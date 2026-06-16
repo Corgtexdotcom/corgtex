@@ -89,6 +89,7 @@ export const MODULE_MANIFESTS: readonly ModuleManifest[] = [
     dataOwnership: "corgtex_postgres",
     featureFlag: flag("GOALS", "Goals", "Goal trees, recognition, and progress tracking.", true),
     nav: { href: "/goals", labelKey: "goals", icon: "goals", group: "workspace" },
+    scopes: ["goals:read", "goals:write"],
   },
   {
     key: "brain",
@@ -97,6 +98,7 @@ export const MODULE_MANIFESTS: readonly ModuleManifest[] = [
     description: "Organizational knowledge base.",
     dataOwnership: "corgtex_postgres",
     nav: { href: "/brain", labelKey: "brain", icon: "brain", group: "workspace" },
+    scopes: ["brain:read", "brain:write"],
   },
   {
     key: "tools",
@@ -106,6 +108,7 @@ export const MODULE_MANIFESTS: readonly ModuleManifest[] = [
     dataOwnership: "corgtex_postgres",
     featureFlag: flag("TOOL_LINKS", "Tools catalog", "Shared tool links, catalog approvals, and credentials.", false),
     nav: { href: "/tools", labelKey: "tools", icon: "tools", group: "workspace" },
+    scopes: ["tools:read", "tools:write", "tools:credentials:read"],
   },
   {
     key: "built",
@@ -123,6 +126,7 @@ export const MODULE_MANIFESTS: readonly ModuleManifest[] = [
     description: "Workspace members directory.",
     dataOwnership: "corgtex_postgres",
     nav: { href: "/members", labelKey: "members", icon: "members", group: "workspace" },
+    scopes: ["members:read", "members:write"],
   },
 
   // --- Core + first-party: operations group ---
@@ -133,6 +137,7 @@ export const MODULE_MANIFESTS: readonly ModuleManifest[] = [
     description: "Tension capture and triage.",
     dataOwnership: "corgtex_postgres",
     nav: { href: "/tensions", labelKey: "tensions", icon: "tensions", group: "operations" },
+    scopes: ["tensions:read", "tensions:write"],
   },
   {
     key: "actions",
@@ -141,6 +146,7 @@ export const MODULE_MANIFESTS: readonly ModuleManifest[] = [
     description: "Action items and assignments.",
     dataOwnership: "corgtex_postgres",
     nav: { href: "/actions", labelKey: "actions", icon: "actions", group: "operations" },
+    scopes: ["actions:read", "actions:write"],
   },
   {
     key: "meetings",
@@ -149,6 +155,7 @@ export const MODULE_MANIFESTS: readonly ModuleManifest[] = [
     description: "Meeting intake, summaries, and follow-up.",
     dataOwnership: "corgtex_postgres",
     nav: { href: "/meetings", labelKey: "meetings", icon: "meetings", group: "operations" },
+    scopes: ["meetings:read", "meetings:write"],
     subFlags: [
       flag("MEETING_RECORDERS", "Meeting recorders", "Managed meeting recorder entitlement and recorder config.", false),
       flag(
@@ -173,6 +180,8 @@ export const MODULE_MANIFESTS: readonly ModuleManifest[] = [
     dataOwnership: "corgtex_postgres",
     featureFlag: flag("RELATIONSHIPS", "Relationships", "CRM, leads, and relationship workspace views.", true),
     nav: { href: "/leads", labelKey: "relationships", icon: "relationships", group: "operations" },
+    // No dedicated MCP scope namespace today; relationship data is reached via
+    // brain/members scopes. Left unowned intentionally.
   },
   {
     key: "context-maps",
@@ -187,6 +196,7 @@ export const MODULE_MANIFESTS: readonly ModuleManifest[] = [
       false,
     ),
     nav: { href: "/maps", labelKey: "contextMaps", icon: "contextMaps", group: "operations" },
+    scopes: ["context-graph:read", "context-graph:propose", "context-graph:approve"],
     subFlags: [
       flag(
         "CONTEXT_MAP_AI",
@@ -205,6 +215,7 @@ export const MODULE_MANIFESTS: readonly ModuleManifest[] = [
     description: "Governance proposals and decisions.",
     dataOwnership: "corgtex_postgres",
     nav: { href: "/proposals", labelKey: "proposals", icon: "proposals", group: "governance" },
+    scopes: ["proposals:read", "proposals:write"],
   },
   {
     key: "circles",
@@ -213,6 +224,7 @@ export const MODULE_MANIFESTS: readonly ModuleManifest[] = [
     description: "Circles and roles structure.",
     dataOwnership: "corgtex_postgres",
     nav: { href: "/circles", labelKey: "circles", icon: "circles", group: "governance" },
+    scopes: ["circles:read"],
   },
   {
     key: "cycles",
@@ -222,6 +234,7 @@ export const MODULE_MANIFESTS: readonly ModuleManifest[] = [
     dataOwnership: "corgtex_postgres",
     featureFlag: flag("CYCLES", "Cycles", "Planning cycles, updates, and allocations.", true),
     nav: { href: "/cycles", labelKey: "cycles", icon: "cycles", group: "governance" },
+    scopes: ["cycles:read", "cycles:write"],
   },
 
   // --- First-party: finance group ---
@@ -260,6 +273,7 @@ export const MODULE_MANIFESTS: readonly ModuleManifest[] = [
       group: "aiGovernance",
       requiredCapability: "canManageAgentGovernance",
     },
+    scopes: ["agents:read", "runtime:read", "runtime:write"],
   },
 
   // --- First-party: system group ---
@@ -343,6 +357,7 @@ export const MODULE_MANIFESTS: readonly ModuleManifest[] = [
       "Durable execution request, context packet, and result write-back plumbing.",
       false,
     ),
+    scopes: ["execution:read", "execution:write"],
   },
 
   // --- Satellite modules ---
@@ -464,4 +479,63 @@ export function getSatelliteEmbedForModule(moduleKey: string): ModuleManifest | 
     (mod.graduation?.stage === "embed" || mod.graduation?.stage === "dual_write") &&
     mod.graduation?.embedInModuleKey === moduleKey,
   );
+}
+
+/**
+ * MCP scopes that are not owned by a single first-party/nav module because they
+ * are cross-cutting platform/support concerns (workspace info, archives, chat,
+ * support audit, connected external tools, integration/data-feed inspection,
+ * and the governance reference reads that span proposals/circles/metrics).
+ *
+ * Together with every module's `scopes`, this set must partition `ALL_SCOPES`
+ * (the canonical MCP scope registry in agent-auth) exactly - asserted by the
+ * scope-ownership parity test so a new scope cannot ship without an owner.
+ *
+ * Kept as a literal here (not derived from SCOPE_REGISTRY) so this registry
+ * stays pure/dependency-free; the test imports both sides and proves parity.
+ */
+export const PLATFORM_SCOPES: readonly string[] = [
+  "workspace:read",
+  "workspace:write",
+  "support:write",
+  "archive:read",
+  "archive:write",
+  "conversations:write",
+  "governance:read",
+  "documents:write",
+  "external-tools:read",
+  "external-tools:write",
+  "integrations:read",
+  "data-sources:read",
+  "data-sources:write",
+];
+
+/**
+ * Map of MCP scope -> owning module key, derived from each manifest's `scopes`.
+ * Throws if a scope is claimed by more than one module so ownership stays unique.
+ */
+export function listModuleScopeOwnership(): Map<string, string> {
+  const owner = new Map<string, string>();
+  for (const mod of MODULE_MANIFESTS) {
+    for (const scope of mod.scopes ?? []) {
+      const existing = owner.get(scope);
+      if (existing && existing !== mod.key) {
+        throw new Error(
+          `MCP scope "${scope}" is claimed by both "${existing}" and "${mod.key}". Scope ownership must be unique.`,
+        );
+      }
+      owner.set(scope, mod.key);
+    }
+  }
+  return owner;
+}
+
+/** The module key that owns the given MCP scope, or undefined for platform scopes. */
+export function getModuleForScope(scope: string): string | undefined {
+  return listModuleScopeOwnership().get(scope);
+}
+
+/** Every MCP scope declared as module-owned across the registry, sorted. */
+export function listModuleOwnedScopes(): string[] {
+  return [...listModuleScopeOwnership().keys()].sort();
 }
