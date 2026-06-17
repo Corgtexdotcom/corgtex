@@ -8,6 +8,7 @@ type OAuthStatePayload = {
   userId: string;
   workspaceId: string | null;
   intent: IntegrationOAuthIntent;
+  returnTo: string | null;
   nonce: string;
   issuedAt: number;
 };
@@ -30,11 +31,13 @@ export function createIntegrationOAuthState(params: {
   userId: string;
   workspaceId?: string | null;
   intent?: IntegrationOAuthIntent;
+  returnTo?: string | null;
 }) {
   const payload = base64UrlJson({
     userId: params.userId,
     workspaceId: params.workspaceId?.trim() || null,
     intent: params.intent ?? "calendar",
+    returnTo: params.returnTo?.trim() || null,
     nonce: randomOpaqueToken(16),
     issuedAt: Date.now(),
   } satisfies OAuthStatePayload);
@@ -67,5 +70,6 @@ export function verifyIntegrationOAuthState(state: string | null | undefined, ex
     userId: payload.userId,
     workspaceId: payload.workspaceId,
     intent: payload.intent ?? "calendar",
+    returnTo: payload.returnTo ?? null,
   };
 }

@@ -8,6 +8,7 @@ import "driver.js/dist/driver.css";
 import "../../../demo-tour-theme.css";
 import { Dialog } from "@/lib/components/Dialog";
 import { KnowledgeFileUploader } from "./KnowledgeFileUploader";
+import { GoogleDrivePicker } from "./tools/GoogleDrivePicker";
 import { workspaceRouteMatches, workspaceStepUrl } from "./onboarding-tour-routing";
 
 const RESTART_EVENT = "corgtex:restart-self-serve-tour";
@@ -48,6 +49,7 @@ export function WorkspaceOnboardingTour({
   hasInitialKnowledge,
   featureFlags,
   capabilities,
+  googleDrivePicker,
 }: {
   workspaceId: string;
   tourKey: string;
@@ -57,6 +59,13 @@ export function WorkspaceOnboardingTour({
   featureFlags?: Record<string, boolean>;
   capabilities?: {
     canManageAgentGovernance?: boolean;
+  };
+  googleDrivePicker?: {
+    clientId: string | null;
+    developerKey: string | null;
+    appId: string | null;
+    hasDocumentScope: boolean;
+    initialSelectedIds: string[];
   };
 }) {
   const router = useRouter();
@@ -77,6 +86,7 @@ export function WorkspaceOnboardingTour({
   const isMapRoute = Boolean(pathname?.includes(`/workspaces/${workspaceId}/maps`));
   const routeKey = `${pathname ?? ""}?${searchParams?.toString() ?? ""}`;
   const onboardingRequested = searchParams?.get("onboarding") === "setup";
+  const openGoogleDrivePicker = searchParams?.get("googleDrivePicker") === "1";
   const goalsTourEnabled = Boolean(featureFlags?.GOALS);
   const contextMapsTourEnabled = Boolean(featureFlags?.CONTEXT_MAPS);
   const agentGovernanceTourEnabled = Boolean(featureFlags?.AGENT_GOVERNANCE && capabilities?.canManageAgentGovernance);
@@ -325,6 +335,13 @@ export function WorkspaceOnboardingTour({
     setSetupMessage(t("uploadComplete", { count }));
   }, [t]);
 
+  const handleDriveSynced = useCallback((count: number) => {
+    hasContextRef.current = true;
+    setHasContext(true);
+    setSetupMessage(t("drivePickerComplete", { count }));
+    router.refresh();
+  }, [router, t]);
+
   const handleSetupClose = useCallback(() => {
     if (!setupMode) return;
 
@@ -415,6 +432,36 @@ export function WorkspaceOnboardingTour({
               onUploaded={handleUploaded}
               onDone={startTour}
             />
+          </section>
+
+          <section className="onboarding-setup-panel stack">
+            <div>
+              <h3>{t("drivePickerTitle")}</h3>
+              <p className="nr-item-meta">{t("drivePickerDescription")}</p>
+            </div>
+            {googleDrivePicker?.hasDocumentScope ? (
+              <GoogleDrivePicker
+                workspaceId={workspaceId}
+                clientId={googleDrivePicker.clientId}
+                developerKey={googleDrivePicker.developerKey}
+                appId={googleDrivePicker.appId}
+                initialSelectedIds={googleDrivePicker.initialSelectedIds}
+                autoOpen={openGoogleDrivePicker}
+                onSynced={handleDriveSynced}
+              />
+            ) : (
+              <div className="stack" style={{ gap: 8 }}>
+                <p className="nr-item-meta" style={{ margin: 0 }}>
+                  {t("drivePickerConnectDescription")}
+                </p>
+                <a
+                  className="button secondary small"
+                  href={`/api/integrations/google/connect?workspaceId=${workspaceId}&intent=documents&returnTo=${encodeURIComponent(`/workspaces/${workspaceId}?onboarding=setup&googleDrivePicker=1`)}`}
+                >
+                  {t("drivePickerConnectAction")}
+                </a>
+              </div>
+            )}
           </section>
 
           <section className="onboarding-setup-panel stack">

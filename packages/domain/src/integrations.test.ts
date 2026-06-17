@@ -5,6 +5,7 @@ const { prismaMock, requireWorkspaceMembershipMock } = vi.hoisted(() => {
     oAuthConnection: {
       findUnique: vi.fn(),
       findFirst: vi.fn(),
+      create: vi.fn(),
       upsert: vi.fn(),
       update: vi.fn(),
       delete: vi.fn(),
@@ -44,7 +45,8 @@ describe("OAuth integration sync helpers", () => {
   });
 
   it("encrypts OAuth tokens when saving a workspace connection", async () => {
-    prismaMock.oAuthConnection.upsert.mockResolvedValue({
+    prismaMock.oAuthConnection.findUnique.mockResolvedValue(null);
+    prismaMock.oAuthConnection.create.mockResolvedValue({
       id: "conn-1",
       provider: "GOOGLE",
       status: "ACTIVE",
@@ -66,24 +68,124 @@ describe("OAuth integration sync helpers", () => {
       scopes: ["openid", "profile", "https://www.googleapis.com/auth/calendar.readonly"],
     });
 
-    expect(prismaMock.oAuthConnection.upsert).toHaveBeenCalledWith(expect.objectContaining({
-      update: expect.objectContaining({
+    expect(prismaMock.oAuthConnection.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        userId: "user-1",
+        provider: "GOOGLE",
         accessToken: "enc:access-token",
         refreshToken: "enc:refresh-token",
         tokenStorageVersion: "aes-256-gcm",
+        scopes: ["openid", "profile", "https://www.googleapis.com/auth/calendar.readonly"],
       }),
-      create: expect.objectContaining({
-        accessToken: "enc:access-token",
-        refreshToken: "enc:refresh-token",
-        tokenStorageVersion: "aes-256-gcm",
-      }),
-    }));
+    });
     expect(prismaMock.workflowJob.create).toHaveBeenCalledWith(expect.objectContaining({
       data: expect.objectContaining({
         workspaceId: "ws-1",
         type: "calendar.sync",
       }),
     }));
+  });
+
+  it("merges Drive-first Google scopes when Calendar is connected later", async () => {
+    prismaMock.oAuthConnection.findUnique.mockResolvedValue({
+      id: "conn-1",
+      scopes: ["openid", "profile", "https://www.googleapis.com/auth/drive.file"],
+      syncSettings: {
+        calendar: { enabled: false, includeAllEvents: false },
+        documents: { enabled: false, selectedDriveIds: [] },
+        email: { enabled: false, filters: [] },
+      },
+    });
+    prismaMock.oAuthConnection.update.mockResolvedValue({
+      id: "conn-1",
+      provider: "GOOGLE",
+      status: "ACTIVE",
+    });
+    prismaMock.workflowJob.create.mockResolvedValue({ id: "job-1" });
+    const { saveOAuthConnectionAndEnqueueCalendarSync } = await import("./integrations");
+
+    await saveOAuthConnectionAndEnqueueCalendarSync({
+      kind: "user",
+      user: { id: "user-1", email: "user@example.test" },
+    } as any, {
+      workspaceId: "ws-1",
+      provider: "GOOGLE",
+      providerAccountId: "google-user-1",
+      providerEmail: "user@example.test",
+      accessToken: "access-token",
+      scopes: ["openid", "email", "profile", "https://www.googleapis.com/auth/calendar.readonly"],
+      enableCalendarSync: true,
+    });
+
+    expect(prismaMock.oAuthConnection.update).toHaveBeenCalledWith({
+      where: { id: "conn-1" },
+      data: expect.objectContaining({
+        scopes: [
+          "openid",
+          "profile",
+          "https://www.googleapis.com/auth/drive.file",
+          "email",
+          "https://www.googleapis.com/auth/calendar.readonly",
+        ],
+        syncSettings: expect.objectContaining({
+          calendar: { enabled: true, includeAllEvents: false },
+          documents: { enabled: false, selectedDriveIds: [] },
+        }),
+      }),
+    });
+    expect(prismaMock.workflowJob.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ type: "calendar.sync" }),
+    }));
+  });
+
+  it("merges Calendar-first Google scopes when Drive is connected later without queuing calendar sync", async () => {
+    prismaMock.oAuthConnection.findUnique.mockResolvedValue({
+      id: "conn-1",
+      scopes: ["openid", "email", "profile", "https://www.googleapis.com/auth/calendar.readonly"],
+      syncSettings: {
+        calendar: { enabled: true, includeAllEvents: false },
+        documents: { enabled: false, selectedDriveIds: [] },
+        email: { enabled: false, filters: [] },
+      },
+    });
+    prismaMock.oAuthConnection.update.mockResolvedValue({
+      id: "conn-1",
+      provider: "GOOGLE",
+      status: "ACTIVE",
+    });
+    const { saveOAuthConnectionAndEnqueueCalendarSync } = await import("./integrations");
+
+    await saveOAuthConnectionAndEnqueueCalendarSync({
+      kind: "user",
+      user: { id: "user-1", email: "user@example.test" },
+    } as any, {
+      workspaceId: "ws-1",
+      provider: "GOOGLE",
+      providerAccountId: "google-user-1",
+      providerEmail: "user@example.test",
+      accessToken: "access-token",
+      scopes: ["openid", "profile", "https://www.googleapis.com/auth/drive.file"],
+      createSyncSettings: {
+        calendar: { enabled: false, includeAllEvents: false },
+        documents: { enabled: false, selectedDriveIds: [] },
+        email: { enabled: false, filters: [] },
+      },
+      enqueueCalendarSync: false,
+    });
+
+    expect(prismaMock.oAuthConnection.update).toHaveBeenCalledWith({
+      where: { id: "conn-1" },
+      data: expect.objectContaining({
+        scopes: [
+          "openid",
+          "email",
+          "profile",
+          "https://www.googleapis.com/auth/calendar.readonly",
+          "https://www.googleapis.com/auth/drive.file",
+        ],
+      }),
+    });
+    expect(prismaMock.workflowJob.create).not.toHaveBeenCalled();
   });
 
   it("opportunistically backfills plaintext OAuth tokens before sync use", async () => {
@@ -257,6 +359,8 @@ describe("OAuth integration sync helpers", () => {
       status: "ACTIVE",
     }).mockResolvedValueOnce({
       id: "conn-1",
+      provider: "GOOGLE",
+      scopes: ["https://www.googleapis.com/auth/drive.file"],
       status: "ACTIVE",
       syncSettings: { calendar: { enabled: true }, documents: { enabled: true, selectedDriveIds: ["doc-1"] } },
     });
@@ -301,6 +405,8 @@ describe("OAuth integration sync helpers", () => {
       status: "ACTIVE",
     }).mockResolvedValueOnce({
       id: "conn-1",
+      provider: "GOOGLE",
+      scopes: ["https://www.googleapis.com/auth/drive.readonly"],
       status: "ACTIVE",
       syncSettings: { documents: { enabled: true, selectedDriveIds: ["doc-1"] } },
     });
@@ -452,6 +558,8 @@ describe("OAuth integration sync helpers", () => {
   it("enqueues only enabled manual sync kinds for a connection", async () => {
     prismaMock.oAuthConnection.findFirst.mockResolvedValue({
       id: "conn-1",
+      provider: "GOOGLE",
+      scopes: ["https://www.googleapis.com/auth/calendar.readonly", "https://www.googleapis.com/auth/drive.file"],
       status: "ACTIVE",
       syncSettings: {
         calendar: { enabled: true },
@@ -476,6 +584,8 @@ describe("OAuth integration sync helpers", () => {
   it("does not let manual sync bypass disabled sections", async () => {
     prismaMock.oAuthConnection.findFirst.mockResolvedValue({
       id: "conn-1",
+      provider: "GOOGLE",
+      scopes: ["https://www.googleapis.com/auth/calendar.readonly", "https://www.googleapis.com/auth/drive.file"],
       status: "ACTIVE",
       syncSettings: {
         calendar: { enabled: false },
@@ -494,5 +604,31 @@ describe("OAuth integration sync helpers", () => {
       kinds: ["calendar", "documents", "email"],
     })).resolves.toEqual({ scheduled: [] });
     expect(prismaMock.workflowJob.upsert).not.toHaveBeenCalled();
+  });
+
+  it("does not let manual sync bypass missing Google scopes", async () => {
+    prismaMock.oAuthConnection.findFirst.mockResolvedValue({
+      id: "conn-1",
+      provider: "GOOGLE",
+      scopes: ["openid", "profile", "https://www.googleapis.com/auth/drive.file"],
+      status: "ACTIVE",
+      syncSettings: {
+        calendar: { enabled: true },
+        documents: { enabled: true, selectedDriveIds: ["doc-1"] },
+      },
+    });
+    prismaMock.workflowJob.upsert.mockImplementation(async (input: any) => ({ id: input.create.type, type: input.create.type }));
+    const { enqueueOAuthConnectionSync } = await import("./integrations");
+
+    await expect(enqueueOAuthConnectionSync({
+      kind: "user",
+      user: { id: "user-1", email: "user@example.test" },
+    } as any, {
+      workspaceId: "ws-1",
+      connectionId: "conn-1",
+      kinds: ["calendar", "documents"],
+    })).resolves.toEqual({
+      scheduled: ["oauth.documents.sync"],
+    });
   });
 });

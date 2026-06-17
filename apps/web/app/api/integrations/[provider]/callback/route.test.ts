@@ -52,7 +52,7 @@ describe("GET /api/integrations/[provider]/callback", () => {
         access_token: "access-token",
         refresh_token: "refresh-token",
         expires_in: 3600,
-        scope: "calendar profile",
+        scope: "https://www.googleapis.com/auth/calendar.readonly profile",
       }), { status: 200 }))
       .mockResolvedValueOnce(new Response(JSON.stringify({
         id: "google-user-1",
@@ -79,12 +79,13 @@ describe("GET /api/integrations/[provider]/callback", () => {
         expiresIn: 3600,
         providerAccountId: "google-user-1",
         providerEmail: null,
-        scopes: ["calendar", "profile"],
+        scopes: ["https://www.googleapis.com/auth/calendar.readonly", "profile"],
         createSyncSettings: undefined,
+        enableCalendarSync: true,
         enqueueCalendarSync: true,
       },
     );
-    expect(response.headers.get("location")).toBe("http://localhost:3000/workspaces/ws-1/tools?type=CONNECTOR&q=google&integration=google&integrationStatus=success&integrationSuccess=google_connected");
+    expect(response.headers.get("location")).toBe("http://localhost:3000/workspaces/ws-1/tools?type=CONNECTOR&q=google&integration=google&integrationStatus=success&intent=calendar&integrationSuccess=google_connected");
     expect(response.headers.get("set-cookie")).toContain("corgtex_google_oauth_state=");
   });
 
@@ -94,7 +95,12 @@ describe("GET /api/integrations/[provider]/callback", () => {
       user: { id: "user-1" },
     });
     saveOAuthConnectionAndEnqueueCalendarSync.mockResolvedValue({ id: "conn-1" });
-    verifyIntegrationOAuthState.mockReturnValue({ userId: "user-1", workspaceId: "ws-1", intent: "documents" });
+    verifyIntegrationOAuthState.mockReturnValue({
+      userId: "user-1",
+      workspaceId: "ws-1",
+      intent: "documents",
+      returnTo: "/workspaces/ws-1?onboarding=setup&googleDrivePicker=1",
+    });
 
     const fetchMock = vi.mocked(fetch);
     fetchMock
@@ -128,10 +134,11 @@ describe("GET /api/integrations/[provider]/callback", () => {
           documents: { enabled: false, selectedDriveIds: [] },
           email: { enabled: false, filters: [] },
         },
+        enableCalendarSync: false,
         enqueueCalendarSync: false,
       }),
     );
-    expect(response.headers.get("location")).toBe("http://localhost:3000/workspaces/ws-1/tools?type=CONNECTOR&q=google&integration=google&integrationStatus=success&integrationSuccess=google_connected");
+    expect(response.headers.get("location")).toBe("http://localhost:3000/workspaces/ws-1?onboarding=setup&googleDrivePicker=1&integration=google&integrationStatus=success&intent=documents&integrationSuccess=google_connected");
   });
 
   it("redirects provider access errors back to Tools with a safe Google verification message", async () => {
@@ -150,7 +157,7 @@ describe("GET /api/integrations/[provider]/callback", () => {
     );
 
     expect(saveOAuthConnectionAndEnqueueCalendarSync).not.toHaveBeenCalled();
-    expect(response.headers.get("location")).toBe("http://localhost:3000/workspaces/ws-1/tools?type=CONNECTOR&q=google&integration=google&integrationStatus=error&integrationError=google_verification_or_tester_required");
+    expect(response.headers.get("location")).toBe("http://localhost:3000/workspaces/ws-1/tools?type=CONNECTOR&q=google&integration=google&integrationStatus=error&intent=calendar&integrationError=google_verification_or_tester_required");
   });
 
   it("redirects Microsoft tenant token failures back to Tools instead of returning JSON", async () => {
@@ -172,7 +179,7 @@ describe("GET /api/integrations/[provider]/callback", () => {
       { params: Promise.resolve({ provider: "microsoft" }) },
     );
 
-    expect(response.headers.get("location")).toBe("http://localhost:3000/workspaces/ws-1/tools?type=CONNECTOR&q=microsoft&integration=microsoft&integrationStatus=error&integrationError=microsoft_tenant_access_denied");
+    expect(response.headers.get("location")).toBe("http://localhost:3000/workspaces/ws-1/tools?type=CONNECTOR&q=microsoft&integration=microsoft&integrationStatus=error&intent=calendar&integrationError=microsoft_tenant_access_denied");
     expect(vi.mocked(fetch).mock.calls[0]?.[0]).toBe("https://login.microsoftonline.com/organizations/oauth2/v2.0/token");
   });
 
@@ -195,7 +202,7 @@ describe("GET /api/integrations/[provider]/callback", () => {
       { params: Promise.resolve({ provider: "microsoft" }) },
     );
 
-    expect(response.headers.get("location")).toBe("http://localhost:3000/workspaces/ws-1/tools?type=CONNECTOR&q=microsoft&integration=microsoft&integrationStatus=error&integrationError=microsoft_invalid_client_secret");
+    expect(response.headers.get("location")).toBe("http://localhost:3000/workspaces/ws-1/tools?type=CONNECTOR&q=microsoft&integration=microsoft&integrationStatus=error&intent=calendar&integrationError=microsoft_invalid_client_secret");
   });
 
   it("rejects callbacks without the matching short-lived state cookie", async () => {

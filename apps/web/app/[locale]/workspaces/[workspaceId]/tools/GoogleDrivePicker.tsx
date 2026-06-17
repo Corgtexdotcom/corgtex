@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 declare global {
   interface Window {
@@ -83,13 +83,18 @@ export function GoogleDrivePicker({
   developerKey,
   appId,
   initialSelectedIds,
+  autoOpen = false,
+  onSynced,
 }: {
   workspaceId: string;
   clientId: string | null;
   developerKey: string | null;
   appId: string | null;
   initialSelectedIds: string[];
+  autoOpen?: boolean;
+  onSynced?: (count: number) => void;
 }) {
+  const autoOpenRef = useRef(false);
   const [selectedIds, setSelectedIds] = useState(initialSelectedIds);
   const [selectedNames, setSelectedNames] = useState<string[]>([]);
   const [status, setStatus] = useState<string | null>(null);
@@ -121,7 +126,8 @@ export function GoogleDrivePicker({
     setSelectedIds(documentIds);
     setSelectedNames(docs.map((doc) => doc.name).filter((name): name is string => Boolean(name)));
     setStatus("Google Drive document sync is queued.");
-  }, [workspaceId]);
+    onSynced?.(documentIds.length);
+  }, [onSynced, workspaceId]);
 
   const openPicker = useCallback(async () => {
     if (!clientId || !developerKey || !appId) {
@@ -176,6 +182,12 @@ export function GoogleDrivePicker({
       setIsOpening(false);
     }
   }, [appId, clientId, developerKey, missingConfig, saveSelection]);
+
+  useEffect(() => {
+    if (!autoOpen || autoOpenRef.current || missingConfig.length > 0) return;
+    autoOpenRef.current = true;
+    void openPicker();
+  }, [autoOpen, missingConfig.length, openPicker]);
 
   return (
     <div className="nr-item stack" style={{ gap: 8, padding: 12, marginTop: 8 }}>

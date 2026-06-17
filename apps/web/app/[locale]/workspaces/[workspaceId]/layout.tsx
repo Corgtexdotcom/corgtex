@@ -57,6 +57,14 @@ async function hasWorkspaceInitialKnowledge(workspaceId: string) {
   return documentCount + brainSourceCount + meetingCount + knowledgeChunkCount > 0;
 }
 
+function syncSettingsRecord(value: unknown) {
+  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+}
+
+function syncSettingsStringList(value: unknown) {
+  return Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === "string") : [];
+}
+
 export async function generateMetadata({ params }: { params: Promise<{ locale: string; workspaceId: string }> }): Promise<Metadata> {
   const { workspaceId } = await params;
   const workspace = await prisma.workspace.findUnique({ where: { id: workspaceId }, select: { slug: true, name: true } });
@@ -75,7 +83,7 @@ export default async function WorkspaceLayout({
   const { locale, workspaceId } = await params;
   const actor = await requirePageActor();
   const userId = actor.kind === "user" ? actor.user.id : null;
-  const [workspaces, unreadCount, conversationsResult, dailyQuestions, featureFlags, membership, invitePolicy, workspaceRuntime, onboardingState, hasInitialKnowledge] = await Promise.all([
+  const [workspaces, unreadCount, conversationsResult, dailyQuestions, featureFlags, membership, invitePolicy, workspaceRuntime, onboardingState, hasInitialKnowledge, googleConnection] = await Promise.all([
     listActorWorkspaces(actor),
     userId ? countUnreadNotifications(userId, workspaceId) : Promise.resolve(0),
     listConversations(actor, workspaceId, { take: 30 }).catch(() => ({ items: [], total: 0, take: 30, skip: 0 })),
@@ -90,6 +98,22 @@ export default async function WorkspaceLayout({
       tourVersion: SELF_SERVE_WORKSPACE_TOUR_VERSION,
     }).catch(() => null) : Promise.resolve(null),
     hasWorkspaceInitialKnowledge(workspaceId).catch(() => false),
+    userId ? prisma.oAuthConnection.findFirst({
+      where: {
+        userId,
+        provider: "GOOGLE",
+        status: { not: "DISCONNECTED" },
+        OR: [
+          { workspaceId },
+          { workspaceId: null },
+        ],
+      },
+      orderBy: { updatedAt: "desc" },
+      select: {
+        scopes: true,
+        syncSettings: true,
+      },
+    }).catch(() => null) : Promise.resolve(null),
   ]);
   const current = workspaces.find((w: Workspace) => w.id === workspaceId);
   const conversations = conversationsResult.items;
@@ -106,6 +130,15 @@ export default async function WorkspaceLayout({
   const controlPlaneHref = getControlPlaneHref("/control-plane", locale);
   const isDemo = current?.slug === "jnj-demo";
   const showSelfServeOnboarding = !isDemo && workspaceRuntime?.plan !== "ENTERPRISE_MANAGED" && Boolean(onboardingState);
+  const googleScopes = (googleConnection?.scopes ?? []).join(" ").toLowerCase();
+  const googleDocuments = syncSettingsRecord(syncSettingsRecord(googleConnection?.syncSettings).documents);
+  const googleDrivePicker = {
+    clientId: process.env.GOOGLE_CLIENT_ID ?? null,
+    developerKey: process.env.NEXT_PUBLIC_GOOGLE_PICKER_API_KEY ?? null,
+    appId: process.env.NEXT_PUBLIC_GOOGLE_CLOUD_PROJECT_NUMBER ?? null,
+    hasDocumentScope: googleScopes.includes("drive.file") || googleScopes.includes("drive.readonly"),
+    initialSelectedIds: syncSettingsStringList(googleDocuments.selectedDriveIds ?? googleDocuments.selectedDocumentIds),
+  };
   const meetingRecorderConfig = !isDemo && featureFlags.MEETING_RECORDERS
     ? await getMeetingRecorderConfig(actor, workspaceId).catch(() => null)
     : null;
@@ -245,6 +278,7 @@ export default async function WorkspaceLayout({
           hasInitialKnowledge={hasInitialKnowledge}
           featureFlags={featureFlags}
           capabilities={capabilities}
+          googleDrivePicker={googleDrivePicker}
         />
       )}
     </div>
