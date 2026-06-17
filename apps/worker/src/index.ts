@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { createServer } from "node:http";
 import { prisma, logger } from "@corgtex/shared";
 import { finalizeExpiredApprovalFlows } from "@corgtex/domain";
-import { dispatchPendingEvents, runPendingJobs, scheduleDailyJobs, schedulePeriodicJobs, scheduleDripCampaigns } from "@corgtex/workflows";
+import { dispatchPendingEvents, renderWorkflowJobMetrics, runPendingJobs, scheduleDailyJobs, schedulePeriodicJobs, scheduleDripCampaigns } from "@corgtex/workflows";
 import * as Sentry from "@sentry/node";
 
 if (process.env.SENTRY_DSN) {
@@ -171,6 +171,7 @@ function startHealthServer() {
         `# HELP worker_last_tick_ms Duration of last tick in ms`,
         `# TYPE worker_last_tick_ms gauge`,
         `worker_last_tick_ms{worker="${workerId}"} ${lastTickMs}`,
+        ...renderWorkflowJobMetrics(workerId),
         `# HELP worker_memory_bytes Heap memory used`,
         `# TYPE worker_memory_bytes gauge`,
         `worker_memory_bytes{worker="${workerId}"} ${process.memoryUsage().heapUsed}`,
