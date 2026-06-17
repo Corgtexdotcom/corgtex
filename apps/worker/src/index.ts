@@ -4,6 +4,7 @@ import { prisma, logger } from "@corgtex/shared";
 import { finalizeExpiredApprovalFlows } from "@corgtex/domain";
 import { dispatchPendingEvents, renderWorkflowJobMetrics, runPendingJobs, scheduleDailyJobs, schedulePeriodicJobs, scheduleDripCampaigns } from "@corgtex/workflows";
 import * as Sentry from "@sentry/node";
+import { getNextPollIntervalMs, getWorkerPollOutcome, type WorkerPollOutcome } from "./polling";
 
 if (process.env.SENTRY_DSN) {
   Sentry.init({
@@ -61,8 +62,8 @@ function log(level: "info" | "warn" | "error", data: Record<string, unknown>) {
 
 // --- Worker tick ---
 
-async function tick() {
-  if (tickInFlight || phase === "stopped") return;
+async function tick(): Promise<WorkerPollOutcome | null> {
+  if (tickInFlight || phase === "stopped") return null;
   tickInFlight = true;
 
   const tickStart = Date.now();
@@ -84,8 +85,18 @@ async function tick() {
     lastTickMs = Date.now() - tickStart;
     lastError = null;
     lastSuccessfulTickAt = new Date().toISOString();
+    const outcome = getWorkerPollOutcome({
+      finalized,
+      dispatched,
+      eventBatchSize: EVENT_BATCH_SIZE,
+      processed,
+      jobBatchSize: JOB_BATCH_SIZE,
+      scheduled,
+      scheduledPeriodic,
+      scheduledDrip,
+    });
 
-    if (finalized > 0 || dispatched > 0 || processed > 0 || scheduled > 0 || scheduledPeriodic > 0 || scheduledDrip > 0) {
+    if (outcome.workDone) {
       lastWorkAt = lastSuccessfulTickAt;
       log("info", {
         event: "tick",
@@ -94,11 +105,12 @@ async function tick() {
         processed,
         scheduled,
         scheduledPeriodic,
+        fastDrain: outcome.fastDrain,
         durationMs: lastTickMs,
       });
-      return true;
+      return outcome;
     }
-    return false;
+    return outcome;
   } catch (error) {
     lastTickMs = Date.now() - tickStart;
     lastError = error instanceof Error ? error.message : "Unknown error";
@@ -111,7 +123,7 @@ async function tick() {
       error: lastError,
       durationMs: lastTickMs,
     });
-    return false;
+    return { workDone: false, fastDrain: false };
   } finally {
     tickInFlight = false;
   }
@@ -249,19 +261,27 @@ async function main() {
   // Initial tick
   const initialWork = await tick();
   phase = "running";
-  if (initialWork === false) {
-    currentPollIntervalMs = Math.min(MAX_POLL_INTERVAL_MS, currentPollIntervalMs * 2);
+  if (initialWork) {
+    currentPollIntervalMs = getNextPollIntervalMs({
+      outcome: initialWork,
+      pollIntervalMs: POLL_INTERVAL_MS,
+      maxPollIntervalMs: MAX_POLL_INTERVAL_MS,
+      currentPollIntervalMs,
+    });
   }
 
   // Start polling
   function scheduleNextTick() {
     if (phase !== "running") return;
     pollTimer = setTimeout(() => {
-      tick().then((workDone) => {
-        if (workDone === true) {
-          currentPollIntervalMs = POLL_INTERVAL_MS;
-        } else if (workDone === false) {
-          currentPollIntervalMs = Math.min(MAX_POLL_INTERVAL_MS, currentPollIntervalMs * 2);
+      tick().then((outcome) => {
+        if (outcome) {
+          currentPollIntervalMs = getNextPollIntervalMs({
+            outcome,
+            pollIntervalMs: POLL_INTERVAL_MS,
+            maxPollIntervalMs: MAX_POLL_INTERVAL_MS,
+            currentPollIntervalMs,
+          });
         }
         scheduleNextTick();
       }).catch((error) => {
