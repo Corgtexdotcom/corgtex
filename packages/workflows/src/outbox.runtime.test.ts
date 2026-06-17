@@ -124,6 +124,16 @@ vi.mock("@corgtex/domain", () => ({
 import { runPendingJobs, scheduleDailyJobs, schedulePeriodicJobs } from "./outbox";
 import { resetWorkflowJobMetricsForTest, snapshotWorkflowJobMetrics } from "./job-metrics";
 
+function deferred<T = void>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((promiseResolve, promiseReject) => {
+    resolve = promiseResolve;
+    reject = promiseReject;
+  });
+  return { promise, resolve, reject };
+}
+
 afterEach(() => {
   vi.useRealTimers();
   delete process.env.WORKER_DAILY_JOB_START_HOUR_UTC;
@@ -219,6 +229,98 @@ describe("runPendingJobs", () => {
         status: "COMPLETED",
       }),
     });
+  });
+
+  it("starts independent jobs concurrently when the cap allows it", async () => {
+    const firstJob = deferred();
+    txMock.$queryRaw.mockResolvedValue([
+      {
+        id: "job-1",
+        workspaceId: "ws-1",
+        type: "communication.slack.event",
+        payload: { inboundEventId: "inbound-1" },
+        attempts: 1,
+      },
+      {
+        id: "job-2",
+        workspaceId: "ws-1",
+        type: "communication.slack.event",
+        payload: { inboundEventId: "inbound-2" },
+        attempts: 1,
+      },
+    ]);
+    processSlackInboundEventMock.mockImplementation((inboundEventId: string) => (
+      inboundEventId === "inbound-1" ? firstJob.promise : Promise.resolve()
+    ));
+
+    const pendingRun = runPendingJobs("worker-1", 2, 2);
+
+    await vi.waitFor(() => {
+      expect(processSlackInboundEventMock).toHaveBeenCalledTimes(2);
+    });
+    expect(prismaMock.workflowJob.update).toHaveBeenCalledWith({
+      where: { id: "job-2" },
+      data: expect.objectContaining({
+        status: "COMPLETED",
+      }),
+    });
+
+    firstJob.resolve();
+    await expect(pendingRun).resolves.toBe(2);
+    expect(prismaMock.workflowJob.update).toHaveBeenCalledWith({
+      where: { id: "job-1" },
+      data: expect.objectContaining({
+        status: "COMPLETED",
+      }),
+    });
+  });
+
+  it("does not start more jobs than the concurrency cap", async () => {
+    const firstJob = deferred();
+    const secondJob = deferred();
+    txMock.$queryRaw.mockResolvedValue([
+      {
+        id: "job-1",
+        workspaceId: "ws-1",
+        type: "communication.slack.event",
+        payload: { inboundEventId: "inbound-1" },
+        attempts: 1,
+      },
+      {
+        id: "job-2",
+        workspaceId: "ws-1",
+        type: "communication.slack.event",
+        payload: { inboundEventId: "inbound-2" },
+        attempts: 1,
+      },
+      {
+        id: "job-3",
+        workspaceId: "ws-1",
+        type: "communication.slack.event",
+        payload: { inboundEventId: "inbound-3" },
+        attempts: 1,
+      },
+    ]);
+    processSlackInboundEventMock.mockImplementation((inboundEventId: string) => {
+      if (inboundEventId === "inbound-1") return firstJob.promise;
+      if (inboundEventId === "inbound-2") return secondJob.promise;
+      return Promise.resolve();
+    });
+
+    const pendingRun = runPendingJobs("worker-1", 3, 2);
+
+    await vi.waitFor(() => {
+      expect(processSlackInboundEventMock).toHaveBeenCalledTimes(2);
+    });
+    expect(processSlackInboundEventMock).not.toHaveBeenCalledWith("inbound-3");
+
+    firstJob.resolve();
+    await vi.waitFor(() => {
+      expect(processSlackInboundEventMock).toHaveBeenCalledWith("inbound-3");
+    });
+    secondJob.resolve();
+
+    await expect(pendingRun).resolves.toBe(3);
   });
 
   it("logs per-job timing and a completed outcome for successful jobs", async () => {

@@ -36,6 +36,7 @@ import {
 } from "@corgtex/domain";
 
 const DEFAULT_BATCH_SIZE = 25;
+const DEFAULT_JOB_CONCURRENCY = 5;
 const MAX_ATTEMPTS = 5;
 const RETRY_BASE_DELAY_MS = 5_000;
 const RETRY_MAX_DELAY_MS = 5 * 60 * 1_000;
@@ -355,6 +356,35 @@ async function failJob(job: ClaimedJob, error: unknown) {
       lockedBy: null,
     },
   });
+}
+
+function normalizeJobConcurrency(concurrency: number, jobCount: number) {
+  if (jobCount <= 0) return 0;
+  if (!Number.isFinite(concurrency)) return Math.min(DEFAULT_JOB_CONCURRENCY, jobCount);
+  return Math.min(Math.max(1, Math.floor(concurrency)), jobCount);
+}
+
+async function runWithBoundedConcurrency<T>(
+  items: T[],
+  concurrency: number,
+  processItem: (item: T) => Promise<void>,
+) {
+  const workerCount = normalizeJobConcurrency(concurrency, items.length);
+  let nextIndex = 0;
+
+  const workers = Array.from({ length: workerCount }, async () => {
+    while (nextIndex < items.length) {
+      const item = items[nextIndex];
+      nextIndex += 1;
+      await processItem(item);
+    }
+  });
+
+  const results = await Promise.allSettled(workers);
+  const rejected = results.find((result): result is PromiseRejectedResult => result.status === "rejected");
+  if (rejected) {
+    throw rejected.reason;
+  }
 }
 
 async function scheduleRecurringRecorderCalendarSync(workspaceId: string, sourceId: string) {
@@ -828,51 +858,51 @@ export async function dispatchPendingEvents(workerId: string, batchSize = DEFAUL
   return events.length;
 }
 
-export async function runPendingJobs(workerId: string, batchSize = DEFAULT_BATCH_SIZE) {
-  const jobs = await claimPendingJobs(workerId, batchSize);
-
-  for (const job of jobs) {
-    const startedAt = Date.now();
-    let failed = false;
-    let failure: unknown = null;
-    try {
-      await handleJob(job);
-      await completeJob(job.id);
-    } catch (error) {
-      failed = true;
-      failure = error;
-      await failJob(job, error);
-    }
-
-    // Emit per-job timing outside the try/catch so a logging error can never be
-    // mistaken for a job failure (and a completed job re-marked as failed).
-    const durationMs = Date.now() - startedAt;
-    const outcome = failed ? "failed" : "completed";
-    recordWorkflowJobProcessedMetric({
-      type: job.type,
-      outcome,
-      durationMs,
-    });
-
-    const fields = {
-      workerId,
-      jobId: job.id,
-      type: job.type,
-      workspaceId: job.workspaceId,
-      attempts: job.attempts,
-      durationMs,
-    };
-    if (failed) {
-      logger.warn("workflow_job_processed", {
-        ...fields,
-        outcome,
-        error: failure instanceof Error ? failure.message : "Unknown worker error.",
-      });
-    } else {
-      logger.info("workflow_job_processed", { ...fields, outcome });
-    }
+async function processClaimedJob(workerId: string, job: ClaimedJob) {
+  const startedAt = Date.now();
+  let failed = false;
+  let failure: unknown = null;
+  try {
+    await handleJob(job);
+    await completeJob(job.id);
+  } catch (error) {
+    failed = true;
+    failure = error;
+    await failJob(job, error);
   }
 
+  // Emit per-job timing outside the try/catch so a logging error can never be
+  // mistaken for a job failure (and a completed job re-marked as failed).
+  const durationMs = Date.now() - startedAt;
+  const outcome = failed ? "failed" : "completed";
+  recordWorkflowJobProcessedMetric({
+    type: job.type,
+    outcome,
+    durationMs,
+  });
+
+  const fields = {
+    workerId,
+    jobId: job.id,
+    type: job.type,
+    workspaceId: job.workspaceId,
+    attempts: job.attempts,
+    durationMs,
+  };
+  if (failed) {
+    logger.warn("workflow_job_processed", {
+      ...fields,
+      outcome,
+      error: failure instanceof Error ? failure.message : "Unknown worker error.",
+    });
+  } else {
+    logger.info("workflow_job_processed", { ...fields, outcome });
+  }
+}
+
+export async function runPendingJobs(workerId: string, batchSize = DEFAULT_BATCH_SIZE, concurrency = DEFAULT_JOB_CONCURRENCY) {
+  const jobs = await claimPendingJobs(workerId, batchSize);
+  await runWithBoundedConcurrency(jobs, concurrency, (job) => processClaimedJob(workerId, job));
   return jobs.length;
 }
 
