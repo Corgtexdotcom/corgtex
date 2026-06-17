@@ -333,6 +333,18 @@ export async function runDailyDigest(params: {
     members.get(session.userId)!.transcripts.push(transcript);
   }
 
+  // Pre-load existing PERSON articles for all conversing members in one query
+  // instead of a per-member findUnique inside the loop below. Each slug is read
+  // once here and written at most once in its own iteration, so the pre-loop
+  // snapshot is equivalent to the previous per-iteration read.
+  const memberPersonSlugs = [...members.keys()].map((userId) => `person-${userId}`);
+  const existingPersonArticles = memberPersonSlugs.length
+    ? await prisma.brainArticle.findMany({
+        where: { workspaceId: params.workspaceId, slug: { in: memberPersonSlugs } },
+      })
+    : [];
+  const existingPersonArticlesBySlug = new Map(existingPersonArticles.map((article) => [article.slug, article]));
+
   const memberUpdates = [];
   for (const [userId, data] of members.entries()) {
     const fullTranscript = data.transcripts.join("\n\n---\n\n").slice(0, 8000); // Take up to 8K chars
@@ -372,9 +384,7 @@ export async function runDailyDigest(params: {
 
     // Check if PERSON article exists for this user
     const slug = `person-${userId}`;
-    const existingArticle = await prisma.brainArticle.findUnique({
-      where: { workspaceId_slug: { workspaceId: params.workspaceId, slug } }
-    });
+    const existingArticle = existingPersonArticlesBySlug.get(slug) ?? null;
 
     const profileMergeResult = await defaultModelGateway.chat({
       model,
@@ -553,16 +563,20 @@ Rules:
   let failedEmails = 0;
   let skippedEmails = 0;
 
+  // Pre-load recipient PERSON profiles in one query (after the profile-rebuild
+  // writes above, so freshly-updated profiles are reflected) instead of a
+  // per-recipient findUnique inside the loop below.
+  const recipientPersonSlugs = recipientMembers.map((member) => `person-${member.user.id}`);
+  const recipientPersonArticles = recipientPersonSlugs.length
+    ? await prisma.brainArticle.findMany({
+        where: { workspaceId: params.workspaceId, slug: { in: recipientPersonSlugs } },
+        select: { slug: true, bodyMd: true },
+      })
+    : [];
+  const recipientPersonArticleBySlug = new Map(recipientPersonArticles.map((article) => [article.slug, article]));
+
   for (const member of recipientMembers) {
-    const personArticle = await prisma.brainArticle.findUnique({
-      where: {
-        workspaceId_slug: {
-          workspaceId: params.workspaceId,
-          slug: `person-${member.user.id}`,
-        },
-      },
-      select: { bodyMd: true },
-    });
+    const personArticle = recipientPersonArticleBySlug.get(`person-${member.user.id}`) ?? null;
 
     const personalizationExtraction = await defaultModelGateway.extract({
       model,

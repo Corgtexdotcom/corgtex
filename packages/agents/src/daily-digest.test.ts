@@ -40,6 +40,7 @@ const {
     },
     brainArticle: {
       findUnique: vi.fn(),
+      findMany: vi.fn(),
     },
     member: {
       findMany: vi.fn(),
@@ -165,6 +166,7 @@ describe("runDailyDigest", () => {
     prismaMock.demoLead.findFirst.mockResolvedValue(null);
     prismaMock.brainSource.create.mockResolvedValue({ id: "source-1" });
     prismaMock.brainArticle.findUnique.mockResolvedValue(null);
+    prismaMock.brainArticle.findMany.mockResolvedValue([]);
     chatMock.mockResolvedValue({ content: "Merged profile body" });
     extractMock.mockImplementation(async ({ instruction }: { instruction: string }) => {
       if (instruction.startsWith("Generate a structured")) {
@@ -271,6 +273,68 @@ describe("runDailyDigest", () => {
       status: "SENT",
       providerMessageId: "email-1",
     }));
+  });
+
+  it("batches recipient profile reads into a single findMany over all recipient slugs", async () => {
+    prismaMock.buildArtifact.findMany.mockResolvedValue([mockRecentBuildArtifact()]);
+    prismaMock.member.findMany.mockResolvedValue([
+      { id: "member-a", newspaperCadence: "DAILY", user: { id: "user-a", email: "a@example.com", displayName: "A" } },
+      { id: "member-b", newspaperCadence: "DAILY", user: { id: "user-b", email: "b@example.com", displayName: "B" } },
+    ]);
+
+    const { runDailyDigest } = await import("./daily-digest");
+    await runDailyDigest({
+      workspaceId: "workspace-1",
+      dateISO: "2026-04-30T12:00:00.000Z",
+      cadence: "DAILY",
+    });
+
+    expect(prismaMock.brainArticle.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          workspaceId: "workspace-1",
+          slug: { in: expect.arrayContaining(["person-user-a", "person-user-b"]) },
+        }),
+      }),
+    );
+    // The per-recipient profile read must not fall back to a findUnique per member.
+    const personFindUniqueCalls = prismaMock.brainArticle.findUnique.mock.calls.filter(
+      ([arg]) => arg?.where?.workspaceId_slug?.slug?.startsWith("person-"),
+    );
+    expect(personFindUniqueCalls).toHaveLength(0);
+    expect(sendEmailMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("batches conversing-member profile lookups into a single findMany", async () => {
+    prismaMock.buildArtifact.findMany.mockResolvedValue([mockRecentBuildArtifact()]);
+    prismaMock.conversationSession.findMany.mockResolvedValue([
+      { userId: "user-a", user: { id: "user-a", email: "a@example.com", displayName: "A" }, turns: [{ userMessage: "hi", assistantMessage: "yo" }] },
+      { userId: "user-b", user: { id: "user-b", email: "b@example.com", displayName: "B" }, turns: [{ userMessage: "ho", assistantMessage: "hey" }] },
+    ]);
+
+    const { runDailyDigest } = await import("./daily-digest");
+    await runDailyDigest({
+      workspaceId: "workspace-1",
+      dateISO: "2026-04-30T12:00:00.000Z",
+      cadence: "DAILY",
+    });
+
+    expect(prismaMock.brainArticle.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          workspaceId: "workspace-1",
+          slug: { in: expect.arrayContaining(["person-user-a", "person-user-b"]) },
+        }),
+      }),
+    );
+    expect(createArticleMock).toHaveBeenCalledWith(
+      expect.objectContaining({ kind: "agent" }),
+      expect.objectContaining({ slug: "person-user-a", type: "PERSON" }),
+    );
+    expect(createArticleMock).toHaveBeenCalledWith(
+      expect.objectContaining({ kind: "agent" }),
+      expect.objectContaining({ slug: "person-user-b", type: "PERSON" }),
+    );
   });
 
   it("skips digest generation when no active members match the requested cadence", async () => {
