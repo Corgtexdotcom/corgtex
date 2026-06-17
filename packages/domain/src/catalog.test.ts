@@ -620,7 +620,7 @@ describe("catalog domain", () => {
     }));
   });
 
-  it("derives meeting recorder as a requestable Tools option before recorder access is enabled", async () => {
+  it("derives meeting transcripts as a requestable Tools option before transcript access is enabled", async () => {
     const { listCatalogItems } = await import("./catalog");
     prismaMock.workspaceToolLink.findMany.mockResolvedValue([]);
     prismaMock.catalogItem.findMany.mockResolvedValue([]);
@@ -639,7 +639,7 @@ describe("catalog domain", () => {
       },
       create: expect.objectContaining({
         type: "TOOL",
-        title: "Meeting recorder",
+        title: "Meeting transcripts",
         url: null,
         category: "MEETINGS",
         accessMode: "REQUEST",
@@ -656,7 +656,7 @@ describe("catalog domain", () => {
     }));
   });
 
-  it("keeps meeting recorder setup canonical inside Tools when recorder access is enabled", async () => {
+  it("keeps meeting transcript setup canonical inside Tools when recorder access is enabled", async () => {
     const { listCatalogItems } = await import("./catalog");
     prismaMock.workspaceFeatureFlag.findMany.mockResolvedValue([
       { flag: "MEETING_RECORDERS", enabled: true },
@@ -687,6 +687,37 @@ describe("catalog domain", () => {
         url: null,
         accessMode: "OPEN",
         featured: true,
+      }),
+    }));
+  });
+
+  it("opens meeting transcript setup when transcript-source access is enabled without recorder access", async () => {
+    const { listCatalogItems } = await import("./catalog");
+    prismaMock.workspaceFeatureFlag.findMany.mockResolvedValue([
+      { flag: "MEETING_TRANSCRIPT_SOURCES", enabled: true },
+      { flag: "MEETING_RECORDERS", enabled: false },
+    ]);
+    prismaMock.workspaceToolLink.findMany.mockResolvedValue([]);
+    prismaMock.catalogItem.findMany.mockResolvedValue([]);
+    prismaMock.catalogFavorite.findMany.mockResolvedValue([]);
+    prismaMock.catalogRequest.findMany.mockResolvedValue([]);
+
+    await listCatalogItems(actor, "workspace-1");
+
+    expect(prismaMock.catalogItem.upsert).toHaveBeenCalledWith(expect.objectContaining({
+      where: {
+        workspaceId_sourceType_sourceId: {
+          workspaceId: "workspace-1",
+          sourceType: "MEETING_RECORDER",
+          sourceId: "meeting-recorder",
+        },
+      },
+      create: expect.objectContaining({
+        title: "Meeting transcripts",
+        accessMode: "OPEN",
+      }),
+      update: expect.objectContaining({
+        accessMode: "OPEN",
       }),
     }));
   });

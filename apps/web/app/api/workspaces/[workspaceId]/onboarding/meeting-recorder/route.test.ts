@@ -2,25 +2,28 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { NextRequest } from "next/server";
 
 const {
-  enableMeetingRecorderForWorkspace,
-  getMeetingRecorderConfig,
-  updateMeetingRecorderConfig,
+  enableMeetingTranscriptSourcesForWorkspace,
+  getMeetingTranscriptSourcesFeatureState,
+  getV1MeetingTranscriptProviderCatalog,
+  listMeetingTranscriptSourceState,
   resolveRequestActor,
   checkApiDemoGuard,
   handleRouteError,
 } = vi.hoisted(() => ({
-  enableMeetingRecorderForWorkspace: vi.fn(),
-  getMeetingRecorderConfig: vi.fn(),
-  updateMeetingRecorderConfig: vi.fn(),
+  enableMeetingTranscriptSourcesForWorkspace: vi.fn(),
+  getMeetingTranscriptSourcesFeatureState: vi.fn(),
+  getV1MeetingTranscriptProviderCatalog: vi.fn(),
+  listMeetingTranscriptSourceState: vi.fn(),
   resolveRequestActor: vi.fn(),
   checkApiDemoGuard: vi.fn(),
   handleRouteError: vi.fn(),
 }));
 
 vi.mock("@corgtex/domain", () => ({
-  enableMeetingRecorderForWorkspace,
-  getMeetingRecorderConfig,
-  updateMeetingRecorderConfig,
+  enableMeetingTranscriptSourcesForWorkspace,
+  getMeetingTranscriptSourcesFeatureState,
+  getV1MeetingTranscriptProviderCatalog,
+  listMeetingTranscriptSourceState,
 }));
 
 vi.mock("@/lib/auth", () => ({
@@ -35,20 +38,20 @@ vi.mock("@/lib/http", () => ({
   handleRouteError,
 }));
 
-function recorderConfig(overrides: Record<string, unknown> = {}, topLevelOverrides: Record<string, unknown> = {}) {
+function transcriptSourceState() {
   return {
-    featureEnabled: true,
-    ...topLevelOverrides,
-    config: {
-      enabled: false,
-      autoRecordEnabled: false,
-      defaultProvider: "RECALL_AI",
-      fallbackProvider: null,
-      botName: "Corgtex Recorder",
-      monthlyMinuteCap: 6000,
-      ...overrides,
-    },
-    usage: { usedMinutes: 0 },
+    connections: [
+      { id: "connection-read", provider: "READ_AI", status: "ACTIVE" },
+      { id: "connection-otter", provider: "OTTER", status: "ACTIVE" },
+    ],
+    batches: [
+      { id: "batch-read", provider: "READ_AI" },
+      { id: "batch-otter", provider: "OTTER" },
+    ],
+    records: [
+      { id: "record-read", provider: "READ_AI" },
+      { id: "record-otter", provider: "OTTER" },
+    ],
   };
 }
 
@@ -57,9 +60,16 @@ afterEach(() => {
 });
 
 describe("/api/workspaces/[workspaceId]/onboarding/meeting-recorder", () => {
-  it("returns recorder setup status for the current workspace actor", async () => {
+  it("returns V1 transcript-source setup state for the current workspace actor", async () => {
     resolveRequestActor.mockResolvedValue({ kind: "user", user: { id: "user-1" } });
-    getMeetingRecorderConfig.mockResolvedValue(recorderConfig({ enabled: true }));
+    getMeetingTranscriptSourcesFeatureState.mockResolvedValue({ featureEnabled: true });
+    getV1MeetingTranscriptProviderCatalog.mockReturnValue([
+      { provider: "READ_AI", label: "Read.ai" },
+      { provider: "FATHOM", label: "Fathom" },
+      { provider: "FIREFLIES", label: "Fireflies" },
+      { provider: "MANUAL_UPLOAD", label: "Upload files" },
+    ]);
+    listMeetingTranscriptSourceState.mockResolvedValue(transcriptSourceState());
     const { GET } = await import("./route");
 
     const response = await GET(
@@ -67,67 +77,42 @@ describe("/api/workspaces/[workspaceId]/onboarding/meeting-recorder", () => {
       { params: Promise.resolve({ workspaceId: "ws-1" }) },
     );
 
-    expect(getMeetingRecorderConfig).toHaveBeenCalledWith(
+    expect(getMeetingTranscriptSourcesFeatureState).toHaveBeenCalledWith(
       { kind: "user", user: { id: "user-1" } },
       "ws-1",
     );
     await expect(response.json()).resolves.toEqual(expect.objectContaining({
       featureEnabled: true,
-      enabled: true,
-      defaultProvider: "RECALL_AI",
+      catalog: expect.arrayContaining([
+        expect.objectContaining({ provider: "READ_AI" }),
+        expect.objectContaining({ provider: "FATHOM" }),
+        expect.objectContaining({ provider: "FIREFLIES" }),
+        expect.objectContaining({ provider: "MANUAL_UPLOAD" }),
+      ]),
+      connections: [{ id: "connection-read", provider: "READ_AI", status: "ACTIVE" }],
     }));
   });
 
-  it("updates recorder setup through the demo guard", async () => {
+  it("initializes transcript-source access without enabling the Corgtex recorder", async () => {
     resolveRequestActor.mockResolvedValue({ kind: "user", user: { id: "user-1" } });
-    getMeetingRecorderConfig.mockResolvedValue(recorderConfig({ enabled: true }));
+    getMeetingTranscriptSourcesFeatureState.mockResolvedValue({ featureEnabled: true });
+    getV1MeetingTranscriptProviderCatalog.mockReturnValue([{ provider: "READ_AI", label: "Read.ai" }]);
+    listMeetingTranscriptSourceState.mockResolvedValue(transcriptSourceState());
     const { POST } = await import("./route");
 
     const response = await POST(
       new NextRequest("https://app.corgtex.com/api/workspaces/ws-1/onboarding/meeting-recorder", {
         method: "POST",
-        body: JSON.stringify({ enabled: true, autoRecordEnabled: false }),
+        body: JSON.stringify({ enabled: true }),
       }),
       { params: Promise.resolve({ workspaceId: "ws-1" }) },
     );
 
     expect(checkApiDemoGuard).toHaveBeenCalledWith("ws-1");
-    expect(enableMeetingRecorderForWorkspace).toHaveBeenCalledWith(
+    expect(enableMeetingTranscriptSourcesForWorkspace).toHaveBeenCalledWith(
       { kind: "user", user: { id: "user-1" } },
       { workspaceId: "ws-1", enabled: true },
-    );
-    expect(updateMeetingRecorderConfig).toHaveBeenCalledWith(
-      { kind: "user", user: { id: "user-1" } },
-      { workspaceId: "ws-1", enabled: true, autoRecordEnabled: false },
     );
     expect(response.status).toBe(200);
-  });
-
-  it("enables recorder access from onboarding when the workspace did not have it yet", async () => {
-    resolveRequestActor.mockResolvedValue({ kind: "user", user: { id: "user-1" } });
-    getMeetingRecorderConfig.mockResolvedValue(recorderConfig({ enabled: true }, { featureEnabled: true }));
-    const { POST } = await import("./route");
-
-    const response = await POST(
-      new NextRequest("https://app.corgtex.com/api/workspaces/ws-1/onboarding/meeting-recorder", {
-        method: "POST",
-        body: JSON.stringify({ enabled: true, autoRecordEnabled: true }),
-      }),
-      { params: Promise.resolve({ workspaceId: "ws-1" }) },
-    );
-
-    expect(enableMeetingRecorderForWorkspace).toHaveBeenCalledWith(
-      { kind: "user", user: { id: "user-1" } },
-      { workspaceId: "ws-1", enabled: true },
-    );
-    expect(updateMeetingRecorderConfig).toHaveBeenCalledWith(
-      { kind: "user", user: { id: "user-1" } },
-      { workspaceId: "ws-1", enabled: true, autoRecordEnabled: false },
-    );
-    await expect(response.json()).resolves.toEqual(expect.objectContaining({
-      featureEnabled: true,
-      enabled: true,
-      autoRecordEnabled: false,
-    }));
   });
 });

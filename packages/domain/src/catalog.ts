@@ -31,6 +31,7 @@ const CATALOG_FEATURE_DEFAULTS = {
   BUILD_ARTIFACTS: false,
   MEETING_RECORDERS: false,
   SETTINGS_GENERAL: true,
+  MEETING_TRANSCRIPT_SOURCES: false,
   FINANCE: true,
   AI_WORKSPACES: true,
   OPENWORK_DEFAULT: false,
@@ -344,19 +345,19 @@ function connectorSources(workspaceId: string, flags: CatalogFeatureFlags): Cata
       featured: false,
     });
 
-    const meetingRecordersEnabled = flags.MEETING_RECORDERS;
+    const meetingTranscriptSourcesEnabled = flags.MEETING_TRANSCRIPT_SOURCES || flags.MEETING_RECORDERS;
     sources.push({
       type: "TOOL",
       sourceType: "MEETING_RECORDER",
       sourceId: "meeting-recorder",
-      title: "Meeting recorder",
-      outcome: "Connect recorder transcripts so Corgtex extracts proposals, action items, and Brain context.",
-      descriptionMd: meetingRecordersEnabled
-        ? "Connect a meeting recorder or upload transcript exports so Corgtex can process meeting evidence from the start."
-        : "Request meeting recorder access, then connect a recorder or upload transcript exports as the first onboarding context source.",
+      title: "Meeting transcripts",
+      outcome: "Import transcripts from existing recorders so Corgtex extracts proposals, action items, and Brain context.",
+      descriptionMd: meetingTranscriptSourcesEnabled
+        ? "Connect Read.ai, Fathom, or Fireflies, or upload transcript exports so Corgtex can process meeting evidence from the start."
+        : "Initialize transcript import access, then connect Read.ai, Fathom, Fireflies, or upload transcript exports as the first onboarding context source.",
       url: null,
       category: "MEETINGS",
-      accessMode: meetingRecordersEnabled ? "OPEN" : "REQUEST",
+      accessMode: meetingTranscriptSourcesEnabled ? "OPEN" : "REQUEST",
       requestedScopes: ["meetings:read", "meetings:write", "brain:read"],
       featured: true,
       manifestJson: connectorReadinessManifest("meeting-recorder"),

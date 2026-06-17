@@ -866,7 +866,7 @@ const CLIENT_FEATURE_POSTURES = {
   enterprise: {
     "agent-governance": true,
     settings: true,
-    meetings: { MEETING_RECORDERS: true, MEETING_CONTEXTUAL_INTELLIGENCE: true },
+    meetings: { MEETING_TRANSCRIPT_SOURCES: true, MEETING_RECORDERS: true, MEETING_CONTEXTUAL_INTELLIGENCE: true },
     "ai-workspaces": { AI_WORKSPACES: true, MANAGED_ENTERPRISE_SERVICES: true },
     "execution-packets": true,
   },

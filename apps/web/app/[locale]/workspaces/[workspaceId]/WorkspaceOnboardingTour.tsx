@@ -25,16 +25,6 @@ interface TourStep {
 
 type SetupMode = "setup" | "setupReturn" | null;
 
-type RecorderStatus = {
-  featureEnabled: boolean;
-  enabled: boolean;
-  autoRecordEnabled: boolean;
-  defaultProvider: string;
-  botName: string;
-  monthlyMinuteCap: number;
-  usedMinutes: number;
-};
-
 function currentUrl() {
   return `${window.location.pathname}${window.location.search}`;
 }
@@ -82,18 +72,16 @@ export function WorkspaceOnboardingTour({
   const [hasContext, setHasContext] = useState(hasInitialKnowledge);
   const [setupMode, setSetupMode] = useState<SetupMode>(null);
   const [setupMessage, setSetupMessage] = useState<string | null>(null);
-  const [recorderStatus, setRecorderStatus] = useState<RecorderStatus | null>(null);
-  const [recorderLoading, setRecorderLoading] = useState(false);
-  const [recorderSaving, setRecorderSaving] = useState(false);
-  const [recorderError, setRecorderError] = useState<string | null>(null);
+  const [transcriptSourceSaving, setTranscriptSourceSaving] = useState(false);
+  const [transcriptSourceError, setTranscriptSourceError] = useState<string | null>(null);
   const isMapRoute = Boolean(pathname?.includes(`/workspaces/${workspaceId}/maps`));
   const routeKey = `${pathname ?? ""}?${searchParams?.toString() ?? ""}`;
   const onboardingRequested = searchParams?.get("onboarding") === "setup";
   const goalsTourEnabled = Boolean(featureFlags?.GOALS);
   const contextMapsTourEnabled = Boolean(featureFlags?.CONTEXT_MAPS);
   const agentGovernanceTourEnabled = Boolean(featureFlags?.AGENT_GOVERNANCE && capabilities?.canManageAgentGovernance);
-  const meetingRecorderOnboardingPath = featureFlags?.TOOL_LINKS
-    ? "/tools?type=TOOL&q=meeting%20recorder"
+  const transcriptImportPath = featureFlags?.TOOL_LINKS
+    ? "/tools?type=TOOL&q=meeting%20transcripts"
     : "/settings?tab=general";
 
   const tourSteps: TourStep[] = useMemo(() => {
@@ -199,7 +187,7 @@ export function WorkspaceOnboardingTour({
 
     steps.push(
       {
-        href: meetingRecorderOnboardingPath,
+        href: transcriptImportPath,
         element: ".ws-main-content",
         popover: {
           title: t("integrationsTitle"),
@@ -219,7 +207,7 @@ export function WorkspaceOnboardingTour({
     );
 
     return steps;
-  }, [t, goalsTourEnabled, contextMapsTourEnabled, agentGovernanceTourEnabled, meetingRecorderOnboardingPath]);
+  }, [t, goalsTourEnabled, contextMapsTourEnabled, agentGovernanceTourEnabled, transcriptImportPath]);
 
   const markCompleted = useCallback(async () => {
     completedRef.current = true;
@@ -308,45 +296,28 @@ export function WorkspaceOnboardingTour({
     driverRef.current?.drive(0);
   }, [router, workspaceId]);
 
-  const loadRecorderStatus = useCallback(async () => {
-    setRecorderLoading(true);
-    setRecorderError(null);
+  const openTranscriptImport = useCallback(async () => {
+    setTranscriptSourceSaving(true);
+    setTranscriptSourceError(null);
     try {
-      const response = await fetch(`/api/workspaces/${workspaceId}/onboarding/meeting-recorder`);
-      const data = await response.json().catch(() => null);
-      if (!response.ok) {
-        throw new Error(parseApiError(data, t("recorderErrorLoad")));
-      }
-      setRecorderStatus(data);
-    } catch (error) {
-      setRecorderError(error instanceof Error ? error.message : t("recorderErrorLoad"));
-    } finally {
-      setRecorderLoading(false);
-    }
-  }, [t, workspaceId]);
-
-  const enableRecorder = useCallback(async () => {
-    setRecorderSaving(true);
-    setRecorderError(null);
-    try {
-      const response = await fetch(`/api/workspaces/${workspaceId}/onboarding/meeting-recorder`, {
+      const response = await fetch(`/api/workspaces/${workspaceId}/onboarding/meeting-transcript-sources`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ enabled: true, autoRecordEnabled: false }),
+        body: JSON.stringify({ enabled: true }),
       });
       const data = await response.json().catch(() => null);
       if (!response.ok) {
-        throw new Error(parseApiError(data, t("recorderErrorSave")));
+        throw new Error(parseApiError(data, t("transcriptSourcesErrorSave")));
       }
-      setRecorderStatus(data);
-      setSetupMessage(t("recorderEnabled"));
-      router.refresh();
+      setSetupMessage(t("transcriptSourcesInitialized"));
+      setSetupMode(null);
+      router.push(workspaceStepUrl(workspaceId, transcriptImportPath));
     } catch (error) {
-      setRecorderError(error instanceof Error ? error.message : t("recorderErrorSave"));
+      setTranscriptSourceError(error instanceof Error ? error.message : t("transcriptSourcesErrorSave"));
     } finally {
-      setRecorderSaving(false);
+      setTranscriptSourceSaving(false);
     }
-  }, [router, t, workspaceId]);
+  }, [router, t, transcriptImportPath, workspaceId]);
 
   const handleUploaded = useCallback((count: number) => {
     hasContextRef.current = true;
@@ -405,11 +376,6 @@ export function WorkspaceOnboardingTour({
   }, [initDriver, isMapRoute, onboardingRequested, restartTour]);
 
   useEffect(() => {
-    if (!setupMode) return;
-    void loadRecorderStatus();
-  }, [loadRecorderStatus, setupMode]);
-
-  useEffect(() => {
     if (targetStepIndexRef.current !== null) {
       const targetIndex = targetStepIndexRef.current;
       targetStepIndexRef.current = null;
@@ -453,34 +419,24 @@ export function WorkspaceOnboardingTour({
 
           <section className="onboarding-setup-panel stack">
             <div>
-              <h3>{t("connectRecorderTitle")}</h3>
-              <p className="nr-item-meta">{t("connectRecorderDescription")}</p>
+              <h3>{t("transcriptSourcesTitle")}</h3>
+              <p className="nr-item-meta">{t("transcriptSourcesDescription")}</p>
             </div>
-            <div className="stack">
-              {recorderLoading && <p className="nr-item-meta">{t("recorderLoading")}</p>}
-              {recorderError && <p className="form-message form-message-error">{recorderError}</p>}
-              {recorderStatus ? (
-                <div className="nr-item">
-                  <div className="row">
-                    <strong className="nr-item-title">{t("recorderStatusTitle")}</strong>
-                    <span className="tag">{recorderStatus.enabled ? t("recorderStatusEnabled") : t("recorderStatusDisabled")}</span>
-                  </div>
-                  <p className="nr-item-meta">
-                    {t("recorderMeta", {
-                      provider: recorderStatus.defaultProvider,
-                      minutes: recorderStatus.monthlyMinuteCap,
-                    })}
-                  </p>
-                </div>
-              ) : (
-                <p className="nr-item-meta">{t("recorderSetupReady")}</p>
-              )}
+            <div className="stack" style={{ gap: 10 }}>
+              {transcriptSourceError && <p className="form-message form-message-error">{transcriptSourceError}</p>}
+              <div className="actions-inline" style={{ gap: 8 }}>
+                <span className="tag">Read.ai</span>
+                <span className="tag">Fathom</span>
+                <span className="tag">Fireflies</span>
+                <span className="tag">{t("transcriptSourcesUploadTag")}</span>
+              </div>
+              <p className="nr-item-meta">{t("transcriptSourcesReady")}</p>
               <div className="actions-inline">
-                <button type="button" className="secondary small" disabled={recorderSaving || recorderStatus?.enabled === true} onClick={enableRecorder}>
-                  {recorderSaving ? t("recorderSaving") : t("connectRecorderAction")}
+                <button type="button" className="secondary small" disabled={transcriptSourceSaving} onClick={openTranscriptImport}>
+                  {transcriptSourceSaving ? t("transcriptSourcesSaving") : t("transcriptSourcesAction")}
                 </button>
-                <a className="link-button secondary" href={workspaceStepUrl(workspaceId, meetingRecorderOnboardingPath)}>
-                  {t("recorderDetailsAction")}
+                <a className="link-button secondary" href={workspaceStepUrl(workspaceId, transcriptImportPath)}>
+                  {t("transcriptSourcesDetailsAction")}
                 </a>
               </div>
             </div>

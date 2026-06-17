@@ -20,6 +20,7 @@ export async function POST(
       accessToken: typeof body.accessToken === "string" ? body.accessToken : null,
       refreshToken: typeof body.refreshToken === "string" ? body.refreshToken : null,
       webhookSecret: typeof body.webhookSecret === "string" ? body.webhookSecret : null,
+      webhookUrl: typeof body.webhookUrl === "string" ? body.webhookUrl : null,
     });
     return NextResponse.json(result, { status: 201 });
   } catch (error) {

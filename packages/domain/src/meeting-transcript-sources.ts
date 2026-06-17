@@ -8,7 +8,20 @@ import { intakeMeetingTranscript, type MeetingTranscriptSegment } from "./meetin
 export type TranscriptAuthMode = "API_KEY" | "OAUTH_ADMIN" | "MCP" | "MANUAL_EXPORT";
 export type TranscriptSourceDataShape = "TRANSCRIPT_TEXT" | "SPEAKER_SEGMENTS" | "SUMMARY" | "ACTION_ITEMS" | "RECORDING_METADATA";
 export type TranscriptFormat = "json" | "vtt" | "srt" | "txt" | "docx" | "pdf" | "zip" | "csv";
-const MEETING_RECORDERS_FEATURE_FLAG = "MEETING_RECORDERS";
+export const MEETING_TRANSCRIPT_SOURCES_FEATURE_FLAG = "MEETING_TRANSCRIPT_SOURCES";
+const LEGACY_MEETING_RECORDERS_FEATURE_FLAG = "MEETING_RECORDERS";
+const MEETING_TRANSCRIPT_SOURCE_FEATURE_FLAGS = [
+  MEETING_TRANSCRIPT_SOURCES_FEATURE_FLAG,
+  LEGACY_MEETING_RECORDERS_FEATURE_FLAG,
+] as const;
+const V1_TRANSCRIPT_SOURCE_PROVIDERS = new Set<MeetingTranscriptSourceProvider>([
+  "READ_AI",
+  "FATHOM",
+  "FIREFLIES",
+  "MANUAL_UPLOAD",
+]);
+const PROVIDER_BACKFILL_LOOKBACK_DAYS = 90;
+const PROVIDER_BACKFILL_MAX_ARTIFACTS = 500;
 const TRANSCRIPT_SOURCE_DUPLICATE_MATCH_WINDOW_MS = 2 * 60 * 60 * 1000;
 const TRANSCRIPT_SOURCE_DUPLICATE_SCORE_THRESHOLD = 0.7;
 
@@ -48,6 +61,13 @@ export type MeetingTranscriptSourceArtifact = {
   participants?: unknown[] | null;
   segments?: MeetingTranscriptSegment[] | null;
   metadata?: Record<string, unknown> | null;
+};
+
+type TranscriptSourceConnectionForProviderApi = {
+  id: string;
+  provider: MeetingTranscriptSourceProvider;
+  apiKeyEnc: string | null;
+  webhookSecretEnc?: string | null;
 };
 
 export type NormalizedMeetingTranscriptSourceArtifact = {
@@ -94,17 +114,65 @@ const PROVIDER_SLUGS: Record<string, MeetingTranscriptSourceProvider> = {
   "manual-upload": "MANUAL_UPLOAD",
 };
 
+async function meetingTranscriptSourcesFeatureEnabled(workspaceId: string) {
+  const flags = await prisma.workspaceFeatureFlag.findMany({
+    where: {
+      workspaceId,
+      flag: { in: [...MEETING_TRANSCRIPT_SOURCE_FEATURE_FLAGS] },
+    },
+    select: { flag: true, enabled: true },
+  });
+  return flags.some((flag) => flag.enabled);
+}
+
+export async function getMeetingTranscriptSourcesFeatureState(actor: AppActor, workspaceId: string) {
+  await requireWorkspaceMembership({ actor, workspaceId });
+  return { featureEnabled: await meetingTranscriptSourcesFeatureEnabled(workspaceId) };
+}
+
 async function requireMeetingTranscriptSourcesFeature(workspaceId: string) {
-  const flag = await prisma.workspaceFeatureFlag.findUnique({
+  invariant(
+    await meetingTranscriptSourcesFeatureEnabled(workspaceId),
+    403,
+    "FEATURE_DISABLED",
+    "Meeting transcript sources are not enabled for this workspace.",
+  );
+}
+
+export async function enableMeetingTranscriptSourcesForWorkspace(actor: AppActor, params: {
+  workspaceId: string;
+  enabled?: boolean;
+}) {
+  await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId, allowedRoles: ["ADMIN"] });
+  const enabled = params.enabled ?? true;
+  const flag = await prisma.workspaceFeatureFlag.upsert({
     where: {
       workspaceId_flag: {
-        workspaceId,
-        flag: MEETING_RECORDERS_FEATURE_FLAG,
+        workspaceId: params.workspaceId,
+        flag: MEETING_TRANSCRIPT_SOURCES_FEATURE_FLAG,
       },
     },
-    select: { enabled: true },
+    create: {
+      workspaceId: params.workspaceId,
+      flag: MEETING_TRANSCRIPT_SOURCES_FEATURE_FLAG,
+      enabled,
+    },
+    update: { enabled },
   });
-  invariant(flag?.enabled, 403, "FEATURE_DISABLED", "Meeting recorder transcript sources are not enabled for this workspace.");
+  await prisma.auditLog.create({
+    data: {
+      workspaceId: params.workspaceId,
+      actorUserId: actor.kind === "user" ? actor.user.id : null,
+      action: "meeting-transcript-sources.feature-updated",
+      entityType: "WorkspaceFeatureFlag",
+      entityId: flag.id,
+      meta: {
+        flag: MEETING_TRANSCRIPT_SOURCES_FEATURE_FLAG,
+        enabled,
+      } satisfies Prisma.InputJsonObject,
+    },
+  });
+  return { featureEnabled: enabled };
 }
 
 const CATALOG: MeetingTranscriptProviderCatalogEntry[] = [
@@ -314,6 +382,15 @@ export function getMeetingTranscriptProviderCatalog() {
   return [...CATALOG].sort((left, right) => left.popularityRank - right.popularityRank);
 }
 
+export function getV1MeetingTranscriptProviderCatalog() {
+  return getMeetingTranscriptProviderCatalog()
+    .filter((entry) => V1_TRANSCRIPT_SOURCE_PROVIDERS.has(entry.provider))
+    .sort((left, right) => {
+      const order = ["READ_AI", "FATHOM", "FIREFLIES", "MANUAL_UPLOAD"];
+      return order.indexOf(left.provider) - order.indexOf(right.provider);
+    });
+}
+
 export function normalizeMeetingTranscriptSourceProvider(value: string): MeetingTranscriptSourceProvider {
   const normalized = value.trim().toLowerCase().replace(/_/g, "-");
   const provider = PROVIDER_SLUGS[normalized] ?? PROVIDER_SLUGS[normalized.replace(/\./g, "")];
@@ -509,8 +586,19 @@ function normalizeSegment(value: unknown): MeetingTranscriptSegment | null {
   const record = asRecord(value);
   const text = asString(record.text) ?? asString(record.sentence) ?? asString(record.content) ?? asString(record.transcript);
   if (!text) return null;
-  const speaker = asString(record.speaker) ?? asString(record.speaker_name) ?? asString(record.name);
-  const startMs = typeof record.startMs === "number" ? record.startMs : typeof record.start_time === "number" ? record.start_time * 1000 : null;
+  const speakerRecord = asRecord(record.speaker);
+  const speaker = asString(record.speaker)
+    ?? asString(speakerRecord.display_name)
+    ?? asString(speakerRecord.name)
+    ?? asString(record.speaker_name)
+    ?? asString(record.name);
+  const startMs = typeof record.startMs === "number"
+    ? record.startMs
+    : typeof record.start_time === "number"
+      ? record.start_time * 1000
+      : asString(record.timestamp)
+        ? parseTimestampMs(asString(record.timestamp) ?? "")
+        : null;
   const endMs = typeof record.endMs === "number" ? record.endMs : typeof record.end_time === "number" ? record.end_time * 1000 : null;
   return { speaker, startMs, endMs, text };
 }
@@ -709,10 +797,14 @@ export function normalizeMeetingTranscriptSourceArtifact(
     || asString(jsonRecord.transcriptId)
     || asString(jsonRecord.recording_id)
     || asString(jsonRecord.recordingId)
+    || (asNumber(jsonRecord.recording_id) != null ? String(asNumber(jsonRecord.recording_id)) : null)
+    || asString(jsonRecord.meeting_id)
+    || asString(jsonRecord.meetingId)
     || asString(nestedMeeting.id)
     || asString(nestedRecording.id);
   const title = artifact.title?.trim()
     || asString(jsonRecord.title)
+    || asString(jsonRecord.meeting_title)
     || asString(jsonRecord.name)
     || asString(nestedMeeting.title)
     || asString(nestedRecording.title)
@@ -722,6 +814,10 @@ export function normalizeMeetingTranscriptSourceArtifact(
     || asDate(jsonRecord.recorded_at)
     || asDate(jsonRecord.date)
     || asDate(jsonRecord.start_time)
+    || asDate(jsonRecord.recording_start_time)
+    || asDate(jsonRecord.scheduled_start_time)
+    || asDate(jsonRecord.created_at)
+    || asDate(jsonRecord.timestamp)
     || asDate(nestedMeeting.start_time)
     || parseDateFromText(`${artifact.fileName ?? ""}\n${text.slice(0, 2000)}`);
   invariant(recordedAt, 400, "RECORDED_AT_REQUIRED", `Recorded date is required for ${artifact.fileName || explicitExternalId || "transcript artifact"}.`);
@@ -736,15 +832,19 @@ export function normalizeMeetingTranscriptSourceArtifact(
     || asDate(jsonRecord.updatedAt)
     || asDate(jsonRecord.updated_at)
     || asDate(jsonRecord.modified_at)
+    || asDate(jsonRecord.recording_end_time)
+    || asDate(jsonRecord.created_at)
     || null;
   const sourceUrl = artifact.sourceUrl?.trim()
     || asString(jsonRecord.url)
     || asString(jsonRecord.sourceUrl)
+    || asString(jsonRecord.share_url)
     || asString(jsonRecord.transcript_url)
     || null;
   const meetingUrl = artifact.meetingUrl?.trim()
     || asString(jsonRecord.meetingUrl)
     || asString(jsonRecord.meeting_url)
+    || asString(jsonRecord.meeting_link)
     || asString(nestedMeeting.url)
     || null;
   const participantEmails = [
@@ -752,16 +852,26 @@ export function normalizeMeetingTranscriptSourceArtifact(
     ...uniqueEmails([
       jsonRecord.participants,
       jsonRecord.attendees,
+      jsonRecord.calendar_invitees,
+      jsonRecord.meeting_attendees,
+      jsonRecord.recorded_by,
+      jsonRecord.transcript,
+      jsonRecord.action_items,
       nestedMeeting.participants,
       nestedRecording.participants,
       text.slice(0, 6000),
     ]),
   ].map((email) => email.trim().toLowerCase()).filter(Boolean);
-  const participants = artifact.participants ?? asArray(jsonRecord.participants).concat(asArray(jsonRecord.attendees));
+  const participants = artifact.participants
+    ?? asArray(jsonRecord.participants)
+      .concat(asArray(jsonRecord.attendees))
+      .concat(asArray(jsonRecord.calendar_invitees))
+      .concat(asArray(jsonRecord.meeting_attendees));
   const summaryMd = artifact.summaryMd?.trim()
     || asString(jsonRecord.summary)
     || asString(jsonRecord.summaryMd)
     || asString(asRecord(jsonRecord.summary).overview)
+    || asString(asRecord(jsonRecord.default_summary).markdown_formatted)
     || null;
   const normalized = {
     provider,
@@ -790,6 +900,37 @@ export function normalizeMeetingTranscriptSourceArtifact(
   return { ...normalized, contentHash: contentHashFor(normalized) };
 }
 
+async function createFathomWebhook(params: { apiKey: string; webhookUrl: string }) {
+  const response = await fetch("https://api.fathom.ai/external/v1/webhooks", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "X-Api-Key": params.apiKey,
+    },
+    body: JSON.stringify({
+      destination_url: params.webhookUrl,
+      triggered_for: [
+        "my_recordings",
+        "my_shared_with_team_recordings",
+        "shared_external_recordings",
+      ],
+      include_action_items: true,
+      include_summary: true,
+      include_transcript: true,
+    }),
+  });
+  const body = await response.json().catch(() => null);
+  if (!response.ok) {
+    const message = asString(asRecord(body).message)
+      ?? asString(asRecord(body).error)
+      ?? "Fathom webhook registration failed.";
+    throw new AppError(502, "PROVIDER_WEBHOOK_REGISTRATION_FAILED", message);
+  }
+  const secret = asString(asRecord(body).secret);
+  invariant(secret, 502, "PROVIDER_WEBHOOK_REGISTRATION_FAILED", "Fathom did not return a webhook secret.");
+  return secret;
+}
+
 export async function connectMeetingTranscriptSource(actor: AppActor, params: {
   workspaceId: string;
   provider: MeetingTranscriptSourceProvider | string;
@@ -798,6 +939,7 @@ export async function connectMeetingTranscriptSource(actor: AppActor, params: {
   accessToken?: string | null;
   refreshToken?: string | null;
   webhookSecret?: string | null;
+  webhookUrl?: string | null;
 }) {
   await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId, allowedRoles: ["ADMIN"] });
   await requireMeetingTranscriptSourcesFeature(params.workspaceId);
@@ -806,7 +948,11 @@ export async function connectMeetingTranscriptSource(actor: AppActor, params: {
   const apiKey = params.apiKey?.trim();
   const accessToken = params.accessToken?.trim();
   const refreshToken = params.refreshToken?.trim();
-  const webhookSecret = params.webhookSecret?.trim();
+  let webhookSecret = params.webhookSecret?.trim();
+  const webhookUrl = params.webhookUrl?.trim();
+  if (provider === "FATHOM" && apiKey && webhookUrl && !webhookSecret) {
+    webhookSecret = await createFathomWebhook({ apiKey, webhookUrl });
+  }
   invariant(apiKey || accessToken || webhookSecret || catalogEntry.authModes.includes("MANUAL_EXPORT"), 400, "CREDENTIAL_REQUIRED", "Add an API key, access token, or webhook secret.");
 
   const connection = await prisma.meetingTranscriptSourceConnection.upsert({
@@ -1376,6 +1522,188 @@ export async function retryMeetingTranscriptImportBatch(actor: AppActor, params:
   });
 }
 
+function providerBackfillWindowStart(now = new Date()) {
+  return new Date(now.getTime() - PROVIDER_BACKFILL_LOOKBACK_DAYS * 24 * 60 * 60 * 1000);
+}
+
+async function createProviderBackfillBatch(params: {
+  workspaceId: string;
+  connectionId: string;
+  provider: MeetingTranscriptSourceProvider;
+  status: "COMPLETED" | "FAILED";
+  error?: string | null;
+}) {
+  const now = new Date();
+  return prisma.meetingTranscriptImportBatch.create({
+    data: {
+      workspaceId: params.workspaceId,
+      connectionId: params.connectionId,
+      provider: params.provider,
+      sourceKind: "provider_backfill",
+      status: params.status,
+      startedAt: now,
+      finishedAt: now,
+      importedCount: 0,
+      skippedCount: 0,
+      failedCount: params.status === "FAILED" ? 1 : 0,
+      error: params.error ?? null,
+    },
+  });
+}
+
+async function finishProviderBackfillConnection(params: {
+  connectionId: string;
+  error?: string | null;
+}) {
+  await prisma.meetingTranscriptSourceConnection.update({
+    where: { id: params.connectionId },
+    data: {
+      lastBackfillAt: new Date(),
+      lastError: params.error ?? null,
+    },
+  });
+}
+
+function providerErrorMessage(error: unknown, fallback: string) {
+  return error instanceof Error && error.message.trim() ? error.message : fallback;
+}
+
+function fathomMeetingArtifact(value: unknown): MeetingTranscriptSourceArtifact {
+  const meeting = asRecord(value);
+  const recordingId = asNumber(meeting.recording_id);
+  return {
+    json: meeting,
+    externalId: recordingId != null ? String(recordingId) : asString(meeting.recording_id) ?? asString(meeting.id),
+    title: asString(meeting.title) ?? asString(meeting.meeting_title),
+    recordedAt: asDate(meeting.recording_start_time) ?? asDate(meeting.scheduled_start_time) ?? asDate(meeting.created_at),
+    sourceUpdatedAt: asDate(meeting.recording_end_time) ?? asDate(meeting.created_at),
+    sourceUrl: asString(meeting.share_url) ?? asString(meeting.url),
+    meetingUrl: asString(meeting.meeting_url),
+    summaryMd: asString(asRecord(meeting.default_summary).markdown_formatted),
+    participantEmails: uniqueEmails([
+      meeting.calendar_invitees,
+      meeting.recorded_by,
+      meeting.transcript,
+      meeting.action_items,
+    ]),
+    participants: asArray(meeting.calendar_invitees),
+    metadata: {
+      provider: "FATHOM",
+      providerBackfill: true,
+      rawMeeting: meeting,
+    },
+  };
+}
+
+async function fetchFathomBackfillArtifacts(connection: TranscriptSourceConnectionForProviderApi) {
+  invariant(connection.apiKeyEnc, 400, "CREDENTIAL_REQUIRED", "Add a Fathom API key before running backfill.");
+  const apiKey = decryptSecret(connection.apiKeyEnc);
+  const artifacts: MeetingTranscriptSourceArtifact[] = [];
+  let cursor: string | null = null;
+  for (let page = 0; page < 20 && artifacts.length < PROVIDER_BACKFILL_MAX_ARTIFACTS; page += 1) {
+    const url = new URL("https://api.fathom.ai/external/v1/meetings");
+    url.searchParams.set("created_after", providerBackfillWindowStart().toISOString());
+    url.searchParams.set("include_transcript", "true");
+    url.searchParams.set("include_summary", "true");
+    url.searchParams.set("include_action_items", "true");
+    if (cursor) url.searchParams.set("cursor", cursor);
+    const response = await fetch(url, {
+      headers: { "X-Api-Key": apiKey },
+    });
+    const body = await response.json().catch(() => null);
+    if (!response.ok) {
+      throw new AppError(
+        502,
+        "PROVIDER_BACKFILL_FAILED",
+        asString(asRecord(body).message) ?? asString(asRecord(body).error) ?? "Fathom backfill request failed.",
+      );
+    }
+    const items = asArray(asRecord(body).items);
+    artifacts.push(...items.map(fathomMeetingArtifact));
+    cursor = asString(asRecord(body).next_cursor);
+    if (!cursor || items.length === 0) break;
+  }
+  return artifacts.slice(0, PROVIDER_BACKFILL_MAX_ARTIFACTS);
+}
+
+function firefliesTranscriptArtifact(value: unknown): MeetingTranscriptSourceArtifact {
+  const transcript = asRecord(value);
+  return {
+    json: transcript,
+    externalId: asString(transcript.id),
+    title: asString(transcript.title),
+    recordedAt: asDate(transcript.date),
+    sourceUpdatedAt: asDate(transcript.date),
+    sourceUrl: asString(transcript.transcript_url),
+    meetingUrl: asString(transcript.meeting_link),
+    calendarExternalId: asString(transcript.calendar_id) ?? asString(transcript.cal_id),
+    summaryMd: asString(asRecord(transcript.summary).overview),
+    participantEmails: uniqueEmails([
+      transcript.participants,
+      transcript.meeting_attendees,
+      transcript.user,
+    ]),
+    participants: asArray(transcript.participants).concat(asArray(transcript.meeting_attendees)),
+    metadata: {
+      provider: "FIREFLIES",
+      providerBackfill: true,
+      rawTranscript: transcript,
+    },
+  };
+}
+
+async function fetchFirefliesBackfillArtifacts(connection: TranscriptSourceConnectionForProviderApi) {
+  invariant(connection.apiKeyEnc, 400, "CREDENTIAL_REQUIRED", "Add a Fireflies API key before running backfill.");
+  const apiKey = decryptSecret(connection.apiKeyEnc);
+  const artifacts: MeetingTranscriptSourceArtifact[] = [];
+  const limit = 50;
+  for (let skip = 0; skip < PROVIDER_BACKFILL_MAX_ARTIFACTS; skip += limit) {
+    const response = await fetch("https://api.fireflies.ai/graphql", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify({
+        query: `query BackfillTranscripts($fromDate: DateTime!, $limit: Int!, $skip: Int!) {
+          transcripts(fromDate: $fromDate, limit: $limit, skip: $skip) {
+            id
+            title
+            date
+            transcript_url
+            meeting_link
+            calendar_id
+            cal_id
+            participants
+            meeting_attendees { displayName email name }
+            user { email name }
+            sentences { speaker_name text start_time end_time }
+            summary { overview action_items }
+          }
+        }`,
+        variables: {
+          fromDate: providerBackfillWindowStart().toISOString(),
+          limit,
+          skip,
+        },
+      }),
+    });
+    const body = await response.json().catch(() => null);
+    if (!response.ok || asArray(asRecord(body).errors).length > 0) {
+      const firstError = asRecord(asArray(asRecord(body).errors)[0]);
+      throw new AppError(
+        502,
+        "PROVIDER_BACKFILL_FAILED",
+        asString(firstError.message) ?? asString(asRecord(body).error) ?? "Fireflies backfill request failed.",
+      );
+    }
+    const transcripts = asArray(asRecord(asRecord(body).data).transcripts);
+    artifacts.push(...transcripts.map(firefliesTranscriptArtifact));
+    if (transcripts.length < limit) break;
+  }
+  return artifacts.slice(0, PROVIDER_BACKFILL_MAX_ARTIFACTS);
+}
+
 export async function runMeetingTranscriptSourceBackfill(actor: AppActor, params: {
   workspaceId: string;
   provider: MeetingTranscriptSourceProvider | string;
@@ -1387,26 +1715,56 @@ export async function runMeetingTranscriptSourceBackfill(actor: AppActor, params
     where: { workspaceId_provider: { workspaceId: params.workspaceId, provider } },
   });
   invariant(connection, 404, "NOT_FOUND", "Meeting transcript source is not connected.");
-  const batch = await prisma.meetingTranscriptImportBatch.create({
-    data: {
+  if (provider !== "FATHOM" && provider !== "FIREFLIES") {
+    const error = provider === "READ_AI"
+      ? "Read.ai automatic historical import is deferred until the OAuth/API milestone. Upload a Read.ai JSON, TXT, or ZIP export for historical meetings."
+      : "Automatic historical backfill is not enabled for this provider yet. Upload the provider export ZIP for first-batch processing.";
+    const batch = await createProviderBackfillBatch({
       workspaceId: params.workspaceId,
       connectionId: connection.id,
       provider,
-      sourceKind: "provider_backfill",
       status: "FAILED",
-      startedAt: new Date(),
-      finishedAt: new Date(),
-      error: "Automatic historical backfill is not enabled for this provider yet. Upload the provider export ZIP for first-batch processing.",
-    },
-  });
-  await prisma.meetingTranscriptSourceConnection.update({
-    where: { id: connection.id },
-    data: {
-      lastBackfillAt: new Date(),
-      lastError: batch.error,
-    },
-  });
-  return { batch };
+      error,
+    });
+    await finishProviderBackfillConnection({ connectionId: connection.id, error });
+    return { batch };
+  }
+  try {
+    const artifacts = provider === "FATHOM"
+      ? await fetchFathomBackfillArtifacts(connection)
+      : await fetchFirefliesBackfillArtifacts(connection);
+    if (artifacts.length === 0) {
+      const batch = await createProviderBackfillBatch({
+        workspaceId: params.workspaceId,
+        connectionId: connection.id,
+        provider,
+        status: "COMPLETED",
+      });
+      await finishProviderBackfillConnection({ connectionId: connection.id });
+      return { batch };
+    }
+    const result = await importMeetingTranscriptSourceArtifacts(actor, {
+      workspaceId: params.workspaceId,
+      provider,
+      connectionId: connection.id,
+      sourceKind: "provider_backfill",
+      artifacts,
+    });
+    const error = result.batch.status === "FAILED" ? result.batch.error : null;
+    await finishProviderBackfillConnection({ connectionId: connection.id, error });
+    return { batch: result.batch };
+  } catch (error) {
+    const message = providerErrorMessage(error, "Provider backfill failed.");
+    const batch = await createProviderBackfillBatch({
+      workspaceId: params.workspaceId,
+      connectionId: connection.id,
+      provider,
+      status: "FAILED",
+      error: message,
+    });
+    await finishProviderBackfillConnection({ connectionId: connection.id, error: message });
+    return { batch };
+  }
 }
 
 export async function listMeetingTranscriptSourceState(actor: AppActor, workspaceId: string) {
@@ -1492,6 +1850,31 @@ function safeEqual(left: string, right: string) {
   return leftBuffer.length === rightBuffer.length && timingSafeEqual(leftBuffer, rightBuffer);
 }
 
+function verifyFathomWebhookSignature(params: {
+  rawBody: string;
+  header: (name: string) => string | null;
+  secret: string;
+}) {
+  const webhookId = params.header("webhook-id")?.trim();
+  const webhookTimestamp = params.header("webhook-timestamp")?.trim();
+  const webhookSignature = params.header("webhook-signature")?.trim();
+  if (!webhookId || !webhookTimestamp || !webhookSignature || !params.secret.trim()) return false;
+  const timestamp = Number(webhookTimestamp);
+  if (!Number.isFinite(timestamp) || Math.abs(Math.floor(Date.now() / 1000) - timestamp) > 300) return false;
+  const secretSuffix = params.secret.trim().startsWith("whsec_")
+    ? params.secret.trim().slice("whsec_".length)
+    : params.secret.trim();
+  const secretBytes = Buffer.from(secretSuffix, "base64");
+  if (secretBytes.length === 0) return false;
+  const expected = createHmac("sha256", secretBytes)
+    .update(`${webhookId}.${webhookTimestamp}.${params.rawBody}`)
+    .digest("base64");
+  return webhookSignature
+    .split(" ")
+    .map((signature) => signature.includes(",") ? signature.split(",").at(-1) ?? "" : signature)
+    .some((signature) => safeEqual(expected, signature.trim()));
+}
+
 export function verifyMeetingTranscriptWebhookSignature(params: {
   provider: MeetingTranscriptSourceProvider | string;
   rawBody: string;
@@ -1512,11 +1895,16 @@ export function verifyMeetingTranscriptWebhookSignature(params: {
     const expected = createHmac("sha256", keyBytes).update(params.rawBody).digest("hex");
     return safeEqual(expected, actual);
   }
+  if (provider === "FATHOM") {
+    return verifyFathomWebhookSignature({
+      rawBody: params.rawBody,
+      header,
+      secret: params.secret,
+    });
+  }
   const headerNames = provider === "FIREFLIES"
-    ? ["x-fireflies-signature", "x-hub-signature-256", "x-webhook-signature"]
-    : provider === "FATHOM"
-      ? ["x-fathom-signature", "x-webhook-signature", "x-hub-signature-256"]
-      : ["x-webhook-signature", "x-hub-signature-256"];
+    ? ["x-fireflies-signature", "x-hub-signature", "x-hub-signature-256", "x-webhook-signature"]
+    : ["x-webhook-signature", "x-hub-signature-256"];
   const actual = headerNames.map(header).find(Boolean)?.trim();
   if (!actual || !params.secret.trim()) return false;
   return signatures(params.rawBody, params.secret.trim()).some((expected) => safeEqual(expected, actual));
@@ -1551,9 +1939,12 @@ function webhookArtifactFromPayload(provider: MeetingTranscriptSourceProvider, p
     json: sourceJson,
     externalId: asString(source.transcript_id)
       ?? asString(source.transcriptId)
+      ?? asString(source.meeting_id)
+      ?? asString(source.meetingId)
       ?? asString(transcript.id)
       ?? asString(source.recording_id)
       ?? asString(source.recordingId)
+      ?? (asNumber(source.recording_id) != null ? String(asNumber(source.recording_id)) : null)
       ?? asString(recording.id)
       ?? asString(meeting.id)
       ?? asString(source.id),
@@ -1562,10 +1953,15 @@ function webhookArtifactFromPayload(provider: MeetingTranscriptSourceProvider, p
       ?? asDate(source.recorded_at)
       ?? asDate(source.date)
       ?? asDate(source.started_at)
+      ?? asDate(source.recording_start_time)
+      ?? asDate(source.scheduled_start_time)
+      ?? asDate(source.created_at)
+      ?? asDate(source.timestamp)
       ?? asDate(recording.started_at)
       ?? asDate(meeting.start_time),
-    sourceUpdatedAt: asDate(source.updatedAt) ?? asDate(source.updated_at) ?? new Date(),
-    sourceUrl: asString(source.url) ?? asString(source.transcript_url),
+    sourceUpdatedAt: asDate(source.updatedAt) ?? asDate(source.updated_at) ?? asDate(source.recording_end_time) ?? new Date(),
+    sourceUrl: asString(source.url) ?? asString(source.share_url) ?? asString(source.transcript_url),
+    meetingUrl: asString(source.meeting_url) ?? asString(source.meeting_link),
     text: asString(source.transcript_text)
       ?? asString(source.text)
       ?? asString(transcript.transcript_text)
@@ -1577,7 +1973,7 @@ function webhookArtifactFromPayload(provider: MeetingTranscriptSourceProvider, p
   };
 }
 
-async function fetchProviderTranscriptArtifact(connection: { provider: MeetingTranscriptSourceProvider; apiKeyEnc: string | null }, payloadArtifact: MeetingTranscriptSourceArtifact) {
+async function fetchProviderTranscriptArtifact(connection: TranscriptSourceConnectionForProviderApi, payloadArtifact: MeetingTranscriptSourceArtifact) {
   if (payloadArtifact.text || payloadArtifact.json && (asArray(asRecord(payloadArtifact.json).sentences).length > 0 || asArray(asRecord(payloadArtifact.json).segments).length > 0)) {
     return payloadArtifact;
   }
@@ -1602,10 +1998,17 @@ async function fetchProviderTranscriptArtifact(connection: { provider: MeetingTr
   }
   if (connection.provider === "FATHOM") {
     const response = await fetch(`https://api.fathom.ai/external/v1/recordings/${encodeURIComponent(payloadArtifact.externalId)}/transcript`, {
-      headers: { authorization: `Bearer ${apiKey}` },
+      headers: { "X-Api-Key": apiKey },
     });
     if (response.ok) {
-      return { ...payloadArtifact, json: await response.json() };
+      const body = await response.json() as Record<string, unknown>;
+      return {
+        ...payloadArtifact,
+        json: {
+          ...asRecord(payloadArtifact.json),
+          ...body,
+        },
+      };
     }
   }
   return payloadArtifact;

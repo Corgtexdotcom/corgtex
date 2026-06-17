@@ -57,7 +57,7 @@ function ToolsMovedPanel({ workspaceId, compact = false }: { workspaceId: string
         <a className="button secondary small" href={toolsHref(workspaceId, "?type=CONNECTOR")}>Connectors</a>
         <a className="button secondary small" href={toolsHref(workspaceId, "?type=DATA_SOURCE")}>Data sources</a>
         <a className="button secondary small" href={toolsHref(workspaceId, "?type=TOOL&q=webhooks")}>Webhooks</a>
-        {!compact && <a className="button secondary small" href={toolsHref(workspaceId, "?type=TOOL&q=meeting%20recorder")}>Meeting recorder</a>}
+        {!compact && <a className="button secondary small" href={toolsHref(workspaceId, "?type=TOOL&q=meeting%20transcripts")}>Meeting transcripts</a>}
       </div>
     </section>
   );

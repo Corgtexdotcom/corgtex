@@ -186,9 +186,10 @@ export default async function CatalogItemPage({
   } else if (item.sourceType === "MCP_CONNECTOR") {
     setupPanel = <ExternalConnectorReadinessPanel item={item} />;
   } else if (item.sourceType === "MEETING_RECORDER") {
-    const [recorderConfig, transcriptSources] = featureFlags.MEETING_RECORDERS
+    const transcriptSourcesEnabled = featureFlags.MEETING_TRANSCRIPT_SOURCES || featureFlags.MEETING_RECORDERS;
+    const [recorderConfig, transcriptSources] = transcriptSourcesEnabled
       ? await Promise.all([
-        getMeetingRecorderConfig(actor, workspaceId).catch(() => null),
+        featureFlags.MEETING_RECORDERS ? getMeetingRecorderConfig(actor, workspaceId).catch(() => null) : Promise.resolve(null),
         listMeetingTranscriptSourceState(actor, workspaceId).catch(() => null),
       ])
       : [null, null] as const;
