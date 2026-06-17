@@ -94,6 +94,49 @@ describe("agent-config", () => {
   });
 
   describe("listAgentConfigs", () => {
+    it("defaults company-understanding goal generation to automatic apply mode", async () => {
+      const { prisma } = await import("@corgtex/shared");
+      const { listAgentConfigs } = await import("./agent-config");
+
+      vi.mocked(prisma.workspaceAgentConfig.findMany).mockResolvedValue([]);
+
+      const configs = await listAgentConfigs(
+        { kind: "user", user: { id: "u-1" } } as any,
+        "ws-1",
+      );
+      const companyUnderstandingConfig = configs.find((config) => config.agentKey === "company-understanding");
+
+      expect(companyUnderstandingConfig?.configJson).toMatchObject({
+        goalApplyMode: "AUTO",
+      });
+    });
+
+    it("normalizes invalid company-understanding goal apply mode to automatic", async () => {
+      const { prisma } = await import("@corgtex/shared");
+      const { listAgentConfigs } = await import("./agent-config");
+
+      vi.mocked(prisma.workspaceAgentConfig.findMany).mockResolvedValue([{
+        workspaceId: "ws-1",
+        agentKey: "company-understanding",
+        enabled: true,
+        modelOverride: null,
+        governancePolicy: null,
+        configJson: { goalApplyMode: "REVIEW_QUEUE" },
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      } as any]);
+
+      const configs = await listAgentConfigs(
+        { kind: "user", user: { id: "u-1" } } as any,
+        "ws-1",
+      );
+      const companyUnderstandingConfig = configs.find((config) => config.agentKey === "company-understanding");
+
+      expect(companyUnderstandingConfig?.configJson).toMatchObject({
+        goalApplyMode: "AUTO",
+      });
+    });
+
     it("defaults Slack proactive timing to 24 hour ask, 24 hour action, and 72 hour follow-up", async () => {
       const { prisma } = await import("@corgtex/shared");
       const { listAgentConfigs } = await import("./agent-config");
@@ -252,6 +295,53 @@ describe("agent-config", () => {
         }),
         update: {
           configJson: { existing: true, newspaperCadence: "OFF" },
+        },
+      }));
+    });
+  });
+
+  describe("company-understanding goal apply mode", () => {
+    it("defaults to automatic when unset", async () => {
+      const { prisma } = await import("@corgtex/shared");
+      const { getCompanyUnderstandingGoalApplyMode } = await import("./agent-config");
+
+      vi.mocked(prisma.workspaceAgentConfig.findUnique).mockResolvedValue(null);
+
+      await expect(getCompanyUnderstandingGoalApplyMode("ws-1")).resolves.toBe("AUTO");
+    });
+
+    it("reads manual mode from config", async () => {
+      const { prisma } = await import("@corgtex/shared");
+      const { getCompanyUnderstandingGoalApplyMode } = await import("./agent-config");
+
+      vi.mocked(prisma.workspaceAgentConfig.findUnique).mockResolvedValue({
+        configJson: { goalApplyMode: "MANUAL" },
+      } as any);
+
+      await expect(getCompanyUnderstandingGoalApplyMode("ws-1")).resolves.toBe("MANUAL");
+    });
+
+    it("merges the goal apply mode into the company-understanding config", async () => {
+      const { prisma } = await import("@corgtex/shared");
+      const { updateCompanyUnderstandingGoalApplyMode } = await import("./agent-config");
+
+      vi.mocked(prisma.workspaceAgentConfig.findUnique).mockResolvedValue({
+        configJson: { existing: true },
+      } as any);
+      vi.mocked(prisma.workspaceAgentConfig.upsert).mockResolvedValue({} as any);
+
+      await updateCompanyUnderstandingGoalApplyMode(
+        { kind: "user", user: { id: "u-1" } } as any,
+        { workspaceId: "ws-1", mode: "MANUAL" },
+      );
+
+      expect(prisma.workspaceAgentConfig.upsert).toHaveBeenCalledWith(expect.objectContaining({
+        where: { workspaceId_agentKey: { workspaceId: "ws-1", agentKey: "company-understanding" } },
+        create: expect.objectContaining({
+          configJson: { existing: true, goalApplyMode: "MANUAL" },
+        }),
+        update: {
+          configJson: { existing: true, goalApplyMode: "MANUAL" },
         },
       }));
     });

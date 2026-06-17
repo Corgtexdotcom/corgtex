@@ -23,6 +23,9 @@ export type AgentConfigSummary = {
 
 export const DEFAULT_NEWSPAPER_CADENCE: NewspaperCadence = "DAILY";
 const NEWSPAPER_CADENCES = new Set<NewspaperCadence>(["DAILY", "WEEKLY", "OFF"]);
+export type CompanyUnderstandingGoalApplyMode = "AUTO" | "MANUAL";
+export const DEFAULT_COMPANY_UNDERSTANDING_GOAL_APPLY_MODE: CompanyUnderstandingGoalApplyMode = "AUTO";
+const COMPANY_UNDERSTANDING_GOAL_APPLY_MODES = new Set<CompanyUnderstandingGoalApplyMode>(["AUTO", "MANUAL"]);
 const DEFAULT_SLACK_AGENT_CONFIG = {
   publicIngestionEnabled: true,
   rawMessageRetentionDays: 3650,
@@ -44,11 +47,23 @@ export function normalizeNewspaperCadence(value: unknown, fallback: NewspaperCad
     : fallback;
 }
 
+export function normalizeCompanyUnderstandingGoalApplyMode(
+  value: unknown,
+  fallback: CompanyUnderstandingGoalApplyMode = DEFAULT_COMPANY_UNDERSTANDING_GOAL_APPLY_MODE,
+): CompanyUnderstandingGoalApplyMode {
+  return typeof value === "string" && COMPANY_UNDERSTANDING_GOAL_APPLY_MODES.has(value as CompanyUnderstandingGoalApplyMode)
+    ? value as CompanyUnderstandingGoalApplyMode
+    : fallback;
+}
+
 function normalizeAgentConfigJson(agentKey: string, configJson: unknown): Prisma.InputJsonObject {
   const config = isRecord(configJson) ? { ...configJson } : {};
 
   if (agentKey === "daily-digest" && "newspaperCadence" in config) {
     config.newspaperCadence = normalizeNewspaperCadence(config.newspaperCadence);
+  }
+  if (agentKey === "company-understanding") {
+    config.goalApplyMode = normalizeCompanyUnderstandingGoalApplyMode(config.goalApplyMode);
   }
   if (agentKey === "slack-agent") {
     const mutedChannelIds = Array.isArray(config.mutedChannelIds)
@@ -78,6 +93,9 @@ function normalizeAgentConfigJson(agentKey: string, configJson: unknown): Prisma
 
 function defaultConfigJson(agentKey: string) {
   if (agentKey === "slack-agent") return DEFAULT_SLACK_AGENT_CONFIG;
+  if (agentKey === "company-understanding") {
+    return { goalApplyMode: DEFAULT_COMPANY_UNDERSTANDING_GOAL_APPLY_MODE };
+  }
   return {};
 }
 
@@ -178,6 +196,21 @@ export async function getWorkspaceNewspaperCadence(workspaceId: string): Promise
   return normalizeNewspaperCadence(isRecord(config?.configJson) ? config.configJson.newspaperCadence : undefined);
 }
 
+export async function getCompanyUnderstandingGoalApplyMode(
+  workspaceId: string,
+): Promise<CompanyUnderstandingGoalApplyMode> {
+  const config = await prisma.workspaceAgentConfig.findUnique({
+    where: {
+      workspaceId_agentKey: { workspaceId, agentKey: "company-understanding" },
+    },
+    select: { configJson: true },
+  });
+
+  return normalizeCompanyUnderstandingGoalApplyMode(
+    isRecord(config?.configJson) ? config.configJson.goalApplyMode : undefined,
+  );
+}
+
 export type WorkspaceDigestSetting = {
   enabled: boolean;
   cadence: NewspaperCadence;
@@ -254,6 +287,51 @@ export async function updateWorkspaceNewspaperCadence(
     create: {
       workspaceId: params.workspaceId,
       agentKey: "daily-digest",
+      enabled: true,
+      modelOverride: null,
+      governancePolicy: null,
+      configJson,
+    },
+    update: {
+      configJson,
+    },
+  });
+}
+
+export async function updateCompanyUnderstandingGoalApplyMode(
+  actor: AppActor,
+  params: {
+    workspaceId: string;
+    mode: CompanyUnderstandingGoalApplyMode;
+  },
+) {
+  await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId, allowedRoles: ["ADMIN"] });
+
+  const mode = normalizeCompanyUnderstandingGoalApplyMode(params.mode);
+  const existing = await prisma.workspaceAgentConfig.findUnique({
+    where: {
+      workspaceId_agentKey: { workspaceId: params.workspaceId, agentKey: "company-understanding" },
+    },
+    select: { configJson: true },
+  });
+  const currentConfig = isRecord(existing?.configJson)
+    ? existing.configJson as Prisma.InputJsonObject
+    : {};
+  const configJson = toInputJson({
+    ...currentConfig,
+    goalApplyMode: mode,
+  }) as Prisma.InputJsonObject;
+
+  return prisma.workspaceAgentConfig.upsert({
+    where: {
+      workspaceId_agentKey: {
+        workspaceId: params.workspaceId,
+        agentKey: "company-understanding",
+      },
+    },
+    create: {
+      workspaceId: params.workspaceId,
+      agentKey: "company-understanding",
       enabled: true,
       modelOverride: null,
       governancePolicy: null,

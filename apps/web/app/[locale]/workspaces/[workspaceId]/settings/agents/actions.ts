@@ -2,7 +2,12 @@
 
 import { requirePageActor } from "@/lib/auth";
 import { enforceDemoGuard } from "@/lib/demo-guard";
-import { updateAgentConfig, updateWorkspaceNewspaperCadence } from "@corgtex/domain";
+import {
+  updateAgentConfig,
+  updateCompanyUnderstandingGoalApplyMode,
+  updateWorkspaceNewspaperCadence,
+  type CompanyUnderstandingGoalApplyMode,
+} from "@corgtex/domain";
 import { revalidatePath } from "next/cache";
 
 export async function toggleAgentAction(workspaceId: string, agentKey: string, enabled: boolean) {
@@ -25,6 +30,18 @@ export async function updateAgentNewspaperCadenceAction(
 
   const actor = await requirePageActor();
   await updateWorkspaceNewspaperCadence(actor, { workspaceId, cadence });
+  revalidatePath(`/workspaces/${workspaceId}/settings/agents`);
+  revalidatePath(`/workspaces/${workspaceId}/settings`);
+}
+
+export async function updateCompanyUnderstandingGoalApplyModeAction(
+  workspaceId: string,
+  mode: CompanyUnderstandingGoalApplyMode,
+) {
+  await enforceDemoGuard(workspaceId);
+
+  const actor = await requirePageActor();
+  await updateCompanyUnderstandingGoalApplyMode(actor, { workspaceId, mode });
   revalidatePath(`/workspaces/${workspaceId}/settings/agents`);
   revalidatePath(`/workspaces/${workspaceId}/settings`);
 }

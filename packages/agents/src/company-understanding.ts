@@ -10,6 +10,8 @@ import {
   createContextGraphProposedDiff,
   createGoal,
   createGoalLink,
+  getCompanyUnderstandingGoalApplyMode,
+  type CompanyUnderstandingGoalApplyMode,
   type ContextGraphDiffInput,
 } from "@corgtex/domain";
 import { executeAgentRun } from "./runtime";
@@ -17,6 +19,8 @@ import { executeAgentRun } from "./runtime";
 const HIGH_CONFIDENCE = 0.85;
 const DRAFT_CONFIDENCE = 0.65;
 const COMPANY_UNDERSTANDING_SOURCE = "company-understanding";
+const GOAL_CADENCE_ORDER: GoalCadence[] = ["TEN_YEAR", "FIVE_YEAR", "ANNUAL", "QUARTERLY", "MONTHLY", "WEEKLY"];
+const GOAL_CADENCE_RANK = new Map(GOAL_CADENCE_ORDER.map((cadence, index) => [cadence, index]));
 
 type EvidenceRef = {
   sourceType: "BrainSource" | "BrainArticle";
@@ -25,12 +29,22 @@ type EvidenceRef = {
   label?: string | null;
 };
 
+type GoalKeyResultInsight = {
+  title: string;
+  targetValue?: number | null;
+  currentValue?: number | null;
+  unit?: string | null;
+};
+
 type GoalInsight = {
   title: string;
   descriptionMd: string | null;
-  horizon: "short" | "long";
+  cadence: GoalCadence;
   confidence: number;
   evidenceRefs: EvidenceRef[];
+  keyResults: GoalKeyResultInsight[];
+  parentTitle: string | null;
+  parentCadence: GoalCadence | null;
 };
 
 type QuestionInsight = {
@@ -130,20 +144,90 @@ function normalizeEvidence(value: unknown, fallbackSourceId?: string | null): Ev
   });
 }
 
-function normalizeHorizon(value: unknown) {
+export function normalizeCompanyUnderstandingGoalCadence(value: unknown, fallback: GoalCadence = "QUARTERLY"): GoalCadence {
   const text = asString(value).toLowerCase();
-  if (text.includes("long") || text.includes("strategy") || text.includes("annual") || text.includes("year")) {
-    return "long" as const;
+  if (!text) return fallback;
+
+  const compact = text.replace(/[^a-z0-9]/g, "");
+  if (
+    compact === "tenyear"
+    || compact === "10year"
+    || compact === "10y"
+    || compact === "teny"
+    || text.includes("10 year")
+    || text.includes("ten year")
+  ) {
+    return "TEN_YEAR";
   }
-  return "short" as const;
+  if (
+    compact === "fiveyear"
+    || compact === "5year"
+    || compact === "5y"
+    || compact === "fivey"
+    || text.includes("5 year")
+    || text.includes("five year")
+  ) {
+    return "FIVE_YEAR";
+  }
+  if (compact === "annual" || compact === "yearly" || compact === "oneyear" || text.includes("annual") || text.includes("year")) {
+    return "ANNUAL";
+  }
+  if (compact === "quarterly" || compact === "quarter" || compact === "qtr" || text.includes("quarter")) {
+    return "QUARTERLY";
+  }
+  if (compact === "monthly" || compact === "month" || text.includes("month")) {
+    return "MONTHLY";
+  }
+  if (compact === "weekly" || compact === "week" || text.includes("week")) {
+    return "WEEKLY";
+  }
+  if (text.includes("north star") || text.includes("mission") || text.includes("market position")) {
+    return "TEN_YEAR";
+  }
+  if (text.includes("capability") || text.includes("portfolio")) {
+    return "FIVE_YEAR";
+  }
+  if (text.includes("long") || text.includes("strategy")) {
+    return "ANNUAL";
+  }
+  if (text.includes("decision") || text.includes("action") || text.includes("short")) {
+    return "WEEKLY";
+  }
+  return fallback;
 }
 
-function goalCadenceForHorizon(goal: GoalInsight): GoalCadence {
-  return goal.horizon === "long" ? "ANNUAL" : "QUARTERLY";
+function normalizeOptionalGoalCadence(value: unknown): GoalCadence | null {
+  const text = asString(value);
+  return text ? normalizeCompanyUnderstandingGoalCadence(text) : null;
 }
 
-function goalStatusForConfidence(confidence: number): GoalStatus {
+function goalStatusForConfidence(confidence: number, applyMode: CompanyUnderstandingGoalApplyMode): GoalStatus {
+  if (applyMode === "MANUAL") return "DRAFT";
   return confidence >= HIGH_CONFIDENCE ? "ACTIVE" : "DRAFT";
+}
+
+function normalizeOptionalNumber(value: unknown) {
+  if (value === null || value === undefined || value === "") return null;
+  const numeric = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(numeric) ? numeric : null;
+}
+
+function normalizeGoalKeyResults(value: unknown): GoalKeyResultInsight[] {
+  const entries = Array.isArray(value) ? value : [];
+  return entries
+    .map((entry): GoalKeyResultInsight | null => {
+      if (!isRecord(entry)) return null;
+      const title = asString(entry.title) || asString(entry.name) || asString(entry.metric);
+      if (!title) return null;
+      return {
+        title,
+        targetValue: normalizeOptionalNumber(entry.targetValue ?? entry.target ?? entry.targetNumber),
+        currentValue: normalizeOptionalNumber(entry.currentValue ?? entry.current ?? entry.baseline),
+        unit: asString(entry.unit) || null,
+      };
+    })
+    .filter((entry): entry is GoalKeyResultInsight => Boolean(entry))
+    .slice(0, 5);
 }
 
 function normalizeQuestion(entry: unknown, fallbackSourceId?: string | null): QuestionInsight | null {
@@ -231,9 +315,12 @@ export function normalizeCompanyUnderstandingOutput(output: unknown, fallbackSou
         return {
           title,
           descriptionMd: asString(entry.descriptionMd) || asString(entry.summary) || null,
-          horizon: normalizeHorizon(entry.horizon ?? entry.goalType),
+          cadence: normalizeCompanyUnderstandingGoalCadence(entry.cadence ?? entry.cadenceLabel ?? entry.horizon ?? entry.goalType),
           confidence: clampConfidence(entry.confidence),
           evidenceRefs: normalizeEvidence(entry.evidenceRefs, fallbackSourceId),
+          keyResults: normalizeGoalKeyResults(entry.keyResults ?? entry.keyResultCandidates ?? entry.metrics),
+          parentTitle: asString(entry.parentTitle) || asString(entry.parentGoalTitle) || null,
+          parentCadence: normalizeOptionalGoalCadence(entry.parentCadence ?? entry.parentGoalCadence),
         } satisfies GoalInsight;
       })
       .filter((entry): entry is GoalInsight => Boolean(entry)),
@@ -325,13 +412,85 @@ async function linkGoalEvidence(actor: AppActor, workspaceId: string, goalId: st
   }
 }
 
-async function applyGoalInsight(actor: AppActor, workspaceId: string, goal: GoalInsight, agentRunId: string, questionMemberId: string | null) {
-  const existingGoals = await prisma.goal.findMany({
-    where: { workspaceId, archivedAt: null },
-    select: { id: true, title: true },
-    take: 200,
+type GoalIndexEntry = {
+  id: string;
+  title: string;
+  cadence: GoalCadence;
+  status: GoalStatus;
+  parentGoalId: string | null;
+  generatedByCompanyUnderstanding: boolean;
+};
+
+type GoalIndex = {
+  byCadenceTitle: Map<string, GoalIndexEntry>;
+  byTitle: Map<string, GoalIndexEntry[]>;
+};
+
+function goalIndexKey(cadence: GoalCadence, title: string) {
+  return `${cadence}:${normalizeTitle(title)}`;
+}
+
+function addGoalIndexEntry(index: GoalIndex, entry: GoalIndexEntry) {
+  index.byCadenceTitle.set(goalIndexKey(entry.cadence, entry.title), entry);
+  const titleKey = normalizeTitle(entry.title);
+  const entries = index.byTitle.get(titleKey) ?? [];
+  entries.push(entry);
+  index.byTitle.set(titleKey, entries);
+}
+
+function buildGoalIndex(existingGoals: Array<{
+  id: string;
+  title: string;
+  cadence: GoalCadence;
+  status: GoalStatus;
+  parentGoalId: string | null;
+  links?: Array<{ id: string }>;
+}>): GoalIndex {
+  const index: GoalIndex = {
+    byCadenceTitle: new Map(),
+    byTitle: new Map(),
+  };
+
+  for (const goal of existingGoals) {
+    addGoalIndexEntry(index, {
+      id: goal.id,
+      title: goal.title,
+      cadence: goal.cadence,
+      status: goal.status,
+      parentGoalId: goal.parentGoalId,
+      generatedByCompanyUnderstanding: Boolean(goal.links?.length),
+    });
+  }
+
+  return index;
+}
+
+function findGoalIndexEntry(index: GoalIndex, title: string, cadence: GoalCadence | null) {
+  if (cadence) {
+    const byCadence = index.byCadenceTitle.get(goalIndexKey(cadence, title));
+    if (byCadence) return byCadence;
+  }
+  return index.byTitle.get(normalizeTitle(title))?.[0] ?? null;
+}
+
+function sortGoalsParentFirst(goals: GoalInsight[]) {
+  return [...goals].sort((a, b) => {
+    const cadenceDiff = (GOAL_CADENCE_RANK.get(a.cadence) ?? 999) - (GOAL_CADENCE_RANK.get(b.cadence) ?? 999);
+    if (cadenceDiff !== 0) return cadenceDiff;
+    return a.title.localeCompare(b.title);
   });
-  const existing = existingGoals.find((candidate) => normalizeTitle(candidate.title) === normalizeTitle(goal.title));
+}
+
+async function applyGoalInsight(
+  actor: AppActor,
+  workspaceId: string,
+  goal: GoalInsight,
+  applyMode: CompanyUnderstandingGoalApplyMode,
+  agentRunId: string,
+  questionMemberId: string | null,
+  goalIndex: GoalIndex,
+) {
+  const existing = findGoalIndexEntry(goalIndex, goal.title, goal.cadence);
 
   if (goal.confidence < DRAFT_CONFIDENCE || goal.evidenceRefs.length === 0) {
     return createQuestionIfNew(actor, workspaceId, questionMemberId, {
@@ -346,17 +505,41 @@ async function applyGoalInsight(actor: AppActor, workspaceId: string, goal: Goal
     }, { generatedFrom: "goal-low-confidence", title: goal.title });
   }
 
+  const parent = goal.parentTitle
+    ? findGoalIndexEntry(goalIndex, goal.parentTitle, goal.parentCadence)
+    : null;
+  const status = goalStatusForConfidence(goal.confidence, applyMode);
   const target = existing ?? await createGoal(actor, {
     workspaceId,
     title: goal.title,
     descriptionMd: goal.descriptionMd,
     level: "COMPANY",
-    cadence: goalCadenceForHorizon(goal),
-    status: goalStatusForConfidence(goal.confidence),
+    cadence: goal.cadence,
+    status,
+    parentGoalId: parent?.id ?? null,
+    keyResults: goal.keyResults,
   });
 
+  if (!existing) {
+    addGoalIndexEntry(goalIndex, {
+      id: target.id,
+      title: goal.title,
+      cadence: goal.cadence,
+      status,
+      parentGoalId: parent?.id ?? null,
+      generatedByCompanyUnderstanding: true,
+    });
+  }
+
   await linkGoalEvidence(actor, workspaceId, target.id, goal, agentRunId);
-  return { kind: "goal" as const, created: !existing, updated: Boolean(existing), id: target.id, status: goalStatusForConfidence(goal.confidence) };
+  return {
+    kind: "goal" as const,
+    created: !existing,
+    updated: Boolean(existing),
+    id: target.id,
+    status: existing?.status ?? status,
+    generatedByCompanyUnderstanding: existing?.generatedByCompanyUnderstanding ?? true,
+  };
 }
 
 function mapQuestionForProposal(proposal: MapProposalInsight): QuestionInsight {
@@ -473,9 +656,20 @@ export async function runCompanyUnderstandingSynthesis(params: {
   const existingGoals = await prisma.goal.findMany({
     where: { workspaceId: params.workspaceId, archivedAt: null },
     orderBy: { updatedAt: "desc" },
-    take: 50,
-    select: { title: true, status: true, cadence: true },
+    take: 200,
+    select: {
+      id: true,
+      title: true,
+      status: true,
+      cadence: true,
+      parentGoalId: true,
+      links: {
+        where: { source: COMPANY_UNDERSTANDING_SOURCE },
+        select: { id: true },
+      },
+    },
   });
+  const goalApplyMode = await getCompanyUnderstandingGoalApplyMode(params.workspaceId);
 
   const extraction = await defaultModelGateway.extract({
     model: params.model,
@@ -484,20 +678,31 @@ export async function runCompanyUnderstandingSynthesis(params: {
     instruction: `Synthesize absorbed Brain evidence into company understanding.
 
 Return only evidence-backed items:
-- goals: short-term decisions/quarterly goals and long-term strategy/annual goals
+- goals: company goals for the explicit cadence ladder: TEN_YEAR, FIVE_YEAR, ANNUAL, QUARTERLY, MONTHLY, WEEKLY
 - openQuestions and missingEvidence: questions employees can answer, including upload requests
 - mapProposals: proposal-first facts for org, critical-path, and agent-governance context maps
 
+Goal cadence guidance:
+- TEN_YEAR: durable north-star direction, mission, market position, or major strategic bet. Avoid detailed execution tasks.
+- FIVE_YEAR: strategic capability or portfolio outcome that makes the TEN_YEAR direction plausible.
+- ANNUAL: annual strategic objective, suitable for Hoshin/OKR-style alignment.
+- QUARTERLY: outcome-focused operating priority with measurable key results.
+- MONTHLY: near-term milestone, blocker resolution, decision package, or focused delivery commitment.
+- WEEKLY: concrete immediate commitment, decision, owner follow-up, or action-level objective.
+
 Rules:
 - Every goal and map proposal must cite BrainSource or BrainArticle evidenceRefs.
+- Do not invent missing strategy layers. If evidence is missing for a cadence, create a question instead of filling the gap.
+- Prefer specific, challenging, measurable goals with feedback signals.
+- Weekly and monthly goals should include parentTitle and parentCadence hints to a quarterly goal when evidence supports the parent.
+- Do not suggest overwriting existing manual goal content. Avoid duplicates of existing goals.
 - Do not invent map nodes. If evidence is insufficient, create a question instead.
 - Confidence is 0 to 1.
 - High confidence is >= 0.85, draft/proposal confidence is 0.65-0.84, below 0.65 should become a question.
-- Avoid duplicates of existing goals.
 
 Expected JSON shape:
 {
-  "goals": [{"title":"", "summary":"", "horizon":"short|long", "confidence":0.0, "evidenceRefs":[{"sourceType":"BrainSource|BrainArticle","sourceId":"","quote":""}]}],
+  "goals": [{"title":"", "summary":"", "cadence":"TEN_YEAR|FIVE_YEAR|ANNUAL|QUARTERLY|MONTHLY|WEEKLY", "confidence":0.0, "evidenceRefs":[{"sourceType":"BrainSource|BrainArticle","sourceId":"","quote":""}], "keyResults":[{"title":"", "currentValue":0, "targetValue":0, "unit":""}], "parentTitle":"", "parentCadence":"TEN_YEAR|FIVE_YEAR|ANNUAL|QUARTERLY|MONTHLY|WEEKLY"}],
   "openQuestions": [{"questionText":"", "reason":"", "priority":0, "confidence":0.0, "relatedEntityType":"BrainSource|BrainArticle", "relatedEntityId":""}],
   "missingEvidence": [{"request":"", "reason":"", "priority":0, "confidence":0.0, "relatedEntityType":"BrainSource|BrainArticle", "relatedEntityId":""}],
   "mapProposals": [{"title":"", "mapType":"org|critical-path|agent-governance", "confidence":0.0, "evidenceRefs":[{"sourceType":"BrainSource|BrainArticle","sourceId":"","quote":""}], "objects":[{"ref":"", "objectType":"Person|Team|Role|Process|ProcessStep|Project|Decision|Tool|Risk|Agent|Question|Evidence", "title":"", "summary":""}], "relationships":[{"sourceRef":"", "targetRef":"", "relationshipType":"owns|member_of|reports_to|depends_on|blocks|uses|supports|part_of|input_to|output_of", "summary":""}]}]
@@ -523,17 +728,27 @@ Expected JSON shape:
         bodyMd: article.bodyMd.slice(0, 2000),
       })),
       existingGoals,
+      goalApplyMode,
     }),
   });
 
   const normalized = normalizeCompanyUnderstandingOutput(extraction.output, params.sourceId);
   const questionMemberId = await resolveQuestionMemberId(params.workspaceId);
+  const goalIndex = buildGoalIndex(existingGoals);
   const goalResults = [];
   const questionResults = [];
   const mapResults = [];
 
-  for (const goal of normalized.goals) {
-    goalResults.push(await applyGoalInsight(actor, params.workspaceId, goal, params.agentRunId, questionMemberId));
+  for (const goal of sortGoalsParentFirst(normalized.goals)) {
+    goalResults.push(await applyGoalInsight(
+      actor,
+      params.workspaceId,
+      goal,
+      goalApplyMode,
+      params.agentRunId,
+      questionMemberId,
+      goalIndex,
+    ));
   }
   for (const question of [...normalized.questions, ...normalized.missingEvidence]) {
     questionResults.push(await createQuestionIfNew(actor, params.workspaceId, questionMemberId, question, {
@@ -553,6 +768,7 @@ Expected JSON shape:
     questions: [...questionResults, ...goalResults, ...mapResults].filter((result) => result.kind === "question" && "created" in result && result.created).length,
     mapProposals: mapResults.filter((result) => result.kind === "map-proposal" && "created" in result && result.created).length,
     lowConfidenceFallbacks: [...goalResults, ...mapResults].filter((result) => result.kind === "question").length,
+    goalApplyMode,
   };
 }
 
@@ -567,7 +783,7 @@ export async function runCompanyUnderstandingAgent(params: {
     workspaceId: params.workspaceId,
     triggerType: params.triggerType,
     triggerRef: params.triggerRef,
-    goal: "Synthesize absorbed Brain evidence into evidence-backed company goals, questions, and context-map proposals.",
+    goal: "Synthesize absorbed Brain evidence into evidence-backed company goals across the full cadence ladder, questions, and context-map proposals.",
     payload: { sourceId: params.sourceId ?? null },
     plan: ["load-brain-evidence", "extract-company-understanding", "apply-thresholds", "persist-goals-questions-map-proposals"],
     buildContext: async (helpers) =>

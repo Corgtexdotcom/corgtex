@@ -1,8 +1,13 @@
 "use client";
 
 import { useTransition } from"react";
-import { toggleAgentAction, updateAgentModelAction, updateAgentNewspaperCadenceAction } from"./actions";
-import type { AgentConfigSummary } from"@corgtex/domain";
+import {
+ toggleAgentAction,
+ updateAgentModelAction,
+ updateAgentNewspaperCadenceAction,
+ updateCompanyUnderstandingGoalApplyModeAction,
+} from"./actions";
+import type { AgentConfigSummary, CompanyUnderstandingGoalApplyMode } from"@corgtex/domain";
 import { useTranslations } from "next-intl";
 
 export function AgentSettingsClient({ workspaceId, agents }: { workspaceId: string, agents: AgentConfigSummary[] }) {
@@ -24,6 +29,13 @@ export function AgentSettingsClient({ workspaceId, agents }: { workspaceId: stri
  const handleNewspaperCadenceChange = (cadence: string) => {
  startTransition(() => {
  updateAgentNewspaperCadenceAction(workspaceId, cadence ==="WEEKLY" ?"WEEKLY" : cadence ==="OFF" ?"OFF" :"DAILY");
+ });
+ };
+
+ const handleGoalApplyModeChange = (mode: string) => {
+ startTransition(() => {
+ const normalized: CompanyUnderstandingGoalApplyMode = mode ==="MANUAL" ?"MANUAL" :"AUTO";
+ updateCompanyUnderstandingGoalApplyModeAction(workspaceId, normalized);
  });
  };
 
@@ -126,6 +138,26 @@ export function AgentSettingsClient({ workspaceId, agents }: { workspaceId: stri
  </select>
  <p className="text-xs text-muted max-w-56 text-left lg:text-right">
  {t("newspaperCadenceAdminHelp")}
+ </p>
+ </div>
+ )}
+
+ {agent.agentKey ==="company-understanding" && (
+ <div className="flex flex-col items-start lg:items-end gap-2">
+ <label className="text-sm font-medium text-text">
+ {t("lblGoalApplyMode")}
+ </label>
+ <select
+ disabled={isPending}
+ value={agent.configJson?.goalApplyMode ==="MANUAL" ?"MANUAL" :"AUTO"}
+ onChange={(e) => handleGoalApplyModeChange(e.target.value)}
+ className="text-sm border border-line rounded-md bg-surface-strong text-text py-1.5 px-3 disabled:opacity-50"
+ >
+ <option value="AUTO">{t("goalApplyModeAuto")}</option>
+ <option value="MANUAL">{t("goalApplyModeManual")}</option>
+ </select>
+ <p className="text-xs text-muted max-w-64 text-left lg:text-right">
+ {t("goalApplyModeHelp")}
  </p>
  </div>
  )}
