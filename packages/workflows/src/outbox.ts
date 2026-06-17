@@ -2,6 +2,7 @@ import type { EventStatus, NewspaperCadence, Prisma, WorkflowJobStatus } from "@
 import { logger, prisma } from "@corgtex/shared";
 import { deriveJobsForEvent } from "./derive-jobs";
 import { deriveNotificationsForEvent } from "./derive-notifications";
+import { recordWorkflowJobProcessedMetric } from "./job-metrics";
 import { handleKnowledgeSync, handleMeetingKnowledgeSync, handleDocumentKnowledgeSync, handleEventKnowledgeSync, handleTensionKnowledgeSync, handleActionKnowledgeSync, handleCircleKnowledgeSync, handleRoleKnowledgeSync, handleSlackMessageKnowledgeSync, handleCalendarSync, handleOAuthDocumentsSync, handleOAuthEmailSync, handleContextGraphSync, handleContextGraphStalenessSweep, handleContextGraphReconcile } from "./handlers";
 import { handleGovernanceScoring } from "./handlers";
 import { runAgentWorkflowJob } from "./handlers";
@@ -845,22 +846,30 @@ export async function runPendingJobs(workerId: string, batchSize = DEFAULT_BATCH
 
     // Emit per-job timing outside the try/catch so a logging error can never be
     // mistaken for a job failure (and a completed job re-marked as failed).
+    const durationMs = Date.now() - startedAt;
+    const outcome = failed ? "failed" : "completed";
+    recordWorkflowJobProcessedMetric({
+      type: job.type,
+      outcome,
+      durationMs,
+    });
+
     const fields = {
       workerId,
       jobId: job.id,
       type: job.type,
       workspaceId: job.workspaceId,
       attempts: job.attempts,
-      durationMs: Date.now() - startedAt,
+      durationMs,
     };
     if (failed) {
       logger.warn("workflow_job_processed", {
         ...fields,
-        outcome: "failed",
+        outcome,
         error: failure instanceof Error ? failure.message : "Unknown worker error.",
       });
     } else {
-      logger.info("workflow_job_processed", { ...fields, outcome: "completed" });
+      logger.info("workflow_job_processed", { ...fields, outcome });
     }
   }
 

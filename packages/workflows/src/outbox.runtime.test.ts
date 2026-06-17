@@ -122,6 +122,7 @@ vi.mock("@corgtex/domain", () => ({
 }));
 
 import { runPendingJobs, scheduleDailyJobs, schedulePeriodicJobs } from "./outbox";
+import { resetWorkflowJobMetricsForTest, snapshotWorkflowJobMetrics } from "./job-metrics";
 
 afterEach(() => {
   vi.useRealTimers();
@@ -160,6 +161,7 @@ describe("runPendingJobs", () => {
     getWorkspaceDigestSettingsMock.mockReset().mockResolvedValue(new Map());
     loggerMock.info.mockReset();
     loggerMock.warn.mockReset();
+    resetWorkflowJobMetricsForTest();
   });
 
   it("requeues agent jobs when execution is skipped by the concurrency gate", async () => {
@@ -242,6 +244,14 @@ describe("runPendingJobs", () => {
       durationMs: expect.any(Number),
     }));
     expect(loggerMock.warn).not.toHaveBeenCalled();
+    expect(snapshotWorkflowJobMetrics()).toEqual([
+      expect.objectContaining({
+        type: "communication.slack.event",
+        outcome: "completed",
+        count: 1,
+        durationMsSum: expect.any(Number),
+      }),
+    ]);
   });
 
   it("logs per-job timing and a failed outcome when a job throws", async () => {
@@ -267,6 +277,14 @@ describe("runPendingJobs", () => {
       durationMs: expect.any(Number),
     }));
     expect(loggerMock.info).not.toHaveBeenCalledWith("workflow_job_processed", expect.anything());
+    expect(snapshotWorkflowJobMetrics()).toEqual([
+      expect.objectContaining({
+        type: "communication.slack.event",
+        outcome: "failed",
+        count: 1,
+        durationMsSum: expect.any(Number),
+      }),
+    ]);
   });
 
   it("dispatches recorder calendar sync jobs and schedules the recurring follow-up", async () => {
