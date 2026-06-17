@@ -127,6 +127,11 @@ export type AiWorkspaceSetupCard = {
   advancedSection?: AiWorkspaceAdvancedSection;
 };
 
+export type BuildAiWorkspaceSetupCardsOptions = {
+  returnTo?: string | null;
+  includeClaudeAdvanced?: boolean;
+};
+
 const PRIMARY_PROVIDER_KEYS = ["openwork", "claude", "chatgpt", "cursor"];
 
 const GROUP_RANK: Record<AiWorkspaceProviderGroup, number> = {
@@ -272,15 +277,21 @@ export function splitAiWorkspaceProviders(providers: AiWorkspaceProviderView[]) 
   };
 }
 
+export function primaryAiWorkspaceProviders(providers: AiWorkspaceProviderView[]) {
+  return [...providers].filter(isPrimaryAiWorkspaceProvider).sort(providerDisplayComparator);
+}
+
 export function buildAiWorkspaceSetupCards(
   providers: AiWorkspaceProviderView[],
   connectorUrl: string,
   origin?: string | null,
   workspaceId?: string | null,
+  options: BuildAiWorkspaceSetupCardsOptions = {},
 ): AiWorkspaceSetupCard[] {
   const cursorLinks = buildCursorInstallLinks(connectorUrl);
   const claudeCodeCommand = buildClaudeCodeCommand(connectorUrl);
-  const claudeReturnTo = workspaceId ? `/workspaces/${workspaceId}/settings?tab=ai-workspaces&provider=claude` : null;
+  const claudeReturnTo = options.returnTo ?? (workspaceId ? `/workspaces/${workspaceId}/settings?tab=ai-workspaces&provider=claude` : null);
+  const includeClaudeAdvanced = options.includeClaudeAdvanced ?? true;
   const claudeInstallerPath = buildClaudeInstallerShareUrl(null, {
     workspaceId,
     returnTo: claudeReturnTo,
@@ -383,7 +394,7 @@ export function buildAiWorkspaceSetupCards(
           "Pro and Max users can add a custom connector directly.",
           "Team and Enterprise owners may need to add Corgtex at organization level before members can connect it.",
         ],
-        advancedSection: {
+        advancedSection: includeClaudeAdvanced ? {
           title: "Claude Code",
           description: "For technical teammates who use Claude Code from Terminal.",
           actions: [
@@ -403,7 +414,7 @@ export function buildAiWorkspaceSetupCards(
             "Authenticate Corgtex in the browser when prompted.",
           ],
           notes: ["User scope keeps Corgtex available across projects."],
-        },
+        } : undefined,
       };
     }
 

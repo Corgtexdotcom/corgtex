@@ -7,8 +7,10 @@ import { driver } from "driver.js";
 import "driver.js/dist/driver.css";
 import "../../../demo-tour-theme.css";
 import { Dialog } from "@/lib/components/Dialog";
+import type { AiWorkspaceLaunchState } from "@/lib/ai-workspace-launch";
 import { KnowledgeFileUploader } from "./KnowledgeFileUploader";
 import { GoogleDrivePicker } from "./tools/GoogleDrivePicker";
+import { OnboardingAiWorkspaceSetup } from "./OnboardingAiWorkspaceSetup";
 import { workspaceRouteMatches, workspaceStepUrl } from "./onboarding-tour-routing";
 
 const RESTART_EVENT = "corgtex:restart-self-serve-tour";
@@ -50,12 +52,18 @@ export function WorkspaceOnboardingTour({
   featureFlags,
   capabilities,
   googleDrivePicker,
+  aiWorkspaceState,
+  connectorUrl,
+  origin,
 }: {
   workspaceId: string;
   tourKey: string;
   tourVersion: string;
   initialCompletedAt: string | null;
   hasInitialKnowledge: boolean;
+  aiWorkspaceState: AiWorkspaceLaunchState;
+  connectorUrl: string;
+  origin: string;
   featureFlags?: Record<string, boolean>;
   capabilities?: {
     canManageAgentGovernance?: boolean;
@@ -433,6 +441,13 @@ export function WorkspaceOnboardingTour({
               onDone={startTour}
             />
           </section>
+
+          <OnboardingAiWorkspaceSetup
+            workspaceId={workspaceId}
+            initialState={aiWorkspaceState}
+            connectorUrl={connectorUrl}
+            origin={origin}
+          />
 
           <section className="onboarding-setup-panel stack">
             <div>

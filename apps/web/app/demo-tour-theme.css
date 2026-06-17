@@ -307,6 +307,57 @@
   margin-bottom: 0;
 }
 
+.onboarding-ai-provider-picker {
+  gap: 6px;
+}
+
+.onboarding-ai-provider-picker span {
+  color: var(--muted);
+  font-size: 0.74rem;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.onboarding-ai-provider-picker select {
+  min-height: 38px;
+  padding: 0 10px;
+}
+
+.onboarding-ai-card {
+  display: grid;
+  gap: 8px;
+}
+
+.onboarding-ai-actions {
+  gap: 8px;
+}
+
+.onboarding-ai-status {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  font-size: 0.82rem;
+  line-height: 1.4;
+  padding: 8px 10px;
+}
+
+.onboarding-ai-status-success {
+  background: var(--accent-soft);
+}
+
+.onboarding-ai-status-warning {
+  background: rgba(255, 165, 0, 0.12);
+  border-color: rgba(255, 165, 0, 0.35);
+}
+
+.onboarding-ai-status textarea {
+  font-family: monospace;
+  font-size: 0.78rem;
+  margin-top: 8px;
+  min-height: 58px;
+  resize: vertical;
+}
+
 .onboarding-drive-list {
   max-height: 220px;
   overflow: auto;

@@ -12,6 +12,7 @@ import {
   normalizeSelectedProvider,
   normalizeSelectedService,
   providerGroup,
+  primaryAiWorkspaceProviders,
   splitAiWorkspaceProviders,
   type AiWorkspaceProviderView,
   type EnterpriseServiceView,
@@ -104,6 +105,20 @@ describe("AI workspace UI helpers", () => {
     expect(groups.advanced.map((entry) => entry.key)).toEqual(["cursor"]);
     expect(split.primary.map((entry) => entry.key)).toEqual(["openwork", "claude", "chatgpt", "cursor"]);
     expect(split.advanced.map((entry) => entry.key)).toEqual(["copilot"]);
+  });
+
+  it("keeps onboarding setup limited to primary AI apps", () => {
+    const primary = primaryAiWorkspaceProviders([
+      provider({ key: "gemini", label: "Gemini CLI", category: "ADVANCED" }),
+      provider({ key: "chatgpt", label: "ChatGPT", category: "BYO" }),
+      provider({ key: "generic_mcp", label: "Generic MCP client", category: "ADVANCED" }),
+      provider({ key: "cursor", label: "Cursor", category: "ADVANCED" }),
+      provider({ key: "copilot", label: "GitHub Copilot", category: "BYO" }),
+      provider({ key: "openwork", label: "OpenWork Free", category: "DEFAULT", recommendedDefault: true }),
+      provider({ key: "claude", label: "Claude", category: "BYO" }),
+    ]);
+
+    expect(primary.map((entry) => entry.key)).toEqual(["openwork", "claude", "chatgpt", "cursor"]);
   });
 
   it("normalizes selected provider and service values from URL params", () => {
@@ -206,6 +221,36 @@ describe("AI workspace UI helpers", () => {
     expect(claudeCard.actions.find((action) => action.label === "Copy share link")).toMatchObject({
       value: "https://app.corgtex.com/install/claude?workspaceId=workspace-1&returnTo=%2Fworkspaces%2Fworkspace-1%2Fsettings%3Ftab%3Dai-workspaces%26provider%3Dclaude",
     });
+  });
+
+  it("can point Claude setup back to onboarding without exposing Settings links", () => {
+    const cards = buildAiWorkspaceSetupCards(
+      [
+        provider({ key: "openwork", label: "OpenWork Free", category: "DEFAULT", recommendedDefault: true }),
+        provider({ key: "claude", label: "Claude", category: "BYO" }),
+        provider({ key: "chatgpt", label: "ChatGPT", category: "BYO" }),
+        provider({ key: "cursor", label: "Cursor", category: "ADVANCED" }),
+      ],
+      "https://app.corgtex.com/mcp",
+      "https://app.corgtex.com",
+      "workspace-1",
+      {
+        returnTo: "/workspaces/workspace-1?onboarding=setup",
+        includeClaudeAdvanced: false,
+      },
+    );
+    const claudeCard = cards.find((card) => card.provider.key === "claude");
+    const serializedCards = JSON.stringify(cards);
+
+    expect(claudeCard?.actions[0]).toMatchObject({
+      kind: "open",
+      href: "/install/claude?workspaceId=workspace-1&returnTo=%2Fworkspaces%2Fworkspace-1%3Fonboarding%3Dsetup",
+    });
+    expect(claudeCard?.actions.find((action) => action.label === "Copy share link")).toMatchObject({
+      value: "https://app.corgtex.com/install/claude?workspaceId=workspace-1&returnTo=%2Fworkspaces%2Fworkspace-1%3Fonboarding%3Dsetup",
+    });
+    expect(claudeCard?.advancedSection).toBeUndefined();
+    expect(serializedCards).not.toContain("/settings?tab=ai-workspaces");
   });
 
   it("keeps provider guidance compact and avoids offering Copilot cloud-agent OAuth setup", () => {
