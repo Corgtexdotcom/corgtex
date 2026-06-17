@@ -3,10 +3,6 @@
 import { useMemo, useState } from "react";
 
 import {
-  aiWorkspaceLaunchUrl,
-  type AiWorkspaceLaunchConnection,
-} from "@/lib/ai-workspace-launch";
-import {
   buildAiWorkspaceSetupCards,
   enterpriseServiceHealthLabel,
   enterpriseServiceHealthTone,
@@ -36,7 +32,6 @@ type Props = {
   managedServicesEnabled: boolean;
   canRequestManagedServices: boolean;
   requestManagedServiceAction: (formData: FormData) => void | Promise<void>;
-  connections: AiWorkspaceLaunchConnection[];
   selectedProviderKey: string | null;
   selectedServiceKey: string | null;
 };
@@ -77,23 +72,6 @@ function parseRouteError(value: unknown) {
   return null;
 }
 
-function connectionStatusLabel(value: string | null | undefined) {
-  if (value === "CONNECTED") return "Connected";
-  if (value === "NEEDS_SETUP") return "Needs setup";
-  if (value === "UNHEALTHY") return "Needs attention";
-  if (value === "DISCONNECTED") return "Disconnected";
-  if (value === "REVOKED") return "Reconnect";
-  if (value === "MANAGED_EXTERNALLY") return "Managed";
-  return "Needs setup";
-}
-
-function connectionStatusTone(value: string | null | undefined): EnterpriseServiceHealthTone {
-  if (value === "CONNECTED") return "success";
-  if (value === "UNHEALTHY" || value === "DISCONNECTED" || value === "REVOKED") return "danger";
-  if (value === "MANAGED_EXTERNALLY") return "info";
-  return "warning";
-}
-
 export function AiWorkspaceManager({
   connectorUrl,
   workspaceId,
@@ -103,29 +81,15 @@ export function AiWorkspaceManager({
   managedServicesEnabled,
   canRequestManagedServices,
   requestManagedServiceAction,
-  connections: initialConnections,
   selectedProviderKey,
   selectedServiceKey,
 }: Props) {
   const cards = useMemo(() => buildAiWorkspaceSetupCards(providers, connectorUrl, origin, workspaceId), [connectorUrl, origin, providers, workspaceId]);
   const providerGroups = useMemo(() => splitAiWorkspaceProviders(providers), [providers]);
   const [activeProviderKey, setActiveProviderKey] = useState(selectedProviderKey ?? cards[0]?.provider.key ?? null);
-  const [connections, setConnections] = useState(initialConnections);
   const [isSelecting, setIsSelecting] = useState(false);
-  const [pendingConnectionAction, setPendingConnectionAction] = useState<string | null>(null);
   const [status, setStatus] = useState<ActionStatus | null>(null);
   const activeCard = cards.find((card) => card.provider.key === activeProviderKey) ?? cards[0] ?? null;
-  const listedConnections = connections
-    .map((connection) => ({
-      connection,
-      provider: providers.find((provider) => provider.key === connection.providerKey) ?? null,
-    }))
-    .filter((entry) => entry.provider)
-    .sort((a, b) =>
-      Number(b.connection.isDefault) - Number(a.connection.isDefault)
-      || Number(b.connection.healthStatus === "CONNECTED") - Number(a.connection.healthStatus === "CONNECTED")
-      || (a.provider?.shortLabel ?? "").localeCompare(b.provider?.shortLabel ?? "")
-    );
 
   const setCopyResult = (
     key: string,
@@ -191,112 +155,26 @@ export function AiWorkspaceManager({
       const response = await fetch(`/api/workspaces/${workspaceId}/ai-workspace-selection`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action: "start_setup", providerKey }),
+        body: JSON.stringify({ providerKey }),
       });
       const data = await response.json().catch(() => ({}));
       if (!response.ok) {
-        throw new Error(parseRouteError(data) ?? "Could not start setup for this AI app.");
-      }
-      if (Array.isArray((data as { connections?: unknown }).connections)) {
-        setConnections((data as { connections: AiWorkspaceLaunchConnection[] }).connections);
+        throw new Error(parseRouteError(data) ?? "Could not save the selected AI app.");
       }
       setStatus({
-        key: `${providerKey}:setup`,
-        message: `Setup started for ${nextCard.provider.shortLabel}. Follow the steps below, then verify or mark it connected.`,
+        key: `${providerKey}:selection`,
+        message: `${nextCard.provider.shortLabel} is selected. Use Connect to finish setup in that app.`,
         tone: "success",
       });
     } catch (selectionError) {
       setStatus({
-        key: `${providerKey}:setup`,
-        message: selectionError instanceof Error ? selectionError.message : "Could not start setup for this AI app.",
+        key: `${providerKey}:selection`,
+        message: selectionError instanceof Error ? selectionError.message : "Could not save the selected AI app.",
         tone: "warning",
       });
     } finally {
       setIsSelecting(false);
     }
-  };
-
-  const makeDefault = async (providerKey: string) => {
-    setPendingConnectionAction(`${providerKey}:default`);
-    setStatus(null);
-
-    try {
-      const response = await fetch(`/api/workspaces/${workspaceId}/ai-workspace-selection`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action: "make_default", providerKey }),
-      });
-      const data = await response.json().catch(() => ({}));
-      if (!response.ok) {
-        throw new Error(parseRouteError(data) ?? "Could not make this app the default.");
-      }
-      if (Array.isArray((data as { connections?: unknown }).connections)) {
-        setConnections((data as { connections: AiWorkspaceLaunchConnection[] }).connections);
-      }
-      const provider = providers.find((entry) => entry.key === providerKey);
-      setStatus({
-        key: `${providerKey}:connection`,
-        message: `${provider?.shortLabel ?? "This app"} is now shown first.`,
-        tone: "success",
-      });
-    } catch (error) {
-      setStatus({
-        key: `${providerKey}:connection`,
-        message: error instanceof Error ? error.message : "Could not make this app the default.",
-        tone: "warning",
-      });
-    } finally {
-      setPendingConnectionAction(null);
-    }
-  };
-
-  const updateConnection = async (providerKey: string, action: "verify" | "mark_connected") => {
-    setPendingConnectionAction(`${providerKey}:${action}`);
-    setStatus(null);
-
-    try {
-      const response = await fetch(`/api/workspaces/${workspaceId}/mcp-connections`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action, providerKey }),
-      });
-      const data = await response.json().catch(() => ({}));
-      if (!response.ok) {
-        throw new Error(parseRouteError(data) ?? "Could not update this connection.");
-      }
-      const state = (data as { state?: { connections?: AiWorkspaceLaunchConnection[] } }).state;
-      if (Array.isArray(state?.connections)) {
-        setConnections(state.connections);
-      }
-      const verified = Boolean((data as { verified?: unknown }).verified);
-      const message = typeof (data as { message?: unknown }).message === "string"
-        ? (data as { message: string }).message
-        : verified
-          ? "Connection marked as complete."
-          : "Connection could not be verified automatically.";
-      setStatus({
-        key: `${providerKey}:connection`,
-        message,
-        tone: verified ? "success" : "warning",
-      });
-    } catch (error) {
-      setStatus({
-        key: `${providerKey}:connection`,
-        message: error instanceof Error ? error.message : "Could not update this connection.",
-        tone: "warning",
-      });
-    } finally {
-      setPendingConnectionAction(null);
-    }
-  };
-
-  const continueSetup = (providerKey: string) => {
-    setActiveProviderKey(providerKey);
-    setStatus({
-      key: `${providerKey}:setup`,
-      message: "Use the connect button and steps below, then verify when sign-in is complete.",
-      tone: "success",
-    });
   };
 
   const renderAction = (action: AiWorkspaceSetupAction, providerKey: string) => {
@@ -365,7 +243,6 @@ export function AiWorkspaceManager({
 
   const renderStatus = (providerKey: string) => {
     if (!status || !status.key.startsWith(`${providerKey}:`)) return null;
-    if (status.key.startsWith(`${providerKey}:connection`)) return null;
 
     return (
       <div
@@ -398,120 +275,7 @@ export function AiWorkspaceManager({
     <section className="stack" style={{ gap: 22 }}>
       <div className="panel stack" style={{ border: "1px solid var(--line)", borderRadius: 8, gap: 14, padding: 18 }}>
         <div className="stack" style={{ gap: 6 }}>
-          <h2 className="nr-section-header" style={{ margin: 0 }}>Connected AI apps</h2>
-          <p className="nr-item-meta" style={{ fontSize: "0.9rem", lineHeight: 1.45, margin: 0 }}>
-            Apps listed here can use Corgtex from their own chat interface after setup is complete.
-          </p>
-        </div>
-
-        {listedConnections.length > 0 ? (
-          <div className="stack" style={{ gap: 10 }}>
-            {listedConnections.map(({ connection, provider }) => {
-              if (!provider) return null;
-              const launchUrl = aiWorkspaceLaunchUrl(provider.key);
-              const connected = connection.healthStatus === "CONNECTED";
-              const actionBusy = pendingConnectionAction?.startsWith(`${provider.key}:`);
-              const tone = connectionStatusTone(connection.healthStatus);
-
-              return (
-                <div
-                  key={provider.key}
-                  style={{
-                    alignItems: "center",
-                    border: "1px solid var(--line)",
-                    borderRadius: 8,
-                    display: "grid",
-                    gap: 12,
-                    gridTemplateColumns: "minmax(0, 1fr) auto",
-                    padding: 12,
-                  }}
-                >
-                  <div className="stack" style={{ gap: 6, minWidth: 0 }}>
-                    <div className="actions-inline" style={{ gap: 6 }}>
-                      <strong>{provider.shortLabel}</strong>
-                      <span className="tag" style={healthTagStyle(tone)}>{connectionStatusLabel(connection.healthStatus)}</span>
-                      {connection.isDefault ? <span className="tag info">Shown first</span> : null}
-                    </div>
-                    <span className="nr-item-meta" style={{ fontSize: "0.8rem" }}>
-                      {connected
-                        ? connection.connectedAt
-                          ? `Connected ${formatServiceTimestamp(connection.connectedAt)}`
-                          : "Connected"
-                        : connection.lastCheckedAt
-                          ? `Last checked ${formatServiceTimestamp(connection.lastCheckedAt)}`
-                          : "Finish setup in the AI app, then verify here."}
-                    </span>
-                  </div>
-                  <div className="actions-inline" style={{ justifyContent: "flex-end" }}>
-                    {connected && launchUrl ? (
-                      <a className="button secondary small" href={launchUrl} target="_blank" rel="noreferrer">
-                        Open
-                      </a>
-                    ) : (
-                      <button type="button" className="button secondary small" onClick={() => continueSetup(provider.key)}>
-                        Continue setup
-                      </button>
-                    )}
-                    <button
-                      type="button"
-                      className="button secondary small"
-                      disabled={actionBusy}
-                      onClick={() => void updateConnection(provider.key, "verify")}
-                    >
-                      {pendingConnectionAction === `${provider.key}:verify` ? "Checking" : "Verify"}
-                    </button>
-                    {!connected ? (
-                      <button
-                        type="button"
-                        className="button secondary small"
-                        disabled={actionBusy}
-                        onClick={() => void updateConnection(provider.key, "mark_connected")}
-                      >
-                        {pendingConnectionAction === `${provider.key}:mark_connected` ? "Saving" : "I connected it"}
-                      </button>
-                    ) : null}
-                    {!connection.isDefault ? (
-                      <button
-                        type="button"
-                        className="button secondary small"
-                        disabled={actionBusy}
-                        onClick={() => void makeDefault(provider.key)}
-                      >
-                        {pendingConnectionAction === `${provider.key}:default` ? "Saving" : "Show first"}
-                      </button>
-                    ) : null}
-                  </div>
-                  {status?.key.startsWith(`${provider.key}:connection`) ? (
-                    <div
-                      role="status"
-                      className="nr-item-meta"
-                      style={{
-                        background: status.tone === "success" ? "var(--accent-soft)" : "rgba(255, 165, 0, 0.12)",
-                        border: `1px solid ${status.tone === "success" ? "var(--line)" : "rgba(255, 165, 0, 0.35)"}`,
-                        borderRadius: 6,
-                        color: "var(--text)",
-                        fontSize: "0.82rem",
-                        gridColumn: "1 / -1",
-                        padding: "8px 10px",
-                      }}
-                    >
-                      {status.message}
-                    </div>
-                  ) : null}
-                </div>
-              );
-            })}
-          </div>
-        ) : (
-          <p className="nr-item-meta" style={{ fontSize: "0.86rem", margin: 0 }}>
-            No AI apps are connected yet. Add one below.
-          </p>
-        )}
-      </div>
-
-      <div className="panel stack" style={{ border: "1px solid var(--line)", borderRadius: 8, gap: 14, padding: 18 }}>
-        <div className="stack" style={{ gap: 6 }}>
-          <h2 className="nr-section-header" style={{ margin: 0 }}>Add AI app</h2>
+          <h2 className="nr-section-header" style={{ margin: 0 }}>Connect an AI app</h2>
           <p className="nr-item-meta" style={{ fontSize: "0.9rem", lineHeight: 1.45, margin: 0 }}>
             Choose where your team wants to work. Corgtex connects to that app and supplies company context, policies, and write-back.
           </p>
@@ -519,7 +283,7 @@ export function AiWorkspaceManager({
 
         <label className="stack" style={{ gap: 6, maxWidth: 420 }}>
           <span className="nr-item-meta" style={{ fontSize: "0.78rem", fontWeight: 700, textTransform: "uppercase" }}>
-            AI app
+            Favorite AI app
           </span>
           <select
             value={activeCard?.provider.key ?? ""}

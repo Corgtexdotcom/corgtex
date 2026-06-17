@@ -3,10 +3,9 @@ import { describe, expect, it } from "vitest";
 import { CONTROL_PLANE_WORKSPACE_FEATURE_FLAGS } from "./control-plane";
 
 /**
- * Byte-for-byte parity anchor for PR2: `CONTROL_PLANE_WORKSPACE_FEATURE_FLAGS`
- * is now derived from the Module Manifest registry. This test pins the derived
- * output to the exact list (order, labels, descriptions, defaults) that was
- * previously hand-written, proving the derivation is behavior-preserving.
+ * `CONTROL_PLANE_WORKSPACE_FEATURE_FLAGS` is derived from the Module Manifest
+ * registry. This test pins the derived output to the intended list: order,
+ * labels, descriptions, and defaults.
  */
 const EXPECTED = [
   { flag: "GOALS", label: "Goals", description: "Goal trees, recognition, and progress tracking.", defaultEnabled: true },
@@ -24,7 +23,7 @@ const EXPECTED = [
   { flag: "MEETING_CONTEXTUAL_INTELLIGENCE", label: "Context-aware meeting intelligence", description: "Use workspace context to summarize meetings and automatically update related governance records.", defaultEnabled: false },
   { flag: "CONTEXT_MAP_AI", label: "Context map AI", description: "Premium chat tools for reading, reasoning about, and applying living context map graph changes.", defaultEnabled: false },
   { flag: "SLACK_MEETING_ACTION_REVIEW", label: "Slack meeting action review", description: "Post meeting summaries and proposed action-item follow-ups to an approved Slack review surface before action creation.", defaultEnabled: false },
-  { flag: "AI_WORKSPACES", label: "AI workspaces", description: "Catalog and setup foundation for OpenWork, ChatGPT, Claude, GitHub Copilot, Gemini, Cursor, and generic MCP clients.", defaultEnabled: false },
+  { flag: "AI_WORKSPACES", label: "AI workspaces", description: "Catalog and setup foundation for OpenWork, ChatGPT, Claude, GitHub Copilot, Gemini, Cursor, and generic MCP clients.", defaultEnabled: true },
   { flag: "OPENWORK_DEFAULT", label: "OpenWork default", description: "Recommend OpenWork as the default free self-managed AI workspace.", defaultEnabled: false },
   { flag: "EXECUTION_PACKETS", label: "Execution packets", description: "Durable execution request, context packet, and result write-back plumbing.", defaultEnabled: false },
   { flag: "MANAGED_ENTERPRISE_SERVICES", label: "Managed enterprise services", description: "CORGTEX-managed service ownership, health, usage, and support escalation foundation.", defaultEnabled: false },
