@@ -1,11 +1,17 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import { prisma } from "@corgtex/shared";
 import type { AppActor } from "@corgtex/shared";
-import { postDeliberationEntry, resolveDeliberationEntry, listDeliberationEntries } from "./deliberation";
+import {
+  postDeliberationEntry,
+  resolveDeliberationEntry,
+  listDeliberationEntries,
+  listDeliberationEntriesForParents,
+} from "./deliberation";
 
 describe("deliberation", () => {
   let workspaceId: string;
   let adminActor: AppActor;
+  let adminUserId: string;
   let memberActor: AppActor;
   let memberId: string;
   let proposalId: string;
@@ -20,6 +26,7 @@ describe("deliberation", () => {
     const adminUser = await prisma.user.create({
       data: { email: `admin-${Date.now()}-${Math.random()}@test.com`, passwordHash: "x", displayName: "Admin" }
     });
+    adminUserId = adminUser.id;
     await prisma.member.create({
       data: { workspaceId, userId: adminUser.id, role: "ADMIN" }
     });
@@ -117,6 +124,58 @@ describe("deliberation", () => {
       parentId: proposalId,
     });
     expect(list.length).toBe(2);
+  });
+
+  it("lists deliberation entries for multiple parents in one grouped read", async () => {
+    const secondProposal = await prisma.proposal.create({
+      data: {
+        workspaceId,
+        authorUserId: adminUserId,
+        title: "Second Proposal",
+        bodyMd: "body",
+      }
+    });
+    const firstEntry = await postDeliberationEntry(memberActor, {
+      workspaceId,
+      parentType: "PROPOSAL",
+      parentId: proposalId,
+      entryType: "REACTION",
+      bodyMd: "First proposal reaction"
+    });
+    const secondEntry = await postDeliberationEntry(memberActor, {
+      workspaceId,
+      parentType: "PROPOSAL",
+      parentId: secondProposal.id,
+      entryType: "OBJECTION",
+      bodyMd: "Second proposal objection"
+    });
+    const laterFirstEntry = await postDeliberationEntry(adminActor, {
+      workspaceId,
+      parentType: "PROPOSAL",
+      parentId: proposalId,
+      entryType: "REACTION",
+      bodyMd: "Later first proposal reaction"
+    });
+    const entriesByParent = await listDeliberationEntriesForParents(adminActor, {
+      workspaceId,
+      parentType: "PROPOSAL",
+      parentIds: [proposalId, secondProposal.id, "missing-parent"],
+    });
+
+    expect(entriesByParent.get(proposalId)?.map((entry) => entry.id)).toEqual([firstEntry.id, laterFirstEntry.id]);
+    expect(entriesByParent.get(secondProposal.id)?.map((entry) => entry.id)).toEqual([secondEntry.id]);
+    expect(entriesByParent.get("missing-parent")).toEqual([]);
+    expect(entriesByParent.get(proposalId)?.[0].author.displayName).toBe("Member");
+  });
+
+  it("returns an empty parent map for empty parent ids", async () => {
+    const entriesByParent = await listDeliberationEntriesForParents(adminActor, {
+      workspaceId,
+      parentType: "PROPOSAL",
+      parentIds: [],
+    });
+
+    expect(entriesByParent.size).toBe(0);
   });
 
   it("accepts targetMemberId for a reaction", async () => {

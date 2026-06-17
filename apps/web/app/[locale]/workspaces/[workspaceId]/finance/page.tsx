@@ -4,7 +4,7 @@ import {
   getEnterpriseAppSurface,
   issueEnterpriseAppSession,
   listCatalogItems,
-  listDeliberationEntries,
+  listDeliberationEntriesForParents,
   listLedgerAccounts,
   listSpends,
   requireWorkspaceMembership,
@@ -212,18 +212,11 @@ export default async function FinancePage({
       : t("targetPerson", { name: option.name }),
   }));
 
-  const entriesMap = new Map(
-    await Promise.all(
-      spends.map(async (spend) => {
-        const entries = await listDeliberationEntries(actor, {
-          workspaceId,
-          parentType: "SPEND",
-          parentId: spend.id,
-        });
-        return [spend.id, entries] as const;
-      }),
-    ),
-  );
+  const entriesMap = await listDeliberationEntriesForParents(actor, {
+    workspaceId,
+    parentType: "SPEND",
+    parentIds: spends.map((spend) => spend.id),
+  });
 
   const unresolvedObjectionCount = (spendId: string) => (
     (entriesMap.get(spendId) || []).filter((entry) => entry.entryType === "OBJECTION" && !entry.resolvedAt).length
