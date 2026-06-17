@@ -866,6 +866,7 @@
     "formType": "Type",
     "formVendor": "Vendor",
     "discussionTitle": "Discussion",
+    "ledgerAccounts": "Ledger Accounts",
     "noAccounts": "No ledger accounts defined yet.",
     "noSpends": "No spend requests match this filter.",
     "pageDescription": "Spend tracking, ledger accounts, and reconciliation.",

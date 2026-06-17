@@ -86,7 +86,7 @@ const CONNECTOR_READINESS_PROFILES: Record<string, ConnectorReadinessProfile> = 
     connectorRole: "app",
     connectedBy: "Corgtex managed",
     supportedOperations: ["Finance app launch", "App MCP routing", "Knowledge summaries"],
-    storagePolicy: "Structured finance records stay in Practice Ledger; Corgtex receives governed summaries and routing context.",
+    storagePolicy: "Native practice-finance records live in Corgtex Postgres; app runtime metadata is retained for routing, launch, and provenance.",
     sourceUrl: "https://github.com/Corgtexdotcom/practice-ledger",
     adminNotes: "Keep this in Apps/Finance, not as a generic data connector.",
     recommendationRank: 60,

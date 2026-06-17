@@ -16,7 +16,7 @@ import {
  * Snapshot of today's `WORKSPACE_NAV_GROUPS` (apps/web/lib/nav-config.ts).
  * packages/domain cannot import the web nav config (the package-layer ESLint
  * boundary forbids it), so this is the parity anchor the registry must
- * reproduce. PR2 derives the real nav from the registry against this shape.
+ * reproduce while the web nav derives from the registry.
  */
 const EXPECTED_NAV: Array<{
   href: string;
