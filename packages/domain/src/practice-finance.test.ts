@@ -1,8 +1,27 @@
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+
+const { prismaMock, requireWorkspaceMembershipMock } = vi.hoisted(() => ({
+  prismaMock: {
+    practiceProject: {
+      findMany: vi.fn(),
+    },
+  },
+  requireWorkspaceMembershipMock: vi.fn(),
+}));
+
+vi.mock("@corgtex/shared", () => ({
+  prisma: prismaMock,
+}));
+
+vi.mock("./auth", () => ({
+  requireWorkspaceMembership: requireWorkspaceMembershipMock,
+}));
 
 import {
   BUDGET_RUNWAY_ATTENTION_WEEKS,
   collectAttention,
+  getPracticeFinanceDashboard,
+  listPracticeProjects,
   projectAttentionItems,
   projectBudgetRunwayWeeks,
   projectNeedsSetup,
@@ -116,5 +135,60 @@ describe("practice-finance pure derivations", () => {
       project({ id: "ok", weeklyBurnCents: 0 }),
     ]);
     expect(all.map((i) => i.projectId)).toEqual(["s"]);
+  });
+});
+
+describe("practice-finance I/O", () => {
+  const actor = {
+    kind: "user" as const,
+    user: {
+      id: "user-1",
+      email: "user@example.com",
+      displayName: "User",
+      globalRole: "USER" as const,
+    },
+  };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    requireWorkspaceMembershipMock.mockResolvedValue({ id: "member-1" });
+    prismaMock.practiceProject.findMany.mockResolvedValue([]);
+  });
+
+  it("lists practice projects with a bounded default page", async () => {
+    await listPracticeProjects(actor, "workspace-1");
+
+    expect(requireWorkspaceMembershipMock).toHaveBeenCalledWith({ actor, workspaceId: "workspace-1" });
+    expect(prismaMock.practiceProject.findMany).toHaveBeenCalledWith({
+      where: { workspaceId: "workspace-1" },
+      orderBy: [{ status: "asc" }, { code: "asc" }, { id: "asc" }],
+      take: 100,
+    });
+  });
+
+  it("clamps practice project take and applies a cursor", async () => {
+    await listPracticeProjects(actor, "workspace-1", { take: 500, cursor: " project-10 " });
+
+    expect(prismaMock.practiceProject.findMany).toHaveBeenCalledWith({
+      where: { workspaceId: "workspace-1" },
+      orderBy: [{ status: "asc" }, { code: "asc" }, { id: "asc" }],
+      take: 200,
+      cursor: { id: "project-10" },
+      skip: 1,
+    });
+  });
+
+  it("builds the dashboard from the bounded project list", async () => {
+    prismaMock.practiceProject.findMany.mockResolvedValueOnce([
+      project({ id: "active-1", poValueCents: 10_000_00, usedCents: 1_000_00 }),
+    ]);
+
+    const dashboard = await getPracticeFinanceDashboard(actor, "workspace-1");
+
+    expect(dashboard.projects).toHaveLength(1);
+    expect(dashboard.summary.activeProjects).toBe(1);
+    expect(prismaMock.practiceProject.findMany).toHaveBeenCalledWith(expect.objectContaining({
+      take: 100,
+    }));
   });
 });
