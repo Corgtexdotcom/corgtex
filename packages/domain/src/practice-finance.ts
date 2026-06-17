@@ -181,6 +181,14 @@ export type PracticeProjectInput = {
   sourceSatelliteId?: string | null;
 };
 
+export type ListPracticeProjectsOptions = {
+  take?: number | null;
+  cursor?: string | null;
+};
+
+const DEFAULT_PRACTICE_PROJECT_TAKE = 100;
+const MAX_PRACTICE_PROJECT_TAKE = 200;
+
 function normalizeCents(value: number | undefined, label: string): number {
   const cents = value ?? 0;
   invariant(Number.isInteger(cents) && cents >= 0, 400, "INVALID_INPUT", `${label} must be a non-negative integer (cents).`);
@@ -193,16 +201,38 @@ function normalizeBps(value: number | null | undefined, label: string): number |
   return value;
 }
 
-export async function listPracticeProjects(actor: AppActor, workspaceId: string): Promise<PracticeProject[]> {
+function normalizeTake(value: number | null | undefined): number {
+  if (value == null) return DEFAULT_PRACTICE_PROJECT_TAKE;
+  invariant(Number.isInteger(value), 400, "INVALID_INPUT", "take must be an integer.");
+  return Math.min(Math.max(value, 1), MAX_PRACTICE_PROJECT_TAKE);
+}
+
+function normalizeCursor(value: string | null | undefined): string | null {
+  const cursor = value?.trim();
+  return cursor || null;
+}
+
+export async function listPracticeProjects(
+  actor: AppActor,
+  workspaceId: string,
+  options: ListPracticeProjectsOptions = {},
+): Promise<PracticeProject[]> {
   await requireWorkspaceMembership({ actor, workspaceId });
+  const cursor = normalizeCursor(options.cursor);
   return prisma.practiceProject.findMany({
     where: { workspaceId },
-    orderBy: [{ status: "asc" }, { code: "asc" }],
+    orderBy: [{ status: "asc" }, { code: "asc" }, { id: "asc" }],
+    take: normalizeTake(options.take),
+    ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
   });
 }
 
-export async function getPracticeFinanceDashboard(actor: AppActor, workspaceId: string) {
-  const projects = await listPracticeProjects(actor, workspaceId);
+export async function getPracticeFinanceDashboard(
+  actor: AppActor,
+  workspaceId: string,
+  options: ListPracticeProjectsOptions = {},
+) {
+  const projects = await listPracticeProjects(actor, workspaceId, options);
   return {
     summary: summarizePracticeFinance(projects),
     attention: collectAttention(projects),

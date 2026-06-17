@@ -4,6 +4,20 @@ import { requireWorkspaceMembership, respondToCheckIn, skipCompanyUnderstandingQ
 import { resolveRequestActor } from "@/lib/auth";
 import { handleRouteError } from "@/lib/http";
 
+const DEFAULT_CHECK_INS_TAKE = 50;
+const MAX_CHECK_INS_TAKE = 100;
+
+function boundedTake(value: string | null) {
+  const parsed = Number.parseInt(value ?? "", 10);
+  if (!Number.isFinite(parsed)) return DEFAULT_CHECK_INS_TAKE;
+  return Math.min(Math.max(parsed, 1), MAX_CHECK_INS_TAKE);
+}
+
+function optionalCursor(value: string | null) {
+  const trimmed = value?.trim();
+  return trimmed || null;
+}
+
 export async function GET(request: NextRequest, { params }: { params: Promise<{ workspaceId: string }> }) {
   try {
     const actor = await resolveRequestActor(request);
@@ -14,8 +28,11 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
 
     // Agent actors get null membership (by design) — they don't have personal check-ins
     if (!membership) {
-      return NextResponse.json({ checkIns: [] });
+      return NextResponse.json({ checkIns: [], nextCursor: null });
     }
+
+    const take = boundedTake(request.nextUrl.searchParams.get("take"));
+    const cursor = optionalCursor(request.nextUrl.searchParams.get("cursor"));
 
     // Return the member's check-ins
     const checkIns = await prisma.checkIn.findMany({
@@ -23,10 +40,15 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
         workspaceId,
         memberId: membership.id,
       },
-      orderBy: { createdAt: "desc" },
+      orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+      take: take + 1,
+      ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
     });
 
-    return NextResponse.json({ checkIns });
+    const page = checkIns.slice(0, take);
+    const nextCursor = checkIns.length > take ? page.at(-1)?.id ?? null : null;
+
+    return NextResponse.json({ checkIns: page, nextCursor });
   } catch (error) {
     return handleRouteError(error);
   }
