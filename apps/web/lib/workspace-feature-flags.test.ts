@@ -34,13 +34,13 @@ describe("filterNavGroupsByWorkspaceAccess", () => {
     expect(visibleLabels({ canManageAgentGovernance: true }, { AGENT_GOVERNANCE: false })).not.toContain("agentGovernance");
   });
 
-  it("hides client-sensitive new surfaces by default", () => {
+  it("hides client-sensitive new surfaces by default while showing AI connector setup", () => {
     const labels = visibleLabels({ canManageAgentGovernance: true });
 
     expect(labels).not.toContain("tools");
     expect(labels).not.toContain("built");
     expect(DEFAULT_WORKSPACE_FEATURE_FLAGS.CONTEXT_MAP_AI).toBe(false);
-    expect(DEFAULT_WORKSPACE_FEATURE_FLAGS.AI_WORKSPACES).toBe(false);
+    expect(DEFAULT_WORKSPACE_FEATURE_FLAGS.AI_WORKSPACES).toBe(true);
     expect(DEFAULT_WORKSPACE_FEATURE_FLAGS.OPENWORK_DEFAULT).toBe(false);
     expect(DEFAULT_WORKSPACE_FEATURE_FLAGS.EXECUTION_PACKETS).toBe(false);
     expect(DEFAULT_WORKSPACE_FEATURE_FLAGS.MANAGED_ENTERPRISE_SERVICES).toBe(false);

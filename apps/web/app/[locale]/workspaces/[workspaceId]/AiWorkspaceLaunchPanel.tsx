@@ -3,13 +3,9 @@
 import { useState } from "react";
 
 import {
-  activeAiWorkspaceConnection,
-  aiWorkspaceProviderByKey,
+  activeAiWorkspaceProvider,
   aiWorkspaceSettingsHref,
-  connectedAiWorkspaceConnections,
   aiWorkspaceLaunchUrl,
-  isAiWorkspaceConnected,
-  pendingAiWorkspaceConnections,
   type AiWorkspaceLaunchState,
   type AiWorkspaceLaunchProvider,
 } from "@/lib/ai-workspace-launch";
@@ -73,17 +69,12 @@ export function AiWorkspaceLaunchPanel({
   const [pendingProviderKey, setPendingProviderKey] = useState(
     initialState.activeProviderKey ?? sortedProviders(initialState.providers)[0]?.key ?? "",
   );
-  const [pendingConnectionAction, setPendingConnectionAction] = useState<string | null>(null);
   const [status, setStatus] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  const activeConnection = activeAiWorkspaceConnection(selectionState);
-  const provider = aiWorkspaceProviderByKey(selectionState, activeConnection?.providerKey ?? selectionState.activeProviderKey);
+  const provider = activeAiWorkspaceProvider(selectionState);
   const orderedProviders = sortedProviders(selectionState.providers);
-  const connectedConnections = connectedAiWorkspaceConnections(selectionState);
-  const pendingConnections = pendingAiWorkspaceConnections(selectionState);
   const activeProviderLaunchUrl = aiWorkspaceLaunchUrl(provider?.key);
-  const connected = isAiWorkspaceConnected(activeConnection);
 
   function setupHref(providerKey: string) {
     return providerKey === "claude" ? claudeInstallerHref(workspaceId) : aiWorkspaceSettingsHref(workspaceId, providerKey);
@@ -110,48 +101,20 @@ export function AiWorkspaceLaunchPanel({
       const response = await fetch(`/api/workspaces/${workspaceId}/ai-workspace-selection`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action: "start_setup", providerKey }),
+        body: JSON.stringify({ providerKey }),
       });
       const data = await response.json().catch(() => ({}));
       if (!response.ok) {
-        throw new Error(parseRouteError(data) ?? "Could not start setup for this AI app.");
+        throw new Error(parseRouteError(data) ?? "Could not choose the AI app.");
       }
       applyState(data);
+      setPendingProviderKey(providerKey);
       setIsChoosing(false);
-      if (typeof window !== "undefined") {
-        window.location.href = setupHref(providerKey);
-      }
+      setStatus(`${nextProvider.shortLabel} is selected. Connect it once, then work from ${nextProvider.shortLabel}.`);
     } catch (selectionError) {
-      setError(selectionError instanceof Error ? selectionError.message : "Could not start setup for this AI app.");
+      setError(selectionError instanceof Error ? selectionError.message : "Could not choose the AI app.");
     } finally {
       setSelectingProviderKey(null);
-    }
-  }
-
-  async function updateConnection(providerKey: string, action: "verify" | "mark_connected") {
-    setPendingConnectionAction(`${providerKey}:${action}`);
-    setError(null);
-    setStatus(null);
-
-    try {
-      const response = await fetch(`/api/workspaces/${workspaceId}/mcp-connections`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action, providerKey }),
-      });
-      const data = await response.json().catch(() => ({}));
-      if (!response.ok) {
-        throw new Error(parseRouteError(data) ?? "Could not update this connection.");
-      }
-      applyState((data as { state?: unknown }).state);
-      const message = typeof (data as { message?: unknown }).message === "string"
-        ? (data as { message: string }).message
-        : "Connection updated.";
-      setStatus(message);
-    } catch (connectionError) {
-      setError(connectionError instanceof Error ? connectionError.message : "Could not update this connection.");
-    } finally {
-      setPendingConnectionAction(null);
     }
   }
 
@@ -177,14 +140,14 @@ export function AiWorkspaceLaunchPanel({
     );
   }
 
-  if (isChoosing || (!connectedConnections.length && !pendingConnections.length)) {
+  if (isChoosing || !provider) {
     return (
       <div className={`ai-workspace-launch ai-workspace-launch-${variant}`}>
         <div className="ai-workspace-launch-header">
           <WorkspaceUtilityIcon name="work" className="ai-workspace-launch-icon" />
           <div>
-            <strong>Connect an AI app</strong>
-            <span>Choose where you want to use Corgtex.</span>
+            <strong>{provider ? "Change AI app" : "Choose AI app"}</strong>
+            <span>Pick the app where your team wants to work with Corgtex.</span>
           </div>
         </div>
 
@@ -211,11 +174,11 @@ export function AiWorkspaceLaunchPanel({
               onClick={() => void selectProvider(pendingProviderKey)}
               disabled={selectingProviderKey !== null || !pendingProviderKey}
             >
-              {selectingProviderKey ? "Opening" : "Connect"}
+              {selectingProviderKey ? "Saving" : "Use this app"}
             </button>
-            {connectedConnections.length || pendingConnections.length ? (
+            {provider ? (
               <button type="button" className="button secondary small" onClick={() => setIsChoosing(false)}>
-                Back
+                Back to {provider.shortLabel}
               </button>
             ) : null}
           </div>
@@ -226,91 +189,36 @@ export function AiWorkspaceLaunchPanel({
     );
   }
 
-  if (!provider || !activeConnection) {
-    return null;
-  }
-
-  if (!connected) {
-    return (
-      <div className={`ai-workspace-launch ai-workspace-launch-${variant}`}>
-        <div className="ai-workspace-launch-header">
-          <WorkspaceUtilityIcon name="work" className="ai-workspace-launch-icon" />
-          <div>
-            <strong>Finish connecting {provider.shortLabel}</strong>
-            <span>Complete setup, then verify it here.</span>
-          </div>
-        </div>
-
-        <div className="ai-workspace-launch-actions">
-          <a className="button small" href={setupHref(provider.key)}>
-            Continue setup
-          </a>
-          <button
-            type="button"
-            className="button secondary small"
-            disabled={pendingConnectionAction !== null}
-            onClick={() => void updateConnection(provider.key, "verify")}
-          >
-            {pendingConnectionAction === `${provider.key}:verify` ? "Checking" : "Verify"}
-          </button>
-          <button
-            type="button"
-            className="button secondary small"
-            disabled={pendingConnectionAction !== null}
-            onClick={() => void updateConnection(provider.key, "mark_connected")}
-          >
-            {pendingConnectionAction === `${provider.key}:mark_connected` ? "Saving" : "I connected it"}
-          </button>
-        </div>
-
-        <button type="button" className="button secondary small" onClick={() => setIsChoosing(true)}>
-          Add app
-        </button>
-
-        {status ? <div className="ai-workspace-launch-status">{status}</div> : null}
-        {error ? <div className="form-message form-message-error">{error}</div> : null}
-      </div>
-    );
-  }
-
   return (
     <div className={`ai-workspace-launch ai-workspace-launch-${variant}`}>
       <div className="ai-workspace-launch-header">
         <WorkspaceUtilityIcon name="work" className="ai-workspace-launch-icon" />
         <div>
-          <strong>{provider.shortLabel} connected</strong>
+          <strong>Corgtex in {provider.shortLabel}</strong>
+          <span>Work from {provider.shortLabel}. Corgtex is available there after the connector is set up.</span>
         </div>
       </div>
 
-      {connectedConnections.length > 1 ? (
-        <div className="ai-workspace-launch-form">
-          {connectedConnections.map((connection) => {
-            const connectedProvider = aiWorkspaceProviderByKey(selectionState, connection.providerKey);
-            if (!connectedProvider) return null;
-            return (
-              <button
-                key={connection.providerKey}
-                type="button"
-                className="button secondary small"
-                onClick={() => openProvider(connection.providerKey)}
-              >
-                Open {connectedProvider.shortLabel}
-              </button>
-            );
-          })}
+      <div className="ai-workspace-launch-result" role="status">
+        <div>
+          <strong>{provider.shortLabel} selected</strong>
+          <span>Corgtex supplies context, policy, audit, and write-back through MCP.</span>
         </div>
-      ) : null}
+      </div>
 
       <div className="ai-workspace-launch-actions">
+        <a className="button small" href={setupHref(provider.key)}>
+          Connect
+        </a>
         {activeProviderLaunchUrl ? (
-          <button type="button" className="button small" onClick={() => openProvider(provider.key)}>
+          <button type="button" className="button secondary small" onClick={() => openProvider(provider.key)}>
             <WorkspaceUtilityIcon name="external" className="ai-workspace-action-icon" />
-            Open {provider.shortLabel}
+            Open
           </button>
         ) : null}
         {selectionState.providers.length > 1 ? (
           <button type="button" className="button secondary small" onClick={() => setIsChoosing(true)}>
-            Add app
+            Change app
           </button>
         ) : null}
       </div>

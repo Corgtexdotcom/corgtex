@@ -86,10 +86,6 @@ export default async function SettingsPage({
   if (!featureFlags.SETTINGS_GENERAL && search.tab === "general") {
     notFound();
   }
-  if (!featureFlags.AI_WORKSPACES && tab === "ai-workspaces") {
-    notFound();
-  }
-
   const [ssoConfigs, planState] = await Promise.all([
     getSsoConfigByWorkspace(actor, workspaceId).catch(() => []),
     getWorkspacePlanState(actor, workspaceId).catch(() => null),
@@ -162,19 +158,17 @@ export default async function SettingsPage({
   const connectorUrl = env.MCP_PUBLIC_URL ?? `${origin}/mcp`;
   const t = await getTranslations("settings");
   const format = await getFormatter();
-  const aiWorkspaceProviders = featureFlags.AI_WORKSPACES
-    ? listAiWorkspaceToolProviders().map((provider) => ({
-      ...provider,
-      capabilities: [...provider.capabilities],
-      supportedOwnershipModes: [...provider.supportedOwnershipModes],
-      setupVariants: provider.setupVariants.map((variant) => ({
-        ...variant,
-        manualSteps: [...variant.manualSteps],
-        limitations: [...variant.limitations],
-      })),
-    }))
-    : [];
-  const enterpriseServices = tab === "ai-workspaces" && featureFlags.AI_WORKSPACES && featureFlags.MANAGED_ENTERPRISE_SERVICES
+  const aiWorkspaceProviders = listAiWorkspaceToolProviders().map((provider) => ({
+    ...provider,
+    capabilities: [...provider.capabilities],
+    supportedOwnershipModes: [...provider.supportedOwnershipModes],
+    setupVariants: provider.setupVariants.map((variant) => ({
+      ...variant,
+      manualSteps: [...variant.manualSteps],
+      limitations: [...variant.limitations],
+    })),
+  }));
+  const enterpriseServices = tab === "ai-workspaces" && featureFlags.MANAGED_ENTERPRISE_SERVICES
     ? (await listWorkspaceEnterpriseServiceStates(actor, workspaceId)).map((service) => ({
       key: service.key,
       label: service.label,
@@ -197,10 +191,10 @@ export default async function SettingsPage({
       readinessChecks: service.readinessChecks,
     }))
     : [];
-  const aiWorkspaceSelection = tab === "ai-workspaces" && featureFlags.AI_WORKSPACES
+  const aiWorkspaceSelection = tab === "ai-workspaces"
     ? await getAiWorkspaceSelectionState(actor, workspaceId).catch(() => ({ activeProviderKey: null, providers: [], connections: [] }))
     : { activeProviderKey: null, providers: [], connections: [] };
-  const selectedProviderKey = normalizeSelectedProvider(search.provider, aiWorkspaceProviders);
+  const selectedProviderKey = normalizeSelectedProvider(search.provider, aiWorkspaceProviders) ?? aiWorkspaceSelection.activeProviderKey;
   const selectedServiceKey = normalizeSelectedService(search.service, enterpriseServices);
   const agentBudget = budget
     ? {
@@ -254,11 +248,9 @@ export default async function SettingsPage({
             {t("tabAgents")}
           </a>
         )}
-        {featureFlags.AI_WORKSPACES && (
-          <a href={`/workspaces/${workspaceId}/settings?tab=ai-workspaces`} className={`nr-tab ${tab === "ai-workspaces" ? "nr-tab-active" : ""}`}>
-            {t("tabAiWorkspaces")}
-          </a>
-        )}
+        <a href={`/workspaces/${workspaceId}/settings?tab=ai-workspaces`} className={`nr-tab ${tab === "ai-workspaces" ? "nr-tab-active" : ""}`}>
+          {t("tabAiWorkspaces")}
+        </a>
         <a href={`/workspaces/${workspaceId}/settings?tab=user`} className={`nr-tab ${tab === "user" ? "nr-tab-active" : ""}`}>
           {t("tabUser")}
         </a>
@@ -407,7 +399,7 @@ export default async function SettingsPage({
         </div>
       )}
 
-      {tab === "ai-workspaces" && featureFlags.AI_WORKSPACES && (
+      {tab === "ai-workspaces" && (
         <AiWorkspaceManager
           connectorUrl={connectorUrl}
           origin={origin}
@@ -417,14 +409,6 @@ export default async function SettingsPage({
           canRequestManagedServices={isAdmin}
           requestManagedServiceAction={requestManagedEnterpriseServiceAction}
           workspaceId={workspaceId}
-          connections={aiWorkspaceSelection.connections.map((connection) => ({
-            providerKey: connection.providerKey,
-            healthStatus: connection.healthStatus,
-            isDefault: connection.isDefault,
-            connectedAt: connection.connectedAt?.toISOString() ?? null,
-            lastCheckedAt: connection.lastCheckedAt?.toISOString() ?? null,
-            verificationSource: connection.verificationSource,
-          }))}
           selectedProviderKey={selectedProviderKey}
           selectedServiceKey={selectedServiceKey}
         />

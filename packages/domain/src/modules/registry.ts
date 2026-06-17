@@ -331,7 +331,7 @@ export const MODULE_MANIFESTS: readonly ModuleManifest[] = [
       "AI_WORKSPACES",
       "AI workspaces",
       "Catalog and setup foundation for OpenWork, ChatGPT, Claude, GitHub Copilot, Gemini, Cursor, and generic MCP clients.",
-      false,
+      true,
     ),
     subFlags: [
       flag("OPENWORK_DEFAULT", "OpenWork default", "Recommend OpenWork as the default free self-managed AI workspace.", false),

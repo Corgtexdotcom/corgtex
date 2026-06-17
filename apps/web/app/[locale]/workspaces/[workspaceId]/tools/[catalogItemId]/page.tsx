@@ -245,15 +245,7 @@ export default async function CatalogItemPage({
         canRequestManagedServices={false}
         requestManagedServiceAction={requestManagedEnterpriseServiceAction}
         workspaceId={workspaceId}
-        connections={aiWorkspaceSelection.connections.map((connection) => ({
-          providerKey: connection.providerKey,
-          healthStatus: connection.healthStatus,
-          isDefault: connection.isDefault,
-          connectedAt: connection.connectedAt?.toISOString() ?? null,
-          lastCheckedAt: connection.lastCheckedAt?.toISOString() ?? null,
-          verificationSource: connection.verificationSource,
-        }))}
-        selectedProviderKey={normalizeSelectedProvider(item.sourceId ?? search?.provider, providers)}
+        selectedProviderKey={normalizeSelectedProvider(item.sourceId ?? search?.provider, providers) ?? aiWorkspaceSelection.activeProviderKey}
         selectedServiceKey={null}
       />
     );
@@ -302,15 +294,7 @@ export default async function CatalogItemPage({
         canRequestManagedServices={isWorkspaceAdmin}
         requestManagedServiceAction={requestManagedEnterpriseServiceAction}
         workspaceId={workspaceId}
-        connections={aiWorkspaceSelection.connections.map((connection) => ({
-          providerKey: connection.providerKey,
-          healthStatus: connection.healthStatus,
-          isDefault: connection.isDefault,
-          connectedAt: connection.connectedAt?.toISOString() ?? null,
-          lastCheckedAt: connection.lastCheckedAt?.toISOString() ?? null,
-          verificationSource: connection.verificationSource,
-        }))}
-        selectedProviderKey={normalizeSelectedProvider(search?.provider, providers)}
+        selectedProviderKey={normalizeSelectedProvider(search?.provider, providers) ?? aiWorkspaceSelection.activeProviderKey}
         selectedServiceKey={normalizeSelectedService(item.sourceId ?? search?.service, enterpriseServices)}
       />
     );
