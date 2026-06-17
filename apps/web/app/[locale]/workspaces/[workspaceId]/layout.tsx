@@ -1,5 +1,5 @@
 import { isGlobalOperator, listActorWorkspaces, countUnreadNotifications, listConversations, listDailyCompanyUnderstandingQuestions, requireWorkspaceMembership, getMemberInvitePolicy, getMeetingRecorderConfig, getUserWorkspaceOnboardingState, getAiWorkspaceSelectionState, resolveWorkspaceModuleAccess, SELF_SERVE_WORKSPACE_TOUR_KEY, SELF_SERVE_WORKSPACE_TOUR_VERSION } from "@corgtex/domain";
-import { workspaceBranding, prisma } from "@corgtex/shared";
+import { env, workspaceBranding, prisma } from "@corgtex/shared";
 import type { Metadata } from "next";
 import { logoutAction, requirePageActor } from "@/lib/auth";
 import { DemoTour } from "./DemoTour";
@@ -18,6 +18,7 @@ import { WorkspaceChatRail } from "./WorkspaceChatRail";
 import { WorkspaceIntercomMessenger } from "./WorkspaceIntercomMessenger";
 import type { AiWorkspaceLaunchState } from "@/lib/ai-workspace-launch";
 import { getMobileCaptureActions } from "@/lib/workspace-add-actions";
+import { headers } from "next/headers";
 
 export const dynamic = "force-dynamic";
 
@@ -126,6 +127,11 @@ export default async function WorkspaceLayout({
   const visibleNavGroups = filterNavGroupsByWorkspaceAccess(navGroups, featureFlags, capabilities, moduleAccess);
   const tNav = await getTranslations("nav");
   const tCommon = await getTranslations("common");
+  const headersList = await headers();
+  const host = headersList.get("host") || "localhost:3000";
+  const protocol = host.includes("localhost") ? "http" : "https";
+  const origin = `${protocol}://${host}`;
+  const connectorUrl = env.MCP_PUBLIC_URL ?? `${origin}/mcp`;
   const currentBranding = current ? workspaceBranding(current) : { primaryName: "Corgtex", secondaryLabel: "Workspace" };
   const controlPlaneHref = getControlPlaneHref("/control-plane", locale);
   const isDemo = current?.slug === "jnj-demo";
@@ -279,6 +285,9 @@ export default async function WorkspaceLayout({
           featureFlags={featureFlags}
           capabilities={capabilities}
           googleDrivePicker={googleDrivePicker}
+          aiWorkspaceState={aiWorkspaceState}
+          connectorUrl={connectorUrl}
+          origin={origin}
         />
       )}
     </div>
