@@ -88,6 +88,15 @@ type ClaimedJob = {
   attempts: number;
 };
 
+type EnqueueJobParams = {
+  workspaceId?: string | null;
+  eventId?: string | null;
+  type: string;
+  payload: Prisma.InputJsonObject;
+  dedupeKey: string;
+  dependsOnJobId?: string | null;
+};
+
 function releaseTargetFromPayload(value: unknown): ControlPlaneReleaseTarget | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const target = value as Record<string, unknown>;
@@ -141,26 +150,36 @@ async function markSlackProactiveScanReauthRequired(job: ClaimedJob, installatio
 
 class RetryableWorkflowJobError extends Error {}
 
-export async function enqueueJob(tx: Prisma.TransactionClient, params: {
-  workspaceId?: string | null;
-  eventId?: string | null;
-  type: string;
-  payload: Prisma.InputJsonObject;
-  dedupeKey: string;
-  dependsOnJobId?: string | null;
-}) {
+function toWorkflowJobCreateInput(params: EnqueueJobParams): Prisma.WorkflowJobCreateManyInput {
+  return {
+    workspaceId: params.workspaceId ?? null,
+    eventId: params.eventId ?? null,
+    type: params.type,
+    payload: params.payload,
+    dedupeKey: params.dedupeKey,
+    dependsOnJobId: params.dependsOnJobId ?? null,
+  };
+}
+
+export async function enqueueJob(tx: Prisma.TransactionClient, params: EnqueueJobParams) {
   await tx.workflowJob.upsert({
     where: { dedupeKey: params.dedupeKey },
     update: {},
-    create: {
-      workspaceId: params.workspaceId ?? null,
-      eventId: params.eventId ?? null,
-      type: params.type,
-      payload: params.payload,
-      dedupeKey: params.dedupeKey,
-      dependsOnJobId: params.dependsOnJobId ?? null,
-    },
+    create: toWorkflowJobCreateInput(params),
   });
+}
+
+async function enqueueJobBatch(tx: Prisma.TransactionClient, jobs: EnqueueJobParams[]) {
+  if (jobs.length === 0) {
+    return 0;
+  }
+
+  const result = await tx.workflowJob.createMany({
+    data: jobs.map(toWorkflowJobCreateInput),
+    skipDuplicates: true,
+  });
+
+  return result.count;
 }
 
 async function resolveDedupeKeyToJobId(tx: Prisma.TransactionClient, dedupeKey: string): Promise<string | null> {
@@ -1033,76 +1052,73 @@ export async function schedulePeriodicJobs() {
       : Promise.resolve([]),
   ]);
 
-  let scheduledCount = 0;
+  const jobs: EnqueueJobParams[] = [];
+
+  for (const source of sources) {
+    if (!source.lastSyncAt || (now.getTime() - source.lastSyncAt.getTime()) / 60000 >= source.pullCadenceMinutes) {
+      const dedupeKey = `sync-${source.id}-${Math.floor(now.getTime() / (source.pullCadenceMinutes * 60000))}`;
+      jobs.push({
+        workspaceId: source.workspaceId,
+        type: "data-source.sync",
+        payload: { sourceId: source.id },
+        dedupeKey,
+      });
+    }
+  }
+
+  const hourlyBucket = Math.floor(now.getTime() / (60 * 60 * 1000));
+  const appHealthBucket = Math.floor(now.getTime() / (appHealthIntervalMinutes * 60 * 1000));
+  for (const installation of slackInstallations) {
+    jobs.push({
+      workspaceId: installation.workspaceId,
+      type: "communication.slack.proactive-scan",
+      payload: { installationId: installation.id },
+      dedupeKey: `${installation.id}:slack-proactive-scan:${hourlyBucket}`,
+    });
+  }
+
+  for (const deployment of customerDeployments) {
+    jobs.push({
+      workspaceId: null,
+      eventId: null,
+      type: CONTROL_PLANE_FLEET_SNAPSHOT_JOB_TYPE,
+      payload: {
+        deploymentId: deployment.id,
+        snapshotKinds: ["HEALTH", "RELEASE", "CONNECTOR", "CONTEXT", "INTEGRATION", "SUPPORT_READY"],
+        reason: "Scheduled Control Plane fleet sweep.",
+      },
+      dedupeKey: `${deployment.id}:control-plane-fleet-snapshot:${hourlyBucket}`,
+    });
+  }
+
+  for (const runtime of appRuntimes) {
+    jobs.push({
+      workspaceId: null,
+      eventId: null,
+      type: ENTERPRISE_APP_HEALTH_CHECK_JOB_TYPE,
+      payload: {
+        runtimeId: runtime.id,
+        reason: "Scheduled enterprise app health sweep.",
+      },
+      dedupeKey: `${runtime.id}:enterprise-app-health:${appHealthBucket}`,
+    });
+  }
+
+  if (pendingAiUsage.length > 0) {
+    jobs.push({
+      workspaceId: null,
+      eventId: null,
+      type: "billing.ai-usage.report",
+      payload: { limit: 500 },
+      dedupeKey: `billing:ai-usage-report:${hourlyBucket}`,
+    });
+  }
 
   await prisma.$transaction(async (tx) => {
-    for (const source of sources) {
-      if (!source.lastSyncAt || (now.getTime() - source.lastSyncAt.getTime()) / 60000 >= source.pullCadenceMinutes) {
-        const dedupeKey = `sync-${source.id}-${Math.floor(now.getTime() / (source.pullCadenceMinutes * 60000))}`;
-        await enqueueJob(tx, {
-          workspaceId: source.workspaceId,
-          type: "data-source.sync",
-          payload: { sourceId: source.id },
-          dedupeKey,
-        });
-        scheduledCount++;
-      }
-    }
-
-    const hourlyBucket = Math.floor(now.getTime() / (60 * 60 * 1000));
-    const appHealthBucket = Math.floor(now.getTime() / (appHealthIntervalMinutes * 60 * 1000));
-    for (const installation of slackInstallations) {
-      await enqueueJob(tx, {
-        workspaceId: installation.workspaceId,
-        type: "communication.slack.proactive-scan",
-        payload: { installationId: installation.id },
-        dedupeKey: `${installation.id}:slack-proactive-scan:${hourlyBucket}`,
-      });
-      scheduledCount++;
-    }
-
-    for (const deployment of customerDeployments) {
-      await enqueueJob(tx, {
-        workspaceId: null,
-        eventId: null,
-        type: CONTROL_PLANE_FLEET_SNAPSHOT_JOB_TYPE,
-        payload: {
-          deploymentId: deployment.id,
-          snapshotKinds: ["HEALTH", "RELEASE", "CONNECTOR", "CONTEXT", "INTEGRATION", "SUPPORT_READY"],
-          reason: "Scheduled Control Plane fleet sweep.",
-        },
-        dedupeKey: `${deployment.id}:control-plane-fleet-snapshot:${hourlyBucket}`,
-      });
-      scheduledCount++;
-    }
-
-    for (const runtime of appRuntimes) {
-      await enqueueJob(tx, {
-        workspaceId: null,
-        eventId: null,
-        type: ENTERPRISE_APP_HEALTH_CHECK_JOB_TYPE,
-        payload: {
-          runtimeId: runtime.id,
-          reason: "Scheduled enterprise app health sweep.",
-        },
-        dedupeKey: `${runtime.id}:enterprise-app-health:${appHealthBucket}`,
-      });
-      scheduledCount++;
-    }
-
-    if (pendingAiUsage.length > 0) {
-      await enqueueJob(tx, {
-        workspaceId: null,
-        eventId: null,
-        type: "billing.ai-usage.report",
-        payload: { limit: 500 },
-        dedupeKey: `billing:ai-usage-report:${hourlyBucket}`,
-      });
-      scheduledCount++;
-    }
+    await enqueueJobBatch(tx, jobs);
   });
 
-  return scheduledCount;
+  return jobs.length;
 }
 
 export async function scheduleDailyJobs() {
@@ -1118,8 +1134,6 @@ export async function scheduleDailyJobs() {
   }
 
   const todayISO = now.toISOString().split("T")[0];
-  let scheduledCount = 0;
-
   const workspaces = await prisma.workspace.findMany({ select: { id: true } });
   const slackArchiveWorkspaces = await prisma.communicationInstallation.findMany({
     where: {
@@ -1209,58 +1223,60 @@ export async function scheduleDailyJobs() {
     }
   }
 
+  const jobs: EnqueueJobParams[] = [];
+
+  for (const workspace of workspaces) {
+    jobs.push({
+      workspaceId: workspace.id,
+      type: "context-graph.staleness-sweep",
+      payload: {},
+      dedupeKey: `${workspace.id}:context-graph-staleness:${todayISO}`,
+    });
+
+    if (isWeeklyWindow) {
+      jobs.push({
+        workspaceId: workspace.id,
+        type: "context-graph.reconcile",
+        payload: { dateISO: todayISO },
+        dedupeKey: `${workspace.id}:context-graph-reconcile:${todayISO}`,
+      });
+    }
+
+    jobs.push({
+      workspaceId: workspace.id,
+      type: "communication.raw-retention",
+      payload: { dateISO: now.toISOString() },
+      dedupeKey: `${workspace.id}:communication-retention:${todayISO}`,
+    });
+  }
+
+  for (const schedule of newspaperSchedules) {
+    jobs.push({
+      workspaceId: schedule.workspaceId,
+      type: "brain.daily-digest",
+      payload: { dateISO: now.toISOString(), cadence: schedule.cadence },
+      dedupeKey: schedule.dedupeKey,
+    });
+    logger.info("newspaper_schedule_created", {
+      workspaceId: schedule.workspaceId,
+      cadence: schedule.cadence,
+      dedupeKey: schedule.dedupeKey,
+    });
+  }
+
+  for (const installation of slackArchiveWorkspaces) {
+    jobs.push({
+      workspaceId: installation.workspaceId,
+      type: "communication.slack.public-archive",
+      payload: { dateISO: now.toISOString() },
+      dedupeKey: `${installation.workspaceId}:slack-public-archive:${todayISO}`,
+    });
+  }
+
   await prisma.$transaction(async (tx) => {
-    for (const workspace of workspaces) {
-      await enqueueJob(tx, {
-        workspaceId: workspace.id,
-        type: "context-graph.staleness-sweep",
-        payload: {},
-        dedupeKey: `${workspace.id}:context-graph-staleness:${todayISO}`,
-      });
-
-      if (isWeeklyWindow) {
-        await enqueueJob(tx, {
-          workspaceId: workspace.id,
-          type: "context-graph.reconcile",
-          payload: { dateISO: todayISO },
-          dedupeKey: `${workspace.id}:context-graph-reconcile:${todayISO}`,
-        });
-      }
-
-      await enqueueJob(tx, {
-        workspaceId: workspace.id,
-        type: "communication.raw-retention",
-        payload: { dateISO: now.toISOString() },
-        dedupeKey: `${workspace.id}:communication-retention:${todayISO}`,
-      });
-      scheduledCount++;
-    }
-
-    for (const schedule of newspaperSchedules) {
-      await enqueueJob(tx, {
-        workspaceId: schedule.workspaceId,
-        type: "brain.daily-digest",
-        payload: { dateISO: now.toISOString(), cadence: schedule.cadence },
-        dedupeKey: schedule.dedupeKey,
-      });
-      logger.info("newspaper_schedule_created", {
-        workspaceId: schedule.workspaceId,
-        cadence: schedule.cadence,
-        dedupeKey: schedule.dedupeKey,
-      });
-      scheduledCount++;
-    }
-
-    for (const installation of slackArchiveWorkspaces) {
-      await enqueueJob(tx, {
-        workspaceId: installation.workspaceId,
-        type: "communication.slack.public-archive",
-        payload: { dateISO: now.toISOString() },
-        dedupeKey: `${installation.workspaceId}:slack-public-archive:${todayISO}`,
-      });
-      scheduledCount++;
-    }
+    await enqueueJobBatch(tx, jobs);
   });
 
+  const scheduledCount = workspaces.length + newspaperSchedules.length + slackArchiveWorkspaces.length;
   return scheduledCount;
 }

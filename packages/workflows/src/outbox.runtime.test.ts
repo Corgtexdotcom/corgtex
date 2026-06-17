@@ -26,6 +26,7 @@ const {
     workflowJob: {
       update: vi.fn(),
       upsert: vi.fn(),
+      createMany: vi.fn(),
     },
     workspace: {
       findMany: vi.fn(),
@@ -51,6 +52,7 @@ const {
     $queryRaw: vi.fn(),
     workflowJob: {
       upsert: vi.fn(),
+      createMany: vi.fn(),
     },
   },
   loggerMock: {
@@ -134,6 +136,16 @@ function deferred<T = void>() {
   return { promise, resolve, reject };
 }
 
+function resetCreateManyMock() {
+  txMock.workflowJob.createMany.mockReset().mockImplementation(async (params: { data: unknown[] }) => ({
+    count: params.data.length,
+  }));
+}
+
+function createdWorkflowJobs() {
+  return txMock.workflowJob.createMany.mock.calls.flatMap(([params]) => params.data);
+}
+
 afterEach(() => {
   vi.useRealTimers();
   delete process.env.WORKER_DAILY_JOB_START_HOUR_UTC;
@@ -153,6 +165,7 @@ describe("runPendingJobs", () => {
     prismaMock.appRuntime.findMany.mockReset().mockResolvedValue([]);
     txMock.$queryRaw.mockReset().mockResolvedValue([]);
     txMock.workflowJob.upsert.mockReset().mockResolvedValue({ id: "job-1" });
+    resetCreateManyMock();
     runAgentWorkflowJobMock.mockReset();
     runDailyDigestMock.mockReset().mockResolvedValue({ success: true });
     runSlackAgentMock.mockReset();
@@ -883,6 +896,7 @@ describe("schedulePeriodicJobs", () => {
   beforeEach(() => {
     prismaMock.$transaction.mockReset().mockImplementation(async (callback: (tx: typeof txMock) => Promise<unknown>) => callback(txMock));
     txMock.workflowJob.upsert.mockReset().mockResolvedValue({ id: "job-1" });
+    resetCreateManyMock();
     prismaMock.externalDataSource.findMany.mockReset().mockResolvedValue([]);
     prismaMock.communicationInstallation.findMany.mockReset().mockResolvedValue([
       { id: "install-1", workspaceId: "ws-1" },
@@ -896,15 +910,18 @@ describe("schedulePeriodicJobs", () => {
   it("schedules hourly proactive scans for public Slack installations", async () => {
     await expect(schedulePeriodicJobs()).resolves.toBe(1);
 
-    expect(txMock.workflowJob.upsert).toHaveBeenCalledWith(expect.objectContaining({
-      create: expect.objectContaining({
-        workspaceId: "ws-1",
-        eventId: null,
-        type: "communication.slack.proactive-scan",
-        payload: { installationId: "install-1" },
-        dedupeKey: "install-1:slack-proactive-scan:493748",
-      }),
-    }));
+    expect(txMock.workflowJob.createMany).toHaveBeenCalledTimes(1);
+    expect(txMock.workflowJob.createMany).toHaveBeenCalledWith({
+      data: expect.arrayContaining([
+        expect.objectContaining({
+          workspaceId: "ws-1",
+          type: "communication.slack.proactive-scan",
+          payload: { installationId: "install-1" },
+          dedupeKey: "install-1:slack-proactive-scan:493748",
+        }),
+      ]),
+      skipDuplicates: true,
+    });
   });
 
   it("schedules bounded control-plane fleet snapshot jobs", async () => {
@@ -924,8 +941,9 @@ describe("schedulePeriodicJobs", () => {
       take: 50,
       select: { id: true },
     }));
-    expect(txMock.workflowJob.upsert).toHaveBeenCalledWith(expect.objectContaining({
-      create: expect.objectContaining({
+    expect(txMock.workflowJob.createMany).toHaveBeenCalledTimes(1);
+    expect(createdWorkflowJobs()).toEqual(expect.arrayContaining([
+      expect.objectContaining({
         workspaceId: null,
         eventId: null,
         type: "control-plane.fleet-snapshot",
@@ -935,7 +953,7 @@ describe("schedulePeriodicJobs", () => {
         }),
         dedupeKey: "inst-1:control-plane-fleet-snapshot:493748",
       }),
-    }));
+    ]));
   });
 
   it("schedules bounded enterprise app health jobs", async () => {
@@ -958,8 +976,9 @@ describe("schedulePeriodicJobs", () => {
       take: 100,
       select: { id: true },
     }));
-    expect(txMock.workflowJob.upsert).toHaveBeenCalledWith(expect.objectContaining({
-      create: expect.objectContaining({
+    expect(txMock.workflowJob.createMany).toHaveBeenCalledTimes(1);
+    expect(createdWorkflowJobs()).toEqual(expect.arrayContaining([
+      expect.objectContaining({
         workspaceId: null,
         eventId: null,
         type: "enterprise-app.health.check",
@@ -969,7 +988,7 @@ describe("schedulePeriodicJobs", () => {
         }),
         dedupeKey: "runtime-1:enterprise-app-health:1974993",
       }),
-    }));
+    ]));
   });
 });
 
@@ -987,6 +1006,7 @@ describe("scheduleDailyJobs", () => {
       { workspaceId: "ws-1" },
     ]);
     txMock.workflowJob.upsert.mockReset().mockResolvedValue({ id: "job-1" });
+    resetCreateManyMock();
     getWorkspaceDigestSettingsMock.mockReset().mockResolvedValue(new Map([
       ["ws-1", { enabled: true, cadence: "DAILY" }],
       ["ws-2", { enabled: false, cadence: "DAILY" }],
@@ -998,39 +1018,33 @@ describe("scheduleDailyJobs", () => {
   it("schedules retention, digest, and Slack archive jobs once the daily window has opened", async () => {
     await expect(scheduleDailyJobs()).resolves.toBe(4);
 
-    expect(txMock.workflowJob.upsert).toHaveBeenCalledWith(expect.objectContaining({
-      create: expect.objectContaining({
-        workspaceId: "ws-1",
-        eventId: null,
-        type: "communication.raw-retention",
-        dedupeKey: "ws-1:communication-retention:2026-04-29",
-      }),
-    }));
-    expect(txMock.workflowJob.upsert).toHaveBeenCalledWith(expect.objectContaining({
-      create: expect.objectContaining({
-        workspaceId: "ws-2",
-        eventId: null,
-        type: "communication.raw-retention",
-        dedupeKey: "ws-2:communication-retention:2026-04-29",
-      }),
-    }));
-    expect(txMock.workflowJob.upsert).toHaveBeenCalledWith(expect.objectContaining({
-      create: expect.objectContaining({
-        workspaceId: "ws-1",
-        eventId: null,
-        type: "brain.daily-digest",
-        payload: { dateISO: "2026-04-29T20:15:00.000Z", cadence: "DAILY" },
-        dedupeKey: "ws-1:daily-digest:2026-04-29",
-      }),
-    }));
-    expect(txMock.workflowJob.upsert).toHaveBeenCalledWith(expect.objectContaining({
-      create: expect.objectContaining({
-        workspaceId: "ws-1",
-        eventId: null,
-        type: "communication.slack.public-archive",
-        dedupeKey: "ws-1:slack-public-archive:2026-04-29",
-      }),
-    }));
+    expect(txMock.workflowJob.createMany).toHaveBeenCalledTimes(1);
+    expect(txMock.workflowJob.createMany).toHaveBeenCalledWith({
+      data: expect.arrayContaining([
+        expect.objectContaining({
+          workspaceId: "ws-1",
+          type: "communication.raw-retention",
+          dedupeKey: "ws-1:communication-retention:2026-04-29",
+        }),
+        expect.objectContaining({
+          workspaceId: "ws-2",
+          type: "communication.raw-retention",
+          dedupeKey: "ws-2:communication-retention:2026-04-29",
+        }),
+        expect.objectContaining({
+          workspaceId: "ws-1",
+          type: "brain.daily-digest",
+          payload: { dateISO: "2026-04-29T20:15:00.000Z", cadence: "DAILY" },
+          dedupeKey: "ws-1:daily-digest:2026-04-29",
+        }),
+        expect.objectContaining({
+          workspaceId: "ws-1",
+          type: "communication.slack.public-archive",
+          dedupeKey: "ws-1:slack-public-archive:2026-04-29",
+        }),
+      ]),
+      skipDuplicates: true,
+    });
   });
 
   it("does not schedule daily jobs before the configured UTC start hour", async () => {
@@ -1038,7 +1052,7 @@ describe("scheduleDailyJobs", () => {
 
     await expect(scheduleDailyJobs()).resolves.toBe(0);
 
-    expect(txMock.workflowJob.upsert).not.toHaveBeenCalled();
+    expect(txMock.workflowJob.createMany).not.toHaveBeenCalled();
   });
 
   it("schedules weekly newspaper jobs on Monday UTC for weekly recipients", async () => {
@@ -1050,21 +1064,26 @@ describe("scheduleDailyJobs", () => {
 
     await expect(scheduleDailyJobs()).resolves.toBe(4);
 
-    expect(txMock.workflowJob.upsert).toHaveBeenCalledWith(expect.objectContaining({
-      create: expect.objectContaining({
+    expect(createdWorkflowJobs()).toEqual(expect.arrayContaining([
+      expect.objectContaining({
         workspaceId: "ws-1",
         type: "brain.daily-digest",
         payload: { dateISO: "2026-05-04T20:15:00.000Z", cadence: "WEEKLY" },
         dedupeKey: "ws-1:weekly-digest:2026-05-04",
       }),
-    }));
-    expect(txMock.workflowJob.upsert).not.toHaveBeenCalledWith(expect.objectContaining({
-      create: expect.objectContaining({
+      expect.objectContaining({
+        workspaceId: "ws-1",
+        type: "context-graph.reconcile",
+        dedupeKey: "ws-1:context-graph-reconcile:2026-05-04",
+      }),
+    ]));
+    expect(createdWorkflowJobs()).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({
         workspaceId: "ws-1",
         type: "brain.daily-digest",
         dedupeKey: "ws-1:daily-digest:2026-05-04",
       }),
-    }));
+    ]));
   });
 
   it("does not schedule newspapers when all effective cadences are off", async () => {
@@ -1079,11 +1098,11 @@ describe("scheduleDailyJobs", () => {
 
     await expect(scheduleDailyJobs()).resolves.toBe(3);
 
-    expect(txMock.workflowJob.upsert).not.toHaveBeenCalledWith(expect.objectContaining({
-      create: expect.objectContaining({
+    expect(createdWorkflowJobs()).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({
         type: "brain.daily-digest",
       }),
-    }));
+    ]));
     expect(loggerMock.info).toHaveBeenCalledWith("newspaper_schedule_skipped", expect.objectContaining({
       workspaceId: "ws-1",
       cadence: "DAILY",
