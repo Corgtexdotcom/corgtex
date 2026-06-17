@@ -358,126 +358,84 @@ export function MeetingRecorderConnectorPanel({ workspaceId, origin, config, sou
   if (!config && !sources) {
     return (
       <section className="nr-item" style={{ padding: 18 }}>
-        <p className="nr-item-meta" style={{ margin: 0 }}>Meeting recorder access is not enabled for this workspace yet.</p>
+        <p className="nr-item-meta" style={{ margin: 0 }}>Meeting transcript import is not enabled for this workspace yet.</p>
       </section>
     );
   }
 
+  const providerOrder = ["READ_AI", "FATHOM", "FIREFLIES", "MANUAL_UPLOAD"];
+  const v1Catalog = sources?.catalog
+    ? sources.catalog
+      .filter((entry: any) => providerOrder.includes(entry.provider))
+      .sort((left: any, right: any) => providerOrder.indexOf(left.provider) - providerOrder.indexOf(right.provider))
+    : [];
+  const v1Connections = sources?.connections?.filter((connection: any) => providerOrder.includes(connection.provider)) ?? [];
+
   return (
     <section className="nr-item stack" style={{ gap: 16, padding: 18 }}>
-      {config ? (
-        <div>
-          <div className="row">
-            <strong className="nr-item-title">Corgtex meeting recorder</strong>
-            <span className="tag" style={{ background: config.config.enabled ? "var(--accent-soft)" : "transparent" }}>
-              {config.config.enabled ? "Enabled" : "Disabled"}
-            </span>
-          </div>
-          <p className="nr-item-meta" style={{ fontSize: "0.82rem", marginTop: 8 }}>
-            Uses Corgtex-managed Recall.ai and Meeting BaaS accounts. Calendar connections stay in Corgtex; vendor keys are never shown to customers.
-          </p>
-          <form action={updateMeetingRecorderConfigAction} className="stack" style={{ gap: 8, paddingTop: 8 }}>
-            <input type="hidden" name="workspaceId" value={workspaceId} />
-            <label style={{ fontSize: "0.85rem" }}>
-              Recorder
-              <select name="enabled" defaultValue={config.config.enabled ? "true" : "false"}>
-                <option value="true">Enabled</option>
-                <option value="false">Disabled</option>
-              </select>
-            </label>
-            <label style={{ fontSize: "0.85rem" }}>
-              Automatic calendar recording
-              <select name="autoRecordEnabled" defaultValue={config.config.autoRecordEnabled ? "true" : "false"}>
-                <option value="true">Enabled</option>
-                <option value="false">Disabled</option>
-              </select>
-            </label>
-            <div className="actions-inline">
-              <label style={{ flex: 1, fontSize: "0.85rem" }}>
-                Default provider
-                <select name="defaultProvider" defaultValue={config.config.defaultProvider}>
-                  <option value="RECALL_AI">Recall.ai</option>
-                  <option value="MEETING_BAAS">Meeting BaaS</option>
-                </select>
-              </label>
-              <label style={{ flex: 1, fontSize: "0.85rem" }}>
-                Fallback provider
-                <select name="fallbackProvider" defaultValue={config.config.fallbackProvider ?? ""}>
-                  <option value="">None</option>
-                  <option value="RECALL_AI">Recall.ai</option>
-                  <option value="MEETING_BAAS">Meeting BaaS</option>
-                </select>
-              </label>
-            </div>
-            <label style={{ fontSize: "0.85rem" }}>
-              Bot name
-              <input name="botName" defaultValue={config.config.botName} />
-            </label>
-            <label style={{ fontSize: "0.85rem" }}>
-              Entry message
-              <textarea name="entryMessage" defaultValue={config.config.entryMessage ?? ""} rows={3} />
-            </label>
-            <label style={{ fontSize: "0.85rem" }}>
-              Monthly minute cap
-              <input name="monthlyMinuteCap" type="number" min="0" defaultValue={config.config.monthlyMinuteCap} />
-            </label>
-            <p className="nr-item-meta" style={{ fontSize: "0.82rem", margin: 0 }}>
-              Used this month: {config.usage.usedMinutes} minutes.
-            </p>
-            <button type="submit" className="secondary small">Save recorder settings</button>
-          </form>
-        </div>
-      ) : null}
-
       {sources ? (
-        <div className="nr-item" style={{ padding: "12px 0" }}>
+        <div className="stack" style={{ gap: 12, padding: "12px 0" }}>
           <div className="row">
-            <strong className="nr-item-title">Meeting records</strong>
-            <span className="tag" style={{ background: sources.connections.length > 0 ? "var(--accent-soft)" : "transparent" }}>
-              {sources.connections.length > 0 ? `${sources.connections.length} connected` : "Ready"}
+            <strong className="nr-item-title">Meeting transcript imports</strong>
+            <span className="tag" style={{ background: v1Connections.length > 0 ? "var(--accent-soft)" : "transparent" }}>
+              {v1Connections.length > 0 ? `${v1Connections.length} connected` : "Ready"}
             </span>
           </div>
           <p className="nr-item-meta" style={{ fontSize: "0.82rem", marginTop: 8 }}>
-            Bring in recorder transcripts as the first onboarding source. Batches are processed oldest to newest, and newer source revisions replace stale active transcripts while keeping the older evidence.
+            Bring in transcripts from the recorder your team already uses. Read.ai supports signed webhooks and manual exports in V1; Fathom and Fireflies support API-key backfill plus future-sync webhooks.
           </p>
-          <details>
+          <details open>
             <summary className="nr-hide-marker settings-disclosure-summary" style={{ color: "var(--accent)", cursor: "pointer", marginTop: 8 }}>
-              Connect providers and upload exports
+              Connect providers or upload exports
             </summary>
             <div className="stack" style={{ gap: 20, marginTop: 12 }}>
-              {sources.catalog.slice(0, 8).map((entry: any) => {
+              {v1Catalog.map((entry: any) => {
                 const connection = sources.connections.find((item: any) => item.provider === entry.provider);
                 const webhookUrl = `${origin}/api/integrations/meeting-transcripts/${entry.slug}/webhook?workspaceId=${workspaceId}`;
+                const isManualUpload = entry.provider === "MANUAL_UPLOAD";
+                const supportsProviderBackfill = entry.provider === "FATHOM" || entry.provider === "FIREFLIES";
                 return (
                   <div key={entry.provider} style={{ borderTop: "1px solid var(--line)", paddingTop: 12 }}>
                     <div className="row">
                       <strong className="nr-item-title">{entry.label}</strong>
                       <span className="tag" style={{ background: connection?.status === "ACTIVE" ? "var(--accent-soft)" : "transparent" }}>
-                        {connection?.status === "ACTIVE" ? "Connected" : entry.connectionStatus}
+                        {connection?.status === "ACTIVE" ? "Connected" : isManualUpload ? "Upload" : entry.connectionStatus}
                       </span>
                     </div>
                     <p className="nr-item-meta" style={{ fontSize: "0.82rem", margin: "6px 0" }}>
                       {entry.firstPath}
                     </p>
                     <div className="stack" style={{ gap: 8 }}>
-                      <form action={connectMeetingTranscriptSourceAction} className="stack nr-form-section">
-                        <input type="hidden" name="workspaceId" value={workspaceId} />
-                        <input type="hidden" name="provider" value={entry.slug} />
-                        <label style={{ fontSize: "0.85rem" }}>
-                          API key
-                          <input name="apiKey" type="password" autoComplete="off" placeholder={connection?.hasApiKey ? "Stored" : "Provider API key"} />
-                        </label>
-                        <label style={{ fontSize: "0.85rem" }}>
-                          Webhook secret
-                          <input name="webhookSecret" type="password" autoComplete="off" placeholder={connection?.hasWebhookSecret ? "Stored" : "Provider webhook secret"} />
-                        </label>
-                        <p className="nr-item-meta" style={{ fontSize: "0.78rem", margin: 0, wordBreak: "break-all" }}>
-                          Webhook URL: {webhookUrl}
-                        </p>
-                        <div className="actions-inline">
-                          <button type="submit" className="secondary small">Save connection</button>
-                        </div>
-                      </form>
+                      {!isManualUpload ? (
+                        <form action={connectMeetingTranscriptSourceAction} className="stack nr-form-section">
+                          <input type="hidden" name="workspaceId" value={workspaceId} />
+                          <input type="hidden" name="provider" value={entry.slug} />
+                          <input type="hidden" name="webhookUrl" value={webhookUrl} />
+                          {entry.provider !== "READ_AI" ? (
+                            <label style={{ fontSize: "0.85rem" }}>
+                              API key
+                              <input name="apiKey" type="password" autoComplete="off" placeholder={connection?.hasApiKey ? "Stored" : "Provider API key"} />
+                            </label>
+                          ) : null}
+                          <label style={{ fontSize: "0.85rem" }}>
+                            Webhook secret
+                            <input
+                              name="webhookSecret"
+                              type="password"
+                              autoComplete="off"
+                              placeholder={connection?.hasWebhookSecret ? "Stored" : entry.provider === "FATHOM" ? "Created automatically from API key" : "Provider webhook secret"}
+                            />
+                          </label>
+                          <p className="nr-item-meta" style={{ fontSize: "0.78rem", margin: 0, wordBreak: "break-all" }}>
+                            Webhook URL: {webhookUrl}
+                          </p>
+                          <div className="actions-inline">
+                            <button type="submit" className="secondary small">
+                              {entry.provider === "FATHOM" ? "Save and create webhook" : "Save connection"}
+                            </button>
+                          </div>
+                        </form>
+                      ) : null}
                       <form
                         action={`/api/workspaces/${workspaceId}/meeting-transcript-sources/${entry.slug}/import`}
                         method="post"
@@ -487,7 +445,7 @@ export function MeetingRecorderConnectorPanel({ workspaceId, origin, config, sou
                         <input type="hidden" name="workspaceId" value={workspaceId} />
                         <input type="hidden" name="provider" value={entry.slug} />
                         <input type="hidden" name="sourceKind" value="tools-upload" />
-                        <input type="hidden" name="redirectTo" value={`/workspaces/${workspaceId}/tools?type=TOOL&q=meeting%20recorder`} />
+                        <input type="hidden" name="redirectTo" value={`/workspaces/${workspaceId}/tools?type=TOOL&q=meeting%20transcripts`} />
                         <label style={{ fontSize: "0.85rem" }}>
                           Transcript export or ZIP
                           <input name="file" type="file" multiple accept=".zip,.json,.txt,.vtt,.srt,.docx,.pdf,.md,.csv,text/*,application/json,application/pdf,application/zip" />
@@ -515,11 +473,11 @@ export function MeetingRecorderConnectorPanel({ workspaceId, origin, config, sou
                           <button type="submit" className="secondary small">Import batch</button>
                         </div>
                       </form>
-                      {connection ? (
+                      {supportsProviderBackfill && connection?.hasApiKey ? (
                         <form action={runMeetingTranscriptSourceBackfillAction}>
                           <input type="hidden" name="workspaceId" value={workspaceId} />
                           <input type="hidden" name="provider" value={entry.slug} />
-                          <button type="submit" className="ghost small">Run backfill</button>
+                          <button type="submit" className="ghost small">Backfill recent meetings</button>
                         </form>
                       ) : null}
                       <p className="nr-item-meta" style={{ fontSize: "0.78rem", margin: 0 }}>
@@ -561,6 +519,75 @@ export function MeetingRecorderConnectorPanel({ workspaceId, origin, config, sou
             </div>
           )}
         </div>
+      ) : null}
+
+      {config ? (
+        <details>
+          <summary className="nr-hide-marker settings-disclosure-summary" style={{ color: "var(--accent)", cursor: "pointer" }}>
+            Corgtex-managed recorder
+          </summary>
+          <div style={{ marginTop: 12 }}>
+            <div className="row">
+              <strong className="nr-item-title">Corgtex meeting recorder</strong>
+              <span className="tag" style={{ background: config.config.enabled ? "var(--accent-soft)" : "transparent" }}>
+                {config.config.enabled ? "Enabled" : "Disabled"}
+              </span>
+            </div>
+            <p className="nr-item-meta" style={{ fontSize: "0.82rem", marginTop: 8 }}>
+              Uses Corgtex-managed Recall.ai and Meeting BaaS accounts. Calendar connections stay in Corgtex; vendor keys are never shown to customers.
+            </p>
+            <form action={updateMeetingRecorderConfigAction} className="stack" style={{ gap: 8, paddingTop: 8 }}>
+              <input type="hidden" name="workspaceId" value={workspaceId} />
+              <label style={{ fontSize: "0.85rem" }}>
+                Recorder
+                <select name="enabled" defaultValue={config.config.enabled ? "true" : "false"}>
+                  <option value="true">Enabled</option>
+                  <option value="false">Disabled</option>
+                </select>
+              </label>
+              <label style={{ fontSize: "0.85rem" }}>
+                Automatic calendar recording
+                <select name="autoRecordEnabled" defaultValue={config.config.autoRecordEnabled ? "true" : "false"}>
+                  <option value="true">Enabled</option>
+                  <option value="false">Disabled</option>
+                </select>
+              </label>
+              <div className="actions-inline">
+                <label style={{ flex: 1, fontSize: "0.85rem" }}>
+                  Default provider
+                  <select name="defaultProvider" defaultValue={config.config.defaultProvider}>
+                    <option value="RECALL_AI">Recall.ai</option>
+                    <option value="MEETING_BAAS">Meeting BaaS</option>
+                  </select>
+                </label>
+                <label style={{ flex: 1, fontSize: "0.85rem" }}>
+                  Fallback provider
+                  <select name="fallbackProvider" defaultValue={config.config.fallbackProvider ?? ""}>
+                    <option value="">None</option>
+                    <option value="RECALL_AI">Recall.ai</option>
+                    <option value="MEETING_BAAS">Meeting BaaS</option>
+                  </select>
+                </label>
+              </div>
+              <label style={{ fontSize: "0.85rem" }}>
+                Bot name
+                <input name="botName" defaultValue={config.config.botName} />
+              </label>
+              <label style={{ fontSize: "0.85rem" }}>
+                Entry message
+                <textarea name="entryMessage" defaultValue={config.config.entryMessage ?? ""} rows={3} />
+              </label>
+              <label style={{ fontSize: "0.85rem" }}>
+                Monthly minute cap
+                <input name="monthlyMinuteCap" type="number" min="0" defaultValue={config.config.monthlyMinuteCap} />
+              </label>
+              <p className="nr-item-meta" style={{ fontSize: "0.82rem", margin: 0 }}>
+                Used this month: {config.usage.usedMinutes} minutes.
+              </p>
+              <button type="submit" className="secondary small">Save recorder settings</button>
+            </form>
+          </div>
+        </details>
       ) : null}
     </section>
   );

@@ -41,6 +41,7 @@ export const WORKSPACE_FEATURE_FLAG_ORDER = [
   "OS_METRICS",
   "SETTINGS_GENERAL",
   "MULTILINGUAL",
+  "MEETING_TRANSCRIPT_SOURCES",
   "MEETING_RECORDERS",
   "MEETING_CONTEXTUAL_INTELLIGENCE",
   "CONTEXT_MAP_AI",
@@ -155,6 +156,7 @@ export const MODULE_MANIFESTS: readonly ModuleManifest[] = [
     nav: { href: "/meetings", labelKey: "meetings", icon: "meetings", group: "operations" },
     scopes: ["meetings:read", "meetings:write"],
     subFlags: [
+      flag("MEETING_TRANSCRIPT_SOURCES", "Meeting transcript sources", "Import transcripts from existing meeting recorders and upload exports.", false),
       flag("MEETING_RECORDERS", "Meeting recorders", "Managed meeting recorder entitlement and recorder config.", false),
       flag(
         "MEETING_CONTEXTUAL_INTELLIGENCE",

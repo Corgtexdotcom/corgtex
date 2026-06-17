@@ -1,5 +1,5 @@
 import { createHmac } from "node:crypto";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const { prismaMock, intakeMeetingTranscriptMock } = vi.hoisted(() => ({
   prismaMock: {
@@ -28,6 +28,8 @@ const { prismaMock, intakeMeetingTranscriptMock } = vi.hoisted(() => ({
     },
     workspaceFeatureFlag: {
       findUnique: vi.fn(),
+      findMany: vi.fn(),
+      upsert: vi.fn(),
     },
     auditLog: {
       create: vi.fn(),
@@ -67,12 +69,13 @@ describe("meeting transcript sources", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     prismaMock.$transaction.mockImplementation((callback) => callback(prismaMock));
-    prismaMock.meetingTranscriptImportBatch.create.mockResolvedValue({
+    prismaMock.meetingTranscriptImportBatch.create.mockImplementation(({ data }) => Promise.resolve({
       id: "batch-1",
       workspaceId: "ws-1",
       provider: "FIREFLIES",
       status: "RUNNING",
-    });
+      ...data,
+    }));
     prismaMock.meetingTranscriptImportBatch.update.mockImplementation(({ data }) => Promise.resolve({
       id: "batch-1",
       workspaceId: "ws-1",
@@ -113,6 +116,12 @@ describe("meeting transcript sources", () => {
       isActive: true,
     });
     prismaMock.workspaceFeatureFlag.findUnique.mockResolvedValue({ enabled: true });
+    prismaMock.workspaceFeatureFlag.findMany.mockResolvedValue([{ flag: "MEETING_TRANSCRIPT_SOURCES", enabled: true }]);
+    prismaMock.workspaceFeatureFlag.upsert.mockImplementation(({ create, update }) => Promise.resolve({
+      id: "flag-1",
+      ...create,
+      ...update,
+    }));
     prismaMock.auditLog.create.mockResolvedValue({});
     intakeMeetingTranscriptMock.mockResolvedValue({
       status: "meeting_matched",
@@ -120,6 +129,10 @@ describe("meeting transcript sources", () => {
       inferred: {},
       message: "saved",
     });
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
   });
 
   it("ranks ready providers and keeps manual export guidance in the catalog", async () => {
@@ -186,8 +199,8 @@ describe("meeting transcript sources", () => {
     })).toThrow("Recorded date is required");
   });
 
-  it("gates transcript imports on the meeting recorder feature flag", async () => {
-    prismaMock.workspaceFeatureFlag.findUnique.mockResolvedValueOnce(null);
+  it("gates transcript imports on transcript-source or legacy recorder feature flags", async () => {
+    prismaMock.workspaceFeatureFlag.findMany.mockResolvedValueOnce([]);
     const { importMeetingTranscriptSourceArtifacts } = await import("./meeting-transcript-sources");
 
     await expect(importMeetingTranscriptSourceArtifacts(agentActor, {
@@ -203,6 +216,19 @@ describe("meeting transcript sources", () => {
     });
 
     expect(prismaMock.meetingTranscriptImportBatch.create).not.toHaveBeenCalled();
+
+    prismaMock.workspaceFeatureFlag.findMany.mockResolvedValueOnce([{ flag: "MEETING_RECORDERS", enabled: true }]);
+    await expect(importMeetingTranscriptSourceArtifacts(agentActor, {
+      workspaceId: "ws-1",
+      provider: "FIREFLIES",
+      artifacts: [{
+        externalId: "ff-legacy",
+        recordedAt: "2026-05-01T10:00:00.000Z",
+        text: "Jan: Legacy recorder entitlement still allows transcript imports.",
+      }],
+    })).resolves.toMatchObject({
+      batch: expect.objectContaining({ status: "COMPLETED" }),
+    });
   });
 
   it("restricts provider credential writes to workspace admins", async () => {
@@ -224,6 +250,62 @@ describe("meeting transcript sources", () => {
     });
 
     expect(prismaMock.meetingTranscriptSourceConnection.upsert).not.toHaveBeenCalled();
+  });
+
+  it("creates a Fathom webhook when connecting with an API key and webhook URL", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ secret: "whsec_created" }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const { connectMeetingTranscriptSource } = await import("./meeting-transcript-sources");
+
+    await connectMeetingTranscriptSource(userActor, {
+      workspaceId: "ws-1",
+      provider: "FATHOM",
+      apiKey: "fathom-key",
+      webhookUrl: "https://app.corgtex.com/api/integrations/meeting-transcripts/fathom/webhook?workspaceId=ws-1",
+    });
+
+    expect(fetchMock).toHaveBeenCalledWith("https://api.fathom.ai/external/v1/webhooks", expect.objectContaining({
+      method: "POST",
+      headers: expect.objectContaining({ "X-Api-Key": "fathom-key" }),
+      body: expect.stringContaining("\"include_transcript\":true"),
+    }));
+    expect(prismaMock.meetingTranscriptSourceConnection.upsert).toHaveBeenCalledWith(expect.objectContaining({
+      create: expect.objectContaining({
+        provider: "FATHOM",
+        apiKeyEnc: "enc:fathom-key",
+        webhookSecretEnc: "enc:whsec_created",
+      }),
+      update: expect.objectContaining({
+        webhookSecretEnc: "enc:whsec_created",
+      }),
+    }));
+  });
+
+  it("initializes transcript-source access without touching recorder configuration", async () => {
+    const { enableMeetingTranscriptSourcesForWorkspace } = await import("./meeting-transcript-sources");
+
+    await expect(enableMeetingTranscriptSourcesForWorkspace(userActor, {
+      workspaceId: "ws-1",
+    })).resolves.toEqual({ featureEnabled: true });
+
+    expect(prismaMock.workspaceFeatureFlag.upsert).toHaveBeenCalledWith(expect.objectContaining({
+      where: { workspaceId_flag: { workspaceId: "ws-1", flag: "MEETING_TRANSCRIPT_SOURCES" } },
+      create: expect.objectContaining({
+        workspaceId: "ws-1",
+        flag: "MEETING_TRANSCRIPT_SOURCES",
+        enabled: true,
+      }),
+      update: { enabled: true },
+    }));
+    expect(prismaMock.auditLog.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        action: "meeting-transcript-sources.feature-updated",
+        meta: expect.objectContaining({ flag: "MEETING_TRANSCRIPT_SOURCES", enabled: true }),
+      }),
+    }));
   });
 
   it("includes the meeting date in fallback external IDs", async () => {
@@ -485,6 +567,44 @@ describe("meeting transcript sources", () => {
       secret: "wrong",
       headers: { "x-fireflies-signature": signature },
     })).toBe(false);
+    expect(verifyMeetingTranscriptWebhookSignature({
+      provider: "fireflies",
+      rawBody,
+      secret,
+      headers: { "x-hub-signature": signature },
+    })).toBe(true);
+  });
+
+  it("verifies Fathom webhook signatures with signed id, timestamp, and body", async () => {
+    const { verifyMeetingTranscriptWebhookSignature } = await import("./meeting-transcript-sources");
+    const rawBody = JSON.stringify({ recording_id: 123456789, title: "QBR" });
+    const secret = `whsec_${Buffer.from("fathom-webhook-secret").toString("base64")}`;
+    const timestamp = String(Math.floor(Date.now() / 1000));
+    const webhookId = "msg_123";
+    const signature = createHmac("sha256", Buffer.from(secret.slice("whsec_".length), "base64"))
+      .update(`${webhookId}.${timestamp}.${rawBody}`)
+      .digest("base64");
+
+    expect(verifyMeetingTranscriptWebhookSignature({
+      provider: "fathom",
+      rawBody,
+      secret,
+      headers: {
+        "webhook-id": webhookId,
+        "webhook-timestamp": timestamp,
+        "webhook-signature": `v1,${signature}`,
+      },
+    })).toBe(true);
+    expect(verifyMeetingTranscriptWebhookSignature({
+      provider: "fathom",
+      rawBody,
+      secret,
+      headers: {
+        "webhook-id": webhookId,
+        "webhook-timestamp": String(Number(timestamp) - 600),
+        "webhook-signature": `v1,${signature}`,
+      },
+    })).toBe(false);
   });
 
   it("verifies Read.ai signatures with the base64 signing key", async () => {
@@ -636,6 +756,126 @@ describe("meeting transcript sources", () => {
     expect(intakeMeetingTranscriptMock).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
       meetingId: "meeting-existing",
     }));
+  });
+
+  it("backfills recent Fathom meetings with X-Api-Key authentication", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        items: [{
+          recording_id: 123456789,
+          title: "QBR",
+          recording_start_time: "2026-05-01T10:00:00.000Z",
+          recording_end_time: "2026-05-01T11:00:00.000Z",
+          share_url: "https://fathom.video/share/qbr",
+          meeting_url: "https://us02web.zoom.us/j/123456789",
+          transcript: [{
+            speaker: { display_name: "Jane Doe", matched_calendar_invitee_email: "jane@example.com" },
+            text: "Let's revisit the budget allocations.",
+            timestamp: "00:05:32",
+          }],
+          default_summary: { markdown_formatted: "## Summary\nBudget review." },
+        }],
+        next_cursor: null,
+      }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    prismaMock.meetingTranscriptSourceConnection.findUnique.mockResolvedValueOnce({
+      id: "connection-fathom",
+      workspaceId: "ws-1",
+      provider: "FATHOM",
+      apiKeyEnc: "enc:fathom-key",
+      webhookSecretEnc: "enc:whsec_created",
+    });
+    const { runMeetingTranscriptSourceBackfill } = await import("./meeting-transcript-sources");
+
+    await runMeetingTranscriptSourceBackfill(userActor, {
+      workspaceId: "ws-1",
+      provider: "FATHOM",
+    });
+
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(String(url)).toContain("https://api.fathom.ai/external/v1/meetings");
+    expect(String(url)).toContain("include_transcript=true");
+    expect(init).toMatchObject({ headers: { "X-Api-Key": "fathom-key" } });
+    expect(intakeMeetingTranscriptMock).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+      provider: "FATHOM",
+      externalId: "meeting-transcript:FATHOM:123456789",
+      transcript: "Jane Doe: Let's revisit the budget allocations.",
+      participantEmails: ["jane@example.com"],
+    }));
+    expect(prismaMock.meetingTranscriptSourceConnection.update).toHaveBeenCalledWith(expect.objectContaining({
+      where: { id: "connection-fathom" },
+      data: expect.objectContaining({ lastError: null }),
+    }));
+  });
+
+  it("backfills recent Fireflies transcripts through GraphQL", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        data: {
+          transcripts: [{
+            id: "ff-backfill-1",
+            title: "Product Weekly",
+            date: "2026-05-01T10:00:00.000Z",
+            transcript_url: "https://app.fireflies.ai/view/ff-backfill-1",
+            meeting_link: "https://meet.google.com/abc-defg-hij",
+            participants: ["jan@example.com"],
+            sentences: [{ speaker_name: "Jan", text: "Fireflies backfill works.", start_time: 1, end_time: 3 }],
+            summary: { overview: "Backfill overview." },
+          }],
+        },
+      }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    prismaMock.meetingTranscriptSourceConnection.findUnique.mockResolvedValueOnce({
+      id: "connection-fireflies",
+      workspaceId: "ws-1",
+      provider: "FIREFLIES",
+      apiKeyEnc: "enc:fireflies-key",
+      webhookSecretEnc: "enc:secret",
+    });
+    const { runMeetingTranscriptSourceBackfill } = await import("./meeting-transcript-sources");
+
+    await runMeetingTranscriptSourceBackfill(userActor, {
+      workspaceId: "ws-1",
+      provider: "FIREFLIES",
+    });
+
+    expect(fetchMock).toHaveBeenCalledWith("https://api.fireflies.ai/graphql", expect.objectContaining({
+      method: "POST",
+      headers: expect.objectContaining({ authorization: "Bearer fireflies-key" }),
+      body: expect.stringContaining("BackfillTranscripts"),
+    }));
+    expect(intakeMeetingTranscriptMock).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+      provider: "FIREFLIES",
+      externalId: "meeting-transcript:FIREFLIES:ff-backfill-1",
+      transcript: "Jan: Fireflies backfill works.",
+    }));
+  });
+
+  it("keeps Read.ai historical backfill deferred to manual export in V1", async () => {
+    prismaMock.meetingTranscriptSourceConnection.findUnique.mockResolvedValueOnce({
+      id: "connection-read",
+      workspaceId: "ws-1",
+      provider: "READ_AI",
+      apiKeyEnc: null,
+      webhookSecretEnc: "enc:read-secret",
+    });
+    const { runMeetingTranscriptSourceBackfill } = await import("./meeting-transcript-sources");
+
+    const result = await runMeetingTranscriptSourceBackfill(userActor, {
+      workspaceId: "ws-1",
+      provider: "READ_AI",
+    });
+
+    expect(result.batch).toMatchObject({
+      provider: "READ_AI",
+      status: "FAILED",
+      error: expect.stringContaining("deferred until the OAuth/API milestone"),
+    });
+    expect(intakeMeetingTranscriptMock).not.toHaveBeenCalled();
   });
 
   it("imports nested transcript bodies from signed webhooks without fetching provider APIs", async () => {

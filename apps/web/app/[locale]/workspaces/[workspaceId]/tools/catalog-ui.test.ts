@@ -185,12 +185,12 @@ describe("Tools catalog UI helpers", () => {
     ]);
   });
 
-  it("lets users request meeting recorder access before the recorder is enabled", () => {
+  it("lets users request meeting transcript access before transcript import is enabled", () => {
     const actions = getCatalogCardActions(item({
       id: "meeting-recorder",
       type: "TOOL",
       sourceType: "MEETING_RECORDER",
-      title: "Meeting recorder",
+      title: "Meeting transcripts",
       url: null,
       accessMode: "REQUEST",
     }), { workspaceId: "workspace-1", canManageCatalog: false });
@@ -201,12 +201,12 @@ describe("Tools catalog UI helpers", () => {
     ]);
   });
 
-  it("opens meeting recorder setup when the recorder is enabled", () => {
+  it("opens meeting transcript setup when transcript import is enabled", () => {
     const actions = getCatalogCardActions(item({
       id: "meeting-recorder",
       type: "TOOL",
       sourceType: "MEETING_RECORDER",
-      title: "Meeting recorder",
+      title: "Meeting transcripts",
       url: null,
       accessMode: "OPEN",
     }), { workspaceId: "workspace-1", canManageCatalog: false });

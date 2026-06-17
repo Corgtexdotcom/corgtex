@@ -68,14 +68,14 @@ const CONNECTOR_READINESS_PROFILES: Record<string, ConnectorReadinessProfile> = 
   },
   "meeting-recorder": {
     key: "meeting-recorder",
-    title: "Meeting recorder",
+    title: "Meeting transcripts",
     availability: "LIVE",
     connectMethod: "manual_import",
     connectorRole: "meeting_evidence",
     connectedBy: "Workspace admin",
-    supportedOperations: ["Recorder configuration", "Transcript source webhooks", "Transcript export upload"],
+    supportedOperations: ["Transcript source webhooks", "Transcript export upload", "Managed recorder configuration"],
     storagePolicy: "Meeting evidence is processed into proposals, actions, and Brain context with source provenance.",
-    adminNotes: "Recorder access depends on workspace feature flags and managed vendor accounts.",
+    adminNotes: "Transcript import uses existing recorder exports first. Managed recorder access remains a separate entitlement.",
     recommendationRank: 50,
   },
   "practice-ledger": {

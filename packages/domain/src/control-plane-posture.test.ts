@@ -20,6 +20,7 @@ const LEGACY_POSTURE_OVERRIDES: Record<string, Record<string, boolean>> = {
     TOOL_LINKS: false,
     BUILD_ARTIFACTS: false,
     CONTEXT_MAPS: false,
+    MEETING_TRANSCRIPT_SOURCES: false,
     MEETING_RECORDERS: false,
     MEETING_CONTEXTUAL_INTELLIGENCE: false,
     CONTEXT_MAP_AI: false,
@@ -32,6 +33,7 @@ const LEGACY_POSTURE_OVERRIDES: Record<string, Record<string, boolean>> = {
   enterprise: {
     AGENT_GOVERNANCE: true,
     SETTINGS_GENERAL: true,
+    MEETING_TRANSCRIPT_SOURCES: true,
     MEETING_RECORDERS: true,
     MEETING_CONTEXTUAL_INTELLIGENCE: true,
     AI_WORKSPACES: true,

@@ -411,6 +411,7 @@ export async function connectMeetingTranscriptSourceAction(formData: FormData) {
     displayName: asOptional(formData, "displayName"),
     apiKey: asOptional(formData, "apiKey"),
     webhookSecret: asOptional(formData, "webhookSecret"),
+    webhookUrl: asOptional(formData, "webhookUrl"),
   });
   refresh(workspaceId);
 }

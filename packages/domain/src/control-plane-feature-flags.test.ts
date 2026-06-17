@@ -19,6 +19,7 @@ const EXPECTED = [
   { flag: "OS_METRICS", label: "OS metrics", description: "Governance health and operating-system metrics.", defaultEnabled: true },
   { flag: "SETTINGS_GENERAL", label: "General settings", description: "General workspace configuration screens.", defaultEnabled: true },
   { flag: "MULTILINGUAL", label: "Multilingual", description: "Locale switcher and translated workspace UI.", defaultEnabled: false },
+  { flag: "MEETING_TRANSCRIPT_SOURCES", label: "Meeting transcript sources", description: "Import transcripts from existing meeting recorders and upload exports.", defaultEnabled: false },
   { flag: "MEETING_RECORDERS", label: "Meeting recorders", description: "Managed meeting recorder entitlement and recorder config.", defaultEnabled: false },
   { flag: "MEETING_CONTEXTUAL_INTELLIGENCE", label: "Context-aware meeting intelligence", description: "Use workspace context to summarize meetings and automatically update related governance records.", defaultEnabled: false },
   { flag: "CONTEXT_MAP_AI", label: "Context map AI", description: "Premium chat tools for reading, reasoning about, and applying living context map graph changes.", defaultEnabled: false },
