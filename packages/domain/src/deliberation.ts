@@ -1,3 +1,4 @@
+import type { Prisma } from "@prisma/client";
 import type { AppActor } from "@corgtex/shared";
 import { prisma } from "@corgtex/shared";
 import { requireWorkspaceMembership, actorUserIdForWorkspace } from "./auth";
@@ -7,6 +8,33 @@ import { getParentWorkItemVersion } from "./work-item-versions";
 
 const VALID_ENTRY_TYPES = ["REACTION", "OBJECTION"];
 const VALID_PARENT_TYPES = ["PROPOSAL", "SPEND", "TENSION", "MEETING", "BRAIN_ARTICLE", "ACTION"];
+const deliberationEntryListInclude = {
+  author: {
+    select: {
+      id: true,
+      displayName: true,
+      email: true,
+    }
+  },
+  targetCircle: {
+    select: {
+      id: true,
+      name: true,
+    }
+  },
+  targetMember: {
+    include: {
+      user: {
+        select: {
+          id: true,
+          displayName: true,
+          email: true,
+        }
+      }
+    }
+  }
+} as const;
+type ListedDeliberationEntry = Prisma.DeliberationEntryGetPayload<{ include: typeof deliberationEntryListInclude }>;
 
 export async function postDeliberationEntry(actor: AppActor, params: {
   workspaceId: string;
@@ -180,32 +208,39 @@ export async function listDeliberationEntries(actor: AppActor, params: {
       parentType: params.parentType,
       parentId: params.parentId,
     },
-    include: {
-      author: {
-        select: {
-          id: true,
-          displayName: true,
-          email: true,
-        }
-      },
-      targetCircle: {
-        select: {
-          id: true,
-          name: true,
-        }
-      },
-      targetMember: {
-        include: {
-          user: {
-            select: {
-              id: true,
-              displayName: true,
-              email: true,
-            }
-          }
-        }
-      }
-    },
+    include: deliberationEntryListInclude,
     orderBy: { createdAt: "asc" }
   });
+}
+
+export async function listDeliberationEntriesForParents(actor: AppActor, params: {
+  workspaceId: string;
+  parentType: string;
+  parentIds: string[];
+}): Promise<Map<string, ListedDeliberationEntry[]>> {
+  await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
+  const parentIds = Array.from(new Set(params.parentIds.filter((parentId) => parentId.length > 0)));
+  const entriesByParentId = new Map<string, ListedDeliberationEntry[]>();
+  for (const parentId of parentIds) {
+    entriesByParentId.set(parentId, []);
+  }
+  if (parentIds.length === 0) {
+    return entriesByParentId;
+  }
+
+  const entries = await prisma.deliberationEntry.findMany({
+    where: {
+      workspaceId: params.workspaceId,
+      parentType: params.parentType,
+      parentId: { in: parentIds },
+    },
+    include: deliberationEntryListInclude,
+    orderBy: { createdAt: "asc" }
+  });
+
+  for (const entry of entries) {
+    entriesByParentId.get(entry.parentId)?.push(entry);
+  }
+
+  return entriesByParentId;
 }
