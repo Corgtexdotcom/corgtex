@@ -96,6 +96,7 @@ export const SCOPE_REGISTRY = {
   "integrations:read":   { label: "Read integrations",          group: "support",    default: false, delegatedDefault: true,  description: "Inspect installed communication and OAuth integrations. Admin-only where domain rules require it." },
   "data-sources:read":   { label: "Read data feeds",            group: "support",    default: false, delegatedDefault: true,  description: "Inspect external data sources and sync health. Admin-only where domain rules require it." },
   "data-sources:write":  { label: "Sync data feeds",            group: "support",    default: false, delegatedDefault: true,  description: "Trigger external data source sync jobs through same-role delegation." },
+  "webhooks:write":      { label: "Ingest webhooks",            group: "support",    default: false, delegatedDefault: false, description: "Accept inbound webhook events through explicit agent credentials." },
   "agents:read":         { label: "Read agent runs",            group: "support",    default: false, delegatedDefault: true,  description: "Inspect agent runs, steps, and failures. Same-role delegation." },
   "runtime:read":        { label: "Read runtime jobs",          group: "support",    default: false, delegatedDefault: true,  description: "Inspect workflow jobs and runtime failures. Same-role delegation." },
   "runtime:write":       { label: "Repair runtime jobs",        group: "support",    default: false, delegatedDefault: true,  description: "Retry or discard failed workflow jobs through same-role delegation." },

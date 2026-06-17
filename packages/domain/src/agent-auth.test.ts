@@ -30,8 +30,15 @@ describe("scope defaults", () => {
     expect(DELEGATED_DEFAULT_SCOPES).toContain("members:write");
     expect(DELEGATED_DEFAULT_SCOPES).toContain("runtime:write");
     expect(DELEGATED_DEFAULT_SCOPES).toContain("workspace:write");
+    expect(DEFAULT_SCOPES).not.toContain("webhooks:write");
+    expect(DELEGATED_DEFAULT_SCOPES).not.toContain("webhooks:write");
     expect(DELEGATED_DEFAULT_SCOPES).not.toContain("support:write");
     expect(SCOPE_REGISTRY["workspace:write"].delegatedDefault).toBe(true);
+    expect(SCOPE_REGISTRY["webhooks:write"]).toMatchObject({
+      default: false,
+      delegatedDefault: false,
+      group: "support",
+    });
     expect(SCOPE_REGISTRY["tools:credentials:read"].description).toContain("audited");
   });
 });

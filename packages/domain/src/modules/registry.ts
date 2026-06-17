@@ -534,6 +534,7 @@ export const PLATFORM_SCOPES: readonly string[] = [
   "integrations:read",
   "data-sources:read",
   "data-sources:write",
+  "webhooks:write",
 ];
 
 /**

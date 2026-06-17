@@ -1,15 +1,22 @@
 import { NextRequest, NextResponse } from "next/server";
 import { handleRouteError } from "@/lib/http";
-import { processInboundWebhook } from "@corgtex/domain";
+import {
+  AppError,
+  processInboundWebhook,
+  requireAgentScope,
+  requireWorkspaceMembership,
+  resolveAgentActorFromBearer,
+} from "@corgtex/domain";
 import { prisma } from "@corgtex/shared";
-import { createHmac } from "node:crypto";
 import { rateLimitWebhookIngest } from "@/lib/rate-limit-middleware";
+
+const INBOUND_WEBHOOK_SCOPE = "webhooks:write";
 
 /**
  * Inbound webhook endpoint for external integrations (Slack, calendar, generic).
  *
- * Authentication: Either a valid agent credential token in the Authorization header,
- * or an HMAC signature in X-Webhook-Signature using the workspace's inbound secret.
+ * Authentication: a valid agent credential token in the Authorization header
+ * with the explicit inbound webhook write scope.
  *
  * POST /api/webhooks/:workspaceId/ingest?source=slack|calendar|generic
  */
@@ -39,33 +46,20 @@ export async function POST(
     // Authenticate via agent credential token
     const authHeader = request.headers.get("authorization");
     if (!authHeader?.startsWith("Bearer ")) {
-      return NextResponse.json({ error: "Missing authorization" }, { status: 401 });
+      throw new AppError(401, "UNAUTHENTICATED", "Missing authorization.");
     }
 
-    const token = authHeader.slice(7);
-    const tokenHash = createHmac("sha256", "corgtex-inbound-webhook").update(token).digest("hex");
-
-    const credential = await prisma.agentCredential.findFirst({
-      where: {
-        workspaceId,
-        tokenHash,
-        isActive: true,
-      },
-      select: { id: true, scopes: true },
-    });
-
-    if (!credential) {
-      return NextResponse.json({ error: "Invalid or expired credential" }, { status: 401 });
+    const token = authHeader.slice("Bearer ".length).trim();
+    if (!token) {
+      throw new AppError(401, "UNAUTHENTICATED", "Missing authorization.");
     }
 
-    // Check scope (allow "webhook:ingest" or "all" scopes)
-    const hasScope = credential.scopes.length === 0 ||
-      credential.scopes.includes("webhook:ingest") ||
-      credential.scopes.includes("all");
-
-    if (!hasScope) {
-      return NextResponse.json({ error: "Insufficient scope" }, { status: 403 });
+    const actor = await resolveAgentActorFromBearer(token);
+    if (!actor || actor.kind !== "agent" || actor.authProvider !== "credential") {
+      throw new AppError(401, "UNAUTHENTICATED", "Invalid or expired credential.");
     }
+    await requireWorkspaceMembership({ actor, workspaceId });
+    requireAgentScope(actor, INBOUND_WEBHOOK_SCOPE);
 
     // Parse payload
     let payload: Record<string, unknown>;
