@@ -1,11 +1,13 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 import {
   activeAiWorkspaceProvider,
+  aiWorkspaceConnectionForProvider,
   aiWorkspaceSettingsHref,
   aiWorkspaceLaunchUrl,
+  isAiWorkspaceConnected,
   type AiWorkspaceLaunchState,
   type AiWorkspaceLaunchProvider,
 } from "@/lib/ai-workspace-launch";
@@ -17,11 +19,6 @@ type Props = {
   variant: "mobile" | "rail";
 };
 
-function openExternalUrl(url: string | null) {
-  if (!url || typeof window === "undefined") return false;
-  return window.open(url, "_blank", "noopener,noreferrer") !== null;
-}
-
 function parseRouteError(value: unknown) {
   if (!value || typeof value !== "object") return null;
   const error = (value as { error?: unknown }).error;
@@ -29,6 +26,24 @@ function parseRouteError(value: unknown) {
   if (error && typeof error === "object" && typeof (error as { message?: unknown }).message === "string") {
     return (error as { message: string }).message;
   }
+  return null;
+}
+
+function claudeConnectedSignal(value: unknown) {
+  if (!value || typeof value !== "object") return null;
+  const signals = (value as { signals?: unknown }).signals;
+  if (signals && typeof signals === "object") {
+    const claude = (signals as { claude?: unknown }).claude;
+    if (claude && typeof claude === "object" && typeof (claude as { connected?: unknown }).connected === "boolean") {
+      return (claude as { connected: boolean }).connected;
+    }
+  }
+
+  const claude = (value as { claude?: unknown }).claude;
+  if (claude && typeof claude === "object" && typeof (claude as { connected?: unknown }).connected === "boolean") {
+    return (claude as { connected: boolean }).connected;
+  }
+
   return null;
 }
 
@@ -69,12 +84,46 @@ export function AiWorkspaceLaunchPanel({
   const [pendingProviderKey, setPendingProviderKey] = useState(
     initialState.activeProviderKey ?? sortedProviders(initialState.providers)[0]?.key ?? "",
   );
+  const [verifiedProviderConnections, setVerifiedProviderConnections] = useState<Record<string, boolean>>({});
   const [status, setStatus] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const provider = activeAiWorkspaceProvider(selectionState);
   const orderedProviders = sortedProviders(selectionState.providers);
+  const activeConnection = aiWorkspaceConnectionForProvider(selectionState, provider?.key);
+  const activeProviderVerified = provider ? verifiedProviderConnections[provider.key] : undefined;
+  const activeProviderConnected = activeProviderVerified ?? isAiWorkspaceConnected(activeConnection);
   const activeProviderLaunchUrl = aiWorkspaceLaunchUrl(provider?.key);
+
+  useEffect(() => {
+    if (provider?.key !== "claude") return;
+
+    let cancelled = false;
+
+    async function checkClaudeConnection() {
+      try {
+        const response = await fetch(`/api/workspaces/${workspaceId}/mcp-connections`, {
+          cache: "no-store",
+        });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) return;
+        const connected = claudeConnectedSignal(data);
+        if (connected === null || cancelled) return;
+        setVerifiedProviderConnections((current) => ({
+          ...current,
+          claude: connected,
+        }));
+      } catch {
+        return;
+      }
+    }
+
+    void checkClaudeConnection();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [provider?.key, workspaceId]);
 
   function setupHref(providerKey: string) {
     return providerKey === "claude" ? claudeInstallerHref(workspaceId) : aiWorkspaceSettingsHref(workspaceId, providerKey);
@@ -115,14 +164,6 @@ export function AiWorkspaceLaunchPanel({
       setError(selectionError instanceof Error ? selectionError.message : "Could not choose the AI app.");
     } finally {
       setSelectingProviderKey(null);
-    }
-  }
-
-  function openProvider(providerKey: string) {
-    const launchUrl = aiWorkspaceLaunchUrl(providerKey);
-    const opened = openExternalUrl(launchUrl);
-    if (!opened && launchUrl) {
-      setStatus("Could not open the AI app. Use Add app to review setup.");
     }
   }
 
@@ -199,23 +240,33 @@ export function AiWorkspaceLaunchPanel({
         </div>
       </div>
 
-      <div className="ai-workspace-launch-result" role="status">
-        <div>
-          <strong>{provider.shortLabel} selected</strong>
-          <span>Corgtex supplies context, policy, audit, and write-back through MCP.</span>
+      {activeProviderLaunchUrl ? (
+        <a
+          className="ai-workspace-launch-result ai-workspace-launch-result-link"
+          href={activeProviderLaunchUrl}
+          target="_blank"
+          rel="noreferrer"
+          aria-label={`Open ${provider.shortLabel}`}
+        >
+          <div>
+            <strong>{provider.shortLabel} {activeProviderConnected ? "connected" : "selected"}</strong>
+            <span>Corgtex supplies context, policy, audit, and write-back through MCP.</span>
+          </div>
+          <WorkspaceUtilityIcon name="external" className="ai-workspace-action-icon" />
+        </a>
+      ) : (
+        <div className="ai-workspace-launch-result" role="status">
+          <div>
+            <strong>{provider.shortLabel} {activeProviderConnected ? "connected" : "selected"}</strong>
+            <span>Corgtex supplies context, policy, audit, and write-back through MCP.</span>
+          </div>
         </div>
-      </div>
+      )}
 
       <div className="ai-workspace-launch-actions">
-        <a className="button small" href={setupHref(provider.key)}>
+        <a className="link-button small" href={setupHref(provider.key)}>
           Connect
         </a>
-        {activeProviderLaunchUrl ? (
-          <button type="button" className="button secondary small" onClick={() => openProvider(provider.key)}>
-            <WorkspaceUtilityIcon name="external" className="ai-workspace-action-icon" />
-            Open
-          </button>
-        ) : null}
         {selectionState.providers.length > 1 ? (
           <button type="button" className="button secondary small" onClick={() => setIsChoosing(true)}>
             Change app

@@ -382,6 +382,9 @@
 .ai-workspace-launch-actions .link-button { display: inline-flex; align-items: center; gap: 6px; }
 .ai-workspace-action-icon { width: 14px; height: 14px; }
 .ai-workspace-launch-result { display: grid; gap: 8px; border: 1px solid var(--line); border-radius: 8px; background: var(--accent-soft); padding: 10px; }
+.ai-workspace-launch-result-link { grid-template-columns: minmax(0, 1fr) auto; align-items: center; color: inherit; cursor: pointer; text-decoration: none; transition: background-color 0.15s, border-color 0.15s, var(--transition); }
+.ai-workspace-launch-result-link:hover { background: color-mix(in srgb, var(--accent-soft) 88%, var(--accent) 12%); border-color: var(--accent); opacity: 1; }
+.ai-workspace-launch-result-link .ai-workspace-action-icon { color: var(--accent); }
 .ai-workspace-launch-status { border: 1px solid var(--line); border-radius: 8px; background: var(--surface); padding: 8px 10px; }
 .ai-workspace-manual-prompt { min-height: 120px; padding: 10px; font-family: monospace; resize: vertical; }
 .ai-workspace-choice-list { display: grid; gap: 8px; }
