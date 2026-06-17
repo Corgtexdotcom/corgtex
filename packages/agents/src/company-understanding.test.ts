@@ -7,6 +7,7 @@ const {
   createGoalLinkMock,
   createQuestionMock,
   createDiffMock,
+  getApplyModeMock,
 } = vi.hoisted(() => ({
   prismaMock: {
     brainSource: { findMany: vi.fn() },
@@ -23,6 +24,7 @@ const {
   createGoalLinkMock: vi.fn(),
   createQuestionMock: vi.fn(),
   createDiffMock: vi.fn(),
+  getApplyModeMock: vi.fn(),
 }));
 
 vi.mock("@corgtex/shared", () => ({
@@ -81,6 +83,7 @@ vi.mock("@corgtex/domain", () => ({
   createContextGraphProposedDiff: createDiffMock,
   createGoal: createGoalMock,
   createGoalLink: createGoalLinkMock,
+  getCompanyUnderstandingGoalApplyMode: getApplyModeMock,
 }));
 
 describe("company understanding synthesis", () => {
@@ -116,6 +119,18 @@ describe("company understanding synthesis", () => {
     createGoalLinkMock.mockResolvedValue({ id: "link-1" });
     createQuestionMock.mockResolvedValue({ id: "question-1" });
     createDiffMock.mockResolvedValue({ id: "diff-1" });
+    getApplyModeMock.mockResolvedValue("AUTO");
+  });
+
+  it("normalizes all six goal cadences from model labels", async () => {
+    const { normalizeCompanyUnderstandingGoalCadence } = await import("./company-understanding");
+
+    expect(normalizeCompanyUnderstandingGoalCadence("10Y")).toBe("TEN_YEAR");
+    expect(normalizeCompanyUnderstandingGoalCadence("five year")).toBe("FIVE_YEAR");
+    expect(normalizeCompanyUnderstandingGoalCadence("Annual")).toBe("ANNUAL");
+    expect(normalizeCompanyUnderstandingGoalCadence("quarterly")).toBe("QUARTERLY");
+    expect(normalizeCompanyUnderstandingGoalCadence("Monthly")).toBe("MONTHLY");
+    expect(normalizeCompanyUnderstandingGoalCadence("week")).toBe("WEEKLY");
   });
 
   it("creates an active evidence-backed goal at high confidence", async () => {
@@ -125,7 +140,7 @@ describe("company understanding synthesis", () => {
           {
             title: "Launch onboarding",
             summary: "Ship the onboarding flow this quarter.",
-            horizon: "short",
+            cadence: "QUARTERLY",
             confidence: 0.91,
             evidenceRefs: [{ sourceType: "BrainSource", sourceId: "source-1", quote: "Launch onboarding" }],
           },
@@ -154,6 +169,192 @@ describe("company understanding synthesis", () => {
       entityId: "source-1",
       confidence: 0.91,
       source: "company-understanding",
+    }));
+  });
+
+  it("applies automatic confidence gates across active goals, drafts, and questions", async () => {
+    createGoalMock
+      .mockResolvedValueOnce({ id: "goal-high" })
+      .mockResolvedValueOnce({ id: "goal-medium" });
+    modelGatewayMock.extract.mockResolvedValue({
+      output: {
+        goals: [
+          {
+            title: "Win category leadership",
+            summary: "Establish durable category position.",
+            cadence: "TEN_YEAR",
+            confidence: 0.91,
+            evidenceRefs: [{ sourceType: "BrainArticle", sourceId: "article-1" }],
+          },
+          {
+            title: "Build launch operating system",
+            summary: "Draft evidence-backed operating system.",
+            cadence: "ANNUAL",
+            confidence: 0.72,
+            evidenceRefs: [{ sourceType: "BrainSource", sourceId: "source-1" }],
+          },
+          {
+            title: "Speculative expansion",
+            summary: "Low confidence direction.",
+            cadence: "FIVE_YEAR",
+            confidence: 0.44,
+            evidenceRefs: [{ sourceType: "BrainSource", sourceId: "source-1" }],
+          },
+        ],
+      },
+    });
+
+    const { runCompanyUnderstandingSynthesis } = await import("./company-understanding");
+    const result = await runCompanyUnderstandingSynthesis({
+      workspaceId: "workspace-1",
+      agentRunId: "run-1",
+      sourceId: "source-1",
+      model: "gpt-4o-mini",
+    });
+
+    expect(result).toMatchObject({ generatedGoals: 2, questions: 1, goalApplyMode: "AUTO" });
+    expect(createGoalMock).toHaveBeenNthCalledWith(1, expect.anything(), expect.objectContaining({
+      title: "Win category leadership",
+      cadence: "TEN_YEAR",
+      status: "ACTIVE",
+    }));
+    expect(createGoalMock).toHaveBeenNthCalledWith(2, expect.anything(), expect.objectContaining({
+      title: "Build launch operating system",
+      cadence: "ANNUAL",
+      status: "DRAFT",
+    }));
+    expect(createQuestionMock).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+      questionText: "Should this become a company goal: Speculative expansion?",
+    }));
+  });
+
+  it("keeps generated goals as drafts in manual apply mode", async () => {
+    getApplyModeMock.mockResolvedValue("MANUAL");
+    createGoalMock
+      .mockResolvedValueOnce({ id: "goal-high" })
+      .mockResolvedValueOnce({ id: "goal-medium" });
+    modelGatewayMock.extract.mockResolvedValue({
+      output: {
+        goals: [
+          {
+            title: "Own strategic platform",
+            cadence: "FIVE_YEAR",
+            confidence: 0.94,
+            evidenceRefs: [{ sourceType: "BrainArticle", sourceId: "article-1" }],
+          },
+          {
+            title: "Resolve launch blockers",
+            cadence: "MONTHLY",
+            confidence: 0.75,
+            evidenceRefs: [{ sourceType: "BrainSource", sourceId: "source-1" }],
+          },
+        ],
+      },
+    });
+
+    const { runCompanyUnderstandingSynthesis } = await import("./company-understanding");
+    const result = await runCompanyUnderstandingSynthesis({
+      workspaceId: "workspace-1",
+      agentRunId: "run-1",
+      sourceId: "source-1",
+      model: "gpt-4o-mini",
+    });
+
+    expect(result).toMatchObject({ generatedGoals: 2, questions: 0, goalApplyMode: "MANUAL" });
+    expect(createGoalMock).toHaveBeenNthCalledWith(1, expect.anything(), expect.objectContaining({
+      title: "Own strategic platform",
+      status: "DRAFT",
+    }));
+    expect(createGoalMock).toHaveBeenNthCalledWith(2, expect.anything(), expect.objectContaining({
+      title: "Resolve launch blockers",
+      status: "DRAFT",
+    }));
+  });
+
+  it("links generated child goals to generated parents in cadence order", async () => {
+    createGoalMock
+      .mockResolvedValueOnce({ id: "annual-goal" })
+      .mockResolvedValueOnce({ id: "quarterly-goal" });
+    modelGatewayMock.extract.mockResolvedValue({
+      output: {
+        goals: [
+          {
+            title: "Ship Q1 growth system",
+            cadence: "QUARTERLY",
+            confidence: 0.9,
+            evidenceRefs: [{ sourceType: "BrainSource", sourceId: "source-1" }],
+            parentTitle: "Build annual growth system",
+            parentCadence: "ANNUAL",
+          },
+          {
+            title: "Build annual growth system",
+            cadence: "ANNUAL",
+            confidence: 0.9,
+            evidenceRefs: [{ sourceType: "BrainArticle", sourceId: "article-1" }],
+          },
+        ],
+      },
+    });
+
+    const { runCompanyUnderstandingSynthesis } = await import("./company-understanding");
+    await runCompanyUnderstandingSynthesis({
+      workspaceId: "workspace-1",
+      agentRunId: "run-1",
+      sourceId: "source-1",
+      model: "gpt-4o-mini",
+    });
+
+    expect(createGoalMock).toHaveBeenNthCalledWith(1, expect.anything(), expect.objectContaining({
+      title: "Build annual growth system",
+      cadence: "ANNUAL",
+      parentGoalId: null,
+    }));
+    expect(createGoalMock).toHaveBeenNthCalledWith(2, expect.anything(), expect.objectContaining({
+      title: "Ship Q1 growth system",
+      cadence: "QUARTERLY",
+      parentGoalId: "annual-goal",
+    }));
+  });
+
+  it("does not overwrite duplicate manual goals and only links evidence", async () => {
+    prismaMock.goal.findMany.mockResolvedValue([
+      {
+        id: "manual-goal",
+        title: "Launch onboarding",
+        status: "ACTIVE",
+        cadence: "QUARTERLY",
+        parentGoalId: null,
+        links: [],
+      },
+    ]);
+    modelGatewayMock.extract.mockResolvedValue({
+      output: {
+        goals: [
+          {
+            title: "Launch onboarding",
+            summary: "Model description should not replace manual content.",
+            cadence: "QUARTERLY",
+            confidence: 0.93,
+            evidenceRefs: [{ sourceType: "BrainSource", sourceId: "source-1" }],
+          },
+        ],
+      },
+    });
+
+    const { runCompanyUnderstandingSynthesis } = await import("./company-understanding");
+    const result = await runCompanyUnderstandingSynthesis({
+      workspaceId: "workspace-1",
+      agentRunId: "run-1",
+      sourceId: "source-1",
+      model: "gpt-4o-mini",
+    });
+
+    expect(result).toMatchObject({ generatedGoals: 0, updatedGoals: 1, questions: 0 });
+    expect(createGoalMock).not.toHaveBeenCalled();
+    expect(createGoalLinkMock).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+      goalId: "manual-goal",
+      entityType: "BrainSource",
+      entityId: "source-1",
     }));
   });
 

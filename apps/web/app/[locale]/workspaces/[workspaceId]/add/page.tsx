@@ -62,7 +62,7 @@ import {
   uploadMeetingTranscriptAction,
 } from "../actions";
 import { createArticleAction } from "../brain/actions";
-import { createGoalFormAction } from "../goals/actions";
+import { createGoalFormAction, refreshCompanyDirectionFromBrainFormAction } from "../goals/actions";
 import { asOptional, asOptionalInt, asString, refresh } from "../action-utils";
 
 export const dynamic = "force-dynamic";
@@ -238,6 +238,12 @@ export default async function WorkspaceAddPage({
   async function createGoalAndReturn(formData: FormData) {
     "use server";
     await createGoalFormAction(formData);
+    redirect(returnTo);
+  }
+
+  async function generateGoalsFromBrainAndReturn(formData: FormData) {
+    "use server";
+    await refreshCompanyDirectionFromBrainFormAction(formData);
     redirect(returnTo);
   }
 
@@ -639,6 +645,16 @@ export default async function WorkspaceAddPage({
               ))}
             </fieldset>
             <div className="actions-inline"><button type="submit">Create goal</button>{cancelLink(returnTo)}</div>
+          </form>
+        )}
+
+        {kind === "generate_goals_from_brain" && (
+          <form action={generateGoalsFromBrainAndReturn} className="stack nr-form-section">
+            {hiddenWorkspace(workspaceId)}
+            <p className="nr-muted" style={{ margin: 0 }}>
+              Run the company-understanding agent over absorbed Brain evidence and apply generated goals to the normal ladder.
+            </p>
+            <div className="actions-inline"><button type="submit">Generate goals</button>{cancelLink(returnTo)}</div>
           </form>
         )}
 

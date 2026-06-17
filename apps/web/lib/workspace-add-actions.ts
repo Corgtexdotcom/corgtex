@@ -35,6 +35,10 @@ export const WORKSPACE_ADD_ACTION_DEFINITIONS = {
     label: "Goal",
     description: "Create a goal with optional key results.",
   },
+  generate_goals_from_brain: {
+    label: "Generate goals from Brain",
+    description: "Run the company-understanding agent over Brain evidence.",
+  },
   circle: {
     label: "Circle",
     description: "Create a workspace circle.",
@@ -241,7 +245,14 @@ export function getWorkspaceAddActions(context: WorkspaceAddActionContext): Work
     case "proposals":
       return [action("proposal")];
     case "goals":
-      return context.featureFlags.GOALS ? [action("goal"), action("upload_file"), action("paste_text")] : [];
+      return context.featureFlags.GOALS
+        ? [
+            action("goal"),
+            ...(isStructureManager(context.role) ? [action("generate_goals_from_brain")] : []),
+            action("upload_file"),
+            action("paste_text"),
+          ]
+        : [];
     case "circles":
       if (!isStructureManager(context.role)) return [];
       return (segments?.length ?? 0) > 1

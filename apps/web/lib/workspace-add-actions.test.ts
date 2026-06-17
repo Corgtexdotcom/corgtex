@@ -63,7 +63,17 @@ describe("workspace add actions", () => {
   });
 
   it("offers goal creation plus evidence capture from Goals", () => {
-    expect(kinds({ pathname: "/workspaces/ws-1/goals" })).toEqual(["goal", "upload_file", "paste_text"]);
+    expect(kinds({ pathname: "/workspaces/ws-1/goals" })).toEqual([
+      "goal",
+      "generate_goals_from_brain",
+      "upload_file",
+      "paste_text",
+    ]);
+    expect(kinds({ pathname: "/workspaces/ws-1/goals", role: "CONTRIBUTOR" })).toEqual([
+      "goal",
+      "upload_file",
+      "paste_text",
+    ]);
   });
 
   it("offers Brain upload before article creation", () => {
