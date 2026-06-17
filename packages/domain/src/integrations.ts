@@ -100,7 +100,7 @@ function enableCalendarInSyncSettings(settings: unknown): Prisma.InputJsonValue 
     calendar: {
       ...calendar,
       enabled: true,
-      includeAllEvents: calendar.includeAllEvents === true,
+      includeAllEvents: false,
     },
     documents: syncSettingsRecord(current.documents),
     email: syncSettingsRecord(current.email),

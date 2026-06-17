@@ -138,6 +138,51 @@ describe("OAuth integration sync helpers", () => {
     }));
   });
 
+  it("resets hidden legacy all-events calendar sync when Calendar is connected", async () => {
+    prismaMock.oAuthConnection.findUnique.mockResolvedValue({
+      id: "conn-1",
+      scopes: ["openid", "profile", "https://www.googleapis.com/auth/drive.file"],
+      syncSettings: {
+        calendar: { enabled: false, includeAllEvents: true },
+        documents: { enabled: true, selectedDriveIds: ["doc-1"] },
+        email: { enabled: false, filters: [] },
+      },
+    });
+    prismaMock.oAuthConnection.update.mockResolvedValue({
+      id: "conn-1",
+      provider: "GOOGLE",
+      status: "ACTIVE",
+    });
+    prismaMock.workflowJob.create.mockResolvedValue({ id: "job-1" });
+    const { saveOAuthConnectionAndEnqueueCalendarSync } = await import("./integrations");
+
+    await saveOAuthConnectionAndEnqueueCalendarSync({
+      kind: "user",
+      user: { id: "user-1", email: "user@example.test" },
+    } as any, {
+      workspaceId: "ws-1",
+      provider: "GOOGLE",
+      providerAccountId: "google-user-1",
+      providerEmail: "user@example.test",
+      accessToken: "access-token",
+      scopes: ["openid", "email", "profile", "https://www.googleapis.com/auth/calendar.readonly"],
+      enableCalendarSync: true,
+    });
+
+    expect(prismaMock.oAuthConnection.update).toHaveBeenCalledWith({
+      where: { id: "conn-1" },
+      data: expect.objectContaining({
+        syncSettings: expect.objectContaining({
+          calendar: { enabled: true, includeAllEvents: false },
+          documents: { enabled: true, selectedDriveIds: ["doc-1"] },
+        }),
+      }),
+    });
+    expect(prismaMock.workflowJob.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ type: "calendar.sync" }),
+    }));
+  });
+
   it("merges Calendar-first Google scopes when Drive is connected later without queuing calendar sync", async () => {
     prismaMock.oAuthConnection.findUnique.mockResolvedValue({
       id: "conn-1",
