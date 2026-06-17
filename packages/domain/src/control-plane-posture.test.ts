@@ -38,6 +38,9 @@ const LEGACY_POSTURE_OVERRIDES: Record<string, Record<string, boolean>> = {
     EXECUTION_PACKETS: true,
     MANAGED_ENTERPRISE_SERVICES: true,
   },
+  consulting: {
+    PRACTICE_PROJECTS: true,
+  },
 };
 
 function legacyPostureFlags(posture: string) {
@@ -49,11 +52,11 @@ function legacyPostureFlags(posture: string) {
 }
 
 describe("CLIENT_FEATURE_POSTURES (module-key bundles)", () => {
-  it("supports exactly the prior posture names", () => {
-    expect([...CLIENT_FEATURE_POSTURE_NAMES].sort()).toEqual(["enterprise", "minimal", "standard"]);
+  it("supports the expected posture names", () => {
+    expect([...CLIENT_FEATURE_POSTURE_NAMES].sort()).toEqual(["consulting", "enterprise", "minimal", "standard"]);
   });
 
-  for (const posture of ["standard", "minimal", "enterprise"] as const) {
+  for (const posture of ["standard", "minimal", "enterprise", "consulting"] as const) {
     it(`expands "${posture}" to the exact legacy flag set`, () => {
       expect(featurePostureFlags(posture)).toEqual(legacyPostureFlags(posture));
     });

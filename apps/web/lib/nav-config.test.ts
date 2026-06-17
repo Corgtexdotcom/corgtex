@@ -88,6 +88,7 @@ const EXPECTED_DEFAULT_FLAGS = {
   OPENWORK_DEFAULT: false,
   EXECUTION_PACKETS: false,
   MANAGED_ENTERPRISE_SERVICES: false,
+  PRACTICE_PROJECTS: false,
 };
 
 describe("registry-derived nav and flags parity", () => {

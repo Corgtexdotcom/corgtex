@@ -14,7 +14,7 @@ import { requirePageActor } from "@/lib/auth";
 import { DeliberationComposer } from "@/lib/components/DeliberationComposer";
 import { DeliberationThread } from "@/lib/components/DeliberationThread";
 import { getDeliberationTargets } from "@/lib/deliberation-targets";
-import { requireWorkspaceFeature } from "@/lib/workspace-feature-flags";
+import { isWorkspaceFeatureEnabled, requireWorkspaceFeature } from "@/lib/workspace-feature-flags";
 import { getPracticeFinanceDashboard } from "@corgtex/domain";
 import { PracticeFinanceDashboard } from "./PracticeFinanceDashboard";
 import { getTranslations } from "next-intl/server";
@@ -40,6 +40,7 @@ export const dynamic = "force-dynamic";
 
 const spendFilters = ["ALL", "DRAFT", "OPEN", "BLOCKED", "RESOLVED", "PAID", "RECONCILED"] as const;
 type SpendFilter = (typeof spendFilters)[number];
+type FinanceTab = "dashboard" | "spends" | "accounts";
 type FinanceAppSurface = Awaited<ReturnType<typeof getEnterpriseAppSurface>>;
 
 function fmt(cents: number, currency: string = "USD") {
@@ -51,6 +52,12 @@ function fmt(cents: number, currency: string = "USD") {
 function normalizeFilter(value: string | string[] | undefined): SpendFilter {
   if (typeof value !== "string") return "ALL";
   return spendFilters.includes(value as SpendFilter) ? (value as SpendFilter) : "ALL";
+}
+
+function resolveActiveTab(requestedTab: string | null, practiceProjectsEnabled: boolean): FinanceTab {
+  if (requestedTab === "accounts" || requestedTab === "spends") return requestedTab;
+  if (requestedTab === "dashboard") return practiceProjectsEnabled ? "dashboard" : "spends";
+  return practiceProjectsEnabled ? "dashboard" : "spends";
 }
 
 function outcomeLabel(outcome?: string | null) {
@@ -177,8 +184,13 @@ export default async function FinancePage({
   const t = await getTranslations("finance");
   const membership = await requireWorkspaceMembership({ actor, workspaceId });
   const resolvedSearch = searchParams ? await searchParams : {};
-  const activeTab = typeof resolvedSearch.tab === "string" ? resolvedSearch.tab : "dashboard";
-  const practiceDashboard = await getPracticeFinanceDashboard(actor, workspaceId);
+  // Practice Ledger is modular: the project portfolio is an opt-in capability.
+  // The expenses (spend) + ledger surfaces are the always-on baseline.
+  const practiceProjectsEnabled = await isWorkspaceFeatureEnabled(workspaceId, "PRACTICE_PROJECTS");
+  const requestedTab = typeof resolvedSearch.tab === "string" ? resolvedSearch.tab : null;
+  const activeTab = resolveActiveTab(requestedTab, practiceProjectsEnabled);
+  const showDashboard = activeTab === "dashboard" && practiceProjectsEnabled;
+  const practiceDashboard = showDashboard ? await getPracticeFinanceDashboard(actor, workspaceId) : null;
   const statusFilter = normalizeFilter(resolvedSearch.status);
   const activeDiscussionId = typeof resolvedSearch.discuss === "string" ? resolvedSearch.discuss : null;
 
@@ -260,15 +272,13 @@ export default async function FinancePage({
     return labels[filter];
   };
 
-  const tabs = [
-    { key: "dashboard", label: "Dashboard" },
-    { key: "spends", label: t("tabSpends") },
-    { key: "accounts", label: t("tabAccounts") },
-  ];
+  const tabs: Array<{ key: FinanceTab; label: string }> = [];
+  if (practiceProjectsEnabled) tabs.push({ key: "dashboard", label: "Projects" });
+  tabs.push({ key: "spends", label: t("tabSpends") }, { key: "accounts", label: t("tabAccounts") });
 
   return (
     <>
-      {activeTab === "dashboard" ? (
+      {showDashboard && practiceDashboard ? (
         <PracticeFinanceDashboard
           summary={practiceDashboard.summary}
           attention={practiceDashboard.attention}
@@ -297,7 +307,7 @@ export default async function FinancePage({
         </>
       )}
 
-      <div className="nr-tab-bar" style={{ marginTop: activeTab === "dashboard" ? 20 : 0 }}>
+      <div className="nr-tab-bar" style={{ marginTop: showDashboard ? 20 : 0 }}>
         {tabs.map((tab) => (
           <Link
             key={tab.key}
@@ -309,7 +319,7 @@ export default async function FinancePage({
         ))}
       </div>
 
-      {activeTab !== "dashboard" && practiceLedgerApp && (
+      {!showDashboard && practiceLedgerApp && (
         <section className="nr-item" style={{ padding: 16, marginBottom: 20 }}>
           <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
             <div>
@@ -321,7 +331,7 @@ export default async function FinancePage({
               </div>
               <strong>{practiceLedgerApp.title}</strong>
               <p className="nr-item-meta" style={{ margin: "4px 0 0" }}>
-                Consulting-finance records stay in Practice Ledger; Corgtex keeps Brain context, routing guidance, and governance.
+                Native practice-finance records live in Corgtex; app metadata keeps setup, routing, and governance visible.
               </p>
             </div>
             <div className="actions-inline">

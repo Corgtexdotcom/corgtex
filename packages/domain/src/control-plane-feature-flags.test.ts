@@ -28,6 +28,7 @@ const EXPECTED = [
   { flag: "OPENWORK_DEFAULT", label: "OpenWork default", description: "Recommend OpenWork as the default free self-managed AI workspace.", defaultEnabled: false },
   { flag: "EXECUTION_PACKETS", label: "Execution packets", description: "Durable execution request, context packet, and result write-back plumbing.", defaultEnabled: false },
   { flag: "MANAGED_ENTERPRISE_SERVICES", label: "Managed enterprise services", description: "CORGTEX-managed service ownership, health, usage, and support escalation foundation.", defaultEnabled: false },
+  { flag: "PRACTICE_PROJECTS", label: "Practice projects", description: "Consulting project portfolio: budgets, burn, remaining, and margin tracking with an attention queue.", defaultEnabled: false },
 ];
 
 describe("CONTROL_PLANE_WORKSPACE_FEATURE_FLAGS (registry-derived)", () => {
