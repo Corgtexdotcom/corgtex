@@ -739,7 +739,6 @@ async function findUserGoogleDriveConnection(actor: AppActor, workspaceId: strin
     where: {
       userId: actor.user.id,
       provider: "GOOGLE",
-      status: "ACTIVE",
       OR: [
         { workspaceId },
         { workspaceId: null },
@@ -846,6 +845,7 @@ export async function selectGoogleDriveDocumentsForSync(actor: AppActor, params:
     data: {
       workspaceId: params.workspaceId,
       syncSettings: mergeDocumentSyncSettings(connection.syncSettings, selectedDriveIds) as Prisma.InputJsonValue,
+      status: "ACTIVE",
       lastSyncError: null,
     },
   });
