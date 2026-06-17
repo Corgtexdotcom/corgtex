@@ -16,7 +16,6 @@ import {
   runMeetingTranscriptSourceBackfillAction,
   runOAuthConnectionSyncAction,
   updateMeetingRecorderConfigAction,
-  updateOAuthConnectionSettingsAction,
   updateSlackAgendaSettingsAction,
   updateWebhookEndpointAction,
 } from "../actions";
@@ -57,9 +56,11 @@ function integrationStatusMessage(params: {
   status?: string;
   error?: string;
   success?: string;
+  intent?: string;
 }) {
   if (!params.provider || !params.status) return null;
   if (params.status === "success") {
+    if (params.success === "google_connected" && params.intent === "documents") return "Google Drive connected. Choose the files you want to sync.";
     if (params.success === "google_connected") return "Google Calendar connected. Calendar sync is queued.";
     if (params.success === "microsoft_connected") return "Microsoft Calendar connected. Calendar sync is queued.";
     return "Integration connected.";
@@ -68,7 +69,7 @@ function integrationStatusMessage(params: {
   const messages: Record<string, string> = {
     google_not_configured: "Google is not configured in Corgtex yet. Add the Google OAuth client ID/secret and redirect URI before retrying.",
     microsoft_not_configured: "Microsoft is not configured in Corgtex yet. Add the Entra OAuth client ID/secret and redirect URI before retrying.",
-    google_verification_or_tester_required: "Google blocked access because this app is still in testing or not verified. Add this email as an approved test user, or complete Google verification before public use.",
+    google_verification_or_tester_required: "Google blocked Calendar because this app is still in testing or not verified for this account. Add this email as an approved test user, or complete Google verification. Drive file picking can still work after Drive access is connected.",
     microsoft_tenant_access_denied: "Microsoft blocked this account for the selected tenant. Use an account in the app tenant, add the account as an external user, or switch the Entra app to the intended multitenant audience.",
     microsoft_admin_consent_required: "Microsoft requires tenant admin consent for this account or organization before Corgtex can connect.",
     microsoft_access_denied: "Microsoft access was denied before Corgtex received permission.",
@@ -85,132 +86,122 @@ function integrationStatusMessage(params: {
   return messages[params.error ?? ""] ?? "The integration could not be connected. Retry from this tool page.";
 }
 
-function OAuthConnectionControls({ connection, provider, workspaceId, format, googlePickerConfig }: {
+function hasProviderCalendarScope(provider: "google" | "microsoft", scopes: string) {
+  return provider === "google"
+    ? scopes.includes("https://www.googleapis.com/auth/calendar.readonly")
+    : scopes.includes("calendars.read");
+}
+
+function hasProviderDocumentScope(provider: "google" | "microsoft", scopes: string) {
+  return provider === "google"
+    ? scopes.includes("drive.file") || scopes.includes("drive.readonly")
+    : scopes.includes("files.read") || scopes.includes("sites.read");
+}
+
+function OAuthConnectionControls({ connection, provider, workspaceId, format, googlePickerConfig, autoOpenDrivePicker = false }: {
   connection: OAuthConnection;
   provider: "google" | "microsoft";
   workspaceId: string;
   format: Formatter;
   googlePickerConfig?: GooglePickerConfig;
+  autoOpenDrivePicker?: boolean;
 }) {
   const calendar = settingsSection(connection.syncSettings, "calendar");
   const documents = settingsSection(connection.syncSettings, "documents");
-  const email = settingsSection(connection.syncSettings, "email");
-  const documentIds = settingsStringList(documents.selectedDriveIds ?? documents.selectedDocumentIds).join("\n");
-  const emailFilters = settingsStringList(email.filters ?? email.queries).join("\n");
   const scopes = connection.scopes.join(" ").toLowerCase();
-  const hasDocumentScope = scopes.includes("drive.file") || scopes.includes("drive.readonly") || scopes.includes("files.read") || scopes.includes("sites.read");
-  const hasEmailScope = scopes.includes("gmail.readonly") || scopes.includes("mail.read");
+  const hasCalendarScope = hasProviderCalendarScope(provider, scopes);
+  const hasDocumentScope = hasProviderDocumentScope(provider, scopes);
+  const calendarConnected = hasCalendarScope && calendar.enabled !== false;
+  const selectedDriveIds = settingsStringList(documents.selectedDriveIds ?? documents.selectedDocumentIds);
 
   return (
-    <div key={connection.id} className="nr-item" style={{ marginTop: 8, padding: "12px 0" }}>
+    <div key={connection.id} className="stack" style={{ gap: 12, marginTop: 8 }}>
       <div className="row" style={{ alignItems: "center" }}>
         <span className="nr-item-meta" style={{ fontSize: "0.82rem" }}>
-          {connection.providerEmail ?? connection.providerAccountId} · {connection.status.toLowerCase()} · {connection.lastSyncAt ? format.dateTime(connection.lastSyncAt, { dateStyle: "medium", timeStyle: "short" }) : "Not synced yet"}
+          {connection.providerEmail ?? connection.providerAccountId} · {connection.status.toLowerCase()}
+          {connection.lastSyncAt ? ` · Last synced ${format.dateTime(connection.lastSyncAt, { dateStyle: "medium", timeStyle: "short" })}` : " · Not synced yet"}
         </span>
       </div>
-      <p className="nr-item-meta" style={{ fontSize: "0.78rem", marginTop: 6 }}>
-        Scopes: {connection.scopes.length > 0 ? connection.scopes.join(", ") : "none recorded"}
-      </p>
       {connection.lastSyncError && (
         <p className="form-message form-message-error" style={{ marginTop: 8 }}>{connection.lastSyncError}</p>
       )}
-      {provider === "google" && !hasDocumentScope && (
-        <div className="actions-inline" style={{ marginTop: 10 }}>
-          <a href={`/api/integrations/google/connect?workspaceId=${workspaceId}&intent=documents`} className="button secondary small">
-            Connect Drive files
-          </a>
-          <p className="nr-item-meta" style={{ fontSize: "0.78rem", margin: 0 }}>
-            Grants selected-file Drive access only. Corgtex will not request all-Drive read access.
-          </p>
+
+      <section className="nr-item stack" style={{ gap: 8, padding: 12 }}>
+        <div className="row">
+          <div>
+            <strong className="nr-item-title" style={{ fontSize: "0.95rem" }}>Calendar</strong>
+            <p className="nr-item-meta" style={{ fontSize: "0.78rem", margin: "4px 0 0" }}>
+              Read-only calendar context for meetings.
+            </p>
+          </div>
+          <span className="tag" style={{ background: calendarConnected ? "var(--accent-soft)" : "transparent" }}>
+            {calendarConnected ? "Connected" : "Not connected"}
+          </span>
         </div>
-      )}
-      {provider === "google" && hasDocumentScope && googlePickerConfig ? (
-        <GoogleDrivePicker
-          workspaceId={workspaceId}
-          clientId={googlePickerConfig.clientId}
-          developerKey={googlePickerConfig.developerKey}
-          appId={googlePickerConfig.appId}
-          initialSelectedIds={settingsStringList(documents.selectedDriveIds ?? documents.selectedDocumentIds)}
-        />
+        <div className="actions-inline">
+          {calendarConnected ? (
+            <form action={runOAuthConnectionSyncAction} className="actions-inline">
+              <input type="hidden" name="workspaceId" value={workspaceId} />
+              <input type="hidden" name="connectionId" value={connection.id} />
+              <input type="hidden" name="syncKind" value="calendar" />
+              <button type="submit" className="button secondary small" disabled={connection.status !== "ACTIVE"}>
+                Sync calendar now
+              </button>
+            </form>
+          ) : provider === "google" ? (
+            <a href={`/api/integrations/google/connect?workspaceId=${workspaceId}`} className="button secondary small">
+              Connect Calendar
+            </a>
+          ) : (
+            <a href={`/api/integrations/microsoft/connect?workspaceId=${workspaceId}`} className="button secondary small">
+              Connect Calendar
+            </a>
+          )}
+        </div>
+      </section>
+
+      {provider === "google" ? (
+        <section className="nr-item stack" style={{ gap: 8, padding: 12 }}>
+          <div className="row">
+            <div>
+              <strong className="nr-item-title" style={{ fontSize: "0.95rem" }}>Drive files</strong>
+              <p className="nr-item-meta" style={{ fontSize: "0.78rem", margin: "4px 0 0" }}>
+                Pick only the Docs, Sheets, or Slides Corgtex should sync.
+              </p>
+            </div>
+            <span className="tag" style={{ background: hasDocumentScope ? "var(--accent-soft)" : "transparent" }}>
+              {hasDocumentScope ? "Connected" : "Not connected"}
+            </span>
+          </div>
+          {!hasDocumentScope ? (
+            <a href={`/api/integrations/google/connect?workspaceId=${workspaceId}&intent=documents`} className="button secondary small">
+              Choose Drive files
+            </a>
+          ) : googlePickerConfig ? (
+            <GoogleDrivePicker
+              workspaceId={workspaceId}
+              clientId={googlePickerConfig.clientId}
+              developerKey={googlePickerConfig.developerKey}
+              appId={googlePickerConfig.appId}
+              initialSelectedIds={selectedDriveIds}
+              autoOpen={autoOpenDrivePicker}
+            />
+          ) : (
+            <p className="form-message form-message-error">Google Picker is missing public configuration.</p>
+          )}
+        </section>
       ) : null}
-      <form action={updateOAuthConnectionSettingsAction} className="stack" style={{ gap: 8, marginTop: 10 }}>
+
+      <form action={deleteOAuthConnectionAction}>
         <input type="hidden" name="workspaceId" value={workspaceId} />
         <input type="hidden" name="connectionId" value={connection.id} />
-        <label style={{ fontSize: "0.82rem" }}>
-          Connection status
-          <select name="status" defaultValue={connection.status === "PAUSED" ? "PAUSED" : "ACTIVE"}>
-            <option value="ACTIVE">Active</option>
-            <option value="PAUSED">Paused</option>
-          </select>
-        </label>
-        <div className="grid-2">
-          <label style={{ fontSize: "0.82rem" }}>
-            Calendar sync
-            <select name="calendarEnabled" defaultValue={calendar.enabled === false ? "false" : "true"}>
-              <option value="true">Enabled</option>
-              <option value="false">Paused</option>
-            </select>
-          </label>
-          <label style={{ fontSize: "0.82rem" }}>
-            Calendar relevance
-            <select name="includeAllEvents" defaultValue={calendar.includeAllEvents === true ? "true" : "false"}>
-              <option value="false">Relevant events only</option>
-              <option value="true">All events</option>
-            </select>
-          </label>
-        </div>
-        <label style={{ fontSize: "0.82rem" }}>
-          Documents
-          <select name="documentsEnabled" defaultValue={documents.enabled === true && hasDocumentScope ? "true" : "false"} disabled={!hasDocumentScope}>
-            <option value="false">Disabled</option>
-            <option value="true">Selected documents only</option>
-          </select>
-        </label>
-        <textarea name="documentIds" rows={3} defaultValue={documentIds} placeholder="One Google Drive, OneDrive, or driveId:itemId file reference per line" disabled={!hasDocumentScope} />
-        {!hasDocumentScope && (
-          <p className="nr-item-meta" style={{ fontSize: "0.78rem", margin: 0 }}>
-            Document ingestion needs an additional approved document scope and stays off for this calendar-only connection.
-          </p>
-        )}
-        <label style={{ fontSize: "0.82rem" }}>
-          Email
-          <select name="emailEnabled" defaultValue={email.enabled === true && hasEmailScope ? "true" : "false"} disabled={!hasEmailScope}>
-            <option value="false">Disabled</option>
-            <option value="true">Filtered messages only</option>
-          </select>
-        </label>
-        <textarea name="emailFilters" rows={3} defaultValue={emailFilters} placeholder="One Gmail/Outlook search filter per line" disabled={!hasEmailScope} />
-        {!hasEmailScope && (
-          <p className="nr-item-meta" style={{ fontSize: "0.78rem", margin: 0 }}>
-            Email ingestion needs an additional approved email scope and stays off until explicit source filters are ready.
-          </p>
-        )}
-        <div className="actions-inline">
-          <button type="submit" className="button secondary small">Save connector settings</button>
-        </div>
+        <button type="submit" className="button ghost small">Disconnect {provider === "google" ? "Google" : "Microsoft"}</button>
       </form>
-      <div className="actions-inline" style={{ marginTop: 10 }}>
-        {connection.status === "ACTIVE" ? (
-          <form action={runOAuthConnectionSyncAction} className="actions-inline">
-            <input type="hidden" name="workspaceId" value={workspaceId} />
-            <input type="hidden" name="connectionId" value={connection.id} />
-            {calendar.enabled !== false && <input type="hidden" name="syncKind" value="calendar" />}
-            {documents.enabled === true && hasDocumentScope && <input type="hidden" name="syncKind" value="documents" />}
-            {email.enabled === true && hasEmailScope && <input type="hidden" name="syncKind" value="email" />}
-            <button type="submit" className="button secondary small">Run sync</button>
-          </form>
-        ) : null}
-        <form action={deleteOAuthConnectionAction}>
-          <input type="hidden" name="workspaceId" value={workspaceId} />
-          <input type="hidden" name="connectionId" value={connection.id} />
-          <button type="submit" className="button ghost small">Delete connection</button>
-        </form>
-      </div>
     </div>
   );
 }
 
-export function OAuthConnectorPanel({ provider, title, configured, connection, workspaceId, format, message }: {
+export function OAuthConnectorPanel({ provider, title, configured, connection, workspaceId, format, message, autoOpenDrivePicker = false }: {
   provider: "google" | "microsoft";
   title: string;
   configured: boolean;
@@ -218,6 +209,7 @@ export function OAuthConnectorPanel({ provider, title, configured, connection, w
   workspaceId: string;
   format: Formatter;
   message?: string | null;
+  autoOpenDrivePicker?: boolean;
 }) {
   const googlePickerConfig = provider === "google"
     ? {
@@ -272,6 +264,7 @@ export function OAuthConnectorPanel({ provider, title, configured, connection, w
           workspaceId={workspaceId}
           format={format}
           googlePickerConfig={googlePickerConfig}
+          autoOpenDrivePicker={autoOpenDrivePicker}
         />
       ) : null}
     </section>

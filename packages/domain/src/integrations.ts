@@ -61,6 +61,52 @@ function oauthRefreshToken(connection: Pick<OAuthConnection, "refreshToken" | "t
   return connection.refreshToken ? decryptOAuthToken(connection.refreshToken, connection.tokenStorageVersion) : null;
 }
 
+function mergeOAuthScopes(existingScopes: string[], grantedScopes: string[]) {
+  const merged: string[] = [];
+  const seen = new Set<string>();
+  for (const scope of [...existingScopes, ...grantedScopes]) {
+    const trimmed = scope.trim();
+    if (!trimmed) continue;
+    const normalized = trimmed.toLowerCase();
+    if (seen.has(normalized)) continue;
+    seen.add(normalized);
+    merged.push(trimmed);
+  }
+  return merged;
+}
+
+function hasGoogleCalendarScope(scopes: string[]) {
+  return scopes.some((scope) => scope.toLowerCase() === "https://www.googleapis.com/auth/calendar.readonly");
+}
+
+function hasCalendarSyncScope(provider: OAuthProvider, scopes: string[]) {
+  if (provider === "GOOGLE") return hasGoogleCalendarScope(scopes);
+  if (provider === "MICROSOFT") return scopes.some((scope) => scope.toLowerCase() === "calendars.read");
+  return false;
+}
+
+function defaultOAuthSyncSettings(): Prisma.InputJsonValue {
+  return {
+    calendar: { enabled: true, includeAllEvents: false },
+    documents: { enabled: false, selectedDriveIds: [] },
+    email: { enabled: false, filters: [] },
+  };
+}
+
+function enableCalendarInSyncSettings(settings: unknown): Prisma.InputJsonValue {
+  const current = syncSettingsRecord(settings);
+  const calendar = syncSettingsRecord(current.calendar);
+  return {
+    calendar: {
+      ...calendar,
+      enabled: true,
+      includeAllEvents: calendar.includeAllEvents === true,
+    },
+    documents: syncSettingsRecord(current.documents),
+    email: syncSettingsRecord(current.email),
+  } as Prisma.InputJsonValue;
+}
+
 export async function saveOAuthConnectionAndEnqueueCalendarSync(actor: AppActor, params: {
   workspaceId?: string | null;
   provider: OAuthProvider;
@@ -73,6 +119,7 @@ export async function saveOAuthConnectionAndEnqueueCalendarSync(actor: AppActor,
   syncSettings?: Prisma.InputJsonValue;
   createSyncSettings?: Prisma.InputJsonValue;
   enqueueCalendarSync?: boolean;
+  enableCalendarSync?: boolean;
 }) {
   invariant(actor.kind === "user", 403, "FORBIDDEN", "Only users can connect OAuth providers.");
 
@@ -84,43 +131,60 @@ export async function saveOAuthConnectionAndEnqueueCalendarSync(actor: AppActor,
   }
 
   return prisma.$transaction(async (tx) => {
-    const connection = await tx.oAuthConnection.upsert({
+    const existing = await tx.oAuthConnection.findUnique({
       where: { userId_provider: { userId: actor.user.id, provider: params.provider } },
-      update: {
-        workspaceId: params.workspaceId ?? null,
-        accessToken: encryptOAuthToken(params.accessToken),
-        refreshToken: params.refreshToken ? encryptOAuthToken(params.refreshToken) : undefined,
-        tokenStorageVersion: ENCRYPTED_TOKEN_STORAGE_VERSION,
-        expiresAt: params.expiresIn ? new Date(Date.now() + params.expiresIn * 1000) : null,
-        providerAccountId: params.providerAccountId,
-        providerEmail: params.providerEmail ?? undefined,
-        scopes: params.scopes ?? [],
-        status: "ACTIVE",
-        disconnectedAt: null,
-        lastSyncError: null,
-        ...(params.syncSettings === undefined ? {} : { syncSettings: params.syncSettings }),
-      },
-      create: {
-        userId: actor.user.id,
-        workspaceId: params.workspaceId ?? null,
-        provider: params.provider,
-        accessToken: encryptOAuthToken(params.accessToken),
-        refreshToken: params.refreshToken ? encryptOAuthToken(params.refreshToken) : null,
-        tokenStorageVersion: ENCRYPTED_TOKEN_STORAGE_VERSION,
-        expiresAt: params.expiresIn ? new Date(Date.now() + params.expiresIn * 1000) : null,
-        providerAccountId: params.providerAccountId,
-        providerEmail: params.providerEmail ?? null,
-        scopes: params.scopes ?? [],
-        status: "ACTIVE",
-        syncSettings: params.createSyncSettings ?? params.syncSettings ?? {
-          calendar: { enabled: true, includeAllEvents: false },
-          documents: { enabled: false, selectedDriveIds: [] },
-          email: { enabled: false, filters: [] },
-        },
+      select: {
+        id: true,
+        scopes: true,
+        syncSettings: true,
       },
     });
+    const scopes = mergeOAuthScopes(existing?.scopes ?? [], params.scopes ?? []);
+    const createSyncSettings = params.enableCalendarSync
+      ? enableCalendarInSyncSettings(params.createSyncSettings ?? params.syncSettings ?? defaultOAuthSyncSettings())
+      : params.createSyncSettings ?? params.syncSettings ?? defaultOAuthSyncSettings();
+    const updateSyncSettings = params.syncSettings !== undefined
+      ? params.syncSettings
+      : params.enableCalendarSync
+        ? enableCalendarInSyncSettings(existing?.syncSettings ?? defaultOAuthSyncSettings())
+        : undefined;
 
-    if (params.workspaceId && params.enqueueCalendarSync !== false) {
+    const connection = existing
+      ? await tx.oAuthConnection.update({
+        where: { id: existing.id },
+        data: {
+          workspaceId: params.workspaceId ?? null,
+          accessToken: encryptOAuthToken(params.accessToken),
+          refreshToken: params.refreshToken ? encryptOAuthToken(params.refreshToken) : undefined,
+          tokenStorageVersion: ENCRYPTED_TOKEN_STORAGE_VERSION,
+          expiresAt: params.expiresIn ? new Date(Date.now() + params.expiresIn * 1000) : null,
+          providerAccountId: params.providerAccountId,
+          providerEmail: params.providerEmail ?? undefined,
+          scopes,
+          status: "ACTIVE",
+          disconnectedAt: null,
+          lastSyncError: null,
+          ...(updateSyncSettings === undefined ? {} : { syncSettings: updateSyncSettings }),
+        },
+      })
+      : await tx.oAuthConnection.create({
+        data: {
+          userId: actor.user.id,
+          workspaceId: params.workspaceId ?? null,
+          provider: params.provider,
+          accessToken: encryptOAuthToken(params.accessToken),
+          refreshToken: params.refreshToken ? encryptOAuthToken(params.refreshToken) : null,
+          tokenStorageVersion: ENCRYPTED_TOKEN_STORAGE_VERSION,
+          expiresAt: params.expiresIn ? new Date(Date.now() + params.expiresIn * 1000) : null,
+          providerAccountId: params.providerAccountId,
+          providerEmail: params.providerEmail ?? null,
+          scopes,
+          status: "ACTIVE",
+          syncSettings: createSyncSettings,
+        },
+      });
+
+    if (params.workspaceId && params.enqueueCalendarSync !== false && hasCalendarSyncScope(params.provider, scopes)) {
       await tx.workflowJob.create({
         data: {
           workspaceId: params.workspaceId,
@@ -259,6 +323,8 @@ export async function enqueueOAuthConnectionSync(actor: AppActor, params: {
     },
     select: {
       id: true,
+      provider: true,
+      scopes: true,
       status: true,
       syncSettings: true,
     },
@@ -277,7 +343,18 @@ export async function enqueueOAuthConnectionSync(actor: AppActor, params: {
     connection.syncSettings,
     kind,
     kind === "calendar",
-  ));
+  )).filter((kind) => {
+    if (kind === "calendar") return hasCalendarSyncScope(connection.provider, connection.scopes);
+    if (kind === "documents") {
+      return connection.provider === "GOOGLE"
+        ? hasGoogleDriveDocumentScope(connection.scopes)
+        : connection.scopes.some((scope) => ["files.read", "sites.read.all"].includes(scope.toLowerCase()));
+    }
+    if (kind === "email") {
+      return connection.scopes.some((scope) => ["https://www.googleapis.com/auth/gmail.readonly", "mail.read"].includes(scope.toLowerCase()));
+    }
+    return false;
+  });
 
   const jobTypes = {
     calendar: "calendar.sync",

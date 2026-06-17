@@ -18,6 +18,7 @@ function redirectWithStateCleared(origin: string, workspaceId: string | null | u
   status: "success" | "error";
   code: string;
   intent?: IntegrationOAuthIntent;
+  returnTo?: string | null;
 }) {
   const response = NextResponse.redirect(integrationRedirectUrl(origin, workspaceId, provider, params));
   clearOAuthStateCookie(response, provider);
@@ -63,7 +64,7 @@ export async function GET(request: NextRequest, props: { params: Promise<{ provi
     const errorDescription = request.nextUrl.searchParams.get("error_description");
     const cookieState = request.cookies.get(oauthStateCookieName(provider))?.value;
 
-    let statePayload: { workspaceId: string | null; intent?: IntegrationOAuthIntent };
+    let statePayload: { workspaceId: string | null; intent?: IntegrationOAuthIntent; returnTo?: string | null };
     try {
       if (!state || !cookieState || state !== cookieState) {
         throw new Error("OAuth state cookie mismatch");
@@ -84,6 +85,7 @@ export async function GET(request: NextRequest, props: { params: Promise<{ provi
         status: "error",
         code: providerOAuthErrorCode(provider, error, errorDescription),
         intent,
+        returnTo: statePayload.returnTo,
       });
     }
 
@@ -92,6 +94,7 @@ export async function GET(request: NextRequest, props: { params: Promise<{ provi
         status: "error",
         code: "oauth_code_missing",
         intent,
+        returnTo: statePayload.returnTo,
       });
     }
 
@@ -105,6 +108,7 @@ export async function GET(request: NextRequest, props: { params: Promise<{ provi
           status: "error",
           code: "google_not_configured",
           intent,
+          returnTo: statePayload.returnTo,
         });
       }
 
@@ -128,6 +132,7 @@ export async function GET(request: NextRequest, props: { params: Promise<{ provi
           status: "error",
           code: tokenExchangeErrorCode(provider, message),
           intent,
+          returnTo: statePayload.returnTo,
         });
       }
 
@@ -142,6 +147,7 @@ export async function GET(request: NextRequest, props: { params: Promise<{ provi
           status: "error",
           code: "google_profile_failed",
           intent,
+          returnTo: statePayload.returnTo,
         });
       }
 
@@ -161,6 +167,7 @@ export async function GET(request: NextRequest, props: { params: Promise<{ provi
             email: { enabled: false, filters: [] },
           }
           : undefined,
+        enableCalendarSync: intent === "calendar",
         enqueueCalendarSync: intent !== "documents",
       });
 
@@ -168,6 +175,7 @@ export async function GET(request: NextRequest, props: { params: Promise<{ provi
         status: "success",
         code: "google_connected",
         intent,
+        returnTo: statePayload.returnTo,
       });
     }
 
@@ -181,6 +189,7 @@ export async function GET(request: NextRequest, props: { params: Promise<{ provi
           status: "error",
           code: "microsoft_not_configured",
           intent,
+          returnTo: statePayload.returnTo,
         });
       }
 
@@ -205,6 +214,7 @@ export async function GET(request: NextRequest, props: { params: Promise<{ provi
           status: "error",
           code: tokenExchangeErrorCode(provider, message),
           intent,
+          returnTo: statePayload.returnTo,
         });
       }
 
@@ -219,6 +229,7 @@ export async function GET(request: NextRequest, props: { params: Promise<{ provi
           status: "error",
           code: "microsoft_profile_failed",
           intent,
+          returnTo: statePayload.returnTo,
         });
       }
 
@@ -239,6 +250,7 @@ export async function GET(request: NextRequest, props: { params: Promise<{ provi
         status: "success",
         code: "microsoft_connected",
         intent,
+        returnTo: statePayload.returnTo,
       });
     }
 

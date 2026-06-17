@@ -25,6 +25,7 @@ describe("OAuth state", () => {
       userId: "user-1",
       workspaceId: "ws-1",
       intent: "calendar",
+      returnTo: null,
     });
   });
 
@@ -41,6 +42,25 @@ describe("OAuth state", () => {
       userId: "user-1",
       workspaceId: "ws-1",
       intent: "documents",
+      returnTo: null,
+    });
+  });
+
+  it("round-trips an internal return path in signed state", async () => {
+    const { createIntegrationOAuthState, verifyIntegrationOAuthState } = await import("./oauth-state");
+
+    const state = createIntegrationOAuthState({
+      userId: "user-1",
+      workspaceId: "ws-1",
+      intent: "documents",
+      returnTo: "/workspaces/ws-1?onboarding=setup&googleDrivePicker=1",
+    });
+
+    expect(verifyIntegrationOAuthState(state, "user-1")).toEqual({
+      userId: "user-1",
+      workspaceId: "ws-1",
+      intent: "documents",
+      returnTo: "/workspaces/ws-1?onboarding=setup&googleDrivePicker=1",
     });
   });
 

@@ -42,17 +42,23 @@ export function integrationRedirectUrl(origin: string, workspaceId: string | nul
   status: "success" | "error";
   code: string;
   intent?: IntegrationOAuthIntent;
+  returnTo?: string | null;
 }) {
-  const path = workspaceId
+  const path = params.returnTo && params.returnTo.startsWith("/")
+    ? params.returnTo
+    : workspaceId
     ? `/workspaces/${workspaceId}/tools`
     : "/";
   const url = new URL(path, origin);
-  if (workspaceId) {
+  if (workspaceId && !params.returnTo) {
     url.searchParams.set("type", "CONNECTOR");
     url.searchParams.set("q", provider);
   }
   url.searchParams.set("integration", provider);
   url.searchParams.set("integrationStatus", params.status);
+  if (params.intent) {
+    url.searchParams.set("intent", params.intent);
+  }
   if (params.status === "error") {
     url.searchParams.set("integrationError", params.code);
   } else {

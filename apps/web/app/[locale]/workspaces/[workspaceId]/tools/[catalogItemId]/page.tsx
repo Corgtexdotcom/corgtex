@@ -117,6 +117,7 @@ export default async function CatalogItemPage({
     integrationStatus?: string;
     integrationError?: string;
     integrationSuccess?: string;
+    intent?: string;
     provider?: string | string[];
     service?: string | string[];
   }>;
@@ -143,6 +144,7 @@ export default async function CatalogItemPage({
     status: search?.integrationStatus,
     error: search?.integrationError,
     success: search?.integrationSuccess,
+    intent: search?.intent,
   });
 
   let setupPanel: ReactNode = null;
@@ -173,6 +175,7 @@ export default async function CatalogItemPage({
         workspaceId={workspaceId}
         format={format}
         message={integrationMessage}
+        autoOpenDrivePicker={search?.integrationStatus === "success" && search?.integration === "google" && search?.intent === "documents"}
       />
     );
   } else if (item.sourceType === "COMMUNICATION_INSTALLATION" && item.sourceId === "slack") {

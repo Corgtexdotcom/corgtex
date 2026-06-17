@@ -59,11 +59,12 @@ describe("GET /api/integrations/[provider]/connect", () => {
     expect(location.searchParams.get("scope")).not.toContain("gmail.readonly");
     expect(location.searchParams.get("scope")).not.toContain("drive.readonly");
     expect(location.searchParams.get("scope")).not.toContain("drive.file");
-    expect(location.searchParams.get("include_granted_scopes")).toBeNull();
+    expect(location.searchParams.get("include_granted_scopes")).toBe("true");
     expect(createIntegrationOAuthState).toHaveBeenCalledWith({
       userId: "user-1",
       workspaceId: "ws-1",
       intent: "calendar",
+      returnTo: null,
     });
     expect(response.headers.get("set-cookie")).toContain("corgtex_google_oauth_state=signed-state");
   });
@@ -85,6 +86,22 @@ describe("GET /api/integrations/[provider]/connect", () => {
       userId: "user-1",
       workspaceId: "ws-1",
       intent: "documents",
+      returnTo: null,
+    });
+  });
+
+  it("signs a safe onboarding return path for Google document OAuth", async () => {
+    const { GET } = await import("./route");
+    await GET(
+      new NextRequest("https://app.corgtex.com/api/integrations/google/connect?workspaceId=ws-1&intent=documents&returnTo=%2Fworkspaces%2Fws-1%3Fonboarding%3Dsetup%26googleDrivePicker%3D1"),
+      { params: Promise.resolve({ provider: "google" }) },
+    );
+
+    expect(createIntegrationOAuthState).toHaveBeenCalledWith({
+      userId: "user-1",
+      workspaceId: "ws-1",
+      intent: "documents",
+      returnTo: "/workspaces/ws-1?onboarding=setup&googleDrivePicker=1",
     });
   });
 
