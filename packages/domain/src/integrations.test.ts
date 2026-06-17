@@ -439,6 +439,53 @@ describe("OAuth integration sync helpers", () => {
     });
   });
 
+  it("recovers Google Drive selection from a previous sync error", async () => {
+    prismaMock.oAuthConnection.findFirst.mockResolvedValueOnce({
+      id: "conn-1",
+      workspaceId: "ws-1",
+      providerEmail: "user@example.test",
+      providerAccountId: "google-user-1",
+      scopes: ["https://www.googleapis.com/auth/drive.file"],
+      syncSettings: { calendar: { enabled: true }, documents: { enabled: false, selectedDriveIds: [] } },
+      status: "ERROR",
+    }).mockResolvedValueOnce({
+      id: "conn-1",
+      provider: "GOOGLE",
+      scopes: ["https://www.googleapis.com/auth/drive.file"],
+      status: "ACTIVE",
+      syncSettings: { calendar: { enabled: true }, documents: { enabled: true, selectedDriveIds: ["doc-1"] } },
+    });
+    prismaMock.oAuthConnection.update.mockResolvedValue({
+      id: "conn-1",
+      status: "ACTIVE",
+    });
+    prismaMock.workflowJob.upsert.mockImplementation(async (input: any) => ({ id: input.create.type, type: input.create.type }));
+    const { selectGoogleDriveDocumentsForSync } = await import("./integrations");
+
+    await expect(selectGoogleDriveDocumentsForSync({
+      kind: "user",
+      user: { id: "user-1", email: "user@example.test" },
+    } as any, {
+      workspaceId: "ws-1",
+      documentIds: ["doc-1"],
+    })).resolves.toEqual({
+      scheduled: ["oauth.documents.sync"],
+    });
+    expect(prismaMock.oAuthConnection.update).toHaveBeenCalledWith({
+      where: { id: "conn-1" },
+      data: expect.objectContaining({
+        status: "ACTIVE",
+        lastSyncError: null,
+        syncSettings: expect.objectContaining({
+          documents: expect.objectContaining({
+            enabled: true,
+            selectedDriveIds: ["doc-1"],
+          }),
+        }),
+      }),
+    });
+  });
+
   it("continues to accept legacy Google Drive readonly connections for selected document sync", async () => {
     prismaMock.oAuthConnection.findFirst.mockResolvedValueOnce({
       id: "conn-1",
