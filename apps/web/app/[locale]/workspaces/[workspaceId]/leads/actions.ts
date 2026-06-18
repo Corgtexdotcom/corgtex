@@ -13,12 +13,18 @@ import {
   deleteDeal,
   createActivity,
   completeActivity,
+  createCommunicationSuggestion,
+  declineCommunicationSuggestion,
+  failCommunicationSuggestion,
+  markCommunicationSuggestionSent,
   approveQualification,
   rejectQualification,
+  requestCommunicationSuggestionExecution,
   sendSchedulingLinkEmail,
   createConversationMessage,
   provisionProspectWorkspace,
   updateCrmAccount,
+  updateCommunicationSuggestion,
 } from "@corgtex/domain";
 
 function asOptionalDate(formData: FormData, key: string) {
@@ -202,6 +208,108 @@ export async function completeActivityAction(formData: FormData) {
   await completeActivity(actor, {
     workspaceId,
     activityId: asString(formData, "activityId"),
+  });
+  refresh(workspaceId);
+}
+
+export async function createCommunicationSuggestionAction(formData: FormData) {
+  const _demoGuardWsId = formData.get("workspaceId") as string;
+  if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
+
+  const actor = await requirePageActor();
+  const workspaceId = asString(formData, "workspaceId");
+  await createCommunicationSuggestion(actor, {
+    workspaceId,
+    title: asString(formData, "title"),
+    subject: asOptional(formData, "subject"),
+    bodyMd: asString(formData, "bodyMd"),
+    recipientEmail: asOptional(formData, "recipientEmail"),
+    recipientName: asOptional(formData, "recipientName"),
+    channel: formData.has("channel") ? asOptional(formData, "channel") : undefined,
+    source: formData.has("source") ? asOptional(formData, "source") : undefined,
+    accountId: formData.has("accountId") ? asOptional(formData, "accountId") : undefined,
+    contactId: formData.has("contactId") ? asOptional(formData, "contactId") : undefined,
+    dealId: formData.has("dealId") ? asOptional(formData, "dealId") : undefined,
+    activityId: formData.has("activityId") ? asOptional(formData, "activityId") : undefined,
+    ownerUserId: formData.has("ownerUserId") ? asOptional(formData, "ownerUserId") ?? null : undefined,
+  });
+  refresh(workspaceId);
+}
+
+export async function updateCommunicationSuggestionAction(formData: FormData) {
+  const _demoGuardWsId = formData.get("workspaceId") as string;
+  if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
+
+  const actor = await requirePageActor();
+  const workspaceId = asString(formData, "workspaceId");
+  await updateCommunicationSuggestion(actor, {
+    workspaceId,
+    suggestionId: asString(formData, "suggestionId"),
+    title: formData.has("title") ? asString(formData, "title") : undefined,
+    subject: formData.has("subject") ? asOptional(formData, "subject") : undefined,
+    bodyMd: formData.has("bodyMd") ? asString(formData, "bodyMd") : undefined,
+    recipientEmail: formData.has("recipientEmail") ? asOptional(formData, "recipientEmail") : undefined,
+    recipientName: formData.has("recipientName") ? asOptional(formData, "recipientName") : undefined,
+    channel: formData.has("channel") ? asOptional(formData, "channel") : undefined,
+    source: formData.has("source") ? asOptional(formData, "source") : undefined,
+    accountId: formData.has("accountId") ? asOptional(formData, "accountId") : undefined,
+    contactId: formData.has("contactId") ? asOptional(formData, "contactId") : undefined,
+    dealId: formData.has("dealId") ? asOptional(formData, "dealId") : undefined,
+    activityId: formData.has("activityId") ? asOptional(formData, "activityId") : undefined,
+    ownerUserId: formData.has("ownerUserId") ? asOptional(formData, "ownerUserId") ?? null : undefined,
+  });
+  refresh(workspaceId);
+}
+
+export async function requestCommunicationSuggestionExecutionAction(formData: FormData) {
+  const _demoGuardWsId = formData.get("workspaceId") as string;
+  if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
+
+  const actor = await requirePageActor();
+  const workspaceId = asString(formData, "workspaceId");
+  await requestCommunicationSuggestionExecution(actor, {
+    workspaceId,
+    suggestionId: asString(formData, "suggestionId"),
+  });
+  refresh(workspaceId);
+}
+
+export async function markCommunicationSuggestionSentAction(formData: FormData) {
+  const _demoGuardWsId = formData.get("workspaceId") as string;
+  if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
+
+  const actor = await requirePageActor();
+  const workspaceId = asString(formData, "workspaceId");
+  await markCommunicationSuggestionSent(actor, {
+    workspaceId,
+    suggestionId: asString(formData, "suggestionId"),
+  });
+  refresh(workspaceId);
+}
+
+export async function declineCommunicationSuggestionAction(formData: FormData) {
+  const _demoGuardWsId = formData.get("workspaceId") as string;
+  if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
+
+  const actor = await requirePageActor();
+  const workspaceId = asString(formData, "workspaceId");
+  await declineCommunicationSuggestion(actor, {
+    workspaceId,
+    suggestionId: asString(formData, "suggestionId"),
+  });
+  refresh(workspaceId);
+}
+
+export async function failCommunicationSuggestionAction(formData: FormData) {
+  const _demoGuardWsId = formData.get("workspaceId") as string;
+  if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
+
+  const actor = await requirePageActor();
+  const workspaceId = asString(formData, "workspaceId");
+  await failCommunicationSuggestion(actor, {
+    workspaceId,
+    suggestionId: asString(formData, "suggestionId"),
+    failureReason: asOptional(formData, "failureReason"),
   });
   refresh(workspaceId);
 }

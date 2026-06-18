@@ -454,6 +454,28 @@ const CRM_ACCOUNTS = [
       { title: "Send compliance checklist", type: "TASK", dealTitle: "Clinical operations pilot", bodyMd: "Share security and governance checklist before Meridian compliance review.", daysAgo: 1, dueInDays: -1, ownerKey: "jtaubert" },
       { title: "Confirm review attendees", type: "TASK", dealTitle: "Clinical operations pilot", bodyMd: "Confirm Meridian compliance and transformation attendees before the next pilot review.", daysAgo: 0, dueInDays: 3, ownerKey: "demo" },
     ],
+    suggestions: [
+      {
+        title: "Send compliance prep note",
+        subject: "Compliance review prep for the clinical operations pilot",
+        bodyMd: "Hi Ava,\n\nAhead of the compliance review, here are the governance checkpoints and evidence links we discussed. I suggest we confirm the required reviewers before Friday so the pilot can stay on schedule.",
+        contactEmail: "ava.chen@meridian.example",
+        dealTitle: "Clinical operations pilot",
+        ownerKey: "jtaubert",
+        status: "SUGGESTED",
+        daysAgo: 0,
+      },
+      {
+        title: "Request attendees through external agent",
+        subject: "Confirming compliance review attendees",
+        bodyMd: "Hi Marco,\n\nCould you confirm who should join the next review from compliance, transformation, and operations? Corgtex has the agenda ready; we just need the attendee list.",
+        contactEmail: "marco.reyes@meridian.example",
+        dealTitle: "Clinical operations pilot",
+        ownerKey: "demo",
+        status: "REQUESTED",
+        daysAgo: 1,
+      },
+    ],
   },
   {
     slug: "horizon-capital-partners",
@@ -470,6 +492,19 @@ const CRM_ACCOUNTS = [
     ],
     activities: [
       { title: "Partner follow-up scheduled", type: "TASK", dealTitle: "Portfolio governance advisory", bodyMd: "Send revised rollout memo and confirm which portfolio companies join the pilot cohort.", daysAgo: 1, dueInDays: 2, ownerKey: "jwolk" },
+    ],
+    suggestions: [
+      {
+        title: "Retry portfolio memo follow-up",
+        subject: "Revised portfolio governance memo",
+        bodyMd: "Hi Nora,\n\nSharing the revised rollout memo and a proposed pilot cohort. If the structure looks right, I can prepare the workspace plan for the first portfolio companies.",
+        contactEmail: "nora.patel@horizon.example",
+        dealTitle: "Portfolio governance advisory",
+        ownerKey: "jwolk",
+        status: "FAILED",
+        failureReason: "External agent could not access the sender mailbox.",
+        daysAgo: 1,
+      },
     ],
   },
   {
@@ -488,6 +523,28 @@ const CRM_ACCOUNTS = [
     activities: [
       { title: "Expansion kickoff notes", type: "NOTE", bodyMd: "Client wants finance visibility and follow-up reminders in the next implementation phase.", daysAgo: 4 },
       { title: "Send expansion recap", type: "TASK", dealTitle: "Expansion workspace rollout", bodyMd: "Recap kickoff decisions and confirm budget owner for the expansion workspace.", daysAgo: 3, dueInDays: -2, ownerKey: "demo", completedDaysAgo: 1 },
+    ],
+    suggestions: [
+      {
+        title: "Expansion kickoff recap",
+        subject: "Expansion rollout recap and budget owner",
+        bodyMd: "Hi Elena,\n\nThanks for the kickoff. We captured the workspace expansion decisions and the open question about budget ownership. I marked the recap as sent so the account timeline has the touchpoint.",
+        contactEmail: "elena.morris@northstar.example",
+        dealTitle: "Expansion workspace rollout",
+        ownerKey: "demo",
+        status: "SENT",
+        daysAgo: 2,
+      },
+      {
+        title: "Declined renewal nudge",
+        subject: "Renewal check-in timing",
+        bodyMd: "Hi Elena,\n\nA renewal timing note was drafted but declined because the expansion kickoff recap already covered the next-step timing.",
+        contactEmail: "elena.morris@northstar.example",
+        dealTitle: "Expansion workspace rollout",
+        ownerKey: "demo",
+        status: "DECLINED",
+        daysAgo: 1,
+      },
     ],
   },
 ];
@@ -962,6 +1019,65 @@ async function seedCrmRelationships(wsId, memberMappings) {
           completedAt,
           completedByUserId: completedAt ? ownerUserId : null,
           createdAt: nDaysAgo(activitySpec.daysAgo),
+        },
+      });
+    }
+
+    for (const suggestionSpec of accountSpec.suggestions ?? []) {
+      const contact = suggestionSpec.contactEmail ? contactsByEmail.get(suggestionSpec.contactEmail) : null;
+      const deal = suggestionSpec.dealTitle ? dealsByTitle.get(suggestionSpec.dealTitle) : null;
+      const ownerUserId = suggestionSpec.ownerKey ? memberMappings[suggestionSpec.ownerKey]?.userId ?? null : null;
+      const suggestionId = `${wsId}-crm-suggestion-${slugify(accountSpec.slug)}-${slugify(suggestionSpec.title)}`;
+      const createdAt = nDaysAgo(suggestionSpec.daysAgo ?? 0);
+      const isRequested = suggestionSpec.status === "REQUESTED" || suggestionSpec.status === "FAILED" || suggestionSpec.status === "SENT";
+      const requestedAt = isRequested ? createdAt : null;
+      const sentAt = suggestionSpec.status === "SENT" ? createdAt : null;
+      const failedAt = suggestionSpec.status === "FAILED" ? createdAt : null;
+      const declinedAt = suggestionSpec.status === "DECLINED" ? createdAt : null;
+      await prisma.crmCommunicationSuggestion.upsert({
+        where: { id: suggestionId },
+        update: {
+          accountId: account.id,
+          contactId: contact?.id ?? null,
+          dealId: deal?.id ?? null,
+          ownerUserId,
+          status: suggestionSpec.status,
+          channel: "EMAIL",
+          title: suggestionSpec.title,
+          subject: suggestionSpec.subject,
+          bodyMd: suggestionSpec.bodyMd,
+          recipientEmail: contact?.email ?? null,
+          recipientName: contact?.name ?? null,
+          source: "demo_seed",
+          requestedAt,
+          sentAt,
+          declinedAt,
+          failedAt,
+          failureReason: suggestionSpec.failureReason ?? null,
+          externalRequestId: isRequested ? `${suggestionId}-external` : null,
+        },
+        create: {
+          id: suggestionId,
+          workspaceId: wsId,
+          accountId: account.id,
+          contactId: contact?.id ?? null,
+          dealId: deal?.id ?? null,
+          ownerUserId,
+          status: suggestionSpec.status,
+          channel: "EMAIL",
+          title: suggestionSpec.title,
+          subject: suggestionSpec.subject,
+          bodyMd: suggestionSpec.bodyMd,
+          recipientEmail: contact?.email ?? null,
+          recipientName: contact?.name ?? null,
+          source: "demo_seed",
+          requestedAt,
+          sentAt,
+          declinedAt,
+          failedAt,
+          failureReason: suggestionSpec.failureReason ?? null,
+          externalRequestId: isRequested ? `${suggestionId}-external` : null,
+          createdAt,
         },
       });
     }

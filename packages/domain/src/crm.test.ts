@@ -74,6 +74,13 @@ vi.mock("@corgtex/shared", () => {
         update: vi.fn(),
         updateMany: vi.fn(),
       },
+      crmCommunicationSuggestion: {
+        findMany: vi.fn(),
+        count: vi.fn(),
+        findUnique: vi.fn(),
+        create: vi.fn(),
+        update: vi.fn(),
+      },
       member: {
         findFirst: vi.fn(),
       },
@@ -204,6 +211,36 @@ vi.mock("@corgtex/shared", () => {
             create: vi.fn().mockResolvedValue({ id: "activity-1" }),
             update: vi.fn().mockResolvedValue({ id: "activity-1", completedAt: new Date("2026-06-18T00:00:00.000Z") }),
             updateMany: vi.fn().mockResolvedValue({ count: 0 }),
+          },
+          crmCommunicationSuggestion: {
+            findMany: vi.fn(),
+            count: vi.fn(),
+            findUnique: vi.fn().mockResolvedValue({
+              id: "suggestion-1",
+              workspaceId: "ws-1",
+              accountId: "account-1",
+              contactId: "contact-1",
+              dealId: null,
+              activityId: null,
+              status: "SUGGESTED",
+              title: "Send follow-up",
+              subject: "Next steps",
+              bodyMd: "Thanks for the walkthrough.",
+              source: "manual",
+              channel: "EMAIL",
+            }),
+            create: vi.fn().mockResolvedValue({
+              id: "suggestion-1",
+              workspaceId: "ws-1",
+              status: "SUGGESTED",
+              channel: "EMAIL",
+            }),
+            update: vi.fn().mockResolvedValue({
+              id: "suggestion-1",
+              workspaceId: "ws-1",
+              status: "REQUESTED",
+              channel: "EMAIL",
+            }),
           },
           member: {
             findFirst: vi.fn().mockResolvedValue({ id: "member-1" }),
@@ -849,6 +886,383 @@ describe("CRM domain", () => {
         take: 5,
       }));
       expect(result.total).toBe(1);
+    });
+  });
+
+  describe("communication suggestions", () => {
+    it("lists suggested communications with workspace and owner filters", async () => {
+      const { prisma } = await import("@corgtex/shared");
+      const { requireWorkspaceMembership } = await import("./auth");
+      const { listCommunicationSuggestions } = await import("./crm");
+
+      vi.mocked(prisma.crmCommunicationSuggestion.findMany).mockResolvedValue([
+        { id: "suggestion-1", workspaceId: "ws-1", status: "REQUESTED", title: "Send pilot recap" },
+      ] as any);
+      vi.mocked(prisma.crmCommunicationSuggestion.count).mockResolvedValue(1);
+
+      const result = await listCommunicationSuggestions(dummyActor, "ws-1", {
+        status: "requested",
+        ownerUserId: "u-1",
+        take: 10,
+      });
+
+      expect(requireWorkspaceMembership).toHaveBeenCalledWith({ actor: dummyActor, workspaceId: "ws-1" });
+      expect(prisma.crmCommunicationSuggestion.findMany).toHaveBeenCalledWith(expect.objectContaining({
+        where: { workspaceId: "ws-1", ownerUserId: "u-1", status: "REQUESTED" },
+        take: 10,
+      }));
+      expect(result.total).toBe(1);
+    });
+
+    it("creates a suggestion linked to CRM context and defaults the recipient from the contact", async () => {
+      const { prisma } = await import("@corgtex/shared");
+      const { createCommunicationSuggestion } = await import("./crm");
+
+      const tx = {
+        member: { findFirst: vi.fn().mockResolvedValue({ id: "member-1" }) },
+        crmAccount: {
+          findUnique: vi.fn().mockResolvedValue({ id: "account-1", workspaceId: "ws-1", archivedAt: null }),
+        },
+        crmContact: {
+          findUnique: vi.fn().mockResolvedValue({
+            id: "contact-1",
+            workspaceId: "ws-1",
+            accountId: "account-1",
+            email: "ava@meridian.example",
+            name: "Ava Chen",
+            archivedAt: null,
+          }),
+        },
+        crmDeal: { findUnique: vi.fn() },
+        crmActivity: { findUnique: vi.fn() },
+        crmCommunicationSuggestion: {
+          create: vi.fn().mockResolvedValue({
+            id: "suggestion-1",
+            workspaceId: "ws-1",
+            status: "SUGGESTED",
+            channel: "EMAIL",
+            recipientEmail: "ava@meridian.example",
+          }),
+        },
+        auditLog: { create: vi.fn().mockResolvedValue({ id: "audit-1" }) },
+      };
+      vi.mocked(prisma.$transaction).mockImplementationOnce((async (fn: any) => fn(tx)) as any);
+
+      await createCommunicationSuggestion(dummyActor, {
+        workspaceId: "ws-1",
+        accountId: "account-1",
+        contactId: "contact-1",
+        ownerUserId: "u-1",
+        title: "Send pilot recap",
+        subject: "Pilot recap and next steps",
+        bodyMd: "Thanks for joining the review. Here are the next steps.",
+        source: "agent_suggestion",
+      });
+
+      expect(tx.member.findFirst).toHaveBeenCalledWith({
+        where: { workspaceId: "ws-1", userId: "u-1", isActive: true },
+        select: { id: true },
+      });
+      expect(tx.crmCommunicationSuggestion.create).toHaveBeenCalledWith({
+        data: expect.objectContaining({
+          workspaceId: "ws-1",
+          accountId: "account-1",
+          contactId: "contact-1",
+          ownerUserId: "u-1",
+          status: "SUGGESTED",
+          channel: "EMAIL",
+          recipientEmail: "ava@meridian.example",
+          recipientName: "Ava Chen",
+          source: "agent_suggestion",
+        }),
+        include: expect.any(Object),
+      });
+    });
+
+    it("edits draft content without changing finalized suggestions", async () => {
+      const { prisma } = await import("@corgtex/shared");
+      const { updateCommunicationSuggestion } = await import("./crm");
+
+      const tx = {
+        crmCommunicationSuggestion: {
+          findUnique: vi.fn().mockResolvedValue({
+            id: "suggestion-1",
+            workspaceId: "ws-1",
+            status: "FAILED",
+            accountId: "account-1",
+            contactId: "contact-1",
+            dealId: null,
+            activityId: null,
+          }),
+          update: vi.fn().mockResolvedValue({
+            id: "suggestion-1",
+            workspaceId: "ws-1",
+            status: "FAILED",
+          }),
+        },
+        auditLog: { create: vi.fn().mockResolvedValue({ id: "audit-1" }) },
+      };
+      vi.mocked(prisma.$transaction).mockImplementationOnce((async (fn: any) => fn(tx)) as any);
+
+      await updateCommunicationSuggestion(dummyActor, {
+        workspaceId: "ws-1",
+        suggestionId: "suggestion-1",
+        title: "Revised pilot recap",
+        bodyMd: "Revised copy for external execution.",
+        recipientEmail: "ava@meridian.example",
+      });
+
+      expect(tx.crmCommunicationSuggestion.update).toHaveBeenCalledWith({
+        where: { id: "suggestion-1" },
+        data: {
+          title: "Revised pilot recap",
+          bodyMd: "Revised copy for external execution.",
+          recipientEmail: "ava@meridian.example",
+        },
+        include: expect.any(Object),
+      });
+
+      const finalizedTx = {
+        crmCommunicationSuggestion: {
+          findUnique: vi.fn().mockResolvedValue({ id: "suggestion-2", workspaceId: "ws-1", status: "SENT" }),
+          update: vi.fn(),
+        },
+      };
+      vi.mocked(prisma.$transaction).mockImplementationOnce((async (fn: any) => fn(finalizedTx)) as any);
+
+      await expect(updateCommunicationSuggestion(dummyActor, {
+        workspaceId: "ws-1",
+        suggestionId: "suggestion-2",
+        title: "Do not edit",
+      })).rejects.toThrow("Finalized suggestions cannot be edited.");
+      expect(finalizedTx.crmCommunicationSuggestion.update).not.toHaveBeenCalled();
+    });
+
+    it("requests external execution without sending email from Corgtex", async () => {
+      const { prisma } = await import("@corgtex/shared");
+      const { requestCommunicationSuggestionExecution } = await import("./crm");
+
+      const tx = {
+        crmCommunicationSuggestion: {
+          findUnique: vi.fn().mockResolvedValue({
+            id: "suggestion-1",
+            workspaceId: "ws-1",
+            status: "SUGGESTED",
+          }),
+          update: vi.fn().mockResolvedValue({
+            id: "suggestion-1",
+            workspaceId: "ws-1",
+            status: "REQUESTED",
+            externalRequestId: "exec-1",
+          }),
+        },
+        crmActivity: { create: vi.fn() },
+        auditLog: { create: vi.fn().mockResolvedValue({ id: "audit-1" }) },
+      };
+      vi.mocked(prisma.$transaction).mockImplementationOnce((async (fn: any) => fn(tx)) as any);
+
+      await requestCommunicationSuggestionExecution(dummyActor, {
+        workspaceId: "ws-1",
+        suggestionId: "suggestion-1",
+        externalRequestId: "exec-1",
+      });
+
+      expect(tx.crmCommunicationSuggestion.update).toHaveBeenCalledWith({
+        where: { id: "suggestion-1" },
+        data: expect.objectContaining({
+          status: "REQUESTED",
+          externalRequestId: "exec-1",
+          requestedAt: expect.any(Date),
+          sentAt: null,
+          declinedAt: null,
+          failedAt: null,
+          failureReason: null,
+        }),
+        include: expect.any(Object),
+      });
+      expect(tx.crmActivity.create).not.toHaveBeenCalled();
+      expect(tx.auditLog.create).toHaveBeenCalledWith(expect.objectContaining({
+        data: expect.objectContaining({
+          action: "crm.communication_suggestion.requested",
+          meta: { note: "External execution request tracked; no email sent by Corgtex." },
+        }),
+      }));
+    });
+
+    it("marks externally sent suggestions as sent and records an email activity", async () => {
+      const { prisma } = await import("@corgtex/shared");
+      const { markCommunicationSuggestionSent } = await import("./crm");
+
+      const sentAt = new Date("2026-06-18T12:00:00.000Z");
+      const tx = {
+        crmCommunicationSuggestion: {
+          findUnique: vi.fn().mockResolvedValue({
+            id: "suggestion-1",
+            workspaceId: "ws-1",
+            accountId: "account-1",
+            contactId: "contact-1",
+            dealId: "deal-1",
+            status: "REQUESTED",
+            title: "Send pilot recap",
+            subject: "Pilot recap and next steps",
+            bodyMd: "Thanks for joining the review.",
+          }),
+          update: vi.fn().mockResolvedValue({
+            id: "suggestion-1",
+            workspaceId: "ws-1",
+            status: "SENT",
+            sentAt,
+          }),
+        },
+        crmActivity: {
+          create: vi.fn().mockResolvedValue({ id: "activity-1" }),
+        },
+        auditLog: { create: vi.fn().mockResolvedValue({ id: "audit-1" }) },
+      };
+      vi.mocked(prisma.$transaction).mockImplementationOnce((async (fn: any) => fn(tx)) as any);
+
+      await markCommunicationSuggestionSent(dummyActor, {
+        workspaceId: "ws-1",
+        suggestionId: "suggestion-1",
+        sentAt,
+      });
+
+      expect(tx.crmCommunicationSuggestion.update).toHaveBeenCalledWith({
+        where: { id: "suggestion-1" },
+        data: {
+          status: "SENT",
+          sentAt,
+          declinedAt: null,
+          failedAt: null,
+          failureReason: null,
+        },
+        include: expect.any(Object),
+      });
+      expect(tx.crmActivity.create).toHaveBeenCalledWith({
+        data: expect.objectContaining({
+          workspaceId: "ws-1",
+          accountId: "account-1",
+          contactId: "contact-1",
+          dealId: "deal-1",
+          actorUserId: "u-1",
+          type: "EMAIL",
+          title: "Pilot recap and next steps",
+          source: "communication_suggestion",
+          createdAt: sentAt,
+        }),
+      });
+      expect(tx.auditLog.create).toHaveBeenCalledWith(expect.objectContaining({
+        data: expect.objectContaining({
+          action: "crm.communication_suggestion.sent",
+          meta: { emailSentByCorgtex: false },
+        }),
+      }));
+    });
+
+    it("declines suggestions without deleting the draft", async () => {
+      const { prisma } = await import("@corgtex/shared");
+      const { declineCommunicationSuggestion } = await import("./crm");
+
+      const tx = {
+        crmCommunicationSuggestion: {
+          findUnique: vi.fn().mockResolvedValue({
+            id: "suggestion-1",
+            workspaceId: "ws-1",
+            status: "SUGGESTED",
+          }),
+          update: vi.fn().mockResolvedValue({
+            id: "suggestion-1",
+            workspaceId: "ws-1",
+            status: "DECLINED",
+          }),
+        },
+        auditLog: { create: vi.fn().mockResolvedValue({ id: "audit-1" }) },
+      };
+      vi.mocked(prisma.$transaction).mockImplementationOnce((async (fn: any) => fn(tx)) as any);
+
+      await declineCommunicationSuggestion(dummyActor, {
+        workspaceId: "ws-1",
+        suggestionId: "suggestion-1",
+      });
+
+      expect(tx.crmCommunicationSuggestion.update).toHaveBeenCalledWith({
+        where: { id: "suggestion-1" },
+        data: expect.objectContaining({
+          status: "DECLINED",
+          declinedAt: expect.any(Date),
+          failedAt: null,
+          failureReason: null,
+        }),
+        include: expect.any(Object),
+      });
+    });
+
+    it("retains failed execution results for later review", async () => {
+      const { prisma } = await import("@corgtex/shared");
+      const { failCommunicationSuggestion } = await import("./crm");
+
+      const tx = {
+        crmCommunicationSuggestion: {
+          findUnique: vi.fn().mockResolvedValue({
+            id: "suggestion-1",
+            workspaceId: "ws-1",
+            status: "REQUESTED",
+          }),
+          update: vi.fn().mockResolvedValue({
+            id: "suggestion-1",
+            workspaceId: "ws-1",
+            status: "FAILED",
+            failureReason: "Mailbox authentication expired.",
+          }),
+        },
+        auditLog: { create: vi.fn().mockResolvedValue({ id: "audit-1" }) },
+      };
+      vi.mocked(prisma.$transaction).mockImplementationOnce((async (fn: any) => fn(tx)) as any);
+
+      await failCommunicationSuggestion(dummyActor, {
+        workspaceId: "ws-1",
+        suggestionId: "suggestion-1",
+        failureReason: "Mailbox authentication expired.",
+      });
+
+      expect(tx.crmCommunicationSuggestion.update).toHaveBeenCalledWith({
+        where: { id: "suggestion-1" },
+        data: expect.objectContaining({
+          status: "FAILED",
+          failedAt: expect.any(Date),
+          failureReason: "Mailbox authentication expired.",
+        }),
+        include: expect.any(Object),
+      });
+      expect(tx.auditLog.create).toHaveBeenCalledWith(expect.objectContaining({
+        data: expect.objectContaining({
+          action: "crm.communication_suggestion.failed",
+          meta: { failureReason: "Mailbox authentication expired." },
+        }),
+      }));
+    });
+
+    it("rejects suggestion mutations across workspace boundaries", async () => {
+      const { prisma } = await import("@corgtex/shared");
+      const { requestCommunicationSuggestionExecution } = await import("./crm");
+
+      const tx = {
+        crmCommunicationSuggestion: {
+          findUnique: vi.fn().mockResolvedValue({
+            id: "suggestion-other",
+            workspaceId: "ws-other",
+            status: "SUGGESTED",
+          }),
+          update: vi.fn(),
+        },
+      };
+      vi.mocked(prisma.$transaction).mockImplementationOnce((async (fn: any) => fn(tx)) as any);
+
+      await expect(requestCommunicationSuggestionExecution(dummyActor, {
+        workspaceId: "ws-1",
+        suggestionId: "suggestion-other",
+      })).rejects.toThrow("Communication suggestion not found.");
+      expect(tx.crmCommunicationSuggestion.update).not.toHaveBeenCalled();
     });
   });
 

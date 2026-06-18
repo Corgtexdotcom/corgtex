@@ -34,9 +34,19 @@ export const SUGGESTED_CRM_LIFECYCLE_STAGES = [
   "LOST",
   "DORMANT",
 ] as const;
+export const CRM_COMMUNICATION_SUGGESTION_STATUSES = [
+  "SUGGESTED",
+  "REQUESTED",
+  "SENT",
+  "DECLINED",
+  "FAILED",
+] as const;
+export type CrmCommunicationSuggestionStatus = (typeof CRM_COMMUNICATION_SUGGESTION_STATUSES)[number];
 
 const CRM_CODE_PATTERN = /^[A-Z][A-Z0-9_]{1,63}$/;
 const CRM_ACTIVITY_SOURCE_PATTERN = /^[a-z][a-z0-9_-]{0,63}$/;
+const CRM_COMMUNICATION_CHANNEL_PATTERN = /^[A-Z][A-Z0-9_]{1,31}$/;
+const CRM_COMMUNICATION_SUGGESTION_STATUS_SET = new Set<string>(CRM_COMMUNICATION_SUGGESTION_STATUSES);
 const FREE_EMAIL_DOMAINS = new Set([
   "aol.com",
   "gmail.com",
@@ -67,6 +77,18 @@ function normalizeCrmActivitySource(value?: string | null) {
   const source = value?.trim().toLowerCase() || "manual";
   invariant(CRM_ACTIVITY_SOURCE_PATTERN.test(source), 400, "INVALID_INPUT", "Activity source must be a lowercase code.");
   return source;
+}
+
+function normalizeCommunicationChannel(value?: string | null) {
+  const channel = (value?.trim() || "EMAIL").toUpperCase().replace(/[\s-]+/g, "_");
+  invariant(CRM_COMMUNICATION_CHANNEL_PATTERN.test(channel), 400, "INVALID_INPUT", "Communication channel must be an uppercase code.");
+  return channel;
+}
+
+export function normalizeCommunicationSuggestionStatus(value?: string | null): CrmCommunicationSuggestionStatus {
+  const status = (value?.trim() || "SUGGESTED").toUpperCase().replace(/[\s-]+/g, "_");
+  invariant(CRM_COMMUNICATION_SUGGESTION_STATUS_SET.has(status), 400, "INVALID_INPUT", "Unsupported communication suggestion status.");
+  return status as CrmCommunicationSuggestionStatus;
 }
 
 function normalizeCrmActivityDate(value: Date | null | undefined, label: string) {
@@ -240,6 +262,45 @@ async function resolveCrmActivityLinks(tx: any, params: {
   invariant(accountId || contactId || dealId, 400, "INVALID_INPUT", "Activity must be linked to an account, contact, or deal.");
 
   return { accountId, contactId, dealId };
+}
+
+async function resolveCommunicationSuggestionLinks(tx: any, params: {
+  workspaceId: string;
+  accountId?: string | null;
+  contactId?: string | null;
+  dealId?: string | null;
+  activityId?: string | null;
+}, existing?: { accountId: string | null; contactId: string | null; dealId: string | null; activityId: string | null }) {
+  let accountId = params.accountId !== undefined ? params.accountId : existing?.accountId ?? null;
+  let contactId = params.contactId !== undefined ? params.contactId : existing?.contactId ?? null;
+  let dealId = params.dealId !== undefined ? params.dealId : existing?.dealId ?? null;
+  const activityId = params.activityId !== undefined ? params.activityId : existing?.activityId ?? null;
+
+  if (activityId) {
+    const activity = await tx.crmActivity.findUnique({ where: { id: activityId } });
+    invariant(activity && activity.workspaceId === params.workspaceId, 404, "NOT_FOUND", "Activity not found.");
+    if (accountId && activity.accountId) {
+      invariant(accountId === activity.accountId, 400, "INVALID_INPUT", "Suggestion account must match the linked activity.");
+    }
+    if (contactId && activity.contactId) {
+      invariant(contactId === activity.contactId, 400, "INVALID_INPUT", "Suggestion contact must match the linked activity.");
+    }
+    if (dealId && activity.dealId) {
+      invariant(dealId === activity.dealId, 400, "INVALID_INPUT", "Suggestion deal must match the linked activity.");
+    }
+    accountId = accountId || activity.accountId || null;
+    contactId = contactId || activity.contactId || null;
+    dealId = dealId || activity.dealId || null;
+  }
+
+  const links = await resolveCrmActivityLinks(tx, {
+    workspaceId: params.workspaceId,
+    accountId,
+    contactId,
+    dealId,
+  });
+
+  return { ...links, activityId };
 }
 
 function dealClosedAtForStage(stage: CrmDealStage) {
@@ -1382,6 +1443,395 @@ export async function completeActivity(actor: AppActor, params: {
       },
     });
 
+    return updated;
+  });
+}
+
+const communicationSuggestionInclude = {
+  account: {
+    select: { id: true, name: true, slug: true, relationshipType: true, lifecycleStage: true },
+  },
+  contact: {
+    select: { id: true, name: true, email: true, company: true },
+  },
+  deal: {
+    select: { id: true, title: true, stage: true, valueCents: true },
+  },
+  activity: {
+    select: { id: true, title: true, type: true, dueAt: true, completedAt: true },
+  },
+};
+
+function assertSuggestionEditable(suggestion: { status: string }) {
+  invariant(suggestion.status !== "SENT" && suggestion.status !== "DECLINED", 400, "INVALID_STATE", "Finalized suggestions cannot be edited.");
+}
+
+function suggestionTimestampData(status: CrmCommunicationSuggestionStatus, now: Date, failureReason?: string | null) {
+  if (status === "REQUESTED") return { requestedAt: now, sentAt: null, declinedAt: null, failedAt: null, failureReason: null };
+  if (status === "SENT") return { sentAt: now, declinedAt: null, failedAt: null, failureReason: null };
+  if (status === "DECLINED") return { declinedAt: now, failedAt: null, failureReason: null };
+  if (status === "FAILED") return { failedAt: now, failureReason: failureReason?.trim() || "External execution failed." };
+  return { requestedAt: null, sentAt: null, declinedAt: null, failedAt: null, failureReason: null };
+}
+
+async function requireCommunicationSuggestion(tx: any, workspaceId: string, suggestionId: string) {
+  const suggestion = await tx.crmCommunicationSuggestion.findUnique({ where: { id: suggestionId } });
+  invariant(suggestion && suggestion.workspaceId === workspaceId, 404, "NOT_FOUND", "Communication suggestion not found.");
+  return suggestion;
+}
+
+export async function listCommunicationSuggestions(actor: AppActor, workspaceId: string, opts?: {
+  accountId?: string;
+  contactId?: string;
+  dealId?: string;
+  activityId?: string;
+  ownerUserId?: string;
+  status?: string;
+  take?: number;
+  skip?: number;
+}) {
+  await requireWorkspaceMembership({ actor, workspaceId });
+
+  const where: any = { workspaceId };
+  if (opts?.accountId) where.accountId = opts.accountId;
+  if (opts?.contactId) where.contactId = opts.contactId;
+  if (opts?.dealId) where.dealId = opts.dealId;
+  if (opts?.activityId) where.activityId = opts.activityId;
+  if (opts?.ownerUserId) where.ownerUserId = opts.ownerUserId;
+  if (opts?.status) where.status = normalizeCommunicationSuggestionStatus(opts.status);
+  const take = opts?.take ?? 50;
+  const skip = opts?.skip ?? 0;
+
+  const [items, total] = await Promise.all([
+    prisma.crmCommunicationSuggestion.findMany({
+      where,
+      include: communicationSuggestionInclude,
+      orderBy: { updatedAt: "desc" },
+      take,
+      skip,
+    }),
+    prisma.crmCommunicationSuggestion.count({ where }),
+  ]);
+
+  return { items, total, take, skip };
+}
+
+export async function createCommunicationSuggestion(actor: AppActor, params: {
+  workspaceId: string;
+  title: string;
+  bodyMd: string;
+  subject?: string | null;
+  recipientEmail?: string | null;
+  recipientName?: string | null;
+  channel?: string | null;
+  source?: string | null;
+  ownerUserId?: string | null;
+  accountId?: string | null;
+  contactId?: string | null;
+  dealId?: string | null;
+  activityId?: string | null;
+}) {
+  await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
+
+  const title = params.title.trim();
+  const bodyMd = params.bodyMd.trim();
+  invariant(title.length > 0, 400, "INVALID_INPUT", "Suggestion title is required.");
+  invariant(bodyMd.length > 0, 400, "INVALID_INPUT", "Suggestion body is required.");
+  const ownerUserId = params.ownerUserId ?? null;
+
+  return prisma.$transaction(async (tx) => {
+    await requireCrmActivityOwner(tx, params.workspaceId, ownerUserId);
+    const links = await resolveCommunicationSuggestionLinks(tx, {
+      workspaceId: params.workspaceId,
+      accountId: params.accountId ?? null,
+      contactId: params.contactId ?? null,
+      dealId: params.dealId ?? null,
+      activityId: params.activityId ?? null,
+    });
+
+    let recipientEmail = params.recipientEmail?.trim().toLowerCase() || null;
+    let recipientName = params.recipientName?.trim() || null;
+    if (links.contactId && (!recipientEmail || !recipientName)) {
+      const contact = await tx.crmContact.findUnique({ where: { id: links.contactId } });
+      recipientEmail = recipientEmail || contact?.email || null;
+      recipientName = recipientName || contact?.name || null;
+    }
+
+    const suggestion = await tx.crmCommunicationSuggestion.create({
+      data: {
+        workspaceId: params.workspaceId,
+        ...links,
+        actorUserId: actor.kind === "user" ? actor.user.id : null,
+        ownerUserId,
+        channel: normalizeCommunicationChannel(params.channel),
+        source: normalizeCrmActivitySource(params.source),
+        status: "SUGGESTED",
+        title,
+        subject: params.subject?.trim() || null,
+        bodyMd,
+        recipientEmail,
+        recipientName,
+      },
+      include: communicationSuggestionInclude,
+    });
+
+    await tx.auditLog.create({
+      data: {
+        workspaceId: params.workspaceId,
+        actorUserId: actor.kind === "user" ? actor.user.id : null,
+        action: "crm.communication_suggestion.created",
+        entityType: "CrmCommunicationSuggestion",
+        entityId: suggestion.id,
+        meta: { status: suggestion.status, channel: suggestion.channel },
+      },
+    });
+
+    return suggestion;
+  });
+}
+
+export async function updateCommunicationSuggestion(actor: AppActor, params: {
+  workspaceId: string;
+  suggestionId: string;
+  title?: string;
+  bodyMd?: string;
+  subject?: string | null;
+  recipientEmail?: string | null;
+  recipientName?: string | null;
+  channel?: string | null;
+  ownerUserId?: string | null;
+  source?: string | null;
+  accountId?: string | null;
+  contactId?: string | null;
+  dealId?: string | null;
+  activityId?: string | null;
+}) {
+  await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
+
+  return prisma.$transaction(async (tx) => {
+    const suggestion = await requireCommunicationSuggestion(tx, params.workspaceId, params.suggestionId);
+    assertSuggestionEditable(suggestion);
+
+    const data: any = {};
+    if (params.title !== undefined) {
+      const title = params.title.trim();
+      invariant(title.length > 0, 400, "INVALID_INPUT", "Suggestion title is required.");
+      data.title = title;
+    }
+    if (params.bodyMd !== undefined) {
+      const bodyMd = params.bodyMd.trim();
+      invariant(bodyMd.length > 0, 400, "INVALID_INPUT", "Suggestion body is required.");
+      data.bodyMd = bodyMd;
+    }
+    if (params.subject !== undefined) data.subject = params.subject?.trim() || null;
+    if (params.recipientEmail !== undefined) data.recipientEmail = params.recipientEmail?.trim().toLowerCase() || null;
+    if (params.recipientName !== undefined) data.recipientName = params.recipientName?.trim() || null;
+    if (params.channel !== undefined) data.channel = normalizeCommunicationChannel(params.channel);
+    if (params.source !== undefined) data.source = normalizeCrmActivitySource(params.source);
+    if (params.ownerUserId !== undefined) {
+      await requireCrmActivityOwner(tx, params.workspaceId, params.ownerUserId);
+      data.ownerUserId = params.ownerUserId;
+    }
+
+    if (
+      params.accountId !== undefined ||
+      params.contactId !== undefined ||
+      params.dealId !== undefined ||
+      params.activityId !== undefined
+    ) {
+      const links = await resolveCommunicationSuggestionLinks(tx, {
+        workspaceId: params.workspaceId,
+        accountId: params.accountId,
+        contactId: params.contactId,
+        dealId: params.dealId,
+        activityId: params.activityId,
+      }, {
+        accountId: suggestion.accountId,
+        contactId: suggestion.contactId,
+        dealId: suggestion.dealId,
+        activityId: suggestion.activityId,
+      });
+      Object.assign(data, links);
+    }
+
+    const updated = await tx.crmCommunicationSuggestion.update({
+      where: { id: suggestion.id },
+      data,
+      include: communicationSuggestionInclude,
+    });
+
+    await tx.auditLog.create({
+      data: {
+        workspaceId: params.workspaceId,
+        actorUserId: actor.kind === "user" ? actor.user.id : null,
+        action: "crm.communication_suggestion.updated",
+        entityType: "CrmCommunicationSuggestion",
+        entityId: updated.id,
+        meta: { fields: Object.keys(data) },
+      },
+    });
+
+    return updated;
+  });
+}
+
+export async function requestCommunicationSuggestionExecution(actor: AppActor, params: {
+  workspaceId: string;
+  suggestionId: string;
+  externalRequestId?: string | null;
+}) {
+  await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
+
+  return prisma.$transaction(async (tx) => {
+    const suggestion = await requireCommunicationSuggestion(tx, params.workspaceId, params.suggestionId);
+    assertSuggestionEditable(suggestion);
+    const updated = await tx.crmCommunicationSuggestion.update({
+      where: { id: suggestion.id },
+      data: {
+        status: "REQUESTED",
+        externalRequestId: params.externalRequestId?.trim() || suggestion.externalRequestId || randomUUID(),
+        ...suggestionTimestampData("REQUESTED", new Date()),
+      },
+      include: communicationSuggestionInclude,
+    });
+    await tx.auditLog.create({
+      data: {
+        workspaceId: params.workspaceId,
+        actorUserId: actor.kind === "user" ? actor.user.id : null,
+        action: "crm.communication_suggestion.requested",
+        entityType: "CrmCommunicationSuggestion",
+        entityId: updated.id,
+        meta: { note: "External execution request tracked; no email sent by Corgtex." },
+      },
+    });
+    return updated;
+  });
+}
+
+export async function markCommunicationSuggestionSent(actor: AppActor, params: {
+  workspaceId: string;
+  suggestionId: string;
+  sentAt?: Date | null;
+}) {
+  await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
+
+  return prisma.$transaction(async (tx) => {
+    const suggestion = await requireCommunicationSuggestion(tx, params.workspaceId, params.suggestionId);
+    if (suggestion.status === "SENT") {
+      return tx.crmCommunicationSuggestion.findUnique({
+        where: { id: suggestion.id },
+        include: communicationSuggestionInclude,
+      });
+    }
+    invariant(suggestion.status !== "DECLINED", 400, "INVALID_STATE", "Declined suggestions cannot be marked sent.");
+    const sentAt = normalizeCrmActivityDate(params.sentAt, "Sent date") ?? new Date();
+    const updated = await tx.crmCommunicationSuggestion.update({
+      where: { id: suggestion.id },
+      data: {
+        status: "SENT",
+        sentAt,
+        declinedAt: null,
+        failedAt: null,
+        failureReason: null,
+      },
+      include: communicationSuggestionInclude,
+    });
+
+    await tx.crmActivity.create({
+      data: {
+        workspaceId: params.workspaceId,
+        accountId: suggestion.accountId,
+        contactId: suggestion.contactId,
+        dealId: suggestion.dealId,
+        actorUserId: actor.kind === "user" ? actor.user.id : null,
+        type: CrmActivityType.EMAIL,
+        title: suggestion.subject?.trim() || suggestion.title,
+        bodyMd: suggestion.bodyMd,
+        source: "communication_suggestion",
+        createdAt: sentAt,
+      },
+    });
+
+    await tx.auditLog.create({
+      data: {
+        workspaceId: params.workspaceId,
+        actorUserId: actor.kind === "user" ? actor.user.id : null,
+        action: "crm.communication_suggestion.sent",
+        entityType: "CrmCommunicationSuggestion",
+        entityId: updated.id,
+        meta: { emailSentByCorgtex: false },
+      },
+    });
+
+    return updated;
+  });
+}
+
+export async function declineCommunicationSuggestion(actor: AppActor, params: {
+  workspaceId: string;
+  suggestionId: string;
+}) {
+  await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
+
+  return prisma.$transaction(async (tx) => {
+    const suggestion = await requireCommunicationSuggestion(tx, params.workspaceId, params.suggestionId);
+    if (suggestion.status === "DECLINED") {
+      return tx.crmCommunicationSuggestion.findUnique({
+        where: { id: suggestion.id },
+        include: communicationSuggestionInclude,
+      });
+    }
+    invariant(suggestion.status !== "SENT", 400, "INVALID_STATE", "Sent suggestions cannot be declined.");
+    const updated = await tx.crmCommunicationSuggestion.update({
+      where: { id: suggestion.id },
+      data: {
+        status: "DECLINED",
+        ...suggestionTimestampData("DECLINED", new Date()),
+      },
+      include: communicationSuggestionInclude,
+    });
+    await tx.auditLog.create({
+      data: {
+        workspaceId: params.workspaceId,
+        actorUserId: actor.kind === "user" ? actor.user.id : null,
+        action: "crm.communication_suggestion.declined",
+        entityType: "CrmCommunicationSuggestion",
+        entityId: updated.id,
+        meta: {},
+      },
+    });
+    return updated;
+  });
+}
+
+export async function failCommunicationSuggestion(actor: AppActor, params: {
+  workspaceId: string;
+  suggestionId: string;
+  failureReason?: string | null;
+}) {
+  await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
+
+  return prisma.$transaction(async (tx) => {
+    const suggestion = await requireCommunicationSuggestion(tx, params.workspaceId, params.suggestionId);
+    invariant(suggestion.status !== "SENT" && suggestion.status !== "DECLINED", 400, "INVALID_STATE", "Finalized suggestions cannot be failed.");
+    const updated = await tx.crmCommunicationSuggestion.update({
+      where: { id: suggestion.id },
+      data: {
+        status: "FAILED",
+        ...suggestionTimestampData("FAILED", new Date(), params.failureReason),
+      },
+      include: communicationSuggestionInclude,
+    });
+    await tx.auditLog.create({
+      data: {
+        workspaceId: params.workspaceId,
+        actorUserId: actor.kind === "user" ? actor.user.id : null,
+        action: "crm.communication_suggestion.failed",
+        entityType: "CrmCommunicationSuggestion",
+        entityId: updated.id,
+        meta: { failureReason: updated.failureReason },
+      },
+    });
     return updated;
   });
 }

@@ -3,6 +3,7 @@ export const RELATIONSHIP_VIEWS = [
   "contacts",
   "pipeline",
   "activity",
+  "suggestions",
   "review",
   "conversations",
   "instances",
@@ -15,6 +16,7 @@ export const ACCOUNT_DETAIL_VIEWS = [
   "contacts",
   "pipeline",
   "activity",
+  "suggestions",
   "conversations",
   "instances",
 ] as const;
