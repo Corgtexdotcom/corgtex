@@ -6,10 +6,15 @@ const {
   buildRoleOnboardingContextForConversationMock,
   checkBudgetMock,
   chatMock,
+  completeActivityMock,
+  conversationTurnFindManyMock,
+  createActivityMock,
+  createCommunicationSuggestionMock,
   createContextGraphProposedDiffMock,
   executeExternalMcpToolMock,
   fetchConnectedExternalMcpContextMock,
   getContextMapDataMock,
+  listCrmActivitiesMock,
   listExternalMcpConnectionsMock,
   listWorkspaceToolLinksMock,
   loadRelevantMemoriesMock,
@@ -22,10 +27,15 @@ const {
   buildRoleOnboardingContextForConversationMock: vi.fn(),
   checkBudgetMock: vi.fn(),
   chatMock: vi.fn(),
+  completeActivityMock: vi.fn(),
+  conversationTurnFindManyMock: vi.fn(),
+  createActivityMock: vi.fn(),
+  createCommunicationSuggestionMock: vi.fn(),
   createContextGraphProposedDiffMock: vi.fn(),
   executeExternalMcpToolMock: vi.fn(),
   fetchConnectedExternalMcpContextMock: vi.fn(),
   getContextMapDataMock: vi.fn(),
+  listCrmActivitiesMock: vi.fn(),
   listExternalMcpConnectionsMock: vi.fn(),
   listWorkspaceToolLinksMock: vi.fn(),
   loadRelevantMemoriesMock: vi.fn(),
@@ -40,7 +50,7 @@ vi.mock("@corgtex/shared", () => ({
   },
   prisma: {
     conversationTurn: {
-      findMany: vi.fn().mockResolvedValue([]),
+      findMany: conversationTurnFindManyMock,
     },
     brainArticle: {
       findUnique: vi.fn().mockResolvedValue(null),
@@ -76,6 +86,9 @@ vi.mock("@corgtex/domain", () => ({
   buildSelectedRegionContext: buildSelectedRegionContextMock,
   buildRoleOnboardingContextForConversation: buildRoleOnboardingContextForConversationMock,
   checkBudget: checkBudgetMock,
+  completeActivity: completeActivityMock,
+  createActivity: createActivityMock,
+  createCommunicationSuggestion: createCommunicationSuggestionMock,
   createAction: vi.fn(),
   createContextGraphProposedDiff: createContextGraphProposedDiffMock,
   createGoal: vi.fn(),
@@ -86,6 +99,7 @@ vi.mock("@corgtex/domain", () => ({
   getContextMapData: getContextMapDataMock,
   getMemberProfile: vi.fn(),
   ingestConversationOnDemand: vi.fn(),
+  listCrmActivities: listCrmActivitiesMock,
   listExternalMcpConnections: listExternalMcpConnectionsMock,
   listMembersEnriched: vi.fn(),
   listWorkspaceToolLinks: listWorkspaceToolLinksMock,
@@ -106,6 +120,7 @@ describe("processConversationTurn", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     checkBudgetMock.mockResolvedValue({ allowed: true, usedPct: 0, usedUsd: 0, capUsd: 5 });
+    conversationTurnFindManyMock.mockResolvedValue([]);
     loadRelevantMemoriesMock.mockResolvedValue([]);
     storeAgentMemoryMock.mockResolvedValue(undefined);
     workspaceFeatureFlagFindManyMock.mockResolvedValue([]);
@@ -123,6 +138,10 @@ describe("processConversationTurn", () => {
     buildRoleOnboardingContextForConversationMock.mockResolvedValue(null);
     executeExternalMcpToolMock.mockResolvedValue({ skipped: false, result: { ok: true } });
     fetchConnectedExternalMcpContextMock.mockResolvedValue({ providerKey: "notion", externalId: "page-1", content: {} });
+    listCrmActivitiesMock.mockResolvedValue({ total: 1, items: [{ id: "activity-1", title: "Follow up", type: "TASK", accountId: "account-1", dueAt: new Date("2026-06-20T10:00:00.000Z"), completedAt: null }] });
+    createActivityMock.mockResolvedValue({ id: "activity-1", title: "Follow up", type: "TASK", accountId: "account-1", dueAt: new Date("2026-06-20T10:00:00.000Z"), completedAt: null });
+    completeActivityMock.mockResolvedValue({ id: "activity-1", title: "Follow up", type: "TASK", accountId: "account-1", completedAt: new Date("2026-06-20T11:00:00.000Z") });
+    createCommunicationSuggestionMock.mockResolvedValue({ id: "suggestion-1", title: "Draft follow-up", status: "SUGGESTED", accountId: "account-1" });
     listExternalMcpConnectionsMock.mockResolvedValue([]);
     searchConnectedExternalMcpContextMock.mockResolvedValue({ results: [], errors: [] });
     listWorkspaceToolLinksMock.mockResolvedValue([
@@ -262,6 +281,23 @@ describe("processConversationTurn", () => {
         }),
       ]),
     }));
+    const firstCall = chatMock.mock.calls[0]?.[0];
+    const toolNames = (firstCall.tools ?? []).map((tool: any) => tool.function.name);
+    expect(toolNames).toEqual(expect.arrayContaining([
+      "list_due_relationship_work",
+      "record_relationship_activity",
+      "create_communication_suggestion",
+    ]));
+    expect(firstCall.messages).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        role: "system",
+        content: expect.stringContaining("CRM write tools require explicit confirmation"),
+      }),
+      expect.objectContaining({
+        role: "system",
+        content: expect.stringContaining("must not send email directly"),
+      }),
+    ]));
   });
 
   it("injects role onboarding context for guided onboarding conversations", async () => {
@@ -533,6 +569,99 @@ describe("processConversationTurn", () => {
     });
     expect(JSON.stringify(context)).not.toContain("bodyMd");
     expect(JSON.stringify(context)).not.toContain("unsafe");
+  });
+
+  it("blocks CRM write tool calls until the user explicitly confirms", async () => {
+    const actor = {
+      kind: "user" as const,
+      user: {
+        id: "user-1",
+        email: "user@example.com",
+        displayName: "User",
+      },
+    };
+    chatMock
+      .mockResolvedValueOnce({
+        content: "",
+        tool_calls: [{
+          id: "call-1",
+          function: {
+            name: "record_relationship_activity",
+            arguments: JSON.stringify({ title: "Follow up", type: "TASK", accountId: "account-1" }),
+          },
+        }],
+      })
+      .mockResolvedValueOnce({ content: "Please confirm before I create that CRM follow-up." });
+
+    const { processConversationTurn } = await import("./conversation");
+    const result = await processConversationTurn({
+      workspaceId: "ws-1",
+      sessionId: "session-1",
+      userId: "user-1",
+      agentKey: "assistant",
+      userMessage: "Create a CRM follow-up for Acme.",
+      actor,
+    });
+
+    const toolMessage = chatMock.mock.calls[1]?.[0]?.messages.find((message: any) => message.role === "tool");
+    expect(toolMessage.content).toContain("CRM_WRITE_REQUIRES_CONFIRMATION");
+    expect(createActivityMock).not.toHaveBeenCalled();
+    expect(result.assistantMessage).toBe("Please confirm before I create that CRM follow-up.");
+  });
+
+  it("executes confirmed CRM writes through the same domain behavior", async () => {
+    conversationTurnFindManyMock.mockResolvedValueOnce([{
+      sequenceNumber: 1,
+      userMessage: "Create a CRM follow-up for Acme.",
+      assistantMessage: "I can create a CRM follow-up for Acme. Please confirm before I write it.",
+    }]);
+    const actor = {
+      kind: "user" as const,
+      user: {
+        id: "user-1",
+        email: "user@example.com",
+        displayName: "User",
+      },
+    };
+    chatMock
+      .mockResolvedValueOnce({
+        content: "",
+        tool_calls: [{
+          id: "call-1",
+          function: {
+            name: "record_relationship_activity",
+            arguments: JSON.stringify({
+              title: "Follow up",
+              type: "TASK",
+              accountId: "account-1",
+              dueAt: "2026-06-20T10:00:00.000Z",
+            }),
+          },
+        }],
+      })
+      .mockResolvedValueOnce({ content: "Created the CRM follow-up." });
+
+    const { processConversationTurn } = await import("./conversation");
+    const result = await processConversationTurn({
+      workspaceId: "ws-1",
+      sessionId: "session-1",
+      userId: "user-1",
+      agentKey: "assistant",
+      userMessage: "yes, do it",
+      actor,
+    });
+
+    expect(createActivityMock).toHaveBeenCalledWith(actor, expect.objectContaining({
+      workspaceId: "ws-1",
+      title: "Follow up",
+      type: "TASK",
+      accountId: "account-1",
+      source: "workspace-chat",
+      dueAt: new Date("2026-06-20T10:00:00.000Z"),
+    }));
+    const toolMessage = chatMock.mock.calls[1]?.[0]?.messages.find((message: any) => message.role === "tool");
+    expect(toolMessage.content).toContain("\"success\":true");
+    expect(result.assistantMessage).toBe("Created the CRM follow-up.");
   });
 
   it("does not expose context map tools when the premium AI flag is disabled", async () => {
