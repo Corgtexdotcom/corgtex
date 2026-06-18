@@ -4036,6 +4036,7 @@ enum ExecutionWritebackTargetType {
   BRAIN_ARTICLE
   BUILD_ARTIFACT
   COMMENT
+  CRM_COMMUNICATION
 }
 
 model ExternalMcpConnection {

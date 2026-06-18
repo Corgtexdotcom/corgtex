@@ -40,6 +40,12 @@ const getExecutionPacketMock = vi.fn();
 const getCompanyContextMock = vi.fn();
 const listWritebackTargetsMock = vi.fn();
 const submitExecutionResultMock = vi.fn();
+const listCrmAccountsMock = vi.fn();
+const listCrmActivitiesMock = vi.fn();
+const createActivityMock = vi.fn();
+const markCommunicationSuggestionSentMock = vi.fn();
+const failCommunicationSuggestionMock = vi.fn();
+const createConversationMessageMock = vi.fn();
 const listWorkItemVersionsMock = vi.fn();
 const getWorkItemVersionMock = vi.fn();
 const requireWorkspaceMembershipMock = vi.fn();
@@ -141,6 +147,12 @@ vi.mock("@corgtex/domain", () => ({
   getCompanyContext: getCompanyContextMock,
   listWritebackTargets: listWritebackTargetsMock,
   submitExecutionResult: submitExecutionResultMock,
+  listCrmAccounts: listCrmAccountsMock,
+  listCrmActivities: listCrmActivitiesMock,
+  createActivity: createActivityMock,
+  markCommunicationSuggestionSent: markCommunicationSuggestionSentMock,
+  failCommunicationSuggestion: failCommunicationSuggestionMock,
+  createConversationMessage: createConversationMessageMock,
   listWorkItemVersions: listWorkItemVersionsMock,
   getWorkItemVersion: getWorkItemVersionMock,
   listDeliberationEntries: listDeliberationEntriesMock,
@@ -258,6 +270,12 @@ describe("createCorgtexMcpServer", () => {
     getCompanyContextMock.mockReset().mockResolvedValue({ workspace: { id: "ws-1", name: "Acme" } });
     listWritebackTargetsMock.mockReset().mockResolvedValue({ items: [{ type: "ACTION", id: "action-1", title: "Follow up" }] });
     submitExecutionResultMock.mockReset().mockResolvedValue({ id: "result-1", status: "ACCEPTED" });
+    listCrmAccountsMock.mockReset().mockResolvedValue({ items: [{ id: "account-1", name: "Acme Buyers" }], total: 1, take: 10, skip: 0 });
+    listCrmActivitiesMock.mockReset().mockResolvedValue({ items: [{ id: "activity-1", title: "Follow up" }], total: 1, take: 10, skip: 0 });
+    createActivityMock.mockReset().mockResolvedValue({ id: "activity-1", type: "TASK", accountId: "account-1" });
+    markCommunicationSuggestionSentMock.mockReset().mockResolvedValue({ id: "suggestion-1", status: "SENT", accountId: "account-1" });
+    failCommunicationSuggestionMock.mockReset().mockResolvedValue({ id: "suggestion-1", status: "FAILED", accountId: "account-1" });
+    createConversationMessageMock.mockReset().mockResolvedValue({ id: "message-1" });
     listWorkItemVersionsMock.mockReset().mockResolvedValue({
       entityType: "Tension",
       entityId: "tension-1",
@@ -730,6 +748,130 @@ describe("createCorgtexMcpServer", () => {
       id: "result-1",
       status: "ACCEPTED",
       webUrl: "https://app.test/workspaces/ws-1/settings?tab=ai-workspaces&executionRequest=request-1",
+    });
+  });
+
+  it("exposes scoped relationship read tools for accounts and due work", async () => {
+    const { createCorgtexMcpServer } = await import("./server");
+    const { requireScope } = await import("./auth");
+
+    const server = createCorgtexMcpServer({
+      actor: { kind: "agent", authProvider: "bootstrap" } as any,
+      workspaceId: "ws-1",
+      authKind: "agent",
+    });
+
+    const accountsResponse = await (server as any)._registeredTools.list_relationship_accounts.handler({
+      query: "Acme",
+      take: 10,
+    });
+    const dueWorkResponse = await (server as any)._registeredTools.list_due_relationship_work.handler({
+      accountId: "account-1",
+      dueTo: "2026-06-03T00:00:00.000Z",
+    });
+
+    expect(vi.mocked(requireScope)).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: "ws-1" }), "relationships:read");
+    expect(listCrmAccountsMock).toHaveBeenCalledWith(expect.objectContaining({ kind: "agent" }), "ws-1", {
+      query: "Acme",
+      take: 10,
+    });
+    expect(listCrmActivitiesMock).toHaveBeenCalledWith(expect.objectContaining({ kind: "agent" }), "ws-1", expect.objectContaining({
+      accountId: "account-1",
+      type: "TASK",
+      completion: "open",
+      sort: "due",
+      dueTo: new Date("2026-06-03T00:00:00.000Z"),
+    }));
+    expect(JSON.parse(accountsResponse.content[0].text)).toMatchObject({
+      items: [{ id: "account-1", name: "Acme Buyers" }],
+      webUrl: "https://app.test/workspaces/ws-1/leads?view=accounts",
+    });
+    expect(JSON.parse(dueWorkResponse.content[0].text)).toMatchObject({
+      items: [{ id: "activity-1", title: "Follow up" }],
+      webUrl: "https://app.test/workspaces/ws-1/leads?view=activity",
+    });
+  });
+
+  it("records relationship activity and completes communication suggestions through scoped MCP tools", async () => {
+    const { createCorgtexMcpServer } = await import("./server");
+    const { requireScope } = await import("./auth");
+
+    const server = createCorgtexMcpServer({
+      actor: { kind: "agent", authProvider: "bootstrap" } as any,
+      workspaceId: "ws-1",
+      authKind: "agent",
+    });
+
+    const activityResponse = await (server as any)._registeredTools.record_relationship_activity.handler({
+      title: "Follow up next week",
+      type: "TASK",
+      accountId: "account-1",
+      dueAt: "2026-06-04T00:00:00.000Z",
+    });
+    const completeResponse = await (server as any)._registeredTools.complete_communication_suggestion.handler({
+      suggestionId: "suggestion-1",
+      status: "SENT",
+      sentAt: "2026-06-02T10:30:00.000Z",
+      conversationId: "conversation-1",
+      conversationBodyMd: "Sent externally via Claude.",
+    });
+
+    expect(vi.mocked(requireScope)).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: "ws-1" }), "relationships:write");
+    expect(createActivityMock).toHaveBeenCalledWith(expect.objectContaining({ kind: "agent" }), expect.objectContaining({
+      workspaceId: "ws-1",
+      title: "Follow up next week",
+      type: "TASK",
+      accountId: "account-1",
+      source: "mcp",
+      dueAt: new Date("2026-06-04T00:00:00.000Z"),
+    }));
+    expect(markCommunicationSuggestionSentMock).toHaveBeenCalledWith(expect.objectContaining({ kind: "agent" }), {
+      workspaceId: "ws-1",
+      suggestionId: "suggestion-1",
+      sentAt: new Date("2026-06-02T10:30:00.000Z"),
+    });
+    expect(createConversationMessageMock).toHaveBeenCalledWith(expect.objectContaining({ kind: "agent" }), {
+      workspaceId: "ws-1",
+      conversationId: "conversation-1",
+      senderType: "ADMIN",
+      senderEmail: undefined,
+      bodyMd: "Sent externally via Claude.",
+    });
+    expect(JSON.parse(activityResponse.content[0].text)).toMatchObject({
+      id: "activity-1",
+      webUrl: "https://app.test/workspaces/ws-1/leads/accounts/account-1?view=activity",
+    });
+    expect(JSON.parse(completeResponse.content[0].text)).toMatchObject({
+      id: "suggestion-1",
+      status: "SENT",
+      webUrl: "https://app.test/workspaces/ws-1/leads/accounts/account-1?view=review",
+    });
+  });
+
+  it("records failed communication suggestion completion through MCP without marking sent", async () => {
+    const { createCorgtexMcpServer } = await import("./server");
+
+    const server = createCorgtexMcpServer({
+      actor: { kind: "agent", authProvider: "bootstrap" } as any,
+      workspaceId: "ws-1",
+      authKind: "agent",
+    });
+
+    const response = await (server as any)._registeredTools.complete_communication_suggestion.handler({
+      suggestionId: "suggestion-1",
+      status: "FAILED",
+      failureReason: "External mailbox rejected the draft.",
+    });
+
+    expect(failCommunicationSuggestionMock).toHaveBeenCalledWith(expect.objectContaining({ kind: "agent" }), {
+      workspaceId: "ws-1",
+      suggestionId: "suggestion-1",
+      failureReason: "External mailbox rejected the draft.",
+    });
+    expect(markCommunicationSuggestionSentMock).not.toHaveBeenCalled();
+    expect(JSON.parse(response.content[0].text)).toMatchObject({
+      id: "suggestion-1",
+      status: "FAILED",
     });
   });
 

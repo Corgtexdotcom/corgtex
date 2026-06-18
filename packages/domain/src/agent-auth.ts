@@ -53,6 +53,10 @@ export const SCOPE_REGISTRY = {
   "execution:read":       { label: "Read execution packets",     group: "operations", default: true,  delegatedDefault: true,  description: "Read governed execution requests, packets, company context, and write-back targets for external AI workspaces." },
   "execution:write":      { label: "Submit execution results",   group: "operations", default: true,  delegatedDefault: true,  description: "Create execution requests and submit idempotent external AI workspace results with audited write-back." },
 
+  // ---- relationships ----
+  "relationships:read":   { label: "Read relationships",         group: "operations", default: true,  delegatedDefault: true,  description: "Read relationship accounts, contacts, deals, activities, reminders, conversations, and communication suggestions." },
+  "relationships:write":  { label: "Update relationships",       group: "operations", default: true,  delegatedDefault: true,  description: "Create relationship activities and record externally executed communication suggestion outcomes." },
+
   // ---- tensions ----
   "tensions:read":       { label: "Read tensions",              group: "operations", default: true,  delegatedDefault: true,  description: "List and view tensions raised in the workspace." },
   "tensions:write":      { label: "Create & edit tensions",     group: "operations", default: true,  delegatedDefault: true,  description: "Create, update, upvote, and resolve tensions." },

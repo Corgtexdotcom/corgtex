@@ -5,6 +5,7 @@ import { requirePageActor } from "@/lib/auth";
 import { asString, asOptional, refresh } from "../action-utils";
 import {
   createCrmAccount,
+  createExecutionRequest,
   createContact,
   updateContact,
   deleteContact,
@@ -19,7 +20,6 @@ import {
   markCommunicationSuggestionSent,
   approveQualification,
   rejectQualification,
-  requestCommunicationSuggestionExecution,
   sendSchedulingLinkEmail,
   createConversationMessage,
   provisionProspectWorkspace,
@@ -267,9 +267,24 @@ export async function requestCommunicationSuggestionExecutionAction(formData: Fo
 
   const actor = await requirePageActor();
   const workspaceId = asString(formData, "workspaceId");
-  await requestCommunicationSuggestionExecution(actor, {
+  const suggestionId = asString(formData, "suggestionId");
+  await createExecutionRequest(actor, {
     workspaceId,
-    suggestionId: asString(formData, "suggestionId"),
+    goal: "Execute this relationship communication externally and submit the result back to Corgtex.",
+    provider: formData.has("provider") ? asOptional(formData, "provider") : undefined,
+    allowedScopes: ["execution:read", "execution:write", "workspace:read", "relationships:read", "relationships:write"],
+    policyConstraints: {
+      emailSentByCorgtex: false,
+      executionPath: "External client sends or copies the communication, then submits an idempotent result.",
+    },
+    expectedOutput: {
+      success: { sentAt: "optional ISO timestamp", conversationId: "optional CRM conversation id" },
+      failure: { errorMessage: "Failure reason" },
+    },
+    approvalRule: "No automatic email send from Corgtex. The external client must submit a result after execution.",
+    writebackTargetType: "CRM_COMMUNICATION",
+    writebackTargetId: suggestionId,
+    idempotencyKey: `crm-communication:${workspaceId}:${suggestionId}`,
   });
   refresh(workspaceId);
 }
