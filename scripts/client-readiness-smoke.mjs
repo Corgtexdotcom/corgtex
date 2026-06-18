@@ -267,7 +267,8 @@ async function expectVisible(page, selector, label, findings, timeout = 5000) {
   return true;
 }
 
-export async function activateMobileMode(page, {
+async function activateMobileControl(page, {
+  controlSelector,
   buttonText,
   expectedSelector,
   label,
@@ -275,7 +276,7 @@ export async function activateMobileMode(page, {
   timeoutMs = mobileModeSwitchTimeoutMs,
   retryDelayMs = mobileModeSwitchRetryMs,
 }) {
-  const button = page.locator(".mobile-mode-switch button", { hasText: buttonText }).first();
+  const button = page.locator(controlSelector, { hasText: buttonText }).first();
   const expected = page.locator(expectedSelector).first();
   const attempts = Math.max(1, Math.ceil(timeoutMs / retryDelayMs));
   const interactionTimeout = Math.max(250, Math.min(2000, retryDelayMs));
@@ -300,6 +301,46 @@ export async function activateMobileMode(page, {
   });
   await captureScreenshot(page, `${label}-missing.png`);
   return false;
+}
+
+export async function activateMobileMode(page, options) {
+  return activateMobileControl(page, {
+    controlSelector: ".mobile-mode-switch button",
+    ...options,
+  });
+}
+
+export async function activateMobileWorkspaceMode(page, {
+  label,
+  findings,
+  timeoutMs = mobileModeSwitchTimeoutMs,
+  retryDelayMs = mobileModeSwitchRetryMs,
+}) {
+  return activateMobileMode(page, {
+    buttonText: /Workspace|Espacio/,
+    expectedSelector: ".mobile-bottom-nav",
+    label,
+    findings,
+    timeoutMs,
+    retryDelayMs,
+  });
+}
+
+export async function activateMobileAskTab(page, {
+  label,
+  findings,
+  timeoutMs = mobileModeSwitchTimeoutMs,
+  retryDelayMs = mobileModeSwitchRetryMs,
+}) {
+  return activateMobileControl(page, {
+    controlSelector: ".mobile-ai-tabs button",
+    buttonText: /Ask|Preguntar/,
+    expectedSelector: ".mobile-ai-pane-ask .chat-input",
+    label,
+    findings,
+    timeoutMs,
+    retryDelayMs,
+  });
 }
 
 async function expectTextVisible(page, selector, text, label, findings) {
@@ -382,6 +423,11 @@ async function verifyMobileShell(page, locale, workspacePath, findings, routeRes
 
     await expectVisible(page, ".mobile-topbar", `mobile-shell-${viewportName}-topbar`, findings);
     await expectVisible(page, ".mobile-mode-switch", `mobile-shell-${viewportName}-mode-switch`, findings);
+    const workspaceModeReady = await activateMobileWorkspaceMode(page, {
+      label: `mobile-shell-${viewportName}-workspace-mode`,
+      findings,
+    });
+    if (!workspaceModeReady) continue;
     await expectVisible(page, ".mobile-bottom-nav", `mobile-shell-${viewportName}-bottom-nav`, findings);
     await verifyNoHorizontalOverflow(page, `mobile-shell-${viewportName}`, findings);
     await captureScreenshot(page, `mobile-shell-${viewportName}-workspace.png`);
@@ -393,6 +439,12 @@ async function verifyMobileShell(page, locale, workspacePath, findings, routeRes
       findings,
     });
     if (!aiModeReady) continue;
+
+    const askTabReady = await activateMobileAskTab(page, {
+      label: `mobile-shell-${viewportName}-ai-ask`,
+      findings,
+    });
+    if (!askTabReady) continue;
 
     const inputReady = await expectVisible(
       page,
