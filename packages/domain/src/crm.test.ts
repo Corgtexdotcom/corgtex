@@ -33,6 +33,8 @@ vi.mock("@corgtex/shared", () => {
         create: vi.fn(),
       },
       crmProspectWorkspace: {
+        findMany: vi.fn(),
+        count: vi.fn(),
         findFirst: vi.fn(),
         create: vi.fn(),
         updateMany: vi.fn(),
@@ -59,6 +61,8 @@ vi.mock("@corgtex/shared", () => {
         updateMany: vi.fn(),
       },
       crmActivity: {
+        findMany: vi.fn(),
+        count: vi.fn(),
         create: vi.fn(),
         updateMany: vi.fn(),
       },
@@ -157,6 +161,8 @@ vi.mock("@corgtex/shared", () => {
             updateMany: vi.fn().mockResolvedValue({ count: 0 }),
           },
           crmActivity: {
+            findMany: vi.fn(),
+            count: vi.fn(),
             create: vi.fn().mockResolvedValue({ id: "activity-1" }),
             updateMany: vi.fn().mockResolvedValue({ count: 0 }),
           },
@@ -168,6 +174,8 @@ vi.mock("@corgtex/shared", () => {
             updateMany: vi.fn().mockResolvedValue({ count: 0 }),
           },
           crmProspectWorkspace: {
+            findMany: vi.fn(),
+            count: vi.fn(),
             create: vi.fn().mockResolvedValue({ id: "pw-1", crmWorkspaceId: "ws-1", targetWorkspaceId: "ws-new" }),
             updateMany: vi.fn().mockResolvedValue({ count: 0 }),
           },
@@ -516,6 +524,53 @@ describe("CRM domain", () => {
         accountsCreated: 0,
         contactsLinked: 0,
       }));
+    });
+
+    it("lists CRM activities with account context through the workspace guard", async () => {
+      const { prisma } = await import("@corgtex/shared");
+      const { requireWorkspaceMembership } = await import("./auth");
+      const { listCrmActivities } = await import("./crm");
+
+      vi.mocked(prisma.crmActivity.findMany).mockResolvedValue([
+        { id: "activity-1", workspaceId: "ws-1", accountId: "account-1", title: "Follow-up" },
+      ] as any);
+      vi.mocked(prisma.crmActivity.count).mockResolvedValue(1);
+
+      const result = await listCrmActivities(dummyActor, "ws-1", {
+        accountId: "account-1",
+        take: 10,
+      });
+
+      expect(requireWorkspaceMembership).toHaveBeenCalledWith({ actor: dummyActor, workspaceId: "ws-1" });
+      expect(prisma.crmActivity.findMany).toHaveBeenCalledWith(expect.objectContaining({
+        where: { workspaceId: "ws-1", accountId: "account-1" },
+        take: 10,
+      }));
+      expect(result.total).toBe(1);
+    });
+
+    it("lists CRM prospect workspaces with account context through the workspace guard", async () => {
+      const { prisma } = await import("@corgtex/shared");
+      const { requireWorkspaceMembership } = await import("./auth");
+      const { listCrmProspectWorkspaces } = await import("./crm");
+
+      vi.mocked(prisma.crmProspectWorkspace.findMany).mockResolvedValue([
+        { id: "pw-1", crmWorkspaceId: "ws-1", accountId: "account-1", status: "ACTIVE" },
+      ] as any);
+      vi.mocked(prisma.crmProspectWorkspace.count).mockResolvedValue(1);
+
+      const result = await listCrmProspectWorkspaces(dummyActor, "ws-1", {
+        accountId: "account-1",
+        status: "ACTIVE",
+        take: 5,
+      });
+
+      expect(requireWorkspaceMembership).toHaveBeenCalledWith({ actor: dummyActor, workspaceId: "ws-1" });
+      expect(prisma.crmProspectWorkspace.findMany).toHaveBeenCalledWith(expect.objectContaining({
+        where: { crmWorkspaceId: "ws-1", accountId: "account-1", status: "ACTIVE" },
+        take: 5,
+      }));
+      expect(result.total).toBe(1);
     });
   });
 

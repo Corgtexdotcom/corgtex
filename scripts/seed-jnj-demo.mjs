@@ -428,6 +428,61 @@ const SHOWCASE_AGENT_RUNS = [
   },
 ];
 
+const CRM_ACCOUNTS = [
+  {
+    slug: "meridian-group",
+    name: "Meridian Group",
+    domain: "meridian.example",
+    relationshipType: "PROSPECT",
+    lifecycleStage: "QUALIFIED",
+    descriptionMd: "Regional care network evaluating governed AI workspace rollout for clinical operations teams.",
+    contacts: [
+      { email: "ava.chen@meridian.example", name: "Ava Chen", title: "Chief Operating Officer" },
+      { email: "marco.reyes@meridian.example", name: "Marco Reyes", title: "Director of Transformation" },
+    ],
+    deals: [
+      { title: "Clinical operations pilot", stage: "PROPOSAL", valueCents: 18000000, contactEmail: "ava.chen@meridian.example", notes: "Pilot scope drafted; waiting on compliance review." },
+    ],
+    activities: [
+      { title: "Proposal walkthrough completed", type: "MEETING", bodyMd: "Reviewed pilot success criteria, timeline, and governance checkpoints with operations leadership.", daysAgo: 2 },
+    ],
+  },
+  {
+    slug: "horizon-capital-partners",
+    name: "Horizon Capital Partners",
+    domain: "horizon.example",
+    relationshipType: "PARTNER",
+    lifecycleStage: "PILOT",
+    descriptionMd: "Investment partner exploring Corgtex as a portfolio operating system for AI governance.",
+    contacts: [
+      { email: "nora.patel@horizon.example", name: "Nora Patel", title: "Operating Partner" },
+    ],
+    deals: [
+      { title: "Portfolio governance advisory", stage: "NEGOTIATION", valueCents: 24000000, contactEmail: "nora.patel@horizon.example", notes: "Commercial terms under review." },
+    ],
+    activities: [
+      { title: "Partner follow-up scheduled", type: "TASK", bodyMd: "Send revised rollout memo and confirm which portfolio companies join the pilot cohort.", daysAgo: 1 },
+    ],
+  },
+  {
+    slug: "northstar-clinics",
+    name: "Northstar Clinics",
+    domain: "northstar.example",
+    relationshipType: "CLIENT",
+    lifecycleStage: "ACTIVE",
+    descriptionMd: "Active client using Corgtex for cross-functional project governance and meeting intelligence.",
+    contacts: [
+      { email: "elena.morris@northstar.example", name: "Elena Morris", title: "VP Operations" },
+    ],
+    deals: [
+      { title: "Expansion workspace rollout", stage: "CLOSED_WON", valueCents: 32000000, contactEmail: "elena.morris@northstar.example", notes: "Expansion approved for three departments." },
+    ],
+    activities: [
+      { title: "Expansion kickoff notes", type: "NOTE", bodyMd: "Client wants finance visibility and follow-up reminders in the next implementation phase.", daysAgo: 4 },
+    ],
+  },
+];
+
 const SHOWCASE_AUDIT_EVENTS = [
   { action: "proposal.published", entityType: "Proposal" },
   { action: "action.created", entityType: "Action" },
@@ -737,6 +792,129 @@ async function enableWorkspaceFeature(wsId, flag) {
       enabled: true,
     },
   });
+}
+
+async function seedCrmRelationships(wsId) {
+  for (const accountSpec of CRM_ACCOUNTS) {
+    const account = await prisma.crmAccount.upsert({
+      where: {
+        workspaceId_slug: {
+          workspaceId: wsId,
+          slug: accountSpec.slug,
+        },
+      },
+      update: {
+        name: accountSpec.name,
+        domain: accountSpec.domain,
+        relationshipType: accountSpec.relationshipType,
+        lifecycleStage: accountSpec.lifecycleStage,
+        descriptionMd: accountSpec.descriptionMd,
+        source: "demo_seed",
+        archivedAt: null,
+        archivedByUserId: null,
+        archiveReason: null,
+      },
+      create: {
+        workspaceId: wsId,
+        slug: accountSpec.slug,
+        name: accountSpec.name,
+        domain: accountSpec.domain,
+        relationshipType: accountSpec.relationshipType,
+        lifecycleStage: accountSpec.lifecycleStage,
+        descriptionMd: accountSpec.descriptionMd,
+        source: "demo_seed",
+      },
+    });
+
+    const contactsByEmail = new Map();
+    for (const contactSpec of accountSpec.contacts) {
+      const contact = await prisma.crmContact.upsert({
+        where: {
+          workspaceId_email: {
+            workspaceId: wsId,
+            email: contactSpec.email,
+          },
+        },
+        update: {
+          accountId: account.id,
+          name: contactSpec.name,
+          company: account.name,
+          title: contactSpec.title,
+          source: "demo_seed",
+          archivedAt: null,
+          archivedByUserId: null,
+          archiveReason: null,
+        },
+        create: {
+          workspaceId: wsId,
+          accountId: account.id,
+          email: contactSpec.email,
+          name: contactSpec.name,
+          company: account.name,
+          title: contactSpec.title,
+          source: "demo_seed",
+        },
+      });
+      contactsByEmail.set(contact.email, contact);
+    }
+
+    for (const dealSpec of accountSpec.deals) {
+      const contact = contactsByEmail.get(dealSpec.contactEmail);
+      if (!contact) continue;
+      const dealId = `${wsId}-crm-deal-${slugify(accountSpec.slug)}-${slugify(dealSpec.title)}`;
+      await prisma.crmDeal.upsert({
+        where: { id: dealId },
+        update: {
+          accountId: account.id,
+          contactId: contact.id,
+          title: dealSpec.title,
+          stage: dealSpec.stage,
+          valueCents: dealSpec.valueCents,
+          currency: "USD",
+          notes: dealSpec.notes,
+          closedAt: dealSpec.stage === "CLOSED_WON" || dealSpec.stage === "CLOSED_LOST" ? nDaysAgo(8) : null,
+          archivedAt: null,
+          archivedByUserId: null,
+          archiveReason: null,
+        },
+        create: {
+          id: dealId,
+          workspaceId: wsId,
+          accountId: account.id,
+          contactId: contact.id,
+          title: dealSpec.title,
+          stage: dealSpec.stage,
+          valueCents: dealSpec.valueCents,
+          currency: "USD",
+          notes: dealSpec.notes,
+          closedAt: dealSpec.stage === "CLOSED_WON" || dealSpec.stage === "CLOSED_LOST" ? nDaysAgo(8) : null,
+        },
+      });
+    }
+
+    for (const activitySpec of accountSpec.activities) {
+      const activityId = `${wsId}-crm-activity-${slugify(accountSpec.slug)}-${slugify(activitySpec.title)}`;
+      await prisma.crmActivity.upsert({
+        where: { id: activityId },
+        update: {
+          accountId: account.id,
+          type: activitySpec.type,
+          title: activitySpec.title,
+          bodyMd: activitySpec.bodyMd,
+          createdAt: nDaysAgo(activitySpec.daysAgo),
+        },
+        create: {
+          id: activityId,
+          workspaceId: wsId,
+          accountId: account.id,
+          type: activitySpec.type,
+          title: activitySpec.title,
+          bodyMd: activitySpec.bodyMd,
+          createdAt: nDaysAgo(activitySpec.daysAgo),
+        },
+      });
+    }
+  }
 }
 
 async function seedContextMapData({ wsId, circleMappings, memberMappings, meetingMappings }) {
@@ -2382,7 +2560,9 @@ async function main() {
 
   // 14. Safe showcase data for current customer-visible feature surfaces.
   await enableWorkspaceFeature(wsId, "AI_WORKSPACES");
+  await enableWorkspaceFeature(wsId, "RELATIONSHIPS");
   await seedShowcaseData({ wsId, memberMappings });
+  await seedCrmRelationships(wsId);
   await seedContextMapData({ wsId, circleMappings, memberMappings, meetingMappings });
 
   const counts = {
@@ -2399,6 +2579,9 @@ async function main() {
     auditLogs: await prisma.auditLog.count({ where: { workspaceId: wsId } }),
     contextObjects: await prisma.contextGraphObject.count({ where: { workspaceId: wsId } }),
     contextMaps: await prisma.contextMapView.count({ where: { workspaceId: wsId } }),
+    crmAccounts: await prisma.crmAccount.count({ where: { workspaceId: wsId, archivedAt: null } }),
+    crmContacts: await prisma.crmContact.count({ where: { workspaceId: wsId, archivedAt: null } }),
+    crmDeals: await prisma.crmDeal.count({ where: { workspaceId: wsId, archivedAt: null } }),
   };
 
   console.log("Demo workspace refreshed:");

@@ -1,21 +1,39 @@
 import { requirePageActor } from "@/lib/auth";
-import { prisma } from "@corgtex/shared";
-import { listContacts, listDeals, listQualifications, listCrmConversations } from "@corgtex/domain";
-import { redirect } from "next/navigation";
-import { 
-  createContactAction, 
-  deleteContactAction,
-  createDealAction,
-  approveQualificationAction,
-  rejectQualificationAction,
-  createConversationMessageAction,
-  provisionProspectWorkspaceAction
-} from "../actions";
-import { DealStageSelect } from "./DealStageSelect";
-import { getTranslations } from "next-intl/server";
 import { requireWorkspaceFeature } from "@/lib/workspace-feature-flags";
 import { MarkdownEditor } from "@/lib/components/MarkdownEditor";
 import { MarkdownRenderer } from "@/lib/components/MarkdownRenderer";
+import {
+  listContacts,
+  listCrmAccounts,
+  listCrmActivities,
+  listCrmConversations,
+  listCrmProspectWorkspaces,
+  listDeals,
+  listQualifications,
+  requireWorkspaceMembership,
+} from "@corgtex/domain";
+import { getTranslations } from "next-intl/server";
+
+import {
+  approveQualificationAction,
+  createContactAction,
+  createConversationMessageAction,
+  createCrmAccountAction,
+  createDealAction,
+  deleteContactAction,
+  provisionProspectWorkspaceAction,
+  rejectQualificationAction,
+} from "../actions";
+import { DealStageSelect } from "./DealStageSelect";
+import {
+  CRM_DEAL_STAGES,
+  CRM_LIFECYCLE_OPTIONS,
+  CRM_RELATIONSHIP_OPTIONS,
+  accountHref,
+  activePipelineValueCents,
+  labelFromCrmCode,
+  normalizeRelationshipView,
+} from "./view-model";
 
 export const dynamic = "force-dynamic";
 
@@ -23,69 +41,46 @@ export default async function LeadsPage({
   params,
   searchParams,
 }: {
-  params: Promise<{ workspaceId: string }>;
+  params: Promise<{ locale: string; workspaceId: string }>;
   searchParams?: Promise<Record<string, string | string[] | undefined>>;
 }) {
-  const { workspaceId } = await params;
+  const { locale, workspaceId } = await params;
   await requireWorkspaceFeature(workspaceId, "RELATIONSHIPS");
   const actor = await requirePageActor();
+  await requireWorkspaceMembership({ actor, workspaceId });
   const t = await getTranslations("leads");
-  
-  // They must be a member
-  try {
-    const membership = await prisma.member.findUnique({
-      where: { workspaceId_userId: { workspaceId, userId: actor.kind === "user" ? actor.user.id : "" } }
-    });
-    if (!membership) throw new Error(t("errorNotMember"));
-  } catch (error) {
-    redirect("/");
-  }
 
   const resolvedSearch = searchParams ? await searchParams : {};
-  const view = typeof resolvedSearch.view === "string" ? resolvedSearch.view : "contacts";
+  const view = normalizeRelationshipView(resolvedSearch.view);
 
-  let contacts: any[] = [];
-  let totalContacts = 0;
-  let deals: any[] = [];
-  let recentActivities: any[] = [];
-  let pendingQualifications: any[] = [];
-  let approvedQualifications: any[] = [];
-  let conversations: any[] = [];
-  let prospectWorkspaces: any[] = [];
+  const [
+    accountResult,
+    contactResult,
+    dealResult,
+    activityResult,
+    pendingQualificationResult,
+    approvedQualificationResult,
+    conversationResult,
+    prospectWorkspaceResult,
+  ] = await Promise.all([
+    listCrmAccounts(actor, workspaceId, { take: 100 }),
+    listContacts(actor, workspaceId, { take: 100 }),
+    listDeals(actor, workspaceId, { take: 100 }),
+    listCrmActivities(actor, workspaceId, { take: 20 }),
+    listQualifications(actor, workspaceId, { status: "PENDING_REVIEW" }),
+    listQualifications(actor, workspaceId, { status: "APPROVED" }),
+    listCrmConversations(actor, workspaceId, { take: 30 }),
+    listCrmProspectWorkspaces(actor, workspaceId, { take: 30 }),
+  ]);
 
-  try {
-    const [cResult, dResult, aResult, qResult, approvedResult, convResult, pwResult] = await Promise.all([
-      listContacts(actor, workspaceId, { take: 50 }),
-      listDeals(actor, workspaceId, { take: 50 }),
-      prisma.crmActivity.findMany({
-        where: { workspaceId },
-        include: {
-          contact: { select: { name: true, email: true } },
-          deal: { select: { title: true } }
-        },
-        orderBy: { createdAt: "desc" },
-        take: 10
-      }),
-      listQualifications(actor, workspaceId, { status: "PENDING_REVIEW" }),
-      listQualifications(actor, workspaceId, { status: "APPROVED" }),
-      listCrmConversations(actor, workspaceId, { take: 20 }),
-      prisma.crmProspectWorkspace.findMany({
-        where: { crmWorkspaceId: workspaceId },
-        include: { demoLead: true, targetWorkspace: true },
-        orderBy: { provisionedAt: "desc" }
-      })
-    ]);
-    contacts = cResult.items;
-    totalContacts = cResult.total;
-    deals = dResult.items;
-    recentActivities = aResult;
-    pendingQualifications = qResult.items;
-    approvedQualifications = approvedResult.items;
-    conversations = convResult.items;
-    prospectWorkspaces = pwResult;
-  } catch (error) {
-    // CRM tables might not be seeded or present in this environment, fallback safely
-  }
+  const accounts = accountResult.items;
+  const contacts = contactResult.items;
+  const deals = dealResult.items;
+  const recentActivities = activityResult.items;
+  const pendingQualifications = pendingQualificationResult.items;
+  const approvedQualifications = approvedQualificationResult.items;
+  const conversations = conversationResult.items;
+  const prospectWorkspaces = prospectWorkspaceResult.items;
 
   const dealsByStage = deals.reduce((acc, deal) => {
     acc[deal.stage] = acc[deal.stage] || [];
@@ -93,26 +88,98 @@ export default async function LeadsPage({
     return acc;
   }, {} as Record<string, typeof deals>);
 
-  const activeDeals = deals.filter(d => d.stage !== "CLOSED_WON" && d.stage !== "CLOSED_LOST");
-  const closedWon = deals.filter(d => d.stage === "CLOSED_WON");
-  const pipelineValue = activeDeals.reduce((sum, d) => sum + (d.valueCents || 0), 0);
+  const dealsByAccountId = deals.reduce((acc, deal) => {
+    if (!deal.accountId) return acc;
+    acc.set(deal.accountId, [...(acc.get(deal.accountId) ?? []), deal]);
+    return acc;
+  }, new Map<string, typeof deals>());
+
+  const lastActivityByAccountId = new Map<string, (typeof recentActivities)[number]>();
+  for (const activity of recentActivities) {
+    if (activity.accountId && !lastActivityByAccountId.has(activity.accountId)) {
+      lastActivityByAccountId.set(activity.accountId, activity);
+    }
+  }
+
+  const activeDeals = deals.filter((deal) => deal.stage !== "CLOSED_WON" && deal.stage !== "CLOSED_LOST");
+  const closedWon = deals.filter((deal) => deal.stage === "CLOSED_WON");
+  const pipelineValue = activePipelineValueCents(activeDeals);
 
   const formatCurrency = (cents: number) => {
-    return new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 0 }).format(cents / 100);
+    return new Intl.NumberFormat(locale, {
+      style: "currency",
+      currency: "USD",
+      maximumFractionDigits: 0,
+    }).format(cents / 100);
   };
 
-  const ageText = (date: Date) => {
+  const formatDate = (value: Date | string) => new Intl.DateTimeFormat(locale, {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+  }).format(new Date(value));
+
+  const ageText = (date: Date | string) => {
     const days = Math.floor((Date.now() - new Date(date).getTime()) / (1000 * 60 * 60 * 24));
-    return days === 0 ? t("ageToday") : t("ageDaysAgo", { days });
+    if (days <= 0) return t("ageToday");
+    if (days === 1) return t("ageYesterday");
+    return t("ageDaysAgo", { days });
   };
 
-  const viewLabels: Record<string, string> = {
+  const viewLabels = {
+    accounts: t("tabAccounts"),
     contacts: t("tabContacts"),
     pipeline: t("tabPipeline"),
     activity: t("tabActivity"),
-    review: "Review Queue",
-    conversations: "Conversations",
-    instances: "Instances",
+    review: t("tabReview"),
+    conversations: t("tabConversations"),
+    instances: t("tabInstances"),
+  };
+
+  const stageLabels = {
+    LEAD: t("stageLead"),
+    QUALIFIED: t("stageQualified"),
+    PROPOSAL: t("stageProposal"),
+    NEGOTIATION: t("stageNegotiate"),
+    CLOSED_WON: t("stageWon"),
+    CLOSED_LOST: t("stageLost"),
+  };
+
+  const relationshipLabelKeys: Record<string, string> = {
+    PROSPECT: "relationshipProspect",
+    PILOT: "relationshipPilot",
+    CLIENT: "relationshipClient",
+    PARTNER: "relationshipPartner",
+    VENDOR: "relationshipVendor",
+    INVESTOR: "relationshipInvestor",
+    INTERNAL: "relationshipInternal",
+  };
+
+  const lifecycleLabelKeys: Record<string, string> = {
+    DISCOVERY: "lifecycleDiscovery",
+    QUALIFIED: "lifecycleQualified",
+    PILOT: "lifecyclePilot",
+    ACTIVE: "lifecycleActive",
+    EXPANSION: "lifecycleExpansion",
+    PAUSED: "lifecyclePaused",
+    CHURNED: "lifecycleChurned",
+  };
+
+  const relationshipLabel = (value?: string | null) => {
+    if (!value) return t("emptyValue");
+    const key = relationshipLabelKeys[value];
+    return key ? t(key) : labelFromCrmCode(value);
+  };
+
+  const lifecycleLabel = (value?: string | null) => {
+    if (!value) return t("emptyValue");
+    const key = lifecycleLabelKeys[value];
+    return key ? t(key) : labelFromCrmCode(value);
+  };
+
+  const accountLink = (account?: { id: string; name: string } | null) => {
+    if (!account) return <span className="muted">{t("emptyAccount")}</span>;
+    return <a href={accountHref(workspaceId, account.id)}>{account.name}</a>;
   };
 
   const activityIcon = (type: string) => {
@@ -121,6 +188,7 @@ export default async function LeadsPage({
       MEETING: t("activityIconMeeting"),
       CALL: t("activityIconCall"),
       NOTE: t("activityIconNote"),
+      TASK: t("activityIconTask"),
     };
     return labels[type] ?? t("activityIconDefault");
   };
@@ -131,8 +199,9 @@ export default async function LeadsPage({
       MEETING: t("activityTypeMeeting"),
       CALL: t("activityTypeCall"),
       NOTE: t("activityTypeNote"),
+      TASK: t("activityTypeTask"),
     };
-    return labels[type] ?? type;
+    return labels[type] ?? labelFromCrmCode(type);
   };
 
   return (
@@ -147,12 +216,12 @@ export default async function LeadsPage({
       <section className="ws-section">
         <div className="ws-stat-row">
           <div className="ws-stat-card">
-            <strong>{totalContacts}</strong>
-            <span>{t("statTotalContacts")}</span>
+            <strong>{accountResult.total}</strong>
+            <span>{t("statAccounts")}</span>
           </div>
           <div className="ws-stat-card">
-            <strong>{activeDeals.length}</strong>
-            <span>{t("statActiveDeals")}</span>
+            <strong>{contactResult.total}</strong>
+            <span>{t("statTotalContacts")}</span>
           </div>
           <div className="ws-stat-card">
             <strong>{formatCurrency(pipelineValue)}</strong>
@@ -165,27 +234,120 @@ export default async function LeadsPage({
         </div>
 
         <div className="nr-filter-bar">
-          {(["contacts", "pipeline", "activity", "review", "conversations", "instances"] as const).map((s) => (
-            <a 
-              key={s} 
-              href={`?view=${s}`} 
-              className={`nr-filter-item ${view === s ? "nr-filter-active" : ""}`}
+          {Object.entries(viewLabels).map(([key, label]) => (
+            <a
+              key={key}
+              href={`?view=${key}`}
+              className={`nr-filter-item ${view === key ? "nr-filter-active" : ""}`}
             >
-              {viewLabels[s]}
+              {label}
             </a>
           ))}
         </div>
 
+        {view === "accounts" && (
+          <div>
+            <div style={{ marginBottom: 24, display: "flex", justifyContent: "flex-end" }}>
+              <details style={{ width: "100%" }}>
+                <summary className="link-button small" style={{ cursor: "pointer", marginLeft: "auto", display: "inline-flex" }}>
+                  {t("btnNewAccount")}
+                </summary>
+                <form action={createCrmAccountAction} className="stack nr-form-section" style={{ marginTop: 16 }}>
+                  <input type="hidden" name="workspaceId" value={workspaceId} />
+                  <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 16 }}>
+                    <label>{t("formAccountName")} <input type="text" name="name" required /></label>
+                    <label>{t("formDomain")} <input type="text" name="domain" placeholder={t("formDomainPlaceholder")} /></label>
+                    <label>
+                      {t("formRelationshipType")}
+                      <select name="relationshipType" defaultValue="PROSPECT">
+                        {CRM_RELATIONSHIP_OPTIONS.map((option) => (
+                          <option key={option} value={option}>{relationshipLabel(option)}</option>
+                        ))}
+                      </select>
+                    </label>
+                    <label>
+                      {t("formLifecycleStage")}
+                      <select name="lifecycleStage" defaultValue="DISCOVERY">
+                        {CRM_LIFECYCLE_OPTIONS.map((option) => (
+                          <option key={option} value={option}>{lifecycleLabel(option)}</option>
+                        ))}
+                      </select>
+                    </label>
+                  </div>
+                  <label>
+                    {t("formDescription")}
+                    <MarkdownEditor name="descriptionMd" placeholder={t("formDescriptionPlaceholder")} rows={3} />
+                  </label>
+                  <button type="submit" style={{ width: "fit-content" }}>{t("btnCreateAccount")}</button>
+                </form>
+              </details>
+            </div>
+
+            {accounts.length === 0 ? (
+              <p className="muted">{t("noAccounts")}</p>
+            ) : (
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))", gap: 16 }}>
+                {accounts.map((account) => {
+                  const accountDeals = dealsByAccountId.get(account.id) ?? [];
+                  const accountPipelineValue = activePipelineValueCents(accountDeals);
+                  const lastActivity = lastActivityByAccountId.get(account.id);
+                  return (
+                    <a
+                      key={account.id}
+                      href={accountHref(workspaceId, account.id)}
+                      className="item nr-clickable-card"
+                      style={{ display: "grid", gap: 12, color: "inherit", textDecoration: "none", borderRadius: 8 }}
+                    >
+                      <div className="row" style={{ alignItems: "flex-start", gap: 12 }}>
+                        <div>
+                          <strong style={{ fontSize: "1rem" }}>{account.name}</strong>
+                          <div className="muted" style={{ fontSize: "0.82rem", marginTop: 4 }}>
+                            {account.domain || t("noDomain")}
+                          </div>
+                        </div>
+                        <span className="tag" style={{ marginLeft: "auto" }}>{relationshipLabel(account.relationshipType)}</span>
+                      </div>
+                      <div className="nr-tag-group">
+                        <span className="tag-sm">{lifecycleLabel(account.lifecycleStage)}</span>
+                        <span className="tag-sm">{t("accountContactsCount", { count: account._count.contacts })}</span>
+                        <span className="tag-sm">{t("accountDealsCount", { count: account._count.deals })}</span>
+                      </div>
+                      <div className="row" style={{ fontSize: "0.85rem", alignItems: "baseline" }}>
+                        <span className="muted">{t("accountPipeline")}</span>
+                        <strong>{formatCurrency(accountPipelineValue)}</strong>
+                      </div>
+                      <div className="muted" style={{ fontSize: "0.8rem" }}>
+                        {lastActivity
+                          ? t("accountLastActivity", { title: lastActivity.title, age: ageText(lastActivity.createdAt) })
+                          : t("accountNoActivity")}
+                      </div>
+                    </a>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        )}
+
         {view === "contacts" && (
           <div>
-            <div style={{ marginBottom: "24px", display: "flex", justifyContent: "flex-end" }}>
+            <div style={{ marginBottom: 24, display: "flex", justifyContent: "flex-end" }}>
               <details style={{ width: "100%" }}>
                 <summary className="link-button small" style={{ cursor: "pointer", marginLeft: "auto", display: "inline-flex" }}>
                   {t("btnNewContact")}
                 </summary>
                 <form action={createContactAction} className="stack nr-form-section" style={{ marginTop: 16 }}>
                   <input type="hidden" name="workspaceId" value={workspaceId} />
-                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "16px" }}>
+                  <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 16 }}>
+                    <label>
+                      {t("formAccount")}
+                      <select name="accountId" defaultValue="">
+                        <option value="">{t("selectAccountOptional")}</option>
+                        {accounts.map((account) => (
+                          <option key={account.id} value={account.id}>{account.name}</option>
+                        ))}
+                      </select>
+                    </label>
                     <label>{t("formEmail")} <input type="email" name="email" required /></label>
                     <label>{t("formName")} <input type="text" name="name" /></label>
                     <label>{t("formCompany")} <input type="text" name="company" /></label>
@@ -204,7 +366,7 @@ export default async function LeadsPage({
                   <thead>
                     <tr style={{ borderBottom: "2px solid var(--line)", textAlign: "left" }}>
                       <th style={{ padding: "12px 8px" }}>{t("colContact")}</th>
-                      <th style={{ padding: "12px 8px" }}>{t("colCompany")}</th>
+                      <th style={{ padding: "12px 8px" }}>{t("colAccount")}</th>
                       <th style={{ padding: "12px 8px" }}>{t("colSource")}</th>
                       <th style={{ padding: "12px 8px" }}>{t("colCreated")}</th>
                       <th style={{ padding: "12px 8px" }}>{t("colActions")}</th>
@@ -218,13 +380,13 @@ export default async function LeadsPage({
                           <div className="muted" style={{ fontSize: "0.8rem" }}>{contact.email}</div>
                         </td>
                         <td style={{ padding: "12px 8px" }}>
-                          {contact.company || <span className="muted">{t("emptyValue")}</span>}
+                          {contact.account ? accountLink(contact.account) : (contact.company || <span className="muted">{t("emptyAccount")}</span>)}
                         </td>
                         <td style={{ padding: "12px 8px" }}>
                           <span className="tag">{contact.source}</span>
                         </td>
                         <td style={{ padding: "12px 8px" }} className="muted">
-                          {new Date(contact.createdAt).toLocaleDateString()}
+                          {formatDate(contact.createdAt)}
                         </td>
                         <td style={{ padding: "12px 8px" }}>
                           <details style={{ position: "relative" }}>
@@ -254,19 +416,23 @@ export default async function LeadsPage({
 
         {view === "pipeline" && (
           <div>
-            <div style={{ marginBottom: "24px", display: "flex", justifyContent: "flex-end" }}>
+            <div style={{ marginBottom: 24, display: "flex", justifyContent: "flex-end" }}>
               <details style={{ width: "100%" }}>
                 <summary className="link-button small" style={{ cursor: "pointer", marginLeft: "auto", display: "inline-flex" }}>
                   {t("btnNewDeal")}
                 </summary>
                 <form action={createDealAction} className="stack nr-form-section" style={{ marginTop: 16 }}>
                   <input type="hidden" name="workspaceId" value={workspaceId} />
-                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "16px" }}>
+                  <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 16 }}>
                     <label>
                       {t("formContact")}
                       <select name="contactId" required>
                         <option value="">{t("selectContact")}</option>
-                        {contacts.map((c) => <option key={c.id} value={c.id}>{c.name || c.email}</option>)}
+                        {contacts.map((contact) => (
+                          <option key={contact.id} value={contact.id}>
+                            {contact.name || contact.email}
+                          </option>
+                        ))}
                       </select>
                     </label>
                     <label>{t("formDealTitle")} <input type="text" name="title" required /></label>
@@ -277,24 +443,27 @@ export default async function LeadsPage({
               </details>
             </div>
 
-            <div style={{ display: "flex", gap: "16px", overflowX: "auto", paddingBottom: "16px" }}>
-              {(["LEAD", "QUALIFIED", "PROPOSAL", "NEGOTIATION", "CLOSED_WON", "CLOSED_LOST"] as const).map(stage => (
-                <div key={stage} style={{ flex: "0 0 300px", background: "var(--bg-alt)", borderRadius: "12px", padding: "16px" }}>
-                  <div style={{ fontWeight: 600, marginBottom: "16px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                    {stage === "LEAD" ? t("stageLead") : stage === "QUALIFIED" ? t("stageQualified") : stage === "PROPOSAL" ? t("stageProposal") : stage === "NEGOTIATION" ? t("stageNegotiate") : stage === "CLOSED_WON" ? t("stageWon") : t("stageLost")}
-                    <span className="muted" style={{ fontSize: "0.8rem", background: "rgba(0,0,0,0.05)", padding: "2px 8px", borderRadius: "99px" }}>
+            <div style={{ display: "flex", gap: 16, overflowX: "auto", paddingBottom: 16 }}>
+              {CRM_DEAL_STAGES.map((stage) => (
+                <div key={stage} style={{ flex: "0 0 300px", background: "var(--bg-alt)", borderRadius: 8, padding: 16 }}>
+                  <div style={{ fontWeight: 600, marginBottom: 16, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                    {stageLabels[stage]}
+                    <span className="muted" style={{ fontSize: "0.8rem", background: "rgba(0,0,0,0.05)", padding: "2px 8px", borderRadius: 8 }}>
                       {(dealsByStage[stage] || []).length}
                     </span>
                   </div>
                   <div className="stack">
-                    {(dealsByStage[stage] || []).map((deal: any) => (
-                      <div key={deal.id} className="item" style={{ background: "white", padding: "12px" }}>
+                    {(dealsByStage[stage] || []).map((deal) => (
+                      <div key={deal.id} className="item" style={{ background: "white", padding: 12, borderRadius: 8 }}>
                         <div style={{ fontWeight: 600, fontSize: "0.95rem", marginBottom: 4 }}>{deal.title}</div>
+                        <div className="muted" style={{ fontSize: "0.8rem", marginBottom: 8 }}>
+                          {accountLink(deal.account)}
+                        </div>
                         <div className="row" style={{ fontSize: "0.8rem" }}>
                           <span className="muted">{deal.contact.name || deal.contact.email}</span>
                           {deal.valueCents != null && <strong style={{ color: "var(--success)" }}>{formatCurrency(deal.valueCents)}</strong>}
                         </div>
-                        <div style={{ marginTop: 12, display: "flex", gap: "4px" }}>
+                        <div style={{ marginTop: 12, display: "flex", gap: 4 }}>
                           <DealStageSelect workspaceId={workspaceId} dealId={deal.id} currentStage={deal.stage} />
                         </div>
                       </div>
@@ -309,19 +478,20 @@ export default async function LeadsPage({
         {view === "activity" && (
           <div className="stack">
             {recentActivities.length === 0 && <p className="muted">{t("noActivity")}</p>}
-            {recentActivities.map(activity => (
-              <div key={activity.id} className="item" style={{ display: "flex", gap: "16px" }}>
-                <div style={{ width: "40px", height: "40px", borderRadius: "50%", background: "var(--accent-soft)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: "1.2rem", flexShrink: 0 }}>
+            {recentActivities.map((activity) => (
+              <div key={activity.id} className="item" style={{ display: "flex", gap: 16 }}>
+                <div style={{ width: 40, height: 40, borderRadius: "50%", background: "var(--accent-soft)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: "1.2rem", flexShrink: 0 }}>
                   {activityIcon(activity.type)}
                 </div>
-                <div>
-                  <div className="row" style={{ justifyContent: "flex-start", gap: "8px", marginBottom: "4px" }}>
+                <div style={{ minWidth: 0, flex: 1 }}>
+                  <div className="row" style={{ justifyContent: "flex-start", gap: 8, marginBottom: 4 }}>
                     <strong style={{ fontSize: "0.95rem" }}>{activity.title}</strong>
                     <span className="tag">{activityTypeLabel(activity.type)}</span>
                     <span className="muted" style={{ fontSize: "0.8rem", marginLeft: "auto" }}>{ageText(activity.createdAt)}</span>
                   </div>
-                  <MarkdownRenderer markdown={activity.bodyMd} variant="compact" />
-                  <div className="row" style={{ fontSize: "0.8rem" }}>
+                  {activity.bodyMd && <MarkdownRenderer markdown={activity.bodyMd} variant="compact" />}
+                  <div className="row" style={{ fontSize: "0.8rem", justifyContent: "flex-start", gap: 12 }}>
+                    <span className="muted">{t("activityAccount")} <strong>{accountLink(activity.account)}</strong></span>
                     {activity.contact && (
                       <span className="muted">{t("activityContact")} <strong>{activity.contact.name || activity.contact.email}</strong></span>
                     )}
@@ -337,30 +507,30 @@ export default async function LeadsPage({
 
         {view === "review" && (
           <div className="stack">
-            {pendingQualifications.length === 0 && <p className="muted">No pending qualifications in queue</p>}
-            {pendingQualifications.map(qual => (
-              <div key={qual.id} className="item" style={{ padding: 16 }}>
+            {pendingQualifications.length === 0 && <p className="muted">{t("noPendingQualifications")}</p>}
+            {pendingQualifications.map((qualification) => (
+              <div key={qualification.id} className="item" style={{ padding: 16 }}>
                 <div className="row">
-                  <strong>{qual.demoLead.email}</strong>
-                  <span className="tag">{qual.responseChannel}</span>
+                  <strong>{qualification.demoLead.email}</strong>
+                  <span className="tag">{qualification.responseChannel}</span>
                 </div>
-                <div style={{ marginTop: 16, display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16, fontSize: "0.85rem" }}>
-                  {qual.companyName && <div><span className="muted">Company:</span> {qual.companyName}</div>}
-                  {qual.website && <div><span className="muted">Website:</span> {qual.website}</div>}
-                  {qual.aiExperience && <div style={{ gridColumn: "1 / -1" }}><span className="muted">AI Exp:</span> {qual.aiExperience}</div>}
-                  {qual.helpNeeded && <div style={{ gridColumn: "1 / -1" }}><span className="muted">Needs:</span> {qual.helpNeeded}</div>}
-                  {qual.rawEmailReply && <div style={{ gridColumn: "1 / -1" }}><span className="muted">Raw Reply:</span> {qual.rawEmailReply}</div>}
+                <div style={{ marginTop: 16, display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 16, fontSize: "0.85rem" }}>
+                  {qualification.companyName && <div><span className="muted">{t("reviewCompany")}</span> {qualification.companyName}</div>}
+                  {qualification.website && <div><span className="muted">{t("reviewWebsite")}</span> {qualification.website}</div>}
+                  {qualification.aiExperience && <div style={{ gridColumn: "1 / -1" }}><span className="muted">{t("reviewAiExperience")}</span> {qualification.aiExperience}</div>}
+                  {qualification.helpNeeded && <div style={{ gridColumn: "1 / -1" }}><span className="muted">{t("reviewNeeds")}</span> {qualification.helpNeeded}</div>}
+                  {qualification.rawEmailReply && <div style={{ gridColumn: "1 / -1" }}><span className="muted">{t("reviewRawReply")}</span> {qualification.rawEmailReply}</div>}
                 </div>
                 <div className="row" style={{ marginTop: 16, justifyContent: "flex-start", gap: 8 }}>
                   <form action={approveQualificationAction}>
                     <input type="hidden" name="workspaceId" value={workspaceId} />
-                    <input type="hidden" name="qualificationId" value={qual.id} />
-                    <button type="submit" className="small">Approve & Send Demo</button>
+                    <input type="hidden" name="qualificationId" value={qualification.id} />
+                    <button type="submit" className="small">{t("btnApproveQualification")}</button>
                   </form>
                   <form action={rejectQualificationAction}>
                     <input type="hidden" name="workspaceId" value={workspaceId} />
-                    <input type="hidden" name="qualificationId" value={qual.id} />
-                    <button type="submit" className="danger small">Reject</button>
+                    <input type="hidden" name="qualificationId" value={qualification.id} />
+                    <button type="submit" className="danger small">{t("btnRejectQualification")}</button>
                   </form>
                 </div>
               </div>
@@ -370,30 +540,32 @@ export default async function LeadsPage({
 
         {view === "conversations" && (
           <div className="stack">
-            {conversations.length === 0 && <p className="muted">No active conversations</p>}
-            {conversations.map(conv => (
-              <div key={conv.id} className="item" style={{ padding: 16 }}>
+            {conversations.length === 0 && <p className="muted">{t("noConversations")}</p>}
+            {conversations.map((conversation) => (
+              <div key={conversation.id} className="item" style={{ padding: 16 }}>
                 <div className="row">
-                  <strong>{conv.subject}</strong>
-                  <span className="tag">{conv.status}</span>
+                  <strong>{conversation.subject || t("untitledConversation")}</strong>
+                  <span className="tag">{conversation.status}</span>
                 </div>
                 <div className="muted" style={{ fontSize: "0.85rem", marginTop: 4 }}>
-                  {conv.contact ? (conv.contact.name || conv.contact.email) : conv.demoLead?.email}
+                  {accountLink(conversation.account)}
+                  {" · "}
+                  {conversation.contact ? (conversation.contact.name || conversation.contact.email) : conversation.demoLead?.email}
                 </div>
-                {conv.messages && conv.messages[0] && (
+                {conversation.messages && conversation.messages[0] && (
                   <div style={{ marginTop: 12, background: "var(--bg-alt)", padding: 12, borderRadius: 8, fontSize: "0.85rem" }}>
-                    <strong>{conv.messages[0].senderType === "LEAD" ? "Lead" : "Staff"}</strong>
-                    <MarkdownRenderer markdown={conv.messages[0].bodyMd} variant="compact" />
+                    <strong>{conversation.messages[0].senderType === "LEAD" ? t("senderLead") : t("senderStaff")}</strong>
+                    <MarkdownRenderer markdown={conversation.messages[0].bodyMd} variant="compact" />
                   </div>
                 )}
-                
+
                 <details style={{ marginTop: 12 }}>
-                  <summary className="link-button small" style={{ cursor: "pointer" }}>Reply to Conversation</summary>
+                  <summary className="link-button small" style={{ cursor: "pointer" }}>{t("btnReplyConversation")}</summary>
                   <form action={createConversationMessageAction} className="stack nr-form-section" style={{ marginTop: 12 }}>
                     <input type="hidden" name="workspaceId" value={workspaceId} />
-                    <input type="hidden" name="conversationId" value={conv.id} />
-                    <MarkdownEditor name="bodyMd" required placeholder="Type your reply here..." rows={3} />
-                    <button type="submit" className="small" style={{ width: "fit-content" }}>Send Reply</button>
+                    <input type="hidden" name="conversationId" value={conversation.id} />
+                    <MarkdownEditor name="bodyMd" required placeholder={t("formReplyPlaceholder")} rows={3} />
+                    <button type="submit" className="small" style={{ width: "fit-content" }}>{t("btnSendReply")}</button>
                   </form>
                 </details>
               </div>
@@ -403,43 +575,46 @@ export default async function LeadsPage({
 
         {view === "instances" && (
           <div className="stack">
-            <div style={{ marginBottom: "24px", display: "flex", justifyContent: "flex-end" }}>
+            <div style={{ marginBottom: 24, display: "flex", justifyContent: "flex-end" }}>
               <details style={{ width: "100%" }}>
                 <summary className="link-button small" style={{ cursor: "pointer", marginLeft: "auto", display: "inline-flex" }}>
-                  Provision New Instance
+                  {t("btnProvisionInstance")}
                 </summary>
                 <form action={provisionProspectWorkspaceAction} className="stack nr-form-section" style={{ marginTop: 16 }}>
                   <input type="hidden" name="workspaceId" value={workspaceId} />
-                  <div style={{ display: "grid", gridTemplateColumns: "1fr", gap: "16px" }}>
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr", gap: 16 }}>
                     <label>
-                      Select Prospect
+                      {t("formProspect")}
                       <select name="demoLeadId" required>
-                        <option value="">Choose Lead...</option>
-                        {approvedQualifications.map((q: any) => (
-                          <option key={q.demoLeadId} value={q.demoLeadId}>{q.companyName || q.demoLead?.email || "Unknown Lead"}</option>
+                        <option value="">{t("selectLead")}</option>
+                        {approvedQualifications.map((qualification) => (
+                          <option key={qualification.demoLeadId} value={qualification.demoLeadId}>
+                            {qualification.companyName || qualification.demoLead?.email || t("unknownLead")}
+                          </option>
                         ))}
                       </select>
                     </label>
-                    <label>Admin Email <input type="email" name="adminEmail" required /></label>
+                    <label>{t("formAdminEmail")} <input type="email" name="adminEmail" required /></label>
                   </div>
-                  <button type="submit" style={{ width: "fit-content" }}>Provision Demo Workspace</button>
+                  <button type="submit" style={{ width: "fit-content" }}>{t("btnProvisionWorkspace")}</button>
                 </form>
               </details>
             </div>
 
-            {prospectWorkspaces.length === 0 && <p className="muted">No instances provisioned yet</p>}
-            {prospectWorkspaces.map(pw => (
-              <div key={pw.id} className="item" style={{ padding: 16 }}>
+            {prospectWorkspaces.length === 0 && <p className="muted">{t("noInstances")}</p>}
+            {prospectWorkspaces.map((prospectWorkspace) => (
+              <div key={prospectWorkspace.id} className="item" style={{ padding: 16 }}>
                 <div className="row">
-                  <strong>{pw.targetWorkspace?.name || "Demo Workspace"}</strong>
-                  <span className="tag" style={{ background: pw.status === "ACTIVE" ? "var(--success)" : "var(--bg-alt)", color: pw.status === "ACTIVE" ? "white" : "inherit" }}>
-                    {pw.status}
+                  <strong>{prospectWorkspace.targetWorkspace?.name || t("demoWorkspace")}</strong>
+                  <span className="tag" style={{ background: prospectWorkspace.status === "ACTIVE" ? "var(--success)" : "var(--bg-alt)", color: prospectWorkspace.status === "ACTIVE" ? "white" : "inherit" }}>
+                    {prospectWorkspace.status}
                   </span>
                 </div>
                 <div className="muted" style={{ fontSize: "0.85rem", marginTop: 8 }}>
-                  <div>Lead: {pw.demoLead?.email}</div>
-                  <div>Admin: {pw.adminEmail}</div>
-                  <div>Provisioned: {new Date(pw.provisionedAt).toLocaleDateString()}</div>
+                  <div>{t("instanceAccount")} {accountLink(prospectWorkspace.account)}</div>
+                  <div>{t("instanceLead")} {prospectWorkspace.demoLead?.email}</div>
+                  <div>{t("instanceAdmin")} {prospectWorkspace.adminEmail}</div>
+                  <div>{t("instanceProvisioned")} {formatDate(prospectWorkspace.provisionedAt)}</div>
                 </div>
               </div>
             ))}

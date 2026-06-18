@@ -2,8 +2,9 @@
 
 import { enforceDemoGuard } from "@/lib/demo-guard";
 import { requirePageActor } from "@/lib/auth";
-import { asString, asOptional, asOptionalInt, refresh } from "../action-utils";
+import { asString, asOptional, refresh } from "../action-utils";
 import {
+  createCrmAccount,
   createContact,
   updateContact,
   deleteContact,
@@ -15,9 +16,44 @@ import {
   rejectQualification,
   sendSchedulingLinkEmail,
   createConversationMessage,
-  provisionProspectWorkspace
+  provisionProspectWorkspace,
+  updateCrmAccount,
 } from "@corgtex/domain";
 
+export async function createCrmAccountAction(formData: FormData) {
+  const _demoGuardWsId = formData.get("workspaceId") as string;
+  if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
+
+  const actor = await requirePageActor();
+  const workspaceId = asString(formData, "workspaceId");
+  await createCrmAccount(actor, {
+    workspaceId,
+    name: asString(formData, "name"),
+    domain: asOptional(formData, "domain"),
+    relationshipType: asOptional(formData, "relationshipType"),
+    lifecycleStage: asOptional(formData, "lifecycleStage"),
+    descriptionMd: asOptional(formData, "descriptionMd"),
+  });
+  refresh(workspaceId);
+}
+
+export async function updateCrmAccountAction(formData: FormData) {
+  const _demoGuardWsId = formData.get("workspaceId") as string;
+  if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
+
+  const actor = await requirePageActor();
+  const workspaceId = asString(formData, "workspaceId");
+  await updateCrmAccount(actor, {
+    workspaceId,
+    accountId: asString(formData, "accountId"),
+    name: formData.has("name") ? asString(formData, "name") : undefined,
+    domain: formData.has("domain") ? asOptional(formData, "domain") ?? null : undefined,
+    relationshipType: formData.has("relationshipType") ? asOptional(formData, "relationshipType") ?? undefined : undefined,
+    lifecycleStage: formData.has("lifecycleStage") ? asOptional(formData, "lifecycleStage") ?? undefined : undefined,
+    descriptionMd: formData.has("descriptionMd") ? asOptional(formData, "descriptionMd") ?? null : undefined,
+  });
+  refresh(workspaceId);
+}
 
 export async function createContactAction(formData: FormData) {
   const _demoGuardWsId = formData.get("workspaceId") as string;
@@ -32,6 +68,7 @@ export async function createContactAction(formData: FormData) {
     company: asOptional(formData, "company"),
     title: asOptional(formData, "title"),
     phone: asOptional(formData, "phone"),
+    accountId: formData.has("accountId") ? asOptional(formData, "accountId") ?? null : undefined,
   });
   refresh(workspaceId);
 }
@@ -50,6 +87,7 @@ export async function updateContactAction(formData: FormData) {
     company: formData.has("company") ? asOptional(formData, "company") ?? undefined : undefined,
     title: formData.has("title") ? asOptional(formData, "title") ?? undefined : undefined,
     phone: formData.has("phone") ? asOptional(formData, "phone") ?? undefined : undefined,
+    accountId: formData.has("accountId") ? asOptional(formData, "accountId") ?? null : undefined,
   });
   refresh(workspaceId);
 }
@@ -83,6 +121,7 @@ export async function createDealAction(formData: FormData) {
     contactId: asString(formData, "contactId"),
     title: asString(formData, "title"),
     valueCents,
+    accountId: formData.has("accountId") ? asOptional(formData, "accountId") ?? null : undefined,
   });
   refresh(workspaceId);
 }
@@ -133,6 +172,7 @@ export async function createActivityAction(formData: FormData) {
     title: asString(formData, "title"),
     type: formData.has("type") ? (asString(formData, "type") as any) : undefined,
     bodyMd: asOptional(formData, "bodyMd"),
+    accountId: asOptional(formData, "accountId"),
     contactId: asOptional(formData, "contactId"),
     dealId: asOptional(formData, "dealId"),
   });
