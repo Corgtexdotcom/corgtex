@@ -12,6 +12,13 @@ export const RELATIONSHIP_VIEWS = [
 
 export type RelationshipView = (typeof RELATIONSHIP_VIEWS)[number];
 
+export const RELATIONSHIP_FULL_PAGE_VIEWS = [
+  "accounts",
+  "pipeline",
+] as const;
+
+export type RelationshipFullPageView = (typeof RELATIONSHIP_FULL_PAGE_VIEWS)[number];
+
 export const ACCOUNT_DETAIL_VIEWS = [
   "overview",
   "contacts",
@@ -69,6 +76,22 @@ export function normalizeAccountDetailView(value: string | string[] | undefined)
 
 export function accountHref(workspaceId: string, accountId: string) {
   return `/workspaces/${workspaceId}/leads/accounts/${accountId}`;
+}
+
+export function relationshipDashboardHref(workspaceId: string) {
+  return `/workspaces/${workspaceId}/leads`;
+}
+
+export function relationshipFullPageHref(workspaceId: string, view: RelationshipFullPageView) {
+  return `/workspaces/${workspaceId}/leads/${view}`;
+}
+
+export function relationshipViewHref(workspaceId: string, view: RelationshipView) {
+  if (view === "dashboard") return relationshipDashboardHref(workspaceId);
+  if (RELATIONSHIP_FULL_PAGE_VIEWS.includes(view as RelationshipFullPageView)) {
+    return relationshipFullPageHref(workspaceId, view as RelationshipFullPageView);
+  }
+  return `/workspaces/${workspaceId}/leads?view=${view}`;
 }
 
 export function labelFromCrmCode(value?: string | null) {
