@@ -180,8 +180,7 @@ export const MODULE_MANIFESTS: readonly ModuleManifest[] = [
     dataOwnership: "corgtex_postgres",
     featureFlag: flag("RELATIONSHIPS", "Relationships", "CRM, leads, and relationship workspace views.", true),
     nav: { href: "/leads", labelKey: "relationships", icon: "relationships", group: "operations" },
-    // No dedicated MCP scope namespace today; relationship data is reached via
-    // brain/members scopes. Left unowned intentionally.
+    scopes: ["relationships:read", "relationships:write"],
   },
   {
     key: "context-maps",

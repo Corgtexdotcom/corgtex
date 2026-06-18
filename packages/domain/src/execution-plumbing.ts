@@ -18,6 +18,7 @@ import { upsertBuildArtifact } from "./build-artifacts";
 import { createMeeting } from "./meetings";
 import { createProposal } from "./proposals";
 import { createTension } from "./tensions";
+import { createConversationMessage, failCommunicationSuggestion, markCommunicationSuggestionSent } from "./crm";
 import { recordAudit } from "./audit-trail";
 import { actorUserIdForWorkspace, requireWorkspaceMembership } from "./auth";
 import { AppError, invariant } from "./errors";
@@ -38,6 +39,7 @@ type WritebackTargetSummary = {
   title: string;
   status: string | null;
   webPath: string;
+  context?: JsonRecord;
 };
 
 type ExecutionRequestRecord = Awaited<ReturnType<typeof loadExecutionRequest>>;
@@ -125,6 +127,17 @@ export function normalizeExecutionTargetType(value?: string | ExecutionWriteback
     FILES: "BUILD_ARTIFACT",
     COMMENT: "COMMENT",
     COMMENTS: "COMMENT",
+    CRM: "CRM_COMMUNICATION",
+    CRM_COMMUNICATION: "CRM_COMMUNICATION",
+    CRM_COMMUNICATIONS: "CRM_COMMUNICATION",
+    CRM_COMMUNICATION_SUGGESTION: "CRM_COMMUNICATION",
+    CRM_COMMUNICATION_SUGGESTIONS: "CRM_COMMUNICATION",
+    COMMUNICATION: "CRM_COMMUNICATION",
+    COMMUNICATIONS: "CRM_COMMUNICATION",
+    COMMUNICATION_SUGGESTION: "CRM_COMMUNICATION",
+    COMMUNICATION_SUGGESTIONS: "CRM_COMMUNICATION",
+    EMAIL_SUGGESTION: "CRM_COMMUNICATION",
+    EMAIL_SUGGESTIONS: "CRM_COMMUNICATION",
   };
   const type = aliases[normalized];
   invariant(type, 400, "INVALID_INPUT", "Unsupported write-back target type.");
@@ -140,6 +153,7 @@ function targetReadScope(type: ExecutionWritebackTargetType): AgentScope {
     case "BRAIN_ARTICLE": return "brain:read";
     case "BUILD_ARTIFACT": return "workspace:read";
     case "COMMENT": return "execution:read";
+    case "CRM_COMMUNICATION": return "relationships:read";
   }
 }
 
@@ -152,6 +166,7 @@ function targetWriteScope(type: ExecutionWritebackTargetType): AgentScope {
     case "BRAIN_ARTICLE": return "brain:write";
     case "BUILD_ARTIFACT": return "workspace:write";
     case "COMMENT": return "execution:write";
+    case "CRM_COMMUNICATION": return "relationships:write";
   }
 }
 
@@ -234,6 +249,77 @@ function enumValue<TEnum extends Record<string, string>>(
 function titleMatches(query: string | null | undefined) {
   const trimmed = query?.trim();
   return trimmed ? { contains: trimmed, mode: "insensitive" as const } : undefined;
+}
+
+function crmCommunicationTargetContext(suggestion: {
+  id: string;
+  status: string;
+  channel: string;
+  title: string;
+  subject: string | null;
+  bodyMd: string;
+  recipientEmail: string | null;
+  recipientName: string | null;
+  source: string;
+  account: {
+    id: string;
+    name: string;
+    slug: string;
+    domain: string | null;
+    relationshipType: string;
+    lifecycleStage: string;
+  } | null;
+  contact: {
+    id: string;
+    name: string | null;
+    email: string;
+    company: string | null;
+    title: string | null;
+  } | null;
+  deal: {
+    id: string;
+    title: string;
+    stage: string;
+    valueCents: number | null;
+    currency: string;
+  } | null;
+  activity: {
+    id: string;
+    title: string;
+    type: string;
+    dueAt: Date | null;
+    completedAt: Date | null;
+  } | null;
+}): JsonRecord {
+  return {
+    relationshipCommunication: {
+      id: suggestion.id,
+      status: suggestion.status,
+      channel: suggestion.channel,
+      title: suggestion.title,
+      subject: suggestion.subject,
+      bodyMd: suggestion.bodyMd,
+      recipientEmail: suggestion.recipientEmail,
+      recipientName: suggestion.recipientName,
+      source: suggestion.source,
+      account: suggestion.account,
+      contact: suggestion.contact,
+      deal: suggestion.deal,
+      activity: suggestion.activity,
+    },
+    executionMode: {
+      emailSentByCorgtex: false,
+      instruction: "Send or copy the email in the external client, then submit an execution result back to Corgtex.",
+      successOutput: {
+        sentAt: "optional ISO timestamp",
+        conversationId: "optional same-workspace CRM conversation id",
+        conversationBodyMd: "optional conversation note body",
+      },
+      failureOutput: {
+        errorMessage: "required failure reason when external execution fails",
+      },
+    },
+  };
 }
 
 function brainArticlePrivacyFilter(actor: AppActor, membership?: MembershipSummary | null) {
@@ -368,6 +454,7 @@ async function validateWritebackTarget(
 ) {
   if (!type) return null;
   if (!targetId) {
+    invariant(type !== "CRM_COMMUNICATION", 400, "INVALID_INPUT", "CRM communication write-back target id is required.");
     return {
       type,
       id: null,
@@ -424,6 +511,69 @@ async function validateWritebackTarget(
       const item = await prisma.buildArtifact.findFirst({ where: { id: targetId, workspaceId }, select: { id: true, title: true, status: true } });
       invariant(item, 404, "NOT_FOUND", "Build artifact write-back target not found.");
       return { type, id: item.id, title: item.title, status: item.status, webPath: `/build-artifacts/${item.id}` };
+    }
+    case "CRM_COMMUNICATION": {
+      const item = await prisma.crmCommunicationSuggestion.findFirst({
+        where: { id: targetId, workspaceId },
+        select: {
+          id: true,
+          status: true,
+          channel: true,
+          title: true,
+          subject: true,
+          bodyMd: true,
+          recipientEmail: true,
+          recipientName: true,
+          source: true,
+          account: {
+            select: {
+              id: true,
+              name: true,
+              slug: true,
+              domain: true,
+              relationshipType: true,
+              lifecycleStage: true,
+            },
+          },
+          contact: {
+            select: {
+              id: true,
+              name: true,
+              email: true,
+              company: true,
+              title: true,
+            },
+          },
+          deal: {
+            select: {
+              id: true,
+              title: true,
+              stage: true,
+              valueCents: true,
+              currency: true,
+            },
+          },
+          activity: {
+            select: {
+              id: true,
+              title: true,
+              type: true,
+              dueAt: true,
+              completedAt: true,
+            },
+          },
+        },
+      });
+      invariant(item, 404, "NOT_FOUND", "CRM communication write-back target not found.");
+      invariant(item.status !== "SENT" && item.status !== "DECLINED", 400, "INVALID_STATE", "Finalized communication suggestions cannot be requested for external execution.");
+      return {
+        type,
+        id: item.id,
+        title: item.subject ?? item.title,
+        status: item.status,
+        webPath: item.account ? `/leads/accounts/${item.account.id}?view=review` : "/leads?view=review",
+        context: crmCommunicationTargetContext(item),
+      };
     }
     case "COMMENT":
       return { type, id: targetId, title: "Execution comment", status: null, webPath: "" };
@@ -492,6 +642,7 @@ export async function createExecutionRequest(actor: AppActor, params: CreateExec
     requireExecutionScope(actor, targetWriteScope(targetType));
   }
   const target = await validateWritebackTarget(params.workspaceId, targetType, params.writebackTargetId, actor, membership);
+  const context = params.context === undefined ? target?.context ?? null : params.context;
 
   const workspace = await prisma.workspace.findUnique({
     where: { id: params.workspaceId },
@@ -510,7 +661,7 @@ export async function createExecutionRequest(actor: AppActor, params: CreateExec
           provider,
           goal,
           actorJson: jsonInput(params.actor ?? { actorKind: actor.kind }),
-          contextJson: jsonInput(params.context ?? null),
+          contextJson: jsonInput(context),
           allowedScopes,
           policyConstraintsJson: jsonInput(params.policyConstraints ?? null),
           expectedOutputJson: jsonInput(params.expectedOutput ?? null),
@@ -529,6 +680,30 @@ export async function createExecutionRequest(actor: AppActor, params: CreateExec
         data: { packetJson: packet as Prisma.InputJsonValue },
         include: { results: { orderBy: { submittedAt: "desc" }, take: 10 } },
       });
+      if (targetType === "CRM_COMMUNICATION" && target?.id) {
+        await tx.crmCommunicationSuggestion.update({
+          where: { id: target.id },
+          data: {
+            status: "REQUESTED",
+            externalRequestId: created.id,
+            requestedAt: new Date(),
+            sentAt: null,
+            declinedAt: null,
+            failedAt: null,
+            failureReason: null,
+          },
+        });
+        await recordAudit(tx, actor, {
+          workspaceId: params.workspaceId,
+          action: "crm.communication_suggestion.requested",
+          entityType: "CrmCommunicationSuggestion",
+          entityId: target.id,
+          meta: {
+            executionRequestId: created.id,
+            note: "External execution request tracked; no email sent by Corgtex.",
+          },
+        });
+      }
 
       await recordAudit(tx, actor, {
         workspaceId: params.workspaceId,
@@ -745,11 +920,100 @@ export async function listWritebackTargets(actor: AppActor, params: ListWritebac
     });
     items.push(...records.map((record) => ({ type: "BUILD_ARTIFACT" as const, id: record.id, title: record.title, status: record.status, webPath: `/build-artifacts/${record.id}` })));
   }
+  if (includeType("CRM_COMMUNICATION")) {
+    requireExecutionScope(actor, "relationships:read");
+    const records = await prisma.crmCommunicationSuggestion.findMany({
+      where: {
+        workspaceId: params.workspaceId,
+        ...(title
+          ? {
+            OR: [
+              { title },
+              { subject: title },
+              { recipientEmail: title },
+              { recipientName: title },
+            ],
+          }
+          : {}),
+      },
+      select: {
+        id: true,
+        title: true,
+        subject: true,
+        status: true,
+        accountId: true,
+      },
+      orderBy: { updatedAt: "desc" },
+      take,
+    });
+    items.push(...records.map((record) => ({
+      type: "CRM_COMMUNICATION" as const,
+      id: record.id,
+      title: record.subject ?? record.title,
+      status: record.status,
+      webPath: record.accountId ? `/leads/accounts/${record.accountId}?view=review` : "/leads?view=review",
+    })));
+  }
   if (includeType("COMMENT")) {
     items.push({ type: "COMMENT", id: null, title: "Comment on execution request", status: null, webPath: "" });
   }
 
   return { items: items.slice(0, take * 6) };
+}
+
+async function validateCrmCommunicationResultOutput(workspaceId: string, targetId: string | null, output: JsonRecord) {
+  invariant(targetId, 400, "INVALID_INPUT", "CRM communication result target id is required.");
+  optionalDate(output.sentAt);
+
+  const conversationId = optionalString(output.conversationId);
+  if (conversationId) {
+    const conversation = await prisma.crmConversation.findFirst({
+      where: { id: conversationId, workspaceId },
+      select: { id: true },
+    });
+    invariant(conversation, 404, "NOT_FOUND", "CRM conversation write-back target not found.");
+  }
+}
+
+async function createCrmCommunicationWriteback(actor: AppActor, params: {
+  workspaceId: string;
+  targetId: string;
+  output: JsonRecord;
+  errorMessage: string | null;
+  requestCreatedByUserId: string | null;
+}) {
+  const writebackActor = requestOwnerActor({ createdByUserId: params.requestCreatedByUserId }, actor);
+  if (params.errorMessage) {
+    const suggestion = await failCommunicationSuggestion(writebackActor, {
+      workspaceId: params.workspaceId,
+      suggestionId: params.targetId,
+      failureReason: params.errorMessage,
+    });
+    return { entityType: "CrmCommunicationSuggestion", entityId: suggestion?.id ?? params.targetId };
+  }
+
+  const suggestion = await markCommunicationSuggestionSent(writebackActor, {
+    workspaceId: params.workspaceId,
+    suggestionId: params.targetId,
+    sentAt: optionalDate(params.output.sentAt),
+  });
+
+  const conversationId = optionalString(params.output.conversationId);
+  if (conversationId) {
+    await createConversationMessage(writebackActor, {
+      workspaceId: params.workspaceId,
+      conversationId,
+      senderType: "ADMIN",
+      senderEmail: optionalString(params.output.senderEmail) ?? undefined,
+      bodyMd: optionalString(params.output.conversationBodyMd)
+        ?? optionalString(params.output.messageBodyMd)
+        ?? optionalString(params.output.bodyMd)
+        ?? optionalString(params.output.body)
+        ?? "External communication was marked sent.",
+    });
+  }
+
+  return { entityType: "CrmCommunicationSuggestion", entityId: suggestion?.id ?? params.targetId };
 }
 
 async function createNativeWriteback(actor: AppActor, params: {
@@ -761,6 +1025,16 @@ async function createNativeWriteback(actor: AppActor, params: {
   resultId: string;
   requestCreatedByUserId: string | null;
 }) {
+  if (params.type === "CRM_COMMUNICATION") {
+    invariant(params.targetId, 400, "INVALID_INPUT", "CRM communication write-back target id is required.");
+    return createCrmCommunicationWriteback(actor, {
+      workspaceId: params.workspaceId,
+      targetId: params.targetId,
+      output: params.output,
+      errorMessage: null,
+      requestCreatedByUserId: params.requestCreatedByUserId,
+    });
+  }
   if (params.targetId || params.type === "COMMENT") {
     return { entityType: "ExecutionResult", entityId: params.resultId };
   }
@@ -871,6 +1145,9 @@ function validateNativeWritebackOutput(type: ExecutionWritebackTargetType, targe
       enumValue(BuildArtifactClassification, output.classification, "INTERNAL", "Build artifact classification");
       enumValue(BuildArtifactVisibility, output.visibility, "PRIVATE", "Build artifact visibility");
       return;
+    case "CRM_COMMUNICATION":
+      invariant(targetId, 400, "INVALID_INPUT", "CRM communication result target id is required.");
+      return;
   }
 }
 
@@ -899,7 +1176,14 @@ export async function submitExecutionResult(actor: AppActor, params: SubmitExecu
 
   const output = objectInput(params.output);
   const errorMessage = optionalString(params.errorMessage);
-  if (!errorMessage) {
+  if (targetType === "CRM_COMMUNICATION") {
+    invariant(targetId, 400, "INVALID_INPUT", "CRM communication result target id is required.");
+    const writeScope = targetWriteScope(targetType);
+    requireExecutionScope(actor, writeScope);
+    invariant(request.allowedScopes.includes(writeScope), 403, "FORBIDDEN", `Execution request does not allow the required scope: ${writeScope}.`);
+    await validateWritebackTarget(params.workspaceId, targetType, targetId, actor, membership);
+    await validateCrmCommunicationResultOutput(params.workspaceId, targetId, output);
+  } else if (!errorMessage) {
     invariant(targetType, 400, "INVALID_INPUT", "Result target type is required.");
     const writeScope = targetWriteScope(targetType);
     requireExecutionScope(actor, writeScope);
@@ -960,9 +1244,17 @@ export async function submitExecutionResult(actor: AppActor, params: SubmitExecu
     return serializeExecutionResult(duplicate);
   }
 
-  const writeback = errorMessage || !targetType
-    ? null
-    : await createNativeWriteback(actor, {
+  const writeback = targetType === "CRM_COMMUNICATION" && targetId
+    ? await createCrmCommunicationWriteback(actor, {
+      workspaceId: params.workspaceId,
+      targetId,
+      output,
+      errorMessage,
+      requestCreatedByUserId: request.createdByUserId,
+    })
+    : errorMessage || !targetType
+      ? null
+      : await createNativeWriteback(actor, {
       workspaceId: params.workspaceId,
       type: targetType,
       targetId: targetId ?? null,

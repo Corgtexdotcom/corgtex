@@ -130,6 +130,12 @@ import {
   getCompanyContext,
   listWritebackTargets,
   submitExecutionResult,
+  listCrmAccounts,
+  listCrmActivities,
+  createActivity,
+  markCommunicationSuggestionSent,
+  failCommunicationSuggestion,
+  createConversationMessage,
   listWorkItemVersions,
   getWorkItemVersion,
   AppError,
@@ -234,6 +240,10 @@ const TOOL_CAPABILITIES = {
   get_company_context: { scopes: ["execution:read", "workspace:read", "actions:read", "tensions:read", "proposals:read", "meetings:read", "brain:read"] },
   list_writeback_targets: { scopes: ["execution:read"] },
   submit_execution_result: { scopes: ["execution:write"] },
+  list_relationship_accounts: { scopes: ["relationships:read"] },
+  list_due_relationship_work: { scopes: ["relationships:read"] },
+  record_relationship_activity: { scopes: ["relationships:write"] },
+  complete_communication_suggestion: { scopes: ["relationships:write"] },
   record_support_audit: { scopes: ["support:write"], sensitive: true },
   list_integrations: { scopes: ["integrations:read"] },
   list_data_sources: { scopes: ["data-sources:read"] },
@@ -1226,7 +1236,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
       policyConstraints: z.unknown().optional().describe("Company policy, security, approval, or governance constraints"),
       expectedOutput: z.unknown().optional().describe("Expected output shape"),
       approvalRule: z.string().optional().describe("Human approval or review rule"),
-      writebackTargetType: z.string().optional().describe("ACTION, TENSION, PROPOSAL, MEETING, BRAIN_ARTICLE, BUILD_ARTIFACT, or COMMENT"),
+      writebackTargetType: z.string().optional().describe("ACTION, TENSION, PROPOSAL, MEETING, BRAIN_ARTICLE, BUILD_ARTIFACT, COMMENT, or CRM_COMMUNICATION"),
       writebackTargetId: z.string().optional().describe("Optional existing target id for comment-style write-back"),
       writebackTargetLabel: z.string().optional(),
       idempotencyKey: z.string().optional().describe("Optional idempotency key supplied by the caller"),
@@ -1320,6 +1330,186 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
         ...params,
       });
       return jsonResult({ ...result, webUrl: webUrl(workspaceId, `/settings?tab=ai-workspaces&executionRequest=${params.requestId}`) });
+    },
+  );
+
+  // ===========================================================================
+  // RELATIONSHIPS
+  // ===========================================================================
+
+  tool(
+    "list_relationship_accounts",
+    "List CRM relationship accounts for the workspace. Use this to ground external communication or follow-up work in account context.",
+    {
+      query: z.string().optional(),
+      relationshipType: z.string().optional(),
+      lifecycleStage: z.string().optional(),
+      take: z.number().optional(),
+      skip: z.number().optional(),
+    },
+    async (params: {
+      query?: string;
+      relationshipType?: string;
+      lifecycleStage?: string;
+      take?: number;
+      skip?: number;
+    }) => {
+      requireToolCapability("list_relationship_accounts");
+      const result = await listCrmAccounts(actor, workspaceId, params);
+      return structuredJsonResult({
+        ...result,
+        webUrl: webUrl(workspaceId, "/leads?view=accounts"),
+      });
+    },
+  );
+
+  tool(
+    "list_due_relationship_work",
+    "List open relationship follow-up tasks and reminders, sorted by due date. This is tracking work; it does not send email.",
+    {
+      accountId: z.string().optional(),
+      contactId: z.string().optional(),
+      dealId: z.string().optional(),
+      ownerUserId: z.string().optional(),
+      dueFrom: z.string().optional().describe("Optional ISO lower bound"),
+      dueTo: z.string().optional().describe("Optional ISO upper bound"),
+      take: z.number().optional(),
+      skip: z.number().optional(),
+    },
+    async (params: {
+      accountId?: string;
+      contactId?: string;
+      dealId?: string;
+      ownerUserId?: string;
+      dueFrom?: string;
+      dueTo?: string;
+      take?: number;
+      skip?: number;
+    }) => {
+      requireToolCapability("list_due_relationship_work");
+      const result = await listCrmActivities(actor, workspaceId, {
+        accountId: params.accountId,
+        contactId: params.contactId,
+        dealId: params.dealId,
+        ownerUserId: params.ownerUserId,
+        type: "TASK",
+        completion: "open",
+        sort: "due",
+        dueFrom: params.dueFrom ? new Date(params.dueFrom) : undefined,
+        dueTo: params.dueTo ? new Date(params.dueTo) : undefined,
+        take: params.take,
+        skip: params.skip,
+      });
+      return structuredJsonResult({
+        ...result,
+        webUrl: webUrl(workspaceId, "/leads?view=activity"),
+      });
+    },
+  );
+
+  tool(
+    "record_relationship_activity",
+    "Record a relationship activity, task, note, email log, or follow-up reminder in Corgtex.",
+    {
+      title: z.string(),
+      type: z.string().optional().describe("NOTE, EMAIL, CALL, MEETING, TASK, or another CRM activity type supported by Corgtex"),
+      bodyMd: z.string().optional(),
+      accountId: z.string().optional(),
+      contactId: z.string().optional(),
+      dealId: z.string().optional(),
+      ownerUserId: z.string().optional(),
+      source: z.string().optional(),
+      dueAt: z.string().optional().describe("Optional ISO due date for reminders"),
+      completedAt: z.string().optional().describe("Optional ISO completion timestamp"),
+    },
+    async (params: {
+      title: string;
+      type?: string;
+      bodyMd?: string;
+      accountId?: string;
+      contactId?: string;
+      dealId?: string;
+      ownerUserId?: string;
+      source?: string;
+      dueAt?: string;
+      completedAt?: string;
+    }) => {
+      requireToolCapability("record_relationship_activity");
+      const activity = await createActivity(actor, {
+        workspaceId,
+        title: params.title,
+        type: params.type as any,
+        bodyMd: params.bodyMd,
+        accountId: params.accountId,
+        contactId: params.contactId,
+        dealId: params.dealId,
+        ownerUserId: params.ownerUserId,
+        source: params.source ?? "mcp",
+        dueAt: params.dueAt ? new Date(params.dueAt) : undefined,
+        completedAt: params.completedAt ? new Date(params.completedAt) : undefined,
+      });
+      return jsonResult({
+        id: activity.id,
+        type: activity.type,
+        webUrl: webUrl(workspaceId, activity.accountId ? `/leads/accounts/${activity.accountId}?view=activity` : "/leads?view=activity"),
+      });
+    },
+  );
+
+  tool(
+    "complete_communication_suggestion",
+    "Complete a CRM communication suggestion after external execution. Mark it sent or failed; Corgtex records the outcome but does not send the email.",
+    {
+      suggestionId: z.string(),
+      status: z.enum(["SENT", "FAILED"]).optional(),
+      sentAt: z.string().optional().describe("Optional ISO timestamp for when the external client sent the communication"),
+      failureReason: z.string().optional(),
+      conversationId: z.string().optional().describe("Optional same-workspace CRM conversation id to append a sent note"),
+      conversationBodyMd: z.string().optional(),
+      senderEmail: z.string().optional(),
+    },
+    async (params: {
+      suggestionId: string;
+      status?: "SENT" | "FAILED";
+      sentAt?: string;
+      failureReason?: string;
+      conversationId?: string;
+      conversationBodyMd?: string;
+      senderEmail?: string;
+    }) => {
+      requireToolCapability("complete_communication_suggestion");
+      if (params.status === "FAILED") {
+        const suggestion = await failCommunicationSuggestion(actor, {
+          workspaceId,
+          suggestionId: params.suggestionId,
+          failureReason: params.failureReason,
+        });
+        return jsonResult({
+          id: suggestion?.id ?? params.suggestionId,
+          status: suggestion?.status ?? "FAILED",
+          webUrl: webUrl(workspaceId, suggestion?.accountId ? `/leads/accounts/${suggestion.accountId}?view=review` : "/leads?view=review"),
+        });
+      }
+
+      const suggestion = await markCommunicationSuggestionSent(actor, {
+        workspaceId,
+        suggestionId: params.suggestionId,
+        sentAt: params.sentAt ? new Date(params.sentAt) : undefined,
+      });
+      if (params.conversationId && params.conversationBodyMd) {
+        await createConversationMessage(actor, {
+          workspaceId,
+          conversationId: params.conversationId,
+          senderType: "ADMIN",
+          senderEmail: params.senderEmail,
+          bodyMd: params.conversationBodyMd,
+        });
+      }
+      return jsonResult({
+        id: suggestion?.id ?? params.suggestionId,
+        status: suggestion?.status ?? "SENT",
+        webUrl: webUrl(workspaceId, suggestion?.accountId ? `/leads/accounts/${suggestion.accountId}?view=review` : "/leads?view=review"),
+      });
     },
   );
 

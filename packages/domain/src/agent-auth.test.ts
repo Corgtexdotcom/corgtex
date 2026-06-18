@@ -30,6 +30,10 @@ describe("scope defaults", () => {
     expect(DELEGATED_DEFAULT_SCOPES).toContain("members:write");
     expect(DELEGATED_DEFAULT_SCOPES).toContain("runtime:write");
     expect(DELEGATED_DEFAULT_SCOPES).toContain("workspace:write");
+    expect(DEFAULT_SCOPES).toContain("relationships:read");
+    expect(DEFAULT_SCOPES).toContain("relationships:write");
+    expect(DELEGATED_DEFAULT_SCOPES).toContain("relationships:read");
+    expect(DELEGATED_DEFAULT_SCOPES).toContain("relationships:write");
     expect(DEFAULT_SCOPES).not.toContain("webhooks:write");
     expect(DELEGATED_DEFAULT_SCOPES).not.toContain("webhooks:write");
     expect(DELEGATED_DEFAULT_SCOPES).not.toContain("support:write");
