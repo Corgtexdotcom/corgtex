@@ -8,13 +8,12 @@ type DealLike = { id: string; title: string; stage?: string | null; accountId?: 
 type ActivityLike = { id: string; title: string; type?: string | null; accountId?: string | null; account?: AccountLike | null; contactId?: string | null; contact?: ContactLike | null; dealId?: string | null; deal?: DealLike | null; dueAt?: Date | string | null; completedAt?: Date | string | null; ownerUserId?: string | null };
 type SuggestionLike = { id: string; title: string; status?: string | null; accountId?: string | null; account?: AccountLike | null; contactId?: string | null; contact?: ContactLike | null; dealId?: string | null; deal?: DealLike | null; recipientEmail?: string | null; subject?: string | null };
 
-function dateString(value: Date | string | null | undefined) {
-  if (!value) return null;
-  const date = value instanceof Date ? value : new Date(value);
-  return Number.isNaN(date.getTime()) ? null : date.toISOString();
-}
 function contactName(contact?: ContactLike | null) {
   return contact?.name || contact?.email || null;
+}
+function dateString(value: Date | string | null | undefined) {
+  const date = value ? value instanceof Date ? value : new Date(value) : null;
+  return date && !Number.isNaN(date.getTime()) ? date.toISOString() : null;
 }
 export function crmFilters(filters: Record<string, string | number | boolean | null | undefined>) {
   return Object.fromEntries(Object.entries(filters)
@@ -62,7 +61,6 @@ export function crmDealContext(workspaceId: string, deal: DealLike) {
     webUrl: accountId ? `${accountHref(workspaceId, accountId)}?view=pipeline` : null,
   };
 }
-
 export function crmActivityContext(workspaceId: string, activity: ActivityLike) {
   const accountId = activity.accountId ?? activity.account?.id ?? null;
   return {
@@ -81,7 +79,6 @@ export function crmActivityContext(workspaceId: string, activity: ActivityLike) 
     webUrl: accountId ? `${accountHref(workspaceId, accountId)}?view=activity` : null,
   };
 }
-
 export function crmSuggestionContext(workspaceId: string, suggestion: SuggestionLike) {
   const accountId = suggestion.accountId ?? suggestion.account?.id ?? null;
   return {
