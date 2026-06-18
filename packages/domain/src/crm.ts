@@ -48,6 +48,10 @@ const FREE_EMAIL_DOMAINS = new Set([
   "protonmail.com",
   "yahoo.com",
 ]);
+const CLOSED_CRM_DEAL_STAGES = new Set<CrmDealStage>([
+  CrmDealStage.CLOSED_WON,
+  CrmDealStage.CLOSED_LOST,
+]);
 
 function normalizeCrmCode(value: string | null | undefined, fallback: string, label: string) {
   const normalized = (value?.trim() || fallback)
@@ -176,6 +180,30 @@ async function requireCrmAccount(tx: any, workspaceId: string, accountId: string
   const account = await tx.crmAccount.findUnique({ where: { id: accountId } });
   invariant(account && account.workspaceId === workspaceId && !account.archivedAt, 404, "NOT_FOUND", "Account not found.");
   return account;
+}
+
+function dealClosedAtForStage(stage: CrmDealStage) {
+  return CLOSED_CRM_DEAL_STAGES.has(stage) ? new Date() : null;
+}
+
+async function recordDealStageTransition(tx: any, params: {
+  workspaceId: string;
+  dealId: string;
+  fromStage: CrmDealStage | null;
+  toStage: CrmDealStage;
+  actorUserId?: string | null;
+  createdAt?: Date;
+}) {
+  return tx.crmDealStageTransition.create({
+    data: {
+      workspaceId: params.workspaceId,
+      dealId: params.dealId,
+      fromStage: params.fromStage,
+      toStage: params.toStage,
+      actorUserId: params.actorUserId ?? null,
+      ...(params.createdAt ? { createdAt: params.createdAt } : {}),
+    },
+  });
 }
 
 async function syncCrmAccountLinksForContact(tx: any, params: { workspaceId: string; contactId: string; email?: string | null; accountId: string }) {
@@ -375,6 +403,17 @@ export async function getCrmAccount(actor: AppActor, params: { workspaceId: stri
         include: {
           contact: {
             select: { id: true, name: true, email: true, avatarUrl: true },
+          },
+          activities: {
+            where: { type: CrmActivityType.TASK },
+            orderBy: { createdAt: "desc" },
+            take: 1,
+            select: { id: true, title: true, createdAt: true, type: true },
+          },
+          stageTransitions: {
+            orderBy: { createdAt: "desc" },
+            take: 1,
+            select: { id: true, fromStage: true, toStage: true, createdAt: true },
           },
         },
       },
@@ -852,6 +891,17 @@ export async function listDeals(actor: AppActor, workspaceId: string, opts?: { t
         contact: {
           select: { id: true, name: true, company: true, email: true, avatarUrl: true },
         },
+        activities: {
+          where: { type: CrmActivityType.TASK },
+          orderBy: { createdAt: "desc" },
+          take: 1,
+          select: { id: true, title: true, createdAt: true, type: true },
+        },
+        stageTransitions: {
+          orderBy: { createdAt: "desc" },
+          take: 1,
+          select: { id: true, fromStage: true, toStage: true, createdAt: true },
+        },
       },
       orderBy: { updatedAt: "desc" },
       take,
@@ -885,6 +935,7 @@ export async function createDeal(actor: AppActor, params: {
     if (params.accountId !== undefined) {
       accountId = params.accountId ? (await requireCrmAccount(tx, params.workspaceId, params.accountId)).id : null;
     }
+    const stage = params.stage ?? CrmDealStage.LEAD;
 
     const deal = await tx.crmDeal.create({
       data: {
@@ -892,11 +943,21 @@ export async function createDeal(actor: AppActor, params: {
         accountId,
         contactId: params.contactId,
         title,
-        stage: params.stage || CrmDealStage.LEAD,
-        valueCents: params.valueCents || null,
+        stage,
+        valueCents: params.valueCents ?? null,
         currency: params.currency || "USD",
+        closedAt: dealClosedAtForStage(stage),
         ownerUserId: params.ownerUserId || null,
       },
+    });
+
+    await recordDealStageTransition(tx, {
+      workspaceId: params.workspaceId,
+      dealId: deal.id,
+      fromStage: null,
+      toStage: stage,
+      actorUserId: actor.kind === "user" ? actor.user.id : null,
+      createdAt: deal.createdAt,
     });
 
     await tx.auditLog.create({
@@ -942,17 +1003,17 @@ export async function updateDeal(actor: AppActor, params: {
     invariant(deal && deal.workspaceId === params.workspaceId && !deal.archivedAt, 404, "NOT_FOUND", "Deal not found.");
 
     const data: any = {};
+    let stageChanged = false;
     if (params.title !== undefined) {
       const title = params.title.trim();
       invariant(title.length > 0, 400, "INVALID_INPUT", "Deal title is required.");
       data.title = title;
     }
     if (params.stage !== undefined) {
-      data.stage = params.stage;
-      if (params.stage === CrmDealStage.CLOSED_WON || params.stage === CrmDealStage.CLOSED_LOST) {
-        data.closedAt = new Date();
-      } else {
-        data.closedAt = null;
+      stageChanged = params.stage !== deal.stage;
+      if (stageChanged) {
+        data.stage = params.stage;
+        data.closedAt = dealClosedAtForStage(params.stage);
       }
     }
     if (params.valueCents !== undefined) data.valueCents = params.valueCents;
@@ -963,10 +1024,24 @@ export async function updateDeal(actor: AppActor, params: {
       data.accountId = params.accountId ? (await requireCrmAccount(tx, params.workspaceId, params.accountId)).id : null;
     }
 
+    if (Object.keys(data).length === 0) {
+      return deal;
+    }
+
     const updated = await tx.crmDeal.update({
       where: { id: params.dealId },
       data,
     });
+
+    if (stageChanged && params.stage) {
+      await recordDealStageTransition(tx, {
+        workspaceId: params.workspaceId,
+        dealId: params.dealId,
+        fromStage: deal.stage,
+        toStage: params.stage,
+        actorUserId: actor.kind === "user" ? actor.user.id : null,
+      });
+    }
 
     await tx.auditLog.create({
       data: {

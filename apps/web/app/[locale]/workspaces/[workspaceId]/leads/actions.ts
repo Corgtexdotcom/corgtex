@@ -122,6 +122,7 @@ export async function createDealAction(formData: FormData) {
     title: asString(formData, "title"),
     valueCents,
     accountId: formData.has("accountId") ? asOptional(formData, "accountId") ?? null : undefined,
+    ownerUserId: formData.has("ownerUserId") ? asOptional(formData, "ownerUserId") ?? null : undefined,
   });
   refresh(workspaceId);
 }
@@ -133,9 +134,9 @@ export async function updateDealAction(formData: FormData) {
   const actor = await requirePageActor();
   const workspaceId = asString(formData, "workspaceId");
   
-  const rawAmount = asString(formData, "value");
+  const rawAmount = formData.has("value") ? asString(formData, "value") : "";
   const parsedAmount = Number.parseFloat(rawAmount);
-  const valueCents = !Number.isNaN(parsedAmount) ? Math.round(parsedAmount * 100) : undefined;
+  const valueCents = formData.has("value") && !Number.isNaN(parsedAmount) ? Math.round(parsedAmount * 100) : undefined;
   
   await updateDeal(actor, {
     workspaceId,
@@ -144,6 +145,7 @@ export async function updateDealAction(formData: FormData) {
     stage: formData.has("stage") ? (asString(formData, "stage") as any) : undefined,
     valueCents: formData.has("value") ? valueCents : undefined,
     notes: formData.has("notes") ? asOptional(formData, "notes") ?? undefined : undefined,
+    ownerUserId: formData.has("ownerUserId") ? asOptional(formData, "ownerUserId") ?? null : undefined,
   });
   refresh(workspaceId);
 }

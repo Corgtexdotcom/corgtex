@@ -599,6 +599,7 @@ model Workspace {
   crmAccounts                    CrmAccount[]
   crmContacts                    CrmContact[]
   crmDeals                       CrmDeal[]
+  crmDealStageTransitions        CrmDealStageTransition[]
   crmActivities                  CrmActivity[]
   agentConfigs                   WorkspaceAgentConfig[]
   oauthApps                      OAuthApp[]
@@ -3608,11 +3609,29 @@ model CrmDeal {
   contact          CrmContact        @relation(fields: [contactId], references: [id], onDelete: Cascade)
   activities       CrmActivity[]
   crmConversations CrmConversation[]
+  stageTransitions CrmDealStageTransition[]
 
   @@index([workspaceId, stage])
   @@index([accountId])
   @@index([contactId])
   @@index([workspaceId, archivedAt])
+}
+
+model CrmDealStageTransition {
+  id          String       @id @default(uuid())
+  workspaceId String
+  dealId      String
+  fromStage   CrmDealStage?
+  toStage     CrmDealStage
+  actorUserId String?
+  createdAt   DateTime     @default(now())
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  deal      CrmDeal   @relation(fields: [dealId], references: [id], onDelete: Cascade)
+
+  @@index([workspaceId, createdAt])
+  @@index([workspaceId, toStage, createdAt])
+  @@index([dealId, createdAt])
 }
 
 model CrmActivity {

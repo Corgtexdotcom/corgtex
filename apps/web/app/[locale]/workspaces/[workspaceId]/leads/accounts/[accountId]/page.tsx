@@ -2,7 +2,8 @@ import { requirePageActor } from "@/lib/auth";
 import { requireWorkspaceFeature } from "@/lib/workspace-feature-flags";
 import { MarkdownEditor } from "@/lib/components/MarkdownEditor";
 import { MarkdownRenderer } from "@/lib/components/MarkdownRenderer";
-import { getCrmAccount, requireWorkspaceMembership } from "@corgtex/domain";
+import { normalizeVisibleWorkItemColumns, toggleWorkItemColumnVisibility } from "@/lib/work-item-view";
+import { getCrmAccount, listMembers, requireWorkspaceMembership } from "@corgtex/domain";
 import { getTranslations } from "next-intl/server";
 
 import {
@@ -18,8 +19,9 @@ import {
   activePipelineValueCents,
   labelFromCrmCode,
   normalizeAccountDetailView,
+  CRM_DEAL_STAGES,
 } from "../../view-model";
-import { DealStageSelect } from "../../DealStageSelect";
+import { DealPipelineBoard } from "../../DealPipelineBoard";
 
 export const dynamic = "force-dynamic";
 
@@ -35,9 +37,20 @@ export default async function AccountDetailPage({
   const actor = await requirePageActor();
   await requireWorkspaceMembership({ actor, workspaceId });
   const t = await getTranslations("leads");
+  const tWork = await getTranslations("workItems");
   const resolvedSearch = searchParams ? await searchParams : {};
   const view = normalizeAccountDetailView(resolvedSearch.view);
-  const account = await getCrmAccount(actor, { workspaceId, accountId });
+  const visiblePipelineColumnIds = normalizeVisibleWorkItemColumns(resolvedSearch.columns, CRM_DEAL_STAGES);
+  const pipelineColumnHideHrefs = Object.fromEntries(CRM_DEAL_STAGES.map((stage) => {
+    const nextColumns = toggleWorkItemColumnVisibility(visiblePipelineColumnIds, stage, CRM_DEAL_STAGES);
+    const query = new URLSearchParams({ view: "pipeline" });
+    if (nextColumns) query.set("columns", nextColumns.join(","));
+    return [stage, `?${query.toString()}`];
+  }));
+  const [account, members] = await Promise.all([
+    getCrmAccount(actor, { workspaceId, accountId }),
+    listMembers(workspaceId),
+  ]);
 
   const activeDeals = account.deals.filter((deal) => deal.stage !== "CLOSED_WON" && deal.stage !== "CLOSED_LOST");
   const pipelineValue = activePipelineValueCents(account.deals);
@@ -273,28 +286,61 @@ export default async function AccountDetailPage({
                   </label>
                   <label>{t("formDealTitle")} <input type="text" name="title" required /></label>
                   <label>{t("formValue")} <input type="number" name="value" step="0.01" min="0" /></label>
+                  <label>
+                    {t("formOwner")}
+                    <select name="ownerUserId" defaultValue="">
+                      <option value="">{t("selectOwnerOptional")}</option>
+                      {members.map((member) => (
+                        <option key={member.user.id} value={member.user.id}>
+                          {member.user.displayName || member.user.email}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
                 </div>
                 <button type="submit" style={{ width: "fit-content" }}>{t("btnCreateDeal")}</button>
               </form>
             </details>
 
-            {account.deals.length === 0 ? (
-              <p className="muted">{t("accountNoDeals")}</p>
-            ) : account.deals.map((deal) => (
-              <div key={deal.id} className="item" style={{ padding: 16 }}>
-                <div className="row">
-                  <strong>{deal.title}</strong>
-                  <span className="tag">{stageLabels[deal.stage as keyof typeof stageLabels] ?? labelFromCrmCode(deal.stage)}</span>
-                </div>
-                <div className="row" style={{ fontSize: "0.85rem", marginTop: 8 }}>
-                  <span className="muted">{deal.contact.name || deal.contact.email}</span>
-                  {deal.valueCents != null && <strong>{formatCurrency(deal.valueCents)}</strong>}
-                </div>
-                <div style={{ marginTop: 12, maxWidth: 260 }}>
-                  <DealStageSelect workspaceId={workspaceId} dealId={deal.id} currentStage={deal.stage} />
-                </div>
-              </div>
-            ))}
+            <DealPipelineBoard
+              workspaceId={workspaceId}
+              deals={account.deals}
+              members={members}
+              locale={locale}
+              stageLabels={stageLabels}
+              visibleColumnIds={visiblePipelineColumnIds}
+              hideColumnHrefs={pipelineColumnHideHrefs}
+              storageKey={`relationships:${workspaceId}:account:${account.id}:pipeline`}
+              accountFallback={{ id: account.id, name: account.name }}
+              labels={{
+                account: t("pipelineAccount"),
+                contact: t("pipelineContact"),
+                emptyStage: t("pipelineNoDealsInStage"),
+                noAccount: t("emptyAccount"),
+                nextFollowUp: t("pipelineNextFollowUp"),
+                noNextFollowUp: t("pipelineNoNextFollowUp"),
+                owner: t("pipelineOwner"),
+                noOwner: t("pipelineNoOwner"),
+                stageAgeToday: t("pipelineStageAgeToday"),
+                stageAgeYesterday: t("pipelineStageAgeYesterday"),
+                stageAgeDays: (days) => t("pipelineStageAgeDays", { days }),
+              }}
+              workItemLabels={{
+                settingsLabel: tWork("columnSettings"),
+                resetLabel: tWork("resetColumns"),
+                hideLabel: tWork("hideColumn"),
+                moveUpLabel: tWork("moveColumnLeft"),
+                moveDownLabel: tWork("moveColumnRight"),
+                hideShortLabel: tWork("hideColumnShort"),
+                moveUpShortLabel: tWork("moveColumnLeftShort"),
+                moveDownShortLabel: tWork("moveColumnRightShort"),
+                sortLabel: tWork("sort"),
+                sortPriorityLabel: tWork("sortPriority"),
+                sortDateLabel: tWork("sortDate"),
+                sortAlphaLabel: tWork("sortAlpha"),
+                dragUnavailableLabel: tWork("dragUnavailable"),
+              }}
+            />
           </div>
         )}
 
