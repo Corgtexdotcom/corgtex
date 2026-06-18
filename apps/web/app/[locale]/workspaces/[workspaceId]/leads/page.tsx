@@ -31,6 +31,7 @@ import {
 } from "../actions";
 import { CommunicationSuggestionCard } from "./CommunicationSuggestionCard";
 import { DealPipelineBoard } from "./DealPipelineBoard";
+import { RelationshipNav, relationshipNavLabels } from "./RelationshipNav";
 import { splitCommunicationSuggestions } from "./communication-suggestions";
 import { sortDashboardDeals, summarizeDashboardAccounts } from "./dashboard-view-model";
 import { splitRelationshipReminders } from "./relationship-reminders";
@@ -42,6 +43,7 @@ import {
   activePipelineValueCents,
   labelFromCrmCode,
   normalizeRelationshipView,
+  relationshipFullPageHref,
 } from "./view-model";
 
 export const dynamic = "force-dynamic";
@@ -159,16 +161,10 @@ export default async function LeadsPage({
   const dueText = (date?: Date | string | null) => date ? formatDate(date) : t("followUpNoDueDate");
   const ownerText = (ownerUserId?: string | null) => ownerUserId ? memberNames.get(ownerUserId) ?? t("pipelineNoOwner") : t("pipelineNoOwner");
 
-  const viewLabels = {
-    dashboard: t("tabDashboard"),
-    accounts: t("tabAccounts"),
-    contacts: t("tabContacts"),
-    pipeline: t("tabPipeline"),
-    activity: t("tabActivity"),
-    suggestions: t("tabSuggestions"),
-    review: t("tabReview"),
-    conversations: t("tabConversations"),
-    instances: t("tabInstances"),
+  const viewLabels = relationshipNavLabels(t);
+  const fullPageHrefs = {
+    accounts: relationshipFullPageHref(workspaceId, "accounts"),
+    pipeline: relationshipFullPageHref(workspaceId, "pipeline"),
   };
 
   const stageLabels = {
@@ -290,17 +286,7 @@ export default async function LeadsPage({
       </header>
 
       <section className="ws-section">
-        <div className="nr-filter-bar">
-          {Object.entries(viewLabels).map(([key, label]) => (
-            <a
-              key={key}
-              href={`?view=${key}`}
-              className={`nr-filter-item ${view === key ? "nr-filter-active" : ""}`}
-            >
-              {label}
-            </a>
-          ))}
-        </div>
+        <RelationshipNav workspaceId={workspaceId} active={view} labels={viewLabels} />
 
         {view === "dashboard" && (
           <div className="stack" style={{ gap: 28 }}>
@@ -406,7 +392,7 @@ export default async function LeadsPage({
               <section className="stack" style={{ gap: 12 }}>
                 <div className="row" style={{ alignItems: "flex-start", gap: 12 }}>
                   <h2 style={{ margin: 0, fontSize: "1.1rem" }}>{t("dashboardAccountSummaryTitle")}</h2>
-                  <a href="?view=accounts" className="link-button small" style={{ marginLeft: "auto" }}>{t("dashboardViewAccounts")}</a>
+                  <a href={fullPageHrefs.accounts} className="link-button small" style={{ marginLeft: "auto" }}>{t("dashboardViewAccounts")}</a>
                 </div>
                 {dashboardAccounts.length === 0 ? (
                   <p className="muted">{t("noAccounts")}</p>
@@ -444,7 +430,7 @@ export default async function LeadsPage({
               <section className="stack" style={{ gap: 12 }}>
                 <div className="row" style={{ alignItems: "flex-start", gap: 12 }}>
                   <h2 style={{ margin: 0, fontSize: "1.1rem" }}>{t("dashboardPipelineSummaryTitle")}</h2>
-                  <a href="?view=pipeline" className="link-button small" style={{ marginLeft: "auto" }}>{t("dashboardViewPipeline")}</a>
+                  <a href={fullPageHrefs.pipeline} className="link-button small" style={{ marginLeft: "auto" }}>{t("dashboardViewPipeline")}</a>
                 </div>
                 {dashboardDeals.length === 0 ? (
                   <p className="muted">{t("dashboardNoPipeline")}</p>
