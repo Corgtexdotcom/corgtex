@@ -45,6 +45,7 @@ describe("module scope ownership — manifest <-> MCP scope registry parity", ()
   it("attributes representative scopes to the expected owning module", () => {
     expect(getModuleForScope("finance:read")).toBe("finance");
     expect(getModuleForScope("goals:write")).toBe("goals");
+    expect(getModuleForScope("relationships:write")).toBe("relationships");
     expect(getModuleForScope("context-graph:approve")).toBe("context-maps");
     expect(getModuleForScope("runtime:write")).toBe("agent-governance");
     // Platform scopes are intentionally unowned by any single module.
