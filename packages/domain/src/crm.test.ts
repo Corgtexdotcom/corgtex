@@ -69,8 +69,13 @@ vi.mock("@corgtex/shared", () => {
       crmActivity: {
         findMany: vi.fn(),
         count: vi.fn(),
+        findUnique: vi.fn(),
         create: vi.fn(),
+        update: vi.fn(),
         updateMany: vi.fn(),
+      },
+      member: {
+        findFirst: vi.fn(),
       },
       auditLog: {
         create: vi.fn(),
@@ -187,8 +192,21 @@ vi.mock("@corgtex/shared", () => {
           crmActivity: {
             findMany: vi.fn(),
             count: vi.fn(),
+            findUnique: vi.fn().mockResolvedValue({
+              id: "activity-1",
+              workspaceId: "ws-1",
+              accountId: "account-1",
+              contactId: null,
+              dealId: null,
+              source: "manual",
+              completedAt: null,
+            }),
             create: vi.fn().mockResolvedValue({ id: "activity-1" }),
+            update: vi.fn().mockResolvedValue({ id: "activity-1", completedAt: new Date("2026-06-18T00:00:00.000Z") }),
             updateMany: vi.fn().mockResolvedValue({ count: 0 }),
+          },
+          member: {
+            findFirst: vi.fn().mockResolvedValue({ id: "member-1" }),
           },
           crmConversationMessage: {
             create: vi.fn().mockResolvedValue({ id: "msg-1", conversationId: "conv-1" }),
@@ -588,6 +606,225 @@ describe("CRM domain", () => {
         take: 10,
       }));
       expect(result.total).toBe(1);
+    });
+
+    it("lists open due CRM tasks with due and owner filters", async () => {
+      const { prisma } = await import("@corgtex/shared");
+      const { listCrmActivities } = await import("./crm");
+
+      vi.mocked(prisma.crmActivity.findMany).mockResolvedValue([]);
+      vi.mocked(prisma.crmActivity.count).mockResolvedValue(0);
+
+      const dueFrom = new Date("2026-06-18T00:00:00.000Z");
+      const dueTo = new Date("2026-06-25T00:00:00.000Z");
+      await listCrmActivities(dummyActor, "ws-1", {
+        type: "TASK" as any,
+        ownerUserId: "u-1",
+        completion: "open",
+        dueFrom,
+        dueTo,
+        sort: "due",
+      });
+
+      expect(prisma.crmActivity.findMany).toHaveBeenCalledWith(expect.objectContaining({
+        where: expect.objectContaining({
+          workspaceId: "ws-1",
+          type: "TASK",
+          ownerUserId: "u-1",
+          completedAt: null,
+          dueAt: { gte: dueFrom, lte: dueTo },
+        }),
+        orderBy: [
+          { dueAt: { sort: "asc", nulls: "last" } },
+          { createdAt: "desc" },
+        ],
+      }));
+    });
+
+    it("creates a due reminder task with validated owner and source metadata", async () => {
+      const { prisma } = await import("@corgtex/shared");
+      const { createActivity } = await import("./crm");
+
+      const tx = {
+        member: {
+          findFirst: vi.fn().mockResolvedValue({ id: "member-1" }),
+        },
+        crmAccount: {
+          findUnique: vi.fn().mockResolvedValue({ id: "account-1", workspaceId: "ws-1", archivedAt: null }),
+        },
+        crmContact: {
+          findUnique: vi.fn(),
+        },
+        crmDeal: {
+          findUnique: vi.fn(),
+        },
+        crmActivity: {
+          create: vi.fn().mockResolvedValue({ id: "activity-1" }),
+        },
+      };
+      vi.mocked(prisma.$transaction).mockImplementationOnce((async (fn: any) => fn(tx)) as any);
+
+      const dueAt = new Date("2026-06-20T00:00:00.000Z");
+      await createActivity(dummyActor, {
+        workspaceId: "ws-1",
+        accountId: "account-1",
+        title: "Send pilot recap",
+        type: "TASK" as any,
+        ownerUserId: "u-1",
+        source: "agent_suggestion",
+        dueAt,
+      });
+
+      expect(tx.member.findFirst).toHaveBeenCalledWith({
+        where: { workspaceId: "ws-1", userId: "u-1", isActive: true },
+        select: { id: true },
+      });
+      expect(tx.crmActivity.create).toHaveBeenCalledWith({
+        data: expect.objectContaining({
+          workspaceId: "ws-1",
+          accountId: "account-1",
+          type: "TASK",
+          title: "Send pilot recap",
+          ownerUserId: "u-1",
+          source: "agent_suggestion",
+          dueAt,
+          completedAt: null,
+        }),
+      });
+    });
+
+    it("rejects reminder owners outside the workspace", async () => {
+      const { prisma } = await import("@corgtex/shared");
+      const { createActivity } = await import("./crm");
+
+      const tx = {
+        member: {
+          findFirst: vi.fn().mockResolvedValue(null),
+        },
+      };
+      vi.mocked(prisma.$transaction).mockImplementationOnce((async (fn: any) => fn(tx)) as any);
+
+      await expect(createActivity(dummyActor, {
+        workspaceId: "ws-1",
+        accountId: "account-1",
+        title: "Send pilot recap",
+        type: "TASK" as any,
+        ownerUserId: "u-other",
+      })).rejects.toThrow("Activity owner not found.");
+    });
+
+    it("updates reminder due date and owner after validating workspace links", async () => {
+      const { prisma } = await import("@corgtex/shared");
+      const { updateActivity } = await import("./crm");
+
+      const dueAt = new Date("2026-06-22T00:00:00.000Z");
+      const tx = {
+        crmActivity: {
+          findUnique: vi.fn().mockResolvedValue({
+            id: "activity-1",
+            workspaceId: "ws-1",
+            accountId: "account-1",
+            contactId: null,
+            dealId: null,
+            source: "manual",
+            completedAt: null,
+          }),
+          update: vi.fn().mockResolvedValue({ id: "activity-1" }),
+        },
+        member: {
+          findFirst: vi.fn().mockResolvedValue({ id: "member-1" }),
+        },
+        auditLog: {
+          create: vi.fn().mockResolvedValue({ id: "audit-1" }),
+        },
+      };
+      vi.mocked(prisma.$transaction).mockImplementationOnce((async (fn: any) => fn(tx)) as any);
+
+      await updateActivity(dummyActor, {
+        workspaceId: "ws-1",
+        activityId: "activity-1",
+        title: "Send revised recap",
+        ownerUserId: "u-1",
+        dueAt,
+      });
+
+      expect(tx.crmActivity.update).toHaveBeenCalledWith({
+        where: { id: "activity-1" },
+        data: {
+          title: "Send revised recap",
+          dueAt,
+          ownerUserId: "u-1",
+        },
+      });
+      expect(tx.auditLog.create).toHaveBeenCalledWith(expect.objectContaining({
+        data: expect.objectContaining({
+          action: "crm.activity.updated",
+          meta: { fields: ["title", "dueAt", "ownerUserId"] },
+        }),
+      }));
+    });
+
+    it("completes an open reminder and records the completing user", async () => {
+      const { prisma } = await import("@corgtex/shared");
+      const { completeActivity } = await import("./crm");
+
+      const completedAt = new Date("2026-06-18T12:00:00.000Z");
+      const tx = {
+        crmActivity: {
+          findUnique: vi.fn().mockResolvedValue({
+            id: "activity-1",
+            workspaceId: "ws-1",
+            source: "manual",
+            completedAt: null,
+          }),
+          update: vi.fn().mockResolvedValue({ id: "activity-1", completedAt }),
+        },
+        auditLog: {
+          create: vi.fn().mockResolvedValue({ id: "audit-1" }),
+        },
+      };
+      vi.mocked(prisma.$transaction).mockImplementationOnce((async (fn: any) => fn(tx)) as any);
+
+      await completeActivity(dummyActor, {
+        workspaceId: "ws-1",
+        activityId: "activity-1",
+        completedAt,
+      });
+
+      expect(tx.crmActivity.update).toHaveBeenCalledWith({
+        where: { id: "activity-1" },
+        data: {
+          completedAt,
+          completedByUserId: "u-1",
+        },
+      });
+      expect(tx.auditLog.create).toHaveBeenCalledWith(expect.objectContaining({
+        data: expect.objectContaining({
+          action: "crm.activity.completed",
+          entityId: "activity-1",
+        }),
+      }));
+    });
+
+    it("rejects completion for activities in another workspace", async () => {
+      const { prisma } = await import("@corgtex/shared");
+      const { completeActivity } = await import("./crm");
+
+      const tx = {
+        crmActivity: {
+          findUnique: vi.fn().mockResolvedValue({
+            id: "activity-1",
+            workspaceId: "ws-other",
+            completedAt: null,
+          }),
+        },
+      };
+      vi.mocked(prisma.$transaction).mockImplementationOnce((async (fn: any) => fn(tx)) as any);
+
+      await expect(completeActivity(dummyActor, {
+        workspaceId: "ws-1",
+        activityId: "activity-1",
+      })).rejects.toThrow("Activity not found.");
     });
 
     it("lists CRM prospect workspaces with account context through the workspace guard", async () => {

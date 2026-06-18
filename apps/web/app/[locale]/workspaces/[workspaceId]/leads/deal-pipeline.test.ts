@@ -63,14 +63,30 @@ describe("deal pipeline helpers", () => {
       activities: [
         {
           id: "activity-1",
+          title: "Completed follow-up",
+          type: "TASK",
+          completedAt: "2026-06-17T18:00:00.000Z",
+          dueAt: "2026-06-17T00:00:00.000Z",
+          createdAt: "2026-06-15T00:00:00.000Z",
+        },
+        {
+          id: "activity-2",
+          title: "Later follow-up",
+          type: "TASK",
+          dueAt: "2026-06-21T00:00:00.000Z",
+          createdAt: "2026-06-16T00:00:00.000Z",
+        },
+        {
+          id: "activity-3",
           title: "Send revised pilot terms",
           type: "TASK",
+          dueAt: "2026-06-19T00:00:00.000Z",
           createdAt: "2026-06-17T00:00:00.000Z",
         },
       ],
     };
 
-    expect(nextDealFollowUp(deal)).toEqual(deal.activities[0]);
-    expect(dealPipelineSort(deal).date).toBe("2026-06-17T00:00:00.000Z");
+    expect(nextDealFollowUp(deal)).toEqual(deal.activities[2]);
+    expect(dealPipelineSort(deal).date).toBe("2026-06-19T00:00:00.000Z");
   });
 });

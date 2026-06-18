@@ -6,6 +6,7 @@ import { requireWorkspaceMembership } from "./auth";
 import { archiveFilterWhere, archiveWorkspaceArtifact, type ArchiveFilter } from "./archive";
 import { invariant } from "./errors";
 import { CrmDealStage, CrmActivityType } from "@prisma/client";
+import type { Prisma } from "@prisma/client";
 import { registerCustomerDeployment } from "./customer-lifecycle";
 
 const DEFAULT_DEMO_WORKSPACE = {
@@ -35,6 +36,7 @@ export const SUGGESTED_CRM_LIFECYCLE_STAGES = [
 ] as const;
 
 const CRM_CODE_PATTERN = /^[A-Z][A-Z0-9_]{1,63}$/;
+const CRM_ACTIVITY_SOURCE_PATTERN = /^[a-z][a-z0-9_-]{0,63}$/;
 const FREE_EMAIL_DOMAINS = new Set([
   "aol.com",
   "gmail.com",
@@ -59,6 +61,19 @@ function normalizeCrmCode(value: string | null | undefined, fallback: string, la
     .replace(/[\s-]+/g, "_");
   invariant(CRM_CODE_PATTERN.test(normalized), 400, "INVALID_INPUT", `${label} must be an uppercase code.`);
   return normalized;
+}
+
+function normalizeCrmActivitySource(value?: string | null) {
+  const source = value?.trim().toLowerCase() || "manual";
+  invariant(CRM_ACTIVITY_SOURCE_PATTERN.test(source), 400, "INVALID_INPUT", "Activity source must be a lowercase code.");
+  return source;
+}
+
+function normalizeCrmActivityDate(value: Date | null | undefined, label: string) {
+  if (value == null) return null;
+  const date = value instanceof Date ? value : new Date(value);
+  invariant(!Number.isNaN(date.getTime()), 400, "INVALID_INPUT", `${label} must be a valid date.`);
+  return date;
 }
 
 export function normalizeCrmRelationshipType(value?: string | null) {
@@ -180,6 +195,51 @@ async function requireCrmAccount(tx: any, workspaceId: string, accountId: string
   const account = await tx.crmAccount.findUnique({ where: { id: accountId } });
   invariant(account && account.workspaceId === workspaceId && !account.archivedAt, 404, "NOT_FOUND", "Account not found.");
   return account;
+}
+
+async function requireCrmActivityOwner(tx: any, workspaceId: string, ownerUserId?: string | null) {
+  if (!ownerUserId) return null;
+  const member = await tx.member.findFirst({
+    where: { workspaceId, userId: ownerUserId, isActive: true },
+    select: { id: true },
+  });
+  invariant(member, 404, "NOT_FOUND", "Activity owner not found.");
+  return member;
+}
+
+async function resolveCrmActivityLinks(tx: any, params: {
+  workspaceId: string;
+  accountId?: string | null;
+  contactId?: string | null;
+  dealId?: string | null;
+}, existing?: { accountId: string | null; contactId: string | null; dealId: string | null }) {
+  let accountId = params.accountId !== undefined ? params.accountId : existing?.accountId ?? null;
+  const contactId = params.contactId !== undefined ? params.contactId : existing?.contactId ?? null;
+  const dealId = params.dealId !== undefined ? params.dealId : existing?.dealId ?? null;
+
+  if (contactId) {
+    const contact = await tx.crmContact.findUnique({ where: { id: contactId } });
+    invariant(contact && contact.workspaceId === params.workspaceId && !contact.archivedAt, 404, "NOT_FOUND", "Contact not found.");
+    if (accountId && contact.accountId) {
+      invariant(accountId === contact.accountId, 400, "INVALID_INPUT", "Activity account must match the linked contact.");
+    }
+    accountId = accountId || contact.accountId || null;
+  }
+  if (dealId) {
+    const deal = await tx.crmDeal.findUnique({ where: { id: dealId } });
+    invariant(deal && deal.workspaceId === params.workspaceId && !deal.archivedAt, 404, "NOT_FOUND", "Deal not found.");
+    if (accountId && deal.accountId) {
+      invariant(accountId === deal.accountId, 400, "INVALID_INPUT", "Activity account must match the linked deal.");
+    }
+    accountId = accountId || deal.accountId || null;
+  }
+  if (accountId) {
+    await requireCrmAccount(tx, params.workspaceId, accountId);
+  }
+
+  invariant(accountId || contactId || dealId, 400, "INVALID_INPUT", "Activity must be linked to an account, contact, or deal.");
+
+  return { accountId, contactId, dealId };
 }
 
 function dealClosedAtForStage(stage: CrmDealStage) {
@@ -405,10 +465,22 @@ export async function getCrmAccount(actor: AppActor, params: { workspaceId: stri
             select: { id: true, name: true, email: true, avatarUrl: true },
           },
           activities: {
-            where: { type: CrmActivityType.TASK },
-            orderBy: { createdAt: "desc" },
+            where: { type: CrmActivityType.TASK, completedAt: null },
+            orderBy: [
+              { dueAt: { sort: "asc", nulls: "last" } },
+              { createdAt: "desc" },
+            ],
             take: 1,
-            select: { id: true, title: true, createdAt: true, type: true },
+            select: {
+              id: true,
+              title: true,
+              createdAt: true,
+              dueAt: true,
+              completedAt: true,
+              ownerUserId: true,
+              source: true,
+              type: true,
+            },
           },
           stageTransitions: {
             orderBy: { createdAt: "desc" },
@@ -420,6 +492,14 @@ export async function getCrmAccount(actor: AppActor, params: { workspaceId: stri
       activities: {
         orderBy: { createdAt: "desc" },
         take: 50,
+        include: {
+          contact: {
+            select: { id: true, name: true, email: true, company: true },
+          },
+          deal: {
+            select: { id: true, title: true, stage: true, valueCents: true },
+          },
+        },
       },
       crmConversations: {
         orderBy: { updatedAt: "desc" },
@@ -892,10 +972,22 @@ export async function listDeals(actor: AppActor, workspaceId: string, opts?: { t
           select: { id: true, name: true, company: true, email: true, avatarUrl: true },
         },
         activities: {
-          where: { type: CrmActivityType.TASK },
-          orderBy: { createdAt: "desc" },
+          where: { type: CrmActivityType.TASK, completedAt: null },
+          orderBy: [
+            { dueAt: { sort: "asc", nulls: "last" } },
+            { createdAt: "desc" },
+          ],
           take: 1,
-          select: { id: true, title: true, createdAt: true, type: true },
+          select: {
+            id: true,
+            title: true,
+            createdAt: true,
+            dueAt: true,
+            completedAt: true,
+            ownerUserId: true,
+            source: true,
+            type: true,
+          },
         },
         stageTransitions: {
           orderBy: { createdAt: "desc" },
@@ -1078,6 +1170,12 @@ export async function listCrmActivities(actor: AppActor, workspaceId: string, op
   contactId?: string;
   dealId?: string;
   type?: CrmActivityType;
+  ownerUserId?: string;
+  source?: string;
+  dueFrom?: Date;
+  dueTo?: Date;
+  completion?: "open" | "completed" | "all";
+  sort?: "recent" | "due";
   take?: number;
   skip?: number;
 }) {
@@ -1090,6 +1188,21 @@ export async function listCrmActivities(actor: AppActor, workspaceId: string, op
   if (opts?.contactId) where.contactId = opts.contactId;
   if (opts?.dealId) where.dealId = opts.dealId;
   if (opts?.type) where.type = opts.type;
+  if (opts?.ownerUserId) where.ownerUserId = opts.ownerUserId;
+  if (opts?.source) where.source = normalizeCrmActivitySource(opts.source);
+  if (opts?.completion === "open") where.completedAt = null;
+  if (opts?.completion === "completed") where.completedAt = { not: null };
+  if (opts?.dueFrom || opts?.dueTo) {
+    where.dueAt = {};
+    if (opts.dueFrom) where.dueAt.gte = normalizeCrmActivityDate(opts.dueFrom, "Due from");
+    if (opts.dueTo) where.dueAt.lte = normalizeCrmActivityDate(opts.dueTo, "Due to");
+  }
+  const orderBy: Prisma.CrmActivityOrderByWithRelationInput | Prisma.CrmActivityOrderByWithRelationInput[] = opts?.sort === "due"
+    ? [
+        { dueAt: { sort: "asc", nulls: "last" } },
+        { createdAt: "desc" },
+      ]
+    : { createdAt: "desc" };
 
   const [items, total] = await Promise.all([
     prisma.crmActivity.findMany({
@@ -1105,7 +1218,7 @@ export async function listCrmActivities(actor: AppActor, workspaceId: string, op
           select: { id: true, title: true, stage: true, valueCents: true },
         },
       },
-      orderBy: { createdAt: "desc" },
+      orderBy,
       take,
       skip,
     }),
@@ -1123,51 +1236,153 @@ export async function createActivity(actor: AppActor, params: {
   contactId?: string | null;
   dealId?: string | null;
   accountId?: string | null;
+  ownerUserId?: string | null;
+  source?: string | null;
+  dueAt?: Date | null;
+  completedAt?: Date | null;
 }) {
   await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
 
   const title = params.title.trim();
   invariant(title.length > 0, 400, "INVALID_INPUT", "Activity title is required.");
-  invariant(params.accountId || params.contactId || params.dealId, 400, "INVALID_INPUT", "Activity must be linked to an account, contact, or deal.");
+  const dueAt = normalizeCrmActivityDate(params.dueAt, "Due date");
+  const completedAt = normalizeCrmActivityDate(params.completedAt, "Completed date");
+  const ownerUserId = params.ownerUserId ?? null;
 
   return prisma.$transaction(async (tx) => {
-    let accountId = params.accountId ?? null;
-    if (params.contactId) {
-      const contact = await tx.crmContact.findUnique({ where: { id: params.contactId } });
-      invariant(contact && contact.workspaceId === params.workspaceId && !contact.archivedAt, 404, "NOT_FOUND", "Contact not found.");
-      if (accountId && contact.accountId) {
-        invariant(accountId === contact.accountId, 400, "INVALID_INPUT", "Activity account must match the linked contact.");
-      }
-      accountId = accountId || contact.accountId || null;
-    }
-    if (params.dealId) {
-      const deal = await tx.crmDeal.findUnique({ where: { id: params.dealId } });
-      invariant(deal && deal.workspaceId === params.workspaceId && !deal.archivedAt, 404, "NOT_FOUND", "Deal not found.");
-      if (accountId && deal.accountId) {
-        invariant(accountId === deal.accountId, 400, "INVALID_INPUT", "Activity account must match the linked deal.");
-      }
-      accountId = accountId || deal.accountId || null;
-    }
-    if (accountId) {
-      await requireCrmAccount(tx, params.workspaceId, accountId);
-    }
-
-    invariant(accountId || params.contactId || params.dealId, 400, "INVALID_INPUT", "Activity must be linked to an account, contact, or deal.");
+    await requireCrmActivityOwner(tx, params.workspaceId, ownerUserId);
+    const links = await resolveCrmActivityLinks(tx, {
+      workspaceId: params.workspaceId,
+      accountId: params.accountId ?? null,
+      contactId: params.contactId ?? null,
+      dealId: params.dealId ?? null,
+    });
 
     const activity = await tx.crmActivity.create({
       data: {
         workspaceId: params.workspaceId,
-        accountId,
+        accountId: links.accountId,
         title,
         type: params.type || CrmActivityType.NOTE,
         bodyMd: params.bodyMd?.trim() || null,
-        contactId: params.contactId || null,
-        dealId: params.dealId || null,
+        contactId: links.contactId,
+        dealId: links.dealId,
         actorUserId: actor.kind === "user" ? actor.user.id : null,
+        ownerUserId,
+        source: normalizeCrmActivitySource(params.source),
+        dueAt,
+        completedAt,
+        completedByUserId: completedAt && actor.kind === "user" ? actor.user.id : null,
       },
     });
 
     return activity;
+  });
+}
+
+export async function updateActivity(actor: AppActor, params: {
+  workspaceId: string;
+  activityId: string;
+  title?: string;
+  type?: CrmActivityType;
+  bodyMd?: string | null;
+  contactId?: string | null;
+  dealId?: string | null;
+  accountId?: string | null;
+  ownerUserId?: string | null;
+  source?: string | null;
+  dueAt?: Date | null;
+}) {
+  await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
+
+  return prisma.$transaction(async (tx) => {
+    const activity = await tx.crmActivity.findUnique({ where: { id: params.activityId } });
+    invariant(activity && activity.workspaceId === params.workspaceId, 404, "NOT_FOUND", "Activity not found.");
+
+    const data: any = {};
+    if (params.title !== undefined) {
+      const title = params.title.trim();
+      invariant(title.length > 0, 400, "INVALID_INPUT", "Activity title is required.");
+      data.title = title;
+    }
+    if (params.type !== undefined) data.type = params.type;
+    if (params.bodyMd !== undefined) data.bodyMd = params.bodyMd?.trim() || null;
+    if (params.source !== undefined) data.source = normalizeCrmActivitySource(params.source);
+    if (params.dueAt !== undefined) data.dueAt = normalizeCrmActivityDate(params.dueAt, "Due date");
+    if (params.ownerUserId !== undefined) {
+      await requireCrmActivityOwner(tx, params.workspaceId, params.ownerUserId);
+      data.ownerUserId = params.ownerUserId;
+    }
+
+    if (params.accountId !== undefined || params.contactId !== undefined || params.dealId !== undefined) {
+      const links = await resolveCrmActivityLinks(tx, {
+        workspaceId: params.workspaceId,
+        accountId: params.accountId,
+        contactId: params.contactId,
+        dealId: params.dealId,
+      }, {
+        accountId: activity.accountId,
+        contactId: activity.contactId,
+        dealId: activity.dealId,
+      });
+      data.accountId = links.accountId;
+      data.contactId = links.contactId;
+      data.dealId = links.dealId;
+    }
+
+    const updated = await tx.crmActivity.update({
+      where: { id: params.activityId },
+      data,
+    });
+
+    await tx.auditLog.create({
+      data: {
+        workspaceId: params.workspaceId,
+        actorUserId: actor.kind === "user" ? actor.user.id : null,
+        action: "crm.activity.updated",
+        entityType: "CrmActivity",
+        entityId: updated.id,
+        meta: { fields: Object.keys(data) },
+      },
+    });
+
+    return updated;
+  });
+}
+
+export async function completeActivity(actor: AppActor, params: {
+  workspaceId: string;
+  activityId: string;
+  completedAt?: Date | null;
+}) {
+  await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
+
+  return prisma.$transaction(async (tx) => {
+    const activity = await tx.crmActivity.findUnique({ where: { id: params.activityId } });
+    invariant(activity && activity.workspaceId === params.workspaceId, 404, "NOT_FOUND", "Activity not found.");
+    if (activity.completedAt) return activity;
+
+    const completedAt = normalizeCrmActivityDate(params.completedAt, "Completed date") ?? new Date();
+    const updated = await tx.crmActivity.update({
+      where: { id: params.activityId },
+      data: {
+        completedAt,
+        completedByUserId: actor.kind === "user" ? actor.user.id : null,
+      },
+    });
+
+    await tx.auditLog.create({
+      data: {
+        workspaceId: params.workspaceId,
+        actorUserId: actor.kind === "user" ? actor.user.id : null,
+        action: "crm.activity.completed",
+        entityType: "CrmActivity",
+        entityId: updated.id,
+        meta: { source: activity.source },
+      },
+    });
+
+    return updated;
   });
 }
 

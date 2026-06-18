@@ -7,6 +7,10 @@ export type DealPipelineActivity = {
   id: string;
   title: string;
   type?: string;
+  dueAt?: Date | string | null;
+  completedAt?: Date | string | null;
+  ownerUserId?: string | null;
+  source?: string | null;
   createdAt: Date | string;
 };
 
@@ -60,13 +64,19 @@ export function dealStageAgeDays(deal: DealPipelineDeal, now: Date | number = Da
 }
 
 export function nextDealFollowUp(deal: DealPipelineDeal) {
-  return deal.activities?.[0] ?? null;
+  return [...(deal.activities ?? [])]
+    .filter((activity) => activity.type === "TASK" && !activity.completedAt)
+    .sort((left, right) => {
+      const leftDate = new Date(left.dueAt ?? left.createdAt).getTime();
+      const rightDate = new Date(right.dueAt ?? right.createdAt).getTime();
+      return leftDate - rightDate;
+    })[0] ?? null;
 }
 
 export function dealPipelineSort(deal: DealPipelineDeal): WorkItemSortable {
   return {
     priority: deal.valueCents ?? 0,
-    date: nextDealFollowUp(deal)?.createdAt ?? dealStageStartedAt(deal),
+    date: nextDealFollowUp(deal)?.dueAt ?? dealStageStartedAt(deal),
     alpha: deal.title,
   };
 }

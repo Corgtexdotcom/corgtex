@@ -93,6 +93,13 @@ export function DealPipelineBoard({
       maximumFractionDigits: 0,
     }).format(cents / 100);
   };
+  const formatDate = (value: Date | string) => {
+    return new Intl.DateTimeFormat(locale, {
+      month: "short",
+      day: "numeric",
+      year: "numeric",
+    }).format(new Date(value));
+  };
   const formatStageAge = (deal: PipelineDeal) => {
     const days = dealStageAgeDays(deal);
     if (days <= 0) return labels.stageAgeToday;
@@ -138,7 +145,9 @@ export function DealPipelineBoard({
                 <span className="tag-sm">{labels.owner}: {owner ?? labels.noOwner}</span>
               </div>
               <div className="muted" style={{ fontSize: "0.8rem", marginTop: 10 }}>
-                {labels.nextFollowUp}: {followUp?.title ?? labels.noNextFollowUp}
+                {labels.nextFollowUp}: {followUp
+                  ? `${followUp.title}${followUp.dueAt ? ` (${formatDate(followUp.dueAt)})` : ""}`
+                  : labels.noNextFollowUp}
               </div>
               <div style={{ marginTop: 12, display: "flex", gap: 4 }}>
                 <DealStageSelect workspaceId={workspaceId} dealId={deal.id} currentStage={deal.stage} />

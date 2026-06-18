@@ -3635,16 +3635,21 @@ model CrmDealStageTransition {
 }
 
 model CrmActivity {
-  id          String          @id @default(uuid())
-  workspaceId String
-  accountId   String?
-  contactId   String?
-  dealId      String?
-  actorUserId String?
-  type        CrmActivityType @default(NOTE)
-  title       String
-  bodyMd      String?         @db.Text
-  createdAt   DateTime        @default(now())
+  id                String          @id @default(uuid())
+  workspaceId       String
+  accountId         String?
+  contactId         String?
+  dealId            String?
+  actorUserId       String?
+  ownerUserId       String?
+  completedByUserId String?
+  type              CrmActivityType @default(NOTE)
+  title             String
+  bodyMd            String?         @db.Text
+  source            String          @default("manual")
+  dueAt             DateTime?
+  completedAt       DateTime?
+  createdAt         DateTime        @default(now())
 
   workspace Workspace   @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   account   CrmAccount? @relation(fields: [accountId], references: [id], onDelete: SetNull)
@@ -3652,6 +3657,9 @@ model CrmActivity {
   deal      CrmDeal?    @relation(fields: [dealId], references: [id], onDelete: Cascade)
 
   @@index([workspaceId, createdAt])
+  @@index([workspaceId, type, dueAt])
+  @@index([workspaceId, completedAt])
+  @@index([workspaceId, ownerUserId, dueAt])
   @@index([accountId])
   @@index([contactId])
   @@index([dealId])
