@@ -998,6 +998,48 @@ export async function deleteDeal(actor: AppActor, params: { workspaceId: string;
 
 // --- ACTIVITIES ---
 
+export async function listCrmActivities(actor: AppActor, workspaceId: string, opts?: {
+  accountId?: string;
+  contactId?: string;
+  dealId?: string;
+  type?: CrmActivityType;
+  take?: number;
+  skip?: number;
+}) {
+  await requireWorkspaceMembership({ actor, workspaceId });
+
+  const take = opts?.take ?? 50;
+  const skip = opts?.skip ?? 0;
+  const where: any = { workspaceId };
+  if (opts?.accountId) where.accountId = opts.accountId;
+  if (opts?.contactId) where.contactId = opts.contactId;
+  if (opts?.dealId) where.dealId = opts.dealId;
+  if (opts?.type) where.type = opts.type;
+
+  const [items, total] = await Promise.all([
+    prisma.crmActivity.findMany({
+      where,
+      include: {
+        account: {
+          select: { id: true, name: true, slug: true, relationshipType: true, lifecycleStage: true },
+        },
+        contact: {
+          select: { id: true, name: true, email: true, company: true },
+        },
+        deal: {
+          select: { id: true, title: true, stage: true, valueCents: true },
+        },
+      },
+      orderBy: { createdAt: "desc" },
+      take,
+      skip,
+    }),
+    prisma.crmActivity.count({ where }),
+  ]);
+
+  return { items, total, take, skip };
+}
+
 export async function createActivity(actor: AppActor, params: {
   workspaceId: string;
   title: string;
@@ -1432,6 +1474,40 @@ export async function listCrmConversations(actor: AppActor, workspaceId: string,
 }
 
 // --- PROVISIONING ---
+
+export async function listCrmProspectWorkspaces(actor: AppActor, workspaceId: string, opts?: {
+  accountId?: string;
+  status?: string;
+  take?: number;
+  skip?: number;
+}) {
+  await requireWorkspaceMembership({ actor, workspaceId });
+
+  const take = opts?.take ?? 50;
+  const skip = opts?.skip ?? 0;
+  const where: any = { crmWorkspaceId: workspaceId };
+  if (opts?.accountId) where.accountId = opts.accountId;
+  if (opts?.status) where.status = opts.status;
+
+  const [items, total] = await Promise.all([
+    prisma.crmProspectWorkspace.findMany({
+      where,
+      include: {
+        account: {
+          select: { id: true, name: true, slug: true, relationshipType: true, lifecycleStage: true },
+        },
+        demoLead: true,
+        targetWorkspace: { select: { id: true, slug: true, name: true } },
+      },
+      orderBy: { provisionedAt: "desc" },
+      take,
+      skip,
+    }),
+    prisma.crmProspectWorkspace.count({ where }),
+  ]);
+
+  return { items, total, take, skip };
+}
 
 export async function provisionProspectWorkspace(actor: AppActor, params: {
   demoLeadId: string;
