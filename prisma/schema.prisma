@@ -596,6 +596,7 @@ model Workspace {
   impactFootprints               ImpactFootprint[]
   checkIns                       CheckIn[]
   demoLeads                      DemoLead[]
+  crmAccounts                    CrmAccount[]
   crmContacts                    CrmContact[]
   crmDeals                       CrmDeal[]
   crmActivities                  CrmActivity[]
@@ -3540,9 +3541,41 @@ enum CrmActivityType {
   TASK
 }
 
+model CrmAccount {
+  id               String    @id @default(uuid())
+  workspaceId      String
+  name             String
+  slug             String
+  domain           String?
+  relationshipType String    @default("PROSPECT")
+  lifecycleStage   String    @default("DISCOVERY")
+  descriptionMd    String?   @db.Text
+  source           String    @default("manual")
+  tags             String[]  @default([])
+  ownerUserId      String?
+  archivedAt       DateTime?
+  archivedByUserId String?
+  archiveReason    String?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+
+  workspace          Workspace              @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  contacts           CrmContact[]
+  deals              CrmDeal[]
+  activities         CrmActivity[]
+  crmConversations   CrmConversation[]
+  prospectWorkspaces CrmProspectWorkspace[]
+
+  @@unique([workspaceId, slug])
+  @@index([workspaceId, relationshipType, lifecycleStage])
+  @@index([workspaceId, archivedAt])
+  @@index([workspaceId, domain])
+}
+
 model CrmContact {
   id               String    @id @default(uuid())
   workspaceId      String
+  accountId        String?
   email            String
   name             String?
   company          String?
@@ -3559,6 +3592,7 @@ model CrmContact {
   updatedAt        DateTime  @updatedAt
 
   workspace        Workspace         @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  account          CrmAccount?       @relation(fields: [accountId], references: [id], onDelete: SetNull)
   deals            CrmDeal[]
   activities       CrmActivity[]
   crmConversations CrmConversation[]
@@ -3566,11 +3600,13 @@ model CrmContact {
   @@unique([workspaceId, email])
   @@index([workspaceId, createdAt])
   @@index([workspaceId, archivedAt])
+  @@index([accountId])
 }
 
 model CrmDeal {
   id               String       @id @default(uuid())
   workspaceId      String
+  accountId        String?
   contactId        String
   title            String
   stage            CrmDealStage @default(LEAD)
@@ -3586,11 +3622,13 @@ model CrmDeal {
   updatedAt        DateTime     @updatedAt
 
   workspace        Workspace         @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  account          CrmAccount?       @relation(fields: [accountId], references: [id], onDelete: SetNull)
   contact          CrmContact        @relation(fields: [contactId], references: [id], onDelete: Cascade)
   activities       CrmActivity[]
   crmConversations CrmConversation[]
 
   @@index([workspaceId, stage])
+  @@index([accountId])
   @@index([contactId])
   @@index([workspaceId, archivedAt])
 }
@@ -3598,6 +3636,7 @@ model CrmDeal {
 model CrmActivity {
   id          String          @id @default(uuid())
   workspaceId String
+  accountId   String?
   contactId   String?
   dealId      String?
   actorUserId String?
@@ -3607,10 +3646,12 @@ model CrmActivity {
   createdAt   DateTime        @default(now())
 
   workspace Workspace   @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  account   CrmAccount? @relation(fields: [accountId], references: [id], onDelete: SetNull)
   contact   CrmContact? @relation(fields: [contactId], references: [id], onDelete: Cascade)
   deal      CrmDeal?    @relation(fields: [dealId], references: [id], onDelete: Cascade)
 
   @@index([workspaceId, createdAt])
+  @@index([accountId])
   @@index([contactId])
   @@index([dealId])
 }
@@ -4459,6 +4500,7 @@ model CrmQualification {
 model CrmConversation {
   id          String   @id @default(uuid())
   workspaceId String
+  accountId   String?
   demoLeadId  String?
   contactId   String?
   dealId      String?
@@ -4468,12 +4510,14 @@ model CrmConversation {
   updatedAt   DateTime @updatedAt
 
   workspace Workspace                @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  account   CrmAccount?              @relation(fields: [accountId], references: [id], onDelete: SetNull)
   demoLead  DemoLead?                @relation(fields: [demoLeadId], references: [id], onDelete: SetNull)
   contact   CrmContact?              @relation(fields: [contactId], references: [id], onDelete: SetNull)
   deal      CrmDeal?                 @relation(fields: [dealId], references: [id], onDelete: SetNull)
   messages  CrmConversationMessage[]
 
   @@index([workspaceId, status])
+  @@index([accountId])
   @@index([demoLeadId])
   @@index([contactId])
 }
@@ -4497,6 +4541,7 @@ model CrmConversationMessage {
 model CrmProspectWorkspace {
   id                String   @id @default(uuid())
   crmWorkspaceId    String
+  accountId         String?
   demoLeadId        String
   targetWorkspaceId String
   adminEmail        String
@@ -4504,11 +4549,13 @@ model CrmProspectWorkspace {
   provisionedAt     DateTime @default(now())
   updatedAt         DateTime @updatedAt
 
-  crmWorkspace    Workspace @relation("CrmWorkspace", fields: [crmWorkspaceId], references: [id], onDelete: Cascade)
-  targetWorkspace Workspace @relation("TargetWorkspace", fields: [targetWorkspaceId], references: [id], onDelete: Cascade)
-  demoLead        DemoLead  @relation(fields: [demoLeadId], references: [id], onDelete: Cascade)
+  crmWorkspace    Workspace   @relation("CrmWorkspace", fields: [crmWorkspaceId], references: [id], onDelete: Cascade)
+  targetWorkspace Workspace   @relation("TargetWorkspace", fields: [targetWorkspaceId], references: [id], onDelete: Cascade)
+  account         CrmAccount? @relation(fields: [accountId], references: [id], onDelete: SetNull)
+  demoLead        DemoLead    @relation(fields: [demoLeadId], references: [id], onDelete: Cascade)
 
   @@index([crmWorkspaceId, status])
+  @@index([accountId])
   @@index([demoLeadId])
   @@index([targetWorkspaceId])
 }

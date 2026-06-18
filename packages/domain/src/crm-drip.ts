@@ -16,6 +16,13 @@ export async function recordDripFollowUp(
   invariant(lead && lead.workspaceId === workspaceId, 404, "NOT_FOUND", "DemoLead not found.");
 
   await prisma.$transaction(async (tx) => {
+    const contact = lead.convertedContactId
+      ? await tx.crmContact.findUnique({
+        where: { id: lead.convertedContactId },
+        select: { accountId: true },
+      })
+      : null;
+
     await tx.demoLead.update({
       where: { id: demoLeadId },
       data: {
@@ -28,6 +35,7 @@ export async function recordDripFollowUp(
     await tx.crmActivity.create({
       data: {
         workspaceId,
+        accountId: contact?.accountId ?? null,
         type: "EMAIL",
         title: `Sent follow-up #${lead.followUpCount + 1}`,
         bodyMd: emailContent,

@@ -21,6 +21,7 @@ type ArchiveEntityType =
   | "BrainArticle"
   | "BrainSource"
   | "Circle"
+  | "CrmAccount"
   | "CrmContact"
   | "CrmDeal"
   | "Cycle"
@@ -118,6 +119,12 @@ const ENTITY_CONFIGS: Record<ArchiveEntityType, ArchiveConfig> = {
   Circle: {
     entityType: "Circle",
     delegate: "circle",
+    findWhere: directWorkspace,
+    label: titleOrName,
+  },
+  CrmAccount: {
+    entityType: "CrmAccount",
+    delegate: "crmAccount",
     findWhere: directWorkspace,
     label: titleOrName,
   },

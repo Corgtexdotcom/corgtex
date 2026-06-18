@@ -37,6 +37,7 @@ export async function applyEnrichmentResult(
       data: {
         workspaceId,
         type: "NOTE",
+        accountId: contact.accountId ?? null,
         contactId,
         title: "Applied Enrichment Data",
         bodyMd: `Applied high-confidence enrichment data: ${JSON.stringify({
@@ -52,6 +53,7 @@ export async function applyEnrichmentResult(
       data: {
         workspaceId,
         type: "NOTE",
+        accountId: contact.accountId ?? null,
         contactId,
         title: "Low-Confidence Enrichment Found",
         bodyMd: `Low-confidence enrichment data found (score: ${enrichedData.confidence}). Please review: ${JSON.stringify({
