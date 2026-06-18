@@ -601,6 +601,7 @@ model Workspace {
   crmDeals                       CrmDeal[]
   crmDealStageTransitions        CrmDealStageTransition[]
   crmActivities                  CrmActivity[]
+  crmCommunicationSuggestions    CrmCommunicationSuggestion[]
   agentConfigs                   WorkspaceAgentConfig[]
   oauthApps                      OAuthApp[]
   mcpOAuthCodes                  McpOAuthAuthorizationCode[]
@@ -3542,12 +3543,13 @@ model CrmAccount {
   createdAt        DateTime  @default(now())
   updatedAt        DateTime  @updatedAt
 
-  workspace          Workspace              @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-  contacts           CrmContact[]
-  deals              CrmDeal[]
-  activities         CrmActivity[]
-  crmConversations   CrmConversation[]
-  prospectWorkspaces CrmProspectWorkspace[]
+  workspace                Workspace                    @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  contacts                 CrmContact[]
+  deals                    CrmDeal[]
+  activities               CrmActivity[]
+  communicationSuggestions CrmCommunicationSuggestion[]
+  crmConversations         CrmConversation[]
+  prospectWorkspaces       CrmProspectWorkspace[]
 
   @@unique([workspaceId, slug])
   @@index([workspaceId, relationshipType, lifecycleStage])
@@ -3574,11 +3576,12 @@ model CrmContact {
   createdAt        DateTime  @default(now())
   updatedAt        DateTime  @updatedAt
 
-  workspace        Workspace         @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-  account          CrmAccount?       @relation(fields: [accountId], references: [id], onDelete: SetNull)
-  deals            CrmDeal[]
-  activities       CrmActivity[]
-  crmConversations CrmConversation[]
+  workspace                Workspace                    @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  account                  CrmAccount?                  @relation(fields: [accountId], references: [id], onDelete: SetNull)
+  deals                    CrmDeal[]
+  activities               CrmActivity[]
+  communicationSuggestions CrmCommunicationSuggestion[]
+  crmConversations         CrmConversation[]
 
   @@unique([workspaceId, email])
   @@index([workspaceId, createdAt])
@@ -3604,12 +3607,13 @@ model CrmDeal {
   createdAt        DateTime     @default(now())
   updatedAt        DateTime     @updatedAt
 
-  workspace        Workspace         @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-  account          CrmAccount?       @relation(fields: [accountId], references: [id], onDelete: SetNull)
-  contact          CrmContact        @relation(fields: [contactId], references: [id], onDelete: Cascade)
-  activities       CrmActivity[]
-  crmConversations CrmConversation[]
-  stageTransitions CrmDealStageTransition[]
+  workspace                Workspace                    @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  account                  CrmAccount?                  @relation(fields: [accountId], references: [id], onDelete: SetNull)
+  contact                  CrmContact                   @relation(fields: [contactId], references: [id], onDelete: Cascade)
+  activities               CrmActivity[]
+  communicationSuggestions CrmCommunicationSuggestion[]
+  crmConversations         CrmConversation[]
+  stageTransitions         CrmDealStageTransition[]
 
   @@index([workspaceId, stage])
   @@index([accountId])
@@ -3618,13 +3622,13 @@ model CrmDeal {
 }
 
 model CrmDealStageTransition {
-  id          String       @id @default(uuid())
+  id          String        @id @default(uuid())
   workspaceId String
   dealId      String
   fromStage   CrmDealStage?
   toStage     CrmDealStage
   actorUserId String?
-  createdAt   DateTime     @default(now())
+  createdAt   DateTime      @default(now())
 
   workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   deal      CrmDeal   @relation(fields: [dealId], references: [id], onDelete: Cascade)
@@ -3651,10 +3655,11 @@ model CrmActivity {
   completedAt       DateTime?
   createdAt         DateTime        @default(now())
 
-  workspace Workspace   @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-  account   CrmAccount? @relation(fields: [accountId], references: [id], onDelete: SetNull)
-  contact   CrmContact? @relation(fields: [contactId], references: [id], onDelete: Cascade)
-  deal      CrmDeal?    @relation(fields: [dealId], references: [id], onDelete: Cascade)
+  workspace                Workspace                    @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  account                  CrmAccount?                  @relation(fields: [accountId], references: [id], onDelete: SetNull)
+  contact                  CrmContact?                  @relation(fields: [contactId], references: [id], onDelete: Cascade)
+  deal                     CrmDeal?                     @relation(fields: [dealId], references: [id], onDelete: Cascade)
+  communicationSuggestions CrmCommunicationSuggestion[]
 
   @@index([workspaceId, createdAt])
   @@index([workspaceId, type, dueAt])
@@ -3663,6 +3668,46 @@ model CrmActivity {
   @@index([accountId])
   @@index([contactId])
   @@index([dealId])
+}
+
+model CrmCommunicationSuggestion {
+  id                String    @id @default(uuid())
+  workspaceId       String
+  accountId         String?
+  contactId         String?
+  dealId            String?
+  activityId        String?
+  actorUserId       String?
+  ownerUserId       String?
+  status            String    @default("SUGGESTED")
+  channel           String    @default("EMAIL")
+  title             String
+  subject           String?
+  bodyMd            String    @db.Text
+  recipientEmail    String?
+  recipientName     String?
+  source            String    @default("manual")
+  requestedAt       DateTime?
+  sentAt            DateTime?
+  declinedAt        DateTime?
+  failedAt          DateTime?
+  failureReason     String?   @db.Text
+  externalRequestId String?
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+
+  workspace Workspace    @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  account   CrmAccount?  @relation(fields: [accountId], references: [id], onDelete: SetNull)
+  contact   CrmContact?  @relation(fields: [contactId], references: [id], onDelete: SetNull)
+  deal      CrmDeal?     @relation(fields: [dealId], references: [id], onDelete: SetNull)
+  activity  CrmActivity? @relation(fields: [activityId], references: [id], onDelete: SetNull)
+
+  @@index([workspaceId, status, createdAt])
+  @@index([workspaceId, ownerUserId, status])
+  @@index([accountId, status])
+  @@index([contactId, status])
+  @@index([dealId, status])
+  @@index([activityId])
 }
 
 model WorkspaceAgentConfig {

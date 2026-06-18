@@ -6,6 +6,7 @@ import {
   listContacts,
   listCrmAccounts,
   listCrmActivities,
+  listCommunicationSuggestions,
   listCrmConversations,
   listCrmProspectWorkspaces,
   listDeals,
@@ -19,6 +20,7 @@ import { normalizeVisibleWorkItemColumns, toggleWorkItemColumnVisibility } from 
 import {
   approveQualificationAction,
   completeActivityAction,
+  createCommunicationSuggestionAction,
   createContactAction,
   createConversationMessageAction,
   createCrmAccountAction,
@@ -27,7 +29,9 @@ import {
   provisionProspectWorkspaceAction,
   rejectQualificationAction,
 } from "../actions";
+import { CommunicationSuggestionCard } from "./CommunicationSuggestionCard";
 import { DealPipelineBoard } from "./DealPipelineBoard";
+import { splitCommunicationSuggestions } from "./communication-suggestions";
 import { splitRelationshipReminders } from "./relationship-reminders";
 import {
   CRM_DEAL_STAGES,
@@ -77,6 +81,7 @@ export default async function LeadsPage({
     dealResult,
     activityResult,
     followUpResult,
+    communicationSuggestionResult,
     pendingQualificationResult,
     approvedQualificationResult,
     conversationResult,
@@ -88,6 +93,7 @@ export default async function LeadsPage({
     listDeals(actor, workspaceId, { take: 100 }),
     listCrmActivities(actor, workspaceId, { take: 20 }),
     listCrmActivities(actor, workspaceId, { type: "TASK" as any, completion: "open", sort: "due", take: 100 }),
+    listCommunicationSuggestions(actor, workspaceId, { take: 100 }),
     listQualifications(actor, workspaceId, { status: "PENDING_REVIEW" }),
     listQualifications(actor, workspaceId, { status: "APPROVED" }),
     listCrmConversations(actor, workspaceId, { take: 30 }),
@@ -100,6 +106,7 @@ export default async function LeadsPage({
   const deals = dealResult.items;
   const recentActivities = activityResult.items as Array<(typeof activityResult.items)[number] & CrmActivityContext>;
   const followUps = followUpResult.items as Array<(typeof followUpResult.items)[number] & CrmActivityContext>;
+  const communicationSuggestions = communicationSuggestionResult.items;
   const pendingQualifications = pendingQualificationResult.items;
   const approvedQualifications = approvedQualificationResult.items;
   const conversations = conversationResult.items;
@@ -123,6 +130,8 @@ export default async function LeadsPage({
   const pipelineValue = activePipelineValueCents(activeDeals);
   const reminderSummary = splitRelationshipReminders(followUps);
   const nextFollowUps = reminderSummary.open.slice(0, 1);
+  const communicationSummary = splitCommunicationSuggestions(communicationSuggestions);
+  const nextCommunicationSuggestions = communicationSummary.open.slice(0, 1);
   const memberNames = new Map(members.map((member) => [
     member.user.id,
     member.user.displayName || member.user.email,
@@ -157,6 +166,7 @@ export default async function LeadsPage({
     contacts: t("tabContacts"),
     pipeline: t("tabPipeline"),
     activity: t("tabActivity"),
+    suggestions: t("tabSuggestions"),
     review: t("tabReview"),
     conversations: t("tabConversations"),
     instances: t("tabInstances"),
@@ -230,6 +240,41 @@ export default async function LeadsPage({
     return labels[type] ?? labelFromCrmCode(type);
   };
 
+  const communicationStatusLabels = {
+    SUGGESTED: t("suggestionStatusSuggested"),
+    REQUESTED: t("suggestionStatusRequested"),
+    SENT: t("suggestionStatusSent"),
+    DECLINED: t("suggestionStatusDeclined"),
+    FAILED: t("suggestionStatusFailed"),
+  };
+
+  const communicationCardLabels = {
+    title: t("formSuggestionTitle"),
+    status: communicationStatusLabels,
+    recipient: t("formSuggestionRecipient"),
+    subject: t("formSuggestionSubject"),
+    body: t("formSuggestionBody"),
+    source: t("colSource"),
+    account: t("pipelineAccount"),
+    contact: t("pipelineContact"),
+    deal: t("activityDeal"),
+    noRecipient: t("suggestionNoRecipient"),
+    noSubject: t("suggestionNoSubject"),
+    copyDraft: t("suggestionCopyDraft"),
+    edit: t("btnEditSuggestion"),
+    save: t("btnSaveSuggestion"),
+    requestExecution: t("btnRequestExternalExecution"),
+    markSent: t("btnMarkSuggestionSent"),
+    decline: t("btnDeclineSuggestion"),
+    failureReason: t("formFailureReason"),
+    fail: t("btnFailSuggestion"),
+    requestedAt: t("suggestionRequestedAt"),
+    sentAt: t("suggestionSentAt"),
+    declinedAt: t("suggestionDeclinedAt"),
+    failedAt: t("suggestionFailedAt"),
+    externalExecutionNote: t("suggestionExternalExecutionNote"),
+  };
+
   return (
     <>
       <header className="nr-masthead" style={{ textAlign: "left", marginBottom: 32 }}>
@@ -264,6 +309,10 @@ export default async function LeadsPage({
           <div className="ws-stat-card">
             <strong>{reminderSummary.overdue.length}</strong>
             <span>{t("statOverdueFollowUps")}</span>
+          </div>
+          <div className="ws-stat-card">
+            <strong>{communicationSummary.open.length}</strong>
+            <span>{t("statSuggestedCommunications")}</span>
           </div>
         </div>
 
@@ -306,6 +355,47 @@ export default async function LeadsPage({
                     <input type="hidden" name="activityId" value={activity.id} />
                     <button type="submit" className="small">{t("btnCompleteFollowUp")}</button>
                   </form>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        <div className="item" style={{ padding: 16, marginBottom: 24 }}>
+          <div className="row" style={{ alignItems: "flex-start", gap: 12 }}>
+            <div>
+              <strong>{t("suggestionQueueTitle")}</strong>
+              <div className="muted" style={{ fontSize: "0.85rem", marginTop: 4 }}>
+                {t("suggestionQueueMeta", {
+                  suggested: communicationSummary.suggested.length,
+                  requested: communicationSummary.requested.length,
+                  failed: communicationSummary.failed.length,
+                })}
+              </div>
+            </div>
+            <a href="?view=suggestions" className="link-button small" style={{ marginLeft: "auto" }}>
+              {t("viewSuggestions")}
+            </a>
+          </div>
+          {nextCommunicationSuggestions.length === 0 ? (
+            <p className="muted" style={{ marginTop: 12 }}>{t("noOpenSuggestions")}</p>
+          ) : (
+            <div className="stack" style={{ marginTop: 16 }}>
+              {nextCommunicationSuggestions.map((suggestion) => (
+                <div key={suggestion.id} className="row" style={{ alignItems: "flex-start", gap: 12, padding: "10px 0", borderTop: "1px solid var(--line)" }}>
+                  <div style={{ minWidth: 0, flex: 1 }}>
+                    <strong style={{ fontSize: "0.92rem" }}>{suggestion.title}</strong>
+                    <div className="muted" style={{ fontSize: "0.82rem", marginTop: 4 }}>
+                      {communicationStatusLabels[suggestion.status as keyof typeof communicationStatusLabels] ?? suggestion.status}
+                      {" · "}
+                      {suggestion.recipientEmail || suggestion.contact?.email || t("suggestionNoRecipient")}
+                    </div>
+                    <div className="row" style={{ justifyContent: "flex-start", gap: 8, marginTop: 6, fontSize: "0.82rem" }}>
+                      {suggestion.account && <span>{t("activityAccount")} <strong>{accountLink(suggestion.account)}</strong></span>}
+                      {suggestion.deal && <span>{t("activityDeal")} <strong>{suggestion.deal.title}</strong></span>}
+                    </div>
+                  </div>
+                  <a href="?view=suggestions" className="link-button small">{t("btnReviewSuggestion")}</a>
                 </div>
               ))}
             </div>
@@ -600,6 +690,81 @@ export default async function LeadsPage({
                   </div>
                 </div>
               </div>
+            ))}
+          </div>
+        )}
+
+        {view === "suggestions" && (
+          <div className="stack">
+            <details>
+              <summary className="link-button small" style={{ cursor: "pointer", width: "fit-content" }}>
+                {t("btnNewSuggestion")}
+              </summary>
+              <form action={createCommunicationSuggestionAction} className="stack nr-form-section" style={{ marginTop: 16 }}>
+                <input type="hidden" name="workspaceId" value={workspaceId} />
+                <input type="hidden" name="channel" value="EMAIL" />
+                <input type="hidden" name="source" value="manual" />
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 16 }}>
+                  <label>
+                    {t("formAccount")}
+                    <select name="accountId" required>
+                      <option value="">{t("selectAccount")}</option>
+                      {accounts.map((account) => (
+                        <option key={account.id} value={account.id}>{account.name}</option>
+                      ))}
+                    </select>
+                  </label>
+                  <label>
+                    {t("formContact")}
+                    <select name="contactId" defaultValue="">
+                      <option value="">{t("selectContactOptional")}</option>
+                      {contacts.map((contact) => (
+                        <option key={contact.id} value={contact.id}>{contact.name || contact.email}</option>
+                      ))}
+                    </select>
+                  </label>
+                  <label>
+                    {t("activityDeal")}
+                    <select name="dealId" defaultValue="">
+                      <option value="">{t("selectDealOptional")}</option>
+                      {deals.map((deal) => (
+                        <option key={deal.id} value={deal.id}>{deal.title}</option>
+                      ))}
+                    </select>
+                  </label>
+                  <label>
+                    {t("formOwner")}
+                    <select name="ownerUserId" defaultValue="">
+                      <option value="">{t("selectOwnerOptional")}</option>
+                      {members.map((member) => (
+                        <option key={member.user.id} value={member.user.id}>
+                          {member.user.displayName || member.user.email}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label>{t("formSuggestionTitle")} <input name="title" required /></label>
+                  <label>{t("formSuggestionRecipient")} <input type="email" name="recipientEmail" /></label>
+                  <label>{t("formSuggestionSubject")} <input name="subject" /></label>
+                </div>
+                <label>
+                  {t("formSuggestionBody")}
+                  <MarkdownEditor name="bodyMd" placeholder={t("formSuggestionBodyPlaceholder")} rows={5} required />
+                </label>
+                <button type="submit" style={{ width: "fit-content" }}>{t("btnCreateSuggestion")}</button>
+              </form>
+            </details>
+
+            {communicationSummary.all.length === 0 ? (
+              <p className="muted">{t("noSuggestions")}</p>
+            ) : communicationSummary.all.map((suggestion) => (
+              <CommunicationSuggestionCard
+                key={suggestion.id}
+                workspaceId={workspaceId}
+                suggestion={suggestion}
+                labels={communicationCardLabels}
+                formatDate={formatDate}
+              />
             ))}
           </div>
         )}
