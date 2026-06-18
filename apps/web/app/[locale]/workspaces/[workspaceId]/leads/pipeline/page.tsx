@@ -6,7 +6,14 @@ import type { CrmDealStage } from "@prisma/client";
 import { getTranslations } from "next-intl/server";
 
 import { createDealAction } from "../actions";
+import { CrmChatPageContext } from "../CrmChatPageContext";
 import { DealPipelineBoard } from "../DealPipelineBoard";
+import {
+  CRM_CHAT_CONTEXT_LIMIT,
+  crmDealContext,
+  crmFilters,
+  crmPageMetrics,
+} from "../chat-page-context";
 import {
   CRM_DEAL_STAGES,
   activePipelineValueCents,
@@ -76,9 +83,29 @@ export default async function RelationshipPipelinePage({
   const pageCount = crmPageCount(dealResult.total);
   const previousHref = crmPageHref(pagePath, resolvedSearch, { page: Math.max(page - 1, 1) });
   const nextHref = crmPageHref(pagePath, resolvedSearch, { page: Math.min(page + 1, pageCount) });
+  const crmChatPageContext = {
+    surface: "crm" as const,
+    workspaceId,
+    view: "pipeline",
+    section: "pipeline",
+    selectedIds: {},
+    filters: crmFilters({ stage, page }),
+    pagination: { page, pageCount, total: dealResult.total },
+    visibleContext: {
+      metrics: crmPageMetrics([
+        { label: "dealsVisible", value: dealResult.items.length },
+        { label: "dealsTotal", value: dealResult.total },
+        { label: "pipelineValueCents", value: activePipelineValueCents(dealResult.items) },
+      ]),
+      deals: dealResult.items
+        .slice(0, CRM_CHAT_CONTEXT_LIMIT)
+        .map((deal) => crmDealContext(workspaceId, deal)),
+    },
+  };
 
   return (
     <>
+      <CrmChatPageContext context={crmChatPageContext} />
       <header className="nr-masthead" style={{ textAlign: "left", marginBottom: 32 }}>
         <a href={relationshipDashboardHref(workspaceId)} className="muted" style={{ fontSize: "0.9rem" }}>
           {t("backToRelationships")}

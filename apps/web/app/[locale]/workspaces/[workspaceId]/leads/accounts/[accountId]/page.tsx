@@ -16,6 +16,17 @@ import {
   convertCrmAccountToClientAction,
   updateCrmAccountAction,
 } from "../../actions";
+import { CrmChatPageContext } from "../../CrmChatPageContext";
+import {
+  CRM_CHAT_CONTEXT_LIMIT,
+  crmAccountContext,
+  crmActivityContext,
+  crmContactContext,
+  crmDealContext,
+  crmFilters,
+  crmPageMetrics,
+  crmSuggestionContext,
+} from "../../chat-page-context";
 import {
   ACCOUNT_DETAIL_VIEWS,
   CRM_LIFECYCLE_OPTIONS,
@@ -209,9 +220,42 @@ export default async function AccountDetailPage({
     failedAt: t("suggestionFailedAt"),
     externalExecutionNote: t("suggestionExternalExecutionNote"),
   };
+  const crmChatPageContext = {
+    surface: "crm" as const,
+    workspaceId,
+    view: "account-detail",
+    section: view,
+    selectedIds: { accountId: account.id },
+    filters: crmFilters({ view }),
+    visibleContext: {
+      metrics: crmPageMetrics([
+        { label: "contacts", value: account.contacts.length },
+        { label: "activeDeals", value: activeDeals.length },
+        { label: "pipelineValueCents", value: pipelineValue },
+        { label: "activities", value: accountActivities.length },
+        { label: "openFollowUps", value: reminderSummary.open.length },
+        { label: "overdueFollowUps", value: reminderSummary.overdue.length },
+        { label: "openCommunicationSuggestions", value: communicationSummary.open.length },
+      ]),
+      accounts: [crmAccountContext(workspaceId, account)],
+      contacts: account.contacts
+        .slice(0, CRM_CHAT_CONTEXT_LIMIT)
+        .map((contact) => crmContactContext(workspaceId, { ...contact, account })),
+      deals: account.deals
+        .slice(0, CRM_CHAT_CONTEXT_LIMIT)
+        .map((deal) => crmDealContext(workspaceId, { ...deal, account })),
+      activities: accountActivities
+        .slice(0, CRM_CHAT_CONTEXT_LIMIT)
+        .map((activity) => crmActivityContext(workspaceId, { ...activity, account })),
+      suggestions: communicationSummary.all
+        .slice(0, CRM_CHAT_CONTEXT_LIMIT)
+        .map((suggestion) => crmSuggestionContext(workspaceId, suggestion)),
+    },
+  };
 
   return (
     <>
+      <CrmChatPageContext context={crmChatPageContext} />
       <header className="nr-masthead" style={{ textAlign: "left", marginBottom: 32 }}>
         <a href={`/workspaces/${workspaceId}/leads`} className="muted" style={{ fontSize: "0.9rem" }}>
           {t("backToRelationships")}

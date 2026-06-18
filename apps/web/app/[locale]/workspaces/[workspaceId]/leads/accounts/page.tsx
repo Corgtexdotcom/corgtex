@@ -5,6 +5,13 @@ import { listCrmAccounts, listCrmActivities, listDeals, requireWorkspaceMembersh
 import { getTranslations } from "next-intl/server";
 
 import { createCrmAccountAction } from "../actions";
+import { CrmChatPageContext } from "../CrmChatPageContext";
+import {
+  CRM_CHAT_CONTEXT_LIMIT,
+  crmAccountContext,
+  crmFilters,
+  crmPageMetrics,
+} from "../chat-page-context";
 import {
   CRM_LIFECYCLE_OPTIONS,
   CRM_RELATIONSHIP_OPTIONS,
@@ -112,9 +119,28 @@ export default async function RelationshipAccountsPage({
   const pageCount = crmPageCount(accountResult.total);
   const previousHref = crmPageHref(pagePath, resolvedSearch, { page: Math.max(page - 1, 1) });
   const nextHref = crmPageHref(pagePath, resolvedSearch, { page: Math.min(page + 1, pageCount) });
+  const crmChatPageContext = {
+    surface: "crm" as const,
+    workspaceId,
+    view: "accounts",
+    section: "accounts",
+    selectedIds: {},
+    filters: crmFilters({ q: query, relationshipType, lifecycleStage, page }),
+    pagination: { page, pageCount, total: accountResult.total },
+    visibleContext: {
+      metrics: crmPageMetrics([
+        { label: "accountsVisible", value: accountResult.items.length },
+        { label: "accountsTotal", value: accountResult.total },
+      ]),
+      accounts: accountResult.items
+        .slice(0, CRM_CHAT_CONTEXT_LIMIT)
+        .map((account) => crmAccountContext(workspaceId, account)),
+    },
+  };
 
   return (
     <>
+      <CrmChatPageContext context={crmChatPageContext} />
       <header className="nr-masthead" style={{ textAlign: "left", marginBottom: 32 }}>
         <a href={relationshipDashboardHref(workspaceId)} className="muted" style={{ fontSize: "0.9rem" }}>
           {t("backToRelationships")}

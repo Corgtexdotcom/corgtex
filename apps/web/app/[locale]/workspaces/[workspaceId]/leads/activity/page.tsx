@@ -14,6 +14,13 @@ import type { CrmActivityType } from "@prisma/client";
 import { getTranslations } from "next-intl/server";
 
 import { completeActivityAction, createActivityAction } from "../actions";
+import { CrmChatPageContext } from "../CrmChatPageContext";
+import {
+  CRM_CHAT_CONTEXT_LIMIT,
+  crmActivityContext,
+  crmFilters,
+  crmPageMetrics,
+} from "../chat-page-context";
 import { accountHref, labelFromCrmCode, relationshipDashboardHref, relationshipFullPageHref } from "../view-model";
 import { RelationshipNav, relationshipNavLabels } from "../RelationshipNav";
 import {
@@ -110,9 +117,28 @@ export default async function RelationshipActivityPage({
   const pageCount = crmPageCount(activityResult.total);
   const previousHref = crmPageHref(pagePath, resolvedSearch, { page: Math.max(page - 1, 1) });
   const nextHref = crmPageHref(pagePath, resolvedSearch, { page: Math.min(page + 1, pageCount) });
+  const crmChatPageContext = {
+    surface: "crm" as const,
+    workspaceId,
+    view: "activity",
+    section: "activity",
+    selectedIds: {},
+    filters: crmFilters({ type, completion, sort, page }),
+    pagination: { page, pageCount, total: activityResult.total },
+    visibleContext: {
+      metrics: crmPageMetrics([
+        { label: "activitiesVisible", value: activityResult.items.length },
+        { label: "activitiesTotal", value: activityResult.total },
+      ]),
+      activities: activities
+        .slice(0, CRM_CHAT_CONTEXT_LIMIT)
+        .map((activity) => crmActivityContext(workspaceId, activity)),
+    },
+  };
 
   return (
     <>
+      <CrmChatPageContext context={crmChatPageContext} />
       <header className="nr-masthead" style={{ textAlign: "left", marginBottom: 32 }}>
         <a href={relationshipDashboardHref(workspaceId)} className="muted" style={{ fontSize: "0.9rem" }}>
           {t("backToRelationships")}

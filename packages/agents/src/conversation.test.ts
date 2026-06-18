@@ -400,6 +400,8 @@ describe("processConversationTurn", () => {
     });
 
     expect(context?.route?.length).toBe(240);
+    expect(context?.surface).toBe("context-map");
+    if (context?.surface !== "context-map") throw new Error("Expected context map context");
     expect(context?.selectedObjectIds).toHaveLength(12);
     expect(context?.selectedObjects[0]).toEqual({
       id: "step-1",
@@ -407,6 +409,130 @@ describe("processConversationTurn", () => {
       objectType: "ProcessStep",
       status: "approved",
     });
+  });
+
+  it("adds sanitized CRM page context without changing the visible user message", async () => {
+    const actor = {
+      kind: "user" as const,
+      user: {
+        id: "user-1",
+        email: "user@example.com",
+        displayName: "User",
+      },
+    };
+    chatMock.mockResolvedValueOnce({ content: "You are viewing the Acme account." });
+
+    const { processConversationTurn } = await import("./conversation");
+    await processConversationTurn({
+      workspaceId: "ws-1",
+      sessionId: "session-1",
+      userId: "user-1",
+      agentKey: "assistant",
+      userMessage: "What CRM account am I viewing?",
+      actor,
+      pageContext: {
+        surface: "crm",
+        route: "/workspaces/ws-1/leads/accounts/account-1",
+        workspaceId: "ws-1",
+        view: "account-detail",
+        section: "overview",
+        selectedIds: { accountId: "account-1", contactId: null, dealId: null, activityId: null, suggestionId: null },
+        filters: { view: "overview" },
+        pagination: { page: null, pageCount: null, total: null },
+        visibleContext: {
+          metrics: [{ label: "activeDeals", value: "2", detail: null }],
+          accounts: [{
+            id: "account-1",
+            name: "Acme",
+            domain: "acme.test",
+            relationshipType: "CLIENT",
+            lifecycleStage: "ACTIVE",
+            webUrl: "/workspaces/ws-1/leads/accounts/account-1",
+          }],
+          contacts: [],
+          deals: [],
+          activities: [],
+          suggestions: [],
+        },
+      },
+    });
+
+    expect(chatMock).toHaveBeenCalledWith(expect.objectContaining({
+      messages: expect.arrayContaining([
+        expect.objectContaining({
+          role: "system",
+          content: expect.stringContaining("user-visible CRM state"),
+        }),
+        expect.objectContaining({
+          role: "system",
+          content: expect.stringContaining('"accountId": "account-1"'),
+        }),
+        expect.objectContaining({
+          role: "user",
+          content: "What CRM account am I viewing?",
+        }),
+      ]),
+    }));
+  });
+
+  it("sanitizes CRM page context before model use", async () => {
+    const { sanitizeConversationPageContext } = await import("./page-context");
+    const context = sanitizeConversationPageContext({
+      surface: "crm",
+      route: `/workspaces/ws-1/leads/accounts/account-1?${"x".repeat(400)}`,
+      workspaceId: "ws-1",
+      view: "account-detail",
+      section: "overview",
+      selectedIds: {
+        accountId: "account-1",
+        ignoredId: "should-not-pass",
+      },
+      filters: Object.fromEntries(Array.from({ length: 20 }, (_, index) => [`filter-${index}`, `value-${index}`])),
+      pagination: { page: "2", pageCount: 5, total: 80 },
+      visibleContext: {
+        accounts: Array.from({ length: 20 }, (_, index) => ({
+          id: `account-${index}`,
+          name: `Account ${index}`,
+          domain: "example.test",
+          bodyMd: "Do not pass descriptions.",
+        })),
+        suggestions: [{
+          id: "suggestion-1",
+          title: "Follow up",
+          status: "SUGGESTED",
+          bodyMd: "Do not pass draft bodies.",
+          recipientEmail: "lead@example.test",
+        }],
+      },
+      unsafe: "do not pass",
+    });
+
+    expect(context?.surface).toBe("crm");
+    if (context?.surface !== "crm") throw new Error("Expected CRM context");
+    expect(context.route?.length).toBe(240);
+    expect(Object.keys(context.filters)).toHaveLength(12);
+    expect(context.selectedIds).toEqual({
+      accountId: "account-1",
+      contactId: null,
+      dealId: null,
+      activityId: null,
+      suggestionId: null,
+    });
+    expect(context.pagination).toEqual({ page: 2, pageCount: 5, total: 80 });
+    expect(context.visibleContext.accounts).toHaveLength(12);
+    expect(context.visibleContext.accounts[0]).toMatchObject({
+      id: "account-0",
+      name: "Account 0",
+      domain: "example.test",
+    });
+    expect(context.visibleContext.suggestions[0]).toMatchObject({
+      id: "suggestion-1",
+      title: "Follow up",
+      status: "SUGGESTED",
+      recipientEmail: "lead@example.test",
+    });
+    expect(JSON.stringify(context)).not.toContain("bodyMd");
+    expect(JSON.stringify(context)).not.toContain("unsafe");
   });
 
   it("does not expose context map tools when the premium AI flag is disabled", async () => {

@@ -31,8 +31,18 @@ import {
   rejectQualificationAction,
 } from "../actions";
 import { CommunicationSuggestionCard } from "./CommunicationSuggestionCard";
+import { CrmChatPageContext } from "./CrmChatPageContext";
 import { DealPipelineBoard } from "./DealPipelineBoard";
 import { RelationshipNav, relationshipNavLabels } from "./RelationshipNav";
+import {
+  CRM_CHAT_CONTEXT_LIMIT,
+  crmAccountContext,
+  crmActivityContext,
+  crmDealContext,
+  crmFilters,
+  crmPageMetrics,
+  crmSuggestionContext,
+} from "./chat-page-context";
 import { splitCommunicationSuggestions } from "./communication-suggestions";
 import { sortDashboardDeals, summarizeDashboardAccounts } from "./dashboard-view-model";
 import { splitRelationshipReminders } from "./relationship-reminders";
@@ -278,9 +288,42 @@ export default async function LeadsPage({
   const attentionSuggestions = [...communicationSummary.failed, ...communicationSummary.requested].slice(0, 3);
   const attentionQualifications = pendingQualifications.slice(0, 2);
   const hasAttention = attentionFollowUps.length > 0 || attentionSuggestions.length > 0 || attentionQualifications.length > 0;
+  const crmChatPageContext = {
+    surface: "crm" as const,
+    workspaceId,
+    view,
+    section: view === "dashboard" ? null : view,
+    selectedIds: {},
+    filters: crmFilters({ view: view === "dashboard" ? null : view }),
+    visibleContext: {
+      metrics: crmPageMetrics([
+        { label: "accountsLoaded", value: accounts.length },
+        { label: "contactsLoaded", value: contacts.length },
+        { label: "activeDeals", value: activeDeals.length },
+        { label: "pipelineValueCents", value: pipelineValue },
+        { label: "openFollowUps", value: reminderSummary.open.length },
+        { label: "overdueFollowUps", value: reminderSummary.overdue.length },
+        { label: "openCommunicationSuggestions", value: communicationSummary.open.length },
+        { label: "pendingQualifications", value: pendingQualifications.length },
+      ]),
+      accounts: dashboardAccounts
+        .slice(0, CRM_CHAT_CONTEXT_LIMIT)
+        .map(({ account }) => crmAccountContext(workspaceId, account)),
+      deals: dashboardDeals
+        .slice(0, CRM_CHAT_CONTEXT_LIMIT)
+        .map((deal) => crmDealContext(workspaceId, deal)),
+      activities: attentionFollowUps
+        .slice(0, CRM_CHAT_CONTEXT_LIMIT)
+        .map((activity) => crmActivityContext(workspaceId, activity)),
+      suggestions: attentionSuggestions
+        .slice(0, CRM_CHAT_CONTEXT_LIMIT)
+        .map((suggestion) => crmSuggestionContext(workspaceId, suggestion)),
+    },
+  };
 
   return (
     <>
+      <CrmChatPageContext context={crmChatPageContext} />
       <header className="nr-masthead" style={{ textAlign: "left", marginBottom: 32 }}>
         <h1 style={{ border: "none", padding: 0, margin: 0, fontSize: "2rem" }}>{t("pageTitle")}</h1>
         <div className="nr-masthead-meta">

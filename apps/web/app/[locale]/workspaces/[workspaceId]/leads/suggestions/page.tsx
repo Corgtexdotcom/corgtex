@@ -13,6 +13,13 @@ import { getTranslations } from "next-intl/server";
 
 import { createCommunicationSuggestionAction } from "../actions";
 import { CommunicationSuggestionCard } from "../CommunicationSuggestionCard";
+import { CrmChatPageContext } from "../CrmChatPageContext";
+import {
+  CRM_CHAT_CONTEXT_LIMIT,
+  crmFilters,
+  crmPageMetrics,
+  crmSuggestionContext,
+} from "../chat-page-context";
 import { relationshipDashboardHref, relationshipFullPageHref } from "../view-model";
 import { RelationshipNav, relationshipNavLabels } from "../RelationshipNav";
 import {
@@ -99,9 +106,28 @@ export default async function RelationshipSuggestionsPage({
   const pageCount = crmPageCount(suggestionResult.total);
   const previousHref = crmPageHref(pagePath, resolvedSearch, { page: Math.max(page - 1, 1) });
   const nextHref = crmPageHref(pagePath, resolvedSearch, { page: Math.min(page + 1, pageCount) });
+  const crmChatPageContext = {
+    surface: "crm" as const,
+    workspaceId,
+    view: "suggestions",
+    section: "suggestions",
+    selectedIds: {},
+    filters: crmFilters({ status, page }),
+    pagination: { page, pageCount, total: suggestionResult.total },
+    visibleContext: {
+      metrics: crmPageMetrics([
+        { label: "suggestionsVisible", value: suggestionResult.items.length },
+        { label: "suggestionsTotal", value: suggestionResult.total },
+      ]),
+      suggestions: suggestionResult.items
+        .slice(0, CRM_CHAT_CONTEXT_LIMIT)
+        .map((suggestion) => crmSuggestionContext(workspaceId, suggestion)),
+    },
+  };
 
   return (
     <>
+      <CrmChatPageContext context={crmChatPageContext} />
       <header className="nr-masthead" style={{ textAlign: "left", marginBottom: 32 }}>
         <a href={relationshipDashboardHref(workspaceId)} className="muted" style={{ fontSize: "0.9rem" }}>
           {t("backToRelationships")}
