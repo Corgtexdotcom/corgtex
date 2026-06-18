@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import { ArrowDownAZ, ArrowDownWideNarrow, ArrowUpDown, Columns3, List } from "lucide-react";
+import { ArrowDownAZ, ArrowDownWideNarrow, ArrowUpDown, Columns3, List, Table2 } from "lucide-react";
 import type { WorkItemScope, WorkItemSort, WorkItemViewMode } from "@/lib/work-item-view";
 
 type Option = {
@@ -17,15 +17,19 @@ export function WorkItemViewToggle({
   currentView,
   listHref,
   kanbanHref,
+  tableHref,
   listLabel,
   kanbanLabel,
+  tableLabel,
   label,
 }: {
   currentView: WorkItemViewMode;
   listHref: string;
   kanbanHref: string;
+  tableHref: string;
   listLabel: string;
   kanbanLabel: string;
+  tableLabel: string;
   label: string;
 }) {
   return (
@@ -46,6 +50,14 @@ export function WorkItemViewToggle({
       >
         <Columns3 size={17} aria-hidden="true" />
       </a>
+      <a
+        href={tableHref}
+        className={`nr-icon-link ${currentView === "table" ? "nr-icon-link-active" : ""}`}
+        aria-label={tableLabel}
+        title={tableLabel}
+      >
+        <Table2 size={17} aria-hidden="true" />
+      </a>
     </div>
   );
 }
@@ -55,9 +67,11 @@ export function WorkItemToolbar({
   currentSort,
   listHref,
   kanbanHref,
+  tableHref,
   sortLinks,
   listLabel,
   kanbanLabel,
+  tableLabel,
   sortLabel,
   sortPriorityLabel,
   sortDateLabel,
@@ -68,9 +82,11 @@ export function WorkItemToolbar({
   currentSort: WorkItemSort;
   listHref: string;
   kanbanHref: string;
+  tableHref: string;
   sortLinks: Record<WorkItemSort, string>;
   listLabel: string;
   kanbanLabel: string;
+  tableLabel: string;
   sortLabel: string;
   sortPriorityLabel: string;
   sortDateLabel: string;
@@ -89,11 +105,13 @@ export function WorkItemToolbar({
         currentView={currentView}
         listHref={listHref}
         kanbanHref={kanbanHref}
+        tableHref={tableHref}
         listLabel={listLabel}
         kanbanLabel={kanbanLabel}
+        tableLabel={tableLabel}
         label={label}
       />
-      {currentView === "list" && (
+      {(currentView === "list" || currentView === "table") && (
         <details className="nr-icon-menu">
           <summary className="nr-icon-link" aria-label={sortLabel} title={sortLabel}>
             <ArrowUpDown size={17} aria-hidden="true" />

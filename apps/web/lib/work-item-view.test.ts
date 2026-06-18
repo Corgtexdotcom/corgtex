@@ -13,7 +13,8 @@ import {
 describe("work item view helpers", () => {
   it("normalizes view, sort, and date query values", () => {
     expect(normalizeWorkItemView("kanban")).toBe("kanban");
-    expect(normalizeWorkItemView("table")).toBe("list");
+    expect(normalizeWorkItemView("table")).toBe("table");
+    expect(normalizeWorkItemView("grid")).toBe("list");
     expect(normalizeWorkItemSort("date")).toBe("date");
     expect(normalizeWorkItemSort("alpha")).toBe("alpha");
     expect(normalizeWorkItemSort("invalid")).toBe("priority");
@@ -30,6 +31,13 @@ describe("work item view helpers", () => {
       memberId: "mem-1",
       columns: ["OPEN", "IN_PROGRESS"],
     })).toBe("?status=OPEN&view=kanban&sort=alpha&circleId=circle-1&memberId=mem-1&columns=OPEN%2CIN_PROGRESS");
+    expect(buildWorkItemQuery({
+      status: "OPEN",
+      view: "table",
+      sort: "date",
+      circleId: "circle-1",
+      memberId: "mem-1",
+    })).toBe("?status=OPEN&view=table&sort=date&circleId=circle-1&memberId=mem-1");
   });
 
   it("normalizes kanban column visibility from query values", () => {

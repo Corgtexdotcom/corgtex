@@ -5,6 +5,7 @@ import { MarkdownExcerpt } from "@/lib/components/MarkdownRenderer";
 import { WorkItemFilterControls, WorkItemToolbar } from "@/lib/components/WorkItemControls";
 import { WorkItemKanbanBoard, type WorkItemKanbanColumn } from "@/lib/components/WorkItemKanbanBoard";
 import { WorkItemResolutionDialog } from "@/lib/components/WorkItemResolutionDialog";
+import { WorkItemTable, type WorkItemTableColumn, type WorkItemTableRow } from "@/lib/components/WorkItemTable";
 import {
   buildWorkItemQuery,
   normalizeVisibleWorkItemColumns,
@@ -86,7 +87,7 @@ export default async function ProposalsPage({
   );
   const proposalFilterHref = (status: ProposalColumnStatus) => view === "kanban"
     ? buildProposalColumnHref(status)
-    : buildWorkItemQuery({ view, sort: view === "list" ? sort : undefined, circleId, memberId, status });
+    : buildWorkItemQuery({ view, sort, circleId, memberId, status });
   const proposalFilterActive = (status: ProposalColumnStatus) => view === "kanban"
     ? visibleProposalColumnIds.includes(status)
     : statusFilter === status;
@@ -171,8 +172,7 @@ export default async function ProposalsPage({
     );
   }
 
-  function renderProposalCard(proposal: ProposalListItem, compact = false) {
-    const detailHref = `/workspaces/${workspaceId}/proposals/${proposal.id}`;
+  function proposalControls(proposal: ProposalListItem) {
     const isAuthor = actor.kind === "user" && proposal.authorUserId === actor.user.id;
     const canManage = canManageProposal(proposal);
     const canEditContent = proposal.status === "DRAFT" ? canManage : proposal.status === "OPEN" && isAuthor;
@@ -222,6 +222,13 @@ export default async function ProposalsPage({
     }
 
     const primaryAction = primaryMoveTarget ? renderProposalMove(proposal, primaryMoveTarget, { primary: true }) : null;
+
+    return { hiddenTransitions, moreItems, primaryAction };
+  }
+
+  function renderProposalCard(proposal: ProposalListItem, compact = false) {
+    const detailHref = `/workspaces/${workspaceId}/proposals/${proposal.id}`;
+    const { hiddenTransitions, moreItems, primaryAction } = proposalControls(proposal);
 
     return (
       <div className={`${compact ? "nr-kanban-card" : "nr-item nr-list-card"} nr-clickable-card`} key={proposal.id}>
@@ -278,6 +285,96 @@ export default async function ProposalsPage({
         )}
       </div>
     );
+  }
+
+  function renderEmptyProposalState() {
+    return (
+      <div className="nr-item nr-empty-state">
+        <h3 className="nr-empty-title">{t("whatIsProposalTitle")}</h3>
+        <p className="muted nr-empty-desc">
+          {t("whatIsProposalDesc")}
+        </p>
+      </div>
+    );
+  }
+
+  const proposalTableColumns: WorkItemTableColumn[] = [
+    { id: "item", label: tWork("tableItem"), cellClassName: "nr-work-item-table-main" },
+    { id: "status", label: tWork("tableStatus") },
+    { id: "owner", label: tWork("tableOwner") },
+    { id: "created", label: tWork("tableCreated") },
+    { id: "priority", label: t("formPriority"), align: "right" },
+    { id: "links", label: tWork("tableLinks") },
+    { id: "actions", label: tWork("tableActions"), cellClassName: "nr-work-item-table-actions" },
+  ];
+
+  function proposalTableRow(proposal: ProposalListItem): WorkItemTableRow {
+    const detailHref = `/workspaces/${workspaceId}/proposals/${proposal.id}`;
+    const { hiddenTransitions, moreItems, primaryAction } = proposalControls(proposal);
+    const statusText = proposal.status === "RESOLVED" && proposal.resolutionOutcome
+      ? `${proposalStatusLabel("RESOLVED")} · ${proposal.resolutionOutcome.replace("_", " ")}`
+      : proposalStatusLabel(proposal.archivedAt ? "ARCHIVED" : proposal.status as ProposalColumnStatus);
+
+    return {
+      id: proposal.id,
+      cells: {
+        item: (
+          <>
+            <a href={detailHref} className="nr-work-item-table-title">
+              {proposal.status === "DRAFT" && <span title={t("privateDraftTooltip")} style={{ marginRight: 6 }}>◆</span>}
+              {proposal.title}
+            </a>
+            <MarkdownExcerpt markdown={proposal.summary ?? proposal.bodyMd} maxLength={140} as="div" className="nr-work-item-table-meta" />
+          </>
+        ),
+        status: (
+          <span className={`tag ${proposal.status === "DRAFT" ? "info" : proposal.status === "OPEN" ? "warning" : proposal.resolutionOutcome === "ADOPTED" ? "success" : proposal.status === "RESOLVED" ? "info" : ""}`}>
+            {statusText}
+          </span>
+        ),
+        owner: (
+          <div className="nr-work-item-table-meta">
+            <div>{proposal.author.displayName || proposal.author.email}</div>
+            {proposal.circle && <div>{proposal.circle.name}</div>}
+          </div>
+        ),
+        created: <span className="nr-work-item-table-meta">{new Date(proposal.createdAt).toLocaleDateString()}</span>,
+        priority: tWork("priorityN", { priority: proposal.priority }),
+        links: (
+          <div className="nr-work-item-table-meta nr-work-item-table-tags">
+            {proposal.version > 1 ? (
+              <a href={`/workspaces/${workspaceId}/versions?entityType=PROPOSAL&entityId=${encodeURIComponent(proposal.id)}`}>v{proposal.version}</a>
+            ) : (
+              <span>v{proposal.version}</span>
+            )}
+            {proposal.tensions?.map((linkedTension) => (
+              <a key={linkedTension.id} href={`/workspaces/${workspaceId}/tensions/${linkedTension.id}`} className="tag info tag-sm no-underline">
+                {t("tensionTag", { title: linkedTension.title })}
+              </a>
+            ))}
+            {proposal.actions?.map((action) => (
+              <a key={action.id} href={`/workspaces/${workspaceId}/actions/${action.id}`} className="tag info tag-sm no-underline">
+                {t("actionTag", { title: action.title })}
+              </a>
+            ))}
+          </div>
+        ),
+        actions: !isDemo ? (
+          <>
+            <ItemActions
+              moreLabel={tCommon("moreActions")}
+              primary={primaryAction}
+              more={moreItems.length > 0 ? moreItems : null}
+            />
+            {hiddenTransitions.length > 0 && (
+              <div className="nr-transition-controls">
+                {hiddenTransitions}
+              </div>
+            )}
+          </>
+        ) : null,
+      },
+    };
   }
 
   function proposalAddCard() {
@@ -337,13 +434,15 @@ export default async function ProposalsPage({
             currentSort={sort}
             listHref={buildWorkItemQuery({ sort, circleId, memberId, status: statusFilter, view: "list" })}
             kanbanHref={buildWorkItemQuery({ circleId, memberId, status: statusFilter, view: "kanban" })}
+            tableHref={buildWorkItemQuery({ sort, circleId, memberId, status: statusFilter, view: "table" })}
             sortLinks={{
-              priority: buildWorkItemQuery({ view: "list", circleId, memberId, status: statusFilter, sort: "priority" }),
-              date: buildWorkItemQuery({ view: "list", circleId, memberId, status: statusFilter, sort: "date" }),
-              alpha: buildWorkItemQuery({ view: "list", circleId, memberId, status: statusFilter, sort: "alpha" }),
+              priority: buildWorkItemQuery({ view: view === "table" ? "table" : "list", circleId, memberId, status: statusFilter, sort: "priority" }),
+              date: buildWorkItemQuery({ view: view === "table" ? "table" : "list", circleId, memberId, status: statusFilter, sort: "date" }),
+              alpha: buildWorkItemQuery({ view: view === "table" ? "table" : "list", circleId, memberId, status: statusFilter, sort: "alpha" }),
             }}
             listLabel={tWork("listView")}
             kanbanLabel={tWork("kanbanView")}
+            tableLabel={tWork("tableView")}
             sortLabel={tWork("sort")}
             sortPriorityLabel={tWork("sortPriority")}
             sortDateLabel={tWork("sortDate")}
@@ -355,7 +454,7 @@ export default async function ProposalsPage({
           action={`/workspaces/${workspaceId}/proposals`}
           status={statusFilter}
           view={view}
-          sort={view === "list" ? sort : undefined}
+          sort={view !== "kanban" ? sort : undefined}
           columns={view === "kanban" && !allProposalColumnsVisible ? visibleProposalColumnIds : undefined}
           circleId={circleId}
           memberId={memberId}
@@ -391,15 +490,16 @@ export default async function ProposalsPage({
             sortAlphaLabel={tWork("sortAlpha")}
             dragUnavailableLabel={tWork("dragUnavailable")}
           />
+        ) : view === "table" ? (
+          <WorkItemTable
+            columns={proposalTableColumns}
+            rows={displayProposals.map((proposal) => proposalTableRow(proposal))}
+            empty={renderEmptyProposalState()}
+          />
         ) : (
           <div>
             {(!displayProposals || displayProposals.length === 0) && (
-              <div className="nr-item nr-empty-state">
-                <h3 className="nr-empty-title">{t("whatIsProposalTitle")}</h3>
-                <p className="muted nr-empty-desc">
-                  {t("whatIsProposalDesc")}
-                </p>
-              </div>
+              renderEmptyProposalState()
             )}
             {displayProposals.map((proposal) => renderProposalCard(proposal))}
           </div>

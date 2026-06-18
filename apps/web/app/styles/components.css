@@ -2252,6 +2252,16 @@ details[open] > .settings-disclosure-summary::before {
   .nr-table th, .nr-table td { @apply text-left px-3 py-2 border-b border-line; }
   .nr-table th { @apply font-sans not-italic text-[0.78rem] font-semibold bg-bg-alt text-text; }
   .nr-table tr:last-child td { @apply border-b-0; }
+  .nr-table-cell-center { @apply text-center; }
+  .nr-table-cell-right { @apply text-right; }
+  .nr-work-item-table-wrap { @apply bg-surface-strong; }
+  .nr-work-item-table td { @apply align-top; }
+  .nr-work-item-table-title { @apply font-semibold text-text no-underline hover:text-accent; }
+  .nr-work-item-table-main { @apply grid gap-1 min-w-[220px]; }
+  .nr-work-item-table-meta { @apply text-[0.78rem] text-muted; }
+  .nr-work-item-table-tags { @apply flex flex-wrap items-center gap-1.5; }
+  .nr-work-item-table-actions { @apply min-w-[150px]; }
+  .nr-work-item-table-actions .item-actions { @apply justify-end; }
   
   /* Hide default arrow on details > summary for custom layout */
   details > summary.nr-hide-marker { @apply list-none; }
@@ -3055,6 +3065,26 @@ details[open] > .settings-disclosure-summary::before {
   .table td + td,
   .notif-pref-table td + td {
     border-top: 1px solid var(--line-subtle) !important;
+  }
+
+  .nr-work-item-table td[data-label] {
+    display: grid;
+    grid-template-columns: minmax(88px, 0.35fr) minmax(0, 1fr);
+    gap: 12px;
+    align-items: start;
+  }
+
+  .nr-work-item-table td[data-label]::before {
+    content: attr(data-label);
+    font-size: 0.72rem;
+    font-weight: 650;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 0;
+  }
+
+  .nr-work-item-table-actions .item-actions {
+    justify-content: flex-start;
   }
 
   .admin-dashboard {
