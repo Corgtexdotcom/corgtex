@@ -18,6 +18,7 @@ import { normalizeVisibleWorkItemColumns, toggleWorkItemColumnVisibility } from 
 
 import {
   approveQualificationAction,
+  completeActivityAction,
   createContactAction,
   createConversationMessageAction,
   createCrmAccountAction,
@@ -27,6 +28,7 @@ import {
   rejectQualificationAction,
 } from "../actions";
 import { DealPipelineBoard } from "./DealPipelineBoard";
+import { splitRelationshipReminders } from "./relationship-reminders";
 import {
   CRM_DEAL_STAGES,
   CRM_LIFECYCLE_OPTIONS,
@@ -38,6 +40,12 @@ import {
 } from "./view-model";
 
 export const dynamic = "force-dynamic";
+
+type CrmActivityContext = {
+  account?: { id: string; name: string } | null;
+  contact?: { id: string; name?: string | null; email: string } | null;
+  deal?: { id: string; title: string } | null;
+};
 
 export default async function LeadsPage({
   params,
@@ -68,6 +76,7 @@ export default async function LeadsPage({
     contactResult,
     dealResult,
     activityResult,
+    followUpResult,
     pendingQualificationResult,
     approvedQualificationResult,
     conversationResult,
@@ -78,6 +87,7 @@ export default async function LeadsPage({
     listContacts(actor, workspaceId, { take: 100 }),
     listDeals(actor, workspaceId, { take: 100 }),
     listCrmActivities(actor, workspaceId, { take: 20 }),
+    listCrmActivities(actor, workspaceId, { type: "TASK" as any, completion: "open", sort: "due", take: 100 }),
     listQualifications(actor, workspaceId, { status: "PENDING_REVIEW" }),
     listQualifications(actor, workspaceId, { status: "APPROVED" }),
     listCrmConversations(actor, workspaceId, { take: 30 }),
@@ -88,7 +98,8 @@ export default async function LeadsPage({
   const accounts = accountResult.items;
   const contacts = contactResult.items;
   const deals = dealResult.items;
-  const recentActivities = activityResult.items;
+  const recentActivities = activityResult.items as Array<(typeof activityResult.items)[number] & CrmActivityContext>;
+  const followUps = followUpResult.items as Array<(typeof followUpResult.items)[number] & CrmActivityContext>;
   const pendingQualifications = pendingQualificationResult.items;
   const approvedQualifications = approvedQualificationResult.items;
   const conversations = conversationResult.items;
@@ -110,6 +121,12 @@ export default async function LeadsPage({
   const activeDeals = deals.filter((deal) => deal.stage !== "CLOSED_WON" && deal.stage !== "CLOSED_LOST");
   const closedWon = deals.filter((deal) => deal.stage === "CLOSED_WON");
   const pipelineValue = activePipelineValueCents(activeDeals);
+  const reminderSummary = splitRelationshipReminders(followUps);
+  const nextFollowUps = reminderSummary.open.slice(0, 1);
+  const memberNames = new Map(members.map((member) => [
+    member.user.id,
+    member.user.displayName || member.user.email,
+  ]));
 
   const formatCurrency = (cents: number) => {
     return new Intl.NumberFormat(locale, {
@@ -131,6 +148,9 @@ export default async function LeadsPage({
     if (days === 1) return t("ageYesterday");
     return t("ageDaysAgo", { days });
   };
+
+  const dueText = (date?: Date | string | null) => date ? formatDate(date) : t("followUpNoDueDate");
+  const ownerText = (ownerUserId?: string | null) => ownerUserId ? memberNames.get(ownerUserId) ?? t("pipelineNoOwner") : t("pipelineNoOwner");
 
   const viewLabels = {
     accounts: t("tabAccounts"),
@@ -237,6 +257,59 @@ export default async function LeadsPage({
             <strong>{closedWon.length}</strong>
             <span>{t("statDealsWon")}</span>
           </div>
+          <div className="ws-stat-card">
+            <strong>{reminderSummary.open.length}</strong>
+            <span>{t("statOpenFollowUps")}</span>
+          </div>
+          <div className="ws-stat-card">
+            <strong>{reminderSummary.overdue.length}</strong>
+            <span>{t("statOverdueFollowUps")}</span>
+          </div>
+        </div>
+
+        <div className="item" style={{ padding: 16, marginBottom: 24 }}>
+          <div className="row" style={{ alignItems: "flex-start", gap: 12 }}>
+            <div>
+              <strong>{t("nextFollowUpsTitle")}</strong>
+              <div className="muted" style={{ fontSize: "0.85rem", marginTop: 4 }}>
+                {t("nextFollowUpsMeta", {
+                  overdue: reminderSummary.overdue.length,
+                  upcoming: reminderSummary.upcoming.length,
+                })}
+              </div>
+            </div>
+            <a href="?view=activity" className="link-button small" style={{ marginLeft: "auto" }}>
+              {t("viewActivity")}
+            </a>
+          </div>
+          {nextFollowUps.length === 0 ? (
+            <p className="muted" style={{ marginTop: 12 }}>{t("noOpenFollowUps")}</p>
+          ) : (
+            <div className="stack" style={{ marginTop: 16 }}>
+              {nextFollowUps.map((activity) => (
+                <div key={activity.id} className="row" style={{ alignItems: "flex-start", gap: 12, padding: "10px 0", borderTop: "1px solid var(--line)" }}>
+                  <div style={{ minWidth: 0, flex: 1 }}>
+                    <strong style={{ fontSize: "0.92rem" }}>{activity.title}</strong>
+                    <div className="muted" style={{ fontSize: "0.82rem", marginTop: 4 }}>
+                      {t("followUpDue", { date: dueText(activity.dueAt) })}
+                      {" · "}
+                      {t("pipelineOwner")}: {ownerText(activity.ownerUserId)}
+                    </div>
+                    <div className="row" style={{ justifyContent: "flex-start", gap: 8, marginTop: 6, fontSize: "0.82rem" }}>
+                      {activity.account && <span>{t("activityAccount")} <strong>{accountLink(activity.account)}</strong></span>}
+                      {activity.contact && <span>{t("activityContact")} <strong>{activity.contact.name || activity.contact.email}</strong></span>}
+                      {activity.deal && <span>{t("activityDeal")} <strong>{activity.deal.title}</strong></span>}
+                    </div>
+                  </div>
+                  <form action={completeActivityAction}>
+                    <input type="hidden" name="workspaceId" value={workspaceId} />
+                    <input type="hidden" name="activityId" value={activity.id} />
+                    <button type="submit" className="small">{t("btnCompleteFollowUp")}</button>
+                  </form>
+                </div>
+              ))}
+            </div>
+          )}
         </div>
 
         <div className="nr-filter-bar">

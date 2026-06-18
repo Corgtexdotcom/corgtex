@@ -22,6 +22,12 @@ const nDaysAgo = (days) => {
   return d;
 };
 
+const nDaysFromNow = (days) => {
+  const d = new Date();
+  d.setDate(d.getDate() + days);
+  return d;
+};
+
 const nDaysAgoAtNoonUtc = (days) => {
   const d = nDaysAgo(days); d.setUTCHours(12, 0, 0, 0); return d;
 };
@@ -445,7 +451,8 @@ const CRM_ACCOUNTS = [
     ],
     activities: [
       { title: "Proposal walkthrough completed", type: "MEETING", bodyMd: "Reviewed pilot success criteria, timeline, and governance checkpoints with operations leadership.", daysAgo: 2 },
-      { title: "Send compliance checklist", type: "TASK", dealTitle: "Clinical operations pilot", bodyMd: "Share security and governance checklist before Meridian compliance review.", daysAgo: 1 },
+      { title: "Send compliance checklist", type: "TASK", dealTitle: "Clinical operations pilot", bodyMd: "Share security and governance checklist before Meridian compliance review.", daysAgo: 1, dueInDays: -1, ownerKey: "jtaubert" },
+      { title: "Confirm review attendees", type: "TASK", dealTitle: "Clinical operations pilot", bodyMd: "Confirm Meridian compliance and transformation attendees before the next pilot review.", daysAgo: 0, dueInDays: 3, ownerKey: "demo" },
     ],
   },
   {
@@ -462,7 +469,7 @@ const CRM_ACCOUNTS = [
       { title: "Portfolio governance advisory", stage: "NEGOTIATION", valueCents: 24000000, contactEmail: "nora.patel@horizon.example", ownerKey: "jwolk", stageDaysAgo: 10, notes: "Commercial terms under review." },
     ],
     activities: [
-      { title: "Partner follow-up scheduled", type: "TASK", dealTitle: "Portfolio governance advisory", bodyMd: "Send revised rollout memo and confirm which portfolio companies join the pilot cohort.", daysAgo: 1 },
+      { title: "Partner follow-up scheduled", type: "TASK", dealTitle: "Portfolio governance advisory", bodyMd: "Send revised rollout memo and confirm which portfolio companies join the pilot cohort.", daysAgo: 1, dueInDays: 2, ownerKey: "jwolk" },
     ],
   },
   {
@@ -480,6 +487,7 @@ const CRM_ACCOUNTS = [
     ],
     activities: [
       { title: "Expansion kickoff notes", type: "NOTE", bodyMd: "Client wants finance visibility and follow-up reminders in the next implementation phase.", daysAgo: 4 },
+      { title: "Send expansion recap", type: "TASK", dealTitle: "Expansion workspace rollout", bodyMd: "Recap kickoff decisions and confirm budget owner for the expansion workspace.", daysAgo: 3, dueInDays: -2, ownerKey: "demo", completedDaysAgo: 1 },
     ],
   },
 ];
@@ -920,6 +928,9 @@ async function seedCrmRelationships(wsId, memberMappings) {
     for (const activitySpec of accountSpec.activities) {
       const deal = activitySpec.dealTitle ? dealsByTitle.get(activitySpec.dealTitle) : null;
       const activityId = `${wsId}-crm-activity-${slugify(accountSpec.slug)}-${slugify(activitySpec.title)}`;
+      const ownerUserId = activitySpec.ownerKey ? memberMappings[activitySpec.ownerKey]?.userId ?? null : null;
+      const completedAt = Number.isFinite(activitySpec.completedDaysAgo) ? nDaysAgo(activitySpec.completedDaysAgo) : null;
+      const dueAt = Number.isFinite(activitySpec.dueInDays) ? nDaysFromNow(activitySpec.dueInDays) : null;
       await prisma.crmActivity.upsert({
         where: { id: activityId },
         update: {
@@ -929,6 +940,11 @@ async function seedCrmRelationships(wsId, memberMappings) {
           type: activitySpec.type,
           title: activitySpec.title,
           bodyMd: activitySpec.bodyMd,
+          ownerUserId,
+          source: "demo_seed",
+          dueAt,
+          completedAt,
+          completedByUserId: completedAt ? ownerUserId : null,
           createdAt: nDaysAgo(activitySpec.daysAgo),
         },
         create: {
@@ -940,6 +956,11 @@ async function seedCrmRelationships(wsId, memberMappings) {
           type: activitySpec.type,
           title: activitySpec.title,
           bodyMd: activitySpec.bodyMd,
+          ownerUserId,
+          source: "demo_seed",
+          dueAt,
+          completedAt,
+          completedByUserId: completedAt ? ownerUserId : null,
           createdAt: nDaysAgo(activitySpec.daysAgo),
         },
       });

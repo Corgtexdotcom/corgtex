@@ -7,6 +7,7 @@ import { getCrmAccount, listMembers, requireWorkspaceMembership } from "@corgtex
 import { getTranslations } from "next-intl/server";
 
 import {
+  completeActivityAction,
   createActivityAction,
   createContactAction,
   createDealAction,
@@ -22,8 +23,14 @@ import {
   CRM_DEAL_STAGES,
 } from "../../view-model";
 import { DealPipelineBoard } from "../../DealPipelineBoard";
+import { splitRelationshipReminders } from "../../relationship-reminders";
 
 export const dynamic = "force-dynamic";
+
+type AccountActivityContext = {
+  contact?: { id: string; name?: string | null; email: string } | null;
+  deal?: { id: string; title: string } | null;
+};
 
 export default async function AccountDetailPage({
   params,
@@ -54,6 +61,13 @@ export default async function AccountDetailPage({
 
   const activeDeals = account.deals.filter((deal) => deal.stage !== "CLOSED_WON" && deal.stage !== "CLOSED_LOST");
   const pipelineValue = activePipelineValueCents(account.deals);
+  const accountActivities = account.activities as Array<(typeof account.activities)[number] & AccountActivityContext>;
+  const reminderSummary = splitRelationshipReminders(accountActivities);
+  const nextFollowUps = reminderSummary.open.slice(0, 5);
+  const memberNames = new Map(members.map((member) => [
+    member.user.id,
+    member.user.displayName || member.user.email,
+  ]));
 
   const formatCurrency = (cents: number) => new Intl.NumberFormat(locale, {
     style: "currency",
@@ -66,6 +80,8 @@ export default async function AccountDetailPage({
     day: "numeric",
     year: "numeric",
   }).format(new Date(value));
+  const dueText = (date?: Date | string | null) => date ? formatDate(date) : t("followUpNoDueDate");
+  const ownerText = (ownerUserId?: string | null) => ownerUserId ? memberNames.get(ownerUserId) ?? t("pipelineNoOwner") : t("pipelineNoOwner");
 
   const stageLabels = {
     LEAD: t("stageLead"),
@@ -161,9 +177,62 @@ export default async function AccountDetailPage({
             <span>{t("statPipelineValue")}</span>
           </div>
           <div className="ws-stat-card">
-            <strong>{account.activities.length}</strong>
+            <strong>{accountActivities.length}</strong>
             <span>{t("statActivities")}</span>
           </div>
+          <div className="ws-stat-card">
+            <strong>{reminderSummary.open.length}</strong>
+            <span>{t("statOpenFollowUps")}</span>
+          </div>
+          <div className="ws-stat-card">
+            <strong>{reminderSummary.overdue.length}</strong>
+            <span>{t("statOverdueFollowUps")}</span>
+          </div>
+        </div>
+
+        <div className="item" style={{ padding: 16, marginBottom: 24 }}>
+          <div className="row" style={{ alignItems: "flex-start", gap: 12 }}>
+            <div>
+              <strong>{t("nextFollowUpsTitle")}</strong>
+              <div className="muted" style={{ fontSize: "0.85rem", marginTop: 4 }}>
+                {t("nextFollowUpsMeta", {
+                  overdue: reminderSummary.overdue.length,
+                  upcoming: reminderSummary.upcoming.length,
+                })}
+              </div>
+            </div>
+            <a href="?view=activity" className="link-button small" style={{ marginLeft: "auto" }}>
+              {t("viewActivity")}
+            </a>
+          </div>
+          {nextFollowUps.length === 0 ? (
+            <p className="muted" style={{ marginTop: 12 }}>{t("noOpenFollowUps")}</p>
+          ) : (
+            <div className="stack" style={{ marginTop: 16 }}>
+              {nextFollowUps.map((activity) => (
+                <div key={activity.id} className="row" style={{ alignItems: "flex-start", gap: 12, padding: "10px 0", borderTop: "1px solid var(--line)" }}>
+                  <div style={{ minWidth: 0, flex: 1 }}>
+                    <strong style={{ fontSize: "0.92rem" }}>{activity.title}</strong>
+                    <div className="muted" style={{ fontSize: "0.82rem", marginTop: 4 }}>
+                      {t("followUpDue", { date: dueText(activity.dueAt) })}
+                      {" · "}
+                      {t("pipelineOwner")}: {ownerText(activity.ownerUserId)}
+                    </div>
+                    {activity.deal && (
+                      <div className="muted" style={{ fontSize: "0.82rem", marginTop: 4 }}>
+                        {t("activityDeal")} <strong>{activity.deal.title}</strong>
+                      </div>
+                    )}
+                  </div>
+                  <form action={completeActivityAction}>
+                    <input type="hidden" name="workspaceId" value={workspaceId} />
+                    <input type="hidden" name="activityId" value={activity.id} />
+                    <button type="submit" className="small">{t("btnCompleteFollowUp")}</button>
+                  </form>
+                </div>
+              ))}
+            </div>
+          )}
         </div>
 
         <div className="nr-filter-bar">
@@ -363,15 +432,28 @@ export default async function AccountDetailPage({
                       <option value="TASK">{t("activityTypeTask")}</option>
                     </select>
                   </label>
+                  <label>{t("formDueAt")} <input type="date" name="dueAt" /></label>
+                  <label>
+                    {t("formOwner")}
+                    <select name="ownerUserId" defaultValue="">
+                      <option value="">{t("selectOwnerOptional")}</option>
+                      {members.map((member) => (
+                        <option key={member.user.id} value={member.user.id}>
+                          {member.user.displayName || member.user.email}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
                 </div>
+                <input type="hidden" name="source" value="manual" />
                 <MarkdownEditor name="bodyMd" placeholder={t("formActivityBodyPlaceholder")} rows={3} />
                 <button type="submit" style={{ width: "fit-content" }}>{t("btnCreateActivity")}</button>
               </form>
             </details>
 
-            {account.activities.length === 0 ? (
+            {accountActivities.length === 0 ? (
               <p className="muted">{t("accountNoActivity")}</p>
-            ) : account.activities.map((activity) => (
+            ) : accountActivities.map((activity) => (
               <div key={activity.id} className="item" style={{ display: "flex", gap: 16 }}>
                 <div style={{ width: 40, height: 40, borderRadius: "50%", background: "var(--accent-soft)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: "1.2rem", flexShrink: 0 }}>
                   {activityIcon(activity.type)}
@@ -379,9 +461,23 @@ export default async function AccountDetailPage({
                 <div style={{ minWidth: 0, flex: 1 }}>
                   <div className="row">
                     <strong>{activity.title}</strong>
-                    <span className="muted" style={{ fontSize: "0.8rem" }}>{formatDate(activity.createdAt)}</span>
+                    <div className="row" style={{ gap: 8, marginLeft: "auto", fontSize: "0.8rem" }}>
+                      <span className="tag-sm">{activity.source}</span>
+                      <span className="muted">{activity.completedAt ? t("followUpCompleted", { date: formatDate(activity.completedAt) }) : formatDate(activity.createdAt)}</span>
+                    </div>
+                  </div>
+                  <div className="nr-tag-group" style={{ marginTop: 8 }}>
+                    {activity.dueAt && <span className="tag-sm">{t("followUpDue", { date: dueText(activity.dueAt) })}</span>}
+                    {activity.ownerUserId && <span className="tag-sm">{t("pipelineOwner")}: {ownerText(activity.ownerUserId)}</span>}
                   </div>
                   {activity.bodyMd && <MarkdownRenderer markdown={activity.bodyMd} variant="compact" />}
+                  {activity.type === "TASK" && !activity.completedAt && (
+                    <form action={completeActivityAction} style={{ marginTop: 12 }}>
+                      <input type="hidden" name="workspaceId" value={workspaceId} />
+                      <input type="hidden" name="activityId" value={activity.id} />
+                      <button type="submit" className="small">{t("btnCompleteFollowUp")}</button>
+                    </form>
+                  )}
                 </div>
               </div>
             ))}

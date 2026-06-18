@@ -12,6 +12,7 @@ import {
   updateDeal,
   deleteDeal,
   createActivity,
+  completeActivity,
   approveQualification,
   rejectQualification,
   sendSchedulingLinkEmail,
@@ -19,6 +20,14 @@ import {
   provisionProspectWorkspace,
   updateCrmAccount,
 } from "@corgtex/domain";
+
+function asOptionalDate(formData: FormData, key: string) {
+  const value = asOptional(formData, key);
+  if (!value) return null;
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return null;
+  return date;
+}
 
 export async function createCrmAccountAction(formData: FormData) {
   const _demoGuardWsId = formData.get("workspaceId") as string;
@@ -177,6 +186,22 @@ export async function createActivityAction(formData: FormData) {
     accountId: asOptional(formData, "accountId"),
     contactId: asOptional(formData, "contactId"),
     dealId: asOptional(formData, "dealId"),
+    ownerUserId: formData.has("ownerUserId") ? asOptional(formData, "ownerUserId") ?? null : undefined,
+    source: formData.has("source") ? asOptional(formData, "source") ?? undefined : undefined,
+    dueAt: formData.has("dueAt") ? asOptionalDate(formData, "dueAt") : undefined,
+  });
+  refresh(workspaceId);
+}
+
+export async function completeActivityAction(formData: FormData) {
+  const _demoGuardWsId = formData.get("workspaceId") as string;
+  if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
+
+  const actor = await requirePageActor();
+  const workspaceId = asString(formData, "workspaceId");
+  await completeActivity(actor, {
+    workspaceId,
+    activityId: asString(formData, "activityId"),
   });
   refresh(workspaceId);
 }
