@@ -3,7 +3,13 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { usePathname } from "next/navigation";
 import { ChatInterface } from "./chat/ChatInterface";
-import { OPEN_WORKSPACE_CHAT_EVENT, type OpenWorkspaceChatEventDetail, type WorkspaceChatPageContext } from "./chat/page-context";
+import {
+  OPEN_WORKSPACE_CHAT_EVENT,
+  SET_WORKSPACE_CHAT_PAGE_CONTEXT_EVENT,
+  type OpenWorkspaceChatEventDetail,
+  type SetWorkspaceChatPageContextEventDetail,
+  type WorkspaceChatPageContext,
+} from "./chat/page-context";
 import { AiWorkspaceLaunchPanel } from "./AiWorkspaceLaunchPanel";
 import type { AiWorkspaceLaunchState } from "@/lib/ai-workspace-launch";
 import { WorkspaceUtilityIcon } from "./WorkspaceNavIcon";
@@ -96,6 +102,17 @@ export function WorkspaceChatRail({
     return () => window.removeEventListener(OPEN_WORKSPACE_CHAT_EVENT, handleOpenChat);
   }, []);
 
+  useEffect(() => {
+    function handleSetPageContext(event: Event) {
+      const detail = (event as CustomEvent<SetWorkspaceChatPageContextEventDetail>).detail;
+      setPageContext(detail?.pageContext ?? null);
+    }
+
+    setPageContext(window.__corgtexWorkspaceChatPageContext ?? null);
+    window.addEventListener(SET_WORKSPACE_CHAT_PAGE_CONTEXT_EVENT, handleSetPageContext);
+    return () => window.removeEventListener(SET_WORKSPACE_CHAT_PAGE_CONTEXT_EVENT, handleSetPageContext);
+  }, []);
+
   const pageContextRoute = pageContext?.route ?? "";
   useEffect(() => {
     if (!pageContextRoute) return;
@@ -106,6 +123,7 @@ export function WorkspaceChatRail({
   }, [pageContextRoute, pathname]);
 
   function toggleCollapsed() {
+    const isOpening = isCollapsed;
     setIsCollapsed((current) => {
       const next = !current;
       try {
@@ -115,6 +133,9 @@ export function WorkspaceChatRail({
       }
       return next;
     });
+    if (isOpening && pageContext) {
+      setOpenSignal((value) => value + 1);
+    }
   }
 
   return (

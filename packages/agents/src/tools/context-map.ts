@@ -37,6 +37,10 @@ function selectedObjectIds(ctx: ContextMapToolContext, args: JsonRecord) {
   return [...new Set(pageIds)].slice(0, 12);
 }
 
+function pageContextIncludeStale(ctx: ContextMapToolContext) {
+  return ctx.pageContext?.surface === "context-map" && ctx.pageContext.includeStale === true;
+}
+
 function mapObjectSummary(object: {
   id: string;
   objectType: string;
@@ -185,7 +189,7 @@ export async function getContextMapInfoAction(actor: AppActor, ctx: ContextMapTo
   const data = await getContextMapData(actor, {
     workspaceId: ctx.workspaceId,
     mapViewId,
-    includeStale: args.includeStale === true || ctx.pageContext?.includeStale === true,
+    includeStale: args.includeStale === true || pageContextIncludeStale(ctx),
   });
   const selectedIds = new Set(selectedObjectIds(ctx, args));
   return {
@@ -210,7 +214,7 @@ export async function getSelectedContextMapRegionAction(actor: AppActor, ctx: Co
     mapViewId: typeof args.mapViewId === "string" ? args.mapViewId : pageContextMapViewId(ctx),
     objectIds,
     depth: Number.isFinite(requestedDepth) ? Math.min(requestedDepth, 2) : 2,
-    includeStale: args.includeStale === true || ctx.pageContext?.includeStale === true,
+    includeStale: args.includeStale === true || pageContextIncludeStale(ctx),
   });
 }
 
