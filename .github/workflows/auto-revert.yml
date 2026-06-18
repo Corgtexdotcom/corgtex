@@ -120,7 +120,7 @@ jobs:
                 const releaseMatches = releaseGitSha === sha || releaseImageTag === sha;
                 const healthOk = json?.status === "ok" && json?.service === "web" &&
                   json?.database === "up" && json?.schema === "ready" &&
-                  json?.app === "corgtex";
+                  json?.app === "corgtex" && json?.auth === "password-session";
                 process.exit(healthOk && releaseMatches ? 0 : 1);
               } catch {
                 process.exit(1);
