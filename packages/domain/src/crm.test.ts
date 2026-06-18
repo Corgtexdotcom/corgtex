@@ -56,9 +56,15 @@ vi.mock("@corgtex/shared", () => {
         updateMany: vi.fn(),
       },
       crmDeal: {
+        findMany: vi.fn(),
+        count: vi.fn(),
         findUnique: vi.fn(),
         create: vi.fn(),
+        update: vi.fn(),
         updateMany: vi.fn(),
+      },
+      crmDealStageTransition: {
+        create: vi.fn(),
       },
       crmActivity: {
         findMany: vi.fn(),
@@ -157,8 +163,26 @@ vi.mock("@corgtex/shared", () => {
             updateMany: vi.fn(),
           },
           crmDeal: {
-            create: vi.fn().mockResolvedValue({ id: "deal-1", accountId: "account-1" }),
+            create: vi.fn().mockResolvedValue({
+              id: "deal-1",
+              workspaceId: "ws-1",
+              accountId: "account-1",
+              contactId: "contact-1",
+              title: "Pilot",
+              stage: "LEAD",
+              createdAt: new Date("2026-06-01T00:00:00.000Z"),
+            }),
+            findUnique: vi.fn().mockResolvedValue({
+              id: "deal-1",
+              workspaceId: "ws-1",
+              stage: "LEAD",
+              archivedAt: null,
+            }),
+            update: vi.fn().mockResolvedValue({ id: "deal-1", workspaceId: "ws-1", stage: "QUALIFIED" }),
             updateMany: vi.fn().mockResolvedValue({ count: 0 }),
+          },
+          crmDealStageTransition: {
+            create: vi.fn().mockResolvedValue({ id: "transition-1" }),
           },
           crmActivity: {
             findMany: vi.fn(),
@@ -435,8 +459,16 @@ describe("CRM domain", () => {
         crmDeal: {
           create: vi.fn().mockResolvedValue({
             id: "deal-1",
+            workspaceId: "ws-1",
             accountId: "account-1",
+            contactId: "contact-1",
+            title: "Pilot",
+            stage: "LEAD",
+            createdAt: new Date("2026-06-01T00:00:00.000Z"),
           }),
+        },
+        crmDealStageTransition: {
+          create: vi.fn().mockResolvedValue({ id: "transition-1" }),
         },
         auditLog: { create: vi.fn().mockResolvedValue({ id: "audit-1" }) },
       };
@@ -453,6 +485,15 @@ describe("CRM domain", () => {
           accountId: "account-1",
           contactId: "contact-1",
           title: "Pilot",
+        }),
+      });
+      expect(tx.crmDealStageTransition.create).toHaveBeenCalledWith({
+        data: expect.objectContaining({
+          workspaceId: "ws-1",
+          dealId: "deal-1",
+          fromStage: null,
+          toStage: "LEAD",
+          actorUserId: "u-1",
         }),
       });
     });
@@ -571,6 +612,226 @@ describe("CRM domain", () => {
         take: 5,
       }));
       expect(result.total).toBe(1);
+    });
+  });
+
+  describe("deal stage transitions", () => {
+    it("records an initial stage transition when creating a deal", async () => {
+      const { prisma } = await import("@corgtex/shared");
+      const { createDeal } = await import("./crm");
+
+      const tx = {
+        crmContact: {
+          findUnique: vi.fn().mockResolvedValue({
+            id: "contact-1",
+            workspaceId: "ws-1",
+            accountId: "account-1",
+            archivedAt: null,
+          }),
+        },
+        crmDeal: {
+          create: vi.fn().mockResolvedValue({
+            id: "deal-1",
+            workspaceId: "ws-1",
+            accountId: "account-1",
+            contactId: "contact-1",
+            title: "Expansion",
+            stage: "PROPOSAL",
+            createdAt: new Date("2026-06-11T00:00:00.000Z"),
+          }),
+        },
+        crmDealStageTransition: {
+          create: vi.fn().mockResolvedValue({ id: "transition-1" }),
+        },
+        auditLog: { create: vi.fn().mockResolvedValue({ id: "audit-1" }) },
+      };
+      vi.mocked(prisma.$transaction).mockImplementationOnce((async (fn: any) => fn(tx)) as any);
+
+      await createDeal(dummyActor, {
+        workspaceId: "ws-1",
+        contactId: "contact-1",
+        title: "Expansion",
+        stage: "PROPOSAL" as any,
+        valueCents: 0,
+      });
+
+      expect(tx.crmDeal.create).toHaveBeenCalledWith({
+        data: expect.objectContaining({
+          stage: "PROPOSAL",
+          valueCents: 0,
+          closedAt: null,
+        }),
+      });
+      expect(tx.crmDealStageTransition.create).toHaveBeenCalledWith({
+        data: expect.objectContaining({
+          workspaceId: "ws-1",
+          dealId: "deal-1",
+          fromStage: null,
+          toStage: "PROPOSAL",
+          actorUserId: "u-1",
+          createdAt: new Date("2026-06-11T00:00:00.000Z"),
+        }),
+      });
+    });
+
+    it("records one transition and closes the deal when stage changes to won", async () => {
+      const { prisma } = await import("@corgtex/shared");
+      const { updateDeal } = await import("./crm");
+
+      const tx = {
+        crmDeal: {
+          findUnique: vi.fn().mockResolvedValue({
+            id: "deal-1",
+            workspaceId: "ws-1",
+            stage: "NEGOTIATION",
+            archivedAt: null,
+          }),
+          update: vi.fn().mockResolvedValue({
+            id: "deal-1",
+            workspaceId: "ws-1",
+            stage: "CLOSED_WON",
+          }),
+        },
+        crmDealStageTransition: {
+          create: vi.fn().mockResolvedValue({ id: "transition-1" }),
+        },
+        auditLog: { create: vi.fn().mockResolvedValue({ id: "audit-1" }) },
+      };
+      vi.mocked(prisma.$transaction).mockImplementationOnce((async (fn: any) => fn(tx)) as any);
+
+      await updateDeal(dummyActor, {
+        workspaceId: "ws-1",
+        dealId: "deal-1",
+        stage: "CLOSED_WON" as any,
+      });
+
+      expect(tx.crmDeal.update).toHaveBeenCalledWith({
+        where: { id: "deal-1" },
+        data: {
+          stage: "CLOSED_WON",
+          closedAt: expect.any(Date),
+        },
+      });
+      expect(tx.crmDealStageTransition.create).toHaveBeenCalledTimes(1);
+      expect(tx.crmDealStageTransition.create).toHaveBeenCalledWith({
+        data: expect.objectContaining({
+          workspaceId: "ws-1",
+          dealId: "deal-1",
+          fromStage: "NEGOTIATION",
+          toStage: "CLOSED_WON",
+          actorUserId: "u-1",
+        }),
+      });
+    });
+
+    it("clears closedAt when a deal returns to an open stage", async () => {
+      const { prisma } = await import("@corgtex/shared");
+      const { updateDeal } = await import("./crm");
+
+      const tx = {
+        crmDeal: {
+          findUnique: vi.fn().mockResolvedValue({
+            id: "deal-1",
+            workspaceId: "ws-1",
+            stage: "CLOSED_WON",
+            archivedAt: null,
+          }),
+          update: vi.fn().mockResolvedValue({
+            id: "deal-1",
+            workspaceId: "ws-1",
+            stage: "NEGOTIATION",
+            closedAt: null,
+          }),
+        },
+        crmDealStageTransition: {
+          create: vi.fn().mockResolvedValue({ id: "transition-1" }),
+        },
+        auditLog: { create: vi.fn().mockResolvedValue({ id: "audit-1" }) },
+      };
+      vi.mocked(prisma.$transaction).mockImplementationOnce((async (fn: any) => fn(tx)) as any);
+
+      await updateDeal(dummyActor, {
+        workspaceId: "ws-1",
+        dealId: "deal-1",
+        stage: "NEGOTIATION" as any,
+      });
+
+      expect(tx.crmDeal.update).toHaveBeenCalledWith({
+        where: { id: "deal-1" },
+        data: {
+          stage: "NEGOTIATION",
+          closedAt: null,
+        },
+      });
+      expect(tx.crmDealStageTransition.create).toHaveBeenCalledWith({
+        data: expect.objectContaining({
+          fromStage: "CLOSED_WON",
+          toStage: "NEGOTIATION",
+        }),
+      });
+    });
+
+    it("does not record a transition for no-op stage updates", async () => {
+      const { prisma } = await import("@corgtex/shared");
+      const { updateDeal } = await import("./crm");
+
+      const tx = {
+        crmDeal: {
+          findUnique: vi.fn().mockResolvedValue({
+            id: "deal-1",
+            workspaceId: "ws-1",
+            stage: "PROPOSAL",
+            archivedAt: null,
+          }),
+          update: vi.fn(),
+        },
+        crmDealStageTransition: {
+          create: vi.fn(),
+        },
+        auditLog: { create: vi.fn() },
+      };
+      vi.mocked(prisma.$transaction).mockImplementationOnce((async (fn: any) => fn(tx)) as any);
+
+      const result = await updateDeal(dummyActor, {
+        workspaceId: "ws-1",
+        dealId: "deal-1",
+        stage: "PROPOSAL" as any,
+      });
+
+      expect(result).toEqual(expect.objectContaining({ id: "deal-1" }));
+      expect(tx.crmDeal.update).not.toHaveBeenCalled();
+      expect(tx.crmDealStageTransition.create).not.toHaveBeenCalled();
+      expect(tx.auditLog.create).not.toHaveBeenCalled();
+    });
+
+    it("rejects stage updates for deals from another workspace", async () => {
+      const { prisma } = await import("@corgtex/shared");
+      const { updateDeal } = await import("./crm");
+
+      const tx = {
+        crmDeal: {
+          findUnique: vi.fn().mockResolvedValue({
+            id: "deal-other",
+            workspaceId: "ws-other",
+            stage: "LEAD",
+            archivedAt: null,
+          }),
+          update: vi.fn(),
+        },
+        crmDealStageTransition: {
+          create: vi.fn(),
+        },
+      };
+      vi.mocked(prisma.$transaction).mockImplementationOnce((async (fn: any) => fn(tx)) as any);
+
+      await expect(updateDeal(dummyActor, {
+        workspaceId: "ws-1",
+        dealId: "deal-other",
+        stage: "QUALIFIED" as any,
+      })).rejects.toThrow();
+
+      expect(tx.crmDeal.update).not.toHaveBeenCalled();
+      expect(tx.crmDealStageTransition.create).not.toHaveBeenCalled();
     });
   });
 

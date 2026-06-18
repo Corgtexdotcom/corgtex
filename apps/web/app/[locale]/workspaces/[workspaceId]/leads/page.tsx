@@ -9,10 +9,12 @@ import {
   listCrmConversations,
   listCrmProspectWorkspaces,
   listDeals,
+  listMembers,
   listQualifications,
   requireWorkspaceMembership,
 } from "@corgtex/domain";
 import { getTranslations } from "next-intl/server";
+import { normalizeVisibleWorkItemColumns, toggleWorkItemColumnVisibility } from "@/lib/work-item-view";
 
 import {
   approveQualificationAction,
@@ -24,7 +26,7 @@ import {
   provisionProspectWorkspaceAction,
   rejectQualificationAction,
 } from "../actions";
-import { DealStageSelect } from "./DealStageSelect";
+import { DealPipelineBoard } from "./DealPipelineBoard";
 import {
   CRM_DEAL_STAGES,
   CRM_LIFECYCLE_OPTIONS,
@@ -49,9 +51,17 @@ export default async function LeadsPage({
   const actor = await requirePageActor();
   await requireWorkspaceMembership({ actor, workspaceId });
   const t = await getTranslations("leads");
+  const tWork = await getTranslations("workItems");
 
   const resolvedSearch = searchParams ? await searchParams : {};
   const view = normalizeRelationshipView(resolvedSearch.view);
+  const visiblePipelineColumnIds = normalizeVisibleWorkItemColumns(resolvedSearch.columns, CRM_DEAL_STAGES);
+  const pipelineColumnHideHrefs = Object.fromEntries(CRM_DEAL_STAGES.map((stage) => {
+    const nextColumns = toggleWorkItemColumnVisibility(visiblePipelineColumnIds, stage, CRM_DEAL_STAGES);
+    const query = new URLSearchParams({ view: "pipeline" });
+    if (nextColumns) query.set("columns", nextColumns.join(","));
+    return [stage, `?${query.toString()}`];
+  }));
 
   const [
     accountResult,
@@ -62,6 +72,7 @@ export default async function LeadsPage({
     approvedQualificationResult,
     conversationResult,
     prospectWorkspaceResult,
+    members,
   ] = await Promise.all([
     listCrmAccounts(actor, workspaceId, { take: 100 }),
     listContacts(actor, workspaceId, { take: 100 }),
@@ -71,6 +82,7 @@ export default async function LeadsPage({
     listQualifications(actor, workspaceId, { status: "APPROVED" }),
     listCrmConversations(actor, workspaceId, { take: 30 }),
     listCrmProspectWorkspaces(actor, workspaceId, { take: 30 }),
+    listMembers(workspaceId),
   ]);
 
   const accounts = accountResult.items;
@@ -81,12 +93,6 @@ export default async function LeadsPage({
   const approvedQualifications = approvedQualificationResult.items;
   const conversations = conversationResult.items;
   const prospectWorkspaces = prospectWorkspaceResult.items;
-
-  const dealsByStage = deals.reduce((acc, deal) => {
-    acc[deal.stage] = acc[deal.stage] || [];
-    acc[deal.stage].push(deal);
-    return acc;
-  }, {} as Record<string, typeof deals>);
 
   const dealsByAccountId = deals.reduce((acc, deal) => {
     if (!deal.accountId) return acc;
@@ -437,41 +443,61 @@ export default async function LeadsPage({
                     </label>
                     <label>{t("formDealTitle")} <input type="text" name="title" required /></label>
                     <label>{t("formValue")} <input type="number" name="value" step="0.01" min="0" /></label>
+                    <label>
+                      {t("formOwner")}
+                      <select name="ownerUserId" defaultValue="">
+                        <option value="">{t("selectOwnerOptional")}</option>
+                        {members.map((member) => (
+                          <option key={member.user.id} value={member.user.id}>
+                            {member.user.displayName || member.user.email}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
                   </div>
                   <button type="submit" style={{ width: "fit-content" }}>{t("btnCreateDeal")}</button>
                 </form>
               </details>
             </div>
 
-            <div style={{ display: "flex", gap: 16, overflowX: "auto", paddingBottom: 16 }}>
-              {CRM_DEAL_STAGES.map((stage) => (
-                <div key={stage} style={{ flex: "0 0 300px", background: "var(--bg-alt)", borderRadius: 8, padding: 16 }}>
-                  <div style={{ fontWeight: 600, marginBottom: 16, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                    {stageLabels[stage]}
-                    <span className="muted" style={{ fontSize: "0.8rem", background: "rgba(0,0,0,0.05)", padding: "2px 8px", borderRadius: 8 }}>
-                      {(dealsByStage[stage] || []).length}
-                    </span>
-                  </div>
-                  <div className="stack">
-                    {(dealsByStage[stage] || []).map((deal) => (
-                      <div key={deal.id} className="item" style={{ background: "white", padding: 12, borderRadius: 8 }}>
-                        <div style={{ fontWeight: 600, fontSize: "0.95rem", marginBottom: 4 }}>{deal.title}</div>
-                        <div className="muted" style={{ fontSize: "0.8rem", marginBottom: 8 }}>
-                          {accountLink(deal.account)}
-                        </div>
-                        <div className="row" style={{ fontSize: "0.8rem" }}>
-                          <span className="muted">{deal.contact.name || deal.contact.email}</span>
-                          {deal.valueCents != null && <strong style={{ color: "var(--success)" }}>{formatCurrency(deal.valueCents)}</strong>}
-                        </div>
-                        <div style={{ marginTop: 12, display: "flex", gap: 4 }}>
-                          <DealStageSelect workspaceId={workspaceId} dealId={deal.id} currentStage={deal.stage} />
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              ))}
-            </div>
+            <DealPipelineBoard
+              workspaceId={workspaceId}
+              deals={deals}
+              members={members}
+              locale={locale}
+              stageLabels={stageLabels}
+              visibleColumnIds={visiblePipelineColumnIds}
+              hideColumnHrefs={pipelineColumnHideHrefs}
+              storageKey={`relationships:${workspaceId}:pipeline`}
+              labels={{
+                account: t("pipelineAccount"),
+                contact: t("pipelineContact"),
+                emptyStage: t("pipelineNoDealsInStage"),
+                noAccount: t("emptyAccount"),
+                nextFollowUp: t("pipelineNextFollowUp"),
+                noNextFollowUp: t("pipelineNoNextFollowUp"),
+                owner: t("pipelineOwner"),
+                noOwner: t("pipelineNoOwner"),
+                stageAgeToday: t("pipelineStageAgeToday"),
+                stageAgeYesterday: t("pipelineStageAgeYesterday"),
+                stageAgeDays: (days) => t("pipelineStageAgeDays", { days }),
+              }}
+              workItemLabels={{
+                settingsLabel: tWork("columnSettings"),
+                resetLabel: tWork("resetColumns"),
+                hideLabel: tWork("hideColumn"),
+                moveUpLabel: tWork("moveColumnLeft"),
+                moveDownLabel: tWork("moveColumnRight"),
+                hideShortLabel: tWork("hideColumnShort"),
+                moveUpShortLabel: tWork("moveColumnLeftShort"),
+                moveDownShortLabel: tWork("moveColumnRightShort"),
+                sortLabel: tWork("sort"),
+                sortPriorityLabel: tWork("sortPriority"),
+                sortDateLabel: tWork("sortDate"),
+                sortAlphaLabel: tWork("sortAlpha"),
+                dragUnavailableLabel: tWork("dragUnavailable"),
+              }}
+            />
           </div>
         )}
 

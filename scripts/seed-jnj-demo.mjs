@@ -441,10 +441,11 @@ const CRM_ACCOUNTS = [
       { email: "marco.reyes@meridian.example", name: "Marco Reyes", title: "Director of Transformation" },
     ],
     deals: [
-      { title: "Clinical operations pilot", stage: "PROPOSAL", valueCents: 18000000, contactEmail: "ava.chen@meridian.example", notes: "Pilot scope drafted; waiting on compliance review." },
+      { title: "Clinical operations pilot", stage: "PROPOSAL", valueCents: 18000000, contactEmail: "ava.chen@meridian.example", ownerKey: "jtaubert", stageDaysAgo: 6, notes: "Pilot scope drafted; waiting on compliance review." },
     ],
     activities: [
       { title: "Proposal walkthrough completed", type: "MEETING", bodyMd: "Reviewed pilot success criteria, timeline, and governance checkpoints with operations leadership.", daysAgo: 2 },
+      { title: "Send compliance checklist", type: "TASK", dealTitle: "Clinical operations pilot", bodyMd: "Share security and governance checklist before Meridian compliance review.", daysAgo: 1 },
     ],
   },
   {
@@ -458,10 +459,10 @@ const CRM_ACCOUNTS = [
       { email: "nora.patel@horizon.example", name: "Nora Patel", title: "Operating Partner" },
     ],
     deals: [
-      { title: "Portfolio governance advisory", stage: "NEGOTIATION", valueCents: 24000000, contactEmail: "nora.patel@horizon.example", notes: "Commercial terms under review." },
+      { title: "Portfolio governance advisory", stage: "NEGOTIATION", valueCents: 24000000, contactEmail: "nora.patel@horizon.example", ownerKey: "jwolk", stageDaysAgo: 10, notes: "Commercial terms under review." },
     ],
     activities: [
-      { title: "Partner follow-up scheduled", type: "TASK", bodyMd: "Send revised rollout memo and confirm which portfolio companies join the pilot cohort.", daysAgo: 1 },
+      { title: "Partner follow-up scheduled", type: "TASK", dealTitle: "Portfolio governance advisory", bodyMd: "Send revised rollout memo and confirm which portfolio companies join the pilot cohort.", daysAgo: 1 },
     ],
   },
   {
@@ -475,7 +476,7 @@ const CRM_ACCOUNTS = [
       { email: "elena.morris@northstar.example", name: "Elena Morris", title: "VP Operations" },
     ],
     deals: [
-      { title: "Expansion workspace rollout", stage: "CLOSED_WON", valueCents: 32000000, contactEmail: "elena.morris@northstar.example", notes: "Expansion approved for three departments." },
+      { title: "Expansion workspace rollout", stage: "CLOSED_WON", valueCents: 32000000, contactEmail: "elena.morris@northstar.example", ownerKey: "demo", stageDaysAgo: 18, notes: "Expansion approved for three departments." },
     ],
     activities: [
       { title: "Expansion kickoff notes", type: "NOTE", bodyMd: "Client wants finance visibility and follow-up reminders in the next implementation phase.", daysAgo: 4 },
@@ -794,7 +795,7 @@ async function enableWorkspaceFeature(wsId, flag) {
   });
 }
 
-async function seedCrmRelationships(wsId) {
+async function seedCrmRelationships(wsId, memberMappings) {
   for (const accountSpec of CRM_ACCOUNTS) {
     const account = await prisma.crmAccount.upsert({
       where: {
@@ -858,11 +859,13 @@ async function seedCrmRelationships(wsId) {
       contactsByEmail.set(contact.email, contact);
     }
 
+    const dealsByTitle = new Map();
     for (const dealSpec of accountSpec.deals) {
       const contact = contactsByEmail.get(dealSpec.contactEmail);
       if (!contact) continue;
       const dealId = `${wsId}-crm-deal-${slugify(accountSpec.slug)}-${slugify(dealSpec.title)}`;
-      await prisma.crmDeal.upsert({
+      const ownerUserId = dealSpec.ownerKey ? memberMappings[dealSpec.ownerKey]?.userId ?? null : null;
+      const deal = await prisma.crmDeal.upsert({
         where: { id: dealId },
         update: {
           accountId: account.id,
@@ -871,6 +874,7 @@ async function seedCrmRelationships(wsId) {
           stage: dealSpec.stage,
           valueCents: dealSpec.valueCents,
           currency: "USD",
+          ownerUserId,
           notes: dealSpec.notes,
           closedAt: dealSpec.stage === "CLOSED_WON" || dealSpec.stage === "CLOSED_LOST" ? nDaysAgo(8) : null,
           archivedAt: null,
@@ -886,18 +890,42 @@ async function seedCrmRelationships(wsId) {
           stage: dealSpec.stage,
           valueCents: dealSpec.valueCents,
           currency: "USD",
+          ownerUserId,
           notes: dealSpec.notes,
           closedAt: dealSpec.stage === "CLOSED_WON" || dealSpec.stage === "CLOSED_LOST" ? nDaysAgo(8) : null,
+        },
+      });
+      dealsByTitle.set(deal.title, deal);
+
+      await prisma.crmDealStageTransition.upsert({
+        where: { id: `${dealId}-initial-stage` },
+        update: {
+          fromStage: null,
+          toStage: dealSpec.stage,
+          actorUserId: ownerUserId,
+          createdAt: nDaysAgo(dealSpec.stageDaysAgo ?? 14),
+        },
+        create: {
+          id: `${dealId}-initial-stage`,
+          workspaceId: wsId,
+          dealId: deal.id,
+          fromStage: null,
+          toStage: dealSpec.stage,
+          actorUserId: ownerUserId,
+          createdAt: nDaysAgo(dealSpec.stageDaysAgo ?? 14),
         },
       });
     }
 
     for (const activitySpec of accountSpec.activities) {
+      const deal = activitySpec.dealTitle ? dealsByTitle.get(activitySpec.dealTitle) : null;
       const activityId = `${wsId}-crm-activity-${slugify(accountSpec.slug)}-${slugify(activitySpec.title)}`;
       await prisma.crmActivity.upsert({
         where: { id: activityId },
         update: {
           accountId: account.id,
+          contactId: null,
+          dealId: deal?.id ?? null,
           type: activitySpec.type,
           title: activitySpec.title,
           bodyMd: activitySpec.bodyMd,
@@ -907,6 +935,8 @@ async function seedCrmRelationships(wsId) {
           id: activityId,
           workspaceId: wsId,
           accountId: account.id,
+          contactId: null,
+          dealId: deal?.id ?? null,
           type: activitySpec.type,
           title: activitySpec.title,
           bodyMd: activitySpec.bodyMd,
@@ -2562,7 +2592,7 @@ async function main() {
   await enableWorkspaceFeature(wsId, "AI_WORKSPACES");
   await enableWorkspaceFeature(wsId, "RELATIONSHIPS");
   await seedShowcaseData({ wsId, memberMappings });
-  await seedCrmRelationships(wsId);
+  await seedCrmRelationships(wsId, memberMappings);
   await seedContextMapData({ wsId, circleMappings, memberMappings, meetingMappings });
 
   const counts = {
