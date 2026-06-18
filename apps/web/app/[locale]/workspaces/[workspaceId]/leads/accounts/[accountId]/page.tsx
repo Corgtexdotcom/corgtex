@@ -13,6 +13,7 @@ import {
   createContactAction,
   createDealAction,
   createFinanceProjectFromDealAction,
+  convertCrmAccountToClientAction,
   updateCrmAccountAction,
 } from "../../actions";
 import {
@@ -89,6 +90,8 @@ export default async function AccountDetailPage({
   const canCreateFinanceProjects = canShowPracticeFinance && (
     actor.kind === "agent" || membership?.role === "ADMIN" || membership?.role === "FINANCE_STEWARD"
   );
+  const isClientAccount = account.relationshipType === "CLIENT" && account.lifecycleStage === "ACTIVE";
+  const canConvertToClient = !isClientAccount;
   const memberNames = new Map(members.map((member) => [
     member.user.id,
     member.user.displayName || member.user.email,
@@ -370,6 +373,37 @@ export default async function AccountDetailPage({
 
         {view === "overview" && (
           <div className="stack">
+            {canConvertToClient && (
+              <div className="item" style={{ padding: 16 }}>
+                <div className="row" style={{ alignItems: "flex-start", gap: 12 }}>
+                  <div>
+                    <strong>{t("clientConversionTitle")}</strong>
+                    <div className="muted" style={{ fontSize: "0.85rem", marginTop: 4 }}>
+                      {t("clientConversionMeta")}
+                    </div>
+                  </div>
+                  <form action={convertCrmAccountToClientAction} className="row" style={{ gap: 12, marginLeft: "auto", alignItems: "center" }}>
+                    <input type="hidden" name="workspaceId" value={workspaceId} />
+                    <input type="hidden" name="accountId" value={account.id} />
+                    {canCreateFinanceProjects && closedWonDealsWithoutProject.length > 0 && (
+                      <label className="muted" style={{ fontSize: "0.85rem" }}>
+                        {t("clientConversionOptionalFinance")}
+                        <select name="financeDealId" defaultValue="" style={{ marginLeft: 8, minWidth: 220 }}>
+                          <option value="">{t("clientConversionNoFinance")}</option>
+                          {closedWonDealsWithoutProject.map((deal) => (
+                            <option key={deal.id} value={deal.id}>
+                              {deal.title} ({formatCurrency(deal.valueCents ?? 0)})
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                    )}
+                    <button type="submit" className="small">{t("clientConversionButton")}</button>
+                  </form>
+                </div>
+              </div>
+            )}
+
             {canShowPracticeFinance && (
               <div className="item" style={{ padding: 16 }}>
                 <div className="row" style={{ alignItems: "flex-start", gap: 12 }}>

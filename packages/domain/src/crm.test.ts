@@ -35,6 +35,7 @@ vi.mock("@corgtex/shared", () => {
       crmProspectWorkspace: {
         findMany: vi.fn(),
         count: vi.fn(),
+        findUnique: vi.fn(),
         findFirst: vi.fn(),
         create: vi.fn(),
         updateMany: vi.fn(),
@@ -255,6 +256,7 @@ vi.mock("@corgtex/shared", () => {
           crmProspectWorkspace: {
             findMany: vi.fn(),
             count: vi.fn(),
+            findUnique: vi.fn(),
             create: vi.fn().mockResolvedValue({ id: "pw-1", crmWorkspaceId: "ws-1", targetWorkspaceId: "ws-new" }),
             updateMany: vi.fn().mockResolvedValue({ count: 0 }),
           },
@@ -266,6 +268,7 @@ vi.mock("@corgtex/shared", () => {
 
 vi.mock("./auth", () => ({
   requireWorkspaceMembership: vi.fn().mockResolvedValue(true),
+  requireGlobalOperator: vi.fn(),
 }));
 
 vi.mock("./events", () => ({
@@ -496,6 +499,49 @@ describe("CRM domain", () => {
       })).rejects.toThrow();
 
       expect(tx.crmContact.create).not.toHaveBeenCalled();
+    });
+
+    it("converts an account to an active client without customer lifecycle writes", async () => {
+      const { prisma } = await import("@corgtex/shared");
+      const { convertCrmAccountToClient } = await import("./crm");
+
+      const tx = {
+        crmAccount: {
+          findUnique: vi.fn().mockResolvedValue({
+            id: "account-1",
+            workspaceId: "ws-1",
+            relationshipType: "PROSPECT",
+            lifecycleStage: "PILOT",
+            archivedAt: null,
+          }),
+          update: vi.fn().mockResolvedValue({
+            id: "account-1",
+            workspaceId: "ws-1",
+            relationshipType: "CLIENT",
+            lifecycleStage: "ACTIVE",
+          }),
+        },
+        customerAccount: { upsert: vi.fn() },
+        customerDeployment: { upsert: vi.fn() },
+        auditLog: { create: vi.fn().mockResolvedValue({ id: "audit-1" }) },
+      };
+      vi.mocked(prisma.$transaction).mockImplementationOnce((async (fn: any) => fn(tx)) as any);
+
+      const result = await convertCrmAccountToClient(dummyActor, {
+        workspaceId: "ws-1",
+        accountId: "account-1",
+      });
+
+      expect(tx.crmAccount.update).toHaveBeenCalledWith({
+        where: { id: "account-1" },
+        data: {
+          relationshipType: "CLIENT",
+          lifecycleStage: "ACTIVE",
+        },
+      });
+      expect(result).toMatchObject({ relationshipType: "CLIENT", lifecycleStage: "ACTIVE" });
+      expect(tx.customerAccount.upsert).not.toHaveBeenCalled();
+      expect(tx.customerDeployment.upsert).not.toHaveBeenCalled();
     });
 
     it("inherits the contact account when creating a deal", async () => {
@@ -1707,6 +1753,53 @@ describe("CRM domain", () => {
       expect(result).toBeDefined();
     });
 
+    it("does not register customer lifecycle records during ordinary prospect provisioning", async () => {
+      const { prisma } = await import("@corgtex/shared");
+      const { provisionProspectWorkspace } = await import("./crm");
+
+      vi.mocked(prisma.demoLead.findUnique).mockResolvedValue({
+        id: "lead-1",
+        email: "demo@acme.com",
+        workspaceId: "ws-1",
+      } as any);
+      vi.mocked(prisma.crmProspectWorkspace.findFirst).mockResolvedValue(null);
+
+      const customerAccountUpsert = vi.fn();
+      const customerDeploymentUpsert = vi.fn();
+      const tx = {
+        workspace: {
+          create: vi.fn().mockResolvedValue({ id: "ws-new", name: "Demo Workspace", slug: "demo-123" }),
+        },
+        crmProspectWorkspace: {
+          create: vi.fn().mockResolvedValue({ id: "pw-1", crmWorkspaceId: "ws-1", targetWorkspaceId: "ws-new" }),
+        },
+        customerAccount: {
+          upsert: customerAccountUpsert,
+        },
+        customerDeployment: {
+          upsert: customerDeploymentUpsert,
+        },
+      };
+      vi.mocked(prisma.$transaction).mockImplementationOnce((async (fn: any) => fn(tx)) as any);
+
+      await provisionProspectWorkspace(dummyActor, {
+        demoLeadId: "lead-1",
+        adminEmail: "admin@acme.com",
+        crmWorkspaceId: "ws-1",
+      });
+
+      expect(tx.crmProspectWorkspace.create).toHaveBeenCalledWith({
+        data: expect.objectContaining({
+          crmWorkspaceId: "ws-1",
+          demoLeadId: "lead-1",
+          targetWorkspaceId: "ws-new",
+          status: "ACTIVE",
+        }),
+      });
+      expect(customerAccountUpsert).not.toHaveBeenCalled();
+      expect(customerDeploymentUpsert).not.toHaveBeenCalled();
+    });
+
     it("returns existing workspace if already provisioned", async () => {
       const { prisma } = await import("@corgtex/shared");
       const { provisionProspectWorkspace } = await import("./crm");
@@ -1742,6 +1835,154 @@ describe("CRM domain", () => {
           crmWorkspaceId: "ws-1",
         })
       ).rejects.toThrow();
+    });
+
+    it("registers an account prospect workspace with the customer lifecycle only for the explicit internal action", async () => {
+      const { prisma } = await import("@corgtex/shared");
+      const { registerCrmAccountCustomerLifecycle } = await import("./crm");
+
+      const tx = {
+        crmAccount: {
+          findUnique: vi.fn().mockResolvedValue({
+            id: "account-1",
+            workspaceId: "ws-1",
+            name: "Acme Corp",
+            slug: "acme-corp",
+            relationshipType: "PROSPECT",
+            lifecycleStage: "PILOT",
+            archivedAt: null,
+          }),
+          update: vi.fn().mockResolvedValue({
+            id: "account-1",
+            relationshipType: "CLIENT",
+            lifecycleStage: "ACTIVE",
+          }),
+        },
+        crmProspectWorkspace: {
+          findUnique: vi.fn().mockResolvedValue({
+            id: "pw-1",
+            crmWorkspaceId: "ws-1",
+            accountId: "account-1",
+            targetWorkspaceId: "ws-client",
+            targetWorkspace: {
+              id: "ws-client",
+              slug: "acme-client",
+              name: "Acme Client",
+              description: "Pilot workspace",
+            },
+          }),
+        },
+        customerAccount: {
+          upsert: vi.fn().mockResolvedValue({ id: "cust-1", slug: "acme-corp", primaryDeploymentId: null }),
+          findUnique: vi.fn().mockResolvedValue({ id: "cust-1", primaryDeploymentId: null }),
+          update: vi.fn().mockResolvedValue({ id: "cust-1", primaryDeploymentId: "deployment-1" }),
+        },
+        customerDeployment: {
+          findUnique: vi.fn().mockResolvedValue(null),
+          upsert: vi.fn().mockResolvedValue({ id: "deployment-1", customerAccountId: "cust-1" }),
+        },
+        auditLog: {
+          create: vi.fn().mockResolvedValue({ id: "audit-1" }),
+        },
+      };
+      vi.mocked(prisma.$transaction).mockImplementationOnce((async (fn: any) => fn(tx)) as any);
+
+      const result = await registerCrmAccountCustomerLifecycle(dummyActor, {
+        workspaceId: "ws-1",
+        accountId: "account-1",
+        prospectWorkspaceId: "pw-1",
+      });
+
+      expect(tx.customerAccount.upsert).toHaveBeenCalledWith(expect.objectContaining({
+        where: { slug: "acme-corp" },
+        create: expect.objectContaining({
+          displayName: "Acme Corp",
+          status: "ACTIVE",
+          managementAuthority: "CORGTEX",
+        }),
+      }));
+      expect(tx.customerDeployment.upsert).toHaveBeenCalledWith(expect.objectContaining({
+        create: expect.objectContaining({
+          customerAccountId: "cust-1",
+          managedWorkspaceId: "ws-client",
+          remoteWorkspaceSlug: "acme-client",
+        }),
+      }));
+      expect(result.account).toMatchObject({ relationshipType: "CLIENT", lifecycleStage: "ACTIVE" });
+    });
+
+    it("rejects customer lifecycle registration for non-global actors before mutating control-plane state", async () => {
+      const { prisma } = await import("@corgtex/shared");
+      const { requireGlobalOperator } = await import("./auth");
+      const { registerCrmAccountCustomerLifecycle } = await import("./crm");
+
+      vi.mocked(requireGlobalOperator).mockImplementationOnce(() => {
+        throw new Error("Only global operators can perform this action.");
+      });
+
+      await expect(registerCrmAccountCustomerLifecycle(dummyActor, {
+        workspaceId: "ws-1",
+        accountId: "account-1",
+        prospectWorkspaceId: "pw-1",
+      })).rejects.toThrow("Only global operators");
+
+      expect(prisma.$transaction).not.toHaveBeenCalled();
+    });
+
+    it("rejects customer lifecycle registration for cross-workspace or unlinked prospect workspaces", async () => {
+      const { prisma } = await import("@corgtex/shared");
+      const { registerCrmAccountCustomerLifecycle } = await import("./crm");
+
+      const tx = {
+        crmAccount: {
+          findUnique: vi.fn().mockResolvedValue({
+            id: "account-1",
+            workspaceId: "ws-1",
+            name: "Acme Corp",
+            slug: "acme-corp",
+            relationshipType: "PROSPECT",
+            lifecycleStage: "PILOT",
+            archivedAt: null,
+          }),
+          update: vi.fn(),
+        },
+        crmProspectWorkspace: {
+          findUnique: vi.fn()
+            .mockResolvedValueOnce({
+              id: "pw-other",
+              crmWorkspaceId: "ws-other",
+              accountId: "account-1",
+              targetWorkspace: { id: "target-other", slug: "other", name: "Other" },
+            })
+            .mockResolvedValueOnce({
+              id: "pw-unlinked",
+              crmWorkspaceId: "ws-1",
+              accountId: "account-other",
+              targetWorkspace: { id: "target-1", slug: "target", name: "Target" },
+            }),
+        },
+        customerAccount: { upsert: vi.fn() },
+        customerDeployment: { upsert: vi.fn() },
+        auditLog: { create: vi.fn() },
+      };
+      vi.mocked(prisma.$transaction)
+        .mockImplementationOnce((async (fn: any) => fn(tx)) as any)
+        .mockImplementationOnce((async (fn: any) => fn(tx)) as any);
+
+      await expect(registerCrmAccountCustomerLifecycle(dummyActor, {
+        workspaceId: "ws-1",
+        accountId: "account-1",
+        prospectWorkspaceId: "pw-other",
+      })).rejects.toThrow();
+      await expect(registerCrmAccountCustomerLifecycle(dummyActor, {
+        workspaceId: "ws-1",
+        accountId: "account-1",
+        prospectWorkspaceId: "pw-unlinked",
+      })).rejects.toThrow();
+
+      expect(tx.customerAccount.upsert).not.toHaveBeenCalled();
+      expect(tx.customerDeployment.upsert).not.toHaveBeenCalled();
+      expect(tx.crmAccount.update).not.toHaveBeenCalled();
     });
   });
 
