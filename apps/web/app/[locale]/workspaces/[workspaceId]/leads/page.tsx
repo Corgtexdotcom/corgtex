@@ -14,6 +14,7 @@ import {
   listQualifications,
   requireWorkspaceMembership,
 } from "@corgtex/domain";
+import { CrmActivityType } from "@prisma/client";
 import { getTranslations } from "next-intl/server";
 import { normalizeVisibleWorkItemColumns, toggleWorkItemColumnVisibility } from "@/lib/work-item-view";
 
@@ -95,7 +96,7 @@ export default async function LeadsPage({
     listContacts(actor, workspaceId, { take: 100 }),
     listDeals(actor, workspaceId, { take: 100 }),
     listCrmActivities(actor, workspaceId, { take: 20 }),
-    listCrmActivities(actor, workspaceId, { type: "TASK" as any, completion: "open", sort: "due", take: 100 }),
+    listCrmActivities(actor, workspaceId, { type: CrmActivityType.TASK, completion: "open", sort: "due", take: 100 }),
     listCommunicationSuggestions(actor, workspaceId, { take: 100 }),
     listQualifications(actor, workspaceId, { status: "PENDING_REVIEW" }),
     listQualifications(actor, workspaceId, { status: "APPROVED" }),
@@ -165,6 +166,8 @@ export default async function LeadsPage({
   const fullPageHrefs = {
     accounts: relationshipFullPageHref(workspaceId, "accounts"),
     pipeline: relationshipFullPageHref(workspaceId, "pipeline"),
+    activity: relationshipFullPageHref(workspaceId, "activity"),
+    suggestions: relationshipFullPageHref(workspaceId, "suggestions"),
   };
 
   const stageLabels = {
@@ -326,7 +329,7 @@ export default async function LeadsPage({
                     })}
                   </div>
                 </div>
-                <a href="?view=activity" className="link-button small" style={{ marginLeft: "auto" }}>
+                <a href={fullPageHrefs.activity} className="link-button small" style={{ marginLeft: "auto" }}>
                   {t("viewActivity")}
                 </a>
               </div>
@@ -366,7 +369,7 @@ export default async function LeadsPage({
                             {suggestion.account ? accountLink(suggestion.account) : t("emptyAccount")}
                           </div>
                         </div>
-                        <a href="?view=suggestions" className="link-button small">{t("btnReviewSuggestion")}</a>
+                        <a href={fullPageHrefs.suggestions} className="link-button small">{t("btnReviewSuggestion")}</a>
                       </div>
                     </div>
                   ))}
@@ -456,7 +459,7 @@ export default async function LeadsPage({
               <section className="stack" style={{ gap: 12 }}>
                 <div className="row" style={{ alignItems: "flex-start", gap: 12 }}>
                   <h2 style={{ margin: 0, fontSize: "1.1rem" }}>{t("dashboardSuggestionSummaryTitle")}</h2>
-                  <a href="?view=suggestions" className="link-button small" style={{ marginLeft: "auto" }}>{t("viewSuggestions")}</a>
+                  <a href={fullPageHrefs.suggestions} className="link-button small" style={{ marginLeft: "auto" }}>{t("viewSuggestions")}</a>
                 </div>
                 {communicationSummary.open.length === 0 ? (
                   <p className="muted">{t("noOpenSuggestions")}</p>
