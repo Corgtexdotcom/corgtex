@@ -2,7 +2,9 @@ import { readFile } from "node:fs/promises";
 import { describe, expect, it, vi } from "vitest";
 
 import {
+  activateMobileAskTab,
   activateMobileMode,
+  activateMobileWorkspaceMode,
   isWorkspaceUrl,
   labelConsoleEntry,
   submitLoginForm,
@@ -110,7 +112,7 @@ describe("client readiness mobile mode handling", () => {
       expected,
       page: {
         locator: vi.fn((selector) => ({
-          first: vi.fn(() => (selector === ".mobile-mode-switch button" ? button : expected)),
+          first: vi.fn(() => (selector.endsWith("button") ? button : expected)),
         })),
         screenshot: vi.fn(async () => null),
         url: vi.fn(() => "http://localhost/workspaces/workspace-1"),
@@ -159,6 +161,63 @@ describe("client readiness mobile mode handling", () => {
     }]);
     expect(page.screenshot).toHaveBeenCalledWith(expect.objectContaining({
       path: expect.stringContaining("mobile-shell-iphone-modern-ai-missing.png"),
+    }));
+  });
+
+  it("returns to workspace mode before checking the bottom navigation", async () => {
+    const findings = [];
+    const { button, page } = mobileModePage({ visibleAfterClicks: 1 });
+
+    await expect(activateMobileWorkspaceMode(page, {
+      label: "mobile-shell-pixel-workspace-mode",
+      findings,
+      timeoutMs: 3,
+      retryDelayMs: 1,
+    })).resolves.toBe(true);
+
+    expect(page.locator).toHaveBeenCalledWith(".mobile-mode-switch button", { hasText: /Workspace|Espacio/ });
+    expect(page.locator).toHaveBeenCalledWith(".mobile-bottom-nav");
+    expect(button.click).toHaveBeenCalledTimes(1);
+    expect(findings).toEqual([]);
+  });
+
+  it("activates the Ask tab before checking mobile chat controls", async () => {
+    const findings = [];
+    const { button, page } = mobileModePage({ visibleAfterClicks: 1 });
+
+    await expect(activateMobileAskTab(page, {
+      label: "mobile-shell-pixel-ai-ask",
+      findings,
+      timeoutMs: 3,
+      retryDelayMs: 1,
+    })).resolves.toBe(true);
+
+    expect(page.locator).toHaveBeenCalledWith(".mobile-ai-tabs button", { hasText: /Ask|Preguntar/ });
+    expect(page.locator).toHaveBeenCalledWith(".mobile-ai-pane-ask .chat-input");
+    expect(button.click).toHaveBeenCalledTimes(1);
+    expect(findings).toEqual([]);
+  });
+
+  it("records a finding when the Ask tab does not reveal chat controls", async () => {
+    const findings = [];
+    const { button, page } = mobileModePage({ visibleAfterClicks: 10 });
+
+    await expect(activateMobileAskTab(page, {
+      label: "mobile-shell-pixel-ai-ask",
+      findings,
+      timeoutMs: 3,
+      retryDelayMs: 1,
+    })).resolves.toBe(false);
+
+    expect(button.click).toHaveBeenCalledTimes(3);
+    expect(findings).toEqual([{
+      name: "mobile-shell-pixel-ai-ask",
+      route: "http://localhost/workspaces/workspace-1",
+      status: "mode-switch-timeout",
+      selector: ".mobile-ai-pane-ask .chat-input",
+    }]);
+    expect(page.screenshot).toHaveBeenCalledWith(expect.objectContaining({
+      path: expect.stringContaining("mobile-shell-pixel-ai-ask-missing.png"),
     }));
   });
 });
