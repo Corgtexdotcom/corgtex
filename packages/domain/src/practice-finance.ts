@@ -1,4 +1,4 @@
-import type { MemberRole, PracticeProject, PracticeProjectStatus } from "@prisma/client";
+import { CrmDealStage, type MemberRole, type PracticeProject, type PracticeProjectStatus } from "@prisma/client";
 import { prisma } from "@corgtex/shared";
 import type { AppActor } from "@corgtex/shared";
 import { requireWorkspaceMembership } from "./auth";
@@ -186,6 +186,34 @@ export type ListPracticeProjectsOptions = {
   cursor?: string | null;
 };
 
+export type CrmAccountPracticeFinanceProject = PracticeProject & {
+  crmDeal: {
+    id: string;
+    title: string;
+    stage: CrmDealStage;
+    valueCents: number | null;
+    currency: string;
+  } | null;
+};
+
+export type CrmAccountPracticeFinance = {
+  summary: PracticeFinanceSummary;
+  projects: CrmAccountPracticeFinanceProject[];
+};
+
+export type CreatePracticeProjectFromWonDealInput = {
+  dealId: string;
+  code?: string | null;
+  name?: string | null;
+  clientName?: string | null;
+  poValueCents?: number | null;
+  serviceBudgetCents?: number;
+  expenseBudgetCents?: number;
+  weeklyBurnCents?: number;
+  targetMarginBps?: number | null;
+  currentMarginBps?: number | null;
+};
+
 const DEFAULT_PRACTICE_PROJECT_TAKE = 100;
 const MAX_PRACTICE_PROJECT_TAKE = 200;
 
@@ -212,6 +240,23 @@ function normalizeCursor(value: string | null | undefined): string | null {
   return cursor || null;
 }
 
+function normalizeProjectCode(value: string) {
+  const normalized = value
+    .trim()
+    .toUpperCase()
+    .replace(/[^A-Z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 80);
+  invariant(normalized.length > 0, 400, "INVALID_INPUT", "Project code is required.");
+  return normalized;
+}
+
+function defaultProjectCode(deal: { id: string; title: string; account?: { slug: string } | null }) {
+  const base = deal.account?.slug || deal.title;
+  const normalizedBase = normalizeProjectCode(base).slice(0, 48).replace(/-+$/g, "") || "CRM";
+  return `${normalizedBase}-${deal.id.slice(0, 8).toUpperCase()}`;
+}
+
 export async function listPracticeProjects(
   actor: AppActor,
   workspaceId: string,
@@ -236,6 +281,42 @@ export async function getPracticeFinanceDashboard(
   return {
     summary: summarizePracticeFinance(projects),
     attention: collectAttention(projects),
+    projects,
+  };
+}
+
+export async function getCrmAccountPracticeFinance(
+  actor: AppActor,
+  params: { workspaceId: string; accountId: string },
+): Promise<CrmAccountPracticeFinance> {
+  await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
+  const account = await prisma.crmAccount.findUnique({
+    where: { id: params.accountId },
+    select: { id: true, workspaceId: true, archivedAt: true },
+  });
+  invariant(account && account.workspaceId === params.workspaceId && !account.archivedAt, 404, "NOT_FOUND", "Account not found.");
+
+  const projects = await prisma.practiceProject.findMany({
+    where: {
+      workspaceId: params.workspaceId,
+      crmAccountId: params.accountId,
+    },
+    include: {
+      crmDeal: {
+        select: {
+          id: true,
+          title: true,
+          stage: true,
+          valueCents: true,
+          currency: true,
+        },
+      },
+    },
+    orderBy: [{ status: "asc" }, { code: "asc" }, { id: "asc" }],
+  });
+
+  return {
+    summary: summarizePracticeFinance(projects),
     projects,
   };
 }
@@ -269,6 +350,58 @@ export async function createPracticeProject(
       targetMarginBps: normalizeBps(input.targetMarginBps, "Target margin"),
       currentMarginBps: normalizeBps(input.currentMarginBps, "Current margin"),
       sourceSatelliteId: input.sourceSatelliteId?.trim() || null,
+    },
+  });
+}
+
+export async function createPracticeProjectFromWonDeal(
+  actor: AppActor,
+  workspaceId: string,
+  input: CreatePracticeProjectFromWonDealInput,
+): Promise<PracticeProject> {
+  await requireWorkspaceMembership({ actor, workspaceId, allowedRoles: PRACTICE_FINANCE_MANAGE_ROLES });
+
+  const deal = await prisma.crmDeal.findUnique({
+    where: { id: input.dealId },
+    include: {
+      account: { select: { id: true, workspaceId: true, name: true, slug: true } },
+      contact: { select: { id: true, workspaceId: true, email: true, company: true } },
+    },
+  });
+  invariant(deal && deal.workspaceId === workspaceId && !deal.archivedAt, 404, "NOT_FOUND", "Deal not found.");
+  invariant(deal.stage === CrmDealStage.CLOSED_WON, 400, "INVALID_STATE", "Only closed-won deals can create finance projects.");
+  invariant(!deal.account || deal.account.workspaceId === workspaceId, 400, "INVALID_STATE", "Deal account belongs to another workspace.");
+  invariant(deal.contact.workspaceId === workspaceId, 400, "INVALID_STATE", "Deal contact belongs to another workspace.");
+
+  const existing = await prisma.practiceProject.findUnique({
+    where: { crmDealId: deal.id },
+  });
+  if (existing) {
+    invariant(existing.workspaceId === workspaceId, 409, "CONFLICT", "Deal is already linked to a finance project in another workspace.");
+    return existing;
+  }
+
+  const name = input.name?.trim() || deal.title;
+  const clientName = input.clientName?.trim() || deal.account?.name || deal.contact.company || deal.contact.email;
+  const poValueCents = input.poValueCents ?? deal.valueCents ?? 0;
+
+  return prisma.practiceProject.create({
+    data: {
+      workspaceId,
+      crmAccountId: deal.account?.id ?? null,
+      crmDealId: deal.id,
+      code: normalizeProjectCode(input.code || defaultProjectCode(deal)),
+      name,
+      clientName,
+      status: "ACTIVE",
+      poValueCents: normalizeCents(poValueCents, "PO value"),
+      serviceBudgetCents: normalizeCents(input.serviceBudgetCents, "Service budget"),
+      expenseBudgetCents: normalizeCents(input.expenseBudgetCents, "Expense budget"),
+      usedCents: 0,
+      weeklyBurnCents: normalizeCents(input.weeklyBurnCents, "Weekly burn"),
+      targetMarginBps: normalizeBps(input.targetMarginBps, "Target margin"),
+      currentMarginBps: normalizeBps(input.currentMarginBps, "Current margin"),
+      sourceSatelliteId: null,
     },
   });
 }

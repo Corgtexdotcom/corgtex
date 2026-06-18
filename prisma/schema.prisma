@@ -1916,6 +1916,8 @@ enum PracticeProjectStatus {
 model PracticeProject {
   id                 String                @id @default(uuid())
   workspaceId        String
+  crmAccountId       String?
+  crmDealId          String?               @unique
   code               String
   name               String
   clientName         String
@@ -1931,11 +1933,14 @@ model PracticeProject {
   createdAt          DateTime              @default(now())
   updatedAt          DateTime              @updatedAt
 
-  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  workspace  Workspace   @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  crmAccount CrmAccount? @relation(fields: [crmAccountId], references: [id], onDelete: SetNull)
+  crmDeal    CrmDeal?    @relation(fields: [crmDealId], references: [id], onDelete: SetNull)
 
   @@unique([workspaceId, code])
   @@unique([workspaceId, sourceSatelliteId])
   @@index([workspaceId, status])
+  @@index([workspaceId, crmAccountId])
 }
 
 model LedgerAccount {
@@ -3550,6 +3555,7 @@ model CrmAccount {
   communicationSuggestions CrmCommunicationSuggestion[]
   crmConversations         CrmConversation[]
   prospectWorkspaces       CrmProspectWorkspace[]
+  practiceProjects         PracticeProject[]
 
   @@unique([workspaceId, slug])
   @@index([workspaceId, relationshipType, lifecycleStage])
@@ -3614,6 +3620,7 @@ model CrmDeal {
   communicationSuggestions CrmCommunicationSuggestion[]
   crmConversations         CrmConversation[]
   stageTransitions         CrmDealStageTransition[]
+  practiceProject          PracticeProject?
 
   @@index([workspaceId, stage])
   @@index([accountId])
