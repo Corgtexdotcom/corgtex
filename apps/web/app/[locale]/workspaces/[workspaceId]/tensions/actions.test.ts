@@ -19,6 +19,7 @@ const publishTension = vi.fn();
 const requirePageActor = vi.fn(async () => actor);
 const resolveDeliberationEntry = vi.fn();
 const returnTensionToDraft = vi.fn();
+const updateDeliberationEntry = vi.fn();
 const updateTension = vi.fn();
 const upvoteTension = vi.fn();
 
@@ -38,6 +39,7 @@ vi.mock("@corgtex/domain", () => ({
   publishTension,
   resolveDeliberationEntry,
   returnTensionToDraft,
+  updateDeliberationEntry,
   updateTension,
   upvoteTension,
 }));

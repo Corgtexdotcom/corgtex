@@ -184,8 +184,9 @@ export default async function TensionsPage({
     const authorName = tension.author.displayName || tension.author.email || t("authorUnknown");
     const raisedByName = tension.raisedByMember ? memberName(tension.raisedByMember) : null;
     const canManage = canManageTension(tension);
-    const canSubmittedAuthorEdit = actor.kind === "user" && tension.authorUserId === actor.user.id;
-    const canEditContent = tension.status === "DRAFT" ? canManage : tension.status === "OPEN" && canSubmittedAuthorEdit;
+    const canSubmittedEditorEdit = actor.kind === "user"
+      && (tension.authorUserId === actor.user.id || tension.assigneeMemberId === membership?.id);
+    const canEditContent = tension.status === "DRAFT" ? canManage : tension.status === "OPEN" && canSubmittedEditorEdit;
     const canDraftProposal = !tension.proposal && (canManage || !tension.isPrivate);
     const openedDate = tension.publishedAt ? new Date(tension.publishedAt).toLocaleDateString() : null;
     const closedDate = tension.resolvedAt ? new Date(tension.resolvedAt).toLocaleDateString() : null;

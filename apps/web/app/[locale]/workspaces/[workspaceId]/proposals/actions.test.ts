@@ -17,16 +17,15 @@ const enforceDemoGuard = vi.fn();
 const executeAdviceProcessDecision = vi.fn();
 const initiateAdviceProcess = vi.fn();
 const postDeliberationEntry = vi.fn();
-const postReaction = vi.fn();
 const publishProposal = vi.fn();
 const recordAdvice = vi.fn();
 const reopenProposal = vi.fn();
 const requirePageActor = vi.fn(async () => actor);
 const resolveDeliberationEntry = vi.fn();
 const resolveProposal = vi.fn();
-const resolveReaction = vi.fn();
 const returnProposalToDraft = vi.fn();
 const submitProposal = vi.fn();
+const updateDeliberationEntry = vi.fn();
 const updateProposal = vi.fn();
 const withdrawAdviceProcess = vi.fn();
 
@@ -45,15 +44,14 @@ vi.mock("@corgtex/domain", () => ({
   executeAdviceProcessDecision,
   initiateAdviceProcess,
   postDeliberationEntry,
-  postReaction,
   publishProposal,
   recordAdvice,
   reopenProposal,
   resolveDeliberationEntry,
   resolveProposal,
-  resolveReaction,
   returnProposalToDraft,
   submitProposal,
+  updateDeliberationEntry,
   updateProposal,
   withdrawAdviceProcess,
 }));

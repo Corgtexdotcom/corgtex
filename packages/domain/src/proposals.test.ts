@@ -44,10 +44,6 @@ vi.mock("@corgtex/shared", () => ({
       count: vi.fn(),
       updateMany: vi.fn(),
     },
-    proposalReaction: {
-      count: vi.fn(),
-      updateMany: vi.fn(),
-    },
     approvalFlow: {
       findUnique: vi.fn(),
       update: vi.fn(),
@@ -1114,7 +1110,6 @@ describe("submitProposal event payload", () => {
     vi.mocked((prisma as any).objection.deleteMany).mockResolvedValue({ count: 1 });
     vi.mocked((prisma as any).approvalFlow.update).mockResolvedValue({});
     vi.mocked((prisma as any).deliberationEntry.updateMany).mockResolvedValue({ count: 1 });
-    vi.mocked((prisma as any).proposalReaction.updateMany).mockResolvedValue({ count: 1 });
     vi.mocked((prisma.proposal as any).update).mockResolvedValue({
       id: "p-1",
       status: "DRAFT",
@@ -1181,7 +1176,6 @@ describe("submitProposal event payload", () => {
     vi.mocked((prisma as any).approvalFlow.update).mockResolvedValue({});
     vi.mocked((prisma as any).policyCorpus.deleteMany).mockResolvedValue({ count: 1 });
     vi.mocked((prisma as any).deliberationEntry.updateMany).mockResolvedValue({ count: 1 });
-    vi.mocked((prisma as any).proposalReaction.updateMany).mockResolvedValue({ count: 1 });
     vi.mocked((prisma.proposal as any).update).mockResolvedValue({
       id: "p-1",
       status: "DRAFT",

@@ -40,6 +40,23 @@ export function requireSubmittedWorkItemAuthor(actor: AppActor, effectiveAuthorU
   throw new AppError(403, "FORBIDDEN", "Only the author can edit submitted work items.");
 }
 
+export function requireSubmittedWorkItemEditor(
+  actor: AppActor,
+  membership: MembershipSummary | null | undefined,
+  record: {
+    authorUserId?: string | null;
+    assigneeMemberId?: string | null;
+  },
+) {
+  if (actor.kind === "user" && record.authorUserId && actor.user.id === record.authorUserId) {
+    return;
+  }
+  if (actor.kind === "user" && membership?.isActive && record.assigneeMemberId && membership.id === record.assigneeMemberId) {
+    return;
+  }
+  throw new AppError(403, "FORBIDDEN", "Only the author or assigned member can edit submitted work items.");
+}
+
 export async function resolveWorkspaceMemberUserId(
   tx: Prisma.TransactionClient,
   workspaceId: string,

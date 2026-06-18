@@ -8,7 +8,7 @@ import { DeliberationThread } from "@/lib/components/DeliberationThread";
 import { DeliberationComposer } from "@/lib/components/DeliberationComposer";
 import { getDeliberationTargets } from "@/lib/deliberation-targets";
 import { canOpenPrivateDraft } from "@/lib/governance-open-guards";
-import { postDeliberationEntryAction, resolveDeliberationEntryAction, resolveProposalAction, returnProposalToDraftAction, submitProposalAction, updateProposalAction } from "../actions";
+import { postDeliberationEntryAction, resolveDeliberationEntryAction, resolveProposalAction, returnProposalToDraftAction, submitProposalAction, updateDeliberationEntryAction, updateProposalAction } from "../actions";
 import { ProposalDraftFields } from "../ProposalDraftFields";
 import { getTranslations } from "next-intl/server";
 
@@ -62,9 +62,20 @@ export default async function ProposalDetailPage({
   })();
 
   const isAuthor = proposal.authorUserId === (actor.kind === "user" ? actor.user.id : "");
+  const isAdmin = actor.kind === "agent" || membership?.role === "ADMIN";
+  const actorUserId = actor.kind === "user" ? actor.user.id : null;
+  const actorMemberId = deliberationTargets.actorMemberId;
+  const actorCircleIds = new Set(deliberationTargets.actorCircleIds);
   const canManage = actor.kind === "agent" || membership?.role === "ADMIN" || isAuthor;
   const canEditContent = proposal.status === "DRAFT" ? canManage : proposal.status === "OPEN" && isAuthor;
   const canResolve = actor.kind === "agent" || Boolean(membership);
+  const canManageEntry = (entry: (typeof deliberationEntries)[number]) => Boolean(
+    isAdmin
+      || (actorUserId && entry.authorUserId === actorUserId)
+      || isAuthor
+      || (actorMemberId && entry.targetMemberId === actorMemberId)
+      || (entry.targetCircleId && actorCircleIds.has(entry.targetCircleId)),
+  );
 
   return (
     <>
@@ -150,9 +161,12 @@ export default async function ProposalDetailPage({
                 : e.targetMember
                   ? t("targetPerson", { name: e.targetMember.user.displayName || e.targetMember.user.email })
                   : null,
+              canEdit: canManageEntry(e),
+              canResolve: canManageEntry(e),
             }))}
             canResolve={isAuthor || actor.kind === "agent"}
             resolveAction={resolveDeliberationEntryAction}
+            updateAction={updateDeliberationEntryAction}
             hiddenFields={{ workspaceId, proposalId }}
           />
 

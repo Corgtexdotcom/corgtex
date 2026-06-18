@@ -1,68 +1,217 @@
-import { describe, it, expect, beforeEach } from "vitest";
-import { prisma } from "@corgtex/shared";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { AppActor } from "@corgtex/shared";
 import {
-  postDeliberationEntry,
-  resolveDeliberationEntry,
   listDeliberationEntries,
   listDeliberationEntriesForParents,
+  postDeliberationEntry,
+  resolveDeliberationEntry,
+  updateDeliberationEntry,
 } from "./deliberation";
 
+const { prismaMock, state } = vi.hoisted(() => {
+  type UserRecord = { id: string; displayName?: string | null; email?: string | null };
+  type MemberRecord = { id: string; workspaceId: string; userId: string; role: string; isActive: boolean };
+  type EntryRecord = {
+    id: string;
+    workspaceId: string;
+    parentType: string;
+    parentId: string;
+    parentVersion: number | null;
+    authorUserId: string;
+    entryType: string;
+    bodyMd: string | null;
+    targetMemberId: string | null;
+    targetCircleId: string | null;
+    resolvedAt: Date | null;
+    resolvedNote: string | null;
+    createdAt: Date;
+  };
+
+  const store = {
+    users: new Map<string, UserRecord>(),
+    members: new Map<string, MemberRecord>(),
+    proposals: new Map<string, { id: string; workspaceId: string; authorUserId: string; version: number }>(),
+    actions: new Map<string, { id: string; workspaceId: string; authorUserId: string; assigneeMemberId: string | null; version: number }>(),
+    entries: [] as EntryRecord[],
+    auditLogs: [] as any[],
+    events: [] as any[],
+    nextEntry: 1,
+  };
+
+  function includeEntry(entry: EntryRecord) {
+    const author = store.users.get(entry.authorUserId) ?? null;
+    const targetMember = entry.targetMemberId ? store.members.get(entry.targetMemberId) : null;
+    const targetUser = targetMember ? store.users.get(targetMember.userId) : null;
+    return {
+      ...entry,
+      author,
+      targetCircle: null,
+      targetMember: targetMember && targetUser
+        ? { ...targetMember, user: targetUser }
+        : null,
+    };
+  }
+
+  function matchesEntryWhere(entry: EntryRecord, where: any) {
+    if (where.workspaceId && entry.workspaceId !== where.workspaceId) return false;
+    if (where.parentType && entry.parentType !== where.parentType) return false;
+    if (where.parentId) {
+      if (typeof where.parentId === "string" && entry.parentId !== where.parentId) return false;
+      if (where.parentId.in && !where.parentId.in.includes(entry.parentId)) return false;
+    }
+    return true;
+  }
+
+  const tx = {
+    member: {
+      findUnique: vi.fn(async ({ where }: any) => store.members.get(where.id) ?? null),
+      findFirst: vi.fn(async ({ where }: any) => {
+        return Array.from(store.members.values()).find((member) => (
+          (!where.id || member.id === where.id)
+            && (!where.workspaceId || member.workspaceId === where.workspaceId)
+            && (!where.userId || member.userId === where.userId)
+            && (where.isActive === undefined || member.isActive === where.isActive)
+        )) ?? null;
+      }),
+    },
+    circle: {
+      findUnique: vi.fn(async () => null),
+    },
+    roleAssignment: {
+      findFirst: vi.fn(async () => null),
+    },
+    proposal: {
+      findFirst: vi.fn(async ({ where, select }: any) => {
+        const proposal = Array.from(store.proposals.values()).find((item) => (
+          item.id === where.id && item.workspaceId === where.workspaceId
+        )) ?? null;
+        if (!proposal || !select) return proposal;
+        return Object.fromEntries(Object.keys(select).map((field) => [field, (proposal as any)[field]]));
+      }),
+      findUnique: vi.fn(async ({ where, select }: any) => {
+        const proposal = store.proposals.get(where.id) ?? null;
+        if (!proposal || !select) return proposal;
+        return Object.fromEntries(Object.keys(select).map((field) => [field, (proposal as any)[field]]));
+      }),
+    },
+    action: {
+      findFirst: vi.fn(async ({ where, select }: any) => {
+        const action = Array.from(store.actions.values()).find((item) => (
+          item.id === where.id && item.workspaceId === where.workspaceId
+        )) ?? null;
+        if (!action || !select) return action;
+        return Object.fromEntries(Object.keys(select).map((field) => [field, (action as any)[field]]));
+      }),
+      findUnique: vi.fn(async ({ where, select }: any) => {
+        const action = store.actions.get(where.id) ?? null;
+        if (!action || !select) return action;
+        return Object.fromEntries(Object.keys(select).map((field) => [field, (action as any)[field]]));
+      }),
+    },
+    spendRequest: {
+      findUnique: vi.fn(async () => null),
+    },
+    meeting: {
+      findUnique: vi.fn(async () => null),
+    },
+    brainArticle: {
+      findUnique: vi.fn(async () => null),
+    },
+    deliberationEntry: {
+      create: vi.fn(async ({ data }: any) => {
+        const entry = {
+          id: `entry-${store.nextEntry++}`,
+          resolvedAt: null,
+          resolvedNote: null,
+          createdAt: new Date(`2026-06-17T12:00:${String(store.nextEntry).padStart(2, "0")}.000Z`),
+          targetMemberId: null,
+          targetCircleId: null,
+          ...data,
+        } as EntryRecord;
+        store.entries.push(entry);
+        return entry;
+      }),
+      findUnique: vi.fn(async ({ where }: any) => store.entries.find((entry) => entry.id === where.id) ?? null),
+      findMany: vi.fn(async ({ where }: any) => store.entries.filter((entry) => matchesEntryWhere(entry, where)).map(includeEntry)),
+      update: vi.fn(async ({ where, data }: any) => {
+        const index = store.entries.findIndex((item) => item.id === where.id);
+        const entry = store.entries[index];
+        if (!entry) return null;
+        const updated = { ...entry, ...data };
+        store.entries[index] = updated;
+        return updated;
+      }),
+    },
+    auditLog: {
+      create: vi.fn(async ({ data }: any) => {
+        store.auditLogs.push(data);
+        return data;
+      }),
+      findFirst: vi.fn(async ({ where }: any) => store.auditLogs.find((log) => (
+        (!where.workspaceId || log.workspaceId === where.workspaceId)
+          && (!where.action || log.action === where.action)
+          && (!where.entityId || log.entityId === where.entityId)
+      )) ?? null),
+    },
+    event: {
+      createMany: vi.fn(async ({ data }: any) => {
+        store.events.push(...data);
+        return { count: data.length };
+      }),
+    },
+  };
+
+  return {
+    state: store,
+    prismaMock: {
+      ...tx,
+      $transaction: vi.fn(async (callback: (client: typeof tx) => Promise<unknown>) => callback(tx)),
+    },
+  };
+});
+
+vi.mock("@corgtex/shared", () => ({
+  prisma: prismaMock,
+}));
+
+vi.mock("./auth", () => ({
+  requireWorkspaceMembership: vi.fn(async ({ actor, workspaceId }: { actor: AppActor; workspaceId: string }) => {
+    if (actor.kind !== "user") return null;
+    return Array.from(state.members.values()).find((member) => (
+      member.workspaceId === workspaceId && member.userId === actor.user.id && member.isActive
+    )) ?? null;
+  }),
+  actorUserIdForWorkspace: vi.fn(async (actor: AppActor) => actor.kind === "user" ? actor.user.id : "agent-user"),
+}));
+
 describe("deliberation", () => {
-  let workspaceId: string;
-  let adminActor: AppActor;
-  let adminUserId: string;
-  let memberActor: AppActor;
-  let memberId: string;
-  let proposalId: string;
-  let actionId: string;
+  const workspaceId = "ws-1";
+  const proposalId = "proposal-1";
+  const actionId = "action-1";
+  const adminActor = { kind: "user", user: { id: "admin-user", email: "admin@example.com", displayName: "Admin" } } as AppActor;
+  const memberActor = { kind: "user", user: { id: "member-user", email: "member@example.com", displayName: "Member" } } as AppActor;
+  const otherActor = { kind: "user", user: { id: "other-user", email: "other@example.com", displayName: "Other" } } as AppActor;
+  const memberId = "member-1";
 
-  beforeEach(async () => {
-    const ws = await prisma.workspace.create({
-      data: { name: "Test WS", slug: `test-${Date.now()}-${Math.random()}` }
-    });
-    workspaceId = ws.id;
+  beforeEach(() => {
+    vi.clearAllMocks();
+    state.users.clear();
+    state.members.clear();
+    state.proposals.clear();
+    state.actions.clear();
+    state.entries.length = 0;
+    state.auditLogs.length = 0;
+    state.events.length = 0;
+    state.nextEntry = 1;
 
-    const adminUser = await prisma.user.create({
-      data: { email: `admin-${Date.now()}-${Math.random()}@test.com`, passwordHash: "x", displayName: "Admin" }
-    });
-    adminUserId = adminUser.id;
-    await prisma.member.create({
-      data: { workspaceId, userId: adminUser.id, role: "ADMIN" }
-    });
-    adminActor = { kind: "user", user: adminUser };
-
-    const memberUser = await prisma.user.create({
-      data: { email: `member-${Date.now()}-${Math.random()}@test.com`, passwordHash: "x", displayName: "Member" }
-    });
-    const member = await prisma.member.create({
-      data: { workspaceId, userId: memberUser.id, role: "CONTRIBUTOR" }
-    });
-    memberId = member.id;
-    memberActor = { kind: "user", user: memberUser };
-
-    const proposal = await prisma.proposal.create({
-      data: {
-        workspaceId,
-        authorUserId: adminUser.id,
-        title: "Test Proposal",
-        bodyMd: "body"
-      }
-    });
-    proposalId = proposal.id;
-
-    const action = await prisma.action.create({
-      data: {
-        workspaceId,
-        authorUserId: adminUser.id,
-        title: "Test Action",
-        bodyMd: "body",
-        status: "OPEN",
-        isPrivate: false,
-        publishedAt: new Date(),
-      },
-    });
-    actionId = action.id;
+    state.users.set("admin-user", { id: "admin-user", displayName: "Admin", email: "admin@example.com" });
+    state.users.set("member-user", { id: "member-user", displayName: "Member", email: "member@example.com" });
+    state.users.set("other-user", { id: "other-user", displayName: "Other", email: "other@example.com" });
+    state.members.set("admin-member", { id: "admin-member", workspaceId, userId: "admin-user", role: "ADMIN", isActive: true });
+    state.members.set(memberId, { id: memberId, workspaceId, userId: "member-user", role: "CONTRIBUTOR", isActive: true });
+    state.members.set("other-member", { id: "other-member", workspaceId, userId: "other-user", role: "CONTRIBUTOR", isActive: true });
+    state.proposals.set(proposalId, { id: proposalId, workspaceId, authorUserId: "admin-user", version: 1 });
+    state.actions.set(actionId, { id: actionId, workspaceId, authorUserId: "admin-user", assigneeMemberId: memberId, version: 1 });
   });
 
   it("posts an entry and lists it", async () => {
@@ -71,7 +220,7 @@ describe("deliberation", () => {
       parentType: "PROPOSAL",
       parentId: proposalId,
       entryType: "REACTION",
-      bodyMd: "What is this?"
+      bodyMd: "What is this?",
     });
 
     expect(entry.entryType).toBe("REACTION");
@@ -83,7 +232,7 @@ describe("deliberation", () => {
       parentType: "PROPOSAL",
       parentId: proposalId,
     });
-    expect(list.length).toBe(1);
+    expect(list).toHaveLength(1);
     expect(list[0].id).toBe(entry.id);
     expect(list[0].author.displayName).toBe("Member");
     expect(list[0].parentVersion).toBe(1);
@@ -95,7 +244,7 @@ describe("deliberation", () => {
       parentType: "PROPOSAL",
       parentId: proposalId,
       entryType: "OBJECTION",
-      bodyMd: ""
+      bodyMd: "",
     })).rejects.toThrow(/Deliberation entries require a non-empty bodyMd/);
   });
 
@@ -105,65 +254,56 @@ describe("deliberation", () => {
       parentType: "PROPOSAL",
       parentId: proposalId,
       entryType: "REACTION",
-      bodyMd: "First reaction"
+      bodyMd: "First reaction",
     });
-
     const entry2 = await postDeliberationEntry(memberActor, {
       workspaceId,
       parentType: "PROPOSAL",
       parentId: proposalId,
       entryType: "REACTION",
-      bodyMd: "Second reaction"
+      bodyMd: "Second reaction",
     });
 
     expect(entry1.id).not.toBe(entry2.id);
-
-    const list = await listDeliberationEntries(adminActor, {
+    await expect(listDeliberationEntries(adminActor, {
       workspaceId,
       parentType: "PROPOSAL",
       parentId: proposalId,
-    });
-    expect(list.length).toBe(2);
+    })).resolves.toHaveLength(2);
   });
 
   it("lists deliberation entries for multiple parents in one grouped read", async () => {
-    const secondProposal = await prisma.proposal.create({
-      data: {
-        workspaceId,
-        authorUserId: adminUserId,
-        title: "Second Proposal",
-        bodyMd: "body",
-      }
-    });
+    state.proposals.set("proposal-2", { id: "proposal-2", workspaceId, authorUserId: "admin-user", version: 1 });
     const firstEntry = await postDeliberationEntry(memberActor, {
       workspaceId,
       parentType: "PROPOSAL",
       parentId: proposalId,
       entryType: "REACTION",
-      bodyMd: "First proposal reaction"
+      bodyMd: "First proposal reaction",
     });
     const secondEntry = await postDeliberationEntry(memberActor, {
       workspaceId,
       parentType: "PROPOSAL",
-      parentId: secondProposal.id,
+      parentId: "proposal-2",
       entryType: "OBJECTION",
-      bodyMd: "Second proposal objection"
+      bodyMd: "Second proposal objection",
     });
     const laterFirstEntry = await postDeliberationEntry(adminActor, {
       workspaceId,
       parentType: "PROPOSAL",
       parentId: proposalId,
       entryType: "REACTION",
-      bodyMd: "Later first proposal reaction"
+      bodyMd: "Later first proposal reaction",
     });
+
     const entriesByParent = await listDeliberationEntriesForParents(adminActor, {
       workspaceId,
       parentType: "PROPOSAL",
-      parentIds: [proposalId, secondProposal.id, "missing-parent"],
+      parentIds: [proposalId, "proposal-2", "missing-parent"],
     });
 
     expect(entriesByParent.get(proposalId)?.map((entry) => entry.id)).toEqual([firstEntry.id, laterFirstEntry.id]);
-    expect(entriesByParent.get(secondProposal.id)?.map((entry) => entry.id)).toEqual([secondEntry.id]);
+    expect(entriesByParent.get("proposal-2")?.map((entry) => entry.id)).toEqual([secondEntry.id]);
     expect(entriesByParent.get("missing-parent")).toEqual([]);
     expect(entriesByParent.get(proposalId)?.[0].author.displayName).toBe("Member");
   });
@@ -185,7 +325,7 @@ describe("deliberation", () => {
       parentId: proposalId,
       entryType: "REACTION",
       bodyMd: "Please review this.",
-      targetMemberId: memberId
+      targetMemberId: memberId,
     });
     expect(entry.targetMemberId).toBe(memberId);
   });
@@ -210,17 +350,104 @@ describe("deliberation", () => {
       parentType: "PROPOSAL",
       parentId: proposalId,
       entryType: "OBJECTION",
-      bodyMd: "I am concerned."
+      bodyMd: "I am concerned.",
     });
 
     const resolved = await resolveDeliberationEntry(adminActor, {
       workspaceId,
       entryId: entry.id,
-      resolvedNote: "Fixed it"
+      resolvedNote: "Fixed it",
     });
 
     expect(resolved.resolvedAt).toBeTruthy();
     expect(resolved.resolvedNote).toBe("Fixed it");
+  });
+
+  it("allows the targeted member to edit an unresolved entry and audits the previous body", async () => {
+    const entry = await postDeliberationEntry(adminActor, {
+      workspaceId,
+      parentType: "PROPOSAL",
+      parentId: proposalId,
+      entryType: "REACTION",
+      bodyMd: "Please review.",
+      targetMemberId: memberId,
+    });
+
+    const updated = await updateDeliberationEntry(memberActor, {
+      workspaceId,
+      entryId: entry.id,
+      entryType: "OBJECTION",
+      bodyMd: "This needs a tighter rollout plan.",
+    });
+
+    expect(updated.entryType).toBe("OBJECTION");
+    expect(updated.bodyMd).toBe("This needs a tighter rollout plan.");
+
+    const audit = state.auditLogs.find((log) => log.action === "deliberation.entry_updated" && log.entityId === entry.id);
+    expect(audit?.meta).toMatchObject({
+      parentType: "PROPOSAL",
+      parentId: proposalId,
+      changedFields: ["entryType", "bodyMd"],
+      previousState: {
+        entryType: "REACTION",
+        bodyMd: "Please review.",
+      },
+    });
+  });
+
+  it("allows the assigned parent action member to edit an unresolved action entry", async () => {
+    const entry = await postDeliberationEntry(adminActor, {
+      workspaceId,
+      parentType: "ACTION",
+      parentId: actionId,
+      entryType: "REACTION",
+      bodyMd: "Initial action context.",
+    });
+
+    const updated = await updateDeliberationEntry(memberActor, {
+      workspaceId,
+      entryId: entry.id,
+      bodyMd: "Owner updated action context.",
+    });
+
+    expect(updated.bodyMd).toBe("Owner updated action context.");
+  });
+
+  it("prevents unrelated members from editing unresolved entries", async () => {
+    const entry = await postDeliberationEntry(adminActor, {
+      workspaceId,
+      parentType: "PROPOSAL",
+      parentId: proposalId,
+      entryType: "REACTION",
+      bodyMd: "Needs a change.",
+    });
+
+    await expect(updateDeliberationEntry(otherActor, {
+      workspaceId,
+      entryId: entry.id,
+      bodyMd: "Not allowed.",
+    })).rejects.toThrow(/Only the entry author, target, parent owner, assigned member, or a workspace admin can edit/);
+  });
+
+  it("prevents editing resolved entries", async () => {
+    const entry = await postDeliberationEntry(memberActor, {
+      workspaceId,
+      parentType: "PROPOSAL",
+      parentId: proposalId,
+      entryType: "REACTION",
+      bodyMd: "Needs a change.",
+    });
+    await resolveDeliberationEntry(memberActor, {
+      workspaceId,
+      entryId: entry.id,
+      resolvedNote: "Handled.",
+    });
+
+    await expect(updateDeliberationEntry(memberActor, {
+      workspaceId,
+      entryId: entry.id,
+      bodyMd: "Edit after resolve.",
+    })).rejects.toThrow(/Resolved deliberation entries cannot be edited/);
   });
 
   it("prevents resolving by non-admin non-author", async () => {
@@ -229,13 +456,13 @@ describe("deliberation", () => {
       parentType: "PROPOSAL",
       parentId: proposalId,
       entryType: "REACTION",
-      bodyMd: "Needs a change."
+      bodyMd: "Needs a change.",
     });
 
     await expect(resolveDeliberationEntry(memberActor, {
       workspaceId,
       entryId: entry.id,
-      resolvedNote: "Not allowed"
-    })).rejects.toThrow(/Only the entry author, parent author, or a workspace admin can resolve/);
+      resolvedNote: "Not allowed",
+    })).rejects.toThrow(/Only the entry author, target, parent owner, assigned member, or a workspace admin can resolve/);
   });
 });

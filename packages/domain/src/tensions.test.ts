@@ -354,7 +354,63 @@ describe("tensions domain", () => {
     });
   });
 
-  it("rejects open tension edits by non-authors", async () => {
+  it("allows the assigned member to edit an open tension and preserves the previous version", async () => {
+    const { requireWorkspaceMembership } = await import("./auth");
+    vi.mocked(requireWorkspaceMembership).mockResolvedValueOnce({
+      id: "mem-2",
+      workspaceId: "ws-1",
+      userId: "u-2",
+      role: "MEMBER",
+      isActive: true,
+    } as any);
+    prismaMock.tension.findUnique.mockResolvedValueOnce({
+      id: "t-open",
+      workspaceId: "ws-1",
+      authorUserId: "agent-user",
+      assigneeMemberId: "mem-2",
+      title: "Old title",
+      bodyMd: "Old body",
+      status: "OPEN",
+      version: 1,
+      publishedAt: new Date("2026-06-01T00:00:00.000Z"),
+      archivedAt: null,
+      raisedByMemberId: null,
+    });
+    prismaMock.tension.update.mockResolvedValueOnce({
+      id: "t-open",
+      workspaceId: "ws-1",
+      authorUserId: "agent-user",
+      assigneeMemberId: "mem-2",
+      title: "Assigned update",
+      status: "OPEN",
+      version: 2,
+    });
+    const { updateTension } = await import("./tensions");
+
+    await expect(updateTension({ kind: "user", user: { id: "u-2" } } as any, {
+      workspaceId: "ws-1",
+      tensionId: "t-open",
+      title: "Assigned update",
+    })).resolves.toMatchObject({
+      id: "t-open",
+      version: 2,
+    });
+
+    expect(prismaMock.workItemVersion.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        entityType: "Tension",
+        entityId: "t-open",
+        version: 1,
+        changedFields: ["title"],
+      }),
+    }));
+    expect(prismaMock.tension.update).toHaveBeenCalledWith({
+      where: { id: "t-open" },
+      data: { title: "Assigned update", version: 2 },
+    });
+  });
+
+  it("rejects open tension edits by non-authors and non-assignees", async () => {
     prismaMock.tension.findUnique.mockResolvedValueOnce({
       id: "t-open",
       workspaceId: "ws-1",

@@ -953,7 +953,6 @@ model User {
   cycleUpdates                  CycleUpdate[]
   allocationsFrom               Allocation[]                   @relation("AllocFrom")
   allocationsTo                 Allocation[]                   @relation("AllocTo")
-  reactions                     ProposalReaction[]
   objections                    Objection[]
   tensionUpvotes                TensionUpvote[]
   agentCreds                    AgentCredential[]              @relation("AgentCredentialCreator")
@@ -1735,7 +1734,6 @@ model Proposal {
   author        User                @relation("ProposalAuthor", fields: [authorUserId], references: [id], onDelete: Restrict)
   circle        Circle?             @relation(fields: [circleId], references: [id], onDelete: SetNull)
   meeting       Meeting?            @relation(fields: [meetingId], references: [id], onDelete: SetNull)
-  reactions     ProposalReaction[]
   spendLinks    SpendProposalLink[]
   policyCorpus  PolicyCorpus?
   actions       Action[]
@@ -1745,22 +1743,6 @@ model Proposal {
   @@index([workspaceId, status])
   @@index([workspaceId, archivedAt])
   @@index([workspaceId, priority])
-}
-
-model ProposalReaction {
-  id           String    @id @default(uuid())
-  proposalId   String
-  userId       String
-  reaction     String
-  bodyMd       String?   @db.Text
-  resolvedAt   DateTime?
-  resolvedNote String?
-  createdAt    DateTime  @default(now())
-
-  proposal Proposal @relation(fields: [proposalId], references: [id], onDelete: Cascade)
-  user     User     @relation(fields: [userId], references: [id], onDelete: Cascade)
-
-  @@index([proposalId, createdAt])
 }
 
 model DeliberationEntry {

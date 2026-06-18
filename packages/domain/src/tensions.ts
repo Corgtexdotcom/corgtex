@@ -12,7 +12,7 @@ import {
   changedDataFields,
   pickJsonSnapshot,
   recordWorkItemVersion,
-  requireSubmittedWorkItemAuthor,
+  requireSubmittedWorkItemEditor,
   resolveWorkspaceMemberUserId,
 } from "./work-item-versions";
 
@@ -306,7 +306,7 @@ export async function updateTension(actor: AppActor, params: {
         await requireDraftManager({ actor, workspaceId: params.workspaceId, record: tension, resolvedMembership: membership });
       } else {
         invariant(tension.status === "OPEN", 400, "INVALID_STATE", "Only draft or open tensions can be edited.");
-        requireSubmittedWorkItemAuthor(actor, tension.authorUserId);
+        requireSubmittedWorkItemEditor(actor, membership, tension);
       }
     }
     if (params.isPrivate !== undefined) {
