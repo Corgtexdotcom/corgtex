@@ -32,6 +32,7 @@ import {
 import { CommunicationSuggestionCard } from "./CommunicationSuggestionCard";
 import { DealPipelineBoard } from "./DealPipelineBoard";
 import { splitCommunicationSuggestions } from "./communication-suggestions";
+import { sortDashboardDeals, summarizeDashboardAccounts } from "./dashboard-view-model";
 import { splitRelationshipReminders } from "./relationship-reminders";
 import {
   CRM_DEAL_STAGES,
@@ -126,12 +127,9 @@ export default async function LeadsPage({
   }
 
   const activeDeals = deals.filter((deal) => deal.stage !== "CLOSED_WON" && deal.stage !== "CLOSED_LOST");
-  const closedWon = deals.filter((deal) => deal.stage === "CLOSED_WON");
   const pipelineValue = activePipelineValueCents(activeDeals);
   const reminderSummary = splitRelationshipReminders(followUps);
-  const nextFollowUps = reminderSummary.open.slice(0, 1);
   const communicationSummary = splitCommunicationSuggestions(communicationSuggestions);
-  const nextCommunicationSuggestions = communicationSummary.open.slice(0, 1);
   const memberNames = new Map(members.map((member) => [
     member.user.id,
     member.user.displayName || member.user.email,
@@ -162,6 +160,7 @@ export default async function LeadsPage({
   const ownerText = (ownerUserId?: string | null) => ownerUserId ? memberNames.get(ownerUserId) ?? t("pipelineNoOwner") : t("pipelineNoOwner");
 
   const viewLabels = {
+    dashboard: t("tabDashboard"),
     accounts: t("tabAccounts"),
     contacts: t("tabContacts"),
     pipeline: t("tabPipeline"),
@@ -274,6 +273,12 @@ export default async function LeadsPage({
     failedAt: t("suggestionFailedAt"),
     externalExecutionNote: t("suggestionExternalExecutionNote"),
   };
+  const dashboardAccounts = summarizeDashboardAccounts(accounts, deals, recentActivities);
+  const dashboardDeals = sortDashboardDeals(deals);
+  const attentionFollowUps = reminderSummary.overdue.slice(0, 3);
+  const attentionSuggestions = [...communicationSummary.failed, ...communicationSummary.requested].slice(0, 3);
+  const attentionQualifications = pendingQualifications.slice(0, 2);
+  const hasAttention = attentionFollowUps.length > 0 || attentionSuggestions.length > 0 || attentionQualifications.length > 0;
 
   return (
     <>
@@ -285,123 +290,6 @@ export default async function LeadsPage({
       </header>
 
       <section className="ws-section">
-        <div className="ws-stat-row">
-          <div className="ws-stat-card">
-            <strong>{accountResult.total}</strong>
-            <span>{t("statAccounts")}</span>
-          </div>
-          <div className="ws-stat-card">
-            <strong>{contactResult.total}</strong>
-            <span>{t("statTotalContacts")}</span>
-          </div>
-          <div className="ws-stat-card">
-            <strong>{formatCurrency(pipelineValue)}</strong>
-            <span>{t("statPipelineValue")}</span>
-          </div>
-          <div className="ws-stat-card">
-            <strong>{closedWon.length}</strong>
-            <span>{t("statDealsWon")}</span>
-          </div>
-          <div className="ws-stat-card">
-            <strong>{reminderSummary.open.length}</strong>
-            <span>{t("statOpenFollowUps")}</span>
-          </div>
-          <div className="ws-stat-card">
-            <strong>{reminderSummary.overdue.length}</strong>
-            <span>{t("statOverdueFollowUps")}</span>
-          </div>
-          <div className="ws-stat-card">
-            <strong>{communicationSummary.open.length}</strong>
-            <span>{t("statSuggestedCommunications")}</span>
-          </div>
-        </div>
-
-        <div className="item" style={{ padding: 16, marginBottom: 24 }}>
-          <div className="row" style={{ alignItems: "flex-start", gap: 12 }}>
-            <div>
-              <strong>{t("nextFollowUpsTitle")}</strong>
-              <div className="muted" style={{ fontSize: "0.85rem", marginTop: 4 }}>
-                {t("nextFollowUpsMeta", {
-                  overdue: reminderSummary.overdue.length,
-                  upcoming: reminderSummary.upcoming.length,
-                })}
-              </div>
-            </div>
-            <a href="?view=activity" className="link-button small" style={{ marginLeft: "auto" }}>
-              {t("viewActivity")}
-            </a>
-          </div>
-          {nextFollowUps.length === 0 ? (
-            <p className="muted" style={{ marginTop: 12 }}>{t("noOpenFollowUps")}</p>
-          ) : (
-            <div className="stack" style={{ marginTop: 16 }}>
-              {nextFollowUps.map((activity) => (
-                <div key={activity.id} className="row" style={{ alignItems: "flex-start", gap: 12, padding: "10px 0", borderTop: "1px solid var(--line)" }}>
-                  <div style={{ minWidth: 0, flex: 1 }}>
-                    <strong style={{ fontSize: "0.92rem" }}>{activity.title}</strong>
-                    <div className="muted" style={{ fontSize: "0.82rem", marginTop: 4 }}>
-                      {t("followUpDue", { date: dueText(activity.dueAt) })}
-                      {" · "}
-                      {t("pipelineOwner")}: {ownerText(activity.ownerUserId)}
-                    </div>
-                    <div className="row" style={{ justifyContent: "flex-start", gap: 8, marginTop: 6, fontSize: "0.82rem" }}>
-                      {activity.account && <span>{t("activityAccount")} <strong>{accountLink(activity.account)}</strong></span>}
-                      {activity.contact && <span>{t("activityContact")} <strong>{activity.contact.name || activity.contact.email}</strong></span>}
-                      {activity.deal && <span>{t("activityDeal")} <strong>{activity.deal.title}</strong></span>}
-                    </div>
-                  </div>
-                  <form action={completeActivityAction}>
-                    <input type="hidden" name="workspaceId" value={workspaceId} />
-                    <input type="hidden" name="activityId" value={activity.id} />
-                    <button type="submit" className="small">{t("btnCompleteFollowUp")}</button>
-                  </form>
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
-
-        <div className="item" style={{ padding: 16, marginBottom: 24 }}>
-          <div className="row" style={{ alignItems: "flex-start", gap: 12 }}>
-            <div>
-              <strong>{t("suggestionQueueTitle")}</strong>
-              <div className="muted" style={{ fontSize: "0.85rem", marginTop: 4 }}>
-                {t("suggestionQueueMeta", {
-                  suggested: communicationSummary.suggested.length,
-                  requested: communicationSummary.requested.length,
-                  failed: communicationSummary.failed.length,
-                })}
-              </div>
-            </div>
-            <a href="?view=suggestions" className="link-button small" style={{ marginLeft: "auto" }}>
-              {t("viewSuggestions")}
-            </a>
-          </div>
-          {nextCommunicationSuggestions.length === 0 ? (
-            <p className="muted" style={{ marginTop: 12 }}>{t("noOpenSuggestions")}</p>
-          ) : (
-            <div className="stack" style={{ marginTop: 16 }}>
-              {nextCommunicationSuggestions.map((suggestion) => (
-                <div key={suggestion.id} className="row" style={{ alignItems: "flex-start", gap: 12, padding: "10px 0", borderTop: "1px solid var(--line)" }}>
-                  <div style={{ minWidth: 0, flex: 1 }}>
-                    <strong style={{ fontSize: "0.92rem" }}>{suggestion.title}</strong>
-                    <div className="muted" style={{ fontSize: "0.82rem", marginTop: 4 }}>
-                      {communicationStatusLabels[suggestion.status as keyof typeof communicationStatusLabels] ?? suggestion.status}
-                      {" · "}
-                      {suggestion.recipientEmail || suggestion.contact?.email || t("suggestionNoRecipient")}
-                    </div>
-                    <div className="row" style={{ justifyContent: "flex-start", gap: 8, marginTop: 6, fontSize: "0.82rem" }}>
-                      {suggestion.account && <span>{t("activityAccount")} <strong>{accountLink(suggestion.account)}</strong></span>}
-                      {suggestion.deal && <span>{t("activityDeal")} <strong>{suggestion.deal.title}</strong></span>}
-                    </div>
-                  </div>
-                  <a href="?view=suggestions" className="link-button small">{t("btnReviewSuggestion")}</a>
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
-
         <div className="nr-filter-bar">
           {Object.entries(viewLabels).map(([key, label]) => (
             <a
@@ -413,6 +301,198 @@ export default async function LeadsPage({
             </a>
           ))}
         </div>
+
+        {view === "dashboard" && (
+          <div className="stack" style={{ gap: 28 }}>
+            <div className="ws-stat-row">
+              <div className="ws-stat-card">
+                <strong>{accountResult.total}</strong>
+                <span>{t("statAccounts")}</span>
+              </div>
+              <div className="ws-stat-card">
+                <strong>{activeDeals.length}</strong>
+                <span>{t("statActiveDeals")}</span>
+              </div>
+              <div className="ws-stat-card">
+                <strong>{formatCurrency(pipelineValue)}</strong>
+                <span>{t("statPipelineValue")}</span>
+              </div>
+              <div className="ws-stat-card">
+                <strong>{reminderSummary.open.length}</strong>
+                <span>{t("statOpenFollowUps")}</span>
+              </div>
+            </div>
+
+            <section className="stack" style={{ gap: 12 }}>
+              <div className="row" style={{ alignItems: "flex-start", gap: 12 }}>
+                <div>
+                  <h2 style={{ margin: 0, fontSize: "1.1rem" }}>{t("dashboardAttentionTitle")}</h2>
+                  <div className="muted" style={{ fontSize: "0.85rem", marginTop: 4 }}>
+                    {t("nextFollowUpsMeta", {
+                      overdue: reminderSummary.overdue.length,
+                      upcoming: reminderSummary.upcoming.length,
+                    })}
+                    {" · "}
+                    {t("suggestionQueueMeta", {
+                      suggested: communicationSummary.suggested.length,
+                      requested: communicationSummary.requested.length,
+                      failed: communicationSummary.failed.length,
+                    })}
+                  </div>
+                </div>
+                <a href="?view=activity" className="link-button small" style={{ marginLeft: "auto" }}>
+                  {t("viewActivity")}
+                </a>
+              </div>
+              {!hasAttention ? (
+                <p className="muted">{t("dashboardNoAttention")}</p>
+              ) : (
+                <div className="stack" style={{ gap: 8 }}>
+                  {attentionFollowUps.map((activity) => (
+                    <div key={activity.id} className="item" style={{ padding: 12 }}>
+                      <div className="row" style={{ alignItems: "flex-start", gap: 12 }}>
+                        <div style={{ minWidth: 0, flex: 1 }}>
+                          <span className="tag-sm">{t("dashboardAttentionFollowUp")}</span>
+                          <strong style={{ display: "block", marginTop: 6 }}>{activity.title}</strong>
+                          <div className="muted" style={{ fontSize: "0.82rem", marginTop: 4 }}>
+                            {t("followUpDue", { date: dueText(activity.dueAt) })}
+                            {" · "}
+                            {activity.account ? accountLink(activity.account) : t("emptyAccount")}
+                          </div>
+                        </div>
+                        <form action={completeActivityAction}>
+                          <input type="hidden" name="workspaceId" value={workspaceId} />
+                          <input type="hidden" name="activityId" value={activity.id} />
+                          <button type="submit" className="small">{t("btnCompleteFollowUp")}</button>
+                        </form>
+                      </div>
+                    </div>
+                  ))}
+                  {attentionSuggestions.map((suggestion) => (
+                    <div key={suggestion.id} className="item" style={{ padding: 12 }}>
+                      <div className="row" style={{ alignItems: "flex-start", gap: 12 }}>
+                        <div style={{ minWidth: 0, flex: 1 }}>
+                          <span className="tag-sm">{t("dashboardAttentionSuggestion")}</span>
+                          <strong style={{ display: "block", marginTop: 6 }}>{suggestion.title}</strong>
+                          <div className="muted" style={{ fontSize: "0.82rem", marginTop: 4 }}>
+                            {communicationStatusLabels[suggestion.status as keyof typeof communicationStatusLabels] ?? suggestion.status}
+                            {" · "}
+                            {suggestion.account ? accountLink(suggestion.account) : t("emptyAccount")}
+                          </div>
+                        </div>
+                        <a href="?view=suggestions" className="link-button small">{t("btnReviewSuggestion")}</a>
+                      </div>
+                    </div>
+                  ))}
+                  {attentionQualifications.map((qualification) => (
+                    <div key={qualification.id} className="item" style={{ padding: 12 }}>
+                      <div className="row" style={{ alignItems: "flex-start", gap: 12 }}>
+                        <div style={{ minWidth: 0, flex: 1 }}>
+                          <span className="tag-sm">{t("dashboardAttentionQualification")}</span>
+                          <strong style={{ display: "block", marginTop: 6 }}>{qualification.companyName || qualification.demoLead.email}</strong>
+                          <div className="muted" style={{ fontSize: "0.82rem", marginTop: 4 }}>
+                            {qualification.responseChannel}
+                          </div>
+                        </div>
+                        <a href="?view=review" className="link-button small">{t("dashboardViewReview")}</a>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </section>
+
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))", gap: 20 }}>
+              <section className="stack" style={{ gap: 12 }}>
+                <div className="row" style={{ alignItems: "flex-start", gap: 12 }}>
+                  <h2 style={{ margin: 0, fontSize: "1.1rem" }}>{t("dashboardAccountSummaryTitle")}</h2>
+                  <a href="?view=accounts" className="link-button small" style={{ marginLeft: "auto" }}>{t("dashboardViewAccounts")}</a>
+                </div>
+                {dashboardAccounts.length === 0 ? (
+                  <p className="muted">{t("noAccounts")}</p>
+                ) : dashboardAccounts.map((summary) => {
+                  const account = summary.account;
+                  return (
+                    <a
+                      key={account.id}
+                      href={accountHref(workspaceId, account.id)}
+                      className="item nr-clickable-card"
+                      style={{ display: "grid", gap: 10, color: "inherit", textDecoration: "none", borderRadius: 8, padding: 12 }}
+                    >
+                      <div className="row" style={{ alignItems: "flex-start", gap: 8 }}>
+                        <strong>{account.name}</strong>
+                        <span className="tag-sm" style={{ marginLeft: "auto" }}>{relationshipLabel(account.relationshipType)}</span>
+                      </div>
+                      <div className="nr-tag-group">
+                        <span className="tag-sm">{lifecycleLabel(account.lifecycleStage)}</span>
+                        <span className="tag-sm">{t("dashboardActiveDealsCount", { count: summary.activeDealCount })}</span>
+                      </div>
+                      <div className="row" style={{ fontSize: "0.85rem", alignItems: "baseline" }}>
+                        <span className="muted">{t("accountPipeline")}</span>
+                        <strong>{formatCurrency(summary.pipelineValueCents)}</strong>
+                      </div>
+                      <div className="muted" style={{ fontSize: "0.8rem" }}>
+                        {summary.lastTouchedAt
+                          ? t("dashboardLastTouch", { age: ageText(summary.lastTouchedAt) })
+                          : t("dashboardNoLastTouch")}
+                      </div>
+                    </a>
+                  );
+                })}
+              </section>
+
+              <section className="stack" style={{ gap: 12 }}>
+                <div className="row" style={{ alignItems: "flex-start", gap: 12 }}>
+                  <h2 style={{ margin: 0, fontSize: "1.1rem" }}>{t("dashboardPipelineSummaryTitle")}</h2>
+                  <a href="?view=pipeline" className="link-button small" style={{ marginLeft: "auto" }}>{t("dashboardViewPipeline")}</a>
+                </div>
+                {dashboardDeals.length === 0 ? (
+                  <p className="muted">{t("dashboardNoPipeline")}</p>
+                ) : dashboardDeals.map((deal) => (
+                  <div key={deal.id} className="item" style={{ padding: 12 }}>
+                    <div className="row" style={{ alignItems: "flex-start", gap: 8 }}>
+                      <strong>{deal.title}</strong>
+                      <span className="tag-sm" style={{ marginLeft: "auto" }}>{stageLabels[deal.stage as keyof typeof stageLabels] ?? labelFromCrmCode(deal.stage)}</span>
+                    </div>
+                    <div className="muted" style={{ fontSize: "0.82rem", marginTop: 6 }}>
+                      {deal.account ? accountLink(deal.account) : t("emptyAccount")}
+                      {" · "}
+                      {t("pipelineOwner")}: {ownerText(deal.ownerUserId)}
+                    </div>
+                    <div className="row" style={{ fontSize: "0.85rem", alignItems: "baseline", marginTop: 8 }}>
+                      <span className="muted">{t("dashboardDealValue")}</span>
+                      <strong>{formatCurrency(deal.valueCents ?? 0)}</strong>
+                    </div>
+                  </div>
+                ))}
+              </section>
+
+              <section className="stack" style={{ gap: 12 }}>
+                <div className="row" style={{ alignItems: "flex-start", gap: 12 }}>
+                  <h2 style={{ margin: 0, fontSize: "1.1rem" }}>{t("dashboardSuggestionSummaryTitle")}</h2>
+                  <a href="?view=suggestions" className="link-button small" style={{ marginLeft: "auto" }}>{t("viewSuggestions")}</a>
+                </div>
+                {communicationSummary.open.length === 0 ? (
+                  <p className="muted">{t("noOpenSuggestions")}</p>
+                ) : communicationSummary.open.slice(0, 5).map((suggestion) => (
+                  <div key={suggestion.id} className="item" style={{ padding: 12 }}>
+                    <div className="row" style={{ alignItems: "flex-start", gap: 8 }}>
+                      <strong>{suggestion.title}</strong>
+                      <span className="tag-sm" style={{ marginLeft: "auto" }}>
+                        {communicationStatusLabels[suggestion.status as keyof typeof communicationStatusLabels] ?? suggestion.status}
+                      </span>
+                    </div>
+                    <div className="muted" style={{ fontSize: "0.82rem", marginTop: 6 }}>
+                      {suggestion.account ? accountLink(suggestion.account) : t("emptyAccount")}
+                      {" · "}
+                      {suggestion.recipientEmail || suggestion.contact?.email || t("suggestionNoRecipient")}
+                    </div>
+                  </div>
+                ))}
+              </section>
+            </div>
+          </div>
+        )}
 
         {view === "accounts" && (
           <div>
