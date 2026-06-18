@@ -86,14 +86,16 @@ Mechanical, CI-enforced:
 ## Rollback
 
 Post-deploy safety is the `smoke-prod` job in `.github/workflows/ci.yml`.
-If it fails on `main`:
+If it fails on `main`, first check whether current production health recovered
+on the same failed SHA:
 
-- `.github/workflows/auto-revert.yml` opens a revert PR labeled `auto-revert`, `forbidden-path-approved`, and `large-change-approved`.
+- If production is still unhealthy, `.github/workflows/auto-revert.yml` opens a revert PR labeled `auto-revert`, `forbidden-path-approved`, and `large-change-approved`.
 - The workflow uses `AUTO_REVERT_TOKEN`, a repo secret backed by a bot or app token with `contents`, `pull_requests`, and `workflow` access, so the revert PR triggers normal `pull_request` CI.
 - The Reviewer merges the revert immediately; the same gating applies (required checks green) but the plan-present / scope-check steps are relaxed for `auto-revert`-labeled PRs.
 - The original PR is re-opened as draft with the failure logs attached. The Planner decides next steps.
+- If production recovered on the failed SHA, rerun the trusted GitHub production smoke. Use a fix-forward window of up to one hour for smoke-script, deploy timing, or configuration recovery before rolling back.
 
-**Rule: never investigate-then-fix on `main`. Revert first, always.**
+**Rule: rollback first when production remains red; fix forward briefly when production has already recovered on the failed SHA.**
 
 ## Human intervention
 

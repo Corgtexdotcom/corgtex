@@ -87,6 +87,13 @@ do not treat that alone as a failed production gate. Check the GitHub `Productio
 Smoke Test` on `main`; it uses repo-managed production secrets and is the
 credential-backed production gate.
 
+If a post-deploy health check fails during a deploy window, verify
+`https://app.corgtex.com/api/health` against the expected release and rerun the
+GitHub production smoke. When production has recovered on the failed SHA, use a
+fix-forward window of up to one hour for smoke-script, deploy timing, or
+configuration recovery. If production is still red, or the gate is not green or
+clearly explained within that window, roll back through the auto-revert path.
+
 For CRM / Relationships UI proof, use a focused readiness smoke instead of the
 full route sweep:
 
