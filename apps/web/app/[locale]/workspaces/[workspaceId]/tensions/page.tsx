@@ -16,6 +16,7 @@ import { ItemActions } from "@/lib/components/ui/ItemActions";
 import { WorkItemFilterControls, WorkItemToolbar } from "@/lib/components/WorkItemControls";
 import { WorkItemKanbanBoard, type WorkItemKanbanColumn } from "@/lib/components/WorkItemKanbanBoard";
 import { WorkItemResolutionDialog } from "@/lib/components/WorkItemResolutionDialog";
+import { WorkItemTable, type WorkItemTableColumn, type WorkItemTableRow } from "@/lib/components/WorkItemTable";
 import {
   buildWorkItemQuery,
   normalizeVisibleWorkItemColumns,
@@ -85,7 +86,7 @@ export default async function TensionsPage({
       memberId,
       columns: filter === "ALL" ? undefined : toggleWorkItemColumnVisibility(visibleTensionColumnIds, filter, tensionColumnStatuses),
     })
-    : buildWorkItemQuery({ view, sort: view === "list" ? sort : undefined, circleId, memberId, status: filter });
+    : buildWorkItemQuery({ view, sort, circleId, memberId, status: filter });
   const tensionFilterActive = (filter: TensionStatusFilter) => view === "kanban"
     ? filter === "ALL"
       ? allTensionColumnsVisible
@@ -179,17 +180,12 @@ export default async function TensionsPage({
     );
   }
 
-  function renderTensionCard(tension: TensionListItem, compact = false) {
-    const detailHref = `/workspaces/${workspaceId}/tensions/${tension.id}`;
-    const authorName = tension.author.displayName || tension.author.email || t("authorUnknown");
-    const raisedByName = tension.raisedByMember ? memberName(tension.raisedByMember) : null;
+  function tensionControls(tension: TensionListItem) {
     const canManage = canManageTension(tension);
     const canSubmittedEditorEdit = actor.kind === "user"
       && (tension.authorUserId === actor.user.id || tension.assigneeMemberId === membership?.id);
     const canEditContent = tension.status === "DRAFT" ? canManage : tension.status === "OPEN" && canSubmittedEditorEdit;
     const canDraftProposal = !tension.proposal && (canManage || !tension.isPrivate);
-    const openedDate = tension.publishedAt ? new Date(tension.publishedAt).toLocaleDateString() : null;
-    const closedDate = tension.resolvedAt ? new Date(tension.resolvedAt).toLocaleDateString() : null;
     const primary = canManage && tension.status === "DRAFT" ? renderTensionMove(tension, "OPEN", { primary: true }) : !tension.isPrivate && tension.status === "OPEN" ? (
       <form action={upvoteTensionAction}>
         <input type="hidden" name="workspaceId" value={workspaceId} />
@@ -270,6 +266,17 @@ export default async function TensionsPage({
       </form>,
     );
 
+    return { hiddenTransitions, moreItems, primary };
+  }
+
+  function renderTensionCard(tension: TensionListItem, compact = false) {
+    const detailHref = `/workspaces/${workspaceId}/tensions/${tension.id}`;
+    const authorName = tension.author.displayName || tension.author.email || t("authorUnknown");
+    const raisedByName = tension.raisedByMember ? memberName(tension.raisedByMember) : null;
+    const openedDate = tension.publishedAt ? new Date(tension.publishedAt).toLocaleDateString() : null;
+    const closedDate = tension.resolvedAt ? new Date(tension.resolvedAt).toLocaleDateString() : null;
+    const { hiddenTransitions, moreItems, primary } = tensionControls(tension);
+
     return (
       <div className={`${compact ? "nr-kanban-card" : "nr-item nr-list-card"} nr-clickable-card`} key={tension.id}>
         <a href={detailHref} className="nr-card-hitbox" aria-label={tWork("openItem", { title: tension.title })} draggable={false} />
@@ -319,6 +326,100 @@ export default async function TensionsPage({
         )}
       </div>
     );
+  }
+
+  function renderEmptyTensionState() {
+    return (
+      <div className="nr-item nr-empty-state">
+        <h3 className="nr-empty-title">{t("whatIsTensionTitle")}</h3>
+        <p className="muted nr-empty-desc">
+          {t("whatIsTensionDesc")}
+        </p>
+      </div>
+    );
+  }
+
+  const tensionTableColumns: WorkItemTableColumn[] = [
+    { id: "item", label: tWork("tableItem"), cellClassName: "nr-work-item-table-main" },
+    { id: "status", label: tWork("tableStatus") },
+    { id: "owner", label: tWork("tableOwner") },
+    { id: "dates", label: tWork("tableDates") },
+    { id: "priority", label: t("formPriority"), align: "right" },
+    { id: "links", label: tWork("tableLinks") },
+    { id: "actions", label: tWork("tableActions"), cellClassName: "nr-work-item-table-actions" },
+  ];
+
+  function tensionTableRow(tension: TensionListItem): WorkItemTableRow {
+    const detailHref = `/workspaces/${workspaceId}/tensions/${tension.id}`;
+    const authorName = tension.author.displayName || tension.author.email || t("authorUnknown");
+    const raisedByName = tension.raisedByMember ? memberName(tension.raisedByMember) : null;
+    const openedDate = tension.publishedAt ? new Date(tension.publishedAt).toLocaleDateString() : null;
+    const closedDate = tension.resolvedAt ? new Date(tension.resolvedAt).toLocaleDateString() : null;
+    const { hiddenTransitions, moreItems, primary } = tensionControls(tension);
+
+    return {
+      id: tension.id,
+      cells: {
+        item: (
+          <>
+            <a href={detailHref} className="nr-work-item-table-title">
+              {tension.isPrivate && <span title={t("privateInboxTooltip")} style={{ marginRight: 6 }}>◆</span>}
+              {tension.title}
+            </a>
+            {tension.bodyMd && <MarkdownExcerpt markdown={tension.bodyMd} maxLength={140} as="div" className="nr-work-item-table-meta" />}
+            <div className="nr-work-item-table-meta">{t("upvotes", { count: tension.upvotes.length })}</div>
+          </>
+        ),
+        status: (
+          <span className={`tag ${tension.status === "DRAFT" ? "info" : tension.status === "OPEN" ? "neutral" : "success"}`}>
+            {statusLabel(tension.status)}
+          </span>
+        ),
+        owner: (
+          <div className="nr-work-item-table-meta">
+            <div>{t("createdByMeta", { name: authorName })}</div>
+            {raisedByName && <div>{t("raisedByMeta", { name: raisedByName })}</div>}
+            {tension.circle && <div>{tension.circle.name}</div>}
+          </div>
+        ),
+        dates: (
+          <div className="nr-work-item-table-meta">
+            <div>{ageText(tension.createdAt)}</div>
+            {openedDate && <div>{t("openedOnMeta", { date: openedDate })}</div>}
+            {closedDate && <div>{t("closedOnMeta", { date: closedDate })}</div>}
+          </div>
+        ),
+        priority: tWork("priorityN", { priority: tension.priority }),
+        links: (
+          <div className="nr-work-item-table-meta nr-work-item-table-tags">
+            {tension.version > 1 ? (
+              <a href={`/workspaces/${workspaceId}/versions?entityType=TENSION&entityId=${encodeURIComponent(tension.id)}`}>v{tension.version}</a>
+            ) : (
+              <span>v{tension.version}</span>
+            )}
+            {tension.proposal && (
+              <a href={`/workspaces/${workspaceId}/proposals/${tension.proposal.id}`}>
+                {t("linkedProposalMeta", { title: tension.proposal.title })}
+              </a>
+            )}
+          </div>
+        ),
+        actions: (
+          <>
+            <ItemActions
+              moreLabel={tCommon("moreActions")}
+              primary={primary}
+              more={moreItems.length > 0 ? moreItems : null}
+            />
+            {hiddenTransitions.length > 0 && (
+              <div className="nr-transition-controls">
+                {hiddenTransitions}
+              </div>
+            )}
+          </>
+        ),
+      },
+    };
   }
 
   function renderCompactCreateTensionForm() {
@@ -393,13 +494,15 @@ export default async function TensionsPage({
             currentSort={sort}
             listHref={buildWorkItemQuery({ sort, circleId, memberId, status: statusFilter, view: "list" })}
             kanbanHref={buildWorkItemQuery({ circleId, memberId, status: statusFilter, view: "kanban" })}
+            tableHref={buildWorkItemQuery({ sort, circleId, memberId, status: statusFilter, view: "table" })}
             sortLinks={{
-              priority: buildWorkItemQuery({ view: "list", circleId, memberId, status: statusFilter, sort: "priority" }),
-              date: buildWorkItemQuery({ view: "list", circleId, memberId, status: statusFilter, sort: "date" }),
-              alpha: buildWorkItemQuery({ view: "list", circleId, memberId, status: statusFilter, sort: "alpha" }),
+              priority: buildWorkItemQuery({ view: view === "table" ? "table" : "list", circleId, memberId, status: statusFilter, sort: "priority" }),
+              date: buildWorkItemQuery({ view: view === "table" ? "table" : "list", circleId, memberId, status: statusFilter, sort: "date" }),
+              alpha: buildWorkItemQuery({ view: view === "table" ? "table" : "list", circleId, memberId, status: statusFilter, sort: "alpha" }),
             }}
             listLabel={tWork("listView")}
             kanbanLabel={tWork("kanbanView")}
+            tableLabel={tWork("tableView")}
             sortLabel={tWork("sort")}
             sortPriorityLabel={tWork("sortPriority")}
             sortDateLabel={tWork("sortDate")}
@@ -412,7 +515,7 @@ export default async function TensionsPage({
           action={`/workspaces/${workspaceId}/tensions`}
           status={statusFilter}
           view={view}
-          sort={view === "list" ? sort : undefined}
+          sort={view !== "kanban" ? sort : undefined}
           columns={view === "kanban" && !allTensionColumnsVisible ? visibleTensionColumnIds : undefined}
           circleId={circleId}
           memberId={memberId}
@@ -448,15 +551,16 @@ export default async function TensionsPage({
             sortAlphaLabel={tWork("sortAlpha")}
             dragUnavailableLabel={tWork("dragUnavailable")}
           />
+        ) : view === "table" ? (
+          <WorkItemTable
+            columns={tensionTableColumns}
+            rows={displayTensions.map((tension) => tensionTableRow(tension))}
+            empty={renderEmptyTensionState()}
+          />
         ) : (
           <div>
             {(!displayTensions || displayTensions.length === 0) && (
-              <div className="nr-item nr-empty-state">
-                <h3 className="nr-empty-title">{t("whatIsTensionTitle")}</h3>
-                <p className="muted nr-empty-desc">
-                  {t("whatIsTensionDesc")}
-                </p>
-              </div>
+              renderEmptyTensionState()
             )}
             {displayTensions.map((tension) => renderTensionCard(tension))}
           </div>

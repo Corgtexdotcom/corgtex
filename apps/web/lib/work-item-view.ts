@@ -1,4 +1,4 @@
-export type WorkItemViewMode = "list" | "kanban";
+export type WorkItemViewMode = "list" | "kanban" | "table";
 
 export type WorkItemScope = "company" | "circle" | "member";
 
@@ -19,7 +19,8 @@ export function firstSearchParam(value: string | string[] | undefined) {
 }
 
 export function normalizeWorkItemView(value: string | string[] | undefined): WorkItemViewMode {
-  return firstSearchParam(value) === "kanban" ? "kanban" : "list";
+  const candidate = firstSearchParam(value);
+  return candidate === "kanban" || candidate === "table" ? candidate : "list";
 }
 
 export function normalizeWorkItemSort(value: string | string[] | undefined): WorkItemSort {

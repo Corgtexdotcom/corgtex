@@ -23,6 +23,7 @@ import { ItemActions } from "@/lib/components/ui/ItemActions";
 import { WorkItemFilterControls, WorkItemToolbar } from "@/lib/components/WorkItemControls";
 import { WorkItemKanbanBoard, type WorkItemKanbanColumn } from "@/lib/components/WorkItemKanbanBoard";
 import { WorkItemResolutionDialog } from "@/lib/components/WorkItemResolutionDialog";
+import { WorkItemTable, type WorkItemTableColumn, type WorkItemTableRow } from "@/lib/components/WorkItemTable";
 import {
   buildWorkItemQuery,
   normalizeVisibleWorkItemColumns,
@@ -115,7 +116,7 @@ export default async function ActionsPage({
       memberId,
       columns: filter === "ALL" ? undefined : toggleWorkItemColumnVisibility(visibleActionColumnIds, filter, actionColumnStatuses),
     })
-    : buildWorkItemQuery({ view, sort: view === "list" ? sort : undefined, circleId, memberId, status: filter });
+    : buildWorkItemQuery({ view, sort, circleId, memberId, status: filter });
   const actionFilterActive = (filter: ActionStatusFilter) => view === "kanban"
     ? filter === "ALL"
       ? allActionColumnsVisible
@@ -142,6 +143,10 @@ export default async function ActionsPage({
     if (status === "OPEN") return t("btnOpen");
     if (status === "IN_PROGRESS") return t("btnStart");
     return t("btnComplete");
+  }
+
+  function renderEmptyActionState() {
+    return <p className="muted">{t("noActionsFound")}</p>;
   }
 
   function renderActionMove(action: ActionListItem, targetStatus: ActionColumnStatus, options: { hidden?: boolean; primary?: boolean } = {}) {
@@ -205,20 +210,13 @@ export default async function ActionsPage({
     );
   }
 
-  function renderActionCard(action: ActionListItem, compact = false) {
-    const detailHref = `/workspaces/${workspaceId}/actions/${action.id}`;
-    const statusMeta = ACTION_STATUS_META[action.status as keyof typeof ACTION_STATUS_META] ?? ACTION_STATUS_META.OPEN;
-    const authorName = action.author?.displayName || action.author?.email || "Unknown";
-    const assigneeName = action.assigneeMember?.user?.displayName || action.assigneeMember?.user?.email;
-    const createdAge = ageText(action.createdAt);
-    const dueDate = action.dueAt ? new Date(action.dueAt).toLocaleDateString() : null;
+  function actionControls(action: ActionListItem) {
     const canManage = canManageAction(action);
     const canSubmittedEditorEdit = actor.kind === "user"
       && (action.authorUserId === actor.user.id || action.assigneeMemberId === membership?.id);
     const canEditContent = action.status === "DRAFT"
       ? canManage
       : (action.status === "OPEN" || action.status === "IN_PROGRESS") && canSubmittedEditorEdit;
-    const evidence = evidenceByActionId.get(action.id) ?? [];
     const primaryTarget: ActionColumnStatus | null = action.status === "DRAFT" && canManage
       ? "OPEN"
       : action.status === "OPEN"
@@ -233,7 +231,6 @@ export default async function ActionsPage({
     };
 
     const primary = primaryTarget ? renderActionMove(action, primaryTarget, { primary: true }) : null;
-
     const moreItems: ReactNode[] = [];
     const hiddenTransitions = actionColumnStatuses
       .filter((targetStatus) => canMoveToStatus(targetStatus) && targetStatus !== primaryTarget)
@@ -276,6 +273,19 @@ export default async function ActionsPage({
         <button type="submit" className="danger">{t("btnDelete")}</button>
       </form>,
     );
+
+    return { hiddenTransitions, moreItems, primary };
+  }
+
+  function renderActionCard(action: ActionListItem, compact = false) {
+    const detailHref = `/workspaces/${workspaceId}/actions/${action.id}`;
+    const statusMeta = ACTION_STATUS_META[action.status as keyof typeof ACTION_STATUS_META] ?? ACTION_STATUS_META.OPEN;
+    const authorName = action.author?.displayName || action.author?.email || "Unknown";
+    const assigneeName = action.assigneeMember?.user?.displayName || action.assigneeMember?.user?.email;
+    const createdAge = ageText(action.createdAt);
+    const dueDate = action.dueAt ? new Date(action.dueAt).toLocaleDateString() : null;
+    const evidence = evidenceByActionId.get(action.id) ?? [];
+    const { hiddenTransitions, moreItems, primary } = actionControls(action);
 
     return (
       <div className={`${compact ? "nr-kanban-card" : "nr-item nr-list-card"} nr-clickable-card`} key={action.id}>
@@ -333,6 +343,101 @@ export default async function ActionsPage({
         )}
       </div>
     );
+  }
+
+  const actionTableColumns: WorkItemTableColumn[] = [
+    { id: "item", label: tWork("tableItem"), cellClassName: "nr-work-item-table-main" },
+    { id: "status", label: tWork("tableStatus") },
+    { id: "owner", label: tWork("tableOwner") },
+    { id: "dates", label: tWork("tableDates") },
+    { id: "priority", label: t("formPriority"), align: "right" },
+    { id: "links", label: tWork("tableLinks") },
+    { id: "actions", label: tWork("tableActions"), cellClassName: "nr-work-item-table-actions" },
+  ];
+
+  function actionTableRow(action: ActionListItem): WorkItemTableRow {
+    const detailHref = `/workspaces/${workspaceId}/actions/${action.id}`;
+    const statusMeta = ACTION_STATUS_META[action.status as keyof typeof ACTION_STATUS_META] ?? ACTION_STATUS_META.OPEN;
+    const authorName = action.author?.displayName || action.author?.email || "Unknown";
+    const assigneeName = action.assigneeMember?.user?.displayName || action.assigneeMember?.user?.email;
+    const createdAge = ageText(action.createdAt);
+    const dueDate = action.dueAt ? new Date(action.dueAt).toLocaleDateString() : null;
+    const evidence = evidenceByActionId.get(action.id) ?? [];
+    const { hiddenTransitions, moreItems, primary } = actionControls(action);
+
+    return {
+      id: action.id,
+      cells: {
+        item: (
+          <>
+            <a href={detailHref} className="nr-work-item-table-title">
+              {action.status === "DRAFT" && <span title={t("statusDraft")} style={{ marginRight: 6 }}>◆</span>}
+              {action.title}
+            </a>
+            {action.bodyMd && <MarkdownExcerpt markdown={action.bodyMd} maxLength={140} as="div" className="nr-work-item-table-meta" />}
+            {action.status === "COMPLETED" && action.completedVia && (
+              <div className="nr-work-item-table-meta">
+                <strong>{tWork("completionNote")}</strong>{" "}
+                <MarkdownExcerpt markdown={action.completedVia} maxLength={120} as="span" />
+              </div>
+            )}
+            {evidence.length > 0 && (
+              <div className="nr-work-item-table-meta nr-work-item-table-tags">
+                <strong>{tWork("completionEvidence")}</strong>
+                {evidence.map((row) => (
+                  <a key={row.id} href={`/workspaces/${workspaceId}/brain/sources`}>
+                    {row.document.title}
+                  </a>
+                ))}
+              </div>
+            )}
+          </>
+        ),
+        status: <span className={`tag ${statusMeta.tagClass}`}>{t(statusMeta.labelKey)}</span>,
+        owner: (
+          <div className="nr-work-item-table-meta">
+            <div>{t("metaCreator", { name: authorName })}</div>
+            {assigneeName && <div>{t("metaAssignee", { name: assigneeName })}</div>}
+            {action.circle && <div>{action.circle.name}</div>}
+          </div>
+        ),
+        dates: (
+          <div className="nr-work-item-table-meta">
+            {createdAge && <div>{createdAge}</div>}
+            {dueDate && <div>{t("metaDue", { date: dueDate })}</div>}
+          </div>
+        ),
+        priority: tWork("priorityN", { priority: action.priority }),
+        links: (
+          <div className="nr-work-item-table-meta nr-work-item-table-tags">
+            {action.version > 1 ? (
+              <a href={`/workspaces/${workspaceId}/versions?entityType=ACTION&entityId=${encodeURIComponent(action.id)}`}>v{action.version}</a>
+            ) : (
+              <span>v{action.version}</span>
+            )}
+            {action.proposal?.title ? (
+              <a href={`/workspaces/${workspaceId}/proposals/${action.proposal.id}`}>
+                {t("metaLinkedToProposal", { title: action.proposal.title })}
+              </a>
+            ) : null}
+          </div>
+        ),
+        actions: (
+          <>
+            <ItemActions
+              moreLabel={tCommon("moreActions")}
+              primary={primary}
+              more={moreItems.length > 0 ? moreItems : null}
+            />
+            {hiddenTransitions.length > 0 && (
+              <div className="nr-transition-controls">
+                {hiddenTransitions}
+              </div>
+            )}
+          </>
+        ),
+      },
+    };
   }
 
   function renderCompactCreateActionForm() {
@@ -407,13 +512,15 @@ export default async function ActionsPage({
             currentSort={sort}
             listHref={buildWorkItemQuery({ sort, circleId, memberId, status: statusFilter, view: "list" })}
             kanbanHref={buildWorkItemQuery({ circleId, memberId, status: statusFilter, view: "kanban" })}
+            tableHref={buildWorkItemQuery({ sort, circleId, memberId, status: statusFilter, view: "table" })}
             sortLinks={{
-              priority: buildWorkItemQuery({ view: "list", circleId, memberId, status: statusFilter, sort: "priority" }),
-              date: buildWorkItemQuery({ view: "list", circleId, memberId, status: statusFilter, sort: "date" }),
-              alpha: buildWorkItemQuery({ view: "list", circleId, memberId, status: statusFilter, sort: "alpha" }),
+              priority: buildWorkItemQuery({ view: view === "table" ? "table" : "list", circleId, memberId, status: statusFilter, sort: "priority" }),
+              date: buildWorkItemQuery({ view: view === "table" ? "table" : "list", circleId, memberId, status: statusFilter, sort: "date" }),
+              alpha: buildWorkItemQuery({ view: view === "table" ? "table" : "list", circleId, memberId, status: statusFilter, sort: "alpha" }),
             }}
             listLabel={tWork("listView")}
             kanbanLabel={tWork("kanbanView")}
+            tableLabel={tWork("tableView")}
             sortLabel={tWork("sort")}
             sortPriorityLabel={tWork("sortPriority")}
             sortDateLabel={tWork("sortDate")}
@@ -426,7 +533,7 @@ export default async function ActionsPage({
           action={`/workspaces/${workspaceId}/actions`}
           status={statusFilter}
           view={view}
-          sort={view === "list" ? sort : undefined}
+          sort={view !== "kanban" ? sort : undefined}
           columns={view === "kanban" && !allActionColumnsVisible ? visibleActionColumnIds : undefined}
           circleId={circleId}
           memberId={memberId}
@@ -462,9 +569,15 @@ export default async function ActionsPage({
             sortAlphaLabel={tWork("sortAlpha")}
             dragUnavailableLabel={tWork("dragUnavailable")}
           />
+        ) : view === "table" ? (
+          <WorkItemTable
+            columns={actionTableColumns}
+            rows={displayActions.map((action) => actionTableRow(action))}
+            empty={renderEmptyActionState()}
+          />
         ) : (
           <div>
-            {displayActions.length === 0 && <p className="muted">{t("noActionsFound")}</p>}
+            {displayActions.length === 0 && renderEmptyActionState()}
             {displayActions.map((action) => renderActionCard(action))}
           </div>
         )}
