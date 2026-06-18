@@ -321,15 +321,47 @@ jobs:
         if: github.ref == 'refs/heads/main' && steps.check-secrets.outputs.skip != 'true'
         run: curl -sf https://app.corgtex.com/api/health > /dev/null
       
-      - name: Require internal dogfood release match
-        id: railway-watch
+      - uses: actions/checkout@v5
+        if: github.ref == 'refs/heads/main' && steps.check-secrets.outputs.skip != 'true'
+        with:
+          fetch-depth: 0
+      - name: Detect production app release requirement
+        id: app-release
         if: github.ref == 'refs/heads/main' && steps.check-secrets.outputs.skip != 'true'
         run: |
           set -euo pipefail
-          echo "skip_release_match=false" >> "$GITHUB_OUTPUT"
-          echo "Internal dogfood Railway services watch the full repo; release match remains required for every main commit."
-      - uses: actions/checkout@v5
-        if: github.ref == 'refs/heads/main' && steps.check-secrets.outputs.skip != 'true'
+          before="${{ github.event.before }}"
+          after="${{ github.sha }}"
+
+          if [ -z "$before" ] || [ "$before" = "0000000000000000000000000000000000000000" ]; then
+            echo "skip_release_match=false" >> "$GITHUB_OUTPUT"
+            echo "Previous main commit is unknown; release match remains required."
+            exit 0
+          fi
+
+          changed_files="$(git diff --name-only "$before" "$after")"
+          echo "Changed files:"
+          printf '%s\n' "$changed_files"
+
+          requires_app_release=false
+          while IFS= read -r path; do
+            [ -z "$path" ] && continue
+            case "$path" in
+              AGENTS.md|README.md|docs/*|.github/*|.agents/*|.codex/*)
+                ;;
+              *)
+                requires_app_release=true
+                ;;
+            esac
+          done <<< "$changed_files"
+
+          if [ "$requires_app_release" = "true" ]; then
+            echo "skip_release_match=false" >> "$GITHUB_OUTPUT"
+            echo "Production app-affecting changes detected; release match required."
+          else
+            echo "skip_release_match=true" >> "$GITHUB_OUTPUT"
+            echo "Only docs, workflow, or agent-guidance files changed; release match skipped while live smoke still runs."
+          fi
       - uses: actions/setup-node@v5
         if: github.ref == 'refs/heads/main' && steps.check-secrets.outputs.skip != 'true'
         with:
@@ -348,7 +380,7 @@ jobs:
       - run: node scripts/railway-smoke.mjs https://app.corgtex.com ${{ secrets.ADMIN_EMAIL }} ${{ secrets.ADMIN_PASSWORD }}
         if: github.ref == 'refs/heads/main' && steps.check-secrets.outputs.skip != 'true'
         env:
-          CORGTEX_SKIP_RELEASE_MATCH: ${{ steps.railway-watch.outputs.skip_release_match }}
+          CORGTEX_SKIP_RELEASE_MATCH: ${{ steps.app-release.outputs.skip_release_match }}
           CORGTEX_RELEASE_MATCH_TIMEOUT_MS: 1200000
       - run: node scripts/ingestion-guidance-smoke.mjs https://app.corgtex.com ${{ secrets.ADMIN_EMAIL }} ${{ secrets.ADMIN_PASSWORD }}
         if: github.ref == 'refs/heads/main' && steps.check-secrets.outputs.skip != 'true'
