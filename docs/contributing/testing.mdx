@@ -78,3 +78,22 @@ artifacts belong under `.artifacts/` or in CI artifacts, not under
 `docs/assets/`. Credentials live in `.env` (`AGENT_E2E_EMAIL`,
 `AGENT_E2E_PASSWORD`) — never hardcoded, never in PR descriptions. See the secrets section of
 [`AGENTS.md`](https://github.com/corgtex/corgtex/blob/main/AGENTS.md#secrets-and-credentials).
+
+## Production UI smoke
+
+Local seeded E2E credentials and production-safe smoke credentials are separate.
+If a local browser smoke against `https://app.corgtex.com` returns a login 401,
+do not treat that alone as a failed production gate. Check the GitHub `Production
+Smoke Test` on `main`; it uses repo-managed production secrets and is the
+credential-backed production gate.
+
+For CRM / Relationships UI proof, use a focused readiness smoke instead of the
+full route sweep:
+
+```bash
+CLIENT_READINESS_ROUTE_NAMES=leads node scripts/client-readiness-smoke.mjs https://app.corgtex.com .artifacts/client-readiness/<slug>
+```
+
+If the focused smoke fails at login, verify the GitHub production smoke before
+requesting a Chrome-session fallback. Chrome can be used for visual proof only
+when the credential-backed smoke path is unavailable or explicitly approved.
