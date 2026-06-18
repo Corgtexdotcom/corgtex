@@ -1373,7 +1373,10 @@
       "action_item": "action items",
       "proposal": "proposals",
       "follow_up": "follow-ups",
-      "deliberation_entry": "deliberation"
+      "deliberation_entry": "deliberation",
+      "crm_contact": "CRM contacts",
+      "crm_deal": "CRM opportunities",
+      "crm_activity": "CRM activities"
     }
   },
   "members": {

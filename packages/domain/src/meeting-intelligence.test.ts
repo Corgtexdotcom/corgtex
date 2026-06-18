@@ -6,6 +6,10 @@ const {
   updateActionMock,
   createProposalMock,
   createProposalFromTensionMock,
+  createActivityMock,
+  createContactMock,
+  createCrmMeetingReviewInsightsMock,
+  createDealMock,
   resolveProposalMock,
   submitProposalMock,
   createTensionMock,
@@ -17,6 +21,10 @@ const {
   updateActionMock: vi.fn(),
   createProposalMock: vi.fn(),
   createProposalFromTensionMock: vi.fn(),
+  createActivityMock: vi.fn(),
+  createContactMock: vi.fn(),
+  createCrmMeetingReviewInsightsMock: vi.fn(),
+  createDealMock: vi.fn(),
   resolveProposalMock: vi.fn(),
   submitProposalMock: vi.fn(),
   createTensionMock: vi.fn(),
@@ -102,6 +110,21 @@ vi.mock("./tensions", () => ({
   updateTension: updateTensionMock,
 }));
 
+vi.mock("./crm", () => ({
+  createActivity: createActivityMock,
+  createContact: createContactMock,
+  createDeal: createDealMock,
+}));
+
+vi.mock("./crm-information-gathering", () => ({
+  createCrmMeetingReviewInsights: createCrmMeetingReviewInsightsMock,
+  crmInsightPayload: (metadataJson: any) => metadataJson?.crm ?? {},
+  requireCrmInsightEmail: (payload: any) => {
+    if (!payload?.email) throw new Error("CRM contact insight requires a valid email.");
+    return String(payload.email).trim().toLowerCase();
+  },
+}));
+
 vi.mock("./events", () => ({
   appendEvents: vi.fn(),
 }));
@@ -177,6 +200,10 @@ describe("meeting-intelligence", () => {
     updateActionMock.mockResolvedValue({ id: "action-1" });
     createProposalMock.mockResolvedValue({ id: "proposal-1" });
     createProposalFromTensionMock.mockResolvedValue({ id: "proposal-from-tension-1" });
+    createActivityMock.mockResolvedValue({ id: "activity-1" });
+    createContactMock.mockResolvedValue({ id: "contact-1" });
+    createCrmMeetingReviewInsightsMock.mockResolvedValue([]);
+    createDealMock.mockResolvedValue({ id: "deal-1" });
     resolveProposalMock.mockResolvedValue({ id: "proposal-1" });
     submitProposalMock.mockResolvedValue({ proposalId: "proposal-1" });
     createTensionMock.mockResolvedValue({ id: "tension-1" });
@@ -913,6 +940,112 @@ describe("meeting-intelligence", () => {
       }));
     });
 
+    it("applies CRM contact insights through the Relationships contact path", async () => {
+      (prisma.meetingInsight.findUnique as ReturnType<typeof vi.fn>).mockResolvedValue({
+        id: "insight-crm-contact",
+        workspaceId: "ws-1",
+        meetingId: "meeting-1",
+        type: "CRM_CONTACT",
+        operation: "CREATE",
+        status: "SUGGESTED",
+        title: "Review CRM contact",
+        bodyMd: "Create a contact for Buyer.",
+        metadataJson: {
+          crm: {
+            email: "buyer@example.test",
+            name: "Buyer",
+            company: "Example",
+            accountId: "account-1",
+            source: "meeting_intelligence",
+          },
+        },
+        meeting: { id: "meeting-1", title: "Pilot review" },
+      });
+
+      await applyInsight(mockActor, {
+        workspaceId: "ws-1",
+        insightId: "insight-crm-contact",
+      });
+
+      expect(createContactMock).toHaveBeenCalledWith(mockActor, expect.objectContaining({
+        workspaceId: "ws-1",
+        email: "buyer@example.test",
+        name: "Buyer",
+        company: "Example",
+        accountId: "account-1",
+      }));
+      expect(prisma.meetingInsight.update).toHaveBeenCalledWith(expect.objectContaining({
+        data: expect.objectContaining({
+          status: "APPLIED",
+          appliedEntityType: "CrmContact",
+          appliedEntityId: "contact-1",
+        }),
+      }));
+    });
+
+    it("applies CRM deal and activity insights through Relationships domain paths", async () => {
+      (prisma.meetingInsight.findUnique as ReturnType<typeof vi.fn>)
+        .mockResolvedValueOnce({
+          id: "insight-crm-deal",
+          workspaceId: "ws-1",
+          meetingId: "meeting-1",
+          type: "CRM_DEAL",
+          operation: "CREATE",
+          status: "SUGGESTED",
+          title: "Review opportunity",
+          bodyMd: "Pilot pricing came up.",
+          metadataJson: {
+            crm: {
+              accountId: "account-1",
+              contactId: "contact-1",
+              dealTitle: "Pilot opportunity",
+              valueCents: 250000,
+              currency: "USD",
+            },
+          },
+          meeting: { id: "meeting-1", title: "Pilot review" },
+        })
+        .mockResolvedValueOnce({
+          id: "insight-crm-activity",
+          workspaceId: "ws-1",
+          meetingId: "meeting-1",
+          type: "CRM_ACTIVITY",
+          operation: "CREATE",
+          status: "SUGGESTED",
+          title: "Follow up with buyer",
+          bodyMd: "Send the pilot recap.",
+          dueAt: new Date("2026-06-20T17:00:00.000Z"),
+          metadataJson: {
+            crm: {
+              accountId: "account-1",
+              contactId: "contact-1",
+              activityType: "TASK",
+              source: "meeting_intelligence",
+            },
+          },
+          meeting: { id: "meeting-1", title: "Pilot review" },
+        });
+
+      await applyInsight(mockActor, { workspaceId: "ws-1", insightId: "insight-crm-deal" });
+      await applyInsight(mockActor, { workspaceId: "ws-1", insightId: "insight-crm-activity" });
+
+      expect(createDealMock).toHaveBeenCalledWith(mockActor, expect.objectContaining({
+        workspaceId: "ws-1",
+        accountId: "account-1",
+        contactId: "contact-1",
+        title: "Pilot opportunity",
+        valueCents: 250000,
+      }));
+      expect(createActivityMock).toHaveBeenCalledWith(mockActor, expect.objectContaining({
+        workspaceId: "ws-1",
+        accountId: "account-1",
+        contactId: "contact-1",
+        title: "Follow up with buyer",
+        type: "TASK",
+        dueAt: new Date("2026-06-20T17:00:00.000Z"),
+      }));
+    });
+
     it("skips already reviewed insights with the same dedupe key during extraction replay", async () => {
       const { defaultModelGateway } = await import("@corgtex/models");
       (defaultModelGateway.extract as ReturnType<typeof vi.fn>).mockResolvedValue({
@@ -1272,6 +1405,32 @@ describe("meeting-intelligence", () => {
           autoAppliedAt: expect.any(Date),
         }),
       }));
+    });
+
+    it("does not auto-apply CRM relationship insights", async () => {
+      (prisma.meetingInsight.findMany as ReturnType<typeof vi.fn>).mockResolvedValue([
+        {
+          id: "insight-crm-activity",
+          type: "CRM_ACTIVITY",
+          operation: "CREATE",
+          targetEntityType: null,
+          targetEntityId: null,
+          confidence: 0.99,
+          sourceQuote: "Send the follow-up.",
+        },
+      ]);
+
+      await expect(autoApplyMeetingInsights(mockActor, {
+        workspaceId: "ws-1",
+        meetingId: "meeting-1",
+      })).resolves.toMatchObject({
+        applied: 0,
+        failed: 0,
+        skipped: 1,
+      });
+
+      expect(createActivityMock).not.toHaveBeenCalled();
+      expect(prisma.meetingInsight.findUnique).not.toHaveBeenCalled();
     });
 
     it("reads the workspace member directory once when applying multiple hinted insights", async () => {

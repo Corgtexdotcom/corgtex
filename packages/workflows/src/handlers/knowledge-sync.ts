@@ -4,6 +4,8 @@ import {
   fetchCalendarEvents,
   fetchFilteredEmailMessages,
   fetchSelectedDocuments,
+  materializeCrmCalendarTouchpoints,
+  materializeCrmEmailTouchpoints,
   syncCalendarEventRecorder,
 } from "@corgtex/domain";
 
@@ -394,6 +396,11 @@ export async function handleCalendarSync(jobId: string, payload: { connectionId?
         event,
       });
     }
+    await materializeCrmCalendarTouchpoints({
+      workspaceId,
+      connectionId: connection.id,
+      events,
+    });
     await prisma.oAuthConnection.update({
       where: { id: connection.id },
       data: {
@@ -514,6 +521,11 @@ export async function handleOAuthEmailSync(jobId: string, payload: { connectionI
         workflowJobId: jobId,
       });
     }
+    await materializeCrmEmailTouchpoints({
+      workspaceId,
+      connectionId: connection.id,
+      messages,
+    });
     await prisma.oAuthConnection.update({
       where: { id: connection.id },
       data: { lastSyncAt: new Date(), lastSyncError: null, status: "ACTIVE" },

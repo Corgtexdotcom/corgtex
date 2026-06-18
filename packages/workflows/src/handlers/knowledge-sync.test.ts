@@ -1,13 +1,19 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const {
+  fetchCalendarEventsMock,
   fetchFilteredEmailMessagesMock,
   fetchSelectedDocumentsMock,
+  materializeCrmCalendarTouchpointsMock,
+  materializeCrmEmailTouchpointsMock,
   prismaMock,
   syncKnowledgeForSourceMock,
 } = vi.hoisted(() => ({
+  fetchCalendarEventsMock: vi.fn(),
   fetchFilteredEmailMessagesMock: vi.fn(),
   fetchSelectedDocumentsMock: vi.fn(),
+  materializeCrmCalendarTouchpointsMock: vi.fn(),
+  materializeCrmEmailTouchpointsMock: vi.fn(),
   prismaMock: {
     communicationMessage: {
       findUnique: vi.fn(),
@@ -39,9 +45,11 @@ vi.mock("@corgtex/knowledge", () => ({
 }));
 
 vi.mock("@corgtex/domain", () => ({
-  fetchCalendarEvents: vi.fn(),
+  fetchCalendarEvents: fetchCalendarEventsMock,
   fetchFilteredEmailMessages: fetchFilteredEmailMessagesMock,
   fetchSelectedDocuments: fetchSelectedDocumentsMock,
+  materializeCrmCalendarTouchpoints: materializeCrmCalendarTouchpointsMock,
+  materializeCrmEmailTouchpoints: materializeCrmEmailTouchpointsMock,
   syncCalendarEventRecorder: vi.fn(),
 }));
 
@@ -162,6 +170,58 @@ describe("handleMeetingKnowledgeSync", () => {
   });
 });
 
+describe("handleCalendarSync", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    prismaMock.oAuthConnection.findUnique.mockResolvedValue({
+      id: "conn-1",
+      workspaceId: "workspace-1",
+      provider: "GOOGLE",
+      status: "ACTIVE",
+      syncSettings: {
+        calendar: { enabled: true },
+      },
+    });
+    prismaMock.oAuthConnection.update.mockResolvedValue({});
+    fetchCalendarEventsMock.mockResolvedValue([{
+      id: "event-1",
+      provider: "GOOGLE",
+      title: "Customer pilot",
+      description: "Pilot follow-up",
+      startTime: new Date("2026-05-24T12:00:00.000Z"),
+      endTime: new Date("2026-05-24T12:30:00.000Z"),
+      attendees: ["customer@example.test", "owner@corgtex.com"],
+      organizerEmail: "owner@corgtex.com",
+      meetingUrl: null,
+      htmlLink: "https://calendar.test/event-1",
+      status: null,
+      visibility: null,
+      transparency: null,
+      responseStatus: null,
+    }]);
+    materializeCrmCalendarTouchpointsMock.mockResolvedValue({});
+    syncKnowledgeForSourceMock.mockResolvedValue(undefined);
+  });
+
+  it("materializes calendar relationship touchpoints after indexing eligible events", async () => {
+    const { handleCalendarSync } = await import("./knowledge-sync");
+
+    await handleCalendarSync("job-1", { connectionId: "conn-1" }, "workspace-1");
+
+    expect(syncKnowledgeForSourceMock).toHaveBeenCalledWith(expect.objectContaining({
+      workspaceId: "workspace-1",
+      sourceType: "MEETING",
+      sourceId: "calendar-event-1",
+      sourceTitle: "Customer pilot",
+    }));
+    expect(materializeCrmCalendarTouchpointsMock).toHaveBeenCalledWith({
+      workspaceId: "workspace-1",
+      connectionId: "conn-1",
+      events: [expect.objectContaining({ id: "event-1", attendees: ["customer@example.test", "owner@corgtex.com"] })],
+    });
+  });
+});
+
 describe("OAuth document and email knowledge sync", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -173,8 +233,11 @@ describe("OAuth document and email knowledge sync", () => {
       syncSettings: {},
     });
     prismaMock.oAuthConnection.update.mockResolvedValue({});
+    fetchCalendarEventsMock.mockResolvedValue([]);
     fetchFilteredEmailMessagesMock.mockResolvedValue([]);
     fetchSelectedDocumentsMock.mockResolvedValue([]);
+    materializeCrmCalendarTouchpointsMock.mockResolvedValue({});
+    materializeCrmEmailTouchpointsMock.mockResolvedValue({});
     syncKnowledgeForSourceMock.mockResolvedValue(undefined);
   });
 
@@ -255,6 +318,7 @@ describe("OAuth document and email knowledge sync", () => {
 
     expect(fetchFilteredEmailMessagesMock).not.toHaveBeenCalled();
     expect(syncKnowledgeForSourceMock).not.toHaveBeenCalled();
+    expect(materializeCrmEmailTouchpointsMock).not.toHaveBeenCalled();
   });
 
   it("indexes filtered OAuth email as document knowledge", async () => {
@@ -293,5 +357,10 @@ describe("OAuth document and email knowledge sync", () => {
         workflowJobId: "job-1",
       }),
     }));
+    expect(materializeCrmEmailTouchpointsMock).toHaveBeenCalledWith({
+      workspaceId: "workspace-1",
+      connectionId: "conn-1",
+      messages: [expect.objectContaining({ id: "msg-1", filter: "from:customer@example.test" })],
+    });
   });
 });
