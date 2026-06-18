@@ -40,8 +40,12 @@ const getExecutionPacketMock = vi.fn();
 const getCompanyContextMock = vi.fn();
 const listWritebackTargetsMock = vi.fn();
 const submitExecutionResultMock = vi.fn();
+const getCrmAccountMock = vi.fn();
 const listCrmAccountsMock = vi.fn();
+const listContactsMock = vi.fn();
+const listDealsMock = vi.fn();
 const listCrmActivitiesMock = vi.fn();
+const listCommunicationSuggestionsMock = vi.fn();
 const createActivityMock = vi.fn();
 const markCommunicationSuggestionSentMock = vi.fn();
 const failCommunicationSuggestionMock = vi.fn();
@@ -147,8 +151,12 @@ vi.mock("@corgtex/domain", () => ({
   getCompanyContext: getCompanyContextMock,
   listWritebackTargets: listWritebackTargetsMock,
   submitExecutionResult: submitExecutionResultMock,
+  getCrmAccount: getCrmAccountMock,
   listCrmAccounts: listCrmAccountsMock,
+  listContacts: listContactsMock,
+  listDeals: listDealsMock,
   listCrmActivities: listCrmActivitiesMock,
+  listCommunicationSuggestions: listCommunicationSuggestionsMock,
   createActivity: createActivityMock,
   markCommunicationSuggestionSent: markCommunicationSuggestionSentMock,
   failCommunicationSuggestion: failCommunicationSuggestionMock,
@@ -270,8 +278,18 @@ describe("createCorgtexMcpServer", () => {
     getCompanyContextMock.mockReset().mockResolvedValue({ workspace: { id: "ws-1", name: "Acme" } });
     listWritebackTargetsMock.mockReset().mockResolvedValue({ items: [{ type: "ACTION", id: "action-1", title: "Follow up" }] });
     submitExecutionResultMock.mockReset().mockResolvedValue({ id: "result-1", status: "ACCEPTED" });
+    getCrmAccountMock.mockReset().mockResolvedValue({
+      id: "account-1",
+      name: "Acme Buyers",
+      contacts: [{ id: "contact-1", accountId: "account-1", email: "buyer@example.test" }],
+      deals: [{ id: "deal-1", accountId: "account-1", title: "Pilot" }],
+      activities: [{ id: "activity-1", accountId: "account-1", title: "Follow up" }],
+    });
     listCrmAccountsMock.mockReset().mockResolvedValue({ items: [{ id: "account-1", name: "Acme Buyers" }], total: 1, take: 10, skip: 0 });
-    listCrmActivitiesMock.mockReset().mockResolvedValue({ items: [{ id: "activity-1", title: "Follow up" }], total: 1, take: 10, skip: 0 });
+    listContactsMock.mockReset().mockResolvedValue({ items: [{ id: "contact-1", accountId: "account-1", email: "buyer@example.test" }], total: 1, take: 10, skip: 0 });
+    listDealsMock.mockReset().mockResolvedValue({ items: [{ id: "deal-1", accountId: "account-1", title: "Pilot" }], total: 1, take: 10, skip: 0 });
+    listCrmActivitiesMock.mockReset().mockResolvedValue({ items: [{ id: "activity-1", accountId: "account-1", title: "Follow up" }], total: 1, take: 10, skip: 0 });
+    listCommunicationSuggestionsMock.mockReset().mockResolvedValue({ items: [{ id: "suggestion-1", accountId: "account-1", title: "Send recap" }], total: 1, take: 10, skip: 0 });
     createActivityMock.mockReset().mockResolvedValue({ id: "activity-1", type: "TASK", accountId: "account-1" });
     markCommunicationSuggestionSentMock.mockReset().mockResolvedValue({ id: "suggestion-1", status: "SENT", accountId: "account-1" });
     failCommunicationSuggestionMock.mockReset().mockResolvedValue({ id: "suggestion-1", status: "FAILED", accountId: "account-1" });
@@ -751,7 +769,7 @@ describe("createCorgtexMcpServer", () => {
     });
   });
 
-  it("exposes scoped relationship read tools for accounts and due work", async () => {
+  it("exposes scoped relationship read tools for CRM accounts, contacts, deals, due work, and suggestions", async () => {
     const { createCorgtexMcpServer } = await import("./server");
     const { requireScope } = await import("./auth");
 
@@ -765,15 +783,50 @@ describe("createCorgtexMcpServer", () => {
       query: "Acme",
       take: 10,
     });
+    const accountResponse = await (server as any)._registeredTools.get_relationship_account.handler({
+      accountId: "account-1",
+    });
+    const contactsResponse = await (server as any)._registeredTools.list_relationship_contacts.handler({
+      accountId: "account-1",
+      query: "buyer",
+      take: 10,
+    });
+    const dealsResponse = await (server as any)._registeredTools.list_relationship_deals.handler({
+      accountId: "account-1",
+      contactId: "contact-1",
+      stage: "QUALIFIED",
+      take: 10,
+    });
     const dueWorkResponse = await (server as any)._registeredTools.list_due_relationship_work.handler({
       accountId: "account-1",
       dueTo: "2026-06-03T00:00:00.000Z",
+    });
+    const suggestionsResponse = await (server as any)._registeredTools.list_communication_suggestions.handler({
+      accountId: "account-1",
+      status: "SUGGESTED",
+      take: 10,
     });
 
     expect(vi.mocked(requireScope)).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: "ws-1" }), "relationships:read");
     expect(listCrmAccountsMock).toHaveBeenCalledWith(expect.objectContaining({ kind: "agent" }), "ws-1", {
       query: "Acme",
       take: 10,
+    });
+    expect(getCrmAccountMock).toHaveBeenCalledWith(expect.objectContaining({ kind: "agent" }), {
+      workspaceId: "ws-1",
+      accountId: "account-1",
+    });
+    expect(listContactsMock).toHaveBeenCalledWith(expect.objectContaining({ kind: "agent" }), "ws-1", {
+      accountId: "account-1",
+      query: "buyer",
+      take: 10,
+    });
+    expect(listDealsMock).toHaveBeenCalledWith(expect.objectContaining({ kind: "agent" }), "ws-1", {
+      accountId: "account-1",
+      contactId: "contact-1",
+      stage: "QUALIFIED",
+      take: 10,
+      skip: undefined,
     });
     expect(listCrmActivitiesMock).toHaveBeenCalledWith(expect.objectContaining({ kind: "agent" }), "ws-1", expect.objectContaining({
       accountId: "account-1",
@@ -782,13 +835,38 @@ describe("createCorgtexMcpServer", () => {
       sort: "due",
       dueTo: new Date("2026-06-03T00:00:00.000Z"),
     }));
+    expect(listCommunicationSuggestionsMock).toHaveBeenCalledWith(expect.objectContaining({ kind: "agent" }), "ws-1", {
+      accountId: "account-1",
+      status: "SUGGESTED",
+      take: 10,
+    });
     expect(JSON.parse(accountsResponse.content[0].text)).toMatchObject({
-      items: [{ id: "account-1", name: "Acme Buyers" }],
+      items: [{ id: "account-1", name: "Acme Buyers", webUrl: "https://app.test/workspaces/ws-1/leads/accounts/account-1" }],
       webUrl: "https://app.test/workspaces/ws-1/leads?view=accounts",
     });
+    expect(JSON.parse(accountResponse.content[0].text)).toMatchObject({
+      account: {
+        id: "account-1",
+        webUrl: "https://app.test/workspaces/ws-1/leads/accounts/account-1",
+        contacts: [{ id: "contact-1", webUrl: "https://app.test/workspaces/ws-1/leads/accounts/account-1?view=contacts" }],
+        deals: [{ id: "deal-1", webUrl: "https://app.test/workspaces/ws-1/leads/accounts/account-1?view=pipeline" }],
+      },
+    });
+    expect(JSON.parse(contactsResponse.content[0].text)).toMatchObject({
+      items: [{ id: "contact-1", webUrl: "https://app.test/workspaces/ws-1/leads/accounts/account-1?view=contacts" }],
+      webUrl: "https://app.test/workspaces/ws-1/leads/accounts/account-1?view=contacts",
+    });
+    expect(JSON.parse(dealsResponse.content[0].text)).toMatchObject({
+      items: [{ id: "deal-1", webUrl: "https://app.test/workspaces/ws-1/leads/accounts/account-1?view=pipeline" }],
+      webUrl: "https://app.test/workspaces/ws-1/leads/accounts/account-1?view=pipeline",
+    });
     expect(JSON.parse(dueWorkResponse.content[0].text)).toMatchObject({
-      items: [{ id: "activity-1", title: "Follow up" }],
+      items: [{ id: "activity-1", title: "Follow up", webUrl: "https://app.test/workspaces/ws-1/leads/accounts/account-1?view=activity" }],
       webUrl: "https://app.test/workspaces/ws-1/leads?view=activity",
+    });
+    expect(JSON.parse(suggestionsResponse.content[0].text)).toMatchObject({
+      items: [{ id: "suggestion-1", webUrl: "https://app.test/workspaces/ws-1/leads/accounts/account-1?view=suggestions" }],
+      webUrl: "https://app.test/workspaces/ws-1/leads/accounts/account-1?view=suggestions",
     });
   });
 

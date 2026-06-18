@@ -130,8 +130,12 @@ import {
   getCompanyContext,
   listWritebackTargets,
   submitExecutionResult,
+  getCrmAccount,
   listCrmAccounts,
+  listContacts,
+  listDeals,
   listCrmActivities,
+  listCommunicationSuggestions,
   createActivity,
   markCommunicationSuggestionSent,
   failCommunicationSuggestion,
@@ -156,6 +160,49 @@ import { requireScope } from "./auth";
 function webUrl(workspaceId: string, path: string): string {
   const origin = env.APP_URL.replace(/\/$/, "");
   return `${origin}/workspaces/${workspaceId}${path}`;
+}
+
+function accountWebUrl(workspaceId: string, accountId: string, view?: string) {
+  return webUrl(workspaceId, `/leads/accounts/${accountId}${view ? `?view=${view}` : ""}`);
+}
+
+function relationshipAccountRecord(workspaceId: string, account: any) {
+  return {
+    ...account,
+    webUrl: accountWebUrl(workspaceId, account.id),
+  };
+}
+
+function relationshipContactRecord(workspaceId: string, contact: any) {
+  const accountId = contact.accountId ?? contact.account?.id ?? null;
+  return {
+    ...contact,
+    webUrl: accountId ? accountWebUrl(workspaceId, accountId, "contacts") : webUrl(workspaceId, "/leads?view=accounts"),
+  };
+}
+
+function relationshipDealRecord(workspaceId: string, deal: any) {
+  const accountId = deal.accountId ?? deal.account?.id ?? null;
+  return {
+    ...deal,
+    webUrl: accountId ? accountWebUrl(workspaceId, accountId, "pipeline") : webUrl(workspaceId, "/leads/pipeline"),
+  };
+}
+
+function relationshipActivityRecord(workspaceId: string, activity: any) {
+  const accountId = activity.accountId ?? activity.account?.id ?? null;
+  return {
+    ...activity,
+    webUrl: accountId ? accountWebUrl(workspaceId, accountId, "activity") : webUrl(workspaceId, "/leads/activity"),
+  };
+}
+
+function relationshipSuggestionRecord(workspaceId: string, suggestion: any) {
+  const accountId = suggestion.accountId ?? suggestion.account?.id ?? null;
+  return {
+    ...suggestion,
+    webUrl: accountId ? accountWebUrl(workspaceId, accountId, "suggestions") : webUrl(workspaceId, "/leads/suggestions"),
+  };
 }
 
 function jsonResult(value: unknown) {
@@ -241,7 +288,11 @@ const TOOL_CAPABILITIES = {
   list_writeback_targets: { scopes: ["execution:read"] },
   submit_execution_result: { scopes: ["execution:write"] },
   list_relationship_accounts: { scopes: ["relationships:read"] },
+  get_relationship_account: { scopes: ["relationships:read"] },
+  list_relationship_contacts: { scopes: ["relationships:read"] },
+  list_relationship_deals: { scopes: ["relationships:read"] },
   list_due_relationship_work: { scopes: ["relationships:read"] },
+  list_communication_suggestions: { scopes: ["relationships:read"] },
   record_relationship_activity: { scopes: ["relationships:write"] },
   complete_communication_suggestion: { scopes: ["relationships:write"] },
   record_support_audit: { scopes: ["support:write"], sensitive: true },
@@ -1358,7 +1409,83 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
       const result = await listCrmAccounts(actor, workspaceId, params);
       return structuredJsonResult({
         ...result,
+        items: result.items.map((account: any) => relationshipAccountRecord(workspaceId, account)),
         webUrl: webUrl(workspaceId, "/leads?view=accounts"),
+      });
+    },
+  );
+
+  tool(
+    "get_relationship_account",
+    "Get one CRM relationship account with contacts, deals, activity, conversations, stable IDs, and app deep links.",
+    {
+      accountId: z.string(),
+    },
+    async (params: { accountId: string }) => {
+      requireToolCapability("get_relationship_account");
+      const account = await getCrmAccount(actor, { workspaceId, accountId: params.accountId });
+      const accountRecord = relationshipAccountRecord(workspaceId, {
+        ...account,
+        contacts: Array.isArray(account.contacts)
+          ? account.contacts.map((contact: any) => relationshipContactRecord(workspaceId, { ...contact, accountId: contact.accountId ?? account.id, account }))
+          : [],
+        deals: Array.isArray(account.deals)
+          ? account.deals.map((deal: any) => relationshipDealRecord(workspaceId, { ...deal, accountId: deal.accountId ?? account.id, account }))
+          : [],
+        activities: Array.isArray(account.activities)
+          ? account.activities.map((activity: any) => relationshipActivityRecord(workspaceId, { ...activity, accountId: activity.accountId ?? account.id, account }))
+          : [],
+      });
+      return structuredJsonResult({
+        account: accountRecord,
+        webUrl: accountRecord.webUrl,
+      });
+    },
+  );
+
+  tool(
+    "list_relationship_contacts",
+    "List CRM relationship contacts with account context, stable IDs, and app deep links.",
+    {
+      accountId: z.string().optional(),
+      query: z.string().optional(),
+      take: z.number().optional(),
+      skip: z.number().optional(),
+    },
+    async (params: { accountId?: string; query?: string; take?: number; skip?: number }) => {
+      requireToolCapability("list_relationship_contacts");
+      const result = await listContacts(actor, workspaceId, params);
+      return structuredJsonResult({
+        ...result,
+        items: result.items.map((contact: any) => relationshipContactRecord(workspaceId, contact)),
+        webUrl: params.accountId ? accountWebUrl(workspaceId, params.accountId, "contacts") : webUrl(workspaceId, "/leads?view=accounts"),
+      });
+    },
+  );
+
+  tool(
+    "list_relationship_deals",
+    "List CRM relationship deals with account/contact context, stable IDs, and app deep links.",
+    {
+      accountId: z.string().optional(),
+      contactId: z.string().optional(),
+      stage: z.string().optional(),
+      take: z.number().optional(),
+      skip: z.number().optional(),
+    },
+    async (params: { accountId?: string; contactId?: string; stage?: string; take?: number; skip?: number }) => {
+      requireToolCapability("list_relationship_deals");
+      const result = await listDeals(actor, workspaceId, {
+        accountId: params.accountId,
+        contactId: params.contactId,
+        stage: params.stage as any,
+        take: params.take,
+        skip: params.skip,
+      });
+      return structuredJsonResult({
+        ...result,
+        items: result.items.map((deal: any) => relationshipDealRecord(workspaceId, deal)),
+        webUrl: params.accountId ? accountWebUrl(workspaceId, params.accountId, "pipeline") : webUrl(workspaceId, "/leads/pipeline"),
       });
     },
   );
@@ -1402,7 +1529,41 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
       });
       return structuredJsonResult({
         ...result,
+        items: result.items.map((activity: any) => relationshipActivityRecord(workspaceId, activity)),
         webUrl: webUrl(workspaceId, "/leads?view=activity"),
+      });
+    },
+  );
+
+  tool(
+    "list_communication_suggestions",
+    "List CRM communication suggestions for external drafting or follow-up planning. This reads suggestions only; it does not send email.",
+    {
+      accountId: z.string().optional(),
+      contactId: z.string().optional(),
+      dealId: z.string().optional(),
+      activityId: z.string().optional(),
+      ownerUserId: z.string().optional(),
+      status: z.string().optional(),
+      take: z.number().optional(),
+      skip: z.number().optional(),
+    },
+    async (params: {
+      accountId?: string;
+      contactId?: string;
+      dealId?: string;
+      activityId?: string;
+      ownerUserId?: string;
+      status?: string;
+      take?: number;
+      skip?: number;
+    }) => {
+      requireToolCapability("list_communication_suggestions");
+      const result = await listCommunicationSuggestions(actor, workspaceId, params);
+      return structuredJsonResult({
+        ...result,
+        items: result.items.map((suggestion: any) => relationshipSuggestionRecord(workspaceId, suggestion)),
+        webUrl: params.accountId ? accountWebUrl(workspaceId, params.accountId, "suggestions") : webUrl(workspaceId, "/leads/suggestions"),
       });
     },
   );

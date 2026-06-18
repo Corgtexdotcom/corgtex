@@ -52,6 +52,7 @@ vi.mock("@corgtex/shared", () => {
         findFirst: vi.fn(),
         findUnique: vi.fn(),
         findMany: vi.fn(),
+        count: vi.fn(),
         create: vi.fn(),
         update: vi.fn(),
         updateMany: vi.fn(),
@@ -932,6 +933,56 @@ describe("CRM domain", () => {
         take: 5,
       }));
       expect(result.total).toBe(1);
+    });
+  });
+
+  describe("relationship lists", () => {
+    it("filters contacts and deals by linked relationship ids", async () => {
+      const { prisma } = await import("@corgtex/shared");
+      const { requireWorkspaceMembership } = await import("./auth");
+      const { listContacts, listDeals } = await import("./crm");
+
+      vi.mocked(prisma.crmContact.findMany).mockResolvedValue([
+        { id: "contact-1", workspaceId: "ws-1", accountId: "account-1", email: "buyer@example.test" },
+      ] as any);
+      vi.mocked(prisma.crmContact.count).mockResolvedValue(1);
+      vi.mocked(prisma.crmDeal.findMany).mockResolvedValue([
+        { id: "deal-1", workspaceId: "ws-1", accountId: "account-1", contactId: "contact-1", stage: "QUALIFIED" },
+      ] as any);
+      vi.mocked(prisma.crmDeal.count).mockResolvedValue(1);
+
+      const contacts = await listContacts(dummyActor, "ws-1", {
+        accountId: "account-1",
+        query: "buyer",
+        take: 5,
+      });
+      const deals = await listDeals(dummyActor, "ws-1", {
+        accountId: "account-1",
+        contactId: "contact-1",
+        stage: "QUALIFIED" as any,
+        take: 7,
+      });
+
+      expect(requireWorkspaceMembership).toHaveBeenCalledWith({ actor: dummyActor, workspaceId: "ws-1" });
+      expect(prisma.crmContact.findMany).toHaveBeenCalledWith(expect.objectContaining({
+        where: expect.objectContaining({
+          workspaceId: "ws-1",
+          accountId: "account-1",
+          OR: expect.any(Array),
+        }),
+        take: 5,
+      }));
+      expect(prisma.crmDeal.findMany).toHaveBeenCalledWith(expect.objectContaining({
+        where: expect.objectContaining({
+          workspaceId: "ws-1",
+          accountId: "account-1",
+          contactId: "contact-1",
+          stage: "QUALIFIED",
+        }),
+        take: 7,
+      }));
+      expect(contacts.total).toBe(1);
+      expect(deals.total).toBe(1);
     });
   });
 
