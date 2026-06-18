@@ -15,6 +15,8 @@ export type RelationshipView = (typeof RELATIONSHIP_VIEWS)[number];
 export const RELATIONSHIP_FULL_PAGE_VIEWS = [
   "accounts",
   "pipeline",
+  "activity",
+  "suggestions",
 ] as const;
 
 export type RelationshipFullPageView = (typeof RELATIONSHIP_FULL_PAGE_VIEWS)[number];
