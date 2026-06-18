@@ -3651,6 +3651,9 @@ model CrmActivity {
   title             String
   bodyMd            String?         @db.Text
   source            String          @default("manual")
+  sourceExternalId  String?
+  sourceUrl         String?
+  sourceOccurredAt  DateTime?
   dueAt             DateTime?
   completedAt       DateTime?
   createdAt         DateTime        @default(now())
@@ -3661,10 +3664,12 @@ model CrmActivity {
   deal                     CrmDeal?                     @relation(fields: [dealId], references: [id], onDelete: Cascade)
   communicationSuggestions CrmCommunicationSuggestion[]
 
+  @@unique([workspaceId, source, sourceExternalId])
   @@index([workspaceId, createdAt])
   @@index([workspaceId, type, dueAt])
   @@index([workspaceId, completedAt])
   @@index([workspaceId, ownerUserId, dueAt])
+  @@index([workspaceId, source, sourceOccurredAt])
   @@index([accountId])
   @@index([contactId])
   @@index([dealId])
@@ -4243,6 +4248,9 @@ enum MeetingInsightType {
   PROPOSAL
   FOLLOW_UP
   DELIBERATION_ENTRY
+  CRM_CONTACT
+  CRM_DEAL
+  CRM_ACTIVITY
 }
 
 enum MeetingInsightStatus {
@@ -4310,6 +4318,7 @@ model MeetingInsight {
   deliberationEntryType String?
   resolutionOutcome     ProposalResolutionOutcome?
   dedupeKey             String?
+  metadataJson          Json                       @default("{}")
   autoAppliedAt         DateTime?
   autoApplyError        String?
 
@@ -4553,16 +4562,20 @@ model CrmQualification {
 }
 
 model CrmConversation {
-  id          String   @id @default(uuid())
-  workspaceId String
-  accountId   String?
-  demoLeadId  String?
-  contactId   String?
-  dealId      String?
-  subject     String?
-  status      String   @default("OPEN") // OPEN, CLOSED, SNOOZED
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  id               String    @id @default(uuid())
+  workspaceId      String
+  accountId        String?
+  demoLeadId       String?
+  contactId        String?
+  dealId           String?
+  subject          String?
+  status           String    @default("OPEN") // OPEN, CLOSED, SNOOZED
+  source           String    @default("manual")
+  sourceExternalId String?
+  sourceUrl        String?
+  sourceOccurredAt DateTime?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
 
   workspace Workspace                @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   account   CrmAccount?              @relation(fields: [accountId], references: [id], onDelete: SetNull)
@@ -4571,7 +4584,9 @@ model CrmConversation {
   deal      CrmDeal?                 @relation(fields: [dealId], references: [id], onDelete: SetNull)
   messages  CrmConversationMessage[]
 
+  @@unique([workspaceId, source, sourceExternalId])
   @@index([workspaceId, status])
+  @@index([workspaceId, source, sourceOccurredAt])
   @@index([accountId])
   @@index([demoLeadId])
   @@index([contactId])

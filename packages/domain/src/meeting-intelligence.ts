@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { CrmActivityType } from "@prisma/client";
 import type { MeetingInsightType, MeetingInsight, MeetingInsightOperation, Prisma, ProposalResolutionOutcome } from "@prisma/client";
 import { prisma, type AppActor } from "@corgtex/shared";
 import { requireWorkspaceMembership } from "./auth";
@@ -8,6 +9,8 @@ import { createAction, updateAction } from "./actions";
 import { createTension, updateTension } from "./tensions";
 import { createProposal, createProposalFromTension, resolveProposal, submitProposal } from "./proposals";
 import { postDeliberationEntry } from "./deliberation";
+import { createActivity, createContact, createDeal } from "./crm";
+import { createCrmMeetingReviewInsights, crmInsightPayload, requireCrmInsightEmail } from "./crm-information-gathering";
 import { buildMeetingIntelligenceContext } from "./meeting-intelligence-context";
 import { shouldBypassAutoApplyForSlackMeetingActionReview } from "./meeting-action-review";
 import {
@@ -32,6 +35,9 @@ const MEETING_INSIGHT_TYPES = new Set<MeetingInsightType>([
   "PROPOSAL",
   "FOLLOW_UP",
   "DELIBERATION_ENTRY",
+  "CRM_CONTACT",
+  "CRM_DEAL",
+  "CRM_ACTIVITY",
 ]);
 const MEETING_INSIGHT_TYPE_ALIASES: Record<string, MeetingInsightType> = {
   ACTION: "ACTION_ITEM",
@@ -47,6 +53,20 @@ const MEETING_INSIGHT_TYPE_ALIASES: Record<string, MeetingInsightType> = {
   DISCUSSION: "DELIBERATION_ENTRY",
   DISCUSSION_NOTE: "DELIBERATION_ENTRY",
   TENSIONS: "TENSION",
+  CRMCONTACT: "CRM_CONTACT",
+  CRM_CONTACTS: "CRM_CONTACT",
+  CONTACT: "CRM_CONTACT",
+  CONTACTS: "CRM_CONTACT",
+  CRMDEAL: "CRM_DEAL",
+  CRM_DEALS: "CRM_DEAL",
+  DEAL: "CRM_DEAL",
+  DEALS: "CRM_DEAL",
+  OPPORTUNITY: "CRM_DEAL",
+  OPPORTUNITIES: "CRM_DEAL",
+  CRM_ACTIVITY: "CRM_ACTIVITY",
+  CRM_ACTIVITIES: "CRM_ACTIVITY",
+  RELATIONSHIP_ACTIVITY: "CRM_ACTIVITY",
+  RELATIONSHIP_FOLLOW_UP: "CRM_ACTIVITY",
 };
 const RESOLUTION_OUTCOMES = new Set<ProposalResolutionOutcome>([
   "ADOPTED",
@@ -380,6 +400,17 @@ function isActiveReviewableInsight(insight: Pick<MeetingInsight, "status" | "sup
   return (insight.status === "SUGGESTED" || insight.status === "CONFIRMED") && !insight.supersededAt;
 }
 
+function isCrmInsightType(type: MeetingInsightType) {
+  return type === "CRM_CONTACT" || type === "CRM_DEAL" || type === "CRM_ACTIVITY";
+}
+
+function normalizeCrmActivityType(value: string | null | undefined) {
+  const normalized = value?.trim().toUpperCase().replace(/[\s-]+/g, "_") || "NOTE";
+  return Object.values(CrmActivityType).includes(normalized as CrmActivityType)
+    ? normalized as CrmActivityType
+    : CrmActivityType.NOTE;
+}
+
 export async function extractMeetingInsights(
   actor: AppActor,
   params: { workspaceId: string; meetingId: string }
@@ -446,6 +477,9 @@ Extract all:
 - FOLLOW_UPS: Items that need to be discussed in the next meeting
 - DELIBERATION_ENTRIES: Notes about discussion on an existing proposal or tension
 - RESOLUTIONS: existing actions, tensions, or proposals that the meeting clearly completed, resolved, adopted, rejected, or withdrew
+- CRM_CONTACTS: External customer, partner, vendor, investor, or prospect contacts that should be reviewed for Relationships
+- CRM_DEALS: Customer/prospect opportunities, pilots, proposals, expansion, or commercial conversion signals that should be reviewed for Relationships
+- CRM_ACTIVITIES: Relationship timeline notes, meeting logs, reminders, or follow-up tasks that should be reviewed for Relationships
 
 Use any user-provided ingestion guidance to prioritize what matters and what follow-up work the operator wanted highlighted. Treat guidance as trusted operator context for spelling, name, and terminology corrections. When guidance corrects a transcript term, use the corrected term in titles and body text. Do not invent new decisions, tasks, tensions, proposals, or resolutions from guidance alone. If an item mainly comes from guidance rather than transcript evidence, say that clearly in the body and leave sourceQuote null.
 Correct meeting transcript drift where Cortex means Corgtex. Use Corgtex in human-facing titles, bodies, source quotes, and meeting block labels.
@@ -455,10 +489,11 @@ Use meetingBlocks as the conversation map. Assign each extracted item to the mos
 Treat owner-backed commitments as ACTION_ITEM items even when they appear in summaryMd, key takeaways, action item sections, or indirect transcript wording. If someone says they will do something, needs to contact someone, owns a follow-up, or must prepare a next step, extract a concrete ACTION_ITEM with that owner when the evidence is clear.
 Treat team-update, scorecard, round-robin, department update, and status update sections as extraction-relevant. Do not drop action items, tensions, proposals, or follow-ups just because they are inside an update section.
 For team-scoped action items, extract one collective ACTION_ITEM with assigneeHint such as "Team members" or "Workspace team"; do not duplicate one action per person unless each person has a distinct named responsibility. If a coordinator owns setup and the team must self-select or pick up work, extract the coordinator action separately from the team-scoped follow-up. Do not create action items for vague awareness, general monitoring, or "keep in mind" language unless there is a concrete next step.
+CRM items are review suggestions only. Do not imply Corgtex sent an email. Use CRM_CONTACT when the participant/contact should be reviewed, CRM_DEAL when there is a commercial opportunity/pilot/proposal/expansion signal, and CRM_ACTIVITY when there is a relationship timeline entry or follow-up reminder. Put structured CRM fields under crm.
 
 For each item, provide:
 - operation: CREATE for new records/decisions/follow-ups, RESOLVE for existing records resolved in this meeting
-- type: one of DECISION, TENSION, ACTION_ITEM, PROPOSAL, FOLLOW_UP, DELIBERATION_ENTRY
+- type: one of DECISION, TENSION, ACTION_ITEM, PROPOSAL, FOLLOW_UP, DELIBERATION_ENTRY, CRM_CONTACT, CRM_DEAL, CRM_ACTIVITY
 - title: a concise human title with no generated item number, no # prefix, and no ">" separator
 - body: human-first Markdown, not machine metadata. Do not use all-caps labels like CONTEXT, REQUEST, ANSWER, RESULT, MEETING BLOCK, or BLOCK KIND.
   For TENSION items, structure the body around current reality, gap / desired future, why it matters, and likely processing path.
@@ -475,6 +510,7 @@ For each item, provide:
 - resolutionOutcome only for resolved proposals: ADOPTED, NOT_ADOPTED, or WITHDRAWN
 - blockSequence, blockTitle, and blockKind for the meeting block that produced this item
 - dedupeKey: stable lowercase key based on type, target, and the discussed topic
+- crm for CRM_* items only: email, name, company, accountId, contactId, dealTitle, valueCents, currency, activityType (MEETING, NOTE, TASK, EMAIL, CALL), and source when known
 
 Be conservative — only extract items you're confident about.
 `;
@@ -488,7 +524,7 @@ Be conservative — only extract items you're confident about.
       "items": {
         "type": "object",
         "properties": {
-          "type": { "type": "string", "enum": ["DECISION", "TENSION", "ACTION_ITEM", "PROPOSAL", "FOLLOW_UP", "DELIBERATION_ENTRY"] },
+          "type": { "type": "string", "enum": ["DECISION", "TENSION", "ACTION_ITEM", "PROPOSAL", "FOLLOW_UP", "DELIBERATION_ENTRY", "CRM_CONTACT", "CRM_DEAL", "CRM_ACTIVITY"] },
           "operation": { "type": "string", "enum": ["CREATE", "RESOLVE"] },
           "title": { "type": "string" },
           "body": { "type": "string" },
@@ -503,7 +539,22 @@ Be conservative — only extract items you're confident about.
           "blockSequence": { "type": "number" },
           "blockTitle": { "type": "string" },
           "blockKind": { "type": "string" },
-          "dedupeKey": { "type": "string" }
+          "dedupeKey": { "type": "string" },
+          "crm": {
+            "type": "object",
+            "properties": {
+              "email": { "type": "string" },
+              "name": { "type": "string" },
+              "company": { "type": "string" },
+              "accountId": { "type": "string" },
+              "contactId": { "type": "string" },
+              "dealTitle": { "type": "string" },
+              "valueCents": { "type": "number" },
+              "currency": { "type": "string" },
+              "activityType": { "type": "string", "enum": ["MEETING", "NOTE", "TASK", "EMAIL", "CALL"] },
+              "source": { "type": "string" }
+            }
+          }
         },
         "required": ["type", "title", "body", "confidence"]
       }
@@ -574,7 +625,7 @@ Be conservative — only extract items you're confident about.
     .filter((item: { id: string; status: string }) => item.status === "OPEN")
     .map((item: { id: string }) => item.id));
 
-  return prisma.$transaction(async (tx: Prisma.TransactionClient) => {
+  const extractedInsights = await prisma.$transaction(async (tx: Prisma.TransactionClient) => {
     const createdInsights: MeetingInsight[] = [];
     const seenDedupeKeys = new Set<string>();
 
@@ -644,6 +695,9 @@ Be conservative — only extract items you're confident about.
       const sourceDedupeKey = latestSourceRecord ? `${dedupeKey}:source:${latestSourceRecord.id}` : dedupeKey;
       if (seenDedupeKeys.has(sourceDedupeKey)) continue;
       seenDedupeKeys.add(sourceDedupeKey);
+      const crm = item.crm && typeof item.crm === "object" && !Array.isArray(item.crm)
+        ? item.crm as Record<string, unknown>
+        : null;
 
       const insightData = {
         meetingId: meeting.id,
@@ -654,7 +708,7 @@ Be conservative — only extract items you're confident about.
         title,
         bodyMd,
         assigneeHint: typeof item.assigneeHint === "string" ? item.assigneeHint.trim() || null : null,
-        dueAt: type === "ACTION_ITEM" || type === "FOLLOW_UP" ? normalizeDueAt(item.dueAt ?? item.dueDate) : null,
+        dueAt: type === "ACTION_ITEM" || type === "FOLLOW_UP" || type === "CRM_ACTIVITY" ? normalizeDueAt(item.dueAt ?? item.dueDate) : null,
         confidence: typeof item.confidence === "number" ? item.confidence : 0,
         sourceQuote: typeof item.sourceQuote === "string" ? normalizeMeetingProductTerminology(item.sourceQuote).slice(0, 200) : null,
         targetEntityType: keepTarget ? targetEntityType : null,
@@ -662,6 +716,7 @@ Be conservative — only extract items you're confident about.
         deliberationEntryType,
         resolutionOutcome,
         dedupeKey: sourceDedupeKey,
+        metadataJson: (isCrmInsightType(type) && crm ? { crm } : {}) as Prisma.InputJsonValue,
         sourceRecordId: latestSourceRecord?.id ?? null,
         sourceRecordedAt: latestSourceRecord?.recordedAt ?? meeting.recordedAt ?? null,
       };
@@ -751,6 +806,11 @@ Be conservative — only extract items you're confident about.
 
     return createdInsights;
   });
+  const crmInsights = await createCrmMeetingReviewInsights({
+    workspaceId: params.workspaceId,
+    meetingId: meeting.id,
+  });
+  return [...extractedInsights, ...crmInsights];
 }
 
 export async function confirmInsight(
@@ -931,6 +991,47 @@ export async function applyInsight(
       appliedEntityType = "Proposal";
       appliedEntityId = insight.targetEntityId;
     }
+  } else if (insight.type === "CRM_CONTACT") {
+    const crm = crmInsightPayload(insight.metadataJson);
+    const email = requireCrmInsightEmail(crm);
+    const contact = await createContact(actor, {
+      workspaceId: params.workspaceId,
+      email,
+      name: crm.name,
+      company: crm.company,
+      accountId: crm.accountId,
+      source: crm.source || "meeting_intelligence",
+    });
+    appliedEntityType = "CrmContact";
+    appliedEntityId = contact.id;
+  } else if (insight.type === "CRM_DEAL") {
+    const crm = crmInsightPayload(insight.metadataJson);
+    invariant(crm.contactId, 400, "INVALID_INPUT", "CRM deal insight requires a contact.");
+    const deal = await createDeal(actor, {
+      workspaceId: params.workspaceId,
+      contactId: crm.contactId,
+      accountId: crm.accountId,
+      title: crm.dealTitle || insight.title,
+      valueCents: crm.valueCents,
+      currency: crm.currency || "USD",
+    });
+    appliedEntityType = "CrmDeal";
+    appliedEntityId = deal.id;
+  } else if (insight.type === "CRM_ACTIVITY") {
+    const crm = crmInsightPayload(insight.metadataJson);
+    const activity = await createActivity(actor, {
+      workspaceId: params.workspaceId,
+      accountId: crm.accountId,
+      contactId: crm.contactId,
+      dealId: crm.dealId,
+      title: insight.title,
+      bodyMd: fullBody,
+      type: normalizeCrmActivityType(crm.activityType),
+      source: crm.source || "meeting_intelligence",
+      dueAt: normalizeCrmActivityType(crm.activityType) === CrmActivityType.TASK ? insight.dueAt ?? null : null,
+    });
+    appliedEntityType = "CrmActivity";
+    appliedEntityId = activity.id;
   } else if (insight.type === "DECISION") {
     appliedEntityType = "Decision";
     
@@ -1080,6 +1181,10 @@ export async function autoApplyMeetingInsights(
       continue;
     }
     if (!hasMeetingEvidenceForAutoApply(insight)) {
+      skipped++;
+      continue;
+    }
+    if (isCrmInsightType(insight.type)) {
       skipped++;
       continue;
     }

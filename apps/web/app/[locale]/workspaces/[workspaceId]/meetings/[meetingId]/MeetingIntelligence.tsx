@@ -146,6 +146,9 @@ export default function MeetingIntelligence({
     PROPOSAL: t("insightType.proposal"),
     FOLLOW_UP: t("insightType.follow_up"),
     DELIBERATION_ENTRY: t("insightType.deliberation_entry"),
+    CRM_CONTACT: t("insightType.crm_contact"),
+    CRM_DEAL: t("insightType.crm_deal"),
+    CRM_ACTIVITY: t("insightType.crm_activity"),
   };
 
   const buckets: InsightBucket[] = [
