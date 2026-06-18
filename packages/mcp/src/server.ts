@@ -137,6 +137,8 @@ import {
   listCrmActivities,
   listCommunicationSuggestions,
   createActivity,
+  completeActivity,
+  createCommunicationSuggestion,
   markCommunicationSuggestionSent,
   failCommunicationSuggestion,
   createConversationMessage,
@@ -294,6 +296,8 @@ const TOOL_CAPABILITIES = {
   list_due_relationship_work: { scopes: ["relationships:read"] },
   list_communication_suggestions: { scopes: ["relationships:read"] },
   record_relationship_activity: { scopes: ["relationships:write"] },
+  complete_relationship_activity: { scopes: ["relationships:write"] },
+  create_communication_suggestion: { scopes: ["relationships:write"] },
   complete_communication_suggestion: { scopes: ["relationships:write"] },
   record_support_audit: { scopes: ["support:write"], sensitive: true },
   list_integrations: { scopes: ["integrations:read"] },
@@ -1613,6 +1617,85 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
         id: activity.id,
         type: activity.type,
         webUrl: webUrl(workspaceId, activity.accountId ? `/leads/accounts/${activity.accountId}?view=activity` : "/leads?view=activity"),
+      });
+    },
+  );
+
+  tool(
+    "complete_relationship_activity",
+    "Complete a CRM relationship activity or follow-up reminder. This closes tracked work only; it does not send email.",
+    {
+      activityId: z.string(),
+      completedAt: z.string().optional().describe("Optional ISO completion timestamp"),
+    },
+    async (params: { activityId: string; completedAt?: string }) => {
+      requireToolCapability("complete_relationship_activity");
+      const activity = await completeActivity(actor, {
+        workspaceId,
+        activityId: params.activityId,
+        completedAt: params.completedAt ? new Date(params.completedAt) : undefined,
+      });
+      const activityRecord = relationshipActivityRecord(workspaceId, activity);
+      return jsonResult({
+        id: activityRecord.id,
+        completedAt: activityRecord.completedAt,
+        webUrl: activityRecord.webUrl,
+      });
+    },
+  );
+
+  tool(
+    "create_communication_suggestion",
+    "Create a CRM communication suggestion draft for external review or execution. Corgtex stores the suggestion only; it does not send email.",
+    {
+      title: z.string(),
+      bodyMd: z.string(),
+      subject: z.string().optional(),
+      recipientEmail: z.string().optional(),
+      recipientName: z.string().optional(),
+      channel: z.string().optional(),
+      ownerUserId: z.string().optional(),
+      accountId: z.string().optional(),
+      contactId: z.string().optional(),
+      dealId: z.string().optional(),
+      activityId: z.string().optional(),
+      source: z.string().optional(),
+    },
+    async (params: {
+      title: string;
+      bodyMd: string;
+      subject?: string;
+      recipientEmail?: string;
+      recipientName?: string;
+      channel?: string;
+      ownerUserId?: string;
+      accountId?: string;
+      contactId?: string;
+      dealId?: string;
+      activityId?: string;
+      source?: string;
+    }) => {
+      requireToolCapability("create_communication_suggestion");
+      const suggestion = await createCommunicationSuggestion(actor, {
+        workspaceId,
+        title: params.title,
+        bodyMd: params.bodyMd,
+        subject: params.subject,
+        recipientEmail: params.recipientEmail,
+        recipientName: params.recipientName,
+        channel: params.channel,
+        ownerUserId: params.ownerUserId,
+        accountId: params.accountId,
+        contactId: params.contactId,
+        dealId: params.dealId,
+        activityId: params.activityId,
+        source: params.source ?? "mcp",
+      });
+      const suggestionRecord = relationshipSuggestionRecord(workspaceId, suggestion);
+      return jsonResult({
+        id: suggestionRecord.id,
+        status: suggestionRecord.status,
+        webUrl: suggestionRecord.webUrl,
       });
     },
   );

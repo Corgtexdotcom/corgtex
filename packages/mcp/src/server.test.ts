@@ -47,6 +47,8 @@ const listDealsMock = vi.fn();
 const listCrmActivitiesMock = vi.fn();
 const listCommunicationSuggestionsMock = vi.fn();
 const createActivityMock = vi.fn();
+const completeActivityMock = vi.fn();
+const createCommunicationSuggestionMock = vi.fn();
 const markCommunicationSuggestionSentMock = vi.fn();
 const failCommunicationSuggestionMock = vi.fn();
 const createConversationMessageMock = vi.fn();
@@ -158,6 +160,8 @@ vi.mock("@corgtex/domain", () => ({
   listCrmActivities: listCrmActivitiesMock,
   listCommunicationSuggestions: listCommunicationSuggestionsMock,
   createActivity: createActivityMock,
+  completeActivity: completeActivityMock,
+  createCommunicationSuggestion: createCommunicationSuggestionMock,
   markCommunicationSuggestionSent: markCommunicationSuggestionSentMock,
   failCommunicationSuggestion: failCommunicationSuggestionMock,
   createConversationMessage: createConversationMessageMock,
@@ -291,6 +295,8 @@ describe("createCorgtexMcpServer", () => {
     listCrmActivitiesMock.mockReset().mockResolvedValue({ items: [{ id: "activity-1", accountId: "account-1", title: "Follow up" }], total: 1, take: 10, skip: 0 });
     listCommunicationSuggestionsMock.mockReset().mockResolvedValue({ items: [{ id: "suggestion-1", accountId: "account-1", title: "Send recap" }], total: 1, take: 10, skip: 0 });
     createActivityMock.mockReset().mockResolvedValue({ id: "activity-1", type: "TASK", accountId: "account-1" });
+    completeActivityMock.mockReset().mockResolvedValue({ id: "activity-1", type: "TASK", accountId: "account-1", completedAt: new Date("2026-06-05T09:00:00.000Z") });
+    createCommunicationSuggestionMock.mockReset().mockResolvedValue({ id: "suggestion-2", status: "SUGGESTED", accountId: "account-1" });
     markCommunicationSuggestionSentMock.mockReset().mockResolvedValue({ id: "suggestion-1", status: "SENT", accountId: "account-1" });
     failCommunicationSuggestionMock.mockReset().mockResolvedValue({ id: "suggestion-1", status: "FAILED", accountId: "account-1" });
     createConversationMessageMock.mockReset().mockResolvedValue({ id: "message-1" });
@@ -886,6 +892,18 @@ describe("createCorgtexMcpServer", () => {
       accountId: "account-1",
       dueAt: "2026-06-04T00:00:00.000Z",
     });
+    const completedActivityResponse = await (server as any)._registeredTools.complete_relationship_activity.handler({
+      activityId: "activity-1",
+      completedAt: "2026-06-05T09:00:00.000Z",
+    });
+    const suggestionDraftResponse = await (server as any)._registeredTools.create_communication_suggestion.handler({
+      title: "Draft pilot recap",
+      bodyMd: "Draft only. Do not send.",
+      subject: "Pilot recap",
+      accountId: "account-1",
+      contactId: "contact-1",
+      dealId: "deal-1",
+    });
     const completeResponse = await (server as any)._registeredTools.complete_communication_suggestion.handler({
       suggestionId: "suggestion-1",
       status: "SENT",
@@ -903,6 +921,26 @@ describe("createCorgtexMcpServer", () => {
       source: "mcp",
       dueAt: new Date("2026-06-04T00:00:00.000Z"),
     }));
+    expect(completeActivityMock).toHaveBeenCalledWith(expect.objectContaining({ kind: "agent" }), {
+      workspaceId: "ws-1",
+      activityId: "activity-1",
+      completedAt: new Date("2026-06-05T09:00:00.000Z"),
+    });
+    expect(createCommunicationSuggestionMock).toHaveBeenCalledWith(expect.objectContaining({ kind: "agent" }), {
+      workspaceId: "ws-1",
+      title: "Draft pilot recap",
+      bodyMd: "Draft only. Do not send.",
+      subject: "Pilot recap",
+      recipientEmail: undefined,
+      recipientName: undefined,
+      channel: undefined,
+      ownerUserId: undefined,
+      accountId: "account-1",
+      contactId: "contact-1",
+      dealId: "deal-1",
+      activityId: undefined,
+      source: "mcp",
+    });
     expect(markCommunicationSuggestionSentMock).toHaveBeenCalledWith(expect.objectContaining({ kind: "agent" }), {
       workspaceId: "ws-1",
       suggestionId: "suggestion-1",
@@ -918,6 +956,16 @@ describe("createCorgtexMcpServer", () => {
     expect(JSON.parse(activityResponse.content[0].text)).toMatchObject({
       id: "activity-1",
       webUrl: "https://app.test/workspaces/ws-1/leads/accounts/account-1?view=activity",
+    });
+    expect(JSON.parse(completedActivityResponse.content[0].text)).toMatchObject({
+      id: "activity-1",
+      completedAt: "2026-06-05T09:00:00.000Z",
+      webUrl: "https://app.test/workspaces/ws-1/leads/accounts/account-1?view=activity",
+    });
+    expect(JSON.parse(suggestionDraftResponse.content[0].text)).toMatchObject({
+      id: "suggestion-2",
+      status: "SUGGESTED",
+      webUrl: "https://app.test/workspaces/ws-1/leads/accounts/account-1?view=suggestions",
     });
     expect(JSON.parse(completeResponse.content[0].text)).toMatchObject({
       id: "suggestion-1",
