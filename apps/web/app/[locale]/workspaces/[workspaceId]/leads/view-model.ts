@@ -1,4 +1,5 @@
 export const RELATIONSHIP_VIEWS = [
+  "dashboard",
   "accounts",
   "contacts",
   "pipeline",
@@ -56,7 +57,7 @@ export function normalizeRelationshipView(value: string | string[] | undefined):
   const candidate = Array.isArray(value) ? value[0] : value;
   return RELATIONSHIP_VIEWS.includes(candidate as RelationshipView)
     ? candidate as RelationshipView
-    : "accounts";
+    : "dashboard";
 }
 
 export function normalizeAccountDetailView(value: string | string[] | undefined): AccountDetailView {
