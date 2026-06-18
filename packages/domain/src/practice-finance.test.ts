@@ -2,7 +2,15 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const { prismaMock, requireWorkspaceMembershipMock } = vi.hoisted(() => ({
   prismaMock: {
+    crmAccount: {
+      findUnique: vi.fn(),
+    },
+    crmDeal: {
+      findUnique: vi.fn(),
+    },
     practiceProject: {
+      create: vi.fn(),
+      findUnique: vi.fn(),
       findMany: vi.fn(),
     },
   },
@@ -20,6 +28,8 @@ vi.mock("./auth", () => ({
 import {
   BUDGET_RUNWAY_ATTENTION_WEEKS,
   collectAttention,
+  createPracticeProjectFromWonDeal,
+  getCrmAccountPracticeFinance,
   getPracticeFinanceDashboard,
   listPracticeProjects,
   projectAttentionItems,
@@ -152,6 +162,54 @@ describe("practice-finance I/O", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     requireWorkspaceMembershipMock.mockResolvedValue({ id: "member-1" });
+    prismaMock.crmAccount.findUnique.mockResolvedValue({
+      id: "account-1",
+      workspaceId: "workspace-1",
+      archivedAt: null,
+    });
+    prismaMock.crmDeal.findUnique.mockResolvedValue({
+      id: "deal-1",
+      workspaceId: "workspace-1",
+      accountId: "account-1",
+      contactId: "contact-1",
+      title: "Pilot rollout",
+      stage: "CLOSED_WON",
+      valueCents: 25_000_00,
+      archivedAt: null,
+      account: {
+        id: "account-1",
+        workspaceId: "workspace-1",
+        name: "Example",
+        slug: "example",
+      },
+      contact: {
+        id: "contact-1",
+        workspaceId: "workspace-1",
+        email: "buyer@example.test",
+        company: "Example",
+      },
+    });
+    prismaMock.practiceProject.create.mockResolvedValue({
+      id: "project-1",
+      workspaceId: "workspace-1",
+      crmAccountId: "account-1",
+      crmDealId: "deal-1",
+      code: "EXAMPLE-DEAL-1",
+      name: "Pilot rollout",
+      clientName: "Example",
+      status: "ACTIVE",
+      poValueCents: 25_000_00,
+      serviceBudgetCents: 0,
+      expenseBudgetCents: 0,
+      usedCents: 0,
+      weeklyBurnCents: 0,
+      targetMarginBps: null,
+      currentMarginBps: null,
+      sourceSatelliteId: null,
+      createdAt: new Date("2026-06-18T00:00:00.000Z"),
+      updatedAt: new Date("2026-06-18T00:00:00.000Z"),
+    });
+    prismaMock.practiceProject.findUnique.mockResolvedValue(null);
     prismaMock.practiceProject.findMany.mockResolvedValue([]);
   });
 
@@ -190,5 +248,164 @@ describe("practice-finance I/O", () => {
     expect(prismaMock.practiceProject.findMany).toHaveBeenCalledWith(expect.objectContaining({
       take: 100,
     }));
+  });
+
+  it("returns CRM account-linked finance rollups from authoritative practice projects", async () => {
+    prismaMock.practiceProject.findMany.mockResolvedValueOnce([
+      {
+        ...project({
+          id: "project-1",
+          poValueCents: 50_000_00,
+          usedCents: 15_000_00,
+          currentMarginBps: 6200,
+        }),
+        workspaceId: "workspace-1",
+        crmAccountId: "account-1",
+        crmDealId: "deal-1",
+        code: "EXAMPLE-1",
+        clientName: "Example",
+        weeklyBurnCents: 5_000_00,
+        sourceSatelliteId: null,
+        createdAt: new Date("2026-06-18T00:00:00.000Z"),
+        updatedAt: new Date("2026-06-18T00:00:00.000Z"),
+        crmDeal: {
+          id: "deal-1",
+          title: "Pilot rollout",
+          stage: "CLOSED_WON",
+          valueCents: 50_000_00,
+          currency: "USD",
+        },
+      },
+    ]);
+
+    const result = await getCrmAccountPracticeFinance(actor, {
+      workspaceId: "workspace-1",
+      accountId: "account-1",
+    });
+
+    expect(requireWorkspaceMembershipMock).toHaveBeenCalledWith({ actor, workspaceId: "workspace-1" });
+    expect(prismaMock.crmAccount.findUnique).toHaveBeenCalledWith({
+      where: { id: "account-1" },
+      select: { id: true, workspaceId: true, archivedAt: true },
+    });
+    expect(result.summary).toMatchObject({
+      activeProjects: 1,
+      budgetCents: 50_000_00,
+      usedCents: 15_000_00,
+      remainingCents: 35_000_00,
+      marginBps: 6200,
+    });
+    expect(result.projects[0]?.crmDeal?.valueCents).toBe(50_000_00);
+  });
+
+  it("rejects account finance rollups across workspace boundaries", async () => {
+    prismaMock.crmAccount.findUnique.mockResolvedValueOnce({
+      id: "account-1",
+      workspaceId: "other-workspace",
+      archivedAt: null,
+    });
+
+    await expect(getCrmAccountPracticeFinance(actor, {
+      workspaceId: "workspace-1",
+      accountId: "account-1",
+    })).rejects.toMatchObject({ status: 404, code: "NOT_FOUND" });
+    expect(prismaMock.practiceProject.findMany).not.toHaveBeenCalled();
+  });
+
+  it("creates one finance project from a closed-won CRM deal behind finance-write access", async () => {
+    const projectResult = await createPracticeProjectFromWonDeal(actor, "workspace-1", {
+      dealId: "deal-1",
+      serviceBudgetCents: 15_000_00,
+      expenseBudgetCents: 2_000_00,
+      targetMarginBps: 5500,
+    });
+
+    expect(requireWorkspaceMembershipMock).toHaveBeenCalledWith({
+      actor,
+      workspaceId: "workspace-1",
+      allowedRoles: expect.arrayContaining(["FINANCE_STEWARD", "ADMIN"]),
+    });
+    expect(projectResult.id).toBe("project-1");
+    expect(prismaMock.practiceProject.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        workspaceId: "workspace-1",
+        crmAccountId: "account-1",
+        crmDealId: "deal-1",
+        name: "Pilot rollout",
+        clientName: "Example",
+        poValueCents: 25_000_00,
+        serviceBudgetCents: 15_000_00,
+        expenseBudgetCents: 2_000_00,
+        targetMarginBps: 5500,
+      }),
+    });
+  });
+
+  it("returns the existing linked finance project on repeated won-deal conversion", async () => {
+    prismaMock.practiceProject.findUnique.mockResolvedValueOnce({
+      id: "project-existing",
+      workspaceId: "workspace-1",
+    });
+
+    const projectResult = await createPracticeProjectFromWonDeal(actor, "workspace-1", { dealId: "deal-1" });
+
+    expect(projectResult.id).toBe("project-existing");
+    expect(prismaMock.practiceProject.create).not.toHaveBeenCalled();
+  });
+
+  it("rejects project conversion unless the deal is closed won and workspace-scoped", async () => {
+    prismaMock.crmDeal.findUnique.mockResolvedValueOnce({
+      id: "deal-1",
+      workspaceId: "workspace-1",
+      accountId: "account-1",
+      contactId: "contact-1",
+      title: "Pilot rollout",
+      stage: "NEGOTIATION",
+      valueCents: 25_000_00,
+      archivedAt: null,
+      account: {
+        id: "account-1",
+        workspaceId: "workspace-1",
+        name: "Example",
+        slug: "example",
+      },
+      contact: {
+        id: "contact-1",
+        workspaceId: "workspace-1",
+        email: "buyer@example.test",
+        company: "Example",
+      },
+    });
+
+    await expect(createPracticeProjectFromWonDeal(actor, "workspace-1", { dealId: "deal-1" }))
+      .rejects.toMatchObject({ status: 400, code: "INVALID_STATE" });
+    expect(prismaMock.practiceProject.create).not.toHaveBeenCalled();
+
+    prismaMock.crmDeal.findUnique.mockResolvedValueOnce({
+      id: "deal-2",
+      workspaceId: "workspace-1",
+      accountId: "account-other",
+      contactId: "contact-1",
+      title: "Expansion",
+      stage: "CLOSED_WON",
+      valueCents: 10_000_00,
+      archivedAt: null,
+      account: {
+        id: "account-other",
+        workspaceId: "other-workspace",
+        name: "Other",
+        slug: "other",
+      },
+      contact: {
+        id: "contact-1",
+        workspaceId: "workspace-1",
+        email: "buyer@example.test",
+        company: "Example",
+      },
+    });
+
+    await expect(createPracticeProjectFromWonDeal(actor, "workspace-1", { dealId: "deal-2" }))
+      .rejects.toMatchObject({ status: 400, code: "INVALID_STATE" });
+    expect(prismaMock.practiceProject.create).not.toHaveBeenCalled();
   });
 });

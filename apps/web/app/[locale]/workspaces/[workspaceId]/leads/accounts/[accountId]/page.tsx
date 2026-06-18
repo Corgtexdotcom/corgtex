@@ -1,9 +1,9 @@
 import { requirePageActor } from "@/lib/auth";
-import { requireWorkspaceFeature } from "@/lib/workspace-feature-flags";
+import { isWorkspaceFeatureEnabled, requireWorkspaceFeature } from "@/lib/workspace-feature-flags";
 import { MarkdownEditor } from "@/lib/components/MarkdownEditor";
 import { MarkdownRenderer } from "@/lib/components/MarkdownRenderer";
 import { normalizeVisibleWorkItemColumns, toggleWorkItemColumnVisibility } from "@/lib/work-item-view";
-import { getCrmAccount, listCommunicationSuggestions, listMembers, requireWorkspaceMembership } from "@corgtex/domain";
+import { getCrmAccount, getCrmAccountPracticeFinance, listCommunicationSuggestions, listMembers, projectRemainingCents, requireWorkspaceMembership } from "@corgtex/domain";
 import { getTranslations } from "next-intl/server";
 
 import {
@@ -12,6 +12,7 @@ import {
   createCommunicationSuggestionAction,
   createContactAction,
   createDealAction,
+  createFinanceProjectFromDealAction,
   updateCrmAccountAction,
 } from "../../actions";
 import {
@@ -45,7 +46,7 @@ export default async function AccountDetailPage({
   const { locale, workspaceId, accountId } = await params;
   await requireWorkspaceFeature(workspaceId, "RELATIONSHIPS");
   const actor = await requirePageActor();
-  await requireWorkspaceMembership({ actor, workspaceId });
+  const membership = await requireWorkspaceMembership({ actor, workspaceId });
   const t = await getTranslations("leads");
   const tWork = await getTranslations("workItems");
   const resolvedSearch = searchParams ? await searchParams : {};
@@ -57,10 +58,21 @@ export default async function AccountDetailPage({
     if (nextColumns) query.set("columns", nextColumns.join(","));
     return [stage, `?${query.toString()}`];
   }));
-  const [account, communicationSuggestionResult, members] = await Promise.all([
+  const [financeEnabled, practiceProjectsEnabled] = await Promise.all([
+    isWorkspaceFeatureEnabled(workspaceId, "FINANCE"),
+    isWorkspaceFeatureEnabled(workspaceId, "PRACTICE_PROJECTS"),
+  ]);
+  const canShowPracticeFinance = financeEnabled && practiceProjectsEnabled;
+  const [account, communicationSuggestionResult, members, accountFinance] = await Promise.all([
     getCrmAccount(actor, { workspaceId, accountId }),
     listCommunicationSuggestions(actor, workspaceId, { accountId, take: 100 }),
     listMembers(workspaceId),
+    canShowPracticeFinance
+      ? getCrmAccountPracticeFinance(actor, { workspaceId, accountId })
+      : Promise.resolve({
+        summary: { activeProjects: 0, budgetCents: 0, usedCents: 0, remainingCents: 0, marginBps: null },
+        projects: [],
+      }),
   ]);
 
   const activeDeals = account.deals.filter((deal) => deal.stage !== "CLOSED_WON" && deal.stage !== "CLOSED_LOST");
@@ -70,6 +82,13 @@ export default async function AccountDetailPage({
   const nextFollowUps = reminderSummary.open.slice(0, 5);
   const communicationSummary = splitCommunicationSuggestions(communicationSuggestionResult.items);
   const nextCommunicationSuggestions = communicationSummary.open.slice(0, 3);
+  const financeProjectByDealId = new Map(accountFinance.projects
+    .filter((project) => project.crmDealId)
+    .map((project) => [project.crmDealId as string, project]));
+  const closedWonDealsWithoutProject = account.deals.filter((deal) => deal.stage === "CLOSED_WON" && !financeProjectByDealId.has(deal.id));
+  const canCreateFinanceProjects = canShowPracticeFinance && (
+    actor.kind === "agent" || membership?.role === "ADMIN" || membership?.role === "FINANCE_STEWARD"
+  );
   const memberNames = new Map(members.map((member) => [
     member.user.id,
     member.user.displayName || member.user.email,
@@ -80,6 +99,8 @@ export default async function AccountDetailPage({
     currency: "USD",
     maximumFractionDigits: 0,
   }).format(cents / 100);
+
+  const formatMargin = (bps?: number | null) => bps == null ? t("emptyValue") : `${(bps / 100).toFixed(1)}%`;
 
   const formatDate = (value: Date | string) => new Intl.DateTimeFormat(locale, {
     month: "short",
@@ -234,6 +255,18 @@ export default async function AccountDetailPage({
             <strong>{communicationSummary.open.length}</strong>
             <span>{t("statSuggestedCommunications")}</span>
           </div>
+          {canShowPracticeFinance && (
+            <>
+              <div className="ws-stat-card">
+                <strong>{accountFinance.projects.length}</strong>
+                <span>{t("statFinanceProjects")}</span>
+              </div>
+              <div className="ws-stat-card">
+                <strong>{formatCurrency(accountFinance.summary.remainingCents)}</strong>
+                <span>{t("statFinanceRemaining")}</span>
+              </div>
+            </>
+          )}
         </div>
 
         <div className="item" style={{ padding: 16, marginBottom: 24 }}>
@@ -337,6 +370,83 @@ export default async function AccountDetailPage({
 
         {view === "overview" && (
           <div className="stack">
+            {canShowPracticeFinance && (
+              <div className="item" style={{ padding: 16 }}>
+                <div className="row" style={{ alignItems: "flex-start", gap: 12 }}>
+                  <div>
+                    <strong>{t("financeBridgeTitle")}</strong>
+                    <div className="muted" style={{ fontSize: "0.85rem", marginTop: 4 }}>
+                      {t("financeBridgeMeta", {
+                        projects: accountFinance.projects.length,
+                        remaining: formatCurrency(accountFinance.summary.remainingCents),
+                      })}
+                    </div>
+                  </div>
+                  <a href={`/workspaces/${workspaceId}/finance?tab=dashboard`} className="link-button small" style={{ marginLeft: "auto" }}>
+                    {t("financeOpenDashboard")}
+                  </a>
+                </div>
+
+                {accountFinance.projects.length === 0 ? (
+                  <p className="muted" style={{ marginTop: 12 }}>{t("financeBridgeEmpty")}</p>
+                ) : (
+                  <div className="stack" style={{ marginTop: 16 }}>
+                    {accountFinance.projects.map((project) => (
+                      <div key={project.id} className="item" style={{ padding: 14 }}>
+                        <div className="row" style={{ gap: 8, alignItems: "flex-start" }}>
+                          <div style={{ minWidth: 0, flex: 1 }}>
+                            <strong>{project.name}</strong>
+                            <div className="muted" style={{ fontSize: "0.82rem", marginTop: 4 }}>
+                              {t("financeProjectCode")}: {project.code}
+                              {project.crmDeal ? ` · ${t("financeLinkedDeal")}: ${project.crmDeal.title}` : ""}
+                            </div>
+                          </div>
+                          <span className="tag">{project.status.toLowerCase()}</span>
+                        </div>
+                        <div className="nr-tag-group" style={{ marginTop: 12 }}>
+                          {project.crmDeal && <span className="tag-sm">{t("financeDealValue")}: {formatCurrency(project.crmDeal.valueCents ?? 0)}</span>}
+                          <span className="tag-sm">{t("financePoValue")}: {formatCurrency(project.poValueCents)}</span>
+                          <span className="tag-sm">{t("financeUsedBudget")}: {formatCurrency(project.usedCents)}</span>
+                          <span className="tag-sm">{t("financeRemainingBudget")}: {formatCurrency(projectRemainingCents(project))}</span>
+                          <span className="tag-sm">{t("financeMargin")}: {formatMargin(project.currentMarginBps)}</span>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {canCreateFinanceProjects && closedWonDealsWithoutProject.length > 0 && (
+                  <details style={{ marginTop: 16 }}>
+                    <summary className="link-button small" style={{ cursor: "pointer" }}>{t("financeCreateFromWonDealTitle")}</summary>
+                    <div className="stack" style={{ marginTop: 16 }}>
+                      {closedWonDealsWithoutProject.map((deal) => (
+                        <form key={deal.id} action={createFinanceProjectFromDealAction} className="stack nr-form-section">
+                          <input type="hidden" name="workspaceId" value={workspaceId} />
+                          <input type="hidden" name="dealId" value={deal.id} />
+                          <div className="row" style={{ alignItems: "flex-start", gap: 12 }}>
+                            <div>
+                              <strong>{deal.title}</strong>
+                              <div className="muted" style={{ fontSize: "0.82rem", marginTop: 4 }}>
+                                {t("financeDealValue")}: {formatCurrency(deal.valueCents ?? 0)}
+                              </div>
+                            </div>
+                            <span className="tag success" style={{ marginLeft: "auto" }}>{stageLabels.CLOSED_WON}</span>
+                          </div>
+                          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 12 }}>
+                            <label>{t("formProjectCodeOptional")} <input type="text" name="code" /></label>
+                            <label>{t("formServiceBudget")} <input type="number" name="serviceBudget" min="0" step="0.01" /></label>
+                            <label>{t("formExpenseBudget")} <input type="number" name="expenseBudget" min="0" step="0.01" /></label>
+                            <label>{t("formTargetMargin")} <input type="number" name="targetMargin" min="0" max="100" step="0.1" /></label>
+                          </div>
+                          <button type="submit" style={{ width: "fit-content" }}>{t("btnCreateFinanceProject")}</button>
+                        </form>
+                      ))}
+                    </div>
+                  </details>
+                )}
+              </div>
+            )}
+
             <div className="item" style={{ padding: 16 }}>
               <div className="row">
                 <strong>{t("accountOverview")}</strong>

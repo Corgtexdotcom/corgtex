@@ -2,6 +2,7 @@
 
 import { enforceDemoGuard } from "@/lib/demo-guard";
 import { requirePageActor } from "@/lib/auth";
+import { requireWorkspaceFeature } from "@/lib/workspace-feature-flags";
 import { asString, asOptional, refresh } from "../action-utils";
 import {
   createCrmAccount,
@@ -25,6 +26,7 @@ import {
   provisionProspectWorkspace,
   updateCrmAccount,
   updateCommunicationSuggestion,
+  createPracticeProjectFromWonDeal,
 } from "@corgtex/domain";
 
 function asOptionalDate(formData: FormData, key: string) {
@@ -33,6 +35,20 @@ function asOptionalDate(formData: FormData, key: string) {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return null;
   return date;
+}
+
+function optionalCurrencyCents(formData: FormData, key: string) {
+  const raw = asOptional(formData, key);
+  if (!raw) return undefined;
+  const parsed = Number.parseFloat(raw);
+  return Number.isFinite(parsed) ? Math.round(parsed * 100) : undefined;
+}
+
+function optionalPercentBps(formData: FormData, key: string) {
+  const raw = asOptional(formData, key);
+  if (!raw) return undefined;
+  const parsed = Number.parseFloat(raw);
+  return Number.isFinite(parsed) ? Math.round(parsed * 100) : undefined;
 }
 
 export async function createCrmAccountAction(formData: FormData) {
@@ -161,6 +177,26 @@ export async function updateDealAction(formData: FormData) {
     valueCents: formData.has("value") ? valueCents : undefined,
     notes: formData.has("notes") ? asOptional(formData, "notes") ?? undefined : undefined,
     ownerUserId: formData.has("ownerUserId") ? asOptional(formData, "ownerUserId") ?? null : undefined,
+  });
+  refresh(workspaceId);
+}
+
+export async function createFinanceProjectFromDealAction(formData: FormData) {
+  const _demoGuardWsId = formData.get("workspaceId") as string;
+  if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
+
+  const actor = await requirePageActor();
+  const workspaceId = asString(formData, "workspaceId");
+  await requireWorkspaceFeature(workspaceId, "FINANCE");
+  await requireWorkspaceFeature(workspaceId, "PRACTICE_PROJECTS");
+
+  await createPracticeProjectFromWonDeal(actor, workspaceId, {
+    dealId: asString(formData, "dealId"),
+    code: asOptional(formData, "code"),
+    serviceBudgetCents: optionalCurrencyCents(formData, "serviceBudget"),
+    expenseBudgetCents: optionalCurrencyCents(formData, "expenseBudget"),
+    weeklyBurnCents: optionalCurrencyCents(formData, "weeklyBurn"),
+    targetMarginBps: optionalPercentBps(formData, "targetMargin"),
   });
   refresh(workspaceId);
 }
