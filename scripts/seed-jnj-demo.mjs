@@ -2201,25 +2201,28 @@ async function main() {
       },
     });
     const potentialReactors = Object.values(memberMappings).filter((member) => member.userId !== authorId);
-    const reactionTypes = ["SUPPORT", "QUESTION", "SUPPORT"];
     const reactionRows = potentialReactors.slice(0, Math.min(potentialReactors.length, (index % 3) + 1)).map((reactor, reactorIndex) => ({
       id: `${proposal.id}-seed-reaction-${reactorIndex + 1}`,
-      proposalId: proposal.id,
-      userId: reactor.userId,
-      reaction: reactionTypes[(index + reactorIndex) % reactionTypes.length],
+      workspaceId: wsId,
+      parentType: "PROPOSAL",
+      parentId: proposal.id,
+      parentVersion: proposal.version,
+      authorUserId: reactor.userId,
+      entryType: "REACTION",
+      bodyMd: "Seeded demo reaction for proposal deliberation.",
     }));
-    await prisma.proposalReaction.deleteMany({
+    await prisma.deliberationEntry.deleteMany({
       where: {
-        proposalId: proposal.id,
+        parentType: "PROPOSAL",
+        parentId: proposal.id,
         id: {
           startsWith: `${proposal.id}-seed-reaction-`,
-          notIn: reactionRows.map((reaction) => reaction.id),
         },
       },
     });
     for (const reaction of reactionRows) {
       const { id, ...reactionData } = reaction;
-      await prisma.proposalReaction.upsert({
+      await prisma.deliberationEntry.upsert({
         where: { id },
         update: reactionData,
         create: reaction,

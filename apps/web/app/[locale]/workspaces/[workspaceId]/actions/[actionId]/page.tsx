@@ -1,11 +1,14 @@
 import Link from "next/link";
-import { getAction, listWorkItemEvidence, listWorkItemVersions, requireWorkspaceMembership } from "@corgtex/domain";
+import { getAction, listDeliberationEntries, listWorkItemEvidence, listWorkItemVersions, requireWorkspaceMembership } from "@corgtex/domain";
 import { requirePageActor } from "@/lib/auth";
 import { MarkdownEditor } from "@/lib/components/MarkdownEditor";
 import { MarkdownRenderer } from "@/lib/components/MarkdownRenderer";
 import { WorkItemResolutionDialog } from "@/lib/components/WorkItemResolutionDialog";
+import { DeliberationComposer } from "@/lib/components/DeliberationComposer";
+import { DeliberationThread } from "@/lib/components/DeliberationThread";
+import { getDeliberationTargets } from "@/lib/deliberation-targets";
 import { canOpenPrivateDraft } from "@/lib/governance-open-guards";
-import { deleteActionAction, publishActionAction, returnActionToDraftAction, updateActionAction } from "../../actions";
+import { deleteActionAction, postActionDeliberationAction, publishActionAction, resolveActionDeliberationAction, returnActionToDraftAction, updateActionAction, updateActionDeliberationAction } from "../../actions";
 import { getTranslations } from "next-intl/server";
 
 export const dynamic = "force-dynamic";
@@ -22,10 +25,18 @@ export default async function ActionDetailPage({
   const tWork = await getTranslations("workItems");
   const action = await getAction(actor, { workspaceId, actionId });
   const membership = await requireWorkspaceMembership({ actor, workspaceId });
-  const [versionHistory, evidence] = await Promise.all([
+  const [versionHistory, evidence, deliberationEntries] = await Promise.all([
     listWorkItemVersions(actor, { workspaceId, entityType: "ACTION", entityId: actionId }),
     listWorkItemEvidence(actor, { workspaceId, entityType: "Action", entityId: actionId }),
+    listDeliberationEntries(actor, { workspaceId, parentType: "ACTION", parentId: actionId }),
   ]);
+  const deliberationTargets = await getDeliberationTargets({ actor, workspaceId, parentCircleId: action.circleId });
+  const targetOptions = deliberationTargets.options.map((option) => ({
+    ...option,
+    label: option.kind === "circle"
+      ? t("targetCircle", { name: option.name })
+      : t("targetPerson", { name: option.name }),
+  }));
 
   const statusClass = action.status === "DRAFT"
     ? "info"
@@ -45,10 +56,26 @@ export default async function ActionDetailPage({
   const canManage = actor.kind === "agent"
     || membership?.role === "ADMIN"
     || (actor.kind === "user" && action.authorUserId === actor.user.id);
-  const canSubmittedAuthorEdit = actor.kind === "user" && action.authorUserId === actor.user.id;
+  const isAdmin = actor.kind === "agent" || membership?.role === "ADMIN";
+  const actorUserId = actor.kind === "user" ? actor.user.id : null;
+  const actorMemberId = deliberationTargets.actorMemberId;
+  const actorCircleIds = new Set(deliberationTargets.actorCircleIds);
+  const isParentResponsible = Boolean(
+    actorUserId && action.authorUserId === actorUserId
+      || actorMemberId && action.assigneeMemberId === actorMemberId,
+  );
+  const canManageEntry = (entry: (typeof deliberationEntries)[number]) => Boolean(
+    isAdmin
+      || (actorUserId && entry.authorUserId === actorUserId)
+      || isParentResponsible
+      || (actorMemberId && entry.targetMemberId === actorMemberId)
+      || (entry.targetCircleId && actorCircleIds.has(entry.targetCircleId)),
+  );
+  const canSubmittedEditorEdit = actor.kind === "user"
+    && (action.authorUserId === actor.user.id || action.assigneeMemberId === membership?.id);
   const canEditContent = action.status === "DRAFT"
     ? canManage
-    : (action.status === "OPEN" || action.status === "IN_PROGRESS") && canSubmittedAuthorEdit;
+    : (action.status === "OPEN" || action.status === "IN_PROGRESS") && canSubmittedEditorEdit;
 
   return (
     <>
@@ -161,6 +188,47 @@ export default async function ActionDetailPage({
             <em className="muted">{t("noNotes")}</em>
           )}
         </div>
+      </section>
+
+      <section className="ws-section" style={{ marginBottom: 48 }}>
+        <h2 className="nr-section-header">{t("sectionDiscussion")}</h2>
+        <DeliberationThread
+          entries={deliberationEntries.map((entry) => ({
+            id: entry.id,
+            entryType: entry.entryType,
+            authorName: entry.author?.displayName || entry.author?.email || "Unknown",
+            authorInitials: (entry.author?.displayName || entry.author?.email || "?").substring(0, 2).toUpperCase(),
+            bodyMd: entry.bodyMd,
+            createdAt: entry.createdAt,
+            parentVersion: entry.parentVersion,
+            resolvedAt: entry.resolvedAt,
+            resolvedNote: entry.resolvedNote,
+            targetLabel: entry.targetCircle
+              ? t("targetCircle", { name: entry.targetCircle.name })
+              : entry.targetMember
+                ? t("targetPerson", { name: entry.targetMember.user.displayName || entry.targetMember.user.email })
+                : null,
+            canEdit: canManageEntry(entry),
+            canResolve: canManageEntry(entry),
+          }))}
+          canResolve={false}
+          resolveAction={resolveActionDeliberationAction}
+          updateAction={updateActionDeliberationAction}
+          hiddenFields={{ workspaceId, parentId: actionId }}
+        />
+        {(action.status === "OPEN" || action.status === "IN_PROGRESS") && (
+          <div style={{ marginTop: 24 }}>
+            <DeliberationComposer
+              postAction={postActionDeliberationAction}
+              hiddenFields={{ workspaceId, parentId: actionId }}
+              targetOptions={targetOptions}
+              entryTypes={[
+                { value: "REACTION", label: t("entryReaction"), variant: "secondary" },
+                { value: "OBJECTION", label: t("entryObjection"), variant: "danger" },
+              ]}
+            />
+          </div>
+        )}
       </section>
 
       {action.status === "COMPLETED" && action.completedVia && (

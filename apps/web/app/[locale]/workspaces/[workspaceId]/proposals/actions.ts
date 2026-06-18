@@ -8,9 +8,7 @@ import {
   archiveProposal,
   createProposal,
   createProposalFromTension,
-  postReaction,
   reopenProposal,
-  resolveReaction,
   resolveProposal,
   returnProposalToDraft,
   submitProposal,
@@ -21,7 +19,8 @@ import {
   withdrawAdviceProcess,
   executeAdviceProcessDecision,
   postDeliberationEntry,
-  resolveDeliberationEntry
+  resolveDeliberationEntry,
+  updateDeliberationEntry
 } from "@corgtex/domain";
 import { uploadWorkItemEvidenceDocument } from "../work-item-evidence-upload";
 
@@ -173,36 +172,6 @@ export async function publishProposalAction(formData: FormData) {
   refresh(workspaceId);
 }
 
-export async function postReactionAction(formData: FormData) {
-  const _demoGuardWsId = formData.get("workspaceId") as string;
-  if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
-
-  const actor = await requirePageActor();
-  const workspaceId = asString(formData, "workspaceId");
-  await postReaction(actor, {
-    workspaceId,
-    proposalId: asString(formData, "proposalId"),
-    reaction: asString(formData, "reaction"),
-    bodyMd: asOptional(formData, "bodyMd") || undefined,
-  });
-  refresh(workspaceId);
-}
-
-export async function resolveReactionAction(formData: FormData) {
-  const _demoGuardWsId = formData.get("workspaceId") as string;
-  if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
-
-  const actor = await requirePageActor();
-  const workspaceId = asString(formData, "workspaceId");
-  await resolveReaction(actor, {
-    workspaceId,
-    reactionId: asString(formData, "reactionId"),
-    resolvedNote: asString(formData, "resolvedNote"),
-  });
-  refresh(workspaceId);
-}
-
-
 export async function initiateAdviceProcessAction(formData: FormData) {
   const _demoGuardWsId = formData.get("workspaceId") as string;
   if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
@@ -288,6 +257,21 @@ export async function resolveDeliberationEntryAction(formData: FormData) {
     workspaceId,
     entryId: asString(formData, "entryId"),
     resolvedNote: asString(formData, "resolvedNote"),
+  });
+  refresh(workspaceId);
+}
+
+export async function updateDeliberationEntryAction(formData: FormData) {
+  const _demoGuardWsId = formData.get("workspaceId") as string;
+  if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
+
+  const actor = await requirePageActor();
+  const workspaceId = asString(formData, "workspaceId");
+  await updateDeliberationEntry(actor, {
+    workspaceId,
+    entryId: asString(formData, "entryId"),
+    entryType: asString(formData, "entryType"),
+    bodyMd: asString(formData, "bodyMd"),
   });
   refresh(workspaceId);
 }

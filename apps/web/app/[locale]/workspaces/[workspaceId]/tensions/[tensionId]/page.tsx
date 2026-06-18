@@ -8,7 +8,7 @@ import { DeliberationThread } from "@/lib/components/DeliberationThread";
 import { DeliberationComposer } from "@/lib/components/DeliberationComposer";
 import { getDeliberationTargets } from "@/lib/deliberation-targets";
 import { canOpenPrivateDraft } from "@/lib/governance-open-guards";
-import { createProposalFromTensionAction, postTensionDeliberationAction, publishTensionAction, returnTensionToDraftAction, resolveTensionDeliberationAction, updateTensionAction } from "../../actions";
+import { createProposalFromTensionAction, postTensionDeliberationAction, publishTensionAction, returnTensionToDraftAction, resolveTensionDeliberationAction, updateTensionAction, updateTensionDeliberationAction } from "../../actions";
 import { getTranslations } from "next-intl/server";
 
 export const dynamic = "force-dynamic";
@@ -60,8 +60,24 @@ export default async function TensionDetailPage({
   const priorityText = tension.priority > 0 ? t("priorityN", { priority: tension.priority }) : t("noPriority");
   const raisedByName = tension.raisedByMember?.user.displayName || tension.raisedByMember?.user.email || null;
   const canManage = actor.kind === "agent" || membership?.role === "ADMIN" || (actor.kind === "user" && tension.authorUserId === actor.user.id);
-  const canSubmittedAuthorEdit = actor.kind === "user" && tension.authorUserId === actor.user.id;
-  const canEditContent = tension.status === "DRAFT" ? canManage : tension.status === "OPEN" && canSubmittedAuthorEdit;
+  const isAdmin = actor.kind === "agent" || membership?.role === "ADMIN";
+  const actorUserId = actor.kind === "user" ? actor.user.id : null;
+  const actorMemberId = deliberationTargets.actorMemberId;
+  const actorCircleIds = new Set(deliberationTargets.actorCircleIds);
+  const isParentResponsible = Boolean(
+    actorUserId && tension.authorUserId === actorUserId
+      || actorMemberId && tension.assigneeMemberId === actorMemberId,
+  );
+  const canManageEntry = (entry: (typeof entries)[number]) => Boolean(
+    isAdmin
+      || (actorUserId && entry.authorUserId === actorUserId)
+      || isParentResponsible
+      || (actorMemberId && entry.targetMemberId === actorMemberId)
+      || (entry.targetCircleId && actorCircleIds.has(entry.targetCircleId)),
+  );
+  const canSubmittedEditorEdit = actor.kind === "user"
+    && (tension.authorUserId === actor.user.id || tension.assigneeMemberId === membership?.id);
+  const canEditContent = tension.status === "DRAFT" ? canManage : tension.status === "OPEN" && canSubmittedEditorEdit;
   const canDraftProposal = !tension.proposal && (canManage || !tension.isPrivate);
   const canResolve = !tension.isPrivate && tension.status === "OPEN";
 
@@ -196,7 +212,17 @@ export default async function TensionDetailPage({
 
       <section className="ws-section" style={{ marginBottom: 48 }}>
         <h2 className="nr-section-header">{t("sectionDiscussion")}</h2>
-        <DeliberationThread entries={mappedEntries} canResolve={true} resolveAction={resolveTensionDeliberationAction} hiddenFields={{ workspaceId, parentId: tensionId }} />
+        <DeliberationThread
+          entries={mappedEntries.map((entry) => ({
+            ...entry,
+            canEdit: canManageEntry(entry),
+            canResolve: canManageEntry(entry),
+          }))}
+          canResolve={true}
+          resolveAction={resolveTensionDeliberationAction}
+          updateAction={updateTensionDeliberationAction}
+          hiddenFields={{ workspaceId, parentId: tensionId }}
+        />
         {tension.status === "OPEN" && (
         <div style={{ marginTop: 24 }}>
           <DeliberationComposer

@@ -13,10 +13,13 @@ const actor = {
 const createAction = vi.fn();
 const deleteAction = vi.fn();
 const enforceDemoGuard = vi.fn();
+const postDeliberationEntry = vi.fn();
 const publishAction = vi.fn();
 const requirePageActor = vi.fn(async () => actor);
+const resolveDeliberationEntry = vi.fn();
 const returnActionToDraft = vi.fn();
 const updateAction = vi.fn();
+const updateDeliberationEntry = vi.fn();
 
 vi.mock("@/lib/demo-guard", () => ({
   enforceDemoGuard,
@@ -29,9 +32,12 @@ vi.mock("@/lib/auth", () => ({
 vi.mock("@corgtex/domain", () => ({
   createAction,
   deleteAction,
+  postDeliberationEntry,
   publishAction,
+  resolveDeliberationEntry,
   returnActionToDraft,
   updateAction,
+  updateDeliberationEntry,
 }));
 
 vi.mock("next/cache", () => ({
@@ -79,5 +85,27 @@ describe("action item server actions", () => {
     expect(createAction).toHaveBeenCalledWith(actor, expect.objectContaining({
       isPrivate: false,
     }));
+  });
+
+  it("posts action deliberation entries against ACTION parents", async () => {
+    const { postActionDeliberationAction } = await import("./actions");
+    const formData = new FormData();
+    formData.set("workspaceId", "workspace-1");
+    formData.set("parentId", "action-1");
+    formData.set("entryType", "OBJECTION");
+    formData.set("bodyMd", "Needs a clearer owner.");
+    formData.set("targetMemberId", "member-1");
+
+    await postActionDeliberationAction(formData);
+
+    expect(postDeliberationEntry).toHaveBeenCalledWith(actor, {
+      workspaceId: "workspace-1",
+      parentType: "ACTION",
+      parentId: "action-1",
+      entryType: "OBJECTION",
+      bodyMd: "Needs a clearer owner.",
+      targetMemberId: "member-1",
+      targetCircleId: undefined,
+    });
   });
 });

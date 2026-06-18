@@ -359,7 +359,6 @@ export async function listProposals(actor: AppActor, workspaceId: string, opts?:
           },
         },
         circle: { select: { id: true, name: true } },
-        reactions: true,
         tensions: { select: { id: true, title: true, status: true } },
         actions: { select: { id: true, title: true, status: true } },
         adviceProcess: {
@@ -858,17 +857,6 @@ export async function returnProposalToDraft(actor: AppActor, params: {
         resolvedNote: "Cleared when proposal returned to draft.",
       },
     });
-    await tx.proposalReaction.updateMany({
-      where: {
-        proposalId: proposal.id,
-        resolvedAt: null,
-      },
-      data: {
-        resolvedAt: now,
-        resolvedNote: "Cleared when proposal returned to draft.",
-      },
-    });
-
     const updated = await tx.proposal.update({
       where: { id: proposal.id },
       data: {

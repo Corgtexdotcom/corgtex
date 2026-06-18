@@ -13,7 +13,7 @@ import {
   changedDataFields,
   pickJsonSnapshot,
   recordWorkItemVersion,
-  requireSubmittedWorkItemAuthor,
+  requireSubmittedWorkItemEditor,
   resolveWorkspaceMemberUserId,
 } from "./work-item-versions";
 
@@ -320,7 +320,7 @@ export async function updateAction(actor: AppActor, params: {
         await requireDraftManager({ actor, workspaceId: params.workspaceId, record: action, resolvedMembership: membership });
       } else {
         invariant(action.status === "OPEN" || action.status === "IN_PROGRESS", 400, "INVALID_STATE", "Only draft, open, or in-progress actions can be edited.");
-        requireSubmittedWorkItemAuthor(actor, action.authorUserId);
+        requireSubmittedWorkItemEditor(actor, membership, action);
       }
     }
     if (params.isPrivate !== undefined) {

@@ -213,10 +213,11 @@ export default async function ActionsPage({
     const createdAge = ageText(action.createdAt);
     const dueDate = action.dueAt ? new Date(action.dueAt).toLocaleDateString() : null;
     const canManage = canManageAction(action);
-    const canSubmittedAuthorEdit = actor.kind === "user" && action.authorUserId === actor.user.id;
+    const canSubmittedEditorEdit = actor.kind === "user"
+      && (action.authorUserId === actor.user.id || action.assigneeMemberId === membership?.id);
     const canEditContent = action.status === "DRAFT"
       ? canManage
-      : (action.status === "OPEN" || action.status === "IN_PROGRESS") && canSubmittedAuthorEdit;
+      : (action.status === "OPEN" || action.status === "IN_PROGRESS") && canSubmittedEditorEdit;
     const evidence = evidenceByActionId.get(action.id) ?? [];
     const primaryTarget: ActionColumnStatus | null = action.status === "DRAFT" && canManage
       ? "OPEN"

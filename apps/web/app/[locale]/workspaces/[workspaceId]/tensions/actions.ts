@@ -12,7 +12,8 @@ import {
   publishTension,
   returnTensionToDraft,
   postDeliberationEntry,
-  resolveDeliberationEntry
+  resolveDeliberationEntry,
+  updateDeliberationEntry
 } from "@corgtex/domain";
 import { uploadWorkItemEvidenceDocument } from "../work-item-evidence-upload";
 
@@ -166,6 +167,22 @@ export async function resolveTensionDeliberationAction(formData: FormData) {
     workspaceId,
     entryId: asString(formData, "entryId"),
     resolvedNote: asString(formData, "resolvedNote"),
+  });
+  refresh(workspaceId);
+}
+
+export async function updateTensionDeliberationAction(formData: FormData) {
+  const _demoGuardWsId = formData.get("workspaceId") as string;
+  if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
+
+  const actor = await requirePageActor();
+  const workspaceId = asString(formData, "workspaceId");
+
+  await updateDeliberationEntry(actor, {
+    workspaceId,
+    entryId: asString(formData, "entryId"),
+    entryType: asString(formData, "entryType"),
+    bodyMd: asString(formData, "bodyMd"),
   });
   refresh(workspaceId);
 }

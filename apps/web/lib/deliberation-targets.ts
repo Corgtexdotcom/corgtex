@@ -8,7 +8,7 @@ export async function getDeliberationTargets(params: {
   actor: AppActor;
   workspaceId: string;
   parentCircleId?: string | null;
-}): Promise<{ options: DeliberationTargetOption[]; defaultValue: string }> {
+}): Promise<{ options: DeliberationTargetOption[]; defaultValue: string; actorMemberId: string | null; actorCircleIds: string[] }> {
   const actorUserId = params.actor.kind === "user" ? params.actor.user.id : null;
   const [circles, members, actorMember] = await Promise.all([
     prisma.circle.findMany({
@@ -58,9 +58,15 @@ export async function getDeliberationTargets(params: {
   const actorCircle = actorMember?.roleAssignments
     .map((assignment) => assignment.role.circle)
     .find((circle) => circle && !circle.archivedAt);
+  const actorCircleIds = actorMember?.roleAssignments.flatMap((assignment) => {
+    const circle = assignment.role.circle;
+    return circle && !circle.archivedAt ? [circle.id] : [];
+  }) ?? [];
 
   return {
     options,
     defaultValue: parentCircle || (actorCircle ? `circle:${actorCircle.id}` : circles[0] ? `circle:${circles[0].id}` : ""),
+    actorMemberId: actorMember?.id ?? null,
+    actorCircleIds,
   };
 }

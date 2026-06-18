@@ -558,7 +558,6 @@ export async function getMeeting(workspaceId: string, meetingId: string) {
               email: true,
             },
           },
-          reactions: true,
           tensions: {
             select: {
               id: true,

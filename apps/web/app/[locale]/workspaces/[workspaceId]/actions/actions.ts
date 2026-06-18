@@ -8,7 +8,10 @@ import {
   deleteAction,
   updateAction,
   publishAction,
-  returnActionToDraft
+  returnActionToDraft,
+  postDeliberationEntry,
+  resolveDeliberationEntry,
+  updateDeliberationEntry
 } from "@corgtex/domain";
 import { uploadWorkItemEvidenceDocument } from "../work-item-evidence-upload";
 
@@ -95,6 +98,53 @@ export async function returnActionToDraftAction(formData: FormData) {
   await returnActionToDraft(actor, {
     workspaceId,
     actionId: asString(formData, "actionId"),
+  });
+  refresh(workspaceId);
+}
+
+export async function postActionDeliberationAction(formData: FormData) {
+  const _demoGuardWsId = formData.get("workspaceId") as string;
+  if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
+
+  const actor = await requirePageActor();
+  const workspaceId = asString(formData, "workspaceId");
+  await postDeliberationEntry(actor, {
+    workspaceId,
+    parentType: "ACTION",
+    parentId: asString(formData, "parentId"),
+    entryType: asString(formData, "entryType"),
+    bodyMd: asString(formData, "bodyMd"),
+    targetMemberId: asOptional(formData, "targetMemberId") || undefined,
+    targetCircleId: asOptional(formData, "targetCircleId") || undefined,
+  });
+  refresh(workspaceId);
+}
+
+export async function resolveActionDeliberationAction(formData: FormData) {
+  const _demoGuardWsId = formData.get("workspaceId") as string;
+  if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
+
+  const actor = await requirePageActor();
+  const workspaceId = asString(formData, "workspaceId");
+  await resolveDeliberationEntry(actor, {
+    workspaceId,
+    entryId: asString(formData, "entryId"),
+    resolvedNote: asString(formData, "resolvedNote"),
+  });
+  refresh(workspaceId);
+}
+
+export async function updateActionDeliberationAction(formData: FormData) {
+  const _demoGuardWsId = formData.get("workspaceId") as string;
+  if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
+
+  const actor = await requirePageActor();
+  const workspaceId = asString(formData, "workspaceId");
+  await updateDeliberationEntry(actor, {
+    workspaceId,
+    entryId: asString(formData, "entryId"),
+    entryType: asString(formData, "entryType"),
+    bodyMd: asString(formData, "bodyMd"),
   });
   refresh(workspaceId);
 }
