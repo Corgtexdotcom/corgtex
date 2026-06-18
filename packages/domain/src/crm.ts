@@ -2,11 +2,11 @@ import { randomUUID } from "node:crypto";
 import { env, prisma } from "@corgtex/shared";
 import type { AppActor } from "@corgtex/shared";
 import { appendEvents } from "./events";
-import { requireWorkspaceMembership } from "./auth";
+import { requireGlobalOperator, requireWorkspaceMembership } from "./auth";
 import { archiveFilterWhere, archiveWorkspaceArtifact, type ArchiveFilter } from "./archive";
 import { invariant } from "./errors";
 import { CrmDealStage, CrmActivityType } from "@prisma/client";
-import type { Prisma } from "@prisma/client";
+import type { CustomerAccountStatus, CustomerDeploymentStatus, Prisma } from "@prisma/client";
 import { registerCustomerDeployment } from "./customer-lifecycle";
 
 const DEFAULT_DEMO_WORKSPACE = {
@@ -703,6 +703,54 @@ export async function updateCrmAccount(actor: AppActor, params: {
         meta: { fields: Object.keys(data) },
       },
     });
+
+    return updated;
+  });
+}
+
+export async function convertCrmAccountToClient(actor: AppActor, params: {
+  workspaceId: string;
+  accountId: string;
+}) {
+  await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
+
+  return prisma.$transaction(async (tx) => {
+    const account = await requireCrmAccount(tx, params.workspaceId, params.accountId);
+    const updated = await tx.crmAccount.update({
+      where: { id: account.id },
+      data: {
+        relationshipType: "CLIENT",
+        lifecycleStage: "ACTIVE",
+      },
+    });
+
+    await tx.auditLog.create({
+      data: {
+        workspaceId: params.workspaceId,
+        actorUserId: actor.kind === "user" ? actor.user.id : null,
+        action: "crm.account.converted_to_client",
+        entityType: "CrmAccount",
+        entityId: updated.id,
+        meta: {
+          previousRelationshipType: account.relationshipType,
+          previousLifecycleStage: account.lifecycleStage,
+        },
+      },
+    });
+
+    await appendEvents(tx, [
+      {
+        workspaceId: params.workspaceId,
+        type: "crm.account.converted_to_client",
+        aggregateType: "CrmAccount",
+        aggregateId: updated.id,
+        payload: {
+          accountId: updated.id,
+          previousRelationshipType: account.relationshipType,
+          previousLifecycleStage: account.lifecycleStage,
+        },
+      },
+    ]);
 
     return updated;
   });
@@ -2279,22 +2327,6 @@ export async function provisionProspectWorkspace(actor: AppActor, params: {
       },
     });
 
-    await registerCustomerDeployment({
-      accountSlug: targetWorkspace.slug,
-      accountDisplayName: targetWorkspace.name,
-      accountStatus: "PROSPECT",
-      managementAuthority: "CORGTEX",
-      label: targetWorkspace.name,
-      url: `${env.APP_URL.replace(/\/$/, "")}/workspaces/${targetWorkspace.id}`,
-      environment: "production",
-      notes: `CRM prospect workspace for ${lead.email}.`,
-      deploymentKind: "SHARED_WORKSPACE",
-      deploymentStatus: "ACTIVE",
-      customerSlug: targetWorkspace.slug,
-      managedWorkspaceId: targetWorkspace.id,
-      primary: true,
-    }, tx);
-
     const prospectWorkspace = await tx.crmProspectWorkspace.create({
       data: {
         crmWorkspaceId: params.crmWorkspaceId,
@@ -2317,5 +2349,110 @@ export async function provisionProspectWorkspace(actor: AppActor, params: {
     ]);
 
     return prospectWorkspace;
+  });
+}
+
+export async function registerCrmAccountCustomerLifecycle(actor: AppActor, params: {
+  workspaceId: string;
+  accountId: string;
+  prospectWorkspaceId: string;
+  accountStatus?: CustomerAccountStatus;
+  deploymentStatus?: CustomerDeploymentStatus;
+  supportOwnerEmail?: string | null;
+  notes?: string | null;
+  primary?: boolean;
+}) {
+  await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId, allowedRoles: ["ADMIN"] });
+  requireGlobalOperator(actor);
+
+  return prisma.$transaction(async (tx) => {
+    const account = await requireCrmAccount(tx, params.workspaceId, params.accountId);
+    const prospectWorkspace = await tx.crmProspectWorkspace.findUnique({
+      where: { id: params.prospectWorkspaceId },
+      include: {
+        targetWorkspace: {
+          select: { id: true, slug: true, name: true, description: true },
+        },
+      },
+    });
+    invariant(
+      prospectWorkspace && prospectWorkspace.crmWorkspaceId === params.workspaceId,
+      404,
+      "NOT_FOUND",
+      "Prospect workspace not found.",
+    );
+    invariant(
+      prospectWorkspace.accountId === account.id,
+      400,
+      "INVALID_STATE",
+      "Prospect workspace is not linked to this account.",
+    );
+
+    const targetWorkspace = prospectWorkspace.targetWorkspace;
+    const result = await registerCustomerDeployment({
+      accountSlug: account.slug,
+      accountDisplayName: account.name,
+      accountStatus: params.accountStatus ?? "ACTIVE",
+      managementAuthority: "CORGTEX",
+      label: targetWorkspace.name,
+      url: `${env.APP_URL.replace(/\/$/, "")}/workspaces/${targetWorkspace.id}`,
+      environment: "production",
+      notes: params.notes ?? `CRM customer lifecycle registration for ${account.name}.`,
+      deploymentKind: "SHARED_WORKSPACE",
+      deploymentStatus: params.deploymentStatus ?? "ACTIVE",
+      customerSlug: account.slug,
+      supportOwnerEmail: params.supportOwnerEmail,
+      managedWorkspaceId: targetWorkspace.id,
+      remoteWorkspaceSlug: targetWorkspace.slug,
+      remoteWorkspaceId: targetWorkspace.id,
+      primary: params.primary ?? true,
+    }, tx);
+
+    const updatedAccount = await tx.crmAccount.update({
+      where: { id: account.id },
+      data: {
+        relationshipType: "CLIENT",
+        lifecycleStage: "ACTIVE",
+      },
+    });
+
+    await tx.auditLog.create({
+      data: {
+        workspaceId: params.workspaceId,
+        actorUserId: actor.kind === "user" ? actor.user.id : null,
+        action: "crm.account.customer_lifecycle_registered",
+        entityType: "CrmAccount",
+        entityId: account.id,
+        meta: {
+          prospectWorkspaceId: prospectWorkspace.id,
+          targetWorkspaceId: targetWorkspace.id,
+          customerAccountId: result.account.id,
+          customerDeploymentId: result.deployment.id,
+        },
+      },
+    });
+
+    await appendEvents(tx, [
+      {
+        workspaceId: params.workspaceId,
+        type: "crm.account.customer_lifecycle_registered",
+        aggregateType: "CrmAccount",
+        aggregateId: account.id,
+        payload: {
+          accountId: account.id,
+          prospectWorkspaceId: prospectWorkspace.id,
+          targetWorkspaceId: targetWorkspace.id,
+          customerAccountId: result.account.id,
+          customerDeploymentId: result.deployment.id,
+        },
+      },
+    ]);
+
+    return {
+      account: updatedAccount,
+      prospectWorkspace,
+      customerAccount: result.account,
+      customerDeployment: result.deployment,
+    };
   });
 }

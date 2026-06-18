@@ -99,8 +99,7 @@ describe("CRM Integration Lifecycle", () => {
       where: { slug: prospectWorkspace!.targetWorkspace.slug },
       include: { primaryDeployment: true },
     });
-    expect(customerAccount?.status).toBe("PROSPECT");
-    expect(customerAccount?.primaryDeployment?.managedWorkspaceId).toBe(prospectWorkspace?.targetWorkspaceId);
+    expect(customerAccount).toBeNull();
   });
 
   it("handles the reject flow correctly", async () => {

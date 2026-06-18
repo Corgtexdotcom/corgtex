@@ -6,6 +6,7 @@ import { requireWorkspaceFeature } from "@/lib/workspace-feature-flags";
 import { asString, asOptional, refresh } from "../action-utils";
 import {
   createCrmAccount,
+  convertCrmAccountToClient,
   createExecutionRequest,
   createContact,
   updateContact,
@@ -83,6 +84,29 @@ export async function updateCrmAccountAction(formData: FormData) {
     lifecycleStage: formData.has("lifecycleStage") ? asOptional(formData, "lifecycleStage") ?? undefined : undefined,
     descriptionMd: formData.has("descriptionMd") ? asOptional(formData, "descriptionMd") ?? null : undefined,
   });
+  refresh(workspaceId);
+}
+
+export async function convertCrmAccountToClientAction(formData: FormData) {
+  const _demoGuardWsId = formData.get("workspaceId") as string;
+  if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
+
+  const actor = await requirePageActor();
+  const workspaceId = asString(formData, "workspaceId");
+  await convertCrmAccountToClient(actor, {
+    workspaceId,
+    accountId: asString(formData, "accountId"),
+  });
+
+  const financeDealId = asOptional(formData, "financeDealId");
+  if (financeDealId) {
+    await requireWorkspaceFeature(workspaceId, "FINANCE");
+    await requireWorkspaceFeature(workspaceId, "PRACTICE_PROJECTS");
+    await createPracticeProjectFromWonDeal(actor, workspaceId, {
+      dealId: financeDealId,
+    });
+  }
+
   refresh(workspaceId);
 }
 
