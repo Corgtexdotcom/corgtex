@@ -851,13 +851,16 @@ export async function backfillCrmAccountsForWorkspace(actor: AppActor, params: {
 
 // --- CONTACTS ---
 
-export async function listContacts(actor: AppActor, workspaceId: string, opts?: { take?: number; skip?: number; query?: string; archiveFilter?: ArchiveFilter }) {
+export async function listContacts(actor: AppActor, workspaceId: string, opts?: { take?: number; skip?: number; query?: string; accountId?: string; archiveFilter?: ArchiveFilter }) {
   await requireWorkspaceMembership({ actor, workspaceId });
   
   const take = opts?.take ?? 50;
   const skip = opts?.skip ?? 0;
   
   let where: any = { workspaceId, ...archiveFilterWhere(opts?.archiveFilter) };
+  if (opts?.accountId) {
+    where.accountId = opts.accountId;
+  }
   if (opts?.query) {
     where = {
       ...where,
@@ -1059,13 +1062,19 @@ export async function deleteContact(actor: AppActor, params: { workspaceId: stri
 
 // --- DEALS ---
 
-export async function listDeals(actor: AppActor, workspaceId: string, opts?: { take?: number; skip?: number; stage?: CrmDealStage; archiveFilter?: ArchiveFilter }) {
+export async function listDeals(actor: AppActor, workspaceId: string, opts?: { take?: number; skip?: number; stage?: CrmDealStage; accountId?: string; contactId?: string; archiveFilter?: ArchiveFilter }) {
   await requireWorkspaceMembership({ actor, workspaceId });
   
   const take = opts?.take ?? 100;
   const skip = opts?.skip ?? 0;
   
   const where: any = { workspaceId, ...archiveFilterWhere(opts?.archiveFilter) };
+  if (opts?.accountId) {
+    where.accountId = opts.accountId;
+  }
+  if (opts?.contactId) {
+    where.contactId = opts.contactId;
+  }
   if (opts?.stage) {
     where.stage = opts.stage;
   }
