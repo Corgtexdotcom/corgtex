@@ -958,7 +958,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
     "Get setup instructions for an installed or available Corgtex marketplace app. Use this before asking a user to connect a separate app MCP.",
     {
       catalogItemId: z.string().optional().describe("Catalog item id from list_installed_apps."),
-      appKey: z.string().optional().describe("App key such as practice-ledger."),
+      appKey: z.string().optional().describe("App key such as finance-suite."),
     },
     async ({ catalogItemId, appKey }: { catalogItemId?: string; appKey?: string }) => {
       requireToolCapability("get_app_connection_instructions");
@@ -971,7 +971,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
     "invoke_installed_app_tool",
     "Invoke a scoped MCP tool on an installed enterprise app through Corgtex governance, app-session auth, and audit.",
     {
-      appKey: z.string().optional().describe("Installed app key such as practice-ledger."),
+      appKey: z.string().optional().describe("Installed app key such as finance-suite."),
       surface: z.enum(["FINANCE"]).optional().describe("Workspace surface assigned to the installed app."),
       toolName: z.string().describe("Installed app MCP tool name, such as create_expenses."),
       arguments: z.record(z.string(), z.unknown()).optional().describe("Installed app MCP tool arguments."),
@@ -1012,7 +1012,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
     "Create a Tools admin request to install an available marketplace app. Does not install or call the app directly.",
     {
       catalogItemId: z.string().optional().describe("Catalog item id from list_installed_apps."),
-      appKey: z.string().optional().describe("App key such as practice-ledger."),
+      appKey: z.string().optional().describe("App key such as finance-suite."),
       reasonMd: z.string().optional().describe("Why this workspace needs the app."),
     },
     async ({ catalogItemId, appKey, reasonMd }: { catalogItemId?: string; appKey?: string; reasonMd?: string }) => {

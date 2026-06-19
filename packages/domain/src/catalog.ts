@@ -16,7 +16,6 @@ import { prisma, randomOpaqueToken, sha256, toInputJson } from "@corgtex/shared"
 import type { AppActor, MembershipSummary } from "@corgtex/shared";
 import { AGENT_REGISTRY } from "./agent-registry";
 import { ALL_SCOPES } from "./agent-auth";
-import { getSatelliteModuleByAppKey } from "./modules";
 import { listAiWorkspaceToolProviders, listEnterpriseServices } from "./ai-workspaces";
 import { actorUserIdForWorkspace, requireWorkspaceMembership } from "./auth";
 import { connectorReadinessManifest, listConnectorReadinessProfiles } from "./connector-readiness";
@@ -44,6 +43,7 @@ const APP_VISIBILITIES: AppVisibility[] = ["PUBLIC_MARKETPLACE", "UNLISTED", "WO
 const HOSTING_MODES: AppHostingMode[] = ["EXTERNAL_URL", "CORGTEX_MANAGED_EXTERNAL", "CORGTEX_HOSTED_STATIC", "CORGTEX_HOSTED_CONTAINER", "MCP_SERVER"];
 const INTEGRATION_DEPTHS: AppIntegrationDepth[] = ["CATALOG_ONLY", "LAUNCHABLE", "MCP_ACTIONABLE", "KNOWLEDGE_SYNCED", "WORKFLOW_NATIVE"];
 const INSTALLATION_STATUSES: AppInstallationStatus[] = ["REQUESTED", "APPROVED", "INSTALLED", "NEEDS_SETUP", "UNHEALTHY", "DISABLED"];
+const RETIRED_MARKETPLACE_APP_KEYS = new Set(["practice-ledger"]);
 
 type CatalogFeatureFlag = keyof typeof CATALOG_FEATURE_DEFAULTS;
 type CatalogFeatureFlags = Record<CatalogFeatureFlag, boolean>;
@@ -178,73 +178,6 @@ function requireUser(actor: AppActor) {
     throw new AppError(403, "FORBIDDEN", "Only signed-in workspace members can use this catalog action.");
   }
   return actor.user;
-}
-
-function practiceLedgerCapabilities() {
-  // Derived from the satellite module's graduation-stable capability contract
-  // in the Module Manifest registry (single source of truth).
-  const satellite = getSatelliteModuleByAppKey("practice-ledger");
-  return (satellite?.contract ?? []).map((capability) => ({
-    key: capability.key,
-    description: capability.description,
-    requiredScopes: capability.requiredScopes ?? [],
-  }));
-}
-
-function mergeManifest(
-  base: Record<string, unknown> | null | undefined,
-  connectorKey: string,
-) {
-  return {
-    ...(base ?? {}),
-    ...connectorReadinessManifest(connectorKey),
-  };
-}
-
-// Derive marketplace app sources from satellite-tier module manifests. The
-// satellite's structured identity (app key, repository, env-sourced URLs,
-// category, classification, capability contract) comes from the registry;
-// only marketing copy lives here.
-function marketplaceAppSources(_workspaceId: string, flags: CatalogFeatureFlags): CatalogSourceInput[] {
-  if (!flags.APP_MARKETPLACE || !flags.FINANCE) return [];
-
-  const ledger = getSatelliteModuleByAppKey("practice-ledger");
-  const spec = ledger?.satellite;
-  if (!ledger || !spec) return [];
-
-  const practiceLedgerUrl = normalizeString(process.env[spec.appUrlEnv]);
-  const practiceLedgerMcpUrl = normalizeString(process.env[spec.mcpUrlEnv]);
-  const repositoryUrl = `https://${spec.repository}`;
-  return [{
-    type: "APP",
-    sourceType: "MARKETPLACE_APP",
-    sourceId: spec.appKey,
-    title: ledger.title,
-    outcome: "Track consulting budgets, billing codes, time, expenses, margin, burn rate, and finance intake.",
-    descriptionMd: "Official Corgtex-built finance app for consulting practices. Native practice-finance records live in Corgtex while retained app metadata supports useful summaries, source provenance, and audit-readable context.",
-    accessNotesMd: "Use this managed finance app for workspaces that need consulting-finance operations. Native dashboard records live in Corgtex; app MCP/runtime metadata remains available for workspaces that still route expense, time, budget, or statement writes through an assigned app runtime.",
-    url: practiceLedgerUrl,
-    category: spec.routingCategory,
-    accessMode: "REQUEST",
-    requestedScopes: ["workspace:read", "brain:read", "brain:write", "finance:read", "finance:write"],
-    featured: true,
-    appCategory: spec.appCategory as AppCategory,
-    appVisibility: "CORGTEX_MANAGED",
-    hostingMode: practiceLedgerMcpUrl && !practiceLedgerUrl ? "MCP_SERVER" : "CORGTEX_MANAGED_EXTERNAL",
-    integrationDepth: "KNOWLEDGE_SYNCED",
-    installationStatus: "NEEDS_SETUP",
-    appMcpUrl: practiceLedgerMcpUrl,
-    dataClassification: spec.dataClassification,
-    proofUrl: repositoryUrl,
-    reviewUrl: repositoryUrl,
-    manifestJson: mergeManifest({
-      appKey: spec.appKey,
-      repository: spec.repository,
-      structuredRecordOwner: "Corgtex PracticeProject",
-      corgtexRole: "governed context, Brain sync, app discovery, routing guidance, and audit context",
-    }, "practice-ledger"),
-    capabilitiesJson: practiceLedgerCapabilities(),
-  }];
 }
 
 function connectorSources(workspaceId: string, flags: CatalogFeatureFlags): CatalogSourceInput[] {
@@ -612,7 +545,6 @@ async function ensureDerivedCatalogItems(workspaceId: string) {
       accessMode: "ADMIN_ONLY" as const,
       requestedScopes: ["data-sources:read"],
     })) : []),
-    ...marketplaceAppSources(workspaceId, featureFlags),
     ...connectorSources(workspaceId, featureFlags),
     ...externalConnectorSources(),
     ...aiWorkspaceSources(workspaceId, featureFlags),
@@ -1226,6 +1158,10 @@ function appMatches(item: SerializedCatalogItem, value: string) {
     item.title.toLowerCase() === normalized;
 }
 
+function activeMarketplaceApps(items: SerializedCatalogItem[]) {
+  return items.filter((item) => isMarketplaceApp(item) && !RETIRED_MARKETPLACE_APP_KEYS.has(appKey(item).toLowerCase()));
+}
+
 function financeIntent(intent: string, recordType?: string | null) {
   const text = `${intent} ${recordType ?? ""}`.toLowerCase();
   return /\b(expense|expenses|receipt|receipts|invoice|invoices|statement|statements|budget|budgets|billing|billable|time entr|timesheet|hours|margin|burn|purchase order|po)\b/.test(text);
@@ -1250,7 +1186,7 @@ export async function listInstalledApps(actor: AppActor, params: {
   workspaceId: string;
 }) {
   const catalog = await listCatalogItems(actor, params.workspaceId);
-  const apps = catalog.items.filter(isMarketplaceApp);
+  const apps = activeMarketplaceApps(catalog.items);
   const installed = apps.filter((item) => isInstalledAppStatus(item.installationStatus)).map(appSummary);
   const available = apps.filter((item) => !isInstalledAppStatus(item.installationStatus) && item.installationStatus !== "DISABLED").map(appSummary);
   return {
@@ -1266,7 +1202,7 @@ export async function getAppRoutingGuidance(actor: AppActor, params: {
   recordType?: string | null;
 }) {
   const catalog = await listCatalogItems(actor, params.workspaceId);
-  const apps = catalog.items.filter(isMarketplaceApp);
+  const apps = activeMarketplaceApps(catalog.items);
   const installed = apps.filter((item) => isInstalledAppStatus(item.installationStatus));
   const available = apps.filter((item) => !isInstalledAppStatus(item.installationStatus) && item.installationStatus !== "DISABLED");
 
@@ -1294,6 +1230,15 @@ export async function getAppRoutingGuidance(actor: AppActor, params: {
         nextStep: "Request app install, then connect the app MCP in the user's agent environment.",
       };
     }
+    return {
+      routing: "CORGTEX_MCP",
+      target: {
+        appKey: "corgtex",
+        title: "Corgtex Practice Ledger",
+      },
+      guidance: "Use Corgtex native Finance / Practice Ledger for structured finance records. Do not route finance writes to the retired Practice Ledger app runtime.",
+      corgtexDoesNotProxyWrites: false,
+    };
   }
 
   if (corgtexNativeIntent(params.intent, params.recordType)) {
@@ -1322,7 +1267,7 @@ export async function getAppConnectionInstructions(actor: AppActor, params: {
   appKey?: string | null;
 }) {
   const catalog = await listCatalogItems(actor, params.workspaceId);
-  const app = findApp(catalog.items.filter(isMarketplaceApp), params);
+  const app = findApp(activeMarketplaceApps(catalog.items), params);
   invariant(app, 404, "NOT_FOUND", "App not found.");
   const summary = appSummary(app);
   return {
@@ -1345,7 +1290,7 @@ export async function requestAppInstall(actor: AppActor, params: {
   reasonMd?: string | null;
 }) {
   const catalog = await listCatalogItems(actor, params.workspaceId);
-  const app = findApp(catalog.items.filter(isMarketplaceApp), params);
+  const app = findApp(activeMarketplaceApps(catalog.items), params);
   invariant(app, 404, "NOT_FOUND", "App not found.");
   const request = await createCatalogRequest(actor, {
     workspaceId: params.workspaceId,

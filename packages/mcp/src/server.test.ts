@@ -228,12 +228,12 @@ describe("createCorgtexMcpServer", () => {
     listInstalledAppsMock.mockReset().mockResolvedValue({ installed: [], available: [], webUrl: "/workspaces/ws-1/tools?type=APP" });
     getAppRoutingGuidanceMock.mockReset().mockResolvedValue({ routing: "CORGTEX_MCP", guidance: "Use Corgtex." });
     getAppConnectionInstructionsMock.mockReset().mockResolvedValue({
-      app: { id: "practice-ledger", title: "Practice Ledger" },
-      instructions: ["Connect Practice Ledger MCP."],
+      app: { id: "finance-suite", title: "Finance Suite" },
+      instructions: ["Connect Finance Suite MCP."],
       connectionReady: true,
     });
     invokeInstalledAppToolMock.mockReset().mockResolvedValue({
-      appKey: "practice-ledger",
+      appKey: "finance-suite",
       appInstallationId: "installation-1",
       toolName: "create_expenses",
       scopes: ["finance:write"],
@@ -241,7 +241,7 @@ describe("createCorgtexMcpServer", () => {
     });
     requestAppInstallMock.mockReset().mockResolvedValue({
       request: { id: "request-1", status: "PENDING" },
-      app: { id: "practice-ledger", title: "Practice Ledger" },
+      app: { id: "finance-suite", title: "Finance Suite" },
     });
     upsertWorkspaceToolLinkMock.mockReset().mockResolvedValue({
       id: "tool-1",
@@ -1631,8 +1631,8 @@ describe("createCorgtexMcpServer", () => {
     listInstalledAppsMock.mockResolvedValueOnce({
       installed: [{
         id: "app-1",
-        appKey: "practice-ledger",
-        title: "Practice Ledger",
+        appKey: "finance-suite",
+        title: "Finance Suite",
         category: "FINANCE",
         installationStatus: "INSTALLED",
       }],
@@ -1640,8 +1640,8 @@ describe("createCorgtexMcpServer", () => {
     });
     getAppRoutingGuidanceMock.mockResolvedValueOnce({
       routing: "APP_MCP",
-      target: { appKey: "practice-ledger", title: "Practice Ledger" },
-      guidance: "Use Practice Ledger MCP for structured finance writes.",
+      target: { appKey: "finance-suite", title: "Finance Suite" },
+      guidance: "Use Finance Suite MCP for structured finance writes.",
       corgtexDoesNotProxyWrites: true,
     });
 
@@ -1669,7 +1669,7 @@ describe("createCorgtexMcpServer", () => {
       recordType: undefined,
     });
     expect(JSON.parse(listResponse.content[0].text).installed[0]).toEqual(expect.objectContaining({
-      appKey: "practice-ledger",
+      appKey: "finance-suite",
     }));
     expect(JSON.parse(guidanceResponse.content[0].text)).toEqual(expect.objectContaining({
       routing: "APP_MCP",
@@ -1696,10 +1696,10 @@ describe("createCorgtexMcpServer", () => {
     });
 
     const instructionsResponse = await (server as any)._registeredTools.get_app_connection_instructions.handler({
-      appKey: "practice-ledger",
+      appKey: "finance-suite",
     });
     const requestResponse = await (server as any)._registeredTools.request_app_install.handler({
-      appKey: "practice-ledger",
+      appKey: "finance-suite",
       reasonMd: "Need expense intake.",
     });
 
@@ -1708,15 +1708,15 @@ describe("createCorgtexMcpServer", () => {
     expect(getAppConnectionInstructionsMock).toHaveBeenCalledWith(actor, {
       workspaceId: "ws-1",
       catalogItemId: undefined,
-      appKey: "practice-ledger",
+      appKey: "finance-suite",
     });
     expect(requestAppInstallMock).toHaveBeenCalledWith(actor, {
       workspaceId: "ws-1",
       catalogItemId: undefined,
-      appKey: "practice-ledger",
+      appKey: "finance-suite",
       reasonMd: "Need expense intake.",
     });
-    expect(JSON.parse(instructionsResponse.content[0].text).app.title).toBe("Practice Ledger");
+    expect(JSON.parse(instructionsResponse.content[0].text).app.title).toBe("Finance Suite");
     expect(JSON.parse(requestResponse.content[0].text).request.status).toBe("PENDING");
   });
 
@@ -1751,7 +1751,7 @@ describe("createCorgtexMcpServer", () => {
       requiredScopes: ["finance:write"],
     });
     expect(JSON.parse(response.content[0].text)).toEqual(expect.objectContaining({
-      appKey: "practice-ledger",
+      appKey: "finance-suite",
       toolName: "create_expenses",
       webUrl: "https://app.test/workspaces/ws-1/finance",
     }));

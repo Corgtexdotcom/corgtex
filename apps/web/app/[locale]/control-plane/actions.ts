@@ -377,7 +377,7 @@ export async function installEnterpriseAppFromControlPlaneAction(formData: FormD
   const workspaceId = asString(formData, "workspaceId");
   await installEnterpriseApp(actor, {
     workspaceId,
-    appKey: asString(formData, "appKey") || "practice-ledger",
+    appKey: asString(formData, "appKey"),
     surface: optionalString(formData, "surface"),
     runtimeMode: optionalString(formData, "runtimeMode"),
     runtimeBaseUrl: optionalString(formData, "runtimeBaseUrl"),

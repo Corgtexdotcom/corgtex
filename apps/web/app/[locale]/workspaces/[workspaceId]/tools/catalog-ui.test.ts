@@ -266,9 +266,9 @@ describe("Tools catalog UI helpers", () => {
 
   it("treats marketplace apps as installable rather than generic tool links", () => {
     const actions = getCatalogCardActions(item({
-      id: "practice-ledger",
+      id: "finance-suite",
       type: "APP",
-      title: "Practice Ledger",
+      title: "Finance Suite",
       url: null,
       accessMode: "REQUEST",
       appCategory: "FINANCE",
@@ -278,7 +278,7 @@ describe("Tools catalog UI helpers", () => {
 
     expect(actions).toEqual([
       { kind: "request", label: "Request install", requestType: "ACCESS", variant: "primary" },
-      { kind: "link", label: "Details", href: "/workspaces/workspace-1/tools/practice-ledger", variant: "secondary" },
+      { kind: "link", label: "Details", href: "/workspaces/workspace-1/tools/finance-suite", variant: "secondary" },
     ]);
   });
 });

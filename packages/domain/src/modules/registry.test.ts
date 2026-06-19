@@ -5,7 +5,6 @@ import {
   collectFeatureFlagDefinitions,
   defaultWorkspaceFeatureFlags,
   getSatelliteEmbedForModule,
-  getSatelliteModuleByAppKey,
   listNavModules,
   listWorkspaceFeatureFlagDefinitions,
   listWorkspaceFeatureFlagKeys,
@@ -132,37 +131,15 @@ describe("module registry integrity", () => {
   });
 });
 
-describe("practice ledger satellite contract", () => {
-  it("exposes the structured identity the catalog derives from", () => {
-    const ledger = getSatelliteModuleByAppKey("practice-ledger");
-    expect(ledger?.satellite).toMatchObject({
-      appKey: "practice-ledger",
-      repository: "github.com/Corgtexdotcom/practice-ledger",
-      appUrlEnv: "PRACTICE_LEDGER_APP_URL",
-      mcpUrlEnv: "PRACTICE_LEDGER_MCP_URL",
-      appCategory: "FINANCE",
-      routingCategory: "FINANCE",
-      dataClassification: "CLIENT_PRIVATE",
-    });
-  });
-
-  it("declares the four graduation-stable capabilities", () => {
-    const ledger = getSatelliteModuleByAppKey("practice-ledger");
-    expect((ledger?.contract ?? []).map((capability) => capability.key)).toEqual([
-      "expenses.create_draft",
-      "time_entries.create_draft",
-      "budgets.read_status",
-      "knowledge.sync_summary",
-    ]);
-  });
-
-  it("has graduated to a first-party native module (cutover complete)", () => {
-    const ledger = getSatelliteModuleByAppKey("practice-ledger");
+describe("practice ledger native module", () => {
+  it("has no satellite app identity or embed after the native finance cutover", () => {
+    const ledger = MODULE_MANIFESTS.find((mod) => mod.key === "practice-ledger");
     expect(ledger?.tier).toBe("first_party");
     expect(ledger?.dataOwnership).toBe("corgtex_postgres");
-    expect(ledger?.graduation).toEqual({ stage: "cutover" });
+    expect(ledger?.satellite).toBeUndefined();
+    expect(ledger?.contract).toBeUndefined();
+    expect(ledger?.graduation).toBeUndefined();
 
-    // After cutover the finance tab is native (no satellite embed).
     expect(getSatelliteEmbedForModule("finance")).toBeUndefined();
     expect(getSatelliteEmbedForModule("goals")).toBeUndefined();
   });

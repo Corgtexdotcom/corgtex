@@ -465,7 +465,7 @@ describe("catalog domain", () => {
     }));
   });
 
-  it("derives Practice Ledger as an official finance marketplace app", async () => {
+  it("does not derive Practice Ledger as an installable marketplace app", async () => {
     const { listCatalogItems } = await import("./catalog");
     vi.stubEnv("PRACTICE_LEDGER_APP_URL", "https://practice-ledger.example.com");
     vi.stubEnv("PRACTICE_LEDGER_MCP_URL", "https://practice-ledger.example.com/mcp");
@@ -476,7 +476,7 @@ describe("catalog domain", () => {
 
     await listCatalogItems(actor, "workspace-1");
 
-    expect(prismaMock.catalogItem.upsert).toHaveBeenCalledWith(expect.objectContaining({
+    expect(prismaMock.catalogItem.upsert).not.toHaveBeenCalledWith(expect.objectContaining({
       where: {
         workspaceId_sourceType_sourceId: {
           workspaceId: "workspace-1",
@@ -484,20 +484,6 @@ describe("catalog domain", () => {
           sourceId: "practice-ledger",
         },
       },
-      create: expect.objectContaining({
-        type: "APP",
-        title: "Practice Ledger",
-        url: "https://practice-ledger.example.com",
-        category: "FINANCE",
-        accessMode: "REQUEST",
-        appCategory: "FINANCE",
-        appVisibility: "CORGTEX_MANAGED",
-        hostingMode: "CORGTEX_MANAGED_EXTERNAL",
-        integrationDepth: "KNOWLEDGE_SYNCED",
-        installationStatus: "NEEDS_SETUP",
-        appMcpUrl: "https://practice-ledger.example.com/mcp",
-        requestedScopes: ["workspace:read", "brain:read", "brain:write", "finance:read", "finance:write"],
-      }),
     }));
   });
 
@@ -798,7 +784,7 @@ describe("catalog domain", () => {
     );
   });
 
-  it("returns Practice Ledger routing guidance when the finance app is installed", async () => {
+  it("ignores stale Practice Ledger app rows when routing finance intents", async () => {
     const { getAppRoutingGuidance } = await import("./catalog");
     prismaMock.catalogItem.findMany.mockResolvedValue([
       catalogItemFixture({
@@ -823,15 +809,12 @@ describe("catalog domain", () => {
     });
 
     expect(result).toMatchObject({
-      routing: "APP_MCP",
+      routing: "CORGTEX_MCP",
       target: {
-        appKey: "practice-ledger",
-        title: "Practice Ledger",
-        category: "FINANCE",
-        appMcpUrl: "https://practice-ledger.example.com/mcp",
-        capabilities: ["expenses.create_draft"],
+        appKey: "corgtex",
+        title: "Corgtex Practice Ledger",
       },
-      corgtexDoesNotProxyWrites: true,
+      corgtexDoesNotProxyWrites: false,
     });
   });
 });

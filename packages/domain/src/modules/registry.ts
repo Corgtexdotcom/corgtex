@@ -359,19 +359,16 @@ export const MODULE_MANIFESTS: readonly ModuleManifest[] = [
     scopes: ["execution:read", "execution:write"],
   },
 
-  // --- Graduated satellite (cutover): now a first-party module. ---
+  // --- Native first-party module. ---
   {
     key: "practice-ledger",
-    // Cutover complete: promoted from satellite (tier 3) to first-party (tier 2).
-    // Data now lives in Corgtex Postgres (PracticeProject); the `satellite` spec
-    // and `contract` are retained as integration metadata / provenance.
     tier: "first_party",
     title: "Practice Ledger",
     description:
-      "Official Corgtex-built finance app for consulting practices. Native records live in Corgtex Postgres while retained app metadata supports summaries, provenance, and audit context.",
+      "Native consulting finance workspace for project budgets, burn, remaining budget, and margin tracking.",
     dataOwnership: "corgtex_postgres",
-    // Practice Ledger is modular: every workspace gets the finance tab (expenses
-    // / spend + ledger baseline), and each capability below is opt-in per client.
+    // Finance is now the native Practice Ledger surface for every workspace;
+    // this sub-flag controls optional consulting project portfolio affordances.
     subFlags: [
       flag(
         "PRACTICE_PROJECTS",
@@ -380,40 +377,6 @@ export const MODULE_MANIFESTS: readonly ModuleManifest[] = [
         false,
       ),
     ],
-    contract: [
-      {
-        key: "expenses.create_draft",
-        description: "Create expense drafts from receipts, account statements, invoices, or user notes.",
-        requiredScopes: ["finance:write", "brain:read", "brain:write"],
-      },
-      {
-        key: "time_entries.create_draft",
-        description: "Create consultant time-entry drafts with source provenance.",
-        requiredScopes: ["finance:write", "brain:read", "brain:write"],
-      },
-      {
-        key: "budgets.read_status",
-        description: "Read budget, burn, remaining budget, and margin status.",
-        requiredScopes: ["finance:read", "brain:read"],
-      },
-      {
-        key: "knowledge.sync_summary",
-        description: "Sync finance summaries and source provenance into Corgtex Brain.",
-        requiredScopes: ["brain:write"],
-      },
-    ],
-    satellite: {
-      appKey: "practice-ledger",
-      repository: "github.com/Corgtexdotcom/practice-ledger",
-      appUrlEnv: "PRACTICE_LEDGER_APP_URL",
-      mcpUrlEnv: "PRACTICE_LEDGER_MCP_URL",
-      appCategory: "FINANCE",
-      routingCategory: "FINANCE",
-      dataClassification: "CLIENT_PRIVATE",
-    },
-    // Graduation complete. The finance tab renders the native first-party
-    // practice-finance dashboard (PracticeProject); no embed.
-    graduation: { stage: "cutover" },
   },
 ];
 
