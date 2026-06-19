@@ -43,6 +43,14 @@ import {
   searchConnectedContextTool,
 } from "./tools/external-mcp";
 import { contextMapToolHandlers, contextMapTools, isContextMapAiAvailable } from "./tools/context-map";
+import {
+  CRM_WRITE_TOOL_NAMES,
+  completeRelationshipActivityAction,
+  createCommunicationSuggestionAction,
+  crmTools,
+  listDueRelationshipWorkAction,
+  recordRelationshipActivityAction,
+} from "./tools/crm";
 import { formatConversationPageContextForModel, type ConversationPageContext } from "./page-context";
 import type { AppActor } from "@corgtex/shared";
 
@@ -75,6 +83,7 @@ READ TOOLS:
 - 'list_connected_tools' — same-user external MCP tools connected to this workspace
 - 'search_connected_context', 'fetch_connected_context' — live search/fetch from Corgtex and connected tools such as Notion, with provenance
 - Premium context-map tools, when enabled — read the current map, fetch selected-region context, create pending graph diffs, and apply graph diffs through the audited review/apply path
+- CRM tools — summarize visible CRM page context and list due relationship work
 
 WRITE TOOLS:
 - 'create_tension', 'create_action' — create new items
@@ -84,9 +93,11 @@ WRITE TOOLS:
 - 'upsert_tool_link', 'archive_tool_link', 'reveal_tool_link_credential' — manage and use the shared Tools directory
 - 'execute_external_tool' — run a same-user delegated external MCP tool such as Notion when the user explicitly asks or confidence is high
 - 'create_context_map_diff' and 'apply_context_map_diff', when enabled — propose or directly apply context-map graph changes without bypassing graph audit
+- CRM write tools — 'record_relationship_activity', 'complete_relationship_activity', and 'create_communication_suggestion'
 
 When asked about current state, ALWAYS use a query tool instead of guessing.
-When asked to create or update something, execute the write tool immediately — do not ask for confirmation. Report what you did clearly after executing.
+When asked to create or update something, execute the write tool immediately — do not ask for confirmation, except for CRM write tools. Report what you did clearly after executing.
+CRM write tools require explicit confirmation in a separate user reply before execution. First summarize the exact CRM change you plan to make and ask the user to confirm. After the user replies with a clear confirmation such as "yes", "confirm", "go ahead", or "do it", execute the CRM write tool. CRM tools may draft, suggest, record, or mark tracked work complete, but they must not send email directly.
 Every write action is fully audited and traceable.
 For context map work, use CURRENT PAGE CONTEXT only as a pointer to the map/view/selection. Fetch bounded map details with 'get_context_map_info' or 'get_selected_context_map_region' before proposing or applying graph changes. If the user asks for an ambiguous change, ask a clarifying question instead of guessing. If the user confirms with "yes", "do it", or similar, use the prior chat turns plus CURRENT PAGE CONTEXT to carry out the last clear map-change intent. For merge requests, ask which item survives if unclear; otherwise update the survivor, re-point absorbed relationships, archive the absorbed item, and preserve evidence refs on the survivor where available.
 Tool credential reveals are sensitive and audited. Use them only when the user asks to access or reveal a saved tool credential.
@@ -180,6 +191,7 @@ const BASE_TOOLS = [
   searchConnectedContextTool,
   fetchConnectedContextTool,
   executeExternalToolTool,
+  ...crmTools,
 ];
 
 async function toolsForContext(ctx: ConversationContext) {
@@ -227,8 +239,43 @@ const TOOL_HANDLERS: Record<string, (actor: AppActor, ctx: ConversationContext, 
   search_connected_context: async (actor, ctx, args) => searchConnectedContextAction(actor, ctx, args),
   fetch_connected_context: async (actor, ctx, args) => fetchConnectedContextAction(actor, ctx, args),
   execute_external_tool: async (actor, ctx, args) => executeExternalToolAction(actor, ctx, args),
+  list_due_relationship_work: async (actor, ctx, args) => listDueRelationshipWorkAction(actor, ctx, args),
+  record_relationship_activity: async (actor, ctx, args) => recordRelationshipActivityAction(actor, ctx, args),
+  complete_relationship_activity: async (actor, ctx, args) => completeRelationshipActivityAction(actor, ctx, args),
+  create_communication_suggestion: async (actor, ctx, args) => createCommunicationSuggestionAction(actor, ctx, args),
   ...contextMapToolHandlers,
 };
+
+function isCrmWriteTool(toolName: string) {
+  return CRM_WRITE_TOOL_NAMES.has(toolName);
+}
+
+function userMessageConfirmsWrite(message: string) {
+  const normalized = message.trim().toLowerCase();
+  if (!normalized) return false;
+  return /^(yes|yep|yeah|ok|okay|confirm|confirmed|approved|approve|go ahead|do it|please do|proceed|run it|create it|record it|draft it|complete it)\b/.test(normalized)
+    || /\b(confirm(ed)?|go ahead|do it|please do|proceed|run it)\b/.test(normalized);
+}
+
+function assistantAskedForCrmWriteConfirmation(priorTurns: Array<{ assistantMessage: string }>) {
+  return priorTurns.slice(-4).some((turn) => {
+    const message = turn.assistantMessage.toLowerCase();
+    return /(confirm|reply|say yes|go ahead|do it)/.test(message)
+      && /(crm|relationship|account|follow[- ]?up|activity|note|communication suggestion|suggestion|draft)/.test(message);
+  });
+}
+
+function hasConfirmedCrmWrite(ctx: ConversationContext, priorTurns: Array<{ assistantMessage: string }>) {
+  return userMessageConfirmsWrite(ctx.userMessage) && assistantAskedForCrmWriteConfirmation(priorTurns);
+}
+
+function crmWriteConfirmationError(toolName: string) {
+  return {
+    error: "CRM_WRITE_REQUIRES_CONFIRMATION",
+    toolName,
+    message: "CRM write tools require explicit confirmation in a separate user reply. Ask the user to confirm the exact CRM change before calling this tool.",
+  };
+}
 
 function requireConversationToolActor(ctx: ConversationContext): AppActor {
   if (!ctx.actor) {
@@ -393,6 +440,7 @@ export async function processConversationTurn(ctx: ConversationContext): Promise
 
   let finalMessage = response.content;
   let mapGraphChanged = false;
+  const crmWriteConfirmed = hasConfirmedCrmWrite(ctx, priorTurns);
 
   // Execute tools if the LLM requests it
   if (response.tool_calls && response.tool_calls.length > 0) {
@@ -403,6 +451,10 @@ export async function processConversationTurn(ctx: ConversationContext): Promise
       const handler = TOOL_HANDLERS[call.function.name];
       if (handler) {
         try {
+          if (isCrmWriteTool(call.function.name) && !crmWriteConfirmed) {
+            messages.push({ role: "tool", content: JSON.stringify(crmWriteConfirmationError(call.function.name)), name: call.function.name, tool_call_id: call.id });
+            continue;
+          }
           const args = call.function.arguments ? JSON.parse(call.function.arguments) : {};
           const result = await handler(actor, ctx, args);
           if (isContextMapMutationTool(call.function.name)) {
@@ -559,6 +611,7 @@ export async function* processConversationTurnStream(ctx: ConversationContext): 
 
   let finalMessage = "";
   let mapGraphChanged = false;
+  const crmWriteConfirmed = hasConfirmedCrmWrite(ctx, priorTurns);
 
   const iterator = defaultModelGateway.chatStream({
     workspaceId: ctx.workspaceId,
@@ -588,6 +641,10 @@ export async function* processConversationTurnStream(ctx: ConversationContext): 
       const handler = TOOL_HANDLERS[call.function.name];
       if (handler) {
         try {
+          if (isCrmWriteTool(call.function.name) && !crmWriteConfirmed) {
+            messages.push({ role: "tool", content: JSON.stringify(crmWriteConfirmationError(call.function.name)), name: call.function.name, tool_call_id: call.id });
+            continue;
+          }
           const args = call.function.arguments ? JSON.parse(call.function.arguments) : {};
           const result = await handler(actor, ctx, args);
           if (isContextMapMutationTool(call.function.name)) {
