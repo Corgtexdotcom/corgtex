@@ -25,11 +25,28 @@ export function normalizeActionStatusFilter(value: string | string[] | undefined
     : "OPEN";
 }
 
+export function normalizeActionStatusFilters(value: string | string[] | undefined): ActionStatusFilter[] {
+  const values = Array.isArray(value) ? value : value ? [value] : [];
+  const seen = new Set<ActionStatusFilter>();
+  for (const entry of values) {
+    if (ACTION_STATUS_FILTERS.includes(entry as ActionStatusFilter)) {
+      seen.add(entry as ActionStatusFilter);
+    }
+  }
+  if (seen.has("ALL") || seen.size === ACTION_STATUS_FILTERS.length - 1) return [];
+  return [...seen];
+}
+
 export function actionMatchesStatusFilter(action: ActionListItem, filter: ActionStatusFilter): boolean {
   if (filter === "ALL") return true;
   if (action.status !== filter) return false;
   if (filter === "DRAFT") return true;
   return !action.isPrivate;
+}
+
+export function actionMatchesStatusFilters(action: ActionListItem, filters: readonly ActionStatusFilter[]): boolean {
+  if (filters.length === 0) return true;
+  return filters.some((filter) => actionMatchesStatusFilter(action, filter));
 }
 
 export function groupActionsByStatus<T extends ActionListItem>(actions: T[]) {

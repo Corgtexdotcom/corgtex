@@ -2603,12 +2603,17 @@ function compareFleetRows(
   return direction === "asc" ? result : -result;
 }
 
+function controlPlaneFilterValues(value?: string | string[] | null) {
+  const rawValues = Array.isArray(value) ? value : value ? [value] : [];
+  return [...new Set(rawValues.map((entry) => entry.trim().toLowerCase()).filter(Boolean))];
+}
+
 export async function listControlPlaneFleetPage(actor: AppActor, params: {
   query?: string | null;
-  health?: string | null;
-  support?: string | null;
-  region?: string | null;
-  owner?: string | null;
+  health?: string | string[] | null;
+  support?: string | string[] | null;
+  region?: string | string[] | null;
+  owner?: string | string[] | null;
   unhealthy?: string | boolean | null;
   issues?: string | boolean | null;
   missingTools?: string | boolean | null;
@@ -2620,10 +2625,10 @@ export async function listControlPlaneFleetPage(actor: AppActor, params: {
 } = {}) {
   const rows = await listControlPlaneDeployments(actor);
   const query = params.query?.trim().toLowerCase() ?? "";
-  const health = params.health?.trim().toLowerCase() ?? "";
-  const support = params.support?.trim().toLowerCase() ?? "";
-  const region = params.region?.trim().toLowerCase() ?? "";
-  const owner = params.owner?.trim().toLowerCase() ?? "";
+  const health = controlPlaneFilterValues(params.health);
+  const support = controlPlaneFilterValues(params.support);
+  const region = controlPlaneFilterValues(params.region);
+  const owner = controlPlaneFilterValues(params.owner);
   const sort = (["customer", "health", "release", "support", "region", "owner", "updated"].includes(params.sort ?? "")
     ? params.sort
     : "updated") as ControlPlaneFleetSort;
@@ -2635,10 +2640,10 @@ export async function listControlPlaneFleetPage(actor: AppActor, params: {
     const healthValue = normalizedStatus(row.lastHealthStatus || latestSnapshotForKind(row, "HEALTH")?.status || row.provisioningStatus);
     const supportValue = normalizedStatus(controlPlaneSupportSummary(row).status);
     return fleetRowMatchesQuery(row, query)
-      && (!health || healthValue === health)
-      && (!support || supportValue === support)
-      && (!region || row.region?.toLowerCase() === region)
-      && (!owner || row.supportOwnerEmail?.toLowerCase() === owner);
+      && (health.length === 0 || health.includes(healthValue))
+      && (support.length === 0 || support.includes(supportValue))
+      && (region.length === 0 || region.includes(row.region?.toLowerCase() ?? ""))
+      && (owner.length === 0 || owner.includes(row.supportOwnerEmail?.toLowerCase() ?? ""));
   }).sort((a, b) => compareFleetRows(a, b, sort, direction));
 
   const pageCount = Math.max(Math.ceil(filtered.length / pageSize), 1);
@@ -4388,15 +4393,15 @@ export async function getControlPlaneFleetOverview(actor: AppActor, params: Para
 
 export async function listControlPlaneRecorderMatrix(actor: AppActor, params: {
   query?: string | null;
-  client?: string | null;
-  status?: string | null;
+  client?: string | string[] | null;
+  status?: string | string[] | null;
   page?: number | null;
   pageSize?: number | null;
 } = {}) {
   const rows = await listControlPlaneDeployments(actor);
   const query = params.query?.trim().toLowerCase() ?? "";
-  const client = params.client?.trim().toLowerCase() ?? "";
-  const status = params.status?.trim().toLowerCase() ?? "";
+  const client = controlPlaneFilterValues(params.client);
+  const status = controlPlaneFilterValues(params.status);
   const pageSize = boundedInteger(params.pageSize, 25, 10, 100);
   const page = boundedInteger(params.page, 1, 1, Number.MAX_SAFE_INTEGER);
 
@@ -4410,8 +4415,8 @@ export async function listControlPlaneRecorderMatrix(actor: AppActor, params: {
       row.readiness.detail,
       row.calendarSource?.label,
     ].some((value) => value?.toLowerCase().includes(query));
-    const matchesClient = !client || row.deploymentId.toLowerCase() === client || row.clientSlug?.toLowerCase() === client;
-    const matchesStatus = !status || row.status === status || row.availability.status === status;
+    const matchesClient = client.length === 0 || client.includes(row.deploymentId.toLowerCase()) || client.includes(row.clientSlug?.toLowerCase() ?? "");
+    const matchesStatus = status.length === 0 || status.includes(row.status) || status.includes(row.availability.status);
     return matchesQuery && matchesClient && matchesStatus;
   });
   const pageCount = Math.max(Math.ceil(filtered.length / pageSize), 1);

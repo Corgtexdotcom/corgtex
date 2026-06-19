@@ -269,17 +269,23 @@ export type ListProposalsOptions = {
   take?: number;
   skip?: number;
   circleId?: string | null;
+  circleIds?: string[] | null;
   memberId?: string | null;
+  memberIds?: string[] | null;
   status?: ProposalStatus;
   archiveFilter?: ArchiveFilter;
   sort?: WorkItemSort;
 };
 
-function memberRelatedProposalWhere(workspaceId: string, memberId: string): Prisma.ProposalWhereInput[] {
+function listFilterValues(values?: readonly (string | null | undefined)[] | null) {
+  return [...new Set((values ?? []).map((value) => value?.trim()).filter((value): value is string => Boolean(value)))];
+}
+
+function memberRelatedProposalWhere(workspaceId: string, memberIds: string[]): Prisma.ProposalWhereInput[] {
   const authorMembershipWhere = {
     memberships: {
       some: {
-        id: memberId,
+        id: { in: memberIds },
         workspaceId,
         isActive: true,
       },
@@ -291,7 +297,7 @@ function memberRelatedProposalWhere(workspaceId: string, memberId: string): Pris
       actions: {
         some: {
           OR: [
-            { assigneeMemberId: memberId },
+            { assigneeMemberId: { in: memberIds } },
             { author: authorMembershipWhere },
           ],
         },
@@ -301,8 +307,8 @@ function memberRelatedProposalWhere(workspaceId: string, memberId: string): Pris
       tensions: {
         some: {
           OR: [
-            { assigneeMemberId: memberId },
-            { raisedByMemberId: memberId },
+            { assigneeMemberId: { in: memberIds } },
+            { raisedByMemberId: { in: memberIds } },
             { author: authorMembershipWhere },
           ],
         },
@@ -340,12 +346,16 @@ export async function listProposals(actor: AppActor, workspaceId: string, opts?:
     ...privacyFilter(actor, membership),
     ...archiveFilterWhere(opts?.archiveFilter),
   };
-  if (opts?.circleId !== undefined) {
+  const circleIds = listFilterValues(opts?.circleIds);
+  if (circleIds.length > 0) {
+    where.circleId = { in: circleIds };
+  } else if (opts?.circleId !== undefined) {
     where.circleId = opts.circleId;
   }
   if (opts?.status) where.status = opts.status;
-  if (opts?.memberId) {
-    appendProposalWhereAnd(where, { OR: memberRelatedProposalWhere(workspaceId, opts.memberId) });
+  const memberIds = listFilterValues([...(opts?.memberIds ?? []), opts?.memberId]);
+  if (memberIds.length > 0) {
+    appendProposalWhereAnd(where, { OR: memberRelatedProposalWhere(workspaceId, memberIds) });
   }
 
   const [items, total] = await Promise.all([

@@ -567,13 +567,13 @@ describe("tensions domain", () => {
           },
           {
             OR: [
-              { assigneeMemberId: "mem-1" },
-              { raisedByMemberId: "mem-1" },
+              { assigneeMemberId: { in: ["mem-1"] } },
+              { raisedByMemberId: { in: ["mem-1"] } },
               {
                 author: {
                   memberships: {
                     some: {
-                      id: "mem-1",
+                      id: { in: ["mem-1"] },
                       workspaceId: "ws-1",
                       isActive: true,
                     },

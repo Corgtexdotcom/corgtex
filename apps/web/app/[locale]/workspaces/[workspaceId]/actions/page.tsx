@@ -14,8 +14,10 @@ import {
   ACTION_STATUS_FILTERS,
   ACTION_STATUS_META,
   type ActionStatusFilter,
+  actionMatchesStatusFilters,
   groupActionsByStatus,
   normalizeActionStatusFilter,
+  normalizeActionStatusFilters,
 } from "./view-model";
 import { MarkdownEditor } from "@/lib/components/MarkdownEditor";
 import { MarkdownExcerpt } from "@/lib/components/MarkdownRenderer";
@@ -48,14 +50,15 @@ export default async function ActionsPage({
   const tWork = await getTranslations("workItems");
   const membership = await requireWorkspaceMembership({ actor, workspaceId });
   const resolvedSearch = searchParams ? await searchParams : {};
-  const statusFilter = normalizeActionStatusFilter(resolvedSearch.status);
+  const statusFilters = normalizeActionStatusFilters(resolvedSearch.status);
+  const statusFilter = statusFilters.length === 1 ? statusFilters[0] : normalizeActionStatusFilter(resolvedSearch.status);
   const view = normalizeWorkItemView(resolvedSearch.view);
-  const { circleId, memberId, sort } = resolveWorkItemFilters(resolvedSearch);
+  const { circleIds, memberIds, sort } = resolveWorkItemFilters(resolvedSearch);
   const [{ items: actions }, { items: proposals }, circles, members] = await Promise.all([
     listActions(actor, workspaceId, {
       take: 200,
-      circleId,
-      memberId,
+      circleIds,
+      memberIds,
       sort,
     }),
     listProposals(actor, workspaceId, { take: 50 }),
@@ -92,7 +95,7 @@ export default async function ActionsPage({
 
   const activeProposals = proposals.filter((p) => p.status === "DRAFT" || p.status === "OPEN");
   const groupedActions = groupActionsByStatus(actions);
-  const displayActions = groupedActions[statusFilter];
+  const displayActions = actions.filter((action) => actionMatchesStatusFilters(action, statusFilters));
   type ActionListItem = (typeof actions)[number];
   type ActionColumnStatus = "DRAFT" | "OPEN" | "IN_PROGRESS" | "COMPLETED";
   const actionColumnStatuses: ActionColumnStatus[] = ["DRAFT", "OPEN", "IN_PROGRESS", "COMPLETED"];
@@ -100,9 +103,9 @@ export default async function ActionsPage({
   const allActionColumnsVisible = visibleActionColumnIds.length === actionColumnStatuses.length;
   const buildActionColumnHref = (status: ActionColumnStatus) => buildWorkItemQuery({
     view: "kanban",
-    status: statusFilter,
-    circleId,
-    memberId,
+    status: statusFilters,
+    circleIds,
+    memberIds,
     columns: toggleWorkItemColumnVisibility(visibleActionColumnIds, status, actionColumnStatuses),
   });
   const actionColumnHideHrefs = Object.fromEntries(
@@ -111,17 +114,19 @@ export default async function ActionsPage({
   const actionFilterHref = (filter: ActionStatusFilter) => view === "kanban"
     ? buildWorkItemQuery({
       view: "kanban",
-      status: statusFilter,
-      circleId,
-      memberId,
+      status: statusFilters,
+      circleIds,
+      memberIds,
       columns: filter === "ALL" ? undefined : toggleWorkItemColumnVisibility(visibleActionColumnIds, filter, actionColumnStatuses),
     })
-    : buildWorkItemQuery({ view, sort, circleId, memberId, status: filter });
+    : buildWorkItemQuery({ view, sort, circleIds, memberIds, status: filter });
   const actionFilterActive = (filter: ActionStatusFilter) => view === "kanban"
     ? filter === "ALL"
       ? allActionColumnsVisible
       : visibleActionColumnIds.includes(filter)
-    : statusFilter === filter;
+    : filter === "ALL"
+      ? statusFilters.length === 0
+      : statusFilters.includes(filter);
 
   const canManageAction = (action: { authorUserId: string }) => actor.kind === "agent"
     || membership?.role === "ADMIN"
@@ -510,13 +515,13 @@ export default async function ActionsPage({
           <WorkItemToolbar
             currentView={view}
             currentSort={sort}
-            listHref={buildWorkItemQuery({ sort, circleId, memberId, status: statusFilter, view: "list" })}
-            kanbanHref={buildWorkItemQuery({ circleId, memberId, status: statusFilter, view: "kanban" })}
-            tableHref={buildWorkItemQuery({ sort, circleId, memberId, status: statusFilter, view: "table" })}
+            listHref={buildWorkItemQuery({ sort, circleIds, memberIds, status: statusFilters, view: "list" })}
+            kanbanHref={buildWorkItemQuery({ circleIds, memberIds, status: statusFilters, view: "kanban" })}
+            tableHref={buildWorkItemQuery({ sort, circleIds, memberIds, status: statusFilters, view: "table" })}
             sortLinks={{
-              priority: buildWorkItemQuery({ view: view === "table" ? "table" : "list", circleId, memberId, status: statusFilter, sort: "priority" }),
-              date: buildWorkItemQuery({ view: view === "table" ? "table" : "list", circleId, memberId, status: statusFilter, sort: "date" }),
-              alpha: buildWorkItemQuery({ view: view === "table" ? "table" : "list", circleId, memberId, status: statusFilter, sort: "alpha" }),
+              priority: buildWorkItemQuery({ view: view === "table" ? "table" : "list", circleIds, memberIds, status: statusFilters, sort: "priority" }),
+              date: buildWorkItemQuery({ view: view === "table" ? "table" : "list", circleIds, memberIds, status: statusFilters, sort: "date" }),
+              alpha: buildWorkItemQuery({ view: view === "table" ? "table" : "list", circleIds, memberIds, status: statusFilters, sort: "alpha" }),
             }}
             listLabel={tWork("listView")}
             kanbanLabel={tWork("kanbanView")}
@@ -535,15 +540,22 @@ export default async function ActionsPage({
           view={view}
           sort={view !== "kanban" ? sort : undefined}
           columns={view === "kanban" && !allActionColumnsVisible ? visibleActionColumnIds : undefined}
-          circleId={circleId}
-          memberId={memberId}
+          statusOptions={ACTION_STATUS_FILTERS.map((filter) => ({ id: filter, label: ACTION_STATUS_META[filter].labelKey ? t(ACTION_STATUS_META[filter].labelKey) : filter }))}
+          statusValues={statusFilters}
+          circleIds={circleIds}
+          memberIds={memberIds}
           circles={circles.map((circle) => ({ id: circle.id, label: circle.name }))}
           members={members.map((member) => ({ id: member.id, label: memberName(member) }))}
           labels={{
+            status: tWork("status"),
+            allStatuses: tWork("allStatuses"),
             circle: tWork("circle"),
             person: tWork("person"),
             allCircles: tWork("allCircles"),
             allPeople: tWork("allPeople"),
+            selectAll: tWork("selectAll"),
+            unselectAll: tWork("unselectAll"),
+            selectedCount: tWork("selectedCount", { count: "{count}" }),
             apply: tWork("applyFilters"),
             clear: tWork("clearFilters"),
           }}

@@ -8,6 +8,8 @@ import {
 } from "@corgtex/domain";
 import { Link } from "@/i18n/routing";
 import { requirePageActor } from "@/lib/auth";
+import { MultiSelectFilter } from "@/lib/components/MultiSelectFilter";
+import { firstSelectedValue, normalizeSelectedValues, queryStringFromParams, searchParamValues } from "@/lib/filter-query";
 import { enqueueDeployLatestRolloutAction } from "./actions";
 import {
   ControlPlanePageHeader,
@@ -29,16 +31,8 @@ type FleetPage = Awaited<ReturnType<typeof getControlPlaneFleetOverview>>;
 type ReleaseRollout = Awaited<ReturnType<typeof listControlPlaneReleaseRolloutJobs>>[number];
 
 const PAGE_SIZE = 25;
-
-function queryString(params: Record<string, string | number | null | undefined>) {
-  const search = new URLSearchParams();
-  for (const [key, value] of Object.entries(params)) {
-    if (value !== undefined && value !== null && String(value).length > 0) {
-      search.set(key, String(value));
-    }
-  }
-  return `?${search.toString()}`;
-}
+const FLEET_HEALTH_FILTERS = ["ok", "degraded", "down"] as const;
+const FLEET_SUPPORT_FILTERS = ["managed", "ready", "configured", "connected", "requires_connector", "not_configured", "degraded"] as const;
 
 function payloadString(payload: ReleaseRollout["payload"], key: string) {
   if (!payload || typeof payload !== "object" || Array.isArray(payload)) return null;
@@ -90,7 +84,7 @@ function issueStatusLabel(issues: FleetPage["items"][number]["issues"]) {
 export default async function ControlPlanePage({
   searchParams,
 }: {
-  searchParams?: Promise<Record<string, string | undefined>>;
+  searchParams?: Promise<Record<string, string | string[] | undefined>>;
 }) {
   const actor = await requirePageActor();
   try {
@@ -100,20 +94,22 @@ export default async function ControlPlanePage({
   }
 
   const raw = await searchParams;
-  const refresh = shouldRefreshControlPlaneCache(raw?.refresh);
+  const refresh = shouldRefreshControlPlaneCache(firstSelectedValue(searchParamValues(raw?.refresh)));
+  const healthFilters = normalizeSelectedValues(raw?.health, FLEET_HEALTH_FILTERS);
+  const supportFilters = normalizeSelectedValues(raw?.support, FLEET_SUPPORT_FILTERS);
   const fleetParams = {
-    query: raw?.q,
-    health: raw?.health,
-    support: raw?.support,
-    region: raw?.region,
-    owner: raw?.owner,
-    unhealthy: raw?.unhealthy,
-    issues: raw?.issues,
-    missingTools: raw?.missingTools,
-    stale: raw?.stale,
-    sort: raw?.sort,
-    direction: raw?.direction,
-    page: Number(raw?.page ?? 1),
+    query: firstSelectedValue(searchParamValues(raw?.q)),
+    health: healthFilters,
+    support: supportFilters,
+    region: normalizeSelectedValues(raw?.region),
+    owner: normalizeSelectedValues(raw?.owner),
+    unhealthy: firstSelectedValue(searchParamValues(raw?.unhealthy)),
+    issues: firstSelectedValue(searchParamValues(raw?.issues)),
+    missingTools: firstSelectedValue(searchParamValues(raw?.missingTools)),
+    stale: firstSelectedValue(searchParamValues(raw?.stale)),
+    sort: firstSelectedValue(searchParamValues(raw?.sort)),
+    direction: firstSelectedValue(searchParamValues(raw?.direction)),
+    page: Number(firstSelectedValue(searchParamValues(raw?.page)) ?? 1),
     pageSize: PAGE_SIZE,
   };
   const actorCacheKey = controlPlaneActorCacheKey(actor);
@@ -146,9 +142,9 @@ export default async function ControlPlanePage({
     sort: fleet.filters.sort,
     direction: fleet.filters.direction,
   };
-  const previousHref = queryString({ ...paginationFilters, page: Math.max(fleet.page - 1, 1) });
-  const nextHref = queryString({ ...paginationFilters, page: Math.min(fleet.page + 1, fleet.pageCount) });
-  const refreshHref = queryString({ ...paginationFilters, page: fleet.page, refresh: 1 });
+  const previousHref = queryStringFromParams({ ...paginationFilters, page: Math.max(fleet.page - 1, 1) });
+  const nextHref = queryStringFromParams({ ...paginationFilters, page: Math.min(fleet.page + 1, fleet.pageCount) });
+  const refreshHref = queryStringFromParams({ ...paginationFilters, page: fleet.page, refresh: 1 });
   const attentionItems = fleet.items.filter((customer) => customer.hasDeployment && customer.issues.length > 0);
   const firstAttentionIssue = attentionItems[0]?.issues[0] ? serializeIssues([attentionItems[0].issues[0]]) : [];
 
@@ -208,18 +204,32 @@ export default async function ControlPlanePage({
         actions={
           <form method="get" className="flex flex-wrap gap-2">
             <input name="q" defaultValue={fleet.filters.query} placeholder="Search clients..." className={controlPlaneInputClass} />
-            <select name="health" defaultValue={fleet.filters.health} className={controlPlaneInputClass}>
-              <option value="">Any health</option>
-              <option value="ok">Healthy</option>
-              <option value="degraded">Degraded</option>
-              <option value="down">Down</option>
-            </select>
-            <select name="support" defaultValue={fleet.filters.support} className={controlPlaneInputClass}>
-              <option value="">Any support</option>
-              <option value="connected">Connected</option>
-              <option value="not_configured">Not configured</option>
-              <option value="degraded">Degraded</option>
-            </select>
+            <MultiSelectFilter
+              name="health"
+              label="Health"
+              options={[
+                { value: "ok", label: "Healthy" },
+                { value: "degraded", label: "Degraded" },
+                { value: "down", label: "Down" },
+              ]}
+              selectedValues={fleet.filters.health}
+              allLabel="Any health"
+            />
+            <MultiSelectFilter
+              name="support"
+              label="Support"
+              options={[
+                { value: "managed", label: "Managed" },
+                { value: "ready", label: "Ready" },
+                { value: "configured", label: "Configured" },
+                { value: "connected", label: "Connected" },
+                { value: "requires_connector", label: "Requires connector" },
+                { value: "not_configured", label: "Not configured" },
+                { value: "degraded", label: "Degraded" },
+              ]}
+              selectedValues={fleet.filters.support}
+              allLabel="Any support"
+            />
             <label className="flex min-h-9 items-center gap-2 rounded-md border border-line bg-surface px-3 text-xs text-muted">
               <input type="checkbox" name="unhealthy" value="1" defaultChecked={fleet.filters.unhealthy} className="rounded border-line bg-bg-alt text-brand-600 focus:ring-0" />
               Unhealthy

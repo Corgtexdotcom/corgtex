@@ -1,6 +1,7 @@
 import { notFound } from "next/navigation";
 import { getControlPlaneClientOptions, requireControlPlaneAccess } from "@corgtex/domain";
 import { requirePageActor } from "@/lib/auth";
+import { normalizeSelectedValues } from "@/lib/filter-query";
 import { prisma } from "@corgtex/shared";
 import { Link } from "@/i18n/routing";
 import { ClientContextSwitcher } from "../_components/client-context-switcher";
@@ -17,9 +18,10 @@ export const dynamic = "force-dynamic";
 export default async function ControlPlaneOperationsPage({
   searchParams,
 }: {
-  searchParams?: Promise<Record<string, string | undefined>>;
+  searchParams?: Promise<Record<string, string | string[] | undefined>>;
 }) {
   const raw = await searchParams;
+  const clientFilters = normalizeSelectedValues(raw?.client);
   const actor = await requirePageActor();
   try {
     await requireControlPlaneAccess(actor);
@@ -30,7 +32,7 @@ export default async function ControlPlaneOperationsPage({
   // Fetch real operations audit logs from database using Prisma SupportOperation
   const [operations, clientOptions] = await Promise.all([
     prisma.supportOperation.findMany({
-      where: raw?.client ? { deploymentId: raw.client } : undefined,
+      where: clientFilters.length > 0 ? { deploymentId: { in: clientFilters } } : undefined,
       orderBy: { createdAt: "desc" },
       take: 50,
       include: {
@@ -84,7 +86,7 @@ export default async function ControlPlaneOperationsPage({
           <div className="rounded-lg border border-line bg-bg-alt p-3">
             <ClientContextSwitcher
               clients={clientOptions}
-              selectedClientId={raw?.client ?? ""}
+              selectedClientIds={clientFilters}
               mode="filter"
               label="Client"
             />

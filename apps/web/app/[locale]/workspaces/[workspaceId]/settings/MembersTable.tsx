@@ -15,6 +15,7 @@ import {
 } from "../actions";
 import { useTranslations } from "next-intl";
 import { Dialog } from "@/lib/components/Dialog";
+import { MultiSelectFilter } from "@/lib/components/MultiSelectFilter";
 import { useToast } from "@/lib/components/Toast";
 
 type InvitePolicy = "ADMINS_ONLY" | "MEMBERS_CAN_INVITE" | "MEMBERS_CAN_REQUEST";
@@ -73,11 +74,12 @@ export function MembersTable({
   inviteRequests: InviteRequest[];
 }) {
   const [searchQuery, setSearchQuery] = useState("");
-  const [roleFilter, setRoleFilter] = useState<string>("ALL");
+  const [roleFilters, setRoleFilters] = useState<string[]>([]);
   const [statusFilter, setStatusFilter] = useState<"ACTIVE" | "ALL">("ACTIVE");
-  const [circleFilter, setCircleFilter] = useState<string>("ALL");
+  const [circleFilters, setCircleFilters] = useState<string[]>([]);
   const [editingMember, setEditingMember] = useState<EnrichedMember | null>(null);
   const t = useTranslations("settings");
+  const tWork = useTranslations("workItems");
   const { addToast } = useToast();
 
   const handleActionWithToast = async (actionFn: (formData: FormData) => Promise<any>, formData: FormData, successMsg: string) => {
@@ -126,16 +128,16 @@ export function MembersTable({
         if (!searchMatches) return false;
       }
 
-      if (roleFilter !== "ALL" && member.role !== roleFilter) return false;
+      if (roleFilters.length > 0 && !roleFilters.includes(member.role)) return false;
 
-      if (circleFilter !== "ALL") {
-        const inCircle = member.roleAssignments.some((assignment) => assignment.role.circle.id === circleFilter);
+      if (circleFilters.length > 0) {
+        const inCircle = member.roleAssignments.some((assignment) => circleFilters.includes(assignment.role.circle.id));
         if (!inCircle) return false;
       }
 
       return true;
     });
-  }, [members, searchQuery, roleFilter, statusFilter, circleFilter]);
+  }, [members, searchQuery, roleFilters, statusFilter, circleFilters]);
 
   const totalCount = members.length;
   const activeCount = members.filter((member) => member.isActive).length;
@@ -283,16 +285,17 @@ export function MembersTable({
             onChange={(event) => setSearchQuery(event.target.value)}
             style={{ width: 240, fontSize: "0.85rem", padding: "8px 12px" }}
           />
-          <select
-            value={circleFilter}
-            onChange={(event) => setCircleFilter(event.target.value)}
-            style={{ width: 200, fontSize: "0.85rem", padding: "8px 12px" }}
-          >
-            <option value="ALL">{t("optionAllCircles")}</option>
-            {allCircles.map((circle) => (
-              <option key={circle.id} value={circle.id}>{circle.name}</option>
-            ))}
-          </select>
+          <MultiSelectFilter
+            name="circle"
+            label={t("colCircles")}
+            options={allCircles.map((circle) => ({ value: circle.id, label: circle.name }))}
+            selectedValues={circleFilters}
+            allLabel={t("optionAllCircles")}
+            selectAllLabel={tWork("selectAll")}
+            unselectAllLabel={tWork("unselectAll")}
+            selectedCountLabel={tWork("selectedCount", { count: "{count}" })}
+            onSelectionChange={setCircleFilters}
+          />
           <label style={{ display: "flex", alignItems: "center", gap: 6, margin: 0, fontSize: "0.85rem" }}>
             <input
               type="checkbox"
@@ -304,18 +307,17 @@ export function MembersTable({
           </label>
         </div>
 
-        <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
-          {["ALL", ...MEMBER_ROLES].map((role) => (
-            <button
-              key={role}
-              onClick={() => setRoleFilter(role)}
-              className={roleFilter === role ? "button small" : "button secondary small"}
-              style={{ padding: "4px 10px", fontSize: "0.75rem", borderRadius: 16 }}
-            >
-              {role === "ALL" ? t("optionAllRoles") : t(roleLabelKey(role) as any)}
-            </button>
-          ))}
-        </div>
+        <MultiSelectFilter
+          name="role"
+          label={t("labelSystemRole")}
+          options={MEMBER_ROLES.map((role) => ({ value: role, label: t(roleLabelKey(role) as any) }))}
+          selectedValues={roleFilters}
+          allLabel={t("optionAllRoles")}
+          selectAllLabel={tWork("selectAll")}
+          unselectAllLabel={tWork("unselectAll")}
+          selectedCountLabel={tWork("selectedCount", { count: "{count}" })}
+          onSelectionChange={setRoleFilters}
+        />
       </div>
 
       <div style={{ overflowX: "auto", border: "1px dashed var(--line)", borderRadius: 8, background: "var(--bg)" }}>

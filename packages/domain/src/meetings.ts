@@ -467,6 +467,7 @@ export type ListMeetingsOptions = {
   archiveFilter?: ArchiveFilter;
   status?: MeetingStatus;
   memberId?: string | null;
+  memberIds?: string[] | null;
   recordedFrom?: Date;
   recordedTo?: Date;
 };
@@ -479,10 +480,13 @@ function meetingDateRangeWhere(from?: Date, to?: Date): Prisma.DateTimeFilter | 
 }
 
 export async function listMeetings(workspaceId: string, opts?: ListMeetingsOptions) {
-  const member = opts?.memberId
-    ? await prisma.member.findFirst({
+  const memberIds = [...new Set([...(opts?.memberIds ?? []), opts?.memberId]
+    .map((value) => value?.trim())
+    .filter((value): value is string => Boolean(value)))];
+  const members = memberIds.length > 0
+    ? await prisma.member.findMany({
       where: {
-        id: opts.memberId,
+        id: { in: memberIds },
         workspaceId,
         isActive: true,
       },
@@ -495,23 +499,23 @@ export async function listMeetings(workspaceId: string, opts?: ListMeetingsOptio
         },
       },
     })
-    : null;
+    : [];
+  const participantIds = [...new Set([
+    ...memberIds,
+    ...members.map((member) => member.userId),
+  ])];
+  const participantEmails = [...new Set(members.map((member) => member.user.email))];
   const recordedAt = meetingDateRangeWhere(opts?.recordedFrom, opts?.recordedTo);
   return prisma.meeting.findMany({
     where: {
       workspaceId,
       ...(opts?.status ? { status: opts.status } : {}),
       ...(recordedAt ? { recordedAt } : {}),
-      ...(opts?.memberId
+      ...(memberIds.length > 0
         ? {
           OR: [
-            { participantIds: { has: opts.memberId } },
-            ...(member
-              ? [
-                { participantIds: { has: member.userId } },
-                { participantEmails: { has: member.user.email } },
-              ]
-              : []),
+            ...(participantIds.length > 0 ? [{ participantIds: { hasSome: participantIds } }] : []),
+            ...(participantEmails.length > 0 ? [{ participantEmails: { hasSome: participantEmails } }] : []),
           ],
         }
         : {}),

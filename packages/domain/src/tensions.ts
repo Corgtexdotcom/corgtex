@@ -26,7 +26,9 @@ export type ListTensionsOptions = {
   archiveFilter?: ArchiveFilter;
   status?: TensionStatus;
   circleId?: string | null;
+  circleIds?: string[] | null;
   memberId?: string | null;
+  memberIds?: string[] | null;
   openedFrom?: Date;
   openedTo?: Date;
   closedFrom?: Date;
@@ -66,6 +68,10 @@ function appendTensionWhereAnd(where: Prisma.TensionWhereInput, condition: Prism
   where.AND = and;
 }
 
+function listFilterValues(values?: readonly (string | null | undefined)[] | null) {
+  return [...new Set((values ?? []).map((value) => value?.trim()).filter((value): value is string => Boolean(value)))];
+}
+
 function workItemOrderBy(sort: WorkItemSort | undefined): Prisma.TensionOrderByWithRelationInput[] {
   if (sort === "alpha") {
     return [{ title: "asc" }, { createdAt: "desc" }, { id: "desc" }];
@@ -93,19 +99,22 @@ export async function listTensions(actor: AppActor, workspaceId: string, opts?: 
   const openedAt = dateRangeWhere(opts?.openedFrom, opts?.openedTo);
   const closedAt = dateRangeWhere(opts?.closedFrom, opts?.closedTo);
   if (opts?.status) where.status = opts.status;
-  if (opts?.circleId) where.circleId = opts.circleId;
+  const circleIds = listFilterValues(opts?.circleIds);
+  if (circleIds.length > 0) where.circleId = { in: circleIds };
+  else if (opts?.circleId) where.circleId = opts.circleId;
   if (openedAt) where.publishedAt = openedAt;
   if (closedAt) where.resolvedAt = closedAt;
-  if (opts?.memberId) {
+  const memberIds = listFilterValues([...(opts?.memberIds ?? []), opts?.memberId]);
+  if (memberIds.length > 0) {
     appendTensionWhereAnd(where, {
       OR: [
-        { assigneeMemberId: opts.memberId },
-        { raisedByMemberId: opts.memberId },
+        { assigneeMemberId: { in: memberIds } },
+        { raisedByMemberId: { in: memberIds } },
         {
           author: {
             memberships: {
               some: {
-                id: opts.memberId,
+                id: { in: memberIds },
                 workspaceId,
                 isActive: true,
               },

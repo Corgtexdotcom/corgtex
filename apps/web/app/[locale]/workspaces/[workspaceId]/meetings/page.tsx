@@ -18,15 +18,27 @@ import { ItemActions } from "@/lib/components/ui/ItemActions";
 import { WorkItemFilterControls } from "@/lib/components/WorkItemControls";
 import {
   buildWorkItemQuery,
-  firstSearchParam,
   normalizeDateOnly,
-  resolveWorkItemScope,
+  resolveWorkItemFilters,
   startOfUtcDate,
   endOfUtcDate,
 } from "@/lib/work-item-view";
-import type { WorkItemScope } from "@/lib/work-item-view";
 
 export const dynamic = "force-dynamic";
+
+const MEETING_STATUS_FILTERS = ["COMPLETED", "SCHEDULED"] as const;
+type MeetingStatusFilter = (typeof MEETING_STATUS_FILTERS)[number];
+
+function normalizeMeetingStatusFilters(value: string | string[] | undefined): MeetingStatusFilter[] {
+  const values = Array.isArray(value) ? value : value ? [value] : [];
+  const seen = new Set<MeetingStatusFilter>();
+  for (const entry of values) {
+    if (MEETING_STATUS_FILTERS.includes(entry as MeetingStatusFilter)) {
+      seen.add(entry as MeetingStatusFilter);
+    }
+  }
+  return seen.size === MEETING_STATUS_FILTERS.length ? [] : [...seen];
+}
 
 export default async function MeetingsPage({
   params,
@@ -38,17 +50,14 @@ export default async function MeetingsPage({
   const { workspaceId } = await params;
   const actor = await requirePageActor();
   const resolvedSearch = searchParams ? await searchParams : {};
-  const rawStatus = firstSearchParam(resolvedSearch.status);
-  const statusFilter = rawStatus === "COMPLETED" || rawStatus === "SCHEDULED" ? rawStatus : "ALL";
-  const rawScope = resolveWorkItemScope(resolvedSearch);
-  const scope: WorkItemScope = rawScope.scope === "member" ? "member" : "company";
-  const memberId = scope === "member" ? rawScope.memberId : undefined;
+  const statusFilters = normalizeMeetingStatusFilters(resolvedSearch.status);
+  const { memberIds } = resolveWorkItemFilters(resolvedSearch);
   const dateValues = {
     recordedFrom: normalizeDateOnly(resolvedSearch.recordedFrom),
     recordedTo: normalizeDateOnly(resolvedSearch.recordedTo),
   };
   const meetingFilters = {
-    memberId,
+    memberIds,
     recordedFrom: dateValues.recordedFrom ? startOfUtcDate(dateValues.recordedFrom) : undefined,
     recordedTo: dateValues.recordedTo ? endOfUtcDate(dateValues.recordedTo) : undefined,
   };
@@ -59,8 +68,8 @@ export default async function MeetingsPage({
     getMeetingRecorderConfig(actor, workspaceId).catch(() => null),
     listMembers(workspaceId),
   ]);
-  const completedMeetings = statusFilter === "SCHEDULED" ? [] : filteredCompletedMeetings;
-  const upcomingMeetings = statusFilter === "COMPLETED" ? [] : filteredUpcomingMeetings;
+  const completedMeetings = statusFilters.includes("SCHEDULED") ? [] : filteredCompletedMeetings;
+  const upcomingMeetings = statusFilters.includes("COMPLETED") ? [] : filteredUpcomingMeetings;
   const recorderEnabled = Boolean(featureFlags.MEETING_RECORDERS && recorderConfig?.featureEnabled && recorderConfig.config.enabled);
   const recordings = recorderEnabled
     ? await listMeetingRecordings(workspaceId, upcomingMeetings.map((meeting) => meeting.id))
@@ -69,7 +78,7 @@ export default async function MeetingsPage({
   const t = await getTranslations("meetings");
   const tCommon = await getTranslations("common");
   const tWork = await getTranslations("workItems");
-  const filterState = { scope, memberId, dates: dateValues };
+  const filterState = { memberIds, dates: dateValues, status: statusFilters };
   const memberName = (member: { user: { displayName: string | null; email: string } }) => member.user.displayName || member.user.email;
 
   return (
@@ -90,21 +99,27 @@ export default async function MeetingsPage({
             { status: "ALL", label: tWork("statusAll"), count: filteredCompletedMeetings.length + filteredUpcomingMeetings.length },
             { status: "COMPLETED", label: t("completedMeetings"), count: filteredCompletedMeetings.length },
             { status: "SCHEDULED", label: t("upcomingMeetings"), count: filteredUpcomingMeetings.length },
-          ] as const).map((item) => (
-            <a
-              key={item.status}
-              href={buildWorkItemQuery({ ...filterState, status: item.status })}
-              className={`nr-filter-item ${statusFilter === item.status ? "nr-filter-active" : ""}`}
-            >
-              {item.label} ({item.count})
-            </a>
-          ))}
+          ] as const).map((item) => {
+            const isActive = item.status === "ALL" ? statusFilters.length === 0 : statusFilters.includes(item.status);
+            return (
+              <a
+                key={item.status}
+                href={buildWorkItemQuery({ ...filterState, status: item.status })}
+                className={`nr-filter-item ${isActive ? "nr-filter-active" : ""}`}
+              >
+                {item.label} ({item.count})
+              </a>
+            );
+          })}
         </div>
         <WorkItemFilterControls
           action={`/workspaces/${workspaceId}/meetings`}
-          status={statusFilter}
-          scope={scope}
-          memberId={memberId}
+          statusOptions={MEETING_STATUS_FILTERS.map((status) => ({
+            id: status,
+            label: status === "COMPLETED" ? t("completedMeetings") : t("upcomingMeetings"),
+          }))}
+          statusValues={statusFilters}
+          memberIds={memberIds}
           circles={[]}
           members={members.map((member) => ({ id: member.id, label: memberName(member) }))}
           dates={[
@@ -115,10 +130,15 @@ export default async function MeetingsPage({
           labels={{
             scope: tWork("scope"),
             company: tWork("companyScope"),
+            status: tWork("status"),
+            allStatuses: tWork("allStatuses"),
             circle: tWork("circle"),
             person: tWork("person"),
             allCircles: tWork("allCircles"),
             allPeople: tWork("allPeople"),
+            selectAll: tWork("selectAll"),
+            unselectAll: tWork("unselectAll"),
+            selectedCount: tWork("selectedCount", { count: "{count}" }),
             apply: tWork("applyFilters"),
             clear: tWork("clearFilters"),
           }}

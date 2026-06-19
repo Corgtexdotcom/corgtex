@@ -1,3 +1,5 @@
+import { appendRepeatedParams, normalizeSelectedValues, selectedValuesFrom } from "@/lib/filter-query";
+
 export type WorkItemViewMode = "list" | "kanban" | "table";
 
 export type WorkItemScope = "company" | "circle" | "member";
@@ -111,22 +113,25 @@ export function endOfUtcDate(value: string) {
 }
 
 export function buildWorkItemQuery(params: {
-  status?: string;
+  status?: string | readonly string[];
   view?: WorkItemViewMode;
   scope?: WorkItemScope;
   sort?: WorkItemSort;
   circleId?: string;
+  circleIds?: readonly string[];
   memberId?: string;
+  memberIds?: readonly string[];
   columns?: readonly string[];
   dates?: WorkItemDateValues;
 }) {
   const query = new URLSearchParams();
-  if (params.status) query.set("status", params.status);
+  if (typeof params.status === "string") query.set("status", params.status);
+  else appendRepeatedParams(query, "status", params.status);
   if (params.view && params.view !== "list") query.set("view", params.view);
   if (params.scope && params.scope !== "company") query.set("scope", params.scope);
   if (params.sort && params.sort !== "priority") query.set("sort", params.sort);
-  if (params.circleId) query.set("circleId", params.circleId);
-  if (params.memberId) query.set("memberId", params.memberId);
+  appendRepeatedParams(query, "circleId", params.circleIds ?? (params.circleId ? [params.circleId] : undefined));
+  appendRepeatedParams(query, "memberId", params.memberIds ?? (params.memberId ? [params.memberId] : undefined));
   if (params.columns && params.columns.length > 0) query.set("columns", params.columns.join(","));
   for (const [key, value] of Object.entries(params.dates ?? {})) {
     if (value) query.set(key, value);
@@ -136,15 +141,34 @@ export function buildWorkItemQuery(params: {
 }
 
 export function resolveWorkItemFilters(search: Record<string, string | string[] | undefined>) {
-  const circleId = firstSearchParam(search.circleId)?.trim() || undefined;
-  const memberId = firstSearchParam(search.memberId)?.trim() || undefined;
+  const circleIds = normalizeSelectedValues(search.circleId);
+  const memberIds = normalizeSelectedValues(search.memberId);
+  const circleId = circleIds[0];
+  const memberId = memberIds[0];
   const sort = normalizeWorkItemSort(search.sort);
-  return { circleId, memberId, sort };
+  return { circleId, circleIds, memberId, memberIds, sort };
+}
+
+export function normalizeWorkItemFilterValues<TValue extends string>(
+  values: readonly TValue[] | undefined,
+  allowedValues: readonly TValue[],
+) {
+  return selectedValuesFrom(values, allowedValues);
+}
+
+export function resolveWorkItemStatusValues<TValue extends string>(
+  value: string | string[] | undefined,
+  allowedValues: readonly TValue[],
+  defaultValue?: TValue,
+) {
+  const normalized = normalizeSelectedValues(value, allowedValues);
+  if (normalized.length > 0) return normalized;
+  return defaultValue ? [defaultValue] : [];
 }
 
 export function resolveWorkItemScope(search: Record<string, string | string[] | undefined>) {
   const scope = normalizeWorkItemScope(search.scope);
-  const circleId = scope === "circle" ? firstSearchParam(search.circleId)?.trim() || undefined : undefined;
-  const memberId = scope === "member" ? firstSearchParam(search.memberId)?.trim() || undefined : undefined;
-  return { scope, circleId, memberId };
+  const circleIds = scope === "circle" ? normalizeSelectedValues(search.circleId) : [];
+  const memberIds = scope === "member" ? normalizeSelectedValues(search.memberId) : [];
+  return { scope, circleId: circleIds[0], circleIds, memberId: memberIds[0], memberIds };
 }

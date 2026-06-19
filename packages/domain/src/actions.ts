@@ -27,7 +27,9 @@ export type ListActionsOptions = {
   archiveFilter?: ArchiveFilter;
   status?: ActionStatus;
   circleId?: string | null;
+  circleIds?: string[] | null;
   memberId?: string | null;
+  memberIds?: string[] | null;
   createdFrom?: Date;
   createdTo?: Date;
   dueFrom?: Date;
@@ -47,6 +49,10 @@ function nullableDateRangeWhere(from?: Date, to?: Date): Prisma.DateTimeNullable
   if (from) filter.gte = from;
   if (to) filter.lte = to;
   return Object.keys(filter).length > 0 ? filter : undefined;
+}
+
+function listFilterValues(values?: readonly (string | null | undefined)[] | null) {
+  return [...new Set((values ?? []).map((value) => value?.trim()).filter((value): value is string => Boolean(value)))];
 }
 
 function appendActionWhereAnd(where: Prisma.ActionWhereInput, condition: Prisma.ActionWhereInput) {
@@ -79,20 +85,23 @@ export async function listActions(actor: AppActor, workspaceId: string, opts?: L
     ...archiveFilterWhere(opts?.archiveFilter),
   };
   if (opts?.status) where.status = opts.status;
-  if (opts?.circleId) where.circleId = opts.circleId;
+  const circleIds = listFilterValues(opts?.circleIds);
+  if (circleIds.length > 0) where.circleId = { in: circleIds };
+  else if (opts?.circleId) where.circleId = opts.circleId;
   const createdAt = dateRangeWhere(opts?.createdFrom, opts?.createdTo);
   const dueAt = nullableDateRangeWhere(opts?.dueFrom, opts?.dueTo);
   if (createdAt) where.createdAt = createdAt;
   if (dueAt) where.dueAt = dueAt;
-  if (opts?.memberId) {
+  const memberIds = listFilterValues([...(opts?.memberIds ?? []), opts?.memberId]);
+  if (memberIds.length > 0) {
     appendActionWhereAnd(where, {
       OR: [
-        { assigneeMemberId: opts.memberId },
+        { assigneeMemberId: { in: memberIds } },
         {
           author: {
             memberships: {
               some: {
-                id: opts.memberId,
+                id: { in: memberIds },
                 workspaceId,
                 isActive: true,
               },

@@ -383,6 +383,34 @@ describe("CRM domain", () => {
       expect(result.relationshipType).toBe("CLIENT_PARTNER");
     });
 
+    it("lists accounts with relationship and lifecycle array filters", async () => {
+      const { prisma } = await import("@corgtex/shared");
+      const { requireWorkspaceMembership } = await import("./auth");
+      const { listCrmAccounts } = await import("./crm");
+
+      vi.mocked(prisma.crmAccount.findMany).mockResolvedValue([
+        { id: "account-1", workspaceId: "ws-1", relationshipType: "CLIENT", lifecycleStage: "ACTIVE" },
+      ] as any);
+      vi.mocked(prisma.crmAccount.count).mockResolvedValue(1);
+
+      const result = await listCrmAccounts(dummyActor, "ws-1", {
+        relationshipTypes: ["client", "partner"],
+        lifecycleStages: ["active", "pilot"],
+        take: 10,
+      });
+
+      expect(requireWorkspaceMembership).toHaveBeenCalledWith({ actor: dummyActor, workspaceId: "ws-1" });
+      expect(prisma.crmAccount.findMany).toHaveBeenCalledWith(expect.objectContaining({
+        where: expect.objectContaining({
+          workspaceId: "ws-1",
+          relationshipType: { in: ["CLIENT", "PARTNER"] },
+          lifecycleStage: { in: ["ACTIVE", "PILOT"] },
+        }),
+        take: 10,
+      }));
+      expect(result.total).toBe(1);
+    });
+
     it("links a new contact to an inferred account", async () => {
       const { prisma } = await import("@corgtex/shared");
       const { createContact } = await import("./crm");
@@ -702,7 +730,7 @@ describe("CRM domain", () => {
       const dueFrom = new Date("2026-06-18T00:00:00.000Z");
       const dueTo = new Date("2026-06-25T00:00:00.000Z");
       await listCrmActivities(dummyActor, "ws-1", {
-        type: "TASK" as any,
+        types: ["TASK", "EMAIL"] as any,
         ownerUserId: "u-1",
         completion: "open",
         dueFrom,
@@ -713,7 +741,7 @@ describe("CRM domain", () => {
       expect(prisma.crmActivity.findMany).toHaveBeenCalledWith(expect.objectContaining({
         where: expect.objectContaining({
           workspaceId: "ws-1",
-          type: "TASK",
+          type: { in: ["TASK", "EMAIL"] },
           ownerUserId: "u-1",
           completedAt: null,
           dueAt: { gte: dueFrom, lte: dueTo },
@@ -959,7 +987,7 @@ describe("CRM domain", () => {
       const deals = await listDeals(dummyActor, "ws-1", {
         accountId: "account-1",
         contactId: "contact-1",
-        stage: "QUALIFIED" as any,
+        stages: ["QUALIFIED", "PROPOSAL"] as any,
         take: 7,
       });
 
@@ -977,7 +1005,7 @@ describe("CRM domain", () => {
           workspaceId: "ws-1",
           accountId: "account-1",
           contactId: "contact-1",
-          stage: "QUALIFIED",
+          stage: { in: ["QUALIFIED", "PROPOSAL"] },
         }),
         take: 7,
       }));
@@ -998,14 +1026,14 @@ describe("CRM domain", () => {
       vi.mocked(prisma.crmCommunicationSuggestion.count).mockResolvedValue(1);
 
       const result = await listCommunicationSuggestions(dummyActor, "ws-1", {
-        status: "requested",
+        statuses: ["requested", "sent"],
         ownerUserId: "u-1",
         take: 10,
       });
 
       expect(requireWorkspaceMembership).toHaveBeenCalledWith({ actor: dummyActor, workspaceId: "ws-1" });
       expect(prisma.crmCommunicationSuggestion.findMany).toHaveBeenCalledWith(expect.objectContaining({
-        where: { workspaceId: "ws-1", ownerUserId: "u-1", status: "REQUESTED" },
+        where: { workspaceId: "ws-1", ownerUserId: "u-1", status: { in: ["REQUESTED", "SENT"] } },
         take: 10,
       }));
       expect(result.total).toBe(1);

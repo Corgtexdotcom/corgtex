@@ -2,6 +2,8 @@ import { notFound } from "next/navigation";
 import { getControlPlaneClientOptions, listControlPlaneRecorderMatrix, requireControlPlaneAccess } from "@corgtex/domain";
 import { Link } from "@/i18n/routing";
 import { requirePageActor } from "@/lib/auth";
+import { MultiSelectFilter } from "@/lib/components/MultiSelectFilter";
+import { firstSelectedValue, normalizeSelectedValues, queryStringFromParams, searchParamValues } from "@/lib/filter-query";
 import { cn } from "@/lib/utils";
 import { ClientContextSwitcher } from "../_components/client-context-switcher";
 import {
@@ -16,6 +18,7 @@ import { controlPlaneActorCacheKey, readControlPlaneCached, shouldRefreshControl
 export const dynamic = "force-dynamic";
 
 const PAGE_SIZE = 25;
+const RECORDER_STATUS_FILTERS = ["available", "ready", "needs_setup", "not_configured", "disabled", "requires_connector", "unavailable"] as const;
 
 type RecorderPage = Awaited<ReturnType<typeof listControlPlaneRecorderMatrix>>;
 type RecorderRow = RecorderPage["items"][number];
@@ -38,16 +41,6 @@ function label(value?: string | null) {
   return value ? value.replace(/_/g, " ") : "unknown";
 }
 
-function queryString(params: Record<string, string | number | null | undefined>) {
-  const search = new URLSearchParams();
-  for (const [key, value] of Object.entries(params)) {
-    if (value !== undefined && value !== null && String(value).length > 0) {
-      search.set(key, String(value));
-    }
-  }
-  return `?${search.toString()}`;
-}
-
 function formatDate(value: Date | null) {
   if (!value) return "Never";
   return new Intl.DateTimeFormat("en", {
@@ -67,7 +60,7 @@ function usageLabel(row: RecorderRow) {
 export default async function ControlPlaneRecordersPage({
   searchParams,
 }: {
-  searchParams?: Promise<Record<string, string | undefined>>;
+  searchParams?: Promise<Record<string, string | string[] | undefined>>;
 }) {
   const actor = await requirePageActor();
   try {
@@ -77,13 +70,15 @@ export default async function ControlPlaneRecordersPage({
   }
 
   const raw = await searchParams;
-  const refresh = shouldRefreshControlPlaneCache(raw?.refresh);
+  const refresh = shouldRefreshControlPlaneCache(firstSelectedValue(searchParamValues(raw?.refresh)));
   const actorCacheKey = controlPlaneActorCacheKey(actor);
+  const clientFilters = normalizeSelectedValues(raw?.client);
+  const statusFilters = normalizeSelectedValues(raw?.status, RECORDER_STATUS_FILTERS);
   const recorderParams = {
-    query: raw?.q,
-    client: raw?.client,
-    status: raw?.status,
-    page: Number(raw?.page ?? 1),
+    query: firstSelectedValue(searchParamValues(raw?.q)),
+    client: clientFilters,
+    status: statusFilters,
+    page: Number(firstSelectedValue(searchParamValues(raw?.page)) ?? 1),
     pageSize: PAGE_SIZE,
   };
   const [recorderMatrixRead, clientOptionsRead] = await Promise.all([
@@ -101,9 +96,9 @@ export default async function ControlPlaneRecordersPage({
     client: recorderMatrix.filters.client,
     status: recorderMatrix.filters.status,
   };
-  const previousHref = queryString({ ...paginationFilters, page: Math.max(recorderMatrix.page - 1, 1) });
-  const nextHref = queryString({ ...paginationFilters, page: Math.min(recorderMatrix.page + 1, recorderMatrix.pageCount) });
-  const refreshHref = queryString({ ...paginationFilters, page: recorderMatrix.page, refresh: 1 });
+  const previousHref = queryStringFromParams({ ...paginationFilters, page: Math.max(recorderMatrix.page - 1, 1) });
+  const nextHref = queryStringFromParams({ ...paginationFilters, page: Math.min(recorderMatrix.page + 1, recorderMatrix.pageCount) });
+  const refreshHref = queryStringFromParams({ ...paginationFilters, page: recorderMatrix.page, refresh: 1 });
 
   return (
     <div className="space-y-5 pb-12">
@@ -143,27 +138,27 @@ export default async function ControlPlaneRecordersPage({
               placeholder="Search..."
               className={controlPlaneInputClass}
             />
-            <input type="hidden" name="client" value={recorderMatrix.filters.client} />
             <ClientContextSwitcher
               clients={clientOptions}
-              selectedClientId={recorderMatrix.filters.client}
+              selectedClientIds={recorderMatrix.filters.client}
               mode="filter"
               label="Client"
             />
-            <select
+            <MultiSelectFilter
               name="status"
-              defaultValue={recorderMatrix.filters.status}
-              className={controlPlaneInputClass}
-            >
-              <option value="">Any status</option>
-              <option value="available">Available</option>
-              <option value="ready">Ready</option>
-              <option value="needs_setup">Needs setup</option>
-              <option value="not_configured">Not configured</option>
-              <option value="disabled">Disabled</option>
-              <option value="requires_connector">Requires connector</option>
-              <option value="unavailable">Unavailable</option>
-            </select>
+              label="Status"
+              options={[
+                { value: "available", label: "Available" },
+                { value: "ready", label: "Ready" },
+                { value: "needs_setup", label: "Needs setup" },
+                { value: "not_configured", label: "Not configured" },
+                { value: "disabled", label: "Disabled" },
+                { value: "requires_connector", label: "Requires connector" },
+                { value: "unavailable", label: "Unavailable" },
+              ]}
+              selectedValues={recorderMatrix.filters.status}
+              allLabel="Any status"
+            />
             <button
               type="submit"
               className={controlPlaneButtonClass}

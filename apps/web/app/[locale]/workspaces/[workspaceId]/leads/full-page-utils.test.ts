@@ -10,6 +10,7 @@ import {
   normalizeCrmSortDirection,
   normalizeCrmViewMode,
   optionValue,
+  optionValues,
 } from "./full-page-utils";
 
 describe("CRM full page helpers", () => {
@@ -32,11 +33,19 @@ describe("CRM full page helpers", () => {
       .toBe("/workspaces/ws/leads/accounts?q=acme&page=3");
     expect(crmPageHref("/workspaces/ws/leads/accounts", { q: "acme", page: "2" }, { q: "", page: 1 }))
       .toBe("/workspaces/ws/leads/accounts?page=1");
+    expect(crmPageHref("/workspaces/ws/leads/pipeline", { stage: ["LEAD", "NEGOTIATION"], page: "2", sort: "date" }, { page: 3 }))
+      .toBe("/workspaces/ws/leads/pipeline?stage=LEAD&stage=NEGOTIATION&page=3&sort=date");
+    expect(crmPageHref("/workspaces/ws/leads/pipeline", { stage: ["LEAD", "NEGOTIATION"], page: "2", sort: "date" }, { stage: [], page: 1 }))
+      .toBe("/workspaces/ws/leads/pipeline?page=1&sort=date");
   });
 
   it("keeps only allowed filter options", () => {
     expect(optionValue("LEAD", ["LEAD", "QUALIFIED"])).toBe("LEAD");
     expect(optionValue("BAD", ["LEAD", "QUALIFIED"])).toBeUndefined();
+    expect(optionValues(["LEAD", "BAD", "QUALIFIED", "LEAD"], ["LEAD", "QUALIFIED", "WON"]))
+      .toEqual(["LEAD", "QUALIFIED"]);
+    expect(optionValues(["LEAD", "QUALIFIED", "WON"], ["LEAD", "QUALIFIED", "WON"]))
+      .toEqual([]);
   });
 
   it("normalizes page view modes to supported defaults", () => {
