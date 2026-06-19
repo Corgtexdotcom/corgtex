@@ -6,36 +6,43 @@
 }
 
 .ws-layout {
+  --ws-sidebar-width: 240px;
+  --ws-sidebar-half-width: 120px;
+  --ws-agent-rail-width: 350px;
+  --ws-agent-rail-half-width: 175px;
+  --ws-main-content-max-width: 1100px;
+  --ws-main-content-half-max-width: 550px;
+  --ws-main-content-padding-x: 32px;
+  --workspace-add-top: 40px;
+  --workspace-add-content-gutter: max(
+    var(--ws-main-content-padding-x),
+    calc(50vw - var(--ws-sidebar-half-width) - var(--ws-agent-rail-half-width) - var(--ws-main-content-half-max-width) + var(--ws-main-content-padding-x))
+  );
+  --workspace-add-right: calc(
+    var(--ws-agent-rail-width) + var(--workspace-add-content-gutter)
+  );
   display: grid;
-  grid-template-columns: 240px minmax(0, 1fr) 350px;
+  grid-template-columns: var(--ws-sidebar-width) minmax(0, 1fr) var(--ws-agent-rail-width);
   height: 100vh;
   overflow: hidden;
   transition: grid-template-columns 0.2s ease;
 }
 
 .ws-layout.ws-layout-chat-collapsed {
-  grid-template-columns: 240px minmax(0, 1fr) 52px;
-}
-
-.ws-layout.ws-layout-chat-collapsed .ws-main-content {
-  max-width: 1280px;
-}
-
-.ws-layout.ws-layout-chat-collapsed .workspace-add-menu {
-  right: 76px;
+  --ws-agent-rail-width: 52px;
+  --ws-agent-rail-half-width: 26px;
+  --ws-main-content-max-width: 1280px;
+  --ws-main-content-half-max-width: 640px;
+  grid-template-columns: var(--ws-sidebar-width) minmax(0, 1fr) var(--ws-agent-rail-width);
 }
 
 @supports selector(:has(*)) {
   .ws-layout:has(.ws-agent-sidebar-collapsed) {
-    grid-template-columns: 240px minmax(0, 1fr) 52px;
-  }
-
-  .ws-layout:has(.ws-agent-sidebar-collapsed) .ws-main-content {
-    max-width: 1280px;
-  }
-
-  .ws-layout:has(.ws-agent-sidebar-collapsed) .workspace-add-menu {
-    right: 76px;
+    --ws-agent-rail-width: 52px;
+    --ws-agent-rail-half-width: 26px;
+    --ws-main-content-max-width: 1280px;
+    --ws-main-content-half-max-width: 640px;
+    grid-template-columns: var(--ws-sidebar-width) minmax(0, 1fr) var(--ws-agent-rail-width);
   }
 
   .ws-layout:has([data-workspace-surface="enterprise-app"]) .workspace-add-menu {
@@ -185,9 +192,9 @@
 
 .ws-main-content {
   width: 100%;
-  max-width: 1100px;
+  max-width: var(--ws-main-content-max-width);
   margin: 0 auto;
-  padding: 40px 32px 80px;
+  padding: 40px var(--ws-main-content-padding-x) 80px;
 }
 
 .enterprise-app-surface-frame {
@@ -196,8 +203,8 @@
 
 .workspace-add-menu {
   position: fixed;
-  top: 20px;
-  right: 374px;
+  top: var(--workspace-add-top);
+  right: var(--workspace-add-right);
   z-index: 950;
 }
 
@@ -2493,7 +2500,11 @@ details[open] > .settings-disclosure-summary::before {
 
 @media (max-width: 1100px) {
   .ws-layout {
-    grid-template-columns: 240px minmax(0, 1fr);
+    --ws-agent-rail-width: 0px;
+    --ws-agent-rail-half-width: 0px;
+    --ws-main-content-padding-x: 24px;
+    --workspace-add-right: var(--ws-main-content-padding-x);
+    grid-template-columns: var(--ws-sidebar-width) minmax(0, 1fr);
   }
 
   .ws-agent-sidebar {
@@ -2509,6 +2520,10 @@ details[open] > .settings-disclosure-summary::before {
 
 @media (max-width: 720px) {
   .ws-layout {
+    --ws-sidebar-width: 0px;
+    --ws-sidebar-half-width: 0px;
+    --ws-main-content-padding-x: 16px;
+    --workspace-add-right: calc(16px + env(safe-area-inset-right, 0px));
     grid-template-columns: minmax(0, 1fr);
     height: auto;
     min-height: 100vh;
@@ -2557,12 +2572,19 @@ details[open] > .settings-disclosure-summary::before {
   }
 
   .workspace-add-menu {
-    top: calc(var(--mobile-top-offset) + 12px);
-    right: 16px;
+    top: auto;
+    right: var(--workspace-add-right);
+    bottom: calc(var(--mobile-bottom-offset) + 16px);
   }
 
   .ws-layout.ws-layout-chat-collapsed .workspace-add-menu {
-    right: 16px;
+    right: var(--workspace-add-right);
+  }
+
+  .workspace-add-dropdown {
+    top: auto;
+    bottom: calc(100% + 10px);
+    max-height: min(50dvh, 420px);
   }
 }
 
