@@ -317,6 +317,51 @@ const SPENDS = [
   { desc: "Patent Filing – Novel CAR-T Vector", cat: "Legal", vendor: "Fish & Richardson", amountCents: 6500000, status: "RESOLVED", resolutionOutcome: "APPROVED", paid: true }
 ];
 
+const PRACTICE_PROJECTS = [
+  {
+    code: "MEDTECH-EMEA",
+    name: "Digital Surgery EMEA rollout",
+    clientName: "MedTech Commercial",
+    status: "ACTIVE",
+    poValueCents: 420000000,
+    serviceBudgetCents: 280000000,
+    expenseBudgetCents: 65000000,
+    usedCents: 214000000,
+    weeklyBurnCents: 27000000,
+    targetMarginBps: 5800,
+    currentMarginBps: 6100,
+    sourceSatelliteId: "jnj-demo-practice-medtech-emea",
+  },
+  {
+    code: "ONC-MFG-01",
+    name: "CARVYKTI manufacturing scale-up",
+    clientName: "Innovative Medicine",
+    status: "ON_HOLD",
+    poValueCents: 520000000,
+    serviceBudgetCents: 390000000,
+    expenseBudgetCents: 85000000,
+    usedCents: 138000000,
+    weeklyBurnCents: 18000000,
+    targetMarginBps: 5200,
+    currentMarginBps: 4900,
+    sourceSatelliteId: "jnj-demo-practice-onc-mfg-01",
+  },
+  {
+    code: "ESG-SUPPLIER",
+    name: "Supplier ESG monitoring program",
+    clientName: "ESG & Sustainability",
+    status: "ACTIVE",
+    poValueCents: 175000000,
+    serviceBudgetCents: 112000000,
+    expenseBudgetCents: 24000000,
+    usedCents: 132000000,
+    weeklyBurnCents: 11500000,
+    targetMarginBps: 5400,
+    currentMarginBps: 5050,
+    sourceSatelliteId: "jnj-demo-practice-esg-supplier",
+  },
+];
+
 const SHOWCASE_GOALS = [
   {
     title: "Ship Agent Governance v2",
@@ -2699,6 +2744,40 @@ async function main() {
     }
   }
 
+  const practiceProjectIds = PRACTICE_PROJECTS.map((project) => `${wsId}-practice-project-${slugify(project.code)}`);
+  await prisma.practiceProject.deleteMany({
+    where: {
+      workspaceId: wsId,
+      id: {
+        startsWith: `${wsId}-practice-project-`,
+        notIn: practiceProjectIds,
+      },
+    },
+  });
+  for (const [index, project] of PRACTICE_PROJECTS.entries()) {
+    const projectId = practiceProjectIds[index];
+    const data = {
+      workspaceId: wsId,
+      code: project.code,
+      name: project.name,
+      clientName: project.clientName,
+      status: project.status,
+      poValueCents: project.poValueCents,
+      serviceBudgetCents: project.serviceBudgetCents,
+      expenseBudgetCents: project.expenseBudgetCents,
+      usedCents: project.usedCents,
+      weeklyBurnCents: project.weeklyBurnCents,
+      targetMarginBps: project.targetMarginBps,
+      currentMarginBps: project.currentMarginBps,
+      sourceSatelliteId: project.sourceSatelliteId,
+    };
+    await prisma.practiceProject.upsert({
+      where: { id: projectId },
+      update: data,
+      create: { id: projectId, ...data },
+    });
+  }
+
   // 13. Policy Corpus
   const policies = [
     { title: "APAC Market Expansion Authorization", pTitle: "Expand DARZALEX Subcutaneous Roll-out to APAC Markets", cId: circleMappings["innovative-medicine"] },
@@ -2749,6 +2828,7 @@ async function main() {
     crmAccounts: await prisma.crmAccount.count({ where: { workspaceId: wsId, archivedAt: null } }),
     crmContacts: await prisma.crmContact.count({ where: { workspaceId: wsId, archivedAt: null } }),
     crmDeals: await prisma.crmDeal.count({ where: { workspaceId: wsId, archivedAt: null } }),
+    practiceProjects: await prisma.practiceProject.count({ where: { workspaceId: wsId } }),
   };
 
   console.log("Demo workspace refreshed:");

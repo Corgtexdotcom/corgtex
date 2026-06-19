@@ -181,6 +181,21 @@ export type PracticeProjectInput = {
   sourceSatelliteId?: string | null;
 };
 
+export type UpdatePracticeProjectInput = {
+  projectId: string;
+  code?: string;
+  name?: string;
+  clientName?: string;
+  status?: PracticeProjectStatus;
+  poValueCents?: number;
+  serviceBudgetCents?: number;
+  expenseBudgetCents?: number;
+  usedCents?: number;
+  weeklyBurnCents?: number;
+  targetMarginBps?: number | null;
+  currentMarginBps?: number | null;
+};
+
 export type ListPracticeProjectsOptions = {
   take?: number | null;
   cursor?: string | null;
@@ -216,6 +231,7 @@ export type CreatePracticeProjectFromWonDealInput = {
 
 const DEFAULT_PRACTICE_PROJECT_TAKE = 100;
 const MAX_PRACTICE_PROJECT_TAKE = 200;
+const PRACTICE_PROJECT_STATUSES: PracticeProjectStatus[] = ["ACTIVE", "ON_HOLD", "CLOSED"];
 
 function normalizeCents(value: number | undefined, label: string): number {
   const cents = value ?? 0;
@@ -226,6 +242,30 @@ function normalizeCents(value: number | undefined, label: string): number {
 function normalizeBps(value: number | null | undefined, label: string): number | null {
   if (value == null) return null;
   invariant(Number.isInteger(value) && value >= 0 && value <= 10000, 400, "INVALID_INPUT", `${label} must be 0-10000 basis points.`);
+  return value;
+}
+
+function normalizeOptionalCents(value: number | undefined, label: string): number | undefined {
+  return value === undefined ? undefined : normalizeCents(value, label);
+}
+
+function normalizeOptionalBps(value: number | null | undefined, label: string): number | null | undefined {
+  return value === undefined ? undefined : normalizeBps(value, label);
+}
+
+function normalizeRequiredText(value: string | undefined, label: string): string {
+  const normalized = value?.trim();
+  invariant(normalized, 400, "INVALID_INPUT", `${label} is required.`);
+  return normalized;
+}
+
+function normalizeOptionalText(value: string | undefined, label: string): string | undefined {
+  return value === undefined ? undefined : normalizeRequiredText(value, label);
+}
+
+function normalizeProjectStatus(value: PracticeProjectStatus | undefined): PracticeProjectStatus | undefined {
+  if (value === undefined) return undefined;
+  invariant(PRACTICE_PROJECT_STATUSES.includes(value), 400, "INVALID_INPUT", "Invalid project status.");
   return value;
 }
 
@@ -328,12 +368,9 @@ export async function createPracticeProject(
 ): Promise<PracticeProject> {
   await requireWorkspaceMembership({ actor, workspaceId, allowedRoles: PRACTICE_FINANCE_MANAGE_ROLES });
 
-  const code = input.code?.trim();
-  const name = input.name?.trim();
-  const clientName = input.clientName?.trim();
-  invariant(code, 400, "INVALID_INPUT", "Project code is required.");
-  invariant(name, 400, "INVALID_INPUT", "Project name is required.");
-  invariant(clientName, 400, "INVALID_INPUT", "Client name is required.");
+  const code = normalizeRequiredText(input.code, "Project code");
+  const name = normalizeRequiredText(input.name, "Project name");
+  const clientName = normalizeRequiredText(input.clientName, "Client name");
 
   return prisma.practiceProject.create({
     data: {
@@ -341,7 +378,7 @@ export async function createPracticeProject(
       code,
       name,
       clientName,
-      status: input.status ?? "ACTIVE",
+      status: normalizeProjectStatus(input.status) ?? "ACTIVE",
       poValueCents: normalizeCents(input.poValueCents, "PO value"),
       serviceBudgetCents: normalizeCents(input.serviceBudgetCents, "Service budget"),
       expenseBudgetCents: normalizeCents(input.expenseBudgetCents, "Expense budget"),
@@ -351,6 +388,41 @@ export async function createPracticeProject(
       currentMarginBps: normalizeBps(input.currentMarginBps, "Current margin"),
       sourceSatelliteId: input.sourceSatelliteId?.trim() || null,
     },
+  });
+}
+
+export async function updatePracticeProject(
+  actor: AppActor,
+  workspaceId: string,
+  input: UpdatePracticeProjectInput,
+): Promise<PracticeProject> {
+  await requireWorkspaceMembership({ actor, workspaceId, allowedRoles: PRACTICE_FINANCE_MANAGE_ROLES });
+  const projectId = input.projectId.trim();
+  invariant(projectId, 400, "INVALID_INPUT", "Project ID is required.");
+
+  const existing = await prisma.practiceProject.findUnique({
+    where: { id: projectId },
+    select: { id: true, workspaceId: true },
+  });
+  invariant(existing && existing.workspaceId === workspaceId, 404, "NOT_FOUND", "Practice project not found.");
+
+  const data = {
+    code: normalizeOptionalText(input.code, "Project code"),
+    name: normalizeOptionalText(input.name, "Project name"),
+    clientName: normalizeOptionalText(input.clientName, "Client name"),
+    status: normalizeProjectStatus(input.status),
+    poValueCents: normalizeOptionalCents(input.poValueCents, "PO value"),
+    serviceBudgetCents: normalizeOptionalCents(input.serviceBudgetCents, "Service budget"),
+    expenseBudgetCents: normalizeOptionalCents(input.expenseBudgetCents, "Expense budget"),
+    usedCents: normalizeOptionalCents(input.usedCents, "Used"),
+    weeklyBurnCents: normalizeOptionalCents(input.weeklyBurnCents, "Weekly burn"),
+    targetMarginBps: normalizeOptionalBps(input.targetMarginBps, "Target margin"),
+    currentMarginBps: normalizeOptionalBps(input.currentMarginBps, "Current margin"),
+  };
+
+  return prisma.practiceProject.update({
+    where: { id: projectId },
+    data,
   });
 }
 
