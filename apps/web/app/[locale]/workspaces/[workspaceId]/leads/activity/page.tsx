@@ -17,6 +17,7 @@ import type { CrmActivityType } from "@prisma/client";
 import { getTranslations } from "next-intl/server";
 
 import { completeActivityAction, createActivityAction } from "../actions";
+import { CrmTableSortHeader } from "../CrmTableSortHeader";
 import { CrmChatPageContext } from "../CrmChatPageContext";
 import {
   CRM_CHAT_CONTEXT_LIMIT,
@@ -33,6 +34,7 @@ import {
   crmPageOffset,
   crmViewHref,
   normalizeCrmPage,
+  normalizeCrmSortDirection,
   normalizeCrmViewMode,
   optionValue,
   type SearchParamsRecord,
@@ -42,7 +44,7 @@ export const dynamic = "force-dynamic";
 
 const CRM_ACTIVITY_TYPES = ["NOTE", "EMAIL", "CALL", "MEETING", "TASK"] as const;
 const ACTIVITY_COMPLETION = ["open", "completed", "all"] as const;
-const ACTIVITY_SORTS = ["recent", "due"] as const;
+const ACTIVITY_SORTS = ["recent", "due", "date", "type", "account"] as const;
 const ACTIVITY_VIEW_MODES = ["list", "table"] as const;
 const DEFAULT_ACTIVITY_VIEW = "list";
 
@@ -71,6 +73,8 @@ export default async function RelationshipActivityPage({
   const type = optionValue(resolvedSearch.type, CRM_ACTIVITY_TYPES as readonly CrmActivityType[]);
   const completion = optionValue(resolvedSearch.completion, ACTIVITY_COMPLETION) ?? "all";
   const sort = optionValue(resolvedSearch.sort, ACTIVITY_SORTS) ?? "recent";
+  const defaultSortDirection = sort === "recent" || sort === "date" ? "desc" : "asc";
+  const sortDirection = normalizeCrmSortDirection(resolvedSearch.dir, defaultSortDirection);
   const pagePath = relationshipFullPageHref(workspaceId, "activity");
 
   const [activityResult, accountResult, contactResult, dealResult, members] = await Promise.all([
@@ -79,7 +83,7 @@ export default async function RelationshipActivityPage({
       skip: crmPageOffset(page),
       type,
       completion,
-      sort,
+      sort: sort === "due" ? "due" : "recent",
     }),
     listCrmAccounts(actor, workspaceId, { take: 200 }),
     listContacts(actor, workspaceId, { take: 200 }),
@@ -127,6 +131,19 @@ export default async function RelationshipActivityPage({
   const previousHref = crmPageHref(pagePath, resolvedSearch, { page: Math.max(page - 1, 1) });
   const nextHref = crmPageHref(pagePath, resolvedSearch, { page: Math.min(page + 1, pageCount) });
   const clearHref = crmPageHref(pagePath, {}, { view: viewMode === DEFAULT_ACTIVITY_VIEW ? null : viewMode });
+  const directionFactor = sortDirection === "asc" ? 1 : -1;
+  const compareText = (left?: string | null, right?: string | null) => (
+    (left || "").localeCompare(right || "", locale, { sensitivity: "base" }) * directionFactor
+  );
+  const compareDate = (left: Date | string, right: Date | string) => (
+    (new Date(left).getTime() - new Date(right).getTime()) * directionFactor
+  );
+  const sortedActivities = sort === "date" ? [...activities].sort((left, right) => compareDate(left.createdAt, right.createdAt))
+    : sort === "type" ? [...activities].sort((left, right) => compareText(activityTypeLabel(left.type), activityTypeLabel(right.type)))
+      : sort === "account" ? [...activities].sort((left, right) => compareText(left.account?.name, right.account?.name))
+        : activities;
+  const tableActiveSort = sort === "recent" ? "date" : sort;
+  const tableSortDirection = sort === "recent" ? "desc" : sortDirection;
   const renderCompleteAction = (activity: (typeof activities)[number]) => !activity.completedAt ? (
     <form action={completeActivityAction}>
       <input type="hidden" name="workspaceId" value={workspaceId} />
@@ -136,12 +153,52 @@ export default async function RelationshipActivityPage({
   ) : null;
   const activityTableColumns: WorkItemTableColumn[] = [
     { id: "activity", label: t("fullActivityTitle") },
-    { id: "type", label: t("filterActivityType") },
-    { id: "account", label: t("colAccount") },
-    { id: "date", label: t("colUpdated") },
+    {
+      id: "type",
+      label: (
+        <CrmTableSortHeader
+          label={t("filterActivityType")}
+          sortKey="type"
+          activeSort={tableActiveSort}
+          direction={tableSortDirection}
+          path={pagePath}
+          current={resolvedSearch}
+        />
+      ),
+      mobileLabel: t("filterActivityType"),
+    },
+    {
+      id: "account",
+      label: (
+        <CrmTableSortHeader
+          label={t("colAccount")}
+          sortKey="account"
+          activeSort={tableActiveSort}
+          direction={tableSortDirection}
+          path={pagePath}
+          current={resolvedSearch}
+        />
+      ),
+      mobileLabel: t("colAccount"),
+    },
+    {
+      id: "date",
+      label: (
+        <CrmTableSortHeader
+          label={t("colUpdated")}
+          sortKey="date"
+          activeSort={tableActiveSort}
+          direction={tableSortDirection}
+          defaultDirection="desc"
+          path={pagePath}
+          current={resolvedSearch}
+        />
+      ),
+      mobileLabel: t("colUpdated"),
+    },
     { id: "actions", label: t("colActions"), align: "right" },
   ];
-  const activityTableRows: WorkItemTableRow[] = activities.map((activity) => ({
+  const activityTableRows: WorkItemTableRow[] = sortedActivities.map((activity) => ({
     id: activity.id,
     cells: {
       activity: (
@@ -164,14 +221,14 @@ export default async function RelationshipActivityPage({
     view: "activity",
     section: "activity",
     selectedIds: {},
-    filters: crmFilters({ type, completion, sort, page, viewMode }),
+    filters: crmFilters({ type, completion, sort, dir: sortDirection, page, viewMode }),
     pagination: { page, pageCount, total: activityResult.total },
     visibleContext: {
       metrics: crmPageMetrics([
         { label: "activitiesVisible", value: activityResult.items.length },
         { label: "activitiesTotal", value: activityResult.total },
       ]),
-      activities: activities
+      activities: sortedActivities
         .slice(0, CRM_CHAT_CONTEXT_LIMIT)
         .map((activity) => crmActivityContext(workspaceId, activity)),
     },
@@ -180,11 +237,11 @@ export default async function RelationshipActivityPage({
   return (
     <>
       <CrmChatPageContext context={crmChatPageContext} />
-      <header className="nr-masthead" style={{ textAlign: "left", marginBottom: 32 }}>
-        <a href={relationshipDashboardHref(workspaceId)} className="muted" style={{ fontSize: "0.9rem" }}>
+      <header className="nr-masthead nr-crm-masthead">
+        <a href={relationshipDashboardHref(workspaceId)} className="nr-crm-back-link">
           {t("backToRelationships")}
         </a>
-        <h1 style={{ border: "none", padding: 0, margin: "12px 0 0", fontSize: "2rem" }}>{t("fullActivityTitle")}</h1>
+        <h1>{t("fullActivityTitle")}</h1>
         <div className="nr-masthead-meta"><span>{t("fullActivityDescription")}</span></div>
       </header>
 
@@ -210,33 +267,35 @@ export default async function RelationshipActivityPage({
           />
         </div>
 
-        <form method="get" className="nr-form-section" style={{ marginBottom: 20 }}>
+        <form method="get" className="nr-filter-panel nr-crm-filter-panel">
           {viewMode !== DEFAULT_ACTIVITY_VIEW && <input type="hidden" name="view" value={viewMode} />}
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 12 }}>
-            <label>
-              {t("filterActivityType")}
-              <select name="type" defaultValue={type ?? ""}>
-                <option value="">{t("activityTypeAll")}</option>
-                {CRM_ACTIVITY_TYPES.map((option) => <option key={option} value={option}>{activityTypeLabel(option)}</option>)}
-              </select>
-            </label>
-            <label>
-              {t("filterCompletion")}
-              <select name="completion" defaultValue={completion}>
-                <option value="all">{t("completionAll")}</option>
-                <option value="open">{t("completionOpen")}</option>
-                <option value="completed">{t("completionCompleted")}</option>
-              </select>
-            </label>
-            <label>
-              {t("filterSort")}
-              <select name="sort" defaultValue={sort}>
-                <option value="recent">{t("sortRecent")}</option>
-                <option value="due">{t("sortDue")}</option>
-              </select>
-            </label>
-          </div>
-          <div className="row" style={{ justifyContent: "flex-start", gap: 8, marginTop: 12 }}>
+          {sortDirection !== defaultSortDirection && <input type="hidden" name="dir" value={sortDirection} />}
+          <label>
+            <span className="nr-item-meta">{t("filterActivityType")}</span>
+            <select name="type" defaultValue={type ?? ""}>
+              <option value="">{t("activityTypeAll")}</option>
+              {CRM_ACTIVITY_TYPES.map((option) => <option key={option} value={option}>{activityTypeLabel(option)}</option>)}
+            </select>
+          </label>
+          <label>
+            <span className="nr-item-meta">{t("filterCompletion")}</span>
+            <select name="completion" defaultValue={completion}>
+              <option value="all">{t("completionAll")}</option>
+              <option value="open">{t("completionOpen")}</option>
+              <option value="completed">{t("completionCompleted")}</option>
+            </select>
+          </label>
+          <label>
+            <span className="nr-item-meta">{t("filterSort")}</span>
+            <select name="sort" defaultValue={sort}>
+              <option value="recent">{t("sortRecent")}</option>
+              <option value="due">{t("sortDue")}</option>
+              <option value="date">{t("colUpdated")}</option>
+              <option value="type">{t("filterActivityType")}</option>
+              <option value="account">{t("colAccount")}</option>
+            </select>
+          </label>
+          <div className="nr-crm-filter-actions">
             <button type="submit" className="small">{t("filterApply")}</button>
             <a href={clearHref} className="link-button small">{t("filterClear")}</a>
           </div>
@@ -271,8 +330,8 @@ export default async function RelationshipActivityPage({
           />
         ) : (
         <div className="stack">
-          {activities.length === 0 && <p className="muted">{t("noActivity")}</p>}
-          {activities.map((activity) => (
+          {sortedActivities.length === 0 && <p className="muted">{t("noActivity")}</p>}
+          {sortedActivities.map((activity) => (
             <div key={activity.id} className="item" style={{ display: "flex", gap: 16 }}>
               <div style={{ width: 40, height: 40, borderRadius: "50%", background: "var(--accent-soft)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: "1.2rem", flexShrink: 0 }}>
                 {activityIcon(activity.type)}
