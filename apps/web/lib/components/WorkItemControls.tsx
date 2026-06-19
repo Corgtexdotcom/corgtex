@@ -22,42 +22,37 @@ export function WorkItemViewToggle({
   kanbanLabel,
   tableLabel,
   label,
+  availableViews = ["list", "kanban", "table"],
 }: {
   currentView: WorkItemViewMode;
-  listHref: string;
-  kanbanHref: string;
-  tableHref: string;
+  listHref?: string;
+  kanbanHref?: string;
+  tableHref?: string;
   listLabel: string;
   kanbanLabel: string;
   tableLabel: string;
   label: string;
+  availableViews?: WorkItemViewMode[];
 }) {
+  const viewItems = [
+    { id: "list" as const, href: listHref, label: listLabel, icon: <List size={17} aria-hidden="true" /> },
+    { id: "kanban" as const, href: kanbanHref, label: kanbanLabel, icon: <Columns3 size={17} aria-hidden="true" /> },
+    { id: "table" as const, href: tableHref, label: tableLabel, icon: <Table2 size={17} aria-hidden="true" /> },
+  ].filter((item) => availableViews.includes(item.id) && item.href);
+
   return (
     <div className="nr-view-toggle" aria-label={label}>
-      <a
-        href={listHref}
-        className={`nr-icon-link ${currentView === "list" ? "nr-icon-link-active" : ""}`}
-        aria-label={listLabel}
-        title={listLabel}
-      >
-        <List size={17} aria-hidden="true" />
-      </a>
-      <a
-        href={kanbanHref}
-        className={`nr-icon-link ${currentView === "kanban" ? "nr-icon-link-active" : ""}`}
-        aria-label={kanbanLabel}
-        title={kanbanLabel}
-      >
-        <Columns3 size={17} aria-hidden="true" />
-      </a>
-      <a
-        href={tableHref}
-        className={`nr-icon-link ${currentView === "table" ? "nr-icon-link-active" : ""}`}
-        aria-label={tableLabel}
-        title={tableLabel}
-      >
-        <Table2 size={17} aria-hidden="true" />
-      </a>
+      {viewItems.map((item) => (
+        <a
+          key={item.id}
+          href={item.href}
+          className={`nr-icon-link ${currentView === item.id ? "nr-icon-link-active" : ""}`}
+          aria-label={item.label}
+          title={item.label}
+        >
+          {item.icon}
+        </a>
+      ))}
     </div>
   );
 }
@@ -77,12 +72,14 @@ export function WorkItemToolbar({
   sortDateLabel,
   sortAlphaLabel,
   label,
+  availableViews,
+  showSort = true,
 }: {
   currentView: WorkItemViewMode;
   currentSort: WorkItemSort;
-  listHref: string;
-  kanbanHref: string;
-  tableHref: string;
+  listHref?: string;
+  kanbanHref?: string;
+  tableHref?: string;
   sortLinks: Record<WorkItemSort, string>;
   listLabel: string;
   kanbanLabel: string;
@@ -92,6 +89,8 @@ export function WorkItemToolbar({
   sortDateLabel: string;
   sortAlphaLabel: string;
   label: string;
+  availableViews?: WorkItemViewMode[];
+  showSort?: boolean;
 }) {
   const sortOptions: Array<{ value: WorkItemSort; label: string; icon: ReactNode }> = [
     { value: "priority", label: sortPriorityLabel, icon: <ArrowDownWideNarrow size={15} aria-hidden="true" /> },
@@ -110,8 +109,9 @@ export function WorkItemToolbar({
         kanbanLabel={kanbanLabel}
         tableLabel={tableLabel}
         label={label}
+        availableViews={availableViews}
       />
-      {(currentView === "list" || currentView === "table") && (
+      {showSort && (currentView === "list" || currentView === "table") && (
         <details className="nr-icon-menu">
           <summary className="nr-icon-link" aria-label={sortLabel} title={sortLabel}>
             <ArrowUpDown size={17} aria-hidden="true" />

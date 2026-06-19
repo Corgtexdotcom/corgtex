@@ -1,6 +1,10 @@
 import { requirePageActor } from "@/lib/auth";
 import { MarkdownEditor } from "@/lib/components/MarkdownEditor";
+import { WorkItemToolbar } from "@/lib/components/WorkItemControls";
+import { WorkItemKanbanBoard, type WorkItemKanbanColumn } from "@/lib/components/WorkItemKanbanBoard";
+import { WorkItemTable, type WorkItemTableColumn, type WorkItemTableRow } from "@/lib/components/WorkItemTable";
 import { requireWorkspaceFeature } from "@/lib/workspace-feature-flags";
+import type { WorkItemViewMode } from "@/lib/work-item-view";
 import {
   listCommunicationSuggestions,
   listContacts,
@@ -27,7 +31,9 @@ import {
   crmPageCount,
   crmPageHref,
   crmPageOffset,
+  crmViewHref,
   normalizeCrmPage,
+  normalizeCrmViewMode,
   optionValue,
   type SearchParamsRecord,
 } from "../full-page-utils";
@@ -35,6 +41,8 @@ import {
 export const dynamic = "force-dynamic";
 
 const SUGGESTION_STATUSES = ["SUGGESTED", "REQUESTED", "SENT", "DECLINED", "FAILED"] as const;
+const SUGGESTION_VIEW_MODES = ["list", "table", "kanban"] as const;
+const DEFAULT_SUGGESTION_VIEW = "list";
 
 export default async function RelationshipSuggestionsPage({
   params,
@@ -48,8 +56,10 @@ export default async function RelationshipSuggestionsPage({
   const actor = await requirePageActor();
   await requireWorkspaceMembership({ actor, workspaceId });
   const t = await getTranslations("leads");
+  const tWork = await getTranslations("workItems");
   const resolvedSearch = searchParams ? await searchParams : {};
   const page = normalizeCrmPage(resolvedSearch.page);
+  const viewMode = normalizeCrmViewMode(resolvedSearch.view, SUGGESTION_VIEW_MODES, DEFAULT_SUGGESTION_VIEW);
   const status = optionValue(resolvedSearch.status, SUGGESTION_STATUSES);
   const pagePath = relationshipFullPageHref(workspaceId, "suggestions");
 
@@ -106,13 +116,73 @@ export default async function RelationshipSuggestionsPage({
   const pageCount = crmPageCount(suggestionResult.total);
   const previousHref = crmPageHref(pagePath, resolvedSearch, { page: Math.max(page - 1, 1) });
   const nextHref = crmPageHref(pagePath, resolvedSearch, { page: Math.min(page + 1, pageCount) });
+  const clearHref = crmPageHref(pagePath, {}, { view: viewMode === DEFAULT_SUGGESTION_VIEW ? null : viewMode });
+  const suggestionDate = (suggestion: (typeof suggestionResult.items)[number]) => (
+    suggestion.updatedAt ?? suggestion.requestedAt ?? suggestion.sentAt ?? suggestion.declinedAt ?? suggestion.failedAt
+  );
+  const suggestionAccount = (suggestion: (typeof suggestionResult.items)[number]) => (
+    suggestion.account ? <a href={`/workspaces/${workspaceId}/leads/accounts/${suggestion.account.id}`}>{suggestion.account.name}</a> : <span className="muted">{t("emptyAccount")}</span>
+  );
+  const suggestionRecipient = (suggestion: (typeof suggestionResult.items)[number]) => (
+    suggestion.recipientEmail || suggestion.contact?.email || t("suggestionNoRecipient")
+  );
+  const suggestionTableColumns: WorkItemTableColumn[] = [
+    { id: "suggestion", label: t("dashboardSuggestionSummaryTitle") },
+    { id: "status", label: t("filterStatus") },
+    { id: "account", label: t("colAccount") },
+    { id: "recipient", label: t("formSuggestionRecipient") },
+    { id: "updated", label: t("colUpdated") },
+  ];
+  const suggestionTableRows: WorkItemTableRow[] = suggestionResult.items.map((suggestion) => ({
+    id: suggestion.id,
+    cells: {
+      suggestion: (
+        <>
+          <strong>{suggestion.title}</strong>
+          <div className="nr-work-item-table-meta">{suggestion.subject || t("suggestionNoSubject")}</div>
+        </>
+      ),
+      status: <span className="tag-sm">{communicationStatusLabels[suggestion.status as keyof typeof communicationStatusLabels] ?? suggestion.status}</span>,
+      account: suggestionAccount(suggestion),
+      recipient: <span className="muted">{suggestionRecipient(suggestion)}</span>,
+      updated: <span className="muted">{suggestionDate(suggestion) ? formatDate(suggestionDate(suggestion) as Date | string) : t("emptyValue")}</span>,
+    },
+  }));
+  const suggestionColumns: WorkItemKanbanColumn[] = SUGGESTION_STATUSES.map((suggestionStatus) => {
+    const items = suggestionResult.items.filter((suggestion) => suggestion.status === suggestionStatus);
+    return {
+      id: suggestionStatus,
+      label: communicationStatusLabels[suggestionStatus],
+      count: items.length,
+      empty: <p className="muted">{t("noSuggestions")}</p>,
+      items: items.map((suggestion) => ({
+        id: suggestion.id,
+        status: suggestion.status,
+        sort: {
+          priority: suggestion.status === "FAILED" ? 3 : suggestion.status === "REQUESTED" ? 2 : 1,
+          date: suggestionDate(suggestion) ?? null,
+          alpha: suggestion.title,
+        },
+        node: (
+          <div className="item" style={{ padding: 12, display: "grid", gap: 8 }}>
+            <strong style={{ fontSize: "0.95rem", lineHeight: 1.3 }}>{suggestion.title}</strong>
+            <div className="muted" style={{ fontSize: "0.82rem" }}>{suggestion.subject || t("suggestionNoSubject")}</div>
+            <div className="nr-tag-group">
+              <span className="tag-sm">{suggestionRecipient(suggestion)}</span>
+              <span className="tag-sm">{suggestion.account?.name ?? t("emptyAccount")}</span>
+            </div>
+          </div>
+        ),
+      })),
+    };
+  });
   const crmChatPageContext = {
     surface: "crm" as const,
     workspaceId,
     view: "suggestions",
     section: "suggestions",
     selectedIds: {},
-    filters: crmFilters({ status, page }),
+    filters: crmFilters({ status, page, viewMode }),
     pagination: { page, pageCount, total: suggestionResult.total },
     visibleContext: {
       metrics: crmPageMetrics([
@@ -137,9 +207,29 @@ export default async function RelationshipSuggestionsPage({
       </header>
 
       <section className="ws-section">
-        <RelationshipNav workspaceId={workspaceId} active="suggestions" labels={relationshipNavLabels(t)} />
+        <div className="nr-work-board-header">
+          <RelationshipNav workspaceId={workspaceId} active="suggestions" labels={relationshipNavLabels(t)} />
+          <WorkItemToolbar
+            currentView={viewMode as WorkItemViewMode}
+            currentSort="priority"
+            listHref={crmViewHref(pagePath, resolvedSearch, "list", DEFAULT_SUGGESTION_VIEW)}
+            kanbanHref={crmViewHref(pagePath, resolvedSearch, "kanban", DEFAULT_SUGGESTION_VIEW)}
+            tableHref={crmViewHref(pagePath, resolvedSearch, "table", DEFAULT_SUGGESTION_VIEW)}
+            sortLinks={{ priority: pagePath, date: pagePath, alpha: pagePath }}
+            listLabel={tWork("listView")}
+            kanbanLabel={tWork("kanbanView")}
+            tableLabel={tWork("tableView")}
+            sortLabel={tWork("sort")}
+            sortPriorityLabel={tWork("sortPriority")}
+            sortDateLabel={tWork("sortDate")}
+            sortAlphaLabel={tWork("sortAlpha")}
+            label={tWork("viewMode")}
+            showSort={false}
+          />
+        </div>
 
         <form method="get" className="nr-form-section" style={{ marginBottom: 20 }}>
+          {viewMode !== DEFAULT_SUGGESTION_VIEW && <input type="hidden" name="view" value={viewMode} />}
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 12 }}>
             <label>
               {t("filterStatus")}
@@ -153,7 +243,7 @@ export default async function RelationshipSuggestionsPage({
           </div>
           <div className="row" style={{ justifyContent: "flex-start", gap: 8, marginTop: 12 }}>
             <button type="submit" className="small">{t("filterApply")}</button>
-            <a href={pagePath} className="link-button small">{t("filterClear")}</a>
+            <a href={clearHref} className="link-button small">{t("filterClear")}</a>
           </div>
         </form>
 
@@ -179,6 +269,31 @@ export default async function RelationshipSuggestionsPage({
           </form>
         </details>
 
+        {viewMode === "table" ? (
+          <WorkItemTable
+            columns={suggestionTableColumns}
+            rows={suggestionTableRows}
+            empty={<p className="muted">{t("noSuggestions")}</p>}
+          />
+        ) : viewMode === "kanban" ? (
+          <WorkItemKanbanBoard
+            columns={suggestionColumns}
+            storageKey={`relationships:${workspaceId}:suggestions`}
+            settingsLabel={tWork("columnSettings")}
+            resetLabel={tWork("resetColumns")}
+            hideLabel={tWork("hideColumn")}
+            moveUpLabel={tWork("moveColumnLeft")}
+            moveDownLabel={tWork("moveColumnRight")}
+            hideShortLabel={tWork("hideColumnShort")}
+            moveUpShortLabel={tWork("moveColumnLeftShort")}
+            moveDownShortLabel={tWork("moveColumnRightShort")}
+            sortLabel={tWork("sort")}
+            sortPriorityLabel={tWork("sortPriority")}
+            sortDateLabel={tWork("sortDate")}
+            sortAlphaLabel={tWork("sortAlpha")}
+            dragUnavailableLabel={tWork("dragUnavailable")}
+          />
+        ) : (
         <div className="stack">
           {suggestionResult.items.length === 0 ? (
             <p className="muted">{t("noSuggestions")}</p>
@@ -192,6 +307,7 @@ export default async function RelationshipSuggestionsPage({
             />
           ))}
         </div>
+        )}
 
         <div className="row" style={{ marginTop: 16, fontSize: "0.85rem" }}>
           <span className="muted">{t("paginationSummary", { page, pageCount, count: suggestionResult.items.length, total: suggestionResult.total })}</span>
