@@ -1,6 +1,7 @@
 import { notFound } from "next/navigation";
 import { getControlPlaneClientOptions, requireControlPlaneAccess } from "@corgtex/domain";
 import { requirePageActor } from "@/lib/auth";
+import { normalizeSelectedValues } from "@/lib/filter-query";
 import { prisma } from "@corgtex/shared";
 import { UsersClient } from "./_components/users-client";
 import { ClientContextSwitcher } from "../_components/client-context-switcher";
@@ -11,9 +12,10 @@ export const dynamic = "force-dynamic";
 export default async function ControlPlaneUsersPage({
   searchParams,
 }: {
-  searchParams?: Promise<Record<string, string | undefined>>;
+  searchParams?: Promise<Record<string, string | string[] | undefined>>;
 }) {
   const raw = await searchParams;
+  const clientFilters = normalizeSelectedValues(raw?.client);
   const actor = await requirePageActor();
   try {
     await requireControlPlaneAccess(actor);
@@ -41,10 +43,12 @@ export default async function ControlPlaneUsersPage({
     }),
     getControlPlaneClientOptions(actor),
   ]);
-  const selectedWorkspaceId = clientOptions.find((client) => client.id === raw?.client)?.managedWorkspaceId ?? null;
-  const scopedUsers = raw?.client && selectedWorkspaceId
-    ? users.filter((user: any) => user.memberships.some((membership: any) => membership.workspace.id === selectedWorkspaceId))
-    : raw?.client
+  const selectedWorkspaceIds = clientOptions
+    .filter((client) => clientFilters.includes(client.id) && client.managedWorkspaceId)
+    .map((client) => client.managedWorkspaceId);
+  const scopedUsers = clientFilters.length > 0 && selectedWorkspaceIds.length > 0
+    ? users.filter((user: any) => user.memberships.some((membership: any) => selectedWorkspaceIds.includes(membership.workspace.id)))
+    : clientFilters.length > 0
       ? []
       : users;
 
@@ -73,7 +77,7 @@ export default async function ControlPlaneUsersPage({
           <div className="rounded-lg border border-line bg-bg-alt p-3">
             <ClientContextSwitcher
               clients={clientOptions}
-              selectedClientId={raw?.client ?? ""}
+              selectedClientIds={clientFilters}
               mode="filter"
               label="Client"
             />

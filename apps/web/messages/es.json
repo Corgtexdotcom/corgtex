@@ -627,6 +627,7 @@
   "workItems": {
     "allCircles": "Todos los círculos",
     "allPeople": "Todas las personas",
+    "allStatuses": "Todos los estados",
     "applyFilters": "Aplicar filtros",
     "backToItem": "Volver",
     "clearFilters": "Limpiar",
@@ -681,6 +682,9 @@
     "sortAlpha": "A-Z",
     "sortDate": "Fecha",
     "sortPriority": "Prioridad",
+    "selectAll": "Seleccionar todo",
+    "selectedCount": "{count} seleccionados",
+    "status": "Estado",
     "statusAll": "Todas",
     "tableActions": "Acciones",
     "tableCreated": "Creado",
@@ -691,6 +695,7 @@
     "tableScope": "Alcance",
     "tableStatus": "Estado",
     "tableView": "Tabla",
+    "unselectAll": "Deseleccionar todo",
     "version": "v{version}",
     "viewMode": "Modo de vista",
     "viewSnapshot": "Ver instantánea"

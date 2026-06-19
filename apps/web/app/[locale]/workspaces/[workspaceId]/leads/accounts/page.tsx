@@ -1,5 +1,6 @@
 import { requirePageActor } from "@/lib/auth";
 import { MarkdownEditor } from "@/lib/components/MarkdownEditor";
+import { MultiSelectFilter } from "@/lib/components/MultiSelectFilter";
 import { WorkItemToolbar } from "@/lib/components/WorkItemControls";
 import { WorkItemTable, type WorkItemTableColumn, type WorkItemTableRow } from "@/lib/components/WorkItemTable";
 import { requireWorkspaceFeature } from "@/lib/workspace-feature-flags";
@@ -37,6 +38,7 @@ import {
   normalizeCrmSortDirection,
   normalizeCrmViewMode,
   optionValue,
+  optionValues,
   searchValue,
   type SearchParamsRecord,
 } from "../full-page-utils";
@@ -63,8 +65,8 @@ export default async function RelationshipAccountsPage({
   const page = normalizeCrmPage(resolvedSearch.page);
   const viewMode = normalizeCrmViewMode(resolvedSearch.view, ACCOUNT_VIEW_MODES, DEFAULT_ACCOUNT_VIEW);
   const query = searchValue(resolvedSearch, "q").trim();
-  const relationshipType = optionValue(resolvedSearch.relationshipType, CRM_RELATIONSHIP_OPTIONS);
-  const lifecycleStage = optionValue(resolvedSearch.lifecycleStage, CRM_LIFECYCLE_OPTIONS);
+  const relationshipTypes = optionValues(resolvedSearch.relationshipType, CRM_RELATIONSHIP_OPTIONS);
+  const lifecycleStages = optionValues(resolvedSearch.lifecycleStage, CRM_LIFECYCLE_OPTIONS);
   const sort = optionValue(resolvedSearch.sort, ACCOUNT_SORTS) ?? "updated";
   const sortDirection = normalizeCrmSortDirection(resolvedSearch.dir, sort === "updated" ? "desc" : "asc");
   const pagePath = relationshipFullPageHref(workspaceId, "accounts");
@@ -74,8 +76,8 @@ export default async function RelationshipAccountsPage({
       take: CRM_FULL_PAGE_SIZE,
       skip: crmPageOffset(page),
       query: query || undefined,
-      relationshipType,
-      lifecycleStage,
+      relationshipTypes,
+      lifecycleStages,
     }),
     listDeals(actor, workspaceId, { take: 500 }),
     listCrmActivities(actor, workspaceId, { take: 500 }),
@@ -266,7 +268,7 @@ export default async function RelationshipAccountsPage({
     view: "accounts",
     section: "accounts",
     selectedIds: {},
-    filters: crmFilters({ q: query, relationshipType, lifecycleStage, page, viewMode, sort, dir: sortDirection }),
+    filters: crmFilters({ q: query, relationshipType: relationshipTypes.join(","), lifecycleStage: lifecycleStages.join(","), page, viewMode, sort, dir: sortDirection }),
     pagination: { page, pageCount, total: accountResult.total },
     visibleContext: {
       metrics: crmPageMetrics([
@@ -320,20 +322,26 @@ export default async function RelationshipAccountsPage({
             <span className="nr-item-meta">{t("filterSearch")}</span>
             <input name="q" defaultValue={query} />
           </label>
-          <label>
-            <span className="nr-item-meta">{t("filterRelationship")}</span>
-            <select name="relationshipType" defaultValue={relationshipType ?? ""}>
-              <option value="">{t("filterAny")}</option>
-              {CRM_RELATIONSHIP_OPTIONS.map((option) => <option key={option} value={option}>{relationshipLabel(option)}</option>)}
-            </select>
-          </label>
-          <label>
-            <span className="nr-item-meta">{t("filterLifecycle")}</span>
-            <select name="lifecycleStage" defaultValue={lifecycleStage ?? ""}>
-              <option value="">{t("filterAny")}</option>
-              {CRM_LIFECYCLE_OPTIONS.map((option) => <option key={option} value={option}>{lifecycleLabel(option)}</option>)}
-            </select>
-          </label>
+          <MultiSelectFilter
+            name="relationshipType"
+            label={t("filterRelationship")}
+            options={CRM_RELATIONSHIP_OPTIONS.map((option) => ({ value: option, label: relationshipLabel(option) }))}
+            selectedValues={relationshipTypes}
+            allLabel={t("filterAny")}
+            selectAllLabel={tWork("selectAll")}
+            unselectAllLabel={tWork("unselectAll")}
+            selectedCountLabel={tWork("selectedCount", { count: "{count}" })}
+          />
+          <MultiSelectFilter
+            name="lifecycleStage"
+            label={t("filterLifecycle")}
+            options={CRM_LIFECYCLE_OPTIONS.map((option) => ({ value: option, label: lifecycleLabel(option) }))}
+            selectedValues={lifecycleStages}
+            allLabel={t("filterAny")}
+            selectAllLabel={tWork("selectAll")}
+            unselectAllLabel={tWork("unselectAll")}
+            selectedCountLabel={tWork("selectedCount", { count: "{count}" })}
+          />
           <div className="nr-crm-filter-actions">
             <button type="submit" className="small">{t("filterApply")}</button>
             <a href={clearHref} className="link-button small">{t("filterClear")}</a>

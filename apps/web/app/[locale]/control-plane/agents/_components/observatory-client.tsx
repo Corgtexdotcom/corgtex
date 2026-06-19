@@ -13,6 +13,7 @@ import {
   Code,
   X,
 } from "lucide-react";
+import { MultiSelectFilter } from "@/lib/components/MultiSelectFilter";
 import { cn } from "@/lib/utils";
 
 interface Agent {
@@ -88,23 +89,36 @@ interface ObservatoryProps {
   agents: Agent[];
   runs: Run[];
   customers: CustomerSummary[];
-  initialCustomerId?: string | null;
+  initialCustomerIds?: readonly string[] | null;
 }
 
-export function AgentObservatoryClient({ agents, runs, customers, initialCustomerId }: ObservatoryProps) {
+const AGENT_STATUS_FILTERS = [
+  { value: "ACTIVE", label: "Active" },
+  { value: "AVAILABLE", label: "Available" },
+  { value: "DISABLED", label: "Disabled" },
+  { value: "ARCHIVED", label: "Archived" },
+];
+
+export function AgentObservatoryClient({ agents, runs, customers, initialCustomerIds }: ObservatoryProps) {
   const router = useRouter();
   const pathname = usePathname() || "";
   const searchParams = useSearchParams();
   const [search, setSearch] = useState("");
-  const [selectedCustomerId, setSelectedCustomerId] = useState(initialCustomerId ?? "");
-  const [pendingCustomerId, setPendingCustomerId] = useState<string | null>(null);
-  const [selectedStatus, setSelectedStatus] = useState("");
+  const [selectedCustomerIds, setSelectedCustomerIds] = useState<string[]>([...(initialCustomerIds ?? [])]);
+  const [pendingCustomerIds, setPendingCustomerIds] = useState<string[] | null>(null);
+  const [selectedStatuses, setSelectedStatuses] = useState<string[]>([]);
   const [selectedRun, setSelectedRun] = useState<Run | null>(null); // Active trace drawer
   const [isPending, startTransition] = useTransition();
-  const selectedCustomer = customers.find((customer) => customer.id === selectedCustomerId) ?? null;
-  const scopedCustomers = selectedCustomer ? [selectedCustomer] : customers;
-  const scopedAgents = selectedCustomer ? agents.filter((agent) => agent.customerId === selectedCustomer.id) : agents;
-  const scopedRuns = selectedCustomer ? runs.filter((run) => run.customerId === selectedCustomer.id) : runs;
+  const selectedCustomerIdSet = new Set(selectedCustomerIds);
+  const scopedCustomers = selectedCustomerIds.length > 0
+    ? customers.filter((customer) => selectedCustomerIdSet.has(customer.id))
+    : customers;
+  const scopedAgents = selectedCustomerIds.length > 0
+    ? agents.filter((agent) => selectedCustomerIdSet.has(agent.customerId))
+    : agents;
+  const scopedRuns = selectedCustomerIds.length > 0
+    ? runs.filter((run) => selectedCustomerIdSet.has(run.customerId))
+    : runs;
   const summaryAgentCount = scopedCustomers.reduce((total, customer) => total + customer.agentCount, 0);
   const summaryRunCount = scopedCustomers.reduce((total, customer) => total + customer.runCount, 0);
   const completedRuns = scopedRuns.filter((run) => run.status === "COMPLETED").length;
@@ -122,7 +136,7 @@ export function AgentObservatoryClient({ agents, runs, customers, initialCustome
       agent.access,
       agent.dataScope,
     ].some((value) => value.toLowerCase().includes(query));
-    const matchesStatus = selectedStatus === "" || agent.status === selectedStatus;
+    const matchesStatus = selectedStatuses.length === 0 || selectedStatuses.includes(agent.status);
     return matchesSearch && matchesStatus;
   });
   const filteredRuns = scopedRuns;
@@ -151,19 +165,18 @@ export function AgentObservatoryClient({ agents, runs, customers, initialCustome
   })));
 
   useEffect(() => {
-    setSelectedCustomerId(initialCustomerId ?? "");
-    setPendingCustomerId(null);
-  }, [initialCustomerId]);
+    setSelectedCustomerIds([...(initialCustomerIds ?? [])]);
+    setPendingCustomerIds(null);
+  }, [initialCustomerIds]);
 
-  const selectCustomer = (customerId: string) => {
-    if (customerId === selectedCustomerId) return;
-    setSelectedCustomerId(customerId);
-    setPendingCustomerId(customerId);
+  const selectCustomers = (customerIds: string[]) => {
+    if (customerIds.join("|") === selectedCustomerIds.join("|")) return;
+    setSelectedCustomerIds(customerIds);
+    setPendingCustomerIds(customerIds);
     const params = new URLSearchParams(searchParams?.toString() ?? "");
-    if (customerId) {
-      params.set("client", customerId);
-    } else {
-      params.delete("client");
+    params.delete("client");
+    for (const customerId of customerIds) {
+      params.append("client", customerId);
     }
     const query = params.toString();
     startTransition(() => {
@@ -180,19 +193,15 @@ export function AgentObservatoryClient({ agents, runs, customers, initialCustome
             Switch between the whole Corgtex platform and individual customer deployments.
           </p>
         </div>
-        <select
-          value={selectedCustomerId}
-          onChange={(event) => selectCustomer(event.target.value)}
-          className="bg-surface border border-line text-xs text-text rounded-lg px-3 py-2 focus:outline-none lg:min-w-72"
-        >
-          <option value="">Whole platform</option>
-          {customers.map((customer) => (
-            <option key={customer.id} value={customer.id}>
-              {customer.name}
-            </option>
-          ))}
-        </select>
-        {(pendingCustomerId !== null || isPending) && (
+        <MultiSelectFilter
+          name="client"
+          label="Customer"
+          options={customers.map((customer) => ({ value: customer.id, label: customer.name }))}
+          selectedValues={selectedCustomerIds}
+          allLabel="Whole platform"
+          onSelectionChange={selectCustomers}
+        />
+        {(pendingCustomerIds !== null || isPending) && (
           <span className="text-[10px] font-semibold text-amber-300">Loading customer scope...</span>
         )}
       </div>
@@ -200,7 +209,7 @@ export function AgentObservatoryClient({ agents, runs, customers, initialCustome
       {/* Metrics Row */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
         {[
-          { title: "Customers", value: scopedCustomers.length, detail: selectedCustomer ? selectedCustomer.slug : "visible fleet scope", icon: Bot, tone: "text-muted" },
+          { title: "Customers", value: scopedCustomers.length, detail: scopedCustomers.length === 1 ? scopedCustomers[0].slug : "visible fleet scope", icon: Bot, tone: "text-muted" },
           { title: "Total Agents", value: scopedAgents.length || summaryAgentCount, detail: "known or configured agents", icon: CheckCircle, tone: "text-emerald-400" },
           { title: "Run Traces", value: scopedRuns.length || summaryRunCount, detail: scopedRuns.length ? successRate : "summary count", icon: CheckCircle, tone: "text-emerald-400" },
           { title: "Model Spend", value: `$${modelSpend.toFixed(2)}`, detail: "from loaded run traces", icon: DollarSign, tone: "text-indigo-400" },
@@ -241,17 +250,14 @@ export function AgentObservatoryClient({ agents, runs, customers, initialCustome
                 onChange={(e) => setSearch(e.target.value)}
                 className="bg-surface border border-line text-xs text-text placeholder-slate-600 rounded-lg px-2.5 py-1.5 focus:border-line focus:outline-none"
               />
-              <select
-                value={selectedStatus}
-                onChange={(e) => setSelectedStatus(e.target.value)}
-                className="bg-surface border border-line text-xs text-muted rounded-lg px-2 py-1.5 focus:outline-none"
-              >
-                <option value="">Any status</option>
-                <option value="ACTIVE">Active</option>
-                <option value="AVAILABLE">Available</option>
-                <option value="DISABLED">Disabled</option>
-                <option value="ARCHIVED">Archived</option>
-              </select>
+              <MultiSelectFilter
+                name="status"
+                label="Status"
+                options={AGENT_STATUS_FILTERS}
+                selectedValues={selectedStatuses}
+                allLabel="Any status"
+                onSelectionChange={setSelectedStatuses}
+              />
             </div>
           </div>
 

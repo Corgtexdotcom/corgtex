@@ -439,7 +439,7 @@ describe("listProposals", () => {
                 author: expect.objectContaining({
                   memberships: {
                     some: {
-                      id: "mem-1",
+                      id: { in: ["mem-1"] },
                       workspaceId: "ws-1",
                       isActive: true,
                     },

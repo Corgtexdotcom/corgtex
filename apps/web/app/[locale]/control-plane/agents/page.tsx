@@ -10,6 +10,7 @@ import {
 } from "@corgtex/domain";
 import { Link } from "@/i18n/routing";
 import { requirePageActor } from "@/lib/auth";
+import { firstSelectedValue, normalizeSelectedValues, queryStringFromParams, searchParamValues } from "@/lib/filter-query";
 import { AgentObservatoryClient } from "./_components/observatory-client";
 import { aggregateModelUsageByRunId, sortAgentFleetRows } from "./view-model";
 import { ControlPlaneCacheMeta, ControlPlanePageHeader, controlPlaneButtonClass } from "../_components/control-plane-ui";
@@ -119,20 +120,10 @@ function approvalLabel(summary: AgentAuthoritySummary) {
   return `${policy}; ${summary.approval.pendingApprovalCount} pending`;
 }
 
-function queryString(params: Record<string, string | number | null | undefined>) {
-  const search = new URLSearchParams();
-  for (const [key, value] of Object.entries(params)) {
-    if (value !== undefined && value !== null && String(value).length > 0) {
-      search.set(key, String(value));
-    }
-  }
-  return `?${search.toString()}`;
-}
-
 export default async function ControlPlaneAgentsPage({
   searchParams,
 }: {
-  searchParams?: Promise<Record<string, string | undefined>>;
+  searchParams?: Promise<Record<string, string | string[] | undefined>>;
 }) {
   const raw = await searchParams;
   const actor = await requirePageActor();
@@ -142,15 +133,15 @@ export default async function ControlPlaneAgentsPage({
     notFound();
   }
 
-  const selectedCustomerId = raw?.client ?? "";
-  const refresh = shouldRefreshControlPlaneCache(raw?.refresh);
+  const selectedCustomerIds = normalizeSelectedValues(raw?.client);
+  const refresh = shouldRefreshControlPlaneCache(firstSelectedValue(searchParamValues(raw?.refresh)));
   const actorCacheKey = controlPlaneActorCacheKey(actor);
   const fleetRowsRead = await readControlPlaneCached(["control-plane", "agents", "fleet", actorCacheKey], refresh, () => (
     listControlPlaneDeployments(actor)
   ));
   const fleetRows = sortAgentFleetRows(fleetRowsRead.data);
-  const detailedRows = selectedCustomerId
-    ? fleetRows.filter((customer: any) => customer.id === selectedCustomerId)
+  const detailedRows = selectedCustomerIds.length > 0
+    ? fleetRows.filter((customer: any) => selectedCustomerIds.includes(customer.id))
     : [];
 
   const customerDetails = await Promise.all(detailedRows.map(async (customer: any) => {
@@ -299,14 +290,14 @@ export default async function ControlPlaneAgentsPage({
       <ControlPlaneCacheMeta
         cachedAt={fleetRowsRead.cachedAt}
         cacheStatus={fleetRowsRead.cacheStatus}
-        refreshAction={<Link href={queryString({ client: selectedCustomerId, refresh: 1 })} className={controlPlaneButtonClass}>Refresh live data</Link>}
+        refreshAction={<Link href={queryStringFromParams({ client: selectedCustomerIds, refresh: 1 })} className={controlPlaneButtonClass}>Refresh live data</Link>}
       />
 
       <AgentObservatoryClient
         agents={formattedAgents}
         runs={formattedRuns}
         customers={customers}
-        initialCustomerId={raw?.client ?? ""}
+        initialCustomerIds={selectedCustomerIds}
       />
 
     </div>

@@ -23,6 +23,9 @@ const { prismaMock } = vi.hoisted(() => {
     meetingTranscriptSourceRecord: {
       updateMany: vi.fn(),
     },
+    member: {
+      findMany: vi.fn(),
+    },
     action: {
       findMany: vi.fn(),
     },
@@ -74,6 +77,43 @@ describe("meetings domain", () => {
     await expect(listMeetings("workspace-1")).resolves.toEqual([{ id: "meeting-1" }]);
     expect(prismaMock.meeting.findMany).toHaveBeenCalledWith({
       where: { workspaceId: "workspace-1", archivedAt: null },
+      orderBy: { recordedAt: "desc" },
+    });
+  });
+
+  it("listMeetings matches multiple members through participant ids and emails", async () => {
+    prismaMock.member.findMany.mockResolvedValue([
+      { id: "member-1", userId: "user-1", user: { id: "user-1", email: "one@example.test" } },
+      { id: "member-2", userId: "user-2", user: { id: "user-2", email: "two@example.test" } },
+    ]);
+    prismaMock.meeting.findMany.mockResolvedValue([{ id: "meeting-1" }]);
+
+    const { listMeetings } = await import("./meetings");
+    await expect(listMeetings("workspace-1", { memberIds: ["member-1", "member-2", "member-1"] })).resolves.toEqual([{ id: "meeting-1" }]);
+    expect(prismaMock.member.findMany).toHaveBeenCalledWith({
+      where: {
+        id: { in: ["member-1", "member-2"] },
+        workspaceId: "workspace-1",
+        isActive: true,
+      },
+      include: {
+        user: {
+          select: {
+            id: true,
+            email: true,
+          },
+        },
+      },
+    });
+    expect(prismaMock.meeting.findMany).toHaveBeenCalledWith({
+      where: {
+        workspaceId: "workspace-1",
+        OR: [
+          { participantIds: { hasSome: ["member-1", "member-2", "user-1", "user-2"] } },
+          { participantEmails: { hasSome: ["one@example.test", "two@example.test"] } },
+        ],
+        archivedAt: null,
+      },
       orderBy: { recordedAt: "desc" },
     });
   });

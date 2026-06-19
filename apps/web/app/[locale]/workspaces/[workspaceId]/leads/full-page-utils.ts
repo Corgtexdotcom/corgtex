@@ -32,6 +32,24 @@ export function optionValue<TValue extends string>(
   return allowed.includes(raw as TValue) ? raw as TValue : undefined;
 }
 
+export function optionValues<TValue extends string>(
+  value: string | string[] | undefined,
+  allowed: readonly TValue[],
+): TValue[] {
+  const rawValues = Array.isArray(value) ? value : value ? [value] : [];
+  const allowedSet = new Set<string>(allowed);
+  const seen = new Set<string>();
+  const values: TValue[] = [];
+
+  for (const raw of rawValues) {
+    if (!allowedSet.has(raw) || seen.has(raw)) continue;
+    seen.add(raw);
+    values.push(raw as TValue);
+  }
+
+  return values.length === allowed.length ? [] : values;
+}
+
 export function normalizeCrmViewMode<TView extends CrmFullPageViewMode>(
   value: string | string[] | undefined,
   allowed: readonly TView[],
@@ -50,16 +68,23 @@ export function normalizeCrmSortDirection(
 export function crmPageHref(
   path: string,
   current: SearchParamsRecord,
-  updates: Record<string, string | number | null | undefined>,
+  updates: Record<string, string | number | readonly string[] | null | undefined>,
 ) {
   const query = new URLSearchParams();
   for (const [key, value] of Object.entries(current)) {
-    const raw = Array.isArray(value) ? value[0] : value;
-    if (raw) query.set(key, raw);
+    const rawValues = Array.isArray(value) ? value : value ? [value] : [];
+    for (const raw of rawValues) {
+      if (raw) query.append(key, raw);
+    }
   }
   for (const [key, value] of Object.entries(updates)) {
-    if (value === null || value === undefined || String(value).length === 0) {
+    if (value === null || value === undefined || (!Array.isArray(value) && String(value).length === 0)) {
       query.delete(key);
+    } else if (Array.isArray(value)) {
+      query.delete(key);
+      for (const entry of value) {
+        if (entry) query.append(key, entry);
+      }
     } else {
       query.set(key, String(value));
     }

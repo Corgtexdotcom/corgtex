@@ -1,5 +1,6 @@
 import { requirePageActor } from "@/lib/auth";
 import { MarkdownEditor } from "@/lib/components/MarkdownEditor";
+import { MultiSelectFilter } from "@/lib/components/MultiSelectFilter";
 import { WorkItemToolbar } from "@/lib/components/WorkItemControls";
 import { WorkItemKanbanBoard, type WorkItemKanbanColumn } from "@/lib/components/WorkItemKanbanBoard";
 import { WorkItemTable, type WorkItemTableColumn, type WorkItemTableRow } from "@/lib/components/WorkItemTable";
@@ -37,6 +38,7 @@ import {
   normalizeCrmSortDirection,
   normalizeCrmViewMode,
   optionValue,
+  optionValues,
   type SearchParamsRecord,
 } from "../full-page-utils";
 
@@ -63,7 +65,7 @@ export default async function RelationshipSuggestionsPage({
   const resolvedSearch = searchParams ? await searchParams : {};
   const page = normalizeCrmPage(resolvedSearch.page);
   const viewMode = normalizeCrmViewMode(resolvedSearch.view, SUGGESTION_VIEW_MODES, DEFAULT_SUGGESTION_VIEW);
-  const status = optionValue(resolvedSearch.status, SUGGESTION_STATUSES);
+  const statuses = optionValues(resolvedSearch.status, SUGGESTION_STATUSES);
   const sort = optionValue(resolvedSearch.sort, SUGGESTION_SORTS) ?? "updated";
   const sortDirection = normalizeCrmSortDirection(resolvedSearch.dir, sort === "updated" ? "desc" : "asc");
   const pagePath = relationshipFullPageHref(workspaceId, "suggestions");
@@ -72,7 +74,7 @@ export default async function RelationshipSuggestionsPage({
     listCommunicationSuggestions(actor, workspaceId, {
       take: CRM_FULL_PAGE_SIZE,
       skip: crmPageOffset(page),
-      status,
+      statuses,
     }),
     listCrmAccounts(actor, workspaceId, { take: 200 }),
     listContacts(actor, workspaceId, { take: 200 }),
@@ -246,7 +248,7 @@ export default async function RelationshipSuggestionsPage({
     view: "suggestions",
     section: "suggestions",
     selectedIds: {},
-    filters: crmFilters({ status, page, viewMode, sort, dir: sortDirection }),
+    filters: crmFilters({ status: statuses.join(","), page, viewMode, sort, dir: sortDirection }),
     pagination: { page, pageCount, total: suggestionResult.total },
     visibleContext: {
       metrics: crmPageMetrics([
@@ -296,15 +298,16 @@ export default async function RelationshipSuggestionsPage({
           {viewMode !== DEFAULT_SUGGESTION_VIEW && <input type="hidden" name="view" value={viewMode} />}
           <input type="hidden" name="sort" value={sort} />
           {sortDirection !== "asc" && <input type="hidden" name="dir" value={sortDirection} />}
-          <label>
-            <span className="nr-item-meta">{t("filterStatus")}</span>
-            <select name="status" defaultValue={status ?? ""}>
-              <option value="">{t("statusAll")}</option>
-              {SUGGESTION_STATUSES.map((option) => (
-                <option key={option} value={option}>{communicationStatusLabels[option]}</option>
-              ))}
-            </select>
-          </label>
+          <MultiSelectFilter
+            name="status"
+            label={t("filterStatus")}
+            options={SUGGESTION_STATUSES.map((option) => ({ value: option, label: communicationStatusLabels[option] }))}
+            selectedValues={statuses}
+            allLabel={t("statusAll")}
+            selectAllLabel={tWork("selectAll")}
+            unselectAllLabel={tWork("unselectAll")}
+            selectedCountLabel={tWork("selectedCount", { count: "{count}" })}
+          />
           <div className="nr-crm-filter-actions">
             <button type="submit" className="small">{t("filterApply")}</button>
             <a href={clearHref} className="link-button small">{t("filterClear")}</a>

@@ -1,4 +1,5 @@
 import { requirePageActor } from "@/lib/auth";
+import { MultiSelectFilter } from "@/lib/components/MultiSelectFilter";
 import { WorkItemToolbar } from "@/lib/components/WorkItemControls";
 import { WorkItemTable, type WorkItemTableColumn, type WorkItemTableRow } from "@/lib/components/WorkItemTable";
 import { normalizeVisibleWorkItemColumns, toggleWorkItemColumnVisibility } from "@/lib/work-item-view";
@@ -37,6 +38,7 @@ import {
   normalizeCrmSortDirection,
   normalizeCrmViewMode,
   optionValue,
+  optionValues,
   type SearchParamsRecord,
 } from "../full-page-utils";
 
@@ -61,7 +63,7 @@ export default async function RelationshipPipelinePage({
   const resolvedSearch = searchParams ? await searchParams : {};
   const page = normalizeCrmPage(resolvedSearch.page);
   const viewMode = normalizeCrmViewMode(resolvedSearch.view, PIPELINE_VIEW_MODES, DEFAULT_PIPELINE_VIEW);
-  const stage = optionValue(resolvedSearch.stage, CRM_DEAL_STAGES as readonly CrmDealStage[]);
+  const stages = optionValues(resolvedSearch.stage, CRM_DEAL_STAGES as readonly CrmDealStage[]);
   const sort = optionValue(resolvedSearch.sort, PIPELINE_SORTS);
   const sortDirection = normalizeCrmSortDirection(resolvedSearch.dir);
   const pagePath = relationshipFullPageHref(workspaceId, "pipeline");
@@ -75,7 +77,7 @@ export default async function RelationshipPipelinePage({
     listDeals(actor, workspaceId, {
       take: CRM_FULL_PAGE_SIZE,
       skip: crmPageOffset(page),
-      stage,
+      stages,
     }),
     listContacts(actor, workspaceId, { take: 200 }),
     listMembers(workspaceId),
@@ -246,7 +248,7 @@ export default async function RelationshipPipelinePage({
     view: "pipeline",
     section: "pipeline",
     selectedIds: {},
-    filters: crmFilters({ stage, page, viewMode, sort, dir: sort ? sortDirection : undefined }),
+    filters: crmFilters({ stage: stages.join(","), page, viewMode, sort, dir: sort ? sortDirection : undefined }),
     pagination: { page, pageCount, total: dealResult.total },
     visibleContext: {
       metrics: crmPageMetrics([
@@ -305,15 +307,16 @@ export default async function RelationshipPipelinePage({
           {viewMode !== DEFAULT_PIPELINE_VIEW && <input type="hidden" name="view" value={viewMode} />}
           {sort && <input type="hidden" name="sort" value={sort} />}
           {sort && sortDirection !== "asc" && <input type="hidden" name="dir" value={sortDirection} />}
-          <label>
-            <span className="nr-item-meta">{t("filterStage")}</span>
-            <select name="stage" defaultValue={stage ?? ""}>
-              <option value="">{t("stageAll")}</option>
-              {CRM_DEAL_STAGES.map((option) => (
-                <option key={option} value={option}>{stageLabels[option] ?? labelFromCrmCode(option)}</option>
-              ))}
-            </select>
-          </label>
+          <MultiSelectFilter
+            name="stage"
+            label={t("filterStage")}
+            options={CRM_DEAL_STAGES.map((option) => ({ value: option, label: stageLabels[option] ?? labelFromCrmCode(option) }))}
+            selectedValues={stages}
+            allLabel={t("stageAll")}
+            selectAllLabel={tWork("selectAll")}
+            unselectAllLabel={tWork("unselectAll")}
+            selectedCountLabel={tWork("selectedCount", { count: "{count}" })}
+          />
           <div className="nr-crm-filter-actions">
             <button type="submit" className="small">{t("filterApply")}</button>
             <a href={clearHref} className="link-button small">{t("filterClear")}</a>

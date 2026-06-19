@@ -2076,12 +2076,16 @@ describe("control plane domain", () => {
       .mockResolvedValueOnce([{ workspaceId: "ws-1", _count: { _all: 2 } }]);
     const filteredMatrix = await getControlPlaneFleetOverview(operatorActor, {
       query: "remote",
+      health: ["degraded", "down"],
+      support: ["requires_connector", "degraded"],
       issues: "1",
       missingTools: "1",
       pageSize: 25,
     });
     expect(filteredMatrix.total).toBe(1);
     expect(filteredMatrix.items.map((row) => row.id)).toEqual(["remote-1"]);
+    expect(filteredMatrix.filters.health).toEqual(["degraded", "down"]);
+    expect(filteredMatrix.filters.support).toEqual(["requires_connector", "degraded"]);
   });
 
   it("shows Azure self-serve support sessions as ready without an enterprise connector", async () => {
@@ -2355,7 +2359,7 @@ describe("control plane domain", () => {
     prismaMock.workspaceRecorderCalendarSource.findMany.mockResolvedValue([]);
     prismaMock.meetingRecorderSmokeRun.findMany.mockResolvedValue([]);
 
-    const filtered = await listControlPlaneRecorderMatrix(operatorActor, { client: "inst-1", status: "needs_setup" });
+    const filtered = await listControlPlaneRecorderMatrix(operatorActor, { client: ["inst-1", "remote-1"], status: ["needs_setup", "available"] });
     const unfiltered = await listControlPlaneRecorderMatrix(operatorActor, {});
 
     expect(filtered.items).toHaveLength(1);

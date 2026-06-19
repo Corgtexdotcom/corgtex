@@ -7,6 +7,7 @@ import {
   requireControlPlaneAccess,
 } from "@corgtex/domain";
 import { requirePageActor } from "@/lib/auth";
+import { normalizeSelectedValues } from "@/lib/filter-query";
 import { prisma } from "@corgtex/shared";
 import { Link } from "@/i18n/routing";
 import { enqueueDeployLatestRolloutAction } from "../actions";
@@ -30,9 +31,10 @@ function releaseLabel(imageTag?: string | null, version?: string | null) {
 export default async function ControlPlaneReleasesPage({
   searchParams,
 }: {
-  searchParams?: Promise<Record<string, string | undefined>>;
+  searchParams?: Promise<Record<string, string | string[] | undefined>>;
 }) {
   const raw = await searchParams;
+  const clientFilters = normalizeSelectedValues(raw?.client);
   const actor = await requirePageActor();
   try {
     await requireControlPlaneAccess(actor);
@@ -63,8 +65,8 @@ export default async function ControlPlaneReleasesPage({
     ? releaseLabel(latestReleaseTarget.releaseImageTag, latestReleaseTarget.releaseVersion)
     : "Not configured";
 
-  const filteredDeployments = raw?.client
-    ? deployments.filter((deployment: any) => deployment.id === raw.client)
+  const filteredDeployments = clientFilters.length > 0
+    ? deployments.filter((deployment: any) => clientFilters.includes(deployment.id))
     : deployments;
   const formattedFleet = filteredDeployments.map((deployment: any) => {
     const targetDiffers = latestReleaseTarget
@@ -92,7 +94,7 @@ export default async function ControlPlaneReleasesPage({
           <div className="flex flex-col gap-3 rounded-lg border border-line bg-bg-alt p-3">
             <ClientContextSwitcher
               clients={clientOptions}
-              selectedClientId={raw?.client ?? ""}
+              selectedClientIds={clientFilters}
               mode="filter"
               label="Client"
             />

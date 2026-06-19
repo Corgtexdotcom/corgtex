@@ -7,6 +7,7 @@ import {
   normalizeWorkItemSort,
   normalizeWorkItemView,
   resolveWorkItemFilters,
+  resolveWorkItemStatusValues,
   toggleWorkItemColumnVisibility,
 } from "./work-item-view";
 
@@ -38,6 +39,14 @@ describe("work item view helpers", () => {
       circleId: "circle-1",
       memberId: "mem-1",
     })).toBe("?status=OPEN&view=table&sort=date&circleId=circle-1&memberId=mem-1");
+    expect(buildWorkItemQuery({
+      status: ["OPEN", "RESOLVED"],
+      view: "table",
+      sort: "date",
+      circleIds: ["circle-1", "circle-2"],
+      memberIds: ["mem-1", "mem-2"],
+      dates: { openedFrom: "2026-06-01" },
+    })).toBe("?status=OPEN&status=RESOLVED&view=table&sort=date&circleId=circle-1&circleId=circle-2&memberId=mem-1&memberId=mem-2&openedFrom=2026-06-01");
   });
 
   it("normalizes kanban column visibility from query values", () => {
@@ -61,14 +70,27 @@ describe("work item view helpers", () => {
 
   it("applies circle and member ids independently", () => {
     expect(resolveWorkItemFilters({
-      circleId: "circle-1",
-      memberId: "mem-1",
+      circleId: ["circle-1", "circle-2", "circle-1", ""],
+      memberId: ["mem-1", "mem-2", "mem-1"],
       sort: "date",
     })).toEqual({
       circleId: "circle-1",
+      circleIds: ["circle-1", "circle-2"],
       memberId: "mem-1",
+      memberIds: ["mem-1", "mem-2"],
       sort: "date",
     });
+  });
+
+  it("normalizes repeated status params and canonicalizes all-selected as no explicit filter", () => {
+    const statuses = ["OPEN", "RESOLVED", "ARCHIVED"] as const;
+
+    expect(resolveWorkItemStatusValues(["OPEN", "BAD", "RESOLVED", "OPEN"], statuses))
+      .toEqual(["OPEN", "RESOLVED"]);
+    expect(resolveWorkItemStatusValues(["OPEN", "RESOLVED", "ARCHIVED"], statuses))
+      .toEqual([]);
+    expect(resolveWorkItemStatusValues(undefined, statuses, "OPEN"))
+      .toEqual(["OPEN"]);
   });
 
   it("sorts work item values by priority, date, or title", () => {

@@ -1,6 +1,7 @@
 import { requirePageActor } from "@/lib/auth";
 import { MarkdownEditor } from "@/lib/components/MarkdownEditor";
 import { MarkdownRenderer } from "@/lib/components/MarkdownRenderer";
+import { MultiSelectFilter } from "@/lib/components/MultiSelectFilter";
 import { WorkItemToolbar } from "@/lib/components/WorkItemControls";
 import { WorkItemTable, type WorkItemTableColumn, type WorkItemTableRow } from "@/lib/components/WorkItemTable";
 import { requireWorkspaceFeature } from "@/lib/workspace-feature-flags";
@@ -37,6 +38,7 @@ import {
   normalizeCrmSortDirection,
   normalizeCrmViewMode,
   optionValue,
+  optionValues,
   type SearchParamsRecord,
 } from "../full-page-utils";
 
@@ -70,8 +72,8 @@ export default async function RelationshipActivityPage({
   const resolvedSearch = searchParams ? await searchParams : {};
   const page = normalizeCrmPage(resolvedSearch.page);
   const viewMode = normalizeCrmViewMode(resolvedSearch.view, ACTIVITY_VIEW_MODES, DEFAULT_ACTIVITY_VIEW);
-  const type = optionValue(resolvedSearch.type, CRM_ACTIVITY_TYPES as readonly CrmActivityType[]);
-  const completion = optionValue(resolvedSearch.completion, ACTIVITY_COMPLETION) ?? "all";
+  const types = optionValues(resolvedSearch.type, CRM_ACTIVITY_TYPES as readonly CrmActivityType[]);
+  const completions = optionValues(resolvedSearch.completion, ACTIVITY_COMPLETION);
   const sort = optionValue(resolvedSearch.sort, ACTIVITY_SORTS) ?? "recent";
   const defaultSortDirection = sort === "recent" || sort === "date" ? "desc" : "asc";
   const sortDirection = normalizeCrmSortDirection(resolvedSearch.dir, defaultSortDirection);
@@ -81,8 +83,8 @@ export default async function RelationshipActivityPage({
     listCrmActivities(actor, workspaceId, {
       take: CRM_FULL_PAGE_SIZE,
       skip: crmPageOffset(page),
-      type,
-      completion,
+      types,
+      completions,
       sort: sort === "due" ? "due" : "recent",
     }),
     listCrmAccounts(actor, workspaceId, { take: 200 }),
@@ -221,7 +223,7 @@ export default async function RelationshipActivityPage({
     view: "activity",
     section: "activity",
     selectedIds: {},
-    filters: crmFilters({ type, completion, sort, dir: sortDirection, page, viewMode }),
+    filters: crmFilters({ type: types.join(","), completion: completions.join(","), sort, dir: sortDirection, page, viewMode }),
     pagination: { page, pageCount, total: activityResult.total },
     visibleContext: {
       metrics: crmPageMetrics([
@@ -270,21 +272,29 @@ export default async function RelationshipActivityPage({
         <form method="get" className="nr-filter-panel nr-crm-filter-panel">
           {viewMode !== DEFAULT_ACTIVITY_VIEW && <input type="hidden" name="view" value={viewMode} />}
           {sortDirection !== defaultSortDirection && <input type="hidden" name="dir" value={sortDirection} />}
-          <label>
-            <span className="nr-item-meta">{t("filterActivityType")}</span>
-            <select name="type" defaultValue={type ?? ""}>
-              <option value="">{t("activityTypeAll")}</option>
-              {CRM_ACTIVITY_TYPES.map((option) => <option key={option} value={option}>{activityTypeLabel(option)}</option>)}
-            </select>
-          </label>
-          <label>
-            <span className="nr-item-meta">{t("filterCompletion")}</span>
-            <select name="completion" defaultValue={completion}>
-              <option value="all">{t("completionAll")}</option>
-              <option value="open">{t("completionOpen")}</option>
-              <option value="completed">{t("completionCompleted")}</option>
-            </select>
-          </label>
+          <MultiSelectFilter
+            name="type"
+            label={t("filterActivityType")}
+            options={CRM_ACTIVITY_TYPES.map((option) => ({ value: option, label: activityTypeLabel(option) }))}
+            selectedValues={types}
+            allLabel={t("activityTypeAll")}
+            selectAllLabel={tWork("selectAll")}
+            unselectAllLabel={tWork("unselectAll")}
+            selectedCountLabel={tWork("selectedCount", { count: "{count}" })}
+          />
+          <MultiSelectFilter
+            name="completion"
+            label={t("filterCompletion")}
+            options={[
+              { value: "open", label: t("completionOpen") },
+              { value: "completed", label: t("completionCompleted") },
+            ]}
+            selectedValues={completions.filter((value) => value !== "all")}
+            allLabel={t("completionAll")}
+            selectAllLabel={tWork("selectAll")}
+            unselectAllLabel={tWork("unselectAll")}
+            selectedCountLabel={tWork("selectedCount", { count: "{count}" })}
+          />
           <label>
             <span className="nr-item-meta">{t("filterSort")}</span>
             <select name="sort" defaultValue={sort}>

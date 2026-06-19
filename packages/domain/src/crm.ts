@@ -460,12 +460,18 @@ export async function captureDemoLead(params: {
 
 // --- ACCOUNTS ---
 
+function listFilterValues(values?: readonly (string | null | undefined)[] | null) {
+  return [...new Set((values ?? []).map((value) => value?.trim()).filter((value): value is string => Boolean(value)))];
+}
+
 export async function listCrmAccounts(actor: AppActor, workspaceId: string, opts?: {
   take?: number;
   skip?: number;
   query?: string;
   relationshipType?: string;
+  relationshipTypes?: string[];
   lifecycleStage?: string;
+  lifecycleStages?: string[];
   archiveFilter?: ArchiveFilter;
 }) {
   await requireWorkspaceMembership({ actor, workspaceId });
@@ -474,10 +480,18 @@ export async function listCrmAccounts(actor: AppActor, workspaceId: string, opts
   const skip = opts?.skip ?? 0;
 
   let where: any = { workspaceId, ...archiveFilterWhere(opts?.archiveFilter) };
-  if (opts?.relationshipType) {
+  const relationshipTypes = listFilterValues([...(opts?.relationshipTypes ?? []), opts?.relationshipType])
+    .map((value) => normalizeCrmRelationshipType(value));
+  const lifecycleStages = listFilterValues([...(opts?.lifecycleStages ?? []), opts?.lifecycleStage])
+    .map((value) => normalizeCrmLifecycleStage(value));
+  if (relationshipTypes.length > 0) {
+    where.relationshipType = { in: relationshipTypes };
+  } else if (opts?.relationshipType) {
     where.relationshipType = normalizeCrmRelationshipType(opts.relationshipType);
   }
-  if (opts?.lifecycleStage) {
+  if (lifecycleStages.length > 0) {
+    where.lifecycleStage = { in: lifecycleStages };
+  } else if (opts?.lifecycleStage) {
     where.lifecycleStage = normalizeCrmLifecycleStage(opts.lifecycleStage);
   }
   if (opts?.query) {
@@ -1062,7 +1076,7 @@ export async function deleteContact(actor: AppActor, params: { workspaceId: stri
 
 // --- DEALS ---
 
-export async function listDeals(actor: AppActor, workspaceId: string, opts?: { take?: number; skip?: number; stage?: CrmDealStage; accountId?: string; contactId?: string; archiveFilter?: ArchiveFilter }) {
+export async function listDeals(actor: AppActor, workspaceId: string, opts?: { take?: number; skip?: number; stage?: CrmDealStage; stages?: CrmDealStage[]; accountId?: string; contactId?: string; archiveFilter?: ArchiveFilter }) {
   await requireWorkspaceMembership({ actor, workspaceId });
   
   const take = opts?.take ?? 100;
@@ -1075,7 +1089,10 @@ export async function listDeals(actor: AppActor, workspaceId: string, opts?: { t
   if (opts?.contactId) {
     where.contactId = opts.contactId;
   }
-  if (opts?.stage) {
+  const stages = listFilterValues([...(opts?.stages ?? []), opts?.stage]) as CrmDealStage[];
+  if (stages.length > 0) {
+    where.stage = { in: stages };
+  } else if (opts?.stage) {
     where.stage = opts.stage;
   }
 
@@ -1288,11 +1305,13 @@ export async function listCrmActivities(actor: AppActor, workspaceId: string, op
   contactId?: string;
   dealId?: string;
   type?: CrmActivityType;
+  types?: CrmActivityType[];
   ownerUserId?: string;
   source?: string;
   dueFrom?: Date;
   dueTo?: Date;
   completion?: "open" | "completed" | "all";
+  completions?: Array<"open" | "completed" | "all">;
   sort?: "recent" | "due";
   take?: number;
   skip?: number;
@@ -1305,11 +1324,15 @@ export async function listCrmActivities(actor: AppActor, workspaceId: string, op
   if (opts?.accountId) where.accountId = opts.accountId;
   if (opts?.contactId) where.contactId = opts.contactId;
   if (opts?.dealId) where.dealId = opts.dealId;
-  if (opts?.type) where.type = opts.type;
+  const types = listFilterValues([...(opts?.types ?? []), opts?.type]) as CrmActivityType[];
+  if (types.length > 0) where.type = { in: types };
+  else if (opts?.type) where.type = opts.type;
   if (opts?.ownerUserId) where.ownerUserId = opts.ownerUserId;
   if (opts?.source) where.source = normalizeCrmActivitySource(opts.source);
-  if (opts?.completion === "open") where.completedAt = null;
-  if (opts?.completion === "completed") where.completedAt = { not: null };
+  const completions = listFilterValues([...(opts?.completions ?? []), opts?.completion])
+    .filter((value): value is "open" | "completed" | "all" => value === "open" || value === "completed" || value === "all");
+  if (completions.length === 1 && completions[0] === "open") where.completedAt = null;
+  if (completions.length === 1 && completions[0] === "completed") where.completedAt = { not: null };
   if (opts?.dueFrom || opts?.dueTo) {
     where.dueAt = {};
     if (opts.dueFrom) where.dueAt.gte = normalizeCrmActivityDate(opts.dueFrom, "Due from");
@@ -1544,6 +1567,7 @@ export async function listCommunicationSuggestions(actor: AppActor, workspaceId:
   activityId?: string;
   ownerUserId?: string;
   status?: string;
+  statuses?: string[];
   take?: number;
   skip?: number;
 }) {
@@ -1555,7 +1579,10 @@ export async function listCommunicationSuggestions(actor: AppActor, workspaceId:
   if (opts?.dealId) where.dealId = opts.dealId;
   if (opts?.activityId) where.activityId = opts.activityId;
   if (opts?.ownerUserId) where.ownerUserId = opts.ownerUserId;
-  if (opts?.status) where.status = normalizeCommunicationSuggestionStatus(opts.status);
+  const statuses = listFilterValues([...(opts?.statuses ?? []), opts?.status])
+    .map((value) => normalizeCommunicationSuggestionStatus(value));
+  if (statuses.length > 0) where.status = { in: statuses };
+  else if (opts?.status) where.status = normalizeCommunicationSuggestionStatus(opts.status);
   const take = opts?.take ?? 50;
   const skip = opts?.skip ?? 0;
 

@@ -141,12 +141,12 @@ describe("action domain lifecycle", () => {
           },
           {
             OR: [
-              { assigneeMemberId: "member-1" },
+              { assigneeMemberId: { in: ["member-1"] } },
               {
                 author: {
                   memberships: {
                     some: {
-                      id: "member-1",
+                      id: { in: ["member-1"] },
                       workspaceId: "workspace-1",
                       isActive: true,
                     },

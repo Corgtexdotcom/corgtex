@@ -627,6 +627,7 @@
   "workItems": {
     "allCircles": "All circles",
     "allPeople": "All people",
+    "allStatuses": "All statuses",
     "applyFilters": "Apply filters",
     "backToItem": "Back",
     "clearFilters": "Clear",
@@ -681,6 +682,9 @@
     "sortAlpha": "A-Z",
     "sortDate": "Date",
     "sortPriority": "Priority",
+    "selectAll": "Select all",
+    "selectedCount": "{count} selected",
+    "status": "Status",
     "statusAll": "All",
     "tableActions": "Actions",
     "tableCreated": "Created",
@@ -691,6 +695,7 @@
     "tableScope": "Scope",
     "tableStatus": "Status",
     "tableView": "Table",
+    "unselectAll": "Unselect all",
     "version": "v{version}",
     "viewMode": "View mode",
     "viewSnapshot": "View snapshot"

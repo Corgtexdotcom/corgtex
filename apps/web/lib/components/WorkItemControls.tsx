@@ -1,6 +1,7 @@
 import type { ReactNode } from "react";
 import { ArrowDownAZ, ArrowDownWideNarrow, ArrowUpDown, Columns3, List, Table2 } from "lucide-react";
 import type { WorkItemScope, WorkItemSort, WorkItemViewMode } from "@/lib/work-item-view";
+import { MultiSelectFilter } from "@/lib/components/MultiSelectFilter";
 
 type Option = {
   id: string;
@@ -92,10 +93,10 @@ export function WorkItemToolbar({
   availableViews?: WorkItemViewMode[];
   showSort?: boolean;
 }) {
-  const sortOptions: Array<{ value: WorkItemSort; label: string; icon: ReactNode }> = [
-    { value: "priority", label: sortPriorityLabel, icon: <ArrowDownWideNarrow size={15} aria-hidden="true" /> },
-    { value: "date", label: sortDateLabel, icon: <ArrowUpDown size={15} aria-hidden="true" /> },
-    { value: "alpha", label: sortAlphaLabel, icon: <ArrowDownAZ size={15} aria-hidden="true" /> },
+  const sortOptions: Array<{ id: WorkItemSort; label: string; icon: ReactNode }> = [
+    { id: "priority", label: sortPriorityLabel, icon: <ArrowDownWideNarrow size={15} aria-hidden="true" /> },
+    { id: "date", label: sortDateLabel, icon: <ArrowUpDown size={15} aria-hidden="true" /> },
+    { id: "alpha", label: sortAlphaLabel, icon: <ArrowDownAZ size={15} aria-hidden="true" /> },
   ];
 
   return (
@@ -119,9 +120,9 @@ export function WorkItemToolbar({
           <div className="nr-icon-menu-popover">
             {sortOptions.map((option) => (
               <a
-                key={option.value}
-                href={sortLinks[option.value]}
-                className={`nr-icon-menu-item ${currentSort === option.value ? "nr-icon-menu-item-active" : ""}`}
+                key={option.id}
+                href={sortLinks[option.id]}
+                className={`nr-icon-menu-item ${currentSort === option.id ? "nr-icon-menu-item-active" : ""}`}
               >
                 {option.icon}
                 <span>{option.label}</span>
@@ -142,7 +143,11 @@ export function WorkItemFilterControls({
   sort,
   columns,
   circleId,
+  circleIds,
   memberId,
+  memberIds,
+  statusOptions,
+  statusValues,
   circles,
   members,
   dates = [],
@@ -158,7 +163,11 @@ export function WorkItemFilterControls({
   sort?: WorkItemSort;
   columns?: readonly string[];
   circleId?: string;
+  circleIds?: readonly string[];
   memberId?: string;
+  memberIds?: readonly string[];
+  statusOptions?: Option[];
+  statusValues?: readonly string[];
   circles: Option[];
   members: Option[];
   dates?: DateFilter[];
@@ -172,16 +181,36 @@ export function WorkItemFilterControls({
     person: string;
     allCircles: string;
     allPeople: string;
+    status?: string;
+    allStatuses?: string;
+    selectAll?: string;
+    unselectAll?: string;
+    selectedCount?: string;
     apply: string;
     clear: string;
   };
 }) {
+  const selectedCircleIds = circleIds ?? (circleId ? [circleId] : []);
+  const selectedMemberIds = memberIds ?? (memberId ? [memberId] : []);
+
   return (
     <form className="nr-filter-panel" action={action}>
-      {status && <input type="hidden" name="status" value={status} />}
+      {status && !statusOptions && <input type="hidden" name="status" value={status} />}
       {view && view !== "list" && <input type="hidden" name="view" value={view} />}
       {sort && sort !== "priority" && <input type="hidden" name="sort" value={sort} />}
       {columns && columns.length > 0 && <input type="hidden" name="columns" value={columns.join(",")} />}
+      {statusOptions && (
+        <MultiSelectFilter
+          name="status"
+          label={labels.status ?? "Status"}
+          options={statusOptions.map((option) => ({ value: option.id, label: option.label }))}
+          selectedValues={statusValues}
+          allLabel={labels.allStatuses ?? labels.status ?? "All statuses"}
+          selectAllLabel={labels.selectAll}
+          unselectAllLabel={labels.unselectAll}
+          selectedCountLabel={labels.selectedCount}
+        />
+      )}
       {scope && (
         <label>
           <span className="nr-item-meta">{labels.scope}</span>
@@ -193,26 +222,28 @@ export function WorkItemFilterControls({
         </label>
       )}
       {showCircle && (
-        <label>
-          <span className="nr-item-meta">{labels.circle}</span>
-          <select name="circleId" defaultValue={circleId ?? ""}>
-            <option value="">{labels.allCircles}</option>
-            {circles.map((circle) => (
-              <option key={circle.id} value={circle.id}>{circle.label}</option>
-            ))}
-          </select>
-        </label>
+        <MultiSelectFilter
+          name="circleId"
+          label={labels.circle}
+          options={circles.map((circle) => ({ value: circle.id, label: circle.label }))}
+          selectedValues={selectedCircleIds}
+          allLabel={labels.allCircles}
+          selectAllLabel={labels.selectAll}
+          unselectAllLabel={labels.unselectAll}
+          selectedCountLabel={labels.selectedCount}
+        />
       )}
       {showMember && (
-        <label>
-          <span className="nr-item-meta">{labels.person}</span>
-          <select name="memberId" defaultValue={memberId ?? ""}>
-            <option value="">{labels.allPeople}</option>
-            {members.map((member) => (
-              <option key={member.id} value={member.id}>{member.label}</option>
-            ))}
-          </select>
-        </label>
+        <MultiSelectFilter
+          name="memberId"
+          label={labels.person}
+          options={members.map((member) => ({ value: member.id, label: member.label }))}
+          selectedValues={selectedMemberIds}
+          allLabel={labels.allPeople}
+          selectAllLabel={labels.selectAll}
+          unselectAllLabel={labels.unselectAll}
+          selectedCountLabel={labels.selectedCount}
+        />
       )}
       {dates.map((date) => (
         <label key={date.name}>

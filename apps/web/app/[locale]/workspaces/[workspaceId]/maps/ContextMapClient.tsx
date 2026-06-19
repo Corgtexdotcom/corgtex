@@ -34,6 +34,7 @@ import {
   X,
 } from "lucide-react";
 
+import { MultiSelectFilter } from "@/lib/components/MultiSelectFilter";
 import {
   applyContextGraphProposedDiffAction,
   buildSelectedRegionContextAction,
@@ -207,6 +208,12 @@ export type ContextMapClientData = {
 type RegionContext = Awaited<ReturnType<typeof buildSelectedRegionContextAction>>;
 type InspectorDock = "right" | "bottom";
 type StatusFilter = "active" | "approved" | "needs-review" | "all";
+const CONTEXT_MAP_STATUS_FILTERS: Array<{ value: StatusFilter; label: string }> = [
+  { value: "active", label: "Active facts" },
+  { value: "needs-review", label: "Needs review" },
+  { value: "approved", label: "Approved" },
+  { value: "all", label: "All loaded" },
+];
 type ContextMapNodeVariant = "standard" | "alert";
 type ContextMapManualCardKind = "standard" | "alert";
 type ContextMapManualRelationIntent = "enables" | "blocks" | "supports" | "needs_approval_from";
@@ -726,6 +733,10 @@ function shouldShowStatus(status: string, filter: StatusFilter) {
   return status !== "archived";
 }
 
+function shouldShowAnyStatus(status: string, filters: readonly StatusFilter[]) {
+  return filters.length === 0 || filters.some((filter) => shouldShowStatus(status, filter));
+}
+
 function sourceLabel(value: { sourceEntityType: string | null; sourceEntityId: string | null; createdByType: string }) {
   if (value.sourceEntityType) return `${value.sourceEntityType}${value.sourceEntityId ? ` - ${value.sourceEntityId}` : ""}`;
   return `created by ${value.createdByType}`;
@@ -1067,8 +1078,8 @@ export default function ContextMapClient({
     return new URL(window.location.href).searchParams.get("fullscreen") === "1";
   });
   const [showFilters, setShowFilters] = useState(false);
-  const [typeFilter, setTypeFilter] = useState("all");
-  const [statusFilter, setStatusFilter] = useState<StatusFilter>("active");
+  const [typeFilters, setTypeFilters] = useState<string[]>([]);
+  const [statusFilters, setStatusFilters] = useState<StatusFilter[]>(["active"]);
   // Inspector preferences must start at the SSR defaults and load from localStorage
   // after mount, otherwise the first client render mismatches the server HTML.
   const [inspectorDock, setInspectorDock] = useState<InspectorDock>("right");
@@ -1111,9 +1122,9 @@ export default function ContextMapClient({
   const objectTypes = useMemo(() => [...new Set(canvasObjects.map((object) => object.objectType))].sort(), [canvasObjects]);
 
   const filteredObjects = useMemo(() => canvasObjects.filter((object) => {
-    if (typeFilter !== "all" && object.objectType !== typeFilter) return false;
-    return shouldShowStatus(object.status, statusFilter);
-  }), [canvasObjects, statusFilter, typeFilter]);
+    if (typeFilters.length > 0 && !typeFilters.includes(object.objectType)) return false;
+    return shouldShowAnyStatus(object.status, statusFilters);
+  }), [canvasObjects, statusFilters, typeFilters]);
   const visibleObjectIds = useMemo(() => new Set(filteredObjects.map((object) => object.id)), [filteredObjects]);
 
   const initialNodes = useMemo<ContextMapFlowNode[]>(() => filteredObjects.map((object, index) => {
@@ -1171,7 +1182,7 @@ export default function ContextMapClient({
     if (
       !visibleObjectIds.has(visual.sourceObjectId)
       || !visibleObjectIds.has(visual.targetObjectId)
-      || !shouldShowStatus(relationship.status, statusFilter)
+      || !shouldShowAnyStatus(relationship.status, statusFilters)
     ) {
       return [];
     }
@@ -1214,7 +1225,7 @@ export default function ContextMapClient({
         strokeDasharray: visualStyle.strokeDasharray,
       },
     }];
-  }), [allRelationships, routingObstacles, routingRects, statusFilter, visibleObjectIds]);
+  }), [allRelationships, routingObstacles, routingRects, statusFilters, visibleObjectIds]);
 
   const [edges, setEdges, onEdgesChange] = useEdgesState<ContextMapFlowEdge>(routedEdges);
 
@@ -1420,7 +1431,7 @@ export default function ContextMapClient({
     if (!flowInstance || nodes.length === 0) return;
     scheduleFit();
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [flowInstance, data.mapView.id, isFullscreen, statusFilter, typeFilter, includeStale, nodes.length, inspectorDock]);
+  }, [flowInstance, data.mapView.id, isFullscreen, statusFilters, typeFilters, includeStale, nodes.length, inspectorDock]);
 
   function resetLocalLayout() {
     setNodes(initialNodes);
@@ -1904,22 +1915,22 @@ export default function ContextMapClient({
 
       {showFilters && (
         <div className="context-map-filter-bar">
-          <label>
-            <span>Type</span>
-            <select value={typeFilter} onChange={(event) => setTypeFilter(event.target.value)}>
-              <option value="all">All types</option>
-              {objectTypes.map((objectType) => <option key={objectType} value={objectType}>{objectType}</option>)}
-            </select>
-          </label>
-          <label>
-            <span>Status</span>
-            <select value={statusFilter} onChange={(event) => setStatusFilter(event.target.value as StatusFilter)}>
-              <option value="active">Active facts</option>
-              <option value="needs-review">Needs review</option>
-              <option value="approved">Approved</option>
-              <option value="all">All loaded</option>
-            </select>
-          </label>
+          <MultiSelectFilter
+            name="type"
+            label="Type"
+            options={objectTypes.map((objectType) => ({ value: objectType, label: objectType }))}
+            selectedValues={typeFilters}
+            allLabel="All types"
+            onSelectionChange={setTypeFilters}
+          />
+          <MultiSelectFilter
+            name="status"
+            label="Status"
+            options={CONTEXT_MAP_STATUS_FILTERS}
+            selectedValues={statusFilters}
+            allLabel="All loaded"
+            onSelectionChange={(values) => setStatusFilters(values as StatusFilter[])}
+          />
           <label className="context-map-checkbox">
             <input type="checkbox" checked={includeStale} onChange={(event) => toggleIncludeStale(event.target.checked)} />
             <span>Load stale facts</span>
