@@ -1,6 +1,7 @@
 export const CRM_FULL_PAGE_SIZE = 25;
 
 export type SearchParamsRecord = Record<string, string | string[] | undefined>;
+export type CrmFullPageViewMode = "list" | "kanban" | "table";
 
 export function searchValue(searchParams: SearchParamsRecord, key: string) {
   const value = searchParams[key];
@@ -29,6 +30,14 @@ export function optionValue<TValue extends string>(
   return allowed.includes(raw as TValue) ? raw as TValue : undefined;
 }
 
+export function normalizeCrmViewMode<TView extends CrmFullPageViewMode>(
+  value: string | string[] | undefined,
+  allowed: readonly TView[],
+  defaultView: TView,
+) {
+  return optionValue(value, allowed) ?? defaultView;
+}
+
 export function crmPageHref(
   path: string,
   current: SearchParamsRecord,
@@ -48,4 +57,13 @@ export function crmPageHref(
   }
   const text = query.toString();
   return text ? `${path}?${text}` : path;
+}
+
+export function crmViewHref<TView extends CrmFullPageViewMode>(
+  path: string,
+  current: SearchParamsRecord,
+  view: TView,
+  defaultView: TView,
+) {
+  return crmPageHref(path, current, { view: view === defaultView ? null : view });
 }

@@ -1,7 +1,10 @@
 import { requirePageActor } from "@/lib/auth";
 import { MarkdownEditor } from "@/lib/components/MarkdownEditor";
 import { MarkdownRenderer } from "@/lib/components/MarkdownRenderer";
+import { WorkItemToolbar } from "@/lib/components/WorkItemControls";
+import { WorkItemTable, type WorkItemTableColumn, type WorkItemTableRow } from "@/lib/components/WorkItemTable";
 import { requireWorkspaceFeature } from "@/lib/workspace-feature-flags";
+import type { WorkItemViewMode } from "@/lib/work-item-view";
 import {
   listContacts,
   listCrmAccounts,
@@ -28,7 +31,9 @@ import {
   crmPageCount,
   crmPageHref,
   crmPageOffset,
+  crmViewHref,
   normalizeCrmPage,
+  normalizeCrmViewMode,
   optionValue,
   type SearchParamsRecord,
 } from "../full-page-utils";
@@ -38,6 +43,8 @@ export const dynamic = "force-dynamic";
 const CRM_ACTIVITY_TYPES = ["NOTE", "EMAIL", "CALL", "MEETING", "TASK"] as const;
 const ACTIVITY_COMPLETION = ["open", "completed", "all"] as const;
 const ACTIVITY_SORTS = ["recent", "due"] as const;
+const ACTIVITY_VIEW_MODES = ["list", "table"] as const;
+const DEFAULT_ACTIVITY_VIEW = "list";
 
 type ActivityContext = {
   account?: { id: string; name: string } | null;
@@ -57,8 +64,10 @@ export default async function RelationshipActivityPage({
   const actor = await requirePageActor();
   await requireWorkspaceMembership({ actor, workspaceId });
   const t = await getTranslations("leads");
+  const tWork = await getTranslations("workItems");
   const resolvedSearch = searchParams ? await searchParams : {};
   const page = normalizeCrmPage(resolvedSearch.page);
+  const viewMode = normalizeCrmViewMode(resolvedSearch.view, ACTIVITY_VIEW_MODES, DEFAULT_ACTIVITY_VIEW);
   const type = optionValue(resolvedSearch.type, CRM_ACTIVITY_TYPES as readonly CrmActivityType[]);
   const completion = optionValue(resolvedSearch.completion, ACTIVITY_COMPLETION) ?? "all";
   const sort = optionValue(resolvedSearch.sort, ACTIVITY_SORTS) ?? "recent";
@@ -117,13 +126,45 @@ export default async function RelationshipActivityPage({
   const pageCount = crmPageCount(activityResult.total);
   const previousHref = crmPageHref(pagePath, resolvedSearch, { page: Math.max(page - 1, 1) });
   const nextHref = crmPageHref(pagePath, resolvedSearch, { page: Math.min(page + 1, pageCount) });
+  const clearHref = crmPageHref(pagePath, {}, { view: viewMode === DEFAULT_ACTIVITY_VIEW ? null : viewMode });
+  const renderCompleteAction = (activity: (typeof activities)[number]) => !activity.completedAt ? (
+    <form action={completeActivityAction}>
+      <input type="hidden" name="workspaceId" value={workspaceId} />
+      <input type="hidden" name="activityId" value={activity.id} />
+      <button type="submit" className="small">{t("btnCompleteFollowUp")}</button>
+    </form>
+  ) : null;
+  const activityTableColumns: WorkItemTableColumn[] = [
+    { id: "activity", label: t("fullActivityTitle") },
+    { id: "type", label: t("filterActivityType") },
+    { id: "account", label: t("colAccount") },
+    { id: "date", label: t("colUpdated") },
+    { id: "actions", label: t("colActions"), align: "right" },
+  ];
+  const activityTableRows: WorkItemTableRow[] = activities.map((activity) => ({
+    id: activity.id,
+    cells: {
+      activity: (
+        <>
+          <strong>{activity.title}</strong>
+          <div className="nr-work-item-table-meta">
+            {activity.dueAt ? t("followUpDue", { date: formatDate(activity.dueAt) }) : ageText(activity.createdAt)}
+          </div>
+        </>
+      ),
+      type: <span className="tag-sm">{activityTypeLabel(activity.type)}</span>,
+      account: accountLink(activity.account),
+      date: <span className="muted">{ageText(activity.createdAt)}</span>,
+      actions: renderCompleteAction(activity),
+    },
+  }));
   const crmChatPageContext = {
     surface: "crm" as const,
     workspaceId,
     view: "activity",
     section: "activity",
     selectedIds: {},
-    filters: crmFilters({ type, completion, sort, page }),
+    filters: crmFilters({ type, completion, sort, page, viewMode }),
     pagination: { page, pageCount, total: activityResult.total },
     visibleContext: {
       metrics: crmPageMetrics([
@@ -148,9 +189,29 @@ export default async function RelationshipActivityPage({
       </header>
 
       <section className="ws-section">
-        <RelationshipNav workspaceId={workspaceId} active="activity" labels={relationshipNavLabels(t)} />
+        <div className="nr-work-board-header">
+          <RelationshipNav workspaceId={workspaceId} active="activity" labels={relationshipNavLabels(t)} />
+          <WorkItemToolbar
+            currentView={viewMode as WorkItemViewMode}
+            currentSort="priority"
+            listHref={crmViewHref(pagePath, resolvedSearch, "list", DEFAULT_ACTIVITY_VIEW)}
+            tableHref={crmViewHref(pagePath, resolvedSearch, "table", DEFAULT_ACTIVITY_VIEW)}
+            sortLinks={{ priority: pagePath, date: pagePath, alpha: pagePath }}
+            listLabel={tWork("listView")}
+            kanbanLabel={tWork("kanbanView")}
+            tableLabel={tWork("tableView")}
+            sortLabel={tWork("sort")}
+            sortPriorityLabel={tWork("sortPriority")}
+            sortDateLabel={tWork("sortDate")}
+            sortAlphaLabel={tWork("sortAlpha")}
+            label={tWork("viewMode")}
+            availableViews={["list", "table"]}
+            showSort={false}
+          />
+        </div>
 
         <form method="get" className="nr-form-section" style={{ marginBottom: 20 }}>
+          {viewMode !== DEFAULT_ACTIVITY_VIEW && <input type="hidden" name="view" value={viewMode} />}
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 12 }}>
             <label>
               {t("filterActivityType")}
@@ -177,7 +238,7 @@ export default async function RelationshipActivityPage({
           </div>
           <div className="row" style={{ justifyContent: "flex-start", gap: 8, marginTop: 12 }}>
             <button type="submit" className="small">{t("filterApply")}</button>
-            <a href={pagePath} className="link-button small">{t("filterClear")}</a>
+            <a href={clearHref} className="link-button small">{t("filterClear")}</a>
           </div>
         </form>
 
@@ -202,6 +263,13 @@ export default async function RelationshipActivityPage({
           </form>
         </details>
 
+        {viewMode === "table" ? (
+          <WorkItemTable
+            columns={activityTableColumns}
+            rows={activityTableRows}
+            empty={<p className="muted">{t("noActivity")}</p>}
+          />
+        ) : (
         <div className="stack">
           {activities.length === 0 && <p className="muted">{t("noActivity")}</p>}
           {activities.map((activity) => (
@@ -224,17 +292,12 @@ export default async function RelationshipActivityPage({
                   {activity.dueAt && <span className="muted">{t("followUpDue", { date: formatDate(activity.dueAt) })}</span>}
                   {activity.completedAt && <span className="muted">{t("followUpCompleted", { date: formatDate(activity.completedAt) })}</span>}
                 </div>
-                {!activity.completedAt && (
-                  <form action={completeActivityAction} style={{ marginTop: 10 }}>
-                    <input type="hidden" name="workspaceId" value={workspaceId} />
-                    <input type="hidden" name="activityId" value={activity.id} />
-                    <button type="submit" className="small">{t("btnCompleteFollowUp")}</button>
-                  </form>
-                )}
+                <div style={{ marginTop: 10 }}>{renderCompleteAction(activity)}</div>
               </div>
             </div>
           ))}
         </div>
+        )}
 
         <div className="row" style={{ marginTop: 16, fontSize: "0.85rem" }}>
           <span className="muted">{t("paginationSummary", { page, pageCount, count: activityResult.items.length, total: activityResult.total })}</span>

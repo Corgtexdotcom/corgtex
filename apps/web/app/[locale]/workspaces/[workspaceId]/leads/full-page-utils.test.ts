@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { crmPageCount, crmPageHref, crmPageOffset, normalizeCrmPage, optionValue } from "./full-page-utils";
+import { crmPageCount, crmPageHref, crmPageOffset, crmViewHref, normalizeCrmPage, normalizeCrmViewMode, optionValue } from "./full-page-utils";
 
 describe("CRM full page helpers", () => {
   it("normalizes invalid page values to the first page", () => {
@@ -27,5 +27,18 @@ describe("CRM full page helpers", () => {
   it("keeps only allowed filter options", () => {
     expect(optionValue("LEAD", ["LEAD", "QUALIFIED"])).toBe("LEAD");
     expect(optionValue("BAD", ["LEAD", "QUALIFIED"])).toBeUndefined();
+  });
+
+  it("normalizes page view modes to supported defaults", () => {
+    expect(normalizeCrmViewMode("kanban", ["kanban", "table", "list"], "kanban")).toBe("kanban");
+    expect(normalizeCrmViewMode("grid", ["kanban", "table", "list"], "kanban")).toBe("kanban");
+    expect(normalizeCrmViewMode("kanban", ["table", "list"], "table")).toBe("table");
+  });
+
+  it("preserves filters and pagination when switching CRM views", () => {
+    expect(crmViewHref("/workspaces/ws/leads/pipeline", { stage: "LEAD", page: "2" }, "table", "kanban"))
+      .toBe("/workspaces/ws/leads/pipeline?stage=LEAD&page=2&view=table");
+    expect(crmViewHref("/workspaces/ws/leads/pipeline", { stage: "LEAD", page: "2", view: "table" }, "kanban", "kanban"))
+      .toBe("/workspaces/ws/leads/pipeline?stage=LEAD&page=2");
   });
 });
