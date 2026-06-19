@@ -1,6 +1,14 @@
 import type { RelationshipView } from "./view-model";
 import { relationshipViewHref } from "./view-model";
 
+const PRIMARY_RELATIONSHIP_VIEWS: RelationshipView[] = [
+  "dashboard",
+  "accounts",
+  "pipeline",
+  "activity",
+  "suggestions",
+];
+
 export function RelationshipNav({
   workspaceId,
   active,
@@ -12,13 +20,13 @@ export function RelationshipNav({
 }) {
   return (
     <div className="nr-filter-bar">
-      {Object.entries(labels).map(([key, label]) => (
+      {PRIMARY_RELATIONSHIP_VIEWS.map((key) => (
         <a
           key={key}
-          href={relationshipViewHref(workspaceId, key as RelationshipView)}
+          href={relationshipViewHref(workspaceId, key)}
           className={`nr-filter-item ${active === key ? "nr-filter-active" : ""}`}
         >
-          {label}
+          {labels[key]}
         </a>
       ))}
     </div>
