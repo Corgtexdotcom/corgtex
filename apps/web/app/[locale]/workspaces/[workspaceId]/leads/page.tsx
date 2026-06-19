@@ -16,6 +16,7 @@ import {
 } from "@corgtex/domain";
 import { CrmActivityType } from "@prisma/client";
 import { getTranslations } from "next-intl/server";
+import { ArrowRight } from "lucide-react";
 import { normalizeVisibleWorkItemColumns, toggleWorkItemColumnVisibility } from "@/lib/work-item-view";
 
 import {
@@ -44,6 +45,7 @@ import {
   crmSuggestionContext,
 } from "./chat-page-context";
 import { splitCommunicationSuggestions } from "./communication-suggestions";
+import { capDashboardPanelRows } from "./dashboard-panel-rows";
 import { sortDashboardDeals, summarizeDashboardAccounts } from "./dashboard-view-model";
 import { splitRelationshipReminders } from "./relationship-reminders";
 import {
@@ -288,6 +290,10 @@ export default async function LeadsPage({
   const attentionSuggestions = [...communicationSummary.failed, ...communicationSummary.requested].slice(0, 3);
   const attentionQualifications = pendingQualifications.slice(0, 2);
   const hasAttention = attentionFollowUps.length > 0 || attentionSuggestions.length > 0 || attentionQualifications.length > 0;
+  const dashboardAccountRows = capDashboardPanelRows(dashboardAccounts);
+  const dashboardDealRows = capDashboardPanelRows(dashboardDeals);
+  const dashboardActivityRows = capDashboardPanelRows(recentActivities);
+  const dashboardSuggestionRows = capDashboardPanelRows(communicationSummary.open);
   const crmChatPageContext = {
     surface: "crm" as const,
     workspaceId,
@@ -335,8 +341,8 @@ export default async function LeadsPage({
         <RelationshipNav workspaceId={workspaceId} active={view} labels={viewLabels} />
 
         {view === "dashboard" && (
-          <div className="stack" style={{ gap: 28 }}>
-            <div className="ws-stat-row">
+          <div className="stack" style={{ gap: 20 }}>
+            <div className="ws-stat-row" style={{ marginBottom: 0 }}>
               <div className="ws-stat-card">
                 <strong>{accountResult.total}</strong>
                 <span>{t("statAccounts")}</span>
@@ -355,8 +361,8 @@ export default async function LeadsPage({
               </div>
             </div>
 
-            <section className="stack" style={{ gap: 12 }}>
-              <div className="row" style={{ alignItems: "flex-start", gap: 12 }}>
+            <section className="nr-table-wrap" style={{ overflow: "hidden" }}>
+              <div className="row" style={{ alignItems: "flex-start", gap: 12, padding: "12px 12px 0" }}>
                 <div>
                   <h2 style={{ margin: 0, fontSize: "1.1rem" }}>{t("dashboardAttentionTitle")}</h2>
                   <div className="muted" style={{ fontSize: "0.85rem", marginTop: 4 }}>
@@ -372,155 +378,247 @@ export default async function LeadsPage({
                     })}
                   </div>
                 </div>
-                <a href={fullPageHrefs.activity} className="link-button small" style={{ marginLeft: "auto" }}>
-                  {t("viewActivity")}
+                <a href={fullPageHrefs.activity} className="link-button small" style={{ marginLeft: "auto" }} aria-label={t("viewActivity")} title={t("viewActivity")}>
+                  <ArrowRight size={14} aria-hidden="true" />
                 </a>
               </div>
-              {!hasAttention ? (
-                <p className="muted">{t("dashboardNoAttention")}</p>
-              ) : (
-                <div className="stack" style={{ gap: 8 }}>
+              <table className="nr-table nr-work-item-table" style={{ marginTop: 12 }}>
+                <thead>
+                  <tr>
+                    <th>{t("dashboardAttentionTitle")}</th>
+                    <th>{t("colAccount")}</th>
+                    <th>{t("colUpdated")}</th>
+                    <th className="nr-table-cell-right">{t("colActions")}</th>
+                  </tr>
+                </thead>
+                <tbody>
                   {attentionFollowUps.map((activity) => (
-                    <div key={activity.id} className="item" style={{ padding: 12 }}>
-                      <div className="row" style={{ alignItems: "flex-start", gap: 12 }}>
-                        <div style={{ minWidth: 0, flex: 1 }}>
+                    <tr key={activity.id}>
+                      <td data-label={t("dashboardAttentionTitle")}>
+                        <div className="nr-work-item-table-main">
                           <span className="tag-sm">{t("dashboardAttentionFollowUp")}</span>
-                          <strong style={{ display: "block", marginTop: 6 }}>{activity.title}</strong>
-                          <div className="muted" style={{ fontSize: "0.82rem", marginTop: 4 }}>
-                            {t("followUpDue", { date: dueText(activity.dueAt) })}
-                            {" · "}
-                            {activity.account ? accountLink(activity.account) : t("emptyAccount")}
-                          </div>
+                          <strong>{activity.title}</strong>
+                          <span className="nr-work-item-table-meta">{t("followUpDue", { date: dueText(activity.dueAt) })}</span>
                         </div>
+                      </td>
+                      <td data-label={t("colAccount")}>{activity.account ? accountLink(activity.account) : t("emptyAccount")}</td>
+                      <td data-label={t("colUpdated")} className="muted">{dueText(activity.dueAt)}</td>
+                      <td data-label={t("colActions")} className="nr-table-cell-right">
                         <form action={completeActivityAction}>
                           <input type="hidden" name="workspaceId" value={workspaceId} />
                           <input type="hidden" name="activityId" value={activity.id} />
                           <button type="submit" className="small">{t("btnCompleteFollowUp")}</button>
                         </form>
-                      </div>
-                    </div>
+                      </td>
+                    </tr>
                   ))}
                   {attentionSuggestions.map((suggestion) => (
-                    <div key={suggestion.id} className="item" style={{ padding: 12 }}>
-                      <div className="row" style={{ alignItems: "flex-start", gap: 12 }}>
-                        <div style={{ minWidth: 0, flex: 1 }}>
+                    <tr key={suggestion.id}>
+                      <td data-label={t("dashboardAttentionTitle")}>
+                        <div className="nr-work-item-table-main">
                           <span className="tag-sm">{t("dashboardAttentionSuggestion")}</span>
-                          <strong style={{ display: "block", marginTop: 6 }}>{suggestion.title}</strong>
-                          <div className="muted" style={{ fontSize: "0.82rem", marginTop: 4 }}>
-                            {communicationStatusLabels[suggestion.status as keyof typeof communicationStatusLabels] ?? suggestion.status}
-                            {" · "}
-                            {suggestion.account ? accountLink(suggestion.account) : t("emptyAccount")}
-                          </div>
+                          <strong>{suggestion.title}</strong>
+                          <span className="nr-work-item-table-meta">{communicationStatusLabels[suggestion.status as keyof typeof communicationStatusLabels] ?? suggestion.status}</span>
                         </div>
+                      </td>
+                      <td data-label={t("colAccount")}>{suggestion.account ? accountLink(suggestion.account) : t("emptyAccount")}</td>
+                      <td data-label={t("colUpdated")} className="muted">{suggestion.updatedAt ? formatDate(suggestion.updatedAt) : t("emptyValue")}</td>
+                      <td data-label={t("colActions")} className="nr-table-cell-right">
                         <a href={fullPageHrefs.suggestions} className="link-button small">{t("btnReviewSuggestion")}</a>
-                      </div>
-                    </div>
+                      </td>
+                    </tr>
                   ))}
                   {attentionQualifications.map((qualification) => (
-                    <div key={qualification.id} className="item" style={{ padding: 12 }}>
-                      <div className="row" style={{ alignItems: "flex-start", gap: 12 }}>
-                        <div style={{ minWidth: 0, flex: 1 }}>
+                    <tr key={qualification.id}>
+                      <td data-label={t("dashboardAttentionTitle")}>
+                        <div className="nr-work-item-table-main">
                           <span className="tag-sm">{t("dashboardAttentionQualification")}</span>
-                          <strong style={{ display: "block", marginTop: 6 }}>{qualification.companyName || qualification.demoLead.email}</strong>
-                          <div className="muted" style={{ fontSize: "0.82rem", marginTop: 4 }}>
-                            {qualification.responseChannel}
-                          </div>
+                          <strong>{qualification.companyName || qualification.demoLead.email}</strong>
+                          <span className="nr-work-item-table-meta">{qualification.responseChannel}</span>
                         </div>
+                      </td>
+                      <td data-label={t("colAccount")}>{t("emptyAccount")}</td>
+                      <td data-label={t("colUpdated")} className="muted">{formatDate(qualification.createdAt)}</td>
+                      <td data-label={t("colActions")} className="nr-table-cell-right">
                         <a href="?view=review" className="link-button small">{t("dashboardViewReview")}</a>
-                      </div>
-                    </div>
+                      </td>
+                    </tr>
                   ))}
-                </div>
-              )}
+                  {!hasAttention && (
+                    <tr><td colSpan={4} className="nr-table-cell-center muted">{t("dashboardNoAttention")}</td></tr>
+                  )}
+                </tbody>
+              </table>
             </section>
 
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))", gap: 20 }}>
-              <section className="stack" style={{ gap: 12 }}>
-                <div className="row" style={{ alignItems: "flex-start", gap: 12 }}>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(420px, 1fr))", gap: 20 }}>
+              <section className="nr-table-wrap" style={{ overflow: "hidden" }}>
+                <div className="row" style={{ alignItems: "flex-start", gap: 12, padding: "12px 12px 0" }}>
                   <h2 style={{ margin: 0, fontSize: "1.1rem" }}>{t("dashboardAccountSummaryTitle")}</h2>
-                  <a href={fullPageHrefs.accounts} className="link-button small" style={{ marginLeft: "auto" }}>{t("dashboardViewAccounts")}</a>
+                  <a href={fullPageHrefs.accounts} className="link-button small" style={{ marginLeft: "auto" }} aria-label={t("dashboardViewAccounts")} title={t("dashboardViewAccounts")}>
+                    <ArrowRight size={14} aria-hidden="true" />
+                  </a>
                 </div>
-                {dashboardAccounts.length === 0 ? (
-                  <p className="muted">{t("noAccounts")}</p>
-                ) : dashboardAccounts.map((summary) => {
-                  const account = summary.account;
-                  return (
-                    <a
-                      key={account.id}
-                      href={accountHref(workspaceId, account.id)}
-                      className="item nr-clickable-card"
-                      style={{ display: "grid", gap: 10, color: "inherit", textDecoration: "none", borderRadius: 8, padding: 12 }}
-                    >
-                      <div className="row" style={{ alignItems: "flex-start", gap: 8 }}>
-                        <strong>{account.name}</strong>
-                        <span className="tag-sm" style={{ marginLeft: "auto" }}>{relationshipLabel(account.relationshipType)}</span>
-                      </div>
-                      <div className="nr-tag-group">
-                        <span className="tag-sm">{lifecycleLabel(account.lifecycleStage)}</span>
-                        <span className="tag-sm">{t("dashboardActiveDealsCount", { count: summary.activeDealCount })}</span>
-                      </div>
-                      <div className="row" style={{ fontSize: "0.85rem", alignItems: "baseline" }}>
-                        <span className="muted">{t("accountPipeline")}</span>
-                        <strong>{formatCurrency(summary.pipelineValueCents)}</strong>
-                      </div>
-                      <div className="muted" style={{ fontSize: "0.8rem" }}>
-                        {summary.lastTouchedAt
-                          ? t("dashboardLastTouch", { age: ageText(summary.lastTouchedAt) })
-                          : t("dashboardNoLastTouch")}
-                      </div>
-                    </a>
-                  );
-                })}
+                <table className="nr-table nr-work-item-table" style={{ marginTop: 12 }}>
+                  <thead>
+                    <tr>
+                      <th>{t("colAccount")}</th>
+                      <th>{t("colRelationship")}</th>
+                      <th>{t("accountPipeline")}</th>
+                      <th className="nr-table-cell-right">{t("colActions")}</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {dashboardAccountRows.map((summary) => {
+                      const account = summary.account;
+                      return (
+                        <tr key={account.id}>
+                          <td data-label={t("colAccount")}>
+                            <a href={accountHref(workspaceId, account.id)} className="nr-work-item-table-title">{account.name}</a>
+                            <div className="nr-work-item-table-meta">{account.domain || t("noDomain")}</div>
+                          </td>
+                          <td data-label={t("colRelationship")}>
+                            <div className="nr-work-item-table-tags">
+                              <span className="tag-sm">{relationshipLabel(account.relationshipType)}</span>
+                              <span className="tag-sm">{lifecycleLabel(account.lifecycleStage)}</span>
+                              <span className="tag-sm">{t("dashboardActiveDealsCount", { count: summary.activeDealCount })}</span>
+                            </div>
+                          </td>
+                          <td data-label={t("accountPipeline")}><strong>{formatCurrency(summary.pipelineValueCents)}</strong></td>
+                          <td data-label={t("colActions")} className="nr-table-cell-right">
+                            <a href={accountHref(workspaceId, account.id)} className="link-button small">{t("openDetail")}</a>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                    {dashboardAccountRows.length === 0 && (
+                      <tr><td colSpan={4} className="nr-table-cell-center muted">{t("noAccounts")}</td></tr>
+                    )}
+                  </tbody>
+                </table>
               </section>
 
-              <section className="stack" style={{ gap: 12 }}>
-                <div className="row" style={{ alignItems: "flex-start", gap: 12 }}>
+              <section className="nr-table-wrap" style={{ overflow: "hidden" }}>
+                <div className="row" style={{ alignItems: "flex-start", gap: 12, padding: "12px 12px 0" }}>
                   <h2 style={{ margin: 0, fontSize: "1.1rem" }}>{t("dashboardPipelineSummaryTitle")}</h2>
-                  <a href={fullPageHrefs.pipeline} className="link-button small" style={{ marginLeft: "auto" }}>{t("dashboardViewPipeline")}</a>
+                  <a href={fullPageHrefs.pipeline} className="link-button small" style={{ marginLeft: "auto" }} aria-label={t("dashboardViewPipeline")} title={t("dashboardViewPipeline")}>
+                    <ArrowRight size={14} aria-hidden="true" />
+                  </a>
                 </div>
-                {dashboardDeals.length === 0 ? (
-                  <p className="muted">{t("dashboardNoPipeline")}</p>
-                ) : dashboardDeals.map((deal) => (
-                  <div key={deal.id} className="item" style={{ padding: 12 }}>
-                    <div className="row" style={{ alignItems: "flex-start", gap: 8 }}>
-                      <strong>{deal.title}</strong>
-                      <span className="tag-sm" style={{ marginLeft: "auto" }}>{stageLabels[deal.stage as keyof typeof stageLabels] ?? labelFromCrmCode(deal.stage)}</span>
-                    </div>
-                    <div className="muted" style={{ fontSize: "0.82rem", marginTop: 6 }}>
-                      {deal.account ? accountLink(deal.account) : t("emptyAccount")}
-                      {" · "}
-                      {t("pipelineOwner")}: {ownerText(deal.ownerUserId)}
-                    </div>
-                    <div className="row" style={{ fontSize: "0.85rem", alignItems: "baseline", marginTop: 8 }}>
-                      <span className="muted">{t("dashboardDealValue")}</span>
-                      <strong>{formatCurrency(deal.valueCents ?? 0)}</strong>
-                    </div>
-                  </div>
-                ))}
+                <table className="nr-table nr-work-item-table" style={{ marginTop: 12 }}>
+                  <thead>
+                    <tr>
+                      <th>{t("fullPipelineTitle")}</th>
+                      <th>{t("colAccount")}</th>
+                      <th>{t("dashboardDealValue")}</th>
+                      <th className="nr-table-cell-right">{t("colActions")}</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {dashboardDealRows.map((deal) => (
+                      <tr key={deal.id}>
+                        <td data-label={t("fullPipelineTitle")}>
+                          <div className="nr-work-item-table-main">
+                            <strong>{deal.title}</strong>
+                            <div className="nr-work-item-table-tags">
+                              <span className="tag-sm">{stageLabels[deal.stage as keyof typeof stageLabels] ?? labelFromCrmCode(deal.stage)}</span>
+                              <span className="tag-sm">{t("pipelineOwner")}: {ownerText(deal.ownerUserId)}</span>
+                            </div>
+                          </div>
+                        </td>
+                        <td data-label={t("colAccount")}>{deal.account ? accountLink(deal.account) : t("emptyAccount")}</td>
+                        <td data-label={t("dashboardDealValue")}><strong>{formatCurrency(deal.valueCents ?? 0)}</strong></td>
+                        <td data-label={t("colActions")} className="nr-table-cell-right">
+                          {deal.account ? <a href={accountHref(workspaceId, deal.account.id)} className="link-button small">{t("openDetail")}</a> : <a href={fullPageHrefs.pipeline} className="link-button small">{t("dashboardViewPipeline")}</a>}
+                        </td>
+                      </tr>
+                    ))}
+                    {dashboardDealRows.length === 0 && (
+                      <tr><td colSpan={4} className="nr-table-cell-center muted">{t("dashboardNoPipeline")}</td></tr>
+                    )}
+                  </tbody>
+                </table>
               </section>
 
-              <section className="stack" style={{ gap: 12 }}>
-                <div className="row" style={{ alignItems: "flex-start", gap: 12 }}>
-                  <h2 style={{ margin: 0, fontSize: "1.1rem" }}>{t("dashboardSuggestionSummaryTitle")}</h2>
-                  <a href={fullPageHrefs.suggestions} className="link-button small" style={{ marginLeft: "auto" }}>{t("viewSuggestions")}</a>
+              <section className="nr-table-wrap" style={{ overflow: "hidden" }}>
+                <div className="row" style={{ alignItems: "flex-start", gap: 12, padding: "12px 12px 0" }}>
+                  <h2 style={{ margin: 0, fontSize: "1.1rem" }}>{t("fullActivityTitle")}</h2>
+                  <a href={fullPageHrefs.activity} className="link-button small" style={{ marginLeft: "auto" }} aria-label={t("viewActivity")} title={t("viewActivity")}>
+                    <ArrowRight size={14} aria-hidden="true" />
+                  </a>
                 </div>
-                {communicationSummary.open.length === 0 ? (
-                  <p className="muted">{t("noOpenSuggestions")}</p>
-                ) : communicationSummary.open.slice(0, 5).map((suggestion) => (
-                  <div key={suggestion.id} className="item" style={{ padding: 12 }}>
-                    <div className="row" style={{ alignItems: "flex-start", gap: 8 }}>
-                      <strong>{suggestion.title}</strong>
-                      <span className="tag-sm" style={{ marginLeft: "auto" }}>
-                        {communicationStatusLabels[suggestion.status as keyof typeof communicationStatusLabels] ?? suggestion.status}
-                      </span>
-                    </div>
-                    <div className="muted" style={{ fontSize: "0.82rem", marginTop: 6 }}>
-                      {suggestion.account ? accountLink(suggestion.account) : t("emptyAccount")}
-                      {" · "}
-                      {suggestion.recipientEmail || suggestion.contact?.email || t("suggestionNoRecipient")}
-                    </div>
-                  </div>
-                ))}
+                <table className="nr-table nr-work-item-table" style={{ marginTop: 12 }}>
+                  <thead>
+                    <tr>
+                      <th>{t("fullActivityTitle")}</th>
+                      <th>{t("colAccount")}</th>
+                      <th>{t("colUpdated")}</th>
+                      <th className="nr-table-cell-right">{t("colActions")}</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {dashboardActivityRows.map((activity) => (
+                      <tr key={activity.id}>
+                        <td data-label={t("fullActivityTitle")}>
+                          <div className="nr-work-item-table-main">
+                            <strong>{activity.title}</strong>
+                            <div className="nr-work-item-table-tags">
+                              <span className="tag-sm">{activityTypeLabel(activity.type)}</span>
+                              {activity.dueAt && <span className="tag-sm">{t("followUpDue", { date: formatDate(activity.dueAt) })}</span>}
+                            </div>
+                          </div>
+                        </td>
+                        <td data-label={t("colAccount")}>{activity.account ? accountLink(activity.account) : t("emptyAccount")}</td>
+                        <td data-label={t("colUpdated")} className="muted">{ageText(activity.createdAt)}</td>
+                        <td data-label={t("colActions")} className="nr-table-cell-right">
+                          {activity.account ? <a href={accountHref(workspaceId, activity.account.id)} className="link-button small">{t("openDetail")}</a> : <a href={fullPageHrefs.activity} className="link-button small">{t("viewActivity")}</a>}
+                        </td>
+                      </tr>
+                    ))}
+                    {dashboardActivityRows.length === 0 && (
+                      <tr><td colSpan={4} className="nr-table-cell-center muted">{t("noActivity")}</td></tr>
+                    )}
+                  </tbody>
+                </table>
+              </section>
+
+              <section className="nr-table-wrap" style={{ overflow: "hidden" }}>
+                <div className="row" style={{ alignItems: "flex-start", gap: 12, padding: "12px 12px 0" }}>
+                  <h2 style={{ margin: 0, fontSize: "1.1rem" }}>{t("dashboardSuggestionSummaryTitle")}</h2>
+                  <a href={fullPageHrefs.suggestions} className="link-button small" style={{ marginLeft: "auto" }} aria-label={t("viewSuggestions")} title={t("viewSuggestions")}>
+                    <ArrowRight size={14} aria-hidden="true" />
+                  </a>
+                </div>
+                <table className="nr-table nr-work-item-table" style={{ marginTop: 12 }}>
+                  <thead>
+                    <tr>
+                      <th>{t("dashboardSuggestionSummaryTitle")}</th>
+                      <th>{t("colAccount")}</th>
+                      <th>{t("formSuggestionRecipient")}</th>
+                      <th className="nr-table-cell-right">{t("colActions")}</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {dashboardSuggestionRows.map((suggestion) => (
+                      <tr key={suggestion.id}>
+                        <td data-label={t("dashboardSuggestionSummaryTitle")}>
+                          <div className="nr-work-item-table-main">
+                            <strong>{suggestion.title}</strong>
+                            <span className="tag-sm">{communicationStatusLabels[suggestion.status as keyof typeof communicationStatusLabels] ?? suggestion.status}</span>
+                          </div>
+                        </td>
+                        <td data-label={t("colAccount")}>{suggestion.account ? accountLink(suggestion.account) : t("emptyAccount")}</td>
+                        <td data-label={t("formSuggestionRecipient")} className="muted">{suggestion.recipientEmail || suggestion.contact?.email || t("suggestionNoRecipient")}</td>
+                        <td data-label={t("colActions")} className="nr-table-cell-right">
+                          <a href={fullPageHrefs.suggestions} className="link-button small">{t("btnReviewSuggestion")}</a>
+                        </td>
+                      </tr>
+                    ))}
+                    {dashboardSuggestionRows.length === 0 && (
+                      <tr><td colSpan={4} className="nr-table-cell-center muted">{t("noOpenSuggestions")}</td></tr>
+                    )}
+                  </tbody>
+                </table>
               </section>
             </div>
           </div>
