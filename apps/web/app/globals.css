@@ -547,11 +547,15 @@ button:disabled {
 
 @media (max-width: 1100px) {
   .ws-layout {
-    grid-template-columns: 240px minmax(0, 1fr);
+    --ws-agent-rail-width: 0px;
+    --ws-main-content-padding-x: 24px;
+    --workspace-add-right: var(--ws-main-content-padding-x);
+    grid-template-columns: var(--ws-sidebar-width) minmax(0, 1fr);
   }
 
   .ws-layout.ws-layout-chat-collapsed {
-    grid-template-columns: 240px minmax(0, 1fr);
+    --ws-agent-rail-width: 0px;
+    grid-template-columns: var(--ws-sidebar-width) minmax(0, 1fr);
   }
 
   .ws-agent-sidebar {
@@ -565,11 +569,11 @@ button:disabled {
   }
 
   .workspace-add-menu {
-    right: 24px;
+    right: var(--workspace-add-right);
   }
 
   .ws-layout.ws-layout-chat-collapsed .workspace-add-menu {
-    right: 24px;
+    right: var(--workspace-add-right);
   }
 }
 
