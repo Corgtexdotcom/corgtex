@@ -297,26 +297,6 @@ const SCORES = [
   { periodEnd: nDaysAgo(90), score: 78, parts: { participationPct: 82, decisionVelocityHrs: 24, policyCoverage: 72, tensionResolutionPct: 78, constitutionFreshness: 85 } },
 ];
 
-const LEDGER_ACCOUNTS = [
-  { name: "Operating Fund", type: "TREASURY", currency: "USD", balanceCents: 245000000 },
-  { name: "R&D Innovation Grant", type: "GRANT", currency: "USD", balanceCents: 85000000 },
-  { name: "ESG Programs", type: "DESIGNATED", currency: "USD", balanceCents: 32000000 },
-  { name: "MedTech Capital Expenditure", type: "CAPEX", currency: "USD", balanceCents: 120000000 }
-];
-
-const SPENDS = [
-  { desc: "Q4 DARZALEX Marketing Campaign – APAC", cat: "Marketing", vendor: "Publicis Health", amountCents: 125000000, status: "RESOLVED", resolutionOutcome: "APPROVED", paid: true },
-  { desc: "Abiomed EU Commercial Team Hiring", cat: "HR/Recruiting", vendor: "Internal", amountCents: 45000000, status: "RESOLVED", resolutionOutcome: "APPROVED" },
-  { desc: "CARVYKTI Manufacturing Scale-up Phase 1", cat: "Manufacturing", vendor: "Lilly Engineering", amountCents: 320000000, status: "OPEN" },
-  { desc: "Health for Humanity Annual Report", cat: "PR/Comms", vendor: "Edelman", amountCents: 8500000, status: "RESOLVED", resolutionOutcome: "APPROVED", paid: true },
-  { desc: "AI Infrastructure Pilot – Azure ML", cat: "Technology", vendor: "Microsoft", amountCents: 32000000, status: "OPEN" },
-  { desc: "Board Strategic Offsite – Q2 2025", cat: "Travel/Events", vendor: "Four Seasons", amountCents: 4200000, status: "DRAFT" },
-  { desc: "Clinical Trial Phase III – TREMFYA", cat: "R&D", vendor: "Covance", amountCents: 180000000, status: "RESOLVED", resolutionOutcome: "APPROVED" },
-  { desc: "Supplier ESG Monitoring Platform", cat: "Technology", vendor: "EcoVadis", amountCents: 17500000, status: "OPEN" },
-  { desc: "Robotic Surgery Training Program", cat: "Education", vendor: "Intuitive Surgical", amountCents: 29000000, status: "RESOLVED", resolutionOutcome: "APPROVED" },
-  { desc: "Patent Filing – Novel CAR-T Vector", cat: "Legal", vendor: "Fish & Richardson", amountCents: 6500000, status: "RESOLVED", resolutionOutcome: "APPROVED", paid: true }
-];
-
 const PRACTICE_PROJECTS = [
   {
     code: "MEDTECH-EMEA",
@@ -2701,49 +2681,6 @@ async function main() {
     });
   }
   
-  // 12. Ledger Accounts & Spends
-  const accountMappings = {};
-  for (const acc of LEDGER_ACCOUNTS) {
-    const a = await prisma.ledgerAccount.upsert({
-      where: { id: `${wsId}-acc-${slugify(acc.name)}` },
-      update: { balanceCents: acc.balanceCents },
-      create: { id: `${wsId}-acc-${slugify(acc.name)}`, workspaceId: wsId, name: acc.name, type: acc.type, currency: acc.currency, balanceCents: acc.balanceCents }
-    });
-    accountMappings[acc.name] = a.id;
-  }
-  
-  for (const sp of SPENDS) {
-    const spendId = `${wsId}-spend-${slugify(sp.desc)}`;
-    const exists = await prisma.spendRequest.findFirst({
-      where: { workspaceId: wsId, description: sp.desc },
-      orderBy: { createdAt: "asc" },
-    });
-    const data = {
-      workspaceId: wsId,
-      requesterUserId: adminUserId,
-      description: sp.desc,
-      category: sp.cat,
-      vendor: sp.vendor,
-      amountCents: sp.amountCents,
-      currency: "USD",
-      status: sp.status,
-      resolutionOutcome: sp.resolutionOutcome ?? null,
-      spentAt: sp.paid ? nDaysAgo(5) : null,
-      archivedAt: null,
-      archivedByUserId: null,
-      archiveReason: null
-    };
-    if (exists) {
-      await prisma.spendRequest.update({ where: { id: exists.id }, data });
-    } else {
-      await prisma.spendRequest.upsert({
-        where: { id: spendId },
-        update: data,
-        create: { id: spendId, ...data },
-      });
-    }
-  }
-
   const practiceProjectIds = PRACTICE_PROJECTS.map((project) => `${wsId}-practice-project-${slugify(project.code)}`);
   await prisma.practiceProject.deleteMany({
     where: {

@@ -79,14 +79,6 @@ import {
   getCurrentConstitution,
   listPolicyCorpus,
   getApprovalPolicies,
-  createSpend,
-  deleteLedgerAccount,
-  deleteSpend,
-  submitSpend,
-  updateSpend,
-  returnSpendToDraft,
-  listSpends,
-  listLedgerAccounts,
   listArchivedWorkspaceArtifacts,
   listAgentRuns,
   listAgentCredentials,
@@ -385,20 +377,10 @@ const TOOL_CAPABILITIES = {
   get_constitution: { scopes: ["governance:read"] },
   list_policies: { scopes: ["governance:read"] },
   list_approval_policies: { scopes: ["governance:read"] },
-  list_spends: { scopes: ["finance:read"] },
-  create_spend: { scopes: ["finance:write"] },
-  create_spend_draft: { scopes: ["finance:write"] },
-  submit_spend: { scopes: ["finance:write"] },
-  update_spend: { scopes: ["finance:write"] },
-  return_spend_to_draft: { scopes: ["finance:write"] },
-  archive_spend: { scopes: ["finance:write"] },
-  list_ledger_accounts: { scopes: ["finance:read"] },
-  archive_ledger_account: { scopes: ["finance:write"] },
   archive_artifact: { scopes: ["archive:write"] },
   list_archived_artifacts: { scopes: ["archive:read"] },
   restore_artifact: { scopes: ["archive:write"] },
   purge_artifact: { scopes: ["archive:write"], destructive: true },
-  list_ledger_transactions: { scopes: ["finance:read"] },
   list_work_item_versions: { scopes: [] },
   get_work_item_version: { scopes: [] },
 } satisfies Record<string, ToolCapability>;
@@ -471,7 +453,7 @@ const BRAIN_ARTICLE_TYPE = [
 ] as const;
 const BRAIN_ARTICLE_AUTHORITY = ["AUTHORITATIVE", "REFERENCE", "HISTORICAL", "DRAFT"] as const;
 const BRAIN_DISCUSSION_TARGET = ["ARTICLE", "SECTION", "LINE"] as const;
-const WORK_ITEM_ENTITY_TYPE = ["TENSION", "PROPOSAL", "ACTION", "SPEND", "GOAL"] as const;
+const WORK_ITEM_ENTITY_TYPE = ["TENSION", "PROPOSAL", "ACTION", "GOAL"] as const;
 const DELIBERATION_ENTRY_TYPE = ["REACTION", "OBJECTION"] as const;
 
 function deliberationEntryResult(entry: {
@@ -554,7 +536,6 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
       TENSION: "tensions:read",
       PROPOSAL: "proposals:read",
       ACTION: "actions:read",
-      SPEND: "finance:read",
       GOAL: "goals:read",
     } as const;
     requireScope(sessionCtx, scopeByEntity[entityType]);
@@ -1161,9 +1142,9 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
 
   tool(
     "list_work_item_versions",
-    "List previous saved versions for a tension, proposal, action, spend request, or goal. Versions are returned newest first and include the changed fields and previous state snapshot.",
+    "List previous saved versions for a tension, proposal, action, or goal. Versions are returned newest first and include the changed fields and previous state snapshot.",
     {
-      entityType: z.enum(WORK_ITEM_ENTITY_TYPE).describe("TENSION, PROPOSAL, ACTION, SPEND, or GOAL"),
+      entityType: z.enum(WORK_ITEM_ENTITY_TYPE).describe("TENSION, PROPOSAL, ACTION, or GOAL"),
       entityId: z.string().describe("Work item ID"),
     },
     async ({ entityType, entityId }: { entityType: typeof WORK_ITEM_ENTITY_TYPE[number]; entityId: string }) => {
@@ -1178,9 +1159,9 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
 
   tool(
     "get_work_item_version",
-    "Fetch one previous saved version snapshot for a tension, proposal, action, spend request, or goal.",
+    "Fetch one previous saved version snapshot for a tension, proposal, action, or goal.",
     {
-      entityType: z.enum(WORK_ITEM_ENTITY_TYPE).describe("TENSION, PROPOSAL, ACTION, SPEND, or GOAL"),
+      entityType: z.enum(WORK_ITEM_ENTITY_TYPE).describe("TENSION, PROPOSAL, ACTION, or GOAL"),
       entityId: z.string().describe("Work item ID"),
       version: z.number().int().positive().describe("Previous version number to fetch"),
     },
@@ -1193,7 +1174,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
 
   tool(
     "daily_overview",
-    "Get a one-call daily digest of recent workspace activity: open actions, in-flight proposals, fresh tensions, recent meetings, and pending spend requests within a configurable window. Defaults to the last 24 hours.",
+    "Get a one-call daily digest of recent workspace activity: open actions, in-flight proposals, fresh tensions, and recent meetings within a configurable window. Defaults to the last 24 hours.",
     {
       windowHours: z.number().optional().describe("How many hours back to look (default 24)"),
     },
@@ -1203,15 +1184,13 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
       requireScope(sessionCtx, "proposals:read");
       requireScope(sessionCtx, "tensions:read");
       requireScope(sessionCtx, "meetings:read");
-      requireScope(sessionCtx, "finance:read");
       const since = new Date(Date.now() - (windowHours ?? 24) * 60 * 60 * 1000);
 
-      const [actions, proposals, tensions, meetings, spends] = await Promise.all([
+      const [actions, proposals, tensions, meetings] = await Promise.all([
         listActions(actor, workspaceId, { take: 100 }),
         listProposals(actor, workspaceId, { take: 50 }),
         listTensions(actor, workspaceId, { take: 50 }),
         listMeetings(workspaceId),
-        listSpends(actor, workspaceId, { take: 50 }),
       ]);
 
       const recentActions = actions.items
@@ -1245,16 +1224,6 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
           summaryPreview: m.summaryMd?.slice(0, 200) ?? null,
         }));
 
-      const pendingSpends = spends.items
-        .filter((s) => s.status === "DRAFT" || s.status === "OPEN")
-        .map((s) => ({
-          id: s.id,
-          amountCents: s.amountCents,
-          currency: s.currency,
-          description: s.description,
-          status: s.status,
-        }));
-
       return jsonResult({
         windowHours: windowHours ?? 24,
         since: since.toISOString(),
@@ -1263,13 +1232,11 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
         inFlightProposals,
         freshTensions,
         recentMeetings,
-        pendingSpends,
         counts: {
           openActions: recentActions.length,
           inFlightProposals: inFlightProposals.length,
           freshTensions: freshTensions.length,
           recentMeetings: recentMeetings.length,
-          pendingSpends: pendingSpends.length,
         },
       });
     },
@@ -3789,242 +3756,6 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
     },
   );
 
-  // ===========================================================================
-  // FINANCE
-  // ===========================================================================
-
-  tool(
-    "list_spends",
-    "List spend requests in the workspace.",
-    {
-      take: z.number().optional(),
-      skip: z.number().optional(),
-    },
-    async ({ take, skip }: { take?: number; skip?: number }) => {
-      requireScope(sessionCtx, "finance:read");
-      const result = await listSpends(actor, workspaceId, { take, skip });
-      const simplified = result.items.map((s) => ({
-        id: s.id,
-        amountCents: s.amountCents,
-        currency: s.currency,
-        category: s.category,
-        description: s.description,
-        status: s.status,
-        version: s.version,
-        vendor: s.vendor,
-      }));
-      return jsonResult({ items: simplified, total: result.total });
-    },
-  );
-
-  tool(
-    "create_spend",
-    "Create and open a spend request in one call (legacy convenience). To create-then-review-then-open, use create_spend_draft + submit_spend instead.",
-    {
-      amountCents: z.number().describe("Amount in cents"),
-      currency: z.string().describe("Currency code (e.g. USD)"),
-      category: z.string().describe("Category of the spend"),
-      description: z.string().describe("Description"),
-      vendor: z.string().optional().describe("Vendor name"),
-      requesterEmail: z.string().optional().describe("Optionally target a specific user via email"),
-      requesterMemberId: z.string().optional().describe("Optionally target a specific active workspace member as requester"),
-    },
-    async (params: {
-      amountCents: number;
-      currency: string;
-      category: string;
-      description: string;
-      vendor?: string;
-      requesterEmail?: string;
-      requesterMemberId?: string;
-    }) => {
-      requireScope(sessionCtx, "finance:write");
-      const spend = await createSpend(actor, {
-        workspaceId,
-        amountCents: params.amountCents,
-        currency: params.currency,
-        category: params.category,
-        description: params.description,
-        vendor: params.vendor,
-        requesterEmail: params.requesterEmail,
-        requesterMemberId: params.requesterMemberId,
-      });
-      const submitted = await submitSpend(actor, { workspaceId, spendId: spend.id });
-      return jsonResult({
-        id: submitted.spendId,
-        status: "OPEN",
-        version: spend.version,
-        webUrl: webUrl(workspaceId, `/finance/spend/${submitted.spendId}`),
-      });
-    },
-  );
-
-  tool(
-    "create_spend_draft",
-    "Create a spend request as a DRAFT (not yet submitted for approval). Pair with `submit_spend` when ready.",
-    {
-      amountCents: z.number(),
-      currency: z.string(),
-      category: z.string(),
-      description: z.string(),
-      vendor: z.string().optional(),
-      requesterEmail: z.string().optional(),
-      requesterMemberId: z.string().optional(),
-      proposalId: z.string().optional(),
-      ledgerAccountId: z.string().optional(),
-    },
-    async (params: {
-      amountCents: number;
-      currency: string;
-      category: string;
-      description: string;
-      vendor?: string;
-      requesterEmail?: string;
-      requesterMemberId?: string;
-      proposalId?: string;
-      ledgerAccountId?: string;
-    }) => {
-      requireScope(sessionCtx, "finance:write");
-      const spend = await createSpend(actor, {
-        workspaceId,
-        amountCents: params.amountCents,
-        currency: params.currency,
-        category: params.category,
-        description: params.description,
-        vendor: params.vendor,
-        requesterEmail: params.requesterEmail,
-        requesterMemberId: params.requesterMemberId,
-        proposalId: params.proposalId,
-        ledgerAccountId: params.ledgerAccountId,
-      });
-      return jsonResult({
-        id: spend.id,
-        status: spend.status,
-        version: spend.version,
-        webUrl: webUrl(workspaceId, `/finance/spend/${spend.id}`),
-      });
-    },
-  );
-
-  tool(
-    "submit_spend",
-    "Open a DRAFT spend request. Open spends are payable unless they receive an unresolved objection.",
-    {
-      spendId: z.string(),
-    },
-    async ({ spendId }: { spendId: string }) => {
-      requireScope(sessionCtx, "finance:write");
-      const submitted = await submitSpend(actor, { workspaceId, spendId });
-      return jsonResult({
-        id: submitted.spendId,
-        status: "OPEN",
-        webUrl: webUrl(workspaceId, `/finance/spend/${submitted.spendId}`),
-      });
-    },
-  );
-
-  tool(
-    "update_spend",
-    "Update a spend request. Draft edits keep draft-manager permissions; OPEN unpaid/unreconciled spend content edits require the connected requester and create a saved previous version.",
-    {
-      spendId: z.string(),
-      amountCents: z.number().optional(),
-      currency: z.string().optional(),
-      category: z.string().optional(),
-      description: z.string().optional(),
-      vendor: z.string().nullable().optional(),
-      ledgerAccountId: z.string().nullable().optional(),
-    },
-    async (params: {
-      spendId: string;
-      amountCents?: number;
-      currency?: string;
-      category?: string;
-      description?: string;
-      vendor?: string | null;
-      ledgerAccountId?: string | null;
-    }) => {
-      requireScope(sessionCtx, "finance:write");
-      const updated = await updateSpend(actor, {
-        workspaceId,
-        spendId: params.spendId,
-        amountCents: params.amountCents,
-        currency: params.currency,
-        category: params.category,
-        description: params.description,
-        vendor: params.vendor,
-        ledgerAccountId: params.ledgerAccountId,
-      });
-      return jsonResult({
-        id: updated.id,
-        status: updated.status,
-        version: updated.version,
-        webUrl: webUrl(workspaceId, `/finance/spend/${updated.id}`),
-      });
-    },
-  );
-
-  tool(
-    "return_spend_to_draft",
-    "Return an OPEN spend request to DRAFT so authorized draft managers can edit it. Paid, reconciled, resolved, or archived spend requests cannot be returned.",
-    {
-      spendId: z.string(),
-    },
-    async ({ spendId }: { spendId: string }) => {
-      requireScope(sessionCtx, "finance:write");
-      const updated = await returnSpendToDraft(actor, { workspaceId, spendId });
-      return jsonResult({
-        id: updated.id,
-        status: updated.status,
-        webUrl: webUrl(workspaceId, `/finance/spend/${updated.id}`),
-      });
-    },
-  );
-
-  tool(
-    "archive_spend",
-    "Archive a spend request so it stops appearing in active finance views. Open or paid spend remains recoverable and auditable.",
-    {
-      spendId: z.string(),
-    },
-    async ({ spendId }: { spendId: string }) => {
-      requireScope(sessionCtx, "finance:write");
-      const result = await deleteSpend(actor, { workspaceId, spendId });
-      return jsonResult({ id: result.id, archived: true, webUrl: webUrl(workspaceId, `/audit?tab=archive`) });
-    },
-  );
-
-  tool(
-    "list_ledger_accounts",
-    "List ledger accounts (checking, savings, credit, etc) in the workspace.",
-    {},
-    async () => {
-      requireScope(sessionCtx, "finance:read");
-      const result = await listLedgerAccounts(workspaceId, { take: 100 });
-      const simplified = result.items.map((a) => ({
-        id: a.id,
-        name: a.name,
-        currency: a.currency,
-        type: a.type,
-        balanceCents: a.balanceCents,
-      }));
-      return jsonResult(simplified);
-    },
-  );
-
-  tool(
-    "archive_ledger_account",
-    "Archive a ledger account so it is hidden from active finance views. Ledger entries are preserved.",
-    {
-      accountId: z.string(),
-    },
-    async ({ accountId }: { accountId: string }) => {
-      requireScope(sessionCtx, "finance:write");
-      const result = await deleteLedgerAccount(actor, { workspaceId, accountId });
-      return jsonResult({ id: result.id, archived: true, webUrl: webUrl(workspaceId, `/audit?tab=archive`) });
-    },
-  );
-
   tool(
     "archive_artifact",
     "Archive any supported workspace artifact by entity type and id. Normal destructive actions should use archive, not purge.",
@@ -4101,27 +3832,6 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
       requireScope(sessionCtx, "archive:write");
       const result = await purgeWorkspaceArtifact(actor, { workspaceId, entityType, entityId, reason });
       return jsonResult({ id: result.id, purged: true, webUrl: webUrl(workspaceId, `/audit?tab=archive`) });
-    },
-  );
-
-  tool(
-    "list_ledger_transactions",
-    "List ledger entries (transactions) for the workspace, optionally scoped to a single account. Returns most-recent-first.",
-    {
-      accountId: z.string().optional(),
-      take: z.number().optional().describe("Default 50"),
-    },
-    async ({ accountId, take }: { accountId?: string; take?: number }) => {
-      requireScope(sessionCtx, "finance:read");
-      const entries = await prisma.ledgerEntry.findMany({
-        where: {
-          workspaceId,
-          ...(accountId ? { accountId } : {}),
-        },
-        orderBy: { occurredAt: "desc" },
-        take: take ?? 50,
-      });
-      return jsonResult(entries);
     },
   );
 

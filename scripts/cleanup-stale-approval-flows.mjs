@@ -31,21 +31,13 @@ async function resolveWorkspace(value) {
   return workspace;
 }
 
-function staleReason(flow, proposalById, spendById) {
+function staleReason(flow, proposalById) {
   if (flow.subjectType === "PROPOSAL") {
     const proposal = proposalById.get(flow.subjectId);
     if (!proposal) return "proposal missing";
     if (proposal.archivedAt) return "proposal archived";
     if (proposal.status !== "OPEN") return `proposal status ${proposal.status}`;
     if (proposal.isPrivate) return "proposal private";
-    return null;
-  }
-
-  if (flow.subjectType === "SPEND") {
-    const spend = spendById.get(flow.subjectId);
-    if (!spend) return "spend missing";
-    if (spend.archivedAt) return "spend archived";
-    if (spend.status !== "OPEN") return `spend status ${spend.status}`;
     return null;
   }
 
@@ -61,25 +53,15 @@ async function main() {
     orderBy: { createdAt: "asc" },
   });
   const proposalIds = flows.filter((flow) => flow.subjectType === "PROPOSAL").map((flow) => flow.subjectId);
-  const spendIds = flows.filter((flow) => flow.subjectType === "SPEND").map((flow) => flow.subjectId);
-  const [proposals, spends] = await Promise.all([
-    proposalIds.length > 0
-      ? prisma.proposal.findMany({
-        where: { id: { in: proposalIds } },
-        select: { id: true, status: true, isPrivate: true, archivedAt: true },
-      })
-      : Promise.resolve([]),
-    spendIds.length > 0
-      ? prisma.spendRequest.findMany({
-        where: { id: { in: spendIds } },
-        select: { id: true, status: true, archivedAt: true },
-      })
-      : Promise.resolve([]),
-  ]);
+  const proposals = proposalIds.length > 0
+    ? await prisma.proposal.findMany({
+      where: { id: { in: proposalIds } },
+      select: { id: true, status: true, isPrivate: true, archivedAt: true },
+    })
+    : [];
   const proposalById = new Map(proposals.map((proposal) => [proposal.id, proposal]));
-  const spendById = new Map(spends.map((spend) => [spend.id, spend]));
   const stale = flows
-    .map((flow) => ({ flow, reason: staleReason(flow, proposalById, spendById) }))
+    .map((flow) => ({ flow, reason: staleReason(flow, proposalById) }))
     .filter((entry) => entry.reason);
 
   if (!apply) {

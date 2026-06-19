@@ -2,7 +2,7 @@ import type { MemberRole } from "@prisma/client";
 import { Prisma } from "@prisma/client";
 import { prisma } from "@corgtex/shared";
 import type { AppActor, MembershipSummary } from "@corgtex/shared";
-import { actorUserIdForWorkspace, requireWorkspaceMembership } from "./auth";
+import { requireWorkspaceMembership } from "./auth";
 import { invariant } from "./errors";
 import { defaultStorage } from "@corgtex/storage";
 import { withdrawActiveApprovalFlowForSubject } from "./approvals";
@@ -29,12 +29,10 @@ type ArchiveEntityType =
   | "ExpertiseTag"
   | "ExternalDataSource"
   | "Goal"
-  | "LedgerAccount"
   | "Meeting"
   | "OAuthApp"
   | "Proposal"
   | "Role"
-  | "SpendRequest"
   | "Tension"
   | "WebhookEndpoint"
   | "WorkspaceToolLink"
@@ -60,12 +58,10 @@ type ArchiveConfig = {
 
 const directWorkspace = (workspaceId: string, id: string) => ({ id, workspaceId });
 const titleOrName = (record: any) => record.title ?? record.name ?? record.label ?? record.slug ?? record.email ?? record.id ?? null;
-const FINANCE_ARCHIVE_ROLES = new Set<MemberRole>(["FINANCE_STEWARD", "ADMIN"]);
 const WORK_ITEM_ARCHIVE_ENTITY_TYPES = new Set<ArchiveEntityType>([
   "Action",
   "Goal",
   "Proposal",
-  "SpendRequest",
   "Tension",
 ]);
 
@@ -191,21 +187,6 @@ const ENTITY_CONFIGS: Record<ArchiveEntityType, ArchiveConfig> = {
     findWhere: directWorkspace,
     label: titleOrName,
   },
-  LedgerAccount: {
-    entityType: "LedgerAccount",
-    delegate: "ledgerAccount",
-    findWhere: directWorkspace,
-    label: titleOrName,
-    archiveAllowedRoles: ["FINANCE_STEWARD", "ADMIN"],
-    canPurge: async (tx, record) => {
-      const [entries, activeSpends] = await Promise.all([
-        tx.ledgerEntry.count({ where: { accountId: record.id } }),
-        tx.spendRequest.count({ where: { ledgerAccountId: record.id, archivedAt: null } }),
-      ]);
-      invariant(entries === 0, 400, "INVALID_STATE", "Ledger accounts with ledger entries cannot be purged.");
-      invariant(activeSpends === 0, 400, "INVALID_STATE", "Ledger accounts linked to active spend requests cannot be purged.");
-    },
-  },
   Meeting: {
     entityType: "Meeting",
     delegate: "meeting",
@@ -244,35 +225,6 @@ const ENTITY_CONFIGS: Record<ArchiveEntityType, ArchiveConfig> = {
     delegate: "role",
     findWhere: (workspaceId, id) => ({ id, circle: { workspaceId } }),
     label: titleOrName,
-  },
-  SpendRequest: {
-    entityType: "SpendRequest",
-    delegate: "spendRequest",
-    findWhere: directWorkspace,
-    label: (record) => record.description ?? record.id,
-    canArchive: async ({ actor, membership, record }) => {
-      if (membership && FINANCE_ARCHIVE_ROLES.has(membership.role as MemberRole)) {
-        return;
-      }
-
-      const actorUserId = actor.kind === "user" ? actor.user.id : await actorUserIdForWorkspace(actor, record.workspaceId);
-      invariant(
-        record.status === "DRAFT" && record.requesterUserId === actorUserId,
-        403,
-        "FORBIDDEN",
-        "Only the requester can archive their own draft spend request. Finance stewards or admins are required for submitted or shared spend requests.",
-      );
-    },
-    canPurge: async (tx, record) => {
-      invariant(record.status === "DRAFT", 400, "INVALID_STATE", "Only draft spend requests can be purged.");
-      const ledgerEntries = await tx.ledgerEntry.count({
-        where: {
-          referenceType: "SpendRequest",
-          referenceId: record.id,
-        },
-      });
-      invariant(ledgerEntries === 0, 400, "INVALID_STATE", "Spend requests with posted ledger entries cannot be purged.");
-    },
   },
   Tension: {
     entityType: "Tension",
@@ -420,10 +372,10 @@ export async function archiveWorkspaceArtifact(actor: AppActor, params: {
       },
     });
 
-    if (config.entityType === "Proposal" || config.entityType === "SpendRequest") {
+    if (config.entityType === "Proposal") {
       await withdrawActiveApprovalFlowForSubject(tx, {
         workspaceId: params.workspaceId,
-        subjectType: config.entityType === "Proposal" ? "PROPOSAL" : "SPEND",
+        subjectType: "PROPOSAL",
         subjectId: record.id,
         cleanupReason: `${config.entityType} archived`,
         actorUserId: actorUserId(actor),

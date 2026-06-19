@@ -59,14 +59,6 @@ export const WORKSPACE_ADD_ACTION_DEFINITIONS = {
     label: "Allocation",
     description: "Allocate points in an open cycle.",
   },
-  spend: {
-    label: "Spend",
-    description: "Create a spend request.",
-  },
-  ledger_account: {
-    label: "Ledger account",
-    description: "Create a finance account.",
-  },
   article: {
     label: "Brain article",
     description: "Create a knowledge article.",
@@ -261,7 +253,7 @@ export function getWorkspaceAddActions(context: WorkspaceAddActionContext): Work
     case "cycles":
       return context.featureFlags.CYCLES ? [action("cycle"), action("allocation")] : [];
     case "finance":
-      return [action("spend"), action("ledger_account")];
+      return [];
     case "brain":
       return [action("upload_file"), action("article")];
     case "tools":

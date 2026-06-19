@@ -46,7 +46,6 @@ const MEETING_RECORDER_RECONCILE_INTERVAL_MS = 10 * 60 * 1_000;
 const DEFAULT_DAILY_JOB_START_HOUR_UTC = 11;
 const TRIAGE_EVENT_TYPES = new Set([
   "proposal.submitted",
-  "spend.submitted",
   "meeting.created",
   "meeting.transcript-uploaded",
   "action.created",
@@ -60,9 +59,6 @@ const KNOWLEDGE_PULSE_EVENT_TYPES = new Set([
   "proposal.submitted",
   "proposal.approved",
   "document.created",
-  "spend.created",
-  "spend.submitted",
-  "spend.paid",
   "meeting.created",
   "meeting.transcript-uploaded",
   "approval.finalized",

@@ -9,7 +9,6 @@ function backHref(workspaceId: string, entityType: string, entityId: string) {
   if (entityType === "Tension") return `/workspaces/${workspaceId}/tensions/${entityId}`;
   if (entityType === "Proposal") return `/workspaces/${workspaceId}/proposals/${entityId}`;
   if (entityType === "Action") return `/workspaces/${workspaceId}/actions`;
-  if (entityType === "SpendRequest") return `/workspaces/${workspaceId}/finance`;
   if (entityType === "Goal") return `/workspaces/${workspaceId}/goals`;
   return `/workspaces/${workspaceId}`;
 }

@@ -99,18 +99,6 @@ const { prismaMock, encryptSecretMock, decryptSecretMock, memberMocks, communica
       count: vi.fn(),
       findMany: vi.fn(),
     },
-    ledgerAccount: {
-      count: vi.fn(),
-      findMany: vi.fn(),
-    },
-    ledgerEntry: {
-      count: vi.fn(),
-      findMany: vi.fn(),
-    },
-    spendRequest: {
-      count: vi.fn(),
-      findMany: vi.fn(),
-    },
     customerDeployment: {
       findMany: vi.fn(),
       findUnique: vi.fn(),
@@ -511,9 +499,6 @@ describe("control plane domain", () => {
       "cycle",
       "cycleUpdate",
       "allocation",
-      "ledgerAccount",
-      "ledgerEntry",
-      "spendRequest",
       "workspaceFeatureFlag",
       "workspaceToolLink",
       "workspaceToolLinkCircleTag",

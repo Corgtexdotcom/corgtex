@@ -1049,15 +1049,6 @@ async function createSharedClientWorkspace(params: {
           minApproverCount: 1,
           decisionWindowHours: 72,
         },
-        {
-          workspaceId: workspace.id,
-          subjectType: "SPEND",
-          mode: "SINGLE",
-          quorumPercent: 0,
-          minApproverCount: 1,
-          decisionWindowHours: 72,
-          requireProposalLink: false,
-        },
       ],
     });
 
@@ -1589,9 +1580,6 @@ async function buildMigrationInventory(deployment: {
       { entityType: "Cycle", modelName: "cycle", where: { workspaceId }, createIdMap: true },
       { entityType: "CycleUpdate", modelName: "cycleUpdate", where: { cycle: { workspaceId } }, createIdMap: true },
       { entityType: "Allocation", modelName: "allocation", where: { cycle: { workspaceId } }, createIdMap: true },
-      { entityType: "LedgerAccount", modelName: "ledgerAccount", where: { workspaceId }, createIdMap: true },
-      { entityType: "LedgerEntry", modelName: "ledgerEntry", where: { workspaceId }, createIdMap: true },
-      { entityType: "SpendRequest", modelName: "spendRequest", where: { workspaceId }, createIdMap: true },
       { entityType: "WorkspaceFeatureFlag", modelName: "workspaceFeatureFlag", where: { workspaceId }, createIdMap: true },
       { entityType: "WorkspaceToolLink", modelName: "workspaceToolLink", where: { workspaceId }, createIdMap: true },
       { entityType: "WorkspaceToolLinkCircleTag", modelName: "workspaceToolLinkCircleTag", where: { toolLink: { workspaceId } }, createIdMap: true },

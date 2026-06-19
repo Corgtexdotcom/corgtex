@@ -7,7 +7,7 @@ import { appendEvents } from "./events";
 import { getParentWorkItemVersion } from "./work-item-versions";
 
 const VALID_ENTRY_TYPES = ["REACTION", "OBJECTION"];
-const VALID_PARENT_TYPES = ["PROPOSAL", "SPEND", "TENSION", "MEETING", "BRAIN_ARTICLE", "ACTION"];
+const VALID_PARENT_TYPES = ["PROPOSAL", "TENSION", "MEETING", "BRAIN_ARTICLE", "ACTION"];
 const deliberationEntryListInclude = {
   author: {
     select: {
@@ -84,10 +84,6 @@ async function isResponsibleForParent(tx: Prisma.TransactionClient, params: {
   if (params.entry.parentType === "PROPOSAL") {
     const parent = await tx.proposal.findUnique({ where: { id: params.entry.parentId }, select: { authorUserId: true } });
     return parent?.authorUserId === params.actorUserId;
-  }
-  if (params.entry.parentType === "SPEND") {
-    const parent = await tx.spendRequest.findUnique({ where: { id: params.entry.parentId }, select: { requesterUserId: true } });
-    return parent?.requesterUserId === params.actorUserId;
   }
   if (params.entry.parentType === "TENSION") {
     const parent = await tx.tension.findUnique({ where: { id: params.entry.parentId }, select: { authorUserId: true, assigneeMemberId: true } });
@@ -185,16 +181,6 @@ export async function postDeliberationEntry(actor: AppActor, params: {
         targetCircleId: params.targetCircleId || null,
       }
     });
-
-    if (params.parentType === "SPEND" && params.entryType === "OBJECTION") {
-      await appendEvents(tx, [{
-        workspaceId: params.workspaceId,
-        type: "spend.objected",
-        aggregateType: "SpendRequest",
-        aggregateId: params.parentId,
-        payload: { spendId: params.parentId },
-      }]);
-    }
 
     await tx.auditLog.create({
       data: {

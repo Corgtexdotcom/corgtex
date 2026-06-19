@@ -144,8 +144,6 @@ async function main() {
     tensions,
     proposals,
     meetings,
-    spends,
-    ledgerAccounts,
     documents,
     brainArticles,
     brainSources,
@@ -173,21 +171,6 @@ async function main() {
     }),
     prisma.meeting.findMany({
       where: { workspaceId: workspace.id, archivedAt: null, ...testPrefixWhere(["title", "source"]) },
-    }),
-    prisma.spendRequest.findMany({
-      where: {
-        workspaceId: workspace.id,
-        requesterUserId: tester.id,
-        archivedAt: null,
-        OR: [
-          { description: { startsWith: TEST_PREFIX } },
-          { category: { startsWith: TEST_PREFIX } },
-          { vendor: { startsWith: TEST_PREFIX } },
-        ],
-      },
-    }),
-    prisma.ledgerAccount.findMany({
-      where: { workspaceId: workspace.id, archivedAt: null, name: { startsWith: TEST_PREFIX } },
     }),
     prisma.document.findMany({
       where: { workspaceId: workspace.id, archivedAt: null, ...testPrefixWhere(["title", "source"]) },
@@ -265,8 +248,6 @@ async function main() {
       records: proposals,
     });
     counts.Meeting = await archiveBatch(tx, { ...base, entityType: "Meeting", delegate: "meeting", records: meetings });
-    counts.SpendRequest = await archiveBatch(tx, { ...base, entityType: "SpendRequest", delegate: "spendRequest", records: spends });
-    counts.LedgerAccount = await archiveBatch(tx, { ...base, entityType: "LedgerAccount", delegate: "ledgerAccount", records: ledgerAccounts });
     counts.Document = await archiveBatch(tx, { ...base, entityType: "Document", delegate: "document", records: documents });
     counts.BrainArticle = await archiveBatch(tx, { ...base, entityType: "BrainArticle", delegate: "brainArticle", records: brainArticles });
     counts.BrainSource = await archiveBatch(tx, { ...base, entityType: "BrainSource", delegate: "brainSource", records: brainSources });
@@ -314,58 +295,9 @@ async function main() {
     });
   });
 
-  const purged = { SpendRequest: 0, LedgerAccount: 0 };
-  if (purgeEligible) {
-    const draftSpendIds = spends.filter((spend) => spend.status === "DRAFT").map((spend) => spend.id);
-    if (draftSpendIds.length > 0) {
-      const spendsWithLedger = await prisma.ledgerEntry.findMany({
-        where: { referenceType: "SpendRequest", referenceId: { in: draftSpendIds } },
-        select: { referenceId: true },
-      });
-      const blockedSpendIds = new Set(spendsWithLedger.map((entry) => entry.referenceId).filter(Boolean));
-      const purgeSpendIds = draftSpendIds.filter((id) => !blockedSpendIds.has(id));
-      if (purgeSpendIds.length > 0) {
-        const result = await prisma.spendRequest.deleteMany({ where: { id: { in: purgeSpendIds } } });
-        purged.SpendRequest = result.count;
-        await prisma.workspaceArchiveRecord.updateMany({
-          where: { workspaceId: workspace.id, entityType: "SpendRequest", entityId: { in: purgeSpendIds }, purgedAt: null },
-          data: { purgedAt: new Date(), purgedByUserId: actorUserId, purgeReason: "Eligible draft test spend cleanup." },
-        });
-      }
-    }
-
-    const ledgerAccountIds = ledgerAccounts.map((account) => account.id);
-    if (ledgerAccountIds.length > 0) {
-      const [accountsWithEntries, accountsWithActiveSpends] = await Promise.all([
-        prisma.ledgerEntry.findMany({ where: { accountId: { in: ledgerAccountIds } }, select: { accountId: true } }),
-        prisma.spendRequest.findMany({
-          where: { ledgerAccountId: { in: ledgerAccountIds }, archivedAt: null },
-          select: { ledgerAccountId: true },
-        }),
-      ]);
-      const blockedAccountIds = new Set([
-        ...accountsWithEntries.map((entry) => entry.accountId),
-        ...accountsWithActiveSpends.map((spend) => spend.ledgerAccountId).filter(Boolean),
-      ]);
-      const purgeAccountIds = ledgerAccountIds.filter((id) => !blockedAccountIds.has(id));
-      if (purgeAccountIds.length > 0) {
-        const result = await prisma.ledgerAccount.deleteMany({ where: { id: { in: purgeAccountIds } } });
-        purged.LedgerAccount = result.count;
-        await prisma.workspaceArchiveRecord.updateMany({
-          where: { workspaceId: workspace.id, entityType: "LedgerAccount", entityId: { in: purgeAccountIds }, purgedAt: null },
-          data: { purgedAt: new Date(), purgedByUserId: actorUserId, purgeReason: "Eligible unused test ledger account cleanup." },
-        });
-      }
-    }
-  }
-
   const archivedTotal = Object.values(counts).reduce((sum, count) => sum + count, 0);
-  const purgedTotal = Object.values(purged).reduce((sum, count) => sum + count, 0);
   console.log(`Archived ${archivedTotal} test artifacts in ${workspace.slug}.`);
-  console.log(JSON.stringify({ archived: counts, purged }, null, 2));
-  if (!purgeEligible && purgedTotal === 0) {
-    console.log("Pass --purge-eligible or PURGE_ELIGIBLE_TEST_ARTIFACTS=true to purge eligible draft spend/account test rows.");
-  }
+  console.log(JSON.stringify({ archived: counts, purgeEligible }, null, 2));
 }
 
 main()

@@ -59,16 +59,6 @@ export const AGENT_REGISTRY = {
     inputs: ["full policy corpus", "current constitution"],
     outputs: ["updated constitution markdown"],
   },
-  "finance-reconciliation-prep": {
-    label: "Finance Reconciliation Prep",
-    description: "Summarizes unreconciled spends for finance review.",
-    category: "finance",
-    canDisable: true,
-    defaultModelTier: "standard" as const,
-    costTier: "medium" as const,
-    inputs: ["paid/unreconciled spends"],
-    outputs: ["reconciliation summary"],
-  },
   "brain-absorb": {
     label: "Brain Absorb",
     description: "Absorbs new sources into wiki articles with cascading updates.",
@@ -128,16 +118,6 @@ export const AGENT_REGISTRY = {
     costTier: "low" as const,
     inputs: ["advice process records"],
     outputs: ["compliance score + warnings"],
-  },
-  "spend-submission": {
-    label: "Spend Submission",
-    description: "Creates and submits spend requests programmatically.",
-    category: "finance",
-    canDisable: true,
-    defaultModelTier: "none" as const,
-    costTier: "free" as const,
-    inputs: ["amount, currency, category, description"],
-    outputs: ["submitted spend request"],
   },
   "daily-digest": {
     label: "Daily Digest & Emails",

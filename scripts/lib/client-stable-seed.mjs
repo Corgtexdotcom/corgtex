@@ -391,71 +391,6 @@ async function ensureProposal(tx, workspaceId, userId, circleId, meetingId, prop
   });
 }
 
-async function ensureFinance(tx, workspaceId, requesterUserId, finance) {
-  let account = await tx.ledgerAccount.findFirst({
-    where: { workspaceId, name: finance.accountName },
-  });
-  if (account) {
-    account = await tx.ledgerAccount.update({
-      where: { id: account.id },
-      data: {
-        currency: finance.currency,
-        type: "MANUAL",
-        archivedAt: null,
-      },
-    });
-  } else {
-    account = await tx.ledgerAccount.create({
-      data: {
-        workspaceId,
-        name: finance.accountName,
-        type: "MANUAL",
-        currency: finance.currency,
-        balanceCents: finance.balanceCents ?? 0,
-      },
-    });
-  }
-
-  const spend = finance.starterSpend;
-  if (spend) {
-    const existingSpend = await tx.spendRequest.findFirst({
-      where: { workspaceId, description: spend.description },
-    });
-    if (existingSpend) {
-      await tx.spendRequest.update({
-        where: { id: existingSpend.id },
-        data: {
-          ledgerAccountId: account.id,
-          amountCents: spend.amountCents,
-          currency: finance.currency,
-          category: spend.category,
-          vendor: spend.vendor,
-          status: spend.status ?? "OPEN",
-          spentAt: new Date(spend.spentAt),
-          archivedAt: null,
-        },
-      });
-    } else {
-      await tx.spendRequest.create({
-        data: {
-          workspaceId,
-          requesterUserId,
-          ledgerAccountId: account.id,
-          amountCents: spend.amountCents,
-          currency: finance.currency,
-          category: spend.category,
-          description: spend.description,
-          vendor: spend.vendor,
-          status: spend.status ?? "OPEN",
-          spentAt: new Date(spend.spentAt),
-        },
-      });
-    }
-  }
-
-  return account;
-}
-
 async function ensureGoal(tx, workspaceId, goal, circleId, ownerMemberId, parentGoalId) {
   const existing = await tx.goal.findFirst({
     where: { workspaceId, title: goal.title },
@@ -669,8 +604,6 @@ export async function seedStableClient(config) {
         if (config.tension) await ensureTension(tx, workspace.id, adminUser.id, adminMember.id, tensionCircle?.id ?? null, config.tension);
         if (config.action) await ensureAction(tx, workspace.id, adminUser.id, adminMember.id, actionCircle?.id ?? null, config.action);
         if (config.proposal) await ensureProposal(tx, workspace.id, adminUser.id, proposalCircle?.id ?? null, meeting?.id ?? null, config.proposal);
-        if (config.finance) await ensureFinance(tx, workspace.id, adminUser.id, config.finance);
-
         const goalMap = new Map();
         for (const goal of config.goals ?? []) {
           const circle = goal.circleKey ? circleMap.get(goal.circleKey) : null;

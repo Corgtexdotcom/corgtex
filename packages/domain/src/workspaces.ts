@@ -47,15 +47,6 @@ export async function createWorkspace(actor: AppActor, params: {
           minApproverCount: 1,
           decisionWindowHours: 72,
         },
-        {
-          workspaceId: workspace.id,
-          subjectType: "SPEND",
-          mode: "SINGLE",
-          quorumPercent: 0,
-          minApproverCount: 1,
-          decisionWindowHours: 72,
-          requireProposalLink: false,
-        },
       ],
     });
 
@@ -78,4 +69,3 @@ export async function listWorkspaces(actor: AppActor) {
     orderBy: { createdAt: "desc" },
   });
 }
-

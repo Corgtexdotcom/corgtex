@@ -12,7 +12,6 @@ import {
   listContacts,
   listCycles,
   listGoals,
-  listLedgerAccounts,
   listMembers,
   listProposals,
   listQualifications,
@@ -46,12 +45,10 @@ import {
   createContactAction,
   createCycleAction,
   createDealAction,
-  createLedgerAccountAction,
   createMeetingSeriesAction,
   createMemberAction,
   createProposalAction,
   createRoleAction,
-  createSpendAction,
   createTensionAction,
   createWebhookEndpointAction,
   importMeetingInviteAction,
@@ -174,7 +171,6 @@ export default async function WorkspaceAddPage({
   const needsCircles = kind === "goal" || kind === "circle" || kind === "role" || kind === "tool_link";
   const needsRoles = kind === "role_assignment";
   const needsGoals = kind === "goal";
-  const needsLedgerAccounts = kind === "spend";
   const needsContacts = kind === "deal";
   const needsCycles = kind === "allocation";
   const needsApprovedProspects = kind === "prospect_instance";
@@ -184,7 +180,6 @@ export default async function WorkspaceAddPage({
     members,
     circles,
     goals,
-    ledgerAccountsResult,
     contactsResult,
     cyclesResult,
     approvedQualificationsResult,
@@ -194,7 +189,6 @@ export default async function WorkspaceAddPage({
     needsMembers ? listMembers(workspaceId) : Promise.resolve([]),
     needsCircles ? listCircles(workspaceId) : Promise.resolve([]),
     needsGoals ? listGoals(actor, { workspaceId }) : Promise.resolve([]),
-    needsLedgerAccounts ? listLedgerAccounts(workspaceId, { take: 100 }) : Promise.resolve({ items: [] }),
     needsContacts ? listContacts(actor, workspaceId, { take: 100 }) : Promise.resolve({ items: [] }),
     needsCycles ? listCycles(workspaceId, { take: 100 }) : Promise.resolve({ items: [] }),
     needsApprovedProspects ? listQualifications(actor, workspaceId, { status: "APPROVED" }) : Promise.resolve({ items: [] }),
@@ -203,7 +197,6 @@ export default async function WorkspaceAddPage({
 
   const proposals = proposalsResult.items;
   const activeProposals = proposals.filter((proposal) => proposal.status === "DRAFT" || proposal.status === "OPEN");
-  const ledgerAccounts = ledgerAccountsResult.items;
   const contacts = contactsResult.items;
   const cycles = cyclesResult.items;
   const allocatableCycles = cycles.filter((cycle) => cycle.status === "OPEN_ALLOCATIONS");
@@ -274,18 +267,6 @@ export default async function WorkspaceAddPage({
   async function createAllocationAndReturn(formData: FormData) {
     "use server";
     await createAllocationAction(formData);
-    redirect(returnTo);
-  }
-
-  async function createSpendAndReturn(formData: FormData) {
-    "use server";
-    await createSpendAction(formData);
-    redirect(returnTo);
-  }
-
-  async function createLedgerAccountAndReturn(formData: FormData) {
-    "use server";
-    await createLedgerAccountAction(formData);
     redirect(returnTo);
   }
 
@@ -738,34 +719,6 @@ export default async function WorkspaceAddPage({
             </div>
             {allocatableCycles.length === 0 && <p className="form-message form-message-error">No cycles are currently open for allocations.</p>}
             <div className="actions-inline"><button type="submit" disabled={allocatableCycles.length === 0}>Create allocation</button>{cancelLink(returnTo)}</div>
-          </form>
-        )}
-
-        {kind === "spend" && (
-          <form action={createSpendAndReturn} className="stack nr-form-section">
-            {hiddenWorkspace(workspaceId)}
-            <label>Amount<input name="amount" type="number" step="0.01" min="0.01" required /></label>
-            <div className="actions-inline">
-              <label style={{ flex: 1 }}>Currency<input name="currency" defaultValue="USD" required /></label>
-              <label style={{ flex: 1 }}>Category<input name="category" required /></label>
-            </div>
-            <label>Description<textarea name="description" required /></label>
-            <label>Vendor<input name="vendor" /></label>
-            <label>Ledger account<select name="ledgerAccountId" defaultValue=""><option value="">Unassigned</option>{ledgerAccounts.map((account) => <option key={account.id} value={account.id}>{account.name} ({account.currency})</option>)}</select></label>
-            <div className="actions-inline"><button type="submit">Create spend</button>{cancelLink(returnTo)}</div>
-          </form>
-        )}
-
-        {kind === "ledger_account" && (
-          <form action={createLedgerAccountAndReturn} className="stack nr-form-section">
-            {hiddenWorkspace(workspaceId)}
-            <label>Name<input name="name" required /></label>
-            <div className="actions-inline">
-              <label style={{ flex: 1 }}>Currency<input name="currency" defaultValue="USD" required /></label>
-              <label style={{ flex: 1 }}>Type<input name="type" defaultValue="MANUAL" /></label>
-            </div>
-            <label>Opening balance cents<input name="balanceCents" type="number" defaultValue={0} /></label>
-            <div className="actions-inline"><button type="submit">Create account</button>{cancelLink(returnTo)}</div>
           </form>
         )}
 

@@ -197,31 +197,6 @@ async function main() {
     },
   });
 
-  await prisma.approvalPolicy.upsert({
-    where: {
-      workspaceId_subjectType: {
-        workspaceId: workspace.id,
-        subjectType: "SPEND",
-      },
-    },
-    update: {
-      mode: "SINGLE",
-      quorumPercent: 0,
-      minApproverCount: 1,
-      decisionWindowHours: 72,
-      requireProposalLink: false,
-    },
-    create: {
-      workspaceId: workspace.id,
-      subjectType: "SPEND",
-      mode: "SINGLE",
-      quorumPercent: 0,
-      minApproverCount: 1,
-      decisionWindowHours: 72,
-      requireProposalLink: false,
-    },
-  });
-
   await prisma.circle.upsert({
     where: { id: `${workspace.id}-general-circle` },
     update: {

@@ -21,7 +21,6 @@ export {
   updateProposalAction,
   withdrawAdviceProcessAction,
 } from "./proposals/actions";
-export * from "./finance/actions";
 export * from "./leads/actions";
 export * from "./governance/actions";
 // Note: runtime and webhooks were mapped to governance and settings respectively by our script.

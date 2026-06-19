@@ -5,7 +5,7 @@ import { requireWorkspaceMembership } from "./auth";
 import { AppError, invariant } from "./errors";
 import { privacyFilter } from "./privacy";
 
-export const WORK_ITEM_ENTITY_TYPES = ["Action", "Tension", "Proposal", "SpendRequest", "Goal"] as const;
+export const WORK_ITEM_ENTITY_TYPES = ["Action", "Tension", "Proposal", "Goal"] as const;
 export type WorkItemEntityType = typeof WORK_ITEM_ENTITY_TYPES[number];
 
 const WORK_ITEM_ENTITY_TYPE_ALIASES: Record<string, WorkItemEntityType> = {
@@ -15,9 +15,6 @@ const WORK_ITEM_ENTITY_TYPE_ALIASES: Record<string, WorkItemEntityType> = {
   Tension: "Tension",
   PROPOSAL: "Proposal",
   Proposal: "Proposal",
-  SPEND: "SpendRequest",
-  SPEND_REQUEST: "SpendRequest",
-  SpendRequest: "SpendRequest",
   GOAL: "Goal",
   Goal: "Goal",
 };
@@ -29,7 +26,6 @@ export function normalizeWorkItemEntityType(entityType: string): WorkItemEntityT
 }
 
 export function workItemEntityTypeToMcp(entityType: WorkItemEntityType) {
-  if (entityType === "SpendRequest") return "SPEND";
   return entityType.toUpperCase();
 }
 
@@ -208,26 +204,6 @@ async function assertCanReadWorkItemVersions(
     return item.version;
   }
 
-  if (params.entityType === "SpendRequest") {
-    const where: Prisma.SpendRequestWhereInput = {
-      id: params.entityId,
-      workspaceId: params.workspaceId,
-      archivedAt: null,
-    };
-    if (actor.kind === "user" && membership?.role !== "ADMIN") {
-      where.OR = [
-        { status: { not: "DRAFT" } },
-        { status: "DRAFT", requesterUserId: actor.user.id },
-      ];
-    }
-    const item = await tx.spendRequest.findFirst({
-      where,
-      select: { id: true, version: true },
-    });
-    invariant(item, 404, "NOT_FOUND", "Spend request not found.");
-    return item.version;
-  }
-
   const item = await tx.goal.findFirst({
     where: {
       id: params.entityId,
@@ -331,14 +307,6 @@ export async function getParentWorkItemVersion(
       select: { version: true },
     });
     invariant(item, 404, "NOT_FOUND", "Action not found.");
-    return item.version;
-  }
-  if (params.parentType === "SPEND") {
-    const item = await tx.spendRequest.findFirst({
-      where: { id: params.parentId, workspaceId: params.workspaceId },
-      select: { version: true },
-    });
-    invariant(item, 404, "NOT_FOUND", "Spend request not found.");
     return item.version;
   }
   return null;

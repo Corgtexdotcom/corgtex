@@ -1,4 +1,4 @@
-import { runInboxTriageAgent, runDailyCheckInAgent, runMeetingSummaryAgent, runActionExtractionAgent, runProposalDraftingAgent, runConstitutionUpdateTriggerAgent, runFinanceReconciliationPrepAgent, runConstitutionSynthesisAgent, runAdviceRoutingAgent, runProcessLintingAgent, runSpendSubmissionAgent, runCrmDripFollowupAgent, runCrmEmailExtractionAgent, runCrmLeadEnrichmentAgent, runCompanyUnderstandingAgent } from "@corgtex/agents";
+import { runInboxTriageAgent, runDailyCheckInAgent, runMeetingSummaryAgent, runActionExtractionAgent, runProposalDraftingAgent, runConstitutionUpdateTriggerAgent, runConstitutionSynthesisAgent, runAdviceRoutingAgent, runProcessLintingAgent, runCrmDripFollowupAgent, runCrmEmailExtractionAgent, runCrmLeadEnrichmentAgent, runCompanyUnderstandingAgent } from "@corgtex/agents";
 import { executeAgentRun } from "@corgtex/agents";
 import { runBrainMaintenance, absorbSource } from "@corgtex/agents";
 
@@ -70,15 +70,6 @@ export async function runAgentWorkflowJob(job: {
       workspaceId: job.workspaceId,
       triggerRef: job.id,
       proposalId: asString(payload.proposalId),
-      triggerType: payload.triggerType === "MANUAL" ? "MANUAL" : "EVENT",
-    });
-  }
-
-  if (job.type === "agent.finance-reconciliation-prep") {
-    return runFinanceReconciliationPrepAgent({
-      workspaceId: job.workspaceId,
-      triggerRef: job.id,
-      spendId: asString(payload.spendId) || null,
       triggerType: payload.triggerType === "MANUAL" ? "MANUAL" : "EVENT",
     });
   }
@@ -167,22 +158,6 @@ export async function runAgentWorkflowJob(job: {
       triggerRef: job.id,
       processId,
       triggerType: "EVENT",
-    });
-  }
-
-  if (job.type === "agent.spend-submission") {
-    const amountCents = Number(payload.amountCents ?? 0);
-    if (!amountCents) return null;
-    return runSpendSubmissionAgent({
-      workspaceId: job.workspaceId!,
-      triggerRef: job.id,
-      triggerType: payload.triggerType === "MANUAL" ? "MANUAL" : "EVENT",
-      amountCents,
-      currency: asString(payload.currency) || "USD",
-      category: asString(payload.category) || "general",
-      description: asString(payload.description) || "Agent-generated spend request.",
-      vendor: asString(payload.vendor) || null,
-      requesterEmail: asString(payload.requesterEmail) || null,
     });
   }
 

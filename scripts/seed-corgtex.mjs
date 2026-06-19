@@ -28,7 +28,7 @@ const ARTICLES = [
   { title: "Monorepo Package Structure", type: "ARCHITECTURE", authority: "REFERENCE",
     body: `# Monorepo Package Structure\n\n- \`apps/web\`: Main UI and route handlers\n- \`apps/worker\`: Workflow worker loop\n- \`apps/site\`: Marketing website\n- \`packages/domain\`: Business logic\n- \`packages/shared\`: Env/db/types\n- \`packages/workflows\`: Event/job orchestration\n- \`packages/knowledge\`: RAG pipeline\n- \`packages/agents\`: Execution runtime` },
   { title: "Database Schema Overview", type: "ARCHITECTURE", authority: "REFERENCE",
-    body: `# Database Schema Overview\n\nEverything originates from the \`Workspace\` model. Core relations include \`User\`, \`Member\`, \`Circle\`, \`Role\`, \`Proposal\`, \`Tension\`, \`LedgerAccount\`, \`BrainArticle\`, \`KnowledgeChunk\`, \`Action\`, \`DemoLead\`, and \`Meeting\`. All IDs are UUIDs. Finance amounts are \`Int\` representing Cents.` },
+    body: `# Database Schema Overview\n\nEverything originates from the \`Workspace\` model. Core relations include \`User\`, \`Member\`, \`Circle\`, \`Role\`, \`Proposal\`, \`Tension\`, \`PracticeProject\`, \`BrainArticle\`, \`KnowledgeChunk\`, \`Action\`, \`DemoLead\`, and \`Meeting\`. All IDs are UUIDs. Finance amounts are \`Int\` representing cents.` },
   { title: "Agent Runtime Architecture", type: "ARCHITECTURE", authority: "REFERENCE",
     body: `# Agent Runtime Architecture\n\nAgents execute autonomously or directly interact with users via Chat Interface. Driven by \`AgentRun\`, \`AgentCredential\`, and Model Context Protocols (MCP). Built on OpenRouter for LLM gateway routing.` },
   { title: "Knowledge & RAG Pipeline", type: "ARCHITECTURE", authority: "REFERENCE",
@@ -39,8 +39,8 @@ const ARTICLES = [
   // PRODUCT
   { title: "Governance System", type: "PRODUCT", authority: "AUTHORITATIVE",
     body: `# Governance System\n\nBuilt on Consent-based decision-making. Circles represent domains, Roles have accountabilities, and Proposals must pass through an objection checking phase (integrated or withdrawn) before execution.` },
-  { title: "Finance Module", type: "PRODUCT", authority: "AUTHORITATIVE",
-    body: `# Finance Module\n\nManages \`LedgerAccount\` double-entry book-keeping. \`SpendRequest\` handles cross-circle expense approvals with receipt attachment and reconciliation tracing.` },
+  { title: "Practice Ledger", type: "PRODUCT", authority: "AUTHORITATIVE",
+    body: `# Practice Ledger\n\nPractice Ledger is the native Finance workspace surface. It tracks client projects, revenue, expenses, invoices, and budget health through \`PracticeProject\`, \`PracticeExpense\`, and \`PracticeInvoice\` records.` },
   { title: "Organization Brain", type: "PRODUCT", authority: "AUTHORITATIVE",
     body: `# Organization Brain\n\nDynamic AI knowledge base with Versioning. Submits backlinks and automatically groups organizational knowledge based on semantic relevance via AI bots.` },
   { title: "O2 Integration — Organic Organization", type: "PRODUCT", authority: "REFERENCE",
@@ -259,25 +259,6 @@ async function main() {
   }
 
   console.log(`Ensured sample tensions exist.`);
-
-  // 6. Create Ledger Accounts
-  const accounts = [
-    { name: "Infrastructure Hosting (Railway)", currency: "USD", balanceCents: 1540_00 },
-    { name: "LLM API Tranches (OpenRouter)", currency: "USD", balanceCents: 200_00 },
-    { name: "Domain Registrations", currency: "USD", balanceCents: -50_00 },
-  ];
-
-  for (const acct of accounts) {
-    const existing = await prisma.ledgerAccount.findFirst({
-      where: { workspaceId: wsId, name: acct.name },
-    });
-    if (!existing) {
-      await prisma.ledgerAccount.create({
-        data: { workspaceId: wsId, name: acct.name, type: "MANUAL", currency: acct.currency, balanceCents: acct.balanceCents },
-      });
-    }
-  }
-  console.log(`Created ${accounts.length} ledger accounts.`);
 
   console.log("✅ Corgtex dogfood workspace seed complete.");
 }

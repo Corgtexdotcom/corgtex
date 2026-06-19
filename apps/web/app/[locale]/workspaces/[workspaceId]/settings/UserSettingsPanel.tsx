@@ -165,7 +165,6 @@ export function UserSettingsPanel({
   const notifTypes = [
     { type: "*", label: t("notifType_*") },
     { type: "proposal.submitted", label: t("notifType_proposal_submitted") },
-    { type: "spend.submitted", label: t("notifType_spend_submitted") },
     { type: "meeting.created", label: t("notifType_meeting_created") },
     { type: "action.created", label: t("notifType_action_created") },
     { type: "tension.created", label: t("notifType_tension_created") },

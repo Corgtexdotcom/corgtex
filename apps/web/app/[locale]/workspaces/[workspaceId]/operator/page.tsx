@@ -133,7 +133,6 @@ export default async function OperatorPage({
                   <option value="action-extraction">{t("agentActionExtraction")}</option>
                   <option value="proposal-drafting">{t("agentProposalDrafting")}</option>
                   <option value="constitution-update-trigger">{t("agentConstitutionUpdate")}</option>
-                  <option value="finance-reconciliation-prep">{t("agentFinancePrep")}</option>
                 </select>
               </label>
               <label style={{ flex: 1 }}>
@@ -145,10 +144,6 @@ export default async function OperatorPage({
               <label style={{ flex: 1 }}>
                 {t("formProposalId")}
                 <input name="proposalId" placeholder={t("placeholderOptional")} />
-              </label>
-              <label style={{ flex: 1 }}>
-                {t("formSpendId")}
-                <input name="spendId" placeholder={t("placeholderOptional")} />
               </label>
             </div>
             <label>

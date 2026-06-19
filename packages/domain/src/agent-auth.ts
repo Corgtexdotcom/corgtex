@@ -93,8 +93,8 @@ export const SCOPE_REGISTRY = {
   "governance:read":     { label: "Read governance",            group: "governance", default: true,  delegatedDefault: true,  description: "Read the constitution, active policies, and governance scoring." },
 
   // ---- finance ----
-  "finance:read":        { label: "Read finance",               group: "finance",    default: true,  delegatedDefault: true,  description: "List spend requests and ledger accounts." },
-  "finance:write":       { label: "Submit spend requests",      group: "finance",    default: false, delegatedDefault: true,  description: "Create and submit spend requests on behalf of users through same-role delegation." },
+  "finance:read":        { label: "Read finance",               group: "finance",    default: true,  delegatedDefault: true,  description: "Read Practice Ledger project, expense, and invoice records." },
+  "finance:write":       { label: "Update finance",             group: "finance",    default: false, delegatedDefault: true,  description: "Create and update Practice Ledger finance records through same-role delegation." },
 
   // ---- support / operations ----
   "integrations:read":   { label: "Read integrations",          group: "support",    default: false, delegatedDefault: true,  description: "Inspect installed communication and OAuth integrations. Admin-only where domain rules require it." },
