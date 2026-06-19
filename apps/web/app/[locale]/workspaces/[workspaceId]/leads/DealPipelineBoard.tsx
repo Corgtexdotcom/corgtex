@@ -123,7 +123,7 @@ export function DealPipelineBoard({
           status: deal.stage,
           sort: dealPipelineSort(deal),
           node: (
-            <div className="item" style={{ background: "white", padding: 12, borderRadius: 8 }}>
+            <div className="nr-kanban-card">
               <div className="row" style={{ alignItems: "flex-start", gap: 8 }}>
                 <strong style={{ fontSize: "0.95rem", lineHeight: 1.3 }}>{deal.title}</strong>
                 {deal.valueCents != null && (

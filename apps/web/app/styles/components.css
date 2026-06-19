@@ -2136,6 +2136,8 @@ details[open] > .settings-disclosure-summary::before {
     padding: 14px;
     margin-bottom: 12px;
     background: var(--surface);
+    color: var(--text);
+    box-shadow: var(--shadow-sm);
   }
 
   .nr-kanban-draggable {
@@ -2222,6 +2224,11 @@ details[open] > .settings-disclosure-summary::before {
   }
 
   @supports selector(:has(*)) {
+    .ws-layout:has(.nr-kanban-shell) .ws-main {
+      min-height: 0;
+      overflow-y: auto;
+    }
+
     .ws-layout:has(.nr-kanban-shell) .ws-main-content {
       max-width: min(1760px, calc(100vw - 112px));
     }
