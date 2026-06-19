@@ -12,6 +12,7 @@ const { prismaMock, requireWorkspaceMembershipMock } = vi.hoisted(() => ({
       create: vi.fn(),
       findUnique: vi.fn(),
       findMany: vi.fn(),
+      update: vi.fn(),
     },
   },
   requireWorkspaceMembershipMock: vi.fn(),
@@ -28,6 +29,7 @@ vi.mock("./auth", () => ({
 import {
   BUDGET_RUNWAY_ATTENTION_WEEKS,
   collectAttention,
+  createPracticeProject,
   createPracticeProjectFromWonDeal,
   getCrmAccountPracticeFinance,
   getPracticeFinanceDashboard,
@@ -38,6 +40,7 @@ import {
   projectRemainingCents,
   projectUsedRatio,
   summarizePracticeFinance,
+  updatePracticeProject,
 } from "./practice-finance";
 
 type Fixture = Parameters<typeof projectAttentionItems>[0];
@@ -209,6 +212,26 @@ describe("practice-finance I/O", () => {
       createdAt: new Date("2026-06-18T00:00:00.000Z"),
       updatedAt: new Date("2026-06-18T00:00:00.000Z"),
     });
+    prismaMock.practiceProject.update.mockResolvedValue({
+      id: "project-1",
+      workspaceId: "workspace-1",
+      crmAccountId: null,
+      crmDealId: null,
+      code: "DPRJ-001",
+      name: "Updated project",
+      clientName: "Example",
+      status: "ON_HOLD",
+      poValueCents: 40_000_00,
+      serviceBudgetCents: 25_000_00,
+      expenseBudgetCents: 5_000_00,
+      usedCents: 12_000_00,
+      weeklyBurnCents: 2_000_00,
+      targetMarginBps: 5500,
+      currentMarginBps: 5200,
+      sourceSatelliteId: null,
+      createdAt: new Date("2026-06-18T00:00:00.000Z"),
+      updatedAt: new Date("2026-06-19T00:00:00.000Z"),
+    });
     prismaMock.practiceProject.findUnique.mockResolvedValue(null);
     prismaMock.practiceProject.findMany.mockResolvedValue([]);
   });
@@ -296,6 +319,97 @@ describe("practice-finance I/O", () => {
       marginBps: 6200,
     });
     expect(result.projects[0]?.crmDeal?.valueCents).toBe(50_000_00);
+  });
+
+  it("creates a manual practice project behind finance-write access", async () => {
+    const projectResult = await createPracticeProject(actor, "workspace-1", {
+      code: "DPRJ-001",
+      name: "Manual rollout",
+      clientName: "Example",
+      status: "ACTIVE",
+      poValueCents: 40_000_00,
+      serviceBudgetCents: 25_000_00,
+      expenseBudgetCents: 5_000_00,
+      usedCents: 12_000_00,
+      weeklyBurnCents: 2_000_00,
+      targetMarginBps: 5500,
+      currentMarginBps: 5200,
+    });
+
+    expect(requireWorkspaceMembershipMock).toHaveBeenCalledWith({
+      actor,
+      workspaceId: "workspace-1",
+      allowedRoles: expect.arrayContaining(["FINANCE_STEWARD", "ADMIN"]),
+    });
+    expect(projectResult.id).toBe("project-1");
+    expect(prismaMock.practiceProject.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        workspaceId: "workspace-1",
+        code: "DPRJ-001",
+        name: "Manual rollout",
+        clientName: "Example",
+        status: "ACTIVE",
+        poValueCents: 40_000_00,
+        targetMarginBps: 5500,
+      }),
+    });
+  });
+
+  it("updates a workspace-scoped practice project behind finance-write access", async () => {
+    prismaMock.practiceProject.findUnique.mockResolvedValueOnce({
+      id: "project-1",
+      workspaceId: "workspace-1",
+    });
+
+    const projectResult = await updatePracticeProject(actor, "workspace-1", {
+      projectId: " project-1 ",
+      code: "DPRJ-002",
+      name: "Updated project",
+      clientName: "Example",
+      status: "ON_HOLD",
+      poValueCents: 40_000_00,
+      serviceBudgetCents: 25_000_00,
+      expenseBudgetCents: 5_000_00,
+      usedCents: 12_000_00,
+      weeklyBurnCents: 2_000_00,
+      targetMarginBps: 5500,
+      currentMarginBps: 5200,
+    });
+
+    expect(requireWorkspaceMembershipMock).toHaveBeenCalledWith({
+      actor,
+      workspaceId: "workspace-1",
+      allowedRoles: expect.arrayContaining(["FINANCE_STEWARD", "ADMIN"]),
+    });
+    expect(projectResult.status).toBe("ON_HOLD");
+    expect(prismaMock.practiceProject.findUnique).toHaveBeenCalledWith({
+      where: { id: "project-1" },
+      select: { id: true, workspaceId: true },
+    });
+    expect(prismaMock.practiceProject.update).toHaveBeenCalledWith({
+      where: { id: "project-1" },
+      data: expect.objectContaining({
+        code: "DPRJ-002",
+        name: "Updated project",
+        clientName: "Example",
+        status: "ON_HOLD",
+        poValueCents: 40_000_00,
+        currentMarginBps: 5200,
+      }),
+    });
+  });
+
+  it("rejects practice project updates across workspace boundaries", async () => {
+    prismaMock.practiceProject.findUnique.mockResolvedValueOnce({
+      id: "project-1",
+      workspaceId: "other-workspace",
+    });
+
+    await expect(updatePracticeProject(actor, "workspace-1", {
+      projectId: "project-1",
+      status: "CLOSED",
+    })).rejects.toMatchObject({ status: 404, code: "NOT_FOUND" });
+    expect(prismaMock.practiceProject.update).not.toHaveBeenCalled();
   });
 
   it("rejects account finance rollups across workspace boundaries", async () => {
