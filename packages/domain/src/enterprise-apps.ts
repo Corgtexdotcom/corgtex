@@ -1,6 +1,5 @@
 import type {
   AppCategory,
-  AppDefinitionStatus,
   AppHostingMode,
   AppInstallationStatus,
   AppIntegrationDepth,
@@ -34,6 +33,7 @@ const APP_MCP_TOOL_SCOPE_REQUIREMENTS: Record<string, string[]> = {
   create_expenses: ["finance:write"],
   submit_finance_entries: ["finance:write"],
 };
+const RETIRED_ENTERPRISE_APP_KEYS = new Set(["practice-ledger"]);
 
 const APP_SURFACES: AppSurface[] = ["FINANCE"];
 const APP_CATEGORIES: AppCategory[] = ["FINANCE", "KNOWLEDGE", "COMMUNICATION", "AI", "OPERATIONS", "GOVERNANCE", "DATA", "OTHER"];
@@ -95,6 +95,15 @@ function normalizeAppKey(value: string | null | undefined) {
   const appKey = text(value)?.toLowerCase();
   invariant(appKey && APP_KEY_PATTERN.test(appKey), 400, "INVALID_INPUT", "App key must be a DNS-safe app identifier.");
   return appKey;
+}
+
+function assertAppKeyIsNotRetired(appKey: string) {
+  invariant(
+    !RETIRED_ENTERPRISE_APP_KEYS.has(appKey),
+    410,
+    "APP_RETIRED",
+    "Practice Ledger is now native Finance and cannot be installed or launched as an enterprise app.",
+  );
 }
 
 function enumOrDefault<T extends string>(value: string | null | undefined, allowed: readonly T[], fallback: T) {
@@ -307,76 +316,6 @@ async function postJsonWithTimeout(url: string, params: {
   } finally {
     clearTimeout(timeout);
   }
-}
-
-function practiceLedgerDefinition() {
-  const appUrl = normalizeOptionalUrl(process.env.PRACTICE_LEDGER_APP_URL, "Practice Ledger app URL");
-  const mcpUrl = normalizeOptionalUrl(process.env.PRACTICE_LEDGER_MCP_URL, "Practice Ledger MCP URL");
-  const healthUrl = appUrl ? `${appUrl}/api/health` : null;
-  const manifest: EnterpriseAppManifest = {
-    appKey: "practice-ledger",
-    version: "0.1.0",
-    supportedSurfaces: ["FINANCE"],
-    requestedScopes: ["workspace:read", "brain:read", "brain:write", "finance:read", "finance:write"],
-    authMode: "corgtex_launch_token",
-    healthUrl: healthUrl ?? "https://practice-ledger.example.invalid/api/health",
-    mcpUrl,
-    dataClassification: "CLIENT_PRIVATE",
-    tenantMode: "multi_tenant",
-    embed: {
-      supported: true,
-      path: "/dashboard?embedded=1",
-    },
-  };
-  return {
-    appKey: "practice-ledger",
-    title: "Practice Ledger",
-    descriptionMd: "Corgtex-managed consulting finance app for budgets, billing codes, time, expenses, margin, finance intake, and MCP posting.",
-    repositoryUrl: "https://github.com/Corgtexdotcom/practice-ledger",
-    manifestUrl: appUrl ? `${appUrl}/.well-known/corgtex-app.json` : null,
-    category: "FINANCE" as AppCategory,
-    visibility: "CORGTEX_MANAGED" as AppVisibility,
-    defaultHostingMode: "CORGTEX_MANAGED_EXTERNAL" as AppHostingMode,
-    defaultIntegrationDepth: "KNOWLEDGE_SYNCED" as AppIntegrationDepth,
-    dataClassification: "CLIENT_PRIVATE",
-    supportedSurfaces: ["FINANCE"] as AppSurface[],
-    requestedScopes: manifest.requestedScopes,
-    manifestJson: manifest,
-    capabilitiesJson: [
-      { key: "expenses.create_draft", requiredScopes: ["finance:write", "brain:read", "brain:write"] },
-      { key: "time_entries.create_draft", requiredScopes: ["finance:write", "brain:read", "brain:write"] },
-      { key: "budgets.read_status", requiredScopes: ["finance:read", "brain:read"] },
-      { key: "knowledge.sync_summary", requiredScopes: ["brain:write"] },
-    ],
-  };
-}
-
-async function ensureDefaultAppDefinitions() {
-  const definition = practiceLedgerDefinition();
-  await prisma.appDefinition.upsert({
-    where: { appKey: definition.appKey },
-    create: {
-      ...definition,
-      manifestJson: toInputJson(definition.manifestJson),
-      capabilitiesJson: toInputJson(definition.capabilitiesJson),
-    },
-    update: {
-      title: definition.title,
-      descriptionMd: definition.descriptionMd,
-      repositoryUrl: definition.repositoryUrl,
-      manifestUrl: definition.manifestUrl,
-      category: definition.category,
-      visibility: definition.visibility,
-      defaultHostingMode: definition.defaultHostingMode,
-      defaultIntegrationDepth: definition.defaultIntegrationDepth,
-      dataClassification: definition.dataClassification,
-      supportedSurfaces: definition.supportedSurfaces,
-      requestedScopes: definition.requestedScopes,
-      manifestJson: toInputJson(definition.manifestJson),
-      capabilitiesJson: toInputJson(definition.capabilitiesJson),
-      status: "ACTIVE" as AppDefinitionStatus,
-    },
-  });
 }
 
 function serializeInstallation(row: EnterpriseAppInstallationRecord) {
@@ -782,16 +721,17 @@ export async function runEnterpriseAppHealthCheckJob(params: {
 }
 
 export async function listEnterpriseAppDefinitions() {
-  await ensureDefaultAppDefinitions();
   return prisma.appDefinition.findMany({
-    where: { status: "ACTIVE" },
+    where: {
+      status: "ACTIVE",
+      appKey: { notIn: [...RETIRED_ENTERPRISE_APP_KEYS] },
+    },
     orderBy: [{ category: "asc" }, { title: "asc" }],
   });
 }
 
 export async function listWorkspaceEnterpriseApps(actor: AppActor, workspaceId: string) {
   const membership = await requireWorkspaceMembership({ actor, workspaceId });
-  await ensureDefaultAppDefinitions();
   const installations = await prisma.appInstallation.findMany({
     where: { workspaceId },
     include: {
@@ -837,8 +777,8 @@ export async function installEnterpriseApp(actor: AppActor, params: {
 }) {
   const membership = await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
   assertCanManageEnterpriseApps(membership);
-  await ensureDefaultAppDefinitions();
   const appKey = normalizeAppKey(params.appKey);
+  assertAppKeyIsNotRetired(appKey);
   const definition = await prisma.appDefinition.findUnique({ where: { appKey } });
   invariant(definition, 404, "NOT_FOUND", "Enterprise app definition not found.");
   invariant(definition.status === "ACTIVE", 400, "APP_DISABLED", "Enterprise app definition is disabled.");
@@ -1786,6 +1726,13 @@ export async function getEnterpriseAppSurface(actor: AppActor, params: {
   }
 
   const row = assignment.appInstallation;
+  if (RETIRED_ENTERPRISE_APP_KEYS.has(row.appDefinition.appKey)) {
+    return {
+      mode: "native" as const,
+      surface,
+      canManage: canManageEnterpriseApps(membership),
+    };
+  }
   const reasons = unavailableReasons(row);
   const serialized = serializeInstallation(row);
   if (reasons.length > 0) {
@@ -1816,6 +1763,7 @@ export async function issueEnterpriseAppSession(actor: AppActor, params: {
   }
   const membership = await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
   const row = await getInstallation(params.workspaceId, params.appInstallationId);
+  assertAppKeyIsNotRetired(row.appDefinition.appKey);
   const reasons = unavailableReasons(row);
   invariant(reasons.length === 0, 400, "APP_RUNTIME_UNAVAILABLE", reasons.join(" "));
   const session = await createEnterpriseAppSession(actor, {
@@ -1847,11 +1795,15 @@ export async function invokeInstalledAppTool(actor: AppActor, params: {
   invariant(toolName, 400, "INVALID_INPUT", "Tool name is required.");
   const membership = await requireWorkspaceMembership({ actor, workspaceId });
   const appKey = params.appKey ? normalizeAppKey(params.appKey) : null;
+  if (appKey) {
+    assertAppKeyIsNotRetired(appKey);
+  }
   const surface = params.surface ? normalizeSurface(params.surface) : null;
   invariant(appKey || surface, 400, "INVALID_INPUT", "Provide appKey or surface.");
   const row = surface
     ? await getInstallationBySurface(workspaceId, surface)
     : await getInstallationByAppKey(workspaceId, appKey!);
+  assertAppKeyIsNotRetired(row.appDefinition.appKey);
   let requiredScopes: string[] = [];
   const auditBase = () => ({
     appKey: row.appDefinition.appKey,

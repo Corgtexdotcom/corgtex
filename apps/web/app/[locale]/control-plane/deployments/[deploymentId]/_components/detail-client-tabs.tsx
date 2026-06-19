@@ -438,15 +438,15 @@ export function CustomerDetailClientTabs({
                 )}
 
                 {canManageEnterpriseApps && (
-                  <form action={installEnterpriseAppFromControlPlaneAction} className={`${detailInnerPanelClass} grid grid-cols-1 gap-3 lg:grid-cols-5`}>
+                  <form action={installEnterpriseAppFromControlPlaneAction} className={`${detailInnerPanelClass} grid grid-cols-1 gap-3 lg:grid-cols-6`}>
                     <input type="hidden" name="deploymentId" value={customer.id} />
                     <input type="hidden" name="workspaceId" value={customer.managedWorkspaceId} />
-                    <input type="hidden" name="appKey" value="practice-ledger" />
                     <input type="hidden" name="runtimeMode" value="SELF_MANAGED_EXTERNAL" />
                     <input type="hidden" name="surface" value="FINANCE" />
+                    <input name="appKey" required placeholder="App key" className={controlPlaneInputClass} />
                     <input name="runtimeBaseUrl" placeholder="Runtime URL" className={controlPlaneInputClass} />
                     <input name="tenantExternalId" placeholder="Tenant / org id" className={controlPlaneInputClass} />
-                    <input name="launchPath" placeholder="/dashboard?embedded=1" className={controlPlaneInputClass} />
+                    <input name="launchPath" placeholder="/embedded" className={controlPlaneInputClass} />
                     <input name="reason" required placeholder="Audit reason" className={controlPlaneInputClass} />
                     <button type="submit" className={detailPrimaryButtonClass}>Install app</button>
                   </form>
