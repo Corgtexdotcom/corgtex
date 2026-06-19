@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import React, { type ReactNode } from "react";
 
 export type WorkItemTableColumn = {
   id: string;
@@ -36,11 +36,11 @@ export function WorkItemTable({
   empty?: ReactNode;
 }) {
   if (rows.length === 0) {
-    return empty ? <>{empty}</> : null;
+    return empty ? <div className="nr-workspace-table-surface">{empty}</div> : null;
   }
 
   return (
-    <div className="nr-table-wrap nr-work-item-table-wrap">
+    <div className="nr-table-wrap nr-work-item-table-wrap nr-workspace-table-surface">
       <table className="nr-table nr-work-item-table">
         <thead>
           <tr>

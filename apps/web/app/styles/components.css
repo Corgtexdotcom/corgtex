@@ -2367,16 +2367,22 @@ details[open] > .settings-disclosure-summary::before {
   }
 
   @supports selector(:has(*)) {
-    .ws-layout:has(.nr-kanban-shell) .ws-main {
+    .ws-layout:has(.nr-kanban-shell) .ws-main,
+    .ws-layout:has(.nr-workspace-table-surface) .ws-main,
+    .ws-layout:has(.ws-main-content table) .ws-main {
       min-height: 0;
       overflow-y: auto;
     }
 
-    .ws-layout:has(.nr-kanban-shell) .ws-main-content {
+    .ws-layout:has(.nr-kanban-shell) .ws-main-content,
+    .ws-layout:has(.nr-workspace-table-surface) .ws-main-content,
+    .ws-layout:has(.ws-main-content table) .ws-main-content {
       max-width: min(1760px, calc(100vw - 112px));
     }
 
-    .ws-main-content:has(.nr-kanban-shell) {
+    .ws-main-content:has(.nr-kanban-shell),
+    .ws-main-content:has(.nr-workspace-table-surface),
+    .ws-main-content:has(table) {
       max-width: min(1760px, calc(100vw - 112px));
     }
   }
