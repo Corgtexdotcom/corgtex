@@ -43,6 +43,36 @@ function parseToolResult(result) {
   return JSON.parse(text);
 }
 
+function crmVisualTargets(workspaceId, accountId) {
+  return [
+    { name: "dashboard", route: `/workspaces/${workspaceId}/leads`, selector: ".ws-section" },
+    { name: "accounts-table", route: `/workspaces/${workspaceId}/leads/accounts?view=table`, selector: ".nr-work-item-table" },
+    { name: "accounts-list", route: `/workspaces/${workspaceId}/leads/accounts?view=list`, selector: ".ws-section" },
+    { name: "pipeline-kanban", route: `/workspaces/${workspaceId}/leads/pipeline?view=kanban`, selector: ".nr-kanban", kanban: true },
+    { name: "pipeline-table", route: `/workspaces/${workspaceId}/leads/pipeline?view=table`, selector: ".nr-work-item-table" },
+    { name: "pipeline-list", route: `/workspaces/${workspaceId}/leads/pipeline?view=list`, selector: ".ws-section" },
+    { name: "activity-list", route: `/workspaces/${workspaceId}/leads/activity?view=list`, selector: ".ws-section" },
+    { name: "activity-table", route: `/workspaces/${workspaceId}/leads/activity?view=table`, selector: ".nr-work-item-table" },
+    { name: "suggestions-list", route: `/workspaces/${workspaceId}/leads/suggestions?view=list`, selector: ".ws-section" },
+    { name: "suggestions-table", route: `/workspaces/${workspaceId}/leads/suggestions?view=table`, selector: ".nr-work-item-table" },
+    { name: "suggestions-kanban", route: `/workspaces/${workspaceId}/leads/suggestions?view=kanban`, selector: ".nr-kanban", kanban: true },
+    { name: "account-detail-pipeline", route: `/workspaces/${workspaceId}/leads/accounts/${accountId}?view=pipeline`, selector: ".nr-kanban", kanban: true },
+  ];
+}
+
+function crmScreenshotFileName(targetName, theme) {
+  return `${targetName}-${theme}.png`;
+}
+
+function evaluateKanbanSnapshot(snapshot) {
+  if (!snapshot?.boardVisible) return "Kanban board was not visible.";
+  if (snapshot.cardCount < 1) return "Kanban board did not render any visible cards.";
+  if (snapshot.clippedWithoutPageScrollCount > 0) {
+    return `${snapshot.clippedWithoutPageScrollCount} Kanban card(s) extended below the viewport while the page could not scroll.`;
+  }
+  return null;
+}
+
 function crmPageContext(workspaceId, account, activityId = null, title = null) {
   return {
     surface: "crm",
@@ -234,24 +264,83 @@ class CrmSmoke {
     });
   }
 
+  async applyTheme(page, theme) {
+    await page.evaluate((selectedTheme) => {
+      window.localStorage.setItem("theme", selectedTheme);
+      document.documentElement.classList.toggle("dark", selectedTheme === "dark");
+      document.documentElement.style.colorScheme = selectedTheme;
+    }, theme);
+    await page.waitForTimeout(150);
+  }
+
+  async kanbanSnapshot(page) {
+    return page.evaluate(() => {
+      const board = document.querySelector(".nr-kanban");
+      const boardRect = board?.getBoundingClientRect();
+      const scrollingElement = document.scrollingElement || document.documentElement;
+      const viewportHeight = window.innerHeight;
+      const scrollHeight = scrollingElement?.scrollHeight ?? document.documentElement.scrollHeight;
+      const hasScrollableAncestor = (element) => {
+        let current = element.parentElement;
+        while (current && current !== document.body && current !== document.documentElement) {
+          const style = window.getComputedStyle(current);
+          const canScrollY = /(auto|scroll)/.test(style.overflowY);
+          if (canScrollY && current.scrollHeight > current.clientHeight + 1) return true;
+          current = current.parentElement;
+        }
+        return scrollHeight > viewportHeight + 1;
+      };
+      const cardSnapshots = Array.from(document.querySelectorAll(".nr-kanban-draggable"))
+        .map((card) => {
+          const rect = card.getBoundingClientRect();
+          const style = window.getComputedStyle(card);
+          return {
+            width: rect.width,
+            height: rect.height,
+            top: rect.top,
+            bottom: rect.bottom,
+            hasScrollPath: hasScrollableAncestor(card),
+            visible: rect.width > 0 && rect.height > 0 && style.display !== "none" && style.visibility !== "hidden" && style.opacity !== "0",
+          };
+        })
+        .filter((card) => card.visible);
+      return {
+        boardVisible: Boolean(boardRect && boardRect.width > 0 && boardRect.height > 0),
+        cardCount: cardSnapshots.length,
+        clippedWithoutPageScrollCount: cardSnapshots.filter((card) => card.bottom > viewportHeight + 1 && !card.hasScrollPath).length,
+      };
+    });
+  }
+
+  async assertKanbanVisible(page, name) {
+    await page.locator(".nr-kanban").first().waitFor({ state: "visible", timeout: 10_000 });
+    const firstCard = page.locator(".nr-kanban-draggable").first();
+    await firstCard.waitFor({ state: "visible", timeout: 10_000 });
+    await firstCard.scrollIntoViewIfNeeded();
+    const snapshot = await this.kanbanSnapshot(page);
+    const issue = evaluateKanbanSnapshot(snapshot);
+    assert(!issue, `${name}: ${issue}`);
+  }
+
   async verifyPages(page, account) {
-    const routes = [
-      ["dashboard", `/workspaces/${this.workspaceId}/leads`],
-      ["accounts", `/workspaces/${this.workspaceId}/leads/accounts`],
-      ["pipeline", `/workspaces/${this.workspaceId}/leads/pipeline`],
-      ["activity", `/workspaces/${this.workspaceId}/leads/activity`],
-      ["suggestions", `/workspaces/${this.workspaceId}/leads/suggestions`],
-      ["account-detail", `/workspaces/${this.workspaceId}/leads/accounts/${account.id}`],
-    ];
-    for (const [name, route] of routes) {
-      const response = await page.goto(`${this.baseUrl}${route}`, { waitUntil: "networkidle", timeout: 30_000 });
-      assert((response?.status() ?? 0) < 400, `${name} returned HTTP ${response?.status() ?? 0}`);
-      if (name === "account-detail") {
-        await page.getByText(account.name, { exact: false }).first().waitFor({ timeout: 10_000 });
+    const targets = crmVisualTargets(this.workspaceId, account.id);
+    const screenshots = [];
+    for (const theme of ["light", "dark"]) {
+      for (const target of targets) {
+        const response = await page.goto(`${this.baseUrl}${target.route}`, { waitUntil: "networkidle", timeout: 30_000 });
+        assert((response?.status() ?? 0) < 400, `${target.name} returned HTTP ${response?.status() ?? 0}`);
+        await this.applyTheme(page, theme);
+        await page.locator(target.selector).first().waitFor({ state: "visible", timeout: 10_000 });
+        if (target.name === "account-detail-pipeline") {
+          await page.getByText(account.name, { exact: false }).first().waitFor({ timeout: 10_000 });
+        }
+        if (target.kanban) await this.assertKanbanVisible(page, target.name);
+        const fileName = crmScreenshotFileName(target.name, theme);
+        await page.screenshot({ path: path.join(this.outDir, fileName), fullPage: true }).catch(() => null);
+        screenshots.push(fileName);
       }
-      await page.screenshot({ path: path.join(this.outDir, `${name}.png`), fullPage: true }).catch(() => null);
     }
-    this.record("CRM pages", { checked: routes.map(([name]) => name) });
+    this.record("CRM visual pages", { checked: targets.map((target) => target.name), themes: ["light", "dark"], screenshots });
   }
 
   async dueWorkContains(accountId, activityId, title, dueTo) {
@@ -432,4 +521,14 @@ if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) 
   });
 }
 
-export { CrmSmoke, crmPageContext, normalizeBaseUrl, parseSetCookie, parseToolResult, usage };
+export {
+  CrmSmoke,
+  crmPageContext,
+  crmScreenshotFileName,
+  crmVisualTargets,
+  evaluateKanbanSnapshot,
+  normalizeBaseUrl,
+  parseSetCookie,
+  parseToolResult,
+  usage,
+};
