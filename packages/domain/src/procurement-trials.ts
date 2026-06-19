@@ -896,15 +896,6 @@ async function createActiveTrial(params: {
           minApproverCount: 1,
           decisionWindowHours: 72,
         },
-        {
-          workspaceId: workspace.id,
-          subjectType: "SPEND",
-          mode: "SINGLE",
-          quorumPercent: 0,
-          minApproverCount: 1,
-          decisionWindowHours: 72,
-          requireProposalLink: false,
-        },
       ],
     });
 

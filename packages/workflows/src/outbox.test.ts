@@ -25,11 +25,11 @@ describe("deriveJobsForEvent", () => {
     ]);
   });
 
-  it("creates triage jobs for submitted work", () => {
+  it("creates triage jobs for submitted proposals", () => {
     const createdAt = new Date("2026-04-03T12:03:30.000Z");
     const jobs = deriveJobsForEvent({
       id: "event-2",
-      type: "spend.submitted",
+      type: "proposal.submitted",
       workspaceId: "workspace-1",
       payload: {},
       createdAt,
@@ -155,26 +155,6 @@ describe("deriveJobsForEvent", () => {
       payload: { proposalId: "proposal-1" },
       dedupeKey: "event-proposal-opened:knowledge-sync",
     });
-  });
-
-  it("creates reconciliation prep jobs for paid spends", () => {
-    const jobs = deriveJobsForEvent({
-      id: "event-5",
-      type: "spend.paid",
-      workspaceId: "workspace-1",
-      payload: {
-        spendId: "spend-1",
-      },
-    });
-
-    expect(jobs).toHaveLength(2);
-    expect(jobs[0]).toMatchObject({
-      type: "agent.finance-reconciliation-prep",
-      payload: {
-        spendId: "spend-1",
-      },
-    });
-    expect(jobs[1]?.type).toBe("knowledge.sync.event");
   });
 
   it("creates CRM email extraction jobs for inbound reply qualifications", () => {
@@ -323,29 +303,6 @@ describe("deriveNotificationsForEvent", () => {
         entityId: "proposal-1",
         title: "Proposal for review: Hire a PM for growth",
         bodyMd: "The proposal **Hire a PM for growth** is awaiting approval.",
-      },
-    ]);
-  });
-
-  it("creates a notification for spend.opened events", () => {
-    const notifications = deriveNotificationsForEvent({
-      type: "spend.opened",
-      workspaceId: "workspace-1",
-      aggregateType: "SpendRequest",
-      aggregateId: "spend-1",
-      payload: {
-        spendId: "spend-1",
-        title: "AWS hosting for Q3",
-      },
-    });
-
-    expect(notifications).toEqual([
-      {
-        type: "spend.opened",
-        entityType: "SpendRequest",
-        entityId: "spend-1",
-        title: "Spend review: AWS hosting for Q3",
-        bodyMd: "The spend request **AWS hosting for Q3** is awaiting finance review.",
       },
     ]);
   });

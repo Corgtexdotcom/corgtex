@@ -4,7 +4,6 @@ import type {
   ApprovalFlowStatus,
   ApprovalMode,
   ApprovalPolicy,
-  MemberRole,
   Prisma,
 } from "@prisma/client";
 import { prisma } from "@corgtex/shared";
@@ -148,18 +147,11 @@ function validateDecisionChoice(mode: ApprovalMode, choice: ApprovalDecisionChoi
   );
 }
 
-async function eligibleApproverIds(tx: Prisma.TransactionClient, workspaceId: string, subjectType: string): Promise<string[]> {
-  let roles: MemberRole[] | undefined;
-
-  if (subjectType === "SPEND") {
-    roles = ["FINANCE_STEWARD", "ADMIN"];
-  }
-
+async function eligibleApproverIds(tx: Prisma.TransactionClient, workspaceId: string): Promise<string[]> {
   const members = await tx.member.findMany({
     where: {
       workspaceId,
       isActive: true,
-      role: roles ? { in: roles } : undefined,
     },
     select: {
       id: true,
@@ -292,19 +284,6 @@ async function applySubjectOutcome(tx: Prisma.TransactionClient, params: {
     });
   }
 
-  if (params.status === "APPROVED" && params.flow.subjectType === "SPEND") {
-    await tx.spendRequest.update({
-      where: { id: params.flow.subjectId },
-      data: { status: "RESOLVED", resolutionOutcome: "APPROVED" },
-    });
-  }
-
-  if (params.status === "REJECTED" && params.flow.subjectType === "SPEND") {
-    await tx.spendRequest.update({
-      where: { id: params.flow.subjectId },
-      data: { status: "RESOLVED", resolutionOutcome: "REJECTED" },
-    });
-  }
 }
 
 async function finalizeApprovalFlow(tx: Prisma.TransactionClient, params: {
@@ -446,27 +425,14 @@ export async function listActionableApprovalFlows(
   const proposalIds = flows
     .filter((flow) => flow.subjectType === "PROPOSAL")
     .map((flow) => flow.subjectId);
-  const spendIds = flows
-    .filter((flow) => flow.subjectType === "SPEND")
-    .map((flow) => flow.subjectId);
-
-  const [proposals, spends] = await Promise.all([
-    proposalIds.length > 0
-      ? prisma.proposal.findMany({
-        where: { id: { in: proposalIds } },
-        select: { id: true, title: true, status: true, isPrivate: true, archivedAt: true },
-      })
-      : Promise.resolve([]),
-    spendIds.length > 0
-      ? prisma.spendRequest.findMany({
-        where: { id: { in: spendIds } },
-        select: { id: true, description: true, status: true, archivedAt: true },
-      })
-      : Promise.resolve([]),
-  ]);
+  const proposals = proposalIds.length > 0
+    ? await prisma.proposal.findMany({
+      where: { id: { in: proposalIds } },
+      select: { id: true, title: true, status: true, isPrivate: true, archivedAt: true },
+    })
+    : [];
 
   const proposalById = new Map(proposals.map((proposal) => [proposal.id, proposal]));
-  const spendById = new Map(spends.map((spend) => [spend.id, spend]));
   const actionable: ActionableApprovalFlow[] = [];
 
   for (const flow of flows) {
@@ -476,12 +442,6 @@ export async function listActionableApprovalFlows(
         continue;
       }
       actionable.push({ ...flow, subjectLabel: proposal.title });
-    } else if (flow.subjectType === "SPEND") {
-      const spend = spendById.get(flow.subjectId);
-      if (!spend || spend.archivedAt || spend.status !== "OPEN") {
-        continue;
-      }
-      actionable.push({ ...flow, subjectLabel: spend.description });
     }
   }
 
@@ -607,7 +567,7 @@ export async function recordApprovalDecision(actor: AppActor, params: {
     const flow = await loadFlow(tx, current.id);
     invariant(flow, 404, "NOT_FOUND", "Approval flow not found.");
 
-    const approverIds = await eligibleApproverIds(tx, params.workspaceId, flow.subjectType);
+    const approverIds = await eligibleApproverIds(tx, params.workspaceId);
     const outcome = calculateApprovalOutcome({
       mode: flow.mode,
       quorumPercent: flow.quorumPercent,
@@ -750,7 +710,7 @@ export async function createObjection(actor: AppActor, params: {
 
     const refreshed = await loadFlow(tx, flow.id);
     invariant(refreshed, 404, "NOT_FOUND", "Approval flow not found.");
-    const approverIds = await eligibleApproverIds(tx, params.workspaceId, refreshed.subjectType);
+    const approverIds = await eligibleApproverIds(tx, params.workspaceId);
     const outcome = calculateApprovalOutcome({
       mode: refreshed.mode,
       quorumPercent: refreshed.quorumPercent,
@@ -852,7 +812,7 @@ export async function resolveObjection(actor: AppActor, params: {
 
     const refreshed = await loadFlow(tx, flow.id);
     invariant(refreshed, 404, "NOT_FOUND", "Approval flow not found.");
-    const approverIds = await eligibleApproverIds(tx, params.workspaceId, refreshed.subjectType);
+    const approverIds = await eligibleApproverIds(tx, params.workspaceId);
     const outcome = calculateApprovalOutcome({
       mode: refreshed.mode,
       quorumPercent: refreshed.quorumPercent,
@@ -927,7 +887,7 @@ export async function finalizeExpiredApprovalFlows(batchSize = EXPIRING_FLOW_BAT
         continue;
       }
 
-      const approverIds = await eligibleApproverIds(tx, flow.workspaceId, flow.subjectType);
+      const approverIds = await eligibleApproverIds(tx, flow.workspaceId);
       const outcome = calculateApprovalOutcome({
         mode: flow.mode,
         quorumPercent: flow.quorumPercent,

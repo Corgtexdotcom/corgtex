@@ -38,9 +38,6 @@ const prismaMock = {
     update: vi.fn(),
     updateMany: vi.fn(),
   },
-  spendRequest: {
-    findMany: vi.fn(),
-  },
   policyCorpus: {
     findUnique: vi.fn(),
   },
@@ -167,7 +164,6 @@ describe("agent runtime", () => {
         knowledge: [],
       };
     });
-    prismaMock.spendRequest.findMany.mockReset().mockResolvedValue([]);
     prismaMock.policyCorpus.findUnique.mockReset().mockResolvedValue(null);
     prismaMock.workspaceAgentConfig.findUnique.mockReset().mockResolvedValue(null);
     prismaMock.event.create.mockReset().mockResolvedValue({ id: "event-1" });

@@ -59,18 +59,6 @@ export function deriveNotificationsForEvent(event: {
     }] satisfies NotificationDraft[];
   }
 
-  if (event.type === "spend.submitted" || event.type === "spend.opened") {
-    return [{
-      type: event.type,
-      entityType,
-      entityId,
-      title: title ? `Spend review: ${title}` : "Spend request submitted for review",
-      bodyMd: title
-        ? `The spend request **${title}** is awaiting finance review.`
-        : "A spend request is awaiting finance review in the workspace dashboard.",
-    }] satisfies NotificationDraft[];
-  }
-
   if (event.type === "meeting.created") {
     return [{
       type: event.type,
@@ -123,4 +111,3 @@ export function deriveNotificationsForEvent(event: {
 
   return [] satisfies NotificationDraft[];
 }
-

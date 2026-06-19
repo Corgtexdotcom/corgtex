@@ -19,21 +19,6 @@ const { prismaMock, storageDeleteMock } = vi.hoisted(() => {
       update: vi.fn(),
       updateMany: vi.fn(),
     },
-    spendRequest: {
-      findFirst: vi.fn(),
-      count: vi.fn(),
-      update: vi.fn(),
-      delete: vi.fn(),
-    },
-    ledgerAccount: {
-      findFirst: vi.fn(),
-      count: vi.fn(),
-      update: vi.fn(),
-      delete: vi.fn(),
-    },
-    ledgerEntry: {
-      count: vi.fn(),
-    },
     member: {
       findUnique: vi.fn(),
     },
@@ -205,29 +190,6 @@ describe("workspace archive domain", () => {
     });
   });
 
-  it("refuses to purge submitted spend requests", async () => {
-    prismaMock.spendRequest.findFirst.mockResolvedValue({
-      id: "spend-1",
-      workspaceId: "workspace-1",
-      description: "Submitted spend",
-      archivedAt: new Date("2026-04-25T12:00:00.000Z"),
-      status: "OPEN",
-    });
-    prismaMock.workspaceArchiveRecord.findFirst.mockResolvedValue({ id: "archive-1" });
-
-    const { purgeWorkspaceArtifact } = await import("./archive");
-    await expect(purgeWorkspaceArtifact(actor, {
-      workspaceId: "workspace-1",
-      entityType: "SpendRequest",
-      entityId: "spend-1",
-      reason: "mistake",
-    })).rejects.toMatchObject({
-      status: 400,
-      code: "INVALID_STATE",
-    });
-    expect(prismaMock.spendRequest.delete).not.toHaveBeenCalled();
-  });
-
   it("purges work item version snapshots when purging a work item", async () => {
     const action = {
       id: "action-1",
@@ -256,129 +218,6 @@ describe("workspace archive domain", () => {
       },
     });
     expect(prismaMock.action.delete).toHaveBeenCalledWith({ where: { id: "action-1" } });
-  });
-
-  it("lets requesters archive only their own draft spend requests", async () => {
-    prismaMock.member.findUnique.mockResolvedValue({
-      id: "member-1",
-      workspaceId: "workspace-1",
-      userId: "requester-1",
-      role: "CONTRIBUTOR",
-      isActive: true,
-    });
-    prismaMock.spendRequest.findFirst.mockResolvedValue({
-      id: "spend-1",
-      workspaceId: "workspace-1",
-      requesterUserId: "requester-1",
-      description: "Draft spend",
-      archivedAt: null,
-      status: "DRAFT",
-    });
-    prismaMock.spendRequest.update.mockResolvedValue({ id: "spend-1", archivedAt: new Date("2026-04-25T12:00:00.000Z") });
-
-    const { archiveWorkspaceArtifact } = await import("./archive");
-    await expect(archiveWorkspaceArtifact(contributorActor, {
-      workspaceId: "workspace-1",
-      entityType: "SpendRequest",
-      entityId: "spend-1",
-      reason: "mistake",
-    })).resolves.toMatchObject({ id: "spend-1" });
-
-    expect(prismaMock.spendRequest.update).toHaveBeenCalledWith(expect.objectContaining({
-      where: { id: "spend-1" },
-      data: expect.objectContaining({
-        archivedByUserId: "requester-1",
-      }),
-    }));
-  });
-
-  it("blocks contributors from archiving another requester's draft spend", async () => {
-    prismaMock.member.findUnique.mockResolvedValue({
-      id: "member-1",
-      workspaceId: "workspace-1",
-      userId: "requester-1",
-      role: "CONTRIBUTOR",
-      isActive: true,
-    });
-    prismaMock.spendRequest.findFirst.mockResolvedValue({
-      id: "spend-1",
-      workspaceId: "workspace-1",
-      requesterUserId: "requester-2",
-      description: "Other draft spend",
-      archivedAt: null,
-      status: "DRAFT",
-    });
-
-    const { archiveWorkspaceArtifact } = await import("./archive");
-    await expect(archiveWorkspaceArtifact(contributorActor, {
-      workspaceId: "workspace-1",
-      entityType: "SpendRequest",
-      entityId: "spend-1",
-      reason: "mistake",
-    })).rejects.toMatchObject({
-      status: 403,
-      code: "FORBIDDEN",
-    });
-    expect(prismaMock.spendRequest.update).not.toHaveBeenCalled();
-  });
-
-  it("blocks contributors from archiving their own non-draft spend", async () => {
-    prismaMock.member.findUnique.mockResolvedValue({
-      id: "member-1",
-      workspaceId: "workspace-1",
-      userId: "requester-1",
-      role: "CONTRIBUTOR",
-      isActive: true,
-    });
-    prismaMock.spendRequest.findFirst.mockResolvedValue({
-      id: "spend-1",
-      workspaceId: "workspace-1",
-      requesterUserId: "requester-1",
-      description: "Submitted spend",
-      archivedAt: null,
-      status: "OPEN",
-    });
-
-    const { archiveWorkspaceArtifact } = await import("./archive");
-    await expect(archiveWorkspaceArtifact(contributorActor, {
-      workspaceId: "workspace-1",
-      entityType: "SpendRequest",
-      entityId: "spend-1",
-      reason: "mistake",
-    })).rejects.toMatchObject({
-      status: 403,
-      code: "FORBIDDEN",
-    });
-    expect(prismaMock.spendRequest.update).not.toHaveBeenCalled();
-  });
-
-  it("lets finance stewards archive submitted spend requests", async () => {
-    prismaMock.member.findUnique.mockResolvedValue({
-      id: "member-1",
-      workspaceId: "workspace-1",
-      userId: "requester-1",
-      role: "FINANCE_STEWARD",
-      isActive: true,
-    });
-    prismaMock.spendRequest.findFirst.mockResolvedValue({
-      id: "spend-1",
-      workspaceId: "workspace-1",
-      requesterUserId: "requester-2",
-      description: "Submitted spend",
-      archivedAt: null,
-      status: "OPEN",
-    });
-    prismaMock.spendRequest.update.mockResolvedValue({ id: "spend-1", archivedAt: new Date("2026-04-25T12:00:00.000Z") });
-
-    const { archiveWorkspaceArtifact } = await import("./archive");
-    await expect(archiveWorkspaceArtifact(contributorActor, {
-      workspaceId: "workspace-1",
-      entityType: "SpendRequest",
-      entityId: "spend-1",
-      reason: "finance cleanup",
-    })).resolves.toMatchObject({ id: "spend-1" });
-
-    expect(prismaMock.spendRequest.update).toHaveBeenCalled();
   });
 
   it("lists active archive records by default", async () => {

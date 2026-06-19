@@ -7,7 +7,6 @@ export function triageBucketStart(date: Date) {
 
 const TRIAGE_EVENT_TYPES = new Set([
   "proposal.submitted",
-  "spend.submitted",
   "meeting.created",
   "meeting.transcript-uploaded",
   "action.created",
@@ -22,9 +21,6 @@ const KNOWLEDGE_PULSE_EVENT_TYPES = new Set([
   "proposal.opened",
   "proposal.approved",
   "document.created",
-  "spend.created",
-  "spend.submitted",
-  "spend.paid",
   "meeting.created",
   "meeting.transcript-uploaded",
   "approval.finalized",
@@ -306,21 +302,6 @@ export function deriveJobsForEvent(event: {
         dedupeKey: `${event.id}:document-knowledge-sync`,
       });
       pushContextGraphSync("DOCUMENT", payload.documentId, `${event.id}:document-knowledge-sync`);
-    }
-  }
-
-  if (event.type === "spend.paid") {
-    const payload = event.payload as { spendId?: string };
-    if (payload.spendId && event.workspaceId) {
-      jobs.push({
-        workspaceId: event.workspaceId,
-        eventId: event.id,
-        type: "agent.finance-reconciliation-prep",
-        payload: {
-          spendId: payload.spendId,
-        },
-        dedupeKey: `${event.id}:finance-reconciliation-prep`,
-      });
     }
   }
 

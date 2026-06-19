@@ -26,15 +26,13 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
       prompt?: unknown;
       meetingId?: unknown;
       proposalId?: unknown;
-      spendId?: unknown;
     };
     const job = await triggerAgentRun(actor, {
       workspaceId,
-      agentKey: String(body.agentKey ?? "") as "inbox-triage" | "meeting-summary" | "action-extraction" | "proposal-drafting" | "constitution-update-trigger" | "finance-reconciliation-prep",
+      agentKey: String(body.agentKey ?? "") as "inbox-triage" | "meeting-summary" | "action-extraction" | "proposal-drafting" | "constitution-update-trigger",
       prompt: typeof body.prompt === "string" ? body.prompt : null,
       meetingId: typeof body.meetingId === "string" ? body.meetingId : null,
       proposalId: typeof body.proposalId === "string" ? body.proposalId : null,
-      spendId: typeof body.spendId === "string" ? body.spendId : null,
     });
     return NextResponse.json({ job }, { status: 201 });
   } catch (error) {

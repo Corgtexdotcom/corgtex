@@ -106,24 +106,6 @@ enum ApprovalDecisionChoice {
   BLOCK
 }
 
-enum SpendStatus {
-  DRAFT
-  OPEN
-  RESOLVED
-}
-
-enum SpendResolutionOutcome {
-  APPROVED
-  REJECTED
-  WITHDRAWN
-}
-
-enum SpendReconciliationStatus {
-  PENDING
-  STATEMENT_ATTACHED
-  RECONCILED
-}
-
 enum CycleStatus {
   PLANNED
   OPEN_UPDATES
@@ -564,9 +546,6 @@ model Workspace {
   approvalFlows                  ApprovalFlow[]
   approvalPolicy                 ApprovalPolicy[]
   cycles                         Cycle[]
-  ledgerAccounts                 LedgerAccount[]
-  ledgerEntries                  LedgerEntry[]
-  spendRequests                  SpendRequest[]
   meetings                       Meeting[]
   meetingSeries                  MeetingSeries[]
   documents                      Document[]
@@ -950,8 +929,6 @@ model User {
   authoredActions               Action[]                       @relation("ActionAuthor")
   authoredTensions              Tension[]                      @relation("TensionAuthor")
   authoredProposals             Proposal[]                     @relation("ProposalAuthor")
-  spendRequests                 SpendRequest[]                 @relation("SpendRequester")
-  spendComments                 SpendComment[]                 @relation("SpendCommentAuthor")
   cycleUpdates                  CycleUpdate[]
   allocationsFrom               Allocation[]                   @relation("AllocFrom")
   allocationsTo                 Allocation[]                   @relation("AllocTo")
@@ -1736,7 +1713,6 @@ model Proposal {
   author        User                @relation("ProposalAuthor", fields: [authorUserId], references: [id], onDelete: Restrict)
   circle        Circle?             @relation(fields: [circleId], references: [id], onDelete: SetNull)
   meeting       Meeting?            @relation(fields: [meetingId], references: [id], onDelete: SetNull)
-  spendLinks    SpendProposalLink[]
   policyCorpus  PolicyCorpus?
   actions       Action[]
   tensions      Tension[]
@@ -1750,7 +1726,7 @@ model Proposal {
 model DeliberationEntry {
   id             String    @id @default(uuid())
   workspaceId    String
-  parentType     String // "PROPOSAL" | "SPEND" | "TENSION" | "MEETING" | "BRAIN_ARTICLE"
+  parentType     String // "PROPOSAL" | "TENSION" | "MEETING" | "BRAIN_ARTICLE" | "ACTION"
   parentId       String
   parentVersion  Int?
   authorUserId   String
@@ -1941,110 +1917,6 @@ model PracticeProject {
   @@unique([workspaceId, sourceSatelliteId])
   @@index([workspaceId, status])
   @@index([workspaceId, crmAccountId])
-}
-
-model LedgerAccount {
-  id               String    @id @default(uuid())
-  workspaceId      String
-  name             String
-  currency         String
-  type             String    @default("MANUAL")
-  balanceCents     Int       @default(0)
-  archivedAt       DateTime?
-  archivedByUserId String?
-  archiveReason    String?
-  createdAt        DateTime  @default(now())
-  updatedAt        DateTime  @updatedAt
-
-  workspace     Workspace      @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-  entries       LedgerEntry[]
-  spendRequests SpendRequest[]
-
-  @@index([workspaceId, archivedAt])
-}
-
-model LedgerEntry {
-  id            String   @id @default(uuid())
-  workspaceId   String
-  accountId     String
-  type          String
-  amountCents   Int
-  currency      String
-  description   String
-  referenceType String?
-  referenceId   String?
-  effectiveAt   DateTime
-  createdAt     DateTime @default(now())
-
-  workspace Workspace     @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-  account   LedgerAccount @relation(fields: [accountId], references: [id], onDelete: Cascade)
-
-  @@index([workspaceId, effectiveAt])
-}
-
-model SpendRequest {
-  id                   String                    @id @default(uuid())
-  workspaceId          String
-  requesterUserId      String
-  status               SpendStatus               @default(DRAFT)
-  version              Int                       @default(1)
-  resolutionOutcome    SpendResolutionOutcome?
-  amountCents          Int
-  currency             String
-  category             String
-  description          String
-  vendor               String?
-  receiptUrl           String?
-  spentAt              DateTime?
-  ledgerAccountId      String?
-  reconciliationStatus SpendReconciliationStatus @default(PENDING)
-  reconciliationNote   String?
-  statementStorageKey  String?
-  statementFileName    String?
-  statementMimeType    String?
-  statementUploadedAt  DateTime?
-  reconciledAt         DateTime?
-  archivedAt           DateTime?
-  archivedByUserId     String?
-  archiveReason        String?
-  createdAt            DateTime                  @default(now())
-  updatedAt            DateTime                  @updatedAt
-
-  workspace     Workspace           @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-  requester     User                @relation("SpendRequester", fields: [requesterUserId], references: [id], onDelete: Restrict)
-  ledgerAccount LedgerAccount?      @relation(fields: [ledgerAccountId], references: [id], onDelete: SetNull)
-  proposalLinks SpendProposalLink[]
-  comments      SpendComment[]
-
-  @@index([workspaceId, status])
-  @@index([workspaceId, reconciliationStatus])
-  @@index([workspaceId, archivedAt])
-}
-
-model SpendProposalLink {
-  id         String @id @default(uuid())
-  spendId    String
-  proposalId String
-
-  spend    SpendRequest @relation(fields: [spendId], references: [id], onDelete: Cascade)
-  proposal Proposal     @relation(fields: [proposalId], references: [id], onDelete: Cascade)
-
-  @@unique([spendId, proposalId])
-}
-
-model SpendComment {
-  id           String    @id @default(uuid())
-  spendId      String
-  authorUserId String
-  bodyMd       String    @db.Text
-  isObjection  Boolean   @default(false)
-  resolvedAt   DateTime?
-  createdAt    DateTime  @default(now())
-
-  spend  SpendRequest @relation(fields: [spendId], references: [id], onDelete: Cascade)
-  author User         @relation(fields: [authorUserId], references: [id], onDelete: Restrict, name: "SpendCommentAuthor")
-
-  @@index([spendId, createdAt])
 }
 
 enum MeetingStatus {

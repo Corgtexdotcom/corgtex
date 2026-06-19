@@ -108,9 +108,6 @@ const { prismaMock, state } = vi.hoisted(() => {
         return Object.fromEntries(Object.keys(select).map((field) => [field, (action as any)[field]]));
       }),
     },
-    spendRequest: {
-      findUnique: vi.fn(async () => null),
-    },
     meeting: {
       findUnique: vi.fn(async () => null),
     },

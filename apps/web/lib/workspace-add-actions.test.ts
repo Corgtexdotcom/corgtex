@@ -99,10 +99,8 @@ describe("workspace add actions", () => {
   });
 
   it("uses tab and view context for multi-surface pages", () => {
-    expect(kinds({ pathname: "/workspaces/ws-1/finance", searchParams: "tab=accounts" })).toEqual([
-      "spend",
-      "ledger_account",
-    ]);
+    expect(kinds({ pathname: "/workspaces/ws-1/finance" })).toEqual([]);
+    expect(kinds({ pathname: "/workspaces/ws-1/finance", searchParams: "tab=accounts" })).toEqual([]);
     expect(kinds({ pathname: "/workspaces/ws-1/leads", searchParams: "view=pipeline" })).toEqual(["deal"]);
     expect(kinds({ pathname: "/workspaces/ws-1/leads", searchParams: "view=instances" })).toEqual(["prospect_instance"]);
   });

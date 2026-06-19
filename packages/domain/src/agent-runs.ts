@@ -11,14 +11,12 @@ export type AgentKey =
   | "proposal-drafting"
   | "constitution-update-trigger"
   | "constitution-synthesis"
-  | "finance-reconciliation-prep"
   | "brain-absorb"
   | "company-understanding"
   | "brain-maintenance"
   | "advice-routing"
   | "process-linting"
   | "daily-check-in"
-  | "spend-submission"
   | "slack-agent"
   | "crm-email-extraction"
   | "crm-drip-followup"
@@ -38,8 +36,6 @@ function jobTypeForAgent(agentKey: AgentKey) {
       return "agent.constitution-update-trigger";
     case "constitution-synthesis":
       return "agent.constitution-synthesis";
-    case "finance-reconciliation-prep":
-      return "agent.finance-reconciliation-prep";
     case "brain-absorb":
       return "agent.brain-absorb";
     case "company-understanding":
@@ -52,8 +48,6 @@ function jobTypeForAgent(agentKey: AgentKey) {
       return "agent.process-linting";
     case "daily-check-in":
       return "agent.daily-check-in";
-    case "spend-submission":
-      return "agent.spend-submission";
     case "slack-agent":
       return "communication.slack.agent";
     case "crm-email-extraction":
@@ -113,7 +107,6 @@ export async function triggerAgentRun(actor: AppActor, params: {
   prompt?: string | null;
   meetingId?: string | null;
   proposalId?: string | null;
-  spendId?: string | null;
 }) {
   await requireWorkspaceMembership({
     actor,
@@ -146,7 +139,6 @@ export async function triggerAgentRun(actor: AppActor, params: {
           prompt: params.prompt?.trim() || null,
           meetingId: params.meetingId?.trim() || null,
           proposalId: params.proposalId?.trim() || null,
-          spendId: params.spendId?.trim() || null,
         },
       },
       select: {
@@ -169,7 +161,6 @@ export async function triggerAgentRun(actor: AppActor, params: {
           prompt: params.prompt?.trim() || null,
           meetingId: params.meetingId?.trim() || null,
           proposalId: params.proposalId?.trim() || null,
-          spendId: params.spendId?.trim() || null,
         },
       },
     });

@@ -70,14 +70,17 @@ describe("deriveJobsForEvent edge cases", () => {
     });
     const secondJobs = deriveJobsForEvent({
       id: "evt-6",
-      type: "spend.submitted",
+      type: "tension.created",
       workspaceId: "ws-1",
-      payload: {},
+      payload: { tensionId: "tension-1" },
       createdAt: secondTime,
     });
 
-    expect(firstJobs[0]?.dedupeKey).toBe(`ws-1:triage:${triageBucketStart(firstTime).toISOString()}`);
-    expect(secondJobs[0]?.dedupeKey).toBe(firstJobs[0]?.dedupeKey);
+    const firstTriageJob = firstJobs.find((job) => job.type === "agent.inbox-triage");
+    const secondTriageJob = secondJobs.find((job) => job.type === "agent.inbox-triage");
+
+    expect(firstTriageJob?.dedupeKey).toBe(`ws-1:triage:${triageBucketStart(firstTime).toISOString()}`);
+    expect(secondTriageJob?.dedupeKey).toBe(firstTriageJob?.dedupeKey);
   });
 
   it("creates a new triage key when events cross the coalescing window", () => {

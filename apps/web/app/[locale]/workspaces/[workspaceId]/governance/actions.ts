@@ -93,11 +93,10 @@ export async function triggerAgentRunAction(formData: FormData) {
   const workspaceId = asString(formData, "workspaceId");
   await triggerAgentRun(actor, {
     workspaceId,
-    agentKey: asString(formData, "agentKey") as "inbox-triage" | "meeting-summary" | "action-extraction" | "proposal-drafting" | "constitution-update-trigger" | "constitution-synthesis" | "finance-reconciliation-prep",
+    agentKey: asString(formData, "agentKey") as "inbox-triage" | "meeting-summary" | "action-extraction" | "proposal-drafting" | "constitution-update-trigger" | "constitution-synthesis",
     prompt: asOptional(formData, "prompt"),
     meetingId: asOptional(formData, "meetingId"),
     proposalId: asOptional(formData, "proposalId"),
-    spendId: asOptional(formData, "spendId"),
   });
   refresh(workspaceId);
 }
