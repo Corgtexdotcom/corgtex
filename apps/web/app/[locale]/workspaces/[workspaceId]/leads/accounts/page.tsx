@@ -5,9 +5,11 @@ import { WorkItemTable, type WorkItemTableColumn, type WorkItemTableRow } from "
 import { requireWorkspaceFeature } from "@/lib/workspace-feature-flags";
 import type { WorkItemViewMode } from "@/lib/work-item-view";
 import { listCrmAccounts, listCrmActivities, listDeals, requireWorkspaceMembership } from "@corgtex/domain";
+import { ExternalLink } from "lucide-react";
 import { getTranslations } from "next-intl/server";
 
 import { createCrmAccountAction } from "../actions";
+import { CrmTableSortHeader } from "../CrmTableSortHeader";
 import { CrmChatPageContext } from "../CrmChatPageContext";
 import {
   CRM_CHAT_CONTEXT_LIMIT,
@@ -32,6 +34,7 @@ import {
   crmPageOffset,
   crmViewHref,
   normalizeCrmPage,
+  normalizeCrmSortDirection,
   normalizeCrmViewMode,
   optionValue,
   searchValue,
@@ -40,6 +43,7 @@ import {
 
 export const dynamic = "force-dynamic";
 const ACCOUNT_VIEW_MODES = ["table", "list"] as const;
+const ACCOUNT_SORTS = ["name", "relationship", "pipeline", "updated"] as const;
 const DEFAULT_ACCOUNT_VIEW = "table";
 
 export default async function RelationshipAccountsPage({
@@ -61,6 +65,8 @@ export default async function RelationshipAccountsPage({
   const query = searchValue(resolvedSearch, "q").trim();
   const relationshipType = optionValue(resolvedSearch.relationshipType, CRM_RELATIONSHIP_OPTIONS);
   const lifecycleStage = optionValue(resolvedSearch.lifecycleStage, CRM_LIFECYCLE_OPTIONS);
+  const sort = optionValue(resolvedSearch.sort, ACCOUNT_SORTS) ?? "updated";
+  const sortDirection = normalizeCrmSortDirection(resolvedSearch.dir, sort === "updated" ? "desc" : "asc");
   const pagePath = relationshipFullPageHref(workspaceId, "accounts");
 
   const [accountResult, dealResult, activityResult] = await Promise.all([
@@ -129,15 +135,93 @@ export default async function RelationshipAccountsPage({
   const previousHref = crmPageHref(pagePath, resolvedSearch, { page: Math.max(page - 1, 1) });
   const nextHref = crmPageHref(pagePath, resolvedSearch, { page: Math.min(page + 1, pageCount) });
   const clearHref = crmPageHref(pagePath, {}, { view: viewMode === DEFAULT_ACCOUNT_VIEW ? null : viewMode });
+  const directionFactor = sortDirection === "asc" ? 1 : -1;
+  const compareText = (left?: string | null, right?: string | null) => (
+    (left || "").localeCompare(right || "", locale, { sensitivity: "base" }) * directionFactor
+  );
+  const compareNumber = (left: number, right: number) => (left - right) * directionFactor;
+  const compareDate = (left: Date | string, right: Date | string) => (
+    (new Date(left).getTime() - new Date(right).getTime()) * directionFactor
+  );
+  const accountSortLabel = (account: (typeof accountResult.items)[number]) => (
+    `${relationshipLabel(account.relationshipType)} ${lifecycleLabel(account.lifecycleStage)}`
+  );
+  const accountUpdatedAt = (account: (typeof accountResult.items)[number]) => (
+    lastActivityByAccountId.get(account.id)?.createdAt ?? account.updatedAt
+  );
+  const sortedAccounts = [...accountResult.items].sort((left, right) => {
+    if (sort === "name") return compareText(left.name, right.name);
+    if (sort === "relationship") return compareText(accountSortLabel(left), accountSortLabel(right));
+    if (sort === "pipeline") {
+      return compareNumber(
+        activePipelineValueCents(dealsByAccountId.get(left.id) ?? []),
+        activePipelineValueCents(dealsByAccountId.get(right.id) ?? []),
+      );
+    }
+    return compareDate(accountUpdatedAt(left), accountUpdatedAt(right));
+  });
   const accountTableColumns: WorkItemTableColumn[] = [
-    { id: "account", label: t("colAccount") },
-    { id: "relationship", label: t("colRelationship") },
+    {
+      id: "account",
+      label: (
+        <CrmTableSortHeader
+          label={t("colAccount")}
+          sortKey="name"
+          activeSort={sort}
+          direction={sortDirection}
+          path={pagePath}
+          current={resolvedSearch}
+        />
+      ),
+      mobileLabel: t("colAccount"),
+    },
+    {
+      id: "relationship",
+      label: (
+        <CrmTableSortHeader
+          label={t("colRelationship")}
+          sortKey="relationship"
+          activeSort={sort}
+          direction={sortDirection}
+          path={pagePath}
+          current={resolvedSearch}
+        />
+      ),
+      mobileLabel: t("colRelationship"),
+    },
     { id: "counts", label: t("colCounts") },
-    { id: "pipeline", label: t("accountPipeline") },
-    { id: "updated", label: t("colUpdated") },
+    {
+      id: "pipeline",
+      label: (
+        <CrmTableSortHeader
+          label={t("accountPipeline")}
+          sortKey="pipeline"
+          activeSort={sort}
+          direction={sortDirection}
+          path={pagePath}
+          current={resolvedSearch}
+        />
+      ),
+      mobileLabel: t("accountPipeline"),
+    },
+    {
+      id: "updated",
+      label: (
+        <CrmTableSortHeader
+          label={t("colUpdated")}
+          sortKey="updated"
+          activeSort={sort}
+          direction={sortDirection}
+          defaultDirection="desc"
+          path={pagePath}
+          current={resolvedSearch}
+        />
+      ),
+      mobileLabel: t("colUpdated"),
+    },
     { id: "actions", label: t("colActions"), align: "right" },
   ];
-  const accountTableRows: WorkItemTableRow[] = accountResult.items.map((account) => {
+  const accountTableRows: WorkItemTableRow[] = sortedAccounts.map((account) => {
     const accountDeals = dealsByAccountId.get(account.id) ?? [];
     const pipelineValue = activePipelineValueCents(accountDeals);
     const lastActivity = lastActivityByAccountId.get(account.id);
@@ -163,7 +247,16 @@ export default async function RelationshipAccountsPage({
             {lastActivity ? t("accountLastActivity", { title: lastActivity.title, age: formatDate(lastActivity.createdAt) }) : formatDate(account.updatedAt)}
           </span>
         ),
-        actions: <a href={accountHref(workspaceId, account.id)} className="link-button small">{t("openDetail")}</a>,
+        actions: (
+          <a
+            href={accountHref(workspaceId, account.id)}
+            className="nr-icon-link nr-table-action"
+            aria-label={t("openDetail")}
+            title={t("openDetail")}
+          >
+            <ExternalLink size={15} aria-hidden="true" />
+          </a>
+        ),
       },
     };
   });
@@ -173,14 +266,14 @@ export default async function RelationshipAccountsPage({
     view: "accounts",
     section: "accounts",
     selectedIds: {},
-    filters: crmFilters({ q: query, relationshipType, lifecycleStage, page, viewMode }),
+    filters: crmFilters({ q: query, relationshipType, lifecycleStage, page, viewMode, sort, dir: sortDirection }),
     pagination: { page, pageCount, total: accountResult.total },
     visibleContext: {
       metrics: crmPageMetrics([
         { label: "accountsVisible", value: accountResult.items.length },
         { label: "accountsTotal", value: accountResult.total },
       ]),
-      accounts: accountResult.items
+      accounts: sortedAccounts
         .slice(0, CRM_CHAT_CONTEXT_LIMIT)
         .map((account) => crmAccountContext(workspaceId, account)),
     },
@@ -189,11 +282,11 @@ export default async function RelationshipAccountsPage({
   return (
     <>
       <CrmChatPageContext context={crmChatPageContext} />
-      <header className="nr-masthead" style={{ textAlign: "left", marginBottom: 32 }}>
-        <a href={relationshipDashboardHref(workspaceId)} className="muted" style={{ fontSize: "0.9rem" }}>
+      <header className="nr-masthead nr-crm-masthead">
+        <a href={relationshipDashboardHref(workspaceId)} className="nr-crm-back-link">
           {t("backToRelationships")}
         </a>
-        <h1 style={{ border: "none", padding: 0, margin: "12px 0 0", fontSize: "2rem" }}>{t("fullAccountsTitle")}</h1>
+        <h1>{t("fullAccountsTitle")}</h1>
         <div className="nr-masthead-meta"><span>{t("fullAccountsDescription")}</span></div>
       </header>
 
@@ -219,26 +312,29 @@ export default async function RelationshipAccountsPage({
           />
         </div>
 
-        <form method="get" className="nr-form-section" style={{ marginBottom: 20 }}>
+        <form method="get" className="nr-filter-panel nr-crm-filter-panel">
           {viewMode !== DEFAULT_ACCOUNT_VIEW && <input type="hidden" name="view" value={viewMode} />}
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 12 }}>
-            <label>{t("filterSearch")} <input name="q" defaultValue={query} /></label>
-            <label>
-              {t("filterRelationship")}
-              <select name="relationshipType" defaultValue={relationshipType ?? ""}>
-                <option value="">{t("filterAny")}</option>
-                {CRM_RELATIONSHIP_OPTIONS.map((option) => <option key={option} value={option}>{relationshipLabel(option)}</option>)}
-              </select>
-            </label>
-            <label>
-              {t("filterLifecycle")}
-              <select name="lifecycleStage" defaultValue={lifecycleStage ?? ""}>
-                <option value="">{t("filterAny")}</option>
-                {CRM_LIFECYCLE_OPTIONS.map((option) => <option key={option} value={option}>{lifecycleLabel(option)}</option>)}
-              </select>
-            </label>
-          </div>
-          <div className="row" style={{ justifyContent: "flex-start", gap: 8, marginTop: 12 }}>
+          <input type="hidden" name="sort" value={sort} />
+          {sortDirection !== "asc" && <input type="hidden" name="dir" value={sortDirection} />}
+          <label>
+            <span className="nr-item-meta">{t("filterSearch")}</span>
+            <input name="q" defaultValue={query} />
+          </label>
+          <label>
+            <span className="nr-item-meta">{t("filterRelationship")}</span>
+            <select name="relationshipType" defaultValue={relationshipType ?? ""}>
+              <option value="">{t("filterAny")}</option>
+              {CRM_RELATIONSHIP_OPTIONS.map((option) => <option key={option} value={option}>{relationshipLabel(option)}</option>)}
+            </select>
+          </label>
+          <label>
+            <span className="nr-item-meta">{t("filterLifecycle")}</span>
+            <select name="lifecycleStage" defaultValue={lifecycleStage ?? ""}>
+              <option value="">{t("filterAny")}</option>
+              {CRM_LIFECYCLE_OPTIONS.map((option) => <option key={option} value={option}>{lifecycleLabel(option)}</option>)}
+            </select>
+          </label>
+          <div className="nr-crm-filter-actions">
             <button type="submit" className="small">{t("filterApply")}</button>
             <a href={clearHref} className="link-button small">{t("filterClear")}</a>
           </div>
@@ -269,8 +365,8 @@ export default async function RelationshipAccountsPage({
           />
         ) : (
           <div className="stack">
-            {accountResult.items.length === 0 && <p className="muted">{t("noAccounts")}</p>}
-            {accountResult.items.map((account) => {
+            {sortedAccounts.length === 0 && <p className="muted">{t("noAccounts")}</p>}
+            {sortedAccounts.map((account) => {
               const accountDeals = dealsByAccountId.get(account.id) ?? [];
               const pipelineValue = activePipelineValueCents(accountDeals);
               const lastActivity = lastActivityByAccountId.get(account.id);

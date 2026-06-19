@@ -1,7 +1,9 @@
 export const CRM_FULL_PAGE_SIZE = 25;
+export const CRM_SORT_DIRECTIONS = ["asc", "desc"] as const;
 
 export type SearchParamsRecord = Record<string, string | string[] | undefined>;
 export type CrmFullPageViewMode = "list" | "kanban" | "table";
+export type CrmSortDirection = typeof CRM_SORT_DIRECTIONS[number];
 
 export function searchValue(searchParams: SearchParamsRecord, key: string) {
   const value = searchParams[key];
@@ -38,6 +40,13 @@ export function normalizeCrmViewMode<TView extends CrmFullPageViewMode>(
   return optionValue(value, allowed) ?? defaultView;
 }
 
+export function normalizeCrmSortDirection(
+  value: string | string[] | undefined,
+  defaultDirection: CrmSortDirection = "asc",
+) {
+  return optionValue(value, CRM_SORT_DIRECTIONS) ?? defaultDirection;
+}
+
 export function crmPageHref(
   path: string,
   current: SearchParamsRecord,
@@ -66,4 +75,22 @@ export function crmViewHref<TView extends CrmFullPageViewMode>(
   defaultView: TView,
 ) {
   return crmPageHref(path, current, { view: view === defaultView ? null : view });
+}
+
+export function crmSortHref(
+  path: string,
+  current: SearchParamsRecord,
+  sortKey: string,
+  activeSort: string | undefined,
+  activeDirection: CrmSortDirection,
+  defaultDirection: CrmSortDirection = "asc",
+) {
+  const nextDirection = activeSort === sortKey
+    ? activeDirection === "asc" ? "desc" : "asc"
+    : defaultDirection;
+  return crmPageHref(path, current, {
+    sort: sortKey,
+    dir: nextDirection === "asc" ? null : nextDirection,
+    page: null,
+  });
 }

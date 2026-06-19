@@ -16,7 +16,7 @@ import {
 } from "@corgtex/domain";
 import { CrmActivityType } from "@prisma/client";
 import { getTranslations } from "next-intl/server";
-import { ArrowRight } from "lucide-react";
+import { ArrowRight, ExternalLink } from "lucide-react";
 import { normalizeVisibleWorkItemColumns, toggleWorkItemColumnVisibility } from "@/lib/work-item-view";
 
 import {
@@ -330,8 +330,8 @@ export default async function LeadsPage({
   return (
     <>
       <CrmChatPageContext context={crmChatPageContext} />
-      <header className="nr-masthead" style={{ textAlign: "left", marginBottom: 32 }}>
-        <h1 style={{ border: "none", padding: 0, margin: 0, fontSize: "2rem" }}>{t("pageTitle")}</h1>
+      <header className="nr-masthead nr-crm-masthead">
+        <h1>{t("pageTitle")}</h1>
         <div className="nr-masthead-meta">
           <span>{t("pageDescription")}</span>
         </div>
@@ -378,7 +378,7 @@ export default async function LeadsPage({
                     })}
                   </div>
                 </div>
-                <a href={fullPageHrefs.activity} className="link-button small" style={{ marginLeft: "auto" }} aria-label={t("viewActivity")} title={t("viewActivity")}>
+                <a href={fullPageHrefs.activity} className="nr-icon-link nr-table-action" style={{ marginLeft: "auto" }} aria-label={t("viewActivity")} title={t("viewActivity")}>
                   <ArrowRight size={14} aria-hidden="true" />
                 </a>
               </div>
@@ -424,7 +424,9 @@ export default async function LeadsPage({
                       <td data-label={t("colAccount")}>{suggestion.account ? accountLink(suggestion.account) : t("emptyAccount")}</td>
                       <td data-label={t("colUpdated")} className="muted">{suggestion.updatedAt ? formatDate(suggestion.updatedAt) : t("emptyValue")}</td>
                       <td data-label={t("colActions")} className="nr-table-cell-right">
-                        <a href={fullPageHrefs.suggestions} className="link-button small">{t("btnReviewSuggestion")}</a>
+                        <a href={fullPageHrefs.suggestions} className="nr-icon-link nr-table-action" aria-label={t("btnReviewSuggestion")} title={t("btnReviewSuggestion")}>
+                          <ExternalLink size={15} aria-hidden="true" />
+                        </a>
                       </td>
                     </tr>
                   ))}
@@ -440,7 +442,9 @@ export default async function LeadsPage({
                       <td data-label={t("colAccount")}>{t("emptyAccount")}</td>
                       <td data-label={t("colUpdated")} className="muted">{formatDate(qualification.createdAt)}</td>
                       <td data-label={t("colActions")} className="nr-table-cell-right">
-                        <a href="?view=review" className="link-button small">{t("dashboardViewReview")}</a>
+                        <a href="?view=review" className="nr-icon-link nr-table-action" aria-label={t("dashboardViewReview")} title={t("dashboardViewReview")}>
+                          <ExternalLink size={15} aria-hidden="true" />
+                        </a>
                       </td>
                     </tr>
                   ))}
@@ -455,7 +459,7 @@ export default async function LeadsPage({
               <section className="nr-table-wrap" style={{ overflow: "hidden" }}>
                 <div className="row" style={{ alignItems: "flex-start", gap: 12, padding: "12px 12px 0" }}>
                   <h2 style={{ margin: 0, fontSize: "1.1rem" }}>{t("dashboardAccountSummaryTitle")}</h2>
-                  <a href={fullPageHrefs.accounts} className="link-button small" style={{ marginLeft: "auto" }} aria-label={t("dashboardViewAccounts")} title={t("dashboardViewAccounts")}>
+                  <a href={fullPageHrefs.accounts} className="nr-icon-link nr-table-action" style={{ marginLeft: "auto" }} aria-label={t("dashboardViewAccounts")} title={t("dashboardViewAccounts")}>
                     <ArrowRight size={14} aria-hidden="true" />
                   </a>
                 </div>
@@ -486,7 +490,9 @@ export default async function LeadsPage({
                           </td>
                           <td data-label={t("accountPipeline")}><strong>{formatCurrency(summary.pipelineValueCents)}</strong></td>
                           <td data-label={t("colActions")} className="nr-table-cell-right">
-                            <a href={accountHref(workspaceId, account.id)} className="link-button small">{t("openDetail")}</a>
+                            <a href={accountHref(workspaceId, account.id)} className="nr-icon-link nr-table-action" aria-label={t("openDetail")} title={t("openDetail")}>
+                              <ExternalLink size={15} aria-hidden="true" />
+                            </a>
                           </td>
                         </tr>
                       );
@@ -501,7 +507,7 @@ export default async function LeadsPage({
               <section className="nr-table-wrap" style={{ overflow: "hidden" }}>
                 <div className="row" style={{ alignItems: "flex-start", gap: 12, padding: "12px 12px 0" }}>
                   <h2 style={{ margin: 0, fontSize: "1.1rem" }}>{t("dashboardPipelineSummaryTitle")}</h2>
-                  <a href={fullPageHrefs.pipeline} className="link-button small" style={{ marginLeft: "auto" }} aria-label={t("dashboardViewPipeline")} title={t("dashboardViewPipeline")}>
+                  <a href={fullPageHrefs.pipeline} className="nr-icon-link nr-table-action" style={{ marginLeft: "auto" }} aria-label={t("dashboardViewPipeline")} title={t("dashboardViewPipeline")}>
                     <ArrowRight size={14} aria-hidden="true" />
                   </a>
                 </div>
@@ -529,7 +535,15 @@ export default async function LeadsPage({
                         <td data-label={t("colAccount")}>{deal.account ? accountLink(deal.account) : t("emptyAccount")}</td>
                         <td data-label={t("dashboardDealValue")}><strong>{formatCurrency(deal.valueCents ?? 0)}</strong></td>
                         <td data-label={t("colActions")} className="nr-table-cell-right">
-                          {deal.account ? <a href={accountHref(workspaceId, deal.account.id)} className="link-button small">{t("openDetail")}</a> : <a href={fullPageHrefs.pipeline} className="link-button small">{t("dashboardViewPipeline")}</a>}
+                          {deal.account ? (
+                            <a href={accountHref(workspaceId, deal.account.id)} className="nr-icon-link nr-table-action" aria-label={t("openDetail")} title={t("openDetail")}>
+                              <ExternalLink size={15} aria-hidden="true" />
+                            </a>
+                          ) : (
+                            <a href={fullPageHrefs.pipeline} className="nr-icon-link nr-table-action" aria-label={t("dashboardViewPipeline")} title={t("dashboardViewPipeline")}>
+                              <ExternalLink size={15} aria-hidden="true" />
+                            </a>
+                          )}
                         </td>
                       </tr>
                     ))}
@@ -543,7 +557,7 @@ export default async function LeadsPage({
               <section className="nr-table-wrap" style={{ overflow: "hidden" }}>
                 <div className="row" style={{ alignItems: "flex-start", gap: 12, padding: "12px 12px 0" }}>
                   <h2 style={{ margin: 0, fontSize: "1.1rem" }}>{t("fullActivityTitle")}</h2>
-                  <a href={fullPageHrefs.activity} className="link-button small" style={{ marginLeft: "auto" }} aria-label={t("viewActivity")} title={t("viewActivity")}>
+                  <a href={fullPageHrefs.activity} className="nr-icon-link nr-table-action" style={{ marginLeft: "auto" }} aria-label={t("viewActivity")} title={t("viewActivity")}>
                     <ArrowRight size={14} aria-hidden="true" />
                   </a>
                 </div>
@@ -571,7 +585,15 @@ export default async function LeadsPage({
                         <td data-label={t("colAccount")}>{activity.account ? accountLink(activity.account) : t("emptyAccount")}</td>
                         <td data-label={t("colUpdated")} className="muted">{ageText(activity.createdAt)}</td>
                         <td data-label={t("colActions")} className="nr-table-cell-right">
-                          {activity.account ? <a href={accountHref(workspaceId, activity.account.id)} className="link-button small">{t("openDetail")}</a> : <a href={fullPageHrefs.activity} className="link-button small">{t("viewActivity")}</a>}
+                          {activity.account ? (
+                            <a href={accountHref(workspaceId, activity.account.id)} className="nr-icon-link nr-table-action" aria-label={t("openDetail")} title={t("openDetail")}>
+                              <ExternalLink size={15} aria-hidden="true" />
+                            </a>
+                          ) : (
+                            <a href={fullPageHrefs.activity} className="nr-icon-link nr-table-action" aria-label={t("viewActivity")} title={t("viewActivity")}>
+                              <ExternalLink size={15} aria-hidden="true" />
+                            </a>
+                          )}
                         </td>
                       </tr>
                     ))}
@@ -585,7 +607,7 @@ export default async function LeadsPage({
               <section className="nr-table-wrap" style={{ overflow: "hidden" }}>
                 <div className="row" style={{ alignItems: "flex-start", gap: 12, padding: "12px 12px 0" }}>
                   <h2 style={{ margin: 0, fontSize: "1.1rem" }}>{t("dashboardSuggestionSummaryTitle")}</h2>
-                  <a href={fullPageHrefs.suggestions} className="link-button small" style={{ marginLeft: "auto" }} aria-label={t("viewSuggestions")} title={t("viewSuggestions")}>
+                  <a href={fullPageHrefs.suggestions} className="nr-icon-link nr-table-action" style={{ marginLeft: "auto" }} aria-label={t("viewSuggestions")} title={t("viewSuggestions")}>
                     <ArrowRight size={14} aria-hidden="true" />
                   </a>
                 </div>
@@ -610,7 +632,9 @@ export default async function LeadsPage({
                         <td data-label={t("colAccount")}>{suggestion.account ? accountLink(suggestion.account) : t("emptyAccount")}</td>
                         <td data-label={t("formSuggestionRecipient")} className="muted">{suggestion.recipientEmail || suggestion.contact?.email || t("suggestionNoRecipient")}</td>
                         <td data-label={t("colActions")} className="nr-table-cell-right">
-                          <a href={fullPageHrefs.suggestions} className="link-button small">{t("btnReviewSuggestion")}</a>
+                          <a href={fullPageHrefs.suggestions} className="nr-icon-link nr-table-action" aria-label={t("btnReviewSuggestion")} title={t("btnReviewSuggestion")}>
+                            <ExternalLink size={15} aria-hidden="true" />
+                          </a>
                         </td>
                       </tr>
                     ))}

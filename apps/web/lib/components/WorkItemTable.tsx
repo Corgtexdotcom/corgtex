@@ -2,7 +2,8 @@ import type { ReactNode } from "react";
 
 export type WorkItemTableColumn = {
   id: string;
-  label: string;
+  label: ReactNode;
+  mobileLabel?: string;
   align?: "left" | "center" | "right";
   className?: string;
   headerClassName?: string;
@@ -59,7 +60,7 @@ export function WorkItemTable({
               {columns.map((column) => (
                 <td
                   key={column.id}
-                  data-label={column.label}
+                  data-label={column.mobileLabel ?? (typeof column.label === "string" ? column.label : column.id)}
                   className={classes(alignClass(column.align), column.className, column.cellClassName)}
                 >
                   {row.cells[column.id] ?? null}

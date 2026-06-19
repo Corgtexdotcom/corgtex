@@ -256,13 +256,13 @@ export default async function AccountDetailPage({
   return (
     <>
       <CrmChatPageContext context={crmChatPageContext} />
-      <header className="nr-masthead" style={{ textAlign: "left", marginBottom: 32 }}>
-        <a href={`/workspaces/${workspaceId}/leads`} className="muted" style={{ fontSize: "0.9rem" }}>
+      <header className="nr-masthead nr-crm-masthead">
+        <a href={`/workspaces/${workspaceId}/leads`} className="nr-crm-back-link">
           {t("backToRelationships")}
         </a>
-        <div className="row" style={{ alignItems: "flex-start", marginTop: 12 }}>
+        <div className="row" style={{ alignItems: "flex-start", marginTop: 8 }}>
           <div>
-            <h1 style={{ border: "none", padding: 0, margin: 0, fontSize: "2rem" }}>{account.name}</h1>
+            <h1>{account.name}</h1>
             <div className="nr-masthead-meta">
               <span>{account.domain || t("noDomain")}</span>
               <span>{relationshipLabel(account.relationshipType)}</span>

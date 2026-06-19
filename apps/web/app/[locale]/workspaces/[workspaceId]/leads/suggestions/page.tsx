@@ -17,6 +17,7 @@ import { getTranslations } from "next-intl/server";
 
 import { createCommunicationSuggestionAction } from "../actions";
 import { CommunicationSuggestionCard } from "../CommunicationSuggestionCard";
+import { CrmTableSortHeader } from "../CrmTableSortHeader";
 import { CrmChatPageContext } from "../CrmChatPageContext";
 import {
   CRM_CHAT_CONTEXT_LIMIT,
@@ -33,6 +34,7 @@ import {
   crmPageOffset,
   crmViewHref,
   normalizeCrmPage,
+  normalizeCrmSortDirection,
   normalizeCrmViewMode,
   optionValue,
   type SearchParamsRecord,
@@ -42,6 +44,7 @@ export const dynamic = "force-dynamic";
 
 const SUGGESTION_STATUSES = ["SUGGESTED", "REQUESTED", "SENT", "DECLINED", "FAILED"] as const;
 const SUGGESTION_VIEW_MODES = ["list", "table", "kanban"] as const;
+const SUGGESTION_SORTS = ["status", "account", "updated"] as const;
 const DEFAULT_SUGGESTION_VIEW = "list";
 
 export default async function RelationshipSuggestionsPage({
@@ -61,6 +64,8 @@ export default async function RelationshipSuggestionsPage({
   const page = normalizeCrmPage(resolvedSearch.page);
   const viewMode = normalizeCrmViewMode(resolvedSearch.view, SUGGESTION_VIEW_MODES, DEFAULT_SUGGESTION_VIEW);
   const status = optionValue(resolvedSearch.status, SUGGESTION_STATUSES);
+  const sort = optionValue(resolvedSearch.sort, SUGGESTION_SORTS) ?? "updated";
+  const sortDirection = normalizeCrmSortDirection(resolvedSearch.dir, sort === "updated" ? "desc" : "asc");
   const pagePath = relationshipFullPageHref(workspaceId, "suggestions");
 
   const [suggestionResult, accountResult, contactResult, dealResult, members] = await Promise.all([
@@ -126,14 +131,73 @@ export default async function RelationshipSuggestionsPage({
   const suggestionRecipient = (suggestion: (typeof suggestionResult.items)[number]) => (
     suggestion.recipientEmail || suggestion.contact?.email || t("suggestionNoRecipient")
   );
+  const directionFactor = sortDirection === "asc" ? 1 : -1;
+  const statusOrder = new Map(SUGGESTION_STATUSES.map((suggestionStatus, index) => [suggestionStatus, index]));
+  const compareText = (left?: string | null, right?: string | null) => (
+    (left || "").localeCompare(right || "", locale, { sensitivity: "base" }) * directionFactor
+  );
+  const compareNumber = (left: number, right: number) => (left - right) * directionFactor;
+  const compareDate = (left?: Date | string | null, right?: Date | string | null) => (
+    ((left ? new Date(left).getTime() : 0) - (right ? new Date(right).getTime() : 0)) * directionFactor
+  );
+  const sortedSuggestions = [...suggestionResult.items].sort((left, right) => {
+    if (sort === "status") {
+      return compareNumber(
+        statusOrder.get(left.status as typeof SUGGESTION_STATUSES[number]) ?? 0,
+        statusOrder.get(right.status as typeof SUGGESTION_STATUSES[number]) ?? 0,
+      );
+    }
+    if (sort === "account") return compareText(left.account?.name, right.account?.name);
+    return compareDate(suggestionDate(left), suggestionDate(right));
+  });
   const suggestionTableColumns: WorkItemTableColumn[] = [
     { id: "suggestion", label: t("dashboardSuggestionSummaryTitle") },
-    { id: "status", label: t("filterStatus") },
-    { id: "account", label: t("colAccount") },
+    {
+      id: "status",
+      label: (
+        <CrmTableSortHeader
+          label={t("filterStatus")}
+          sortKey="status"
+          activeSort={sort}
+          direction={sortDirection}
+          path={pagePath}
+          current={resolvedSearch}
+        />
+      ),
+      mobileLabel: t("filterStatus"),
+    },
+    {
+      id: "account",
+      label: (
+        <CrmTableSortHeader
+          label={t("colAccount")}
+          sortKey="account"
+          activeSort={sort}
+          direction={sortDirection}
+          path={pagePath}
+          current={resolvedSearch}
+        />
+      ),
+      mobileLabel: t("colAccount"),
+    },
     { id: "recipient", label: t("formSuggestionRecipient") },
-    { id: "updated", label: t("colUpdated") },
+    {
+      id: "updated",
+      label: (
+        <CrmTableSortHeader
+          label={t("colUpdated")}
+          sortKey="updated"
+          activeSort={sort}
+          direction={sortDirection}
+          defaultDirection="desc"
+          path={pagePath}
+          current={resolvedSearch}
+        />
+      ),
+      mobileLabel: t("colUpdated"),
+    },
   ];
-  const suggestionTableRows: WorkItemTableRow[] = suggestionResult.items.map((suggestion) => ({
+  const suggestionTableRows: WorkItemTableRow[] = sortedSuggestions.map((suggestion) => ({
     id: suggestion.id,
     cells: {
       suggestion: (
@@ -182,14 +246,14 @@ export default async function RelationshipSuggestionsPage({
     view: "suggestions",
     section: "suggestions",
     selectedIds: {},
-    filters: crmFilters({ status, page, viewMode }),
+    filters: crmFilters({ status, page, viewMode, sort, dir: sortDirection }),
     pagination: { page, pageCount, total: suggestionResult.total },
     visibleContext: {
       metrics: crmPageMetrics([
         { label: "suggestionsVisible", value: suggestionResult.items.length },
         { label: "suggestionsTotal", value: suggestionResult.total },
       ]),
-      suggestions: suggestionResult.items
+      suggestions: sortedSuggestions
         .slice(0, CRM_CHAT_CONTEXT_LIMIT)
         .map((suggestion) => crmSuggestionContext(workspaceId, suggestion)),
     },
@@ -198,11 +262,11 @@ export default async function RelationshipSuggestionsPage({
   return (
     <>
       <CrmChatPageContext context={crmChatPageContext} />
-      <header className="nr-masthead" style={{ textAlign: "left", marginBottom: 32 }}>
-        <a href={relationshipDashboardHref(workspaceId)} className="muted" style={{ fontSize: "0.9rem" }}>
+      <header className="nr-masthead nr-crm-masthead">
+        <a href={relationshipDashboardHref(workspaceId)} className="nr-crm-back-link">
           {t("backToRelationships")}
         </a>
-        <h1 style={{ border: "none", padding: 0, margin: "12px 0 0", fontSize: "2rem" }}>{t("fullSuggestionsTitle")}</h1>
+        <h1>{t("fullSuggestionsTitle")}</h1>
         <div className="nr-masthead-meta"><span>{t("fullSuggestionsDescription")}</span></div>
       </header>
 
@@ -228,20 +292,20 @@ export default async function RelationshipSuggestionsPage({
           />
         </div>
 
-        <form method="get" className="nr-form-section" style={{ marginBottom: 20 }}>
+        <form method="get" className="nr-filter-panel nr-crm-filter-panel">
           {viewMode !== DEFAULT_SUGGESTION_VIEW && <input type="hidden" name="view" value={viewMode} />}
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 12 }}>
-            <label>
-              {t("filterStatus")}
-              <select name="status" defaultValue={status ?? ""}>
-                <option value="">{t("statusAll")}</option>
-                {SUGGESTION_STATUSES.map((option) => (
-                  <option key={option} value={option}>{communicationStatusLabels[option]}</option>
-                ))}
-              </select>
-            </label>
-          </div>
-          <div className="row" style={{ justifyContent: "flex-start", gap: 8, marginTop: 12 }}>
+          <input type="hidden" name="sort" value={sort} />
+          {sortDirection !== "asc" && <input type="hidden" name="dir" value={sortDirection} />}
+          <label>
+            <span className="nr-item-meta">{t("filterStatus")}</span>
+            <select name="status" defaultValue={status ?? ""}>
+              <option value="">{t("statusAll")}</option>
+              {SUGGESTION_STATUSES.map((option) => (
+                <option key={option} value={option}>{communicationStatusLabels[option]}</option>
+              ))}
+            </select>
+          </label>
+          <div className="nr-crm-filter-actions">
             <button type="submit" className="small">{t("filterApply")}</button>
             <a href={clearHref} className="link-button small">{t("filterClear")}</a>
           </div>
@@ -295,9 +359,9 @@ export default async function RelationshipSuggestionsPage({
           />
         ) : (
         <div className="stack">
-          {suggestionResult.items.length === 0 ? (
+          {sortedSuggestions.length === 0 ? (
             <p className="muted">{t("noSuggestions")}</p>
-          ) : suggestionResult.items.map((suggestion) => (
+          ) : sortedSuggestions.map((suggestion) => (
             <CommunicationSuggestionCard
               key={suggestion.id}
               workspaceId={workspaceId}

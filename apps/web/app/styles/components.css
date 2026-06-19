@@ -1826,6 +1826,57 @@ details[open] > .settings-disclosure-summary::before {
     min-width: min(180px, 100%);
   }
 
+  .nr-crm-masthead {
+    margin-bottom: 20px !important;
+  }
+
+  .nr-crm-masthead h1 {
+    margin-top: 8px;
+    font-size: 1.72rem;
+    line-height: 1.18;
+  }
+
+  .nr-crm-back-link {
+    display: inline-flex;
+    width: fit-content;
+    color: var(--muted);
+    font-size: 0.82rem;
+    text-decoration: none;
+  }
+
+  .nr-crm-filter-panel {
+    align-items: end;
+    gap: 10px;
+    margin-bottom: 16px;
+    padding: 0 0 14px;
+    border-bottom: 1px solid var(--line);
+  }
+
+  .nr-crm-filter-panel label {
+    min-width: min(190px, 100%);
+  }
+
+  .nr-crm-filter-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-height: 36px;
+  }
+
+  .nr-sort-header {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    color: inherit;
+    text-decoration: none;
+    white-space: nowrap;
+  }
+
+  .nr-table-action {
+    width: 32px;
+    height: 32px;
+  }
+
   .nr-work-board-header {
     display: flex;
     align-items: flex-start;
