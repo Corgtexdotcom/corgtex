@@ -1,4 +1,4 @@
-import { listActions, listCircles, listMembers, listProposals, requireWorkspaceMembership } from "@corgtex/domain";
+import { listActions, listCircles, listMembers, requireWorkspaceMembership } from "@corgtex/domain";
 import { prisma } from "@corgtex/shared";
 import type { ReactNode } from "react";
 import { requirePageActor } from "@/lib/auth";
@@ -54,14 +54,13 @@ export default async function ActionsPage({
   const statusFilter = statusFilters.length === 1 ? statusFilters[0] : normalizeActionStatusFilter(resolvedSearch.status);
   const view = normalizeWorkItemView(resolvedSearch.view);
   const { circleIds, memberIds, sort } = resolveWorkItemFilters(resolvedSearch);
-  const [{ items: actions }, { items: proposals }, circles, members] = await Promise.all([
+  const [{ items: actions }, circles, members] = await Promise.all([
     listActions(actor, workspaceId, {
       take: 200,
       circleIds,
       memberIds,
       sort,
     }),
-    listProposals(actor, workspaceId, { take: 50 }),
     listCircles(workspaceId),
     listMembers(workspaceId),
   ]);
@@ -93,7 +92,6 @@ export default async function ActionsPage({
     evidenceByActionId.set(row.entityId, [...(evidenceByActionId.get(row.entityId) ?? []), row]);
   }
 
-  const activeProposals = proposals.filter((p) => p.status === "DRAFT" || p.status === "OPEN");
   const groupedActions = groupActionsByStatus(actions);
   const displayActions = actions.filter((action) => actionMatchesStatusFilters(action, statusFilters));
   type ActionListItem = (typeof actions)[number];
@@ -593,42 +591,6 @@ export default async function ActionsPage({
             {displayActions.map((action) => renderActionCard(action))}
           </div>
         )}
-      </section>
-
-      <section className={`ws-section ${view === "kanban" ? "nr-list-only-create" : ""}`}>
-        <details open={resolvedSearch.open === "new"}>
-          <summary className="nr-hide-marker nr-section-toggle">
-            <span className="nr-section-header nr-section-header-inline">{t("newActionTitle")}</span>
-          </summary>
-          <form action={createActionAction} className="stack nr-form-section">
-            <input type="hidden" name="workspaceId" value={workspaceId} />
-            <label>
-              {t("formTitle")}
-              <input name="title" required />
-            </label>
-            <label>
-              {t("formNotes")}
-              <MarkdownEditor name="bodyMd" rows={5} />
-            </label>
-            <label>
-              {t("formPriority")}
-              <input name="priority" type="number" min={0} defaultValue={0} />
-            </label>
-            <details>
-              <summary className="secondary small nr-hide-marker" style={{ cursor: "pointer", display: "inline-block" }}>{t("formOptionalMetadata")}</summary>
-              <label style={{ marginTop: 12 }}>
-                {t("formLinkToProposal")}
-                <select name="proposalId" defaultValue="">
-                  <option value="">{t("formNone")}</option>
-                  {activeProposals.map((p) => (
-                    <option value={p.id} key={p.id}>{p.title}</option>
-                  ))}
-                </select>
-              </label>
-            </details>
-            <button type="submit">{t("btnCreateAction")}</button>
-          </form>
-        </details>
       </section>
     </>
   );

@@ -71,6 +71,10 @@ export const WORKSPACE_ADD_ACTION_DEFINITIONS = {
     label: "Publish shared link",
     description: "Add a shared workspace tool link.",
   },
+  crm_account: {
+    label: "Account",
+    description: "Create a relationship account.",
+  },
   contact: {
     label: "Contact",
     description: "Create a relationship contact.",
@@ -78,6 +82,14 @@ export const WORKSPACE_ADD_ACTION_DEFINITIONS = {
   deal: {
     label: "Deal",
     description: "Create a pipeline deal.",
+  },
+  crm_activity: {
+    label: "Activity",
+    description: "Create a relationship activity.",
+  },
+  communication_suggestion: {
+    label: "Suggestion",
+    description: "Create a relationship communication suggestion.",
   },
   prospect_instance: {
     label: "Provision instance",
@@ -176,6 +188,16 @@ export function workspaceSubpath(pathname: string, workspaceId: string) {
   return afterWorkspace.startsWith("/") ? afterWorkspace : `/${afterWorkspace}`;
 }
 
+export function crmAccountIdFromPath(pathname: string, workspaceId: string) {
+  const segments = pathSegments(workspaceSubpath(pathname, workspaceId));
+  if (segments?.[0] !== "leads" || segments[1] !== "accounts" || !segments[2]) return null;
+  try {
+    return decodeURIComponent(segments[2]);
+  } catch {
+    return segments[2];
+  }
+}
+
 function primarySegment(subpath: string | null) {
   if (subpath === null) return null;
   return subpath.split("?")[0]?.split("#")[0]?.split("/").filter(Boolean)[0] ?? "";
@@ -260,11 +282,46 @@ export function getWorkspaceAddActions(context: WorkspaceAddActionContext): Work
       return context.featureFlags.TOOL_LINKS ? [action("tool_app"), action("tool_link")] : [];
     case "leads": {
       if (!context.featureFlags.RELATIONSHIPS) return [];
-      const view = searchParam(context.searchParams, "view") ?? "contacts";
+      const section = segments?.[1] ?? "";
+      const detailId = segments?.[2] ?? "";
+      const view = searchParam(context.searchParams, "view");
+
+      if (section === "accounts") {
+        if (detailId) {
+          if (view === "contacts") return [action("contact")];
+          if (view === "pipeline") return [action("deal")];
+          if (view === "activity") return [action("crm_activity")];
+          if (view === "suggestions") return [action("communication_suggestion")];
+          if (view === "overview" || !view) {
+            return [
+              action("contact"),
+              action("deal"),
+              action("crm_activity"),
+              action("communication_suggestion"),
+            ];
+          }
+          return [];
+        }
+        return [action("crm_account")];
+      }
+
+      if (section === "pipeline") return [action("deal")];
+      if (section === "activity") return [action("crm_activity")];
+      if (section === "suggestions") return [action("communication_suggestion")];
+
       if (view === "pipeline") return [action("deal")];
       if (view === "instances") return [action("prospect_instance")];
       if (view === "contacts") return [action("contact")];
-      return [];
+      if (view === "accounts") return [action("crm_account")];
+      if (view === "activity") return [action("crm_activity")];
+      if (view === "suggestions") return [action("communication_suggestion")];
+      return [
+        action("crm_account"),
+        action("contact"),
+        action("deal"),
+        action("crm_activity"),
+        action("communication_suggestion"),
+      ];
     }
     case "settings": {
       const tab = searchParam(context.searchParams, "tab") ?? (context.featureFlags.SETTINGS_GENERAL ? "general" : "members");

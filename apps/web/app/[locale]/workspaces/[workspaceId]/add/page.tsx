@@ -6,6 +6,8 @@ import {
   createWorkspaceToolLink,
   getMeetingRecorderConfig,
   getMemberInvitePolicy,
+  listCrmAccounts,
+  listDeals,
   ingestSource,
   intakeMeetingTranscript,
   listCircles,
@@ -29,6 +31,7 @@ import { getWorkspaceFeatureFlags } from "@/lib/workspace-feature-flags";
 import { parseOptionalMeetingDateTimeInput } from "@/lib/meeting-timezone";
 import { KnowledgeFileUploader } from "../KnowledgeFileUploader";
 import {
+  crmAccountIdFromPath,
   getWorkspaceAddActions,
   isWorkspaceAddActionKind,
   sanitizeWorkspaceReturnTo,
@@ -40,9 +43,12 @@ import {
   assignRoleAction,
   bulkInviteAction,
   createActionAction,
+  createActivityAction,
   createAllocationAction,
   createCircleAction,
+  createCommunicationSuggestionAction,
   createContactAction,
+  createCrmAccountAction,
   createCycleAction,
   createDealAction,
   createMeetingSeriesAction,
@@ -61,6 +67,13 @@ import {
 import { createArticleAction } from "../brain/actions";
 import { createGoalFormAction, refreshCompanyDirectionFromBrainFormAction } from "../goals/actions";
 import { asOptional, asOptionalInt, asString, refresh } from "../action-utils";
+import {
+  CRM_ACTIVITY_TYPES,
+  CRM_CREATABLE_DEAL_STAGES,
+  CRM_LIFECYCLE_OPTIONS,
+  CRM_RELATIONSHIP_OPTIONS,
+  labelFromCrmCode,
+} from "../leads/view-model";
 
 export const dynamic = "force-dynamic";
 
@@ -110,6 +123,18 @@ function cancelLink(returnTo: string) {
   return <a className="link-button secondary" href={returnTo}>Cancel</a>;
 }
 
+function firstSearchValue(search: Record<string, string | string[] | undefined>, key: string) {
+  const value = search[key];
+  return Array.isArray(value) ? value[0] : value;
+}
+
+function creatableDealStageFromSearch(search: Record<string, string | string[] | undefined>) {
+  const value = firstSearchValue(search, "stage");
+  return CRM_CREATABLE_DEAL_STAGES.includes(value as typeof CRM_CREATABLE_DEAL_STAGES[number])
+    ? value as typeof CRM_CREATABLE_DEAL_STAGES[number]
+    : null;
+}
+
 function circleIdFromReturnTo(returnTo: string, workspaceId: string) {
   const parsed = new URL(returnTo, "https://app.local");
   const subpath = workspaceSubpath(parsed.pathname, workspaceId);
@@ -154,6 +179,8 @@ export default async function WorkspaceAddPage({
   const returnTo = sanitizeWorkspaceReturnTo(workspaceId, search.returnTo);
   const contextCircleId = circleIdFromReturnTo(returnTo, workspaceId);
   const returnUrl = new URL(returnTo, "https://app.local");
+  const contextAccountId = crmAccountIdFromPath(returnUrl.pathname, workspaceId);
+  const contextDealStage = creatableDealStageFromSearch(search);
   const allowedActions = getWorkspaceAddActions({
     workspaceId,
     pathname: returnUrl.pathname,
@@ -167,11 +194,19 @@ export default async function WorkspaceAddPage({
   if (!allowedActions.some((action) => action.kind === kind)) notFound();
 
   const needsProposals = kind === "action" || kind === "tension";
-  const needsMembers = kind === "tension" || kind === "goal" || kind === "allocation" || kind === "role_assignment";
+  const needsMembers = kind === "tension"
+    || kind === "goal"
+    || kind === "allocation"
+    || kind === "role_assignment"
+    || kind === "deal"
+    || kind === "crm_activity"
+    || kind === "communication_suggestion";
   const needsCircles = kind === "goal" || kind === "circle" || kind === "role" || kind === "tool_link";
   const needsRoles = kind === "role_assignment";
   const needsGoals = kind === "goal";
-  const needsContacts = kind === "deal";
+  const needsContacts = kind === "deal" || kind === "crm_activity" || kind === "communication_suggestion";
+  const needsAccounts = (kind === "crm_activity" || kind === "communication_suggestion") && !contextAccountId;
+  const needsDeals = kind === "crm_activity" || kind === "communication_suggestion";
   const needsCycles = kind === "allocation";
   const needsApprovedProspects = kind === "prospect_instance";
 
@@ -181,6 +216,8 @@ export default async function WorkspaceAddPage({
     circles,
     goals,
     contactsResult,
+    accountsResult,
+    dealsResult,
     cyclesResult,
     approvedQualificationsResult,
     roles,
@@ -189,7 +226,9 @@ export default async function WorkspaceAddPage({
     needsMembers ? listMembers(workspaceId) : Promise.resolve([]),
     needsCircles ? listCircles(workspaceId) : Promise.resolve([]),
     needsGoals ? listGoals(actor, { workspaceId }) : Promise.resolve([]),
-    needsContacts ? listContacts(actor, workspaceId, { take: 100 }) : Promise.resolve({ items: [] }),
+    needsContacts ? listContacts(actor, workspaceId, { take: 100, accountId: contextAccountId ?? undefined }) : Promise.resolve({ items: [] }),
+    needsAccounts ? listCrmAccounts(actor, workspaceId, { take: 100 }) : Promise.resolve({ items: [] }),
+    needsDeals ? listDeals(actor, workspaceId, { take: 100, accountId: contextAccountId ?? undefined }) : Promise.resolve({ items: [] }),
     needsCycles ? listCycles(workspaceId, { take: 100 }) : Promise.resolve({ items: [] }),
     needsApprovedProspects ? listQualifications(actor, workspaceId, { status: "APPROVED" }) : Promise.resolve({ items: [] }),
     needsRoles ? listRoles(workspaceId) : Promise.resolve([]),
@@ -198,6 +237,8 @@ export default async function WorkspaceAddPage({
   const proposals = proposalsResult.items;
   const activeProposals = proposals.filter((proposal) => proposal.status === "DRAFT" || proposal.status === "OPEN");
   const contacts = contactsResult.items;
+  const accounts = accountsResult.items;
+  const deals = dealsResult.items;
   const cycles = cyclesResult.items;
   const allocatableCycles = cycles.filter((cycle) => cycle.status === "OPEN_ALLOCATIONS");
   const approvedQualifications = approvedQualificationsResult.items;
@@ -306,9 +347,27 @@ export default async function WorkspaceAddPage({
     redirect(returnTo);
   }
 
+  async function createCrmAccountAndReturn(formData: FormData) {
+    "use server";
+    await createCrmAccountAction(formData);
+    redirect(returnTo);
+  }
+
   async function createDealAndReturn(formData: FormData) {
     "use server";
     await createDealAction(formData);
+    redirect(returnTo);
+  }
+
+  async function createCrmActivityAndReturn(formData: FormData) {
+    "use server";
+    await createActivityAction(formData);
+    redirect(returnTo);
+  }
+
+  async function createCommunicationSuggestionAndReturn(formData: FormData) {
+    "use server";
+    await createCommunicationSuggestionAction(formData);
     redirect(returnTo);
   }
 
@@ -543,6 +602,7 @@ export default async function WorkspaceAddPage({
             {hiddenWorkspace(workspaceId)}
             <label>Title<input name="title" required /></label>
             <label>Notes<MarkdownEditor name="bodyMd" rows={5} /></label>
+            <label>Priority<input name="priority" type="number" min={0} defaultValue={0} /></label>
             <label>
               Link to proposal
               <select name="proposalId" defaultValue="">
@@ -559,6 +619,7 @@ export default async function WorkspaceAddPage({
             {hiddenWorkspace(workspaceId)}
             <label>Title<input name="title" required /></label>
             <label>Description<MarkdownEditor name="bodyMd" rows={5} /></label>
+            <label>Priority<input name="priority" type="number" min={0} defaultValue={0} /></label>
             <label>
               Raised by
               <select name="raisedByMemberId" defaultValue="">
@@ -587,6 +648,7 @@ export default async function WorkspaceAddPage({
             <label>Title<input name="title" required /></label>
             <label>Summary<input name="summary" /></label>
             <label>Body<MarkdownEditor name="bodyMd" required rows={8} /></label>
+            <label>Priority<input name="priority" type="number" min={0} defaultValue={0} /></label>
             <label style={{ display: "flex", alignItems: "center", flexDirection: "row", gap: 8 }}>
               <input type="checkbox" name="isPrivate" defaultChecked style={{ width: "auto" }} />
               Private draft
@@ -794,9 +856,38 @@ export default async function WorkspaceAddPage({
           </form>
         )}
 
+        {kind === "crm_account" && (
+          <form action={createCrmAccountAndReturn} className="stack nr-form-section">
+            {hiddenWorkspace(workspaceId)}
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 16 }}>
+              <label>Account name<input type="text" name="name" required /></label>
+              <label>Domain<input type="text" name="domain" placeholder="example.com" /></label>
+              <label>
+                Relationship type
+                <select name="relationshipType" defaultValue="PROSPECT">
+                  {CRM_RELATIONSHIP_OPTIONS.map((option) => (
+                    <option key={option} value={option}>{labelFromCrmCode(option)}</option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                Lifecycle stage
+                <select name="lifecycleStage" defaultValue="DISCOVERY">
+                  {CRM_LIFECYCLE_OPTIONS.map((option) => (
+                    <option key={option} value={option}>{labelFromCrmCode(option)}</option>
+                  ))}
+                </select>
+              </label>
+            </div>
+            <label>Description<MarkdownEditor name="descriptionMd" rows={3} /></label>
+            <div className="actions-inline"><button type="submit">Create account</button>{cancelLink(returnTo)}</div>
+          </form>
+        )}
+
         {kind === "contact" && (
           <form action={createContactAndReturn} className="stack nr-form-section">
             {hiddenWorkspace(workspaceId)}
+            {contextAccountId && <input type="hidden" name="accountId" value={contextAccountId} />}
             <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 16 }}>
               <label>Email<input type="email" name="email" required /></label>
               <label>Name<input type="text" name="name" /></label>
@@ -811,10 +902,131 @@ export default async function WorkspaceAddPage({
         {kind === "deal" && (
           <form action={createDealAndReturn} className="stack nr-form-section">
             {hiddenWorkspace(workspaceId)}
-            <label>Contact<select name="contactId" required><option value="">Choose contact</option>{contacts.map((contact) => <option key={contact.id} value={contact.id}>{contact.name || contact.email}</option>)}</select></label>
-            <label>Deal title<input type="text" name="title" required /></label>
-            <label>Value<input type="number" name="value" step="0.01" min="0" /></label>
+            {contextAccountId && <input type="hidden" name="accountId" value={contextAccountId} />}
+            {contextDealStage && <input type="hidden" name="stage" value={contextDealStage} />}
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 16 }}>
+              <label>
+                Contact
+                <select name="contactId" required>
+                  <option value="">Choose contact</option>
+                  {contacts.map((contact) => <option key={contact.id} value={contact.id}>{contact.name || contact.email}</option>)}
+                </select>
+              </label>
+              <label>Deal title<input type="text" name="title" required /></label>
+              <label>Value<input type="number" name="value" step="0.01" min="0" /></label>
+              <label>
+                Owner
+                <select name="ownerUserId" defaultValue="">
+                  <option value="">No owner</option>
+                  {members.map((member) => (
+                    <option key={member.user.id} value={member.user.id}>{member.user.displayName || member.user.email}</option>
+                  ))}
+                </select>
+              </label>
+            </div>
             <div className="actions-inline"><button type="submit" disabled={contacts.length === 0}>Create deal</button>{cancelLink(returnTo)}</div>
+          </form>
+        )}
+
+        {kind === "crm_activity" && (
+          <form action={createCrmActivityAndReturn} className="stack nr-form-section">
+            {hiddenWorkspace(workspaceId)}
+            <input type="hidden" name="source" value="manual" />
+            {contextAccountId ? (
+              <input type="hidden" name="accountId" value={contextAccountId} />
+            ) : (
+              <label>
+                Account
+                <select name="accountId" required>
+                  <option value="">Choose account</option>
+                  {accounts.map((account) => <option key={account.id} value={account.id}>{account.name}</option>)}
+                </select>
+              </label>
+            )}
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 16 }}>
+              <label>
+                Contact
+                <select name="contactId" defaultValue="">
+                  <option value="">No contact</option>
+                  {contacts.map((contact) => <option key={contact.id} value={contact.id}>{contact.name || contact.email}</option>)}
+                </select>
+              </label>
+              <label>
+                Deal
+                <select name="dealId" defaultValue="">
+                  <option value="">No deal</option>
+                  {deals.map((deal) => <option key={deal.id} value={deal.id}>{deal.title}</option>)}
+                </select>
+              </label>
+              <label>
+                Type
+                <select name="type" defaultValue="TASK">
+                  {CRM_ACTIVITY_TYPES.map((option) => <option key={option} value={option}>{labelFromCrmCode(option)}</option>)}
+                </select>
+              </label>
+              <label>Title<input name="title" required /></label>
+              <label>Due date<input type="date" name="dueAt" /></label>
+              <label>
+                Owner
+                <select name="ownerUserId" defaultValue="">
+                  <option value="">No owner</option>
+                  {members.map((member) => (
+                    <option key={member.user.id} value={member.user.id}>{member.user.displayName || member.user.email}</option>
+                  ))}
+                </select>
+              </label>
+            </div>
+            <MarkdownEditor name="bodyMd" rows={3} />
+            <div className="actions-inline"><button type="submit" disabled={!contextAccountId && accounts.length === 0}>Create activity</button>{cancelLink(returnTo)}</div>
+          </form>
+        )}
+
+        {kind === "communication_suggestion" && (
+          <form action={createCommunicationSuggestionAndReturn} className="stack nr-form-section">
+            {hiddenWorkspace(workspaceId)}
+            <input type="hidden" name="channel" value="EMAIL" />
+            <input type="hidden" name="source" value="manual" />
+            {contextAccountId ? (
+              <input type="hidden" name="accountId" value={contextAccountId} />
+            ) : (
+              <label>
+                Account
+                <select name="accountId" required>
+                  <option value="">Choose account</option>
+                  {accounts.map((account) => <option key={account.id} value={account.id}>{account.name}</option>)}
+                </select>
+              </label>
+            )}
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 16 }}>
+              <label>
+                Contact
+                <select name="contactId" defaultValue="">
+                  <option value="">No contact</option>
+                  {contacts.map((contact) => <option key={contact.id} value={contact.id}>{contact.name || contact.email}</option>)}
+                </select>
+              </label>
+              <label>
+                Deal
+                <select name="dealId" defaultValue="">
+                  <option value="">No deal</option>
+                  {deals.map((deal) => <option key={deal.id} value={deal.id}>{deal.title}</option>)}
+                </select>
+              </label>
+              <label>
+                Owner
+                <select name="ownerUserId" defaultValue="">
+                  <option value="">No owner</option>
+                  {members.map((member) => (
+                    <option key={member.user.id} value={member.user.id}>{member.user.displayName || member.user.email}</option>
+                  ))}
+                </select>
+              </label>
+              <label>Title<input name="title" required /></label>
+              <label>Recipient email<input type="email" name="recipientEmail" /></label>
+              <label>Subject<input name="subject" /></label>
+            </div>
+            <label>Body<MarkdownEditor name="bodyMd" rows={5} required /></label>
+            <div className="actions-inline"><button type="submit" disabled={!contextAccountId && accounts.length === 0}>Create suggestion</button>{cancelLink(returnTo)}</div>
           </form>
         )}
 

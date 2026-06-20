@@ -4,6 +4,7 @@ import { enforceDemoGuard } from "@/lib/demo-guard";
 import { requirePageActor } from "@/lib/auth";
 import { requireWorkspaceFeature } from "@/lib/workspace-feature-flags";
 import { asString, asOptional, refresh } from "../action-utils";
+import { CRM_CREATABLE_DEAL_STAGES } from "./view-model";
 import {
   createCrmAccount,
   convertCrmAccountToClient,
@@ -29,6 +30,7 @@ import {
   updateCommunicationSuggestion,
   createPracticeProjectFromWonDeal,
 } from "@corgtex/domain";
+import type { CrmDealStage } from "@prisma/client";
 
 function asOptionalDate(formData: FormData, key: string) {
   const value = asOptional(formData, key);
@@ -50,6 +52,13 @@ function optionalPercentBps(formData: FormData, key: string) {
   if (!raw) return undefined;
   const parsed = Number.parseFloat(raw);
   return Number.isFinite(parsed) ? Math.round(parsed * 100) : undefined;
+}
+
+function optionalCreatableDealStage(formData: FormData) {
+  const stage = asOptional(formData, "stage");
+  return CRM_CREATABLE_DEAL_STAGES.includes(stage as typeof CRM_CREATABLE_DEAL_STAGES[number])
+    ? stage as CrmDealStage
+    : undefined;
 }
 
 export async function createCrmAccountAction(formData: FormData) {
@@ -175,6 +184,7 @@ export async function createDealAction(formData: FormData) {
     workspaceId,
     contactId: asString(formData, "contactId"),
     title: asString(formData, "title"),
+    stage: optionalCreatableDealStage(formData),
     valueCents,
     accountId: formData.has("accountId") ? asOptional(formData, "accountId") ?? null : undefined,
     ownerUserId: formData.has("ownerUserId") ? asOptional(formData, "ownerUserId") ?? null : undefined,

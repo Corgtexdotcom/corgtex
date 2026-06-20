@@ -1,5 +1,4 @@
 import { requirePageActor } from "@/lib/auth";
-import { MarkdownEditor } from "@/lib/components/MarkdownEditor";
 import { MarkdownRenderer } from "@/lib/components/MarkdownRenderer";
 import { MultiSelectFilter } from "@/lib/components/MultiSelectFilter";
 import { WorkItemToolbar } from "@/lib/components/WorkItemControls";
@@ -7,17 +6,14 @@ import { WorkItemTable, type WorkItemTableColumn, type WorkItemTableRow } from "
 import { requireWorkspaceFeature } from "@/lib/workspace-feature-flags";
 import type { WorkItemViewMode } from "@/lib/work-item-view";
 import {
-  listContacts,
-  listCrmAccounts,
   listCrmActivities,
-  listDeals,
   listMembers,
   requireWorkspaceMembership,
 } from "@corgtex/domain";
 import type { CrmActivityType } from "@prisma/client";
 import { getTranslations } from "next-intl/server";
 
-import { completeActivityAction, createActivityAction } from "../actions";
+import { completeActivityAction } from "../actions";
 import { CrmTableSortHeader } from "../CrmTableSortHeader";
 import { CrmChatPageContext } from "../CrmChatPageContext";
 import {
@@ -79,7 +75,7 @@ export default async function RelationshipActivityPage({
   const sortDirection = normalizeCrmSortDirection(resolvedSearch.dir, defaultSortDirection);
   const pagePath = relationshipFullPageHref(workspaceId, "activity");
 
-  const [activityResult, accountResult, contactResult, dealResult, members] = await Promise.all([
+  const [activityResult, members] = await Promise.all([
     listCrmActivities(actor, workspaceId, {
       take: CRM_FULL_PAGE_SIZE,
       skip: crmPageOffset(page),
@@ -87,9 +83,6 @@ export default async function RelationshipActivityPage({
       completions,
       sort: sort === "due" ? "due" : "recent",
     }),
-    listCrmAccounts(actor, workspaceId, { take: 200 }),
-    listContacts(actor, workspaceId, { take: 200 }),
-    listDeals(actor, workspaceId, { take: 200 }),
     listMembers(workspaceId),
   ]);
   const activities = activityResult.items as Array<(typeof activityResult.items)[number] & ActivityContext>;
@@ -310,27 +303,6 @@ export default async function RelationshipActivityPage({
             <a href={clearHref} className="link-button small">{t("filterClear")}</a>
           </div>
         </form>
-
-        <details style={{ marginBottom: 20 }}>
-          <summary className="link-button small" style={{ cursor: "pointer", width: "fit-content" }}>
-            {t("btnNewActivity")}
-          </summary>
-          <form action={createActivityAction} className="stack nr-form-section" style={{ marginTop: 16 }}>
-            <input type="hidden" name="workspaceId" value={workspaceId} />
-            <input type="hidden" name="source" value="manual" />
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 16 }}>
-              <label>{t("formAccount")} <select name="accountId" required><option value="">{t("selectAccount")}</option>{accountResult.items.map((account) => <option key={account.id} value={account.id}>{account.name}</option>)}</select></label>
-              <label>{t("formContact")} <select name="contactId" defaultValue=""><option value="">{t("selectContactOptional")}</option>{contactResult.items.map((contact) => <option key={contact.id} value={contact.id}>{contact.name || contact.email}</option>)}</select></label>
-              <label>{t("activityDeal")} <select name="dealId" defaultValue=""><option value="">{t("selectDealOptional")}</option>{dealResult.items.map((deal) => <option key={deal.id} value={deal.id}>{deal.title}</option>)}</select></label>
-              <label>{t("formActivityType")} <select name="type" defaultValue="TASK">{CRM_ACTIVITY_TYPES.map((option) => <option key={option} value={option}>{activityTypeLabel(option)}</option>)}</select></label>
-              <label>{t("formActivityTitle")} <input name="title" required /></label>
-              <label>{t("formDueAt")} <input type="date" name="dueAt" /></label>
-              <label>{t("formOwner")} <select name="ownerUserId" defaultValue=""><option value="">{t("selectOwnerOptional")}</option>{members.map((member) => <option key={member.user.id} value={member.user.id}>{member.user.displayName || member.user.email}</option>)}</select></label>
-            </div>
-            <MarkdownEditor name="bodyMd" placeholder={t("formActivityBodyPlaceholder")} rows={3} />
-            <button type="submit" style={{ width: "fit-content" }}>{t("btnCreateActivity")}</button>
-          </form>
-        </details>
 
         {viewMode === "table" ? (
           <WorkItemTable

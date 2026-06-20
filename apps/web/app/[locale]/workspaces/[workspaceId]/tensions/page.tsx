@@ -1,4 +1,4 @@
-import { listCircles, listMembers, listProposals, listTensions, requireWorkspaceMembership } from "@corgtex/domain";
+import { listCircles, listMembers, listTensions, requireWorkspaceMembership } from "@corgtex/domain";
 import type { ReactNode } from "react";
 import { requirePageActor } from "@/lib/auth";
 import {
@@ -52,14 +52,12 @@ export default async function TensionsPage({
   const { statusFilters } = resolveTensionSearch(resolvedSearch);
   const view = normalizeWorkItemView(resolvedSearch.view);
   const { circleIds, memberIds, sort } = resolveWorkItemFilters(resolvedSearch);
-  const [{ items: tensions }, { items: proposals }, circles, members] = await Promise.all([
+  const [{ items: tensions }, circles, members] = await Promise.all([
     listTensions(actor, workspaceId, { take: 200, circleIds, memberIds, sort }),
-    listProposals(actor, workspaceId, { take: 50 }),
     listCircles(workspaceId),
     listMembers(workspaceId),
   ]);
 
-  const activeProposals = proposals.filter((p) => p.status === "DRAFT" || p.status === "OPEN");
   const groupedTensions = groupTensionsByStatus(tensions);
   const displayTensions = tensions.filter((tension) => tensionMatchesStatusFilters(tension, statusFilters));
   type TensionListItem = (typeof tensions)[number];
@@ -572,55 +570,6 @@ export default async function TensionsPage({
             {displayTensions.map((tension) => renderTensionCard(tension))}
           </div>
         )}
-      </section>
-
-      <section className={`ws-section ${view === "kanban" ? "nr-list-only-create" : ""}`}>
-        <details open={resolvedSearch.open === "new"}>
-          <summary className="nr-hide-marker nr-section-toggle">
-            <span className="nr-section-header nr-section-header-inline">{t("newTensionTitle")}</span>
-          </summary>
-          <form action={createTensionAction} className="stack nr-form-section">
-            <input type="hidden" name="workspaceId" value={workspaceId} />
-            <label>
-              {t("formTitle")}
-              <input name="title" required />
-            </label>
-            <label>
-              {t("formDescription")}
-              <MarkdownEditor name="bodyMd" rows={5} />
-            </label>
-            <label>
-              {t("formRaisedBy")}
-              <select name="raisedByMemberId" defaultValue="">
-                <option value="">{t("formRaisedByNone")}</option>
-                {members.map((member) => (
-                  <option value={member.id} key={member.id}>{memberName(member)}</option>
-                ))}
-              </select>
-            </label>
-            <label>
-              {t("formPriority")}
-              <input name="priority" type="number" min={0} defaultValue={0} />
-            </label>
-            <details>
-              <summary className="secondary small nr-hide-marker" style={{ cursor: "pointer", display: "inline-block" }}>{t("formOptionalMetadata")}</summary>
-              <label style={{ marginTop: 12 }}>
-                {t("formLinkToProposal")}
-                <select name="proposalId" defaultValue="">
-                  <option value="">{t("formNone")}</option>
-                  {activeProposals.map((p) => (
-                    <option value={p.id} key={p.id}>{p.title}</option>
-                  ))}
-                </select>
-              </label>
-            </details>
-            <label style={{ display: "flex", alignItems: "center", gap: "8px", fontWeight: "normal", cursor: "pointer" }}>
-              <input type="checkbox" name="isPrivate" defaultChecked />
-              <span>{t("formPrivateInbox")}</span>
-            </label>
-            <button type="submit">{t("btnCreateTension")}</button>
-          </form>
-        </details>
       </section>
     </>
   );

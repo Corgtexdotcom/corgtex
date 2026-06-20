@@ -527,17 +527,6 @@ export default async function ProposalsPage({
           </div>
         )}
       </section>
-
-      {!isDemo && (
-        <section className={`ws-section ${view === "kanban" ? "nr-list-only-create" : ""}`}>
-          <details open={resolvedSearch.open === "new"}>
-            <summary className="nr-hide-marker nr-section-toggle">
-              <span className="nr-section-header nr-section-header-inline">{t("newProposalTitle")}</span>
-            </summary>
-            <CreateProposalForm workspaceId={workspaceId} />
-          </details>
-        </section>
-      )}
     </>
   );
 }
