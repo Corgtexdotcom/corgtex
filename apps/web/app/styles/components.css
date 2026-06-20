@@ -2320,6 +2320,10 @@ details[open] > .settings-disclosure-summary::before {
     cursor: pointer;
   }
 
+  .nr-kanban-add-link {
+    text-decoration: none;
+  }
+
   .nr-kanban-add-trigger:hover {
     border-color: var(--accent);
     color: var(--accent);

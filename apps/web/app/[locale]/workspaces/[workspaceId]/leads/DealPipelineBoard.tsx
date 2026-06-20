@@ -9,7 +9,7 @@ import {
   nextDealFollowUp,
   type DealPipelineDeal,
 } from "./deal-pipeline";
-import { CRM_DEAL_STAGES, accountHref, labelFromCrmCode } from "./view-model";
+import { CRM_CREATABLE_DEAL_STAGES, CRM_DEAL_STAGES, accountHref, labelFromCrmCode } from "./view-model";
 
 type PipelineMember = {
   user: {
@@ -54,6 +54,7 @@ export function DealPipelineBoard({
   labels,
   workItemLabels,
   accountFallback,
+  addStageHrefs,
 }: {
   workspaceId: string;
   deals: PipelineDeal[];
@@ -78,6 +79,7 @@ export function DealPipelineBoard({
   };
   workItemLabels: WorkItemLabels;
   accountFallback?: { id: string; name: string } | null;
+  addStageHrefs?: Partial<Record<string, string>>;
 }) {
   const groupedDeals = dealsGroupedByStage(deals);
   const ownerNames = new Map(
@@ -107,13 +109,25 @@ export function DealPipelineBoard({
     return labels.stageAgeDays(days);
   };
   const accountForDeal = (deal: PipelineDeal) => deal.account ?? accountFallback ?? null;
+  const creatableStageSet = new Set<string>(CRM_CREATABLE_DEAL_STAGES);
   const columns: WorkItemKanbanColumn[] = CRM_DEAL_STAGES.map((stage) => {
     const stageDeals = groupedDeals[stage] ?? [];
+    const addHref = creatableStageSet.has(stage) ? addStageHrefs?.[stage] : undefined;
     return {
       id: stage,
       label: stageLabels[stage] ?? labelFromCrmCode(stage),
       count: stageDeals.length,
       empty: <p className="muted">{labels.emptyStage}</p>,
+      addCard: addHref ? (
+        <a
+          className="nr-kanban-add-trigger nr-kanban-add-link"
+          href={addHref}
+          aria-label={`Add deal to ${stageLabels[stage] ?? labelFromCrmCode(stage)}`}
+          title={`Add deal to ${stageLabels[stage] ?? labelFromCrmCode(stage)}`}
+        >
+          +
+        </a>
+      ) : null,
       items: stageDeals.map((deal) => {
         const followUp = nextDealFollowUp(deal);
         const account = accountForDeal(deal);

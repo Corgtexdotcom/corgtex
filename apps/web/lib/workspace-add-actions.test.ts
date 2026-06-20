@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import { DEFAULT_WORKSPACE_FEATURE_FLAGS } from "@/lib/workspace-feature-flags";
 import {
+  crmAccountIdFromPath,
   getMobileCaptureActions,
   getWorkspaceAddActions,
   sanitizeWorkspaceReturnTo,
@@ -30,6 +31,13 @@ describe("workspace add actions", () => {
   it("resolves workspace subpaths with optional locale prefixes", () => {
     expect(workspaceSubpath("/workspaces/ws-1/meetings", "ws-1")).toBe("/meetings");
     expect(workspaceSubpath("/en/workspaces/ws-1/settings", "ws-1")).toBe("/settings");
+  });
+
+  it("extracts relationship account detail context from workspace paths", () => {
+    expect(crmAccountIdFromPath("/workspaces/ws-1/leads/accounts/account-1", "ws-1")).toBe("account-1");
+    expect(crmAccountIdFromPath("/en/workspaces/ws-1/leads/accounts/account%202?view=pipeline", "ws-1")).toBe("account 2");
+    expect(crmAccountIdFromPath("/workspaces/ws-1/leads/accounts", "ws-1")).toBeNull();
+    expect(crmAccountIdFromPath("/workspaces/ws-2/leads/accounts/account-1", "ws-1")).toBeNull();
   });
 
   it("returns ordered meeting actions", () => {
@@ -101,8 +109,33 @@ describe("workspace add actions", () => {
   it("uses tab and view context for multi-surface pages", () => {
     expect(kinds({ pathname: "/workspaces/ws-1/finance" })).toEqual([]);
     expect(kinds({ pathname: "/workspaces/ws-1/finance", searchParams: "tab=accounts" })).toEqual([]);
+    expect(kinds({ pathname: "/workspaces/ws-1/leads" })).toEqual([
+      "crm_account",
+      "contact",
+      "deal",
+      "crm_activity",
+      "communication_suggestion",
+    ]);
     expect(kinds({ pathname: "/workspaces/ws-1/leads", searchParams: "view=pipeline" })).toEqual(["deal"]);
     expect(kinds({ pathname: "/workspaces/ws-1/leads", searchParams: "view=instances" })).toEqual(["prospect_instance"]);
+    expect(kinds({ pathname: "/workspaces/ws-1/leads/accounts" })).toEqual(["crm_account"]);
+    expect(kinds({ pathname: "/workspaces/ws-1/leads/pipeline" })).toEqual(["deal"]);
+    expect(kinds({ pathname: "/workspaces/ws-1/leads/activity" })).toEqual(["crm_activity"]);
+    expect(kinds({ pathname: "/workspaces/ws-1/leads/suggestions" })).toEqual(["communication_suggestion"]);
+  });
+
+  it("narrows relationship account detail add actions by active tab", () => {
+    expect(kinds({ pathname: "/workspaces/ws-1/leads/accounts/account-1" })).toEqual([
+      "contact",
+      "deal",
+      "crm_activity",
+      "communication_suggestion",
+    ]);
+    expect(kinds({ pathname: "/workspaces/ws-1/leads/accounts/account-1", searchParams: "view=contacts" })).toEqual(["contact"]);
+    expect(kinds({ pathname: "/workspaces/ws-1/leads/accounts/account-1", searchParams: "view=pipeline" })).toEqual(["deal"]);
+    expect(kinds({ pathname: "/workspaces/ws-1/leads/accounts/account-1", searchParams: "view=activity" })).toEqual(["crm_activity"]);
+    expect(kinds({ pathname: "/workspaces/ws-1/leads/accounts/account-1", searchParams: "view=suggestions" })).toEqual(["communication_suggestion"]);
+    expect(kinds({ pathname: "/workspaces/ws-1/leads/accounts/account-1", searchParams: "view=instances" })).toEqual([]);
   });
 
   it("filters settings actions by role and invite policy", () => {

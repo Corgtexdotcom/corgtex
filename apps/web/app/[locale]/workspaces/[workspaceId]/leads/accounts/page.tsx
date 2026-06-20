@@ -1,5 +1,4 @@
 import { requirePageActor } from "@/lib/auth";
-import { MarkdownEditor } from "@/lib/components/MarkdownEditor";
 import { MultiSelectFilter } from "@/lib/components/MultiSelectFilter";
 import { WorkItemToolbar } from "@/lib/components/WorkItemControls";
 import { WorkItemTable, type WorkItemTableColumn, type WorkItemTableRow } from "@/lib/components/WorkItemTable";
@@ -9,7 +8,6 @@ import { listCrmAccounts, listCrmActivities, listDeals, requireWorkspaceMembersh
 import { ExternalLink } from "lucide-react";
 import { getTranslations } from "next-intl/server";
 
-import { createCrmAccountAction } from "../actions";
 import { CrmTableSortHeader } from "../CrmTableSortHeader";
 import { CrmChatPageContext } from "../CrmChatPageContext";
 import {
@@ -347,23 +345,6 @@ export default async function RelationshipAccountsPage({
             <a href={clearHref} className="link-button small">{t("filterClear")}</a>
           </div>
         </form>
-
-        <details style={{ marginBottom: 20 }}>
-          <summary className="link-button small" style={{ cursor: "pointer", width: "fit-content" }}>
-            {t("btnNewAccount")}
-          </summary>
-          <form action={createCrmAccountAction} className="stack nr-form-section" style={{ marginTop: 16 }}>
-            <input type="hidden" name="workspaceId" value={workspaceId} />
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 16 }}>
-              <label>{t("formAccountName")} <input type="text" name="name" required /></label>
-              <label>{t("formDomain")} <input type="text" name="domain" placeholder={t("formDomainPlaceholder")} /></label>
-              <label>{t("formRelationshipType")} <select name="relationshipType" defaultValue="PROSPECT">{CRM_RELATIONSHIP_OPTIONS.map((option) => <option key={option} value={option}>{relationshipLabel(option)}</option>)}</select></label>
-              <label>{t("formLifecycleStage")} <select name="lifecycleStage" defaultValue="DISCOVERY">{CRM_LIFECYCLE_OPTIONS.map((option) => <option key={option} value={option}>{lifecycleLabel(option)}</option>)}</select></label>
-            </div>
-            <label>{t("formDescription")} <MarkdownEditor name="descriptionMd" placeholder={t("formDescriptionPlaceholder")} rows={3} /></label>
-            <button type="submit" style={{ width: "fit-content" }}>{t("btnCreateAccount")}</button>
-          </form>
-        </details>
 
         {viewMode === "table" ? (
           <WorkItemTable

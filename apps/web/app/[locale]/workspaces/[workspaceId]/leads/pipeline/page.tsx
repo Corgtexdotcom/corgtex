@@ -5,12 +5,11 @@ import { WorkItemTable, type WorkItemTableColumn, type WorkItemTableRow } from "
 import { normalizeVisibleWorkItemColumns, toggleWorkItemColumnVisibility } from "@/lib/work-item-view";
 import type { WorkItemViewMode } from "@/lib/work-item-view";
 import { requireWorkspaceFeature } from "@/lib/workspace-feature-flags";
-import { listContacts, listDeals, listMembers, requireWorkspaceMembership } from "@corgtex/domain";
+import { listDeals, listMembers, requireWorkspaceMembership } from "@corgtex/domain";
 import type { CrmDealStage } from "@prisma/client";
 import { ExternalLink } from "lucide-react";
 import { getTranslations } from "next-intl/server";
 
-import { createDealAction } from "../actions";
 import { CrmTableSortHeader } from "../CrmTableSortHeader";
 import { CrmChatPageContext } from "../CrmChatPageContext";
 import { DealPipelineBoard } from "../DealPipelineBoard";
@@ -21,6 +20,7 @@ import {
   crmPageMetrics,
 } from "../chat-page-context";
 import {
+  CRM_CREATABLE_DEAL_STAGES,
   CRM_DEAL_STAGES,
   activePipelineValueCents,
   labelFromCrmCode,
@@ -73,13 +73,12 @@ export default async function RelationshipPipelinePage({
     return [column, crmPageHref(pagePath, resolvedSearch, { columns: nextColumns?.join(",") ?? null })];
   }));
 
-  const [dealResult, contactResult, members] = await Promise.all([
+  const [dealResult, members] = await Promise.all([
     listDeals(actor, workspaceId, {
       take: CRM_FULL_PAGE_SIZE,
       skip: crmPageOffset(page),
       stages,
     }),
-    listContacts(actor, workspaceId, { take: 200 }),
     listMembers(workspaceId),
   ]);
 
@@ -105,6 +104,11 @@ export default async function RelationshipPipelinePage({
   const previousHref = crmPageHref(pagePath, resolvedSearch, { page: Math.max(page - 1, 1) });
   const nextHref = crmPageHref(pagePath, resolvedSearch, { page: Math.min(page + 1, pageCount) });
   const clearHref = crmPageHref(pagePath, {}, { view: viewMode === DEFAULT_PIPELINE_VIEW ? null : viewMode });
+  const currentHref = crmPageHref(pagePath, resolvedSearch, {});
+  const pipelineStageAddHrefs = Object.fromEntries(CRM_CREATABLE_DEAL_STAGES.map((stage) => [
+    stage,
+    `/workspaces/${workspaceId}/add?kind=deal&stage=${stage}&returnTo=${encodeURIComponent(currentHref)}`,
+  ]));
   const ownerText = (ownerUserId?: string | null) => {
     const owner = members.find((member) => member.user.id === ownerUserId)?.user;
     return owner ? owner.displayName || owner.email : t("pipelineNoOwner");
@@ -323,38 +327,6 @@ export default async function RelationshipPipelinePage({
           </div>
         </form>
 
-        <details style={{ marginBottom: 20 }}>
-          <summary className="link-button small" style={{ cursor: "pointer", width: "fit-content" }}>
-            {t("btnNewDeal")}
-          </summary>
-          <form action={createDealAction} className="stack nr-form-section" style={{ marginTop: 16 }}>
-            <input type="hidden" name="workspaceId" value={workspaceId} />
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 16 }}>
-              <label>
-                {t("formContact")}
-                <select name="contactId" required>
-                  <option value="">{t("selectContact")}</option>
-                  {contactResult.items.map((contact) => (
-                    <option key={contact.id} value={contact.id}>{contact.name || contact.email}</option>
-                  ))}
-                </select>
-              </label>
-              <label>{t("formDealTitle")} <input type="text" name="title" required /></label>
-              <label>{t("formValue")} <input type="number" name="value" step="0.01" min="0" /></label>
-              <label>
-                {t("formOwner")}
-                <select name="ownerUserId" defaultValue="">
-                  <option value="">{t("selectOwnerOptional")}</option>
-                  {members.map((member) => (
-                    <option key={member.user.id} value={member.user.id}>{member.user.displayName || member.user.email}</option>
-                  ))}
-                </select>
-              </label>
-            </div>
-            <button type="submit" style={{ width: "fit-content" }}>{t("btnCreateDeal")}</button>
-          </form>
-        </details>
-
         {viewMode === "kanban" ? (
           <DealPipelineBoard
             workspaceId={workspaceId}
@@ -365,6 +337,7 @@ export default async function RelationshipPipelinePage({
             visibleColumnIds={visiblePipelineColumnIds}
             hideColumnHrefs={pipelineColumnHideHrefs}
             storageKey={`relationships:${workspaceId}:pipeline:full`}
+            addStageHrefs={pipelineStageAddHrefs}
             labels={{
               account: t("pipelineAccount"),
               contact: t("pipelineContact"),

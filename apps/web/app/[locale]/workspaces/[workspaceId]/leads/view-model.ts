@@ -42,6 +42,15 @@ export const CRM_DEAL_STAGES = [
   "CLOSED_LOST",
 ] as const;
 
+export const CRM_CREATABLE_DEAL_STAGES = [
+  "LEAD",
+  "QUALIFIED",
+  "PROPOSAL",
+  "NEGOTIATION",
+] as const;
+
+export const CRM_ACTIVITY_TYPES = ["NOTE", "EMAIL", "CALL", "MEETING", "TASK"] as const;
+
 export const CRM_RELATIONSHIP_OPTIONS = [
   "PROSPECT",
   "PILOT",

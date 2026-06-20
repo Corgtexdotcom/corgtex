@@ -8,10 +8,6 @@ import { getTranslations } from "next-intl/server";
 
 import {
   completeActivityAction,
-  createActivityAction,
-  createCommunicationSuggestionAction,
-  createContactAction,
-  createDealAction,
   createFinanceProjectFromDealAction,
   convertCrmAccountToClientAction,
   updateCrmAccountAction,
@@ -29,6 +25,7 @@ import {
 } from "../../chat-page-context";
 import {
   ACCOUNT_DETAIL_VIEWS,
+  CRM_CREATABLE_DEAL_STAGES,
   CRM_LIFECYCLE_OPTIONS,
   CRM_RELATIONSHIP_OPTIONS,
   activePipelineValueCents,
@@ -70,6 +67,15 @@ export default async function AccountDetailPage({
     if (nextColumns) query.set("columns", nextColumns.join(","));
     return [stage, `?${query.toString()}`];
   }));
+  const accountPath = `/workspaces/${workspaceId}/leads/accounts/${accountId}`;
+  const pipelineReturnQuery = new URLSearchParams({ view: "pipeline" });
+  const columnsParam = Array.isArray(resolvedSearch.columns) ? resolvedSearch.columns[0] : resolvedSearch.columns;
+  if (columnsParam) pipelineReturnQuery.set("columns", columnsParam);
+  const pipelineReturnTo = `${accountPath}?${pipelineReturnQuery.toString()}`;
+  const pipelineStageAddHrefs = Object.fromEntries(CRM_CREATABLE_DEAL_STAGES.map((stage) => [
+    stage,
+    `/workspaces/${workspaceId}/add?kind=deal&stage=${stage}&returnTo=${encodeURIComponent(pipelineReturnTo)}`,
+  ]));
   const [financeEnabled, practiceProjectsEnabled] = await Promise.all([
     isWorkspaceFeatureEnabled(workspaceId, "FINANCE"),
     isWorkspaceFeatureEnabled(workspaceId, "PRACTICE_PROJECTS"),
@@ -580,21 +586,6 @@ export default async function AccountDetailPage({
 
         {view === "contacts" && (
           <div className="stack">
-            <details>
-              <summary className="link-button small" style={{ cursor: "pointer" }}>{t("btnNewContact")}</summary>
-              <form action={createContactAction} className="stack nr-form-section" style={{ marginTop: 16 }}>
-                <input type="hidden" name="workspaceId" value={workspaceId} />
-                <input type="hidden" name="accountId" value={account.id} />
-                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 16 }}>
-                  <label>{t("formEmail")} <input type="email" name="email" required /></label>
-                  <label>{t("formName")} <input type="text" name="name" /></label>
-                  <label>{t("formCompany")} <input type="text" name="company" defaultValue={account.name} /></label>
-                  <label>{t("formTitle")} <input type="text" name="title" /></label>
-                </div>
-                <button type="submit" style={{ width: "fit-content" }}>{t("btnCreateContact")}</button>
-              </form>
-            </details>
-
             {account.contacts.length === 0 ? (
               <p className="muted">{t("accountNoContacts")}</p>
             ) : account.contacts.map((contact) => (
@@ -614,39 +605,6 @@ export default async function AccountDetailPage({
 
         {view === "pipeline" && (
           <div className="stack">
-            <details>
-              <summary className="link-button small" style={{ cursor: "pointer" }}>{t("btnNewDeal")}</summary>
-              <form action={createDealAction} className="stack nr-form-section" style={{ marginTop: 16 }}>
-                <input type="hidden" name="workspaceId" value={workspaceId} />
-                <input type="hidden" name="accountId" value={account.id} />
-                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 16 }}>
-                  <label>
-                    {t("formContact")}
-                    <select name="contactId" required>
-                      <option value="">{t("selectContact")}</option>
-                      {account.contacts.map((contact) => (
-                        <option key={contact.id} value={contact.id}>{contact.name || contact.email}</option>
-                      ))}
-                    </select>
-                  </label>
-                  <label>{t("formDealTitle")} <input type="text" name="title" required /></label>
-                  <label>{t("formValue")} <input type="number" name="value" step="0.01" min="0" /></label>
-                  <label>
-                    {t("formOwner")}
-                    <select name="ownerUserId" defaultValue="">
-                      <option value="">{t("selectOwnerOptional")}</option>
-                      {members.map((member) => (
-                        <option key={member.user.id} value={member.user.id}>
-                          {member.user.displayName || member.user.email}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                </div>
-                <button type="submit" style={{ width: "fit-content" }}>{t("btnCreateDeal")}</button>
-              </form>
-            </details>
-
             <DealPipelineBoard
               workspaceId={workspaceId}
               deals={account.deals}
@@ -657,6 +615,7 @@ export default async function AccountDetailPage({
               hideColumnHrefs={pipelineColumnHideHrefs}
               storageKey={`relationships:${workspaceId}:account:${account.id}:pipeline`}
               accountFallback={{ id: account.id, name: account.name }}
+              addStageHrefs={pipelineStageAddHrefs}
               labels={{
                 account: t("pipelineAccount"),
                 contact: t("pipelineContact"),
@@ -691,42 +650,6 @@ export default async function AccountDetailPage({
 
         {view === "activity" && (
           <div className="stack">
-            <details>
-              <summary className="link-button small" style={{ cursor: "pointer" }}>{t("btnNewActivity")}</summary>
-              <form action={createActivityAction} className="stack nr-form-section" style={{ marginTop: 16 }}>
-                <input type="hidden" name="workspaceId" value={workspaceId} />
-                <input type="hidden" name="accountId" value={account.id} />
-                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 16 }}>
-                  <label>{t("formActivityTitle")} <input type="text" name="title" required /></label>
-                  <label>
-                    {t("formActivityType")}
-                    <select name="type" defaultValue="NOTE">
-                      <option value="NOTE">{t("activityTypeNote")}</option>
-                      <option value="EMAIL">{t("activityTypeEmail")}</option>
-                      <option value="MEETING">{t("activityTypeMeeting")}</option>
-                      <option value="CALL">{t("activityTypeCall")}</option>
-                      <option value="TASK">{t("activityTypeTask")}</option>
-                    </select>
-                  </label>
-                  <label>{t("formDueAt")} <input type="date" name="dueAt" /></label>
-                  <label>
-                    {t("formOwner")}
-                    <select name="ownerUserId" defaultValue="">
-                      <option value="">{t("selectOwnerOptional")}</option>
-                      {members.map((member) => (
-                        <option key={member.user.id} value={member.user.id}>
-                          {member.user.displayName || member.user.email}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                </div>
-                <input type="hidden" name="source" value="manual" />
-                <MarkdownEditor name="bodyMd" placeholder={t("formActivityBodyPlaceholder")} rows={3} />
-                <button type="submit" style={{ width: "fit-content" }}>{t("btnCreateActivity")}</button>
-              </form>
-            </details>
-
             {accountActivities.length === 0 ? (
               <p className="muted">{t("accountNoActivity")}</p>
             ) : accountActivities.map((activity) => (
@@ -762,57 +685,6 @@ export default async function AccountDetailPage({
 
         {view === "suggestions" && (
           <div className="stack">
-            <details>
-              <summary className="link-button small" style={{ cursor: "pointer", width: "fit-content" }}>
-                {t("btnNewSuggestion")}
-              </summary>
-              <form action={createCommunicationSuggestionAction} className="stack nr-form-section" style={{ marginTop: 16 }}>
-                <input type="hidden" name="workspaceId" value={workspaceId} />
-                <input type="hidden" name="accountId" value={account.id} />
-                <input type="hidden" name="channel" value="EMAIL" />
-                <input type="hidden" name="source" value="manual" />
-                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 16 }}>
-                  <label>
-                    {t("formContact")}
-                    <select name="contactId" defaultValue="">
-                      <option value="">{t("selectContactOptional")}</option>
-                      {account.contacts.map((contact) => (
-                        <option key={contact.id} value={contact.id}>{contact.name || contact.email}</option>
-                      ))}
-                    </select>
-                  </label>
-                  <label>
-                    {t("activityDeal")}
-                    <select name="dealId" defaultValue="">
-                      <option value="">{t("selectDealOptional")}</option>
-                      {account.deals.map((deal) => (
-                        <option key={deal.id} value={deal.id}>{deal.title}</option>
-                      ))}
-                    </select>
-                  </label>
-                  <label>
-                    {t("formOwner")}
-                    <select name="ownerUserId" defaultValue="">
-                      <option value="">{t("selectOwnerOptional")}</option>
-                      {members.map((member) => (
-                        <option key={member.user.id} value={member.user.id}>
-                          {member.user.displayName || member.user.email}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                  <label>{t("formSuggestionTitle")} <input name="title" required /></label>
-                  <label>{t("formSuggestionRecipient")} <input type="email" name="recipientEmail" /></label>
-                  <label>{t("formSuggestionSubject")} <input name="subject" /></label>
-                </div>
-                <label>
-                  {t("formSuggestionBody")}
-                  <MarkdownEditor name="bodyMd" placeholder={t("formSuggestionBodyPlaceholder")} rows={5} required />
-                </label>
-                <button type="submit" style={{ width: "fit-content" }}>{t("btnCreateSuggestion")}</button>
-              </form>
-            </details>
-
             {communicationSummary.all.length === 0 ? (
               <p className="muted">{t("accountNoSuggestions")}</p>
             ) : communicationSummary.all.map((suggestion) => (
