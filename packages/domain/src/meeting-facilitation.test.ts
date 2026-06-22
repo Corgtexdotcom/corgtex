@@ -225,7 +225,11 @@ describe("meeting facilitation", () => {
     prismaMock.meetingInsight.findMany.mockResolvedValue([
       {
         id: "follow-up-1",
+        type: "FOLLOW_UP",
+        operation: "CREATE",
+        status: "SUGGESTED",
         title: "Review prior decision",
+        meetingId: "previous-meeting",
         bodyMd: "Bring back to next meeting.",
         assigneeHint: "Jan",
       },
@@ -293,6 +297,148 @@ describe("meeting facilitation", () => {
     expect(prismaMock.meeting.update).toHaveBeenCalledWith({
       where: { id: "meeting-1" },
       data: { summaryPostedAt: expect.any(Date) },
+      });
+  });
+
+  it("prepares deterministic regular update agendas for recurring meetings without model extraction", async () => {
+    prismaMock.meeting.findFirst.mockResolvedValueOnce({
+      id: "meeting-1",
+      workspaceId: "workspace-1",
+      status: "SCHEDULED",
+      title: "Weekly update",
+      source: "internal",
+      transcript: null,
+      summaryMd: null,
+      blocksJson: null,
+      agendaJson: null,
+      ingestionGuidanceMd: null,
+      seriesId: "series-1",
+      participantIds: ["user-1"],
+      participantEmails: ["jan@example.com"],
+      recordedAt: new Date("2026-06-23T17:00:00.000Z"),
+      scheduledEndAt: new Date("2026-06-23T18:00:00.000Z"),
+      archivedAt: null,
+      series: { title: "Weekly update", recurrenceRule: "FREQ=WEEKLY" },
+    });
+    prismaMock.meeting.findMany.mockResolvedValueOnce([
+      {
+        id: "previous-meeting",
+        title: "Weekly update",
+        recordedAt: new Date("2026-06-16T17:00:00.000Z"),
+        summaryMd: "Previous summary",
+        decisionsJson: { items: [{ title: "Decision made", bodyMd: "Decision details." }] },
+      },
+    ]);
+    prismaMock.member.findMany.mockResolvedValue([
+      {
+        id: "member-1",
+        user: { displayName: "Jan", email: "jan@example.com" },
+        roleAssignments: [
+          { role: { circleId: "circle-1", circle: { name: "Ops" } } },
+        ],
+      },
+    ]);
+    prismaMock.tension.findMany.mockResolvedValue([
+      {
+        id: "tension-1",
+        title: "Clarify discount authority",
+        status: "OPEN",
+        priority: 3,
+        bodyMd: "Tension body.",
+        upvotes: [],
+        circle: { name: "Ops" },
+        assigneeMember: null,
+        raisedByMember: { user: { displayName: "Jan", email: "jan@example.com" } },
+      },
+    ]);
+    prismaMock.action.findMany.mockResolvedValue([
+      {
+        id: "action-1",
+        title: "Draft policy",
+        status: "OPEN",
+        dueAt: new Date("2026-06-22T12:00:00.000Z"),
+        bodyMd: "Action body.",
+        circle: { name: "Ops" },
+        assigneeMember: { user: { displayName: "Jan", email: "jan@example.com" } },
+      },
+    ]);
+    prismaMock.proposal.findMany.mockResolvedValue([
+      {
+        id: "proposal-1",
+        title: "Pricing proposal",
+        status: "OPEN",
+        summary: "Proposal summary.",
+        bodyMd: "Proposal body.",
+        circle: { name: "Ops" },
+        author: { displayName: "Jan", email: "jan@example.com" },
+        tensions: [],
+        actions: [],
+      },
+    ]);
+    prismaMock.meetingInsight.findMany.mockResolvedValue([
+      {
+        id: "follow-up-1",
+        meetingId: "previous-meeting",
+        type: "FOLLOW_UP",
+        operation: "CREATE",
+        status: "SUGGESTED",
+        title: "Review prior decision",
+        bodyMd: "Bring back to next meeting.",
+        assigneeHint: "Jan",
+        targetEntityType: null,
+        targetEntityId: null,
+        appliedEntityType: null,
+        appliedEntityId: null,
+      },
+      {
+        id: "created-action",
+        meetingId: "previous-meeting",
+        type: "ACTION_ITEM",
+        operation: "CREATE",
+        status: "APPLIED",
+        title: "Draft policy",
+        bodyMd: "Action body.",
+        assigneeHint: "Jan",
+        targetEntityType: null,
+        targetEntityId: null,
+        appliedEntityType: "Action",
+        appliedEntityId: "action-1",
+      },
+      {
+        id: "resolved-tension",
+        meetingId: "previous-meeting",
+        type: "TENSION",
+        operation: "RESOLVE",
+        status: "APPLIED",
+        title: "Resolved old tension",
+        bodyMd: "Resolved in prior meeting.",
+        assigneeHint: null,
+        targetEntityType: "Tension",
+        targetEntityId: "old-tension",
+        appliedEntityType: "Tension",
+        appliedEntityId: "old-tension",
+      },
+    ]);
+    prismaMock.meeting.update.mockResolvedValue({ id: "meeting-1" });
+
+    const { prepareAgendaForMeeting } = await import("./meeting-facilitation");
+    const result = await prepareAgendaForMeeting({ workspaceId: "workspace-1", meetingId: "meeting-1" });
+
+    expect(defaultModelGatewayMock.extract).not.toHaveBeenCalled();
+    expect(result.agenda).toMatchObject({
+      templateKey: "regular_update_v1",
+      generationMode: "deterministic",
+      sections: [
+        expect.objectContaining({ key: "check_in" }),
+        expect.objectContaining({ key: "last_meeting_recap" }),
+        expect.objectContaining({ key: "circle_updates" }),
+        expect.objectContaining({ key: "work_queue" }),
+        expect.objectContaining({ key: "checkout" }),
+      ],
+    });
+    expect(prismaMock.meeting.update).toHaveBeenCalledWith({
+      where: { id: "meeting-1" },
+      data: { agendaJson: expect.objectContaining({ templateKey: "regular_update_v1" }) },
     });
   });
 
@@ -365,6 +511,56 @@ describe("meeting facilitation", () => {
       where: { id: "meeting-1" },
       data: { summaryPostedAt: expect.any(Date) },
     });
+  });
+
+  it("does not mutate regular update agendas from Slack thread edit requests", async () => {
+    prismaMock.user.findUnique.mockResolvedValue({
+      id: "user-1",
+      email: "jan@example.com",
+      displayName: "Jan",
+      globalRole: "USER",
+    });
+    prismaMock.meeting.findFirst.mockResolvedValueOnce({
+      id: "meeting-1",
+      title: "Weekly update",
+      recordedAt: new Date("2026-06-23T17:00:00.000Z"),
+      scheduledEndAt: new Date("2026-06-23T18:00:00.000Z"),
+      agendaJson: {
+        templateKey: "regular_update_v1",
+        version: 1,
+        generationMode: "deterministic",
+        title: "Weekly update",
+        generatedAt: "2026-06-22T17:00:00.000Z",
+        sections: [],
+      },
+      agendaChannelId: "C123",
+      agendaMessageTs: "1710000000.000100",
+    });
+    sendSlackMessageMock.mockResolvedValue({ ok: true, ts: "1710000002.000100" });
+
+    const { runMeetingAgendaThreadEdit } = await import("./meeting-facilitation");
+    await expect(runMeetingAgendaThreadEdit({
+      workspaceId: "workspace-1",
+      meetingId: "meeting-1",
+      actorUserId: "user-1",
+      installationId: "slack-1",
+      channelId: "C123",
+      threadTs: "1710000000.000100",
+      messageTs: "1710000001.000100",
+      messageText: "add one item",
+      workflowJobId: "job-1",
+    })).resolves.toEqual({
+      edited: false,
+      reason: "read_only_regular_agenda",
+    });
+
+    expect(defaultModelGatewayMock.extract).not.toHaveBeenCalled();
+    expect(updateSlackMessageMock).not.toHaveBeenCalled();
+    expect(prismaMock.meeting.update).not.toHaveBeenCalled();
+    expect(sendSlackMessageMock).toHaveBeenCalledWith("slack-1", {
+      channel: "C123",
+      threadTs: "1710000000.000100",
+    }, expect.any(Array));
   });
 
   it("edits agenda thread parent messages from concrete Slack requests", async () => {

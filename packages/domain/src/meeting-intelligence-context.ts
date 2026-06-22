@@ -20,22 +20,25 @@ const CONTEXT_KNOWLEDGE_SOURCE_TYPES: KnowledgeSourceType[] = [
 type ContextMeetingRecord = {
   id: string;
   workspaceId: string;
+  status: string;
   title: string | null;
   source: string;
   transcript: string | null;
   summaryMd: string | null;
   blocksJson: unknown;
+  agendaJson: unknown;
   ingestionGuidanceMd: string | null;
   recordedAt: Date;
   scheduledEndAt: Date | null;
   seriesId: string | null;
-  series: { title: string | null } | null;
+  series: { title: string | null; recurrenceRule: string | null } | null;
   participantIds: string[];
   participantEmails: string[];
 };
 
 type ContextMemberRecord = {
   id: string;
+  userId: string;
   user: { displayName: string | null; email: string };
   roleAssignments: Array<{
     role: {
@@ -93,9 +96,16 @@ type ContextPreviousMeetingRecord = {
 type ContextFollowUpRecord = {
   id: string;
   meetingId: string;
+  type?: string;
+  operation?: string;
+  status?: string;
   title: string;
   bodyMd: string;
   assigneeHint: string | null;
+  targetEntityType?: string | null;
+  targetEntityId?: string | null;
+  appliedEntityType?: string | null;
+  appliedEntityId?: string | null;
 };
 
 type ContextDeliberationEntryRecord = {
@@ -137,14 +147,17 @@ export type MeetingIntelligenceContext = {
     workspaceId: string;
     title: string | null;
     source: string;
+    status: string;
     transcript: string | null;
     summaryMd: string | null;
     blocksJson: unknown;
+    agendaJson: unknown;
     ingestionGuidanceMd: string | null;
     recordedAt: Date;
     scheduledEndAt: Date | null;
     seriesId: string | null;
     seriesTitle: string | null;
+    seriesRecurrenceRule: string | null;
     participantIds: string[];
     participantEmails: string[];
   };
@@ -187,6 +200,8 @@ export type MeetingIntelligenceContext = {
     actions: Array<{ id: string; title: string; status: string }>;
   }>;
   followUps: Array<{ id: string; meetingId: string; title: string; bodyMd: string; owner: string | null }>;
+  resolvedTensions: Array<{ id: string; meetingId: string; title: string; bodyMd: string; targetEntityId: string | null }>;
+  createdFromPreviousMeeting: Array<{ meetingId: string; entityType: string; entityId: string }>;
   deliberationEntries: Array<{
     id: string;
     parentType: string;
@@ -490,17 +505,31 @@ function contextMeeting(meeting: ContextMeetingRecord) {
     workspaceId: meeting.workspaceId,
     title: meeting.title,
     source: meeting.source,
+    status: meeting.status,
     transcript: meeting.transcript,
     summaryMd: meeting.summaryMd,
     blocksJson: meeting.blocksJson,
+    agendaJson: meeting.agendaJson,
     ingestionGuidanceMd: meeting.ingestionGuidanceMd,
     recordedAt: meeting.recordedAt,
     scheduledEndAt: meeting.scheduledEndAt,
     seriesId: meeting.seriesId,
     seriesTitle: meeting.series?.title ?? null,
+    seriesRecurrenceRule: meeting.series?.recurrenceRule ?? null,
     participantIds: meeting.participantIds,
     participantEmails: meeting.participantEmails,
   };
+}
+
+function attendeeOrderRanker(meeting: ContextMeetingRecord) {
+  const participantIds = new Map(meeting.participantIds.map((id, index) => [id, index]));
+  const participantEmails = new Map(meeting.participantEmails.map((email, index) => [email.toLowerCase(), index]));
+  return (member: ContextMemberRecord) => (
+    participantIds.get(member.id)
+    ?? participantIds.get(member.userId)
+    ?? participantEmails.get(member.user.email.toLowerCase())
+    ?? Number.MAX_SAFE_INTEGER
+  );
 }
 
 function emptyContext(meeting: ContextMeetingRecord, contextualIntelligenceEnabled: boolean): MeetingIntelligenceContext {
@@ -513,6 +542,8 @@ function emptyContext(meeting: ContextMeetingRecord, contextualIntelligenceEnabl
     actions: [],
     proposals: [],
     followUps: [],
+    resolvedTensions: [],
+    createdFromPreviousMeeting: [],
     deliberationEntries: [],
     knowledgeSearchQuery: "",
     knowledge: [],
@@ -569,6 +600,12 @@ export async function buildMeetingIntelligenceContext(params: {
     },
   }) as ContextMemberRecord[];
 
+  const attendeeRank = attendeeOrderRanker(meeting);
+  const orderedMembers = [...members].sort((left, right) => {
+    const rank = attendeeRank(left) - attendeeRank(right);
+    if (rank !== 0) return rank;
+    return (userLabel(left.user) ?? "").localeCompare(userLabel(right.user) ?? "");
+  });
   const memberIds = members.map((member) => member.id);
   const circleIds = [...new Set(members
     .flatMap((member) => member.roleAssignments.map((assignment) => assignment.role.circleId))
@@ -674,17 +711,30 @@ export async function buildMeetingIntelligenceContext(params: {
 
   const previousMeetingIds = previousMeetings.map((previousMeeting) => previousMeeting.id);
   const targetIds = [...proposals.map((proposal) => proposal.id), ...tensions.map((tension) => tension.id)];
-  const [followUps, deliberationEntries] = await Promise.all([
+  const [previousInsights, deliberationEntries] = await Promise.all([
     previousMeetingIds.length > 0
       ? prisma.meetingInsight.findMany({
         where: {
           workspaceId: params.workspaceId,
           meetingId: { in: previousMeetingIds },
-          type: "FOLLOW_UP",
           status: { not: "DISMISSED" },
         },
         orderBy: { createdAt: "asc" },
-        take: contextualIntelligenceEnabled ? 20 : 8,
+        take: contextualIntelligenceEnabled ? 60 : 20,
+        select: {
+          id: true,
+          meetingId: true,
+          type: true,
+          operation: true,
+          status: true,
+          title: true,
+          bodyMd: true,
+          assigneeHint: true,
+          targetEntityType: true,
+          targetEntityId: true,
+          appliedEntityType: true,
+          appliedEntityId: true,
+        },
       })
       : Promise.resolve([]),
     contextualIntelligenceEnabled && targetIds.length > 0
@@ -704,10 +754,24 @@ export async function buildMeetingIntelligenceContext(params: {
       : Promise.resolve([]),
   ]) as [ContextFollowUpRecord[], ContextDeliberationEntryRecord[]];
 
+  const followUps = previousInsights.filter((insight) => insight.type === "FOLLOW_UP");
+  const resolvedTensions = previousInsights.filter((insight) => (
+    insight.operation === "RESOLVE"
+    && insight.status === "APPLIED"
+    && (insight.appliedEntityType === "Tension" || insight.targetEntityType === "Tension")
+  ));
+  const createdFromPreviousMeeting = previousInsights
+    .filter((insight) => insight.operation === "CREATE" && insight.status === "APPLIED" && insight.appliedEntityType && insight.appliedEntityId)
+    .map((insight) => ({
+      meetingId: insight.meetingId,
+      entityType: insight.appliedEntityType as string,
+      entityId: insight.appliedEntityId as string,
+    }));
+
   const context = {
     contextualIntelligenceEnabled,
     meeting: contextMeeting(meeting),
-    attendees: members.map((member) => ({
+    attendees: orderedMembers.map((member) => ({
       memberId: member.id,
       name: userLabel(member.user),
       email: member.user.email,
@@ -759,6 +823,14 @@ export async function buildMeetingIntelligenceContext(params: {
       bodyMd: followUp.bodyMd,
       owner: followUp.assigneeHint,
     })),
+    resolvedTensions: resolvedTensions.map((insight) => ({
+      id: insight.id,
+      meetingId: insight.meetingId,
+      title: insight.title,
+      bodyMd: insight.bodyMd,
+      targetEntityId: insight.appliedEntityId ?? insight.targetEntityId ?? null,
+    })),
+    createdFromPreviousMeeting,
     deliberationEntries: deliberationEntries.map((entry) => ({
       id: entry.id,
       parentType: entry.parentType,

@@ -1121,6 +1121,70 @@ details[open] > .settings-disclosure-summary::before {
   margin-bottom: 48px;
 }
 
+.meeting-agenda-stack,
+.meeting-agenda-section,
+.meeting-agenda-groups,
+.meeting-agenda-list {
+  display: grid;
+  gap: 16px;
+}
+
+.meeting-agenda-section {
+  padding-bottom: 20px;
+  border-bottom: 1px solid var(--line);
+}
+
+.meeting-agenda-section:last-child {
+  padding-bottom: 0;
+  border-bottom: none;
+}
+
+.meeting-agenda-group {
+  display: grid;
+  gap: 12px;
+}
+
+.meeting-agenda-group summary {
+  cursor: pointer;
+  color: var(--muted);
+  font-size: 0.82rem;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.meeting-agenda-group h3 {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.82rem;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.meeting-agenda-item {
+  display: grid;
+  gap: 8px;
+  padding: 14px 16px;
+  color: inherit;
+  text-decoration: none;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+
+a.meeting-agenda-item:hover {
+  background: var(--bg-alt);
+  border-color: var(--accent);
+}
+
+.meeting-agenda-item-title {
+  color: var(--text);
+  font-size: 0.96rem;
+  font-weight: 650;
+  line-height: 1.35;
+}
+
 .meeting-raised-header {
   margin-bottom: 18px;
 }

@@ -39,6 +39,7 @@ export * from "./module-access";
 export * from "./governance-scoring";
 export * from "./meetings";
 export * from "./meeting-facilitation";
+export * from "./meeting-agendas";
 export * from "./meeting-action-review";
 export * from "./members";
 export * from "./notifications";
