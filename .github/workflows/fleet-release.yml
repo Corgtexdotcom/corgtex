@@ -1,0 +1,187 @@
+name: Fleet Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      release:
+        description: "latest-stable or a full 40-character Git SHA."
+        required: true
+        type: string
+        default: latest-stable
+      targets:
+        description: "all, railway-customers, azure-selfserve, ops, backup-app, or a comma-separated subset."
+        required: true
+        type: string
+        default: all
+      reason:
+        description: "Audited reason for the release."
+        required: true
+        type: string
+      dry_run:
+        description: "Print the manifest, rings, and blockers without mutating providers."
+        required: true
+        type: boolean
+        default: true
+      concurrency:
+        description: "Max targets promoted in parallel within a ring."
+        required: true
+        type: string
+        default: "2"
+      force_after_failure:
+        description: "Continue later rings after a failed target."
+        required: true
+        type: boolean
+        default: false
+
+permissions:
+  actions: read
+  contents: read
+  id-token: write
+  packages: write
+
+concurrency:
+  group: fleet-release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Promote Corgtex release
+    runs-on: ubuntu-latest
+    environment: production
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: corgtex_ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d corgtex_ci"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      CONTROL_PLANE_URL: ${{ vars.CONTROL_PLANE_URL || 'https://ops.corgtex.com' }}
+      CONTROL_PLANE_AGENT_API_KEY: ${{ secrets.CONTROL_PLANE_AGENT_API_KEY }}
+      RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
+      RAILWAY_GRAPHQL_ENDPOINT: ${{ vars.RAILWAY_GRAPHQL_ENDPOINT }}
+      FLEET_RELEASE_TARGETS_JSON: ${{ vars.FLEET_RELEASE_TARGETS_JSON }}
+      FLEET_RELEASE_OPS_TARGET_JSON: ${{ vars.FLEET_RELEASE_OPS_TARGET_JSON }}
+      FLEET_RELEASE_BACKUP_APP_TARGET_JSON: ${{ vars.FLEET_RELEASE_BACKUP_APP_TARGET_JSON }}
+      FLEET_RELEASE_AZURE_TARGET_JSON: ${{ vars.FLEET_RELEASE_AZURE_TARGET_JSON }}
+      FLEET_RELEASE_STABLE_GIT_SHA: ${{ vars.FLEET_RELEASE_STABLE_GIT_SHA }}
+      FLEET_RELEASE_ACR_SERVER: ${{ vars.FLEET_RELEASE_ACR_SERVER || 'acrcorgtexssstgwus3.azurecr.io' }}
+      GHCR_IMPORT_USERNAME: ${{ vars.GHCR_IMPORT_USERNAME || github.actor }}
+      GHCR_IMPORT_TOKEN: ${{ secrets.GHCR_IMPORT_TOKEN }}
+      GITHUB_TOKEN: ${{ github.token }}
+      AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+      AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+      AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Resolve release manifest
+        id: manifest
+        run: |
+          node scripts/release/fleet-release-runner.mjs resolve \
+            --release "${{ inputs.release }}"
+
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ steps.manifest.outputs.git_sha }}
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      - run: npx prisma generate
+
+      - name: Validate data migration fixtures
+        run: node scripts/check-data-migration-fixtures.mjs
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/corgtex_ci?schema=public
+
+      - name: Preflight fleet release
+        if: ${{ !inputs.dry_run }}
+        run: |
+          node scripts/release/fleet-release-runner.mjs deploy \
+            --manifest-json '${{ steps.manifest.outputs.manifest_json }}' \
+            --targets "${{ inputs.targets }}" \
+            --reason "${{ inputs.reason }}" \
+            --dry-run true \
+            --concurrency "${{ inputs.concurrency }}" \
+            --fail-on-blockers true
+
+      - uses: docker/setup-buildx-action@v3
+        if: ${{ !inputs.dry_run }}
+
+      - name: Log in to GHCR
+        if: ${{ !inputs.dry_run }}
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Build and push web image
+        id: build-web
+        if: ${{ !inputs.dry_run }}
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/Dockerfile.web
+          push: true
+          tags: ${{ steps.manifest.outputs.ghcr_web_image }}
+
+      - name: Build and push worker image
+        id: build-worker
+        if: ${{ !inputs.dry_run }}
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/Dockerfile.worker
+          push: true
+          tags: ${{ steps.manifest.outputs.ghcr_worker_image }}
+
+      - name: Finalize release manifest
+        id: final_manifest
+        run: |
+          if [[ "${{ inputs.dry_run }}" == "true" ]]; then
+            node scripts/release/fleet-release-runner.mjs resolve \
+              --manifest-json '${{ steps.manifest.outputs.manifest_json }}'
+          else
+            node scripts/release/fleet-release-runner.mjs resolve \
+              --manifest-json '${{ steps.manifest.outputs.manifest_json }}' \
+              --web-digest '${{ steps.build-web.outputs.digest }}' \
+              --worker-digest '${{ steps.build-worker.outputs.digest }}' \
+              --stability-status image-published
+          fi
+
+      - name: Log in to Azure
+        if: ${{ !inputs.dry_run && (inputs.targets == 'all' || contains(inputs.targets, 'azure-selfserve')) }}
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Promote release through rings
+        run: |
+          node scripts/release/fleet-release-runner.mjs deploy \
+            --manifest-json '${{ steps.final_manifest.outputs.manifest_json }}' \
+            --targets "${{ inputs.targets }}" \
+            --reason "${{ inputs.reason }}" \
+            --dry-run "${{ inputs.dry_run }}" \
+            --concurrency "${{ inputs.concurrency }}" \
+            --force-after-failure "${{ inputs.force_after_failure }}"

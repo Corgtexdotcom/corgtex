@@ -1,0 +1,105 @@
+import { describe, expect, it } from "vitest";
+
+import {
+  assertHealthProof,
+  buildReleaseManifest,
+  filterTargetsByGroups,
+  formatReleasePlan,
+  healthProofErrors,
+  imageTagForSha,
+  normalizeReleaseInput,
+  normalizeTargets,
+  releaseVersionForSha,
+  targetFromControlPlaneRow,
+} from "./fleet-release-core.mjs";
+
+const SHA = "c9077ff031e8e672923c84d52eeef862368f3493";
+
+describe("fleet release core", () => {
+  it("normalizes release input without treating latest as raw main", () => {
+    expect(normalizeReleaseInput()).toBe("latest-stable");
+    expect(normalizeReleaseInput("latest")).toBe("latest-stable");
+    expect(normalizeReleaseInput(SHA.toUpperCase())).toBe(SHA);
+    expect(() => normalizeReleaseInput("main")).toThrow("latest-stable or a full 40-character git SHA");
+  });
+
+  it("uses one deterministic version and image tag shape", () => {
+    expect(releaseVersionForSha(SHA)).toBe("main-c9077ff031e8");
+    expect(imageTagForSha(SHA)).toBe(`sha-${SHA}`);
+  });
+
+  it("builds a canonical release manifest from a SHA", () => {
+    expect(buildReleaseManifest({ gitSha: SHA, sourceWorkflowRunId: "run-1" })).toMatchObject({
+      gitSha: SHA,
+      releaseVersion: "main-c9077ff031e8",
+      imageTag: `sha-${SHA}`,
+      ghcrWebImage: `ghcr.io/corgtexdotcom/corgtex/web:sha-${SHA}`,
+      ghcrWorkerImage: `ghcr.io/corgtexdotcom/corgtex/worker:sha-${SHA}`,
+      acrWebImage: `acrcorgtexssstgwus3.azurecr.io/corgtex/web:sha-${SHA}`,
+      acrWorkerImage: `acrcorgtexssstgwus3.azurecr.io/corgtex/worker:sha-${SHA}`,
+      stabilityStatus: "candidate",
+      sourceWorkflowRunId: "run-1",
+    });
+  });
+
+  it("requires strict health proof before release recording", () => {
+    const manifest = buildReleaseManifest({ gitSha: SHA });
+    const healthy = {
+      status: "ok",
+      database: "up",
+      schema: "ready",
+      release: {
+        imageTag: manifest.imageTag,
+        gitSha: manifest.gitSha,
+      },
+    };
+    expect(assertHealthProof(healthy, manifest, "app")).toBe(true);
+    expect(healthProofErrors({
+      ...healthy,
+      release: { imageTag: "old", gitSha: manifest.gitSha },
+    }, manifest)).toEqual(["release.imageTag=old"]);
+  });
+
+  it("expands and validates target groups", () => {
+    expect(normalizeTargets("all")).toEqual(["railway-customers", "azure-selfserve", "ops", "backup-app"]);
+    expect(normalizeTargets("ops,backup-app")).toEqual(["ops", "backup-app"]);
+    expect(() => normalizeTargets("demo")).toThrow("Unknown release target");
+  });
+
+  it("classifies control-plane rows by provider and URL", () => {
+    expect(targetFromControlPlaneRow({
+      id: "azure-1",
+      label: "Azure",
+      cloudProvider: "AZURE",
+      url: "https://selfserve.corgtex.com",
+    })).toMatchObject({ group: "azure-selfserve", provider: "azure" });
+    expect(targetFromControlPlaneRow({
+      id: "app-1",
+      label: "Backup App",
+      url: "https://app.corgtex.com",
+    })).toMatchObject({ group: "backup-app", provider: "railway" });
+    expect(targetFromControlPlaneRow({
+      id: "customer-1",
+      label: "Crina",
+      url: "https://crina.corgtex.com",
+    })).toMatchObject({ group: "railway-customers", provider: "railway" });
+  });
+
+  it("formats progressive rings without UI-specific behavior", () => {
+    const manifest = buildReleaseManifest({ gitSha: SHA });
+    const targets = [
+      { id: "crina", label: "Crina", group: "railway-customers", provider: "railway", url: "https://crina.test" },
+      { id: "ops", label: "Ops", group: "ops", provider: "railway", url: "https://ops.test" },
+    ];
+    expect(formatReleasePlan({ manifest, targets, dryRun: true, concurrency: 2 })).toMatchObject({
+      dryRun: true,
+      concurrency: 2,
+      release: { gitSha: SHA },
+      rings: [
+        { ring: 1, targets: [{ id: "ops" }] },
+        { ring: 2, targets: [{ id: "crina" }] },
+      ],
+    });
+    expect(filterTargetsByGroups(targets, ["ops"])).toEqual([targets[1]]);
+  });
+});

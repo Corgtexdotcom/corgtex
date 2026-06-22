@@ -1595,6 +1595,8 @@ describe("control plane domain", () => {
       providerProjectId: "railway-project-1",
       providerEnvironmentId: "railway-env-1",
       providerResourceGroup: null,
+      providerWebServiceId: "railway-web-1",
+      providerWorkerServiceId: "railway-worker-1",
       providerLogsUrl: "https://portal.azure.com/logs",
       providerCostUrl: "https://portal.azure.com/costs",
       hasSupportCredential: true,
@@ -1695,6 +1697,8 @@ describe("control plane domain", () => {
     expect(result).toEqual([expect.objectContaining({
       id: "selfserve-1",
       cloudProvider: "AZURE",
+      providerWebServiceId: "ca-corgtex-ss-prod-web",
+      providerWorkerServiceId: "ca-corgtex-ss-prod-worker",
       hasSupportCredential: false,
       supportConnectorStatus: "ready",
       supportConnectorLabel: "Self-serve support sessions",
