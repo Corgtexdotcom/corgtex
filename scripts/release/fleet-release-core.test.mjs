@@ -80,15 +80,15 @@ describe("fleet release core", () => {
     })).toMatchObject({ group: "backup-app", provider: "railway" });
     expect(targetFromControlPlaneRow({
       id: "customer-1",
-      label: "Crina",
-      url: "https://crina.corgtex.com",
+      label: "Acme",
+      url: "https://acme.corgtex.com",
     })).toMatchObject({ group: "railway-customers", provider: "railway" });
   });
 
   it("formats progressive rings without UI-specific behavior", () => {
     const manifest = buildReleaseManifest({ gitSha: SHA });
     const targets = [
-      { id: "crina", label: "Crina", group: "railway-customers", provider: "railway", url: "https://crina.test" },
+      { id: "acme", label: "Acme", group: "railway-customers", provider: "railway", url: "https://acme.test" },
       { id: "ops", label: "Ops", group: "ops", provider: "railway", url: "https://ops.test" },
     ];
     expect(formatReleasePlan({ manifest, targets, dryRun: true, concurrency: 2 })).toMatchObject({
@@ -97,7 +97,7 @@ describe("fleet release core", () => {
       release: { gitSha: SHA },
       rings: [
         { ring: 1, targets: [{ id: "ops" }] },
-        { ring: 2, targets: [{ id: "crina" }] },
+        { ring: 2, targets: [{ id: "acme" }] },
       ],
     });
     expect(filterTargetsByGroups(targets, ["ops"])).toEqual([targets[1]]);
