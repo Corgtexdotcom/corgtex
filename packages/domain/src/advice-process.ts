@@ -44,6 +44,9 @@ export async function initiateAdviceProcess(
         workspaceId: params.workspaceId,
         proposalId: params.proposalId,
         authorMemberId: authorMember.id,
+        ownerMemberId: authorMember.id,
+        subjectType: "PROPOSAL",
+        subjectId: params.proposalId,
         status: "GATHERING",
         adviceDeadline: deadline,
       },
@@ -60,7 +63,12 @@ export async function initiateAdviceProcess(
         type: "advice-process.initiated",
         aggregateType: "AdviceProcess",
         aggregateId: process.id,
-        payload: { proposalId: params.proposalId, deadline: deadline.toISOString() },
+        payload: {
+          proposalId: params.proposalId,
+          subjectType: "PROPOSAL",
+          subjectId: params.proposalId,
+          deadline: deadline.toISOString(),
+        },
       },
     });
 

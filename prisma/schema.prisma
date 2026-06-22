@@ -572,6 +572,7 @@ model Workspace {
   brainBacklinks                 BrainBacklink[]
   expertiseTags                  ExpertiseTag[]
   adviceProcesses                AdviceProcess[]
+  adviceRequests                 AdviceRequest[]
   impactFootprints               ImpactFootprint[]
   checkIns                       CheckIn[]
   demoLeads                      DemoLead[]
@@ -950,6 +951,7 @@ model User {
   meetingInsights               MeetingInsight[]
   createdAgentIdentities        AgentIdentity[]                @relation("AgentIdentityCreator")
   deliberationEntries           DeliberationEntry[]
+  createdAdviceRequests         AdviceRequest[]                @relation("AdviceRequestRequester")
   notificationPrefs             NotificationPreference[]
   crmConversationMessages       CrmConversationMessage[]
   reviewedQualifications        CrmQualification[]             @relation("QualificationReviewer")
@@ -1023,7 +1025,9 @@ model Member {
   brainDiscussionComments     BrainDiscussionComment[]
   expertise                   MemberExpertise[]
   authoredAdviceProcesses     AdviceProcess[]          @relation("AdviceProcessAuthor")
+  ownedAdviceProcesses        AdviceProcess[]          @relation("AdviceProcessOwner")
   adviceRecords               AdviceRecord[]
+  adviceRequestRecipients     AdviceRequestRecipient[]
   impactFootprints            ImpactFootprint[]
   checkIns                    CheckIn[]
   ownedGoals                  Goal[]
@@ -1117,6 +1121,7 @@ model Circle {
   goals                       Goal[]
   agentAssignments            CircleAgentAssignment[]
   targetedDeliberationEntries DeliberationEntry[]          @relation("DeliberationTargetCircle")
+  targetedAdviceRequests      AdviceRequest[]              @relation("AdviceRequestTargetCircle")
   toolLinkTags                WorkspaceToolLinkCircleTag[]
 
   @@index([workspaceId])
@@ -1709,10 +1714,10 @@ model Proposal {
   createdAt         DateTime                   @default(now())
   updatedAt         DateTime                   @updatedAt
 
-  workspace     Workspace           @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-  author        User                @relation("ProposalAuthor", fields: [authorUserId], references: [id], onDelete: Restrict)
-  circle        Circle?             @relation(fields: [circleId], references: [id], onDelete: SetNull)
-  meeting       Meeting?            @relation(fields: [meetingId], references: [id], onDelete: SetNull)
+  workspace     Workspace      @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  author        User           @relation("ProposalAuthor", fields: [authorUserId], references: [id], onDelete: Restrict)
+  circle        Circle?        @relation(fields: [circleId], references: [id], onDelete: SetNull)
+  meeting       Meeting?       @relation(fields: [meetingId], references: [id], onDelete: SetNull)
   policyCorpus  PolicyCorpus?
   actions       Action[]
   tensions      Tension[]
@@ -1724,30 +1729,33 @@ model Proposal {
 }
 
 model DeliberationEntry {
-  id             String    @id @default(uuid())
-  workspaceId    String
-  parentType     String // "PROPOSAL" | "TENSION" | "MEETING" | "BRAIN_ARTICLE" | "ACTION"
-  parentId       String
-  parentVersion  Int?
-  authorUserId   String
-  entryType      String // "REACTION" | "OBJECTION"
-  bodyMd         String?   @db.Text
-  targetMemberId String? // For ADVICE_REQUEST: which member is being asked
-  targetCircleId String?
-  resolvedAt     DateTime?
-  resolvedNote   String?
-  createdAt      DateTime  @default(now())
+  id              String    @id @default(uuid())
+  workspaceId     String
+  parentType      String // "PROPOSAL" | "TENSION" | "MEETING" | "BRAIN_ARTICLE" | "ACTION"
+  parentId        String
+  parentVersion   Int?
+  authorUserId    String
+  entryType       String // "REACTION" | "OBJECTION"
+  bodyMd          String?   @db.Text
+  targetMemberId  String? // For ADVICE_REQUEST: which member is being asked
+  targetCircleId  String?
+  adviceRequestId String?
+  resolvedAt      DateTime?
+  resolvedNote    String?
+  createdAt       DateTime  @default(now())
 
-  workspace    Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-  author       User      @relation(fields: [authorUserId], references: [id], onDelete: Cascade)
-  targetMember Member?   @relation("DeliberationTargetMember", fields: [targetMemberId], references: [id], onDelete: SetNull)
-  targetCircle Circle?   @relation("DeliberationTargetCircle", fields: [targetCircleId], references: [id], onDelete: SetNull)
+  workspace     Workspace      @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  author        User           @relation(fields: [authorUserId], references: [id], onDelete: Cascade)
+  targetMember  Member?        @relation("DeliberationTargetMember", fields: [targetMemberId], references: [id], onDelete: SetNull)
+  targetCircle  Circle?        @relation("DeliberationTargetCircle", fields: [targetCircleId], references: [id], onDelete: SetNull)
+  adviceRequest AdviceRequest? @relation(fields: [adviceRequestId], references: [id], onDelete: SetNull)
 
   @@index([parentType, parentId, createdAt])
   @@index([parentType, parentId, parentVersion])
   @@index([workspaceId, parentType])
   @@index([targetCircleId])
   @@index([targetMemberId])
+  @@index([adviceRequestId])
 }
 
 model ApprovalPolicy {
@@ -3288,13 +3296,36 @@ enum AdviceProcessStatus {
   WITHDRAWN
 }
 
+enum AdviceRequestAudienceType {
+  MEMBERS
+  CIRCLE
+  WORKSPACE
+}
+
+enum AdviceRequestPreferredChannel {
+  IN_APP
+  SLACK
+  EMAIL
+  COPY
+}
+
+enum AdviceRequestStatus {
+  ACTIVE
+  COMPLETED
+  CANCELED
+}
+
 model AdviceProcess {
   id                      String              @id @default(uuid())
   workspaceId             String
   proposalId              String              @unique
   authorMemberId          String
+  ownerMemberId           String?
+  subjectType             String              @default("PROPOSAL")
+  subjectId               String
   status                  AdviceProcessStatus @default(GATHERING)
   adviceDeadline          DateTime?
+  closedAt                DateTime?
   executedAt              DateTime?
   withdrawnAt             DateTime?
   advisorySuggestionsJson Json?
@@ -3302,12 +3333,60 @@ model AdviceProcess {
   createdAt               DateTime            @default(now())
   updatedAt               DateTime            @updatedAt
 
-  workspace    Workspace      @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-  proposal     Proposal       @relation(fields: [proposalId], references: [id], onDelete: Cascade)
-  authorMember Member         @relation("AdviceProcessAuthor", fields: [authorMemberId], references: [id], onDelete: Restrict)
+  workspace    Workspace       @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  proposal     Proposal        @relation(fields: [proposalId], references: [id], onDelete: Cascade)
+  authorMember Member          @relation("AdviceProcessAuthor", fields: [authorMemberId], references: [id], onDelete: Restrict)
+  ownerMember  Member?         @relation("AdviceProcessOwner", fields: [ownerMemberId], references: [id], onDelete: SetNull)
   records      AdviceRecord[]
+  requests     AdviceRequest[]
 
   @@index([workspaceId, status])
+  @@index([workspaceId, subjectType, subjectId])
+  @@index([workspaceId, subjectType, status])
+  @@index([ownerMemberId])
+}
+
+model AdviceRequest {
+  id                String                        @id @default(uuid())
+  workspaceId       String
+  processId         String
+  requestedByUserId String
+  audienceType      AdviceRequestAudienceType
+  targetCircleId    String?
+  messageMd         String                        @db.Text
+  deadlineAt        DateTime?
+  reminderAt        DateTime?
+  preferredChannel  AdviceRequestPreferredChannel @default(IN_APP)
+  status            AdviceRequestStatus           @default(ACTIVE)
+  completedAt       DateTime?
+  canceledAt        DateTime?
+  createdAt         DateTime                      @default(now())
+  updatedAt         DateTime                      @updatedAt
+
+  workspace           Workspace                @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  process             AdviceProcess            @relation(fields: [processId], references: [id], onDelete: Cascade)
+  requestedBy         User                     @relation("AdviceRequestRequester", fields: [requestedByUserId], references: [id], onDelete: Restrict)
+  targetCircle        Circle?                  @relation("AdviceRequestTargetCircle", fields: [targetCircleId], references: [id], onDelete: SetNull)
+  recipients          AdviceRequestRecipient[]
+  deliberationEntries DeliberationEntry[]
+
+  @@index([workspaceId, processId])
+  @@index([workspaceId, status, deadlineAt])
+  @@index([workspaceId, status, reminderAt])
+  @@index([targetCircleId])
+}
+
+model AdviceRequestRecipient {
+  id        String   @id @default(uuid())
+  requestId String
+  memberId  String
+  createdAt DateTime @default(now())
+
+  request AdviceRequest @relation(fields: [requestId], references: [id], onDelete: Cascade)
+  member  Member        @relation(fields: [memberId], references: [id], onDelete: Cascade)
+
+  @@unique([requestId, memberId])
+  @@index([memberId])
 }
 
 model AdviceRecord {
