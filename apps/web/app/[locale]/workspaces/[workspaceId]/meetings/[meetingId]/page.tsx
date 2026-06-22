@@ -1,4 +1,14 @@
-import { getMeeting, getMeetingParticipants, privacyFilter, requireWorkspaceMembership } from "@corgtex/domain";
+import {
+  getMeeting,
+  getMeetingParticipants,
+  meetingAgendaSections,
+  normalizeMeetingAgendaForDisplay,
+  privacyFilter,
+  requireWorkspaceMembership,
+  type MeetingAgendaGroup,
+  type MeetingAgendaItem,
+  type MeetingAgendaSection,
+} from "@corgtex/domain";
 import { requirePageActor } from "@/lib/auth";
 import { getFormatter, getTranslations } from "next-intl/server";
 import { prisma } from "@corgtex/shared";
@@ -10,10 +20,15 @@ import { getDeliberationTargets } from "@/lib/deliberation-targets";
 import { listDeliberationEntries } from "@corgtex/domain";
 import { postMeetingDeliberationAction, resolveMeetingDeliberationAction } from "../actions";
 import MeetingIntelligence, { MeetingRegenerationPanel, type InsightTargetMetadata } from "./MeetingIntelligence";
+import {
+  agendaItemHref,
+  hasMeetingAgendaTab,
+  meetingTabHref,
+  normalizeMeetingTab,
+  type MeetingTab,
+} from "./meetingAgendaView";
 
 export const dynamic = "force-dynamic";
-
-type MeetingTab = "summary" | "raised" | "evidence";
 
 type MeetingInsightSummary = {
   status: string;
@@ -28,16 +43,6 @@ type MeetingInsightSummary = {
   targetEntityId: string | null;
   supersededAt?: Date | string | null;
 };
-
-function normalizeMeetingTab(value: string | string[] | undefined): MeetingTab {
-  const candidate = Array.isArray(value) ? value[0] : value;
-  if (candidate === "raised" || candidate === "evidence") return candidate;
-  return "summary";
-}
-
-function meetingTabHref(baseHref: string, tab: MeetingTab) {
-  return tab === "summary" ? baseHref : `${baseHref}?tab=${tab}`;
-}
 
 function statusTagClass(status: string, resolutionOutcome?: string | null) {
   if (status === "DRAFT") return "info";
@@ -77,6 +82,80 @@ function getMeetingProcessingStatus(meeting: NonNullable<Awaited<ReturnType<type
     descriptionKey: "processingStatusQueuedDescription",
     reviewCount,
   } as const;
+}
+
+function AgendaItemView({ item, workspaceId }: { item: MeetingAgendaItem; workspaceId: string }) {
+  const href = agendaItemHref(workspaceId, item);
+  const body = (
+    <>
+      <div className="meeting-agenda-item-title">{item.text}</div>
+      <div className="nr-item-meta">
+        {[item.owner, item.circle, item.status].filter(Boolean).join(" · ")}
+      </div>
+      {item.tags && item.tags.length > 0 && (
+        <div className="meeting-raised-tags">
+          {item.tags.map((tag) => <span className="tag info" key={tag.key}>{tag.label}</span>)}
+        </div>
+      )}
+      {item.bodyMd && (
+        <MarkdownExcerpt markdown={item.bodyMd} maxLength={220} as="div" className="nr-excerpt" />
+      )}
+    </>
+  );
+
+  return href ? (
+    <Link href={href} className="meeting-agenda-item">
+      {body}
+    </Link>
+  ) : (
+    <div className="meeting-agenda-item">
+      {body}
+    </div>
+  );
+}
+
+function AgendaGroupView({ group, workspaceId }: { group: MeetingAgendaGroup; workspaceId: string }) {
+  const items = (
+    <div className="meeting-agenda-list">
+      {group.items.map((item) => <AgendaItemView item={item} workspaceId={workspaceId} key={item.id} />)}
+    </div>
+  );
+
+  if (group.collapsedByDefault) {
+    return (
+      <details className="meeting-agenda-group">
+        <summary>{group.title}</summary>
+        {items}
+      </details>
+    );
+  }
+
+  return (
+    <div className="meeting-agenda-group">
+      <h3>{group.title}</h3>
+      {items}
+    </div>
+  );
+}
+
+function AgendaSectionView({ section, workspaceId }: { section: MeetingAgendaSection; workspaceId: string }) {
+  return (
+    <section className="meeting-agenda-section">
+      <div>
+        <h2 className="nr-section-header">{section.title}</h2>
+        {section.description && <p className="nr-item-meta">{section.description}</p>}
+      </div>
+      {section.groups && section.groups.length > 0 ? (
+        <div className="meeting-agenda-groups">
+          {section.groups.map((group) => <AgendaGroupView group={group} workspaceId={workspaceId} key={group.key} />)}
+        </div>
+      ) : (
+        <div className="meeting-agenda-list">
+          {(section.items ?? []).map((item) => <AgendaItemView item={item} workspaceId={workspaceId} key={item.id} />)}
+        </div>
+      )}
+    </section>
+  );
 }
 
 export default async function MeetingDetailPage({
@@ -125,10 +204,16 @@ export default async function MeetingDetailPage({
     );
   }
   
+  const agenda = normalizeMeetingAgendaForDisplay(meeting.agendaJson, meeting.title || t("untitledMeeting"));
+  const hasAgendaTab = hasMeetingAgendaTab({
+    agendaExists: Boolean(agenda),
+    status: meeting.status,
+    recurrenceRule: meeting.series?.recurrenceRule,
+  });
   const participants = meeting.participantIds?.length > 0 
     ? await getMeetingParticipants(workspaceId, meeting.participantIds)
     : [];
-  const activeTab = normalizeMeetingTab(resolvedSearch.tab);
+  const activeTab = normalizeMeetingTab(resolvedSearch.tab, hasAgendaTab ? "agenda" : "summary", hasAgendaTab);
   const meetingHref = `/workspaces/${workspaceId}/meetings/${meetingId}`;
   const processingStatus = getMeetingProcessingStatus(meeting);
   const insightTargetProposalIds = [...new Set((meeting.insights as MeetingInsightSummary[])
@@ -171,6 +256,7 @@ export default async function MeetingDetailPage({
   }
   const raisedItemCount = meeting.tensions.length + meeting.proposals.length + raisedActions.length;
   const tabs: Array<{ key: MeetingTab; label: string }> = [
+    ...(hasAgendaTab ? [{ key: "agenda" as const, label: t("tabAgenda") }] : []),
     { key: "summary", label: t("tabSummary") },
     { key: "raised", label: t("tabRaised", { count: raisedItemCount }) },
     { key: "evidence", label: t("tabEvidence") },
@@ -246,6 +332,18 @@ export default async function MeetingDetailPage({
       </nav>
 
       <div className="meeting-tab-panel">
+        {activeTab === "agenda" && (
+          <section className="ws-section meeting-agenda-stack" style={{ marginBottom: 48 }}>
+            {agenda ? (
+              meetingAgendaSections(agenda).map((section) => (
+                <AgendaSectionView section={section} workspaceId={workspaceId} key={section.key} />
+              ))
+            ) : (
+              <p className="meeting-empty-state">{t("agendaPreparing")}</p>
+            )}
+          </section>
+        )}
+
         {activeTab === "summary" && (
           <>
             {participants.length > 0 && (

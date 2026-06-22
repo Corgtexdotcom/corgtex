@@ -6,6 +6,7 @@ import {
   applyGuidanceTermCorrections,
   buildMeetingIntelligenceContext,
   buildMeetingTranscriptChunks,
+  agendaSectionTitles,
   type MeetingBlocksJson,
   type MeetingTranscriptChunk,
   normalizeMeetingBlocks,
@@ -131,6 +132,7 @@ export async function runMeetingSummaryAgent(params: {
         transcript: string | null;
         summaryMd: string | null;
         blocksJson: unknown;
+        agendaJson: unknown;
         ingestionGuidanceMd: string | null;
         recordedAt: string | Date;
       } | null | undefined;
@@ -175,6 +177,7 @@ export async function runMeetingSummaryAgent(params: {
             "Preserve scorecard, round-robin, department, team-update, and status update segments as update blocks even when they are not decisions.",
             "For owner-backed commitments inside updates, make the commitment visible in the block summary so downstream extraction can create action items.",
             "Tie proposal discussions and decisions to supplied existing proposal, tension, or action records only when the transcript and context support it.",
+            "If agenda section titles are supplied, use them as helpful hints for likely meeting structure, but preserve the actual transcript flow when the meeting diverges.",
             "Personal check-ins can be blocks, but they are not governance records unless explicit work follows.",
             "Correct meeting transcript drift where Cortex means Corgtex. Use Corgtex in block titles, block summaries, and source quotes.",
             "Return ordered blocks only. Do not invent transcript content.",
@@ -194,6 +197,7 @@ export async function runMeetingSummaryAgent(params: {
               endChar: chunk.endChar,
             },
             currentSummary: meeting.summaryMd,
+            agendaSectionTitles: agendaSectionTitles(meeting.agendaJson),
             ingestionGuidanceMd: meeting.ingestionGuidanceMd,
             existingRecords: meetingContext?.contextualIntelligenceEnabled ? {
               actions: meetingContext.actions,
@@ -220,6 +224,7 @@ export async function runMeetingSummaryAgent(params: {
               "Return clean Markdown only, with no preamble or closing disclaimer.",
               "Write a fuller narrative summary organized around the supplied dynamic meeting blocks, with roughly twice the useful context of a terse recap and no repetition.",
               "Use the block titles as the main story spine. Preserve the meeting flow instead of forcing a fixed agenda template.",
+              "When an agenda is supplied, treat it as useful context for the intended flow, not proof that every section happened.",
               "For each block, explain what happened, why it mattered, the outcome or open question, and how it connects to decisions, proposals, tensions, actions, or follow-ups when evidence supports it.",
               "Explicitly tie decisions to the proposal, tension, or topic they belong to. If no clear decision was made, say what remained open.",
               "Do not leave owner-backed commitments only in the summary. Make action-oriented language explicit enough for downstream extraction to create separate action items.",
@@ -250,6 +255,7 @@ export async function runMeetingSummaryAgent(params: {
                 : null,
               currentSummary: meeting.summaryMd,
               meetingBlocks,
+              agendaSectionTitles: agendaSectionTitles(meeting.agendaJson),
               ingestionGuidanceMd: meeting.ingestionGuidanceMd,
               corgtexContext: meetingContext?.contextualIntelligenceEnabled ? {
                 previousMeetings: meetingContext.previousMeetings,

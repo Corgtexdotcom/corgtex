@@ -77,13 +77,14 @@ describe("meeting-intelligence-context", () => {
       recordedAt: new Date("2026-05-13T16:00:00.000Z"),
       scheduledEndAt: new Date("2026-05-13T17:00:00.000Z"),
       seriesId: "series-1",
-      series: { title: "Weekly progress review" },
+      series: { title: "Weekly progress review", recurrenceRule: "FREQ=WEEKLY" },
       participantIds: ["user-1"],
       participantEmails: ["alice@example.com"],
     });
     (prisma.member.findMany as ReturnType<typeof vi.fn>).mockResolvedValue([
       {
         id: "member-1",
+        userId: "user-1",
         user: { displayName: "Alice", email: "alice@example.com" },
         roleAssignments: [
           { role: { circleId: "circle-1", circle: { name: "Operations" } } },
@@ -140,9 +141,44 @@ describe("meeting-intelligence-context", () => {
       {
         id: "follow-up-1",
         meetingId: "meeting-1",
+        type: "FOLLOW_UP",
+        operation: "CREATE",
+        status: "SUGGESTED",
         title: "Review onboarding next week",
         bodyMd: "Carry this forward.",
         assigneeHint: "Alice",
+        targetEntityType: null,
+        targetEntityId: null,
+        appliedEntityType: null,
+        appliedEntityId: null,
+      },
+      {
+        id: "resolved-1",
+        meetingId: "meeting-1",
+        type: "TENSION",
+        operation: "RESOLVE",
+        status: "APPLIED",
+        title: "Clarified onboarding threshold",
+        bodyMd: "Resolved in the previous weekly.",
+        assigneeHint: null,
+        targetEntityType: "Tension",
+        targetEntityId: "tension-old",
+        appliedEntityType: "Tension",
+        appliedEntityId: "tension-old",
+      },
+      {
+        id: "created-action-1",
+        meetingId: "meeting-1",
+        type: "ACTION_ITEM",
+        operation: "CREATE",
+        status: "APPLIED",
+        title: "Send onboarding checklist",
+        bodyMd: "Created last meeting.",
+        assigneeHint: "Alice",
+        targetEntityType: null,
+        targetEntityId: null,
+        appliedEntityType: "Action",
+        appliedEntityId: "action-1",
       },
     ]);
     (prisma.deliberationEntry.findMany as ReturnType<typeof vi.fn>).mockResolvedValue([
@@ -239,6 +275,12 @@ describe("meeting-intelligence-context", () => {
     }));
     expect(context.followUps).toEqual([
       expect.objectContaining({ id: "follow-up-1", owner: "Alice" }),
+    ]);
+    expect(context.resolvedTensions).toEqual([
+      expect.objectContaining({ id: "resolved-1", targetEntityId: "tension-old" }),
+    ]);
+    expect(context.createdFromPreviousMeeting).toEqual([
+      { meetingId: "meeting-1", entityType: "Action", entityId: "action-1" },
     ]);
     expect(context.deliberationEntries).toEqual([
       expect.objectContaining({ id: "entry-1", parentId: "proposal-1" }),

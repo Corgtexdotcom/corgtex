@@ -8,31 +8,24 @@ import {
   markSlackMeetingActionReviewPosted,
   prepareSlackMeetingActionReviewPost,
 } from "./meeting-action-review";
+import {
+  buildLegacyAgendaFallback,
+  buildRegularUpdateAgenda,
+  isRegularUpdateAgenda,
+  normalizeLegacyAgenda,
+  REGULAR_UPDATE_AGENDA_TEMPLATE_KEY,
+  renderAgendaSlackBlocks,
+  selectedMeetingAgendaTemplate,
+  type LegacyMeetingAgenda,
+} from "./meeting-agendas";
 import { extractMeetingInsights } from "./meeting-intelligence";
 import { buildMeetingIntelligenceContext } from "./meeting-intelligence-context";
-
-type AgendaSection = {
-  title: string;
-  items: Array<{
-    text: string;
-    sourceType?: string | null;
-    sourceId?: string | null;
-    owner?: string | null;
-  }>;
-  durationMinutes?: number | null;
-};
-
-type AgendaJson = {
-  title: string;
-  intro?: string | null;
-  sections: AgendaSection[];
-};
 
 type AgendaEditOutput = {
   action: "update" | "clarify";
   changeSummary?: string | null;
   clarification?: string | null;
-  agenda?: AgendaJson | null;
+  agenda?: LegacyMeetingAgenda | null;
 };
 
 type AgendaSettings = {
@@ -78,57 +71,8 @@ function nextAgendaRunAfter(settings: AgendaSettings, now = new Date()) {
   return next;
 }
 
-function displayDate(date: Date, timeZone = "UTC") {
-  return new Intl.DateTimeFormat("en-US", {
-    weekday: "short",
-    month: "short",
-    day: "numeric",
-    hour: "numeric",
-    minute: "2-digit",
-    timeZone,
-  }).format(date);
-}
-
 function truncate(text: string, max = 2900) {
   return text.length > max ? `${text.slice(0, max - 3)}...` : text;
-}
-
-function normalizeAgenda(output: Record<string, unknown>, fallbackTitle: string, fallbackSections: AgendaSection[]): AgendaJson {
-  const sectionsRaw = Array.isArray(output.sections) ? output.sections : [];
-  const sections = sectionsRaw.map((section): AgendaSection | null => {
-    if (!isRecord(section)) return null;
-    const title = typeof section.title === "string" && section.title.trim() ? section.title.trim() : null;
-    const itemsRaw = Array.isArray(section.items) ? section.items : [];
-    const items: AgendaSection["items"] = [];
-    for (const item of itemsRaw) {
-      if (typeof item === "string") {
-        const text = item.trim();
-        if (text) items.push({ text });
-        continue;
-      }
-      if (!isRecord(item)) continue;
-      const text = typeof item.text === "string" ? item.text.trim() : "";
-      if (!text) continue;
-      items.push({
-        text,
-        sourceType: typeof item.sourceType === "string" ? item.sourceType : null,
-        sourceId: typeof item.sourceId === "string" ? item.sourceId : null,
-        owner: typeof item.owner === "string" ? item.owner : null,
-      });
-    }
-    if (!title || items.length === 0) return null;
-    return {
-      title,
-      items,
-      durationMinutes: typeof section.durationMinutes === "number" ? section.durationMinutes : null,
-    };
-  }).filter((section): section is AgendaSection => Boolean(section));
-
-  return {
-    title: typeof output.title === "string" && output.title.trim() ? output.title.trim() : fallbackTitle,
-    intro: typeof output.intro === "string" ? output.intro.trim() : null,
-    sections: sections.length > 0 ? sections : fallbackSections,
-  };
 }
 
 function slackSection(title: string, lines: string[]) {
@@ -139,44 +83,6 @@ function slackSection(title: string, lines: string[]) {
       text: truncate(`*${title}*\n${lines.length > 0 ? lines.join("\n") : "_None._"}`),
     },
   };
-}
-
-function renderAgendaBlocks(params: {
-  meeting: { title: string | null; recordedAt: Date; scheduledEndAt: Date | null };
-  agenda: AgendaJson;
-  attendeeMentions: string[];
-  timezone: string;
-}) {
-  const when = params.meeting.scheduledEndAt
-    ? `${displayDate(params.meeting.recordedAt, params.timezone)}-${new Intl.DateTimeFormat("en-US", {
-      hour: "numeric",
-      minute: "2-digit",
-      timeZone: params.timezone,
-    }).format(params.meeting.scheduledEndAt)}`
-    : displayDate(params.meeting.recordedAt, params.timezone);
-
-  return [
-    {
-      type: "header",
-      text: { type: "plain_text", text: `Tomorrow's agenda: ${params.meeting.title || params.agenda.title}` },
-    },
-    {
-      type: "section",
-      text: {
-        type: "mrkdwn",
-        text: [
-          `*When:* ${when}`,
-          params.attendeeMentions.length > 0 ? `*Attendees:* ${params.attendeeMentions.join(" ")}` : null,
-          params.agenda.intro ? `\n${params.agenda.intro}` : null,
-        ].filter(Boolean).join("\n"),
-      },
-    },
-    { type: "divider" },
-    ...params.agenda.sections.map((section) => slackSection(section.title, section.items.map((item, index) => {
-      const owner = item.owner ? ` (${item.owner})` : "";
-      return `${index + 1}. ${item.text}${owner}`;
-    }))),
-  ];
 }
 
 function renderSummaryBlocks(params: {
@@ -311,48 +217,17 @@ export async function prepareAgendaForMeeting(params: {
   workflowJobId?: string;
 }) {
   const context = await buildMeetingAgendaContext(params.workspaceId, params.meetingId);
-  const fallbackSections: AgendaSection[] = [
-    {
-      title: "Check-in",
-      durationMinutes: 5,
-      items: [{ text: "Brief check-in round." }],
-    },
-    {
-      title: "Tensions to process",
-      items: context.tensions.map((tension) => ({
-        text: `${tension.title}${tension.upvotes ? ` (${tension.upvotes} upvotes)` : ""}`,
-        sourceType: "Tension",
-        sourceId: tension.id,
-        owner: tension.owner,
-      })),
-    },
-    {
-      title: "Follow-ups from last meeting",
-      items: context.followUps.map((followUp) => ({
-        text: followUp.title,
-        sourceType: "MeetingInsight",
-        sourceId: followUp.id,
-        owner: followUp.owner,
-      })),
-    },
-    {
-      title: "Pending actions",
-      items: context.actions.map((action) => ({
-        text: action.title,
-        sourceType: "Action",
-        sourceId: action.id,
-        owner: action.owner,
-      })),
-    },
-    {
-      title: "Checkout",
-      durationMinutes: 3,
-      items: [{ text: "Confirm decisions, owners, and next follow-ups." }],
-    },
-  ].map((section) => ({
-    ...section,
-    items: section.items.length > 0 ? section.items : [{ text: "No items found." }],
-  }));
+  const template = selectedMeetingAgendaTemplate(context);
+  if (template?.key === REGULAR_UPDATE_AGENDA_TEMPLATE_KEY) {
+    const agenda = buildRegularUpdateAgenda(context);
+    await prisma.meeting.update({
+      where: { id: context.meeting.id },
+      data: { agendaJson: toInputJson(agenda) },
+    });
+    return { meeting: context.meeting, agenda, context };
+  }
+
+  const fallbackAgenda = buildLegacyAgendaFallback(context);
 
   const extraction = await defaultModelGateway.extract({
     workspaceId: params.workspaceId,
@@ -378,7 +253,7 @@ export async function prepareAgendaForMeeting(params: {
     }`,
   });
 
-  const agenda = normalizeAgenda(extraction.output, context.meeting.title || "Meeting agenda", fallbackSections);
+  const agenda = normalizeLegacyAgenda(extraction.output, context.meeting.title || "Meeting agenda", fallbackAgenda.sections);
   await prisma.meeting.update({
     where: { id: context.meeting.id },
     data: { agendaJson: toInputJson(agenda) },
@@ -429,7 +304,7 @@ export async function runMeetingAgendaPreparation(params: {
 
     const attendeeMentions = await attendeeMentionsForContext(installation.id, params.workspaceId, context.attendees);
 
-    const response = await sendSlackMessage(installation.id, { channel: channelId }, renderAgendaBlocks({
+    const response = await sendSlackMessage(installation.id, { channel: channelId }, renderAgendaSlackBlocks({
       meeting,
       agenda,
       attendeeMentions,
@@ -460,7 +335,7 @@ function parseAgendaEditOutput(output: Record<string, unknown>, fallbackTitle: s
     action: action === "update" && hasAgendaSections ? "update" : "clarify",
     changeSummary: typeof output.changeSummary === "string" ? output.changeSummary.trim() : null,
     clarification: typeof output.clarification === "string" ? output.clarification.trim() : null,
-    agenda: agendaRaw && hasAgendaSections ? normalizeAgenda(agendaRaw, fallbackTitle, []) : null,
+    agenda: agendaRaw && hasAgendaSections ? normalizeLegacyAgenda(agendaRaw, fallbackTitle, []) : null,
   };
 }
 
@@ -502,7 +377,15 @@ export async function runMeetingAgendaThreadEdit(params: {
     },
   });
   invariant(meeting?.agendaJson && meeting.agendaChannelId && meeting.agendaMessageTs, 404, "NOT_FOUND", "Agenda thread not found.");
-  const currentAgenda = normalizeAgenda(isRecord(meeting.agendaJson) ? meeting.agendaJson : {}, meeting.title || "Meeting agenda", []);
+  if (isRegularUpdateAgenda(meeting.agendaJson)) {
+    await sendSlackMessage(params.installationId, {
+      channel: params.channelId,
+      threadTs: params.threadTs,
+    }, [slackSection("Agenda is read-only", ["This recurring meeting agenda is generated from Corgtex records. Edit the source tension, proposal, action, or meeting instead."])]);
+    return { edited: false, reason: "read_only_regular_agenda" };
+  }
+
+  const currentAgenda = normalizeLegacyAgenda(isRecord(meeting.agendaJson) ? meeting.agendaJson : {}, meeting.title || "Meeting agenda", []);
   invariant(currentAgenda.sections.length > 0, 400, "AGENDA_NOT_READY", "The agenda is not ready for editing yet.");
 
   const installation = await activeSlackInstallation(params.workspaceId);
@@ -572,7 +455,7 @@ export async function runMeetingAgendaThreadEdit(params: {
   await updateSlackMessage(params.installationId, {
     channel: params.channelId,
     ts: params.threadTs,
-  }, renderAgendaBlocks({
+  }, renderAgendaSlackBlocks({
     meeting,
     agenda: edit.agenda,
     attendeeMentions,
