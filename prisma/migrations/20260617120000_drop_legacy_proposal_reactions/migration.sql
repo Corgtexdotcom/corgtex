@@ -1,4 +1,5 @@
 INSERT INTO "DeliberationEntry" (
+  "id",
   "workspaceId",
   "parentType",
   "parentId",
@@ -11,6 +12,7 @@ INSERT INTO "DeliberationEntry" (
   "createdAt"
 )
 SELECT
+  'legacy-proposal-reaction-' || pr."id",
   p."workspaceId",
   'PROPOSAL',
   pr."proposalId",

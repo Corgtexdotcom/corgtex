@@ -96,6 +96,8 @@ jobs:
 
       - run: npx prisma migrate deploy
 
+      - run: npm run check:migration-fixtures
+
   build:
     name: Build
     runs-on: ubuntu-latest

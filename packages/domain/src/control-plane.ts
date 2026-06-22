@@ -2872,6 +2872,8 @@ export type ControlPlaneCustomerSummary = {
   providerProjectId: string | null;
   providerEnvironmentId: string | null;
   providerResourceGroup: string | null;
+  providerWebServiceId: string | null;
+  providerWorkerServiceId: string | null;
   providerLogsUrl: string | null;
   providerCostUrl: string | null;
   hasSupportCredential: boolean;
@@ -2971,6 +2973,8 @@ function controlPlaneCustomerSummaryFromDeployment(params: {
     providerProjectId: provider.providerProjectId,
     providerEnvironmentId: provider.providerEnvironmentId,
     providerResourceGroup: provider.providerResourceGroup,
+    providerWebServiceId: provider.providerWebServiceId,
+    providerWorkerServiceId: provider.providerWorkerServiceId,
     providerLogsUrl: provider.providerLogsUrl,
     providerCostUrl: provider.providerCostUrl,
     hasSupportCredential: Boolean(deployment.supportCredentialEnc),
@@ -3031,6 +3035,8 @@ function controlPlaneCustomerSummaryFromAccount(account: {
     providerProjectId: null,
     providerEnvironmentId: null,
     providerResourceGroup: null,
+    providerWebServiceId: null,
+    providerWorkerServiceId: null,
     providerLogsUrl: null,
     providerCostUrl: null,
     hasSupportCredential: false,
