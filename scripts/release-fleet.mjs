@@ -31,10 +31,14 @@ export function buildWorkflowInputs(argv = process.argv.slice(2)) {
   };
 }
 
+export function workflowForInputs(inputs) {
+  return inputs.dryRun ? "fleet-release-preflight.yml" : "fleet-release.yml";
+}
+
 export function runFleetReleaseDispatch(argv = process.argv.slice(2), deps = {}) {
   const inputs = buildWorkflowInputs(argv);
   const run = deps.runCommand ?? runCommand;
-  const workflow = "fleet-release.yml";
+  const workflow = workflowForInputs(inputs);
   const dispatchArgs = [
     "workflow",
     "run",
@@ -48,12 +52,16 @@ export function runFleetReleaseDispatch(argv = process.argv.slice(2), deps = {})
     "-f",
     `reason=${inputs.reason}`,
     "-f",
-    `dry_run=${inputs.dryRun}`,
-    "-f",
     `concurrency=${inputs.concurrency}`,
-    "-f",
-    `force_after_failure=${inputs.forceAfterFailure}`,
   ];
+  if (!inputs.dryRun) {
+    dispatchArgs.push(
+      "-f",
+      `dry_run=${inputs.dryRun}`,
+      "-f",
+      `force_after_failure=${inputs.forceAfterFailure}`,
+    );
+  }
 
   run("gh", dispatchArgs);
   console.log(JSON.stringify({ dispatched: true, workflow, inputs }, null, 2));
