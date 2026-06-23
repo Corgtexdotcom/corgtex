@@ -53,6 +53,7 @@ describe("rate-limiter", () => {
     expect(RATE_LIMITS.API_PER_WORKSPACE.limit).toBe(120);
     expect(RATE_LIMITS.AGENT_PER_WORKSPACE.limit).toBe(10);
     expect(RATE_LIMITS.WEBHOOK_INGEST_PER_WORKSPACE.limit).toBe(30);
+    expect(RATE_LIMITS.PRODUCT_FEEDBACK_PER_USER.limit).toBe(10);
     expect(RATE_LIMITS.AUTH_PER_IP.limit).toBe(20);
   });
 });

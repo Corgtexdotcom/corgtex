@@ -114,4 +114,18 @@ describe("env", () => {
     expect(env.NEXT_PUBLIC_INTERCOM_API_BASE).toBe("https://api-iam.intercom.io");
     expect(env.INTERCOM_MESSENGER_SECRET).toBeUndefined();
   });
+
+  it("exposes optional product feedback target configuration", async () => {
+    restoreEnv();
+    Object.assign(process.env, {
+      NODE_ENV: "development",
+      PRODUCT_FEEDBACK_TARGET_WORKSPACE_ID: "workspace-target",
+      PRODUCT_FEEDBACK_TARGET_WORKSPACE_SLUG: "corgtex-internal",
+    });
+
+    const { env } = await import("./env");
+
+    expect(env.PRODUCT_FEEDBACK_TARGET_WORKSPACE_ID).toBe("workspace-target");
+    expect(env.PRODUCT_FEEDBACK_TARGET_WORKSPACE_SLUG).toBe("corgtex-internal");
+  });
 });

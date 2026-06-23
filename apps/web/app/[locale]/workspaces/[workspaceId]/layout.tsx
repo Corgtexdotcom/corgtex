@@ -16,8 +16,10 @@ import { getControlPlaneHref } from "@/lib/control-plane-url";
 import { WorkspaceAddMenu } from "./WorkspaceAddMenu";
 import { WorkspaceChatRail } from "./WorkspaceChatRail";
 import { WorkspaceIntercomMessenger } from "./WorkspaceIntercomMessenger";
+import { ProductFeedbackWidget } from "./ProductFeedbackWidget";
 import type { AiWorkspaceLaunchState } from "@/lib/ai-workspace-launch";
 import { getMobileCaptureActions } from "@/lib/workspace-add-actions";
+import { getProductFeedbackTargetWorkspace } from "@/lib/product-feedback";
 import { headers } from "next/headers";
 
 export const dynamic = "force-dynamic";
@@ -84,7 +86,7 @@ export default async function WorkspaceLayout({
   const { locale, workspaceId } = await params;
   const actor = await requirePageActor();
   const userId = actor.kind === "user" ? actor.user.id : null;
-  const [workspaces, unreadCount, conversationsResult, dailyQuestions, featureFlags, membership, invitePolicy, workspaceRuntime, onboardingState, hasInitialKnowledge, googleConnection] = await Promise.all([
+  const [workspaces, unreadCount, conversationsResult, dailyQuestions, featureFlags, membership, invitePolicy, workspaceRuntime, onboardingState, hasInitialKnowledge, googleConnection, productFeedbackTarget] = await Promise.all([
     listActorWorkspaces(actor),
     userId ? countUnreadNotifications(userId, workspaceId) : Promise.resolve(0),
     listConversations(actor, workspaceId, { take: 30 }).catch(() => ({ items: [], total: 0, take: 30, skip: 0 })),
@@ -115,6 +117,7 @@ export default async function WorkspaceLayout({
         syncSettings: true,
       },
     }).catch(() => null) : Promise.resolve(null),
+    getProductFeedbackTargetWorkspace().catch(() => null),
   ]);
   const current = workspaces.find((w: Workspace) => w.id === workspaceId);
   const conversations = conversationsResult.items;
@@ -289,6 +292,9 @@ export default async function WorkspaceLayout({
           connectorUrl={connectorUrl}
           origin={origin}
         />
+      )}
+      {!isDemo && productFeedbackTarget && (
+        <ProductFeedbackWidget locale={locale} workspaceId={workspaceId} />
       )}
     </div>
   );

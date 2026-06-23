@@ -5,7 +5,7 @@ import { requireWorkspaceMembership } from "./auth";
 import { invariant } from "./errors";
 
 export const WORK_ITEM_EVIDENCE_ENTITY_TYPES = ["Proposal", "Tension", "Action"] as const;
-export const WORK_ITEM_EVIDENCE_PURPOSES = ["resolution_evidence", "completion_evidence"] as const;
+export const WORK_ITEM_EVIDENCE_PURPOSES = ["resolution_evidence", "completion_evidence", "feedback_context"] as const;
 
 export type WorkItemEvidenceEntityType = (typeof WORK_ITEM_EVIDENCE_ENTITY_TYPES)[number];
 export type WorkItemEvidencePurpose = (typeof WORK_ITEM_EVIDENCE_PURPOSES)[number];
