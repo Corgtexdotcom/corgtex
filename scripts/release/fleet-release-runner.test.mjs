@@ -216,6 +216,26 @@ describe("fleet release runner", () => {
     })).rejects.toThrow("Railway workerServiceId is missing");
   });
 
+  it("requires GHCR pull credentials before Railway mutation", async () => {
+    await expect(runFleetRelease([
+      "deploy",
+      "--release",
+      SHA,
+      "--targets",
+      "ops",
+      "--reason",
+      "Deploy release.",
+    ], {
+      env: {
+        FLEET_RELEASE_TARGETS_JSON: targetJson(),
+        RAILWAY_API_TOKEN: "railway-token",
+      },
+      runCommand: vi.fn(),
+      fetchImpl: vi.fn(),
+      sleep: vi.fn(),
+    })).rejects.toThrow("GHCR import token is missing for Railway image pull");
+  });
+
   it("can make dry-run preflight blockers fatal before image build", async () => {
     await expect(runFleetRelease([
       "deploy",
@@ -283,6 +303,98 @@ describe("fleet release runner", () => {
       env: { GITHUB_REPOSITORY: "Corgtexdotcom/corgtex" },
       runCommand,
     })).rejects.toThrow("Release Images workflow before fleet promotion");
+  });
+
+  it("passes GHCR registry credentials to Railway image updates", async () => {
+    const railwayCalls = [];
+    const fetchImpl = vi.fn(async (url, options) => {
+      if (String(url).includes("backboard.railway.com")) {
+        const body = JSON.parse(options.body);
+        railwayCalls.push(body);
+        if (body.query.includes("serviceInstanceDeployV2")) {
+          return {
+            ok: true,
+            json: async () => ({
+              data: {
+                deploymentId: body.variables.serviceId === "web-1" ? "deploy-web" : "deploy-worker",
+              },
+            }),
+          };
+        }
+        if (body.query.includes("deployments(")) {
+          return {
+            ok: true,
+            json: async () => ({
+              data: {
+                deployments: {
+                  edges: [{
+                    node: {
+                      id: body.variables.serviceId === "web-1" ? "deploy-web" : "deploy-worker",
+                      status: "SUCCESS",
+                    },
+                  }],
+                },
+              },
+            }),
+          };
+        }
+        return { ok: true, json: async () => ({ data: {} }) };
+      }
+      return {
+        ok: true,
+        json: async () => ({
+          status: "ok",
+          database: "up",
+          schema: "ready",
+          release: {
+            imageTag: `sha-${SHA}`,
+            gitSha: SHA,
+          },
+        }),
+      };
+    });
+
+    const result = await runFleetRelease([
+      "deploy",
+      "--release",
+      SHA,
+      "--targets",
+      "ops",
+      "--reason",
+      "Deploy release.",
+    ], {
+      env: {
+        FLEET_RELEASE_TARGETS_JSON: targetJson(),
+        RAILWAY_API_TOKEN: "railway-token",
+        GHCR_IMPORT_USERNAME: "github-user",
+        GITHUB_TOKEN: "github-token",
+      },
+      runCommand: vi.fn(),
+      fetchImpl,
+      sleep: vi.fn(),
+    });
+
+    expect(result.results).toHaveLength(1);
+    const updateCalls = railwayCalls.filter((call) => call.query.includes("serviceInstanceUpdate"));
+    expect(updateCalls).toHaveLength(2);
+    expect(updateCalls[0].variables.input).toMatchObject({
+      source: {
+        image: `ghcr.io/corgtexdotcom/corgtex/web:sha-${SHA}`,
+      },
+      registryCredentials: {
+        username: "github-user",
+        password: "github-token",
+      },
+    });
+    expect(updateCalls[1].variables.input).toMatchObject({
+      source: {
+        image: `ghcr.io/corgtexdotcom/corgtex/worker:sha-${SHA}`,
+      },
+      registryCredentials: {
+        username: "github-user",
+        password: "github-token",
+      },
+    });
   });
 
   it("requires control-plane credentials before verified inventory recording", async () => {

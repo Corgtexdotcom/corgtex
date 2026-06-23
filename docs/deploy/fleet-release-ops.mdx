@@ -20,7 +20,7 @@ Configure these values on the `fleet-release-production` environment. Store secr
 | `AZURE_CLIENT_ID` | Secret | Azure workload identity client used by `azure/login`. |
 | `AZURE_TENANT_ID` | Secret | Azure tenant used by `azure/login`. |
 | `AZURE_SUBSCRIPTION_ID` | Secret | Azure subscription used by `azure/login`. |
-| `GHCR_IMPORT_TOKEN` | Secret, optional | Used only when the workflow token cannot import GHCR images into Azure Container Registry. |
+| `GHCR_IMPORT_TOKEN` | Secret, optional | Long-lived GHCR pull token for Railway private-image pulls and Azure imports. When unset, Railway promotions use the workflow `GITHUB_TOKEN` for the immediate pull. |
 | `CONTROL_PLANE_URL` | Variable | Ops control-plane origin. Defaults to `https://ops.corgtex.com` when unset. |
 | `RAILWAY_GRAPHQL_ENDPOINT` | Variable, optional | Railway GraphQL endpoint override. Leave unset unless Railway support directs otherwise. |
 | `FLEET_RELEASE_STABLE_GIT_SHA` | Variable | Latest stable 40-character git SHA. Update only after canary proof. |
@@ -65,7 +65,8 @@ Azure self-serve targets must include:
 1. Confirm `fleet-release-production` has the required secrets and variables for the selected target groups.
 2. Confirm `FLEET_RELEASE_STABLE_GIT_SHA` points to the canary-proven stable release, not an arbitrary `main` commit.
 3. Confirm the `Release Images` workflow has published both canonical GHCR images for `sha-<FLEET_RELEASE_STABLE_GIT_SHA>`.
-4. Run a dry-run:
+4. Confirm Railway targets can pull private GHCR images. Prefer setting `GHCR_IMPORT_TOKEN`; otherwise the workflow will pass its short-lived `GITHUB_TOKEN` as Railway registry credentials for the current promotion.
+5. Run a dry-run:
 
 ```bash
 npm run release:fleet -- --reason "Plan latest stable fleet release." --dry-run
@@ -73,11 +74,11 @@ npm run release:fleet -- --reason "Plan latest stable fleet release." --dry-run
 
 Dry-runs use the lightweight preflight workflow by default. That path validates configuration, resolves `latest-stable`, and plans rings without `npm ci`, Prisma generation, Docker build, Azure login, or provider mutation.
 
-5. Confirm the dry-run dispatches `fleet-release-preflight.yml`, prints the manifest, selected targets, rings, blockers, and elapsed seconds before any provider mutation.
-6. If the dry-run fails on missing config, fix the named GitHub environment setting and rerun.
-7. If the preflight takes longer than 30 seconds or reports unclear blockers, stop and repair the preflight before expanding release orchestration.
-8. For a real promotion, use a specific support reason and monitor the GitHub Actions run until each target proves matching `gitSha`, `imageTag`, `database=up`, and `schema=ready`.
-9. If any target fails, stop at the failed ring unless an operator explicitly supplies a force reason.
+6. Confirm the dry-run dispatches `fleet-release-preflight.yml`, prints the manifest, selected targets, rings, blockers, and elapsed seconds before any provider mutation.
+7. If the dry-run fails on missing config, fix the named GitHub environment setting and rerun.
+8. If the preflight takes longer than 30 seconds or reports unclear blockers, stop and repair the preflight before expanding release orchestration.
+9. For a real promotion, use a specific support reason and monitor the GitHub Actions run until each target proves matching `gitSha`, `imageTag`, `database=up`, and `schema=ready`.
+10. If any target fails, stop at the failed ring unless an operator explicitly supplies a force reason.
 
 ## Gate For Next Work
 
