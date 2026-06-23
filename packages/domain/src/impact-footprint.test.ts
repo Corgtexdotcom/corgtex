@@ -5,10 +5,11 @@ vi.mock("@corgtex/shared", async (importOriginal) => {
   return {
     ...actual,
     prisma: {
-      member: { findMany: vi.fn() },
+      member: { findMany: vi.fn(), findUnique: vi.fn() },
       proposal: { count: vi.fn(), findMany: vi.fn() },
       adviceProcess: { count: vi.fn() },
-      adviceRecord: { count: vi.fn() },
+      adviceRequest: { count: vi.fn() },
+      deliberationEntry: { count: vi.fn() },
       tension: { count: vi.fn() },
       action: { count: vi.fn() },
       meeting: { count: vi.fn() },
@@ -25,11 +26,13 @@ const periodStart = new Date("2026-01-01T00:00:00.000Z");
 const periodEnd = new Date("2026-01-31T23:59:59.000Z");
 
 function mockCalculateQueries() {
+  (prisma.member.findUnique as ReturnType<typeof vi.fn>).mockResolvedValue({ userId: "user-1" });
   (prisma.proposal.count as ReturnType<typeof vi.fn>).mockResolvedValue(3);
   (prisma.adviceProcess.count as ReturnType<typeof vi.fn>).mockResolvedValue(1);
-  (prisma.adviceRecord.count as ReturnType<typeof vi.fn>).mockImplementation((args: { where: { type?: string } }) => {
-    if (args.where.type === "ENDORSE") return Promise.resolve(4);
-    if (args.where.type === "CONCERN") return Promise.resolve(1);
+  (prisma.adviceRequest.count as ReturnType<typeof vi.fn>).mockResolvedValue(8);
+  (prisma.deliberationEntry.count as ReturnType<typeof vi.fn>).mockImplementation((args: { where: { entryType?: string } }) => {
+    if (args.where.entryType === "REACTION") return Promise.resolve(4);
+    if (args.where.entryType === "OBJECTION") return Promise.resolve(1);
     return Promise.resolve(2); // adviceGiven (no type filter)
   });
   (prisma.tension.count as ReturnType<typeof vi.fn>).mockResolvedValue(5);
@@ -56,7 +59,7 @@ describe("impact-footprint", () => {
         proposalsAuthored: 3,
         proposalsExecuted: 1,
         adviceGiven: 2,
-        adviceSoughtCount: 0,
+        adviceSoughtCount: 8,
         tensionsResolved: 5,
         actionsCompleted: 6,
         endorsementsReceived: 4,

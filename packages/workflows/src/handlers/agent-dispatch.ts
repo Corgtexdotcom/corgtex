@@ -1,4 +1,4 @@
-import { runInboxTriageAgent, runDailyCheckInAgent, runMeetingSummaryAgent, runActionExtractionAgent, runProposalDraftingAgent, runConstitutionUpdateTriggerAgent, runConstitutionSynthesisAgent, runAdviceRoutingAgent, runProcessLintingAgent, runCrmDripFollowupAgent, runCrmEmailExtractionAgent, runCrmLeadEnrichmentAgent, runCompanyUnderstandingAgent } from "@corgtex/agents";
+import { runInboxTriageAgent, runDailyCheckInAgent, runMeetingSummaryAgent, runActionExtractionAgent, runProposalDraftingAgent, runConstitutionUpdateTriggerAgent, runConstitutionSynthesisAgent, runCrmDripFollowupAgent, runCrmEmailExtractionAgent, runCrmLeadEnrichmentAgent, runCompanyUnderstandingAgent } from "@corgtex/agents";
 import { executeAgentRun } from "@corgtex/agents";
 import { runBrainMaintenance, absorbSource } from "@corgtex/agents";
 
@@ -136,28 +136,6 @@ export async function runAgentWorkflowJob(job: {
       triggerRef: job.id,
       sourceId: asString(payload.sourceId) || null,
       triggerType: payload.triggerType === "MANUAL" ? "MANUAL" : "EVENT",
-    });
-  }
-
-  if (job.type === "agent.advice-routing") {
-    const proposalId = asString(payload.proposalId);
-    if (!proposalId) return null;
-    return runAdviceRoutingAgent({
-      workspaceId: job.workspaceId!,
-      triggerRef: job.id,
-      proposalId,
-      triggerType: "EVENT",
-    });
-  }
-
-  if (job.type === "agent.process-linting") {
-    const processId = asString(payload.processId);
-    if (!processId) return null;
-    return runProcessLintingAgent({
-      workspaceId: job.workspaceId!,
-      triggerRef: job.id,
-      processId,
-      triggerType: "EVENT",
     });
   }
 

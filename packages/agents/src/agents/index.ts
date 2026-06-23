@@ -4,8 +4,6 @@ export * from "./action-extraction";
 export * from "./proposal-drafting";
 export * from "./constitution-update-trigger";
 export * from "./constitution-synthesis";
-export * from "./advice-routing";
-export * from "./process-linting";
 export * from "./daily-check-in";
 export * from "./slack-agent";
 export * from "./slack-context";

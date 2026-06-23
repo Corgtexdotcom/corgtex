@@ -95,7 +95,6 @@ export default async function ProposalDetailPage({
   const defaultCircleValue = proposal.circleId && circleRequestOptions.some((option) => option.value === `circle:${proposal.circleId}`)
     ? proposal.circleId
     : circleRequestOptions[0]?.value.slice("circle:".length) ?? "";
-  const legacyAdviceRecords = proposal.adviceProcess?.records ?? [];
   const dateTimeLabel = (value: Date | string | null | undefined) => value
     ? format.dateTime(new Date(value), { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })
     : null;
@@ -123,7 +122,6 @@ export default async function ProposalDetailPage({
     request.deadlineAt ? t("adviceCopyableDeadline", { date: dateTimeLabel(request.deadlineAt) ?? "" }) : null,
     t("adviceCopyableLink", { url: proposalUrl }),
   ].filter(Boolean).join("\n\n");
-  const legacyAdviceLabel = (type: string) => type === "ENDORSE" ? t("entrySupport") : t("entryConcern");
 
   return (
     <>
@@ -192,7 +190,7 @@ export default async function ProposalDetailPage({
 
           <hr className="nr-divider nr-divider-lg" />
 
-          {(canRequestAdvice || adviceRequests.length > 0 || legacyAdviceRecords.length > 0) && (
+          {(canRequestAdvice || adviceRequests.length > 0) && (
             <section style={{ marginBottom: 40 }}>
               <h3 className="font-playfair font-semibold mb-6 text-[1.4rem]">{t("sectionAdviceRequests")}</h3>
               {adviceRequests.length > 0 && (
@@ -255,21 +253,6 @@ export default async function ProposalDetailPage({
                     );
                   })}
                 </div>
-              )}
-              {legacyAdviceRecords.length > 0 && (
-                <details style={{ marginBottom: canRequestAdvice ? 24 : 0 }}>
-                  <summary className="secondary small nr-hide-marker" style={{ cursor: "pointer", display: "inline-block" }}>{t("adviceLegacyHistory")}</summary>
-                  <div className="stack" style={{ marginTop: 12, gap: 0 }}>
-                    {legacyAdviceRecords.map((record) => (
-                      <div key={record.id} style={{ borderTop: "1px solid var(--line)", padding: "10px 0" }}>
-                        <div className="nr-item-meta" style={{ marginBottom: 6 }}>
-                          {record.member.user.displayName || record.member.user.email} · {legacyAdviceLabel(record.type)} · {dateTimeLabel(record.createdAt)}
-                        </div>
-                        <MarkdownRenderer markdown={record.bodyMd} variant="document" />
-                      </div>
-                    ))}
-                  </div>
-                </details>
               )}
               {canRequestAdvice && (
                 <details open={adviceRequests.length === 0}>

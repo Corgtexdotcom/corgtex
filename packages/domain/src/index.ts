@@ -58,7 +58,6 @@ export * from "./onboarding";
 export * from "./storage-metrics";
 export * from "./password-reset";
 export * from "./expertise";
-export * from "./advice-process";
 export * from "./advice-requests";
 export * from "./impact-footprint";
 export * from "./privacy";

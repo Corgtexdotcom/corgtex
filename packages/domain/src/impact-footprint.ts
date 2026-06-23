@@ -3,10 +3,17 @@ import type { AppActor } from "@corgtex/shared";
 import { requireWorkspaceMembership } from "./auth";
 
 export async function calculateImpactFootprint(workspaceId: string, memberId: string, periodStart: Date, periodEnd: Date) {
+  const member = await prisma.member.findUnique({
+    where: { id: memberId },
+    select: { userId: true },
+  });
+  const memberUserId = member?.userId ?? "__missing_member_user__";
+
   const [
     proposalsAuthored,
     proposalsExecuted,
     adviceGiven,
+    adviceSoughtCount,
     tensionsResolved,
     actionsCompleted,
     meetingsParticipated,
@@ -31,9 +38,19 @@ export async function calculateImpactFootprint(workspaceId: string, memberId: st
       },
     }),
     // Advice Given
-    prisma.adviceRecord.count({
+    prisma.deliberationEntry.count({
       where: {
-        memberId,
+        workspaceId,
+        parentType: "PROPOSAL",
+        authorUserId: memberUserId,
+        createdAt: { gte: periodStart, lte: periodEnd },
+      },
+    }),
+    // Advice/Input Requests Created
+    prisma.adviceRequest.count({
+      where: {
+        workspaceId,
+        requestedByUserId: memberUserId,
         createdAt: { gte: periodStart, lte: periodEnd },
       },
     }),
@@ -78,26 +95,25 @@ export async function calculateImpactFootprint(workspaceId: string, memberId: st
   
   const proposalIds = authoredProposals.map(p => p.id);
 
-  const endorsementsReceived = await prisma.adviceRecord.count({
+  const endorsementsReceived = await prisma.deliberationEntry.count({
     where: {
-      type: "ENDORSE",
-      process: { proposalId: { in: proposalIds } },
+      workspaceId,
+      parentType: "PROPOSAL",
+      parentId: { in: proposalIds },
+      entryType: "REACTION",
       createdAt: { gte: periodStart, lte: periodEnd },
     },
   });
 
-  const concernsRaised = await prisma.adviceRecord.count({
+  const concernsRaised = await prisma.deliberationEntry.count({
     where: {
-      memberId,
-      type: "CONCERN",
+      workspaceId,
+      parentType: "PROPOSAL",
+      authorUserId: memberUserId,
+      entryType: "OBJECTION",
       createdAt: { gte: periodStart, lte: periodEnd },
     },
   });
-
-  // Since advisorySuggestionsJson is a JSON blob, we can't easily count it in Prisma directly.
-  // In a real production system, this could be stored in a separate table, but for now we skip tracking this exact count 
-  // or we could load all advice processes and parse JSON. For footprint V1, we will default it to 0 or derive from records.
-  const adviceSoughtCount = 0; 
 
   const footprintData = {
     proposalsAuthored,

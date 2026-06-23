@@ -3,7 +3,6 @@
 import { enforceDemoGuard } from "@/lib/demo-guard";
 import { requirePageActor } from "@/lib/auth";
 import { asString, asOptional, asOptionalInt, refresh } from "../action-utils";
-import { revalidatePath } from "next/cache";
 import {
   archiveProposal,
   createProposal,
@@ -15,10 +14,6 @@ import {
   submitProposal,
   updateProposal,
   publishProposal,
-  initiateAdviceProcess,
-  recordAdvice,
-  withdrawAdviceProcess,
-  executeAdviceProcessDecision,
   postDeliberationEntry,
   resolveDeliberationEntry,
   updateDeliberationEntry
@@ -198,63 +193,6 @@ export async function requestProposalAdviceAction(formData: FormData) {
     deadlineAt: asOptionalDate(formData, "deadlineAt"),
     reminderAt: asOptionalDate(formData, "reminderAt"),
     preferredChannel: asOptional(formData, "preferredChannel") as AdviceRequestPreferredChannel | null,
-  });
-  refresh(workspaceId);
-}
-
-export async function initiateAdviceProcessAction(formData: FormData) {
-  const _demoGuardWsId = formData.get("workspaceId") as string;
-  if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
-
-  const actor = await requirePageActor();
-  const workspaceId = asString(formData, "workspaceId");
-  await initiateAdviceProcess(actor, {
-    workspaceId,
-    proposalId: asString(formData, "proposalId"),
-    adviceDeadlineDays: asOptionalInt(formData, "adviceDeadlineDays"),
-  });
-  revalidatePath(`/workspaces/${workspaceId}/proposals/${asString(formData, "proposalId")}`);
-  refresh(workspaceId);
-}
-
-export async function recordAdviceAction(type: string, formData: FormData) {
-  const _demoGuardWsId = formData.get("workspaceId") as string;
-  if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
-
-  const actor = await requirePageActor();
-  const workspaceId = asString(formData, "workspaceId");
-  await recordAdvice(actor, {
-    workspaceId,
-    processId: asString(formData, "processId"),
-    type: type as "ENDORSE" | "CONCERN",
-    bodyMd: asString(formData, "bodyMd"),
-  });
-  refresh(workspaceId);
-}
-
-export async function withdrawAdviceProcessAction(formData: FormData) {
-  const _demoGuardWsId = formData.get("workspaceId") as string;
-  if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
-
-  const actor = await requirePageActor();
-  const workspaceId = asString(formData, "workspaceId");
-  await withdrawAdviceProcess(actor, {
-    workspaceId,
-    processId: asString(formData, "processId"),
-  });
-  refresh(workspaceId);
-}
-
-export async function executeAdviceProcessDecisionAction(formData: FormData) {
-  const _demoGuardWsId = formData.get("workspaceId") as string;
-  if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
-
-  const actor = await requirePageActor();
-  const workspaceId = asString(formData, "workspaceId");
-  await executeAdviceProcessDecision(actor, {
-    workspaceId,
-    processId: asString(formData, "processId"),
-    decisionMd: asOptional(formData, "decisionMd") || undefined,
   });
   refresh(workspaceId);
 }

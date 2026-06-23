@@ -15,11 +15,8 @@ const createAdviceRequest = vi.fn();
 const createProposal = vi.fn();
 const createProposalFromTension = vi.fn();
 const enforceDemoGuard = vi.fn();
-const executeAdviceProcessDecision = vi.fn();
-const initiateAdviceProcess = vi.fn();
 const postDeliberationEntry = vi.fn();
 const publishProposal = vi.fn();
-const recordAdvice = vi.fn();
 const reopenProposal = vi.fn();
 const requirePageActor = vi.fn(async () => actor);
 const resolveDeliberationEntry = vi.fn();
@@ -28,7 +25,6 @@ const returnProposalToDraft = vi.fn();
 const submitProposal = vi.fn();
 const updateDeliberationEntry = vi.fn();
 const updateProposal = vi.fn();
-const withdrawAdviceProcess = vi.fn();
 
 vi.mock("@/lib/demo-guard", () => ({
   enforceDemoGuard,
@@ -43,11 +39,8 @@ vi.mock("@corgtex/domain", () => ({
   createAdviceRequest,
   createProposal,
   createProposalFromTension,
-  executeAdviceProcessDecision,
-  initiateAdviceProcess,
   postDeliberationEntry,
   publishProposal,
-  recordAdvice,
   reopenProposal,
   resolveDeliberationEntry,
   resolveProposal,
@@ -55,7 +48,6 @@ vi.mock("@corgtex/domain", () => ({
   submitProposal,
   updateDeliberationEntry,
   updateProposal,
-  withdrawAdviceProcess,
 }));
 
 vi.mock("next/cache", () => ({

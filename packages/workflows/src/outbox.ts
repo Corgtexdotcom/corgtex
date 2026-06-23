@@ -53,8 +53,6 @@ const TRIAGE_EVENT_TYPES = new Set([
   "meeting.transcript-uploaded",
   "action.created",
   "tension.created",
-  "advice-process.initiated",
-  "advice-process.executed",
   "checkin.response_received",
 ]);
 
@@ -65,7 +63,6 @@ const KNOWLEDGE_PULSE_EVENT_TYPES = new Set([
   "meeting.created",
   "meeting.transcript-uploaded",
   "approval.finalized",
-  "advice-process.advice-recorded",
 ]);
 
 type ClaimedEvent = {

@@ -7,11 +7,8 @@ export * from "./meetings/actions";
 export {
   archiveProposalAction,
   createProposalAction,
-  executeAdviceProcessDecisionAction,
-  initiateAdviceProcessAction,
   postDeliberationEntryAction,
   publishProposalAction,
-  recordAdviceAction,
   reopenProposalAction,
   requestProposalAdviceAction,
   resolveDeliberationEntryAction,
@@ -20,7 +17,6 @@ export {
   submitProposalAction,
   updateDeliberationEntryAction,
   updateProposalAction,
-  withdrawAdviceProcessAction,
 } from "./proposals/actions";
 export * from "./leads/actions";
 export * from "./governance/actions";

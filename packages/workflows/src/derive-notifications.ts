@@ -89,25 +89,5 @@ export function deriveNotificationsForEvent(event: {
     }] satisfies NotificationDraft[];
   }
 
-  if (event.type === "advice-process.initiated") {
-    return [{
-      type: event.type,
-      entityType: "AdviceProcess",
-      entityId,
-      title: title ? `Context required: ${title}` : "Advice process initiated",
-      bodyMd: "A new proposal is seeking advice before execution.",
-    }] satisfies NotificationDraft[];
-  }
-
-  if (event.type === "advice-process.advice-recorded") {
-    return [{
-      type: event.type,
-      entityType: "AdviceRecord",
-      entityId,
-      title: title ? `Advice recorded on: ${title}` : "New advice recorded",
-      bodyMd: "A peer has left advice on an active proposal.",
-    }] satisfies NotificationDraft[];
-  }
-
   return [] satisfies NotificationDraft[];
 }

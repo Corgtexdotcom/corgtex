@@ -389,9 +389,9 @@ const SHOWCASE_AGENTS = [
     purposeMd: "Processes meeting transcripts to extract decisions, action items, and tensions with reviewable evidence.",
   },
   {
-    agentKey: "advice-routing",
-    displayName: "Advice Routing Agent",
-    purposeMd: "Routes proposals to relevant advisors based on expertise, circle membership, and consent-process policy.",
+    agentKey: "proposal-drafting",
+    displayName: "Proposal Drafting Agent",
+    purposeMd: "Drafts governance proposals from operator prompts with workspace context and reviewable source grounding.",
   },
   {
     agentKey: "crm-lead-enrichment",
@@ -426,8 +426,8 @@ const SHOWCASE_AGENT_RUNS = [
     hoursAgo: 8,
   },
   {
-    agentKey: "advice-routing",
-    goal: "Route proposal to domain experts: async consent for standard governance",
+    agentKey: "proposal-drafting",
+    goal: "Draft proposal: async consent for standard governance",
     status: "COMPLETED",
     triggerType: "EVENT",
     durationMs: 4100,
@@ -2249,18 +2249,24 @@ async function seedContextMapData({ wsId, circleMappings, memberMappings, meetin
   }
 }
 
-async function refreshAdviceRecords(processId, records) {
+async function refreshAdviceDeliberationEntries(proposal, records) {
+  const prefix = `${proposal.id}-seed-advice-`;
   const rows = records.map((record, index) => ({
-    id: `${processId}-seed-advice-${index + 1}`,
-    processId,
+    id: `${prefix}${index + 1}`,
+    workspaceId: proposal.workspaceId,
+    parentType: "PROPOSAL",
+    parentId: proposal.id,
+    parentVersion: proposal.version,
     ...record,
   }));
 
-  await prisma.adviceRecord.deleteMany({
+  await prisma.deliberationEntry.deleteMany({
     where: {
-      processId,
+      workspaceId: proposal.workspaceId,
+      parentType: "PROPOSAL",
+      parentId: proposal.id,
       id: {
-        startsWith: `${processId}-seed-advice-`,
+        startsWith: prefix,
         notIn: rows.map((row) => row.id),
       },
     },
@@ -2268,7 +2274,7 @@ async function refreshAdviceRecords(processId, records) {
 
   for (const row of rows) {
     const { id, ...data } = row;
-    await prisma.adviceRecord.upsert({
+    await prisma.deliberationEntry.upsert({
       where: { id },
       update: data,
       create: row,
@@ -2612,23 +2618,17 @@ async function main() {
       ownerMemberId: memberMappings["vbroadhurst"].memberId,
       subjectType: "PROPOSAL",
       subjectId: apProp1.id,
-      status: "GATHERING",
-      advisorySuggestionsJson: {
-        advisors: [
-          { memberId: memberMappings["jwolk"].memberId, name: "Joseph J. Wolk", reason: "Financial impact of supplier mandates" },
-          { memberId: memberMappings["mullmann"].memberId, name: "Michael Ullmann", reason: "Contract and compliance review" }
-        ]
-      }
+      status: "GATHERING"
     };
-    const ap = await prisma.adviceProcess.upsert({
+    await prisma.adviceProcess.upsert({
       where: { proposalId: apProp1.id },
       update: data,
       create: data,
     });
-    await refreshAdviceRecords(ap.id, [
-      { memberId: memberMappings["jwolk"].memberId, type: "ENDORSE", bodyMd: "Supply chain costs will increase slightly in the short term, but long term risk mitigation is sound. Approved from a finance perspective." },
-      { memberId: memberMappings["jtaubert"].memberId, type: "ENDORSE", bodyMd: "Agreed. Needed for our IM facilities." },
-      { memberId: memberMappings["mullmann"].memberId, type: "CONCERN", bodyMd: "We need 6-month grace periods for critical sole-source suppliers before enforcement." }
+    await refreshAdviceDeliberationEntries(apProp1, [
+      { authorUserId: memberMappings["jwolk"].userId, entryType: "REACTION", bodyMd: "Supply chain costs will increase slightly in the short term, but long term risk mitigation is sound. Approved from a finance perspective." },
+      { authorUserId: memberMappings["jtaubert"].userId, entryType: "REACTION", bodyMd: "Agreed. Needed for our IM facilities." },
+      { authorUserId: memberMappings["mullmann"].userId, entryType: "OBJECTION", bodyMd: "We need 6-month grace periods for critical sole-source suppliers before enforcement." }
     ]);
   }
 
@@ -2642,21 +2642,16 @@ async function main() {
       ownerMemberId: memberMappings["jreed"].memberId,
       subjectType: "PROPOSAL",
       subjectId: apProp2.id,
-      status: "GATHERING",
-      advisorySuggestionsJson: {
-        advisors: [
-          { memberId: memberMappings["mullmann"].memberId, name: "Michael Ullmann", reason: "Data privacy & IP risk" }
-        ]
-      }
+      status: "GATHERING"
     };
-    const ap = await prisma.adviceProcess.upsert({
+    await prisma.adviceProcess.upsert({
       where: { proposalId: apProp2.id },
       update: data,
       create: data,
     });
-    await refreshAdviceRecords(ap.id, [
-      { memberId: memberMappings["jtaubert"].memberId, type: "ENDORSE", bodyMd: "Fully support this framework." },
-      { memberId: memberMappings["mullmann"].memberId, type: "CONCERN", bodyMd: "Ensure IP clauses explicitly protect our pending patents." }
+    await refreshAdviceDeliberationEntries(apProp2, [
+      { authorUserId: memberMappings["jtaubert"].userId, entryType: "REACTION", bodyMd: "Fully support this framework." },
+      { authorUserId: memberMappings["mullmann"].userId, entryType: "OBJECTION", bodyMd: "Ensure IP clauses explicitly protect our pending patents." }
     ]);
   }
   

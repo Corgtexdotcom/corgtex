@@ -17,7 +17,6 @@ import {
 import { prisma } from "@corgtex/shared";
 import type { HumanActor } from "@corgtex/shared";
 import { executeAgentRun, asString } from "../runtime";
-import { runAdviceRoutingAgent } from "./advice-routing";
 
 type SlackAgentIntent =
   | "brief"
@@ -39,7 +38,6 @@ type SlackAgentExtraction = {
   assigneeHint: string | null;
   dueDateISO: string | null;
   publish: boolean;
-  needsAdviceRouting: boolean;
   answer: string | null;
   couldNot: string[];
   next: string | null;
@@ -95,7 +93,6 @@ function normalizeExtraction(output: Record<string, unknown>, fallbackPrompt: st
     assigneeHint: asString(output.assigneeHint) || null,
     dueDateISO: asString(output.dueDateISO) || null,
     publish: Boolean(output.publish ?? output.open),
-    needsAdviceRouting: Boolean(output.needsAdviceRouting),
     answer: asString(output.answer) || null,
     couldNot,
     next: asString(output.next) || null,
@@ -833,14 +830,14 @@ export async function runSlackAgent(params: SlackAgentJobPayload & {
         agentRunId: runId,
         instruction: [
           "Classify a plain Slack request for Corgtex.",
-          "Return JSON only with intent, confidence, title, bodyMd, assigneeHint, dueDateISO, publish, needsAdviceRouting, answer, couldNot, and next.",
+          "Return JSON only with intent, confidence, title, bodyMd, assigneeHint, dueDateISO, publish, answer, couldNot, and next.",
           "Allowed intents: brief, create_action, create_tension, create_proposal, capture_note, capabilities, answer_question, summarize_thread, unsupported.",
           "Use unsupported for destructive, admin, financial, permission, invite, role, delete, archive, payment, or broad-notification requests.",
           "Use answer_question for read-only requests to list, find, search, or explain workspace members, accounts, roles, actions, proposals, tensions, current state, or workspace knowledge.",
           "Do not treat read-only member/account lookup as unsupported.",
           "For action due dates, resolve relative dates using the provided userTimezone and current time; otherwise use UTC.",
         ].join(" "),
-        schemaHint: "{ intent: string, confidence: number, title: string, bodyMd: string, assigneeHint: string|null, dueDateISO: string|null, publish: boolean, needsAdviceRouting: boolean, answer: string|null, couldNot: string[], next: string|null }",
+        schemaHint: "{ intent: string, confidence: number, title: string, bodyMd: string, assigneeHint: string|null, dueDateISO: string|null, publish: boolean, answer: string|null, couldNot: string[], next: string|null }",
         input: JSON.stringify({
           now: new Date().toISOString(),
           userTimezone: context.userTimezone ?? "UTC",
@@ -1036,16 +1033,6 @@ export async function runSlackAgent(params: SlackAgentJobPayload & {
               ? "created and opened"
               : "created a private draft";
           done.push(`${state} ${item.entityType} ${slackLink(item.webUrl, parsed.title)}.`);
-
-          if (item.entityType === "Proposal" && item.opened && parsed.needsAdviceRouting) {
-            await helpers.tool("advice-routing.start", { proposalId: item.entityId }, () => runAdviceRoutingAgent({
-              workspaceId: params.workspaceId,
-              proposalId: item.entityId,
-              triggerRef: `slack-agent:${runId}:${item.entityId}`,
-              triggerType: "EVENT",
-            }));
-            done.push("Started advice-routing for the proposal.");
-          }
         }
       }
 

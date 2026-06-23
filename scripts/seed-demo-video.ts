@@ -134,9 +134,9 @@ async function main() {
       purposeMd: "Processes meeting transcripts to extract insights, action items, and decisions, then posts summaries to Slack threads.",
     },
     {
-      agentKey: "advice-routing",
-      displayName: "Advice Routing Agent",
-      purposeMd: "Routes proposals to domain experts based on their expertise and circle assignments for consent-based governance.",
+      agentKey: "proposal-drafting",
+      displayName: "Proposal Drafting Agent",
+      purposeMd: "Drafts governance proposals from operator prompts with workspace context and reviewable source grounding.",
     },
     {
       agentKey: "crm-lead-enrichment",
@@ -199,8 +199,8 @@ async function main() {
         hoursAgo: 8,
       },
       {
-        agentKey: "advice-routing",
-        goal: "Route proposal to domain experts: Async consent for standard governance",
+        agentKey: "proposal-drafting",
+        goal: "Draft proposal: Async consent for standard governance",
         status: "COMPLETED" as const,
         triggerType: "EVENT" as const,
         durationMs: 4100,
