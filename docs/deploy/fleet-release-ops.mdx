@@ -1,0 +1,78 @@
+---
+title: "Fleet Release Operations"
+description: "Operator checklist for promoting a stable Corgtex release across the fleet."
+---
+
+Fleet releases promote a canary-proven Corgtex release through GitHub Actions. Operators trigger and monitor the workflow; GitHub Actions and the Ops control plane own provider credentials, target discovery, release metadata, and health proof.
+
+The release workflow must use the GitHub environment `fleet-release-production`. Do not wire fleet releases to the generic `production` environment.
+
+## Required GitHub Environment Settings
+
+Configure these values on the `fleet-release-production` environment. Store secret values only in GitHub environment secrets, never in docs, issues, PR bodies, logs, or committed files.
+
+| Name | Kind | Purpose |
+|---|---|---|
+| `CONTROL_PLANE_AGENT_API_KEY` | Secret | Lets GitHub Actions call the Ops control-plane MCP endpoint for discovery and verified inventory recording. |
+| `RAILWAY_API_TOKEN` | Secret | Lets GitHub Actions promote Railway web and worker services. |
+| `AZURE_CLIENT_ID` | Secret | Azure workload identity client used by `azure/login`. |
+| `AZURE_TENANT_ID` | Secret | Azure tenant used by `azure/login`. |
+| `AZURE_SUBSCRIPTION_ID` | Secret | Azure subscription used by `azure/login`. |
+| `GHCR_IMPORT_TOKEN` | Secret, optional | Used only when the workflow token cannot import GHCR images into Azure Container Registry. |
+| `CONTROL_PLANE_URL` | Variable | Ops control-plane origin. Defaults to `https://ops.corgtex.com` when unset. |
+| `RAILWAY_GRAPHQL_ENDPOINT` | Variable, optional | Railway GraphQL endpoint override. Leave unset unless Railway support directs otherwise. |
+| `FLEET_RELEASE_STABLE_GIT_SHA` | Variable | Latest stable 40-character git SHA. Update only after canary proof. |
+| `FLEET_RELEASE_TARGETS_JSON` | Variable | Railway customer targets, or leave unset only if control-plane discovery is intentionally used. |
+| `FLEET_RELEASE_OPS_TARGET_JSON` | Variable | Dedicated Ops target. |
+| `FLEET_RELEASE_BACKUP_APP_TARGET_JSON` | Variable | Backup app target. |
+| `FLEET_RELEASE_AZURE_TARGET_JSON` | Variable | Azure self-serve target. |
+| `FLEET_RELEASE_ACR_SERVER` | Variable, optional | Azure Container Registry server. Defaults to the production self-serve registry. |
+| `GHCR_IMPORT_USERNAME` | Variable, optional | GHCR username for Azure imports. Defaults to the GitHub Actions actor. |
+
+## Target Inventory Checklist
+
+Each target variable may contain one target object or an array of target objects. Keep target inventory operational and sanitized: IDs, URLs, provider IDs, and release metadata are acceptable; raw customer content, credentials, private uploads, and bearer tokens are not.
+
+Railway targets must include:
+
+- `id`
+- `label`
+- `url`
+- `group`, one of `railway-customers`, `ops`, or `backup-app`
+- `provider: "railway"`
+- `railway.projectId`
+- `railway.environmentId`
+- `railway.webServiceId`
+- `railway.workerServiceId`
+
+Azure self-serve targets must include:
+
+- `id`
+- `label`
+- `url`
+- `group: "azure-selfserve"`
+- `provider: "azure"`
+- `azure.resourceGroup`
+- `azure.acrName`
+- `azure.webAppName`
+- `azure.workerAppName`
+
+## Operator Checklist
+
+1. Confirm `fleet-release-production` has the required secrets and variables for the selected target groups.
+2. Confirm `FLEET_RELEASE_STABLE_GIT_SHA` points to the canary-proven stable release, not an arbitrary `main` commit.
+3. Run a dry-run:
+
+```bash
+npm run release:fleet -- --reason "Plan latest stable fleet release." --dry-run
+```
+
+4. Confirm the dry-run prints the manifest, selected targets, rings, and blockers before any provider mutation.
+5. If the dry-run fails on missing config, fix the named GitHub environment setting and rerun.
+6. If the dry-run reaches planning but takes longer than 60 seconds or reports unclear blockers, move to the lightweight preflight workflow work before expanding release orchestration.
+7. For a real promotion, use a specific support reason and monitor the GitHub Actions run until each target proves matching `gitSha`, `imageTag`, `database=up`, and `schema=ready`.
+8. If any target fails, stop at the failed ring unless an operator explicitly supplies a force reason.
+
+## Gate For Next Work
+
+This workflow wiring is sufficient only if dry-run planning is clear and fast enough for operators, and a canary promotion succeeds without local Railway or Azure credentials. Move to the next release PR only when this gate is not met.

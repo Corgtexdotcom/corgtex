@@ -72,6 +72,76 @@ describe("fleet release runner", () => {
     })).rejects.toThrow("Set FLEET_RELEASE_STABLE_GIT_SHA");
   });
 
+  it("validates dry-run environment wiring before expensive setup", async () => {
+    const result = await runFleetRelease([
+      "validate-config",
+      "--release",
+      "latest-stable",
+      "--targets",
+      "ops,backup-app,azure-selfserve",
+      "--dry-run",
+    ], {
+      env: {
+        FLEET_RELEASE_STABLE_GIT_SHA: SHA,
+        FLEET_RELEASE_OPS_TARGET_JSON: targetJson(),
+        FLEET_RELEASE_BACKUP_APP_TARGET_JSON: targetJson({ id: "backup", group: "backup-app" }),
+        FLEET_RELEASE_AZURE_TARGET_JSON: azureTargetJson(),
+      },
+      runCommand: vi.fn(),
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.dryRun).toBe(true);
+    expect(result.missing).toEqual([]);
+  });
+
+  it("fails environment validation when latest-stable has no stable marker", async () => {
+    await expect(runFleetRelease([
+      "validate-config",
+      "--release",
+      "latest-stable",
+      "--targets",
+      "ops",
+      "--dry-run",
+    ], {
+      env: {
+        FLEET_RELEASE_OPS_TARGET_JSON: targetJson(),
+      },
+      runCommand: vi.fn(),
+    })).rejects.toThrow("FLEET_RELEASE_STABLE_GIT_SHA");
+  });
+
+  it("fails environment validation when selected target inventory is missing", async () => {
+    await expect(runFleetRelease([
+      "validate-config",
+      "--release",
+      SHA,
+      "--targets",
+      "ops,backup-app",
+      "--dry-run",
+    ], {
+      env: {
+        FLEET_RELEASE_OPS_TARGET_JSON: targetJson(),
+      },
+      runCommand: vi.fn(),
+    })).rejects.toThrow("FLEET_RELEASE_BACKUP_APP_TARGET_JSON");
+  });
+
+  it("requires provider credentials for non-dry-run validation", async () => {
+    await expect(runFleetRelease([
+      "validate-config",
+      "--release",
+      SHA,
+      "--targets",
+      "ops",
+    ], {
+      env: {
+        FLEET_RELEASE_OPS_TARGET_JSON: targetJson(),
+      },
+      runCommand: vi.fn(),
+    })).rejects.toThrow("CONTROL_PLANE_AGENT_API_KEY");
+  });
+
   it("prints a dry-run plan without mutating providers", async () => {
     const runCommand = vi.fn();
     const fetchImpl = vi.fn();
