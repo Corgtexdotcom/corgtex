@@ -1,0 +1,111 @@
+name: Fleet Release Preflight
+
+on:
+  workflow_dispatch:
+    inputs:
+      release:
+        description: "latest-stable or a full 40-character Git SHA."
+        required: true
+        type: string
+        default: latest-stable
+      targets:
+        description: "all, railway-customers, azure-selfserve, ops, backup-app, or a comma-separated subset."
+        required: true
+        type: string
+        default: all
+      reason:
+        description: "Audited reason for the release preflight."
+        required: true
+        type: string
+      concurrency:
+        description: "Max targets promoted in parallel within a ring."
+        required: true
+        type: string
+        default: "2"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fleet-release-preflight
+  cancel-in-progress: true
+
+jobs:
+  preflight:
+    name: Plan Corgtex release
+    runs-on: ubuntu-latest
+    environment: fleet-release-production
+    env:
+      CONTROL_PLANE_URL: ${{ vars.CONTROL_PLANE_URL || 'https://ops.corgtex.com' }}
+      CONTROL_PLANE_AGENT_API_KEY: ${{ secrets.CONTROL_PLANE_AGENT_API_KEY }}
+      RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
+      RAILWAY_GRAPHQL_ENDPOINT: ${{ vars.RAILWAY_GRAPHQL_ENDPOINT }}
+      FLEET_RELEASE_TARGETS_JSON: ${{ vars.FLEET_RELEASE_TARGETS_JSON }}
+      FLEET_RELEASE_OPS_TARGET_JSON: ${{ vars.FLEET_RELEASE_OPS_TARGET_JSON }}
+      FLEET_RELEASE_BACKUP_APP_TARGET_JSON: ${{ vars.FLEET_RELEASE_BACKUP_APP_TARGET_JSON }}
+      FLEET_RELEASE_AZURE_TARGET_JSON: ${{ vars.FLEET_RELEASE_AZURE_TARGET_JSON }}
+      FLEET_RELEASE_STABLE_GIT_SHA: ${{ vars.FLEET_RELEASE_STABLE_GIT_SHA }}
+      FLEET_RELEASE_ACR_SERVER: ${{ vars.FLEET_RELEASE_ACR_SERVER || 'acrcorgtexssstgwus3.azurecr.io' }}
+      GHCR_IMPORT_USERNAME: ${{ vars.GHCR_IMPORT_USERNAME || github.actor }}
+      GHCR_IMPORT_TOKEN: ${{ secrets.GHCR_IMPORT_TOKEN }}
+      GITHUB_TOKEN: ${{ github.token }}
+      AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+      AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+      AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+    steps:
+      - name: Start preflight timer
+        run: echo "FLEET_PREFLIGHT_STARTED_AT=$(date +%s)" >> "$GITHUB_ENV"
+
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+
+      - name: Validate release environment
+        env:
+          RELEASE_INPUT: ${{ inputs.release }}
+          TARGETS_INPUT: ${{ inputs.targets }}
+        run: |
+          node scripts/release/fleet-release-runner.mjs validate-config \
+            --release "$RELEASE_INPUT" \
+            --targets "$TARGETS_INPUT" \
+            --dry-run true
+
+      - name: Resolve release manifest
+        id: manifest
+        env:
+          RELEASE_INPUT: ${{ inputs.release }}
+        run: |
+          node scripts/release/fleet-release-runner.mjs resolve \
+            --release "$RELEASE_INPUT"
+
+      - name: Plan release rings
+        env:
+          MANIFEST_JSON: ${{ steps.manifest.outputs.manifest_json }}
+          TARGETS_INPUT: ${{ inputs.targets }}
+          RELEASE_REASON: ${{ inputs.reason }}
+          CONCURRENCY_INPUT: ${{ inputs.concurrency }}
+        run: |
+          node scripts/release/fleet-release-runner.mjs deploy \
+            --manifest-json "$MANIFEST_JSON" \
+            --targets "$TARGETS_INPUT" \
+            --reason "$RELEASE_REASON" \
+            --dry-run true \
+            --concurrency "$CONCURRENCY_INPUT" \
+            --fail-on-blockers true
+
+      - name: Report preflight timing
+        if: ${{ always() }}
+        env:
+          MAX_SECONDS: ${{ vars.FLEET_RELEASE_PREFLIGHT_MAX_SECONDS || '30' }}
+        run: |
+          finished_at="$(date +%s)"
+          started_at="${FLEET_PREFLIGHT_STARTED_AT:-$finished_at}"
+          elapsed_seconds="$((finished_at - started_at))"
+          echo "{\"stage\":\"preflight-timing\",\"elapsedSeconds\":${elapsed_seconds},\"maxSeconds\":${MAX_SECONDS}}"
+          if [[ "$elapsed_seconds" -gt "$MAX_SECONDS" ]]; then
+            echo "::error::Fleet release preflight took ${elapsed_seconds}s, above ${MAX_SECONDS}s gate."
+            exit 1
+          fi

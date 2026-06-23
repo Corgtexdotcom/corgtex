@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { buildWorkflowInputs, runFleetReleaseDispatch } from "./release-fleet.mjs";
+import { buildWorkflowInputs, runFleetReleaseDispatch, workflowForInputs } from "./release-fleet.mjs";
 
 const SHA = "c9077ff031e8e672923c84d52eeef862368f3493";
 
@@ -36,6 +36,14 @@ describe("release fleet command", () => {
     });
   });
 
+  it("uses the lightweight preflight workflow for dry runs", () => {
+    expect(workflowForInputs(buildWorkflowInputs([
+      "--dry-run",
+      "--reason",
+      "Plan latest stable.",
+    ]))).toBe("fleet-release-preflight.yml");
+  });
+
   it("dispatches the fleet release workflow through GitHub Actions", () => {
     const runCommand = vi.fn()
       .mockReturnValueOnce({ stdout: "", stderr: "" })
@@ -51,6 +59,24 @@ describe("release fleet command", () => {
       "-f",
       `release=${SHA}`,
     ]));
+    expect(runCommand).toHaveBeenNthCalledWith(2, "gh", expect.arrayContaining([
+      "--workflow",
+      "fleet-release.yml",
+    ]));
     expect(runCommand).toHaveBeenNthCalledWith(3, "gh", ["run", "watch", "123", "--exit-status"], { stdio: "inherit" });
+  });
+
+  it("dispatches dry runs to the preflight workflow without release-only inputs", () => {
+    const runCommand = vi.fn().mockReturnValue({ stdout: "", stderr: "" });
+
+    runFleetReleaseDispatch(["--release", SHA, "--reason", "Plan latest.", "--dry-run", "--no-watch"], { runCommand });
+
+    expect(runCommand).toHaveBeenCalledTimes(1);
+    const args = runCommand.mock.calls[0][1];
+    expect(args).toContain("fleet-release-preflight.yml");
+    expect(args).toContain(`release=${SHA}`);
+    expect(args).toContain("concurrency=2");
+    expect(args).not.toContain("dry_run=true");
+    expect(args).not.toContain("force_after_failure=false");
   });
 });

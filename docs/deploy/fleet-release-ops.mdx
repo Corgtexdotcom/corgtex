@@ -27,6 +27,7 @@ Configure these values on the `fleet-release-production` environment. Store secr
 | `FLEET_RELEASE_BACKUP_APP_TARGET_JSON` | Variable | Backup app target. |
 | `FLEET_RELEASE_AZURE_TARGET_JSON` | Variable | Azure self-serve target. |
 | `FLEET_RELEASE_ACR_SERVER` | Variable, optional | Azure Container Registry server. Defaults to the production self-serve registry. |
+| `FLEET_RELEASE_PREFLIGHT_MAX_SECONDS` | Variable, optional | Dry-run preflight timing gate. Defaults to `30`. |
 | `GHCR_IMPORT_USERNAME` | Variable, optional | GHCR username for Azure imports. Defaults to the GitHub Actions actor. |
 
 ## Target Inventory Checklist
@@ -67,12 +68,14 @@ Azure self-serve targets must include:
 npm run release:fleet -- --reason "Plan latest stable fleet release." --dry-run
 ```
 
-4. Confirm the dry-run prints the manifest, selected targets, rings, and blockers before any provider mutation.
+Dry-runs use the lightweight preflight workflow by default. That path validates configuration, resolves `latest-stable`, and plans rings without `npm ci`, Prisma generation, Docker build, Azure login, or provider mutation.
+
+4. Confirm the dry-run dispatches `fleet-release-preflight.yml`, prints the manifest, selected targets, rings, blockers, and elapsed seconds before any provider mutation.
 5. If the dry-run fails on missing config, fix the named GitHub environment setting and rerun.
-6. If the dry-run reaches planning but takes longer than 60 seconds or reports unclear blockers, move to the lightweight preflight workflow work before expanding release orchestration.
+6. If the preflight takes longer than 30 seconds or reports unclear blockers, stop and repair the preflight before expanding release orchestration.
 7. For a real promotion, use a specific support reason and monitor the GitHub Actions run until each target proves matching `gitSha`, `imageTag`, `database=up`, and `schema=ready`.
 8. If any target fails, stop at the failed ring unless an operator explicitly supplies a force reason.
 
 ## Gate For Next Work
 
-This workflow wiring is sufficient only if dry-run planning is clear and fast enough for operators, and a canary promotion succeeds without local Railway or Azure credentials. Move to the next release PR only when this gate is not met.
+The preflight workflow is sufficient only if dry-run planning is clear, completes within the timing gate, and a canary promotion succeeds without local Railway or Azure credentials. Move to the next release PR only when this gate is not met.
