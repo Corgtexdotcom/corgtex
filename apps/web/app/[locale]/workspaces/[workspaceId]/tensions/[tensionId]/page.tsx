@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { getTension, listDeliberationEntries, listWorkItemEvidence, listWorkItemVersions, requireWorkspaceMembership } from "@corgtex/domain";
+import { getTension, listAdviceRequests, listDeliberationEntries, listWorkItemEvidence, listWorkItemVersions, requireWorkspaceMembership } from "@corgtex/domain";
 import { requirePageActor } from "@/lib/auth";
 import { MarkdownEditor } from "@/lib/components/MarkdownEditor";
 import { MarkdownRenderer } from "@/lib/components/MarkdownRenderer";
@@ -8,8 +8,8 @@ import { DeliberationThread } from "@/lib/components/DeliberationThread";
 import { DeliberationComposer } from "@/lib/components/DeliberationComposer";
 import { getDeliberationTargets } from "@/lib/deliberation-targets";
 import { canOpenPrivateDraft } from "@/lib/governance-open-guards";
-import { createProposalFromTensionAction, postTensionDeliberationAction, publishTensionAction, returnTensionToDraftAction, resolveTensionDeliberationAction, updateTensionAction, updateTensionDeliberationAction } from "../../actions";
-import { getTranslations } from "next-intl/server";
+import { createProposalFromTensionAction, postTensionDeliberationAction, publishTensionAction, requestTensionInputAction, returnTensionToDraftAction, resolveTensionDeliberationAction, updateTensionAction, updateTensionDeliberationAction } from "../../actions";
+import { getFormatter, getTranslations } from "next-intl/server";
 
 export const dynamic = "force-dynamic";
 
@@ -23,12 +23,14 @@ export default async function TensionDetailPage({
   const t = await getTranslations("tensions");
   const tCommon = await getTranslations("common");
   const tWork = await getTranslations("workItems");
+  const format = await getFormatter();
   const tension = await getTension(actor, { workspaceId, tensionId });
   const membership = await requireWorkspaceMembership({ actor, workspaceId });
-  const [entries, versionHistory, evidence] = await Promise.all([
+  const [entries, versionHistory, evidence, inputRequests] = await Promise.all([
     listDeliberationEntries(actor, { workspaceId, parentType: "TENSION", parentId: tensionId }),
     listWorkItemVersions(actor, { workspaceId, entityType: "TENSION", entityId: tensionId }),
     listWorkItemEvidence(actor, { workspaceId, entityType: "Tension", entityId: tensionId }),
+    listAdviceRequests(actor, { workspaceId, subjectType: "TENSION", subjectId: tensionId, status: "ACTIVE" }),
   ]);
   const deliberationTargets = await getDeliberationTargets({ actor, workspaceId, parentCircleId: tension.circleId });
   const targetOptions = deliberationTargets.options.map((option) => ({
@@ -80,6 +82,39 @@ export default async function TensionDetailPage({
   const canEditContent = tension.status === "DRAFT" ? canManage : tension.status === "OPEN" && canSubmittedEditorEdit;
   const canDraftProposal = !tension.proposal && (canManage || !tension.isPrivate);
   const canResolve = !tension.isPrivate && tension.status === "OPEN";
+  const canRequestInput = tension.status === "OPEN" && !tension.isPrivate && (canManage || isParentResponsible);
+  const memberRequestOptions = targetOptions.filter((option) => option.kind === "member");
+  const circleRequestOptions = targetOptions.filter((option) => option.kind === "circle");
+  const defaultCircleValue = tension.circleId && circleRequestOptions.some((option) => option.value === `circle:${tension.circleId}`)
+    ? tension.circleId
+    : circleRequestOptions[0]?.value.slice("circle:".length) ?? "";
+  const dateTimeLabel = (value: Date | string | null | undefined) => value
+    ? format.dateTime(new Date(value), { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })
+    : null;
+  const channelLabel = (channel: string) => {
+    const labels: Record<string, string> = {
+      IN_APP: t("inputChannelInApp"),
+      SLACK: t("inputChannelSlack"),
+      EMAIL: t("inputChannelEmail"),
+      COPY: t("inputChannelCopy"),
+    };
+    return labels[channel] ?? channel;
+  };
+  const tensionPath = `/workspaces/${workspaceId}/tensions/${tension.id}`;
+  const appBaseUrl = process.env.NEXT_PUBLIC_APP_URL?.replace(/\/$/, "") ?? "";
+  const tensionUrl = `${appBaseUrl}${tensionPath}`;
+  const requestAudienceLabel = (request: (typeof inputRequests)[number]) => {
+    if (request.audienceType === "WORKSPACE") return t("inputAudienceWorkspace");
+    if (request.audienceType === "CIRCLE") return request.targetCircle ? t("targetCircle", { name: request.targetCircle.name }) : t("inputAudienceCircle");
+    const names = request.recipients.map((recipient) => recipient.member.user.displayName || recipient.member.user.email);
+    return names.length > 0 ? names.join(", ") : t("inputAudienceMembers");
+  };
+  const copyableRequestMessage = (request: (typeof inputRequests)[number]) => [
+    t("inputCopyableSubject", { title: tension.title }),
+    request.messageMd,
+    request.deadlineAt ? t("inputCopyableDeadline", { date: dateTimeLabel(request.deadlineAt) ?? "" }) : null,
+    t("inputCopyableLink", { url: tensionUrl }),
+  ].filter(Boolean).join("\n\n");
 
   return (
     <>
@@ -207,6 +242,130 @@ export default async function TensionDetailPage({
               </div>
             )}
           </div>
+        </section>
+      )}
+
+      {(canRequestInput || inputRequests.length > 0) && (
+        <section className="ws-section" style={{ marginBottom: 48 }}>
+          <h2 className="nr-section-header">{t("sectionInputRequests")}</h2>
+          {inputRequests.length > 0 && (
+            <div className="stack" style={{ marginBottom: canRequestInput ? 24 : 0 }}>
+              {inputRequests.map((request) => {
+                const linkedReplies = mappedEntries.filter((entry) => entry.adviceRequestId === request.id);
+                return (
+                  <div key={request.id} className="nr-item">
+                    <div className="row" style={{ alignItems: "center", gap: 8, marginBottom: 8 }}>
+                      <strong>{requestAudienceLabel(request)}</strong>
+                      <span className="tag info">{channelLabel(request.preferredChannel)}</span>
+                      {request.deadlineAt && <span className="tag warning">{t("inputDeadlineTag", { date: dateTimeLabel(request.deadlineAt) ?? "" })}</span>}
+                    </div>
+                    <div className="nr-item-meta" style={{ marginBottom: 12 }}>
+                      {t("inputRequestedByMeta", { name: request.requestedBy.displayName || request.requestedBy.email })}
+                      {request.reminderAt ? ` · ${t("inputReminderMeta", { date: dateTimeLabel(request.reminderAt) ?? "" })}` : ""}
+                    </div>
+                    <MarkdownRenderer markdown={request.messageMd} variant="document" />
+                    <details style={{ marginTop: 16 }}>
+                      <summary className="secondary small nr-hide-marker" style={{ cursor: "pointer", display: "inline-block" }}>{t("inputCopyableMessage")}</summary>
+                      <textarea
+                        readOnly
+                        rows={6}
+                        value={copyableRequestMessage(request)}
+                        style={{ marginTop: 8, width: "100%" }}
+                      />
+                    </details>
+                    {linkedReplies.length > 0 && (
+                      <div style={{ marginTop: 16 }}>
+                        <strong>{t("inputLinkedReplies", { count: linkedReplies.length })}</strong>
+                        <div className="stack" style={{ marginTop: 8, gap: 0 }}>
+                          {linkedReplies.map((reply) => (
+                            <div key={reply.id} style={{ borderTop: "1px solid var(--line)", padding: "10px 0" }}>
+                              <div className="nr-item-meta" style={{ marginBottom: 6 }}>
+                                {reply.authorName} · {dateTimeLabel(reply.createdAt)}
+                              </div>
+                              {reply.bodyMd && <MarkdownRenderer markdown={reply.bodyMd} variant="document" />}
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                    {tension.status === "OPEN" && (
+                      <details style={{ marginTop: 16 }}>
+                        <summary className="secondary small nr-hide-marker" style={{ cursor: "pointer", display: "inline-block" }}>{t("btnReplyToInputRequest")}</summary>
+                        <div style={{ marginTop: 12 }}>
+                          <DeliberationComposer
+                            postAction={postTensionDeliberationAction}
+                            hiddenFields={{ workspaceId, parentId: tensionId, adviceRequestId: request.id }}
+                            targetOptions={targetOptions}
+                            entryTypes={[
+                              { value: "REACTION", label: t("entryReaction"), variant: "secondary" },
+                              { value: "OBJECTION", label: t("entryObjection"), variant: "danger" },
+                            ]}
+                          />
+                        </div>
+                      </details>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+          {canRequestInput && (
+            <details open={inputRequests.length === 0}>
+              <summary className="secondary small nr-hide-marker" style={{ cursor: "pointer", display: "inline-block" }}>{t("btnRequestInput")}</summary>
+              <form action={requestTensionInputAction} className="stack nr-form-section" style={{ marginTop: 12 }}>
+                <input type="hidden" name="workspaceId" value={workspaceId} />
+                <input type="hidden" name="tensionId" value={tension.id} />
+                <label>
+                  {t("inputAudience")}
+                  <select name="audienceType" defaultValue={defaultCircleValue ? "CIRCLE" : "WORKSPACE"}>
+                    <option value="MEMBERS">{t("inputAudienceMembers")}</option>
+                    <option value="CIRCLE">{t("inputAudienceCircle")}</option>
+                    <option value="WORKSPACE">{t("inputAudienceWorkspace")}</option>
+                  </select>
+                </label>
+                <label>
+                  {t("inputPeople")}
+                  <select name="memberIds" multiple size={Math.min(Math.max(memberRequestOptions.length, 2), 6)}>
+                    {memberRequestOptions.map((option) => (
+                      <option key={option.value} value={option.value.slice("member:".length)}>{option.name}</option>
+                    ))}
+                  </select>
+                </label>
+                <label>
+                  {t("inputCircle")}
+                  <select name="targetCircleId" defaultValue={defaultCircleValue}>
+                    {circleRequestOptions.map((option) => (
+                      <option key={option.value} value={option.value.slice("circle:".length)}>{option.name}</option>
+                    ))}
+                  </select>
+                </label>
+                <label>
+                  {t("inputMessage")}
+                  <MarkdownEditor name="messageMd" rows={4} required />
+                </label>
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 12 }}>
+                  <label>
+                    {t("inputDeadline")}
+                    <input name="deadlineAt" type="datetime-local" />
+                  </label>
+                  <label>
+                    {t("inputReminder")}
+                    <input name="reminderAt" type="datetime-local" />
+                  </label>
+                </div>
+                <label>
+                  {t("inputPreferredChannel")}
+                  <select name="preferredChannel" defaultValue="IN_APP">
+                    <option value="IN_APP">{t("inputChannelInApp")}</option>
+                    <option value="SLACK">{t("inputChannelSlack")}</option>
+                    <option value="EMAIL">{t("inputChannelEmail")}</option>
+                    <option value="COPY">{t("inputChannelCopy")}</option>
+                  </select>
+                </label>
+                <button type="submit" className="secondary small" style={{ alignSelf: "flex-start" }}>{t("btnSendInputRequest")}</button>
+              </form>
+            </details>
+          )}
         </section>
       )}
 

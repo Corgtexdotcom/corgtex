@@ -1,4 +1,4 @@
-import { listCircles, listMembers, listTensions, requireWorkspaceMembership } from "@corgtex/domain";
+import { listAdviceRequests, listCircles, listMembers, listTensions, requireWorkspaceMembership } from "@corgtex/domain";
 import type { ReactNode } from "react";
 import { requirePageActor } from "@/lib/auth";
 import {
@@ -52,14 +52,20 @@ export default async function TensionsPage({
   const { statusFilters } = resolveTensionSearch(resolvedSearch);
   const view = normalizeWorkItemView(resolvedSearch.view);
   const { circleIds, memberIds, sort } = resolveWorkItemFilters(resolvedSearch);
-  const [{ items: tensions }, circles, members] = await Promise.all([
+  const [{ items: tensions }, circles, members, activeInputRequests] = await Promise.all([
     listTensions(actor, workspaceId, { take: 200, circleIds, memberIds, sort }),
     listCircles(workspaceId),
     listMembers(workspaceId),
+    listAdviceRequests(actor, { workspaceId, subjectType: "TENSION", status: "ACTIVE", take: 500 }),
   ]);
 
   const groupedTensions = groupTensionsByStatus(tensions);
   const displayTensions = tensions.filter((tension) => tensionMatchesStatusFilters(tension, statusFilters));
+  const activeInputRequestCounts = activeInputRequests.reduce((counts, request) => {
+    const tensionId = request.process.subjectId;
+    counts.set(tensionId, (counts.get(tensionId) ?? 0) + 1);
+    return counts;
+  }, new Map<string, number>());
   type TensionListItem = (typeof tensions)[number];
   type TensionColumnStatus = "DRAFT" | "OPEN" | "RESOLVED";
   const tensionColumnStatuses: TensionColumnStatus[] = ["DRAFT", "OPEN", "RESOLVED"];
@@ -274,6 +280,7 @@ export default async function TensionsPage({
     const raisedByName = tension.raisedByMember ? memberName(tension.raisedByMember) : null;
     const openedDate = tension.publishedAt ? new Date(tension.publishedAt).toLocaleDateString() : null;
     const closedDate = tension.resolvedAt ? new Date(tension.resolvedAt).toLocaleDateString() : null;
+    const inputRequestCount = activeInputRequestCounts.get(tension.id) ?? 0;
     const { hiddenTransitions, moreItems, primary } = tensionControls(tension);
 
     return (
@@ -288,6 +295,9 @@ export default async function TensionsPage({
             <span className={`tag ${tension.status === "DRAFT" ? "info" : tension.status === "OPEN" ? "neutral" : "success"}`}>
               {statusLabel(tension.status)}
             </span>
+          )}
+          {inputRequestCount > 0 && (
+            <span className="tag warning">{t("inputRequestedCount", { count: inputRequestCount })}</span>
           )}
         </div>
         <div className="nr-card-content">
@@ -354,6 +364,7 @@ export default async function TensionsPage({
     const raisedByName = tension.raisedByMember ? memberName(tension.raisedByMember) : null;
     const openedDate = tension.publishedAt ? new Date(tension.publishedAt).toLocaleDateString() : null;
     const closedDate = tension.resolvedAt ? new Date(tension.resolvedAt).toLocaleDateString() : null;
+    const inputRequestCount = activeInputRequestCounts.get(tension.id) ?? 0;
     const { hiddenTransitions, moreItems, primary } = tensionControls(tension);
 
     return {
@@ -400,6 +411,9 @@ export default async function TensionsPage({
               <a href={`/workspaces/${workspaceId}/proposals/${tension.proposal.id}`}>
                 {t("linkedProposalMeta", { title: tension.proposal.title })}
               </a>
+            )}
+            {inputRequestCount > 0 && (
+              <span className="tag warning">{t("inputRequestedCount", { count: inputRequestCount })}</span>
             )}
           </div>
         ),

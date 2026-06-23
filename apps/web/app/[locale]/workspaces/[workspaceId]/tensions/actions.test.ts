@@ -11,6 +11,7 @@ const actor = {
 };
 
 const createProposalFromTension = vi.fn();
+const createAdviceRequest = vi.fn();
 const createTension = vi.fn();
 const deleteTension = vi.fn();
 const enforceDemoGuard = vi.fn();
@@ -32,6 +33,7 @@ vi.mock("@/lib/auth", () => ({
 }));
 
 vi.mock("@corgtex/domain", () => ({
+  createAdviceRequest,
   createProposalFromTension,
   createTension,
   deleteTension,
@@ -76,6 +78,83 @@ describe("tension server actions", () => {
       bodyMd: "Details",
       priority: 5,
       isPrivate: true,
+    }));
+  });
+
+  it("creates selected-person input requests for open tensions", async () => {
+    const { requestTensionInputAction } = await import("./actions");
+    const formData = new FormData();
+    formData.set("workspaceId", "workspace-1");
+    formData.set("tensionId", "tension-1");
+    formData.set("audienceType", "MEMBERS");
+    formData.append("memberIds", "member-1");
+    formData.append("memberIds", "member-2");
+    formData.set("messageMd", "Please advise on sequencing.");
+    formData.set("deadlineAt", "2026-07-01T10:30:00.000Z");
+    formData.set("reminderAt", "2026-06-30T10:30:00.000Z");
+    formData.set("preferredChannel", "SLACK");
+
+    await requestTensionInputAction(formData);
+
+    expect(enforceDemoGuard).toHaveBeenCalledWith("workspace-1");
+    expect(requirePageActor).toHaveBeenCalled();
+    expect(createAdviceRequest).toHaveBeenCalledWith(actor, expect.objectContaining({
+      workspaceId: "workspace-1",
+      subjectType: "TENSION",
+      subjectId: "tension-1",
+      audienceType: "MEMBERS",
+      memberIds: ["member-1", "member-2"],
+      targetCircleId: null,
+      messageMd: "Please advise on sequencing.",
+      preferredChannel: "SLACK",
+    }));
+    const payload = createAdviceRequest.mock.calls[0][1];
+    expect(payload.deadlineAt.toISOString()).toBe("2026-07-01T10:30:00.000Z");
+    expect(payload.reminderAt.toISOString()).toBe("2026-06-30T10:30:00.000Z");
+  });
+
+  it("creates circle input requests without selected recipients", async () => {
+    const { requestTensionInputAction } = await import("./actions");
+    const formData = new FormData();
+    formData.set("workspaceId", "workspace-1");
+    formData.set("tensionId", "tension-1");
+    formData.set("audienceType", "CIRCLE");
+    formData.set("memberIds", "member-ignored");
+    formData.set("targetCircleId", "circle-1");
+    formData.set("messageMd", "Please advise as a circle.");
+
+    await requestTensionInputAction(formData);
+
+    expect(createAdviceRequest).toHaveBeenCalledWith(actor, expect.objectContaining({
+      workspaceId: "workspace-1",
+      subjectType: "TENSION",
+      subjectId: "tension-1",
+      audienceType: "CIRCLE",
+      memberIds: [],
+      targetCircleId: "circle-1",
+      messageMd: "Please advise as a circle.",
+      preferredChannel: null,
+    }));
+  });
+
+  it("links deliberation replies to an input request when provided", async () => {
+    const { postTensionDeliberationAction } = await import("./actions");
+    const formData = new FormData();
+    formData.set("workspaceId", "workspace-1");
+    formData.set("parentId", "tension-1");
+    formData.set("entryType", "REACTION");
+    formData.set("bodyMd", "This sequencing looks right.");
+    formData.set("adviceRequestId", "advice-request-1");
+
+    await postTensionDeliberationAction(formData);
+
+    expect(postDeliberationEntry).toHaveBeenCalledWith(actor, expect.objectContaining({
+      workspaceId: "workspace-1",
+      parentType: "TENSION",
+      parentId: "tension-1",
+      entryType: "REACTION",
+      bodyMd: "This sequencing looks right.",
+      adviceRequestId: "advice-request-1",
     }));
   });
 });
