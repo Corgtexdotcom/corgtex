@@ -22,6 +22,7 @@ import {
   normalizeNewspaperPersonalizationPayload,
   renderNewspaperDigestMarkdown,
   renderNewspaperEmailHtml,
+  withNewspaperAdviceRequests,
 } from "./newspaper-email";
 
 type DeliveryCadence = Exclude<NewspaperCadence, "OFF">;
@@ -136,6 +137,55 @@ type BuildArtifactDigestItem = {
   }[];
 };
 
+type DigestRecipientMember = {
+  id: string;
+  user: {
+    id: string;
+    email: string;
+    displayName: string | null;
+  };
+  newspaperCadence?: NewspaperCadence | null;
+  roleAssignments?: Array<{
+    role?: {
+      circleId: string;
+      archivedAt: Date | null;
+      circle?: {
+        workspaceId: string;
+        archivedAt: Date | null;
+      } | null;
+    } | null;
+  }>;
+};
+
+type PendingAdviceDigestRequest = {
+  id: string;
+  audienceType: "MEMBERS" | "CIRCLE" | "WORKSPACE";
+  targetCircleId: string | null;
+  messageMd: string;
+  deadlineAt: Date | null;
+  reminderAt: Date | null;
+  preferredChannel: "IN_APP" | "SLACK" | "EMAIL" | "COPY";
+  createdAt: Date;
+  requestedBy: {
+    email: string;
+    displayName: string | null;
+  };
+  targetCircle: {
+    name: string;
+  } | null;
+  recipients: Array<{ memberId: string }>;
+  process: {
+    subjectType: string;
+    subjectId: string;
+  };
+};
+
+type AdviceSubjectPreview = {
+  type: "PROPOSAL" | "TENSION" | "ACTION";
+  id: string;
+  title: string;
+};
+
 function formatBuildArtifactDate(value: Date | null) {
   return value ? value.toISOString().split("T")[0] : "unknown date";
 }
@@ -169,6 +219,233 @@ function formatBuildArtifactDigestInput(items: BuildArtifactDigestItem[]) {
     closed.length > 0 ? `Closed without merge:\n${closed.map(formatBuildArtifactDigestItem).join("\n\n")}` : null,
   ];
   return sections.filter(Boolean).join("\n\n");
+}
+
+function validAdviceSubjectType(value: string): AdviceSubjectPreview["type"] | null {
+  const normalized = value.trim().toUpperCase();
+  if (normalized === "PROPOSAL" || normalized === "TENSION" || normalized === "ACTION") return normalized;
+  return null;
+}
+
+function formatAdviceDigestDate(value: Date | null) {
+  return value ? value.toISOString().split("T")[0] : null;
+}
+
+function truncateDigestText(value: string, maxLength = 360) {
+  const normalized = value.replace(/\s+/g, " ").trim();
+  if (normalized.length <= maxLength) return normalized;
+  return `${normalized.slice(0, maxLength - 3).trimEnd()}...`;
+}
+
+function adviceSubjectLabel(type: AdviceSubjectPreview["type"]) {
+  if (type === "PROPOSAL") return "Proposal";
+  if (type === "TENSION") return "Tension";
+  return "Action";
+}
+
+function adviceRequestLabel(type: AdviceSubjectPreview["type"]) {
+  return type === "PROPOSAL" ? "Advice request" : "Input request";
+}
+
+function adviceSubjectUrl(workspaceId: string, subject: AdviceSubjectPreview) {
+  const baseUrl = workspaceUrl(workspaceId);
+  if (subject.type === "PROPOSAL") return `${baseUrl}/proposals/${subject.id}`;
+  if (subject.type === "TENSION") return `${baseUrl}/tensions/${subject.id}`;
+  return `${baseUrl}/actions/${subject.id}`;
+}
+
+function adviceAudienceLabel(request: PendingAdviceDigestRequest) {
+  if (request.audienceType === "WORKSPACE") return "Everyone";
+  if (request.audienceType === "CIRCLE") return request.targetCircle?.name ? `${request.targetCircle.name} circle` : "Selected circle";
+  return "Selected people";
+}
+
+function memberCircleIds(member: DigestRecipientMember, workspaceId: string) {
+  return new Set((member.roleAssignments ?? []).flatMap((assignment) => {
+    const role = assignment.role;
+    if (!role || role.archivedAt) return [];
+    if (role.circle && (role.circle.workspaceId !== workspaceId || role.circle.archivedAt)) return [];
+    return [role.circleId];
+  }));
+}
+
+async function loadAdviceSubjectPreviews(
+  workspaceId: string,
+  requests: PendingAdviceDigestRequest[],
+) {
+  const byType = new Map<AdviceSubjectPreview["type"], Set<string>>();
+  for (const request of requests) {
+    const subjectType = validAdviceSubjectType(request.process.subjectType);
+    if (!subjectType) continue;
+    if (!byType.has(subjectType)) byType.set(subjectType, new Set());
+    byType.get(subjectType)!.add(request.process.subjectId);
+  }
+
+  const previews = new Map<string, AdviceSubjectPreview>();
+  const proposalIds = [...(byType.get("PROPOSAL") ?? [])];
+  const tensionIds = [...(byType.get("TENSION") ?? [])];
+  const actionIds = [...(byType.get("ACTION") ?? [])];
+
+  const [proposals, tensions, actions] = await Promise.all([
+    proposalIds.length
+      ? prisma.proposal.findMany({
+          where: {
+            workspaceId,
+            id: { in: proposalIds },
+            archivedAt: null,
+          },
+          select: { id: true, title: true },
+        })
+      : [],
+    tensionIds.length
+      ? prisma.tension.findMany({
+          where: {
+            workspaceId,
+            id: { in: tensionIds },
+            archivedAt: null,
+            isPrivate: false,
+          },
+          select: { id: true, title: true },
+        })
+      : [],
+    actionIds.length
+      ? prisma.action.findMany({
+          where: {
+            workspaceId,
+            id: { in: actionIds },
+            archivedAt: null,
+            isPrivate: false,
+          },
+          select: { id: true, title: true },
+        })
+      : [],
+  ]);
+
+  for (const proposal of proposals) previews.set(`PROPOSAL:${proposal.id}`, { type: "PROPOSAL", id: proposal.id, title: proposal.title });
+  for (const tension of tensions) previews.set(`TENSION:${tension.id}`, { type: "TENSION", id: tension.id, title: tension.title });
+  for (const action of actions) previews.set(`ACTION:${action.id}`, { type: "ACTION", id: action.id, title: action.title });
+  return previews;
+}
+
+function formatPendingAdviceRequestDigestItem(params: {
+  workspaceId: string;
+  request: PendingAdviceDigestRequest;
+  subject: AdviceSubjectPreview;
+}) {
+  const due = formatAdviceDigestDate(params.request.deadlineAt);
+  const reminder = formatAdviceDigestDate(params.request.reminderAt);
+  const requestedBy = params.request.requestedBy.displayName || params.request.requestedBy.email;
+  const channel = params.request.preferredChannel.replace("_", " ").toLowerCase();
+  const lines = [
+    `${adviceRequestLabel(params.subject.type)}: ${adviceSubjectLabel(params.subject.type)} - ${params.subject.title}`,
+    `Request: ${truncateDigestText(params.request.messageMd)}`,
+    `Asked by: ${requestedBy}`,
+    `Audience: ${adviceAudienceLabel(params.request)}`,
+    due ? `Deadline: ${due}` : null,
+    reminder ? `Reminder: ${reminder}` : null,
+    `Preferred channel: ${channel}`,
+    `Open: ${adviceSubjectUrl(params.workspaceId, params.subject)}`,
+  ];
+  return lines.filter(Boolean).join("\n");
+}
+
+async function loadPendingAdviceRequestsByMember(params: {
+  workspaceId: string;
+  recipientMembers: DigestRecipientMember[];
+}) {
+  const recipientMemberIds = params.recipientMembers.map((member) => member.id);
+  if (recipientMemberIds.length === 0) return new Map<string, string[]>();
+
+  const recipientCircleIds = Array.from(new Set(params.recipientMembers.flatMap((member) => (
+    [...memberCircleIds(member, params.workspaceId)]
+  ))));
+
+  const requests = await prisma.adviceRequest.findMany({
+    where: {
+      workspaceId: params.workspaceId,
+      status: "ACTIVE",
+      OR: [
+        { audienceType: "WORKSPACE" },
+        {
+          audienceType: "MEMBERS",
+          recipients: {
+            some: {
+              memberId: { in: recipientMemberIds },
+            },
+          },
+        },
+        ...(recipientCircleIds.length > 0
+          ? [{
+              audienceType: "CIRCLE" as const,
+              targetCircleId: { in: recipientCircleIds },
+            }]
+          : []),
+      ],
+    },
+    include: {
+      requestedBy: {
+        select: {
+          email: true,
+          displayName: true,
+        },
+      },
+      targetCircle: {
+        select: {
+          name: true,
+        },
+      },
+      recipients: {
+        select: {
+          memberId: true,
+        },
+      },
+      process: {
+        select: {
+          subjectType: true,
+          subjectId: true,
+        },
+      },
+    },
+    orderBy: [
+      { deadlineAt: "asc" },
+      { createdAt: "desc" },
+    ],
+    take: 100,
+  }) as PendingAdviceDigestRequest[];
+
+  if (requests.length === 0) return new Map<string, string[]>();
+
+  const subjectPreviews = await loadAdviceSubjectPreviews(params.workspaceId, requests);
+  const itemsByMemberId = new Map<string, string[]>();
+  const circleIdsByMemberId = new Map(params.recipientMembers.map((member) => [
+    member.id,
+    memberCircleIds(member, params.workspaceId),
+  ]));
+
+  for (const request of requests) {
+    const subjectType = validAdviceSubjectType(request.process.subjectType);
+    if (!subjectType) continue;
+    const subject = subjectPreviews.get(`${subjectType}:${request.process.subjectId}`);
+    if (!subject) continue;
+
+    const explicitRecipientMemberIds = new Set(request.recipients.map((recipient) => recipient.memberId));
+    for (const member of params.recipientMembers) {
+      const isRecipient = request.audienceType === "WORKSPACE"
+        || (request.audienceType === "MEMBERS" && explicitRecipientMemberIds.has(member.id))
+        || (request.audienceType === "CIRCLE" && request.targetCircleId !== null && (circleIdsByMemberId.get(member.id)?.has(request.targetCircleId) ?? false));
+      if (!isRecipient) continue;
+
+      const existing = itemsByMemberId.get(member.id) ?? [];
+      existing.push(formatPendingAdviceRequestDigestItem({
+        workspaceId: params.workspaceId,
+        request,
+        subject,
+      }));
+      itemsByMemberId.set(member.id, existing);
+    }
+  }
+
+  return itemsByMemberId;
 }
 
 export async function runDailyDigest(params: {
@@ -208,7 +485,25 @@ export async function runDailyDigest(params: {
   const workspaceCadence = await getWorkspaceNewspaperCadence(params.workspaceId);
   const activeMembers = await prisma.member.findMany({
     where: { workspaceId: params.workspaceId, isActive: true },
-    include: { user: { select: { email: true, displayName: true, id: true } } },
+    include: {
+      user: { select: { email: true, displayName: true, id: true } },
+      roleAssignments: {
+        select: {
+          role: {
+            select: {
+              circleId: true,
+              archivedAt: true,
+              circle: {
+                select: {
+                  workspaceId: true,
+                  archivedAt: true,
+                },
+              },
+            },
+          },
+        },
+      },
+    },
   });
   const recipientMembers = activeMembers.filter((member) => (
     (member.newspaperCadence ?? workspaceCadence) === cadence
@@ -302,8 +597,13 @@ export async function runDailyDigest(params: {
       },
     },
   });
+  const pendingAdviceByMemberId = await loadPendingAdviceRequestsByMember({
+    workspaceId: params.workspaceId,
+    recipientMembers,
+  });
+  const hasPendingAdviceRequests = Array.from(pendingAdviceByMemberId.values()).some((items) => items.length > 0);
 
-  if (sessions.length === 0 && slackMessages.length === 0 && buildArtifacts.length === 0) {
+  if (sessions.length === 0 && slackMessages.length === 0 && buildArtifacts.length === 0 && !hasPendingAdviceRequests) {
     logger.info("newspaper_delivery_skipped", {
       workspaceId: params.workspaceId,
       workflowJobId: params.workflowJobId ?? null,
@@ -482,7 +782,7 @@ Rules:
   const digestSlug = `${cadence.toLowerCase()}-newspaper-${params.dateISO.split("T")[0]}`;
   const runKey = params.workflowJobId ?? `${params.workspaceId}:${cadence.toLowerCase()}-newspaper:${params.dateISO.split("T")[0]}`;
 
-  if (digest.sections.length === 0) {
+  if (digest.sections.length === 0 && !hasPendingAdviceRequests) {
     const reason = "No digest sections generated.";
     logger.info("newspaper_delivery_skipped", {
       workspaceId: params.workspaceId,
@@ -517,46 +817,55 @@ Rules:
     };
   }
 
-  const digestBodyMd = renderNewspaperDigestMarkdown({ title: digestTitle, digest });
-  const existingDigestArticle = await prisma.brainArticle.findUnique({
-    where: {
-      workspaceId_slug: {
+  if (digest.sections.length > 0) {
+    const digestBodyMd = renderNewspaperDigestMarkdown({ title: digestTitle, digest });
+    const existingDigestArticle = await prisma.brainArticle.findUnique({
+      where: {
+        workspaceId_slug: {
+          workspaceId: params.workspaceId,
+          slug: digestSlug,
+        },
+      },
+    });
+
+    if (existingDigestArticle?.authority && existingDigestArticle.authority !== "DRAFT") {
+      logger.info("newspaper_digest_article_write_skipped", {
+        workspaceId: params.workspaceId,
+        workflowJobId: params.workflowJobId ?? null,
+        articleId: existingDigestArticle.id,
+        slug: digestSlug,
+        reason: "non_draft_article",
+      });
+    } else if (existingDigestArticle) {
+      await updateArticle(agentActor, {
         workspaceId: params.workspaceId,
         slug: digestSlug,
-      },
-    },
-  });
+        title: digestTitle,
+        bodyMd: digestBodyMd,
+        changeSummary: `Regenerated ${cadence.toLowerCase()} newspaper for ${params.dateISO.split("T")[0]}`,
+        agentRunId: params.agentRunId ?? null,
+      });
+    } else {
+      await createArticle(agentActor, {
+        workspaceId: params.workspaceId,
+        slug: digestSlug,
+        title: digestTitle,
+        type: "DIGEST" as BrainArticleType,
+        authority: "DRAFT",
+        bodyMd: digestBodyMd,
+      });
+    }
 
-  if (existingDigestArticle?.authority && existingDigestArticle.authority !== "DRAFT") {
+    // 5. Rebuild backlinks
+    await rebuildBacklinks(agentActor, { workspaceId: params.workspaceId });
+  } else {
     logger.info("newspaper_digest_article_write_skipped", {
       workspaceId: params.workspaceId,
       workflowJobId: params.workflowJobId ?? null,
-      articleId: existingDigestArticle.id,
       slug: digestSlug,
-      reason: "non_draft_article",
-    });
-  } else if (existingDigestArticle) {
-    await updateArticle(agentActor, {
-      workspaceId: params.workspaceId,
-      slug: digestSlug,
-      title: digestTitle,
-      bodyMd: digestBodyMd,
-      changeSummary: `Regenerated ${cadence.toLowerCase()} newspaper for ${params.dateISO.split("T")[0]}`,
-      agentRunId: params.agentRunId ?? null,
-    });
-  } else {
-    await createArticle(agentActor, {
-      workspaceId: params.workspaceId,
-      slug: digestSlug,
-      title: digestTitle,
-      type: "DIGEST" as BrainArticleType,
-      authority: "DRAFT",
-      bodyMd: digestBodyMd,
+      reason: "personal_advice_requests_only",
     });
   }
-
-  // 5. Rebuild backlinks
-  await rebuildBacklinks(agentActor, { workspaceId: params.workspaceId });
 
   // 6. Send personalized digest emails
   let sentEmails = 0;
@@ -577,6 +886,25 @@ Rules:
 
   for (const member of recipientMembers) {
     const personArticle = recipientPersonArticleBySlug.get(`person-${member.user.id}`) ?? null;
+    const recipientDigest = withNewspaperAdviceRequests(digest, pendingAdviceByMemberId.get(member.id) ?? []);
+
+    if (recipientDigest.sections.length === 0) {
+      const reason = "No digest sections generated for this recipient.";
+      skippedEmails++;
+      await recordNewspaperDelivery({
+        workspaceId: params.workspaceId,
+        workflowJobId: params.workflowJobId ?? null,
+        memberId: member.id,
+        kind: "MEMBER_NEWSPAPER",
+        cadence,
+        runKey,
+        recipientEmail: member.user.email,
+        subject: `${digestTitle} - Your Personal Briefing`,
+        status: "SKIPPED",
+        error: reason,
+      });
+      continue;
+    }
 
     const personalizationExtraction = await defaultModelGateway.extract({
       model,
@@ -593,7 +921,7 @@ Rules:
       input: JSON.stringify({
         recipient: member.user.displayName || member.user.email,
         profile: personArticle?.bodyMd || "No profile available.",
-        digest,
+        digest: recipientDigest,
       }),
     });
     const personalization = normalizeNewspaperPersonalizationPayload(personalizationExtraction.output);
@@ -608,7 +936,7 @@ Rules:
         workspaceName,
         recipientName: member.user.displayName || member.user.email,
         workspaceUrl: workspaceUrl(params.workspaceId),
-        digest,
+        digest: recipientDigest,
         personalization,
       }),
     });

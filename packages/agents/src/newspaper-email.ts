@@ -1,6 +1,7 @@
 import { computeNewspaperLayout } from "@corgtex/domain";
 
 export type NewspaperEmailSectionId =
+  | "adviceRequests"
   | "keyDecisions"
   | "actionItems"
   | "builtWork"
@@ -31,6 +32,7 @@ const SECTION_DEFINITIONS: Array<{
   title: string;
   aliases: string[];
 }> = [
+  { id: "adviceRequests", title: "Requests Awaiting Your Input", aliases: ["inputRequests", "requestsAwaitingInput", "pendingAdviceRequests"] },
   { id: "keyDecisions", title: "Key Decisions Made", aliases: ["keyDecisionsMade", "decisions"] },
   { id: "actionItems", title: "Action Items Identified", aliases: ["actions", "nextActions"] },
   { id: "builtWork", title: "Built / Shipped Work", aliases: ["shippedWork", "buildArtifacts"] },
@@ -165,6 +167,30 @@ export function normalizeNewspaperDigestPayload(input: unknown): NormalizedNewsp
   return {
     intro,
     sections: capEmailSections(normalizedSections),
+  };
+}
+
+export function withNewspaperAdviceRequests(
+  digest: NormalizedNewspaperDigest,
+  items: string[],
+): NormalizedNewspaperDigest {
+  const normalizedItems = items
+    .map((item) => item.replace(/[ \t]+/g, " ").replace(/\n{3,}/g, "\n\n").trim().slice(0, 1000))
+    .filter(Boolean);
+
+  if (normalizedItems.length === 0) return digest;
+
+  const existingAdviceSection = digest.sections.find((section) => section.id === "adviceRequests");
+  const sectionsWithoutAdvice = digest.sections.filter((section) => section.id !== "adviceRequests");
+  const adviceSection: NewspaperDigestSection = {
+    id: "adviceRequests",
+    title: "Requests Awaiting Your Input",
+    items: [...(existingAdviceSection?.items ?? []), ...normalizedItems],
+  };
+
+  return {
+    ...digest,
+    sections: capEmailSections([adviceSection, ...sectionsWithoutAdvice]),
   };
 }
 

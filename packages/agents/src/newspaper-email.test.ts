@@ -4,6 +4,7 @@ import {
   normalizeNewspaperPersonalizationPayload,
   renderNewspaperDigestMarkdown,
   renderNewspaperEmailHtml,
+  withNewspaperAdviceRequests,
 } from "./newspaper-email";
 
 describe("newspaper email rendering", () => {
@@ -45,6 +46,39 @@ describe("newspaper email rendering", () => {
     expect(digest.sections.map((section) => section.id)).toEqual(["keyDecisions", "actionItems"]);
     expect(digest.sections[0]?.items).toEqual(["Hold launch until QA signs off."]);
     expect(digest.sections[1]?.items).toEqual(["Book customer review."]);
+  });
+
+  it("adds personal advice requests as the lead email section", () => {
+    const digest = normalizeNewspaperDigestPayload({
+      builtWork: ["Shipped a useful update."],
+    });
+    const personalizedDigest = withNewspaperAdviceRequests(digest, [
+      "Input request: Tension - Clarify support ownership\nRequest: Please advise on the handoff.",
+    ]);
+
+    expect(personalizedDigest.sections.map((section) => section.id)).toEqual(["adviceRequests", "builtWork"]);
+    expect(renderNewspaperDigestMarkdown({ title: "Daily Newspaper", digest: personalizedDigest })).toContain("## Requests Awaiting Your Input");
+    expect(renderNewspaperEmailHtml({
+      title: "Daily Newspaper",
+      workspaceName: "Acme",
+      recipientName: "Pat",
+      workspaceUrl: "https://app.example.com/workspaces/ws-1",
+      digest: personalizedDigest,
+    })).toContain("Requests Awaiting Your Input");
+  });
+
+  it("normalizes advice request aliases from structured payloads", () => {
+    const digest = normalizeNewspaperDigestPayload({
+      requestsAwaitingInput: ["Advice request: Proposal - Approve pricing."],
+    });
+
+    expect(digest.sections).toEqual([
+      {
+        id: "adviceRequests",
+        title: "Requests Awaiting Your Input",
+        items: ["Advice request: Proposal - Approve pricing."],
+      },
+    ]);
   });
 
   it("escapes model-provided text in email html", () => {

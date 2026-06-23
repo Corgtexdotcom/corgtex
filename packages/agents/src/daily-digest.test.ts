@@ -35,6 +35,18 @@ const {
     buildArtifact: {
       findMany: vi.fn(),
     },
+    adviceRequest: {
+      findMany: vi.fn(),
+    },
+    proposal: {
+      findMany: vi.fn(),
+    },
+    tension: {
+      findMany: vi.fn(),
+    },
+    action: {
+      findMany: vi.fn(),
+    },
     brainSource: {
       create: vi.fn(),
     },
@@ -152,10 +164,15 @@ describe("runDailyDigest", () => {
     prismaMock.conversationSession.findMany.mockResolvedValue([]);
     listSlackMessagesForDigestMock.mockResolvedValue([]);
     prismaMock.buildArtifact.findMany.mockResolvedValue([]);
+    prismaMock.adviceRequest.findMany.mockResolvedValue([]);
+    prismaMock.proposal.findMany.mockResolvedValue([]);
+    prismaMock.tension.findMany.mockResolvedValue([]);
+    prismaMock.action.findMany.mockResolvedValue([]);
     prismaMock.member.findMany.mockResolvedValue([
       {
         id: "member-1",
         newspaperCadence: null,
+        roleAssignments: [],
         user: {
           id: "user-1",
           email: "member@example.com",
@@ -426,6 +443,164 @@ describe("runDailyDigest", () => {
     expect(recordNewspaperDeliveryMock).toHaveBeenCalledWith(expect.objectContaining({
       memberId: "member-daily",
       status: "SENT",
+    }));
+  });
+
+  it("adds pending advice requests only to the recipient newspaper", async () => {
+    prismaMock.buildArtifact.findMany.mockResolvedValue([mockRecentBuildArtifact()]);
+    prismaMock.member.findMany.mockResolvedValue([
+      {
+        id: "member-a",
+        newspaperCadence: "DAILY",
+        roleAssignments: [
+          {
+            role: {
+              circleId: "circle-1",
+              archivedAt: null,
+              circle: { workspaceId: "workspace-1", archivedAt: null },
+            },
+          },
+        ],
+        user: { id: "user-a", email: "a@example.com", displayName: "A" },
+      },
+      {
+        id: "member-b",
+        newspaperCadence: "DAILY",
+        roleAssignments: [
+          {
+            role: {
+              circleId: "circle-2",
+              archivedAt: null,
+              circle: { workspaceId: "workspace-1", archivedAt: null },
+            },
+          },
+        ],
+        user: { id: "user-b", email: "b@example.com", displayName: "B" },
+      },
+    ]);
+    prismaMock.adviceRequest.findMany.mockResolvedValue([
+      {
+        id: "request-selected",
+        audienceType: "MEMBERS",
+        targetCircleId: null,
+        messageMd: "Please advise on the pricing decision.",
+        deadlineAt: new Date("2026-05-03T12:00:00.000Z"),
+        reminderAt: null,
+        preferredChannel: "IN_APP",
+        createdAt: new Date("2026-04-30T08:00:00.000Z"),
+        requestedBy: { email: "requester@example.com", displayName: "Requester" },
+        targetCircle: null,
+        recipients: [{ memberId: "member-a" }],
+        process: { subjectType: "PROPOSAL", subjectId: "proposal-1" },
+      },
+      {
+        id: "request-circle",
+        audienceType: "CIRCLE",
+        targetCircleId: "circle-1",
+        messageMd: "Can you clarify the support handoff?",
+        deadlineAt: null,
+        reminderAt: new Date("2026-05-01T12:00:00.000Z"),
+        preferredChannel: "SLACK",
+        createdAt: new Date("2026-04-30T09:00:00.000Z"),
+        requestedBy: { email: "requester@example.com", displayName: "Requester" },
+        targetCircle: { name: "Support" },
+        recipients: [],
+        process: { subjectType: "TENSION", subjectId: "tension-1" },
+      },
+      {
+        id: "request-workspace",
+        audienceType: "WORKSPACE",
+        targetCircleId: null,
+        messageMd: "Share any rollout constraints before launch.",
+        deadlineAt: null,
+        reminderAt: null,
+        preferredChannel: "EMAIL",
+        createdAt: new Date("2026-04-30T10:00:00.000Z"),
+        requestedBy: { email: "requester@example.com", displayName: "Requester" },
+        targetCircle: null,
+        recipients: [],
+        process: { subjectType: "ACTION", subjectId: "action-1" },
+      },
+    ]);
+    prismaMock.proposal.findMany.mockResolvedValue([{ id: "proposal-1", title: "Approve pricing" }]);
+    prismaMock.tension.findMany.mockResolvedValue([{ id: "tension-1", title: "Clarify support ownership" }]);
+    prismaMock.action.findMany.mockResolvedValue([{ id: "action-1", title: "Prepare launch checklist" }]);
+
+    const { runDailyDigest } = await import("./daily-digest");
+    await runDailyDigest({
+      workspaceId: "workspace-1",
+      dateISO: "2026-04-30T12:00:00.000Z",
+      cadence: "DAILY",
+    });
+
+    expect(sendEmailMock).toHaveBeenCalledTimes(2);
+    const htmlByRecipient = new Map(sendEmailMock.mock.calls.map(([request]) => [request.to, request.html]));
+    const memberAHtml = htmlByRecipient.get("a@example.com");
+    const memberBHtml = htmlByRecipient.get("b@example.com");
+    expect(memberAHtml).toContain("Requests Awaiting Your Input");
+    expect(memberAHtml).toContain("Advice request: Proposal - Approve pricing");
+    expect(memberAHtml).toContain("Input request: Tension - Clarify support ownership");
+    expect(memberAHtml).toContain("Input request: Action - Prepare launch checklist");
+    expect(memberAHtml).toContain("Deadline: 2026-05-03");
+    expect(memberAHtml).toContain("Audience: Support circle");
+    expect(memberBHtml).toContain("Requests Awaiting Your Input");
+    expect(memberBHtml).toContain("Input request: Action - Prepare launch checklist");
+    expect(memberBHtml).not.toContain("Approve pricing");
+    expect(memberBHtml).not.toContain("Clarify support ownership");
+  });
+
+  it("sends a personal advice-only newspaper only to members with pending requests", async () => {
+    prismaMock.member.findMany.mockResolvedValue([
+      { id: "member-a", newspaperCadence: "DAILY", roleAssignments: [], user: { id: "user-a", email: "a@example.com", displayName: "A" } },
+      { id: "member-b", newspaperCadence: "DAILY", roleAssignments: [], user: { id: "user-b", email: "b@example.com", displayName: "B" } },
+    ]);
+    prismaMock.adviceRequest.findMany.mockResolvedValue([
+      {
+        id: "request-selected",
+        audienceType: "MEMBERS",
+        targetCircleId: null,
+        messageMd: "Please advise on the pricing decision.",
+        deadlineAt: null,
+        reminderAt: null,
+        preferredChannel: "IN_APP",
+        createdAt: new Date("2026-04-30T08:00:00.000Z"),
+        requestedBy: { email: "requester@example.com", displayName: "Requester" },
+        targetCircle: null,
+        recipients: [{ memberId: "member-a" }],
+        process: { subjectType: "PROPOSAL", subjectId: "proposal-1" },
+      },
+    ]);
+    prismaMock.proposal.findMany.mockResolvedValue([{ id: "proposal-1", title: "Approve pricing" }]);
+    extractMock.mockImplementation(async ({ instruction }: { instruction: string }) => {
+      if (instruction.startsWith("Generate a structured")) return { output: {} };
+      if (instruction.startsWith("Personalize this structured")) return { output: {} };
+      return { output: {} };
+    });
+
+    const { runDailyDigest } = await import("./daily-digest");
+    const result = await runDailyDigest({
+      workspaceId: "workspace-1",
+      dateISO: "2026-04-30T12:00:00.000Z",
+      cadence: "DAILY",
+    });
+
+    expect(result).toEqual(expect.objectContaining({
+      sentEmails: 1,
+      skippedEmails: 1,
+    }));
+    expect(createArticleMock).not.toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ type: "DIGEST" }));
+    expect(rebuildBacklinksMock).not.toHaveBeenCalled();
+    expect(sendEmailMock).toHaveBeenCalledWith(expect.objectContaining({
+      to: "a@example.com",
+      html: expect.stringContaining("Advice request: Proposal - Approve pricing"),
+    }));
+    expect(sendEmailMock).not.toHaveBeenCalledWith(expect.objectContaining({
+      to: "b@example.com",
+    }));
+    expect(recordNewspaperDeliveryMock).toHaveBeenCalledWith(expect.objectContaining({
+      memberId: "member-b",
+      status: "SKIPPED",
+      error: "No digest sections generated for this recipient.",
     }));
   });
 
