@@ -14,8 +14,6 @@ export type AgentKey =
   | "brain-absorb"
   | "company-understanding"
   | "brain-maintenance"
-  | "advice-routing"
-  | "process-linting"
   | "daily-check-in"
   | "slack-agent"
   | "crm-email-extraction"
@@ -42,10 +40,6 @@ function jobTypeForAgent(agentKey: AgentKey) {
       return "agent.company-understanding";
     case "brain-maintenance":
       return "agent.brain-maintenance";
-    case "advice-routing":
-      return "agent.advice-routing";
-    case "process-linting":
-      return "agent.process-linting";
     case "daily-check-in":
       return "agent.daily-check-in";
     case "slack-agent":

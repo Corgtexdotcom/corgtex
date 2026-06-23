@@ -168,8 +168,6 @@ export function UserSettingsPanel({
     { type: "meeting.created", label: t("notifType_meeting_created") },
     { type: "action.created", label: t("notifType_action_created") },
     { type: "tension.created", label: t("notifType_tension_created") },
-    { type: "advice-process.initiated", label: t("notifType_advice-process_initiated") },
-    { type: "advice-process.advice-recorded", label: t("notifType_advice-process_advice-recorded") },
   ];
   let memberSince = "-";
   if (profile.member) {

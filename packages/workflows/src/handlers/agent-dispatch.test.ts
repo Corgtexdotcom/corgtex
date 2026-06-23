@@ -15,8 +15,6 @@ vi.mock("@corgtex/agents", () => ({
   runProposalDraftingAgent: vi.fn(),
   runConstitutionUpdateTriggerAgent: vi.fn(),
   runConstitutionSynthesisAgent: vi.fn(),
-  runAdviceRoutingAgent: vi.fn(),
-  runProcessLintingAgent: vi.fn(),
   runCrmDripFollowupAgent: vi.fn(),
   runCrmEmailExtractionAgent: vi.fn(),
   runCrmLeadEnrichmentAgent: vi.fn(),

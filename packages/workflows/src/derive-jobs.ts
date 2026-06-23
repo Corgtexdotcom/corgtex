@@ -11,8 +11,6 @@ const TRIAGE_EVENT_TYPES = new Set([
   "meeting.transcript-uploaded",
   "action.created",
   "tension.created",
-  "advice-process.initiated",
-  "advice-process.executed",
   "checkin.response_received",
 ]);
 
@@ -24,7 +22,6 @@ const KNOWLEDGE_PULSE_EVENT_TYPES = new Set([
   "meeting.created",
   "meeting.transcript-uploaded",
   "approval.finalized",
-  "advice-process.advice-recorded",
 ]);
 
 function isObjectRecord(value: unknown): value is Record<string, unknown> {
@@ -140,47 +137,6 @@ export function deriveJobsForEvent(event: {
         dedupeKey: `${event.id}:knowledge-sync`,
       });
       pushContextGraphSync("PROPOSAL", proposalId, `${event.id}:knowledge-sync`);
-    }
-  }
-
-  if (event.type === "advice-process.initiated") {
-    const payload = event.payload as { proposalId?: string };
-    if (payload.proposalId && event.workspaceId) {
-      jobs.push({
-        workspaceId: event.workspaceId,
-        eventId: event.id,
-        type: "agent.advice-routing",
-        payload: {
-          proposalId: payload.proposalId,
-        },
-        dedupeKey: `${event.id}:advice-routing`,
-      });
-    }
-  }
-
-  if (event.type === "advice-process.executed") {
-    const payload = event.payload as { proposalId?: string };
-    if (event.aggregateId && event.workspaceId) {
-      jobs.push({
-        workspaceId: event.workspaceId,
-        eventId: event.id,
-        type: "agent.process-linting",
-        payload: {
-          processId: event.aggregateId,
-        },
-        dedupeKey: `${event.id}:process-linting`,
-      });
-      if (payload.proposalId) {
-        jobs.push({
-          workspaceId: event.workspaceId,
-          eventId: event.id,
-          type: "knowledge.sync.proposal",
-          payload: {
-            proposalId: payload.proposalId,
-          },
-          dedupeKey: `${event.id}:knowledge-sync`,
-        });
-      }
     }
   }
 

@@ -1026,7 +1026,6 @@ model Member {
   expertise                   MemberExpertise[]
   authoredAdviceProcesses     AdviceProcess[]          @relation("AdviceProcessAuthor")
   ownedAdviceProcesses        AdviceProcess[]          @relation("AdviceProcessOwner")
-  adviceRecords               AdviceRecord[]
   adviceRequestRecipients     AdviceRequestRecipient[]
   impactFootprints            ImpactFootprint[]
   checkIns                    CheckIn[]
@@ -3328,8 +3327,6 @@ model AdviceProcess {
   closedAt                DateTime?
   executedAt              DateTime?
   withdrawnAt             DateTime?
-  advisorySuggestionsJson Json?
-  processLintJson         Json?
   createdAt               DateTime            @default(now())
   updatedAt               DateTime            @updatedAt
 
@@ -3337,7 +3334,6 @@ model AdviceProcess {
   proposal     Proposal?       @relation(fields: [proposalId], references: [id], onDelete: Cascade)
   authorMember Member          @relation("AdviceProcessAuthor", fields: [authorMemberId], references: [id], onDelete: Restrict)
   ownerMember  Member?         @relation("AdviceProcessOwner", fields: [ownerMemberId], references: [id], onDelete: SetNull)
-  records      AdviceRecord[]
   requests     AdviceRequest[]
 
   @@index([workspaceId, status])
@@ -3386,22 +3382,6 @@ model AdviceRequestRecipient {
   member  Member        @relation(fields: [memberId], references: [id], onDelete: Cascade)
 
   @@unique([requestId, memberId])
-  @@index([memberId])
-}
-
-model AdviceRecord {
-  id        String   @id @default(uuid())
-  processId String
-  memberId  String
-  type      String // "ENDORSE" | "CONCERN"
-  bodyMd    String   @db.Text
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-
-  process AdviceProcess @relation(fields: [processId], references: [id], onDelete: Cascade)
-  member  Member        @relation(fields: [memberId], references: [id], onDelete: Cascade)
-
-  @@index([processId])
   @@index([memberId])
 }
 
