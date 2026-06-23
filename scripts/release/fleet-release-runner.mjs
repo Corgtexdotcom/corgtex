@@ -35,6 +35,14 @@ const DEFAULT_AZURE = {
 export async function runFleetRelease(argv = process.argv.slice(2), deps = {}) {
   const args = parseKeyValueArgs(argv);
   const command = args._[0] ?? "deploy";
+  if (command === "validate-config") {
+    const validation = validateReleaseEnvironment(args, deps.env ?? process.env);
+    console.log(JSON.stringify({ stage: "config-validation", ...validation }, null, 2));
+    if (!validation.ok) {
+      throw new Error(formatConfigValidationFailure(validation));
+    }
+    return validation;
+  }
   if (command === "resolve") {
     const manifest = await resolveManifest(args, deps);
     emitGithubOutput("git_sha", manifest.gitSha, deps);
@@ -127,6 +135,98 @@ async function resolveManifest(args, deps) {
     sourceWorkflowRunId: deps.env?.GITHUB_RUN_ID ?? process.env.GITHUB_RUN_ID ?? null,
     stabilityStatus: release === "latest-stable" ? "stable" : "candidate",
   });
+}
+
+function validateReleaseEnvironment(args, env) {
+  const release = normalizeReleaseInput(args.release ?? env.FLEET_RELEASE_INPUT ?? "latest-stable");
+  const selectedGroups = normalizeTargets(args.targets ?? env.FLEET_RELEASE_TARGETS ?? "all");
+  const dryRun = parseBoolean(args.dryRun ?? env.FLEET_RELEASE_DRY_RUN, false);
+  const missing = [];
+  const invalid = [];
+
+  if (release === "latest-stable") {
+    const stableMarker = env.FLEET_RELEASE_STABLE_GIT_SHA || env.CONTROL_PLANE_STABLE_RELEASE_GIT_SHA;
+    if (!stableMarker?.trim()) {
+      missing.push("FLEET_RELEASE_STABLE_GIT_SHA");
+    } else {
+      try {
+        normalizeGitSha(stableMarker);
+      } catch (error) {
+        invalid.push({
+          name: env.FLEET_RELEASE_STABLE_GIT_SHA ? "FLEET_RELEASE_STABLE_GIT_SHA" : "CONTROL_PLANE_STABLE_RELEASE_GIT_SHA",
+          reason: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+  }
+
+  validateConfiguredTargetJson("FLEET_RELEASE_TARGETS_JSON", env.FLEET_RELEASE_TARGETS_JSON, invalid);
+  validateConfiguredTargetJson("FLEET_RELEASE_OPS_TARGET_JSON", env.FLEET_RELEASE_OPS_TARGET_JSON, invalid);
+  validateConfiguredTargetJson("FLEET_RELEASE_BACKUP_APP_TARGET_JSON", env.FLEET_RELEASE_BACKUP_APP_TARGET_JSON, invalid);
+  validateConfiguredTargetJson("FLEET_RELEASE_AZURE_TARGET_JSON", env.FLEET_RELEASE_AZURE_TARGET_JSON, invalid);
+
+  if (selectedGroups.includes("railway-customers") && !env.FLEET_RELEASE_TARGETS_JSON?.trim() && !env.CONTROL_PLANE_AGENT_API_KEY?.trim()) {
+    missing.push("FLEET_RELEASE_TARGETS_JSON or CONTROL_PLANE_AGENT_API_KEY");
+  }
+  if (selectedGroups.includes("ops") && !env.FLEET_RELEASE_OPS_TARGET_JSON?.trim()) {
+    missing.push("FLEET_RELEASE_OPS_TARGET_JSON");
+  }
+  if (selectedGroups.includes("backup-app") && !env.FLEET_RELEASE_BACKUP_APP_TARGET_JSON?.trim()) {
+    missing.push("FLEET_RELEASE_BACKUP_APP_TARGET_JSON");
+  }
+  if (selectedGroups.includes("azure-selfserve") && !env.FLEET_RELEASE_AZURE_TARGET_JSON?.trim()) {
+    missing.push("FLEET_RELEASE_AZURE_TARGET_JSON");
+  }
+
+  if (!dryRun) {
+    if (!env.CONTROL_PLANE_AGENT_API_KEY?.trim()) missing.push("CONTROL_PLANE_AGENT_API_KEY");
+    if (selectedGroups.some((group) => group !== "azure-selfserve") && !env.RAILWAY_API_TOKEN?.trim()) {
+      missing.push("RAILWAY_API_TOKEN");
+    }
+    if (selectedGroups.includes("azure-selfserve")) {
+      if (!env.AZURE_CLIENT_ID?.trim()) missing.push("AZURE_CLIENT_ID");
+      if (!env.AZURE_TENANT_ID?.trim()) missing.push("AZURE_TENANT_ID");
+      if (!env.AZURE_SUBSCRIPTION_ID?.trim()) missing.push("AZURE_SUBSCRIPTION_ID");
+      if (!env.GHCR_IMPORT_TOKEN?.trim() && !env.GITHUB_TOKEN?.trim()) {
+        missing.push("GHCR_IMPORT_TOKEN or GITHUB_TOKEN");
+      }
+    }
+  }
+
+  return {
+    ok: missing.length === 0 && invalid.length === 0,
+    release,
+    dryRun,
+    targetGroups: selectedGroups,
+    missing: [...new Set(missing)],
+    invalid,
+  };
+}
+
+function validateConfiguredTargetJson(name, raw, invalid) {
+  if (!raw?.trim()) return;
+  try {
+    const parsed = parseTargetJson(raw);
+    if (parsed.length === 0) {
+      invalid.push({ name, reason: "must contain at least one target" });
+    }
+  } catch (error) {
+    invalid.push({
+      name,
+      reason: error instanceof Error ? error.message : String(error),
+    });
+  }
+}
+
+function formatConfigValidationFailure(validation) {
+  const parts = [];
+  if (validation.missing.length > 0) {
+    parts.push(`missing ${validation.missing.join(", ")}`);
+  }
+  for (const item of validation.invalid) {
+    parts.push(`${item.name}: ${item.reason}`);
+  }
+  return `Fleet release configuration is incomplete: ${parts.join("; ")}`;
 }
 
 async function resolveLatestStableSha(deps) {

@@ -47,7 +47,7 @@ jobs:
   release:
     name: Promote Corgtex release
     runs-on: ubuntu-latest
-    environment: production
+    environment: fleet-release-production
     services:
       postgres:
         image: pgvector/pgvector:pg16
@@ -88,11 +88,29 @@ jobs:
           node-version: 22
           cache: npm
 
+      - name: Validate release environment
+        run: |
+          node scripts/release/fleet-release-runner.mjs validate-config \
+            --release "${{ inputs.release }}" \
+            --targets "${{ inputs.targets }}" \
+            --dry-run "${{ inputs.dry_run }}"
+
       - name: Resolve release manifest
         id: manifest
         run: |
           node scripts/release/fleet-release-runner.mjs resolve \
             --release "${{ inputs.release }}"
+
+      - name: Preflight fleet release
+        if: ${{ !inputs.dry_run }}
+        run: |
+          node scripts/release/fleet-release-runner.mjs deploy \
+            --manifest-json '${{ steps.manifest.outputs.manifest_json }}' \
+            --targets "${{ inputs.targets }}" \
+            --reason "${{ inputs.reason }}" \
+            --dry-run true \
+            --concurrency "${{ inputs.concurrency }}" \
+            --fail-on-blockers true
 
       - uses: actions/checkout@v5
         with:
@@ -111,17 +129,6 @@ jobs:
         run: node scripts/check-data-migration-fixtures.mjs
         env:
           DATABASE_URL: postgresql://postgres:postgres@localhost:5432/corgtex_ci?schema=public
-
-      - name: Preflight fleet release
-        if: ${{ !inputs.dry_run }}
-        run: |
-          node scripts/release/fleet-release-runner.mjs deploy \
-            --manifest-json '${{ steps.manifest.outputs.manifest_json }}' \
-            --targets "${{ inputs.targets }}" \
-            --reason "${{ inputs.reason }}" \
-            --dry-run true \
-            --concurrency "${{ inputs.concurrency }}" \
-            --fail-on-blockers true
 
       - uses: docker/setup-buildx-action@v3
         if: ${{ !inputs.dry_run }}
