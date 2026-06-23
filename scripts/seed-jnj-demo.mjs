@@ -2609,6 +2609,9 @@ async function main() {
       workspaceId: wsId,
       proposalId: apProp1.id,
       authorMemberId: memberMappings["vbroadhurst"].memberId,
+      ownerMemberId: memberMappings["vbroadhurst"].memberId,
+      subjectType: "PROPOSAL",
+      subjectId: apProp1.id,
       status: "GATHERING",
       advisorySuggestionsJson: {
         advisors: [
@@ -2636,6 +2639,9 @@ async function main() {
       workspaceId: wsId,
       proposalId: apProp2.id,
       authorMemberId: memberMappings["jreed"].memberId,
+      ownerMemberId: memberMappings["jreed"].memberId,
+      subjectType: "PROPOSAL",
+      subjectId: apProp2.id,
       status: "GATHERING",
       advisorySuggestionsJson: {
         advisors: [
