@@ -837,6 +837,113 @@ details[open] > .settings-disclosure-summary::before {
   gap: 16px;
 }
 
+/* ── Product Feedback ── */
+
+.product-feedback-widget {
+  position: fixed;
+  right: max(20px, env(safe-area-inset-right, 0px) + 20px);
+  bottom: max(20px, env(safe-area-inset-bottom, 0px) + 20px);
+  z-index: calc(var(--z-toast) - 1);
+}
+
+.product-feedback-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 42px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface-strong);
+  color: var(--text);
+  box-shadow: var(--shadow-md);
+  padding: 0 14px;
+  font-size: 0.9rem;
+  font-weight: 700;
+}
+
+.product-feedback-trigger:hover {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.product-feedback-form,
+.product-feedback-field,
+.product-feedback-attachments {
+  display: grid;
+  gap: 12px;
+}
+
+.product-feedback-field span {
+  font-size: 0.86rem;
+  font-weight: 700;
+  color: var(--muted);
+}
+
+.product-feedback-attachment-actions,
+.product-feedback-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+}
+
+.product-feedback-attachment-actions button,
+.product-feedback-actions button {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.product-feedback-previews {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(96px, 1fr));
+  gap: 10px;
+}
+
+.product-feedback-preview {
+  position: relative;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  aspect-ratio: 4 / 3;
+}
+
+.product-feedback-preview-image {
+  width: 100%;
+  height: 100%;
+  display: block;
+  background-position: center;
+  background-repeat: no-repeat;
+  background-size: cover;
+}
+
+.product-feedback-preview button {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  background: var(--surface-strong);
+  color: var(--danger);
+}
+
+.product-feedback-error {
+  margin: 0;
+  color: var(--danger);
+  font-size: 0.88rem;
+  line-height: 1.4;
+}
+
+.product-feedback-actions {
+  justify-content: flex-end;
+}
+
 /* ── Markdown Editor ── */
 
 .md-editor {

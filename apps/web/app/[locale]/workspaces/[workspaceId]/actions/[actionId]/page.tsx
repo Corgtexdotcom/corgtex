@@ -30,6 +30,8 @@ export default async function ActionDetailPage({
     listWorkItemEvidence(actor, { workspaceId, entityType: "Action", entityId: actionId }),
     listDeliberationEntries(actor, { workspaceId, parentType: "ACTION", parentId: actionId }),
   ]);
+  const completionEvidence = evidence.filter((row) => row.purpose === "completion_evidence");
+  const feedbackContextEvidence = evidence.filter((row) => row.purpose === "feedback_context");
   const deliberationTargets = await getDeliberationTargets({ actor, workspaceId, parentCircleId: action.circleId });
   const targetOptions = deliberationTargets.options.map((option) => ({
     ...option,
@@ -190,6 +192,21 @@ export default async function ActionDetailPage({
         </div>
       </section>
 
+      {feedbackContextEvidence.length > 0 && (
+        <section className="ws-section" style={{ marginBottom: 48 }}>
+          <h2 className="nr-section-header">{tWork("feedbackContext")}</h2>
+          <div className="nr-item">
+            <div className="nr-evidence-list">
+              {feedbackContextEvidence.map((row) => (
+                <Link key={row.id} href={`/workspaces/${workspaceId}/brain/sources`}>
+                  {row.document.title}
+                </Link>
+              ))}
+            </div>
+          </div>
+        </section>
+      )}
+
       <section className="ws-section" style={{ marginBottom: 48 }}>
         <h2 className="nr-section-header">{t("sectionDiscussion")}</h2>
         <DeliberationThread
@@ -236,10 +253,10 @@ export default async function ActionDetailPage({
           <h2 className="nr-section-header">{t("sectionCompletion")}</h2>
           <div className="nr-item">
             <MarkdownRenderer markdown={action.completedVia} variant="document" />
-            {evidence.length > 0 && (
+            {completionEvidence.length > 0 && (
               <div className="nr-evidence-list">
                 <strong>{tWork("completionEvidence")}</strong>
-                {evidence.map((row) => (
+                {completionEvidence.map((row) => (
                   <Link key={row.id} href={`/workspaces/${workspaceId}/brain/sources`}>
                     {row.document.title}
                   </Link>

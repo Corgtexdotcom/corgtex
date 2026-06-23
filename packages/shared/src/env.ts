@@ -98,6 +98,8 @@ type Env = {
   readonly NEXT_PUBLIC_INTERCOM_APP_ID: string | undefined;
   readonly NEXT_PUBLIC_INTERCOM_API_BASE: string;
   readonly INTERCOM_MESSENGER_SECRET: string | undefined;
+  readonly PRODUCT_FEEDBACK_TARGET_WORKSPACE_ID: string | undefined;
+  readonly PRODUCT_FEEDBACK_TARGET_WORKSPACE_SLUG: string | undefined;
   readonly STRIPE_SECRET_KEY: string | undefined;
   readonly STRIPE_WEBHOOK_SECRET: string | undefined;
   readonly STRIPE_PRICE_AI_USAGE_ID: string | undefined;
@@ -245,6 +247,12 @@ export const env: Env = {
   },
   get INTERCOM_MESSENGER_SECRET() {
     return optional("INTERCOM_MESSENGER_SECRET");
+  },
+  get PRODUCT_FEEDBACK_TARGET_WORKSPACE_ID() {
+    return optional("PRODUCT_FEEDBACK_TARGET_WORKSPACE_ID");
+  },
+  get PRODUCT_FEEDBACK_TARGET_WORKSPACE_SLUG() {
+    return optional("PRODUCT_FEEDBACK_TARGET_WORKSPACE_SLUG");
   },
   get STRIPE_SECRET_KEY() {
     return optional("STRIPE_SECRET_KEY");

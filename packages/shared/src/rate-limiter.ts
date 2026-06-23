@@ -205,6 +205,8 @@ export const RATE_LIMITS = {
   AGENT_PER_WORKSPACE: { windowMs: 60_000, limit: 10 },
   /** Inbound webhooks per workspace per minute */
   WEBHOOK_INGEST_PER_WORKSPACE: { windowMs: 60_000, limit: 30 },
+  /** Product feedback submissions per user/workspace per minute */
+  PRODUCT_FEEDBACK_PER_USER: { windowMs: 60_000, limit: 10, failClosed: true },
   /** Auth attempts per IP per minute */
   AUTH_PER_IP: { windowMs: 60_000, limit: 20, failClosed: true },
   /** Password reset requests per email per hour */
