@@ -54,6 +54,12 @@ export async function runFleetRelease(argv = process.argv.slice(2), deps = {}) {
     console.log(JSON.stringify({ manifest }, null, 2));
     return { manifest };
   }
+  if (command === "check-images") {
+    const manifest = await resolveManifest(args, deps);
+    const result = checkReleaseImages(manifest, deps);
+    console.log(JSON.stringify({ stage: "image-check", ...result }, null, 2));
+    return result;
+  }
   if (command !== "deploy") {
     throw new Error(`Unsupported fleet release command: ${command}`);
   }
@@ -324,6 +330,25 @@ function preflightTarget(target, env) {
 
 function formatPreflightFailure(blockers) {
   return `Fleet release preflight failed: ${blockers.map((item) => `${item.target.label}: ${item.blockers.join("; ")}`).join(" | ")}`;
+}
+
+export function checkReleaseImages(manifest, deps) {
+  const images = [manifest.ghcrWebImage, manifest.ghcrWorkerImage];
+  const missing = [];
+  for (const image of images) {
+    try {
+      runCommand("docker", ["manifest", "inspect", image], deps);
+    } catch (error) {
+      missing.push({
+        image,
+        reason: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+  if (missing.length > 0) {
+    throw new Error(`Release image check failed for ${missing.map((item) => item.image).join(", ")}. Publish the ${manifest.imageTag} web and worker images with the Release Images workflow before fleet promotion.`);
+  }
+  return { ok: true, images };
 }
 
 async function deployTarget(target, manifest, reason, deps) {

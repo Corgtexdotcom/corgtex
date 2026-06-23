@@ -7,6 +7,8 @@ Fleet releases promote a canary-proven Corgtex release through GitHub Actions. O
 
 The release workflow must use the GitHub environment `fleet-release-production`. Do not wire fleet releases to the generic `production` environment.
 
+Fleet promotion reuses immutable GHCR images for the release SHA. It does not build Docker images. If the canonical web or worker image for `sha-<gitSha>` is missing, publish it with the `Release Images` workflow before running a real fleet promotion.
+
 ## Required GitHub Environment Settings
 
 Configure these values on the `fleet-release-production` environment. Store secret values only in GitHub environment secrets, never in docs, issues, PR bodies, logs, or committed files.
@@ -62,7 +64,8 @@ Azure self-serve targets must include:
 
 1. Confirm `fleet-release-production` has the required secrets and variables for the selected target groups.
 2. Confirm `FLEET_RELEASE_STABLE_GIT_SHA` points to the canary-proven stable release, not an arbitrary `main` commit.
-3. Run a dry-run:
+3. Confirm the `Release Images` workflow has published both canonical GHCR images for `sha-<FLEET_RELEASE_STABLE_GIT_SHA>`.
+4. Run a dry-run:
 
 ```bash
 npm run release:fleet -- --reason "Plan latest stable fleet release." --dry-run
@@ -70,12 +73,12 @@ npm run release:fleet -- --reason "Plan latest stable fleet release." --dry-run
 
 Dry-runs use the lightweight preflight workflow by default. That path validates configuration, resolves `latest-stable`, and plans rings without `npm ci`, Prisma generation, Docker build, Azure login, or provider mutation.
 
-4. Confirm the dry-run dispatches `fleet-release-preflight.yml`, prints the manifest, selected targets, rings, blockers, and elapsed seconds before any provider mutation.
-5. If the dry-run fails on missing config, fix the named GitHub environment setting and rerun.
-6. If the preflight takes longer than 30 seconds or reports unclear blockers, stop and repair the preflight before expanding release orchestration.
-7. For a real promotion, use a specific support reason and monitor the GitHub Actions run until each target proves matching `gitSha`, `imageTag`, `database=up`, and `schema=ready`.
-8. If any target fails, stop at the failed ring unless an operator explicitly supplies a force reason.
+5. Confirm the dry-run dispatches `fleet-release-preflight.yml`, prints the manifest, selected targets, rings, blockers, and elapsed seconds before any provider mutation.
+6. If the dry-run fails on missing config, fix the named GitHub environment setting and rerun.
+7. If the preflight takes longer than 30 seconds or reports unclear blockers, stop and repair the preflight before expanding release orchestration.
+8. For a real promotion, use a specific support reason and monitor the GitHub Actions run until each target proves matching `gitSha`, `imageTag`, `database=up`, and `schema=ready`.
+9. If any target fails, stop at the failed ring unless an operator explicitly supplies a force reason.
 
 ## Gate For Next Work
 
-The preflight workflow is sufficient only if dry-run planning is clear, completes within the timing gate, and a canary promotion succeeds without local Railway or Azure credentials. Move to the next release PR only when this gate is not met.
+The immutable-image workflow is sufficient only if a canary promotion reuses existing images, skips Docker build work inside fleet promotion, and proves matching `gitSha`, `imageTag`, `database=up`, and `schema=ready`. Move to the next release PR only when this gate is not met.

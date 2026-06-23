@@ -237,6 +237,54 @@ describe("fleet release runner", () => {
     })).rejects.toThrow("RAILWAY_API_TOKEN is missing");
   });
 
+  it("checks canonical GHCR web and worker images before promotion", async () => {
+    const runCommand = vi.fn().mockReturnValue({ stdout: "", stderr: "" });
+
+    const result = await runFleetRelease([
+      "check-images",
+      "--release",
+      SHA,
+    ], {
+      env: { GITHUB_REPOSITORY: "Corgtexdotcom/corgtex" },
+      runCommand,
+    });
+
+    expect(result).toMatchObject({
+      ok: true,
+      images: [
+        `ghcr.io/corgtexdotcom/corgtex/web:sha-${SHA}`,
+        `ghcr.io/corgtexdotcom/corgtex/worker:sha-${SHA}`,
+      ],
+    });
+    expect(runCommand).toHaveBeenNthCalledWith(1, "docker", [
+      "manifest",
+      "inspect",
+      `ghcr.io/corgtexdotcom/corgtex/web:sha-${SHA}`,
+    ]);
+    expect(runCommand).toHaveBeenNthCalledWith(2, "docker", [
+      "manifest",
+      "inspect",
+      `ghcr.io/corgtexdotcom/corgtex/worker:sha-${SHA}`,
+    ]);
+  });
+
+  it("fails clearly when canonical GHCR images are missing", async () => {
+    const runCommand = vi.fn()
+      .mockReturnValueOnce({ stdout: "", stderr: "" })
+      .mockImplementationOnce(() => {
+        throw new Error("manifest unknown");
+      });
+
+    await expect(runFleetRelease([
+      "check-images",
+      "--release",
+      SHA,
+    ], {
+      env: { GITHUB_REPOSITORY: "Corgtexdotcom/corgtex" },
+      runCommand,
+    })).rejects.toThrow("Release Images workflow before fleet promotion");
+  });
+
   it("requires control-plane credentials before verified inventory recording", async () => {
     await expect(runFleetRelease([
       "deploy",

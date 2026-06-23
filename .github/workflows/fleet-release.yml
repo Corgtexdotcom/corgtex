@@ -37,7 +37,7 @@ permissions:
   actions: read
   contents: read
   id-token: write
-  packages: write
+  packages: read
 
 concurrency:
   group: fleet-release
@@ -139,32 +139,6 @@ jobs:
             --concurrency "$CONCURRENCY_INPUT" \
             --fail-on-blockers true
 
-      - uses: actions/checkout@v5
-        if: ${{ !inputs.dry_run }}
-        with:
-          ref: ${{ steps.manifest.outputs.git_sha }}
-
-      - uses: actions/setup-node@v5
-        if: ${{ !inputs.dry_run }}
-        with:
-          node-version: 22
-          cache: npm
-
-      - run: npm ci
-        if: ${{ !inputs.dry_run }}
-
-      - run: npx prisma generate
-        if: ${{ !inputs.dry_run }}
-
-      - name: Validate data migration fixtures
-        if: ${{ !inputs.dry_run }}
-        run: node scripts/check-data-migration-fixtures.mjs
-        env:
-          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/corgtex_ci?schema=public
-
-      - uses: docker/setup-buildx-action@v3
-        if: ${{ !inputs.dry_run }}
-
       - name: Log in to GHCR
         if: ${{ !inputs.dry_run }}
         uses: docker/login-action@v3
@@ -173,39 +147,13 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ github.token }}
 
-      - name: Build and push web image
-        id: build-web
-        if: ${{ !inputs.dry_run }}
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: deploy/Dockerfile.web
-          push: true
-          tags: ${{ steps.manifest.outputs.ghcr_web_image }}
-
-      - name: Build and push worker image
-        id: build-worker
-        if: ${{ !inputs.dry_run }}
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: deploy/Dockerfile.worker
-          push: true
-          tags: ${{ steps.manifest.outputs.ghcr_worker_image }}
-
-      - name: Finalize release manifest
-        id: final_manifest
+      - name: Verify release images exist
         if: ${{ !inputs.dry_run }}
         env:
           MANIFEST_JSON: ${{ steps.manifest.outputs.manifest_json }}
-          WEB_DIGEST: ${{ steps.build-web.outputs.digest }}
-          WORKER_DIGEST: ${{ steps.build-worker.outputs.digest }}
         run: |
-          node scripts/release/fleet-release-runner.mjs resolve \
-            --manifest-json "$MANIFEST_JSON" \
-            --web-digest "$WEB_DIGEST" \
-            --worker-digest "$WORKER_DIGEST" \
-            --stability-status image-published
+          node scripts/release/fleet-release-runner.mjs check-images \
+            --manifest-json "$MANIFEST_JSON"
 
       - name: Log in to Azure
         if: ${{ !inputs.dry_run && (inputs.targets == 'all' || contains(inputs.targets, 'azure-selfserve')) }}
@@ -218,7 +166,7 @@ jobs:
       - name: Promote release through rings
         if: ${{ !inputs.dry_run }}
         env:
-          MANIFEST_JSON: ${{ steps.final_manifest.outputs.manifest_json }}
+          MANIFEST_JSON: ${{ steps.manifest.outputs.manifest_json }}
           TARGETS_INPUT: ${{ inputs.targets }}
           RELEASE_REASON: ${{ inputs.reason }}
           DRY_RUN_INPUT: ${{ inputs.dry_run }}
