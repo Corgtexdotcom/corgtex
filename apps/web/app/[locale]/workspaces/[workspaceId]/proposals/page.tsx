@@ -1,4 +1,4 @@
-import { listCircles, listMembers, listProposals, requireWorkspaceMembership } from "@corgtex/domain";
+import { listAdviceRequests, listCircles, listMembers, listProposals, requireWorkspaceMembership } from "@corgtex/domain";
 import type { ReactNode } from "react";
 import { requirePageActor } from "@/lib/auth";
 import { MarkdownExcerpt } from "@/lib/components/MarkdownRenderer";
@@ -61,11 +61,12 @@ export default async function ProposalsPage({
   const { circleIds, memberIds, sort } = resolveWorkItemFilters(resolvedSearch);
   const membership = await requireWorkspaceMembership({ actor, workspaceId });
 
-  const [{ items: proposals }, currentWorkspace, circles, members] = await Promise.all([
+  const [{ items: proposals }, currentWorkspace, circles, members, activeAdviceRequests] = await Promise.all([
     listProposals(actor, workspaceId, { take: 200, circleIds, memberIds, sort }),
     prisma.workspace.findUnique({ where: { id: workspaceId }, select: { slug: true } }),
     listCircles(workspaceId),
     listMembers(workspaceId),
+    listAdviceRequests(actor, { workspaceId, subjectType: "PROPOSAL", status: "ACTIVE", take: 500 }),
   ]);
   const isDemo = currentWorkspace?.slug === "jnj-demo";
   const canManageProposal = (proposal: { authorUserId: string }) => actor.kind === "agent"
@@ -84,6 +85,11 @@ export default async function ProposalsPage({
   const displayProposals = statusFilters.length === 0
     ? proposals
     : statusFilters.flatMap((filter) => groupedProposals[filter]);
+  const activeAdviceRequestCounts = activeAdviceRequests.reduce((counts, request) => {
+    const proposalId = request.process.subjectId;
+    counts.set(proposalId, (counts.get(proposalId) ?? 0) + 1);
+    return counts;
+  }, new Map<string, number>());
   type ProposalListItem = (typeof proposals)[number];
   type ProposalColumnStatus = "DRAFT" | "OPEN" | "RESOLVED" | "ARCHIVED";
   type ProposalMoveStatus = "DRAFT" | "OPEN" | "RESOLVED";
@@ -245,6 +251,7 @@ export default async function ProposalsPage({
   function renderProposalCard(proposal: ProposalListItem, compact = false) {
     const detailHref = `/workspaces/${workspaceId}/proposals/${proposal.id}`;
     const { hiddenTransitions, moreItems, primaryAction } = proposalControls(proposal);
+    const adviceRequestCount = activeAdviceRequestCounts.get(proposal.id) ?? 0;
 
     return (
       <div className={`${compact ? "nr-kanban-card" : "nr-item nr-list-card"} nr-clickable-card`} key={proposal.id}>
@@ -259,6 +266,9 @@ export default async function ProposalsPage({
               <span className={`tag ${proposal.status === "DRAFT" ? "info" : proposal.status === "OPEN" ? "warning" : proposal.resolutionOutcome === "ADOPTED" ? "success" : proposal.status === "RESOLVED" ? "info" : ""}`}>
                 {proposal.status === "RESOLVED" && proposal.resolutionOutcome ? `${proposal.status} · ${proposal.resolutionOutcome.replace("_", " ")}` : proposal.status}
               </span>
+            )}
+            {adviceRequestCount > 0 && (
+              <span className="tag warning">{t("adviceRequestedCount", { count: adviceRequestCount })}</span>
             )}
           </div>
           <MarkdownExcerpt markdown={proposal.summary ?? proposal.bodyMd} maxLength={compact ? 120 : 180} as="div" className="nr-excerpt" />
@@ -327,6 +337,7 @@ export default async function ProposalsPage({
   function proposalTableRow(proposal: ProposalListItem): WorkItemTableRow {
     const detailHref = `/workspaces/${workspaceId}/proposals/${proposal.id}`;
     const { hiddenTransitions, moreItems, primaryAction } = proposalControls(proposal);
+    const adviceRequestCount = activeAdviceRequestCounts.get(proposal.id) ?? 0;
     const statusText = proposal.status === "RESOLVED" && proposal.resolutionOutcome
       ? `${proposalStatusLabel("RESOLVED")} · ${proposal.resolutionOutcome.replace("_", " ")}`
       : proposalStatusLabel(proposal.archivedAt ? "ARCHIVED" : proposal.status as ProposalColumnStatus);
@@ -373,6 +384,9 @@ export default async function ProposalsPage({
                 {t("actionTag", { title: action.title })}
               </a>
             ))}
+            {adviceRequestCount > 0 && (
+              <span className="tag warning">{t("adviceRequestedCount", { count: adviceRequestCount })}</span>
+            )}
           </div>
         ),
         actions: !isDemo ? (

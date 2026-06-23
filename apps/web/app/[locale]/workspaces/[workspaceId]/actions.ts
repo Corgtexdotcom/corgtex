@@ -13,6 +13,7 @@ export {
   publishProposalAction,
   recordAdviceAction,
   reopenProposalAction,
+  requestProposalAdviceAction,
   resolveDeliberationEntryAction,
   resolveProposalAction,
   returnProposalToDraftAction,
