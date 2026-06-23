@@ -142,6 +142,7 @@ export async function postDeliberationEntry(actor: AppActor, params: {
   bodyMd?: string;
   targetMemberId?: string;
   targetCircleId?: string;
+  adviceRequestId?: string;
 }) {
   await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
   const authorUserId = await actorUserIdForWorkspace(actor, params.workspaceId);
@@ -154,6 +155,44 @@ export async function postDeliberationEntry(actor: AppActor, params: {
   invariant(!(params.targetMemberId && params.targetCircleId), 400, "INVALID_INPUT", "Choose either a person or a circle target, not both.");
 
   return prisma.$transaction(async (tx) => {
+    let linkedAdviceRequest: {
+      id: string;
+      workspaceId: string;
+      status: string;
+      process: { subjectType: string; subjectId: string };
+    } | null = null;
+    if (params.adviceRequestId) {
+      linkedAdviceRequest = await tx.adviceRequest.findUnique({
+        where: { id: params.adviceRequestId },
+        select: {
+          id: true,
+          workspaceId: true,
+          status: true,
+          process: {
+            select: {
+              subjectType: true,
+              subjectId: true,
+            },
+          },
+        },
+      });
+      invariant(
+        linkedAdviceRequest
+          && linkedAdviceRequest.workspaceId === params.workspaceId
+          && linkedAdviceRequest.status === "ACTIVE",
+        400,
+        "INVALID_INPUT",
+        "Advice request must be active and belong to this workspace.",
+      );
+      invariant(
+        linkedAdviceRequest.process.subjectType === params.parentType
+          && linkedAdviceRequest.process.subjectId === params.parentId,
+        400,
+        "INVALID_INPUT",
+        "Advice request must belong to the deliberation parent.",
+      );
+    }
+
     if (params.targetMemberId) {
       const targetMember = await tx.member.findUnique({ where: { id: params.targetMemberId } });
       invariant(targetMember && targetMember.workspaceId === params.workspaceId && targetMember.isActive, 400, "INVALID_INPUT", "Target member must belong to this workspace.");
@@ -179,6 +218,7 @@ export async function postDeliberationEntry(actor: AppActor, params: {
         parentVersion,
         targetMemberId: params.targetMemberId || null,
         targetCircleId: params.targetCircleId || null,
+        adviceRequestId: linkedAdviceRequest?.id ?? null,
       }
     });
 
@@ -206,7 +246,21 @@ export async function postDeliberationEntry(actor: AppActor, params: {
           entryType: params.entryType,
           parentVersion,
         }
-      }
+      },
+      ...(linkedAdviceRequest ? [{
+        workspaceId: params.workspaceId,
+        type: "advice.reply_posted",
+        aggregateType: "DeliberationEntry",
+        aggregateId: entry.id,
+        payload: {
+          adviceRequestId: linkedAdviceRequest.id,
+          entryId: entry.id,
+          parentType: params.parentType,
+          parentId: params.parentId,
+          entryType: params.entryType,
+          authorUserId,
+        },
+      }] : []),
     ]);
 
     return entry;

@@ -22,6 +22,7 @@ const { prismaMock, state } = vi.hoisted(() => {
     bodyMd: string | null;
     targetMemberId: string | null;
     targetCircleId: string | null;
+    adviceRequestId: string | null;
     resolvedAt: Date | null;
     resolvedNote: string | null;
     createdAt: Date;
@@ -32,6 +33,7 @@ const { prismaMock, state } = vi.hoisted(() => {
     members: new Map<string, MemberRecord>(),
     proposals: new Map<string, { id: string; workspaceId: string; authorUserId: string; version: number }>(),
     actions: new Map<string, { id: string; workspaceId: string; authorUserId: string; assigneeMemberId: string | null; version: number }>(),
+    adviceRequests: new Map<string, { id: string; workspaceId: string; status: string; process: { subjectType: string; subjectId: string } }>(),
     entries: [] as EntryRecord[],
     auditLogs: [] as any[],
     events: [] as any[],
@@ -114,6 +116,9 @@ const { prismaMock, state } = vi.hoisted(() => {
     brainArticle: {
       findUnique: vi.fn(async () => null),
     },
+    adviceRequest: {
+      findUnique: vi.fn(async ({ where }: any) => store.adviceRequests.get(where.id) ?? null),
+    },
     deliberationEntry: {
       create: vi.fn(async ({ data }: any) => {
         const entry = {
@@ -123,6 +128,7 @@ const { prismaMock, state } = vi.hoisted(() => {
           createdAt: new Date(`2026-06-17T12:00:${String(store.nextEntry).padStart(2, "0")}.000Z`),
           targetMemberId: null,
           targetCircleId: null,
+          adviceRequestId: null,
           ...data,
         } as EntryRecord;
         store.entries.push(entry);
@@ -196,6 +202,7 @@ describe("deliberation", () => {
     state.members.clear();
     state.proposals.clear();
     state.actions.clear();
+    state.adviceRequests.clear();
     state.entries.length = 0;
     state.auditLogs.length = 0;
     state.events.length = 0;
@@ -209,6 +216,15 @@ describe("deliberation", () => {
     state.members.set("other-member", { id: "other-member", workspaceId, userId: "other-user", role: "CONTRIBUTOR", isActive: true });
     state.proposals.set(proposalId, { id: proposalId, workspaceId, authorUserId: "admin-user", version: 1 });
     state.actions.set(actionId, { id: actionId, workspaceId, authorUserId: "admin-user", assigneeMemberId: memberId, version: 1 });
+    state.adviceRequests.set("request-1", {
+      id: "request-1",
+      workspaceId,
+      status: "ACTIVE",
+      process: {
+        subjectType: "PROPOSAL",
+        subjectId: proposalId,
+      },
+    });
   });
 
   it("posts an entry and lists it", async () => {
@@ -233,6 +249,31 @@ describe("deliberation", () => {
     expect(list[0].id).toBe(entry.id);
     expect(list[0].author.displayName).toBe("Member");
     expect(list[0].parentVersion).toBe(1);
+  });
+
+  it("links a deliberation entry to an active advice request", async () => {
+    const entry = await postDeliberationEntry(memberActor, {
+      workspaceId,
+      parentType: "PROPOSAL",
+      parentId: proposalId,
+      entryType: "REACTION",
+      bodyMd: "I think this is ready.",
+      adviceRequestId: "request-1",
+    });
+
+    expect(entry.adviceRequestId).toBe("request-1");
+    expect(state.events).toContainEqual(expect.objectContaining({
+      type: "advice.reply_posted",
+      aggregateType: "DeliberationEntry",
+      aggregateId: entry.id,
+      payload: expect.objectContaining({
+        adviceRequestId: "request-1",
+        entryId: entry.id,
+        parentType: "PROPOSAL",
+        parentId: proposalId,
+        authorUserId: "member-user",
+      }),
+    }));
   });
 
   it("requires bodyMd for OBJECTION", async () => {

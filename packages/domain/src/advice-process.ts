@@ -130,6 +130,8 @@ export async function withdrawAdviceProcess(actor: AppActor, params: { workspace
   });
 
   invariant(process, 404, "NOT_FOUND", "Advice process not found");
+  const proposalId = process.proposalId;
+  invariant(proposalId, 400, "INVALID_STATE", "Only proposal advice processes can be withdrawn through this legacy path");
   invariant(process.authorMember.userId === actor.user.id, 403, "FORBIDDEN", "Only the author can withdraw");
   invariant(process.status === "GATHERING" || process.status === "READY", 400, "INVALID_STATE", "Cannot withdraw at this stage");
 
@@ -143,7 +145,7 @@ export async function withdrawAdviceProcess(actor: AppActor, params: { workspace
     });
 
     await tx.proposal.update({
-      where: { id: process.proposalId },
+      where: { id: proposalId },
       data: { status: "DRAFT" },
     });
 
@@ -153,7 +155,7 @@ export async function withdrawAdviceProcess(actor: AppActor, params: { workspace
         type: "advice-process.withdrawn",
         aggregateType: "AdviceProcess",
         aggregateId: process.id,
-        payload: { proposalId: process.proposalId },
+        payload: { proposalId },
       },
     });
 
@@ -174,6 +176,9 @@ export async function executeAdviceProcessDecision(
   });
 
   invariant(process, 404, "NOT_FOUND", "Advice process not found");
+  const proposalId = process.proposalId;
+  const proposal = process.proposal;
+  invariant(proposalId && proposal, 400, "INVALID_STATE", "Only proposal advice processes can be executed through this legacy path");
   invariant(process.authorMember.userId === actor.user.id, 403, "FORBIDDEN", "Only the author can execute the decision");
   invariant(process.status === "GATHERING" || process.status === "READY", 400, "INVALID_STATE", "Cannot execute at this stage");
 
@@ -187,7 +192,7 @@ export async function executeAdviceProcessDecision(
     });
 
     await tx.proposal.update({
-      where: { id: process.proposalId },
+      where: { id: proposalId },
       data: {
         status: "RESOLVED",
         resolutionOutcome: "ADOPTED",
@@ -197,15 +202,15 @@ export async function executeAdviceProcessDecision(
     });
 
     // Create policy corpus entry if it's an executed proposal
-    const policy = await tx.policyCorpus.findUnique({ where: { proposalId: process.proposalId } });
+    const policy = await tx.policyCorpus.findUnique({ where: { proposalId } });
     if (!policy) {
       await tx.policyCorpus.create({
         data: {
           workspaceId: process.workspaceId,
-          circleId: process.proposal.circleId,
-          title: process.proposal.title,
-          bodyMd: params.decisionMd ? `${process.proposal.bodyMd}\n\n**Decision Rationale:**\n${params.decisionMd}` : process.proposal.bodyMd,
-          proposalId: process.proposalId,
+          circleId: proposal.circleId,
+          title: proposal.title,
+          bodyMd: params.decisionMd ? `${proposal.bodyMd}\n\n**Decision Rationale:**\n${params.decisionMd}` : proposal.bodyMd,
+          proposalId,
           acceptedAt: new Date(),
         },
       });
@@ -217,7 +222,7 @@ export async function executeAdviceProcessDecision(
         type: "advice-process.executed",
         aggregateType: "AdviceProcess",
         aggregateId: process.id,
-        payload: { proposalId: process.proposalId },
+        payload: { proposalId },
       },
     });
 
