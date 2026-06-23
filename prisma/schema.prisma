@@ -3318,7 +3318,7 @@ enum AdviceRequestStatus {
 model AdviceProcess {
   id                      String              @id @default(uuid())
   workspaceId             String
-  proposalId              String              @unique
+  proposalId              String?             @unique
   authorMemberId          String
   ownerMemberId           String?
   subjectType             String              @default("PROPOSAL")
@@ -3334,7 +3334,7 @@ model AdviceProcess {
   updatedAt               DateTime            @updatedAt
 
   workspace    Workspace       @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-  proposal     Proposal        @relation(fields: [proposalId], references: [id], onDelete: Cascade)
+  proposal     Proposal?       @relation(fields: [proposalId], references: [id], onDelete: Cascade)
   authorMember Member          @relation("AdviceProcessAuthor", fields: [authorMemberId], references: [id], onDelete: Restrict)
   ownerMember  Member?         @relation("AdviceProcessOwner", fields: [ownerMemberId], references: [id], onDelete: SetNull)
   records      AdviceRecord[]

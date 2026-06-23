@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { calculateRetryDelayMs } from "./outbox";
+import { calculateRetryDelayMs, deriveAdviceNotificationContent } from "./outbox";
 import { deriveJobsForEvent, triageBucketStart } from "./derive-jobs";
 import { deriveNotificationsForEvent } from "./derive-notifications";
 
@@ -328,5 +328,42 @@ describe("deriveNotificationsForEvent", () => {
         bodyMd: "An action item was added to the workspace.",
       },
     ]);
+  });
+});
+
+describe("deriveAdviceNotificationContent", () => {
+  it("builds input-requested notification content for the parent entity", () => {
+    expect(deriveAdviceNotificationContent({
+      type: "advice.requested",
+      payload: {
+        subjectType: "TENSION",
+        subjectId: "tension-1",
+        subjectTitle: "Clarify launch owner",
+        messageMd: "Please confirm who owns this.",
+        deadlineAt: "2026-06-26T12:00:00.000Z",
+      },
+    })).toEqual({
+      entityType: "Tension",
+      entityId: "tension-1",
+      title: "Input requested: Clarify launch owner",
+      bodyMd: "Please confirm who owns this.\n\nDeadline: 2026-06-26T12:00:00.000Z",
+    });
+  });
+
+  it("builds reminder notification content", () => {
+    expect(deriveAdviceNotificationContent({
+      type: "advice.reminder_due",
+      payload: {
+        subjectType: "PROPOSAL",
+        subjectId: "proposal-1",
+        subjectTitle: "Adopt async standups",
+        messageMd: "Please advise before Friday.",
+      },
+    })).toEqual({
+      entityType: "Proposal",
+      entityId: "proposal-1",
+      title: "Reminder: input requested for Adopt async standups",
+      bodyMd: "Please advise before Friday.",
+    });
   });
 });

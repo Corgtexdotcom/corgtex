@@ -31,6 +31,9 @@ import {
   reportPendingAiUsageToStripe,
   createRoleOnboardingIntro,
   runEnterpriseAppHealthCheckJob,
+  resolveAdviceRequestRecipientUsers,
+  resolveAdviceRequestRequesterUsers,
+  runAdviceRequestReminderJob,
   type ControlPlaneReleaseTarget,
   type SlackAgentJobPayload,
 } from "@corgtex/domain";
@@ -202,6 +205,65 @@ function readNewspaperCadence(value: unknown): NewspaperCadence {
   return "DAILY";
 }
 
+const TARGETED_ADVICE_NOTIFICATION_EVENTS = new Set([
+  "advice.requested",
+  "advice.reminder_due",
+  "advice.reply_posted",
+]);
+
+function subjectEntityType(value: unknown) {
+  if (value === "PROPOSAL") return "Proposal";
+  if (value === "TENSION") return "Tension";
+  if (value === "ACTION") return "Action";
+  if (typeof value === "string" && value.trim().length > 0) return value.trim();
+  return null;
+}
+
+export function deriveAdviceNotificationContent(event: { type: string; payload: unknown }) {
+  const payload = isRecord(event.payload) ? event.payload : {};
+  const subjectTitle = typeof payload.subjectTitle === "string" && payload.subjectTitle.trim().length > 0
+    ? payload.subjectTitle.trim()
+    : null;
+  const messageMd = typeof payload.messageMd === "string" && payload.messageMd.trim().length > 0
+    ? payload.messageMd.trim()
+    : null;
+  const deadlineAt = typeof payload.deadlineAt === "string" && payload.deadlineAt.trim().length > 0
+    ? payload.deadlineAt.trim()
+    : null;
+  const subjectType = subjectEntityType(payload.subjectType ?? payload.parentType);
+  const subjectId = typeof payload.subjectId === "string" && payload.subjectId.trim().length > 0
+    ? payload.subjectId.trim()
+    : typeof payload.parentId === "string" && payload.parentId.trim().length > 0
+      ? payload.parentId.trim()
+      : null;
+  const deadlineLine = deadlineAt ? `Deadline: ${deadlineAt}` : null;
+
+  if (event.type === "advice.reminder_due") {
+    return {
+      entityType: subjectType,
+      entityId: subjectId,
+      title: subjectTitle ? `Reminder: input requested for ${subjectTitle}` : "Reminder: input requested",
+      bodyMd: [messageMd ?? "Your input is still requested.", deadlineLine].filter(Boolean).join("\n\n") || null,
+    };
+  }
+
+  if (event.type === "advice.reply_posted") {
+    return {
+      entityType: subjectType,
+      entityId: subjectId,
+      title: subjectTitle ? `Input received for ${subjectTitle}` : "Input received",
+      bodyMd: "Someone replied to an input request you own.",
+    };
+  }
+
+  return {
+    entityType: subjectType,
+    entityId: subjectId,
+    title: subjectTitle ? `Input requested: ${subjectTitle}` : "Input requested",
+    bodyMd: [messageMd, deadlineLine].filter(Boolean).join("\n\n") || "Your input was requested.",
+  };
+}
+
 async function claimPendingEvents(workerId: string, batchSize: number) {
   const staleBefore = new Date(Date.now() - LOCK_TIMEOUT_MS);
 
@@ -238,8 +300,68 @@ async function claimPendingEvents(workerId: string, batchSize: number) {
   });
 }
 
+async function createAdviceNotificationsForEvent(tx: Prisma.TransactionClient, event: ClaimedEvent) {
+  if (!event.workspaceId || !TARGETED_ADVICE_NOTIFICATION_EVENTS.has(event.type)) {
+    return false;
+  }
+
+  const payload = isRecord(event.payload) ? event.payload : {};
+  const adviceRequestId = typeof payload.adviceRequestId === "string" && payload.adviceRequestId.trim().length > 0
+    ? payload.adviceRequestId.trim()
+    : event.aggregateType === "AdviceRequest" && event.aggregateId
+      ? event.aggregateId
+      : null;
+  if (!adviceRequestId) {
+    return true;
+  }
+
+  const excludeUserIds = new Set<string>();
+  const requestedByUserId = typeof payload.requestedByUserId === "string" ? payload.requestedByUserId : null;
+  const authorUserId = typeof payload.authorUserId === "string" ? payload.authorUserId : null;
+  if (event.type === "advice.reply_posted") {
+    if (authorUserId) excludeUserIds.add(authorUserId);
+  } else if (requestedByUserId) {
+    excludeUserIds.add(requestedByUserId);
+  }
+
+  const targets = event.type === "advice.reply_posted"
+    ? await resolveAdviceRequestRequesterUsers(tx, {
+      workspaceId: event.workspaceId,
+      adviceRequestId,
+      excludeUserIds: Array.from(excludeUserIds),
+    })
+    : await resolveAdviceRequestRecipientUsers(tx, {
+      workspaceId: event.workspaceId,
+      adviceRequestId,
+      excludeUserIds: Array.from(excludeUserIds),
+    });
+
+  if (targets.length === 0) {
+    return true;
+  }
+
+  const notification = deriveAdviceNotificationContent(event);
+  await tx.notification.createMany({
+    data: targets.map((target) => ({
+      workspaceId: event.workspaceId as string,
+      userId: target.userId,
+      type: event.type,
+      entityType: notification.entityType,
+      entityId: notification.entityId,
+      title: notification.title,
+      bodyMd: notification.bodyMd,
+    })),
+  });
+
+  return true;
+}
+
 async function createNotificationsForEvent(tx: Prisma.TransactionClient, event: ClaimedEvent) {
   if (!event.workspaceId) {
+    return;
+  }
+
+  if (await createAdviceNotificationsForEvent(tx, event)) {
     return;
   }
 
@@ -481,6 +603,18 @@ async function handleJob(job: ClaimedJob) {
 
   if (job.type === "billing.ai-usage.report") {
     await reportPendingAiUsageToStripe({ limit: typeof payload.limit === "number" ? payload.limit : undefined });
+    return;
+  }
+
+  if (job.type === "advice.request.reminder") {
+    const adviceRequestId = (payload as { adviceRequestId?: string }).adviceRequestId;
+    if (!adviceRequestId) {
+      throw new Error("Advice reminder job is missing adviceRequestId.");
+    }
+    await runAdviceRequestReminderJob({
+      workspaceId: job.workspaceId,
+      adviceRequestId,
+    });
     return;
   }
 
