@@ -8,6 +8,7 @@ import {
   archiveProposal,
   createProposal,
   createProposalFromTension,
+  createAdviceRequest,
   reopenProposal,
   resolveProposal,
   returnProposalToDraft,
@@ -22,10 +23,16 @@ import {
   resolveDeliberationEntry,
   updateDeliberationEntry
 } from "@corgtex/domain";
+import type { AdviceRequestAudienceType, AdviceRequestPreferredChannel } from "@prisma/client";
 import { uploadWorkItemEvidenceDocument } from "../work-item-evidence-upload";
 
 function asStringArray(formData: FormData, key: string) {
   return formData.getAll(key).map((value) => String(value).trim()).filter(Boolean);
+}
+
+function asOptionalDate(formData: FormData, key: string) {
+  const value = asOptional(formData, key);
+  return value ? new Date(value) : null;
 }
 
 export async function createProposalAction(formData: FormData) {
@@ -172,6 +179,29 @@ export async function publishProposalAction(formData: FormData) {
   refresh(workspaceId);
 }
 
+export async function requestProposalAdviceAction(formData: FormData) {
+  const _demoGuardWsId = formData.get("workspaceId") as string;
+  if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
+
+  const actor = await requirePageActor();
+  const workspaceId = asString(formData, "workspaceId");
+  const audienceType = asString(formData, "audienceType") as AdviceRequestAudienceType;
+
+  await createAdviceRequest(actor, {
+    workspaceId,
+    subjectType: "PROPOSAL",
+    subjectId: asString(formData, "proposalId"),
+    audienceType,
+    memberIds: audienceType === "MEMBERS" ? asStringArray(formData, "memberIds") : [],
+    targetCircleId: audienceType === "CIRCLE" ? asOptional(formData, "targetCircleId") : null,
+    messageMd: asString(formData, "messageMd"),
+    deadlineAt: asOptionalDate(formData, "deadlineAt"),
+    reminderAt: asOptionalDate(formData, "reminderAt"),
+    preferredChannel: asOptional(formData, "preferredChannel") as AdviceRequestPreferredChannel | null,
+  });
+  refresh(workspaceId);
+}
+
 export async function initiateAdviceProcessAction(formData: FormData) {
   const _demoGuardWsId = formData.get("workspaceId") as string;
   if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
@@ -243,6 +273,7 @@ export async function postDeliberationEntryAction(formData: FormData) {
     bodyMd: asString(formData, "bodyMd"),
     targetMemberId: asOptional(formData, "targetMemberId") || undefined,
     targetCircleId: asOptional(formData, "targetCircleId") || undefined,
+    adviceRequestId: asOptional(formData, "adviceRequestId") || undefined,
   });
   refresh(workspaceId);
 }

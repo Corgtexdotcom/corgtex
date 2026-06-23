@@ -1,16 +1,17 @@
 import { notFound } from "next/navigation";
 import Link from "next/link";
-import { getProposal, listDeliberationEntries, listWorkItemEvidence, listWorkItemVersions, requireWorkspaceMembership } from "@corgtex/domain";
+import { getProposal, listAdviceRequests, listDeliberationEntries, listWorkItemEvidence, listWorkItemVersions, requireWorkspaceMembership } from "@corgtex/domain";
 import { requirePageActor } from "@/lib/auth";
+import { MarkdownEditor } from "@/lib/components/MarkdownEditor";
 import { MarkdownRenderer } from "@/lib/components/MarkdownRenderer";
 import { WorkItemResolutionDialog } from "@/lib/components/WorkItemResolutionDialog";
 import { DeliberationThread } from "@/lib/components/DeliberationThread";
 import { DeliberationComposer } from "@/lib/components/DeliberationComposer";
 import { getDeliberationTargets } from "@/lib/deliberation-targets";
 import { canOpenPrivateDraft } from "@/lib/governance-open-guards";
-import { postDeliberationEntryAction, resolveDeliberationEntryAction, resolveProposalAction, returnProposalToDraftAction, submitProposalAction, updateDeliberationEntryAction, updateProposalAction } from "../actions";
+import { postDeliberationEntryAction, requestProposalAdviceAction, resolveDeliberationEntryAction, resolveProposalAction, returnProposalToDraftAction, submitProposalAction, updateDeliberationEntryAction, updateProposalAction } from "../actions";
 import { ProposalDraftFields } from "../ProposalDraftFields";
-import { getTranslations } from "next-intl/server";
+import { getFormatter, getTranslations } from "next-intl/server";
 
 export const dynamic = "force-dynamic";
 
@@ -24,12 +25,13 @@ export default async function ProposalDetailPage({
   const t = await getTranslations("proposals");
   const tCommon = await getTranslations("common");
   const tWork = await getTranslations("workItems");
+  const format = await getFormatter();
 
   const proposal = await getProposal(actor, { workspaceId, proposalId });
   if (!proposal) notFound();
   const membership = await requireWorkspaceMembership({ actor, workspaceId });
 
-  const [deliberationEntries, versionHistory, evidence] = await Promise.all([
+  const [deliberationEntries, versionHistory, evidence, adviceRequests] = await Promise.all([
     listDeliberationEntries(actor, {
       workspaceId,
       parentType: "PROPOSAL",
@@ -37,6 +39,7 @@ export default async function ProposalDetailPage({
     }),
     listWorkItemVersions(actor, { workspaceId, entityType: "PROPOSAL", entityId: proposalId }),
     listWorkItemEvidence(actor, { workspaceId, entityType: "Proposal", entityId: proposalId }),
+    listAdviceRequests(actor, { workspaceId, subjectType: "PROPOSAL", subjectId: proposalId, status: "ACTIVE" }),
   ]);
   const deliberationTargets = await getDeliberationTargets({ actor, workspaceId, parentCircleId: proposal.circleId });
   const targetOptions = deliberationTargets.options.map((option) => ({
@@ -44,6 +47,16 @@ export default async function ProposalDetailPage({
     label: option.kind === "circle"
       ? t("targetCircle", { name: option.name })
       : t("targetPerson", { name: option.name }),
+  }));
+  const mappedEntries = deliberationEntries.map((e) => ({
+    ...e,
+    authorName: e.author?.displayName || e.author?.email || t("authorUnknown"),
+    authorInitials: (e.author?.displayName || e.author?.email || "U").substring(0, 2).toUpperCase(),
+    targetLabel: e.targetCircle
+      ? t("targetCircle", { name: e.targetCircle.name })
+      : e.targetMember
+        ? t("targetPerson", { name: e.targetMember.user.displayName || e.targetMember.user.email })
+        : null,
   }));
 
   const ageText = (date: Date) => {
@@ -69,6 +82,7 @@ export default async function ProposalDetailPage({
   const canManage = actor.kind === "agent" || membership?.role === "ADMIN" || isAuthor;
   const canEditContent = proposal.status === "DRAFT" ? canManage : proposal.status === "OPEN" && isAuthor;
   const canResolve = actor.kind === "agent" || Boolean(membership);
+  const canRequestAdvice = actor.kind === "user" && proposal.status === "OPEN" && !proposal.isPrivate && (isAuthor || membership?.role === "ADMIN");
   const canManageEntry = (entry: (typeof deliberationEntries)[number]) => Boolean(
     isAdmin
       || (actorUserId && entry.authorUserId === actorUserId)
@@ -76,6 +90,40 @@ export default async function ProposalDetailPage({
       || (actorMemberId && entry.targetMemberId === actorMemberId)
       || (entry.targetCircleId && actorCircleIds.has(entry.targetCircleId)),
   );
+  const memberRequestOptions = targetOptions.filter((option) => option.kind === "member");
+  const circleRequestOptions = targetOptions.filter((option) => option.kind === "circle");
+  const defaultCircleValue = proposal.circleId && circleRequestOptions.some((option) => option.value === `circle:${proposal.circleId}`)
+    ? proposal.circleId
+    : circleRequestOptions[0]?.value.slice("circle:".length) ?? "";
+  const legacyAdviceRecords = proposal.adviceProcess?.records ?? [];
+  const dateTimeLabel = (value: Date | string | null | undefined) => value
+    ? format.dateTime(new Date(value), { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })
+    : null;
+  const channelLabel = (channel: string) => {
+    const labels: Record<string, string> = {
+      IN_APP: t("adviceChannelInApp"),
+      SLACK: t("adviceChannelSlack"),
+      EMAIL: t("adviceChannelEmail"),
+      COPY: t("adviceChannelCopy"),
+    };
+    return labels[channel] ?? channel;
+  };
+  const requestAudienceLabel = (request: (typeof adviceRequests)[number]) => {
+    if (request.audienceType === "WORKSPACE") return t("adviceAudienceWorkspace");
+    if (request.audienceType === "CIRCLE") return request.targetCircle ? t("targetCircle", { name: request.targetCircle.name }) : t("adviceAudienceCircle");
+    const names = request.recipients.map((recipient) => recipient.member.user.displayName || recipient.member.user.email);
+    return names.length > 0 ? names.join(", ") : t("adviceAudienceMembers");
+  };
+  const proposalPath = `/workspaces/${workspaceId}/proposals/${proposal.id}`;
+  const appBaseUrl = process.env.NEXT_PUBLIC_APP_URL?.replace(/\/$/, "") ?? "";
+  const proposalUrl = `${appBaseUrl}${proposalPath}`;
+  const copyableRequestMessage = (request: (typeof adviceRequests)[number]) => [
+    t("adviceCopyableSubject", { title: proposal.title }),
+    request.messageMd,
+    request.deadlineAt ? t("adviceCopyableDeadline", { date: dateTimeLabel(request.deadlineAt) ?? "" }) : null,
+    t("adviceCopyableLink", { url: proposalUrl }),
+  ].filter(Boolean).join("\n\n");
+  const legacyAdviceLabel = (type: string) => type === "ENDORSE" ? t("entrySupport") : t("entryConcern");
 
   return (
     <>
@@ -144,25 +192,151 @@ export default async function ProposalDetailPage({
 
           <hr className="nr-divider nr-divider-lg" />
 
+          {(canRequestAdvice || adviceRequests.length > 0 || legacyAdviceRecords.length > 0) && (
+            <section style={{ marginBottom: 40 }}>
+              <h3 className="font-playfair font-semibold mb-6 text-[1.4rem]">{t("sectionAdviceRequests")}</h3>
+              {adviceRequests.length > 0 && (
+                <div className="stack" style={{ marginBottom: canRequestAdvice ? 24 : 0 }}>
+                  {adviceRequests.map((request) => {
+                    const linkedReplies = mappedEntries.filter((entry) => entry.adviceRequestId === request.id);
+                    return (
+                      <div key={request.id} className="nr-item">
+                        <div className="row" style={{ alignItems: "center", gap: 8, marginBottom: 8 }}>
+                          <strong>{requestAudienceLabel(request)}</strong>
+                          <span className="tag info">{channelLabel(request.preferredChannel)}</span>
+                          {request.deadlineAt && <span className="tag warning">{t("adviceDeadlineTag", { date: dateTimeLabel(request.deadlineAt) ?? "" })}</span>}
+                        </div>
+                        <div className="nr-item-meta" style={{ marginBottom: 12 }}>
+                          {t("adviceRequestedByMeta", { name: request.requestedBy.displayName || request.requestedBy.email })}
+                          {request.reminderAt ? ` · ${t("adviceReminderMeta", { date: dateTimeLabel(request.reminderAt) ?? "" })}` : ""}
+                        </div>
+                        <MarkdownRenderer markdown={request.messageMd} variant="document" />
+                        <details style={{ marginTop: 16 }}>
+                          <summary className="secondary small nr-hide-marker" style={{ cursor: "pointer", display: "inline-block" }}>{t("adviceCopyableMessage")}</summary>
+                          <textarea
+                            readOnly
+                            rows={6}
+                            value={copyableRequestMessage(request)}
+                            style={{ marginTop: 8, width: "100%" }}
+                          />
+                        </details>
+                        {linkedReplies.length > 0 && (
+                          <div style={{ marginTop: 16 }}>
+                            <strong>{t("adviceLinkedReplies", { count: linkedReplies.length })}</strong>
+                            <div className="stack" style={{ marginTop: 8, gap: 0 }}>
+                              {linkedReplies.map((reply) => (
+                                <div key={reply.id} style={{ borderTop: "1px solid var(--line)", padding: "10px 0" }}>
+                                  <div className="nr-item-meta" style={{ marginBottom: 6 }}>
+                                    {reply.authorName} · {dateTimeLabel(reply.createdAt)}
+                                  </div>
+                                  {reply.bodyMd && <MarkdownRenderer markdown={reply.bodyMd} variant="document" />}
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+                        {proposal.status === "OPEN" && (
+                          <details style={{ marginTop: 16 }}>
+                            <summary className="secondary small nr-hide-marker" style={{ cursor: "pointer", display: "inline-block" }}>{t("btnReplyToAdviceRequest")}</summary>
+                            <div style={{ marginTop: 12 }}>
+                              <DeliberationComposer
+                                postAction={postDeliberationEntryAction}
+                                hiddenFields={{ workspaceId, proposalId, adviceRequestId: request.id }}
+                                targetOptions={targetOptions}
+                                entryTypes={[
+                                  { value: "REACTION", label: t("entryReaction"), variant: "secondary" },
+                                  { value: "OBJECTION", label: t("entryObjection"), variant: "danger" },
+                                ]}
+                              />
+                            </div>
+                          </details>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+              {legacyAdviceRecords.length > 0 && (
+                <details style={{ marginBottom: canRequestAdvice ? 24 : 0 }}>
+                  <summary className="secondary small nr-hide-marker" style={{ cursor: "pointer", display: "inline-block" }}>{t("adviceLegacyHistory")}</summary>
+                  <div className="stack" style={{ marginTop: 12, gap: 0 }}>
+                    {legacyAdviceRecords.map((record) => (
+                      <div key={record.id} style={{ borderTop: "1px solid var(--line)", padding: "10px 0" }}>
+                        <div className="nr-item-meta" style={{ marginBottom: 6 }}>
+                          {record.member.user.displayName || record.member.user.email} · {legacyAdviceLabel(record.type)} · {dateTimeLabel(record.createdAt)}
+                        </div>
+                        <MarkdownRenderer markdown={record.bodyMd} variant="document" />
+                      </div>
+                    ))}
+                  </div>
+                </details>
+              )}
+              {canRequestAdvice && (
+                <details open={adviceRequests.length === 0}>
+                  <summary className="secondary small nr-hide-marker" style={{ cursor: "pointer", display: "inline-block" }}>{t("btnRequestAdvice")}</summary>
+                  <form action={requestProposalAdviceAction} className="stack nr-form-section" style={{ marginTop: 12 }}>
+                    <input type="hidden" name="workspaceId" value={workspaceId} />
+                    <input type="hidden" name="proposalId" value={proposal.id} />
+                    <label>
+                      {t("adviceAudience")}
+                      <select name="audienceType" defaultValue={defaultCircleValue ? "CIRCLE" : "WORKSPACE"}>
+                        <option value="MEMBERS">{t("adviceAudienceMembers")}</option>
+                        <option value="CIRCLE">{t("adviceAudienceCircle")}</option>
+                        <option value="WORKSPACE">{t("adviceAudienceWorkspace")}</option>
+                      </select>
+                    </label>
+                    <label>
+                      {t("advicePeople")}
+                      <select name="memberIds" multiple size={Math.min(Math.max(memberRequestOptions.length, 2), 6)}>
+                        {memberRequestOptions.map((option) => (
+                          <option key={option.value} value={option.value.slice("member:".length)}>{option.name}</option>
+                        ))}
+                      </select>
+                    </label>
+                    <label>
+                      {t("adviceCircle")}
+                      <select name="targetCircleId" defaultValue={defaultCircleValue}>
+                        {circleRequestOptions.map((option) => (
+                          <option key={option.value} value={option.value.slice("circle:".length)}>{option.name}</option>
+                        ))}
+                      </select>
+                    </label>
+                    <label>
+                      {t("adviceMessage")}
+                      <MarkdownEditor name="messageMd" rows={4} required />
+                    </label>
+                    <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 12 }}>
+                      <label>
+                        {t("adviceDeadline")}
+                        <input name="deadlineAt" type="datetime-local" />
+                      </label>
+                      <label>
+                        {t("adviceReminder")}
+                        <input name="reminderAt" type="datetime-local" />
+                      </label>
+                    </div>
+                    <label>
+                      {t("advicePreferredChannel")}
+                      <select name="preferredChannel" defaultValue="IN_APP">
+                        <option value="IN_APP">{t("adviceChannelInApp")}</option>
+                        <option value="SLACK">{t("adviceChannelSlack")}</option>
+                        <option value="EMAIL">{t("adviceChannelEmail")}</option>
+                        <option value="COPY">{t("adviceChannelCopy")}</option>
+                      </select>
+                    </label>
+                    <button type="submit" className="secondary small" style={{ alignSelf: "flex-start" }}>{t("btnSendAdviceRequest")}</button>
+                  </form>
+                </details>
+              )}
+            </section>
+          )}
+
           <h3 className="font-playfair font-semibold mb-6 text-[1.4rem]">{t("sectionDeliberation")}</h3>
           <DeliberationThread
-            entries={deliberationEntries.map((e) => ({
-              id: e.id,
-              entryType: e.entryType,
-              authorName: e.author?.displayName || t("authorUnknown"),
-              authorInitials: (e.author?.displayName || "U").substring(0, 2).toUpperCase(),
-              bodyMd: e.bodyMd,
-              createdAt: e.createdAt,
-              parentVersion: e.parentVersion,
-              resolvedAt: e.resolvedAt,
-              resolvedNote: e.resolvedNote,
-              targetLabel: e.targetCircle
-                ? t("targetCircle", { name: e.targetCircle.name })
-                : e.targetMember
-                  ? t("targetPerson", { name: e.targetMember.user.displayName || e.targetMember.user.email })
-                  : null,
-              canEdit: canManageEntry(e),
-              canResolve: canManageEntry(e),
+            entries={mappedEntries.map((entry) => ({
+              ...entry,
+              canEdit: canManageEntry(entry),
+              canResolve: canManageEntry(entry),
             }))}
             canResolve={isAuthor || actor.kind === "agent"}
             resolveAction={resolveDeliberationEntryAction}

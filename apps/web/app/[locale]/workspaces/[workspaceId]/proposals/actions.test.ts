@@ -11,6 +11,7 @@ const actor = {
 };
 
 const archiveProposal = vi.fn();
+const createAdviceRequest = vi.fn();
 const createProposal = vi.fn();
 const createProposalFromTension = vi.fn();
 const enforceDemoGuard = vi.fn();
@@ -39,6 +40,7 @@ vi.mock("@/lib/auth", () => ({
 
 vi.mock("@corgtex/domain", () => ({
   archiveProposal,
+  createAdviceRequest,
   createProposal,
   createProposalFromTension,
   executeAdviceProcessDecision,
@@ -142,6 +144,86 @@ describe("proposal server actions", () => {
       workspaceId: "workspace-1",
       proposalId: "proposal-1",
       includeAiSummary: false,
+    }));
+  });
+
+  it("creates a generic proposal advice request for selected members", async () => {
+    const { requestProposalAdviceAction } = await import("./actions");
+    const formData = new FormData();
+    formData.set("workspaceId", "workspace-1");
+    formData.set("proposalId", "proposal-1");
+    formData.set("audienceType", "MEMBERS");
+    formData.append("memberIds", "member-1");
+    formData.append("memberIds", "member-2");
+    formData.set("targetCircleId", "circle-ignored");
+    formData.set("messageMd", "Please advise on the rollout risk.");
+    formData.set("deadlineAt", "2030-01-02T03:04");
+    formData.set("reminderAt", "2030-01-01T03:04");
+    formData.set("preferredChannel", "SLACK");
+
+    await requestProposalAdviceAction(formData);
+
+    expect(enforceDemoGuard).toHaveBeenCalledWith("workspace-1");
+    expect(requirePageActor).toHaveBeenCalled();
+    expect(createAdviceRequest).toHaveBeenCalledWith(actor, expect.objectContaining({
+      workspaceId: "workspace-1",
+      subjectType: "PROPOSAL",
+      subjectId: "proposal-1",
+      audienceType: "MEMBERS",
+      memberIds: ["member-1", "member-2"],
+      targetCircleId: null,
+      messageMd: "Please advise on the rollout risk.",
+      preferredChannel: "SLACK",
+    }));
+    const payload = createAdviceRequest.mock.calls[0][1];
+    expect(payload.deadlineAt).toEqual(new Date("2030-01-02T03:04"));
+    expect(payload.reminderAt).toEqual(new Date("2030-01-01T03:04"));
+  });
+
+  it("creates a generic proposal advice request for a circle audience", async () => {
+    const { requestProposalAdviceAction } = await import("./actions");
+    const formData = new FormData();
+    formData.set("workspaceId", "workspace-1");
+    formData.set("proposalId", "proposal-1");
+    formData.set("audienceType", "CIRCLE");
+    formData.append("memberIds", "member-ignored");
+    formData.set("targetCircleId", "circle-1");
+    formData.set("messageMd", "Please advise on circle impact.");
+
+    await requestProposalAdviceAction(formData);
+
+    expect(createAdviceRequest).toHaveBeenCalledWith(actor, expect.objectContaining({
+      workspaceId: "workspace-1",
+      subjectType: "PROPOSAL",
+      subjectId: "proposal-1",
+      audienceType: "CIRCLE",
+      memberIds: [],
+      targetCircleId: "circle-1",
+      messageMd: "Please advise on circle impact.",
+      deadlineAt: null,
+      reminderAt: null,
+      preferredChannel: null,
+    }));
+  });
+
+  it("links proposal deliberation replies to an advice request", async () => {
+    const { postDeliberationEntryAction } = await import("./actions");
+    const formData = new FormData();
+    formData.set("workspaceId", "workspace-1");
+    formData.set("proposalId", "proposal-1");
+    formData.set("entryType", "REACTION");
+    formData.set("bodyMd", "This looks safe to try.");
+    formData.set("adviceRequestId", "request-1");
+
+    await postDeliberationEntryAction(formData);
+
+    expect(postDeliberationEntry).toHaveBeenCalledWith(actor, expect.objectContaining({
+      workspaceId: "workspace-1",
+      parentType: "PROPOSAL",
+      parentId: "proposal-1",
+      entryType: "REACTION",
+      bodyMd: "This looks safe to try.",
+      adviceRequestId: "request-1",
     }));
   });
 });
