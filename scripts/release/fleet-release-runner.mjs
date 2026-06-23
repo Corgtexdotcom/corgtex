@@ -186,8 +186,12 @@ function validateReleaseEnvironment(args, env) {
 
   if (!dryRun) {
     if (!env.CONTROL_PLANE_AGENT_API_KEY?.trim()) missing.push("CONTROL_PLANE_AGENT_API_KEY");
-    if (selectedGroups.some((group) => group !== "azure-selfserve") && !env.RAILWAY_API_TOKEN?.trim()) {
+    const includesRailwayTarget = selectedGroups.some((group) => group !== "azure-selfserve");
+    if (includesRailwayTarget && !env.RAILWAY_API_TOKEN?.trim()) {
       missing.push("RAILWAY_API_TOKEN");
+    }
+    if (includesRailwayTarget && !env.GHCR_IMPORT_TOKEN?.trim() && !env.GITHUB_TOKEN?.trim()) {
+      missing.push("GHCR_IMPORT_TOKEN or GITHUB_TOKEN");
     }
     if (selectedGroups.includes("azure-selfserve")) {
       if (!env.AZURE_CLIENT_ID?.trim()) missing.push("AZURE_CLIENT_ID");
@@ -308,6 +312,9 @@ function preflightTarget(target, env) {
   }
   if (target.provider === "railway") {
     if (!env.RAILWAY_API_TOKEN) blockers.push("RAILWAY_API_TOKEN is missing");
+    if (!env.GHCR_IMPORT_TOKEN && !env.GITHUB_TOKEN) {
+      blockers.push("GHCR import token is missing for Railway image pull");
+    }
     for (const key of ["projectId", "environmentId", "webServiceId", "workerServiceId"]) {
       if (!target.railway?.[key]) {
         blockers.push(`Railway ${key} is missing`);
@@ -381,7 +388,7 @@ async function deployRailwayTarget(target, manifest, deps) {
     `, {
       environmentId: target.railway.environmentId,
       serviceId: service.serviceId,
-      input: { source: { image: service.image } },
+      input: railwayServiceUpdateInput(service.image, deps),
     }, deps);
     await railwayGraphql(`
       mutation UpsertVariables($projectId: String!, $environmentId: String!, $serviceId: String!, $variables: EnvironmentVariables!) {
@@ -423,6 +430,25 @@ function releaseVariables(manifest) {
     CORGTEX_RELEASE_VERSION: manifest.releaseVersion,
     CORGTEX_RELEASE_IMAGE_TAG: manifest.imageTag,
     CORGTEX_RELEASE_GIT_SHA: manifest.gitSha,
+  };
+}
+
+function railwayServiceUpdateInput(image, deps) {
+  const input = { source: { image } };
+  if (!image.startsWith("ghcr.io/")) return input;
+
+  const env = deps.env ?? process.env;
+  const password = env.GHCR_IMPORT_TOKEN?.trim() || env.GITHUB_TOKEN?.trim();
+  const username = env.GHCR_IMPORT_USERNAME?.trim() || env.GITHUB_ACTOR?.trim();
+  if (!password || !username) {
+    throw new Error("GHCR_IMPORT_TOKEN or GITHUB_TOKEN is required for Railway to pull private GHCR images.");
+  }
+  return {
+    ...input,
+    registryCredentials: {
+      username,
+      password,
+    },
   };
 }
 
