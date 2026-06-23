@@ -79,6 +79,8 @@ jobs:
     env:
       DATABASE_URL: postgresql://postgres:postgres@localhost:5432/corgtex_ci?schema=public
       SHADOW_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres?schema=public
+      ADMIN_EMAIL: system+corgtex@corgtex.local
+      ADMIN_PASSWORD: corgtex-test-agent-pw
 
     steps:
       - uses: actions/checkout@v5
@@ -97,6 +99,8 @@ jobs:
       - run: npx prisma migrate deploy
 
       - run: npm run check:migration-fixtures
+
+      - run: npm run check:seed-fixtures
 
   build:
     name: Build
@@ -306,27 +310,39 @@ jobs:
             echo "skip=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Wait for healthy self-serve deployment
-        if: github.ref == 'refs/heads/main' && steps.check-secrets.outputs.skip != 'true'
-        run: |
-          for i in $(seq 1 30); do
-            if curl -sf https://selfserve.corgtex.com/api/health > /dev/null 2>&1; then
-              echo "Health check passed on attempt $i"
-              exit 0
-            fi
-            echo "Attempt $i/30 — waiting 10s..."
-            sleep 10
-          done
-          echo "Deployment health check timed out after 5 minutes"
-          exit 1
-      - name: Confirm backup app health
-        if: github.ref == 'refs/heads/main' && steps.check-secrets.outputs.skip != 'true'
-        run: curl -sf https://app.corgtex.com/api/health > /dev/null
-      
       - uses: actions/checkout@v5
         if: github.ref == 'refs/heads/main' && steps.check-secrets.outputs.skip != 'true'
         with:
           fetch-depth: 0
+
+      - uses: actions/setup-node@v5
+        if: github.ref == 'refs/heads/main' && steps.check-secrets.outputs.skip != 'true'
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+        if: github.ref == 'refs/heads/main' && steps.check-secrets.outputs.skip != 'true'
+
+      - run: npx prisma generate
+        if: github.ref == 'refs/heads/main' && steps.check-secrets.outputs.skip != 'true'
+
+      - name: Run production DB release
+        if: github.ref == 'refs/heads/main' && steps.check-secrets.outputs.skip != 'true'
+        run: npm run release:db
+        env:
+          DATABASE_URL: ${{ secrets.PRODUCTION_DATABASE_URL }}
+          ADMIN_EMAIL: ${{ secrets.ADMIN_EMAIL }}
+          ADMIN_PASSWORD: ${{ secrets.ADMIN_PASSWORD }}
+
+      - name: Wait for healthy self-serve deployment
+        if: github.ref == 'refs/heads/main' && steps.check-secrets.outputs.skip != 'true'
+        run: node scripts/wait-health.mjs https://selfserve.corgtex.com/api/health --label self-serve
+
+      - name: Wait for healthy backup app deployment
+        if: github.ref == 'refs/heads/main' && steps.check-secrets.outputs.skip != 'true'
+        run: node scripts/wait-health.mjs https://app.corgtex.com/api/health --label backup-app
+
       - name: Detect production app release requirement
         id: app-release
         if: github.ref == 'refs/heads/main' && steps.check-secrets.outputs.skip != 'true'
@@ -364,15 +380,6 @@ jobs:
             echo "skip_release_match=true" >> "$GITHUB_OUTPUT"
             echo "Only docs, workflow, or agent-guidance files changed; release match skipped while live smoke still runs."
           fi
-      - uses: actions/setup-node@v5
-        if: github.ref == 'refs/heads/main' && steps.check-secrets.outputs.skip != 'true'
-        with:
-          node-version: 22
-          cache: npm
-      - run: npm ci
-        if: github.ref == 'refs/heads/main' && steps.check-secrets.outputs.skip != 'true'
-      - run: npx prisma generate
-        if: github.ref == 'refs/heads/main' && steps.check-secrets.outputs.skip != 'true'
       - run: node scripts/check-migration-health.mjs
         if: github.ref == 'refs/heads/main' && steps.check-secrets.outputs.skip != 'true'
         env:

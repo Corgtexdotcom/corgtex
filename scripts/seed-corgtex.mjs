@@ -58,7 +58,7 @@ const ARTICLES = [
   
   // PROCESS
   { title: "Deployment Pipeline", type: "PROCESS", authority: "REFERENCE",
-    body: `# Deployment Pipeline\n\nDeployed securely through Railway with strict Docker configuration. \`start-web.mjs\` orchestrates migrations, seeds, and server startup upon container initialization.` },
+    body: `# Deployment Pipeline\n\nDeployed securely through Railway with strict Docker configuration. Web containers start in web-only mode. Database migrations and bootstrap seeds run through explicit release jobs before production smoke validation.` },
   { title: "Prisma Migration Workflow", type: "PROCESS", authority: "REFERENCE",
     body: `# Prisma Migration Workflow\n\nNever blindly \`db push\`. Proactively generate explicit migrations via \`npm run prisma:migrate -- --name <X>\`. The Next.js build step strictly remains DB-agnostic.` },
   { title: "Git & PR Strategy", type: "PROCESS", authority: "REFERENCE",

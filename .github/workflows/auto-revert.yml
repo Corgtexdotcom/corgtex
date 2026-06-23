@@ -88,6 +88,26 @@ jobs:
           fi
           echo "trigger=true" >> "$GITHUB_OUTPUT"
 
+      - name: Preflight auto-revert token
+        if: steps.guard.outputs.trigger == 'true'
+        id: token
+        env:
+          AUTO_REVERT_TOKEN: ${{ secrets.AUTO_REVERT_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "$AUTO_REVERT_TOKEN" ]; then
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::AUTO_REVERT_TOKEN is missing. Automatic rollback cannot open a PR if production remains unhealthy."
+            {
+              echo "## Auto-revert token preflight"
+              echo ""
+              echo "- AUTO_REVERT_TOKEN configured: \`false\`"
+              echo "- Impact: if production does not recover on the failed SHA, this workflow will stop before opening a revert PR."
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Check current production health before reverting
         if: steps.guard.outputs.trigger == 'true'
         id: recovery

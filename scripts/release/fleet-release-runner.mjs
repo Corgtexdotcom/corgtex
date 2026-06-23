@@ -170,6 +170,18 @@ function validateReleaseEnvironment(args, env) {
   validateConfiguredTargetJson("FLEET_RELEASE_OPS_TARGET_JSON", env.FLEET_RELEASE_OPS_TARGET_JSON, invalid);
   validateConfiguredTargetJson("FLEET_RELEASE_BACKUP_APP_TARGET_JSON", env.FLEET_RELEASE_BACKUP_APP_TARGET_JSON, invalid);
   validateConfiguredTargetJson("FLEET_RELEASE_AZURE_TARGET_JSON", env.FLEET_RELEASE_AZURE_TARGET_JSON, invalid);
+  if (env.CORGTEX_AUTO_SEED_JNJ_DEMO?.trim()) {
+    invalid.push({
+      name: "CORGTEX_AUTO_SEED_JNJ_DEMO",
+      reason: "demo seeds must not be coupled to web startup; run explicit seed jobs instead",
+    });
+  }
+  if (env.SEED_SCRIPTS?.trim()) {
+    invalid.push({
+      name: "SEED_SCRIPTS",
+      reason: "extra seed scripts must run through explicit DB release or fixture jobs, not web startup",
+    });
+  }
 
   if (selectedGroups.includes("railway-customers") && !env.FLEET_RELEASE_TARGETS_JSON?.trim() && !env.CONTROL_PLANE_AGENT_API_KEY?.trim()) {
     missing.push("FLEET_RELEASE_TARGETS_JSON or CONTROL_PLANE_AGENT_API_KEY");
@@ -418,11 +430,14 @@ async function deployRailwayTarget(target, manifest, deps) {
   return { deployments };
 }
 
-function releaseVariables(manifest) {
+export function releaseVariables(manifest) {
   return {
     CORGTEX_RELEASE_VERSION: manifest.releaseVersion,
     CORGTEX_RELEASE_IMAGE_TAG: manifest.imageTag,
     CORGTEX_RELEASE_GIT_SHA: manifest.gitSha,
+    CORGTEX_STARTUP_MODE: "web",
+    CORGTEX_AUTO_SEED_JNJ_DEMO: "false",
+    SEED_SCRIPTS: "",
   };
 }
 
