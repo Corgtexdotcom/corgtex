@@ -15,6 +15,15 @@ import { getFormatter, getTranslations } from "next-intl/server";
 
 export const dynamic = "force-dynamic";
 
+async function archivedSafeRead<T>(isArchived: boolean, read: Promise<T>, fallback: T): Promise<T> {
+  if (!isArchived) return read;
+  try {
+    return await read;
+  } catch {
+    return fallback;
+  }
+}
+
 export default async function TensionDetailPage({
   params,
 }: {
@@ -55,15 +64,22 @@ export default async function TensionDetailPage({
   const isArchived = Boolean(tension.archivedAt);
   const membership = await requireWorkspaceMembership({ actor, workspaceId });
   const [entries, versionHistory, evidence, inputRequests, archiveRecord] = await Promise.all([
-    listDeliberationEntries(actor, { workspaceId, parentType: "TENSION", parentId: tensionId }),
-    listWorkItemVersions(actor, { workspaceId, entityType: "TENSION", entityId: tensionId }),
-    listWorkItemEvidence(actor, { workspaceId, entityType: "Tension", entityId: tensionId }),
+    archivedSafeRead(isArchived, listDeliberationEntries(actor, { workspaceId, parentType: "TENSION", parentId: tensionId }), []),
+    archivedSafeRead(isArchived, listWorkItemVersions(actor, { workspaceId, entityType: "TENSION", entityId: tensionId }), {
+      entityType: "Tension" as const,
+      entityId: tensionId,
+      currentVersion: tension.version,
+      versions: [],
+    }),
+    archivedSafeRead(isArchived, listWorkItemEvidence(actor, { workspaceId, entityType: "Tension", entityId: tensionId }), []),
     isArchived ? Promise.resolve([]) : listAdviceRequests(actor, { workspaceId, subjectType: "TENSION", subjectId: tensionId, status: "ACTIVE" }),
     isArchived
-      ? getWorkspaceArchiveRecord(actor, { workspaceId, entityType: "Tension", entityId: tension.id })
+      ? archivedSafeRead(true, getWorkspaceArchiveRecord(actor, { workspaceId, entityType: "Tension", entityId: tension.id }), null)
       : Promise.resolve(null),
   ]);
-  const deliberationTargets = await getDeliberationTargets({ actor, workspaceId, parentCircleId: tension.circleId });
+  const deliberationTargets = isArchived
+    ? { options: [], defaultValue: "", actorMemberId: null, actorCircleIds: [] }
+    : await getDeliberationTargets({ actor, workspaceId, parentCircleId: tension.circleId });
   const targetOptions = deliberationTargets.options.map((option) => ({
     ...option,
     label: option.kind === "circle"
@@ -91,7 +107,8 @@ export default async function TensionDetailPage({
   };
 
   const priorityText = tension.priority > 0 ? t("priorityN", { priority: tension.priority }) : t("noPriority");
-  const raisedByName = tension.raisedByMember?.user.displayName || tension.raisedByMember?.user.email || null;
+  const authorName = tension.author?.displayName || tension.author?.email || t("authorUnknown");
+  const raisedByName = tension.raisedByMember?.user?.displayName || tension.raisedByMember?.user?.email || null;
   const canManage = !isArchived && (actor.kind === "agent" || membership?.role === "ADMIN" || (actor.kind === "user" && tension.authorUserId === actor.user.id));
   const isAdmin = actor.kind === "agent" || membership?.role === "ADMIN";
   const actorUserId = actor.kind === "user" ? actor.user.id : null;
@@ -163,7 +180,7 @@ export default async function TensionDetailPage({
           <span className={`tag ${tension.status === "DRAFT" ? "info" : tension.status === "OPEN" ? "warning" : "success"}`}>
             {statusLabel(tension.status)}
           </span>
-          <span>{t("detailAuthorMeta", { author: tension.author.displayName || tension.author.email || t("authorUnknown") })}</span>
+          <span>{t("detailAuthorMeta", { author: authorName })}</span>
           {raisedByName && <span>{t("detailRaisedByMeta", { name: raisedByName })}</span>}
           <span>{t("detailPriorityMeta", { priority: priorityText })}</span>
           <span>{t("detailCreatedMeta", { date: new Date(tension.createdAt).toLocaleDateString() })}</span>
