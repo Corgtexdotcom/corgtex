@@ -172,7 +172,7 @@ describe("fleet release runner", () => {
     });
 
     expect(postDeployProbeFailureSummary(probe)).toBe("recorder:insufficient_credit_balance");
-    expect(() => assertPostDeployProbeReady(probe, "Crina")).toThrow("insufficient_credit_balance");
+    expect(() => assertPostDeployProbeReady(probe, "Customer A")).toThrow("insufficient_credit_balance");
   });
 
   it("builds Slack alert payloads for failed fleet releases", () => {
@@ -180,15 +180,15 @@ describe("fleet release runner", () => {
       manifest: { gitSha: SHA, imageTag: `sha-${SHA}` },
       results: [{
         status: "failed",
-        target: { label: "Crina" },
+        target: { label: "Customer A" },
         error: "post-deploy probe failed",
       }],
       stage: "deploy",
     });
 
     expect(incident.summary).toContain(`sha-${SHA}`);
-    expect(incident.summary).toContain("Crina");
-    expect(incident.evidence).toContain("Crina: post-deploy probe failed");
+    expect(incident.summary).toContain("Customer A");
+    expect(incident.evidence).toContain("Customer A: post-deploy probe failed");
     expect(fleetReleaseSlackPayload(incident)).toEqual({
       text: expect.stringContaining("Fleet release"),
     });
@@ -722,7 +722,7 @@ describe("fleet release runner", () => {
       "Deploy release.",
     ], {
       env: {
-        FLEET_RELEASE_TARGETS_JSON: targetJson({ deploymentId: "deployment-1", label: "Crina" }),
+        FLEET_RELEASE_TARGETS_JSON: targetJson({ deploymentId: "deployment-1", label: "Customer A" }),
         CONTROL_PLANE_AGENT_API_KEY: "control-plane-token",
         RAILWAY_API_TOKEN: "railway-token",
         GHCR_IMPORT_USERNAME: "github-user",
@@ -735,7 +735,7 @@ describe("fleet release runner", () => {
     })).rejects.toThrow("Ring 1 failed");
 
     expect(toolCalls).toEqual(["run_post_deploy_probe"]);
-    expect(slackPayloads[0].text).toContain("Crina");
+    expect(slackPayloads[0].text).toContain("Customer A");
     expect(slackPayloads[0].text).toContain("Fleet release");
   });
 
@@ -745,7 +745,7 @@ describe("fleet release runner", () => {
       reads: [{ key: "actions", status: "ok", count: 1 }],
       recorder: { status: "degraded", failureCount: 1 },
       supportAudit: { status: "completed" },
-    }, "Crina")).toThrow("recorder:degraded");
+    }, "Customer A")).toThrow("recorder:degraded");
   });
 
   it("fails Azure preflight before mutation when provider credentials are missing", async () => {
