@@ -2,16 +2,16 @@ import { NextRequest, NextResponse } from "next/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const {
-  getClaudeMcpConnectionStatus,
   handleRouteError,
-  markAiWorkspaceProviderConnected,
+  listAiWorkspaceToolProviders,
+  listMcpOAuthConnectionStatuses,
   requireWorkspaceMembership,
   resolveRequestActor,
   verifyAiWorkspaceProviderConnection,
 } = vi.hoisted(() => ({
-  getClaudeMcpConnectionStatus: vi.fn(),
   handleRouteError: vi.fn((error: unknown) => NextResponse.json({ error: String(error) }, { status: 500 })),
-  markAiWorkspaceProviderConnected: vi.fn(),
+  listAiWorkspaceToolProviders: vi.fn(),
+  listMcpOAuthConnectionStatuses: vi.fn(),
   requireWorkspaceMembership: vi.fn(),
   resolveRequestActor: vi.fn(),
   verifyAiWorkspaceProviderConnection: vi.fn(),
@@ -30,8 +30,8 @@ class MockAppError extends Error {
 
 vi.mock("@corgtex/domain", () => ({
   AppError: MockAppError,
-  getClaudeMcpConnectionStatus,
-  markAiWorkspaceProviderConnected,
+  listAiWorkspaceToolProviders,
+  listMcpOAuthConnectionStatuses,
   requireWorkspaceMembership,
   verifyAiWorkspaceProviderConnection,
 }));
@@ -75,29 +75,43 @@ describe("GET /api/workspaces/[workspaceId]/mcp-connections", () => {
       },
     });
     requireWorkspaceMembership.mockResolvedValue({ id: "member-1" });
-    getClaudeMcpConnectionStatus.mockResolvedValue({
-      connected: true,
-      connectedAt: new Date("2026-05-20T16:00:00.000Z"),
-    });
+    listAiWorkspaceToolProviders.mockReturnValue([
+      { key: "openwork" },
+      { key: "chatgpt" },
+      { key: "claude" },
+      { key: "cursor" },
+      { key: "generic_mcp" },
+    ]);
+    listMcpOAuthConnectionStatuses.mockResolvedValue([
+      {
+        providerKey: "claude",
+        connected: true,
+        connectedAt: new Date("2026-05-20T16:00:00.000Z"),
+        source: "mcp_oauth",
+        clientName: "Claude",
+      },
+      {
+        providerKey: "chatgpt",
+        connected: true,
+        connectedAt: new Date("2026-05-20T15:30:00.000Z"),
+        source: "mcp_oauth",
+        clientName: "ChatGPT Connector",
+      },
+    ]);
     verifyAiWorkspaceProviderConnection.mockResolvedValue({
-      providerKey: "claude",
+      providerKey: "cursor",
       verified: true,
       connectedAt: new Date("2026-05-20T16:00:00.000Z"),
-      message: "Claude is connected.",
+      message: "Cursor is connected through Corgtex OAuth.",
       state: {
-        activeProviderKey: "claude",
-        connections: [{ providerKey: "claude", healthStatus: "CONNECTED" }],
+        activeProviderKey: "cursor",
+        connections: [{ providerKey: "cursor", healthStatus: "CONNECTED" }],
         providers: [],
       },
     });
-    markAiWorkspaceProviderConnected.mockResolvedValue({
-      activeProviderKey: "chatgpt",
-      connections: [{ providerKey: "chatgpt", healthStatus: "CONNECTED" }],
-      providers: [],
-    });
   });
 
-  it("returns no-store Claude connection status after workspace authorization", async () => {
+  it("returns no-store provider OAuth signals and legacy Claude compatibility after workspace authorization", async () => {
     const { GET } = await import("./route");
     const response = await GET(request(), context());
     const body = await response.json();
@@ -108,7 +122,7 @@ describe("GET /api/workspaces/[workspaceId]/mcp-connections", () => {
       actor: expect.objectContaining({ kind: "user" }),
       workspaceId: "workspace-1",
     });
-    expect(getClaudeMcpConnectionStatus).toHaveBeenCalledWith({
+    expect(listMcpOAuthConnectionStatuses).toHaveBeenCalledWith({
       userId: "user-1",
       workspaceId: "workspace-1",
     });
@@ -117,31 +131,90 @@ describe("GET /api/workspaces/[workspaceId]/mcp-connections", () => {
         connected: true,
         connectedAt: "2026-05-20T16:00:00.000Z",
       },
+      connections: [
+        {
+          providerKey: "openwork",
+          connected: false,
+          connectedAt: null,
+          source: null,
+          clientName: null,
+        },
+        {
+          providerKey: "chatgpt",
+          connected: true,
+          connectedAt: "2026-05-20T15:30:00.000Z",
+          source: "mcp_oauth:chatgpt",
+          clientName: "ChatGPT Connector",
+        },
+        {
+          providerKey: "claude",
+          connected: true,
+          connectedAt: "2026-05-20T16:00:00.000Z",
+          source: "mcp_oauth:claude",
+          clientName: "Claude",
+        },
+        {
+          providerKey: "cursor",
+          connected: false,
+          connectedAt: null,
+          source: null,
+          clientName: null,
+        },
+        {
+          providerKey: "generic_mcp",
+          connected: false,
+          connectedAt: null,
+          source: null,
+          clientName: null,
+        },
+      ],
       signals: {
+        openwork: {
+          connected: false,
+          connectedAt: null,
+          source: null,
+        },
+        chatgpt: {
+          connected: true,
+          connectedAt: "2026-05-20T15:30:00.000Z",
+          source: "mcp_oauth:chatgpt",
+        },
         claude: {
           connected: true,
           connectedAt: "2026-05-20T16:00:00.000Z",
-          source: "claude_oauth",
+          source: "mcp_oauth:claude",
+        },
+        cursor: {
+          connected: false,
+          connectedAt: null,
+          source: null,
+        },
+        generic_mcp: {
+          connected: false,
+          connectedAt: null,
+          source: null,
         },
       },
     });
   });
 
-  it("returns a disconnected Claude payload when no token is active", async () => {
-    getClaudeMcpConnectionStatus.mockResolvedValueOnce({
-      connected: false,
-      connectedAt: null,
-    });
+  it("returns disconnected provider payloads when no token is active", async () => {
+    listMcpOAuthConnectionStatuses.mockResolvedValueOnce([]);
 
     const { GET } = await import("./route");
     const response = await GET(request(), context());
 
-    await expect(response.json()).resolves.toEqual({
+    await expect(response.json()).resolves.toMatchObject({
       claude: {
         connected: false,
         connectedAt: null,
       },
       signals: {
+        chatgpt: {
+          connected: false,
+          connectedAt: null,
+          source: null,
+        },
         claude: {
           connected: false,
           connectedAt: null,
@@ -165,13 +238,18 @@ describe("GET /api/workspaces/[workspaceId]/mcp-connections", () => {
     const response = await GET(request(), context());
 
     expect(response.status).toBe(200);
-    expect(getClaudeMcpConnectionStatus).not.toHaveBeenCalled();
-    await expect(response.json()).resolves.toEqual({
+    expect(listMcpOAuthConnectionStatuses).not.toHaveBeenCalled();
+    await expect(response.json()).resolves.toMatchObject({
       claude: {
         connected: false,
         connectedAt: null,
       },
       signals: {
+        chatgpt: {
+          connected: false,
+          connectedAt: null,
+          source: null,
+        },
         claude: {
           connected: false,
           connectedAt: null,
@@ -189,7 +267,7 @@ describe("GET /api/workspaces/[workspaceId]/mcp-connections", () => {
 
     expect(response.status).toBe(500);
     expect(handleRouteError).toHaveBeenCalledWith(expect.any(MockAppError));
-    expect(getClaudeMcpConnectionStatus).not.toHaveBeenCalled();
+    expect(listMcpOAuthConnectionStatuses).not.toHaveBeenCalled();
   });
 
   it("verifies a provider connection through the domain", async () => {
@@ -198,7 +276,7 @@ describe("GET /api/workspaces/[workspaceId]/mcp-connections", () => {
       request("workspace-1", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action: "verify", providerKey: "claude" }),
+        body: JSON.stringify({ action: "verify", providerKey: "cursor" }),
       }),
       context(),
     );
@@ -206,16 +284,16 @@ describe("GET /api/workspaces/[workspaceId]/mcp-connections", () => {
     expect(response.status).toBe(200);
     expect(verifyAiWorkspaceProviderConnection).toHaveBeenCalledWith(expect.objectContaining({ kind: "user" }), {
       workspaceId: "workspace-1",
-      providerKey: "claude",
+      providerKey: "cursor",
     });
     await expect(response.json()).resolves.toMatchObject({
-      providerKey: "claude",
+      providerKey: "cursor",
       verified: true,
-      message: "Claude is connected.",
+      message: "Cursor is connected through Corgtex OAuth.",
     });
   });
 
-  it("marks a manually completed provider connected", async () => {
+  it("rejects the deprecated manual mark-connected action", async () => {
     const { POST } = await import("./route");
     const response = await POST(
       request("workspace-1", {
@@ -226,20 +304,9 @@ describe("GET /api/workspaces/[workspaceId]/mcp-connections", () => {
       context(),
     );
 
-    expect(response.status).toBe(200);
-    expect(markAiWorkspaceProviderConnected).toHaveBeenCalledWith(expect.objectContaining({ kind: "user" }), {
-      workspaceId: "workspace-1",
-      providerKey: "chatgpt",
-      source: "manual",
-    });
-    await expect(response.json()).resolves.toMatchObject({
-      providerKey: "chatgpt",
-      verified: true,
-      message: "Connection marked as complete.",
-      state: {
-        activeProviderKey: "chatgpt",
-      },
-    });
+    expect(response.status).toBe(500);
+    expect(verifyAiWorkspaceProviderConnection).not.toHaveBeenCalled();
+    expect(handleRouteError).toHaveBeenCalled();
   });
 
   it("rejects invalid connection actions before calling the domain", async () => {
@@ -255,7 +322,6 @@ describe("GET /api/workspaces/[workspaceId]/mcp-connections", () => {
 
     expect(response.status).toBe(500);
     expect(verifyAiWorkspaceProviderConnection).not.toHaveBeenCalled();
-    expect(markAiWorkspaceProviderConnected).not.toHaveBeenCalled();
     expect(handleRouteError).toHaveBeenCalled();
   });
 });

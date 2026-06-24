@@ -39,6 +39,9 @@ describe("authenticateMcpRequest", () => {
       scopes: ["brain:read"],
       instanceSlug: "client-a",
       resource: "https://mcp.corgtex.com/mcp",
+      clientId: "client-1",
+      clientName: "Claude",
+      providerKey: "claude",
     });
 
     const { authenticateMcpRequest } = await import("./auth");
@@ -53,6 +56,9 @@ describe("authenticateMcpRequest", () => {
       workspaceId: "ws-1",
       scopes: ["brain:read"],
       instanceSlug: "client-a",
+      clientId: "client-1",
+      clientName: "Claude",
+      providerKey: "claude",
     });
   });
 
@@ -68,7 +74,7 @@ describe("authenticateMcpRequest", () => {
     }, "actions:write")).toThrow("Missing required permission: actions:write");
   });
 
-  it("OAuth scope errors point users at the hosted installer for self-service reconnect", async () => {
+  it("OAuth scope errors point users at the workspace MCP setup page for self-service reconnect", async () => {
     const { requireScope } = await import("./auth");
 
     expect(() => requireScope({
@@ -77,7 +83,7 @@ describe("authenticateMcpRequest", () => {
       workspaceId: "ws-1",
       scopes: ["brain:read"],
       instanceSlug: "client-a",
-    }, "actions:write")).toThrow("https://app.test/install/claude");
+    }, "actions:write")).toThrow("https://app.test/workspaces/ws-1/tools?type=CONNECTOR&q=corgtex%20mcp");
   });
 
   it("allows sensitive tool credentials only when the OAuth session has the delegated scope", async () => {

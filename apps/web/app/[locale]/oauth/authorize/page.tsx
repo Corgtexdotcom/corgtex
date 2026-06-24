@@ -164,6 +164,12 @@ export default async function OAuthAuthorizePage(props: Props) {
     const deniedRedirectUrl = new URL(redirectUri);
     deniedRedirectUrl.searchParams.set("error", "access_denied");
     if (state) deniedRedirectUrl.searchParams.set("state", state);
+    const currentUserLabel = actor.kind === "user"
+      ? actor.user.displayName || actor.user.email
+      : "this Corgtex account";
+    const currentUserEmail = actor.kind === "user" ? actor.user.email : null;
+    const selectedWorkspace = allowedWorkspaces[0];
+    const hasMultipleWorkspaces = allowedWorkspaces.length > 1;
 
     return (
       <div className="relative flex min-h-screen flex-col items-center justify-center bg-[var(--bg)] p-4 sm:p-8">
@@ -173,9 +179,9 @@ export default async function OAuthAuthorizePage(props: Props) {
               <span className="text-base font-bold text-[var(--danger)]">Corgtex</span>
             </div>
             <div>
-              <h1 className="text-2xl font-bold text-[var(--text-strong)]">Connect Corgtex</h1>
+              <h1 className="text-2xl font-bold text-[var(--text-strong)]">Authorize Corgtex MCP</h1>
               <p className="mt-1 text-sm text-[var(--text-muted)]">
-                Choose the workspace this AI tool can use.
+                Authorize this MCP client to access Corgtex.
               </p>
             </div>
           </div>
@@ -186,33 +192,45 @@ export default async function OAuthAuthorizePage(props: Props) {
                 Allow {mcpClient.name}
               </h2>
               <p className="mt-1 text-sm text-[var(--text-muted)]">
-                This connects your AI client to one Corgtex workspace. It uses your current Corgtex role, including Tools access, and every sensitive action is audited.
+                Authorize this MCP client to access Corgtex as <span className="font-medium text-[var(--text-strong)]">{currentUserLabel}</span>
+                {" "}for <span className="font-medium text-[var(--text-strong)]">{selectedWorkspace.workspace.name}</span>.
               </p>
               {actor.kind === "user" ? (
                 <p className="mt-3 text-xs text-[var(--text-muted)]">
-                  Signed in as <span className="font-medium text-[var(--text-strong)]">{actor.user.displayName ?? actor.user.email}</span>
+                  Current Corgtex account: <span className="font-medium text-[var(--text-strong)]">{currentUserLabel}</span>
+                  {currentUserEmail && currentUserEmail !== currentUserLabel ? ` (${currentUserEmail})` : ""}
                 </p>
               ) : null}
             </div>
 
             <form action="/api/oauth/authorize" method="POST">
               <div className="border-b border-[var(--line-subtle)] px-6 py-6">
-                <label className="block text-sm font-medium text-[var(--text-strong)]">
-                  Workspace
-                  <select
-                    name="workspaceId"
-                    className="mt-2 w-full rounded border border-[var(--line)] bg-[var(--surface)] px-3 py-2"
-                    defaultValue={allowedWorkspaces[0]?.workspace.id}
-                  >
-                    {allowedWorkspaces.map(({ workspace, instance }) => (
-                      <option key={workspace.id} value={workspace.id}>
-                        {workspace.name} ({instance.displayName})
-                      </option>
-                    ))}
-                  </select>
-                </label>
+                {hasMultipleWorkspaces ? (
+                  <label className="block text-sm font-medium text-[var(--text-strong)]">
+                    Workspace
+                    <select
+                      name="workspaceId"
+                      className="mt-2 w-full rounded border border-[var(--line)] bg-[var(--surface)] px-3 py-2"
+                      defaultValue={selectedWorkspace.workspace.id}
+                    >
+                      {allowedWorkspaces.map(({ workspace, instance }) => (
+                        <option key={workspace.id} value={workspace.id}>
+                          {workspace.name} ({instance.displayName})
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                ) : (
+                  <div>
+                    <input type="hidden" name="workspaceId" value={selectedWorkspace.workspace.id} />
+                    <p className="text-sm font-medium text-[var(--text-strong)]">Workspace</p>
+                    <p className="mt-2 rounded border border-[var(--line)] bg-[var(--surface)] px-3 py-2 text-sm text-[var(--text-strong)]">
+                      {selectedWorkspace.workspace.name} ({selectedWorkspace.instance.displayName})
+                    </p>
+                  </div>
+                )}
                 <p className="mt-2 text-xs text-[var(--text-muted)]">
-                  The connector will only see this workspace. To switch, disconnect and reconnect.
+                  The connector will only see the selected Corgtex workspace. Provider account email is not used for authorization.
                 </p>
               </div>
 

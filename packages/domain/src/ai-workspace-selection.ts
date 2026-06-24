@@ -11,7 +11,7 @@ import {
   listAiWorkspaceToolProviders,
   type AiWorkspaceProviderKey,
 } from "./ai-workspaces";
-import { getClaudeMcpConnectionStatus } from "./mcp-connector";
+import { getMcpOAuthConnectionStatus, type McpOAuthProviderKey } from "./mcp-connector";
 
 export type AiWorkspaceConnectionState = {
   providerKey: AiWorkspaceProviderKey;
@@ -73,6 +73,10 @@ function mergeVerificationSetupState(setupState: unknown, source: string, verifi
     verificationSource: source,
     verifiedAt: verifiedAt.toISOString(),
   };
+}
+
+function asMcpOAuthProviderKey(providerKey: AiWorkspaceProviderKey): McpOAuthProviderKey {
+  return providerKey as McpOAuthProviderKey;
 }
 
 type AiWorkspaceConnectionRow = {
@@ -279,7 +283,7 @@ export async function makeDefaultAiWorkspaceProvider(
   return getAiWorkspaceSelectionState(actor, params.workspaceId);
 }
 
-export async function markAiWorkspaceProviderConnected(
+async function markAiWorkspaceProviderConnected(
   actor: AppActor,
   params: {
     workspaceId: string;
@@ -361,29 +365,28 @@ export async function verifyAiWorkspaceProviderConnection(
   await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
   const userId = requireUserActor(actor);
   const providerKey = assertVisibleProvider(params.providerKey);
+  const oauthStatus = await getMcpOAuthConnectionStatus({
+    userId,
+    workspaceId: params.workspaceId,
+    providerKey: asMcpOAuthProviderKey(providerKey),
+  });
 
-  if (providerKey === "claude") {
-    const claude = await getClaudeMcpConnectionStatus({
-      userId,
+  if (oauthStatus.connected) {
+    const state = await markAiWorkspaceProviderConnected(actor, {
       workspaceId: params.workspaceId,
+      providerKey,
+      source: `mcp_oauth:${providerKey}`,
+      connectedAt: oauthStatus.connectedAt,
     });
 
-    if (claude.connected) {
-      const state = await markAiWorkspaceProviderConnected(actor, {
-        workspaceId: params.workspaceId,
-        providerKey,
-        source: "claude_oauth",
-        connectedAt: claude.connectedAt,
-      });
-
-      return {
-        providerKey,
-        verified: true,
-        connectedAt: claude.connectedAt,
-        message: "Claude is connected.",
-        state,
-      };
-    }
+    const definition = AI_WORKSPACE_PROVIDER_REGISTRY[providerKey];
+    return {
+      providerKey,
+      verified: true,
+      connectedAt: oauthStatus.connectedAt,
+      message: `${definition.shortLabel} is connected through Corgtex OAuth.`,
+      state,
+    };
   }
 
   await startAiWorkspaceProviderSetup(actor, {
@@ -403,10 +406,10 @@ export async function verifyAiWorkspaceProviderConnection(
     await prisma.aiWorkspaceConnection.update({
       where: { id: existing.id },
       data: {
+        healthStatus: "NEEDS_SETUP",
         lastHealthCheckAt: new Date(),
-        lastError: providerKey === "claude"
-          ? "No completed Claude MCP sign-in was visible to Corgtex yet."
-          : "Automatic verification is not available for this provider yet.",
+        lastSuccessfulHealthCheckAt: null,
+        lastError: "No completed Corgtex MCP OAuth sign-in was visible for this provider yet.",
       },
     });
   }
@@ -416,9 +419,7 @@ export async function verifyAiWorkspaceProviderConnection(
     providerKey,
     verified: false,
     connectedAt: null,
-    message: providerKey === "claude"
-      ? "Corgtex has not seen Claude finish sign-in yet. Try one prompt in Claude, then verify again or mark it connected."
-      : "Corgtex cannot automatically verify this app yet. Mark it connected after sign-in is complete.",
+    message: "Corgtex has not seen this provider finish Corgtex OAuth yet. Add the MCP URL in the provider, authorize Corgtex in the browser, then verify again.",
     state,
   };
 }

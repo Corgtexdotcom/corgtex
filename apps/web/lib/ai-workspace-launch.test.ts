@@ -65,7 +65,7 @@ describe("ai workspace launch helpers", () => {
           isDefault: true,
           connectedAt: "2026-06-12T12:00:00.000Z",
           lastCheckedAt: "2026-06-12T12:00:00.000Z",
-          verificationSource: "claude_oauth",
+          verificationSource: "mcp_oauth:claude",
         },
         {
           providerKey: "chatgpt",

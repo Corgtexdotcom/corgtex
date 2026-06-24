@@ -255,7 +255,7 @@ describe("MCP OAuth workspace membership revalidation", () => {
   });
 });
 
-describe("Claude MCP connection status", () => {
+describe("MCP OAuth provider classification and connection status", () => {
   const now = new Date("2026-05-20T16:00:00.000Z");
 
   function token(overrides: Record<string, any> = {}) {
@@ -277,6 +277,122 @@ describe("Claude MCP connection status", () => {
       ...overrides,
     };
   }
+
+  it("classifies known MCP clients by client name with a generic fallback", async () => {
+    installSharedMock({});
+
+    const { inferMcpOAuthProviderKey } = await import("./mcp-connector");
+
+    expect(inferMcpOAuthProviderKey({ name: "OpenWork MCP", redirectUris: [], isActive: true })).toBe("openwork");
+    expect(inferMcpOAuthProviderKey({ name: "ChatGPT Connector", redirectUris: [], isActive: true })).toBe("chatgpt");
+    expect(inferMcpOAuthProviderKey({ name: "Claude", redirectUris: [], isActive: true })).toBe("claude");
+    expect(inferMcpOAuthProviderKey({ name: "GitHub Copilot", redirectUris: [], isActive: true })).toBe("copilot");
+    expect(inferMcpOAuthProviderKey({ name: "Gemini", redirectUris: [], isActive: true })).toBe("gemini");
+    expect(inferMcpOAuthProviderKey({ name: "Cursor", redirectUris: [], isActive: true })).toBe("cursor");
+    expect(inferMcpOAuthProviderKey({ name: "Custom Desktop MCP", redirectUris: [], isActive: true })).toBe("generic_mcp");
+  });
+
+  it("classifies known MCP clients by redirect host when the name is generic", async () => {
+    installSharedMock({});
+
+    const { inferMcpOAuthProviderKey } = await import("./mcp-connector");
+
+    expect(inferMcpOAuthProviderKey({ name: "MCP Client", redirectUris: ["https://auth.openworklabs.com/callback"], isActive: true })).toBe("openwork");
+    expect(inferMcpOAuthProviderKey({ name: "MCP Client", redirectUris: ["https://chatgpt.com/aip/example/oauth/callback"], isActive: true })).toBe("chatgpt");
+    expect(inferMcpOAuthProviderKey({ name: "MCP Client", redirectUris: ["https://claude.ai/api/mcp/callback"], isActive: true })).toBe("claude");
+    expect(inferMcpOAuthProviderKey({ name: "MCP Client", redirectUris: ["https://github.com/login/oauth/callback"], isActive: true })).toBe("copilot");
+    expect(inferMcpOAuthProviderKey({ name: "MCP Client", redirectUris: ["https://accounts.google.com/oauth/callback"], isActive: true })).toBe("gemini");
+    expect(inferMcpOAuthProviderKey({ name: "MCP Client", redirectUris: ["https://cursor.com/oauth/callback"], isActive: true })).toBe("cursor");
+  });
+
+  it("aggregates active refreshable OAuth tokens into provider connection statuses", async () => {
+    const prismaMock = {
+      mcpOAuthAccessToken: {
+        findMany: vi.fn().mockResolvedValue([
+          token({
+            updatedAt: new Date("2026-05-20T15:20:00.000Z"),
+            client: {
+              clientId: "mcp_client_chatgpt",
+              name: "ChatGPT Connector",
+              redirectUris: ["https://chatgpt.com/aip/example/oauth/callback"],
+              isActive: true,
+            },
+          }),
+          token({
+            updatedAt: new Date("2026-05-20T15:10:00.000Z"),
+            client: {
+              clientId: "mcp_client_cursor",
+              name: "Cursor",
+              redirectUris: ["https://cursor.com/oauth/callback"],
+              isActive: true,
+            },
+          }),
+          token({
+            updatedAt: new Date("2026-05-20T15:00:00.000Z"),
+            client: {
+              clientId: "mcp_client_generic",
+              name: "Local MCP Client",
+              redirectUris: ["http://127.0.0.1:45837/callback"],
+              isActive: true,
+            },
+          }),
+        ]),
+      },
+    };
+    installSharedMock(prismaMock);
+
+    const { listMcpOAuthConnectionStatuses } = await import("./mcp-connector");
+    const result = await listMcpOAuthConnectionStatuses({ userId: "user-1", workspaceId: "ws-1", now });
+
+    expect(result).toEqual([
+      {
+        providerKey: "chatgpt",
+        connected: true,
+        connectedAt: new Date("2026-05-20T15:20:00.000Z"),
+        source: "mcp_oauth",
+        clientName: "ChatGPT Connector",
+      },
+      {
+        providerKey: "cursor",
+        connected: true,
+        connectedAt: new Date("2026-05-20T15:10:00.000Z"),
+        source: "mcp_oauth",
+        clientName: "Cursor",
+      },
+      {
+        providerKey: "generic_mcp",
+        connected: true,
+        connectedAt: new Date("2026-05-20T15:00:00.000Z"),
+        source: "mcp_oauth",
+        clientName: "Local MCP Client",
+      },
+    ]);
+  });
+
+  it("ignores invalid OAuth tokens when aggregating provider statuses", async () => {
+    const prismaMock = {
+      mcpOAuthAccessToken: {
+        findMany: vi.fn().mockResolvedValue([
+          token({ revokedAt: new Date("2026-05-20T15:30:00.000Z") }),
+          token({ refreshExpiresAt: new Date("2026-05-20T15:30:00.000Z") }),
+          token({ refreshHash: null }),
+          token({
+            client: {
+              name: "Claude",
+              redirectUris: ["https://claude.ai/api/mcp/callback"],
+              isActive: false,
+            },
+          }),
+          token({ userId: "other-user" }),
+          token({ workspaceId: "other-workspace" }),
+        ]),
+      },
+    };
+    installSharedMock(prismaMock);
+
+    const { listMcpOAuthConnectionStatuses } = await import("./mcp-connector");
+    await expect(listMcpOAuthConnectionStatuses({ userId: "user-1", workspaceId: "ws-1", now })).resolves.toEqual([]);
+  });
 
   it("detects an active refreshable Claude OAuth token for the current user and workspace", async () => {
     const prismaMock = {

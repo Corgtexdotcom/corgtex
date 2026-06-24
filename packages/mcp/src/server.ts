@@ -285,6 +285,7 @@ const TOOL_CAPABILITIES = {
   search_connected_context: { scopes: ["external-tools:read"] },
   fetch_connected_context: { scopes: ["external-tools:read"] },
   execute_external_tool: { scopes: ["external-tools:write"] },
+  get_current_connection: { scopes: ["workspace:read"] },
   get_workspace_info: { scopes: ["workspace:read"] },
   daily_overview: { scopes: ["workspace:read", "actions:read", "proposals:read", "tensions:read", "meetings:read", "finance:read"] },
   create_execution_request: { scopes: ["execution:write"] },
@@ -1126,6 +1127,38 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
   // ===========================================================================
   // WORKSPACE OVERVIEW
   // ===========================================================================
+
+  tool(
+    "get_current_connection",
+    "Return safe debug details for the current Corgtex MCP connection, including the Corgtex user, workspace, provider, client name, scopes, and resource. Never returns tokens or secrets.",
+    {},
+    async () => {
+      requireScope(sessionCtx, "workspace:read");
+      const workspace = await prisma.workspace.findUnique({
+        where: { id: workspaceId },
+        select: { id: true, slug: true, name: true },
+      });
+      return structuredJsonResult({
+        authKind: sessionCtx.authKind,
+        corgtexUser: actor.kind === "user"
+          ? {
+            id: actor.user.id,
+            displayName: actor.user.displayName ?? null,
+            email: actor.user.email ?? null,
+          }
+          : null,
+        workspace: {
+          id: workspaceId,
+          name: workspace?.name ?? null,
+          slug: workspace?.slug ?? null,
+        },
+        providerKey: sessionCtx.providerKey ?? null,
+        clientName: sessionCtx.clientName ?? null,
+        scopes: sessionCtx.scopes ?? null,
+        resource: sessionCtx.resource ?? null,
+      });
+    },
+  );
 
   tool(
     "get_workspace_info",

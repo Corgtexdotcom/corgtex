@@ -188,6 +188,9 @@ vi.mock("@corgtex/agents", () => ({
 vi.mock("@corgtex/shared", () => ({
   prisma: {
     $transaction: vi.fn(async (callback: (tx: unknown) => Promise<unknown>) => callback({})),
+    workspace: {
+      findUnique: vi.fn(),
+    },
     workspaceFeatureFlag: {
       findMany: vi.fn(),
       upsert: vi.fn(),
@@ -205,7 +208,7 @@ vi.mock("./auth", () => ({
 }));
 
 describe("createCorgtexMcpServer", () => {
-  beforeEach(() => {
+  beforeEach(async () => {
     createGoalMock.mockReset().mockResolvedValue({
       id: "goal-1",
       title: "Transform 1,000 businesses",
@@ -337,6 +340,12 @@ describe("createCorgtexMcpServer", () => {
       role: "ADMIN",
       isActive: true,
     });
+    const { prisma } = await import("@corgtex/shared");
+    vi.mocked(prisma.workspace.findUnique).mockReset().mockResolvedValue({
+      id: "ws-1",
+      slug: "acme",
+      name: "Acme",
+    } as never);
     getContextGraphMapSchemaMock.mockReset().mockReturnValue({
       objectTypes: ["Process", "Agent", "Evidence"],
       relationshipTypes: ["supports", "has_evidence"],
@@ -353,6 +362,48 @@ describe("createCorgtexMcpServer", () => {
       evidenceCount: 2,
       layoutItemCount: 2,
     });
+  });
+
+  it("returns safe current MCP connection details without credential material", async () => {
+    const { createCorgtexMcpServer } = await import("./server");
+    const { requireScope } = await import("./auth");
+
+    const server = createCorgtexMcpServer({
+      actor: {
+        kind: "user",
+        user: { id: "user-1", email: "user@example.com", displayName: "User One" },
+      } as any,
+      workspaceId: "ws-1",
+      authKind: "oauth",
+      scopes: ["workspace:read", "brain:read"],
+      resource: "https://app.test/api/mcp",
+      providerKey: "cursor",
+      clientName: "Cursor",
+    });
+
+    const response = await (server as any)._registeredTools.get_current_connection.handler({});
+    const payload = JSON.parse(response.content[0].text);
+
+    expect(vi.mocked(requireScope)).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: "ws-1" }), "workspace:read");
+    expect(payload).toEqual({
+      authKind: "oauth",
+      corgtexUser: {
+        id: "user-1",
+        displayName: "User One",
+        email: "user@example.com",
+      },
+      workspace: {
+        id: "ws-1",
+        name: "Acme",
+        slug: "acme",
+      },
+      providerKey: "cursor",
+      clientName: "Cursor",
+      scopes: ["workspace:read", "brain:read"],
+      resource: "https://app.test/api/mcp",
+    });
+    expect(JSON.stringify(payload)).not.toContain("token");
+    expect(JSON.stringify(payload)).not.toContain("secret");
   });
 
   it("lists and fetches work item versions with the matching entity read scope", async () => {

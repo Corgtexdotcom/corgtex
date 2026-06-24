@@ -3,12 +3,42 @@ import { prisma, randomOpaqueToken, sha256, env } from "@corgtex/shared";
 import type { AppActor } from "@corgtex/shared";
 import { AppError, invariant } from "./errors";
 import { ALL_SCOPES, DELEGATED_DEFAULT_SCOPES, type AgentScope } from "./agent-auth";
+import type { AiWorkspaceProviderKey } from "./ai-workspaces";
 
 const MCP_CLIENT_PREFIX = "mcp_client_";
 const MCP_CODE_PREFIX = "mcp_code_";
 const MCP_ACCESS_TOKEN_PREFIX = "mcp_at_";
 const MCP_REFRESH_TOKEN_PREFIX = "mcp_rt_";
-const CLAUDE_HOST = "claude.ai";
+const MCP_OAUTH_PROVIDER_HOSTS: Array<{ providerKey: McpOAuthProviderKey; hosts: string[] }> = [
+  { providerKey: "openwork", hosts: ["openworklabs.com"] },
+  { providerKey: "chatgpt", hosts: ["chatgpt.com", "chat.openai.com", "openai.com"] },
+  { providerKey: "claude", hosts: ["claude.ai", "anthropic.com"] },
+  { providerKey: "copilot", hosts: ["github.com", "githubcopilot.com", "visualstudio.com"] },
+  { providerKey: "gemini", hosts: ["google.com", "googleusercontent.com", "gemini.google.com"] },
+  { providerKey: "cursor", hosts: ["cursor.com", "anysphere.co"] },
+];
+
+const MCP_OAUTH_PROVIDER_NAME_MATCHERS: Array<{ providerKey: McpOAuthProviderKey; pattern: RegExp }> = [
+  { providerKey: "openwork", pattern: /\bopen\s*work\b|\bopenwork\b/i },
+  { providerKey: "chatgpt", pattern: /\bchatgpt\b|\bopenai\b/i },
+  { providerKey: "claude", pattern: /\bclaude\b|\banthropic\b/i },
+  { providerKey: "copilot", pattern: /\bcopilot\b|\bgithub\b|\bvs\s*code\b|\bvisual\s*studio\b/i },
+  { providerKey: "gemini", pattern: /\bgemini\b|\bgoogle\b/i },
+  { providerKey: "cursor", pattern: /\bcursor\b|\banysphere\b/i },
+];
+
+export type McpOAuthProviderKey = Extract<
+  AiWorkspaceProviderKey,
+  "openwork" | "chatgpt" | "claude" | "copilot" | "gemini" | "cursor" | "generic_mcp"
+>;
+
+export type McpOAuthConnectionStatus = {
+  providerKey: McpOAuthProviderKey;
+  connected: boolean;
+  connectedAt: Date | null;
+  source: "mcp_oauth" | null;
+  clientName: string | null;
+};
 
 export const MCP_CONNECTOR_LEGACY_DEFAULT_SCOPES: AgentScope[] = [
   "workspace:read",
@@ -73,6 +103,12 @@ type McpConnectionTokenSnapshot = {
   client: McpConnectionClientSnapshot;
 };
 
+type McpConnectionTokenWithClient = McpConnectionTokenSnapshot & {
+  client: McpConnectionClientSnapshot & {
+    clientId?: string | null;
+  };
+};
+
 function cleanString(value: unknown): string | null {
   return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
 }
@@ -83,18 +119,28 @@ function cleanStringArray(value: unknown): string[] {
     : [];
 }
 
-function uriMatchesClaude(uri: string) {
+function uriMatchesHost(uri: string, host: string) {
   try {
     const hostname = new URL(uri).hostname.toLowerCase();
-    return hostname === CLAUDE_HOST || hostname.endsWith(`.${CLAUDE_HOST}`);
+    return hostname === host || hostname.endsWith(`.${host}`);
   } catch {
-    return uri.toLowerCase().includes(CLAUDE_HOST);
+    return uri.toLowerCase().includes(host);
   }
 }
 
-function isClaudeMcpClient(client: McpConnectionClientSnapshot) {
-  return client.name.toLowerCase().includes("claude") ||
-    client.redirectUris.some((uri) => uriMatchesClaude(uri));
+export function inferMcpOAuthProviderKey(client: McpConnectionClientSnapshot): McpOAuthProviderKey {
+  const name = client.name.trim();
+  for (const matcher of MCP_OAUTH_PROVIDER_NAME_MATCHERS) {
+    if (matcher.pattern.test(name)) return matcher.providerKey;
+  }
+
+  for (const entry of MCP_OAUTH_PROVIDER_HOSTS) {
+    if (client.redirectUris.some((uri) => entry.hosts.some((host) => uriMatchesHost(uri, host)))) {
+      return entry.providerKey;
+    }
+  }
+
+  return "generic_mcp";
 }
 
 function isRefreshableActiveToken(token: McpConnectionTokenSnapshot, params: {
@@ -178,11 +224,11 @@ export function getMcpConnectorInstance(slug: string) {
   return listMcpConnectorInstances().find((instance) => instance.slug === slug && instance.status === "active") ?? null;
 }
 
-export async function getClaudeMcpConnectionStatus(params: {
+export async function listMcpOAuthConnectionStatuses(params: {
   userId: string;
   workspaceId: string;
   now?: Date;
-}): Promise<{ connected: boolean; connectedAt: Date | null }> {
+}): Promise<McpOAuthConnectionStatus[]> {
   const now = params.now ?? new Date();
   const tokens = await prisma.mcpOAuthAccessToken.findMany({
     where: {
@@ -206,6 +252,7 @@ export async function getClaudeMcpConnectionStatus(params: {
       updatedAt: true,
       client: {
         select: {
+          clientId: true,
           name: true,
           redirectUris: true,
           isActive: true,
@@ -213,19 +260,58 @@ export async function getClaudeMcpConnectionStatus(params: {
       },
     },
     orderBy: { updatedAt: "desc" },
-  });
+  }) as McpConnectionTokenWithClient[];
 
-  const connection = tokens.find((token) =>
-    isRefreshableActiveToken(token, {
+  const byProvider = new Map<McpOAuthProviderKey, McpOAuthConnectionStatus>();
+  for (const token of tokens) {
+    if (!isRefreshableActiveToken(token, {
       userId: params.userId,
       workspaceId: params.workspaceId,
       now,
-    }) && isClaudeMcpClient(token.client)
-  );
+    })) {
+      continue;
+    }
 
+    const providerKey = inferMcpOAuthProviderKey(token.client);
+    if (byProvider.has(providerKey)) continue;
+
+    byProvider.set(providerKey, {
+      providerKey,
+      connected: true,
+      connectedAt: token.updatedAt ?? token.createdAt ?? null,
+      source: "mcp_oauth",
+      clientName: token.client.name || null,
+    });
+  }
+
+  return [...byProvider.values()];
+}
+
+export async function getMcpOAuthConnectionStatus(params: {
+  userId: string;
+  workspaceId: string;
+  providerKey: McpOAuthProviderKey;
+  now?: Date;
+}): Promise<McpOAuthConnectionStatus> {
+  const statuses = await listMcpOAuthConnectionStatuses(params);
+  return statuses.find((status) => status.providerKey === params.providerKey) ?? {
+    providerKey: params.providerKey,
+    connected: false,
+    connectedAt: null,
+    source: null,
+    clientName: null,
+  };
+}
+
+export async function getClaudeMcpConnectionStatus(params: {
+  userId: string;
+  workspaceId: string;
+  now?: Date;
+}): Promise<{ connected: boolean; connectedAt: Date | null }> {
+  const connection = await getMcpOAuthConnectionStatus({ ...params, providerKey: "claude" });
   return {
-    connected: Boolean(connection),
-    connectedAt: connection?.updatedAt ?? connection?.createdAt ?? null,
+    connected: connection.connected,
+    connectedAt: connection.connectedAt,
   };
 }
 
@@ -683,5 +769,7 @@ export async function resolveMcpOAuthAccessToken(tokenString: string, expectedRe
     instanceSlug: token.instanceSlug,
     resource: token.resource,
     clientId: token.client.clientId,
+    clientName: token.client.name,
+    providerKey: inferMcpOAuthProviderKey(token.client),
   };
 }

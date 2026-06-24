@@ -29,19 +29,33 @@ function parseRouteError(value: unknown) {
   return null;
 }
 
-function claudeConnectedSignal(value: unknown) {
+function providerConnectedSignal(value: unknown, providerKey: string) {
   if (!value || typeof value !== "object") return null;
   const signals = (value as { signals?: unknown }).signals;
   if (signals && typeof signals === "object") {
-    const claude = (signals as { claude?: unknown }).claude;
-    if (claude && typeof claude === "object" && typeof (claude as { connected?: unknown }).connected === "boolean") {
-      return (claude as { connected: boolean }).connected;
+    const provider = (signals as Record<string, unknown>)[providerKey];
+    if (provider && typeof provider === "object" && typeof (provider as { connected?: unknown }).connected === "boolean") {
+      return (provider as { connected: boolean }).connected;
     }
   }
 
-  const claude = (value as { claude?: unknown }).claude;
-  if (claude && typeof claude === "object" && typeof (claude as { connected?: unknown }).connected === "boolean") {
-    return (claude as { connected: boolean }).connected;
+  const connections = (value as { connections?: unknown }).connections;
+  if (Array.isArray(connections)) {
+    const provider = connections.find((connection) =>
+      connection &&
+      typeof connection === "object" &&
+      (connection as { providerKey?: unknown }).providerKey === providerKey
+    );
+    if (provider && typeof (provider as { connected?: unknown }).connected === "boolean") {
+      return (provider as { connected: boolean }).connected;
+    }
+  }
+
+  if (providerKey === "claude") {
+    const claude = (value as { claude?: unknown }).claude;
+    if (claude && typeof claude === "object" && typeof (claude as { connected?: unknown }).connected === "boolean") {
+      return (claude as { connected: boolean }).connected;
+    }
   }
 
   return null;
@@ -96,29 +110,31 @@ export function AiWorkspaceLaunchPanel({
   const activeProviderLaunchUrl = aiWorkspaceLaunchUrl(provider?.key);
 
   useEffect(() => {
-    if (provider?.key !== "claude") return;
+    const providerKey = provider?.key;
+    if (!providerKey) return;
+    const checkedProviderKey: string = providerKey;
 
     let cancelled = false;
 
-    async function checkClaudeConnection() {
+    async function checkProviderConnection() {
       try {
         const response = await fetch(`/api/workspaces/${workspaceId}/mcp-connections`, {
           cache: "no-store",
         });
         const data = await response.json().catch(() => ({}));
         if (!response.ok) return;
-        const connected = claudeConnectedSignal(data);
+        const connected = providerConnectedSignal(data, checkedProviderKey);
         if (connected === null || cancelled) return;
         setVerifiedProviderConnections((current) => ({
           ...current,
-          claude: connected,
+          [checkedProviderKey]: connected,
         }));
       } catch {
         return;
       }
     }
 
-    void checkClaudeConnection();
+    void checkProviderConnection();
 
     return () => {
       cancelled = true;

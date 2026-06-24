@@ -329,11 +329,12 @@ export function buildAiWorkspaceSetupCards(
         steps: [
           "Open your OpenWork workspace.",
           "Go to Extensions, then Advanced Settings, then Add MCP server.",
-          "Paste the Corgtex MCP URL, enable OAuth, and finish browser sign-in.",
+          "Paste the Corgtex MCP URL. When OpenWork opens Corgtex, authorize as your current Corgtex user for this workspace.",
+          "Return here and verify the connection.",
         ],
         notes: [
           "OpenWork must support dynamic client registration for the OAuth connection.",
-          "After it is connected, users work in OpenWork and Corgtex supplies the governed company context.",
+          "Provider email is not used for authorization; Corgtex uses the signed-in Corgtex user and workspace.",
         ],
       };
     }
@@ -356,10 +357,10 @@ export function buildAiWorkspaceSetupCards(
         steps: [
           "In ChatGPT settings, open Connectors, then Advanced settings.",
           "Turn on Developer Mode if it is not already enabled.",
-          "Create an app, paste the HTTPS Corgtex MCP URL, scan tools, and authenticate.",
-          "In a chat, use Developer Mode and choose Corgtex when you want ChatGPT to work with Corgtex.",
+          "Create an app, paste the HTTPS Corgtex MCP URL, scan tools, and let ChatGPT open Corgtex.",
+          "Authorize as your current Corgtex user for this workspace, then use Developer Mode and choose Corgtex in chat.",
         ],
-        notes: ["Business, Enterprise, or Edu workspaces may require an admin to approve or publish the app before normal users can use it."],
+        notes: ["Business, Enterprise, or Edu workspaces may require an admin to approve or publish the app before normal users can use it. Corgtex never matches ChatGPT email to Corgtex email."],
       };
     }
 
@@ -388,11 +389,12 @@ export function buildAiWorkspaceSetupCards(
         steps: [
           "Open the guided installer.",
           "Approve Corgtex as a custom remote connector.",
-          "Finish browser sign-in and choose this workspace.",
+          "When Claude opens Corgtex, authorize as your current Corgtex user for this workspace.",
+          "Return here and verify the connection.",
         ],
         notes: [
           "Pro and Max users can add a custom connector directly.",
-          "Team and Enterprise owners may need to add Corgtex at organization level before members can connect it.",
+          "Team and Enterprise owners may need to add Corgtex at organization level before members can connect it. Corgtex never matches Claude email to Corgtex email.",
         ],
         advancedSection: includeClaudeAdvanced ? {
           title: "Claude Code",
@@ -411,7 +413,7 @@ export function buildAiWorkspaceSetupCards(
           steps: [
             "Paste the command in Terminal.",
             "Open Claude Code and run /mcp.",
-            "Authenticate Corgtex in the browser when prompted.",
+            "When Claude Code opens Corgtex, authorize as your current Corgtex user for this workspace.",
           ],
           notes: ["User scope keeps Corgtex available across projects."],
         } : undefined,
@@ -444,7 +446,8 @@ export function buildAiWorkspaceSetupCards(
         steps: [
           "In VS Code, run MCP: Add Server or paste the copied user/workspace mcp.json entry.",
           "For Copilot CLI, use /mcp add or paste the copied command.",
-          "Authenticate in the browser if the selected Copilot surface supports OAuth remote MCP.",
+          "When Copilot opens Corgtex, authorize as your current Corgtex user for this workspace.",
+          "Return here and verify the connection.",
         ],
         notes: [
           "Repository and cloud-agent Copilot MCP setup is not offered here because OAuth-backed remote MCP is not supported for that path.",
@@ -475,7 +478,8 @@ export function buildAiWorkspaceSetupCards(
         steps: [
           "Click Add to Cursor.",
           "Approve the Corgtex MCP install prompt.",
-          "Finish browser sign-in when Cursor asks to authenticate.",
+          "When Cursor opens Corgtex, authorize as your current Corgtex user for this workspace.",
+          "Return here and verify the connection.",
         ],
         notes: ["If the install prompt does not open, use the copied mcp.json fallback in Cursor MCP settings."],
       };
@@ -506,7 +510,8 @@ export function buildAiWorkspaceSetupCards(
         steps: [
           "Paste the command in Terminal, or use the settings JSON fallback with httpUrl.",
           "Open Gemini CLI and run /mcp.",
-          "Run /mcp auth corgtex if Gemini asks for authentication.",
+          "Run /mcp auth corgtex if Gemini asks for authentication, then authorize in Corgtex as your current Corgtex user for this workspace.",
+          "Return here and verify the connection.",
         ],
         notes: ["Consumer Gemini web support is not assumed; this path is for technical CLI users."],
       };
@@ -518,9 +523,10 @@ export function buildAiWorkspaceSetupCards(
       steps: [
         "Choose remote MCP, Streamable HTTP, or HTTP MCP server in the client.",
         "Paste the Corgtex MCP URL.",
-        "Complete browser OAuth and confirm Corgtex tools are visible.",
+        "When the client opens Corgtex, authorize as your current Corgtex user for this workspace.",
+        "Return here and verify the connection.",
       ],
-      notes: ["Use this for internal tools or AI workspaces that already support remote MCP."],
+      notes: ["Use this for internal tools or AI workspaces that already support remote MCP. Unknown clients appear as Generic MCP after Corgtex OAuth completes."],
     };
   });
 }
@@ -533,22 +539,22 @@ function providerDisplayComparator(a: AiWorkspaceProviderView, b: AiWorkspacePro
 
 function connectionSummary(provider: AiWorkspaceProviderView) {
   if (provider.key === "chatgpt") {
-    return "Connect Corgtex as a ChatGPT developer-mode app. After that, users work in ChatGPT and call Corgtex from the chat.";
+    return "Paste the Corgtex MCP URL in ChatGPT, authorize in Corgtex, then work from ChatGPT with Corgtex context.";
   }
   if (provider.key === "claude") {
-    return "Connect Corgtex as a Claude remote connector. After that, users work in Claude and Corgtex supplies company context.";
+    return "Paste the Corgtex MCP URL in Claude, authorize in Corgtex, then work from Claude with Corgtex context.";
   }
   if (provider.key === "openwork") {
-    return "Use OpenWork as the default free AI workspace connected to Corgtex through MCP.";
+    return "Paste the Corgtex MCP URL in OpenWork, authorize in Corgtex, then work from OpenWork with Corgtex context.";
   }
   if (provider.key === "cursor") {
-    return "Install Corgtex in Cursor with Cursor's one-click MCP install link.";
+    return "Install the Corgtex MCP URL in Cursor, authorize in Corgtex, then work from Cursor with Corgtex context.";
   }
   if (provider.key === "copilot") {
-    return "Advanced setup for VS Code or Copilot CLI. Repository and cloud-agent OAuth paths are intentionally not offered.";
+    return "Paste the Corgtex MCP URL into VS Code or Copilot CLI, authorize in Corgtex, then verify before use.";
   }
   if (provider.key === "gemini") {
-    return "Advanced setup for Gemini CLI using an HTTP MCP server and browser authentication.";
+    return "Add the Corgtex MCP URL to Gemini CLI, authorize in Corgtex, then verify before use.";
   }
   return provider.outcome;
 }

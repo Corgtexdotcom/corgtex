@@ -1,6 +1,7 @@
 import type { AppActor } from "@corgtex/shared";
 import { env } from "@corgtex/shared";
 import { resolveAgentActorFromBearer, describeScope, resolveMcpOAuthAccessToken, requireTrialMcpAccess } from "@corgtex/domain";
+import type { McpOAuthProviderKey } from "@corgtex/domain";
 import { AppError } from "@corgtex/domain";
 
 /**
@@ -13,6 +14,9 @@ export type McpSessionContext = {
   scopes?: string[];
   instanceSlug?: string;
   resource?: string | null;
+  clientId?: string;
+  clientName?: string | null;
+  providerKey?: McpOAuthProviderKey;
 };
 
 /**
@@ -23,16 +27,6 @@ export type McpSessionContext = {
 function settingsUrl(workspaceId: string): string {
   const origin = env.APP_URL.replace(/\/$/, "");
   return `${origin}/workspaces/${workspaceId}/tools?type=CONNECTOR&q=corgtex%20mcp`;
-}
-
-/**
- * Public installer URL — used in OAuth scope-error messages so the user
- * (the principal of the token, in OAuth's case) can reconnect themselves
- * and approve the new scope, instead of waiting on a workspace admin.
- */
-function claudeInstallerUrl(): string {
-  const origin = env.APP_URL.replace(/\/$/, "");
-  return `${origin}/install/claude`;
 }
 
 /**
@@ -87,6 +81,9 @@ export async function authenticateMcpRequest(
       scopes: oauthSession.scopes,
       instanceSlug: oauthSession.instanceSlug,
       resource: oauthSession.resource,
+      clientId: oauthSession.clientId,
+      clientName: oauthSession.clientName,
+      providerKey: oauthSession.providerKey,
     };
   }
 
@@ -101,17 +98,16 @@ export function requireScope(ctx: McpSessionContext, scope: string): void {
   if (ctx.scopes && !ctx.scopes.includes(scope)) {
     const purpose = describeScope(scope);
 
-    // OAuth (e.g. Claude / Claude Cowork): the principal is the end user —
-    // they can self-service by disconnecting + reconnecting. Point them at the
-    // hosted installer, which walks them through reconnecting in their AI tool.
+    // OAuth connector sessions are user-authorized. The user can reconnect in
+    // their MCP client and approve the missing scope during Corgtex sign-in.
     if (ctx.authKind === "oauth") {
       throw new AppError(
         403,
         "FORBIDDEN",
         [
           `Missing required permission: ${scope} (${purpose}).`,
-          `Disconnect Corgtex in your AI tool, then reconnect using the guided installer at ${claudeInstallerUrl()} —`,
-          `the new permission is requested automatically and you'll be asked to approve it during sign-in.`,
+          `Disconnect Corgtex in your MCP client, then reconnect from ${settingsUrl(ctx.workspaceId)} —`,
+          `the new permission is requested automatically and you'll be asked to approve it during Corgtex sign-in.`,
         ].join(" "),
       );
     }

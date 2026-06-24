@@ -101,7 +101,6 @@ export function OnboardingAiWorkspaceSetup({
   const [activeProviderKey, setActiveProviderKey] = useState(primaryProviderKey(initialState));
   const [selecting, setSelecting] = useState(false);
   const [verifying, setVerifying] = useState(false);
-  const [markingConnected, setMarkingConnected] = useState(false);
   const [status, setStatus] = useState<ActionStatus | null>(null);
 
   const providers = useMemo(() => onboardingProviderViews(selectionState.providers), [selectionState.providers]);
@@ -285,37 +284,6 @@ export function OnboardingAiWorkspaceSetup({
     }
   }
 
-  async function markConnected() {
-    if (!activeCard || markingConnected) return;
-
-    setMarkingConnected(true);
-    setStatus(null);
-
-    try {
-      const response = await fetch(`/api/workspaces/${workspaceId}/mcp-connections`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action: "mark_connected", providerKey: activeCard.provider.key }),
-      });
-      const data = await response.json().catch(() => ({}));
-      if (!response.ok) {
-        throw new Error(parseRouteError(data, t("connectClientErrorMark")));
-      }
-      applyState((data as { state?: unknown }).state);
-      setStatus({
-        message: t("connectClientMarkedConnected", { provider: activeCard.provider.shortLabel }),
-        tone: "success",
-      });
-    } catch (error) {
-      setStatus({
-        message: error instanceof Error ? error.message : t("connectClientErrorMark"),
-        tone: "warning",
-      });
-    } finally {
-      setMarkingConnected(false);
-    }
-  }
-
   if (!activeCard || providers.length === 0) {
     return (
       <section className="onboarding-setup-panel stack">
@@ -359,14 +327,9 @@ export function OnboardingAiWorkspaceSetup({
 
       <div className="actions-inline onboarding-ai-actions">
         {activeCard.actions.map(renderAction)}
-        {activeCard.provider.key === "claude" && !connected ? (
-          <button type="button" className="secondary small" disabled={verifying} onClick={() => void verifyConnection()}>
-            {verifying ? t("connectClientVerifying") : t("connectClientVerifyClaude")}
-          </button>
-        ) : null}
         {!connected ? (
-          <button type="button" className="secondary small" disabled={markingConnected} onClick={() => void markConnected()}>
-            {markingConnected ? t("connectClientMarking") : t("connectClientMarkConnected")}
+          <button type="button" className="secondary small" disabled={verifying} onClick={() => void verifyConnection()}>
+            {verifying ? t("connectClientVerifying") : t("connectClientVerifyConnection")}
           </button>
         ) : null}
       </div>
