@@ -16,6 +16,7 @@ import { prisma } from "@corgtex/shared";
 import Link from "next/link";
 import { MarkdownExcerpt, MarkdownRenderer } from "@/lib/components/MarkdownRenderer";
 import { ArchivedItemBanner } from "@/lib/components/ArchivedItemBanner";
+import { UnavailableItemStatus } from "@/lib/components/UnavailableItemStatus";
 import { DeliberationThread } from "@/lib/components/DeliberationThread";
 import { DeliberationComposer } from "@/lib/components/DeliberationComposer";
 import { getDeliberationTargets } from "@/lib/deliberation-targets";
@@ -176,6 +177,25 @@ export default async function MeetingDetailPage({
   const membership = await requireWorkspaceMembership({ actor, workspaceId });
 
   const meeting = await getMeeting(workspaceId, meetingId, { includeArchived: true });
+  if (!meeting) {
+    const archiveRecord = await getWorkspaceArchiveRecord(actor, {
+      workspaceId,
+      entityType: "Meeting",
+      entityId: meetingId,
+      includePurged: true,
+    });
+    const canShowArchiveRecord = actor.kind === "agent" || membership?.role === "ADMIN";
+    return (
+      <UnavailableItemStatus
+        workspaceId={workspaceId}
+        entityType="Meeting"
+        entityId={meetingId}
+        archiveRecord={canShowArchiveRecord ? archiveRecord : null}
+        backHref={`/workspaces/${workspaceId}/meetings`}
+        backLabel={t("backToMeetings")}
+      />
+    );
+  }
   const meetingEntries = await listDeliberationEntries(actor, { workspaceId, parentType: "MEETING", parentId: meetingId });
   const deliberationTargets = await getDeliberationTargets({ actor, workspaceId });
   const targetOptions = deliberationTargets.options.map((option) => ({
@@ -195,16 +215,6 @@ export default async function MeetingDetailPage({
         : null,
   }));
 
-  if (!meeting) {
-    return (
-      <div className="ws-page-header">
-        <h1>{t("meetingNotFound")}</h1>
-        <Link href={`/workspaces/${workspaceId}/meetings`} className="nr-meta" style={{ textDecoration: "underline" }}>
-          {t("backToMeetings")}
-        </Link>
-      </div>
-    );
-  }
   const isArchived = Boolean(meeting.archivedAt);
   const isAdmin = actor.kind === "agent" || membership?.role === "ADMIN";
   const archiveRecord = isArchived

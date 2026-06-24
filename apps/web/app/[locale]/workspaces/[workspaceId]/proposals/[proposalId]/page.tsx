@@ -1,11 +1,12 @@
 import { notFound } from "next/navigation";
 import Link from "next/link";
-import { getProposal, getWorkspaceArchiveRecord, listAdviceRequests, listDeliberationEntries, listWorkItemEvidence, listWorkItemVersions, requireWorkspaceMembership } from "@corgtex/domain";
+import { AppError, getProposal, getWorkspaceArchiveRecord, listAdviceRequests, listDeliberationEntries, listWorkItemEvidence, listWorkItemVersions, requireWorkspaceMembership } from "@corgtex/domain";
 import { requirePageActor } from "@/lib/auth";
 import { MarkdownEditor } from "@/lib/components/MarkdownEditor";
 import { MarkdownRenderer } from "@/lib/components/MarkdownRenderer";
 import { WorkItemResolutionDialog } from "@/lib/components/WorkItemResolutionDialog";
 import { ArchivedItemBanner } from "@/lib/components/ArchivedItemBanner";
+import { UnavailableItemStatus } from "@/lib/components/UnavailableItemStatus";
 import { DeliberationThread } from "@/lib/components/DeliberationThread";
 import { DeliberationComposer } from "@/lib/components/DeliberationComposer";
 import { getDeliberationTargets } from "@/lib/deliberation-targets";
@@ -28,10 +29,34 @@ export default async function ProposalDetailPage({
   const tWork = await getTranslations("workItems");
   const format = await getFormatter();
 
-  const proposal = await getProposal(actor, { workspaceId, proposalId, includeArchived: true });
+  const membership = await requireWorkspaceMembership({ actor, workspaceId });
+  let proposal: Awaited<ReturnType<typeof getProposal>>;
+  try {
+    proposal = await getProposal(actor, { workspaceId, proposalId, includeArchived: true });
+  } catch (error) {
+    if (error instanceof AppError && error.code === "NOT_FOUND") {
+      const archiveRecord = await getWorkspaceArchiveRecord(actor, {
+        workspaceId,
+        entityType: "Proposal",
+        entityId: proposalId,
+        includePurged: true,
+      });
+      const canShowArchiveRecord = actor.kind === "agent" || membership?.role === "ADMIN";
+      return (
+        <UnavailableItemStatus
+          workspaceId={workspaceId}
+          entityType="Proposal"
+          entityId={proposalId}
+          archiveRecord={canShowArchiveRecord ? archiveRecord : null}
+          backHref={`/workspaces/${workspaceId}/proposals`}
+          backLabel={t("backToProposals")}
+        />
+      );
+    }
+    throw error;
+  }
   if (!proposal) notFound();
   const isArchived = Boolean(proposal.archivedAt);
-  const membership = await requireWorkspaceMembership({ actor, workspaceId });
 
   const [deliberationEntries, versionHistory, evidence, adviceRequests, archiveRecord] = await Promise.all([
     listDeliberationEntries(actor, {

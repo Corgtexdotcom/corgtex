@@ -321,6 +321,8 @@ export async function getWorkspaceArchiveRecord(actor: AppActor, params: {
   workspaceId: string;
   entityType: string;
   entityId: string;
+  includePurged?: boolean;
+  includeRestored?: boolean;
 }) {
   await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
   return prisma.workspaceArchiveRecord.findFirst({
@@ -328,8 +330,8 @@ export async function getWorkspaceArchiveRecord(actor: AppActor, params: {
       workspaceId: params.workspaceId,
       entityType: params.entityType,
       entityId: params.entityId,
-      restoredAt: null,
-      purgedAt: null,
+      ...(params.includeRestored ? {} : { restoredAt: null }),
+      ...(params.includePurged ? {} : { purgedAt: null }),
     },
     orderBy: { archivedAt: "desc" },
   });
