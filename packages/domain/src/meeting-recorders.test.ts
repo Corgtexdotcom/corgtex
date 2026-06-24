@@ -1361,6 +1361,63 @@ describe("meeting recorder domain", () => {
     });
   });
 
+  it("marks Recall terminal failures visible before stale timeout", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-06-24T15:55:00.000Z"));
+    try {
+      const { reconcileMeetingRecorders } = await import("./meeting-recorders");
+      prismaMock.meetingRecording.findMany
+        .mockResolvedValueOnce([])
+        .mockResolvedValueOnce([])
+        .mockResolvedValueOnce([{
+          id: "recording-low-credit",
+          workspaceId: "workspace-1",
+          meetingId: "meeting-1",
+          provider: "RECALL_AI",
+          status: "SCHEDULED",
+          externalBotId: "recall-bot-low-credit",
+          joinAt: new Date("2026-06-24T16:00:00.000Z"),
+          createdAt: new Date("2026-06-24T15:45:00.000Z"),
+          meeting: {
+            recordedAt: new Date("2026-06-24T16:00:00.000Z"),
+            scheduledEndAt: new Date("2026-06-24T17:00:00.000Z"),
+          },
+        }]);
+      fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({
+        status_changes: [{
+          code: "fatal",
+          sub_code: "insufficient_credit_balance",
+          message: "Recall account has insufficient credit balance.",
+        }],
+      }), { status: 200 }));
+      prismaMock.meetingRecording.update.mockResolvedValue({ id: "recording-low-credit", status: "FAILED" });
+      prismaMock.meetingRecorderProviderEvent.updateMany.mockResolvedValue({ count: 0 });
+
+      await expect(reconcileMeetingRecorders("workspace-1")).resolves.toMatchObject({
+        terminalFailed: 1,
+        staleFailed: 0,
+        recoveredTranscripts: 0,
+      });
+
+      expect(fetchMock).toHaveBeenCalledWith(
+        "https://us-west-2.recall.ai/api/v1/bot/recall-bot-low-credit/",
+        expect.objectContaining({ headers: expect.any(Object) }),
+      );
+      expect(prismaMock.meetingRecording.update).toHaveBeenCalledWith(expect.objectContaining({
+        where: { id: "recording-low-credit" },
+        data: expect.objectContaining({
+          status: "FAILED",
+          activeDedupeKey: null,
+          failureCode: "insufficient_credit_balance",
+          failureMessage: "Recall account has insufficient credit balance.",
+          endedAt: expect.any(Date),
+        }),
+      }));
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("does not mark future scheduled provider bots stale based on creation time", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-05-27T12:00:00.000Z"));

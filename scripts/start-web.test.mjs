@@ -1,7 +1,8 @@
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   configuredSeedScripts,
   flagEnabled,
+  localMigrationNames,
   resolveStartupMode,
   startupPlanForMode,
   verifyMigrations,
@@ -9,6 +10,7 @@ import {
 
 const prismaMock = vi.hoisted(() => ({
   migrationQueryStrings: [],
+  migrationRows: [],
   disconnect: vi.fn(),
 }));
 
@@ -17,7 +19,7 @@ vi.mock("@prisma/client", () => ({
     return {
       $queryRaw(strings) {
         prismaMock.migrationQueryStrings = [...strings];
-        return Promise.resolve([]);
+        return Promise.resolve(prismaMock.migrationRows);
       },
       $disconnect: prismaMock.disconnect,
     };
@@ -25,11 +27,25 @@ vi.mock("@prisma/client", () => ({
 }));
 
 describe("start-web startup modes", () => {
-  it("defaults to web startup without database mutations", () => {
-    expect(resolveStartupMode({})).toBe("web");
-    expect(startupPlanForMode("web")).toEqual({
-      runMigrations: false,
-      runSeeds: false,
+  beforeEach(() => {
+    prismaMock.migrationQueryStrings = [];
+    prismaMock.migrationRows = [];
+    prismaMock.disconnect.mockClear();
+  });
+
+  function appliedRows(migrations = localMigrationNames()) {
+    return migrations.map((migration_name) => ({
+      migration_name,
+      finished_at: new Date("2026-06-24T12:00:00.000Z"),
+      rolled_back_at: null,
+    }));
+  }
+
+  it("defaults to combined startup so web boot applies migrations", () => {
+    expect(resolveStartupMode({})).toBe("combined");
+    expect(startupPlanForMode("combined")).toEqual({
+      runMigrations: true,
+      runSeeds: true,
       verifyMigrations: true,
       startWeb: true,
     });
@@ -87,12 +103,42 @@ describe("start-web startup modes", () => {
   });
 
   it("does not treat rolled-back migration rows as requiring attention", async () => {
+    prismaMock.migrationRows = [
+      ...appliedRows(),
+      {
+        migration_name: "20260624000000_rolled_back",
+        finished_at: null,
+        rolled_back_at: new Date("2026-06-24T12:05:00.000Z"),
+      },
+    ];
+
     await verifyMigrations();
 
     const migrationQuery = prismaMock.migrationQueryStrings.join(" ");
-    expect(migrationQuery).toContain("finished_at IS NULL");
-    expect(migrationQuery).toContain("rolled_back_at IS NULL");
-    expect(migrationQuery).not.toContain("rolled_back_at IS NOT NULL");
+    expect(migrationQuery).toContain("FROM _prisma_migrations");
+    expect(prismaMock.disconnect).toHaveBeenCalled();
+  });
+
+  it("fails startup verification when a bundled migration is pending", async () => {
+    const bundledMigrations = localMigrationNames();
+    expect(bundledMigrations.length).toBeGreaterThan(0);
+    prismaMock.migrationRows = appliedRows(bundledMigrations.slice(0, -1));
+
+    await expect(verifyMigrations()).rejects.toThrow("pending=");
+    expect(prismaMock.disconnect).toHaveBeenCalled();
+  });
+
+  it("fails startup verification when a migration row is failed", async () => {
+    prismaMock.migrationRows = [
+      ...appliedRows(),
+      {
+        migration_name: "20260624000000_failed",
+        finished_at: null,
+        rolled_back_at: null,
+      },
+    ];
+
+    await expect(verifyMigrations()).rejects.toThrow("failed=20260624000000_failed");
     expect(prismaMock.disconnect).toHaveBeenCalled();
   });
 });

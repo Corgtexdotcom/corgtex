@@ -1,3 +1,5 @@
+import { existsSync, readdirSync } from "node:fs";
+import path from "node:path";
 import { NextResponse } from "next/server";
 import { prisma } from "@corgtex/shared";
 import {
@@ -5,6 +7,8 @@ import {
   resolveStorageProviderName,
   resolveStorageRuntimeConfig,
 } from "@corgtex/storage";
+
+const migrationsDir = path.resolve(process.cwd(), "..", "..", "prisma", "migrations");
 
 function handleRouteError(error: unknown) {
   console.error("Healthcheck failed.", error);
@@ -99,14 +103,29 @@ async function hasBrainKnowledgeSourceType() {
 
 async function hasHealthyMigrations() {
   try {
-    const failedMigrationsRaw = await prisma.$queryRaw`
-      SELECT COUNT(*) as count FROM _prisma_migrations 
-      WHERE finished_at IS NULL AND rolled_back_at IS NULL
+    const bundledMigrations = existsSync(migrationsDir)
+      ? readdirSync(migrationsDir, { withFileTypes: true })
+        .filter((entry) => entry.isDirectory() && entry.name !== "migration_lock.toml")
+        .map((entry) => entry.name)
+      : [];
+    const migrationRows = await prisma.$queryRaw<Array<{
+      migration_name: string;
+      finished_at: Date | null;
+      rolled_back_at: Date | null;
+    }>>`
+      SELECT migration_name, finished_at, rolled_back_at
+      FROM _prisma_migrations
     `;
-    const count = Number((failedMigrationsRaw as any[])[0]?.count || 0);
-    return count === 0;
-  } catch (e) {
-    // If table doesn't exist yet, it's not healthy
+    const failedMigration = migrationRows.some((row) => row.finished_at === null && row.rolled_back_at === null);
+    if (failedMigration) return false;
+
+    const appliedMigrations = new Set(
+      migrationRows
+        .filter((row) => row.finished_at !== null && row.rolled_back_at === null)
+        .map((row) => row.migration_name),
+    );
+    return bundledMigrations.every((migration) => appliedMigrations.has(migration));
+  } catch {
     return false;
   }
 }

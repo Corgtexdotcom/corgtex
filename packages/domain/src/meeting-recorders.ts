@@ -21,6 +21,7 @@ const DEFAULT_ENTRY_MESSAGE = "Corgtex Recorder is joining to transcribe this me
 const DEFAULT_MONTHLY_MINUTE_CAP = 6000;
 const AUTO_SCHEDULE_MIN_LEAD_MS = 10 * 60 * 1000;
 const STALE_RECORDING_TIMEOUT_MS = 6 * 60 * 60 * 1000;
+const RECALL_TERMINAL_STATUS_CHECK_GRACE_MS = 30 * 60 * 1000;
 const RECALL_TRANSCRIPT_RECOVERY_GRACE_MS = 20 * 60 * 1000;
 const FALLBACK_MEETING_DURATION_MS = 90 * 60 * 1000;
 const ACTIVE_RECORDING_STATUSES: MeetingRecordingStatus[] = ["PENDING", "SCHEDULED", "JOINING", "RECORDING"];
@@ -3354,6 +3355,45 @@ function recallBotIsDone(bot: unknown) {
   return recallBotTerminalStatus(bot) === "done";
 }
 
+function normalizedRecallFailureCode(value: string | null | undefined) {
+  const normalized = value?.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
+  return normalized || "recall_bot_failed";
+}
+
+function recallBotTerminalFailure(bot: unknown) {
+  const status = recallBotTerminalStatus(bot);
+  if (status !== "fatal" && status !== "failed") {
+    return null;
+  }
+
+  const data = isRecord(bot) && isRecord(bot.data) ? bot.data : bot;
+  const changes = isRecord(data) && Array.isArray(data.status_changes) ? data.status_changes : [];
+  const latest = changes.length > 0 && isRecord(changes[changes.length - 1]) ? changes[changes.length - 1] : {};
+  const nested = firstRecord(latest.data, latest.status);
+  const vendorCode = readString(latest.sub_code)
+    ?? readString(nested?.sub_code)
+    ?? readString(latest.code)
+    ?? readString(latest.status)
+    ?? readString(nested?.code)
+    ?? readString(nested?.status)
+    ?? status;
+  const message = readString(latest.message)
+    ?? readString(nested?.message)
+    ?? `Recall bot reached terminal status: ${vendorCode}.`;
+
+  return {
+    failureCode: normalizedRecallFailureCode(vendorCode),
+    failureMessage: message,
+  };
+}
+
+function terminalRecallCheckReady(recording: RecordingWithMeetingTime) {
+  const joinAt = recorderJoinInstant(recording);
+  if (!joinAt) return false;
+  const deltaMs = joinAt.getTime() - Date.now();
+  return deltaMs <= AUTO_SCHEDULE_MIN_LEAD_MS && deltaMs >= -RECALL_TERMINAL_STATUS_CHECK_GRACE_MS;
+}
+
 function transcriptRecoveryIsPending(error: unknown) {
   if (error instanceof AppError) {
     return error.code === "RECORDER_TRANSCRIPT_NOT_READY";
@@ -3489,7 +3529,50 @@ export async function reconcileMeetingRecorders(workspaceId: string) {
       },
     },
   }) as RecordingWithMeetingTime[];
-  const stale = staleCandidates.filter((recording) => staleRecordingReadyAt(recording).getTime() <= Date.now());
+  let terminalFailed = 0;
+  const terminalFailedIds = new Set<string>();
+  for (const recording of staleCandidates) {
+    if (recording.provider !== "RECALL_AI" || !recording.externalBotId || !terminalRecallCheckReady(recording)) {
+      continue;
+    }
+    try {
+      const bot = await fetchRecallBot(recording.externalBotId);
+      const failure = recallBotTerminalFailure(bot);
+      if (!failure) {
+        continue;
+      }
+      await prisma.meetingRecording.update({
+        where: { id: recording.id },
+        data: {
+          status: "FAILED",
+          activeDedupeKey: null,
+          failureCode: failure.failureCode,
+          failureMessage: failure.failureMessage,
+          endedAt: new Date(),
+        },
+      });
+      terminalFailed += 1;
+      terminalFailedIds.add(recording.id);
+      recorderLog("warn", "reconcile_recall_terminal_failed", {
+        workspaceId,
+        meetingId: recording.meetingId,
+        recordingId: recording.id,
+        provider: recording.provider,
+        previousStatus: recording.status,
+        failureCode: failure.failureCode,
+      });
+    } catch (error) {
+      recorderLog("warn", "reconcile_recall_terminal_check_failed", {
+        workspaceId,
+        meetingId: recording.meetingId,
+        recordingId: recording.id,
+        provider: recording.provider,
+        failureCode: providerFailureCode(error),
+      });
+    }
+  }
+
+  const stale = staleCandidates.filter((recording) => !terminalFailedIds.has(recording.id) && staleRecordingReadyAt(recording).getTime() <= Date.now());
   let staleFailed = 0;
   for (const recording of stale) {
     if (recording.externalBotId) {
@@ -3540,6 +3623,7 @@ export async function reconcileMeetingRecorders(workspaceId: string) {
   });
   return {
     staleFailed,
+    terminalFailed,
     recoveredTranscripts,
     duplicateRecordersSkipped: duplicateCleanup.duplicateRecordersSkipped,
     duplicateProviderBotsCancelled: duplicateCleanup.duplicateProviderBotsCancelled,
