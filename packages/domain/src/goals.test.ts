@@ -53,6 +53,9 @@ vi.mock("@corgtex/shared", () => ({
       create: vi.fn(),
       findUnique: vi.fn(),
     },
+    workspacePermalink: {
+      upsert: vi.fn(),
+    },
     $executeRaw: vi.fn(),
     $transaction: vi.fn((fn) => fn(prisma)),
   },

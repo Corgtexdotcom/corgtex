@@ -1,7 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
-import { createAction, listActions } from "@corgtex/domain";
+import { createAction, getWorkspacePermanentPathForEntity, listActions } from "@corgtex/domain";
 import type { ArchiveFilter } from "@corgtex/domain";
 import { withWorkspaceRoute } from "@/lib/route-handler";
+import { env } from "@corgtex/shared";
 
 export const GET = withWorkspaceRoute(async (req, { actor, workspaceId }) => {
   const archiveFilter = req.nextUrl.searchParams.get("archiveFilter") as ArchiveFilter | null;
@@ -17,5 +18,11 @@ export const POST = withWorkspaceRoute(async (req, { actor, workspaceId, members
     bodyMd: typeof body.bodyMd === "string" ? body.bodyMd : null,
     _membership: membership ?? undefined,
   });
-  return NextResponse.json({ action }, { status: 201 });
+  const origin = env.APP_URL.replace(/\/$/, "");
+  const permanentPath = await getWorkspacePermanentPathForEntity({ workspaceId, entityType: "Action", entityId: action.id });
+  return NextResponse.json({
+    action,
+    webUrl: `${origin}/workspaces/${workspaceId}/actions/${action.id}`,
+    permanentUrl: permanentPath ? `${origin}${permanentPath}` : null,
+  }, { status: 201 });
 });

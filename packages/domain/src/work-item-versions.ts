@@ -167,7 +167,6 @@ async function assertCanReadWorkItemVersions(
       where: {
         id: params.entityId,
         workspaceId: params.workspaceId,
-        archivedAt: null,
         ...privacyFilter(actor, membership),
       },
       select: { id: true, version: true },
@@ -181,7 +180,6 @@ async function assertCanReadWorkItemVersions(
       where: {
         id: params.entityId,
         workspaceId: params.workspaceId,
-        archivedAt: null,
         ...privacyFilter(actor, membership),
       },
       select: { id: true, version: true },
@@ -195,7 +193,6 @@ async function assertCanReadWorkItemVersions(
       where: {
         id: params.entityId,
         workspaceId: params.workspaceId,
-        archivedAt: null,
         ...privacyFilter(actor, membership),
       },
       select: { id: true, version: true },
@@ -208,7 +205,6 @@ async function assertCanReadWorkItemVersions(
     where: {
       id: params.entityId,
       workspaceId: params.workspaceId,
-      archivedAt: null,
     },
     select: { id: true, version: true },
   });

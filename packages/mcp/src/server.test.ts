@@ -56,6 +56,7 @@ const requireWorkspaceMembershipMock = vi.fn();
 const listDeliberationEntriesMock = vi.fn();
 const postDeliberationEntryMock = vi.fn();
 const resolveDeliberationEntryMock = vi.fn();
+const getWorkspacePermanentPathForEntityMock = vi.fn();
 
 vi.mock("@corgtex/domain", () => ({
   AppError: class AppError extends Error {
@@ -165,6 +166,7 @@ vi.mock("@corgtex/domain", () => ({
   createConversationMessage: createConversationMessageMock,
   listWorkItemVersions: listWorkItemVersionsMock,
   getWorkItemVersion: getWorkItemVersionMock,
+  getWorkspacePermanentPathForEntity: getWorkspacePermanentPathForEntityMock,
   listDeliberationEntries: listDeliberationEntriesMock,
   postDeliberationEntry: postDeliberationEntryMock,
   resolveDeliberationEntry: resolveDeliberationEntryMock,
@@ -302,6 +304,7 @@ describe("createCorgtexMcpServer", () => {
       currentVersion: 3,
       version: { id: "v-2", version: 2, previousState: { title: "Old" } },
     });
+    getWorkspacePermanentPathForEntityMock.mockReset().mockResolvedValue(null);
     listDeliberationEntriesMock.mockReset().mockResolvedValue([]);
     postDeliberationEntryMock.mockReset().mockResolvedValue({
       id: "entry-1",
@@ -1356,6 +1359,7 @@ describe("createCorgtexMcpServer", () => {
       title: "Transform 1,000 businesses",
       status: "ACTIVE",
       webUrl: "https://app.test/workspaces/ws-1/goals?view=tree&cadence=TEN_YEAR",
+      permanentUrl: null,
     });
   });
 

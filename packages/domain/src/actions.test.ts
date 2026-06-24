@@ -25,6 +25,9 @@ const { prismaMock } = vi.hoisted(() => ({
       create: vi.fn(),
       findUnique: vi.fn(),
     },
+    workspacePermalink: {
+      upsert: vi.fn(),
+    },
   },
 }));
 
@@ -75,6 +78,7 @@ describe("action domain lifecycle", () => {
     prismaMock.$executeRaw.mockResolvedValue({});
     prismaMock.workItemVersion.create.mockResolvedValue({});
     prismaMock.workItemVersion.findUnique.mockResolvedValue(null);
+    prismaMock.workspacePermalink.upsert.mockResolvedValue({});
   });
 
   it("creates form-submitted actions as private drafts by default", async () => {

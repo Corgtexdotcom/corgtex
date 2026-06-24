@@ -36,7 +36,7 @@ describe("meetingAgendaView", () => {
     expect(agendaItemHref("ws-1", { id: "item-2", text: "Proposal", sourceType: "Proposal", sourceId: "proposal-1" }))
       .toBe("/workspaces/ws-1/proposals/proposal-1");
     expect(agendaItemHref("ws-1", { id: "item-3", text: "Action", sourceType: "Action", sourceId: "action-1" }))
-      .toBe("/workspaces/ws-1/actions");
+      .toBe("/workspaces/ws-1/actions/action-1");
     expect(agendaItemHref("ws-1", { id: "item-4", text: "Check-in" })).toBeNull();
   });
 });

@@ -209,9 +209,9 @@ export default async function WorkspaceDashboard({
     .slice(0, 8); // top 8 categories
 
   const recentlyPublished = [
-    ...recentPublishedBase[0].map(i => ({ ...i, kind: "Action", link: `/workspaces/${workspaceId}/actions` })),
-    ...recentPublishedBase[1].map(i => ({ ...i, kind: "Tension", link: `/workspaces/${workspaceId}/tensions` })),
-    ...recentPublishedBase[2].map(i => ({ ...i, kind: "Proposal", link: `/workspaces/${workspaceId}/proposals` })),
+    ...recentPublishedBase[0].map(i => ({ ...i, kind: "Action", link: `/workspaces/${workspaceId}/actions/${i.id}` })),
+    ...recentPublishedBase[1].map(i => ({ ...i, kind: "Tension", link: `/workspaces/${workspaceId}/tensions/${i.id}` })),
+    ...recentPublishedBase[2].map(i => ({ ...i, kind: "Proposal", link: `/workspaces/${workspaceId}/proposals/${i.id}` })),
     ...recentPublishedBase[3].map(i => ({ ...i, kind: "Brain Article", link: `/workspaces/${workspaceId}/brain/${i.slug}`, author: i.ownerMember?.user })),
   ]
     .sort((a, b) => b.publishedAt!.getTime() - a.publishedAt!.getTime())
@@ -442,7 +442,7 @@ export default async function WorkspaceDashboard({
                   {cappedTeamActionItems.map((action) => {
                     const assigneeName = action.assigneeMember?.user?.displayName;
                     return (
-                      <Link key={action.id} href={`/workspaces/${workspaceId}/actions`} className="nr-rail-item">
+                      <Link key={action.id} href={`/workspaces/${workspaceId}/actions/${action.id}`} className="nr-rail-item">
                         <span className="nr-rail-title">{action.title}</span>
                         {action.bodyMd && <MarkdownExcerpt markdown={action.bodyMd} maxLength={110} as="span" className="nr-rail-copy" />}
                         {(action.dueAt || assigneeName) && (

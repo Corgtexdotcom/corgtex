@@ -37,6 +37,9 @@ vi.mock("@corgtex/shared", () => ({
       create: vi.fn(),
       findUnique: vi.fn(),
     },
+    workspacePermalink: {
+      upsert: vi.fn(),
+    },
     event: {
       createMany: vi.fn(),
     },

@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireGptAuth } from "@/lib/gpt-auth";
-import { createGoal, listGoals } from "@corgtex/domain";
+import { createGoal, getWorkspacePermanentPathForEntity, listGoals } from "@corgtex/domain";
 import { env } from "@corgtex/shared";
 import { handleRouteError } from "@/lib/http";
 import { disabledWorkspaceFeatureResponse } from "@/lib/workspace-feature-route";
@@ -90,12 +90,18 @@ export async function POST(request: NextRequest) {
     });
 
     const origin = env.APP_URL.replace(/\/$/, "");
+    const permanentPath = await getWorkspacePermanentPathForEntity({
+      workspaceId,
+      entityType: "Goal",
+      entityId: goal.id,
+    });
 
     return NextResponse.json({
       id: goal.id,
       title: goal.title,
       status: goal.status,
-      webUrl: `${origin}/workspaces/${workspaceId}/goals?view=tree&cadence=${goal.cadence}`,
+      webUrl: `${origin}/workspaces/${workspaceId}/goals?view=tree&cadence=${goal.cadence}&goalId=${goal.id}`,
+      permanentUrl: permanentPath ? `${origin}${permanentPath}` : null,
     });
   } catch (error) {
     return handleRouteError(error);

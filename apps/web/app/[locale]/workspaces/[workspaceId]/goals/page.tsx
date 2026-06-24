@@ -1,6 +1,8 @@
 import { useTranslations } from "next-intl";
 import { getTranslations } from "next-intl/server";
 import {
+  getGoal,
+  getWorkspaceArchiveRecord,
   getGoalTree,
   getMyGoalSlice,
   listCircles,
@@ -13,6 +15,7 @@ import { requirePageActor } from "@/lib/auth";
 import { requireWorkspaceFeature } from "@/lib/workspace-feature-flags";
 import { GoalProgress } from "./GoalProgress";
 import { RecognitionCard } from "./RecognitionCard";
+import { ArchivedItemBanner } from "@/lib/components/ArchivedItemBanner";
 import { MarkdownEditor } from "@/lib/components/MarkdownEditor";
 import { MarkdownRenderer } from "@/lib/components/MarkdownRenderer";
 import { ItemActions } from "@/lib/components/ui/ItemActions";
@@ -44,11 +47,11 @@ export default async function GoalsPage({
   searchParams,
 }: {
   params: Promise<{ workspaceId: string }>;
-  searchParams: Promise<{ view?: string; cadence?: string }>;
+  searchParams: Promise<{ view?: string; cadence?: string; goalId?: string }>;
 }) {
   const { workspaceId } = await params;
   await requireWorkspaceFeature(workspaceId, "GOALS");
-  const { view = "tree", cadence = "QUARTERLY" } = await searchParams;
+  const { view = "tree", cadence = "QUARTERLY", goalId } = await searchParams;
   const actor = await requirePageActor();
   const t = await getTranslations("goals");
   const membership = await requireWorkspaceMembership({ actor, workspaceId });
@@ -59,6 +62,47 @@ export default async function GoalsPage({
     listCircles(workspaceId),
     listMembers(workspaceId),
   ]);
+  const focusedGoal = goalId
+    ? await getGoal(actor, { workspaceId, goalId, includeArchived: true, _membership: membership })
+    : null;
+  const focusedArchiveRecord = focusedGoal?.archivedAt
+    ? await getWorkspaceArchiveRecord(actor, { workspaceId, entityType: "Goal", entityId: focusedGoal.id })
+    : null;
+
+  if (focusedGoal?.archivedAt) {
+    return (
+      <div className="max-w-5xl mx-auto p-6 space-y-8">
+        <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 border-b border-line pb-4">
+          <div>
+            <h1 className="text-3xl font-bold text-text">{focusedGoal.title}</h1>
+            <p className="text-muted mt-1">{t("description")}</p>
+          </div>
+          <a
+            href={`/workspaces/${workspaceId}/goals?view=tree&cadence=${focusedGoal.cadence}`}
+            className="secondary small"
+          >
+            {t("treeView")}
+          </a>
+        </div>
+        <ArchivedItemBanner
+          archivedAt={focusedGoal.archivedAt}
+          archivedBy={focusedArchiveRecord?.archivedByLabel ?? focusedArchiveRecord?.archivedByUserId}
+          archiveReason={focusedGoal.archiveReason}
+          restoreHref={canManageAnyGoal ? `/workspaces/${workspaceId}/audit?tab=archive&archiveEntityType=Goal` : null}
+        />
+        <GoalNode
+          workspaceId={workspaceId}
+          goal={focusedGoal}
+          level={0}
+          allGoals={[]}
+          circles={[]}
+          members={[]}
+          canManageAnyGoal={false}
+          membershipId={null}
+        />
+      </div>
+    );
+  }
 
   let tree: any[] = [];
   let mySlice: any[] = [];
@@ -100,6 +144,21 @@ export default async function GoalsPage({
           </a>
         </div>
       </div>
+
+      {focusedGoal && (
+        <section className="ws-section">
+          <GoalNode
+            workspaceId={workspaceId}
+            goal={focusedGoal}
+            level={0}
+            allGoals={allGoals}
+            circles={circles}
+            members={members}
+            canManageAnyGoal={canManageAnyGoal}
+            membershipId={membership?.id ?? null}
+          />
+        </section>
+      )}
 
       {view === "tree" && (
         <section className="ws-section">

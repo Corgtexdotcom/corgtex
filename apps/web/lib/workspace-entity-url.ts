@@ -8,8 +8,11 @@ export function resolveWorkspaceEntityUrl(
   const normalizedType = entityType.toLowerCase();
   if (normalizedType === "proposal") return `/workspaces/${workspaceId}/proposals/${entityId}`;
   if (normalizedType === "tension") return `/workspaces/${workspaceId}/tensions/${entityId}`;
-  if (normalizedType === "action") return `/workspaces/${workspaceId}/actions`;
+  if (normalizedType === "action") return `/workspaces/${workspaceId}/actions/${entityId}`;
+  if (normalizedType === "brainarticle") return `/workspaces/${workspaceId}/brain/${entityId}`;
   if (normalizedType === "meeting") return `/workspaces/${workspaceId}/meetings/${entityId}`;
+  if (normalizedType === "goal") return `/workspaces/${workspaceId}/goals?goalId=${encodeURIComponent(entityId)}`;
+  if (normalizedType === "workspacepermalink") return `/workspaces/${workspaceId}/items/${entityId}`;
   if (normalizedType === "adviceprocess") return `/workspaces/${workspaceId}/proposals?status=OPEN`;
   if (normalizedType === "advicerecord") return `/workspaces/${workspaceId}/proposals?status=OPEN`;
   if (normalizedType === "spend" || normalizedType === "spendrequest") return `/workspaces/${workspaceId}/finance`;

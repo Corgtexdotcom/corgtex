@@ -8,8 +8,8 @@ export const dynamic = "force-dynamic";
 function backHref(workspaceId: string, entityType: string, entityId: string) {
   if (entityType === "Tension") return `/workspaces/${workspaceId}/tensions/${entityId}`;
   if (entityType === "Proposal") return `/workspaces/${workspaceId}/proposals/${entityId}`;
-  if (entityType === "Action") return `/workspaces/${workspaceId}/actions`;
-  if (entityType === "Goal") return `/workspaces/${workspaceId}/goals`;
+  if (entityType === "Action") return `/workspaces/${workspaceId}/actions/${entityId}`;
+  if (entityType === "Goal") return `/workspaces/${workspaceId}/goals?goalId=${encodeURIComponent(entityId)}`;
   return `/workspaces/${workspaceId}`;
 }
 

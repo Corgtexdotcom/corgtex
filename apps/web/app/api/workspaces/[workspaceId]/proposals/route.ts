@@ -1,7 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
-import { createProposal, createProposalFromTension, listProposals, requireWorkspaceMembership } from "@corgtex/domain";
+import { createProposal, createProposalFromTension, getWorkspacePermanentPathForEntity, listProposals, requireWorkspaceMembership } from "@corgtex/domain";
 import type { ArchiveFilter } from "@corgtex/domain";
+import { env } from "@corgtex/shared";
 import { resolveRequestActor } from "@/lib/auth";
 import { handleRouteError, validateBody } from "@/lib/http";
 
@@ -54,7 +55,13 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
           bodyMd: body.bodyMd!,
           relatedActionIds: body.relatedActionIds ?? null,
         });
-    return NextResponse.json({ proposal }, { status: 201 });
+    const origin = env.APP_URL.replace(/\/$/, "");
+    const permanentPath = await getWorkspacePermanentPathForEntity({ workspaceId, entityType: "Proposal", entityId: proposal.id });
+    return NextResponse.json({
+      proposal,
+      webUrl: `${origin}/workspaces/${workspaceId}/proposals/${proposal.id}`,
+      permanentUrl: permanentPath ? `${origin}${permanentPath}` : null,
+    }, { status: 201 });
   } catch (error) {
     return handleRouteError(error);
   }

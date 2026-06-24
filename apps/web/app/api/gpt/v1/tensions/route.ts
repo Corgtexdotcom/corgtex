@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireGptAuth } from "@/lib/gpt-auth";
-import { listTensions, createTension } from "@corgtex/domain";
+import { listTensions, createTension, getWorkspacePermanentPathForEntity } from "@corgtex/domain";
 import { env } from "@corgtex/shared";
 import { handleRouteError } from "@/lib/http";
 
@@ -48,11 +48,17 @@ export async function POST(request: NextRequest) {
     });
 
     const origin = env.APP_URL.replace(/\/$/, "");
+    const permanentPath = await getWorkspacePermanentPathForEntity({
+      workspaceId,
+      entityType: "Tension",
+      entityId: tension.id,
+    });
 
     return NextResponse.json({
       id: tension.id,
       status: tension.status,
-      webUrl: `${origin}/workspaces/${workspaceId}/tensions`,
+      webUrl: `${origin}/workspaces/${workspaceId}/tensions/${tension.id}`,
+      permanentUrl: permanentPath ? `${origin}${permanentPath}` : null,
     });
   } catch (error) {
     return handleRouteError(error);

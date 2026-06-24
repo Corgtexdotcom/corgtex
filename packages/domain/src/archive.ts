@@ -6,6 +6,12 @@ import { requireWorkspaceMembership } from "./auth";
 import { invariant } from "./errors";
 import { defaultStorage } from "@corgtex/storage";
 import { withdrawActiveApprovalFlowForSubject } from "./approvals";
+import {
+  ensureWorkspacePermalink,
+  isWorkspacePermalinkEntityType,
+  workspaceEntityCanonicalPath,
+  workspacePermanentPath,
+} from "./permalinks";
 
 export type ArchiveFilter = "active" | "archived" | "all";
 
@@ -311,6 +317,24 @@ async function activeArchiveRecord(tx: Prisma.TransactionClient, workspaceId: st
   });
 }
 
+export async function getWorkspaceArchiveRecord(actor: AppActor, params: {
+  workspaceId: string;
+  entityType: string;
+  entityId: string;
+}) {
+  await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
+  return prisma.workspaceArchiveRecord.findFirst({
+    where: {
+      workspaceId: params.workspaceId,
+      entityType: params.entityType,
+      entityId: params.entityId,
+      restoredAt: null,
+      purgedAt: null,
+    },
+    orderBy: { archivedAt: "desc" },
+  });
+}
+
 export async function archiveWorkspaceArtifact(actor: AppActor, params: {
   workspaceId: string;
   entityType: string;
@@ -343,6 +367,15 @@ export async function archiveWorkspaceArtifact(actor: AppActor, params: {
         ...(config.archiveData ? config.archiveData(record) : {}),
       },
     });
+
+    if (isWorkspacePermalinkEntityType(config.entityType)) {
+      await ensureWorkspacePermalink(tx, actor, {
+        workspaceId: params.workspaceId,
+        entityType: config.entityType,
+        entityId: record.id,
+        canonicalPath: workspaceEntityCanonicalPath(params.workspaceId, config.entityType, record),
+      });
+    }
 
     await tx.workspaceArchiveRecord.create({
       data: {
@@ -512,7 +545,7 @@ export async function listArchivedWorkspaceArtifacts(actor: AppActor, params: {
   const take = params.take ?? 100;
   const skip = params.skip ?? 0;
 
-  return prisma.workspaceArchiveRecord.findMany({
+  const records = await prisma.workspaceArchiveRecord.findMany({
     where: {
       workspaceId: params.workspaceId,
       ...(params.entityType ? { entityType: params.entityType } : {}),
@@ -522,5 +555,32 @@ export async function listArchivedWorkspaceArtifacts(actor: AppActor, params: {
     orderBy: { archivedAt: "desc" },
     take,
     skip,
+  });
+  if (records.length === 0) return records;
+
+  const permalinkEligibleRecords = records.filter((record) => isWorkspacePermalinkEntityType(record.entityType));
+  if (permalinkEligibleRecords.length === 0) {
+    return records.map((record) => ({ ...record, permanentPath: null }));
+  }
+
+  const permalinks = await prisma.workspacePermalink.findMany({
+    where: {
+      workspaceId: params.workspaceId,
+      OR: permalinkEligibleRecords.map((record) => ({
+        entityType: record.entityType,
+        entityId: record.entityId,
+      })),
+    },
+  });
+  const permalinkByEntity = new Map(
+    permalinks.map((permalink) => [`${permalink.entityType}:${permalink.entityId}`, permalink]),
+  );
+
+  return records.map((record) => {
+    const permalink = permalinkByEntity.get(`${record.entityType}:${record.entityId}`);
+    return {
+      ...record,
+      permanentPath: permalink ? workspacePermanentPath(params.workspaceId, permalink.id) : null,
+    };
   });
 }

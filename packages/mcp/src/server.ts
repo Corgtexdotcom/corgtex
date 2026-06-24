@@ -137,6 +137,7 @@ import {
   listWorkItemVersions,
   getWorkItemVersion,
   AppError,
+  getWorkspacePermanentPathForEntity,
   requireWorkspaceMembership,
 } from "@corgtex/domain";
 import type { AgentScope } from "@corgtex/domain";
@@ -154,6 +155,16 @@ import { requireScope } from "./auth";
 function webUrl(workspaceId: string, path: string): string {
   const origin = env.APP_URL.replace(/\/$/, "");
   return `${origin}/workspaces/${workspaceId}${path}`;
+}
+
+function appUrl(path: string): string {
+  const origin = env.APP_URL.replace(/\/$/, "");
+  return `${origin}${path}`;
+}
+
+async function permanentUrl(workspaceId: string, entityType: string, entityId: string) {
+  const path = await getWorkspacePermanentPathForEntity({ workspaceId, entityType, entityId });
+  return path ? appUrl(path) : null;
 }
 
 function accountWebUrl(workspaceId: string, accountId: string, view?: string) {
@@ -2275,12 +2286,14 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
     async ({ title, bodyMd, summary, authorMemberId }: { title: string; bodyMd: string; summary?: string; authorMemberId?: string }) => {
       requireScope(sessionCtx, "proposals:write");
       const proposal = await createProposal(actor, { workspaceId, title, bodyMd, summary, authorMemberId });
+      const permanent = await permanentUrl(workspaceId, "Proposal", proposal.id);
       return jsonResult({
         id: proposal.id,
         title: proposal.title,
         status: proposal.status,
         version: proposal.version,
         webUrl: webUrl(workspaceId, `/proposals/${proposal.id}`),
+        permanentUrl: permanent,
       });
     },
   );
@@ -2467,11 +2480,13 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
     async ({ title, bodyMd, assigneeMemberId, authorMemberId }: { title: string; bodyMd?: string; assigneeMemberId?: string; authorMemberId?: string }) => {
       requireScope(sessionCtx, "actions:write");
       const action = await createAction(actor, { workspaceId, title, bodyMd, assigneeMemberId, authorMemberId });
+      const permanent = await permanentUrl(workspaceId, "Action", action.id);
       return jsonResult({
         id: action.id,
         status: action.status,
         version: action.version,
         webUrl: webUrl(workspaceId, `/actions/${action.id}`),
+        permanentUrl: permanent,
       });
     },
   );
@@ -2612,11 +2627,13 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
     async ({ title, bodyMd, raisedByMemberId, authorMemberId }: { title: string; bodyMd?: string; raisedByMemberId?: string; authorMemberId?: string }) => {
       requireScope(sessionCtx, "tensions:write");
       const tension = await createTension(actor, { workspaceId, title, bodyMd, raisedByMemberId, authorMemberId });
+      const permanent = await permanentUrl(workspaceId, "Tension", tension.id);
       return jsonResult({
         id: tension.id,
         status: tension.status,
         version: tension.version,
         webUrl: webUrl(workspaceId, `/tensions/${tension.id}`),
+        permanentUrl: permanent,
       });
     },
   );
@@ -2916,6 +2933,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
         status: goal.status,
         version: goal.version,
         webUrl: webUrl(workspaceId, `/goals?view=tree&cadence=${goal.cadence}`),
+        permanentUrl: await permanentUrl(workspaceId, "Goal", goal.id),
       });
     },
   );
@@ -3276,6 +3294,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
           status: "meeting_created",
           recordedAt: meeting.recordedAt,
           webUrl: webUrl(workspaceId, `/meetings/${meeting.id}`),
+          permanentUrl: await permanentUrl(workspaceId, "Meeting", meeting.id),
         });
       }
 
@@ -3297,6 +3316,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
         status: result.status,
         recordedAt: result.meeting.recordedAt,
         webUrl: webUrl(workspaceId, `/meetings/${result.meeting.id}`),
+        permanentUrl: await permanentUrl(workspaceId, "Meeting", result.meeting.id),
       });
     },
   );
@@ -3408,6 +3428,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
         slug: article.slug,
         type: article.type,
         webUrl: webUrl(workspaceId, `/brain/${article.slug}`),
+        permanentUrl: await permanentUrl(workspaceId, "BrainArticle", article.id),
       });
     },
   );

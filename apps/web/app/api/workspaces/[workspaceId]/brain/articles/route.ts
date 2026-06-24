@@ -1,9 +1,10 @@
 import type { BrainArticleAuthority, BrainArticleType } from "@prisma/client";
 import { NextRequest, NextResponse } from "next/server";
-import { createArticle, listArticles } from "@corgtex/domain";
+import { createArticle, getWorkspacePermanentPathForEntity, listArticles } from "@corgtex/domain";
 import type { ArchiveFilter } from "@corgtex/domain";
 import { resolveRequestActor } from "@/lib/auth";
 import { handleRouteError } from "@/lib/http";
+import { env } from "@corgtex/shared";
 
 export async function GET(request: NextRequest, { params }: { params: Promise<{ workspaceId: string }> }) {
   try {
@@ -50,7 +51,13 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
       staleAfterDays: typeof body.staleAfterDays === "number" ? body.staleAfterDays : undefined,
       sourceIds: Array.isArray(body.sourceIds) ? body.sourceIds.map(String) : undefined,
     });
-    return NextResponse.json({ article }, { status: 201 });
+    const origin = env.APP_URL.replace(/\/$/, "");
+    const permanentPath = await getWorkspacePermanentPathForEntity({ workspaceId, entityType: "BrainArticle", entityId: article.id });
+    return NextResponse.json({
+      article,
+      webUrl: `${origin}/workspaces/${workspaceId}/brain/${article.slug}`,
+      permanentUrl: permanentPath ? `${origin}${permanentPath}` : null,
+    }, { status: 201 });
   } catch (error) {
     return handleRouteError(error);
   }

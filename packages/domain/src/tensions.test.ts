@@ -34,6 +34,9 @@ const { prismaMock } = vi.hoisted(() => {
       create: vi.fn(),
       findUnique: vi.fn(),
     },
+    workspacePermalink: {
+      upsert: vi.fn(),
+    },
     event: {
       createMany: vi.fn(),
     },
@@ -60,6 +63,7 @@ describe("tensions domain", () => {
     prismaMock.$executeRaw.mockResolvedValue({});
     prismaMock.workItemVersion.create.mockResolvedValue({});
     prismaMock.workItemVersion.findUnique.mockResolvedValue(null);
+    prismaMock.workspacePermalink.upsert.mockResolvedValue({});
     prismaMock.event.createMany.mockResolvedValue({ count: 1 });
     prismaMock.member.findFirst.mockResolvedValue({ id: "raised-member-1" });
     prismaMock.tension.count.mockResolvedValue(1);

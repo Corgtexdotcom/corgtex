@@ -28,6 +28,10 @@ const { prismaMock, storageDeleteMock } = vi.hoisted(() => {
       findMany: vi.fn(),
       update: vi.fn(),
     },
+    workspacePermalink: {
+      findMany: vi.fn(),
+      upsert: vi.fn(),
+    },
     auditLog: {
       create: vi.fn(),
     },
@@ -82,6 +86,8 @@ describe("workspace archive domain", () => {
     prismaMock.approvalFlow.updateMany.mockResolvedValue({ count: 1 });
     prismaMock.workspaceArchiveRecord.create.mockResolvedValue({});
     prismaMock.workspaceArchiveRecord.update.mockResolvedValue({});
+    prismaMock.workspacePermalink.findMany.mockResolvedValue([]);
+    prismaMock.workspacePermalink.upsert.mockResolvedValue({});
     prismaMock.workItemVersion.deleteMany.mockResolvedValue({ count: 0 });
   });
 
@@ -227,7 +233,7 @@ describe("workspace archive domain", () => {
     await expect(listArchivedWorkspaceArtifacts(actor, {
       workspaceId: "workspace-1",
       entityType: "Action",
-    })).resolves.toEqual([{ id: "archive-1" }]);
+    })).resolves.toEqual([{ id: "archive-1", permanentPath: null }]);
 
     expect(prismaMock.workspaceArchiveRecord.findMany).toHaveBeenCalledWith(expect.objectContaining({
       where: expect.objectContaining({

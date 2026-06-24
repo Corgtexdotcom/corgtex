@@ -32,6 +32,9 @@ const { prismaMock } = vi.hoisted(() => {
     workspaceArchiveRecord: {
       create: vi.fn(),
     },
+    workspacePermalink: {
+      upsert: vi.fn(),
+    },
     auditLog: {
       create: vi.fn(),
     },
@@ -68,6 +71,7 @@ describe("meetings domain", () => {
     prismaMock.event.createMany.mockResolvedValue({ count: 1 });
     prismaMock.meetingInsight.deleteMany.mockResolvedValue({ count: 0 });
     prismaMock.meetingTranscriptSourceRecord.updateMany.mockResolvedValue({ count: 1 });
+    prismaMock.workspacePermalink.upsert.mockResolvedValue({});
   });
 
   it("listMeetings returns meetings newest first", async () => {

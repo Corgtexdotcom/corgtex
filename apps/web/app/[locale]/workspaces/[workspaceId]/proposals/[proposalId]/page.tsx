@@ -1,10 +1,11 @@
 import { notFound } from "next/navigation";
 import Link from "next/link";
-import { getProposal, listAdviceRequests, listDeliberationEntries, listWorkItemEvidence, listWorkItemVersions, requireWorkspaceMembership } from "@corgtex/domain";
+import { getProposal, getWorkspaceArchiveRecord, listAdviceRequests, listDeliberationEntries, listWorkItemEvidence, listWorkItemVersions, requireWorkspaceMembership } from "@corgtex/domain";
 import { requirePageActor } from "@/lib/auth";
 import { MarkdownEditor } from "@/lib/components/MarkdownEditor";
 import { MarkdownRenderer } from "@/lib/components/MarkdownRenderer";
 import { WorkItemResolutionDialog } from "@/lib/components/WorkItemResolutionDialog";
+import { ArchivedItemBanner } from "@/lib/components/ArchivedItemBanner";
 import { DeliberationThread } from "@/lib/components/DeliberationThread";
 import { DeliberationComposer } from "@/lib/components/DeliberationComposer";
 import { getDeliberationTargets } from "@/lib/deliberation-targets";
@@ -27,11 +28,12 @@ export default async function ProposalDetailPage({
   const tWork = await getTranslations("workItems");
   const format = await getFormatter();
 
-  const proposal = await getProposal(actor, { workspaceId, proposalId });
+  const proposal = await getProposal(actor, { workspaceId, proposalId, includeArchived: true });
   if (!proposal) notFound();
+  const isArchived = Boolean(proposal.archivedAt);
   const membership = await requireWorkspaceMembership({ actor, workspaceId });
 
-  const [deliberationEntries, versionHistory, evidence, adviceRequests] = await Promise.all([
+  const [deliberationEntries, versionHistory, evidence, adviceRequests, archiveRecord] = await Promise.all([
     listDeliberationEntries(actor, {
       workspaceId,
       parentType: "PROPOSAL",
@@ -39,7 +41,10 @@ export default async function ProposalDetailPage({
     }),
     listWorkItemVersions(actor, { workspaceId, entityType: "PROPOSAL", entityId: proposalId }),
     listWorkItemEvidence(actor, { workspaceId, entityType: "Proposal", entityId: proposalId }),
-    listAdviceRequests(actor, { workspaceId, subjectType: "PROPOSAL", subjectId: proposalId, status: "ACTIVE" }),
+    isArchived ? Promise.resolve([]) : listAdviceRequests(actor, { workspaceId, subjectType: "PROPOSAL", subjectId: proposalId, status: "ACTIVE" }),
+    isArchived
+      ? getWorkspaceArchiveRecord(actor, { workspaceId, entityType: "Proposal", entityId: proposal.id })
+      : Promise.resolve(null),
   ]);
   const deliberationTargets = await getDeliberationTargets({ actor, workspaceId, parentCircleId: proposal.circleId });
   const targetOptions = deliberationTargets.options.map((option) => ({
@@ -79,11 +84,11 @@ export default async function ProposalDetailPage({
   const actorUserId = actor.kind === "user" ? actor.user.id : null;
   const actorMemberId = deliberationTargets.actorMemberId;
   const actorCircleIds = new Set(deliberationTargets.actorCircleIds);
-  const canManage = actor.kind === "agent" || membership?.role === "ADMIN" || isAuthor;
-  const canEditContent = proposal.status === "DRAFT" ? canManage : proposal.status === "OPEN" && isAuthor;
-  const canResolve = actor.kind === "agent" || Boolean(membership);
-  const canRequestAdvice = actor.kind === "user" && proposal.status === "OPEN" && !proposal.isPrivate && (isAuthor || membership?.role === "ADMIN");
-  const canManageEntry = (entry: (typeof deliberationEntries)[number]) => Boolean(
+  const canManage = !isArchived && (actor.kind === "agent" || membership?.role === "ADMIN" || isAuthor);
+  const canEditContent = !isArchived && proposal.status === "DRAFT" ? canManage : !isArchived && proposal.status === "OPEN" && isAuthor;
+  const canResolve = !isArchived && (actor.kind === "agent" || Boolean(membership));
+  const canRequestAdvice = !isArchived && actor.kind === "user" && proposal.status === "OPEN" && !proposal.isPrivate && (isAuthor || membership?.role === "ADMIN");
+  const canManageEntry = (entry: (typeof deliberationEntries)[number]) => !isArchived && Boolean(
     isAdmin
       || (actorUserId && entry.authorUserId === actorUserId)
       || isAuthor
@@ -152,6 +157,15 @@ export default async function ProposalDetailPage({
           </span>
         </div>
       </div>
+
+      {isArchived && (
+        <ArchivedItemBanner
+          archivedAt={proposal.archivedAt}
+          archivedBy={archiveRecord?.archivedByLabel ?? archiveRecord?.archivedByUserId}
+          archiveReason={proposal.archiveReason}
+          restoreHref={isAdmin ? `/workspaces/${workspaceId}/audit?tab=archive&archiveEntityType=Proposal` : null}
+        />
+      )}
 
       <div className="nr-detail-grid">
         {/* Main Article Body */}
@@ -233,7 +247,7 @@ export default async function ProposalDetailPage({
                             </div>
                           </div>
                         )}
-                        {proposal.status === "OPEN" && (
+                        {!isArchived && proposal.status === "OPEN" && (
                           <details style={{ marginTop: 16 }}>
                             <summary className="secondary small nr-hide-marker" style={{ cursor: "pointer", display: "inline-block" }}>{t("btnReplyToAdviceRequest")}</summary>
                             <div style={{ marginTop: 12 }}>
@@ -321,13 +335,13 @@ export default async function ProposalDetailPage({
               canEdit: canManageEntry(entry),
               canResolve: canManageEntry(entry),
             }))}
-            canResolve={isAuthor || actor.kind === "agent"}
+            canResolve={!isArchived && (isAuthor || actor.kind === "agent")}
             resolveAction={resolveDeliberationEntryAction}
             updateAction={updateDeliberationEntryAction}
             hiddenFields={{ workspaceId, proposalId }}
           />
 
-          {proposal.status === "OPEN" && (
+          {!isArchived && proposal.status === "OPEN" && (
             <DeliberationComposer
               postAction={postDeliberationEntryAction}
               hiddenFields={{ workspaceId, proposalId }}

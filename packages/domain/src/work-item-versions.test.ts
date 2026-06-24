@@ -38,7 +38,7 @@ describe("work item versions", () => {
     txMock.workItemVersion.findMany.mockResolvedValue([]);
   });
 
-  it("requires active non-archived access before listing historical snapshots", async () => {
+  it("requires workspace and privacy access before listing historical snapshots", async () => {
     const { listWorkItemVersions } = await import("./work-item-versions");
 
     await listWorkItemVersions(
@@ -50,7 +50,6 @@ describe("work item versions", () => {
       where: {
         id: "tension-1",
         workspaceId: "ws-1",
-        archivedAt: null,
         isPrivate: false,
       },
       select: { id: true, version: true },
