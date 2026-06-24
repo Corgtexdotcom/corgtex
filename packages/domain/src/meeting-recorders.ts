@@ -12,6 +12,7 @@ import { enterpriseServiceToDb } from "./ai-workspaces";
 import { requireWorkspaceMembership } from "./auth";
 import { AppError, invariant } from "./errors";
 import { intakeMeetingTranscript } from "./meeting-transcript-intake";
+import { ensureWorkspacePermalink, workspaceEntityCanonicalPath } from "./permalinks";
 
 export const MEETING_RECORDERS_FEATURE_FLAG = "MEETING_RECORDERS";
 
@@ -2219,23 +2220,33 @@ export async function runMeetingRecorderSmoke(params: {
   }
 
   try {
-    const meeting = await prisma.meeting.create({
-      data: {
+    const recorderActor = systemRecorderActor(params.workspaceId);
+    const meeting = await prisma.$transaction(async (tx) => {
+      const created = await tx.meeting.create({
+        data: {
+          workspaceId: params.workspaceId,
+          title: "[SMOKE] Meeting recorder",
+          source: "meeting-recorder-smoke",
+          externalId: `meeting-recorder-smoke:${smokeRun.id}`,
+          calendarExternalId: `meeting-recorder-smoke:${smokeRun.id}`,
+          meetingUrl: url,
+          meetingUrlHash: meetingUrlHash(url as string),
+          status: "SCHEDULED",
+          recordedAt: params.joinAt,
+          scheduledEndAt: new Date(params.joinAt.getTime() + 30 * 60 * 1000),
+          participantIds: [],
+          participantEmails: [],
+        },
+      });
+      await ensureWorkspacePermalink(tx, recorderActor, {
         workspaceId: params.workspaceId,
-        title: "[SMOKE] Meeting recorder",
-        source: "meeting-recorder-smoke",
-        externalId: `meeting-recorder-smoke:${smokeRun.id}`,
-        calendarExternalId: `meeting-recorder-smoke:${smokeRun.id}`,
-        meetingUrl: url,
-        meetingUrlHash: meetingUrlHash(url as string),
-        status: "SCHEDULED",
-        recordedAt: params.joinAt,
-        scheduledEndAt: new Date(params.joinAt.getTime() + 30 * 60 * 1000),
-        participantIds: [],
-        participantEmails: [],
-      },
+        entityType: "Meeting",
+        entityId: created.id,
+        canonicalPath: workspaceEntityCanonicalPath(params.workspaceId, "Meeting", created),
+      });
+      return created;
     });
-    const recording = await scheduleMeetingRecording(systemRecorderActor(params.workspaceId), {
+    const recording = await scheduleMeetingRecording(recorderActor, {
       workspaceId: params.workspaceId,
       meetingId: meeting.id,
       provider,

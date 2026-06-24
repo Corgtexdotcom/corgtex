@@ -10,6 +10,7 @@ import { privacyFilter } from "./privacy";
 import { archiveFilterWhere, archiveWorkspaceArtifact, type ArchiveFilter } from "./archive";
 import { requireDraftManager } from "./draft-permissions";
 import { createWorkItemEvidenceLinks } from "./work-item-evidence";
+import { ensureWorkspacePermalink, workspaceEntityCanonicalPath } from "./permalinks";
 import {
   changedDataFields,
   pickJsonSnapshot,
@@ -385,6 +386,7 @@ export async function listProposals(actor: AppActor, workspaceId: string, opts?:
 export async function getProposal(actor: AppActor, params: {
   workspaceId: string;
   proposalId: string;
+  includeArchived?: boolean;
 }) {
   const membership = await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
   const proposal = await prisma.proposal.findFirst({
@@ -392,7 +394,7 @@ export async function getProposal(actor: AppActor, params: {
       id: params.proposalId,
       workspaceId: params.workspaceId,
       ...privacyFilter(actor, membership),
-      archivedAt: null,
+      ...(params.includeArchived ? {} : { archivedAt: null }),
     },
     include: {
       author: { select: { id: true, displayName: true, email: true } },
@@ -447,6 +449,13 @@ export async function createProposal(actor: AppActor, params: CreateProposalPara
         publishedAt: openedAt,
         autoApproveAt: null,
       },
+    });
+
+    await ensureWorkspacePermalink(tx, actor, {
+      workspaceId: params.workspaceId,
+      entityType: "Proposal",
+      entityId: proposal.id,
+      canonicalPath: workspaceEntityCanonicalPath(params.workspaceId, "Proposal", proposal),
     });
 
     if (sourceTension) {
@@ -559,6 +568,13 @@ export async function createProposalFromTension(actor: AppActor, params: CreateP
         publishedAt: openedAt,
         autoApproveAt: null,
       },
+    });
+
+    await ensureWorkspacePermalink(tx, actor, {
+      workspaceId: params.workspaceId,
+      entityType: "Proposal",
+      entityId: proposal.id,
+      canonicalPath: workspaceEntityCanonicalPath(params.workspaceId, "Proposal", proposal),
     });
 
     await tx.tension.update({

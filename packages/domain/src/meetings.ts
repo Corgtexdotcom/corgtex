@@ -6,6 +6,7 @@ import type { Meeting, MeetingRecordingStatus, MeetingStatus, Prisma } from "@pr
 import { appendEvents } from "./events";
 import { requireWorkspaceMembership } from "./auth";
 import { archiveFilterWhere, archiveWorkspaceArtifact, type ArchiveFilter } from "./archive";
+import { ensureWorkspacePermalink, workspaceEntityCanonicalPath } from "./permalinks";
 import { invariant } from "./errors";
 
 const DEFAULT_OCCURRENCE_WINDOW_DAYS = 30;
@@ -539,12 +540,12 @@ export async function listUpcomingMeetings(workspaceId: string, opts?: { from?: 
   });
 }
 
-export async function getMeeting(workspaceId: string, meetingId: string) {
+export async function getMeeting(workspaceId: string, meetingId: string, opts?: { includeArchived?: boolean }) {
   const meeting = await prisma.meeting.findFirst({
     where: {
       id: meetingId,
       workspaceId,
-      archivedAt: null,
+      ...(opts?.includeArchived ? {} : { archivedAt: null }),
     },
     include: {
       series: true,
@@ -752,6 +753,13 @@ export async function createScheduledMeeting(actor: AppActor, params: {
         participantIds: normalizeIds(params.participantIds),
         participantEmails: normalizeEmails(params.participantEmails),
       },
+    });
+
+    await ensureWorkspacePermalink(tx, actor, {
+      workspaceId: params.workspaceId,
+      entityType: "Meeting",
+      entityId: meeting.id,
+      canonicalPath: workspaceEntityCanonicalPath(params.workspaceId, "Meeting", meeting),
     });
 
     await tx.auditLog.create({
@@ -1170,6 +1178,13 @@ export async function createMeeting(actor: AppActor, params: {
         participantIds: normalizeIds(params.participantIds),
         participantEmails: normalizeEmails(params.participantEmails),
       },
+    });
+
+    await ensureWorkspacePermalink(tx, actor, {
+      workspaceId: params.workspaceId,
+      entityType: "Meeting",
+      entityId: meeting.id,
+      canonicalPath: workspaceEntityCanonicalPath(params.workspaceId, "Meeting", meeting),
     });
 
     await tx.auditLog.create({

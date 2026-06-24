@@ -133,7 +133,7 @@ function undoEntityLabel(entityType: SlackUndoEntityType) {
 
 function undoEntityUrl(workspaceId: string, entityType: SlackUndoEntityType, entityId: string) {
   const base = `/workspaces/${workspaceId}`;
-  if (entityType === "Action") return `${base}/actions`;
+  if (entityType === "Action") return `${base}/actions/${entityId}`;
   if (entityType === "Tension") return `${base}/tensions/${entityId}`;
   if (entityType === "Proposal") return `${base}/proposals/${entityId}`;
   return `${base}/brain`;

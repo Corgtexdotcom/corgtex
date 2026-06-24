@@ -624,6 +624,7 @@ model Workspace {
   communicationEntityLinks       CommunicationEntityLink[]
   meetingFollowUpReviews         MeetingFollowUpReview[]
   archiveRecords                 WorkspaceArchiveRecord[]
+  permalinks                     WorkspacePermalink[]
   crmQualifications              CrmQualification[]
   crmConversations               CrmConversation[]
   crmProspectWorkspacesAsCrm     CrmProspectWorkspace[]              @relation("CrmWorkspace")
@@ -2496,6 +2497,23 @@ model WorkspaceArchiveRecord {
   @@index([workspaceId, entityType, archivedAt])
   @@index([workspaceId, restoredAt])
   @@index([entityType, entityId])
+}
+
+model WorkspacePermalink {
+  id              String   @id @default(uuid())
+  workspaceId     String
+  entityType      String
+  entityId        String
+  canonicalPath   String
+  createdByUserId String?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@unique([workspaceId, entityType, entityId])
+  @@index([workspaceId, entityType])
+  @@index([workspaceId, entityId])
 }
 
 model Event {

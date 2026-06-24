@@ -17,6 +17,9 @@ const { prismaMock } = vi.hoisted(() => ({
     brainSource: {
       create: vi.fn(),
     },
+    workspacePermalink: {
+      upsert: vi.fn(),
+    },
     auditLog: {
       create: vi.fn(),
     },
@@ -59,6 +62,9 @@ describe("Brain article draft lifecycle", () => {
       isActive: true,
     });
     appendEvents.mockResolvedValue(undefined);
+    prismaMock.brainArticle.findUnique.mockReset();
+    prismaMock.brainArticle.findUnique.mockResolvedValue(null);
+    prismaMock.workspacePermalink.upsert.mockResolvedValue({});
     prismaMock.auditLog.create.mockResolvedValue({});
     prismaMock.event.createMany.mockResolvedValue({ count: 1 });
   });

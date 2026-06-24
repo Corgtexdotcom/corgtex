@@ -1,9 +1,10 @@
 import Link from "next/link";
-import { getTension, listAdviceRequests, listDeliberationEntries, listWorkItemEvidence, listWorkItemVersions, requireWorkspaceMembership } from "@corgtex/domain";
+import { getTension, getWorkspaceArchiveRecord, listAdviceRequests, listDeliberationEntries, listWorkItemEvidence, listWorkItemVersions, requireWorkspaceMembership } from "@corgtex/domain";
 import { requirePageActor } from "@/lib/auth";
 import { MarkdownEditor } from "@/lib/components/MarkdownEditor";
 import { MarkdownRenderer } from "@/lib/components/MarkdownRenderer";
 import { WorkItemResolutionDialog } from "@/lib/components/WorkItemResolutionDialog";
+import { ArchivedItemBanner } from "@/lib/components/ArchivedItemBanner";
 import { DeliberationThread } from "@/lib/components/DeliberationThread";
 import { DeliberationComposer } from "@/lib/components/DeliberationComposer";
 import { getDeliberationTargets } from "@/lib/deliberation-targets";
@@ -25,12 +26,16 @@ export default async function TensionDetailPage({
   const tWork = await getTranslations("workItems");
   const format = await getFormatter();
   const tension = await getTension(actor, { workspaceId, tensionId });
+  const isArchived = Boolean(tension.archivedAt);
   const membership = await requireWorkspaceMembership({ actor, workspaceId });
-  const [entries, versionHistory, evidence, inputRequests] = await Promise.all([
+  const [entries, versionHistory, evidence, inputRequests, archiveRecord] = await Promise.all([
     listDeliberationEntries(actor, { workspaceId, parentType: "TENSION", parentId: tensionId }),
     listWorkItemVersions(actor, { workspaceId, entityType: "TENSION", entityId: tensionId }),
     listWorkItemEvidence(actor, { workspaceId, entityType: "Tension", entityId: tensionId }),
-    listAdviceRequests(actor, { workspaceId, subjectType: "TENSION", subjectId: tensionId, status: "ACTIVE" }),
+    isArchived ? Promise.resolve([]) : listAdviceRequests(actor, { workspaceId, subjectType: "TENSION", subjectId: tensionId, status: "ACTIVE" }),
+    isArchived
+      ? getWorkspaceArchiveRecord(actor, { workspaceId, entityType: "Tension", entityId: tension.id })
+      : Promise.resolve(null),
   ]);
   const deliberationTargets = await getDeliberationTargets({ actor, workspaceId, parentCircleId: tension.circleId });
   const targetOptions = deliberationTargets.options.map((option) => ({
@@ -61,7 +66,7 @@ export default async function TensionDetailPage({
 
   const priorityText = tension.priority > 0 ? t("priorityN", { priority: tension.priority }) : t("noPriority");
   const raisedByName = tension.raisedByMember?.user.displayName || tension.raisedByMember?.user.email || null;
-  const canManage = actor.kind === "agent" || membership?.role === "ADMIN" || (actor.kind === "user" && tension.authorUserId === actor.user.id);
+  const canManage = !isArchived && (actor.kind === "agent" || membership?.role === "ADMIN" || (actor.kind === "user" && tension.authorUserId === actor.user.id));
   const isAdmin = actor.kind === "agent" || membership?.role === "ADMIN";
   const actorUserId = actor.kind === "user" ? actor.user.id : null;
   const actorMemberId = deliberationTargets.actorMemberId;
@@ -70,7 +75,7 @@ export default async function TensionDetailPage({
     actorUserId && tension.authorUserId === actorUserId
       || actorMemberId && tension.assigneeMemberId === actorMemberId,
   );
-  const canManageEntry = (entry: (typeof entries)[number]) => Boolean(
+  const canManageEntry = (entry: (typeof entries)[number]) => !isArchived && Boolean(
     isAdmin
       || (actorUserId && entry.authorUserId === actorUserId)
       || isParentResponsible
@@ -79,10 +84,10 @@ export default async function TensionDetailPage({
   );
   const canSubmittedEditorEdit = actor.kind === "user"
     && (tension.authorUserId === actor.user.id || tension.assigneeMemberId === membership?.id);
-  const canEditContent = tension.status === "DRAFT" ? canManage : tension.status === "OPEN" && canSubmittedEditorEdit;
-  const canDraftProposal = !tension.proposal && (canManage || !tension.isPrivate);
-  const canResolve = !tension.isPrivate && tension.status === "OPEN";
-  const canRequestInput = tension.status === "OPEN" && !tension.isPrivate && (canManage || isParentResponsible);
+  const canEditContent = !isArchived && tension.status === "DRAFT" ? canManage : !isArchived && tension.status === "OPEN" && canSubmittedEditorEdit;
+  const canDraftProposal = !isArchived && !tension.proposal && (canManage || !tension.isPrivate);
+  const canResolve = !isArchived && !tension.isPrivate && tension.status === "OPEN";
+  const canRequestInput = !isArchived && tension.status === "OPEN" && !tension.isPrivate && (canManage || isParentResponsible);
   const memberRequestOptions = targetOptions.filter((option) => option.kind === "member");
   const circleRequestOptions = targetOptions.filter((option) => option.kind === "circle");
   const defaultCircleValue = tension.circleId && circleRequestOptions.some((option) => option.value === `circle:${tension.circleId}`)
@@ -151,7 +156,16 @@ export default async function TensionDetailPage({
         </div>
       </header>
 
-      {(canManage || canDraftProposal || canResolve) && (
+      {isArchived && (
+        <ArchivedItemBanner
+          archivedAt={tension.archivedAt}
+          archivedBy={archiveRecord?.archivedByLabel ?? archiveRecord?.archivedByUserId}
+          archiveReason={tension.archiveReason}
+          restoreHref={isAdmin ? `/workspaces/${workspaceId}/audit?tab=archive&archiveEntityType=Tension` : null}
+        />
+      )}
+
+      {!isArchived && (canManage || canDraftProposal || canResolve) && (
         <section className="ws-section" style={{ marginBottom: 24 }}>
           <div className="actions-inline">
             {canManage && canOpenPrivateDraft(tension) && (
@@ -288,7 +302,7 @@ export default async function TensionDetailPage({
                         </div>
                       </div>
                     )}
-                    {tension.status === "OPEN" && (
+                    {!isArchived && tension.status === "OPEN" && (
                       <details style={{ marginTop: 16 }}>
                         <summary className="secondary small nr-hide-marker" style={{ cursor: "pointer", display: "inline-block" }}>{t("btnReplyToInputRequest")}</summary>
                         <div style={{ marginTop: 12 }}>
@@ -377,12 +391,12 @@ export default async function TensionDetailPage({
             canEdit: canManageEntry(entry),
             canResolve: canManageEntry(entry),
           }))}
-          canResolve={true}
+          canResolve={!isArchived}
           resolveAction={resolveTensionDeliberationAction}
           updateAction={updateTensionDeliberationAction}
           hiddenFields={{ workspaceId, parentId: tensionId }}
         />
-        {tension.status === "OPEN" && (
+        {!isArchived && tension.status === "OPEN" && (
         <div style={{ marginTop: 24 }}>
           <DeliberationComposer
             postAction={postTensionDeliberationAction}

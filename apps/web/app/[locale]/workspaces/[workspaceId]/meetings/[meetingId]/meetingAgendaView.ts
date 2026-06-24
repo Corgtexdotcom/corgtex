@@ -25,6 +25,6 @@ export function agendaItemHref(workspaceId: string, item: MeetingAgendaItem) {
   if (!item.sourceType || !item.sourceId) return null;
   if (item.sourceType === "Tension") return `/workspaces/${workspaceId}/tensions/${item.sourceId}`;
   if (item.sourceType === "Proposal") return `/workspaces/${workspaceId}/proposals/${item.sourceId}`;
-  if (item.sourceType === "Action") return `/workspaces/${workspaceId}/actions`;
+  if (item.sourceType === "Action") return `/workspaces/${workspaceId}/actions/${item.sourceId}`;
   return null;
 }

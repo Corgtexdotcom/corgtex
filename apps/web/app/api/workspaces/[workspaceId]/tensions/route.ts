@@ -1,7 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
-import { createTension, listTensions, requireWorkspaceMembership } from "@corgtex/domain";
+import { createTension, getWorkspacePermanentPathForEntity, listTensions, requireWorkspaceMembership } from "@corgtex/domain";
 import type { ArchiveFilter } from "@corgtex/domain";
+import { env } from "@corgtex/shared";
 import { resolveRequestActor } from "@/lib/auth";
 import { handleRouteError, validateBody } from "@/lib/http";
 
@@ -35,7 +36,13 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
       bodyMd: body.bodyMd ?? null,
       raisedByMemberId: body.raisedByMemberId ?? null,
     });
-    return NextResponse.json({ tension }, { status: 201 });
+    const origin = env.APP_URL.replace(/\/$/, "");
+    const permanentPath = await getWorkspacePermanentPathForEntity({ workspaceId, entityType: "Tension", entityId: tension.id });
+    return NextResponse.json({
+      tension,
+      webUrl: `${origin}/workspaces/${workspaceId}/tensions/${tension.id}`,
+      permanentUrl: permanentPath ? `${origin}${permanentPath}` : null,
+    }, { status: 201 });
   } catch (error) {
     return handleRouteError(error);
   }

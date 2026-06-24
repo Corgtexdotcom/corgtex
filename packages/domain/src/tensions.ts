@@ -8,6 +8,7 @@ import { invariant } from "./errors";
 import { requireDraftManager } from "./draft-permissions";
 import { resolveWorkspaceProposalLink } from "./proposal-links";
 import { createWorkItemEvidenceLinks } from "./work-item-evidence";
+import { ensureWorkspacePermalink, workspaceEntityCanonicalPath } from "./permalinks";
 import {
   changedDataFields,
   pickJsonSnapshot,
@@ -222,6 +223,13 @@ export async function createTension(actor: AppActor, params: {
         meetingId: params.meetingId || null,
         publishedAt,
       },
+    });
+
+    await ensureWorkspacePermalink(tx, actor, {
+      workspaceId: params.workspaceId,
+      entityType: "Tension",
+      entityId: tension.id,
+      canonicalPath: workspaceEntityCanonicalPath(params.workspaceId, "Tension", tension),
     });
 
     await tx.auditLog.create({

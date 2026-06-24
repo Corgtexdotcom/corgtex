@@ -8,6 +8,7 @@ import { archiveFilterWhere, archiveWorkspaceArtifact, type ArchiveFilter } from
 import { invariant } from "./errors";
 import { persistedMemberId } from "./membership";
 import { requireDraftManager } from "./draft-permissions";
+import { ensureWorkspacePermalink, workspaceEntityCanonicalPath } from "./permalinks";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -22,6 +23,24 @@ function slugify(input: string) {
 }
 
 export const WIKILINK_RE = /\[\[([^\]]+)\]\]/g;
+
+async function nextAvailableArticleSlug(tx: Prisma.TransactionClient, workspaceId: string, baseSlug: string) {
+  let candidate = baseSlug;
+  for (let suffix = 2; suffix < 1000; suffix += 1) {
+    const existing = await tx.brainArticle.findUnique({
+      where: {
+        workspaceId_slug: {
+          workspaceId,
+          slug: candidate,
+        },
+      },
+      select: { id: true },
+    });
+    if (!existing) return candidate;
+    candidate = `${baseSlug}-${suffix}`;
+  }
+  throw new Error("Unable to generate a unique article slug.");
+}
 
 // ---------------------------------------------------------------------------
 // Articles
@@ -48,14 +67,15 @@ export async function createArticle(actor: AppActor, params: {
   const title = params.title.trim();
   invariant(title.length > 0, 400, "INVALID_INPUT", "Article title is required.");
 
-  const slug = params.slug?.trim() || slugify(title);
-  invariant(slug.length > 0, 400, "INVALID_INPUT", "Article slug is required.");
+  const requestedSlug = slugify(params.slug?.trim() || title);
+  invariant(requestedSlug.length > 0, 400, "INVALID_INPUT", "Article slug is required.");
 
   const isPrivate = params.isPrivate ?? ((params.authority ?? "DRAFT") === "DRAFT");
 
   const membershipId = persistedMemberId(membership);
 
   return prisma.$transaction(async (tx) => {
+    const slug = await nextAvailableArticleSlug(tx, params.workspaceId, requestedSlug);
     const article = await tx.brainArticle.create({
       data: {
         workspaceId: params.workspaceId,
@@ -72,6 +92,13 @@ export async function createArticle(actor: AppActor, params: {
         publishedAt: isPrivate ? null : new Date(),
         lastVerifiedAt: new Date(),
       },
+    });
+
+    await ensureWorkspacePermalink(tx, actor, {
+      workspaceId: params.workspaceId,
+      entityType: "BrainArticle",
+      entityId: article.id,
+      canonicalPath: workspaceEntityCanonicalPath(params.workspaceId, "BrainArticle", article),
     });
 
     await tx.auditLog.create({
@@ -209,6 +236,7 @@ export async function updateArticle(actor: AppActor, params: {
 export async function getArticle(actor: AppActor, params: {
   workspaceId: string;
   slug: string;
+  includeArchived?: boolean;
 }) {
   const membership = await requireWorkspaceMembership({
     actor,
@@ -219,7 +247,7 @@ export async function getArticle(actor: AppActor, params: {
     where: {
       workspaceId: params.workspaceId,
       slug: params.slug,
-      archivedAt: null,
+      ...(params.includeArchived ? {} : { archivedAt: null }),
     },
     include: {
       ownerMember: {

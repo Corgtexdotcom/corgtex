@@ -1,6 +1,7 @@
 import {
   getMeeting,
   getMeetingParticipants,
+  getWorkspaceArchiveRecord,
   meetingAgendaSections,
   normalizeMeetingAgendaForDisplay,
   privacyFilter,
@@ -14,6 +15,7 @@ import { getFormatter, getTranslations } from "next-intl/server";
 import { prisma } from "@corgtex/shared";
 import Link from "next/link";
 import { MarkdownExcerpt, MarkdownRenderer } from "@/lib/components/MarkdownRenderer";
+import { ArchivedItemBanner } from "@/lib/components/ArchivedItemBanner";
 import { DeliberationThread } from "@/lib/components/DeliberationThread";
 import { DeliberationComposer } from "@/lib/components/DeliberationComposer";
 import { getDeliberationTargets } from "@/lib/deliberation-targets";
@@ -173,7 +175,7 @@ export default async function MeetingDetailPage({
   const format = await getFormatter();
   const membership = await requireWorkspaceMembership({ actor, workspaceId });
 
-  const meeting = await getMeeting(workspaceId, meetingId);
+  const meeting = await getMeeting(workspaceId, meetingId, { includeArchived: true });
   const meetingEntries = await listDeliberationEntries(actor, { workspaceId, parentType: "MEETING", parentId: meetingId });
   const deliberationTargets = await getDeliberationTargets({ actor, workspaceId });
   const targetOptions = deliberationTargets.options.map((option) => ({
@@ -203,6 +205,11 @@ export default async function MeetingDetailPage({
       </div>
     );
   }
+  const isArchived = Boolean(meeting.archivedAt);
+  const isAdmin = actor.kind === "agent" || membership?.role === "ADMIN";
+  const archiveRecord = isArchived
+    ? await getWorkspaceArchiveRecord(actor, { workspaceId, entityType: "Meeting", entityId: meeting.id })
+    : null;
   
   const agenda = normalizeMeetingAgendaForDisplay(meeting.agendaJson, meeting.title || t("untitledMeeting"));
   const hasAgendaTab = hasMeetingAgendaTab({
@@ -306,6 +313,15 @@ export default async function MeetingDetailPage({
         </div>
       </header>
 
+      {isArchived && (
+        <ArchivedItemBanner
+          archivedAt={meeting.archivedAt}
+          archivedBy={archiveRecord?.archivedByLabel ?? archiveRecord?.archivedByUserId}
+          archiveReason={meeting.archiveReason}
+          restoreHref={isAdmin ? `/workspaces/${workspaceId}/audit?tab=archive&archiveEntityType=Meeting` : null}
+        />
+      )}
+
       {processingStatus && (
         <section className={`meeting-processing-status ${processingStatus.className}`} style={{ marginBottom: 32 }}>
           <div>
@@ -391,11 +407,11 @@ export default async function MeetingDetailPage({
               )}
             </section>
 
-            <MeetingRegenerationPanel
+            {!isArchived && <MeetingRegenerationPanel
               workspaceId={workspaceId}
               meetingId={meetingId}
               hasTranscript={Boolean(meeting.transcript)}
-            />
+            />}
           </>
         )}
 
@@ -448,7 +464,7 @@ export default async function MeetingDetailPage({
 
                         return (
                           <Link
-                            href={`/workspaces/${workspaceId}/actions`}
+                            href={`/workspaces/${workspaceId}/actions/${action.id}`}
                             className="meeting-raised-card"
                             key={action.id}
                           >
@@ -547,8 +563,8 @@ export default async function MeetingDetailPage({
 
       <section className="ws-section" style={{ marginBottom: 48 }}>
         <h2 className="nr-section-header">{t("discussion")}</h2>
-        <DeliberationThread entries={mappedEntries} canResolve={true} resolveAction={resolveMeetingDeliberationAction} hiddenFields={{ workspaceId, parentId: meetingId }} />
-        <div style={{ marginTop: 24 }}>
+        <DeliberationThread entries={mappedEntries} canResolve={!isArchived} resolveAction={resolveMeetingDeliberationAction} hiddenFields={{ workspaceId, parentId: meetingId }} />
+        {!isArchived && <div style={{ marginTop: 24 }}>
           <DeliberationComposer 
             postAction={postMeetingDeliberationAction} 
             hiddenFields={{ workspaceId, parentId: meetingId }}
@@ -558,7 +574,7 @@ export default async function MeetingDetailPage({
               { value: "OBJECTION", label: t("entryObjection"), variant: "danger" },
             ]}
           />
-        </div>
+        </div>}
       </section>
     </>
   );

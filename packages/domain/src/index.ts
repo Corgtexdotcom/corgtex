@@ -43,6 +43,7 @@ export * from "./meeting-agendas";
 export * from "./meeting-action-review";
 export * from "./members";
 export * from "./notifications";
+export * from "./permalinks";
 export * from "./proposals";
 export * from "./roles";
 export * from "./role-onboarding";

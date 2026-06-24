@@ -9,6 +9,7 @@ import { invariant } from "./errors";
 import { requireDraftManager } from "./draft-permissions";
 import { resolveWorkspaceProposalLink } from "./proposal-links";
 import { createWorkItemEvidenceLinks } from "./work-item-evidence";
+import { ensureWorkspacePermalink, workspaceEntityCanonicalPath } from "./permalinks";
 import {
   changedDataFields,
   pickJsonSnapshot,
@@ -152,6 +153,7 @@ export async function listActions(actor: AppActor, workspaceId: string, opts?: L
 export async function getAction(actor: AppActor, params: {
   workspaceId: string;
   actionId: string;
+  includeArchived?: boolean;
 }) {
   const membership = await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
   const action = await prisma.action.findFirst({
@@ -159,7 +161,7 @@ export async function getAction(actor: AppActor, params: {
       id: params.actionId,
       workspaceId: params.workspaceId,
       ...privacyFilter(actor, membership),
-      archivedAt: null,
+      ...(params.includeArchived ? {} : { archivedAt: null }),
     },
     include: {
       author: {
@@ -240,6 +242,13 @@ export async function createAction(actor: AppActor, params: {
         isPrivate,
         publishedAt,
       },
+    });
+
+    await ensureWorkspacePermalink(tx, actor, {
+      workspaceId: params.workspaceId,
+      entityType: "Action",
+      entityId: action.id,
+      canonicalPath: workspaceEntityCanonicalPath(params.workspaceId, "Action", action),
     });
 
     await recordAudit(tx, actor, {

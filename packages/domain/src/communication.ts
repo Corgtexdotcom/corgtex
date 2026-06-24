@@ -96,7 +96,7 @@ function appUrl(path = "") {
 
 function entityUrl(workspaceId: string, entityType: string, entityId: string) {
   const base = `/workspaces/${workspaceId}`;
-  if (entityType === "Action") return appUrl(`${base}/actions`);
+  if (entityType === "Action") return appUrl(`${base}/actions/${entityId}`);
   if (entityType === "Tension") return appUrl(`${base}/tensions/${entityId}`);
   if (entityType === "Proposal") return appUrl(`${base}/proposals/${entityId}`);
   if (entityType === "BrainSource") return appUrl(`${base}/brain`);

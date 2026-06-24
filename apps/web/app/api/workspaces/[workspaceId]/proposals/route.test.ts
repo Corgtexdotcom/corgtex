@@ -13,6 +13,7 @@ const actor = {
 
 const createProposal = vi.fn();
 const createProposalFromTension = vi.fn();
+const getWorkspacePermanentPathForEntity = vi.fn(async () => null);
 const listProposals = vi.fn();
 const requireWorkspaceMembership = vi.fn();
 const resolveRequestActor = vi.fn(async () => actor);
@@ -24,6 +25,7 @@ vi.mock("@/lib/auth", () => ({
 vi.mock("@corgtex/domain", () => ({
   createProposal,
   createProposalFromTension,
+  getWorkspacePermanentPathForEntity,
   listProposals,
   requireWorkspaceMembership,
 }));
@@ -34,6 +36,7 @@ function context(workspaceId = "workspace-1") {
 
 afterEach(() => {
   vi.clearAllMocks();
+  getWorkspacePermanentPathForEntity.mockResolvedValue(null);
 });
 
 describe("POST /api/workspaces/[workspaceId]/proposals", () => {

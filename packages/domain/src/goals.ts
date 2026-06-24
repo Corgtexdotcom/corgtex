@@ -4,6 +4,7 @@ import { appendEvents } from "./events";
 import { requireWorkspaceMembership } from "./auth";
 import { recordAudit } from "./audit-trail";
 import { archiveFilterWhere, archiveWorkspaceArtifact, type ArchiveFilter } from "./archive";
+import { ensureWorkspacePermalink, workspaceEntityCanonicalPath } from "./permalinks";
 import { invariant } from "./errors";
 import { requireDraftManager } from "./draft-permissions";
 import type { GoalLevel, GoalCadence, GoalStatus, Prisma } from "@prisma/client";
@@ -242,6 +243,13 @@ export async function createGoal(
       },
     });
 
+    await ensureWorkspacePermalink(tx, actor, {
+      workspaceId: params.workspaceId,
+      entityType: "Goal",
+      entityId: goal.id,
+      canonicalPath: workspaceEntityCanonicalPath(params.workspaceId, "Goal", goal),
+    });
+
     if (keyResults.length > 0) {
       await tx.keyResult.createMany({
         data: keyResults.map((keyResult) => ({
@@ -436,6 +444,7 @@ export async function deleteGoal(
   params: {
     workspaceId: string;
     goalId: string;
+    includeArchived?: boolean;
     _membership?: MembershipSummary | null;
   }
 ) {
@@ -458,6 +467,7 @@ export async function getGoal(
   params: {
     workspaceId: string;
     goalId: string;
+    includeArchived?: boolean;
     _membership?: MembershipSummary | null;
   }
 ) {
@@ -496,7 +506,7 @@ export async function getGoal(
     },
   });
 
-  invariant(goal && goal.workspaceId === params.workspaceId && !goal.archivedAt, 404, "NOT_FOUND", "Goal not found.");
+  invariant(goal && goal.workspaceId === params.workspaceId && (params.includeArchived || !goal.archivedAt), 404, "NOT_FOUND", "Goal not found.");
   return goal;
 }
 

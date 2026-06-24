@@ -317,6 +317,9 @@ export default async function AuditPage({
                   </div>
                 </div>
                 <div className="actions-inline" style={{ alignItems: "flex-start" }}>
+                  {(item as { permanentPath?: string | null }).permanentPath && (
+                    <a href={(item as { permanentPath?: string }).permanentPath} className="button secondary">{t("btnOpen")}</a>
+                  )}
                   <form action={restoreArchivedArtifactAction}>
                     <input type="hidden" name="workspaceId" value={workspaceId} />
                     <input type="hidden" name="entityType" value={item.entityType} />

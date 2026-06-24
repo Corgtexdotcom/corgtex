@@ -1,9 +1,10 @@
 import Link from "next/link";
-import { getAction, listDeliberationEntries, listWorkItemEvidence, listWorkItemVersions, requireWorkspaceMembership } from "@corgtex/domain";
+import { getAction, getWorkspaceArchiveRecord, listDeliberationEntries, listWorkItemEvidence, listWorkItemVersions, requireWorkspaceMembership } from "@corgtex/domain";
 import { requirePageActor } from "@/lib/auth";
 import { MarkdownEditor } from "@/lib/components/MarkdownEditor";
 import { MarkdownRenderer } from "@/lib/components/MarkdownRenderer";
 import { WorkItemResolutionDialog } from "@/lib/components/WorkItemResolutionDialog";
+import { ArchivedItemBanner } from "@/lib/components/ArchivedItemBanner";
 import { DeliberationComposer } from "@/lib/components/DeliberationComposer";
 import { DeliberationThread } from "@/lib/components/DeliberationThread";
 import { getDeliberationTargets } from "@/lib/deliberation-targets";
@@ -23,12 +24,16 @@ export default async function ActionDetailPage({
   const t = await getTranslations("actions");
   const tCommon = await getTranslations("common");
   const tWork = await getTranslations("workItems");
-  const action = await getAction(actor, { workspaceId, actionId });
+  const action = await getAction(actor, { workspaceId, actionId, includeArchived: true });
   const membership = await requireWorkspaceMembership({ actor, workspaceId });
-  const [versionHistory, evidence, deliberationEntries] = await Promise.all([
+  const isArchived = Boolean(action.archivedAt);
+  const [versionHistory, evidence, deliberationEntries, archiveRecord] = await Promise.all([
     listWorkItemVersions(actor, { workspaceId, entityType: "ACTION", entityId: actionId }),
     listWorkItemEvidence(actor, { workspaceId, entityType: "Action", entityId: actionId }),
     listDeliberationEntries(actor, { workspaceId, parentType: "ACTION", parentId: actionId }),
+    isArchived
+      ? getWorkspaceArchiveRecord(actor, { workspaceId, entityType: "Action", entityId: action.id })
+      : Promise.resolve(null),
   ]);
   const completionEvidence = evidence.filter((row) => row.purpose === "completion_evidence");
   const feedbackContextEvidence = evidence.filter((row) => row.purpose === "feedback_context");
@@ -55,9 +60,9 @@ export default async function ActionDetailPage({
   }[action.status];
   const authorName = action.author.displayName || action.author.email || "Unknown";
   const assigneeName = action.assigneeMember?.user.displayName || action.assigneeMember?.user.email || null;
-  const canManage = actor.kind === "agent"
+  const canManage = !isArchived && (actor.kind === "agent"
     || membership?.role === "ADMIN"
-    || (actor.kind === "user" && action.authorUserId === actor.user.id);
+    || (actor.kind === "user" && action.authorUserId === actor.user.id));
   const isAdmin = actor.kind === "agent" || membership?.role === "ADMIN";
   const actorUserId = actor.kind === "user" ? actor.user.id : null;
   const actorMemberId = deliberationTargets.actorMemberId;
@@ -66,7 +71,7 @@ export default async function ActionDetailPage({
     actorUserId && action.authorUserId === actorUserId
       || actorMemberId && action.assigneeMemberId === actorMemberId,
   );
-  const canManageEntry = (entry: (typeof deliberationEntries)[number]) => Boolean(
+  const canManageEntry = (entry: (typeof deliberationEntries)[number]) => !isArchived && Boolean(
     isAdmin
       || (actorUserId && entry.authorUserId === actorUserId)
       || isParentResponsible
@@ -75,9 +80,9 @@ export default async function ActionDetailPage({
   );
   const canSubmittedEditorEdit = actor.kind === "user"
     && (action.authorUserId === actor.user.id || action.assigneeMemberId === membership?.id);
-  const canEditContent = action.status === "DRAFT"
+  const canEditContent = !isArchived && action.status === "DRAFT"
     ? canManage
-    : (action.status === "OPEN" || action.status === "IN_PROGRESS") && canSubmittedEditorEdit;
+    : !isArchived && (action.status === "OPEN" || action.status === "IN_PROGRESS") && canSubmittedEditorEdit;
 
   return (
     <>
@@ -111,7 +116,16 @@ export default async function ActionDetailPage({
         </div>
       </header>
 
-      {(canManage || canEditContent || action.status === "OPEN" || action.status === "IN_PROGRESS") && (
+      {isArchived && (
+        <ArchivedItemBanner
+          archivedAt={action.archivedAt}
+          archivedBy={archiveRecord?.archivedByLabel ?? archiveRecord?.archivedByUserId}
+          archiveReason={action.archiveReason}
+          restoreHref={isAdmin ? `/workspaces/${workspaceId}/audit?tab=archive&archiveEntityType=Action` : null}
+        />
+      )}
+
+      {!isArchived && (canManage || canEditContent || action.status === "OPEN" || action.status === "IN_PROGRESS") && (
         <section className="ws-section" style={{ marginBottom: 24 }}>
           <div className="actions-inline">
             {canManage && canOpenPrivateDraft(action) && (
@@ -233,7 +247,7 @@ export default async function ActionDetailPage({
           updateAction={updateActionDeliberationAction}
           hiddenFields={{ workspaceId, parentId: actionId }}
         />
-        {(action.status === "OPEN" || action.status === "IN_PROGRESS") && (
+        {!isArchived && (action.status === "OPEN" || action.status === "IN_PROGRESS") && (
           <div style={{ marginTop: 24 }}>
             <DeliberationComposer
               postAction={postActionDeliberationAction}

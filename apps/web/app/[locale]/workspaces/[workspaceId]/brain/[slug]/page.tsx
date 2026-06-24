@@ -1,10 +1,11 @@
 import type { BrainArticleType, BrainArticleAuthority } from "@prisma/client";
-import { getArticle, listArticles, requireWorkspaceMembership, updateArticle } from "@corgtex/domain";
+import { getArticle, getWorkspaceArchiveRecord, listArticles, requireWorkspaceMembership, updateArticle } from "@corgtex/domain";
 import { requirePageActor } from "@/lib/auth";
 import { notFound } from "next/navigation";
 import Link from "next/link";
 import { MarkdownEditor } from "@/lib/components/MarkdownEditor";
 import { MarkdownRenderer } from "@/lib/components/MarkdownRenderer";
+import { ArchivedItemBanner } from "@/lib/components/ArchivedItemBanner";
 import { revalidatePath } from "next/cache";
 import { prisma } from "@corgtex/shared";
 import { getTranslations } from "next-intl/server";
@@ -41,12 +42,17 @@ export default async function BrainArticlePage({
   const actor = await requirePageActor();
   const t = await getTranslations("brain");
 
-  const article = await getArticle(actor, { workspaceId, slug });
+  const article = await getArticle(actor, { workspaceId, slug, includeArchived: true });
   if (!article) notFound();
   const membership = await requireWorkspaceMembership({ actor, workspaceId });
-  const canManage = actor.kind === "agent"
+  const isArchived = Boolean(article.archivedAt);
+  const isAdmin = actor.kind === "agent" || membership?.role === "ADMIN";
+  const archiveRecord = isArchived
+    ? await getWorkspaceArchiveRecord(actor, { workspaceId, entityType: "BrainArticle", entityId: article.id })
+    : null;
+  const canManage = !isArchived && (actor.kind === "agent"
     || membership?.role === "ADMIN"
-    || (Boolean(article.ownerMemberId) && article.ownerMemberId === membership?.id);
+    || (Boolean(article.ownerMemberId) && article.ownerMemberId === membership?.id));
 
   // Load sidebar navigation
   const { items: allArticles } = await listArticles(actor, { workspaceId, take: 50 });
@@ -124,6 +130,15 @@ export default async function BrainArticlePage({
           </span>
         </div>
       </div>
+
+      {isArchived && (
+        <ArchivedItemBanner
+          archivedAt={article.archivedAt}
+          archivedBy={archiveRecord?.archivedByLabel ?? archiveRecord?.archivedByUserId}
+          archiveReason={article.archiveReason}
+          restoreHref={isAdmin ? `/workspaces/${workspaceId}/audit?tab=archive&archiveEntityType=BrainArticle` : null}
+        />
+      )}
 
       <div style={{ display: "grid", gridTemplateColumns: "3fr 1fr", gap: "64px" }}>
         {/* Main Article Body */}
