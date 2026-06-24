@@ -205,6 +205,10 @@ describe("meeting recorder domain", () => {
       meeting_url: "https://meet.google.com/abc-defg-hij",
       bot_name: "Corgtex Recorder",
       recording_config: {
+        retention: {
+          type: "timed",
+          hours: 168,
+        },
         transcript: {
           provider: {
             recallai_streaming: {
@@ -237,6 +241,14 @@ describe("meeting recorder domain", () => {
 
     expect(request.url).toBe("https://us-east-1.recall.ai/api/v1/bot/");
     expect(request.body).not.toHaveProperty("join_at");
+    expect(request.body).toMatchObject({
+      recording_config: {
+        retention: {
+          type: "timed",
+          hours: 168,
+        },
+      },
+    });
   });
 
   it("switches Meeting BaaS between immediate and scheduled bot endpoints", async () => {

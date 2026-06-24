@@ -23,6 +23,7 @@ const AUTO_SCHEDULE_MIN_LEAD_MS = 10 * 60 * 1000;
 const STALE_RECORDING_TIMEOUT_MS = 6 * 60 * 60 * 1000;
 const RECALL_TERMINAL_STATUS_CHECK_GRACE_MS = 30 * 60 * 1000;
 const RECALL_TRANSCRIPT_RECOVERY_GRACE_MS = 20 * 60 * 1000;
+const RECALL_RECORDING_RETENTION_HOURS = 7 * 24;
 const FALLBACK_MEETING_DURATION_MS = 90 * 60 * 1000;
 const ACTIVE_RECORDING_STATUSES: MeetingRecordingStatus[] = ["PENDING", "SCHEDULED", "JOINING", "RECORDING"];
 const RECOVERABLE_RECALL_RECORDING_STATUSES: MeetingRecordingStatus[] = [...ACTIVE_RECORDING_STATUSES, "COMPLETED"];
@@ -497,6 +498,10 @@ export function buildRecallCreateBotRequest(input: MeetingRecorderScheduleInput,
     meeting_url: input.meetingUrl,
     bot_name: input.botName,
     recording_config: {
+      retention: {
+        type: "timed",
+        hours: RECALL_RECORDING_RETENTION_HOURS,
+      },
       transcript: {
         provider: {
           recallai_streaming: {
