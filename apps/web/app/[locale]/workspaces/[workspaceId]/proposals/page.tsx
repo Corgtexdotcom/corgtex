@@ -26,22 +26,16 @@ import {
 import { ItemActions } from "@/lib/components/ui/ItemActions";
 import { getTranslations } from "next-intl/server";
 import { prisma } from "@corgtex/shared";
+import {
+  PROPOSAL_COLUMN_STATUSES,
+  PROPOSAL_STATUS_FILTERS,
+  type ProposalColumnStatus,
+  type ProposalStatusFilter,
+  type ProposalStatusQuery,
+  resolveProposalStatusSearch,
+} from "./view-model";
 
 export const dynamic = "force-dynamic";
-
-const PROPOSAL_STATUS_FILTERS = ["DRAFT", "OPEN", "RESOLVED", "ARCHIVED"] as const;
-type ProposalStatusFilter = (typeof PROPOSAL_STATUS_FILTERS)[number];
-
-function normalizeProposalStatusFilters(value: string | string[] | undefined): ProposalStatusFilter[] {
-  const values = Array.isArray(value) ? value : value ? [value] : [];
-  const seen = new Set<ProposalStatusFilter>();
-  for (const entry of values) {
-    if (PROPOSAL_STATUS_FILTERS.includes(entry as ProposalStatusFilter)) {
-      seen.add(entry as ProposalStatusFilter);
-    }
-  }
-  return seen.size === PROPOSAL_STATUS_FILTERS.length ? [] : [...seen];
-}
 
 export default async function ProposalsPage({
   params,
@@ -56,8 +50,11 @@ export default async function ProposalsPage({
   const tCommon = await getTranslations("common");
   const tWork = await getTranslations("workItems");
   const resolvedSearch = searchParams ? await searchParams : {};
-  const statusFilters = normalizeProposalStatusFilters(resolvedSearch.status);
   const view = normalizeWorkItemView(resolvedSearch.view);
+  const { statusFilters, statusQuery } = resolveProposalStatusSearch(
+    resolvedSearch.status,
+    view === "kanban" ? null : "OPEN",
+  );
   const { circleIds, memberIds, sort } = resolveWorkItemFilters(resolvedSearch);
   const membership = await requireWorkspaceMembership({ actor, workspaceId });
 
@@ -80,6 +77,7 @@ export default async function ProposalsPage({
     OPEN: activeProposals.filter((p) => p.status === "OPEN" && !p.isPrivate),
     RESOLVED: activeProposals.filter((p) => p.status === "RESOLVED" && !p.isPrivate),
     ARCHIVED: proposals.filter((p) => Boolean(p.archivedAt)),
+    ALL: proposals,
   };
 
   const displayProposals = statusFilters.length === 0
@@ -91,33 +89,38 @@ export default async function ProposalsPage({
     return counts;
   }, new Map<string, number>());
   type ProposalListItem = (typeof proposals)[number];
-  type ProposalColumnStatus = "DRAFT" | "OPEN" | "RESOLVED" | "ARCHIVED";
   type ProposalMoveStatus = "DRAFT" | "OPEN" | "RESOLVED";
-  const proposalColumnStatuses: ProposalColumnStatus[] = ["DRAFT", "OPEN", "RESOLVED", "ARCHIVED"];
   const proposalMoveStatuses: ProposalMoveStatus[] = ["DRAFT", "OPEN", "RESOLVED"];
-  const visibleProposalColumnIds = normalizeVisibleWorkItemColumns(resolvedSearch.columns, proposalColumnStatuses);
-  const allProposalColumnsVisible = visibleProposalColumnIds.length === proposalColumnStatuses.length;
-  const buildProposalColumnHref = (status: ProposalColumnStatus) => buildWorkItemQuery({
+  const visibleProposalColumnIds = normalizeVisibleWorkItemColumns(resolvedSearch.columns, PROPOSAL_COLUMN_STATUSES);
+  const allProposalColumnsVisible = visibleProposalColumnIds.length === PROPOSAL_COLUMN_STATUSES.length;
+  const buildProposalColumnHref = (status: ProposalColumnStatus, queryStatus: ProposalStatusQuery = statusQuery) => buildWorkItemQuery({
     view: "kanban",
-    status: statusFilters,
+    status: queryStatus,
     circleIds,
     memberIds,
-    columns: toggleWorkItemColumnVisibility(visibleProposalColumnIds, status, proposalColumnStatuses),
+    columns: toggleWorkItemColumnVisibility(visibleProposalColumnIds, status, PROPOSAL_COLUMN_STATUSES),
   });
   const proposalColumnHideHrefs = Object.fromEntries(
-    proposalColumnStatuses.map((status) => [status, buildProposalColumnHref(status)]),
+    PROPOSAL_COLUMN_STATUSES.map((status) => [status, buildProposalColumnHref(status)]),
   );
-  const proposalFilterHref = (status: ProposalColumnStatus) => view === "kanban"
-    ? buildProposalColumnHref(status)
+  const proposalFilterHref = (status: ProposalStatusFilter) => view === "kanban"
+    ? status === "ALL"
+      ? buildWorkItemQuery({ view: "kanban", status: "ALL", circleIds, memberIds })
+      : buildProposalColumnHref(status)
     : buildWorkItemQuery({ view, sort, circleIds, memberIds, status });
-  const proposalFilterActive = (status: ProposalColumnStatus) => view === "kanban"
-    ? visibleProposalColumnIds.includes(status)
-    : statusFilters.includes(status);
+  const proposalFilterActive = (status: ProposalStatusFilter) => view === "kanban"
+    ? status === "ALL"
+      ? allProposalColumnsVisible
+      : visibleProposalColumnIds.includes(status)
+    : status === "ALL"
+      ? statusFilters.length === 0
+      : statusFilters.includes(status);
 
-  function proposalStatusLabel(status: "DRAFT" | "OPEN" | "RESOLVED" | "ARCHIVED") {
+  function proposalStatusLabel(status: ProposalStatusFilter) {
     if (status === "DRAFT") return t("statusDraft");
     if (status === "OPEN") return t("statusOpen");
     if (status === "RESOLVED") return t("statusResolved");
+    if (status === "ALL") return tWork("statusAll");
     return t("statusArchived");
   }
 
@@ -419,7 +422,7 @@ export default async function ProposalsPage({
     );
   }
 
-  const proposalColumns: WorkItemKanbanColumn[] = proposalColumnStatuses.map((status) => ({
+  const proposalColumns: WorkItemKanbanColumn[] = PROPOSAL_COLUMN_STATUSES.map((status) => ({
     id: status,
     label: proposalStatusLabel(status),
     count: groupedProposals[status].length,
@@ -449,7 +452,7 @@ export default async function ProposalsPage({
       <section className="ws-section">
         <div className="nr-work-board-header">
           <div className="nr-filter-bar">
-            {(["DRAFT", "OPEN", "RESOLVED", "ARCHIVED"] as const).map((status) => (
+            {PROPOSAL_STATUS_FILTERS.map((status) => (
               <a
                 key={status}
                 href={proposalFilterHref(status)}
@@ -462,13 +465,13 @@ export default async function ProposalsPage({
           <WorkItemToolbar
             currentView={view}
             currentSort={sort}
-            listHref={buildWorkItemQuery({ sort, circleIds, memberIds, status: statusFilters, view: "list" })}
-            kanbanHref={buildWorkItemQuery({ circleIds, memberIds, status: statusFilters, view: "kanban" })}
-            tableHref={buildWorkItemQuery({ sort, circleIds, memberIds, status: statusFilters, view: "table" })}
+            listHref={buildWorkItemQuery({ sort, circleIds, memberIds, status: statusQuery, view: "list" })}
+            kanbanHref={buildWorkItemQuery({ circleIds, memberIds, view: "kanban" })}
+            tableHref={buildWorkItemQuery({ sort, circleIds, memberIds, status: statusQuery, view: "table" })}
             sortLinks={{
-              priority: buildWorkItemQuery({ view: view === "table" ? "table" : "list", circleIds, memberIds, status: statusFilters, sort: "priority" }),
-              date: buildWorkItemQuery({ view: view === "table" ? "table" : "list", circleIds, memberIds, status: statusFilters, sort: "date" }),
-              alpha: buildWorkItemQuery({ view: view === "table" ? "table" : "list", circleIds, memberIds, status: statusFilters, sort: "alpha" }),
+              priority: buildWorkItemQuery({ view: view === "table" ? "table" : "list", circleIds, memberIds, status: statusQuery, sort: "priority" }),
+              date: buildWorkItemQuery({ view: view === "table" ? "table" : "list", circleIds, memberIds, status: statusQuery, sort: "date" }),
+              alpha: buildWorkItemQuery({ view: view === "table" ? "table" : "list", circleIds, memberIds, status: statusQuery, sort: "alpha" }),
             }}
             listLabel={tWork("listView")}
             kanbanLabel={tWork("kanbanView")}

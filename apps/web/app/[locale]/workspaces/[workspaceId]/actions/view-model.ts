@@ -1,6 +1,14 @@
 export const ACTION_STATUS_FILTERS = ["DRAFT", "OPEN", "IN_PROGRESS", "COMPLETED", "ALL"] as const;
+const ACTION_VISIBLE_STATUS_FILTERS = ["DRAFT", "OPEN", "IN_PROGRESS", "COMPLETED"] as const;
 
 export type ActionStatusFilter = (typeof ACTION_STATUS_FILTERS)[number];
+export type ActionVisibleStatusFilter = (typeof ACTION_VISIBLE_STATUS_FILTERS)[number];
+export type ActionStatusQuery = ActionStatusFilter | readonly ActionVisibleStatusFilter[] | undefined;
+export type ActionStatusSearch = {
+  statusFilter: ActionStatusFilter;
+  statusFilters: ActionVisibleStatusFilter[];
+  statusQuery: ActionStatusQuery;
+};
 
 export type ActionListItem = {
   status: string;
@@ -25,7 +33,7 @@ export function normalizeActionStatusFilter(value: string | string[] | undefined
     : "OPEN";
 }
 
-export function normalizeActionStatusFilters(value: string | string[] | undefined): ActionStatusFilter[] {
+function actionStatusValues(value: string | string[] | undefined) {
   const values = Array.isArray(value) ? value : value ? [value] : [];
   const seen = new Set<ActionStatusFilter>();
   for (const entry of values) {
@@ -33,8 +41,49 @@ export function normalizeActionStatusFilters(value: string | string[] | undefine
       seen.add(entry as ActionStatusFilter);
     }
   }
-  if (seen.has("ALL") || seen.size === ACTION_STATUS_FILTERS.length - 1) return [];
-  return [...seen];
+  return seen;
+}
+
+export function resolveActionStatusSearch(
+  value: string | string[] | undefined,
+  defaultValue: ActionVisibleStatusFilter | null = "OPEN",
+): ActionStatusSearch {
+  const seen = actionStatusValues(value);
+  const selected = ACTION_VISIBLE_STATUS_FILTERS.filter((status) => seen.has(status));
+  const isAllStatuses = seen.has("ALL") || selected.length === ACTION_VISIBLE_STATUS_FILTERS.length;
+  if (isAllStatuses) {
+    return {
+      statusFilter: "ALL" as const,
+      statusFilters: [],
+      statusQuery: "ALL" as const,
+    };
+  }
+  if (selected.length > 0) {
+    return {
+      statusFilter: selected[0],
+      statusFilters: selected,
+      statusQuery: selected,
+    };
+  }
+  if (defaultValue !== null) {
+    return {
+      statusFilter: defaultValue,
+      statusFilters: [defaultValue],
+      statusQuery: [defaultValue],
+    };
+  }
+  return {
+    statusFilter: normalizeActionStatusFilter(value),
+    statusFilters: [],
+    statusQuery: undefined,
+  };
+}
+
+export function normalizeActionStatusFilters(
+  value: string | string[] | undefined,
+  defaultValue: ActionVisibleStatusFilter | null = "OPEN",
+): ActionVisibleStatusFilter[] {
+  return resolveActionStatusSearch(value, defaultValue).statusFilters;
 }
 
 export function actionMatchesStatusFilter(action: ActionListItem, filter: ActionStatusFilter): boolean {

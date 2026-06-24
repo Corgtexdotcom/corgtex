@@ -4,6 +4,8 @@ import {
   actionMatchesStatusFilter,
   groupActionsByStatus,
   normalizeActionStatusFilter,
+  normalizeActionStatusFilters,
+  resolveActionStatusSearch,
 } from "./view-model";
 
 describe("actions view model", () => {
@@ -13,6 +15,37 @@ describe("actions view model", () => {
     expect(normalizeActionStatusFilter(["COMPLETED", "DRAFT"])).toBe("COMPLETED");
     expect(normalizeActionStatusFilter("INVALID")).toBe("OPEN");
     expect(normalizeActionStatusFilter(undefined)).toBe("OPEN");
+  });
+
+  it("defaults list and table status filters to open", () => {
+    expect(normalizeActionStatusFilters(undefined)).toEqual(["OPEN"]);
+    expect(normalizeActionStatusFilters("INVALID")).toEqual(["OPEN"]);
+    expect(resolveActionStatusSearch(undefined)).toEqual({
+      statusFilter: "OPEN",
+      statusFilters: ["OPEN"],
+      statusQuery: ["OPEN"],
+    });
+  });
+
+  it("preserves explicit all status selection", () => {
+    expect(resolveActionStatusSearch("ALL")).toEqual({
+      statusFilter: "ALL",
+      statusFilters: [],
+      statusQuery: "ALL",
+    });
+    expect(resolveActionStatusSearch(["DRAFT", "OPEN", "IN_PROGRESS", "COMPLETED"])).toEqual({
+      statusFilter: "ALL",
+      statusFilters: [],
+      statusQuery: "ALL",
+    });
+  });
+
+  it("allows kanban callers to keep a no-status all-columns state", () => {
+    expect(resolveActionStatusSearch(undefined, null)).toEqual({
+      statusFilter: "OPEN",
+      statusFilters: [],
+      statusQuery: undefined,
+    });
   });
 
   it("keeps private drafts visible in the draft tab", () => {

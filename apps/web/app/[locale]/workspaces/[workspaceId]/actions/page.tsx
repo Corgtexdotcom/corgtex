@@ -14,10 +14,10 @@ import {
   ACTION_STATUS_FILTERS,
   ACTION_STATUS_META,
   type ActionStatusFilter,
+  type ActionStatusQuery,
   actionMatchesStatusFilters,
   groupActionsByStatus,
-  normalizeActionStatusFilter,
-  normalizeActionStatusFilters,
+  resolveActionStatusSearch,
 } from "./view-model";
 import { MarkdownEditor } from "@/lib/components/MarkdownEditor";
 import { MarkdownExcerpt } from "@/lib/components/MarkdownRenderer";
@@ -50,9 +50,11 @@ export default async function ActionsPage({
   const tWork = await getTranslations("workItems");
   const membership = await requireWorkspaceMembership({ actor, workspaceId });
   const resolvedSearch = searchParams ? await searchParams : {};
-  const statusFilters = normalizeActionStatusFilters(resolvedSearch.status);
-  const statusFilter = statusFilters.length === 1 ? statusFilters[0] : normalizeActionStatusFilter(resolvedSearch.status);
   const view = normalizeWorkItemView(resolvedSearch.view);
+  const { statusFilter, statusFilters, statusQuery } = resolveActionStatusSearch(
+    resolvedSearch.status,
+    view === "kanban" ? null : "OPEN",
+  );
   const { circleIds, memberIds, sort } = resolveWorkItemFilters(resolvedSearch);
   const [{ items: actions }, circles, members] = await Promise.all([
     listActions(actor, workspaceId, {
@@ -99,9 +101,9 @@ export default async function ActionsPage({
   const actionColumnStatuses: ActionColumnStatus[] = ["DRAFT", "OPEN", "IN_PROGRESS", "COMPLETED"];
   const visibleActionColumnIds = normalizeVisibleWorkItemColumns(resolvedSearch.columns, actionColumnStatuses);
   const allActionColumnsVisible = visibleActionColumnIds.length === actionColumnStatuses.length;
-  const buildActionColumnHref = (status: ActionColumnStatus) => buildWorkItemQuery({
+  const buildActionColumnHref = (status: ActionColumnStatus, queryStatus: ActionStatusQuery = statusQuery) => buildWorkItemQuery({
     view: "kanban",
-    status: statusFilters,
+    status: queryStatus,
     circleIds,
     memberIds,
     columns: toggleWorkItemColumnVisibility(visibleActionColumnIds, status, actionColumnStatuses),
@@ -112,7 +114,7 @@ export default async function ActionsPage({
   const actionFilterHref = (filter: ActionStatusFilter) => view === "kanban"
     ? buildWorkItemQuery({
       view: "kanban",
-      status: statusFilters,
+      status: filter === "ALL" ? "ALL" : statusQuery,
       circleIds,
       memberIds,
       columns: filter === "ALL" ? undefined : toggleWorkItemColumnVisibility(visibleActionColumnIds, filter, actionColumnStatuses),
@@ -513,13 +515,13 @@ export default async function ActionsPage({
           <WorkItemToolbar
             currentView={view}
             currentSort={sort}
-            listHref={buildWorkItemQuery({ sort, circleIds, memberIds, status: statusFilters, view: "list" })}
-            kanbanHref={buildWorkItemQuery({ circleIds, memberIds, status: statusFilters, view: "kanban" })}
-            tableHref={buildWorkItemQuery({ sort, circleIds, memberIds, status: statusFilters, view: "table" })}
+            listHref={buildWorkItemQuery({ sort, circleIds, memberIds, status: statusQuery, view: "list" })}
+            kanbanHref={buildWorkItemQuery({ circleIds, memberIds, view: "kanban" })}
+            tableHref={buildWorkItemQuery({ sort, circleIds, memberIds, status: statusQuery, view: "table" })}
             sortLinks={{
-              priority: buildWorkItemQuery({ view: view === "table" ? "table" : "list", circleIds, memberIds, status: statusFilters, sort: "priority" }),
-              date: buildWorkItemQuery({ view: view === "table" ? "table" : "list", circleIds, memberIds, status: statusFilters, sort: "date" }),
-              alpha: buildWorkItemQuery({ view: view === "table" ? "table" : "list", circleIds, memberIds, status: statusFilters, sort: "alpha" }),
+              priority: buildWorkItemQuery({ view: view === "table" ? "table" : "list", circleIds, memberIds, status: statusQuery, sort: "priority" }),
+              date: buildWorkItemQuery({ view: view === "table" ? "table" : "list", circleIds, memberIds, status: statusQuery, sort: "date" }),
+              alpha: buildWorkItemQuery({ view: view === "table" ? "table" : "list", circleIds, memberIds, status: statusQuery, sort: "alpha" }),
             }}
             listLabel={tWork("listView")}
             kanbanLabel={tWork("kanbanView")}
