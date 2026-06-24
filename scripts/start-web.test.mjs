@@ -25,8 +25,17 @@ vi.mock("@prisma/client", () => ({
 }));
 
 describe("start-web startup modes", () => {
-  it("keeps combined startup as the default Railway-compatible mode", () => {
-    expect(resolveStartupMode({})).toBe("combined");
+  it("defaults to web startup without database mutations", () => {
+    expect(resolveStartupMode({})).toBe("web");
+    expect(startupPlanForMode("web")).toEqual({
+      runMigrations: false,
+      runSeeds: false,
+      verifyMigrations: true,
+      startWeb: true,
+    });
+  });
+
+  it("preserves combined startup for explicit backward-compatible manual runs", () => {
     expect(startupPlanForMode("combined")).toEqual({
       runMigrations: true,
       runSeeds: true,
@@ -45,7 +54,7 @@ describe("start-web startup modes", () => {
     });
   });
 
-  it("supports web mode without database mutations for Azure web replicas", () => {
+  it("supports explicit web mode without database mutations", () => {
     expect(resolveStartupMode({ CORGTEX_STARTUP_MODE: "web" })).toBe("web");
     expect(startupPlanForMode("web")).toEqual({
       runMigrations: false,
@@ -61,7 +70,7 @@ describe("start-web startup modes", () => {
     );
   });
 
-  it("deduplicates explicit seed scripts and optional demo seed entries", () => {
+  it("keeps seed scripts explicit to release-db and migrate-and-seed paths", () => {
     expect(configuredSeedScripts({
       SEED_SCRIPTS: "scripts/seed-a.mjs, scripts/seed-a.mjs, scripts/seed-b.mjs",
       CORGTEX_AUTO_SEED_JNJ_DEMO: "yes",

@@ -73,6 +73,9 @@ jobs:
       FLEET_RELEASE_AZURE_TARGET_JSON: ${{ vars.FLEET_RELEASE_AZURE_TARGET_JSON }}
       FLEET_RELEASE_STABLE_GIT_SHA: ${{ vars.FLEET_RELEASE_STABLE_GIT_SHA }}
       FLEET_RELEASE_ACR_SERVER: ${{ vars.FLEET_RELEASE_ACR_SERVER || 'acrcorgtexssstgwus3.azurecr.io' }}
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/corgtex_ci?schema=public
+      ADMIN_EMAIL: system+corgtex@corgtex.local
+      ADMIN_PASSWORD: corgtex-test-agent-pw
       GHCR_IMPORT_USERNAME: ${{ vars.GHCR_IMPORT_USERNAME || github.actor }}
       GHCR_IMPORT_TOKEN: ${{ secrets.GHCR_IMPORT_TOKEN }}
       GITHUB_TOKEN: ${{ github.token }}
@@ -138,6 +141,25 @@ jobs:
             --dry-run true \
             --concurrency "$CONCURRENCY_INPUT" \
             --fail-on-blockers true
+
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ steps.manifest.outputs.git_sha }}
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      - run: npx prisma generate
+
+      - name: Validate data migration fixtures
+        run: npm run check:migration-fixtures
+
+      - name: Validate seed fixtures
+        run: npm run check:seed-fixtures
 
       - name: Log in to GHCR
         if: ${{ !inputs.dry_run }}

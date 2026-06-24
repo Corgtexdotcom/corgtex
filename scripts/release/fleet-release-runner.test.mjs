@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { latestRailwayStatus, runFleetRelease } from "./fleet-release-runner.mjs";
+import { latestRailwayStatus, releaseVariables, runFleetRelease } from "./fleet-release-runner.mjs";
 
 const SHA = "c9077ff031e8e672923c84d52eeef862368f3493";
 
@@ -140,6 +140,53 @@ describe("fleet release runner", () => {
       },
       runCommand: vi.fn(),
     })).rejects.toThrow("CONTROL_PLANE_AGENT_API_KEY");
+  });
+
+  it("rejects startup seed env during release preflight", async () => {
+    await expect(runFleetRelease([
+      "validate-config",
+      "--release",
+      SHA,
+      "--targets",
+      "ops",
+      "--dry-run",
+    ], {
+      env: {
+        FLEET_RELEASE_OPS_TARGET_JSON: targetJson(),
+        CORGTEX_AUTO_SEED_JNJ_DEMO: "true",
+      },
+      runCommand: vi.fn(),
+    })).rejects.toThrow("CORGTEX_AUTO_SEED_JNJ_DEMO");
+
+    await expect(runFleetRelease([
+      "validate-config",
+      "--release",
+      SHA,
+      "--targets",
+      "ops",
+      "--dry-run",
+    ], {
+      env: {
+        FLEET_RELEASE_OPS_TARGET_JSON: targetJson(),
+        SEED_SCRIPTS: "scripts/seed-jnj-demo.mjs",
+      },
+      runCommand: vi.fn(),
+    })).rejects.toThrow("SEED_SCRIPTS");
+  });
+
+  it("forces Railway release services into web-only startup", async () => {
+    expect(releaseVariables({
+      releaseVersion: "main-c9077ff031e",
+      imageTag: `sha-${SHA}`,
+      gitSha: SHA,
+    })).toEqual({
+      CORGTEX_RELEASE_VERSION: "main-c9077ff031e",
+      CORGTEX_RELEASE_IMAGE_TAG: `sha-${SHA}`,
+      CORGTEX_RELEASE_GIT_SHA: SHA,
+      CORGTEX_STARTUP_MODE: "web",
+      CORGTEX_AUTO_SEED_JNJ_DEMO: "false",
+      SEED_SCRIPTS: "",
+    });
   });
 
   it("prints a dry-run plan without mutating providers", async () => {

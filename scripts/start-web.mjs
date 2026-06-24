@@ -43,7 +43,7 @@ export function configuredSeedScripts(env = process.env) {
 }
 
 export function resolveStartupMode(env = process.env) {
-  const mode = env.CORGTEX_STARTUP_MODE?.trim() || "combined";
+  const mode = env.CORGTEX_STARTUP_MODE?.trim() || "web";
   if (!STARTUP_MODES.has(mode)) {
     throw new Error(`Unsupported CORGTEX_STARTUP_MODE "${mode}". Expected one of: ${[...STARTUP_MODES].join(", ")}.`);
   }
@@ -124,6 +124,12 @@ export async function main() {
   const mode = resolveStartupMode();
   const plan = startupPlanForMode(mode);
   console.log(`[start-web] Startup mode: ${mode}`);
+  if (plan.startWeb && flagEnabled("CORGTEX_AUTO_SEED_JNJ_DEMO")) {
+    console.warn("[start-web] CORGTEX_AUTO_SEED_JNJ_DEMO is ignored for web startup. Run an explicit seed job instead.");
+  }
+  if (plan.startWeb && process.env.SEED_SCRIPTS?.trim()) {
+    console.warn("[start-web] SEED_SCRIPTS is ignored for web startup. Run CORGTEX_STARTUP_MODE=migrate-and-seed instead.");
+  }
 
   if (plan.runMigrations) {
     runMigrations();
