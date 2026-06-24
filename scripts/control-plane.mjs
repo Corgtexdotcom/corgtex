@@ -25,6 +25,7 @@ function usage() {
     "  CONTROL_PLANE_AGENT_API_KEY=... node scripts/control-plane.mjs configure-recorder <deploymentId> <reason> '<json-config>'",
     "  CONTROL_PLANE_AGENT_API_KEY=... node scripts/control-plane.mjs prepare-release <deploymentId> <targetImageTag> <reason> [targetVersion]",
     "  CONTROL_PLANE_AGENT_API_KEY=... node scripts/control-plane.mjs probe-health <deploymentId> <reason>",
+    "  CONTROL_PLANE_AGENT_API_KEY=... node scripts/control-plane.mjs post-deploy-probe <deploymentId> <reason> [releaseImageTag] [releaseVersion]",
     "  CONTROL_PLANE_AGENT_API_KEY=... node scripts/control-plane.mjs record-release <deploymentId> <releaseImageTag> <reason> [releaseVersion]",
     "  CONTROL_PLANE_AGENT_API_KEY=... node scripts/control-plane.mjs set-feature <deploymentId> <flag> <enabled> <reason> [json-config]",
     "  CONTROL_PLANE_AGENT_API_KEY=... node scripts/control-plane.mjs run-support <deploymentId> <action> <reason> '<json-args>'",
@@ -161,6 +162,13 @@ try {
     print(await callTool("probe_customer_deployment_health", {
       deploymentId: requireValue(args[0], "deploymentId"),
       reason: requireValue(args[1], "reason"),
+    }));
+  } else if (command === "post-deploy-probe") {
+    print(await callTool("run_post_deploy_probe", {
+      deploymentId: requireValue(args[0], "deploymentId"),
+      reason: requireValue(args[1], "reason"),
+      releaseImageTag: args[2] || undefined,
+      releaseVersion: args[3] || undefined,
     }));
   } else if (command === "record-release") {
     print(await callTool("record_verified_release", {

@@ -38,6 +38,7 @@ import {
   runControlPlaneClientMigrationDryRun,
   runControlPlaneContextOperation,
   runControlPlaneMeetingRecorderOperation,
+  runControlPlanePostDeployProbe,
   runControlPlaneReleaseOperation,
   runCustomerSupportOperation,
   planControlPlaneClientMigration,
@@ -491,6 +492,21 @@ const tools = [
         deploymentId: { type: "string" },
         snapshotKinds: { type: "array", items: { type: "string" } },
         reason: { type: "string" },
+      },
+      required: ["deploymentId", "reason"],
+    },
+  },
+  {
+    name: "run_post_deploy_probe",
+    description: "Run sanitized customer-read and recorder-readiness probes after a release health check.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        deploymentId: { type: "string" },
+        releaseImageTag: { type: "string" },
+        releaseVersion: { type: "string" },
+        reason: { type: "string" },
+        requireRemoteSupportAudit: { type: "boolean" },
       },
       required: ["deploymentId", "reason"],
     },
@@ -1075,6 +1091,15 @@ export async function POST(request: NextRequest) {
         deploymentId: argString(args, "deploymentId"),
         snapshotKinds: argStringArray(args, "snapshotKinds"),
         reason: argString(args, "reason"),
+      })));
+    }
+    if (name === "run_post_deploy_probe") {
+      return rpcResult(id, textContent(await runControlPlanePostDeployProbe(actor, {
+        deploymentId: argString(args, "deploymentId"),
+        releaseImageTag: argOptionalString(args, "releaseImageTag"),
+        releaseVersion: argOptionalString(args, "releaseVersion"),
+        reason: argString(args, "reason"),
+        requireRemoteSupportAudit: argBoolean(args, "requireRemoteSupportAudit", false),
       })));
     }
     if (name === "enqueue_fleet_snapshot_jobs") {

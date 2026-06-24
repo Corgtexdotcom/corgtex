@@ -149,6 +149,7 @@ describe("/api/control-plane/mcp", () => {
       "probe_customer_deployment_health",
       "record_verified_release",
       "refresh_fleet_snapshots",
+      "run_post_deploy_probe",
       "enqueue_fleet_snapshot_jobs",
       "prepare_release_upgrade",
       "deploy_latest_release",

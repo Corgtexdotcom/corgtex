@@ -147,6 +147,17 @@ export type SupportAction = keyof typeof SUPPORT_ACTION_TO_MCP_TOOL;
 
 type JsonRecord = Record<string, unknown>;
 
+const POST_DEPLOY_CUSTOMER_READ_PROBES = [
+  { key: "daily_overview", label: "Daily overview", toolName: "daily_overview", arguments: { windowHours: 72 } },
+  { key: "brain_context", label: "Brain context", toolName: "get_company_context", arguments: {} },
+  { key: "actions", label: "Actions", toolName: "list_actions", arguments: { take: 1 } },
+  { key: "tensions", label: "Tensions", toolName: "list_tensions", arguments: { take: 1 } },
+  { key: "meetings", label: "Meetings", toolName: "list_meetings", arguments: {} },
+  { key: "proposals", label: "Proposals", toolName: "list_proposals", arguments: { take: 1 } },
+] as const;
+
+const RECORDER_CREDIT_FAILURE_PATTERN = /insufficient[_ -]?credit[_ -]?balance|credit[_ -]?balance|insufficient[_ -]?balance/i;
+
 /**
  * Derived from the Module Manifest registry (`@corgtex/domain/modules`) - the
  * single source of truth for the workspace feature flag vocabulary. The
@@ -8301,6 +8312,294 @@ export async function configureSupportConnector(actor: AppActor, params: {
     hasSupportCredential: true,
     supportCredentialEnc: undefined,
   };
+}
+
+function boundedCount(value: unknown) {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? Math.floor(value) : null;
+}
+
+function countItems(value: unknown) {
+  if (Array.isArray(value)) return value.length;
+  const record = jsonRecord(value);
+  if (!record) return null;
+  if (Array.isArray(record.items)) return record.items.length;
+  if (record.counts && typeof record.counts === "object" && !Array.isArray(record.counts)) {
+    return Object.values(record.counts as JsonRecord)
+      .map(boundedCount)
+      .filter((count): count is number => count !== null)
+      .reduce((total, count) => total + count, 0);
+  }
+  return boundedCount(record.total);
+}
+
+function statusCounts(value: unknown): Record<string, number> {
+  const record = jsonRecord(value);
+  const items: unknown[] = Array.isArray(value)
+    ? value
+    : Array.isArray(record?.items)
+      ? record.items
+      : [];
+  const counts: Record<string, number> = {};
+  for (const item of items) {
+    const status = stringField(jsonRecord(item)?.status)?.toLowerCase();
+    if (!status) continue;
+    counts[status] = (counts[status] ?? 0) + 1;
+  }
+  return counts;
+}
+
+function postDeployProbeErrorClass(error: unknown) {
+  const message = error instanceof Error ? error.message : String(error ?? "");
+  if (error instanceof AppError) return error.code;
+  if (/scope|required scope|forbidden|unauthorized|missing session|invalid signature/i.test(message)) return "REMOTE_AUTH_OR_SCOPE";
+  if (/timeout|timed out/i.test(message)) return "REMOTE_TIMEOUT";
+  if (/fetch|network|ECONN|ENOTFOUND|ECONNRESET/i.test(message)) return "REMOTE_NETWORK";
+  return "REMOTE_ERROR";
+}
+
+function scanFailureCode(value: unknown): string | null {
+  if (typeof value === "string") {
+    return RECORDER_CREDIT_FAILURE_PATTERN.test(value) ? "insufficient_credit_balance" : null;
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const code = scanFailureCode(item);
+      if (code) return code;
+    }
+    return null;
+  }
+  const record = jsonRecord(value);
+  if (!record) return null;
+  for (const [key, entry] of Object.entries(record)) {
+    if (/url|token|secret|credential|transcript|summary|title|body|description/i.test(key)) continue;
+    const code = scanFailureCode(entry);
+    if (code) return code;
+  }
+  return null;
+}
+
+function summarizePostDeployReadProbe(key: string, label: string, value: unknown) {
+  const record = jsonRecord(value);
+  const counts = record?.counts && typeof record.counts === "object" && !Array.isArray(record.counts)
+    ? Object.fromEntries(
+      Object.entries(record.counts as JsonRecord)
+        .map(([countKey, countValue]) => [countKey, boundedCount(countValue)])
+        .filter((entry): entry is [string, number] => entry[1] !== null),
+    )
+    : null;
+  return {
+    key,
+    label,
+    status: "ok",
+    count: countItems(value),
+    counts,
+    statuses: statusCounts(value),
+  };
+}
+
+function summarizePostDeployRecorder(integrations: Awaited<ReturnType<typeof getControlPlaneIntegrationStatus>>) {
+  const recorder = integrations.integrations.find((integration) => {
+    const key = stringField((integration as JsonRecord).key)?.toLowerCase();
+    const label = stringField((integration as JsonRecord).label)?.toLowerCase();
+    return key === "meeting_recorders" || Boolean(label?.includes("recorder"));
+  }) as JsonRecord | undefined;
+
+  if (!recorder) {
+    return {
+      key: "recorder_readiness",
+      label: "Recorder readiness",
+      status: integrations.requiresConnectorSetup ? "requires_connector" : "not_configured",
+      configured: false,
+      entitlementEnabled: false,
+      vendorReadiness: false,
+      provider: null,
+      failureCount: null,
+      lastSmokeStatus: null,
+      failureCode: null,
+    };
+  }
+
+  const readiness = jsonRecord(recorder.readiness);
+  const lastSmokeRun = jsonRecord(recorder.lastSmokeRun) ?? jsonRecord(readiness?.lastSmokeRun);
+  const failureCode = scanFailureCode(recorder);
+  const vendorReady = booleanField(recorder.vendorReadiness);
+  const failures = boundedCount(recorder.failures);
+  const status = failureCode
+    ? "failed"
+    : vendorReady === false || (failures ?? 0) > 0
+      ? "degraded"
+      : vendorReady === true
+        ? "ok"
+        : "unknown";
+
+  return {
+    key: "recorder_readiness",
+    label: "Recorder readiness",
+    status,
+    configured: booleanField(recorder.configured),
+    entitlementEnabled: booleanField(recorder.entitlementEnabled),
+    vendorReadiness: vendorReady,
+    provider: stringField(recorder.provider),
+    failureCount: failures,
+    lastSmokeStatus: stringField(lastSmokeRun?.status),
+    failureCode,
+  };
+}
+
+function postDeployProbeStatus(reads: Array<{ status: string }>, recorder: { status: string }, supportAudit: { status: string }, requireRemoteSupportAudit: boolean) {
+  if (reads.some((probe) => probe.status === "failed")) return "failed";
+  if (recorder.status === "failed") return "failed";
+  if (requireRemoteSupportAudit && supportAudit.status !== "completed") return "failed";
+  if (["degraded", "requires_connector", "not_configured", "unknown"].includes(recorder.status)) return "degraded";
+  return "ok";
+}
+
+function postDeployProbeError(result: { status: string; reads: Array<{ key: string; status: string; errorClass?: string | null }>; recorder: { status: string; failureCode?: string | null }; supportAudit: { status: string; errorClass?: string | null } }) {
+  if (result.status === "ok") return null;
+  const failedRead = result.reads.find((probe) => probe.status === "failed");
+  if (failedRead) return `${failedRead.key}:${failedRead.errorClass ?? "failed"}`;
+  if (result.recorder.status === "failed") return `recorder:${result.recorder.failureCode ?? "failed"}`;
+  if (result.supportAudit.status !== "completed") return `support_audit:${result.supportAudit.errorClass ?? result.supportAudit.status}`;
+  return result.recorder.status === "degraded" ? "recorder:degraded" : "post_deploy_probe:degraded";
+}
+
+export async function runControlPlanePostDeployProbe(actor: AppActor, params: {
+  deploymentId: string;
+  reason?: string | null;
+  releaseImageTag?: string | null;
+  releaseVersion?: string | null;
+  requireRemoteSupportAudit?: boolean | null;
+}) {
+  requireControlPlaneScope(actor, "control-plane:fleet:write");
+  const reason = requireMutationReason(params.reason);
+  await requireControlPlaneAccess(actor, { deploymentId: params.deploymentId });
+  const connector = await loadSupportConnector(params.deploymentId);
+  const operationId = `post-deploy-probe:${params.deploymentId}:${Date.now()}`;
+  const requireRemoteSupportAudit = Boolean(params.requireRemoteSupportAudit);
+  const supportAudit: { status: string; errorClass: string | null } = { status: "skipped", errorClass: null };
+
+  try {
+    await recordRemoteSupportAudit({
+      mcpUrl: connector.mcpUrl,
+      bearerToken: connector.bearerToken,
+      action: "post_deploy_probe",
+      reason,
+      operationId,
+      phase: "started",
+    });
+    supportAudit.status = "started";
+  } catch (error) {
+    supportAudit.status = "failed";
+    supportAudit.errorClass = postDeployProbeErrorClass(error);
+  }
+
+  const reads: Array<{
+    key: string;
+    label: string;
+    status: string;
+    count?: number | null;
+    counts?: Record<string, number> | null;
+    statuses?: Record<string, number>;
+    errorClass?: string | null;
+  }> = [];
+
+  for (const probe of POST_DEPLOY_CUSTOMER_READ_PROBES) {
+    try {
+      const result = await callMcpTool({
+        mcpUrl: connector.mcpUrl,
+        bearerToken: connector.bearerToken,
+        toolName: probe.toolName,
+        arguments: probe.arguments,
+      });
+      const summarized = summarizeMcpResponse(result);
+      const remoteError = supportMcpErrorMessage(summarized);
+      if (remoteError) {
+        throw new AppError(502, "REMOTE_SUPPORT_OPERATION_FAILED", remoteError);
+      }
+      reads.push(summarizePostDeployReadProbe(probe.key, probe.label, summarized));
+    } catch (error) {
+      reads.push({
+        key: probe.key,
+        label: probe.label,
+        status: "failed",
+        errorClass: postDeployProbeErrorClass(error),
+      });
+    }
+  }
+
+  let recorder: ReturnType<typeof summarizePostDeployRecorder>;
+  try {
+    recorder = summarizePostDeployRecorder(await getControlPlaneIntegrationStatus(actor, params.deploymentId));
+  } catch (error) {
+    recorder = {
+      key: "recorder_readiness",
+      label: "Recorder readiness",
+      status: "failed",
+      configured: null,
+      entitlementEnabled: null,
+      vendorReadiness: null,
+      provider: null,
+      failureCount: null,
+      lastSmokeStatus: null,
+      failureCode: postDeployProbeErrorClass(error),
+    };
+  }
+
+  const result = {
+    deploymentId: params.deploymentId,
+    releaseImageTag: params.releaseImageTag?.trim() || null,
+    releaseVersion: params.releaseVersion?.trim() || null,
+    observedAt: new Date().toISOString(),
+    status: "unknown",
+    sanitized: true,
+    reads,
+    recorder,
+    supportAudit,
+  };
+  result.status = postDeployProbeStatus(reads, recorder, supportAudit, requireRemoteSupportAudit);
+
+  if (supportAudit.status === "started") {
+    try {
+      const probeFailed = reads.some((probe) => probe.status === "failed") || recorder.status === "failed";
+      await recordRemoteSupportAudit({
+        mcpUrl: connector.mcpUrl,
+        bearerToken: connector.bearerToken,
+        action: "post_deploy_probe",
+        reason,
+        operationId,
+        phase: probeFailed ? "failed" : "completed",
+        result: {
+          status: probeFailed ? "failed" : "ok",
+          reads: reads.map((probe) => ({ key: probe.key, status: probe.status, count: probe.count ?? null, errorClass: probe.errorClass ?? null })),
+          recorder,
+        },
+        error: probeFailed ? postDeployProbeError({ ...result, status: "failed" }) : null,
+      });
+      supportAudit.status = "completed";
+      result.status = postDeployProbeStatus(reads, recorder, supportAudit, requireRemoteSupportAudit);
+    } catch (auditError) {
+      supportAudit.status = "failed";
+      supportAudit.errorClass = postDeployProbeErrorClass(auditError);
+      result.status = postDeployProbeStatus(reads, recorder, supportAudit, requireRemoteSupportAudit);
+    }
+  }
+
+  await Promise.all([
+    recordFleetHealthSnapshot({
+      customerAccountId: connector.deployment.customerAccountId,
+      deploymentId: params.deploymentId,
+      snapshotKind: "SUPPORT_READY",
+      status: result.status,
+      summary: result,
+      error: postDeployProbeError(result),
+    }),
+    recordCustomerDeploymentEvent(actor, params.deploymentId, "control_plane.post_deploy_probe_completed", {
+      reason,
+      result,
+    }),
+  ]);
+
+  return result;
 }
 
 async function fetchCustomerSupportSnapshotCore(deploymentId: string) {
