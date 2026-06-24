@@ -5331,6 +5331,100 @@ describe("control plane domain", () => {
     }));
   });
 
+  it("classifies post-deploy remote support scope failures as auth or scope errors", async () => {
+    const { runControlPlanePostDeployProbe } = await import("./control-plane");
+    const deployment = {
+      id: "inst-1",
+      label: "Acme Production",
+      url: "https://customer.test",
+      customerSlug: "acme",
+      customerAccountId: "cust-1",
+      deploymentKind: "REMOTE_MANAGED",
+      deploymentStatus: "ACTIVE",
+      managedWorkspaceId: "ws-1",
+      managedWorkspace: {
+        id: "ws-1",
+        slug: "acme",
+        name: "Acme",
+        plan: "ENTERPRISE_MANAGED",
+        trialEndsAt: null,
+        billingProfile: null,
+        _count: { members: 2 },
+      },
+      supportMcpUrl: "https://customer.test/api/mcp",
+      supportCredentialEnc: "encrypted-token",
+      supportConnectorStatus: "connected",
+      supportLastSyncAt: null,
+      supportLastSyncError: null,
+    };
+    prismaMock.customerDeployment.findUnique.mockResolvedValue(deployment);
+    prismaMock.workspaceFeatureFlag.findUnique.mockResolvedValue({ enabled: true });
+    prismaMock.workspaceMeetingRecorderConfig.findUnique.mockResolvedValue({
+      enabled: true,
+      defaultProvider: "RECALL_AI",
+      fallbackProvider: null,
+      autoRecordEnabled: false,
+      botName: "Corgtex Recorder",
+      entryMessage: "Recording for the workspace.",
+      monthlyMinuteCap: 6000,
+    });
+    prismaMock.workspaceRecorderCalendarSource.findUnique.mockResolvedValue({
+      status: "ACTIVE",
+      providerAccountEmail: "calendar@example.com",
+      providerAccountId: "calendar-1",
+      lastSyncAt: new Date("2026-06-24T10:00:00Z"),
+      lastSyncError: null,
+    });
+    prismaMock.workflowJob.count.mockResolvedValue(0);
+    prismaMock.meetingRecorderSmokeRun.findFirst.mockResolvedValue({
+      status: "COMPLETED",
+      createdAt: new Date("2026-06-24T10:05:00Z"),
+    });
+    prismaMock.meetingRecording.count.mockResolvedValue(0);
+    prismaMock.communicationInstallation.findMany.mockResolvedValue([]);
+    prismaMock.externalDataSource.findMany.mockResolvedValue([]);
+    (prismaMock as any).oAuthConnection = prismaMock.oauthConnection;
+    prismaMock.oauthConnection.findMany.mockResolvedValue([]);
+    global.fetch = vi.fn(async (_input, init) => {
+      const body = JSON.parse(String((init as RequestInit)?.body ?? "{}"));
+      const toolName = body.params?.name;
+      const payload = toolName === "record_support_audit"
+        ? { ok: true }
+        : toolName === "get_company_context"
+          ? { text: "Missing required permission: support:write." }
+          : { items: [] };
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          result: {
+            content: [{ type: "text", text: JSON.stringify(payload) }],
+          },
+        }),
+      };
+    }) as any;
+
+    const result = await runControlPlanePostDeployProbe(operatorActor, {
+      deploymentId: "inst-1",
+      releaseImageTag: "sha-new",
+      releaseVersion: "main-sha-new",
+      reason: "Post-deploy customer-read probe.",
+    });
+
+    expect(result.status).toBe("failed");
+    expect(result.reads.find((probe) => probe.key === "brain_context")).toEqual(expect.objectContaining({
+      status: "failed",
+      errorClass: "REMOTE_AUTH_OR_SCOPE",
+    }));
+    expect(prismaMock.fleetHealthSnapshot.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        snapshotKind: "SUPPORT_READY",
+        status: "failed",
+        error: "brain_context:REMOTE_AUTH_OR_SCOPE",
+      }),
+    }));
+  });
+
   it("records and completes an audited remote support operation", async () => {
     const { runCustomerSupportOperation } = await import("./control-plane");
     prismaMock.supportOperation.create.mockResolvedValueOnce({

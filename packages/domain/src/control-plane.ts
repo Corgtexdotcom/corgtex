@@ -656,7 +656,7 @@ function supportMcpErrorMessage(value: unknown) {
   const record = jsonRecord(value);
   const text = typeof value === "string" ? value : stringField(record?.text);
   if (!text) return null;
-  return /MCP credential is missing the required scope|Control Plane scope required|Workspace membership required|FORBIDDEN|INVALID_SIGNATURE/i.test(text)
+  return /MCP credential is missing the required scope|Missing required permission|Control Plane scope required|Workspace membership required|FORBIDDEN|INVALID_SIGNATURE/i.test(text)
     ? text
     : null;
 }
@@ -8350,10 +8350,10 @@ function statusCounts(value: unknown): Record<string, number> {
 
 function postDeployProbeErrorClass(error: unknown) {
   const message = error instanceof Error ? error.message : String(error ?? "");
-  if (error instanceof AppError) return error.code;
-  if (/scope|required scope|forbidden|unauthorized|missing session|invalid signature/i.test(message)) return "REMOTE_AUTH_OR_SCOPE";
+  if (/scope|required scope|required permission|forbidden|unauthorized|missing session|invalid signature/i.test(message)) return "REMOTE_AUTH_OR_SCOPE";
   if (/timeout|timed out/i.test(message)) return "REMOTE_TIMEOUT";
   if (/fetch|network|ECONN|ENOTFOUND|ECONNRESET/i.test(message)) return "REMOTE_NETWORK";
+  if (error instanceof AppError) return error.code;
   return "REMOTE_ERROR";
 }
 
