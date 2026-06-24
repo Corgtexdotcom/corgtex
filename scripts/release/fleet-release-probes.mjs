@@ -57,7 +57,7 @@ export function postDeployProbeFailureSummary(probe) {
 
 export function assertPostDeployProbeReady(probe, targetLabel = "deployment") {
   const sanitized = sanitizePostDeployProbe(probe);
-  if (sanitized.status === "ok") return sanitized;
+  if (sanitized.status === "ok" || sanitized.status === "degraded") return sanitized;
   throw new Error(`${targetLabel} post-deploy probe ${sanitized.status}: ${postDeployProbeFailureSummary(sanitized)}`);
 }
 

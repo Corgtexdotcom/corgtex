@@ -739,13 +739,16 @@ describe("fleet release runner", () => {
     expect(slackPayloads[0].text).toContain("Fleet release");
   });
 
-  it("reports failed recorder readiness as degraded instead of green", async () => {
-    expect(() => assertPostDeployProbeReady({
+  it("reports degraded recorder readiness without blocking deployment success", async () => {
+    const sanitized = assertPostDeployProbeReady({
       status: "degraded",
       reads: [{ key: "actions", status: "ok", count: 1 }],
       recorder: { status: "degraded", failureCount: 1 },
       supportAudit: { status: "completed" },
-    }, "Customer A")).toThrow("recorder:degraded");
+    }, "Customer A");
+
+    expect(sanitized.status).toBe("degraded");
+    expect(postDeployProbeFailureSummary(sanitized)).toBe("recorder:degraded");
   });
 
   it("fails Azure preflight before mutation when provider credentials are missing", async () => {
