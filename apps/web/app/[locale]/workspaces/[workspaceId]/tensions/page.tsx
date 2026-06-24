@@ -27,6 +27,7 @@ import {
 import { getTranslations } from "next-intl/server";
 import {
   TENSION_STATUS_FILTERS,
+  type TensionStatusQuery,
   type TensionStatusFilter,
   groupTensionsByStatus,
   resolveTensionSearch,
@@ -49,8 +50,8 @@ export default async function TensionsPage({
   const tWork = await getTranslations("workItems");
   const membership = await requireWorkspaceMembership({ actor, workspaceId });
   const resolvedSearch = searchParams ? await searchParams : {};
-  const { statusFilters } = resolveTensionSearch(resolvedSearch);
   const view = normalizeWorkItemView(resolvedSearch.view);
+  const { statusFilters, statusQuery } = resolveTensionSearch(resolvedSearch, view === "kanban" ? null : "OPEN");
   const { circleIds, memberIds, sort } = resolveWorkItemFilters(resolvedSearch);
   const [{ items: tensions }, circles, members, activeInputRequests] = await Promise.all([
     listTensions(actor, workspaceId, { take: 200, circleIds, memberIds, sort }),
@@ -71,9 +72,9 @@ export default async function TensionsPage({
   const tensionColumnStatuses: TensionColumnStatus[] = ["DRAFT", "OPEN", "RESOLVED"];
   const visibleTensionColumnIds = normalizeVisibleWorkItemColumns(resolvedSearch.columns, tensionColumnStatuses);
   const allTensionColumnsVisible = visibleTensionColumnIds.length === tensionColumnStatuses.length;
-  const buildTensionColumnHref = (status: TensionColumnStatus) => buildWorkItemQuery({
+  const buildTensionColumnHref = (status: TensionColumnStatus, queryStatus: TensionStatusQuery = statusQuery) => buildWorkItemQuery({
     view: "kanban",
-    status: statusFilters,
+    status: queryStatus,
     circleIds,
     memberIds,
     columns: toggleWorkItemColumnVisibility(visibleTensionColumnIds, status, tensionColumnStatuses),
@@ -84,7 +85,7 @@ export default async function TensionsPage({
   const tensionFilterHref = (filter: TensionStatusFilter) => view === "kanban"
     ? buildWorkItemQuery({
       view: "kanban",
-      status: statusFilters,
+      status: filter === "ALL" ? "ALL" : statusQuery,
       circleIds,
       memberIds,
       columns: filter === "ALL" ? undefined : toggleWorkItemColumnVisibility(visibleTensionColumnIds, filter, tensionColumnStatuses),
@@ -505,13 +506,13 @@ export default async function TensionsPage({
           <WorkItemToolbar
             currentView={view}
             currentSort={sort}
-            listHref={buildWorkItemQuery({ sort, circleIds, memberIds, status: statusFilters, view: "list" })}
-            kanbanHref={buildWorkItemQuery({ circleIds, memberIds, status: statusFilters, view: "kanban" })}
-            tableHref={buildWorkItemQuery({ sort, circleIds, memberIds, status: statusFilters, view: "table" })}
+            listHref={buildWorkItemQuery({ sort, circleIds, memberIds, status: statusQuery, view: "list" })}
+            kanbanHref={buildWorkItemQuery({ circleIds, memberIds, view: "kanban" })}
+            tableHref={buildWorkItemQuery({ sort, circleIds, memberIds, status: statusQuery, view: "table" })}
             sortLinks={{
-              priority: buildWorkItemQuery({ view: view === "table" ? "table" : "list", circleIds, memberIds, status: statusFilters, sort: "priority" }),
-              date: buildWorkItemQuery({ view: view === "table" ? "table" : "list", circleIds, memberIds, status: statusFilters, sort: "date" }),
-              alpha: buildWorkItemQuery({ view: view === "table" ? "table" : "list", circleIds, memberIds, status: statusFilters, sort: "alpha" }),
+              priority: buildWorkItemQuery({ view: view === "table" ? "table" : "list", circleIds, memberIds, status: statusQuery, sort: "priority" }),
+              date: buildWorkItemQuery({ view: view === "table" ? "table" : "list", circleIds, memberIds, status: statusQuery, sort: "date" }),
+              alpha: buildWorkItemQuery({ view: view === "table" ? "table" : "list", circleIds, memberIds, status: statusQuery, sort: "alpha" }),
             }}
             listLabel={tWork("listView")}
             kanbanLabel={tWork("kanbanView")}
