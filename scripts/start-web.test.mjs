@@ -70,6 +70,16 @@ describe("start-web startup modes", () => {
     });
   });
 
+  it("supports migrate-and-web mode for release platforms without seed variables", () => {
+    expect(resolveStartupMode({ CORGTEX_STARTUP_MODE: "migrate-and-web" })).toBe("migrate-and-web");
+    expect(startupPlanForMode("migrate-and-web")).toEqual({
+      runMigrations: true,
+      runSeeds: false,
+      verifyMigrations: true,
+      startWeb: true,
+    });
+  });
+
   it("supports explicit web mode without database mutations", () => {
     expect(resolveStartupMode({ CORGTEX_STARTUP_MODE: "web" })).toBe("web");
     expect(startupPlanForMode("web")).toEqual({
