@@ -1,11 +1,20 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const queryRaw = vi.fn();
+const fsMock = vi.hoisted(() => ({
+  existsSync: vi.fn(() => false),
+  readdirSync: vi.fn((): Array<{ name: string; isDirectory: () => boolean }> => []),
+}));
 
 vi.mock("@corgtex/shared", () => ({
   prisma: {
     $queryRaw: queryRaw,
   },
+}));
+
+vi.mock("node:fs", () => ({
+  existsSync: fsMock.existsSync,
+  readdirSync: fsMock.readdirSync,
 }));
 
 beforeEach(() => {
@@ -39,6 +48,8 @@ beforeEach(() => {
   delete process.env.AZURE_STORAGE_CLIENT_ID;
   delete process.env.AZURE_CLIENT_ID;
   delete process.env.AZURE_STORAGE_CONNECTION_STRING;
+  fsMock.existsSync.mockReturnValue(false);
+  fsMock.readdirSync.mockReturnValue([]);
 });
 
 afterEach(() => {
@@ -129,6 +140,33 @@ describe("GET /api/health", () => {
         brainTables: true,
         knowledgeSourceType: false,
         migrations: false,
+      },
+    });
+  });
+
+  it("returns degraded when bundled migrations are not applied", async () => {
+    const { GET } = await import("./route");
+    fsMock.existsSync.mockReturnValue(true);
+    fsMock.readdirSync.mockReturnValue([
+      { name: "20260624000000_pending_migration", isDirectory: () => true },
+    ]);
+    queryRaw
+      .mockResolvedValueOnce([{ ok: 1 }])
+      .mockResolvedValueOnce([{ ready: true }])
+      .mockResolvedValueOnce([{ ready: true }])
+      .mockResolvedValueOnce([]);
+
+    const response = await GET();
+
+    expect(response.status).toBe(503);
+    await expect(response.json()).resolves.toMatchObject({
+      status: "degraded",
+      database: "up",
+      schema: "stale",
+      missing: {
+        brainTables: false,
+        knowledgeSourceType: false,
+        migrations: true,
       },
     });
   });

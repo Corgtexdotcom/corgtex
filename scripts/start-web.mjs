@@ -1,4 +1,4 @@
-import { existsSync } from "fs";
+import { existsSync, readdirSync } from "fs";
 import { execFileSync } from "child_process";
 import path from "path";
 import { fileURLToPath, pathToFileURL } from "url";
@@ -7,6 +7,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const rootDir = path.resolve(__dirname, "..");
 const prismaBin = path.join(rootDir, "node_modules", ".bin", "prisma");
 const nextBin = path.join(rootDir, "node_modules", "next", "dist", "bin", "next");
+const migrationsDir = path.join(rootDir, "prisma", "migrations");
 const STARTUP_MODES = new Set(["combined", "migrate-and-seed", "web"]);
 
 function run(command, args, options = {}) {
@@ -43,11 +44,19 @@ export function configuredSeedScripts(env = process.env) {
 }
 
 export function resolveStartupMode(env = process.env) {
-  const mode = env.CORGTEX_STARTUP_MODE?.trim() || "web";
+  const mode = env.CORGTEX_STARTUP_MODE?.trim() || "combined";
   if (!STARTUP_MODES.has(mode)) {
     throw new Error(`Unsupported CORGTEX_STARTUP_MODE "${mode}". Expected one of: ${[...STARTUP_MODES].join(", ")}.`);
   }
   return mode;
+}
+
+export function localMigrationNames(dir = migrationsDir) {
+  if (!existsSync(dir)) return [];
+  return readdirSync(dir, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory() && entry.name !== "migration_lock.toml")
+    .map((entry) => entry.name)
+    .sort();
 }
 
 export function startupPlanForMode(mode) {
@@ -77,17 +86,37 @@ export function startupPlanForMode(mode) {
 
 export async function verifyMigrations() {
   console.log("[start-web] Step 2.5: Verifying DB Migrations before Next.js");
+  let prisma;
   try {
     const { PrismaClient } = await import("@prisma/client");
-    const prisma = new PrismaClient();
-    const failedMigrationsRaw = await prisma.$queryRaw`
-      SELECT migration_name FROM _prisma_migrations
-      WHERE finished_at IS NULL AND rolled_back_at IS NULL
+    prisma = new PrismaClient();
+    const migrationRows = await prisma.$queryRaw`
+      SELECT migration_name, finished_at, rolled_back_at
+      FROM _prisma_migrations
     `;
-    console.log("[start-web] Migrations requiring attention:", failedMigrationsRaw);
-    await prisma.$disconnect();
-  } catch (e) {
-    console.log("[start-web] Failed DB check:", e.message);
+    const failedMigrations = migrationRows
+      .filter((migration) => migration.finished_at === null && migration.rolled_back_at === null)
+      .map((migration) => migration.migration_name);
+    const appliedMigrations = new Set(
+      migrationRows
+        .filter((migration) => migration.finished_at !== null && migration.rolled_back_at === null)
+        .map((migration) => migration.migration_name),
+    );
+    const pendingMigrations = localMigrationNames().filter((migration) => !appliedMigrations.has(migration));
+    console.log("[start-web] Failed migrations:", failedMigrations);
+    console.log("[start-web] Pending bundled migrations:", pendingMigrations);
+
+    if (failedMigrations.length > 0 || pendingMigrations.length > 0) {
+      throw new Error(`Database migrations are not ready: ${[
+        failedMigrations.length ? `failed=${failedMigrations.join(",")}` : null,
+        pendingMigrations.length ? `pending=${pendingMigrations.join(",")}` : null,
+      ].filter(Boolean).join(" ")}`);
+    }
+  } catch (error) {
+    console.log("[start-web] Failed DB check:", error.message);
+    throw error;
+  } finally {
+    await prisma?.$disconnect();
   }
 }
 

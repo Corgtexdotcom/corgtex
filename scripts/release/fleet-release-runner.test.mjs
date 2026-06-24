@@ -174,7 +174,7 @@ describe("fleet release runner", () => {
     })).rejects.toThrow("SEED_SCRIPTS");
   });
 
-  it("forces Railway release services into web-only startup", async () => {
+  it("forces Railway release services into combined startup", async () => {
     expect(releaseVariables({
       releaseVersion: "main-c9077ff031e",
       imageTag: `sha-${SHA}`,
@@ -183,7 +183,7 @@ describe("fleet release runner", () => {
       CORGTEX_RELEASE_VERSION: "main-c9077ff031e",
       CORGTEX_RELEASE_IMAGE_TAG: `sha-${SHA}`,
       CORGTEX_RELEASE_GIT_SHA: SHA,
-      CORGTEX_STARTUP_MODE: "web",
+      CORGTEX_STARTUP_MODE: "combined",
       CORGTEX_AUTO_SEED_JNJ_DEMO: "false",
       SEED_SCRIPTS: "",
     });
@@ -442,6 +442,15 @@ describe("fleet release runner", () => {
         password: "github-token",
       },
     });
+    const deployAndWaitCalls = railwayCalls
+      .filter((call) => call.query.includes("serviceInstanceDeployV2") || call.query.includes("deployments("))
+      .map((call) => `${call.query.includes("serviceInstanceDeployV2") ? "deploy" : "wait"}:${call.variables.serviceId}`);
+    expect(deployAndWaitCalls).toEqual([
+      "deploy:web-1",
+      "wait:web-1",
+      "deploy:worker-1",
+      "wait:worker-1",
+    ]);
   });
 
   it("requires control-plane credentials before verified inventory recording", async () => {

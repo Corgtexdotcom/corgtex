@@ -429,9 +429,8 @@ async function deployRailwayTarget(target, manifest, deps) {
       serviceId: service.serviceId,
       environmentId: target.railway.environmentId,
     }, deps);
-    deployments.push({ ...service, deploymentId: result.deploymentId });
-  }
-  for (const deployment of deployments) {
+    const deployment = { ...service, deploymentId: result.deploymentId };
+    deployments.push(deployment);
     await waitForRailwayDeployment(target, deployment, deps);
   }
   return { deployments };
@@ -442,7 +441,7 @@ export function releaseVariables(manifest) {
     CORGTEX_RELEASE_VERSION: manifest.releaseVersion,
     CORGTEX_RELEASE_IMAGE_TAG: manifest.imageTag,
     CORGTEX_RELEASE_GIT_SHA: manifest.gitSha,
-    CORGTEX_STARTUP_MODE: "web",
+    CORGTEX_STARTUP_MODE: "combined",
     CORGTEX_AUTO_SEED_JNJ_DEMO: "false",
     SEED_SCRIPTS: "",
   };
