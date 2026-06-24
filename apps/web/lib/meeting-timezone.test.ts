@@ -1,9 +1,12 @@
 import { describe, expect, it } from "vitest";
 import {
   assertMeetingEndAfterStart,
+  meetingEndFromDurationMinutes,
   normalizeOptionalMeetingDateTimeInput,
+  parseMeetingDurationMinutesInput,
   parseMeetingDateTimeInput,
   parseOptionalMeetingDateTimeInput,
+  resolveMeetingEndFromDurationOrInput,
   validMeetingTimeZone,
 } from "./meeting-timezone";
 
@@ -44,5 +47,29 @@ describe("meeting timezone parsing", () => {
       new Date("2026-06-11T21:07:00.000Z"),
       new Date("2026-06-11T20:07:00.000Z"),
     )).toThrow(/after the start time/);
+  });
+
+  it("parses meeting duration minutes and defaults to one hour", () => {
+    expect(parseMeetingDurationMinutesInput(null)).toBe(60);
+    expect(parseMeetingDurationMinutesInput("90")).toBe(90);
+    expect(parseMeetingDurationMinutesInput(45)).toBe(45);
+    expect(() => parseMeetingDurationMinutesInput("0")).toThrow(/between 1 and 480 minutes/);
+    expect(() => parseMeetingDurationMinutesInput("12.5")).toThrow(/whole number/);
+    expect(() => parseMeetingDurationMinutesInput("481")).toThrow(/between 1 and 480 minutes/);
+  });
+
+  it("derives meeting end times from duration before falling back to scheduled end input", () => {
+    const start = new Date("2026-06-11T21:00:00.000Z");
+    expect(meetingEndFromDurationMinutes(start, 90).toISOString()).toBe("2026-06-11T22:30:00.000Z");
+    expect(resolveMeetingEndFromDurationOrInput({
+      start,
+      durationMinutes: "45",
+      scheduledEndAt: "2026-06-11T23:00:00.000Z",
+    }).toISOString()).toBe("2026-06-11T21:45:00.000Z");
+    expect(resolveMeetingEndFromDurationOrInput({
+      start,
+      scheduledEndAt: "2026-06-11T23:00:00.000Z",
+    }).toISOString()).toBe("2026-06-11T23:00:00.000Z");
+    expect(resolveMeetingEndFromDurationOrInput({ start }).toISOString()).toBe("2026-06-11T22:00:00.000Z");
   });
 });

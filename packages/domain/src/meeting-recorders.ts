@@ -186,6 +186,7 @@ const WINDOWS_TIME_ZONE_TO_IANA: Record<string, string> = {
 export type MeetingRecorderScheduleInput = {
   meetingUrl: string;
   joinAt: Date;
+  joinMode?: "immediate" | "scheduled";
   botName: string;
   entryMessage?: string | null;
   metadata: Record<string, string>;
@@ -494,7 +495,6 @@ export function buildRecallCreateBotRequest(input: MeetingRecorderScheduleInput,
   const body: Record<string, unknown> = {
     meeting_url: input.meetingUrl,
     bot_name: input.botName,
-    join_at: input.joinAt.toISOString(),
     recording_config: {
       transcript: {
         provider: {
@@ -507,6 +507,9 @@ export function buildRecallCreateBotRequest(input: MeetingRecorderScheduleInput,
     },
     metadata: input.metadata,
   };
+  if (input.joinMode !== "immediate") {
+    body.join_at = input.joinAt.toISOString();
+  }
   if (input.entryMessage?.trim()) {
     body.chat = {
       on_bot_join: {
@@ -537,7 +540,6 @@ export function buildMeetingBaasCreateBotRequest(input: MeetingRecorderScheduleI
     meeting_url: input.meetingUrl,
     bot_name: input.botName,
     recording_mode: "speaker_view",
-    join_at: input.joinAt.toISOString(),
     transcription_enabled: true,
     transcription_config: {
       provider: "gladia",
@@ -545,6 +547,9 @@ export function buildMeetingBaasCreateBotRequest(input: MeetingRecorderScheduleI
     allow_multiple_bots: false,
     extra: input.metadata,
   };
+  if (input.joinMode !== "immediate") {
+    body.join_at = input.joinAt.toISOString();
+  }
   if (input.entryMessage?.trim()) {
     body.entry_message = input.entryMessage.trim();
   }
@@ -558,7 +563,9 @@ export function buildMeetingBaasCreateBotRequest(input: MeetingRecorderScheduleI
   }
 
   return {
-    url: "https://api.meetingbaas.com/v2/bots/scheduled",
+    url: input.joinMode === "immediate"
+      ? "https://api.meetingbaas.com/v2/bots"
+      : "https://api.meetingbaas.com/v2/bots/scheduled",
     init: {
       method: "POST",
       headers: {
@@ -949,6 +956,10 @@ function recordingExpectedEnd(recording: RecordingWithMeetingTime) {
     : FALLBACK_MEETING_DURATION_MS;
   const startAt = recording.joinAt ?? recording.meeting.recordedAt;
   return new Date(startAt.getTime() + durationMs);
+}
+
+function recorderJoinMode(joinAt: Date, now = Date.now()): "immediate" | "scheduled" {
+  return joinAt.getTime() - now <= AUTO_SCHEDULE_MIN_LEAD_MS ? "immediate" : "scheduled";
 }
 
 function staleRecordingReadyAt(recording: RecordingWithMeetingTime) {
@@ -2429,6 +2440,7 @@ export async function scheduleMeetingRecording(actor: AppActor, params: {
   const inputBase = {
     meetingUrl: meeting.meetingUrl,
     joinAt: meeting.recordedAt,
+    joinMode: recorderJoinMode(meeting.recordedAt),
     botName: config.botName || DEFAULT_BOT_NAME,
     entryMessage: config.entryMessage,
   };
@@ -2486,6 +2498,7 @@ async function attemptProviderSchedule(params: {
   meetingId: string;
   meetingUrl: string;
   joinAt: Date;
+  joinMode: "immediate" | "scheduled";
   botName: string;
   entryMessage?: string | null;
   provider: MeetingRecorderProvider;
@@ -2512,6 +2525,7 @@ async function attemptProviderSchedule(params: {
     const scheduled = await providerSchedule(params.provider, {
       meetingUrl: params.meetingUrl,
       joinAt: params.joinAt,
+      joinMode: params.joinMode,
       botName: params.botName,
       entryMessage: params.entryMessage,
       metadata: await recorderVendorMetadata({

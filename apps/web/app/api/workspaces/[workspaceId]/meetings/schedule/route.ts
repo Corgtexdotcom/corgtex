@@ -3,9 +3,8 @@ import { createMeetingSeries, enqueueMeetingAgendaPreparation } from "@corgtex/d
 import { resolveRequestActor } from "@/lib/auth";
 import { handleRouteError } from "@/lib/http";
 import {
-  assertMeetingEndAfterStart,
   parseMeetingDateTimeInput,
-  parseOptionalMeetingDateTimeInput,
+  resolveMeetingEndFromDurationOrInput,
 } from "@/lib/meeting-timezone";
 
 export async function POST(request: NextRequest, { params }: { params: Promise<{ workspaceId: string }> }) {
@@ -16,6 +15,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
       title?: unknown;
       description?: unknown;
       startsAt?: unknown;
+      durationMinutes?: unknown;
       scheduledEndAt?: unknown;
       recurrenceRule?: unknown;
       participantIds?: unknown;
@@ -24,12 +24,16 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
     };
     const timeZone = typeof body.timeZone === "string" ? body.timeZone : null;
     const startsAt = parseMeetingDateTimeInput(String(body.startsAt ?? ""), timeZone, "Starts at");
-    const scheduledEndAt = parseOptionalMeetingDateTimeInput(
-      typeof body.scheduledEndAt === "string" ? body.scheduledEndAt : null,
+    const scheduledEndAt = resolveMeetingEndFromDurationOrInput({
+      start: startsAt,
+      durationMinutes: typeof body.durationMinutes === "string" || typeof body.durationMinutes === "number"
+        ? body.durationMinutes
+        : null,
+      scheduledEndAt: typeof body.scheduledEndAt === "string" ? body.scheduledEndAt : null,
       timeZone,
-      "Scheduled end",
-    );
-    assertMeetingEndAfterStart(startsAt, scheduledEndAt, "Scheduled end");
+      durationLabel: "Duration",
+      endLabel: "Scheduled end",
+    });
 
     const result = await createMeetingSeries(actor, {
       workspaceId,

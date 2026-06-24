@@ -16,8 +16,8 @@ export const WORKSPACE_ADD_ACTION_DEFINITIONS = {
     description: "Ingest a completed meeting transcript.",
   },
   meeting_manual_recording: {
-    label: "Record meeting manually",
-    description: "Schedule a recorder for a meeting link.",
+    label: "Record now",
+    description: "Paste a live meeting link and send the Corgtex recorder now.",
   },
   action: {
     label: "Action",

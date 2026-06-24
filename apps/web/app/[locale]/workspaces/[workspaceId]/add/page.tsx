@@ -246,7 +246,9 @@ export default async function WorkspaceAddPage({
     ? roles.filter((role) => role.circle?.id === contextCircleId)
     : roles;
   const currentUserId = actor.kind === "user" ? actor.user.id : "";
-  const title = `Add ${WORKSPACE_ADD_ACTION_DEFINITIONS[kind].label}`;
+  const title = kind === "meeting_manual_recording"
+    ? "Record meeting now"
+    : `Add ${WORKSPACE_ADD_ACTION_DEFINITIONS[kind].label}`;
   const uploadDefaultSource = workspaceSubpath(returnUrl.pathname, workspaceId)?.startsWith("/settings")
     ? "settings-upload"
     : "brain-upload";
@@ -539,7 +541,7 @@ export default async function WorkspaceAddPage({
             <label>Description<textarea name="description" /></label>
             <div className="actions-inline">
               <label style={{ flex: 1 }}>Starts at<input name="startsAt" type="datetime-local" required /></label>
-              <label style={{ flex: 1 }}>Scheduled end<input name="scheduledEndAt" type="datetime-local" /></label>
+              <label style={{ flex: 1 }}>Duration (minutes)<input name="durationMinutes" type="number" min={1} max={480} step={5} defaultValue={60} /></label>
             </div>
             <TimeZoneSelect />
             <label>
@@ -585,15 +587,16 @@ export default async function WorkspaceAddPage({
         {kind === "meeting_manual_recording" && (
           <form action={recordMeetingManuallyAndReturn} className="stack nr-form-section">
             {hiddenWorkspace(workspaceId)}
-            <label>Title<input name="title" required /></label>
             <label>Meeting URL<input name="meetingUrl" type="url" placeholder="https://teams.microsoft.com/l/meetup-join/..." required /></label>
-            <div className="actions-inline">
-              <label style={{ flex: 1 }}>Meeting time<input name="joinAt" type="datetime-local" required /></label>
-              <label style={{ flex: 1 }}>Ends at<input name="scheduledEndAt" type="datetime-local" /></label>
-            </div>
-            <TimeZoneSelect />
-            <label>Participant emails<input name="participantEmails" placeholder="one@example.com, two@example.com" /></label>
-            <div className="actions-inline"><button type="submit">Record meeting</button>{cancelLink(returnTo)}</div>
+            <details>
+              <summary className="nr-hide-marker" style={{ cursor: "pointer", fontWeight: 600, color: "var(--accent)" }}>Optional details</summary>
+              <div className="stack" style={{ marginTop: 12 }}>
+                <label>Title<input name="title" placeholder="Live meeting" /></label>
+                <label>Duration (minutes)<input name="durationMinutes" type="number" min={1} max={480} step={5} defaultValue={60} /></label>
+                <label>Participant emails<input name="participantEmails" placeholder="one@example.com, two@example.com" /></label>
+              </div>
+            </details>
+            <div className="actions-inline"><button type="submit">Send recorder now</button>{cancelLink(returnTo)}</div>
           </form>
         )}
 

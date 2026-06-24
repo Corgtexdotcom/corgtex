@@ -93,4 +93,59 @@ describe("POST /api/workspaces/[workspaceId]/meetings/schedule", () => {
       }),
     );
   });
+
+  it("prefers durationMinutes over scheduledEndAt when both are present", async () => {
+    resolveRequestActor.mockResolvedValue({ kind: "user", user: { id: "user-1" } });
+    createMeetingSeries.mockResolvedValue({ series: { id: "series-1" }, meetings: [] });
+    enqueueMeetingAgendaPreparation.mockResolvedValue({ id: "job-1" });
+
+    const { POST } = await import("./route");
+    await POST(
+      new Request("http://localhost/api/workspaces/ws-1/meetings/schedule", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          title: "Weekly Tactical",
+          startsAt: "2026-04-30T17:00:00.000Z",
+          durationMinutes: 45,
+          scheduledEndAt: "2026-04-30T20:00:00.000Z",
+        }),
+      }) as never,
+      { params: Promise.resolve({ workspaceId: "ws-1" }) },
+    );
+
+    expect(createMeetingSeries).toHaveBeenCalledWith(
+      { kind: "user", user: { id: "user-1" } },
+      expect.objectContaining({
+        startsAt: new Date("2026-04-30T17:00:00.000Z"),
+        scheduledEndAt: new Date("2026-04-30T17:45:00.000Z"),
+      }),
+    );
+  });
+
+  it("defaults durationMinutes to one hour when no end input is present", async () => {
+    resolveRequestActor.mockResolvedValue({ kind: "user", user: { id: "user-1" } });
+    createMeetingSeries.mockResolvedValue({ series: { id: "series-1" }, meetings: [] });
+    enqueueMeetingAgendaPreparation.mockResolvedValue({ id: "job-1" });
+
+    const { POST } = await import("./route");
+    await POST(
+      new Request("http://localhost/api/workspaces/ws-1/meetings/schedule", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          title: "Weekly Tactical",
+          startsAt: "2026-04-30T17:00:00.000Z",
+        }),
+      }) as never,
+      { params: Promise.resolve({ workspaceId: "ws-1" }) },
+    );
+
+    expect(createMeetingSeries).toHaveBeenCalledWith(
+      { kind: "user", user: { id: "user-1" } },
+      expect.objectContaining({
+        scheduledEndAt: new Date("2026-04-30T18:00:00.000Z"),
+      }),
+    );
+  });
 });
