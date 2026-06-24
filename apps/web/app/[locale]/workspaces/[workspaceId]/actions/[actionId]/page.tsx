@@ -1,10 +1,11 @@
 import Link from "next/link";
-import { getAction, getWorkspaceArchiveRecord, listDeliberationEntries, listWorkItemEvidence, listWorkItemVersions, requireWorkspaceMembership } from "@corgtex/domain";
+import { AppError, getAction, getWorkspaceArchiveRecord, listDeliberationEntries, listWorkItemEvidence, listWorkItemVersions, requireWorkspaceMembership } from "@corgtex/domain";
 import { requirePageActor } from "@/lib/auth";
 import { MarkdownEditor } from "@/lib/components/MarkdownEditor";
 import { MarkdownRenderer } from "@/lib/components/MarkdownRenderer";
 import { WorkItemResolutionDialog } from "@/lib/components/WorkItemResolutionDialog";
 import { ArchivedItemBanner } from "@/lib/components/ArchivedItemBanner";
+import { UnavailableItemStatus } from "@/lib/components/UnavailableItemStatus";
 import { DeliberationComposer } from "@/lib/components/DeliberationComposer";
 import { DeliberationThread } from "@/lib/components/DeliberationThread";
 import { getDeliberationTargets } from "@/lib/deliberation-targets";
@@ -24,8 +25,32 @@ export default async function ActionDetailPage({
   const t = await getTranslations("actions");
   const tCommon = await getTranslations("common");
   const tWork = await getTranslations("workItems");
-  const action = await getAction(actor, { workspaceId, actionId, includeArchived: true });
   const membership = await requireWorkspaceMembership({ actor, workspaceId });
+  let action: Awaited<ReturnType<typeof getAction>>;
+  try {
+    action = await getAction(actor, { workspaceId, actionId, includeArchived: true });
+  } catch (error) {
+    if (error instanceof AppError && error.code === "NOT_FOUND") {
+      const archiveRecord = await getWorkspaceArchiveRecord(actor, {
+        workspaceId,
+        entityType: "Action",
+        entityId: actionId,
+        includePurged: true,
+      });
+      const canShowArchiveRecord = actor.kind === "agent" || membership?.role === "ADMIN";
+      return (
+        <UnavailableItemStatus
+          workspaceId={workspaceId}
+          entityType="Action"
+          entityId={actionId}
+          archiveRecord={canShowArchiveRecord ? archiveRecord : null}
+          backHref={`/workspaces/${workspaceId}/actions`}
+          backLabel={t("backToActions")}
+        />
+      );
+    }
+    throw error;
+  }
   const isArchived = Boolean(action.archivedAt);
   const [versionHistory, evidence, deliberationEntries, archiveRecord] = await Promise.all([
     listWorkItemVersions(actor, { workspaceId, entityType: "ACTION", entityId: actionId }),

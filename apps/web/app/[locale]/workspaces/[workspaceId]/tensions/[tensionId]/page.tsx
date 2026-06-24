@@ -1,10 +1,11 @@
 import Link from "next/link";
-import { getTension, getWorkspaceArchiveRecord, listAdviceRequests, listDeliberationEntries, listWorkItemEvidence, listWorkItemVersions, requireWorkspaceMembership } from "@corgtex/domain";
+import { AppError, getTension, getWorkspaceArchiveRecord, listAdviceRequests, listDeliberationEntries, listWorkItemEvidence, listWorkItemVersions, requireWorkspaceMembership } from "@corgtex/domain";
 import { requirePageActor } from "@/lib/auth";
 import { MarkdownEditor } from "@/lib/components/MarkdownEditor";
 import { MarkdownRenderer } from "@/lib/components/MarkdownRenderer";
 import { WorkItemResolutionDialog } from "@/lib/components/WorkItemResolutionDialog";
 import { ArchivedItemBanner } from "@/lib/components/ArchivedItemBanner";
+import { UnavailableItemStatus } from "@/lib/components/UnavailableItemStatus";
 import { DeliberationThread } from "@/lib/components/DeliberationThread";
 import { DeliberationComposer } from "@/lib/components/DeliberationComposer";
 import { getDeliberationTargets } from "@/lib/deliberation-targets";
@@ -25,7 +26,32 @@ export default async function TensionDetailPage({
   const tCommon = await getTranslations("common");
   const tWork = await getTranslations("workItems");
   const format = await getFormatter();
-  const tension = await getTension(actor, { workspaceId, tensionId });
+  let tension: Awaited<ReturnType<typeof getTension>>;
+  try {
+    tension = await getTension(actor, { workspaceId, tensionId });
+  } catch (error) {
+    if (error instanceof AppError && error.code === "NOT_FOUND") {
+      const membership = await requireWorkspaceMembership({ actor, workspaceId });
+      const archiveRecord = await getWorkspaceArchiveRecord(actor, {
+        workspaceId,
+        entityType: "Tension",
+        entityId: tensionId,
+        includePurged: true,
+      });
+      const canShowArchiveRecord = actor.kind === "agent" || membership?.role === "ADMIN";
+      return (
+        <UnavailableItemStatus
+          workspaceId={workspaceId}
+          entityType="Tension"
+          entityId={tensionId}
+          archiveRecord={canShowArchiveRecord ? archiveRecord : null}
+          backHref={`/workspaces/${workspaceId}/tensions`}
+          backLabel={t("backToTensions")}
+        />
+      );
+    }
+    throw error;
+  }
   const isArchived = Boolean(tension.archivedAt);
   const membership = await requireWorkspaceMembership({ actor, workspaceId });
   const [entries, versionHistory, evidence, inputRequests, archiveRecord] = await Promise.all([

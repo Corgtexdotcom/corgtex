@@ -244,4 +244,32 @@ describe("workspace archive domain", () => {
       }),
     }));
   });
+
+  it("can look up purged archive records for typed link status pages", async () => {
+    const purgedAt = new Date("2026-06-24T12:00:00.000Z");
+    prismaMock.workspaceArchiveRecord.findFirst.mockResolvedValue({
+      id: "archive-1",
+      entityType: "Tension",
+      entityId: "tension-1",
+      purgedAt,
+    });
+
+    const { getWorkspaceArchiveRecord } = await import("./archive");
+    await expect(getWorkspaceArchiveRecord(actor, {
+      workspaceId: "workspace-1",
+      entityType: "Tension",
+      entityId: "tension-1",
+      includePurged: true,
+    })).resolves.toMatchObject({ id: "archive-1", purgedAt });
+
+    expect(prismaMock.workspaceArchiveRecord.findFirst).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({
+        workspaceId: "workspace-1",
+        entityType: "Tension",
+        entityId: "tension-1",
+        restoredAt: null,
+      }),
+    }));
+    expect(prismaMock.workspaceArchiveRecord.findFirst.mock.calls.at(-1)?.[0].where).not.toHaveProperty("purgedAt");
+  });
 });
