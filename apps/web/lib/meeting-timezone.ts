@@ -10,6 +10,9 @@ type DateTimeParts = {
 
 const LOCAL_DATETIME_PATTERN = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2})(?:\.(\d{1,9}))?)?$/;
 const TIMEZONE_AWARE_DATETIME_PATTERN = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2})(?:\.(\d{1,9}))?)?([zZ]|[+-]\d{2}:\d{2})$/;
+export const DEFAULT_MEETING_DURATION_MINUTES = 60;
+export const MIN_MEETING_DURATION_MINUTES = 1;
+export const MAX_MEETING_DURATION_MINUTES = 480;
 
 class MeetingDateTimeInputError extends Error {
   readonly status = 400;
@@ -198,4 +201,65 @@ export function assertMeetingEndAfterStart(start: Date, end: Date | null, endLab
   if (end && end <= start) {
     invalid(`${normalizeLabel(endLabel)} must be after the start time.`);
   }
+}
+
+function hasDurationInput(value: string | number | null | undefined) {
+  return typeof value === "number" || Boolean(value?.trim());
+}
+
+export function parseMeetingDurationMinutesInput(
+  value: string | number | null | undefined,
+  label = "Duration",
+  defaultMinutes = DEFAULT_MEETING_DURATION_MINUTES,
+) {
+  if (!hasDurationInput(value)) {
+    return defaultMinutes;
+  }
+
+  const parsed = typeof value === "number" ? value : Number(String(value).trim());
+  if (
+    !Number.isInteger(parsed)
+    || parsed < MIN_MEETING_DURATION_MINUTES
+    || parsed > MAX_MEETING_DURATION_MINUTES
+  ) {
+    invalid(
+      `${normalizeLabel(label)} must be a whole number between ${MIN_MEETING_DURATION_MINUTES} and ${MAX_MEETING_DURATION_MINUTES} minutes.`,
+    );
+  }
+  return parsed;
+}
+
+export function meetingEndFromDurationMinutes(start: Date, durationMinutes: number) {
+  return new Date(start.getTime() + durationMinutes * 60_000);
+}
+
+export function resolveMeetingEndFromDurationOrInput(params: {
+  start: Date;
+  durationMinutes?: string | number | null;
+  scheduledEndAt?: string | null;
+  timeZone?: string | null;
+  durationLabel?: string;
+  endLabel?: string;
+}) {
+  if (hasDurationInput(params.durationMinutes)) {
+    return meetingEndFromDurationMinutes(
+      params.start,
+      parseMeetingDurationMinutesInput(params.durationMinutes, params.durationLabel),
+    );
+  }
+
+  const scheduledEndAt = parseOptionalMeetingDateTimeInput(
+    params.scheduledEndAt,
+    params.timeZone,
+    params.endLabel,
+  );
+  if (scheduledEndAt) {
+    assertMeetingEndAfterStart(params.start, scheduledEndAt, params.endLabel);
+    return scheduledEndAt;
+  }
+
+  return meetingEndFromDurationMinutes(
+    params.start,
+    parseMeetingDurationMinutesInput(null, params.durationLabel),
+  );
 }

@@ -224,6 +224,46 @@ describe("meeting recorder domain", () => {
     });
   });
 
+  it("builds immediate Recall create bot requests without join_at", async () => {
+    const { buildRecallCreateBotRequest } = await import("./meeting-recorders");
+    const request = buildRecallCreateBotRequest({
+      meetingUrl: "https://meet.google.com/abc-defg-hij",
+      joinAt: new Date("2026-05-05T17:00:00.000Z"),
+      joinMode: "immediate",
+      botName: "Corgtex Recorder",
+      entryMessage: "Recording notice",
+      metadata: { workspaceId: "workspace-1", meetingId: "meeting-1", recordingId: "recording-1" },
+    }, "secret", "us-east-1");
+
+    expect(request.url).toBe("https://us-east-1.recall.ai/api/v1/bot/");
+    expect(request.body).not.toHaveProperty("join_at");
+  });
+
+  it("switches Meeting BaaS between immediate and scheduled bot endpoints", async () => {
+    const { buildMeetingBaasCreateBotRequest } = await import("./meeting-recorders");
+    const scheduled = buildMeetingBaasCreateBotRequest({
+      meetingUrl: "https://meet.google.com/abc-defg-hij",
+      joinAt: new Date("2026-05-05T17:00:00.000Z"),
+      joinMode: "scheduled",
+      botName: "Corgtex Recorder",
+      entryMessage: "Recording notice",
+      metadata: { workspaceId: "workspace-1", meetingId: "meeting-1", recordingId: "recording-1" },
+    }, "secret");
+    const immediate = buildMeetingBaasCreateBotRequest({
+      meetingUrl: "https://meet.google.com/abc-defg-hij",
+      joinAt: new Date("2026-05-05T17:00:00.000Z"),
+      joinMode: "immediate",
+      botName: "Corgtex Recorder",
+      entryMessage: "Recording notice",
+      metadata: { workspaceId: "workspace-1", meetingId: "meeting-1", recordingId: "recording-1" },
+    }, "secret");
+
+    expect(scheduled.url).toBe("https://api.meetingbaas.com/v2/bots/scheduled");
+    expect(scheduled.body).toMatchObject({ join_at: "2026-05-05T17:00:00.000Z" });
+    expect(immediate.url).toBe("https://api.meetingbaas.com/v2/bots");
+    expect(immediate.body).not.toHaveProperty("join_at");
+  });
+
   it("rejects tampered recorder calendar OAuth state", async () => {
     const { createRecorderCalendarOAuthState, readRecorderCalendarOAuthState } = await import("./meeting-recorders");
     const state = createRecorderCalendarOAuthState({ deploymentId: "deployment-1", actorUserId: "operator-1" });
@@ -723,6 +763,99 @@ describe("meeting recorder domain", () => {
     });
     expect(JSON.stringify(body.metadata)).not.toContain("Weekly");
     expect(JSON.stringify(body.metadata)).not.toContain("team@example.com");
+  });
+
+  it("creates a local recording before calling Meeting BaaS for immediate joins", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-06-24T17:00:00.000Z"));
+    try {
+      const { scheduleMeetingRecording } = await import("./meeting-recorders");
+      prismaMock.workspaceMeetingRecorderConfig.findUnique.mockResolvedValue({
+        workspaceId: "workspace-1",
+        enabled: true,
+        defaultProvider: "MEETING_BAAS",
+        fallbackProvider: null,
+        botName: "Corgtex Recorder",
+        entryMessage: "Recording notice",
+        autoRecordEnabled: true,
+        monthlyMinuteCap: 6000,
+      });
+      prismaMock.meeting.findFirst.mockResolvedValue({
+        id: "meeting-1",
+        title: "Live meeting",
+        recordedAt: new Date("2026-06-24T17:00:00.000Z"),
+        scheduledEndAt: new Date("2026-06-24T18:00:00.000Z"),
+        meetingUrl: "https://meet.google.com/abc-defg-hij",
+        participantEmails: ["team@example.com"],
+      });
+      prismaMock.meetingRecording.create.mockImplementation(async () => {
+        expect(fetchMock).not.toHaveBeenCalled();
+        return {
+          id: "recording-baas",
+          workspaceId: "workspace-1",
+          meetingId: "meeting-1",
+          provider: "MEETING_BAAS",
+          meetingUrl: "https://meet.google.com/abc-defg-hij",
+          status: "PENDING",
+        };
+      });
+      prismaMock.meetingRecording.update.mockResolvedValue({
+        id: "recording-baas",
+        workspaceId: "workspace-1",
+        meetingId: "meeting-1",
+        provider: "MEETING_BAAS",
+        status: "SCHEDULED",
+        externalBotId: "baas-bot-1",
+      });
+      fetchMock.mockResolvedValue({ ok: true, status: 200, text: async () => JSON.stringify({ data: { bot_id: "baas-bot-1" } }) });
+
+      await expect(scheduleMeetingRecording(operatorActor, {
+        workspaceId: "workspace-1",
+        meetingId: "meeting-1",
+        mode: "manual",
+      })).resolves.toMatchObject({ id: "recording-baas", status: "SCHEDULED" });
+
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(fetchMock.mock.calls[0][0]).toBe("https://api.meetingbaas.com/v2/bots");
+      expect(JSON.parse(String(fetchMock.mock.calls[0][1]?.body))).not.toHaveProperty("join_at");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("reuses an active immediate recording without creating another provider bot", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-06-24T17:00:00.000Z"));
+    try {
+      const { scheduleMeetingRecording } = await import("./meeting-recorders");
+      prismaMock.meeting.findFirst.mockResolvedValue({
+        id: "meeting-1",
+        title: "Live meeting",
+        recordedAt: new Date("2026-06-24T17:00:00.000Z"),
+        scheduledEndAt: new Date("2026-06-24T18:00:00.000Z"),
+        meetingUrl: "https://meet.google.com/abc-defg-hij",
+        participantEmails: ["team@example.com"],
+      });
+      prismaMock.meetingRecording.findFirst.mockResolvedValueOnce({
+        id: "recording-active",
+        workspaceId: "workspace-1",
+        meetingId: "meeting-1",
+        provider: "RECALL_AI",
+        externalBotId: "recall-bot-1",
+        status: "JOINING",
+      });
+
+      await expect(scheduleMeetingRecording(operatorActor, {
+        workspaceId: "workspace-1",
+        meetingId: "meeting-1",
+        mode: "manual",
+      })).resolves.toMatchObject({ id: "recording-active", status: "JOINING" });
+
+      expect(prismaMock.meetingRecording.create).not.toHaveBeenCalled();
+      expect(fetchMock).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("does not fall back from Recall to Meeting BaaS on non-retryable scheduling failures", async () => {

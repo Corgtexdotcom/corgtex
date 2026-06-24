@@ -27,9 +27,9 @@ import {
 } from "@corgtex/domain";
 import { extractTextFromFileBuffer } from "@corgtex/knowledge";
 import {
-  assertMeetingEndAfterStart,
   parseMeetingDateTimeInput,
   parseOptionalMeetingDateTimeInput,
+  resolveMeetingEndFromDurationOrInput,
 } from "@/lib/meeting-timezone";
 
 export async function createMeetingAction(formData: FormData) {
@@ -63,8 +63,14 @@ export async function createMeetingSeriesAction(formData: FormData) {
   const workspaceId = asString(formData, "workspaceId");
   const timeZone = asOptional(formData, "timeZone");
   const startsAt = parseMeetingDateTimeInput(asString(formData, "startsAt"), timeZone, "Starts at");
-  const scheduledEndAt = parseOptionalMeetingDateTimeInput(asOptional(formData, "scheduledEndAt"), timeZone, "Scheduled end");
-  assertMeetingEndAfterStart(startsAt, scheduledEndAt, "Scheduled end");
+  const scheduledEndAt = resolveMeetingEndFromDurationOrInput({
+    start: startsAt,
+    durationMinutes: asOptional(formData, "durationMinutes"),
+    scheduledEndAt: asOptional(formData, "scheduledEndAt"),
+    timeZone,
+    durationLabel: "Duration",
+    endLabel: "Scheduled end",
+  });
   await createMeetingSeries(actor, {
     workspaceId,
     title: asString(formData, "title"),
@@ -90,13 +96,16 @@ export async function scheduleManualMeetingRecordingAction(formData: FormData) {
     workspaceId,
     allowedRoles: ["ADMIN", "FACILITATOR"],
   });
-  const timeZone = asOptional(formData, "timeZone");
-  const joinAt = parseMeetingDateTimeInput(asString(formData, "joinAt"), timeZone, "Meeting time");
-  const scheduledEndAt = parseOptionalMeetingDateTimeInput(asOptional(formData, "scheduledEndAt"), timeZone, "Ends at");
-  assertMeetingEndAfterStart(joinAt, scheduledEndAt, "Ends at");
+  const joinAt = new Date();
+  const scheduledEndAt = resolveMeetingEndFromDurationOrInput({
+    start: joinAt,
+    durationMinutes: asOptional(formData, "durationMinutes"),
+    durationLabel: "Duration",
+  });
+  const title = asOptional(formData, "title") ?? "Live meeting";
   const meeting = await createScheduledMeeting(actor, {
     workspaceId,
-    title: asString(formData, "title"),
+    title,
     startsAt: joinAt,
     scheduledEndAt,
     meetingUrl: asString(formData, "meetingUrl"),

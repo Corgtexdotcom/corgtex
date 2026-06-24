@@ -317,8 +317,8 @@ export default async function MeetingsPage({
                   <input name="startsAt" type="datetime-local" required />
                 </label>
                 <label style={{ flex: 1 }}>
-                  {t("formScheduledEndAt")}
-                  <input name="scheduledEndAt" type="datetime-local" />
+                  {t("formDurationMinutes")}
+                  <input name="durationMinutes" type="number" min={1} max={480} step={5} defaultValue={60} />
                 </label>
               </div>
               <TimeZoneSelect />
