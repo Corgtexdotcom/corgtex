@@ -1,6 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 
 import { azureReleaseVariables, latestRailwayStatus, releaseVariables, runFleetRelease } from "./fleet-release-runner.mjs";
+import { buildFleetReleaseIncident, fleetReleaseSlackPayload } from "./fleet-release-alerts.mjs";
+import { assertPostDeployProbeReady, postDeployProbeFailureSummary, sanitizePostDeployProbe } from "./fleet-release-probes.mjs";
 
 const SHA = "c9077ff031e8e672923c84d52eeef862368f3493";
 
@@ -40,6 +42,63 @@ function azureTargetJson(overrides = {}) {
   }]);
 }
 
+function successfulRailwayResponse(body) {
+  if (body.query.includes("serviceInstanceDeployV2")) {
+    return {
+      ok: true,
+      json: async () => ({
+        data: {
+          deploymentId: body.variables.serviceId === "web-1" ? "deploy-web" : "deploy-worker",
+        },
+      }),
+    };
+  }
+  if (body.query.includes("deployments(")) {
+    return {
+      ok: true,
+      json: async () => ({
+        data: {
+          deployments: {
+            edges: [{
+              node: {
+                id: body.variables.serviceId === "web-1" ? "deploy-web" : "deploy-worker",
+                status: "SUCCESS",
+              },
+            }],
+          },
+        },
+      }),
+    };
+  }
+  return { ok: true, json: async () => ({ data: {} }) };
+}
+
+function healthResponse() {
+  return {
+    ok: true,
+    json: async () => ({
+      status: "ok",
+      database: "up",
+      schema: "ready",
+      release: {
+        imageTag: `sha-${SHA}`,
+        gitSha: SHA,
+      },
+    }),
+  };
+}
+
+function controlPlaneResult(value) {
+  return {
+    ok: true,
+    json: async () => ({
+      result: {
+        content: [{ type: "text", text: JSON.stringify(value) }],
+      },
+    }),
+  };
+}
+
 describe("fleet release runner", () => {
   it("resolves latest-stable from the explicit stable release marker", async () => {
     const outputs = {};
@@ -62,6 +121,76 @@ describe("fleet release runner", () => {
     expect(JSON.parse(outputs.manifest_json)).toMatchObject({
       gitSha: SHA,
       imageTag: `sha-${SHA}`,
+    });
+  });
+
+  it("sanitizes post-deploy probe output down to counts and status only", () => {
+    const sanitized = sanitizePostDeployProbe({
+      deploymentId: "deployment-1",
+      status: "ok",
+      reads: [{
+        key: "actions",
+        label: "Actions",
+        status: "ok",
+        count: 3,
+        title: "Customer-private title",
+        items: [{ title: "Do not store this" }],
+      }],
+      recorder: {
+        status: "ok",
+        provider: "RECALL_AI",
+        failureMessage: "Customer-private recorder details",
+      },
+      supportAudit: { status: "completed" },
+      raw: "customer content",
+    });
+
+    const text = JSON.stringify(sanitized);
+    expect(text).not.toContain("Customer-private");
+    expect(text).not.toContain("Do not store");
+    expect(sanitized.reads[0]).toEqual({
+      key: "actions",
+      label: "Actions",
+      status: "ok",
+      count: 3,
+    });
+    expect(sanitized.recorder).toEqual({
+      status: "ok",
+      provider: "RECALL_AI",
+    });
+  });
+
+  it("keeps recorder insufficient-credit failures visible in probe classification", () => {
+    const probe = sanitizePostDeployProbe({
+      status: "failed",
+      reads: [],
+      recorder: {
+        status: "failed",
+        failureCode: "insufficient_credit_balance",
+      },
+      supportAudit: { status: "completed" },
+    });
+
+    expect(postDeployProbeFailureSummary(probe)).toBe("recorder:insufficient_credit_balance");
+    expect(() => assertPostDeployProbeReady(probe, "Crina")).toThrow("insufficient_credit_balance");
+  });
+
+  it("builds Slack alert payloads for failed fleet releases", () => {
+    const incident = buildFleetReleaseIncident({
+      manifest: { gitSha: SHA, imageTag: `sha-${SHA}` },
+      results: [{
+        status: "failed",
+        target: { label: "Crina" },
+        error: "post-deploy probe failed",
+      }],
+      stage: "deploy",
+    });
+
+    expect(incident.summary).toContain(`sha-${SHA}`);
+    expect(incident.summary).toContain("Crina");
+    expect(incident.evidence).toContain("Crina: post-deploy probe failed");
+    expect(fleetReleaseSlackPayload(incident)).toEqual({
+      text: expect.stringContaining("Fleet release"),
     });
   });
 
@@ -486,6 +615,137 @@ describe("fleet release runner", () => {
       fetchImpl: vi.fn(),
       sleep: vi.fn(),
     })).rejects.toThrow("CONTROL_PLANE_AGENT_API_KEY is missing");
+  });
+
+  it("runs sanitized post-deploy probes before recording a verified release", async () => {
+    const toolCalls = [];
+    const fetchImpl = vi.fn(async (url, options = {}) => {
+      const href = String(url);
+      if (href.includes("backboard.railway.com")) {
+        return successfulRailwayResponse(JSON.parse(options.body));
+      }
+      if (href.includes("/api/control-plane/mcp")) {
+        const body = JSON.parse(options.body);
+        toolCalls.push(body.params.name);
+        if (body.params.name === "run_post_deploy_probe") {
+          return controlPlaneResult({
+            deploymentId: "deployment-1",
+            status: "ok",
+            reads: [{ key: "actions", label: "Actions", status: "ok", count: 1 }],
+            recorder: { status: "ok", provider: "RECALL_AI", failureCount: 0 },
+            supportAudit: { status: "completed" },
+          });
+        }
+        if (body.params.name === "refresh_fleet_snapshots") {
+          return controlPlaneResult({
+            results: [
+              { snapshotKind: "CONTEXT", status: "ok", error: null },
+              { snapshotKind: "INTEGRATION", status: "ok", error: null },
+            ],
+          });
+        }
+        if (body.params.name === "record_verified_release") {
+          return controlPlaneResult({ recorded: true });
+        }
+      }
+      return healthResponse();
+    });
+
+    const result = await runFleetRelease([
+      "deploy",
+      "--release",
+      SHA,
+      "--targets",
+      "ops",
+      "--reason",
+      "Deploy release.",
+    ], {
+      env: {
+        FLEET_RELEASE_TARGETS_JSON: targetJson({ deploymentId: "deployment-1" }),
+        CONTROL_PLANE_AGENT_API_KEY: "control-plane-token",
+        RAILWAY_API_TOKEN: "railway-token",
+        GHCR_IMPORT_USERNAME: "github-user",
+        GITHUB_TOKEN: "github-token",
+      },
+      runCommand: vi.fn(),
+      fetchImpl,
+      sleep: vi.fn(),
+    });
+
+    expect(result.results[0].status).toBe("succeeded");
+    expect(toolCalls).toEqual([
+      "run_post_deploy_probe",
+      "refresh_fleet_snapshots",
+      "record_verified_release",
+    ]);
+    expect(result.results[0].result.postDeployProbe).toMatchObject({
+      status: "ok",
+      sanitized: true,
+    });
+  });
+
+  it("blocks release success and alerts when a customer-read probe fails after green health", async () => {
+    const toolCalls = [];
+    const slackPayloads = [];
+    const fetchImpl = vi.fn(async (url, options = {}) => {
+      const href = String(url);
+      if (href.includes("backboard.railway.com")) {
+        return successfulRailwayResponse(JSON.parse(options.body));
+      }
+      if (href === "https://hooks.slack.test/fleet") {
+        slackPayloads.push(JSON.parse(options.body));
+        return { ok: true, json: async () => ({ ok: true }) };
+      }
+      if (href.includes("/api/control-plane/mcp")) {
+        const body = JSON.parse(options.body);
+        toolCalls.push(body.params.name);
+        if (body.params.name === "run_post_deploy_probe") {
+          return controlPlaneResult({
+            deploymentId: "deployment-1",
+            status: "failed",
+            reads: [{ key: "actions", label: "Actions", status: "failed", errorClass: "REMOTE_AUTH_OR_SCOPE" }],
+            recorder: { status: "ok", provider: "RECALL_AI" },
+            supportAudit: { status: "completed" },
+          });
+        }
+      }
+      return healthResponse();
+    });
+
+    await expect(runFleetRelease([
+      "deploy",
+      "--release",
+      SHA,
+      "--targets",
+      "ops",
+      "--reason",
+      "Deploy release.",
+    ], {
+      env: {
+        FLEET_RELEASE_TARGETS_JSON: targetJson({ deploymentId: "deployment-1", label: "Crina" }),
+        CONTROL_PLANE_AGENT_API_KEY: "control-plane-token",
+        RAILWAY_API_TOKEN: "railway-token",
+        GHCR_IMPORT_USERNAME: "github-user",
+        GITHUB_TOKEN: "github-token",
+        OPS_SLACK_WEBHOOK_URL: "https://hooks.slack.test/fleet",
+      },
+      runCommand: vi.fn(),
+      fetchImpl,
+      sleep: vi.fn(),
+    })).rejects.toThrow("Ring 1 failed");
+
+    expect(toolCalls).toEqual(["run_post_deploy_probe"]);
+    expect(slackPayloads[0].text).toContain("Crina");
+    expect(slackPayloads[0].text).toContain("Fleet release");
+  });
+
+  it("reports failed recorder readiness as degraded instead of green", async () => {
+    expect(() => assertPostDeployProbeReady({
+      status: "degraded",
+      reads: [{ key: "actions", status: "ok", count: 1 }],
+      recorder: { status: "degraded", failureCount: 1 },
+      supportAudit: { status: "completed" },
+    }, "Crina")).toThrow("recorder:degraded");
   });
 
   it("fails Azure preflight before mutation when provider credentials are missing", async () => {

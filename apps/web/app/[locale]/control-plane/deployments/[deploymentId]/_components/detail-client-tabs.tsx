@@ -144,6 +144,19 @@ export function CustomerDetailClientTabs({
     : [];
   const recorderCalendarSource = recorderIntegration?.calendarSource ?? null;
   const recorderLastSmokeRun = recorderIntegration?.lastSmokeRun ?? null;
+  const fleetSnapshots = Array.isArray(customer.fleetSnapshots) ? customer.fleetSnapshots : [];
+  const latestSnapshot = (kind: string) => fleetSnapshots.find((snapshot: any) => snapshot.snapshotKind === kind) ?? null;
+  const healthSnapshot = latestSnapshot("HEALTH");
+  const releaseSnapshot = latestSnapshot("RELEASE");
+  const supportReadySnapshot = latestSnapshot("SUPPORT_READY");
+  const contextSnapshot = latestSnapshot("CONTEXT");
+  const integrationSnapshot = latestSnapshot("INTEGRATION");
+  const latestRollout = Array.isArray(rollouts) ? rollouts[0] : null;
+  const healthSummary = healthSnapshot?.summary && typeof healthSnapshot.summary === "object" ? healthSnapshot.summary : {};
+  const releaseSummary = releaseSnapshot?.summary && typeof releaseSnapshot.summary === "object" ? releaseSnapshot.summary : {};
+  const liveRelease = healthSummary?.health?.release ?? releaseSummary?.observedRelease ?? null;
+  const intendedRelease = releaseSummary?.expectedReleaseImageTag ?? releaseSummary?.expectedReleaseVersion ?? null;
+  const schemaStatus = healthSummary?.health?.schema ?? "unknown";
 
   return (
     <div className="space-y-6">
@@ -1260,6 +1273,69 @@ export function CustomerDetailClientTabs({
                     Log upgrade intent
                   </button>
                 </form>
+              </div>
+
+              <div className={`${detailPanelClass} space-y-4`}>
+                <div>
+                  <h3 className="text-sm font-semibold text-white">Release Verification Evidence</h3>
+                  <p className="text-[10px] text-muted mt-0.5">Latest health, schema, customer-read probe, recorder, and workflow signals.</p>
+                </div>
+
+                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                  {[
+                    {
+                      label: "Intended release",
+                      value: intendedRelease ?? "Not recorded",
+                      status: releaseSnapshot?.status ?? "unknown",
+                      detail: releaseSnapshot?.observedAt ? new Date(releaseSnapshot.observedAt).toLocaleString() : "n/a",
+                    },
+                    {
+                      label: "Live release",
+                      value: liveRelease?.imageTag ?? customer.releaseImageTag ?? customer.releaseVersion ?? "Unknown",
+                      status: customer.lastHealthStatus ?? healthSnapshot?.status ?? "unknown",
+                      detail: liveRelease?.gitSha ?? customer.releaseVersion ?? "No live SHA recorded",
+                    },
+                    {
+                      label: "Schema readiness",
+                      value: schemaStatus,
+                      status: schemaStatus === "ready" ? "ready" : "attention",
+                      detail: healthSnapshot?.error ?? "No schema error recorded",
+                    },
+                    {
+                      label: "Post-deploy probe",
+                      value: supportReadySnapshot?.status ?? "Not run",
+                      status: supportReadySnapshot?.status ?? "unknown",
+                      detail: supportReadySnapshot?.error ?? (supportReadySnapshot?.observedAt ? new Date(supportReadySnapshot.observedAt).toLocaleString() : "No probe snapshot"),
+                    },
+                    {
+                      label: "Recorder readiness",
+                      value: recorderIntegration?.vendorReadiness ? "Ready" : (integrationSnapshot?.status ?? recorderIntegration?.status ?? "Unknown"),
+                      status: recorderIntegration?.vendorReadiness ? "ready" : (integrationSnapshot?.status ?? recorderIntegration?.status ?? "unknown"),
+                      detail: recorderLastSmokeRun?.status ? `Smoke ${recorderLastSmokeRun.status}` : (integrationSnapshot?.error ?? "No smoke status recorded"),
+                    },
+                    {
+                      label: "Release workflow",
+                      value: latestRollout?.status ?? "Not recorded",
+                      status: latestRollout?.status ?? "unknown",
+                      detail: latestRollout?.createdAt ? new Date(latestRollout.createdAt).toLocaleString() : "No rollout row",
+                    },
+                    {
+                      label: "Context probe",
+                      value: contextSnapshot?.status ?? "Not run",
+                      status: contextSnapshot?.status ?? "unknown",
+                      detail: contextSnapshot?.error ?? (contextSnapshot?.observedAt ? new Date(contextSnapshot.observedAt).toLocaleString() : "No context snapshot"),
+                    },
+                  ].map((item) => (
+                    <div key={item.label} className={detailInnerPanelClass}>
+                      <div className="mb-2">
+                        <StatusBadge status={item.status}>{controlPlaneLabel(String(item.status ?? "unknown"))}</StatusBadge>
+                      </div>
+                      <h4 className="text-xs font-semibold text-white">{item.label}</h4>
+                      <strong className="mt-1 block truncate text-xs font-semibold text-white">{String(item.value)}</strong>
+                      <p className="mt-0.5 truncate text-[10px] text-muted">{item.detail}</p>
+                    </div>
+                  ))}
+                </div>
               </div>
 
               <div className={`${detailPanelClass} space-y-4`}>

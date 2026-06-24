@@ -21,6 +21,8 @@ import {
   targetFromControlPlaneRow,
   TERMINAL_RAILWAY_FAILURES,
 } from "./fleet-release-core.mjs";
+import { notifyFleetReleaseFailure } from "./fleet-release-alerts.mjs";
+import { runPostDeployProbe } from "./fleet-release-probes.mjs";
 
 const DEFAULT_CONTROL_PLANE_URL = "https://ops.corgtex.com";
 const DEFAULT_RAILWAY_GRAPHQL_ENDPOINT = "https://backboard.railway.com/graphql/v2";
@@ -99,21 +101,28 @@ export async function runFleetRelease(argv = process.argv.slice(2), deps = {}) {
   }
 
   const results = [];
-  for (const ring of groupTargetsByRing(targets)) {
-    console.log(JSON.stringify({ stage: "ring-started", ring: ring.ring, targetCount: ring.targets.length }));
-    const ringResults = await runWithConcurrency(ring.targets, concurrency, async (target) => {
-      try {
-        const result = await deployTarget(target, manifest, reason, deps);
-        return { target, status: "succeeded", result };
-      } catch (error) {
-        return { target, status: "failed", error: error instanceof Error ? error.message : String(error) };
+  try {
+    for (const ring of groupTargetsByRing(targets)) {
+      console.log(JSON.stringify({ stage: "ring-started", ring: ring.ring, targetCount: ring.targets.length }));
+      const ringResults = await runWithConcurrency(ring.targets, concurrency, async (target) => {
+        try {
+          const result = await deployTarget(target, manifest, reason, deps);
+          return { target, status: "succeeded", result };
+        } catch (error) {
+          return { target, status: "failed", error: error instanceof Error ? error.message : String(error) };
+        }
+      });
+      results.push(...ringResults);
+      console.log(JSON.stringify({ stage: "ring-completed", ring: ring.ring, results: ringResults.map(publicResult) }, null, 2));
+      if (ringResults.some((result) => result.status === "failed") && !forceAfterFailure) {
+        throw new Error(`Ring ${ring.ring} failed; later rings were stopped.`);
       }
-    });
-    results.push(...ringResults);
-    console.log(JSON.stringify({ stage: "ring-completed", ring: ring.ring, results: ringResults.map(publicResult) }, null, 2));
-    if (ringResults.some((result) => result.status === "failed") && !forceAfterFailure) {
-      throw new Error(`Ring ${ring.ring} failed; later rings were stopped.`);
     }
+  } catch (error) {
+    await notifyFleetReleaseFailure({ manifest, results, error, stage: "deploy" }, deps).catch((alertError) => {
+      console.error(`Fleet release alert failed: ${alertError instanceof Error ? alertError.message : String(alertError)}`);
+    });
+    throw error;
   }
 
   return { manifest, results };
@@ -376,6 +385,10 @@ async function deployTarget(target, manifest, reason, deps) {
     : await deployRailwayTarget(target, manifest, deps);
   const health = await pollHealth(target.url, manifest, deps);
   assertHealthProof(health, manifest, target.label);
+  const postDeployProbe = await runPostDeployProbe(target, manifest, reason, deps, callControlPlaneTool);
+  const postDeploySnapshots = target.deploymentId
+    ? await refreshPostDeploySnapshots(target, reason, deps)
+    : { status: "skipped", reason: "deployment_id_missing" };
   if (target.deploymentId) {
     await callControlPlaneTool("record_verified_release", {
       deploymentId: target.deploymentId,
@@ -384,7 +397,22 @@ async function deployTarget(target, manifest, reason, deps) {
       reason,
     }, deps);
   }
-  return { providerResult, release: health.release };
+  return { providerResult, release: health.release, postDeployProbe, postDeploySnapshots };
+}
+
+async function refreshPostDeploySnapshots(target, reason, deps) {
+  const snapshotRefresh = await callControlPlaneTool("refresh_fleet_snapshots", {
+    deploymentId: target.deploymentId,
+    snapshotKinds: ["CONTEXT", "INTEGRATION"],
+    reason,
+  }, deps);
+  const failed = Array.isArray(snapshotRefresh?.results)
+    ? snapshotRefresh.results.filter((result) => result.status === "failed")
+    : [];
+  if (failed.length > 0) {
+    throw new Error(`${target.label} post-deploy snapshot refresh failed: ${failed.map((result) => `${result.snapshotKind}:${result.error ?? result.status}`).join(", ")}`);
+  }
+  return snapshotRefresh;
 }
 
 async function deployRailwayTarget(target, manifest, deps) {
