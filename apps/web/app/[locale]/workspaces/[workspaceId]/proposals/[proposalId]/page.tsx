@@ -17,6 +17,15 @@ import { getFormatter, getTranslations } from "next-intl/server";
 
 export const dynamic = "force-dynamic";
 
+async function archivedSafeRead<T>(isArchived: boolean, read: Promise<T>, fallback: T): Promise<T> {
+  if (!isArchived) return read;
+  try {
+    return await read;
+  } catch {
+    return fallback;
+  }
+}
+
 export default async function ProposalDetailPage({
   params,
 }: {
@@ -59,19 +68,26 @@ export default async function ProposalDetailPage({
   const isArchived = Boolean(proposal.archivedAt);
 
   const [deliberationEntries, versionHistory, evidence, adviceRequests, archiveRecord] = await Promise.all([
-    listDeliberationEntries(actor, {
+    archivedSafeRead(isArchived, listDeliberationEntries(actor, {
       workspaceId,
       parentType: "PROPOSAL",
       parentId: proposalId,
+    }), []),
+    archivedSafeRead(isArchived, listWorkItemVersions(actor, { workspaceId, entityType: "PROPOSAL", entityId: proposalId }), {
+      entityType: "Proposal" as const,
+      entityId: proposalId,
+      currentVersion: proposal.version,
+      versions: [],
     }),
-    listWorkItemVersions(actor, { workspaceId, entityType: "PROPOSAL", entityId: proposalId }),
-    listWorkItemEvidence(actor, { workspaceId, entityType: "Proposal", entityId: proposalId }),
+    archivedSafeRead(isArchived, listWorkItemEvidence(actor, { workspaceId, entityType: "Proposal", entityId: proposalId }), []),
     isArchived ? Promise.resolve([]) : listAdviceRequests(actor, { workspaceId, subjectType: "PROPOSAL", subjectId: proposalId, status: "ACTIVE" }),
     isArchived
-      ? getWorkspaceArchiveRecord(actor, { workspaceId, entityType: "Proposal", entityId: proposal.id })
+      ? archivedSafeRead(true, getWorkspaceArchiveRecord(actor, { workspaceId, entityType: "Proposal", entityId: proposal.id }), null)
       : Promise.resolve(null),
   ]);
-  const deliberationTargets = await getDeliberationTargets({ actor, workspaceId, parentCircleId: proposal.circleId });
+  const deliberationTargets = isArchived
+    ? { options: [], defaultValue: "", actorMemberId: null, actorCircleIds: [] }
+    : await getDeliberationTargets({ actor, workspaceId, parentCircleId: proposal.circleId });
   const targetOptions = deliberationTargets.options.map((option) => ({
     ...option,
     label: option.kind === "circle"
@@ -104,6 +120,7 @@ export default async function ProposalDetailPage({
     return "";
   })();
 
+  const authorName = proposal.author?.displayName || proposal.author?.email || t("authorUnknown");
   const isAuthor = proposal.authorUserId === (actor.kind === "user" ? actor.user.id : "");
   const isAdmin = actor.kind === "agent" || membership?.role === "ADMIN";
   const actorUserId = actor.kind === "user" ? actor.user.id : null;
@@ -159,7 +176,7 @@ export default async function ProposalDetailPage({
         <p className="nr-meta nr-meta-flex mb-3">
           <span><Link href={`/workspaces/${workspaceId}/proposals`} className="nr-link-inherit">{t("backToProposals")}</Link></span>
           <span>·</span>
-          <span>{proposal.author.displayName || proposal.author.email}</span>
+          <span>{authorName}</span>
           <span>·</span>
           <span className={`tag ${statusClass}`}>
             {proposal.status === "RESOLVED" && proposal.resolutionOutcome ? `${proposal.status} · ${proposal.resolutionOutcome.replace("_", " ")}` : proposal.status}

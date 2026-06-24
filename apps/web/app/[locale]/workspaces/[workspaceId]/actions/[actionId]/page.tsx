@@ -15,6 +15,15 @@ import { getTranslations } from "next-intl/server";
 
 export const dynamic = "force-dynamic";
 
+async function archivedSafeRead<T>(isArchived: boolean, read: Promise<T>, fallback: T): Promise<T> {
+  if (!isArchived) return read;
+  try {
+    return await read;
+  } catch {
+    return fallback;
+  }
+}
+
 export default async function ActionDetailPage({
   params,
 }: {
@@ -53,16 +62,23 @@ export default async function ActionDetailPage({
   }
   const isArchived = Boolean(action.archivedAt);
   const [versionHistory, evidence, deliberationEntries, archiveRecord] = await Promise.all([
-    listWorkItemVersions(actor, { workspaceId, entityType: "ACTION", entityId: actionId }),
-    listWorkItemEvidence(actor, { workspaceId, entityType: "Action", entityId: actionId }),
-    listDeliberationEntries(actor, { workspaceId, parentType: "ACTION", parentId: actionId }),
+    archivedSafeRead(isArchived, listWorkItemVersions(actor, { workspaceId, entityType: "ACTION", entityId: actionId }), {
+      entityType: "Action" as const,
+      entityId: actionId,
+      currentVersion: action.version,
+      versions: [],
+    }),
+    archivedSafeRead(isArchived, listWorkItemEvidence(actor, { workspaceId, entityType: "Action", entityId: actionId }), []),
+    archivedSafeRead(isArchived, listDeliberationEntries(actor, { workspaceId, parentType: "ACTION", parentId: actionId }), []),
     isArchived
-      ? getWorkspaceArchiveRecord(actor, { workspaceId, entityType: "Action", entityId: action.id })
+      ? archivedSafeRead(true, getWorkspaceArchiveRecord(actor, { workspaceId, entityType: "Action", entityId: action.id }), null)
       : Promise.resolve(null),
   ]);
   const completionEvidence = evidence.filter((row) => row.purpose === "completion_evidence");
   const feedbackContextEvidence = evidence.filter((row) => row.purpose === "feedback_context");
-  const deliberationTargets = await getDeliberationTargets({ actor, workspaceId, parentCircleId: action.circleId });
+  const deliberationTargets = isArchived
+    ? { options: [], defaultValue: "", actorMemberId: null, actorCircleIds: [] }
+    : await getDeliberationTargets({ actor, workspaceId, parentCircleId: action.circleId });
   const targetOptions = deliberationTargets.options.map((option) => ({
     ...option,
     label: option.kind === "circle"
@@ -83,8 +99,8 @@ export default async function ActionDetailPage({
     IN_PROGRESS: t("statusInProgress"),
     COMPLETED: t("statusCompleted"),
   }[action.status];
-  const authorName = action.author.displayName || action.author.email || "Unknown";
-  const assigneeName = action.assigneeMember?.user.displayName || action.assigneeMember?.user.email || null;
+  const authorName = action.author?.displayName || action.author?.email || "Unknown";
+  const assigneeName = action.assigneeMember?.user?.displayName || action.assigneeMember?.user?.email || null;
   const canManage = !isArchived && (actor.kind === "agent"
     || membership?.role === "ADMIN"
     || (actor.kind === "user" && action.authorUserId === actor.user.id));
