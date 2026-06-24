@@ -8,7 +8,7 @@ const rootDir = path.resolve(__dirname, "..");
 const prismaBin = path.join(rootDir, "node_modules", ".bin", "prisma");
 const nextBin = path.join(rootDir, "node_modules", "next", "dist", "bin", "next");
 const migrationsDir = path.join(rootDir, "prisma", "migrations");
-const STARTUP_MODES = new Set(["combined", "migrate-and-seed", "web"]);
+const STARTUP_MODES = new Set(["combined", "migrate-and-seed", "migrate-and-web", "web"]);
 
 function run(command, args, options = {}) {
   execFileSync(command, args, {
@@ -74,6 +74,14 @@ export function startupPlanForMode(mode) {
       runSeeds: true,
       verifyMigrations: true,
       startWeb: false,
+    };
+  }
+  if (mode === "migrate-and-web") {
+    return {
+      runMigrations: true,
+      runSeeds: false,
+      verifyMigrations: true,
+      startWeb: true,
     };
   }
   return {
@@ -169,7 +177,7 @@ export async function main() {
   if (plan.runSeeds) {
     runSeeds();
   } else {
-    console.log("[start-web] Step 2: Skipping seeds for web-only startup mode.");
+    console.log("[start-web] Step 2: Skipping seeds for this startup mode.");
   }
 
   if (plan.verifyMigrations) {

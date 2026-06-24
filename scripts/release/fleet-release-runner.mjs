@@ -447,6 +447,13 @@ export function releaseVariables(manifest) {
   };
 }
 
+export function azureReleaseVariables(manifest) {
+  return {
+    ...releaseVariables(manifest),
+    CORGTEX_STARTUP_MODE: "migrate-and-web",
+  };
+}
+
 function railwayServiceUpdateInput(image, deps) {
   const input = { source: { image } };
   if (!image.startsWith("ghcr.io/")) return input;
@@ -529,6 +536,7 @@ async function deployAzureTarget(target, manifest, deps) {
 }
 
 function updateAzureContainerApp(name, image, target, manifest, deps) {
+  const releaseEnv = Object.entries(azureReleaseVariables(manifest)).map(([key, value]) => `${key}=${value}`);
   runCommand("az", [
     "containerapp",
     "update",
@@ -539,9 +547,7 @@ function updateAzureContainerApp(name, image, target, manifest, deps) {
     "--image",
     image,
     "--set-env-vars",
-    `CORGTEX_RELEASE_VERSION=${manifest.releaseVersion}`,
-    `CORGTEX_RELEASE_IMAGE_TAG=${manifest.imageTag}`,
-    `CORGTEX_RELEASE_GIT_SHA=${manifest.gitSha}`,
+    ...releaseEnv,
     "--output",
     "none",
   ], deps);

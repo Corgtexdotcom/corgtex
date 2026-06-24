@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { latestRailwayStatus, releaseVariables, runFleetRelease } from "./fleet-release-runner.mjs";
+import { azureReleaseVariables, latestRailwayStatus, releaseVariables, runFleetRelease } from "./fleet-release-runner.mjs";
 
 const SHA = "c9077ff031e8e672923c84d52eeef862368f3493";
 
@@ -184,6 +184,21 @@ describe("fleet release runner", () => {
       CORGTEX_RELEASE_IMAGE_TAG: `sha-${SHA}`,
       CORGTEX_RELEASE_GIT_SHA: SHA,
       CORGTEX_STARTUP_MODE: "combined",
+      CORGTEX_AUTO_SEED_JNJ_DEMO: "false",
+      SEED_SCRIPTS: "",
+    });
+  });
+
+  it("uses migrate-and-web startup for Azure releases", async () => {
+    expect(azureReleaseVariables({
+      releaseVersion: "main-c9077ff031e",
+      imageTag: `sha-${SHA}`,
+      gitSha: SHA,
+    })).toEqual({
+      CORGTEX_RELEASE_VERSION: "main-c9077ff031e",
+      CORGTEX_RELEASE_IMAGE_TAG: `sha-${SHA}`,
+      CORGTEX_RELEASE_GIT_SHA: SHA,
+      CORGTEX_STARTUP_MODE: "migrate-and-web",
       CORGTEX_AUTO_SEED_JNJ_DEMO: "false",
       SEED_SCRIPTS: "",
     });
@@ -491,6 +506,62 @@ describe("fleet release runner", () => {
       fetchImpl: vi.fn(),
       sleep: vi.fn(),
     })).rejects.toThrow("AZURE_CLIENT_ID is missing");
+  });
+
+  it("sets migrate-and-web startup variables during Azure deploys", async () => {
+    const runCommand = vi.fn((command, args) => {
+      if (command === "az" && args[0] === "containerapp" && args[1] === "show") {
+        return { stdout: `${args[3]}-revision\n`, stderr: "" };
+      }
+      return { stdout: "", stderr: "" };
+    });
+    const fetchImpl = vi.fn(async () => ({
+      ok: true,
+      json: async () => ({
+        status: "ok",
+        database: "up",
+        schema: "ready",
+        release: {
+          imageTag: `sha-${SHA}`,
+          gitSha: SHA,
+        },
+      }),
+    }));
+
+    const result = await runFleetRelease([
+      "deploy",
+      "--release",
+      SHA,
+      "--targets",
+      "azure-selfserve",
+      "--reason",
+      "Deploy release.",
+    ], {
+      env: {
+        FLEET_RELEASE_TARGETS_JSON: azureTargetJson(),
+        AZURE_CLIENT_ID: "azure-client",
+        AZURE_TENANT_ID: "azure-tenant",
+        AZURE_SUBSCRIPTION_ID: "azure-subscription",
+        GITHUB_ACTOR: "github-user",
+        GITHUB_TOKEN: "github-token",
+      },
+      runCommand,
+      fetchImpl,
+      sleep: vi.fn(),
+    });
+
+    expect(result.results).toHaveLength(1);
+    const updateCalls = runCommand.mock.calls.filter(([command, args]) => (
+      command === "az" && args[0] === "containerapp" && args[1] === "update"
+    ));
+    expect(updateCalls).toHaveLength(2);
+    for (const [, args] of updateCalls) {
+      expect(args).toContain("CORGTEX_STARTUP_MODE=migrate-and-web");
+      expect(args).toContain("CORGTEX_AUTO_SEED_JNJ_DEMO=false");
+      expect(args).toContain("SEED_SCRIPTS=");
+      expect(args).toContain(`CORGTEX_RELEASE_IMAGE_TAG=sha-${SHA}`);
+      expect(args).toContain(`CORGTEX_RELEASE_GIT_SHA=${SHA}`);
+    }
   });
 
   it("does not treat a different Railway deployment status as proof", async () => {

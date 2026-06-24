@@ -135,6 +135,9 @@ async function updateContainerApp(name, image) {
     `CORGTEX_RELEASE_VERSION=${releaseVersion}`,
     `CORGTEX_RELEASE_IMAGE_TAG=${imageTag}`,
     `CORGTEX_RELEASE_GIT_SHA=${releaseGitSha}`,
+    "CORGTEX_STARTUP_MODE=migrate-and-web",
+    "CORGTEX_AUTO_SEED_JNJ_DEMO=false",
+    "SEED_SCRIPTS=",
     "--output",
     "none",
   ]);
