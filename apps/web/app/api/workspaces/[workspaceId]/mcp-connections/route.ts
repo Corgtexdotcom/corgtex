@@ -1,9 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import {
-  getClaudeMcpConnectionStatus,
-  markAiWorkspaceProviderConnected,
+  listAiWorkspaceToolProviders,
+  listMcpOAuthConnectionStatuses,
   requireWorkspaceMembership,
+  type McpOAuthProviderKey,
   verifyAiWorkspaceProviderConnection,
 } from "@corgtex/domain";
 import { resolveRequestActor } from "@/lib/auth";
@@ -14,9 +15,17 @@ type Params = {
 };
 
 const connectionActionSchema = z.object({
-  action: z.enum(["verify", "mark_connected"]),
+  action: z.literal("verify"),
   providerKey: z.string().min(1),
 });
+
+type ConnectionResponse = {
+  providerKey: string;
+  connected: boolean;
+  connectedAt: string | null;
+  source: string | null;
+  clientName?: string | null;
+};
 
 export async function GET(request: NextRequest, { params }: Params) {
   try {
@@ -24,23 +33,45 @@ export async function GET(request: NextRequest, { params }: Params) {
     const actor = await resolveRequestActor(request);
     await requireWorkspaceMembership({ actor, workspaceId });
 
-    const claude = actor.kind === "user"
-      ? await getClaudeMcpConnectionStatus({ userId: actor.user.id, workspaceId })
-      : { connected: false, connectedAt: null };
+    const providers = listAiWorkspaceToolProviders();
+    const providerKeys = providers.map((provider) => provider.key);
+    const oauthStatuses = actor.kind === "user"
+      ? await listMcpOAuthConnectionStatuses({ userId: actor.user.id, workspaceId })
+      : [];
+    const statusByProvider = new Map(oauthStatuses.map((status) => [status.providerKey, status]));
+    const connections: ConnectionResponse[] = providerKeys.map((providerKey) => {
+      const status = statusByProvider.get(providerKey as McpOAuthProviderKey);
+      return {
+        providerKey,
+        connected: Boolean(status?.connected),
+        connectedAt: status?.connectedAt?.toISOString() ?? null,
+        source: status?.connected ? `mcp_oauth:${providerKey}` : null,
+        clientName: status?.clientName ?? null,
+      };
+    });
+    const signals = Object.fromEntries(connections.map((connection) => [
+      connection.providerKey,
+      {
+        connected: connection.connected,
+        connectedAt: connection.connectedAt,
+        source: connection.source,
+      },
+    ]));
+    const claudeSignal = signals.claude ?? {
+      connected: false,
+      connectedAt: null,
+      source: null,
+    };
+    const claude = {
+      connected: claudeSignal.connected,
+      connectedAt: claudeSignal.connectedAt,
+    };
 
     return NextResponse.json(
       {
-        claude: {
-          connected: claude.connected,
-          connectedAt: claude.connectedAt?.toISOString() ?? null,
-        },
-        signals: {
-          claude: {
-            connected: claude.connected,
-            connectedAt: claude.connectedAt?.toISOString() ?? null,
-            source: claude.connected ? "claude_oauth" : null,
-          },
-        },
+        claude,
+        connections,
+        signals,
       },
       {
         headers: {
@@ -59,21 +90,6 @@ export async function POST(request: NextRequest, { params }: Params) {
     const actor = await resolveRequestActor(request);
     await requireWorkspaceMembership({ actor, workspaceId });
     const parsed = await validateBody(request, connectionActionSchema);
-
-    if (parsed.action === "mark_connected") {
-      const state = await markAiWorkspaceProviderConnected(actor, {
-        workspaceId,
-        providerKey: parsed.providerKey,
-        source: "manual",
-      });
-      return NextResponse.json({
-        providerKey: parsed.providerKey,
-        verified: true,
-        connectedAt: new Date().toISOString(),
-        message: "Connection marked as complete.",
-        state,
-      });
-    }
 
     const result = await verifyAiWorkspaceProviderConnection(actor, {
       workspaceId,

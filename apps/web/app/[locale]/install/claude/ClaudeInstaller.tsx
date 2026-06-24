@@ -47,7 +47,7 @@ export function ClaudeInstaller({ connectorUrl, workspaceId, returnTo }: Props) 
   const [connected, setConnected] = useState(false);
   const [completionMessage, setCompletionMessage] = useState<string | null>(null);
   const [completionTone, setCompletionTone] = useState<"success" | "warning">("success");
-  const [completionPending, setCompletionPending] = useState<"verify" | "mark_connected" | null>(null);
+  const [completionPending, setCompletionPending] = useState<"verify" | null>(null);
 
   const handleCopy = () => {
     void writeClipboard(connectorUrl).then((ok) => {
@@ -74,7 +74,7 @@ export function ClaudeInstaller({ connectorUrl, workspaceId, returnTo }: Props) 
     return connected;
   };
 
-  const updateConnection = async (action: "verify" | "mark_connected") => {
+  const verifyConnection = async () => {
     if (!workspaceId) {
       setConnected(true);
       setCompletionTone("success");
@@ -82,14 +82,14 @@ export function ClaudeInstaller({ connectorUrl, workspaceId, returnTo }: Props) 
       return;
     }
 
-    setCompletionPending(action);
+    setCompletionPending("verify");
     setCompletionMessage(null);
 
     try {
       const response = await fetch(`/api/workspaces/${workspaceId}/mcp-connections`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action, providerKey: "claude" }),
+        body: JSON.stringify({ action: "verify", providerKey: "claude" }),
       });
       const data = await response.json().catch(() => ({}));
       if (!response.ok) {
@@ -99,8 +99,8 @@ export function ClaudeInstaller({ connectorUrl, workspaceId, returnTo }: Props) 
       const message = typeof (data as { message?: unknown }).message === "string"
         ? (data as { message: string }).message
         : verified
-          ? "Claude is connected."
-          : "Corgtex has not seen Claude finish sign-in yet.";
+          ? "Claude is connected through Corgtex OAuth."
+          : "Corgtex has not seen Claude finish Corgtex authorization yet.";
 
       setConnected(verified);
       setCompletionTone(verified ? "success" : "warning");
@@ -134,7 +134,7 @@ export function ClaudeInstaller({ connectorUrl, workspaceId, returnTo }: Props) 
         className="button w-full py-3 text-base"
       >
         {copied && opened
-          ? "URL copied. Claude is open in another tab."
+          ? "MCP URL copied. Claude is open in another tab."
           : "Copy URL and open Claude Connectors"}
       </button>
 
@@ -193,7 +193,7 @@ export function ClaudeInstaller({ connectorUrl, workspaceId, returnTo }: Props) 
               <li>Click <span className="font-medium text-[var(--text-strong)]">Add custom connector</span>.</li>
               <li>Paste the connector URL you copied.</li>
               <li>Click <span className="font-medium text-[var(--text-strong)]">Add</span>, then <span className="font-medium text-[var(--text-strong)]">Connect</span>.</li>
-              <li>Sign in to Corgtex when the popup appears, choose your workspace, click <span className="font-medium text-[var(--text-strong)]">Allow access</span>.</li>
+              <li>When Claude opens Corgtex, authorize as your current Corgtex user and choose this workspace if asked.</li>
             </ul>
           }
         />
@@ -209,17 +209,9 @@ export function ClaudeInstaller({ connectorUrl, workspaceId, returnTo }: Props) 
                   type="button"
                   className="button secondary text-sm"
                   disabled={completionPending !== null}
-                  onClick={() => void updateConnection("verify")}
+                  onClick={() => void verifyConnection()}
                 >
                   {completionPending === "verify" ? "Checking" : "Verify connection"}
-                </button>
-                <button
-                  type="button"
-                  className="button secondary text-sm"
-                  disabled={completionPending !== null}
-                  onClick={() => void updateConnection("mark_connected")}
-                >
-                  {completionPending === "mark_connected" ? "Saving" : "I connected it"}
                 </button>
                 {returnTo ? (
                   <a href={returnTo} className="button secondary text-sm">

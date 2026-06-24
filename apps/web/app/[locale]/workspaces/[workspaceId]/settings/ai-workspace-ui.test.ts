@@ -142,7 +142,8 @@ describe("AI workspace UI helpers", () => {
     expect(cards[0].steps).toEqual([
       "Open your OpenWork workspace.",
       "Go to Extensions, then Advanced Settings, then Add MCP server.",
-      "Paste the Corgtex MCP URL, enable OAuth, and finish browser sign-in.",
+      "Paste the Corgtex MCP URL. When OpenWork opens Corgtex, authorize as your current Corgtex user for this workspace.",
+      "Return here and verify the connection.",
     ]);
     expect(cards[0].notes).toContain("OpenWork must support dynamic client registration for the OAuth connection.");
     expect("resources" in cards[0]).toBe(false);
@@ -163,6 +164,7 @@ describe("AI workspace UI helpers", () => {
     });
     expect(chatgptCard.steps.join(" ")).toContain("Turn on Developer Mode");
     expect(chatgptCard.steps.join(" ")).toContain("scan tools");
+    expect(chatgptCard.steps.join(" ")).toContain("Authorize as your current Corgtex user");
     expect(chatgptCard.steps.join(" ")).toContain("choose Corgtex");
   });
 

@@ -2840,16 +2840,12 @@
       "connectClientCursorOpening": "Opening Cursor's MCP installer. This Corgtex tour tab stays open.",
       "connectClientCursorFallback": "Could not open Cursor automatically. Use the browser fallback.",
       "connectClientBrowserFallback": "Browser fallback",
-      "connectClientVerifyClaude": "Verify Claude",
+      "connectClientVerifyConnection": "Verify connection",
       "connectClientVerifying": "Verifying...",
-      "connectClientVerified": "{provider} is connected.",
-      "connectClientMarkConnected": "Mark connected",
-      "connectClientMarking": "Saving...",
-      "connectClientMarkedConnected": "{provider} is marked connected.",
+      "connectClientVerified": "{provider} is connected through Corgtex OAuth.",
       "connectClientManualValue": "Manual copy value",
       "connectClientErrorSelect": "Could not save the selected AI app.",
       "connectClientErrorVerify": "Could not verify the AI app connection.",
-      "connectClientErrorMark": "Could not mark the AI app connected.",
       "checklistPrimary": "Get started"
     }
   },

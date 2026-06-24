@@ -2838,16 +2838,12 @@
       "connectClientCursorOpening": "Abriendo el instalador MCP de Cursor. Esta pestana del recorrido de Corgtex queda abierta.",
       "connectClientCursorFallback": "No se pudo abrir Cursor automaticamente. Usa la alternativa del navegador.",
       "connectClientBrowserFallback": "Alternativa del navegador",
-      "connectClientVerifyClaude": "Verificar Claude",
+      "connectClientVerifyConnection": "Verificar conexion",
       "connectClientVerifying": "Verificando...",
-      "connectClientVerified": "{provider} esta conectado.",
-      "connectClientMarkConnected": "Marcar conectado",
-      "connectClientMarking": "Guardando...",
-      "connectClientMarkedConnected": "{provider} queda marcado como conectado.",
+      "connectClientVerified": "{provider} esta conectado con OAuth de Corgtex.",
       "connectClientManualValue": "Valor para copiar manualmente",
       "connectClientErrorSelect": "No se pudo guardar la app de IA seleccionada.",
       "connectClientErrorVerify": "No se pudo verificar la conexion de la app de IA.",
-      "connectClientErrorMark": "No se pudo marcar la app de IA como conectada.",
       "checklistPrimary": "Comenzar"
     }
   },

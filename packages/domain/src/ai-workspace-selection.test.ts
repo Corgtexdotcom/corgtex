@@ -1,8 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { AppActor } from "@corgtex/shared";
 
-const { getClaudeMcpConnectionStatusMock, prismaMock, requireWorkspaceMembershipMock } = vi.hoisted(() => ({
-  getClaudeMcpConnectionStatusMock: vi.fn(),
+const { getMcpOAuthConnectionStatusMock, prismaMock, requireWorkspaceMembershipMock } = vi.hoisted(() => ({
+  getMcpOAuthConnectionStatusMock: vi.fn(),
   prismaMock: {
     $transaction: vi.fn(),
     aiWorkspaceConnection: {
@@ -18,7 +18,7 @@ const { getClaudeMcpConnectionStatusMock, prismaMock, requireWorkspaceMembership
 
 vi.mock("@corgtex/shared", () => ({ prisma: prismaMock }));
 vi.mock("./auth", () => ({ requireWorkspaceMembership: requireWorkspaceMembershipMock }));
-vi.mock("./mcp-connector", () => ({ getClaudeMcpConnectionStatus: getClaudeMcpConnectionStatusMock }));
+vi.mock("./mcp-connector", () => ({ getMcpOAuthConnectionStatus: getMcpOAuthConnectionStatusMock }));
 
 const userActor: AppActor = {
   kind: "user",
@@ -48,7 +48,7 @@ describe("AI workspace selection", () => {
     prismaMock.aiWorkspaceConnection.updateMany.mockResolvedValue({ count: 1 });
     prismaMock.aiWorkspaceConnection.update.mockResolvedValue({ id: "connection-1" });
     prismaMock.aiWorkspaceConnection.create.mockResolvedValue({ id: "connection-1" });
-    getClaudeMcpConnectionStatusMock.mockResolvedValue({ connected: false, connectedAt: null });
+    getMcpOAuthConnectionStatusMock.mockResolvedValue({ providerKey: "claude", connected: false, connectedAt: null, source: null, clientName: null });
     requireWorkspaceMembershipMock.mockResolvedValue({ id: "member-1", workspaceId: "workspace-1", userId: "user-1", role: "ADMIN", isActive: true });
   });
 
@@ -166,21 +166,37 @@ describe("AI workspace selection", () => {
     });
   });
 
-  it("marks a provider connected and keeps it as default", async () => {
-    const { markAiWorkspaceProviderConnected } = await import("./ai-workspace-selection");
+  it("verifies a non-Claude provider from an observed MCP OAuth connection", async () => {
+    const { verifyAiWorkspaceProviderConnection } = await import("./ai-workspace-selection");
     prismaMock.aiWorkspaceConnection.findFirst.mockResolvedValueOnce({
       id: "connection-1",
-      setupState: { existing: true },
+      setupState: {},
     });
     const connectedAt = new Date("2026-06-12T12:00:00.000Z");
-
-    await markAiWorkspaceProviderConnected(userActor, {
-      workspaceId: "workspace-1",
-      providerKey: "chatgpt",
-      source: "manual",
+    getMcpOAuthConnectionStatusMock.mockResolvedValueOnce({
+      providerKey: "cursor",
+      connected: true,
       connectedAt,
+      source: "mcp_oauth",
+      clientName: "Cursor",
     });
 
+    const result = await verifyAiWorkspaceProviderConnection(userActor, {
+      workspaceId: "workspace-1",
+      providerKey: "cursor",
+    });
+
+    expect(getMcpOAuthConnectionStatusMock).toHaveBeenCalledWith({
+      userId: "user-1",
+      workspaceId: "workspace-1",
+      providerKey: "cursor",
+    });
+    expect(result).toMatchObject({
+      providerKey: "cursor",
+      verified: true,
+      connectedAt,
+      message: "Cursor is connected through Corgtex OAuth.",
+    });
     expect(prismaMock.aiWorkspaceConnection.updateMany).toHaveBeenCalledWith({
       where: {
         workspaceId: "workspace-1",
@@ -191,49 +207,53 @@ describe("AI workspace selection", () => {
     expect(prismaMock.aiWorkspaceConnection.update).toHaveBeenCalledWith({
       where: { id: "connection-1" },
       data: expect.objectContaining({
-        displayName: "ChatGPT",
+        displayName: "Cursor",
         healthStatus: "CONNECTED",
         isDefault: true,
         lastSuccessfulHealthCheckAt: connectedAt,
         lastError: null,
         setupState: expect.objectContaining({
-          existing: true,
-          verificationSource: "manual",
+          verificationSource: "mcp_oauth:cursor",
           verifiedAt: connectedAt.toISOString(),
         }),
       }),
     });
   });
 
-  it("verifies Claude from an observed MCP OAuth connection", async () => {
+  it("failed verification leaves the provider in needs-setup instead of manual connected state", async () => {
     const { verifyAiWorkspaceProviderConnection } = await import("./ai-workspace-selection");
-    const connectedAt = new Date("2026-06-12T12:00:00.000Z");
-    getClaudeMcpConnectionStatusMock.mockResolvedValueOnce({ connected: true, connectedAt });
-    prismaMock.aiWorkspaceConnection.findFirst.mockResolvedValueOnce({
-      id: "connection-1",
-      setupState: {},
-    });
+    prismaMock.aiWorkspaceConnection.findFirst
+      .mockResolvedValueOnce({
+        id: "connection-1",
+        healthStatus: "CONNECTED",
+        setupState: { verificationSource: "manual" },
+      })
+      .mockResolvedValueOnce({
+        id: "connection-1",
+        setupState: {},
+      });
 
     const result = await verifyAiWorkspaceProviderConnection(userActor, {
       workspaceId: "workspace-1",
-      providerKey: "claude",
+      providerKey: "chatgpt",
     });
 
-    expect(getClaudeMcpConnectionStatusMock).toHaveBeenCalledWith({
+    expect(getMcpOAuthConnectionStatusMock).toHaveBeenCalledWith({
       userId: "user-1",
       workspaceId: "workspace-1",
+      providerKey: "chatgpt",
     });
     expect(result).toMatchObject({
-      providerKey: "claude",
-      verified: true,
-      connectedAt,
-      message: "Claude is connected.",
+      providerKey: "chatgpt",
+      verified: false,
+      connectedAt: null,
     });
-    expect(prismaMock.aiWorkspaceConnection.update).toHaveBeenCalledWith({
+    expect(prismaMock.aiWorkspaceConnection.update).toHaveBeenLastCalledWith({
       where: { id: "connection-1" },
       data: expect.objectContaining({
-        healthStatus: "CONNECTED",
-        setupState: expect.objectContaining({ verificationSource: "claude_oauth" }),
+        healthStatus: "NEEDS_SETUP",
+        lastSuccessfulHealthCheckAt: null,
+        lastError: "No completed Corgtex MCP OAuth sign-in was visible for this provider yet.",
       }),
     });
   });

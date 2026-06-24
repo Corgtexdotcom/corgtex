@@ -54,39 +54,40 @@ const SETUP_CARDS: SetupCard[] = [
     title: "ChatGPT",
     actionLabel: "Connect ChatGPT",
     automation: "Copies the connector URL and opens ChatGPT connector settings.",
-    userWork: "Create the custom Corgtex app in ChatGPT before OAuth can start.",
+    userWork: "Create the custom Corgtex app in ChatGPT, then authorize it in Corgtex.",
     steps: [
       "In ChatGPT, open Settings -> Connectors -> Advanced settings and turn on Developer Mode if asked.",
       "Click Create app, name it Corgtex, paste the Corgtex connector URL as the MCP server URL, choose OAuth or dynamic client registration if ChatGPT asks, then click Create.",
-      "Start a new chat, open the + menu, choose Apps or Developer Mode, select Corgtex, and complete the browser sign-in. The agent receives your current Corgtex role in the selected workspace.",
+      "When ChatGPT opens Corgtex, authorize the connector as your current Corgtex user for the selected workspace.",
+      "Start a new chat, open the + menu, choose Apps or Developer Mode, and select Corgtex.",
     ],
     note:
-      "For Business, Enterprise, or Edu workspaces, an admin may need to approve or publish the app before members can use it.",
+      "For Business, Enterprise, or Edu workspaces, an admin may need to approve or publish the app before members can use it. Corgtex does not match ChatGPT email to Corgtex email.",
   },
   {
     id: "claude",
     title: "Claude",
     actionLabel: "Copy URL and open Claude Connectors",
     automation: "Copies the connector URL and opens Claude connector settings.",
-    userWork: "Add the custom connector in Claude before OAuth can start.",
+    userWork: "Add the custom connector in Claude, then authorize it in Corgtex.",
     steps: [
       "In Claude, open Customize -> Connectors.",
       "Click +, choose Add custom connector, and paste the Corgtex connector URL as the remote MCP server URL.",
-      "Click Add, then Connect, and finish the browser sign-in. Corgtex authorizes the connector with your current workspace role.",
+      "Click Add, then Connect. When Claude opens Corgtex, authorize the connector as your current Corgtex user for the selected workspace.",
     ],
     note:
-      "For Team or Enterprise, owners add it from Organization settings -> Connectors -> Add -> Custom -> Web. Members then connect it from Customize -> Connectors.",
+      "For Team or Enterprise, owners add it from Organization settings -> Connectors -> Add -> Custom -> Web. Members then connect it from Customize -> Connectors. Corgtex does not match Claude email to Corgtex email.",
   },
   {
     id: "cursor",
     title: "Cursor",
     actionLabel: "Add to Cursor",
     automation: "Opens Cursor's MCP installer with the Corgtex HTTP server already encoded.",
-    userWork: "Approve the Cursor install prompt and finish browser sign-in when Cursor asks.",
+    userWork: "Approve the Cursor install prompt, then authorize it in Corgtex when Cursor asks.",
     steps: [
       "Click Add to Cursor.",
       "Approve the install prompt in Cursor.",
-      "When Cursor asks to authenticate, complete the browser sign-in. Corgtex scopes Tools and workspace actions to your role.",
+      "When Cursor opens Corgtex, authorize the connector as your current Corgtex user for the selected workspace.",
     ],
   },
   {
@@ -94,11 +95,11 @@ const SETUP_CARDS: SetupCard[] = [
     title: "Claude Code",
     actionLabel: "Copy Claude Code command",
     automation: "Copies the exact terminal command with the Corgtex connector URL.",
-    userWork: "Paste the command into Terminal, then authenticate Corgtex from Claude Code.",
+    userWork: "Paste the command into Terminal, then authorize Corgtex from Claude Code.",
     steps: [
       "Paste the copied command into Terminal.",
       "Open Claude Code and type /mcp.",
-      "Select corgtex, choose authenticate or connect, and finish the browser sign-in. Sensitive actions such as revealing saved tool credentials are audited.",
+      "Select corgtex, choose authenticate or connect, and authorize in Corgtex as your current Corgtex user for the selected workspace.",
     ],
     note: "User scope makes Corgtex available across projects. Use local scope only if you want it for one project.",
   },
@@ -107,11 +108,11 @@ const SETUP_CARDS: SetupCard[] = [
     title: "Other MCP client",
     actionLabel: "Copy connector URL",
     automation: "Copies the Corgtex connector URL for any remote MCP client.",
-    userWork: "Choose remote MCP or Streamable HTTP in your client and use browser OAuth when prompted.",
+    userWork: "Choose remote MCP or Streamable HTTP in your client, then authorize in Corgtex when prompted.",
     steps: [
       "Choose remote MCP, Streamable HTTP, or HTTP MCP server in your client.",
       "Paste the Corgtex connector URL.",
-      "Use browser OAuth when the client asks for authentication. The connector acts with your selected workspace role.",
+      "When the client opens Corgtex, authorize as your current Corgtex user for the selected workspace.",
     ],
   },
 ];
@@ -356,12 +357,12 @@ export function CorgtexConnectorManager({ connectorUrl, workspaceName }: Props) 
             </strong>
             <div className="nr-item-meta" style={{ fontSize: "0.88rem", marginTop: 6 }}>
               The fastest path for non-technical teammates. We open Claude with the connector URL on your clipboard;
-              the user pastes it once and signs in. Works with Claude.ai (web), the desktop app, and Claude Cowork.
-              {workspaceName ? ` During sign-in this workspace appears as ${workspaceName}.` : ""}
+              the user pastes it once, then Claude opens Corgtex to authorize the current Corgtex user and workspace.
+              {workspaceName ? ` The consent page can authorize ${workspaceName}.` : ""}
             </div>
           </div>
           <span className="tag" style={{ background: "var(--accent-soft)", fontWeight: "bold" }}>
-            Browser sign-in
+            Corgtex OAuth
           </span>
         </div>
 
