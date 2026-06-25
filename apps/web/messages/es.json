@@ -2412,6 +2412,7 @@
     "labelPullCadence": "Cadencia de extracción (minutos)",
     "labelRoleDistribution": "Distribución de roles",
     "labelSelectTables": "Selecciona tablas para sincronizar",
+    "labelSearchMembers": "Buscar",
     "labelShowDeactivated": "Mostrar desactivados",
     "labelSourceType": "Tipo de fuente",
     "labelSystemRole": "Rol del sistema",

@@ -2004,6 +2004,45 @@ a.meeting-agenda-item:hover {
     min-width: min(180px, 100%);
   }
 
+  .nr-filter-field {
+    display: grid;
+    gap: 4px;
+    min-width: min(220px, 100%);
+  }
+
+  .nr-filter-field input,
+  .nr-filter-field select,
+  .nr-filter-field textarea,
+  .nr-multi-select-trigger {
+    min-height: 42px;
+  }
+
+  .nr-checkbox-filter {
+    display: inline-flex !important;
+    flex-direction: row !important;
+    align-items: center;
+    align-self: end;
+    gap: 8px;
+    min-height: 42px;
+    margin: 0;
+    color: var(--text);
+    font-size: 0.85rem;
+    font-weight: 600;
+  }
+
+  .nr-checkbox-filter input {
+    flex: 0 0 auto;
+    width: 16px;
+    height: 16px;
+    min-height: 16px;
+    margin: 0;
+    padding: 0;
+  }
+
+  .nr-members-search-field {
+    min-width: min(280px, 100%);
+  }
+
   .nr-multi-select {
     position: relative;
     display: grid;
@@ -2131,6 +2170,96 @@ a.meeting-agenda-item:hover {
     align-items: center;
     gap: 8px;
     min-height: 36px;
+  }
+
+  .nr-table-action-cell {
+    min-width: 180px;
+  }
+
+  .nr-table-action-group {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .nr-table-action-group-stack {
+    width: max-content;
+    min-width: min(180px, 100%);
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .nr-table-action-group > a,
+  .nr-table-action-group > button,
+  .nr-table-action-group > form,
+  .nr-table-action-group > form > button {
+    flex: 0 0 auto;
+  }
+
+  .nr-table-action-group-stack > a,
+  .nr-table-action-group-stack > button,
+  .nr-table-action-group-stack > form,
+  .nr-table-action-group-stack > form > button {
+    width: 100%;
+  }
+
+  .nr-table-link {
+    color: inherit;
+    font-weight: 600;
+    text-decoration: none;
+  }
+
+  .nr-table-link:hover {
+    color: var(--accent);
+    text-decoration: underline;
+    text-underline-offset: 2px;
+  }
+
+  .nr-compact-square-button {
+    min-width: 40px;
+  }
+
+  .nr-toolbar-action-group {
+    justify-content: flex-end;
+  }
+
+  .nr-tools-card-actions {
+    margin-top: auto;
+  }
+
+  .nr-token-copy-row {
+    margin-top: 8px;
+  }
+
+  .nr-token-copy-input {
+    min-width: min(320px, 100%);
+    max-width: 100%;
+    font-family: monospace;
+  }
+
+  .nr-tools-table-cell-top {
+    vertical-align: top;
+  }
+
+  .nr-tools-request-reason-cell {
+    min-width: 260px;
+  }
+
+  .nr-table-row-muted {
+    opacity: 0.6;
+  }
+
+  .nr-table-empty {
+    padding: 32px;
+    color: var(--muted);
+    text-align: center;
+  }
+
+  .tag-compact,
+  .status-chip-compact {
+    padding: 2px 6px;
+    font-size: 0.7rem;
   }
 
   .nr-sort-header {
@@ -3235,6 +3364,26 @@ a.meeting-agenda-item:hover {
   .actions-inline > form,
   .actions-inline > form > button {
     flex: 1 1 auto;
+  }
+
+  .nr-table-action-group {
+    width: 100%;
+    align-items: stretch;
+  }
+
+  .nr-table-action-group > a,
+  .nr-table-action-group > button,
+  .nr-table-action-group > form,
+  .nr-table-action-group > form > button {
+    flex: 1 1 auto;
+  }
+
+  .nr-toolbar-action-group {
+    justify-content: stretch;
+  }
+
+  .nr-token-copy-input {
+    min-width: 0;
   }
 
   /* New item-actions row keeps overflow menu compact on mobile, primary CTA grows. */

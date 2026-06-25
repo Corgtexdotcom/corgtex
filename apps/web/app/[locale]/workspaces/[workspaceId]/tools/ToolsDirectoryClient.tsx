@@ -3,6 +3,7 @@
 import { useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useTranslations } from "next-intl";
+import { CheckboxFilter, TableActionGroup } from "@/lib/components/ControlPrimitives";
 import { MarkdownEditor } from "@/lib/components/MarkdownEditor";
 import { MarkdownExcerpt, MarkdownRenderer } from "@/lib/components/MarkdownRenderer";
 import {
@@ -658,10 +659,9 @@ export function ToolsDirectoryClient({
           </div>
           <button
             type="button"
-            className="secondary small"
+            className="secondary small nr-compact-square-button"
             aria-label={item.isFavorite ? "Remove favorite" : "Add favorite"}
             onClick={() => toggleFavorite(item)}
-            style={{ minWidth: 40 }}
           >
             {item.isFavorite ? "★" : "☆"}
           </button>
@@ -704,9 +704,9 @@ export function ToolsDirectoryClient({
           {item.type === "APP" ? ` · ${displayEnum(item.integrationDepth)}` : ""}
         </div>
 
-        <div className="actions-inline" style={{ marginTop: "auto" }}>
+        <TableActionGroup className="nr-tools-card-actions">
           {actions.map((action) => renderCatalogAction(action, item))}
-        </div>
+        </TableActionGroup>
       </article>
     );
   }
@@ -746,17 +746,17 @@ export function ToolsDirectoryClient({
             {t("btnReveal")}
           </button>
         ) : (
-          <div className="actions-inline">
+          <TableActionGroup className="nr-token-copy-row">
             <input
               readOnly
               value={secret ?? ""}
-              style={{ minWidth: 180, maxWidth: 280 }}
+              className="nr-token-copy-input"
               aria-label={link.credentialLabel || t("credential")}
             />
             <button type="button" className="secondary small" onClick={() => copyCredential(link.id)}>
               {copiedId === link.id ? t("btnCopied") : t("btnCopy")}
             </button>
-          </div>
+          </TableActionGroup>
         )}
       </div>
     );
@@ -871,8 +871,8 @@ export function ToolsDirectoryClient({
                       : t("createdAt", { date: displayDate(link.createdAt) })}
                   </div>
                 </td>
-                <td style={{ minWidth: 170, verticalAlign: "top" }}>
-                  <div className="actions-inline">
+                <td className="nr-table-action-cell nr-tools-table-cell-top">
+                  <TableActionGroup>
                     <a className="link-button small" href={link.url} target="_blank" rel="noreferrer">
                       {t("btnOpen")}
                     </a>
@@ -886,7 +886,7 @@ export function ToolsDirectoryClient({
                         </button>
                       </>
                     )}
-                  </div>
+                  </TableActionGroup>
                 </td>
               </tr>
             ))}
@@ -920,7 +920,7 @@ export function ToolsDirectoryClient({
               <MarkdownRenderer markdown={link.accessNotesMd} variant="compact" className="muted" />
             )}
             {renderCredential(link)}
-            <div className="actions-inline">
+            <TableActionGroup>
               <a className="link-button small" href={link.url} target="_blank" rel="noreferrer">
                 {t("btnOpen")}
               </a>
@@ -934,7 +934,7 @@ export function ToolsDirectoryClient({
                   </button>
                 </>
               )}
-            </div>
+            </TableActionGroup>
           </article>
         ))}
       </div>
@@ -951,7 +951,7 @@ export function ToolsDirectoryClient({
             placeholder="Find an app, agent, connector, tool, or data source"
             aria-label="Search tools catalog"
           />
-          <div className="actions-inline" style={{ justifyContent: "flex-end" }}>
+          <TableActionGroup className="nr-toolbar-action-group">
             <button type="button" className="small" onClick={() => setIsPublishOpen((open) => !open)}>
               {isPublishOpen ? t("btnCancel") : "Submit app for review"}
             </button>
@@ -961,7 +961,7 @@ export function ToolsDirectoryClient({
             <button type="button" className="secondary small" onClick={() => setIsFormOpen((open) => !open)}>
               {isFormOpen ? t("btnCancel") : "Add protected tool link"}
             </button>
-          </div>
+          </TableActionGroup>
         </div>
 
         <div className="ws-stat-row" style={{ marginTop: 0 }}>
@@ -1005,12 +1005,12 @@ export function ToolsDirectoryClient({
       {issuedToken && (
         <div className="form-message form-message-success">
           <strong>API key issued.</strong>
-          <div className="actions-inline" style={{ marginTop: 8 }}>
-            <input readOnly value={issuedToken} aria-label="Issued API key" style={{ minWidth: 320, fontFamily: "monospace" }} />
+          <TableActionGroup className="nr-token-copy-row">
+            <input readOnly value={issuedToken} aria-label="Issued API key" className="nr-token-copy-input" />
             <button type="button" className="secondary small" onClick={copyToken}>
               {copiedId === "issued-token" ? t("btnCopied") : t("btnCopy")}
             </button>
-          </div>
+          </TableActionGroup>
         </div>
       )}
 
@@ -1137,9 +1137,9 @@ export function ToolsDirectoryClient({
               />
             </label>
           </div>
-          <div className="actions-inline">
+          <TableActionGroup>
             <button type="submit" className="small">Submit to admins</button>
-          </div>
+          </TableActionGroup>
         </form>
       )}
 
@@ -1227,22 +1227,21 @@ export function ToolsDirectoryClient({
             ) : (
               <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 8 }}>
                 {circles.map((circle) => (
-                  <label key={circle.id} style={{ flexDirection: "row", alignItems: "center" }}>
-                    <input
-                      type="checkbox"
-                      checked={form.circleIds.includes(circle.id)}
-                      onChange={() => toggleCircle(circle.id)}
-                    />
+                  <CheckboxFilter
+                    key={circle.id}
+                    checked={form.circleIds.includes(circle.id)}
+                    onChange={() => toggleCircle(circle.id)}
+                  >
                     {circle.name}
-                  </label>
+                  </CheckboxFilter>
                 ))}
               </div>
             )}
           </fieldset>
-          <div className="actions-inline">
+          <TableActionGroup>
             <button type="submit" className="small">{isEditing ? t("btnUpdateTool") : "Add link"}</button>
             <button type="button" className="secondary small" onClick={resetForm}>{t("btnCancel")}</button>
-          </div>
+          </TableActionGroup>
         </form>
       )}
 
@@ -1295,9 +1294,9 @@ export function ToolsDirectoryClient({
               </label>
             </div>
           )}
-          <div className="actions-inline">
+          <TableActionGroup>
             <button type="submit" className="small">Submit request</button>
-          </div>
+          </TableActionGroup>
         </form>
       )}
 
@@ -1321,7 +1320,7 @@ export function ToolsDirectoryClient({
                       <strong>{request.catalogItem?.title ?? request.title ?? "Catalog publish request"}</strong>
                       <div className="nr-item-meta">{request.type} · {displayDate(request.createdAt)}</div>
                     </td>
-                    <td style={{ minWidth: 260 }}>
+                    <td className="nr-tools-request-reason-cell">
                       <MarkdownRenderer markdown={request.reasonMd} variant="compact" />
                       {(request.requestedBudgetCents != null || request.requestedDailyCallLimit != null) && (
                         <div className="nr-item-meta" style={{ marginTop: 6 }}>
@@ -1330,11 +1329,11 @@ export function ToolsDirectoryClient({
                       )}
                     </td>
                     <td>{personName(request.requester)}</td>
-                    <td>
-                      <div className="actions-inline">
+                    <td className="nr-table-action-cell">
+                      <TableActionGroup>
                         <button type="button" className="secondary small" onClick={() => decideRequest(request, "approve")}>Approve</button>
                         <button type="button" className="danger small" onClick={() => decideRequest(request, "reject")}>Reject</button>
-                      </div>
+                      </TableActionGroup>
                     </td>
                   </tr>
                 ))}

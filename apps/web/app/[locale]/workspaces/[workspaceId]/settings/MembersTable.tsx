@@ -14,6 +14,8 @@ import {
   updateMemberInvitePolicyAction,
 } from "../actions";
 import { useTranslations } from "next-intl";
+import { CheckboxFilter, FilterField, FilterToolbar, TableActionGroup } from "@/lib/components/ControlPrimitives";
+import { DataTable, type DataTableColumn, type DataTableRow } from "@/lib/components/DataTable";
 import { Dialog } from "@/lib/components/Dialog";
 import { MultiSelectFilter } from "@/lib/components/MultiSelectFilter";
 import { useToast } from "@/lib/components/Toast";
@@ -146,6 +148,71 @@ export function MembersTable({
   const facilitatorCount = members.filter((member) => member.role === "FACILITATOR" && (statusFilter === "ALL" || member.isActive)).length;
   const canInviteDirectly = Boolean(isAdmin) || invitePolicy === "MEMBERS_CAN_INVITE";
   const canRequestInvite = !isAdmin && invitePolicy === "MEMBERS_CAN_REQUEST";
+  const memberColumns: DataTableColumn[] = [
+    { id: "name", label: t("colName") },
+    { id: "email", label: t("colEmail"), cellClassName: "muted" },
+    { id: "orgRoles", label: t("colOrgRoles") },
+    { id: "circles", label: t("colCircles"), cellClassName: "muted" },
+    { id: "systemRole", label: t("labelSystemRole") },
+    { id: "status", label: t("colStatus") },
+    { id: "actions", label: t("colActions"), cellClassName: "nr-table-action-cell" },
+  ];
+  const memberRows: DataTableRow[] = filteredMembers.map((member) => {
+    const memberCircles = Array.from(new Set(member.roleAssignments.map((assignment) => assignment.role.circle.name)));
+
+    return {
+      id: member.id,
+      className: member.isActive ? undefined : "nr-table-row-muted",
+      cells: {
+        name: (
+          <Link href={`/workspaces/${workspaceId}/members/${member.id}`} className="nr-table-link">
+            {member.user.displayName || t("unknownUser")}
+          </Link>
+        ),
+        email: member.user.email,
+        orgRoles: member.roleAssignments.length > 0 ? (
+          <div className="actions-inline">
+            {member.roleAssignments.slice(0, 3).map((assignment) => (
+              <span key={`${member.id}-${assignment.role.name}`} className="tag info tag-compact">
+                {assignment.role.name}
+              </span>
+            ))}
+            {member.roleAssignments.length > 3 && (
+              <span className="tag tag-compact">+{member.roleAssignments.length - 3}</span>
+            )}
+          </div>
+        ) : (
+          <span className="muted">{t("valNone")}</span>
+        ),
+        circles: memberCircles.join(", ") || t("valNone"),
+        systemRole: t(roleLabelKey(member.role) as any),
+        status: (
+          <span className={`tag tag-compact ${member.isActive ? "success" : "neutral"}`}>
+            {member.isActive ? t("statusActive") : t("statusDeactivated")}
+          </span>
+        ),
+        actions: isAdmin ? (
+          <TableActionGroup direction="stack">
+            <button
+              type="button"
+              className="secondary small"
+              onClick={() => setEditingMember(member)}
+            >
+              {t("btnEditMember")}
+            </button>
+            <button type="button" className="secondary small" onClick={async () => {
+              const fd = new FormData();
+              fd.append("workspaceId", workspaceId);
+              fd.append("memberId", member.id);
+              await handleActionWithToast(resendMemberAccessLinkAction, fd, "Access link sent successfully");
+            }}>{t("btnResendAccessLink")}</button>
+          </TableActionGroup>
+        ) : (
+          <span className="muted">{t("noMemberActions")}</span>
+        ),
+      },
+    };
+  });
 
   return (
     <div className="stack" style={{ gap: 24, marginTop: 16 }}>
@@ -196,7 +263,7 @@ export function MembersTable({
                     {request.email} · {t("requestedBy", { name: request.requesterMember.user.displayName || request.requesterMember.user.email })}
                   </div>
                 </div>
-                <div style={{ display: "flex", gap: 8 }}>
+                <TableActionGroup>
                   <button type="button" className="small" onClick={async () => {
                     const fd = new FormData();
                     fd.append("workspaceId", workspaceId);
@@ -209,7 +276,7 @@ export function MembersTable({
                     fd.append("requestId", request.id);
                     await handleActionWithToast(rejectMemberInviteRequestAction, fd, "Invite request rejected");
                   }}>{t("btnReject")}</button>
-                </div>
+                </TableActionGroup>
               </div>
             ))}
           </div>
@@ -246,7 +313,9 @@ export function MembersTable({
                   </select>
                 </label>
               )}
-              <button type="submit" style={{ alignSelf: "flex-start" }}>{canRequestInvite ? t("btnSubmitInviteRequest") : t("btnSendInvite")}</button>
+              <TableActionGroup>
+                <button type="submit">{canRequestInvite ? t("btnSubmitInviteRequest") : t("btnSendInvite")}</button>
+              </TableActionGroup>
             </form>
           </div>
         </details>
@@ -270,43 +339,34 @@ export function MembersTable({
                   required
                 />
               </label>
-              <button type="submit" style={{ alignSelf: "flex-start" }}>{t("btnSendBulkInvites")}</button>
+              <TableActionGroup>
+                <button type="submit">{t("btnSendBulkInvites")}</button>
+              </TableActionGroup>
             </form>
           </div>
         </details>
       )}
 
-      <div style={{ display: "flex", flexWrap: "wrap", gap: 16, alignItems: "center", justifyContent: "space-between" }}>
-        <div style={{ display: "flex", flexWrap: "wrap", gap: 16, alignItems: "center" }}>
+      <FilterToolbar className="nr-members-filter-toolbar">
+        <FilterField label={t("labelSearchMembers")} className="nr-members-search-field">
           <input
             type="text"
             placeholder={t("placeholderSearchMembers")}
             value={searchQuery}
             onChange={(event) => setSearchQuery(event.target.value)}
-            style={{ width: 240, fontSize: "0.85rem", padding: "8px 12px" }}
           />
-          <MultiSelectFilter
-            name="circle"
-            label={t("colCircles")}
-            options={allCircles.map((circle) => ({ value: circle.id, label: circle.name }))}
-            selectedValues={circleFilters}
-            allLabel={t("optionAllCircles")}
-            selectAllLabel={tWork("selectAll")}
-            unselectAllLabel={tWork("unselectAll")}
-            selectedCountLabel={tWork("selectedCount", { count: "{count}" })}
-            onSelectionChange={setCircleFilters}
-          />
-          <label style={{ display: "flex", alignItems: "center", gap: 6, margin: 0, fontSize: "0.85rem" }}>
-            <input
-              type="checkbox"
-              checked={statusFilter === "ALL"}
-              onChange={(event) => setStatusFilter(event.target.checked ? "ALL" : "ACTIVE")}
-              style={{ margin: 0 }}
-            />
-            {t("labelShowDeactivated")}
-          </label>
-        </div>
-
+        </FilterField>
+        <MultiSelectFilter
+          name="circle"
+          label={t("colCircles")}
+          options={allCircles.map((circle) => ({ value: circle.id, label: circle.name }))}
+          selectedValues={circleFilters}
+          allLabel={t("optionAllCircles")}
+          selectAllLabel={tWork("selectAll")}
+          unselectAllLabel={tWork("unselectAll")}
+          selectedCountLabel={tWork("selectedCount", { count: "{count}" })}
+          onSelectionChange={setCircleFilters}
+        />
         <MultiSelectFilter
           name="role"
           label={t("labelSystemRole")}
@@ -318,91 +378,19 @@ export function MembersTable({
           selectedCountLabel={tWork("selectedCount", { count: "{count}" })}
           onSelectionChange={setRoleFilters}
         />
-      </div>
+        <CheckboxFilter
+          checked={statusFilter === "ALL"}
+          onChange={(event) => setStatusFilter(event.target.checked ? "ALL" : "ACTIVE")}
+        >
+          {t("labelShowDeactivated")}
+        </CheckboxFilter>
+      </FilterToolbar>
 
-      <div style={{ overflowX: "auto", border: "1px dashed var(--line)", borderRadius: 8, background: "var(--bg)" }}>
-        <table className="nr-table" style={{ width: "100%", borderCollapse: "collapse", textAlign: "left", fontSize: "0.85rem" }}>
-          <thead>
-            <tr style={{ borderBottom: "1px dashed var(--line)", background: "rgba(0,0,0,0.02)" }}>
-              <th style={{ padding: "12px 16px", fontWeight: 600 }}>{t("colName")}</th>
-              <th style={{ padding: "12px 16px", fontWeight: 600 }}>{t("colEmail")}</th>
-              <th style={{ padding: "12px 16px", fontWeight: 600 }}>{t("colOrgRoles")}</th>
-              <th style={{ padding: "12px 16px", fontWeight: 600 }}>{t("colCircles")}</th>
-              <th style={{ padding: "12px 16px", fontWeight: 600 }}>{t("labelSystemRole")}</th>
-              <th style={{ padding: "12px 16px", fontWeight: 600 }}>{t("colStatus")}</th>
-              <th style={{ padding: "12px 16px", fontWeight: 600 }}>{t("colActions")}</th>
-            </tr>
-          </thead>
-          <tbody>
-            {filteredMembers.length === 0 ? (
-              <tr>
-                <td colSpan={7} style={{ padding: 32, textAlign: "center", color: "var(--muted)" }}>
-                  {members.length === 0 ? t("msgEmptyMembers") : t("msgNoMatchingMembers")}
-                </td>
-              </tr>
-            ) : (
-              filteredMembers.map((member) => {
-                const memberCircles = Array.from(new Set(member.roleAssignments.map((assignment) => assignment.role.circle.name)));
-                return (
-                  <tr key={member.id} style={{ borderBottom: "1px dashed var(--line)", opacity: member.isActive ? 1 : 0.6 }}>
-                    <td style={{ padding: "12px 16px", fontWeight: 500 }}>
-                      <Link href={`/workspaces/${workspaceId}/members/${member.id}`} style={{ color: "inherit", textDecoration: "none" }}>
-                        {member.user.displayName || t("unknownUser")}
-                      </Link>
-                    </td>
-                    <td style={{ padding: "12px 16px", color: "var(--muted)" }}>{member.user.email}</td>
-                    <td style={{ padding: "12px 16px" }}>
-                      {member.roleAssignments.length > 0 ? (
-                        <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
-                          {member.roleAssignments.slice(0, 3).map((assignment) => (
-                            <span key={`${member.id}-${assignment.role.name}`} className="tag info" style={{ fontSize: "0.7rem", padding: "2px 6px" }}>
-                              {assignment.role.name}
-                            </span>
-                          ))}
-                          {member.roleAssignments.length > 3 && (
-                            <span className="tag" style={{ fontSize: "0.7rem", padding: "2px 6px" }}>+{member.roleAssignments.length - 3}</span>
-                          )}
-                        </div>
-                      ) : (
-                        <span className="muted" style={{ fontSize: "0.75rem" }}>{t("valNone")}</span>
-                      )}
-                    </td>
-                    <td style={{ padding: "12px 16px", color: "var(--muted)", fontSize: "0.8rem" }}>{memberCircles.join(", ") || t("valNone")}</td>
-                    <td style={{ padding: "12px 16px" }}>{t(roleLabelKey(member.role) as any)}</td>
-                    <td style={{ padding: "12px 16px" }}>
-                      <span style={{ color: member.isActive ? "var(--success, #155724)" : "var(--muted)", fontSize: "0.75rem", fontWeight: 600 }}>
-                        {member.isActive ? t("statusActive") : t("statusDeactivated")}
-                      </span>
-                    </td>
-                    <td style={{ padding: "12px 16px", minWidth: 260 }}>
-                      {isAdmin ? (
-                        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                          <button
-                            type="button"
-                            className="secondary small"
-                            onClick={() => setEditingMember(member)}
-                            style={{ alignSelf: "flex-start" }}
-                          >
-                            {t("btnEditMember")}
-                          </button>
-                          <button type="button" className="secondary small" style={{ padding: "4px 8px", fontSize: "0.7rem" }} onClick={async () => {
-                            const fd = new FormData();
-                            fd.append("workspaceId", workspaceId);
-                            fd.append("memberId", member.id);
-                            await handleActionWithToast(resendMemberAccessLinkAction, fd, "Access link sent successfully");
-                          }}>{t("btnResendAccessLink")}</button>
-                        </div>
-                      ) : (
-                        <span className="muted" style={{ fontSize: "0.75rem" }}>{t("noMemberActions")}</span>
-                      )}
-                    </td>
-                  </tr>
-                );
-              })
-            )}
-          </tbody>
-        </table>
-      </div>
+      <DataTable
+        columns={memberColumns}
+        rows={memberRows}
+        empty={members.length === 0 ? t("msgEmptyMembers") : t("msgNoMatchingMembers")}
+      />
 
       {editingMember && (
         <Dialog open={true} onClose={() => setEditingMember(null)} title={t("btnEditMember")}>
