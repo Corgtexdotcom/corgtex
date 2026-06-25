@@ -141,6 +141,13 @@ describe("fleet release runner", () => {
         provider: "RECALL_AI",
         failureMessage: "Customer-private recorder details",
       },
+      supportConnectorReadiness: {
+        status: "ready",
+        requiredScopes: ["workspace:read", "execution:read", { raw: "drop" }],
+        missingScopes: [{ raw: "drop" }],
+        checkedAt: "2026-06-24T10:00:00.000Z",
+        credentialLabel: "Corgtex Support",
+      },
       supportAudit: { status: "completed" },
       raw: "customer content",
     });
@@ -158,6 +165,30 @@ describe("fleet release runner", () => {
       status: "ok",
       provider: "RECALL_AI",
     });
+    expect(sanitized.supportConnectorReadiness).toEqual({
+      status: "ready",
+      requiredScopes: ["workspace:read", "execution:read"],
+      missingScopes: [],
+      checkedAt: "2026-06-24T10:00:00.000Z",
+    });
+  });
+
+  it("blocks post-deploy success when support connector required scopes are missing", () => {
+    const probe = sanitizePostDeployProbe({
+      status: "degraded",
+      reads: [{ key: "actions", status: "ok", count: 1 }],
+      recorder: { status: "not_configured" },
+      supportConnectorReadiness: {
+        status: "missing_scope",
+        requiredScopes: ["workspace:read", "execution:read"],
+        missingScopes: ["execution:read"],
+        checkedAt: "2026-06-24T10:00:00.000Z",
+      },
+      supportAudit: { status: "completed" },
+    });
+
+    expect(postDeployProbeFailureSummary(probe)).toBe("support_connector:MISSING_SUPPORT_SCOPE");
+    expect(() => assertPostDeployProbeReady(probe, "Customer A")).toThrow("MISSING_SUPPORT_SCOPE");
   });
 
   it("keeps recorder insufficient-credit failures visible in probe classification", () => {

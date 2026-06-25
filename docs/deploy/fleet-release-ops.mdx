@@ -63,7 +63,7 @@ Azure self-serve targets must include:
 ## Operator Checklist
 
 1. Confirm `fleet-release-production` has the required secrets and variables for the selected target groups.
-2. Confirm `FLEET_RELEASE_STABLE_GIT_SHA` points to the canary-proven stable release, not an arbitrary `main` commit.
+2. Confirm `FLEET_RELEASE_STABLE_GIT_SHA` points to the canary-proven stable release, not an arbitrary `main` commit. Do not advance it while any blocking customer-read probe, support-connector readiness check, or required recorder smoke is pending.
 3. Confirm the `Release Images` workflow has published both canonical GHCR images for `sha-<FLEET_RELEASE_STABLE_GIT_SHA>`.
 4. Confirm Railway targets can pull private GHCR images. Prefer setting `GHCR_IMPORT_TOKEN`; otherwise the workflow will pass its short-lived `GITHUB_TOKEN` as Railway registry credentials for the current promotion.
 5. Run a dry-run:
@@ -77,9 +77,11 @@ Dry-runs use the lightweight preflight workflow by default. That path validates 
 6. Confirm the dry-run dispatches `fleet-release-preflight.yml`, prints the manifest, selected targets, rings, blockers, and elapsed seconds before any provider mutation.
 7. If the dry-run fails on missing config, fix the named GitHub environment setting and rerun.
 8. If the preflight takes longer than 30 seconds or reports unclear blockers, stop and repair the preflight before expanding release orchestration.
-9. For a real promotion, use a specific support reason and monitor the GitHub Actions run until each target proves matching `gitSha`, `imageTag`, `database=up`, and `schema=ready`.
+9. For a real promotion, use a specific support reason and monitor the GitHub Actions run until each target proves matching `gitSha`, `imageTag`, `database=up`, `schema=ready`, passing customer-read probes, and `supportConnectorReadiness.status=ready`.
 10. If any target fails, stop at the failed ring unless an operator explicitly supplies a force reason.
+
+`MISSING_SUPPORT_SCOPE` means the support connector credential needs an audited scope repair. It is not customer OAuth/sign-in reauthorization.
 
 ## Gate For Next Work
 
-The immutable-image workflow is sufficient only if a canary promotion reuses existing images, skips Docker build work inside fleet promotion, and proves matching `gitSha`, `imageTag`, `database=up`, and `schema=ready`. Move to the next release PR only when this gate is not met.
+The immutable-image workflow is sufficient only if a canary promotion reuses existing images, skips Docker build work inside fleet promotion, and proves matching `gitSha`, `imageTag`, `database=up`, `schema=ready`, customer-read probes, and support-scope readiness. Move to the next release PR only when this gate is not met.

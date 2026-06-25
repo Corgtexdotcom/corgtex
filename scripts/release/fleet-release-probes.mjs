@@ -13,6 +13,12 @@ const RECORDER_KEYS = new Set([
   "lastSmokeStatus",
   "failureCode",
 ]);
+const SUPPORT_CONNECTOR_READINESS_KEYS = new Set([
+  "status",
+  "requiredScopes",
+  "missingScopes",
+  "checkedAt",
+]);
 
 function pickAllowed(record, allowedKeys) {
   if (!record || typeof record !== "object" || Array.isArray(record)) return {};
@@ -25,6 +31,20 @@ function sanitizeReadProbe(probe) {
   return pickAllowed(probe, READ_PROBE_KEYS);
 }
 
+function sanitizeScopeList(value) {
+  return Array.isArray(value) ? value.filter((item) => typeof item === "string") : [];
+}
+
+function sanitizeSupportConnectorReadiness(readiness) {
+  const picked = pickAllowed(readiness, SUPPORT_CONNECTOR_READINESS_KEYS);
+  return {
+    ...(typeof picked.status === "string" ? { status: picked.status } : {}),
+    requiredScopes: sanitizeScopeList(picked.requiredScopes),
+    missingScopes: sanitizeScopeList(picked.missingScopes),
+    ...(typeof picked.checkedAt === "string" ? { checkedAt: picked.checkedAt } : {}),
+  };
+}
+
 export function sanitizePostDeployProbe(probe) {
   return {
     deploymentId: typeof probe?.deploymentId === "string" ? probe.deploymentId : null,
@@ -35,6 +55,7 @@ export function sanitizePostDeployProbe(probe) {
     sanitized: true,
     reads: Array.isArray(probe?.reads) ? probe.reads.map(sanitizeReadProbe) : [],
     recorder: pickAllowed(probe?.recorder, RECORDER_KEYS),
+    supportConnectorReadiness: sanitizeSupportConnectorReadiness(probe?.supportConnectorReadiness),
     supportAudit: {
       status: typeof probe?.supportAudit?.status === "string" ? probe.supportAudit.status : "unknown",
       errorClass: typeof probe?.supportAudit?.errorClass === "string" ? probe.supportAudit.errorClass : null,
@@ -44,6 +65,12 @@ export function sanitizePostDeployProbe(probe) {
 
 export function postDeployProbeFailureSummary(probe) {
   const sanitized = sanitizePostDeployProbe(probe);
+  if (sanitized.supportConnectorReadiness.status && sanitized.supportConnectorReadiness.status !== "ready") {
+    const code = sanitized.supportConnectorReadiness.status === "missing_scope"
+      ? "MISSING_SUPPORT_SCOPE"
+      : sanitized.supportConnectorReadiness.status;
+    return `support_connector:${code}`;
+  }
   const failedRead = sanitized.reads.find((item) => item.status === "failed");
   if (failedRead) return `${failedRead.key}:${failedRead.errorClass ?? "failed"}`;
   if (sanitized.recorder.status && sanitized.recorder.status !== "ok") {
@@ -57,6 +84,9 @@ export function postDeployProbeFailureSummary(probe) {
 
 export function assertPostDeployProbeReady(probe, targetLabel = "deployment") {
   const sanitized = sanitizePostDeployProbe(probe);
+  if (sanitized.supportConnectorReadiness.status && sanitized.supportConnectorReadiness.status !== "ready") {
+    throw new Error(`${targetLabel} post-deploy probe ${sanitized.status}: ${postDeployProbeFailureSummary(sanitized)}`);
+  }
   if (sanitized.status === "ok" || sanitized.status === "degraded") return sanitized;
   throw new Error(`${targetLabel} post-deploy probe ${sanitized.status}: ${postDeployProbeFailureSummary(sanitized)}`);
 }
