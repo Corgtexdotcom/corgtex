@@ -117,7 +117,7 @@ param enableGoogleOauthSecrets bool = false
 param enableMicrosoftOauthSecrets bool = false
 
 @description('Email sender used by self-serve signup and setup flows.')
-param emailFrom string = 'Corgtex <onboarding@corgtex.com>'
+param emailFrom string = 'Corgtex <notifications@auth.corgtex.com>'
 
 @description('Reply-to address for operational signup emails.')
 param emailReplyTo string = 'support@corgtex.com'

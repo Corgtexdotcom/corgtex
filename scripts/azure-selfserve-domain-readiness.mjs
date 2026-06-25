@@ -5,6 +5,8 @@ import { fileURLToPath } from "node:url";
 
 export const DEFAULT_APP_URL = "https://selfserve.corgtex.com";
 export const DEFAULT_SITE_URL = "https://www.corgtex.com";
+export const REQUIRED_EMAIL_FROM_ADDRESS = "notifications@auth.corgtex.com";
+export const REQUIRED_EMAIL_REPLY_TO_ADDRESS = "support@corgtex.com";
 
 const DEFAULT_ALLOWED_APP_HOSTS = [
   "selfserve.corgtex.com",
@@ -26,6 +28,7 @@ const REQUIRED_RUNTIME_ENV = [
   "SELF_SERVE_REGISTRY_SYNC_SECRET",
   "RESEND_API_KEY",
   "EMAIL_FROM",
+  "EMAIL_REPLY_TO",
 ];
 
 const STRICT_PROVIDER_ENV = [
@@ -91,6 +94,12 @@ function status(level, name, detail) {
 
 function envConfigured(env, name) {
   return Boolean(env[name]?.trim());
+}
+
+function parseEmailAddress(value) {
+  const raw = String(value ?? "").trim();
+  const match = raw.match(/<([^<>]+)>/);
+  return (match ? match[1] : raw).trim().toLowerCase();
 }
 
 function expectedMcpUrl(appOrigin) {
@@ -185,6 +194,24 @@ export function validateAzureSelfServeDomainReadiness(env = process.env, options
     } else {
       checks.push(status(strict ? "error" : "warn", `env:${name}`, `${name} is missing.`));
     }
+  }
+
+  if (envConfigured(env, "EMAIL_FROM")) {
+    const fromAddress = parseEmailAddress(env.EMAIL_FROM);
+    checks.push(
+      fromAddress === REQUIRED_EMAIL_FROM_ADDRESS
+        ? status("ok", "email-from-auth-domain", `EMAIL_FROM uses ${REQUIRED_EMAIL_FROM_ADDRESS}.`)
+        : status("error", "email-from-auth-domain", `EMAIL_FROM must use ${REQUIRED_EMAIL_FROM_ADDRESS}; got ${fromAddress || "empty"}.`),
+    );
+  }
+
+  if (envConfigured(env, "EMAIL_REPLY_TO")) {
+    const replyToAddress = parseEmailAddress(env.EMAIL_REPLY_TO);
+    checks.push(
+      replyToAddress === REQUIRED_EMAIL_REPLY_TO_ADDRESS
+        ? status("ok", "email-reply-to-support", `EMAIL_REPLY_TO uses ${REQUIRED_EMAIL_REPLY_TO_ADDRESS}.`)
+        : status("error", "email-reply-to-support", `EMAIL_REPLY_TO must use ${REQUIRED_EMAIL_REPLY_TO_ADDRESS}; got ${replyToAddress || "empty"}.`),
+    );
   }
 
   for (const name of STRICT_PROVIDER_ENV) {

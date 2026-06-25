@@ -285,7 +285,7 @@ export const env: Env = {
     return optional("RESEND_API_KEY");
   },
   get EMAIL_FROM() {
-    return optional("EMAIL_FROM") ?? "Corgtex <onboarding@resend.dev>";
+    return optional("EMAIL_FROM") ?? "Corgtex <notifications@auth.corgtex.com>";
   },
   get EMAIL_REPLY_TO() {
     return optional("EMAIL_REPLY_TO");

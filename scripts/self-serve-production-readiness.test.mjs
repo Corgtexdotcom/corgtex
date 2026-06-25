@@ -20,7 +20,8 @@ const STRICT_BASE_ENV = {
   MICROSOFT_CLIENT_ID: "microsoft-client-id",
   MICROSOFT_CLIENT_SECRET: "microsoft-client-secret-value",
   RESEND_API_KEY: "resend-api-placeholder",
-  EMAIL_FROM: "Corgtex <test@example.com>",
+  EMAIL_FROM: "Corgtex <notifications@auth.corgtex.com>",
+  EMAIL_REPLY_TO: "support@corgtex.com",
   WORKER_POLL_INTERVAL_MS: "1000",
   WORKER_MAX_POLL_INTERVAL_MS: "5000",
   WORKER_EVENT_BATCH_SIZE: "10",
@@ -71,6 +72,8 @@ describe("self-serve production readiness", () => {
 
     expect(result.status).toBe(0);
     expect(result.stdout).toContain("OK   MODEL_PROVIDER configured");
+    expect(result.stdout).toContain("OK   EMAIL_FROM uses notifications@auth.corgtex.com");
+    expect(result.stdout).toContain("OK   EMAIL_REPLY_TO uses support@corgtex.com");
     expect(result.stdout).toContain("OK   MODEL_BASE_URL configured");
     expect(result.stdout).toContain("OK   AZURE_OPENAI_AUTH_MODE configured for managed identity");
     expect(result.stderr).toBe("");
@@ -84,5 +87,39 @@ describe("self-serve production readiness", () => {
 
     expect(result.status).toBe(1);
     expect(result.stderr).toContain("MODEL_API_KEY missing for OpenAI-compatible model provider");
+  });
+
+  it("rejects old app email sender domains in strict mode", () => {
+    for (const emailFrom of [
+      "Corgtex <onboarding@corgtex.com>",
+      "Corgtex <onboarding@resend.dev>",
+    ]) {
+      const result = runReadiness({
+        ...STRICT_BASE_ENV,
+        MODEL_PROVIDER: "fake",
+        EMAIL_FROM: emailFrom,
+      }, ["--strict", "--skip-http"]);
+
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain("EMAIL_FROM must use notifications@auth.corgtex.com");
+    }
+  });
+
+  it("requires support reply-to in strict mode", () => {
+    const missingReplyTo = runReadiness({
+      ...STRICT_BASE_ENV,
+      MODEL_PROVIDER: "fake",
+      EMAIL_REPLY_TO: "",
+    }, ["--strict", "--skip-http"]);
+    expect(missingReplyTo.status).toBe(1);
+    expect(missingReplyTo.stderr).toContain("EMAIL_REPLY_TO missing");
+
+    const wrongReplyTo = runReadiness({
+      ...STRICT_BASE_ENV,
+      MODEL_PROVIDER: "fake",
+      EMAIL_REPLY_TO: "Corgtex <notifications@auth.corgtex.com>",
+    }, ["--strict", "--skip-http"]);
+    expect(wrongReplyTo.status).toBe(1);
+    expect(wrongReplyTo.stderr).toContain("EMAIL_REPLY_TO must use support@corgtex.com");
   });
 });
