@@ -19,7 +19,8 @@ const COMPLETE_ENV = {
   SMOKE_EMAIL_CAPTURE_ALLOWED_DOMAINS: "selfserve.corgtex.com",
   SELF_SERVE_REGISTRY_SYNC_SECRET: "registry-secret",
   RESEND_API_KEY: "resend-key",
-  EMAIL_FROM: "Corgtex <onboarding@corgtex.com>",
+  EMAIL_FROM: "Corgtex <notifications@auth.corgtex.com>",
+  EMAIL_REPLY_TO: "support@corgtex.com",
   GOOGLE_CLIENT_ID: "google-client",
   GOOGLE_CLIENT_SECRET: "google-secret",
   MICROSOFT_CLIENT_ID: "microsoft-client",
@@ -61,6 +62,48 @@ describe("Azure self-serve domain readiness", () => {
 
     expect(result.checks.filter((check) => check.level === "error")).toEqual([]);
     expect(result.checks.find((check) => check.name === "mcp-public-url")).toMatchObject({ level: "ok" });
+    expect(result.checks.find((check) => check.name === "email-from-auth-domain")).toMatchObject({ level: "ok" });
+    expect(result.checks.find((check) => check.name === "email-reply-to-support")).toMatchObject({ level: "ok" });
+  });
+
+  it("rejects old Resend and root-domain app senders", () => {
+    for (const emailFrom of [
+      "Corgtex <onboarding@corgtex.com>",
+      "Corgtex <onboarding@resend.dev>",
+    ]) {
+      const result = validateAzureSelfServeDomainReadiness({
+        ...COMPLETE_ENV,
+        EMAIL_FROM: emailFrom,
+      }, { strict: true });
+
+      expect(result.checks).toContainEqual({
+        level: "error",
+        name: "email-from-auth-domain",
+        detail: expect.stringContaining("notifications@auth.corgtex.com"),
+      });
+    }
+  });
+
+  it("requires support reply-to for app email readiness", () => {
+    const missingReplyTo = validateAzureSelfServeDomainReadiness({
+      ...COMPLETE_ENV,
+      EMAIL_REPLY_TO: "",
+    }, { strict: true });
+    expect(missingReplyTo.checks).toContainEqual({
+      level: "error",
+      name: "env:EMAIL_REPLY_TO",
+      detail: "EMAIL_REPLY_TO is missing.",
+    });
+
+    const wrongReplyTo = validateAzureSelfServeDomainReadiness({
+      ...COMPLETE_ENV,
+      EMAIL_REPLY_TO: "Corgtex <notifications@auth.corgtex.com>",
+    }, { strict: true });
+    expect(wrongReplyTo.checks).toContainEqual({
+      level: "error",
+      name: "email-reply-to-support",
+      detail: expect.stringContaining("support@corgtex.com"),
+    });
   });
 
   it("rejects an origin-only MCP_PUBLIC_URL because the MCP endpoint path would be missing", () => {

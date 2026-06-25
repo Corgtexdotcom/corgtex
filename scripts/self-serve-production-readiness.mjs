@@ -18,6 +18,7 @@ const REQUIRED_ENV = [
   "MICROSOFT_CLIENT_SECRET",
   "RESEND_API_KEY",
   "EMAIL_FROM",
+  "EMAIL_REPLY_TO",
   "WORKER_POLL_INTERVAL_MS",
   "WORKER_MAX_POLL_INTERVAL_MS",
   "WORKER_EVENT_BATCH_SIZE",
@@ -26,6 +27,8 @@ const REQUIRED_ENV = [
   "WORKER_SHUTDOWN_TIMEOUT_MS",
 ];
 
+const REQUIRED_EMAIL_FROM_ADDRESS = "notifications@auth.corgtex.com";
+const REQUIRED_EMAIL_REPLY_TO_ADDRESS = "support@corgtex.com";
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 function arg(name) {
@@ -58,6 +61,12 @@ function looksLikeUuid(value) {
   return UUID_PATTERN.test(value);
 }
 
+function parseEmailAddress(value) {
+  const raw = String(value ?? "").trim();
+  const match = raw.match(/<([^<>]+)>/);
+  return (match ? match[1] : raw).trim().toLowerCase();
+}
+
 function checkConfigured(name, strict, message) {
   if (configured(name)) {
     pass(`${name} configured`);
@@ -65,6 +74,26 @@ function checkConfigured(name, strict, message) {
     fail(message ?? `${name} missing`);
   } else {
     warn(message ?? `${name} missing`);
+  }
+}
+
+function checkEmailSenderConfiguration() {
+  if (configured("EMAIL_FROM")) {
+    const fromAddress = parseEmailAddress(envValue("EMAIL_FROM"));
+    if (fromAddress === REQUIRED_EMAIL_FROM_ADDRESS) {
+      pass(`EMAIL_FROM uses ${REQUIRED_EMAIL_FROM_ADDRESS}`);
+    } else {
+      fail(`EMAIL_FROM must use ${REQUIRED_EMAIL_FROM_ADDRESS}; got ${fromAddress || "empty"}`);
+    }
+  }
+
+  if (configured("EMAIL_REPLY_TO")) {
+    const replyToAddress = parseEmailAddress(envValue("EMAIL_REPLY_TO"));
+    if (replyToAddress === REQUIRED_EMAIL_REPLY_TO_ADDRESS) {
+      pass(`EMAIL_REPLY_TO uses ${REQUIRED_EMAIL_REPLY_TO_ADDRESS}`);
+    } else {
+      fail(`EMAIL_REPLY_TO must use ${REQUIRED_EMAIL_REPLY_TO_ADDRESS}; got ${replyToAddress || "empty"}`);
+    }
   }
 }
 
@@ -136,6 +165,7 @@ async function main() {
     fail("MICROSOFT_CLIENT_SECRET looks like an Entra Secret ID. Use the client secret Value instead.");
   }
 
+  checkEmailSenderConfiguration();
   checkModelConfiguration(strict);
 
   if (skipHttp) {
