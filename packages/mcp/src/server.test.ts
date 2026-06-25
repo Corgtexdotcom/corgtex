@@ -58,7 +58,10 @@ const postDeliberationEntryMock = vi.fn();
 const resolveDeliberationEntryMock = vi.fn();
 const getWorkspacePermanentPathForEntityMock = vi.fn();
 
-vi.mock("@corgtex/domain", () => ({
+vi.mock("@corgtex/domain", async () => {
+  const { MCP_TOOL_CAPABILITIES } = await import("../../domain/src/mcp-tool-capabilities");
+
+  return {
   AppError: class AppError extends Error {
     status: number;
     code: string;
@@ -175,7 +178,9 @@ vi.mock("@corgtex/domain", () => ({
   listFailedJobs: vi.fn(),
   replayWorkflowJob: vi.fn(),
   discardFailedJob: vi.fn(),
-}));
+  MCP_TOOL_CAPABILITIES,
+  };
+});
 
 vi.mock("@corgtex/knowledge", () => ({
   searchIndexedKnowledge: searchIndexedKnowledgeMock,

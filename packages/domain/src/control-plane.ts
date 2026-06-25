@@ -24,9 +24,15 @@ import { createRailwayClientFromEnv, upgradeRailwayCustomerRelease, type Railway
 import { buildCustomerDeploymentProviderReadModel, buildCustomerDeploymentReadiness, provisionCustomerDeployment } from "./admin";
 import { registerCustomerDeployment } from "./customer-lifecycle";
 import { AGENT_REGISTRY } from "./agent-registry";
-import { isKnownScope } from "./agent-auth";
+import { isKnownScope, type AgentScope } from "./agent-auth";
 import { getModuleManifests, listModuleFlagKeys, listWorkspaceFeatureFlagDefinitions } from "./modules";
 import type { FeatureFlagDefinition, WorkspaceFeatureFlagKey } from "./modules";
+import {
+  getMissingPostDeployReadProbeScopes,
+  getRequiredScopesForPostDeployReadProbe,
+  getRequiredScopesForPostDeployReadProbes,
+  POST_DEPLOY_CUSTOMER_READ_PROBES,
+} from "./post-deploy-probe-contract";
 
 const SUPPORT_ACTOR_LABEL = "Corgtex Support";
 const DEFAULT_RECORDER_BOT_NAME = "Corgtex Recorder";
@@ -146,15 +152,6 @@ const SUPPORT_ACTION_TO_MCP_TOOL = {
 export type SupportAction = keyof typeof SUPPORT_ACTION_TO_MCP_TOOL;
 
 type JsonRecord = Record<string, unknown>;
-
-const POST_DEPLOY_CUSTOMER_READ_PROBES = [
-  { key: "daily_overview", label: "Daily overview", toolName: "daily_overview", arguments: { windowHours: 72 } },
-  { key: "brain_context", label: "Brain context", toolName: "get_company_context", arguments: {} },
-  { key: "actions", label: "Actions", toolName: "list_actions", arguments: { take: 1 } },
-  { key: "tensions", label: "Tensions", toolName: "list_tensions", arguments: { take: 1 } },
-  { key: "meetings", label: "Meetings", toolName: "list_meetings", arguments: {} },
-  { key: "proposals", label: "Proposals", toolName: "list_proposals", arguments: { take: 1 } },
-] as const;
 
 const RECORDER_CREDIT_FAILURE_PATTERN = /insufficient[_ -]?credit[_ -]?balance|credit[_ -]?balance|insufficient[_ -]?balance/i;
 
@@ -8348,13 +8345,91 @@ function statusCounts(value: unknown): Record<string, number> {
   return counts;
 }
 
-function postDeployProbeErrorClass(error: unknown) {
-  const message = error instanceof Error ? error.message : String(error ?? "");
+function errorMessage(error: unknown) {
+  return error instanceof Error ? error.message : String(error ?? "");
+}
+
+function missingKnownRequiredScopeFromMessage(message: string, requiredScopes: readonly AgentScope[]) {
+  const match = message.match(/(?:required scope|required permission):\s*([a-z0-9:-]+)/i);
+  const scope = match?.[1]?.trim();
+  return scope && isKnownScope(scope) && requiredScopes.includes(scope) ? scope : null;
+}
+
+function postDeployProbeErrorClass(error: unknown, requiredScopes: readonly AgentScope[] = []) {
+  const message = errorMessage(error);
+  if (missingKnownRequiredScopeFromMessage(message, requiredScopes)) return "MISSING_SUPPORT_SCOPE";
   if (/scope|required scope|required permission|forbidden|unauthorized|missing session|invalid signature/i.test(message)) return "REMOTE_AUTH_OR_SCOPE";
   if (/timeout|timed out/i.test(message)) return "REMOTE_TIMEOUT";
   if (/fetch|network|ECONN|ENOTFOUND|ECONNRESET/i.test(message)) return "REMOTE_NETWORK";
   if (error instanceof AppError) return error.code;
   return "REMOTE_ERROR";
+}
+
+function supportConnectorReadinessResult(params: {
+  status: "ready" | "missing_scope" | "unavailable" | "unknown";
+  requiredScopes: readonly AgentScope[];
+  missingScopes?: readonly AgentScope[];
+  checkedAt?: string;
+}) {
+  return {
+    status: params.status,
+    requiredScopes: [...params.requiredScopes],
+    missingScopes: [...(params.missingScopes ?? [])],
+    checkedAt: params.checkedAt ?? new Date().toISOString(),
+  };
+}
+
+function summarizeSupportConnectorReadiness(value: unknown, requiredScopes: readonly AgentScope[]) {
+  const record = jsonRecord(value);
+  if (!record) {
+    return supportConnectorReadinessResult({ status: "unknown", requiredScopes });
+  }
+
+  if (Array.isArray(record.scopes)) {
+    const scopes = record.scopes.filter((scope): scope is string => typeof scope === "string");
+    const missingScopes = getMissingPostDeployReadProbeScopes(scopes, requiredScopes);
+    return supportConnectorReadinessResult({
+      status: missingScopes.length > 0 ? "missing_scope" : "ready",
+      requiredScopes,
+      missingScopes,
+    });
+  }
+
+  if (record.authKind === "agent" && record.scopes == null) {
+    return supportConnectorReadinessResult({ status: "ready", requiredScopes });
+  }
+
+  return supportConnectorReadinessResult({ status: "unknown", requiredScopes });
+}
+
+async function getSupportConnectorReadiness(
+  connector: Awaited<ReturnType<typeof loadSupportConnector>>,
+  requiredScopes: readonly AgentScope[],
+) {
+  try {
+    const result = await callMcpTool({
+      mcpUrl: connector.mcpUrl,
+      bearerToken: connector.bearerToken,
+      toolName: "get_current_connection",
+      arguments: {},
+    });
+    const summarized = summarizeMcpResponse(result);
+    const remoteError = supportMcpErrorMessage(summarized);
+    if (remoteError) {
+      throw new AppError(502, "REMOTE_SUPPORT_OPERATION_FAILED", remoteError);
+    }
+    return summarizeSupportConnectorReadiness(summarized, requiredScopes);
+  } catch (error) {
+    const missingScope = missingKnownRequiredScopeFromMessage(errorMessage(error), requiredScopes);
+    if (missingScope) {
+      return supportConnectorReadinessResult({
+        status: "missing_scope",
+        requiredScopes,
+        missingScopes: [missingScope],
+      });
+    }
+    return supportConnectorReadinessResult({ status: "unavailable", requiredScopes });
+  }
 }
 
 function scanFailureCode(value: unknown): string | null {
@@ -8446,7 +8521,14 @@ function summarizePostDeployRecorder(integrations: Awaited<ReturnType<typeof get
   };
 }
 
-function postDeployProbeStatus(reads: Array<{ status: string }>, recorder: { status: string }, supportAudit: { status: string }, requireRemoteSupportAudit: boolean) {
+function postDeployProbeStatus(
+  reads: Array<{ status: string }>,
+  recorder: { status: string },
+  supportAudit: { status: string },
+  requireRemoteSupportAudit: boolean,
+  supportConnectorReadiness: { status: string },
+) {
+  if (supportConnectorReadiness.status !== "ready") return "failed";
   if (reads.some((probe) => probe.status === "failed")) return "failed";
   if (recorder.status === "failed") return "failed";
   if (requireRemoteSupportAudit && supportAudit.status !== "completed") return "failed";
@@ -8454,8 +8536,12 @@ function postDeployProbeStatus(reads: Array<{ status: string }>, recorder: { sta
   return "ok";
 }
 
-function postDeployProbeError(result: { status: string; reads: Array<{ key: string; status: string; errorClass?: string | null }>; recorder: { status: string; failureCode?: string | null }; supportAudit: { status: string; errorClass?: string | null } }) {
+function postDeployProbeError(result: { status: string; supportConnectorReadiness?: { status: string; missingScopes?: string[] | null }; reads: Array<{ key: string; status: string; errorClass?: string | null }>; recorder: { status: string; failureCode?: string | null }; supportAudit: { status: string; errorClass?: string | null } }) {
   if (result.status === "ok") return null;
+  if (result.supportConnectorReadiness?.status && result.supportConnectorReadiness.status !== "ready") {
+    const code = result.supportConnectorReadiness.status === "missing_scope" ? "MISSING_SUPPORT_SCOPE" : result.supportConnectorReadiness.status;
+    return `support_connector:${code}`;
+  }
   const failedRead = result.reads.find((probe) => probe.status === "failed");
   if (failedRead) return `${failedRead.key}:${failedRead.errorClass ?? "failed"}`;
   if (result.recorder.status === "failed") return `recorder:${result.recorder.failureCode ?? "failed"}`;
@@ -8474,6 +8560,7 @@ export async function runControlPlanePostDeployProbe(actor: AppActor, params: {
   const reason = requireMutationReason(params.reason);
   await requireControlPlaneAccess(actor, { deploymentId: params.deploymentId });
   const connector = await loadSupportConnector(params.deploymentId);
+  const requiredReadScopes = getRequiredScopesForPostDeployReadProbes();
   const operationId = `post-deploy-probe:${params.deploymentId}:${Date.now()}`;
   const requireRemoteSupportAudit = Boolean(params.requireRemoteSupportAudit);
   const supportAudit: { status: string; errorClass: string | null } = { status: "skipped", errorClass: null };
@@ -8493,6 +8580,8 @@ export async function runControlPlanePostDeployProbe(actor: AppActor, params: {
     supportAudit.errorClass = postDeployProbeErrorClass(error);
   }
 
+  const supportConnectorReadiness = await getSupportConnectorReadiness(connector, requiredReadScopes);
+
   const reads: Array<{
     key: string;
     label: string;
@@ -8504,6 +8593,7 @@ export async function runControlPlanePostDeployProbe(actor: AppActor, params: {
   }> = [];
 
   for (const probe of POST_DEPLOY_CUSTOMER_READ_PROBES) {
+    const probeRequiredScopes = getRequiredScopesForPostDeployReadProbe(probe);
     try {
       const result = await callMcpTool({
         mcpUrl: connector.mcpUrl,
@@ -8522,7 +8612,7 @@ export async function runControlPlanePostDeployProbe(actor: AppActor, params: {
         key: probe.key,
         label: probe.label,
         status: "failed",
-        errorClass: postDeployProbeErrorClass(error),
+        errorClass: postDeployProbeErrorClass(error, probeRequiredScopes),
       });
     }
   }
@@ -8554,13 +8644,14 @@ export async function runControlPlanePostDeployProbe(actor: AppActor, params: {
     sanitized: true,
     reads,
     recorder,
+    supportConnectorReadiness,
     supportAudit,
   };
-  result.status = postDeployProbeStatus(reads, recorder, supportAudit, requireRemoteSupportAudit);
+  result.status = postDeployProbeStatus(reads, recorder, supportAudit, requireRemoteSupportAudit, supportConnectorReadiness);
 
   if (supportAudit.status === "started") {
     try {
-      const probeFailed = reads.some((probe) => probe.status === "failed") || recorder.status === "failed";
+      const probeFailed = supportConnectorReadiness.status !== "ready" || reads.some((probe) => probe.status === "failed") || recorder.status === "failed";
       await recordRemoteSupportAudit({
         mcpUrl: connector.mcpUrl,
         bearerToken: connector.bearerToken,
@@ -8572,15 +8663,16 @@ export async function runControlPlanePostDeployProbe(actor: AppActor, params: {
           status: probeFailed ? "failed" : "ok",
           reads: reads.map((probe) => ({ key: probe.key, status: probe.status, count: probe.count ?? null, errorClass: probe.errorClass ?? null })),
           recorder,
+          supportConnectorReadiness,
         },
         error: probeFailed ? postDeployProbeError({ ...result, status: "failed" }) : null,
       });
       supportAudit.status = "completed";
-      result.status = postDeployProbeStatus(reads, recorder, supportAudit, requireRemoteSupportAudit);
+      result.status = postDeployProbeStatus(reads, recorder, supportAudit, requireRemoteSupportAudit, supportConnectorReadiness);
     } catch (auditError) {
       supportAudit.status = "failed";
       supportAudit.errorClass = postDeployProbeErrorClass(auditError);
-      result.status = postDeployProbeStatus(reads, recorder, supportAudit, requireRemoteSupportAudit);
+      result.status = postDeployProbeStatus(reads, recorder, supportAudit, requireRemoteSupportAudit, supportConnectorReadiness);
     }
   }
 
