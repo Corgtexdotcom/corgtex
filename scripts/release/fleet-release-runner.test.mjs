@@ -739,6 +739,66 @@ describe("fleet release runner", () => {
     expect(slackPayloads[0].text).toContain("Fleet release");
   });
 
+  it("opens a GitHub incident when Slack is not configured", async () => {
+    const githubRequests = [];
+    const fetchImpl = vi.fn(async (url, options = {}) => {
+      const href = String(url);
+      if (href.includes("backboard.railway.com")) {
+        return successfulRailwayResponse(JSON.parse(options.body));
+      }
+      if (href === "https://api.github.com/repos/Corgtexdotcom/corgtex/issues?state=open&per_page=100") {
+        githubRequests.push({ method: options.method ?? "GET", url: href });
+        return { status: 200, text: async () => "[]" };
+      }
+      if (href === "https://api.github.com/repos/Corgtexdotcom/corgtex/issues") {
+        const body = JSON.parse(options.body);
+        githubRequests.push({ method: options.method ?? "GET", url: href, body });
+        return { status: 201, text: async () => JSON.stringify({ html_url: "https://github.com/Corgtexdotcom/corgtex/issues/999" }) };
+      }
+      if (href.includes("/api/control-plane/mcp")) {
+        const body = JSON.parse(options.body);
+        if (body.params.name === "run_post_deploy_probe") {
+          return controlPlaneResult({
+            deploymentId: "deployment-1",
+            status: "failed",
+            reads: [{ key: "brain_context", label: "Brain context", status: "failed", errorClass: "REMOTE_AUTH_OR_SCOPE" }],
+            recorder: { status: "ok", provider: "RECALL_AI" },
+            supportAudit: { status: "completed" },
+          });
+        }
+      }
+      return healthResponse();
+    });
+
+    await expect(runFleetRelease([
+      "deploy",
+      "--release",
+      SHA,
+      "--targets",
+      "ops",
+      "--reason",
+      "Deploy release.",
+    ], {
+      env: {
+        FLEET_RELEASE_TARGETS_JSON: targetJson({ deploymentId: "deployment-1", label: "Customer A" }),
+        CONTROL_PLANE_AGENT_API_KEY: "control-plane-token",
+        RAILWAY_API_TOKEN: "railway-token",
+        GHCR_IMPORT_USERNAME: "github-user",
+        GITHUB_REPOSITORY: "Corgtexdotcom/corgtex",
+        GITHUB_TOKEN: "github-token",
+      },
+      runCommand: vi.fn(),
+      fetchImpl,
+      sleep: vi.fn(),
+    })).rejects.toThrow("Ring 1 failed");
+
+    const createRequest = githubRequests.find((request) => request.method === "POST");
+    expect(createRequest.body.title).toContain("P1 fleet-release");
+    expect(createRequest.body.title).toContain("Fleet release");
+    expect(createRequest.body.body).toContain("Customer A");
+    expect(createRequest.body.body).toContain("REMOTE_AUTH_OR_SCOPE");
+  });
+
   it("reports degraded recorder readiness without blocking deployment success", async () => {
     const sanitized = assertPostDeployProbeReady({
       status: "degraded",
