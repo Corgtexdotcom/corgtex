@@ -56,6 +56,7 @@ reviews code line-by-line. The full specification lives in
 - **Formatting:** double quotes, semicolons, 2-space indent.
 - **Naming:** camelCase (variables/functions), PascalCase (types/components), UPPER_SNAKE (constants/enums).
 - **Icons:** Never use emoji characters (🌙, 🤖, 💾, etc.) in UI code. Use monochrome Unicode glyphs consistent with `apps/web/lib/nav-config.ts`. The ESLint `no-restricted-syntax` rule enforces this.
+- **UI controls:** Controls in the same family must share size, typography, spacing, and alignment. Use the shared filter toolbar pattern for search/select/multiselect/apply/clear controls, the shared checkbox filter pattern for inline filters, and shared table action groups for row actions. Inline `fontSize`, `padding`, `width`, `minWidth`, or `alignSelf` overrides on buttons, filters, checkbox controls, or table actions are review concerns unless they map to a named design-system class.
 - **No `.js`:** `allowJs: false`.
 - **Errors:** throw `AppError(status, code, message)` from domain logic; convert in route handlers with `handleRouteError()`.
 - **DB:** monetary values as `*Cents: Int`. UUIDs for all IDs. Use Prisma compound unique keys for lookups.
@@ -137,6 +138,7 @@ merge.
    - Use `visibility=PUBLIC_REVIEW` / `classification=OPEN_CORE` only after confirming the proof contains no private client data. For private proof, keep the artifact private and use an authenticated/private link.
    - If Build Artifacts is unavailable because the target workspace feature flag, auth, or app URL is missing, use PR attachments, CI-uploaded artifacts, or another private artifact link and state that fallback in **Visual Proof**.
    - For CRM / Relationships production UI proof, use the focused client-readiness smoke after pulling the current `main`: `CLIENT_READINESS_ROUTE_NAMES=leads node scripts/client-readiness-smoke.mjs https://app.corgtex.com .artifacts/client-readiness/<slug>`. If local production login returns 401, check the GitHub `Production Smoke Test` on `main` before treating the gate as blocked; do not ask for a Chrome-session fallback unless the secret-backed production smoke is unavailable or failing.
+   - For control/layout changes, visual proof must show that related buttons, filters, checkbox controls, and table row actions use the shared sizing and alignment patterns.
 5a. **Demo exposure:** For customer-visible product changes, either update `scripts/seed-jnj-demo.mjs` so the public J&J demo shows the safe parts of the feature, or state in the PR body's **Demo exposure** section why the feature cannot be shown safely (for example, because it requires private credentials, customer data, or write access).
 6. **CI fix loop cap:** if CI is red, you may push up to 3 fix commits. After the 3rd failed attempt, label the PR `needs-replan`, comment a summary, and stop. The human will re-prompt the Planner.
 7. **Never (default):** merge your own PR, use `--admin`, skip hooks with `--no-verify`, or run `prisma db push`. Never remove `export const dynamic = "force-dynamic"` from a Prisma-touching page. Never commit `.env` or any secret.

@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { TextPasteUploader } from "./TextPasteUploader";
 import { RecentUploads } from "./RecentUploads";
 import { useLocale, useTranslations } from "next-intl";
+import { CheckboxFilter, TableActionGroup } from "@/lib/components/ControlPrimitives";
 import { KnowledgeFileUploader } from "../KnowledgeFileUploader";
 
 type DataSource = {
@@ -173,25 +174,24 @@ export function DataSourcesManager({ workspaceId, dataSources, documents }: { wo
               <input required value={cursorColumn} onChange={e => setCursorColumn(e.target.value)} placeholder={t("placeholderCursorColumn")} />
             </label>
 
-            <div className="actions-inline">
+            <TableActionGroup>
               <button type="button" className="secondary small" disabled={isTesting || !connectionString} onClick={handleTestConnection}>
                 {isTesting ? t("btnTesting") : t("btnTestConnection")}
               </button>
               <button type="submit" className="small" disabled={isTesting || selectedTables.length === 0}>{t("btnSaveDatabase")}</button>
-            </div>
+            </TableActionGroup>
 
             {availableTables.length > 0 && (
               <div className="stack" style={{ gap: 8 }}>
                 <strong>{t("labelSelectTables")}</strong>
                 {availableTables.map((table) => (
-                  <label key={table} style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                    <input
-                      type="checkbox"
-                      checked={selectedTables.includes(table)}
-                      onChange={() => toggleTable(table)}
-                    />
+                  <CheckboxFilter
+                    key={table}
+                    checked={selectedTables.includes(table)}
+                    onChange={() => toggleTable(table)}
+                  >
                     {table}
-                  </label>
+                  </CheckboxFilter>
                 ))}
               </div>
             )}
@@ -216,10 +216,10 @@ export function DataSourcesManager({ workspaceId, dataSources, documents }: { wo
                     <strong className="nr-item-title" style={{ fontSize: "1.1rem" }}>{source.label}</strong>
                     <span className="tag" style={{ marginLeft: 8 }}>{source.driverType}</span>
                   </div>
-                  <div className="actions-inline">
+                  <TableActionGroup>
                     <button onClick={() => handleSync(source.id)} className="secondary small">{t("btnSyncNow")}</button>
                     <button onClick={() => handleArchive(source.id)} className="danger small">{t("btnDelete")}</button>
-                  </div>
+                  </TableActionGroup>
                 </div>
                 <div className="nr-item-meta" style={{ fontSize: "0.85rem", marginTop: 8 }}>
                   {t("metaCadence", { minutes: source.pullCadenceMinutes, status: source.isActive ? t("statusActive") : t("statusInactive") })}

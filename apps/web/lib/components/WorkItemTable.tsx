@@ -1,30 +1,9 @@
 import React, { type ReactNode } from "react";
+import { DataTable, type DataTableColumn, type DataTableRow } from "@/lib/components/DataTable";
 
-export type WorkItemTableColumn = {
-  id: string;
-  label: ReactNode;
-  mobileLabel?: string;
-  align?: "left" | "center" | "right";
-  className?: string;
-  headerClassName?: string;
-  cellClassName?: string;
-};
+export type WorkItemTableColumn = DataTableColumn;
 
-export type WorkItemTableRow = {
-  id: string;
-  cells: Record<string, ReactNode>;
-  className?: string;
-};
-
-function classes(...values: Array<string | false | null | undefined>) {
-  return values.filter(Boolean).join(" ");
-}
-
-function alignClass(align: WorkItemTableColumn["align"]) {
-  if (align === "center") return "nr-table-cell-center";
-  if (align === "right") return "nr-table-cell-right";
-  return undefined;
-}
+export type WorkItemTableRow = DataTableRow;
 
 export function WorkItemTable({
   columns,
@@ -35,41 +14,5 @@ export function WorkItemTable({
   rows: WorkItemTableRow[];
   empty?: ReactNode;
 }) {
-  if (rows.length === 0) {
-    return empty ? <div className="nr-workspace-table-surface">{empty}</div> : null;
-  }
-
-  return (
-    <div className="nr-table-wrap nr-work-item-table-wrap nr-workspace-table-surface">
-      <table className="nr-table nr-work-item-table">
-        <thead>
-          <tr>
-            {columns.map((column) => (
-              <th
-                key={column.id}
-                className={classes(alignClass(column.align), column.className, column.headerClassName)}
-              >
-                {column.label}
-              </th>
-            ))}
-          </tr>
-        </thead>
-        <tbody>
-          {rows.map((row) => (
-            <tr key={row.id} className={row.className}>
-              {columns.map((column) => (
-                <td
-                  key={column.id}
-                  data-label={column.mobileLabel ?? (typeof column.label === "string" ? column.label : column.id)}
-                  className={classes(alignClass(column.align), column.className, column.cellClassName)}
-                >
-                  {row.cells[column.id] ?? null}
-                </td>
-              ))}
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
-  );
+  return <DataTable columns={columns} rows={rows} empty={empty} surfaceClassName="nr-work-item-table-wrap" tableClassName="nr-work-item-table" />;
 }

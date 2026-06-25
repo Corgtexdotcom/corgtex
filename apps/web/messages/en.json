@@ -2414,6 +2414,7 @@
     "labelPullCadence": "Pull Cadence (minutes)",
     "labelRoleDistribution": "Role Distribution",
     "labelSelectTables": "Select tables to sync",
+    "labelSearchMembers": "Search",
     "labelShowDeactivated": "Show deactivated",
     "labelSourceType": "Source Type",
     "labelSystemRole": "System Role",

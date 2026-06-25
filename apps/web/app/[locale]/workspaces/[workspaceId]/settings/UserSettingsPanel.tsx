@@ -3,6 +3,7 @@
 import { useEffect, useState, useRef } from "react";
 import { useRouter } from "next/navigation";
 import { useLocale, useTranslations } from "next-intl";
+import { TableActionGroup } from "@/lib/components/ControlPrimitives";
 import { updateProfileAction, updateNotificationPrefAction, updateMemberNewspaperCadenceAction } from "./actions";
 
 type MemberNewspaperCadenceChoice = "WORKSPACE_DEFAULT" | "DAILY" | "WEEKLY" | "OFF";
@@ -434,13 +435,15 @@ export function UserSettingsPanel({
         <div className="nested-item">
           <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
             <label style={{ fontWeight: 600, margin: 0 }}>Active Sessions</label>
-            <button
-              className="danger small"
-              onClick={() => handleSessionRevoke(undefined, true)}
-              disabled={sessions.length <= 1}
-            >
-              {t("btnRevokeAllSessions")}
-            </button>
+            <TableActionGroup>
+              <button
+                className="danger small"
+                onClick={() => handleSessionRevoke(undefined, true)}
+                disabled={sessions.length <= 1}
+              >
+                {t("btnRevokeAllSessions")}
+              </button>
+            </TableActionGroup>
           </div>
 
           <div className="session-list">
@@ -454,7 +457,7 @@ export function UserSettingsPanel({
                   <div>
                     <div className="row" style={{ alignItems: 'center', gap: 8, marginBottom: 4 }}>
                       <strong style={{ fontSize: '0.95rem' }}>{browser} on {os}</strong>
-                      {s.isCurrent && <span className="status-chip" style={{ padding: '2px 6px', fontSize: '0.65rem' }}>{t("sessionCurrent")}</span>}
+                      {s.isCurrent && <span className="status-chip status-chip-compact">{t("sessionCurrent")}</span>}
                     </div>
                     <div className="text-muted" style={{ fontSize: '0.8rem', display: 'flex', gap: 16 }}>
                       <span>IP: {s.ipAddress || "Unknown"}</span>
@@ -462,9 +465,11 @@ export function UserSettingsPanel({
                     </div>
                   </div>
                   {!s.isCurrent && (
-                    <button className="secondary small" onClick={() => handleSessionRevoke(s.id)}>
-                      {t("btnRevokeSession")}
-                    </button>
+                    <TableActionGroup>
+                      <button className="secondary small" onClick={() => handleSessionRevoke(s.id)}>
+                        {t("btnRevokeSession")}
+                      </button>
+                    </TableActionGroup>
                   )}
                 </div>
               );

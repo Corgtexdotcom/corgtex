@@ -28,6 +28,14 @@ We enforce a strict, consistent codebase to ensure maintainability across the mo
 
 Throw `AppError(status, code, message)` from domain logic and convert it in Next.js route handlers with the `handleRouteError()` helper block from `apps/web/lib/http.ts`.
 
+## UI Control Consistency
+
+- Controls in the same family must share size, typography, spacing, and alignment.
+- Filter sets must use the shared filter toolbar pattern for search, selects, multiselects, and apply/clear actions.
+- Inline checkbox or toggle filters must use the shared checkbox filter pattern instead of relying on global `label` layout.
+- Table row actions must use shared action groups so edit, resend, revoke, approve, reject, and similar controls align consistently.
+- Inline `fontSize`, `padding`, `width`, `minWidth`, or `alignSelf` overrides on buttons, filters, checkbox controls, or table actions are review concerns unless they map to a named design-system class.
+
 ## Database Conventions
 
 - All monetary values must be stored as `*Cents: Int` at the database level.
