@@ -119,9 +119,26 @@ export async function runFleetRelease(argv = process.argv.slice(2), deps = {}) {
       }
     }
   } catch (error) {
-    await notifyFleetReleaseFailure({ manifest, results, error, stage: "deploy" }, deps).catch((alertError) => {
-      console.error(`Fleet release alert failed: ${alertError instanceof Error ? alertError.message : String(alertError)}`);
-    });
+    await notifyFleetReleaseFailure({ manifest, results, error, stage: "deploy" }, deps)
+      .then((alertResult) => {
+        console.log(JSON.stringify({
+          stage: "fleet-release-alert",
+          channel: alertResult.channel,
+          sent: alertResult.sent,
+          url: alertResult.url ?? null,
+          reason: alertResult.reason ?? null,
+          incident: {
+            searchToken: alertResult.incident?.searchToken,
+            severity: alertResult.incident?.severity,
+            service: alertResult.incident?.service,
+            status: alertResult.incident?.status,
+            summary: alertResult.incident?.summary,
+          },
+        }, null, 2));
+      })
+      .catch((alertError) => {
+        console.error(`Fleet release alert failed: ${alertError instanceof Error ? alertError.message : String(alertError)}`);
+      });
     throw error;
   }
 

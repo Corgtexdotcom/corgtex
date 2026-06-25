@@ -78,7 +78,7 @@ jobs:
       FLEET_RELEASE_REQUIRE_REMOTE_SUPPORT_AUDIT: ${{ vars.FLEET_RELEASE_REQUIRE_REMOTE_SUPPORT_AUDIT || 'false' }}
       OPS_SLACK_WEBHOOK_URL: ${{ secrets.OPS_SLACK_WEBHOOK_URL }}
       OPS_GITHUB_REPOSITORY: ${{ vars.OPS_GITHUB_REPOSITORY || github.repository }}
-      OPS_GITHUB_TOKEN: ${{ secrets.OPS_GITHUB_TOKEN }}
+      OPS_GITHUB_TOKEN: ${{ secrets.OPS_GITHUB_TOKEN || github.token }}
       DATABASE_URL: postgresql://postgres:postgres@localhost:5432/corgtex_ci?schema=public
       ADMIN_EMAIL: system+corgtex@corgtex.local
       ADMIN_PASSWORD: corgtex-test-agent-pw
