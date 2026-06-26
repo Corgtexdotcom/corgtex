@@ -48,9 +48,20 @@ export async function POST(request: NextRequest) {
   const failureReason = eventType === "email.bounced" || eventType === "email.complained"
     ? failureReasonFromData(data)
     : null;
-  const recipientEmail = normalizeEmailAddress(firstRecipient(data.to));
-  const subject = stringValue(data.subject) ?? "(unknown subject)";
   const dedupeKey = request.headers.get("svix-id") ?? `${eventType}:${providerMessageId}:${payload.created_at ?? ""}`;
+
+  const trackedEmail = await prisma.emailDelivery.findUnique({
+    where: { providerMessageId },
+    select: { id: true },
+  });
+
+  if (!trackedEmail) {
+    console.warn("[resend-delivery] Ignoring event for unknown message id", {
+      providerMessageId,
+      eventType,
+    });
+    return NextResponse.json({ ok: true, ignored: true, reason: "unknown_message" });
+  }
 
   await prisma.emailDeliveryEvent.upsert({
     where: { dedupeKey },
@@ -65,24 +76,9 @@ export async function POST(request: NextRequest) {
     },
   });
 
-  await prisma.emailDelivery.upsert({
+  await prisma.emailDelivery.update({
     where: { providerMessageId },
-    update: {
-      status,
-      lastEventType: eventType,
-      lastEventAt: occurredAt,
-      rawLastEvent: payload as any,
-      ...(eventType === "email.delivered" ? { deliveredAt: timestamp } : {}),
-      ...(eventType === "email.bounced" ? { bouncedAt: timestamp, failureReason } : {}),
-      ...(eventType === "email.complained" ? { complainedAt: timestamp, failureReason } : {}),
-    },
-    create: {
-      provider: "resend",
-      providerMessageId,
-      emailType: "unknown",
-      toEmail: recipientEmail,
-      toDomain: emailDomain(recipientEmail),
-      subject,
+    data: {
       status,
       lastEventType: eventType,
       lastEventAt: occurredAt,
@@ -115,23 +111,6 @@ function dateValue(value: unknown) {
   if (!raw) return null;
   const date = new Date(raw);
   return Number.isNaN(date.getTime()) ? null : date;
-}
-
-function firstRecipient(value: unknown) {
-  if (Array.isArray(value)) {
-    return stringValue(value[0]) ?? "unknown";
-  }
-  return stringValue(value) ?? "unknown";
-}
-
-function normalizeEmailAddress(value: string) {
-  const match = value.match(/<([^>]+)>/);
-  return (match ? match[1] : value).trim().toLowerCase();
-}
-
-function emailDomain(email: string) {
-  const [, domain] = email.split("@");
-  return domain?.toLowerCase() ?? "";
 }
 
 function failureReasonFromData(data: Record<string, unknown>) {
