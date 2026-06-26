@@ -2,9 +2,10 @@ import { createHmac } from "node:crypto";
 import { NextRequest } from "next/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const { emailDeliveryEventUpsertMock, emailDeliveryUpsertMock } = vi.hoisted(() => ({
+const { emailDeliveryEventUpsertMock, emailDeliveryFindUniqueMock, emailDeliveryUpdateMock } = vi.hoisted(() => ({
   emailDeliveryEventUpsertMock: vi.fn(),
-  emailDeliveryUpsertMock: vi.fn(),
+  emailDeliveryFindUniqueMock: vi.fn(),
+  emailDeliveryUpdateMock: vi.fn(),
 }));
 
 vi.mock("@corgtex/shared", () => ({
@@ -13,7 +14,8 @@ vi.mock("@corgtex/shared", () => ({
       upsert: emailDeliveryEventUpsertMock,
     },
     emailDelivery: {
-      upsert: emailDeliveryUpsertMock,
+      findUnique: emailDeliveryFindUniqueMock,
+      update: emailDeliveryUpdateMock,
     },
   },
 }));
@@ -46,7 +48,8 @@ describe("Resend delivery webhook route", () => {
     vi.clearAllMocks();
     vi.stubEnv("RESEND_WEBHOOK_SECRET", secret);
     emailDeliveryEventUpsertMock.mockResolvedValue({});
-    emailDeliveryUpsertMock.mockResolvedValue({});
+    emailDeliveryFindUniqueMock.mockResolvedValue({ id: "tracked-email" });
+    emailDeliveryUpdateMock.mockResolvedValue({});
   });
 
   it("rejects unsigned delivery webhooks", async () => {
@@ -59,7 +62,8 @@ describe("Resend delivery webhook route", () => {
 
     expect(response.status).toBe(401);
     expect(emailDeliveryEventUpsertMock).not.toHaveBeenCalled();
-    expect(emailDeliveryUpsertMock).not.toHaveBeenCalled();
+    expect(emailDeliveryFindUniqueMock).not.toHaveBeenCalled();
+    expect(emailDeliveryUpdateMock).not.toHaveBeenCalled();
   });
 
   it("records delivered events and updates the tracked email", async () => {
@@ -86,20 +90,15 @@ describe("Resend delivery webhook route", () => {
         occurredAt: new Date("2026-06-26T04:41:10.000Z"),
       }),
     }));
-    expect(emailDeliveryUpsertMock).toHaveBeenCalledWith(expect.objectContaining({
+    expect(emailDeliveryFindUniqueMock).toHaveBeenCalledWith({
       where: { providerMessageId: "email-1" },
-      update: expect.objectContaining({
+      select: { id: true },
+    });
+    expect(emailDeliveryUpdateMock).toHaveBeenCalledWith(expect.objectContaining({
+      where: { providerMessageId: "email-1" },
+      data: expect.objectContaining({
         status: "DELIVERED",
         lastEventType: "email.delivered",
-        deliveredAt: new Date("2026-06-26T04:41:10.000Z"),
-      }),
-      create: expect.objectContaining({
-        providerMessageId: "email-1",
-        emailType: "unknown",
-        toEmail: "user@example.com",
-        toDomain: "example.com",
-        subject: "Reset your Corgtex password",
-        status: "DELIVERED",
         deliveredAt: new Date("2026-06-26T04:41:10.000Z"),
       }),
     }));
@@ -120,9 +119,9 @@ describe("Resend delivery webhook route", () => {
     }, { svixId: "bounce-event" }));
 
     expect(response.status).toBe(200);
-    expect(emailDeliveryUpsertMock).toHaveBeenCalledWith(expect.objectContaining({
+    expect(emailDeliveryUpdateMock).toHaveBeenCalledWith(expect.objectContaining({
       where: { providerMessageId: "email-2" },
-      update: expect.objectContaining({
+      data: expect.objectContaining({
         status: "BOUNCED",
         bouncedAt: new Date("2026-06-26T04:42:10.000Z"),
         failureReason: "Mailbox does not exist",
@@ -145,9 +144,9 @@ describe("Resend delivery webhook route", () => {
     }, { svixId: "complaint-event" }));
 
     expect(response.status).toBe(200);
-    expect(emailDeliveryUpsertMock).toHaveBeenCalledWith(expect.objectContaining({
+    expect(emailDeliveryUpdateMock).toHaveBeenCalledWith(expect.objectContaining({
       where: { providerMessageId: "email-3" },
-      update: expect.objectContaining({
+      data: expect.objectContaining({
         status: "COMPLAINED",
         complainedAt: new Date("2026-06-26T04:43:10.000Z"),
         failureReason: "abuse",
@@ -168,6 +167,28 @@ describe("Resend delivery webhook route", () => {
 
     await expect(response.json()).resolves.toEqual({ ok: true, ignored: true });
     expect(emailDeliveryEventUpsertMock).not.toHaveBeenCalled();
-    expect(emailDeliveryUpsertMock).not.toHaveBeenCalled();
+    expect(emailDeliveryFindUniqueMock).not.toHaveBeenCalled();
+    expect(emailDeliveryUpdateMock).not.toHaveBeenCalled();
+  });
+
+  it("ignores tracked event types for messages not sent by this instance", async () => {
+    emailDeliveryFindUniqueMock.mockResolvedValue(null);
+    const { POST } = await import("./route");
+
+    const response = await POST(signedRequest({
+      type: "email.delivered",
+      created_at: "2026-06-26T04:45:10.000Z",
+      data: {
+        email_id: "email-from-another-instance",
+      },
+    }, { svixId: "foreign-delivery-event" }));
+
+    await expect(response.json()).resolves.toEqual({
+      ok: true,
+      ignored: true,
+      reason: "unknown_message",
+    });
+    expect(emailDeliveryEventUpsertMock).not.toHaveBeenCalled();
+    expect(emailDeliveryUpdateMock).not.toHaveBeenCalled();
   });
 });
