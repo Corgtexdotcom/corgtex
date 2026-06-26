@@ -2,7 +2,7 @@
 
 import { randomUUID } from "node:crypto";
 import { headers } from "next/headers";
-import { AppError, createProcurementTrial, renderPasswordResetEmail, requestPasswordResetForActiveMember } from "@corgtex/domain";
+import { AppError, createProcurementTrial, renderPasswordResetEmail, renderPasswordResetEmailText, requestPasswordResetForActiveMember } from "@corgtex/domain";
 import { sendEmail } from "@corgtex/shared";
 import { rateLimitProcurementTrialCreateForHeaders } from "@/lib/procurement-api";
 import { getPublicOrigin } from "@/lib/public-origin";
@@ -86,6 +86,19 @@ export async function signupAction(
             displayName: existingAccountReset.user.displayName,
             kind: "existing-account",
           }),
+          text: renderPasswordResetEmailText({
+            resetUrl,
+            displayName: existingAccountReset.user.displayName,
+            kind: "existing-account",
+          }),
+          tracking: {
+            emailType: "password_reset",
+            userId: existingAccountReset.user.id,
+            metadata: {
+              kind: "existing-account",
+              source: "signup_existing_account",
+            },
+          },
         });
       } catch (emailError) {
         console.error("Failed to send existing-account password reset email:", emailError);

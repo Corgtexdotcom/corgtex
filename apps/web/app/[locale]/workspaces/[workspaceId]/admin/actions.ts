@@ -16,6 +16,7 @@ import {
   getWorkspaceAdminDetail,
   renderAccountSetupEmail,
   renderPasswordResetEmail,
+  renderPasswordResetEmailText,
 } from "@corgtex/domain";
 import { sendEmail, prisma } from "@corgtex/shared";
 import { notFound } from "next/navigation";
@@ -58,6 +59,18 @@ export async function adminResetPasswordAction(formData: FormData) {
       resetUrl,
       kind: "admin-triggered",
     }),
+    text: renderPasswordResetEmailText({
+      resetUrl,
+      kind: "admin-triggered",
+    }),
+    tracking: {
+      emailType: "password_reset",
+      metadata: {
+        kind: "admin-triggered",
+        source: "workspace_admin_reset",
+      },
+      workspaceId,
+    },
   });
 
   refresh(workspaceId);

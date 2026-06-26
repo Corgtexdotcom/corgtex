@@ -137,3 +137,28 @@ export function renderPasswordResetEmail(params: {
     `,
   });
 }
+
+export function renderPasswordResetEmailText(params: {
+  resetUrl: string;
+  displayName?: string | null;
+  kind?: PasswordResetEmailKind;
+}) {
+  const kind = params.kind ?? "self-service";
+  const recipient = safeText(params.displayName, "there");
+  const intro = kind === "admin-triggered"
+    ? "A Corgtex administrator requested a password reset for your account."
+    : kind === "existing-account"
+      ? "It looks like you already have a Corgtex account. Reset your password, then you can continue into your workspace."
+      : "We received a request to reset your Corgtex password.";
+
+  return [
+    `Hi ${recipient},`,
+    "",
+    intro,
+    "",
+    "Choose a new password using this secure link:",
+    params.resetUrl,
+    "",
+    "This link expires in 15 minutes. If you did not request this, you can safely ignore this email.",
+  ].join("\n");
+}
