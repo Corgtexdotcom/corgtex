@@ -1001,6 +1001,52 @@ model PasswordResetToken {
   @@index([userId])
 }
 
+model EmailDelivery {
+  id                String    @id @default(uuid())
+  provider          String    @default("resend")
+  providerMessageId String    @unique
+  emailType         String
+  toEmail           String
+  toDomain          String
+  subject           String
+  status            String    @default("SENT")
+  lastEventType     String?
+  lastEventAt       DateTime?
+  sentAt            DateTime  @default(now())
+  deliveredAt       DateTime?
+  bouncedAt         DateTime?
+  complainedAt      DateTime?
+  failureReason     String?   @db.Text
+  userId            String?
+  workspaceId       String?
+  metadata          Json?
+  rawLastEvent      Json?
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+
+  @@index([toEmail, createdAt])
+  @@index([toDomain, createdAt])
+  @@index([emailType, createdAt])
+  @@index([status, createdAt])
+  @@index([workspaceId, createdAt])
+  @@index([userId, createdAt])
+}
+
+model EmailDeliveryEvent {
+  id                String   @id @default(uuid())
+  provider          String   @default("resend")
+  providerMessageId String
+  eventType         String
+  dedupeKey         String   @unique
+  occurredAt        DateTime?
+  payload           Json
+  receivedAt        DateTime @default(now())
+  createdAt         DateTime @default(now())
+
+  @@index([providerMessageId, occurredAt])
+  @@index([eventType, receivedAt])
+}
+
 model Member {
   id               String            @id @default(uuid())
   workspaceId      String

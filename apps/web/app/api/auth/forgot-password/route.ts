@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
-import { renderPasswordResetEmail, requestPasswordReset } from "@corgtex/domain";
+import { renderPasswordResetEmail, renderPasswordResetEmailText, requestPasswordReset } from "@corgtex/domain";
 import { sendEmail } from "@corgtex/shared";
 import { handleRouteError, validateBody } from "@/lib/http";
 import { rateLimitPasswordReset } from "@/lib/rate-limit-middleware";
@@ -33,6 +33,19 @@ export async function POST(request: NextRequest) {
             displayName: result.user.displayName,
             kind: "self-service",
           }),
+          text: renderPasswordResetEmailText({
+            resetUrl,
+            displayName: result.user.displayName,
+            kind: "self-service",
+          }),
+          tracking: {
+            emailType: "password_reset",
+            userId: result.user.id,
+            metadata: {
+              kind: "self-service",
+              source: "api_auth_forgot_password",
+            },
+          },
         });
       } catch (emailError) {
         console.error("Failed to send password reset email:", emailError);

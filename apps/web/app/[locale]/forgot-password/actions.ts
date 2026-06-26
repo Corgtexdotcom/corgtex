@@ -1,6 +1,6 @@
 "use server";
 
-import { renderPasswordResetEmail, requestPasswordReset } from "@corgtex/domain";
+import { renderPasswordResetEmail, renderPasswordResetEmailText, requestPasswordReset } from "@corgtex/domain";
 import { sendEmail } from "@corgtex/shared";
 import type { ForgotPasswordState } from "./state";
 
@@ -26,6 +26,19 @@ export async function forgotPasswordAction(
             displayName: result.user.displayName,
             kind: "self-service",
           }),
+          text: renderPasswordResetEmailText({
+            resetUrl,
+            displayName: result.user.displayName,
+            kind: "self-service",
+          }),
+          tracking: {
+            emailType: "password_reset",
+            userId: result.user.id,
+            metadata: {
+              kind: "self-service",
+              source: "forgot_password_action",
+            },
+          },
         });
       } catch (emailError) {
         // Log but don't fail — the token was created, user just won't receive the email

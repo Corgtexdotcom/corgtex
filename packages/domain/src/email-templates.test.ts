@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { renderAccountSetupEmail, renderPasswordResetEmail } from "./email-templates";
+import { renderAccountSetupEmail, renderPasswordResetEmail, renderPasswordResetEmailText } from "./email-templates";
 
 describe("email templates", () => {
   it("renders account setup emails with onboarding context", () => {
@@ -42,5 +42,19 @@ describe("email templates", () => {
     expect(html).toContain("already have a Corgtex account");
     expect(html).toContain("This link expires in 15 minutes");
     expect(html).not.toContain("What happens next");
+  });
+
+  it("renders a plain-text password reset alternative", () => {
+    const text = renderPasswordResetEmailText({
+      resetUrl: "https://app.example/reset-password/token-1",
+      displayName: "Ada",
+      kind: "self-service",
+    });
+
+    expect(text).toContain("Hi Ada,");
+    expect(text).toContain("We received a request to reset your Corgtex password.");
+    expect(text).toContain("https://app.example/reset-password/token-1");
+    expect(text).toContain("This link expires in 15 minutes.");
+    expect(text).not.toContain("<a");
   });
 });

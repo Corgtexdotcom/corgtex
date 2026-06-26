@@ -27,6 +27,7 @@ vi.mock("@corgtex/domain", () => ({
   AppError: MockAppError,
   createProcurementTrial: createProcurementTrialMock,
   renderPasswordResetEmail: (params: { resetUrl: string; kind?: string }) => `reset email ${params.kind ?? ""} ${params.resetUrl}`,
+  renderPasswordResetEmailText: (params: { resetUrl: string; kind?: string }) => `reset text ${params.kind ?? ""} ${params.resetUrl}`,
   requestPasswordResetForActiveMember: requestPasswordResetForActiveMemberMock,
 }));
 
@@ -153,6 +154,7 @@ describe("signupAction", () => {
     requestPasswordResetForActiveMemberMock.mockResolvedValueOnce({
       token: "reset-token",
       user: {
+        id: "user-1",
         email: "admin@acme.test",
         displayName: "Ada Admin",
       },
@@ -171,11 +173,20 @@ describe("signupAction", () => {
     });
     expect(createProcurementTrialMock).not.toHaveBeenCalled();
     expect(sendEmailMock).toHaveBeenCalledWith(expect.objectContaining({
-	      to: "admin@acme.test",
-	      subject: "Reset your Corgtex password",
-	      html: expect.stringContaining("existing-account https://app.test/reset-password/reset-token"),
-	    }));
-	  });
+      to: "admin@acme.test",
+      subject: "Reset your Corgtex password",
+      html: expect.stringContaining("existing-account https://app.test/reset-password/reset-token"),
+      text: expect.stringContaining("existing-account https://app.test/reset-password/reset-token"),
+      tracking: {
+        emailType: "password_reset",
+        userId: "user-1",
+        metadata: {
+          kind: "existing-account",
+          source: "signup_existing_account",
+        },
+      },
+    }));
+  });
 
   it("normalizes proxy-chain forwarded headers before creating a trial origin", async () => {
     headersMock.mockResolvedValue(new Headers({
