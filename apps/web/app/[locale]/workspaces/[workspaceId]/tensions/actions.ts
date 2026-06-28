@@ -14,7 +14,8 @@ import {
   returnTensionToDraft,
   postDeliberationEntry,
   resolveDeliberationEntry,
-  updateDeliberationEntry
+  updateDeliberationEntry,
+  upsertWorkspaceExternalResourceFromUrl
 } from "@corgtex/domain";
 import type { AdviceRequestAudienceType, AdviceRequestPreferredChannel } from "@prisma/client";
 import { uploadWorkItemEvidenceDocument } from "../work-item-evidence-upload";
@@ -111,6 +112,23 @@ export async function updateTensionAction(formData: FormData) {
     evidenceDocumentIds,
     raisedByMemberId: formData.has("raisedByMemberId") ? asOptional(formData, "raisedByMemberId") : undefined,
     priority: formData.has("priority") ? Number.parseInt(asString(formData, "priority"), 10) : undefined,
+  });
+  refresh(workspaceId);
+}
+
+export async function attachTensionExternalResourceAction(formData: FormData) {
+  const _demoGuardWsId = formData.get("workspaceId") as string;
+  if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
+
+  const actor = await requirePageActor();
+  const workspaceId = asString(formData, "workspaceId");
+  await upsertWorkspaceExternalResourceFromUrl(actor, {
+    workspaceId,
+    url: asString(formData, "url"),
+    descriptionMd: asOptional(formData, "descriptionMd"),
+    entityType: "Tension",
+    entityId: asString(formData, "tensionId"),
+    purpose: "reference",
   });
   refresh(workspaceId);
 }

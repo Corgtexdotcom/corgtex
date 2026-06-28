@@ -1,16 +1,17 @@
 import Link from "next/link";
-import { AppError, getAction, getWorkspaceArchiveRecord, listDeliberationEntries, listWorkItemEvidence, listWorkItemVersions, requireWorkspaceMembership } from "@corgtex/domain";
+import { AppError, getAction, getWorkspaceArchiveRecord, listDeliberationEntries, listExternalResourceAttachments, listWorkItemEvidence, listWorkItemVersions, requireWorkspaceMembership } from "@corgtex/domain";
 import { requirePageActor } from "@/lib/auth";
 import { MarkdownEditor } from "@/lib/components/MarkdownEditor";
 import { MarkdownRenderer } from "@/lib/components/MarkdownRenderer";
 import { WorkItemResolutionDialog } from "@/lib/components/WorkItemResolutionDialog";
 import { ArchivedItemBanner } from "@/lib/components/ArchivedItemBanner";
 import { UnavailableItemStatus } from "@/lib/components/UnavailableItemStatus";
+import { ExternalResourceAttachForm, ExternalResourceCards } from "@/lib/components/ExternalResourceCards";
 import { DeliberationComposer } from "@/lib/components/DeliberationComposer";
 import { DeliberationThread } from "@/lib/components/DeliberationThread";
 import { getDeliberationTargets } from "@/lib/deliberation-targets";
 import { canOpenPrivateDraft } from "@/lib/governance-open-guards";
-import { deleteActionAction, postActionDeliberationAction, publishActionAction, resolveActionDeliberationAction, returnActionToDraftAction, updateActionAction, updateActionDeliberationAction } from "../../actions";
+import { attachActionExternalResourceAction, deleteActionAction, postActionDeliberationAction, publishActionAction, resolveActionDeliberationAction, returnActionToDraftAction, updateActionAction, updateActionDeliberationAction } from "../../actions";
 import { getTranslations } from "next-intl/server";
 
 export const dynamic = "force-dynamic";
@@ -61,7 +62,7 @@ export default async function ActionDetailPage({
     throw error;
   }
   const isArchived = Boolean(action.archivedAt);
-  const [versionHistory, evidence, deliberationEntries, archiveRecord] = await Promise.all([
+  const [versionHistory, evidence, externalResourceAttachments, deliberationEntries, archiveRecord] = await Promise.all([
     archivedSafeRead(isArchived, listWorkItemVersions(actor, { workspaceId, entityType: "ACTION", entityId: actionId }), {
       entityType: "Action" as const,
       entityId: actionId,
@@ -69,6 +70,7 @@ export default async function ActionDetailPage({
       versions: [],
     }),
     archivedSafeRead(isArchived, listWorkItemEvidence(actor, { workspaceId, entityType: "Action", entityId: actionId }), []),
+    archivedSafeRead(isArchived, listExternalResourceAttachments(actor, { workspaceId, entityType: "Action", entityId: actionId }), []),
     archivedSafeRead(isArchived, listDeliberationEntries(actor, { workspaceId, parentType: "ACTION", parentId: actionId }), []),
     isArchived
       ? archivedSafeRead(true, getWorkspaceArchiveRecord(actor, { workspaceId, entityType: "Action", entityId: action.id }), null)
@@ -245,6 +247,17 @@ export default async function ActionDetailPage({
             <em className="muted">{t("noNotes")}</em>
           )}
         </div>
+      </section>
+
+      <section className="ws-section" style={{ marginBottom: 48 }}>
+        <h2 className="nr-section-header">Box files</h2>
+        <ExternalResourceCards attachments={externalResourceAttachments} />
+        {!isArchived && (
+          <ExternalResourceAttachForm
+            action={attachActionExternalResourceAction}
+            hiddenFields={{ workspaceId, actionId: action.id }}
+          />
+        )}
       </section>
 
       {feedbackContextEvidence.length > 0 && (

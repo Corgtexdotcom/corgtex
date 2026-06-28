@@ -13,7 +13,7 @@ type OAuthStatePayload = {
   issuedAt: number;
 };
 
-export type IntegrationOAuthIntent = "calendar" | "documents";
+export type IntegrationOAuthIntent = "calendar" | "documents" | "external_mcp";
 
 function signingSecret() {
   return env.SESSION_COOKIE_SECRET;

@@ -1,4 +1,4 @@
-import { decryptSecret, encryptSecret, prisma } from "@corgtex/shared";
+import { decryptSecret, encryptSecret, env, prisma } from "@corgtex/shared";
 import type { AppActor } from "@corgtex/shared";
 import { Prisma } from "@prisma/client";
 import { evaluateDelegatedActionPolicy } from "./action-policy";
@@ -7,7 +7,7 @@ import { requireWorkspaceMembership } from "./auth";
 import { AppError, invariant } from "./errors";
 
 export const EXTERNAL_MCP_PROVIDER_KEYS = ["box", "notion", "atlassian", "miro"] as const;
-export const CONNECTABLE_EXTERNAL_MCP_PROVIDER_KEYS = ["notion"] as const;
+export const CONNECTABLE_EXTERNAL_MCP_PROVIDER_KEYS = ["box", "notion"] as const;
 
 export type ExternalMcpProviderKey = typeof EXTERNAL_MCP_PROVIDER_KEYS[number];
 export type ExternalMcpOperation = "read" | "write";
@@ -20,6 +20,9 @@ type ExternalMcpProvider = {
   connectionEnabled: boolean;
   searchToolName: string | null;
   fetchToolName: string | null;
+  readToolNames: string[];
+  genericExecutionEnabled: boolean;
+  tokenRefreshUrl?: string;
   sourceUrl: string;
   adminNotes: string;
 };
@@ -33,6 +36,9 @@ export type ExternalMcpConnectionSummary = {
   status: "connected" | "needs_connection" | "error" | "disconnected";
   connectionId: string | null;
   connectionOwnerUserId: string | null;
+  providerAccountId: string | null;
+  providerEmail: string | null;
+  expiresAt: Date | null;
   scopes: string[];
   capabilities: Record<string, unknown>;
   supportsSearch: boolean;
@@ -51,8 +57,11 @@ type ExternalMcpConnectionRecord = {
   providerKey: string;
   displayName: string;
   serverUrl: string;
+  providerAccountId?: string | null;
+  providerEmail?: string | null;
   accessTokenEnc: string | null;
   refreshTokenEnc?: string | null;
+  expiresAt?: Date | null;
   scopes: string[];
   capabilities: Prisma.JsonValue | null;
   status: "ACTIVE" | "DISCONNECTED" | "ERROR";
@@ -65,11 +74,37 @@ const EXTERNAL_MCP_PROVIDERS: Record<ExternalMcpProviderKey, ExternalMcpProvider
     displayName: "Box",
     serverUrl: "https://mcp.box.com",
     authMode: "oauth",
-    connectionEnabled: false,
-    searchToolName: null,
-    fetchToolName: null,
+    connectionEnabled: true,
+    searchToolName: "search_files_keyword",
+    fetchToolName: "get_file_details",
+    readToolNames: [
+      "who_am_i",
+      "get_file_details",
+      "get_folder_details",
+      "list_folder_content_by_folder_id",
+      "search_files_keyword",
+      "search_files_metadata",
+      "search_folders_by_name",
+      "list_file_comments",
+      "list_item_collaborations",
+      "list_tasks",
+      "ai_extract_freeform",
+      "ai_extract_structured",
+      "ai_extract_structured_from_fields",
+      "ai_extract_structured_from_metadata_template",
+      "ai_qa_hub",
+      "ai_qa_multi_file",
+      "ai_qa_single_file",
+      "get_hub_details",
+      "get_hub_items",
+      "list_hubs",
+      "get_docgen_template_by_id",
+      "list_docgen_templates",
+    ],
+    genericExecutionEnabled: false,
+    tokenRefreshUrl: "https://api.box.com/oauth2/token",
     sourceUrl: "https://developer.box.com/guides/box-mcp/",
-    adminNotes: "Official hosted MCP exists, but Corgtex needs Box admin/OAuth product setup before enabling user connection.",
+    adminNotes: "Official hosted MCP is enabled for read/search/AI context. Box writes remain disabled in Corgtex until customer policy is explicit.",
   },
   notion: {
     providerKey: "notion",
@@ -79,6 +114,8 @@ const EXTERNAL_MCP_PROVIDERS: Record<ExternalMcpProviderKey, ExternalMcpProvider
     connectionEnabled: true,
     searchToolName: "notion-search",
     fetchToolName: "notion-fetch",
+    readToolNames: ["notion-search", "notion-fetch"],
+    genericExecutionEnabled: true,
     sourceUrl: "https://developers.notion.com/guides/mcp/overview",
     adminNotes: "Token-backed pilot provider. Replace token-post setup with user-facing OAuth before broad release.",
   },
@@ -90,6 +127,8 @@ const EXTERNAL_MCP_PROVIDERS: Record<ExternalMcpProviderKey, ExternalMcpProvider
     connectionEnabled: false,
     searchToolName: null,
     fetchToolName: null,
+    readToolNames: [],
+    genericExecutionEnabled: false,
     sourceUrl: "https://support.atlassian.com/atlassian-rovo-mcp-server/docs/getting-started-with-the-atlassian-remote-mcp-server/",
     adminNotes: "Rovo MCP requires Atlassian site/admin authorization before Corgtex can safely expose connection.",
   },
@@ -101,6 +140,8 @@ const EXTERNAL_MCP_PROVIDERS: Record<ExternalMcpProviderKey, ExternalMcpProvider
     connectionEnabled: false,
     searchToolName: null,
     fetchToolName: null,
+    readToolNames: [],
+    genericExecutionEnabled: false,
     sourceUrl: "https://developers.miro.com/changelog/its-here-the-miro-mcp-server-is-now-in-public-beta",
     adminNotes: "Miro MCP is beta and Enterprise-admin gated; keep request-only until a workspace is explicitly enabled.",
   },
@@ -116,6 +157,10 @@ function asRecord(value: unknown): Record<string, unknown> {
 
 function asString(value: unknown) {
   return typeof value === "string" ? value : "";
+}
+
+function asNumber(value: unknown) {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
 
 function providerForKey(providerKey: string) {
@@ -136,6 +181,7 @@ function classifyExternalMcpOperation(
 ): ExternalMcpOperation {
   if (operation === "read" || operation === "write") return operation;
   if ((provider.searchToolName && toolName === provider.searchToolName) || (provider.fetchToolName && toolName === provider.fetchToolName)) return "read";
+  if (provider.readToolNames.includes(toolName)) return "read";
   return "write";
 }
 
@@ -201,6 +247,12 @@ function extractMcpPayload(result: unknown) {
   return result;
 }
 
+function boxAppUrl(itemType: string, externalId: string) {
+  if (itemType === "folder") return `https://app.box.com/folder/${encodeURIComponent(externalId)}`;
+  if (itemType === "web_link") return `https://app.box.com/web_link/${encodeURIComponent(externalId)}`;
+  return `https://app.box.com/file/${encodeURIComponent(externalId)}`;
+}
+
 function normalizeSearchResults(params: {
   provider: ExternalMcpProvider;
   connection: ExternalMcpConnectionRecord;
@@ -212,11 +264,23 @@ function normalizeSearchResults(params: {
     ? payloadRecord.results
     : Array.isArray(payloadRecord.items)
       ? payloadRecord.items
-      : [];
+      : Array.isArray(payloadRecord.entries)
+        ? payloadRecord.entries
+        : [];
 
   return candidates.slice(0, params.limit).map((raw, index) => {
-    const item = asRecord(raw);
+    const rawRecord = asRecord(raw);
+    const nestedItem = rawRecord.item && typeof rawRecord.item === "object" && !Array.isArray(rawRecord.item)
+      ? asRecord(rawRecord.item)
+      : null;
+    const item = nestedItem ?? rawRecord;
+    const itemType = asString(item.type) || asString(rawRecord.type);
+    const sharedLink = asRecord(item.shared_link);
     const externalId = asString(item.id) || asString(item.url) || asString(item.pageId) || `${params.connection.id}:${index}`;
+    const url = asString(rawRecord.accessible_via_shared_link)
+      || asString(sharedLink.url)
+      || asString(item.url)
+      || (params.provider.providerKey === "box" ? boxAppUrl(itemType, externalId) : null);
     return {
       id: `${params.provider.providerKey}:${externalId}`,
       source: "external_mcp",
@@ -225,12 +289,77 @@ function normalizeSearchResults(params: {
       externalId,
       title: asString(item.title) || asString(item.name) || asString(item.url) || `${params.provider.displayName} result`,
       text: asString(item.text) || asString(item.snippet) || asString(item.content),
-      url: asString(item.url) || null,
+      url,
       metadata: {
         connectionId: params.connection.id,
+        resourceType: itemType || null,
       },
     };
   });
+}
+
+function connectionNeedsRefresh(connection: ExternalMcpConnectionRecord) {
+  return Boolean(connection.expiresAt && connection.expiresAt.getTime() - Date.now() < 5 * 60 * 1000);
+}
+
+function boxClientCredentials() {
+  const clientId = env.BOX_CLIENT_ID;
+  const clientSecret = env.BOX_CLIENT_SECRET;
+  invariant(clientId && clientSecret, 500, "BOX_NOT_CONFIGURED", "Box OAuth is not configured in Corgtex.");
+  return { clientId, clientSecret };
+}
+
+async function refreshExternalMcpConnectionIfNeeded(connection: ExternalMcpConnectionRecord) {
+  if (!connectionNeedsRefresh(connection)) return connection;
+  const provider = providerForKey(connection.providerKey);
+  if (provider.providerKey !== "box") return connection;
+
+  const refreshToken = connection.refreshTokenEnc ? decryptSecret(connection.refreshTokenEnc) : null;
+  if (!refreshToken) {
+    const lastError = "Box OAuth token expired and no refresh token is available.";
+    await prisma.externalMcpConnection.update({
+      where: { id: connection.id },
+      data: { status: "ERROR", lastError },
+    });
+    throw new AppError(401, "BOX_RECONNECT_REQUIRED", lastError);
+  }
+
+  const { clientId, clientSecret } = boxClientCredentials();
+  const response = await fetch(provider.tokenRefreshUrl ?? "https://api.box.com/oauth2/token", {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({
+      grant_type: "refresh_token",
+      refresh_token: refreshToken,
+      client_id: clientId,
+      client_secret: clientSecret,
+    }),
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    const message = asString(asRecord(data).error_description) || asString(asRecord(data).error) || "Failed to refresh Box OAuth token.";
+    await prisma.externalMcpConnection.update({
+      where: { id: connection.id },
+      data: { status: "ERROR", lastError: message },
+    });
+    throw new AppError(401, "BOX_RECONNECT_REQUIRED", message);
+  }
+
+  const accessToken = asString(asRecord(data).access_token);
+  invariant(accessToken, 502, "BOX_TOKEN_REFRESH_FAILED", "Box token refresh did not return an access token.");
+  const nextRefreshToken = asString(asRecord(data).refresh_token) || refreshToken;
+  const expiresIn = asNumber(asRecord(data).expires_in);
+  const updated = await prisma.externalMcpConnection.update({
+    where: { id: connection.id },
+    data: {
+      accessTokenEnc: encryptSecret(accessToken),
+      refreshTokenEnc: nextRefreshToken ? encryptSecret(nextRefreshToken) : null,
+      expiresAt: expiresIn ? new Date(Date.now() + expiresIn * 1000) : null,
+      status: "ACTIVE",
+      lastError: null,
+    },
+  }) as ExternalMcpConnectionRecord;
+  return updated;
 }
 
 async function activeUserConnections(actor: AppActor, workspaceId: string, providerKey?: string) {
@@ -267,12 +396,13 @@ async function requireActiveConnection(actor: AppActor, params: {
 }
 
 async function callExternalMcpTool(connection: ExternalMcpConnectionRecord, toolName: string, args: Record<string, unknown>) {
-  const token = connection.accessTokenEnc ? decryptSecret(connection.accessTokenEnc) : null;
+  const activeConnection = await refreshExternalMcpConnectionIfNeeded(connection);
+  const token = activeConnection.accessTokenEnc ? decryptSecret(activeConnection.accessTokenEnc) : null;
   if (!token) {
     throw new AppError(404, "NOT_CONNECTED", "External MCP connection is missing an access token.");
   }
 
-  const response = await fetch(connection.serverUrl, {
+  const response = await fetch(activeConnection.serverUrl, {
     method: "POST",
     headers: {
       "accept": "application/json, text/event-stream",
@@ -334,6 +464,31 @@ function externalToolName(provider: ExternalMcpProvider, connection: ExternalMcp
   return toolName;
 }
 
+function externalSearchArgs(provider: ExternalMcpProvider, query: string, limit: number) {
+  if (provider.providerKey === "box") {
+    return {
+      query,
+      limit,
+      fields: ["id", "type", "name", "description", "modified_at", "size", "extension", "shared_link", "file_version", "etag"],
+    };
+  }
+  return { query, limit };
+}
+
+function externalFetchArgs(provider: ExternalMcpProvider, externalId: string) {
+  if (provider.providerKey === "box") {
+    const [resourceType, id] = externalId.includes(":") ? externalId.split(":", 2) : ["file", externalId];
+    if (resourceType === "folder") return { folder_id: id };
+    return { file_id: id };
+  }
+  return { id: externalId };
+}
+
+function requireExternalToolAllowed(provider: ExternalMcpProvider, toolName: string, operation: ExternalMcpOperation) {
+  if (provider.providerKey !== "box") return;
+  invariant(operation === "read" && provider.readToolNames.includes(toolName), 403, "BOX_WRITE_DISABLED", "Box write and raw content tools are disabled in Corgtex v1.");
+}
+
 async function auditExternalMcpCall(actor: AppActor, params: {
   workspaceId: string;
   connection: ExternalMcpConnectionRecord;
@@ -390,6 +545,9 @@ export async function listExternalMcpConnections(actor: AppActor, workspaceId: s
       status: connectionStatus(connection),
       connectionId: connection?.id ?? null,
       connectionOwnerUserId: connection?.userId ?? null,
+      providerAccountId: connection?.providerAccountId ?? null,
+      providerEmail: connection?.providerEmail ?? null,
+      expiresAt: connection?.expiresAt ?? null,
       scopes: connection?.scopes ?? [],
       capabilities: capabilities.capabilities,
       supportsSearch: capabilities.supportsSearch,
@@ -408,6 +566,10 @@ export async function upsertExternalMcpConnection(actor: AppActor, params: {
   providerKey: ExternalMcpProviderKey;
   accessToken: string;
   refreshToken?: string | null;
+  expiresAt?: Date | null;
+  expiresIn?: number | null;
+  providerAccountId?: string | null;
+  providerEmail?: string | null;
   scopes?: string[];
   capabilities?: Record<string, unknown>;
 }) {
@@ -418,6 +580,7 @@ export async function upsertExternalMcpConnection(actor: AppActor, params: {
   const refreshTokenUpdate = params.refreshToken !== undefined
     ? { refreshTokenEnc: params.refreshToken ? encryptSecret(params.refreshToken) : null }
     : {};
+  const expiresAt = params.expiresAt ?? (params.expiresIn ? new Date(Date.now() + params.expiresIn * 1000) : null);
   return prisma.externalMcpConnection.upsert({
     where: {
       workspaceId_userId_providerKey: {
@@ -429,8 +592,11 @@ export async function upsertExternalMcpConnection(actor: AppActor, params: {
     update: {
       displayName: provider.displayName,
       serverUrl: provider.serverUrl,
+      providerAccountId: params.providerAccountId?.trim() || null,
+      providerEmail: params.providerEmail?.trim() || null,
       accessTokenEnc: encryptSecret(params.accessToken),
       ...refreshTokenUpdate,
+      expiresAt,
       scopes: params.scopes ?? [],
       capabilities: params.capabilities ? params.capabilities as Prisma.InputJsonObject : Prisma.DbNull,
       status: "ACTIVE",
@@ -442,8 +608,11 @@ export async function upsertExternalMcpConnection(actor: AppActor, params: {
       providerKey: provider.providerKey,
       displayName: provider.displayName,
       serverUrl: provider.serverUrl,
+      providerAccountId: params.providerAccountId?.trim() || null,
+      providerEmail: params.providerEmail?.trim() || null,
       accessTokenEnc: encryptSecret(params.accessToken),
       refreshTokenEnc: params.refreshToken ? encryptSecret(params.refreshToken) : null,
+      expiresAt,
       scopes: params.scopes ?? [],
       capabilities: params.capabilities ? params.capabilities as Prisma.InputJsonObject : Prisma.DbNull,
       status: "ACTIVE",
@@ -467,10 +636,7 @@ export async function searchConnectedExternalMcpContext(actor: AppActor, params:
     const provider = providerForKey(connection.providerKey);
     const searchToolName = externalToolName(provider, connection, "search");
     try {
-      const remote = await callExternalMcpTool(connection, searchToolName, {
-        query: params.query,
-        limit,
-      });
+      const remote = await callExternalMcpTool(connection, searchToolName, externalSearchArgs(provider, params.query, limit));
       const payload = extractMcpPayload(remote);
       await auditExternalMcpCall(actor, {
         workspaceId: params.workspaceId,
@@ -507,9 +673,7 @@ export async function fetchConnectedExternalMcpContext(actor: AppActor, params: 
   const { provider, connection } = await requireActiveConnection(actor, params);
   const fetchToolName = externalToolName(provider, connection, "fetch");
   try {
-    const remote = await callExternalMcpTool(connection, fetchToolName, {
-      id: params.externalId,
-    });
+    const remote = await callExternalMcpTool(connection, fetchToolName, externalFetchArgs(provider, params.externalId));
     const payload = extractMcpPayload(remote);
     await auditExternalMcpCall(actor, {
       workspaceId: params.workspaceId,
@@ -539,6 +703,60 @@ export async function fetchConnectedExternalMcpContext(actor: AppActor, params: 
   }
 }
 
+export async function getExternalMcpConnectionAccessToken(actor: AppActor, params: {
+  workspaceId: string;
+  providerKey: ExternalMcpProviderKey;
+}) {
+  await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
+  const { provider, connection } = await requireActiveConnection(actor, params);
+  const refreshed = await refreshExternalMcpConnectionIfNeeded(connection);
+  const accessToken = refreshed.accessTokenEnc ? decryptSecret(refreshed.accessTokenEnc) : null;
+  invariant(accessToken, 404, "NOT_CONNECTED", `${provider.displayName} is not connected for this user.`);
+  return {
+    provider,
+    connection: refreshed,
+    accessToken,
+  };
+}
+
+export async function callBoxExternalMcpReadTool(actor: AppActor, params: {
+  workspaceId: string;
+  toolName: string;
+  arguments: Record<string, unknown>;
+}) {
+  await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
+  const provider = providerForKey("box");
+  requireExternalToolAllowed(provider, params.toolName, "read");
+  const { connection } = await requireActiveConnection(actor, {
+    workspaceId: params.workspaceId,
+    providerKey: "box",
+  });
+  try {
+    const remote = await callExternalMcpTool(connection, params.toolName, params.arguments);
+    const payload = extractMcpPayload(remote);
+    await auditExternalMcpCall(actor, {
+      workspaceId: params.workspaceId,
+      connection,
+      toolName: params.toolName,
+      policyClass: "read",
+      input: params.arguments,
+      result: payload,
+    });
+    return payload;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Box MCP read failed.";
+    await auditExternalMcpCall(actor, {
+      workspaceId: params.workspaceId,
+      connection,
+      toolName: params.toolName,
+      policyClass: "read",
+      input: params.arguments,
+      error: message,
+    });
+    throw error;
+  }
+}
+
 export async function executeExternalMcpTool(actor: AppActor, params: {
   workspaceId: string;
   providerKey: ExternalMcpProviderKey;
@@ -551,6 +769,8 @@ export async function executeExternalMcpTool(actor: AppActor, params: {
   await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
   const provider = providerForKey(params.providerKey);
   const operation = classifyExternalMcpOperation(provider, params.toolName, params.operation);
+  requireExternalToolAllowed(provider, params.toolName, operation);
+  invariant(provider.genericExecutionEnabled, 403, "EXTERNAL_TOOL_EXECUTION_DISABLED", `${provider.displayName} generic tool execution is disabled in Corgtex v1.`);
   const policy = evaluateDelegatedActionPolicy({
     toolName: params.toolName,
     operation,

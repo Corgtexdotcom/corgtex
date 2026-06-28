@@ -8,6 +8,7 @@ import {
   listAiWorkspaceToolProviders,
   listCommunicationInstallations,
   listDocuments,
+  listExternalMcpConnections,
   listInboundWebhooks,
   listMeetingTranscriptSourceState,
   listWebhookEndpoints,
@@ -64,21 +65,54 @@ function capabilityKeys(value: unknown) {
     : [];
 }
 
-function ExternalConnectorReadinessPanel({ item }: { item: any }) {
+function ExternalConnectorReadinessPanel({ item, workspaceId, connection, message }: {
+  item: any;
+  workspaceId: string;
+  connection?: Awaited<ReturnType<typeof listExternalMcpConnections>>[number] | null;
+  message?: string | null;
+}) {
   const readiness = connectorReadinessForItem(item);
   if (!readiness) return null;
+  const isBox = readiness.key === "box";
+  const boxConfigured = Boolean(process.env.BOX_CLIENT_ID && process.env.BOX_CLIENT_SECRET);
+  const connected = connection?.status === "connected";
+  const returnTo = `/workspaces/${workspaceId}/tools/${item.id}`;
 
   return (
     <section className="nr-item stack" style={{ gap: 12, padding: 18 }}>
       <div className="row">
         <strong className="nr-item-title">{readiness.title} readiness</strong>
-        <span className={`tag ${readiness.availability === "LIVE" ? "success" : "info"}`}>
-          {displayEnum(readiness.availability)}
-        </span>
+        {isBox && connected ? (
+          <span className="tag success">Connected</span>
+        ) : (
+          <span className={`tag ${readiness.availability === "LIVE" ? "success" : "info"}`}>
+            {displayEnum(readiness.availability)}
+          </span>
+        )}
       </div>
+      {message && (
+        <p className={`form-message ${message.includes("connected") ? "form-message-success" : "form-message-error"}`}>
+          {message}
+        </p>
+      )}
       <p className="nr-item-meta" style={{ margin: 0 }}>
         {readiness.adminNotes}
       </p>
+      {isBox && (
+        <div className="actions-inline">
+          {connected ? (
+            <span className="nr-item-meta">
+              {connection?.providerEmail ?? connection?.providerAccountId ?? "Box account"} · read/search/AI context enabled
+            </span>
+          ) : boxConfigured ? (
+            <a href={`/api/integrations/box/connect?workspaceId=${workspaceId}&intent=external_mcp&returnTo=${encodeURIComponent(returnTo)}`} className="button secondary small">
+              Connect Box
+            </a>
+          ) : (
+            <span className="tag" style={{ border: "1px dashed var(--line)", background: "transparent" }}>Needs setup</span>
+          )}
+        </div>
+      )}
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 10 }}>
         <p className="nr-item-meta" style={{ margin: 0 }}>
           <strong style={{ color: "var(--text)" }}>Who connects</strong><br />
@@ -98,9 +132,14 @@ function ExternalConnectorReadinessPanel({ item }: { item: any }) {
           Provider documentation
         </a>
       )}
-      {readiness.availability !== "LIVE" && (
+      {readiness.availability !== "LIVE" && !isBox && (
         <p className="nr-item-meta" style={{ margin: 0 }}>
           This provider is request-only in Corgtex. The catalog can track demand, but it should not present a one-click connection until admin enablement and OAuth setup are complete.
+        </p>
+      )}
+      {isBox && (
+        <p className="nr-item-meta" style={{ margin: 0 }}>
+          Box remains the editing surface. Corgtex stores file references, summaries, and work-item links; Box write operations stay disabled.
         </p>
       )}
     </section>
@@ -187,7 +226,10 @@ export default async function CatalogItemPage({
   } else if (item.sourceType === "MCP_CONNECTOR" && item.sourceId === "corgtex-mcp") {
     setupPanel = <CorgtexMcpConnectorPanel connectorUrl={connectorUrl} />;
   } else if (item.sourceType === "MCP_CONNECTOR") {
-    setupPanel = <ExternalConnectorReadinessPanel item={item} />;
+    const connection = actor.kind === "user"
+      ? (await listExternalMcpConnections(actor, workspaceId).catch(() => [])).find((entry) => entry.providerKey === item.sourceId) ?? null
+      : null;
+    setupPanel = <ExternalConnectorReadinessPanel item={item} workspaceId={workspaceId} connection={connection} message={integrationMessage} />;
   } else if (item.sourceType === "MEETING_RECORDER") {
     const transcriptSourcesEnabled = featureFlags.MEETING_TRANSCRIPT_SOURCES || featureFlags.MEETING_RECORDERS;
     const [recorderConfig, transcriptSources] = transcriptSourcesEnabled

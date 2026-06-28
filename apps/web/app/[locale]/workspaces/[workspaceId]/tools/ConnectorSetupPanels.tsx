@@ -63,12 +63,19 @@ function integrationStatusMessage(params: {
     if (params.success === "google_connected" && params.intent === "documents") return "Google Drive connected. Choose the files you want to sync.";
     if (params.success === "google_connected") return "Google Calendar connected. Calendar sync is queued.";
     if (params.success === "microsoft_connected") return "Microsoft Calendar connected. Calendar sync is queued.";
+    if (params.success === "box_connected") return "Box connected. Corgtex can now save Box file references and summaries.";
     return "Integration connected.";
   }
 
   const messages: Record<string, string> = {
     google_not_configured: "Google is not configured in Corgtex yet. Add the Google OAuth client ID/secret and redirect URI before retrying.",
     microsoft_not_configured: "Microsoft is not configured in Corgtex yet. Add the Entra OAuth client ID/secret and redirect URI before retrying.",
+    box_not_configured: "Box is not configured in Corgtex yet. Add the Box OAuth client ID/secret and redirect URI before retrying.",
+    box_workspace_required: "Box must be connected from a workspace tool page.",
+    box_access_denied: "Box access was denied before Corgtex received permission.",
+    box_invalid_client: "Box rejected the OAuth client credentials. Check the Box Integration Credentials client ID and secret.",
+    box_token_exchange_failed: "Box returned an error while exchanging the authorization code. Check the Box redirect URI and client secret.",
+    box_profile_failed: "Box connected but Corgtex could not read the signed-in Box profile.",
     google_verification_or_tester_required: "Google blocked Calendar because this app is still in testing or not verified for this account. Add this email as an approved test user, or complete Google verification. Drive file picking can still work after Drive access is connected.",
     microsoft_tenant_access_denied: "Microsoft blocked this account for the selected tenant. Use an account in the app tenant, add the account as an external user, or switch the Entra app to the intended multitenant audience.",
     microsoft_admin_consent_required: "Microsoft requires tenant admin consent for this account or organization before Corgtex can connect.",
@@ -82,6 +89,7 @@ function integrationStatusMessage(params: {
     microsoft_profile_failed: "Microsoft connected but Corgtex could not read the User.Read profile.",
     google_unexpected_error: "Google connection failed inside Corgtex. Retry once; if it repeats, check server logs for the OAuth callback.",
     microsoft_unexpected_error: "Microsoft connection failed inside Corgtex. Retry once; if it repeats, check server logs for the OAuth callback.",
+    box_unexpected_error: "Box connection failed inside Corgtex. Retry once; if it repeats, check server logs for the OAuth callback.",
   };
   return messages[params.error ?? ""] ?? "The integration could not be connected. Retry from this tool page.";
 }

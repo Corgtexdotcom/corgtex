@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 
-export type IntegrationOAuthProvider = "google" | "microsoft";
-export type IntegrationOAuthIntent = "calendar" | "documents";
+export type IntegrationOAuthProvider = "google" | "microsoft" | "box";
+export type IntegrationOAuthIntent = "calendar" | "documents" | "external_mcp";
 
 const OAUTH_STATE_MAX_AGE_SECONDS = 15 * 60;
 const MICROSOFT_INVALID_CLIENT_SECRET_MARKERS = [
@@ -11,7 +11,7 @@ const MICROSOFT_INVALID_CLIENT_SECRET_MARKERS = [
 ];
 
 export function isIntegrationOAuthProvider(value: string): value is IntegrationOAuthProvider {
-  return value === "google" || value === "microsoft";
+  return value === "google" || value === "microsoft" || value === "box";
 }
 
 export function oauthStateCookieName(provider: IntegrationOAuthProvider) {
@@ -76,6 +76,13 @@ export function providerOAuthErrorCode(provider: IntegrationOAuthProvider, error
     return "google_oauth_failed";
   }
 
+  if (provider === "box") {
+    if (raw.includes("access_denied")) {
+      return "box_access_denied";
+    }
+    return "box_oauth_failed";
+  }
+
   if (MICROSOFT_INVALID_CLIENT_SECRET_MARKERS.some((marker) => raw.includes(marker))) {
     return "microsoft_invalid_client_secret";
   }
@@ -101,6 +108,9 @@ export function tokenExchangeErrorCode(provider: IntegrationOAuthProvider, descr
   }
   if (provider === "microsoft" && raw.includes("admin") && raw.includes("consent")) {
     return "microsoft_admin_consent_required";
+  }
+  if (provider === "box" && raw.includes("invalid_client")) {
+    return "box_invalid_client";
   }
   return `${provider}_token_exchange_failed`;
 }

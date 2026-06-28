@@ -168,6 +168,7 @@ enum KnowledgeSourceType {
   CIRCLE
   ROLE
   EXTERNAL_DATABASE
+  EXTERNAL_RESOURCE
   SLACK
 }
 
@@ -528,15 +529,15 @@ enum CustomerReleaseTargetStatus {
 }
 
 model Workspace {
-  id                             String                              @id @default(uuid())
-  slug                           String                              @unique
+  id                             String                                @id @default(uuid())
+  slug                           String                                @unique
   name                           String
   description                    String?
-  plan                           WorkspacePlan                       @default(CORE_FREE)
-  planActivatedAt                DateTime                            @default(now())
+  plan                           WorkspacePlan                         @default(CORE_FREE)
+  planActivatedAt                DateTime                              @default(now())
   trialEndsAt                    DateTime?
-  createdAt                      DateTime                            @default(now())
-  updatedAt                      DateTime                            @updatedAt
+  createdAt                      DateTime                              @default(now())
+  updatedAt                      DateTime                              @updatedAt
   members                        Member[]
   memberInviteRequests           MemberInviteRequest[]
   circles                        Circle[]
@@ -587,6 +588,8 @@ model Workspace {
   mcpOAuthCodes                  McpOAuthAuthorizationCode[]
   mcpOAuthTokens                 McpOAuthAccessToken[]
   externalMcpConnections         ExternalMcpConnection[]
+  externalResources              WorkspaceExternalResource[]
+  externalResourceAttachments    WorkspaceExternalResourceAttachment[]
   aiWorkspaceConnections         AiWorkspaceConnection[]
   executionRequests              ExecutionRequest[]
   executionResults               ExecutionResult[]
@@ -627,8 +630,8 @@ model Workspace {
   permalinks                     WorkspacePermalink[]
   crmQualifications              CrmQualification[]
   crmConversations               CrmConversation[]
-  crmProspectWorkspacesAsCrm     CrmProspectWorkspace[]              @relation("CrmWorkspace")
-  crmProspectWorkspacesAsTarget  CrmProspectWorkspace[]              @relation("TargetWorkspace")
+  crmProspectWorkspacesAsCrm     CrmProspectWorkspace[]                @relation("CrmWorkspace")
+  crmProspectWorkspacesAsTarget  CrmProspectWorkspace[]                @relation("TargetWorkspace")
   procurementSetupSessions       ProcurementSetupSession[]
   procurementBillingHandoffs     ProcurementBillingHandoff[]
   procurementTrials              ProcurementTrial[]
@@ -915,62 +918,64 @@ model CommunicationEntityLink {
 }
 
 model User {
-  id                            String                         @id @default(uuid())
-  email                         String                         @unique
+  id                            String                                @id @default(uuid())
+  email                         String                                @unique
   displayName                   String?
-  bio                           String?                        @db.Text
-  avatarUrl                     String?                        @db.Text
-  linkedinUrl                   String?                        @db.Text
-  websiteUrl                    String?                        @db.Text
+  bio                           String?                               @db.Text
+  avatarUrl                     String?                               @db.Text
+  linkedinUrl                   String?                               @db.Text
+  websiteUrl                    String?                               @db.Text
   passwordHash                  String
-  globalRole                    GlobalRole                     @default(USER)
-  createdAt                     DateTime                       @default(now())
-  updatedAt                     DateTime                       @updatedAt
+  globalRole                    GlobalRole                            @default(USER)
+  createdAt                     DateTime                              @default(now())
+  updatedAt                     DateTime                              @updatedAt
   sessions                      Session[]
   memberships                   Member[]
-  authoredActions               Action[]                       @relation("ActionAuthor")
-  authoredTensions              Tension[]                      @relation("TensionAuthor")
-  authoredProposals             Proposal[]                     @relation("ProposalAuthor")
+  authoredActions               Action[]                              @relation("ActionAuthor")
+  authoredTensions              Tension[]                             @relation("TensionAuthor")
+  authoredProposals             Proposal[]                            @relation("ProposalAuthor")
   cycleUpdates                  CycleUpdate[]
-  allocationsFrom               Allocation[]                   @relation("AllocFrom")
-  allocationsTo                 Allocation[]                   @relation("AllocTo")
+  allocationsFrom               Allocation[]                          @relation("AllocFrom")
+  allocationsTo                 Allocation[]                          @relation("AllocTo")
   objections                    Objection[]
   tensionUpvotes                TensionUpvote[]
-  agentCreds                    AgentCredential[]              @relation("AgentCredentialCreator")
+  agentCreds                    AgentCredential[]                     @relation("AgentCredentialCreator")
   notifications                 Notification[]
   conversations                 ConversationSession[]
   oauthConnections              OAuthConnection[]
   mcpOAuthCodes                 McpOAuthAuthorizationCode[]
   mcpOAuthTokens                McpOAuthAccessToken[]
   externalMcpConnections        ExternalMcpConnection[]
-  createdAiWorkspaceConnections AiWorkspaceConnection[]        @relation("AiWorkspaceConnectionCreator")
-  ownedAiWorkspaceConnections   AiWorkspaceConnection[]        @relation("AiWorkspaceConnectionOwner")
-  createdExecutionRequests      ExecutionRequest[]             @relation("ExecutionRequestCreator")
-  submittedExecutionResults     ExecutionResult[]              @relation("ExecutionResultSubmitter")
+  createdExternalResources      WorkspaceExternalResource[]           @relation("WorkspaceExternalResourceCreator")
+  createdExternalResourceLinks  WorkspaceExternalResourceAttachment[] @relation("WorkspaceExternalResourceAttachmentCreator")
+  createdAiWorkspaceConnections AiWorkspaceConnection[]               @relation("AiWorkspaceConnectionCreator")
+  ownedAiWorkspaceConnections   AiWorkspaceConnection[]               @relation("AiWorkspaceConnectionOwner")
+  createdExecutionRequests      ExecutionRequest[]                    @relation("ExecutionRequestCreator")
+  submittedExecutionResults     ExecutionResult[]                     @relation("ExecutionResultSubmitter")
   resetTokens                   PasswordResetToken[]
   ssoIdentities                 UserSsoIdentity[]
   meetingInsights               MeetingInsight[]
-  createdAgentIdentities        AgentIdentity[]                @relation("AgentIdentityCreator")
+  createdAgentIdentities        AgentIdentity[]                       @relation("AgentIdentityCreator")
   deliberationEntries           DeliberationEntry[]
-  createdAdviceRequests         AdviceRequest[]                @relation("AdviceRequestRequester")
+  createdAdviceRequests         AdviceRequest[]                       @relation("AdviceRequestRequester")
   notificationPrefs             NotificationPreference[]
   crmConversationMessages       CrmConversationMessage[]
-  reviewedQualifications        CrmQualification[]             @relation("QualificationReviewer")
+  reviewedQualifications        CrmQualification[]                    @relation("QualificationReviewer")
   customerDeploymentAccess      CustomerDeploymentAccess[]
-  supportOperations             SupportOperation[]             @relation("SupportOperationActor")
-  createdToolLinks              WorkspaceToolLink[]            @relation("WorkspaceToolLinkCreator")
-  createdCatalogItems           CatalogItem[]                  @relation("CatalogItemCreator")
-  ownedCatalogItems             CatalogItem[]                  @relation("CatalogItemOwner")
+  supportOperations             SupportOperation[]                    @relation("SupportOperationActor")
+  createdToolLinks              WorkspaceToolLink[]                   @relation("WorkspaceToolLinkCreator")
+  createdCatalogItems           CatalogItem[]                         @relation("CatalogItemCreator")
+  ownedCatalogItems             CatalogItem[]                         @relation("CatalogItemOwner")
   catalogFavorites              CatalogFavorite[]
-  catalogRequestsMade           CatalogRequest[]               @relation("CatalogRequestRequester")
-  catalogRequestsDecided        CatalogRequest[]               @relation("CatalogRequestDecider")
-  createdBuildArtifacts         BuildArtifact[]                @relation("BuildArtifactCreator")
+  catalogRequestsMade           CatalogRequest[]                      @relation("CatalogRequestRequester")
+  catalogRequestsDecided        CatalogRequest[]                      @relation("CatalogRequestDecider")
+  createdBuildArtifacts         BuildArtifact[]                       @relation("BuildArtifactCreator")
   productAnalyticsEvents        ProductAnalyticsEvent[]
   onboardingStates              UserWorkspaceOnboardingState[]
-  changedRoleVersions           RoleVersion[]                  @relation("RoleVersionChangedBy")
-  startedRoleHolderHistory      RoleHolderHistory[]            @relation("RoleHolderHistoryStartedBy")
-  endedRoleHolderHistory        RoleHolderHistory[]            @relation("RoleHolderHistoryEndedBy")
-  editedWorkItemVersions        WorkItemVersion[]              @relation("WorkItemVersionEditedBy")
+  changedRoleVersions           RoleVersion[]                         @relation("RoleVersionChangedBy")
+  startedRoleHolderHistory      RoleHolderHistory[]                   @relation("RoleHolderHistoryStartedBy")
+  endedRoleHolderHistory        RoleHolderHistory[]                   @relation("RoleHolderHistoryEndedBy")
+  editedWorkItemVersions        WorkItemVersion[]                     @relation("WorkItemVersionEditedBy")
 }
 
 model Session {
@@ -1033,15 +1038,15 @@ model EmailDelivery {
 }
 
 model EmailDeliveryEvent {
-  id                String   @id @default(uuid())
-  provider          String   @default("resend")
+  id                String    @id @default(uuid())
+  provider          String    @default("resend")
   providerMessageId String
   eventType         String
-  dedupeKey         String   @unique
+  dedupeKey         String    @unique
   occurredAt        DateTime?
   payload           Json
-  receivedAt        DateTime @default(now())
-  createdAt         DateTime @default(now())
+  receivedAt        DateTime  @default(now())
+  createdAt         DateTime  @default(now())
 
   @@index([providerMessageId, occurredAt])
   @@index([eventType, receivedAt])
@@ -2293,6 +2298,58 @@ model WorkItemEvidence {
   @@index([documentId])
 }
 
+model WorkspaceExternalResource {
+  id                  String    @id @default(uuid())
+  workspaceId         String
+  createdByUserId     String?
+  providerKey         String
+  externalId          String
+  resourceType        String
+  title               String
+  url                 String    @db.Text
+  sharedLinkUrl       String?   @db.Text
+  mimeType            String?
+  descriptionMd       String?   @db.Text
+  summaryMd           String?   @db.Text
+  metadata            Json?
+  lastEnrichedAt      DateTime?
+  lastEnrichmentError String?   @db.Text
+  archivedAt          DateTime?
+  archivedByUserId    String?
+  archiveReason       String?
+  createdAt           DateTime  @default(now())
+  updatedAt           DateTime  @updatedAt
+
+  workspace   Workspace                             @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  createdBy   User?                                 @relation("WorkspaceExternalResourceCreator", fields: [createdByUserId], references: [id], onDelete: SetNull)
+  attachments WorkspaceExternalResourceAttachment[]
+
+  @@unique([workspaceId, providerKey, externalId])
+  @@index([workspaceId, providerKey, archivedAt])
+  @@index([workspaceId, resourceType])
+  @@index([createdByUserId])
+}
+
+model WorkspaceExternalResourceAttachment {
+  id              String   @id @default(uuid())
+  workspaceId     String
+  resourceId      String
+  entityType      String
+  entityId        String
+  purpose         String   @default("reference")
+  createdByUserId String?
+  createdAt       DateTime @default(now())
+
+  workspace     Workspace                 @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  resource      WorkspaceExternalResource @relation(fields: [resourceId], references: [id], onDelete: Cascade)
+  createdByUser User?                     @relation("WorkspaceExternalResourceAttachmentCreator", fields: [createdByUserId], references: [id], onDelete: SetNull)
+
+  @@unique([resourceId, entityType, entityId, purpose])
+  @@index([workspaceId, entityType, entityId])
+  @@index([workspaceId, purpose])
+  @@index([createdByUserId])
+}
+
 model PolicyCorpus {
   id          String   @id @default(uuid())
   workspaceId String
@@ -3379,20 +3436,20 @@ enum AdviceRequestStatus {
 }
 
 model AdviceProcess {
-  id                      String              @id @default(uuid())
-  workspaceId             String
-  proposalId              String?             @unique
-  authorMemberId          String
-  ownerMemberId           String?
-  subjectType             String              @default("PROPOSAL")
-  subjectId               String
-  status                  AdviceProcessStatus @default(GATHERING)
-  adviceDeadline          DateTime?
-  closedAt                DateTime?
-  executedAt              DateTime?
-  withdrawnAt             DateTime?
-  createdAt               DateTime            @default(now())
-  updatedAt               DateTime            @updatedAt
+  id             String              @id @default(uuid())
+  workspaceId    String
+  proposalId     String?             @unique
+  authorMemberId String
+  ownerMemberId  String?
+  subjectType    String              @default("PROPOSAL")
+  subjectId      String
+  status         AdviceProcessStatus @default(GATHERING)
+  adviceDeadline DateTime?
+  closedAt       DateTime?
+  executedAt     DateTime?
+  withdrawnAt    DateTime?
+  createdAt      DateTime            @default(now())
+  updatedAt      DateTime            @updatedAt
 
   workspace    Workspace       @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   proposal     Proposal?       @relation(fields: [proposalId], references: [id], onDelete: Cascade)
@@ -4047,20 +4104,23 @@ enum ExecutionWritebackTargetType {
 }
 
 model ExternalMcpConnection {
-  id              String                      @id @default(uuid())
-  workspaceId     String
-  userId          String
-  providerKey     String
-  displayName     String
-  serverUrl       String
-  accessTokenEnc  String?                     @db.Text
-  refreshTokenEnc String?                     @db.Text
-  scopes          String[]                    @default([])
-  capabilities    Json?
-  status          ExternalMcpConnectionStatus @default(ACTIVE)
-  lastError       String?                     @db.Text
-  createdAt       DateTime                    @default(now())
-  updatedAt       DateTime                    @updatedAt
+  id                String                      @id @default(uuid())
+  workspaceId       String
+  userId            String
+  providerKey       String
+  displayName       String
+  serverUrl         String
+  providerAccountId String?
+  providerEmail     String?
+  accessTokenEnc    String?                     @db.Text
+  refreshTokenEnc   String?                     @db.Text
+  expiresAt         DateTime?
+  scopes            String[]                    @default([])
+  capabilities      Json?
+  status            ExternalMcpConnectionStatus @default(ACTIVE)
+  lastError         String?                     @db.Text
+  createdAt         DateTime                    @default(now())
+  updatedAt         DateTime                    @updatedAt
 
   workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
