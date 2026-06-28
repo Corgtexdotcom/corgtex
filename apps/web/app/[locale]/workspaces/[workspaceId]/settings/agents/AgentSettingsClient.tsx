@@ -4,11 +4,30 @@ import { useTransition } from"react";
 import {
  toggleAgentAction,
  updateAgentModelAction,
- updateAgentNewspaperCadenceAction,
+ updateAgentNewspaperScheduleAction,
  updateCompanyUnderstandingGoalApplyModeAction,
 } from"./actions";
-import type { AgentConfigSummary, CompanyUnderstandingGoalApplyMode } from"@corgtex/domain";
+import type { AgentConfigSummary, CompanyUnderstandingGoalApplyMode, NewspaperWeekday } from"@corgtex/domain";
 import { useTranslations } from "next-intl";
+
+type NewspaperCadence = "DAILY" | "WEEKLY" | "OFF";
+
+function newspaperCadenceValue(value: unknown): NewspaperCadence {
+ return value ==="DAILY" || value ==="OFF" ? value : "WEEKLY";
+}
+
+function newspaperWeekdayValue(value: unknown): NewspaperWeekday {
+ const weekdays: NewspaperWeekday[] = ["MONDAY","TUESDAY","WEDNESDAY","THURSDAY","FRIDAY","SATURDAY","SUNDAY"];
+ return weekdays.includes(value as NewspaperWeekday) ? value as NewspaperWeekday : "MONDAY";
+}
+
+function newspaperLocalTimeValue(value: unknown) {
+ return typeof value ==="string" && /^\d{2}:\d{2}$/.test(value) ? value : "08:00";
+}
+
+function newspaperTimeZoneValue(value: unknown) {
+ return typeof value ==="string" && value.trim().length > 0 ? value : "UTC";
+}
 
 export function AgentSettingsClient({ workspaceId, agents }: { workspaceId: string, agents: AgentConfigSummary[] }) {
  const [isPending, startTransition] = useTransition();
@@ -26,9 +45,14 @@ export function AgentSettingsClient({ workspaceId, agents }: { workspaceId: stri
  });
  };
 
- const handleNewspaperCadenceChange = (cadence: string) => {
+ const handleNewspaperScheduleChange = (schedule: {
+ cadence?: NewspaperCadence;
+ weekday?: NewspaperWeekday;
+ localTime?: string;
+ timeZone?: string;
+ }) => {
  startTransition(() => {
- updateAgentNewspaperCadenceAction(workspaceId, cadence ==="WEEKLY" ?"WEEKLY" : cadence ==="OFF" ?"OFF" :"DAILY");
+ updateAgentNewspaperScheduleAction(workspaceId, schedule);
  });
  };
 
@@ -128,14 +152,53 @@ export function AgentSettingsClient({ workspaceId, agents }: { workspaceId: stri
  </label>
  <select
  disabled={isPending}
- value={agent.configJson?.newspaperCadence ==="WEEKLY" ?"WEEKLY" : agent.configJson?.newspaperCadence ==="OFF" ?"OFF" :"DAILY"}
- onChange={(e) => handleNewspaperCadenceChange(e.target.value)}
+ value={newspaperCadenceValue(agent.configJson?.newspaperCadence)}
+ onChange={(e) => handleNewspaperScheduleChange({ cadence: newspaperCadenceValue(e.target.value) })}
  className="text-sm border border-line rounded-md bg-surface-strong text-text py-1.5 px-3 disabled:opacity-50"
  >
  <option value="DAILY">{t("newspaperCadenceDaily")}</option>
  <option value="WEEKLY">{t("newspaperCadenceWeekly")}</option>
  <option value="OFF">{t("newspaperCadenceOff")}</option>
  </select>
+ <div className="grid grid-cols-1 gap-2 sm:grid-cols-3 lg:grid-cols-1">
+ <label className="flex flex-col gap-1 text-xs text-muted">
+ {t("newspaperWeekday")}
+ <select
+ disabled={isPending}
+ value={newspaperWeekdayValue(agent.configJson?.newspaperWeekday)}
+ onChange={(e) => handleNewspaperScheduleChange({ weekday: newspaperWeekdayValue(e.target.value) })}
+ className="text-sm border border-line rounded-md bg-surface-strong text-text py-1.5 px-3 disabled:opacity-50"
+ >
+ <option value="MONDAY">{t("weekdayMonday")}</option>
+ <option value="TUESDAY">{t("weekdayTuesday")}</option>
+ <option value="WEDNESDAY">{t("weekdayWednesday")}</option>
+ <option value="THURSDAY">{t("weekdayThursday")}</option>
+ <option value="FRIDAY">{t("weekdayFriday")}</option>
+ <option value="SATURDAY">{t("weekdaySaturday")}</option>
+ <option value="SUNDAY">{t("weekdaySunday")}</option>
+ </select>
+ </label>
+ <label className="flex flex-col gap-1 text-xs text-muted">
+ {t("newspaperLocalTime")}
+ <input
+ disabled={isPending}
+ type="time"
+ defaultValue={newspaperLocalTimeValue(agent.configJson?.newspaperLocalTime)}
+ onBlur={(e) => handleNewspaperScheduleChange({ localTime: e.target.value })}
+ className="text-sm border border-line rounded-md bg-surface-strong text-text py-1.5 px-3 disabled:opacity-50"
+ />
+ </label>
+ <label className="flex flex-col gap-1 text-xs text-muted">
+ {t("newspaperTimeZone")}
+ <input
+ disabled={isPending}
+ type="text"
+ defaultValue={newspaperTimeZoneValue(agent.configJson?.newspaperTimeZone)}
+ onBlur={(e) => handleNewspaperScheduleChange({ timeZone: e.target.value })}
+ className="text-sm border border-line rounded-md bg-surface-strong text-text py-1.5 px-3 disabled:opacity-50"
+ />
+ </label>
+ </div>
  <p className="text-xs text-muted max-w-56 text-left lg:text-right">
  {t("newspaperCadenceAdminHelp")}
  </p>

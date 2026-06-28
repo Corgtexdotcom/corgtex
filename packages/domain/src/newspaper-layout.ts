@@ -42,6 +42,12 @@ const SECTION_ITEM_CAPS: Record<string, Partial<Record<NewspaperLayoutVariant, n
   published: { sparse: 10, balanced: 10, "meeting-heavy": 8 },
   wiki: { sparse: 8, balanced: 8, "meeting-heavy": 6 },
   keyDecisions: { sparse: 5, balanced: 4, "meeting-heavy": 4 },
+  meetingBriefs: { sparse: 3, balanced: 2, "meeting-heavy": 5 },
+  decisionsAndProposals: { sparse: 5, balanced: 4, "meeting-heavy": 4 },
+  resolvedTensions: { sparse: 4, balanced: 4, "meeting-heavy": 4 },
+  openActions: { sparse: 6, balanced: 6, "meeting-heavy": 5 },
+  goalsProgress: { sparse: 4, balanced: 4, "meeting-heavy": 4 },
+  rolesAndPeople: { sparse: 4, balanced: 4, "meeting-heavy": 4 },
   actionItems: { sparse: 6, balanced: 6, "meeting-heavy": 5 },
   builtWork: { sparse: 5, balanced: 5, "meeting-heavy": 5 },
   conversationHighlights: { sparse: 5, balanced: 4, "meeting-heavy": 4 },
@@ -64,7 +70,7 @@ function normalizeCount(value: number) {
 }
 
 function isMeetingSection(id: string) {
-  return id === "meetings" || id === "yourMeetings";
+  return id === "meetings" || id === "yourMeetings" || id === "meetingBriefs";
 }
 
 function itemCapFor(section: NewspaperSectionInput, variant: NewspaperLayoutVariant, visibleSectionCount: number) {

@@ -85,6 +85,7 @@ import {
   updateAgentCredentialScopes,
   revokeAgentCredential,
   listAgentConfigs,
+  getNewspaperDiagnostics,
   updateAgentConfig,
   getModelUsageBudget,
   updateModelUsageBudget,
@@ -1905,6 +1906,20 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
           costTier: config.costTier,
         })),
       });
+    },
+  );
+
+  tool(
+    "get_newspaper_diagnostics",
+    "Return read-only diagnostics for the Corgtex newspaper: effective schedule, recipients, next runs, recent jobs, deliveries, skip reasons, and source counts.",
+    {
+      take: z.number().min(1).max(50).optional(),
+    },
+    async ({ take }: { take?: number }) => {
+      requireScope(sessionCtx, "agents:read");
+      requireScope(sessionCtx, "runtime:read");
+      const diagnostics = await getNewspaperDiagnostics(actor, workspaceId, { take: take ?? 10 });
+      return jsonResult({ diagnostics });
     },
   );
 

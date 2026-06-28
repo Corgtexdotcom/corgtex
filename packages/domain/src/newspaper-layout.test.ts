@@ -120,4 +120,18 @@ describe("computeNewspaperLayout", () => {
     }));
     expect(layout.sectionCaps.todos.itemCap).toBe(4);
   });
+
+  it("treats meetingBriefs as a meeting-heavy newspaper section", () => {
+    const layout = computeNewspaperLayout([
+      { id: "meetingBriefs", priority: 1, itemCount: 5, surface: "email" },
+      { id: "openActions", priority: 2, itemCount: 4, surface: "email" },
+      { id: "goalsProgress", priority: 3, itemCount: 2, surface: "email" },
+    ]);
+
+    expect(layout.variant).toBe("meeting-heavy");
+    expect(layout.sectionCaps.meetingBriefs).toEqual(expect.objectContaining({
+      itemCap: 5,
+      placement: "wide",
+    }));
+  });
 });

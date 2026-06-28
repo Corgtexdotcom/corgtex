@@ -20,6 +20,8 @@ const {
   runEnterpriseAppHealthCheckJobMock,
   syncRecorderCalendarSourceMock,
   getWorkspaceDigestSettingsMock,
+  getNewspaperLocalDatePartsMock,
+  isNewspaperScheduleDueMock,
 } = vi.hoisted(() => ({
   prismaMock: {
     $transaction: vi.fn(),
@@ -76,6 +78,8 @@ const {
   runEnterpriseAppHealthCheckJobMock: vi.fn(),
   syncRecorderCalendarSourceMock: vi.fn(),
   getWorkspaceDigestSettingsMock: vi.fn(),
+  getNewspaperLocalDatePartsMock: vi.fn(),
+  isNewspaperScheduleDueMock: vi.fn(),
 }));
 
 vi.mock("@corgtex/shared", () => ({
@@ -121,6 +125,13 @@ vi.mock("@corgtex/domain", () => ({
   runEnterpriseAppHealthCheckJob: runEnterpriseAppHealthCheckJobMock,
   syncRecorderCalendarSource: syncRecorderCalendarSourceMock,
   getWorkspaceDigestSettings: getWorkspaceDigestSettingsMock,
+  getNewspaperLocalDateParts: getNewspaperLocalDatePartsMock,
+  isHumanNewspaperRecipientIdentity: (user: { email?: string | null; displayName?: string | null }) => {
+    const email = user.email?.trim().toLowerCase() ?? "";
+    const displayName = user.displayName?.trim().toLowerCase() ?? "";
+    return Boolean(email) && !email.startsWith("system+") && !email.startsWith("support+") && displayName !== "corgtex support";
+  },
+  isNewspaperScheduleDue: isNewspaperScheduleDueMock,
 }));
 
 import { runPendingJobs, scheduleDailyJobs, schedulePeriodicJobs } from "./outbox";
@@ -182,6 +193,14 @@ describe("runPendingJobs", () => {
     runEnterpriseAppHealthCheckJobMock.mockReset().mockResolvedValue({ status: "ok" });
     syncRecorderCalendarSourceMock.mockReset().mockResolvedValue({ action: "synced" });
     getWorkspaceDigestSettingsMock.mockReset().mockResolvedValue(new Map());
+    getNewspaperLocalDatePartsMock.mockReset().mockReturnValue({
+      dateKey: "2026-04-29",
+      weekday: "WEDNESDAY",
+      hour: 20,
+      minute: 15,
+      timeZone: "UTC",
+    });
+    isNewspaperScheduleDueMock.mockReset().mockReturnValue(true);
     loggerMock.info.mockReset();
     loggerMock.warn.mockReset();
     resetWorkflowJobMetricsForTest();
@@ -1000,7 +1019,7 @@ describe("scheduleDailyJobs", () => {
       { id: "ws-2" },
     ]);
     prismaMock.member.findMany.mockReset().mockResolvedValue([
-      { workspaceId: "ws-1", newspaperCadence: null },
+      { workspaceId: "ws-1", newspaperCadence: null, user: { email: "member@example.com", displayName: "Member One" } },
     ]);
     prismaMock.communicationInstallation.findMany.mockReset().mockResolvedValue([
       { workspaceId: "ws-1" },
@@ -1008,9 +1027,17 @@ describe("scheduleDailyJobs", () => {
     txMock.workflowJob.upsert.mockReset().mockResolvedValue({ id: "job-1" });
     resetCreateManyMock();
     getWorkspaceDigestSettingsMock.mockReset().mockResolvedValue(new Map([
-      ["ws-1", { enabled: true, cadence: "DAILY" }],
-      ["ws-2", { enabled: false, cadence: "DAILY" }],
+      ["ws-1", { enabled: true, cadence: "DAILY", weekday: "MONDAY", localTime: "08:00", timeZone: "UTC" }],
+      ["ws-2", { enabled: false, cadence: "DAILY", weekday: "MONDAY", localTime: "08:00", timeZone: "UTC" }],
     ]));
+    getNewspaperLocalDatePartsMock.mockReset().mockReturnValue({
+      dateKey: "2026-04-29",
+      weekday: "WEDNESDAY",
+      hour: 20,
+      minute: 15,
+      timeZone: "UTC",
+    });
+    isNewspaperScheduleDueMock.mockReset().mockReturnValue(true);
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-04-29T20:15:00Z"));
   });
@@ -1034,7 +1061,7 @@ describe("scheduleDailyJobs", () => {
         expect.objectContaining({
           workspaceId: "ws-1",
           type: "brain.daily-digest",
-          payload: { dateISO: "2026-04-29T20:15:00.000Z", cadence: "DAILY" },
+          payload: { dateISO: "2026-04-29T20:15:00.000Z", dateKey: "2026-04-29", cadence: "DAILY" },
           dedupeKey: "ws-1:daily-digest:2026-04-29",
         }),
         expect.objectContaining({
@@ -1047,19 +1074,31 @@ describe("scheduleDailyJobs", () => {
     });
   });
 
-  it("does not schedule daily jobs before the configured UTC start hour", async () => {
+  it("does not schedule newspapers before the workspace local send time", async () => {
     vi.setSystemTime(new Date("2026-04-29T10:59:00Z"));
+    isNewspaperScheduleDueMock.mockReturnValue(false);
 
-    await expect(scheduleDailyJobs()).resolves.toBe(0);
+    await expect(scheduleDailyJobs()).resolves.toBe(3);
 
-    expect(txMock.workflowJob.createMany).not.toHaveBeenCalled();
+    expect(createdWorkflowJobs()).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        type: "brain.daily-digest",
+      }),
+    ]));
   });
 
   it("schedules weekly newspaper jobs on Monday UTC for weekly recipients", async () => {
     vi.setSystemTime(new Date("2026-05-04T20:15:00Z"));
+    getNewspaperLocalDatePartsMock.mockReturnValue({
+      dateKey: "2026-05-04",
+      weekday: "MONDAY",
+      hour: 20,
+      minute: 15,
+      timeZone: "UTC",
+    });
     getWorkspaceDigestSettingsMock.mockResolvedValue(new Map([
-      ["ws-1", { enabled: true, cadence: "WEEKLY" }],
-      ["ws-2", { enabled: false, cadence: "WEEKLY" }],
+      ["ws-1", { enabled: true, cadence: "WEEKLY", weekday: "MONDAY", localTime: "08:00", timeZone: "UTC" }],
+      ["ws-2", { enabled: false, cadence: "WEEKLY", weekday: "MONDAY", localTime: "08:00", timeZone: "UTC" }],
     ]));
 
     await expect(scheduleDailyJobs()).resolves.toBe(4);
@@ -1068,7 +1107,7 @@ describe("scheduleDailyJobs", () => {
       expect.objectContaining({
         workspaceId: "ws-1",
         type: "brain.daily-digest",
-        payload: { dateISO: "2026-05-04T20:15:00.000Z", cadence: "WEEKLY" },
+        payload: { dateISO: "2026-05-04T20:15:00.000Z", dateKey: "2026-05-04", cadence: "WEEKLY" },
         dedupeKey: "ws-1:weekly-digest:2026-05-04",
       }),
       expect.objectContaining({
@@ -1088,12 +1127,12 @@ describe("scheduleDailyJobs", () => {
 
   it("does not schedule newspapers when all effective cadences are off", async () => {
     getWorkspaceDigestSettingsMock.mockResolvedValue(new Map([
-      ["ws-1", { enabled: true, cadence: "OFF" }],
-      ["ws-2", { enabled: false, cadence: "OFF" }],
+      ["ws-1", { enabled: true, cadence: "OFF", weekday: "MONDAY", localTime: "08:00", timeZone: "UTC" }],
+      ["ws-2", { enabled: false, cadence: "OFF", weekday: "MONDAY", localTime: "08:00", timeZone: "UTC" }],
     ]));
     prismaMock.member.findMany.mockResolvedValue([
-      { workspaceId: "ws-1", newspaperCadence: null },
-      { workspaceId: "ws-1", newspaperCadence: "OFF" },
+      { workspaceId: "ws-1", newspaperCadence: null, user: { email: "member@example.com", displayName: "Member One" } },
+      { workspaceId: "ws-1", newspaperCadence: "OFF", user: { email: "off@example.com", displayName: "Off Member" } },
     ]);
 
     await expect(scheduleDailyJobs()).resolves.toBe(3);
@@ -1118,7 +1157,16 @@ describe("scheduleDailyJobs", () => {
     expect(prismaMock.member.findMany).toHaveBeenCalledTimes(1);
     expect(prismaMock.member.findMany).toHaveBeenCalledWith({
       where: { workspaceId: { in: ["ws-1", "ws-2"] }, isActive: true },
-      select: { workspaceId: true, newspaperCadence: true },
+      select: {
+        workspaceId: true,
+        newspaperCadence: true,
+        user: {
+          select: {
+            email: true,
+            displayName: true,
+          },
+        },
+      },
     });
   });
 });

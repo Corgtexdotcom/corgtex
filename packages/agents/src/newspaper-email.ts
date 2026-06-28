@@ -2,12 +2,19 @@ import { computeNewspaperLayout } from "@corgtex/domain";
 
 export type NewspaperEmailSectionId =
   | "adviceRequests"
+  | "meetingBriefs"
+  | "decisionsAndProposals"
+  | "resolvedTensions"
+  | "openActions"
+  | "goalsProgress"
+  | "rolesAndPeople"
   | "keyDecisions"
   | "actionItems"
   | "builtWork"
   | "conversationHighlights"
   | "teamPulse"
-  | "emergingTensions";
+  | "emergingTensions"
+  | "otherUpdates";
 
 export type NewspaperDigestSection = {
   id: NewspaperEmailSectionId;
@@ -33,12 +40,19 @@ const SECTION_DEFINITIONS: Array<{
   aliases: string[];
 }> = [
   { id: "adviceRequests", title: "Requests Awaiting Your Input", aliases: ["inputRequests", "requestsAwaitingInput", "pendingAdviceRequests"] },
-  { id: "keyDecisions", title: "Key Decisions Made", aliases: ["keyDecisionsMade", "decisions"] },
+  { id: "meetingBriefs", title: "Meeting Briefs", aliases: ["meetings", "meetingSummaries", "meetingBriefings"] },
+  { id: "decisionsAndProposals", title: "Decisions & Proposals", aliases: ["decisions", "proposals"] },
+  { id: "resolvedTensions", title: "Resolved Tensions", aliases: ["closedTensions", "resolvedIssues"] },
+  { id: "openActions", title: "Open Actions", aliases: ["assignedActions", "openActionItems", "actions"] },
+  { id: "goalsProgress", title: "Goals & Quarterly Progress", aliases: ["goals", "goalUpdates", "quarterlyGoals", "progress"] },
+  { id: "rolesAndPeople", title: "Roles & People", aliases: ["roleChanges", "peopleChanges", "newMembers", "roles"] },
+  { id: "keyDecisions", title: "Key Decisions Made", aliases: ["keyDecisionsMade"] },
   { id: "actionItems", title: "Action Items Identified", aliases: ["actions", "nextActions"] },
   { id: "builtWork", title: "Built / Shipped Work", aliases: ["shippedWork", "buildArtifacts"] },
   { id: "conversationHighlights", title: "Conversation Highlights", aliases: ["highlights", "summary"] },
   { id: "teamPulse", title: "Team Pulse", aliases: ["pulse", "sentiment"] },
   { id: "emergingTensions", title: "Emerging Tensions", aliases: ["tensions", "risks"] },
+  { id: "otherUpdates", title: "Other Updates", aliases: ["misc", "other", "brainUpdates", "documentUpdates"] },
 ];
 
 function isRecord(value: unknown): value is Record<string, unknown> {
