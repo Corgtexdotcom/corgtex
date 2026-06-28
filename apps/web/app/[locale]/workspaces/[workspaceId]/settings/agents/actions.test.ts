@@ -16,6 +16,7 @@ const revalidatePath = vi.fn();
 const updateAgentConfig = vi.fn();
 const updateCompanyUnderstandingGoalApplyMode = vi.fn();
 const updateWorkspaceNewspaperCadence = vi.fn();
+const updateWorkspaceNewspaperSchedule = vi.fn();
 
 vi.mock("@/lib/demo-guard", () => ({
   enforceDemoGuard,
@@ -29,6 +30,7 @@ vi.mock("@corgtex/domain", () => ({
   updateAgentConfig,
   updateCompanyUnderstandingGoalApplyMode,
   updateWorkspaceNewspaperCadence,
+  updateWorkspaceNewspaperSchedule,
 }));
 
 vi.mock("next/cache", () => ({
@@ -49,6 +51,28 @@ describe("agent settings actions", () => {
     expect(updateCompanyUnderstandingGoalApplyMode).toHaveBeenCalledWith(actor, {
       workspaceId: "workspace-1",
       mode: "MANUAL",
+    });
+    expect(revalidatePath).toHaveBeenCalledWith("/workspaces/workspace-1/settings/agents");
+    expect(revalidatePath).toHaveBeenCalledWith("/workspaces/workspace-1/settings");
+  });
+
+  it("updates the newspaper schedule", async () => {
+    const { updateAgentNewspaperScheduleAction } = await import("./actions");
+
+    await updateAgentNewspaperScheduleAction("workspace-1", {
+      cadence: "WEEKLY",
+      weekday: "MONDAY",
+      localTime: "08:00",
+      timeZone: "America/Los_Angeles",
+    });
+
+    expect(enforceDemoGuard).toHaveBeenCalledWith("workspace-1");
+    expect(updateWorkspaceNewspaperSchedule).toHaveBeenCalledWith(actor, {
+      workspaceId: "workspace-1",
+      cadence: "WEEKLY",
+      weekday: "MONDAY",
+      localTime: "08:00",
+      timeZone: "America/Los_Angeles",
     });
     expect(revalidatePath).toHaveBeenCalledWith("/workspaces/workspace-1/settings/agents");
     expect(revalidatePath).toHaveBeenCalledWith("/workspaces/workspace-1/settings");

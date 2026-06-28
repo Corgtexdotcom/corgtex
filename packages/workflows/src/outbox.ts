@@ -46,7 +46,6 @@ const RETRY_MAX_DELAY_MS = 5 * 60 * 1_000;
 const LOCK_TIMEOUT_MS = 5 * 60 * 1_000;
 const TRIAGE_COALESCE_WINDOW_MS = 5 * 60 * 1_000;
 const MEETING_RECORDER_RECONCILE_INTERVAL_MS = 10 * 60 * 1_000;
-const DEFAULT_DAILY_JOB_START_HOUR_UTC = 11;
 const TRIAGE_EVENT_TYPES = new Set([
   "proposal.submitted",
   "meeting.created",
@@ -196,10 +195,10 @@ function nextRetryTime(attempt: number) {
 }
 
 function readNewspaperCadence(value: unknown): NewspaperCadence {
-  if (value === "WEEKLY" || value === "OFF") {
+  if (value === "DAILY" || value === "WEEKLY" || value === "OFF") {
     return value;
   }
-  return "DAILY";
+  return "WEEKLY";
 }
 
 const TARGETED_ADVICE_NOTIFICATION_EVENTS = new Set([
@@ -914,11 +913,13 @@ async function handleJob(job: ClaimedJob) {
 
   if (job.type === "brain.daily-digest") {
     const dateISO = (payload as { dateISO?: string }).dateISO;
+    const dateKey = (payload as { dateKey?: string }).dateKey;
     if (dateISO && job.workspaceId) {
       await runDailyDigest({
         workspaceId: job.workspaceId,
         workflowJobId: job.id,
         dateISO,
+        dateKey,
         cadence: readNewspaperCadence(payload.cadence),
       });
     }
@@ -1255,16 +1256,6 @@ export async function schedulePeriodicJobs() {
 
 export async function scheduleDailyJobs() {
   const now = new Date();
-  const dailyJobStartHourRaw = Number(process.env.WORKER_DAILY_JOB_START_HOUR_UTC ?? DEFAULT_DAILY_JOB_START_HOUR_UTC);
-  const dailyJobStartHourUTC = Math.min(
-    23,
-    Math.max(0, Number.isFinite(dailyJobStartHourRaw) ? dailyJobStartHourRaw : DEFAULT_DAILY_JOB_START_HOUR_UTC),
-  );
-
-  if (now.getUTCHours() < dailyJobStartHourUTC) {
-    return 0;
-  }
-
   const todayISO = now.toISOString().split("T")[0];
   const workspaces = await prisma.workspace.findMany({ select: { id: true } });
   const slackArchiveWorkspaces = await prisma.communicationInstallation.findMany({
@@ -1276,24 +1267,38 @@ export async function scheduleDailyJobs() {
     distinct: ["workspaceId"],
     select: { workspaceId: true },
   });
-  const { getWorkspaceDigestSettings } = await import("@corgtex/domain");
+  const {
+    getNewspaperLocalDateParts,
+    getWorkspaceDigestSettings,
+    isHumanNewspaperRecipientIdentity,
+    isNewspaperScheduleDue,
+  } = await import("@corgtex/domain");
   const newspaperSchedules: Array<{
     workspaceId: string;
-    cadence: NewspaperCadence;
+    cadence: Exclude<NewspaperCadence, "OFF">;
+    dateKey: string;
     dedupeKey: string;
   }> = [];
   const isWeeklyWindow = now.getUTCDay() === 1;
 
   // Batched reads: one digest-settings lookup and one member lookup for all
   // workspaces, rather than three sequential queries per workspace. This scan
-  // runs on every worker tick once the daily window opens, so its cost must not
-  // grow with workspace count.
+  // runs on worker ticks and checks each workspace's local newspaper window.
   const workspaceIds = workspaces.map((workspace) => workspace.id);
   const [digestSettings, activeMembers] = await Promise.all([
     getWorkspaceDigestSettings(workspaceIds),
     prisma.member.findMany({
       where: { workspaceId: { in: workspaceIds }, isActive: true },
-      select: { workspaceId: true, newspaperCadence: true },
+      select: {
+        workspaceId: true,
+        newspaperCadence: true,
+        user: {
+          select: {
+            email: true,
+            displayName: true,
+          },
+        },
+      },
     }),
   ]);
   const membersByWorkspace = new Map<string, typeof activeMembers>();
@@ -1317,7 +1322,10 @@ export async function scheduleDailyJobs() {
     }
 
     const workspaceCadence = setting.cadence;
-    const workspaceMembers = membersByWorkspace.get(workspace.id) ?? [];
+    const workspaceMembers = (membersByWorkspace.get(workspace.id) ?? []).filter((member) => (
+      isHumanNewspaperRecipientIdentity(member.user)
+    ));
+    const localDateKey = getNewspaperLocalDateParts(now, setting.timeZone).dateKey;
 
     const hasDailyRecipients = workspaceMembers.some((member) => (
       (member.newspaperCadence ?? workspaceCadence) === "DAILY"
@@ -1326,31 +1334,33 @@ export async function scheduleDailyJobs() {
       (member.newspaperCadence ?? workspaceCadence) === "WEEKLY"
     ));
 
-    if (hasDailyRecipients) {
+    if (hasDailyRecipients && isNewspaperScheduleDue({ now, schedule: setting, cadence: "DAILY" })) {
       newspaperSchedules.push({
         workspaceId: workspace.id,
         cadence: "DAILY",
-        dedupeKey: `${workspace.id}:daily-digest:${todayISO}`,
+        dateKey: localDateKey,
+        dedupeKey: `${workspace.id}:daily-digest:${localDateKey}`,
       });
     } else {
       logger.info("newspaper_schedule_skipped", {
         workspaceId: workspace.id,
         cadence: "DAILY",
-        reason: "no_daily_recipients",
+        reason: hasDailyRecipients ? "outside_schedule_window" : "no_daily_recipients",
       });
     }
 
-    if (isWeeklyWindow && hasWeeklyRecipients) {
+    if (hasWeeklyRecipients && isNewspaperScheduleDue({ now, schedule: setting, cadence: "WEEKLY" })) {
       newspaperSchedules.push({
         workspaceId: workspace.id,
         cadence: "WEEKLY",
-        dedupeKey: `${workspace.id}:weekly-digest:${todayISO}`,
+        dateKey: localDateKey,
+        dedupeKey: `${workspace.id}:weekly-digest:${localDateKey}`,
       });
-    } else if (isWeeklyWindow) {
+    } else if (isWeeklyWindow || hasWeeklyRecipients) {
       logger.info("newspaper_schedule_skipped", {
         workspaceId: workspace.id,
         cadence: "WEEKLY",
-        reason: "no_weekly_recipients",
+        reason: hasWeeklyRecipients ? "outside_schedule_window" : "no_weekly_recipients",
       });
     }
   }
@@ -1386,7 +1396,7 @@ export async function scheduleDailyJobs() {
     jobs.push({
       workspaceId: schedule.workspaceId,
       type: "brain.daily-digest",
-      payload: { dateISO: now.toISOString(), cadence: schedule.cadence },
+      payload: { dateISO: now.toISOString(), dateKey: schedule.dateKey, cadence: schedule.cadence },
       dedupeKey: schedule.dedupeKey,
     });
     logger.info("newspaper_schedule_created", {

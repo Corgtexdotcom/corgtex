@@ -1,4 +1,30 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+
+vi.mock("@corgtex/domain", () => ({
+  computeNewspaperLayout: (sections: Array<{ id: string; itemCount: number }>) => {
+    const visibleSections = sections
+      .filter((section) => section.itemCount > 0)
+      .map((section) => ({
+        ...section,
+        itemCap: section.itemCount,
+        excerptMaxLength: 180,
+        placement: "standard",
+      }));
+    return {
+      variant: visibleSections.length <= 2 ? "sparse" : "balanced",
+      visibleSections,
+      sectionCaps: Object.fromEntries(visibleSections.map((section) => [
+        section.id,
+        {
+          itemCap: section.itemCap,
+          excerptMaxLength: section.excerptMaxLength,
+          placement: section.placement,
+        },
+      ])),
+    };
+  },
+}));
+
 import {
   normalizeNewspaperDigestPayload,
   normalizeNewspaperPersonalizationPayload,
@@ -43,9 +69,31 @@ describe("newspaper email rendering", () => {
       },
     });
 
-    expect(digest.sections.map((section) => section.id)).toEqual(["keyDecisions", "actionItems"]);
+    expect(digest.sections.map((section) => section.id)).toEqual(["decisionsAndProposals", "actionItems"]);
     expect(digest.sections[0]?.items).toEqual(["Hold launch until QA signs off."]);
     expect(digest.sections[1]?.items).toEqual(["Book customer review."]);
+  });
+
+  it("normalizes self-management operating sections", () => {
+    const digest = normalizeNewspaperDigestPayload({
+      meetingBriefs: ["Weekly tactical reviewed onboarding."],
+      decisionsAndProposals: ["Adopt the role handoff proposal."],
+      resolvedTensions: ["Closed support ownership tension."],
+      openActions: ["Pat owns the launch checklist."],
+      goalsProgress: ["Quarterly onboarding goal moved to 60%."],
+      rolesAndPeople: ["New facilitator role created."],
+      otherUpdates: ["Brain article updated."],
+    });
+
+    expect(digest.sections.map((section) => section.title)).toEqual([
+      "Meeting Briefs",
+      "Decisions & Proposals",
+      "Resolved Tensions",
+      "Open Actions",
+      "Goals & Quarterly Progress",
+      "Roles & People",
+      "Other Updates",
+    ]);
   });
 
   it("adds personal advice requests as the lead email section", () => {

@@ -7,6 +7,58 @@ const {
 } = vi.hoisted(() => ({
   trackedLinks: [] as any[],
   prismaMock: {
+    workspaceAgentConfig: {
+      findUnique: vi.fn(),
+    },
+    workflowJob: {
+      findMany: vi.fn(),
+    },
+    member: {
+      findMany: vi.fn(),
+      count: vi.fn(),
+    },
+    meeting: {
+      count: vi.fn(),
+    },
+    proposal: {
+      count: vi.fn(),
+    },
+    tension: {
+      count: vi.fn(),
+    },
+    action: {
+      count: vi.fn(),
+    },
+    goal: {
+      count: vi.fn(),
+    },
+    goalUpdate: {
+      count: vi.fn(),
+    },
+    roleVersion: {
+      count: vi.fn(),
+    },
+    roleHolderHistory: {
+      count: vi.fn(),
+    },
+    brainArticle: {
+      count: vi.fn(),
+    },
+    document: {
+      count: vi.fn(),
+    },
+    adviceRequest: {
+      count: vi.fn(),
+    },
+    conversationSession: {
+      count: vi.fn(),
+    },
+    communicationMessage: {
+      count: vi.fn(),
+    },
+    buildArtifact: {
+      count: vi.fn(),
+    },
     newspaperTrackedLink: {
       upsert: vi.fn(),
       findUnique: vi.fn(),
@@ -32,6 +84,7 @@ vi.mock("@corgtex/shared", () => ({
   },
   prisma: prismaMock,
   sha256: testHash,
+  toInputJson: (value: unknown) => value,
 }));
 
 vi.mock("./auth", () => ({
@@ -80,6 +133,24 @@ describe("newspaper delivery", () => {
       ...data,
     }));
     prismaMock.newspaperDelivery.findMany.mockResolvedValue([]);
+    prismaMock.workspaceAgentConfig.findUnique.mockResolvedValue(null);
+    prismaMock.workflowJob.findMany.mockResolvedValue([]);
+    prismaMock.member.findMany.mockResolvedValue([]);
+    prismaMock.member.count.mockResolvedValue(0);
+    prismaMock.meeting.count.mockResolvedValue(0);
+    prismaMock.proposal.count.mockResolvedValue(0);
+    prismaMock.tension.count.mockResolvedValue(0);
+    prismaMock.action.count.mockResolvedValue(0);
+    prismaMock.goal.count.mockResolvedValue(0);
+    prismaMock.goalUpdate.count.mockResolvedValue(0);
+    prismaMock.roleVersion.count.mockResolvedValue(0);
+    prismaMock.roleHolderHistory.count.mockResolvedValue(0);
+    prismaMock.brainArticle.count.mockResolvedValue(0);
+    prismaMock.document.count.mockResolvedValue(0);
+    prismaMock.adviceRequest.count.mockResolvedValue(0);
+    prismaMock.conversationSession.count.mockResolvedValue(0);
+    prismaMock.communicationMessage.count.mockResolvedValue(0);
+    prismaMock.buildArtifact.count.mockResolvedValue(0);
   });
 
   it("rewrites absolute links to aggregate tracked links without storing raw tokens", async () => {
@@ -247,5 +318,86 @@ describe("newspaper delivery", () => {
     }));
     expect(rows[0]).not.toHaveProperty("clickCount");
     expect(rows[0]).not.toHaveProperty("clickedAt");
+  });
+
+  it("returns newspaper diagnostics with effective recipients, next runs, jobs, deliveries, and source counts", async () => {
+    const { getNewspaperDiagnostics } = await import("./newspaper-delivery");
+    prismaMock.workspaceAgentConfig.findUnique.mockResolvedValue({
+      enabled: true,
+      configJson: {
+        newspaperCadence: "WEEKLY",
+        newspaperWeekday: "MONDAY",
+        newspaperLocalTime: "08:00",
+        newspaperTimeZone: "UTC",
+      },
+    });
+    prismaMock.member.findMany.mockResolvedValue([
+      {
+        id: "member-1",
+        newspaperCadence: null,
+        joinedAt: new Date("2026-06-01T12:00:00.000Z"),
+        user: { email: "member@example.com", displayName: "Member One" },
+      },
+    ]);
+    prismaMock.meeting.count.mockResolvedValue(2);
+    prismaMock.action.count.mockResolvedValue(1);
+    prismaMock.workflowJob.findMany.mockResolvedValue([
+      {
+        id: "job-1",
+        status: "COMPLETED",
+        dedupeKey: "ws-1:weekly-digest:2026-06-22",
+        payload: { cadence: "WEEKLY" },
+        error: null,
+        runAfter: new Date("2026-06-22T08:00:00.000Z"),
+        createdAt: new Date("2026-06-22T08:00:00.000Z"),
+        startedAt: new Date("2026-06-22T08:00:00.000Z"),
+        completedAt: new Date("2026-06-22T08:01:00.000Z"),
+      },
+    ]);
+    prismaMock.newspaperDelivery.findMany.mockResolvedValue([
+      {
+        id: "delivery-1",
+        workflowJobId: "job-1",
+        memberId: "member-1",
+        cadence: "WEEKLY",
+        runKey: "run-1",
+        recipientEmail: "member@example.com",
+        subject: "Weekly Newspaper",
+        status: "SKIPPED",
+        error: "No digest inputs.",
+        sentAt: null,
+        skippedAt: new Date("2026-06-22T08:01:00.000Z"),
+        failedAt: null,
+        createdAt: new Date("2026-06-22T08:01:00.000Z"),
+      },
+    ]);
+
+    const diagnostics = await getNewspaperDiagnostics(
+      { kind: "user", user: { id: "u-1" } } as any,
+      "ws-1",
+      { now: new Date("2026-06-28T12:00:00.000Z"), take: 5 },
+    );
+
+    expect(diagnostics.defaultSchedule).toEqual({
+      cadence: "WEEKLY",
+      weekday: "MONDAY",
+      localTime: "08:00",
+      timeZone: "UTC",
+    });
+    expect(diagnostics.nextRuns.weekly).toBe("2026-06-29T08:00:00.000Z");
+    expect(diagnostics.recipients[0]).toEqual(expect.objectContaining({
+      memberId: "member-1",
+      effectiveCadence: "WEEKLY",
+      receivesNewspaper: true,
+    }));
+    expect(diagnostics.sourceCounts.sevenDays).toEqual(expect.objectContaining({
+      meetings: 2,
+      openActions: 1,
+    }));
+    expect(diagnostics.recentJobs).toHaveLength(1);
+    expect(diagnostics.recentDeliveries[0]).toEqual(expect.objectContaining({
+      status: "SKIPPED",
+      error: "No digest inputs.",
+    }));
   });
 });

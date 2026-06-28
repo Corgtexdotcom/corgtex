@@ -32,6 +32,9 @@ const {
     conversationSession: {
       findMany: vi.fn(),
     },
+    meeting: {
+      findMany: vi.fn(),
+    },
     buildArtifact: {
       findMany: vi.fn(),
     },
@@ -45,6 +48,18 @@ const {
       findMany: vi.fn(),
     },
     action: {
+      findMany: vi.fn(),
+    },
+    goal: {
+      findMany: vi.fn(),
+    },
+    roleVersion: {
+      findMany: vi.fn(),
+    },
+    roleHolderHistory: {
+      findMany: vi.fn(),
+    },
+    document: {
       findMany: vi.fn(),
     },
     brainSource: {
@@ -104,9 +119,14 @@ vi.mock("@corgtex/domain", () => ({
   },
   getAgentModelOverride: vi.fn().mockResolvedValue(undefined),
   getWorkspaceNewspaperCadence: getWorkspaceNewspaperCadenceMock,
+  isHumanNewspaperRecipientIdentity: (user: { email?: string | null; displayName?: string | null }) => {
+    const email = user.email?.trim().toLowerCase() ?? "";
+    const displayName = user.displayName?.trim().toLowerCase() ?? "";
+    return Boolean(email) && !email.startsWith("system+") && !email.startsWith("support+") && displayName !== "corgtex support";
+  },
   normalizeNewspaperCadence: (value: unknown) => {
-    if (value === "WEEKLY" || value === "OFF") return value;
-    return "DAILY";
+    if (value === "DAILY" || value === "WEEKLY" || value === "OFF") return value;
+    return "WEEKLY";
   },
   computeNewspaperLayout: (sections: Array<{ id: string; itemCount: number }>) => {
     const visibleSections = sections
@@ -162,24 +182,32 @@ describe("runDailyDigest", () => {
     prismaMock.$transaction.mockImplementation(async (callback: (tx: typeof txMock) => Promise<unknown>) => callback(txMock));
     batchIngestDailyConversationsMock.mockResolvedValue(undefined);
     prismaMock.conversationSession.findMany.mockResolvedValue([]);
+    prismaMock.meeting.findMany.mockResolvedValue([]);
     listSlackMessagesForDigestMock.mockResolvedValue([]);
     prismaMock.buildArtifact.findMany.mockResolvedValue([]);
     prismaMock.adviceRequest.findMany.mockResolvedValue([]);
     prismaMock.proposal.findMany.mockResolvedValue([]);
     prismaMock.tension.findMany.mockResolvedValue([]);
     prismaMock.action.findMany.mockResolvedValue([]);
-    prismaMock.member.findMany.mockResolvedValue([
-      {
-        id: "member-1",
-        newspaperCadence: null,
-        roleAssignments: [],
-        user: {
-          id: "user-1",
-          email: "member@example.com",
-          displayName: "Member One",
+    prismaMock.goal.findMany.mockResolvedValue([]);
+    prismaMock.roleVersion.findMany.mockResolvedValue([]);
+    prismaMock.roleHolderHistory.findMany.mockResolvedValue([]);
+    prismaMock.document.findMany.mockResolvedValue([]);
+    prismaMock.member.findMany.mockImplementation(async (params: any) => {
+      if (params?.select?.joinedAt) return [];
+      return [
+        {
+          id: "member-1",
+          newspaperCadence: null,
+          roleAssignments: [],
+          user: {
+            id: "user-1",
+            email: "member@example.com",
+            displayName: "Member One",
+          },
         },
-      },
-    ]);
+      ];
+    });
     prismaMock.demoLead.findFirst.mockResolvedValue(null);
     prismaMock.brainSource.create.mockResolvedValue({ id: "source-1" });
     prismaMock.brainArticle.findUnique.mockResolvedValue(null);
@@ -215,7 +243,7 @@ describe("runDailyDigest", () => {
     txMock.demoLead.update.mockResolvedValue({ id: "lead-1" });
     txMock.crmActivity.create.mockResolvedValue({ id: "activity-1" });
     txMock.newspaperDelivery.create.mockResolvedValue({ id: "delivery-1" });
-    getWorkspaceNewspaperCadenceMock.mockResolvedValue("DAILY");
+    getWorkspaceNewspaperCadenceMock.mockResolvedValue("WEEKLY");
     prismaMock.workspace.findUnique.mockResolvedValue({ name: "Workspace One" });
   });
 
@@ -275,20 +303,79 @@ describe("runDailyDigest", () => {
       workspaceId: "workspace-1",
       type: "DIGEST",
       bodyMd: expect.stringContaining("## Built / Shipped Work"),
-      title: "Daily Newspaper - 2026-04-30",
+      title: "Weekly Newspaper - 2026-04-30",
     }));
     expect(sendEmailMock).toHaveBeenCalledWith(expect.objectContaining({
       to: "member@example.com",
-      subject: "Daily Newspaper - 2026-04-30 - Your Personal Briefing",
+      subject: "Weekly Newspaper - 2026-04-30 - Your Personal Briefing",
       html: expect.stringContaining("The Workspace One Edition"),
     }));
     expect(recordNewspaperDeliveryMock).toHaveBeenCalledWith(expect.objectContaining({
       workspaceId: "workspace-1",
       memberId: "member-1",
       kind: "MEMBER_NEWSPAPER",
-      cadence: "DAILY",
+      cadence: "WEEKLY",
       status: "SENT",
       providerMessageId: "email-1",
+    }));
+  });
+
+  it("sends a weekly newspaper for a meeting-only workspace", async () => {
+    prismaMock.meeting.findMany.mockResolvedValue([
+      {
+        id: "meeting-1",
+        title: "Weekly tactical",
+        recordedAt: new Date("2026-04-29T10:00:00.000Z"),
+        summaryMd: "Reviewed onboarding progress and agreed to unblock the role handoff.",
+        decisionsJson: [{ title: "Role handoff", summary: "Move onboarding ownership to the facilitation role." }],
+        participantEmails: ["member@example.com"],
+        insights: [
+          {
+            type: "ACTION_ITEM",
+            operation: "CREATE",
+            status: "CONFIRMED",
+            title: "Document onboarding handoff",
+            bodyMd: "Capture the next step before Monday.",
+            dueAt: new Date("2026-05-04T12:00:00.000Z"),
+          },
+        ],
+      },
+    ]);
+    extractMock.mockImplementation(async ({ instruction }: { instruction: string }) => {
+      if (instruction.startsWith("Generate a structured")) {
+        return {
+          output: {
+            intro: "Weekly operating brief.",
+            meetingBriefs: ["Weekly tactical: onboarding progress and role handoff were reviewed."],
+            decisionsAndProposals: ["Role handoff ownership moves to facilitation."],
+          },
+        };
+      }
+      if (instruction.startsWith("Personalize this structured")) return { output: {} };
+      return { output: {} };
+    });
+
+    const { runDailyDigest } = await import("./daily-digest");
+    const result = await runDailyDigest({
+      workspaceId: "workspace-1",
+      dateISO: "2026-04-30T12:00:00.000Z",
+    });
+
+    const digestCall = extractMock.mock.calls.find(([request]) => request.instruction.startsWith("Generate a structured"));
+    expect(digestCall?.[0].input).toContain("Meeting summaries and decisions");
+    expect(digestCall?.[0].input).toContain("Weekly tactical");
+    expect(result).toEqual(expect.objectContaining({
+      cadence: "WEEKLY",
+      sentEmails: 1,
+    }));
+    expect(createArticleMock).toHaveBeenCalledWith(expect.objectContaining({ kind: "agent" }), expect.objectContaining({
+      type: "DIGEST",
+      bodyMd: expect.stringContaining("## Meeting Briefs"),
+      title: "Weekly Newspaper - 2026-04-30",
+    }));
+    expect(sendEmailMock).toHaveBeenCalledWith(expect.objectContaining({
+      to: "member@example.com",
+      html: expect.stringContaining("Meeting Briefs"),
     }));
   });
 
@@ -323,6 +410,7 @@ describe("runDailyDigest", () => {
   });
 
   it("batches conversing-member profile lookups into a single findMany", async () => {
+    getWorkspaceNewspaperCadenceMock.mockResolvedValue("DAILY");
     prismaMock.buildArtifact.findMany.mockResolvedValue([mockRecentBuildArtifact()]);
     prismaMock.conversationSession.findMany.mockResolvedValue([
       { userId: "user-a", user: { id: "user-a", email: "a@example.com", displayName: "A" }, turns: [{ userMessage: "hi", assistantMessage: "yo" }] },
@@ -442,6 +530,49 @@ describe("runDailyDigest", () => {
     }));
     expect(recordNewspaperDeliveryMock).toHaveBeenCalledWith(expect.objectContaining({
       memberId: "member-daily",
+      status: "SENT",
+    }));
+  });
+
+  it("excludes system and support identities from recipient newspapers", async () => {
+    prismaMock.buildArtifact.findMany.mockResolvedValue([mockRecentBuildArtifact()]);
+    prismaMock.member.findMany.mockImplementation(async (params: any) => {
+      if (params?.select?.joinedAt) return [];
+      return [
+        {
+          id: "member-human",
+          newspaperCadence: "WEEKLY",
+          roleAssignments: [],
+          user: { id: "user-human", email: "human@example.com", displayName: "Human Member" },
+        },
+        {
+          id: "member-system",
+          newspaperCadence: "WEEKLY",
+          roleAssignments: [],
+          user: { id: "user-system", email: "system+workspace@corgtex.local", displayName: "System" },
+        },
+        {
+          id: "member-support",
+          newspaperCadence: "WEEKLY",
+          roleAssignments: [],
+          user: { id: "user-support", email: "support+workspace@corgtex.local", displayName: "Corgtex Support" },
+        },
+      ];
+    });
+
+    const { runDailyDigest } = await import("./daily-digest");
+    await runDailyDigest({
+      workspaceId: "workspace-1",
+      dateISO: "2026-04-30T12:00:00.000Z",
+      cadence: "WEEKLY",
+    });
+
+    expect(sendEmailMock).toHaveBeenCalledTimes(1);
+    expect(sendEmailMock).toHaveBeenCalledWith(expect.objectContaining({
+      to: "human@example.com",
+    }));
+    expect(recordNewspaperDeliveryMock).toHaveBeenCalledWith(expect.objectContaining({
+      memberId: "member-human",
       status: "SENT",
     }));
   });
@@ -605,6 +736,7 @@ describe("runDailyDigest", () => {
   });
 
   it("records skipped deliveries when email is not configured", async () => {
+    getWorkspaceNewspaperCadenceMock.mockResolvedValue("DAILY");
     prismaMock.buildArtifact.findMany.mockResolvedValue([mockRecentBuildArtifact()]);
     sendEmailMock.mockResolvedValue({ status: "SKIPPED", reason: "RESEND_API_KEY is not configured." });
 
@@ -625,7 +757,28 @@ describe("runDailyDigest", () => {
     }));
   });
 
+  it("records skipped deliveries for true no-input runs", async () => {
+    const { runDailyDigest } = await import("./daily-digest");
+    const result = await runDailyDigest({
+      workspaceId: "workspace-1",
+      dateISO: "2026-04-30T12:00:00.000Z",
+    });
+
+    expect(result).toEqual(expect.objectContaining({
+      sentEmails: 0,
+      skippedEmails: 1,
+    }));
+    expect(extractMock).not.toHaveBeenCalled();
+    expect(recordNewspaperDeliveryMock).toHaveBeenCalledWith(expect.objectContaining({
+      memberId: "member-1",
+      cadence: "WEEKLY",
+      status: "SKIPPED",
+      error: "No digest inputs.",
+    }));
+  });
+
   it("records skipped deliveries instead of sending empty structured newspapers", async () => {
+    getWorkspaceNewspaperCadenceMock.mockResolvedValue("DAILY");
     prismaMock.buildArtifact.findMany.mockResolvedValue([mockRecentBuildArtifact()]);
     extractMock.mockImplementation(async ({ instruction }: { instruction: string }) => {
       if (instruction.startsWith("Generate a structured")) {
@@ -655,6 +808,7 @@ describe("runDailyDigest", () => {
   });
 
   it("records failed deliveries when sending fails", async () => {
+    getWorkspaceNewspaperCadenceMock.mockResolvedValue("DAILY");
     prismaMock.buildArtifact.findMany.mockResolvedValue([mockRecentBuildArtifact()]);
     sendEmailMock.mockRejectedValue(new Error("provider unavailable"));
 
@@ -715,6 +869,7 @@ describe("runDailyDigest", () => {
   });
 
   it("updates an existing draft newspaper article instead of creating a duplicate slug", async () => {
+    getWorkspaceNewspaperCadenceMock.mockResolvedValue("DAILY");
     prismaMock.buildArtifact.findMany.mockResolvedValue([mockRecentBuildArtifact()]);
     prismaMock.brainArticle.findUnique
       .mockResolvedValueOnce({
@@ -743,6 +898,7 @@ describe("runDailyDigest", () => {
   });
 
   it("skips writing over an existing non-draft newspaper article and still sends the digest", async () => {
+    getWorkspaceNewspaperCadenceMock.mockResolvedValue("DAILY");
     prismaMock.buildArtifact.findMany.mockResolvedValue([mockRecentBuildArtifact()]);
     prismaMock.brainArticle.findUnique
       .mockResolvedValueOnce({

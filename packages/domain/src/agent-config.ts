@@ -21,8 +21,21 @@ export type AgentConfigSummary = {
   configJson: any;
 };
 
-export const DEFAULT_NEWSPAPER_CADENCE: NewspaperCadence = "DAILY";
+export const DEFAULT_NEWSPAPER_CADENCE: NewspaperCadence = "WEEKLY";
+export type NewspaperWeekday = "MONDAY" | "TUESDAY" | "WEDNESDAY" | "THURSDAY" | "FRIDAY" | "SATURDAY" | "SUNDAY";
+export const DEFAULT_NEWSPAPER_WEEKDAY: NewspaperWeekday = "MONDAY";
+export const DEFAULT_NEWSPAPER_LOCAL_TIME = "08:00";
+export const DEFAULT_NEWSPAPER_TIME_ZONE = "UTC";
 const NEWSPAPER_CADENCES = new Set<NewspaperCadence>(["DAILY", "WEEKLY", "OFF"]);
+const NEWSPAPER_WEEKDAYS = new Set<NewspaperWeekday>([
+  "MONDAY",
+  "TUESDAY",
+  "WEDNESDAY",
+  "THURSDAY",
+  "FRIDAY",
+  "SATURDAY",
+  "SUNDAY",
+]);
 export type CompanyUnderstandingGoalApplyMode = "AUTO" | "MANUAL";
 export const DEFAULT_COMPANY_UNDERSTANDING_GOAL_APPLY_MODE: CompanyUnderstandingGoalApplyMode = "AUTO";
 const COMPANY_UNDERSTANDING_GOAL_APPLY_MODES = new Set<CompanyUnderstandingGoalApplyMode>(["AUTO", "MANUAL"]);
@@ -47,6 +60,117 @@ export function normalizeNewspaperCadence(value: unknown, fallback: NewspaperCad
     : fallback;
 }
 
+export type NewspaperScheduleConfig = {
+  cadence: NewspaperCadence;
+  weekday: NewspaperWeekday;
+  localTime: string;
+  timeZone: string;
+};
+
+function normalizeNewspaperWeekday(value: unknown, fallback: NewspaperWeekday = DEFAULT_NEWSPAPER_WEEKDAY): NewspaperWeekday {
+  const normalized = typeof value === "string" ? value.trim().toUpperCase() : "";
+  return NEWSPAPER_WEEKDAYS.has(normalized as NewspaperWeekday)
+    ? normalized as NewspaperWeekday
+    : fallback;
+}
+
+function normalizeNewspaperLocalTime(value: unknown, fallback = DEFAULT_NEWSPAPER_LOCAL_TIME) {
+  if (typeof value !== "string") return fallback;
+  const match = value.trim().match(/^([01]?\d|2[0-3]):([0-5]\d)$/);
+  if (!match) return fallback;
+  return `${match[1].padStart(2, "0")}:${match[2]}`;
+}
+
+function isValidTimeZone(value: string) {
+  try {
+    new Intl.DateTimeFormat("en-US", { timeZone: value }).format(new Date(0));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function normalizeNewspaperTimeZone(value: unknown, fallback = DEFAULT_NEWSPAPER_TIME_ZONE) {
+  if (typeof value !== "string") return fallback;
+  const trimmed = value.trim();
+  return trimmed && isValidTimeZone(trimmed) ? trimmed : fallback;
+}
+
+export function normalizeNewspaperScheduleConfig(configJson: unknown): NewspaperScheduleConfig {
+  const config = isRecord(configJson) ? configJson : {};
+  return {
+    cadence: normalizeNewspaperCadence(config.newspaperCadence),
+    weekday: normalizeNewspaperWeekday(config.newspaperWeekday),
+    localTime: normalizeNewspaperLocalTime(config.newspaperLocalTime),
+    timeZone: normalizeNewspaperTimeZone(config.newspaperTimeZone),
+  };
+}
+
+export function getNewspaperLocalDateParts(now: Date, timeZone: string) {
+  const normalizedTimeZone = normalizeNewspaperTimeZone(timeZone);
+  const formatter = new Intl.DateTimeFormat("en-US", {
+    timeZone: normalizedTimeZone,
+    weekday: "long",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23",
+  });
+  const parts = new Map(formatter.formatToParts(now).map((part) => [part.type, part.value]));
+  const weekday = normalizeNewspaperWeekday(parts.get("weekday"));
+  return {
+    dateKey: `${parts.get("year")}-${parts.get("month")}-${parts.get("day")}`,
+    weekday,
+    hour: Number(parts.get("hour") ?? "0"),
+    minute: Number(parts.get("minute") ?? "0"),
+    timeZone: normalizedTimeZone,
+  };
+}
+
+export function isNewspaperScheduleDue(params: {
+  now: Date;
+  schedule: NewspaperScheduleConfig;
+  cadence: Exclude<NewspaperCadence, "OFF">;
+}) {
+  const local = getNewspaperLocalDateParts(params.now, params.schedule.timeZone);
+  const [scheduleHour, scheduleMinute] = params.schedule.localTime.split(":").map((part) => Number(part));
+  const isAfterLocalSendTime = local.hour > scheduleHour || (local.hour === scheduleHour && local.minute >= scheduleMinute);
+  if (!isAfterLocalSendTime) return false;
+  if (params.cadence === "DAILY") return true;
+  return local.weekday === params.schedule.weekday;
+}
+
+export function getNextNewspaperRunISO(params: {
+  from: Date;
+  schedule: NewspaperScheduleConfig;
+  cadence?: NewspaperCadence;
+}) {
+  const cadence = params.cadence ?? params.schedule.cadence;
+  if (cadence === "OFF") return null;
+
+  const stepMs = 15 * 60 * 1000;
+  let cursor = new Date(Math.ceil(params.from.getTime() / stepMs) * stepMs);
+  const horizon = new Date(params.from.getTime() + 15 * 24 * 60 * 60 * 1000);
+  while (cursor <= horizon) {
+    if (isNewspaperScheduleDue({ now: cursor, schedule: params.schedule, cadence })) {
+      return cursor.toISOString();
+    }
+    cursor = new Date(cursor.getTime() + stepMs);
+  }
+  return null;
+}
+
+export function isHumanNewspaperRecipientIdentity(user: { email?: string | null; displayName?: string | null }) {
+  const email = user.email?.trim().toLowerCase() ?? "";
+  const displayName = user.displayName?.trim().toLowerCase() ?? "";
+  if (!email) return false;
+  if (email.startsWith("system+") || email.startsWith("support+")) return false;
+  if (displayName === "corgtex support") return false;
+  return true;
+}
+
 export function normalizeCompanyUnderstandingGoalApplyMode(
   value: unknown,
   fallback: CompanyUnderstandingGoalApplyMode = DEFAULT_COMPANY_UNDERSTANDING_GOAL_APPLY_MODE,
@@ -59,8 +183,12 @@ export function normalizeCompanyUnderstandingGoalApplyMode(
 function normalizeAgentConfigJson(agentKey: string, configJson: unknown): Prisma.InputJsonObject {
   const config = isRecord(configJson) ? { ...configJson } : {};
 
-  if (agentKey === "daily-digest" && "newspaperCadence" in config) {
-    config.newspaperCadence = normalizeNewspaperCadence(config.newspaperCadence);
+  if (agentKey === "daily-digest") {
+    const schedule = normalizeNewspaperScheduleConfig(config);
+    config.newspaperCadence = schedule.cadence;
+    config.newspaperWeekday = schedule.weekday;
+    config.newspaperLocalTime = schedule.localTime;
+    config.newspaperTimeZone = schedule.timeZone;
   }
   if (agentKey === "company-understanding") {
     config.goalApplyMode = normalizeCompanyUnderstandingGoalApplyMode(config.goalApplyMode);
@@ -95,6 +223,14 @@ function defaultConfigJson(agentKey: string) {
   if (agentKey === "slack-agent") return DEFAULT_SLACK_AGENT_CONFIG;
   if (agentKey === "company-understanding") {
     return { goalApplyMode: DEFAULT_COMPANY_UNDERSTANDING_GOAL_APPLY_MODE };
+  }
+  if (agentKey === "daily-digest") {
+    return {
+      newspaperCadence: DEFAULT_NEWSPAPER_CADENCE,
+      newspaperWeekday: DEFAULT_NEWSPAPER_WEEKDAY,
+      newspaperLocalTime: DEFAULT_NEWSPAPER_LOCAL_TIME,
+      newspaperTimeZone: DEFAULT_NEWSPAPER_TIME_ZONE,
+    };
   }
   return {};
 }
@@ -193,7 +329,7 @@ export async function getWorkspaceNewspaperCadence(workspaceId: string): Promise
     select: { configJson: true },
   });
 
-  return normalizeNewspaperCadence(isRecord(config?.configJson) ? config.configJson.newspaperCadence : undefined);
+  return normalizeNewspaperScheduleConfig(config?.configJson).cadence;
 }
 
 export async function getCompanyUnderstandingGoalApplyMode(
@@ -213,8 +349,7 @@ export async function getCompanyUnderstandingGoalApplyMode(
 
 export type WorkspaceDigestSetting = {
   enabled: boolean;
-  cadence: NewspaperCadence;
-};
+} & NewspaperScheduleConfig;
 
 /**
  * Batched equivalent of calling `isAgentEnabled(id, "daily-digest")` and
@@ -244,25 +379,28 @@ export async function getWorkspaceDigestSettings(
 
   for (const workspaceId of workspaceIds) {
     const config = configByWorkspace.get(workspaceId);
+    const schedule = normalizeNewspaperScheduleConfig(config?.configJson);
     settings.set(workspaceId, {
       enabled: canDisable ? (config?.enabled ?? true) : true,
-      cadence: normalizeNewspaperCadence(isRecord(config?.configJson) ? config.configJson.newspaperCadence : undefined),
+      ...schedule,
     });
   }
 
   return settings;
 }
 
-export async function updateWorkspaceNewspaperCadence(
+export async function updateWorkspaceNewspaperSchedule(
   actor: AppActor,
   params: {
     workspaceId: string;
-    cadence: NewspaperCadence;
+    cadence?: NewspaperCadence;
+    weekday?: NewspaperWeekday;
+    localTime?: string;
+    timeZone?: string;
   },
 ) {
   await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId, allowedRoles: ["ADMIN"] });
 
-  const cadence = normalizeNewspaperCadence(params.cadence);
   const existing = await prisma.workspaceAgentConfig.findUnique({
     where: {
       workspaceId_agentKey: { workspaceId: params.workspaceId, agentKey: "daily-digest" },
@@ -272,9 +410,28 @@ export async function updateWorkspaceNewspaperCadence(
   const currentConfig = isRecord(existing?.configJson)
     ? existing.configJson as Prisma.InputJsonObject
     : {};
+  const currentSchedule = normalizeNewspaperScheduleConfig(currentConfig);
+  const schedule = normalizeNewspaperScheduleConfig({
+    ...currentConfig,
+    newspaperCadence: params.cadence === undefined
+      ? currentSchedule.cadence
+      : normalizeNewspaperCadence(params.cadence, currentSchedule.cadence),
+    newspaperWeekday: params.weekday === undefined
+      ? currentSchedule.weekday
+      : normalizeNewspaperWeekday(params.weekday, currentSchedule.weekday),
+    newspaperLocalTime: params.localTime === undefined
+      ? currentSchedule.localTime
+      : normalizeNewspaperLocalTime(params.localTime, currentSchedule.localTime),
+    newspaperTimeZone: params.timeZone === undefined
+      ? currentSchedule.timeZone
+      : normalizeNewspaperTimeZone(params.timeZone, currentSchedule.timeZone),
+  });
   const configJson = toInputJson({
     ...currentConfig,
-    newspaperCadence: cadence,
+    newspaperCadence: schedule.cadence,
+    newspaperWeekday: schedule.weekday,
+    newspaperLocalTime: schedule.localTime,
+    newspaperTimeZone: schedule.timeZone,
   }) as Prisma.InputJsonObject;
 
   return prisma.workspaceAgentConfig.upsert({
@@ -296,6 +453,16 @@ export async function updateWorkspaceNewspaperCadence(
       configJson,
     },
   });
+}
+
+export async function updateWorkspaceNewspaperCadence(
+  actor: AppActor,
+  params: {
+    workspaceId: string;
+    cadence: NewspaperCadence;
+  },
+) {
+  return updateWorkspaceNewspaperSchedule(actor, params);
 }
 
 export async function updateCompanyUnderstandingGoalApplyMode(

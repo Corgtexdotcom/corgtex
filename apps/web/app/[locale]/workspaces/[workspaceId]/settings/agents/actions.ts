@@ -6,7 +6,9 @@ import {
   updateAgentConfig,
   updateCompanyUnderstandingGoalApplyMode,
   updateWorkspaceNewspaperCadence,
+  updateWorkspaceNewspaperSchedule,
   type CompanyUnderstandingGoalApplyMode,
+  type NewspaperWeekday,
 } from "@corgtex/domain";
 import { revalidatePath } from "next/cache";
 
@@ -30,6 +32,23 @@ export async function updateAgentNewspaperCadenceAction(
 
   const actor = await requirePageActor();
   await updateWorkspaceNewspaperCadence(actor, { workspaceId, cadence });
+  revalidatePath(`/workspaces/${workspaceId}/settings/agents`);
+  revalidatePath(`/workspaces/${workspaceId}/settings`);
+}
+
+export async function updateAgentNewspaperScheduleAction(
+  workspaceId: string,
+  schedule: {
+    cadence?: "DAILY" | "WEEKLY" | "OFF";
+    weekday?: NewspaperWeekday;
+    localTime?: string;
+    timeZone?: string;
+  },
+) {
+  await enforceDemoGuard(workspaceId);
+
+  const actor = await requirePageActor();
+  await updateWorkspaceNewspaperSchedule(actor, { workspaceId, ...schedule });
   revalidatePath(`/workspaces/${workspaceId}/settings/agents`);
   revalidatePath(`/workspaces/${workspaceId}/settings`);
 }

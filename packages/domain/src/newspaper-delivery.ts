@@ -4,6 +4,12 @@ import type { NewspaperCadence, NewspaperDeliveryKind, NewspaperDeliveryStatus }
 import { createHmac } from "node:crypto";
 import { AppError } from "./errors";
 import { requireWorkspaceMembership } from "./auth";
+import {
+  getNextNewspaperRunISO,
+  isHumanNewspaperRecipientIdentity,
+  normalizeNewspaperScheduleConfig,
+  type NewspaperScheduleConfig,
+} from "./agent-config";
 
 const HREF_ATTR_PATTERN = /href\s*=\s*(["'])(.*?)\1/gi;
 const TRACKING_SALT = "corgtex-newspaper-link";
@@ -320,4 +326,304 @@ export async function listNewspaperDeliveryDetails(actor: AppActor, workspaceId:
       },
     },
   });
+}
+
+async function countNewspaperSources(workspaceId: string, since: Date) {
+  const [
+    meetings,
+    proposals,
+    resolvedTensions,
+    openActions,
+    goals,
+    goalUpdates,
+    roleChanges,
+    roleHolderChanges,
+    newMembers,
+    brainArticles,
+    documents,
+    activeAdviceRequests,
+    conversations,
+    slackMessages,
+    buildArtifacts,
+  ] = await Promise.all([
+    prisma.meeting.count({
+      where: {
+        workspaceId,
+        archivedAt: null,
+        OR: [
+          { recordedAt: { gte: since } },
+          { updatedAt: { gte: since } },
+          { summaryPostedAt: { gte: since } },
+          { aiProcessedAt: { gte: since } },
+        ],
+      },
+    }),
+    prisma.proposal.count({
+      where: {
+        workspaceId,
+        archivedAt: null,
+        isPrivate: false,
+        OR: [
+          { createdAt: { gte: since } },
+          { updatedAt: { gte: since } },
+          { publishedAt: { gte: since } },
+          { decidedAt: { gte: since } },
+        ],
+      },
+    }),
+    prisma.tension.count({
+      where: {
+        workspaceId,
+        archivedAt: null,
+        isPrivate: false,
+        status: "RESOLVED",
+        OR: [
+          { resolvedAt: { gte: since } },
+          { updatedAt: { gte: since } },
+        ],
+      },
+    }),
+    prisma.action.count({
+      where: {
+        workspaceId,
+        archivedAt: null,
+        isPrivate: false,
+        status: { in: ["OPEN", "IN_PROGRESS"] },
+      },
+    }),
+    prisma.goal.count({
+      where: {
+        workspaceId,
+        archivedAt: null,
+        OR: [
+          { updatedAt: { gte: since } },
+          { status: { in: ["ACTIVE", "ON_TRACK", "AT_RISK", "BEHIND"] } },
+        ],
+      },
+    }),
+    prisma.goalUpdate.count({
+      where: {
+        createdAt: { gte: since },
+        goal: {
+          workspaceId,
+          archivedAt: null,
+        },
+      },
+    }),
+    prisma.roleVersion.count({
+      where: {
+        workspaceId,
+        createdAt: { gte: since },
+      },
+    }),
+    prisma.roleHolderHistory.count({
+      where: {
+        workspaceId,
+        OR: [
+          { startedAt: { gte: since } },
+          { endedAt: { gte: since } },
+        ],
+      },
+    }),
+    prisma.member.count({
+      where: {
+        workspaceId,
+        isActive: true,
+        joinedAt: { gte: since },
+      },
+    }),
+    prisma.brainArticle.count({
+      where: {
+        workspaceId,
+        archivedAt: null,
+        isPrivate: false,
+        type: { not: "DIGEST" },
+        OR: [
+          { createdAt: { gte: since } },
+          { updatedAt: { gte: since } },
+          { publishedAt: { gte: since } },
+        ],
+      },
+    }),
+    prisma.document.count({
+      where: {
+        workspaceId,
+        archivedAt: null,
+        OR: [
+          { createdAt: { gte: since } },
+          { updatedAt: { gte: since } },
+        ],
+      },
+    }),
+    prisma.adviceRequest.count({
+      where: {
+        workspaceId,
+        status: "ACTIVE",
+      },
+    }),
+    prisma.conversationSession.count({
+      where: {
+        workspaceId,
+        turns: { some: { createdAt: { gte: since } } },
+      },
+    }),
+    prisma.communicationMessage.count({
+      where: {
+        workspaceId,
+        provider: "SLACK",
+        isHidden: false,
+        isDeleted: false,
+        receivedAt: { gte: since },
+      },
+    }),
+    prisma.buildArtifact.count({
+      where: {
+        workspaceId,
+        OR: [
+          { updatedAt: { gte: since } },
+          { mergedAt: { gte: since } },
+          { closedAt: { gte: since } },
+        ],
+      },
+    }),
+  ]);
+
+  return {
+    meetings,
+    proposals,
+    resolvedTensions,
+    openActions,
+    goals,
+    goalUpdates,
+    roleChanges,
+    roleHolderChanges,
+    newMembers,
+    brainArticles,
+    documents,
+    activeAdviceRequests,
+    conversations,
+    slackMessages,
+    buildArtifacts,
+  };
+}
+
+function nextRunsForRecipients(params: {
+  now: Date;
+  schedule: NewspaperScheduleConfig;
+  recipientCadences: Set<NewspaperCadence>;
+}) {
+  return {
+    daily: params.recipientCadences.has("DAILY")
+      ? getNextNewspaperRunISO({ from: params.now, schedule: params.schedule, cadence: "DAILY" })
+      : null,
+    weekly: params.recipientCadences.has("WEEKLY")
+      ? getNextNewspaperRunISO({ from: params.now, schedule: params.schedule, cadence: "WEEKLY" })
+      : null,
+  };
+}
+
+export async function getNewspaperDiagnostics(actor: AppActor, workspaceId: string, opts?: { now?: Date; take?: number }) {
+  await requireWorkspaceMembership({ actor, workspaceId });
+
+  const now = opts?.now ?? new Date();
+  const take = opts?.take ?? 10;
+  const config = await prisma.workspaceAgentConfig.findUnique({
+    where: {
+      workspaceId_agentKey: { workspaceId, agentKey: "daily-digest" },
+    },
+    select: {
+      enabled: true,
+      configJson: true,
+    },
+  });
+  const schedule = normalizeNewspaperScheduleConfig(config?.configJson);
+  const members = await prisma.member.findMany({
+    where: { workspaceId, isActive: true },
+    orderBy: { joinedAt: "asc" },
+    select: {
+      id: true,
+      newspaperCadence: true,
+      joinedAt: true,
+      user: {
+        select: {
+          email: true,
+          displayName: true,
+        },
+      },
+    },
+  });
+  const recipients = members.map((member) => {
+    const effectiveCadence = member.newspaperCadence ?? schedule.cadence;
+    const isHumanRecipient = isHumanNewspaperRecipientIdentity(member.user);
+    return {
+      memberId: member.id,
+      email: member.user.email,
+      displayName: member.user.displayName,
+      joinedAt: member.joinedAt,
+      memberOverride: member.newspaperCadence,
+      effectiveCadence,
+      isHumanRecipient,
+      receivesNewspaper: isHumanRecipient && effectiveCadence !== "OFF" && (config?.enabled ?? true),
+    };
+  });
+  const recipientCadences = new Set<NewspaperCadence>(
+    recipients.filter((recipient) => recipient.receivesNewspaper).map((recipient) => recipient.effectiveCadence),
+  );
+  const [oneDayCounts, sevenDayCounts, jobs, deliveries] = await Promise.all([
+    countNewspaperSources(workspaceId, new Date(now.getTime() - 24 * 60 * 60 * 1000)),
+    countNewspaperSources(workspaceId, new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000)),
+    prisma.workflowJob.findMany({
+      where: {
+        workspaceId,
+        type: "brain.daily-digest",
+      },
+      orderBy: { createdAt: "desc" },
+      take,
+      select: {
+        id: true,
+        status: true,
+        dedupeKey: true,
+        payload: true,
+        error: true,
+        runAfter: true,
+        createdAt: true,
+        startedAt: true,
+        completedAt: true,
+      },
+    }),
+    prisma.newspaperDelivery.findMany({
+      where: { workspaceId },
+      orderBy: { createdAt: "desc" },
+      take: take * 5,
+      select: {
+        id: true,
+        workflowJobId: true,
+        memberId: true,
+        cadence: true,
+        runKey: true,
+        recipientEmail: true,
+        subject: true,
+        status: true,
+        error: true,
+        sentAt: true,
+        skippedAt: true,
+        failedAt: true,
+        createdAt: true,
+      },
+    }),
+  ]);
+
+  return {
+    workspaceId,
+    agentEnabled: config?.enabled ?? true,
+    defaultSchedule: schedule,
+    nextRuns: nextRunsForRecipients({ now, schedule, recipientCadences }),
+    recipients,
+    sourceCounts: {
+      oneDay: oneDayCounts,
+      sevenDays: sevenDayCounts,
+    },
+    recentJobs: jobs,
+    recentDeliveries: deliveries,
+  };
 }

@@ -19,6 +19,7 @@ const listAgentCredentialsMock = vi.fn();
 const updateAgentCredentialScopesMock = vi.fn();
 const revokeAgentCredentialMock = vi.fn();
 const listAgentConfigsMock = vi.fn();
+const getNewspaperDiagnosticsMock = vi.fn();
 const updateAgentConfigMock = vi.fn();
 const getModelUsageBudgetMock = vi.fn();
 const updateModelUsageBudgetMock = vi.fn();
@@ -129,6 +130,7 @@ vi.mock("@corgtex/domain", async () => {
   updateAgentCredentialScopes: updateAgentCredentialScopesMock,
   revokeAgentCredential: revokeAgentCredentialMock,
   listAgentConfigs: listAgentConfigsMock,
+  getNewspaperDiagnostics: getNewspaperDiagnosticsMock,
   updateAgentConfig: updateAgentConfigMock,
   getModelUsageBudget: getModelUsageBudgetMock,
   updateModelUsageBudget: updateModelUsageBudgetMock,
@@ -261,6 +263,7 @@ describe("createCorgtexMcpServer", () => {
     updateAgentCredentialScopesMock.mockReset().mockResolvedValue({ id: "cred-1", label: "Production MCP", scopes: ["workspace:read"], isActive: true });
     revokeAgentCredentialMock.mockReset().mockResolvedValue({ id: "cred-1", label: "Production MCP", scopes: ["workspace:read"], isActive: false });
     listAgentConfigsMock.mockReset().mockResolvedValue([]);
+    getNewspaperDiagnosticsMock.mockReset().mockResolvedValue({});
     updateAgentConfigMock.mockReset().mockResolvedValue({
       id: "config-1",
       agentKey: "meeting-summary",
@@ -1231,6 +1234,29 @@ describe("createCorgtexMcpServer", () => {
     }));
     expect(listResponse.content[0].text).not.toContain("Do not expose raw customer policy");
     expect(updateResponse.content[0].text).not.toContain("Do not expose updated policy");
+  });
+
+  it("returns newspaper diagnostics through a read-only support tool", async () => {
+    const { createCorgtexMcpServer } = await import("./server");
+    const { requireScope } = await import("./auth");
+    getNewspaperDiagnosticsMock.mockResolvedValueOnce({
+      defaultSchedule: { cadence: "WEEKLY", weekday: "MONDAY", localTime: "08:00", timeZone: "UTC" },
+      sourceCounts: { sevenDays: { meetings: 2 } },
+    });
+
+    const server = createCorgtexMcpServer({
+      actor: { kind: "agent", authProvider: "bootstrap" } as any,
+      workspaceId: "ws-1",
+      authKind: "agent",
+    });
+
+    const response = await (server as any)._registeredTools.get_newspaper_diagnostics.handler({ take: 5 });
+    const body = JSON.parse(response.content[0].text);
+
+    expect(vi.mocked(requireScope)).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: "ws-1" }), "agents:read");
+    expect(vi.mocked(requireScope)).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: "ws-1" }), "runtime:read");
+    expect(getNewspaperDiagnosticsMock).toHaveBeenCalledWith(expect.objectContaining({ kind: "agent" }), "ws-1", { take: 5 });
+    expect(body.diagnostics.sourceCounts.sevenDays.meetings).toBe(2);
   });
 
   it("updates and revokes agent credentials through support-scoped tools without returning token material", async () => {

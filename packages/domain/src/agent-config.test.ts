@@ -208,13 +208,13 @@ describe("agent-config", () => {
   });
 
   describe("newspaper cadence", () => {
-    it("defaults workspace newspaper cadence to daily when unset", async () => {
+    it("defaults workspace newspaper cadence to weekly when unset", async () => {
       const { prisma } = await import("@corgtex/shared");
       const { getWorkspaceNewspaperCadence } = await import("./agent-config");
 
       vi.mocked(prisma.workspaceAgentConfig.findUnique).mockResolvedValue(null);
 
-      await expect(getWorkspaceNewspaperCadence("ws-1")).resolves.toBe("DAILY");
+      await expect(getWorkspaceNewspaperCadence("ws-1")).resolves.toBe("WEEKLY");
     });
 
     it("reads configured workspace newspaper cadence", async () => {
@@ -239,7 +239,7 @@ describe("agent-config", () => {
       await expect(getWorkspaceNewspaperCadence("ws-1")).resolves.toBe("OFF");
     });
 
-    it("falls back to daily for invalid configured workspace newspaper cadence", async () => {
+    it("falls back to weekly for invalid configured workspace newspaper cadence", async () => {
       const { prisma } = await import("@corgtex/shared");
       const { getWorkspaceNewspaperCadence } = await import("./agent-config");
 
@@ -247,7 +247,7 @@ describe("agent-config", () => {
         configJson: { newspaperCadence: "MONTHLY" },
       } as any);
 
-      await expect(getWorkspaceNewspaperCadence("ws-1")).resolves.toBe("DAILY");
+      await expect(getWorkspaceNewspaperCadence("ws-1")).resolves.toBe("WEEKLY");
     });
 
     it("merges admin newspaper cadence into the daily digest config", async () => {
@@ -267,10 +267,22 @@ describe("agent-config", () => {
       expect(prisma.workspaceAgentConfig.upsert).toHaveBeenCalledWith(expect.objectContaining({
         where: { workspaceId_agentKey: { workspaceId: "ws-1", agentKey: "daily-digest" } },
         create: expect.objectContaining({
-          configJson: { existing: true, newspaperCadence: "WEEKLY" },
+          configJson: {
+            existing: true,
+            newspaperCadence: "WEEKLY",
+            newspaperWeekday: "MONDAY",
+            newspaperLocalTime: "08:00",
+            newspaperTimeZone: "UTC",
+          },
         }),
         update: {
-          configJson: { existing: true, newspaperCadence: "WEEKLY" },
+          configJson: {
+            existing: true,
+            newspaperCadence: "WEEKLY",
+            newspaperWeekday: "MONDAY",
+            newspaperLocalTime: "08:00",
+            newspaperTimeZone: "UTC",
+          },
         },
       }));
     });
@@ -291,10 +303,63 @@ describe("agent-config", () => {
 
       expect(prisma.workspaceAgentConfig.upsert).toHaveBeenCalledWith(expect.objectContaining({
         create: expect.objectContaining({
-          configJson: { existing: true, newspaperCadence: "OFF" },
+          configJson: {
+            existing: true,
+            newspaperCadence: "OFF",
+            newspaperWeekday: "MONDAY",
+            newspaperLocalTime: "08:00",
+            newspaperTimeZone: "UTC",
+          },
         }),
         update: {
-          configJson: { existing: true, newspaperCadence: "OFF" },
+          configJson: {
+            existing: true,
+            newspaperCadence: "OFF",
+            newspaperWeekday: "MONDAY",
+            newspaperLocalTime: "08:00",
+            newspaperTimeZone: "UTC",
+          },
+        },
+      }));
+    });
+
+    it("merges admin newspaper schedule into the daily digest config", async () => {
+      const { prisma } = await import("@corgtex/shared");
+      const { updateWorkspaceNewspaperSchedule } = await import("./agent-config");
+
+      vi.mocked(prisma.workspaceAgentConfig.findUnique).mockResolvedValue({
+        configJson: { existing: true, newspaperCadence: "WEEKLY" },
+      } as any);
+      vi.mocked(prisma.workspaceAgentConfig.upsert).mockResolvedValue({} as any);
+
+      await updateWorkspaceNewspaperSchedule(
+        { kind: "user", user: { id: "u-1" } } as any,
+        {
+          workspaceId: "ws-1",
+          weekday: "TUESDAY",
+          localTime: "9:30",
+          timeZone: "America/Los_Angeles",
+        },
+      );
+
+      expect(prisma.workspaceAgentConfig.upsert).toHaveBeenCalledWith(expect.objectContaining({
+        create: expect.objectContaining({
+          configJson: {
+            existing: true,
+            newspaperCadence: "WEEKLY",
+            newspaperWeekday: "TUESDAY",
+            newspaperLocalTime: "09:30",
+            newspaperTimeZone: "America/Los_Angeles",
+          },
+        }),
+        update: {
+          configJson: {
+            existing: true,
+            newspaperCadence: "WEEKLY",
+            newspaperWeekday: "TUESDAY",
+            newspaperLocalTime: "09:30",
+            newspaperTimeZone: "America/Los_Angeles",
+          },
         },
       }));
     });
@@ -377,12 +442,36 @@ describe("agent-config", () => {
         where: { agentKey: "daily-digest", workspaceId: { in: ["ws-1", "ws-2", "ws-3", "ws-4"] } },
         select: { workspaceId: true, enabled: true, configJson: true },
       });
-      expect(settings.get("ws-1")).toEqual({ enabled: true, cadence: "WEEKLY" });
-      expect(settings.get("ws-2")).toEqual({ enabled: false, cadence: "OFF" });
-      // Invalid configured cadence falls back to the daily default.
-      expect(settings.get("ws-3")).toEqual({ enabled: true, cadence: "DAILY" });
-      // A workspace with no config row defaults to enabled + the daily default.
-      expect(settings.get("ws-4")).toEqual({ enabled: true, cadence: "DAILY" });
+      expect(settings.get("ws-1")).toEqual({
+        enabled: true,
+        cadence: "WEEKLY",
+        weekday: "MONDAY",
+        localTime: "08:00",
+        timeZone: "UTC",
+      });
+      expect(settings.get("ws-2")).toEqual({
+        enabled: false,
+        cadence: "OFF",
+        weekday: "MONDAY",
+        localTime: "08:00",
+        timeZone: "UTC",
+      });
+      // Invalid configured cadence falls back to the weekly default.
+      expect(settings.get("ws-3")).toEqual({
+        enabled: true,
+        cadence: "WEEKLY",
+        weekday: "MONDAY",
+        localTime: "08:00",
+        timeZone: "UTC",
+      });
+      // A workspace with no config row defaults to enabled + the weekly Monday default.
+      expect(settings.get("ws-4")).toEqual({
+        enabled: true,
+        cadence: "WEEKLY",
+        weekday: "MONDAY",
+        localTime: "08:00",
+        timeZone: "UTC",
+      });
     });
   });
 });

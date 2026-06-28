@@ -6,6 +6,7 @@ import {
   getAgentModelOverride,
   getWorkspaceNewspaperCadence,
   instrumentNewspaperHtmlLinks,
+  isHumanNewspaperRecipientIdentity,
   normalizeNewspaperCadence,
   recordNewspaperDelivery,
 } from "@corgtex/domain";
@@ -186,6 +187,120 @@ type AdviceSubjectPreview = {
   title: string;
 };
 
+type OperatingDigestInputs = {
+  meetings: Array<{
+    id: string;
+    title: string | null;
+    recordedAt: Date;
+    summaryMd: string | null;
+    decisionsJson: unknown;
+    participantEmails: string[];
+    insights: Array<{
+      type: string;
+      operation: string;
+      status: string;
+      title: string;
+      bodyMd: string;
+      dueAt: Date | null;
+    }>;
+  }>;
+  proposals: Array<{
+    id: string;
+    title: string;
+    summary: string | null;
+    status: string;
+    resolutionOutcome: string | null;
+    decisionMd: string | null;
+    decidedAt: Date | null;
+    updatedAt: Date;
+    createdAt: Date;
+  }>;
+  resolvedTensions: Array<{
+    id: string;
+    title: string;
+    status: string;
+    resolvedVia: string | null;
+    resolvedAt: Date | null;
+    priority: number;
+    updatedAt: Date;
+  }>;
+  openActions: Array<{
+    id: string;
+    title: string;
+    bodyMd: string | null;
+    status: string;
+    assigneeMemberId: string | null;
+    dueAt: Date | null;
+    priority: number;
+    updatedAt: Date;
+  }>;
+  goals: Array<{
+    id: string;
+    title: string;
+    status: string;
+    cadence: string;
+    progressPercent: number;
+    targetDate: Date | null;
+    updatedAt: Date;
+    updates: Array<{
+      bodyMd: string;
+      newProgress: number | null;
+      statusChange: string | null;
+      createdAt: Date;
+    }>;
+  }>;
+  roleVersions: Array<{
+    id: string;
+    name: string;
+    changeType: string;
+    createdAt: Date;
+  }>;
+  roleHolderHistory: Array<{
+    id: string;
+    holderKind: string;
+    startedAt: Date;
+    endedAt: Date | null;
+    role: { name: string };
+    member: { user: { email: string; displayName: string | null } } | null;
+  }>;
+  newMembers: Array<{
+    id: string;
+    joinedAt: Date;
+    user: { email: string; displayName: string | null };
+  }>;
+  brainArticles: Array<{
+    id: string;
+    title: string;
+    type: string;
+    authority: string;
+    updatedAt: Date;
+    publishedAt: Date | null;
+  }>;
+  documents: Array<{
+    id: string;
+    title: string;
+    source: string;
+    updatedAt: Date;
+  }>;
+};
+
+type DigestSourceCounts = {
+  meetings: number;
+  proposals: number;
+  resolvedTensions: number;
+  openActions: number;
+  goals: number;
+  roleChanges: number;
+  roleHolderChanges: number;
+  newMembers: number;
+  brainArticles: number;
+  documents: number;
+  adviceRequests: number;
+  conversations: number;
+  slackMessages: number;
+  buildArtifacts: number;
+};
+
 function formatBuildArtifactDate(value: Date | null) {
   return value ? value.toISOString().split("T")[0] : "unknown date";
 }
@@ -219,6 +334,159 @@ function formatBuildArtifactDigestInput(items: BuildArtifactDigestItem[]) {
     closed.length > 0 ? `Closed without merge:\n${closed.map(formatBuildArtifactDigestItem).join("\n\n")}` : null,
   ];
   return sections.filter(Boolean).join("\n\n");
+}
+
+function formatDigestDate(value: Date | null) {
+  return value ? value.toISOString().split("T")[0] : null;
+}
+
+function compactDigestLine(value: string | null | undefined, maxLength = 700) {
+  if (!value) return null;
+  const normalized = value.replace(/\s+/g, " ").trim();
+  if (!normalized) return null;
+  return normalized.length <= maxLength ? normalized : `${normalized.slice(0, maxLength - 3).trimEnd()}...`;
+}
+
+function stringifyDecisionValue(value: unknown): string | null {
+  if (!value) return null;
+  if (typeof value === "string") return compactDigestLine(value, 600);
+  if (Array.isArray(value)) {
+    const items = value.flatMap((item) => {
+      if (typeof item === "string") return [item];
+      if (item && typeof item === "object" && !Array.isArray(item)) {
+        const record = item as Record<string, unknown>;
+        const title = typeof record.title === "string" ? record.title : null;
+        const summary = typeof record.summary === "string"
+          ? record.summary
+          : typeof record.body === "string"
+            ? record.body
+            : typeof record.text === "string"
+              ? record.text
+              : null;
+        return [compactDigestLine([title, summary].filter(Boolean).join(": "), 400)].filter(Boolean) as string[];
+      }
+      return [];
+    });
+    return items.length > 0 ? items.slice(0, 5).join("; ") : null;
+  }
+  if (typeof value === "object") {
+    return compactDigestLine(JSON.stringify(value), 600);
+  }
+  return null;
+}
+
+function sourceCountsLine(counts: DigestSourceCounts) {
+  return [
+    `meetings=${counts.meetings}`,
+    `proposals=${counts.proposals}`,
+    `resolvedTensions=${counts.resolvedTensions}`,
+    `openActions=${counts.openActions}`,
+    `goals=${counts.goals}`,
+    `roleChanges=${counts.roleChanges}`,
+    `roleHolderChanges=${counts.roleHolderChanges}`,
+    `newMembers=${counts.newMembers}`,
+    `brainArticles=${counts.brainArticles}`,
+    `documents=${counts.documents}`,
+    `adviceRequests=${counts.adviceRequests}`,
+    `conversations=${counts.conversations}`,
+    `slackMessages=${counts.slackMessages}`,
+    `buildArtifacts=${counts.buildArtifacts}`,
+  ].join(", ");
+}
+
+function hasDigestSourceInputs(counts: DigestSourceCounts) {
+  return Object.values(counts).some((count) => count > 0);
+}
+
+function formatMeetingDigestInput(meetings: OperatingDigestInputs["meetings"]) {
+  return meetings.map((meeting) => {
+    const date = formatDigestDate(meeting.recordedAt) ?? "unknown date";
+    const title = meeting.title?.trim() || "Untitled meeting";
+    const decisions = stringifyDecisionValue(meeting.decisionsJson);
+    const insights = meeting.insights.slice(0, 5).map((insight) => {
+      const due = formatDigestDate(insight.dueAt);
+      return `${insight.type} ${insight.operation} ${insight.status}: ${insight.title}${due ? ` (due ${due})` : ""}${compactDigestLine(insight.bodyMd, 240) ? ` - ${compactDigestLine(insight.bodyMd, 240)}` : ""}`;
+    }).join("; ");
+    return [
+      `- ${title} (${date})`,
+      compactDigestLine(meeting.summaryMd, 1200) ? `  Summary: ${compactDigestLine(meeting.summaryMd, 1200)}` : null,
+      decisions ? `  Decisions: ${decisions}` : null,
+      insights ? `  Suggested/linked operating items: ${insights}` : null,
+      meeting.participantEmails.length > 0 ? `  Participants: ${meeting.participantEmails.slice(0, 8).join(", ")}` : null,
+    ].filter(Boolean).join("\n");
+  }).join("\n\n");
+}
+
+function formatProposalDigestInput(proposals: OperatingDigestInputs["proposals"]) {
+  return proposals.map((proposal) => {
+    const decided = formatDigestDate(proposal.decidedAt);
+    return [
+      `- ${proposal.title} (${proposal.status}${proposal.resolutionOutcome ? `, ${proposal.resolutionOutcome}` : ""})`,
+      compactDigestLine(proposal.summary, 500) ? `  Summary: ${compactDigestLine(proposal.summary, 500)}` : null,
+      compactDigestLine(proposal.decisionMd, 500) ? `  Decision: ${compactDigestLine(proposal.decisionMd, 500)}` : null,
+      decided ? `  Decided: ${decided}` : `  Updated: ${formatDigestDate(proposal.updatedAt)}`,
+    ].filter(Boolean).join("\n");
+  }).join("\n\n");
+}
+
+function formatResolvedTensionDigestInput(tensions: OperatingDigestInputs["resolvedTensions"]) {
+  return tensions.map((tension) => [
+    `- ${tension.title}`,
+    `  Resolved: ${formatDigestDate(tension.resolvedAt) ?? formatDigestDate(tension.updatedAt) ?? "unknown date"}`,
+    tension.resolvedVia ? `  Via: ${tension.resolvedVia}` : null,
+    tension.priority > 0 ? `  Priority: ${tension.priority}` : null,
+  ].filter(Boolean).join("\n")).join("\n\n");
+}
+
+function formatOpenActionDigestInput(actions: OperatingDigestInputs["openActions"]) {
+  return actions.map((action) => {
+    const due = formatDigestDate(action.dueAt);
+    return [
+      `- ${action.title} (${action.status})`,
+      compactDigestLine(action.bodyMd, 450) ? `  Detail: ${compactDigestLine(action.bodyMd, 450)}` : null,
+      action.assigneeMemberId ? `  Assignee member ID: ${action.assigneeMemberId}` : null,
+      due ? `  Due: ${due}` : null,
+      action.priority > 0 ? `  Priority: ${action.priority}` : null,
+    ].filter(Boolean).join("\n");
+  }).join("\n\n");
+}
+
+function formatGoalDigestInput(goals: OperatingDigestInputs["goals"]) {
+  return goals.map((goal) => {
+    const updates = goal.updates.slice(0, 3).map((update) => {
+      const progress = update.newProgress !== null ? ` progress ${update.newProgress}%` : "";
+      const status = update.statusChange ? ` status ${update.statusChange}` : "";
+      return `${formatDigestDate(update.createdAt)}:${progress}${status} ${compactDigestLine(update.bodyMd, 300) ?? ""}`.trim();
+    }).join("; ");
+    return [
+      `- ${goal.title} (${goal.cadence}, ${goal.status}, ${goal.progressPercent}% complete)`,
+      goal.targetDate ? `  Target: ${formatDigestDate(goal.targetDate)}` : null,
+      updates ? `  Recent updates: ${updates}` : `  Updated: ${formatDigestDate(goal.updatedAt)}`,
+    ].filter(Boolean).join("\n");
+  }).join("\n\n");
+}
+
+function formatRolesAndPeopleDigestInput(inputs: Pick<OperatingDigestInputs, "roleVersions" | "roleHolderHistory" | "newMembers">) {
+  const roleChanges = inputs.roleVersions.map((role) => `- Role ${role.changeType.toLowerCase()}: ${role.name} (${formatDigestDate(role.createdAt)})`);
+  const holderChanges = inputs.roleHolderHistory.map((history) => {
+    const holder = history.member?.user.displayName || history.member?.user.email || history.holderKind.toLowerCase();
+    const ended = history.endedAt ? `ended ${formatDigestDate(history.endedAt)}` : `started ${formatDigestDate(history.startedAt)}`;
+    return `- Role holder ${ended}: ${holder} in ${history.role.name}`;
+  });
+  const people = inputs.newMembers.map((member) => (
+    `- New member: ${member.user.displayName || member.user.email} joined ${formatDigestDate(member.joinedAt)}`
+  ));
+  return [...roleChanges, ...holderChanges, ...people].join("\n");
+}
+
+function formatBrainAndDocumentDigestInput(inputs: Pick<OperatingDigestInputs, "brainArticles" | "documents">) {
+  const brain = inputs.brainArticles.map((article) => (
+    `- Brain article: ${article.title} (${article.type}, ${article.authority}, updated ${formatDigestDate(article.updatedAt)})`
+  ));
+  const docs = inputs.documents.map((document) => (
+    `- Document: ${document.title} (${document.source}, updated ${formatDigestDate(document.updatedAt)})`
+  ));
+  return [...brain, ...docs].join("\n");
 }
 
 function validAdviceSubjectType(value: string): AdviceSubjectPreview["type"] | null {
@@ -448,11 +716,358 @@ async function loadPendingAdviceRequestsByMember(params: {
   return itemsByMemberId;
 }
 
+async function loadOperatingDigestInputs(params: {
+  workspaceId: string;
+  since: Date;
+}): Promise<OperatingDigestInputs> {
+  const [
+    meetings,
+    proposals,
+    resolvedTensions,
+    openActions,
+    goals,
+    roleVersions,
+    roleHolderHistory,
+    newMembers,
+    brainArticles,
+    documents,
+  ] = await Promise.all([
+    prisma.meeting.findMany({
+      where: {
+        workspaceId: params.workspaceId,
+        archivedAt: null,
+        OR: [
+          { recordedAt: { gte: params.since } },
+          { updatedAt: { gte: params.since } },
+          { summaryPostedAt: { gte: params.since } },
+          { aiProcessedAt: { gte: params.since } },
+        ],
+      },
+      orderBy: { recordedAt: "desc" },
+      take: 20,
+      select: {
+        id: true,
+        title: true,
+        recordedAt: true,
+        summaryMd: true,
+        decisionsJson: true,
+        participantEmails: true,
+        insights: {
+          where: {
+            status: { in: ["SUGGESTED", "CONFIRMED", "APPLIED"] },
+            OR: [
+              { createdAt: { gte: params.since } },
+              { updatedAt: { gte: params.since } },
+            ],
+          },
+          orderBy: [{ status: "asc" }, { createdAt: "desc" }],
+          take: 10,
+          select: {
+            type: true,
+            operation: true,
+            status: true,
+            title: true,
+            bodyMd: true,
+            dueAt: true,
+          },
+        },
+      },
+    }),
+    prisma.proposal.findMany({
+      where: {
+        workspaceId: params.workspaceId,
+        archivedAt: null,
+        isPrivate: false,
+        OR: [
+          { createdAt: { gte: params.since } },
+          { updatedAt: { gte: params.since } },
+          { publishedAt: { gte: params.since } },
+          { decidedAt: { gte: params.since } },
+        ],
+      },
+      orderBy: [{ decidedAt: "desc" }, { updatedAt: "desc" }],
+      take: 30,
+      select: {
+        id: true,
+        title: true,
+        summary: true,
+        status: true,
+        resolutionOutcome: true,
+        decisionMd: true,
+        decidedAt: true,
+        updatedAt: true,
+        createdAt: true,
+      },
+    }),
+    prisma.tension.findMany({
+      where: {
+        workspaceId: params.workspaceId,
+        archivedAt: null,
+        isPrivate: false,
+        status: "RESOLVED",
+        OR: [
+          { resolvedAt: { gte: params.since } },
+          { updatedAt: { gte: params.since } },
+        ],
+      },
+      orderBy: [{ resolvedAt: "desc" }, { updatedAt: "desc" }],
+      take: 30,
+      select: {
+        id: true,
+        title: true,
+        status: true,
+        resolvedVia: true,
+        resolvedAt: true,
+        priority: true,
+        updatedAt: true,
+      },
+    }),
+    prisma.action.findMany({
+      where: {
+        workspaceId: params.workspaceId,
+        archivedAt: null,
+        isPrivate: false,
+        status: { in: ["OPEN", "IN_PROGRESS"] },
+      },
+      orderBy: [{ dueAt: "asc" }, { priority: "desc" }, { updatedAt: "desc" }],
+      take: 50,
+      select: {
+        id: true,
+        title: true,
+        bodyMd: true,
+        status: true,
+        assigneeMemberId: true,
+        dueAt: true,
+        priority: true,
+        updatedAt: true,
+      },
+    }),
+    prisma.goal.findMany({
+      where: {
+        workspaceId: params.workspaceId,
+        archivedAt: null,
+        OR: [
+          { updatedAt: { gte: params.since } },
+          { status: { in: ["ACTIVE", "ON_TRACK", "AT_RISK", "BEHIND"] } },
+        ],
+      },
+      orderBy: [{ cadence: "asc" }, { updatedAt: "desc" }],
+      take: 25,
+      select: {
+        id: true,
+        title: true,
+        status: true,
+        cadence: true,
+        progressPercent: true,
+        targetDate: true,
+        updatedAt: true,
+        updates: {
+          where: { createdAt: { gte: params.since } },
+          orderBy: { createdAt: "desc" },
+          take: 3,
+          select: {
+            bodyMd: true,
+            newProgress: true,
+            statusChange: true,
+            createdAt: true,
+          },
+        },
+      },
+    }),
+    prisma.roleVersion.findMany({
+      where: {
+        workspaceId: params.workspaceId,
+        createdAt: { gte: params.since },
+      },
+      orderBy: { createdAt: "desc" },
+      take: 25,
+      select: {
+        id: true,
+        name: true,
+        changeType: true,
+        createdAt: true,
+      },
+    }),
+    prisma.roleHolderHistory.findMany({
+      where: {
+        workspaceId: params.workspaceId,
+        OR: [
+          { startedAt: { gte: params.since } },
+          { endedAt: { gte: params.since } },
+        ],
+      },
+      orderBy: { startedAt: "desc" },
+      take: 25,
+      select: {
+        id: true,
+        holderKind: true,
+        startedAt: true,
+        endedAt: true,
+        role: { select: { name: true } },
+        member: {
+          select: {
+            user: { select: { email: true, displayName: true } },
+          },
+        },
+      },
+    }),
+    prisma.member.findMany({
+      where: {
+        workspaceId: params.workspaceId,
+        isActive: true,
+        joinedAt: { gte: params.since },
+      },
+      orderBy: { joinedAt: "desc" },
+      take: 25,
+      select: {
+        id: true,
+        joinedAt: true,
+        user: { select: { email: true, displayName: true } },
+      },
+    }),
+    prisma.brainArticle.findMany({
+      where: {
+        workspaceId: params.workspaceId,
+        archivedAt: null,
+        isPrivate: false,
+        type: { not: "DIGEST" },
+        OR: [
+          { createdAt: { gte: params.since } },
+          { updatedAt: { gte: params.since } },
+          { publishedAt: { gte: params.since } },
+        ],
+      },
+      orderBy: { updatedAt: "desc" },
+      take: 25,
+      select: {
+        id: true,
+        title: true,
+        type: true,
+        authority: true,
+        updatedAt: true,
+        publishedAt: true,
+      },
+    }),
+    prisma.document.findMany({
+      where: {
+        workspaceId: params.workspaceId,
+        archivedAt: null,
+        OR: [
+          { createdAt: { gte: params.since } },
+          { updatedAt: { gte: params.since } },
+        ],
+      },
+      orderBy: { updatedAt: "desc" },
+      take: 25,
+      select: {
+        id: true,
+        title: true,
+        source: true,
+        updatedAt: true,
+      },
+    }),
+  ]);
+
+  return {
+    meetings: meetings as OperatingDigestInputs["meetings"],
+    proposals: proposals as OperatingDigestInputs["proposals"],
+    resolvedTensions: resolvedTensions as OperatingDigestInputs["resolvedTensions"],
+    openActions: openActions as OperatingDigestInputs["openActions"],
+    goals: goals as OperatingDigestInputs["goals"],
+    roleVersions: roleVersions as OperatingDigestInputs["roleVersions"],
+    roleHolderHistory: roleHolderHistory as OperatingDigestInputs["roleHolderHistory"],
+    newMembers: newMembers as OperatingDigestInputs["newMembers"],
+    brainArticles: brainArticles as OperatingDigestInputs["brainArticles"],
+    documents: documents as OperatingDigestInputs["documents"],
+  };
+}
+
+function buildDigestSourceCounts(params: {
+  operatingInputs: OperatingDigestInputs;
+  sessions: unknown[];
+  slackMessages: unknown[];
+  buildArtifacts: unknown[];
+  pendingAdviceByMemberId: Map<string, string[]>;
+}): DigestSourceCounts {
+  const adviceRequestIds = new Set<string>();
+  for (const items of params.pendingAdviceByMemberId.values()) {
+    for (const item of items) adviceRequestIds.add(item);
+  }
+  return {
+    meetings: params.operatingInputs.meetings.length,
+    proposals: params.operatingInputs.proposals.length,
+    resolvedTensions: params.operatingInputs.resolvedTensions.length,
+    openActions: params.operatingInputs.openActions.length,
+    goals: params.operatingInputs.goals.length,
+    roleChanges: params.operatingInputs.roleVersions.length,
+    roleHolderChanges: params.operatingInputs.roleHolderHistory.length,
+    newMembers: params.operatingInputs.newMembers.length,
+    brainArticles: params.operatingInputs.brainArticles.length,
+    documents: params.operatingInputs.documents.length,
+    adviceRequests: adviceRequestIds.size,
+    conversations: params.sessions.length,
+    slackMessages: params.slackMessages.length,
+    buildArtifacts: params.buildArtifacts.length,
+  };
+}
+
+function buildOperatingDigestInput(inputs: OperatingDigestInputs, counts: DigestSourceCounts) {
+  return [
+    `Operating source counts: ${sourceCountsLine(counts)}`,
+    inputs.meetings.length > 0 ? `Meeting summaries and decisions:\n${formatMeetingDigestInput(inputs.meetings)}` : null,
+    inputs.proposals.length > 0 ? `Decisions and proposals:\n${formatProposalDigestInput(inputs.proposals)}` : null,
+    inputs.resolvedTensions.length > 0 ? `Resolved tensions:\n${formatResolvedTensionDigestInput(inputs.resolvedTensions)}` : null,
+    inputs.openActions.length > 0 ? `Open actions:\n${formatOpenActionDigestInput(inputs.openActions)}` : null,
+    inputs.goals.length > 0 ? `Goals and quarterly progress:\n${formatGoalDigestInput(inputs.goals)}` : null,
+    inputs.roleVersions.length + inputs.roleHolderHistory.length + inputs.newMembers.length > 0
+      ? `Roles and people changes:\n${formatRolesAndPeopleDigestInput(inputs)}`
+      : null,
+    inputs.brainArticles.length + inputs.documents.length > 0
+      ? `Brain and document updates:\n${formatBrainAndDocumentDigestInput(inputs)}`
+      : null,
+  ].filter(Boolean).join("\n\n---\n\n");
+}
+
+function formatAssignedActionDigestItem(params: {
+  workspaceId: string;
+  action: OperatingDigestInputs["openActions"][number];
+}) {
+  const due = formatDigestDate(params.action.dueAt);
+  return [
+    `Assigned action: ${params.action.title}`,
+    compactDigestLine(params.action.bodyMd, 300) ? `Detail: ${compactDigestLine(params.action.bodyMd, 300)}` : null,
+    due ? `Due: ${due}` : null,
+    params.action.priority > 0 ? `Priority: ${params.action.priority}` : null,
+    `Open: ${workspaceUrl(params.workspaceId)}/actions/${params.action.id}`,
+  ].filter(Boolean).join("\n");
+}
+
+function buildPersonalActionItemsByMember(params: {
+  workspaceId: string;
+  pendingAdviceByMemberId: Map<string, string[]>;
+  openActions: OperatingDigestInputs["openActions"];
+}) {
+  const itemsByMemberId = new Map<string, string[]>(
+    [...params.pendingAdviceByMemberId.entries()].map(([memberId, items]) => [memberId, [...items]]),
+  );
+  for (const action of params.openActions) {
+    if (!action.assigneeMemberId) continue;
+    const existing = itemsByMemberId.get(action.assigneeMemberId) ?? [];
+    existing.push(formatAssignedActionDigestItem({
+      workspaceId: params.workspaceId,
+      action,
+    }));
+    itemsByMemberId.set(action.assigneeMemberId, existing);
+  }
+  return itemsByMemberId;
+}
+
 export async function runDailyDigest(params: {
   workspaceId: string;
   workflowJobId?: string;
   agentRunId?: string;
   dateISO: string;
+  dateKey?: string;
   cadence?: NewspaperCadence;
   model?: string;
 }) {
@@ -506,6 +1121,8 @@ export async function runDailyDigest(params: {
     },
   });
   const recipientMembers = activeMembers.filter((member) => (
+    isHumanNewspaperRecipientIdentity(member.user)
+    &&
     (member.newspaperCadence ?? workspaceCadence) === cadence
   ));
 
@@ -601,25 +1218,61 @@ export async function runDailyDigest(params: {
     workspaceId: params.workspaceId,
     recipientMembers,
   });
-  const hasPendingAdviceRequests = Array.from(pendingAdviceByMemberId.values()).some((items) => items.length > 0);
+  const operatingInputs = await loadOperatingDigestInputs({
+    workspaceId: params.workspaceId,
+    since,
+  });
+  const personalItemsByMemberId = buildPersonalActionItemsByMember({
+    workspaceId: params.workspaceId,
+    pendingAdviceByMemberId,
+    openActions: operatingInputs.openActions,
+  });
+  const hasPersonalActionItems = Array.from(personalItemsByMemberId.values()).some((items) => items.length > 0);
+  const sourceCounts = buildDigestSourceCounts({
+    operatingInputs,
+    sessions,
+    slackMessages,
+    buildArtifacts,
+    pendingAdviceByMemberId,
+  });
+  const digestDateKey = params.dateKey ?? params.dateISO.split("T")[0];
+  const digestTitle = `${cadenceLabel(cadence)} Newspaper - ${digestDateKey}`;
+  const digestSlug = `${cadence.toLowerCase()}-newspaper-${digestDateKey}`;
+  const runKey = params.workflowJobId ?? `${params.workspaceId}:${cadence.toLowerCase()}-newspaper:${digestDateKey}`;
 
-  if (sessions.length === 0 && slackMessages.length === 0 && buildArtifacts.length === 0 && !hasPendingAdviceRequests) {
+  if (!hasDigestSourceInputs(sourceCounts)) {
+    const reason = "No digest inputs.";
     logger.info("newspaper_delivery_skipped", {
       workspaceId: params.workspaceId,
       workflowJobId: params.workflowJobId ?? null,
       cadence,
       reason: "no_digest_inputs",
+      sourceCounts,
     });
+    for (const member of recipientMembers) {
+      await recordNewspaperDelivery({
+        workspaceId: params.workspaceId,
+        workflowJobId: params.workflowJobId ?? null,
+        memberId: member.id,
+        kind: "MEMBER_NEWSPAPER",
+        cadence,
+        runKey,
+        recipientEmail: member.user.email,
+        subject: `${digestTitle} - Your Personal Briefing`,
+        status: "SKIPPED",
+        error: reason,
+      });
+    }
     return {
       success: true,
-      message: "No conversations, Slack messages, or PR activity to digest.",
+      message: "No operating activity to digest.",
       cadence,
       processedSessions: 0,
       processedSlackMessages: 0,
       updatedProfiles: 0,
       sentEmails: 0,
       failedEmails: 0,
-      skippedEmails: 0,
+      skippedEmails: recipientMembers.length,
     };
   }
 
@@ -753,36 +1406,40 @@ Rules:
     const text = message.text ?? "";
     return `[Slack #${channel}] ${speaker}: ${text}`;
   }).join("\n");
+  const operatingDigestInput = buildOperatingDigestInput(operatingInputs, sourceCounts);
   const allTranscripts = [
+    operatingDigestInput ? `Corgtex operating data:\n${operatingDigestInput}` : "",
     conversationTranscripts ? `Corgtex conversations:\n${conversationTranscripts}` : "",
     slackTranscript ? `Slack public-channel messages:\n${slackTranscript}` : "",
     buildArtifacts.length > 0 ? `Built / PR activity for accomplishments and shipped work:\n${formatBuildArtifactDigestInput(buildArtifacts)}` : "",
-  ].filter(Boolean).join("\n\n---\n\n").slice(0, 16000);
+  ].filter(Boolean).join("\n\n---\n\n").slice(0, 22000);
 
   const digestExtraction = await defaultModelGateway.extract({
     model,
     workspaceId: params.workspaceId,
     workflowJobId: params.workflowJobId,
     agentRunId: params.agentRunId,
-    instruction: `Generate a structured ${cadenceLabel(cadence)} Newspaper for the workspace based on the last ${lookbackDays} day(s) of conversations. Return concise, non-empty section arrays only when the source material supports them.`,
+    instruction: `Generate a structured ${cadenceLabel(cadence)} Newspaper for the workspace based on the last ${lookbackDays} day(s) of Corgtex operating data. Prioritize meeting summaries, decisions, resolved tensions, proposals, open actions, goals, roles, people changes, and source-backed updates. Return concise, non-empty section arrays only when the source material supports them.`,
     schemaHint: `{
       intro: string | null,
-      keyDecisions: string[],
-      actionItems: string[],
+      meetingBriefs: string[],
+      decisionsAndProposals: string[],
+      resolvedTensions: string[],
+      openActions: string[],
+      goalsProgress: string[],
+      rolesAndPeople: string[],
+      adviceRequests: string[],
       builtWork: string[],
       conversationHighlights: string[],
       teamPulse: string[],
-      emergingTensions: string[]
+      emergingTensions: string[],
+      otherUpdates: string[]
     }`,
     input: allTranscripts,
   });
   const digest = normalizeNewspaperDigestPayload(digestExtraction.output);
 
-  const digestTitle = `${cadenceLabel(cadence)} Newspaper - ${params.dateISO.split("T")[0]}`;
-  const digestSlug = `${cadence.toLowerCase()}-newspaper-${params.dateISO.split("T")[0]}`;
-  const runKey = params.workflowJobId ?? `${params.workspaceId}:${cadence.toLowerCase()}-newspaper:${params.dateISO.split("T")[0]}`;
-
-  if (digest.sections.length === 0 && !hasPendingAdviceRequests) {
+  if (digest.sections.length === 0 && !hasPersonalActionItems) {
     const reason = "No digest sections generated.";
     logger.info("newspaper_delivery_skipped", {
       workspaceId: params.workspaceId,
@@ -842,7 +1499,7 @@ Rules:
         slug: digestSlug,
         title: digestTitle,
         bodyMd: digestBodyMd,
-        changeSummary: `Regenerated ${cadence.toLowerCase()} newspaper for ${params.dateISO.split("T")[0]}`,
+        changeSummary: `Regenerated ${cadence.toLowerCase()} newspaper for ${digestDateKey}`,
         agentRunId: params.agentRunId ?? null,
       });
     } else {
@@ -886,7 +1543,7 @@ Rules:
 
   for (const member of recipientMembers) {
     const personArticle = recipientPersonArticleBySlug.get(`person-${member.user.id}`) ?? null;
-    const recipientDigest = withNewspaperAdviceRequests(digest, pendingAdviceByMemberId.get(member.id) ?? []);
+    const recipientDigest = withNewspaperAdviceRequests(digest, personalItemsByMemberId.get(member.id) ?? []);
 
     if (recipientDigest.sections.length === 0) {
       const reason = "No digest sections generated for this recipient.";
