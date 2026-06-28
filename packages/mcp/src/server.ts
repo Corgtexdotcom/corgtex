@@ -881,18 +881,18 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
 
   tool(
     "search_connected_context",
-    "Search live connected context across Corgtex Brain and same-user external MCP sources such as Notion. External results are not saved into Brain unless the user explicitly asks.",
+    "Search live connected context across Corgtex Brain and same-user external MCP sources such as Box or Notion. External results are not saved into Brain unless the user explicitly asks.",
     {
       query: z.string().describe("The search query"),
       limit: z.number().optional().describe("Max combined results to return (default 5, max 20)"),
       includeCorgtex: z.boolean().optional().describe("Whether to include Corgtex Brain results (default true)"),
-      providerKey: z.enum(["notion"]).optional().describe("Limit external search to one connected provider"),
+      providerKey: z.enum(["box", "notion"]).optional().describe("Limit external search to one connected provider"),
     },
     async ({ query, limit, includeCorgtex, providerKey }: {
       query: string;
       limit?: number;
       includeCorgtex?: boolean;
-      providerKey?: "notion";
+      providerKey?: "box" | "notion";
     }) => {
       requireToolCapability("search_connected_context");
       const safeLimit = Math.max(1, Math.min(limit ?? 5, 20));
@@ -941,10 +941,10 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
     "fetch_connected_context",
     "Fetch detail for one live external MCP result returned by search_connected_context. Does not ingest the result into Corgtex Brain.",
     {
-      providerKey: z.enum(["notion"]).describe("Connected external provider key"),
+      providerKey: z.enum(["box", "notion"]).describe("Connected external provider key"),
       externalId: z.string().describe("External result ID to fetch"),
     },
-    async ({ providerKey, externalId }: { providerKey: "notion"; externalId: string }) => {
+    async ({ providerKey, externalId }: { providerKey: "box" | "notion"; externalId: string }) => {
       requireToolCapability("fetch_connected_context");
       const result = await fetchConnectedExternalMcpContext(actor, {
         workspaceId,

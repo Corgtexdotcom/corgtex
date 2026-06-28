@@ -314,7 +314,9 @@ function externalConnectorSources(): CatalogSourceInput[] {
           : profile.key === "miro"
             ? "Request Miro board context and diagram workflows when a customer has Enterprise MCP enabled."
             : `Request ${profile.title} setup when this workspace already depends on it.`,
-        descriptionMd: `${profile.title} has an official MCP or API path, but Corgtex has not enabled one-click connection for this workspace yet. ${profile.adminNotes}`,
+        descriptionMd: profile.key === "box"
+          ? "Connect Box through hosted MCP and OAuth so Corgtex can save file references, summaries, and work-item links while Box remains the source of truth."
+          : `${profile.title} has an official MCP or API path, but Corgtex has not enabled one-click connection for this workspace yet. ${profile.adminNotes}`,
         accessNotesMd: `${profile.connectedBy}. ${profile.storagePolicy}`,
         url: null,
         category: profile.connectorRole === "documents"
@@ -326,7 +328,7 @@ function externalConnectorSources(): CatalogSourceInput[] {
               : profile.connectorRole === "design"
                 ? "DESIGN"
                 : "CONNECTOR",
-        accessMode: "REQUEST" as const,
+        accessMode: profile.key === "box" && process.env.BOX_CLIENT_ID && process.env.BOX_CLIENT_SECRET ? "OPEN" as const : "REQUEST" as const,
         requestedScopes: ["integrations:read"],
         featured,
         manifestJson: connectorReadinessManifest(profile.key),

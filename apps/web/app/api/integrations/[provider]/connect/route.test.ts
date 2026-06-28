@@ -26,6 +26,7 @@ beforeEach(() => {
   vi.resetModules();
   vi.stubEnv("GOOGLE_CLIENT_ID", "google-client-id");
   vi.stubEnv("MICROSOFT_CLIENT_ID", "microsoft-client-id");
+  vi.stubEnv("BOX_CLIENT_ID", "box-client-id");
   requirePageActor.mockResolvedValue({
     kind: "user",
     user: { id: "user-1" },
@@ -120,6 +121,27 @@ describe("GET /api/integrations/[provider]/connect", () => {
     expect(location.searchParams.get("scope")).not.toContain("Mail.Read");
     expect(location.searchParams.get("scope")).not.toContain("Files.Read");
     expect(response.headers.get("set-cookie")).toContain("corgtex_microsoft_oauth_state=signed-state");
+  });
+
+  it("starts Box OAuth as an external MCP connection with Box MCP scopes", async () => {
+    const { GET } = await import("./route");
+    const response = await GET(
+      new NextRequest("https://app.corgtex.com/api/integrations/box/connect?workspaceId=ws-1&intent=external_mcp&returnTo=%2Fworkspaces%2Fws-1%2Ftools%2Fbox"),
+      { params: Promise.resolve({ provider: "box" }) },
+    );
+
+    const location = new URL(response.headers.get("location") ?? "");
+    expect(location.origin).toBe("https://account.box.com");
+    expect(location.pathname).toBe("/api/oauth2/authorize");
+    expect(location.searchParams.get("redirect_uri")).toBe("https://app.corgtex.com/api/integrations/box/callback");
+    expect(location.searchParams.get("scope")).toBe("root_readwrite ai.readwrite");
+    expect(createIntegrationOAuthState).toHaveBeenCalledWith({
+      userId: "user-1",
+      workspaceId: "ws-1",
+      intent: "external_mcp",
+      returnTo: "/workspaces/ws-1/tools/box",
+    });
+    expect(response.headers.get("set-cookie")).toContain("corgtex_box_oauth_state=signed-state");
   });
 
   it("redirects missing provider config back to Tools with a safe error", async () => {

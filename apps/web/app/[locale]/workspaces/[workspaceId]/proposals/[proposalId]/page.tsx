@@ -1,17 +1,18 @@
 import { notFound } from "next/navigation";
 import Link from "next/link";
-import { AppError, getProposal, getWorkspaceArchiveRecord, listAdviceRequests, listDeliberationEntries, listWorkItemEvidence, listWorkItemVersions, requireWorkspaceMembership } from "@corgtex/domain";
+import { AppError, getProposal, getWorkspaceArchiveRecord, listAdviceRequests, listDeliberationEntries, listExternalResourceAttachments, listWorkItemEvidence, listWorkItemVersions, requireWorkspaceMembership } from "@corgtex/domain";
 import { requirePageActor } from "@/lib/auth";
 import { MarkdownEditor } from "@/lib/components/MarkdownEditor";
 import { MarkdownRenderer } from "@/lib/components/MarkdownRenderer";
 import { WorkItemResolutionDialog } from "@/lib/components/WorkItemResolutionDialog";
 import { ArchivedItemBanner } from "@/lib/components/ArchivedItemBanner";
 import { UnavailableItemStatus } from "@/lib/components/UnavailableItemStatus";
+import { ExternalResourceAttachForm, ExternalResourceCards } from "@/lib/components/ExternalResourceCards";
 import { DeliberationThread } from "@/lib/components/DeliberationThread";
 import { DeliberationComposer } from "@/lib/components/DeliberationComposer";
 import { getDeliberationTargets } from "@/lib/deliberation-targets";
 import { canOpenPrivateDraft } from "@/lib/governance-open-guards";
-import { postDeliberationEntryAction, requestProposalAdviceAction, resolveDeliberationEntryAction, resolveProposalAction, returnProposalToDraftAction, submitProposalAction, updateDeliberationEntryAction, updateProposalAction } from "../actions";
+import { attachProposalExternalResourceAction, postDeliberationEntryAction, requestProposalAdviceAction, resolveDeliberationEntryAction, resolveProposalAction, returnProposalToDraftAction, submitProposalAction, updateDeliberationEntryAction, updateProposalAction } from "../actions";
 import { ProposalDraftFields } from "../ProposalDraftFields";
 import { getFormatter, getTranslations } from "next-intl/server";
 
@@ -67,7 +68,7 @@ export default async function ProposalDetailPage({
   if (!proposal) notFound();
   const isArchived = Boolean(proposal.archivedAt);
 
-  const [deliberationEntries, versionHistory, evidence, adviceRequests, archiveRecord] = await Promise.all([
+  const [deliberationEntries, versionHistory, evidence, externalResourceAttachments, adviceRequests, archiveRecord] = await Promise.all([
     archivedSafeRead(isArchived, listDeliberationEntries(actor, {
       workspaceId,
       parentType: "PROPOSAL",
@@ -80,6 +81,7 @@ export default async function ProposalDetailPage({
       versions: [],
     }),
     archivedSafeRead(isArchived, listWorkItemEvidence(actor, { workspaceId, entityType: "Proposal", entityId: proposalId }), []),
+    archivedSafeRead(isArchived, listExternalResourceAttachments(actor, { workspaceId, entityType: "Proposal", entityId: proposalId }), []),
     isArchived ? Promise.resolve([]) : listAdviceRequests(actor, { workspaceId, subjectType: "PROPOSAL", subjectId: proposalId, status: "ACTIVE" }),
     isArchived
       ? archivedSafeRead(true, getWorkspaceArchiveRecord(actor, { workspaceId, entityType: "Proposal", entityId: proposal.id }), null)
@@ -224,6 +226,17 @@ export default async function ProposalDetailPage({
             </section>
           )}
           <MarkdownRenderer markdown={proposal.bodyMd} variant="document" className="nr-markdown" />
+
+          <section className="nr-summary-section" style={{ marginTop: 24 }}>
+            <h2 className="nr-summary-title">Box files</h2>
+            <ExternalResourceCards attachments={externalResourceAttachments} />
+            {!isArchived && (
+              <ExternalResourceAttachForm
+                action={attachProposalExternalResourceAction}
+                hiddenFields={{ workspaceId, proposalId: proposal.id }}
+              />
+            )}
+          </section>
 
           {proposal.status === "RESOLVED" && proposal.decisionMd && (
             <section className="nr-summary-section" style={{ marginTop: 24 }}>

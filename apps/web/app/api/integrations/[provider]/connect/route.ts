@@ -29,7 +29,8 @@ export async function GET(request: NextRequest, props: { params: Promise<{ provi
 
     const appUrl = getPublicOrigin(request);
     const workspaceId = request.nextUrl.searchParams.get("workspaceId") || "";
-    const intent = request.nextUrl.searchParams.get("intent") === "documents" ? "documents" : "calendar";
+    const rawIntent = request.nextUrl.searchParams.get("intent");
+    const intent = rawIntent === "documents" ? "documents" : rawIntent === "external_mcp" ? "external_mcp" : "calendar";
     const returnTo = safeWorkspaceReturnTo(workspaceId, request.nextUrl.searchParams.get("returnTo"));
     if (workspaceId) {
       await requireWorkspaceMembership({ actor, workspaceId });
@@ -87,6 +88,40 @@ export async function GET(request: NextRequest, props: { params: Promise<{ provi
       authUrl.searchParams.set("response_type", "code");
       authUrl.searchParams.set("redirect_uri", redirectUri);
       authUrl.searchParams.set("response_mode", "query");
+      authUrl.searchParams.set("scope", scopes);
+      authUrl.searchParams.set("state", state);
+
+      const response = NextResponse.redirect(authUrl.toString());
+      setOAuthStateCookie(response, provider, state);
+      return response;
+    }
+
+    if (provider === "box") {
+      if (!workspaceId) {
+        return NextResponse.redirect(integrationRedirectUrl(appUrl, workspaceId, provider, {
+          status: "error",
+          code: "box_workspace_required",
+          intent: "external_mcp",
+        }));
+      }
+      const clientId = process.env.BOX_CLIENT_ID;
+      if (!clientId) {
+        return NextResponse.redirect(integrationRedirectUrl(appUrl, workspaceId, provider, {
+          status: "error",
+          code: "box_not_configured",
+          intent: "external_mcp",
+          returnTo,
+        }));
+      }
+
+      const redirectUri = `${appUrl}/api/integrations/box/callback`;
+      const scopes = (process.env.BOX_MCP_SCOPES || "root_readwrite ai.readwrite").trim();
+      const state = createIntegrationOAuthState({ userId: actor.user.id, workspaceId, intent: "external_mcp", returnTo });
+
+      const authUrl = new URL("https://account.box.com/api/oauth2/authorize");
+      authUrl.searchParams.set("client_id", clientId);
+      authUrl.searchParams.set("redirect_uri", redirectUri);
+      authUrl.searchParams.set("response_type", "code");
       authUrl.searchParams.set("scope", scopes);
       authUrl.searchParams.set("state", state);
 

@@ -30,7 +30,7 @@ export const listConnectedToolsTool: ModelTool = {
   type: "function",
   function: {
     name: "list_connected_tools",
-    description: "List same-user delegated external MCP tools connected to this workspace, such as Notion. Does not reveal OAuth tokens.",
+    description: "List same-user delegated external MCP tools connected to this workspace, such as Box or Notion. Does not reveal OAuth tokens.",
     parameters: {
       type: "object",
       properties: {},
@@ -42,14 +42,14 @@ export const searchConnectedContextTool: ModelTool = {
   type: "function",
   function: {
     name: "search_connected_context",
-    description: "Search live connected context across Corgtex Brain and same-user external MCP sources such as Notion. Use this when the user asks for data that may live outside Corgtex.",
+    description: "Search live connected context across Corgtex Brain and same-user external MCP sources such as Box or Notion. Use this when the user asks for data that may live outside Corgtex.",
     parameters: {
       type: "object",
       properties: {
         query: { type: "string", description: "The search query" },
         limit: { type: "number", description: "Max combined results to return (default: 5, max: 10)" },
         includeCorgtex: { type: "boolean", description: "Whether to include Corgtex Brain results (default true)" },
-        providerKey: { type: "string", enum: ["notion"], description: "Optional provider key to limit external search" },
+        providerKey: { type: "string", enum: ["box", "notion"], description: "Optional provider key to limit external search" },
       },
       required: ["query"],
     },
@@ -64,7 +64,7 @@ export const fetchConnectedContextTool: ModelTool = {
     parameters: {
       type: "object",
       properties: {
-        providerKey: { type: "string", enum: ["notion"] },
+        providerKey: { type: "string", enum: ["box", "notion"] },
         externalId: { type: "string" },
       },
       required: ["providerKey", "externalId"],

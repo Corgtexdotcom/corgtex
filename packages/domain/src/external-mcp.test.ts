@@ -14,6 +14,7 @@ const {
     findMany: vi.fn(),
     findFirst: vi.fn(),
     upsert: vi.fn(),
+    update: vi.fn(),
   },
   prismaTransactionMock: vi.fn(async (callback: (tx: unknown) => Promise<unknown>) => callback({})),
   recordAuditMock: vi.fn(),
@@ -23,6 +24,14 @@ const {
 vi.mock("@corgtex/shared", () => ({
   decryptSecret: decryptSecretMock,
   encryptSecret: encryptSecretMock,
+  env: {
+    get BOX_CLIENT_ID() {
+      return process.env.BOX_CLIENT_ID;
+    },
+    get BOX_CLIENT_SECRET() {
+      return process.env.BOX_CLIENT_SECRET;
+    },
+  },
   prisma: {
     externalMcpConnection: externalMcpConnectionMock,
     $transaction: prismaTransactionMock,
@@ -56,6 +65,7 @@ function activeNotionConnection() {
     serverUrl: "https://notion.test/mcp",
     accessTokenEnc: "enc:notion-token",
     refreshTokenEnc: null,
+    expiresAt: null,
     scopes: ["search"],
     capabilities: null,
     status: "ACTIVE",
@@ -63,15 +73,39 @@ function activeNotionConnection() {
   };
 }
 
+function activeBoxConnection(overrides: Record<string, unknown> = {}) {
+  return {
+    id: "box-connection-1",
+    workspaceId: "ws-1",
+    userId: "user-1",
+    providerKey: "box",
+    displayName: "Box",
+    serverUrl: "https://mcp.box.com",
+    providerAccountId: "box-user-1",
+    providerEmail: "box@example.com",
+    accessTokenEnc: "enc:box-token",
+    refreshTokenEnc: "enc:box-refresh",
+    expiresAt: null,
+    scopes: ["root_readwrite", "ai.readwrite"],
+    capabilities: null,
+    status: "ACTIVE",
+    lastError: null,
+    ...overrides,
+  };
+}
+
 describe("external MCP gateway", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.stubEnv("BOX_CLIENT_ID", "box-client-id");
+    vi.stubEnv("BOX_CLIENT_SECRET", "box-client-secret");
     requireWorkspaceMembershipMock.mockResolvedValue({ id: "member-1" });
     recordAuditMock.mockResolvedValue({ id: "audit-1" });
   });
 
   afterEach(() => {
     vi.unstubAllGlobals();
+    vi.unstubAllEnvs();
   });
 
   it("lists provider metadata while keeping only implemented providers connectable", async () => {
@@ -85,10 +119,12 @@ describe("external MCP gateway", () => {
       expect.objectContaining({
         providerKey: "box",
         displayName: "Box",
-        connectionEnabled: false,
+        connectionEnabled: true,
         status: "needs_connection",
-        supportsSearch: false,
-        supportsFetch: false,
+        supportsSearch: true,
+        supportsFetch: true,
+        searchToolName: "search_files_keyword",
+        fetchToolName: "get_file_details",
       }),
       expect.objectContaining({
         providerKey: "notion",
@@ -158,16 +194,91 @@ describe("external MCP gateway", () => {
     expect(upsertArgs.create).toHaveProperty("refreshTokenEnc", null);
   });
 
-  it("rejects token upserts for external MCP providers that are not enabled yet", async () => {
+  it("upserts a same-user Box connection with expiry and provider identity", async () => {
+    externalMcpConnectionMock.upsert.mockResolvedValueOnce({ id: "box-connection-1" });
     const { upsertExternalMcpConnection } = await import("./external-mcp");
 
-    await expect(upsertExternalMcpConnection(actor, {
+    await upsertExternalMcpConnection(actor, {
       workspaceId: "ws-1",
       providerKey: "box",
       accessToken: "box-access-token",
-    })).rejects.toThrow("Box MCP setup is not enabled in Corgtex yet.");
+      refreshToken: "box-refresh-token",
+      expiresIn: 3600,
+      providerAccountId: "box-user-1",
+      providerEmail: "box@example.com",
+      scopes: ["root_readwrite", "ai.readwrite"],
+    });
 
-    expect(externalMcpConnectionMock.upsert).not.toHaveBeenCalled();
+    expect(encryptSecretMock).toHaveBeenCalledWith("box-access-token");
+    expect(encryptSecretMock).toHaveBeenCalledWith("box-refresh-token");
+    expect(externalMcpConnectionMock.upsert).toHaveBeenCalledWith(expect.objectContaining({
+      update: expect.objectContaining({
+        providerAccountId: "box-user-1",
+        providerEmail: "box@example.com",
+        accessTokenEnc: "enc:box-access-token",
+        refreshTokenEnc: "enc:box-refresh-token",
+        expiresAt: expect.any(Date),
+      }),
+    }));
+  });
+
+  it("refreshes expired Box tokens before live search", async () => {
+    const expired = activeBoxConnection({ expiresAt: new Date(Date.now() - 60_000) });
+    externalMcpConnectionMock.findMany.mockResolvedValueOnce([expired]);
+    externalMcpConnectionMock.update.mockResolvedValueOnce(activeBoxConnection({
+      accessTokenEnc: "enc:box-token-2",
+      refreshTokenEnc: "enc:box-refresh-2",
+      expiresAt: new Date(Date.now() + 3600_000),
+    }));
+    vi.stubGlobal("fetch", vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        access_token: "box-token-2",
+        refresh_token: "box-refresh-2",
+        expires_in: 3600,
+      }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        result: {
+          structuredContent: {
+            entries: [
+              {
+                type: "search_result",
+                item: {
+                  id: "123",
+                  type: "file",
+                  name: "Budget.xlsx",
+                  shared_link: { url: "https://box.com/s/budget" },
+                },
+              },
+            ],
+          },
+        },
+      }), { status: 200 })));
+
+    const { searchConnectedExternalMcpContext } = await import("./external-mcp");
+    const result = await searchConnectedExternalMcpContext(actor, {
+      workspaceId: "ws-1",
+      providerKey: "box",
+      query: "budget",
+    });
+
+    expect(fetch).toHaveBeenNthCalledWith(1, "https://api.box.com/oauth2/token", expect.objectContaining({
+      method: "POST",
+    }));
+    expect(encryptSecretMock).toHaveBeenCalledWith("box-token-2");
+    expect(encryptSecretMock).toHaveBeenCalledWith("box-refresh-2");
+    expect(fetch).toHaveBeenNthCalledWith(2, "https://mcp.box.com", expect.objectContaining({
+      headers: expect.objectContaining({
+        authorization: "Bearer box-token-2",
+      }),
+    }));
+    expect(result.results).toEqual([
+      expect.objectContaining({
+        providerKey: "box",
+        externalId: "123",
+        title: "Budget.xlsx",
+        url: "https://box.com/s/budget",
+      }),
+    ]);
   });
 
   it("searches live Notion context with provenance and audits without storing raw tokens", async () => {
@@ -381,5 +492,20 @@ describe("external MCP gateway", () => {
       }),
     }));
     expect(fetch).toHaveBeenCalled();
+  });
+
+  it("blocks generic Box tool execution even for read-like requests", async () => {
+    const { executeExternalMcpTool } = await import("./external-mcp");
+
+    await expect(executeExternalMcpTool(actor, {
+      workspaceId: "ws-1",
+      providerKey: "box",
+      toolName: "get_file_details",
+      arguments: { file_id: "123" },
+      operation: "read",
+      confidence: 1,
+      explicitUserIntent: true,
+    })).rejects.toThrow("Box generic tool execution is disabled in Corgtex v1.");
+    expect(externalMcpConnectionMock.findFirst).not.toHaveBeenCalled();
   });
 });

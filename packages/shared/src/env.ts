@@ -123,6 +123,9 @@ type Env = {
   readonly SLACK_CLIENT_SECRET: string | undefined;
   readonly SLACK_SIGNING_SECRET: string | undefined;
   readonly SLACK_APP_ID: string | undefined;
+  readonly BOX_CLIENT_ID: string | undefined;
+  readonly BOX_CLIENT_SECRET: string | undefined;
+  readonly BOX_MCP_SCOPES: string | undefined;
   readonly RECALL_API_KEY: string | undefined;
   readonly RECALL_REGION: string;
   readonly RECALL_WEBHOOK_SECRET: string | undefined;
@@ -322,6 +325,15 @@ export const env: Env = {
   },
   get SLACK_APP_ID() {
     return optional("SLACK_APP_ID");
+  },
+  get BOX_CLIENT_ID() {
+    return optional("BOX_CLIENT_ID");
+  },
+  get BOX_CLIENT_SECRET() {
+    return optional("BOX_CLIENT_SECRET");
+  },
+  get BOX_MCP_SCOPES() {
+    return optional("BOX_MCP_SCOPES");
   },
   get RECALL_API_KEY() {
     return optional("RECALL_API_KEY");

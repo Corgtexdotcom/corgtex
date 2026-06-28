@@ -88,7 +88,7 @@ const CONNECTOR_READINESS_PROFILES: Record<string, ConnectorReadinessProfile> = 
     supportedOperations: ["Search", "Fetch file context", "Box AI tools"],
     storagePolicy: "Read/search/fetch first. Writes stay disabled until customer policy and approval are explicit.",
     sourceUrl: "https://developer.box.com/guides/box-mcp/",
-    adminNotes: "Official hosted Box MCP exists; Corgtex still needs admin/OAuth product setup before exposing Connect.",
+    adminNotes: "Official hosted Box MCP is the integration path. Users connect with Box OAuth after the workspace has Box Integration Credentials configured.",
     recommended: true,
     recommendationRank: 70,
   },

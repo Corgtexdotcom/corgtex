@@ -16,7 +16,8 @@ import {
   publishProposal,
   postDeliberationEntry,
   resolveDeliberationEntry,
-  updateDeliberationEntry
+  updateDeliberationEntry,
+  upsertWorkspaceExternalResourceFromUrl
 } from "@corgtex/domain";
 import type { AdviceRequestAudienceType, AdviceRequestPreferredChannel } from "@prisma/client";
 import { uploadWorkItemEvidenceDocument } from "../work-item-evidence-upload";
@@ -80,6 +81,23 @@ export async function updateProposalAction(formData: FormData) {
     bodyMd: asOptional(formData, "bodyMd") ?? undefined,
     priority: formData.has("priority") ? (asOptionalInt(formData, "priority") ?? 0) : undefined,
     includeAiSummary: formData.has("includeAiSummaryRendered") ? formData.get("includeAiSummary") === "on" : undefined,
+  });
+  refresh(workspaceId);
+}
+
+export async function attachProposalExternalResourceAction(formData: FormData) {
+  const _demoGuardWsId = formData.get("workspaceId") as string;
+  if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
+
+  const actor = await requirePageActor();
+  const workspaceId = asString(formData, "workspaceId");
+  await upsertWorkspaceExternalResourceFromUrl(actor, {
+    workspaceId,
+    url: asString(formData, "url"),
+    descriptionMd: asOptional(formData, "descriptionMd"),
+    entityType: "Proposal",
+    entityId: asString(formData, "proposalId"),
+    purpose: "reference",
   });
   refresh(workspaceId);
 }

@@ -2,7 +2,7 @@ import { requirePageActor } from "@/lib/auth";
 import { handleRouteError } from "@/lib/http";
 import { getPublicOrigin } from "@/lib/public-origin";
 import { type NextRequest, NextResponse } from "next/server";
-import { saveOAuthConnectionAndEnqueueCalendarSync, verifyIntegrationOAuthState } from "@corgtex/domain";
+import { saveOAuthConnectionAndEnqueueCalendarSync, upsertExternalMcpConnection, verifyIntegrationOAuthState } from "@corgtex/domain";
 import {
   clearOAuthStateCookie,
   type IntegrationOAuthIntent,
@@ -93,6 +93,94 @@ export async function GET(request: NextRequest, props: { params: Promise<{ provi
       return redirectWithStateCleared(appUrl, workspaceId, provider, {
         status: "error",
         code: "oauth_code_missing",
+        intent,
+        returnTo: statePayload.returnTo,
+      });
+    }
+
+    if (provider === "box") {
+      const clientId = process.env.BOX_CLIENT_ID;
+      const clientSecret = process.env.BOX_CLIENT_SECRET;
+      const redirectUri = `${appUrl}/api/integrations/box/callback`;
+
+      if (!workspaceId) {
+        return redirectWithStateCleared(appUrl, workspaceId, provider, {
+          status: "error",
+          code: "box_workspace_required",
+          intent,
+          returnTo: statePayload.returnTo,
+        });
+      }
+
+      if (!clientId || !clientSecret) {
+        return redirectWithStateCleared(appUrl, workspaceId, provider, {
+          status: "error",
+          code: "box_not_configured",
+          intent,
+          returnTo: statePayload.returnTo,
+        });
+      }
+
+      const tokenResponse = await fetch("https://api.box.com/oauth2/token", {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({
+          code,
+          client_id: clientId,
+          client_secret: clientSecret,
+          redirect_uri: redirectUri,
+          grant_type: "authorization_code",
+        }),
+      });
+
+      const tokenData = await tokenResponse.json();
+      if (!tokenResponse.ok) {
+        const message = readErrorMessage(tokenData);
+        console.error("[OAuthCallback] Box token exchange failed", { error: message });
+        return redirectWithStateCleared(appUrl, workspaceId, provider, {
+          status: "error",
+          code: tokenExchangeErrorCode(provider, message),
+          intent,
+          returnTo: statePayload.returnTo,
+        });
+      }
+
+      const profileResponse = await fetch("https://api.box.com/2.0/users/me", {
+        headers: { Authorization: `Bearer ${tokenData.access_token}` },
+      });
+      const profileData = await profileResponse.json();
+      if (!profileResponse.ok) {
+        const message = readErrorMessage(profileData);
+        console.error("[OAuthCallback] Box profile fetch failed", { error: message });
+        return redirectWithStateCleared(appUrl, workspaceId, provider, {
+          status: "error",
+          code: "box_profile_failed",
+          intent,
+          returnTo: statePayload.returnTo,
+        });
+      }
+
+      const fallbackScopes = (process.env.BOX_MCP_SCOPES || "root_readwrite ai.readwrite").split(/\s+/).filter(Boolean);
+      await upsertExternalMcpConnection(actor, {
+        workspaceId,
+        providerKey: "box",
+        accessToken: String(tokenData.access_token),
+        refreshToken: typeof tokenData.refresh_token === "string" ? tokenData.refresh_token : null,
+        expiresIn: typeof tokenData.expires_in === "number" ? tokenData.expires_in : null,
+        providerAccountId: typeof profileData.id === "string" ? profileData.id : null,
+        providerEmail: typeof profileData.login === "string" ? profileData.login : null,
+        scopes: typeof tokenData.scope === "string" ? tokenData.scope.split(" ") : fallbackScopes,
+        capabilities: {
+          mcpName: "box-remote-mcp",
+          searchToolName: "search_files_keyword",
+          fetchToolName: "get_file_details",
+          writesEnabled: false,
+        },
+      });
+
+      return redirectWithStateCleared(appUrl, workspaceId, provider, {
+        status: "success",
+        code: "box_connected",
         intent,
         returnTo: statePayload.returnTo,
       });

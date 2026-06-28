@@ -4,6 +4,7 @@ import {
   fetchCalendarEvents,
   fetchFilteredEmailMessages,
   fetchSelectedDocuments,
+  externalResourceKnowledgeInput,
   materializeCrmCalendarTouchpoints,
   materializeCrmEmailTouchpoints,
   syncCalendarEventRecorder,
@@ -117,6 +118,24 @@ export async function handleDocumentKnowledgeSync(jobId: string, payload: { docu
       source: document.source,
       mimeType: document.mimeType,
       storageKey: document.storageKey,
+      workflowJobId: jobId,
+    },
+    workflowJobId: jobId,
+  });
+}
+
+export async function handleExternalResourceKnowledgeSync(jobId: string, payload: { resourceId?: string }, workspaceId: string) {
+  if (!payload.resourceId) {
+    return;
+  }
+  const input = await externalResourceKnowledgeInput(payload.resourceId, workspaceId);
+  if (!input) {
+    return;
+  }
+  await syncKnowledgeForSource({
+    ...input,
+    metadata: {
+      ...input.metadata,
       workflowJobId: jobId,
     },
     workflowJobId: jobId,

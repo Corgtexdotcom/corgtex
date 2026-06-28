@@ -11,7 +11,8 @@ import {
   returnActionToDraft,
   postDeliberationEntry,
   resolveDeliberationEntry,
-  updateDeliberationEntry
+  updateDeliberationEntry,
+  upsertWorkspaceExternalResourceFromUrl
 } from "@corgtex/domain";
 import { uploadWorkItemEvidenceDocument } from "../work-item-evidence-upload";
 
@@ -59,6 +60,23 @@ export async function updateActionAction(formData: FormData) {
     status: status ?? undefined,
     completedVia: asOptional(formData, "completedVia") ?? undefined,
     evidenceDocumentIds,
+  });
+  refresh(workspaceId);
+}
+
+export async function attachActionExternalResourceAction(formData: FormData) {
+  const _demoGuardWsId = formData.get("workspaceId") as string;
+  if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
+
+  const actor = await requirePageActor();
+  const workspaceId = asString(formData, "workspaceId");
+  await upsertWorkspaceExternalResourceFromUrl(actor, {
+    workspaceId,
+    url: asString(formData, "url"),
+    descriptionMd: asOptional(formData, "descriptionMd"),
+    entityType: "Action",
+    entityId: asString(formData, "actionId"),
+    purpose: "reference",
   });
   refresh(workspaceId);
 }

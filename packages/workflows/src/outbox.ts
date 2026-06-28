@@ -3,7 +3,7 @@ import { logger, prisma } from "@corgtex/shared";
 import { deriveJobsForEvent } from "./derive-jobs";
 import { deriveNotificationsForEvent } from "./derive-notifications";
 import { recordWorkflowJobProcessedMetric } from "./job-metrics";
-import { handleKnowledgeSync, handleMeetingKnowledgeSync, handleDocumentKnowledgeSync, handleEventKnowledgeSync, handleTensionKnowledgeSync, handleActionKnowledgeSync, handleCircleKnowledgeSync, handleRoleKnowledgeSync, handleSlackMessageKnowledgeSync, handleCalendarSync, handleOAuthDocumentsSync, handleOAuthEmailSync, handleContextGraphSync, handleContextGraphStalenessSweep, handleContextGraphReconcile } from "./handlers";
+import { handleKnowledgeSync, handleMeetingKnowledgeSync, handleDocumentKnowledgeSync, handleExternalResourceKnowledgeSync, handleEventKnowledgeSync, handleTensionKnowledgeSync, handleActionKnowledgeSync, handleCircleKnowledgeSync, handleRoleKnowledgeSync, handleSlackMessageKnowledgeSync, handleCalendarSync, handleOAuthDocumentsSync, handleOAuthEmailSync, handleContextGraphSync, handleContextGraphStalenessSweep, handleContextGraphReconcile } from "./handlers";
 import { handleGovernanceScoring } from "./handlers";
 import { runAgentWorkflowJob } from "./handlers";
 import { syncBrainArticleKnowledge } from "@corgtex/knowledge";
@@ -627,6 +627,11 @@ async function handleJob(job: ClaimedJob) {
 
   if (job.type === "knowledge.sync.document") {
     await handleDocumentKnowledgeSync(job.id, payload as { documentId?: string }, job.workspaceId);
+    return;
+  }
+
+  if (job.type === "knowledge.sync.external-resource") {
+    await handleExternalResourceKnowledgeSync(job.id, payload as { resourceId?: string }, job.workspaceId);
     return;
   }
 

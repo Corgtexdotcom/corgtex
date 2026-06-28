@@ -8,6 +8,7 @@ export * from "./mcp-connector";
 export * from "./mcp-tool-capabilities";
 export * from "./post-deploy-probe-contract";
 export * from "./external-mcp";
+export * from "./external-resources";
 export * from "./agent-registry";
 export * from "./agent-config";
 export * from "./agent-authority-summary";
