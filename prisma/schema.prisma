@@ -2324,8 +2324,8 @@ model WorkspaceExternalResource {
   createdBy   User?                                 @relation("WorkspaceExternalResourceCreator", fields: [createdByUserId], references: [id], onDelete: SetNull)
   attachments WorkspaceExternalResourceAttachment[]
 
-  @@unique([workspaceId, providerKey, externalId])
-  @@index([workspaceId, providerKey, archivedAt])
+  @@unique([workspaceId, providerKey, externalId], map: "WorkspaceExternalResource_workspace_provider_external_key")
+  @@index([workspaceId, providerKey, archivedAt], map: "WorkspaceExternalResource_workspace_provider_archived_idx")
   @@index([workspaceId, resourceType])
   @@index([createdByUserId])
 }
@@ -2344,8 +2344,8 @@ model WorkspaceExternalResourceAttachment {
   resource      WorkspaceExternalResource @relation(fields: [resourceId], references: [id], onDelete: Cascade)
   createdByUser User?                     @relation("WorkspaceExternalResourceAttachmentCreator", fields: [createdByUserId], references: [id], onDelete: SetNull)
 
-  @@unique([resourceId, entityType, entityId, purpose])
-  @@index([workspaceId, entityType, entityId])
+  @@unique([resourceId, entityType, entityId, purpose], map: "WorkspaceExternalResourceAttachment_resource_entity_purpose_key")
+  @@index([workspaceId, entityType, entityId], map: "WorkspaceExternalResourceAttachment_workspace_entity_idx")
   @@index([workspaceId, purpose])
   @@index([createdByUserId])
 }

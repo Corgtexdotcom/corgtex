@@ -43,10 +43,10 @@ CREATE TABLE "WorkspaceExternalResourceAttachment" (
   CONSTRAINT "WorkspaceExternalResourceAttachment_pkey" PRIMARY KEY ("id")
 );
 
-CREATE UNIQUE INDEX "WorkspaceExternalResource_workspaceId_providerKey_externalId_key"
+CREATE UNIQUE INDEX "WorkspaceExternalResource_workspace_provider_external_key"
 ON "WorkspaceExternalResource"("workspaceId", "providerKey", "externalId");
 
-CREATE INDEX "WorkspaceExternalResource_workspaceId_providerKey_archivedAt_idx"
+CREATE INDEX "WorkspaceExternalResource_workspace_provider_archived_idx"
 ON "WorkspaceExternalResource"("workspaceId", "providerKey", "archivedAt");
 
 CREATE INDEX "WorkspaceExternalResource_workspaceId_resourceType_idx"
@@ -55,10 +55,10 @@ ON "WorkspaceExternalResource"("workspaceId", "resourceType");
 CREATE INDEX "WorkspaceExternalResource_createdByUserId_idx"
 ON "WorkspaceExternalResource"("createdByUserId");
 
-CREATE UNIQUE INDEX "WorkspaceExternalResourceAttachment_resourceId_entityType_entityId_purpose_key"
+CREATE UNIQUE INDEX "WorkspaceExternalResourceAttachment_resource_entity_purpose_key"
 ON "WorkspaceExternalResourceAttachment"("resourceId", "entityType", "entityId", "purpose");
 
-CREATE INDEX "WorkspaceExternalResourceAttachment_workspaceId_entityType_entityId_idx"
+CREATE INDEX "WorkspaceExternalResourceAttachment_workspace_entity_idx"
 ON "WorkspaceExternalResourceAttachment"("workspaceId", "entityType", "entityId");
 
 CREATE INDEX "WorkspaceExternalResourceAttachment_workspaceId_purpose_idx"
