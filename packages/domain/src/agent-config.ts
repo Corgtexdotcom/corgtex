@@ -349,6 +349,7 @@ export async function getCompanyUnderstandingGoalApplyMode(
 
 export type WorkspaceDigestSetting = {
   enabled: boolean;
+  disabledReason?: "ai_paused";
 } & NewspaperScheduleConfig;
 
 /**
@@ -371,17 +372,31 @@ export async function getWorkspaceDigestSettings(
   const meta = AGENT_REGISTRY["daily-digest" as RegisteredAgentKey];
   const canDisable = meta?.canDisable ?? true;
 
-  const configs = await prisma.workspaceAgentConfig.findMany({
-    where: { agentKey: "daily-digest", workspaceId: { in: workspaceIds } },
-    select: { workspaceId: true, enabled: true, configJson: true },
-  });
+  const [configs, budgets] = await Promise.all([
+    prisma.workspaceAgentConfig.findMany({
+      where: { agentKey: "daily-digest", workspaceId: { in: workspaceIds }, archivedAt: null },
+      select: { workspaceId: true, enabled: true, configJson: true },
+    }),
+    prisma.modelUsageBudget.findMany({
+      where: { workspaceId: { in: workspaceIds } },
+      select: { workspaceId: true, monthlyCostCapUsd: true },
+    }),
+  ]);
+  const aiPausedWorkspaceIds = new Set(
+    budgets
+      .filter((budget) => Number(budget.monthlyCostCapUsd) === 0)
+      .map((budget) => budget.workspaceId),
+  );
   const configByWorkspace = new Map(configs.map((config) => [config.workspaceId, config]));
 
   for (const workspaceId of workspaceIds) {
     const config = configByWorkspace.get(workspaceId);
     const schedule = normalizeNewspaperScheduleConfig(config?.configJson);
+    const agentEnabled = canDisable ? (config?.enabled ?? true) : true;
+    const aiPaused = agentEnabled && aiPausedWorkspaceIds.has(workspaceId);
     settings.set(workspaceId, {
-      enabled: canDisable ? (config?.enabled ?? true) : true,
+      enabled: agentEnabled && !aiPaused,
+      ...(aiPaused ? { disabledReason: "ai_paused" as const } : {}),
       ...schedule,
     });
   }

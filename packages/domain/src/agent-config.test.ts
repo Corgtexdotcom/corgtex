@@ -7,6 +7,9 @@ const { prismaMock } = vi.hoisted(() => ({
       findUnique: vi.fn(),
       findMany: vi.fn(),
     },
+    modelUsageBudget: {
+      findMany: vi.fn(),
+    },
   },
 }));
 
@@ -22,6 +25,7 @@ vi.mock("./auth", () => ({
 describe("agent-config", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    prismaMock.modelUsageBudget.findMany.mockResolvedValue([]);
   });
 
   describe("updateAgentConfig", () => {
@@ -439,8 +443,12 @@ describe("agent-config", () => {
 
       expect(prisma.workspaceAgentConfig.findMany).toHaveBeenCalledTimes(1);
       expect(prisma.workspaceAgentConfig.findMany).toHaveBeenCalledWith({
-        where: { agentKey: "daily-digest", workspaceId: { in: ["ws-1", "ws-2", "ws-3", "ws-4"] } },
+        where: { agentKey: "daily-digest", workspaceId: { in: ["ws-1", "ws-2", "ws-3", "ws-4"] }, archivedAt: null },
         select: { workspaceId: true, enabled: true, configJson: true },
+      });
+      expect(prisma.modelUsageBudget.findMany).toHaveBeenCalledWith({
+        where: { workspaceId: { in: ["ws-1", "ws-2", "ws-3", "ws-4"] } },
+        select: { workspaceId: true, monthlyCostCapUsd: true },
       });
       expect(settings.get("ws-1")).toEqual({
         enabled: true,
@@ -468,6 +476,29 @@ describe("agent-config", () => {
       expect(settings.get("ws-4")).toEqual({
         enabled: true,
         cadence: "WEEKLY",
+        weekday: "MONDAY",
+        localTime: "08:00",
+        timeZone: "UTC",
+      });
+    });
+
+    it("disables digest settings when workspace AI usage is paused", async () => {
+      const { prisma } = await import("@corgtex/shared");
+      const { getWorkspaceDigestSettings } = await import("./agent-config");
+
+      vi.mocked(prisma.workspaceAgentConfig.findMany).mockResolvedValue([
+        { workspaceId: "ws-1", enabled: true, configJson: { newspaperCadence: "DAILY" } },
+      ] as any);
+      vi.mocked(prisma.modelUsageBudget.findMany).mockResolvedValue([
+        { workspaceId: "ws-1", monthlyCostCapUsd: "0.00" },
+      ] as any);
+
+      const settings = await getWorkspaceDigestSettings(["ws-1"]);
+
+      expect(settings.get("ws-1")).toEqual({
+        enabled: false,
+        disabledReason: "ai_paused",
+        cadence: "DAILY",
         weekday: "MONDAY",
         localTime: "08:00",
         timeZone: "UTC",

@@ -1316,7 +1316,7 @@ export async function scheduleDailyJobs() {
     if (!setting?.enabled) {
       logger.info("newspaper_schedule_skipped", {
         workspaceId: workspace.id,
-        reason: "agent_disabled",
+        reason: setting?.disabledReason ?? "agent_disabled",
       });
       continue;
     }
