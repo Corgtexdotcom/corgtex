@@ -18,6 +18,7 @@ import {
   parseKeyValueArgs,
   parseManifestJson,
   parsePositiveInteger,
+  providerBoundaryErrors,
   targetFromControlPlaneRow,
   TERMINAL_RAILWAY_FAILURES,
 } from "./fleet-release-core.mjs";
@@ -67,7 +68,7 @@ export async function runFleetRelease(argv = process.argv.slice(2), deps = {}) {
   }
 
   const manifest = await resolveManifest(args, deps);
-  const selectedGroups = normalizeTargets(args.targets ?? process.env.FLEET_RELEASE_TARGETS ?? "all");
+  const selectedGroups = normalizeTargets(args.targets ?? process.env.FLEET_RELEASE_TARGETS);
   const dryRun = parseBoolean(args.dryRun ?? process.env.FLEET_RELEASE_DRY_RUN, false);
   const failOnBlockers = parseBoolean(args.failOnBlockers ?? process.env.FLEET_RELEASE_FAIL_ON_BLOCKERS, false);
   const forceAfterFailure = parseBoolean(args.forceAfterFailure ?? process.env.FLEET_RELEASE_FORCE_AFTER_FAILURE, false);
@@ -171,7 +172,7 @@ async function resolveManifest(args, deps) {
 
 function validateReleaseEnvironment(args, env) {
   const release = normalizeReleaseInput(args.release ?? env.FLEET_RELEASE_INPUT ?? "latest-stable");
-  const selectedGroups = normalizeTargets(args.targets ?? env.FLEET_RELEASE_TARGETS ?? "all");
+  const selectedGroups = normalizeTargets(args.targets ?? env.FLEET_RELEASE_TARGETS);
   const dryRun = parseBoolean(args.dryRun ?? env.FLEET_RELEASE_DRY_RUN, false);
   const missing = [];
   const invalid = [];
@@ -343,7 +344,7 @@ function dedupeTargets(targets) {
 }
 
 function preflightTarget(target, env) {
-  const blockers = [];
+  const blockers = [...providerBoundaryErrors(target)];
   if (!target.url) blockers.push("runtime URL is missing");
   if (target.deploymentId && !env.CONTROL_PLANE_AGENT_API_KEY) {
     blockers.push("CONTROL_PLANE_AGENT_API_KEY is missing for verified inventory recording");
@@ -359,6 +360,7 @@ function preflightTarget(target, env) {
       }
     }
   } else if (target.provider === "azure") {
+    if (!target.deploymentId) blockers.push("Azure deploymentId is missing for provider readiness checks");
     if (!env.AZURE_CLIENT_ID) blockers.push("AZURE_CLIENT_ID is missing");
     if (!env.AZURE_TENANT_ID) blockers.push("AZURE_TENANT_ID is missing");
     if (!env.AZURE_SUBSCRIPTION_ID) blockers.push("AZURE_SUBSCRIPTION_ID is missing");
@@ -402,10 +404,16 @@ async function deployTarget(target, manifest, reason, deps) {
     : await deployRailwayTarget(target, manifest, deps);
   const health = await pollHealth(target.url, manifest, deps);
   assertHealthProof(health, manifest, target.label);
-  const postDeployProbe = await runPostDeployProbe(target, manifest, reason, deps, callControlPlaneTool);
-  const postDeploySnapshots = target.deploymentId
-    ? await refreshPostDeploySnapshots(target, reason, deps)
-    : { status: "skipped", reason: "deployment_id_missing" };
+  const providerReadiness = await runProviderReadiness(target, manifest, deps);
+  const usesAzureProviderReadiness = target.group === "azure-selfserve";
+  const postDeployProbe = usesAzureProviderReadiness
+    ? { status: "skipped", reason: "azure_provider_readiness" }
+    : await runPostDeployProbe(target, manifest, reason, deps, callControlPlaneTool);
+  const postDeploySnapshots = usesAzureProviderReadiness
+    ? { status: "skipped", reason: "azure_provider_readiness" }
+    : target.deploymentId
+      ? await refreshPostDeploySnapshots(target, reason, deps)
+      : { status: "skipped", reason: "deployment_id_missing" };
   if (target.deploymentId) {
     await callControlPlaneTool("record_verified_release", {
       deploymentId: target.deploymentId,
@@ -414,7 +422,48 @@ async function deployTarget(target, manifest, reason, deps) {
       reason,
     }, deps);
   }
-  return { providerResult, release: health.release, postDeployProbe, postDeploySnapshots };
+  return { providerResult, release: health.release, providerReadiness, postDeployProbe, postDeploySnapshots };
+}
+
+async function runProviderReadiness(target, manifest, deps) {
+  if (target.group !== "azure-selfserve") {
+    return { status: "skipped", reason: "not_azure_selfserve" };
+  }
+  const providerStatus = await callControlPlaneTool("get_azure_provider_status", {
+    deploymentId: target.deploymentId,
+  }, deps);
+  const registry = await callControlPlaneTool("list_self_serve_customers", {
+    take: 25,
+  }, deps);
+
+  const blockers = [];
+  if (providerStatus?.provider?.cloudProvider !== "AZURE") {
+    blockers.push(`provider=${providerStatus?.provider?.cloudProvider ?? "missing"}`);
+  }
+  if (providerStatus?.health?.status !== "ok") {
+    blockers.push(`health=${providerStatus?.health?.status ?? "missing"}`);
+  }
+  if (providerStatus?.release?.releaseImageTag !== manifest.imageTag) {
+    blockers.push(`releaseImageTag=${providerStatus?.release?.releaseImageTag ?? "missing"}`);
+  }
+  if (providerStatus?.release?.releaseDrift) {
+    blockers.push("releaseDrift=open");
+  }
+  if (!Array.isArray(registry?.items) || !registry?.summary || typeof registry.summary !== "object") {
+    blockers.push("selfServeRegistry=unavailable");
+  }
+  if (blockers.length > 0) {
+    throw new Error(`${target.label} Azure provider readiness failed: ${blockers.join("; ")}`);
+  }
+
+  return {
+    status: "ok",
+    provider: "azure",
+    deploymentId: target.deploymentId,
+    healthStatus: providerStatus.health.status,
+    releaseImageTag: providerStatus.release.releaseImageTag,
+    registrySummary: registry.summary,
+  };
 }
 
 async function refreshPostDeploySnapshots(target, reason, deps) {

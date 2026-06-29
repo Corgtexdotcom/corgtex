@@ -9,6 +9,7 @@ import {
   imageTagForSha,
   normalizeReleaseInput,
   normalizeTargets,
+  providerBoundaryErrors,
   releaseVersionForSha,
   targetFromControlPlaneRow,
 } from "./fleet-release-core.mjs";
@@ -61,6 +62,8 @@ describe("fleet release core", () => {
   });
 
   it("expands and validates target groups", () => {
+    expect(normalizeTargets()).toEqual(["railway-customers", "azure-selfserve", "ops"]);
+    expect(normalizeTargets("default")).toEqual(["railway-customers", "azure-selfserve", "ops"]);
     expect(normalizeTargets("all")).toEqual(["railway-customers", "azure-selfserve", "ops", "backup-app"]);
     expect(normalizeTargets("ops,backup-app")).toEqual(["ops", "backup-app"]);
     expect(() => normalizeTargets("demo")).toThrow("Unknown release target");
@@ -96,10 +99,26 @@ describe("fleet release core", () => {
       concurrency: 2,
       release: { gitSha: SHA },
       rings: [
-        { ring: 1, targets: [{ id: "ops" }] },
-        { ring: 2, targets: [{ id: "acme" }] },
+        { ring: 1, targets: [{ id: "ops", criticality: "blocking", backupOnly: false }] },
+        { ring: 2, targets: [{ id: "acme", criticality: "blocking", backupOnly: false }] },
       ],
     });
     expect(filterTargetsByGroups(targets, ["ops"])).toEqual([targets[1]]);
+  });
+
+  it("flags provider boundary mismatches before deployment", () => {
+    expect(providerBoundaryErrors({
+      group: "azure-selfserve",
+      provider: "railway",
+      url: "https://selfserve.corgtex.com",
+    })).toEqual([
+      "Target group azure-selfserve requires provider azure, got railway",
+      "selfserve.corgtex.com targets must use azure-selfserve group and azure provider",
+    ]);
+    expect(providerBoundaryErrors({
+      group: "railway-customers",
+      provider: "railway",
+      url: "https://acme.corgtex.com",
+    })).toEqual([]);
   });
 });
