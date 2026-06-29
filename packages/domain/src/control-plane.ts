@@ -125,6 +125,7 @@ const SUPPORT_ACTION_TO_MCP_TOOL = {
   "model_budget.update": "update_model_budget",
   "agent_config.list": "list_agent_configs",
   "agent_config.update_policy": "update_agent_policy",
+  "newspaper.diagnostics": "get_newspaper_diagnostics",
   "documents.upload_text": "upload_document_text",
   "context_graph.import_map": "import_context_graph_map",
   "proposals.list": "list_proposals",

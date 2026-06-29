@@ -260,6 +260,7 @@ export function CustomerDetailClientTabs({
                     <option value="data_feeds.list">Inspect context data feeds</option>
                     <option value="runtime.list_failed_jobs">List failing background jobs</option>
                     <option value="model_budget.get">Query model budget overview</option>
+                    <option value="newspaper.diagnostics">Inspect newspaper diagnostics</option>
                   </select>
                 </div>
                 <div>
