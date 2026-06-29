@@ -32,6 +32,11 @@ on:
         required: true
         type: boolean
         default: false
+      confirm_all:
+        description: "Required for non-dry-run releases with targets=all. Prefer selected-customer redeploy for config repair."
+        required: true
+        type: boolean
+        default: false
 
 permissions:
   actions: read
@@ -102,11 +107,13 @@ jobs:
           RELEASE_INPUT: ${{ inputs.release }}
           TARGETS_INPUT: ${{ inputs.targets }}
           DRY_RUN_INPUT: ${{ inputs.dry_run }}
+          CONFIRM_ALL_INPUT: ${{ inputs.confirm_all }}
         run: |
           node scripts/release/fleet-release-runner.mjs validate-config \
             --release "$RELEASE_INPUT" \
             --targets "$TARGETS_INPUT" \
-            --dry-run "$DRY_RUN_INPUT"
+            --dry-run "$DRY_RUN_INPUT" \
+            --confirm-all "$CONFIRM_ALL_INPUT"
 
       - name: Resolve release manifest
         id: manifest
@@ -123,6 +130,7 @@ jobs:
           TARGETS_INPUT: ${{ inputs.targets }}
           RELEASE_REASON: ${{ inputs.reason }}
           CONCURRENCY_INPUT: ${{ inputs.concurrency }}
+          CONFIRM_ALL_INPUT: ${{ inputs.confirm_all }}
         run: |
           node scripts/release/fleet-release-runner.mjs deploy \
             --manifest-json "$MANIFEST_JSON" \
@@ -130,7 +138,8 @@ jobs:
             --reason "$RELEASE_REASON" \
             --dry-run true \
             --concurrency "$CONCURRENCY_INPUT" \
-            --fail-on-blockers true
+            --fail-on-blockers true \
+            --confirm-all "$CONFIRM_ALL_INPUT"
 
       - name: Plan fleet release
         if: ${{ inputs.dry_run }}
@@ -139,6 +148,7 @@ jobs:
           TARGETS_INPUT: ${{ inputs.targets }}
           RELEASE_REASON: ${{ inputs.reason }}
           CONCURRENCY_INPUT: ${{ inputs.concurrency }}
+          CONFIRM_ALL_INPUT: ${{ inputs.confirm_all }}
         run: |
           node scripts/release/fleet-release-runner.mjs deploy \
             --manifest-json "$MANIFEST_JSON" \
@@ -146,7 +156,8 @@ jobs:
             --reason "$RELEASE_REASON" \
             --dry-run true \
             --concurrency "$CONCURRENCY_INPUT" \
-            --fail-on-blockers true
+            --fail-on-blockers true \
+            --confirm-all "$CONFIRM_ALL_INPUT"
 
       - uses: actions/checkout@v5
         with:
@@ -200,6 +211,7 @@ jobs:
           DRY_RUN_INPUT: ${{ inputs.dry_run }}
           CONCURRENCY_INPUT: ${{ inputs.concurrency }}
           FORCE_AFTER_FAILURE_INPUT: ${{ inputs.force_after_failure }}
+          CONFIRM_ALL_INPUT: ${{ inputs.confirm_all }}
         run: |
           node scripts/release/fleet-release-runner.mjs deploy \
             --manifest-json "$MANIFEST_JSON" \
@@ -207,4 +219,5 @@ jobs:
             --reason "$RELEASE_REASON" \
             --dry-run "$DRY_RUN_INPUT" \
             --concurrency "$CONCURRENCY_INPUT" \
-            --force-after-failure "$FORCE_AFTER_FAILURE_INPUT"
+            --force-after-failure "$FORCE_AFTER_FAILURE_INPUT" \
+            --confirm-all "$CONFIRM_ALL_INPUT"

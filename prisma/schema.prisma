@@ -2676,6 +2676,7 @@ model NewspaperDelivery {
   id                String                  @id @default(uuid())
   workspaceId       String
   workflowJobId     String?
+  retryOfDeliveryId String?
   memberId          String?
   demoLeadId        String?
   kind              NewspaperDeliveryKind
@@ -2689,16 +2690,22 @@ model NewspaperDelivery {
   skippedAt         DateTime?
   failedAt          DateTime?
   error             String?                 @db.Text
+  htmlSnapshot      String?                 @db.Text
   createdAt         DateTime                @default(now())
 
-  workspace   Workspace    @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-  workflowJob WorkflowJob? @relation(fields: [workflowJobId], references: [id], onDelete: SetNull)
-  member      Member?      @relation(fields: [memberId], references: [id], onDelete: SetNull)
-  demoLead    DemoLead?    @relation(fields: [demoLeadId], references: [id], onDelete: SetNull)
+  workspace         Workspace            @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  workflowJob       WorkflowJob?         @relation(fields: [workflowJobId], references: [id], onDelete: SetNull)
+  retryOfDelivery   NewspaperDelivery?   @relation("NewspaperDeliveryRetry", fields: [retryOfDeliveryId], references: [id], onDelete: SetNull)
+  retryAttempts     NewspaperDelivery[]  @relation("NewspaperDeliveryRetry")
+  member            Member?              @relation(fields: [memberId], references: [id], onDelete: SetNull)
+  demoLead          DemoLead?            @relation(fields: [demoLeadId], references: [id], onDelete: SetNull)
 
   @@index([workspaceId, createdAt])
   @@index([workspaceId, runKey])
+  @@index([workspaceId, runKey, status])
   @@index([workflowJobId])
+  @@index([workflowJobId, status])
+  @@index([retryOfDeliveryId])
   @@index([memberId])
   @@index([demoLeadId])
 }

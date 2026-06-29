@@ -11,6 +11,7 @@ import {
   filterTargetsByGroups,
   formatReleasePlan,
   groupTargetsByRing,
+  isAllTargetSelection,
   normalizeGitSha,
   normalizeReleaseInput,
   normalizeTargets,
@@ -68,14 +69,19 @@ export async function runFleetRelease(argv = process.argv.slice(2), deps = {}) {
   }
 
   const manifest = await resolveManifest(args, deps);
-  const selectedGroups = normalizeTargets(args.targets ?? process.env.FLEET_RELEASE_TARGETS);
+  const rawTargets = args.targets ?? process.env.FLEET_RELEASE_TARGETS;
+  const selectedGroups = normalizeTargets(rawTargets);
   const dryRun = parseBoolean(args.dryRun ?? process.env.FLEET_RELEASE_DRY_RUN, false);
+  const confirmAll = parseBoolean(args.confirmAll ?? process.env.FLEET_RELEASE_CONFIRM_ALL, false);
   const failOnBlockers = parseBoolean(args.failOnBlockers ?? process.env.FLEET_RELEASE_FAIL_ON_BLOCKERS, false);
   const forceAfterFailure = parseBoolean(args.forceAfterFailure ?? process.env.FLEET_RELEASE_FORCE_AFTER_FAILURE, false);
   const concurrency = parsePositiveInteger(args.concurrency ?? process.env.FLEET_RELEASE_CONCURRENCY, 2);
   const reason = args.reason ?? process.env.FLEET_RELEASE_REASON ?? "";
   if (!reason.trim()) {
     throw new Error("A release reason is required.");
+  }
+  if (!dryRun && isAllTargetSelection(rawTargets) && !confirmAll) {
+    throw new Error("Non-dry-run fleet releases with targets=all require confirm_all=true. Use redeploy_customer_services for selected customer config repair.");
   }
 
   const allTargets = await discoverTargets(deps);
@@ -172,8 +178,10 @@ async function resolveManifest(args, deps) {
 
 function validateReleaseEnvironment(args, env) {
   const release = normalizeReleaseInput(args.release ?? env.FLEET_RELEASE_INPUT ?? "latest-stable");
-  const selectedGroups = normalizeTargets(args.targets ?? env.FLEET_RELEASE_TARGETS);
+  const rawTargets = args.targets ?? env.FLEET_RELEASE_TARGETS;
+  const selectedGroups = normalizeTargets(rawTargets);
   const dryRun = parseBoolean(args.dryRun ?? env.FLEET_RELEASE_DRY_RUN, false);
+  const confirmAll = parseBoolean(args.confirmAll ?? env.FLEET_RELEASE_CONFIRM_ALL, false);
   const missing = [];
   const invalid = [];
 
@@ -197,6 +205,12 @@ function validateReleaseEnvironment(args, env) {
   validateConfiguredTargetJson("FLEET_RELEASE_OPS_TARGET_JSON", env.FLEET_RELEASE_OPS_TARGET_JSON, invalid);
   validateConfiguredTargetJson("FLEET_RELEASE_BACKUP_APP_TARGET_JSON", env.FLEET_RELEASE_BACKUP_APP_TARGET_JSON, invalid);
   validateConfiguredTargetJson("FLEET_RELEASE_AZURE_TARGET_JSON", env.FLEET_RELEASE_AZURE_TARGET_JSON, invalid);
+  if (!dryRun && isAllTargetSelection(rawTargets) && !confirmAll) {
+    invalid.push({
+      name: "confirm_all",
+      reason: "non-dry-run fleet releases with targets=all require confirm_all=true",
+    });
+  }
   if (env.CORGTEX_AUTO_SEED_JNJ_DEMO?.trim()) {
     invalid.push({
       name: "CORGTEX_AUTO_SEED_JNJ_DEMO",

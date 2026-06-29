@@ -59,6 +59,7 @@ export const MCP_TOOL_CAPABILITIES = {
   revoke_agent_credential: { scopes: ["support:write"], destructive: true, sensitive: true },
   list_agent_configs: { scopes: ["agents:read"] },
   get_newspaper_diagnostics: { scopes: ["agents:read", "runtime:read"] },
+  retry_failed_newspaper_deliveries: { scopes: ["runtime:write"], sensitive: true },
   update_agent_policy: { scopes: ["support:write"], sensitive: true },
   get_model_budget: { scopes: ["agents:read"] },
   update_model_budget: { scopes: ["support:write"], sensitive: true },

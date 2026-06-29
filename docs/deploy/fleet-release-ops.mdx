@@ -77,10 +77,12 @@ Dry-runs use the lightweight preflight workflow by default. That path validates 
 6. Confirm the dry-run dispatches `fleet-release-preflight.yml`, prints the manifest, selected targets, rings, blockers, and elapsed seconds before any provider mutation.
 7. If the dry-run fails on missing config, fix the named GitHub environment setting and rerun.
 8. If the preflight takes longer than 30 seconds or reports unclear blockers, stop and repair the preflight before expanding release orchestration.
-9. For a real promotion, use a specific support reason and monitor the GitHub Actions run until each target proves matching `gitSha`, `imageTag`, `database=up`, `schema=ready`, passing customer-read probes, and `supportConnectorReadiness.status=ready`.
+9. For a real promotion, use a specific support reason and monitor the GitHub Actions run until each target proves matching `gitSha`, `imageTag`, `database=up`, `schema=ready`, passing customer-read probes, and `supportConnectorReadiness.status=ready`. A non-dry-run promotion with `targets=all` requires explicit `--confirm-all` or `confirm_all=true`.
 10. If any target fails, stop at the failed ring unless an operator explicitly supplies a force reason.
 
 `MISSING_SUPPORT_SCOPE` means the support connector credential needs an audited scope repair. It is not customer OAuth/sign-in reauthorization.
+
+Fleet release is for promoting a new product release. Do not use `targets=all` or `railway-customers` to repair one customer's provider variables or worker-only readiness. For configuration repair, call the Ops control-plane `redeploy_customer_services` tool with explicit deployment IDs, selected services, a reason, and optional expected release metadata. The selected redeploy path restarts the current Railway service instances without changing image tags or release variables.
 
 ## Gate For Next Work
 

@@ -20,6 +20,7 @@ const mocks = vi.hoisted(() => ({
   resolveControlPlaneRequestActor: vi.fn(),
   getControlPlaneProviderStatus: vi.fn(),
   getControlPlaneSlackSetupTarget: vi.fn(),
+  redeployControlPlaneCustomerServices: vi.fn(),
 }));
 vi.mock("@corgtex/domain", () => ({
   approveReviewGatedProcurementTrial: mocks.approveReviewGatedProcurementTrial,
@@ -43,6 +44,7 @@ vi.mock("@corgtex/domain", () => ({
   rejectReviewGatedProcurementTrial: mocks.rejectReviewGatedProcurementTrial,
   requireControlPlaneAccess: mocks.requireControlPlaneAccess,
   requireControlPlaneScope: mocks.requireControlPlaneScope,
+  redeployControlPlaneCustomerServices: mocks.redeployControlPlaneCustomerServices,
   refreshControlPlaneFleetSnapshots: vi.fn(),
   rollbackControlPlaneClientMigration: vi.fn(),
   revokeControlPlaneAgentCredential: vi.fn(),
@@ -84,6 +86,7 @@ describe("/api/control-plane/mcp", () => {
     mocks.rejectReviewGatedProcurementTrial.mockResolvedValue({ id: "trial-review", status: "SUSPENDED" });
     mocks.getControlPlaneProviderStatus.mockResolvedValue({ deploymentId: "dep-azure", adapter: { kind: "azure_read_model" } });
     mocks.getControlPlaneSlackSetupTarget.mockResolvedValue({ deploymentId: "dep-slack", managedWorkspaceId: "ws-slack" });
+    mocks.redeployControlPlaneCustomerServices.mockResolvedValue({ queuedJobs: 1 });
   });
 
   afterEach(() => {
@@ -154,6 +157,7 @@ describe("/api/control-plane/mcp", () => {
       "prepare_release_upgrade",
       "deploy_latest_release",
       "deploy_latest_release_bulk",
+      "redeploy_customer_services",
       "get_rollout_status",
       "run_customer_support_operation",
     ]);
@@ -686,6 +690,45 @@ describe("/api/control-plane/mcp", () => {
       releaseImageTag: "sha-new",
       releaseVersion: "main-2026-05-20",
       reason: "Verified live health.",
+    });
+  });
+
+  it("calls selected customer service redeploy with release write scope", async () => {
+    mocks.resolveControlPlaneRequestActor.mockResolvedValueOnce({
+      kind: "agent",
+      authProvider: "control-plane",
+      label: "control-plane-agent",
+      scopes: ["control-plane:read", "control-plane:releases:write"],
+    });
+    const domain = await import("@corgtex/domain");
+    vi.mocked(domain.redeployControlPlaneCustomerServices).mockResolvedValueOnce({
+      queuedJobs: 1,
+      services: ["worker"],
+    } as never);
+    const { POST } = await import("./route");
+
+    const response = await POST(request({
+      jsonrpc: "2.0",
+      id: 13,
+      method: "tools/call",
+      params: {
+        name: "redeploy_customer_services",
+        arguments: {
+          deploymentIds: ["inst-1"],
+          services: ["worker"],
+          reason: "Redeploy worker after provider config repair.",
+          expectedReleaseImageTag: "sha-current",
+        },
+      },
+    }) as never);
+
+    expect(response.status).toBe(200);
+    expect(vi.mocked(domain.redeployControlPlaneCustomerServices)).toHaveBeenCalledWith(expect.any(Object), {
+      deploymentIds: ["inst-1"],
+      services: ["worker"],
+      reason: "Redeploy worker after provider config repair.",
+      expectedReleaseImageTag: "sha-current",
+      expectedReleaseVersion: null,
     });
   });
 

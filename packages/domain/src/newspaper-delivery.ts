@@ -1,18 +1,23 @@
-import { env, prisma, sha256 } from "@corgtex/shared";
+import { env, logger, prisma, sendEmail, sha256 } from "@corgtex/shared";
 import type { AppActor } from "@corgtex/shared";
 import type { NewspaperCadence, NewspaperDeliveryKind, NewspaperDeliveryStatus } from "@prisma/client";
 import { createHmac } from "node:crypto";
 import { AppError } from "./errors";
 import { requireWorkspaceMembership } from "./auth";
 import {
+  getNewspaperLocalDateParts,
   getNextNewspaperRunISO,
   isHumanNewspaperRecipientIdentity,
+  isNewspaperScheduleDue,
   normalizeNewspaperScheduleConfig,
   type NewspaperScheduleConfig,
 } from "./agent-config";
 
 const HREF_ATTR_PATTERN = /href\s*=\s*(["'])(.*?)\1/gi;
 const TRACKING_SALT = "corgtex-newspaper-link";
+export const NEWSPAPER_DELIVERY_RETRY_JOB_TYPE = "newspaper.delivery-retry";
+const DEFAULT_RETRY_TAKE = 50;
+const MAX_RETRY_TAKE = 250;
 
 function appUrl() {
   return env.APP_URL.replace(/\/$/, "");
@@ -139,6 +144,8 @@ export async function recordNewspaperDelivery(params: {
   status: NewspaperDeliveryStatus;
   providerMessageId?: string | null;
   error?: string | null;
+  retryOfDeliveryId?: string | null;
+  htmlSnapshot?: string | null;
 }) {
   const now = new Date();
   return prisma.newspaperDelivery.create({
@@ -155,11 +162,355 @@ export async function recordNewspaperDelivery(params: {
       status: params.status,
       providerMessageId: params.providerMessageId ?? null,
       error: params.error ?? null,
+      retryOfDeliveryId: params.retryOfDeliveryId ?? null,
+      htmlSnapshot: params.htmlSnapshot ?? null,
       sentAt: params.status === "SENT" ? now : null,
       skippedAt: params.status === "SKIPPED" ? now : null,
       failedAt: params.status === "FAILED" ? now : null,
     },
   });
+}
+
+function boundedRetryTake(value: number | null | undefined) {
+  if (!Number.isFinite(value)) return DEFAULT_RETRY_TAKE;
+  return Math.max(1, Math.min(MAX_RETRY_TAKE, Math.floor(value ?? DEFAULT_RETRY_TAKE)));
+}
+
+function isRetryableSkippedNewspaperDelivery(error: string | null | undefined) {
+  const normalized = (error ?? "").trim().toLowerCase();
+  if (!normalized) return false;
+  if (normalized.includes("no digest inputs")) return false;
+  if (normalized.includes("no operating activity")) return false;
+  if (normalized.includes("no matching recipients")) return false;
+  if (normalized.includes("no digest sections")) return false;
+  if (normalized.includes("cadence is off")) return false;
+  return normalized.includes("resend")
+    || normalized.includes("email")
+    || normalized.includes("provider")
+    || normalized.includes("api key")
+    || normalized.includes("credential");
+}
+
+function isRetryableNewspaperDelivery(delivery: {
+  status: NewspaperDeliveryStatus;
+  error: string | null;
+  htmlSnapshot: string | null;
+}) {
+  if (!delivery.htmlSnapshot?.trim()) return false;
+  if (delivery.status === "FAILED") return true;
+  if (delivery.status === "SKIPPED") return isRetryableSkippedNewspaperDelivery(delivery.error);
+  return false;
+}
+
+function newspaperFailureBucket(params: {
+  status: NewspaperDeliveryStatus | string;
+  error?: string | null;
+  emailStatus?: string | null;
+  lastEventType?: string | null;
+  failureReason?: string | null;
+}) {
+  const text = [
+    params.status,
+    params.error,
+    params.emailStatus,
+    params.lastEventType,
+    params.failureReason,
+  ].filter(Boolean).join(" ").toLowerCase();
+
+  if (text.includes("complain")) return "complained";
+  if (text.includes("bounce")) return "bounced";
+  if (text.includes("resend_api_key missing") || text.includes("api key missing") || text.includes("missing")) return "missing_email_config";
+  if (text.includes("unauthorized") || text.includes("forbidden") || text.includes("invalid") || text.includes("authentication")) return "invalid_email_config";
+  if (text.includes("rate limit") || text.includes("timeout") || text.includes("temporar")) return "provider_transient";
+  if (text.includes("no digest inputs") || text.includes("no operating activity")) return "no_digest_inputs";
+  if (text.includes("no matching recipients")) return "no_recipients";
+  if (text.includes("no digest sections")) return "empty_digest_sections";
+  if (text.includes("cadence")) return "cadence_off";
+  if (text.includes("email") || text.includes("resend") || text.includes("provider")) return "provider_send_error";
+  return params.status === "FAILED" ? "unknown_failure" : "unknown_skip";
+}
+
+async function listRetryCandidateDeliveries(params: {
+  workspaceId: string;
+  deliveryIds?: string[] | null;
+  workflowJobId?: string | null;
+  runKey?: string | null;
+  take?: number | null;
+}) {
+  const deliveryIds = Array.from(new Set((params.deliveryIds ?? []).map((id) => id.trim()).filter(Boolean)));
+  const deliveries = await prisma.newspaperDelivery.findMany({
+    where: {
+      workspaceId: params.workspaceId,
+      status: { in: ["FAILED", "SKIPPED"] },
+      retryAttempts: { none: {} },
+      ...(deliveryIds.length ? { id: { in: deliveryIds } } : {}),
+      ...(params.workflowJobId ? { workflowJobId: params.workflowJobId } : {}),
+      ...(params.runKey ? { runKey: params.runKey } : {}),
+    },
+    orderBy: { createdAt: "desc" },
+    take: boundedRetryTake(params.take),
+    select: {
+      id: true,
+      status: true,
+      error: true,
+      htmlSnapshot: true,
+      runKey: true,
+      workflowJobId: true,
+      createdAt: true,
+    },
+  });
+
+  return {
+    deliveries,
+    eligible: deliveries.filter(isRetryableNewspaperDelivery),
+    missingSnapshotCount: deliveries.filter((delivery) => !delivery.htmlSnapshot?.trim()).length,
+    nonRetryableCount: deliveries.filter((delivery) => delivery.htmlSnapshot?.trim() && !isRetryableNewspaperDelivery(delivery)).length,
+  };
+}
+
+export async function getRetryableNewspaperDeliverySummary(workspaceId: string, opts?: {
+  deliveryIds?: string[] | null;
+  workflowJobId?: string | null;
+  runKey?: string | null;
+  take?: number | null;
+}) {
+  const result = await listRetryCandidateDeliveries({ workspaceId, ...opts });
+  return {
+    eligibleCount: result.eligible.length,
+    missingSnapshotCount: result.missingSnapshotCount,
+    nonRetryableCount: result.nonRetryableCount,
+    eligibleDeliveryIds: result.eligible.map((delivery) => delivery.id),
+  };
+}
+
+export async function retryFailedNewspaperDeliveries(actor: AppActor, params: {
+  workspaceId: string;
+  deliveryIds?: string[] | null;
+  workflowJobId?: string | null;
+  runKey?: string | null;
+  take?: number | null;
+  reason?: string | null;
+}) {
+  await requireWorkspaceMembership({
+    actor,
+    workspaceId: params.workspaceId,
+    allowedRoles: ["ADMIN", "FACILITATOR"],
+  });
+
+  const candidates = await listRetryCandidateDeliveries(params);
+  const deliveryIds = candidates.eligible.map((delivery) => delivery.id);
+  if (deliveryIds.length === 0) {
+    return {
+      queued: false,
+      message: "No retryable failed or skipped newspaper deliveries with stored HTML snapshots were found.",
+      eligibleCount: 0,
+      missingSnapshotCount: candidates.missingSnapshotCount,
+      nonRetryableCount: candidates.nonRetryableCount,
+    };
+  }
+
+  const reason = params.reason?.trim() || "Retry failed newspaper deliveries.";
+  const dedupeKey = `${params.workspaceId}:newspaper-delivery-retry:${sha256(deliveryIds.sort().join(","))}`;
+  const job = await prisma.$transaction(async (tx) => {
+    const queued = await tx.workflowJob.upsert({
+      where: { dedupeKey },
+      update: {},
+      create: {
+        workspaceId: params.workspaceId,
+        type: NEWSPAPER_DELIVERY_RETRY_JOB_TYPE,
+        payload: {
+          deliveryIds,
+          reason,
+          retryRequestedAt: new Date().toISOString(),
+        },
+        dedupeKey,
+        runAfter: new Date(),
+      },
+      select: {
+        id: true,
+        status: true,
+        type: true,
+        dedupeKey: true,
+        createdAt: true,
+      },
+    });
+
+    await tx.auditLog.create({
+      data: {
+        workspaceId: params.workspaceId,
+        actorUserId: actor.kind === "user" ? actor.user.id : null,
+        action: "newspaper.deliveries_retry_queued",
+        entityType: "NewspaperDelivery",
+        entityId: deliveryIds[0],
+        meta: {
+          deliveryIds,
+          workflowJobId: queued.id,
+          reason,
+        },
+      },
+    });
+
+    return queued;
+  });
+
+  return {
+    queued: true,
+    job,
+    eligibleCount: deliveryIds.length,
+    missingSnapshotCount: candidates.missingSnapshotCount,
+    nonRetryableCount: candidates.nonRetryableCount,
+  };
+}
+
+export async function runNewspaperDeliveryRetryJob(params: {
+  workspaceId: string;
+  workflowJobId: string;
+  deliveryIds: string[];
+}) {
+  const requestedIds = Array.from(new Set(params.deliveryIds.map((id) => id.trim()).filter(Boolean)));
+  if (requestedIds.length === 0) {
+    return { success: true, sentEmails: 0, failedEmails: 0, skippedEmails: 0, ignoredDeliveries: 0 };
+  }
+
+  const deliveries = await prisma.newspaperDelivery.findMany({
+    where: {
+      id: { in: requestedIds },
+      workspaceId: params.workspaceId,
+      status: { in: ["FAILED", "SKIPPED"] },
+      retryAttempts: { none: {} },
+    },
+    orderBy: { createdAt: "asc" },
+    select: {
+      id: true,
+      workspaceId: true,
+      workflowJobId: true,
+      memberId: true,
+      demoLeadId: true,
+      kind: true,
+      cadence: true,
+      runKey: true,
+      recipientEmail: true,
+      subject: true,
+      status: true,
+      error: true,
+      htmlSnapshot: true,
+      member: { select: { userId: true } },
+    },
+  });
+
+  let sentEmails = 0;
+  let failedEmails = 0;
+  let skippedEmails = 0;
+  let ignoredDeliveries = 0;
+
+  for (const delivery of deliveries) {
+    if (!isRetryableNewspaperDelivery(delivery)) {
+      ignoredDeliveries++;
+      continue;
+    }
+
+    const html = delivery.htmlSnapshot!;
+    const tracking = {
+      emailType: delivery.kind === "DEMO_WELCOME" ? "newspaper.demo_welcome" : "newspaper.member",
+      userId: delivery.member?.userId ?? null,
+      workspaceId: delivery.workspaceId,
+      metadata: {
+        workspaceId: delivery.workspaceId,
+        workflowJobId: params.workflowJobId,
+        originalWorkflowJobId: delivery.workflowJobId,
+        retryOfDeliveryId: delivery.id,
+        runKey: delivery.runKey,
+        cadence: delivery.cadence,
+        kind: delivery.kind,
+      },
+    };
+
+    try {
+      const emailResult = await sendEmail({
+        to: delivery.recipientEmail,
+        subject: delivery.subject,
+        html,
+        tracking,
+      });
+      if (emailResult.status === "SENT") {
+        sentEmails++;
+        await recordNewspaperDelivery({
+          workspaceId: delivery.workspaceId,
+          workflowJobId: params.workflowJobId,
+          retryOfDeliveryId: delivery.id,
+          memberId: delivery.memberId,
+          demoLeadId: delivery.demoLeadId,
+          kind: delivery.kind,
+          cadence: delivery.cadence,
+          runKey: delivery.runKey,
+          recipientEmail: delivery.recipientEmail,
+          subject: delivery.subject,
+          status: "SENT",
+          providerMessageId: emailResult.providerMessageId,
+        });
+      } else {
+        skippedEmails++;
+        await recordNewspaperDelivery({
+          workspaceId: delivery.workspaceId,
+          workflowJobId: params.workflowJobId,
+          retryOfDeliveryId: delivery.id,
+          memberId: delivery.memberId,
+          demoLeadId: delivery.demoLeadId,
+          kind: delivery.kind,
+          cadence: delivery.cadence,
+          runKey: delivery.runKey,
+          recipientEmail: delivery.recipientEmail,
+          subject: delivery.subject,
+          status: "SKIPPED",
+          error: emailResult.reason,
+          htmlSnapshot: html,
+        });
+      }
+    } catch (error) {
+      failedEmails++;
+      const message = error instanceof Error ? error.message : "Unknown email error";
+      await recordNewspaperDelivery({
+        workspaceId: delivery.workspaceId,
+        workflowJobId: params.workflowJobId,
+        retryOfDeliveryId: delivery.id,
+        memberId: delivery.memberId,
+        demoLeadId: delivery.demoLeadId,
+        kind: delivery.kind,
+        cadence: delivery.cadence,
+        runKey: delivery.runKey,
+        recipientEmail: delivery.recipientEmail,
+        subject: delivery.subject,
+        status: "FAILED",
+        error: message,
+        htmlSnapshot: html,
+      });
+      logger.error("newspaper_delivery_retry_failed", {
+        workspaceId: delivery.workspaceId,
+        workflowJobId: params.workflowJobId,
+        retryOfDeliveryId: delivery.id,
+        error: message,
+      });
+    }
+  }
+
+  const ignoredMissingIds = requestedIds.length - deliveries.length;
+  logger.info("newspaper_delivery_retry_completed", {
+    workspaceId: params.workspaceId,
+    workflowJobId: params.workflowJobId,
+    requestedDeliveries: requestedIds.length,
+    sentEmails,
+    failedEmails,
+    skippedEmails,
+    ignoredDeliveries: ignoredDeliveries + ignoredMissingIds,
+  });
+
+  return {
+    success: true,
+    sentEmails,
+    failedEmails,
+    skippedEmails,
+    ignoredDeliveries: ignoredDeliveries + ignoredMissingIds,
+  };
 }
 
 export async function recordNewspaperLinkClick(token: string) {
@@ -522,6 +873,124 @@ function nextRunsForRecipients(params: {
   };
 }
 
+function newspaperDedupeKey(workspaceId: string, cadence: Exclude<NewspaperCadence, "OFF">, dateKey: string) {
+  return `${workspaceId}:${cadence === "DAILY" ? "daily-digest" : "weekly-digest"}:${dateKey}`;
+}
+
+function countDeliveryStatuses(deliveries: Array<{ status: NewspaperDeliveryStatus }>) {
+  return {
+    sent: deliveries.filter((delivery) => delivery.status === "SENT").length,
+    failed: deliveries.filter((delivery) => delivery.status === "FAILED").length,
+    skipped: deliveries.filter((delivery) => delivery.status === "SKIPPED").length,
+    total: deliveries.length,
+  };
+}
+
+function buildDeliveryHealth(deliveries: Array<{
+  runKey: string;
+  workflowJobId: string | null;
+  status: NewspaperDeliveryStatus;
+  createdAt: Date;
+  emailDelivery?: { status: string | null; lastEventType: string | null; bouncedAt: Date | null; complainedAt: Date | null } | null;
+}>, unrecoveredFailureCount: number) {
+  const latestRunKey = deliveries[0]?.runKey ?? null;
+  const latestRunDeliveries = latestRunKey ? deliveries.filter((delivery) => delivery.runKey === latestRunKey) : [];
+  const latestCounts = countDeliveryStatuses(latestRunDeliveries);
+  const bounceOrComplaintCount = deliveries.filter((delivery) => (
+    delivery.emailDelivery?.bouncedAt || delivery.emailDelivery?.complainedAt || delivery.emailDelivery?.lastEventType?.toLowerCase().includes("bounce") || delivery.emailDelivery?.lastEventType?.toLowerCase().includes("complain")
+  )).length;
+
+  return {
+    latestRunKey,
+    latestWorkflowJobId: latestRunDeliveries.find((delivery) => delivery.workflowJobId)?.workflowJobId ?? null,
+    latestRunCreatedAt: latestRunDeliveries[0]?.createdAt ?? null,
+    latestRunStatus: latestCounts.failed > 0 ? "failed" : latestCounts.sent > 0 ? "sent" : latestCounts.skipped > 0 ? "skipped" : "none",
+    sentCount: latestCounts.sent,
+    failedCount: latestCounts.failed,
+    skippedCount: latestCounts.skipped,
+    unrecoveredFailureCount,
+    bounceOrComplaintCount,
+  };
+}
+
+function buildFailureBuckets(deliveries: Array<{
+  status: NewspaperDeliveryStatus;
+  error: string | null;
+  emailDelivery?: { status: string | null; lastEventType: string | null; failureReason: string | null } | null;
+}>) {
+  const buckets = new Map<string, number>();
+  for (const delivery of deliveries) {
+    const hasDeliveryFailure = delivery.status === "FAILED" || delivery.status === "SKIPPED";
+    const hasProviderFailure = Boolean(delivery.emailDelivery?.failureReason)
+      || delivery.emailDelivery?.status === "BOUNCED"
+      || delivery.emailDelivery?.status === "COMPLAINED"
+      || delivery.emailDelivery?.lastEventType?.toLowerCase().includes("bounce")
+      || delivery.emailDelivery?.lastEventType?.toLowerCase().includes("complain");
+    if (!hasDeliveryFailure && !hasProviderFailure) continue;
+    const bucket = newspaperFailureBucket({
+      status: delivery.status,
+      error: delivery.error,
+      emailStatus: delivery.emailDelivery?.status,
+      lastEventType: delivery.emailDelivery?.lastEventType,
+      failureReason: delivery.emailDelivery?.failureReason,
+    });
+    buckets.set(bucket, (buckets.get(bucket) ?? 0) + 1);
+  }
+  return Array.from(buckets.entries())
+    .map(([bucket, count]) => ({ bucket, count }))
+    .sort((left, right) => right.count - left.count || left.bucket.localeCompare(right.bucket));
+}
+
+function expectedRunsForCadences(params: {
+  workspaceId: string;
+  now: Date;
+  schedule: NewspaperScheduleConfig;
+  recipientCadences: Set<NewspaperCadence>;
+  jobs: Array<{ id: string; status: string; dedupeKey: string | null; error: string | null; runAfter: Date; createdAt: Date; startedAt: Date | null; completedAt: Date | null }>;
+  deliveries: Array<{ workflowJobId: string | null; runKey: string; status: NewspaperDeliveryStatus }>;
+}) {
+  const cadences = (["DAILY", "WEEKLY"] as const).filter((cadence) => params.recipientCadences.has(cadence));
+  return cadences.map((cadence) => {
+    const nextRunISO = getNextNewspaperRunISO({ from: params.now, schedule: params.schedule, cadence });
+    const expectedAt = nextRunISO ? new Date(nextRunISO) : params.now;
+    const localDateKey = getNewspaperLocalDateParts(expectedAt, params.schedule.timeZone).dateKey;
+    const expectedDedupeKey = newspaperDedupeKey(params.workspaceId, cadence, localDateKey);
+    const matchingJob = params.jobs.find((job) => job.dedupeKey === expectedDedupeKey) ?? null;
+    const matchingDeliveries = matchingJob
+      ? params.deliveries.filter((delivery) => delivery.workflowJobId === matchingJob.id || delivery.runKey === matchingJob.id)
+      : [];
+    const counts = countDeliveryStatuses(matchingDeliveries);
+    const due = isNewspaperScheduleDue({ now: params.now, schedule: params.schedule, cadence });
+    let state: "pending" | "completed" | "failed" | "missed" | "deduped" = due ? "missed" : "pending";
+    if (matchingJob) {
+      if (matchingJob.status === "FAILED" || matchingJob.status === "CANCELLED") {
+        state = "failed";
+      } else if (matchingJob.status === "COMPLETED") {
+        state = counts.failed > 0 ? "failed" : "completed";
+      } else {
+        state = due ? "deduped" : "pending";
+      }
+    }
+    return {
+      cadence,
+      localDateKey,
+      expectedAt: nextRunISO,
+      expectedDedupeKey,
+      state,
+      matchingJob: matchingJob ? {
+        id: matchingJob.id,
+        status: matchingJob.status,
+        error: matchingJob.error,
+        runAfter: matchingJob.runAfter,
+        createdAt: matchingJob.createdAt,
+        startedAt: matchingJob.startedAt,
+        completedAt: matchingJob.completedAt,
+      } : null,
+      matchingDeliveries: counts,
+    };
+  });
+}
+
 export async function getNewspaperDiagnostics(actor: AppActor, workspaceId: string, opts?: { now?: Date; take?: number }) {
   await requireWorkspaceMembership({ actor, workspaceId });
 
@@ -569,7 +1038,7 @@ export async function getNewspaperDiagnostics(actor: AppActor, workspaceId: stri
   const recipientCadences = new Set<NewspaperCadence>(
     recipients.filter((recipient) => recipient.receivesNewspaper).map((recipient) => recipient.effectiveCadence),
   );
-  const [oneDayCounts, sevenDayCounts, jobs, deliveries] = await Promise.all([
+  const [oneDayCounts, sevenDayCounts, jobs, deliveries, retrySummary] = await Promise.all([
     countNewspaperSources(workspaceId, new Date(now.getTime() - 24 * 60 * 60 * 1000)),
     countNewspaperSources(workspaceId, new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000)),
     prisma.workflowJob.findMany({
@@ -598,20 +1067,46 @@ export async function getNewspaperDiagnostics(actor: AppActor, workspaceId: stri
       select: {
         id: true,
         workflowJobId: true,
+        retryOfDeliveryId: true,
         memberId: true,
         cadence: true,
         runKey: true,
         recipientEmail: true,
         subject: true,
         status: true,
+        providerMessageId: true,
         error: true,
+        htmlSnapshot: true,
         sentAt: true,
         skippedAt: true,
         failedAt: true,
         createdAt: true,
       },
     }),
+    getRetryableNewspaperDeliverySummary(workspaceId, { take: 250 }),
   ]);
+  const providerMessageIds = Array.from(new Set(deliveries.map((delivery) => delivery.providerMessageId).filter((id): id is string => Boolean(id))));
+  const emailDeliveryRows = providerMessageIds.length
+    ? await prisma.emailDelivery.findMany({
+        where: { providerMessageId: { in: providerMessageIds } },
+        select: {
+          providerMessageId: true,
+          status: true,
+          lastEventType: true,
+          lastEventAt: true,
+          deliveredAt: true,
+          bouncedAt: true,
+          complainedAt: true,
+          failureReason: true,
+        },
+      })
+    : [];
+  const emailDeliveryByMessageId = new Map(emailDeliveryRows.map((delivery) => [delivery.providerMessageId, delivery]));
+  const enrichedDeliveries = deliveries.map(({ htmlSnapshot, ...delivery }) => ({
+    ...delivery,
+    hasHtmlSnapshot: Boolean(htmlSnapshot?.trim()),
+    emailDelivery: delivery.providerMessageId ? emailDeliveryByMessageId.get(delivery.providerMessageId) ?? null : null,
+  }));
 
   return {
     workspaceId,
@@ -623,7 +1118,18 @@ export async function getNewspaperDiagnostics(actor: AppActor, workspaceId: stri
       oneDay: oneDayCounts,
       sevenDays: sevenDayCounts,
     },
+    deliveryHealth: buildDeliveryHealth(enrichedDeliveries, retrySummary.eligibleCount),
+    failureBuckets: buildFailureBuckets(enrichedDeliveries),
+    expectedRuns: expectedRunsForCadences({
+      workspaceId,
+      now,
+      schedule,
+      recipientCadences,
+      jobs,
+      deliveries: enrichedDeliveries,
+    }),
+    retriableFailures: retrySummary,
     recentJobs: jobs,
-    recentDeliveries: deliveries,
+    recentDeliveries: enrichedDeliveries,
   };
 }

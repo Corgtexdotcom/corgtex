@@ -73,6 +73,21 @@ export type RailwayReleaseUpgradeResult = {
   workerDeploymentId?: string | null;
 };
 
+export type RailwayCustomerServiceRedeployInput = {
+  environmentId: string;
+  services: Array<{ key: "web" | "worker"; serviceId: string }>;
+};
+
+export type RailwayCustomerServiceRedeployResult = {
+  deployments: Array<{ key: "web" | "worker"; serviceId: string; deploymentId: string | null }>;
+};
+
+export type RailwayServiceVariablesInput = {
+  projectId: string;
+  environmentId: string;
+  serviceId: string;
+};
+
 export type RailwayAppRuntimeProvisioningInput = {
   projectName: string;
   environmentName: string;
@@ -901,6 +916,53 @@ export async function upgradeRailwayCustomerRelease(
     webDeploymentId: deployments.web,
     workerDeploymentId: deployments.worker,
   };
+}
+
+export async function getRailwayServiceVariables(
+  client: RailwayClient,
+  input: RailwayServiceVariablesInput,
+): Promise<Record<string, string>> {
+  const result = await client.graphql<{ variables: Record<string, string> | null }>(
+    `query GetServiceVariables($projectId: String!, $environmentId: String!, $serviceId: String!) {
+      variables(projectId: $projectId, environmentId: $environmentId, serviceId: $serviceId)
+    }`,
+    {
+      projectId: input.projectId,
+      environmentId: input.environmentId,
+      serviceId: input.serviceId,
+    },
+  );
+
+  return result.variables ?? {};
+}
+
+export async function redeployRailwayCustomerServices(
+  client: RailwayClient,
+  input: RailwayCustomerServiceRedeployInput,
+): Promise<RailwayCustomerServiceRedeployResult> {
+  if (input.services.length === 0) {
+    throw new AppError(400, "INVALID_INPUT", "Select at least one Railway service to redeploy.");
+  }
+
+  const deployments: RailwayCustomerServiceRedeployResult["deployments"] = [];
+  for (const service of input.services) {
+    const result = await client.graphql<{ deploymentId: string | null }>(
+      `mutation RedeployService($serviceId: String!, $environmentId: String!) {
+        deploymentId: serviceInstanceDeployV2(serviceId: $serviceId, environmentId: $environmentId)
+      }`,
+      {
+        serviceId: service.serviceId,
+        environmentId: input.environmentId,
+      },
+    );
+    deployments.push({
+      key: service.key,
+      serviceId: service.serviceId,
+      deploymentId: result.deploymentId,
+    });
+  }
+
+  return { deployments };
 }
 
 export async function upgradeRailwayAppRuntimeRelease(

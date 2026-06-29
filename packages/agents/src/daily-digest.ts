@@ -1603,6 +1603,18 @@ Rules:
         to: member.user.email,
         subject,
         html,
+        tracking: {
+          emailType: "newspaper.member",
+          userId: member.user.id,
+          workspaceId: params.workspaceId,
+          metadata: {
+            workspaceId: params.workspaceId,
+            workflowJobId: params.workflowJobId ?? null,
+            runKey,
+            cadence,
+            kind: "MEMBER_NEWSPAPER",
+          },
+        },
       });
       if (emailResult.status === "SENT") {
         sentEmails++;
@@ -1631,6 +1643,7 @@ Rules:
           subject,
           status: "SKIPPED",
           error: emailResult.reason,
+          htmlSnapshot: html,
         });
       }
     } catch (error) {
@@ -1647,6 +1660,7 @@ Rules:
         subject,
         status: "FAILED",
         error: message,
+        htmlSnapshot: html,
       });
       logger.error("newspaper_delivery_failed", {
         workspaceId: params.workspaceId,
@@ -1721,6 +1735,17 @@ export async function sendDemoWelcomeNewspaper(params: {
       to: lead.email,
       subject,
       html,
+      tracking: {
+        emailType: "newspaper.demo_welcome",
+        workspaceId: params.workspaceId,
+        metadata: {
+          workspaceId: params.workspaceId,
+          workflowJobId: params.workflowJobId ?? null,
+          runKey,
+          kind: "DEMO_WELCOME",
+          demoLeadId: lead.id,
+        },
+      },
     });
     if (emailResult.status === "SENT") {
       providerMessageId = emailResult.providerMessageId;
@@ -1740,6 +1765,7 @@ export async function sendDemoWelcomeNewspaper(params: {
       subject,
       status: "FAILED",
       error: message,
+      htmlSnapshot: html,
     });
     logger.error("newspaper_delivery_failed", {
       workspaceId: params.workspaceId,
@@ -1784,6 +1810,7 @@ export async function sendDemoWelcomeNewspaper(params: {
         status: deliveryStatus,
         providerMessageId,
         error: deliveryError,
+        htmlSnapshot: deliveryStatus === "SKIPPED" ? html : null,
         sentAt: deliveryStatus === "SENT" ? now : null,
         skippedAt: deliveryStatus === "SKIPPED" ? now : null,
       },

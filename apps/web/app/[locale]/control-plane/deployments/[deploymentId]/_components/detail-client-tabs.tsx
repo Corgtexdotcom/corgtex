@@ -261,6 +261,7 @@ export function CustomerDetailClientTabs({
                     <option value="runtime.list_failed_jobs">List failing background jobs</option>
                     <option value="model_budget.get">Query model budget overview</option>
                     <option value="newspaper.diagnostics">Inspect newspaper diagnostics</option>
+                    <option value="newspaper.retry_failed_deliveries">Retry failed newspaper deliveries</option>
                   </select>
                 </div>
                 <div>
@@ -1406,6 +1407,11 @@ export function CustomerDetailClientTabs({
                       <span>Recorded: {new Date(op.createdAt).toLocaleString()}</span>
                       {op.error && <span className="text-rose-400 block mt-1 font-mono">{op.error}</span>}
                     </div>
+                    {op.resultSummary && (
+                      <pre className="max-h-36 overflow-auto whitespace-pre-wrap rounded border border-white/10 bg-black/20 p-2 text-[9px] text-muted">
+                        {JSON.stringify(op.resultSummary, null, 2).slice(0, 1600)}
+                      </pre>
+                    )}
                   </div>
                 ))}
                 {customer.supportOperations.length === 0 && (

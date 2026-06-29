@@ -31,6 +31,7 @@ import {
   rejectReviewGatedProcurementTrial,
   requireControlPlaneAccess,
   requireControlPlaneScope,
+  redeployControlPlaneCustomerServices,
   refreshControlPlaneFleetSnapshots,
   rollbackControlPlaneClientMigration,
   revokeControlPlaneAgentCredential,
@@ -568,6 +569,21 @@ const tools = [
     },
   },
   {
+    name: "redeploy_customer_services",
+    description: "Queue selected Railway customer web/worker service redeploys without changing images or release variables.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        deploymentIds: { type: "array", items: { type: "string" } },
+        services: { type: "array", items: { type: "string" } },
+        reason: { type: "string" },
+        expectedReleaseImageTag: { type: "string" },
+        expectedReleaseVersion: { type: "string" },
+      },
+      required: ["deploymentIds", "services", "reason"],
+    },
+  },
+  {
     name: "get_rollout_status",
     description: "List recent deploy-latest rollout jobs and statuses.",
     inputSchema: {
@@ -637,6 +653,7 @@ const toolScopes: Record<string, string> = {
   prepare_release_upgrade: "control-plane:releases:write",
   deploy_latest_release: "control-plane:releases:write",
   deploy_latest_release_bulk: "control-plane:releases:write",
+  redeploy_customer_services: "control-plane:releases:write",
   get_rollout_status: "control-plane:read",
   run_customer_support_operation: "control-plane:support:write",
 };
@@ -1133,6 +1150,15 @@ export async function POST(request: NextRequest) {
         includeUnhealthy: argBoolean(args, "includeUnhealthy", false),
         limit: argNumber(args, "limit", 100),
         reason: argString(args, "reason"),
+      })));
+    }
+    if (name === "redeploy_customer_services") {
+      return rpcResult(id, textContent(await redeployControlPlaneCustomerServices(actor, {
+        deploymentIds: argStringArray(args, "deploymentIds"),
+        services: argStringArray(args, "services"),
+        reason: argString(args, "reason"),
+        expectedReleaseImageTag: argOptionalString(args, "expectedReleaseImageTag"),
+        expectedReleaseVersion: argOptionalString(args, "expectedReleaseVersion"),
       })));
     }
     if (name === "get_rollout_status") {

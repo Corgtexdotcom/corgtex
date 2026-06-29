@@ -15,8 +15,10 @@ const {
   syncSlackPublicArchiveForWorkspaceMock,
   runMeetingAgendaThreadEditMock,
   runControlPlaneClientMigrationWorkerVerificationJobMock,
+  runControlPlaneCustomerServiceRedeployJobMock,
   runControlPlaneFleetSnapshotJobMock,
   runControlPlaneReleaseDeployJobMock,
+  runNewspaperDeliveryRetryJobMock,
   runEnterpriseAppHealthCheckJobMock,
   syncRecorderCalendarSourceMock,
   getWorkspaceDigestSettingsMock,
@@ -73,8 +75,10 @@ const {
   syncSlackPublicArchiveForWorkspaceMock: vi.fn(),
   runMeetingAgendaThreadEditMock: vi.fn(),
   runControlPlaneClientMigrationWorkerVerificationJobMock: vi.fn(),
+  runControlPlaneCustomerServiceRedeployJobMock: vi.fn(),
   runControlPlaneFleetSnapshotJobMock: vi.fn(),
   runControlPlaneReleaseDeployJobMock: vi.fn(),
+  runNewspaperDeliveryRetryJobMock: vi.fn(),
   runEnterpriseAppHealthCheckJobMock: vi.fn(),
   syncRecorderCalendarSourceMock: vi.fn(),
   getWorkspaceDigestSettingsMock: vi.fn(),
@@ -117,10 +121,14 @@ vi.mock("@corgtex/domain", () => ({
   runMeetingAgendaThreadEdit: runMeetingAgendaThreadEditMock,
   CONTROL_PLANE_CLIENT_MIGRATION_VERIFY_JOB_TYPE: "control-plane.client-migration.verify",
   runControlPlaneClientMigrationWorkerVerificationJob: runControlPlaneClientMigrationWorkerVerificationJobMock,
+  CONTROL_PLANE_CUSTOMER_SERVICE_REDEPLOY_JOB_TYPE: "control-plane.customer-services.redeploy",
+  runControlPlaneCustomerServiceRedeployJob: runControlPlaneCustomerServiceRedeployJobMock,
   CONTROL_PLANE_FLEET_SNAPSHOT_JOB_TYPE: "control-plane.fleet-snapshot",
   runControlPlaneFleetSnapshotJob: runControlPlaneFleetSnapshotJobMock,
   CONTROL_PLANE_RELEASE_DEPLOY_JOB_TYPE: "control-plane.release.deploy-latest",
   runControlPlaneReleaseDeployJob: runControlPlaneReleaseDeployJobMock,
+  NEWSPAPER_DELIVERY_RETRY_JOB_TYPE: "newspaper.delivery-retry",
+  runNewspaperDeliveryRetryJob: runNewspaperDeliveryRetryJobMock,
   ENTERPRISE_APP_HEALTH_CHECK_JOB_TYPE: "enterprise-app.health.check",
   runEnterpriseAppHealthCheckJob: runEnterpriseAppHealthCheckJobMock,
   syncRecorderCalendarSource: syncRecorderCalendarSourceMock,
@@ -188,8 +196,10 @@ describe("runPendingJobs", () => {
     syncSlackPublicArchiveForWorkspaceMock.mockReset();
     runMeetingAgendaThreadEditMock.mockReset();
     runControlPlaneClientMigrationWorkerVerificationJobMock.mockReset().mockResolvedValue({ id: "mig-1", status: "import_verified" });
+    runControlPlaneCustomerServiceRedeployJobMock.mockReset().mockResolvedValue({ status: "redeployed" });
     runControlPlaneFleetSnapshotJobMock.mockReset().mockResolvedValue({ refreshed: true });
     runControlPlaneReleaseDeployJobMock.mockReset().mockResolvedValue({ status: "deployed" });
+    runNewspaperDeliveryRetryJobMock.mockReset().mockResolvedValue({ success: true });
     runEnterpriseAppHealthCheckJobMock.mockReset().mockResolvedValue({ status: "ok" });
     syncRecorderCalendarSourceMock.mockReset().mockResolvedValue({ action: "synced" });
     getWorkspaceDigestSettingsMock.mockReset().mockResolvedValue(new Map());
@@ -647,6 +657,33 @@ describe("runPendingJobs", () => {
       data: expect.objectContaining({
         status: "FAILED",
         error: "Control Plane client migration verification job is missing migrationRunId.",
+      }),
+    });
+  });
+
+  it("dispatches newspaper delivery retry jobs without regenerating the digest", async () => {
+    txMock.$queryRaw.mockResolvedValue([
+      {
+        id: "job-1",
+        workspaceId: "ws-1",
+        type: "newspaper.delivery-retry",
+        payload: { deliveryIds: ["delivery-1", "delivery-2"] },
+        attempts: 1,
+      },
+    ]);
+
+    await expect(runPendingJobs("worker-1", 1)).resolves.toBe(1);
+
+    expect(runNewspaperDeliveryRetryJobMock).toHaveBeenCalledWith({
+      workspaceId: "ws-1",
+      workflowJobId: "job-1",
+      deliveryIds: ["delivery-1", "delivery-2"],
+    });
+    expect(runDailyDigestMock).not.toHaveBeenCalled();
+    expect(prismaMock.workflowJob.update).toHaveBeenCalledWith({
+      where: { id: "job-1" },
+      data: expect.objectContaining({
+        status: "COMPLETED",
       }),
     });
   });

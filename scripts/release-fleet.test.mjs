@@ -13,9 +13,14 @@ describe("release fleet command", () => {
       dryRun: false,
       concurrency: 2,
       forceAfterFailure: false,
+      confirmAll: false,
       watch: true,
       ref: "main",
     });
+  });
+
+  it("requires explicit confirmation for non-dry-run all-target releases", () => {
+    expect(() => buildWorkflowInputs(["--targets", "all", "--reason", "Ship latest stable."])).toThrow(/confirm-all/);
   });
 
   it("validates explicit SHA and target groups", () => {
@@ -40,6 +45,7 @@ describe("release fleet command", () => {
     expect(buildWorkflowInputs([
       "--targets",
       "all",
+      "--dry-run",
       "--reason",
       "Plan full release.",
       "--no-watch",
@@ -62,7 +68,7 @@ describe("release fleet command", () => {
       .mockReturnValueOnce({ stdout: JSON.stringify([{ databaseId: 123, url: "https://github.test/run/123" }]), stderr: "" })
       .mockReturnValueOnce({ stdout: "", stderr: "" });
 
-    runFleetReleaseDispatch(["--release", SHA, "--reason", "Deploy latest."], { runCommand });
+    runFleetReleaseDispatch(["--release", SHA, "--reason", "Deploy latest.", "--confirm-all"], { runCommand });
 
     expect(runCommand).toHaveBeenNthCalledWith(1, "gh", expect.arrayContaining([
       "workflow",
@@ -71,6 +77,7 @@ describe("release fleet command", () => {
       "-f",
       `release=${SHA}`,
     ]));
+    expect(runCommand.mock.calls[0][1]).toContain("confirm_all=true");
     expect(runCommand).toHaveBeenNthCalledWith(2, "gh", expect.arrayContaining([
       "--workflow",
       "fleet-release.yml",

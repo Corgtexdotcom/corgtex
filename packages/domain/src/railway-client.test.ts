@@ -260,4 +260,29 @@ describe("Railway client", () => {
     });
     expect(graphql.mock.calls[2][0]).toContain("serviceInstanceDeployV2");
   });
+
+  it("redeploys selected Railway customer services without updating source or variables", async () => {
+    const graphql = vi.fn()
+      .mockResolvedValueOnce({ deploymentId: "deploy-worker" });
+    const { redeployRailwayCustomerServices } = await import("./railway-client");
+
+    const result = await redeployRailwayCustomerServices({ graphql }, {
+      environmentId: "env-1",
+      services: [{ key: "worker", serviceId: "worker-1" }],
+    });
+
+    expect(result).toEqual({
+      deployments: [
+        { key: "worker", serviceId: "worker-1", deploymentId: "deploy-worker" },
+      ],
+    });
+    expect(graphql).toHaveBeenCalledTimes(1);
+    expect(graphql.mock.calls[0][0]).toContain("serviceInstanceDeployV2");
+    expect(graphql.mock.calls[0][0]).not.toContain("variableCollectionUpsert");
+    expect(graphql.mock.calls[0][0]).not.toContain("serviceInstanceUpdate");
+    expect(graphql.mock.calls[0][1]).toEqual({
+      serviceId: "worker-1",
+      environmentId: "env-1",
+    });
+  });
 });

@@ -37,6 +37,10 @@ The Ops deployment also exposes a dedicated `/control-plane` surface for pilot c
 
 Support operations are intentionally first-class records. The control plane stores the operator, customer deployment, action, reason, redacted input summary, status, and result summary. Mutating support actions also write `support.*` audit entries into the customer deployment. Direct infrastructure or database work remains a break-glass path and should be recorded as a break-glass support note rather than treated as the normal support workflow.
 
+Newsletter support uses the same support-operation path. Operators should run `newspaper.diagnostics` first to inspect cadence, expected runs, delivery health, failure buckets, retriable failures, source counts, and web/worker email readiness. When diagnostics show failed or provider-skipped delivery rows with stored HTML snapshots, use `newspaper.retry_failed_deliveries`; it sends the stored newspaper HTML only, appends linked retry delivery rows, and does not regenerate the digest or resend successful recipients. `runtime.retry_failed_job` is only a fallback for old rows without snapshots.
+
+When a customer needs a configuration-only runtime refresh, use the control-plane `redeploy_customer_services` tool with explicit deployment IDs and `services: ["worker"]` or `["web", "worker"]`. This operation redeploys the current Railway service instances without changing source images or release variables and rejects Ops, backup app, Azure self-serve, inactive, or non-customer targets.
+
 ### Private bootstrap bundles
 
 Customer bootstrap data is delivered through a private signed bundle reference. The customer runtime accepts a one-time internal bootstrap request, verifies that the bearer token hashes to the runtime-configured `CORGTEX_CUSTOMER_DEPLOYMENT_BOOTSTRAP_TOKEN_HASH`, verifies the request signature and bundle SHA-256 checksum, applies the generic stable-client seed logic, and records only status metadata in the database.

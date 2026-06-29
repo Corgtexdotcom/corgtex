@@ -2,16 +2,31 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const {
   prismaMock,
+  txMock,
   requireWorkspaceMembershipMock,
+  sendEmailMock,
+  loggerMock,
   trackedLinks,
 } = vi.hoisted(() => ({
   trackedLinks: [] as any[],
+  txMock: {
+    workflowJob: {
+      upsert: vi.fn(),
+    },
+    auditLog: {
+      create: vi.fn(),
+    },
+  },
   prismaMock: {
+    $transaction: vi.fn(),
     workspaceAgentConfig: {
       findUnique: vi.fn(),
     },
     workflowJob: {
       findMany: vi.fn(),
+    },
+    auditLog: {
+      create: vi.fn(),
     },
     member: {
       findMany: vi.fn(),
@@ -69,8 +84,16 @@ const {
       create: vi.fn(),
       findMany: vi.fn(),
     },
+    emailDelivery: {
+      findMany: vi.fn(),
+    },
   },
   requireWorkspaceMembershipMock: vi.fn(),
+  sendEmailMock: vi.fn(),
+  loggerMock: {
+    info: vi.fn(),
+    error: vi.fn(),
+  },
 }));
 
 function testHash(value: string) {
@@ -82,7 +105,9 @@ vi.mock("@corgtex/shared", () => ({
     APP_URL: "https://app.example.com",
     SESSION_COOKIE_SECRET: "test-session-secret",
   },
+  logger: loggerMock,
   prisma: prismaMock,
+  sendEmail: sendEmailMock,
   sha256: testHash,
   toInputJson: (value: unknown) => value,
 }));
@@ -133,6 +158,19 @@ describe("newspaper delivery", () => {
       ...data,
     }));
     prismaMock.newspaperDelivery.findMany.mockResolvedValue([]);
+    prismaMock.emailDelivery.findMany.mockResolvedValue([]);
+    prismaMock.$transaction.mockImplementation(async (callback: (tx: typeof txMock) => Promise<unknown>) => callback(txMock));
+    txMock.workflowJob.upsert.mockReset().mockResolvedValue({
+      id: "retry-job-1",
+      status: "PENDING",
+      type: "newspaper.delivery-retry",
+      dedupeKey: "retry-dedupe",
+      createdAt: new Date("2026-06-29T12:00:00.000Z"),
+    });
+    txMock.auditLog.create.mockReset().mockResolvedValue({});
+    sendEmailMock.mockReset().mockResolvedValue({ status: "SENT", providerMessageId: "email-1" });
+    loggerMock.info.mockReset();
+    loggerMock.error.mockReset();
     prismaMock.workspaceAgentConfig.findUnique.mockResolvedValue(null);
     prismaMock.workflowJob.findMany.mockResolvedValue([]);
     prismaMock.member.findMany.mockResolvedValue([]);
@@ -318,6 +356,136 @@ describe("newspaper delivery", () => {
     }));
     expect(rows[0]).not.toHaveProperty("clickCount");
     expect(rows[0]).not.toHaveProperty("clickedAt");
+  });
+
+  it("queues only retryable failed or provider-skipped leaf deliveries with stored HTML", async () => {
+    const { retryFailedNewspaperDeliveries } = await import("./newspaper-delivery");
+    prismaMock.newspaperDelivery.findMany.mockResolvedValue([
+      {
+        id: "failed-with-html",
+        status: "FAILED",
+        error: "Email send failed: Unauthorized",
+        htmlSnapshot: "<p>Retry me</p>",
+        runKey: "run-1",
+        workflowJobId: "job-1",
+        createdAt: new Date("2026-06-29T12:00:00.000Z"),
+      },
+      {
+        id: "missing-html",
+        status: "FAILED",
+        error: "Email send failed: Timeout",
+        htmlSnapshot: null,
+        runKey: "run-1",
+        workflowJobId: "job-1",
+        createdAt: new Date("2026-06-29T12:01:00.000Z"),
+      },
+      {
+        id: "no-input-skip",
+        status: "SKIPPED",
+        error: "No digest inputs.",
+        htmlSnapshot: "<p>Do not retry</p>",
+        runKey: "run-1",
+        workflowJobId: "job-1",
+        createdAt: new Date("2026-06-29T12:02:00.000Z"),
+      },
+    ]);
+
+    const result = await retryFailedNewspaperDeliveries(
+      { kind: "user", user: { id: "u-1" } } as any,
+      {
+        workspaceId: "ws-1",
+        workflowJobId: "job-1",
+        reason: "Retry failed provider sends.",
+      },
+    );
+
+    expect(result).toMatchObject({
+      queued: true,
+      eligibleCount: 1,
+      missingSnapshotCount: 1,
+      nonRetryableCount: 1,
+    });
+    expect(requireWorkspaceMembershipMock).toHaveBeenCalledWith({
+      actor: { kind: "user", user: { id: "u-1" } },
+      workspaceId: "ws-1",
+      allowedRoles: ["ADMIN", "FACILITATOR"],
+    });
+    expect(txMock.workflowJob.upsert).toHaveBeenCalledWith(expect.objectContaining({
+      create: expect.objectContaining({
+        workspaceId: "ws-1",
+        type: "newspaper.delivery-retry",
+        payload: expect.objectContaining({
+          deliveryIds: ["failed-with-html"],
+          reason: "Retry failed provider sends.",
+        }),
+      }),
+    }));
+    expect(txMock.auditLog.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        action: "newspaper.deliveries_retry_queued",
+      }),
+    }));
+  });
+
+  it("retries stored HTML and appends linked delivery rows without regenerating content", async () => {
+    const { runNewspaperDeliveryRetryJob } = await import("./newspaper-delivery");
+    prismaMock.newspaperDelivery.findMany.mockResolvedValue([
+      {
+        id: "failed-with-html",
+        workspaceId: "ws-1",
+        workflowJobId: "original-job-1",
+        memberId: "member-1",
+        demoLeadId: null,
+        kind: "MEMBER_NEWSPAPER",
+        cadence: "WEEKLY",
+        runKey: "original-run-key",
+        recipientEmail: "member@example.com",
+        subject: "Weekly Newspaper",
+        status: "FAILED",
+        error: "Email send failed: Unauthorized",
+        htmlSnapshot: "<p>Stored HTML</p>",
+        member: { userId: "user-1" },
+      },
+    ]);
+
+    const result = await runNewspaperDeliveryRetryJob({
+      workspaceId: "ws-1",
+      workflowJobId: "retry-job-1",
+      deliveryIds: ["failed-with-html"],
+    });
+
+    expect(result).toMatchObject({
+      success: true,
+      sentEmails: 1,
+      failedEmails: 0,
+      skippedEmails: 0,
+    });
+    expect(sendEmailMock).toHaveBeenCalledWith(expect.objectContaining({
+      to: "member@example.com",
+      subject: "Weekly Newspaper",
+      html: "<p>Stored HTML</p>",
+      tracking: expect.objectContaining({
+        emailType: "newspaper.member",
+        userId: "user-1",
+        workspaceId: "ws-1",
+        metadata: expect.objectContaining({
+          workflowJobId: "retry-job-1",
+          originalWorkflowJobId: "original-job-1",
+          retryOfDeliveryId: "failed-with-html",
+          runKey: "original-run-key",
+        }),
+      }),
+    }));
+    expect(prismaMock.newspaperDelivery.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        workflowJobId: "retry-job-1",
+        retryOfDeliveryId: "failed-with-html",
+        runKey: "original-run-key",
+        status: "SENT",
+        providerMessageId: "email-1",
+        htmlSnapshot: null,
+      }),
+    });
   });
 
   it("returns newspaper diagnostics with effective recipients, next runs, jobs, deliveries, and source counts", async () => {

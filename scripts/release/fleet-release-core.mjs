@@ -97,6 +97,11 @@ export function normalizeTargets(value = "default") {
   return [...new Set(selected)];
 }
 
+export function isAllTargetSelection(value = "default") {
+  const raw = String(value ?? "default").trim();
+  return raw === "all";
+}
+
 export function buildReleaseManifest({
   gitSha,
   repository = "Corgtexdotcom/corgtex",

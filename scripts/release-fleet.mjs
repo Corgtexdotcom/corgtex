@@ -4,6 +4,7 @@ import { spawnSync } from "node:child_process";
 import { pathToFileURL } from "node:url";
 
 import {
+  isAllTargetSelection,
   normalizeReleaseInput,
   normalizeTargets,
   parseBoolean,
@@ -14,18 +15,25 @@ import {
 export function buildWorkflowInputs(argv = process.argv.slice(2)) {
   const args = parseKeyValueArgs(argv);
   const release = normalizeReleaseInput(args.release ?? "latest-stable");
-  const targets = normalizeTargets(args.targets).join(",");
+  const rawTargets = args.targets;
+  const targets = normalizeTargets(rawTargets).join(",");
   const reason = args.reason ?? "";
+  const dryRun = parseBoolean(args.dryRun, false);
+  const confirmAll = parseBoolean(args.confirmAll, false);
   if (!reason.trim()) {
-    throw new Error("Usage: npm run release:fleet -- --reason \"...\" [--release latest-stable|<full-sha>] [--targets default|all|railway-customers|azure-selfserve|ops|backup-app] [--dry-run] [--concurrency 2]");
+    throw new Error("Usage: npm run release:fleet -- --reason \"...\" [--release latest-stable|<full-sha>] [--targets default|all|railway-customers|azure-selfserve|ops|backup-app] [--dry-run] [--confirm-all] [--concurrency 2]");
+  }
+  if (!dryRun && isAllTargetSelection(rawTargets) && !confirmAll) {
+    throw new Error("Non-dry-run fleet releases with --targets all require --confirm-all. Use selected-customer redeploy for customer config repair.");
   }
   return {
     release,
     targets,
     reason,
-    dryRun: parseBoolean(args.dryRun, false),
+    dryRun,
     concurrency: parsePositiveInteger(args.concurrency, 2),
     forceAfterFailure: parseBoolean(args.forceAfterFailure, false),
+    confirmAll,
     watch: !parseBoolean(args.noWatch, false),
     ref: args.ref ?? "main",
   };
@@ -60,6 +68,8 @@ export function runFleetReleaseDispatch(argv = process.argv.slice(2), deps = {})
       `dry_run=${inputs.dryRun}`,
       "-f",
       `force_after_failure=${inputs.forceAfterFailure}`,
+      "-f",
+      `confirm_all=${inputs.confirmAll}`,
     );
   }
 

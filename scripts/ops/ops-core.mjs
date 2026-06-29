@@ -353,6 +353,7 @@ export function buildControlPlaneIncidents(customers, options = {}) {
     agentFailureStreakIncident(row, sweepNowMs),
     slackInvalidAuthIncident(row, sweepNowMs),
     releaseMetadataDriftIncident(row),
+    ...newspaperHealthIncidents(row),
   ].filter(Boolean).map(normalizeIncident));
 }
 
@@ -703,6 +704,106 @@ function releaseMetadataDriftIncident(row) {
   };
 }
 
+function newspaperHealthIncidents(row) {
+  const diagnostics = latestNewspaperDiagnostics(row);
+  if (!diagnostics) return [];
+  const label = deploymentLabel(row);
+  const deploymentId = optionalText(row?.id) ?? "unknown";
+  const incidents = [];
+  const readiness = record(diagnostics.providerEmailReadiness);
+  const readinessStatus = optionalText(readiness?.status);
+  if (readinessStatus && ["invalid", "missing"].includes(readinessStatus)) {
+    incidents.push({
+      dedupeKey: `control-plane:${row.id}:newspaperEmailReadiness:${readinessStatus}`,
+      severity: "P2",
+      service: "newspaper",
+      clientSlug: clientSlug(row),
+      status: "newspaperEmailReadiness",
+      summary: `${label} newspaper email readiness is ${readinessStatus}`,
+      evidence: [
+        `Deployment ID: ${deploymentId}`,
+        `Provider readiness: ${readinessStatus}`,
+        `Web key present: ${record(readiness?.web)?.keyPresent === true ? "yes" : "no"}`,
+        `Worker key present: ${record(readiness?.worker)?.keyPresent === true ? "yes" : "no"}`,
+        `Web auth probe: ${optionalText(record(readiness?.web)?.authProbe) ?? "unknown"}`,
+        `Worker auth probe: ${optionalText(record(readiness?.worker)?.authProbe) ?? "unknown"}`,
+      ],
+      recommendedAction: "repair provider config through the control plane, then use selected-customer service redeploy for the affected services",
+    });
+  }
+
+  const expectedRuns = Array.isArray(diagnostics.expectedRuns) ? diagnostics.expectedRuns : [];
+  const missedRuns = expectedRuns.filter((run) => optionalText(run?.state) === "missed");
+  if (missedRuns.length > 0) {
+    incidents.push({
+      dedupeKey: `control-plane:${row.id}:newspaperExpectedRunMissed`,
+      severity: "P2",
+      service: "newspaper",
+      clientSlug: clientSlug(row),
+      status: "newspaperExpectedRunMissed",
+      summary: `${label} missed an expected newspaper run`,
+      evidence: [
+        `Deployment ID: ${deploymentId}`,
+        `Missed runs: ${missedRuns.map((run) => `${optionalText(run?.cadence) ?? "unknown"} ${optionalText(run?.localDateKey) ?? "unknown"}`).join(", ")}`,
+      ],
+      recommendedAction: "run newspaper diagnostics, inspect scheduler dedupe state, and avoid generic replay unless no snapshot retry is possible",
+    });
+  }
+
+  const retriableFailures = record(diagnostics.retriableFailures);
+  const eligibleCount = numberValue(retriableFailures?.eligibleCount);
+  if (eligibleCount > 0) {
+    incidents.push({
+      dedupeKey: `control-plane:${row.id}:newspaperUnrecoveredFailures`,
+      severity: "P2",
+      service: "newspaper",
+      clientSlug: clientSlug(row),
+      status: "newspaperUnrecoveredFailures",
+      summary: `${label} has unrecovered newspaper delivery failures`,
+      evidence: [
+        `Deployment ID: ${deploymentId}`,
+        `Retryable failed/skipped delivery rows: ${eligibleCount}`,
+        `Missing snapshots: ${numberValue(retriableFailures?.missingSnapshotCount) ?? 0}`,
+      ],
+      recommendedAction: "use newspaper.retry_failed_deliveries before considering runtime.retry_failed_job",
+    });
+  }
+
+  const failureBuckets = Array.isArray(diagnostics.failureBuckets) ? diagnostics.failureBuckets : [];
+  const bounceBuckets = failureBuckets.filter((bucket) => ["bounced", "complained"].includes(optionalText(bucket?.bucket) ?? ""));
+  if (bounceBuckets.length > 0) {
+    incidents.push({
+      dedupeKey: `control-plane:${row.id}:newspaperBounceComplaint`,
+      severity: "P2",
+      service: "newspaper",
+      clientSlug: clientSlug(row),
+      status: "newspaperBounceComplaint",
+      summary: `${label} has newspaper bounce or complaint events`,
+      evidence: [
+        `Deployment ID: ${deploymentId}`,
+        `Buckets: ${bounceBuckets.map((bucket) => `${optionalText(bucket?.bucket)}=${numberValue(bucket?.count) ?? 0}`).join(", ")}`,
+      ],
+      recommendedAction: "inspect recipient status and provider events before retrying affected addresses",
+    });
+  }
+
+  return incidents;
+}
+
+function latestNewspaperDiagnostics(row) {
+  const operations = Array.isArray(row?.supportOperations) ? row.supportOperations : [];
+  const operation = operations
+    .filter((item) => optionalText(item?.action) === "newspaper.diagnostics" && normalizeAgentRunStatus(item?.status) === "COMPLETED")
+    .sort((a, b) => Date.parse(optionalText(b?.completedAt) ?? optionalText(b?.createdAt) ?? 0) - Date.parse(optionalText(a?.completedAt) ?? optionalText(a?.createdAt) ?? 0))[0];
+  const summary = record(operation?.resultSummary) ?? record(operation?.resultJson) ?? record(operation?.outputJson);
+  const operationDiagnostics = record(summary?.diagnostics);
+  if (operationDiagnostics) return operationDiagnostics;
+  const snapshot = latestSnapshot(row, "SUPPORT_READY");
+  const snapshotSummary = record(snapshot?.summary);
+  const snapshotNewspaper = record(snapshotSummary?.newspaperDiagnostics);
+  return record(snapshotNewspaper?.diagnostics);
+}
+
 function latestSupportItems(row, key, nestedKeys) {
   const snapshot = latestSnapshot(row, "SUPPORT_READY");
   const summary = record(snapshot?.summary);
@@ -885,6 +986,15 @@ function optionalText(value) {
   if (value === null || value === undefined) return null;
   const text = String(value).trim();
   return text.length > 0 ? text : null;
+}
+
+function numberValue(value) {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string" && value.trim()) {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  return null;
 }
 
 function timestampMs(value) {

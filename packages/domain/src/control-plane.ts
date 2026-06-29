@@ -20,7 +20,7 @@ import {
   type SlackOAuthResponse,
 } from "./communication";
 import { createControlPlaneAdapter } from "./control-plane-adapters";
-import { createRailwayClientFromEnv, upgradeRailwayCustomerRelease, type RailwayClient } from "./railway-client";
+import { createRailwayClientFromEnv, getRailwayServiceVariables, redeployRailwayCustomerServices, upgradeRailwayCustomerRelease, type RailwayClient } from "./railway-client";
 import { buildCustomerDeploymentProviderReadModel, buildCustomerDeploymentReadiness, provisionCustomerDeployment } from "./admin";
 import { registerCustomerDeployment } from "./customer-lifecycle";
 import { AGENT_REGISTRY } from "./agent-registry";
@@ -53,6 +53,7 @@ const CONTROL_PLANE_MIGRATION_READ_ONLY_ENFORCED_ENV = "CONTROL_PLANE_MIGRATION_
 const CONTROL_PLANE_DEPLOYMENT_WRITE_ROLES = new Set<CustomerDeploymentAccessRole>(["SUPPORT_ADMIN", "CUSTOMER_IT_ADMIN"]);
 export const CONTROL_PLANE_FLEET_SNAPSHOT_JOB_TYPE = "control-plane.fleet-snapshot";
 export const CONTROL_PLANE_RELEASE_DEPLOY_JOB_TYPE = "control-plane.release.deploy-latest";
+export const CONTROL_PLANE_CUSTOMER_SERVICE_REDEPLOY_JOB_TYPE = "control-plane.customer-services.redeploy";
 export const CONTROL_PLANE_CLIENT_MIGRATION_VERIFY_JOB_TYPE = "control-plane.client-migration.verify";
 const AGENT_GOVERNANCE_FEATURE_FLAG = "AGENT_GOVERNANCE";
 const STALE_CREDENTIAL_DAYS = 90;
@@ -91,6 +92,7 @@ const MUTATING_SUPPORT_ACTIONS = new Set([
   "tensions.return_to_draft",
   "meetings.upload",
   "runtime.retry_failed_job",
+  "newspaper.retry_failed_deliveries",
   "runtime.discard_failed_job",
   "agent_credentials.update_scopes",
   "agent_credentials.revoke",
@@ -126,6 +128,7 @@ const SUPPORT_ACTION_TO_MCP_TOOL = {
   "agent_config.list": "list_agent_configs",
   "agent_config.update_policy": "update_agent_policy",
   "newspaper.diagnostics": "get_newspaper_diagnostics",
+  "newspaper.retry_failed_deliveries": "retry_failed_newspaper_deliveries",
   "documents.upload_text": "upload_document_text",
   "context_graph.import_map": "import_context_graph_map",
   "proposals.list": "list_proposals",
@@ -722,6 +725,111 @@ async function loadSupportConnector(deploymentId: string) {
     deployment,
     mcpUrl: normalizeSupportMcpUrl(deployment),
     bearerToken: decryptSecret(deployment.supportCredentialEnc),
+  };
+}
+
+type EmailAuthProbeStatus = "valid_send_only" | "invalid" | "missing" | "unknown";
+
+function emailReadinessFromVariables(variables: Record<string, string>, authProbe: EmailAuthProbeStatus) {
+  return {
+    keyPresent: Boolean(variables.RESEND_API_KEY?.trim()),
+    fromPresent: Boolean(variables.EMAIL_FROM?.trim()),
+    replyToPresent: Boolean(variables.EMAIL_REPLY_TO?.trim()),
+    authProbe,
+  };
+}
+
+async function probeResendKeyStatus(apiKey: string | null | undefined): Promise<EmailAuthProbeStatus> {
+  const normalized = apiKey?.trim();
+  if (!normalized) return "missing";
+  try {
+    const response = await fetchWithControlPlaneTimeout(
+      "https://api.resend.com/domains",
+      {
+        method: "GET",
+        headers: {
+          authorization: `Bearer ${normalized}`,
+          accept: "application/json",
+        },
+      },
+      5_000,
+      "EMAIL_PROVIDER_PROBE_TIMEOUT",
+      "Email provider readiness probe timed out.",
+    );
+    if (response.status === 401) return "invalid";
+    if (response.status === 403 || response.ok) return "valid_send_only";
+    return "unknown";
+  } catch (error) {
+    if (error instanceof AppError && error.code === "EMAIL_PROVIDER_PROBE_TIMEOUT") return "unknown";
+    return "unknown";
+  }
+}
+
+async function readRailwayEmailServiceReadiness(params: {
+  projectId: string;
+  environmentId: string;
+  serviceId: string;
+}) {
+  try {
+    const variables = await getRailwayServiceVariables(createRailwayClientFromEnv(), params);
+    return emailReadinessFromVariables(variables, await probeResendKeyStatus(variables.RESEND_API_KEY));
+  } catch {
+    return {
+      keyPresent: false,
+      fromPresent: false,
+      replyToPresent: false,
+      authProbe: "unknown" as EmailAuthProbeStatus,
+    };
+  }
+}
+
+async function getDeploymentEmailReadinessSummary(deploymentId: string) {
+  const deployment = await prisma.customerDeployment.findUnique({
+    where: { id: deploymentId },
+    select: {
+      id: true,
+      cloudProvider: true,
+      railwayProjectId: true,
+      railwayEnvironmentId: true,
+      railwayWebServiceId: true,
+      railwayWorkerServiceId: true,
+      providerProjectId: true,
+      providerEnvironmentId: true,
+      providerWebServiceId: true,
+      providerWorkerServiceId: true,
+    },
+  });
+  if (!deployment) return null;
+  const projectId = deployment.railwayProjectId ?? deployment.providerProjectId;
+  const environmentId = deployment.railwayEnvironmentId ?? deployment.providerEnvironmentId;
+  const webServiceId = deployment.railwayWebServiceId ?? deployment.providerWebServiceId;
+  const workerServiceId = deployment.railwayWorkerServiceId ?? deployment.providerWorkerServiceId;
+  if (deployment.cloudProvider !== "RAILWAY" || !projectId || !environmentId || !webServiceId || !workerServiceId) {
+    return {
+      provider: "resend",
+      source: "control_plane_provider_config",
+      status: "unknown",
+      reason: "railway_service_config_missing_or_unsupported",
+      web: null,
+      worker: null,
+    };
+  }
+
+  const [web, worker] = await Promise.all([
+    readRailwayEmailServiceReadiness({ projectId, environmentId, serviceId: webServiceId }),
+    readRailwayEmailServiceReadiness({ projectId, environmentId, serviceId: workerServiceId }),
+  ]);
+  const missingRequiredConfig = !web.keyPresent || !worker.keyPresent || !web.fromPresent || !worker.fromPresent;
+
+  return {
+    provider: "resend",
+    source: "railway_service_variables",
+    status: web.authProbe === "invalid" || worker.authProbe === "invalid" ? "invalid"
+      : web.authProbe === "unknown" || worker.authProbe === "unknown" ? "unknown"
+        : web.authProbe === "missing" || worker.authProbe === "missing" || missingRequiredConfig ? "missing"
+          : "ready",
+    web,
+    worker,
   };
 }
 
@@ -7957,6 +8065,154 @@ export async function enqueueControlPlaneDeployLatestRollout(actor: AppActor, pa
   };
 }
 
+type CustomerServiceRedeployService = "web" | "worker";
+
+function normalizeCustomerServiceRedeployServices(value: string[] | null | undefined): CustomerServiceRedeployService[] {
+  const services = Array.from(new Set((value ?? []).map((service) => service.trim().toLowerCase()).filter(Boolean)));
+  invariant(services.length > 0, 400, "INVALID_INPUT", "Select worker or web+worker services to redeploy.");
+  const invalid = services.filter((service) => service !== "web" && service !== "worker");
+  invariant(invalid.length === 0, 400, "INVALID_INPUT", `Unsupported service selection: ${invalid.join(", ")}.`);
+  invariant(services.includes("worker"), 400, "INVALID_INPUT", "Selected-customer config repair redeploys must include the worker service.");
+  return services as CustomerServiceRedeployService[];
+}
+
+function validateCustomerServiceRedeployTarget(deployment: {
+  label: string;
+  url: string;
+  customerSlug: string | null;
+  customerAccountId: string | null;
+  deploymentStatus: string;
+  cloudProvider: CustomerDeploymentCloudProvider;
+  railwayProjectId: string | null;
+  railwayEnvironmentId: string | null;
+  railwayWebServiceId: string | null;
+  railwayWorkerServiceId: string | null;
+  providerProjectId: string | null;
+  providerEnvironmentId: string | null;
+  providerWebServiceId: string | null;
+  providerWorkerServiceId: string | null;
+  releaseImageTag: string | null;
+  releaseVersion: string | null;
+}, params: {
+  services: CustomerServiceRedeployService[];
+  expectedReleaseImageTag?: string | null;
+  expectedReleaseVersion?: string | null;
+}) {
+  invariant(!isControlPlaneBackupDeployment(deployment), 400, "INVALID_TARGET", "Selected-customer redeploy cannot target the internal backup app.");
+  invariant(controlPlaneDeploymentCloudProvider(deployment) === "RAILWAY", 400, "PROVIDER_REDEPLOY_UNSUPPORTED", "Selected-customer redeploy is currently available only for Railway deployments.");
+  invariant(Boolean(deployment.customerAccountId), 400, "INVALID_TARGET", "Selected-customer redeploy is only available for customer deployments.");
+  invariant(["ACTIVE", "DEGRADED"].includes(deployment.deploymentStatus), 400, "INVALID_TARGET", "Selected-customer redeploy rejects inactive deployments.");
+  invariant(deployment.railwayProjectId ?? deployment.providerProjectId, 400, "INVALID_TARGET", "Customer deployment is missing a Railway project ID.");
+  invariant(deployment.railwayEnvironmentId ?? deployment.providerEnvironmentId, 400, "INVALID_TARGET", "Customer deployment is missing a Railway environment ID.");
+  if (params.services.includes("web")) {
+    invariant(deployment.railwayWebServiceId ?? deployment.providerWebServiceId, 400, "INVALID_TARGET", "Customer deployment is missing a Railway web service ID.");
+  }
+  if (params.services.includes("worker")) {
+    invariant(deployment.railwayWorkerServiceId ?? deployment.providerWorkerServiceId, 400, "INVALID_TARGET", "Customer deployment is missing a Railway worker service ID.");
+  }
+  if (params.expectedReleaseImageTag?.trim()) {
+    invariant(deployment.releaseImageTag === params.expectedReleaseImageTag.trim(), 409, "RELEASE_MISMATCH", "Customer deployment release image tag does not match expected release metadata.");
+  }
+  if (params.expectedReleaseVersion?.trim()) {
+    invariant(deployment.releaseVersion === params.expectedReleaseVersion.trim(), 409, "RELEASE_MISMATCH", "Customer deployment release version does not match expected release metadata.");
+  }
+}
+
+export async function redeployControlPlaneCustomerServices(actor: AppActor, params: {
+  deploymentIds?: string[] | null;
+  services?: string[] | null;
+  reason?: string | null;
+  expectedReleaseImageTag?: string | null;
+  expectedReleaseVersion?: string | null;
+}) {
+  requireControlPlaneScope(actor, "control-plane:releases:write");
+  const reason = requireMutationReason(params.reason);
+  const services = normalizeCustomerServiceRedeployServices(params.services);
+  const deploymentIds = Array.from(new Set((params.deploymentIds ?? []).map((id) => id.trim()).filter(Boolean)));
+  invariant(deploymentIds.length > 0, 400, "INVALID_INPUT", "Select at least one customer deployment ID.");
+  invariant(deploymentIds.length <= 25, 400, "INVALID_INPUT", "Selected-customer redeploy is limited to 25 deployments per request.");
+
+  const deployments = await prisma.customerDeployment.findMany({
+    where: { id: { in: deploymentIds } },
+    orderBy: { label: "asc" },
+  });
+  const foundIds = new Set(deployments.map((deployment) => deployment.id));
+  const missingIds = deploymentIds.filter((deploymentId) => !foundIds.has(deploymentId));
+  invariant(missingIds.length === 0, 400, "INVALID_INPUT", `Unknown customer deployment IDs: ${missingIds.join(", ")}.`);
+  for (const deployment of deployments) {
+    await requireControlPlaneDeploymentWriteAccess(actor, deployment.id);
+    validateCustomerServiceRedeployTarget(deployment, {
+      services,
+      expectedReleaseImageTag: params.expectedReleaseImageTag,
+      expectedReleaseVersion: params.expectedReleaseVersion,
+    });
+  }
+
+  const bucket = Math.floor(Date.now() / (15 * 60 * 1000));
+  const results: Array<{ deploymentId: string; label: string; status: "queued" | "skipped"; blockers: string[] }> = [];
+  await prisma.$transaction(async (tx) => {
+    for (const deployment of deployments) {
+      const dedupeKey = `control-plane:customer-services-redeploy:${deployment.id}:${services.join("+")}:${bucket}`;
+      const createResult = await tx.workflowJob.createMany({
+        data: {
+          workspaceId: null,
+          eventId: null,
+          type: CONTROL_PLANE_CUSTOMER_SERVICE_REDEPLOY_JOB_TYPE,
+          payload: {
+            deploymentId: deployment.id,
+            services,
+            reason,
+            expectedReleaseImageTag: params.expectedReleaseImageTag ?? null,
+            expectedReleaseVersion: params.expectedReleaseVersion ?? null,
+            requestedBy: actorUserId(actor) ?? (isControlPlaneAgent(actor) ? actor.label : "control-plane"),
+          },
+          dedupeKey,
+        },
+        skipDuplicates: true,
+      });
+      if (createResult.count === 0) {
+        const existingJob = await tx.workflowJob.findUnique({
+          where: { dedupeKey },
+          select: { id: true, status: true },
+        });
+        const blockers = [`A selected-customer redeploy job already exists in this dedupe window${existingJob?.status ? ` with status ${existingJob.status}` : ""}.`];
+        results.push({ deploymentId: deployment.id, label: deployment.label, status: "skipped", blockers });
+        await tx.customerDeploymentEvent.create({
+          data: {
+            deploymentId: deployment.id,
+            actorUserId: actorUserId(actor),
+            action: "control_plane.customer_services_redeploy_skipped",
+            meta: redactObject({ reason, services, blockers, dedupeKey, existingJobId: existingJob?.id ?? null }) as Prisma.InputJsonObject,
+          },
+        });
+        continue;
+      }
+
+      results.push({ deploymentId: deployment.id, label: deployment.label, status: "queued", blockers: [] });
+      await tx.customerDeploymentEvent.create({
+        data: {
+          deploymentId: deployment.id,
+          actorUserId: actorUserId(actor),
+          action: "control_plane.customer_services_redeploy_queued",
+          meta: redactObject({
+            reason,
+            services,
+            expectedReleaseImageTag: params.expectedReleaseImageTag ?? null,
+            expectedReleaseVersion: params.expectedReleaseVersion ?? null,
+          }) as Prisma.InputJsonObject,
+        },
+      });
+    }
+  });
+
+  return {
+    requested: deployments.length,
+    queuedJobs: results.filter((result) => result.status === "queued").length,
+    services,
+    results,
+  };
+}
+
 export async function listControlPlaneReleaseRolloutJobs(actor: AppActor, params: {
   deploymentId?: string | null;
   take?: number | null;
@@ -8000,6 +8256,81 @@ export async function runControlPlaneReleaseDeployJob(params: {
     force: params.force,
     target: params.target,
   });
+}
+
+export async function runControlPlaneCustomerServiceRedeployJob(params: {
+  deploymentId: string;
+  services: string[];
+  reason?: string | null;
+  expectedReleaseImageTag?: string | null;
+  expectedReleaseVersion?: string | null;
+}, railwayClient?: RailwayClient) {
+  const reason = params.reason || "Queued selected-customer service redeploy.";
+  const services = normalizeCustomerServiceRedeployServices(params.services);
+  const deployment = await getControlPlaneDeploymentWithWorkspace(controlPlaneWorkerActor, params.deploymentId);
+  validateCustomerServiceRedeployTarget(deployment, {
+    services,
+    expectedReleaseImageTag: params.expectedReleaseImageTag,
+    expectedReleaseVersion: params.expectedReleaseVersion,
+  });
+
+  const projectId = deployment.railwayProjectId ?? deployment.providerProjectId;
+  const environmentId = deployment.railwayEnvironmentId ?? deployment.providerEnvironmentId;
+  invariant(projectId, 400, "INVALID_TARGET", "Customer deployment is missing a Railway project ID.");
+  invariant(environmentId, 400, "INVALID_TARGET", "Customer deployment is missing a Railway environment ID.");
+  const selectedServices = services.map((service) => {
+    const serviceId = service === "web"
+      ? deployment.railwayWebServiceId ?? deployment.providerWebServiceId
+      : deployment.railwayWorkerServiceId ?? deployment.providerWorkerServiceId;
+    invariant(serviceId, 400, "INVALID_TARGET", `Customer deployment is missing a Railway ${service} service ID.`);
+    return { key: service, serviceId };
+  });
+
+  await prisma.customerDeploymentEvent.create({
+    data: {
+      deploymentId: params.deploymentId,
+      actorUserId: null,
+      action: "control_plane.customer_services_redeploy_started",
+      meta: redactObject({
+        reason,
+        services,
+        expectedReleaseImageTag: params.expectedReleaseImageTag ?? null,
+        expectedReleaseVersion: params.expectedReleaseVersion ?? null,
+      }) as Prisma.InputJsonObject,
+    },
+  });
+
+  try {
+    const result = await redeployRailwayCustomerServices(railwayClient ?? createRailwayClientFromEnv(), {
+      environmentId,
+      services: selectedServices,
+    });
+    await prisma.customerDeploymentEvent.create({
+      data: {
+        deploymentId: params.deploymentId,
+        actorUserId: null,
+        action: "control_plane.customer_services_redeploy_succeeded",
+        meta: redactObject({ reason, services, result }) as Prisma.InputJsonObject,
+      },
+    });
+    return {
+      deploymentId: params.deploymentId,
+      status: "redeployed" as const,
+      services,
+      result,
+    };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Unknown Railway redeploy error.";
+    await prisma.customerDeploymentEvent.create({
+      data: {
+        deploymentId: params.deploymentId,
+        actorUserId: null,
+        action: "control_plane.customer_services_redeploy_failed",
+        meta: redactObject({ reason, services, error: message }) as Prisma.InputJsonObject,
+      },
+    });
+    throw error;
+  }
 }
 
 type CustomerDeploymentHealthPayload = {
@@ -8732,15 +9063,16 @@ async function fetchCustomerSupportSnapshotCore(deploymentId: string) {
     callMcpTool({ ...connector, toolName: "list_data_sources", arguments: {} }),
     callMcpTool({ ...connector, toolName: "list_agent_runs", arguments: { take: 10 } }),
     callMcpTool({ ...connector, toolName: "list_failed_jobs", arguments: { take: 10 } }),
+    callMcpTool({ ...connector, toolName: "get_newspaper_diagnostics", arguments: { take: 10 } }),
   ]);
 
-  const [workspace, members, integrations, dataSources, agentRuns, failedJobs] = calls.map((result) => (
+  const [workspace, members, integrations, dataSources, agentRuns, failedJobs, newspaperDiagnostics] = calls.map((result) => (
     result.status === "fulfilled"
       ? summarizeMcpResponse(result.value)
       : { error: result.reason instanceof Error ? result.reason.message : "Request failed." }
   ));
 
-  const hasError = calls.some((result) => result.status === "rejected");
+  const hasError = calls.slice(0, 6).some((result) => result.status === "rejected");
   await prisma.customerDeployment.update({
     where: { id: deploymentId },
     data: {
@@ -8750,7 +9082,25 @@ async function fetchCustomerSupportSnapshotCore(deploymentId: string) {
     },
   });
 
-  const snapshot = { workspace, members, integrations, dataSources, agentRuns, failedJobs };
+  const snapshot = {
+    workspace,
+    members,
+    integrations,
+    dataSources,
+    agentRuns,
+    failedJobs,
+    newspaperDiagnostics: newspaperDiagnostics && typeof newspaperDiagnostics === "object"
+      ? {
+          ...(newspaperDiagnostics as JsonRecord),
+          diagnostics: {
+            ...(((newspaperDiagnostics as JsonRecord).diagnostics && typeof (newspaperDiagnostics as JsonRecord).diagnostics === "object")
+              ? (newspaperDiagnostics as JsonRecord).diagnostics as JsonRecord
+              : {}),
+            providerEmailReadiness: await getDeploymentEmailReadinessSummary(deploymentId),
+          },
+        }
+      : newspaperDiagnostics,
+  };
   await Promise.all([
     recordFleetHealthSnapshot({
       customerAccountId: connector.deployment.customerAccountId,
@@ -9058,7 +9408,7 @@ export async function runCustomerSupportOperation(actor: AppActor, params: {
   invariant(toolName, 400, "INVALID_INPUT", "Unsupported support action.");
   const reason = normalizeReason(params.reason, params.action);
   const providedArgs = params.arguments ?? {};
-  const args = params.action === "proposals.reopen_resolved" && typeof providedArgs.reason !== "string"
+  const args = (params.action === "proposals.reopen_resolved" || params.action === "newspaper.retry_failed_deliveries") && typeof providedArgs.reason !== "string"
     ? { ...providedArgs, reason }
     : providedArgs;
   const inputSummary = redactObject(args);
@@ -9106,6 +9456,17 @@ export async function runCustomerSupportOperation(actor: AppActor, params: {
     const resultSummary = summarized && typeof summarized === "object"
       ? redactObject(summarized as JsonRecord)
       : { result: summarized };
+    const augmentedResultSummary = params.action === "newspaper.diagnostics" && resultSummary && typeof resultSummary === "object"
+      ? {
+          ...(resultSummary as JsonRecord),
+          diagnostics: {
+            ...(((resultSummary as JsonRecord).diagnostics && typeof (resultSummary as JsonRecord).diagnostics === "object")
+              ? (resultSummary as JsonRecord).diagnostics as JsonRecord
+              : {}),
+            providerEmailReadiness: await getDeploymentEmailReadinessSummary(params.deploymentId),
+          },
+        }
+      : resultSummary;
 
     if (MUTATING_SUPPORT_ACTIONS.has(params.action)) {
       await recordRemoteSupportAudit({
@@ -9115,7 +9476,7 @@ export async function runCustomerSupportOperation(actor: AppActor, params: {
         reason,
         operationId: operation.id,
         phase: "completed",
-        result: resultSummary,
+        result: augmentedResultSummary,
       });
     }
 
@@ -9124,7 +9485,7 @@ export async function runCustomerSupportOperation(actor: AppActor, params: {
       data: {
         status: "COMPLETED",
         completedAt: new Date(),
-        resultSummary: resultSummary as Prisma.InputJsonObject,
+        resultSummary: augmentedResultSummary as Prisma.InputJsonObject,
       },
     });
   } catch (error) {

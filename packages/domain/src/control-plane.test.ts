@@ -5965,6 +5965,54 @@ describe("control plane domain", () => {
     }));
   });
 
+  it("routes failed newspaper delivery retry through the audited support connector as a mutating operation", async () => {
+    const { runCustomerSupportOperation } = await import("./control-plane");
+    prismaMock.supportOperation.create.mockResolvedValueOnce({
+      id: "op-newspaper-retry",
+      action: "newspaper.retry_failed_deliveries",
+    });
+    prismaMock.customerDeployment.findUnique.mockResolvedValue({
+      id: "inst-1",
+      label: "Acme",
+      url: "https://customer.test",
+      supportMcpUrl: "https://customer.test/api/mcp",
+      supportCredentialEnc: "encrypted-token",
+      supportConnectorStatus: "connected",
+    });
+    prismaMock.supportOperation.update.mockResolvedValueOnce({
+      id: "op-newspaper-retry",
+      status: "COMPLETED",
+    });
+
+    await runCustomerSupportOperation(operatorActor, {
+      deploymentId: "inst-1",
+      action: "newspaper.retry_failed_deliveries",
+      reason: "Retry failed newspaper delivery snapshots after provider repair.",
+      arguments: { workflowJobId: "job-1" },
+    });
+
+    expect(fetch).toHaveBeenCalledTimes(3);
+    const toolCall = vi.mocked(fetch).mock.calls[1]?.[1] as RequestInit;
+    expect(JSON.parse(String(toolCall.body))).toEqual(expect.objectContaining({
+      params: expect.objectContaining({
+        name: "retry_failed_newspaper_deliveries",
+        arguments: {
+          workflowJobId: "job-1",
+          reason: "Retry failed newspaper delivery snapshots after provider repair.",
+        },
+      }),
+    }));
+    expect(prismaMock.supportOperation.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        action: "newspaper.retry_failed_deliveries",
+        inputSummary: expect.objectContaining({
+          workflowJobId: "job-1",
+          reason: "Retry failed newspaper delivery snapshots after provider repair.",
+        }),
+      }),
+    }));
+  });
+
   it("routes context map imports through the audited support connector", async () => {
     const { runCustomerSupportOperation } = await import("./control-plane");
     prismaMock.supportOperation.create.mockResolvedValueOnce({

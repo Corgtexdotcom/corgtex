@@ -86,6 +86,7 @@ import {
   revokeAgentCredential,
   listAgentConfigs,
   getNewspaperDiagnostics,
+  retryFailedNewspaperDeliveries,
   updateAgentConfig,
   getModelUsageBudget,
   updateModelUsageBudget,
@@ -1920,6 +1921,36 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
       requireScope(sessionCtx, "runtime:read");
       const diagnostics = await getNewspaperDiagnostics(actor, workspaceId, { take: take ?? 10 });
       return jsonResult({ diagnostics });
+    },
+  );
+
+  tool(
+    "retry_failed_newspaper_deliveries",
+    "Queue a retry job for unrecovered failed or provider-skipped newspaper delivery rows with stored HTML snapshots. Does not regenerate the newspaper.",
+    {
+      deliveryIds: z.array(z.string()).optional(),
+      workflowJobId: z.string().optional(),
+      runKey: z.string().optional(),
+      take: z.number().min(1).max(250).optional(),
+      reason: z.string().optional(),
+    },
+    async (params: {
+      deliveryIds?: string[];
+      workflowJobId?: string;
+      runKey?: string;
+      take?: number;
+      reason?: string;
+    }) => {
+      requireScope(sessionCtx, "runtime:write");
+      const result = await retryFailedNewspaperDeliveries(actor, {
+        workspaceId,
+        deliveryIds: params.deliveryIds,
+        workflowJobId: params.workflowJobId,
+        runKey: params.runKey,
+        take: params.take,
+        reason: params.reason,
+      });
+      return jsonResult({ ...result, webUrl: webUrl(workspaceId, `/operator`) });
     },
   );
 

@@ -27,6 +27,7 @@ function usage() {
     "  CONTROL_PLANE_AGENT_API_KEY=... node scripts/control-plane.mjs probe-health <deploymentId> <reason>",
     "  CONTROL_PLANE_AGENT_API_KEY=... node scripts/control-plane.mjs post-deploy-probe <deploymentId> <reason> [releaseImageTag] [releaseVersion]",
     "  CONTROL_PLANE_AGENT_API_KEY=... node scripts/control-plane.mjs record-release <deploymentId> <releaseImageTag> <reason> [releaseVersion]",
+    "  CONTROL_PLANE_AGENT_API_KEY=... node scripts/control-plane.mjs redeploy-services '<json-args>'",
     "  CONTROL_PLANE_AGENT_API_KEY=... node scripts/control-plane.mjs set-feature <deploymentId> <flag> <enabled> <reason> [json-config]",
     "  CONTROL_PLANE_AGENT_API_KEY=... node scripts/control-plane.mjs run-support <deploymentId> <action> <reason> '<json-args>'",
     "  CONTROL_PLANE_AGENT_API_KEY=... node scripts/control-plane.mjs call <toolName> '<json-args>'",
@@ -177,6 +178,8 @@ try {
       reason: requireValue(args[2], "reason"),
       releaseVersion: args[3] || undefined,
     }));
+  } else if (command === "redeploy-services") {
+    print(await callTool("redeploy_customer_services", parseJsonArg(args[0])));
   } else if (command === "set-feature") {
     print(await callTool("set_customer_feature_flag", {
       deploymentId: requireValue(args[0], "deploymentId"),

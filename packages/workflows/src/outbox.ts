@@ -12,18 +12,22 @@ import { runDailyDigest, runSlackAgent, runSlackContextSummary, runSlackProactiv
 import {
   createWebhookDeliveries,
   CONTROL_PLANE_CLIENT_MIGRATION_VERIFY_JOB_TYPE,
+  CONTROL_PLANE_CUSTOMER_SERVICE_REDEPLOY_JOB_TYPE,
   ENTERPRISE_APP_HEALTH_CHECK_JOB_TYPE,
   CONTROL_PLANE_FLEET_SNAPSHOT_JOB_TYPE,
   CONTROL_PLANE_RELEASE_DEPLOY_JOB_TYPE,
   deliverWebhook,
+  NEWSPAPER_DELIVERY_RETRY_JOB_TYPE,
   postMeetingSummaryToAgendaThread,
   processSlackInboundEvent,
   purgeExpiredCommunicationMessages,
   reconcileMeetingRecorders,
+  runNewspaperDeliveryRetryJob,
   syncRecorderCalendarSource,
   runMeetingAgendaPreparation,
   runMeetingAgendaThreadEdit,
   runMeetingInsightsExtraction,
+  runControlPlaneCustomerServiceRedeployJob,
   runControlPlaneFleetSnapshotJob,
   runControlPlaneClientMigrationWorkerVerificationJob,
   runControlPlaneReleaseDeployJob,
@@ -565,6 +569,20 @@ async function handleJob(job: ClaimedJob) {
     return;
   }
 
+  if (job.type === CONTROL_PLANE_CUSTOMER_SERVICE_REDEPLOY_JOB_TYPE) {
+    if (typeof payload.deploymentId !== "string") {
+      throw new Error("Control Plane selected-customer service redeploy job is missing deploymentId.");
+    }
+    await runControlPlaneCustomerServiceRedeployJob({
+      deploymentId: payload.deploymentId,
+      services: Array.isArray(payload.services) ? payload.services.filter((service): service is string => typeof service === "string") : [],
+      reason: typeof payload.reason === "string" ? payload.reason : null,
+      expectedReleaseImageTag: typeof payload.expectedReleaseImageTag === "string" ? payload.expectedReleaseImageTag : null,
+      expectedReleaseVersion: typeof payload.expectedReleaseVersion === "string" ? payload.expectedReleaseVersion : null,
+    });
+    return;
+  }
+
   if (job.type === CONTROL_PLANE_CLIENT_MIGRATION_VERIFY_JOB_TYPE) {
     if (typeof payload.migrationRunId !== "string") {
       throw new Error("Control Plane client migration verification job is missing migrationRunId.");
@@ -915,12 +933,37 @@ async function handleJob(job: ClaimedJob) {
     const dateISO = (payload as { dateISO?: string }).dateISO;
     const dateKey = (payload as { dateKey?: string }).dateKey;
     if (dateISO && job.workspaceId) {
-      await runDailyDigest({
+      const result = await runDailyDigest({
         workspaceId: job.workspaceId,
         workflowJobId: job.id,
         dateISO,
         dateKey,
         cadence: readNewspaperCadence(payload.cadence),
+      });
+      logger.info("newspaper_delivery_job_result", {
+        workspaceId: job.workspaceId,
+        workflowJobId: job.id,
+        cadence: result.cadence,
+        sentEmails: result.sentEmails,
+        failedEmails: result.failedEmails,
+        skippedEmails: result.skippedEmails,
+        processedSessions: result.processedSessions,
+        processedSlackMessages: result.processedSlackMessages,
+        updatedProfiles: result.updatedProfiles,
+      });
+    }
+    return;
+  }
+
+  if (job.type === NEWSPAPER_DELIVERY_RETRY_JOB_TYPE) {
+    const deliveryIds = Array.isArray(payload.deliveryIds)
+      ? payload.deliveryIds.filter((deliveryId): deliveryId is string => typeof deliveryId === "string")
+      : [];
+    if (job.workspaceId) {
+      await runNewspaperDeliveryRetryJob({
+        workspaceId: job.workspaceId,
+        workflowJobId: job.id,
+        deliveryIds,
       });
     }
     return;
