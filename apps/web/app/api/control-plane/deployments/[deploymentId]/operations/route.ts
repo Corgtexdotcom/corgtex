@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
 import { z } from "zod";
-import { getControlPlaneDeployment, recordBreakGlassSupportNote, runCustomerSupportOperation } from "@corgtex/domain";
+import { listControlPlaneSupportOperations, recordBreakGlassSupportNote, runCustomerSupportOperation } from "@corgtex/domain";
 import { resolveControlPlaneRequestActor } from "@/lib/auth";
 import { handleRouteError } from "@/lib/http";
 import { requireControlPlaneDeploymentMode } from "@/lib/control-plane-guard";
@@ -71,8 +71,8 @@ export async function GET(
   try {
     const actor = await resolveControlPlaneRequestActor(request);
     const { deploymentId } = await props.params;
-    const deployment = await getControlPlaneDeployment(actor, deploymentId);
-    return NextResponse.json({ operations: deployment.supportOperations });
+    const operations = await listControlPlaneSupportOperations(actor, deploymentId);
+    return NextResponse.json({ operations });
   } catch (error) {
     return handleRouteError(error);
   }

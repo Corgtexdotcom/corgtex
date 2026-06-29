@@ -20,7 +20,12 @@ import {
   type SlackOAuthResponse,
 } from "./communication";
 import { createControlPlaneAdapter } from "./control-plane-adapters";
-import { createRailwayClientFromEnv, upgradeRailwayCustomerRelease, type RailwayClient } from "./railway-client";
+import {
+  createRailwayClientFromEnv,
+  upgradeRailwayCustomerRelease,
+  validateRailwayReleaseExecutorAccess,
+  type RailwayClient,
+} from "./railway-client";
 import { buildCustomerDeploymentProviderReadModel, buildCustomerDeploymentReadiness, provisionCustomerDeployment } from "./admin";
 import { registerCustomerDeployment } from "./customer-lifecycle";
 import { AGENT_REGISTRY } from "./agent-registry";
@@ -56,6 +61,10 @@ export const CONTROL_PLANE_RELEASE_DEPLOY_JOB_TYPE = "control-plane.release.depl
 export const CONTROL_PLANE_CLIENT_MIGRATION_VERIFY_JOB_TYPE = "control-plane.client-migration.verify";
 const AGENT_GOVERNANCE_FEATURE_FLAG = "AGENT_GOVERNANCE";
 const STALE_CREDENTIAL_DAYS = 90;
+const CONTROL_PLANE_DETAIL_SNAPSHOT_LIMIT = 6;
+const CONTROL_PLANE_DETAIL_SNAPSHOT_SUMMARY_PREVIEW_BYTES = 4096;
+const CONTROL_PLANE_OPERATION_SUMMARY_PREVIEW_BYTES = 2048;
+const CONTROL_PLANE_OPERATION_LIST_LIMIT = 30;
 const CONTROL_PLANE_SNAPSHOT_KINDS = new Set<FleetSnapshotKind>([
   "HEALTH",
   "RELEASE",
@@ -1097,6 +1106,55 @@ function sanitizeDeploymentForControlPlane(deployment: Record<string, unknown>) 
     ...deployment,
     supportCredentialEnc: undefined,
     hasSupportCredential: Boolean(deployment.supportCredentialEnc),
+  };
+}
+
+function truncateUtf8Preview(value: string, maxBytes: number) {
+  if (Buffer.byteLength(value, "utf8") <= maxBytes) {
+    return value;
+  }
+  return Buffer.from(value, "utf8").subarray(0, maxBytes).toString("utf8").replace(/\uFFFD$/, "");
+}
+
+function compactControlPlaneJsonPreview(value: unknown, maxBytes: number) {
+  if (value == null) {
+    return null;
+  }
+  const serialized = typeof value === "string" ? value : JSON.stringify(value);
+  const originalBytes = Buffer.byteLength(serialized, "utf8");
+  if (originalBytes <= maxBytes) {
+    return value;
+  }
+  return {
+    truncated: true,
+    originalBytes,
+    preview: truncateUtf8Preview(serialized, maxBytes),
+  };
+}
+
+function compactControlPlaneFleetSnapshots(snapshots: Array<Record<string, unknown>> | undefined) {
+  const byKind = new Map<string, Record<string, unknown>>();
+  for (const snapshot of snapshots ?? []) {
+    const kind = typeof snapshot.snapshotKind === "string" ? snapshot.snapshotKind : String(snapshot.snapshotKind ?? "");
+    if (!kind || byKind.has(kind)) {
+      continue;
+    }
+    byKind.set(kind, {
+      ...snapshot,
+      summary: compactControlPlaneJsonPreview(snapshot.summary, CONTROL_PLANE_DETAIL_SNAPSHOT_SUMMARY_PREVIEW_BYTES),
+    });
+    if (byKind.size >= CONTROL_PLANE_DETAIL_SNAPSHOT_LIMIT) {
+      break;
+    }
+  }
+  return Array.from(byKind.values());
+}
+
+function compactControlPlaneSupportOperation<T extends Record<string, unknown>>(operation: T) {
+  return {
+    ...operation,
+    inputSummary: compactControlPlaneJsonPreview(operation.inputSummary, CONTROL_PLANE_OPERATION_SUMMARY_PREVIEW_BYTES),
+    resultSummary: compactControlPlaneJsonPreview(operation.resultSummary, CONTROL_PLANE_OPERATION_SUMMARY_PREVIEW_BYTES),
   };
 }
 
@@ -4461,14 +4519,6 @@ export async function getControlPlaneDeployment(actor: AppActor, deploymentId: s
   const deployment = await prisma.customerDeployment.findUnique({
     where: { id: deploymentId },
     include: {
-      events: {
-        orderBy: { createdAt: "desc" },
-        take: 20,
-      },
-      supportOperations: {
-        orderBy: { createdAt: "desc" },
-        take: 30,
-      },
       accessGrants: {
         where: { isActive: true },
         include: { user: { select: { id: true, email: true, displayName: true } } },
@@ -4488,9 +4538,43 @@ export async function getControlPlaneDeployment(actor: AppActor, deploymentId: s
 
   return {
     ...deployment,
+    events: [],
+    supportOperations: [],
+    fleetSnapshots: compactControlPlaneFleetSnapshots(deployment.fleetSnapshots as Array<Record<string, unknown>>),
     hasSupportCredential: Boolean(deployment.supportCredentialEnc),
     supportCredentialEnc: undefined,
   };
+}
+
+export async function listControlPlaneSupportOperations(actor: AppActor, deploymentId: string, params: {
+  take?: number | null;
+} = {}) {
+  await requireControlPlaneAccess(actor, { deploymentId });
+  const take = boundedInteger(params.take, CONTROL_PLANE_OPERATION_LIST_LIMIT, 1, 100);
+  const operations = await prisma.supportOperation.findMany({
+    where: { deploymentId },
+    orderBy: { createdAt: "desc" },
+    take,
+    select: {
+      id: true,
+      deploymentId: true,
+      workspaceId: true,
+      actorUserId: true,
+      actorLabel: true,
+      action: true,
+      reason: true,
+      status: true,
+      inputSummary: true,
+      resultSummary: true,
+      error: true,
+      idempotencyKey: true,
+      startedAt: true,
+      completedAt: true,
+      createdAt: true,
+      updatedAt: true,
+    },
+  });
+  return operations.map((operation) => compactControlPlaneSupportOperation(operation as unknown as Record<string, unknown>));
 }
 
 async function getControlPlaneDeploymentWithWorkspace(actor: AppActor, deploymentId: string) {
@@ -7488,6 +7572,12 @@ function releasePreflightForDeployment(deployment: {
   const cloudProvider = controlPlaneDeploymentCloudProvider(deployment);
   const railwayDeployConfigured = options.railwayDeployConfigured ?? isControlPlaneRailwayDeployConfigured();
   const sharedWorkspace = isControlPlaneSharedWorkspaceDeployment(deployment);
+  const targetReleaseVersion = target?.releaseVersion ?? null;
+  const currentReleaseVersion = deployment.releaseVersion ?? null;
+  const targetDiffersFromCurrent = Boolean(target && (
+    target.releaseImageTag !== deployment.releaseImageTag
+    || targetReleaseVersion !== currentReleaseVersion
+  ));
   const targetConfigDetail = cloudProvider === "AZURE"
     ? "Set CONTROL_PLANE_AZURE_LATEST_WEB_IMAGE, CONTROL_PLANE_AZURE_LATEST_WORKER_IMAGE, and CONTROL_PLANE_AZURE_LATEST_RELEASE_GIT_SHA."
     : "Set CONTROL_PLANE_RAILWAY_LATEST_WEB_IMAGE and CONTROL_PLANE_RAILWAY_LATEST_WORKER_IMAGE, or the legacy CONTROL_PLANE_LATEST_* Railway target.";
@@ -7587,12 +7677,12 @@ function releasePreflightForDeployment(deployment: {
     {
       key: "target_differs",
       label: "Target differs from current",
-      ok: Boolean(target && (
-        target.releaseImageTag !== deployment.releaseImageTag
-        || target.releaseVersion !== (deployment.releaseVersion ?? null)
-        || (target.releaseGitSha && target.releaseGitSha !== deployment.releaseImageTag)
-      )),
-      detail: target ? `Target ${target.releaseImageTag}; current ${deployment.releaseImageTag ?? "unknown"}.` : "No target release configured.",
+      ok: targetDiffersFromCurrent,
+      detail: target
+        ? targetDiffersFromCurrent
+          ? `Target ${target.releaseImageTag}; current ${deployment.releaseImageTag ?? "unknown"}.`
+          : "Target already matches current release."
+        : "No target release configured.",
     },
     {
       key: "no_release_drift",
@@ -7630,6 +7720,86 @@ export async function getControlPlaneDeployLatestPreflight(actor: AppActor, depl
     target,
     ...releasePreflightForDeployment(deployment, target),
   };
+}
+
+export async function validateControlPlaneRailwayReleaseExecutor(actor: AppActor, deploymentId: string, railwayClient?: RailwayClient) {
+  requireControlPlaneScope(actor, CONTROL_PLANE_READ_SCOPE);
+  const deployment = await getControlPlaneDeploymentWithWorkspace(actor, deploymentId);
+  const cloudProvider = controlPlaneDeploymentCloudProvider(deployment);
+  const target = getControlPlaneLatestReleaseTarget({ cloudProvider });
+  const railwayConfigured = Boolean(railwayClient) || isControlPlaneRailwayDeployConfigured();
+  const preflight = releasePreflightForDeployment(deployment, target, { railwayDeployConfigured: railwayConfigured });
+  const accessCheckBase = {
+    key: "railway_executor_access",
+    label: "Railway executor can read target services",
+  };
+
+  if (cloudProvider !== "RAILWAY") {
+    const detail = `Railway executor validation is only available for Railway deployments; this deployment uses ${cloudProvider}.`;
+    return {
+      deploymentId,
+      provider: cloudProvider,
+      target,
+      status: "blocked" as const,
+      checks: [...preflight.checks, { ...accessCheckBase, ok: false, detail }],
+      blockers: [detail],
+    };
+  }
+
+  if (!deployment.railwayProjectId || !deployment.railwayEnvironmentId || !deployment.railwayWebServiceId || !deployment.railwayWorkerServiceId) {
+    const detail = "Railway project, environment, web service, and worker service IDs must be recorded before executor validation.";
+    return {
+      deploymentId,
+      provider: cloudProvider,
+      target,
+      status: "blocked" as const,
+      checks: [...preflight.checks, { ...accessCheckBase, ok: false, detail }],
+      blockers: [detail],
+    };
+  }
+
+  if (!railwayConfigured) {
+    const detail = "Railway API token is not configured for control-plane release execution.";
+    return {
+      deploymentId,
+      provider: cloudProvider,
+      target,
+      status: "blocked" as const,
+      checks: [...preflight.checks, { ...accessCheckBase, ok: false, detail }],
+      blockers: [detail],
+    };
+  }
+
+  const activeRailwayClient = railwayClient ?? createRailwayClientFromEnv();
+  try {
+    const access = await validateRailwayReleaseExecutorAccess(activeRailwayClient, {
+      projectId: deployment.railwayProjectId,
+      environmentId: deployment.railwayEnvironmentId,
+      webServiceId: deployment.railwayWebServiceId,
+      workerServiceId: deployment.railwayWorkerServiceId,
+    });
+    const detail = "Railway token can read the recorded project, environment, web service, and worker service.";
+    return {
+      deploymentId,
+      provider: cloudProvider,
+      target,
+      status: "ok" as const,
+      access,
+      checks: [...preflight.checks, { ...accessCheckBase, ok: true, detail }],
+      blockers: preflight.blockers,
+    };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Railway executor access validation failed.";
+    const detail = `Railway executor access validation failed: ${message}`;
+    return {
+      deploymentId,
+      provider: cloudProvider,
+      target,
+      status: "blocked" as const,
+      checks: [...preflight.checks, { ...accessCheckBase, ok: false, detail }],
+      blockers: [detail],
+    };
+  }
 }
 
 export async function deployLatestControlPlaneRelease(actor: AppActor, params: {

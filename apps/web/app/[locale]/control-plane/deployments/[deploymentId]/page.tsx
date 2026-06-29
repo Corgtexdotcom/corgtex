@@ -7,6 +7,7 @@ import {
   getControlPlaneClientOptions,
   getControlPlaneDeployment,
   listControlPlaneCustomerMembers,
+  listControlPlaneSupportOperations,
   getControlPlaneIntegrationStatus,
   listControlPlaneFeatureFlags,
   listControlPlaneModuleGrants,
@@ -86,25 +87,25 @@ export default async function ControlPlaneCustomerPage({
     }
     throw error;
   });
-  const customer = customerRead.data;
+  const customerOverview = customerRead.data;
   const clientOptions = clientOptionsRead.data;
   const emptyIntegrations = {
     deploymentId,
     accessMode: "inactive_tab",
-    hasManagedWorkspace: Boolean(customer.managedWorkspaceId),
+    hasManagedWorkspace: Boolean(customerOverview.managedWorkspaceId),
     integrations: [],
   };
   const emptyContext = {
     deploymentId,
     accessMode: "inactive_tab",
-    hasManagedWorkspace: Boolean(customer.managedWorkspaceId),
+    hasManagedWorkspace: Boolean(customerOverview.managedWorkspaceId),
     summary: null,
     sources: [],
   };
   const emptyAiGovernance = {
     deploymentId,
     accessMode: "inactive_tab",
-    hasManagedWorkspace: Boolean(customer.managedWorkspaceId),
+    hasManagedWorkspace: Boolean(customerOverview.managedWorkspaceId),
     agents: { identities: [], configs: [] },
     access: { credentials: [] },
     spend: { budget: null, recentModelUsage: [] },
@@ -119,13 +120,13 @@ export default async function ControlPlaneCustomerPage({
     target: null,
   };
 
-  const [integrationsRead, aiGovernanceRead, membersRead, featureFlagsRead, deployPreflightRead, rolloutsRead] = await Promise.all([
+  const [integrationsRead, aiGovernanceRead, membersRead, featureFlagsRead, deployPreflightRead, rolloutsRead, supportOperationsRead] = await Promise.all([
     activeTab === "recorders" || activeTab === "tools"
       ? readControlPlaneCached(["control-plane", "deployment", "integrations", actorCacheKey, deploymentId], refresh, async () => (
         getControlPlaneIntegrationStatus(actor, deploymentId).catch((err: unknown) => ({
           deploymentId,
           accessMode: "unavailable" as const,
-          hasManagedWorkspace: Boolean(customer.managedWorkspaceId),
+          hasManagedWorkspace: Boolean(customerOverview.managedWorkspaceId),
           integrations: [],
           error: err instanceof Error ? err.message : "Unable to load integrations.",
         }))
@@ -166,9 +167,15 @@ export default async function ControlPlaneCustomerPage({
         listControlPlaneReleaseRolloutJobs(actor, { deploymentId, take: 8 })
       ))
       : Promise.resolve({ data: [], cachedAt: customerRead.cachedAt, cacheStatus: customerRead.cacheStatus }),
+    activeTab === "logs"
+      ? readControlPlaneCached(["control-plane", "deployment", "support-operations", actorCacheKey, deploymentId], refresh, () => (
+        listControlPlaneSupportOperations(actor, deploymentId)
+      ))
+      : Promise.resolve({ data: [], cachedAt: customerRead.cachedAt, cacheStatus: customerRead.cacheStatus }),
   ]);
 
   // Standardize response types for client component
+  const customer = { ...customerOverview, supportOperations: supportOperationsRead.data };
   const members = "members" in membersRead.data ? membersRead.data : { members: [] };
   const featureFlags = "flags" in featureFlagsRead.data ? featureFlagsRead.data : { flags: [] };
   const enterpriseWorkspaceId = activeTab === "config" ? customer.managedWorkspaceId : null;

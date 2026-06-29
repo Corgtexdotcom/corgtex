@@ -43,6 +43,7 @@ import {
   runCustomerSupportOperation,
   planControlPlaneClientMigration,
   setControlPlaneFeatureFlag,
+  validateControlPlaneRailwayReleaseExecutor,
   upsertSelfServeSmokeRun,
   updateControlPlaneAgentCredentialScopes,
   updateControlPlaneAgentPolicy,
@@ -352,6 +353,11 @@ const tools = [
     inputSchema: { type: "object", properties: { deploymentId: { type: "string" } }, required: ["deploymentId"] },
   },
   {
+    name: "validate_railway_release_executor",
+    description: "Read-only check that the configured Railway executor can access the recorded project, environment, web service, and worker service.",
+    inputSchema: { type: "object", properties: { deploymentId: { type: "string" } }, required: ["deploymentId"] },
+  },
+  {
     name: "list_customer_members",
     description: "List all active and inactive members for a customer deployment.",
     inputSchema: { type: "object", properties: { deploymentId: { type: "string" } }, required: ["deploymentId"] },
@@ -620,6 +626,7 @@ const toolScopes: Record<string, string> = {
   update_customer_agent_policy: "control-plane:ai-governance:write",
   get_release_status: "control-plane:read",
   get_deploy_latest_preflight: "control-plane:read",
+  validate_railway_release_executor: "control-plane:read",
   list_customer_members: "control-plane:read",
   create_customer_member: "control-plane:access:write",
   resend_customer_member_access_link: "control-plane:access:write",
@@ -972,6 +979,9 @@ export async function POST(request: NextRequest) {
     }
     if (name === "get_deploy_latest_preflight") {
       return rpcResult(id, textContent(await getControlPlaneDeployLatestPreflight(actor, argString(args, "deploymentId"))));
+    }
+    if (name === "validate_railway_release_executor") {
+      return rpcResult(id, textContent(await validateControlPlaneRailwayReleaseExecutor(actor, argString(args, "deploymentId"))));
     }
     if (name === "list_customer_members") {
       return rpcResult(id, textContent(await listControlPlaneCustomerMembers(actor, argString(args, "deploymentId"))));

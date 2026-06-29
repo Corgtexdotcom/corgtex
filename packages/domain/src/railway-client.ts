@@ -73,6 +73,26 @@ export type RailwayReleaseUpgradeResult = {
   workerDeploymentId?: string | null;
 };
 
+export type RailwayReleaseExecutorValidationInput = {
+  projectId: string;
+  environmentId: string;
+  webServiceId: string;
+  workerServiceId: string;
+};
+
+export type RailwayReleaseExecutorValidationResult = {
+  projectId: string;
+  projectName: string | null;
+  environmentId: string;
+  webServiceId: string;
+  workerServiceId: string;
+  checks: Array<{
+    key: string;
+    ok: boolean;
+    detail: string;
+  }>;
+};
+
 export type RailwayAppRuntimeProvisioningInput = {
   projectName: string;
   environmentName: string;
@@ -286,6 +306,82 @@ async function resolveRailwayEnvironmentId(client: RailwayClient, projectId: str
   );
 
   return created.environmentCreate.id;
+}
+
+export async function validateRailwayReleaseExecutorAccess(
+  client: RailwayClient,
+  input: RailwayReleaseExecutorValidationInput,
+): Promise<RailwayReleaseExecutorValidationResult> {
+  const result = await client.graphql<{
+    project: { id: string; name?: string | null } | null;
+    environments: {
+      edges?: Array<{ node?: { id: string; name?: string | null } | null }>;
+    };
+    services: {
+      edges?: Array<{ node?: { id: string; name?: string | null } | null }>;
+    };
+  }>(
+    `query ValidateRailwayReleaseExecutor($projectId: String!) {
+      project(id: $projectId) { id name }
+      environments(projectId: $projectId, isEphemeral: false) {
+        edges { node { id name } }
+      }
+      services(projectId: $projectId) {
+        edges { node { id name } }
+      }
+    }`,
+    { projectId: input.projectId },
+  );
+
+  const environments = result.environments.edges?.map((edge) => edge.node).filter(Boolean) ?? [];
+  const services = result.services.edges?.map((edge) => edge.node).filter(Boolean) ?? [];
+  const environment = environments.find((entry) => entry?.id === input.environmentId);
+  const webService = services.find((entry) => entry?.id === input.webServiceId);
+  const workerService = services.find((entry) => entry?.id === input.workerServiceId);
+  const checks = [
+    {
+      key: "railway_project_readable",
+      ok: result.project?.id === input.projectId,
+      detail: result.project?.id === input.projectId
+        ? `Project ${result.project.name ?? input.projectId} is readable.`
+        : `Project ${input.projectId} was not returned by Railway.`,
+    },
+    {
+      key: "railway_environment_readable",
+      ok: Boolean(environment),
+      detail: environment
+        ? `Environment ${environment.name ?? input.environmentId} is readable.`
+        : `Environment ${input.environmentId} was not returned for the project.`,
+    },
+    {
+      key: "railway_web_service_readable",
+      ok: Boolean(webService),
+      detail: webService
+        ? `Web service ${webService.name ?? input.webServiceId} is readable.`
+        : `Web service ${input.webServiceId} was not returned for the project.`,
+    },
+    {
+      key: "railway_worker_service_readable",
+      ok: Boolean(workerService),
+      detail: workerService
+        ? `Worker service ${workerService.name ?? input.workerServiceId} is readable.`
+        : `Worker service ${input.workerServiceId} was not returned for the project.`,
+    },
+  ];
+
+  const blockers = checks.filter((check) => !check.ok).map((check) => check.detail);
+  if (blockers.length > 0) {
+    throw new AppError(502, "RAILWAY_EXECUTOR_ACCESS_INVALID", blockers.join(" "));
+  }
+
+  return {
+    projectId: input.projectId,
+    projectName: result.project?.name ?? null,
+    environmentId: input.environmentId,
+    webServiceId: input.webServiceId,
+    workerServiceId: input.workerServiceId,
+    checks,
+  };
 }
 
 export async function provisionRailwayCustomerStack(
