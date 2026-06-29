@@ -4528,12 +4528,8 @@ describe("control plane domain", () => {
       graphql: vi.fn().mockResolvedValueOnce({
         project: { id: "project-1", name: "Acme" },
         environments: { edges: [{ node: { id: "env-1", name: "production" } }] },
-        services: {
-          edges: [
-            { node: { id: "web-1", name: "web" } },
-            { node: { id: "worker-1", name: "worker" } },
-          ],
-        },
+        webService: { id: "web-1", name: "web" },
+        workerService: { id: "worker-1", name: "worker" },
       }),
     };
 
@@ -4541,6 +4537,8 @@ describe("control plane domain", () => {
 
     expect(railwayClient.graphql).toHaveBeenCalledWith(expect.stringContaining("ValidateRailwayReleaseExecutor"), {
       projectId: "project-1",
+      webServiceId: "web-1",
+      workerServiceId: "worker-1",
     });
     expect(result).toMatchObject({
       deploymentId: "inst-1",
