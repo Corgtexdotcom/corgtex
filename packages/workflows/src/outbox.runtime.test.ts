@@ -1149,6 +1149,25 @@ describe("scheduleDailyJobs", () => {
     }));
   });
 
+  it("does not schedule newspaper jobs when workspace AI usage is paused", async () => {
+    getWorkspaceDigestSettingsMock.mockResolvedValue(new Map([
+      ["ws-1", { enabled: false, disabledReason: "ai_paused", cadence: "DAILY", weekday: "MONDAY", localTime: "08:00", timeZone: "UTC" }],
+      ["ws-2", { enabled: false, cadence: "DAILY", weekday: "MONDAY", localTime: "08:00", timeZone: "UTC" }],
+    ]));
+
+    await expect(scheduleDailyJobs()).resolves.toBe(3);
+
+    expect(createdWorkflowJobs()).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        type: "brain.daily-digest",
+      }),
+    ]));
+    expect(loggerMock.info).toHaveBeenCalledWith("newspaper_schedule_skipped", expect.objectContaining({
+      workspaceId: "ws-1",
+      reason: "ai_paused",
+    }));
+  });
+
   it("reads digest settings and members in batched queries, not per workspace", async () => {
     await scheduleDailyJobs();
 

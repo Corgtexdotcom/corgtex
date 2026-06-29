@@ -2078,7 +2078,7 @@ describe("control plane domain", () => {
       release: { status: "drift" },
       recorder: { status: "requires_connector", availability: { status: "requires_connector" } },
       agents: { status: "requires_connector" },
-      tools: { status: "unavailable", total: null },
+      tools: { status: "available", total: null, detail: "Remote enterprise tool inventory is not mirrored locally." },
       users: { status: "requires_connector" },
     });
     expect(matrix.items.find((row) => row.id === "remote-1")?.issues.map((issue) => issue.source)).toContain("release");
@@ -2091,13 +2091,22 @@ describe("control plane domain", () => {
       health: ["degraded", "down"],
       support: ["requires_connector", "degraded"],
       issues: "1",
-      missingTools: "1",
       pageSize: 25,
     });
     expect(filteredMatrix.total).toBe(1);
     expect(filteredMatrix.items.map((row) => row.id)).toEqual(["remote-1"]);
     expect(filteredMatrix.filters.health).toEqual(["degraded", "down"]);
     expect(filteredMatrix.filters.support).toEqual(["requires_connector", "degraded"]);
+
+    prismaMock.meetingRecording.groupBy
+      .mockResolvedValueOnce([{ workspaceId: "ws-1", _sum: { durationSeconds: 3600 } }])
+      .mockResolvedValueOnce([{ workspaceId: "ws-1", _count: { _all: 2 } }]);
+    const remoteMissingToolsMatrix = await getControlPlaneFleetOverview(operatorActor, {
+      query: "remote",
+      missingTools: "1",
+      pageSize: 25,
+    });
+    expect(remoteMissingToolsMatrix.total).toBe(0);
   });
 
   it("shows Azure self-serve support sessions as ready without an enterprise connector", async () => {
@@ -4287,6 +4296,45 @@ describe("control plane domain", () => {
     }));
   });
 
+  it("blocks deploy-latest preflight for shared managed workspace rows", async () => {
+    vi.stubEnv("CONTROL_PLANE_LATEST_WEB_IMAGE", "ghcr.io/corgtex/web:new");
+    vi.stubEnv("CONTROL_PLANE_LATEST_WORKER_IMAGE", "ghcr.io/corgtex/worker:new");
+    vi.stubEnv("CONTROL_PLANE_LATEST_RELEASE_IMAGE_TAG", "release-new");
+    vi.stubEnv("RAILWAY_API_TOKEN", "configured");
+    const { getControlPlaneDeployLatestPreflight } = await import("./control-plane");
+    prismaMock.customerDeployment.findUnique.mockResolvedValueOnce({
+      id: "shared-1",
+      label: "Managed Workspace",
+      url: "https://workspace.test",
+      customerAccountId: "cust-1",
+      customerSlug: "managed-workspace",
+      deploymentKind: "SHARED_WORKSPACE",
+      deploymentStatus: "ACTIVE",
+      managedWorkspaceId: "ws-1",
+      managedWorkspace: { id: "ws-1", slug: "workspace", name: "Workspace" },
+      supportCredentialEnc: null,
+      provisioningStatus: "active",
+      releaseImageTag: "release-old",
+      releaseVersion: "0.1.0",
+      lastHealthStatus: "ok",
+      lastHealthCheck: new Date("2026-01-01T00:00:00.000Z"),
+      lastHealthError: null,
+      railwayProjectId: "project-1",
+      railwayEnvironmentId: "env-1",
+      railwayWebServiceId: "web-1",
+      railwayWorkerServiceId: "worker-1",
+    });
+
+    const preflight = await getControlPlaneDeployLatestPreflight(operatorActor, "shared-1");
+
+    expect(preflight.eligible).toBe(false);
+    expect(preflight.checks).toContainEqual(expect.objectContaining({
+      key: "not_shared_workspace",
+      ok: false,
+      detail: "Shared managed workspace rows are managed through the shared-cloud release workflow and are not deploy-latest targets.",
+    }));
+  });
+
   it("preflights Azure self-serve without requiring Railway project or service IDs", async () => {
     vi.stubEnv("CONTROL_PLANE_AZURE_LATEST_ACR_WEB_IMAGE", "corgtexacr.azurecr.io/corgtex/web:sha-new");
     vi.stubEnv("CONTROL_PLANE_AZURE_LATEST_ACR_WORKER_IMAGE", "corgtexacr.azurecr.io/corgtex/worker:sha-new");
@@ -4557,7 +4605,7 @@ describe("control plane domain", () => {
     });
   });
 
-  it("skips Azure self-serve and backup app rows during fleet-wide deploy-latest", async () => {
+  it("skips Azure self-serve, backup app, and shared workspace rows during fleet-wide deploy-latest", async () => {
     vi.stubEnv("CONTROL_PLANE_RAILWAY_LATEST_WEB_IMAGE", "ghcr.io/corgtex/web:new");
     vi.stubEnv("CONTROL_PLANE_RAILWAY_LATEST_WORKER_IMAGE", "ghcr.io/corgtex/worker:new");
     vi.stubEnv("CONTROL_PLANE_RAILWAY_LATEST_RELEASE_IMAGE_TAG", "release-new");
@@ -4624,6 +4672,27 @@ describe("control plane domain", () => {
         railwayWebServiceId: "web-3",
         railwayWorkerServiceId: "worker-3",
       },
+      {
+        id: "shared-1",
+        label: "Managed Workspace",
+        url: "https://workspace.test",
+        customerSlug: "managed-workspace",
+        customerAccountId: "cust-4",
+        cloudProvider: "RAILWAY",
+        deploymentKind: "SHARED_WORKSPACE",
+        managedWorkspaceId: "ws-managed",
+        deploymentStatus: "ACTIVE",
+        provisioningStatus: "active",
+        releaseImageTag: "release-old",
+        releaseVersion: null,
+        lastHealthStatus: "ok",
+        lastHealthCheck: new Date("2026-06-10T00:00:00.000Z"),
+        lastHealthError: null,
+        railwayProjectId: "project-4",
+        railwayEnvironmentId: "env-4",
+        railwayWebServiceId: "web-4",
+        railwayWorkerServiceId: "worker-4",
+      },
     ]);
 
     const result = await enqueueControlPlaneDeployLatestRollout(operatorActor, {
@@ -4640,12 +4709,13 @@ describe("control plane domain", () => {
       }),
     }));
     expect(result).toMatchObject({
-      requested: 3,
+      requested: 4,
       queuedJobs: 1,
       results: [
         { deploymentId: "enterprise-1", status: "queued" },
         { deploymentId: "selfserve-1", status: "skipped" },
         { deploymentId: "backup-1", status: "skipped" },
+        { deploymentId: "shared-1", status: "skipped" },
       ],
     });
   });
@@ -5061,6 +5131,134 @@ describe("control plane domain", () => {
           reason: "Post-deploy health check.",
           status: "ok",
         }),
+      }),
+    }));
+    expect(result.status).toBe("ok");
+  });
+
+  it("does not call workspace URLs when probing shared managed workspace rows", async () => {
+    const { probeControlPlaneDeploymentHealth } = await import("./control-plane");
+    const scopedAgent: AppActor = {
+      kind: "agent",
+      authProvider: "control-plane",
+      label: "control-plane-agent",
+      scopes: ["control-plane:read", "control-plane:releases:write"],
+    };
+    prismaMock.customerDeployment.findUnique.mockResolvedValue({
+      id: "shared-1",
+      label: "Corporate Rebels",
+      customerAccountId: "cust-1",
+      customerSlug: "corporate-rebels",
+      deploymentKind: "SHARED_WORKSPACE",
+      url: "https://workspace.example.com",
+      managedWorkspaceId: "ws-1",
+      managedWorkspace: { id: "ws-1", slug: "corporate-rebels", name: "Corporate Rebels" },
+      supportCredentialEnc: null,
+      releaseImageTag: null,
+      releaseVersion: null,
+      lastHealthStatus: null,
+      lastHealthError: null,
+      lastHealthCheck: null,
+      lastWorkerHealthStatus: null,
+      lastWorkerHealthCheck: null,
+      lastReleaseCheck: null,
+      provisioningStatus: "active",
+      bootstrapStatus: "completed",
+      lastProvisioningError: null,
+    });
+    prismaMock.customerDeployment.update.mockResolvedValueOnce({ id: "shared-1" });
+    prismaMock.customerDeploymentEvent.findMany.mockResolvedValueOnce([]);
+    global.fetch = vi.fn() as any;
+
+    const result = await probeControlPlaneDeploymentHealth(scopedAgent, {
+      deploymentId: "shared-1",
+      reason: "Refresh managed workspace health.",
+    });
+
+    expect(global.fetch).not.toHaveBeenCalled();
+    expect(prismaMock.customerDeployment.update).toHaveBeenCalledWith(expect.objectContaining({
+      where: { id: "shared-1" },
+      data: expect.objectContaining({
+        lastHealthStatus: "ok",
+        lastHealthError: null,
+        provisioningStatus: "active",
+        deploymentStatus: "ACTIVE",
+      }),
+    }));
+    expect(prismaMock.fleetHealthSnapshot.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        snapshotKind: "HEALTH",
+        status: "ok",
+        summary: expect.objectContaining({
+          probeSkippedReason: "Managed workspace rows use local control-plane state and are not probed as standalone deployment URLs.",
+        }),
+      }),
+    }));
+    expect(result.status).toBe("ok");
+  });
+
+  it("skips release-drift comparison when probing the backup app", async () => {
+    const { probeControlPlaneDeploymentHealth } = await import("./control-plane");
+    const scopedAgent: AppActor = {
+      kind: "agent",
+      authProvider: "control-plane",
+      label: "control-plane-agent",
+      scopes: ["control-plane:read", "control-plane:releases:write"],
+    };
+    prismaMock.customerDeployment.findUnique.mockResolvedValue({
+      id: "backup-1",
+      label: "Corgtex Internal",
+      customerAccountId: "cust-1",
+      customerSlug: "corgtex-internal",
+      deploymentKind: "INTERNAL",
+      url: "https://app.corgtex.com",
+      managedWorkspaceId: null,
+      managedWorkspace: null,
+      supportCredentialEnc: null,
+      releaseImageTag: "sha-expected",
+      releaseVersion: "main-expected",
+      lastHealthStatus: null,
+      lastHealthError: null,
+      lastHealthCheck: null,
+      lastWorkerHealthStatus: null,
+      lastWorkerHealthCheck: null,
+      lastReleaseCheck: null,
+      provisioningStatus: "active",
+      bootstrapStatus: "completed",
+      lastProvisioningError: null,
+    });
+    prismaMock.customerDeployment.update.mockResolvedValueOnce({ id: "backup-1" });
+    prismaMock.customerDeploymentEvent.findMany.mockResolvedValueOnce([]);
+    global.fetch = vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        database: "up",
+        schema: "ready",
+        runtime: { redis: "configured", storage: "configured" },
+        release: { gitSha: "sha-live-backup" },
+      }),
+    })) as any;
+
+    const result = await probeControlPlaneDeploymentHealth(scopedAgent, {
+      deploymentId: "backup-1",
+      reason: "Refresh backup app health.",
+    });
+
+    expect(global.fetch).toHaveBeenCalledWith("https://app.corgtex.com/api/health", expect.objectContaining({ method: "GET" }));
+    expect(prismaMock.customerDeployment.update).toHaveBeenCalledWith(expect.objectContaining({
+      where: { id: "backup-1" },
+      data: expect.objectContaining({
+        lastHealthStatus: "ok",
+        lastHealthError: null,
+        provisioningStatus: "active",
+      }),
+    }));
+    expect(prismaMock.fleetHealthSnapshot.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        snapshotKind: "RELEASE",
+        status: "ok",
+        error: null,
       }),
     }));
     expect(result.status).toBe("ok");

@@ -303,7 +303,7 @@ export default async function ControlPlanePage({
                     <td className="p-3">
                       <StatusBadge status={customer.tools.status} />
                       <span className="mt-1 block text-[10px] text-muted">
-                        {customer.tools.total ?? "n/a"} local signals
+                        {customer.tools.total === null ? customer.tools.detail : `${customer.tools.total} local signals`}
                       </span>
                       {customer.tools.total !== null && (
                         <span className="mt-1 block max-w-[220px] truncate text-[9px] text-muted">

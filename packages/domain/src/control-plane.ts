@@ -1,4 +1,4 @@
-import type { CustomerDeploymentAccessRole, CustomerDeploymentCloudProvider, FleetSnapshotKind, MeetingRecorderProvider, MemberRole, ModuleAccessLevel as PrismaModuleAccessLevel, ModuleGrantPrincipalType as PrismaModuleGrantPrincipalType, Prisma } from "@prisma/client";
+import type { CustomerDeploymentAccessRole, CustomerDeploymentCloudProvider, CustomerDeploymentKind, FleetSnapshotKind, MeetingRecorderProvider, MemberRole, ModuleAccessLevel as PrismaModuleAccessLevel, ModuleGrantPrincipalType as PrismaModuleGrantPrincipalType, Prisma } from "@prisma/client";
 import { decryptSecret, encryptSecret, env, prisma, toInputJson } from "@corgtex/shared";
 import type { AgentActor, AppActor } from "@corgtex/shared";
 import { AppError, invariant } from "./errors";
@@ -2719,6 +2719,12 @@ function isControlPlaneBackupDeployment(deployment: {
     || (label.includes("corgtex internal") && url.includes("app.corgtex.com"));
 }
 
+function isControlPlaneSharedWorkspaceDeployment(deployment: {
+  deploymentKind?: CustomerDeploymentKind | string | null;
+}) {
+  return deployment.deploymentKind === "SHARED_WORKSPACE";
+}
+
 function controlPlaneCustomerSupportSummary(deployment: {
   cloudProvider?: CustomerDeploymentCloudProvider | null;
   managedWorkspaceId?: string | null;
@@ -3353,8 +3359,8 @@ function controlPlaneToolSummary(row: ControlPlaneDeploymentRow, state: BatchedT
   }
   if (!row.managedWorkspaceId) {
     return {
-      status: "unavailable",
-      detail: "Local tool inventory requires a managed workspace link.",
+      status: "available",
+      detail: "Remote enterprise tool inventory is not mirrored locally.",
       total: null,
       toolLinks: null,
       agentCredentials: null,
@@ -3426,7 +3432,7 @@ function controlPlaneMatrixRowMatchesFilters(
 ) {
   if (filters.unhealthy && row.health.tone === "ok") return false;
   if (filters.issues && row.issues.length === 0) return false;
-  if (filters.missingTools && row.tools.status === "active" && (row.tools.total ?? 0) > 0) return false;
+  if (filters.missingTools && !["empty", "unavailable"].includes(row.tools.status)) return false;
   if (filters.stale && !controlPlaneMatrixRowIsStale(row, now)) return false;
   return true;
 }
@@ -7462,6 +7468,7 @@ function releasePreflightForDeployment(deployment: {
   url?: string | null;
   customerSlug?: string | null;
   cloudProvider?: CustomerDeploymentCloudProvider | null;
+  deploymentKind?: CustomerDeploymentKind | string | null;
   deploymentStatus?: string | null;
   provisioningStatus?: string | null;
   releaseImageTag?: string | null;
@@ -7480,6 +7487,7 @@ function releasePreflightForDeployment(deployment: {
 }, target: ControlPlaneReleaseTarget | null, options: { railwayDeployConfigured?: boolean } = {}) {
   const cloudProvider = controlPlaneDeploymentCloudProvider(deployment);
   const railwayDeployConfigured = options.railwayDeployConfigured ?? isControlPlaneRailwayDeployConfigured();
+  const sharedWorkspace = isControlPlaneSharedWorkspaceDeployment(deployment);
   const targetConfigDetail = cloudProvider === "AZURE"
     ? "Set CONTROL_PLANE_AZURE_LATEST_WEB_IMAGE, CONTROL_PLANE_AZURE_LATEST_WORKER_IMAGE, and CONTROL_PLANE_AZURE_LATEST_RELEASE_GIT_SHA."
     : "Set CONTROL_PLANE_RAILWAY_LATEST_WEB_IMAGE and CONTROL_PLANE_RAILWAY_LATEST_WORKER_IMAGE, or the legacy CONTROL_PLANE_LATEST_* Railway target.";
@@ -7503,6 +7511,14 @@ function releasePreflightForDeployment(deployment: {
       detail: isControlPlaneBackupDeployment(deployment)
         ? "Backup app is health-checked only and is not a deploy-latest target."
         : "Deployment participates in production release management.",
+    },
+    {
+      key: "not_shared_workspace",
+      label: "Deployment is not a shared workspace row",
+      ok: !sharedWorkspace,
+      detail: sharedWorkspace
+        ? "Shared managed workspace rows are managed through the shared-cloud release workflow and are not deploy-latest targets."
+        : "Deployment is a standalone release target.",
     },
   ];
   const providerChecks: ControlPlaneReleasePreflightCheck[] = cloudProvider === "AZURE"
@@ -8007,37 +8023,46 @@ async function probeControlPlaneDeploymentHealthCore(actor: AppActor, params: {
   let status = "unknown";
   let error: string | null = null;
   let health: CustomerDeploymentHealthPayload | null = null;
+  const skipUrlHealthProbe = Boolean(deployment.managedWorkspaceId) || isControlPlaneSharedWorkspaceDeployment(deployment);
+  const skipReleaseDriftCheck = skipUrlHealthProbe || isControlPlaneBackupDeployment(deployment);
+  const probeSkippedReason = skipUrlHealthProbe
+    ? "Managed workspace rows use local control-plane state and are not probed as standalone deployment URLs."
+    : null;
 
-  try {
-    const response = await fetchWithControlPlaneTimeout(
-      `${deployment.url.replace(/\/$/, "")}/api/health`,
-      { method: "GET" },
-      CONTROL_PLANE_HEALTH_PROBE_TIMEOUT_MS,
-      "HEALTH_PROBE_TIMEOUT",
-      "Health probe timed out. Retry after the customer deployment is reachable.",
-    );
-    health = await response.json().catch(() => null) as CustomerDeploymentHealthPayload | null;
-    if (response.ok) {
-      status = "ok";
-      const runtimeErrors = [];
-      if (health?.database && health.database !== "up") runtimeErrors.push(`Database ${health.database}`);
-      if (health?.schema && health.schema !== "ready") runtimeErrors.push(`Schema ${health.schema}`);
-      if (health?.runtime?.redis && health.runtime.redis !== "configured") runtimeErrors.push(`Redis ${health.runtime.redis}`);
-      if (health?.runtime?.storage && health.runtime.storage !== "configured") runtimeErrors.push(`Storage ${health.runtime.storage}`);
-      if (deployment.releaseImageTag && health?.release && !observedReleaseMatches(health, deployment.releaseImageTag)) {
-        runtimeErrors.push(`Release drift: expected ${deployment.releaseImageTag}, got ${observedReleaseLabel(health)}`);
-      }
-      if (runtimeErrors.length > 0) {
+  if (skipUrlHealthProbe) {
+    status = "ok";
+  } else {
+    try {
+      const response = await fetchWithControlPlaneTimeout(
+        `${deployment.url.replace(/\/$/, "")}/api/health`,
+        { method: "GET" },
+        CONTROL_PLANE_HEALTH_PROBE_TIMEOUT_MS,
+        "HEALTH_PROBE_TIMEOUT",
+        "Health probe timed out. Retry after the customer deployment is reachable.",
+      );
+      health = await response.json().catch(() => null) as CustomerDeploymentHealthPayload | null;
+      if (response.ok) {
+        status = "ok";
+        const runtimeErrors = [];
+        if (health?.database && health.database !== "up") runtimeErrors.push(`Database ${health.database}`);
+        if (health?.schema && health.schema !== "ready") runtimeErrors.push(`Schema ${health.schema}`);
+        if (health?.runtime?.redis && health.runtime.redis !== "configured") runtimeErrors.push(`Redis ${health.runtime.redis}`);
+        if (health?.runtime?.storage && health.runtime.storage !== "configured") runtimeErrors.push(`Storage ${health.runtime.storage}`);
+        if (!skipReleaseDriftCheck && deployment.releaseImageTag && health?.release && !observedReleaseMatches(health, deployment.releaseImageTag)) {
+          runtimeErrors.push(`Release drift: expected ${deployment.releaseImageTag}, got ${observedReleaseLabel(health)}`);
+        }
+        if (runtimeErrors.length > 0) {
+          status = "degraded";
+          error = runtimeErrors.join("; ");
+        }
+      } else {
         status = "degraded";
-        error = runtimeErrors.join("; ");
+        error = `Status ${response.status}`;
       }
-    } else {
-      status = "degraded";
-      error = `Status ${response.status}`;
+    } catch (probeError) {
+      status = "down";
+      error = probeError instanceof Error ? probeError.message : "Health probe failed.";
     }
-  } catch (probeError) {
-    status = "down";
-    error = probeError instanceof Error ? probeError.message : "Health probe failed.";
   }
 
   await prisma.customerDeployment.update({
@@ -8060,6 +8085,7 @@ async function probeControlPlaneDeploymentHealthCore(actor: AppActor, params: {
       summary: {
         reason: params.reason,
         health,
+        probeSkippedReason,
       },
       error,
     }),
@@ -8072,6 +8098,7 @@ async function probeControlPlaneDeploymentHealthCore(actor: AppActor, params: {
         expectedReleaseImageTag: deployment.releaseImageTag,
         expectedReleaseVersion: deployment.releaseVersion,
         observedRelease: health?.release ?? null,
+        probeSkippedReason,
       },
       error: error?.includes("Release drift:") ? error : null,
     }),
