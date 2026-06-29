@@ -5,10 +5,10 @@ import { buildWorkflowInputs, runFleetReleaseDispatch, workflowForInputs } from 
 const SHA = "c9077ff031e8e672923c84d52eeef862368f3493";
 
 describe("release fleet command", () => {
-  it("defaults to latest-stable and all target groups", () => {
+  it("defaults to latest-stable and primary target groups", () => {
     expect(buildWorkflowInputs(["--reason", "Ship latest stable."])).toMatchObject({
       release: "latest-stable",
-      targets: "railway-customers,azure-selfserve,ops,backup-app",
+      targets: "railway-customers,azure-selfserve,ops",
       reason: "Ship latest stable.",
       dryRun: false,
       concurrency: 2,
@@ -33,6 +33,18 @@ describe("release fleet command", () => {
       targets: "ops,backup-app",
       dryRun: true,
       watch: false,
+    });
+  });
+
+  it("keeps backup app explicit when all is requested", () => {
+    expect(buildWorkflowInputs([
+      "--targets",
+      "all",
+      "--reason",
+      "Plan full release.",
+      "--no-watch",
+    ])).toMatchObject({
+      targets: "railway-customers,azure-selfserve,ops,backup-app",
     });
   });
 

@@ -27,7 +27,7 @@ function targetJson(overrides = {}) {
 function azureTargetJson(overrides = {}) {
   return JSON.stringify([{
     id: "azure",
-    deploymentId: null,
+    deploymentId: "dep-azure",
     label: "Azure Self-Serve",
     url: "https://selfserve.corgtex.com",
     group: "azure-selfserve",
@@ -40,6 +40,31 @@ function azureTargetJson(overrides = {}) {
     },
     ...overrides,
   }]);
+}
+
+function azureProviderStatus(overrides = {}) {
+  return {
+    deploymentId: "dep-azure",
+    provider: { cloudProvider: "AZURE" },
+    health: { status: "ok" },
+    release: { releaseImageTag: `sha-${SHA}`, releaseDrift: null },
+    ...overrides,
+  };
+}
+
+function selfServeRegistry(overrides = {}) {
+  return {
+    items: [],
+    summary: {
+      total: 0,
+      activeTrials: 0,
+      reviewRequired: 0,
+      suspendedTrials: 0,
+      failedSmoke: 0,
+      smokeCovered: 0,
+    },
+    ...overrides,
+  };
 }
 
 function successfulRailwayResponse(body) {
@@ -393,6 +418,54 @@ describe("fleet release runner", () => {
     expect(result.targets).toHaveLength(1);
   });
 
+  it("defaults dry-run plans to primary targets and excludes backup app", async () => {
+    const result = await runFleetRelease([
+      "deploy",
+      "--release",
+      SHA,
+      "--dry-run",
+      "--reason",
+      "Validate default release plan.",
+    ], {
+      env: {
+        FLEET_RELEASE_TARGETS_JSON: JSON.stringify([{
+          id: "customer",
+          deploymentId: null,
+          label: "Customer",
+          url: "https://customer.corgtex.com",
+          group: "railway-customers",
+          provider: "railway",
+          railway: {
+            projectId: "project-customer",
+            environmentId: "env-customer",
+            webServiceId: "web-customer",
+            workerServiceId: "worker-customer",
+          },
+        }]),
+        FLEET_RELEASE_OPS_TARGET_JSON: targetJson(),
+        FLEET_RELEASE_BACKUP_APP_TARGET_JSON: targetJson({ id: "backup", label: "Backup App", group: "backup-app", url: "https://app.corgtex.com" }),
+        FLEET_RELEASE_AZURE_TARGET_JSON: azureTargetJson(),
+        CONTROL_PLANE_AGENT_API_KEY: "control-plane-key",
+        RAILWAY_API_TOKEN: "railway-token",
+        GHCR_IMPORT_USERNAME: "github-user",
+        GITHUB_TOKEN: "github-token",
+        AZURE_CLIENT_ID: "azure-client",
+        AZURE_TENANT_ID: "azure-tenant",
+        AZURE_SUBSCRIPTION_ID: "azure-subscription",
+      },
+      runCommand: vi.fn(),
+      fetchImpl: vi.fn(),
+      sleep: vi.fn(),
+    });
+
+    expect(result.targets.map((target) => target.group)).toEqual([
+      "railway-customers",
+      "ops",
+      "azure-selfserve",
+    ]);
+    expect(result.targets.some((target) => target.group === "backup-app")).toBe(false);
+  });
+
   it("fails preflight before mutation when provider credentials are missing", async () => {
     const runCommand = vi.fn();
     await expect(runFleetRelease([
@@ -456,6 +529,72 @@ describe("fleet release runner", () => {
       fetchImpl: vi.fn(),
       sleep: vi.fn(),
     })).rejects.toThrow("GHCR import token is missing for Railway image pull");
+  });
+
+  it("blocks mismatched provider and URL combinations before mutation", async () => {
+    await expect(runFleetRelease([
+      "deploy",
+      "--release",
+      SHA,
+      "--targets",
+      "azure-selfserve",
+      "--dry-run",
+      "--fail-on-blockers",
+      "--reason",
+      "Validate provider boundary.",
+    ], {
+      env: {
+        FLEET_RELEASE_TARGETS_JSON: targetJson({
+          id: "bad-azure",
+          deploymentId: "dep-azure",
+          label: "Bad Azure",
+          group: "azure-selfserve",
+          provider: "railway",
+          url: "https://selfserve.corgtex.com",
+        }),
+        CONTROL_PLANE_AGENT_API_KEY: "control-plane-key",
+        RAILWAY_API_TOKEN: "railway-token",
+        GHCR_IMPORT_USERNAME: "github-user",
+        GITHUB_TOKEN: "github-token",
+        AZURE_CLIENT_ID: "azure-client",
+        AZURE_TENANT_ID: "azure-tenant",
+        AZURE_SUBSCRIPTION_ID: "azure-subscription",
+      },
+      runCommand: vi.fn(),
+      fetchImpl: vi.fn(),
+      sleep: vi.fn(),
+    })).rejects.toThrow("requires provider azure");
+  });
+
+  it("preflights Azure self-serve without Railway credentials", async () => {
+    const result = await runFleetRelease([
+      "deploy",
+      "--release",
+      SHA,
+      "--targets",
+      "azure-selfserve",
+      "--dry-run",
+      "--fail-on-blockers",
+      "--reason",
+      "Validate Azure release plan.",
+    ], {
+      env: {
+        FLEET_RELEASE_TARGETS_JSON: azureTargetJson(),
+        CONTROL_PLANE_AGENT_API_KEY: "control-plane-key",
+        GHCR_IMPORT_USERNAME: "github-user",
+        GITHUB_TOKEN: "github-token",
+        AZURE_CLIENT_ID: "azure-client",
+        AZURE_TENANT_ID: "azure-tenant",
+        AZURE_SUBSCRIPTION_ID: "azure-subscription",
+      },
+      runCommand: vi.fn(),
+      fetchImpl: vi.fn(),
+      sleep: vi.fn(),
+    });
+
+    expect(result.blockers).toEqual([]);
+    expect(result.targets).toHaveLength(1);
+    expect(result.targets[0]).toMatchObject({ group: "azure-selfserve", provider: "azure" });
   });
 
   it("can make dry-run preflight blockers fatal before image build", async () => {
@@ -863,24 +1002,29 @@ describe("fleet release runner", () => {
   });
 
   it("sets migrate-and-web startup variables during Azure deploys", async () => {
+    const toolCalls = [];
     const runCommand = vi.fn((command, args) => {
       if (command === "az" && args[0] === "containerapp" && args[1] === "show") {
         return { stdout: `${args[3]}-revision\n`, stderr: "" };
       }
       return { stdout: "", stderr: "" };
     });
-    const fetchImpl = vi.fn(async () => ({
-      ok: true,
-      json: async () => ({
-        status: "ok",
-        database: "up",
-        schema: "ready",
-        release: {
-          imageTag: `sha-${SHA}`,
-          gitSha: SHA,
-        },
-      }),
-    }));
+    const fetchImpl = vi.fn(async (url, options = {}) => {
+      if (String(url).includes("/api/control-plane/mcp")) {
+        const body = JSON.parse(options.body);
+        toolCalls.push(body.params.name);
+        if (body.params.name === "get_azure_provider_status") {
+          return controlPlaneResult(azureProviderStatus());
+        }
+        if (body.params.name === "list_self_serve_customers") {
+          return controlPlaneResult(selfServeRegistry());
+        }
+        if (body.params.name === "record_verified_release") {
+          return controlPlaneResult({ recorded: true });
+        }
+      }
+      return healthResponse();
+    });
 
     const result = await runFleetRelease([
       "deploy",
@@ -898,6 +1042,7 @@ describe("fleet release runner", () => {
         AZURE_SUBSCRIPTION_ID: "azure-subscription",
         GITHUB_ACTOR: "github-user",
         GITHUB_TOKEN: "github-token",
+        CONTROL_PLANE_AGENT_API_KEY: "control-plane-token",
       },
       runCommand,
       fetchImpl,
@@ -916,6 +1061,16 @@ describe("fleet release runner", () => {
       expect(args).toContain(`CORGTEX_RELEASE_IMAGE_TAG=sha-${SHA}`);
       expect(args).toContain(`CORGTEX_RELEASE_GIT_SHA=${SHA}`);
     }
+    expect(toolCalls).toEqual([
+      "get_azure_provider_status",
+      "list_self_serve_customers",
+      "record_verified_release",
+    ]);
+    expect(result.results[0].result.providerReadiness).toMatchObject({
+      status: "ok",
+      provider: "azure",
+      releaseImageTag: `sha-${SHA}`,
+    });
   });
 
   it("does not treat a different Railway deployment status as proof", async () => {

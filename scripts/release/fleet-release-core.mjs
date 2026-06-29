@@ -5,6 +5,19 @@ export const TARGET_GROUPS = Object.freeze([
   "backup-app",
 ]);
 
+export const DEFAULT_TARGET_GROUPS = Object.freeze([
+  "railway-customers",
+  "azure-selfserve",
+  "ops",
+]);
+
+const GROUP_PROVIDERS = Object.freeze({
+  "railway-customers": "railway",
+  "azure-selfserve": "azure",
+  ops: "railway",
+  "backup-app": "railway",
+});
+
 export const TERMINAL_RAILWAY_FAILURES = new Set([
   "CRASHED",
   "FAILED",
@@ -72,13 +85,14 @@ export function imageTagForSha(gitSha) {
   return `sha-${normalizeGitSha(gitSha)}`;
 }
 
-export function normalizeTargets(value = "all") {
-  const raw = String(value || "all").trim();
-  if (!raw || raw === "all") return [...TARGET_GROUPS];
+export function normalizeTargets(value = "default") {
+  const raw = String(value || "default").trim();
+  if (!raw || raw === "default") return [...DEFAULT_TARGET_GROUPS];
+  if (raw === "all") return [...TARGET_GROUPS];
   const selected = raw.split(",").map((part) => part.trim()).filter(Boolean);
   const invalid = selected.filter((target) => !TARGET_GROUPS.includes(target));
   if (invalid.length > 0) {
-    throw new Error(`Unknown release target group(s): ${invalid.join(", ")}. Allowed: all, ${TARGET_GROUPS.join(", ")}`);
+    throw new Error(`Unknown release target group(s): ${invalid.join(", ")}. Allowed: default, all, ${TARGET_GROUPS.join(", ")}`);
   }
   return [...new Set(selected)];
 }
@@ -197,10 +211,38 @@ export function formatReleasePlan({ manifest, targets, dryRun, concurrency }) {
         label: target.label,
         group: target.group,
         provider: target.provider,
+        expectedProvider: expectedProviderForGroup(target.group),
+        criticality: targetCriticality(target),
+        backupOnly: target.group === "backup-app",
         url: target.url,
       })),
     })),
   };
+}
+
+export function expectedProviderForGroup(group) {
+  return GROUP_PROVIDERS[group] ?? null;
+}
+
+export function targetCriticality(target) {
+  return target.group === "backup-app" ? "backup-only" : "blocking";
+}
+
+export function providerBoundaryErrors(target) {
+  const errors = [];
+  const expectedProvider = expectedProviderForGroup(target.group);
+  if (expectedProvider && target.provider !== expectedProvider) {
+    errors.push(`Target group ${target.group} requires provider ${expectedProvider}, got ${target.provider || "missing"}`);
+  }
+
+  const lowerUrl = String(target.url ?? "").toLowerCase();
+  if (lowerUrl.includes("selfserve.corgtex.com") && (target.group !== "azure-selfserve" || target.provider !== "azure")) {
+    errors.push("selfserve.corgtex.com targets must use azure-selfserve group and azure provider");
+  }
+  if (lowerUrl.includes("app.corgtex.com") && (target.group !== "backup-app" || target.provider !== "railway")) {
+    errors.push("app.corgtex.com targets must use backup-app group and railway provider");
+  }
+  return errors;
 }
 
 export function targetFromControlPlaneRow(row) {
