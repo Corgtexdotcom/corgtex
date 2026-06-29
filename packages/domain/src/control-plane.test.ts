@@ -1657,6 +1657,124 @@ describe("control plane domain", () => {
     }));
   });
 
+  it("returns a compact deployment detail overview without heavy logs", async () => {
+    const { getControlPlaneDeployment } = await import("./control-plane");
+    const observedAt = new Date("2026-06-29T18:00:00.000Z");
+    const hugeSummary = { payload: "x".repeat(1_100_000) };
+    prismaMock.customerDeployment.findUnique.mockResolvedValueOnce({
+      id: "inst-1",
+      label: "Enterprise Alpha Production",
+      url: "https://enterprise-alpha.example.com",
+      customerSlug: "enterprise-alpha",
+      customerAccountId: "cust-1",
+      supportCredentialEnc: "encrypted:support-token",
+      accessGrants: [],
+      customerAccount: null,
+      managedWorkspace: null,
+      fleetSnapshots: [
+        {
+          id: "snapshot-1",
+          snapshotKind: "SUPPORT_READY",
+          status: "ok",
+          error: null,
+          summary: hugeSummary,
+          observedAt,
+          createdAt: observedAt,
+          updatedAt: observedAt,
+        },
+        {
+          id: "snapshot-duplicate",
+          snapshotKind: "SUPPORT_READY",
+          status: "ok",
+          error: null,
+          summary: { duplicate: true },
+          observedAt,
+          createdAt: observedAt,
+          updatedAt: observedAt,
+        },
+        {
+          id: "snapshot-health",
+          snapshotKind: "HEALTH",
+          status: "ok",
+          error: null,
+          summary: { status: "ok" },
+          observedAt,
+          createdAt: observedAt,
+          updatedAt: observedAt,
+        },
+      ],
+      supportOperations: [{
+        id: "operation-1",
+        resultSummary: { payload: "y".repeat(3_000_000) },
+      }],
+      events: [{
+        id: "event-1",
+        meta: { payload: "z".repeat(100_000) },
+      }],
+    } as any);
+
+    const result = await getControlPlaneDeployment(operatorActor, "inst-1") as any;
+    const args = prismaMock.customerDeployment.findUnique.mock.calls[0]?.[0] as any;
+
+    expect(args.include.supportOperations).toBeUndefined();
+    expect(args.include.events).toBeUndefined();
+    expect(result.hasSupportCredential).toBe(true);
+    expect(result.supportCredentialEnc).toBeUndefined();
+    expect(result.supportOperations).toEqual([]);
+    expect(result.events).toEqual([]);
+    expect(result.fleetSnapshots).toHaveLength(2);
+    expect(result.fleetSnapshots[0].summary).toMatchObject({
+      truncated: true,
+      originalBytes: expect.any(Number),
+      preview: expect.any(String),
+    });
+    expect(Buffer.byteLength(JSON.stringify(result), "utf8")).toBeLessThan(250_000);
+  });
+
+  it("lists support operations with truncated summary previews", async () => {
+    const { listControlPlaneSupportOperations } = await import("./control-plane");
+    const observedAt = new Date("2026-06-29T18:00:00.000Z");
+    prismaMock.supportOperation.findMany.mockResolvedValueOnce([{
+      id: "operation-1",
+      deploymentId: "inst-1",
+      workspaceId: "ws-1",
+      actorUserId: "operator-1",
+      actorLabel: "Corgtex Support",
+      action: "agents.list_runs",
+      reason: "Inspect recent agent runs.",
+      status: "COMPLETED",
+      inputSummary: { filter: "recent" },
+      resultSummary: { runs: "x".repeat(1_000_000) },
+      error: null,
+      idempotencyKey: null,
+      startedAt: observedAt,
+      completedAt: observedAt,
+      createdAt: observedAt,
+      updatedAt: observedAt,
+    } as any]);
+
+    const operations = await listControlPlaneSupportOperations(operatorActor, "inst-1");
+    const args = prismaMock.supportOperation.findMany.mock.calls[0]?.[0] as any;
+
+    expect(args).toMatchObject({
+      where: { deploymentId: "inst-1" },
+      take: 30,
+      select: expect.objectContaining({
+        resultSummary: true,
+        inputSummary: true,
+      }),
+    });
+    expect(operations[0]).toMatchObject({
+      action: "agents.list_runs",
+      resultSummary: {
+        truncated: true,
+        originalBytes: expect.any(Number),
+        preview: expect.any(String),
+      },
+    });
+    expect(Buffer.byteLength(JSON.stringify(operations), "utf8")).toBeLessThan(20_000);
+  });
+
   it("lists Azure self-serve support sessions as ready without requiring an enterprise connector", async () => {
     const { listControlPlaneCustomerSummaries } = await import("./control-plane");
     const observedAt = new Date("2026-06-10T10:00:00.000Z");
@@ -4258,6 +4376,89 @@ describe("control plane domain", () => {
     });
   });
 
+  it("blocks deploy-latest preflight when the configured target already matches the current release", async () => {
+    vi.stubEnv("CONTROL_PLANE_RAILWAY_LATEST_WEB_IMAGE", "ghcr.io/corgtex/web:sha-1c105e0");
+    vi.stubEnv("CONTROL_PLANE_RAILWAY_LATEST_WORKER_IMAGE", "ghcr.io/corgtex/worker:sha-1c105e0");
+    vi.stubEnv("CONTROL_PLANE_RAILWAY_LATEST_RELEASE_IMAGE_TAG", "sha-1c105e0c7961a2f24d4d8af1eeeaeb8ee8d18699");
+    vi.stubEnv("CONTROL_PLANE_RAILWAY_LATEST_RELEASE_VERSION", "main-1c105e0c7961");
+    const { getControlPlaneDeployLatestPreflight } = await import("./control-plane");
+    prismaMock.customerDeployment.findUnique.mockResolvedValueOnce({
+      id: "enterprise-alpha-1",
+      label: "Enterprise Alpha Production",
+      customerAccountId: "cust-alpha",
+      customerSlug: "enterprise-alpha",
+      cloudProvider: "RAILWAY",
+      deploymentKind: "HOSTED",
+      deploymentStatus: "ACTIVE",
+      managedWorkspaceId: null,
+      managedWorkspace: null,
+      supportCredentialEnc: null,
+      provisioningStatus: "active",
+      releaseImageTag: "sha-1c105e0c7961a2f24d4d8af1eeeaeb8ee8d18699",
+      releaseVersion: "main-1c105e0c7961",
+      lastHealthStatus: "ok",
+      lastHealthCheck: new Date("2026-06-29T18:00:00.000Z"),
+      lastHealthError: null,
+      railwayProjectId: "project-alpha",
+      railwayEnvironmentId: "env-alpha",
+      railwayWebServiceId: "web-alpha",
+      railwayWorkerServiceId: "worker-alpha",
+    });
+
+    const preflight = await getControlPlaneDeployLatestPreflight(operatorActor, "enterprise-alpha-1");
+
+    expect(preflight.eligible).toBe(false);
+    expect(preflight.checks).toContainEqual(expect.objectContaining({
+      key: "target_differs",
+      ok: false,
+      detail: "Target already matches current release.",
+    }));
+    expect(preflight.blockers).toContain("Target already matches current release.");
+  });
+
+  it("does not queue aligned Railway enterprise deploy-latest jobs", async () => {
+    vi.stubEnv("CONTROL_PLANE_RAILWAY_LATEST_WEB_IMAGE", "ghcr.io/corgtex/web:sha-1c105e0");
+    vi.stubEnv("CONTROL_PLANE_RAILWAY_LATEST_WORKER_IMAGE", "ghcr.io/corgtex/worker:sha-1c105e0");
+    vi.stubEnv("CONTROL_PLANE_RAILWAY_LATEST_RELEASE_IMAGE_TAG", "sha-1c105e0c7961a2f24d4d8af1eeeaeb8ee8d18699");
+    const { enqueueControlPlaneDeployLatestRollout } = await import("./control-plane");
+    const baseDeployment = {
+      customerAccountId: "cust-1",
+      cloudProvider: "RAILWAY",
+      deploymentKind: "HOSTED",
+      deploymentStatus: "ACTIVE",
+      provisioningStatus: "active",
+      releaseImageTag: "sha-1c105e0c7961a2f24d4d8af1eeeaeb8ee8d18699",
+      releaseVersion: null,
+      lastHealthStatus: "ok",
+      lastHealthCheck: new Date("2026-06-29T18:00:00.000Z"),
+      lastHealthError: null,
+      railwayEnvironmentId: "env-1",
+      railwayWebServiceId: "web-1",
+      railwayWorkerServiceId: "worker-1",
+    };
+    prismaMock.customerDeployment.findMany.mockResolvedValueOnce([
+      { ...baseDeployment, id: "enterprise-alpha-1", label: "Enterprise Alpha Production", customerSlug: "enterprise-alpha", railwayProjectId: "project-alpha" },
+      { ...baseDeployment, id: "enterprise-beta-1", label: "Enterprise Beta Production", customerSlug: "enterprise-beta", railwayProjectId: "project-beta" },
+      { ...baseDeployment, id: "enterprise-gamma-1", label: "Enterprise Gamma Production", customerSlug: "enterprise-gamma", railwayProjectId: "project-gamma" },
+    ]);
+
+    const result = await enqueueControlPlaneDeployLatestRollout(operatorActor, {
+      allEligible: true,
+      reason: "Do not redeploy already aligned customers.",
+    });
+
+    expect(prismaMock.workflowJob.createMany).not.toHaveBeenCalled();
+    expect(result).toMatchObject({
+      requested: 3,
+      queuedJobs: 0,
+      results: [
+        { deploymentId: "enterprise-alpha-1", status: "skipped", blockers: ["Target already matches current release."] },
+        { deploymentId: "enterprise-beta-1", status: "skipped", blockers: ["Target already matches current release."] },
+        { deploymentId: "enterprise-gamma-1", status: "skipped", blockers: ["Target already matches current release."] },
+      ],
+    });
+  });
+
   it("blocks deploy-latest preflight when Railway release execution is not configured", async () => {
     vi.stubEnv("CONTROL_PLANE_LATEST_WEB_IMAGE", "ghcr.io/corgtex/web:new");
     vi.stubEnv("CONTROL_PLANE_LATEST_WORKER_IMAGE", "ghcr.io/corgtex/worker:new");
@@ -4293,6 +4494,114 @@ describe("control plane domain", () => {
       key: "railway_api_token_configured",
       ok: false,
       detail: "Railway API token is not configured for control-plane release execution.",
+    }));
+  });
+
+  it("validates Railway executor read access for a deployment target", async () => {
+    vi.stubEnv("CONTROL_PLANE_RAILWAY_LATEST_WEB_IMAGE", "ghcr.io/corgtex/web:new");
+    vi.stubEnv("CONTROL_PLANE_RAILWAY_LATEST_WORKER_IMAGE", "ghcr.io/corgtex/worker:new");
+    vi.stubEnv("CONTROL_PLANE_RAILWAY_LATEST_RELEASE_IMAGE_TAG", "release-new");
+    const { validateControlPlaneRailwayReleaseExecutor } = await import("./control-plane");
+    prismaMock.customerDeployment.findUnique.mockResolvedValueOnce({
+      id: "inst-1",
+      label: "Acme",
+      customerAccountId: "cust-1",
+      customerSlug: "acme",
+      cloudProvider: "RAILWAY",
+      deploymentKind: "HOSTED",
+      deploymentStatus: "ACTIVE",
+      managedWorkspaceId: null,
+      managedWorkspace: null,
+      supportCredentialEnc: null,
+      provisioningStatus: "active",
+      releaseImageTag: "release-old",
+      releaseVersion: null,
+      lastHealthStatus: "ok",
+      lastHealthCheck: new Date("2026-01-01T00:00:00.000Z"),
+      lastHealthError: null,
+      railwayProjectId: "project-1",
+      railwayEnvironmentId: "env-1",
+      railwayWebServiceId: "web-1",
+      railwayWorkerServiceId: "worker-1",
+    });
+    const railwayClient = {
+      graphql: vi.fn().mockResolvedValueOnce({
+        project: { id: "project-1", name: "Acme" },
+        environments: { edges: [{ node: { id: "env-1", name: "production" } }] },
+        services: {
+          edges: [
+            { node: { id: "web-1", name: "web" } },
+            { node: { id: "worker-1", name: "worker" } },
+          ],
+        },
+      }),
+    };
+
+    const result = await validateControlPlaneRailwayReleaseExecutor(operatorActor, "inst-1", railwayClient);
+
+    expect(railwayClient.graphql).toHaveBeenCalledWith(expect.stringContaining("ValidateRailwayReleaseExecutor"), {
+      projectId: "project-1",
+    });
+    expect(result).toMatchObject({
+      deploymentId: "inst-1",
+      provider: "RAILWAY",
+      status: "ok",
+      access: {
+        projectId: "project-1",
+        environmentId: "env-1",
+        webServiceId: "web-1",
+        workerServiceId: "worker-1",
+      },
+    });
+    expect(result.checks).toContainEqual(expect.objectContaining({
+      key: "railway_executor_access",
+      ok: true,
+    }));
+  });
+
+  it("reports unreadable Railway executor access as a clear blocker", async () => {
+    vi.stubEnv("CONTROL_PLANE_RAILWAY_LATEST_WEB_IMAGE", "ghcr.io/corgtex/web:new");
+    vi.stubEnv("CONTROL_PLANE_RAILWAY_LATEST_WORKER_IMAGE", "ghcr.io/corgtex/worker:new");
+    vi.stubEnv("CONTROL_PLANE_RAILWAY_LATEST_RELEASE_IMAGE_TAG", "release-new");
+    const { validateControlPlaneRailwayReleaseExecutor } = await import("./control-plane");
+    prismaMock.customerDeployment.findUnique.mockResolvedValueOnce({
+      id: "inst-1",
+      label: "Acme",
+      customerAccountId: "cust-1",
+      customerSlug: "acme",
+      cloudProvider: "RAILWAY",
+      deploymentKind: "HOSTED",
+      deploymentStatus: "ACTIVE",
+      managedWorkspaceId: null,
+      managedWorkspace: null,
+      supportCredentialEnc: null,
+      provisioningStatus: "active",
+      releaseImageTag: "release-old",
+      releaseVersion: null,
+      lastHealthStatus: "ok",
+      lastHealthCheck: new Date("2026-01-01T00:00:00.000Z"),
+      lastHealthError: null,
+      railwayProjectId: "project-1",
+      railwayEnvironmentId: "env-1",
+      railwayWebServiceId: "web-1",
+      railwayWorkerServiceId: "worker-1",
+    });
+    const railwayClient = {
+      graphql: vi.fn().mockRejectedValueOnce(new Error("Not Authorized")),
+    };
+
+    const result = await validateControlPlaneRailwayReleaseExecutor(operatorActor, "inst-1", railwayClient);
+
+    expect(result).toMatchObject({
+      deploymentId: "inst-1",
+      provider: "RAILWAY",
+      status: "blocked",
+      blockers: ["Railway executor access validation failed: Not Authorized"],
+    });
+    expect(result.checks).toContainEqual(expect.objectContaining({
+      key: "railway_executor_access",
+      ok: false,
+      detail: "Railway executor access validation failed: Not Authorized",
     }));
   });
 

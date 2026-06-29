@@ -48,6 +48,7 @@ vi.mock("@corgtex/domain", () => ({
   revokeControlPlaneAgentCredential: vi.fn(),
   resendControlPlaneCustomerMemberAccessLink: vi.fn(), runControlPlaneClientMigrationDryRun: vi.fn(), runControlPlaneContextOperation: vi.fn(), runControlPlaneMeetingRecorderOperation: vi.fn(), runControlPlaneReleaseOperation: vi.fn(), runCustomerSupportOperation: vi.fn(),
   planControlPlaneClientMigration: vi.fn(),
+  validateControlPlaneRailwayReleaseExecutor: vi.fn(),
   setControlPlaneFeatureFlag: vi.fn(), updateControlPlaneAgentCredentialScopes: vi.fn(), updateControlPlaneAgentPolicy: vi.fn(), updateControlPlaneCustomerMemberStatus: vi.fn(), updateControlPlaneModelBudget: vi.fn(),
 }));
 vi.mock("@/lib/auth", () => ({ resolveControlPlaneRequestActor: mocks.resolveControlPlaneRequestActor }));
@@ -137,6 +138,7 @@ describe("/api/control-plane/mcp", () => {
       "update_customer_agent_policy",
       "get_release_status",
       "get_deploy_latest_preflight",
+      "validate_railway_release_executor",
       "list_customer_members",
       "create_customer_member",
       "resend_customer_member_access_link",
