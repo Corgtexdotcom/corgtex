@@ -317,27 +317,28 @@ export async function validateRailwayReleaseExecutorAccess(
     environments: {
       edges?: Array<{ node?: { id: string; name?: string | null } | null }>;
     };
-    services: {
-      edges?: Array<{ node?: { id: string; name?: string | null } | null }>;
-    };
+    webService: { id: string; name?: string | null } | null;
+    workerService: { id: string; name?: string | null } | null;
   }>(
-    `query ValidateRailwayReleaseExecutor($projectId: String!) {
+    `query ValidateRailwayReleaseExecutor($projectId: String!, $webServiceId: String!, $workerServiceId: String!) {
       project(id: $projectId) { id name }
       environments(projectId: $projectId, isEphemeral: false) {
         edges { node { id name } }
       }
-      services(projectId: $projectId) {
-        edges { node { id name } }
-      }
+      webService: service(id: $webServiceId) { id name }
+      workerService: service(id: $workerServiceId) { id name }
     }`,
-    { projectId: input.projectId },
+    {
+      projectId: input.projectId,
+      webServiceId: input.webServiceId,
+      workerServiceId: input.workerServiceId,
+    },
   );
 
   const environments = result.environments.edges?.map((edge) => edge.node).filter(Boolean) ?? [];
-  const services = result.services.edges?.map((edge) => edge.node).filter(Boolean) ?? [];
   const environment = environments.find((entry) => entry?.id === input.environmentId);
-  const webService = services.find((entry) => entry?.id === input.webServiceId);
-  const workerService = services.find((entry) => entry?.id === input.workerServiceId);
+  const webService = result.webService?.id === input.webServiceId ? result.webService : null;
+  const workerService = result.workerService?.id === input.workerServiceId ? result.workerService : null;
   const checks = [
     {
       key: "railway_project_readable",
