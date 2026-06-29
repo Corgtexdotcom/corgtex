@@ -5725,6 +5725,48 @@ describe("control plane domain", () => {
     }));
   });
 
+  it("routes newspaper diagnostics through the audited support connector as a read-only operation", async () => {
+    const { runCustomerSupportOperation } = await import("./control-plane");
+    prismaMock.supportOperation.create.mockResolvedValueOnce({
+      id: "op-newspaper",
+      action: "newspaper.diagnostics",
+    });
+    prismaMock.customerDeployment.findUnique.mockResolvedValue({
+      id: "inst-1",
+      label: "Acme",
+      url: "https://customer.test",
+      supportMcpUrl: "https://customer.test/api/mcp",
+      supportCredentialEnc: "encrypted-token",
+      supportConnectorStatus: "connected",
+    });
+    prismaMock.supportOperation.update.mockResolvedValueOnce({
+      id: "op-newspaper",
+      status: "COMPLETED",
+    });
+
+    await runCustomerSupportOperation(operatorActor, {
+      deploymentId: "inst-1",
+      action: "newspaper.diagnostics",
+      reason: "Inspect newsletter schedule and source counts after release.",
+      arguments: { take: 5 },
+    });
+
+    expect(fetch).toHaveBeenCalledTimes(1);
+    const toolCall = vi.mocked(fetch).mock.calls[0]?.[1] as RequestInit;
+    expect(JSON.parse(String(toolCall.body))).toEqual(expect.objectContaining({
+      params: expect.objectContaining({
+        name: "get_newspaper_diagnostics",
+        arguments: { take: 5 },
+      }),
+    }));
+    expect(prismaMock.supportOperation.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        action: "newspaper.diagnostics",
+        inputSummary: { take: 5 },
+      }),
+    }));
+  });
+
   it("routes context map imports through the audited support connector", async () => {
     const { runCustomerSupportOperation } = await import("./control-plane");
     prismaMock.supportOperation.create.mockResolvedValueOnce({
