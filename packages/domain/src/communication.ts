@@ -590,6 +590,7 @@ async function enqueueSlackMessageContextJobs(params: {
   installation: { id: string; workspaceId: string };
   message: { id: string; externalChannelId: string; externalMessageId: string; threadExternalId: string | null; messageTs: Date | null; updatedAt?: Date };
   syncKnowledge?: boolean;
+  syncExternalResources?: boolean;
 }) {
   const dayISO = dateKey(params.message.messageTs ?? slackTimestampToDate(params.message.externalMessageId) ?? new Date());
   const threadTs = params.message.threadExternalId || params.message.externalMessageId;
@@ -605,6 +606,24 @@ async function enqueueSlackMessageContextJobs(params: {
         type: "knowledge.sync.slack-message",
         payload: toInputJson({ messageId: params.message.id }) as Prisma.InputJsonObject,
         dedupeKey: knowledgeDedupeKey,
+      },
+    });
+  }
+
+  if (params.syncExternalResources ?? true) {
+    const revision = params.message.updatedAt?.getTime() ?? Date.now();
+    const dedupeKey = `external-resource:SLACK_MESSAGE:${params.message.id}:capture:${revision}`;
+    await prisma.workflowJob.upsert({
+      where: { dedupeKey },
+      update: {},
+      create: {
+        workspaceId: params.installation.workspaceId,
+        type: "external-resource.capture-source",
+        payload: toInputJson({
+          sourceType: "SLACK_MESSAGE",
+          sourceId: params.message.id,
+        }) as Prisma.InputJsonObject,
+        dedupeKey,
       },
     });
   }
@@ -664,7 +683,7 @@ async function ingestSlackMessage(installation: { id: string; workspaceId: strin
           externalMessageId: ts,
         },
       },
-      select: { id: true, externalChannelId: true, externalMessageId: true, threadExternalId: true, messageTs: true },
+      select: { id: true, externalChannelId: true, externalMessageId: true, threadExternalId: true, messageTs: true, updatedAt: true },
     });
 
     await prisma.communicationMessage.updateMany({
@@ -684,7 +703,11 @@ async function ingestSlackMessage(installation: { id: string; workspaceId: strin
 
     if (existing) {
       await deleteSlackMessageKnowledge(existing.id);
-      await enqueueSlackMessageContextJobs({ installation, message: existing, syncKnowledge: false });
+      await enqueueSlackMessageContextJobs({
+        installation,
+        message: { ...existing, updatedAt: new Date() },
+        syncKnowledge: false,
+      });
     }
     return { skipped: true, reason: "message_deleted" };
   }

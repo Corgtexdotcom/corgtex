@@ -1,9 +1,7 @@
 import type { AppActor } from "@corgtex/shared";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const {
-  callBoxExternalMcpReadToolMock,
-  getExternalMcpConnectionAccessTokenMock,
   prismaMock,
   recordAuditMock,
   requireWorkspaceMembershipMock,
@@ -24,14 +22,23 @@ const {
     workspaceExternalResourceAttachment: {
       createMany: vi.fn(),
     },
+    workspaceExternalResourceMention: {
+      findMany: vi.fn(),
+      updateMany: vi.fn(),
+      upsert: vi.fn(),
+    },
   };
 
   return {
-    callBoxExternalMcpReadToolMock: vi.fn(),
-    getExternalMcpConnectionAccessTokenMock: vi.fn(),
     prismaMock: {
       $transaction: vi.fn(),
+      communicationChannel: { findMany: vi.fn(), findUnique: vi.fn() },
+      communicationMessage: {
+        findMany: vi.fn(),
+        findUnique: vi.fn(),
+      },
       knowledgeChunk: { deleteMany: vi.fn() },
+      workflowJob: { upsert: vi.fn() },
       workspaceExternalResource: {
         findFirst: vi.fn(),
         findMany: vi.fn(),
@@ -58,11 +65,6 @@ vi.mock("./auth", () => ({
   requireWorkspaceMembership: requireWorkspaceMembershipMock,
 }));
 
-vi.mock("./external-mcp", () => ({
-  callBoxExternalMcpReadTool: callBoxExternalMcpReadToolMock,
-  getExternalMcpConnectionAccessToken: getExternalMcpConnectionAccessTokenMock,
-}));
-
 const actor: AppActor = {
   kind: "user",
   user: {
@@ -79,20 +81,20 @@ function resourceFixture(overrides: Record<string, unknown> = {}) {
     workspaceId: "ws-1",
     createdByUserId: "user-1",
     providerKey: "box",
-    externalId: "file:file-123",
-    resourceType: "file",
-    title: "Budget.xlsx",
-    url: "https://app.box.com/file/file-123",
+    externalId: "url:box-hash",
+    resourceType: "link",
+    category: "FILES",
+    priority: 100,
+    title: "Budget model",
+    url: "https://app.box.com/s/budget",
     sharedLinkUrl: "https://app.box.com/s/budget",
-    mimeType: "application/x-box-xlsx",
+    mimeType: null,
     descriptionMd: "Client budget model",
-    summaryMd: "Budget workbook summary",
+    summaryMd: null,
     metadata: {
-      box: {
-        id: "file-123",
-        type: "file",
-      },
-      sourceUrl: "https://app.box.com/s/budget",
+      canonicalUrl: "https://app.box.com/s/budget",
+      host: "app.box.com",
+      providerKey: "box",
     },
     lastEnrichedAt: new Date("2026-06-28T17:00:00.000Z"),
     lastEnrichmentError: null,
@@ -104,10 +106,35 @@ function resourceFixture(overrides: Record<string, unknown> = {}) {
   };
 }
 
+function slackMessage(overrides: Record<string, unknown> = {}) {
+  return {
+    id: "message-1",
+    workspaceId: "ws-1",
+    provider: "SLACK",
+    installationId: "install-1",
+    externalChannelId: "C1",
+    externalMessageId: "1714320000.000100",
+    externalUserId: "U1",
+    threadExternalId: null,
+    text: "Use <https://app.box.com/s/budget?utm_source=slack|Budget model> and https://example.com/reference.",
+    textRedactedAt: null,
+    messageTs: new Date("2026-06-28T17:00:00.000Z"),
+    permalink: "https://slack.test/archives/C1/p1714320000000100",
+    raw: {},
+    isBot: false,
+    isHidden: false,
+    isDeleted: false,
+    receivedAt: new Date("2026-06-28T17:00:01.000Z"),
+    createdAt: new Date("2026-06-28T17:00:01.000Z"),
+    updatedAt: new Date("2026-06-28T17:00:01.000Z"),
+    installation: { id: "install-1", externalTeamName: "Client Workspace" },
+    ...overrides,
+  };
+}
+
 describe("workspace external resources", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    vi.stubGlobal("fetch", vi.fn());
     prismaMock.$transaction.mockImplementation(async (callback: (tx: typeof txMock) => Promise<unknown>) => callback(txMock));
     requireWorkspaceMembershipMock.mockResolvedValue({
       id: "member-1",
@@ -116,38 +143,48 @@ describe("workspace external resources", () => {
       role: "CONTRIBUTOR",
       isActive: true,
     });
-    getExternalMcpConnectionAccessTokenMock.mockResolvedValue({
-      accessToken: "box-access-token",
-      provider: { providerKey: "box" },
-      connection: { id: "box-connection-1" },
-    });
-    callBoxExternalMcpReadToolMock.mockResolvedValue({ answer: "Budget workbook summary" });
     txMock.action.findFirst.mockResolvedValue({ id: "action-1" });
     txMock.workspaceExternalResource.upsert.mockResolvedValue(resourceFixture());
     txMock.workspaceExternalResourceAttachment.createMany.mockResolvedValue({ count: 1 });
+    txMock.workspaceExternalResourceMention.findMany.mockResolvedValue([]);
+    txMock.workspaceExternalResourceMention.updateMany.mockResolvedValue({ count: 0 });
+    txMock.workspaceExternalResourceMention.upsert.mockResolvedValue({ id: "mention-1" });
     txMock.workflowJob.upsert.mockResolvedValue({ id: "job-1" });
     recordAuditMock.mockResolvedValue({ id: "audit-1" });
   });
 
-  afterEach(() => {
-    vi.unstubAllGlobals();
+  it("classifies Box as a high-priority file reference and generic URLs as normal links", async () => {
+    const { classifyExternalResourceUrl } = await import("./external-resources");
+
+    expect(classifyExternalResourceUrl("https://app.box.com/s/budget?utm_source=slack", "Budget model")).toEqual(expect.objectContaining({
+      providerKey: "box",
+      category: "FILES",
+      priority: 100,
+      title: "Budget model",
+      url: "https://app.box.com/s/budget",
+    }));
+    expect(classifyExternalResourceUrl("https://example.com/report")).toEqual(expect.objectContaining({
+      providerKey: "generic_url",
+      category: "LINK",
+      priority: 0,
+    }));
   });
 
-  it("resolves a pasted Box shared link, enriches it, and attaches the stable resource to an action", async () => {
-    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
-      id: "file-123",
-      type: "file",
-      name: "Budget.xlsx",
-      description: "Original Box description",
-      extension: "xlsx",
-      etag: "1",
-      modified_at: "2026-06-28T16:55:00Z",
-      owned_by: { login: "owner@example.com" },
-      shared_link: { url: "https://app.box.com/s/budget" },
-      size: 2048,
-    }), { status: 200 }));
-    vi.stubGlobal("fetch", fetchMock);
+  it("extracts Slack markup and bare URLs without duplicates", async () => {
+    const { extractExternalResourceReferencesFromText } = await import("./external-resources");
 
+    const references = extractExternalResourceReferencesFromText(
+      "Open <https://app.box.com/s/budget?utm_source=slack|Budget model> and also https://app.box.com/s/budget.",
+    );
+
+    expect(references).toEqual([expect.objectContaining({
+      url: "https://app.box.com/s/budget",
+      label: "Budget model",
+      sourceText: expect.stringContaining("Budget model"),
+    })]);
+  });
+
+  it("saves a manual reference and attaches it to an action without requiring Box OAuth", async () => {
     const { upsertWorkspaceExternalResourceFromUrl } = await import("./external-resources");
     const result = await upsertWorkspaceExternalResourceFromUrl(actor, {
       workspaceId: "ws-1",
@@ -160,44 +197,28 @@ describe("workspace external resources", () => {
 
     expect(result).toMatchObject({
       id: "resource-1",
-      externalId: "file:file-123",
-      title: "Budget.xlsx",
-      summaryMd: "Budget workbook summary",
+      providerKey: "box",
+      priority: 100,
     });
-    expect(fetchMock).toHaveBeenCalledWith(
-      expect.stringContaining("https://api.box.com/2.0/shared_items?fields="),
-      expect.objectContaining({
-        headers: expect.objectContaining({
-          Authorization: "Bearer box-access-token",
-          boxapi: "shared_link=https://app.box.com/s/budget",
-        }),
-      }),
-    );
-    expect(callBoxExternalMcpReadToolMock).toHaveBeenCalledWith(actor, expect.objectContaining({
-      workspaceId: "ws-1",
-      toolName: "ai_qa_single_file",
-      arguments: expect.objectContaining({
-        file_id: "file-123",
-      }),
-    }));
     expect(txMock.workspaceExternalResource.upsert).toHaveBeenCalledWith(expect.objectContaining({
       where: {
         workspaceId_providerKey_externalId: {
           workspaceId: "ws-1",
           providerKey: "box",
-          externalId: "file:file-123",
+          externalId: expect.stringMatching(/^url:/),
         },
       },
       update: expect.objectContaining({
-        archivedAt: null,
+        category: "FILES",
+        priority: 100,
+        url: "https://app.box.com/s/budget",
         descriptionMd: "Client budget model",
-        summaryMd: "Budget workbook summary",
       }),
       create: expect.objectContaining({
         createdByUserId: "user-1",
         providerKey: "box",
-        externalId: "file:file-123",
-        title: "Budget.xlsx",
+        category: "FILES",
+        priority: 100,
       }),
     }));
     expect(txMock.workspaceExternalResourceAttachment.createMany).toHaveBeenCalledWith({
@@ -211,146 +232,127 @@ describe("workspace external resources", () => {
       }],
       skipDuplicates: true,
     });
-    expect(txMock.workflowJob.upsert).toHaveBeenCalledWith(expect.objectContaining({
-      create: expect.objectContaining({
-        workspaceId: "ws-1",
-        type: "knowledge.sync.external-resource",
-        payload: { resourceId: "resource-1" },
-      }),
-      where: {
-        dedupeKey: expect.stringMatching(/^external-resource:resource-1:knowledge:/),
-      },
-    }));
     expect(recordAuditMock).toHaveBeenCalledWith(
       txMock,
       actor,
       expect.objectContaining({
         action: "external-resource.attached",
-        meta: expect.objectContaining({
-          providerKey: "box",
-          targetType: "Action",
-          targetId: "action-1",
-        }),
+        meta: expect.objectContaining({ providerKey: "box", targetType: "Action" }),
       }),
     );
   });
 
-  it("keeps failed Box AI enrichment from blocking saved references", async () => {
-    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
-      id: "file-123",
-      type: "file",
-      name: "Budget.xlsx",
-      extension: "xlsx",
-      shared_link: { url: "https://app.box.com/s/budget" },
-    }), { status: 200 }));
-    vi.stubGlobal("fetch", fetchMock);
-    callBoxExternalMcpReadToolMock.mockRejectedValueOnce(new Error("Box AI temporarily unavailable."));
-    txMock.workspaceExternalResource.upsert.mockResolvedValue(resourceFixture({
-      descriptionMd: null,
-      summaryMd: null,
-      lastEnrichmentError: "Box AI temporarily unavailable.",
+  it("captures Slack message references as resources plus source mentions", async () => {
+    prismaMock.communicationMessage.findUnique.mockResolvedValueOnce(slackMessage());
+    prismaMock.communicationChannel.findUnique.mockResolvedValueOnce({ kind: "PUBLIC", name: "client-files" });
+    txMock.workspaceExternalResource.upsert
+      .mockResolvedValueOnce(resourceFixture())
+      .mockResolvedValueOnce(resourceFixture({
+        id: "resource-2",
+        providerKey: "generic_url",
+        externalId: "url:generic",
+        category: "LINK",
+        priority: 0,
+        title: "reference",
+        url: "https://example.com/reference",
+        sharedLinkUrl: "https://example.com/reference",
+      }));
+
+    const { captureReferencesForSource } = await import("./external-resources");
+    const result = await captureReferencesForSource("SLACK_MESSAGE", "message-1");
+
+    expect(result).toEqual(expect.objectContaining({
+      scanned: 2,
+      captured: 2,
+      providerCounts: { box: 1, generic_url: 1 },
     }));
-
-    const { upsertWorkspaceExternalResourceFromUrl } = await import("./external-resources");
-    const result = await upsertWorkspaceExternalResourceFromUrl(actor, {
-      workspaceId: "ws-1",
-      url: "https://app.box.com/s/budget",
-    });
-
-    expect(result).toMatchObject({
-      id: "resource-1",
-      summaryMd: null,
-      lastEnrichmentError: "Box AI temporarily unavailable.",
-    });
-    expect(txMock.workspaceExternalResource.upsert).toHaveBeenCalledWith(expect.objectContaining({
-      update: expect.objectContaining({
-        lastEnrichmentError: "Box AI temporarily unavailable.",
-      }),
+    expect(txMock.workspaceExternalResourceMention.upsert).toHaveBeenCalledWith(expect.objectContaining({
       create: expect.objectContaining({
-        lastEnrichmentError: "Box AI temporarily unavailable.",
-      }),
-    }));
-    expect(txMock.workflowJob.upsert).not.toHaveBeenCalled();
-  });
-
-  it("searches saved external resources by summary and metadata fields without reading Box again", async () => {
-    prismaMock.workspaceExternalResource.findMany.mockResolvedValueOnce([resourceFixture()]);
-
-    const { listWorkspaceExternalResources } = await import("./external-resources");
-    const resources = await listWorkspaceExternalResources(actor, {
-      workspaceId: "ws-1",
-      providerKey: "box",
-      query: "budget",
-      take: 250,
-    });
-
-    expect(resources).toHaveLength(1);
-    expect(prismaMock.workspaceExternalResource.findMany).toHaveBeenCalledWith(expect.objectContaining({
-      where: expect.objectContaining({
         workspaceId: "ws-1",
-        archivedAt: null,
-        providerKey: "box",
-        OR: [
-          { title: { contains: "budget", mode: "insensitive" } },
-          { descriptionMd: { contains: "budget", mode: "insensitive" } },
-          { summaryMd: { contains: "budget", mode: "insensitive" } },
-          { url: { contains: "budget", mode: "insensitive" } },
-        ],
+        resourceId: "resource-1",
+        sourceType: "SLACK_MESSAGE",
+        sourceId: "message-1",
+        sourceProvider: "SLACK",
+        sourceExternalId: "1714320000.000100",
+        sourcePermalink: "https://slack.test/archives/C1/p1714320000000100",
+        sourceLabel: "Budget model",
+        communicationMessageId: "message-1",
       }),
-      take: 100,
     }));
-    expect(fetch).not.toHaveBeenCalled();
+    expect(txMock.workflowJob.upsert).toHaveBeenCalledWith(expect.objectContaining({
+      create: expect.objectContaining({
+        type: "knowledge.sync.external-resource",
+        payload: { resourceId: "resource-1" },
+      }),
+    }));
   });
 
-  it("archives saved references and removes only the Corgtex-owned Brain summary chunks", async () => {
-    prismaMock.workspaceExternalResource.findFirst.mockResolvedValueOnce({ id: "resource-1" });
-    txMock.workspaceExternalResource.update.mockResolvedValueOnce(resourceFixture({ archivedAt: new Date("2026-06-28T18:00:00.000Z") }));
-    txMock.knowledgeChunk.deleteMany.mockResolvedValueOnce({ count: 1 });
-
-    const { archiveWorkspaceExternalResource } = await import("./external-resources");
-    const result = await archiveWorkspaceExternalResource(actor, {
-      workspaceId: "ws-1",
+  it("redacts mention text when the source Slack message is deleted", async () => {
+    prismaMock.communicationMessage.findUnique.mockResolvedValueOnce(slackMessage({
+      text: null,
+      textRedactedAt: new Date("2026-06-28T18:00:00.000Z"),
+      isDeleted: true,
+    }));
+    prismaMock.communicationChannel.findUnique.mockResolvedValueOnce({ kind: "PUBLIC", name: "client-files" });
+    txMock.workspaceExternalResourceMention.findMany.mockResolvedValueOnce([{
       resourceId: "resource-1",
-      reason: "Superseded",
-    });
-
-    expect(result).toEqual({ id: "resource-1" });
-    expect(txMock.workspaceExternalResource.update).toHaveBeenCalledWith({
-      where: { id: "resource-1" },
-      data: expect.objectContaining({
-        archivedAt: expect.any(Date),
-        archivedByUserId: "user-1",
-        archiveReason: "Superseded",
-      }),
-    });
-    expect(txMock.knowledgeChunk.deleteMany).toHaveBeenCalledWith({
-      where: {
+      resource: {
+        id: "resource-1",
         workspaceId: "ws-1",
-        sourceType: "EXTERNAL_RESOURCE",
-        sourceId: "resource-1",
+        updatedAt: new Date("2026-06-28T17:00:00.000Z"),
       },
-    });
-    expect(recordAuditMock).toHaveBeenCalledWith(
-      txMock,
-      actor,
-      expect.objectContaining({
-        action: "external-resource.archived",
-        entityId: "resource-1",
+    }]);
+
+    const { captureReferencesForSource } = await import("./external-resources");
+    const result = await captureReferencesForSource("SLACK_MESSAGE", "message-1");
+
+    expect(result).toEqual(expect.objectContaining({ captured: 0, redacted: 1 }));
+    expect(txMock.workspaceExternalResourceMention.updateMany).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        sourceLabel: null,
+        sourceText: null,
+        redactedAt: expect.any(Date),
       }),
-    );
+    }));
+    expect(txMock.workflowJob.upsert).toHaveBeenCalledWith(expect.objectContaining({
+      create: expect.objectContaining({
+        type: "knowledge.sync.external-resource",
+        payload: { resourceId: "resource-1" },
+        dedupeKey: expect.stringContaining("redaction:"),
+      }),
+    }));
   });
 
-  it("rejects non-Box URLs before touching external systems", async () => {
-    const { upsertWorkspaceExternalResourceFromUrl } = await import("./external-resources");
+  it("dry-runs a Slack reference backfill with provider counts and no raw URLs", async () => {
+    prismaMock.communicationChannel.findMany.mockResolvedValueOnce([
+      { installationId: "install-1", externalChannelId: "C1" },
+    ]);
+    prismaMock.communicationMessage.findMany.mockResolvedValueOnce([
+      { id: "message-1", text: "Box <https://app.box.com/s/budget|Budget>", updatedAt: new Date("2026-06-28T17:00:00.000Z") },
+      { id: "message-2", text: "Docs https://docs.google.com/document/d/abc", updatedAt: new Date("2026-06-28T17:10:00.000Z") },
+    ]);
 
-    await expect(upsertWorkspaceExternalResourceFromUrl(actor, {
+    const { backfillExternalResourceReferencesForWorkspace } = await import("./external-resources");
+    const result = await backfillExternalResourceReferencesForWorkspace(actor, {
       workspaceId: "ws-1",
-      url: "https://example.com/not-box",
-    })).rejects.toMatchObject({
-      status: 400,
-      code: "INVALID_INPUT",
+      dryRun: true,
+      take: 100,
     });
-    expect(getExternalMcpConnectionAccessTokenMock).not.toHaveBeenCalled();
-    expect(fetch).not.toHaveBeenCalled();
+
+    expect(result).toEqual({
+      workspaceId: "ws-1",
+      dryRun: true,
+      scannedMessages: 2,
+      candidateMessages: 2,
+      references: 2,
+      providerCounts: { box: 1, google_drive: 1 },
+      enqueued: 0,
+    });
+    expect(prismaMock.communicationMessage.findMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({
+        OR: [{ installationId: "install-1", externalChannelId: "C1" }],
+      }),
+    }));
+    expect(prismaMock.workflowJob.upsert).not.toHaveBeenCalled();
   });
 });

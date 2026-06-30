@@ -55,6 +55,27 @@ type ToolLink = {
   canManage: boolean;
 };
 
+type ExternalResource = {
+  id: string;
+  providerKey: string;
+  externalId: string;
+  resourceType: string;
+  category: string;
+  priority: number;
+  title: string;
+  url: string;
+  sharedLinkUrl: string | null;
+  mimeType: string | null;
+  descriptionMd: string | null;
+  summaryMd: string | null;
+  lastEnrichedAt: string | null;
+  lastEnrichmentError: string | null;
+  archivedAt: string | null;
+  archiveReason: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
 type CatalogRequestStatus = "PENDING" | "APPROVED" | "REJECTED" | "CANCELLED";
 
 type CatalogItem = CatalogItemForUi & {
@@ -260,6 +281,7 @@ export function ToolsDirectoryClient({
   initialView,
   initialType,
   initialQuery,
+  initialExternalResources,
 }: {
   workspaceId: string;
   initialLinks: ToolLink[];
@@ -270,12 +292,14 @@ export function ToolsDirectoryClient({
   initialView: "list" | "grid";
   initialType: CatalogItemType | "ALL";
   initialQuery: string;
+  initialExternalResources: ExternalResource[];
 }) {
   const router = useRouter();
   const t = useTranslations("tools");
   const [links, setLinks] = useState(initialLinks);
   const [items, setItems] = useState(initialCatalogItems);
   const [requests, setRequests] = useState(initialRequests);
+  const [externalResources] = useState(initialExternalResources);
   const [form, setForm] = useState<FormState>(EMPTY_FORM);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [isFormOpen, setIsFormOpen] = useState(false);
@@ -619,6 +643,31 @@ export function ToolsDirectoryClient({
       >
         {action.label}
       </a>
+    );
+  }
+
+  function renderExternalResourceCard(resource: ExternalResource) {
+    return (
+      <article key={resource.id} className="nr-tool-card">
+        <div className="nr-tool-card-header">
+          <div>
+            <div className="nr-tool-card-badges">
+              <span className={resource.providerKey === "box" ? "tag success" : "tag info"}>{resource.providerKey.replace(/_/g, " ").toUpperCase()}</span>
+              <span className="tag">{displayEnum(resource.category)}</span>
+            </div>
+            <h3>{resource.title}</h3>
+          </div>
+        </div>
+        {(resource.summaryMd || resource.descriptionMd) && (
+          <MarkdownExcerpt markdown={resource.summaryMd ?? resource.descriptionMd ?? ""} />
+        )}
+        <p className="nr-item-meta">
+          {displayEnum(resource.resourceType)} · Updated {displayDate(resource.updatedAt)}
+        </p>
+        <TableActionGroup>
+          <a className="link-button small" href={resource.url} target="_blank" rel="noreferrer">Open</a>
+        </TableActionGroup>
+      </article>
     );
   }
 
@@ -1358,6 +1407,17 @@ export function ToolsDirectoryClient({
             "No recommendations yet.",
             true,
             "Highest-priority setup paths, capped so the page stays realistic.",
+          )}
+          {externalResources.length > 0 && (
+            <section className="stack" style={{ gap: 16 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "baseline" }}>
+                <h2 className="nr-section-header" style={{ margin: 0 }}>Captured references</h2>
+                <span className="nr-item-meta">{externalResources.length} recent</span>
+              </div>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(300px, 1fr))", gap: 16 }}>
+                {externalResources.map((resource) => renderExternalResourceCard(resource))}
+              </div>
+            </section>
           )}
           {renderSection(
             "Available on request",

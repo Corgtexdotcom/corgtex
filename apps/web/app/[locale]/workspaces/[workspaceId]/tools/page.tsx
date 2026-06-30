@@ -1,4 +1,4 @@
-import { listCatalogItems, listCatalogRequests, listCircles, listWorkspaceToolLinks, requireWorkspaceMembership } from "@corgtex/domain";
+import { listCatalogItems, listCatalogRequests, listCircles, listWorkspaceExternalResources, listWorkspaceToolLinks, requireWorkspaceMembership } from "@corgtex/domain";
 import { requirePageActor } from "@/lib/auth";
 import { requireWorkspaceFeature } from "@/lib/workspace-feature-flags";
 import { getTranslations } from "next-intl/server";
@@ -23,11 +23,12 @@ export default async function ToolsPage({
   const selectedView = Array.isArray(view) ? view[0] : view;
   const initialView = selectedView === "grid" ? "grid" : "list";
 
-  const [toolLinks, circles, catalog, catalogRequests] = await Promise.all([
+  const [toolLinks, circles, catalog, catalogRequests, externalResources] = await Promise.all([
     listWorkspaceToolLinks(actor, { workspaceId }),
     listCircles(workspaceId),
     listCatalogItems(actor, workspaceId),
     listCatalogRequests(actor, { workspaceId, status: "PENDING" }),
+    listWorkspaceExternalResources(actor, { workspaceId, take: 8 }),
   ]);
 
   return (
@@ -85,6 +86,13 @@ export default async function ToolsPage({
         circles={circles.map((circle) => ({
           id: circle.id,
           name: circle.name,
+        }))}
+        initialExternalResources={externalResources.map((resource) => ({
+          ...resource,
+          createdAt: resource.createdAt.toISOString(),
+          updatedAt: resource.updatedAt.toISOString(),
+          archivedAt: resource.archivedAt?.toISOString() ?? null,
+          lastEnrichedAt: resource.lastEnrichedAt?.toISOString() ?? null,
         }))}
       />
     </>

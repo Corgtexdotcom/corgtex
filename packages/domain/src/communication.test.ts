@@ -502,6 +502,12 @@ describe("communication Slack integration", () => {
     }));
     expect(prismaMock.workflowJob.upsert).toHaveBeenCalledWith(expect.objectContaining({
       create: expect.objectContaining({
+        type: "external-resource.capture-source",
+        payload: { sourceType: "SLACK_MESSAGE", sourceId: "message-1" },
+      }),
+    }));
+    expect(prismaMock.workflowJob.upsert).toHaveBeenCalledWith(expect.objectContaining({
+      create: expect.objectContaining({
         type: "communication.slack.context-summary",
         payload: expect.objectContaining({
           installationId: "install-1",
@@ -566,6 +572,12 @@ describe("communication Slack integration", () => {
     });
     expect(prismaMock.workflowJob.upsert).not.toHaveBeenCalledWith(expect.objectContaining({
       create: expect.objectContaining({ type: "knowledge.sync.slack-message" }),
+    }));
+    expect(prismaMock.workflowJob.upsert).toHaveBeenCalledWith(expect.objectContaining({
+      create: expect.objectContaining({
+        type: "external-resource.capture-source",
+        payload: { sourceType: "SLACK_MESSAGE", sourceId: "message-1" },
+      }),
     }));
     expect(prismaMock.workflowJob.upsert).toHaveBeenCalledWith(expect.objectContaining({
       create: expect.objectContaining({

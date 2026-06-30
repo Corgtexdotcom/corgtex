@@ -4,6 +4,7 @@ const {
   fetchCalendarEventsMock,
   fetchFilteredEmailMessagesMock,
   fetchSelectedDocumentsMock,
+  externalResourceKnowledgeInputMock,
   materializeCrmCalendarTouchpointsMock,
   materializeCrmEmailTouchpointsMock,
   prismaMock,
@@ -12,6 +13,7 @@ const {
   fetchCalendarEventsMock: vi.fn(),
   fetchFilteredEmailMessagesMock: vi.fn(),
   fetchSelectedDocumentsMock: vi.fn(),
+  externalResourceKnowledgeInputMock: vi.fn(),
   materializeCrmCalendarTouchpointsMock: vi.fn(),
   materializeCrmEmailTouchpointsMock: vi.fn(),
   prismaMock: {
@@ -48,6 +50,7 @@ vi.mock("@corgtex/domain", () => ({
   fetchCalendarEvents: fetchCalendarEventsMock,
   fetchFilteredEmailMessages: fetchFilteredEmailMessagesMock,
   fetchSelectedDocuments: fetchSelectedDocumentsMock,
+  externalResourceKnowledgeInput: externalResourceKnowledgeInputMock,
   materializeCrmCalendarTouchpoints: materializeCrmCalendarTouchpointsMock,
   materializeCrmEmailTouchpoints: materializeCrmEmailTouchpointsMock,
   syncCalendarEventRecorder: vi.fn(),
@@ -137,6 +140,43 @@ describe("handleSlackMessageKnowledgeSync", () => {
     await handleSlackMessageKnowledgeSync("job-1", { messageId: "message-1" }, "workspace-1");
 
     expect(syncKnowledgeForSourceMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("handleExternalResourceKnowledgeSync", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    externalResourceKnowledgeInputMock.mockResolvedValue({
+      workspaceId: "workspace-1",
+      sourceType: "EXTERNAL_RESOURCE",
+      sourceId: "resource-1",
+      sourceTitle: "Budget model",
+      content: "Budget model\n\nProvider: box",
+      metadata: {
+        providerKey: "box",
+        category: "FILES",
+      },
+    });
+    syncKnowledgeForSourceMock.mockResolvedValue(undefined);
+  });
+
+  it("indexes captured external resources into Brain chunks", async () => {
+    const { handleExternalResourceKnowledgeSync } = await import("./knowledge-sync");
+
+    await handleExternalResourceKnowledgeSync("job-1", { resourceId: "resource-1" }, "workspace-1");
+
+    expect(externalResourceKnowledgeInputMock).toHaveBeenCalledWith("resource-1", "workspace-1");
+    expect(syncKnowledgeForSourceMock).toHaveBeenCalledWith(expect.objectContaining({
+      workspaceId: "workspace-1",
+      sourceType: "EXTERNAL_RESOURCE",
+      sourceId: "resource-1",
+      sourceTitle: "Budget model",
+      metadata: expect.objectContaining({
+        providerKey: "box",
+        workflowJobId: "job-1",
+      }),
+      workflowJobId: "job-1",
+    }));
   });
 });
 

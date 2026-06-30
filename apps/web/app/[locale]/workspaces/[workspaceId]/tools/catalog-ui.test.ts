@@ -121,8 +121,8 @@ describe("Tools catalog UI helpers", () => {
     ]);
 
     expect(sections.liveSetup.map((entry) => entry.id)).toEqual(["slack"]);
-    expect(sections.recommendedSetup.map((entry) => entry.id)).toEqual(["box"]);
-    expect(sections.availableOnRequest.map((entry) => entry.id)).toEqual(["miro"]);
+    expect(sections.recommendedSetup.map((entry) => entry.id)).toEqual([]);
+    expect(sections.availableOnRequest.map((entry) => entry.id)).toEqual(["box", "miro"]);
     expect(sections.appsAndLinks.map((entry) => entry.id)).toEqual(["tool"]);
   });
 
@@ -154,7 +154,7 @@ describe("Tools catalog UI helpers", () => {
     expect(actions.map((action) => action.label)).not.toContain("Budget");
   });
 
-  it("does not offer Connect on pilot-ready external MCP connectors", () => {
+  it("shows request-only status on pilot-ready external MCP connectors", () => {
     const actions = getCatalogCardActions(item({
       id: "box",
       type: "CONNECTOR",
@@ -165,7 +165,7 @@ describe("Tools catalog UI helpers", () => {
     }), { workspaceId: "workspace-1", canManageCatalog: true });
 
     expect(actions).toEqual([
-      { kind: "request", label: "Request setup", requestType: "ACCESS", variant: "primary" },
+      { kind: "status", label: "Request-only connector" },
       { kind: "link", label: "Details", href: "/workspaces/workspace-1/tools/box", variant: "secondary" },
     ]);
   });
