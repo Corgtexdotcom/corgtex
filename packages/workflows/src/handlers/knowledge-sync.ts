@@ -7,6 +7,7 @@ import {
   externalResourceKnowledgeInput,
   materializeCrmCalendarTouchpoints,
   materializeCrmEmailTouchpoints,
+  syncExternalContentSource,
   syncCalendarEventRecorder,
 } from "@corgtex/domain";
 
@@ -139,6 +140,19 @@ export async function handleExternalResourceKnowledgeSync(jobId: string, payload
       workflowJobId: jobId,
     },
     workflowJobId: jobId,
+  });
+}
+
+export async function handleExternalContentKnowledgeSync(jobId: string, payload: { sourceId?: string }, workspaceId: string) {
+  if (!payload.sourceId) {
+    return;
+  }
+
+  await syncExternalContentSource({
+    workspaceId,
+    sourceId: payload.sourceId,
+    workflowJobId: jobId,
+    syncKnowledge: (input) => syncKnowledgeForSource(input),
   });
 }
 

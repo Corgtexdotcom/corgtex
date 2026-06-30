@@ -79,6 +79,7 @@ const EXTERNAL_MCP_PROVIDERS: Record<ExternalMcpProviderKey, ExternalMcpProvider
     fetchToolName: "get_file_details",
     readToolNames: [
       "who_am_i",
+      "get_file_content",
       "get_file_details",
       "get_folder_details",
       "list_folder_content_by_folder_id",
@@ -486,7 +487,7 @@ function externalFetchArgs(provider: ExternalMcpProvider, externalId: string) {
 
 function requireExternalToolAllowed(provider: ExternalMcpProvider, toolName: string, operation: ExternalMcpOperation) {
   if (provider.providerKey !== "box") return;
-  invariant(operation === "read" && provider.readToolNames.includes(toolName), 403, "BOX_WRITE_DISABLED", "Box write and raw content tools are disabled in Corgtex v1.");
+  invariant(operation === "read" && provider.readToolNames.includes(toolName), 403, "BOX_WRITE_DISABLED", "Box write tools are disabled in Corgtex v1.");
 }
 
 async function auditExternalMcpCall(actor: AppActor, params: {
@@ -731,6 +732,50 @@ export async function callBoxExternalMcpReadTool(actor: AppActor, params: {
     workspaceId: params.workspaceId,
     providerKey: "box",
   });
+  try {
+    const remote = await callExternalMcpTool(connection, params.toolName, params.arguments);
+    const payload = extractMcpPayload(remote);
+    await auditExternalMcpCall(actor, {
+      workspaceId: params.workspaceId,
+      connection,
+      toolName: params.toolName,
+      policyClass: "read",
+      input: params.arguments,
+      result: payload,
+    });
+    return payload;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Box MCP read failed.";
+    await auditExternalMcpCall(actor, {
+      workspaceId: params.workspaceId,
+      connection,
+      toolName: params.toolName,
+      policyClass: "read",
+      input: params.arguments,
+      error: message,
+    });
+    throw error;
+  }
+}
+
+export async function callBoxExternalMcpReadToolForConnection(actor: AppActor, params: {
+  workspaceId: string;
+  connectionId: string;
+  toolName: string;
+  arguments: Record<string, unknown>;
+}) {
+  await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
+  const provider = providerForKey("box");
+  requireExternalToolAllowed(provider, params.toolName, "read");
+  const connection = await prisma.externalMcpConnection.findFirst({
+    where: {
+      id: params.connectionId,
+      workspaceId: params.workspaceId,
+      providerKey: "box",
+      status: "ACTIVE",
+    },
+  }) as ExternalMcpConnectionRecord | null;
+  invariant(connection?.accessTokenEnc, 404, "NOT_CONNECTED", "Box is not connected for the selected source.");
   try {
     const remote = await callExternalMcpTool(connection, params.toolName, params.arguments);
     const payload = extractMcpPayload(remote);

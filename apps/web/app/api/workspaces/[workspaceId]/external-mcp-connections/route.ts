@@ -10,9 +10,13 @@ import { withWorkspaceRoute } from "@/lib/route-handler";
 export const dynamic = "force-dynamic";
 
 const connectionSchema = z.object({
-  providerKey: z.literal("notion"),
+  providerKey: z.enum(["box", "notion"]),
   accessToken: z.string().min(1),
   refreshToken: z.string().optional().nullable(),
+  expiresAt: z.string().datetime().optional().nullable(),
+  expiresIn: z.number().int().positive().optional().nullable(),
+  providerAccountId: z.string().optional().nullable(),
+  providerEmail: z.string().email().optional().nullable(),
   scopes: z.array(z.string()).optional(),
   capabilities: z.record(z.string(), z.unknown()).optional(),
 });
@@ -29,6 +33,10 @@ export const POST = withWorkspaceRoute(async (request, { actor, workspaceId }) =
     providerKey: parsed.providerKey,
     accessToken: parsed.accessToken,
     refreshToken: parsed.refreshToken,
+    expiresAt: parsed.expiresAt ? new Date(parsed.expiresAt) : null,
+    expiresIn: parsed.expiresIn,
+    providerAccountId: parsed.providerAccountId,
+    providerEmail: parsed.providerEmail,
     scopes: parsed.scopes,
     capabilities: parsed.capabilities,
   });

@@ -8,6 +8,7 @@ const {
   materializeCrmCalendarTouchpointsMock,
   materializeCrmEmailTouchpointsMock,
   prismaMock,
+  syncExternalContentSourceMock,
   syncKnowledgeForSourceMock,
 } = vi.hoisted(() => ({
   fetchCalendarEventsMock: vi.fn(),
@@ -16,6 +17,7 @@ const {
   externalResourceKnowledgeInputMock: vi.fn(),
   materializeCrmCalendarTouchpointsMock: vi.fn(),
   materializeCrmEmailTouchpointsMock: vi.fn(),
+  syncExternalContentSourceMock: vi.fn(),
   prismaMock: {
     communicationMessage: {
       findUnique: vi.fn(),
@@ -53,6 +55,7 @@ vi.mock("@corgtex/domain", () => ({
   externalResourceKnowledgeInput: externalResourceKnowledgeInputMock,
   materializeCrmCalendarTouchpoints: materializeCrmCalendarTouchpointsMock,
   materializeCrmEmailTouchpoints: materializeCrmEmailTouchpointsMock,
+  syncExternalContentSource: syncExternalContentSourceMock,
   syncCalendarEventRecorder: vi.fn(),
 }));
 
@@ -175,6 +178,47 @@ describe("handleExternalResourceKnowledgeSync", () => {
         providerKey: "box",
         workflowJobId: "job-1",
       }),
+      workflowJobId: "job-1",
+    }));
+  });
+});
+
+describe("handleExternalContentKnowledgeSync", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    syncExternalContentSourceMock.mockResolvedValue({
+      status: "SYNCED",
+      chunksCreated: 2,
+      brainSourceId: "brain-source-1",
+    });
+  });
+
+  it("delegates selected external content sync through the domain source state machine", async () => {
+    const { handleExternalContentKnowledgeSync } = await import("./knowledge-sync");
+
+    await handleExternalContentKnowledgeSync("job-1", { sourceId: "source-1" }, "workspace-1");
+
+    expect(syncExternalContentSourceMock).toHaveBeenCalledWith({
+      workspaceId: "workspace-1",
+      sourceId: "source-1",
+      workflowJobId: "job-1",
+      syncKnowledge: expect.any(Function),
+    });
+    const syncKnowledge = syncExternalContentSourceMock.mock.calls[0][0].syncKnowledge;
+    await syncKnowledge({
+      workspaceId: "workspace-1",
+      sourceType: "EXTERNAL_CONTENT",
+      sourceId: "source-1",
+      sourceTitle: "Box source",
+      content: "Box source content",
+      metadata: { providerKey: "box" },
+      workflowJobId: "job-1",
+    });
+    expect(syncKnowledgeForSourceMock).toHaveBeenCalledWith(expect.objectContaining({
+      workspaceId: "workspace-1",
+      sourceType: "EXTERNAL_CONTENT",
+      sourceId: "source-1",
+      sourceTitle: "Box source",
       workflowJobId: "job-1",
     }));
   });

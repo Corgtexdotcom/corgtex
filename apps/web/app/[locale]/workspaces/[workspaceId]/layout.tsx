@@ -37,7 +37,7 @@ async function hasWorkspaceInitialKnowledge(workspaceId: string) {
       where: {
         workspaceId,
         archivedAt: null,
-        sourceType: { in: ["FILE_UPLOAD", "DOC", "ARTICLE", "MEETING"] },
+        sourceType: { in: ["FILE_UPLOAD", "DOC", "ARTICLE", "MEETING", "EXTERNAL_CONTENT"] },
       },
     }),
     prisma.meeting.count({

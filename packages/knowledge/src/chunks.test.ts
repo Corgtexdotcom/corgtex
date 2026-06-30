@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { getWorkspaceIndexingHealth, reindexWorkspace, syncKnowledgeForSource, syncBrainArticleKnowledge } from "./chunks";
 import { prisma } from "@corgtex/shared";
+import { defaultModelGateway } from "@corgtex/models";
 
 vi.mock("@corgtex/shared", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@corgtex/shared")>();
@@ -20,7 +21,7 @@ vi.mock("@corgtex/shared", async (importOriginal) => {
 
 vi.mock("@corgtex/models", () => ({
   defaultModelGateway: {
-    embed: vi.fn().mockResolvedValue({ embeddings: [[1, 0]], usage: { model: "fake-embed" } }),
+    embed: vi.fn().mockResolvedValue({ embeddings: [[1, 0]], usage: { provider: "test", model: "fake-embed" } }),
   },
   resolveModel: vi.fn().mockReturnValue("fake-model"),
 }));
@@ -92,6 +93,28 @@ describe("Workspace Indexing Health", () => {
     expect(health.unchunkedArticles).toHaveLength(1);
     expect(health.recentErrors).toHaveLength(1);
     expect(health.recentErrors[0]).toContain("OpenAI error");
+  });
+});
+
+describe("syncKnowledgeForSource", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(defaultModelGateway.embed).mockResolvedValue({ embeddings: [[1, 0]], usage: { provider: "test", model: "fake-embed" } });
+  });
+
+  it("does not delete prior chunks when embedding fails", async () => {
+    vi.mocked(defaultModelGateway.embed).mockRejectedValueOnce(new Error("embedding unavailable"));
+
+    await expect(syncKnowledgeForSource({
+      workspaceId: "ws_1",
+      sourceType: "EXTERNAL_CONTENT",
+      sourceId: "source-1",
+      sourceTitle: "Box source",
+      content: "Box source content",
+    })).rejects.toThrow("embedding unavailable");
+
+    expect(prisma.knowledgeChunk.deleteMany).not.toHaveBeenCalled();
+    expect(prisma.knowledgeChunk.createMany).not.toHaveBeenCalled();
   });
 });
 

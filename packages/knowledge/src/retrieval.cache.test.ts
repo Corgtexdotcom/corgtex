@@ -1,40 +1,45 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const { prismaMock, modelGatewayMock } = vi.hoisted(() => ({
-  prismaMock: {
-    knowledgeChunk: {
-      findMany: vi.fn(),
-      deleteMany: vi.fn(),
-      createMany: vi.fn(),
+const { prismaMock, modelGatewayMock } = vi.hoisted(() => {
+  const knowledgeChunkMock = {
+    findMany: vi.fn(),
+    deleteMany: vi.fn(),
+    createMany: vi.fn(),
+  };
+  return {
+    prismaMock: {
+      $transaction: vi.fn(async (callback: (tx: unknown) => Promise<unknown>) => callback({ knowledgeChunk: knowledgeChunkMock })),
+      knowledgeChunk: knowledgeChunkMock,
     },
-  },
-  modelGatewayMock: {
-    embed: vi.fn(async ({ input }: { input: string | string[] }) => {
-      const values = Array.isArray(input) ? input : [input];
-      return {
-        embeddings: values.map(() => [1, 0]),
+    modelGatewayMock: {
+      embed: vi.fn(async ({ input }: { input: string | string[] }) => {
+        const values = Array.isArray(input) ? input : [input];
+        return {
+          embeddings: values.map(() => [1, 0]),
+          usage: {
+            provider: "test",
+            model: "fake-embed",
+          },
+        };
+      }),
+      rerank: vi.fn(async ({ documents, topK }: { documents: string[]; topK: number }) => ({
+        results: documents.slice(0, topK).map((_, index) => ({
+          index,
+          score: 0.9 - (index * 0.1),
+        })),
         usage: {
-          model: "fake-embed",
+          model: "fake-rerank",
         },
-      };
-    }),
-    rerank: vi.fn(async ({ documents, topK }: { documents: string[]; topK: number }) => ({
-      results: documents.slice(0, topK).map((_, index) => ({
-        index,
-        score: 0.9 - (index * 0.1),
       })),
-      usage: {
-        model: "fake-rerank",
-      },
-    })),
-    chat: vi.fn(async () => ({
-      content: "Grounded answer",
-      usage: {
-        model: "fake-chat",
-      },
-    })),
-  },
-}));
+      chat: vi.fn(async () => ({
+        content: "Grounded answer",
+        usage: {
+          model: "fake-chat",
+        },
+      })),
+    },
+  };
+});
 
 vi.mock("@corgtex/shared", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@corgtex/shared")>();

@@ -81,17 +81,18 @@ export async function syncKnowledgeForSource(params: {
   workflowJobId?: string;
   agentRunId?: string;
 }) {
-  await prisma.knowledgeChunk.deleteMany({
-    where: {
-      workspaceId: params.workspaceId,
-      sourceType: params.sourceType,
-      sourceId: params.sourceId,
-    },
-  });
-  await invalidateKnowledgeCache(params.workspaceId);
-
   const chunks = chunkText(params.content);
   if (chunks.length === 0) {
+    await prisma.$transaction(async (tx) => {
+      await tx.knowledgeChunk.deleteMany({
+        where: {
+          workspaceId: params.workspaceId,
+          sourceType: params.sourceType,
+          sourceId: params.sourceId,
+        },
+      });
+    });
+    await invalidateKnowledgeCache(params.workspaceId);
     return 0;
   }
 
@@ -102,28 +103,37 @@ export async function syncKnowledgeForSource(params: {
     input: chunks,
   });
 
-  await prisma.knowledgeChunk.createMany({
-    data: chunks.map((content, index) => {
-      const sensitivity = classifyChunkSensitivity(content);
-      return {
+  const data = chunks.map((content, index) => {
+    const sensitivity = classifyChunkSensitivity(content);
+    return {
+      workspaceId: params.workspaceId,
+      sourceType: params.sourceType,
+      sourceId: params.sourceId,
+      sourceTitle: params.sourceTitle?.trim() || null,
+      chunkIndex: index,
+      content,
+      embedding: embeddingResponse.embeddings[index] ?? null,
+      metadata: {
+        ...(params.metadata ?? {}),
+        chunkIndex: index,
+        sourceType: params.sourceType,
+        sensitivityPatterns: sensitivity.matchedPatterns,
+      },
+      tokenCount: content.length,
+      embeddingModel: embeddingResponse.usage.model,
+      sensitivity: sensitivity.label,
+    };
+  });
+
+  await prisma.$transaction(async (tx) => {
+    await tx.knowledgeChunk.deleteMany({
+      where: {
         workspaceId: params.workspaceId,
         sourceType: params.sourceType,
         sourceId: params.sourceId,
-        sourceTitle: params.sourceTitle?.trim() || null,
-        chunkIndex: index,
-        content,
-        embedding: embeddingResponse.embeddings[index] ?? null,
-        metadata: {
-          ...(params.metadata ?? {}),
-          chunkIndex: index,
-          sourceType: params.sourceType,
-          sensitivityPatterns: sensitivity.matchedPatterns,
-        },
-        tokenCount: content.length,
-        embeddingModel: embeddingResponse.usage.model,
-        sensitivity: sensitivity.label,
-      };
-    }),
+      },
+    });
+    await tx.knowledgeChunk.createMany({ data });
   });
 
   await invalidateKnowledgeCache(params.workspaceId);

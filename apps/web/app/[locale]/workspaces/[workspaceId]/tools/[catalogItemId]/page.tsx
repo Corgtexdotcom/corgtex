@@ -8,6 +8,7 @@ import {
   listAiWorkspaceToolProviders,
   listCommunicationInstallations,
   listDocuments,
+  listExternalContentSources,
   listExternalMcpConnections,
   listInboundWebhooks,
   listMeetingTranscriptSourceState,
@@ -34,6 +35,7 @@ import {
   integrationStatusMessage,
 } from "../ConnectorSetupPanels";
 import { requestManagedEnterpriseServiceAction } from "../../actions";
+import { selectBoxExternalContentSourceAction, syncBoxExternalContentSourceAction } from "../actions";
 
 export const dynamic = "force-dynamic";
 
@@ -54,6 +56,18 @@ function displayEnum(value: string | null | undefined) {
   return value ? value.replace(/_/g, " ").toLowerCase().replace(/\b\w/g, (letter) => letter.toUpperCase()) : "Not set";
 }
 
+function displayDateTime(value: Date | string | null | undefined) {
+  if (!value) return "Not synced";
+  const date = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(date.getTime())) return "Not synced";
+  return date.toLocaleString(undefined, {
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  });
+}
+
 function capabilityKeys(value: unknown) {
   return Array.isArray(value)
     ? value.map((entry) => {
@@ -65,10 +79,11 @@ function capabilityKeys(value: unknown) {
     : [];
 }
 
-function ExternalConnectorReadinessPanel({ item, workspaceId, connection, message }: {
+function ExternalConnectorReadinessPanel({ item, workspaceId, connection, sources = [], message }: {
   item: any;
   workspaceId: string;
   connection?: Awaited<ReturnType<typeof listExternalMcpConnections>>[number] | null;
+  sources?: Awaited<ReturnType<typeof listExternalContentSources>>;
   message?: string | null;
 }) {
   const readiness = connectorReadinessForItem(item);
@@ -76,7 +91,9 @@ function ExternalConnectorReadinessPanel({ item, workspaceId, connection, messag
   const isBox = readiness.key === "box";
   const boxConfigured = Boolean(process.env.BOX_CLIENT_ID && process.env.BOX_CLIENT_SECRET);
   const connected = connection?.status === "connected";
+  const connectionId = connection?.connectionId ?? "";
   const returnTo = `/workspaces/${workspaceId}/tools/${item.id}`;
+  const fieldStyle = { minWidth: 0, width: "100%" };
 
   return (
     <section className="nr-item stack" style={{ gap: 12, padding: 18 }}>
@@ -139,8 +156,112 @@ function ExternalConnectorReadinessPanel({ item, workspaceId, connection, messag
       )}
       {isBox && (
         <p className="nr-item-meta" style={{ margin: 0 }}>
-          Box remains the editing surface. Corgtex stores file references, summaries, and work-item links; Box write operations stay disabled.
+          Box remains the editing surface. Corgtex stores selected read-only snapshots, summaries, and citations for reliability; Box write operations stay disabled.
         </p>
+      )}
+      {isBox && connected && (
+        <div className="stack" style={{ borderTop: "1px solid var(--line)", paddingTop: 14, gap: 12 }}>
+          <div className="row">
+            <strong className="nr-item-title">Selected Box sources</strong>
+            <span className="nr-item-meta">{sources.length} selected</span>
+          </div>
+          {sources.length === 0 ? (
+            <p className="nr-item-meta" style={{ margin: 0 }}>
+              No Box sources selected for Corgtex sync.
+            </p>
+          ) : (
+            <div className="stack" style={{ gap: 10 }}>
+              {sources.map((source) => {
+                const latestLog = source.syncLogs[0];
+                const statusClass = source.status === "ACTIVE"
+                  ? "success"
+                  : source.status === "ERROR"
+                    ? "error"
+                    : "info";
+                return (
+                  <div key={source.id} className="stack" style={{ borderTop: "1px solid var(--line)", paddingTop: 10, gap: 8 }}>
+                    <div className="row">
+                      <div>
+                        <strong>{source.title}</strong>
+                        <p className="nr-item-meta" style={{ margin: "4px 0 0", wordBreak: "break-word" }}>
+                          {displayEnum(source.sourceKind)} · {source.externalId}
+                        </p>
+                      </div>
+                      <span className={`tag ${statusClass}`}>{displayEnum(source.status)}</span>
+                    </div>
+                    <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))", gap: 8 }}>
+                      <p className="nr-item-meta" style={{ margin: 0 }} suppressHydrationWarning>
+                        <strong style={{ color: "var(--text)" }}>Last sync</strong><br />
+                        {displayDateTime(source.lastSyncedAt)}
+                      </p>
+                      <p className="nr-item-meta" style={{ margin: 0 }}>
+                        <strong style={{ color: "var(--text)" }}>Remote version</strong><br />
+                        {source.lastRemoteVersion ?? latestLog?.remoteVersion ?? "Not captured"}
+                      </p>
+                      <p className="nr-item-meta" style={{ margin: 0 }}>
+                        <strong style={{ color: "var(--text)" }}>Chunks</strong><br />
+                        {latestLog?.chunksCreated ?? 0}
+                      </p>
+                    </div>
+                    {source.lastSyncError && (
+                      <p className="form-message form-message-error" style={{ margin: 0 }}>
+                        {source.lastSyncError}
+                      </p>
+                    )}
+                    <div className="actions-inline">
+                      <form action={syncBoxExternalContentSourceAction}>
+                        <input type="hidden" name="workspaceId" value={workspaceId} />
+                        <input type="hidden" name="catalogItemId" value={item.id} />
+                        <input type="hidden" name="sourceId" value={source.id} />
+                        <button type="submit" className="button secondary small">
+                          Sync now
+                        </button>
+                      </form>
+                      {source.externalUrl && (
+                        <a href={source.externalUrl} target="_blank" rel="noreferrer" className="button secondary small">
+                          Open in Box
+                        </a>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+          <form action={selectBoxExternalContentSourceAction} className="stack" style={{ borderTop: "1px solid var(--line)", paddingTop: 12, gap: 10 }}>
+            <input type="hidden" name="workspaceId" value={workspaceId} />
+            <input type="hidden" name="catalogItemId" value={item.id} />
+            <input type="hidden" name="connectionId" value={connectionId} />
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 10 }}>
+              <label className="stack" style={{ gap: 4 }}>
+                <span className="nr-item-meta">Source</span>
+                <select name="sourceKind" defaultValue="HUB" style={fieldStyle}>
+                  <option value="HUB">Hub</option>
+                  <option value="FOLDER">Folder</option>
+                  <option value="FILE">File</option>
+                </select>
+              </label>
+              <label className="stack" style={{ gap: 4 }}>
+                <span className="nr-item-meta">Box ID</span>
+                <input name="externalId" required placeholder="123456789" style={fieldStyle} />
+              </label>
+              <label className="stack" style={{ gap: 4 }}>
+                <span className="nr-item-meta">Title</span>
+                <input name="title" placeholder="Client knowledge hub" style={fieldStyle} />
+              </label>
+            </div>
+            <label className="stack" style={{ gap: 4 }}>
+              <span className="nr-item-meta">Box URL</span>
+              <input name="externalUrl" placeholder="https://app.box.com/..." style={fieldStyle} />
+            </label>
+            <div className="actions-inline">
+              <button type="submit" className="button secondary small">
+                Add selected source
+              </button>
+              <span className="nr-item-meta">Selected sources sync snapshots only; Corgtex does not crawl all Box content.</span>
+            </div>
+          </form>
+        </div>
       )}
     </section>
   );
@@ -226,10 +347,16 @@ export default async function CatalogItemPage({
   } else if (item.sourceType === "MCP_CONNECTOR" && item.sourceId === "corgtex-mcp") {
     setupPanel = <CorgtexMcpConnectorPanel connectorUrl={connectorUrl} />;
   } else if (item.sourceType === "MCP_CONNECTOR") {
-    const connection = actor.kind === "user"
-      ? (await listExternalMcpConnections(actor, workspaceId).catch(() => [])).find((entry) => entry.providerKey === item.sourceId) ?? null
-      : null;
-    setupPanel = <ExternalConnectorReadinessPanel item={item} workspaceId={workspaceId} connection={connection} message={integrationMessage} />;
+    let connections: Awaited<ReturnType<typeof listExternalMcpConnections>> = [];
+    let sources: Awaited<ReturnType<typeof listExternalContentSources>> = [];
+    if (actor.kind === "user") {
+      [connections, sources] = await Promise.all([
+        listExternalMcpConnections(actor, workspaceId).catch(() => []),
+        item.sourceId === "box" ? listExternalContentSources(actor, { workspaceId, providerKey: "box" }).catch(() => []) : Promise.resolve([]),
+      ]);
+    }
+    const connection = connections.find((entry) => entry.providerKey === item.sourceId) ?? null;
+    setupPanel = <ExternalConnectorReadinessPanel item={item} workspaceId={workspaceId} connection={connection} sources={sources} message={integrationMessage} />;
   } else if (item.sourceType === "MEETING_RECORDER") {
     const transcriptSourcesEnabled = featureFlags.MEETING_TRANSCRIPT_SOURCES || featureFlags.MEETING_RECORDERS;
     const [recorderConfig, transcriptSources] = transcriptSourcesEnabled
