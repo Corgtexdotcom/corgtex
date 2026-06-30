@@ -33,6 +33,7 @@ const {
     prismaMock: {
       $transaction: vi.fn(),
       communicationChannel: { findMany: vi.fn(), findUnique: vi.fn() },
+      communicationExternalUser: { findMany: vi.fn() },
       communicationMessage: {
         findMany: vi.fn(),
         findUnique: vi.fn(),
@@ -150,6 +151,8 @@ describe("workspace external resources", () => {
     txMock.workspaceExternalResourceMention.updateMany.mockResolvedValue({ count: 0 });
     txMock.workspaceExternalResourceMention.upsert.mockResolvedValue({ id: "mention-1" });
     txMock.workflowJob.upsert.mockResolvedValue({ id: "job-1" });
+    prismaMock.communicationExternalUser.findMany.mockResolvedValue([]);
+    prismaMock.communicationChannel.findMany.mockResolvedValue([]);
     recordAuditMock.mockResolvedValue({ id: "audit-1" });
   });
 
@@ -284,6 +287,63 @@ describe("workspace external resources", () => {
         type: "knowledge.sync.external-resource",
         payload: { resourceId: "resource-1" },
       }),
+    }));
+  });
+
+  it("lists captured resources with source owner and channel context", async () => {
+    prismaMock.workspaceExternalResource.findMany.mockResolvedValueOnce([resourceFixture({
+      createdBy: { id: "user-1", email: "user@example.com", displayName: "User" },
+      mentions: [{
+        id: "mention-1",
+        sourceType: "SLACK_MESSAGE",
+        sourceProvider: "SLACK",
+        sourceExternalId: "1714320000.000100",
+        sourcePermalink: "https://slack.test/archives/C1/p1714320000000100",
+        sourceLabel: "Budget model",
+        sourceText: "Budget model shared for the client proposal.",
+        mentionedAt: new Date("2026-06-28T17:00:00.000Z"),
+        redactedAt: null,
+        createdAt: new Date("2026-06-28T17:00:01.000Z"),
+        communicationMessage: {
+          installationId: "install-1",
+          provider: "SLACK",
+          externalUserId: "U1",
+          externalChannelId: "C1",
+          messageTs: new Date("2026-06-28T17:00:00.000Z"),
+        },
+      }],
+    })]);
+    prismaMock.communicationExternalUser.findMany.mockResolvedValueOnce([{
+      installationId: "install-1",
+      externalUserId: "U1",
+      email: "nina@example.com",
+      displayName: "Nina",
+    }]);
+    prismaMock.communicationChannel.findMany.mockResolvedValueOnce([{
+      installationId: "install-1",
+      externalChannelId: "C1",
+      name: "client-files",
+    }]);
+
+    const { listWorkspaceExternalResources } = await import("./external-resources");
+    const result = await listWorkspaceExternalResources(actor, {
+      workspaceId: "ws-1",
+      take: 20,
+    });
+
+    expect(result[0]).toEqual(expect.objectContaining({
+      id: "resource-1",
+      createdBy: { id: "user-1", email: "user@example.com", displayName: "User" },
+      mentions: [expect.objectContaining({
+        id: "mention-1",
+        sharedByName: "Nina",
+        sourceChannelName: "client-files",
+        sourceChannelExternalId: "C1",
+      })],
+    }));
+    expect(result[0].mentions[0]).not.toHaveProperty("communicationMessage");
+    expect(prismaMock.workspaceExternalResource.findMany).toHaveBeenCalledWith(expect.objectContaining({
+      take: 20,
     }));
   });
 

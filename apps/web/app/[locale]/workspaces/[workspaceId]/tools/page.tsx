@@ -2,7 +2,7 @@ import { listCatalogItems, listCatalogRequests, listCircles, listWorkspaceExtern
 import { requirePageActor } from "@/lib/auth";
 import { requireWorkspaceFeature } from "@/lib/workspace-feature-flags";
 import { getTranslations } from "next-intl/server";
-import { normalizeCatalogQuery, normalizeCatalogType, type CatalogSearchParamValue } from "./catalog-ui";
+import { normalizeCatalogQuery, normalizeCatalogType, normalizeToolsSurface, type CatalogSearchParamValue } from "./catalog-ui";
 import { ToolsDirectoryClient } from "./ToolsDirectoryClient";
 
 export const dynamic = "force-dynamic";
@@ -12,10 +12,10 @@ export default async function ToolsPage({
   searchParams,
 }: {
   params: Promise<{ workspaceId: string }>;
-  searchParams: Promise<{ view?: CatalogSearchParamValue; type?: CatalogSearchParamValue; q?: CatalogSearchParamValue }>;
+  searchParams: Promise<{ view?: CatalogSearchParamValue; surface?: CatalogSearchParamValue; type?: CatalogSearchParamValue; q?: CatalogSearchParamValue }>;
 }) {
   const { workspaceId } = await params;
-  const { view, type, q } = await searchParams;
+  const { view, surface, type, q } = await searchParams;
   const actor = await requirePageActor();
   await requireWorkspaceMembership({ actor, workspaceId });
   await requireWorkspaceFeature(workspaceId, "TOOL_LINKS");
@@ -28,7 +28,7 @@ export default async function ToolsPage({
     listCircles(workspaceId),
     listCatalogItems(actor, workspaceId),
     listCatalogRequests(actor, { workspaceId, status: "PENDING" }),
-    listWorkspaceExternalResources(actor, { workspaceId, take: 8 }),
+    listWorkspaceExternalResources(actor, { workspaceId, take: 100 }),
   ]);
 
   return (
@@ -63,6 +63,7 @@ export default async function ToolsPage({
       <ToolsDirectoryClient
         workspaceId={workspaceId}
         initialView={initialView}
+        initialSurface={normalizeToolsSurface(surface)}
         initialType={normalizeCatalogType(type)}
         initialQuery={normalizeCatalogQuery(q)}
         initialCatalogItems={catalog.items.map((item) => ({
@@ -93,6 +94,12 @@ export default async function ToolsPage({
           updatedAt: resource.updatedAt.toISOString(),
           archivedAt: resource.archivedAt?.toISOString() ?? null,
           lastEnrichedAt: resource.lastEnrichedAt?.toISOString() ?? null,
+          mentions: resource.mentions.map((mention) => ({
+            ...mention,
+            mentionedAt: mention.mentionedAt?.toISOString() ?? null,
+            redactedAt: mention.redactedAt?.toISOString() ?? null,
+            createdAt: mention.createdAt.toISOString(),
+          })),
         }))}
       />
     </>
