@@ -71,6 +71,45 @@ const externalResourceSelect = {
   updatedAt: true,
 } satisfies Prisma.WorkspaceExternalResourceSelect;
 
+const externalResourceMentionListSelect = {
+  id: true,
+  sourceType: true,
+  sourceProvider: true,
+  sourceExternalId: true,
+  sourcePermalink: true,
+  sourceLabel: true,
+  sourceText: true,
+  mentionedAt: true,
+  redactedAt: true,
+  createdAt: true,
+  communicationMessage: {
+    select: {
+      installationId: true,
+      provider: true,
+      externalUserId: true,
+      externalChannelId: true,
+      messageTs: true,
+    },
+  },
+} satisfies Prisma.WorkspaceExternalResourceMentionSelect;
+
+const externalResourceListSelect = {
+  ...externalResourceSelect,
+  createdBy: {
+    select: {
+      id: true,
+      email: true,
+      displayName: true,
+    },
+  },
+  mentions: {
+    where: { redactedAt: null },
+    orderBy: [{ mentionedAt: "desc" as const }, { createdAt: "desc" as const }],
+    take: 5,
+    select: externalResourceMentionListSelect,
+  },
+} satisfies Prisma.WorkspaceExternalResourceSelect;
+
 const externalResourceAttachmentSelect = {
   id: true,
   workspaceId: true,
@@ -84,6 +123,7 @@ const externalResourceAttachmentSelect = {
 } satisfies Prisma.WorkspaceExternalResourceAttachmentSelect;
 
 type ExternalResourceRecord = Prisma.WorkspaceExternalResourceGetPayload<{ select: typeof externalResourceSelect }>;
+type ExternalResourceListRecord = Prisma.WorkspaceExternalResourceGetPayload<{ select: typeof externalResourceListSelect }>;
 type ExternalResourceKnowledgeRecord = ExternalResourceRecord & {
   mentions?: Array<{
     sourceType: string;
@@ -117,6 +157,14 @@ function cleanText(value?: string | null, maxLength = 4000) {
 
 function hashValue(value: string) {
   return createHash("sha256").update(value).digest("hex").slice(0, 32);
+}
+
+function communicationUserKey(installationId: string, externalUserId: string) {
+  return `${installationId}:${externalUserId}`;
+}
+
+function communicationChannelKey(installationId: string, externalChannelId: string) {
+  return `${installationId}:${externalChannelId}`;
 }
 
 function fallbackExternalId(url: string) {
@@ -861,7 +909,7 @@ export async function listWorkspaceExternalResources(actor: AppActor, params: {
 }) {
   await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
   const query = params.query?.trim();
-  return prisma.workspaceExternalResource.findMany({
+  const resources = await prisma.workspaceExternalResource.findMany({
     where: {
       workspaceId: params.workspaceId,
       archivedAt: null,
@@ -872,13 +920,97 @@ export async function listWorkspaceExternalResources(actor: AppActor, params: {
           { descriptionMd: { contains: query, mode: "insensitive" } },
           { summaryMd: { contains: query, mode: "insensitive" } },
           { url: { contains: query, mode: "insensitive" } },
+          { mentions: { some: { sourceLabel: { contains: query, mode: "insensitive" }, redactedAt: null } } },
+          { mentions: { some: { sourceText: { contains: query, mode: "insensitive" }, redactedAt: null } } },
         ],
       } : {}),
     },
     orderBy: [{ priority: "desc" }, { updatedAt: "desc" }, { createdAt: "desc" }],
     take: Math.max(1, Math.min(params.take ?? 50, 100)),
-    select: externalResourceSelect,
+    select: externalResourceListSelect,
   });
+  return enrichExternalResourceList(params.workspaceId, resources);
+}
+
+async function enrichExternalResourceList(workspaceId: string, resources: ExternalResourceListRecord[]) {
+  const userPairs = new Map<string, { installationId: string; externalUserId: string }>();
+  const channelPairs = new Map<string, { installationId: string; externalChannelId: string }>();
+
+  for (const resource of resources) {
+    for (const mention of resource.mentions) {
+      const message = mention.communicationMessage;
+      if (!message) continue;
+      if (message.externalUserId) {
+        userPairs.set(communicationUserKey(message.installationId, message.externalUserId), {
+          installationId: message.installationId,
+          externalUserId: message.externalUserId,
+        });
+      }
+      if (message.externalChannelId) {
+        channelPairs.set(communicationChannelKey(message.installationId, message.externalChannelId), {
+          installationId: message.installationId,
+          externalChannelId: message.externalChannelId,
+        });
+      }
+    }
+  }
+
+  const [users, channels] = await Promise.all([
+    userPairs.size > 0
+      ? prisma.communicationExternalUser.findMany({
+        where: {
+          workspaceId,
+          OR: [...userPairs.values()].map((pair) => ({
+            installationId: pair.installationId,
+            externalUserId: pair.externalUserId,
+          })),
+        },
+        select: {
+          installationId: true,
+          externalUserId: true,
+          email: true,
+          displayName: true,
+        },
+      })
+      : Promise.resolve([]),
+    channelPairs.size > 0
+      ? prisma.communicationChannel.findMany({
+        where: {
+          workspaceId,
+          OR: [...channelPairs.values()].map((pair) => ({
+            installationId: pair.installationId,
+            externalChannelId: pair.externalChannelId,
+          })),
+        },
+        select: {
+          installationId: true,
+          externalChannelId: true,
+          name: true,
+        },
+      })
+      : Promise.resolve([]),
+  ]);
+
+  const usersByKey = new Map(users.map((user) => [communicationUserKey(user.installationId, user.externalUserId), user]));
+  const channelsByKey = new Map(channels.map((channel) => [communicationChannelKey(channel.installationId, channel.externalChannelId), channel]));
+
+  return resources.map(({ mentions, ...resource }) => ({
+    ...resource,
+    mentions: mentions.map(({ communicationMessage, ...mention }) => {
+      const user = communicationMessage?.externalUserId
+        ? usersByKey.get(communicationUserKey(communicationMessage.installationId, communicationMessage.externalUserId))
+        : null;
+      const channel = communicationMessage?.externalChannelId
+        ? channelsByKey.get(communicationChannelKey(communicationMessage.installationId, communicationMessage.externalChannelId))
+        : null;
+      return {
+        ...mention,
+        sharedByName: user?.displayName || user?.email || communicationMessage?.externalUserId || null,
+        sourceChannelName: channel?.name || null,
+        sourceChannelExternalId: communicationMessage?.externalChannelId ?? null,
+      };
+    }),
+  }));
 }
 
 export async function listExternalResourceAttachments(actor: AppActor, params: {

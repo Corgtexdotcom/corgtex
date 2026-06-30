@@ -5,6 +5,7 @@ import {
   getCatalogCardActions,
   normalizeCatalogQuery,
   normalizeCatalogType,
+  normalizeToolsSurface,
   splitDefaultCatalogSections,
   type CatalogItemForUi,
 } from "./catalog-ui";
@@ -80,6 +81,10 @@ describe("Tools catalog UI helpers", () => {
     expect(normalizeCatalogType(["BAD", "TOOL"])).toBe("ALL");
     expect(normalizeCatalogQuery(["meeting", "recorder"])).toBe("meeting");
     expect(normalizeCatalogQuery("x".repeat(140))).toHaveLength(120);
+    expect(normalizeToolsSurface(undefined)).toBe("LINKS");
+    expect(normalizeToolsSurface("apps")).toBe("APPS");
+    expect(normalizeToolsSurface(["all", "apps"])).toBe("ALL");
+    expect(normalizeToolsSurface("connectors")).toBe("LINKS");
   });
 
   it("matches search across title, outcome, description, category, and type", () => {

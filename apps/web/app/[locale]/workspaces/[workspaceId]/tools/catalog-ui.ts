@@ -5,6 +5,7 @@ export type AppCategory = "FINANCE" | "KNOWLEDGE" | "COMMUNICATION" | "AI" | "OP
 export type AppInstallationStatus = "REQUESTED" | "APPROVED" | "INSTALLED" | "NEEDS_SETUP" | "UNHEALTHY" | "DISABLED";
 export type AppIntegrationDepth = "CATALOG_ONLY" | "LAUNCHABLE" | "MCP_ACTIONABLE" | "KNOWLEDGE_SYNCED" | "WORKFLOW_NATIVE";
 export type CatalogConnectorAvailability = "LIVE" | "PILOT_READY" | "ON_REQUEST" | "MANUAL_ONLY" | "RESEARCH";
+export type ToolsSurface = "LINKS" | "APPS" | "ALL";
 
 export type CatalogConnectorReadiness = {
   key: string;
@@ -84,6 +85,13 @@ export function normalizeCatalogType(value: CatalogSearchParamValue): CatalogIte
 
 export function normalizeCatalogQuery(value: CatalogSearchParamValue) {
   return firstSearchParam(value)?.slice(0, 120) ?? "";
+}
+
+export function normalizeToolsSurface(value: CatalogSearchParamValue): ToolsSurface {
+  const surface = firstSearchParam(value)?.toLowerCase();
+  if (surface === "apps") return "APPS";
+  if (surface === "all") return "ALL";
+  return "LINKS";
 }
 
 export function hasCatalogFilter({ activeType, query }: CatalogFilterState) {

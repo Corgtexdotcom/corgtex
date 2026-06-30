@@ -21,6 +21,7 @@ import {
   type CatalogItemForUi,
   type CatalogItemType,
   type CatalogRequestType,
+  type ToolsSurface,
 } from "./catalog-ui";
 
 type CircleOption = {
@@ -74,6 +75,24 @@ type ExternalResource = {
   archiveReason: string | null;
   createdAt: string;
   updatedAt: string;
+  createdBy: PersonSummary | null;
+  mentions: ExternalResourceMention[];
+};
+
+type ExternalResourceMention = {
+  id: string;
+  sourceType: string;
+  sourceProvider: string | null;
+  sourceExternalId: string | null;
+  sourcePermalink: string | null;
+  sourceLabel: string | null;
+  sourceText: string | null;
+  mentionedAt: string | null;
+  redactedAt: string | null;
+  createdAt: string;
+  sharedByName: string | null;
+  sourceChannelName: string | null;
+  sourceChannelExternalId: string | null;
 };
 
 type CatalogRequestStatus = "PENDING" | "APPROVED" | "REJECTED" | "CANCELLED";
@@ -160,6 +179,28 @@ type PublishDraft = {
   capabilities: string;
 };
 
+type LinkLibraryItem = {
+  id: string;
+  source: "captured" | "manual";
+  title: string;
+  url: string;
+  providerLabel: string;
+  providerKey: string;
+  categoryLabel: string;
+  typeLabel: string;
+  descriptionMd: string | null;
+  ownerLabel: string;
+  sourceLabel: string;
+  updatedAt: string;
+  priority: number;
+  host: string;
+  mentions: ExternalResourceMention[];
+  sourcePermalink: string | null;
+  hasManualShortcut: boolean;
+  hasCredential: boolean;
+  toolLink: ToolLink | null;
+};
+
 const EMPTY_FORM: FormState = {
   title: "",
   url: "",
@@ -226,6 +267,12 @@ const TYPE_LABELS: Record<CatalogItemType, string> = {
   DATA_SOURCE: "Data",
 };
 
+const SURFACE_LABELS: Record<ToolsSurface, string> = {
+  LINKS: "Links",
+  APPS: "Apps",
+  ALL: "All",
+};
+
 function domainFor(url: string) {
   try {
     return new URL(url, "https://corgtex.local").hostname.replace(/^www\./, "") || url;
@@ -255,6 +302,83 @@ function personName(person: PersonSummary | null) {
   return person?.displayName ?? person?.email ?? "Workspace";
 }
 
+function providerLabel(providerKey: string) {
+  const known: Record<string, string> = {
+    box: "Box",
+    dropbox: "Dropbox",
+    google_drive: "Google Drive",
+    notion: "Notion",
+    generic_url: "Web",
+  };
+  return known[providerKey] ?? displayEnum(providerKey);
+}
+
+function normalizeUrlKey(url: string) {
+  try {
+    const parsed = new URL(url);
+    parsed.hash = "";
+    for (const key of [...parsed.searchParams.keys()]) {
+      if (key.startsWith("utm_") || key === "ref" || key === "source") {
+        parsed.searchParams.delete(key);
+      }
+    }
+    parsed.searchParams.sort();
+    return parsed.toString().replace(/\/$/, "");
+  } catch {
+    return url.trim().replace(/\/$/, "");
+  }
+}
+
+function bestMention(mentions: ExternalResourceMention[]) {
+  return mentions.find((mention) => mention.sharedByName || mention.sourceLabel || mention.sourceText)
+    ?? mentions[0]
+    ?? null;
+}
+
+function mentionSourceLabel(mention: ExternalResourceMention | null) {
+  if (!mention) return "Captured reference";
+  const provider = mention.sourceProvider ? displayEnum(mention.sourceProvider) : displayEnum(mention.sourceType);
+  if (mention.sourceChannelName) return `${provider} #${mention.sourceChannelName}`;
+  return provider;
+}
+
+function inferLinkType(input: {
+  resourceType?: string | null;
+  mimeType?: string | null;
+  category?: string | null;
+  title?: string | null;
+  descriptionMd?: string | null;
+  url: string;
+}) {
+  const haystack = `${input.resourceType ?? ""} ${input.mimeType ?? ""} ${input.category ?? ""} ${input.title ?? ""} ${input.descriptionMd ?? ""} ${input.url}`.toLowerCase();
+  if (haystack.includes("folder") || haystack.includes("/folder/") || haystack.includes("/folders/")) return "Folder";
+  if (haystack.includes("spreadsheet") || haystack.includes("sheet")) return "Spreadsheet";
+  if (haystack.includes("presentation") || haystack.includes("slide")) return "Presentation";
+  if (haystack.includes("pdf") || haystack.includes("document") || haystack.includes("docx") || haystack.includes("file")) return "Document";
+  if (input.resourceType && input.resourceType.toLowerCase() !== "link") return displayEnum(input.resourceType);
+  if (input.category === "FILES" || input.category === "DOCUMENTS") return "Document";
+  return "Link";
+}
+
+function linkSearchText(item: LinkLibraryItem) {
+  return [
+    item.title,
+    item.host,
+    item.providerLabel,
+    item.categoryLabel,
+    item.typeLabel,
+    item.descriptionMd,
+    item.ownerLabel,
+    item.sourceLabel,
+    ...item.mentions.flatMap((mention) => [
+      mention.sourceLabel,
+      mention.sourceText,
+      mention.sharedByName,
+      mention.sourceChannelName,
+    ]),
+  ].filter(Boolean).join(" ").toLowerCase();
+}
+
 function linkToForm(link: ToolLink): FormState {
   return {
     title: link.title,
@@ -279,6 +403,7 @@ export function ToolsDirectoryClient({
   canManageCatalog,
   circles,
   initialView,
+  initialSurface,
   initialType,
   initialQuery,
   initialExternalResources,
@@ -290,6 +415,7 @@ export function ToolsDirectoryClient({
   canManageCatalog: boolean;
   circles: CircleOption[];
   initialView: "list" | "grid";
+  initialSurface: ToolsSurface;
   initialType: CatalogItemType | "ALL";
   initialQuery: string;
   initialExternalResources: ExternalResource[];
@@ -303,6 +429,7 @@ export function ToolsDirectoryClient({
   const [form, setForm] = useState<FormState>(EMPTY_FORM);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [isFormOpen, setIsFormOpen] = useState(false);
+  const [activeSurface, setActiveSurface] = useState<ToolsSurface>(initialSurface);
   const [activeType, setActiveType] = useState<CatalogItemType | "ALL">(initialType);
   const [query, setQuery] = useState(initialQuery);
   const [requestDraft, setRequestDraft] = useState<RequestDraft>(EMPTY_REQUEST);
@@ -318,11 +445,114 @@ export function ToolsDirectoryClient({
     return [...links].sort((a, b) => a.title.localeCompare(b.title));
   }, [links]);
 
+  const linkLibraryItems = useMemo(() => {
+    const manualByUrl = new Map<string, ToolLink>();
+    const usedManualIds = new Set<string>();
+    for (const link of links) {
+      manualByUrl.set(normalizeUrlKey(link.url), link);
+    }
+
+    const capturedItems: LinkLibraryItem[] = externalResources.map((resource) => {
+      const url = resource.sharedLinkUrl ?? resource.url;
+      const manual = manualByUrl.get(normalizeUrlKey(url)) ?? null;
+      if (manual) usedManualIds.add(manual.id);
+      const mention = bestMention(resource.mentions);
+      const descriptionMd = resource.summaryMd
+        ?? resource.descriptionMd
+        ?? mention?.sourceText
+        ?? manual?.descriptionMd
+        ?? manual?.previewDescription
+        ?? manual?.accessNotesMd
+        ?? null;
+      return {
+        id: `resource-${resource.id}`,
+        source: "captured",
+        title: resource.title || manual?.title || domainFor(url),
+        url,
+        providerLabel: providerLabel(resource.providerKey),
+        providerKey: resource.providerKey,
+        categoryLabel: displayEnum(resource.category),
+        typeLabel: inferLinkType({
+          resourceType: resource.resourceType,
+          mimeType: resource.mimeType,
+          category: resource.category,
+          title: resource.title,
+          descriptionMd,
+          url,
+        }),
+        descriptionMd,
+        ownerLabel: mention?.sharedByName
+          ? `Shared by ${mention.sharedByName}`
+          : resource.createdBy
+            ? `Added by ${personName(resource.createdBy)}`
+            : manual?.createdBy
+              ? `Added by ${personName(manual.createdBy)}`
+              : "Workspace",
+        sourceLabel: mentionSourceLabel(mention),
+        updatedAt: resource.updatedAt,
+        priority: resource.priority,
+        host: domainFor(url),
+        mentions: resource.mentions,
+        sourcePermalink: mention?.sourcePermalink ?? null,
+        hasManualShortcut: Boolean(manual),
+        hasCredential: Boolean(manual?.hasCredential),
+        toolLink: manual,
+      };
+    });
+
+    const manualItems: LinkLibraryItem[] = links
+      .filter((link) => !usedManualIds.has(link.id))
+      .map((link) => {
+        const descriptionMd = link.descriptionMd ?? link.previewDescription ?? link.accessNotesMd ?? null;
+        return {
+          id: `link-${link.id}`,
+          source: "manual",
+          title: link.previewTitle || link.title,
+          url: link.url,
+          providerLabel: domainFor(link.url),
+          providerKey: "manual",
+          categoryLabel: displayEnum(link.category),
+          typeLabel: inferLinkType({
+            category: link.category,
+            title: link.title,
+            descriptionMd,
+            url: link.url,
+          }),
+          descriptionMd,
+          ownerLabel: link.createdBy ? `Added by ${personName(link.createdBy)}` : "Workspace",
+          sourceLabel: "Manual shared link",
+          updatedAt: link.updatedAt,
+          priority: link.category === "FILES" ? 75 : 0,
+          host: domainFor(link.url),
+          mentions: [],
+          sourcePermalink: null,
+          hasManualShortcut: true,
+          hasCredential: link.hasCredential,
+          toolLink: link,
+        };
+      });
+
+    return [...capturedItems, ...manualItems].sort((a, b) => (
+      b.priority - a.priority
+      || Number(b.providerKey === "box") - Number(a.providerKey === "box")
+      || new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime()
+      || a.title.localeCompare(b.title)
+    ));
+  }, [externalResources, links]);
+
+  const filteredLinkLibraryItems = useMemo(() => {
+    const normalizedQuery = query.trim().toLowerCase();
+    if (!normalizedQuery) return linkLibraryItems;
+    return linkLibraryItems.filter((item) => linkSearchText(item).includes(normalizedQuery));
+  }, [linkLibraryItems, query]);
+
   const visibleItems = useMemo(() => {
     return filterCatalogItems(items, { activeType, query });
   }, [activeType, items, query]);
 
   const hasActiveCatalogFilter = hasCatalogFilter({ activeType, query });
+  const showLinks = activeSurface === "LINKS" || activeSurface === "ALL";
+  const showApps = activeSurface === "APPS" || activeSurface === "ALL";
   const defaultCatalogSections = useMemo(() => splitDefaultCatalogSections(visibleItems), [visibleItems]);
 
   const recommendedItems = useMemo(() => (
@@ -347,8 +577,10 @@ export function ToolsDirectoryClient({
       activeConnectors,
       installedApps,
       budgetCents,
+      links: linkLibraryItems.length,
+      capturedLinks: externalResources.length,
     };
-  }, [items]);
+  }, [externalResources.length, items, linkLibraryItems.length]);
 
   function setField<K extends keyof FormState>(key: K, value: FormState[K]) {
     setForm((current) => ({ ...current, [key]: value }));
@@ -646,26 +878,78 @@ export function ToolsDirectoryClient({
     );
   }
 
-  function renderExternalResourceCard(resource: ExternalResource) {
+  function renderLinkLibraryCard(item: LinkLibraryItem) {
     return (
-      <article key={resource.id} className="nr-tool-card">
-        <div className="nr-tool-card-header">
-          <div>
-            <div className="nr-tool-card-badges">
-              <span className={resource.providerKey === "box" ? "tag success" : "tag info"}>{resource.providerKey.replace(/_/g, " ").toUpperCase()}</span>
-              <span className="tag">{displayEnum(resource.category)}</span>
+      <article
+        key={item.id}
+        style={{
+          border: "1px solid var(--line)",
+          borderRadius: 8,
+          padding: 16,
+          background: "var(--surface-strong)",
+          display: "grid",
+          gap: 12,
+          minHeight: 224,
+        }}
+      >
+        <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "flex-start" }}>
+          <div style={{ minWidth: 0 }}>
+            <div className="actions-inline" style={{ gap: 6, marginBottom: 8 }}>
+              <span className={item.providerKey === "box" ? "tag success" : "tag info"}>{item.providerLabel}</span>
+              <span className="tag">{item.categoryLabel}</span>
+              <span className={item.source === "captured" ? "tag info" : "tag"}>{item.source === "captured" ? "Captured" : "Manual"}</span>
+              {item.hasManualShortcut && <span className="tag">Shortcut</span>}
+              {item.hasCredential && <span className="tag success">{t("credentialConfigured")}</span>}
             </div>
-            <h3>{resource.title}</h3>
+            <h2 style={{ fontSize: "1.08rem", margin: 0, wordBreak: "break-word" }}>
+              {item.title}
+            </h2>
+            <div className="nr-item-meta" style={{ marginTop: 4 }}>{item.host}</div>
           </div>
         </div>
-        {(resource.summaryMd || resource.descriptionMd) && (
-          <MarkdownExcerpt markdown={resource.summaryMd ?? resource.descriptionMd ?? ""} />
+
+        {item.descriptionMd ? (
+          <MarkdownExcerpt markdown={item.descriptionMd} maxLength={220} as="div" className="muted" />
+        ) : (
+          <p className="muted" style={{ margin: 0, fontSize: "0.9rem" }}>No description yet.</p>
         )}
-        <p className="nr-item-meta">
-          {displayEnum(resource.resourceType)} · Updated {displayDate(resource.updatedAt)}
+
+        <div
+          style={{
+            display: "grid",
+            gridTemplateColumns: "repeat(auto-fit, minmax(135px, 1fr))",
+            gap: 8,
+          }}
+        >
+          <div className="nr-item-meta" style={{ margin: 0 }}>
+            <strong style={{ color: "var(--text)" }}>Type</strong><br />
+            {item.typeLabel}
+          </div>
+          <div className="nr-item-meta" style={{ margin: 0 }}>
+            <strong style={{ color: "var(--text)" }}>Owner</strong><br />
+            {item.ownerLabel}
+          </div>
+          <div className="nr-item-meta" style={{ margin: 0 }}>
+            <strong style={{ color: "var(--text)" }}>Source</strong><br />
+            {item.sourceLabel}
+          </div>
+        </div>
+
+        <p className="nr-item-meta" style={{ margin: 0 }}>
+          {item.mentions.length > 0 ? `${item.mentions.length} mention${item.mentions.length === 1 ? "" : "s"} · ` : ""}
+          Updated {displayDate(item.updatedAt)}
         </p>
-        <TableActionGroup>
-          <a className="link-button small" href={resource.url} target="_blank" rel="noreferrer">Open</a>
+
+        <TableActionGroup className="nr-tools-card-actions">
+          <a className="link-button small" href={item.url} target="_blank" rel="noreferrer">Open</a>
+          {item.sourcePermalink && (
+            <a className="link-button secondary small" href={item.sourcePermalink} target="_blank" rel="noreferrer">Source</a>
+          )}
+          {item.toolLink?.canManage && (
+            <button type="button" className="secondary small" onClick={() => startEdit(item.toolLink as ToolLink)}>
+              {t("btnEdit")}
+            </button>
+          )}
         </TableActionGroup>
       </article>
     );
@@ -997,34 +1281,36 @@ export function ToolsDirectoryClient({
           <input
             value={query}
             onChange={(event) => setQuery(event.target.value)}
-            placeholder="Find an app, agent, connector, tool, or data source"
-            aria-label="Search tools catalog"
+            placeholder="Find a link, file, folder, app, or connector"
+            aria-label="Search tools"
           />
           <TableActionGroup className="nr-toolbar-action-group">
-            <button type="button" className="small" onClick={() => setIsPublishOpen((open) => !open)}>
-              {isPublishOpen ? t("btnCancel") : "Submit app for review"}
-            </button>
+            {showApps && (
+              <button type="button" className="small" onClick={() => setIsPublishOpen((open) => !open)}>
+                {isPublishOpen ? t("btnCancel") : "Submit app for review"}
+              </button>
+            )}
             <a className="link-button secondary small" href={`/workspaces/${workspaceId}/brain`}>
               Add reference to Brain
             </a>
             <button type="button" className="secondary small" onClick={() => setIsFormOpen((open) => !open)}>
-              {isFormOpen ? t("btnCancel") : "Add protected tool link"}
+              {isFormOpen ? t("btnCancel") : "Add manual link"}
             </button>
           </TableActionGroup>
         </div>
 
         <div className="ws-stat-row" style={{ marginTop: 0 }}>
           <div className="ws-stat-card">
-            <span>Catalog items</span>
+            <span>Links</span>
+            <strong>{summary.links}</strong>
+          </div>
+          <div className="ws-stat-card">
+            <span>Captured</span>
+            <strong>{summary.capturedLinks}</strong>
+          </div>
+          <div className="ws-stat-card">
+            <span>Apps</span>
             <strong>{summary.total}</strong>
-          </div>
-          <div className="ws-stat-card">
-            <span>Connectors</span>
-            <strong>{summary.activeConnectors}</strong>
-          </div>
-          <div className="ws-stat-card">
-            <span>Installed apps</span>
-            <strong>{summary.installedApps}</strong>
           </div>
           <div className="ws-stat-card">
             <span>Pending</span>
@@ -1032,21 +1318,35 @@ export function ToolsDirectoryClient({
           </div>
         </div>
 
-        <div className="nr-filter-bar">
-          <button type="button" className={`nr-filter-item ${activeType === "ALL" ? "nr-filter-active" : ""}`} onClick={() => setActiveType("ALL")}>
-            All ({items.length})
-          </button>
-          {TYPE_ORDER.map((type) => (
+        <div className="nr-filter-bar nr-filter-bar-wrap">
+          {(["LINKS", "APPS", "ALL"] as const).map((surface) => (
             <button
               type="button"
-              key={type}
-              className={`nr-filter-item ${activeType === type ? "nr-filter-active" : ""}`}
-              onClick={() => setActiveType(type)}
+              key={surface}
+              className={`nr-filter-item ${activeSurface === surface ? "nr-filter-active" : ""}`}
+              onClick={() => setActiveSurface(surface)}
             >
-              {TYPE_LABELS[type]} ({items.filter((item) => item.type === type).length})
+              {SURFACE_LABELS[surface]} ({surface === "LINKS" ? linkLibraryItems.length : surface === "APPS" ? items.length : linkLibraryItems.length + items.length})
             </button>
           ))}
         </div>
+        {showApps && (
+          <div className="nr-filter-bar">
+            <button type="button" className={`nr-filter-item ${activeType === "ALL" ? "nr-filter-active" : ""}`} onClick={() => setActiveType("ALL")}>
+              All apps ({items.length})
+            </button>
+            {TYPE_ORDER.map((type) => (
+              <button
+                type="button"
+                key={type}
+                className={`nr-filter-item ${activeType === type ? "nr-filter-active" : ""}`}
+                onClick={() => setActiveType(type)}
+              >
+                {TYPE_LABELS[type]} ({items.filter((item) => item.type === type).length})
+              </button>
+            ))}
+          </div>
+        )}
       </div>
 
       {error && <div className="form-message form-message-error">{error}</div>}
@@ -1063,7 +1363,7 @@ export function ToolsDirectoryClient({
         </div>
       )}
 
-      {isPublishOpen && (
+      {showApps && isPublishOpen && (
         <form
           onSubmit={submitPublishRequest}
           className="nr-form-section stack"
@@ -1199,9 +1499,9 @@ export function ToolsDirectoryClient({
           style={{ border: "1px solid var(--line)", borderRadius: 8, padding: 20, marginBottom: 8 }}
         >
           <div>
-            <h2 style={{ margin: 0, fontSize: "1.1rem" }}>{isEditing ? t("editTitle") : "Add protected tool link"}</h2>
+            <h2 style={{ margin: 0, fontSize: "1.1rem" }}>{isEditing ? t("editTitle") : "Add manual link"}</h2>
             <p className="nr-item-meta" style={{ margin: "4px 0 0" }}>
-              Keep credentials, launch URLs, installed tools, and access notes here. Put plain reference links and vendor notes in Brain.
+              Manual links are saved in the shared link library. Captured links appear automatically after communication history is processed.
             </p>
           </div>
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))", gap: 14 }}>
@@ -1349,7 +1649,7 @@ export function ToolsDirectoryClient({
         </form>
       )}
 
-      {canManageCatalog && pendingRequests.length > 0 && (
+      {showApps && canManageCatalog && pendingRequests.length > 0 && (
         <section className="stack" style={{ gap: 12 }}>
           <h2 className="nr-section-header" style={{ margin: 0 }}>Admin queue</h2>
           <div className="nr-table-wrap">
@@ -1392,7 +1692,26 @@ export function ToolsDirectoryClient({
         </section>
       )}
 
-      {!hasActiveCatalogFilter && (
+      {showLinks && (
+        <section className="stack" style={{ gap: 16 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "baseline" }}>
+            <h2 className="nr-section-header" style={{ margin: 0 }}>Links</h2>
+            <span className="nr-item-meta">{filteredLinkLibraryItems.length} shown</span>
+          </div>
+          {filteredLinkLibraryItems.length === 0 ? (
+            <div className="nr-item" style={{ textAlign: "center", padding: "48px 24px" }}>
+              <h2 style={{ margin: "0 0 8px", fontSize: "1.1rem" }}>No links found.</h2>
+              <p className="muted" style={{ margin: 0 }}>Try another search or add a manual link.</p>
+            </div>
+          ) : (
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(300px, 1fr))", gap: 16 }}>
+              {filteredLinkLibraryItems.map((item) => renderLinkLibraryCard(item))}
+            </div>
+          )}
+        </section>
+      )}
+
+      {showApps && !hasActiveCatalogFilter && (
         <>
           {renderSection(
             "Connected now",
@@ -1408,17 +1727,6 @@ export function ToolsDirectoryClient({
             true,
             "Highest-priority setup paths, capped so the page stays realistic.",
           )}
-          {externalResources.length > 0 && (
-            <section className="stack" style={{ gap: 16 }}>
-              <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "baseline" }}>
-                <h2 className="nr-section-header" style={{ margin: 0 }}>Captured references</h2>
-                <span className="nr-item-meta">{externalResources.length} recent</span>
-              </div>
-              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(300px, 1fr))", gap: 16 }}>
-                {externalResources.map((resource) => renderExternalResourceCard(resource))}
-              </div>
-            </section>
-          )}
           {renderSection(
             "Available on request",
             defaultCatalogSections.availableOnRequest,
@@ -1427,19 +1735,19 @@ export function ToolsDirectoryClient({
             "Providers with a real MCP/API path but no one-click Corgtex connection in this workspace.",
           )}
           {renderSection(
-            "Apps and shared links",
+            "Apps and tools",
             defaultCatalogSections.appsAndLinks,
-            "Apps, agents, protected links, and data tools will appear here.",
+            "Apps, agents, and data tools will appear here.",
             true,
           )}
         </>
       )}
 
-      {hasActiveCatalogFilter && (
+      {showApps && hasActiveCatalogFilter && (
         <section className="stack" style={{ gap: 16 }}>
           <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "baseline" }}>
             <h2 className="nr-section-header" style={{ margin: 0 }}>
-              {activeType === "ALL" ? "Search results" : TYPE_LABELS[activeType]}
+              {activeType === "ALL" ? "App search results" : TYPE_LABELS[activeType]}
             </h2>
             <span className="nr-item-meta">
               {visibleItems.length} items
@@ -1448,7 +1756,7 @@ export function ToolsDirectoryClient({
           {visibleItems.length === 0 ? (
             <div className="nr-item" style={{ textAlign: "center", padding: "48px 24px" }}>
               <h2 style={{ margin: "0 0 8px", fontSize: "1.1rem" }}>No catalog items found.</h2>
-              <p className="muted" style={{ margin: 0 }}>Try another search, add a protected tool link, or put reference material in Brain.</p>
+              <p className="muted" style={{ margin: 0 }}>Try another search or add a manual link.</p>
             </div>
           ) : (
             <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(300px, 1fr))", gap: 16 }}>
@@ -1460,7 +1768,7 @@ export function ToolsDirectoryClient({
 
       <details>
         <summary className="nr-section-header" style={{ cursor: "pointer", margin: 0 }}>
-          Shared link management
+          Manual shared-link management
         </summary>
         <div style={{ marginTop: 16 }}>
           {groupedLinks.length === 0 ? (
