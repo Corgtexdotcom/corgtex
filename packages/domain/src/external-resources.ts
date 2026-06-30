@@ -383,8 +383,10 @@ function resourceKnowledgeContent(resource: ExternalResourceKnowledgeRecord) {
   ].filter(Boolean).join("\n\n");
 }
 
-async function enqueueExternalResourceKnowledgeSync(tx: Prisma.TransactionClient, resource: Pick<ExternalResourceRecord, "id" | "workspaceId" | "updatedAt">) {
-  const dedupeKey = `external-resource:${resource.id}:knowledge:${resource.updatedAt.getTime()}`;
+async function enqueueExternalResourceKnowledgeSync(tx: Prisma.TransactionClient, resource: Pick<ExternalResourceRecord, "id" | "workspaceId" | "updatedAt">, options?: {
+  dedupeKeySuffix?: string;
+}) {
+  const dedupeKey = `external-resource:${resource.id}:knowledge:${options?.dedupeKeySuffix ?? resource.updatedAt.getTime()}`;
   await tx.workflowJob.upsert({
     where: { dedupeKey },
     update: {},
@@ -652,7 +654,7 @@ async function redactMentionsForSource(tx: Prisma.TransactionClient, params: {
 
   const resources = new Map(mentions.map((mention) => [mention.resource.id, mention.resource]));
   for (const resource of resources.values()) {
-    await enqueueExternalResourceKnowledgeSync(tx, resource);
+    await enqueueExternalResourceKnowledgeSync(tx, resource, { dedupeKeySuffix: `redaction:${now.getTime()}` });
   }
   return { redacted: mentions.length, resourceIds: [...resources.keys()] };
 }
@@ -758,10 +760,37 @@ export async function backfillExternalResourceReferencesForWorkspace(actor: AppA
   await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
   const take = Math.max(1, Math.min(params.take ?? 500, 5000));
   const dryRun = params.dryRun !== false;
+  const publicChannels = await prisma.communicationChannel.findMany({
+    where: {
+      workspaceId: params.workspaceId,
+      provider: "SLACK",
+      kind: "PUBLIC",
+      isIngestEnabled: true,
+      isArchived: false,
+    },
+    select: { installationId: true, externalChannelId: true },
+  });
+
+  if (publicChannels.length === 0) {
+    return {
+      workspaceId: params.workspaceId,
+      dryRun,
+      scannedMessages: 0,
+      candidateMessages: 0,
+      references: 0,
+      providerCounts: {},
+      enqueued: 0,
+    };
+  }
+
   const messages = await prisma.communicationMessage.findMany({
     where: {
       workspaceId: params.workspaceId,
       provider: "SLACK",
+      OR: publicChannels.map((channel) => ({
+        installationId: channel.installationId,
+        externalChannelId: channel.externalChannelId,
+      })),
       text: { contains: "http" },
       textRedactedAt: null,
       isBot: false,

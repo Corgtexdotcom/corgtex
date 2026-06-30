@@ -32,7 +32,7 @@ const {
   return {
     prismaMock: {
       $transaction: vi.fn(),
-      communicationChannel: { findUnique: vi.fn() },
+      communicationChannel: { findMany: vi.fn(), findUnique: vi.fn() },
       communicationMessage: {
         findMany: vi.fn(),
         findUnique: vi.fn(),
@@ -314,9 +314,19 @@ describe("workspace external resources", () => {
         redactedAt: expect.any(Date),
       }),
     }));
+    expect(txMock.workflowJob.upsert).toHaveBeenCalledWith(expect.objectContaining({
+      create: expect.objectContaining({
+        type: "knowledge.sync.external-resource",
+        payload: { resourceId: "resource-1" },
+        dedupeKey: expect.stringContaining("redaction:"),
+      }),
+    }));
   });
 
   it("dry-runs a Slack reference backfill with provider counts and no raw URLs", async () => {
+    prismaMock.communicationChannel.findMany.mockResolvedValueOnce([
+      { installationId: "install-1", externalChannelId: "C1" },
+    ]);
     prismaMock.communicationMessage.findMany.mockResolvedValueOnce([
       { id: "message-1", text: "Box <https://app.box.com/s/budget|Budget>", updatedAt: new Date("2026-06-28T17:00:00.000Z") },
       { id: "message-2", text: "Docs https://docs.google.com/document/d/abc", updatedAt: new Date("2026-06-28T17:10:00.000Z") },
@@ -338,6 +348,11 @@ describe("workspace external resources", () => {
       providerCounts: { box: 1, google_drive: 1 },
       enqueued: 0,
     });
+    expect(prismaMock.communicationMessage.findMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({
+        OR: [{ installationId: "install-1", externalChannelId: "C1" }],
+      }),
+    }));
     expect(prismaMock.workflowJob.upsert).not.toHaveBeenCalled();
   });
 });
