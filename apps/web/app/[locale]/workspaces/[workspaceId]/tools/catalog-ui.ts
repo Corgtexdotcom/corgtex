@@ -176,12 +176,12 @@ function isLiveSetupItem(item: CatalogItemForUi) {
 
 function isRecommendedSetupItem(item: CatalogItemForUi) {
   const readiness = connectorReadinessForItem(item);
-  return Boolean(readiness?.recommended && readiness.availability !== "LIVE");
+  return Boolean(readiness?.recommended && readiness.availability !== "LIVE" && readiness.connectMethod !== "external_mcp");
 }
 
 function isAvailableOnRequestItem(item: CatalogItemForUi) {
   const readiness = connectorReadinessForItem(item);
-  return Boolean(readiness && readiness.availability !== "LIVE" && !readiness.recommended);
+  return Boolean(readiness && readiness.availability !== "LIVE" && (!readiness.recommended || readiness.connectMethod === "external_mcp"));
 }
 
 function isAppsAndSharedLinksItem(item: CatalogItemForUi) {
@@ -221,6 +221,11 @@ function isToolSetupItem(item: CatalogItemForUi) {
     || item.sourceType === "ENTERPRISE_SERVICE";
 }
 
+function isRequestOnlyExternalMcpConnector(item: CatalogItemForUi) {
+  const readiness = connectorReadinessForItem(item);
+  return Boolean(item.type === "CONNECTOR" && readiness?.connectMethod === "external_mcp" && readiness.availability !== "LIVE");
+}
+
 export function getCatalogCardActions(
   item: CatalogItemForUi,
   { workspaceId, canManageCatalog }: { workspaceId: string; canManageCatalog: boolean },
@@ -242,6 +247,9 @@ export function getCatalogCardActions(
     if (disabled) return [{ kind: "status", label: "Disabled" }, details];
     if (item.accessMode === "ADMIN_ONLY" && !canManageCatalog) {
       return [{ kind: "status", label: "Admin setup required" }, details];
+    }
+    if (isRequestOnlyExternalMcpConnector(item)) {
+      return [{ kind: "status", label: "Request-only connector" }, details];
     }
     if (item.accessMode === "REQUEST" || (readiness && readiness.availability !== "LIVE")) {
       return [

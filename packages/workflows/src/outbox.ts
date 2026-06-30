@@ -11,6 +11,7 @@ import { syncBrainArticleKnowledge } from "@corgtex/knowledge";
 import { runDailyDigest, runSlackAgent, runSlackContextSummary, runSlackProactiveScan, sendDemoWelcomeNewspaper } from "@corgtex/agents";
 import {
   createWebhookDeliveries,
+  captureReferencesForSource,
   CONTROL_PLANE_CLIENT_MIGRATION_VERIFY_JOB_TYPE,
   ENTERPRISE_APP_HEALTH_CHECK_JOB_TYPE,
   CONTROL_PLANE_FLEET_SNAPSHOT_JOB_TYPE,
@@ -869,6 +870,14 @@ async function handleJob(job: ClaimedJob) {
         threadTs: summaryPayload.threadTs ?? null,
         dayISO: summaryPayload.dayISO,
       });
+    }
+    return;
+  }
+
+  if (job.type === "external-resource.capture-source") {
+    const capturePayload = payload as { sourceType?: string; sourceId?: string };
+    if (capturePayload.sourceType && capturePayload.sourceId) {
+      await captureReferencesForSource(capturePayload.sourceType, capturePayload.sourceId);
     }
     return;
   }

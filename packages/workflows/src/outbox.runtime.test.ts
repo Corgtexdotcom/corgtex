@@ -11,6 +11,7 @@ const {
   runSlackProactiveScanMock,
   sendDemoWelcomeNewspaperMock,
   processSlackInboundEventMock,
+  captureReferencesForSourceMock,
   purgeExpiredCommunicationMessagesMock,
   syncSlackPublicArchiveForWorkspaceMock,
   runMeetingAgendaThreadEditMock,
@@ -69,6 +70,7 @@ const {
   runSlackProactiveScanMock: vi.fn(),
   sendDemoWelcomeNewspaperMock: vi.fn(),
   processSlackInboundEventMock: vi.fn(),
+  captureReferencesForSourceMock: vi.fn(),
   purgeExpiredCommunicationMessagesMock: vi.fn(),
   syncSlackPublicArchiveForWorkspaceMock: vi.fn(),
   runMeetingAgendaThreadEditMock: vi.fn(),
@@ -112,6 +114,7 @@ vi.mock("@corgtex/domain", () => ({
   syncBrainArticleKnowledge: vi.fn(),
   fetchCalendarEvents: vi.fn(),
   processSlackInboundEvent: processSlackInboundEventMock,
+  captureReferencesForSource: captureReferencesForSourceMock,
   purgeExpiredCommunicationMessages: purgeExpiredCommunicationMessagesMock,
   syncSlackPublicArchiveForWorkspace: syncSlackPublicArchiveForWorkspaceMock,
   runMeetingAgendaThreadEdit: runMeetingAgendaThreadEditMock,
@@ -184,6 +187,7 @@ describe("runPendingJobs", () => {
     runSlackProactiveScanMock.mockReset().mockResolvedValue({ agendaJobs: 0, nudges: 0, drafts: 0 });
     sendDemoWelcomeNewspaperMock.mockReset().mockResolvedValue({ success: true });
     processSlackInboundEventMock.mockReset();
+    captureReferencesForSourceMock.mockReset().mockResolvedValue({ captured: 1 });
     purgeExpiredCommunicationMessagesMock.mockReset();
     syncSlackPublicArchiveForWorkspaceMock.mockReset();
     runMeetingAgendaThreadEditMock.mockReset();
@@ -255,6 +259,28 @@ describe("runPendingJobs", () => {
     await expect(runPendingJobs("worker-1", 1)).resolves.toBe(1);
 
     expect(processSlackInboundEventMock).toHaveBeenCalledWith("inbound-1");
+    expect(prismaMock.workflowJob.update).toHaveBeenCalledWith({
+      where: { id: "job-1" },
+      data: expect.objectContaining({
+        status: "COMPLETED",
+      }),
+    });
+  });
+
+  it("dispatches external resource capture jobs", async () => {
+    txMock.$queryRaw.mockResolvedValue([
+      {
+        id: "job-1",
+        workspaceId: "ws-1",
+        type: "external-resource.capture-source",
+        payload: { sourceType: "SLACK_MESSAGE", sourceId: "message-1" },
+        attempts: 1,
+      },
+    ]);
+
+    await expect(runPendingJobs("worker-1", 1)).resolves.toBe(1);
+
+    expect(captureReferencesForSourceMock).toHaveBeenCalledWith("SLACK_MESSAGE", "message-1");
     expect(prismaMock.workflowJob.update).toHaveBeenCalledWith({
       where: { id: "job-1" },
       data: expect.objectContaining({

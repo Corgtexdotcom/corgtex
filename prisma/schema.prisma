@@ -590,6 +590,7 @@ model Workspace {
   externalMcpConnections         ExternalMcpConnection[]
   externalResources              WorkspaceExternalResource[]
   externalResourceAttachments    WorkspaceExternalResourceAttachment[]
+  externalResourceMentions       WorkspaceExternalResourceMention[]
   aiWorkspaceConnections         AiWorkspaceConnection[]
   executionRequests              ExecutionRequest[]
   executionResults               ExecutionResult[]
@@ -838,6 +839,7 @@ model CommunicationMessage {
   installation CommunicationInstallation @relation(fields: [installationId], references: [id], onDelete: Cascade)
   workspace    Workspace                 @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   entityLinks  CommunicationEntityLink[]
+  externalResourceMentions WorkspaceExternalResourceMention[]
 
   @@unique([installationId, externalChannelId, externalMessageId], map: "CommunicationMessage_installation_channel_message_key")
   @@index([workspaceId, provider, receivedAt])
@@ -2305,6 +2307,8 @@ model WorkspaceExternalResource {
   providerKey         String
   externalId          String
   resourceType        String
+  category            String    @default("LINK")
+  priority            Int       @default(0)
   title               String
   url                 String    @db.Text
   sharedLinkUrl       String?   @db.Text
@@ -2323,9 +2327,11 @@ model WorkspaceExternalResource {
   workspace   Workspace                             @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   createdBy   User?                                 @relation("WorkspaceExternalResourceCreator", fields: [createdByUserId], references: [id], onDelete: SetNull)
   attachments WorkspaceExternalResourceAttachment[]
+  mentions    WorkspaceExternalResourceMention[]
 
   @@unique([workspaceId, providerKey, externalId], map: "WorkspaceExternalResource_workspace_provider_external_key")
   @@index([workspaceId, providerKey, archivedAt], map: "WorkspaceExternalResource_workspace_provider_archived_idx")
+  @@index([workspaceId, category, priority], map: "WorkspaceExternalResource_workspace_category_priority_idx")
   @@index([workspaceId, resourceType])
   @@index([createdByUserId])
 }
@@ -2348,6 +2354,33 @@ model WorkspaceExternalResourceAttachment {
   @@index([workspaceId, entityType, entityId], map: "WorkspaceExternalResourceAttachment_workspace_entity_idx")
   @@index([workspaceId, purpose])
   @@index([createdByUserId])
+}
+
+model WorkspaceExternalResourceMention {
+  id                     String    @id @default(uuid())
+  workspaceId            String
+  resourceId             String
+  sourceType             String
+  sourceId               String
+  sourceProvider         String?
+  sourceExternalId       String?
+  sourcePermalink        String?   @db.Text
+  sourceLabel            String?
+  sourceText             String?   @db.Text
+  mentionedAt            DateTime?
+  redactedAt             DateTime?
+  createdAt              DateTime  @default(now())
+  updatedAt              DateTime  @updatedAt
+  communicationMessageId String?
+
+  workspace            Workspace                  @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  resource             WorkspaceExternalResource  @relation(fields: [resourceId], references: [id], onDelete: Cascade)
+  communicationMessage CommunicationMessage?      @relation(fields: [communicationMessageId], references: [id], onDelete: SetNull)
+
+  @@unique([resourceId, sourceType, sourceId], map: "WorkspaceExternalResourceMention_resource_source_key")
+  @@index([workspaceId, sourceType, sourceId], map: "WorkspaceExternalResourceMention_workspace_source_idx")
+  @@index([workspaceId, sourceType, mentionedAt], map: "WorkspaceExternalResourceMention_workspace_source_time_idx")
+  @@index([communicationMessageId], map: "WorkspaceExternalResourceMention_message_idx")
 }
 
 model PolicyCorpus {

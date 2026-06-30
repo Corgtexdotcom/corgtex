@@ -7,6 +7,8 @@ type ExternalResourceAttachment = {
     id: string;
     providerKey: string;
     resourceType: string;
+    category: string;
+    priority: number;
     title: string;
     url: string;
     summaryMd: string | null;
@@ -25,11 +27,11 @@ export function ExternalResourceCards({ attachments }: { attachments: ExternalRe
             <div>
               <strong className="nr-item-title">{attachment.resource.title}</strong>
               <p className="nr-item-meta" style={{ margin: "4px 0 0", fontSize: "0.8rem" }}>
-                {attachment.resource.providerKey.toUpperCase()} · {attachment.resource.resourceType.replace(/_/g, " ")} · {attachment.purpose.replace(/_/g, " ")}
+                {attachment.resource.providerKey.replace(/_/g, " ").toUpperCase()} · {attachment.resource.category.toLowerCase()} · {attachment.resource.resourceType.replace(/_/g, " ")} · {attachment.purpose.replace(/_/g, " ")}
               </p>
             </div>
             <a href={attachment.resource.url} target="_blank" rel="noreferrer" className="button secondary small">
-              Open in Box
+              Open
             </a>
           </div>
           {(attachment.resource.summaryMd || attachment.resource.descriptionMd) && (
@@ -59,15 +61,15 @@ export function ExternalResourceAttachForm({ action, hiddenFields, children }: {
         <input key={name} type="hidden" name={name} value={value} />
       ))}
       <label>
-        Box link
-        <input name="url" type="url" placeholder="https://app.box.com/..." required />
+        Reference link
+        <input name="url" type="url" placeholder="https://..." required />
       </label>
       <label>
         Description
         <textarea name="descriptionMd" rows={3} placeholder="What this file is for" />
       </label>
       <button type="submit" className="secondary small" style={{ alignSelf: "flex-start" }}>
-        Save Box link
+        Save reference
       </button>
       {children}
     </form>

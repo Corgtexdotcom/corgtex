@@ -1,17 +1,51 @@
 import { createHash } from "node:crypto";
-import type { Prisma } from "@prisma/client";
+import type { CommunicationProvider, Prisma } from "@prisma/client";
 import type { AppActor } from "@corgtex/shared";
 import { prisma } from "@corgtex/shared";
 import { recordAudit } from "./audit-trail";
 import { requireWorkspaceMembership } from "./auth";
 import { AppError, invariant } from "./errors";
-import { callBoxExternalMcpReadTool, getExternalMcpConnectionAccessToken } from "./external-mcp";
 
 export const WORKSPACE_EXTERNAL_RESOURCE_ENTITY_TYPES = ["Action", "Tension", "Proposal", "Meeting", "BrainSource"] as const;
 export const WORKSPACE_EXTERNAL_RESOURCE_PURPOSES = ["reference", "completion_evidence", "resolution_evidence", "feedback_context"] as const;
+export const EXTERNAL_RESOURCE_SOURCE_TYPES = ["SLACK_MESSAGE"] as const;
 
 export type WorkspaceExternalResourceEntityType = (typeof WORKSPACE_EXTERNAL_RESOURCE_ENTITY_TYPES)[number];
 export type WorkspaceExternalResourcePurpose = (typeof WORKSPACE_EXTERNAL_RESOURCE_PURPOSES)[number];
+export type ExternalResourceSourceType = (typeof EXTERNAL_RESOURCE_SOURCE_TYPES)[number];
+export type ExternalResourceProviderKey = "box" | "dropbox" | "google_drive" | "notion" | "generic_url";
+export type ExternalResourceCategory = "FILES" | "KNOWLEDGE" | "LINK";
+
+type NormalizedUrl = {
+  url: URL;
+  canonicalUrl: string;
+  host: string;
+};
+
+export type ExtractedExternalReference = {
+  url: string;
+  label: string | null;
+  sourceText: string | null;
+};
+
+export type ExternalResourceClassification = {
+  providerKey: ExternalResourceProviderKey;
+  externalId: string;
+  resourceType: string;
+  category: ExternalResourceCategory;
+  priority: number;
+  title: string;
+  url: string;
+  sharedLinkUrl: string | null;
+  mimeType: string | null;
+  metadata: Prisma.InputJsonObject;
+};
+
+type ResourceProviderAdapter = {
+  providerKey: ExternalResourceProviderKey;
+  matches: (url: URL) => boolean;
+  classify: (input: NormalizedUrl, label: string | null) => Omit<ExternalResourceClassification, "providerKey" | "url" | "metadata">;
+};
 
 const externalResourceSelect = {
   id: true,
@@ -20,6 +54,8 @@ const externalResourceSelect = {
   providerKey: true,
   externalId: true,
   resourceType: true,
+  category: true,
+  priority: true,
   title: true,
   url: true,
   sharedLinkUrl: true,
@@ -48,17 +84,43 @@ const externalResourceAttachmentSelect = {
 } satisfies Prisma.WorkspaceExternalResourceAttachmentSelect;
 
 type ExternalResourceRecord = Prisma.WorkspaceExternalResourceGetPayload<{ select: typeof externalResourceSelect }>;
+type ExternalResourceKnowledgeRecord = ExternalResourceRecord & {
+  mentions?: Array<{
+    sourceType: string;
+    sourceProvider: string | null;
+    sourceLabel: string | null;
+    sourceText: string | null;
+    mentionedAt: Date | null;
+    redactedAt: Date | null;
+  }>;
+};
+
+const TRACKING_PARAMS = new Set([
+  "utm_source",
+  "utm_medium",
+  "utm_campaign",
+  "utm_term",
+  "utm_content",
+  "fbclid",
+  "gclid",
+  "msclkid",
+]);
 
 function actorUserId(actor: AppActor) {
   return actor.kind === "user" ? actor.user.id : null;
 }
 
-function asRecord(value: unknown): Record<string, unknown> {
-  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+function cleanText(value?: string | null, maxLength = 4000) {
+  const trimmed = value?.replace(/\s+/g, " ").trim() ?? "";
+  return trimmed ? trimmed.slice(0, maxLength) : null;
 }
 
-function asString(value: unknown) {
-  return typeof value === "string" ? value : "";
+function hashValue(value: string) {
+  return createHash("sha256").update(value).digest("hex").slice(0, 32);
+}
+
+function fallbackExternalId(url: string) {
+  return `url:${hashValue(url)}`;
 }
 
 function validatePurpose(value?: string | null): WorkspaceExternalResourcePurpose {
@@ -72,28 +134,66 @@ function validateEntityType(value: string): WorkspaceExternalResourceEntityType 
   return value as WorkspaceExternalResourceEntityType;
 }
 
-function normalizeBoxUrl(rawUrl: string) {
-  const trimmed = rawUrl.trim();
-  invariant(trimmed.length > 0, 400, "INVALID_INPUT", "Box URL is required.");
+function normalizeExternalUrl(rawUrl: string): NormalizedUrl {
+  const trimmed = rawUrl.trim().replace(/&amp;/g, "&");
+  invariant(trimmed.length > 0, 400, "INVALID_INPUT", "External resource URL is required.");
+
   let url: URL;
   try {
     url = new URL(trimmed);
   } catch {
-    throw new AppError(400, "INVALID_INPUT", "Box URL is not valid.");
+    throw new AppError(400, "INVALID_INPUT", "External resource URL is not valid.");
   }
-  const host = url.hostname.toLowerCase();
-  invariant(host === "box.com" || host.endsWith(".box.com"), 400, "INVALID_INPUT", "Only Box links can be saved as Box resources.");
+
+  invariant(url.protocol === "https:" || url.protocol === "http:", 400, "INVALID_INPUT", "External resource URL must use HTTP or HTTPS.");
+  url.protocol = url.protocol.toLowerCase();
+  url.hostname = url.hostname.toLowerCase();
   url.hash = "";
-  return url.toString();
+
+  for (const key of [...url.searchParams.keys()]) {
+    if (TRACKING_PARAMS.has(key.toLowerCase())) {
+      url.searchParams.delete(key);
+    }
+  }
+
+  if (url.pathname.length > 1) {
+    url.pathname = url.pathname.replace(/\/+$/, "");
+  }
+
+  return {
+    url,
+    canonicalUrl: url.toString(),
+    host: url.hostname,
+  };
 }
 
-function fallbackExternalId(url: string) {
-  return `url:${createHash("sha256").update(url).digest("hex").slice(0, 32)}`;
+function hostMatches(url: URL, domains: string[]) {
+  const host = url.hostname.toLowerCase();
+  return domains.some((domain) => host === domain || host.endsWith(`.${domain}`));
 }
 
-function parseBoxAppItem(url: string) {
-  const parsed = new URL(url);
-  const segments = parsed.pathname.split("/").filter(Boolean);
+function lastPathLabel(url: URL) {
+  const segment = url.pathname.split("/").filter(Boolean).at(-1);
+  if (!segment) return null;
+  try {
+    return decodeURIComponent(segment).replace(/[-_]+/g, " ").trim() || null;
+  } catch {
+    return segment.replace(/[-_]+/g, " ").trim() || null;
+  }
+}
+
+function displayHost(host: string) {
+  return host.replace(/^www\./, "");
+}
+
+function titleFromLabelOrUrl(label: string | null, input: NormalizedUrl, fallback: string) {
+  const cleanedLabel = cleanText(label, 160);
+  if (cleanedLabel && !cleanedLabel.startsWith("http://") && !cleanedLabel.startsWith("https://")) return cleanedLabel;
+  return lastPathLabel(input.url) || fallback || displayHost(input.host);
+}
+
+function parseBoxAppItem(url: URL) {
+  const segments = url.pathname.split("/").filter(Boolean);
   const fileIndex = segments.findIndex((segment) => segment === "file" || segment === "files");
   if (fileIndex >= 0 && segments[fileIndex + 1]) {
     return { type: "file", id: segments[fileIndex + 1] };
@@ -105,112 +205,141 @@ function parseBoxAppItem(url: string) {
   return null;
 }
 
-function boxFields() {
-  return [
-    "id",
-    "type",
-    "name",
-    "description",
-    "modified_at",
-    "size",
-    "extension",
-    "sha1",
-    "shared_link",
-    "permissions",
-    "parent",
-    "path_collection",
-    "owned_by",
-    "file_version",
-    "etag",
-  ].join(",");
-}
-
-async function boxApiJson(accessToken: string, url: string, headers?: Record<string, string>) {
-  const response = await fetch(url, {
-    headers: {
-      Authorization: `Bearer ${accessToken}`,
-      ...(headers ?? {}),
+const providerAdapters: ResourceProviderAdapter[] = [
+  {
+    providerKey: "box",
+    matches: (url) => hostMatches(url, ["box.com"]),
+    classify: (input, label) => {
+      const item = parseBoxAppItem(input.url);
+      const resourceType = item?.type ?? "link";
+      return {
+        externalId: item ? `${item.type}:${item.id}` : fallbackExternalId(input.canonicalUrl),
+        resourceType,
+        category: "FILES",
+        priority: 100,
+        title: titleFromLabelOrUrl(label, input, resourceType === "folder" ? "Box folder" : resourceType === "file" ? "Box file" : "Box link"),
+        sharedLinkUrl: input.canonicalUrl,
+        mimeType: null,
+      };
     },
+  },
+  {
+    providerKey: "dropbox",
+    matches: (url) => hostMatches(url, ["dropbox.com"]),
+    classify: (input, label) => ({
+      externalId: fallbackExternalId(input.canonicalUrl),
+      resourceType: "link",
+      category: "FILES",
+      priority: 50,
+      title: titleFromLabelOrUrl(label, input, "Dropbox link"),
+      sharedLinkUrl: input.canonicalUrl,
+      mimeType: null,
+    }),
+  },
+  {
+    providerKey: "google_drive",
+    matches: (url) => hostMatches(url, ["drive.google.com", "docs.google.com"]),
+    classify: (input, label) => ({
+      externalId: fallbackExternalId(input.canonicalUrl),
+      resourceType: "link",
+      category: "FILES",
+      priority: 50,
+      title: titleFromLabelOrUrl(label, input, "Google Drive link"),
+      sharedLinkUrl: input.canonicalUrl,
+      mimeType: null,
+    }),
+  },
+  {
+    providerKey: "notion",
+    matches: (url) => hostMatches(url, ["notion.so", "notion.site"]),
+    classify: (input, label) => ({
+      externalId: fallbackExternalId(input.canonicalUrl),
+      resourceType: "page",
+      category: "KNOWLEDGE",
+      priority: 30,
+      title: titleFromLabelOrUrl(label, input, "Notion page"),
+      sharedLinkUrl: input.canonicalUrl,
+      mimeType: null,
+    }),
+  },
+  {
+    providerKey: "generic_url",
+    matches: () => true,
+    classify: (input, label) => ({
+      externalId: fallbackExternalId(input.canonicalUrl),
+      resourceType: "link",
+      category: "LINK",
+      priority: 0,
+      title: titleFromLabelOrUrl(label, input, displayHost(input.host)),
+      sharedLinkUrl: input.canonicalUrl,
+      mimeType: null,
+    }),
+  },
+];
+
+export function classifyExternalResourceUrl(rawUrl: string, label?: string | null): ExternalResourceClassification {
+  const input = normalizeExternalUrl(rawUrl);
+  const adapter = providerAdapters.find((candidate) => candidate.matches(input.url)) ?? providerAdapters[providerAdapters.length - 1];
+  const classified = adapter.classify(input, label ?? null);
+  return {
+    providerKey: adapter.providerKey,
+    ...classified,
+    url: input.canonicalUrl,
+    metadata: {
+      canonicalUrl: input.canonicalUrl,
+      host: input.host,
+      providerKey: adapter.providerKey,
+      category: classified.category,
+      priority: classified.priority,
+    },
+  };
+}
+
+function trimBareUrl(rawUrl: string) {
+  let value = rawUrl.trim();
+  while (/[),.;!?]+$/.test(value)) {
+    const next = value.slice(0, -1);
+    if (value.endsWith(")") && (next.match(/\(/g)?.length ?? 0) > (next.match(/\)/g)?.length ?? 0)) break;
+    value = next;
+  }
+  return value;
+}
+
+export function extractExternalResourceReferencesFromText(text?: string | null): ExtractedExternalReference[] {
+  const sourceText = cleanText(text, 1200);
+  if (!sourceText) return [];
+
+  const references: ExtractedExternalReference[] = [];
+  const seen = new Set<string>();
+  const addReference = (url: string, label?: string | null) => {
+    const trimmedUrl = trimBareUrl(url.replace(/&amp;/g, "&"));
+    if (!trimmedUrl) return;
+    try {
+      const classified = classifyExternalResourceUrl(trimmedUrl, label ?? null);
+      if (seen.has(classified.url)) return;
+      seen.add(classified.url);
+      references.push({
+        url: classified.url,
+        label: cleanText(label, 160),
+        sourceText,
+      });
+    } catch {
+      // Ignore malformed URLs during free-text extraction. Manual saves still validate strictly.
+    }
+  };
+
+  const slackLinkPattern = /<((?:https?:\/\/)[^>|]+)(?:\|([^>]*))?>/g;
+  const textWithoutSlackLinks = (text ?? "").replace(slackLinkPattern, (_match, url: string, label?: string) => {
+    addReference(url, label);
+    return " ";
   });
-  const data = await response.json().catch(() => ({}));
-  if (!response.ok) {
-    const message = asString(asRecord(data).message) || asString(asRecord(data).error) || `Box API returned HTTP ${response.status}.`;
-    throw new AppError(response.status, "BOX_API_ERROR", message);
-  }
-  return data;
-}
 
-async function resolveBoxItem(accessToken: string, url: string) {
-  const fields = boxFields();
-  try {
-    return await boxApiJson(
-      accessToken,
-      `https://api.box.com/2.0/shared_items?fields=${encodeURIComponent(fields)}`,
-      { boxapi: `shared_link=${url}` },
-    );
-  } catch (error) {
-    const direct = parseBoxAppItem(url);
-    if (!direct) throw error;
-    const endpoint = direct.type === "folder" ? "folders" : "files";
-    return boxApiJson(accessToken, `https://api.box.com/2.0/${endpoint}/${encodeURIComponent(direct.id)}?fields=${encodeURIComponent(fields)}`);
+  const bareUrlPattern = /\bhttps?:\/\/[^\s<>"']+/g;
+  for (const match of textWithoutSlackLinks.matchAll(bareUrlPattern)) {
+    addReference(match[0], null);
   }
-}
 
-function itemUrl(item: Record<string, unknown>, originalUrl: string) {
-  const sharedLink = asRecord(item.shared_link);
-  const sharedUrl = asString(sharedLink.url);
-  if (sharedUrl) return sharedUrl;
-  const type = asString(item.type);
-  const id = asString(item.id);
-  if (type === "folder" && id) return `https://app.box.com/folder/${encodeURIComponent(id)}`;
-  if (type === "web_link" && id) return `https://app.box.com/web_link/${encodeURIComponent(id)}`;
-  if (id) return `https://app.box.com/file/${encodeURIComponent(id)}`;
-  return originalUrl;
-}
-
-function itemMimeType(item: Record<string, unknown>) {
-  const extension = asString(item.extension);
-  if (!extension) return null;
-  return `application/x-box-${extension.toLowerCase()}`;
-}
-
-function summaryFromPayload(payload: unknown) {
-  const record = asRecord(payload);
-  const candidates = [
-    record.answer,
-    record.text,
-    record.content,
-    record.result,
-    record.response,
-    record.message,
-  ];
-  for (const candidate of candidates) {
-    const text = asString(candidate).trim();
-    if (text) return text.slice(0, 4000);
-  }
-  return null;
-}
-
-async function summarizeBoxItem(actor: AppActor, workspaceId: string, item: Record<string, unknown>) {
-  if (asString(item.type) !== "file" || !asString(item.id)) {
-    return { summaryMd: null, error: null };
-  }
-  try {
-    const payload = await callBoxExternalMcpReadTool(actor, {
-      workspaceId,
-      toolName: "ai_qa_single_file",
-      arguments: {
-        file_id: asString(item.id),
-        question: "Summarize this file for a workspace knowledge index in 3 concise sentences. Include what the file is for and when someone should open it in Box.",
-      },
-    });
-    return { summaryMd: summaryFromPayload(payload), error: null };
-  } catch (error) {
-    return {
-      summaryMd: null,
-      error: error instanceof Error ? error.message : "Box AI summary failed.",
-    };
-  }
+  return references;
 }
 
 async function assertAttachTarget(tx: Prisma.TransactionClient, workspaceId: string, entityType: WorkspaceExternalResourceEntityType, entityId: string) {
@@ -229,20 +358,33 @@ async function assertAttachTarget(tx: Prisma.TransactionClient, workspaceId: str
   invariant(found, 404, "NOT_FOUND", "External resource target not found.");
 }
 
-function resourceKnowledgeContent(resource: ExternalResourceRecord) {
+function resourceKnowledgeContent(resource: ExternalResourceKnowledgeRecord) {
+  const mentionLines = (resource.mentions ?? [])
+    .filter((mention) => !mention.redactedAt)
+    .map((mention) => [
+      mention.sourceType,
+      mention.sourceProvider ? `via ${mention.sourceProvider}` : null,
+      mention.mentionedAt ? mention.mentionedAt.toISOString() : null,
+      mention.sourceLabel ? `Label: ${mention.sourceLabel}` : null,
+      mention.sourceText,
+    ].filter(Boolean).join(" | "))
+    .filter(Boolean);
+
   return [
     resource.title,
     `Provider: ${resource.providerKey}`,
+    `Category: ${resource.category}`,
     `Type: ${resource.resourceType}`,
+    `Priority: ${resource.priority}`,
     resource.summaryMd ? `Summary:\n${resource.summaryMd}` : null,
     resource.descriptionMd ? `Description:\n${resource.descriptionMd}` : null,
-    `Open in Box: ${resource.url}`,
+    mentionLines.length > 0 ? `Seen in:\n${mentionLines.map((line) => `- ${line}`).join("\n")}` : null,
+    `Open resource: ${resource.url}`,
   ].filter(Boolean).join("\n\n");
 }
 
-async function enqueueExternalResourceKnowledgeSync(tx: Prisma.TransactionClient, resource: ExternalResourceRecord) {
-  if (!resource.summaryMd?.trim() && !resource.descriptionMd?.trim()) return;
-  const dedupeKey = `external-resource:${resource.id}:knowledge:${Date.now()}`;
+async function enqueueExternalResourceKnowledgeSync(tx: Prisma.TransactionClient, resource: Pick<ExternalResourceRecord, "id" | "workspaceId" | "updatedAt">) {
+  const dedupeKey = `external-resource:${resource.id}:knowledge:${resource.updatedAt.getTime()}`;
   await tx.workflowJob.upsert({
     where: { dedupeKey },
     update: {},
@@ -256,10 +398,136 @@ async function enqueueExternalResourceKnowledgeSync(tx: Prisma.TransactionClient
   });
 }
 
+async function upsertExternalResource(tx: Prisma.TransactionClient, params: {
+  workspaceId: string;
+  actor: AppActor | null;
+  url: string;
+  label?: string | null;
+  descriptionMd?: string | null;
+  summaryMd?: string | null;
+  sourceType?: string | null;
+}) {
+  const classification = classifyExternalResourceUrl(params.url, params.label);
+  const descriptionMd = cleanText(params.descriptionMd, 4000);
+  const summaryMd = cleanText(params.summaryMd, 4000);
+  const metadata = {
+    ...classification.metadata,
+    capturedFrom: params.sourceType ?? "manual",
+  } satisfies Prisma.InputJsonObject;
+
+  return tx.workspaceExternalResource.upsert({
+    where: {
+      workspaceId_providerKey_externalId: {
+        workspaceId: params.workspaceId,
+        providerKey: classification.providerKey,
+        externalId: classification.externalId,
+      },
+    },
+    update: {
+      title: classification.title,
+      resourceType: classification.resourceType,
+      category: classification.category,
+      priority: classification.priority,
+      url: classification.url,
+      sharedLinkUrl: classification.sharedLinkUrl,
+      mimeType: classification.mimeType,
+      ...(descriptionMd !== null ? { descriptionMd } : {}),
+      ...(summaryMd !== null ? { summaryMd } : {}),
+      metadata,
+      lastEnrichedAt: new Date(),
+      lastEnrichmentError: null,
+      archivedAt: null,
+      archiveReason: null,
+    },
+    create: {
+      workspaceId: params.workspaceId,
+      createdByUserId: params.actor ? actorUserId(params.actor) : null,
+      providerKey: classification.providerKey,
+      externalId: classification.externalId,
+      resourceType: classification.resourceType,
+      category: classification.category,
+      priority: classification.priority,
+      title: classification.title,
+      url: classification.url,
+      sharedLinkUrl: classification.sharedLinkUrl,
+      mimeType: classification.mimeType,
+      descriptionMd,
+      summaryMd,
+      metadata,
+      lastEnrichedAt: new Date(),
+      lastEnrichmentError: null,
+    },
+    select: externalResourceSelect,
+  });
+}
+
+async function upsertExternalResourceMention(tx: Prisma.TransactionClient, params: {
+  workspaceId: string;
+  resourceId: string;
+  sourceType: ExternalResourceSourceType;
+  sourceId: string;
+  sourceProvider?: CommunicationProvider | string | null;
+  sourceExternalId?: string | null;
+  sourcePermalink?: string | null;
+  sourceLabel?: string | null;
+  sourceText?: string | null;
+  mentionedAt?: Date | null;
+  communicationMessageId?: string | null;
+}) {
+  return tx.workspaceExternalResourceMention.upsert({
+    where: {
+      resourceId_sourceType_sourceId: {
+        resourceId: params.resourceId,
+        sourceType: params.sourceType,
+        sourceId: params.sourceId,
+      },
+    },
+    update: {
+      workspaceId: params.workspaceId,
+      sourceProvider: params.sourceProvider ? String(params.sourceProvider) : null,
+      sourceExternalId: params.sourceExternalId ?? null,
+      sourcePermalink: params.sourcePermalink ?? null,
+      sourceLabel: cleanText(params.sourceLabel, 160),
+      sourceText: cleanText(params.sourceText, 1200),
+      mentionedAt: params.mentionedAt ?? null,
+      redactedAt: null,
+      communicationMessageId: params.communicationMessageId ?? null,
+    },
+    create: {
+      workspaceId: params.workspaceId,
+      resourceId: params.resourceId,
+      sourceType: params.sourceType,
+      sourceId: params.sourceId,
+      sourceProvider: params.sourceProvider ? String(params.sourceProvider) : null,
+      sourceExternalId: params.sourceExternalId ?? null,
+      sourcePermalink: params.sourcePermalink ?? null,
+      sourceLabel: cleanText(params.sourceLabel, 160),
+      sourceText: cleanText(params.sourceText, 1200),
+      mentionedAt: params.mentionedAt ?? null,
+      communicationMessageId: params.communicationMessageId ?? null,
+    },
+  });
+}
+
 export async function externalResourceKnowledgeInput(resourceId: string, workspaceId: string) {
   const resource = await prisma.workspaceExternalResource.findFirst({
     where: { id: resourceId, workspaceId, archivedAt: null },
-    select: externalResourceSelect,
+    select: {
+      ...externalResourceSelect,
+      mentions: {
+        where: { redactedAt: null },
+        orderBy: [{ mentionedAt: "desc" }, { createdAt: "desc" }],
+        take: 5,
+        select: {
+          sourceType: true,
+          sourceProvider: true,
+          sourceLabel: true,
+          sourceText: true,
+          mentionedAt: true,
+          redactedAt: true,
+        },
+      },
+    },
   });
   if (!resource) return null;
   const content = resourceKnowledgeContent(resource);
@@ -274,6 +542,8 @@ export async function externalResourceKnowledgeInput(resourceId: string, workspa
       providerKey: resource.providerKey,
       externalId: resource.externalId,
       resourceType: resource.resourceType,
+      category: resource.category,
+      priority: resource.priority,
       url: resource.url,
       sharedLinkUrl: resource.sharedLinkUrl,
     },
@@ -290,23 +560,6 @@ export async function upsertWorkspaceExternalResourceFromUrl(actor: AppActor, pa
   purpose?: WorkspaceExternalResourcePurpose | string | null;
 }) {
   await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
-  invariant(actor.kind === "user", 403, "FORBIDDEN", "Box resources use same-user delegated OAuth. Sign in as a user to save Box links.");
-  const normalizedUrl = normalizeBoxUrl(params.url);
-  const { accessToken } = await getExternalMcpConnectionAccessToken(actor, {
-    workspaceId: params.workspaceId,
-    providerKey: "box",
-  });
-  const item = asRecord(await resolveBoxItem(accessToken, normalizedUrl));
-  const resourceType = asString(item.type) || parseBoxAppItem(normalizedUrl)?.type || "link";
-  const boxId = asString(item.id);
-  const externalId = boxId ? `${resourceType}:${boxId}` : fallbackExternalId(normalizedUrl);
-  const sharedLink = asRecord(item.shared_link);
-  const sharedLinkUrl = asString(sharedLink.url) || normalizedUrl;
-  const explicitSummary = params.summaryMd?.trim() || null;
-  const summary = explicitSummary ? { summaryMd: explicitSummary, error: null } : await summarizeBoxItem(actor, params.workspaceId, item);
-  const descriptionMd = params.descriptionMd?.trim() || asString(item.description).trim() || null;
-  const title = asString(item.name) || normalizedUrl;
-  const url = itemUrl(item, normalizedUrl);
   const purpose = validatePurpose(params.purpose);
   const entityType = params.entityType ? validateEntityType(params.entityType) : null;
   const entityId = params.entityId?.trim() || null;
@@ -317,67 +570,13 @@ export async function upsertWorkspaceExternalResourceFromUrl(actor: AppActor, pa
       await assertAttachTarget(tx, params.workspaceId, entityType, entityId);
     }
 
-    const resource = await tx.workspaceExternalResource.upsert({
-      where: {
-        workspaceId_providerKey_externalId: {
-          workspaceId: params.workspaceId,
-          providerKey: "box",
-          externalId,
-        },
-      },
-      update: {
-        title,
-        resourceType,
-        url,
-        sharedLinkUrl,
-        mimeType: itemMimeType(item),
-        descriptionMd,
-        summaryMd: summary.summaryMd,
-        metadata: {
-          box: {
-            id: boxId || null,
-            type: resourceType,
-            etag: asString(item.etag) || null,
-            modifiedAt: asString(item.modified_at) || null,
-            size: typeof item.size === "number" ? item.size : null,
-            extension: asString(item.extension) || null,
-            owner: asString(asRecord(item.owned_by).login) || asString(asRecord(item.owned_by).name) || null,
-          },
-          sourceUrl: normalizedUrl,
-        } satisfies Prisma.InputJsonObject,
-        lastEnrichedAt: new Date(),
-        lastEnrichmentError: summary.error,
-        archivedAt: null,
-        archiveReason: null,
-      },
-      create: {
-        workspaceId: params.workspaceId,
-        createdByUserId: actor.user.id,
-        providerKey: "box",
-        externalId,
-        resourceType,
-        title,
-        url,
-        sharedLinkUrl,
-        mimeType: itemMimeType(item),
-        descriptionMd,
-        summaryMd: summary.summaryMd,
-        metadata: {
-          box: {
-            id: boxId || null,
-            type: resourceType,
-            etag: asString(item.etag) || null,
-            modifiedAt: asString(item.modified_at) || null,
-            size: typeof item.size === "number" ? item.size : null,
-            extension: asString(item.extension) || null,
-            owner: asString(asRecord(item.owned_by).login) || asString(asRecord(item.owned_by).name) || null,
-          },
-          sourceUrl: normalizedUrl,
-        } satisfies Prisma.InputJsonObject,
-        lastEnrichedAt: new Date(),
-        lastEnrichmentError: summary.error,
-      },
-      select: externalResourceSelect,
+    const resource = await upsertExternalResource(tx, {
+      workspaceId: params.workspaceId,
+      actor,
+      url: params.url,
+      descriptionMd: params.descriptionMd,
+      summaryMd: params.summaryMd,
+      sourceType: "manual",
     });
 
     if (entityType && entityId) {
@@ -388,7 +587,7 @@ export async function upsertWorkspaceExternalResourceFromUrl(actor: AppActor, pa
           entityType,
           entityId,
           purpose,
-          createdByUserId: actor.user.id,
+          createdByUserId: actorUserId(actor),
         }],
         skipDuplicates: true,
       });
@@ -397,7 +596,7 @@ export async function upsertWorkspaceExternalResourceFromUrl(actor: AppActor, pa
         action: "external-resource.attached",
         entityType: "WorkspaceExternalResource",
         entityId: resource.id,
-        meta: { providerKey: "box", targetType: entityType, targetId: entityId, purpose },
+        meta: { providerKey: resource.providerKey, targetType: entityType, targetId: entityId, purpose },
       });
     }
 
@@ -406,11 +605,223 @@ export async function upsertWorkspaceExternalResourceFromUrl(actor: AppActor, pa
       action: "external-resource.saved",
       entityType: "WorkspaceExternalResource",
       entityId: resource.id,
-      meta: { providerKey: "box", externalId: resource.externalId, resourceType: resource.resourceType },
+      meta: {
+        providerKey: resource.providerKey,
+        externalId: resource.externalId,
+        resourceType: resource.resourceType,
+      },
     });
     await enqueueExternalResourceKnowledgeSync(tx, resource);
     return resource;
   });
+}
+
+async function redactMentionsForSource(tx: Prisma.TransactionClient, params: {
+  workspaceId: string;
+  sourceType: ExternalResourceSourceType;
+  sourceId: string;
+  keepResourceIds?: string[];
+}) {
+  const mentions = await tx.workspaceExternalResourceMention.findMany({
+    where: {
+      workspaceId: params.workspaceId,
+      sourceType: params.sourceType,
+      sourceId: params.sourceId,
+      redactedAt: null,
+      ...(params.keepResourceIds ? { resourceId: { notIn: params.keepResourceIds } } : {}),
+    },
+    select: { resourceId: true, resource: { select: { id: true, workspaceId: true, updatedAt: true } } },
+  });
+  if (mentions.length === 0) return { redacted: 0, resourceIds: [] as string[] };
+
+  const now = new Date();
+  await tx.workspaceExternalResourceMention.updateMany({
+    where: {
+      workspaceId: params.workspaceId,
+      sourceType: params.sourceType,
+      sourceId: params.sourceId,
+      redactedAt: null,
+      ...(params.keepResourceIds ? { resourceId: { notIn: params.keepResourceIds } } : {}),
+    },
+    data: {
+      sourceLabel: null,
+      sourceText: null,
+      redactedAt: now,
+    },
+  });
+
+  const resources = new Map(mentions.map((mention) => [mention.resource.id, mention.resource]));
+  for (const resource of resources.values()) {
+    await enqueueExternalResourceKnowledgeSync(tx, resource);
+  }
+  return { redacted: mentions.length, resourceIds: [...resources.keys()] };
+}
+
+async function captureSlackMessageReferences(sourceId: string) {
+  const message = await prisma.communicationMessage.findUnique({
+    where: { id: sourceId },
+  });
+  if (!message || message.provider !== "SLACK") {
+    return { sourceType: "SLACK_MESSAGE" as const, sourceId, scanned: 0, captured: 0, redacted: 0, providerCounts: {} as Record<string, number> };
+  }
+
+  const channel = await prisma.communicationChannel.findUnique({
+    where: {
+      installationId_externalChannelId: {
+        installationId: message.installationId,
+        externalChannelId: message.externalChannelId,
+      },
+    },
+    select: { kind: true, name: true },
+  });
+
+  if (channel?.kind !== "PUBLIC" || !message.text || message.textRedactedAt || message.isBot || message.isHidden || message.isDeleted) {
+    return prisma.$transaction((tx) => redactMentionsForSource(tx, {
+      workspaceId: message.workspaceId,
+      sourceType: "SLACK_MESSAGE",
+      sourceId: message.id,
+    }).then((result) => ({
+      sourceType: "SLACK_MESSAGE" as const,
+      sourceId: message.id,
+      scanned: 0,
+      captured: 0,
+      redacted: result.redacted,
+      providerCounts: {} as Record<string, number>,
+    })));
+  }
+
+  const references = extractExternalResourceReferencesFromText(message.text);
+  const providerCounts: Record<string, number> = {};
+
+  return prisma.$transaction(async (tx) => {
+    const resourceIds: string[] = [];
+
+    for (const reference of references) {
+      const classification = classifyExternalResourceUrl(reference.url, reference.label);
+      providerCounts[classification.providerKey] = (providerCounts[classification.providerKey] ?? 0) + 1;
+      const resource = await upsertExternalResource(tx, {
+        workspaceId: message.workspaceId,
+        actor: null,
+        url: reference.url,
+        label: reference.label,
+        descriptionMd: reference.sourceText,
+        sourceType: "SLACK_MESSAGE",
+      });
+      resourceIds.push(resource.id);
+      await upsertExternalResourceMention(tx, {
+        workspaceId: message.workspaceId,
+        resourceId: resource.id,
+        sourceType: "SLACK_MESSAGE",
+        sourceId: message.id,
+        sourceProvider: message.provider,
+        sourceExternalId: message.externalMessageId,
+        sourcePermalink: message.permalink,
+        sourceLabel: reference.label,
+        sourceText: reference.sourceText,
+        mentionedAt: message.messageTs ?? message.receivedAt,
+        communicationMessageId: message.id,
+      });
+      await enqueueExternalResourceKnowledgeSync(tx, resource);
+    }
+
+    const redacted = await redactMentionsForSource(tx, {
+      workspaceId: message.workspaceId,
+      sourceType: "SLACK_MESSAGE",
+      sourceId: message.id,
+      keepResourceIds: resourceIds,
+    });
+
+    return {
+      sourceType: "SLACK_MESSAGE" as const,
+      sourceId: message.id,
+      scanned: references.length,
+      captured: resourceIds.length,
+      redacted: redacted.redacted,
+      providerCounts,
+    };
+  });
+}
+
+export async function captureReferencesForSource(sourceType: ExternalResourceSourceType | string, sourceId: string) {
+  invariant(sourceId.trim().length > 0, 400, "INVALID_INPUT", "External resource source ID is required.");
+  if (sourceType === "SLACK_MESSAGE") {
+    return captureSlackMessageReferences(sourceId);
+  }
+  throw new AppError(400, "INVALID_INPUT", "Unsupported external resource source type.");
+}
+
+export async function backfillExternalResourceReferencesForWorkspace(actor: AppActor, params: {
+  workspaceId: string;
+  dryRun?: boolean;
+  take?: number;
+}) {
+  await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
+  const take = Math.max(1, Math.min(params.take ?? 500, 5000));
+  const dryRun = params.dryRun !== false;
+  const messages = await prisma.communicationMessage.findMany({
+    where: {
+      workspaceId: params.workspaceId,
+      provider: "SLACK",
+      text: { contains: "http" },
+      textRedactedAt: null,
+      isBot: false,
+      isHidden: false,
+      isDeleted: false,
+    },
+    orderBy: [{ messageTs: "asc" }, { receivedAt: "asc" }],
+    take,
+    select: {
+      id: true,
+      text: true,
+      updatedAt: true,
+    },
+  });
+
+  const providerCounts: Record<string, number> = {};
+  let references = 0;
+  let candidateMessages = 0;
+
+  for (const message of messages) {
+    const extracted = extractExternalResourceReferencesFromText(message.text);
+    if (extracted.length === 0) continue;
+    candidateMessages += 1;
+    references += extracted.length;
+    for (const reference of extracted) {
+      const providerKey = classifyExternalResourceUrl(reference.url, reference.label).providerKey;
+      providerCounts[providerKey] = (providerCounts[providerKey] ?? 0) + 1;
+    }
+  }
+
+  let enqueued = 0;
+  if (!dryRun) {
+    for (const message of messages) {
+      if (extractExternalResourceReferencesFromText(message.text).length === 0) continue;
+      await prisma.workflowJob.upsert({
+        where: { dedupeKey: `external-resource:SLACK_MESSAGE:${message.id}:capture:${message.updatedAt.getTime()}` },
+        update: {},
+        create: {
+          workspaceId: params.workspaceId,
+          type: "external-resource.capture-source",
+          payload: {
+            sourceType: "SLACK_MESSAGE",
+            sourceId: message.id,
+          },
+          dedupeKey: `external-resource:SLACK_MESSAGE:${message.id}:capture:${message.updatedAt.getTime()}`,
+        },
+      });
+      enqueued += 1;
+    }
+  }
+
+  return {
+    workspaceId: params.workspaceId,
+    dryRun,
+    scannedMessages: messages.length,
+    candidateMessages,
+    references,
+    providerCounts,
+    enqueued,
+  };
 }
 
 export async function listWorkspaceExternalResources(actor: AppActor, params: {
@@ -435,7 +846,7 @@ export async function listWorkspaceExternalResources(actor: AppActor, params: {
         ],
       } : {}),
     },
-    orderBy: [{ updatedAt: "desc" }, { createdAt: "desc" }],
+    orderBy: [{ priority: "desc" }, { updatedAt: "desc" }, { createdAt: "desc" }],
     take: Math.max(1, Math.min(params.take ?? 50, 100)),
     select: externalResourceSelect,
   });
