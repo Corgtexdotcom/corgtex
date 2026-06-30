@@ -127,7 +127,7 @@ function slackMessage(overrides: Record<string, unknown> = {}) {
     receivedAt: new Date("2026-06-28T17:00:01.000Z"),
     createdAt: new Date("2026-06-28T17:00:01.000Z"),
     updatedAt: new Date("2026-06-28T17:00:01.000Z"),
-    installation: { id: "install-1", externalTeamName: "Crina" },
+    installation: { id: "install-1", externalTeamName: "Client Workspace" },
     ...overrides,
   };
 }
