@@ -777,7 +777,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
 
   tool(
     "list_connected_tools",
-    "List same-user delegated external MCP tools connected to this workspace, starting with Notion. Does not reveal OAuth tokens.",
+    "List same-user delegated external MCP tools connected to this workspace, such as Box or Notion. Does not reveal OAuth tokens.",
     {},
     async () => {
       requireToolCapability("list_connected_tools");

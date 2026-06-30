@@ -11,6 +11,7 @@ const CONTEXT_KNOWLEDGE_SOURCE_TYPES: KnowledgeSourceType[] = [
   "ACTION",
   "DOCUMENT",
   "BRAIN_ARTICLE",
+  "EXTERNAL_CONTENT",
   "EVENT",
   "SLACK",
   "CIRCLE",

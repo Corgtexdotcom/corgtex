@@ -169,6 +169,7 @@ enum KnowledgeSourceType {
   ROLE
   EXTERNAL_DATABASE
   EXTERNAL_RESOURCE
+  EXTERNAL_CONTENT
   SLACK
 }
 
@@ -215,6 +216,20 @@ enum BrainSourceType {
   FILE_UPLOAD
   CONVERSATION
   CONVERSATION_INSIGHT
+  EXTERNAL_CONTENT
+}
+
+enum ExternalContentSourceKind {
+  HUB
+  FOLDER
+  FILE
+}
+
+enum ExternalContentSourceStatus {
+  ACTIVE
+  SYNCING
+  ERROR
+  ARCHIVED
 }
 
 enum BuildArtifactStatus {
@@ -588,6 +603,8 @@ model Workspace {
   mcpOAuthCodes                  McpOAuthAuthorizationCode[]
   mcpOAuthTokens                 McpOAuthAccessToken[]
   externalMcpConnections         ExternalMcpConnection[]
+  externalContentSources         ExternalContentSource[]
+  externalContentSyncLogs        ExternalContentSyncLog[]
   externalResources              WorkspaceExternalResource[]
   externalResourceAttachments    WorkspaceExternalResourceAttachment[]
   externalResourceMentions       WorkspaceExternalResourceMention[]
@@ -948,6 +965,7 @@ model User {
   mcpOAuthCodes                 McpOAuthAuthorizationCode[]
   mcpOAuthTokens                McpOAuthAccessToken[]
   externalMcpConnections        ExternalMcpConnection[]
+  selectedExternalContentSources ExternalContentSource[]              @relation("ExternalContentSourceSelectedBy")
   createdExternalResources      WorkspaceExternalResource[]           @relation("WorkspaceExternalResourceCreator")
   createdExternalResourceLinks  WorkspaceExternalResourceAttachment[] @relation("WorkspaceExternalResourceAttachmentCreator")
   createdAiWorkspaceConnections AiWorkspaceConnection[]               @relation("AiWorkspaceConnectionCreator")
@@ -2381,6 +2399,60 @@ model WorkspaceExternalResourceMention {
   @@index([workspaceId, sourceType, sourceId], map: "WorkspaceExternalResourceMention_workspace_source_idx")
   @@index([workspaceId, sourceType, mentionedAt], map: "WorkspaceExternalResourceMention_workspace_source_time_idx")
   @@index([communicationMessageId], map: "WorkspaceExternalResourceMention_message_idx")
+}
+
+model ExternalContentSource {
+  id                String                      @id @default(uuid())
+  workspaceId       String
+  connectionId      String?
+  selectedByUserId  String?
+  providerKey       String
+  sourceKind        ExternalContentSourceKind
+  externalId        String
+  title             String
+  externalUrl       String?                     @db.Text
+  syncMode          String                      @default("SELECTED")
+  status            ExternalContentSourceStatus @default(ACTIVE)
+  lastRemoteVersion String?
+  lastSyncedAt      DateTime?
+  lastSyncError     String?                     @db.Text
+  metadata          Json?
+  archivedAt        DateTime?
+  archivedByUserId  String?
+  archiveReason     String?
+  createdAt         DateTime                    @default(now())
+  updatedAt         DateTime                    @updatedAt
+
+  workspace      Workspace              @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  connection     ExternalMcpConnection? @relation(fields: [connectionId], references: [id], onDelete: SetNull)
+  selectedByUser User?                  @relation("ExternalContentSourceSelectedBy", fields: [selectedByUserId], references: [id], onDelete: SetNull)
+  syncLogs       ExternalContentSyncLog[]
+
+  @@unique([workspaceId, providerKey, sourceKind, externalId], map: "ExternalContentSource_workspace_provider_kind_external_key")
+  @@index([workspaceId, providerKey, status], map: "ExternalContentSource_workspace_provider_status_idx")
+  @@index([connectionId], map: "ExternalContentSource_connection_idx")
+  @@index([selectedByUserId], map: "ExternalContentSource_selectedByUser_idx")
+}
+
+model ExternalContentSyncLog {
+  id            String    @id @default(uuid())
+  workspaceId   String
+  sourceId      String
+  workflowJobId String?
+  status        String
+  remoteVersion String?
+  chunksCreated Int       @default(0)
+  brainSourceId String?
+  error         String?   @db.Text
+  startedAt     DateTime  @default(now())
+  completedAt   DateTime?
+
+  workspace Workspace             @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  source    ExternalContentSource @relation(fields: [sourceId], references: [id], onDelete: Cascade)
+
+  @@index([workspaceId, startedAt], map: "ExternalContentSyncLog_workspace_started_idx")
+  @@index([sourceId, startedAt], map: "ExternalContentSyncLog_source_started_idx")
+  @@index([workflowJobId], map: "ExternalContentSyncLog_workflowJob_idx")
 }
 
 model PolicyCorpus {
@@ -4155,8 +4227,9 @@ model ExternalMcpConnection {
   createdAt         DateTime                    @default(now())
   updatedAt         DateTime                    @updatedAt
 
-  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  workspace              Workspace               @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  user                   User                    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  externalContentSources ExternalContentSource[]
 
   @@unique([workspaceId, userId, providerKey])
   @@index([workspaceId, providerKey, status])

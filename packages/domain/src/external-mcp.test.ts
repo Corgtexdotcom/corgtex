@@ -508,4 +508,51 @@ describe("external MCP gateway", () => {
     })).rejects.toThrow("Box generic tool execution is disabled in Corgtex v1.");
     expect(externalMcpConnectionMock.findFirst).not.toHaveBeenCalled();
   });
+
+  it("allows selected Box file content reads through the server-side connection helper", async () => {
+    externalMcpConnectionMock.findFirst.mockResolvedValueOnce(activeBoxConnection());
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      result: {
+        structuredContent: {
+          text: "Selected file content",
+        },
+      },
+    }), { status: 200 })));
+    const { callBoxExternalMcpReadToolForConnection } = await import("./external-mcp");
+
+    const result = await callBoxExternalMcpReadToolForConnection(actor, {
+      workspaceId: "ws-1",
+      connectionId: "box-connection-1",
+      toolName: "get_file_content",
+      arguments: { file_id: "123" },
+    });
+
+    expect(result).toEqual({ text: "Selected file content" });
+    expect(externalMcpConnectionMock.findFirst).toHaveBeenCalledWith({
+      where: {
+        id: "box-connection-1",
+        workspaceId: "ws-1",
+        providerKey: "box",
+        status: "ACTIVE",
+      },
+    });
+    expect(fetch).toHaveBeenCalledWith("https://mcp.box.com", expect.objectContaining({
+      body: expect.stringContaining("\"name\":\"get_file_content\""),
+    }));
+    expect(JSON.stringify(recordAuditMock.mock.calls)).not.toContain("box-token");
+  });
+
+  it("rejects non-allowlisted Box write tools before loading the connection", async () => {
+    vi.stubGlobal("fetch", vi.fn());
+    const { callBoxExternalMcpReadToolForConnection } = await import("./external-mcp");
+
+    await expect(callBoxExternalMcpReadToolForConnection(actor, {
+      workspaceId: "ws-1",
+      connectionId: "box-connection-1",
+      toolName: "update_file_properties",
+      arguments: { file_id: "123", name: "New name" },
+    })).rejects.toThrow("Box write tools are disabled in Corgtex v1.");
+    expect(externalMcpConnectionMock.findFirst).not.toHaveBeenCalled();
+    expect(fetch).not.toHaveBeenCalled();
+  });
 });

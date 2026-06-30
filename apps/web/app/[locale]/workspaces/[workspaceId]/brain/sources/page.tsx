@@ -44,7 +44,7 @@ export default async function BrainSourcesPage({
             <label style={{ flex: 1 }}>
               {t("labelSourceType")}
               <select name="sourceType">
-                {["MEETING","TICKET","PR","RFC","INCIDENT","SLACK","CUSTOMER_FEEDBACK","COMPETITOR","RESEARCH","ARTICLE","DOC","RUNBOOK","EMAIL","FILE_UPLOAD"].map((t) => (
+                {["MEETING","TICKET","PR","RFC","INCIDENT","SLACK","CUSTOMER_FEEDBACK","COMPETITOR","RESEARCH","ARTICLE","DOC","RUNBOOK","EMAIL","FILE_UPLOAD","EXTERNAL_CONTENT"].map((t) => (
                   <option key={t} value={t}>{t}</option>
                 ))}
               </select>
