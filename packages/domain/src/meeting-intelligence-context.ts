@@ -501,6 +501,8 @@ function buildKnowledgeQuery(params: {
 }
 
 function contextMeeting(meeting: ContextMeetingRecord) {
+  const participantIds = meeting.participantIds ?? [];
+  const participantEmails = meeting.participantEmails ?? [];
   return {
     id: meeting.id,
     workspaceId: meeting.workspaceId,
@@ -517,14 +519,14 @@ function contextMeeting(meeting: ContextMeetingRecord) {
     seriesId: meeting.seriesId,
     seriesTitle: meeting.series?.title ?? null,
     seriesRecurrenceRule: meeting.series?.recurrenceRule ?? null,
-    participantIds: meeting.participantIds,
-    participantEmails: meeting.participantEmails,
+    participantIds,
+    participantEmails,
   };
 }
 
 function attendeeOrderRanker(meeting: ContextMeetingRecord) {
-  const participantIds = new Map(meeting.participantIds.map((id, index) => [id, index]));
-  const participantEmails = new Map(meeting.participantEmails.map((email, index) => [email.toLowerCase(), index]));
+  const participantIds = new Map((meeting.participantIds ?? []).map((id, index) => [id, index]));
+  const participantEmails = new Map((meeting.participantEmails ?? []).map((email, index) => [email.toLowerCase(), index]));
   return (member: ContextMemberRecord) => (
     participantIds.get(member.id)
     ?? participantIds.get(member.userId)
@@ -573,10 +575,11 @@ export async function buildMeetingIntelligenceContext(params: {
     return emptyContext(meeting, contextualIntelligenceEnabled);
   }
 
-  const participantEmails = meeting.participantEmails.map((email) => email.toLowerCase());
+  const participantIds = meeting.participantIds ?? [];
+  const participantEmails = (meeting.participantEmails ?? []).map((email) => email.toLowerCase());
   const memberOr = [
-    meeting.participantIds.length > 0 ? { id: { in: meeting.participantIds } } : null,
-    meeting.participantIds.length > 0 ? { userId: { in: meeting.participantIds } } : null,
+    participantIds.length > 0 ? { id: { in: participantIds } } : null,
+    participantIds.length > 0 ? { userId: { in: participantIds } } : null,
     participantEmails.length > 0 ? { user: { email: { in: participantEmails } } } : null,
   ].filter(Boolean) as Prisma.MemberWhereInput[];
 
@@ -623,6 +626,7 @@ export async function buildMeetingIntelligenceContext(params: {
     meeting.title ? { title: meeting.title } : null,
   ].filter(Boolean) as Prisma.MeetingWhereInput[];
   const targetRecordLimit = params.mode === "agenda" ? 8 : params.mode === "insights" ? 50 : 30;
+  const previousMeetingLimit = params.mode === "agenda" ? 10 : contextualIntelligenceEnabled ? 3 : 1;
   const tensionStatuses: TensionStatus[] = params.mode === "agenda" ? ["OPEN"] : ["DRAFT", "OPEN"];
   const actionStatuses: ActionStatus[] = params.mode === "agenda" ? ["OPEN", "IN_PROGRESS"] : ["DRAFT", "OPEN", "IN_PROGRESS"];
   const proposalStatuses: ProposalStatus[] = params.mode === "agenda" ? ["OPEN"] : ["DRAFT", "OPEN"];
@@ -698,7 +702,7 @@ export async function buildMeetingIntelligenceContext(params: {
           OR: previousMeetingOr,
         },
         orderBy: { recordedAt: "desc" },
-        take: contextualIntelligenceEnabled ? 3 : 1,
+        take: previousMeetingLimit,
         select: {
           id: true,
           title: true,

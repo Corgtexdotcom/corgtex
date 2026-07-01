@@ -20,17 +20,20 @@ const mocks = vi.hoisted(() => ({
   resolveControlPlaneRequestActor: vi.fn(),
   getControlPlaneProviderStatus: vi.fn(),
   getControlPlaneSlackSetupTarget: vi.fn(),
+  getControlPlaneMeetingOperationsReadiness: vi.fn(),
+  enqueueControlPlaneAgendaPreparation: vi.fn(),
 }));
 vi.mock("@corgtex/domain", () => ({
   approveReviewGatedProcurementTrial: mocks.approveReviewGatedProcurementTrial,
   configureControlPlaneMeetingRecorderIntegration: vi.fn(), createControlPlaneClient: vi.fn(), createControlPlaneCustomerMember: vi.fn(), deployLatestControlPlaneRelease: vi.fn(),
   executeControlPlaneClientMigration: vi.fn(),
+  enqueueControlPlaneAgendaPreparation: mocks.enqueueControlPlaneAgendaPreparation,
   enqueueControlPlaneDeployLatestRollout: vi.fn(), enqueueControlPlaneFleetSnapshots: vi.fn(), fetchCustomerSupportSnapshot: vi.fn(),
   finalizeControlPlaneClientMigration: vi.fn(),
   getControlPlaneClientMigrationStatus: vi.fn(),
   getControlPlaneDeployLatestPreflight: vi.fn(),
   getControlPlaneAiGovernanceStatus: vi.fn(), getControlPlaneContextHealth: vi.fn(),
-  getControlPlaneDeployment: vi.fn(), getControlPlaneIntegrationStatus: vi.fn(), getControlPlaneProviderStatus: mocks.getControlPlaneProviderStatus, getControlPlaneReleaseStatus: vi.fn(), getControlPlaneSlackSetupTarget: mocks.getControlPlaneSlackSetupTarget,
+  getControlPlaneDeployment: vi.fn(), getControlPlaneIntegrationStatus: vi.fn(), getControlPlaneMeetingOperationsReadiness: mocks.getControlPlaneMeetingOperationsReadiness, getControlPlaneProviderStatus: mocks.getControlPlaneProviderStatus, getControlPlaneReleaseStatus: vi.fn(), getControlPlaneSlackSetupTarget: mocks.getControlPlaneSlackSetupTarget,
   listControlPlaneCustomerMembers: vi.fn(),
   listControlPlaneDeployments: mocks.listControlPlaneDeployments,
   listControlPlaneCustomerSummaries: mocks.listControlPlaneCustomerSummaries,
@@ -85,6 +88,8 @@ describe("/api/control-plane/mcp", () => {
     mocks.rejectReviewGatedProcurementTrial.mockResolvedValue({ id: "trial-review", status: "SUSPENDED" });
     mocks.getControlPlaneProviderStatus.mockResolvedValue({ deploymentId: "dep-azure", adapter: { kind: "azure_read_model" } });
     mocks.getControlPlaneSlackSetupTarget.mockResolvedValue({ deploymentId: "dep-slack", managedWorkspaceId: "ws-slack" });
+    mocks.getControlPlaneMeetingOperationsReadiness.mockResolvedValue({ deploymentId: "inst-1", agenda: { status: "ready" }, recorder: { status: "ready" } });
+    mocks.enqueueControlPlaneAgendaPreparation.mockResolvedValue({ deploymentId: "inst-1", workflowJobId: "job-1" });
   });
 
   afterEach(() => {
@@ -147,6 +152,8 @@ describe("/api/control-plane/mcp", () => {
       "set_customer_feature_flag",
       "configure_customer_integration",
       "run_meeting_recorder_operation",
+      "check_meeting_operations_readiness",
+      "enqueue_agenda_preparation",
       "run_context_sync",
       "probe_customer_deployment_health",
       "record_verified_release",
@@ -722,6 +729,61 @@ describe("/api/control-plane/mcp", () => {
       error: { code: -32602, message: "entitlementEnabled must be a boolean." },
     });
     expect(vi.mocked(domain.configureControlPlaneMeetingRecorderIntegration)).not.toHaveBeenCalled();
+  });
+
+  it("routes meeting operations readiness checks to the domain", async () => {
+    const domain = await import("@corgtex/domain");
+    const { POST } = await import("./route");
+
+    const response = await POST(request({
+      jsonrpc: "2.0",
+      id: 9,
+      method: "tools/call",
+      params: {
+        name: "check_meeting_operations_readiness",
+        arguments: {
+          deploymentId: "inst-1",
+        },
+      },
+    }) as never);
+
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    expect(body.result.content[0].text).toContain("\"agenda\"");
+    expect(vi.mocked(domain.getControlPlaneMeetingOperationsReadiness)).toHaveBeenCalledWith(expect.any(Object), "inst-1");
+  });
+
+  it("routes agenda preparation enqueue requests to the domain", async () => {
+    mocks.resolveControlPlaneRequestActor.mockResolvedValueOnce({
+      kind: "agent",
+      authProvider: "control-plane",
+      label: "control-plane-agent",
+      scopes: ["control-plane:read", "control-plane:integrations:write"],
+    });
+    const domain = await import("@corgtex/domain");
+    const { POST } = await import("./route");
+
+    const response = await POST(request({
+      jsonrpc: "2.0",
+      id: 10,
+      method: "tools/call",
+      params: {
+        name: "enqueue_agenda_preparation",
+        arguments: {
+          deploymentId: "inst-1",
+          targetDateISO: "2026-07-02",
+          reason: "Verify regular-call agenda.",
+        },
+      },
+    }) as never);
+
+    expect(response.status).toBe(200);
+    await response.json();
+    expect(vi.mocked(domain.enqueueControlPlaneAgendaPreparation)).toHaveBeenCalledWith(expect.any(Object), {
+      deploymentId: "inst-1",
+      targetDateISO: "2026-07-02",
+      reason: "Verify regular-call agenda.",
+    });
   });
 
   it("rejects timezone-less meeting recorder smoke timestamps", async () => {

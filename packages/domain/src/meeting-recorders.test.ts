@@ -1083,7 +1083,8 @@ describe("meeting recorder domain", () => {
       workspaceId: "workspace-1",
       status: "COMPLETED",
       provider: "RECALL_AI",
-      createdAt: new Date("2026-05-05T18:05:00.000Z"),
+      createdAt: new Date(Date.now() - 60 * 60 * 1000),
+      completedAt: new Date(Date.now() - 55 * 60 * 1000),
     });
     prismaMock.meetingRecording.aggregate.mockResolvedValue({ _sum: { durationSeconds: 1500 } });
 
@@ -1339,7 +1340,7 @@ describe("meeting recorder domain", () => {
     expect(fetchMock.mock.calls[1]?.[0]).toBe("https://graph.microsoft.com/v1.0/me/events?$skiptoken=page-2");
   });
 
-  it("requires a completed smoke run and ignores failed sync jobs before the latest successful sync", async () => {
+  it("requires recent provider proof and ignores failed sync jobs before the latest successful sync", async () => {
     const { getMeetingRecorderEnterpriseReadiness } = await import("./meeting-recorders");
     const lastSyncAt = new Date("2026-05-05T18:00:00.000Z");
     prismaMock.workspaceRecorderCalendarSource.findUnique.mockResolvedValue({
@@ -1381,8 +1382,115 @@ describe("meeting recorder domain", () => {
       },
     });
     expect(readiness.checks.find((check) => check.key === "worker_sync")?.ok).toBe(true);
-    expect(readiness.checks.find((check) => check.key === "last_smoke")?.ok).toBe(false);
+    expect(readiness.checks.find((check) => check.key === "provider_proof")?.ok).toBe(false);
     expect(readiness.ready).toBe(false);
+  });
+
+  it("marks recorder readiness ready from a recent successful real recording", async () => {
+    const { getMeetingRecorderEnterpriseReadiness } = await import("./meeting-recorders");
+    const recent = new Date(Date.now() - 60 * 60 * 1000);
+    prismaMock.workspaceRecorderCalendarSource.findUnique.mockResolvedValue({
+      id: "source-1",
+      workspaceId: "workspace-1",
+      provider: "MICROSOFT",
+      providerAccountId: "ms-user-1",
+      providerAccountEmail: "calendar@customer.test",
+      displayName: "Customer Recorder",
+      status: "ACTIVE",
+      lastSyncAt: recent,
+      lastSyncStartedAt: recent,
+      lastSyncCompletedAt: recent,
+      lastSyncJobId: "job-success",
+      lastSyncError: null,
+      lastDryRunAt: null,
+      lastUpcomingEventCount: 1,
+      lastSchedulableEventCount: 1,
+      createdAt: recent,
+      updatedAt: recent,
+    });
+    prismaMock.workflowJob.count.mockResolvedValue(0);
+    prismaMock.meetingRecorderSmokeRun.findFirst.mockResolvedValue(null);
+    prismaMock.meetingRecording.findFirst.mockResolvedValue({
+      id: "recording-1",
+      workspaceId: "workspace-1",
+      meetingId: "meeting-1",
+      provider: "RECALL_AI",
+      status: "COMPLETED",
+      scheduledAt: recent,
+      startedAt: recent,
+      endedAt: recent,
+      createdAt: recent,
+      updatedAt: recent,
+    });
+    prismaMock.meetingRecording.findMany.mockResolvedValue([]);
+
+    const readiness = await getMeetingRecorderEnterpriseReadiness("workspace-1");
+
+    expect(readiness.checks.find((check) => check.key === "provider_proof")).toMatchObject({
+      ok: true,
+    });
+    expect(readiness.ready).toBe(true);
+    expect(readiness.lastSuccessfulRecording).toMatchObject({
+      id: "recording-1",
+      status: "COMPLETED",
+    });
+  });
+
+  it("blocks recorder readiness when a provider auth failure is newer than successful proof", async () => {
+    const { getMeetingRecorderEnterpriseReadiness } = await import("./meeting-recorders");
+    const proofAt = new Date(Date.now() - 2 * 60 * 60 * 1000);
+    const failureAt = new Date(Date.now() - 30 * 60 * 1000);
+    prismaMock.workspaceRecorderCalendarSource.findUnique.mockResolvedValue({
+      id: "source-1",
+      workspaceId: "workspace-1",
+      provider: "MICROSOFT",
+      providerAccountId: "ms-user-1",
+      providerAccountEmail: "calendar@customer.test",
+      displayName: "Customer Recorder",
+      status: "ACTIVE",
+      lastSyncAt: proofAt,
+      lastSyncStartedAt: proofAt,
+      lastSyncCompletedAt: proofAt,
+      lastSyncJobId: "job-success",
+      lastSyncError: null,
+      lastDryRunAt: null,
+      lastUpcomingEventCount: 1,
+      lastSchedulableEventCount: 1,
+      createdAt: proofAt,
+      updatedAt: proofAt,
+    });
+    prismaMock.workflowJob.count.mockResolvedValue(0);
+    prismaMock.meetingRecorderSmokeRun.findFirst.mockResolvedValue({
+      id: "smoke-1",
+      workspaceId: "workspace-1",
+      status: "COMPLETED",
+      provider: "RECALL_AI",
+      createdAt: proofAt,
+      completedAt: proofAt,
+    });
+    prismaMock.meetingRecording.findFirst.mockResolvedValue(null);
+    prismaMock.meetingRecording.findMany.mockResolvedValue([
+      {
+        id: "recording-failed",
+        provider: "RECALL_AI",
+        status: "FAILED",
+        failureCode: "vendor_http_error",
+        failureMessage: "RECALL_AI returned 401: authentication_failed Invalid API token for region.",
+        updatedAt: failureAt,
+      },
+    ]);
+
+    const readiness = await getMeetingRecorderEnterpriseReadiness("workspace-1");
+
+    expect(readiness.checks.find((check) => check.key === "provider_proof")).toMatchObject({
+      ok: false,
+      detail: "Recall authentication failed; verify the configured API token and region.",
+    });
+    expect(readiness.ready).toBe(false);
+    expect(readiness.lastProviderAuthFailure).toMatchObject({
+      id: "recording-failed",
+      failureCode: "vendor_http_error",
+    });
   });
 
   it("does not mark worker sync ready before a successful calendar sync completes", async () => {

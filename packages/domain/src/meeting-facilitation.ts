@@ -2,7 +2,7 @@ import { defaultModelGateway } from "@corgtex/models";
 import { prisma, toInputJson, type AppActor } from "@corgtex/shared";
 import type { MeetingInsightType } from "@prisma/client";
 import { requireWorkspaceMembership } from "./auth";
-import { invariant } from "./errors";
+import { AppError, invariant } from "./errors";
 import { fetchSlackThreadMessages, sendSlackMessage, updateSlackMessage, validateSlackPostTarget } from "./communication";
 import {
   markSlackMeetingActionReviewPosted,
@@ -12,11 +12,13 @@ import {
   buildLegacyAgendaFallback,
   buildRegularUpdateAgenda,
   isRegularUpdateAgenda,
+  normalizeMeetingAgendaForDisplay,
   normalizeLegacyAgenda,
   REGULAR_UPDATE_AGENDA_TEMPLATE_KEY,
   renderAgendaSlackBlocks,
   selectedMeetingAgendaTemplate,
   type LegacyMeetingAgenda,
+  type MeetingAgenda,
 } from "./meeting-agendas";
 import { extractMeetingInsights } from "./meeting-intelligence";
 import { buildMeetingIntelligenceContext } from "./meeting-intelligence-context";
@@ -33,6 +35,27 @@ type AgendaSettings = {
   agendaTimezone?: string | null;
   agendaRunHour?: number | null;
 };
+
+type AgendaReadinessStatus = "configured" | "ready" | "degraded" | "blocked";
+
+type AgendaMeetingCandidate = {
+  id: string;
+  workspaceId: string;
+  title: string | null;
+  status: string;
+  recordedAt: Date;
+  scheduledEndAt: Date | null;
+  agendaJson: unknown;
+  agendaChannelId: string | null;
+  agendaMessageTs: string | null;
+  agendaPostedAt: Date | null;
+  seriesId: string | null;
+  series: { recurrenceRule: string | null } | null;
+};
+
+const AGENDA_SCAN_LOOKAHEAD_MS = 7 * 24 * 60 * 60 * 1000;
+const AGENDA_POST_LEAD_MS = 24 * 60 * 60 * 1000;
+const AGENDA_DUE_GRACE_MS = 2 * 60 * 60 * 1000;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -151,11 +174,11 @@ async function scheduleNextAgendaJob(workspaceId: string, settings: AgendaSettin
   });
 }
 
-export async function enqueueMeetingAgendaPreparation(actor: AppActor, params: {
+export async function enqueueWorkspaceMeetingAgendaPreparation(params: {
   workspaceId: string;
   runAfter?: Date;
+  targetDateISO?: string | null;
 }) {
-  await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
   const runAfter = params.runAfter ?? new Date();
   const dedupeKey = `meeting-agenda-prepare:${params.workspaceId}:manual:${runAfter.toISOString()}`;
   return prisma.workflowJob.upsert({
@@ -165,12 +188,21 @@ export async function enqueueMeetingAgendaPreparation(actor: AppActor, params: {
       workspaceId: params.workspaceId,
       type: "meeting.agenda.prepare",
       payload: {
-        targetDateISO: dateKey(new Date(runAfter.getTime() + 24 * 60 * 60 * 1000)),
+        targetDateISO: params.targetDateISO ?? dateKey(new Date(runAfter.getTime() + 24 * 60 * 60 * 1000)),
       },
       runAfter,
       dedupeKey,
     },
   });
+}
+
+export async function enqueueMeetingAgendaPreparation(actor: AppActor, params: {
+  workspaceId: string;
+  runAfter?: Date;
+  targetDateISO?: string | null;
+}) {
+  await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
+  return enqueueWorkspaceMeetingAgendaPreparation(params);
 }
 
 export async function updateSlackAgendaSettings(actor: AppActor, params: {
@@ -228,38 +260,220 @@ export async function prepareAgendaForMeeting(params: {
   }
 
   const fallbackAgenda = buildLegacyAgendaFallback(context);
-
-  const extraction = await defaultModelGateway.extract({
-    workspaceId: params.workspaceId,
-    workflowJobId: params.workflowJobId,
-    instruction: [
-      "Generate a concise, practical meeting agenda for a self-managed organization.",
-      "Use the supplied meeting, attendee, open tension, prior follow-up, and pending action context.",
-      "Do not invent private facts. Preserve source IDs where provided.",
-    ].join("\n"),
-    input: JSON.stringify(context),
-    schemaHint: `{
-      "title": "string",
-      "intro": "string",
-      "sections": [
-        {
-          "title": "string",
-          "durationMinutes": "number",
-          "items": [
-            { "text": "string", "sourceType": "string", "sourceId": "string", "owner": "string" }
-          ]
-        }
-      ]
-    }`,
-  });
-
-  const agenda = normalizeLegacyAgenda(extraction.output, context.meeting.title || "Meeting agenda", fallbackAgenda.sections);
+  let agenda: LegacyMeetingAgenda = fallbackAgenda;
+  let fallbackReason: string | null = "model_not_used";
+  try {
+    const extraction = await defaultModelGateway.extract({
+      workspaceId: params.workspaceId,
+      workflowJobId: params.workflowJobId,
+      instruction: [
+        "Generate a concise, practical meeting agenda for a self-managed organization.",
+        "Use the supplied meeting, attendee, open tension, prior follow-up, and pending action context.",
+        "Do not invent private facts. Preserve source IDs where provided.",
+      ].join("\n"),
+      input: JSON.stringify(context),
+      schemaHint: `{
+        "title": "string",
+        "intro": "string",
+        "sections": [
+          {
+            "title": "string",
+            "durationMinutes": "number",
+            "items": [
+              { "text": "string", "sourceType": "string", "sourceId": "string", "owner": "string" }
+            ]
+          }
+        ]
+      }`,
+    });
+    agenda = normalizeLegacyAgenda(extraction.output, context.meeting.title || "Meeting agenda", fallbackAgenda.sections);
+    fallbackReason = null;
+  } catch {
+    agenda = fallbackAgenda;
+    fallbackReason = "model_generation_failed";
+  }
   await prisma.meeting.update({
     where: { id: context.meeting.id },
     data: { agendaJson: toInputJson(agenda) },
   });
 
-  return { meeting: context.meeting, agenda, context };
+  return { meeting: context.meeting, agenda, context, fallbackReason };
+}
+
+function hasPostedAgenda(meeting: Pick<AgendaMeetingCandidate, "agendaPostedAt" | "agendaChannelId" | "agendaMessageTs">) {
+  return Boolean(meeting.agendaPostedAt && meeting.agendaChannelId?.trim() && meeting.agendaMessageTs?.trim());
+}
+
+function sameUtcWeekdayAndMinute(left: Date, right: Date) {
+  return left.getUTCDay() === right.getUTCDay()
+    && left.getUTCHours() === right.getUTCHours()
+    && left.getUTCMinutes() === right.getUTCMinutes();
+}
+
+function hasSeriesSignal(meeting: Pick<AgendaMeetingCandidate, "seriesId" | "series">) {
+  return Boolean(meeting.seriesId || meeting.series?.recurrenceRule);
+}
+
+async function hasConservativeRecurringFallback(workspaceId: string, meeting: Pick<AgendaMeetingCandidate, "id" | "title" | "recordedAt">) {
+  const title = meeting.title?.trim();
+  if (!title) return false;
+  const previous = await prisma.meeting.findMany({
+    where: {
+      workspaceId,
+      id: { not: meeting.id },
+      title,
+      status: "COMPLETED",
+      archivedAt: null,
+      recordedAt: { lt: meeting.recordedAt },
+    },
+    orderBy: { recordedAt: "desc" },
+    take: 10,
+    select: { recordedAt: true },
+  });
+  return previous.some((candidate: { recordedAt: Date }) => sameUtcWeekdayAndMinute(candidate.recordedAt, meeting.recordedAt));
+}
+
+async function filterRegularAgendaMeetings(workspaceId: string, meetings: AgendaMeetingCandidate[]) {
+  const eligible: AgendaMeetingCandidate[] = [];
+  for (const meeting of meetings) {
+    if (hasSeriesSignal(meeting) || await hasConservativeRecurringFallback(workspaceId, meeting)) {
+      eligible.push(meeting);
+    }
+  }
+  return eligible;
+}
+
+async function findRegularAgendaMeetingsForDay(workspaceId: string, start: Date, end: Date) {
+  const candidates = await prisma.meeting.findMany({
+    where: {
+      workspaceId,
+      status: "SCHEDULED",
+      archivedAt: null,
+      recordedAt: { gte: start, lt: end },
+      OR: [
+        { agendaPostedAt: null },
+        { agendaChannelId: null },
+        { agendaMessageTs: null },
+      ],
+    },
+    orderBy: { recordedAt: "asc" },
+    include: { series: { select: { recurrenceRule: true } } },
+  }) as AgendaMeetingCandidate[];
+  return filterRegularAgendaMeetings(workspaceId, candidates);
+}
+
+async function findNextRegularAgendaMeeting(workspaceId: string, now = new Date()) {
+  const candidates = await prisma.meeting.findMany({
+    where: {
+      workspaceId,
+      status: "SCHEDULED",
+      archivedAt: null,
+      recordedAt: {
+        gte: now,
+        lt: new Date(now.getTime() + AGENDA_SCAN_LOOKAHEAD_MS),
+      },
+    },
+    orderBy: { recordedAt: "asc" },
+    take: 20,
+    include: { series: { select: { recurrenceRule: true } } },
+  }) as AgendaMeetingCandidate[];
+  const eligible = await filterRegularAgendaMeetings(workspaceId, candidates);
+  return eligible[0] ?? null;
+}
+
+function sanitizeAgendaFailure(error: unknown) {
+  const raw = error instanceof Error ? error.message : "Unknown agenda preparation error.";
+  return truncate(raw.replace(/https?:\/\/\S+/g, "[url]"), 500);
+}
+
+function compactAgendaMeeting(meeting: AgendaMeetingCandidate | null) {
+  if (!meeting) return null;
+  return {
+    id: meeting.id,
+    title: meeting.title,
+    recordedAt: meeting.recordedAt,
+    scheduledEndAt: meeting.scheduledEndAt,
+    seriesId: meeting.seriesId,
+    hasAgendaJson: Boolean(meeting.agendaJson),
+    hasPostedAgenda: hasPostedAgenda(meeting),
+  };
+}
+
+function compactAgendaJob(job: { id: string; status: string; runAfter: Date; error: string | null; updatedAt: Date } | null) {
+  if (!job) return null;
+  return {
+    id: job.id,
+    status: job.status,
+    runAfter: job.runAfter,
+    updatedAt: job.updatedAt,
+    error: job.error ? sanitizeAgendaFailure(new Error(job.error)) : null,
+  };
+}
+
+async function agendaPayloadForPosting(params: {
+  workspaceId: string;
+  meeting: AgendaMeetingCandidate;
+  workflowJobId?: string;
+}) {
+  const existingAgenda = normalizeMeetingAgendaForDisplay(params.meeting.agendaJson, params.meeting.title || "Meeting agenda");
+  if (existingAgenda) {
+    return {
+      meeting: params.meeting,
+      agenda: existingAgenda,
+      context: await buildMeetingAgendaContext(params.workspaceId, params.meeting.id),
+      reusedExistingAgenda: true,
+    };
+  }
+  const prepared = await prepareAgendaForMeeting({
+    workspaceId: params.workspaceId,
+    meetingId: params.meeting.id,
+    workflowJobId: params.workflowJobId,
+  });
+  return {
+    meeting: params.meeting,
+    agenda: prepared.agenda as MeetingAgenda,
+    context: prepared.context,
+    reusedExistingAgenda: false,
+  };
+}
+
+async function postAgendaForMeeting(params: {
+  workspaceId: string;
+  installationId: string;
+  channelId: string;
+  settings: AgendaSettings;
+  meeting: AgendaMeetingCandidate;
+  workflowJobId?: string;
+}) {
+  if (hasPostedAgenda(params.meeting)) {
+    return { posted: false, skipped: true, reason: "already_posted" };
+  }
+  const { agenda, context } = await agendaPayloadForPosting({
+    workspaceId: params.workspaceId,
+    meeting: params.meeting,
+    workflowJobId: params.workflowJobId,
+  });
+  const attendeeMentions = await attendeeMentionsForContext(params.installationId, params.workspaceId, context.attendees);
+  const response = await sendSlackMessage(params.installationId, { channel: params.channelId }, renderAgendaSlackBlocks({
+    meeting: params.meeting,
+    agenda,
+    attendeeMentions,
+    timezone: params.settings.agendaTimezone || "UTC",
+  }));
+  const messageTs = typeof response.ts === "string" ? response.ts.trim() : "";
+  if (!messageTs) {
+    throw new AppError(502, "SLACK_AGENDA_POST_MISSING_TS", "Slack accepted the agenda post without returning a message timestamp.");
+  }
+  await prisma.meeting.update({
+    where: { id: params.meeting.id },
+    data: {
+      agendaJson: toInputJson(agenda),
+      agendaChannelId: String(response.channel ?? params.channelId),
+      agendaMessageTs: messageTs,
+      agendaPostedAt: new Date(),
+    },
+  });
+  return { posted: true, skipped: false };
 }
 
 export async function runMeetingAgendaPreparation(params: {
@@ -271,60 +485,128 @@ export async function runMeetingAgendaPreparation(params: {
   const settings = agendaSettings(installation?.settings);
   const channelId = settings.defaultAgendaChannelId?.trim();
 
-  if (!installation || !channelId) {
+  try {
+    if (!installation || !channelId) {
+      return { skipped: true, reason: "slack_agenda_channel_missing" };
+    }
+    const channelValidation = await validateSlackPostTarget(installation.id, channelId);
+    if (!channelValidation.ok) {
+      return { skipped: true, reason: channelValidation.code };
+    }
+
+    const targetDate = params.targetDateISO ? new Date(`${params.targetDateISO}T00:00:00.000Z`) : tomorrowBounds().start;
+    const { start, end } = utcDayBounds(Number.isNaN(targetDate.valueOf()) ? tomorrowBounds().start : targetDate);
+    const meetings = await findRegularAgendaMeetingsForDay(params.workspaceId, start, end);
+
+    let posted = 0;
+    const skipped: Array<{ meetingId: string; reason: string }> = [];
+    const failures: Array<{ meetingId: string; reason: string }> = [];
+    for (const meeting of meetings) {
+      try {
+        const result = await postAgendaForMeeting({
+          workspaceId: params.workspaceId,
+          installationId: installation.id,
+          channelId,
+          settings,
+          meeting,
+          workflowJobId: params.workflowJobId,
+        });
+        if (result.posted) {
+          posted += 1;
+        } else if (result.skipped && result.reason) {
+          skipped.push({ meetingId: meeting.id, reason: result.reason });
+        }
+      } catch (error) {
+        failures.push({ meetingId: meeting.id, reason: sanitizeAgendaFailure(error) });
+      }
+    }
+
+    if (failures.length > 0) {
+      throw new AppError(502, "MEETING_AGENDA_PREPARATION_PARTIAL_FAILURE", `Agenda preparation failed for ${failures.length} meeting(s): ${failures.map((failure) => `${failure.meetingId}:${failure.reason}`).join("; ")}`);
+    }
+
+    return {
+      posted,
+      meetingIds: meetings.map((meeting: { id: string }) => meeting.id),
+      skipped,
+      failures,
+    };
+  } finally {
     await scheduleNextAgendaJob(params.workspaceId, settings);
-    return { skipped: true, reason: "slack_agenda_channel_missing" };
   }
+}
+
+export async function getMeetingAgendaReadiness(workspaceId: string, now = new Date()) {
+  const [installation, nextMeeting, lastAgendaJob, failedAgendaJob] = await Promise.all([
+    activeSlackInstallation(workspaceId),
+    findNextRegularAgendaMeeting(workspaceId, now),
+    prisma.workflowJob.findFirst({
+      where: { workspaceId, type: "meeting.agenda.prepare" },
+      orderBy: { createdAt: "desc" },
+      select: { id: true, status: true, runAfter: true, error: true, updatedAt: true },
+    }),
+    prisma.workflowJob.findFirst({
+      where: { workspaceId, type: "meeting.agenda.prepare", status: "FAILED" },
+      orderBy: { updatedAt: "desc" },
+      select: { id: true, status: true, runAfter: true, error: true, updatedAt: true },
+    }),
+  ]);
+  const settings = agendaSettings(installation?.settings);
+  const channelId = settings.defaultAgendaChannelId?.trim();
+  const failedChecks: Array<{ key: string; label: string; detail: string }> = [];
+
+  if (!installation) {
+    failedChecks.push({ key: "slack_installation", label: "Slack installation", detail: "No active Slack installation." });
+    return { workspaceId, status: "blocked" as AgendaReadinessStatus, ready: false, configured: false, detail: "Slack is not connected.", failedChecks, nextMeeting: compactAgendaMeeting(nextMeeting), lastAgendaJob: compactAgendaJob(lastAgendaJob) };
+  }
+  if (!channelId) {
+    failedChecks.push({ key: "agenda_channel", label: "Agenda channel", detail: "No default agenda channel configured." });
+    return { workspaceId, status: "blocked" as AgendaReadinessStatus, ready: false, configured: false, detail: "Agenda channel is not configured.", failedChecks, nextMeeting: compactAgendaMeeting(nextMeeting), lastAgendaJob: compactAgendaJob(lastAgendaJob) };
+  }
+
   const channelValidation = await validateSlackPostTarget(installation.id, channelId);
   if (!channelValidation.ok) {
-    await scheduleNextAgendaJob(params.workspaceId, settings);
-    return { skipped: true, reason: channelValidation.code };
+    failedChecks.push({ key: "agenda_channel", label: "Agenda channel", detail: channelValidation.message });
+    return { workspaceId, status: "blocked" as AgendaReadinessStatus, ready: false, configured: true, detail: channelValidation.message, failedChecks, nextMeeting: compactAgendaMeeting(nextMeeting), lastAgendaJob: compactAgendaJob(lastAgendaJob) };
   }
 
-  const targetDate = params.targetDateISO ? new Date(`${params.targetDateISO}T00:00:00.000Z`) : tomorrowBounds().start;
-  const { start, end } = utcDayBounds(Number.isNaN(targetDate.valueOf()) ? tomorrowBounds().start : targetDate);
-  const meetings = await prisma.meeting.findMany({
+  if (!nextMeeting) {
+    return { workspaceId, status: "configured" as AgendaReadinessStatus, ready: false, configured: true, detail: "No upcoming regular call found in the next 7 days.", failedChecks, nextMeeting: null, lastAgendaJob: compactAgendaJob(lastAgendaJob) };
+  }
+  if (hasPostedAgenda(nextMeeting)) {
+    return { workspaceId, status: "ready" as AgendaReadinessStatus, ready: true, configured: true, detail: "Next regular call has a posted agenda.", failedChecks, nextMeeting: compactAgendaMeeting(nextMeeting), lastAgendaJob: compactAgendaJob(lastAgendaJob) };
+  }
+
+  const agendaDueAt = new Date(nextMeeting.recordedAt.getTime() - AGENDA_POST_LEAD_MS);
+  const pendingJob = await prisma.workflowJob.findFirst({
     where: {
-      workspaceId: params.workspaceId,
-      status: "SCHEDULED",
-      archivedAt: null,
-      agendaPostedAt: null,
-      recordedAt: { gte: start, lt: end },
+      workspaceId,
+      type: "meeting.agenda.prepare",
+      status: { in: ["PENDING", "RUNNING"] },
+      runAfter: { lte: nextMeeting.recordedAt },
     },
-    orderBy: { recordedAt: "asc" },
+    orderBy: { runAfter: "asc" },
+    select: { id: true, status: true, runAfter: true, error: true, updatedAt: true },
   });
-
-  let posted = 0;
-  for (const meeting of meetings) {
-    const { agenda, context } = await prepareAgendaForMeeting({
-      workspaceId: params.workspaceId,
-      meetingId: meeting.id,
-      workflowJobId: params.workflowJobId,
-    });
-
-    const attendeeMentions = await attendeeMentionsForContext(installation.id, params.workspaceId, context.attendees);
-
-    const response = await sendSlackMessage(installation.id, { channel: channelId }, renderAgendaSlackBlocks({
-      meeting,
-      agenda,
-      attendeeMentions,
-      timezone: settings.agendaTimezone || "UTC",
-    }));
-
-    await prisma.meeting.update({
-      where: { id: meeting.id },
-      data: {
-        agendaJson: toInputJson(agenda),
-        agendaChannelId: String(response.channel ?? channelId),
-        agendaMessageTs: String(response.ts ?? ""),
-        agendaPostedAt: new Date(),
-      },
-    });
-    posted += 1;
+  if (pendingJob && agendaDueAt.getTime() - now.getTime() <= AGENDA_DUE_GRACE_MS) {
+    return { workspaceId, status: "ready" as AgendaReadinessStatus, ready: true, configured: true, detail: "Agenda job is queued for the next regular call.", failedChecks, nextMeeting: compactAgendaMeeting(nextMeeting), lastAgendaJob: compactAgendaJob(pendingJob) };
+  }
+  if (agendaDueAt > now) {
+    return { workspaceId, status: "configured" as AgendaReadinessStatus, ready: false, configured: true, detail: "Next regular call is not yet inside the 24 hour agenda window.", failedChecks, nextMeeting: compactAgendaMeeting(nextMeeting), lastAgendaJob: compactAgendaJob(lastAgendaJob) };
   }
 
-  await scheduleNextAgendaJob(params.workspaceId, settings);
-  return { posted, meetingIds: meetings.map((meeting: { id: string }) => meeting.id) };
+  const failedDetail = failedAgendaJob?.error ? sanitizeAgendaFailure(new Error(failedAgendaJob.error)) : "No posted agenda or pending agenda job for the next regular call.";
+  failedChecks.push({ key: "next_agenda", label: "Next regular-call agenda", detail: failedDetail });
+  return {
+    workspaceId,
+    status: "degraded" as AgendaReadinessStatus,
+    ready: false,
+    configured: true,
+    detail: failedDetail,
+    failedChecks,
+    nextMeeting: compactAgendaMeeting(nextMeeting),
+    lastAgendaJob: compactAgendaJob(failedAgendaJob ?? lastAgendaJob),
+  };
 }
 
 function parseAgendaEditOutput(output: Record<string, unknown>, fallbackTitle: string): AgendaEditOutput {
