@@ -17,6 +17,11 @@ import { TimeZoneSelect } from "@/lib/components/TimeZoneSelect";
 import { ItemActions } from "@/lib/components/ui/ItemActions";
 import { WorkItemFilterControls } from "@/lib/components/WorkItemControls";
 import {
+  DEFAULT_MEETING_DURATION_MINUTES,
+  MAX_MEETING_DURATION_MINUTES,
+  MIN_MEETING_DURATION_MINUTES,
+} from "@/lib/meeting-timezone";
+import {
   buildWorkItemQuery,
   normalizeDateOnly,
   resolveWorkItemFilters,
@@ -75,6 +80,15 @@ export default async function MeetingsPage({
     ? await listMeetingRecordings(workspaceId, upcomingMeetings.map((meeting) => meeting.id))
     : [];
   const latestRecordingByMeeting = new Map(recordings.map((recording) => [recording.meetingId, recording]));
+  const recorderSentMeetingId = Array.isArray(resolvedSearch.recorderSent)
+    ? resolvedSearch.recorderSent[0] ?? null
+    : resolvedSearch.recorderSent ?? null;
+  const recorderSentMeeting = recorderSentMeetingId
+    ? upcomingMeetings.find((meeting) => meeting.id === recorderSentMeetingId) ?? null
+    : null;
+  const recorderSentRecording = recorderSentMeeting
+    ? latestRecordingByMeeting.get(recorderSentMeeting.id) ?? null
+    : null;
   const t = await getTranslations("meetings");
   const tCommon = await getTranslations("common");
   const tWork = await getTranslations("workItems");
@@ -90,6 +104,16 @@ export default async function MeetingsPage({
           <span>{t("meetingsScheduled", { count: upcomingMeetings.length })}</span>
         </div>
       </header>
+
+      {recorderSentMeeting ? (
+        <div className="form-message form-message-success" role="status" style={{ marginBottom: 24 }}>
+          <strong>{t("recorderSentTitle")}</strong>{" "}
+          {t("recorderSentDescription", { status: recorderSentRecording?.status ?? t("recorderStatusPending") })}{" "}
+          <Link href={`/workspaces/${workspaceId}/meetings/${recorderSentMeeting.id}`}>
+            {t("recorderSentViewMeeting")}
+          </Link>
+        </div>
+      ) : null}
 
       {/* ── OUTPUT SECTIONS (primary content) ────────────────────── */}
 
@@ -318,7 +342,7 @@ export default async function MeetingsPage({
                 </label>
                 <label style={{ flex: 1 }}>
                   {t("formDurationMinutes")}
-                  <input name="durationMinutes" type="number" min={1} max={480} step={5} defaultValue={60} />
+                  <input name="durationMinutes" type="number" min={MIN_MEETING_DURATION_MINUTES} max={MAX_MEETING_DURATION_MINUTES} step={1} defaultValue={DEFAULT_MEETING_DURATION_MINUTES} />
                 </label>
               </div>
               <TimeZoneSelect />

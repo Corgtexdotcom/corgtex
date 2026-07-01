@@ -28,8 +28,14 @@ import { enforceDemoGuard } from "@/lib/demo-guard";
 import { MarkdownEditor } from "@/lib/components/MarkdownEditor";
 import { TimeZoneSelect } from "@/lib/components/TimeZoneSelect";
 import { getWorkspaceFeatureFlags } from "@/lib/workspace-feature-flags";
-import { parseOptionalMeetingDateTimeInput } from "@/lib/meeting-timezone";
+import {
+  DEFAULT_MEETING_DURATION_MINUTES,
+  MAX_MEETING_DURATION_MINUTES,
+  MIN_MEETING_DURATION_MINUTES,
+  parseOptionalMeetingDateTimeInput,
+} from "@/lib/meeting-timezone";
 import { KnowledgeFileUploader } from "../KnowledgeFileUploader";
+import { ManualMeetingRecordingForm } from "./ManualMeetingRecordingForm";
 import {
   crmAccountIdFromPath,
   getWorkspaceAddActions,
@@ -61,7 +67,6 @@ import {
   inviteMemberAction,
   provisionProspectWorkspaceAction,
   requestMemberInviteAction,
-  scheduleManualMeetingRecordingAction,
   uploadMeetingTranscriptAction,
 } from "../actions";
 import { createArticleAction } from "../brain/actions";
@@ -337,12 +342,6 @@ export default async function WorkspaceAddPage({
     redirect(returnTo);
   }
 
-  async function recordMeetingManuallyAndReturn(formData: FormData) {
-    "use server";
-    await scheduleManualMeetingRecordingAction(formData);
-    redirect(returnTo);
-  }
-
   async function createContactAndReturn(formData: FormData) {
     "use server";
     await createContactAction(formData);
@@ -541,7 +540,7 @@ export default async function WorkspaceAddPage({
             <label>Description<textarea name="description" /></label>
             <div className="actions-inline">
               <label style={{ flex: 1 }}>Starts at<input name="startsAt" type="datetime-local" required /></label>
-              <label style={{ flex: 1 }}>Duration (minutes)<input name="durationMinutes" type="number" min={1} max={480} step={5} defaultValue={60} /></label>
+              <label style={{ flex: 1 }}>Duration (minutes)<input name="durationMinutes" type="number" min={MIN_MEETING_DURATION_MINUTES} max={MAX_MEETING_DURATION_MINUTES} step={1} defaultValue={DEFAULT_MEETING_DURATION_MINUTES} /></label>
             </div>
             <TimeZoneSelect />
             <label>
@@ -585,19 +584,7 @@ export default async function WorkspaceAddPage({
         )}
 
         {kind === "meeting_manual_recording" && (
-          <form action={recordMeetingManuallyAndReturn} className="stack nr-form-section">
-            {hiddenWorkspace(workspaceId)}
-            <label>Meeting URL<input name="meetingUrl" type="url" placeholder="https://teams.microsoft.com/l/meetup-join/..." required /></label>
-            <details>
-              <summary className="nr-hide-marker" style={{ cursor: "pointer", fontWeight: 600, color: "var(--accent)" }}>Optional details</summary>
-              <div className="stack" style={{ marginTop: 12 }}>
-                <label>Title<input name="title" placeholder="Live meeting" /></label>
-                <label>Duration (minutes)<input name="durationMinutes" type="number" min={1} max={480} step={5} defaultValue={60} /></label>
-                <label>Participant emails<input name="participantEmails" placeholder="one@example.com, two@example.com" /></label>
-              </div>
-            </details>
-            <div className="actions-inline"><button type="submit">Send recorder now</button>{cancelLink(returnTo)}</div>
-          </form>
+          <ManualMeetingRecordingForm workspaceId={workspaceId} cancelHref={returnTo} />
         )}
 
         {kind === "action" && (

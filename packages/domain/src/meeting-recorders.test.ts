@@ -30,6 +30,7 @@ const { prismaMock, fetchMock } = vi.hoisted(() => {
     },
     meeting: {
       create: vi.fn(),
+      delete: vi.fn(),
       findFirst: vi.fn(),
       update: vi.fn(),
       upsert: vi.fn(),
@@ -57,6 +58,9 @@ const { prismaMock, fetchMock } = vi.hoisted(() => {
     },
     member: {
       findUnique: vi.fn(),
+    },
+    workspacePermalink: {
+      upsert: vi.fn(),
     },
     meetingInsight: {
       deleteMany: vi.fn(),
@@ -179,6 +183,19 @@ describe("meeting recorder domain", () => {
     }));
     prismaMock.meetingRecording.aggregate.mockResolvedValue({ _sum: { durationSeconds: 0 } });
     prismaMock.meetingRecording.updateMany.mockResolvedValue({ count: 1 });
+    prismaMock.meeting.delete.mockResolvedValue({ id: "meeting-1" });
+    prismaMock.meeting.create.mockResolvedValue({
+      id: "meeting-1",
+      workspaceId: "workspace-1",
+      title: "Live meeting",
+      source: "manual-recorder",
+      status: "SCHEDULED",
+      recordedAt: new Date("2026-06-24T17:00:00.000Z"),
+      scheduledEndAt: new Date("2026-06-24T18:00:00.000Z"),
+      meetingUrl: "https://meet.google.com/abc-defg-hij",
+      participantEmails: ["team@example.com"],
+    });
+    prismaMock.workspacePermalink.upsert.mockResolvedValue({});
     prismaMock.workflowJob.count.mockResolvedValue(0);
     prismaMock.meetingRecorderSmokeRun.findFirst.mockResolvedValue(null);
     prismaMock.member.findUnique.mockResolvedValue({
@@ -188,6 +205,108 @@ describe("meeting recorder domain", () => {
       role: "FACILITATOR",
       isActive: true,
     });
+  });
+
+  it("sends a manual meeting recorder after validating the link and duration", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-06-24T17:00:00.000Z"));
+    try {
+      const { sendManualMeetingRecorder } = await import("./meeting-recorders");
+      fetchMock.mockResolvedValue({ ok: true, status: 200, text: async () => JSON.stringify({ id: "recall-bot-1" }) });
+
+      await expect(sendManualMeetingRecorder(facilitatorActor, {
+        workspaceId: "workspace-1",
+        meetingUrl: "https://MEET.google.com/abc-defg-hij#ignored",
+        participantEmails: [" Team@Example.com "],
+      })).resolves.toMatchObject({
+        meeting: { id: "meeting-1" },
+        recording: { status: "SCHEDULED", externalBotId: "recall-bot-1" },
+      });
+
+      expect(prismaMock.meeting.create).toHaveBeenCalledWith({
+        data: expect.objectContaining({
+          workspaceId: "workspace-1",
+          title: "Live meeting",
+          source: "manual-recorder",
+          recordedAt: new Date("2026-06-24T17:00:00.000Z"),
+          scheduledEndAt: new Date("2026-06-24T18:00:00.000Z"),
+          meetingUrl: "https://meet.google.com/abc-defg-hij",
+          participantEmails: ["team@example.com"],
+        }),
+      });
+      expect(prismaMock.meeting.delete).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("rejects non-schedulable Teams meet links before creating a manual meeting", async () => {
+    const { sendManualMeetingRecorder } = await import("./meeting-recorders");
+
+    await expect(sendManualMeetingRecorder(facilitatorActor, {
+      workspaceId: "workspace-1",
+      meetingUrl: "https://teams.microsoft.com/meet/21377000607471?p=abc",
+    })).rejects.toMatchObject({
+      status: 400,
+      code: "RECORDER_TEAMS_FULL_JOIN_LINK_REQUIRED",
+      message: expect.stringContaining("/l/meetup-join/"),
+    });
+
+    expect(prismaMock.meeting.create).not.toHaveBeenCalled();
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("rejects invalid manual recorder duration before creating a meeting", async () => {
+    const { sendManualMeetingRecorder } = await import("./meeting-recorders");
+
+    await expect(sendManualMeetingRecorder(facilitatorActor, {
+      workspaceId: "workspace-1",
+      meetingUrl: "https://meet.google.com/abc-defg-hij",
+      durationMinutes: "481",
+    })).rejects.toMatchObject({
+      status: 400,
+      code: "INVALID_INPUT",
+    });
+
+    expect(prismaMock.meeting.create).not.toHaveBeenCalled();
+  });
+
+  it("discards the manual meeting when provider scheduling fails", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-06-24T17:00:00.000Z"));
+    try {
+      const { sendManualMeetingRecorder } = await import("./meeting-recorders");
+      prismaMock.meeting.findFirst
+        .mockResolvedValueOnce({
+          id: "meeting-1",
+          title: "Live meeting",
+          recordedAt: new Date("2026-06-24T17:00:00.000Z"),
+          scheduledEndAt: new Date("2026-06-24T18:00:00.000Z"),
+          meetingUrl: "https://meet.google.com/abc-defg-hij",
+          participantEmails: [],
+        })
+        .mockResolvedValueOnce({ id: "meeting-1", recordings: [] });
+      fetchMock.mockResolvedValue({ ok: false, status: 507, text: async () => "capacity" });
+
+      await expect(sendManualMeetingRecorder(facilitatorActor, {
+        workspaceId: "workspace-1",
+        meetingUrl: "https://meet.google.com/abc-defg-hij",
+      })).rejects.toMatchObject({
+        status: 502,
+        code: "RECORDER_SCHEDULING_FAILED",
+      });
+
+      expect(prismaMock.meeting.create).toHaveBeenCalled();
+      expect(prismaMock.meeting.delete).toHaveBeenCalledWith({ where: { id: "meeting-1" } });
+      expect(prismaMock.meetingRecording.update).toHaveBeenCalledWith(expect.objectContaining({
+        data: expect.objectContaining({
+          status: "FAILED",
+          failureCode: "vendor_capacity_exceeded",
+        }),
+      }));
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("builds Recall create bot requests with transcript and consent chat config", async () => {

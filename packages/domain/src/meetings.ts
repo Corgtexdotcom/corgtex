@@ -8,6 +8,7 @@ import { requireWorkspaceMembership } from "./auth";
 import { archiveFilterWhere, archiveWorkspaceArtifact, type ArchiveFilter } from "./archive";
 import { ensureWorkspacePermalink, workspaceEntityCanonicalPath } from "./permalinks";
 import { invariant } from "./errors";
+import { meetingUrlHash, normalizeMeetingUrl } from "./meeting-urls";
 
 const DEFAULT_OCCURRENCE_WINDOW_DAYS = 30;
 const TRANSCRIPT_MATCH_WINDOW_MS = 2 * 60 * 60 * 1000;
@@ -104,24 +105,6 @@ function toIcsDate(value: Date) {
 
 function hashStableId(value: string) {
   return createHash("sha256").update(value).digest("hex").slice(0, 16);
-}
-
-function normalizeMeetingUrl(value: string) {
-  try {
-    const url = new URL(value.trim());
-    url.hash = "";
-    url.hostname = url.hostname.toLowerCase();
-    if (url.hostname.includes("zoom.us")) {
-      url.searchParams.sort();
-    }
-    return url.toString();
-  } catch {
-    return value.trim();
-  }
-}
-
-function meetingUrlHash(value: string) {
-  return createHash("sha256").update(normalizeMeetingUrl(value)).digest("hex");
 }
 
 function workspaceScopedMeetingExternalId(workspaceId: string, externalId?: string | null) {

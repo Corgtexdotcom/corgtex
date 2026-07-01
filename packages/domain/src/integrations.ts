@@ -4,7 +4,7 @@ import type { OAuthConnection, OAuthProvider, Prisma } from "@prisma/client";
 import { requireWorkspaceMembership } from "./auth";
 import { archiveFilterWhere, archiveWorkspaceArtifact, type ArchiveFilter } from "./archive";
 import { invariant } from "./errors";
-import { extractSupportedMeetingUrlFromText } from "./meeting-recorders";
+import { extractSupportedMeetingUrlFromText } from "./meeting-urls";
 
 const ENCRYPTED_TOKEN_STORAGE_VERSION = "aes-256-gcm";
 
