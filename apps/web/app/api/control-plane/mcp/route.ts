@@ -12,12 +12,14 @@ import {
   executeControlPlaneClientMigration,
   finalizeControlPlaneClientMigration,
   fetchCustomerSupportSnapshot,
+  enqueueControlPlaneAgendaPreparation,
   getControlPlaneClientMigrationStatus,
   getControlPlaneDeployLatestPreflight,
   getControlPlaneAiGovernanceStatus,
   getControlPlaneContextHealth,
   getControlPlaneDeployment,
   getControlPlaneIntegrationStatus,
+  getControlPlaneMeetingOperationsReadiness,
   getControlPlaneSlackSetupTarget,
   getControlPlaneProviderStatus,
   getControlPlaneReleaseStatus,
@@ -462,6 +464,30 @@ const tools = [
     },
   },
   {
+    name: "check_meeting_operations_readiness",
+    description: "Read agenda and recorder readiness for a managed customer without exposing raw meeting content or credentials.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        deploymentId: { type: "string" },
+      },
+      required: ["deploymentId"],
+    },
+  },
+  {
+    name: "enqueue_agenda_preparation",
+    description: "Queue the deterministic regular-call agenda scan for a managed customer/date window.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        deploymentId: { type: "string" },
+        targetDateISO: { type: "string" },
+        reason: { type: "string" },
+      },
+      required: ["deploymentId", "reason"],
+    },
+  },
+  {
     name: "run_context_sync",
     description: "Queue an audited context sync for all active sources or one source.",
     inputSchema: {
@@ -636,6 +662,8 @@ const toolScopes: Record<string, string> = {
   refresh_customer_deployment_snapshot: "control-plane:support:write",
   configure_customer_integration: "control-plane:integrations:write",
   run_meeting_recorder_operation: "control-plane:integrations:write",
+  check_meeting_operations_readiness: "control-plane:read",
+  enqueue_agenda_preparation: "control-plane:integrations:write",
   run_context_sync: "control-plane:context:write",
   probe_customer_deployment_health: "control-plane:releases:write",
   record_verified_release: "control-plane:releases:write",
@@ -1070,6 +1098,16 @@ export async function POST(request: NextRequest) {
         meetingUrl: argOptionalString(args, "meetingUrl"),
         joinAt: parsedJoinAt.date,
         provider: argOptionalString(args, "provider"),
+        reason: argString(args, "reason"),
+      })));
+    }
+    if (name === "check_meeting_operations_readiness") {
+      return rpcResult(id, textContent(await getControlPlaneMeetingOperationsReadiness(actor, argString(args, "deploymentId"))));
+    }
+    if (name === "enqueue_agenda_preparation") {
+      return rpcResult(id, textContent(await enqueueControlPlaneAgendaPreparation(actor, {
+        deploymentId: argString(args, "deploymentId"),
+        targetDateISO: argOptionalString(args, "targetDateISO"),
         reason: argString(args, "reason"),
       })));
     }

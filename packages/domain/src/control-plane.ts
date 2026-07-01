@@ -15,6 +15,10 @@ import {
   upsertRecorderCalendarSource,
 } from "./meeting-recorders";
 import {
+  enqueueWorkspaceMeetingAgendaPreparation,
+  getMeetingAgendaReadiness,
+} from "./meeting-facilitation";
+import {
   saveSlackInstallationForWorkspace,
   validateSlackPostTarget,
   type SlackOAuthResponse,
@@ -6101,6 +6105,99 @@ export async function saveControlPlaneRecorderCalendarSource(actor: AppActor, pa
     managedWorkspaceId,
     source,
     workflowJobId: job.id,
+  };
+}
+
+function recorderMeetingOpsStatus(readiness: Awaited<ReturnType<typeof getMeetingRecorderEnterpriseReadiness>>) {
+  if (readiness.ready) return "ready" as const;
+  const failedChecks = readiness.checks.filter((check) => !check.ok);
+  if (!readiness.config.enabled) return "configured" as const;
+  if (failedChecks.some((check) => (
+    check.key === "recall_api_key"
+    || check.key === "recall_webhook_secret"
+    || check.key === "meeting_baas_api_key"
+    || check.key === "meeting_baas_webhook_secret"
+    || check.key === "provider_proof"
+  ))) {
+    return "blocked" as const;
+  }
+  return "degraded" as const;
+}
+
+function compactRecorderMeetingOpsReadiness(readiness: Awaited<ReturnType<typeof getMeetingRecorderEnterpriseReadiness>>) {
+  const failedChecks = readiness.checks
+    .filter((check) => !check.ok)
+    .map((check) => ({
+      key: check.key,
+      label: check.label,
+      detail: sanitizeDiagnosticText(check.detail),
+    }));
+  return {
+    workspaceId: readiness.workspaceId,
+    status: recorderMeetingOpsStatus(readiness),
+    ready: readiness.ready,
+    configured: Boolean(readiness.config.enabled),
+    provider: readiness.config.defaultProvider,
+    fallbackProvider: readiness.config.fallbackProvider,
+    detail: failedChecks[0]?.detail ?? "Recorder readiness checks are passing.",
+    failedChecks,
+    lastSmokeRun: readiness.lastSmokeRun
+      ? {
+        id: readiness.lastSmokeRun.id,
+        status: readiness.lastSmokeRun.status,
+        createdAt: readiness.lastSmokeRun.createdAt,
+        completedAt: readiness.lastSmokeRun.completedAt,
+      }
+      : null,
+    lastSuccessfulRecording: readiness.lastSuccessfulRecording,
+    lastProviderAuthFailure: readiness.lastProviderAuthFailure,
+  };
+}
+
+export async function getControlPlaneMeetingOperationsReadiness(actor: AppActor, deploymentId: string) {
+  requireControlPlaneScope(actor, "control-plane:read");
+  const deployment = await getControlPlaneDeploymentWithWorkspace(actor, deploymentId);
+  const managedWorkspaceId = deployment.managedWorkspaceId;
+  invariant(managedWorkspaceId, 400, "MANAGED_WORKSPACE_REQUIRED", "Meeting operations readiness requires a managed workspace link.");
+  const [agenda, recorder] = await Promise.all([
+    getMeetingAgendaReadiness(managedWorkspaceId),
+    getMeetingRecorderEnterpriseReadiness(managedWorkspaceId),
+  ]);
+  return {
+    deploymentId,
+    managedWorkspaceId,
+    agenda,
+    recorder: compactRecorderMeetingOpsReadiness(recorder),
+  };
+}
+
+export async function enqueueControlPlaneAgendaPreparation(actor: AppActor, params: {
+  deploymentId: string;
+  targetDateISO?: string | null;
+  reason?: string | null;
+}) {
+  requireControlPlaneScope(actor, "control-plane:integrations:write");
+  const reason = requireMutationReason(params.reason);
+  await requireControlPlaneDeploymentWriteAccess(actor, params.deploymentId);
+  const deployment = await getControlPlaneDeploymentWithWorkspace(actor, params.deploymentId);
+  const managedWorkspaceId = deployment.managedWorkspaceId;
+  invariant(managedWorkspaceId, 400, "MANAGED_WORKSPACE_REQUIRED", "Agenda preparation requires a managed workspace link.");
+  const job = await enqueueWorkspaceMeetingAgendaPreparation({
+    workspaceId: managedWorkspaceId,
+    runAfter: new Date(),
+    targetDateISO: params.targetDateISO,
+  });
+  await recordCustomerDeploymentEvent(actor, params.deploymentId, "control_plane.integration.meeting_agenda_prepare_requested", {
+    reason,
+    managedWorkspaceId,
+    workflowJobId: job.id,
+    targetDateISO: params.targetDateISO ?? null,
+  });
+  return {
+    deploymentId: params.deploymentId,
+    managedWorkspaceId,
+    workflowJobId: job.id,
+    targetDateISO: params.targetDateISO ?? null,
   };
 }
 

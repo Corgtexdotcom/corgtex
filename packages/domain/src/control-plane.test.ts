@@ -190,6 +190,7 @@ const { prismaMock, encryptSecretMock, decryptSecretMock, memberMocks, communica
       count: vi.fn(),
       create: vi.fn(),
       createMany: vi.fn(),
+      findFirst: vi.fn(),
       findUnique: vi.fn(),
       findMany: vi.fn(),
       upsert: vi.fn(),
@@ -434,6 +435,7 @@ describe("control plane domain", () => {
     })) as any;
     prismaMock.workflowJob.createMany.mockResolvedValue({ count: 1 });
     prismaMock.workflowJob.count.mockResolvedValue(0);
+    prismaMock.workflowJob.findFirst.mockResolvedValue(null);
     prismaMock.workflowJob.findMany.mockResolvedValue([]);
     prismaMock.agentRun.count.mockResolvedValue(0);
     prismaMock.agentRun.findMany.mockResolvedValue([]);
@@ -579,6 +581,8 @@ describe("control plane domain", () => {
     prismaMock.meetingRecorderSmokeRun.findFirst.mockResolvedValue(null);
     prismaMock.meetingRecording.aggregate.mockResolvedValue({ _sum: { durationSeconds: 0 } });
     prismaMock.meetingRecording.count.mockResolvedValue(0);
+    prismaMock.meetingRecording.findFirst.mockResolvedValue(null);
+    prismaMock.meetingRecording.findMany.mockResolvedValue([]);
     prismaMock.meetingRecording.groupBy.mockResolvedValue([]);
     memberMocks.sendMemberSetupEmail.mockResolvedValue({ status: "sent" });
     vi.stubEnv("RAILWAY_API_TOKEN", "test-railway-token");
@@ -2798,6 +2802,137 @@ describe("control plane domain", () => {
         status: "ENABLED",
       },
     });
+  });
+
+  it("returns compact meeting operations readiness for managed workspaces", async () => {
+    const { getControlPlaneMeetingOperationsReadiness } = await import("./control-plane");
+    const recent = new Date(Date.now() - 60 * 60 * 1000);
+    const nextMeetingAt = new Date(Date.now() + 23 * 60 * 60 * 1000);
+    prismaMock.customerDeployment.findUnique.mockResolvedValueOnce({
+      id: "inst-1",
+      label: "Acme",
+      customerAccountId: "cust-1",
+      managedWorkspaceId: "ws-1",
+      supportCredentialEnc: null,
+      managedWorkspace: {
+        id: "ws-1",
+        slug: "acme",
+        name: "Acme",
+        _count: {},
+      },
+    });
+    prismaMock.communicationInstallation.findFirst.mockResolvedValueOnce({
+      id: "slack-1",
+      settings: { defaultAgendaChannelId: "C123", agendaTimezone: "UTC" },
+    });
+    prismaMock.meeting.findMany.mockResolvedValueOnce([
+      {
+        id: "meeting-1",
+        workspaceId: "ws-1",
+        title: "Weekly update",
+        status: "SCHEDULED",
+        recordedAt: nextMeetingAt,
+        scheduledEndAt: new Date(nextMeetingAt.getTime() + 60 * 60 * 1000),
+        agendaJson: { title: "Agenda", sections: [] },
+        agendaChannelId: "C123",
+        agendaMessageTs: "1710000001.000100",
+        agendaPostedAt: recent,
+        seriesId: "series-1",
+        series: { recurrenceRule: "FREQ=WEEKLY" },
+      },
+    ]);
+    prismaMock.workflowJob.findFirst.mockResolvedValue(null);
+    prismaMock.workspaceFeatureFlag.findUnique.mockResolvedValueOnce({ enabled: true });
+    prismaMock.workspaceMeetingRecorderConfig.findUnique.mockResolvedValueOnce({
+      workspaceId: "ws-1",
+      enabled: true,
+      defaultProvider: "RECALL_AI",
+      fallbackProvider: null,
+      monthlyMinuteCap: 6000,
+    });
+    prismaMock.workspaceRecorderCalendarSource.findUnique.mockResolvedValueOnce({
+      workspaceId: "ws-1",
+      status: "ACTIVE",
+      providerAccountId: "ms-user-1",
+      providerAccountEmail: "calendar@example.com",
+      lastSyncAt: recent,
+      lastSyncError: null,
+    });
+    prismaMock.workflowJob.count.mockResolvedValueOnce(0);
+    prismaMock.meetingRecorderSmokeRun.findFirst.mockResolvedValue({
+      id: "smoke-1",
+      status: "COMPLETED",
+      provider: "RECALL_AI",
+      createdAt: recent,
+      completedAt: recent,
+    });
+    prismaMock.meetingRecording.findFirst.mockResolvedValue(null);
+    prismaMock.meetingRecording.findMany.mockResolvedValue([]);
+
+    const result = await getControlPlaneMeetingOperationsReadiness(operatorActor, "inst-1");
+
+    expect(result).toMatchObject({
+      deploymentId: "inst-1",
+      managedWorkspaceId: "ws-1",
+      agenda: {
+        status: "ready",
+        ready: true,
+        nextMeeting: {
+          id: "meeting-1",
+          hasAgendaJson: true,
+          hasPostedAgenda: true,
+        },
+      },
+      recorder: {
+        status: "ready",
+        ready: true,
+        provider: "RECALL_AI",
+      },
+    });
+    expect(JSON.stringify(result)).not.toContain("supportCredentialEnc");
+  });
+
+  it("queues agenda preparation for managed workspaces and audits the reason", async () => {
+    const { enqueueControlPlaneAgendaPreparation } = await import("./control-plane");
+    prismaMock.customerDeployment.findUnique.mockResolvedValueOnce({
+      id: "inst-1",
+      label: "Acme",
+      customerAccountId: "cust-1",
+      managedWorkspaceId: "ws-1",
+      supportCredentialEnc: null,
+      managedWorkspace: {
+        id: "ws-1",
+        slug: "acme",
+        name: "Acme",
+        _count: {},
+      },
+    });
+    prismaMock.workflowJob.upsert.mockResolvedValueOnce({ id: "agenda-job-1" });
+
+    await expect(enqueueControlPlaneAgendaPreparation(operatorActor, {
+      deploymentId: "inst-1",
+      targetDateISO: "2026-07-02",
+      reason: "Verify regular-call agenda.",
+    })).resolves.toMatchObject({
+      deploymentId: "inst-1",
+      managedWorkspaceId: "ws-1",
+      workflowJobId: "agenda-job-1",
+      targetDateISO: "2026-07-02",
+    });
+
+    expect(prismaMock.workflowJob.upsert).toHaveBeenCalledWith(expect.objectContaining({
+      create: expect.objectContaining({
+        workspaceId: "ws-1",
+        type: "meeting.agenda.prepare",
+        payload: { targetDateISO: "2026-07-02" },
+      }),
+    }));
+    expect(prismaMock.customerDeploymentEvent.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        deploymentId: "inst-1",
+        action: "control_plane.integration.meeting_agenda_prepare_requested",
+      }),
+    }));
   });
 
   it("requires completed smoke before active meeting recorder auto-recording can be configured", async () => {
@@ -5705,8 +5840,11 @@ describe("control plane domain", () => {
     });
     prismaMock.workflowJob.count.mockResolvedValue(0);
     prismaMock.meetingRecorderSmokeRun.findFirst.mockResolvedValue({
+      id: "smoke-1",
       status: "COMPLETED",
+      provider: "RECALL_AI",
       createdAt: new Date("2026-06-24T10:05:00Z"),
+      completedAt: new Date("2026-06-24T10:06:00Z"),
     });
     prismaMock.meetingRecording.count.mockResolvedValue(0);
     prismaMock.communicationInstallation.findMany.mockResolvedValue([]);
@@ -5932,8 +6070,11 @@ describe("control plane domain", () => {
     });
     prismaMock.workflowJob.count.mockResolvedValue(0);
     prismaMock.meetingRecorderSmokeRun.findFirst.mockResolvedValue({
+      id: "smoke-1",
       status: "COMPLETED",
+      provider: "RECALL_AI",
       createdAt: new Date("2026-06-24T10:05:00Z"),
+      completedAt: new Date("2026-06-24T10:06:00Z"),
     });
     prismaMock.meetingRecording.count.mockResolvedValue(0);
     prismaMock.communicationInstallation.findMany.mockResolvedValue([]);
@@ -6023,8 +6164,11 @@ describe("control plane domain", () => {
     });
     prismaMock.workflowJob.count.mockResolvedValue(0);
     prismaMock.meetingRecorderSmokeRun.findFirst.mockResolvedValue({
+      id: "smoke-1",
       status: "COMPLETED",
+      provider: "RECALL_AI",
       createdAt: new Date("2026-06-24T10:05:00Z"),
+      completedAt: new Date("2026-06-24T10:06:00Z"),
     });
     prismaMock.meetingRecording.count.mockResolvedValue(0);
     prismaMock.communicationInstallation.findMany.mockResolvedValue([]);

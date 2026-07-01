@@ -57,6 +57,7 @@ const RECORDER_LOG_COMPONENT = "meeting-recorder";
 const RECORDER_CALENDAR_SYNC_LOOKAHEAD_MS = 30 * 24 * 60 * 60 * 1000;
 const RECORDER_CALENDAR_SYNC_LOOKBACK_MS = 24 * 60 * 60 * 1000;
 const RECORDER_CALENDAR_OAUTH_STATE_TTL_MS = 30 * 60 * 1000;
+const RECORDER_PROVIDER_PROOF_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
 type DateTimeParts = {
   year: number;
   month: number;
@@ -1999,8 +2000,78 @@ function providerRuntimeChecks(config: {
   return checks;
 }
 
+function recorderProofObservedAt(recording: {
+  endedAt?: Date | null;
+  startedAt?: Date | null;
+  scheduledAt?: Date | null;
+  createdAt: Date;
+}) {
+  return recording.endedAt ?? recording.startedAt ?? recording.scheduledAt ?? recording.createdAt;
+}
+
+function isRecorderAuthFailure(recording: { failureCode: string | null; failureMessage: string | null }) {
+  const text = `${recording.failureCode ?? ""}\n${recording.failureMessage ?? ""}`.toLowerCase();
+  return text.includes("authentication_failed")
+    || text.includes("invalid api token")
+    || text.includes("invalid_auth")
+    || text.includes("unauthorized")
+    || text.includes("401")
+    || text.includes("region")
+    || recording.failureCode === "configuration_error";
+}
+
+function sanitizeRecorderFailureDetail(recording: { failureCode: string | null; failureMessage: string | null }) {
+  if (recording.failureCode === "configuration_error") return "Recorder provider credential is not configured.";
+  const message = recording.failureMessage ?? recording.failureCode ?? "Recorder provider authentication failed.";
+  if (/recall/i.test(message) && /401|authentication_failed|invalid api token|region/i.test(message)) {
+    return "Recall authentication failed; verify the configured API token and region.";
+  }
+  return message.replace(/https?:\/\/\S+/g, "[url]").slice(0, 500);
+}
+
+function compactRecorderProof(recording: {
+  id: string;
+  provider: MeetingRecorderProvider;
+  status: string;
+  createdAt: Date;
+  updatedAt: Date;
+  scheduledAt?: Date | null;
+  startedAt?: Date | null;
+  endedAt?: Date | null;
+} | null) {
+  if (!recording) return null;
+  return {
+    id: recording.id,
+    provider: recording.provider,
+    status: recording.status,
+    observedAt: recorderProofObservedAt(recording),
+    createdAt: recording.createdAt,
+    updatedAt: recording.updatedAt,
+  };
+}
+
+function compactRecorderAuthFailure(recording: {
+  id: string;
+  provider: MeetingRecorderProvider;
+  status: string;
+  failureCode: string | null;
+  failureMessage: string | null;
+  updatedAt: Date;
+} | null) {
+  if (!recording) return null;
+  return {
+    id: recording.id,
+    provider: recording.provider,
+    status: recording.status,
+    failureCode: recording.failureCode,
+    detail: sanitizeRecorderFailureDetail(recording),
+    updatedAt: recording.updatedAt,
+  };
+}
+
 export async function getMeetingRecorderEnterpriseReadiness(workspaceId: string) {
-  const [featureEnabled, config, calendarSource, lastSmokeRun] = await Promise.all([
+  const proofSince = new Date(Date.now() - RECORDER_PROVIDER_PROOF_MAX_AGE_MS);
+  const [featureEnabled, config, calendarSource, lastSmokeRun, lastSuccessfulSmokeRun, lastSuccessfulRecording, failedRecordings] = await Promise.all([
     isRecorderFeatureEnabled(workspaceId),
     getEffectiveRecorderConfig(workspaceId),
     getRecorderCalendarSource(workspaceId),
@@ -2008,7 +2079,59 @@ export async function getMeetingRecorderEnterpriseReadiness(workspaceId: string)
       where: { workspaceId },
       orderBy: { createdAt: "desc" },
     }),
+    prisma.meetingRecorderSmokeRun.findFirst({
+      where: {
+        workspaceId,
+        status: "COMPLETED",
+        completedAt: { gte: proofSince },
+      },
+      orderBy: { completedAt: "desc" },
+    }),
+    prisma.meetingRecording.findFirst({
+      where: {
+        workspaceId,
+        status: { in: ["COMPLETED", "RECORDING"] },
+        OR: [
+          { endedAt: { gte: proofSince } },
+          { startedAt: { gte: proofSince } },
+          { scheduledAt: { gte: proofSince } },
+          { createdAt: { gte: proofSince } },
+        ],
+      },
+      orderBy: { updatedAt: "desc" },
+      select: {
+        id: true,
+        provider: true,
+        status: true,
+        scheduledAt: true,
+        startedAt: true,
+        endedAt: true,
+        createdAt: true,
+        updatedAt: true,
+      },
+    }),
+    prisma.meetingRecording.findMany({
+      where: {
+        workspaceId,
+        status: "FAILED",
+      },
+      orderBy: { updatedAt: "desc" },
+      take: 10,
+      select: {
+        id: true,
+        provider: true,
+        status: true,
+        failureCode: true,
+        failureMessage: true,
+        updatedAt: true,
+      },
+    }),
   ]);
+  const lastProviderAuthFailure = failedRecordings.find(isRecorderAuthFailure) ?? null;
+  const proofObservedAt = lastSuccessfulSmokeRun?.completedAt
+    ?? (lastSuccessfulRecording ? recorderProofObservedAt(lastSuccessfulRecording) : null);
+  const providerProofBlocked = Boolean(lastProviderAuthFailure && (!proofObservedAt || lastProviderAuthFailure.updatedAt > proofObservedAt));
+  const providerProofOk = Boolean(proofObservedAt && proofObservedAt >= proofSince && !providerProofBlocked);
   const failedSyncJobs = calendarSource
     ? await prisma.workflowJob.count({
       where: {
@@ -2051,10 +2174,14 @@ export async function getMeetingRecorderEnterpriseReadiness(workspaceId: string)
           : "No successful recorder calendar sync yet."),
     },
     {
-      key: "last_smoke",
-      label: "Latest smoke run",
-      ok: lastSmokeRun?.status === "COMPLETED",
-      detail: lastSmokeRun ? `${lastSmokeRun.status} at ${lastSmokeRun.createdAt.toISOString()}.` : "No recorder smoke run recorded yet.",
+      key: "provider_proof",
+      label: "Recorder provider proof",
+      ok: providerProofOk,
+      detail: providerProofBlocked && lastProviderAuthFailure
+        ? sanitizeRecorderFailureDetail(lastProviderAuthFailure)
+        : proofObservedAt
+          ? `Recent recorder proof at ${proofObservedAt.toISOString()}.`
+          : "No recent successful recorder smoke or real recording in the last 30 days.",
     },
   ];
   return {
@@ -2063,6 +2190,9 @@ export async function getMeetingRecorderEnterpriseReadiness(workspaceId: string)
     checks,
     calendarSource,
     lastSmokeRun,
+    lastSuccessfulSmokeRun,
+    lastSuccessfulRecording: compactRecorderProof(lastSuccessfulRecording),
+    lastProviderAuthFailure: compactRecorderAuthFailure(lastProviderAuthFailure),
     config,
   };
 }
@@ -2080,7 +2210,7 @@ function recorderServiceHealthStatus(params: {
   const failed = failedRecorderChecks(params.checks);
   if (failed.length === 0) return "ACTIVE" as const;
   if (failed.some((check) => check.key === "calendar_source")) return "DISCONNECTED" as const;
-  if (failed.some((check) => check.key === "worker_sync" || check.key === "last_smoke")) return "UNHEALTHY" as const;
+  if (failed.some((check) => check.key === "worker_sync" || check.key === "provider_proof")) return "UNHEALTHY" as const;
   return "UNHEALTHY" as const;
 }
 
