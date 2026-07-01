@@ -45,6 +45,8 @@ export * from "./meetings";
 export * from "./meeting-facilitation";
 export * from "./meeting-agendas";
 export * from "./meeting-action-review";
+export * from "./meeting-durations";
+export * from "./meeting-urls";
 export * from "./members";
 export * from "./notifications";
 export * from "./permalinks";

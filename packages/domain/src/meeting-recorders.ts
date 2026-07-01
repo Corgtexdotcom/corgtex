@@ -11,8 +11,32 @@ import type { AppActor } from "@corgtex/shared";
 import { enterpriseServiceToDb } from "./ai-workspaces";
 import { requireWorkspaceMembership } from "./auth";
 import { AppError, invariant } from "./errors";
+import {
+  meetingEndFromDurationMinutes,
+  parseMeetingDurationMinutes,
+} from "./meeting-durations";
 import { intakeMeetingTranscript } from "./meeting-transcript-intake";
+import { createScheduledMeeting, discardManualScheduledMeeting } from "./meetings";
+import {
+  extractRecorderMeetingUrlFromText,
+  extractSupportedMeetingUrlFromText,
+  isMicrosoftTeamsMeetingUrl,
+  meetingUrlHash,
+  normalizeMeetingUrl,
+  normalizeRecorderMeetingUrl,
+  TEAMS_FULL_JOIN_LINK_REQUIRED_MESSAGE,
+} from "./meeting-urls";
 import { ensureWorkspacePermalink, workspaceEntityCanonicalPath } from "./permalinks";
+
+export {
+  extractRecorderMeetingUrlFromText,
+  extractSupportedMeetingUrlFromText,
+  isMicrosoftTeamsMeetingUrl,
+  isMicrosoftTeamsRecorderUrl,
+  meetingUrlHash,
+  normalizeMeetingUrl,
+  normalizeRecorderMeetingUrl,
+} from "./meeting-urls";
 
 export const MEETING_RECORDERS_FEATURE_FLAG = "MEETING_RECORDERS";
 
@@ -326,24 +350,6 @@ function normalizeEmail(value: string) {
 
 function normalizeEmails(values?: string[] | null) {
   return [...new Set((values ?? []).map(normalizeEmail).filter(Boolean))];
-}
-
-export function normalizeMeetingUrl(value: string) {
-  try {
-    const url = new URL(value.trim());
-    url.hash = "";
-    url.hostname = url.hostname.toLowerCase();
-    if (url.hostname.includes("zoom.us")) {
-      url.searchParams.sort();
-    }
-    return url.toString();
-  } catch {
-    return value.trim();
-  }
-}
-
-export function meetingUrlHash(value: string) {
-  return createHash("sha256").update(normalizeMeetingUrl(value)).digest("hex");
 }
 
 function firstRecord(...values: unknown[]) {
@@ -1624,16 +1630,6 @@ async function fetchRecorderCalendarSourceEvents(sourceId: string, timeMin: Date
     .filter((event) => event.id && !Number.isNaN(event.startTime.valueOf()) && !Number.isNaN(event.endTime.valueOf()));
 }
 
-export function isMicrosoftTeamsMeetingUrl(value?: string | null) {
-  if (!value) return false;
-  try {
-    const url = new URL(value);
-    return url.hostname.toLowerCase() === "teams.microsoft.com" && url.pathname.startsWith("/l/meetup-join/");
-  } catch {
-    return false;
-  }
-}
-
 export async function upsertRecorderCalendarSource(params: {
   workspaceId: string;
   providerAccountId: string;
@@ -2188,7 +2184,8 @@ export async function runMeetingRecorderSmoke(params: {
   const provider = params.provider ?? "RECALL_AI";
   const config = await getEffectiveRecorderConfig(params.workspaceId);
   const featureEnabled = await isRecorderFeatureEnabled(params.workspaceId);
-  const url = extractSupportedMeetingUrlFromText(params.meetingUrl);
+  const recorderUrl = extractRecorderMeetingUrlFromText(params.meetingUrl);
+  const url = recorderUrl?.providerSchedulable ? recorderUrl.url : null;
   const checks: RecorderReadinessCheck[] = [
     {
       key: "entitlement",
@@ -2206,7 +2203,9 @@ export async function runMeetingRecorderSmoke(params: {
       key: "meeting_url",
       label: "Supported meeting URL",
       ok: Boolean(url && isMicrosoftTeamsMeetingUrl(url)),
-      detail: url ? "Business Microsoft Teams URL detected." : "A supported Microsoft Teams meeting URL is required.",
+      detail: recorderUrl?.kind === "MICROSOFT_TEAMS_MEET"
+        ? TEAMS_FULL_JOIN_LINK_REQUIRED_MESSAGE
+        : url ? "Business Microsoft Teams URL detected." : "A supported Microsoft Teams meeting URL is required.",
     },
     {
       key: "join_time",
@@ -2365,6 +2364,88 @@ async function createRecordingAttempt(params: {
     });
     invariant(existing, 409, "RECORDER_ALREADY_SCHEDULING", "A recorder is already being scheduled for this meeting.");
     return { recording: existing, reused: true };
+  }
+}
+
+function unsupportedRecorderMeetingUrlError() {
+  return new AppError(
+    400,
+    "RECORDER_UNSUPPORTED_MEETING_URL",
+    "Paste a supported Google Meet, Zoom, or full Microsoft Teams join link.",
+  );
+}
+
+function recorderSchedulingFailedError() {
+  return new AppError(
+    502,
+    "RECORDER_SCHEDULING_FAILED",
+    "Recorder scheduling failed. Try again or contact support if it keeps happening.",
+  );
+}
+
+export async function sendManualMeetingRecorder(actor: AppActor, params: {
+  workspaceId: string;
+  meetingUrl: string;
+  title?: string | null;
+  durationMinutes?: string | number | null;
+  participantEmails?: string[] | null;
+}) {
+  const membership = await requireWorkspaceMembership({
+    actor,
+    workspaceId: params.workspaceId,
+    allowedRoles: ["ADMIN", "FACILITATOR"],
+  });
+  await requireRecorderFeature(params.workspaceId);
+
+  const recorderUrl = normalizeRecorderMeetingUrl(params.meetingUrl);
+  if (!recorderUrl) {
+    throw unsupportedRecorderMeetingUrlError();
+  }
+  if (!recorderUrl.providerSchedulable) {
+    throw new AppError(400, "RECORDER_TEAMS_FULL_JOIN_LINK_REQUIRED", TEAMS_FULL_JOIN_LINK_REQUIRED_MESSAGE);
+  }
+
+  const config = await getEffectiveRecorderConfig(params.workspaceId);
+  invariant(config.enabled, 403, "RECORDER_DISABLED", "Meeting recorder is disabled for this workspace.");
+
+  const durationMinutes = parseMeetingDurationMinutes(params.durationMinutes, "Duration");
+  const isAdmin = actor.kind === "user"
+    ? membership?.role === "ADMIN"
+    : actor.scopes?.includes("support:write");
+  await enforceMonthlyCap({
+    workspaceId: params.workspaceId,
+    config,
+    estimatedMinutes: durationMinutes,
+    allowOverride: Boolean(isAdmin),
+  });
+
+  const joinAt = new Date();
+  const meeting = await createScheduledMeeting(actor, {
+    workspaceId: params.workspaceId,
+    title: params.title?.trim() || "Live meeting",
+    startsAt: joinAt,
+    scheduledEndAt: meetingEndFromDurationMinutes(joinAt, durationMinutes),
+    meetingUrl: recorderUrl.url,
+    participantEmails: normalizeEmails(params.participantEmails),
+    source: "manual-recorder",
+  });
+
+  try {
+    const recording = await scheduleMeetingRecording(actor, {
+      workspaceId: params.workspaceId,
+      meetingId: meeting.id,
+      mode: "manual",
+    });
+    if (recording.status === "FAILED") {
+      throw recorderSchedulingFailedError();
+    }
+    return { meeting, recording };
+  } catch (error) {
+    await discardManualScheduledMeeting(actor, { workspaceId: params.workspaceId, meetingId: meeting.id }).catch(() => undefined);
+    if (error instanceof AppError) {
+      throw error;
+    }
+    throw recorderSchedulingFailedError();
   }
 }
 
@@ -3114,22 +3195,6 @@ async function ingestProviderTranscript(provider: MeetingRecorderProvider, recor
     })
     : await fetchMeetingBaasTranscriptArtifact(recording.externalBotId ?? event.externalBotId ?? "", event.transcriptUrl);
   await completeRecordingWithTranscriptArtifact(provider, recording, artifact);
-}
-
-export function extractSupportedMeetingUrlFromText(value?: string | null) {
-  if (!value) return null;
-  const patterns = [
-    /https:\/\/meet\.google\.com\/[a-z0-9-]+/i,
-    /https:\/\/(?:[\w.-]+\.)?zoom\.us\/j\/[^\s<>"']+/i,
-    /https:\/\/teams\.microsoft\.com\/l\/meetup-join\/[^\s<>"']+/i,
-  ];
-  for (const pattern of patterns) {
-    const match = value.match(pattern);
-    if (match?.[0]) {
-      return normalizeMeetingUrl(match[0]);
-    }
-  }
-  return null;
 }
 
 export function calendarEventIsEligible(event: CalendarEventForRecorder, now = new Date()) {

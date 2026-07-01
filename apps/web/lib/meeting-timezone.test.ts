@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
   assertMeetingEndAfterStart,
+  DEFAULT_MEETING_DURATION_MINUTES,
+  MAX_MEETING_DURATION_MINUTES,
+  MIN_MEETING_DURATION_MINUTES,
   meetingEndFromDurationMinutes,
   normalizeOptionalMeetingDateTimeInput,
   parseMeetingDurationMinutesInput,
@@ -50,9 +53,12 @@ describe("meeting timezone parsing", () => {
   });
 
   it("parses meeting duration minutes and defaults to one hour", () => {
-    expect(parseMeetingDurationMinutesInput(null)).toBe(60);
+    expect(parseMeetingDurationMinutesInput(null)).toBe(DEFAULT_MEETING_DURATION_MINUTES);
+    expect(parseMeetingDurationMinutesInput("60")).toBe(60);
     expect(parseMeetingDurationMinutesInput("90")).toBe(90);
     expect(parseMeetingDurationMinutesInput(45)).toBe(45);
+    expect(parseMeetingDurationMinutesInput(String(MIN_MEETING_DURATION_MINUTES))).toBe(MIN_MEETING_DURATION_MINUTES);
+    expect(parseMeetingDurationMinutesInput(String(MAX_MEETING_DURATION_MINUTES))).toBe(MAX_MEETING_DURATION_MINUTES);
     expect(() => parseMeetingDurationMinutesInput("0")).toThrow(/between 1 and 480 minutes/);
     expect(() => parseMeetingDurationMinutesInput("12.5")).toThrow(/whole number/);
     expect(() => parseMeetingDurationMinutesInput("481")).toThrow(/between 1 and 480 minutes/);

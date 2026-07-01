@@ -3,18 +3,16 @@
 import { enforceDemoGuard } from "@/lib/demo-guard";
 import { requirePageActor } from "@/lib/auth";
 import { asString, asOptional, refresh } from "../action-utils";
+import { redirect } from "next/navigation";
 import {
   createMeeting,
   createMeetingSeries,
-  createScheduledMeeting,
   deleteMeeting,
-  discardManualScheduledMeeting,
   enqueueMeetingAgendaPreparation,
   extractMeetingInsights,
   importMeetingInvite,
   intakeMeetingTranscript,
   requestMeetingIntelligenceRegeneration,
-  requireWorkspaceMembership,
   confirmInsight,
   dismissInsight,
   updateInsight,
@@ -24,6 +22,7 @@ import {
   resolveDeliberationEntry,
   scheduleMeetingRecording,
   cancelMeetingRecording,
+  sendManualMeetingRecorder,
 } from "@corgtex/domain";
 import { extractTextFromFileBuffer } from "@corgtex/knowledge";
 import {
@@ -31,6 +30,54 @@ import {
   parseOptionalMeetingDateTimeInput,
   resolveMeetingEndFromDurationOrInput,
 } from "@/lib/meeting-timezone";
+
+export type ManualMeetingRecordingActionState = {
+  status: "idle" | "error";
+  message?: string | null;
+  values?: {
+    meetingUrl?: string;
+    title?: string;
+    durationMinutes?: string;
+    participantEmails?: string;
+  };
+};
+
+function splitFormList(value: string | null) {
+  return (value ?? "")
+    .split(/[\n,]+/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function manualRecordingFormValues(formData: FormData): NonNullable<ManualMeetingRecordingActionState["values"]> {
+  return {
+    meetingUrl: asString(formData, "meetingUrl"),
+    title: asString(formData, "title"),
+    durationMinutes: asString(formData, "durationMinutes"),
+    participantEmails: asString(formData, "participantEmails"),
+  };
+}
+
+function expectedActionErrorMessage(error: unknown) {
+  if (
+    error instanceof Error
+    && "status" in error
+    && typeof (error as { status?: unknown }).status === "number"
+    && (error as { status: number }).status >= 400
+    && (error as { status: number }).status < 500
+  ) {
+    return error.message;
+  }
+  if (
+    error instanceof Error
+    && "code" in error
+    && (error as { code?: unknown }).code === "RECORDER_SCHEDULING_FAILED"
+  ) {
+    return error.message;
+  }
+  console.error("Manual meeting recorder action failed.", error);
+  return "Recorder scheduling is temporarily unavailable. Try again.";
+}
 
 export async function createMeetingAction(formData: FormData) {
   const _demoGuardWsId = formData.get("workspaceId") as string;
@@ -85,47 +132,33 @@ export async function createMeetingSeriesAction(formData: FormData) {
   refresh(workspaceId);
 }
 
-export async function scheduleManualMeetingRecordingAction(formData: FormData) {
+export async function scheduleManualMeetingRecordingAction(
+  _previousState: ManualMeetingRecordingActionState,
+  formData: FormData,
+): Promise<ManualMeetingRecordingActionState> {
+  const values = manualRecordingFormValues(formData);
   const _demoGuardWsId = formData.get("workspaceId") as string;
-  if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
-
-  const actor = await requirePageActor();
   const workspaceId = asString(formData, "workspaceId");
-  await requireWorkspaceMembership({
-    actor,
-    workspaceId,
-    allowedRoles: ["ADMIN", "FACILITATOR"],
-  });
-  const joinAt = new Date();
-  const scheduledEndAt = resolveMeetingEndFromDurationOrInput({
-    start: joinAt,
-    durationMinutes: asOptional(formData, "durationMinutes"),
-    durationLabel: "Duration",
-  });
-  const title = asOptional(formData, "title") ?? "Live meeting";
-  const meeting = await createScheduledMeeting(actor, {
-    workspaceId,
-    title,
-    startsAt: joinAt,
-    scheduledEndAt,
-    meetingUrl: asString(formData, "meetingUrl"),
-    participantEmails: asOptional(formData, "participantEmails")?.split(",").map((value) => value.trim()).filter(Boolean) ?? [],
-    source: "manual-recorder",
-  });
+  let result: Awaited<ReturnType<typeof sendManualMeetingRecorder>>;
   try {
-    const recording = await scheduleMeetingRecording(actor, {
+    if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
+    const actor = await requirePageActor();
+    result = await sendManualMeetingRecorder(actor, {
       workspaceId,
-      meetingId: meeting.id,
-      mode: "manual",
+      meetingUrl: values.meetingUrl ?? "",
+      title: values.title,
+      durationMinutes: values.durationMinutes,
+      participantEmails: splitFormList(values.participantEmails ?? null),
     });
-    if (recording.status === "FAILED") {
-      throw new Error(recording.failureMessage ?? "Recorder scheduling failed.");
-    }
   } catch (error) {
-    await discardManualScheduledMeeting(actor, { workspaceId, meetingId: meeting.id }).catch(() => undefined);
-    throw error;
+    return {
+      status: "error",
+      message: expectedActionErrorMessage(error),
+      values,
+    };
   }
   refresh(workspaceId);
+  redirect(`/workspaces/${workspaceId}/meetings?recorderSent=${encodeURIComponent(result.meeting.id)}`);
 }
 
 export async function importMeetingInviteAction(formData: FormData) {
