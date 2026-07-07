@@ -6,6 +6,8 @@ import {
   isAllowedOAuthRedirectUri,
   isKnownScope,
   listActorWorkspaces,
+  MCP_CONNECTOR_DEFAULT_SCOPES,
+  MCP_OAUTH_PROTOCOL_SCOPES,
   resolveMcpClientAllowedScopes,
   resolveMcpConnectorInstanceForWorkspace,
   SCOPE_REGISTRY,
@@ -43,6 +45,30 @@ function scopeLabel(scope: string) {
 
 function scopeDescription(scope: string) {
   return isKnownScope(scope) ? SCOPE_REGISTRY[scope].description : "Custom permission requested by this connector.";
+}
+
+function redirectHostLabel(redirectUri: string) {
+  try {
+    return new URL(redirectUri).host;
+  } catch {
+    return redirectUri;
+  }
+}
+
+function isLoopbackRedirectUri(redirectUri: string) {
+  try {
+    const url = new URL(redirectUri);
+    const hostname = url.hostname.toLowerCase().replace(/^\[/, "").replace(/\]$/, "");
+    return url.protocol === "http:" && ["localhost", "127.0.0.1", "::1"].includes(hostname);
+  } catch {
+    return false;
+  }
+}
+
+function hasSameScopeSet(left: string[], right: string[]) {
+  if (left.length !== right.length) return false;
+  const rightSet = new Set(right);
+  return left.every((scope) => rightSet.has(scope));
 }
 
 function scopeGroup(scope: string): string {
@@ -158,9 +184,24 @@ export default async function OAuthAuthorizePage(props: Props) {
       return <ErrorPanel>You do not have access to a workspace registered for the Corgtex connector.</ErrorPanel>;
     }
 
-    const displayScopes = scopeString.split(" ").filter(Boolean);
+    const requestedScopes = scopeString.split(" ").filter(Boolean);
+    const protocolScopes = new Set<string>(MCP_OAUTH_PROTOCOL_SCOPES);
+    const requestedPermissionScopes = requestedScopes.filter((scope) => !protocolScopes.has(scope));
     const allowedScopes = resolveMcpClientAllowedScopes(mcpClient.scopes);
-    const effectiveScopes: string[] = displayScopes.length > 0 ? displayScopes : allowedScopes;
+    const allowedScopeSet = new Set<string>(allowedScopes);
+    const allowsSafeStepUp = hasSameScopeSet(allowedScopes, MCP_CONNECTOR_DEFAULT_SCOPES);
+    let effectiveScopes: string[] = allowedScopes;
+    if (requestedPermissionScopes.length > 0) {
+      try {
+        effectiveScopes = resolveMcpClientAllowedScopes(requestedPermissionScopes);
+      } catch {
+        return <ErrorPanel>This connector requested an unsupported Corgtex permission.</ErrorPanel>;
+      }
+      const forbiddenScopes = allowsSafeStepUp ? [] : effectiveScopes.filter((scope) => !allowedScopeSet.has(scope));
+      if (forbiddenScopes.length > 0) {
+        return <ErrorPanel>This connector requested a permission it is not registered to use.</ErrorPanel>;
+      }
+    }
     const deniedRedirectUrl = new URL(redirectUri);
     deniedRedirectUrl.searchParams.set("error", "access_denied");
     if (state) deniedRedirectUrl.searchParams.set("state", state);
@@ -170,6 +211,8 @@ export default async function OAuthAuthorizePage(props: Props) {
     const currentUserEmail = actor.kind === "user" ? actor.user.email : null;
     const selectedWorkspace = allowedWorkspaces[0];
     const hasMultipleWorkspaces = allowedWorkspaces.length > 1;
+    const redirectHost = redirectHostLabel(redirectUri);
+    const usesLoopbackRedirect = isLoopbackRedirectUri(redirectUri);
 
     return (
       <div className="relative flex min-h-screen flex-col items-center justify-center bg-[var(--bg)] p-4 sm:p-8">
@@ -199,6 +242,14 @@ export default async function OAuthAuthorizePage(props: Props) {
                 <p className="mt-3 text-xs text-[var(--text-muted)]">
                   Current Corgtex account: <span className="font-medium text-[var(--text-strong)]">{currentUserLabel}</span>
                   {currentUserEmail && currentUserEmail !== currentUserLabel ? ` (${currentUserEmail})` : ""}
+                </p>
+              ) : null}
+              <p className="mt-3 text-xs text-[var(--text-muted)]">
+                Redirect host: <span className="font-medium text-[var(--text-strong)]">{redirectHost}</span>
+              </p>
+              {usesLoopbackRedirect ? (
+                <p className="mt-2 rounded border border-[var(--warning)] bg-[var(--warning-bg)] px-3 py-2 text-xs text-[var(--text-strong)]">
+                  This connector uses a local redirect. Continue only if you started this connection from the MCP client on this device.
                 </p>
               ) : null}
             </div>

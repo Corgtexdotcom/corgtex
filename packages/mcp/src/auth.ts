@@ -19,6 +19,30 @@ export type McpSessionContext = {
   providerKey?: McpOAuthProviderKey;
 };
 
+export class McpInsufficientScopeError extends AppError {
+  requiredScope: string;
+  grantedScopes: string[];
+
+  constructor(params: {
+    workspaceId: string;
+    requiredScope: string;
+    grantedScopes?: string[];
+  }) {
+    const purpose = describeScope(params.requiredScope);
+    super(
+      403,
+      "MCP_INSUFFICIENT_SCOPE",
+      [
+        `Missing required permission: ${params.requiredScope} (${purpose}).`,
+        `Disconnect Corgtex in your MCP client, then reconnect from ${settingsUrl(params.workspaceId)} —`,
+        `the new permission is requested automatically and you'll be asked to approve it during Corgtex sign-in.`,
+      ].join(" "),
+    );
+    this.requiredScope = params.requiredScope;
+    this.grantedScopes = params.grantedScopes ?? [];
+  }
+}
+
 /**
  * Build the workspace Tools deep-link the user should visit to fix a
  * scope problem. Falls back to a relative path when the public origin
@@ -101,15 +125,11 @@ export function requireScope(ctx: McpSessionContext, scope: string): void {
     // OAuth connector sessions are user-authorized. The user can reconnect in
     // their MCP client and approve the missing scope during Corgtex sign-in.
     if (ctx.authKind === "oauth") {
-      throw new AppError(
-        403,
-        "FORBIDDEN",
-        [
-          `Missing required permission: ${scope} (${purpose}).`,
-          `Disconnect Corgtex in your MCP client, then reconnect from ${settingsUrl(ctx.workspaceId)} —`,
-          `the new permission is requested automatically and you'll be asked to approve it during Corgtex sign-in.`,
-        ].join(" "),
-      );
+      throw new McpInsufficientScopeError({
+        workspaceId: ctx.workspaceId,
+        requiredScope: scope,
+        grantedScopes: ctx.scopes,
+      });
     }
 
     const label = ctx.actor.kind === "agent" ? ctx.actor.label ?? "this credential" : "this credential";

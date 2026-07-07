@@ -11,7 +11,9 @@ function restoreEnv() {
 
 afterEach(() => {
   restoreEnv();
+  vi.unstubAllGlobals();
   vi.doUnmock("@corgtex/shared");
+  vi.doUnmock("node:dns/promises");
   vi.clearAllMocks();
   vi.resetModules();
 });
@@ -37,14 +39,14 @@ function installSharedMock(prismaMock: Record<string, any>, envOverrides: Record
 }
 
 describe("MCP connector registry", () => {
-  it("uses delegated defaults for new OAuth connector clients", async () => {
+  it("uses baseline public defaults for new OAuth connector clients", async () => {
     const prismaMock = {
       mcpOAuthClient: {
         create: vi.fn().mockResolvedValue({
           clientId: "mcp_client_test",
           name: "Corgtex",
           redirectUris: ["https://client.example/callback"],
-          scopes: ["workspace:read", "tools:read", "tools:write", "members:write", "runtime:write"],
+          scopes: ["workspace:read", "brain:read", "tools:read", "conversations:write"],
           tokenEndpointAuthMethod: "none",
         }),
       },
@@ -57,13 +59,16 @@ describe("MCP connector registry", () => {
       redirectUris: ["https://client.example/callback"],
     });
 
-    expect(MCP_CONNECTOR_DEFAULT_SCOPES).toContain("tools:write");
+    expect(MCP_CONNECTOR_DEFAULT_SCOPES).toContain("workspace:read");
+    expect(MCP_CONNECTOR_DEFAULT_SCOPES).toContain("tools:read");
+    expect(MCP_CONNECTOR_DEFAULT_SCOPES).toContain("conversations:write");
+    expect(MCP_CONNECTOR_DEFAULT_SCOPES).not.toContain("tools:write");
     expect(MCP_CONNECTOR_DEFAULT_SCOPES).not.toContain("tools:credentials:read");
-    expect(MCP_CONNECTOR_DEFAULT_SCOPES).toContain("runtime:write");
+    expect(MCP_CONNECTOR_DEFAULT_SCOPES).not.toContain("runtime:write");
     expect(MCP_CONNECTOR_DEFAULT_SCOPES).not.toContain("support:write");
     expect(prismaMock.mcpOAuthClient.create).toHaveBeenCalledWith({
       data: expect.objectContaining({
-        scopes: expect.arrayContaining(["tools:read", "tools:write"]),
+        scopes: expect.arrayContaining(["workspace:read", "tools:read", "conversations:write"]),
       }),
     });
     expect(result.scope).not.toContain("tools:credentials:read");
@@ -78,13 +83,122 @@ describe("MCP connector registry", () => {
     } = await import("./mcp-connector");
 
     expect(resolveMcpClientAllowedScopes(MCP_CONNECTOR_LEGACY_DEFAULT_SCOPES)).toEqual(
-      expect.arrayContaining(["tools:write", "runtime:write"]),
+      expect.arrayContaining(["context-graph:read", "goals:read", "tools:read"]),
     );
+    expect(resolveMcpClientAllowedScopes(MCP_CONNECTOR_LEGACY_DEFAULT_SCOPES)).not.toContain("tools:write");
+    expect(resolveMcpClientAllowedScopes(MCP_CONNECTOR_LEGACY_DEFAULT_SCOPES)).not.toContain("runtime:write");
     expect(resolveMcpClientAllowedScopes(MCP_CONNECTOR_LEGACY_DEFAULT_SCOPES)).not.toContain("tools:credentials:read");
     expect(resolveMcpClientAllowedScopes(["workspace:read", "brain:read"])).toEqual(["workspace:read", "brain:read"]);
   });
 
-  it("rejects support-only scopes for user OAuth connector registration", async () => {
+  it("grants baseline scopes when DCR omits scope", async () => {
+    const prismaMock = {
+      mcpOAuthClient: {
+        create: vi.fn().mockResolvedValue({
+          clientId: "mcp_client_test",
+          name: "Corgtex",
+          redirectUris: ["https://client.example/callback"],
+          scopes: ["workspace:read", "brain:read", "tools:read", "conversations:write"],
+          tokenEndpointAuthMethod: "none",
+        }),
+      },
+    };
+    installSharedMock(prismaMock);
+
+    const { registerMcpOAuthClient } = await import("./mcp-connector");
+    const result = await registerMcpOAuthClient({
+      name: "Corgtex",
+      redirectUris: ["https://client.example/callback"],
+    });
+
+    expect(prismaMock.mcpOAuthClient.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        scopes: expect.arrayContaining(["workspace:read", "brain:read", "tools:read", "conversations:write"]),
+      }),
+    });
+    expect(result.scope).toContain("workspace:read");
+    expect(result.scope).toContain("tools:read");
+  });
+
+  it("accepts OAuth protocol scopes without persisting them for DCR clients", async () => {
+    const prismaMock = {
+      mcpOAuthClient: {
+        create: vi.fn().mockResolvedValue({
+          clientId: "mcp_client_test",
+          name: "Corgtex",
+          redirectUris: ["https://client.example/callback"],
+          scopes: ["workspace:read", "brain:read", "tools:read", "conversations:write"],
+          tokenEndpointAuthMethod: "none",
+        }),
+      },
+    };
+    installSharedMock(prismaMock);
+
+    const { registerMcpOAuthClient } = await import("./mcp-connector");
+    await registerMcpOAuthClient({
+      name: "Corgtex",
+      redirectUris: ["https://client.example/callback"],
+      scopes: ["openid", "profile", "email", "offline_access"],
+    });
+
+    expect(prismaMock.mcpOAuthClient.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        scopes: expect.arrayContaining(["workspace:read", "brain:read"]),
+      }),
+    });
+    const persistedScopes = prismaMock.mcpOAuthClient.create.mock.calls[0][0].data.scopes;
+    expect(persistedScopes).not.toEqual(expect.arrayContaining(["openid", "profile", "email", "offline_access"]));
+  });
+
+  it("accepts mixed OAuth protocol and Corgtex scopes for DCR clients", async () => {
+    const prismaMock = {
+      mcpOAuthClient: {
+        create: vi.fn().mockResolvedValue({
+          clientId: "mcp_client_test",
+          name: "Corgtex",
+          redirectUris: ["https://client.example/callback"],
+          scopes: ["workspace:read", "brain:read"],
+          tokenEndpointAuthMethod: "none",
+        }),
+      },
+    };
+    installSharedMock(prismaMock);
+
+    const { registerMcpOAuthClient } = await import("./mcp-connector");
+    await registerMcpOAuthClient({
+      name: "Corgtex",
+      redirectUris: ["https://client.example/callback"],
+      scopes: ["openid", "workspace:read", "profile", "brain:read"],
+    });
+
+    expect(prismaMock.mcpOAuthClient.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        scopes: ["workspace:read", "brain:read"],
+      }),
+    });
+  });
+
+  it("rejects unknown scopes for user OAuth connector registration", async () => {
+    const prismaMock = {
+      mcpOAuthClient: {
+        create: vi.fn(),
+      },
+    };
+    installSharedMock(prismaMock);
+
+    const { registerMcpOAuthClient } = await import("./mcp-connector");
+    await expect(registerMcpOAuthClient({
+      name: "Corgtex",
+      redirectUris: ["https://client.example/callback"],
+      scopes: ["workspace:read", "unknown:read"],
+    })).rejects.toMatchObject({
+      status: 400,
+      code: "INVALID_INPUT",
+    });
+    expect(prismaMock.mcpOAuthClient.create).not.toHaveBeenCalled();
+  });
+
+  it("rejects sensitive scopes for user OAuth connector registration", async () => {
     const prismaMock = {
       mcpOAuthClient: {
         create: vi.fn(),
@@ -104,11 +218,252 @@ describe("MCP connector registry", () => {
     expect(prismaMock.mcpOAuthClient.create).not.toHaveBeenCalled();
   });
 
-  it("filters support-only scopes from existing OAuth connector clients", async () => {
+  it("rejects sensitive scopes from existing OAuth connector clients", async () => {
     installSharedMock({});
 
     const { resolveMcpClientAllowedScopes } = await import("./mcp-connector");
-    expect(resolveMcpClientAllowedScopes(["workspace:read", "support:write"])).toEqual(["workspace:read"]);
+    expect(() => resolveMcpClientAllowedScopes(["workspace:read", "support:write"])).toThrow("sensitive/support-only");
+  });
+
+  it("allows baseline OAuth clients to step up to safe Corgtex scopes during authorization", async () => {
+    const createAuthorizationCodeMock = vi.fn().mockResolvedValue({});
+    const prismaMock = {
+      mcpOAuthClient: {
+        findUnique: vi.fn().mockResolvedValue({
+          id: "client-db-1",
+          clientId: "mcp_client_test",
+          isActive: true,
+          redirectUris: ["https://client.example/callback"],
+          scopes: ["workspace:read", "brain:read", "governance:read", "context-graph:read", "proposals:read", "actions:read", "tensions:read", "goals:read", "members:read", "meetings:read", "cycles:read", "circles:read", "tools:read", "conversations:write"],
+        }),
+      },
+      member: {
+        findUnique: vi.fn().mockResolvedValue({ id: "member-1", isActive: true }),
+      },
+      workspace: {
+        findUnique: vi.fn().mockResolvedValue({ id: "ws-1", slug: "corgtex" }),
+      },
+      mcpOAuthAuthorizationCode: {
+        create: createAuthorizationCodeMock,
+      },
+    };
+    installSharedMock(prismaMock);
+
+    const { issueMcpAuthorizationCode } = await import("./mcp-connector");
+    await issueMcpAuthorizationCode({
+      kind: "user",
+      user: { id: "user-1", email: "user@example.com", displayName: "User" },
+    }, {
+      clientId: "mcp_client_test",
+      workspaceId: "ws-1",
+      redirectUri: "https://client.example/callback",
+      scopes: ["workspace:read", "actions:write"],
+      codeChallenge: "challenge",
+      codeChallengeMethod: "S256",
+      resource: "https://app.test/mcp",
+    });
+
+    expect(createAuthorizationCodeMock).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        scopes: ["workspace:read", "actions:write"],
+      }),
+    });
+  });
+
+  it("keeps intentionally narrow OAuth clients from stepping up beyond registered scopes", async () => {
+    const prismaMock = {
+      mcpOAuthClient: {
+        findUnique: vi.fn().mockResolvedValue({
+          id: "client-db-1",
+          clientId: "mcp_client_test",
+          isActive: true,
+          redirectUris: ["https://client.example/callback"],
+          scopes: ["workspace:read"],
+        }),
+      },
+      member: {
+        findUnique: vi.fn().mockResolvedValue({ id: "member-1", isActive: true }),
+      },
+      workspace: {
+        findUnique: vi.fn().mockResolvedValue({ id: "ws-1", slug: "corgtex" }),
+      },
+    };
+    installSharedMock(prismaMock);
+
+    const { issueMcpAuthorizationCode } = await import("./mcp-connector");
+    await expect(issueMcpAuthorizationCode({
+      kind: "user",
+      user: { id: "user-1", email: "user@example.com", displayName: "User" },
+    }, {
+      clientId: "mcp_client_test",
+      workspaceId: "ws-1",
+      redirectUri: "https://client.example/callback",
+      scopes: ["workspace:read", "actions:write"],
+      codeChallenge: "challenge",
+      codeChallengeMethod: "S256",
+      resource: "https://app.test/mcp",
+    })).rejects.toMatchObject({
+      status: 400,
+      code: "INVALID_INPUT",
+    });
+  });
+
+  it("upserts HTTPS URL client_ids from CIMD metadata documents", async () => {
+    const lookupMock = vi.fn().mockResolvedValue([{ address: "93.184.216.34", family: 4 }]);
+    vi.doMock("node:dns/promises", () => ({ lookup: lookupMock }));
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      client_id: "https://client.example/oauth/client.json",
+      client_name: "Claude Code",
+      redirect_uris: ["http://localhost:3456/callback"],
+      scope: "openid profile workspace:read brain:read",
+      grant_types: ["authorization_code"],
+      response_types: ["code"],
+      token_endpoint_auth_method: "none",
+    }), {
+      headers: { "content-type": "application/json" },
+    })));
+
+    const prismaMock = {
+      mcpOAuthClient: {
+        findUnique: vi.fn().mockResolvedValue(null),
+        upsert: vi.fn().mockResolvedValue({
+          id: "client-db-1",
+          clientId: "https://client.example/oauth/client.json",
+          name: "Claude Code",
+          redirectUris: ["http://localhost:3456/callback"],
+          scopes: ["workspace:read", "brain:read"],
+          tokenEndpointAuthMethod: "none",
+          isActive: true,
+        }),
+      },
+    };
+    installSharedMock(prismaMock);
+
+    const { getMcpOAuthClientByClientId } = await import("./mcp-connector");
+    const client = await getMcpOAuthClientByClientId("https://client.example/oauth/client.json");
+
+    expect(client.clientId).toBe("https://client.example/oauth/client.json");
+    expect(fetch).toHaveBeenCalledWith(expect.any(URL), expect.objectContaining({
+      redirect: "manual",
+      method: "GET",
+    }));
+    expect(prismaMock.mcpOAuthClient.upsert).toHaveBeenCalledWith({
+      where: { clientId: "https://client.example/oauth/client.json" },
+      create: expect.objectContaining({
+        clientId: "https://client.example/oauth/client.json",
+        name: "Claude Code",
+        redirectUris: ["http://localhost:3456/callback"],
+        scopes: ["workspace:read", "brain:read"],
+        tokenEndpointAuthMethod: "none",
+        isActive: true,
+      }),
+      update: expect.objectContaining({
+        name: "Claude Code",
+        redirectUris: ["http://localhost:3456/callback"],
+        scopes: ["workspace:read", "brain:read"],
+        tokenEndpointAuthMethod: "none",
+      }),
+    });
+  });
+
+  it("does not treat non-HTTPS client IDs as CIMD clients", async () => {
+    installSharedMock({});
+
+    const { isCimdMcpClientId } = await import("./mcp-connector");
+    expect(isCimdMcpClientId("http://client.example/oauth/client.json")).toBe(false);
+    expect(isCimdMcpClientId("https://client.example")).toBe(false);
+    expect(isCimdMcpClientId("https://client.example/oauth/client.json")).toBe(true);
+  });
+
+  it("rejects CIMD metadata URLs that target localhost or private networks", async () => {
+    const prismaMock = {
+      mcpOAuthClient: {
+        findUnique: vi.fn().mockResolvedValue(null),
+        upsert: vi.fn(),
+      },
+    };
+    installSharedMock(prismaMock);
+
+    const { getMcpOAuthClientByClientId } = await import("./mcp-connector");
+    await expect(getMcpOAuthClientByClientId("https://127.0.0.1/oauth/client.json")).rejects.toMatchObject({
+      status: 400,
+      code: "INVALID_INPUT",
+    });
+    expect(prismaMock.mcpOAuthClient.upsert).not.toHaveBeenCalled();
+  });
+
+  it("rejects CIMD metadata hosts that resolve to private networks", async () => {
+    vi.doMock("node:dns/promises", () => ({
+      lookup: vi.fn().mockResolvedValue([{ address: "10.0.0.8", family: 4 }]),
+    }));
+    vi.stubGlobal("fetch", vi.fn());
+    const prismaMock = {
+      mcpOAuthClient: {
+        findUnique: vi.fn().mockResolvedValue(null),
+        upsert: vi.fn(),
+      },
+    };
+    installSharedMock(prismaMock);
+
+    const { getMcpOAuthClientByClientId } = await import("./mcp-connector");
+    await expect(getMcpOAuthClientByClientId("https://client.example/oauth/client.json")).rejects.toMatchObject({
+      status: 400,
+      code: "INVALID_INPUT",
+    });
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it("rejects oversized CIMD metadata documents", async () => {
+    vi.doMock("node:dns/promises", () => ({
+      lookup: vi.fn().mockResolvedValue([{ address: "93.184.216.34", family: 4 }]),
+    }));
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      padding: "x".repeat(70 * 1024),
+    }), {
+      headers: { "content-type": "application/json" },
+    })));
+    const prismaMock = {
+      mcpOAuthClient: {
+        findUnique: vi.fn().mockResolvedValue(null),
+        upsert: vi.fn(),
+      },
+    };
+    installSharedMock(prismaMock);
+
+    const { getMcpOAuthClientByClientId } = await import("./mcp-connector");
+    await expect(getMcpOAuthClientByClientId("https://client.example/oauth/client.json")).rejects.toMatchObject({
+      status: 400,
+      code: "INVALID_INPUT",
+    });
+    expect(prismaMock.mcpOAuthClient.upsert).not.toHaveBeenCalled();
+  });
+
+  it("rejects CIMD metadata whose client_id or redirect metadata is invalid", async () => {
+    vi.doMock("node:dns/promises", () => ({
+      lookup: vi.fn().mockResolvedValue([{ address: "93.184.216.34", family: 4 }]),
+    }));
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      client_id: "https://client.example/other.json",
+      client_name: "Bad Client",
+      redirect_uris: ["http://192.168.1.10/callback"],
+      token_endpoint_auth_method: "none",
+    }), {
+      headers: { "content-type": "application/json" },
+    })));
+    const prismaMock = {
+      mcpOAuthClient: {
+        findUnique: vi.fn().mockResolvedValue(null),
+        upsert: vi.fn(),
+      },
+    };
+    installSharedMock(prismaMock);
+
+    const { getMcpOAuthClientByClientId } = await import("./mcp-connector");
+    await expect(getMcpOAuthClientByClientId("https://client.example/oauth/client.json")).rejects.toMatchObject({
+      status: 400,
+      code: "INVALID_INPUT",
+    });
+    expect(prismaMock.mcpOAuthClient.upsert).not.toHaveBeenCalled();
   });
 
   it("defaults the current deployment to a registered active instance from WORKSPACE_SLUG", async () => {

@@ -2,23 +2,69 @@ import { NextRequest, NextResponse } from "next/server";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import { handleRouteError } from "@/lib/http";
 import { getPublicOrigin, getPublicRequestUrl } from "@/lib/public-origin";
-import { createCorgtexMcpServer, authenticateMcpRequest } from "@corgtex/mcp";
-import { AppError, getMcpPublicUrl } from "@corgtex/domain";
+import { createCorgtexMcpServer, authenticateMcpRequest, McpInsufficientScopeError } from "@corgtex/mcp";
+import { AppError, MCP_CONNECTOR_DEFAULT_SCOPES, MCP_TOOL_CAPABILITIES, getMcpPublicUrl } from "@corgtex/domain";
 
 function protectedResourceMetadataUrl(request: NextRequest) {
   return `${getPublicOrigin(request)}/.well-known/oauth-protected-resource`;
 }
 
-function mcpAuthErrorResponse(request: NextRequest, error: AppError) {
+function bearerChallenge(params: {
+  error: "invalid_token" | "insufficient_scope";
+  resourceMetadataUrl: string;
+  scopes: string[];
+}) {
+  return [
+    `Bearer error="${params.error}"`,
+    `resource_metadata="${params.resourceMetadataUrl}"`,
+    `scope="${[...new Set(params.scopes)].join(" ")}"`,
+  ].join(", ");
+}
+
+function mcpAuthErrorResponse(request: NextRequest, error: AppError, challengeScopes: string[]) {
   return NextResponse.json(
     { error: { code: error.code, message: error.message } },
     {
       status: error.status,
       headers: {
-        "WWW-Authenticate": `Bearer resource_metadata="${protectedResourceMetadataUrl(request)}"`,
+        "WWW-Authenticate": bearerChallenge({
+          error: error.status === 403 ? "insufficient_scope" : "invalid_token",
+          resourceMetadataUrl: protectedResourceMetadataUrl(request),
+          scopes: challengeScopes,
+        }),
       },
     },
   );
+}
+
+function toolCallName(message: unknown) {
+  if (!message || typeof message !== "object" || Array.isArray(message)) return null;
+  const candidate = message as { method?: unknown; params?: { name?: unknown } };
+  return candidate.method === "tools/call" && typeof candidate.params?.name === "string"
+    ? candidate.params.name
+    : null;
+}
+
+function oauthToolScopeError(sessionCtx: Awaited<ReturnType<typeof authenticateMcpRequest>>, body: unknown) {
+  if (sessionCtx.authKind !== "oauth") return null;
+  const grantedScopes = sessionCtx.scopes ?? [];
+  const messages = Array.isArray(body) ? body : [body];
+
+  for (const message of messages) {
+    const name = toolCallName(message);
+    if (!name || !Object.prototype.hasOwnProperty.call(MCP_TOOL_CAPABILITIES, name)) continue;
+    const capability = MCP_TOOL_CAPABILITIES[name as keyof typeof MCP_TOOL_CAPABILITIES];
+    const missingScope = capability.scopes.find((scope) => !grantedScopes.includes(scope));
+    if (missingScope) {
+      return new McpInsufficientScopeError({
+        workspaceId: sessionCtx.workspaceId,
+        requiredScope: missingScope,
+        grantedScopes,
+      });
+    }
+  }
+
+  return null;
 }
 
 /**
@@ -35,6 +81,13 @@ export async function POST(request: NextRequest) {
     const sessionCtx = await authenticateMcpRequest(authHeader, {
       resourceUrl: getPublicRequestUrl(request),
     });
+    const body = await request.json();
+
+    const missingScope = oauthToolScopeError(sessionCtx, body);
+    if (missingScope) {
+      throw missingScope;
+    }
+
     server = createCorgtexMcpServer(sessionCtx);
 
     const transport = new WebStandardStreamableHTTPServerTransport({
@@ -43,8 +96,6 @@ export async function POST(request: NextRequest) {
     });
 
     await server.connect(transport);
-
-    const body = await request.json();
 
     // The SDK requires Accept to include both application/json and text/event-stream.
     // Some proxies (mcp-remote, curl) may not send both, so we patch the header.
@@ -67,8 +118,11 @@ export async function POST(request: NextRequest) {
     return response;
   } catch (error) {
     if (server) await server.close().catch(() => {});
+    if (error instanceof McpInsufficientScopeError) {
+      return mcpAuthErrorResponse(request, error, [...error.grantedScopes, error.requiredScope]);
+    }
     if (error instanceof AppError && error.status === 401) {
-      return mcpAuthErrorResponse(request, error);
+      return mcpAuthErrorResponse(request, error, MCP_CONNECTOR_DEFAULT_SCOPES);
     }
     return handleRouteError(error);
   }

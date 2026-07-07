@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { ALL_SCOPES, getMcpPublicUrl } from "@corgtex/domain";
+import { MCP_CONNECTOR_DEFAULT_SCOPES, getMcpPublicUrl } from "@corgtex/domain";
 import { getPublicOrigin } from "@/lib/public-origin";
 
 export async function GET(request: NextRequest) {
@@ -10,7 +10,7 @@ export async function GET(request: NextRequest) {
     resource_documentation: `${origin}/install`,
     resource_policy_uri: `${origin}/install`,
     authorization_servers: [origin],
-    scopes_supported: ALL_SCOPES,
+    scopes_supported: MCP_CONNECTOR_DEFAULT_SCOPES,
     bearer_methods_supported: ["header"],
   }, {
     headers: {

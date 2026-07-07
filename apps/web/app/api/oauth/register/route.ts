@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { handleRouteError } from "@/lib/http";
-import { registerMcpOAuthClient } from "@corgtex/domain";
+import { AppError, registerMcpOAuthClient } from "@corgtex/domain";
 
 const registrationSchema = z.object({
   client_name: z.string().optional(),
@@ -30,6 +30,12 @@ export async function POST(request: NextRequest) {
       },
     });
   } catch (error) {
+    if (error instanceof AppError && error.code === "INVALID_INPUT") {
+      return NextResponse.json(
+        { error: "invalid_scope", error_description: error.message },
+        { status: 400 },
+      );
+    }
     return handleRouteError(error);
   }
 }
