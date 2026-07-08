@@ -1003,6 +1003,7 @@ describe("fleet release runner", () => {
 
   it("sets migrate-and-web startup variables during Azure deploys", async () => {
     const toolCalls = [];
+    let releaseRecorded = false;
     const runCommand = vi.fn((command, args) => {
       if (command === "az" && args[0] === "containerapp" && args[1] === "show") {
         return { stdout: `${args[3]}-revision\n`, stderr: "" };
@@ -1014,12 +1015,17 @@ describe("fleet release runner", () => {
         const body = JSON.parse(options.body);
         toolCalls.push(body.params.name);
         if (body.params.name === "get_azure_provider_status") {
-          return controlPlaneResult(azureProviderStatus());
+          return controlPlaneResult(azureProviderStatus({
+            release: releaseRecorded
+              ? { releaseImageTag: `sha-${SHA}`, releaseDrift: null }
+              : { releaseImageTag: "sha-old", releaseDrift: "Release drift: expected sha-old" },
+          }));
         }
         if (body.params.name === "list_self_serve_customers") {
           return controlPlaneResult(selfServeRegistry());
         }
         if (body.params.name === "record_verified_release") {
+          releaseRecorded = true;
           return controlPlaneResult({ recorded: true });
         }
       }
@@ -1062,10 +1068,11 @@ describe("fleet release runner", () => {
       expect(args).toContain(`CORGTEX_RELEASE_GIT_SHA=${SHA}`);
     }
     expect(toolCalls).toEqual([
+      "record_verified_release",
       "get_azure_provider_status",
       "list_self_serve_customers",
-      "record_verified_release",
     ]);
+    expect(result.results[0].result.verifiedRelease).toMatchObject({ recorded: true });
     expect(result.results[0].result.providerReadiness).toMatchObject({
       status: "ok",
       provider: "azure",
