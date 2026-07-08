@@ -7,6 +7,7 @@ vi.mock("@corgtex/shared", () => {
     env: {
       APP_URL: "https://app.corgtex.test",
     },
+    toInputJson: vi.fn((value: unknown) => value),
     prisma: {
       demoLead: {
         findUnique: vi.fn(),
@@ -277,6 +278,7 @@ vi.mock("./events", () => ({
 }));
 
 const dummyActor = { kind: "user", user: { id: "u-1", email: "admin@corgtex.local" } } as any;
+const targetWorkspaceSlug = ["cr", "ina"].join("");
 
 // ---------- tests ----------
 
@@ -337,6 +339,338 @@ describe("CRM domain", () => {
       await captureDemoLead({ email: "demo@example.com" });
 
       expect(appendEvents).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("captureCrmInquiry", () => {
+    function inquiryInput(overrides: Record<string, unknown> = {}) {
+      return {
+        workspaceSlug: targetWorkspaceSlug,
+        source: "corporate_rebels_website",
+        sourceExternalId: "form-001",
+        persona: "OWNER",
+        name: "Ava Chen",
+        email: "Ava@Meridian.example",
+        phone: "+1 555 0100",
+        company: "Meridian Works",
+        website: "https://meridian.example",
+        title: "Owner",
+        location: "Chicago",
+        message: "I want to explore acquisition support.",
+        answers: { timeline: "This quarter" },
+        sourceUrl: "https://us.corporate-rebels.com/contact",
+        referrerUrl: "https://us.corporate-rebels.com/",
+        utmSource: "website",
+        consentToContact: true,
+        ...overrides,
+      };
+    }
+
+    function inquiryTx(overrides: Record<string, any> = {}) {
+      const tx = {
+        workspace: {
+          findUnique: vi.fn().mockResolvedValue({ id: "ws-1", slug: targetWorkspaceSlug }),
+        },
+        crmConversation: {
+          findUnique: vi.fn().mockResolvedValue(null),
+          create: vi.fn().mockResolvedValue({
+            id: "conv-1",
+            workspaceId: "ws-1",
+            accountId: "account-1",
+            contactId: "contact-1",
+            dealId: "deal-1",
+          }),
+        },
+        crmConversationMessage: {
+          create: vi.fn().mockResolvedValue({ id: "msg-1", conversationId: "conv-1" }),
+        },
+        crmActivity: {
+          findUnique: vi.fn().mockResolvedValue(null),
+          create: vi.fn().mockResolvedValue({ id: "activity-1" }),
+        },
+        crmAccount: {
+          findFirst: vi.fn().mockResolvedValue(null),
+          create: vi.fn().mockResolvedValue({
+            id: "account-1",
+            workspaceId: "ws-1",
+            name: "Meridian Works",
+            slug: "meridian-works",
+            domain: "meridian.example",
+            tags: ["source:corporate_rebels_website", "persona:owner"],
+          }),
+          update: vi.fn(),
+        },
+        crmContact: {
+          findUnique: vi.fn().mockResolvedValue(null),
+          create: vi.fn().mockResolvedValue({
+            id: "contact-1",
+            workspaceId: "ws-1",
+            email: "ava@meridian.example",
+            accountId: "account-1",
+            tags: ["source:corporate_rebels_website", "persona:owner"],
+          }),
+          update: vi.fn(),
+        },
+        crmDeal: {
+          create: vi.fn().mockResolvedValue({
+            id: "deal-1",
+            workspaceId: "ws-1",
+            accountId: "account-1",
+            contactId: "contact-1",
+            title: "Meridian Works owner inquiry",
+            stage: "LEAD",
+            createdAt: new Date("2026-07-08T12:00:00.000Z"),
+          }),
+        },
+        crmDealStageTransition: {
+          create: vi.fn().mockResolvedValue({ id: "transition-1" }),
+        },
+        ...overrides,
+      };
+      return tx;
+    }
+
+    it("creates contact, account, conversation, task, and deal for owner inquiries", async () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date("2026-07-09T12:00:00.000Z"));
+      try {
+        const { prisma } = await import("@corgtex/shared");
+        const { appendEvents } = await import("./events");
+        const { captureCrmInquiry } = await import("./crm");
+        const tx = inquiryTx();
+        vi.mocked(prisma.$transaction).mockImplementationOnce((async (fn: any) => fn(tx)) as any);
+
+        const result = await captureCrmInquiry(inquiryInput());
+
+        expect(result).toEqual({
+          duplicate: false,
+          submissionId: "conv-1",
+          workspaceId: "ws-1",
+          contactId: "contact-1",
+          accountId: "account-1",
+          conversationId: "conv-1",
+          messageId: "msg-1",
+          activityId: "activity-1",
+          dealId: "deal-1",
+        });
+        expect(tx.crmAccount.create).toHaveBeenCalledWith({
+          data: expect.objectContaining({
+            workspaceId: "ws-1",
+            name: "Meridian Works",
+            slug: "meridian-works",
+            domain: "meridian.example",
+            relationshipType: "PROSPECT",
+            lifecycleStage: "DISCOVERY",
+            tags: ["source:corporate_rebels_website", "persona:owner"],
+          }),
+        });
+        expect(tx.crmContact.create).toHaveBeenCalledWith({
+          data: expect.objectContaining({
+            workspaceId: "ws-1",
+            accountId: "account-1",
+            email: "ava@meridian.example",
+            name: "Ava Chen",
+            company: "Meridian Works",
+            source: "corporate_rebels_website",
+            tags: ["source:corporate_rebels_website", "persona:owner"],
+          }),
+        });
+        expect(tx.crmConversation.create).toHaveBeenCalledWith({
+          data: expect.objectContaining({
+            workspaceId: "ws-1",
+            accountId: "account-1",
+            contactId: "contact-1",
+            dealId: "deal-1",
+            source: "corporate_rebels_website",
+            sourceExternalId: "form-001",
+          }),
+        });
+        expect(tx.crmConversationMessage.create).toHaveBeenCalledWith({
+          data: expect.objectContaining({
+            conversationId: "conv-1",
+            senderType: "LEAD",
+            senderEmail: "ava@meridian.example",
+            bodyMd: expect.stringContaining("I want to explore acquisition support."),
+          }),
+        });
+        expect(tx.crmActivity.create).toHaveBeenCalledWith({
+          data: expect.objectContaining({
+            workspaceId: "ws-1",
+            accountId: "account-1",
+            contactId: "contact-1",
+            dealId: "deal-1",
+            type: "TASK",
+            source: "corporate_rebels_website",
+            sourceExternalId: "form-001:follow-up",
+            dueAt: new Date("2026-07-10T17:00:00.000Z"),
+          }),
+        });
+        expect(tx.crmDeal.create).toHaveBeenCalledWith({
+          data: expect.objectContaining({
+            workspaceId: "ws-1",
+            accountId: "account-1",
+            contactId: "contact-1",
+            stage: "LEAD",
+          }),
+        });
+        expect(tx.crmDealStageTransition.create).toHaveBeenCalledWith({
+          data: expect.objectContaining({
+            workspaceId: "ws-1",
+            dealId: "deal-1",
+            fromStage: null,
+            toStage: "LEAD",
+            actorUserId: null,
+          }),
+        });
+        expect(appendEvents).toHaveBeenCalledWith(expect.anything(), [
+          expect.objectContaining({
+            workspaceId: "ws-1",
+            type: "crm.inquiry.captured",
+            aggregateType: "CrmConversation",
+            aggregateId: "conv-1",
+          }),
+        ]);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it.each(["GENERAL", "EMPLOYEE"])("creates no deal for %s inquiries", async (persona) => {
+      const { prisma } = await import("@corgtex/shared");
+      const { captureCrmInquiry } = await import("./crm");
+      const tx = inquiryTx({
+        crmConversation: {
+          findUnique: vi.fn().mockResolvedValue(null),
+          create: vi.fn().mockResolvedValue({
+            id: "conv-1",
+            workspaceId: "ws-1",
+            accountId: "account-1",
+            contactId: "contact-1",
+            dealId: null,
+          }),
+        },
+      });
+      vi.mocked(prisma.$transaction).mockImplementationOnce((async (fn: any) => fn(tx)) as any);
+
+      const result = await captureCrmInquiry(inquiryInput({ persona }));
+
+      expect(result.dealId).toBeNull();
+      expect(tx.crmDeal.create).not.toHaveBeenCalled();
+      expect(tx.crmConversation.create).toHaveBeenCalledWith({
+        data: expect.objectContaining({
+          dealId: null,
+        }),
+      });
+      expect(tx.crmActivity.create).toHaveBeenCalledWith({
+        data: expect.objectContaining({
+          dealId: null,
+        }),
+      });
+    });
+
+    it("returns the existing submission for duplicate source ids without creating CRM records", async () => {
+      const { prisma } = await import("@corgtex/shared");
+      const { appendEvents } = await import("./events");
+      const { captureCrmInquiry } = await import("./crm");
+      const tx = inquiryTx({
+        crmConversation: {
+          findUnique: vi.fn().mockResolvedValue({
+            id: "conv-existing",
+            accountId: "account-existing",
+            contactId: "contact-existing",
+            dealId: "deal-existing",
+          }),
+          create: vi.fn(),
+        },
+        crmActivity: {
+          findUnique: vi.fn().mockResolvedValue({ id: "activity-existing" }),
+          create: vi.fn(),
+        },
+      });
+      vi.mocked(prisma.$transaction).mockImplementationOnce((async (fn: any) => fn(tx)) as any);
+
+      const result = await captureCrmInquiry(inquiryInput());
+
+      expect(result).toEqual({
+        duplicate: true,
+        submissionId: "conv-existing",
+        workspaceId: "ws-1",
+        contactId: "contact-existing",
+        accountId: "account-existing",
+        conversationId: "conv-existing",
+        messageId: null,
+        activityId: "activity-existing",
+        dealId: "deal-existing",
+      });
+      expect(tx.crmContact.create).not.toHaveBeenCalled();
+      expect(tx.crmContact.update).not.toHaveBeenCalled();
+      expect(tx.crmConversation.create).not.toHaveBeenCalled();
+      expect(tx.crmActivity.create).not.toHaveBeenCalled();
+      expect(tx.crmDeal.create).not.toHaveBeenCalled();
+      expect(appendEvents).not.toHaveBeenCalled();
+    });
+
+    it("rejects invalid email and missing consent before writing", async () => {
+      const { prisma } = await import("@corgtex/shared");
+      const { captureCrmInquiry } = await import("./crm");
+
+      await expect(captureCrmInquiry(inquiryInput({
+        email: "not-an-email",
+      }) as any)).rejects.toThrow("Valid email is required.");
+      await expect(captureCrmInquiry(inquiryInput({
+        consentToContact: false,
+      }) as any)).rejects.toThrow("Consent to contact is required.");
+      expect(prisma.$transaction).not.toHaveBeenCalled();
+    });
+
+    it("accepts connector-style sources through the same service", async () => {
+      const { prisma } = await import("@corgtex/shared");
+      const { captureCrmInquiry } = await import("./crm");
+      const tx = inquiryTx({
+        crmAccount: {
+          findFirst: vi.fn().mockResolvedValue(null),
+          create: vi.fn().mockResolvedValue({
+            id: "account-1",
+            workspaceId: "ws-1",
+            name: "Meridian Works",
+            slug: "meridian-works",
+            domain: "meridian.example",
+            tags: ["source:salesforce_connector", "persona:partner"],
+          }),
+          update: vi.fn(),
+        },
+        crmContact: {
+          findUnique: vi.fn().mockResolvedValue(null),
+          create: vi.fn().mockResolvedValue({
+            id: "contact-1",
+            workspaceId: "ws-1",
+            email: "ava@meridian.example",
+            accountId: "account-1",
+            tags: ["source:salesforce_connector", "persona:partner"],
+          }),
+          update: vi.fn(),
+        },
+      });
+      vi.mocked(prisma.$transaction).mockImplementationOnce((async (fn: any) => fn(tx)) as any);
+
+      await captureCrmInquiry(inquiryInput({
+        source: "salesforce_connector",
+        sourceExternalId: "lead-789",
+        persona: "PARTNER",
+      }));
+
+      expect(tx.crmConversation.create).toHaveBeenCalledWith({
+        data: expect.objectContaining({
+          source: "salesforce_connector",
+          sourceExternalId: "lead-789",
+        }),
+      });
+      expect(tx.crmContact.create).toHaveBeenCalledWith({
+        data: expect.objectContaining({
+          source: "salesforce_connector",
+          tags: ["source:salesforce_connector", "persona:partner"],
+        }),
+      });
     });
   });
 
