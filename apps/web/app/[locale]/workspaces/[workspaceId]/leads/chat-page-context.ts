@@ -2,7 +2,7 @@ import { accountHref } from "./view-model";
 
 export const CRM_CHAT_CONTEXT_LIMIT = 12;
 
-type AccountLike = { id: string; name: string; domain?: string | null; relationshipType?: string | null; lifecycleStage?: string | null };
+type AccountLike = { id: string; name: string; domain?: string | null; relationshipType?: string | null; lifecycleStage?: string | null; archivedAt?: Date | string | null };
 type ContactLike = { id: string; name?: string | null; email?: string | null; title?: string | null; accountId?: string | null; account?: AccountLike | null };
 type DealLike = { id: string; title: string; stage?: string | null; accountId?: string | null; account?: AccountLike | null; contactId?: string | null; contact?: ContactLike | null; valueCents?: number | null; ownerUserId?: string | null };
 type ActivityLike = { id: string; title: string; type?: string | null; accountId?: string | null; account?: AccountLike | null; contactId?: string | null; contact?: ContactLike | null; dealId?: string | null; deal?: DealLike | null; dueAt?: Date | string | null; completedAt?: Date | string | null; ownerUserId?: string | null };
@@ -36,6 +36,7 @@ export function crmAccountContext(workspaceId: string, account: AccountLike) {
 }
 export function crmContactContext(workspaceId: string, contact: ContactLike) {
   const accountId = contact.accountId ?? contact.account?.id ?? null;
+  const accountArchived = Boolean(contact.account?.archivedAt);
   return {
     id: contact.id,
     name: contact.name ?? null,
@@ -43,11 +44,12 @@ export function crmContactContext(workspaceId: string, contact: ContactLike) {
     title: contact.title ?? null,
     accountId,
     accountName: contact.account?.name ?? null,
-    webUrl: accountId ? accountHref(workspaceId, accountId) : null,
+    webUrl: accountId && !accountArchived ? accountHref(workspaceId, accountId) : null,
   };
 }
 export function crmDealContext(workspaceId: string, deal: DealLike) {
   const accountId = deal.accountId ?? deal.account?.id ?? null;
+  const accountArchived = Boolean(deal.account?.archivedAt);
   return {
     id: deal.id,
     title: deal.title,
@@ -58,7 +60,7 @@ export function crmDealContext(workspaceId: string, deal: DealLike) {
     contactName: contactName(deal.contact),
     valueCents: deal.valueCents ?? null,
     ownerUserId: deal.ownerUserId ?? null,
-    webUrl: accountId ? `${accountHref(workspaceId, accountId)}?view=pipeline` : null,
+    webUrl: accountId && !accountArchived ? `${accountHref(workspaceId, accountId)}?view=pipeline` : null,
   };
 }
 export function crmActivityContext(workspaceId: string, activity: ActivityLike) {

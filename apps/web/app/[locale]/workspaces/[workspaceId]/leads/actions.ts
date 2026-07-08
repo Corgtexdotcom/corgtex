@@ -5,13 +5,15 @@ import { requirePageActor } from "@/lib/auth";
 import { requireWorkspaceFeature } from "@/lib/workspace-feature-flags";
 import { asString, asOptional, refresh } from "../action-utils";
 import { CRM_CREATABLE_DEAL_STAGES } from "./view-model";
+import { redirect } from "next/navigation";
 import {
+  archiveContact,
+  archiveCrmAccount,
   createCrmAccount,
   convertCrmAccountToClient,
   createExecutionRequest,
   createContact,
   updateContact,
-  deleteContact,
   createDeal,
   updateDeal,
   deleteDeal,
@@ -96,6 +98,20 @@ export async function updateCrmAccountAction(formData: FormData) {
   refresh(workspaceId);
 }
 
+export async function archiveCrmAccountAction(formData: FormData) {
+  const _demoGuardWsId = formData.get("workspaceId") as string;
+  if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
+
+  const actor = await requirePageActor();
+  const workspaceId = asString(formData, "workspaceId");
+  await archiveCrmAccount(actor, {
+    workspaceId,
+    accountId: asString(formData, "accountId"),
+  });
+  refresh(workspaceId);
+  redirect(`/workspaces/${workspaceId}/leads/accounts`);
+}
+
 export async function convertCrmAccountToClientAction(formData: FormData) {
   const _demoGuardWsId = formData.get("workspaceId") as string;
   if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
@@ -156,17 +172,25 @@ export async function updateContactAction(formData: FormData) {
   refresh(workspaceId);
 }
 
-export async function deleteContactAction(formData: FormData) {
+async function archiveContactFromForm(formData: FormData) {
   const _demoGuardWsId = formData.get("workspaceId") as string;
   if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
 
   const actor = await requirePageActor();
   const workspaceId = asString(formData, "workspaceId");
-  await deleteContact(actor, {
+  await archiveContact(actor, {
     workspaceId,
     contactId: asString(formData, "contactId"),
   });
   refresh(workspaceId);
+}
+
+export async function archiveContactAction(formData: FormData) {
+  await archiveContactFromForm(formData);
+}
+
+export async function deleteContactAction(formData: FormData) {
+  await archiveContactFromForm(formData);
 }
 
 export async function createDealAction(formData: FormData) {

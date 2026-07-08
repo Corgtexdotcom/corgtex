@@ -20,10 +20,11 @@ import { ArrowRight, ExternalLink } from "lucide-react";
 import { normalizeVisibleWorkItemColumns, toggleWorkItemColumnVisibility } from "@/lib/work-item-view";
 
 import {
+  archiveContactAction,
+  archiveCrmAccountAction,
   approveQualificationAction,
   completeActivityAction,
   createConversationMessageAction,
-  deleteContactAction,
   provisionProspectWorkspaceAction,
   rejectQualificationAction,
 } from "../actions";
@@ -228,8 +229,9 @@ export default async function LeadsPage({
     return key ? t(key) : labelFromCrmCode(value);
   };
 
-  const accountLink = (account?: { id: string; name: string } | null) => {
+  const accountLink = (account?: { id: string; name: string; archivedAt?: Date | string | null } | null) => {
     if (!account) return <span className="muted">{t("emptyAccount")}</span>;
+    if (account.archivedAt) return <span className="muted">{account.name}</span>;
     return <a href={accountHref(workspaceId, account.id)}>{account.name}</a>;
   };
 
@@ -664,15 +666,14 @@ export default async function LeadsPage({
                   const accountPipelineValue = activePipelineValueCents(accountDeals);
                   const lastActivity = lastActivityByAccountId.get(account.id);
                   return (
-                    <a
+                    <div
                       key={account.id}
-                      href={accountHref(workspaceId, account.id)}
-                      className="item nr-clickable-card"
-                      style={{ display: "grid", gap: 12, color: "inherit", textDecoration: "none", borderRadius: 8 }}
+                      className="item"
+                      style={{ display: "grid", gap: 12, borderRadius: 8 }}
                     >
                       <div className="row" style={{ alignItems: "flex-start", gap: 12 }}>
                         <div>
-                          <strong style={{ fontSize: "1rem" }}>{account.name}</strong>
+                          <a href={accountHref(workspaceId, account.id)} className="nr-work-item-table-title">{account.name}</a>
                           <div className="muted" style={{ fontSize: "0.82rem", marginTop: 4 }}>
                             {account.domain || t("noDomain")}
                           </div>
@@ -693,7 +694,15 @@ export default async function LeadsPage({
                           ? t("accountLastActivity", { title: lastActivity.title, age: ageText(lastActivity.createdAt) })
                           : t("accountNoActivity")}
                       </div>
-                    </a>
+                      <div className="row" style={{ justifyContent: "flex-end", gap: 8 }}>
+                        <a href={accountHref(workspaceId, account.id)} className="link-button small">{t("openDetail")}</a>
+                        <form action={archiveCrmAccountAction}>
+                          <input type="hidden" name="workspaceId" value={workspaceId} />
+                          <input type="hidden" name="accountId" value={account.id} />
+                          <button type="submit" className="danger small">{t("btnArchiveAccount")}</button>
+                        </form>
+                      </div>
+                    </div>
                   );
                 })}
               </div>
@@ -742,10 +751,10 @@ export default async function LeadsPage({
                               {t("btnContactActions")}
                             </summary>
                             <div style={{ position: "absolute", right: 0, top: "100%", background: "white", padding: 8, border: "1px solid var(--line)", borderRadius: 8, zIndex: 10, boxShadow: "var(--shadow-md)" }}>
-                              <form action={deleteContactAction}>
+                              <form action={archiveContactAction}>
                                 <input type="hidden" name="workspaceId" value={workspaceId} />
                                 <input type="hidden" name="contactId" value={contact.id} />
-                                <button type="submit" className="danger small" style={{ width: "100%", whiteSpace: "nowrap" }}>{t("btnDelete")}</button>
+                                <button type="submit" className="danger small" style={{ width: "100%", whiteSpace: "nowrap" }}>{t("btnArchiveContact")}</button>
                               </form>
                             </div>
                           </details>

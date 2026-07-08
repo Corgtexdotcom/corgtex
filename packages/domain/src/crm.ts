@@ -1205,17 +1205,31 @@ export async function convertCrmAccountToClient(actor: AppActor, params: {
   });
 }
 
-export async function deleteCrmAccount(actor: AppActor, params: { workspaceId: string; accountId: string }) {
+async function archiveCrmAccountWithReason(actor: AppActor, params: { workspaceId: string; accountId: string; reason: string }) {
   await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
 
   await archiveWorkspaceArtifact(actor, {
     workspaceId: params.workspaceId,
     entityType: "CrmAccount",
     entityId: params.accountId,
-    reason: "Archived from account delete path.",
+    reason: params.reason,
   });
 
   return { id: params.accountId };
+}
+
+export async function archiveCrmAccount(actor: AppActor, params: { workspaceId: string; accountId: string }) {
+  return archiveCrmAccountWithReason(actor, {
+    ...params,
+    reason: "Archived from CRM account archive action.",
+  });
+}
+
+export async function deleteCrmAccount(actor: AppActor, params: { workspaceId: string; accountId: string }) {
+  return archiveCrmAccountWithReason(actor, {
+    ...params,
+    reason: "Archived from account delete path.",
+  });
 }
 
 export async function backfillCrmAccountsForWorkspace(actor: AppActor, params: { workspaceId: string; take?: number }) {
@@ -1326,7 +1340,7 @@ export async function listContacts(actor: AppActor, workspaceId: string, opts?: 
       where,
       include: {
         account: {
-          select: { id: true, name: true, slug: true, domain: true, relationshipType: true, lifecycleStage: true },
+          select: { id: true, name: true, slug: true, domain: true, relationshipType: true, lifecycleStage: true, archivedAt: true },
         },
         _count: {
           select: { deals: true, activities: true },
@@ -1496,17 +1510,31 @@ export async function updateContact(actor: AppActor, params: {
   });
 }
 
-export async function deleteContact(actor: AppActor, params: { workspaceId: string; contactId: string }) {
+async function archiveContactWithReason(actor: AppActor, params: { workspaceId: string; contactId: string; reason: string }) {
   await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
 
   await archiveWorkspaceArtifact(actor, {
     workspaceId: params.workspaceId,
     entityType: "CrmContact",
     entityId: params.contactId,
-    reason: "Archived from contact delete path.",
+    reason: params.reason,
   });
 
   return { id: params.contactId };
+}
+
+export async function archiveContact(actor: AppActor, params: { workspaceId: string; contactId: string }) {
+  return archiveContactWithReason(actor, {
+    ...params,
+    reason: "Archived from CRM contact archive action.",
+  });
+}
+
+export async function deleteContact(actor: AppActor, params: { workspaceId: string; contactId: string }) {
+  return archiveContactWithReason(actor, {
+    ...params,
+    reason: "Archived from contact delete path.",
+  });
 }
 
 // --- DEALS ---
@@ -1536,7 +1564,7 @@ export async function listDeals(actor: AppActor, workspaceId: string, opts?: { t
       where,
       include: {
         account: {
-          select: { id: true, name: true, slug: true, domain: true, relationshipType: true, lifecycleStage: true },
+          select: { id: true, name: true, slug: true, domain: true, relationshipType: true, lifecycleStage: true, archivedAt: true },
         },
         contact: {
           select: { id: true, name: true, company: true, email: true, avatarUrl: true },

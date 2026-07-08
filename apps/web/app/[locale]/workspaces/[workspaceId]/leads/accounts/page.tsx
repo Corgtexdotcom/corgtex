@@ -26,6 +26,7 @@ import {
   relationshipFullPageHref,
 } from "../view-model";
 import { RelationshipNav, relationshipNavLabels } from "../RelationshipNav";
+import { archiveCrmAccountAction } from "../actions";
 import {
   CRM_FULL_PAGE_SIZE,
   crmPageCount,
@@ -248,14 +249,21 @@ export default async function RelationshipAccountsPage({
           </span>
         ),
         actions: (
-          <a
-            href={accountHref(workspaceId, account.id)}
-            className="nr-icon-link nr-table-action"
-            aria-label={t("openDetail")}
-            title={t("openDetail")}
-          >
-            <ExternalLink size={15} aria-hidden="true" />
-          </a>
+          <div className="row" style={{ justifyContent: "flex-end", gap: 6 }}>
+            <a
+              href={accountHref(workspaceId, account.id)}
+              className="nr-icon-link nr-table-action"
+              aria-label={t("openDetail")}
+              title={t("openDetail")}
+            >
+              <ExternalLink size={15} aria-hidden="true" />
+            </a>
+            <form action={archiveCrmAccountAction}>
+              <input type="hidden" name="workspaceId" value={workspaceId} />
+              <input type="hidden" name="accountId" value={account.id} />
+              <button type="submit" className="danger small" style={{ whiteSpace: "nowrap" }}>{t("btnArchiveAccount")}</button>
+            </form>
+          </div>
         ),
       },
     };
@@ -360,10 +368,10 @@ export default async function RelationshipAccountsPage({
               const pipelineValue = activePipelineValueCents(accountDeals);
               const lastActivity = lastActivityByAccountId.get(account.id);
               return (
-                <a key={account.id} href={accountHref(workspaceId, account.id)} className="item nr-clickable-card" style={{ display: "grid", gap: 10, color: "inherit", textDecoration: "none" }}>
+                <div key={account.id} className="item" style={{ display: "grid", gap: 10 }}>
                   <div className="row" style={{ alignItems: "flex-start", gap: 10 }}>
                     <div style={{ minWidth: 0 }}>
-                      <strong>{account.name}</strong>
+                      <a href={accountHref(workspaceId, account.id)} className="nr-work-item-table-title">{account.name}</a>
                       <div className="muted" style={{ fontSize: "0.84rem", marginTop: 4 }}>{account.domain || t("noDomain")}</div>
                     </div>
                     <span className="tag-sm" style={{ marginLeft: "auto" }}>{formatCurrency(pipelineValue)}</span>
@@ -377,7 +385,15 @@ export default async function RelationshipAccountsPage({
                   <div className="muted" style={{ fontSize: "0.82rem" }}>
                     {lastActivity ? t("accountLastActivity", { title: lastActivity.title, age: formatDate(lastActivity.createdAt) }) : formatDate(account.updatedAt)}
                   </div>
-                </a>
+                  <div className="row" style={{ justifyContent: "flex-end", gap: 8 }}>
+                    <a href={accountHref(workspaceId, account.id)} className="link-button small">{t("openDetail")}</a>
+                    <form action={archiveCrmAccountAction}>
+                      <input type="hidden" name="workspaceId" value={workspaceId} />
+                      <input type="hidden" name="accountId" value={account.id} />
+                      <button type="submit" className="danger small">{t("btnArchiveAccount")}</button>
+                    </form>
+                  </div>
+                </div>
               );
             })}
           </div>
