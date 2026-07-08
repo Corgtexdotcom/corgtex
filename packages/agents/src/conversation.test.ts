@@ -116,9 +116,12 @@ vi.mock("@corgtex/domain", () => ({
   upsertWorkspaceToolLink: vi.fn(),
 }));
 
+import { searchIndexedKnowledge } from "@corgtex/knowledge";
+
 describe("processConversationTurn", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.mocked(searchIndexedKnowledge).mockReset().mockResolvedValue([]);
     checkBudgetMock.mockResolvedValue({ allowed: true, usedPct: 0, usedUsd: 0, capUsd: 5 });
     conversationTurnFindManyMock.mockResolvedValue([]);
     loadRelevantMemoriesMock.mockResolvedValue([]);
@@ -242,6 +245,105 @@ describe("processConversationTurn", () => {
       code: "BUDGET_EXCEEDED",
     });
     expect(chatMock).not.toHaveBeenCalled();
+  });
+
+  it("runs retrieval for short follow-up questions using recent conversation context", async () => {
+    conversationTurnFindManyMock.mockResolvedValueOnce([{
+      sequenceNumber: 1,
+      userMessage: "Can you find the name from the meeting transcript?",
+      assistantMessage: "I will check the meeting transcript for the name.",
+    }]);
+    vi.mocked(searchIndexedKnowledge).mockResolvedValueOnce([{
+      chunkId: "chunk-1",
+      sourceType: "MEETING",
+      sourceId: "meeting-1",
+      title: "Transcript",
+      chunkIndex: 0,
+      snippet: "The name mentioned was Jan.",
+      score: 0.95,
+    } as any]);
+    chatMock.mockResolvedValueOnce({ content: "The name was Jan." });
+
+    const { processConversationTurn } = await import("./conversation");
+    const result = await processConversationTurn({
+      workspaceId: "ws-1",
+      sessionId: "session-1",
+      userId: "user-1",
+      agentKey: "assistant",
+      userMessage: "any name?",
+    });
+
+    expect(searchIndexedKnowledge).toHaveBeenCalledWith(expect.objectContaining({
+      workspaceId: "ws-1",
+      limit: 4,
+      query: expect.stringContaining("Recent conversation context"),
+    }));
+    expect(vi.mocked(searchIndexedKnowledge).mock.calls[0]?.[0]?.query).toContain("meeting transcript");
+    expect(result.contextUsed.knowledgeSearch).toMatchObject({
+      hitCount: 1,
+    });
+    expect(chatMock).toHaveBeenCalledWith(expect.objectContaining({
+      messages: expect.arrayContaining([
+        expect.objectContaining({
+          role: "system",
+          content: expect.stringContaining("Knowledge retrieval already searched indexed workspace knowledge"),
+        }),
+      ]),
+    }));
+  });
+
+  it("routes Slack follow-up retrieval to indexed Slack knowledge", async () => {
+    conversationTurnFindManyMock.mockResolvedValueOnce([{
+      sequenceNumber: 1,
+      userMessage: "Who was discussed in the transcript?",
+      assistantMessage: "The transcript context was inconclusive.",
+    }]);
+    chatMock.mockResolvedValueOnce({ content: "I did not find a Slack match." });
+
+    const { processConversationTurn } = await import("./conversation");
+    await processConversationTurn({
+      workspaceId: "ws-1",
+      sessionId: "session-1",
+      userId: "user-1",
+      agentKey: "assistant",
+      userMessage: "can you check slack too",
+    });
+
+    expect(searchIndexedKnowledge).toHaveBeenCalledWith(expect.objectContaining({
+      sourceTypes: ["SLACK"],
+      query: expect.stringContaining("Who was discussed in the transcript?"),
+    }));
+    expect(chatMock).toHaveBeenCalledWith(expect.objectContaining({
+      messages: expect.arrayContaining([
+        expect.objectContaining({
+          role: "system",
+          content: expect.stringContaining("indexed public Slack knowledge"),
+        }),
+      ]),
+    }));
+  });
+
+  it("warns the model not to claim source checks when retrieval fails", async () => {
+    vi.mocked(searchIndexedKnowledge).mockRejectedValueOnce(new Error("search unavailable"));
+    chatMock.mockResolvedValueOnce({ content: "I could not verify that from indexed Slack context." });
+
+    const { processConversationTurn } = await import("./conversation");
+    await processConversationTurn({
+      workspaceId: "ws-1",
+      sessionId: "session-1",
+      userId: "user-1",
+      agentKey: "assistant",
+      userMessage: "can you check slack too",
+    });
+
+    expect(chatMock).toHaveBeenCalledWith(expect.objectContaining({
+      messages: expect.arrayContaining([
+        expect.objectContaining({
+          role: "system",
+          content: expect.stringContaining("Do not claim that you checked or searched that source"),
+        }),
+      ]),
+    }));
   });
 
   it("guides the assistant to create proposals from tensions instead of action conversions", async () => {

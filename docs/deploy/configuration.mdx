@@ -41,6 +41,14 @@ By default, the platform relies on external Large Language Models to power the O
 | `MODEL_API_KEY` | Your API key for the chosen provider. |
 | `MODEL_CHAT_DEFAULT` | The specific model string to use for conversational features (e.g., `google/gemma-4-31b-it`). |
 | `MODEL_EMBEDDING_DEFAULT` | The specific model string to use for vector embeddings (e.g., `text-embedding-3-small`). |
+| `KNOWLEDGE_SEARCH_PROVIDER` | Retrieval backend for indexed Brain chunks. Defaults to `postgres`; set to `azure` or `dual_compare` after Azure Search is configured and backfilled. |
+| `AZURE_SEARCH_ENDPOINT` | Azure AI Search service endpoint, for example `https://example.search.windows.net`. Required for Azure retrieval. |
+| `AZURE_SEARCH_INDEX_NAME` | Per-deployment Azure Search index name for Corgtex knowledge chunks. |
+| `AZURE_SEARCH_AUTH_MODE` | `api_key` for Railway or `managed_identity` for Azure-hosted runtimes. Defaults to `api_key`. |
+| `AZURE_SEARCH_ADMIN_KEY` | Server-side key used by workers/backfill jobs to write Azure Search documents. |
+| `AZURE_SEARCH_QUERY_KEY` | Server-side key used by web/API processes to query Azure Search. Falls back to admin key if omitted. |
+| `AZURE_SEARCH_API_VERSION` | Azure Search REST API version. Defaults to `2026-04-01`. |
+| `AZURE_SEARCH_VECTOR_DIMENSIONS` | Embedding dimensions for the Azure Search vector field. Defaults to `1536`. |
 
 <Info>
   Setting `MODEL_PROVIDER` allows Corgtex's internal abstractions to handle the LLM routing without baking a specific vendor dependency into your infrastructure.

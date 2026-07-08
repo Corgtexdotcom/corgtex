@@ -53,6 +53,7 @@ import {
 } from "./tools/crm";
 import { formatConversationPageContextForModel, type ConversationPageContext } from "./page-context";
 import type { AppActor } from "@corgtex/shared";
+import type { KnowledgeSourceType } from "@prisma/client";
 
 const MAX_HISTORY_TURNS = 20;
 const KNOWLEDGE_SEARCH_LIMIT = 4;
@@ -153,6 +154,12 @@ type ConversationContext = {
 
 type ConversationContextUsed = {
   knowledgeResults?: unknown[];
+  knowledgeSearch?: {
+    query: string;
+    sourceTypes?: KnowledgeSourceType[];
+    hitCount: number;
+    error?: string;
+  };
   memories?: unknown[];
   pageContext?: ConversationPageContext;
   mapGraphChanged?: boolean;
@@ -205,6 +212,113 @@ const CONTEXT_MAP_MUTATION_TOOLS = new Set(["create_context_map_diff", "apply_co
 
 function isContextMapMutationTool(toolName: string) {
   return CONTEXT_MAP_MUTATION_TOOLS.has(toolName);
+}
+
+type PriorConversationTurn = {
+  sequenceNumber: number;
+  userMessage: string;
+  assistantMessage: string;
+};
+
+function compactForSearch(value: string | null | undefined, maxLength = 500) {
+  return (value ?? "").replace(/\s+/g, " ").trim().slice(0, maxLength);
+}
+
+function isShortFollowUp(message: string) {
+  const trimmed = message.trim();
+  if (!trimmed) return false;
+  const terms = trimmed.toLowerCase().split(/[^a-z0-9]+/g).filter(Boolean);
+  return trimmed.length <= 40 || terms.length <= 5 || /\b(too|also|that|this|them|it|name|names|who|which|where)\b/i.test(trimmed);
+}
+
+function userMentionsSlack(message: string) {
+  return /\bslack\b/i.test(message);
+}
+
+function pageContextSearchHint(pageContext: ConversationPageContext | null | undefined) {
+  if (!pageContext) return "";
+  return compactForSearch(formatConversationPageContextForModel(pageContext), 900);
+}
+
+function buildKnowledgeSearchQuery(params: {
+  userMessage: string;
+  priorTurns: PriorConversationTurn[];
+  pageContext?: ConversationPageContext | null;
+}) {
+  const current = compactForSearch(params.userMessage, 700);
+  const parts = [current];
+  if (isShortFollowUp(params.userMessage)) {
+    const recent = params.priorTurns.slice(-4).map((turn) => [
+      `User: ${compactForSearch(turn.userMessage, 300)}`,
+      `Assistant: ${compactForSearch(turn.assistantMessage, 300)}`,
+    ].join(" ")).join(" ");
+    if (recent) {
+      parts.push(`Recent conversation context: ${recent}`);
+    }
+  }
+  const pageHint = pageContextSearchHint(params.pageContext);
+  if (pageHint) {
+    parts.push(`Current page context: ${pageHint}`);
+  }
+  return parts.filter(Boolean).join("\n");
+}
+
+async function loadKnowledgeForConversation(params: {
+  ctx: ConversationContext;
+  priorTurns: PriorConversationTurn[];
+  limit: number;
+}) {
+  const query = buildKnowledgeSearchQuery({
+    userMessage: params.ctx.userMessage,
+    priorTurns: params.priorTurns,
+    pageContext: params.ctx.pageContext,
+  });
+  if (!query) {
+    return { results: [] as unknown[], search: undefined };
+  }
+
+  const sourceTypes = userMentionsSlack(params.ctx.userMessage)
+    ? (["SLACK"] as KnowledgeSourceType[])
+    : undefined;
+
+  try {
+    const results = await searchIndexedKnowledge({
+      workspaceId: params.ctx.workspaceId,
+      query,
+      limit: params.limit,
+      sourceTypes,
+    });
+    return {
+      results: Array.isArray(results) ? results : [],
+      search: {
+        query,
+        sourceTypes,
+        hitCount: Array.isArray(results) ? results.length : 0,
+      },
+    };
+  } catch (error) {
+    return {
+      results: [] as unknown[],
+      search: {
+        query,
+        sourceTypes,
+        hitCount: 0,
+        error: error instanceof Error ? error.message : String(error),
+      },
+    };
+  }
+}
+
+function knowledgeSearchInstruction(search: ConversationContextUsed["knowledgeSearch"]) {
+  if (!search) return null;
+  const sourceLabel = search.sourceTypes?.includes("SLACK") ? "indexed public Slack knowledge" : "indexed workspace knowledge";
+  if (search.error) {
+    return `Knowledge retrieval attempted against ${sourceLabel}, but it failed. Do not claim that you checked or searched that source unless you call a tool successfully in this turn. Error: ${search.error}`;
+  }
+  if (search.hitCount === 0) {
+    return `Knowledge retrieval already searched ${sourceLabel} for this turn and found no matching indexed chunks. Do not claim that you found or checked a source unless you use the supplied results or call a tool successfully.`;
+  }
+  return `Knowledge retrieval already searched ${sourceLabel} for this turn. Use the supplied results when answering from workspace context, cite them when relevant, and do not claim to have checked any other source unless a tool result is present.`;
 }
 
 const TOOL_HANDLERS: Record<string, (actor: AppActor, ctx: ConversationContext, args: any) => Promise<unknown>> = {
@@ -317,21 +431,16 @@ export async function processConversationTurn(ctx: ConversationContext): Promise
   const priorTurns = [...priorTurnsDesc].reverse();
   const turnCount = priorTurns.at(-1)?.sequenceNumber ?? 0;
 
-  // Search knowledge if the message looks like a question or references workspace concepts
   let knowledgeResults: unknown[] = [];
+  let knowledgeSearch: ConversationContextUsed["knowledgeSearch"] | undefined;
   const effectiveKnowledgeLimit = ctx.userMessage.length > 10_000 ? 2 : KNOWLEDGE_SEARCH_LIMIT;
-  if (ctx.userMessage.length > 10) {
-    try {
-      const results = await searchIndexedKnowledge({
-        workspaceId: ctx.workspaceId,
-        query: ctx.userMessage,
-        limit: effectiveKnowledgeLimit,
-      });
-      knowledgeResults = Array.isArray(results) ? results : [];
-    } catch {
-      // Knowledge search is best-effort
-    }
-  }
+  const loadedKnowledge = await loadKnowledgeForConversation({
+    ctx,
+    priorTurns,
+    limit: effectiveKnowledgeLimit,
+  });
+  knowledgeResults = loadedKnowledge.results;
+  knowledgeSearch = loadedKnowledge.search;
 
   // Load agent memories for context
   let memories: unknown[] = [];
@@ -383,6 +492,13 @@ export async function processConversationTurn(ctx: ConversationContext): Promise
     messages.push({
       role: "system",
       content: `Relevant workspace knowledge:\n${JSON.stringify(knowledgeResults, null, 2)}`,
+    });
+  }
+  const knowledgeInstruction = knowledgeSearchInstruction(knowledgeSearch);
+  if (knowledgeInstruction) {
+    messages.push({
+      role: "system",
+      content: knowledgeInstruction,
     });
   }
 
@@ -504,6 +620,7 @@ export async function processConversationTurn(ctx: ConversationContext): Promise
     assistantMessage: finalMessage,
     contextUsed: {
       knowledgeResults: knowledgeResults.length > 0 ? knowledgeResults : undefined,
+      knowledgeSearch,
       memories: memories.length > 0 ? memories : undefined,
       pageContext: ctx.pageContext ?? undefined,
       mapGraphChanged: mapGraphChanged || undefined,
@@ -534,18 +651,15 @@ export async function* processConversationTurnStream(ctx: ConversationContext): 
   const turnCount = priorTurns.at(-1)?.sequenceNumber ?? 0;
 
   let knowledgeResults: unknown[] = [];
+  let knowledgeSearch: ConversationContextUsed["knowledgeSearch"] | undefined;
   const effectiveKnowledgeLimit = ctx.userMessage.length > 10_000 ? 2 : KNOWLEDGE_SEARCH_LIMIT;
-  if (ctx.userMessage.length > 10) {
-    try {
-      const results = await searchIndexedKnowledge({
-        workspaceId: ctx.workspaceId,
-        query: ctx.userMessage,
-        limit: effectiveKnowledgeLimit,
-      });
-      knowledgeResults = Array.isArray(results) ? results : [];
-    } catch {
-    }
-  }
+  const loadedKnowledge = await loadKnowledgeForConversation({
+    ctx,
+    priorTurns,
+    limit: effectiveKnowledgeLimit,
+  });
+  knowledgeResults = loadedKnowledge.results;
+  knowledgeSearch = loadedKnowledge.search;
 
   let memories: unknown[] = [];
   try {
@@ -566,6 +680,13 @@ export async function* processConversationTurnStream(ctx: ConversationContext): 
     messages.push({
       role: "system",
       content: `Relevant workspace knowledge:\n${JSON.stringify(knowledgeResults, null, 2)}`,
+    });
+  }
+  const knowledgeInstruction = knowledgeSearchInstruction(knowledgeSearch);
+  if (knowledgeInstruction) {
+    messages.push({
+      role: "system",
+      content: knowledgeInstruction,
     });
   }
 
@@ -699,6 +820,7 @@ export async function* processConversationTurnStream(ctx: ConversationContext): 
     assistantMessage: finalMessage,
     contextUsed: {
       knowledgeResults: knowledgeResults.length > 0 ? knowledgeResults : undefined,
+      knowledgeSearch,
       memories: memories.length > 0 ? memories : undefined,
       pageContext: ctx.pageContext ?? undefined,
       mapGraphChanged: mapGraphChanged || undefined,

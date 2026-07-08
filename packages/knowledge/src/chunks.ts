@@ -1,7 +1,9 @@
+import { randomUUID } from "node:crypto";
 import type { KnowledgeSourceType } from "@prisma/client";
 import { prisma } from "@corgtex/shared";
 import { defaultModelGateway } from "@corgtex/models";
 import { invalidateKnowledgeCache } from "./retrieval";
+import { getKnowledgeSearchProvider, isAzureKnowledgeSearchConfigured, logAzureKnowledgeIndexingWarning, syncAzureKnowledgeSource } from "./azure-search";
 import { classifyChunkSensitivity } from "./sensitivity";
 
 function normalizeText(input: string | null | undefined) {
@@ -92,6 +94,12 @@ export async function syncKnowledgeForSource(params: {
         },
       });
     });
+    await syncAzureSourceBestEffort({
+      workspaceId: params.workspaceId,
+      sourceType: params.sourceType,
+      sourceId: params.sourceId,
+      chunks: [],
+    });
     await invalidateKnowledgeCache(params.workspaceId);
     return 0;
   }
@@ -103,9 +111,10 @@ export async function syncKnowledgeForSource(params: {
     input: chunks,
   });
 
-  const data = chunks.map((content, index) => {
+  const chunkRows = chunks.map((content, index) => {
     const sensitivity = classifyChunkSensitivity(content);
     return {
+      id: randomUUID(),
       workspaceId: params.workspaceId,
       sourceType: params.sourceType,
       sourceId: params.sourceId,
@@ -133,11 +142,47 @@ export async function syncKnowledgeForSource(params: {
         sourceId: params.sourceId,
       },
     });
-    await tx.knowledgeChunk.createMany({ data });
+    await tx.knowledgeChunk.createMany({ data: chunkRows });
+  });
+
+  await syncAzureSourceBestEffort({
+    workspaceId: params.workspaceId,
+    sourceType: params.sourceType,
+    sourceId: params.sourceId,
+    chunks: chunkRows.map((row) => ({
+      id: row.id,
+      workspaceId: row.workspaceId,
+      sourceType: row.sourceType,
+      sourceId: row.sourceId,
+      sourceTitle: row.sourceTitle,
+      chunkIndex: row.chunkIndex,
+      content: row.content,
+      embedding: row.embedding ?? [],
+      metadata: row.metadata,
+      sensitivity: row.sensitivity,
+    })),
   });
 
   await invalidateKnowledgeCache(params.workspaceId);
   return chunks.length;
+}
+
+async function syncAzureSourceBestEffort(params: Parameters<typeof syncAzureKnowledgeSource>[0]) {
+  if (getKnowledgeSearchProvider() === "azure" && !isAzureKnowledgeSearchConfigured("admin")) {
+    throw new Error("Azure Search indexing is enabled but not configured for writes.");
+  }
+  try {
+    await syncAzureKnowledgeSource(params);
+  } catch (error) {
+    if (getKnowledgeSearchProvider() === "azure") {
+      throw error;
+    }
+    logAzureKnowledgeIndexingWarning(error, {
+      workspaceId: params.workspaceId,
+      sourceType: params.sourceType,
+      sourceId: params.sourceId,
+    });
+  }
 }
 
 export async function syncBrainArticleKnowledge(params: {

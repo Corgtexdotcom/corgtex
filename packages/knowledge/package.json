@@ -4,6 +4,7 @@
   "private": true,
   "type": "module",
   "dependencies": {
+    "@azure/identity": "^4.13.1",
     "@corgtex/domain": "0.1.0",
     "@corgtex/models": "0.1.0",
     "@corgtex/shared": "0.1.0",

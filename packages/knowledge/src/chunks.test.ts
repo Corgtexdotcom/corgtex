@@ -32,6 +32,10 @@ vi.mock("./retrieval", () => ({
 
 describe("Workspace Indexing Health", () => {
   beforeEach(() => {
+    delete process.env.KNOWLEDGE_SEARCH_PROVIDER;
+    delete process.env.AZURE_SEARCH_ENDPOINT;
+    delete process.env.AZURE_SEARCH_INDEX_NAME;
+    delete process.env.AZURE_SEARCH_ADMIN_KEY;
     vi.clearAllMocks();
   });
 
@@ -120,6 +124,10 @@ describe("syncKnowledgeForSource", () => {
 
 describe("Workspace Reindex", () => {
   beforeEach(() => {
+    delete process.env.KNOWLEDGE_SEARCH_PROVIDER;
+    delete process.env.AZURE_SEARCH_ENDPOINT;
+    delete process.env.AZURE_SEARCH_INDEX_NAME;
+    delete process.env.AZURE_SEARCH_ADMIN_KEY;
     vi.clearAllMocks();
   });
 
@@ -154,5 +162,25 @@ describe("Workspace Reindex", () => {
     // Note: Since reindexWorkspace is in the same file as invalidateKnowledgeCache, 
     // it will call the real invalidateKnowledgeCache, not the mock we defined, because
     // of how module scopes work. So we just check the function executed without crashing.
+  });
+});
+
+describe("Azure Search indexing guard", () => {
+  beforeEach(() => {
+    delete process.env.AZURE_SEARCH_ENDPOINT;
+    delete process.env.AZURE_SEARCH_INDEX_NAME;
+    delete process.env.AZURE_SEARCH_ADMIN_KEY;
+    process.env.KNOWLEDGE_SEARCH_PROVIDER = "azure";
+    vi.clearAllMocks();
+  });
+
+  it("fails source sync when Azure retrieval is enabled without write configuration", async () => {
+    await expect(syncKnowledgeForSource({
+      workspaceId: "ws_1",
+      sourceType: "DOCUMENT",
+      sourceId: "doc-1",
+      sourceTitle: "Document",
+      content: "",
+    })).rejects.toThrow("Azure Search indexing is enabled but not configured for writes");
   });
 });

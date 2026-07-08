@@ -1,7 +1,8 @@
 import type { KnowledgeSourceType, Prisma } from "@prisma/client";
-import { getCacheJson, getCacheVersion, incrementCacheVersion, prisma, cosineSimilarity, setCacheJson } from "@corgtex/shared";
+import { getCacheJson, getCacheVersion, incrementCacheVersion, prisma, cosineSimilarity, logger, setCacheJson } from "@corgtex/shared";
 import { defaultModelGateway } from "@corgtex/models";
 import type { SensitivityLabel } from "./sensitivity";
+import { getKnowledgeSearchProvider, isAzureKnowledgeSearchConfigured, searchAzureKnowledge } from "./azure-search";
 
 const sensitivityOrder: SensitivityLabel[] = ["PUBLIC", "INTERNAL", "CONFIDENTIAL", "PII"];
 
@@ -81,9 +82,13 @@ function searchCacheKey(params: {
   limit?: number;
   sourceTypes?: KnowledgeSourceType[];
   maxSensitivity?: SensitivityLabel;
+  provider?: string;
+  indexName?: string;
 }) {
   return [
     "knowledge-search",
+    params.provider ?? "postgres",
+    params.indexName ?? "",
     params.workspaceId,
     params.cacheVersion,
     params.query.trim().toLowerCase(),
@@ -98,9 +103,13 @@ function answerCacheKey(params: {
   cacheVersion: string;
   question: string;
   limit?: number;
+  provider?: string;
+  indexName?: string;
 }) {
   return [
     "knowledge-answer",
+    params.provider ?? "postgres",
+    params.indexName ?? "",
     params.workspaceId,
     params.cacheVersion,
     params.question.trim().toLowerCase(),
@@ -140,6 +149,11 @@ export async function searchIndexedKnowledge(params: {
     return [] as KnowledgeSearchResult[];
   }
 
+  const configuredProvider = getKnowledgeSearchProvider();
+  const effectiveProvider = configuredProvider === "postgres" || isAzureKnowledgeSearchConfigured("query")
+    ? configuredProvider
+    : "postgres";
+
   const cacheVersion = await knowledgeCacheVersion(params.workspaceId);
   const cacheKey = searchCacheKey({
     workspaceId: params.workspaceId,
@@ -148,11 +162,100 @@ export async function searchIndexedKnowledge(params: {
     limit: params.limit,
     sourceTypes: params.sourceTypes,
     maxSensitivity: params.maxSensitivity,
+    provider: effectiveProvider,
+    indexName: effectiveProvider === "postgres" ? undefined : process.env.AZURE_SEARCH_INDEX_NAME,
   });
   const cached = await getCacheJson<KnowledgeSearchResult[]>(cacheKey);
   if (cached) {
     return cached;
   }
+
+  const results = await executeKnowledgeSearch({
+    ...params,
+    query,
+    provider: effectiveProvider,
+    configuredProvider,
+  });
+
+  await setCacheJson(cacheKey, results, SEARCH_CACHE_TTL_MS);
+  return results;
+}
+
+async function executeKnowledgeSearch(params: {
+  workspaceId: string;
+  query: string;
+  limit?: number;
+  sourceTypes?: KnowledgeSourceType[];
+  maxSensitivity?: SensitivityLabel;
+  workflowJobId?: string;
+  agentRunId?: string;
+  provider: "postgres" | "azure" | "dual_compare";
+  configuredProvider: "postgres" | "azure" | "dual_compare";
+}) {
+  if (params.provider === "postgres") {
+    return searchIndexedKnowledgePostgres(params);
+  }
+
+  try {
+    const queryEmbedding = await defaultModelGateway.embed({
+      workspaceId: params.workspaceId,
+      workflowJobId: params.workflowJobId,
+      agentRunId: params.agentRunId,
+      input: params.query,
+    });
+    const azureResults = await searchAzureKnowledge({
+      workspaceId: params.workspaceId,
+      query: params.query,
+      queryEmbedding: queryEmbedding.embeddings[0] ?? [],
+      limit: params.limit,
+      sourceTypes: params.sourceTypes,
+      maxSensitivity: params.maxSensitivity,
+    });
+
+    if (params.provider === "dual_compare") {
+      const postgresResults = await searchIndexedKnowledgePostgres(params, queryEmbedding.embeddings[0] ?? []);
+      logDualCompare(params, azureResults, postgresResults);
+      return azureResults.length > 0 ? azureResults : postgresResults;
+    }
+
+    return azureResults;
+  } catch (error) {
+    logger.warn("Azure Search retrieval failed; falling back to Postgres knowledge retrieval", {
+      workspaceId: params.workspaceId,
+      configuredProvider: params.configuredProvider,
+      sourceTypes: params.sourceTypes,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return searchIndexedKnowledgePostgres(params);
+  }
+}
+
+function logDualCompare(
+  params: { workspaceId: string; sourceTypes?: KnowledgeSourceType[] },
+  azureResults: KnowledgeSearchResult[],
+  postgresResults: KnowledgeSearchResult[],
+) {
+  const azureIds = new Set(azureResults.map((result) => result.chunkId));
+  const overlap = postgresResults.filter((result) => azureIds.has(result.chunkId)).length;
+  logger.info("Knowledge search dual compare", {
+    workspaceId: params.workspaceId,
+    sourceTypes: params.sourceTypes,
+    azureHitCount: azureResults.length,
+    postgresHitCount: postgresResults.length,
+    overlap,
+  });
+}
+
+async function searchIndexedKnowledgePostgres(params: {
+  workspaceId: string;
+  query: string;
+  limit?: number;
+  sourceTypes?: KnowledgeSourceType[];
+  maxSensitivity?: SensitivityLabel;
+  workflowJobId?: string;
+  agentRunId?: string;
+}, queryEmbeddingOverride?: number[]) {
+  const query = params.query;
 
   const chunks = await prisma.knowledgeChunk.findMany({
     where: {
@@ -198,12 +301,14 @@ export async function searchIndexedKnowledge(params: {
   });
 
   const embeddingMap = new Map(chunkEmbeddings.map((c) => [c.id, c.embedding]));
-  const queryEmbedding = await defaultModelGateway.embed({
-    workspaceId: params.workspaceId,
-    workflowJobId: params.workflowJobId,
-    agentRunId: params.agentRunId,
-    input: query,
-  });
+  const queryEmbedding = queryEmbeddingOverride
+    ? { embeddings: [queryEmbeddingOverride] }
+    : await defaultModelGateway.embed({
+      workspaceId: params.workspaceId,
+      workflowJobId: params.workflowJobId,
+      agentRunId: params.agentRunId,
+      input: query,
+    });
 
   const scored = lexicalCandidates
     .map(({ chunk, lexical }) => {
@@ -246,7 +351,6 @@ export async function searchIndexedKnowledge(params: {
     };
   });
 
-  await setCacheJson(cacheKey, results, SEARCH_CACHE_TTL_MS);
   return results;
 }
 
@@ -258,7 +362,14 @@ export async function answerKnowledgeQuestion(params: {
   agentRunId?: string;
 }) {
   const cacheVersion = await knowledgeCacheVersion(params.workspaceId);
-  const cacheKey = answerCacheKey({ ...params, cacheVersion });
+  const provider = getKnowledgeSearchProvider();
+  const effectiveProvider = provider === "postgres" || isAzureKnowledgeSearchConfigured("query") ? provider : "postgres";
+  const cacheKey = answerCacheKey({
+    ...params,
+    cacheVersion,
+    provider: effectiveProvider,
+    indexName: effectiveProvider === "postgres" ? undefined : process.env.AZURE_SEARCH_INDEX_NAME,
+  });
   const cached = await getCacheJson<{
     answer: string;
     citations: KnowledgeCitation[];

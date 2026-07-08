@@ -26,8 +26,12 @@ export async function searchBrain(workspaceId: string, query: string, limit: num
   });
 
   return chunks.map(c => ({
+    chunkId: c.chunkId,
+    sourceId: c.sourceId,
     sourceType: c.sourceType,
     title: c.title || "Untitled",
-    contentSnippet: c.snippet.substring(0, 500) + (c.snippet.length > 500 ? "..." : ""),
+    chunkIndex: c.chunkIndex,
+    snippet: c.snippet.substring(0, 500) + (c.snippet.length > 500 ? "..." : ""),
+    score: c.score,
   }));
 }
