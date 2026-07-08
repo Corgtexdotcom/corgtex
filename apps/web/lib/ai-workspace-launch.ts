@@ -5,6 +5,7 @@ import {
   CURSOR_MCP_DOCS_URL,
   GEMINI_MCP_DOCS_URL,
   OPENWORK_DOWNLOAD_URL,
+  buildInstallerPath,
 } from "@/lib/install-helpers";
 
 export type AiWorkspaceSetupVariant = {
@@ -92,6 +93,13 @@ export function aiWorkspaceSettingsHref(workspaceId: string, providerKey: string
   const params = new URLSearchParams({ tab: "ai-workspaces" });
   if (providerKey) params.set("provider", providerKey);
   return `/workspaces/${workspaceId}/settings?${params.toString()}`;
+}
+
+export function aiWorkspaceSetupHref(workspaceId: string, providerKey: string | null | undefined) {
+  return buildInstallerPath(providerKey, {
+    workspaceId,
+    returnTo: aiWorkspaceSettingsHref(workspaceId, providerKey),
+  });
 }
 
 export function activeAiWorkspaceProvider(state: AiWorkspaceLaunchState | null | undefined) {

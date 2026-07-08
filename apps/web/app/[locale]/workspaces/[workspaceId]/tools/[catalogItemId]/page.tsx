@@ -345,7 +345,7 @@ export default async function CatalogItemPage({
     const slackInstallation = communicationInstallations.find((installation) => installation.provider === "SLACK" && installation.status === "ACTIVE");
     setupPanel = <SlackConnectorPanel workspaceId={workspaceId} installation={slackInstallation} canManage={isWorkspaceAdmin} />;
   } else if (item.sourceType === "MCP_CONNECTOR" && item.sourceId === "corgtex-mcp") {
-    setupPanel = <CorgtexMcpConnectorPanel connectorUrl={connectorUrl} />;
+    setupPanel = <CorgtexMcpConnectorPanel connectorUrl={connectorUrl} workspaceId={workspaceId} />;
   } else if (item.sourceType === "MCP_CONNECTOR") {
     let connections: Awaited<ReturnType<typeof listExternalMcpConnections>> = [];
     let sources: Awaited<ReturnType<typeof listExternalContentSources>> = [];

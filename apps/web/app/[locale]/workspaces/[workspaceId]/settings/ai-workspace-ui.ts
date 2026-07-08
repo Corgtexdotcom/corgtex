@@ -1,20 +1,6 @@
 import {
-  CHATGPT_CONNECTORS_ADVANCED_URL,
-  CHATGPT_CONNECTORS_URL,
-  COPILOT_DOCS_URL,
-  COPILOT_VSCODE_MCP_DOCS_URL,
-  buildClaudeCodeCommand,
-  buildClaudeInstallerShareUrl,
-  buildCopilotCliCommand,
-  buildCursorInstallLinks,
-  buildCursorMcpJsonConfig,
-  buildGeminiMcpCommand,
-  buildGeminiMcpConfig,
-  buildVsCodeMcpConfig,
-  CLAUDE_CODE_INSTALLER_PATH,
-  CLAUDE_CONNECTORS_URL,
-  GEMINI_MCP_DOCS_URL,
-  OPENWORK_DOWNLOAD_URL,
+  buildInstallerPath,
+  buildInstallerShareUrl,
 } from "@/lib/install-helpers";
 
 export type AiWorkspaceProviderView = {
@@ -288,17 +274,31 @@ export function buildAiWorkspaceSetupCards(
   workspaceId?: string | null,
   options: BuildAiWorkspaceSetupCardsOptions = {},
 ): AiWorkspaceSetupCard[] {
-  const cursorLinks = buildCursorInstallLinks(connectorUrl);
-  const claudeCodeCommand = buildClaudeCodeCommand(connectorUrl);
-  const claudeReturnTo = options.returnTo ?? (workspaceId ? `/workspaces/${workspaceId}/settings?tab=ai-workspaces&provider=claude` : null);
   const includeClaudeAdvanced = options.includeClaudeAdvanced ?? true;
-  const claudeInstallerPath = buildClaudeInstallerShareUrl(null, {
+
+  const providerReturnTo = (providerKey: string) =>
+    options.returnTo ?? (workspaceId ? `/workspaces/${workspaceId}/settings?tab=ai-workspaces&provider=${providerKey}` : null);
+  const providerInstallerPath = (providerKey: string) => buildInstallerPath(providerKey, {
     workspaceId,
-    returnTo: claudeReturnTo,
+    returnTo: providerReturnTo(providerKey),
   });
-  const claudeInstallerShareUrl = buildClaudeInstallerShareUrl(origin, {
+  const providerInstallerShareUrl = (providerKey: string) => buildInstallerShareUrl(origin, providerKey, {
     workspaceId,
-    returnTo: claudeReturnTo,
+    returnTo: providerReturnTo(providerKey),
+  });
+  const installerAction = (providerKey: string, label: string): Extract<AiWorkspaceSetupAction, { kind: "open" }> => ({
+    kind: "open",
+    label,
+    href: providerInstallerPath(providerKey),
+    variant: "primary",
+  });
+  const installerShareAction = (providerKey: string, productName: string): Extract<AiWorkspaceSetupAction, { kind: "copy" }> => ({
+    kind: "copy",
+    label: "Copy installer link",
+    value: providerInstallerShareUrl(providerKey),
+    copiedMessage: `Copied the ${productName} installer link.`,
+    fallbackMessage: "Clipboard access was blocked. Select and copy the installer link.",
+    variant: "secondary",
   });
 
   return [...providers].sort(providerDisplayComparator).map((provider) => {
@@ -316,20 +316,13 @@ export function buildAiWorkspaceSetupCards(
       return {
         ...base,
         actions: [
-          {
-            kind: "copyAndOpen",
-            label: "Connect OpenWork",
-            value: connectorUrl,
-            href: OPENWORK_DOWNLOAD_URL,
-            productName: "OpenWork",
-            variant: "primary",
-          },
-          copyMcpUrlAction(connectorUrl, "OpenWork"),
+          installerAction(provider.key, "Connect OpenWork"),
+          installerShareAction(provider.key, "OpenWork"),
         ],
         steps: [
-          "Open your OpenWork workspace.",
-          "Go to Extensions, then Advanced Settings, then Add MCP server.",
-          "Paste the Corgtex MCP URL. When OpenWork opens Corgtex, authorize as your current Corgtex user for this workspace.",
+          "Open the guided installer.",
+          "Copy the Corgtex MCP URL and open OpenWork from the installer.",
+          "When OpenWork opens Corgtex, authorize as your current Corgtex user for this workspace.",
           "Return here and verify the connection.",
         ],
         notes: [
@@ -343,21 +336,13 @@ export function buildAiWorkspaceSetupCards(
       return {
         ...base,
         actions: [
-          {
-            kind: "copyAndOpen",
-            label: "Connect ChatGPT",
-            value: connectorUrl,
-            href: CHATGPT_CONNECTORS_URL,
-            productName: "ChatGPT connector settings",
-            variant: "primary",
-          },
-          { kind: "open", label: "Open advanced settings", href: CHATGPT_CONNECTORS_ADVANCED_URL, variant: "secondary" },
-          copyMcpUrlAction(connectorUrl, "ChatGPT"),
+          installerAction(provider.key, "Connect ChatGPT"),
+          installerShareAction(provider.key, "ChatGPT"),
         ],
         steps: [
-          "In ChatGPT settings, open Connectors, then Advanced settings.",
-          "Turn on Developer Mode if it is not already enabled.",
-          "Create an app, paste the HTTPS Corgtex MCP URL, scan tools, and let ChatGPT open Corgtex.",
+          "Open the guided installer.",
+          "Copy the Corgtex MCP URL and open ChatGPT connector settings from the installer.",
+          "Create the Corgtex app in ChatGPT, scan tools, and let ChatGPT open Corgtex.",
           "Authorize as your current Corgtex user for this workspace, then use Developer Mode and choose Corgtex in chat.",
         ],
         notes: ["Business, Enterprise, or Edu workspaces may require an admin to approve or publish the app before normal users can use it. Corgtex never matches ChatGPT email to Corgtex email."],
@@ -368,23 +353,8 @@ export function buildAiWorkspaceSetupCards(
       return {
         ...base,
         actions: [
-          { kind: "open", label: "Connect Claude", href: claudeInstallerPath, variant: "primary" },
-          {
-            kind: "copyAndOpen",
-            label: "Open Claude settings",
-            value: connectorUrl,
-            href: CLAUDE_CONNECTORS_URL,
-            productName: "Claude Connectors",
-            variant: "secondary",
-          },
-          {
-            kind: "copy",
-            label: "Copy share link",
-            value: claudeInstallerShareUrl,
-            copiedMessage: "Copied the Claude installer share link.",
-            fallbackMessage: "Clipboard access was blocked. Select and copy the share link.",
-            variant: "secondary",
-          },
+          installerAction(provider.key, "Connect Claude"),
+          installerShareAction(provider.key, "Claude"),
         ],
         steps: [
           "Open the guided installer.",
@@ -400,18 +370,12 @@ export function buildAiWorkspaceSetupCards(
           title: "Claude Code",
           description: "For technical teammates who use Claude Code from Terminal.",
           actions: [
-            { kind: "open", label: "Open Claude Code installer", href: CLAUDE_CODE_INSTALLER_PATH, variant: "secondary" },
-            {
-              kind: "copy",
-              label: "Copy Claude Code command",
-              value: claudeCodeCommand,
-              copiedMessage: "Copied the Claude Code command.",
-              fallbackMessage: "Clipboard access was blocked. Select and copy the command.",
-              variant: "secondary",
-            },
+            { kind: "open", label: "Open Claude Code installer", href: providerInstallerPath("claude_code"), variant: "secondary" },
+            installerShareAction("claude_code", "Claude Code"),
           ],
           steps: [
-            "Paste the command in Terminal.",
+            "Open the guided Claude Code installer.",
+            "Copy the generated command and paste it in Terminal.",
             "Open Claude Code and run /mcp.",
             "When Claude Code opens Corgtex, authorize as your current Corgtex user for this workspace.",
           ],
@@ -424,28 +388,12 @@ export function buildAiWorkspaceSetupCards(
       return {
         ...base,
         actions: [
-          {
-            kind: "copy",
-            label: "Copy VS Code config",
-            value: JSON.stringify(buildVsCodeMcpConfig(connectorUrl), null, 2),
-            copiedMessage: "Copied the VS Code MCP configuration.",
-            fallbackMessage: "Clipboard access was blocked. Select and copy the configuration.",
-            variant: "primary",
-          },
-          {
-            kind: "copy",
-            label: "Copy Copilot CLI command",
-            value: buildCopilotCliCommand(connectorUrl),
-            copiedMessage: "Copied the Copilot CLI command.",
-            fallbackMessage: "Clipboard access was blocked. Select and copy the command.",
-            variant: "secondary",
-          },
-          { kind: "open", label: "VS Code MCP docs", href: COPILOT_VSCODE_MCP_DOCS_URL, variant: "secondary" },
-          { kind: "open", label: "Copilot CLI docs", href: COPILOT_DOCS_URL, variant: "secondary" },
+          installerAction(provider.key, "Connect Copilot"),
+          installerShareAction(provider.key, "Copilot"),
         ],
         steps: [
-          "In VS Code, run MCP: Add Server or paste the copied user/workspace mcp.json entry.",
-          "For Copilot CLI, use /mcp add or paste the copied command.",
+          "Open the guided installer.",
+          "Copy the VS Code configuration or Copilot CLI command from the installer.",
           "When Copilot opens Corgtex, authorize as your current Corgtex user for this workspace.",
           "Return here and verify the connection.",
         ],
@@ -459,25 +407,12 @@ export function buildAiWorkspaceSetupCards(
       return {
         ...base,
         actions: [
-          {
-            kind: "cursorInstall",
-            label: "Connect Cursor",
-            appHref: cursorLinks.app,
-            browserHref: cursorLinks.browser,
-            variant: "primary",
-          },
-          {
-            kind: "copy",
-            label: "Copy manual mcp.json",
-            value: JSON.stringify(buildCursorMcpJsonConfig(connectorUrl), null, 2),
-            copiedMessage: "Copied the Cursor MCP configuration.",
-            fallbackMessage: "Clipboard access was blocked. Select and copy the configuration.",
-            variant: "secondary",
-          },
+          installerAction(provider.key, "Connect Cursor"),
+          installerShareAction(provider.key, "Cursor"),
         ],
         steps: [
-          "Click Add to Cursor.",
-          "Approve the Corgtex MCP install prompt.",
+          "Open the guided installer.",
+          "Use Add to Cursor or the manual mcp.json fallback from the installer.",
           "When Cursor opens Corgtex, authorize as your current Corgtex user for this workspace.",
           "Return here and verify the connection.",
         ],
@@ -489,29 +424,14 @@ export function buildAiWorkspaceSetupCards(
       return {
         ...base,
         actions: [
-          {
-            kind: "copy",
-            label: "Copy Gemini command",
-            value: buildGeminiMcpCommand(connectorUrl),
-            copiedMessage: "Copied the Gemini CLI MCP command.",
-            fallbackMessage: "Clipboard access was blocked. Select and copy the command.",
-            variant: "primary",
-          },
-          {
-            kind: "copy",
-            label: "Copy settings JSON",
-            value: JSON.stringify(buildGeminiMcpConfig(connectorUrl), null, 2),
-            copiedMessage: "Copied the Gemini CLI MCP settings.",
-            fallbackMessage: "Clipboard access was blocked. Select and copy the configuration.",
-            variant: "secondary",
-          },
-          { kind: "open", label: "Gemini MCP docs", href: GEMINI_MCP_DOCS_URL, variant: "secondary" },
+          installerAction(provider.key, "Connect Gemini"),
+          installerShareAction(provider.key, "Gemini"),
         ],
         steps: [
-          "Paste the command in Terminal, or use the settings JSON fallback with httpUrl.",
+          "Open the guided installer.",
+          "Copy the Gemini CLI command or settings JSON from the installer.",
           "Open Gemini CLI and run /mcp.",
           "Run /mcp auth corgtex if Gemini asks for authentication, then authorize in Corgtex as your current Corgtex user for this workspace.",
-          "Return here and verify the connection.",
         ],
         notes: ["Consumer Gemini web support is not assumed; this path is for technical CLI users."],
       };
@@ -519,12 +439,15 @@ export function buildAiWorkspaceSetupCards(
 
     return {
       ...base,
-      actions: [copyMcpUrlAction(connectorUrl, provider.shortLabel, "primary")],
+      actions: [
+        installerAction(provider.key, "Open guided installer"),
+        installerShareAction(provider.key, provider.shortLabel),
+      ],
       steps: [
+        "Open the guided installer.",
+        "Copy the Corgtex MCP URL from the installer.",
         "Choose remote MCP, Streamable HTTP, or HTTP MCP server in the client.",
-        "Paste the Corgtex MCP URL.",
         "When the client opens Corgtex, authorize as your current Corgtex user for this workspace.",
-        "Return here and verify the connection.",
       ],
       notes: ["Use this for internal tools or AI workspaces that already support remote MCP. Unknown clients appear as Generic MCP after Corgtex OAuth completes."],
     };
@@ -557,21 +480,6 @@ function connectionSummary(provider: AiWorkspaceProviderView) {
     return "Add the Corgtex MCP URL to Gemini CLI, authorize in Corgtex, then verify before use.";
   }
   return provider.outcome;
-}
-
-function copyMcpUrlAction(
-  connectorUrl: string,
-  productName: string,
-  variant: AiWorkspaceActionVariant = "secondary",
-): Extract<AiWorkspaceSetupAction, { kind: "copy" }> {
-  return {
-    kind: "copy",
-    label: "Copy MCP URL",
-    value: connectorUrl,
-    copiedMessage: `Copied the Corgtex MCP URL for ${productName}.`,
-    fallbackMessage: "Clipboard access was blocked. Select and copy the MCP URL.",
-    variant,
-  };
 }
 
 function ownershipLabel(modes: string[]) {

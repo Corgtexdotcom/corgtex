@@ -6,6 +6,7 @@ import {
   aiWorkspaceConnectionForProvider,
   connectedAiWorkspaceConnections,
   aiWorkspaceLaunchUrl,
+  aiWorkspaceSetupHref,
   isAiWorkspaceConnected,
   pendingAiWorkspaceConnections,
   aiWorkspaceSettingsHref,
@@ -22,6 +23,12 @@ describe("ai workspace launch helpers", () => {
     expect(aiWorkspaceLaunchUrl("generic_mcp")).toBeNull();
     expect(aiWorkspaceSettingsHref("workspace-1", "openwork")).toBe(
       "/workspaces/workspace-1/settings?tab=ai-workspaces&provider=openwork",
+    );
+    expect(aiWorkspaceSetupHref("workspace-1", "chatgpt")).toBe(
+      "/install/chatgpt?workspaceId=workspace-1&returnTo=%2Fworkspaces%2Fworkspace-1%2Fsettings%3Ftab%3Dai-workspaces%26provider%3Dchatgpt",
+    );
+    expect(aiWorkspaceSetupHref("workspace-1", "generic_mcp")).toBe(
+      "/install/generic-mcp?workspaceId=workspace-1&returnTo=%2Fworkspaces%2Fworkspace-1%2Fsettings%3Ftab%3Dai-workspaces%26provider%3Dgeneric_mcp",
     );
   });
 
