@@ -404,8 +404,12 @@ async function deployTarget(target, manifest, reason, deps) {
     : await deployRailwayTarget(target, manifest, deps);
   const health = await pollHealth(target.url, manifest, deps);
   assertHealthProof(health, manifest, target.label);
-  const providerReadiness = await runProviderReadiness(target, manifest, deps);
   const usesAzureProviderReadiness = target.group === "azure-selfserve";
+  let verifiedRelease = null;
+  if (target.deploymentId && usesAzureProviderReadiness) {
+    verifiedRelease = await recordVerifiedRelease(target, manifest, reason, deps);
+  }
+  const providerReadiness = await runProviderReadiness(target, manifest, deps);
   const postDeployProbe = usesAzureProviderReadiness
     ? { status: "skipped", reason: "azure_provider_readiness" }
     : await runPostDeployProbe(target, manifest, reason, deps, callControlPlaneTool);
@@ -414,15 +418,19 @@ async function deployTarget(target, manifest, reason, deps) {
     : target.deploymentId
       ? await refreshPostDeploySnapshots(target, reason, deps)
       : { status: "skipped", reason: "deployment_id_missing" };
-  if (target.deploymentId) {
-    await callControlPlaneTool("record_verified_release", {
-      deploymentId: target.deploymentId,
-      releaseImageTag: manifest.imageTag,
-      releaseVersion: manifest.releaseVersion,
-      reason,
-    }, deps);
+  if (target.deploymentId && !usesAzureProviderReadiness) {
+    verifiedRelease = await recordVerifiedRelease(target, manifest, reason, deps);
   }
-  return { providerResult, release: health.release, providerReadiness, postDeployProbe, postDeploySnapshots };
+  return { providerResult, release: health.release, providerReadiness, postDeployProbe, postDeploySnapshots, verifiedRelease };
+}
+
+async function recordVerifiedRelease(target, manifest, reason, deps) {
+  return callControlPlaneTool("record_verified_release", {
+    deploymentId: target.deploymentId,
+    releaseImageTag: manifest.imageTag,
+    releaseVersion: manifest.releaseVersion,
+    reason,
+  }, deps);
 }
 
 async function runProviderReadiness(target, manifest, deps) {
