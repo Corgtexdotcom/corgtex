@@ -23,6 +23,8 @@ const {
   getWorkspaceDigestSettingsMock,
   getNewspaperLocalDatePartsMock,
   isNewspaperScheduleDueMock,
+  recordMeetingTranscriptProcessingStageMock,
+  markMeetingTranscriptProcessingReadyMock,
 } = vi.hoisted(() => ({
   prismaMock: {
     $transaction: vi.fn(),
@@ -82,6 +84,8 @@ const {
   getWorkspaceDigestSettingsMock: vi.fn(),
   getNewspaperLocalDatePartsMock: vi.fn(),
   isNewspaperScheduleDueMock: vi.fn(),
+  recordMeetingTranscriptProcessingStageMock: vi.fn(),
+  markMeetingTranscriptProcessingReadyMock: vi.fn(),
 }));
 
 vi.mock("@corgtex/shared", () => ({
@@ -129,6 +133,20 @@ vi.mock("@corgtex/domain", () => ({
   syncRecorderCalendarSource: syncRecorderCalendarSourceMock,
   getWorkspaceDigestSettings: getWorkspaceDigestSettingsMock,
   getNewspaperLocalDateParts: getNewspaperLocalDatePartsMock,
+  meetingIdFromWorkflowJobPayload: (payload: unknown) => (
+    payload && typeof payload === "object" && !Array.isArray(payload) && typeof (payload as { meetingId?: unknown }).meetingId === "string"
+      ? (payload as { meetingId: string }).meetingId
+      : null
+  ),
+  meetingTranscriptProcessingStageForJobType: (type: string) => {
+    if (type === "agent.meeting-summary") return "SUMMARIZING";
+    if (type === "meeting.insights.extract") return "EXTRACTING_INSIGHTS";
+    if (type === "agent.action-extraction" || type === "meeting.summary.post") return "SYNCING_OUTPUTS";
+    if (type === "knowledge.sync.meeting") return "INDEXING_BRAIN";
+    return null;
+  },
+  recordMeetingTranscriptProcessingStage: recordMeetingTranscriptProcessingStageMock,
+  markMeetingTranscriptProcessingReady: markMeetingTranscriptProcessingReadyMock,
   isHumanNewspaperRecipientIdentity: (user: { email?: string | null; displayName?: string | null }) => {
     const email = user.email?.trim().toLowerCase() ?? "";
     const displayName = user.displayName?.trim().toLowerCase() ?? "";
@@ -197,6 +215,8 @@ describe("runPendingJobs", () => {
     runEnterpriseAppHealthCheckJobMock.mockReset().mockResolvedValue({ status: "ok" });
     syncRecorderCalendarSourceMock.mockReset().mockResolvedValue({ action: "synced" });
     getWorkspaceDigestSettingsMock.mockReset().mockResolvedValue(new Map());
+    recordMeetingTranscriptProcessingStageMock.mockReset().mockResolvedValue(undefined);
+    markMeetingTranscriptProcessingReadyMock.mockReset().mockResolvedValue(undefined);
     getNewspaperLocalDatePartsMock.mockReset().mockReturnValue({
       dateKey: "2026-04-29",
       weekday: "WEDNESDAY",
@@ -243,6 +263,40 @@ describe("runPendingJobs", () => {
         lockedBy: null,
       }),
     });
+  });
+
+  it("records meeting transcript progress around completed meeting jobs", async () => {
+    txMock.$queryRaw.mockResolvedValue([
+      {
+        id: "job-1",
+        workspaceId: "ws-1",
+        type: "agent.meeting-summary",
+        payload: { meetingId: "meeting-1" },
+        attempts: 1,
+      },
+    ]);
+    runAgentWorkflowJobMock.mockResolvedValue({ meetingId: "meeting-1" });
+
+    await expect(runPendingJobs("worker-1", 1)).resolves.toBe(1);
+
+    expect(recordMeetingTranscriptProcessingStageMock).toHaveBeenNthCalledWith(1, expect.objectContaining({
+      workspaceId: "ws-1",
+      meetingId: "meeting-1",
+      stage: "SUMMARIZING",
+      status: "ACTIVE",
+      workflowJobId: "job-1",
+      workflowJobType: "agent.meeting-summary",
+      workflowJobStatus: "RUNNING",
+    }));
+    expect(recordMeetingTranscriptProcessingStageMock).toHaveBeenNthCalledWith(2, expect.objectContaining({
+      workspaceId: "ws-1",
+      meetingId: "meeting-1",
+      stage: "SUMMARIZING",
+      status: "COMPLETED",
+      workflowJobId: "job-1",
+      workflowJobType: "agent.meeting-summary",
+      workflowJobStatus: "COMPLETED",
+    }));
   });
 
   it("dispatches Slack communication event jobs", async () => {

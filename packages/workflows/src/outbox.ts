@@ -35,6 +35,10 @@ import {
   resolveAdviceRequestRecipientUsers,
   resolveAdviceRequestRequesterUsers,
   runAdviceRequestReminderJob,
+  markMeetingTranscriptProcessingReady,
+  meetingIdFromWorkflowJobPayload,
+  meetingTranscriptProcessingStageForJobType,
+  recordMeetingTranscriptProcessingStage,
   type ControlPlaneReleaseTarget,
   type SlackAgentJobPayload,
 } from "@corgtex/domain";
@@ -123,6 +127,55 @@ function isSlackInvalidAuthError(error: unknown) {
     ? error.data.error
     : "";
   return message.includes("invalid_auth") || dataError === "invalid_auth";
+}
+
+function meetingProgressContextForJob(job: ClaimedJob) {
+  if (!job.workspaceId) return null;
+  const meetingId = meetingIdFromWorkflowJobPayload(job.payload);
+  if (!meetingId) return null;
+  const stage = meetingTranscriptProcessingStageForJobType(job.type);
+  if (!stage) return null;
+  return {
+    workspaceId: job.workspaceId,
+    meetingId,
+    stage,
+  };
+}
+
+function resultWasSkipped(result: unknown) {
+  return isRecord(result) && result.skipped === true;
+}
+
+async function recordMeetingProgressForJob(
+  job: ClaimedJob,
+  status: "ACTIVE" | "COMPLETED" | "FAILED" | "SKIPPED",
+  opts?: { error?: unknown },
+) {
+  const context = meetingProgressContextForJob(job);
+  if (!context) return;
+
+  if (context.stage === "INDEXING_BRAIN" && status === "COMPLETED") {
+    await markMeetingTranscriptProcessingReady({
+      workspaceId: context.workspaceId,
+      meetingId: context.meetingId,
+      workflowJobId: job.id,
+      workflowJobType: job.type,
+      attempts: job.attempts,
+    });
+    return;
+  }
+
+  await recordMeetingTranscriptProcessingStage({
+    workspaceId: context.workspaceId,
+    meetingId: context.meetingId,
+    stage: context.stage,
+    status,
+    workflowJobId: job.id,
+    workflowJobType: job.type,
+    workflowJobStatus: status === "ACTIVE" ? "RUNNING" : status === "FAILED" ? "FAILED" : "COMPLETED",
+    attempts: job.attempts,
+    error: opts?.error,
+  });
 }
 
 async function markSlackProactiveScanReauthRequired(job: ClaimedJob, installationId: string, error: unknown) {
@@ -621,8 +674,7 @@ async function handleJob(job: ClaimedJob) {
   }
 
   if (job.type === "knowledge.sync.meeting") {
-    await handleMeetingKnowledgeSync(job.id, payload as { meetingId?: string }, job.workspaceId);
-    return;
+    return handleMeetingKnowledgeSync(job.id, payload as { meetingId?: string }, job.workspaceId);
   }
 
   if (job.type === "knowledge.sync.document") {
@@ -773,7 +825,7 @@ async function handleJob(job: ClaimedJob) {
   if (job.type === "meeting.insights.extract") {
     const meetingId = (payload as { meetingId?: string }).meetingId;
     if (meetingId) {
-      await runMeetingInsightsExtraction({ workspaceId: job.workspaceId, meetingId });
+      return runMeetingInsightsExtraction({ workspaceId: job.workspaceId, meetingId, workflowJobId: job.id });
     }
     return;
   }
@@ -815,7 +867,7 @@ async function handleJob(job: ClaimedJob) {
   if (job.type === "meeting.summary.post") {
     const meetingId = (payload as { meetingId?: string }).meetingId;
     if (meetingId) {
-      await postMeetingSummaryToAgendaThread({ workspaceId: job.workspaceId, meetingId });
+      return postMeetingSummaryToAgendaThread({ workspaceId: job.workspaceId, meetingId });
     }
     return;
   }
@@ -911,7 +963,7 @@ async function handleJob(job: ClaimedJob) {
     if (result && typeof result === "object" && "skipped" in result && result.reason === "concurrency_limit") {
       throw new RetryableWorkflowJobError("Agent concurrency limit reached.");
     }
-    return;
+    return result;
   }
 
   if (job.type === "agent.role-onboarding-intro") {
@@ -957,6 +1009,7 @@ async function handleJob(job: ClaimedJob) {
     if (result && typeof result === "object" && "skipped" in result && result.reason === "concurrency_limit") {
       throw new RetryableWorkflowJobError("Agent concurrency limit reached.");
     }
+    return result;
   }
 }
 
@@ -1029,11 +1082,16 @@ async function processClaimedJob(workerId: string, job: ClaimedJob) {
   let failed = false;
   let failure: unknown = null;
   try {
-    await handleJob(job);
+    await recordMeetingProgressForJob(job, "ACTIVE");
+    const result = await handleJob(job);
+    await recordMeetingProgressForJob(job, resultWasSkipped(result) ? "SKIPPED" : "COMPLETED");
     await completeJob(job.id);
   } catch (error) {
     failed = true;
     failure = error;
+    if (job.attempts >= MAX_ATTEMPTS) {
+      await recordMeetingProgressForJob(job, "FAILED", { error });
+    }
     await failJob(job, error);
   }
 

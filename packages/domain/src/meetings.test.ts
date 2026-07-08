@@ -23,6 +23,10 @@ const { prismaMock } = vi.hoisted(() => {
     meetingTranscriptSourceRecord: {
       updateMany: vi.fn(),
     },
+    meetingTranscriptProcessingProgress: {
+      findUnique: vi.fn(),
+      upsert: vi.fn(),
+    },
     member: {
       findMany: vi.fn(),
     },
@@ -71,6 +75,8 @@ describe("meetings domain", () => {
     prismaMock.event.createMany.mockResolvedValue({ count: 1 });
     prismaMock.meetingInsight.deleteMany.mockResolvedValue({ count: 0 });
     prismaMock.meetingTranscriptSourceRecord.updateMany.mockResolvedValue({ count: 1 });
+    prismaMock.meetingTranscriptProcessingProgress.findUnique.mockResolvedValue(null);
+    prismaMock.meetingTranscriptProcessingProgress.upsert.mockResolvedValue({ id: "progress-1" });
     prismaMock.workspacePermalink.upsert.mockResolvedValue({});
   });
 
@@ -448,6 +454,14 @@ describe("meetings domain", () => {
         sourceRecordId: null,
       },
     });
+    expect(prismaMock.meetingTranscriptProcessingProgress.upsert).toHaveBeenCalledWith(expect.objectContaining({
+      where: { meetingId: "scheduled-1" },
+      update: expect.objectContaining({
+        currentStage: "SUMMARIZING",
+        completedAt: null,
+        failedAt: null,
+      }),
+    }));
   });
 
   it("uploadMeetingTranscript updates a matching completed meeting and merges guidance", async () => {

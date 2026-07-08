@@ -9,6 +9,7 @@ import { archiveFilterWhere, archiveWorkspaceArtifact, type ArchiveFilter } from
 import { ensureWorkspacePermalink, workspaceEntityCanonicalPath } from "./permalinks";
 import { invariant } from "./errors";
 import { meetingUrlHash, normalizeMeetingUrl } from "./meeting-urls";
+import { resetMeetingTranscriptProcessingProgress } from "./meeting-transcript-processing";
 
 const DEFAULT_OCCURRENCE_WINDOW_DAYS = 30;
 const TRANSCRIPT_MATCH_WINDOW_MS = 2 * 60 * 60 * 1000;
@@ -410,6 +411,11 @@ async function updateMeetingWithTranscriptTx(
       },
     });
   }
+
+  await resetMeetingTranscriptProcessingProgress(tx, {
+    workspaceId: params.workspaceId,
+    meetingId: meeting.id,
+  });
 
   await tx.auditLog.create({
     data: {
@@ -1082,6 +1088,11 @@ export async function requestMeetingIntelligenceRegeneration(actor: AppActor, pa
       },
     });
 
+    await resetMeetingTranscriptProcessingProgress(tx, {
+      workspaceId: params.workspaceId,
+      meetingId: meeting.id,
+    });
+
     await tx.auditLog.create({
       data: {
         workspaceId: params.workspaceId,
@@ -1194,6 +1205,13 @@ export async function createMeeting(actor: AppActor, params: {
         data: {
           meetingId: meeting.id,
         },
+      });
+    }
+
+    if (meeting.transcript) {
+      await resetMeetingTranscriptProcessingProgress(tx, {
+        workspaceId: params.workspaceId,
+        meetingId: meeting.id,
       });
     }
 

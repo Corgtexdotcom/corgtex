@@ -65,6 +65,10 @@ const { prismaMock, fetchMock } = vi.hoisted(() => {
     meetingInsight: {
       deleteMany: vi.fn(),
     },
+    meetingTranscriptProcessingProgress: {
+      findUnique: vi.fn(),
+      upsert: vi.fn(),
+    },
     auditLog: {
       create: vi.fn(),
     },
@@ -195,6 +199,8 @@ describe("meeting recorder domain", () => {
       meetingUrl: "https://meet.google.com/abc-defg-hij",
       participantEmails: ["team@example.com"],
     });
+    prismaMock.meetingTranscriptProcessingProgress.findUnique.mockResolvedValue(null);
+    prismaMock.meetingTranscriptProcessingProgress.upsert.mockResolvedValue({ id: "progress-1" });
     prismaMock.workspacePermalink.upsert.mockResolvedValue({});
     prismaMock.workflowJob.count.mockResolvedValue(0);
     prismaMock.meetingRecorderSmokeRun.findFirst.mockResolvedValue(null);
