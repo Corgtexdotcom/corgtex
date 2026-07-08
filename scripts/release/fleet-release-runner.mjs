@@ -409,7 +409,10 @@ async function deployTarget(target, manifest, reason, deps) {
   if (target.deploymentId && usesAzureProviderReadiness) {
     verifiedRelease = await recordVerifiedRelease(target, manifest, reason, deps);
   }
-  const providerReadiness = await runProviderReadiness(target, manifest, deps);
+  const providerReadiness = await runProviderReadiness(target, manifest, deps, {
+    health,
+    verifiedRelease,
+  });
   const postDeployProbe = usesAzureProviderReadiness
     ? { status: "skipped", reason: "azure_provider_readiness" }
     : await runPostDeployProbe(target, manifest, reason, deps, callControlPlaneTool);
@@ -433,7 +436,7 @@ async function recordVerifiedRelease(target, manifest, reason, deps) {
   }, deps);
 }
 
-async function runProviderReadiness(target, manifest, deps) {
+async function runProviderReadiness(target, manifest, deps, proof = {}) {
   if (target.group !== "azure-selfserve") {
     return { status: "skipped", reason: "not_azure_selfserve" };
   }
@@ -448,13 +451,18 @@ async function runProviderReadiness(target, manifest, deps) {
   if (providerStatus?.provider?.cloudProvider !== "AZURE") {
     blockers.push(`provider=${providerStatus?.provider?.cloudProvider ?? "missing"}`);
   }
-  if (providerStatus?.health?.status !== "ok") {
+  const releaseProof = azureReleaseProof(manifest, proof);
+  const providerReleaseMatches = providerStatus?.release?.releaseImageTag === manifest.imageTag
+    && !providerStatus?.release?.releaseDrift;
+  const providerStatusLagging = releaseProof.ok && !providerReleaseMatches;
+
+  if (providerStatus?.health?.status !== "ok" && !providerStatusLagging) {
     blockers.push(`health=${providerStatus?.health?.status ?? "missing"}`);
   }
-  if (providerStatus?.release?.releaseImageTag !== manifest.imageTag) {
+  if (!releaseProof.ok && providerStatus?.release?.releaseImageTag !== manifest.imageTag) {
     blockers.push(`releaseImageTag=${providerStatus?.release?.releaseImageTag ?? "missing"}`);
   }
-  if (providerStatus?.release?.releaseDrift) {
+  if (!releaseProof.ok && providerStatus?.release?.releaseDrift) {
     blockers.push("releaseDrift=open");
   }
   if (!Array.isArray(registry?.items) || !registry?.summary || typeof registry.summary !== "object") {
@@ -468,10 +476,34 @@ async function runProviderReadiness(target, manifest, deps) {
     status: "ok",
     provider: "azure",
     deploymentId: target.deploymentId,
-    healthStatus: providerStatus.health.status,
-    releaseImageTag: providerStatus.release.releaseImageTag,
+    healthStatus: providerStatus?.health?.status ?? null,
+    releaseImageTag: releaseProof.releaseImageTag ?? providerStatus?.release?.releaseImageTag ?? null,
+    releaseProofSource: releaseProof.source,
+    providerStatusLagging,
+    providerStatusReleaseImageTag: providerStatus?.release?.releaseImageTag ?? null,
+    providerStatusReleaseDrift: providerStatus?.release?.releaseDrift ?? null,
     registrySummary: registry.summary,
   };
+}
+
+function azureReleaseProof(manifest, proof) {
+  const healthRelease = proof.health?.release;
+  if (healthRelease && (healthRelease.imageTag === manifest.imageTag || healthRelease.gitSha === manifest.gitSha)) {
+    return { ok: true, source: "runtime_health", releaseImageTag: manifest.imageTag };
+  }
+  const verifiedRelease = proof.verifiedRelease;
+  const observedRelease = verifiedRelease?.observedRelease;
+  if (observedRelease && (observedRelease.imageTag === manifest.imageTag || observedRelease.gitSha === manifest.gitSha)) {
+    return { ok: true, source: "record_verified_release", releaseImageTag: manifest.imageTag };
+  }
+  const recordedRelease = verifiedRelease?.release?.current;
+  if (recordedRelease?.releaseImageTag === manifest.imageTag) {
+    return { ok: true, source: "record_verified_release_status", releaseImageTag: manifest.imageTag };
+  }
+  if (verifiedRelease?.recorded === true) {
+    return { ok: true, source: "record_verified_release_ack", releaseImageTag: manifest.imageTag };
+  }
+  return { ok: false, source: "provider_status", releaseImageTag: null };
 }
 
 async function refreshPostDeploySnapshots(target, reason, deps) {
