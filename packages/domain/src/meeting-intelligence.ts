@@ -23,6 +23,7 @@ import {
   buildMeetingTranscriptChunks,
   type MeetingTranscriptChunk,
 } from "./meeting-transcript-chunks";
+import { recordMeetingTranscriptProcessingStage } from "./meeting-transcript-processing";
 
 const AUTO_APPLY_CONFIDENCE_THRESHOLD = 0.8;
 const AUTO_APPLY_DELIBERATION_THRESHOLD = 0.85;
@@ -413,7 +414,7 @@ function normalizeCrmActivityType(value: string | null | undefined) {
 
 export async function extractMeetingInsights(
   actor: AppActor,
-  params: { workspaceId: string; meetingId: string }
+  params: { workspaceId: string; meetingId: string; workflowJobId?: string | null }
 ): Promise<MeetingInsight[]> {
   await requireWorkspaceMembership({
     actor,
@@ -569,6 +570,18 @@ Be conservative — only extract items you're confident about.
   const extractedItems: Array<Record<string, unknown>> = [];
 
   for (const chunk of transcriptChunks) {
+    await recordMeetingTranscriptProcessingStage({
+      workspaceId: params.workspaceId,
+      meetingId: meeting.id,
+      stage: "EXTRACTING_INSIGHTS",
+      status: "ACTIVE",
+      workflowJobId: params.workflowJobId ?? null,
+      workflowJobType: "meeting.insights.extract",
+      workflowJobStatus: "RUNNING",
+      attempts: null,
+      chunkIndex: transcriptChunkedForExtraction ? chunk.chunkIndex : null,
+      chunkCount: transcriptChunkedForExtraction ? chunk.chunkCount : null,
+    });
     const extraction = await defaultModelGateway.extract({
       workspaceId: params.workspaceId,
       instruction,

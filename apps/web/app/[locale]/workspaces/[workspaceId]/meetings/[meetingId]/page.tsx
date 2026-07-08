@@ -1,6 +1,7 @@
 import {
   getMeeting,
   getMeetingParticipants,
+  getMeetingTranscriptProcessingState,
   getWorkspaceArchiveRecord,
   meetingAgendaSections,
   normalizeMeetingAgendaForDisplay,
@@ -21,7 +22,7 @@ import { DeliberationThread } from "@/lib/components/DeliberationThread";
 import { DeliberationComposer } from "@/lib/components/DeliberationComposer";
 import { getDeliberationTargets } from "@/lib/deliberation-targets";
 import { listDeliberationEntries } from "@corgtex/domain";
-import { postMeetingDeliberationAction, resolveMeetingDeliberationAction } from "../actions";
+import { postMeetingDeliberationAction, resolveMeetingDeliberationAction, retryMeetingProcessingJobAction } from "../actions";
 import MeetingIntelligence, { MeetingRegenerationPanel, type InsightTargetMetadata } from "./MeetingIntelligence";
 import {
   agendaItemHref,
@@ -30,6 +31,7 @@ import {
   normalizeMeetingTab,
   type MeetingTab,
 } from "./meetingAgendaView";
+import { buildMeetingProcessingView } from "./meetingProcessingView";
 
 export const dynamic = "force-dynamic";
 
@@ -53,38 +55,6 @@ function statusTagClass(status: string, resolutionOutcome?: string | null) {
   if (resolutionOutcome === "ADOPTED") return "success";
   if (status === "RESOLVED") return "info";
   return "";
-}
-
-function getMeetingProcessingStatus(meeting: NonNullable<Awaited<ReturnType<typeof getMeeting>>>) {
-  if (!meeting.transcript) return null;
-
-  const reviewCount = meeting.insights.filter((insight: MeetingInsightSummary) =>
-    (insight.status === "SUGGESTED" || insight.status === "CONFIRMED") && !insight.supersededAt
-  ).length;
-  if (meeting.aiProcessedAt) {
-    return {
-      className: "complete",
-      labelKey: "processingStatusComplete",
-      descriptionKey: reviewCount > 0 ? "processingStatusCompleteWithReview" : "processingStatusCompleteDescription",
-      reviewCount,
-    } as const;
-  }
-
-  if (meeting.summaryMd || meeting.insights.length > 0) {
-    return {
-      className: "processing",
-      labelKey: "processingStatusProcessing",
-      descriptionKey: "processingStatusProcessingDescription",
-      reviewCount,
-    } as const;
-  }
-
-  return {
-    className: "queued",
-    labelKey: "processingStatusQueued",
-    descriptionKey: "processingStatusQueuedDescription",
-    reviewCount,
-  } as const;
 }
 
 function AgendaItemView({ item, workspaceId }: { item: MeetingAgendaItem; workspaceId: string }) {
@@ -232,7 +202,8 @@ export default async function MeetingDetailPage({
     : [];
   const activeTab = normalizeMeetingTab(resolvedSearch.tab, hasAgendaTab ? "agenda" : "summary", hasAgendaTab);
   const meetingHref = `/workspaces/${workspaceId}/meetings/${meetingId}`;
-  const processingStatus = getMeetingProcessingStatus(meeting);
+  const processingState = await getMeetingTranscriptProcessingState(actor, { workspaceId, meetingId });
+  const processingView = buildMeetingProcessingView(processingState);
   const insightTargetProposalIds = [...new Set((meeting.insights as MeetingInsightSummary[])
     .filter((insight: MeetingInsightSummary) => insight.targetEntityType === "Proposal" && insight.targetEntityId)
     .map((insight: MeetingInsightSummary) => insight.targetEntityId as string))];
@@ -332,15 +303,66 @@ export default async function MeetingDetailPage({
         />
       )}
 
-      {processingStatus && (
-        <section className={`meeting-processing-status ${processingStatus.className}`} style={{ marginBottom: 32 }}>
-          <div>
-            <span className="meeting-processing-status-label">
-              <span className="meeting-processing-status-dot" aria-hidden="true" />
-              {t(processingStatus.labelKey)}
-            </span>
-            <p>{t(processingStatus.descriptionKey, { count: processingStatus.reviewCount })}</p>
+      {processingView && (
+        <section className={`meeting-processing-stepper ${processingView.overallClass}`} style={{ marginBottom: 32 }}>
+          <div className="meeting-processing-stepper-header">
+            <div>
+              <span className="meeting-processing-status-label">
+                <span className="meeting-processing-status-dot" aria-hidden="true" />
+                {t(processingView.titleKey)}
+              </span>
+              <p>
+                {processingView.activeStageLabelKey
+                  ? t("processingOverallActiveDescription", { step: t(processingView.activeStageLabelKey) })
+                  : t("processingOverallIdleDescription")}
+              </p>
+            </div>
           </div>
+          <ol className="meeting-processing-steps">
+            {processingView.steps.map((step) => (
+              <li className={`meeting-processing-step ${step.className}`} key={step.stage}>
+                <span className="meeting-processing-step-marker" aria-hidden="true" />
+                <div>
+                  <strong>{t(step.labelKey)}</strong>
+                  <span>{t(step.statusKey)}</span>
+                  {step.chunkIndex && step.chunkCount && step.chunkCount > 1 && (
+                    <em>{t("processingSectionProgress", { current: step.chunkIndex, total: step.chunkCount })}</em>
+                  )}
+                </div>
+              </li>
+            ))}
+          </ol>
+          {isAdmin && processingView.diagnostics.length > 0 && (
+            <details className="meeting-processing-diagnostics">
+              <summary>{t("processingDiagnosticsTitle")}</summary>
+              <div className="meeting-processing-diagnostics-list">
+                {processingView.diagnostics.map((diagnostic) => (
+                  <div className="meeting-processing-diagnostic" key={diagnostic.workflowJobId}>
+                    <div className="row">
+                      <strong>{diagnostic.workflowJobType}</strong>
+                      <span className={`tag ${diagnostic.status === "FAILED" ? "warning" : "info"}`}>{diagnostic.status}</span>
+                    </div>
+                    <p className="nr-item-meta">
+                      {t("processingDiagnosticsMeta", {
+                        attempts: diagnostic.attempts,
+                        date: diagnostic.updatedAt ? format.dateTime(new Date(diagnostic.updatedAt), { dateStyle: "medium", timeStyle: "short" }) : t("processingDiagnosticsNoDate"),
+                      })}
+                    </p>
+                    {diagnostic.safeErrorMessage && (
+                      <p className="meeting-processing-diagnostic-error">{diagnostic.safeErrorMessage}</p>
+                    )}
+                    {diagnostic.retrySupported && (
+                      <form action={retryMeetingProcessingJobAction}>
+                        <input type="hidden" name="workspaceId" value={workspaceId} />
+                        <input type="hidden" name="workflowJobId" value={diagnostic.workflowJobId} />
+                        <button type="submit" className="secondary small">{t("processingRetryFailedJob")}</button>
+                      </form>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </details>
+          )}
         </section>
       )}
       

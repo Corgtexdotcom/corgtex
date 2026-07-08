@@ -630,6 +630,7 @@ model Workspace {
   meetingTranscriptConnections   MeetingTranscriptSourceConnection[]
   meetingTranscriptImportBatches MeetingTranscriptImportBatch[]
   meetingTranscriptSourceRecords MeetingTranscriptSourceRecord[]
+  meetingTranscriptProcessingProgress MeetingTranscriptProcessingProgress[]
   meetingInsights                MeetingInsight[]
   goals                          Goal[]
   workItemVersions               WorkItemVersion[]
@@ -2074,6 +2075,23 @@ enum MeetingTranscriptSourceRecordStatus {
   FAILED
 }
 
+enum MeetingTranscriptProcessingStage {
+  UPLOADED
+  SUMMARIZING
+  EXTRACTING_INSIGHTS
+  SYNCING_OUTPUTS
+  INDEXING_BRAIN
+  READY
+}
+
+enum MeetingTranscriptProcessingStageStatus {
+  PENDING
+  ACTIVE
+  COMPLETED
+  FAILED
+  SKIPPED
+}
+
 model MeetingSeries {
   id                     String    @id @default(uuid())
   workspaceId            String
@@ -2134,6 +2152,7 @@ model Meeting {
   tensions                Tension[]
   insights                MeetingInsight[]
   followUpReview          MeetingFollowUpReview?
+  transcriptProcessingProgress MeetingTranscriptProcessingProgress?
   recordings              MeetingRecording[]
   smokeRuns               MeetingRecorderSmokeRun[]
   transcriptSourceRecords MeetingTranscriptSourceRecord[]
@@ -2679,6 +2698,31 @@ model MeetingTranscriptSourceRecord {
   @@index([workspaceId, recordedAt])
   @@index([meetingId])
   @@index([batchId])
+}
+
+model MeetingTranscriptProcessingProgress {
+  id                       String                                  @id @default(uuid())
+  workspaceId              String
+  meetingId                String                                  @unique
+  currentStage             MeetingTranscriptProcessingStage         @default(UPLOADED)
+  stageStatuses            Json                                    @default("{}")
+  currentWorkflowJobId     String?
+  currentWorkflowJobType   String?
+  currentWorkflowJobStatus WorkflowJobStatus?
+  attemptCount             Int                                     @default(0)
+  safeErrorCode            String?
+  safeErrorMessage         String?                                 @db.Text
+  startedAt                DateTime?
+  completedAt              DateTime?
+  failedAt                 DateTime?
+  createdAt                DateTime                                @default(now())
+  updatedAt                DateTime                                @updatedAt
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  meeting   Meeting   @relation(fields: [meetingId], references: [id], onDelete: Cascade)
+
+  @@index([workspaceId, currentStage])
+  @@index([workspaceId, updatedAt])
 }
 
 model WorkspaceArchiveRecord {

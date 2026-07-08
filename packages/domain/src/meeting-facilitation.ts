@@ -776,6 +776,7 @@ export async function runMeetingAgendaThreadEdit(params: {
 export async function runMeetingInsightsExtraction(params: {
   workspaceId: string;
   meetingId: string;
+  workflowJobId?: string | null;
 }) {
   const meeting = await prisma.meeting.findFirst({
     where: { id: params.meetingId, workspaceId: params.workspaceId },
@@ -795,6 +796,7 @@ export async function runMeetingInsightsExtraction(params: {
   const insights = await extractMeetingInsights(actor, {
     workspaceId: params.workspaceId,
     meetingId: params.meetingId,
+    workflowJobId: params.workflowJobId ?? null,
   });
   return { extracted: insights.length };
 }

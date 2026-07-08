@@ -13,6 +13,8 @@ import {
   importMeetingInvite,
   intakeMeetingTranscript,
   requestMeetingIntelligenceRegeneration,
+  requireWorkspaceMembership,
+  replayWorkflowJob,
   confirmInsight,
   dismissInsight,
   updateInsight,
@@ -276,6 +278,24 @@ export async function regenerateMeetingIntelligenceAction(formData: FormData) {
     workspaceId,
     meetingId: asString(formData, "meetingId"),
     guidanceMd: asString(formData, "guidanceMd"),
+  });
+  refresh(workspaceId);
+}
+
+export async function retryMeetingProcessingJobAction(formData: FormData) {
+  const _demoGuardWsId = formData.get("workspaceId") as string;
+  if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
+
+  const actor = await requirePageActor();
+  const workspaceId = asString(formData, "workspaceId");
+  await requireWorkspaceMembership({
+    actor,
+    workspaceId,
+    allowedRoles: ["ADMIN"],
+  });
+  await replayWorkflowJob(actor, {
+    workspaceId,
+    workflowJobId: asString(formData, "workflowJobId"),
   });
   refresh(workspaceId);
 }

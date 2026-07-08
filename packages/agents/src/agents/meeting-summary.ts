@@ -11,6 +11,7 @@ import {
   type MeetingTranscriptChunk,
   normalizeMeetingBlocks,
   normalizeMeetingProductTerminology,
+  recordMeetingTranscriptProcessingStage,
 } from "@corgtex/domain";
 import { executeAgentRun } from "../runtime";
 
@@ -162,6 +163,18 @@ export async function runMeetingSummaryAgent(params: {
       const blockOutputs: MeetingBlocksJson[] = [];
 
       for (const chunk of transcriptChunks) {
+        await recordMeetingTranscriptProcessingStage({
+          workspaceId: params.workspaceId,
+          meetingId: meeting.id,
+          stage: "SUMMARIZING",
+          status: "ACTIVE",
+          workflowJobId: params.triggerRef,
+          workflowJobType: "agent.meeting-summary",
+          workflowJobStatus: "RUNNING",
+          attempts: null,
+          chunkIndex: transcriptChunkedForSummary ? chunk.chunkIndex : null,
+          chunkCount: transcriptChunkedForSummary ? chunk.chunkCount : null,
+        });
         const blockExtraction = await helpers.tool("model.extract.meeting-blocks", {
           meetingId: meeting.id,
           chunkIndex: chunk.chunkIndex,
