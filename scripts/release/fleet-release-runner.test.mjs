@@ -1015,10 +1015,10 @@ describe("fleet release runner", () => {
         const body = JSON.parse(options.body);
         toolCalls.push(body.params.name);
         if (body.params.name === "get_azure_provider_status") {
+          expect(releaseRecorded).toBe(true);
           return controlPlaneResult(azureProviderStatus({
-            release: releaseRecorded
-              ? { releaseImageTag: `sha-${SHA}`, releaseDrift: null }
-              : { releaseImageTag: "sha-old", releaseDrift: "Release drift: expected sha-old" },
+            health: { status: "degraded" },
+            release: { releaseImageTag: "sha-old", releaseDrift: "Release drift: expected sha-old" },
           }));
         }
         if (body.params.name === "list_self_serve_customers") {
@@ -1026,7 +1026,10 @@ describe("fleet release runner", () => {
         }
         if (body.params.name === "record_verified_release") {
           releaseRecorded = true;
-          return controlPlaneResult({ recorded: true });
+          return controlPlaneResult({
+            recorded: true,
+            observedRelease: { imageTag: `sha-${SHA}`, gitSha: SHA },
+          });
         }
       }
       return healthResponse();
@@ -1077,6 +1080,10 @@ describe("fleet release runner", () => {
       status: "ok",
       provider: "azure",
       releaseImageTag: `sha-${SHA}`,
+      releaseProofSource: "runtime_health",
+      providerStatusLagging: true,
+      providerStatusReleaseImageTag: "sha-old",
+      providerStatusReleaseDrift: "Release drift: expected sha-old",
     });
   });
 
