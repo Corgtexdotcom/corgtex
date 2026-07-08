@@ -167,6 +167,20 @@ jobs:
       - name: Validate seed fixtures
         run: npm run check:seed-fixtures
 
+      - name: Checkout release runner source
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ github.sha }}
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      - run: npx prisma generate
+
       - name: Log in to GHCR
         if: ${{ !inputs.dry_run }}
         uses: docker/login-action@v3
