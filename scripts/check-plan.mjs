@@ -63,8 +63,30 @@ const PLAN_SECRET_PATTERNS = [
   { name: "JWT-like token", pattern: /\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b/ },
 ];
 
-function sh(cmd) {
-  return execSync(cmd, { encoding: "utf8" }).trim();
+function sh(cmd, options = {}) {
+  const stdio = options.quiet ? ["ignore", "pipe", "pipe"] : undefined;
+  return execSync(cmd, { encoding: "utf8", ...(stdio ? { stdio } : {}) }).trim();
+}
+
+function gitDiffAgainstBase(base, diffArgs) {
+  try {
+    return sh(`git diff ${diffArgs} ${base}...HEAD`, { quiet: true });
+  } catch (baseErr) {
+    const parentDiff = gitDiffAgainstMergeParents(diffArgs);
+    if (parentDiff !== null) return parentDiff;
+    throw baseErr;
+  }
+}
+
+function gitDiffAgainstMergeParents(diffArgs) {
+  if (process.env.GITHUB_ACTIONS !== "true") return null;
+  try {
+    sh("git rev-parse --verify HEAD^1", { quiet: true });
+    sh("git rev-parse --verify HEAD^2", { quiet: true });
+    return sh(`git diff ${diffArgs} HEAD^1 HEAD^2`, { quiet: true });
+  } catch {
+    return null;
+  }
 }
 
 function branchName() {
@@ -99,7 +121,7 @@ function prLabels() {
 
 function changedFiles(base) {
   try {
-    const outputs = [sh(`git diff --name-only ${base}...HEAD`)];
+    const outputs = [gitDiffAgainstBase(base, "--name-only")];
     if (process.env.GITHUB_ACTIONS !== "true") {
       outputs.push(sh("git diff --name-only --cached"));
       outputs.push(sh("git diff --name-only"));
@@ -270,7 +292,7 @@ function isExecutablePolicyFile(file) {
 }
 
 function addedDiffLines(base) {
-  const outputs = [sh(`git diff --unified=0 --no-ext-diff ${base}...HEAD`)];
+  const outputs = [gitDiffAgainstBase(base, "--unified=0 --no-ext-diff")];
   if (process.env.GITHUB_ACTIONS !== "true") {
     outputs.push(sh("git diff --unified=0 --no-ext-diff --cached"));
     outputs.push(sh("git diff --unified=0 --no-ext-diff"));
@@ -396,7 +418,7 @@ if (mode === "size") {
   // Count LOC of non-doc files only.
   let codeLoc = 0;
   try {
-    const numstats = [sh(`git diff --numstat ${base}...HEAD`)];
+    const numstats = [gitDiffAgainstBase(base, "--numstat")];
     if (process.env.GITHUB_ACTIONS !== "true") {
       numstats.push(sh("git diff --numstat --cached"));
       numstats.push(sh("git diff --numstat"));
