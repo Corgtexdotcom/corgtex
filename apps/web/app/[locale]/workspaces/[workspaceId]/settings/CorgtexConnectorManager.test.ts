@@ -11,6 +11,8 @@ import {
   buildCursorMcpJsonConfig,
   buildGeminiMcpCommand,
   buildGeminiMcpConfig,
+  buildInstallerPath,
+  buildInstallerShareUrl,
   buildVsCodeMcpConfig,
   CHATGPT_CHAT_URL,
   CHATGPT_CONNECTORS_ADVANCED_URL,
@@ -19,6 +21,7 @@ import {
   CLAUDE_CONNECTORS_URL,
   CLAUDE_INSTALLER_PATH,
   encodeBase64Utf8,
+  installerProviderSlug,
 } from "@/lib/install-helpers";
 
 const CONNECTOR_URL = "https://mcp.corgtex.com/mcp";
@@ -129,5 +132,23 @@ describe("CorgtexConnectorManager setup helpers", () => {
   it("builds a hydration-safe Claude installer share URL", () => {
     expect(buildClaudeInstallerShareUrl()).toBe(CLAUDE_INSTALLER_PATH);
     expect(buildClaudeInstallerShareUrl("https://app.corgtex.com/")).toBe("https://app.corgtex.com/install/claude");
+  });
+
+  it("builds guided installer paths and share URLs for visible AI tools", () => {
+    expect(installerProviderSlug("claude_code")).toBe("claude-code");
+    expect(installerProviderSlug("generic_mcp")).toBe("generic-mcp");
+    expect(buildInstallerPath("chatgpt")).toBe("/install/chatgpt");
+    expect(buildInstallerPath("generic_mcp", {
+      workspaceId: "workspace-1",
+      returnTo: "/workspaces/workspace-1/settings?tab=ai-workspaces&provider=generic_mcp",
+    })).toBe(
+      "/install/generic-mcp?workspaceId=workspace-1&returnTo=%2Fworkspaces%2Fworkspace-1%2Fsettings%3Ftab%3Dai-workspaces%26provider%3Dgeneric_mcp",
+    );
+    expect(buildInstallerShareUrl("https://app.corgtex.com/", "cursor", {
+      workspaceId: "workspace-1",
+      returnTo: "/workspaces/workspace-1/settings?tab=ai-workspaces&provider=cursor",
+    })).toBe(
+      "https://app.corgtex.com/install/cursor?workspaceId=workspace-1&returnTo=%2Fworkspaces%2Fworkspace-1%2Fsettings%3Ftab%3Dai-workspaces%26provider%3Dcursor",
+    );
   });
 });

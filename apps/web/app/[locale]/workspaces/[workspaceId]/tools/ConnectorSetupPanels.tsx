@@ -739,12 +739,13 @@ export function WebhooksConnectorPanel({ workspaceId, webhookEndpoints, inboundW
   );
 }
 
-export function CorgtexMcpConnectorPanel({ connectorUrl }: {
+export function CorgtexMcpConnectorPanel({ connectorUrl, workspaceId }: {
   connectorUrl: string;
+  workspaceId?: string;
 }) {
   return (
     <section className="stack" style={{ gap: 16 }}>
-      <CorgtexConnectorManager connectorUrl={connectorUrl} />
+      <CorgtexConnectorManager connectorUrl={connectorUrl} workspaceId={workspaceId} />
     </section>
   );
 }

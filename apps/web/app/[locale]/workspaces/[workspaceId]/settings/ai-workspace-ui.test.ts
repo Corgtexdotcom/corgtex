@@ -138,18 +138,22 @@ describe("AI workspace UI helpers", () => {
       statusLabel: "Recommended",
       connectorUrl: "https://app.corgtex.com/mcp",
     });
-    expect(cards[0].actions.map((action) => action.label)).toEqual(["Connect OpenWork", "Copy MCP URL"]);
+    expect(cards[0].actions.map((action) => action.label)).toEqual(["Connect OpenWork", "Copy installer link"]);
+    expect(cards[0].actions[0]).toMatchObject({
+      kind: "open",
+      href: "/install/openwork",
+    });
     expect(cards[0].steps).toEqual([
-      "Open your OpenWork workspace.",
-      "Go to Extensions, then Advanced Settings, then Add MCP server.",
-      "Paste the Corgtex MCP URL. When OpenWork opens Corgtex, authorize as your current Corgtex user for this workspace.",
+      "Open the guided installer.",
+      "Copy the Corgtex MCP URL and open OpenWork from the installer.",
+      "When OpenWork opens Corgtex, authorize as your current Corgtex user for this workspace.",
       "Return here and verify the connection.",
     ]);
     expect(cards[0].notes).toContain("OpenWork must support dynamic client registration for the OAuth connection.");
     expect("resources" in cards[0]).toBe(false);
   });
 
-  it("points ChatGPT setup at connector settings and keeps Developer Mode guidance short", () => {
+  it("points ChatGPT setup at the guided installer instead of raw connector settings", () => {
     const cards = buildAiWorkspaceSetupCards(
       [provider({ key: "chatgpt", label: "ChatGPT", category: "BYO" })],
       "https://app.corgtex.com/mcp",
@@ -157,18 +161,18 @@ describe("AI workspace UI helpers", () => {
     const chatgptCard = cards[0];
 
     expect(chatgptCard.actions[0]).toMatchObject({
-      kind: "copyAndOpen",
+      kind: "open",
       label: "Connect ChatGPT",
-      value: "https://app.corgtex.com/mcp",
-      href: "https://chatgpt.com/#settings/Connectors",
+      href: "/install/chatgpt",
     });
-    expect(chatgptCard.steps.join(" ")).toContain("Turn on Developer Mode");
+    expect(JSON.stringify(chatgptCard.actions)).not.toContain("https://chatgpt.com/#settings/Connectors");
+    expect(chatgptCard.steps.join(" ")).toContain("Open the guided installer");
     expect(chatgptCard.steps.join(" ")).toContain("scan tools");
     expect(chatgptCard.steps.join(" ")).toContain("Authorize as your current Corgtex user");
     expect(chatgptCard.steps.join(" ")).toContain("choose Corgtex");
   });
 
-  it("builds provider-specific computed install actions outside the React component", () => {
+  it("routes provider setup actions to guided installers outside the React component", () => {
     const providers = [
       provider({ key: "claude", label: "Claude", category: "BYO" }),
       provider({ key: "cursor", label: "Cursor", category: "ADVANCED" }),
@@ -182,28 +186,21 @@ describe("AI workspace UI helpers", () => {
 
     expect(claudeCard?.actions.map((action) => action.kind)).toEqual([
       "open",
-      "copyAndOpen",
       "copy",
     ]);
-    expect(claudeCard?.advancedSection?.actions.find((action) => action.label === "Copy Claude Code command")).toMatchObject({
-      kind: "copy",
-      value: "claude mcp add --transport http corgtex --scope user https://app.corgtex.com/mcp",
+    expect(claudeCard?.advancedSection?.actions.find((action) => action.label === "Open Claude Code installer")).toMatchObject({
+      kind: "open",
+      href: "/install/claude-code",
     });
     expect(claudeCard?.advancedSection?.steps).toContain("Open Claude Code and run /mcp.");
     expect(cursorCard?.actions[0]).toMatchObject({
-      kind: "cursorInstall",
+      kind: "open",
       label: "Connect Cursor",
+      href: "/install/cursor",
     });
-    expect(cursorCard?.actions.map((action) => action.label)).toContain("Copy manual mcp.json");
-    expect(cursorCard?.actions.find((action) => action.label === "Copy manual mcp.json")).toMatchObject({
-      value: expect.stringContaining("\"mcpServers\""),
-    });
-    expect(geminiCard?.actions.map((action) => action.label)).toContain("Copy Gemini command");
-    expect(geminiCard?.actions.find((action) => action.label === "Copy Gemini command")).toMatchObject({
-      value: "gemini mcp add --transport http --scope user corgtex https://app.corgtex.com/mcp",
-    });
-    expect(geminiCard?.actions.find((action) => action.label === "Copy settings JSON")).toMatchObject({
-      value: expect.stringContaining("\"httpUrl\""),
+    expect(geminiCard?.actions.find((action) => action.label === "Connect Gemini")).toMatchObject({
+      kind: "open",
+      href: "/install/gemini",
     });
   });
 
@@ -220,7 +217,7 @@ describe("AI workspace UI helpers", () => {
       kind: "open",
       href: "/install/claude?workspaceId=workspace-1&returnTo=%2Fworkspaces%2Fworkspace-1%2Fsettings%3Ftab%3Dai-workspaces%26provider%3Dclaude",
     });
-    expect(claudeCard.actions.find((action) => action.label === "Copy share link")).toMatchObject({
+    expect(claudeCard.actions.find((action) => action.label === "Copy installer link")).toMatchObject({
       value: "https://app.corgtex.com/install/claude?workspaceId=workspace-1&returnTo=%2Fworkspaces%2Fworkspace-1%2Fsettings%3Ftab%3Dai-workspaces%26provider%3Dclaude",
     });
   });
@@ -248,7 +245,7 @@ describe("AI workspace UI helpers", () => {
       kind: "open",
       href: "/install/claude?workspaceId=workspace-1&returnTo=%2Fworkspaces%2Fworkspace-1%3Fonboarding%3Dsetup",
     });
-    expect(claudeCard?.actions.find((action) => action.label === "Copy share link")).toMatchObject({
+    expect(claudeCard?.actions.find((action) => action.label === "Copy installer link")).toMatchObject({
       value: "https://app.corgtex.com/install/claude?workspaceId=workspace-1&returnTo=%2Fworkspaces%2Fworkspace-1%3Fonboarding%3Dsetup",
     });
     expect(claudeCard?.advancedSection).toBeUndefined();
@@ -277,12 +274,22 @@ describe("AI workspace UI helpers", () => {
     }
 
     const copilotCard = cards.find((entry) => entry.provider.key === "copilot");
+    expect(Object.fromEntries(cards.map((card) => [card.provider.key, card.actions[0]]))).toMatchObject({
+      chatgpt: { kind: "open", href: "/install/chatgpt" },
+      claude: { kind: "open", href: "/install/claude" },
+      copilot: { kind: "open", href: "/install/copilot" },
+      gemini: { kind: "open", href: "/install/gemini" },
+      cursor: { kind: "open", href: "/install/cursor" },
+      generic_mcp: { kind: "open", href: "/install/generic-mcp" },
+    });
     expect(copilotCard?.actions.map((action) => action.label)).toEqual([
-      "Copy VS Code config",
-      "Copy Copilot CLI command",
-      "VS Code MCP docs",
-      "Copilot CLI docs",
+      "Connect Copilot",
+      "Copy installer link",
     ]);
+    expect(copilotCard?.actions[0]).toMatchObject({
+      kind: "open",
+      href: "/install/copilot",
+    });
     expect(copilotCard?.notes.join(" ")).toContain("OAuth-backed remote MCP is not supported");
     expect(copilotCard?.steps.join(" ")).not.toContain("repository");
   });

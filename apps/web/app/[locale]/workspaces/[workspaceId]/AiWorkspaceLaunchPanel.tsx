@@ -5,8 +5,8 @@ import { useEffect, useState } from "react";
 import {
   activeAiWorkspaceProvider,
   aiWorkspaceConnectionForProvider,
-  aiWorkspaceSettingsHref,
   aiWorkspaceLaunchUrl,
+  aiWorkspaceSetupHref,
   isAiWorkspaceConnected,
   type AiWorkspaceLaunchState,
   type AiWorkspaceLaunchProvider,
@@ -78,15 +78,6 @@ function sortedProviders(providers: AiWorkspaceLaunchProvider[]) {
   return [...providers].sort((a, b) => providerRank(a) - providerRank(b) || a.label.localeCompare(b.label));
 }
 
-function claudeInstallerHref(workspaceId: string) {
-  const returnTo = aiWorkspaceSettingsHref(workspaceId, "claude");
-  const params = new URLSearchParams({
-    workspaceId,
-    returnTo,
-  });
-  return `/install/claude?${params.toString()}`;
-}
-
 export function AiWorkspaceLaunchPanel({
   workspaceId,
   initialState,
@@ -142,7 +133,7 @@ export function AiWorkspaceLaunchPanel({
   }, [provider?.key, workspaceId]);
 
   function setupHref(providerKey: string) {
-    return providerKey === "claude" ? claudeInstallerHref(workspaceId) : aiWorkspaceSettingsHref(workspaceId, providerKey);
+    return aiWorkspaceSetupHref(workspaceId, providerKey);
   }
 
   function applyState(data: unknown) {

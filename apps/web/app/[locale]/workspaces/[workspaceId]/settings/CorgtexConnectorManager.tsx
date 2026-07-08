@@ -1,16 +1,14 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import {
   buildClaudeInstallerShareUrl,
   buildClaudeCodeCommand,
   buildCursorInstallLinks,
   buildCursorMcpConfig,
+  buildInstallerPath,
+  buildInstallerShareUrl,
   encodeBase64Utf8,
-  CHATGPT_CONNECTORS_URL,
-  CLAUDE_CONNECTORS_URL,
-  CLAUDE_INSTALLER_PATH,
-  CLAUDE_CODE_INSTALLER_PATH,
   type CursorMcpConfig,
 } from "@/lib/install-helpers";
 
@@ -27,9 +25,10 @@ export type { CursorMcpConfig };
 type Props = {
   connectorUrl: string;
   workspaceName?: string;
+  workspaceId?: string;
 };
 
-type SetupCardId = "chatgpt" | "claude" | "cursor" | "claude-code" | "other";
+type SetupCardId = "openwork" | "chatgpt" | "claude" | "cursor" | "copilot" | "gemini" | "claude-code" | "other";
 
 type SetupCard = {
   id: SetupCardId;
@@ -50,11 +49,24 @@ type ActionStatus = {
 
 const SETUP_CARDS: SetupCard[] = [
   {
+    id: "openwork",
+    title: "OpenWork",
+    actionLabel: "Open guided installer",
+    automation: "Opens the Corgtex-guided OpenWork installer.",
+    userWork: "Add the Corgtex MCP URL in OpenWork from the installer, then authorize it in Corgtex.",
+    steps: [
+      "Open your OpenWork workspace.",
+      "Go to Extensions, then Advanced Settings, then Add MCP server.",
+      "When OpenWork opens Corgtex, authorize the connector as your current Corgtex user for the selected workspace.",
+    ],
+    note: "OpenWork is the recommended free work surface when the team does not already prefer another AI tool.",
+  },
+  {
     id: "chatgpt",
     title: "ChatGPT",
-    actionLabel: "Connect ChatGPT",
-    automation: "Copies the connector URL and opens ChatGPT connector settings.",
-    userWork: "Create the custom Corgtex app in ChatGPT, then authorize it in Corgtex.",
+    actionLabel: "Open guided installer",
+    automation: "Opens the Corgtex-guided ChatGPT installer.",
+    userWork: "Create the custom Corgtex app in ChatGPT from the installer, then authorize it in Corgtex.",
     steps: [
       "In ChatGPT, open Settings -> Connectors -> Advanced settings and turn on Developer Mode if asked.",
       "Click Create app, name it Corgtex, paste the Corgtex connector URL as the MCP server URL, choose OAuth or dynamic client registration if ChatGPT asks, then click Create.",
@@ -67,9 +79,9 @@ const SETUP_CARDS: SetupCard[] = [
   {
     id: "claude",
     title: "Claude",
-    actionLabel: "Copy URL and open Claude Connectors",
-    automation: "Copies the connector URL and opens Claude connector settings.",
-    userWork: "Add the custom connector in Claude, then authorize it in Corgtex.",
+    actionLabel: "Open guided installer",
+    automation: "Opens the Corgtex-guided Claude installer.",
+    userWork: "Add the custom connector in Claude from the installer, then authorize it in Corgtex.",
     steps: [
       "In Claude, open Customize -> Connectors.",
       "Click +, choose Add custom connector, and paste the Corgtex connector URL as the remote MCP server URL.",
@@ -81,9 +93,9 @@ const SETUP_CARDS: SetupCard[] = [
   {
     id: "cursor",
     title: "Cursor",
-    actionLabel: "Add to Cursor",
-    automation: "Opens Cursor's MCP installer with the Corgtex HTTP server already encoded.",
-    userWork: "Approve the Cursor install prompt, then authorize it in Corgtex when Cursor asks.",
+    actionLabel: "Open guided installer",
+    automation: "Opens the Corgtex-guided Cursor installer.",
+    userWork: "Approve the Cursor install prompt from the installer, then authorize it in Corgtex when Cursor asks.",
     steps: [
       "Click Add to Cursor.",
       "Approve the install prompt in Cursor.",
@@ -91,11 +103,37 @@ const SETUP_CARDS: SetupCard[] = [
     ],
   },
   {
+    id: "copilot",
+    title: "GitHub Copilot",
+    actionLabel: "Open guided installer",
+    automation: "Opens the Corgtex-guided Copilot installer.",
+    userWork: "Use the VS Code config or Copilot CLI command from the installer, then authorize it in Corgtex.",
+    steps: [
+      "Use the VS Code MCP setup path or Copilot CLI command from the installer.",
+      "When Copilot opens Corgtex, authorize the connector as your current Corgtex user for the selected workspace.",
+      "Return to Corgtex and verify the completed OAuth connection.",
+    ],
+    note: "Repository and cloud-agent Copilot OAuth setup is not offered here.",
+  },
+  {
+    id: "gemini",
+    title: "Gemini CLI",
+    actionLabel: "Open guided installer",
+    automation: "Opens the Corgtex-guided Gemini CLI installer.",
+    userWork: "Copy the Gemini command or settings JSON from the installer, then authorize it in Corgtex.",
+    steps: [
+      "Paste the command in Terminal, or use the settings JSON fallback.",
+      "Open Gemini CLI and run /mcp.",
+      "When Gemini opens Corgtex, authorize the connector as your current Corgtex user for the selected workspace.",
+    ],
+    note: "Consumer Gemini web support is not assumed; this path is for technical CLI users.",
+  },
+  {
     id: "claude-code",
     title: "Claude Code",
-    actionLabel: "Copy Claude Code command",
-    automation: "Copies the exact terminal command with the Corgtex connector URL.",
-    userWork: "Paste the command into Terminal, then authorize Corgtex from Claude Code.",
+    actionLabel: "Open guided installer",
+    automation: "Opens the Corgtex-guided Claude Code installer.",
+    userWork: "Copy the command from the installer, paste it into Terminal, then authorize Corgtex from Claude Code.",
     steps: [
       "Paste the copied command into Terminal.",
       "Open Claude Code and type /mcp.",
@@ -106,8 +144,8 @@ const SETUP_CARDS: SetupCard[] = [
   {
     id: "other",
     title: "Other MCP client",
-    actionLabel: "Copy connector URL",
-    automation: "Copies the Corgtex connector URL for any remote MCP client.",
+    actionLabel: "Open guided installer",
+    automation: "Opens the Corgtex-guided generic MCP installer.",
     userWork: "Choose remote MCP or Streamable HTTP in your client, then authorize in Corgtex when prompted.",
     steps: [
       "Choose remote MCP, Streamable HTTP, or HTTP MCP server in your client.",
@@ -130,29 +168,28 @@ async function writeClipboard(value: string): Promise<boolean> {
   }
 }
 
-function openExternalUrl(url: string): boolean {
-  if (typeof window === "undefined") return false;
-  const target = window.open(url, "_blank", "noopener,noreferrer");
-  return target !== null;
+function setupProviderKey(cardId: SetupCardId) {
+  if (cardId === "claude-code") return "claude_code";
+  if (cardId === "other") return "generic_mcp";
+  return cardId;
 }
 
-function openCurrentWindow(url: string): boolean {
-  if (typeof window === "undefined") return false;
-  window.location.href = url;
-  return true;
+function setupReturnTo(workspaceId: string | undefined, providerKey: string) {
+  return workspaceId ? `/workspaces/${workspaceId}/settings?tab=ai-workspaces&provider=${providerKey}` : null;
 }
 
-export function CorgtexConnectorManager({ connectorUrl, workspaceName }: Props) {
+export function CorgtexConnectorManager({ connectorUrl, workspaceName, workspaceId }: Props) {
   const [isHydrated, setIsHydrated] = useState(false);
   const [status, setStatus] = useState<ActionStatus | null>(null);
   const [claudeInstallerShareUrl, setClaudeInstallerShareUrl] = useState<string | null>(null);
-  const cursorLinks = useMemo(() => buildCursorInstallLinks(connectorUrl), [connectorUrl]);
-  const claudeCodeCommand = useMemo(() => buildClaudeCodeCommand(connectorUrl), [connectorUrl]);
 
   useEffect(() => {
     setIsHydrated(true);
-    setClaudeInstallerShareUrl(buildClaudeInstallerShareUrl(window.location.origin));
-  }, []);
+    setClaudeInstallerShareUrl(buildInstallerShareUrl(window.location.origin, "claude", {
+      workspaceId,
+      returnTo: setupReturnTo(workspaceId, "claude"),
+    }));
+  }, [workspaceId]);
 
   const setCopyResult = (cardId: SetupCardId, copied: boolean, copiedMessage: string, fallbackMessage: string, value: string) => {
     setStatus({
@@ -166,48 +203,6 @@ export function CorgtexConnectorManager({ connectorUrl, workspaceName }: Props) 
   const handleCopy = (cardId: SetupCardId, value: string, copiedMessage: string, fallbackMessage: string) => {
     void writeClipboard(value).then((copied) => {
       setCopyResult(cardId, copied, copiedMessage, fallbackMessage, value);
-    });
-  };
-
-  const handleCopyAndOpen = (cardId: SetupCardId, value: string, url: string, productName: string) => {
-    const opened = openExternalUrl(url);
-
-    void writeClipboard(value).then((copied) => {
-      if (copied && opened) {
-        setStatus({
-          cardId,
-          message: `Copied the connector URL and opened ${productName}.`,
-          tone: "success",
-        });
-        return;
-      }
-
-      if (copied) {
-        setStatus({
-          cardId,
-          message: `Copied the connector URL. If ${productName} did not open, use the setup link below.`,
-          tone: "warning",
-        });
-        return;
-      }
-
-      setStatus({
-        cardId,
-        message: `${productName} opened, but your browser blocked clipboard access. Select and copy the URL below.`,
-        tone: "warning",
-        manualValue: value,
-      });
-    });
-  };
-
-  const handleCursorInstall = () => {
-    const opened = openCurrentWindow(cursorLinks.app);
-    setStatus({
-      cardId: "cursor",
-      message: opened
-        ? "Opening Cursor's MCP installer. If nothing happens, use the browser fallback link below."
-        : "Cursor could not be opened here. Use the browser fallback link below.",
-      tone: opened ? "success" : "warning",
     });
   };
 
@@ -241,84 +236,15 @@ export function CorgtexConnectorManager({ connectorUrl, workspaceName }: Props) 
   );
 
   const renderAction = (card: SetupCard) => {
-    if (card.id === "chatgpt") {
-      return (
-        <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
-          <button className="button secondary" type="button" onClick={() => handleCopyAndOpen(card.id, connectorUrl, CHATGPT_CONNECTORS_URL, "ChatGPT connector settings")}>
-            {card.actionLabel}
-          </button>
-          <a className="button secondary" href={CHATGPT_CONNECTORS_URL} target="_blank" rel="noreferrer">
-            Open only
-          </a>
-        </div>
-      );
-    }
-
-    if (card.id === "claude") {
-      return (
-        <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
-          <a className="button" href={CLAUDE_INSTALLER_PATH} target="_blank" rel="noreferrer">
-            Open guided installer ↗
-          </a>
-          <button className="button secondary" type="button" onClick={() => handleCopyAndOpen(card.id, connectorUrl, CLAUDE_CONNECTORS_URL, "Claude Connectors")}>
-            {card.actionLabel}
-          </button>
-        </div>
-      );
-    }
-
-    if (card.id === "cursor") {
-      return (
-        <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
-          <button className="button secondary" type="button" onClick={handleCursorInstall}>
-            {card.actionLabel}
-          </button>
-          <a className="button secondary" href={cursorLinks.browser} target="_blank" rel="noreferrer">
-            Browser fallback
-          </a>
-        </div>
-      );
-    }
-
-    if (card.id === "claude-code") {
-      return (
-        <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
-          <a className="button" href={CLAUDE_CODE_INSTALLER_PATH} target="_blank" rel="noreferrer">
-            Open guided installer ↗
-          </a>
-          <button
-            className="button secondary"
-            type="button"
-            onClick={() =>
-              handleCopy(
-                card.id,
-                claudeCodeCommand,
-                "Copied the Claude Code command.",
-                "Your browser blocked clipboard access. Select and copy the command below.",
-              )
-            }
-          >
-            {card.actionLabel}
-          </button>
-        </div>
-      );
-    }
-
+    const providerKey = setupProviderKey(card.id);
+    const href = buildInstallerPath(providerKey, {
+      workspaceId,
+      returnTo: setupReturnTo(workspaceId, providerKey),
+    });
     return (
-      <button
-        className="button secondary"
-        type="button"
-        onClick={() =>
-          handleCopy(
-            card.id,
-            connectorUrl,
-            "Copied the connector URL.",
-            "Your browser blocked clipboard access. Select and copy the URL below.",
-          )
-        }
-      >
+      <a className="button" href={href} target="_blank" rel="noreferrer">
         {card.actionLabel}
-      </button>
+      </a>
     );
   };
 
@@ -356,8 +282,8 @@ export function CorgtexConnectorManager({ connectorUrl, workspaceName }: Props) 
               Add Corgtex to Claude
             </strong>
             <div className="nr-item-meta" style={{ fontSize: "0.88rem", marginTop: 6 }}>
-              The fastest path for non-technical teammates. We open Claude with the connector URL on your clipboard;
-              the user pastes it once, then Claude opens Corgtex to authorize the current Corgtex user and workspace.
+              The fastest path for non-technical teammates. The guided installer copies the connector URL, opens Claude
+              settings, and walks the user through Corgtex authorization for the current Corgtex user and workspace.
               {workspaceName ? ` The consent page can authorize ${workspaceName}.` : ""}
             </div>
           </div>
@@ -369,22 +295,16 @@ export function CorgtexConnectorManager({ connectorUrl, workspaceName }: Props) 
         <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginTop: 16 }}>
           <a
             className="button"
-            href={CLAUDE_INSTALLER_PATH}
+            href={buildInstallerPath("claude", {
+              workspaceId,
+              returnTo: setupReturnTo(workspaceId, "claude"),
+            })}
             target="_blank"
             rel="noreferrer"
             style={{ fontSize: "0.95rem", padding: "8px 16px" }}
           >
             Open guided installer ↗
           </a>
-          <button
-            className="button secondary"
-            type="button"
-            onClick={() =>
-              handleCopyAndOpen("claude", connectorUrl, CLAUDE_CONNECTORS_URL, "Claude Connectors")
-            }
-          >
-            Copy URL and open Claude Connectors
-          </button>
           <button
             className="button secondary"
             type="button"
@@ -462,7 +382,7 @@ export function CorgtexConnectorManager({ connectorUrl, workspaceName }: Props) 
 
       <details>
         <summary style={{ cursor: "pointer", fontSize: "0.95rem", fontWeight: 600, padding: "8px 0" }}>
-          Other AI tools (ChatGPT, Cursor, Claude Code, Other)
+          Other AI tools (OpenWork, ChatGPT, Cursor, Copilot, Gemini, Claude Code, Other)
         </summary>
 
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))", gap: 16, marginTop: 12 }}>
@@ -495,42 +415,7 @@ export function CorgtexConnectorManager({ connectorUrl, workspaceName }: Props) 
 
             {renderConnectorUrl(card.id)}
 
-            {card.id === "claude-code" ? (
-              <div style={{ display: "grid", gap: 6 }}>
-                <span className="nr-item-meta" style={{ fontSize: "0.78rem", fontWeight: 700, textTransform: "uppercase" }}>
-                  Claude Code command
-                </span>
-                <code
-                  style={{
-                    display: "block",
-                    border: "1px solid var(--line)",
-                    borderRadius: 6,
-                    fontFamily: "monospace",
-                    fontSize: "0.82rem",
-                    overflowWrap: "anywhere",
-                    padding: "8px 10px",
-                  }}
-                >
-                  {claudeCodeCommand}
-                </code>
-                {status?.cardId === card.id && status.manualValue === claudeCodeCommand ? (
-                  <textarea
-                    readOnly
-                    value={status.manualValue}
-                    aria-label="Claude Code manual copy value"
-                    style={{ minHeight: 70, resize: "vertical", fontFamily: "monospace", fontSize: "0.82rem" }}
-                  />
-                ) : null}
-              </div>
-            ) : null}
-
             {renderAction(card)}
-
-            {card.id === "cursor" ? (
-              <div className="nr-item-meta" style={{ fontSize: "0.8rem", margin: 0, overflowWrap: "anywhere" }}>
-                Browser fallback: <a href={cursorLinks.browser} target="_blank" rel="noreferrer">{cursorLinks.browser}</a>
-              </div>
-            ) : null}
 
             {status?.cardId === card.id ? (
               <div

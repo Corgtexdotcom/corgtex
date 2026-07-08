@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 import { getMcpPublicUrl } from "@corgtex/domain";
+import { buildInstallerPath } from "@/lib/install-helpers";
 
 export const dynamic = "force-dynamic";
 
@@ -11,25 +12,61 @@ export const metadata: Metadata = {
 
 const TILES = [
   {
+    id: "openwork",
+    title: "OpenWork",
+    body: "Recommended default work surface. Copy the MCP URL, open OpenWork, then authorize in Corgtex.",
+    href: buildInstallerPath("openwork"),
+    primary: true,
+  },
+  {
     id: "claude",
     title: "Claude (web, desktop, Cowork)",
     body: "The smoothest path. Three clicks, no terminal — works for non-technical teammates.",
-    href: "/install/claude",
-    primary: true,
+    href: buildInstallerPath("claude"),
+    primary: false,
+  },
+  {
+    id: "chatgpt",
+    title: "ChatGPT",
+    body: "Copy the MCP URL, open ChatGPT connector settings, then finish the required ChatGPT setup steps.",
+    href: buildInstallerPath("chatgpt"),
+    primary: false,
+  },
+  {
+    id: "cursor",
+    title: "Cursor",
+    body: "Use Cursor's MCP install prompt, with browser and manual mcp.json fallbacks.",
+    href: buildInstallerPath("cursor"),
+    primary: false,
+  },
+  {
+    id: "copilot",
+    title: "GitHub Copilot",
+    body: "Use the VS Code MCP config or Copilot CLI command from a guided setup page.",
+    href: buildInstallerPath("copilot"),
+    primary: false,
+  },
+  {
+    id: "gemini",
+    title: "Gemini CLI",
+    body: "Copy the Gemini CLI command or settings JSON, then authenticate through Corgtex.",
+    href: buildInstallerPath("gemini"),
+    primary: false,
   },
   {
     id: "claude-code",
     title: "Claude Code",
     body: "One terminal command, then sign in through your browser.",
-    href: "/install/claude-code",
+    href: buildInstallerPath("claude-code"),
     primary: false,
   },
-];
-
-const OTHER = [
-  { name: "ChatGPT", body: "Add Corgtex as a developer-mode app in ChatGPT Settings -> Connectors." },
-  { name: "Cursor", body: "Use the cursor:// install link from your workspace settings." },
-  { name: "Other MCP clients", body: "Paste the connector URL into any client that supports remote MCP / Streamable HTTP." },
+  {
+    id: "generic-mcp",
+    title: "Generic MCP client",
+    body: "Copy the Corgtex MCP URL for any client that supports remote MCP or Streamable HTTP.",
+    href: buildInstallerPath("generic-mcp"),
+    primary: false,
+  },
 ];
 
 export default function InstallIndexPage() {
@@ -75,15 +112,7 @@ export default function InstallIndexPage() {
         </ul>
 
         <section className="rounded-[var(--radius-lg)] border border-[var(--line-subtle)] bg-[var(--surface-sunken)] p-5">
-          <h2 className="text-sm font-medium text-[var(--text-strong)]">Other tools</h2>
-          <ul className="mt-3 space-y-2">
-            {OTHER.map((item) => (
-              <li key={item.name} className="text-sm">
-                <span className="font-medium text-[var(--text-strong)]">{item.name}</span>
-                <span className="text-[var(--text-muted)]"> — {item.body}</span>
-              </li>
-            ))}
-          </ul>
+          <h2 className="text-sm font-medium text-[var(--text-strong)]">Manual setup</h2>
           <p className="mt-4 text-xs text-[var(--text-muted)]">
             Paste this connector URL anywhere a remote MCP server is accepted:
           </p>

@@ -154,15 +154,59 @@ export const CLAUDE_INSTALLER_PATH = "/install/claude";
 export const CLAUDE_CODE_INSTALLER_PATH = "/install/claude-code";
 export const INSTALL_INDEX_PATH = "/install";
 
-export function buildClaudeInstallerShareUrl(
-  origin?: string | null,
+export type InstallerProviderKey =
+  | "openwork"
+  | "claude"
+  | "chatgpt"
+  | "cursor"
+  | "copilot"
+  | "gemini"
+  | "claude-code"
+  | "generic-mcp";
+
+const INSTALLER_PROVIDER_SLUGS: Record<string, InstallerProviderKey> = {
+  openwork: "openwork",
+  claude: "claude",
+  chatgpt: "chatgpt",
+  cursor: "cursor",
+  copilot: "copilot",
+  gemini: "gemini",
+  claude_code: "claude-code",
+  "claude-code": "claude-code",
+  generic_mcp: "generic-mcp",
+  "generic-mcp": "generic-mcp",
+};
+
+export function installerProviderSlug(providerKey: string | null | undefined): InstallerProviderKey | null {
+  if (!providerKey) return null;
+  return INSTALLER_PROVIDER_SLUGS[providerKey] ?? null;
+}
+
+export function buildInstallerPath(
+  providerKey: string | null | undefined,
   params: { workspaceId?: string | null; returnTo?: string | null } = {},
 ): string {
-  const trimmedOrigin = origin?.trim().replace(/\/$/, "");
+  const slug = installerProviderSlug(providerKey);
   const search = new URLSearchParams();
   if (params.workspaceId) search.set("workspaceId", params.workspaceId);
   if (params.returnTo) search.set("returnTo", params.returnTo);
   const suffix = search.size > 0 ? `?${search.toString()}` : "";
-  const path = `${CLAUDE_INSTALLER_PATH}${suffix}`;
+  return `${slug ? `/install/${slug}` : INSTALL_INDEX_PATH}${suffix}`;
+}
+
+export function buildInstallerShareUrl(
+  origin: string | null | undefined,
+  providerKey: string | null | undefined,
+  params: { workspaceId?: string | null; returnTo?: string | null } = {},
+): string {
+  const trimmedOrigin = origin?.trim().replace(/\/$/, "");
+  const path = buildInstallerPath(providerKey, params);
   return trimmedOrigin ? `${trimmedOrigin}${path}` : path;
+}
+
+export function buildClaudeInstallerShareUrl(
+  origin?: string | null,
+  params: { workspaceId?: string | null; returnTo?: string | null } = {},
+): string {
+  return buildInstallerShareUrl(origin, "claude", params);
 }
