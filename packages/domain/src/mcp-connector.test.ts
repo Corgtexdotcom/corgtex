@@ -308,6 +308,49 @@ describe("MCP connector registry", () => {
     });
   });
 
+  it("rejects malformed MCP OAuth resource values before issuing an authorization code", async () => {
+    const createAuthorizationCodeMock = vi.fn();
+    const prismaMock = {
+      mcpOAuthClient: {
+        findUnique: vi.fn().mockResolvedValue({
+          id: "client-db-1",
+          clientId: "mcp_client_test",
+          isActive: true,
+          redirectUris: ["https://client.example/callback"],
+          scopes: ["workspace:read", "brain:read", "governance:read", "context-graph:read", "proposals:read", "actions:read", "tensions:read", "goals:read", "members:read", "meetings:read", "cycles:read", "circles:read", "tools:read", "conversations:write"],
+        }),
+      },
+      member: {
+        findUnique: vi.fn().mockResolvedValue({ id: "member-1", isActive: true }),
+      },
+      workspace: {
+        findUnique: vi.fn().mockResolvedValue({ id: "ws-1", slug: "corgtex" }),
+      },
+      mcpOAuthAuthorizationCode: {
+        create: createAuthorizationCodeMock,
+      },
+    };
+    installSharedMock(prismaMock);
+
+    const { issueMcpAuthorizationCode } = await import("./mcp-connector");
+    await expect(issueMcpAuthorizationCode({
+      kind: "user",
+      user: { id: "user-1", email: "user@example.com", displayName: "User" },
+    }, {
+      clientId: "mcp_client_test",
+      workspaceId: "ws-1",
+      redirectUri: "https://client.example/callback",
+      scopes: ["workspace:read"],
+      codeChallenge: "challenge",
+      codeChallengeMethod: "S256",
+      resource: "not a url",
+    })).rejects.toMatchObject({
+      status: 400,
+      code: "INVALID_INPUT",
+    });
+    expect(createAuthorizationCodeMock).not.toHaveBeenCalled();
+  });
+
   it("upserts HTTPS URL client_ids from CIMD metadata documents", async () => {
     const lookupMock = vi.fn().mockResolvedValue([{ address: "93.184.216.34", family: 4 }]);
     vi.doMock("node:dns/promises", () => ({ lookup: lookupMock }));

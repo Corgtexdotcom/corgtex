@@ -757,11 +757,15 @@ export function getMcpPublicUrl(origin?: string) {
 }
 
 function normalizeMcpResource(resource: string) {
-  const parsed = new URL(resource);
-  parsed.search = "";
-  parsed.hash = "";
-  parsed.pathname = parsed.pathname.replace(/\/$/, "");
-  return parsed.toString().replace(/\/$/, "");
+  try {
+    const parsed = new URL(resource);
+    parsed.search = "";
+    parsed.hash = "";
+    parsed.pathname = parsed.pathname.replace(/\/$/, "");
+    return parsed.toString().replace(/\/$/, "");
+  } catch {
+    throw new AppError(400, "INVALID_INPUT", "MCP OAuth resource must be a valid URL.");
+  }
 }
 
 export function areEquivalentMcpResources(storedResource: string, requestedResource: string) {
