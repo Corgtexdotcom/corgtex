@@ -73,7 +73,7 @@ export async function POST(
         try {
           let finalResult: {
             assistantMessage: string;
-            contextUsed: { knowledgeResults?: unknown[]; memories?: unknown[]; pageContext?: unknown; mapGraphChanged?: boolean };
+            contextUsed: { knowledgeResults?: unknown[]; knowledgeSearch?: unknown; memories?: unknown[]; pageContext?: unknown; mapGraphChanged?: boolean };
           } | undefined;
 
           while (true) {

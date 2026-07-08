@@ -1,5 +1,7 @@
 type NodeEnv = "development" | "test" | "production";
 type AzureOpenAiAuthMode = "api_key" | "managed_identity";
+type KnowledgeSearchProvider = "postgres" | "azure" | "dual_compare";
+type AzureSearchAuthMode = "api_key" | "managed_identity";
 
 type RequiredOptions = {
   testFallback?: string;
@@ -60,6 +62,22 @@ function azureOpenAiAuthMode(): AzureOpenAiAuthMode {
   return value;
 }
 
+function knowledgeSearchProvider(): KnowledgeSearchProvider {
+  const value = optional("KNOWLEDGE_SEARCH_PROVIDER") ?? "postgres";
+  if (value !== "postgres" && value !== "azure" && value !== "dual_compare") {
+    throw new Error("Invalid KNOWLEDGE_SEARCH_PROVIDER.");
+  }
+  return value;
+}
+
+function azureSearchAuthMode(): AzureSearchAuthMode {
+  const value = optional("AZURE_SEARCH_AUTH_MODE") ?? "api_key";
+  if (value !== "api_key" && value !== "managed_identity") {
+    throw new Error("Invalid AZURE_SEARCH_AUTH_MODE.");
+  }
+  return value;
+}
+
 type Env = {
   readonly NODE_ENV: NodeEnv;
   readonly DATABASE_URL: string;
@@ -95,6 +113,14 @@ type Env = {
   readonly MODEL_CHAT_CONVERSATION: string;
   readonly MODEL_EMBEDDING_DEFAULT: string;
   readonly MODEL_REQUEST_TIMEOUT_MS: number;
+  readonly KNOWLEDGE_SEARCH_PROVIDER: KnowledgeSearchProvider;
+  readonly AZURE_SEARCH_ENDPOINT: string | undefined;
+  readonly AZURE_SEARCH_INDEX_NAME: string | undefined;
+  readonly AZURE_SEARCH_AUTH_MODE: AzureSearchAuthMode;
+  readonly AZURE_SEARCH_ADMIN_KEY: string | undefined;
+  readonly AZURE_SEARCH_QUERY_KEY: string | undefined;
+  readonly AZURE_SEARCH_API_VERSION: string;
+  readonly AZURE_SEARCH_VECTOR_DIMENSIONS: number;
   readonly NEXT_PUBLIC_INTERCOM_APP_ID: string | undefined;
   readonly NEXT_PUBLIC_INTERCOM_API_BASE: string;
   readonly INTERCOM_MESSENGER_SECRET: string | undefined;
@@ -241,6 +267,30 @@ export const env: Env = {
   },
   get MODEL_REQUEST_TIMEOUT_MS() {
     return numberFromEnv("MODEL_REQUEST_TIMEOUT_MS", 180_000);
+  },
+  get KNOWLEDGE_SEARCH_PROVIDER() {
+    return knowledgeSearchProvider();
+  },
+  get AZURE_SEARCH_ENDPOINT() {
+    return optional("AZURE_SEARCH_ENDPOINT");
+  },
+  get AZURE_SEARCH_INDEX_NAME() {
+    return optional("AZURE_SEARCH_INDEX_NAME");
+  },
+  get AZURE_SEARCH_AUTH_MODE() {
+    return azureSearchAuthMode();
+  },
+  get AZURE_SEARCH_ADMIN_KEY() {
+    return optional("AZURE_SEARCH_ADMIN_KEY");
+  },
+  get AZURE_SEARCH_QUERY_KEY() {
+    return optional("AZURE_SEARCH_QUERY_KEY");
+  },
+  get AZURE_SEARCH_API_VERSION() {
+    return optional("AZURE_SEARCH_API_VERSION") ?? "2026-04-01";
+  },
+  get AZURE_SEARCH_VECTOR_DIMENSIONS() {
+    return numberFromEnv("AZURE_SEARCH_VECTOR_DIMENSIONS", 1536);
   },
   get NEXT_PUBLIC_INTERCOM_APP_ID() {
     return optional("NEXT_PUBLIC_INTERCOM_APP_ID");

@@ -60,6 +60,12 @@ import { answerKnowledgeQuestion, searchIndexedKnowledge, invalidateKnowledgeCac
 
 describe("knowledge retrieval cache", () => {
   beforeEach(async () => {
+    delete process.env.KNOWLEDGE_SEARCH_PROVIDER;
+    delete process.env.AZURE_SEARCH_ENDPOINT;
+    delete process.env.AZURE_SEARCH_INDEX_NAME;
+    delete process.env.AZURE_SEARCH_ADMIN_KEY;
+    delete process.env.AZURE_SEARCH_QUERY_KEY;
+    delete process.env.AZURE_SEARCH_VECTOR_DIMENSIONS;
     resetLocalCacheStore();
     await invalidateKnowledgeCache();
 
@@ -235,6 +241,7 @@ describe("knowledge retrieval cache", () => {
     expect(prismaMock.knowledgeChunk.createMany).toHaveBeenCalledWith({
       data: [
         expect.objectContaining({
+          id: expect.any(String),
           metadata: expect.objectContaining({
             chunkIndex: 0,
             sourceType: "DOCUMENT",
@@ -243,5 +250,40 @@ describe("knowledge retrieval cache", () => {
         }),
       ],
     });
+  });
+
+  it("falls back to Postgres retrieval when Azure Search is enabled but unavailable", async () => {
+    process.env.KNOWLEDGE_SEARCH_PROVIDER = "azure";
+    process.env.AZURE_SEARCH_ENDPOINT = "https://corgtex-search.search.windows.net";
+    process.env.AZURE_SEARCH_INDEX_NAME = "client-knowledge";
+    process.env.AZURE_SEARCH_QUERY_KEY = "query-key";
+    process.env.AZURE_SEARCH_VECTOR_DIMENSIONS = "1536";
+
+    prismaMock.knowledgeChunk.findMany.mockResolvedValue([
+      {
+        id: "chunk-5",
+        sourceType: "DOCUMENT",
+        sourceId: "doc-5",
+        sourceTitle: "Fallback policy",
+        chunkIndex: 0,
+        content: "Fallback policy mentions travel.",
+        embedding: [1, 0],
+        createdAt: new Date("2026-04-03T09:00:00.000Z"),
+      },
+    ]);
+
+    const results = await searchIndexedKnowledge({
+      workspaceId: "ws-1",
+      query: "travel policy",
+      limit: 2,
+    });
+
+    expect(results[0]).toMatchObject({
+      chunkId: "chunk-5",
+      sourceType: "DOCUMENT",
+      sourceId: "doc-5",
+    });
+    expect(modelGatewayMock.embed).toHaveBeenCalledTimes(2);
+    expect(modelGatewayMock.rerank).toHaveBeenCalledTimes(1);
   });
 });
