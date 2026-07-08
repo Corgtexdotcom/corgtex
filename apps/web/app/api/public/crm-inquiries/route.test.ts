@@ -44,6 +44,7 @@ vi.mock("@/lib/posthog-server", () => ({
 
 const originalWorkspaceSlug = process.env.WORKSPACE_SLUG;
 const targetWorkspaceSlug = ["cr", "ina"].join("");
+const targetCrmHost = `${targetWorkspaceSlug}.corgtex.com`;
 
 function inquiryPayload(overrides: Record<string, unknown> = {}) {
   return {
@@ -62,8 +63,12 @@ function inquiryPayload(overrides: Record<string, unknown> = {}) {
   };
 }
 
-function crmInquiryRequest(body: Record<string, unknown>, headers: Record<string, string> = {}) {
-  return new Request(`https://${targetWorkspaceSlug}.corgtex.com/api/public/crm-inquiries`, {
+function crmInquiryRequest(
+  body: Record<string, unknown>,
+  headers: Record<string, string> = {},
+  host = targetCrmHost,
+) {
+  return new Request(`https://${host}/api/public/crm-inquiries`, {
     method: "POST",
     headers: {
       "content-type": "application/json",
@@ -139,6 +144,50 @@ describe("POST /api/public/crm-inquiries", () => {
     });
     expect(checkRateLimitMock).not.toHaveBeenCalled();
     expect(captureCrmInquiryMock).not.toHaveBeenCalled();
+  });
+
+  it("rejects Corporate Rebels browser origins on other deployments before CRM writes", async () => {
+    process.env.WORKSPACE_SLUG = "alumipres";
+    const { POST } = await import("./route");
+
+    const response = await POST(crmInquiryRequest(inquiryPayload(), {
+      origin: "https://us.corporate-rebels.com",
+    }, "alumipres.corgtex.com"));
+
+    expect(response.status).toBe(403);
+    await expect(response.json()).resolves.toEqual({
+      error: {
+        code: "ORIGIN_NOT_ALLOWED",
+        message: "Origin is not allowed.",
+      },
+    });
+    expect(checkRateLimitMock).not.toHaveBeenCalled();
+    expect(captureCrmInquiryMock).not.toHaveBeenCalled();
+  });
+
+  it("accepts connector-style requests without browser origin on other Corgtex deployments", async () => {
+    process.env.WORKSPACE_SLUG = "alumipres";
+    const { POST } = await import("./route");
+
+    const response = await POST(crmInquiryRequest(inquiryPayload({
+      source: "partner_connector",
+      sourceExternalId: "connector-123",
+      persona: "PARTNER",
+    }), {}, "alumipres.corgtex.com"));
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("Access-Control-Allow-Origin")).toBeNull();
+    await expect(response.json()).resolves.toEqual({
+      ok: true,
+      duplicate: false,
+      submissionId: "conv-1",
+    });
+    expect(captureCrmInquiryMock).toHaveBeenCalledWith(expect.objectContaining({
+      workspaceSlug: "alumipres",
+      source: "partner_connector",
+      sourceExternalId: "connector-123",
+      persona: "PARTNER",
+    }));
   });
 
   it("rejects non-empty honeypot submissions", async () => {

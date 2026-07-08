@@ -7,13 +7,14 @@ import { handleRouteError, validateBody } from "@/lib/http";
 
 export const dynamic = "force-dynamic";
 
-const ALLOWED_BROWSER_ORIGINS = new Set([
+const CORPORATE_REBELS_BROWSER_ORIGINS = new Set([
   "https://us.corporate-rebels.com",
   "https://www.us.corporate-rebels.com",
 ]);
 const LOCAL_BROWSER_ORIGIN_PATTERN = /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(?::\d+)?$/;
 const CRM_INQUIRY_RATE_LIMIT = { windowMs: 60_000, limit: 10, failClosed: true } as const;
 const DEFAULT_CRM_WORKSPACE_SLUG = ["cr", "ina"].join("");
+const DEFAULT_CRM_HOST = `${DEFAULT_CRM_WORKSPACE_SLUG}.corgtex.com`;
 
 const optionalText = (max = 500) => z.string().trim().min(1).max(max).optional();
 const crmInquirySchema = z.object({
@@ -50,14 +51,24 @@ function normalizeOrigin(value: string | null) {
   }
 }
 
-function isAllowedBrowserOrigin(origin: string) {
-  return ALLOWED_BROWSER_ORIGINS.has(origin) || LOCAL_BROWSER_ORIGIN_PATTERN.test(origin);
+function isDefaultCrmDeploymentRequest(request: NextRequest) {
+  try {
+    return new URL(request.url).hostname.toLowerCase() === DEFAULT_CRM_HOST;
+  } catch {
+    return false;
+  }
+}
+
+function isAllowedBrowserOrigin(origin: string, request: NextRequest) {
+  if (LOCAL_BROWSER_ORIGIN_PATTERN.test(origin)) return true;
+  if (CORPORATE_REBELS_BROWSER_ORIGINS.has(origin)) return isDefaultCrmDeploymentRequest(request);
+  return false;
 }
 
 function allowedOriginForRequest(request: NextRequest) {
   const origin = normalizeOrigin(request.headers.get("origin"));
   if (!origin) return null;
-  if (!isAllowedBrowserOrigin(origin)) {
+  if (!isAllowedBrowserOrigin(origin, request)) {
     throw new AppError(403, "ORIGIN_NOT_ALLOWED", "Origin is not allowed.");
   }
   return origin;
