@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { env, prisma } from "@corgtex/shared";
+import { env, prisma, toInputJson } from "@corgtex/shared";
 import type { AppActor } from "@corgtex/shared";
 import { appendEvents } from "./events";
 import { requireGlobalOperator, requireWorkspaceMembership } from "./auth";
@@ -42,11 +42,22 @@ export const CRM_COMMUNICATION_SUGGESTION_STATUSES = [
   "FAILED",
 ] as const;
 export type CrmCommunicationSuggestionStatus = (typeof CRM_COMMUNICATION_SUGGESTION_STATUSES)[number];
+export const CRM_INQUIRY_PERSONAS = [
+  "OWNER",
+  "EMPLOYEE",
+  "TRANSFORMER",
+  "INVESTOR",
+  "PARTNER",
+  "GENERAL",
+] as const;
+export type CrmInquiryPersona = (typeof CRM_INQUIRY_PERSONAS)[number];
 
 const CRM_CODE_PATTERN = /^[A-Z][A-Z0-9_]{1,63}$/;
 const CRM_ACTIVITY_SOURCE_PATTERN = /^[a-z][a-z0-9_-]{0,63}$/;
 const CRM_COMMUNICATION_CHANNEL_PATTERN = /^[A-Z][A-Z0-9_]{1,31}$/;
 const CRM_COMMUNICATION_SUGGESTION_STATUS_SET = new Set<string>(CRM_COMMUNICATION_SUGGESTION_STATUSES);
+const CRM_INQUIRY_PERSONA_SET = new Set<string>(CRM_INQUIRY_PERSONAS);
+const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const FREE_EMAIL_DOMAINS = new Set([
   "aol.com",
   "gmail.com",
@@ -77,6 +88,35 @@ function normalizeCrmActivitySource(value?: string | null) {
   const source = value?.trim().toLowerCase() || "manual";
   invariant(CRM_ACTIVITY_SOURCE_PATTERN.test(source), 400, "INVALID_INPUT", "Activity source must be a lowercase code.");
   return source;
+}
+
+function normalizeCrmInquirySource(value?: string | null) {
+  const source = value?.trim().toLowerCase() || "";
+  invariant(CRM_ACTIVITY_SOURCE_PATTERN.test(source), 400, "INVALID_INPUT", "Inquiry source must be a lowercase code.");
+  return source;
+}
+
+function normalizeCrmInquiryExternalId(value?: string | null) {
+  const sourceExternalId = value?.trim() || "";
+  invariant(sourceExternalId.length > 0 && sourceExternalId.length <= 200, 400, "INVALID_INPUT", "Source external id is required.");
+  return sourceExternalId;
+}
+
+function normalizeCrmInquiryPersona(value?: string | null): CrmInquiryPersona {
+  const persona = value?.trim().toUpperCase() || "";
+  invariant(CRM_INQUIRY_PERSONA_SET.has(persona), 400, "INVALID_INPUT", "Unsupported CRM inquiry persona.");
+  return persona as CrmInquiryPersona;
+}
+
+function normalizeCrmInquiryEmail(value?: string | null) {
+  const email = value?.trim().toLowerCase() || "";
+  invariant(EMAIL_PATTERN.test(email), 400, "INVALID_INPUT", "Valid email is required.");
+  return email;
+}
+
+function trimOptionalText(value?: string | null) {
+  const trimmed = value?.trim();
+  return trimmed ? trimmed : null;
 }
 
 function normalizeCommunicationChannel(value?: string | null) {
@@ -169,6 +209,16 @@ function crmAccountCandidate(params: {
   };
 }
 
+function normalizeCrmTags(tags?: readonly (string | null | undefined)[] | null) {
+  return [...new Set((tags ?? [])
+    .map((tag) => tag?.trim())
+    .filter((tag): tag is string => Boolean(tag)))];
+}
+
+function mergeCrmTags(...tagLists: readonly (readonly string[] | null | undefined)[]) {
+  return normalizeCrmTags(tagLists.flatMap((tags) => tags ?? []));
+}
+
 async function findExistingCrmAccount(tx: any, workspaceId: string, candidate: { slug: string; domain: string | null }) {
   const or = [{ slug: candidate.slug }];
   if (candidate.domain) {
@@ -190,16 +240,26 @@ async function ensureCrmAccount(tx: any, workspaceId: string, params: {
   source?: string | null;
   relationshipType?: string | null;
   lifecycleStage?: string | null;
+  tags?: string[];
 }) {
   const candidate = crmAccountCandidate(params);
   if (!candidate) return null;
+  const tags = normalizeCrmTags(params.tags);
 
   const existing = await findExistingCrmAccount(tx, workspaceId, candidate);
   if (existing) {
+    const mergedTags = mergeCrmTags(existing.tags, tags);
+    const data: Record<string, unknown> = {};
     if (!existing.domain && candidate.domain) {
+      data.domain = candidate.domain;
+    }
+    if (mergedTags.length > (existing.tags ?? []).length) {
+      data.tags = mergedTags;
+    }
+    if (Object.keys(data).length > 0) {
       return tx.crmAccount.update({
         where: { id: existing.id },
-        data: { domain: candidate.domain },
+        data,
       });
     }
     return existing;
@@ -209,6 +269,7 @@ async function ensureCrmAccount(tx: any, workspaceId: string, params: {
     data: {
       workspaceId,
       ...candidate,
+      tags,
     },
   });
 }
@@ -455,6 +516,380 @@ export async function captureDemoLead(params: {
     }
 
     return { workspace, demoLead, contact };
+  });
+}
+
+export type CaptureCrmInquiryInput = {
+  workspaceSlug: string;
+  source: string;
+  sourceExternalId: string;
+  persona: CrmInquiryPersona | string;
+  name: string;
+  email: string;
+  phone?: string | null;
+  company?: string | null;
+  website?: string | null;
+  title?: string | null;
+  location?: string | null;
+  message?: string | null;
+  answers?: Record<string, unknown> | null;
+  sourceUrl?: string | null;
+  referrerUrl?: string | null;
+  utmSource?: string | null;
+  utmMedium?: string | null;
+  utmCampaign?: string | null;
+  utmTerm?: string | null;
+  utmContent?: string | null;
+  utmId?: string | null;
+  consentToContact: boolean;
+};
+
+export type CaptureCrmInquiryResult = {
+  duplicate: boolean;
+  submissionId: string;
+  workspaceId: string;
+  contactId: string | null;
+  accountId: string | null;
+  conversationId: string;
+  messageId: string | null;
+  activityId: string | null;
+  dealId: string | null;
+};
+
+function crmInquiryTags(source: string, persona: CrmInquiryPersona) {
+  return [`source:${source}`, `persona:${persona.toLowerCase()}`];
+}
+
+function shouldCreateCrmInquiryDeal(persona: CrmInquiryPersona) {
+  return persona === "OWNER" || persona === "INVESTOR";
+}
+
+function nextBusinessDay(from = new Date()) {
+  const dueAt = new Date(from);
+  dueAt.setUTCDate(dueAt.getUTCDate() + 1);
+  while (dueAt.getUTCDay() === 0 || dueAt.getUTCDay() === 6) {
+    dueAt.setUTCDate(dueAt.getUTCDate() + 1);
+  }
+  dueAt.setUTCHours(17, 0, 0, 0);
+  return dueAt;
+}
+
+function crmInquiryUtm(params: CaptureCrmInquiryInput) {
+  return {
+    source: trimOptionalText(params.utmSource),
+    medium: trimOptionalText(params.utmMedium),
+    campaign: trimOptionalText(params.utmCampaign),
+    term: trimOptionalText(params.utmTerm),
+    content: trimOptionalText(params.utmContent),
+    id: trimOptionalText(params.utmId),
+  };
+}
+
+function crmInquiryAnswersMd(answers?: Record<string, unknown> | null) {
+  if (!answers || Object.keys(answers).length === 0) return null;
+  return Object.entries(answers)
+    .map(([key, value]) => `- ${key}: ${typeof value === "string" ? value : JSON.stringify(value)}`)
+    .join("\n");
+}
+
+function crmInquiryMessageMd(params: CaptureCrmInquiryInput & {
+  source: string;
+  persona: CrmInquiryPersona;
+  email: string;
+}) {
+  const lines = [
+    `New ${params.persona.toLowerCase()} inquiry from ${trimOptionalText(params.name) ?? params.email}.`,
+    "",
+    `Email: ${params.email}`,
+  ];
+  const details = [
+    ["Name", trimOptionalText(params.name)],
+    ["Phone", trimOptionalText(params.phone)],
+    ["Company", trimOptionalText(params.company)],
+    ["Website", trimOptionalText(params.website)],
+    ["Title", trimOptionalText(params.title)],
+    ["Location", trimOptionalText(params.location)],
+    ["Source URL", trimOptionalText(params.sourceUrl)],
+    ["Referrer URL", trimOptionalText(params.referrerUrl)],
+  ] as const;
+  for (const [label, value] of details) {
+    if (value) lines.push(`${label}: ${value}`);
+  }
+  const utm = crmInquiryUtm(params);
+  const utmLines = Object.entries(utm)
+    .filter(([, value]) => Boolean(value))
+    .map(([key, value]) => `${key}=${value}`);
+  if (utmLines.length > 0) {
+    lines.push(`UTM: ${utmLines.join(", ")}`);
+  }
+  const message = trimOptionalText(params.message);
+  if (message) {
+    lines.push("", "Message:", message);
+  }
+  const answers = crmInquiryAnswersMd(params.answers);
+  if (answers) {
+    lines.push("", "Answers:", answers);
+  }
+  return lines.join("\n");
+}
+
+function crmInquiryDealTitle(params: {
+  persona: CrmInquiryPersona;
+  name: string | null;
+  company: string | null;
+  email: string;
+}) {
+  const label = params.company ?? params.name ?? params.email;
+  return `${label} ${params.persona.toLowerCase()} inquiry`;
+}
+
+function crmInquiryEventPayload(params: {
+  input: CaptureCrmInquiryInput;
+  workspaceId: string;
+  source: string;
+  sourceExternalId: string;
+  persona: CrmInquiryPersona;
+  email: string;
+  contactId: string;
+  accountId: string | null;
+  conversationId: string;
+  messageId: string;
+  activityId: string;
+  dealId: string | null;
+}) {
+  return toInputJson({
+    source: params.source,
+    sourceExternalId: params.sourceExternalId,
+    persona: params.persona,
+    email: params.email,
+    contactId: params.contactId,
+    accountId: params.accountId,
+    conversationId: params.conversationId,
+    messageId: params.messageId,
+    activityId: params.activityId,
+    dealId: params.dealId,
+    sourceUrl: trimOptionalText(params.input.sourceUrl),
+    referrerUrl: trimOptionalText(params.input.referrerUrl),
+    utm: crmInquiryUtm(params.input),
+    answers: params.input.answers ?? null,
+  });
+}
+
+export async function captureCrmInquiry(params: CaptureCrmInquiryInput): Promise<CaptureCrmInquiryResult> {
+  const workspaceSlug = params.workspaceSlug.trim();
+  invariant(workspaceSlug.length > 0, 400, "INVALID_INPUT", "Workspace slug is required.");
+  invariant(params.consentToContact === true, 400, "CONSENT_REQUIRED", "Consent to contact is required.");
+
+  const source = normalizeCrmInquirySource(params.source);
+  const sourceExternalId = normalizeCrmInquiryExternalId(params.sourceExternalId);
+  const persona = normalizeCrmInquiryPersona(params.persona);
+  const email = normalizeCrmInquiryEmail(params.email);
+  const name = trimOptionalText(params.name);
+  invariant(name, 400, "INVALID_INPUT", "Name is required.");
+
+  return prisma.$transaction(async (tx) => {
+    const workspace = await tx.workspace.findUnique({
+      where: { slug: workspaceSlug },
+      select: { id: true, slug: true },
+    });
+    invariant(workspace, 404, "NOT_FOUND", "Workspace not found.");
+
+    const existingConversation = await tx.crmConversation.findUnique({
+      where: {
+        workspaceId_source_sourceExternalId: {
+          workspaceId: workspace.id,
+          source,
+          sourceExternalId,
+        },
+      },
+      select: {
+        id: true,
+        accountId: true,
+        contactId: true,
+        dealId: true,
+      },
+    });
+    if (existingConversation) {
+      const existingActivity = await tx.crmActivity.findUnique({
+        where: {
+          workspaceId_source_sourceExternalId: {
+            workspaceId: workspace.id,
+            source,
+            sourceExternalId: `${sourceExternalId}:follow-up`,
+          },
+        },
+        select: { id: true },
+      });
+      return {
+        duplicate: true,
+        submissionId: existingConversation.id,
+        workspaceId: workspace.id,
+        contactId: existingConversation.contactId,
+        accountId: existingConversation.accountId,
+        conversationId: existingConversation.id,
+        messageId: null,
+        activityId: existingActivity?.id ?? null,
+        dealId: existingConversation.dealId,
+      };
+    }
+
+    const tags = crmInquiryTags(source, persona);
+    const account = await ensureCrmAccount(tx, workspace.id, {
+      email,
+      company: params.company,
+      website: params.website,
+      source,
+      relationshipType: persona === "PARTNER" ? "PARTNER" : persona === "INVESTOR" ? "INVESTOR" : "PROSPECT",
+      lifecycleStage: "DISCOVERY",
+      tags,
+    });
+
+    const existingContact = await tx.crmContact.findUnique({
+      where: {
+        workspaceId_email: {
+          workspaceId: workspace.id,
+          email,
+        },
+      },
+    });
+    const contactBaseData = {
+      accountId: account?.id ?? existingContact?.accountId ?? null,
+      email,
+      name,
+      source,
+      tags: mergeCrmTags(existingContact?.tags, tags),
+      lastSeenAt: new Date(),
+    };
+    const contactCreateData = {
+      ...contactBaseData,
+      company: trimOptionalText(params.company),
+      title: trimOptionalText(params.title),
+      phone: trimOptionalText(params.phone),
+    };
+    const contactUpdateData = {
+      ...contactBaseData,
+      ...(params.company !== undefined ? { company: trimOptionalText(params.company) } : {}),
+      ...(params.title !== undefined ? { title: trimOptionalText(params.title) } : {}),
+      ...(params.phone !== undefined ? { phone: trimOptionalText(params.phone) } : {}),
+    };
+    const contact = existingContact
+      ? await tx.crmContact.update({
+        where: { id: existingContact.id },
+        data: contactUpdateData,
+      })
+      : await tx.crmContact.create({
+        data: {
+          workspaceId: workspace.id,
+          ...contactCreateData,
+        },
+      });
+
+    let deal = null;
+    if (shouldCreateCrmInquiryDeal(persona)) {
+      deal = await tx.crmDeal.create({
+        data: {
+          workspaceId: workspace.id,
+          accountId: account?.id ?? contact.accountId ?? null,
+          contactId: contact.id,
+          title: crmInquiryDealTitle({
+            persona,
+            name,
+            company: trimOptionalText(params.company),
+            email,
+          }),
+          stage: CrmDealStage.LEAD,
+          notes: trimOptionalText(params.message),
+        },
+      });
+      await recordDealStageTransition(tx, {
+        workspaceId: workspace.id,
+        dealId: deal.id,
+        fromStage: null,
+        toStage: CrmDealStage.LEAD,
+        actorUserId: null,
+        createdAt: deal.createdAt,
+      });
+    }
+
+    const conversation = await tx.crmConversation.create({
+      data: {
+        workspaceId: workspace.id,
+        accountId: account?.id ?? contact.accountId ?? null,
+        contactId: contact.id,
+        dealId: deal?.id ?? null,
+        subject: `CRM inquiry: ${persona.toLowerCase()} from ${name}`,
+        source,
+        sourceExternalId,
+        sourceUrl: trimOptionalText(params.sourceUrl),
+        sourceOccurredAt: new Date(),
+      },
+    });
+
+    const message = await tx.crmConversationMessage.create({
+      data: {
+        conversationId: conversation.id,
+        senderType: "LEAD",
+        senderEmail: email,
+        bodyMd: crmInquiryMessageMd({
+          ...params,
+          source,
+          persona,
+          email,
+        }),
+      },
+    });
+
+    const activity = await tx.crmActivity.create({
+      data: {
+        workspaceId: workspace.id,
+        accountId: account?.id ?? contact.accountId ?? null,
+        contactId: contact.id,
+        dealId: deal?.id ?? null,
+        type: CrmActivityType.TASK,
+        title: `Follow up with ${name}`,
+        bodyMd: `Respond to the ${persona.toLowerCase()} inquiry captured from ${source}.`,
+        source,
+        sourceExternalId: `${sourceExternalId}:follow-up`,
+        sourceUrl: trimOptionalText(params.sourceUrl),
+        sourceOccurredAt: new Date(),
+        dueAt: nextBusinessDay(),
+      },
+    });
+
+    await appendEvents(tx, [
+      {
+        workspaceId: workspace.id,
+        type: "crm.inquiry.captured",
+        aggregateType: "CrmConversation",
+        aggregateId: conversation.id,
+        payload: crmInquiryEventPayload({
+          input: params,
+          workspaceId: workspace.id,
+          source,
+          sourceExternalId,
+          persona,
+          email,
+          contactId: contact.id,
+          accountId: account?.id ?? contact.accountId ?? null,
+          conversationId: conversation.id,
+          messageId: message.id,
+          activityId: activity.id,
+          dealId: deal?.id ?? null,
+        }),
+      },
+    ]);
+
+    return {
+      duplicate: false,
+      submissionId: conversation.id,
+      workspaceId: workspace.id,
+      contactId: contact.id,
+      accountId: account?.id ?? contact.accountId ?? null,
+      conversationId: conversation.id,
+      messageId: message.id,
+      activityId: activity.id,
+      dealId: deal?.id ?? null,
+    };
   });
 }
 
