@@ -79,6 +79,22 @@ function crmInquiryRequest(
   }) as never;
 }
 
+function proxiedCrmInquiryRequest(
+  body: Record<string, unknown>,
+  headers: Record<string, string> = {},
+  internalHost = "corgtex-web-production.internal",
+) {
+  return new Request(`https://${internalHost}/api/public/crm-inquiries`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "x-forwarded-for": "203.0.113.55",
+      ...headers,
+    },
+    body: JSON.stringify(body),
+  }) as never;
+}
+
 describe("POST /api/public/crm-inquiries", () => {
   beforeEach(() => {
     vi.resetModules();
@@ -128,6 +144,23 @@ describe("POST /api/public/crm-inquiries", () => {
     }));
   });
 
+  it("accepts Corporate Rebels browser origins when the deployed host is supplied by proxy headers", async () => {
+    const { POST } = await import("./route");
+
+    const response = await POST(proxiedCrmInquiryRequest(inquiryPayload(), {
+      origin: "https://us.corporate-rebels.com",
+      host: "corgtex-web-production.internal",
+      "x-forwarded-host": targetCrmHost,
+    }));
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("Access-Control-Allow-Origin")).toBe("https://us.corporate-rebels.com");
+    expect(captureCrmInquiryMock).toHaveBeenCalledWith(expect.objectContaining({
+      workspaceSlug: targetWorkspaceSlug,
+      sourceExternalId: "submission-123",
+    }));
+  });
+
   it("rejects disallowed browser origins before CRM writes", async () => {
     const { POST } = await import("./route");
 
@@ -152,6 +185,26 @@ describe("POST /api/public/crm-inquiries", () => {
 
     const response = await POST(crmInquiryRequest(inquiryPayload(), {
       origin: "https://us.corporate-rebels.com",
+    }, "alumipres.corgtex.com"));
+
+    expect(response.status).toBe(403);
+    await expect(response.json()).resolves.toEqual({
+      error: {
+        code: "ORIGIN_NOT_ALLOWED",
+        message: "Origin is not allowed.",
+      },
+    });
+    expect(checkRateLimitMock).not.toHaveBeenCalled();
+    expect(captureCrmInquiryMock).not.toHaveBeenCalled();
+  });
+
+  it("does not let forwarded host override another public Corgtex deployment host", async () => {
+    process.env.WORKSPACE_SLUG = "alumipres";
+    const { POST } = await import("./route");
+
+    const response = await POST(crmInquiryRequest(inquiryPayload(), {
+      origin: "https://us.corporate-rebels.com",
+      "x-forwarded-host": targetCrmHost,
     }, "alumipres.corgtex.com"));
 
     expect(response.status).toBe(403);

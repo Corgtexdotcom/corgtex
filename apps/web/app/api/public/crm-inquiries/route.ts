@@ -15,6 +15,7 @@ const LOCAL_BROWSER_ORIGIN_PATTERN = /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\
 const CRM_INQUIRY_RATE_LIMIT = { windowMs: 60_000, limit: 10, failClosed: true } as const;
 const DEFAULT_CRM_WORKSPACE_SLUG = ["cr", "ina"].join("");
 const DEFAULT_CRM_HOST = `${DEFAULT_CRM_WORKSPACE_SLUG}.corgtex.com`;
+const CORGTEX_PUBLIC_HOST_PATTERN = /(^|\.)corgtex\.com$/;
 
 const optionalText = (max = 500) => z.string().trim().min(1).max(max).optional();
 const crmInquirySchema = z.object({
@@ -51,12 +52,36 @@ function normalizeOrigin(value: string | null) {
   }
 }
 
-function isDefaultCrmDeploymentRequest(request: NextRequest) {
+function normalizeHostname(value: string | null) {
+  if (!value) return null;
+  const firstValue = value.split(",")[0]?.trim();
+  if (!firstValue) return null;
   try {
-    return new URL(request.url).hostname.toLowerCase() === DEFAULT_CRM_HOST;
+    return new URL(firstValue.includes("://") ? firstValue : `https://${firstValue}`).hostname.toLowerCase();
   } catch {
-    return false;
+    return null;
   }
+}
+
+function presentHostname(value: string | null): value is string {
+  return Boolean(value);
+}
+
+function isDefaultCrmDeploymentRequest(request: NextRequest) {
+  const directHostnames = [
+    normalizeHostname(request.headers.get("host")),
+    normalizeHostname(request.url),
+  ].filter(presentHostname);
+  const publicDirectHostnames = directHostnames.filter((hostname) => CORGTEX_PUBLIC_HOST_PATTERN.test(hostname));
+  if (publicDirectHostnames.length > 0) {
+    return publicDirectHostnames.some((hostname) => hostname === DEFAULT_CRM_HOST);
+  }
+
+  const proxyHostnames = [
+    normalizeHostname(request.headers.get("x-forwarded-host")),
+    normalizeHostname(request.headers.get("x-original-host")),
+  ].filter(presentHostname);
+  return [...directHostnames, ...proxyHostnames].some((hostname) => hostname === DEFAULT_CRM_HOST);
 }
 
 function isAllowedBrowserOrigin(origin: string, request: NextRequest) {
