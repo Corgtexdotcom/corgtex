@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { ALL_SCOPES } from "@corgtex/domain";
+import { MCP_CONNECTOR_DEFAULT_SCOPES } from "@corgtex/domain";
 import { getPublicOrigin } from "@/lib/public-origin";
 
 export async function GET(request: NextRequest) {
@@ -14,7 +14,8 @@ export async function GET(request: NextRequest) {
     grant_types_supported: ["authorization_code", "refresh_token"],
     code_challenge_methods_supported: ["S256"],
     token_endpoint_auth_methods_supported: ["none", "client_secret_basic", "client_secret_post"],
-    scopes_supported: ALL_SCOPES,
+    client_id_metadata_document_supported: true,
+    scopes_supported: MCP_CONNECTOR_DEFAULT_SCOPES,
     service_documentation: `${origin}/install`,
   }, {
     headers: {

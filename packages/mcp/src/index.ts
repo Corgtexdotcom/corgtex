@@ -1,3 +1,3 @@
 export { createCorgtexMcpServer } from "./server";
-export { authenticateMcpRequest, requireScope } from "./auth";
+export { authenticateMcpRequest, McpInsufficientScopeError, requireScope } from "./auth";
 export type { McpSessionContext } from "./auth";

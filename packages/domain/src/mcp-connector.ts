@@ -1,8 +1,10 @@
 import { createHash } from "node:crypto";
+import { lookup } from "node:dns/promises";
+import { isIP } from "node:net";
 import { prisma, randomOpaqueToken, sha256, env } from "@corgtex/shared";
 import type { AppActor } from "@corgtex/shared";
 import { AppError, invariant } from "./errors";
-import { ALL_SCOPES, DELEGATED_DEFAULT_SCOPES, type AgentScope } from "./agent-auth";
+import { ALL_SCOPES, type AgentScope } from "./agent-auth";
 import type { AiWorkspaceProviderKey } from "./ai-workspaces";
 
 const MCP_CLIENT_PREFIX = "mcp_client_";
@@ -55,15 +57,40 @@ export const MCP_CONNECTOR_LEGACY_DEFAULT_SCOPES: AgentScope[] = [
   "conversations:write",
 ];
 
-export const MCP_CONNECTOR_DEFAULT_SCOPES: AgentScope[] = DELEGATED_DEFAULT_SCOPES;
+export const MCP_CONNECTOR_DEFAULT_SCOPES: AgentScope[] = [
+  "workspace:read",
+  "brain:read",
+  "governance:read",
+  "context-graph:read",
+  "proposals:read",
+  "actions:read",
+  "tensions:read",
+  "goals:read",
+  "members:read",
+  "meetings:read",
+  "cycles:read",
+  "circles:read",
+  "tools:read",
+  "conversations:write",
+];
 
 export const MCP_CONNECTOR_READ_ONLY_SCOPES: AgentScope[] = MCP_CONNECTOR_DEFAULT_SCOPES.filter(
   (scope) => !scope.endsWith(":write"),
 );
 
+export const MCP_OAUTH_PROTOCOL_SCOPES = ["openid", "profile", "email", "offline_access"] as const;
+
+const MCP_OAUTH_PROTOCOL_SCOPE_SET = new Set<string>(MCP_OAUTH_PROTOCOL_SCOPES);
+
 const MCP_USER_DELEGATION_FORBIDDEN_SCOPES = new Set<AgentScope>([
+  "context-graph:approve",
   "support:write",
+  "tools:credentials:read",
+  "webhooks:write",
 ]);
+
+const CIMD_METADATA_TIMEOUT_MS = 3_000;
+const CIMD_METADATA_MAX_BYTES = 64 * 1024;
 
 type InstanceStatus = "active" | "disabled";
 
@@ -342,9 +369,13 @@ function normalizeScopes(scopes: string[] | undefined) {
   return [...new Set((scopes ?? []).map((scope) => scope.trim()).filter(Boolean))];
 }
 
-function validateMcpScopes(scopes: string[] | undefined): AgentScope[] {
+function normalizeMcpPermissionScopes(
+  scopes: string[] | undefined,
+  fallbackScopes: AgentScope[] = MCP_CONNECTOR_DEFAULT_SCOPES,
+): AgentScope[] {
   const normalized = normalizeScopes(scopes);
-  const effective = normalized.length > 0 ? normalized : MCP_CONNECTOR_DEFAULT_SCOPES;
+  const permissionScopes = normalized.filter((scope) => !MCP_OAUTH_PROTOCOL_SCOPE_SET.has(scope));
+  const effective = permissionScopes.length > 0 ? permissionScopes : fallbackScopes;
   const unknown = effective.filter((scope) => !ALL_SCOPES.includes(scope as AgentScope));
   invariant(
     unknown.length === 0,
@@ -357,13 +388,17 @@ function validateMcpScopes(scopes: string[] | undefined): AgentScope[] {
     forbidden.length === 0,
     400,
     "INVALID_INPUT",
-    `MCP OAuth user delegation cannot request support-only scope(s): ${forbidden.join(", ")}.`,
+    `MCP OAuth user delegation cannot request sensitive/support-only scope(s): ${forbidden.join(", ")}.`,
   );
   return effective as AgentScope[];
 }
 
+function validateMcpScopes(scopes: string[] | undefined): AgentScope[] {
+  return normalizeMcpPermissionScopes(scopes);
+}
+
 export function resolveMcpClientAllowedScopes(scopes: string[]): AgentScope[] {
-  const normalized = normalizeScopes(scopes);
+  const normalized = normalizeMcpPermissionScopes(scopes, MCP_CONNECTOR_DEFAULT_SCOPES);
   const legacyDefault = new Set(MCP_CONNECTOR_LEGACY_DEFAULT_SCOPES);
   const matchesLegacyDefault = normalized.length === legacyDefault.size &&
     normalized.every((scope) => legacyDefault.has(scope as AgentScope));
@@ -372,11 +407,19 @@ export function resolveMcpClientAllowedScopes(scopes: string[]): AgentScope[] {
   return allowed.filter((scope) => !MCP_USER_DELEGATION_FORBIDDEN_SCOPES.has(scope));
 }
 
+function hasSameScopeSet(left: string[], right: string[]) {
+  if (left.length !== right.length) return false;
+  const rightSet = new Set(right);
+  return left.every((scope) => rightSet.has(scope));
+}
+
 function requestedScopes(scopes: string[] | undefined, allowedScopes: string[]) {
   const effectiveAllowedScopes = resolveMcpClientAllowedScopes(allowedScopes);
-  const normalized = normalizeScopes(scopes);
-  const effective = normalized.length > 0 ? normalized : effectiveAllowedScopes;
-  const forbidden = effective.filter((scope) => !effectiveAllowedScopes.includes(scope as AgentScope));
+  const effective = normalizeMcpPermissionScopes(scopes, effectiveAllowedScopes);
+  const canStepUpFromBaseline = hasSameScopeSet(effectiveAllowedScopes, MCP_CONNECTOR_DEFAULT_SCOPES);
+  const forbidden = canStepUpFromBaseline
+    ? []
+    : effective.filter((scope) => !effectiveAllowedScopes.includes(scope as AgentScope));
   invariant(
     forbidden.length === 0,
     400,
@@ -384,6 +427,258 @@ function requestedScopes(scopes: string[] | undefined, allowedScopes: string[]) 
     `Requested MCP scope(s) are not allowed for this client: ${forbidden.join(", ")}.`,
   );
   return effective;
+}
+
+function normalizedHostname(hostname: string) {
+  return hostname.toLowerCase().replace(/^\[/, "").replace(/\]$/, "");
+}
+
+function isLoopbackHostname(hostname: string) {
+  const normalized = normalizedHostname(hostname);
+  return normalized === "localhost" || normalized === "127.0.0.1" || normalized === "::1";
+}
+
+function isLoopbackRedirectUrl(url: URL) {
+  return url.protocol === "http:" && isLoopbackHostname(url.hostname);
+}
+
+function validateMcpRedirectUri(uri: string) {
+  let parsed: URL;
+  try {
+    parsed = new URL(uri);
+  } catch {
+    throw new AppError(400, "INVALID_INPUT", `Invalid redirect URI: ${uri}`);
+  }
+
+  if (parsed.hash) {
+    throw new AppError(400, "INVALID_INPUT", `Redirect URI must not include a fragment: ${uri}`);
+  }
+
+  if (parsed.protocol === "https:" || isLoopbackRedirectUrl(parsed)) {
+    return parsed.toString();
+  }
+
+  throw new AppError(400, "INVALID_INPUT", `Redirect URI must use HTTPS or localhost HTTP: ${uri}`);
+}
+
+function isBlockedIpv4Address(address: string) {
+  const parts = address.split(".").map((part) => Number(part));
+  if (parts.length !== 4 || parts.some((part) => !Number.isInteger(part) || part < 0 || part > 255)) {
+    return true;
+  }
+
+  const [a, b] = parts;
+  return a === 0 ||
+    a === 10 ||
+    a === 127 ||
+    a >= 224 ||
+    (a === 100 && b >= 64 && b <= 127) ||
+    (a === 169 && b === 254) ||
+    (a === 172 && b >= 16 && b <= 31) ||
+    (a === 192 && b === 0) ||
+    (a === 192 && b === 168) ||
+    (a === 198 && (b === 18 || b === 19));
+}
+
+function isBlockedIpv6Address(address: string) {
+  const normalized = normalizedHostname(address);
+  if (
+    normalized === "::" ||
+    normalized === "::1" ||
+    normalized.startsWith("fe8") ||
+    normalized.startsWith("fe9") ||
+    normalized.startsWith("fea") ||
+    normalized.startsWith("feb") ||
+    normalized.startsWith("fc") ||
+    normalized.startsWith("fd")
+  ) {
+    return true;
+  }
+
+  const mappedIpv4 = normalized.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/i)?.[1];
+  return mappedIpv4 ? isBlockedIpv4Address(mappedIpv4) : false;
+}
+
+function isBlockedNetworkAddress(address: string) {
+  const normalized = normalizedHostname(address);
+  const ipVersion = isIP(normalized);
+  if (ipVersion === 4) return isBlockedIpv4Address(normalized);
+  if (ipVersion === 6) return isBlockedIpv6Address(normalized);
+  return normalized === "localhost" || normalized.endsWith(".localhost");
+}
+
+function parseCimdClientId(clientId: string) {
+  let parsed: URL;
+  try {
+    parsed = new URL(clientId);
+  } catch {
+    return null;
+  }
+
+  if (parsed.protocol !== "https:" || parsed.hash || parsed.username || parsed.password) {
+    return null;
+  }
+  if (!parsed.pathname || parsed.pathname === "/") {
+    return null;
+  }
+  return parsed;
+}
+
+export function isCimdMcpClientId(clientId: string) {
+  return Boolean(parseCimdClientId(clientId));
+}
+
+async function assertSafeCimdMetadataUrl(url: URL) {
+  if (isBlockedNetworkAddress(url.hostname)) {
+    throw new AppError(400, "INVALID_INPUT", "CIMD client metadata URL must not target localhost or private networks.");
+  }
+
+  const hostname = normalizedHostname(url.hostname);
+  if (isIP(hostname)) return;
+
+  let records: Array<{ address: string; family: number }>;
+  try {
+    records = await lookup(hostname, { all: true });
+  } catch {
+    throw new AppError(400, "INVALID_INPUT", "CIMD client metadata host could not be resolved.");
+  }
+
+  if (records.length === 0 || records.some((record) => isBlockedNetworkAddress(record.address))) {
+    throw new AppError(400, "INVALID_INPUT", "CIMD client metadata host resolves to localhost or a private network.");
+  }
+}
+
+async function readLimitedResponseText(response: Response, maxBytes: number) {
+  if (!response.body) return "";
+
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let totalBytes = 0;
+
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    if (!value) continue;
+    totalBytes += value.byteLength;
+    if (totalBytes > maxBytes) {
+      throw new AppError(400, "INVALID_INPUT", "CIMD client metadata document is too large.");
+    }
+    chunks.push(value);
+  }
+
+  const merged = new Uint8Array(totalBytes);
+  let offset = 0;
+  for (const chunk of chunks) {
+    merged.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return new TextDecoder().decode(merged);
+}
+
+async function fetchCimdMetadataDocument(clientId: string) {
+  const parsedUrl = parseCimdClientId(clientId);
+  if (!parsedUrl) {
+    throw new AppError(400, "INVALID_INPUT", "CIMD client_id must be an HTTPS metadata document URL with a path.");
+  }
+  const url = parsedUrl;
+  await assertSafeCimdMetadataUrl(url);
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), CIMD_METADATA_TIMEOUT_MS);
+  try {
+    const response = await fetch(url, {
+      method: "GET",
+      redirect: "manual",
+      signal: controller.signal,
+      headers: {
+        "Accept": "application/json, application/*+json",
+      },
+    });
+
+    if (response.status >= 300 && response.status < 400) {
+      throw new AppError(400, "INVALID_INPUT", "CIMD client metadata redirects are not allowed.");
+    }
+    if (!response.ok) {
+      throw new AppError(400, "INVALID_INPUT", "CIMD client metadata document could not be fetched.");
+    }
+
+    const contentType = response.headers.get("content-type")?.toLowerCase() ?? "";
+    if (contentType && !contentType.includes("json")) {
+      throw new AppError(400, "INVALID_INPUT", "CIMD client metadata document must be JSON.");
+    }
+
+    const text = await readLimitedResponseText(response, CIMD_METADATA_MAX_BYTES);
+    try {
+      return JSON.parse(text) as unknown;
+    } catch {
+      throw new AppError(400, "INVALID_INPUT", "CIMD client metadata document is not valid JSON.");
+    }
+  } catch (error) {
+    if (error instanceof AppError) throw error;
+    throw new AppError(400, "INVALID_INPUT", "CIMD client metadata document could not be fetched.");
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+type CimdMetadataDocument = {
+  client_id?: unknown;
+  client_name?: unknown;
+  redirect_uris?: unknown;
+  scope?: unknown;
+  grant_types?: unknown;
+  response_types?: unknown;
+  token_endpoint_auth_method?: unknown;
+};
+
+function optionalMetadataStringArray(value: unknown, label: string) {
+  if (value === undefined) return [];
+  if (!Array.isArray(value) || value.some((item) => typeof item !== "string")) {
+    throw new AppError(400, "INVALID_INPUT", `CIMD client metadata ${label} must be an array of strings.`);
+  }
+  return cleanStringArray(value);
+}
+
+function validateCimdMetadata(clientId: string, metadata: unknown) {
+  if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) {
+    throw new AppError(400, "INVALID_INPUT", "CIMD client metadata document must be a JSON object.");
+  }
+
+  const document = metadata as CimdMetadataDocument;
+  if (cleanString(document.client_id) !== clientId) {
+    throw new AppError(400, "INVALID_INPUT", "CIMD client metadata client_id must exactly match the metadata URL.");
+  }
+
+  const redirectUris = cleanStringArray(document.redirect_uris);
+  if (redirectUris.length === 0) {
+    throw new AppError(400, "INVALID_INPUT", "CIMD client metadata must include at least one redirect URI.");
+  }
+  for (const uri of redirectUris) {
+    validateMcpRedirectUri(uri);
+  }
+
+  const grantTypes = optionalMetadataStringArray(document.grant_types, "grant_types");
+  if (grantTypes.length > 0 && !grantTypes.includes("authorization_code")) {
+    throw new AppError(400, "INVALID_INPUT", "CIMD client metadata must support the authorization_code grant.");
+  }
+
+  const responseTypes = optionalMetadataStringArray(document.response_types, "response_types");
+  if (responseTypes.length > 0 && !responseTypes.includes("code")) {
+    throw new AppError(400, "INVALID_INPUT", "CIMD client metadata must support the code response type.");
+  }
+
+  const tokenEndpointAuthMethod = cleanString(document.token_endpoint_auth_method) ?? "none";
+  if (tokenEndpointAuthMethod !== "none") {
+    throw new AppError(400, "INVALID_INPUT", "CIMD clients must use token_endpoint_auth_method \"none\" in this release.");
+  }
+
+  const scope = cleanString(document.scope);
+  return {
+    name: cleanString(document.client_name) ?? "MCP metadata client",
+    redirectUris,
+    scopes: validateMcpScopes(scope ? scope.split(/\s+/) : undefined),
+    tokenEndpointAuthMethod,
+  };
 }
 
 function pkceS256(verifier: string) {
@@ -433,7 +728,27 @@ async function requireActiveMcpWorkspaceMembership(params: {
 }
 
 export function isAllowedMcpRedirectUri(registeredRedirectUris: string[], redirectUri: string) {
-  return registeredRedirectUris.includes(redirectUri);
+  if (registeredRedirectUris.includes(redirectUri)) return true;
+
+  let requested: URL;
+  try {
+    requested = new URL(redirectUri);
+  } catch {
+    return false;
+  }
+
+  return registeredRedirectUris.some((uri) => {
+    try {
+      const registered = new URL(uri);
+      if (!isLoopbackRedirectUrl(registered) || !isLoopbackRedirectUrl(requested)) return false;
+      return registered.protocol === requested.protocol &&
+        registered.hostname === requested.hostname &&
+        registered.pathname === requested.pathname &&
+        registered.search === requested.search;
+    } catch {
+      return false;
+    }
+  });
 }
 
 export function getMcpPublicUrl(origin?: string) {
@@ -442,11 +757,15 @@ export function getMcpPublicUrl(origin?: string) {
 }
 
 function normalizeMcpResource(resource: string) {
-  const parsed = new URL(resource);
-  parsed.search = "";
-  parsed.hash = "";
-  parsed.pathname = parsed.pathname.replace(/\/$/, "");
-  return parsed.toString().replace(/\/$/, "");
+  try {
+    const parsed = new URL(resource);
+    parsed.search = "";
+    parsed.hash = "";
+    parsed.pathname = parsed.pathname.replace(/\/$/, "");
+    return parsed.toString().replace(/\/$/, "");
+  } catch {
+    throw new AppError(400, "INVALID_INPUT", "MCP OAuth resource must be a valid URL.");
+  }
 }
 
 export function areEquivalentMcpResources(storedResource: string, requestedResource: string) {
@@ -470,11 +789,7 @@ export async function registerMcpOAuthClient(params: {
   const redirectUris = params.redirectUris.map((uri) => uri.trim()).filter(Boolean);
   invariant(redirectUris.length > 0, 400, "INVALID_INPUT", "At least one redirect URI is required.");
   for (const uri of redirectUris) {
-    try {
-      new URL(uri);
-    } catch {
-      throw new AppError(400, "INVALID_INPUT", `Invalid redirect URI: ${uri}`);
-    }
+    validateMcpRedirectUri(uri);
   }
 
   const clientId = `${MCP_CLIENT_PREFIX}${randomOpaqueToken(18)}`;
@@ -501,16 +816,53 @@ export async function registerMcpOAuthClient(params: {
   };
 }
 
+async function getOrCreateCimdMcpOAuthClient(clientId: string) {
+  const metadata = await fetchCimdMetadataDocument(clientId);
+  const validated = validateCimdMetadata(clientId, metadata);
+
+  const client = await prisma.mcpOAuthClient.upsert({
+    where: { clientId },
+    create: {
+      clientId,
+      name: validated.name,
+      redirectUris: validated.redirectUris,
+      scopes: validated.scopes,
+      tokenEndpointAuthMethod: "none",
+      isActive: true,
+    },
+    update: {
+      name: validated.name,
+      redirectUris: validated.redirectUris,
+      scopes: validated.scopes,
+      tokenEndpointAuthMethod: "none",
+    },
+  });
+
+  if (!client.isActive) {
+    throw new AppError(404, "NOT_FOUND", "MCP OAuth client not found or inactive.");
+  }
+
+  return client;
+}
+
 export async function getMcpOAuthClientByClientId(clientId: string) {
   const client = await prisma.mcpOAuthClient.findUnique({
     where: { clientId },
   });
 
-  if (!client || !client.isActive) {
+  if (client?.isActive) {
+    return client;
+  }
+
+  if (client) {
     throw new AppError(404, "NOT_FOUND", "MCP OAuth client not found or inactive.");
   }
 
-  return client;
+  if (isCimdMcpClientId(clientId)) {
+    return getOrCreateCimdMcpOAuthClient(clientId);
+  }
+
+  throw new AppError(404, "NOT_FOUND", "MCP OAuth client not found or inactive.");
 }
 
 export async function issueMcpAuthorizationCode(actor: AppActor, params: {

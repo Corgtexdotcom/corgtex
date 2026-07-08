@@ -63,7 +63,7 @@ describe("authenticateMcpRequest", () => {
   });
 
   it("enforces scopes for OAuth connector sessions", async () => {
-    const { requireScope } = await import("./auth");
+    const { McpInsufficientScopeError, requireScope } = await import("./auth");
 
     expect(() => requireScope({
       actor: { kind: "user", user: { id: "user-1", email: "user@example.com", displayName: "User" } },
@@ -72,6 +72,23 @@ describe("authenticateMcpRequest", () => {
       scopes: ["brain:read"],
       instanceSlug: "client-a",
     }, "actions:write")).toThrow("Missing required permission: actions:write");
+    try {
+      requireScope({
+        actor: { kind: "user", user: { id: "user-1", email: "user@example.com", displayName: "User" } },
+        authKind: "oauth",
+        workspaceId: "ws-1",
+        scopes: ["brain:read"],
+        instanceSlug: "client-a",
+      }, "actions:write");
+      throw new Error("Expected scope error");
+    } catch (error) {
+      expect(error).toBeInstanceOf(McpInsufficientScopeError);
+      expect(error).toMatchObject({
+        code: "MCP_INSUFFICIENT_SCOPE",
+        requiredScope: "actions:write",
+        grantedScopes: ["brain:read"],
+      });
+    }
   });
 
   it("OAuth scope errors point users at the workspace MCP setup page for self-service reconnect", async () => {

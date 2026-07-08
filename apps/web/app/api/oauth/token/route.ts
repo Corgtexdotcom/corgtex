@@ -10,6 +10,7 @@ import {
 import { AppError } from "@corgtex/domain";
 
 export async function POST(request: NextRequest) {
+  let grantType: string | undefined;
   try {
     // Handle both JSON and form URL encoded bodies (most OAuth clients use application/x-www-form-urlencoded)
     const contentType = request.headers.get("content-type") || "";
@@ -37,7 +38,7 @@ export async function POST(request: NextRequest) {
       clientSecret = clientSecret || pass;
     }
 
-    const grantType = bodyData.grant_type;
+    grantType = bodyData.grant_type;
 
     if (!clientId) {
       return NextResponse.json({ error: "invalid_client", error_description: "Missing client credentials" }, { status: 401 });
@@ -138,8 +139,9 @@ export async function POST(request: NextRequest) {
 
   } catch (error) {
     if (error instanceof AppError) {
+      const isRefreshGrant = grantType === "refresh_token";
       const oauthErrorResponse = {
-        error: error.status === 401 ? "invalid_client" : "invalid_grant",
+        error: isRefreshGrant ? "invalid_grant" : error.status === 401 ? "invalid_client" : "invalid_grant",
         error_description: error.message
       };
       // Important trick for OAuth token response: Even for failures, some clients expect specific HTTP codes.
