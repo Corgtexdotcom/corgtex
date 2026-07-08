@@ -56,4 +56,17 @@ describe("buildMeetingProcessingView", () => {
 
     expect(buildMeetingProcessingView(indexing)?.titleKey).toBe("processingOverallReadyIndexing");
   });
+
+  it("shows ready while indexing when Brain indexing is queued", () => {
+    const indexing = state({
+      stages: state().stages.map((step) => {
+        if (step.stage === "SUMMARIZING" || step.stage === "EXTRACTING_INSIGHTS" || step.stage === "SYNCING_OUTPUTS") {
+          return { ...step, detail: { ...step.detail, status: "COMPLETED", chunkIndex: null, chunkCount: null } };
+        }
+        return step;
+      }),
+    });
+
+    expect(buildMeetingProcessingView(indexing)?.titleKey).toBe("processingOverallReadyIndexing");
+  });
 });

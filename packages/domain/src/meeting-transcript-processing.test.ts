@@ -104,4 +104,27 @@ describe("meeting transcript processing progress", () => {
     expect(indexing?.stages.find((step) => step.stage === "READY")?.detail.status).toBe("PENDING");
     expect(ready?.stages.find((step) => step.stage === "READY")?.detail.status).toBe("COMPLETED");
   });
+
+  it("marks persisted progress ready when AI processing is complete and no Brain job is pending", () => {
+    const state = deriveMeetingTranscriptProcessingState({
+      meeting: {
+        transcript: "Meeting transcript",
+        summaryMd: "Summary",
+        aiProcessedAt: "2026-07-08T10:00:00.000Z",
+      },
+      progress: {
+        currentStage: "INDEXING_BRAIN",
+        stageStatuses: {
+          ...normalizeMeetingTranscriptStageStatuses({}),
+          UPLOADED: { status: "COMPLETED" },
+          SUMMARIZING: { status: "COMPLETED" },
+          EXTRACTING_INSIGHTS: { status: "COMPLETED" },
+        },
+      } as any,
+    });
+
+    expect(state?.stages.find((step) => step.stage === "SYNCING_OUTPUTS")?.detail.status).toBe("COMPLETED");
+    expect(state?.stages.find((step) => step.stage === "INDEXING_BRAIN")?.detail.status).toBe("COMPLETED");
+    expect(state?.stages.find((step) => step.stage === "READY")?.detail.status).toBe("COMPLETED");
+  });
 });

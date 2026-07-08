@@ -37,7 +37,10 @@ export function buildMeetingProcessingView(state: MeetingTranscriptProcessingSta
   const readyStep = state.stages.find((step) => step.stage === "READY");
   const indexingStep = state.stages.find((step) => step.stage === "INDEXING_BRAIN");
   const ready = readyStep?.detail.status === "COMPLETED";
-  const readyIndexing = !ready && indexingStep?.detail.status === "ACTIVE";
+  const readyIndexing = !ready && (
+    indexingStep?.detail.status === "ACTIVE"
+    || (!activeStep && indexingStep?.detail.status === "PENDING")
+  );
   const overallClass = failedStep ? "failed" : ready ? "complete" : readyIndexing ? "ready-indexing" : "processing";
   const titleKey = failedStep
     ? "processingOverallFailed"

@@ -297,12 +297,22 @@ export function deriveMeetingTranscriptProcessingState(params: {
   }
 
   if (params.meeting.aiProcessedAt) {
+    const hasBrainSyncJob = (params.jobs ?? []).some((job) => job.type === "knowledge.sync.meeting");
+    const hasOutputSyncJob = (params.jobs ?? []).some((job) =>
+      job.type === "agent.action-extraction" || job.type === "meeting.summary.post"
+    );
     details.SUMMARIZING.status = details.SUMMARIZING.status === "FAILED" ? "FAILED" : "COMPLETED";
     details.EXTRACTING_INSIGHTS.status = details.EXTRACTING_INSIGHTS.status === "FAILED" ? "FAILED" : "COMPLETED";
-    if (details.INDEXING_BRAIN.status === "COMPLETED") {
-      details.READY.status = "COMPLETED";
-    } else if (details.INDEXING_BRAIN.status === "ACTIVE" || details.INDEXING_BRAIN.status === "PENDING") {
+    if (!hasOutputSyncJob && details.SYNCING_OUTPUTS.status !== "FAILED") {
+      details.SYNCING_OUTPUTS.status = "COMPLETED";
+    }
+    if (details.INDEXING_BRAIN.status === "FAILED") {
       details.READY.status = "PENDING";
+    } else if (details.INDEXING_BRAIN.status === "ACTIVE" || (details.INDEXING_BRAIN.status === "PENDING" && hasBrainSyncJob)) {
+      details.READY.status = "PENDING";
+    } else {
+      details.INDEXING_BRAIN.status = "COMPLETED";
+      details.READY.status = "COMPLETED";
     }
   }
 
