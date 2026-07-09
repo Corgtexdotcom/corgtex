@@ -23,6 +23,7 @@ import {
   reconcileMeetingRecorders,
   syncRecorderCalendarSource,
   runMeetingAgendaPreparation,
+  ensureMeetingSeriesOccurrences,
   runMeetingAgendaThreadEdit,
   runMeetingInsightsExtraction,
   runControlPlaneFleetSnapshotJob,
@@ -822,6 +823,14 @@ async function handleJob(job: ClaimedJob) {
     return;
   }
 
+  if (job.type === "meeting.series.materialize") {
+    await ensureMeetingSeriesOccurrences({
+      workspaceId: job.workspaceId,
+      reason: typeof payload.reason === "string" ? payload.reason : "workflow-job",
+    });
+    return;
+  }
+
   if (job.type === "meeting.insights.extract") {
     const meetingId = (payload as { meetingId?: string }).meetingId;
     if (meetingId) {
@@ -1330,6 +1339,14 @@ export async function scheduleDailyJobs() {
   const now = new Date();
   const todayISO = now.toISOString().split("T")[0];
   const workspaces = await prisma.workspace.findMany({ select: { id: true } });
+  const recurringSeriesWorkspaces = await prisma.meetingSeries.findMany({
+    where: {
+      archivedAt: null,
+      recurrenceRule: { not: null },
+    },
+    distinct: ["workspaceId"],
+    select: { workspaceId: true },
+  });
   const slackArchiveWorkspaces = await prisma.communicationInstallation.findMany({
     where: {
       provider: "SLACK",
@@ -1464,6 +1481,15 @@ export async function scheduleDailyJobs() {
     });
   }
 
+  for (const seriesWorkspace of recurringSeriesWorkspaces) {
+    jobs.push({
+      workspaceId: seriesWorkspace.workspaceId,
+      type: "meeting.series.materialize",
+      payload: { reason: "daily-recurring-series-repair" },
+      dedupeKey: `meeting-series-materialize:${seriesWorkspace.workspaceId}:${todayISO}`,
+    });
+  }
+
   for (const schedule of newspaperSchedules) {
     jobs.push({
       workspaceId: schedule.workspaceId,
@@ -1491,6 +1517,6 @@ export async function scheduleDailyJobs() {
     await enqueueJobBatch(tx, jobs);
   });
 
-  const scheduledCount = workspaces.length + newspaperSchedules.length + slackArchiveWorkspaces.length;
+  const scheduledCount = workspaces.length + newspaperSchedules.length + slackArchiveWorkspaces.length + recurringSeriesWorkspaces.length;
   return scheduledCount;
 }

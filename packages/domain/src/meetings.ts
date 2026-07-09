@@ -1,8 +1,8 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import ICAL from "ical.js";
 import { prisma } from "@corgtex/shared";
 import type { AppActor } from "@corgtex/shared";
-import type { Meeting, MeetingRecordingStatus, MeetingStatus, Prisma } from "@prisma/client";
+import type { Meeting, MeetingStatus, Prisma } from "@prisma/client";
 import { appendEvents } from "./events";
 import { requireWorkspaceMembership } from "./auth";
 import { archiveFilterWhere, archiveWorkspaceArtifact, type ArchiveFilter } from "./archive";
@@ -11,11 +11,11 @@ import { invariant } from "./errors";
 import { meetingUrlHash, normalizeMeetingUrl } from "./meeting-urls";
 import { resetMeetingTranscriptProcessingProgress } from "./meeting-transcript-processing";
 
-const DEFAULT_OCCURRENCE_WINDOW_DAYS = 30;
+const DEFAULT_OCCURRENCE_LOOKBACK_DAYS = 14;
+const DEFAULT_OCCURRENCE_LOOKAHEAD_DAYS = 60;
 const TRANSCRIPT_MATCH_WINDOW_MS = 2 * 60 * 60 * 1000;
 const TRANSCRIPT_AUTO_MATCH_THRESHOLD = 0.65;
 const TRANSCRIPT_MATCH_MARGIN = 0.1;
-const ACTIVE_RECORDING_STATUSES_FOR_CLEANUP: MeetingRecordingStatus[] = ["PENDING", "SCHEDULED", "JOINING", "RECORDING"];
 
 type MeetingCandidate = {
   meetingId: string;
@@ -206,10 +206,10 @@ function componentForSeries(series: MeetingSeriesForExpansion) {
 async function materializeMeetingSeriesOccurrencesTx(
   tx: Prisma.TransactionClient,
   series: MeetingSeriesForExpansion,
-  params?: { from?: Date; to?: Date }
+  params?: { from?: Date; to?: Date; createdIds?: Set<string> }
 ) {
   const from = params?.from ?? series.startsAt;
-  const to = params?.to ?? addDays(new Date(), DEFAULT_OCCURRENCE_WINDOW_DAYS);
+  const to = params?.to ?? addDays(new Date(), DEFAULT_OCCURRENCE_LOOKAHEAD_DAYS);
   const component = componentForSeries(series);
   const occurrences = expandIcsEvent(component, {
     from,
@@ -219,35 +219,118 @@ async function materializeMeetingSeriesOccurrencesTx(
 
   const meetings: Meeting[] = [];
   for (const occurrence of occurrences) {
-    const meeting = await tx.meeting.upsert({
+    const meetingId = randomUUID();
+    const inserted = await tx.$executeRaw`
+      INSERT INTO "Meeting" (
+        "id",
+        "workspaceId",
+        "seriesId",
+        "status",
+        "title",
+        "source",
+        "externalId",
+        "calendarExternalId",
+        "recordedAt",
+        "scheduledEndAt",
+        "participantIds",
+        "participantEmails",
+        "createdAt",
+        "updatedAt"
+      ) VALUES (
+        ${meetingId},
+        ${series.workspaceId},
+        ${series.id},
+        'SCHEDULED'::"MeetingStatus",
+        ${series.title},
+        ${series.source},
+        ${occurrence.externalId},
+        ${occurrence.calendarExternalId},
+        ${occurrence.start},
+        ${occurrence.end},
+        ${series.participantIds},
+        ${series.participantEmails},
+        NOW(),
+        NOW()
+      )
+      ON CONFLICT ("externalId") DO NOTHING
+    `;
+    const meeting = await tx.meeting.findUnique({
       where: { externalId: occurrence.externalId },
-      update: {
-        title: series.title,
-        source: series.source,
-        seriesId: series.id,
-        scheduledEndAt: occurrence.end,
-        participantIds: series.participantIds,
-        participantEmails: series.participantEmails,
-        calendarExternalId: occurrence.calendarExternalId,
-      },
-      create: {
-        workspaceId: series.workspaceId,
-        seriesId: series.id,
-        status: "SCHEDULED",
-        title: series.title,
-        source: series.source,
-        externalId: occurrence.externalId,
-        calendarExternalId: occurrence.calendarExternalId,
-        recordedAt: occurrence.start,
-        scheduledEndAt: occurrence.end,
-        participantIds: series.participantIds,
-        participantEmails: series.participantEmails,
-      },
     });
+    invariant(meeting, 500, "MEETING_MATERIALIZATION_FAILED", "Unable to materialize recurring meeting occurrence.");
+    if (inserted > 0) {
+      params?.createdIds?.add(meeting.id);
+    }
     meetings.push(meeting);
   }
 
   return meetings;
+}
+
+export async function ensureMeetingSeriesOccurrences(params: {
+  workspaceId: string;
+  from?: Date;
+  to?: Date;
+  reason?: string | null;
+}) {
+  const now = new Date();
+  const from = params.from ?? addDays(now, -DEFAULT_OCCURRENCE_LOOKBACK_DAYS);
+  const to = params.to ?? addDays(now, DEFAULT_OCCURRENCE_LOOKAHEAD_DAYS);
+  invariant(!Number.isNaN(from.valueOf()), 400, "INVALID_INPUT", "from must be a valid date.");
+  invariant(!Number.isNaN(to.valueOf()), 400, "INVALID_INPUT", "to must be a valid date.");
+  invariant(to >= from, 400, "INVALID_INPUT", "to must be on or after from.");
+
+  const seriesList = await prisma.meetingSeries.findMany({
+    where: {
+      workspaceId: params.workspaceId,
+      archivedAt: null,
+      recurrenceRule: { not: null },
+    },
+    orderBy: { startsAt: "asc" },
+  });
+
+  const createdIds = new Set<string>();
+  const meetings = await prisma.$transaction(async (tx) => {
+    const materialized: Meeting[] = [];
+    for (const series of seriesList) {
+      materialized.push(...await materializeMeetingSeriesOccurrencesTx(tx, series, { from, to, createdIds }));
+    }
+    return materialized;
+  });
+
+  return {
+    workspaceId: params.workspaceId,
+    from,
+    to,
+    reason: params.reason ?? null,
+    seriesCount: seriesList.length,
+    meetingCount: meetings.length,
+    createdCount: createdIds.size,
+    meetings,
+  };
+}
+
+export async function enqueueMeetingSeriesMaterialization(params: {
+  workspaceId: string;
+  runAfter?: Date;
+  date?: Date;
+}) {
+  const date = params.date ?? params.runAfter ?? new Date();
+  const dateISO = date.toISOString().slice(0, 10);
+  const dedupeKey = `meeting-series-materialize:${params.workspaceId}:${dateISO}`;
+  return prisma.workflowJob.upsert({
+    where: { dedupeKey },
+    update: {},
+    create: {
+      workspaceId: params.workspaceId,
+      type: "meeting.series.materialize",
+      payload: {
+        reason: "daily-recurring-series-repair",
+      },
+      runAfter: params.runAfter ?? new Date(),
+      dedupeKey,
+    },
+  });
 }
 
 async function findTranscriptMeetingCandidatesInternal(params: {
@@ -517,7 +600,7 @@ export async function listMeetings(workspaceId: string, opts?: ListMeetingsOptio
 
 export async function listUpcomingMeetings(workspaceId: string, opts?: { from?: Date; to?: Date }) {
   const from = opts?.from ?? new Date();
-  const to = opts?.to ?? addDays(from, DEFAULT_OCCURRENCE_WINDOW_DAYS);
+  const to = opts?.to ?? addDays(from, DEFAULT_OCCURRENCE_LOOKAHEAD_DAYS);
   return prisma.meeting.findMany({
     where: {
       workspaceId,
@@ -783,70 +866,6 @@ export async function createScheduledMeeting(actor: AppActor, params: {
     ]);
 
     return meeting;
-  });
-}
-
-export async function discardManualScheduledMeeting(actor: AppActor, params: {
-  workspaceId: string;
-  meetingId: string;
-}) {
-  await requireWorkspaceMembership({
-    actor,
-    workspaceId: params.workspaceId,
-    allowedRoles: ["ADMIN", "FACILITATOR"],
-  });
-
-  return prisma.$transaction(async (tx) => {
-    const meeting = await tx.meeting.findFirst({
-      where: {
-        id: params.meetingId,
-        workspaceId: params.workspaceId,
-        status: "SCHEDULED",
-        source: "manual-recorder",
-        archivedAt: null,
-      },
-      select: {
-        id: true,
-        recordings: {
-          where: { status: { in: ACTIVE_RECORDING_STATUSES_FOR_CLEANUP } },
-          select: { id: true },
-          take: 1,
-        },
-      },
-    });
-    if (!meeting) {
-      return { id: params.meetingId, deleted: false };
-    }
-    invariant(meeting.recordings.length === 0, 409, "RECORDER_ALREADY_SCHEDULING", "Manual meeting has an active recorder.");
-
-    await tx.meeting.delete({ where: { id: meeting.id } });
-    await tx.auditLog.create({
-      data: {
-        workspaceId: params.workspaceId,
-        actorUserId: actor.kind === "user" ? actor.user.id : null,
-        action: "meeting.manual_schedule_discarded",
-        entityType: "Meeting",
-        entityId: meeting.id,
-        meta: {
-          reason: "Recorder scheduling failed before the manual meeting could be finalized.",
-        },
-      },
-    });
-
-    await appendEvents(tx, [
-      {
-        workspaceId: params.workspaceId,
-        type: "meeting.manual_schedule_discarded",
-        aggregateType: "Meeting",
-        aggregateId: meeting.id,
-        payload: {
-          meetingId: meeting.id,
-          reason: "recorder_scheduling_failed",
-        },
-      },
-    ]);
-
-    return { id: meeting.id, deleted: true };
   });
 }
 

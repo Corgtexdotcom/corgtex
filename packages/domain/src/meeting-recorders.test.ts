@@ -277,37 +277,50 @@ describe("meeting recorder domain", () => {
     expect(prismaMock.meeting.create).not.toHaveBeenCalled();
   });
 
-  it("discards the manual meeting when provider scheduling fails", async () => {
+  it("keeps the manual meeting and failed recording when provider scheduling fails", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-06-24T17:00:00.000Z"));
     try {
       const { sendManualMeetingRecorder } = await import("./meeting-recorders");
-      prismaMock.meeting.findFirst
-        .mockResolvedValueOnce({
-          id: "meeting-1",
-          title: "Live meeting",
-          recordedAt: new Date("2026-06-24T17:00:00.000Z"),
-          scheduledEndAt: new Date("2026-06-24T18:00:00.000Z"),
-          meetingUrl: "https://meet.google.com/abc-defg-hij",
-          participantEmails: [],
-        })
-        .mockResolvedValueOnce({ id: "meeting-1", recordings: [] });
-      fetchMock.mockResolvedValue({ ok: false, status: 507, text: async () => "capacity" });
+      prismaMock.workspaceMeetingRecorderConfig.findUnique.mockResolvedValue({
+        workspaceId: "workspace-1",
+        enabled: true,
+        defaultProvider: "RECALL_AI",
+        fallbackProvider: null,
+        botName: "Corgtex Recorder",
+        entryMessage: "Recording notice",
+        autoRecordEnabled: true,
+        monthlyMinuteCap: 6000,
+      });
+      prismaMock.meeting.findFirst.mockResolvedValueOnce({
+        id: "meeting-1",
+        title: "Live meeting",
+        recordedAt: new Date("2026-06-24T17:00:00.000Z"),
+        scheduledEndAt: new Date("2026-06-24T18:00:00.000Z"),
+        meetingUrl: "https://meet.google.com/abc-defg-hij",
+        participantEmails: [],
+      });
+      fetchMock.mockResolvedValue({ ok: false, status: 400, text: async () => "bad request" });
 
       await expect(sendManualMeetingRecorder(facilitatorActor, {
         workspaceId: "workspace-1",
         meetingUrl: "https://meet.google.com/abc-defg-hij",
-      })).rejects.toMatchObject({
-        status: 502,
-        code: "RECORDER_SCHEDULING_FAILED",
+      })).resolves.toMatchObject({
+        meeting: { id: "meeting-1", status: "SCHEDULED" },
+        recording: {
+          id: "recording-1",
+          status: "FAILED",
+          failureCode: "vendor_http_error",
+        },
       });
 
       expect(prismaMock.meeting.create).toHaveBeenCalled();
-      expect(prismaMock.meeting.delete).toHaveBeenCalledWith({ where: { id: "meeting-1" } });
+      expect(prismaMock.meeting.delete).not.toHaveBeenCalled();
       expect(prismaMock.meetingRecording.update).toHaveBeenCalledWith(expect.objectContaining({
+        where: { id: "recording-1" },
         data: expect.objectContaining({
           status: "FAILED",
-          failureCode: "vendor_capacity_exceeded",
+          failureCode: "vendor_http_error",
         }),
       }));
     } finally {

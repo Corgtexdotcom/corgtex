@@ -3,6 +3,7 @@ import {
   getMeetingParticipants,
   getMeetingTranscriptProcessingState,
   getWorkspaceArchiveRecord,
+  listMeetingRecordings,
   meetingAgendaSections,
   normalizeMeetingAgendaForDisplay,
   privacyFilter,
@@ -20,9 +21,10 @@ import { ArchivedItemBanner } from "@/lib/components/ArchivedItemBanner";
 import { UnavailableItemStatus } from "@/lib/components/UnavailableItemStatus";
 import { DeliberationThread } from "@/lib/components/DeliberationThread";
 import { DeliberationComposer } from "@/lib/components/DeliberationComposer";
+import { MarkdownEditor } from "@/lib/components/MarkdownEditor";
 import { getDeliberationTargets } from "@/lib/deliberation-targets";
 import { listDeliberationEntries } from "@corgtex/domain";
-import { postMeetingDeliberationAction, resolveMeetingDeliberationAction, retryMeetingProcessingJobAction } from "../actions";
+import { postMeetingDeliberationAction, resolveMeetingDeliberationAction, retryMeetingProcessingJobAction, uploadMeetingTranscriptAction } from "../actions";
 import MeetingIntelligence, { MeetingRegenerationPanel, type InsightTargetMetadata } from "./MeetingIntelligence";
 import {
   agendaItemHref,
@@ -200,6 +202,7 @@ export default async function MeetingDetailPage({
   const participants = meeting.participantIds?.length > 0 
     ? await getMeetingParticipants(workspaceId, meeting.participantIds)
     : [];
+  const [latestRecording] = await listMeetingRecordings(workspaceId, [meeting.id]);
   const activeTab = normalizeMeetingTab(resolvedSearch.tab, hasAgendaTab ? "agenda" : "summary", hasAgendaTab);
   const meetingHref = `/workspaces/${workspaceId}/meetings/${meetingId}`;
   const processingState = await getMeetingTranscriptProcessingState(actor, { workspaceId, meetingId });
@@ -301,6 +304,41 @@ export default async function MeetingDetailPage({
           archiveReason={meeting.archiveReason}
           restoreHref={isAdmin ? `/workspaces/${workspaceId}/audit?tab=archive&archiveEntityType=Meeting` : null}
         />
+      )}
+
+      {!isArchived && latestRecording?.status === "FAILED" && (
+        <section className="ws-section" style={{ marginBottom: 32 }}>
+          <h2 className="nr-section-header">{t("recorderFailedTitle")}</h2>
+          <p className="nr-item-meta">
+            {latestRecording.provider}: {latestRecording.failureMessage ?? latestRecording.failureCode ?? t("recorderFailedFallback")}
+          </p>
+        </section>
+      )}
+
+      {!isArchived && !meeting.transcript && (
+        <section className="ws-section" style={{ marginBottom: 32 }}>
+          <h2 className="nr-section-header">{t("uploadTranscriptForMeeting")}</h2>
+          <form action={uploadMeetingTranscriptAction} className="stack panel">
+            <input type="hidden" name="workspaceId" value={workspaceId} />
+            <input type="hidden" name="meetingId" value={meeting.id} />
+            <input type="hidden" name="title" value={meeting.title ?? ""} />
+            <input type="hidden" name="recordedAt" value={new Date(meeting.recordedAt).toISOString()} />
+            <label>
+              {t("formTranscriptFile")}
+              <input name="file" type="file" accept=".txt,.md,.csv,.json,.pdf,.docx" />
+            </label>
+            <label>
+              {t("formTranscript")}
+              <textarea name="transcript" />
+            </label>
+            <label>
+              {t("formIngestionGuidance")}
+              <MarkdownEditor name="ingestionGuidanceMd" rows={3} />
+              <span className="nr-item-meta" style={{ display: "block", marginTop: 4 }}>{t("helpIngestionGuidance")}</span>
+            </label>
+            <button type="submit">{t("btnUploadTranscript")}</button>
+          </form>
+        </section>
       )}
 
       {processingView && (

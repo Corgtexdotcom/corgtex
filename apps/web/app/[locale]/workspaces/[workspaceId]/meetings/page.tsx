@@ -34,6 +34,16 @@ export const dynamic = "force-dynamic";
 const MEETING_STATUS_FILTERS = ["COMPLETED", "SCHEDULED"] as const;
 type MeetingStatusFilter = (typeof MEETING_STATUS_FILTERS)[number];
 
+function isPastScheduledMeetingWithoutTranscript(meeting: {
+  recordedAt: Date | string;
+  scheduledEndAt: Date | string | null;
+  transcript: string | null;
+}, now: Date) {
+  if (meeting.transcript) return false;
+  const reference = new Date(meeting.scheduledEndAt ?? meeting.recordedAt);
+  return reference <= now;
+}
+
 function normalizeMeetingStatusFilters(value: string | string[] | undefined): MeetingStatusFilter[] {
   const values = Array.isArray(value) ? value : value ? [value] : [];
   const seen = new Set<MeetingStatusFilter>();
@@ -74,17 +84,20 @@ export default async function MeetingsPage({
     listMembers(workspaceId),
   ]);
   const completedMeetings = statusFilters.includes("SCHEDULED") ? [] : filteredCompletedMeetings;
-  const upcomingMeetings = statusFilters.includes("COMPLETED") ? [] : filteredUpcomingMeetings;
+  const scheduledMeetings = statusFilters.includes("COMPLETED") ? [] : filteredUpcomingMeetings;
+  const now = new Date();
+  const needsTranscriptMeetings = scheduledMeetings.filter((meeting) => isPastScheduledMeetingWithoutTranscript(meeting, now));
+  const upcomingMeetings = scheduledMeetings.filter((meeting) => !isPastScheduledMeetingWithoutTranscript(meeting, now));
   const recorderEnabled = Boolean(featureFlags.MEETING_RECORDERS && recorderConfig?.featureEnabled && recorderConfig.config.enabled);
   const recordings = recorderEnabled
-    ? await listMeetingRecordings(workspaceId, upcomingMeetings.map((meeting) => meeting.id))
+    ? await listMeetingRecordings(workspaceId, scheduledMeetings.map((meeting) => meeting.id))
     : [];
   const latestRecordingByMeeting = new Map(recordings.map((recording) => [recording.meetingId, recording]));
   const recorderSentMeetingId = Array.isArray(resolvedSearch.recorderSent)
     ? resolvedSearch.recorderSent[0] ?? null
     : resolvedSearch.recorderSent ?? null;
   const recorderSentMeeting = recorderSentMeetingId
-    ? upcomingMeetings.find((meeting) => meeting.id === recorderSentMeetingId) ?? null
+    ? scheduledMeetings.find((meeting) => meeting.id === recorderSentMeetingId) ?? null
     : null;
   const recorderSentRecording = recorderSentMeeting
     ? latestRecordingByMeeting.get(recorderSentMeeting.id) ?? null
@@ -94,6 +107,67 @@ export default async function MeetingsPage({
   const tWork = await getTranslations("workItems");
   const filterState = { memberIds, dates: dateValues, status: statusFilters };
   const memberName = (member: { user: { displayName: string | null; email: string } }) => member.user.displayName || member.user.email;
+  const renderRecorderControls = (meeting: (typeof scheduledMeetings)[number]) => {
+    const recording = latestRecordingByMeeting.get(meeting.id);
+    return recorderEnabled ? (
+      <div className="row" style={{ alignItems: "flex-start", gap: 12, marginBottom: 8 }}>
+        <div>
+          <span className={`tag ${recording?.status === "FAILED" ? "warning" : ""}`}>
+            {recording ? `Recorder ${recording.status}` : meeting.meetingUrl ? t("recorderReady") : t("recorderNoMeetingLink")}
+          </span>
+          {recording?.failureMessage ? (
+            <div className="nr-item-meta" style={{ fontSize: "0.82rem", marginTop: 4 }}>
+              {recording.provider}: {recording.failureMessage}
+            </div>
+          ) : recording ? (
+            <div className="nr-item-meta" style={{ fontSize: "0.82rem", marginTop: 4 }}>
+              {recording.provider}
+            </div>
+          ) : null}
+        </div>
+        {recording && ["PENDING", "SCHEDULED", "JOINING", "RECORDING"].includes(recording.status) ? (
+          <form action={cancelMeetingRecordingAction}>
+            <input type="hidden" name="workspaceId" value={workspaceId} />
+            <input type="hidden" name="meetingId" value={meeting.id} />
+            <button type="submit" className="secondary small">{t("btnCancelRecorder")}</button>
+          </form>
+        ) : meeting.meetingUrl ? (
+          <form action={scheduleMeetingRecordingAction}>
+            <input type="hidden" name="workspaceId" value={workspaceId} />
+            <input type="hidden" name="meetingId" value={meeting.id} />
+            <button type="submit" className="secondary small">{t("btnRecordWithCorgtex")}</button>
+          </form>
+        ) : null}
+      </div>
+    ) : null;
+  };
+  const renderTranscriptUploadMenu = (meeting: (typeof scheduledMeetings)[number]) => (
+    <details>
+      <summary className="nr-hide-marker nr-action-summary">
+        {t("uploadTranscriptForMeeting")}
+      </summary>
+      <form action={uploadMeetingTranscriptAction} className="action-menu-form">
+        <input type="hidden" name="workspaceId" value={workspaceId} />
+        <input type="hidden" name="meetingId" value={meeting.id} />
+        <input type="hidden" name="title" value={meeting.title ?? ""} />
+        <input type="hidden" name="recordedAt" value={new Date(meeting.recordedAt).toISOString()} />
+        <label>
+          {t("formTranscriptFile")}
+          <input name="file" type="file" accept=".txt,.md,.csv,.json,.pdf,.docx" />
+        </label>
+        <label>
+          {t("formTranscript")}
+          <textarea name="transcript" />
+        </label>
+        <label>
+          {t("formIngestionGuidance")}
+          <MarkdownEditor name="ingestionGuidanceMd" rows={3} />
+          <span className="nr-item-meta" style={{ display: "block", marginTop: 4 }}>{t("helpIngestionGuidance")}</span>
+        </label>
+        <button type="submit">{t("btnUploadTranscript")}</button>
+      </form>
+    </details>
+  );
 
   return (
     <>
@@ -102,6 +176,7 @@ export default async function MeetingsPage({
         <div className="nr-masthead-meta">
           <span>{t("meetingsRecorded", { count: completedMeetings.length })}</span>
           <span>{t("meetingsScheduled", { count: upcomingMeetings.length })}</span>
+          <span>{t("meetingsNeedTranscript", { count: needsTranscriptMeetings.length })}</span>
         </div>
       </header>
 
@@ -122,7 +197,7 @@ export default async function MeetingsPage({
           {([
             { status: "ALL", label: tWork("statusAll"), count: filteredCompletedMeetings.length + filteredUpcomingMeetings.length },
             { status: "COMPLETED", label: t("completedMeetings"), count: filteredCompletedMeetings.length },
-            { status: "SCHEDULED", label: t("upcomingMeetings"), count: filteredUpcomingMeetings.length },
+            { status: "SCHEDULED", label: t("scheduledMeetings"), count: filteredUpcomingMeetings.length },
           ] as const).map((item) => {
             const isActive = item.status === "ALL" ? statusFilters.length === 0 : statusFilters.includes(item.status);
             return (
@@ -140,7 +215,7 @@ export default async function MeetingsPage({
           action={`/workspaces/${workspaceId}/meetings`}
           statusOptions={MEETING_STATUS_FILTERS.map((status) => ({
             id: status,
-            label: status === "COMPLETED" ? t("completedMeetings") : t("upcomingMeetings"),
+            label: status === "COMPLETED" ? t("completedMeetings") : t("scheduledMeetings"),
           }))}
           statusValues={statusFilters}
           memberIds={memberIds}
@@ -237,38 +312,7 @@ export default async function MeetingsPage({
           <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
             {upcomingMeetings.map((meeting) => (
               <div className="nr-item" key={meeting.id}>
-                {(() => {
-                  const recording = latestRecordingByMeeting.get(meeting.id);
-                  return recorderEnabled ? (
-                    <div className="row" style={{ alignItems: "flex-start", gap: 12, marginBottom: 8 }}>
-                      <div>
-                        <span className="tag">{recording ? `Recorder ${recording.status}` : meeting.meetingUrl ? "Recorder ready" : "No meeting link"}</span>
-                        {recording?.failureMessage ? (
-                          <div className="nr-item-meta" style={{ fontSize: "0.82rem", marginTop: 4 }}>
-                            {recording.provider}: {recording.failureMessage}
-                          </div>
-                        ) : recording ? (
-                          <div className="nr-item-meta" style={{ fontSize: "0.82rem", marginTop: 4 }}>
-                            {recording.provider}
-                          </div>
-                        ) : null}
-                      </div>
-                      {recording && ["PENDING", "SCHEDULED", "JOINING", "RECORDING"].includes(recording.status) ? (
-                        <form action={cancelMeetingRecordingAction}>
-                          <input type="hidden" name="workspaceId" value={workspaceId} />
-                          <input type="hidden" name="meetingId" value={meeting.id} />
-                          <button type="submit" className="secondary small">Cancel recorder</button>
-                        </form>
-                      ) : meeting.meetingUrl ? (
-                        <form action={scheduleMeetingRecordingAction}>
-                          <input type="hidden" name="workspaceId" value={workspaceId} />
-                          <input type="hidden" name="meetingId" value={meeting.id} />
-                          <button type="submit" className="secondary small">Record with Corgtex</button>
-                        </form>
-                      ) : null}
-                    </div>
-                  ) : null;
-                })()}
+                {renderRecorderControls(meeting)}
                 <Link href={`/workspaces/${workspaceId}/meetings/${meeting.id}`} style={{ textDecoration: "none", color: "inherit" }}>
                   <div className="nr-item-title">{meeting.title ?? t("untitledMeeting")}</div>
                   <div className="nr-item-meta">
@@ -283,32 +327,36 @@ export default async function MeetingsPage({
                       {tCommon("btnView")}
                     </Link>
                   }
+                  more={renderTranscriptUploadMenu(meeting)}
+                />
+              </div>
+            ))}
+          </div>
+        )}
+      </section>
+
+      <section className="ws-section" style={{ marginBottom: 48 }}>
+        <h2 className="nr-section-header">{t("needsTranscriptMeetings")}</h2>
+        {needsTranscriptMeetings.length === 0 && <p className="nr-meta">{t("noNeedsTranscriptMeetings")}</p>}
+        {needsTranscriptMeetings.length > 0 && (
+          <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+            {needsTranscriptMeetings.map((meeting) => (
+              <div className="nr-item" key={meeting.id}>
+                {renderRecorderControls(meeting)}
+                <Link href={`/workspaces/${workspaceId}/meetings/${meeting.id}`} style={{ textDecoration: "none", color: "inherit" }}>
+                  <div className="nr-item-title">{meeting.title ?? t("untitledMeeting")}</div>
+                  <div className="nr-item-meta">
+                    {new Date(meeting.recordedAt).toLocaleString()} • {meeting.source}
+                    {meeting.agendaPostedAt ? ` • ${t("agendaPosted")}` : ""}
+                  </div>
+                </Link>
+                <ItemActions
+                  moreLabel={tCommon("moreActions")}
+                  primary={renderTranscriptUploadMenu(meeting)}
                   more={
-                    <details>
-                      <summary className="nr-hide-marker" style={{ cursor: "pointer", padding: "8px 10px", borderRadius: 8, fontSize: "0.88rem", fontWeight: 500 }}>
-                        {t("uploadTranscriptForMeeting")}
-                      </summary>
-                      <form action={uploadMeetingTranscriptAction} className="action-menu-form">
-                        <input type="hidden" name="workspaceId" value={workspaceId} />
-                        <input type="hidden" name="meetingId" value={meeting.id} />
-                        <input type="hidden" name="title" value={meeting.title ?? ""} />
-                        <input type="hidden" name="recordedAt" value={new Date(meeting.recordedAt).toISOString()} />
-                        <label>
-                          {t("formTranscriptFile")}
-                          <input name="file" type="file" accept=".txt,.md,.csv,.json,.pdf,.docx" />
-                        </label>
-                        <label>
-                          {t("formTranscript")}
-                          <textarea name="transcript" />
-                        </label>
-                        <label>
-                          {t("formIngestionGuidance")}
-                          <MarkdownEditor name="ingestionGuidanceMd" rows={3} />
-                          <span className="nr-item-meta" style={{ display: "block", marginTop: 4 }}>{t("helpIngestionGuidance")}</span>
-                        </label>
-                        <button type="submit">{t("btnUploadTranscript")}</button>
-                      </form>
-                    </details>
+                    <Link className="link-button small" href={`/workspaces/${workspaceId}/meetings/${meeting.id}`}>
+                      {tCommon("btnView")}
+                    </Link>
                   }
                 />
               </div>

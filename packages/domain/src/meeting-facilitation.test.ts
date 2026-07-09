@@ -8,6 +8,7 @@ const {
   validateSlackPostTargetMock,
   fetchSlackThreadMessagesMock,
   extractMeetingInsightsMock,
+  ensureMeetingSeriesOccurrencesMock,
 } = vi.hoisted(() => ({
   prismaMock: {
     $transaction: vi.fn(),
@@ -47,6 +48,7 @@ const {
   validateSlackPostTargetMock: vi.fn(),
   fetchSlackThreadMessagesMock: vi.fn(),
   extractMeetingInsightsMock: vi.fn(),
+  ensureMeetingSeriesOccurrencesMock: vi.fn(),
 }));
 
 vi.mock("@corgtex/shared", () => ({
@@ -72,6 +74,10 @@ vi.mock("./communication", () => ({
 
 vi.mock("./meeting-intelligence", () => ({
   extractMeetingInsights: extractMeetingInsightsMock,
+}));
+
+vi.mock("./meetings", () => ({
+  ensureMeetingSeriesOccurrences: ensureMeetingSeriesOccurrencesMock,
 }));
 
 describe("meeting facilitation", () => {
@@ -114,6 +120,7 @@ describe("meeting facilitation", () => {
     });
     fetchSlackThreadMessagesMock.mockReset();
     fetchSlackThreadMessagesMock.mockResolvedValue([]);
+    ensureMeetingSeriesOccurrencesMock.mockReset().mockResolvedValue({ meetingCount: 0, createdCount: 0 });
   });
 
   it("validates and stores Slack agenda channel metadata", async () => {
@@ -173,6 +180,12 @@ describe("meeting facilitation", () => {
     });
 
     expect(defaultModelGatewayMock.extract).not.toHaveBeenCalled();
+    expect(ensureMeetingSeriesOccurrencesMock).toHaveBeenCalledWith({
+      workspaceId: "workspace-1",
+      from: expect.any(Date),
+      to: expect.any(Date),
+      reason: "meeting-agenda-preparation",
+    });
     expect(prismaMock.meeting.findMany).not.toHaveBeenCalled();
     expect(sendSlackMessageMock).not.toHaveBeenCalled();
   });
@@ -238,6 +251,15 @@ describe("meeting facilitation", () => {
 
     expect(defaultModelGatewayMock.extract).not.toHaveBeenCalled();
     expect(sendSlackMessageMock).toHaveBeenCalledTimes(1);
+    expect(ensureMeetingSeriesOccurrencesMock).toHaveBeenCalledWith({
+      workspaceId: "workspace-1",
+      from: new Date("2026-06-23T00:00:00.000Z"),
+      to: new Date("2026-06-24T00:00:00.000Z"),
+      reason: "meeting-agenda-preparation",
+    });
+    expect(ensureMeetingSeriesOccurrencesMock.mock.invocationCallOrder[0]).toBeLessThan(
+      prismaMock.meeting.findMany.mock.invocationCallOrder[0],
+    );
     expect(prismaMock.meeting.update).toHaveBeenCalledWith({
       where: { id: "meeting-1" },
       data: {
@@ -361,6 +383,65 @@ describe("meeting facilitation", () => {
     expect(prismaMock.meeting.update).toHaveBeenCalledTimes(1);
     expect(prismaMock.meeting.update).toHaveBeenCalledWith(expect.objectContaining({
       where: { id: "meeting-posts" },
+    }));
+    expect(prismaMock.workflowJob.upsert).toHaveBeenCalled();
+  });
+
+  it("persists a deterministic agenda before Slack delivery failure", async () => {
+    prismaMock.meeting.findMany
+      .mockResolvedValueOnce([
+        {
+          id: "meeting-fails",
+          workspaceId: "workspace-1",
+          title: "Weekly update",
+          status: "SCHEDULED",
+          recordedAt: new Date("2026-06-23T17:00:00.000Z"),
+          scheduledEndAt: new Date("2026-06-23T18:00:00.000Z"),
+          agendaJson: null,
+          agendaChannelId: null,
+          agendaMessageTs: null,
+          agendaPostedAt: null,
+          seriesId: "series-1",
+          series: { recurrenceRule: "FREQ=WEEKLY" },
+        },
+      ])
+      .mockResolvedValue([]);
+    prismaMock.meeting.findFirst.mockResolvedValue({
+      id: "meeting-fails",
+      workspaceId: "workspace-1",
+      status: "SCHEDULED",
+      title: "Weekly update",
+      source: "internal",
+      transcript: null,
+      summaryMd: null,
+      blocksJson: null,
+      agendaJson: null,
+      ingestionGuidanceMd: null,
+      seriesId: "series-1",
+      participantIds: [],
+      participantEmails: [],
+      recordedAt: new Date("2026-06-23T17:00:00.000Z"),
+      scheduledEndAt: new Date("2026-06-23T18:00:00.000Z"),
+      archivedAt: null,
+      series: { title: "Weekly update", recurrenceRule: "FREQ=WEEKLY" },
+    });
+    sendSlackMessageMock.mockRejectedValueOnce(new Error("Slack post failed"));
+    prismaMock.meeting.update.mockResolvedValue({ id: "meeting-fails" });
+
+    const { runMeetingAgendaPreparation } = await import("./meeting-facilitation");
+    await expect(runMeetingAgendaPreparation({
+      workspaceId: "workspace-1",
+      targetDateISO: "2026-06-23",
+    })).rejects.toMatchObject({
+      code: "MEETING_AGENDA_PREPARATION_PARTIAL_FAILURE",
+    });
+
+    expect(prismaMock.meeting.update).toHaveBeenCalledWith({
+      where: { id: "meeting-fails" },
+      data: { agendaJson: expect.objectContaining({ templateKey: "regular_update_v1" }) },
+    });
+    expect(prismaMock.meeting.update).not.toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ agendaPostedAt: expect.any(Date) }),
     }));
     expect(prismaMock.workflowJob.upsert).toHaveBeenCalled();
   });
