@@ -22,6 +22,7 @@ import {
 } from "./meeting-agendas";
 import { extractMeetingInsights } from "./meeting-intelligence";
 import { buildMeetingIntelligenceContext } from "./meeting-intelligence-context";
+import { ensureMeetingSeriesOccurrences } from "./meetings";
 
 type AgendaEditOutput = {
   action: "update" | "clarify";
@@ -481,11 +482,21 @@ export async function runMeetingAgendaPreparation(params: {
   workflowJobId?: string;
   targetDateISO?: string | null;
 }) {
-  const installation = await activeSlackInstallation(params.workspaceId);
-  const settings = agendaSettings(installation?.settings);
-  const channelId = settings.defaultAgendaChannelId?.trim();
+  let settings: AgendaSettings = {};
 
   try {
+    const targetDate = params.targetDateISO ? new Date(`${params.targetDateISO}T00:00:00.000Z`) : tomorrowBounds().start;
+    const { start, end } = utcDayBounds(Number.isNaN(targetDate.valueOf()) ? tomorrowBounds().start : targetDate);
+    await ensureMeetingSeriesOccurrences({
+      workspaceId: params.workspaceId,
+      from: start,
+      to: end,
+      reason: "meeting-agenda-preparation",
+    });
+
+    const installation = await activeSlackInstallation(params.workspaceId);
+    settings = agendaSettings(installation?.settings);
+    const channelId = settings.defaultAgendaChannelId?.trim();
     if (!installation || !channelId) {
       return { skipped: true, reason: "slack_agenda_channel_missing" };
     }
@@ -494,8 +505,6 @@ export async function runMeetingAgendaPreparation(params: {
       return { skipped: true, reason: channelValidation.code };
     }
 
-    const targetDate = params.targetDateISO ? new Date(`${params.targetDateISO}T00:00:00.000Z`) : tomorrowBounds().start;
-    const { start, end } = utcDayBounds(Number.isNaN(targetDate.valueOf()) ? tomorrowBounds().start : targetDate);
     const meetings = await findRegularAgendaMeetingsForDay(params.workspaceId, start, end);
 
     let posted = 0;

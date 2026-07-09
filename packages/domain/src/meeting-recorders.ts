@@ -16,7 +16,7 @@ import {
   parseMeetingDurationMinutes,
 } from "./meeting-durations";
 import { intakeMeetingTranscript } from "./meeting-transcript-intake";
-import { createScheduledMeeting, discardManualScheduledMeeting } from "./meetings";
+import { createScheduledMeeting } from "./meetings";
 import {
   extractRecorderMeetingUrlFromText,
   extractSupportedMeetingUrlFromText,
@@ -2566,12 +2566,8 @@ export async function sendManualMeetingRecorder(actor: AppActor, params: {
       meetingId: meeting.id,
       mode: "manual",
     });
-    if (recording.status === "FAILED") {
-      throw recorderSchedulingFailedError();
-    }
     return { meeting, recording };
   } catch (error) {
-    await discardManualScheduledMeeting(actor, { workspaceId: params.workspaceId, meetingId: meeting.id }).catch(() => undefined);
     if (error instanceof AppError) {
       throw error;
     }

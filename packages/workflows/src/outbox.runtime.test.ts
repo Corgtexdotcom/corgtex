@@ -15,6 +15,8 @@ const {
   purgeExpiredCommunicationMessagesMock,
   syncSlackPublicArchiveForWorkspaceMock,
   runMeetingAgendaThreadEditMock,
+  runMeetingAgendaPreparationMock,
+  ensureMeetingSeriesOccurrencesMock,
   runControlPlaneClientMigrationWorkerVerificationJobMock,
   runControlPlaneFleetSnapshotJobMock,
   runControlPlaneReleaseDeployJobMock,
@@ -32,6 +34,9 @@ const {
       update: vi.fn(),
       upsert: vi.fn(),
       createMany: vi.fn(),
+    },
+    meetingSeries: {
+      findMany: vi.fn(),
     },
     workspace: {
       findMany: vi.fn(),
@@ -76,6 +81,8 @@ const {
   purgeExpiredCommunicationMessagesMock: vi.fn(),
   syncSlackPublicArchiveForWorkspaceMock: vi.fn(),
   runMeetingAgendaThreadEditMock: vi.fn(),
+  runMeetingAgendaPreparationMock: vi.fn(),
+  ensureMeetingSeriesOccurrencesMock: vi.fn(),
   runControlPlaneClientMigrationWorkerVerificationJobMock: vi.fn(),
   runControlPlaneFleetSnapshotJobMock: vi.fn(),
   runControlPlaneReleaseDeployJobMock: vi.fn(),
@@ -122,6 +129,8 @@ vi.mock("@corgtex/domain", () => ({
   purgeExpiredCommunicationMessages: purgeExpiredCommunicationMessagesMock,
   syncSlackPublicArchiveForWorkspace: syncSlackPublicArchiveForWorkspaceMock,
   runMeetingAgendaThreadEdit: runMeetingAgendaThreadEditMock,
+  runMeetingAgendaPreparation: runMeetingAgendaPreparationMock,
+  ensureMeetingSeriesOccurrences: ensureMeetingSeriesOccurrencesMock,
   CONTROL_PLANE_CLIENT_MIGRATION_VERIFY_JOB_TYPE: "control-plane.client-migration.verify",
   runControlPlaneClientMigrationWorkerVerificationJob: runControlPlaneClientMigrationWorkerVerificationJobMock,
   CONTROL_PLANE_FLEET_SNAPSHOT_JOB_TYPE: "control-plane.fleet-snapshot",
@@ -188,6 +197,7 @@ describe("runPendingJobs", () => {
     prismaMock.$transaction.mockReset().mockImplementation(async (callback: (tx: typeof txMock) => Promise<unknown>) => callback(txMock));
     prismaMock.workflowJob.update.mockReset().mockResolvedValue({ id: "job-1" });
     prismaMock.workflowJob.upsert.mockReset().mockResolvedValue({ id: "job-next" });
+    prismaMock.meetingSeries.findMany.mockReset().mockResolvedValue([]);
     prismaMock.workspace.findMany.mockReset().mockResolvedValue([]);
     prismaMock.member.findMany.mockReset().mockResolvedValue([]);
     prismaMock.externalDataSource.findMany.mockReset().mockResolvedValue([]);
@@ -209,6 +219,8 @@ describe("runPendingJobs", () => {
     purgeExpiredCommunicationMessagesMock.mockReset();
     syncSlackPublicArchiveForWorkspaceMock.mockReset();
     runMeetingAgendaThreadEditMock.mockReset();
+    runMeetingAgendaPreparationMock.mockReset().mockResolvedValue({ posted: 0 });
+    ensureMeetingSeriesOccurrencesMock.mockReset().mockResolvedValue({ meetingCount: 0, createdCount: 0 });
     runControlPlaneClientMigrationWorkerVerificationJobMock.mockReset().mockResolvedValue({ id: "mig-1", status: "import_verified" });
     runControlPlaneFleetSnapshotJobMock.mockReset().mockResolvedValue({ refreshed: true });
     runControlPlaneReleaseDeployJobMock.mockReset().mockResolvedValue({ status: "deployed" });
@@ -891,6 +903,31 @@ describe("runPendingJobs", () => {
     });
   });
 
+  it("dispatches meeting series materialization jobs", async () => {
+    txMock.$queryRaw.mockResolvedValue([
+      {
+        id: "job-1",
+        workspaceId: "ws-1",
+        type: "meeting.series.materialize",
+        payload: { reason: "daily-recurring-series-repair" },
+        attempts: 1,
+      },
+    ]);
+
+    await expect(runPendingJobs("worker-1", 1)).resolves.toBe(1);
+
+    expect(ensureMeetingSeriesOccurrencesMock).toHaveBeenCalledWith({
+      workspaceId: "ws-1",
+      reason: "daily-recurring-series-repair",
+    });
+    expect(prismaMock.workflowJob.update).toHaveBeenCalledWith({
+      where: { id: "job-1" },
+      data: expect.objectContaining({
+        status: "COMPLETED",
+      }),
+    });
+  });
+
   it("dispatches Slack context summary jobs", async () => {
     txMock.$queryRaw.mockResolvedValue([
       {
@@ -1104,6 +1141,7 @@ describe("scheduleDailyJobs", () => {
     prismaMock.communicationInstallation.findMany.mockReset().mockResolvedValue([
       { workspaceId: "ws-1" },
     ]);
+    prismaMock.meetingSeries.findMany.mockReset().mockResolvedValue([]);
     txMock.workflowJob.upsert.mockReset().mockResolvedValue({ id: "job-1" });
     resetCreateManyMock();
     getWorkspaceDigestSettingsMock.mockReset().mockResolvedValue(new Map([
@@ -1152,6 +1190,31 @@ describe("scheduleDailyJobs", () => {
       ]),
       skipDuplicates: true,
     });
+  });
+
+  it("schedules recurring meeting materialization once per workspace per day", async () => {
+    prismaMock.meetingSeries.findMany.mockResolvedValue([
+      { workspaceId: "ws-1" },
+    ]);
+
+    await expect(scheduleDailyJobs()).resolves.toBe(5);
+
+    expect(prismaMock.meetingSeries.findMany).toHaveBeenCalledWith({
+      where: {
+        archivedAt: null,
+        recurrenceRule: { not: null },
+      },
+      distinct: ["workspaceId"],
+      select: { workspaceId: true },
+    });
+    expect(createdWorkflowJobs()).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        workspaceId: "ws-1",
+        type: "meeting.series.materialize",
+        payload: { reason: "daily-recurring-series-repair" },
+        dedupeKey: "meeting-series-materialize:ws-1:2026-04-29",
+      }),
+    ]));
   });
 
   it("does not schedule newspapers before the workspace local send time", async () => {

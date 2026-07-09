@@ -4,6 +4,7 @@ import type { AppActor } from "@corgtex/shared";
 const { prismaMock } = vi.hoisted(() => {
   const prisma = {
     $transaction: vi.fn(),
+    $executeRaw: vi.fn(),
     meeting: {
       findMany: vi.fn(),
       findFirst: vi.fn(),
@@ -15,6 +16,10 @@ const { prismaMock } = vi.hoisted(() => {
     },
     meetingSeries: {
       create: vi.fn(),
+      findMany: vi.fn(),
+      upsert: vi.fn(),
+    },
+    workflowJob: {
       upsert: vi.fn(),
     },
     meetingInsight: {
@@ -71,6 +76,7 @@ describe("meetings domain", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     prismaMock.$transaction.mockImplementation(async (callback: (tx: typeof prismaMock) => Promise<unknown>) => callback(prismaMock));
+    prismaMock.$executeRaw.mockResolvedValue(1);
     prismaMock.auditLog.create.mockResolvedValue({});
     prismaMock.event.createMany.mockResolvedValue({ count: 1 });
     prismaMock.meetingInsight.deleteMany.mockResolvedValue({ count: 0 });
@@ -78,6 +84,8 @@ describe("meetings domain", () => {
     prismaMock.meetingTranscriptProcessingProgress.findUnique.mockResolvedValue(null);
     prismaMock.meetingTranscriptProcessingProgress.upsert.mockResolvedValue({ id: "progress-1" });
     prismaMock.workspacePermalink.upsert.mockResolvedValue({});
+    prismaMock.meetingSeries.findMany.mockResolvedValue([]);
+    prismaMock.workflowJob.upsert.mockResolvedValue({ id: "job-1" });
   });
 
   it("listMeetings returns meetings newest first", async () => {
@@ -262,39 +270,6 @@ describe("meetings domain", () => {
     });
   });
 
-  it("discardManualScheduledMeeting removes an orphan manual recorder meeting", async () => {
-    prismaMock.meeting.findFirst.mockResolvedValue({
-      id: "meeting-1",
-      recordings: [],
-    });
-    prismaMock.meeting.delete.mockResolvedValue({ id: "meeting-1" });
-
-    const { discardManualScheduledMeeting } = await import("./meetings");
-    await expect(discardManualScheduledMeeting(actor, {
-      workspaceId: "workspace-1",
-      meetingId: "meeting-1",
-    })).resolves.toEqual({ id: "meeting-1", deleted: true });
-
-    expect(prismaMock.meeting.findFirst).toHaveBeenCalledWith({
-      where: {
-        id: "meeting-1",
-        workspaceId: "workspace-1",
-        status: "SCHEDULED",
-        source: "manual-recorder",
-        archivedAt: null,
-      },
-      select: {
-        id: true,
-        recordings: {
-          where: { status: { in: ["PENDING", "SCHEDULED", "JOINING", "RECORDING"] } },
-          select: { id: true },
-          take: 1,
-        },
-      },
-    });
-    expect(prismaMock.meeting.delete).toHaveBeenCalledWith({ where: { id: "meeting-1" } });
-  });
-
   it("createMeetingSeries materializes recurring scheduled meetings", async () => {
     const startsAt = new Date("2026-04-30T17:00:00.000Z");
     const scheduledEndAt = new Date("2026-04-30T18:00:00.000Z");
@@ -311,9 +286,15 @@ describe("meetings domain", () => {
       participantIds: [],
       participantEmails: ["jan@example.com"],
     });
-    prismaMock.meeting.upsert.mockImplementation(async (args: any) => ({
-      id: `meeting-${prismaMock.meeting.upsert.mock.calls.length}`,
-      ...args.create,
+    prismaMock.meeting.findUnique.mockImplementation(async (args: any) => ({
+      id: `meeting-${prismaMock.meeting.findUnique.mock.calls.length}`,
+      workspaceId: "workspace-1",
+      seriesId: "series-1",
+      status: "SCHEDULED",
+      title: "Weekly Tactical",
+      source: "internal",
+      externalId: args.where.externalId,
+      participantEmails: ["jan@example.com"],
     }));
 
     const { createMeetingSeries } = await import("./meetings");
@@ -331,13 +312,8 @@ describe("meetings domain", () => {
       ]),
     });
 
-    expect(prismaMock.meeting.upsert).toHaveBeenCalledTimes(2);
-    expect(prismaMock.meeting.upsert).toHaveBeenCalledWith(expect.objectContaining({
-      create: expect.objectContaining({
-        participantEmails: ["jan@example.com"],
-        status: "SCHEDULED",
-      }),
-    }));
+    expect(prismaMock.$executeRaw).toHaveBeenCalledTimes(2);
+    expect(prismaMock.meeting.create).not.toHaveBeenCalled();
   });
 
   it("importMeetingInvite parses .ics attendees and dedupes by external IDs", async () => {
@@ -354,9 +330,15 @@ describe("meetings domain", () => {
       participantIds: [],
       participantEmails: ["jan@example.com"],
     });
-    prismaMock.meeting.upsert.mockImplementation(async (args: any) => ({
-      id: `meeting-${prismaMock.meeting.upsert.mock.calls.length}`,
-      ...args.create,
+    prismaMock.meeting.findUnique.mockImplementation(async (args: any) => ({
+      id: `meeting-${prismaMock.meeting.findUnique.mock.calls.length}`,
+      workspaceId: "workspace-1",
+      seriesId: "series-ics",
+      status: "SCHEDULED",
+      title: "Imported Tactical",
+      source: "ics",
+      externalId: args.where.externalId,
+      participantEmails: ["jan@example.com"],
     }));
 
     const icsText = [
@@ -387,7 +369,162 @@ describe("meetings domain", () => {
         recurrenceRule: "FREQ=WEEKLY;COUNT=2",
       }),
     }));
-    expect(prismaMock.meeting.upsert).toHaveBeenCalledTimes(2);
+    expect(prismaMock.$executeRaw).toHaveBeenCalledTimes(2);
+    expect(prismaMock.meeting.create).not.toHaveBeenCalled();
+  });
+
+  it("ensureMeetingSeriesOccurrences creates missing weekly occurrences in the repair window", async () => {
+    const startsAt = new Date("2026-04-01T17:00:00.000Z");
+    prismaMock.meetingSeries.findMany.mockResolvedValue([
+      {
+        id: "series-1",
+        workspaceId: "workspace-1",
+        title: "Weekly Tactical",
+        description: null,
+        source: "internal",
+        externalId: null,
+        recurrenceRule: "FREQ=WEEKLY;COUNT=3",
+        startsAt,
+        defaultDurationMinutes: 60,
+        participantIds: ["member-1"],
+        participantEmails: ["jan@example.com"],
+      },
+    ]);
+    prismaMock.meeting.findMany.mockResolvedValue([]);
+    prismaMock.meeting.findUnique.mockImplementation(async (args: any) => ({
+      id: `created-${prismaMock.meeting.findUnique.mock.calls.length}`,
+      workspaceId: "workspace-1",
+      seriesId: "series-1",
+      status: "SCHEDULED",
+      title: "Weekly Tactical",
+      source: "internal",
+      externalId: args.where.externalId,
+    }));
+
+    const { ensureMeetingSeriesOccurrences } = await import("./meetings");
+    await expect(ensureMeetingSeriesOccurrences({
+      workspaceId: "workspace-1",
+      from: new Date("2026-04-01T00:00:00.000Z"),
+      to: new Date("2026-04-30T00:00:00.000Z"),
+      reason: "test",
+    })).resolves.toMatchObject({
+      workspaceId: "workspace-1",
+      seriesCount: 1,
+      meetingCount: 3,
+      createdCount: 3,
+    });
+
+    expect(prismaMock.meetingSeries.findMany).toHaveBeenCalledWith({
+      where: {
+        workspaceId: "workspace-1",
+        archivedAt: null,
+        recurrenceRule: { not: null },
+      },
+      orderBy: { startsAt: "asc" },
+    });
+    expect(prismaMock.$executeRaw).toHaveBeenCalledTimes(3);
+    expect(prismaMock.meeting.create).not.toHaveBeenCalled();
+  });
+
+  it("ensureMeetingSeriesOccurrences is idempotent and does not overwrite existing occurrence fields", async () => {
+    const startsAt = new Date("2026-04-01T17:00:00.000Z");
+    const existingMeeting = {
+      id: "meeting-existing",
+      workspaceId: "workspace-1",
+      seriesId: "series-1",
+      status: "COMPLETED",
+      title: "Edited title",
+      source: "internal",
+      externalId: "meeting-series:series-1:2026-04-01T17:00:00.000Z",
+      recordedAt: startsAt,
+      scheduledEndAt: new Date("2026-04-01T18:00:00.000Z"),
+      transcript: "Existing transcript",
+      agendaJson: { title: "Existing agenda" },
+      participantIds: ["edited-member"],
+      participantEmails: ["edited@example.com"],
+      meetingUrl: "https://meet.example.test/edited",
+    };
+    prismaMock.meetingSeries.findMany.mockResolvedValue([
+      {
+        id: "series-1",
+        workspaceId: "workspace-1",
+        title: "Weekly Tactical",
+        description: null,
+        source: "internal",
+        externalId: null,
+        recurrenceRule: "FREQ=WEEKLY;COUNT=1",
+        startsAt,
+        defaultDurationMinutes: 60,
+        participantIds: ["member-1"],
+        participantEmails: ["jan@example.com"],
+      },
+    ]);
+    prismaMock.meeting.findMany.mockResolvedValue([{ id: "meeting-existing" }]);
+    prismaMock.$executeRaw.mockResolvedValue(0);
+    prismaMock.meeting.findUnique.mockResolvedValue(existingMeeting);
+
+    const { ensureMeetingSeriesOccurrences } = await import("./meetings");
+    await expect(ensureMeetingSeriesOccurrences({
+      workspaceId: "workspace-1",
+      from: new Date("2026-04-01T00:00:00.000Z"),
+      to: new Date("2026-04-02T00:00:00.000Z"),
+    })).resolves.toMatchObject({
+      meetingCount: 1,
+      createdCount: 0,
+      meetings: [expect.objectContaining({
+        id: "meeting-existing",
+        transcript: "Existing transcript",
+        agendaJson: { title: "Existing agenda" },
+        participantEmails: ["edited@example.com"],
+        meetingUrl: "https://meet.example.test/edited",
+      })],
+    });
+
+    expect(prismaMock.$executeRaw).toHaveBeenCalledTimes(1);
+    expect(prismaMock.meeting.create).not.toHaveBeenCalled();
+    expect(prismaMock.meeting.update).not.toHaveBeenCalled();
+  });
+
+  it("ensureMeetingSeriesOccurrences honors finite recurrence UNTIL rules", async () => {
+    const startsAt = new Date("2026-04-01T17:00:00.000Z");
+    prismaMock.meetingSeries.findMany.mockResolvedValue([
+      {
+        id: "series-1",
+        workspaceId: "workspace-1",
+        title: "Weekly Tactical",
+        description: null,
+        source: "internal",
+        externalId: null,
+        recurrenceRule: "FREQ=WEEKLY;UNTIL=20260415T170000Z",
+        startsAt,
+        defaultDurationMinutes: 60,
+        participantIds: [],
+        participantEmails: [],
+      },
+    ]);
+    prismaMock.meeting.findMany.mockResolvedValue([]);
+    prismaMock.meeting.findUnique.mockImplementation(async (args: any) => ({
+      id: `created-${prismaMock.meeting.findUnique.mock.calls.length}`,
+      workspaceId: "workspace-1",
+      seriesId: "series-1",
+      status: "SCHEDULED",
+      title: "Weekly Tactical",
+      source: "internal",
+      externalId: args.where.externalId,
+    }));
+
+    const { ensureMeetingSeriesOccurrences } = await import("./meetings");
+    await expect(ensureMeetingSeriesOccurrences({
+      workspaceId: "workspace-1",
+      from: new Date("2026-04-01T00:00:00.000Z"),
+      to: new Date("2026-05-01T00:00:00.000Z"),
+    })).resolves.toMatchObject({
+      meetingCount: 3,
+      createdCount: 3,
+    });
+
+    expect(prismaMock.$executeRaw).toHaveBeenCalledTimes(3);
+    expect(prismaMock.meeting.create).not.toHaveBeenCalled();
   });
 
   it("uploadMeetingTranscript auto-matches a scheduled meeting by title, time, and attendees", async () => {
