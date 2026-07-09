@@ -1012,6 +1012,8 @@
     "clientConversionOptionalFinance": "Finance project",
     "clientConversionTitle": "Client conversion",
     "btnApproveQualification": "Approve and send demo",
+    "btnArchiveAccount": "Archive account",
+    "btnArchiveContact": "Archive contact",
     "btnContactActions": "⋯",
     "btnCreateAccount": "Create account",
     "btnCreateActivity": "Create activity",

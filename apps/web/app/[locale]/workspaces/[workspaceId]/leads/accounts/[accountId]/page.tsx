@@ -7,6 +7,8 @@ import { getCrmAccount, getCrmAccountPracticeFinance, listCommunicationSuggestio
 import { getTranslations } from "next-intl/server";
 
 import {
+  archiveContactAction,
+  archiveCrmAccountAction,
   completeActivityAction,
   createFinanceProjectFromDealAction,
   convertCrmAccountToClientAction,
@@ -580,6 +582,11 @@ export default async function AccountDetailPage({
                 </label>
                 <button type="submit" style={{ width: "fit-content" }}>{t("btnSaveAccount")}</button>
               </form>
+              <form action={archiveCrmAccountAction} style={{ marginTop: 12 }}>
+                <input type="hidden" name="workspaceId" value={workspaceId} />
+                <input type="hidden" name="accountId" value={account.id} />
+                <button type="submit" className="danger small">{t("btnArchiveAccount")}</button>
+              </form>
             </details>
           </div>
         )}
@@ -590,13 +597,22 @@ export default async function AccountDetailPage({
               <p className="muted">{t("accountNoContacts")}</p>
             ) : account.contacts.map((contact) => (
               <div key={contact.id} className="item" style={{ padding: 16 }}>
-                <div className="row">
-                  <strong>{contact.name || t("unknownContact")}</strong>
-                  <span className="tag">{contact.source}</span>
-                </div>
-                <div className="muted" style={{ fontSize: "0.85rem", marginTop: 4 }}>
-                  {contact.email}
-                  {contact.title ? ` · ${contact.title}` : ""}
+                <div className="row" style={{ alignItems: "flex-start", gap: 12 }}>
+                  <div style={{ minWidth: 0 }}>
+                    <strong>{contact.name || t("unknownContact")}</strong>
+                    <div className="muted" style={{ fontSize: "0.85rem", marginTop: 4 }}>
+                      {contact.email}
+                      {contact.title ? ` · ${contact.title}` : ""}
+                    </div>
+                  </div>
+                  <div className="row" style={{ marginLeft: "auto", gap: 8 }}>
+                    <span className="tag">{contact.source}</span>
+                    <form action={archiveContactAction}>
+                      <input type="hidden" name="workspaceId" value={workspaceId} />
+                      <input type="hidden" name="contactId" value={contact.id} />
+                      <button type="submit" className="danger small">{t("btnArchiveContact")}</button>
+                    </form>
+                  </div>
                 </div>
               </div>
             ))}

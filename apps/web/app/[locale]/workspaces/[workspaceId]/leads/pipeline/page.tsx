@@ -143,6 +143,7 @@ export default async function RelationshipPipelinePage({
   }) : dealResult.items;
   const accountLink = (deal: (typeof dealResult.items)[number]) => {
     if (!deal.account) return <span className="muted">{t("emptyAccount")}</span>;
+    if (deal.account.archivedAt) return <span className="muted">{deal.account.name}</span>;
     return <a href={`/workspaces/${workspaceId}/leads/accounts/${deal.account.id}`}>{deal.account.name}</a>;
   };
   const dealTableColumns: WorkItemTableColumn[] = [
@@ -234,7 +235,7 @@ export default async function RelationshipPipelinePage({
       value: <strong>{formatCurrency(deal.valueCents ?? 0)}</strong>,
       followUp: <span className="muted">{followUpText(deal)}</span>,
       owner: <span className="muted">{ownerText(deal.ownerUserId)}</span>,
-      actions: deal.account ? (
+      actions: deal.account && !deal.account.archivedAt ? (
         <a
           href={`/workspaces/${workspaceId}/leads/accounts/${deal.account.id}?view=pipeline`}
           className="nr-icon-link nr-table-action"

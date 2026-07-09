@@ -2,6 +2,8 @@ import { describe, expect, it, vi, beforeEach } from "vitest";
 
 // ---------- mocks ----------
 
+const archiveWorkspaceArtifact = vi.fn().mockResolvedValue({ id: "archive-1" });
+
 vi.mock("@corgtex/shared", () => {
   return {
     env: {
@@ -275,6 +277,15 @@ vi.mock("./auth", () => ({
 
 vi.mock("./events", () => ({
   appendEvents: vi.fn().mockResolvedValue(undefined),
+}));
+
+vi.mock("./archive", () => ({
+  archiveWorkspaceArtifact,
+  archiveFilterWhere: vi.fn((filter = "active") => {
+    if (filter === "all") return {};
+    if (filter === "archived") return { archivedAt: { not: null } };
+    return { archivedAt: null };
+  }),
 }));
 
 const dummyActor = { kind: "user", user: { id: "u-1", email: "admin@corgtex.local" } } as any;
@@ -743,6 +754,28 @@ describe("CRM domain", () => {
         take: 10,
       }));
       expect(result.total).toBe(1);
+    });
+
+    it("archives accounts through the shared archive system without cascading to linked CRM records", async () => {
+      const { prisma } = await import("@corgtex/shared");
+      const { requireWorkspaceMembership } = await import("./auth");
+      const { archiveCrmAccount } = await import("./crm");
+
+      const result = await archiveCrmAccount(dummyActor, {
+        workspaceId: "ws-1",
+        accountId: "account-1",
+      });
+
+      expect(requireWorkspaceMembership).toHaveBeenCalledWith({ actor: dummyActor, workspaceId: "ws-1" });
+      expect(archiveWorkspaceArtifact).toHaveBeenCalledWith(dummyActor, {
+        workspaceId: "ws-1",
+        entityType: "CrmAccount",
+        entityId: "account-1",
+        reason: "Archived from CRM account archive action.",
+      });
+      expect(prisma.crmContact.updateMany).not.toHaveBeenCalled();
+      expect(prisma.crmDeal.updateMany).not.toHaveBeenCalled();
+      expect(result).toEqual({ id: "account-1" });
     });
 
     it("links a new contact to an inferred account", async () => {
@@ -1299,6 +1332,25 @@ describe("CRM domain", () => {
   });
 
   describe("relationship lists", () => {
+    it("archives contacts through the shared archive system", async () => {
+      const { requireWorkspaceMembership } = await import("./auth");
+      const { archiveContact } = await import("./crm");
+
+      const result = await archiveContact(dummyActor, {
+        workspaceId: "ws-1",
+        contactId: "contact-1",
+      });
+
+      expect(requireWorkspaceMembership).toHaveBeenCalledWith({ actor: dummyActor, workspaceId: "ws-1" });
+      expect(archiveWorkspaceArtifact).toHaveBeenCalledWith(dummyActor, {
+        workspaceId: "ws-1",
+        entityType: "CrmContact",
+        entityId: "contact-1",
+        reason: "Archived from CRM contact archive action.",
+      });
+      expect(result).toEqual({ id: "contact-1" });
+    });
+
     it("filters contacts and deals by linked relationship ids", async () => {
       const { prisma } = await import("@corgtex/shared");
       const { requireWorkspaceMembership } = await import("./auth");

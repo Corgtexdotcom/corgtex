@@ -19,9 +19,15 @@ type PipelineMember = {
   };
 };
 
+type PipelineAccount = {
+  id: string;
+  name: string;
+  archivedAt?: Date | string | null;
+};
+
 type PipelineDeal = DealPipelineDeal & {
   accountId?: string | null;
-  account?: { id: string; name: string } | null;
+  account?: PipelineAccount | null;
   contact: { id: string; name?: string | null; email: string };
   ownerUserId?: string | null;
 };
@@ -78,7 +84,7 @@ export function DealPipelineBoard({
     stageAgeDays: (days: number) => string;
   };
   workItemLabels: WorkItemLabels;
-  accountFallback?: { id: string; name: string } | null;
+  accountFallback?: PipelineAccount | null;
   addStageHrefs?: Partial<Record<string, string>>;
 }) {
   const groupedDeals = dealsGroupedByStage(deals);
@@ -147,7 +153,13 @@ export function DealPipelineBoard({
               <div style={{ display: "grid", gap: 6, marginTop: 10, fontSize: "0.82rem" }}>
                 <div>
                   <span className="muted">{labels.account}: </span>
-                  {account ? <a href={accountHref(workspaceId, account.id)}>{account.name}</a> : <span className="muted">{labels.noAccount}</span>}
+                  {account ? (
+                    account.archivedAt ? (
+                      <span className="muted">{account.name}</span>
+                    ) : (
+                      <a href={accountHref(workspaceId, account.id)}>{account.name}</a>
+                    )
+                  ) : <span className="muted">{labels.noAccount}</span>}
                 </div>
                 <div>
                   <span className="muted">{labels.contact}: </span>
