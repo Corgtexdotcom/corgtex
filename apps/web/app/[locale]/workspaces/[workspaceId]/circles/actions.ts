@@ -12,6 +12,7 @@ import {
   createRole,
   deleteRole,
   removeAgentFromCircle,
+  reassignRole,
   unassignRole,
   updateRole
 } from "@corgtex/domain";
@@ -138,6 +139,21 @@ export async function unassignRoleAction(formData: FormData) {
     workspaceId,
     roleId: asString(formData, "roleId"),
     memberId: asString(formData, "memberId"),
+  });
+  refresh(workspaceId);
+}
+
+export async function reassignRoleAction(formData: FormData) {
+  const _demoGuardWsId = formData.get("workspaceId") as string;
+  if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
+
+  const actor = await requirePageActor();
+  const workspaceId = asString(formData, "workspaceId");
+  await reassignRole(actor, {
+    workspaceId,
+    roleId: asString(formData, "roleId"),
+    fromMemberId: asString(formData, "fromMemberId"),
+    toMemberId: asString(formData, "toMemberId"),
   });
   refresh(workspaceId);
 }

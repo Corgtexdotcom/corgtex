@@ -546,6 +546,108 @@ describe("roles domain", () => {
     }));
   });
 
+  it("reassignRole moves a holder through the shared assignment lifecycle in one transaction", async () => {
+    prismaMock.role.findUnique.mockResolvedValue({
+      id: "role-1",
+      circleId: "circle-1",
+      name: "Lead",
+      purposeMd: "Lead the work.",
+      accountabilities: ["Coordinate"],
+      artifacts: [],
+      metricsMd: null,
+      coreRoleType: null,
+      archivedAt: null,
+      circle: {
+        id: "circle-1",
+        workspaceId: "workspace-1",
+        name: "Circle",
+        purposeMd: null,
+        domainMd: null,
+      },
+    });
+    prismaMock.member.findUnique.mockResolvedValue({
+      id: "member-2",
+      userId: "user-2",
+      workspaceId: "workspace-1",
+      isActive: true,
+      user: { displayName: "Next holder", email: "next@example.com" },
+    });
+    prismaMock.roleAssignment.findUnique
+      .mockResolvedValueOnce({ id: "source-assignment" })
+      .mockResolvedValueOnce(null);
+    prismaMock.roleAssignment.upsert.mockResolvedValue({ id: "target-assignment" });
+    prismaMock.roleAssignment.delete.mockResolvedValue({ id: "source-assignment" });
+
+    const { reassignRole } = await import("./roles");
+    await expect(reassignRole(actor, {
+      workspaceId: "workspace-1",
+      roleId: "role-1",
+      fromMemberId: "member-1",
+      toMemberId: "member-2",
+    })).resolves.toEqual({
+      roleId: "role-1",
+      fromMemberId: "member-1",
+      toMemberId: "member-2",
+      assignedAssignmentId: "target-assignment",
+      removedAssignmentId: "source-assignment",
+    });
+
+    expect(prismaMock.$transaction).toHaveBeenCalledTimes(1);
+    expect(prismaMock.$executeRaw.mock.calls.length).toBeGreaterThanOrEqual(2);
+    expect(prismaMock.roleAssignment.upsert).toHaveBeenCalledWith(expect.objectContaining({
+      where: {
+        roleId_memberId: {
+          roleId: "role-1",
+          memberId: "member-2",
+        },
+      },
+      create: {
+        roleId: "role-1",
+        memberId: "member-2",
+      },
+    }));
+    expect(prismaMock.roleHolderHistory.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        roleId: "role-1",
+        memberId: "member-2",
+        assignmentId: "target-assignment",
+      }),
+    }));
+    expect(prismaMock.roleAssignment.delete).toHaveBeenCalledWith({
+      where: { id: "source-assignment" },
+    });
+    expect(prismaMock.roleHolderHistory.updateMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({
+        roleId: "role-1",
+        memberId: "member-1",
+        endedAt: null,
+      }),
+    }));
+    expect(prismaMock.roleOnboardingSession.updateMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({
+        roleId: "role-1",
+        memberId: "member-1",
+      }),
+      data: expect.objectContaining({
+        status: "DISMISSED",
+      }),
+    }));
+  });
+
+  it("reassignRole rejects same-member reassignment before mutating", async () => {
+    const { reassignRole } = await import("./roles");
+    await expect(reassignRole(actor, {
+      workspaceId: "workspace-1",
+      roleId: "role-1",
+      fromMemberId: "member-1",
+      toMemberId: "member-1",
+    })).rejects.toMatchObject({
+      status: 400,
+      code: "INVALID_INPUT",
+    });
+    expect(prismaMock.$transaction).not.toHaveBeenCalled();
+  });
+
   it("listRoleAssignments returns assignments for workspace roles", async () => {
     prismaMock.roleAssignment.findMany.mockResolvedValue([{ id: "assignment-1" }]);
 
