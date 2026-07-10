@@ -9,6 +9,7 @@ import { UnavailableItemStatus } from "@/lib/components/UnavailableItemStatus";
 import { ExternalResourceAttachForm, ExternalResourceCards } from "@/lib/components/ExternalResourceCards";
 import { DeliberationThread } from "@/lib/components/DeliberationThread";
 import { DeliberationComposer } from "@/lib/components/DeliberationComposer";
+import { AdviceRequestForm } from "@/lib/components/AdviceRequestForm";
 import { getDeliberationTargets } from "@/lib/deliberation-targets";
 import { canOpenPrivateDraft } from "@/lib/governance-open-guards";
 import { attachTensionExternalResourceAction, createProposalFromTensionAction, postTensionDeliberationAction, publishTensionAction, requestTensionInputAction, returnTensionToDraftAction, resolveTensionDeliberationAction, updateTensionAction, updateTensionDeliberationAction } from "../../actions";
@@ -133,11 +134,15 @@ export default async function TensionDetailPage({
   const canDraftProposal = !isArchived && !tension.proposal && (canManage || !tension.isPrivate);
   const canResolve = !isArchived && !tension.isPrivate && tension.status === "OPEN";
   const canRequestInput = !isArchived && tension.status === "OPEN" && !tension.isPrivate && (canManage || isParentResponsible);
-  const memberRequestOptions = targetOptions.filter((option) => option.kind === "member");
-  const circleRequestOptions = targetOptions.filter((option) => option.kind === "circle");
-  const defaultCircleValue = tension.circleId && circleRequestOptions.some((option) => option.value === `circle:${tension.circleId}`)
+  const memberRequestOptions = targetOptions
+    .filter((option) => option.kind === "member")
+    .map((option) => ({ value: option.value.slice("member:".length), label: option.name }));
+  const circleRequestOptions = targetOptions
+    .filter((option) => option.kind === "circle")
+    .map((option) => ({ value: option.value.slice("circle:".length), label: option.name }));
+  const defaultCircleValue = tension.circleId && circleRequestOptions.some((option) => option.value === tension.circleId)
     ? tension.circleId
-    : circleRequestOptions[0]?.value.slice("circle:".length) ?? "";
+    : circleRequestOptions[0]?.value ?? "";
   const dateTimeLabel = (value: Date | string | null | undefined) => value
     ? format.dateTime(new Date(value), { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })
     : null;
@@ -382,58 +387,38 @@ export default async function TensionDetailPage({
           {canRequestInput && (
             <details open={inputRequests.length === 0}>
               <summary className="secondary small nr-hide-marker" style={{ cursor: "pointer", display: "inline-block" }}>{t("btnRequestInput")}</summary>
-              <form action={requestTensionInputAction} className="stack nr-form-section" style={{ marginTop: 12 }}>
-                <input type="hidden" name="workspaceId" value={workspaceId} />
-                <input type="hidden" name="tensionId" value={tension.id} />
-                <label>
-                  {t("inputAudience")}
-                  <select name="audienceType" defaultValue={defaultCircleValue ? "CIRCLE" : "WORKSPACE"}>
-                    <option value="MEMBERS">{t("inputAudienceMembers")}</option>
-                    <option value="CIRCLE">{t("inputAudienceCircle")}</option>
-                    <option value="WORKSPACE">{t("inputAudienceWorkspace")}</option>
-                  </select>
-                </label>
-                <label>
-                  {t("inputPeople")}
-                  <select name="memberIds" multiple size={Math.min(Math.max(memberRequestOptions.length, 2), 6)}>
-                    {memberRequestOptions.map((option) => (
-                      <option key={option.value} value={option.value.slice("member:".length)}>{option.name}</option>
-                    ))}
-                  </select>
-                </label>
-                <label>
-                  {t("inputCircle")}
-                  <select name="targetCircleId" defaultValue={defaultCircleValue}>
-                    {circleRequestOptions.map((option) => (
-                      <option key={option.value} value={option.value.slice("circle:".length)}>{option.name}</option>
-                    ))}
-                  </select>
-                </label>
-                <label>
-                  {t("inputMessage")}
-                  <MarkdownEditor name="messageMd" rows={4} required />
-                </label>
-                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 12 }}>
-                  <label>
-                    {t("inputDeadline")}
-                    <input name="deadlineAt" type="datetime-local" />
-                  </label>
-                  <label>
-                    {t("inputReminder")}
-                    <input name="reminderAt" type="datetime-local" />
-                  </label>
-                </div>
-                <label>
-                  {t("inputPreferredChannel")}
-                  <select name="preferredChannel" defaultValue="IN_APP">
-                    <option value="IN_APP">{t("inputChannelInApp")}</option>
-                    <option value="SLACK">{t("inputChannelSlack")}</option>
-                    <option value="EMAIL">{t("inputChannelEmail")}</option>
-                    <option value="COPY">{t("inputChannelCopy")}</option>
-                  </select>
-                </label>
-                <button type="submit" className="secondary small" style={{ alignSelf: "flex-start" }}>{t("btnSendInputRequest")}</button>
-              </form>
+              <AdviceRequestForm
+                action={requestTensionInputAction}
+                hiddenFields={{ workspaceId, tensionId: tension.id }}
+                memberOptions={memberRequestOptions}
+                circleOptions={circleRequestOptions}
+                defaultAudienceType={defaultCircleValue ? "CIRCLE" : "WORKSPACE"}
+                defaultCircleId={defaultCircleValue}
+                labels={{
+                  audience: t("inputAudience"),
+                  audienceMembers: t("inputAudienceMembers"),
+                  audienceCircle: t("inputAudienceCircle"),
+                  audienceWorkspace: t("inputAudienceWorkspace"),
+                  people: t("inputPeople"),
+                  choosePeople: t("inputChoosePeople"),
+                  circle: t("inputCircle"),
+                  membersAudienceNote: t("inputMembersAudienceNote"),
+                  circleAudienceNote: t("inputCircleAudienceNote"),
+                  workspaceAudienceNote: t("inputWorkspaceAudienceNote"),
+                  message: t("inputMessage"),
+                  deadline: t("inputDeadline"),
+                  reminder: t("inputReminder"),
+                  preferredChannel: t("inputPreferredChannel"),
+                  channelInApp: t("inputChannelInApp"),
+                  channelSlack: t("inputChannelSlack"),
+                  channelEmail: t("inputChannelEmail"),
+                  channelCopy: t("inputChannelCopy"),
+                  selectAll: tWork("selectAll"),
+                  unselectAll: tWork("unselectAll"),
+                  selectedCount: tWork("selectedCount", { count: "{count}" }),
+                  submit: t("btnSendInputRequest"),
+                }}
+              />
             </details>
           )}
         </section>

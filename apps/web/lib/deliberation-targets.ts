@@ -1,5 +1,6 @@
 import type { AppActor } from "@corgtex/shared";
 import { prisma } from "@corgtex/shared";
+import { humanMemberIdentityWhere } from "@corgtex/domain";
 import type { DeliberationMentionTarget } from "./deliberation-mentions";
 
 export type DeliberationTargetOption = DeliberationMentionTarget;
@@ -17,7 +18,7 @@ export async function getDeliberationTargets(params: {
       orderBy: { name: "asc" },
     }),
     prisma.member.findMany({
-      where: { workspaceId: params.workspaceId, isActive: true },
+      where: { workspaceId: params.workspaceId, isActive: true, ...humanMemberIdentityWhere() },
       include: { user: { select: { displayName: true, email: true } } },
       orderBy: { joinedAt: "asc" },
     }),

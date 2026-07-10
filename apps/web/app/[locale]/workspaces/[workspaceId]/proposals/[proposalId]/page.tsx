@@ -2,7 +2,6 @@ import { notFound } from "next/navigation";
 import Link from "next/link";
 import { AppError, getProposal, getWorkspaceArchiveRecord, listAdviceRequests, listDeliberationEntries, listExternalResourceAttachments, listWorkItemEvidence, listWorkItemVersions, requireWorkspaceMembership } from "@corgtex/domain";
 import { requirePageActor } from "@/lib/auth";
-import { MarkdownEditor } from "@/lib/components/MarkdownEditor";
 import { MarkdownRenderer } from "@/lib/components/MarkdownRenderer";
 import { WorkItemResolutionDialog } from "@/lib/components/WorkItemResolutionDialog";
 import { ArchivedItemBanner } from "@/lib/components/ArchivedItemBanner";
@@ -10,6 +9,7 @@ import { UnavailableItemStatus } from "@/lib/components/UnavailableItemStatus";
 import { ExternalResourceAttachForm, ExternalResourceCards } from "@/lib/components/ExternalResourceCards";
 import { DeliberationThread } from "@/lib/components/DeliberationThread";
 import { DeliberationComposer } from "@/lib/components/DeliberationComposer";
+import { AdviceRequestForm } from "@/lib/components/AdviceRequestForm";
 import { getDeliberationTargets } from "@/lib/deliberation-targets";
 import { canOpenPrivateDraft } from "@/lib/governance-open-guards";
 import { attachProposalExternalResourceAction, postDeliberationEntryAction, requestProposalAdviceAction, resolveDeliberationEntryAction, resolveProposalAction, returnProposalToDraftAction, submitProposalAction, updateDeliberationEntryAction, updateProposalAction } from "../actions";
@@ -139,11 +139,15 @@ export default async function ProposalDetailPage({
       || (actorMemberId && entry.targetMemberId === actorMemberId)
       || (entry.targetCircleId && actorCircleIds.has(entry.targetCircleId)),
   );
-  const memberRequestOptions = targetOptions.filter((option) => option.kind === "member");
-  const circleRequestOptions = targetOptions.filter((option) => option.kind === "circle");
-  const defaultCircleValue = proposal.circleId && circleRequestOptions.some((option) => option.value === `circle:${proposal.circleId}`)
+  const memberRequestOptions = targetOptions
+    .filter((option) => option.kind === "member")
+    .map((option) => ({ value: option.value.slice("member:".length), label: option.name }));
+  const circleRequestOptions = targetOptions
+    .filter((option) => option.kind === "circle")
+    .map((option) => ({ value: option.value.slice("circle:".length), label: option.name }));
+  const defaultCircleValue = proposal.circleId && circleRequestOptions.some((option) => option.value === proposal.circleId)
     ? proposal.circleId
-    : circleRequestOptions[0]?.value.slice("circle:".length) ?? "";
+    : circleRequestOptions[0]?.value ?? "";
   const dateTimeLabel = (value: Date | string | null | undefined) => value
     ? format.dateTime(new Date(value), { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })
     : null;
@@ -326,58 +330,38 @@ export default async function ProposalDetailPage({
               {canRequestAdvice && (
                 <details open={adviceRequests.length === 0}>
                   <summary className="secondary small nr-hide-marker" style={{ cursor: "pointer", display: "inline-block" }}>{t("btnRequestAdvice")}</summary>
-                  <form action={requestProposalAdviceAction} className="stack nr-form-section" style={{ marginTop: 12 }}>
-                    <input type="hidden" name="workspaceId" value={workspaceId} />
-                    <input type="hidden" name="proposalId" value={proposal.id} />
-                    <label>
-                      {t("adviceAudience")}
-                      <select name="audienceType" defaultValue={defaultCircleValue ? "CIRCLE" : "WORKSPACE"}>
-                        <option value="MEMBERS">{t("adviceAudienceMembers")}</option>
-                        <option value="CIRCLE">{t("adviceAudienceCircle")}</option>
-                        <option value="WORKSPACE">{t("adviceAudienceWorkspace")}</option>
-                      </select>
-                    </label>
-                    <label>
-                      {t("advicePeople")}
-                      <select name="memberIds" multiple size={Math.min(Math.max(memberRequestOptions.length, 2), 6)}>
-                        {memberRequestOptions.map((option) => (
-                          <option key={option.value} value={option.value.slice("member:".length)}>{option.name}</option>
-                        ))}
-                      </select>
-                    </label>
-                    <label>
-                      {t("adviceCircle")}
-                      <select name="targetCircleId" defaultValue={defaultCircleValue}>
-                        {circleRequestOptions.map((option) => (
-                          <option key={option.value} value={option.value.slice("circle:".length)}>{option.name}</option>
-                        ))}
-                      </select>
-                    </label>
-                    <label>
-                      {t("adviceMessage")}
-                      <MarkdownEditor name="messageMd" rows={4} required />
-                    </label>
-                    <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 12 }}>
-                      <label>
-                        {t("adviceDeadline")}
-                        <input name="deadlineAt" type="datetime-local" />
-                      </label>
-                      <label>
-                        {t("adviceReminder")}
-                        <input name="reminderAt" type="datetime-local" />
-                      </label>
-                    </div>
-                    <label>
-                      {t("advicePreferredChannel")}
-                      <select name="preferredChannel" defaultValue="IN_APP">
-                        <option value="IN_APP">{t("adviceChannelInApp")}</option>
-                        <option value="SLACK">{t("adviceChannelSlack")}</option>
-                        <option value="EMAIL">{t("adviceChannelEmail")}</option>
-                        <option value="COPY">{t("adviceChannelCopy")}</option>
-                      </select>
-                    </label>
-                    <button type="submit" className="secondary small" style={{ alignSelf: "flex-start" }}>{t("btnSendAdviceRequest")}</button>
-                  </form>
+                  <AdviceRequestForm
+                    action={requestProposalAdviceAction}
+                    hiddenFields={{ workspaceId, proposalId: proposal.id }}
+                    memberOptions={memberRequestOptions}
+                    circleOptions={circleRequestOptions}
+                    defaultAudienceType={defaultCircleValue ? "CIRCLE" : "WORKSPACE"}
+                    defaultCircleId={defaultCircleValue}
+                    labels={{
+                      audience: t("adviceAudience"),
+                      audienceMembers: t("adviceAudienceMembers"),
+                      audienceCircle: t("adviceAudienceCircle"),
+                      audienceWorkspace: t("adviceAudienceWorkspace"),
+                      people: t("advicePeople"),
+                      choosePeople: t("adviceChoosePeople"),
+                      circle: t("adviceCircle"),
+                      membersAudienceNote: t("adviceMembersAudienceNote"),
+                      circleAudienceNote: t("adviceCircleAudienceNote"),
+                      workspaceAudienceNote: t("adviceWorkspaceAudienceNote"),
+                      message: t("adviceMessage"),
+                      deadline: t("adviceDeadline"),
+                      reminder: t("adviceReminder"),
+                      preferredChannel: t("advicePreferredChannel"),
+                      channelInApp: t("adviceChannelInApp"),
+                      channelSlack: t("adviceChannelSlack"),
+                      channelEmail: t("adviceChannelEmail"),
+                      channelCopy: t("adviceChannelCopy"),
+                      selectAll: tWork("selectAll"),
+                      unselectAll: tWork("unselectAll"),
+                      selectedCount: tWork("selectedCount", { count: "{count}" }),
+                      submit: t("btnSendAdviceRequest"),
+                    }}
+                  />
                 </details>
               )}
             </section>
