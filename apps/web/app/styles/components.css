@@ -2286,6 +2286,71 @@ a.meeting-agenda-item:hover {
     opacity: 0.5;
   }
 
+  .nr-advice-request-form {
+    gap: 14px;
+  }
+
+  .nr-advice-audience-fieldset {
+    border: 0;
+    padding: 0;
+    margin: 0;
+    display: grid;
+    gap: 6px;
+  }
+
+  .nr-advice-audience-options {
+    display: inline-flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    padding: 4px;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    background: var(--bg-alt);
+    width: fit-content;
+    max-width: 100%;
+  }
+
+  .nr-advice-audience-option {
+    display: inline-flex !important;
+    align-items: center;
+    gap: 8px;
+    min-width: auto !important;
+    border: 0;
+    border-radius: 6px;
+    background: transparent;
+    padding: 8px 12px;
+    margin: 0;
+    color: var(--muted);
+    font-size: 0.9rem;
+    font-weight: 700;
+    font-family: inherit;
+    cursor: pointer;
+  }
+
+  .nr-advice-audience-option-active {
+    color: var(--text);
+    background: var(--surface);
+    box-shadow: 0 1px 3px rgba(15, 23, 42, 0.08);
+  }
+
+  .nr-advice-audience-option:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+
+  .nr-advice-recipient-panel {
+    display: grid;
+    gap: 6px;
+  }
+
+  .nr-advice-recipient-picker {
+    width: min(340px, 100%);
+  }
+
+  .nr-advice-recipient-note {
+    margin: 0;
+  }
+
   .nr-crm-masthead {
     margin-bottom: 20px !important;
   }

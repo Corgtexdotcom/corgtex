@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useId, useMemo, useRef, useState } from "react";
+import React, { useEffect, useId, useMemo, useRef, useState } from "react";
 import { Check, ChevronDown } from "lucide-react";
 import { cn } from "@/lib/utils";
 
@@ -19,6 +19,7 @@ export function MultiSelectFilter({
   selectAllLabel = "Select all",
   unselectAllLabel = "Unselect all",
   selectedCountLabel = "{count} selected",
+  collapseAllToEmpty = true,
   className,
   triggerClassName,
   panelClassName,
@@ -32,6 +33,7 @@ export function MultiSelectFilter({
   selectAllLabel?: string;
   unselectAllLabel?: string;
   selectedCountLabel?: string;
+  collapseAllToEmpty?: boolean;
   className?: string;
   triggerClassName?: string;
   panelClassName?: string;
@@ -40,12 +42,12 @@ export function MultiSelectFilter({
   const id = useId();
   const rootRef = useRef<HTMLDivElement>(null);
   const [open, setOpen] = useState(false);
-  const [currentValues, setCurrentValues] = useState<string[]>(() => normalizeValues(selectedValues, options));
+  const [currentValues, setCurrentValues] = useState<string[]>(() => normalizeValues(selectedValues, options, collapseAllToEmpty));
   const optionByValue = useMemo(() => new Map(options.map((option) => [option.value, option])), [options]);
 
   useEffect(() => {
-    setCurrentValues(normalizeValues(selectedValues, options));
-  }, [options, selectedValues]);
+    setCurrentValues(normalizeValues(selectedValues, options, collapseAllToEmpty));
+  }, [collapseAllToEmpty, options, selectedValues]);
 
   useEffect(() => {
     if (!open) return;
@@ -75,7 +77,7 @@ export function MultiSelectFilter({
       : selectedCountLabel.replace("{count}", String(currentValues.length));
 
   const updateValues = (values: string[]) => {
-    const normalized = normalizeValues(values, options);
+    const normalized = normalizeValues(values, options, collapseAllToEmpty);
     setCurrentValues(normalized);
     onSelectionChange?.(normalized);
   };
@@ -92,6 +94,9 @@ export function MultiSelectFilter({
 
   return (
     <div ref={rootRef} className={cn("nr-multi-select", className)}>
+      {currentValues.map((value) => (
+        <input key={value} type="hidden" name={name} value={value} />
+      ))}
       {label && <span className="nr-item-meta">{label}</span>}
       <button
         type="button"
@@ -122,7 +127,6 @@ export function MultiSelectFilter({
               <label key={option.value} className={cn("nr-multi-select-option", option.disabled && "nr-multi-select-option-disabled")}>
                 <input
                   type="checkbox"
-                  name={name}
                   value={option.value}
                   checked={selectedSet.has(option.value)}
                   disabled={option.disabled}
@@ -141,7 +145,7 @@ export function MultiSelectFilter({
   );
 }
 
-function normalizeValues(values: readonly string[], options: MultiSelectFilterOption[]) {
+function normalizeValues(values: readonly string[], options: MultiSelectFilterOption[], collapseAllToEmpty: boolean) {
   const allowedValues = new Set(options.filter((option) => !option.disabled).map((option) => option.value));
   const seen = new Set<string>();
   const normalized: string[] = [];
@@ -152,5 +156,5 @@ function normalizeValues(values: readonly string[], options: MultiSelectFilterOp
     normalized.push(value);
   }
 
-  return normalized.length === allowedValues.size ? [] : normalized;
+  return collapseAllToEmpty && normalized.length === allowedValues.size ? [] : normalized;
 }
