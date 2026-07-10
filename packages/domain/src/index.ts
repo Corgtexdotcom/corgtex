@@ -49,6 +49,7 @@ export * from "./meeting-durations";
 export * from "./meeting-urls";
 export * from "./members";
 export * from "./member-identity";
+export * from "./member-merge";
 export * from "./notifications";
 export * from "./permalinks";
 export * from "./proposals";
