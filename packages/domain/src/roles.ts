@@ -31,6 +31,31 @@ function sameStringList(a: string[], b: string[]) {
   return a.length === b.length && a.every((value, index) => value === b[index]);
 }
 
+const ROLE_ASSIGNMENT_ROLE_INCLUDE = {
+  circle: {
+    select: {
+      id: true,
+      workspaceId: true,
+      name: true,
+      purposeMd: true,
+      domainMd: true,
+    },
+  },
+} satisfies Prisma.RoleInclude;
+
+type RoleForAssignment = Prisma.RoleGetPayload<{ include: typeof ROLE_ASSIGNMENT_ROLE_INCLUDE }>;
+
+const ROLE_ASSIGNMENT_MEMBER_INCLUDE = {
+  user: {
+    select: {
+      displayName: true,
+      email: true,
+    },
+  },
+} satisfies Prisma.MemberInclude;
+
+type MemberForAssignment = Prisma.MemberGetPayload<{ include: typeof ROLE_ASSIGNMENT_MEMBER_INCLUDE }>;
+
 export async function listRoles(workspaceId: string, opts?: { archiveFilter?: ArchiveFilter }) {
   return prisma.role.findMany({
     where: {
@@ -382,100 +407,16 @@ export async function assignRole(actor: AppActor, params: {
   });
 
   return prisma.$transaction(async (tx) => {
-    const role = await tx.role.findUnique({
-      where: { id: params.roleId },
-      include: {
-        circle: {
-          select: {
-            id: true,
-            workspaceId: true,
-            name: true,
-            purposeMd: true,
-            domainMd: true,
-          },
-        },
-      },
-    });
-    invariant(role && role.circle.workspaceId === params.workspaceId && !role.archivedAt, 404, "NOT_FOUND", "Role not found.");
+    await lockRoleAssignments(tx, [{ roleId: params.roleId, memberId: params.memberId }]);
 
-    const member = await tx.member.findUnique({
-      where: { id: params.memberId },
-      include: {
-        user: {
-          select: {
-            displayName: true,
-            email: true,
-          },
-        },
-      },
-    });
-    invariant(member && member.workspaceId === params.workspaceId && member.isActive, 404, "NOT_FOUND", "Member not found.");
+    const role = await loadRoleForAssignment(tx, params.workspaceId, params.roleId);
+    const member = await loadMemberForAssignment(tx, params.workspaceId, params.memberId);
 
-    const assignmentKey = {
-      roleId: params.roleId,
-      memberId: params.memberId,
-    };
-    await tx.$executeRaw`
-      SELECT pg_advisory_xact_lock(hashtext('role_assignment'), hashtext(${`${assignmentKey.roleId}:${assignmentKey.memberId}`}))
-    `;
-    const existingAssignment = await tx.roleAssignment.findUnique({
-      where: {
-        roleId_memberId: assignmentKey,
-      },
-    });
-
-    const assignment = await tx.roleAssignment.upsert({
-      where: {
-        roleId_memberId: assignmentKey,
-      },
-      update: {},
-      create: assignmentKey,
-    });
-
-    if (!existingAssignment) {
-      await startRoleHolderHistory(tx, {
-        workspaceId: params.workspaceId,
-        roleId: params.roleId,
-        memberId: params.memberId,
-        assignmentId: assignment.id,
-        actor,
-      });
-    }
-
-    const onboarding = await ensureRoleOnboardingForAssignment(tx, {
+    const { assignment } = await assignRoleInTransaction(tx, actor, {
       workspaceId: params.workspaceId,
       role,
       member,
     });
-
-    await tx.auditLog.create({
-      data: {
-        workspaceId: params.workspaceId,
-        actorUserId: actor.kind === "user" ? actor.user.id : null,
-        action: "role.assigned",
-        entityType: "RoleAssignment",
-        entityId: assignment.id,
-        meta: { roleId: params.roleId, memberId: params.memberId },
-      },
-    });
-
-    if (!existingAssignment || onboarding.wasCreated) {
-      await appendEvents(tx, [
-        {
-          workspaceId: params.workspaceId,
-          type: "role.assigned",
-          aggregateType: "RoleAssignment",
-          aggregateId: assignment.id,
-          payload: {
-            roleId: params.roleId,
-            memberId: params.memberId,
-            assignmentId: assignment.id,
-            onboardingSessionId: onboarding.id,
-            conversationId: onboarding.conversationId,
-          },
-        },
-      ]);
-    }
 
     return assignment;
   });
@@ -493,69 +434,251 @@ export async function unassignRole(actor: AppActor, params: {
   });
 
   return prisma.$transaction(async (tx) => {
-    await tx.$executeRaw`
-      SELECT pg_advisory_xact_lock(hashtext('role_assignment'), hashtext(${`${params.roleId}:${params.memberId}`}))
-    `;
-    const role = await tx.role.findUnique({
-      where: { id: params.roleId },
-      include: { circle: { select: { workspaceId: true } } },
-    });
-    invariant(role && role.circle.workspaceId === params.workspaceId && !role.archivedAt, 404, "NOT_FOUND", "Role not found.");
+    await lockRoleAssignments(tx, [{ roleId: params.roleId, memberId: params.memberId }]);
+    await loadRoleForAssignment(tx, params.workspaceId, params.roleId);
 
-    const assignment = await tx.roleAssignment.findUnique({
+    return unassignRoleInTransaction(tx, actor, {
+      workspaceId: params.workspaceId,
+      roleId: params.roleId,
+      memberId: params.memberId,
+    });
+  });
+}
+
+export async function reassignRole(actor: AppActor, params: {
+  workspaceId: string;
+  roleId: string;
+  fromMemberId: string;
+  toMemberId: string;
+}) {
+  await requireWorkspaceMembership({
+    actor,
+    workspaceId: params.workspaceId,
+    allowedRoles: ["FACILITATOR", "ADMIN"],
+  });
+
+  invariant(params.fromMemberId !== params.toMemberId, 400, "INVALID_INPUT", "Choose a different member to reassign this role.");
+
+  return prisma.$transaction(async (tx) => {
+    await lockRoleAssignments(tx, [
+      { roleId: params.roleId, memberId: params.fromMemberId },
+      { roleId: params.roleId, memberId: params.toMemberId },
+    ]);
+
+    const role = await loadRoleForAssignment(tx, params.workspaceId, params.roleId);
+    const targetMember = await loadMemberForAssignment(tx, params.workspaceId, params.toMemberId);
+    const sourceAssignment = await tx.roleAssignment.findUnique({
       where: {
         roleId_memberId: {
           roleId: params.roleId,
-          memberId: params.memberId,
+          memberId: params.fromMemberId,
         },
       },
     });
-    invariant(assignment, 404, "NOT_FOUND", "Role assignment not found.");
+    invariant(sourceAssignment, 404, "NOT_FOUND", "Role assignment not found.");
 
-    await tx.roleAssignment.delete({
-      where: { id: assignment.id },
+    const { assignment: targetAssignment } = await assignRoleInTransaction(tx, actor, {
+      workspaceId: params.workspaceId,
+      role,
+      member: targetMember,
     });
-
-    await endRoleHolderHistory(tx, {
+    const removedAssignment = await unassignRoleInTransaction(tx, actor, {
       workspaceId: params.workspaceId,
       roleId: params.roleId,
-      memberId: params.memberId,
+      memberId: params.fromMemberId,
+      assignment: sourceAssignment,
+    });
+
+    return {
+      roleId: params.roleId,
+      fromMemberId: params.fromMemberId,
+      toMemberId: params.toMemberId,
+      assignedAssignmentId: targetAssignment.id,
+      removedAssignmentId: removedAssignment.id,
+    };
+  });
+}
+
+function assignmentKey(params: { roleId: string; memberId: string }) {
+  return `${params.roleId}:${params.memberId}`;
+}
+
+async function lockRoleAssignments(
+  tx: Prisma.TransactionClient,
+  assignments: Array<{ roleId: string; memberId: string }>,
+) {
+  const keys = Array.from(new Set(assignments.map(assignmentKey))).sort();
+  for (const key of keys) {
+    await tx.$executeRaw`
+      SELECT pg_advisory_xact_lock(hashtext('role_assignment'), hashtext(${key}))
+    `;
+  }
+}
+
+async function loadRoleForAssignment(
+  tx: Prisma.TransactionClient,
+  workspaceId: string,
+  roleId: string,
+): Promise<RoleForAssignment> {
+  const role = await tx.role.findUnique({
+    where: { id: roleId },
+    include: ROLE_ASSIGNMENT_ROLE_INCLUDE,
+  });
+  invariant(role && role.circle.workspaceId === workspaceId && !role.archivedAt, 404, "NOT_FOUND", "Role not found.");
+  return role;
+}
+
+async function loadMemberForAssignment(
+  tx: Prisma.TransactionClient,
+  workspaceId: string,
+  memberId: string,
+): Promise<MemberForAssignment> {
+  const member = await tx.member.findUnique({
+    where: { id: memberId },
+    include: ROLE_ASSIGNMENT_MEMBER_INCLUDE,
+  });
+  invariant(member && member.workspaceId === workspaceId && member.isActive, 404, "NOT_FOUND", "Member not found.");
+  return member;
+}
+
+async function assignRoleInTransaction(
+  tx: Prisma.TransactionClient,
+  actor: AppActor,
+  params: {
+    workspaceId: string;
+    role: RoleForAssignment;
+    member: MemberForAssignment;
+  },
+) {
+  const key = {
+    roleId: params.role.id,
+    memberId: params.member.id,
+  };
+  const existingAssignment = await tx.roleAssignment.findUnique({
+    where: {
+      roleId_memberId: key,
+    },
+  });
+
+  const assignment = await tx.roleAssignment.upsert({
+    where: {
+      roleId_memberId: key,
+    },
+    update: {},
+    create: key,
+  });
+
+  if (!existingAssignment) {
+    await startRoleHolderHistory(tx, {
+      workspaceId: params.workspaceId,
+      roleId: params.role.id,
+      memberId: params.member.id,
+      assignmentId: assignment.id,
       actor,
     });
+  }
 
-    await dismissRoleOnboardingForAssignment(tx, {
+  const onboarding = await ensureRoleOnboardingForAssignment(tx, {
+    workspaceId: params.workspaceId,
+    role: params.role,
+    member: params.member,
+  });
+
+  await tx.auditLog.create({
+    data: {
       workspaceId: params.workspaceId,
-      roleId: params.roleId,
-      memberId: params.memberId,
-    });
+      actorUserId: actorUserId(actor),
+      action: "role.assigned",
+      entityType: "RoleAssignment",
+      entityId: assignment.id,
+      meta: { roleId: params.role.id, memberId: params.member.id },
+    },
+  });
 
-    await tx.auditLog.create({
-      data: {
-        workspaceId: params.workspaceId,
-        actorUserId: actor.kind === "user" ? actor.user.id : null,
-        action: "role.unassigned",
-        entityType: "RoleAssignment",
-        entityId: assignment.id,
-        meta: { roleId: params.roleId, memberId: params.memberId },
-      },
-    });
-
+  if (!existingAssignment || onboarding.wasCreated) {
     await appendEvents(tx, [
       {
         workspaceId: params.workspaceId,
-        type: "role.unassigned",
+        type: "role.assigned",
         aggregateType: "RoleAssignment",
         aggregateId: assignment.id,
         payload: {
-          roleId: params.roleId,
-          memberId: params.memberId,
+          roleId: params.role.id,
+          memberId: params.member.id,
           assignmentId: assignment.id,
+          onboardingSessionId: onboarding.id,
+          conversationId: onboarding.conversationId,
         },
       },
     ]);
+  }
 
-    return { id: assignment.id };
+  return { assignment, existingAssignment, onboarding };
+}
+
+async function unassignRoleInTransaction(
+  tx: Prisma.TransactionClient,
+  actor: AppActor,
+  params: {
+    workspaceId: string;
+    roleId: string;
+    memberId: string;
+    assignment?: { id: string };
+  },
+) {
+  const assignment = params.assignment ?? await tx.roleAssignment.findUnique({
+    where: {
+      roleId_memberId: {
+        roleId: params.roleId,
+        memberId: params.memberId,
+      },
+    },
   });
+  invariant(assignment, 404, "NOT_FOUND", "Role assignment not found.");
+
+  await tx.roleAssignment.delete({
+    where: { id: assignment.id },
+  });
+
+  await endRoleHolderHistory(tx, {
+    workspaceId: params.workspaceId,
+    roleId: params.roleId,
+    memberId: params.memberId,
+    actor,
+  });
+
+  await dismissRoleOnboardingForAssignment(tx, {
+    workspaceId: params.workspaceId,
+    roleId: params.roleId,
+    memberId: params.memberId,
+  });
+
+  await tx.auditLog.create({
+    data: {
+      workspaceId: params.workspaceId,
+      actorUserId: actorUserId(actor),
+      action: "role.unassigned",
+      entityType: "RoleAssignment",
+      entityId: assignment.id,
+      meta: { roleId: params.roleId, memberId: params.memberId },
+    },
+  });
+
+  await appendEvents(tx, [
+    {
+      workspaceId: params.workspaceId,
+      type: "role.unassigned",
+      aggregateType: "RoleAssignment",
+      aggregateId: assignment.id,
+      payload: {
+        roleId: params.roleId,
+        memberId: params.memberId,
+        assignmentId: assignment.id,
+      },
+    },
+  ]);
+
+  return { id: assignment.id };
 }
 
 export async function listRoleAssignments(workspaceId: string) {
