@@ -1380,6 +1380,7 @@ export async function scheduleDailyJobs() {
       where: { workspaceId: { in: workspaceIds }, isActive: true },
       select: {
         workspaceId: true,
+        kind: true,
         newspaperCadence: true,
         user: {
           select: {
@@ -1412,7 +1413,7 @@ export async function scheduleDailyJobs() {
 
     const workspaceCadence = setting.cadence;
     const workspaceMembers = (membersByWorkspace.get(workspace.id) ?? []).filter((member) => (
-      isHumanNewspaperRecipientIdentity(member.user)
+      isHumanNewspaperRecipientIdentity(member)
     ));
     const localDateKey = getNewspaperLocalDateParts(now, setting.timeZone).dateKey;
 

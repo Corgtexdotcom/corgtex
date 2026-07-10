@@ -128,8 +128,8 @@ async function main() {
 
   await prisma.member.upsert({
     where: { workspaceId_userId: { workspaceId: wsId, userId: systemUser.id } },
-    update: { role: "ADMIN", isActive: true },
-    create: { workspaceId: wsId, userId: systemUser.id, role: "ADMIN", isActive: true }
+    update: { role: "ADMIN", kind: "SYSTEM", isActive: true },
+    create: { workspaceId: wsId, userId: systemUser.id, role: "ADMIN", kind: "SYSTEM", isActive: true }
   });
 
   const additionalUsers = [

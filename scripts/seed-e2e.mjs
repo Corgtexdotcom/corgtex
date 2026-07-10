@@ -52,12 +52,14 @@ async function main() {
     },
     update: {
       role: "ADMIN",
+      kind: "SYSTEM",
       isActive: true,
     },
     create: {
       workspaceId: workspace.id,
       userId: user.id,
       role: "ADMIN",
+      kind: "SYSTEM",
       isActive: true,
     },
   });

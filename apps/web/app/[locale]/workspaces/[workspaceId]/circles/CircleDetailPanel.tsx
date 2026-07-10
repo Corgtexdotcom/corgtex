@@ -67,6 +67,7 @@ export default function CircleDetailPanel({
                         person={{
                           memberId: member.memberId,
                           userId: member.userId,
+                          kind: member.kind,
                           displayName: member.displayName,
                           email: member.email,
                           avatarUrl: member.avatarUrl,
@@ -134,6 +135,7 @@ export default function CircleDetailPanel({
                                   person={{
                                     memberId: a.member.id,
                                     userId: a.member.user?.id,
+                                    kind: a.member.kind,
                                     displayName: a.member.user?.displayName || a.member.user?.email || t("unknownMember"),
                                     email: a.member.user?.email || "",
                                     avatarUrl: a.member.user?.avatarUrl,

@@ -1121,7 +1121,7 @@ export async function runDailyDigest(params: {
     },
   });
   const recipientMembers = activeMembers.filter((member) => (
-    isHumanNewspaperRecipientIdentity(member.user)
+    isHumanNewspaperRecipientIdentity(member)
     &&
     (member.newspaperCadence ?? workspaceCadence) === cadence
   ));

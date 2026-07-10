@@ -119,9 +119,11 @@ vi.mock("@corgtex/domain", () => ({
   },
   getAgentModelOverride: vi.fn().mockResolvedValue(undefined),
   getWorkspaceNewspaperCadence: getWorkspaceNewspaperCadenceMock,
-  isHumanNewspaperRecipientIdentity: (user: { email?: string | null; displayName?: string | null }) => {
+  isHumanNewspaperRecipientIdentity: (identity: { kind?: string | null; user?: { email?: string | null; displayName?: string | null } | null; email?: string | null; displayName?: string | null }) => {
+    const user = identity.user ?? identity;
     const email = user.email?.trim().toLowerCase() ?? "";
     const displayName = user.displayName?.trim().toLowerCase() ?? "";
+    if (identity.kind === "SYSTEM") return false;
     return Boolean(email) && !email.startsWith("system+") && !email.startsWith("support+") && displayName !== "corgtex support";
   },
   normalizeNewspaperCadence: (value: unknown) => {

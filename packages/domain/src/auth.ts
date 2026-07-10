@@ -2,6 +2,7 @@ import type { MemberRole } from "@prisma/client";
 import { env, prisma, hashPassword, parseAllowedWorkspaceIds, randomOpaqueToken, sha256, verifyPassword } from "@corgtex/shared";
 import type { AppActor, MembershipSummary } from "@corgtex/shared";
 import { AppError, invariant } from "./errors";
+import { systemActorMemberIdentityWhere } from "./member-identity";
 
 const SESSION_TTL_MS = 1000 * 60 * 60 * 24 * 14;
 export async function loginUserWithPassword(params: {
@@ -221,11 +222,7 @@ export async function actorUserIdForWorkspace(actor: AppActor, workspaceId: stri
       workspaceId,
       isActive: true,
       role: "ADMIN",
-      user: {
-        email: {
-          startsWith: "system+",
-        },
-      },
+      ...systemActorMemberIdentityWhere(),
     },
     select: {
       userId: true,

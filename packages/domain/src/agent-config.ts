@@ -3,7 +3,8 @@ import type { AppActor } from "@corgtex/shared";
 import { requireWorkspaceMembership } from "./auth";
 import { AGENT_REGISTRY, type RegisteredAgentKey } from "./agent-registry";
 import { AppError } from "./errors";
-import type { NewspaperCadence, Prisma } from "@prisma/client";
+import type { MemberKind, NewspaperCadence, Prisma } from "@prisma/client";
+import { isHumanMemberIdentity } from "./member-identity";
 
 export type AgentConfigSummary = {
   agentKey: RegisteredAgentKey;
@@ -162,13 +163,15 @@ export function getNextNewspaperRunISO(params: {
   return null;
 }
 
-export function isHumanNewspaperRecipientIdentity(user: { email?: string | null; displayName?: string | null }) {
-  const email = user.email?.trim().toLowerCase() ?? "";
-  const displayName = user.displayName?.trim().toLowerCase() ?? "";
-  if (!email) return false;
-  if (email.startsWith("system+") || email.startsWith("support+")) return false;
-  if (displayName === "corgtex support") return false;
-  return true;
+export function isHumanNewspaperRecipientIdentity(identity: {
+  kind?: MemberKind | null;
+  user?: { email?: string | null; displayName?: string | null } | null;
+  email?: string | null;
+  displayName?: string | null;
+}) {
+  const user = identity.user ?? identity;
+  if (!user.email?.trim()) return false;
+  return isHumanMemberIdentity(identity);
 }
 
 export function normalizeCompanyUnderstandingGoalApplyMode(

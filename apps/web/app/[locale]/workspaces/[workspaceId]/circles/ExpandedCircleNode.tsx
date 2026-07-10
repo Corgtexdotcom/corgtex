@@ -86,6 +86,7 @@ export default function ExpandedCircleNode({ data, selected }: { data: ExpandedC
               person={{
                 memberId: member.memberId,
                 userId: member.userId,
+                kind: member.kind,
                 displayName: member.displayName,
                 email: member.email,
                 avatarUrl: member.avatarUrl,
@@ -149,6 +150,7 @@ export default function ExpandedCircleNode({ data, selected }: { data: ExpandedC
                   const personData: PersonData = {
                     memberId: member.id,
                     userId: user?.id,
+                    kind: member.kind,
                     displayName: user?.displayName || user?.email || t("unknownMember"),
                     email: user?.email || "",
                     roleName: role.name,

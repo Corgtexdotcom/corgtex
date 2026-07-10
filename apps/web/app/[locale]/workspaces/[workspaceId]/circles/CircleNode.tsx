@@ -99,6 +99,7 @@ export default function CircleNode({ data, selected }: { data: CircleNodeData; s
               person={{
                 memberId: member.memberId,
                 userId: member.userId,
+                kind: member.kind,
                 displayName: member.displayName,
                 email: member.email,
                 avatarUrl: member.avatarUrl,

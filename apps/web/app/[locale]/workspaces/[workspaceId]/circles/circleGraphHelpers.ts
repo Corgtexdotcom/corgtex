@@ -8,6 +8,7 @@ export type CircleGraphUser = {
 
 export type CircleGraphMember = {
   id?: string;
+  kind?: "HUMAN" | "SYSTEM" | null;
   user?: CircleGraphUser | null;
 };
 
@@ -39,6 +40,7 @@ export type CircleGraphCircle = {
 export type CircleMemberPreview = {
   memberId: string;
   userId?: string;
+  kind?: "HUMAN" | "SYSTEM" | null;
   displayName: string;
   email: string;
   avatarUrl?: string | null;
@@ -78,6 +80,7 @@ export function collectCircleMembers(circle: CircleGraphCircle): CircleMemberPre
       people.set(member.id, {
         memberId: member.id,
         userId: user?.id,
+        kind: member.kind,
         displayName: getDisplayName(user),
         email: user?.email || "",
         avatarUrl: user?.avatarUrl,

@@ -156,9 +156,11 @@ vi.mock("@corgtex/domain", () => ({
   },
   recordMeetingTranscriptProcessingStage: recordMeetingTranscriptProcessingStageMock,
   markMeetingTranscriptProcessingReady: markMeetingTranscriptProcessingReadyMock,
-  isHumanNewspaperRecipientIdentity: (user: { email?: string | null; displayName?: string | null }) => {
+  isHumanNewspaperRecipientIdentity: (identity: { kind?: string | null; user?: { email?: string | null; displayName?: string | null } | null; email?: string | null; displayName?: string | null }) => {
+    const user = identity.user ?? identity;
     const email = user.email?.trim().toLowerCase() ?? "";
     const displayName = user.displayName?.trim().toLowerCase() ?? "";
+    if (identity.kind === "SYSTEM") return false;
     return Boolean(email) && !email.startsWith("system+") && !email.startsWith("support+") && displayName !== "corgtex support";
   },
   isNewspaperScheduleDue: isNewspaperScheduleDueMock,
@@ -1321,6 +1323,7 @@ describe("scheduleDailyJobs", () => {
       where: { workspaceId: { in: ["ws-1", "ws-2"] }, isActive: true },
       select: {
         workspaceId: true,
+        kind: true,
         newspaperCadence: true,
         user: {
           select: {

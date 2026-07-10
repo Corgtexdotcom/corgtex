@@ -542,6 +542,7 @@ export async function getNewspaperDiagnostics(actor: AppActor, workspaceId: stri
     orderBy: { joinedAt: "asc" },
     select: {
       id: true,
+      kind: true,
       newspaperCadence: true,
       joinedAt: true,
       user: {
@@ -554,7 +555,7 @@ export async function getNewspaperDiagnostics(actor: AppActor, workspaceId: stri
   });
   const recipients = members.map((member) => {
     const effectiveCadence = member.newspaperCadence ?? schedule.cadence;
-    const isHumanRecipient = isHumanNewspaperRecipientIdentity(member.user);
+    const isHumanRecipient = isHumanNewspaperRecipientIdentity(member);
     return {
       memberId: member.id,
       email: member.user.email,

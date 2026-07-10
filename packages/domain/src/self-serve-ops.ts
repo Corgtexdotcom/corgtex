@@ -1056,6 +1056,7 @@ export async function createSelfServeSupportSession(actor: AppActor, params: {
         workspaceId,
         userId: supportUser.id,
         role: supportRole,
+        kind: "SYSTEM",
         isActive: true,
       },
       select: { id: true, role: true },
