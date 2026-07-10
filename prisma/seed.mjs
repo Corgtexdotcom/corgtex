@@ -162,12 +162,14 @@ async function main() {
     },
     update: {
       role: "ADMIN",
+      kind: "SYSTEM",
       isActive: true,
     },
     create: {
       workspaceId: workspace.id,
       userId: systemUser.id,
       role: "ADMIN",
+      kind: "SYSTEM",
       isActive: true,
     },
   });

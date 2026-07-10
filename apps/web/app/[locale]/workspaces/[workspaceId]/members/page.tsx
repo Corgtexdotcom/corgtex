@@ -1,4 +1,4 @@
-import { AppError, listMembersEnriched, listAgentIdentities, requireWorkspaceMembership } from "@corgtex/domain";
+import { AppError, isSystemMemberIdentity, listMembersEnriched, listAgentIdentities, requireWorkspaceMembership } from "@corgtex/domain";
 import { requirePageActor } from "@/lib/auth";
 import Link from "next/link";
 import { getTranslations } from "next-intl/server";
@@ -44,7 +44,7 @@ export default async function MembersPage({
             const initials = member.user.displayName
               ? member.user.displayName.split(" ").map((n: string) => n[0]).join("").substring(0, 2).toUpperCase()
               : member.user.email.substring(0,2).toUpperCase();
-            const isAgent = member.user.email.includes("agent") || displayName.toLowerCase().includes("agent") || member.user.email.includes("system+");
+            const isSystem = isSystemMemberIdentity(member);
             const profileLinks: { label: string; href: string }[] = [];
             if (member.user.linkedinUrl) profileLinks.push({ label: t("linkedin"), href: member.user.linkedinUrl });
             if (member.user.websiteUrl) profileLinks.push({ label: t("website"), href: member.user.websiteUrl });
@@ -64,19 +64,19 @@ export default async function MembersPage({
                       width: 48,
                       height: 48,
                       borderRadius: 24,
-                      background: isAgent ? "var(--surface-sunken)" : "var(--accent-soft)",
+                      background: isSystem ? "var(--surface-sunken)" : "var(--accent-soft)",
                       backgroundImage: member.user.avatarUrl ? `url(${JSON.stringify(member.user.avatarUrl)})` : undefined,
                       backgroundPosition: "center",
                       backgroundSize: "cover",
-                      color: isAgent ? "var(--text-strong)" : "var(--accent)",
-                      border: isAgent ? "1px solid var(--line)" : "none",
+                      color: isSystem ? "var(--text-strong)" : "var(--accent)",
+                      border: isSystem ? "1px solid var(--line)" : "none",
                       display: "flex",
                       alignItems: "center",
                       justifyContent: "center",
                       fontWeight: 600,
                       fontSize: "1.1rem"
                     }}>
-                      {!member.user.avatarUrl && (isAgent ? "⬡" : initials)}
+                      {!member.user.avatarUrl && (isSystem ? "⬡" : initials)}
                     </div>
                     <div>
                       <h3 style={{ margin: "0 0 4px", fontSize: "1rem" }}>{displayName}</h3>

@@ -34,6 +34,11 @@ enum MemberRole {
   ADMIN
 }
 
+enum MemberKind {
+  HUMAN
+  SYSTEM
+}
+
 enum NewspaperCadence {
   DAILY
   WEEKLY
@@ -1078,6 +1083,7 @@ model Member {
   workspaceId      String
   userId           String
   role             MemberRole        @default(CONTRIBUTOR)
+  kind             MemberKind        @default(HUMAN)
   isActive         Boolean           @default(true)
   joinedAt         DateTime          @default(now())
   newspaperCadence NewspaperCadence?
@@ -1113,6 +1119,7 @@ model Member {
 
   @@unique([workspaceId, userId])
   @@index([workspaceId, role])
+  @@index([workspaceId, kind])
 }
 
 model MemberInviteRequest {

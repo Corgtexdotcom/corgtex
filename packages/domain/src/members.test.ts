@@ -144,9 +144,37 @@ describe("members domain", () => {
     });
   });
 
+  it("listHumanMembers filters out persisted and legacy system identities", async () => {
+    prismaMock.member.findMany.mockResolvedValue([{ id: "member-human" }]);
+
+    const { listHumanMembers } = await import("./members");
+    await expect(listHumanMembers("workspace-1")).resolves.toEqual([{ id: "member-human" }]);
+    expect(prismaMock.member.findMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({
+        workspaceId: "workspace-1",
+        isActive: true,
+        NOT: expect.any(Array),
+      }),
+    }));
+  });
+
+  it("listSystemMembers returns persisted and legacy system identities", async () => {
+    prismaMock.member.findMany.mockResolvedValue([{ id: "member-system" }]);
+
+    const { listSystemMembers } = await import("./members");
+    await expect(listSystemMembers("workspace-1")).resolves.toEqual([{ id: "member-system" }]);
+    expect(prismaMock.member.findMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({
+        workspaceId: "workspace-1",
+        isActive: true,
+        OR: expect.arrayContaining([{ kind: "SYSTEM" }]),
+      }),
+    }));
+  });
+
   it("createMember creates or reactivates a member and issues a setup token", async () => {
     prismaMock.user.upsert.mockResolvedValue({ id: "user-1", email: "user@example.com", displayName: "User" });
-    prismaMock.member.upsert.mockResolvedValue({ id: "member-1", role: "ADMIN" });
+    prismaMock.member.upsert.mockResolvedValue({ id: "member-1", role: "ADMIN", kind: "HUMAN" });
 
     const { createMember } = await import("./members");
     await expect(createMember(actor, {
@@ -156,7 +184,7 @@ describe("members domain", () => {
       role: "ADMIN",
     })).resolves.toEqual({
       user: { id: "user-1", email: "user@example.com", displayName: "User" },
-      member: { id: "member-1", role: "ADMIN" },
+      member: { id: "member-1", role: "ADMIN", kind: "HUMAN" },
       token: "opaque-token",
     });
 
@@ -166,8 +194,27 @@ describe("members domain", () => {
     expect(prismaMock.member.upsert).toHaveBeenCalledWith(expect.objectContaining({
       update: {
         role: "ADMIN",
+        kind: "HUMAN",
         isActive: true,
       },
+    }));
+  });
+
+  it("createMember classifies system-convention accounts as system members", async () => {
+    prismaMock.user.upsert.mockResolvedValue({ id: "user-1", email: "system+workspace@corgtex.local", displayName: "System" });
+    prismaMock.member.upsert.mockResolvedValue({ id: "member-1", role: "ADMIN", kind: "SYSTEM" });
+
+    const { createMember } = await import("./members");
+    await createMember(actor, {
+      workspaceId: "workspace-1",
+      email: "system+workspace@corgtex.local",
+      displayName: "System",
+      role: "ADMIN",
+    });
+
+    expect(prismaMock.member.upsert).toHaveBeenCalledWith(expect.objectContaining({
+      update: expect.objectContaining({ kind: "SYSTEM" }),
+      create: expect.objectContaining({ kind: "SYSTEM" }),
     }));
   });
 
@@ -258,6 +305,7 @@ describe("members domain", () => {
     expect(prismaMock.member.upsert).toHaveBeenCalledWith(expect.objectContaining({
       update: {
         role: "CONTRIBUTOR",
+        kind: "HUMAN",
         isActive: true,
       },
     }));

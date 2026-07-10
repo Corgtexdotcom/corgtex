@@ -1,4 +1,4 @@
-import type { MemberInviteRequestStatus, MemberRole } from "@prisma/client";
+import type { MemberInviteRequestStatus, MemberKind, MemberRole } from "@prisma/client";
 import type { AppActor } from "@corgtex/shared";
 import { env, prisma, hashPassword, randomOpaqueToken, sendEmail, sha256 } from "@corgtex/shared";
 import { AppError, invariant } from "./errors";
@@ -9,6 +9,7 @@ import { privacyFilter } from "./privacy";
 import { closeRoleLifecycleForMember } from "./role-onboarding";
 import { maybeCaptureSelfServeSetupEmail } from "./self-serve-ops";
 import { renderAccountSetupEmail } from "./email-templates";
+import { humanMemberIdentityWhere, inferMemberKindFromUserIdentity, systemMemberIdentityWhere } from "./member-identity";
 
 export type MemberInvitePolicy = "ADMINS_ONLY" | "MEMBERS_CAN_INVITE" | "MEMBERS_CAN_REQUEST";
 
@@ -169,6 +170,58 @@ export async function listMembers(workspaceId: string) {
   });
 }
 
+export async function listHumanMembers(workspaceId: string, opts?: { includeInactive?: boolean }) {
+  return prisma.member.findMany({
+    where: {
+      workspaceId,
+      ...(opts?.includeInactive ? {} : { isActive: true }),
+      ...humanMemberIdentityWhere(),
+    },
+    include: {
+      user: {
+        select: {
+          id: true,
+          email: true,
+          displayName: true,
+          avatarUrl: true,
+          bio: true,
+          linkedinUrl: true,
+          websiteUrl: true,
+        },
+      },
+    },
+    orderBy: {
+      joinedAt: "asc",
+    },
+  });
+}
+
+export async function listSystemMembers(workspaceId: string, opts?: { includeInactive?: boolean }) {
+  return prisma.member.findMany({
+    where: {
+      workspaceId,
+      ...(opts?.includeInactive ? {} : { isActive: true }),
+      ...systemMemberIdentityWhere(),
+    },
+    include: {
+      user: {
+        select: {
+          id: true,
+          email: true,
+          displayName: true,
+          avatarUrl: true,
+          bio: true,
+          linkedinUrl: true,
+          websiteUrl: true,
+        },
+      },
+    },
+    orderBy: {
+      joinedAt: "asc",
+    },
+  });
+}
+
 export async function listMembersEnriched(workspaceId: string, opts?: { includeInactive?: boolean }) {
   return prisma.member.findMany({
     where: {
@@ -264,7 +317,7 @@ export async function updateMemberInvitePolicy(actor: AppActor, params: {
 
 export async function bulkInviteMembers(actor: AppActor, params: {
   workspaceId: string;
-  members: { email: string; displayName?: string | null; role?: MemberRole }[];
+  members: { email: string; displayName?: string | null; role?: MemberRole; kind?: MemberKind }[];
 }): Promise<{ invited: number; details: { email: string; displayName: string | null; token: string }[]; errors: string[] }> {
   await requireWorkspaceMembership({
     actor,
@@ -283,6 +336,7 @@ export async function bulkInviteMembers(actor: AppActor, params: {
         email: info.email,
         displayName: info.displayName,
         role: info.role || "CONTRIBUTOR",
+        kind: info.kind,
       });
       invited++;
       details.push({
@@ -303,6 +357,7 @@ export async function createMember(actor: AppActor, params: {
   email: string;
   displayName?: string | null;
   role: MemberRole;
+  kind?: MemberKind;
   skipAdminCheck?: boolean;
 }) {
   if (!params.skipAdminCheck) {
@@ -314,6 +369,8 @@ export async function createMember(actor: AppActor, params: {
   }
 
   const email = normalizeEmail(params.email);
+  const displayName = normalizeDisplayName(params.displayName);
+  const kind = params.kind ?? inferMemberKindFromUserIdentity({ email, displayName });
   invariant(email.length > 0, 400, "INVALID_INPUT", "Email is required.");
   await assertTrialMemberCapacity(params.workspaceId);
 
@@ -322,11 +379,11 @@ export async function createMember(actor: AppActor, params: {
     const user = await tx.user.upsert({
       where: { email },
       update: {
-        displayName: normalizeDisplayName(params.displayName) || undefined,
+        displayName: displayName || undefined,
       },
       create: {
         email,
-        displayName: normalizeDisplayName(params.displayName),
+        displayName,
         passwordHash: hashPassword(randomPassword),
       },
       select: {
@@ -345,12 +402,14 @@ export async function createMember(actor: AppActor, params: {
       },
       update: {
         role: params.role,
+        kind,
         isActive: true,
       },
       create: {
         workspaceId: params.workspaceId,
         userId: user.id,
         role: params.role,
+        kind,
         isActive: true,
       },
     });
@@ -365,6 +424,7 @@ export async function createMember(actor: AppActor, params: {
         meta: {
           email,
           role: params.role,
+          kind,
         },
       },
     });
@@ -379,6 +439,7 @@ export async function createMember(actor: AppActor, params: {
           memberId: member.id,
           userId: user.id,
           role: member.role,
+          kind: member.kind,
         },
       },
     ]);
@@ -418,6 +479,7 @@ export async function updateMember(actor: AppActor, params: {
   workspaceId: string;
   memberId: string;
   role?: MemberRole;
+  kind?: MemberKind;
   isActive?: boolean;
   displayName?: string | null;
   email?: string | null;
@@ -448,6 +510,7 @@ export async function updateMember(actor: AppActor, params: {
 
     const memberData: Record<string, unknown> = {};
     if (params.role !== undefined) memberData.role = params.role;
+    if (params.kind !== undefined) memberData.kind = params.kind;
     if (params.isActive !== undefined) memberData.isActive = params.isActive;
     if (params.isActive === false && !member.isActive) {
       throw new AppError(400, "INVALID_STATE", "Member is already deactivated.");
@@ -505,6 +568,16 @@ export async function updateMember(actor: AppActor, params: {
     }
     if (emailChanged) {
       userData.email = normalizedEmail;
+    }
+    if (params.kind === undefined && (normalizedEmail !== undefined || nextDisplayName !== undefined)) {
+      const inferredKind = inferMemberKindFromUserIdentity({
+        email: normalizedEmail ?? member.user.email,
+        displayName: nextDisplayName !== undefined ? nextDisplayName : member.user.displayName,
+      });
+      const currentKind = member.kind ?? inferMemberKindFromUserIdentity(member.user);
+      if (inferredKind !== currentKind) {
+        memberData.kind = inferredKind;
+      }
     }
 
     if (Object.keys(userData).length > 0) {

@@ -5,6 +5,7 @@ import { getInitials } from "./circleGraphHelpers";
 export type PersonData = {
   memberId: string;
   userId?: string;
+  kind?: "HUMAN" | "SYSTEM" | null;
   displayName: string;
   email: string;
   roleName?: string;
@@ -24,14 +25,14 @@ export default function PersonNode({
   className?: string;
   style?: CSSProperties;
 }) {
-  const isAgent = person.email.includes("agent") || person.displayName.toLowerCase().includes("agent") || person.email.includes("system+");
+  const isSystem = person.kind === "SYSTEM";
   const initials = getInitials(person.displayName, person.email);
   const title = [person.displayName || person.email, person.roleName, person.bio].filter(Boolean).join(" - ");
 
   return (
     <Link
       href={`/workspaces/${person.workspaceId}/members/${person.memberId}`}
-      className={`person-chip nodrag nopan ${compact ? "person-chip-compact" : ""} ${isAgent ? "agent-chip" : ""} ${className}`}
+      className={`person-chip nodrag nopan ${compact ? "person-chip-compact" : ""} ${isSystem ? "agent-chip" : ""} ${className}`}
       style={style}
       title={title}
       aria-label={title}
@@ -41,7 +42,7 @@ export default function PersonNode({
         style={person.avatarUrl ? { backgroundImage: `url(${JSON.stringify(person.avatarUrl)})` } : undefined}
         aria-hidden="true"
       >
-        {!person.avatarUrl && (isAgent ? "⬡" : initials)}
+        {!person.avatarUrl && (isSystem ? "⬡" : initials)}
       </span>
       {!compact && (
         <span className="person-info">
