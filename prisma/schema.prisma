@@ -559,6 +559,7 @@ model Workspace {
   createdAt                      DateTime                              @default(now())
   updatedAt                      DateTime                              @updatedAt
   members                        Member[]
+  memberEmailAliases             MemberEmailAlias[]
   memberInviteRequests           MemberInviteRequest[]
   circles                        Circle[]
   actions                        Action[]
@@ -1002,6 +1003,8 @@ model User {
   startedRoleHolderHistory      RoleHolderHistory[]                   @relation("RoleHolderHistoryStartedBy")
   endedRoleHolderHistory        RoleHolderHistory[]                   @relation("RoleHolderHistoryEndedBy")
   editedWorkItemVersions        WorkItemVersion[]                     @relation("WorkItemVersionEditedBy")
+  createdMemberEmailAliases     MemberEmailAlias[]                    @relation("MemberEmailAliasCreator")
+  mergedMembers                 Member[]                              @relation("MemberMergedBy")
 }
 
 model Session {
@@ -1085,13 +1088,21 @@ model Member {
   role             MemberRole        @default(CONTRIBUTOR)
   kind             MemberKind        @default(HUMAN)
   isActive         Boolean           @default(true)
+  mergedIntoMemberId String?
+  mergedAt         DateTime?
+  mergedByUserId   String?
+  mergeReason      String?           @db.Text
   joinedAt         DateTime          @default(now())
   newspaperCadence NewspaperCadence?
 
   workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  mergedIntoMember Member? @relation("MemberMergeTarget", fields: [mergedIntoMemberId], references: [id], onDelete: SetNull)
+  mergedMembers    Member[] @relation("MemberMergeTarget")
+  mergedBy         User?    @relation("MemberMergedBy", fields: [mergedByUserId], references: [id], onDelete: SetNull)
 
   roleAssignments             RoleAssignment[]
+  emailAliases                MemberEmailAlias[]
   inviteRequestsMade          MemberInviteRequest[]    @relation("MemberInviteRequestRequester")
   inviteRequestsDecided       MemberInviteRequest[]    @relation("MemberInviteRequestDecider")
   assignedActions             Action[]                 @relation("ActionAssignee")
@@ -1120,6 +1131,27 @@ model Member {
   @@unique([workspaceId, userId])
   @@index([workspaceId, role])
   @@index([workspaceId, kind])
+  @@index([workspaceId, mergedAt])
+  @@index([mergedIntoMemberId])
+  @@index([mergedByUserId])
+}
+
+model MemberEmailAlias {
+  id              String   @id @default(uuid())
+  workspaceId     String
+  memberId        String
+  email           String
+  source          String   @default("MANUAL")
+  createdByUserId String?
+  createdAt       DateTime @default(now())
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  member    Member    @relation(fields: [memberId], references: [id], onDelete: Cascade)
+  createdBy User?     @relation("MemberEmailAliasCreator", fields: [createdByUserId], references: [id], onDelete: SetNull)
+
+  @@unique([workspaceId, email])
+  @@index([memberId])
+  @@index([createdByUserId])
 }
 
 model MemberInviteRequest {
