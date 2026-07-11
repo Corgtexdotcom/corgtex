@@ -1,5 +1,6 @@
 import { isHumanMemberIdentity } from "@corgtex/domain";
 import type { WorkItemSortable } from "@/lib/work-item-view";
+import { isVisibleRoleAssignment } from "./circleGraphHelpers";
 
 export const ROLE_STAFFING_COLUMN_IDS = ["open", "staffed", "shared"] as const;
 
@@ -8,6 +9,7 @@ export type RoleStaffingColumnId = (typeof ROLE_STAFFING_COLUMN_IDS)[number];
 type DateLike = Date | string | number;
 
 export type RoleStaffingAssignment = {
+  expiresAt?: DateLike | null;
   member?: {
     kind?: "HUMAN" | "SYSTEM" | null;
     isActive?: boolean | null;
@@ -65,20 +67,21 @@ export function roleAssignmentDisplayName(assignment: RoleStaffingAssignment) {
   return user?.displayName?.trim() || user?.email?.trim() || null;
 }
 
-export function activeHumanRoleAssignments(assignments: readonly RoleStaffingAssignment[]) {
+export function activeHumanRoleAssignments(assignments: readonly RoleStaffingAssignment[], now: Date = new Date()) {
   return assignments.filter((assignment) => {
+    if (!isVisibleRoleAssignment(assignment, now)) return false;
     const member = assignment.member;
     if (!member || member.isActive === false) return false;
     return isHumanMemberIdentity(member);
   });
 }
 
-export function flattenRoleStaffingCards(circles: readonly RoleStaffingCircle[]) {
+export function flattenRoleStaffingCards(circles: readonly RoleStaffingCircle[], now: Date = new Date()) {
   const cards: RoleStaffingCard[] = [];
 
   function walk(circle: RoleStaffingCircle) {
     for (const role of circle.roles ?? []) {
-      const activeHumanAssignments = activeHumanRoleAssignments(role.assignments ?? []);
+      const activeHumanAssignments = activeHumanRoleAssignments(role.assignments ?? [], now);
       const holderNames = activeHumanAssignments
         .map(roleAssignmentDisplayName)
         .filter((name): name is string => Boolean(name));

@@ -8,6 +8,7 @@ import {
   roleStaffingStatus,
   type RoleStaffingCircle,
 } from "./role-staffing";
+import { collectCircleMembers, type CircleGraphCircle } from "./circleGraphHelpers";
 
 describe("role staffing helpers", () => {
   it("classifies roles by existing holder count", () => {
@@ -81,14 +82,16 @@ describe("role staffing helpers", () => {
   });
 
   it("counts only active human assignments as staffing holders", () => {
+    const now = new Date("2026-07-11T12:00:00.000Z");
     const assignments = [
       { member: { kind: "HUMAN" as const, isActive: true, user: { email: "ada@example.com", displayName: "Ada" } } },
+      { expiresAt: "2026-07-10T12:00:00.000Z", member: { kind: "HUMAN" as const, isActive: true, user: { email: "expired@example.com", displayName: "Expired" } } },
       { member: { kind: "HUMAN" as const, isActive: false, user: { email: "inactive@example.com", displayName: "Inactive" } } },
       { member: { kind: "SYSTEM" as const, isActive: true, user: { email: "system+bot@corgtex.local", displayName: "System" } } },
       { member: { isActive: true, user: { email: "support@example.com", displayName: "Corgtex Support" } } },
     ];
 
-    expect(activeHumanRoleAssignments(assignments)).toHaveLength(1);
+    expect(activeHumanRoleAssignments(assignments, now)).toHaveLength(1);
 
     const [card] = flattenRoleStaffingCards([
       {
@@ -102,13 +105,60 @@ describe("role staffing helpers", () => {
           },
         ],
       },
-    ]);
+    ], now);
 
     expect(card).toMatchObject({
       status: "staffed",
       holderCount: 1,
       holderNames: ["Ada"],
     });
+  });
+
+  it("omits expired assignments from circle member summaries", () => {
+    const circle: CircleGraphCircle = {
+      id: "circle-1",
+      workspaceId: "workspace-1",
+      name: "Product",
+      parentCircleId: null,
+      purposeMd: null,
+      domainMd: null,
+      maturityStage: "GETTING_STARTED",
+      roles: [
+        {
+          id: "role-1",
+          name: "Lead",
+          assignments: [
+            {
+              id: "assignment-active",
+              expiresAt: "2026-07-12T12:00:00.000Z",
+              member: {
+                id: "member-active",
+                kind: "HUMAN",
+                user: { id: "user-active", email: "active@example.com", displayName: "Active" },
+              },
+            },
+            {
+              id: "assignment-expired",
+              expiresAt: "2026-07-10T12:00:00.000Z",
+              member: {
+                id: "member-expired",
+                kind: "HUMAN",
+                user: { id: "user-expired", email: "expired@example.com", displayName: "Expired" },
+              },
+            },
+          ],
+        },
+      ],
+      childCircles: [],
+    };
+
+    expect(collectCircleMembers(circle, new Date("2026-07-11T12:00:00.000Z"))).toMatchObject([
+      {
+        memberId: "member-active",
+        displayName: "Active",
+        roleNames: ["Lead"],
+      },
+    ]);
   });
 
   it("sorts open roles ahead of staffed roles by default priority", () => {

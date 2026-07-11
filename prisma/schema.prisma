@@ -1693,15 +1693,18 @@ model RoleHolderHistory {
 }
 
 model RoleAssignment {
-  id         String   @id @default(uuid())
-  roleId     String
-  memberId   String
-  assignedAt DateTime @default(now())
+  id             String    @id @default(uuid())
+  roleId         String
+  memberId       String
+  assignedAt     DateTime  @default(now())
+  expiresAt      DateTime?
+  transferReason String?
 
   role   Role   @relation(fields: [roleId], references: [id], onDelete: Cascade)
   member Member @relation(fields: [memberId], references: [id], onDelete: Cascade)
 
   @@unique([roleId, memberId])
+  @@index([expiresAt])
 }
 
 model RoleOnboardingSession {

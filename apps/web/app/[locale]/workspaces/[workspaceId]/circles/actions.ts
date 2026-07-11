@@ -2,7 +2,7 @@
 
 import { enforceDemoGuard } from "@/lib/demo-guard";
 import { requirePageActor } from "@/lib/auth";
-import { asString, asOptional, asOptionalInt, refresh } from "../action-utils";
+import { asString, asOptional, refresh } from "../action-utils";
 import {
   assignAgentToCircle,
   createCircle,
@@ -17,6 +17,11 @@ import {
   updateRole
 } from "@corgtex/domain";
 
+function asOptionalRoleAssignmentExpiry(formData: FormData) {
+  const value = asOptional(formData, "expiresAt");
+  if (!value) return null;
+  return new Date(`${value}T23:59:59.999Z`);
+}
 
 export async function createCircleAction(formData: FormData) {
   const _demoGuardWsId = formData.get("workspaceId") as string;
@@ -125,6 +130,8 @@ export async function assignRoleAction(formData: FormData) {
     workspaceId,
     roleId: asString(formData, "roleId"),
     memberId: asString(formData, "memberId"),
+    expiresAt: asOptionalRoleAssignmentExpiry(formData),
+    transferReason: asOptional(formData, "transferReason"),
   });
   refresh(workspaceId);
 }
@@ -154,6 +161,8 @@ export async function reassignRoleAction(formData: FormData) {
     roleId: asString(formData, "roleId"),
     fromMemberId: asString(formData, "fromMemberId"),
     toMemberId: asString(formData, "toMemberId"),
+    expiresAt: asOptionalRoleAssignmentExpiry(formData),
+    transferReason: asOptional(formData, "transferReason"),
   });
   refresh(workspaceId);
 }
