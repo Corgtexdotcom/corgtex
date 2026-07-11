@@ -14,7 +14,10 @@ import {
   Hexagon,
   Home,
   Landmark,
+  Languages,
+  LogOut,
   MessageSquare,
+  MoreHorizontal,
   Network,
   PackageCheck,
   RefreshCw,
@@ -60,6 +63,9 @@ export type WorkspaceUtilityIconName =
   | "capture"
   | "copy"
   | "external"
+  | "language"
+  | "logout"
+  | "more"
   | "send"
   | "work"
   | "platformAdmin";
@@ -69,6 +75,9 @@ const UTILITY_ICONS: Record<WorkspaceUtilityIconName, LucideIcon> = {
   capture: FileText,
   copy: Clipboard,
   external: ExternalLink,
+  language: Languages,
+  logout: LogOut,
+  more: MoreHorizontal,
   send: Send,
   work: ClipboardList,
   platformAdmin: Shield,

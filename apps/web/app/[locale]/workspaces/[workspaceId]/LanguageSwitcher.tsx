@@ -2,8 +2,9 @@
 
 import { usePathname, useRouter } from "@/i18n/routing";
 import { useLocale, useTranslations } from "next-intl";
+import { WorkspaceUtilityIcon } from "./WorkspaceNavIcon";
 
-export function LanguageSwitcher() {
+export function LanguageSwitcher({ variant = "sidebar" }: { variant?: "sidebar" | "mobile" }) {
   const locale = useLocale();
   const router = useRouter();
   const pathname = usePathname();
@@ -14,23 +15,18 @@ export function LanguageSwitcher() {
   };
 
   const t = useTranslations("common");
+  const isMobile = variant === "mobile";
 
   return (
-    <div style={{ display: "flex", alignItems: "center", gap: 12, padding: "8px 16px", borderTop: "1px solid var(--line)" }}>
-      <label htmlFor="language-switcher" className="muted" style={{ fontSize: "0.85rem", margin: 0 }}>
+    <div className={isMobile ? "language-switcher language-switcher-mobile" : "language-switcher"}>
+      {isMobile && <WorkspaceUtilityIcon name="language" className="mobile-more-icon" />}
+      <label htmlFor={isMobile ? "mobile-language-switcher" : "language-switcher"} className="muted">
         {t("language")}
       </label>
       <select 
+        id={isMobile ? "mobile-language-switcher" : "language-switcher"}
         value={locale} 
         onChange={handleLanguageChange}
-        style={{ 
-          width: "100%", 
-          padding: "4px 8px", 
-          fontSize: "0.85rem", 
-          borderRadius: 4,
-          border: "1px solid var(--border)",
-          background: "var(--bg-panel)"
-        }}
       >
         <option value="en">English</option>
         <option value="es">Español</option>

@@ -17,6 +17,7 @@ import { WorkspaceAddMenu } from "./WorkspaceAddMenu";
 import { WorkspaceChatRail } from "./WorkspaceChatRail";
 import { WorkspaceIntercomMessenger } from "./WorkspaceIntercomMessenger";
 import { ProductFeedbackWidget } from "./ProductFeedbackWidget";
+import { WorkspaceNavIcon, WorkspaceUtilityIcon } from "./WorkspaceNavIcon";
 import type { AiWorkspaceLaunchState } from "@/lib/ai-workspace-launch";
 import { getMobileCaptureActions } from "@/lib/workspace-add-actions";
 import { getProductFeedbackTargetWorkspace } from "@/lib/product-feedback";
@@ -138,6 +139,7 @@ export default async function WorkspaceLayout({
   const currentBranding = current ? workspaceBranding(current) : { primaryName: "Corgtex", secondaryLabel: "Workspace" };
   const controlPlaneHref = getControlPlaneHref("/control-plane", locale);
   const isDemo = current?.slug === "jnj-demo";
+  const showPlatformAdmin = isGlobalOperator(actor);
   const showSelfServeOnboarding = !isDemo && workspaceRuntime?.plan !== "ENTERPRISE_MANAGED" && Boolean(onboardingState);
   const googleScopes = (googleConnection?.scopes ?? []).join(" ").toLowerCase();
   const googleDocuments = syncSettingsRecord(syncSettingsRecord(googleConnection?.syncSettings).documents);
@@ -201,6 +203,27 @@ export default async function WorkspaceLayout({
     updatedAt: c.updatedAt.toISOString(),
     lastMessage: c.turns?.[0]?.assistantMessage?.slice(0, 100) ?? null,
   }));
+  const mobileUtilityActions = (
+    <>
+      {showPlatformAdmin && (
+        <a href={controlPlaneHref} className="mobile-utility-action">
+          <WorkspaceUtilityIcon name="platformAdmin" className="mobile-more-icon" />
+          <span>{tNav("platformAdmin")}</span>
+        </a>
+      )}
+      {featureFlags.MULTILINGUAL && <LanguageSwitcher variant="mobile" />}
+      <a href={`/workspaces/${workspaceId}/settings?tab=user`} className="mobile-utility-action">
+        <WorkspaceNavIcon name="settings" className="mobile-more-icon" />
+        <span>{tNav("settings")} (User)</span>
+      </a>
+      <form action={logoutAction} className="mobile-utility-form">
+        <button type="submit" className="mobile-utility-action">
+          <WorkspaceUtilityIcon name="logout" className="mobile-more-icon" />
+          <span>{tCommon("logout")}</span>
+        </button>
+      </form>
+    </>
+  );
 
   return (
     <div className="ws-layout">
@@ -213,6 +236,7 @@ export default async function WorkspaceLayout({
         conversations={conversationSummaries}
         aiWorkspaceState={aiWorkspaceState}
         captureActions={captureActions}
+        utilityActions={mobileUtilityActions}
       />
       <aside className="ws-sidebar">
         <div className="ws-sidebar-header">
@@ -228,7 +252,7 @@ export default async function WorkspaceLayout({
           workspaceId={workspaceId}
           navGroups={visibleNavGroups}
           unreadCount={unreadCount}
-          showPlatformAdmin={isGlobalOperator(actor)}
+          showPlatformAdmin={showPlatformAdmin}
           controlPlaneHref={controlPlaneHref}
         />
 

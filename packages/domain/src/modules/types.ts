@@ -85,6 +85,8 @@ export type ModuleNav = {
   labelKey: string;
   icon: string;
   group: string;
+  /** Optional priority for fixed mobile primary slots; overflow still uses nav order. */
+  mobilePrimaryOrder?: number | null;
   /** Mirrors the existing nav `requiredCapability` gate. */
   requiredCapability?: string | null;
 };
