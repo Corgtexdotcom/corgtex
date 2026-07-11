@@ -70,12 +70,18 @@ describe("fakeModelGateway", () => {
       documents: ["alpha", "zzzz unrelated"],
       topK: 1,
     });
+    const transcription = await fakeModelGateway.transcribeAudio({
+      workspaceId: "ws-1",
+      fileName: "meeting.m4a",
+      data: Buffer.from("audio"),
+    });
 
     expect(chat.content).toContain("FAKE_MODEL_RESPONSE");
     expect(extraction.output.summary).toContain("Alpha");
     expect(embeddings.embeddings).toHaveLength(2);
     expect(reranked.results).toHaveLength(1);
     expect(reranked.results[0]?.index).toBe(0);
+    expect(transcription.text).toContain("Fake transcript for meeting.m4a");
   });
 });
 
@@ -203,6 +209,52 @@ describe("openAICompatibleModelGateway", () => {
         type: "json_object",
       },
     });
+  });
+
+  it("sends audio transcription requests as multipart form data", async () => {
+    restoreEnv();
+    Object.assign(process.env, {
+      MODEL_PROVIDER: "openai",
+      MODEL_API_KEY: "test-key",
+      MODEL_BASE_URL: "https://models.example.test/v1",
+      MODEL_TRANSCRIPTION_DEFAULT: "gpt-4o-transcribe",
+    });
+
+    const fetchMock = vi.fn().mockResolvedValueOnce(new Response(JSON.stringify({
+      text: "Dana: We agreed on the next step.",
+    }), { status: 200 }));
+
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { openAICompatibleModelGateway } = await import("./openai-compatible-gateway");
+
+    const result = await openAICompatibleModelGateway.transcribeAudio({
+      workspaceId: "ws-1",
+      workflowJobId: "job-1",
+      fileName: "meeting.m4a",
+      mimeType: "audio/mp4",
+      data: Buffer.from("audio"),
+      prompt: "Meeting title: Team Sync",
+    });
+
+    expect(result.text).toBe("Dana: We agreed on the next step.");
+
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    const form = init.body as FormData;
+    const file = form.get("file") as File;
+
+    expect(url).toBe("https://models.example.test/v1/audio/transcriptions");
+    expect(init.headers).toMatchObject({
+      authorization: "Bearer test-key",
+    });
+    expect(init.headers).not.toMatchObject({
+      "content-type": expect.any(String),
+    });
+    expect(form.get("model")).toBe("gpt-4o-transcribe");
+    expect(form.get("response_format")).toBe("json");
+    expect(form.get("prompt")).toBe("Meeting title: Team Sync");
+    expect(file.name).toBe("meeting.m4a");
+    expect(file.type).toBe("audio/mp4");
   });
 
   it("sends Azure OpenAI API key headers without OpenRouter provider options", async () => {

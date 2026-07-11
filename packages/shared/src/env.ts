@@ -112,6 +112,7 @@ type Env = {
   readonly MODEL_CHAT_EXCELLENT: string;
   readonly MODEL_CHAT_CONVERSATION: string;
   readonly MODEL_EMBEDDING_DEFAULT: string;
+  readonly MODEL_TRANSCRIPTION_DEFAULT: string | undefined;
   readonly MODEL_REQUEST_TIMEOUT_MS: number;
   readonly KNOWLEDGE_SEARCH_PROVIDER: KnowledgeSearchProvider;
   readonly AZURE_SEARCH_ENDPOINT: string | undefined;
@@ -264,6 +265,9 @@ export const env: Env = {
   },
   get MODEL_EMBEDDING_DEFAULT() {
     return optional("MODEL_EMBEDDING_DEFAULT") ?? "google/gemini-embedding-001";
+  },
+  get MODEL_TRANSCRIPTION_DEFAULT() {
+    return optional("MODEL_TRANSCRIPTION_DEFAULT");
   },
   get MODEL_REQUEST_TIMEOUT_MS() {
     return numberFromEnv("MODEL_REQUEST_TIMEOUT_MS", 180_000);

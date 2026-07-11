@@ -7,6 +7,7 @@ import type {
   ModelGateway,
   ModelUsageInput,
   RerankRequest,
+  AudioTranscriptionRequest,
 } from "./contracts";
 import { assertCatalogModelBudget, assertWorkspaceModelBudget, recordModelUsage } from "./usage";
 import { estimateModelCost, getModelPrice } from "./pricing";
@@ -42,6 +43,10 @@ type EmbeddingApiResponse = {
   usage?: {
     prompt_tokens?: number;
   };
+};
+
+type AudioTranscriptionApiResponse = {
+  text?: string;
 };
 
 const REQUEST_TIMEOUT_MS = env.MODEL_REQUEST_TIMEOUT_MS;
@@ -176,8 +181,14 @@ async function getAzureAccessToken() {
 }
 
 async function requestHeaders() {
-  const headers: Record<string, string> = {
+  return {
     "content-type": "application/json",
+    ...await authHeaders(),
+  };
+}
+
+async function authHeaders() {
+  const headers: Record<string, string> = {
   };
 
   if (isAzureOpenAiProvider()) {
@@ -616,6 +627,87 @@ async function embedTexts(request: EmbeddingRequest) {
   };
 }
 
+async function transcribeAudioFile(request: AudioTranscriptionRequest) {
+  const startedAt = Date.now();
+  const model = request.model ?? env.MODEL_TRANSCRIPTION_DEFAULT;
+  if (!model) {
+    throw new Error("MODEL_TRANSCRIPTION_DEFAULT is required for audio transcription.");
+  }
+  assertKnownModelPrice(env.MODEL_PROVIDER, model);
+  await assertWorkspaceModelBudget(request.workspaceId);
+  await assertCatalogModelBudget({
+    workspaceId: request.workspaceId,
+    ...usageContext(request),
+  });
+
+  const form = new FormData();
+  const fileName = request.fileName.trim() || "meeting-audio";
+  form.set("model", model);
+  form.set("response_format", "json");
+  form.set("file", new Blob([new Uint8Array(request.data)], {
+    type: request.mimeType?.trim() || "application/octet-stream",
+  }), fileName);
+  if (request.prompt?.trim()) {
+    form.set("prompt", request.prompt.trim());
+  }
+  if (request.language?.trim()) {
+    form.set("language", request.language.trim());
+  }
+
+  let lastError: unknown = null;
+  for (let attempt = 0; attempt <= MAX_REQUEST_RETRIES; attempt += 1) {
+    try {
+      const response = await fetch(`${baseUrl()}/audio/transcriptions`, {
+        method: "POST",
+        headers: await authHeaders(),
+        body: form,
+        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        const error = new Error(`OpenAI-compatible audio transcription failed (${response.status}): ${errorText}`);
+        if (attempt < MAX_REQUEST_RETRIES && isRetryableStatus(response.status)) {
+          lastError = error;
+          await sleep(retryDelayMs(attempt));
+          continue;
+        }
+        throw error;
+      }
+
+      const output = await response.json() as AudioTranscriptionApiResponse;
+      const text = output.text?.trim() ?? "";
+      if (!text) {
+        throw new Error("Audio transcription returned no text.");
+      }
+      const latencyMs = Date.now() - startedAt;
+      const usage = await recordUsage({
+        workspaceId: request.workspaceId,
+        workflowJobId: request.workflowJobId,
+        agentRunId: request.agentRunId,
+        ...usageContext(request),
+        provider: env.MODEL_PROVIDER,
+        model,
+        taskType: "TRANSCRIPTION",
+        inputTokens: 0,
+        outputTokens: Math.ceil(text.length / 4),
+        latencyMs,
+        ...costFields(env.MODEL_PROVIDER, model, 0, Math.ceil(text.length / 4)),
+      });
+
+      return { text, usage };
+    } catch (error) {
+      if (attempt >= MAX_REQUEST_RETRIES || !isRetryableRequestError(error)) {
+        throw error;
+      }
+      lastError = error;
+      await sleep(retryDelayMs(attempt));
+    }
+  }
+
+  throw lastError ?? new Error("OpenAI-compatible audio transcription failed after retries.");
+}
+
 export const openAICompatibleModelGateway: ModelGateway = {
   async chat(request: ChatCompletionRequest) {
     return completeChat(request, request.taskType);
@@ -732,5 +824,9 @@ export const openAICompatibleModelGateway: ModelGateway = {
       results,
       usage,
     };
+  },
+
+  async transcribeAudio(request: AudioTranscriptionRequest) {
+    return transcribeAudioFile(request);
   },
 };

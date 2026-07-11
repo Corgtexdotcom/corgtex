@@ -414,6 +414,7 @@ enum ModelTaskType {
   SUMMARY
   CLASSIFICATION
   AGENT
+  TRANSCRIPTION
 }
 
 enum AgentRunStatus {
@@ -570,6 +571,7 @@ model Workspace {
   cycles                         Cycle[]
   meetings                       Meeting[]
   meetingSeries                  MeetingSeries[]
+  meetingAudioAssets             MeetingAudioAsset[]
   documents                      Document[]
   workItemEvidence               WorkItemEvidence[]
   policyCorpus                   PolicyCorpus[]
@@ -1006,6 +1008,7 @@ model User {
   editedWorkItemVersions        WorkItemVersion[]                     @relation("WorkItemVersionEditedBy")
   createdMemberEmailAliases     MemberEmailAlias[]                    @relation("MemberEmailAliasCreator")
   mergedMembers                 Member[]                              @relation("MemberMergedBy")
+  uploadedMeetingAudioAssets    MeetingAudioAsset[]                   @relation("MeetingAudioAssetUploader")
 }
 
 model Session {
@@ -2063,6 +2066,14 @@ enum MeetingRecordingStatus {
   SKIPPED
 }
 
+enum MeetingAudioAssetStatus {
+  UPLOADED
+  TRANSCRIBING
+  TRANSCRIBED
+  INGESTED
+  FAILED
+}
+
 enum RecorderCalendarSourceStatus {
   ACTIVE
   DISABLED
@@ -2197,6 +2208,7 @@ model Meeting {
   followUpReview          MeetingFollowUpReview?
   transcriptProcessingProgress MeetingTranscriptProcessingProgress?
   recordings              MeetingRecording[]
+  audioAssets             MeetingAudioAsset[]
   smokeRuns               MeetingRecorderSmokeRun[]
   transcriptSourceRecords MeetingTranscriptSourceRecord[]
 
@@ -2285,6 +2297,43 @@ model MeetingRecording {
   @@index([workspaceId, meetingId])
   @@index([workspaceId, status, joinAt])
   @@index([workspaceId, provider, externalBotId])
+}
+
+model MeetingAudioAsset {
+  id                 String                  @id @default(uuid())
+  workspaceId        String
+  meetingId          String?
+  uploadedByUserId   String?
+  fileName           String
+  mimeType           String?
+  storageKey         String                  @unique
+  sizeBytes          Int
+  durationSeconds    Int?
+  title              String?
+  recordedAt         DateTime?
+  participantEmails  String[]                @default([])
+  status             MeetingAudioAssetStatus @default(UPLOADED)
+  transcriptText     String?                 @db.Text
+  transcriptProvider String?
+  transcriptModel    String?
+  transcriptMetadata Json?
+  intakeMeetingId    String?
+  workflowJobId      String?
+  failureCode        String?
+  failureMessage     String?                 @db.Text
+  transcribedAt      DateTime?
+  ingestedAt         DateTime?
+  createdAt          DateTime                @default(now())
+  updatedAt          DateTime                @updatedAt
+
+  workspace      Workspace    @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  meeting        Meeting?     @relation(fields: [meetingId], references: [id], onDelete: SetNull)
+  uploadedByUser User?        @relation("MeetingAudioAssetUploader", fields: [uploadedByUserId], references: [id], onDelete: SetNull)
+  workflowJob    WorkflowJob? @relation(fields: [workflowJobId], references: [id], onDelete: SetNull)
+
+  @@index([workspaceId, status, createdAt])
+  @@index([workspaceId, meetingId])
+  @@index([workflowJobId])
 }
 
 model MeetingRecorderProviderEvent {
@@ -2857,6 +2906,7 @@ model WorkflowJob {
   dependsOn             WorkflowJob?           @relation("JobDependency", fields: [dependsOnJobId], references: [id], onDelete: SetNull)
   dependents            WorkflowJob[]          @relation("JobDependency")
   modelUsage            ModelUsage[]
+  meetingAudioAssets    MeetingAudioAsset[]
   newspaperEditions     NewspaperEdition[]
   newspaperDeliveries   NewspaperDelivery[]
   newspaperTrackedLinks NewspaperTrackedLink[]
