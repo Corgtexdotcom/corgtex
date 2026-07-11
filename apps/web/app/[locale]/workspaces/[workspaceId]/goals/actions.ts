@@ -12,6 +12,8 @@ import {
   deleteKeyResult,
   postGoalUpdate,
   createGoalLink,
+  createGoalFinanceProjectLink,
+  deleteGoalFinanceProjectLink,
   deleteGoalLink,
   createRecognition,
   respondToCheckIn,
@@ -353,6 +355,37 @@ export async function createGoalLinkAction(params: {
   } catch (error: any) {
     return { success: false, error: error.message || "Failed to create goal link" };
   }
+}
+
+export async function createGoalFinanceProjectLinkFormAction(formData: FormData) {
+  const _demoGuardWsId = formData.get("workspaceId") as string;
+  if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
+
+  const actor = await requirePageActor();
+  const workspaceId = await requireGoalsEnabled(formData);
+  await requireWorkspaceFeature(workspaceId, "FINANCE");
+  await requireWorkspaceFeature(workspaceId, "PRACTICE_PROJECTS");
+  await createGoalFinanceProjectLink(actor, {
+    workspaceId,
+    goalId: asString(formData, "goalId"),
+    projectId: asString(formData, "projectId"),
+  });
+  refresh(workspaceId);
+}
+
+export async function deleteGoalFinanceProjectLinkFormAction(formData: FormData) {
+  const _demoGuardWsId = formData.get("workspaceId") as string;
+  if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
+
+  const actor = await requirePageActor();
+  const workspaceId = await requireGoalsEnabled(formData);
+  await requireWorkspaceFeature(workspaceId, "FINANCE");
+  await requireWorkspaceFeature(workspaceId, "PRACTICE_PROJECTS");
+  await deleteGoalFinanceProjectLink(actor, {
+    workspaceId,
+    linkId: asString(formData, "linkId"),
+  });
+  refresh(workspaceId);
 }
 
 export async function deleteGoalLinkAction(params: { workspaceId: string; linkId: string }) {
