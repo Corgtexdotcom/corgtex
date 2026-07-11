@@ -6,6 +6,7 @@ import type {
   ModelGateway,
   ModelUsageInput,
   RerankRequest,
+  AudioTranscriptionRequest,
 } from "./contracts";
 import { assertCatalogModelBudget, assertWorkspaceModelBudget, recordModelUsage } from "./usage";
 
@@ -226,5 +227,30 @@ export const fakeModelGateway: ModelGateway = {
       results: ranked,
       usage,
     };
+  },
+
+  async transcribeAudio(request: AudioTranscriptionRequest) {
+    const startedAt = Date.now();
+    await assertWorkspaceModelBudget(request.workspaceId);
+    await assertCatalogModelBudget({
+      workspaceId: request.workspaceId,
+      ...usageContext(request),
+    });
+    const text = `Fake transcript for ${request.fileName} (${request.data.byteLength} bytes).`;
+    const usage = await recordUsage({
+      workspaceId: request.workspaceId,
+      workflowJobId: request.workflowJobId,
+      agentRunId: request.agentRunId,
+      ...usageContext(request),
+      provider: env.MODEL_PROVIDER,
+      model: request.model ?? env.MODEL_TRANSCRIPTION_DEFAULT ?? "fake-transcribe",
+      taskType: "TRANSCRIPTION",
+      inputTokens: 0,
+      outputTokens: Math.ceil(text.length / 4),
+      latencyMs: Date.now() - startedAt,
+      estimatedCostUsd: "0.000000",
+    });
+
+    return { text, usage };
   },
 };

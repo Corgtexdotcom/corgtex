@@ -118,10 +118,30 @@ export type RerankResponse = {
   usage: Omit<ModelUsageInput, "workspaceId" | "workflowJobId" | "agentRunId" | "taskType">;
 };
 
+export type AudioTranscriptionRequest = {
+  workspaceId: string;
+  model?: string;
+  fileName: string;
+  mimeType?: string | null;
+  data: Buffer;
+  prompt?: string | null;
+  language?: string | null;
+  workflowJobId?: string;
+  agentRunId?: string;
+  catalogItemId?: string;
+  agentCredentialId?: string;
+};
+
+export type AudioTranscriptionResponse = {
+  text: string;
+  usage: Omit<ModelUsageInput, "workspaceId" | "workflowJobId" | "agentRunId" | "taskType">;
+};
+
 export type ModelGateway = {
   chat(request: ChatCompletionRequest): Promise<ChatCompletionResponse>;
   chatStream(request: ChatCompletionRequest): AsyncGenerator<string, ChatCompletionResponse>;
   extract(request: ExtractionRequest): Promise<ExtractionResponse>;
   embed(request: EmbeddingRequest): Promise<EmbeddingResponse>;
   rerank(request: RerankRequest): Promise<RerankResponse>;
+  transcribeAudio(request: AudioTranscriptionRequest): Promise<AudioTranscriptionResponse>;
 };
