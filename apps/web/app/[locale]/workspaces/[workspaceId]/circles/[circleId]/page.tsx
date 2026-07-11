@@ -1,7 +1,7 @@
 import Link from "next/link";
 import { notFound, redirect } from "next/navigation";
 import { getTranslations } from "next-intl/server";
-import { listCircleTree, requireWorkspaceMembership } from "@corgtex/domain";
+import { listCircleTree, listHumanMembers, requireWorkspaceMembership } from "@corgtex/domain";
 import { prisma } from "@corgtex/shared";
 
 import { requirePageActor } from "@/lib/auth";
@@ -9,33 +9,20 @@ import { ActionMenu } from "@/lib/components/ui/ActionMenu";
 import {
   assignAgentToCircleAction,
   deleteCircleAction,
-  deleteRoleAction,
   removeAgentFromCircleAction,
-  unassignRoleAction,
   updateCircleAction,
-  updateRoleAction,
 } from "../../actions";
 import { ConfirmSubmitButton } from "../ConfirmSubmitButton";
 import {
   collectCircleMembers,
   countAccountabilities,
 } from "../circleGraphHelpers";
+import { RoleManagementPanel } from "./RoleManagementPanel";
 
 export const dynamic = "force-dynamic";
 
 type CircleTree = Awaited<ReturnType<typeof listCircleTree>>;
 type CircleTreeNode = CircleTree[number];
-type RoleAssignmentRecord = {
-  id: string;
-  member?: {
-    id?: string | null;
-    user?: {
-      id?: string | null;
-      displayName?: string | null;
-      email?: string | null;
-    } | null;
-  } | null;
-};
 
 function findCircle(nodes: CircleTree, circleId: string): CircleTreeNode | null {
   for (const node of nodes) {
@@ -48,12 +35,6 @@ function findCircle(nodes: CircleTree, circleId: string): CircleTreeNode | null 
 
 function flattenCircles(nodes: CircleTree): CircleTree {
   return nodes.flatMap((node) => [node, ...flattenCircles(node.childCircles)]);
-}
-
-function memberName(assignment: RoleAssignmentRecord) {
-  return assignment.member?.user?.displayName
-    ?? assignment.member?.user?.email
-    ?? "Unknown";
 }
 
 function hiddenWorkspace(workspaceId: string) {
@@ -72,7 +53,7 @@ export default async function CircleDetailPage({
   const tCommon = await getTranslations("common");
   const membership = await requireWorkspaceMembership({ actor, workspaceId });
 
-  const [treeData, currentWorkspace, agentAssignments, allAgents] = await Promise.all([
+  const [treeData, currentWorkspace, agentAssignments, allAgents, roleAssignableMembers] = await Promise.all([
     listCircleTree(workspaceId),
     prisma.workspace.findUnique({ where: { id: workspaceId }, select: { slug: true } }),
     prisma.circleAgentAssignment.findMany({
@@ -84,6 +65,7 @@ export default async function CircleDetailPage({
       where: { workspaceId, isActive: true, archivedAt: null },
       orderBy: { displayName: "asc" },
     }),
+    listHumanMembers(workspaceId),
   ]);
 
   const circle = findCircle(treeData, circleId);
@@ -317,162 +299,49 @@ export default async function CircleDetailPage({
         {circle.roles.length === 0 ? (
           <p className="muted">{t("noRolesInCircle")}</p>
         ) : (
-          <div style={{ display: "grid", gap: 16 }}>
-            {circle.roles.map((role) => {
-              const assignments = role.assignments ?? [];
-              const versions = roleVersionsByRole.get(role.id) ?? [];
-              const holderEvents = holderHistoryByRole.get(role.id) ?? [];
-              return (
-                <article key={role.id} className="nr-item">
-                  <div className="row" style={{ alignItems: "flex-start", gap: 16 }}>
-                    <div style={{ minWidth: 0 }}>
-                      <strong className="nr-item-title">{role.name}</strong>
-                      <div className="nr-item-meta" style={{ marginTop: 4 }}>
-                        {(role.accountabilities?.length ?? 0) > 0
-                          ? t("accountabilityCount", { count: role.accountabilities.length })
-                          : t("noAccountabilities")}
-                      </div>
-                    </div>
-                    {canManageStructure && (
-                      <ActionMenu label={tCommon("moreActions")}>
-                        <form action={deleteRoleAction}>
-                          {hiddenWorkspace(workspaceId)}
-                          <input type="hidden" name="roleId" value={role.id} />
-                          <ConfirmSubmitButton className="danger" message={t("confirmArchiveRole")}>
-                            {t("btnDelete")}
-                          </ConfirmSubmitButton>
-                        </form>
-                      </ActionMenu>
-                    )}
-                  </div>
-
-                  {role.purposeMd && <div className="nr-excerpt" style={{ marginTop: 8 }}>{role.purposeMd}</div>}
-                  {(role.accountabilities?.length ?? 0) > 0 && (
-                    <ul style={{ margin: "10px 0 0", paddingLeft: 18 }}>
-                      {role.accountabilities.map((accountability: string, index: number) => (
-                        <li key={`${role.id}-accountability-${index}`} className="nr-item-meta" style={{ marginBottom: 4 }}>
-                          {accountability}
-                        </li>
-                      ))}
-                    </ul>
-                  )}
-
-                  <div style={{ marginTop: 16, paddingTop: 12, borderTop: "1px solid var(--line)" }}>
-                    <strong style={{ display: "block", marginBottom: 8, fontSize: "0.85rem" }}>{t("labelAssignedTo")}</strong>
-                    {assignments.length === 0 ? (
-                      <p className="muted" style={{ margin: 0 }}>{t("unassigned")}</p>
-                    ) : (
-                      <div style={{ display: "grid", gap: 8 }}>
-                        {assignments.map((assignment: RoleAssignmentRecord) => {
-                          const memberId = assignment.member?.id;
-                          const onboarding = memberId ? onboardingByRoleMember.get(`${role.id}:${memberId}`) : null;
-                          const canOpenOnboarding = Boolean(
-                            onboarding && assignment.member?.user?.id === currentUserId,
-                          );
-                          if (!memberId) return null;
-                          return (
-                            <div key={assignment.id} className="row" style={{ gap: 12 }}>
-                              <Link href={`/workspaces/${workspaceId}/members/${memberId}`} style={{ color: "inherit", textDecoration: "none" }}>
-                                {memberName(assignment)}
-                              </Link>
-                              {onboarding && canOpenOnboarding && (
-                                <Link
-                                  href={`/workspaces/${workspaceId}/chat?session=${onboarding.conversationId}`}
-                                  className="tag info"
-                                  style={{ fontSize: "0.7rem", padding: "2px 6px", textDecoration: "none" }}
-                                >
-                                  onboarding {onboarding.status.toLowerCase()}
-                                </Link>
-                              )}
-                              {onboarding && !canOpenOnboarding && (
-                                <span className="tag info" style={{ fontSize: "0.7rem", padding: "2px 6px" }}>
-                                  onboarding {onboarding.status.toLowerCase()}
-                                </span>
-                              )}
-                              {canManageStructure && (
-                                <form action={unassignRoleAction}>
-                                  {hiddenWorkspace(workspaceId)}
-                                  <input type="hidden" name="roleId" value={role.id} />
-                                  <input type="hidden" name="memberId" value={memberId} />
-                                  <button type="submit" className="secondary small">{t("btnUnassign")}</button>
-                                </form>
-                              )}
-                            </div>
-                          );
-                        })}
-                      </div>
-                    )}
-                  </div>
-
-                  {canManageStructure && (
-                    <details style={{ marginTop: 16 }}>
-                      <summary className="secondary small nr-hide-marker" style={{ cursor: "pointer", display: "inline-block" }}>
-                        {t("btnEditRole")}
-                      </summary>
-                      <form action={updateRoleAction} className="stack nr-form-section" style={{ marginTop: 12 }}>
-                        {hiddenWorkspace(workspaceId)}
-                        <input type="hidden" name="roleId" value={role.id} />
-                        <label>
-                          {t("formName")}
-                          <input name="name" defaultValue={role.name} required />
-                        </label>
-                        <label>
-                          {t("formPurpose")}
-                          <textarea name="purposeMd" defaultValue={role.purposeMd ?? ""} />
-                        </label>
-                        <label>
-                          {t("formAccountabilities")}
-                          <textarea name="accountabilities" defaultValue={(role.accountabilities ?? []).join("\n")} placeholder={t("formAccountabilitiesPlaceholder")} />
-                        </label>
-                        <button type="submit" className="secondary small">{tCommon("save")}</button>
-                      </form>
-                    </details>
-                  )}
-
-                  {(versions.length > 0 || holderEvents.length > 0) && (
-                    <details style={{ marginTop: 16 }}>
-                      <summary className="secondary small nr-hide-marker" style={{ cursor: "pointer", display: "inline-block" }}>
-                        Role history
-                      </summary>
-                      <div style={{ display: "grid", gap: 12, marginTop: 12 }}>
-                        {versions.length > 0 && (
-                          <div>
-                            <strong style={{ display: "block", fontSize: "0.8rem", marginBottom: 6 }}>Definition versions</strong>
-                            <div style={{ display: "grid", gap: 6 }}>
-                              {versions.slice(0, 5).map((version) => (
-                                <div key={version.id} className="nr-item-meta">
-                                  v{version.version} {version.changeType} - {version.createdAt.toISOString().slice(0, 10)}
-                                </div>
-                              ))}
-                            </div>
-                          </div>
-                        )}
-                        {holderEvents.length > 0 && (
-                          <div>
-                            <strong style={{ display: "block", fontSize: "0.8rem", marginBottom: 6 }}>Holder history</strong>
-                            <div style={{ display: "grid", gap: 6 }}>
-                              {holderEvents.slice(0, 8).map((event) => {
-                                const holderName = event.member?.user.displayName
-                                  ?? event.member?.user.email
-                                  ?? event.agentIdentity?.displayName
-                                  ?? "Unknown holder";
-                                return (
-                                  <div key={event.id} className="nr-item-meta">
-                                    {holderName} - {event.startedAt.toISOString().slice(0, 10)}
-                                    {event.endedAt ? ` to ${event.endedAt.toISOString().slice(0, 10)}` : " to present"}
-                                  </div>
-                                );
-                              })}
-                            </div>
-                          </div>
-                        )}
-                      </div>
-                    </details>
-                  )}
-                </article>
-              );
-            })}
-          </div>
+          <RoleManagementPanel
+            workspaceId={workspaceId}
+            roles={circle.roles}
+            members={roleAssignableMembers.map((member) => ({
+              id: member.id,
+              name: member.user.displayName ?? member.user.email,
+              email: member.user.email,
+            }))}
+            canManageStructure={canManageStructure}
+            currentUserId={currentUserId}
+            roleVersionsByRole={roleVersionsByRole}
+            holderHistoryByRole={holderHistoryByRole}
+            onboardingByRoleMember={onboardingByRoleMember}
+            moreActionsLabel={tCommon("moreActions")}
+            labels={{
+              accountabilityCount: (count) => t("accountabilityCount", { count }),
+              btnAddHolder: t("btnAddHolder"),
+              btnDelete: t("btnDelete"),
+              btnEditRole: t("btnEditRole"),
+              btnReassign: t("btnReassign"),
+              btnUnassign: t("btnUnassign"),
+              confirmArchiveRole: t("confirmArchiveRole"),
+              dateRangeTo: t("dateRangeTo"),
+              definitionVersions: t("definitionVersions"),
+              formAccountabilities: t("formAccountabilities"),
+              formAccountabilitiesPlaceholder: t("formAccountabilitiesPlaceholder"),
+              formMember: t("formMember"),
+              formName: t("formName"),
+              formPurpose: t("formPurpose"),
+              holderHistory: t("holderHistory"),
+              labelAssignedTo: t("labelAssignedTo"),
+              noAccountabilities: t("noAccountabilities"),
+              noAvailableMembers: t("noAvailableMembers"),
+              onboardingStatus: (status) => t("onboardingStatus", { status }),
+              present: t("present"),
+              reassignTo: t("reassignTo"),
+              roleHistory: t("roleHistory"),
+              save: tCommon("save"),
+              selectMember: t("selectMember"),
+              unassigned: t("unassigned"),
+              unknownHolder: t("unknownHolder"),
+            }}
+          />
         )}
       </section>
 
