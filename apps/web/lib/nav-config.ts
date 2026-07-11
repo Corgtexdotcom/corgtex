@@ -39,6 +39,7 @@ export type WorkspaceNavIconName =
   | "meetings"
   | "relationships"
   | "contextMaps"
+  | "agreements"
   | "proposals"
   | "circles"
   | "cycles"
