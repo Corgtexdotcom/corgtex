@@ -399,6 +399,8 @@ export async function assignRole(actor: AppActor, params: {
   workspaceId: string;
   roleId: string;
   memberId: string;
+  expiresAt?: Date | null;
+  transferReason?: string | null;
 }) {
   await requireWorkspaceMembership({
     actor,
@@ -411,11 +413,16 @@ export async function assignRole(actor: AppActor, params: {
 
     const role = await loadRoleForAssignment(tx, params.workspaceId, params.roleId);
     const member = await loadMemberForAssignment(tx, params.workspaceId, params.memberId);
+    const transfer = normalizeRoleAssignmentTransfer({
+      expiresAt: params.expiresAt,
+      transferReason: params.transferReason,
+    });
 
     const { assignment } = await assignRoleInTransaction(tx, actor, {
       workspaceId: params.workspaceId,
       role,
       member,
+      transfer,
     });
 
     return assignment;
@@ -450,6 +457,8 @@ export async function reassignRole(actor: AppActor, params: {
   roleId: string;
   fromMemberId: string;
   toMemberId: string;
+  expiresAt?: Date | null;
+  transferReason?: string | null;
 }) {
   await requireWorkspaceMembership({
     actor,
@@ -467,6 +476,10 @@ export async function reassignRole(actor: AppActor, params: {
 
     const role = await loadRoleForAssignment(tx, params.workspaceId, params.roleId);
     const targetMember = await loadMemberForAssignment(tx, params.workspaceId, params.toMemberId);
+    const transfer = normalizeRoleAssignmentTransfer({
+      expiresAt: params.expiresAt,
+      transferReason: params.transferReason,
+    });
     const sourceAssignment = await tx.roleAssignment.findUnique({
       where: {
         roleId_memberId: {
@@ -481,6 +494,7 @@ export async function reassignRole(actor: AppActor, params: {
       workspaceId: params.workspaceId,
       role,
       member: targetMember,
+      transfer,
     });
     const removedAssignment = await unassignRoleInTransaction(tx, actor, {
       workspaceId: params.workspaceId,
@@ -501,6 +515,41 @@ export async function reassignRole(actor: AppActor, params: {
 
 function assignmentKey(params: { roleId: string; memberId: string }) {
   return `${params.roleId}:${params.memberId}`;
+}
+
+type RoleAssignmentTransfer = {
+  expiresAt: Date | null;
+  transferReason: string | null;
+};
+
+function normalizeRoleAssignmentTransfer(params: {
+  expiresAt?: Date | null;
+  transferReason?: string | null;
+  now?: Date;
+}): RoleAssignmentTransfer {
+  const expiresAt = params.expiresAt ?? null;
+  if (expiresAt) {
+    invariant(!Number.isNaN(expiresAt.getTime()), 400, "INVALID_INPUT", "Temporary role assignment expiry is invalid.");
+    invariant(expiresAt.getTime() > (params.now ?? new Date()).getTime(), 400, "INVALID_INPUT", "Temporary role assignment expiry must be in the future.");
+  }
+
+  return {
+    expiresAt,
+    transferReason: expiresAt ? params.transferReason?.trim() || null : null,
+  };
+}
+
+function sameNullableDate(left?: Date | null, right?: Date | null) {
+  if (!left && !right) return true;
+  if (!left || !right) return false;
+  return left.getTime() === right.getTime();
+}
+
+function transferEventPayload(transfer: RoleAssignmentTransfer) {
+  return {
+    expiresAt: transfer.expiresAt?.toISOString() ?? null,
+    transferReason: transfer.transferReason,
+  };
 }
 
 async function lockRoleAssignments(
@@ -548,6 +597,7 @@ async function assignRoleInTransaction(
     workspaceId: string;
     role: RoleForAssignment;
     member: MemberForAssignment;
+    transfer: RoleAssignmentTransfer;
   },
 ) {
   const key = {
@@ -559,13 +609,22 @@ async function assignRoleInTransaction(
       roleId_memberId: key,
     },
   });
+  const transferChanged = !sameNullableDate(existingAssignment?.expiresAt ?? null, params.transfer.expiresAt)
+    || (existingAssignment?.transferReason ?? null) !== params.transfer.transferReason;
 
   const assignment = await tx.roleAssignment.upsert({
     where: {
       roleId_memberId: key,
     },
-    update: {},
-    create: key,
+    update: {
+      expiresAt: params.transfer.expiresAt,
+      transferReason: params.transfer.transferReason,
+    },
+    create: {
+      ...key,
+      expiresAt: params.transfer.expiresAt,
+      transferReason: params.transfer.transferReason,
+    },
   });
 
   if (!existingAssignment) {
@@ -591,7 +650,11 @@ async function assignRoleInTransaction(
       action: "role.assigned",
       entityType: "RoleAssignment",
       entityId: assignment.id,
-      meta: { roleId: params.role.id, memberId: params.member.id },
+      meta: {
+        roleId: params.role.id,
+        memberId: params.member.id,
+        ...transferEventPayload(params.transfer),
+      },
     },
   });
 
@@ -608,6 +671,22 @@ async function assignRoleInTransaction(
           assignmentId: assignment.id,
           onboardingSessionId: onboarding.id,
           conversationId: onboarding.conversationId,
+          ...transferEventPayload(params.transfer),
+        },
+      },
+    ]);
+  } else if (transferChanged) {
+    await appendEvents(tx, [
+      {
+        workspaceId: params.workspaceId,
+        type: "role.assignment.updated",
+        aggregateType: "RoleAssignment",
+        aggregateId: assignment.id,
+        payload: {
+          roleId: params.role.id,
+          memberId: params.member.id,
+          assignmentId: assignment.id,
+          ...transferEventPayload(params.transfer),
         },
       },
     ]);

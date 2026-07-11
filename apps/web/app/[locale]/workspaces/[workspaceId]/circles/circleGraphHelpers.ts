@@ -14,6 +14,7 @@ export type CircleGraphMember = {
 
 export type CircleGraphAssignment = {
   id: string;
+  expiresAt?: Date | string | null;
   member?: CircleGraphMember | null;
 };
 
@@ -60,11 +61,20 @@ export function getDisplayName(user?: CircleGraphUser | null) {
   return user?.displayName?.trim() || user?.email?.trim() || "Unknown";
 }
 
-export function collectCircleMembers(circle: CircleGraphCircle): CircleMemberPreview[] {
+export function isVisibleRoleAssignment(assignment: { expiresAt?: Date | string | number | null }, now: Date = new Date()) {
+  if (!assignment.expiresAt) return true;
+  const expiresAt = assignment.expiresAt instanceof Date
+    ? assignment.expiresAt
+    : new Date(assignment.expiresAt);
+  return !Number.isNaN(expiresAt.getTime()) && expiresAt.getTime() > now.getTime();
+}
+
+export function collectCircleMembers(circle: CircleGraphCircle, now: Date = new Date()): CircleMemberPreview[] {
   const people = new Map<string, CircleMemberPreview>();
 
   for (const role of circle.roles ?? []) {
     for (const assignment of role.assignments ?? []) {
+      if (!isVisibleRoleAssignment(assignment, now)) continue;
       const member = assignment.member;
       if (!member?.id) continue;
 

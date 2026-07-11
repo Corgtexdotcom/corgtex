@@ -450,12 +450,122 @@ describe("roles domain", () => {
           memberId: "member-1",
         },
       },
-      update: {},
+      update: {
+        expiresAt: null,
+        transferReason: null,
+      },
       create: {
         roleId: "role-1",
         memberId: "member-1",
+        expiresAt: null,
+        transferReason: null,
       },
     }));
+  });
+
+  it("assignRole writes temporary transfer metadata to assignments, audit, and events", async () => {
+    const expiresAt = new Date("2099-01-31T23:59:59.999Z");
+    prismaMock.role.findUnique.mockResolvedValue({
+      id: "role-1",
+      circleId: "circle-1",
+      name: "Lead",
+      purposeMd: "Lead the work.",
+      accountabilities: ["Coordinate"],
+      artifacts: [],
+      metricsMd: null,
+      coreRoleType: null,
+      archivedAt: null,
+      circle: {
+        id: "circle-1",
+        workspaceId: "workspace-1",
+        name: "Circle",
+        purposeMd: null,
+        domainMd: null,
+      },
+    });
+    prismaMock.member.findUnique.mockResolvedValue({
+      id: "member-1",
+      userId: "user-1",
+      workspaceId: "workspace-1",
+      isActive: true,
+      user: { displayName: "Member", email: "member@example.com" },
+    });
+    prismaMock.roleAssignment.findUnique.mockResolvedValue(null);
+
+    const { assignRole } = await import("./roles");
+    await expect(assignRole(actor, {
+      workspaceId: "workspace-1",
+      roleId: "role-1",
+      memberId: "member-1",
+      expiresAt,
+      transferReason: "  Leave coverage  ",
+    })).resolves.toEqual({ id: "assignment-1" });
+
+    expect(prismaMock.roleAssignment.upsert).toHaveBeenCalledWith(expect.objectContaining({
+      update: {
+        expiresAt,
+        transferReason: "Leave coverage",
+      },
+      create: {
+        roleId: "role-1",
+        memberId: "member-1",
+        expiresAt,
+        transferReason: "Leave coverage",
+      },
+    }));
+    expect(prismaMock.auditLog.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        action: "role.assigned",
+        meta: expect.objectContaining({
+          expiresAt: expiresAt.toISOString(),
+          transferReason: "Leave coverage",
+        }),
+      }),
+    }));
+    expect(prismaMock.event.createMany).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.arrayContaining([
+        expect.objectContaining({
+          type: "role.assigned",
+          payload: expect.objectContaining({
+            expiresAt: expiresAt.toISOString(),
+            transferReason: "Leave coverage",
+          }),
+        }),
+      ]),
+    }));
+  });
+
+  it("assignRole rejects past temporary expiry before writing an assignment", async () => {
+    prismaMock.role.findUnique.mockResolvedValue({
+      id: "role-1",
+      archivedAt: null,
+      circle: {
+        id: "circle-1",
+        workspaceId: "workspace-1",
+        name: "Circle",
+        purposeMd: null,
+        domainMd: null,
+      },
+    });
+    prismaMock.member.findUnique.mockResolvedValue({
+      id: "member-1",
+      userId: "user-1",
+      workspaceId: "workspace-1",
+      isActive: true,
+      user: { displayName: "Member", email: "member@example.com" },
+    });
+
+    const { assignRole } = await import("./roles");
+    await expect(assignRole(actor, {
+      workspaceId: "workspace-1",
+      roleId: "role-1",
+      memberId: "member-1",
+      expiresAt: new Date("2000-01-01T00:00:00.000Z"),
+    })).rejects.toMatchObject({
+      status: 400,
+      code: "INVALID_INPUT",
+    });
+    expect(prismaMock.roleAssignment.upsert).not.toHaveBeenCalled();
   });
 
   it("assignRole emits the onboarding intro event when an existing assignment gets a new onboarding session", async () => {
@@ -604,6 +714,8 @@ describe("roles domain", () => {
       create: {
         roleId: "role-1",
         memberId: "member-2",
+        expiresAt: null,
+        transferReason: null,
       },
     }));
     expect(prismaMock.roleHolderHistory.create).toHaveBeenCalledWith(expect.objectContaining({
@@ -665,4 +777,5 @@ describe("roles domain", () => {
       },
     }));
   });
+
 });

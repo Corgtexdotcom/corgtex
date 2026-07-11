@@ -17,6 +17,8 @@ type RoleManagementMember = {
 
 type RoleManagementAssignment = {
   id: string;
+  expiresAt?: Date | string | null;
+  transferReason?: string | null;
   member?: {
     id?: string | null;
     user?: {
@@ -79,9 +81,12 @@ export type RoleManagementLabels = {
   definitionVersions: string;
   formAccountabilities: string;
   formAccountabilitiesPlaceholder: string;
+  formExpiresAt: string;
   formMember: string;
   formName: string;
   formPurpose: string;
+  formTransferReason: string;
+  formTransferReasonPlaceholder: string;
   holderHistory: string;
   labelAssignedTo: string;
   noAccountabilities: string;
@@ -92,6 +97,8 @@ export type RoleManagementLabels = {
   roleHistory: string;
   save: string;
   selectMember: string;
+  temporaryActive: (date: string) => string;
+  temporaryExpired: (date: string) => string;
   unassigned: string;
   unknownHolder: string;
 };
@@ -112,6 +119,21 @@ function memberOptionLabel(member: RoleManagementMember) {
 
 function formatDate(value: Date) {
   return value.toISOString().slice(0, 10);
+}
+
+function assignmentExpiryState(value?: Date | string | null, now: Date = new Date()) {
+  if (!value) return null;
+  const date = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(date.getTime())) return null;
+  return {
+    date: formatDate(date),
+    expired: date.getTime() <= now.getTime(),
+  };
+}
+
+function activeAssignmentDateValue(value?: Date | string | null, now: Date = new Date()) {
+  const state = assignmentExpiryState(value, now);
+  return state && !state.expired ? state.date : "";
 }
 
 export function RoleManagementPanel({
@@ -197,6 +219,7 @@ export function RoleManagementPanel({
                       ? members.filter((member) => member.id !== memberId && !assignedMemberIds.has(member.id))
                       : [];
                     if (!memberId) return null;
+                    const expiryState = assignmentExpiryState(assignment.expiresAt);
                     return (
                       <div key={assignment.id} style={{ display: "grid", gap: 8, padding: "8px 0", borderTop: "1px solid var(--line)" }}>
                         <div className="row" style={{ gap: 12 }}>
@@ -217,6 +240,13 @@ export function RoleManagementPanel({
                               {labels.onboardingStatus(onboarding.status.toLowerCase())}
                             </span>
                           )}
+                          {expiryState && (
+                            <span className={expiryState.expired ? "tag warning" : "tag info"} style={{ fontSize: "0.7rem", padding: "2px 6px" }}>
+                              {expiryState.expired
+                                ? labels.temporaryExpired(expiryState.date)
+                                : labels.temporaryActive(expiryState.date)}
+                            </span>
+                          )}
                           {canManageStructure && (
                             <form action={unassignRoleAction}>
                               {hiddenWorkspace(workspaceId)}
@@ -226,8 +256,27 @@ export function RoleManagementPanel({
                             </form>
                           )}
                         </div>
+                        {assignment.transferReason && (
+                          <div className="nr-item-meta">{assignment.transferReason}</div>
+                        )}
                         {canManageStructure && (
-                          <form action={reassignRoleAction} className="row" style={{ gap: 8 }}>
+                          <form action={assignRoleAction} className="row" style={{ gap: 8, alignItems: "flex-end" }}>
+                            {hiddenWorkspace(workspaceId)}
+                            <input type="hidden" name="roleId" value={role.id} />
+                            <input type="hidden" name="memberId" value={memberId} />
+                            <label style={{ flex: "0 1 180px", minWidth: 150 }}>
+                              {labels.formExpiresAt}
+                              <input name="expiresAt" type="date" min={formatDate(new Date())} defaultValue={activeAssignmentDateValue(assignment.expiresAt)} />
+                            </label>
+                            <label style={{ flex: "1 1 220px", minWidth: 180 }}>
+                              {labels.formTransferReason}
+                              <input name="transferReason" placeholder={labels.formTransferReasonPlaceholder} defaultValue={assignment.transferReason ?? ""} />
+                            </label>
+                            <button type="submit" className="secondary small">{labels.save}</button>
+                          </form>
+                        )}
+                        {canManageStructure && (
+                          <form action={reassignRoleAction} className="row" style={{ gap: 8, alignItems: "flex-end" }}>
                             {hiddenWorkspace(workspaceId)}
                             <input type="hidden" name="roleId" value={role.id} />
                             <input type="hidden" name="fromMemberId" value={memberId} />
@@ -239,6 +288,14 @@ export function RoleManagementPanel({
                                   <option key={member.id} value={member.id}>{memberOptionLabel(member)}</option>
                                 ))}
                               </select>
+                            </label>
+                            <label style={{ flex: "0 1 180px", minWidth: 150 }}>
+                              {labels.formExpiresAt}
+                              <input name="expiresAt" type="date" min={formatDate(new Date())} />
+                            </label>
+                            <label style={{ flex: "1 1 220px", minWidth: 180 }}>
+                              {labels.formTransferReason}
+                              <input name="transferReason" placeholder={labels.formTransferReasonPlaceholder} />
                             </label>
                             <button type="submit" className="secondary small" disabled={replacementMembers.length === 0}>
                               {labels.btnReassign}
@@ -252,7 +309,7 @@ export function RoleManagementPanel({
               )}
 
               {canManageStructure && (
-                <form action={assignRoleAction} className="row" style={{ gap: 8, marginTop: 12 }}>
+                <form action={assignRoleAction} className="row" style={{ gap: 8, marginTop: 12, alignItems: "flex-end" }}>
                   {hiddenWorkspace(workspaceId)}
                   <input type="hidden" name="roleId" value={role.id} />
                   <label style={{ flex: "1 1 260px", minWidth: 200 }}>
@@ -263,6 +320,14 @@ export function RoleManagementPanel({
                         <option key={member.id} value={member.id}>{memberOptionLabel(member)}</option>
                       ))}
                     </select>
+                  </label>
+                  <label style={{ flex: "0 1 180px", minWidth: 150 }}>
+                    {labels.formExpiresAt}
+                    <input name="expiresAt" type="date" min={formatDate(new Date())} />
+                  </label>
+                  <label style={{ flex: "1 1 220px", minWidth: 180 }}>
+                    {labels.formTransferReason}
+                    <input name="transferReason" placeholder={labels.formTransferReasonPlaceholder} />
                   </label>
                   <button type="submit" className="secondary small" disabled={addableMembers.length === 0}>
                     {labels.btnAddHolder}

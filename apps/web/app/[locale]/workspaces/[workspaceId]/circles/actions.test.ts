@@ -72,6 +72,8 @@ describe("circle server actions", () => {
       roleId: "role-1",
       fromMemberId: "member-1",
       toMemberId: "member-2",
+      expiresAt: null,
+      transferReason: null,
     });
   });
 });
