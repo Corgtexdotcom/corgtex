@@ -22,6 +22,7 @@ const {
   runControlPlaneReleaseDeployJobMock,
   runEnterpriseAppHealthCheckJobMock,
   syncRecorderCalendarSourceMock,
+  runMeetingAudioAssetTranscriptionMock,
   getWorkspaceDigestSettingsMock,
   getNewspaperLocalDatePartsMock,
   isNewspaperScheduleDueMock,
@@ -88,6 +89,7 @@ const {
   runControlPlaneReleaseDeployJobMock: vi.fn(),
   runEnterpriseAppHealthCheckJobMock: vi.fn(),
   syncRecorderCalendarSourceMock: vi.fn(),
+  runMeetingAudioAssetTranscriptionMock: vi.fn(),
   getWorkspaceDigestSettingsMock: vi.fn(),
   getNewspaperLocalDatePartsMock: vi.fn(),
   isNewspaperScheduleDueMock: vi.fn(),
@@ -140,6 +142,8 @@ vi.mock("@corgtex/domain", () => ({
   ENTERPRISE_APP_HEALTH_CHECK_JOB_TYPE: "enterprise-app.health.check",
   runEnterpriseAppHealthCheckJob: runEnterpriseAppHealthCheckJobMock,
   syncRecorderCalendarSource: syncRecorderCalendarSourceMock,
+  MEETING_AUDIO_TRANSCRIPTION_JOB_TYPE: "meeting-audio.transcribe",
+  runMeetingAudioAssetTranscription: runMeetingAudioAssetTranscriptionMock,
   getWorkspaceDigestSettings: getWorkspaceDigestSettingsMock,
   getNewspaperLocalDateParts: getNewspaperLocalDatePartsMock,
   meetingIdFromWorkflowJobPayload: (payload: unknown) => (
@@ -228,6 +232,7 @@ describe("runPendingJobs", () => {
     runControlPlaneReleaseDeployJobMock.mockReset().mockResolvedValue({ status: "deployed" });
     runEnterpriseAppHealthCheckJobMock.mockReset().mockResolvedValue({ status: "ok" });
     syncRecorderCalendarSourceMock.mockReset().mockResolvedValue({ action: "synced" });
+    runMeetingAudioAssetTranscriptionMock.mockReset().mockResolvedValue({ status: "ingested", meetingId: "meeting-1" });
     getWorkspaceDigestSettingsMock.mockReset().mockResolvedValue(new Map());
     recordMeetingTranscriptProcessingStageMock.mockReset().mockResolvedValue(undefined);
     markMeetingTranscriptProcessingReadyMock.mockReset().mockResolvedValue(undefined);
@@ -349,6 +354,32 @@ describe("runPendingJobs", () => {
     await expect(runPendingJobs("worker-1", 1)).resolves.toBe(1);
 
     expect(captureReferencesForSourceMock).toHaveBeenCalledWith("SLACK_MESSAGE", "message-1");
+    expect(prismaMock.workflowJob.update).toHaveBeenCalledWith({
+      where: { id: "job-1" },
+      data: expect.objectContaining({
+        status: "COMPLETED",
+      }),
+    });
+  });
+
+  it("dispatches meeting audio transcription jobs", async () => {
+    txMock.$queryRaw.mockResolvedValue([
+      {
+        id: "job-1",
+        workspaceId: "ws-1",
+        type: "meeting-audio.transcribe",
+        payload: { audioAssetId: "audio-1" },
+        attempts: 1,
+      },
+    ]);
+
+    await expect(runPendingJobs("worker-1", 1)).resolves.toBe(1);
+
+    expect(runMeetingAudioAssetTranscriptionMock).toHaveBeenCalledWith({
+      workspaceId: "ws-1",
+      audioAssetId: "audio-1",
+      workflowJobId: "job-1",
+    });
     expect(prismaMock.workflowJob.update).toHaveBeenCalledWith({
       where: { id: "job-1" },
       data: expect.objectContaining({
