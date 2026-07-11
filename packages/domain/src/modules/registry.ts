@@ -208,6 +208,15 @@ export const MODULE_MANIFESTS: readonly ModuleManifest[] = [
 
   // --- Core + first-party: governance group ---
   {
+    key: "agreements",
+    tier: "core",
+    title: "Agreements",
+    description: "Constitution, accepted policies, and working agreements.",
+    dataOwnership: "corgtex_postgres",
+    nav: { href: "/agreements", labelKey: "agreements", icon: "agreements", group: "governance" },
+    scopes: ["governance:read", "brain:read"],
+  },
+  {
     key: "proposals",
     tier: "core",
     title: "Proposals",

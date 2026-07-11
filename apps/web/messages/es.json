@@ -963,6 +963,24 @@
     "companyDirectionAnswer": "Guardar respuesta",
     "companyDirectionSkip": "Omitir por ahora"
   },
+  "agreements": {
+    "accepted": "Aceptada {date}",
+    "constitutionMeta": "v{version} · {date}",
+    "noBrainAgreements": "Todavía no hay acuerdos de trabajo públicos listos.",
+    "noConstitution": "Todavía no hay constitución.",
+    "noPolicies": "Todavía no hay políticas aceptadas.",
+    "pageDescription": "Constitución actual, políticas aceptadas y acuerdos de trabajo autorizados.",
+    "pageTitle": "Acuerdos",
+    "sectionBrain": "Acuerdos de trabajo ({count})",
+    "sectionConstitution": "Constitución",
+    "sectionHistory": "Historial de constitución",
+    "sectionPolicies": "Políticas aceptadas ({count})",
+    "statBrain": "Acuerdos de trabajo",
+    "statConstitution": "Constitución",
+    "statPolicies": "Políticas aceptadas",
+    "verified": "Verificado {date}",
+    "viewGovernance": "Gobernanza"
+  },
   "governance": {
     "approvalPoliciesDesc": "Configura cómo se toman las decisiones para propuestas.",
     "btnRecalculate": "Recalcular puntuación",
@@ -1658,6 +1676,7 @@
   },
   "nav": {
     "actions": "Acciones",
+    "agreements": "Acuerdos",
     "agentGovernance": "Gobernanza de Agentes",
     "aiGovernance": "Gobernanza de IA",
     "auditTrail": "Registro de auditoría",

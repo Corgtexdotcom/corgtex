@@ -13,6 +13,7 @@ export * from "./external-resources";
 export * from "./agent-registry";
 export * from "./agent-config";
 export * from "./agent-authority-summary";
+export * from "./agreements";
 export * from "./brain";
 export * from "./audit-trail";
 export * from "./archive";

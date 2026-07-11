@@ -36,6 +36,7 @@ const EXPECTED_NAV: Array<{
   { href: "/meetings", labelKey: "meetings", icon: "meetings", group: "operations" },
   { href: "/leads", labelKey: "relationships", icon: "relationships", group: "operations", featureFlag: "RELATIONSHIPS" },
   { href: "/maps", labelKey: "contextMaps", icon: "contextMaps", group: "operations", featureFlag: "CONTEXT_MAPS" },
+  { href: "/agreements", labelKey: "agreements", icon: "agreements", group: "governance" },
   { href: "/proposals", labelKey: "proposals", icon: "proposals", group: "governance" },
   { href: "/circles", labelKey: "circles", icon: "circles", group: "governance" },
   { href: "/cycles", labelKey: "cycles", icon: "cycles", group: "governance", featureFlag: "CYCLES" },

@@ -963,6 +963,24 @@
     "companyDirectionAnswer": "Save answer",
     "companyDirectionSkip": "Skip for now"
   },
+  "agreements": {
+    "accepted": "Accepted {date}",
+    "constitutionMeta": "v{version} · {date}",
+    "noBrainAgreements": "No public working agreements are ready yet.",
+    "noConstitution": "No constitution yet.",
+    "noPolicies": "No accepted policies yet.",
+    "pageDescription": "Current constitution, accepted policies, and authoritative working agreements.",
+    "pageTitle": "Agreements",
+    "sectionBrain": "Working Agreements ({count})",
+    "sectionConstitution": "Constitution",
+    "sectionHistory": "Constitution History",
+    "sectionPolicies": "Accepted Policies ({count})",
+    "statBrain": "Working agreements",
+    "statConstitution": "Constitution",
+    "statPolicies": "Accepted policies",
+    "verified": "Verified {date}",
+    "viewGovernance": "Governance"
+  },
   "governance": {
     "approvalPoliciesDesc": "Configure how decisions are made for proposals.",
     "btnRecalculate": "Recalculate Score",
@@ -1658,6 +1676,7 @@
   },
   "nav": {
     "actions": "Actions",
+    "agreements": "Agreements",
     "agentGovernance": "Agent Governance",
     "aiGovernance": "AI Governance",
     "auditTrail": "Audit Trail",
