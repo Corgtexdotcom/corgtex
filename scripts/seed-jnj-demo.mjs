@@ -372,6 +372,13 @@ const SHOWCASE_GOALS = [
   },
 ];
 
+const SHOWCASE_GOAL_FINANCE_LINKS = [
+  {
+    goalTitle: "Ship Agent Governance v2",
+    projectCode: "ESG-SUPPLIER",
+  },
+];
+
 const SHOWCASE_AGENTS = [
   {
     agentKey: "slack-agent",
@@ -669,6 +676,42 @@ async function seedShowcaseData({ wsId, memberMappings }) {
     }
   }
   console.log(`✅ ${SHOWCASE_GOALS.length} Goals refreshed`);
+
+  for (const link of SHOWCASE_GOAL_FINANCE_LINKS) {
+    const goal = await prisma.goal.findFirst({
+      where: { workspaceId: wsId, title: link.goalTitle },
+      select: { id: true },
+    });
+    const project = await prisma.practiceProject.findFirst({
+      where: { workspaceId: wsId, code: link.projectCode },
+      select: { id: true },
+    });
+    if (goal && project) {
+      await prisma.goalLink.upsert({
+        where: {
+          goalId_entityType_entityId: {
+            goalId: goal.id,
+            entityType: "PracticeProject",
+            entityId: project.id,
+          },
+        },
+        update: {
+          confidence: 1,
+          linkedBy: "demo-seed",
+          source: "practice-finance",
+        },
+        create: {
+          goalId: goal.id,
+          entityType: "PracticeProject",
+          entityId: project.id,
+          confidence: 1,
+          linkedBy: "demo-seed",
+          source: "practice-finance",
+        },
+      });
+    }
+  }
+  console.log(`✅ ${SHOWCASE_GOAL_FINANCE_LINKS.length} Goal finance links refreshed`);
 
   for (const agent of SHOWCASE_AGENTS) {
     await prisma.agentIdentity.upsert({
@@ -2744,6 +2787,8 @@ async function main() {
 
   // 14. Safe showcase data for current customer-visible feature surfaces.
   await enableWorkspaceFeature(wsId, "AI_WORKSPACES");
+  await enableWorkspaceFeature(wsId, "FINANCE");
+  await enableWorkspaceFeature(wsId, "PRACTICE_PROJECTS");
   await enableWorkspaceFeature(wsId, "RELATIONSHIPS");
   await seedShowcaseData({ wsId, memberMappings });
   await seedCrmRelationships(wsId, memberMappings);
