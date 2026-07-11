@@ -10,6 +10,7 @@ export type NavItem = {
   labelKey: string;
   icon: WorkspaceNavIconName;
   featureFlag?: WorkspaceNavFeatureFlag;
+  mobilePrimaryOrder?: number;
   requiredCapability?: WorkspaceNavCapability;
 };
 
@@ -67,6 +68,9 @@ export const WORKSPACE_NAV_GROUPS: NavGroup[] = NAV_GROUP_ORDER
         };
         if (mod.featureFlag) {
           item.featureFlag = mod.featureFlag.flag as WorkspaceNavFeatureFlag;
+        }
+        if (typeof nav.mobilePrimaryOrder === "number") {
+          item.mobilePrimaryOrder = nav.mobilePrimaryOrder;
         }
         if (nav.requiredCapability) {
           item.requiredCapability = nav.requiredCapability as WorkspaceNavCapability;

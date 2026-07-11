@@ -23,21 +23,22 @@ const EXPECTED_NAV: Array<{
   icon: string;
   group: string;
   featureFlag?: string;
+  mobilePrimaryOrder?: number;
   requiredCapability?: string;
 }> = [
-  { href: "", labelKey: "home", icon: "home", group: "workspace" },
+  { href: "", labelKey: "home", icon: "home", group: "workspace", mobilePrimaryOrder: 10 },
   { href: "/goals", labelKey: "goals", icon: "goals", group: "workspace", featureFlag: "GOALS" },
   { href: "/brain", labelKey: "brain", icon: "brain", group: "workspace" },
   { href: "/tools", labelKey: "tools", icon: "tools", group: "workspace", featureFlag: "TOOL_LINKS" },
   { href: "/built", labelKey: "built", icon: "built", group: "workspace", featureFlag: "BUILD_ARTIFACTS" },
   { href: "/members", labelKey: "members", icon: "members", group: "workspace" },
-  { href: "/tensions", labelKey: "tensions", icon: "tensions", group: "operations" },
-  { href: "/actions", labelKey: "actions", icon: "actions", group: "operations" },
+  { href: "/tensions", labelKey: "tensions", icon: "tensions", group: "operations", mobilePrimaryOrder: 20 },
+  { href: "/actions", labelKey: "actions", icon: "actions", group: "operations", mobilePrimaryOrder: 30 },
   { href: "/meetings", labelKey: "meetings", icon: "meetings", group: "operations" },
   { href: "/leads", labelKey: "relationships", icon: "relationships", group: "operations", featureFlag: "RELATIONSHIPS" },
   { href: "/maps", labelKey: "contextMaps", icon: "contextMaps", group: "operations", featureFlag: "CONTEXT_MAPS" },
   { href: "/agreements", labelKey: "agreements", icon: "agreements", group: "governance" },
-  { href: "/proposals", labelKey: "proposals", icon: "proposals", group: "governance" },
+  { href: "/proposals", labelKey: "proposals", icon: "proposals", group: "governance", mobilePrimaryOrder: 50 },
   { href: "/circles", labelKey: "circles", icon: "circles", group: "governance" },
   { href: "/cycles", labelKey: "cycles", icon: "cycles", group: "governance", featureFlag: "CYCLES" },
   { href: "/finance", labelKey: "finance", icon: "finance", group: "finance", featureFlag: "FINANCE" },
@@ -51,7 +52,7 @@ const EXPECTED_NAV: Array<{
   },
   { href: "/governance", labelKey: "osMetrics", icon: "governance", group: "system", featureFlag: "OS_METRICS" },
   { href: "/audit", labelKey: "auditTrail", icon: "audit", group: "system" },
-  { href: "/notifications", labelKey: "notifications", icon: "notifications", group: "system" },
+  { href: "/notifications", labelKey: "notifications", icon: "notifications", group: "system", mobilePrimaryOrder: 40 },
   { href: "/settings", labelKey: "settings", icon: "settings", group: "system" },
 ];
 
@@ -92,6 +93,7 @@ describe("module registry nav parity", () => {
         icon: string;
         group: string;
         featureFlag?: string;
+        mobilePrimaryOrder?: number;
         requiredCapability?: string;
       } = {
         href: nav.href,
@@ -100,6 +102,7 @@ describe("module registry nav parity", () => {
         group: nav.group,
       };
       if (mod.featureFlag) entry.featureFlag = mod.featureFlag.flag;
+      if (typeof nav.mobilePrimaryOrder === "number") entry.mobilePrimaryOrder = nav.mobilePrimaryOrder;
       if (nav.requiredCapability) entry.requiredCapability = nav.requiredCapability;
       return entry;
     });

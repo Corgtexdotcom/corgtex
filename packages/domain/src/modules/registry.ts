@@ -78,7 +78,7 @@ export const MODULE_MANIFESTS: readonly ModuleManifest[] = [
     title: "Home",
     description: "Workspace home dashboard.",
     dataOwnership: "corgtex_postgres",
-    nav: { href: "", labelKey: "home", icon: "home", group: "workspace" },
+    nav: { href: "", labelKey: "home", icon: "home", group: "workspace", mobilePrimaryOrder: 10 },
   },
   {
     key: "goals",
@@ -135,7 +135,7 @@ export const MODULE_MANIFESTS: readonly ModuleManifest[] = [
     title: "Tensions",
     description: "Tension capture and triage.",
     dataOwnership: "corgtex_postgres",
-    nav: { href: "/tensions", labelKey: "tensions", icon: "tensions", group: "operations" },
+    nav: { href: "/tensions", labelKey: "tensions", icon: "tensions", group: "operations", mobilePrimaryOrder: 20 },
     scopes: ["tensions:read", "tensions:write"],
   },
   {
@@ -144,7 +144,7 @@ export const MODULE_MANIFESTS: readonly ModuleManifest[] = [
     title: "Actions",
     description: "Action items and assignments.",
     dataOwnership: "corgtex_postgres",
-    nav: { href: "/actions", labelKey: "actions", icon: "actions", group: "operations" },
+    nav: { href: "/actions", labelKey: "actions", icon: "actions", group: "operations", mobilePrimaryOrder: 30 },
     scopes: ["actions:read", "actions:write"],
   },
   {
@@ -221,7 +221,7 @@ export const MODULE_MANIFESTS: readonly ModuleManifest[] = [
     title: "Proposals",
     description: "Governance proposals and decisions.",
     dataOwnership: "corgtex_postgres",
-    nav: { href: "/proposals", labelKey: "proposals", icon: "proposals", group: "governance" },
+    nav: { href: "/proposals", labelKey: "proposals", icon: "proposals", group: "governance", mobilePrimaryOrder: 50 },
     scopes: ["proposals:read", "proposals:write"],
   },
   {
@@ -307,7 +307,7 @@ export const MODULE_MANIFESTS: readonly ModuleManifest[] = [
     title: "Notifications",
     description: "Workspace notifications.",
     dataOwnership: "corgtex_postgres",
-    nav: { href: "/notifications", labelKey: "notifications", icon: "notifications", group: "system" },
+    nav: { href: "/notifications", labelKey: "notifications", icon: "notifications", group: "system", mobilePrimaryOrder: 40 },
   },
   {
     key: "settings",

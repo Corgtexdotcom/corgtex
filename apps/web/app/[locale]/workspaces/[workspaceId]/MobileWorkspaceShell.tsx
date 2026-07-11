@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { usePathname } from "next/navigation";
 import { useTranslations } from "next-intl";
 import { ChatInterface } from "./chat/ChatInterface";
@@ -9,6 +9,7 @@ import type { NavGroup } from "@/lib/nav-config";
 import type { AiWorkspaceLaunchState } from "@/lib/ai-workspace-launch";
 import type { MobileCaptureAction } from "@/lib/workspace-add-actions";
 import { WorkspaceNavIcon, WorkspaceUtilityIcon } from "./WorkspaceNavIcon";
+import { buildMobileNavModel, containsActiveNavItem, isActiveWorkspacePath } from "./mobile-nav-model";
 
 type MobileMode = "workspace" | "ai";
 type MobileAiTab = "work" | "ask" | "capture";
@@ -31,20 +32,13 @@ type MobileWorkspaceShellProps = {
   conversations: ConversationSummary[];
   aiWorkspaceState: AiWorkspaceLaunchState;
   captureActions: MobileCaptureAction[];
+  utilityActions: ReactNode;
 };
 
 const MODE_STORAGE_KEY = "corgtex.mobileMode";
-const PRIMARY_HREFS = ["", "/tensions", "/actions", "/notifications", "/proposals"] as const;
 
 function navHref(workspaceId: string, href: string) {
   return `/workspaces/${workspaceId}${href}`;
-}
-
-function isActivePath(pathname: string | null, workspaceId: string, href: string) {
-  const currentPathname = pathname ?? "";
-  const fullHref = navHref(workspaceId, href);
-  if (href === "") return currentPathname.endsWith(`/workspaces/${workspaceId}`);
-  return currentPathname.includes(fullHref);
 }
 
 export function MobileWorkspaceShell({
@@ -56,21 +50,19 @@ export function MobileWorkspaceShell({
   conversations,
   aiWorkspaceState,
   captureActions,
+  utilityActions,
 }: MobileWorkspaceShellProps) {
   const pathname = usePathname() ?? "";
   const tNav = useTranslations("nav");
   const tMobile = useTranslations("mobile");
   const [mode, setModeState] = useState<MobileMode>("workspace");
   const [aiTab, setAiTab] = useState<MobileAiTab>("work");
+  const [isMoreOpen, setIsMoreOpen] = useState(false);
   const [hasLoadedStoredMode, setHasLoadedStoredMode] = useState(false);
   const lastViewedKeyRef = useRef<string | null>(null);
 
-  const primaryItems = useMemo(() => {
-    const items = navGroups.flatMap((group) => group.items);
-    return PRIMARY_HREFS
-      .map((href) => items.find((item) => item.href === href))
-      .filter((item): item is NonNullable<typeof item> => !!item);
-  }, [navGroups]);
+  const mobileNav = useMemo(() => buildMobileNavModel(navGroups, { reserveMoreSlot: true }), [navGroups]);
+  const isMoreActive = containsActiveNavItem(mobileNav.overflowGroups, pathname, workspaceId);
 
   const trackMobileMode = useCallback((eventName: "mode_viewed" | "mode_changed", nextMode: MobileMode, options: {
     previousMode?: MobileMode;
@@ -103,6 +95,9 @@ export function MobileWorkspaceShell({
   }, [workspaceId]);
 
   function setMode(nextMode: MobileMode, source = "unknown") {
+    if (nextMode === "ai") {
+      setIsMoreOpen(false);
+    }
     setModeState((previousMode) => {
       if (previousMode !== nextMode) {
         trackMobileMode("mode_changed", nextMode, { previousMode, source });
@@ -132,6 +127,10 @@ export function MobileWorkspaceShell({
   useEffect(() => {
     document.documentElement.dataset.mobileMode = mode;
   }, [mode]);
+
+  useEffect(() => {
+    setIsMoreOpen(false);
+  }, [pathname]);
 
   useEffect(() => {
     if (!hasLoadedStoredMode) return;
@@ -176,23 +175,92 @@ export function MobileWorkspaceShell({
 
         {mode === "workspace" && (
           <nav className="mobile-bottom-nav" aria-label={tMobile("bottomNavLabel")}>
-            {primaryItems.map((item) => (
-              <a
-                key={item.href}
-                href={navHref(workspaceId, item.href)}
-                className={isActivePath(pathname, workspaceId, item.href) ? "active" : ""}
-                onClick={() => setMode("workspace", "bottom_nav")}
-              >
-                <WorkspaceNavIcon name={item.icon} className="mobile-bottom-icon" />
-                <span>{tNav(item.labelKey as any)}</span>
-                {item.href === "/notifications" && unreadCount > 0 && (
-                  <span className="mobile-bottom-badge">{unreadCount}</span>
-                )}
-              </a>
-            ))}
+            {mobileNav.primaryItems.map((item) => {
+              const isActive = isActiveWorkspacePath(pathname, workspaceId, item.href);
+
+              return (
+                <a
+                  key={item.href}
+                  href={navHref(workspaceId, item.href)}
+                  className={isActive ? "active" : ""}
+                  aria-current={isActive ? "page" : undefined}
+                  onClick={() => setMode("workspace", "bottom_nav")}
+                >
+                  <WorkspaceNavIcon name={item.icon} className="mobile-bottom-icon" />
+                  <span>{tNav(item.labelKey as any)}</span>
+                  {item.href === "/notifications" && unreadCount > 0 && (
+                    <span className="mobile-bottom-badge">{unreadCount}</span>
+                  )}
+                </a>
+              );
+            })}
+            <button
+              type="button"
+              className={isMoreOpen || isMoreActive ? "active" : ""}
+              aria-expanded={isMoreOpen}
+              aria-controls="mobile-more-menu"
+              onClick={() => {
+                setIsMoreOpen((open) => !open);
+                setMode("workspace", "more_nav");
+              }}
+            >
+              <WorkspaceUtilityIcon name="more" className="mobile-bottom-icon" />
+              <span>{tMobile("moreTab")}</span>
+            </button>
           </nav>
         )}
       </div>
+
+      {mode === "workspace" && isMoreOpen && (
+        <section id="mobile-more-menu" className="mobile-more-panel" role="dialog" aria-modal="true" aria-label={tMobile("morePanelLabel")}>
+          <div className="mobile-more-header">
+            <div>
+              <h2>{tMobile("moreTitle")}</h2>
+              <p>{tMobile("moreDescription")}</p>
+            </div>
+            <button type="button" className="mobile-icon-button" onClick={() => setIsMoreOpen(false)}>
+              {tMobile("closeMore")}
+            </button>
+          </div>
+          <div className="mobile-more-scroll">
+            {mobileNav.overflowGroups.map((group) => (
+              <div key={group.labelKey} className="mobile-more-group">
+                <div className="mobile-more-group-title">{tNav(group.labelKey as any)}</div>
+                <div className="mobile-more-links">
+                  {group.items.map((item) => {
+                    const isActive = isActiveWorkspacePath(pathname, workspaceId, item.href);
+
+                    return (
+                      <a
+                        key={item.href}
+                        href={navHref(workspaceId, item.href)}
+                        className={isActive ? "mobile-more-link active" : "mobile-more-link"}
+                        aria-current={isActive ? "page" : undefined}
+                        onClick={() => {
+                          setMode("workspace", "more_nav_link");
+                          setIsMoreOpen(false);
+                        }}
+                      >
+                        <WorkspaceNavIcon name={item.icon} className="mobile-more-icon" />
+                        <span>{tNav(item.labelKey as any)}</span>
+                        {item.href === "/notifications" && unreadCount > 0 && (
+                          <span className="mobile-more-badge">{unreadCount}</span>
+                        )}
+                      </a>
+                    );
+                  })}
+                </div>
+              </div>
+            ))}
+            <div className="mobile-more-group mobile-more-utility-group">
+              <div className="mobile-more-group-title">{tMobile("utilitiesTitle")}</div>
+              <div className="mobile-utility-actions">
+                {utilityActions}
+              </div>
+            </div>
+          </div>
+        </section>
+      )}
 
       {mode === "ai" && (
         <section className="mobile-ai-workbench" aria-label={tMobile("aiWorkbenchLabel")}>

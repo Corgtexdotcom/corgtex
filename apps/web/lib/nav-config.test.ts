@@ -12,7 +12,7 @@ const EXPECTED_NAV_GROUPS: NavGroup[] = [
   {
     labelKey: "workspace",
     items: [
-      { moduleKey: "home", href: "", labelKey: "home", icon: "home" },
+      { moduleKey: "home", href: "", labelKey: "home", icon: "home", mobilePrimaryOrder: 10 },
       { moduleKey: "goals", href: "/goals", labelKey: "goals", icon: "goals", featureFlag: "GOALS" },
       { moduleKey: "brain", href: "/brain", labelKey: "brain", icon: "brain" },
       { moduleKey: "tools", href: "/tools", labelKey: "tools", icon: "tools", featureFlag: "TOOL_LINKS" },
@@ -23,8 +23,8 @@ const EXPECTED_NAV_GROUPS: NavGroup[] = [
   {
     labelKey: "operations",
     items: [
-      { moduleKey: "tensions", href: "/tensions", labelKey: "tensions", icon: "tensions" },
-      { moduleKey: "actions", href: "/actions", labelKey: "actions", icon: "actions" },
+      { moduleKey: "tensions", href: "/tensions", labelKey: "tensions", icon: "tensions", mobilePrimaryOrder: 20 },
+      { moduleKey: "actions", href: "/actions", labelKey: "actions", icon: "actions", mobilePrimaryOrder: 30 },
       { moduleKey: "meetings", href: "/meetings", labelKey: "meetings", icon: "meetings" },
       { moduleKey: "relationships", href: "/leads", labelKey: "relationships", icon: "relationships", featureFlag: "RELATIONSHIPS" },
       { moduleKey: "context-maps", href: "/maps", labelKey: "contextMaps", icon: "contextMaps", featureFlag: "CONTEXT_MAPS" },
@@ -34,7 +34,7 @@ const EXPECTED_NAV_GROUPS: NavGroup[] = [
     labelKey: "governance",
     items: [
       { moduleKey: "agreements", href: "/agreements", labelKey: "agreements", icon: "agreements" },
-      { moduleKey: "proposals", href: "/proposals", labelKey: "proposals", icon: "proposals" },
+      { moduleKey: "proposals", href: "/proposals", labelKey: "proposals", icon: "proposals", mobilePrimaryOrder: 50 },
       { moduleKey: "circles", href: "/circles", labelKey: "circles", icon: "circles" },
       { moduleKey: "cycles", href: "/cycles", labelKey: "cycles", icon: "cycles", featureFlag: "CYCLES" },
     ],
@@ -63,7 +63,7 @@ const EXPECTED_NAV_GROUPS: NavGroup[] = [
     items: [
       { moduleKey: "os-metrics", href: "/governance", labelKey: "osMetrics", icon: "governance", featureFlag: "OS_METRICS" },
       { moduleKey: "audit", href: "/audit", labelKey: "auditTrail", icon: "audit" },
-      { moduleKey: "notifications", href: "/notifications", labelKey: "notifications", icon: "notifications" },
+      { moduleKey: "notifications", href: "/notifications", labelKey: "notifications", icon: "notifications", mobilePrimaryOrder: 40 },
       { moduleKey: "settings", href: "/settings", labelKey: "settings", icon: "settings" },
     ],
   },
