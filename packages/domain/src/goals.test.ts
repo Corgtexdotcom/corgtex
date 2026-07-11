@@ -3,6 +3,7 @@ import {
   addKeyResult,
   createGoal,
   createGoalLink,
+  getMyGoalSlice,
   listCompanyDirectionFromBrain,
   recomputeGoalProgress,
   returnGoalToDraft,
@@ -190,6 +191,32 @@ describe("Goals Domain", () => {
         code: "INVALID_INPUT",
       });
 
+      expect(prisma.goal.create).not.toHaveBeenCalled();
+    });
+
+    it("rejects system identities as goal owners", async () => {
+      vi.mocked(prisma.member.findFirst).mockResolvedValueOnce(null);
+
+      await expect(createGoal(actor, {
+        workspaceId: "ws-1",
+        title: "Human-owned Goal",
+        ownerMemberId: "system-member",
+      })).rejects.toMatchObject({
+        code: "INVALID_INPUT",
+      });
+
+      expect(prisma.member.findFirst).toHaveBeenCalledWith(expect.objectContaining({
+        where: expect.objectContaining({
+          id: "system-member",
+          NOT: expect.arrayContaining([
+            expect.objectContaining({
+              OR: expect.arrayContaining([
+                expect.objectContaining({ kind: "SYSTEM" }),
+              ]),
+            }),
+          ]),
+        }),
+      }));
       expect(prisma.goal.create).not.toHaveBeenCalled();
     });
   });
@@ -476,6 +503,65 @@ describe("Goals Domain", () => {
       expect(prisma.goal.update).toHaveBeenCalledWith(expect.objectContaining({
         where: { id: "goal-1" },
         data: { title: "Updated goal", version: 2 },
+      }));
+    });
+
+    it("rejects reassignment to a system identity", async () => {
+      vi.mocked(prisma.goal.findUnique).mockResolvedValueOnce({
+        id: "goal-1",
+        workspaceId: "ws-1",
+        archivedAt: null,
+        title: "Draft goal",
+        descriptionMd: null,
+        level: "COMPANY",
+        cadence: "QUARTERLY",
+        targetDate: null,
+        startDate: null,
+        parentGoalId: null,
+        circleId: null,
+        ownerMemberId: "member-1",
+        status: "DRAFT",
+        progressPercent: 0,
+        version: 1,
+      } as any);
+      vi.mocked(prisma.member.findFirst).mockResolvedValueOnce(null);
+
+      await expect(updateGoal(actor, {
+        workspaceId: "ws-1",
+        goalId: "goal-1",
+        ownerMemberId: "system-member",
+      })).rejects.toMatchObject({
+        code: "INVALID_INPUT",
+      });
+
+      expect(prisma.goal.update).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("getMyGoalSlice", () => {
+    it("returns only active owned goals ordered by target date", async () => {
+      const activeGoal = {
+        id: "goal-active",
+        workspaceId: "ws-1",
+        ownerMemberId: "member-1",
+        status: "ACTIVE",
+        archivedAt: null,
+      };
+      vi.mocked(prisma.goal.findMany).mockResolvedValueOnce([activeGoal] as any);
+
+      await expect(getMyGoalSlice(actor, "member-1", "ws-1")).resolves.toEqual([activeGoal]);
+
+      expect(prisma.goal.findMany).toHaveBeenCalledWith(expect.objectContaining({
+        where: {
+          workspaceId: "ws-1",
+          ownerMemberId: "member-1",
+          archivedAt: null,
+          status: { in: ["ACTIVE", "ON_TRACK", "AT_RISK", "BEHIND"] },
+        },
+        orderBy: [
+          { targetDate: "asc" },
+          { updatedAt: "desc" },
+        ],
       }));
     });
   });

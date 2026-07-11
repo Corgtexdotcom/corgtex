@@ -1,4 +1,4 @@
-import { listCycles, listMembers } from "@corgtex/domain";
+import { listCycles, listHumanMembers } from "@corgtex/domain";
 import { requirePageActor } from "@/lib/auth";
 import {
   createCycleAction,
@@ -25,7 +25,7 @@ export default async function CyclesPage({
   const currentUserId = actor.kind === "user" ? actor.user.id : "";
   const [cyclesResult, members] = await Promise.all([
     listCycles(workspaceId, { take: 20 }),
-    listMembers(workspaceId),
+    listHumanMembers(workspaceId),
   ]);
   const cycles = cyclesResult.items;
 

@@ -1,4 +1,4 @@
-import { listAdviceRequests, listCircles, listMembers, listProposals, requireWorkspaceMembership } from "@corgtex/domain";
+import { listAdviceRequests, listCircles, listHumanMembers, listProposals, requireWorkspaceMembership } from "@corgtex/domain";
 import type { ReactNode } from "react";
 import { requirePageActor } from "@/lib/auth";
 import { MarkdownExcerpt } from "@/lib/components/MarkdownRenderer";
@@ -62,7 +62,7 @@ export default async function ProposalsPage({
     listProposals(actor, workspaceId, { take: 200, circleIds, memberIds, sort }),
     prisma.workspace.findUnique({ where: { id: workspaceId }, select: { slug: true } }),
     listCircles(workspaceId),
-    listMembers(workspaceId),
+    listHumanMembers(workspaceId),
     listAdviceRequests(actor, { workspaceId, subjectType: "PROPOSAL", status: "ACTIVE", take: 500 }),
   ]);
   const isDemo = currentWorkspace?.slug === "jnj-demo";

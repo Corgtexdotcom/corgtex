@@ -14,7 +14,7 @@ import {
   listContacts,
   listCycles,
   listGoals,
-  listMembers,
+  listHumanMembers,
   listProposals,
   listQualifications,
   listRoles,
@@ -228,7 +228,7 @@ export default async function WorkspaceAddPage({
     roles,
   ] = await Promise.all([
     needsProposals ? listProposals(actor, workspaceId, { take: 100 }) : Promise.resolve({ items: [] }),
-    needsMembers ? listMembers(workspaceId) : Promise.resolve([]),
+    needsMembers ? listHumanMembers(workspaceId) : Promise.resolve([]),
     needsCircles ? listCircles(workspaceId) : Promise.resolve([]),
     needsGoals ? listGoals(actor, { workspaceId }) : Promise.resolve([]),
     needsContacts ? listContacts(actor, workspaceId, { take: 100, accountId: contextAccountId ?? undefined }) : Promise.resolve({ items: [] }),

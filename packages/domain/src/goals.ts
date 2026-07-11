@@ -7,6 +7,7 @@ import { archiveFilterWhere, archiveWorkspaceArtifact, type ArchiveFilter } from
 import { ensureWorkspacePermalink, workspaceEntityCanonicalPath } from "./permalinks";
 import { invariant } from "./errors";
 import { requireDraftManager } from "./draft-permissions";
+import { humanMemberIdentityWhere } from "./member-identity";
 import type { GoalLevel, GoalCadence, GoalStatus, Prisma } from "@prisma/client";
 import {
   changedDataFields,
@@ -164,15 +165,18 @@ async function validateGoalReferences(
   }
 
   if (params.ownerMemberId) {
-    const owner = await tx.member.findUnique({
-      where: { id: params.ownerMemberId },
+    const owner = await tx.member.findFirst({
+      where: {
+        id: params.ownerMemberId,
+        ...humanMemberIdentityWhere(),
+      },
       select: { workspaceId: true, isActive: true },
     });
     invariant(
       owner && owner.workspaceId === params.workspaceId && owner.isActive,
       400,
       "INVALID_INPUT",
-      "Goal owner must be an active member in the same workspace.",
+      "Goal owner must be an active human member in the same workspace.",
     );
   }
 }
@@ -1129,18 +1133,27 @@ export async function getMyGoalSlice(actor: AppActor, memberId: string, workspac
   await requireWorkspaceMembership({ actor, workspaceId });
 
   const myGoals = await prisma.goal.findMany({
-    where: { workspaceId, ownerMemberId: memberId, archivedAt: null },
+    where: {
+      workspaceId,
+      ownerMemberId: memberId,
+      archivedAt: null,
+      status: { in: ["ACTIVE", "ON_TRACK", "AT_RISK", "BEHIND"] },
+    },
     include: {
       circle: true,
       parentGoal: {
         include: {
           circle: true,
           parentGoal: {
-            include: { circle: true }
-          }
-        }
-      }
-    }
+            include: { circle: true },
+          },
+        },
+      },
+    },
+    orderBy: [
+      { targetDate: "asc" },
+      { updatedAt: "desc" },
+    ],
   });
 
   return myGoals;

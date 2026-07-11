@@ -1,4 +1,4 @@
-import { listAdviceRequests, listCircles, listMembers, listTensions, requireWorkspaceMembership } from "@corgtex/domain";
+import { listAdviceRequests, listCircles, listHumanMembers, listTensions, requireWorkspaceMembership } from "@corgtex/domain";
 import type { ReactNode } from "react";
 import { requirePageActor } from "@/lib/auth";
 import {
@@ -56,7 +56,7 @@ export default async function TensionsPage({
   const [{ items: tensions }, circles, members, activeInputRequests] = await Promise.all([
     listTensions(actor, workspaceId, { take: 200, circleIds, memberIds, sort }),
     listCircles(workspaceId),
-    listMembers(workspaceId),
+    listHumanMembers(workspaceId),
     listAdviceRequests(actor, { workspaceId, subjectType: "TENSION", status: "ACTIVE", take: 500 }),
   ]);
 
