@@ -7,7 +7,7 @@ import {
   getMyGoalSlice,
   listCircles,
   listGoals,
-  listMembers,
+  listHumanMembers,
   listRecognitions,
   requireWorkspaceMembership,
 } from "@corgtex/domain";
@@ -60,7 +60,7 @@ export default async function GoalsPage({
   const [allGoals, circles, members] = await Promise.all([
     listGoals(actor, { workspaceId }),
     listCircles(workspaceId),
-    listMembers(workspaceId),
+    listHumanMembers(workspaceId),
   ]);
   const focusedGoal = goalId
     ? await getGoal(actor, { workspaceId, goalId, includeArchived: true, _membership: membership })
@@ -315,7 +315,14 @@ export default async function GoalsPage({
                 mySlice.map((goal) => (
                   <div key={goal.id} className="bg-surface-strong border border-line rounded-lg p-5 shadow-sm">
                     <div className="flex justify-between items-start mb-2">
-                      <h4 className="font-semibold text-lg">{goal.title}</h4>
+                      <h4 className="font-semibold text-lg">
+                        <a
+                          href={`/workspaces/${workspaceId}/goals?view=tree&cadence=${goal.cadence}&goalId=${encodeURIComponent(goal.id)}`}
+                          className="hover:underline"
+                        >
+                          {goal.title}
+                        </a>
+                      </h4>
                       <span className="text-xs px-2 py-1 bg-accent-soft rounded text-muted">
                         {goal.cadence.replace("_", "")}
                       </span>
@@ -323,12 +330,20 @@ export default async function GoalsPage({
                     {goal.parentGoal && (
                       <div className="text-sm text-muted mb-3 flex items-center">
                         <span className="mr-1">↗ {t("contributesTo")}</span>
-                        <span className="font-medium text-text">
+                        <a
+                          href={`/workspaces/${workspaceId}/goals?view=tree&cadence=${goal.parentGoal.cadence}&goalId=${encodeURIComponent(goal.parentGoal.id)}`}
+                          className="font-medium text-text hover:underline"
+                        >
                           {goal.parentGoal.circle?.name ? `[${goal.parentGoal.circle.name}] ` : ""}
                           {goal.parentGoal.title}
-                        </span>
+                        </a>
                       </div>
                     )}
+                    <div className="text-xs text-muted mb-2">
+                      {goal.circle?.name ? `${goal.circle.name} · ` : ""}
+                      {goal.status}
+                      {goal.targetDate ? ` · ${t("target")} ${new Date(goal.targetDate).toLocaleDateString()}` : ""}
+                    </div>
                     <GoalProgress percent={goal.progressPercent} />
                   </div>
                 ))

@@ -1,4 +1,4 @@
-import { listActions, listCircles, listMembers, requireWorkspaceMembership } from "@corgtex/domain";
+import { listActions, listCircles, listHumanMembers, requireWorkspaceMembership } from "@corgtex/domain";
 import { prisma } from "@corgtex/shared";
 import type { ReactNode } from "react";
 import { requirePageActor } from "@/lib/auth";
@@ -64,7 +64,7 @@ export default async function ActionsPage({
       sort,
     }),
     listCircles(workspaceId),
-    listMembers(workspaceId),
+    listHumanMembers(workspaceId),
   ]);
 
   const actionIds = actions.map((action) => action.id);

@@ -1,4 +1,4 @@
-import { getMeetingRecorderConfig, listMeetingRecordings, listMeetings, listMembers } from "@corgtex/domain";
+import { getMeetingRecorderConfig, listHumanMembers, listMeetingRecordings, listMeetings } from "@corgtex/domain";
 import { requirePageActor } from "@/lib/auth";
 import {
   archiveMeetingAction,
@@ -81,7 +81,7 @@ export default async function MeetingsPage({
     listMeetings(workspaceId, { status: "SCHEDULED", ...meetingFilters }),
     getWorkspaceFeatureFlags(workspaceId),
     getMeetingRecorderConfig(actor, workspaceId).catch(() => null),
-    listMembers(workspaceId),
+    listHumanMembers(workspaceId),
   ]);
   const completedMeetings = statusFilters.includes("SCHEDULED") ? [] : filteredCompletedMeetings;
   const scheduledMeetings = statusFilters.includes("COMPLETED") ? [] : filteredUpcomingMeetings;
