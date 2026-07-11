@@ -1,4 +1,4 @@
-import { env, prisma, sha256 } from "@corgtex/shared";
+import { env, prisma, sha256, toInputJson } from "@corgtex/shared";
 import type { AppActor } from "@corgtex/shared";
 import type { NewspaperCadence, NewspaperDeliveryKind, NewspaperDeliveryStatus } from "@prisma/client";
 import { createHmac } from "node:crypto";
@@ -59,6 +59,85 @@ function trackingToken(runKey: string, targetUrlHash: string) {
   return createHmac("sha256", env.SESSION_COOKIE_SECRET)
     .update(`${runKey}:${targetUrlHash}:${TRACKING_SALT}`)
     .digest("base64url");
+}
+
+type NewspaperEditionCadence = Exclude<NewspaperCadence, "OFF">;
+
+export async function upsertNewspaperEdition(params: {
+  workspaceId: string;
+  workflowJobId?: string | null;
+  cadence: NewspaperCadence;
+  dateKey: string;
+  runKey: string;
+  title: string;
+  slug: string;
+  digestJson: unknown;
+  bodyMd: string;
+  sourceCounts: unknown;
+}) {
+  if (params.cadence === "OFF") {
+    throw new AppError(400, "INVALID_INPUT", "Newspaper editions require a delivery cadence.");
+  }
+
+  const cadence = params.cadence as NewspaperEditionCadence;
+  const generatedAt = new Date();
+  return prisma.newspaperEdition.upsert({
+    where: {
+      workspaceId_cadence_dateKey: {
+        workspaceId: params.workspaceId,
+        cadence,
+        dateKey: params.dateKey,
+      },
+    },
+    create: {
+      workspaceId: params.workspaceId,
+      workflowJobId: params.workflowJobId ?? null,
+      cadence,
+      dateKey: params.dateKey,
+      runKey: params.runKey,
+      title: params.title,
+      slug: params.slug,
+      digestJson: toInputJson(params.digestJson),
+      bodyMd: params.bodyMd,
+      sourceCounts: toInputJson(params.sourceCounts),
+      generatedAt,
+    },
+    update: {
+      workflowJobId: params.workflowJobId ?? null,
+      runKey: params.runKey,
+      title: params.title,
+      slug: params.slug,
+      digestJson: toInputJson(params.digestJson),
+      bodyMd: params.bodyMd,
+      sourceCounts: toInputJson(params.sourceCounts),
+      generatedAt,
+    },
+  });
+}
+
+export async function listNewspaperEditions(actor: AppActor, workspaceId: string, opts?: { take?: number }) {
+  await requireWorkspaceMembership({ actor, workspaceId });
+
+  return prisma.newspaperEdition.findMany({
+    where: { workspaceId },
+    orderBy: { generatedAt: "desc" },
+    take: opts?.take ?? 20,
+    select: {
+      id: true,
+      workflowJobId: true,
+      cadence: true,
+      dateKey: true,
+      runKey: true,
+      title: true,
+      slug: true,
+      digestJson: true,
+      bodyMd: true,
+      sourceCounts: true,
+      generatedAt: true,
+      createdAt: true,
+      updatedAt: true,
+    },
+  });
 }
 
 async function getTrackingUrl(params: {
@@ -570,7 +649,7 @@ export async function getNewspaperDiagnostics(actor: AppActor, workspaceId: stri
   const recipientCadences = new Set<NewspaperCadence>(
     recipients.filter((recipient) => recipient.receivesNewspaper).map((recipient) => recipient.effectiveCadence),
   );
-  const [oneDayCounts, sevenDayCounts, jobs, deliveries] = await Promise.all([
+  const [oneDayCounts, sevenDayCounts, jobs, deliveries, editions] = await Promise.all([
     countNewspaperSources(workspaceId, new Date(now.getTime() - 24 * 60 * 60 * 1000)),
     countNewspaperSources(workspaceId, new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000)),
     prisma.workflowJob.findMany({
@@ -612,6 +691,22 @@ export async function getNewspaperDiagnostics(actor: AppActor, workspaceId: stri
         createdAt: true,
       },
     }),
+    prisma.newspaperEdition.findMany({
+      where: { workspaceId },
+      orderBy: { generatedAt: "desc" },
+      take,
+      select: {
+        id: true,
+        workflowJobId: true,
+        cadence: true,
+        dateKey: true,
+        runKey: true,
+        title: true,
+        slug: true,
+        generatedAt: true,
+        updatedAt: true,
+      },
+    }),
   ]);
 
   return {
@@ -626,5 +721,6 @@ export async function getNewspaperDiagnostics(actor: AppActor, workspaceId: stri
     },
     recentJobs: jobs,
     recentDeliveries: deliveries,
+    recentEditions: editions,
   };
 }

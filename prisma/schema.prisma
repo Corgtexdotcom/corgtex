@@ -672,6 +672,7 @@ model Workspace {
   appSurfaceAssignments          AppSurfaceAssignment[]
   appSessions                    AppSession[]
   buildArtifacts                 BuildArtifact[]
+  newspaperEditions              NewspaperEdition[]
   newspaperDeliveries            NewspaperDelivery[]
   newspaperTrackedLinks          NewspaperTrackedLink[]
   contextGraphObjects            ContextGraphObject[]
@@ -2856,11 +2857,37 @@ model WorkflowJob {
   dependsOn             WorkflowJob?           @relation("JobDependency", fields: [dependsOnJobId], references: [id], onDelete: SetNull)
   dependents            WorkflowJob[]          @relation("JobDependency")
   modelUsage            ModelUsage[]
+  newspaperEditions     NewspaperEdition[]
   newspaperDeliveries   NewspaperDelivery[]
   newspaperTrackedLinks NewspaperTrackedLink[]
 
   @@index([status, runAfter, createdAt])
   @@index([dependsOnJobId])
+}
+
+model NewspaperEdition {
+  id            String           @id @default(uuid())
+  workspaceId   String
+  workflowJobId String?
+  cadence       NewspaperCadence
+  dateKey       String
+  runKey        String
+  title         String
+  slug          String
+  digestJson    Json
+  bodyMd        String           @db.Text
+  sourceCounts  Json
+  generatedAt   DateTime         @default(now())
+  createdAt     DateTime         @default(now())
+  updatedAt     DateTime         @updatedAt
+
+  workspace   Workspace    @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  workflowJob WorkflowJob? @relation(fields: [workflowJobId], references: [id], onDelete: SetNull)
+
+  @@unique([workspaceId, cadence, dateKey])
+  @@unique([workspaceId, runKey])
+  @@index([workspaceId, generatedAt])
+  @@index([workflowJobId])
 }
 
 model NewspaperDelivery {

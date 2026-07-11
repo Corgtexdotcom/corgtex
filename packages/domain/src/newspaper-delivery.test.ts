@@ -69,6 +69,10 @@ const {
       create: vi.fn(),
       findMany: vi.fn(),
     },
+    newspaperEdition: {
+      upsert: vi.fn(),
+      findMany: vi.fn(),
+    },
   },
   requireWorkspaceMembershipMock: vi.fn(),
 }));
@@ -133,6 +137,8 @@ describe("newspaper delivery", () => {
       ...data,
     }));
     prismaMock.newspaperDelivery.findMany.mockResolvedValue([]);
+    prismaMock.newspaperEdition.upsert.mockResolvedValue({ id: "edition-1" });
+    prismaMock.newspaperEdition.findMany.mockResolvedValue([]);
     prismaMock.workspaceAgentConfig.findUnique.mockResolvedValue(null);
     prismaMock.workflowJob.findMany.mockResolvedValue([]);
     prismaMock.member.findMany.mockResolvedValue([]);
@@ -320,6 +326,109 @@ describe("newspaper delivery", () => {
     expect(rows[0]).not.toHaveProperty("clickedAt");
   });
 
+  it("upserts canonical newspaper editions by workspace, cadence, and date", async () => {
+    const { upsertNewspaperEdition } = await import("./newspaper-delivery");
+
+    await upsertNewspaperEdition({
+      workspaceId: "ws-1",
+      workflowJobId: "job-1",
+      cadence: "DAILY",
+      dateKey: "2026-07-11",
+      runKey: "run-1",
+      title: "Daily Newspaper - 2026-07-11",
+      slug: "daily-newspaper-2026-07-11",
+      digestJson: { intro: "Hello", sections: [{ id: "builtWork", items: ["Shipped work"] }] },
+      bodyMd: "# Daily Newspaper\n\n## Built Work",
+      sourceCounts: { buildArtifacts: 1 },
+    });
+
+    expect(prismaMock.newspaperEdition.upsert).toHaveBeenCalledWith({
+      where: {
+        workspaceId_cadence_dateKey: {
+          workspaceId: "ws-1",
+          cadence: "DAILY",
+          dateKey: "2026-07-11",
+        },
+      },
+      create: expect.objectContaining({
+        workspaceId: "ws-1",
+        workflowJobId: "job-1",
+        cadence: "DAILY",
+        dateKey: "2026-07-11",
+        runKey: "run-1",
+        title: "Daily Newspaper - 2026-07-11",
+        slug: "daily-newspaper-2026-07-11",
+        bodyMd: "# Daily Newspaper\n\n## Built Work",
+        sourceCounts: { buildArtifacts: 1 },
+      }),
+      update: expect.objectContaining({
+        workflowJobId: "job-1",
+        runKey: "run-1",
+        digestJson: expect.objectContaining({
+          intro: "Hello",
+        }),
+        sourceCounts: { buildArtifacts: 1 },
+      }),
+    });
+  });
+
+  it("rejects off cadence when storing a canonical edition", async () => {
+    const { upsertNewspaperEdition } = await import("./newspaper-delivery");
+
+    await expect(upsertNewspaperEdition({
+      workspaceId: "ws-1",
+      cadence: "OFF",
+      dateKey: "2026-07-11",
+      runKey: "run-1",
+      title: "Off Newspaper",
+      slug: "off-newspaper",
+      digestJson: {},
+      bodyMd: "",
+      sourceCounts: {},
+    })).rejects.toMatchObject({
+      code: "INVALID_INPUT",
+    });
+
+    expect(prismaMock.newspaperEdition.upsert).not.toHaveBeenCalled();
+  });
+
+  it("lists canonical newspaper editions behind workspace membership", async () => {
+    const { listNewspaperEditions } = await import("./newspaper-delivery");
+    prismaMock.newspaperEdition.findMany.mockResolvedValue([
+      {
+        id: "edition-1",
+        workflowJobId: "job-1",
+        cadence: "WEEKLY",
+        dateKey: "2026-07-06",
+        runKey: "run-1",
+        title: "Weekly Newspaper - 2026-07-06",
+        slug: "weekly-newspaper-2026-07-06",
+        digestJson: { sections: [] },
+        bodyMd: "# Weekly Newspaper",
+        sourceCounts: {},
+        generatedAt: new Date("2026-07-06T08:00:00.000Z"),
+        createdAt: new Date("2026-07-06T08:00:00.000Z"),
+        updatedAt: new Date("2026-07-06T08:00:00.000Z"),
+      },
+    ]);
+
+    const rows = await listNewspaperEditions({ kind: "user", user: { id: "u-1" } } as any, "ws-1", { take: 5 });
+
+    expect(requireWorkspaceMembershipMock).toHaveBeenCalledWith({
+      actor: { kind: "user", user: { id: "u-1" } },
+      workspaceId: "ws-1",
+    });
+    expect(prismaMock.newspaperEdition.findMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: { workspaceId: "ws-1" },
+      orderBy: { generatedAt: "desc" },
+      take: 5,
+    }));
+    expect(rows[0]).toEqual(expect.objectContaining({
+      id: "edition-1",
+      cadence: "WEEKLY",
+    }));
+  });
+
   it("returns newspaper diagnostics with effective recipients, next runs, jobs, deliveries, and source counts", async () => {
     const { getNewspaperDiagnostics } = await import("./newspaper-delivery");
     prismaMock.workspaceAgentConfig.findUnique.mockResolvedValue({
@@ -371,6 +480,19 @@ describe("newspaper delivery", () => {
         createdAt: new Date("2026-06-22T08:01:00.000Z"),
       },
     ]);
+    prismaMock.newspaperEdition.findMany.mockResolvedValue([
+      {
+        id: "edition-1",
+        workflowJobId: "job-1",
+        cadence: "WEEKLY",
+        dateKey: "2026-06-22",
+        runKey: "run-1",
+        title: "Weekly Newspaper - 2026-06-22",
+        slug: "weekly-newspaper-2026-06-22",
+        generatedAt: new Date("2026-06-22T08:00:30.000Z"),
+        updatedAt: new Date("2026-06-22T08:00:30.000Z"),
+      },
+    ]);
 
     const diagnostics = await getNewspaperDiagnostics(
       { kind: "user", user: { id: "u-1" } } as any,
@@ -398,6 +520,11 @@ describe("newspaper delivery", () => {
     expect(diagnostics.recentDeliveries[0]).toEqual(expect.objectContaining({
       status: "SKIPPED",
       error: "No digest inputs.",
+    }));
+    expect(diagnostics.recentEditions[0]).toEqual(expect.objectContaining({
+      cadence: "WEEKLY",
+      dateKey: "2026-06-22",
+      slug: "weekly-newspaper-2026-06-22",
     }));
   });
 });
