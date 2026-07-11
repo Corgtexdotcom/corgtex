@@ -1,34 +1,10 @@
-import { describe, expect, it, vi } from "vitest";
-
-vi.mock("@corgtex/domain", () => ({
-  computeNewspaperLayout: (sections: Array<{ id: string; itemCount: number }>) => {
-    const visibleSections = sections
-      .filter((section) => section.itemCount > 0)
-      .map((section) => ({
-        ...section,
-        itemCap: section.itemCount,
-        excerptMaxLength: 180,
-        placement: "standard",
-      }));
-    return {
-      variant: visibleSections.length <= 2 ? "sparse" : "balanced",
-      visibleSections,
-      sectionCaps: Object.fromEntries(visibleSections.map((section) => [
-        section.id,
-        {
-          itemCap: section.itemCap,
-          excerptMaxLength: section.excerptMaxLength,
-          placement: section.placement,
-        },
-      ])),
-    };
-  },
-}));
+import { describe, expect, it } from "vitest";
 
 import {
   normalizeNewspaperDigestPayload,
   normalizeNewspaperPersonalizationPayload,
   renderNewspaperDigestMarkdown,
+  renderNewspaperEditionEmailHtml,
   renderNewspaperEmailHtml,
   withNewspaperAdviceRequests,
 } from "./newspaper-email";
@@ -155,6 +131,26 @@ describe("newspaper email rendering", () => {
     expect(html).toContain("trace it back to evidence");
     expect(html).not.toContain("<script>alert");
     expect(html).not.toContain("<img src=x");
+  });
+
+  it("renders newsletter html from the stored canonical edition", () => {
+    const html = renderNewspaperEditionEmailHtml({
+      edition: {
+        title: "Weekly Newspaper - 2026-07-11",
+        digestJson: {
+          intro: "Shared edition intro.",
+          builtWork: ["Stored edition powers the newsletter."],
+        },
+      },
+      workspaceName: "Acme",
+      recipientName: "Pat",
+      workspaceUrl: "https://app.example.com/workspaces/ws-1",
+    });
+
+    expect(html).toContain("Weekly Newspaper - 2026-07-11");
+    expect(html).toContain("Shared edition intro.");
+    expect(html).toContain("Built / Shipped Work");
+    expect(html).toContain("Stored edition powers the newsletter.");
   });
 
   it("uses deterministic markdown output", () => {

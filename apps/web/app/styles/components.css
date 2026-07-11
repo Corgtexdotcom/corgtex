@@ -1851,6 +1851,14 @@ a.meeting-agenda-item:hover {
     gap: 0;
   }
 
+  .nr-section-heading-row {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 16px;
+    min-width: 0;
+  }
+
   .nr-feed-item {
     border-bottom: 1px solid var(--line);
     padding: 18px 0;
@@ -1890,6 +1898,23 @@ a.meeting-agenda-item:hover {
   .nr-feed-item-lead .nr-feed-title {
     font-size: 1.55rem;
     line-height: 1.18;
+  }
+
+  .nr-edition-intro {
+    max-width: 68ch;
+    margin: 6px 0 10px;
+  }
+
+  .nr-edition-items {
+    display: grid;
+    gap: 8px;
+    margin: 0;
+    padding-left: 20px;
+  }
+
+  .nr-edition-items li {
+    min-width: 0;
+    color: var(--text);
   }
 
   .nr-work-rail {

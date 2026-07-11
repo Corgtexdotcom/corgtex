@@ -23,7 +23,7 @@ import {
   normalizeNewspaperDigestPayload,
   normalizeNewspaperPersonalizationPayload,
   renderNewspaperDigestMarkdown,
-  renderNewspaperEmailHtml,
+  renderNewspaperEditionEmailHtml,
   withNewspaperAdviceRequests,
 } from "./newspaper-email";
 
@@ -1475,6 +1475,8 @@ Rules:
     };
   }
 
+  let sharedEdition: { title: string; digestJson: unknown } | null = null;
+
   if (digest.sections.length > 0) {
     const digestBodyMd = renderNewspaperDigestMarkdown({ title: digestTitle, digest });
     const existingDigestArticle = await prisma.brainArticle.findUnique({
@@ -1514,7 +1516,7 @@ Rules:
       });
     }
 
-    await upsertNewspaperEdition({
+    const storedEdition = await upsertNewspaperEdition({
       workspaceId: params.workspaceId,
       workflowJobId: params.workflowJobId ?? null,
       cadence,
@@ -1526,6 +1528,10 @@ Rules:
       bodyMd: digestBodyMd,
       sourceCounts,
     });
+    sharedEdition = {
+      title: storedEdition.title,
+      digestJson: storedEdition.digestJson,
+    };
 
     // 5. Rebuild backlinks
     await rebuildBacklinks(agentActor, { workspaceId: params.workspaceId });
@@ -1554,10 +1560,12 @@ Rules:
       })
     : [];
   const recipientPersonArticleBySlug = new Map(recipientPersonArticles.map((article) => [article.slug, article]));
+  const editionDigest = sharedEdition ? normalizeNewspaperDigestPayload(sharedEdition.digestJson) : digest;
 
   for (const member of recipientMembers) {
     const personArticle = recipientPersonArticleBySlug.get(`person-${member.user.id}`) ?? null;
-    const recipientDigest = withNewspaperAdviceRequests(digest, personalItemsByMemberId.get(member.id) ?? []);
+    const recipientDigest = withNewspaperAdviceRequests(editionDigest, personalItemsByMemberId.get(member.id) ?? []);
+    const subject = `${sharedEdition?.title ?? digestTitle} - Your Personal Briefing`;
 
     if (recipientDigest.sections.length === 0) {
       const reason = "No digest sections generated for this recipient.";
@@ -1570,7 +1578,7 @@ Rules:
         cadence,
         runKey,
         recipientEmail: member.user.email,
-        subject: `${digestTitle} - Your Personal Briefing`,
+        subject,
         status: "SKIPPED",
         error: reason,
       });
@@ -1597,13 +1605,12 @@ Rules:
     });
     const personalization = normalizeNewspaperPersonalizationPayload(personalizationExtraction.output);
 
-    const subject = `${digestTitle} - Your Personal Briefing`;
     const html = await instrumentNewspaperHtmlLinks({
       workspaceId: params.workspaceId,
       workflowJobId: params.workflowJobId ?? null,
       runKey,
-      html: renderNewspaperEmailHtml({
-        title: digestTitle,
+      html: renderNewspaperEditionEmailHtml({
+        edition: sharedEdition ?? { title: digestTitle, digestJson: digest },
         workspaceName,
         recipientName: member.user.displayName || member.user.email,
         workspaceUrl: workspaceUrl(params.workspaceId),

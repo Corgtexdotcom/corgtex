@@ -1,8 +1,10 @@
 import {
   computeNewspaperLayout,
   countUnreadNotifications,
+  listNewspaperEditions,
   listMembers, listNotifications, listTensions,
-  listArticles, listMeetings
+  listArticles, listMeetings,
+  normalizeNewspaperEditionDigest
 } from "@corgtex/domain";
 import { prisma, workspaceBranding } from "@corgtex/shared";
 import { requirePageActor } from "@/lib/auth";
@@ -40,6 +42,7 @@ export default async function WorkspaceDashboard({
     notifications,
     unreadNotificationsCount,
     articlesResult,
+    newspaperEditions,
     meetings,
     openProposalCandidates,
     teamActionCandidates,
@@ -54,6 +57,7 @@ export default async function WorkspaceDashboard({
     listNotifications(actor, workspaceId, { take: 5, unreadOnly: true }),
     actor.kind === "user" ? countUnreadNotifications(actor.user.id, workspaceId) : Promise.resolve(0),
     listArticles(actor, { workspaceId, take: 50 }),
+    listNewspaperEditions(actor, workspaceId, { take: 1 }),
     listMeetings(workspaceId, { status: "COMPLETED" }),
     prisma.proposal.findMany({
       where: {
@@ -191,6 +195,11 @@ export default async function WorkspaceDashboard({
   const dateString = format.dateTime(d, { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
 
   const allArticles = articlesResult.items;
+  const latestNewspaperEdition = newspaperEditions[0] ?? null;
+  const latestEditionDigest = latestNewspaperEdition
+    ? normalizeNewspaperEditionDigest(latestNewspaperEdition)
+    : null;
+  const latestEditionSections = latestEditionDigest?.sections ?? [];
   const dashboardFeedItems = selectDashboardFeedItems({
     articles: allArticles,
     meetings,
@@ -258,6 +267,24 @@ export default async function WorkspaceDashboard({
     excerptMaxLength: 140,
     placement: "standard" as const,
   };
+  const editionLayout = computeNewspaperLayout(latestEditionSections.map((section, index) => ({
+    id: section.id,
+    priority: index + 1,
+    itemCount: section.items.length,
+    estimatedTextLength: section.items.reduce((sum, item) => sum + item.length, 0),
+    surface: "dashboard" as const,
+  })));
+  const latestEditionSectionById = new Map(latestEditionSections.map((section) => [section.id, section]));
+  const cappedEditionSections = editionLayout.visibleSections.flatMap((layoutSection) => {
+    const section = latestEditionSectionById.get(layoutSection.id);
+    if (!section) return [];
+    return [{
+      ...section,
+      items: section.items.slice(0, layoutSection.itemCap),
+      excerptMaxLength: layoutSection.excerptMaxLength,
+    }];
+  });
+  const hasStoredEdition = !!latestNewspaperEdition && cappedEditionSections.length > 0;
   const knowledgeFeedLayout = dashboardSectionLayout("knowledgeFeed");
   const proposalLayout = dashboardSectionLayout("proposals");
   const actionLayout = dashboardSectionLayout("actionItems");
@@ -271,7 +298,7 @@ export default async function WorkspaceDashboard({
     || teamActionItems.length > 0
     || openTensionItems.length > 0
     || myWorkItems.length > 0;
-  const hasDashboardContent = cappedFeedItems.length > 0 || hasWorkRail;
+  const hasDashboardContent = hasStoredEdition || cappedFeedItems.length > 0 || hasWorkRail;
   const hasStrategicDirection = strategicGoals.length > 0 || !!recentRecognition;
   const attentionPanel = totalAttentionItems > 0 ? (
     <section className="nr-rail-section nr-rail-section-attention">
@@ -350,7 +377,53 @@ export default async function WorkspaceDashboard({
 
       {hasDashboardContent && (
       <section className="nr-dashboard-grid">
-        {cappedFeedItems.length > 0 && (
+        {hasStoredEdition && latestNewspaperEdition && latestEditionDigest ? (
+          <div className="nr-knowledge-feed">
+            <div className="nr-section-heading-row">
+              <div>
+                <h2 className="nr-section-header">{t("latestNewspaper")}</h2>
+                <div className="nr-feed-meta">
+                  <span>{latestNewspaperEdition.cadence === "DAILY" ? t("dailyEdition") : t("weeklyEdition")}</span>
+                  <span>·</span>
+                  <span suppressHydrationWarning>
+                    {t("generatedOn", {
+                      date: format.dateTime(latestNewspaperEdition.generatedAt, {
+                        month: "short",
+                        day: "numeric",
+                        hour: "numeric",
+                        minute: "2-digit",
+                      }),
+                    })}
+                  </span>
+                </div>
+              </div>
+              <Link href={`/workspaces/${workspaceId}/brain/${latestNewspaperEdition.slug}`} className="nr-link">
+                {t("readFullEdition")}
+              </Link>
+            </div>
+            {latestEditionDigest.intro && (
+              <MarkdownExcerpt markdown={latestEditionDigest.intro} maxLength={280} as="p" className="nr-excerpt nr-edition-intro" />
+            )}
+            <div className="nr-feed-list nr-edition-section-list">
+              {cappedEditionSections.map((section, index) => (
+                <article key={section.id} className={index === 0 ? "nr-feed-item nr-feed-item-lead" : "nr-feed-item"}>
+                  <h3 className="nr-feed-title">{section.title}</h3>
+                  <ul className="nr-edition-items">
+                    {section.items.map((item, itemIndex) => (
+                      <li key={`${section.id}-${itemIndex}`}>
+                        <MarkdownExcerpt
+                          markdown={item}
+                          maxLength={itemIndex === 0 ? section.excerptMaxLength : Math.min(160, section.excerptMaxLength)}
+                          as="span"
+                        />
+                      </li>
+                    ))}
+                  </ul>
+                </article>
+              ))}
+            </div>
+          </div>
+        ) : cappedFeedItems.length > 0 && (
           <div className="nr-knowledge-feed">
             <h2 className="nr-section-header">{t("freshKnowledge")}</h2>
             <div className="nr-feed-list">

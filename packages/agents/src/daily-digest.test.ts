@@ -119,6 +119,22 @@ vi.mock("@corgtex/domain", () => ({
       defaultModelTier: "standard",
     },
   },
+  NEWSPAPER_SECTION_DEFINITIONS: [
+    { id: "adviceRequests", title: "Requests Awaiting Your Input", aliases: ["inputRequests", "requestsAwaitingInput", "pendingAdviceRequests"] },
+    { id: "meetingBriefs", title: "Meeting Briefs", aliases: ["meetings", "meetingSummaries", "meetingBriefings"] },
+    { id: "decisionsAndProposals", title: "Decisions & Proposals", aliases: ["decisions", "proposals"] },
+    { id: "resolvedTensions", title: "Resolved Tensions", aliases: ["closedTensions", "resolvedIssues"] },
+    { id: "openActions", title: "Open Actions", aliases: ["assignedActions", "openActionItems", "actions"] },
+    { id: "goalsProgress", title: "Goals & Quarterly Progress", aliases: ["goals", "goalUpdates", "quarterlyGoals", "progress"] },
+    { id: "rolesAndPeople", title: "Roles & People", aliases: ["roleChanges", "peopleChanges", "newMembers", "roles"] },
+    { id: "keyDecisions", title: "Key Decisions Made", aliases: ["keyDecisionsMade"] },
+    { id: "actionItems", title: "Action Items Identified", aliases: ["actions", "nextActions"] },
+    { id: "builtWork", title: "Built / Shipped Work", aliases: ["shippedWork", "buildArtifacts"] },
+    { id: "conversationHighlights", title: "Conversation Highlights", aliases: ["highlights", "summary"] },
+    { id: "teamPulse", title: "Team Pulse", aliases: ["pulse", "sentiment"] },
+    { id: "emergingTensions", title: "Emerging Tensions", aliases: ["tensions", "risks"] },
+    { id: "otherUpdates", title: "Other Updates", aliases: ["misc", "other", "brainUpdates", "documentUpdates"] },
+  ],
   getAgentModelOverride: vi.fn().mockResolvedValue(undefined),
   getWorkspaceNewspaperCadence: getWorkspaceNewspaperCadenceMock,
   isHumanNewspaperRecipientIdentity: (identity: { kind?: string | null; user?: { email?: string | null; displayName?: string | null } | null; email?: string | null; displayName?: string | null }) => {
@@ -132,6 +148,58 @@ vi.mock("@corgtex/domain", () => ({
     if (value === "DAILY" || value === "WEEKLY" || value === "OFF") return value;
     return "WEEKLY";
   },
+  capNewspaperDigestSections: (sections: Array<{ items: string[] }>) => sections,
+  normalizeNewspaperDigestPayload: (input: any) => {
+    const record = input && typeof input === "object" && !Array.isArray(input) ? input : {};
+    if (Array.isArray(record.sections)) {
+      return {
+        intro: typeof record.intro === "string" ? record.intro : null,
+        sections: record.sections.flatMap((section: any) => (
+          section
+            && typeof section.id === "string"
+            && typeof section.title === "string"
+            && Array.isArray(section.items)
+            ? [{
+              id: section.id,
+              title: section.title,
+              items: section.items.map((item: unknown) => String(item).trim()).filter(Boolean),
+            }]
+            : []
+        )),
+      };
+    }
+    const definitions = [
+      { id: "adviceRequests", title: "Requests Awaiting Your Input", keys: ["adviceRequests", "inputRequests", "requestsAwaitingInput", "pendingAdviceRequests"] },
+      { id: "meetingBriefs", title: "Meeting Briefs", keys: ["meetingBriefs", "meetings", "meetingSummaries", "meetingBriefings"] },
+      { id: "decisionsAndProposals", title: "Decisions & Proposals", keys: ["decisionsAndProposals", "decisions", "proposals"] },
+      { id: "resolvedTensions", title: "Resolved Tensions", keys: ["resolvedTensions", "closedTensions", "resolvedIssues"] },
+      { id: "openActions", title: "Open Actions", keys: ["openActions", "assignedActions", "openActionItems", "actions"] },
+      { id: "goalsProgress", title: "Goals & Quarterly Progress", keys: ["goalsProgress", "goals", "goalUpdates", "quarterlyGoals", "progress"] },
+      { id: "rolesAndPeople", title: "Roles & People", keys: ["rolesAndPeople", "roleChanges", "peopleChanges", "newMembers", "roles"] },
+      { id: "keyDecisions", title: "Key Decisions Made", keys: ["keyDecisions", "keyDecisionsMade"] },
+      { id: "actionItems", title: "Action Items Identified", keys: ["actionItems", "actions", "nextActions"] },
+      { id: "builtWork", title: "Built / Shipped Work", keys: ["builtWork", "shippedWork", "buildArtifacts"] },
+      { id: "conversationHighlights", title: "Conversation Highlights", keys: ["conversationHighlights", "highlights", "summary"] },
+      { id: "teamPulse", title: "Team Pulse", keys: ["teamPulse", "pulse", "sentiment"] },
+      { id: "emergingTensions", title: "Emerging Tensions", keys: ["emergingTensions", "tensions", "risks"] },
+      { id: "otherUpdates", title: "Other Updates", keys: ["otherUpdates", "misc", "other", "brainUpdates", "documentUpdates"] },
+    ];
+    const sections = definitions.flatMap((definition) => {
+      const items = definition.keys.flatMap((key) => {
+        const value = record[key];
+        if (Array.isArray(value)) return value.map((item) => String(item).trim()).filter(Boolean);
+        if (typeof value === "string") return [value.trim()].filter(Boolean);
+        return [];
+      });
+      return items.length > 0 ? [{ id: definition.id, title: definition.title, items }] : [];
+    });
+    return { intro: typeof record.intro === "string" ? record.intro : null, sections };
+  },
+  renderNewspaperDigestMarkdown: ({ title, digest }: { title: string; digest: { intro: string | null; sections: Array<{ title: string; items: string[] }> } }) => [
+    `# ${title}`,
+    digest.intro ? `\n${digest.intro}` : "",
+    ...digest.sections.flatMap((section) => ["", `## ${section.title}`, "", ...section.items.map((item) => `- ${item}`)]),
+  ].filter((line, index) => line !== "" || index > 0).join("\n").trim(),
   computeNewspaperLayout: (sections: Array<{ id: string; itemCount: number }>) => {
     const visibleSections = sections
       .filter((section) => section.itemCount > 0)
@@ -245,7 +313,11 @@ describe("runDailyDigest", () => {
     sendEmailMock.mockResolvedValue({ status: "SENT", providerMessageId: "email-1" });
     instrumentNewspaperHtmlLinksMock.mockImplementation(async ({ html }: { html: string }) => html);
     recordNewspaperDeliveryMock.mockResolvedValue({ id: "delivery-1" });
-    upsertNewspaperEditionMock.mockResolvedValue({ id: "edition-1" });
+    upsertNewspaperEditionMock.mockImplementation(async (params: any) => ({
+      id: "edition-1",
+      title: params.title,
+      digestJson: params.digestJson,
+    }));
     txMock.demoLead.update.mockResolvedValue({ id: "lead-1" });
     txMock.crmActivity.create.mockResolvedValue({ id: "activity-1" });
     txMock.newspaperDelivery.create.mockResolvedValue({ id: "delivery-1" });
@@ -340,6 +412,33 @@ describe("runDailyDigest", () => {
       cadence: "WEEKLY",
       status: "SENT",
       providerMessageId: "email-1",
+    }));
+  });
+
+  it("renders member newsletters from the stored canonical edition", async () => {
+    prismaMock.buildArtifact.findMany.mockResolvedValue([mockRecentBuildArtifact()]);
+    upsertNewspaperEditionMock.mockResolvedValueOnce({
+      id: "edition-1",
+      title: "Stored Weekly Newspaper - 2026-04-30",
+      digestJson: {
+        intro: "Stored shared intro.",
+        builtWork: ["Stored edition item."],
+      },
+    });
+
+    const { runDailyDigest } = await import("./daily-digest");
+    await runDailyDigest({
+      workspaceId: "workspace-1",
+      dateISO: "2026-04-30T12:00:00.000Z",
+    });
+
+    expect(sendEmailMock).toHaveBeenCalledWith(expect.objectContaining({
+      to: "member@example.com",
+      subject: "Stored Weekly Newspaper - 2026-04-30 - Your Personal Briefing",
+      html: expect.stringContaining("Stored Weekly Newspaper - 2026-04-30"),
+    }));
+    expect(sendEmailMock).toHaveBeenCalledWith(expect.objectContaining({
+      html: expect.stringContaining("Stored edition item."),
     }));
   });
 
