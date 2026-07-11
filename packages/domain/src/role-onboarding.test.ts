@@ -65,7 +65,28 @@ const onboardingRecord = {
       purposeMd: "Run the operating system.",
       domainMd: "Delivery cadence",
     },
-    assignments: [],
+    assignments: [
+      {
+        id: "assignment-active",
+        expiresAt: null,
+        member: {
+          user: {
+            displayName: "Active Holder",
+            email: "active@example.com",
+          },
+        },
+      },
+      {
+        id: "assignment-expired",
+        expiresAt: new Date("2026-01-01T00:00:00.000Z"),
+        member: {
+          user: {
+            displayName: "Expired Holder",
+            email: "expired@example.com",
+          },
+        },
+      },
+    ],
     agentAssignments: [],
     versions: [],
   },
@@ -159,8 +180,26 @@ describe("role onboarding domain", () => {
 
     expect(context).toContain("ROLE ONBOARDING CONTEXT");
     expect(context).toContain("Integrator");
+    expect(context).toContain("Active Holder");
+    expect(context).not.toContain("Expired Holder");
     expect(context).toContain("Advice process");
     expect(context).toContain("Publish weekly status");
+    expect(prismaMock.roleOnboardingSession.findFirst).toHaveBeenCalledWith(expect.objectContaining({
+      include: expect.objectContaining({
+        role: expect.objectContaining({
+          include: expect.objectContaining({
+            assignments: expect.objectContaining({
+              where: {
+                OR: [
+                  { expiresAt: null },
+                  { expiresAt: { gt: expect.any(Date) } },
+                ],
+              },
+            }),
+          }),
+        }),
+      }),
+    }));
     expect(prismaMock.meeting.findMany).toHaveBeenCalledWith(expect.objectContaining({
       where: expect.objectContaining({
         OR: [

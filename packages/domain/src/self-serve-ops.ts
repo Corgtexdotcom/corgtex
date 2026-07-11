@@ -13,6 +13,7 @@ import {
 import type { AgentActor, AppActor } from "@corgtex/shared";
 import { AppError, invariant } from "./errors";
 import { isGlobalOperator } from "./auth";
+import { activeRoleAssignmentWhere } from "./role-assignment-activity";
 
 const SUPPORT_SESSION_TTL_MS = 60 * 60 * 1000;
 const SUPPORT_EMAIL_DOMAIN = "corgtex.local";
@@ -948,14 +949,19 @@ async function cloneRoleAssignments(tx: Prisma.TransactionClient, params: {
   await tx.roleAssignment.deleteMany({ where: { memberId: params.supportMemberId } });
   if (!params.sourceMemberId) return;
   const assignments = await tx.roleAssignment.findMany({
-    where: { memberId: params.sourceMemberId },
-    select: { roleId: true },
+    where: {
+      memberId: params.sourceMemberId,
+      ...activeRoleAssignmentWhere(),
+    },
+    select: { roleId: true, expiresAt: true, transferReason: true },
   });
   if (assignments.length === 0) return;
   await tx.roleAssignment.createMany({
     data: assignments.map((assignment) => ({
       memberId: params.supportMemberId,
       roleId: assignment.roleId,
+      expiresAt: assignment.expiresAt,
+      transferReason: assignment.transferReason,
     })),
     skipDuplicates: true,
   });

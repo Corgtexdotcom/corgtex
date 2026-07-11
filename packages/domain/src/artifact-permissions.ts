@@ -1,4 +1,5 @@
 import { prisma } from "@corgtex/shared";
+import { activeRoleAssignmentWhere } from "./role-assignment-activity";
 
 export async function checkArtifactPermission(params: {
   workspaceId: string;
@@ -13,6 +14,7 @@ export async function checkArtifactPermission(params: {
     },
     include: {
       assignments: {
+        where: activeRoleAssignmentWhere(),
         select: { memberId: true },
       },
     },

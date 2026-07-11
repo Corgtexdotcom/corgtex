@@ -56,6 +56,8 @@ const ROLE_ASSIGNMENT_MEMBER_INCLUDE = {
 
 type MemberForAssignment = Prisma.MemberGetPayload<{ include: typeof ROLE_ASSIGNMENT_MEMBER_INCLUDE }>;
 
+export { activeRoleAssignmentWhere, isRoleAssignmentActive } from "./role-assignment-activity";
+
 export async function listRoles(workspaceId: string, opts?: { archiveFilter?: ArchiveFilter }) {
   return prisma.role.findMany({
     where: {

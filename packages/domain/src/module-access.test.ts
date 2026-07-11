@@ -1,13 +1,72 @@
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+
+const { prismaMock } = vi.hoisted(() => ({
+  prismaMock: {
+    workspaceFeatureFlag: {
+      findMany: vi.fn(),
+    },
+    workspaceModuleGrant: {
+      findMany: vi.fn(),
+      upsert: vi.fn(),
+      delete: vi.fn(),
+    },
+    roleAssignment: {
+      findMany: vi.fn(),
+    },
+    circle: {
+      findMany: vi.fn(),
+    },
+    workspaceModuleAccessRequest: {
+      create: vi.fn(),
+      findMany: vi.fn(),
+      findFirst: vi.fn(),
+      update: vi.fn(),
+    },
+    member: {
+      findFirst: vi.fn(),
+      findUnique: vi.fn(),
+    },
+    session: {
+      create: vi.fn(),
+    },
+    user: {
+      findUnique: vi.fn(),
+      create: vi.fn(),
+    },
+    $transaction: vi.fn(),
+  },
+}));
+
+vi.mock("@corgtex/shared", () => ({
+  env: {
+    SESSION_LAST_SEEN_WRITE_INTERVAL_MS: 5 * 60 * 1000,
+  },
+  prisma: prismaMock,
+  hashPassword: vi.fn((value: string) => `hash:${value}`),
+  parseAllowedWorkspaceIds: vi.fn(() => new Set<string>()),
+  randomOpaqueToken: vi.fn(() => "opaque-token"),
+  sha256: vi.fn((value: string) => `sha:${value}`),
+  verifyPassword: vi.fn(() => true),
+}));
 
 import {
   createModuleAccessRequest,
   decideModuleAccessRequest,
   expandCircleAncestors,
+  gatherModuleAccessContext,
   listModuleAccessRequests,
   toAccessLevel,
   toPrismaAccessLevel,
 } from "./module-access";
+
+beforeEach(() => {
+  vi.clearAllMocks();
+  prismaMock.workspaceFeatureFlag.findMany.mockResolvedValue([]);
+  prismaMock.workspaceModuleGrant.findMany.mockResolvedValue([]);
+  prismaMock.roleAssignment.findMany.mockResolvedValue([]);
+  prismaMock.circle.findMany.mockResolvedValue([]);
+  prismaMock.$transaction.mockImplementation(async (callback: (tx: typeof prismaMock) => Promise<unknown>) => callback(prismaMock));
+});
 
 describe("expandCircleAncestors", () => {
   it("includes the base circles and all ancestors up the tree", () => {
@@ -68,5 +127,35 @@ describe("module access request API surface", () => {
     expect(typeof createModuleAccessRequest).toBe("function");
     expect(typeof listModuleAccessRequests).toBe("function");
     expect(typeof decideModuleAccessRequest).toBe("function");
+  });
+});
+
+describe("gatherModuleAccessContext", () => {
+  it("loads only active role assignments before deriving governance roles and circles", async () => {
+    prismaMock.roleAssignment.findMany.mockResolvedValue([
+      { roleId: "role-active", role: { circleId: "circle-child" } },
+    ]);
+    prismaMock.circle.findMany.mockResolvedValue([
+      { id: "circle-root", parentCircleId: null },
+      { id: "circle-child", parentCircleId: "circle-root" },
+    ]);
+
+    const context = await gatherModuleAccessContext({
+      workspaceId: "workspace-1",
+      memberId: "member-1",
+      role: "CONTRIBUTOR",
+    });
+
+    expect(prismaMock.roleAssignment.findMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({
+        memberId: "member-1",
+        OR: [
+          { expiresAt: null },
+          { expiresAt: { gt: expect.any(Date) } },
+        ],
+      }),
+    }));
+    expect(context.governanceRoleIds).toEqual(["role-active"]);
+    expect(new Set(context.circleIds)).toEqual(new Set(["circle-child", "circle-root"]));
   });
 });

@@ -3,6 +3,7 @@ import { prisma } from "@corgtex/shared";
 import type { AppActor } from "@corgtex/shared";
 import { requireWorkspaceMembership } from "./auth";
 import { invariant } from "./errors";
+import { activeRoleAssignmentWhere, isRoleAssignmentActive } from "./role-assignment-activity";
 
 const ACTIVE_ONBOARDING_STATUSES: RoleOnboardingStatus[] = ["PENDING", "ACTIVE"];
 const ONBOARDING_START_MESSAGE = "Start my role onboarding.";
@@ -383,6 +384,7 @@ async function loadRoleOnboardingContext(params: {
             },
           },
           assignments: {
+            where: activeRoleAssignmentWhere(),
             include: {
               member: {
                 include: {
@@ -522,9 +524,11 @@ export async function buildRoleOnboardingContextForConversation(params: {
 
   const role = context.session.role;
   const member = context.session.member;
-  const humanHolders = role.assignments.map((assignment) => (
-    assignment.member.user.displayName ?? assignment.member.user.email
-  ));
+  const humanHolders = role.assignments
+    .filter((assignment) => isRoleAssignmentActive(assignment))
+    .map((assignment) => (
+      assignment.member.user.displayName ?? assignment.member.user.email
+    ));
   const agentHolders = role.agentAssignments.map((assignment) => (
     `${assignment.agentIdentity.displayName} (${assignment.agentIdentity.memberType})`
   ));

@@ -55,6 +55,19 @@ describe("checkArtifactPermission", () => {
     });
 
     expect(result.allowed).toBe(true);
+    expect(prisma.role.findMany).toHaveBeenCalledWith(expect.objectContaining({
+      include: {
+        assignments: expect.objectContaining({
+          where: {
+            OR: [
+              { expiresAt: null },
+              { expiresAt: { gt: expect.any(Date) } },
+            ],
+          },
+          select: { memberId: true },
+        }),
+      },
+    }));
   });
 
   it("blocks action when artifact is owned by a different role", async () => {
@@ -87,5 +100,37 @@ describe("checkArtifactPermission", () => {
     expect(result.allowed).toBe(false);
     expect(result.gatekeeperRoleId).toBe("role-1");
     expect(result.gatekeeperMemberIds).toEqual(["member-2"]);
+  });
+
+  it("does not treat expired assignments as gatekeepers", async () => {
+    vi.mocked(prisma.role.findMany).mockResolvedValueOnce([
+      {
+        id: "role-1",
+        circleId: "circle-1",
+        name: "Webmaster",
+        purposeMd: null,
+        accountabilities: [],
+        artifacts: ["website_admin"],
+        metricsMd: null,
+        isCoreRole: false,
+        coreRoleType: null,
+        sortOrder: 0,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+        assignments: [],
+      } as any,
+    ]);
+
+    const result = await checkArtifactPermission({
+      workspaceId,
+      artifactName,
+      actorMemberId: "member-1",
+    });
+
+    expect(result).toEqual({
+      allowed: false,
+      gatekeeperRoleId: "role-1",
+      gatekeeperMemberIds: [],
+    });
   });
 });
