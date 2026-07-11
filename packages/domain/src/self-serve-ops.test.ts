@@ -664,7 +664,12 @@ describe("self-serve ops domain", () => {
     });
     prismaMock.user.create.mockResolvedValue({ id: "support-user", email: "support+workspace@corgtex.local", displayName: "Corgtex Support" });
     prismaMock.member.create.mockResolvedValue({ id: "support-member", role: "FACILITATOR" });
-    prismaMock.roleAssignment.findMany.mockResolvedValue([{ roleId: "role-1" }]);
+    const expiresAt = new Date("2099-01-31T23:59:59.999Z");
+    prismaMock.roleAssignment.findMany.mockResolvedValue([{
+      roleId: "role-1",
+      expiresAt,
+      transferReason: "Temporary support coverage",
+    }]);
     prismaMock.roleAssignment.createMany.mockResolvedValue({ count: 1 });
     prismaMock.supportOperation.create.mockResolvedValue({ id: "operation-1" });
     prismaMock.selfServeSupportSession.create.mockResolvedValue({ id: "support-session-1" });
@@ -685,8 +690,23 @@ describe("self-serve ops domain", () => {
     expect(prismaMock.member.create).toHaveBeenCalledWith(expect.objectContaining({
       data: expect.objectContaining({ role: "FACILITATOR", isActive: true }),
     }));
+    expect(prismaMock.roleAssignment.findMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({
+        memberId: "member-target",
+        OR: [
+          { expiresAt: null },
+          { expiresAt: { gt: expect.any(Date) } },
+        ],
+      }),
+      select: { roleId: true, expiresAt: true, transferReason: true },
+    }));
     expect(prismaMock.roleAssignment.createMany).toHaveBeenCalledWith({
-      data: [{ memberId: "support-member", roleId: "role-1" }],
+      data: [{
+        memberId: "support-member",
+        roleId: "role-1",
+        expiresAt,
+        transferReason: "Temporary support coverage",
+      }],
       skipDuplicates: true,
     });
     expect(prismaMock.supportOperation.create).toHaveBeenCalledWith(expect.objectContaining({

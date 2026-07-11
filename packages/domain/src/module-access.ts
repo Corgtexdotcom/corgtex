@@ -28,6 +28,7 @@ import type {
 } from "./modules";
 import { requireWorkspaceMembership } from "./auth";
 import { invariant } from "./errors";
+import { activeRoleAssignmentWhere } from "./role-assignment-activity";
 
 export function toAccessLevel(level: PrismaModuleAccessLevel): ModuleAccessLevel {
   switch (level) {
@@ -106,7 +107,10 @@ export async function gatherModuleAccessContext(params: {
     }),
     memberId
       ? prisma.roleAssignment.findMany({
-          where: { memberId },
+          where: {
+            memberId,
+            ...activeRoleAssignmentWhere(),
+          },
           select: { roleId: true, role: { select: { circleId: true } } },
         })
       : Promise.resolve([]),
