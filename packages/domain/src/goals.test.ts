@@ -365,9 +365,9 @@ describe("Goals Domain", () => {
       vi.mocked(prisma.practiceProject.findMany).mockResolvedValueOnce([
         {
           id: "project-1",
-          code: "CRINA-Q3",
-          name: "CRINA Q3 enablement",
-          clientName: "CRINA",
+          code: "DEMO-Q3",
+          name: "Demo Q3 enablement",
+          clientName: "Demo Client",
           status: "ACTIVE",
           poValueCents: 1000000,
           serviceBudgetCents: 600000,
