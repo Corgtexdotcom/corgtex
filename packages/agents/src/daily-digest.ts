@@ -9,6 +9,7 @@ import {
   isHumanNewspaperRecipientIdentity,
   normalizeNewspaperCadence,
   recordNewspaperDelivery,
+  upsertNewspaperEdition,
 } from "@corgtex/domain";
 import { 
   batchIngestDailyConversations, 
@@ -1512,6 +1513,19 @@ Rules:
         bodyMd: digestBodyMd,
       });
     }
+
+    await upsertNewspaperEdition({
+      workspaceId: params.workspaceId,
+      workflowJobId: params.workflowJobId ?? null,
+      cadence,
+      dateKey: digestDateKey,
+      runKey,
+      title: digestTitle,
+      slug: digestSlug,
+      digestJson: digest,
+      bodyMd: digestBodyMd,
+      sourceCounts,
+    });
 
     // 5. Rebuild backlinks
     await rebuildBacklinks(agentActor, { workspaceId: params.workspaceId });

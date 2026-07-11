@@ -15,6 +15,7 @@ const {
   getWorkspaceNewspaperCadenceMock,
   instrumentNewspaperHtmlLinksMock,
   recordNewspaperDeliveryMock,
+  upsertNewspaperEditionMock,
 } = vi.hoisted(() => ({
   txMock: {
     demoLead: {
@@ -94,6 +95,7 @@ const {
   getWorkspaceNewspaperCadenceMock: vi.fn(),
   instrumentNewspaperHtmlLinksMock: vi.fn(),
   recordNewspaperDeliveryMock: vi.fn(),
+  upsertNewspaperEditionMock: vi.fn(),
 }));
 
 vi.mock("@corgtex/shared", () => ({
@@ -154,6 +156,7 @@ vi.mock("@corgtex/domain", () => ({
   },
   instrumentNewspaperHtmlLinks: instrumentNewspaperHtmlLinksMock,
   recordNewspaperDelivery: recordNewspaperDeliveryMock,
+  upsertNewspaperEdition: upsertNewspaperEditionMock,
   batchIngestDailyConversations: batchIngestDailyConversationsMock,
   createArticle: createArticleMock,
   listSlackMessagesForDigest: listSlackMessagesForDigestMock,
@@ -242,6 +245,7 @@ describe("runDailyDigest", () => {
     sendEmailMock.mockResolvedValue({ status: "SENT", providerMessageId: "email-1" });
     instrumentNewspaperHtmlLinksMock.mockImplementation(async ({ html }: { html: string }) => html);
     recordNewspaperDeliveryMock.mockResolvedValue({ id: "delivery-1" });
+    upsertNewspaperEditionMock.mockResolvedValue({ id: "edition-1" });
     txMock.demoLead.update.mockResolvedValue({ id: "lead-1" });
     txMock.crmActivity.create.mockResolvedValue({ id: "activity-1" });
     txMock.newspaperDelivery.create.mockResolvedValue({ id: "delivery-1" });
@@ -306,6 +310,23 @@ describe("runDailyDigest", () => {
       type: "DIGEST",
       bodyMd: expect.stringContaining("## Built / Shipped Work"),
       title: "Weekly Newspaper - 2026-04-30",
+    }));
+    expect(upsertNewspaperEditionMock).toHaveBeenCalledWith(expect.objectContaining({
+      workspaceId: "workspace-1",
+      cadence: "WEEKLY",
+      dateKey: "2026-04-30",
+      runKey: "workspace-1:weekly-newspaper:2026-04-30",
+      title: "Weekly Newspaper - 2026-04-30",
+      slug: "weekly-newspaper-2026-04-30",
+      digestJson: expect.objectContaining({
+        sections: expect.arrayContaining([
+          expect.objectContaining({ id: "builtWork" }),
+        ]),
+      }),
+      bodyMd: expect.stringContaining("## Built / Shipped Work"),
+      sourceCounts: expect.objectContaining({
+        buildArtifacts: 2,
+      }),
     }));
     expect(sendEmailMock).toHaveBeenCalledWith(expect.objectContaining({
       to: "member@example.com",
@@ -777,6 +798,7 @@ describe("runDailyDigest", () => {
       status: "SKIPPED",
       error: "No digest inputs.",
     }));
+    expect(upsertNewspaperEditionMock).not.toHaveBeenCalled();
   });
 
   it("records skipped deliveries instead of sending empty structured newspapers", async () => {
@@ -802,6 +824,7 @@ describe("runDailyDigest", () => {
     }));
     expect(sendEmailMock).not.toHaveBeenCalled();
     expect(createArticleMock).not.toHaveBeenCalled();
+    expect(upsertNewspaperEditionMock).not.toHaveBeenCalled();
     expect(recordNewspaperDeliveryMock).toHaveBeenCalledWith(expect.objectContaining({
       memberId: "member-1",
       status: "SKIPPED",
