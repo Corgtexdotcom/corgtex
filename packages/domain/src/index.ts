@@ -102,6 +102,7 @@ export * from "./meeting-transcript-chunks";
 export * from "./meeting-transcript-processing";
 export * from "./meeting-transcript-intake";
 export * from "./meeting-transcript-sources";
+export * from "./meeting-audio-assets";
 export * from "./meeting-recorders";
 export * from "./admin";
 export * from "./railway-client";
