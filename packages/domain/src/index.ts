@@ -82,6 +82,7 @@ export * from "./execution-plumbing";
 export * from "./tool-links";
 export * from "./build-artifacts";
 export * from "./newspaper-delivery";
+export * from "./newspaper-edition-rendering";
 export * from "./newspaper-layout";
 
 export * from "./check-ins";
