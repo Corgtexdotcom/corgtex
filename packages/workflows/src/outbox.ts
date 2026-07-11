@@ -37,9 +37,11 @@ import {
   resolveAdviceRequestRequesterUsers,
   runAdviceRequestReminderJob,
   markMeetingTranscriptProcessingReady,
+  MEETING_AUDIO_TRANSCRIPTION_JOB_TYPE,
   meetingIdFromWorkflowJobPayload,
   meetingTranscriptProcessingStageForJobType,
   recordMeetingTranscriptProcessingStage,
+  runMeetingAudioAssetTranscription,
   type ControlPlaneReleaseTarget,
   type SlackAgentJobPayload,
 } from "@corgtex/domain";
@@ -944,6 +946,18 @@ async function handleJob(job: ClaimedJob) {
     const capturePayload = payload as { sourceType?: string; sourceId?: string };
     if (capturePayload.sourceType && capturePayload.sourceId) {
       await captureReferencesForSource(capturePayload.sourceType, capturePayload.sourceId);
+    }
+    return;
+  }
+
+  if (job.type === MEETING_AUDIO_TRANSCRIPTION_JOB_TYPE) {
+    const audioAssetId = (payload as { audioAssetId?: string }).audioAssetId;
+    if (audioAssetId) {
+      await runMeetingAudioAssetTranscription({
+        workspaceId: job.workspaceId,
+        audioAssetId,
+        workflowJobId: job.id,
+      });
     }
     return;
   }
