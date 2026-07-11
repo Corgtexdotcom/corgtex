@@ -1,3 +1,4 @@
+import { isHumanMemberIdentity } from "@corgtex/domain";
 import type { WorkItemSortable } from "@/lib/work-item-view";
 
 export const ROLE_STAFFING_COLUMN_IDS = ["open", "staffed", "shared"] as const;
@@ -8,6 +9,8 @@ type DateLike = Date | string | number;
 
 export type RoleStaffingAssignment = {
   member?: {
+    kind?: "HUMAN" | "SYSTEM" | null;
+    isActive?: boolean | null;
     user?: {
       email?: string | null;
       displayName?: string | null;
@@ -62,15 +65,24 @@ export function roleAssignmentDisplayName(assignment: RoleStaffingAssignment) {
   return user?.displayName?.trim() || user?.email?.trim() || null;
 }
 
+export function activeHumanRoleAssignments(assignments: readonly RoleStaffingAssignment[]) {
+  return assignments.filter((assignment) => {
+    const member = assignment.member;
+    if (!member || member.isActive === false) return false;
+    return isHumanMemberIdentity(member);
+  });
+}
+
 export function flattenRoleStaffingCards(circles: readonly RoleStaffingCircle[]) {
   const cards: RoleStaffingCard[] = [];
 
   function walk(circle: RoleStaffingCircle) {
     for (const role of circle.roles ?? []) {
-      const holderNames = (role.assignments ?? [])
+      const activeHumanAssignments = activeHumanRoleAssignments(role.assignments ?? []);
+      const holderNames = activeHumanAssignments
         .map(roleAssignmentDisplayName)
         .filter((name): name is string => Boolean(name));
-      const holderCount = role.assignments?.length ?? 0;
+      const holderCount = activeHumanAssignments.length;
       cards.push({
         id: role.id,
         status: roleStaffingStatus(holderCount),

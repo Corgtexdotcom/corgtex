@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  activeHumanRoleAssignments,
   flattenRoleStaffingCards,
   roleAssignmentDisplayName,
   roleStaffingSort,
@@ -77,6 +78,37 @@ describe("role staffing helpers", () => {
     expect(roleAssignmentDisplayName({
       member: { user: { email: "grace@example.com", displayName: " " } },
     })).toBe("grace@example.com");
+  });
+
+  it("counts only active human assignments as staffing holders", () => {
+    const assignments = [
+      { member: { kind: "HUMAN" as const, isActive: true, user: { email: "ada@example.com", displayName: "Ada" } } },
+      { member: { kind: "HUMAN" as const, isActive: false, user: { email: "inactive@example.com", displayName: "Inactive" } } },
+      { member: { kind: "SYSTEM" as const, isActive: true, user: { email: "system+bot@corgtex.local", displayName: "System" } } },
+      { member: { isActive: true, user: { email: "support@example.com", displayName: "Corgtex Support" } } },
+    ];
+
+    expect(activeHumanRoleAssignments(assignments)).toHaveLength(1);
+
+    const [card] = flattenRoleStaffingCards([
+      {
+        id: "circle-1",
+        name: "Product",
+        roles: [
+          {
+            id: "role-staffed",
+            name: "Staffed",
+            assignments,
+          },
+        ],
+      },
+    ]);
+
+    expect(card).toMatchObject({
+      status: "staffed",
+      holderCount: 1,
+      holderNames: ["Ada"],
+    });
   });
 
   it("sorts open roles ahead of staffed roles by default priority", () => {
