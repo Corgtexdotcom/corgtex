@@ -36,6 +36,7 @@ import {
 } from "@/lib/meeting-timezone";
 import { KnowledgeFileUploader } from "../KnowledgeFileUploader";
 import { ManualMeetingRecordingForm } from "./ManualMeetingRecordingForm";
+import { MeetingAudioUploadForm } from "./MeetingAudioUploadForm";
 import {
   crmAccountIdFromPath,
   getWorkspaceAddActions,
@@ -253,6 +254,8 @@ export default async function WorkspaceAddPage({
   const currentUserId = actor.kind === "user" ? actor.user.id : "";
   const title = kind === "meeting_manual_recording"
     ? "Record meeting now"
+    : kind === "meeting_audio_upload"
+      ? "Upload meeting audio"
     : `Add ${WORKSPACE_ADD_ACTION_DEFINITIONS[kind].label}`;
   const uploadDefaultSource = workspaceSubpath(returnUrl.pathname, workspaceId)?.startsWith("/settings")
     ? "settings-upload"
@@ -585,6 +588,10 @@ export default async function WorkspaceAddPage({
 
         {kind === "meeting_manual_recording" && (
           <ManualMeetingRecordingForm workspaceId={workspaceId} cancelHref={returnTo} />
+        )}
+
+        {kind === "meeting_audio_upload" && (
+          <MeetingAudioUploadForm workspaceId={workspaceId} cancelHref={returnTo} />
         )}
 
         {kind === "action" && (

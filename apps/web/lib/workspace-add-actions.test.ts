@@ -45,6 +45,7 @@ describe("workspace add actions", () => {
       "meeting_schedule",
       "meeting_invite",
       "meeting_transcript",
+      "meeting_audio_upload",
     ]);
   });
 
@@ -53,6 +54,7 @@ describe("workspace add actions", () => {
       "meeting_schedule",
       "meeting_invite",
       "meeting_transcript",
+      "meeting_audio_upload",
       "meeting_manual_recording",
     ];
     expect(kinds({ pathname: "/workspaces/ws-1/meetings", meetingRecorderEnabled: true })).toEqual(recorderActions);
@@ -61,6 +63,7 @@ describe("workspace add actions", () => {
       "meeting_schedule",
       "meeting_invite",
       "meeting_transcript",
+      "meeting_audio_upload",
     ]);
   });
 
@@ -161,6 +164,7 @@ describe("workspace add actions", () => {
       "tension",
       "action",
       "meeting_transcript",
+      "meeting_audio_upload",
       "upload_file",
       "paste_text",
     ]);
