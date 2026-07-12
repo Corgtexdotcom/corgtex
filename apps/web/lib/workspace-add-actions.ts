@@ -15,6 +15,10 @@ export const WORKSPACE_ADD_ACTION_DEFINITIONS = {
     label: "Upload transcript",
     description: "Ingest a completed meeting transcript.",
   },
+  meeting_audio_upload: {
+    label: "Upload audio",
+    description: "Upload an in-person meeting recording for transcription.",
+  },
   meeting_manual_recording: {
     label: "Record now",
     description: "Paste a live meeting link and send the Corgtex recorder now.",
@@ -231,6 +235,7 @@ const MOBILE_CAPTURE_SPECS: Array<{
   { kind: "tension", subpath: "/tensions" },
   { kind: "action", subpath: "/actions" },
   { kind: "meeting_transcript", subpath: "/meetings" },
+  { kind: "meeting_audio_upload", subpath: "/meetings" },
   { kind: "meeting_manual_recording", subpath: "/meetings" },
   { kind: "upload_file", subpath: "/brain" },
   { kind: "paste_text", subpath: "/settings?tab=data-sources" },
@@ -250,6 +255,7 @@ export function getWorkspaceAddActions(context: WorkspaceAddActionContext): Work
         action("meeting_schedule"),
         action("meeting_invite"),
         action("meeting_transcript"),
+        action("meeting_audio_upload"),
         ...(canRecordMeetingsManually(context) ? [action("meeting_manual_recording")] : []),
       ];
     case "actions":
