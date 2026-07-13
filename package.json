@@ -99,8 +99,6 @@
     "jszip": "^3.10.1",
     "next": "15.5.18",
     "playwright": "^1.60.0",
-    "react": "19.2.4",
-    "react-dom": "19.2.4",
     "zod": "^4.4.3"
   },
   "devDependencies": {

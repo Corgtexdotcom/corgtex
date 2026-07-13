@@ -36,6 +36,10 @@
         "docs/assets/**",
         "docs/pr-assets/**",
         "test-results/**"
+      ],
+      "ignoreDependencies": [
+        // package.json test:e2e:agents invokes this through npx dotenv-cli.
+        "dotenv-cli"
       ]
     },
     "apps/site": {
