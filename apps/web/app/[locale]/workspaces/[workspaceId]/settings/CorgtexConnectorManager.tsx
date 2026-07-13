@@ -2,25 +2,9 @@
 
 import { useEffect, useState } from "react";
 import {
-  buildClaudeInstallerShareUrl,
-  buildClaudeCodeCommand,
-  buildCursorInstallLinks,
-  buildCursorMcpConfig,
   buildInstallerPath,
   buildInstallerShareUrl,
-  encodeBase64Utf8,
-  type CursorMcpConfig,
 } from "@/lib/install-helpers";
-
-// Re-export so the existing test in CorgtexConnectorManager.test.ts keeps working.
-export {
-  buildClaudeCodeCommand,
-  buildClaudeInstallerShareUrl,
-  buildCursorInstallLinks,
-  buildCursorMcpConfig,
-  encodeBase64Utf8,
-};
-export type { CursorMcpConfig };
 
 type Props = {
   connectorUrl: string;

@@ -18,7 +18,7 @@ export type AiWorkspaceProviderView = {
   setupVariants: AiWorkspaceSetupVariantView[];
 };
 
-export type AiWorkspaceSetupVariantView = {
+type AiWorkspaceSetupVariantView = {
   variantKey: string;
   label: string;
   audience: string;
@@ -50,7 +50,7 @@ export type EnterpriseServiceView = {
   readinessChecks?: EnterpriseServiceReadinessCheckView[];
 };
 
-export type EnterpriseServiceReadinessCheckView = {
+type EnterpriseServiceReadinessCheckView = {
   key: string;
   label: string;
   ok: boolean;
@@ -59,7 +59,7 @@ export type EnterpriseServiceReadinessCheckView = {
 
 export type AiWorkspaceProviderGroup = "default" | "byo" | "advanced";
 
-export type AiWorkspaceActionVariant = "primary" | "secondary";
+type AiWorkspaceActionVariant = "primary" | "secondary";
 
 export type AiWorkspaceSetupAction =
   | {
@@ -92,7 +92,7 @@ export type AiWorkspaceSetupAction =
       variant?: AiWorkspaceActionVariant;
     };
 
-export type AiWorkspaceAdvancedSection = {
+type AiWorkspaceAdvancedSection = {
   title: string;
   description: string;
   actions: AiWorkspaceSetupAction[];
@@ -190,7 +190,7 @@ export function groupAiWorkspaceProviders(providers: AiWorkspaceProviderView[]) 
   return groups;
 }
 
-export function providerComparator(a: AiWorkspaceProviderView, b: AiWorkspaceProviderView) {
+function providerComparator(a: AiWorkspaceProviderView, b: AiWorkspaceProviderView) {
   return GROUP_RANK[providerGroup(a)] - GROUP_RANK[providerGroup(b)]
     || Number(b.recommendedDefault) - Number(a.recommendedDefault)
     || (PROVIDER_RANK[a.key] ?? 100) - (PROVIDER_RANK[b.key] ?? 100)
@@ -251,7 +251,7 @@ export function normalizeSelectedService(
   return null;
 }
 
-export function isPrimaryAiWorkspaceProvider(provider: AiWorkspaceProviderView) {
+function isPrimaryAiWorkspaceProvider(provider: AiWorkspaceProviderView) {
   return PRIMARY_PROVIDER_KEYS.includes(provider.key);
 }
 
