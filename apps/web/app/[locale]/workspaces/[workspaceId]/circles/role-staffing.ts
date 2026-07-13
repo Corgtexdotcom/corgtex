@@ -20,7 +20,7 @@ export type RoleStaffingAssignment = {
   } | null;
 };
 
-export type RoleStaffingRole = {
+type RoleStaffingRole = {
   id: string;
   name: string;
   purposeMd?: string | null;
