@@ -48,8 +48,6 @@ import { splitRelationshipReminders } from "./relationship-reminders";
 import {
   CRM_DEAL_STAGES,
   CRM_CREATABLE_DEAL_STAGES,
-  CRM_LIFECYCLE_OPTIONS,
-  CRM_RELATIONSHIP_OPTIONS,
   accountHref,
   activePipelineValueCents,
   labelFromCrmCode,

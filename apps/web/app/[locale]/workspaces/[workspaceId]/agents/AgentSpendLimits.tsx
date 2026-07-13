@@ -1,11 +1,9 @@
 "use client";
 
-import { useTransition } from "react";
 import { updateAgentSpendLimitAction } from "./actions";
 import { useTranslations } from "next-intl";
 
 export function AgentSpendLimits({ workspaceId, agents }: { workspaceId: string, agents: any[] }) {
-  const [isPending, startTransition] = useTransition();
   const t = useTranslations("agents");
 
   return (
