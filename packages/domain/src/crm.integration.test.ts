@@ -1,4 +1,4 @@
-import { describe, expect, it, beforeAll, afterAll } from "vitest";
+import { describe, expect, it, beforeAll } from "vitest";
 import { prisma } from "@corgtex/shared";
 import {
   captureDemoLead,
