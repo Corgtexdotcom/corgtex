@@ -8,6 +8,11 @@
     // scripts/set-railway-release-metadata.mjs shells out to the external Railway CLI.
     "railway"
   ],
+  "ignoreIssues": {
+    // kept-intentionally: KNOWN_SCOPES is a deprecated public alias for ALL_SCOPES.
+    // Removing it would be an auth-facing package export removal, not cleanup.
+    "packages/domain/src/agent-auth.ts": ["duplicates"]
+  },
   "workspaces": {
     ".": {
       "entry": [
