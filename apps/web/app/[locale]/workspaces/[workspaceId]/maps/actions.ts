@@ -6,10 +6,7 @@ import {
   AppError,
   applyContextGraphProposedDiff,
   buildSelectedRegionContext,
-  createContextMapChangeProposal,
   createContextMapManualEditProposal,
-  createContextGraphProposedDiff,
-  createMissingRegionFactsProposal,
   createPersonalContextMapView,
   reviewContextGraphProposedDiff,
   updateContextMapLayout,
@@ -75,70 +72,6 @@ export async function buildSelectedRegionContextAction(params: {
     objectIds: params.objectIds,
     depth: 2,
   });
-}
-
-export async function createRegionProposalAction(params: {
-  workspaceId: string;
-  mapViewId: string;
-  objectIds: string[];
-}) {
-  const actor = await requirePageActor();
-  const context = await buildSelectedRegionContext(actor, {
-    workspaceId: params.workspaceId,
-    mapViewId: params.mapViewId,
-    objectIds: params.objectIds,
-    depth: 2,
-  });
-  const title = `Review context region: ${context.objects.slice(0, 3).map((object) => object.title).join(", ")}`;
-  const proposedDiff = await createContextGraphProposedDiff(actor, {
-    workspaceId: params.workspaceId,
-    reason: "User requested an agent-ready review of the selected map region.",
-    evidence: {
-      mapViewId: params.mapViewId,
-      selectedObjectIds: params.objectIds,
-      contextObjectCount: context.objects.length,
-      contextRelationshipCount: context.relationships.length,
-    },
-    diff: {
-      objects: [{
-        ref: "region-question",
-        objectType: "Question",
-        title: title.slice(0, 180),
-        summary: "Review this selected map region and propose any missing owners, blockers, stale facts, or next actions before changing company truth.",
-        status: "proposed",
-        sourceEntityType: "ContextMapView",
-        sourceEntityId: params.mapViewId,
-        properties: {
-          selectedObjectIds: params.objectIds,
-        },
-      }],
-    },
-  });
-  revalidatePath(`/workspaces/${params.workspaceId}/maps`);
-  return proposedDiff;
-}
-
-export async function createMissingRegionFactsProposalAction(params: {
-  workspaceId: string;
-  mapViewId: string;
-  objectIds: string[];
-}) {
-  const actor = await requirePageActor();
-  const proposedDiff = await createMissingRegionFactsProposal(actor, params);
-  revalidatePath(`/workspaces/${params.workspaceId}/maps`);
-  return proposedDiff;
-}
-
-export async function createContextMapChangeProposalAction(params: {
-  workspaceId: string;
-  mapViewId: string;
-  selectedObjectIds?: string[];
-  instruction: string;
-}) {
-  const actor = await requirePageActor();
-  const result = await createContextMapChangeProposal(actor, params);
-  revalidatePath(`/workspaces/${params.workspaceId}/maps`);
-  return result;
 }
 
 export async function createContextMapManualEditProposalAction(params: {
