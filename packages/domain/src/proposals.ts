@@ -752,7 +752,7 @@ export async function archiveProposal(actor: AppActor, params: {
   workspaceId: string;
   proposalId: string;
 }) {
-  const membership = await requireWorkspaceMembership({
+  await requireWorkspaceMembership({
     actor,
     workspaceId: params.workspaceId,
   });
@@ -914,7 +914,7 @@ export async function reopenProposal(actor: AppActor, params: {
   workspaceId: string;
   proposalId: string;
 }) {
-  const membership = await requireWorkspaceMembership({
+  await requireWorkspaceMembership({
     actor,
     workspaceId: params.workspaceId,
   });

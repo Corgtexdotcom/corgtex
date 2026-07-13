@@ -1,12 +1,8 @@
 import type {
-  AppCategory,
-  AppHostingMode,
   AppInstallationStatus,
-  AppIntegrationDepth,
   AppRuntimeMode,
   AppRuntimeStatus,
   AppSurface,
-  AppVisibility,
   Prisma,
 } from "@prisma/client";
 import { prisma, randomOpaqueToken, sha256, toInputJson } from "@corgtex/shared";
@@ -36,10 +32,6 @@ const APP_MCP_TOOL_SCOPE_REQUIREMENTS: Record<string, string[]> = {
 const RETIRED_ENTERPRISE_APP_KEYS = new Set(["practice-ledger"]);
 
 const APP_SURFACES: AppSurface[] = ["FINANCE"];
-const APP_CATEGORIES: AppCategory[] = ["FINANCE", "KNOWLEDGE", "COMMUNICATION", "AI", "OPERATIONS", "GOVERNANCE", "DATA", "OTHER"];
-const APP_VISIBILITIES: AppVisibility[] = ["PUBLIC_MARKETPLACE", "UNLISTED", "WORKSPACE_PRIVATE", "CORGTEX_MANAGED"];
-const HOSTING_MODES: AppHostingMode[] = ["EXTERNAL_URL", "CORGTEX_MANAGED_EXTERNAL", "CORGTEX_HOSTED_STATIC", "CORGTEX_HOSTED_CONTAINER", "MCP_SERVER"];
-const INTEGRATION_DEPTHS: AppIntegrationDepth[] = ["CATALOG_ONLY", "LAUNCHABLE", "MCP_ACTIONABLE", "KNOWLEDGE_SYNCED", "WORKFLOW_NATIVE"];
 const INSTALLATION_STATUSES: AppInstallationStatus[] = ["REQUESTED", "APPROVED", "INSTALLED", "NEEDS_SETUP", "UNHEALTHY", "DISABLED"];
 const RUNTIME_MODES: AppRuntimeMode[] = ["SHARED_MULTI_TENANT", "ISOLATED_SINGLE_TENANT", "SELF_MANAGED_EXTERNAL"];
 const RUNTIME_STATUSES: AppRuntimeStatus[] = ["PROVISIONING", "ACTIVE", "UNHEALTHY", "DISABLED"];

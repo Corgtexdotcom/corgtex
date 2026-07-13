@@ -1213,6 +1213,7 @@ describe("submitProposal event payload", () => {
 
   it("reopens a resolved proposal and clears stale approval and policy state", async () => {
     const { appendEvents } = await import("./events");
+    const { requireWorkspaceMembership } = await import("./auth");
     const { reopenProposal } = await import("./proposals");
 
     vi.mocked((prisma.proposal as any).findUnique).mockResolvedValue({
@@ -1252,6 +1253,7 @@ describe("submitProposal event payload", () => {
       status: "OPEN",
     });
 
+    expect(requireWorkspaceMembership).toHaveBeenCalledWith({ actor, workspaceId: "ws-1" });
     expect((prisma as any).approvalFlow.update).toHaveBeenCalledWith(expect.objectContaining({
       where: { id: "flow-1" },
       data: expect.objectContaining({

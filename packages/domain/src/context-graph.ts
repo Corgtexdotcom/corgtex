@@ -4,9 +4,9 @@ import { prisma } from "@corgtex/shared";
 import type { AppActor } from "@corgtex/shared";
 import { appendEvents } from "./events";
 import { requireAgentScope } from "./agent-auth";
-import { actorUserIdForWorkspace, requireWorkspaceMembership } from "./auth";
+import { requireWorkspaceMembership } from "./auth";
 import { recordAudit } from "./audit-trail";
-import { AppError, invariant } from "./errors";
+import { invariant } from "./errors";
 
 export const CONTEXT_GRAPH_OBJECT_TYPES = [
   "Person",
