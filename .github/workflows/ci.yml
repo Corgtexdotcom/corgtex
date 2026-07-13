@@ -365,7 +365,7 @@ jobs:
           while IFS= read -r path; do
             [ -z "$path" ] && continue
             case "$path" in
-              AGENTS.md|README.md|docs/*|.github/*|.agents/*|.codex/*)
+              AGENTS.md|README.md|docs/*|.github/*|.agents/*|.codex/*|apps/site/*)
                 ;;
               *)
                 requires_app_release=true
@@ -378,7 +378,7 @@ jobs:
             echo "Production app-affecting changes detected; release match required."
           else
             echo "skip_release_match=true" >> "$GITHUB_OUTPUT"
-            echo "Only docs, workflow, or agent-guidance files changed; release match skipped while live smoke still runs."
+            echo "Only docs, workflow, agent-guidance, or site-only files changed; release match skipped while live smoke still runs."
           fi
       - run: node scripts/check-migration-health.mjs
         if: github.ref == 'refs/heads/main' && steps.check-secrets.outputs.skip != 'true'

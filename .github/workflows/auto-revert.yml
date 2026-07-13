@@ -108,17 +108,56 @@ jobs:
             echo "configured=true" >> "$GITHUB_OUTPUT"
           fi
 
+      - name: Detect production app release requirement
+        if: steps.guard.outputs.trigger == 'true'
+        id: app-release
+        env:
+          SHA: ${{ steps.merge.outputs.sha }}
+        run: |
+          set -euo pipefail
+          before="$(git rev-parse "${SHA}^1" 2>/dev/null || true)"
+
+          if [ -z "$before" ]; then
+            echo "requires_app_release=true" >> "$GITHUB_OUTPUT"
+            echo "Previous main commit is unknown; production app release match remains required."
+            exit 0
+          fi
+
+          changed_files="$(git diff --name-only "$before" "$SHA")"
+          echo "Changed files:"
+          printf '%s\n' "$changed_files"
+
+          requires_app_release=false
+          while IFS= read -r path; do
+            [ -z "$path" ] && continue
+            case "$path" in
+              AGENTS.md|README.md|docs/*|.github/*|.agents/*|.codex/*|apps/site/*)
+                ;;
+              *)
+                requires_app_release=true
+                ;;
+            esac
+          done <<< "$changed_files"
+
+          echo "requires_app_release=$requires_app_release" >> "$GITHUB_OUTPUT"
+          if [ "$requires_app_release" = "true" ]; then
+            echo "Production app-affecting changes detected; recovery requires release match."
+          else
+            echo "Only docs, workflow, agent-guidance, or site-only files changed; recovery accepts healthy app smoke without release match."
+          fi
+
       - name: Check current production health before reverting
         if: steps.guard.outputs.trigger == 'true'
         id: recovery
         env:
           APP_HEALTH_URL: https://app.corgtex.com/api/health
           SHA: ${{ steps.merge.outputs.sha }}
+          REQUIRES_APP_RELEASE: ${{ steps.app-release.outputs.requires_app_release }}
         run: |
           set -euo pipefail
           attempts="${AUTO_REVERT_RECOVERY_HEALTH_ATTEMPTS:-12}"
           interval="${AUTO_REVERT_RECOVERY_HEALTH_INTERVAL_SECONDS:-10}"
-          healthy_on_sha="false"
+          healthy_recovery="false"
           last_status="no response"
           last_body=""
 
@@ -133,11 +172,12 @@ jobs:
             if [ "$status" = "200" ] && node -e '
               const body = process.argv[1];
               const sha = process.argv[2];
+              const requiresAppRelease = process.argv[3] !== "false";
               try {
                 const json = JSON.parse(body);
                 const releaseGitSha = json?.release?.gitSha ?? "";
                 const releaseImageTag = json?.release?.imageTag ?? "";
-                const releaseMatches = releaseGitSha === sha || releaseImageTag === sha;
+                const releaseMatches = !requiresAppRelease || releaseGitSha === sha || releaseImageTag === sha;
                 const healthOk = json?.status === "ok" && json?.service === "web" &&
                   json?.database === "up" && json?.schema === "ready" &&
                   json?.app === "corgtex" && json?.auth === "password-session";
@@ -145,19 +185,19 @@ jobs:
               } catch {
                 process.exit(1);
               }
-            ' "$body" "$SHA"; then
-              healthy_on_sha="true"
-              echo "Production health is green on failed SHA $SHA at attempt $i."
+            ' "$body" "$SHA" "$REQUIRES_APP_RELEASE"; then
+              healthy_recovery="true"
+              echo "Production health satisfies recovery criteria for failed SHA $SHA at attempt $i."
               break
             fi
 
-            echo "Health attempt $i/$attempts did not confirm $SHA. status=$status"
+            echo "Health attempt $i/$attempts did not satisfy recovery criteria for $SHA. status=$status"
             if [ "$i" -lt "$attempts" ]; then
               sleep "$interval"
             fi
           done
 
-          echo "healthy=$healthy_on_sha" >> "$GITHUB_OUTPUT"
+          echo "healthy=$healthy_recovery" >> "$GITHUB_OUTPUT"
           echo "status=$last_status" >> "$GITHUB_OUTPUT"
           {
             echo "## Auto-revert recovery probe"
@@ -165,10 +205,11 @@ jobs:
             echo "- Failed run: ${{ github.event.workflow_run.html_url }}"
             echo "- Health URL: $APP_HEALTH_URL"
             echo "- Expected SHA: \`$SHA\`"
-            echo "- Current health on expected SHA: \`$healthy_on_sha\`"
+            echo "- App release match required: \`$REQUIRES_APP_RELEASE\`"
+            echo "- Current health satisfies recovery criteria: \`$healthy_recovery\`"
             echo "- Last HTTP status: \`$last_status\`"
             echo ""
-            if [ "$healthy_on_sha" = "true" ]; then
+            if [ "$healthy_recovery" = "true" ]; then
               echo "Production recovered before auto-revert. Do not open an automatic revert PR from this run."
               echo "Rerun the trusted GitHub production smoke, then use the fix-forward window for up to one hour before rollback."
             else
@@ -183,7 +224,7 @@ jobs:
       - name: Skip revert for recovered production
         if: steps.guard.outputs.trigger == 'true' && steps.recovery.outputs.healthy == 'true'
         run: |
-          echo "Production is healthy on the failed SHA. Skipping automatic revert so the trusted smoke can be rerun."
+          echo "Production satisfies the recovery criteria. Skipping automatic revert so the trusted smoke can be rerun."
 
       - name: Verify auto-revert token is configured
         if: steps.guard.outputs.trigger == 'true' && steps.recovery.outputs.healthy != 'true'
