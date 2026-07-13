@@ -16,7 +16,6 @@ import {
   revokeEnterpriseAppInstallationSessions,
   revokeControlPlaneAgentCredential,
   resendControlPlaneCustomerMemberAccessLink,
-  runControlPlaneContextOperation,
   runControlPlaneMeetingRecorderOperation,
   runControlPlaneReleaseOperation,
   runCustomerSupportOperation,
@@ -264,18 +263,6 @@ export async function disconnectControlPlaneSlackInstallationAction(formData: Fo
   await disconnectControlPlaneSlackInstallation(actor, {
     deploymentId,
     installationId: asString(formData, "installationId"),
-    reason: asString(formData, "reason"),
-  });
-  revalidateControlPlaneDeployment(deploymentId);
-}
-
-export async function runContextOperationAction(formData: FormData) {
-  const actor = await requirePageActor();
-  const deploymentId = asString(formData, "deploymentId");
-  await runControlPlaneContextOperation(actor, {
-    deploymentId,
-    operation: asString(formData, "operation"),
-    sourceId: optionalString(formData, "sourceId"),
     reason: asString(formData, "reason"),
   });
   revalidateControlPlaneDeployment(deploymentId);

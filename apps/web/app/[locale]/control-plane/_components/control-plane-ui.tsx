@@ -5,7 +5,7 @@ export function controlPlaneLabel(value?: string | null) {
   return value ? value.replace(/_/g, " ") : "unknown";
 }
 
-export function controlPlaneTone(status?: string | null) {
+function controlPlaneTone(status?: string | null) {
   const normalized = status?.toLowerCase();
   if (["ok", "active", "connected", "ready", "managed", "completed", "passed", "enabled", "aligned", "available"].includes(normalized ?? "")) {
     return "border-emerald-500/25 bg-emerald-500/10 text-emerald-400";
@@ -122,7 +122,7 @@ export function ControlPlaneStatusStrip({
   );
 }
 
-export function controlPlaneCacheAgeLabel(cachedAt: Date) {
+function controlPlaneCacheAgeLabel(cachedAt: Date) {
   const ageSeconds = Math.max(0, Math.round((Date.now() - cachedAt.getTime()) / 1000));
   if (ageSeconds < 5) return "just now";
   if (ageSeconds < 60) return `${ageSeconds}s ago`;

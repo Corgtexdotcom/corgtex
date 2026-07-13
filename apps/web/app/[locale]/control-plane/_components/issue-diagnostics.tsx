@@ -27,15 +27,6 @@ function observedLabel(value: string | null) {
   }).format(new Date(value));
 }
 
-export function serializeControlPlaneIssues(issues: Array<Omit<ControlPlaneIssueView, "observedAt"> & { observedAt?: Date | string | null }>): ControlPlaneIssueView[] {
-  return issues.map((issue) => ({
-    ...issue,
-    observedAt: issue.observedAt
-      ? (issue.observedAt instanceof Date ? issue.observedAt.toISOString() : issue.observedAt)
-      : null,
-  }));
-}
-
 export function ControlPlaneIssueDiagnostics({
   issues,
   className,
