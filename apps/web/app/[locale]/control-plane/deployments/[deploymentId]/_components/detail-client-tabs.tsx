@@ -2,7 +2,6 @@
 
 import { useEffect, useState, useTransition } from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
-import { useTranslations } from "next-intl";
 import { cn } from "@/lib/utils";
 import {
   DisabledActionHint,
@@ -27,7 +26,6 @@ import {
   updateControlPlaneModelBudgetAction,
   updateControlPlaneAgentPolicyAction,
   revokeControlPlaneAgentCredentialAction,
-  updateControlPlaneAgentCredentialScopesAction,
   deployLatestControlPlaneReleaseAction,
   runReleaseOperationAction,
   installEnterpriseAppFromControlPlaneAction,
@@ -165,7 +163,6 @@ export function CustomerDetailClientTabs({
   locale,
   initialTab,
 }: TabProps) {
-  const t = useTranslations("controlPlane");
   const router = useRouter();
   const pathname = usePathname() || "";
   const searchParams = useSearchParams();
