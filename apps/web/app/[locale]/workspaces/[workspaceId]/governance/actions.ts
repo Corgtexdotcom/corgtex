@@ -4,60 +4,12 @@ import { enforceDemoGuard } from "@/lib/demo-guard";
 import { requirePageActor } from "@/lib/auth";
 import { asString, asOptional, refresh } from "../action-utils";
 import {
-  createObjection,
-  recordApprovalDecision,
-  resolveObjection,
   replayEvent,
   replayWorkflowJob,
   triggerAgentRun,
   recalculateGovernanceScore,
   updateApprovalPolicy
 } from "@corgtex/domain";
-
-
-export async function decideApprovalAction(formData: FormData) {
-  const _demoGuardWsId = formData.get("workspaceId") as string;
-  if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
-
-  const actor = await requirePageActor();
-  const workspaceId = asString(formData, "workspaceId");
-  await recordApprovalDecision(actor, {
-    workspaceId,
-    flowId: asString(formData, "flowId"),
-    choice: asString(formData, "choice") as "APPROVE" | "REJECT" | "ABSTAIN" | "AGREE" | "BLOCK",
-    rationale: asOptional(formData, "rationale"),
-  });
-  refresh(workspaceId);
-}
-
-export async function createObjectionAction(formData: FormData) {
-  const _demoGuardWsId = formData.get("workspaceId") as string;
-  if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
-
-  const actor = await requirePageActor();
-  const workspaceId = asString(formData, "workspaceId");
-  await createObjection(actor, {
-    workspaceId,
-    flowId: asString(formData, "flowId"),
-    bodyMd: asString(formData, "bodyMd"),
-  });
-  refresh(workspaceId);
-}
-
-export async function resolveObjectionAction(formData: FormData) {
-  const _demoGuardWsId = formData.get("workspaceId") as string;
-  if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
-
-  const actor = await requirePageActor();
-  const workspaceId = asString(formData, "workspaceId");
-  await resolveObjection(actor, {
-    workspaceId,
-    flowId: asString(formData, "flowId"),
-    objectionId: asString(formData, "objectionId"),
-  });
-  refresh(workspaceId);
-}
-
 
 export async function replayEventAction(formData: FormData) {
   const _demoGuardWsId = formData.get("workspaceId") as string;
