@@ -1,5 +1,5 @@
 import { prisma } from "@corgtex/shared";
-import { syncKnowledgeForSource, syncBrainArticleKnowledge } from "@corgtex/knowledge";
+import { syncKnowledgeForSource } from "@corgtex/knowledge";
 import {
   fetchCalendarEvents,
   fetchFilteredEmailMessages,
