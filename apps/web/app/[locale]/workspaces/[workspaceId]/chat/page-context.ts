@@ -1,7 +1,7 @@
 export const OPEN_WORKSPACE_CHAT_EVENT = "corgtex:open-workspace-chat";
 export const SET_WORKSPACE_CHAT_PAGE_CONTEXT_EVENT = "corgtex:set-workspace-chat-page-context";
 
-export type WorkspaceChatContextMapPageContext = {
+type WorkspaceChatContextMapPageContext = {
   surface: "context-map";
   route: string;
   workspaceId: string;

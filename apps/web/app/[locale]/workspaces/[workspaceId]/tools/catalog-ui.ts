@@ -1,10 +1,10 @@
 export type CatalogItemType = "APP" | "AGENT" | "TOOL" | "AUTOMATION" | "CONNECTOR" | "DATA_SOURCE";
-export type CatalogAccessMode = "OPEN" | "REQUEST" | "ADMIN_ONLY" | "DISABLED";
+type CatalogAccessMode = "OPEN" | "REQUEST" | "ADMIN_ONLY" | "DISABLED";
 export type CatalogRequestType = "ACCESS" | "API_KEY" | "BUDGET_INCREASE" | "PUBLISH";
 export type AppCategory = "FINANCE" | "KNOWLEDGE" | "COMMUNICATION" | "AI" | "OPERATIONS" | "GOVERNANCE" | "DATA" | "OTHER";
 export type AppInstallationStatus = "REQUESTED" | "APPROVED" | "INSTALLED" | "NEEDS_SETUP" | "UNHEALTHY" | "DISABLED";
 export type AppIntegrationDepth = "CATALOG_ONLY" | "LAUNCHABLE" | "MCP_ACTIONABLE" | "KNOWLEDGE_SYNCED" | "WORKFLOW_NATIVE";
-export type CatalogConnectorAvailability = "LIVE" | "PILOT_READY" | "ON_REQUEST" | "MANUAL_ONLY" | "RESEARCH";
+type CatalogConnectorAvailability = "LIVE" | "PILOT_READY" | "ON_REQUEST" | "MANUAL_ONLY" | "RESEARCH";
 export type ToolsSurface = "LINKS" | "APPS" | "ALL";
 
 export type CatalogConnectorReadiness = {
