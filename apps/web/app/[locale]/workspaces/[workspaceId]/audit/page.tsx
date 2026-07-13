@@ -1,9 +1,5 @@
 import {
   listAuditLogs,
-  getModelUsageSummary,
-  listAgentRuns,
-  getAgentRunTrace,
-  getStorageUsageSummary,
   listArchivedWorkspaceArtifacts,
   listNewspaperDeliveryDetails,
   listNewspaperDeliverySummaries,
@@ -25,10 +21,6 @@ function formatDateTime(value: Date | string | null | undefined) {
     hour: "numeric",
     minute: "2-digit",
   });
-}
-
-function formatUsd(value: number) {
-  return `$${value.toFixed(value >= 0.01 ? 4 : 6)}`;
 }
 
 function actionLabel(action: string): string {
@@ -75,10 +67,6 @@ export default async function AuditPage({
     entityId: search.entityId,
   });
 
-  const usageSummary = await getModelUsageSummary(actor, workspaceId, { periodDays: 30 });
-  const storageSummary = await getStorageUsageSummary(actor, workspaceId);
-
-  const agentRuns = await listAgentRuns(actor, workspaceId, { take: 10 });
   const archivedArtifacts = await listArchivedWorkspaceArtifacts(actor, {
     workspaceId,
     entityType: search.archiveEntityType,
@@ -105,11 +93,6 @@ export default async function AuditPage({
     }
     return true;
   });
-
-  // If a specific agent run is selected, get its trace
-  const selectedRunTrace = search.agentRunId
-    ? await getAgentRunTrace(actor, workspaceId, search.agentRunId)
-    : null;
 
   return (
     <>
