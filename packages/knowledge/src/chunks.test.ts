@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { getWorkspaceIndexingHealth, reindexWorkspace, syncKnowledgeForSource, syncBrainArticleKnowledge } from "./chunks";
+import { getWorkspaceIndexingHealth, reindexWorkspace, syncKnowledgeForSource } from "./chunks";
 import { prisma } from "@corgtex/shared";
 import { defaultModelGateway } from "@corgtex/models";
 

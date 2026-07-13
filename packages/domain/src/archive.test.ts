@@ -66,16 +66,6 @@ const actor: AppActor = {
   },
 };
 
-const contributorActor: AppActor = {
-  kind: "user" as const,
-  user: {
-    id: "requester-1",
-    email: "requester@example.com",
-    displayName: "Requester",
-    globalRole: "USER",
-  },
-};
-
 describe("workspace archive domain", () => {
   beforeEach(() => {
     vi.clearAllMocks();
