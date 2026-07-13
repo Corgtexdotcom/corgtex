@@ -1,0 +1,83 @@
+{
+  "$schema": "./node_modules/knip/schema.json",
+  "workspaces": {
+    ".": {
+      "entry": [
+        "eslint.config.mjs",
+        "postcss.config.cjs",
+        "tailwind.config.ts",
+        "vitest.config.mts",
+        "vitest.globalSetup.ts",
+        "prisma/seed.mjs",
+        "scripts/**/*.{mjs,ts}",
+        ".github/workflows/*.yml",
+        "deploy/**/*",
+        "config/**/*.json"
+      ],
+      "project": [
+        "*.config.{js,mjs,cjs,ts,mts}",
+        "scripts/**/*.{mjs,ts}",
+        "prisma/**/*.{prisma,mjs,ts}",
+        ".github/workflows/*.yml",
+        "deploy/**/*",
+        "config/**/*.json"
+      ],
+      "ignore": [
+        ".artifacts/**",
+        ".agents/plans/**",
+        "docs/assets/**",
+        "docs/pr-assets/**",
+        "test-results/**"
+      ]
+    },
+    "apps/site": {
+      "entry": [
+        "next.config.mjs",
+        "middleware.ts",
+        "i18n/request.ts",
+        "app/**/{page,layout,route,loading,error,not-found,global-error,template,default}.{ts,tsx}",
+        "app/**/{sitemap,robots,opengraph-image}.{ts,tsx}",
+        "components/**/*.{ts,tsx}",
+        "lib/**/*.{ts,tsx}"
+      ],
+      "project": [
+        "**/*.{ts,tsx,mjs,cjs}"
+      ]
+    },
+    "apps/web": {
+      "entry": [
+        "next.config.ts",
+        "middleware.ts",
+        "instrumentation.ts",
+        "i18n/request.ts",
+        "app/**/{page,layout,route,loading,error,not-found,global-error,template,default}.{ts,tsx}",
+        "app/**/{sitemap,robots,opengraph-image}.{ts,tsx}",
+        "app/styles/**/*.{ts,tsx,css}",
+        "lib/**/*.{ts,tsx}"
+      ],
+      "project": [
+        "**/*.{ts,tsx,mts,mjs}"
+      ]
+    },
+    "apps/worker": {
+      "entry": [
+        "src/index.ts",
+        "src/**/*.test.ts"
+      ],
+      "project": [
+        "src/**/*.ts"
+      ]
+    },
+    "packages/*": {
+      "entry": [
+        "src/index.ts",
+        "src/**/*.test.ts",
+        "src/**/*.integration.test.ts"
+      ],
+      "project": [
+        "src/**/*.ts",
+        "src/**/*.tsx"
+      ]
+    }
+  }
+}
