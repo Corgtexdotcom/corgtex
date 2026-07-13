@@ -8999,9 +8999,10 @@ async function fetchCustomerSupportSnapshotCore(deploymentId: string) {
     callMcpTool({ ...connector, toolName: "list_data_sources", arguments: {} }),
     callMcpTool({ ...connector, toolName: "list_agent_runs", arguments: { take: 10 } }),
     callMcpTool({ ...connector, toolName: "list_failed_jobs", arguments: { take: 10 } }),
+    callMcpTool({ ...connector, toolName: "get_newspaper_diagnostics", arguments: { take: 10 } }),
   ]);
 
-  const [workspace, members, integrations, dataSources, agentRuns, failedJobs] = calls.map((result) => (
+  const [workspace, members, integrations, dataSources, agentRuns, failedJobs, newspaperDiagnostics] = calls.map((result) => (
     result.status === "fulfilled"
       ? summarizeMcpResponse(result.value)
       : { error: result.reason instanceof Error ? result.reason.message : "Request failed." }
@@ -9017,7 +9018,7 @@ async function fetchCustomerSupportSnapshotCore(deploymentId: string) {
     },
   });
 
-  const snapshot = { workspace, members, integrations, dataSources, agentRuns, failedJobs };
+  const snapshot = { workspace, members, integrations, dataSources, agentRuns, failedJobs, newspaperDiagnostics };
   await Promise.all([
     recordFleetHealthSnapshot({
       customerAccountId: connector.deployment.customerAccountId,

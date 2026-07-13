@@ -353,6 +353,7 @@ export function buildControlPlaneIncidents(customers, options = {}) {
     agentFailureStreakIncident(row, sweepNowMs),
     slackInvalidAuthIncident(row, sweepNowMs),
     releaseMetadataDriftIncident(row),
+    newspaperDeliveryAttentionIncident(row),
   ].filter(Boolean).map(normalizeIncident));
 }
 
@@ -703,6 +704,106 @@ function releaseMetadataDriftIncident(row) {
   };
 }
 
+function newspaperDeliveryAttentionIncident(row) {
+  const signal = latestNewspaperDeliveryAttentionSignal(row);
+  if (!signal) return null;
+  const alert = signal.alert;
+  const label = deploymentLabel(row);
+  const latestRunKey = optionalText(alert.latestRunKey) ?? "unknown";
+  const latestError = latestNewspaperDeliveryAlertError(alert);
+
+  return {
+    dedupeKey: `control-plane:${row.id}:newspaperDeliveryAttention:${latestRunKey}`,
+    severity: "P2",
+    service: "newspaper",
+    clientSlug: clientSlug(row),
+    status: "newspaperDeliveryAttention",
+    summary: `${label} newspaper delivery needs attention`,
+    evidence: [
+      `Deployment ID: ${optionalText(row.id) ?? "unknown"}`,
+      `Signal source: ${signal.source}`,
+      `Latest run: ${latestRunKey}`,
+      `Failed deliveries: ${numberValue(alert.failedCount, 0)}`,
+      `Provider/config skips: ${numberValue(alert.skippedAttentionCount, 0)}`,
+      `Provider bounces/complaints: ${numberValue(alert.providerFailureCount, 0)}`,
+      `Affected recipients: ${newspaperAffectedRecipients(alert).length}`,
+      latestError ? `Latest redacted error: ${latestError.slice(0, 500)}` : null,
+    ].filter(Boolean),
+    recommendedAction: "fix email/provider/runtime configuration before the next scheduled newspaper; do not retry old sends from this path",
+  };
+}
+
+function latestNewspaperDeliveryAttentionSignal(row) {
+  const snapshot = latestSnapshot(row, "SUPPORT_READY");
+  const snapshotSummary = record(snapshot?.summary);
+  const snapshotAlert = newspaperDeliveryAlertFromPayload(snapshotSummary?.newspaperDiagnostics ?? snapshotSummary);
+  const snapshotSignal = optionalText(snapshotAlert?.state) === "attention"
+    ? {
+      source: "support snapshot",
+      observedAtMs: timestampMs(optionalText(snapshot?.observedAt) ?? optionalText(snapshot?.createdAt)),
+      alert: snapshotAlert,
+    }
+    : null;
+
+  const operation = latestCompletedNewspaperDiagnosticsOperation(row);
+  const operationSummary = record(operation?.resultSummary)
+    ?? record(operation?.resultJson)
+    ?? record(operation?.outputJson);
+  const operationAlert = newspaperDeliveryAlertFromPayload(operationSummary);
+  const operationSignal = optionalText(operationAlert?.state) === "attention"
+    ? {
+      source: "newspaper.diagnostics support operation",
+      observedAtMs: timestampMs(
+        optionalText(operation?.completedAt)
+          ?? optionalText(operation?.updatedAt)
+          ?? optionalText(operation?.createdAt),
+      ),
+      alert: operationAlert,
+    }
+    : null;
+
+  return [snapshotSignal, operationSignal]
+    .filter(Boolean)
+    .sort((a, b) => (b.observedAtMs ?? 0) - (a.observedAtMs ?? 0))[0] ?? null;
+}
+
+function latestCompletedNewspaperDiagnosticsOperation(row) {
+  const operations = Array.isArray(row?.supportOperations) ? row.supportOperations : [];
+  return operations
+    .filter((operation) => optionalText(operation?.action) === "newspaper.diagnostics")
+    .filter((operation) => normalizeAgentRunStatus(operation?.status) === "COMPLETED")
+    .sort((a, b) => (
+      (timestampMs(optionalText(b?.completedAt) ?? optionalText(b?.updatedAt) ?? optionalText(b?.createdAt)) ?? 0)
+      - (timestampMs(optionalText(a?.completedAt) ?? optionalText(a?.updatedAt) ?? optionalText(a?.createdAt)) ?? 0)
+    ))[0] ?? null;
+}
+
+function newspaperDeliveryAlertFromPayload(value) {
+  const source = record(value);
+  if (!source) return null;
+  const diagnostics = record(source.diagnostics);
+  const newspaperDiagnostics = record(source.newspaperDiagnostics);
+  const nestedNewspaperDiagnostics = record(newspaperDiagnostics?.diagnostics);
+  return [
+    record(source.deliveryAlert),
+    record(diagnostics?.deliveryAlert),
+    record(newspaperDiagnostics?.deliveryAlert),
+    record(nestedNewspaperDiagnostics?.deliveryAlert),
+  ].find((alert) => optionalText(alert?.state)) ?? null;
+}
+
+function newspaperAffectedRecipients(alert) {
+  return Array.isArray(alert?.affectedRecipients)
+    ? alert.affectedRecipients.map(record).filter(Boolean)
+    : [];
+}
+
+function latestNewspaperDeliveryAlertError(alert) {
+  const recipient = newspaperAffectedRecipients(alert)
+    .find((item) => optionalText(item?.error));
+  return optionalText(recipient?.error) ?? optionalText(alert?.reason);
+}
+
 function latestSupportItems(row, key, nestedKeys) {
   const snapshot = latestSnapshot(row, "SUPPORT_READY");
   const summary = record(snapshot?.summary);
@@ -885,6 +986,11 @@ function optionalText(value) {
   if (value === null || value === undefined) return null;
   const text = String(value).trim();
   return text.length > 0 ? text : null;
+}
+
+function numberValue(value, fallback = 0) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : fallback;
 }
 
 function timestampMs(value) {

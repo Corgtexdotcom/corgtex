@@ -69,6 +69,9 @@ const {
       create: vi.fn(),
       findMany: vi.fn(),
     },
+    emailDelivery: {
+      findMany: vi.fn(),
+    },
     newspaperEdition: {
       upsert: vi.fn(),
       findMany: vi.fn(),
@@ -137,6 +140,7 @@ describe("newspaper delivery", () => {
       ...data,
     }));
     prismaMock.newspaperDelivery.findMany.mockResolvedValue([]);
+    prismaMock.emailDelivery.findMany.mockResolvedValue([]);
     prismaMock.newspaperEdition.upsert.mockResolvedValue({ id: "edition-1" });
     prismaMock.newspaperEdition.findMany.mockResolvedValue([]);
     prismaMock.workspaceAgentConfig.findUnique.mockResolvedValue(null);
@@ -473,6 +477,7 @@ describe("newspaper delivery", () => {
         recipientEmail: "member@example.com",
         subject: "Weekly Newspaper",
         status: "SKIPPED",
+        providerMessageId: null,
         error: "No digest inputs.",
         sentAt: null,
         skippedAt: new Date("2026-06-22T08:01:00.000Z"),
@@ -525,6 +530,172 @@ describe("newspaper delivery", () => {
       cadence: "WEEKLY",
       dateKey: "2026-06-22",
       slug: "weekly-newspaper-2026-06-22",
+    }));
+    expect(diagnostics.deliveryAlert).toEqual(expect.objectContaining({
+      state: "ok",
+      failedCount: 0,
+      skippedAttentionCount: 0,
+      providerFailureCount: 0,
+    }));
+  });
+
+  it("flags failed newspaper deliveries in diagnostics", async () => {
+    const { getNewspaperDiagnostics } = await import("./newspaper-delivery");
+    prismaMock.member.findMany.mockResolvedValue([]);
+    prismaMock.newspaperDelivery.findMany.mockResolvedValue([
+      {
+        id: "delivery-failed",
+        workflowJobId: "job-1",
+        memberId: "member-1",
+        cadence: "DAILY",
+        runKey: "run-1",
+        recipientEmail: "member@example.com",
+        subject: "Daily Newspaper",
+        status: "FAILED",
+        providerMessageId: null,
+        error: "provider unavailable",
+        sentAt: null,
+        skippedAt: null,
+        failedAt: new Date("2026-07-11T08:00:00.000Z"),
+        createdAt: new Date("2026-07-11T08:00:00.000Z"),
+      },
+    ]);
+
+    const diagnostics = await getNewspaperDiagnostics(
+      { kind: "user", user: { id: "u-1" } } as any,
+      "ws-1",
+      { now: new Date("2026-07-11T12:00:00.000Z") },
+    );
+
+    expect(diagnostics.deliveryAlert).toEqual(expect.objectContaining({
+      state: "attention",
+      latestRunKey: "run-1",
+      failedCount: 1,
+      skippedAttentionCount: 0,
+      providerFailureCount: 0,
+    }));
+    expect(diagnostics.deliveryAlert.affectedRecipients).toEqual([
+      expect.objectContaining({
+        id: "delivery-failed",
+        recipientEmail: "member@example.com",
+        error: "provider unavailable",
+      }),
+    ]);
+  });
+
+  it("alerts only provider skipped deliveries and ignores older failed runs after a clean latest run", async () => {
+    const { getNewspaperDiagnostics } = await import("./newspaper-delivery");
+    prismaMock.member.findMany.mockResolvedValue([]);
+    prismaMock.newspaperDelivery.findMany.mockResolvedValue([
+      {
+        id: "delivery-latest-benign",
+        workflowJobId: "job-2",
+        memberId: "member-1",
+        cadence: "DAILY",
+        runKey: "run-2",
+        recipientEmail: "member@example.com",
+        subject: "Daily Newspaper",
+        status: "SKIPPED",
+        providerMessageId: null,
+        error: "No digest inputs.",
+        sentAt: null,
+        skippedAt: new Date("2026-07-12T08:00:00.000Z"),
+        failedAt: null,
+        createdAt: new Date("2026-07-12T08:00:00.000Z"),
+      },
+      {
+        id: "delivery-old-failed",
+        workflowJobId: "job-1",
+        memberId: "member-1",
+        cadence: "DAILY",
+        runKey: "run-1",
+        recipientEmail: "member@example.com",
+        subject: "Daily Newspaper",
+        status: "FAILED",
+        providerMessageId: null,
+        error: "provider unavailable",
+        sentAt: null,
+        skippedAt: null,
+        failedAt: new Date("2026-07-11T08:00:00.000Z"),
+        createdAt: new Date("2026-07-11T08:00:00.000Z"),
+      },
+    ]);
+
+    const cleanDiagnostics = await getNewspaperDiagnostics({ kind: "user", user: { id: "u-1" } } as any, "ws-1");
+    expect(cleanDiagnostics.deliveryAlert).toEqual(expect.objectContaining({
+      state: "ok",
+      latestRunKey: "run-2",
+      failedCount: 0,
+      skippedAttentionCount: 0,
+    }));
+
+    prismaMock.newspaperDelivery.findMany.mockResolvedValue([
+      {
+        id: "delivery-provider-skip",
+        workflowJobId: "job-3",
+        memberId: "member-1",
+        cadence: "DAILY",
+        runKey: "run-3",
+        recipientEmail: "member@example.com",
+        subject: "Daily Newspaper",
+        status: "SKIPPED",
+        providerMessageId: null,
+        error: "RESEND_API_KEY is not configured.",
+        sentAt: null,
+        skippedAt: new Date("2026-07-13T08:00:00.000Z"),
+        failedAt: null,
+        createdAt: new Date("2026-07-13T08:00:00.000Z"),
+      },
+    ]);
+
+    const alertDiagnostics = await getNewspaperDiagnostics({ kind: "user", user: { id: "u-1" } } as any, "ws-1");
+    expect(alertDiagnostics.deliveryAlert).toEqual(expect.objectContaining({
+      state: "attention",
+      latestRunKey: "run-3",
+      failedCount: 0,
+      skippedAttentionCount: 1,
+    }));
+  });
+
+  it("flags bounced or complained provider events attached to recent newspaper deliveries", async () => {
+    const { getNewspaperDiagnostics } = await import("./newspaper-delivery");
+    prismaMock.member.findMany.mockResolvedValue([]);
+    prismaMock.newspaperDelivery.findMany.mockResolvedValue([
+      {
+        id: "delivery-sent",
+        workflowJobId: "job-1",
+        memberId: "member-1",
+        cadence: "DAILY",
+        runKey: "run-1",
+        recipientEmail: "member@example.com",
+        subject: "Daily Newspaper",
+        status: "SENT",
+        providerMessageId: "email-1",
+        error: null,
+        sentAt: new Date("2026-07-11T08:00:00.000Z"),
+        skippedAt: null,
+        failedAt: null,
+        createdAt: new Date("2026-07-11T08:00:00.000Z"),
+      },
+    ]);
+    prismaMock.emailDelivery.findMany.mockResolvedValue([
+      {
+        providerMessageId: "email-1",
+        status: "BOUNCED",
+        lastEventType: "email.bounced",
+        bouncedAt: new Date("2026-07-11T08:05:00.000Z"),
+        complainedAt: null,
+      },
+    ]);
+
+    const diagnostics = await getNewspaperDiagnostics({ kind: "user", user: { id: "u-1" } } as any, "ws-1");
+
+    expect(prismaMock.emailDelivery.findMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: { providerMessageId: { in: ["email-1"] } },
+    }));
+    expect(diagnostics.deliveryAlert).toEqual(expect.objectContaining({
+      state: "attention",
+      providerFailureCount: 1,
     }));
   });
 });

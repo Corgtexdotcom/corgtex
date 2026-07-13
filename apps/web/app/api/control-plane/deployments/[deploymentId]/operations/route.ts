@@ -46,6 +46,7 @@ const operationSchema = z.object({
     "meetings.list",
     "meetings.get",
     "meetings.upload",
+    "newspaper.diagnostics",
   ]),
   reason: z.string().trim().min(1).optional(),
   remoteWorkspaceId: z.string().trim().min(1).nullable().optional(),

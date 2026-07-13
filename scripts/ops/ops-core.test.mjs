@@ -309,6 +309,131 @@ describe("ops-core control-plane incidents", () => {
     expect(incidents.find((incident) => incident.status === "slackInvalidAuth").evidence.join("\n")).not.toContain("secret");
   });
 
+  it("emits a newspaper delivery incident from an attention support snapshot", () => {
+    const incidents = buildTestControlPlaneIncidents([
+      {
+        id: "deployment-acme",
+        label: "Acme Production",
+        customerSlug: "acme",
+        hasSupportCredential: true,
+        fleetSnapshots: [
+          {
+            snapshotKind: "SUPPORT_READY",
+            observedAt: "2026-05-24T00:10:00.000Z",
+            summary: {
+              newspaperDiagnostics: {
+                diagnostics: {
+                  deliveryAlert: {
+                    state: "attention",
+                    reason: "failed-delivery",
+                    latestRunKey: "daily:2026-05-24",
+                    failedCount: 1,
+                    skippedAttentionCount: 1,
+                    providerFailureCount: 0,
+                    affectedRecipients: [
+                      {
+                        id: "delivery-1",
+                        runKey: "daily:2026-05-24",
+                        status: "FAILED",
+                        error: "Resend API key is not configured.",
+                      },
+                    ],
+                  },
+                },
+              },
+            },
+          },
+        ],
+      },
+    ]);
+
+    const incident = incidents.find((item) => item.status === "newspaperDeliveryAttention");
+    expect(incident).toMatchObject({
+      severity: "P2",
+      service: "newspaper",
+      clientSlug: "acme",
+      recommendedAction: "fix email/provider/runtime configuration before the next scheduled newspaper; do not retry old sends from this path",
+    });
+    expect(incident.evidence).toEqual(expect.arrayContaining([
+      "Deployment ID: deployment-acme",
+      "Latest run: daily:2026-05-24",
+      "Failed deliveries: 1",
+      "Provider/config skips: 1",
+      "Provider bounces/complaints: 0",
+      "Affected recipients: 1",
+      "Latest redacted error: Resend API key is not configured.",
+    ]));
+  });
+
+  it("uses only the latest completed newspaper diagnostics operation state", () => {
+    const incidents = buildTestControlPlaneIncidents([
+      {
+        id: "deployment-acme",
+        label: "Acme Production",
+        customerSlug: "acme",
+        hasSupportCredential: true,
+        supportOperations: [
+          {
+            action: "newspaper.diagnostics",
+            status: "COMPLETED",
+            completedAt: "2026-05-24T00:05:00.000Z",
+            resultSummary: {
+              diagnostics: {
+                deliveryAlert: {
+                  state: "attention",
+                  latestRunKey: "daily:2026-05-24",
+                  failedCount: 1,
+                  skippedAttentionCount: 0,
+                  providerFailureCount: 0,
+                  affectedRecipients: [],
+                },
+              },
+            },
+          },
+          {
+            action: "newspaper.diagnostics",
+            status: "COMPLETED",
+            completedAt: "2026-05-24T00:20:00.000Z",
+            resultSummary: {
+              diagnostics: {
+                deliveryAlert: {
+                  state: "ok",
+                  latestRunKey: "daily:2026-05-24",
+                  failedCount: 0,
+                  skippedAttentionCount: 0,
+                  providerFailureCount: 0,
+                  affectedRecipients: [],
+                },
+              },
+            },
+          },
+        ],
+        fleetSnapshots: [
+          {
+            snapshotKind: "SUPPORT_READY",
+            observedAt: "2026-05-24T00:00:00.000Z",
+            summary: {
+              newspaperDiagnostics: {
+                diagnostics: {
+                  deliveryAlert: {
+                    state: "ok",
+                    latestRunKey: "daily:2026-05-24",
+                    failedCount: 0,
+                    skippedAttentionCount: 0,
+                    providerFailureCount: 0,
+                    affectedRecipients: [],
+                  },
+                },
+              },
+            },
+          },
+        ],
+      },
+    ]);
+
+    expect(incidents.some((item) => item.status === "newspaperDeliveryAttention")).toBe(false);
+  });
+
   it("keeps recent Slack invalid-auth incidents", () => {
     const incidents = buildTestControlPlaneIncidents([
       {

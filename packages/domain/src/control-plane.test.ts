@@ -6416,6 +6416,72 @@ describe("control plane domain", () => {
     }));
   });
 
+  it("includes newspaper diagnostics in support-ready snapshots without degrading attention alerts", async () => {
+    const { fetchCustomerSupportSnapshot } = await import("./control-plane");
+    const deliveryAlert = {
+      state: "attention",
+      reason: "failed-delivery",
+      latestRunKey: "daily:2026-07-10",
+      latestRunAt: "2026-07-10T12:00:00.000Z",
+      failedCount: 1,
+      skippedAttentionCount: 0,
+      providerFailureCount: 0,
+      affectedRecipients: [
+        {
+          id: "delivery-1",
+          runKey: "daily:2026-07-10",
+          status: "FAILED",
+          createdAt: "2026-07-10T12:00:00.000Z",
+          recipientEmail: "member@example.com",
+          error: "Resend API key is not configured.",
+        },
+      ],
+    };
+    prismaMock.customerDeployment.findUnique.mockResolvedValue({
+      id: "inst-1",
+      label: "Acme",
+      url: "https://customer.test",
+      customerSlug: "acme",
+      customerAccountId: "cust-1",
+      deploymentKind: "REMOTE_MANAGED",
+      deploymentStatus: "ACTIVE",
+      supportMcpUrl: "https://customer.test/api/mcp",
+      supportCredentialEnc: "encrypted-token",
+      supportConnectorStatus: "connected",
+    });
+    global.fetch = vi.fn(async (_input, init) => {
+      const body = JSON.parse(String((init as RequestInit).body));
+      const toolName = body?.params?.name;
+      if (toolName === "get_newspaper_diagnostics") {
+        return mcpToolResult({ diagnostics: { deliveryAlert } });
+      }
+      return mcpToolResult({ items: [] });
+    }) as any;
+
+    const result = await fetchCustomerSupportSnapshot(operatorActor, "inst-1") as any;
+
+    expect(result.newspaperDiagnostics).toEqual({ diagnostics: { deliveryAlert } });
+    expect(fetch).toHaveBeenCalledTimes(7);
+    expect(vi.mocked(fetch).mock.calls.map(([, init]) => JSON.parse(String(init?.body)).params.name)).toContain("get_newspaper_diagnostics");
+    expect(prismaMock.customerDeployment.update).toHaveBeenCalledWith(expect.objectContaining({
+      where: { id: "inst-1" },
+      data: expect.objectContaining({
+        supportConnectorStatus: "connected",
+        supportLastSyncError: null,
+      }),
+    }));
+    expect(prismaMock.fleetHealthSnapshot.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        snapshotKind: "SUPPORT_READY",
+        status: "ok",
+        error: null,
+        summary: expect.objectContaining({
+          newspaperDiagnostics: { diagnostics: { deliveryAlert } },
+        }),
+      }),
+    }));
+  });
+
   it("routes context map imports through the audited support connector", async () => {
     const { runCustomerSupportOperation } = await import("./control-plane");
     prismaMock.supportOperation.create.mockResolvedValueOnce({
