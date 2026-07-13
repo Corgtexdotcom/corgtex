@@ -11,7 +11,7 @@ type ModelUsageLike = {
   billableCostUsd?: Prisma.Decimal | string | number | null;
 };
 
-export type AgentRunModelUsageSummary = {
+type AgentRunModelUsageSummary = {
   provider: string;
   model: string;
   taskType: ModelTaskType;
@@ -35,7 +35,7 @@ function asCostNumber(value: Prisma.Decimal | string | number | null) {
   return Number.isFinite(parsed) ? parsed : 0;
 }
 
-export function summarizeAgentRunModelUsage(usages: ModelUsageLike[]) {
+function summarizeAgentRunModelUsage(usages: ModelUsageLike[]) {
   const grouped = new Map<string, AgentRunModelUsageSummary>();
 
   for (const usage of usages) {

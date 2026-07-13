@@ -22,6 +22,77 @@ vi.mock("./auth", () => ({
 }));
 
 describe("agent-runs", () => {
+  it("returns summarized model usage for listed runs without exposing raw usage rows", async () => {
+    const { prisma } = await import("@corgtex/shared");
+    const { listAgentRuns } = await import("./agent-runs");
+
+    vi.mocked(prisma.agentRun.findMany).mockResolvedValue([
+      {
+        id: "run-1",
+        workspaceId: "ws-1",
+        status: "COMPLETED",
+        steps: [],
+        toolCalls: [],
+        modelUsage: [
+          {
+            provider: "openai",
+            model: "gpt-4o",
+            taskType: "CHAT",
+            inputTokens: 10,
+            outputTokens: 5,
+            latencyMs: 100,
+            estimatedCostUsd: "0.100000",
+            billableCostUsd: "0.050000",
+          },
+          {
+            provider: "openai",
+            model: "gpt-4o",
+            taskType: "CHAT",
+            inputTokens: 7,
+            outputTokens: 3,
+            latencyMs: 30,
+            estimatedCostUsd: "0.200000",
+            billableCostUsd: null,
+          },
+          {
+            provider: "anthropic",
+            model: "claude-sonnet-4",
+            taskType: "SUMMARY",
+            inputTokens: 20,
+            outputTokens: 8,
+            latencyMs: 80,
+            estimatedCostUsd: "0.030000",
+            billableCostUsd: null,
+          },
+        ],
+      },
+    ] as any);
+
+    const runs = await listAgentRuns({ kind: "user", user: { id: "u-1" } } as any, "ws-1");
+
+    expect(runs[0]).not.toHaveProperty("modelUsage");
+    expect(runs[0]?.modelUsageSummary).toEqual([
+      {
+        provider: "openai",
+        model: "gpt-4o",
+        taskType: "CHAT",
+        inputTokens: 17,
+        outputTokens: 8,
+        latencyMs: 130,
+        estimatedCostUsd: "0.250000",
+      },
+      {
+        provider: "anthropic",
+        model: "claude-sonnet-4",
+        taskType: "SUMMARY",
+        inputTokens: 20,
+        outputTokens: 8,
+        latencyMs: 80,
+        estimatedCostUsd: "0.030000",
+      },
+    ]);
+  });
+
   it("routes manual company-understanding triggers to the company-understanding workflow job", async () => {
     const { prisma } = await import("@corgtex/shared");
     const { triggerAgentRun } = await import("./agent-runs");
