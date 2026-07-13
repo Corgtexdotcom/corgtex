@@ -163,7 +163,7 @@ export async function issueAuthorizationCode(actor: AppActor, params: {
 
   const code = `code_${randomOpaqueToken()}`;
 
-  const authCode = await prisma.oAuthAuthorizationCode.create({
+  await prisma.oAuthAuthorizationCode.create({
     data: {
       appId: app.id,
       userId: actor.user.id,
