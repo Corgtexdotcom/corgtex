@@ -12,11 +12,7 @@ export {
   normalizeNewspaperDigestPayload,
   renderNewspaperDigestMarkdown,
 };
-export type {
-  NormalizedNewspaperDigest,
-  NewspaperDigestSection,
-  NewspaperEmailSectionId,
-};
+export type { NormalizedNewspaperDigest };
 
 export type NewspaperPersonalization = {
   greeting: string | null;

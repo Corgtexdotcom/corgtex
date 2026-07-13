@@ -110,7 +110,7 @@ async function requireContextMapAi(workspaceId: string) {
   }
 }
 
-export const getContextMapInfoTool: ModelTool = {
+const getContextMapInfoTool: ModelTool = {
   type: "function",
   function: {
     name: "get_context_map_info",
@@ -125,7 +125,7 @@ export const getContextMapInfoTool: ModelTool = {
   },
 };
 
-export const getSelectedContextMapRegionTool: ModelTool = {
+const getSelectedContextMapRegionTool: ModelTool = {
   type: "function",
   function: {
     name: "get_selected_context_map_region",
@@ -142,7 +142,7 @@ export const getSelectedContextMapRegionTool: ModelTool = {
   },
 };
 
-export const createContextMapDiffTool: ModelTool = {
+const createContextMapDiffTool: ModelTool = {
   type: "function",
   function: {
     name: "create_context_map_diff",
@@ -159,7 +159,7 @@ export const createContextMapDiffTool: ModelTool = {
   },
 };
 
-export const applyContextMapDiffTool: ModelTool = {
+const applyContextMapDiffTool: ModelTool = {
   type: "function",
   function: {
     name: "apply_context_map_diff",
@@ -183,7 +183,7 @@ export const contextMapTools = [
   applyContextMapDiffTool,
 ];
 
-export async function getContextMapInfoAction(actor: AppActor, ctx: ContextMapToolContext, args: JsonRecord) {
+async function getContextMapInfoAction(actor: AppActor, ctx: ContextMapToolContext, args: JsonRecord) {
   await requireContextMapAi(ctx.workspaceId);
   const mapViewId = typeof args.mapViewId === "string" ? args.mapViewId : pageContextMapViewId(ctx);
   const data = await getContextMapData(actor, {
@@ -202,7 +202,7 @@ export async function getContextMapInfoAction(actor: AppActor, ctx: ContextMapTo
   };
 }
 
-export async function getSelectedContextMapRegionAction(actor: AppActor, ctx: ContextMapToolContext, args: JsonRecord) {
+async function getSelectedContextMapRegionAction(actor: AppActor, ctx: ContextMapToolContext, args: JsonRecord) {
   await requireContextMapAi(ctx.workspaceId);
   const objectIds = selectedObjectIds(ctx, args);
   if (objectIds.length === 0) {
@@ -218,7 +218,7 @@ export async function getSelectedContextMapRegionAction(actor: AppActor, ctx: Co
   });
 }
 
-export async function createContextMapDiffAction(actor: AppActor, ctx: ContextMapToolContext, args: JsonRecord) {
+async function createContextMapDiffAction(actor: AppActor, ctx: ContextMapToolContext, args: JsonRecord) {
   await requireContextMapAi(ctx.workspaceId);
   const proposedDiff = await createContextGraphProposedDiff(actor, {
     workspaceId: ctx.workspaceId,
@@ -233,7 +233,7 @@ export async function createContextMapDiffAction(actor: AppActor, ctx: ContextMa
   };
 }
 
-export async function applyContextMapDiffAction(actor: AppActor, ctx: ContextMapToolContext, args: JsonRecord) {
+async function applyContextMapDiffAction(actor: AppActor, ctx: ContextMapToolContext, args: JsonRecord) {
   await requireContextMapAi(ctx.workspaceId);
   const proposedDiff = await createContextGraphProposedDiff(actor, {
     workspaceId: ctx.workspaceId,
