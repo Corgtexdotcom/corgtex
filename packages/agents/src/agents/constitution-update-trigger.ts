@@ -1,9 +1,7 @@
 import type { AgentTriggerType } from "@prisma/client";
-import { prisma, env } from "@corgtex/shared";
+import { prisma } from "@corgtex/shared";
 import { defaultModelGateway } from "@corgtex/models";
-import { searchIndexedKnowledge } from "@corgtex/knowledge";
-import { createConstitutionVersion } from "@corgtex/domain";
-import { executeAgentRun, normalizeActionDrafts, normalizeProposalDraft, asString } from "../runtime";
+import { executeAgentRun } from "../runtime";
 
 export async function runConstitutionUpdateTriggerAgent(params: {
   workspaceId: string;
@@ -104,4 +102,3 @@ export async function runConstitutionUpdateTriggerAgent(params: {
     },
   });
 }
-

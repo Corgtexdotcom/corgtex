@@ -3,7 +3,6 @@ import { prisma } from "@corgtex/shared";
 import { defaultModelGateway } from "@corgtex/models";
 import type { AppActor } from "@corgtex/shared";
 import {
-  AGENT_REGISTRY,
   CONTEXT_GRAPH_OBJECT_TYPES,
   CONTEXT_GRAPH_RELATIONSHIP_TYPES,
   createCompanyUnderstandingQuestion,
@@ -92,10 +91,6 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function asString(value: unknown) {
   return typeof value === "string" ? value.trim() : "";
-}
-
-function asStringArray(value: unknown) {
-  return Array.isArray(value) ? value.map(asString).filter(Boolean) : [];
 }
 
 function normalizeTitle(value: string) {

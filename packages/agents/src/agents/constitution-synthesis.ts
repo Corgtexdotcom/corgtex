@@ -1,9 +1,8 @@
 import type { AgentTriggerType } from "@prisma/client";
-import { prisma, env } from "@corgtex/shared";
+import { prisma } from "@corgtex/shared";
 import { defaultModelGateway } from "@corgtex/models";
-import { searchIndexedKnowledge } from "@corgtex/knowledge";
 import { createConstitutionVersion } from "@corgtex/domain";
-import { executeAgentRun, normalizeActionDrafts, normalizeProposalDraft, asString } from "../runtime";
+import { executeAgentRun } from "../runtime";
 
 export async function runConstitutionSynthesisAgent(params: {
   workspaceId: string;
@@ -143,4 +142,3 @@ ${currentConstitution ? "You are UPDATING the existing constitution. You MUST pr
     },
   });
 }
-

@@ -1,11 +1,8 @@
 import type { AgentRunStatus, AgentTriggerType } from "@prisma/client";
 import { Prisma } from "@prisma/client";
-import { createConstitutionVersion, type AgentKey } from "@corgtex/domain";
+import type { AgentKey } from "@corgtex/domain";
 import { env, prisma, toInputJson } from "@corgtex/shared";
-import { searchIndexedKnowledge } from "@corgtex/knowledge";
-import { defaultModelGateway, resolveModel } from "@corgtex/models";
-import { absorbSource } from "./brain-absorb";
-import { runBrainMaintenance } from "./brain-maintenance";
+import { resolveModel } from "@corgtex/models";
 import { isAgentEnabled, getAgentModelOverride, AGENT_REGISTRY, type RegisteredAgentKey } from "@corgtex/domain";
 import { resolveAgentIdentityLimits, resolveAgentBehaviorContext } from "@corgtex/domain";
 
@@ -319,7 +316,7 @@ export async function executeAgentRun<TPayload extends Record<string, unknown>, 
 
     return finalRun;
   } catch (error) {
-    const failedRun = await prisma.$transaction(async (tx) => {
+    await prisma.$transaction(async (tx) => {
       if (accumulatedSteps.length > 0) {
         await tx.agentStep.createMany({ data: accumulatedSteps });
       }
@@ -360,7 +357,6 @@ export async function executeAgentRun<TPayload extends Record<string, unknown>, 
     throw error;
   }
 }
-
 
 
 
