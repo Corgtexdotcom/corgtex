@@ -601,6 +601,100 @@ function nextRunsForRecipients(params: {
   };
 }
 
+function isProviderSkippedNewspaperDelivery(error: string | null | undefined) {
+  const normalized = error?.trim().toLowerCase() ?? "";
+  if (!normalized) return false;
+  if (normalized.includes("no digest inputs")) return false;
+  if (normalized.includes("no operating activity")) return false;
+  if (normalized.includes("no active members")) return false;
+  if (normalized.includes("no matching recipients")) return false;
+  if (normalized.includes("no digest sections")) return false;
+  if (normalized.includes("cadence is off")) return false;
+  if (normalized.includes("demo lead not found")) return false;
+  if (normalized.includes("welcome newspaper already sent")) return false;
+  return normalized.includes("resend")
+    || normalized.includes("api key")
+    || normalized.includes("credential")
+    || normalized.includes("auth")
+    || normalized.includes("provider")
+    || normalized.includes("email")
+    || normalized.includes("timeout")
+    || normalized.includes("rate limit");
+}
+
+function hasProviderDeliveryFailure(delivery: {
+  status: string | null;
+  lastEventType: string | null;
+  bouncedAt: Date | null;
+  complainedAt: Date | null;
+} | null | undefined) {
+  const status = delivery?.status?.toLowerCase() ?? "";
+  const lastEventType = delivery?.lastEventType?.toLowerCase() ?? "";
+  return Boolean(delivery?.bouncedAt || delivery?.complainedAt)
+    || status.includes("bounce")
+    || status.includes("complain")
+    || lastEventType.includes("bounce")
+    || lastEventType.includes("complain");
+}
+
+function buildNewspaperDeliveryAlert(deliveries: Array<{
+  id: string;
+  runKey: string;
+  recipientEmail: string;
+  status: NewspaperDeliveryStatus;
+  providerMessageId: string | null;
+  error: string | null;
+  createdAt: Date;
+}>, emailDeliveryByMessageId: Map<string, {
+  status: string | null;
+  lastEventType: string | null;
+  bouncedAt: Date | null;
+  complainedAt: Date | null;
+}>) {
+  const latestRunKey = deliveries[0]?.runKey ?? null;
+  const latestRunDeliveries = latestRunKey
+    ? deliveries.filter((delivery) => delivery.runKey === latestRunKey)
+    : [];
+  const failed = latestRunDeliveries.filter((delivery) => delivery.status === "FAILED");
+  const skippedAttention = latestRunDeliveries.filter((delivery) => (
+    delivery.status === "SKIPPED" && isProviderSkippedNewspaperDelivery(delivery.error)
+  ));
+  const providerFailures = latestRunDeliveries.filter((delivery) => (
+    delivery.providerMessageId
+      ? hasProviderDeliveryFailure(emailDeliveryByMessageId.get(delivery.providerMessageId))
+      : false
+  ));
+  const affectedById = new Map([...failed, ...skippedAttention, ...providerFailures].map((delivery) => [delivery.id, delivery]));
+  const affectedRecipients = Array.from(affectedById.values()).map((delivery) => ({
+    id: delivery.id,
+    runKey: delivery.runKey,
+    status: delivery.status,
+    createdAt: delivery.createdAt,
+    recipientEmail: delivery.recipientEmail,
+    error: delivery.error,
+  }));
+  const failedCount = failed.length;
+  const skippedAttentionCount = skippedAttention.length;
+  const providerFailureCount = providerFailures.length;
+  const state = failedCount + skippedAttentionCount + providerFailureCount > 0 ? "attention" : "ok";
+  const reasons = [
+    failedCount > 0 ? `${failedCount} failed delivery${failedCount === 1 ? "" : "ies"}` : null,
+    skippedAttentionCount > 0 ? `${skippedAttentionCount} provider/config skip${skippedAttentionCount === 1 ? "" : "s"}` : null,
+    providerFailureCount > 0 ? `${providerFailureCount} provider bounce/complaint${providerFailureCount === 1 ? "" : "s"}` : null,
+  ].filter(Boolean);
+
+  return {
+    state,
+    reason: reasons.length > 0 ? reasons.join("; ") : "Latest newspaper run has no active delivery alerts.",
+    latestRunKey,
+    latestRunAt: latestRunDeliveries[0]?.createdAt ?? null,
+    failedCount,
+    skippedAttentionCount,
+    providerFailureCount,
+    affectedRecipients,
+  };
+}
+
 export async function getNewspaperDiagnostics(actor: AppActor, workspaceId: string, opts?: { now?: Date; take?: number }) {
   await requireWorkspaceMembership({ actor, workspaceId });
 
@@ -684,6 +778,7 @@ export async function getNewspaperDiagnostics(actor: AppActor, workspaceId: stri
         recipientEmail: true,
         subject: true,
         status: true,
+        providerMessageId: true,
         error: true,
         sentAt: true,
         skippedAt: true,
@@ -708,6 +803,22 @@ export async function getNewspaperDiagnostics(actor: AppActor, workspaceId: stri
       },
     }),
   ]);
+  const providerMessageIds = Array.from(new Set(deliveries
+    .map((delivery) => delivery.providerMessageId)
+    .filter((id): id is string => Boolean(id))));
+  const emailDeliveryRows = providerMessageIds.length > 0
+    ? await prisma.emailDelivery.findMany({
+        where: { providerMessageId: { in: providerMessageIds } },
+        select: {
+          providerMessageId: true,
+          status: true,
+          lastEventType: true,
+          bouncedAt: true,
+          complainedAt: true,
+        },
+      })
+    : [];
+  const emailDeliveryByMessageId = new Map(emailDeliveryRows.map((delivery) => [delivery.providerMessageId, delivery]));
 
   return {
     workspaceId,
@@ -722,5 +833,6 @@ export async function getNewspaperDiagnostics(actor: AppActor, workspaceId: stri
     recentJobs: jobs,
     recentDeliveries: deliveries,
     recentEditions: editions,
+    deliveryAlert: buildNewspaperDeliveryAlert(deliveries, emailDeliveryByMessageId),
   };
 }

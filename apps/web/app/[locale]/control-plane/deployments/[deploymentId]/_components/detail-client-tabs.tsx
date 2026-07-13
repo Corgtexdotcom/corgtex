@@ -46,6 +46,88 @@ const detailDangerButtonClass =
   "inline-flex min-h-8 items-center justify-center rounded-md border border-rose-500/30 bg-rose-950/10 px-3 py-1.5 text-xs font-semibold text-rose-400 transition-colors hover:bg-rose-950/20 disabled:cursor-not-allowed disabled:opacity-50";
 const detailPrimaryButtonClass = controlPlaneButtonClass;
 
+type NewspaperDeliveryAlert = Record<string, unknown>;
+
+function recordValue(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
+}
+
+function optionalTextValue(value: unknown) {
+  if (value === null || value === undefined) return null;
+  const text = String(value).trim();
+  return text.length > 0 ? text : null;
+}
+
+function numberValue(value: unknown) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function newspaperDeliveryAlertFromPayload(value: unknown): NewspaperDeliveryAlert | null {
+  const source = recordValue(value);
+  if (!source) return null;
+  const diagnostics = recordValue(source.diagnostics);
+  const newspaperDiagnostics = recordValue(source.newspaperDiagnostics);
+  const nestedNewspaperDiagnostics = recordValue(newspaperDiagnostics?.diagnostics);
+  return [
+    recordValue(source.deliveryAlert),
+    recordValue(diagnostics?.deliveryAlert),
+    recordValue(newspaperDiagnostics?.deliveryAlert),
+    recordValue(nestedNewspaperDiagnostics?.deliveryAlert),
+  ].find((alert) => optionalTextValue(alert?.state)) ?? null;
+}
+
+function newspaperDeliveryAttentionAlertFromPayload(value: unknown): NewspaperDeliveryAlert | null {
+  const alert = newspaperDeliveryAlertFromPayload(value);
+  return optionalTextValue(alert?.state) === "attention" ? alert : null;
+}
+
+function newspaperAffectedRecipients(alert: NewspaperDeliveryAlert | null) {
+  return Array.isArray(alert?.affectedRecipients)
+    ? alert.affectedRecipients.map(recordValue).filter(Boolean)
+    : [];
+}
+
+function latestNewspaperDeliveryAlertError(alert: NewspaperDeliveryAlert | null) {
+  const recipient = newspaperAffectedRecipients(alert)
+    .find((item) => optionalTextValue(item?.error));
+  return optionalTextValue(recipient?.error) ?? optionalTextValue(alert?.reason);
+}
+
+function NewspaperDeliveryAttentionBanner({
+  alert,
+  className,
+}: {
+  alert: NewspaperDeliveryAlert;
+  className?: string;
+}) {
+  const latestError = latestNewspaperDeliveryAlertError(alert);
+  const latestRunKey = optionalTextValue(alert.latestRunKey) ?? "unknown";
+  const affectedRecipients = newspaperAffectedRecipients(alert).length;
+
+  return (
+    <div className={cn("rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-100", className)}>
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <strong className="font-semibold text-amber-100">Newspaper delivery needs attention</strong>
+        <StatusBadge status="attention">Attention</StatusBadge>
+      </div>
+      <p className="mt-1 text-[10px] text-amber-100/80">
+        Fix email/provider/runtime configuration before the next scheduled newspaper. This path does not retry or resend old sends.
+      </p>
+      <div className="mt-2 grid grid-cols-2 gap-2 text-[10px] sm:grid-cols-4">
+        <span>Run: <strong className="font-mono text-amber-50">{latestRunKey}</strong></span>
+        <span>Failed: <strong className="text-amber-50">{numberValue(alert.failedCount)}</strong></span>
+        <span>Skipped: <strong className="text-amber-50">{numberValue(alert.skippedAttentionCount)}</strong></span>
+        <span>Provider: <strong className="text-amber-50">{numberValue(alert.providerFailureCount)}</strong></span>
+      </div>
+      <p className="mt-1 text-[10px] text-amber-100/80">
+        Affected recipients: {affectedRecipients}
+        {latestError ? ` / Latest error: ${latestError.slice(0, 180)}` : ""}
+      </p>
+    </div>
+  );
+}
+
 interface TabProps {
   customer: any;
   integrations: any;
@@ -157,6 +239,18 @@ export function CustomerDetailClientTabs({
   const liveRelease = healthSummary?.health?.release ?? releaseSummary?.observedRelease ?? null;
   const intendedRelease = releaseSummary?.expectedReleaseImageTag ?? releaseSummary?.expectedReleaseVersion ?? null;
   const schemaStatus = healthSummary?.health?.schema ?? "unknown";
+  const supportOperations = Array.isArray(customer.supportOperations) ? customer.supportOperations : [];
+  const latestNewspaperDiagnosticsOperation = supportOperations
+    .filter((operation: any) => operation?.action === "newspaper.diagnostics" && operation?.status === "COMPLETED")
+    .sort((a: any, b: any) => (
+      new Date(b.completedAt ?? b.updatedAt ?? b.createdAt ?? 0).getTime()
+      - new Date(a.completedAt ?? a.updatedAt ?? a.createdAt ?? 0).getTime()
+    ))[0] ?? null;
+  const snapshotNewspaperDeliveryAlert = newspaperDeliveryAttentionAlertFromPayload(
+    recordValue(supportReadySnapshot?.summary)?.newspaperDiagnostics ?? supportReadySnapshot?.summary,
+  );
+  const operationNewspaperDeliveryAlert = newspaperDeliveryAttentionAlertFromPayload(latestNewspaperDiagnosticsOperation?.resultSummary);
+  const newspaperDeliveryAlert = operationNewspaperDeliveryAlert ?? snapshotNewspaperDeliveryAlert;
 
   return (
     <div className="space-y-6">
@@ -196,6 +290,11 @@ export function CustomerDetailClientTabs({
         {/* OVERVIEW TAB */}
         {activeTab === "overview" && (
           <div className="grid grid-cols-1 gap-5 lg:grid-cols-3">
+            {newspaperDeliveryAlert && (
+              <div className="lg:col-span-3">
+                <NewspaperDeliveryAttentionBanner alert={newspaperDeliveryAlert} />
+              </div>
+            )}
             <div className="lg:col-span-2 space-y-6">
               <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                 <div className={detailPanelClass}>
@@ -1393,22 +1492,39 @@ export function CustomerDetailClientTabs({
           <div className="grid grid-cols-1 gap-5 lg:grid-cols-3">
             <div className={`${detailPanelClass} space-y-4 lg:col-span-2`}>
               <h3 className="text-sm font-semibold text-white">Deployment Operational Audit History</h3>
+              {newspaperDeliveryAlert && (
+                <NewspaperDeliveryAttentionBanner alert={newspaperDeliveryAlert} />
+              )}
 
               <div className="space-y-3 max-h-[460px] overflow-y-auto pr-1 scrollbar-thin">
-                {customer.supportOperations.map((op: any) => (
-                  <div key={op.id} className={`${detailInnerPanelClass} space-y-2`}>
-                    <div className="flex items-center justify-between">
-                      <strong className="text-xs text-white font-semibold">{op.action}</strong>
-                      <StatusBadge status={op.status}>{controlPlaneLabel(op.status)}</StatusBadge>
+                {supportOperations.map((op: any) => {
+                  const operationAlert = op?.action === "newspaper.diagnostics"
+                    ? newspaperDeliveryAttentionAlertFromPayload(op.resultSummary)
+                    : null;
+                  return (
+                    <div key={op.id} className={`${detailInnerPanelClass} space-y-2`}>
+                      <div className="flex items-center justify-between">
+                        <strong className="text-xs text-white font-semibold">{op.action}</strong>
+                        <StatusBadge status={operationAlert ? "attention" : op.status}>
+                          {operationAlert ? "Attention" : controlPlaneLabel(op.status)}
+                        </StatusBadge>
+                      </div>
+                      <p className="text-[10px] text-muted">{op.reason}</p>
+                      {operationAlert && (
+                        <p className="rounded border border-amber-500/25 bg-amber-500/10 px-2 py-1 text-[10px] text-amber-100">
+                          Newspaper delivery attention for run {optionalTextValue(operationAlert.latestRunKey) ?? "unknown"}:
+                          {" "}
+                          {latestNewspaperDeliveryAlertError(operationAlert)?.slice(0, 180) ?? "provider/runtime issue detected"}
+                        </p>
+                      )}
+                      <div className="text-[9px] text-muted">
+                        <span>Recorded: {new Date(op.createdAt).toLocaleString()}</span>
+                        {op.error && <span className="text-rose-400 block mt-1 font-mono">{op.error}</span>}
+                      </div>
                     </div>
-                    <p className="text-[10px] text-muted">{op.reason}</p>
-                    <div className="text-[9px] text-muted">
-                      <span>Recorded: {new Date(op.createdAt).toLocaleString()}</span>
-                      {op.error && <span className="text-rose-400 block mt-1 font-mono">{op.error}</span>}
-                    </div>
-                  </div>
-                ))}
-                {customer.supportOperations.length === 0 && (
+                  );
+                })}
+                {supportOperations.length === 0 && (
                   <div className="text-center py-8 text-muted text-[10px]">No support operations recorded.</div>
                 )}
               </div>

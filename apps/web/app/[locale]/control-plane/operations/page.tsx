@@ -15,6 +15,52 @@ import {
 
 export const dynamic = "force-dynamic";
 
+function recordValue(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
+}
+
+function optionalTextValue(value: unknown) {
+  if (value === null || value === undefined) return null;
+  const text = String(value).trim();
+  return text.length > 0 ? text : null;
+}
+
+function numberValue(value: unknown) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function newspaperDeliveryAlertFromPayload(value: unknown) {
+  const source = recordValue(value);
+  if (!source) return null;
+  const diagnostics = recordValue(source.diagnostics);
+  const newspaperDiagnostics = recordValue(source.newspaperDiagnostics);
+  const nestedNewspaperDiagnostics = recordValue(newspaperDiagnostics?.diagnostics);
+  const alert = [
+    recordValue(source.deliveryAlert),
+    recordValue(diagnostics?.deliveryAlert),
+    recordValue(newspaperDiagnostics?.deliveryAlert),
+    recordValue(nestedNewspaperDiagnostics?.deliveryAlert),
+  ].find((candidate) => optionalTextValue(candidate?.state)) ?? null;
+  return optionalTextValue(alert?.state) === "attention" ? alert : null;
+}
+
+function newspaperAlertSummary(alert: Record<string, unknown>) {
+  const recipients = Array.isArray(alert.affectedRecipients)
+    ? alert.affectedRecipients.map(recordValue).filter(Boolean)
+    : [];
+  const latestError = optionalTextValue(recipients.find((recipient) => optionalTextValue(recipient?.error))?.error)
+    ?? optionalTextValue(alert.reason)
+    ?? "provider/runtime issue detected";
+  return [
+    `run ${optionalTextValue(alert.latestRunKey) ?? "unknown"}`,
+    `${numberValue(alert.failedCount)} failed`,
+    `${numberValue(alert.skippedAttentionCount)} skipped`,
+    `${numberValue(alert.providerFailureCount)} provider events`,
+    latestError.slice(0, 160),
+  ].join(" / ");
+}
+
 export default async function ControlPlaneOperationsPage({
   searchParams,
 }: {
@@ -57,6 +103,9 @@ export default async function ControlPlaneOperationsPage({
 
   const formattedOps = operations.map((op: any) => {
     const actionKey = op.action.toLowerCase();
+    const newspaperAlert = op.action === "newspaper.diagnostics" && op.status === "COMPLETED"
+      ? newspaperDeliveryAlertFromPayload(op.resultSummary)
+      : null;
     return {
       id: op.id,
       type: op.action,
@@ -69,12 +118,14 @@ export default async function ControlPlaneOperationsPage({
       actorName: op.actor?.displayName || op.actor?.email || op.actorLabel || "System Daemon",
       createdAt: op.createdAt.toLocaleString(),
       error: op.error,
+      newspaperAlert,
     };
   });
 
   const totalOps = formattedOps.length;
   const breakGlassCount = formattedOps.filter((o: any) => o.isBreakGlass).length;
   const errorCount = formattedOps.filter((o: any) => o.status === "FAILED").length;
+  const newspaperAttentionCount = formattedOps.filter((o: any) => o.newspaperAlert).length;
 
   return (
     <div className="space-y-5">
@@ -100,6 +151,7 @@ export default async function ControlPlaneOperationsPage({
           { label: "Mutations", value: formattedOps.filter((o: any) => o.isMutating).length, detail: "state changes" },
           { label: "Break-glass", value: breakGlassCount, detail: "incidents", status: breakGlassCount > 0 ? "degraded" : "ok" },
           { label: "Failures", value: errorCount, detail: "failed", status: errorCount > 0 ? "failed" : "ok" },
+          { label: "Newspaper", value: newspaperAttentionCount, detail: "attention", status: newspaperAttentionCount > 0 ? "failed" : "ok" },
         ]}
       />
 
@@ -135,10 +187,15 @@ export default async function ControlPlaneOperationsPage({
                   </td>
                   <td className="p-3 min-w-[240px]">
                     <span className="block font-medium text-text">{op.description}</span>
+                    {op.newspaperAlert && (
+                      <span className="mt-1 block rounded border border-amber-500/25 bg-amber-500/10 px-2 py-1 text-[10px] text-amber-200">
+                        {newspaperAlertSummary(op.newspaperAlert)}
+                      </span>
+                    )}
                     {op.error && <span className="mt-1 block font-mono text-[10px] text-rose-400">{op.error}</span>}
                   </td>
                   <td className="p-3 font-semibold text-text">{op.customerName}</td>
-                  <td className="p-3"><StatusBadge status={op.status} /></td>
+                  <td className="p-3"><StatusBadge status={op.newspaperAlert ? "attention" : op.status} /></td>
                   <td className="p-3 text-muted">{op.actorName}</td>
                   <td className="p-3 text-muted">{op.createdAt}</td>
                   <td className="p-3 text-right">
