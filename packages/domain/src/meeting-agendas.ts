@@ -1,4 +1,3 @@
-import type { MeetingInsightType } from "@prisma/client";
 import type { MeetingIntelligenceContext } from "./meeting-intelligence-context";
 
 export const REGULAR_UPDATE_AGENDA_TEMPLATE_KEY = "regular_update_v1";

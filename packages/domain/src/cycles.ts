@@ -1,7 +1,7 @@
 import type { CycleStatus } from "@prisma/client";
 import { prisma } from "@corgtex/shared";
 import type { AppActor } from "@corgtex/shared";
-import { actorUserIdForWorkspace, requireWorkspaceMembership } from "./auth";
+import { requireWorkspaceMembership } from "./auth";
 import { appendEvents } from "./events";
 import { archiveFilterWhere, type ArchiveFilter } from "./archive";
 import { invariant } from "./errors";
