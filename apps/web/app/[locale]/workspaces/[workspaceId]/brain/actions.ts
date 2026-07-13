@@ -2,16 +2,12 @@
 
 import { enforceDemoGuard } from "@/lib/demo-guard";
 
-import type { BrainArticleAuthority, BrainArticleType, BrainDiscussionTargetType, BrainSourceType } from "@prisma/client";
+import type { BrainArticleAuthority, BrainArticleType, BrainSourceType } from "@prisma/client";
 import { revalidatePath } from "next/cache";
 import {
   createArticle,
   updateArticle,
-  deleteArticle,
   ingestSource,
-  createDiscussionThread,
-  addDiscussionComment,
-  resolveDiscussionThread,
   publishArticle,
   returnArticleToDraft,
 } from "@corgtex/domain";
@@ -96,19 +92,6 @@ export async function updateArticleAction(formData: FormData) {
   refresh(workspaceId);
 }
 
-export async function deleteArticleAction(formData: FormData) {
-  const _demoGuardWsId = formData.get("workspaceId") as string;
-  if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
-
-  const actor = await requirePageActor();
-  const workspaceId = asString(formData, "workspaceId");
-  await deleteArticle(actor, {
-    workspaceId,
-    slug: asString(formData, "slug"),
-  });
-  refresh(workspaceId);
-}
-
 export async function ingestSourceAction(formData: FormData) {
   const _demoGuardWsId = formData.get("workspaceId") as string;
   if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
@@ -122,49 +105,6 @@ export async function ingestSourceAction(formData: FormData) {
     content: asString(formData, "content"),
     title: asOptional(formData, "title"),
     channel: asOptional(formData, "channel"),
-  });
-  refresh(workspaceId);
-}
-
-export async function createDiscussionAction(formData: FormData) {
-  const _demoGuardWsId = formData.get("workspaceId") as string;
-  if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
-
-  const actor = await requirePageActor();
-  const workspaceId = asString(formData, "workspaceId");
-  await createDiscussionThread(actor, {
-    workspaceId,
-    slug: asString(formData, "slug"),
-    targetType: (asOptional(formData, "targetType") ?? "ARTICLE") as BrainDiscussionTargetType,
-    targetRef: asOptional(formData, "targetRef"),
-    bodyMd: asString(formData, "bodyMd"),
-  });
-  refresh(workspaceId);
-}
-
-export async function addCommentAction(formData: FormData) {
-  const _demoGuardWsId = formData.get("workspaceId") as string;
-  if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
-
-  const actor = await requirePageActor();
-  const workspaceId = asString(formData, "workspaceId");
-  await addDiscussionComment(actor, {
-    workspaceId,
-    threadId: asString(formData, "threadId"),
-    bodyMd: asString(formData, "bodyMd"),
-  });
-  refresh(workspaceId);
-}
-
-export async function resolveThreadAction(formData: FormData) {
-  const _demoGuardWsId = formData.get("workspaceId") as string;
-  if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
-
-  const actor = await requirePageActor();
-  const workspaceId = asString(formData, "workspaceId");
-  await resolveDiscussionThread(actor, {
-    workspaceId,
-    threadId: asString(formData, "threadId"),
   });
   refresh(workspaceId);
 }
