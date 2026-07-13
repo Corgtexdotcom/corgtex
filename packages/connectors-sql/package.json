@@ -4,7 +4,6 @@
   "private": true,
   "type": "module",
   "dependencies": {
-    "@corgtex/domain": "0.1.0",
     "@corgtex/knowledge": "0.1.0",
     "@corgtex/shared": "0.1.0",
     "pg": "^8.21.0"
