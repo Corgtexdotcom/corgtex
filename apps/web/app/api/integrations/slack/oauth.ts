@@ -1,5 +1,4 @@
 export {
-  appOrigin,
   appRedirectUrl,
   rethrowNextRedirectError,
   slackCallbackRedirectUri,

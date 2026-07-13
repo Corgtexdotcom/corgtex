@@ -7,7 +7,7 @@ function navHref(workspaceId: string, href: string) {
   return `/workspaces/${workspaceId}${href}`;
 }
 
-export function workspacePathname(pathname: string, workspaceId: string) {
+function workspacePathname(pathname: string, workspaceId: string) {
   const marker = `/workspaces/${workspaceId}`;
   const markerIndex = pathname.indexOf(marker);
   return markerIndex >= 0 ? pathname.slice(markerIndex) : pathname;
