@@ -5,7 +5,6 @@ import { enforceDemoGuard } from "@/lib/demo-guard";
 import {
   updateAgentConfig,
   updateCompanyUnderstandingGoalApplyMode,
-  updateWorkspaceNewspaperCadence,
   updateWorkspaceNewspaperSchedule,
   type CompanyUnderstandingGoalApplyMode,
   type NewspaperWeekday,
@@ -22,18 +21,6 @@ export async function updateAgentModelAction(workspaceId: string, agentKey: stri
   const actor = await requirePageActor();
   await updateAgentConfig(actor, { workspaceId, agentKey, modelOverride });
   revalidatePath(`/workspaces/${workspaceId}/settings/agents`);
-}
-
-export async function updateAgentNewspaperCadenceAction(
-  workspaceId: string,
-  cadence: "DAILY" | "WEEKLY" | "OFF",
-) {
-  await enforceDemoGuard(workspaceId);
-
-  const actor = await requirePageActor();
-  await updateWorkspaceNewspaperCadence(actor, { workspaceId, cadence });
-  revalidatePath(`/workspaces/${workspaceId}/settings/agents`);
-  revalidatePath(`/workspaces/${workspaceId}/settings`);
 }
 
 export async function updateAgentNewspaperScheduleAction(

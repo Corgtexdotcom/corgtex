@@ -5,7 +5,6 @@ import { requirePageActor } from "@/lib/auth";
 import { asString, asOptional, asOptionalInt, refresh } from "../action-utils";
 import {
   createMember,
-  deactivateMember,
   markAllNotificationsRead,
   markNotificationRead,
   updateMember,
@@ -16,7 +15,6 @@ import {
   rotateWebhookSecret,
   createExpertiseTag,
   addMemberExpertise,
-  endorseMemberExpertise,
   upsertSsoConfig,
   updateModelUsageBudget,
   inviteMember,
@@ -31,13 +29,11 @@ import {
   updateMeetingRecorderConfig,
   renderAccountSetupEmail,
   connectMeetingTranscriptSource,
-  importMeetingTranscriptSourceArtifacts,
   normalizeMeetingTranscriptSourceProvider,
   retryMeetingTranscriptImportBatch,
   runMeetingTranscriptSourceBackfill,
   deleteOAuthConnection,
   enqueueOAuthConnectionSync,
-  updateOAuthConnectionSyncSettings,
   requestManagedEnterpriseService,
   createModuleAccessRequest,
   decideModuleAccessRequest,
@@ -45,7 +41,6 @@ import {
   type EnterpriseServiceKey,
 } from "@corgtex/domain";
 import { prisma, sendEmail } from "@corgtex/shared";
-import { meetingTranscriptArtifactsFromFormData } from "@/lib/meeting-transcript-source-artifacts";
 
 async function workspaceNameForEmail(workspaceId: string) {
   const workspace = await prisma.workspace.findUnique({
@@ -233,19 +228,6 @@ export async function updateMemberAction(formData: FormData) {
   }
 }
 
-export async function deactivateMemberAction(formData: FormData) {
-  const _demoGuardWsId = formData.get("workspaceId") as string;
-  if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
-
-  const actor = await requirePageActor();
-  const workspaceId = asString(formData, "workspaceId");
-  await deactivateMember(actor, {
-    workspaceId,
-    memberId: asString(formData, "memberId"),
-  });
-  refresh(workspaceId);
-}
-
 export async function resendMemberAccessLinkAction(formData: FormData) {
   try {
     const _demoGuardWsId = formData.get("workspaceId") as string;
@@ -416,22 +398,6 @@ export async function connectMeetingTranscriptSourceAction(formData: FormData) {
   refresh(workspaceId);
 }
 
-export async function importMeetingTranscriptSourceAction(formData: FormData) {
-  const _demoGuardWsId = formData.get("workspaceId") as string;
-  if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
-
-  const actor = await requirePageActor();
-  const workspaceId = asString(formData, "workspaceId");
-  const artifacts = await meetingTranscriptArtifactsFromFormData(formData);
-  await importMeetingTranscriptSourceArtifacts(actor, {
-    workspaceId,
-    provider: normalizeMeetingTranscriptSourceProvider(asString(formData, "provider")),
-    sourceKind: asOptional(formData, "sourceKind") ?? "settings-upload",
-    artifacts,
-  });
-  refresh(workspaceId);
-}
-
 export async function runMeetingTranscriptSourceBackfillAction(formData: FormData) {
   const _demoGuardWsId = formData.get("workspaceId") as string;
   if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
@@ -563,20 +529,6 @@ export async function addMemberExpertiseAction(formData: FormData) {
   refresh(workspaceId);
 }
 
-export async function endorseMemberExpertiseAction(formData: FormData) {
-  const _demoGuardWsId = formData.get("workspaceId") as string;
-  if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
-
-  const actor = await requirePageActor();
-  const workspaceId = asString(formData, "workspaceId");
-  await endorseMemberExpertise(actor, {
-    workspaceId,
-    memberId: asString(formData, "memberId"),
-    tagId: asString(formData, "tagId"),
-  });
-  refresh(workspaceId);
-}
-
 export async function upsertSsoConfigAction(formData: FormData) {
   const _demoGuardWsId = formData.get("workspaceId") as string;
   if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
@@ -615,48 +567,6 @@ export async function updateModelUsageBudgetAction(formData: FormData) {
     periodStartDay: isNaN(periodStartDay) ? 1 : periodStartDay,
   });
 
-  refresh(workspaceId);
-}
-
-function oauthSyncSettingsFromForm(formData: FormData) {
-  const documentsRaw = asOptional(formData, "documentIds") ?? "";
-  const emailFiltersRaw = asOptional(formData, "emailFilters") ?? "";
-  const selectedDriveIds = documentsRaw
-    .split(/[\n,]/)
-    .map((value) => value.trim())
-    .filter(Boolean);
-  const filters = emailFiltersRaw
-    .split(/\n/)
-    .map((value) => value.trim())
-    .filter(Boolean);
-
-  return {
-    calendar: {
-      enabled: formData.get("calendarEnabled") === "true",
-      includeAllEvents: formData.get("includeAllEvents") === "true",
-    },
-    documents: {
-      enabled: formData.get("documentsEnabled") === "true",
-      selectedDriveIds,
-    },
-    email: {
-      enabled: formData.get("emailEnabled") === "true",
-      filters,
-    },
-  };
-}
-
-export async function updateOAuthConnectionSettingsAction(formData: FormData) {
-  const workspaceId = asString(formData, "workspaceId");
-  await enforceDemoGuard(workspaceId);
-
-  const actor = await requirePageActor();
-  await updateOAuthConnectionSyncSettings(actor, {
-    workspaceId,
-    connectionId: asString(formData, "connectionId"),
-    syncSettings: oauthSyncSettingsFromForm(formData),
-    status: asString(formData, "status") as "ACTIVE" | "PAUSED",
-  });
   refresh(workspaceId);
 }
 
