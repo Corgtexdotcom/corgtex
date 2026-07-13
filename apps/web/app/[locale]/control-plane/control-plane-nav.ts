@@ -1,4 +1,4 @@
-export type ControlPlaneNavKey =
+type ControlPlaneNavKey =
   | "dashboard"
   | "customers"
   | "selfServe"
@@ -8,7 +8,7 @@ export type ControlPlaneNavKey =
   | "operations"
   | "users";
 
-export type ControlPlaneNavGroupKey = "fleet" | "observe" | "operate";
+type ControlPlaneNavGroupKey = "fleet" | "observe" | "operate";
 
 export interface ControlPlaneNavItem {
   key: ControlPlaneNavKey;
@@ -67,7 +67,7 @@ export const controlPlaneNavGroups: ControlPlaneNavGroup[] = [
   },
 ];
 
-export function normalizeControlPlanePathname(pathname: string) {
+function normalizeControlPlanePathname(pathname: string) {
   const normalized = pathname || "";
   return normalized.replace(/^\/(en|es)(?=\/)/, "") || "/control-plane";
 }
