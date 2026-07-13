@@ -13,14 +13,9 @@ const actor = {
 const addKeyResult = vi.fn();
 const createGoal = vi.fn();
 const createGoalFinanceProjectLink = vi.fn();
-const createGoalLink = vi.fn();
-const createRecognition = vi.fn();
 const deleteGoal = vi.fn();
 const deleteGoalFinanceProjectLink = vi.fn();
-const deleteGoalLink = vi.fn();
-const deleteKeyResult = vi.fn();
 const enforceDemoGuard = vi.fn();
-const postGoalUpdate = vi.fn();
 const requirePageActor = vi.fn(async () => actor);
 const requireWorkspaceFeature = vi.fn();
 const respondToCheckIn = vi.fn();
@@ -28,7 +23,6 @@ const returnGoalToDraft = vi.fn();
 const skipCompanyUnderstandingQuestion = vi.fn();
 const triggerAgentRun = vi.fn();
 const updateGoal = vi.fn();
-const updateKeyResult = vi.fn();
 
 vi.mock("@/lib/demo-guard", () => ({
   enforceDemoGuard,
@@ -46,19 +40,13 @@ vi.mock("@corgtex/domain", () => ({
   addKeyResult,
   createGoal,
   createGoalFinanceProjectLink,
-  createGoalLink,
-  createRecognition,
   deleteGoal,
   deleteGoalFinanceProjectLink,
-  deleteGoalLink,
-  deleteKeyResult,
-  postGoalUpdate,
   respondToCheckIn,
   returnGoalToDraft,
   skipCompanyUnderstandingQuestion,
   triggerAgentRun,
   updateGoal,
-  updateKeyResult,
 }));
 
 vi.mock("next/cache", () => ({
