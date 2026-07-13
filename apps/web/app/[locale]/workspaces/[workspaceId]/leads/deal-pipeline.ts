@@ -1,9 +1,7 @@
 import type { WorkItemSortable } from "@/lib/work-item-view";
 import { CRM_DEAL_STAGES } from "./view-model";
 
-export type CrmDealStageCode = (typeof CRM_DEAL_STAGES)[number];
-
-export type DealPipelineActivity = {
+type DealPipelineActivity = {
   id: string;
   title: string;
   type?: string;
@@ -14,7 +12,7 @@ export type DealPipelineActivity = {
   createdAt: Date | string;
 };
 
-export type DealPipelineTransition = {
+type DealPipelineTransition = {
   id: string;
   fromStage?: string | null;
   toStage: string;
@@ -48,7 +46,7 @@ export function dealsGroupedByStage<T extends { stage: string }>(
   return grouped;
 }
 
-export function latestDealStageTransition(deal: DealPipelineDeal) {
+function latestDealStageTransition(deal: DealPipelineDeal) {
   return deal.stageTransitions?.[0] ?? null;
 }
 

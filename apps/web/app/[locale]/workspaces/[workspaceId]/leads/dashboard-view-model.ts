@@ -1,6 +1,6 @@
 type DateValue = Date | string | null | undefined;
 
-export const CRM_DASHBOARD_LIST_LIMIT = 5;
+const CRM_DASHBOARD_LIST_LIMIT = 5;
 
 export type DashboardAccountLike = {
   id: string;

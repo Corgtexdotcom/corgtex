@@ -1,5 +1,5 @@
 export const CRM_FULL_PAGE_SIZE = 25;
-export const CRM_SORT_DIRECTIONS = ["asc", "desc"] as const;
+const CRM_SORT_DIRECTIONS = ["asc", "desc"] as const;
 
 export type SearchParamsRecord = Record<string, string | string[] | undefined>;
 export type CrmFullPageViewMode = "list" | "kanban" | "table";

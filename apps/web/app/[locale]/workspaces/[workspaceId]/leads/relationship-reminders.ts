@@ -7,7 +7,7 @@ export type RelationshipReminder = {
   createdAt: Date | string;
 };
 
-export function isOpenRelationshipReminder(activity: RelationshipReminder) {
+function isOpenRelationshipReminder(activity: RelationshipReminder) {
   return activity.type === "TASK" && !activity.completedAt;
 }
 
