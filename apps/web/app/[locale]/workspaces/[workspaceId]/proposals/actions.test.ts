@@ -16,7 +16,6 @@ const createProposal = vi.fn();
 const createProposalFromTension = vi.fn();
 const enforceDemoGuard = vi.fn();
 const postDeliberationEntry = vi.fn();
-const publishProposal = vi.fn();
 const reopenProposal = vi.fn();
 const requirePageActor = vi.fn(async () => actor);
 const resolveDeliberationEntry = vi.fn();
@@ -40,7 +39,6 @@ vi.mock("@corgtex/domain", () => ({
   createProposal,
   createProposalFromTension,
   postDeliberationEntry,
-  publishProposal,
   reopenProposal,
   resolveDeliberationEntry,
   resolveProposal,

@@ -13,7 +13,6 @@ import {
   returnProposalToDraft,
   submitProposal,
   updateProposal,
-  publishProposal,
   postDeliberationEntry,
   resolveDeliberationEntry,
   updateDeliberationEntry,
@@ -175,19 +174,6 @@ export async function resolveProposalAction(formData: FormData) {
     outcome: asString(formData, "outcome") as "ADOPTED" | "NOT_ADOPTED" | "WITHDRAWN",
     decisionMd: asString(formData, "decisionMd"),
     evidenceDocumentIds,
-  });
-  refresh(workspaceId);
-}
-
-export async function publishProposalAction(formData: FormData) {
-  const _demoGuardWsId = formData.get("workspaceId") as string;
-  if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
-
-  const actor = await requirePageActor();
-  const workspaceId = asString(formData, "workspaceId");
-  await publishProposal(actor, {
-    workspaceId,
-    proposalId: asString(formData, "proposalId"),
   });
   refresh(workspaceId);
 }

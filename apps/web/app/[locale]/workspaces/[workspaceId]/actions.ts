@@ -8,7 +8,6 @@ export {
   archiveProposalAction,
   createProposalAction,
   postDeliberationEntryAction,
-  publishProposalAction,
   reopenProposalAction,
   requestProposalAdviceAction,
   resolveDeliberationEntryAction,
