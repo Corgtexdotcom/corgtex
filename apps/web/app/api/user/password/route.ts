@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { changeUserPassword } from "@corgtex/domain";
-import { resolveRequestActor, logoutAction } from "@/lib/auth";
+import { resolveRequestActor } from "@/lib/auth";
 import { handleRouteError, validateBody } from "@/lib/http";
 
 const passwordSchema = z.object({

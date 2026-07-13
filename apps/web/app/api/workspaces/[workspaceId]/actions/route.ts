@@ -1,4 +1,4 @@
-import { NextRequest, NextResponse } from "next/server";
+import { NextResponse } from "next/server";
 import { createAction, getWorkspacePermanentPathForEntity, listActions } from "@corgtex/domain";
 import type { ArchiveFilter } from "@corgtex/domain";
 import { withWorkspaceRoute } from "@/lib/route-handler";
