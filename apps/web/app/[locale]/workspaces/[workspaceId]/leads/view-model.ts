@@ -1,4 +1,4 @@
-export const RELATIONSHIP_VIEWS = [
+const RELATIONSHIP_VIEWS = [
   "dashboard",
   "accounts",
   "contacts",
@@ -12,7 +12,7 @@ export const RELATIONSHIP_VIEWS = [
 
 export type RelationshipView = (typeof RELATIONSHIP_VIEWS)[number];
 
-export const RELATIONSHIP_FULL_PAGE_VIEWS = [
+const RELATIONSHIP_FULL_PAGE_VIEWS = [
   "accounts",
   "pipeline",
   "activity",

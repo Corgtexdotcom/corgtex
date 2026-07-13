@@ -1,13 +1,3 @@
-export const CRM_COMMUNICATION_SUGGESTION_STATUSES = [
-  "SUGGESTED",
-  "REQUESTED",
-  "FAILED",
-  "SENT",
-  "DECLINED",
-] as const;
-
-export type CommunicationSuggestionStatus = (typeof CRM_COMMUNICATION_SUGGESTION_STATUSES)[number];
-
 export type CommunicationSuggestionLike = {
   status: string;
   updatedAt?: Date | string;
@@ -26,7 +16,7 @@ export function isOpenCommunicationSuggestion(suggestion: CommunicationSuggestio
   return suggestion.status === "SUGGESTED" || suggestion.status === "REQUESTED" || suggestion.status === "FAILED";
 }
 
-export function communicationSuggestionStatusRank(status: string) {
+function communicationSuggestionStatusRank(status: string) {
   return STATUS_RANK[status] ?? 99;
 }
 
