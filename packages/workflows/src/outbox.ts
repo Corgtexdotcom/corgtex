@@ -52,25 +52,7 @@ const MAX_ATTEMPTS = 5;
 const RETRY_BASE_DELAY_MS = 5_000;
 const RETRY_MAX_DELAY_MS = 5 * 60 * 1_000;
 const LOCK_TIMEOUT_MS = 5 * 60 * 1_000;
-const TRIAGE_COALESCE_WINDOW_MS = 5 * 60 * 1_000;
 const MEETING_RECORDER_RECONCILE_INTERVAL_MS = 10 * 60 * 1_000;
-const TRIAGE_EVENT_TYPES = new Set([
-  "proposal.submitted",
-  "meeting.created",
-  "meeting.transcript-uploaded",
-  "action.created",
-  "tension.created",
-  "checkin.response_received",
-]);
-
-const KNOWLEDGE_PULSE_EVENT_TYPES = new Set([
-  "proposal.submitted",
-  "proposal.approved",
-  "document.created",
-  "meeting.created",
-  "meeting.transcript-uploaded",
-  "approval.finalized",
-]);
 
 type ClaimedEvent = {
   id: string;
