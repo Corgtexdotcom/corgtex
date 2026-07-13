@@ -13,10 +13,8 @@ import {
   convertCrmAccountToClient,
   createExecutionRequest,
   createContact,
-  updateContact,
   createDeal,
   updateDeal,
-  deleteDeal,
   createActivity,
   completeActivity,
   createCommunicationSuggestion,
@@ -153,25 +151,6 @@ export async function createContactAction(formData: FormData) {
   refresh(workspaceId);
 }
 
-export async function updateContactAction(formData: FormData) {
-  const _demoGuardWsId = formData.get("workspaceId") as string;
-  if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
-
-  const actor = await requirePageActor();
-  const workspaceId = asString(formData, "workspaceId");
-  await updateContact(actor, {
-    workspaceId,
-    contactId: asString(formData, "contactId"),
-    email: formData.has("email") ? asString(formData, "email") : undefined,
-    name: formData.has("name") ? asOptional(formData, "name") ?? undefined : undefined,
-    company: formData.has("company") ? asOptional(formData, "company") ?? undefined : undefined,
-    title: formData.has("title") ? asOptional(formData, "title") ?? undefined : undefined,
-    phone: formData.has("phone") ? asOptional(formData, "phone") ?? undefined : undefined,
-    accountId: formData.has("accountId") ? asOptional(formData, "accountId") ?? null : undefined,
-  });
-  refresh(workspaceId);
-}
-
 async function archiveContactFromForm(formData: FormData) {
   const _demoGuardWsId = formData.get("workspaceId") as string;
   if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
@@ -186,10 +165,6 @@ async function archiveContactFromForm(formData: FormData) {
 }
 
 export async function archiveContactAction(formData: FormData) {
-  await archiveContactFromForm(formData);
-}
-
-export async function deleteContactAction(formData: FormData) {
   await archiveContactFromForm(formData);
 }
 
@@ -255,19 +230,6 @@ export async function createFinanceProjectFromDealAction(formData: FormData) {
     expenseBudgetCents: optionalCurrencyCents(formData, "expenseBudget"),
     weeklyBurnCents: optionalCurrencyCents(formData, "weeklyBurn"),
     targetMarginBps: optionalPercentBps(formData, "targetMargin"),
-  });
-  refresh(workspaceId);
-}
-
-export async function deleteDealAction(formData: FormData) {
-  const _demoGuardWsId = formData.get("workspaceId") as string;
-  if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
-
-  const actor = await requirePageActor();
-  const workspaceId = asString(formData, "workspaceId");
-  await deleteDeal(actor, {
-    workspaceId,
-    dealId: asString(formData, "dealId"),
   });
   refresh(workspaceId);
 }
