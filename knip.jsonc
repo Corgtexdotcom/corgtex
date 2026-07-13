@@ -1,5 +1,13 @@
 {
   "$schema": "./node_modules/knip/schema.json",
+  "ignoreDependencies": [
+    // Loaded by eslint.config.mjs through FlatCompat("next/core-web-vitals").
+    "eslint-config-next"
+  ],
+  "ignoreBinaries": [
+    // scripts/set-railway-release-metadata.mjs shells out to the external Railway CLI.
+    "railway"
+  ],
   "workspaces": {
     ".": {
       "entry": [
