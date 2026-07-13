@@ -1,10 +1,9 @@
-import { createNavigation } from "next-intl/navigation";
 import { defineRouting } from "next-intl/routing";
 
 export const locales = ["en", "es"] as const;
 export type SiteLocale = (typeof locales)[number];
 
-export const defaultLocale: SiteLocale = "en";
+const defaultLocale: SiteLocale = "en";
 
 export const routing = defineRouting({
   locales,
@@ -29,5 +28,3 @@ export function pathAlternates(path: string) {
     "x-default": normalizedPath,
   };
 }
-
-export const { Link, redirect, usePathname, useRouter, getPathname } = createNavigation(routing);

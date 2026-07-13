@@ -1,15 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-vi.mock("next-intl/navigation", () => ({
-  createNavigation: () => ({
-    Link: vi.fn(),
-    getPathname: vi.fn(),
-    redirect: vi.fn(),
-    usePathname: vi.fn(),
-    useRouter: vi.fn(),
-  }),
-}));
-
 vi.mock("next-intl/routing", () => ({
   defineRouting: vi.fn((config) => config),
 }));
