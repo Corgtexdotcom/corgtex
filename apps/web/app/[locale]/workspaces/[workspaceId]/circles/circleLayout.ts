@@ -134,7 +134,7 @@ function getExpandedCircleHeight(data: CircleLayoutNodeData | undefined, width: 
   return headerHeight + 28 + roleHeights.reduce((total, height) => total + height, 0) + Math.max(0, roleHeights.length - 1) * 10;
 }
 
-export function getCircleNodeDimensions({
+function getCircleNodeDimensions({
   isExpanded,
   roleCount,
   viewportWidth,
@@ -403,7 +403,7 @@ function applyManualPositions(nodes: Node[], manualPositions: Record<string, Gra
   });
 }
 
-export function getGraphBounds(nodes: Node[], options: CircleLayoutOptions): GraphBounds {
+function getGraphBounds(nodes: Node[], options: CircleLayoutOptions): GraphBounds {
   if (nodes.length === 0) {
     return { minX: 0, minY: 0, maxX: 1, maxY: 1, width: 1, height: 1 };
   }

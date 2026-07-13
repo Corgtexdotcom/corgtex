@@ -1,4 +1,4 @@
-export type CircleGraphUser = {
+type CircleGraphUser = {
   id?: string;
   email?: string | null;
   displayName?: string | null;
@@ -6,13 +6,13 @@ export type CircleGraphUser = {
   bio?: string | null;
 };
 
-export type CircleGraphMember = {
+type CircleGraphMember = {
   id?: string;
   kind?: "HUMAN" | "SYSTEM" | null;
   user?: CircleGraphUser | null;
 };
 
-export type CircleGraphAssignment = {
+type CircleGraphAssignment = {
   id: string;
   expiresAt?: Date | string | null;
   member?: CircleGraphMember | null;
@@ -57,7 +57,7 @@ export function getInitials(name?: string | null, email?: string | null) {
   return source.slice(0, 2).toUpperCase();
 }
 
-export function getDisplayName(user?: CircleGraphUser | null) {
+function getDisplayName(user?: CircleGraphUser | null) {
   return user?.displayName?.trim() || user?.email?.trim() || "Unknown";
 }
 
