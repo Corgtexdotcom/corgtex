@@ -131,7 +131,7 @@ jobs:
           while IFS= read -r path; do
             [ -z "$path" ] && continue
             case "$path" in
-              AGENTS.md|README.md|docs/*|.github/*|.agents/*|.codex/*|apps/site/*)
+              AGENTS.md|README.md|knip.jsonc|tsconfig.unused.json|docs/*|.github/*|.agents/*|.codex/*|apps/site/*)
                 ;;
               *)
                 requires_app_release=true
@@ -143,7 +143,7 @@ jobs:
           if [ "$requires_app_release" = "true" ]; then
             echo "Production app-affecting changes detected; recovery requires release match."
           else
-            echo "Only docs, workflow, agent-guidance, or site-only files changed; recovery accepts healthy app smoke without release match."
+            echo "Only docs, workflow, agent-guidance, cleanup-tooling config, or site-only files changed; recovery accepts healthy app smoke without release match."
           fi
 
       - name: Check current production health before reverting
