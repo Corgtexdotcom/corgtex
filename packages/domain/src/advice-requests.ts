@@ -102,6 +102,7 @@ async function resolveAdviceSubject(
         status: true,
         circleId: true,
         authorUserId: true,
+        ownerMemberId: true,
         archivedAt: true,
       },
     });
@@ -114,7 +115,7 @@ async function resolveAdviceSubject(
       id: proposal.id,
       title: proposal.title,
       circleId: proposal.circleId,
-      ownerMemberId: await resolveSubjectOwnerMemberId(tx, params.workspaceId, proposal.authorUserId),
+      ownerMemberId: proposal.ownerMemberId ?? await resolveSubjectOwnerMemberId(tx, params.workspaceId, proposal.authorUserId),
       authorUserId: proposal.authorUserId,
     };
   }

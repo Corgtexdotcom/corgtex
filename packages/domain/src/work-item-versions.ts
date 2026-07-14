@@ -42,6 +42,7 @@ export function requireSubmittedWorkItemEditor(
   record: {
     authorUserId?: string | null;
     assigneeMemberId?: string | null;
+    ownerMemberId?: string | null;
   },
 ) {
   if (actor.kind === "user" && record.authorUserId && actor.user.id === record.authorUserId) {
@@ -50,7 +51,10 @@ export function requireSubmittedWorkItemEditor(
   if (actor.kind === "user" && membership?.isActive && record.assigneeMemberId && membership.id === record.assigneeMemberId) {
     return;
   }
-  throw new AppError(403, "FORBIDDEN", "Only the author or assigned member can edit submitted work items.");
+  if (actor.kind === "user" && membership?.isActive && record.ownerMemberId && membership.id === record.ownerMemberId) {
+    return;
+  }
+  throw new AppError(403, "FORBIDDEN", "Only the author or responsible member can edit submitted work items.");
 }
 
 export async function resolveWorkspaceMemberUserId(

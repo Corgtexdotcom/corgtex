@@ -3,6 +3,7 @@
 import { useMemo, useState } from "react";
 import { useTranslations } from "next-intl";
 import { MarkdownEditor } from "@/lib/components/MarkdownEditor";
+import { WorkItemMemberSelect, type WorkItemMemberOption } from "@/lib/components/WorkItemMemberSelect";
 import { WorkItemPrioritySelect } from "@/lib/components/WorkItemPrioritySelect";
 import type { WorkItemPriorityLabels } from "@/lib/work-item-priority";
 
@@ -34,10 +35,14 @@ export function ProposalDraftFields({
   defaultTitle = "",
   defaultBodyMd = "",
   defaultPriority = 0,
+  defaultOwnerMemberId = "",
+  members,
 }: {
   defaultTitle?: string;
   defaultBodyMd?: string;
   defaultPriority?: number;
+  defaultOwnerMemberId?: string | null;
+  members: WorkItemMemberOption[];
 }) {
   const t = useTranslations("proposals");
   const tWork = useTranslations("workItems");
@@ -71,6 +76,13 @@ export function ProposalDraftFields({
           placeholder={t("formBodyPlaceholder")}
         />
       </label>
+      <WorkItemMemberSelect
+        name="ownerMemberId"
+        label={t("formOwner")}
+        noneLabel={t("formOwnerNone")}
+        members={members}
+        defaultValue={defaultOwnerMemberId}
+      />
       <WorkItemPrioritySelect label={t("formPriority")} labels={priorityLabels} defaultValue={defaultPriority} />
       {showAiSummaryToggle && (
         <label style={{ display: "flex", alignItems: "center", gap: "8px", fontWeight: "normal", cursor: "pointer" }}>

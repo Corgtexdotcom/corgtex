@@ -343,6 +343,7 @@ async function rewireMemberRelations(tx: Prisma.TransactionClient, sourceMemberI
     ["action", "assigneeMemberId"],
     ["tension", "assigneeMemberId"],
     ["tension", "raisedByMemberId"],
+    ["proposal", "ownerMemberId"],
     ["deliberationEntry", "targetMemberId"],
     ["approvalDecision", "memberId"],
     ["newspaperDelivery", "memberId"],

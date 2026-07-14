@@ -64,6 +64,7 @@ describe("proposal server actions", () => {
     formData.set("title", "Clarify approval policy");
     formData.set("bodyMd", "Proposal body");
     formData.set("priority", "6");
+    formData.set("ownerMemberId", "member-owner");
     formData.set("sourceTensionId", "tension-1");
     formData.append("relatedActionIds", "action-1");
     formData.append("relatedActionIds", "action-2");
@@ -77,6 +78,7 @@ describe("proposal server actions", () => {
       title: "Clarify approval policy",
       bodyMd: "Proposal body",
       priority: 6,
+      ownerMemberId: "member-owner",
       includeAiSummary: false,
       isPrivate: false,
       sourceTensionId: "tension-1",
@@ -126,6 +128,7 @@ describe("proposal server actions", () => {
     formData.set("proposalId", "proposal-1");
     formData.set("title", "Clarify approval policy");
     formData.set("bodyMd", "Long proposal body");
+    formData.set("ownerMemberId", "member-owner");
     formData.set("includeAiSummaryRendered", "1");
 
     await updateProposalAction(formData);
@@ -133,6 +136,7 @@ describe("proposal server actions", () => {
     expect(updateProposal).toHaveBeenCalledWith(actor, expect.objectContaining({
       workspaceId: "workspace-1",
       proposalId: "proposal-1",
+      ownerMemberId: "member-owner",
       includeAiSummary: false,
     }));
   });

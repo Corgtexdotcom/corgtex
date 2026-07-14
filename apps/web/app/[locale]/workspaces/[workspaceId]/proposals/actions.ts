@@ -42,6 +42,7 @@ export async function createProposalAction(formData: FormData) {
     bodyMd: asString(formData, "bodyMd"),
     includeAiSummary: formData.get("includeAiSummary") === "on",
     priority: asOptionalInt(formData, "priority"),
+    ownerMemberId: asOptional(formData, "ownerMemberId"),
     isPrivate: formData.get("isPrivate") === "on",
     sourceTensionId: asOptional(formData, "sourceTensionId"),
     relatedActionIds: asStringArray(formData, "relatedActionIds"),
@@ -61,6 +62,7 @@ export async function createProposalFromTensionAction(formData: FormData) {
     title: asOptional(formData, "title"),
     summary: asOptional(formData, "summary"),
     bodyMd: asOptional(formData, "bodyMd"),
+    ownerMemberId: asOptional(formData, "ownerMemberId"),
     relatedActionIds: asStringArray(formData, "relatedActionIds"),
     isPrivate: formData.has("isPrivate") ? formData.get("isPrivate") === "on" : true,
   });
@@ -79,6 +81,7 @@ export async function updateProposalAction(formData: FormData) {
     title: asOptional(formData, "title") ?? undefined,
     bodyMd: asOptional(formData, "bodyMd") ?? undefined,
     priority: formData.has("priority") ? (asOptionalInt(formData, "priority") ?? 0) : undefined,
+    ownerMemberId: formData.has("ownerMemberId") ? asOptional(formData, "ownerMemberId") : undefined,
     includeAiSummary: formData.has("includeAiSummaryRendered") ? formData.get("includeAiSummary") === "on" : undefined,
   });
   refresh(workspaceId);

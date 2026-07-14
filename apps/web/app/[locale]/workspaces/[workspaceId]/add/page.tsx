@@ -206,6 +206,7 @@ export default async function WorkspaceAddPage({
   const needsProposals = kind === "action" || kind === "tension";
   const needsMembers = kind === "action"
     || kind === "tension"
+    || kind === "proposal"
     || kind === "goal"
     || kind === "allocation"
     || kind === "role_assignment"
@@ -678,6 +679,12 @@ export default async function WorkspaceAddPage({
             <label>Title<input name="title" required /></label>
             <label>Summary<input name="summary" /></label>
             <label>Body<MarkdownEditor name="bodyMd" required rows={8} /></label>
+            <WorkItemMemberSelect
+              name="ownerMemberId"
+              label="Owner"
+              noneLabel="No owner"
+              members={memberOptions}
+            />
             <WorkItemPrioritySelect label="Priority" labels={DEFAULT_WORK_ITEM_PRIORITY_LABELS} defaultValue={0} />
             <label style={{ display: "flex", alignItems: "center", flexDirection: "row", gap: 8 }}>
               <input type="checkbox" name="isPrivate" defaultChecked style={{ width: "auto" }} />
