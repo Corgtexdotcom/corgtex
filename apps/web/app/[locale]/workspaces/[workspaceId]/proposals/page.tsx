@@ -67,9 +67,12 @@ export default async function ProposalsPage({
     listAdviceRequests(actor, { workspaceId, subjectType: "PROPOSAL", status: "ACTIVE", take: 500 }),
   ]);
   const isDemo = currentWorkspace?.slug === "jnj-demo";
-  const canManageProposal = (proposal: { authorUserId: string }) => actor.kind === "agent"
+  const memberName = (member: { user: { displayName: string | null; email: string } }) => member.user.displayName || member.user.email;
+  const memberOptions = members.map((member) => ({ id: member.id, label: memberName(member) }));
+  const canManageProposal = (proposal: { authorUserId: string; ownerMemberId?: string | null }) => actor.kind === "agent"
     || membership?.role === "ADMIN"
-    || (actor.kind === "user" && proposal.authorUserId === actor.user.id);
+    || (actor.kind === "user" && proposal.authorUserId === actor.user.id)
+    || (Boolean(membership?.id) && proposal.ownerMemberId === membership?.id);
   const canResolveProposal = actor.kind === "agent" || Boolean(membership);
   const priorityLabels = {
     3: tWork("priorityUrgent"),
@@ -78,6 +81,9 @@ export default async function ProposalsPage({
     0: tWork("priorityLow"),
   } satisfies WorkItemPriorityLabels;
   const priorityText = (priority: number | null | undefined) => formatWorkItemPriority(priority, priorityLabels);
+  const ownerText = (proposal: { ownerMember?: { user: { displayName: string | null; email: string } } | null }) => proposal.ownerMember
+    ? t("ownerMeta", { name: memberName(proposal.ownerMember) })
+    : t("formOwnerNone");
   const activeProposals = proposals.filter((proposal) => !proposal.archivedAt);
 
   const groupedProposals = {
@@ -207,8 +213,9 @@ export default async function ProposalsPage({
 
   function proposalControls(proposal: ProposalListItem) {
     const isAuthor = actor.kind === "user" && proposal.authorUserId === actor.user.id;
+    const isOwner = Boolean(membership?.id) && proposal.ownerMemberId === membership?.id;
     const canManage = canManageProposal(proposal);
-    const canEditContent = proposal.status === "DRAFT" ? canManage : proposal.status === "OPEN" && isAuthor;
+    const canEditContent = proposal.status === "DRAFT" ? canManage : proposal.status === "OPEN" && (isAuthor || isOwner);
     const moreItems: ReactNode[] = [];
     const primaryMoveTarget: ProposalMoveStatus | null = canManage && proposal.status === "DRAFT"
       ? "OPEN"
@@ -237,7 +244,13 @@ export default async function ProposalsPage({
           <form action={updateProposalAction} className="action-menu-form">
             <input type="hidden" name="workspaceId" value={workspaceId} />
             <input type="hidden" name="proposalId" value={proposal.id} />
-            <ProposalDraftFields defaultTitle={proposal.title} defaultBodyMd={proposal.bodyMd} defaultPriority={proposal.priority} />
+            <ProposalDraftFields
+              defaultTitle={proposal.title}
+              defaultBodyMd={proposal.bodyMd}
+              defaultPriority={proposal.priority}
+              defaultOwnerMemberId={proposal.ownerMemberId}
+              members={memberOptions}
+            />
             <button type="submit" className="secondary small">{proposal.status === "DRAFT" ? t("btnSaveDraft") : tCommon("save")}</button>
           </form>
         </details>,
@@ -284,7 +297,7 @@ export default async function ProposalsPage({
           </div>
           <MarkdownExcerpt markdown={proposal.summary ?? proposal.bodyMd} maxLength={compact ? 120 : 180} as="div" className="nr-excerpt" />
           <div className="nr-item-meta mt-2">
-            {proposal.author.displayName || proposal.author.email} · {new Date(proposal.createdAt).toLocaleDateString()} · {priorityText(proposal.priority)}
+            {ownerText(proposal)} · {new Date(proposal.createdAt).toLocaleDateString()} · {priorityText(proposal.priority)}
             {proposal.circle ? ` · ${proposal.circle.name}` : ""}
             {" · "}
             {proposal.version > 1 ? (
@@ -372,7 +385,8 @@ export default async function ProposalsPage({
         ),
         owner: (
           <div className="nr-work-item-table-meta">
-            <div>{proposal.author.displayName || proposal.author.email}</div>
+            <div>{ownerText(proposal)}</div>
+            <div>{t("authorMeta", { name: proposal.author.displayName || proposal.author.email })}</div>
             {proposal.circle && <div>{proposal.circle.name}</div>}
           </div>
         ),
@@ -425,7 +439,7 @@ export default async function ProposalsPage({
         <summary className="nr-hide-marker nr-kanban-add-trigger">
           {tWork("newDraftCard")}
         </summary>
-        <CreateProposalForm workspaceId={workspaceId} compact />
+        <CreateProposalForm workspaceId={workspaceId} members={memberOptions} compact />
       </details>
     );
   }
@@ -501,7 +515,7 @@ export default async function ProposalsPage({
           circleIds={circleIds}
           memberIds={memberIds}
           circles={circles.map((circle) => ({ id: circle.id, label: circle.name }))}
-          members={members.map((member) => ({ id: member.id, label: member.user.displayName || member.user.email }))}
+          members={memberOptions}
           labels={{
             status: tWork("status"),
             allStatuses: tWork("allStatuses"),

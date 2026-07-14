@@ -43,6 +43,7 @@ const { prismaMock, requireWorkspaceMembershipMock } = vi.hoisted(() => {
       memberExpertise: relationModel(),
       memberInviteRequest: relationModel(),
       newspaperDelivery: relationModel(),
+      proposal: relationModel(),
       recognition: relationModel(),
       roleAssignment: relationModel(),
       roleHolderHistory: relationModel(),
@@ -252,6 +253,7 @@ describe("member merge domain", () => {
     prismaMock.roleAssignment.updateMany.mockResolvedValue({ count: 2 });
     prismaMock.action.updateMany.mockResolvedValue({ count: 3 });
     prismaMock.tension.updateMany.mockResolvedValueOnce({ count: 1 }).mockResolvedValueOnce({ count: 0 });
+    prismaMock.proposal.updateMany.mockResolvedValue({ count: 2 });
     prismaMock.member.update.mockResolvedValueOnce({
       ...targetMember,
       role: "ADMIN",
@@ -278,6 +280,7 @@ describe("member merge domain", () => {
       "roleAssignment.memberId": 2,
       "action.assigneeMemberId": 3,
       "tension.assigneeMemberId": 1,
+      "proposal.ownerMemberId": 2,
     });
     expect(prismaMock.memberEmailAlias.upsert).toHaveBeenCalledWith(expect.objectContaining({
       update: expect.objectContaining({

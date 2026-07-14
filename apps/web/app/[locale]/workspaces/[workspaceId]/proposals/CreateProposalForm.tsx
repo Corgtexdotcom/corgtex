@@ -4,6 +4,7 @@ import { useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useFormStatus } from "react-dom";
 import { useTranslations } from "next-intl";
+import type { WorkItemMemberOption } from "@/lib/components/WorkItemMemberSelect";
 import { createProposalAction } from "../actions";
 import { ProposalDraftFields } from "./ProposalDraftFields";
 
@@ -17,7 +18,15 @@ function CreateProposalButton({ label }: { label: string }) {
   );
 }
 
-export function CreateProposalForm({ workspaceId, compact = false }: { workspaceId: string; compact?: boolean }) {
+export function CreateProposalForm({
+  workspaceId,
+  compact = false,
+  members,
+}: {
+  workspaceId: string;
+  compact?: boolean;
+  members: WorkItemMemberOption[];
+}) {
   const formRef = useRef<HTMLFormElement | null>(null);
   const [editorKey, setEditorKey] = useState(0);
   const router = useRouter();
@@ -33,7 +42,7 @@ export function CreateProposalForm({ workspaceId, compact = false }: { workspace
   return (
     <form ref={formRef} action={handleCreateProposal} className={`stack nr-form-section ${compact ? "nr-inline-draft-form" : "mt-4"}`}>
       <input type="hidden" name="workspaceId" value={workspaceId} />
-      <ProposalDraftFields key={editorKey} />
+      <ProposalDraftFields key={editorKey} members={members} />
       <label className="nr-checkbox-label">
         <input type="checkbox" name="isPrivate" defaultChecked />
         <span>{t("formPrivateDraft")}</span>

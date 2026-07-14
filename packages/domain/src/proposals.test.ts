@@ -12,6 +12,9 @@ vi.mock("@corgtex/shared", () => ({
       update: vi.fn(),
       findUniqueOrThrow: vi.fn(),
     },
+    member: {
+      findFirst: vi.fn(),
+    },
     action: {
       findMany: vi.fn(),
       updateMany: vi.fn(),
@@ -410,6 +413,167 @@ describe("proposal creation visibility", () => {
       ]),
     );
   });
+
+  it("validates and stores an active human proposal owner", async () => {
+    const { createProposal } = await import("./proposals");
+    const actor = { kind: "user", user: { id: "u-1" } } as any;
+
+    vi.mocked((prisma as any).member.findFirst).mockResolvedValueOnce({ id: "mem-owner" });
+    vi.mocked(prisma.proposal.create).mockResolvedValueOnce({
+      id: "p-owned",
+      workspaceId: "ws-1",
+      authorUserId: "u-1",
+      ownerMemberId: "mem-owner",
+      title: "Owned proposal",
+      status: "DRAFT",
+      isPrivate: true,
+    } as any);
+
+    await createProposal(actor, {
+      workspaceId: "ws-1",
+      title: "Owned proposal",
+      bodyMd: "Proposal body",
+      ownerMemberId: " mem-owner ",
+    });
+
+    expect((prisma as any).member.findFirst).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({
+        id: "mem-owner",
+        workspaceId: "ws-1",
+        isActive: true,
+      }),
+      select: { id: true },
+    }));
+    expect(prisma.proposal.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        ownerMemberId: "mem-owner",
+      }),
+    }));
+  });
+
+  it("rejects proposal owners that are not active human members in the workspace", async () => {
+    const { createProposal } = await import("./proposals");
+    const actor = { kind: "user", user: { id: "u-1" } } as any;
+
+    vi.mocked((prisma as any).member.findFirst).mockResolvedValueOnce(null);
+
+    await expect(createProposal(actor, {
+      workspaceId: "ws-1",
+      title: "Owned proposal",
+      bodyMd: "Proposal body",
+      ownerMemberId: "system-member",
+    })).rejects.toThrow("Proposal owner must be an active human member in the same workspace.");
+    expect(prisma.proposal.create).not.toHaveBeenCalled();
+  });
+});
+
+describe("proposal owner updates", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked((prisma as any).workItemVersion.findUnique).mockResolvedValue(null);
+    vi.mocked((prisma as any).workItemVersion.create).mockResolvedValue({});
+    vi.mocked((prisma as any).$executeRaw).mockResolvedValue({});
+  });
+
+  it("records version history when the proposal owner changes", async () => {
+    const { updateProposal } = await import("./proposals");
+    const actor = { kind: "user", user: { id: "u-1" } } as any;
+
+    vi.mocked(prisma.proposal.findUnique).mockResolvedValueOnce({
+      id: "p-owner-change",
+      workspaceId: "ws-1",
+      authorUserId: "u-1",
+      ownerMemberId: null,
+      title: "Old title",
+      summary: null,
+      bodyMd: "Old body",
+      priority: 0,
+      circleId: null,
+      status: "DRAFT",
+      archivedAt: null,
+      version: 1,
+    } as any);
+    vi.mocked((prisma as any).member.findFirst).mockResolvedValueOnce({ id: "mem-owner" });
+    vi.mocked(prisma.proposal.update).mockResolvedValueOnce({
+      id: "p-owner-change",
+      ownerMemberId: "mem-owner",
+      version: 2,
+    } as any);
+
+    await updateProposal(actor, {
+      workspaceId: "ws-1",
+      proposalId: "p-owner-change",
+      ownerMemberId: "mem-owner",
+    });
+
+    expect(prisma.proposal.update).toHaveBeenCalledWith(expect.objectContaining({
+      where: { id: "p-owner-change" },
+      data: expect.objectContaining({
+        ownerMemberId: "mem-owner",
+        version: 2,
+      }),
+    }));
+    expect((prisma as any).workItemVersion.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        entityType: "Proposal",
+        entityId: "p-owner-change",
+        version: 1,
+        changedFields: ["ownerMemberId"],
+        previousState: expect.objectContaining({
+          ownerMemberId: null,
+        }),
+      }),
+    }));
+  });
+
+  it("allows the proposal owner to edit an open proposal", async () => {
+    const { updateProposal } = await import("./proposals");
+    const { requireWorkspaceMembership } = await import("./auth");
+    const actor = { kind: "user", user: { id: "u-owner" } } as any;
+
+    vi.mocked(requireWorkspaceMembership).mockResolvedValueOnce({
+      id: "mem-owner",
+      workspaceId: "ws-1",
+      userId: "u-owner",
+      role: "MEMBER",
+      isActive: true,
+    } as any);
+    vi.mocked(prisma.proposal.findUnique).mockResolvedValueOnce({
+      id: "p-open-owned",
+      workspaceId: "ws-1",
+      authorUserId: "u-author",
+      ownerMemberId: "mem-owner",
+      title: "Old title",
+      summary: null,
+      bodyMd: "Old body",
+      priority: 0,
+      circleId: null,
+      status: "OPEN",
+      archivedAt: null,
+      version: 1,
+    } as any);
+    vi.mocked(prisma.proposal.update).mockResolvedValueOnce({
+      id: "p-open-owned",
+      title: "Owner edit",
+      version: 2,
+    } as any);
+
+    await expect(updateProposal(actor, {
+      workspaceId: "ws-1",
+      proposalId: "p-open-owned",
+      title: "Owner edit",
+    })).resolves.toMatchObject({
+      id: "p-open-owned",
+      title: "Owner edit",
+    });
+
+    expect(prisma.proposal.update).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        title: "Owner edit",
+        version: 2,
+      }),
+    }));
+  });
 });
 
 describe("listProposals", () => {
@@ -449,6 +613,7 @@ describe("listProposals", () => {
                   },
                 }),
               }),
+              { ownerMemberId: { in: ["mem-1"] } },
               expect.objectContaining({ actions: expect.any(Object) }),
               expect.objectContaining({ tensions: expect.any(Object) }),
             ]),

@@ -1,6 +1,6 @@
 import { notFound } from "next/navigation";
 import Link from "next/link";
-import { AppError, getProposal, getWorkspaceArchiveRecord, listAdviceRequests, listDeliberationEntries, listExternalResourceAttachments, listWorkItemEvidence, listWorkItemVersions, requireWorkspaceMembership } from "@corgtex/domain";
+import { AppError, getProposal, getWorkspaceArchiveRecord, listAdviceRequests, listDeliberationEntries, listExternalResourceAttachments, listHumanMembers, listWorkItemEvidence, listWorkItemVersions, requireWorkspaceMembership } from "@corgtex/domain";
 import { requirePageActor } from "@/lib/auth";
 import { MarkdownRenderer } from "@/lib/components/MarkdownRenderer";
 import { WorkItemResolutionDialog } from "@/lib/components/WorkItemResolutionDialog";
@@ -69,7 +69,7 @@ export default async function ProposalDetailPage({
   if (!proposal) notFound();
   const isArchived = Boolean(proposal.archivedAt);
 
-  const [deliberationEntries, versionHistory, evidence, externalResourceAttachments, adviceRequests, archiveRecord] = await Promise.all([
+  const [deliberationEntries, versionHistory, evidence, externalResourceAttachments, adviceRequests, archiveRecord, members] = await Promise.all([
     archivedSafeRead(isArchived, listDeliberationEntries(actor, {
       workspaceId,
       parentType: "PROPOSAL",
@@ -87,6 +87,7 @@ export default async function ProposalDetailPage({
     isArchived
       ? archivedSafeRead(true, getWorkspaceArchiveRecord(actor, { workspaceId, entityType: "Proposal", entityId: proposal.id }), null)
       : Promise.resolve(null),
+    isArchived ? Promise.resolve([]) : listHumanMembers(workspaceId),
   ]);
   const deliberationTargets = isArchived
     ? { options: [], defaultValue: "", actorMemberId: null, actorCircleIds: [] }
@@ -124,6 +125,10 @@ export default async function ProposalDetailPage({
   })();
 
   const authorName = proposal.author?.displayName || proposal.author?.email || t("authorUnknown");
+  const memberName = (member: { user: { displayName: string | null; email: string } }) => member.user.displayName || member.user.email;
+  const memberOptions = members.map((member) => ({ id: member.id, label: memberName(member) }));
+  const ownerName = proposal.ownerMember ? memberName(proposal.ownerMember) : null;
+  const ownerText = ownerName ? t("ownerMeta", { name: ownerName }) : t("formOwnerNone");
   const priorityLabels = {
     3: tWork("priorityUrgent"),
     2: tWork("priorityImportant"),
@@ -132,12 +137,13 @@ export default async function ProposalDetailPage({
   } satisfies WorkItemPriorityLabels;
   const priorityText = formatWorkItemPriority(proposal.priority, priorityLabels);
   const isAuthor = proposal.authorUserId === (actor.kind === "user" ? actor.user.id : "");
+  const isOwner = Boolean(membership?.id) && proposal.ownerMemberId === membership?.id;
   const isAdmin = actor.kind === "agent" || membership?.role === "ADMIN";
   const actorUserId = actor.kind === "user" ? actor.user.id : null;
   const actorMemberId = deliberationTargets.actorMemberId;
   const actorCircleIds = new Set(deliberationTargets.actorCircleIds);
-  const canManage = !isArchived && (actor.kind === "agent" || membership?.role === "ADMIN" || isAuthor);
-  const canEditContent = !isArchived && proposal.status === "DRAFT" ? canManage : !isArchived && proposal.status === "OPEN" && isAuthor;
+  const canManage = !isArchived && (actor.kind === "agent" || membership?.role === "ADMIN" || isAuthor || isOwner);
+  const canEditContent = !isArchived && proposal.status === "DRAFT" ? canManage : !isArchived && proposal.status === "OPEN" && (isAuthor || isOwner);
   const canResolve = !isArchived && (actor.kind === "agent" || Boolean(membership));
   const canRequestAdvice = !isArchived && actor.kind === "user" && proposal.status === "OPEN" && !proposal.isPrivate && (isAuthor || membership?.role === "ADMIN");
   const canManageEntry = (entry: (typeof deliberationEntries)[number]) => !isArchived && Boolean(
@@ -191,6 +197,8 @@ export default async function ProposalDetailPage({
           <span><Link href={`/workspaces/${workspaceId}/proposals`} className="nr-link-inherit">{t("backToProposals")}</Link></span>
           <span>·</span>
           <span>{authorName}</span>
+          <span>·</span>
+          <span>{ownerText}</span>
           <span>·</span>
           <span className={`tag ${statusClass}`}>
             {proposal.status === "RESOLVED" && proposal.resolutionOutcome ? `${proposal.status} · ${proposal.resolutionOutcome.replace("_", " ")}` : proposal.status}
@@ -428,7 +436,13 @@ export default async function ProposalDetailPage({
               <form action={updateProposalAction} className="stack nr-form-section mt-3">
                 <input type="hidden" name="workspaceId" value={workspaceId} />
                 <input type="hidden" name="proposalId" value={proposal.id} />
-                <ProposalDraftFields defaultTitle={proposal.title} defaultBodyMd={proposal.bodyMd} defaultPriority={proposal.priority} />
+                <ProposalDraftFields
+                  defaultTitle={proposal.title}
+                  defaultBodyMd={proposal.bodyMd}
+                  defaultPriority={proposal.priority}
+                  defaultOwnerMemberId={proposal.ownerMemberId}
+                  members={memberOptions}
+                />
                 <button type="submit" className="secondary small">{proposal.status === "DRAFT" ? t("btnSaveDraft") : tCommon("save")}</button>
               </form>
             </details>
@@ -463,6 +477,9 @@ export default async function ProposalDetailPage({
           <h3 className="nr-sidebar-title">{t("aboutTitle")}</h3>
           <div className="nr-meta mb-4">
             <strong>{t("aboutCreated")}</strong> {new Date(proposal.createdAt).toLocaleDateString()}
+          </div>
+          <div className="nr-meta mb-4">
+            <strong>{t("formOwner")}</strong> {ownerName ?? t("formOwnerNone")}
           </div>
           {(proposal.tensions.length > 0 || proposal.actions.length > 0) && (
             <div className="nr-meta mb-4">

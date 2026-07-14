@@ -185,6 +185,40 @@ describe("advice requests", () => {
     });
   });
 
+  it("uses the proposal owner as the advice subject owner", async () => {
+    const { createAdviceRequest } = await import("./advice-requests");
+
+    tx.proposal.findUnique.mockResolvedValueOnce({
+      id: "proposal-1",
+      workspaceId: "workspace-1",
+      title: "Clarify launch owner",
+      status: "OPEN",
+      circleId: "circle-1",
+      authorUserId: "user-author",
+      ownerMemberId: "member-owner",
+      archivedAt: null,
+    });
+
+    await createAdviceRequest(actor, {
+      workspaceId: "workspace-1",
+      subjectType: "PROPOSAL",
+      subjectId: "proposal-1",
+      audienceType: "WORKSPACE",
+      messageMd: "Please advise.",
+    });
+
+    expect(tx.adviceProcess.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        workspaceId: "workspace-1",
+        proposalId: "proposal-1",
+        authorMemberId: "member-owner",
+        ownerMemberId: "member-owner",
+        subjectType: "PROPOSAL",
+        subjectId: "proposal-1",
+      }),
+    });
+  });
+
   it("rejects input requests for draft tensions", async () => {
     tx.tension.findUnique.mockResolvedValueOnce({
       id: "tension-1",
@@ -277,4 +311,3 @@ describe("advice requests", () => {
     });
   });
 });
-

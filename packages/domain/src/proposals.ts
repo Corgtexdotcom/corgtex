@@ -9,13 +9,14 @@ import { invariant } from "./errors";
 import { privacyFilter } from "./privacy";
 import { archiveFilterWhere, archiveWorkspaceArtifact, type ArchiveFilter } from "./archive";
 import { requireDraftManager } from "./draft-permissions";
+import { humanMemberIdentityWhere } from "./member-identity";
 import { createWorkItemEvidenceLinks } from "./work-item-evidence";
 import { ensureWorkspacePermalink, workspaceEntityCanonicalPath } from "./permalinks";
 import {
   changedDataFields,
   pickJsonSnapshot,
   recordWorkItemVersion,
-  requireSubmittedWorkItemAuthor,
+  requireSubmittedWorkItemEditor,
   resolveWorkspaceMemberUserId,
 } from "./work-item-versions";
 
@@ -33,6 +34,7 @@ type CreateProposalParams = {
   bodyMd: string;
   priority?: number | null;
   circleId?: string | null;
+  ownerMemberId?: string | null;
   isPrivate?: boolean;
   authorMemberId?: string | null;
   meetingId?: string | null;
@@ -266,6 +268,26 @@ async function validateRelatedActions(
   return actionIds;
 }
 
+async function resolveProposalOwnerMemberId(
+  tx: Prisma.TransactionClient,
+  workspaceId: string,
+  ownerMemberId?: string | null,
+) {
+  const normalizedOwnerMemberId = ownerMemberId?.trim();
+  if (!normalizedOwnerMemberId) return null;
+  const owner = await tx.member.findFirst({
+    where: {
+      id: normalizedOwnerMemberId,
+      workspaceId,
+      isActive: true,
+      ...humanMemberIdentityWhere(),
+    },
+    select: { id: true },
+  });
+  invariant(owner, 400, "INVALID_INPUT", "Proposal owner must be an active human member in the same workspace.");
+  return owner.id;
+}
+
 export type ListProposalsOptions = {
   take?: number;
   skip?: number;
@@ -294,6 +316,7 @@ function memberRelatedProposalWhere(workspaceId: string, memberIds: string[]): P
   };
   return [
     { author: authorMembershipWhere },
+    { ownerMemberId: { in: memberIds } },
     {
       actions: {
         some: {
@@ -369,6 +392,16 @@ export async function listProposals(actor: AppActor, workspaceId: string, opts?:
             email: true,
           },
         },
+        ownerMember: {
+          include: {
+            user: {
+              select: {
+                displayName: true,
+                email: true,
+              },
+            },
+          },
+        },
         circle: { select: { id: true, name: true } },
         tensions: { select: { id: true, title: true, status: true } },
         actions: { select: { id: true, title: true, status: true } },
@@ -398,6 +431,13 @@ export async function getProposal(actor: AppActor, params: {
     },
     include: {
       author: { select: { id: true, displayName: true, email: true } },
+      ownerMember: {
+        include: {
+          user: {
+            select: { displayName: true, email: true },
+          },
+        },
+      },
       circle: { select: { id: true, name: true } },
       tensions: { select: { id: true, title: true, status: true } },
       actions: { select: { id: true, title: true, status: true } },
@@ -428,6 +468,7 @@ export async function createProposal(actor: AppActor, params: CreateProposalPara
   return prisma.$transaction(async (tx) => {
     const sourceTension = await loadVisibleSourceTension(tx, actor, membership, params.workspaceId, params.sourceTensionId);
     const relatedActionIds = await validateRelatedActions(tx, actor, membership, params.workspaceId, params.relatedActionIds);
+    const ownerMemberId = await resolveProposalOwnerMemberId(tx, params.workspaceId, params.ownerMemberId);
     let authorUserId = actor.kind === "user"
       ? actor.user.id
       : await actorUserIdForWorkspace(actor, params.workspaceId);
@@ -442,6 +483,7 @@ export async function createProposal(actor: AppActor, params: CreateProposalPara
         summary,
         bodyMd,
         priority: params.priority ?? 0,
+        ownerMemberId,
         circleId: params.circleId || sourceTension?.circleId || null,
         status: isPrivate ? "DRAFT" : "OPEN",
         isPrivate,
@@ -545,6 +587,7 @@ export async function createProposalFromTension(actor: AppActor, params: CreateP
     const sourceTension = await loadVisibleSourceTension(tx, actor, membership, params.workspaceId, params.sourceTensionId);
     invariant(sourceTension, 404, "NOT_FOUND", "Source tension not found.");
     const relatedActionIds = await validateRelatedActions(tx, actor, membership, params.workspaceId, params.relatedActionIds);
+    const ownerMemberId = await resolveProposalOwnerMemberId(tx, params.workspaceId, params.ownerMemberId);
     const draft = proposalDraftFromTension(sourceTension, params);
     let authorUserId = actor.kind === "user"
       ? actor.user.id
@@ -561,6 +604,7 @@ export async function createProposalFromTension(actor: AppActor, params: CreateP
         summary: draft.summary,
         bodyMd: draft.bodyMd,
         priority: params.priority ?? sourceTension.priority ?? 0,
+        ownerMemberId,
         circleId: params.circleId || sourceTension.circleId || null,
         status: isPrivate ? "DRAFT" : "OPEN",
         isPrivate,
@@ -657,6 +701,7 @@ export async function updateProposal(actor: AppActor, params: {
   bodyMd?: string;
   priority?: number;
   circleId?: string | null;
+  ownerMemberId?: string | null;
 }) {
   const membership = await requireWorkspaceMembership({
     actor,
@@ -674,7 +719,7 @@ export async function updateProposal(actor: AppActor, params: {
       await requireDraftManager({ actor, workspaceId: params.workspaceId, record: proposal, resolvedMembership: membership });
     } else {
       invariant(proposal.status === "OPEN", 400, "INVALID_STATE", "Only draft or open proposals can be edited.");
-      requireSubmittedWorkItemAuthor(actor, proposal.authorUserId);
+      requireSubmittedWorkItemEditor(actor, membership, proposal);
     }
 
     const data: Record<string, unknown> = {};
@@ -701,8 +746,11 @@ export async function updateProposal(actor: AppActor, params: {
     }
     if (params.priority !== undefined) data.priority = params.priority;
     if (params.circleId !== undefined) data.circleId = params.circleId || null;
+    if (params.ownerMemberId !== undefined) {
+      data.ownerMemberId = await resolveProposalOwnerMemberId(tx, params.workspaceId, params.ownerMemberId);
+    }
 
-    const contentFields = ["title", "summary", "bodyMd", "priority", "circleId"];
+    const contentFields = ["title", "summary", "bodyMd", "priority", "circleId", "ownerMemberId"];
     const changedFields = changedDataFields(proposal as unknown as Record<string, unknown>, data)
       .filter((field) => contentFields.includes(field));
     if (changedFields.length > 0) {
@@ -720,6 +768,7 @@ export async function updateProposal(actor: AppActor, params: {
           "bodyMd",
           "priority",
           "circleId",
+          "ownerMemberId",
           "status",
           "version",
         ]),

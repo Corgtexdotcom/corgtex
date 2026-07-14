@@ -1112,6 +1112,7 @@ model Member {
   assignedActions             Action[]                 @relation("ActionAssignee")
   assignedTensions            Tension[]                @relation("TensionAssignee")
   raisedTensions              Tension[]                @relation("TensionRaisedBy")
+  ownedProposals              Proposal[]               @relation("ProposalOwner")
   approvalDecisions           ApprovalDecision[]
   ownedBrainArticles          BrainArticle[]
   authoredBrainSources        BrainSource[]
@@ -1812,6 +1813,7 @@ model Proposal {
   id                String                     @id @default(uuid())
   workspaceId       String
   authorUserId      String
+  ownerMemberId     String?
   circleId          String?
   meetingId         String?
   title             String
@@ -1834,6 +1836,7 @@ model Proposal {
 
   workspace     Workspace      @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   author        User           @relation("ProposalAuthor", fields: [authorUserId], references: [id], onDelete: Restrict)
+  ownerMember   Member?        @relation("ProposalOwner", fields: [ownerMemberId], references: [id], onDelete: SetNull)
   circle        Circle?        @relation(fields: [circleId], references: [id], onDelete: SetNull)
   meeting       Meeting?       @relation(fields: [meetingId], references: [id], onDelete: SetNull)
   policyCorpus  PolicyCorpus?
@@ -1844,6 +1847,7 @@ model Proposal {
   @@index([workspaceId, status])
   @@index([workspaceId, archivedAt])
   @@index([workspaceId, priority])
+  @@index([ownerMemberId])
 }
 
 model DeliberationEntry {
