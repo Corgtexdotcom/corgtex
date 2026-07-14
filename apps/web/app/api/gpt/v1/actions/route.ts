@@ -3,6 +3,7 @@ import { requireGptAuth } from "@/lib/gpt-auth";
 import { listActions, createAction, getWorkspacePermanentPathForEntity } from "@corgtex/domain";
 import { env } from "@corgtex/shared";
 import { handleRouteError } from "@/lib/http";
+import { loadActionWorkItemResponse, serializeActionWorkItem, workItemPriorityFromBody } from "@/lib/work-item-api";
 
 export async function GET(request: NextRequest) {
   try {
@@ -14,15 +15,22 @@ export async function GET(request: NextRequest) {
 
     const result = await listActions(actor, workspaceId, { take, skip });
 
-    const simplified = result.items.map((a) => ({
-      id: a.id,
-      title: a.title,
-      status: a.status,
-      author: a.author?.displayName ?? a.author?.email ?? "Unknown",
-      assignee: a.assigneeMember?.user?.displayName ?? a.assigneeMember?.user?.email ?? null,
-      dueAt: (a as Record<string, unknown>).dueAt ?? null,
-      createdAt: a.createdAt,
-    }));
+    const simplified = result.items.map((a) => {
+      const item = serializeActionWorkItem(a);
+      return {
+        id: item.id,
+        title: item.title,
+        status: item.status,
+        priority: item.priority,
+        priorityLabel: item.priorityLabel,
+        author: a.author?.displayName ?? a.author?.email ?? "Unknown",
+        assigneeMemberId: item.assigneeMemberId,
+        assigneeMemberName: item.assigneeMemberName,
+        assignee: item.assignee,
+        dueAt: (a as Record<string, unknown>).dueAt ?? null,
+        createdAt: a.createdAt,
+      };
+    });
 
     return NextResponse.json({ items: simplified, total: result.total });
   } catch (error) {
@@ -44,7 +52,11 @@ export async function POST(request: NextRequest) {
       workspaceId,
       title: body.title,
       bodyMd: body.bodyMd,
+      assigneeMemberId: body.assigneeMemberId ?? null,
+      priority: workItemPriorityFromBody(body),
     });
+    const actionForResponse = await loadActionWorkItemResponse(workspaceId, action.id) ?? action;
+    const item = serializeActionWorkItem(actionForResponse);
 
     const origin = env.APP_URL.replace(/\/$/, "");
     const permanentPath = await getWorkspacePermanentPathForEntity({
@@ -55,6 +67,10 @@ export async function POST(request: NextRequest) {
 
     return NextResponse.json({
       id: action.id,
+      priority: item.priority,
+      priorityLabel: item.priorityLabel,
+      assigneeMemberId: item.assigneeMemberId,
+      assigneeMemberName: item.assigneeMemberName,
       status: action.status,
       webUrl: `${origin}/workspaces/${workspaceId}/actions/${action.id}`,
       permanentUrl: permanentPath ? `${origin}${permanentPath}` : null,

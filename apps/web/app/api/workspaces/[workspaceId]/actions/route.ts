@@ -4,6 +4,7 @@ import type { ArchiveFilter } from "@corgtex/domain";
 import type { ActionStatus } from "@prisma/client";
 import { searchParamValues } from "@/lib/filter-query";
 import { withWorkspaceRoute } from "@/lib/route-handler";
+import { loadActionWorkItemResponse, serializeActionWorkItem, workItemPriorityFromBody } from "@/lib/work-item-api";
 import { normalizeWorkItemSort } from "@/lib/work-item-view";
 import { env } from "@corgtex/shared";
 
@@ -36,21 +37,29 @@ export const GET = withWorkspaceRoute(async (req, { actor, workspaceId }) => {
     take: parseNonNegativeInt(searchParams.get("take")),
     skip: parseNonNegativeInt(searchParams.get("skip")),
   });
-  return NextResponse.json({ actions });
+  return NextResponse.json({
+    actions: {
+      ...actions,
+      items: actions.items.map(serializeActionWorkItem),
+    },
+  });
 });
 
 export const POST = withWorkspaceRoute(async (req, { actor, workspaceId, membership }) => {
-  const body = (await req.json()) as { title?: unknown; bodyMd?: unknown };
+  const body = (await req.json()) as Record<string, unknown>;
   const action = await createAction(actor, {
     workspaceId,
     title: String(body.title ?? ""),
     bodyMd: typeof body.bodyMd === "string" ? body.bodyMd : null,
+    assigneeMemberId: body.assigneeMemberId === null ? null : typeof body.assigneeMemberId === "string" ? body.assigneeMemberId : undefined,
+    priority: workItemPriorityFromBody(body),
     _membership: membership ?? undefined,
   });
   const origin = env.APP_URL.replace(/\/$/, "");
   const permanentPath = await getWorkspacePermanentPathForEntity({ workspaceId, entityType: "Action", entityId: action.id });
+  const actionForResponse = await loadActionWorkItemResponse(workspaceId, action.id) ?? action;
   return NextResponse.json({
-    action,
+    action: serializeActionWorkItem(actionForResponse),
     webUrl: `${origin}/workspaces/${workspaceId}/actions/${action.id}`,
     permanentUrl: permanentPath ? `${origin}${permanentPath}` : null,
   }, { status: 201 });

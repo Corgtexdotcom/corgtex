@@ -61,6 +61,7 @@ export * from "./tensions";
 export * from "./webhooks";
 export * from "./workspaces";
 export * from "./work-item-evidence";
+export * from "./work-item-priority";
 export * from "./integrations";
 export * from "./billing";
 export * from "./oauth-state";

@@ -4,6 +4,7 @@ import { createGoal, getWorkspacePermanentPathForEntity, listGoals } from "@corg
 import { env } from "@corgtex/shared";
 import { handleRouteError } from "@/lib/http";
 import { disabledWorkspaceFeatureResponse } from "@/lib/workspace-feature-route";
+import { serializeGoalWorkItem } from "@/lib/work-item-api";
 import type { GoalCadence, GoalLevel, GoalStatus } from "@prisma/client";
 
 function optionalDate(value: unknown) {
@@ -32,28 +33,33 @@ export async function GET(request: NextRequest) {
       status: status ?? undefined,
     });
 
-    const simplified = goals.map((goal) => ({
-      id: goal.id,
-      title: goal.title,
-      descriptionMd: goal.descriptionMd,
-      cadence: goal.cadence,
-      level: goal.level,
-      status: goal.status,
-      progressPercent: goal.progressPercent,
-      startDate: goal.startDate,
-      targetDate: goal.targetDate,
-      circle: goal.circle?.name ?? null,
-      owner: goal.ownerMember?.user?.displayName ?? goal.ownerMember?.user?.email ?? null,
-      keyResults: goal.keyResults.map((keyResult) => ({
-        id: keyResult.id,
-        title: keyResult.title,
-        targetValue: keyResult.targetValue,
-        currentValue: keyResult.currentValue,
-        unit: keyResult.unit,
-        progressPercent: keyResult.progressPercent,
-      })),
-      createdAt: goal.createdAt,
-    }));
+    const simplified = goals.map((goal) => {
+      const item = serializeGoalWorkItem(goal);
+      return {
+        id: goal.id,
+        title: goal.title,
+        descriptionMd: goal.descriptionMd,
+        cadence: goal.cadence,
+        level: goal.level,
+        status: goal.status,
+        progressPercent: goal.progressPercent,
+        startDate: goal.startDate,
+        targetDate: goal.targetDate,
+        circle: goal.circle?.name ?? null,
+        ownerMemberId: item.ownerMemberId,
+        ownerMemberName: item.ownerMemberName,
+        owner: item.owner,
+        keyResults: goal.keyResults.map((keyResult) => ({
+          id: keyResult.id,
+          title: keyResult.title,
+          targetValue: keyResult.targetValue,
+          currentValue: keyResult.currentValue,
+          unit: keyResult.unit,
+          progressPercent: keyResult.progressPercent,
+        })),
+        createdAt: goal.createdAt,
+      };
+    });
 
     return NextResponse.json({ items: simplified, total: simplified.length });
   } catch (error) {
@@ -96,10 +102,14 @@ export async function POST(request: NextRequest) {
       entityId: goal.id,
     });
 
+    const item = serializeGoalWorkItem(goal);
+
     return NextResponse.json({
       id: goal.id,
       title: goal.title,
       status: goal.status,
+      ownerMemberId: item.ownerMemberId,
+      ownerMemberName: item.ownerMemberName,
       webUrl: `${origin}/workspaces/${workspaceId}/goals?view=tree&cadence=${goal.cadence}&goalId=${goal.id}`,
       permanentUrl: permanentPath ? `${origin}${permanentPath}` : null,
     });

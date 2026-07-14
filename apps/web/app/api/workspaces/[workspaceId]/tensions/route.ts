@@ -5,11 +5,15 @@ import type { ArchiveFilter } from "@corgtex/domain";
 import { env } from "@corgtex/shared";
 import { resolveRequestActor } from "@/lib/auth";
 import { handleRouteError, validateBody } from "@/lib/http";
+import { loadTensionWorkItemResponse, serializeTensionWorkItem, workItemPriorityFromBody } from "@/lib/work-item-api";
 
 const createTensionSchema = z.object({
   title: z.string().trim().min(1),
   bodyMd: z.string().optional().nullable(),
   raisedByMemberId: z.string().optional().nullable(),
+  assigneeMemberId: z.string().optional().nullable(),
+  priority: z.union([z.number().int(), z.string()]).optional().nullable(),
+  priorityLabel: z.string().optional().nullable(),
 });
 
 export async function GET(request: NextRequest, { params }: { params: Promise<{ workspaceId: string }> }) {
@@ -19,7 +23,12 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
     await requireWorkspaceMembership({ actor, workspaceId });
     const archiveFilter = request.nextUrl.searchParams.get("archiveFilter") as ArchiveFilter | null;
     const tensions = await listTensions(actor, workspaceId, { archiveFilter: archiveFilter ?? undefined });
-    return NextResponse.json({ tensions });
+    return NextResponse.json({
+      tensions: {
+        ...tensions,
+        items: tensions.items.map(serializeTensionWorkItem),
+      },
+    });
   } catch (error) {
     return handleRouteError(error);
   }
@@ -35,11 +44,14 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
       title: body.title,
       bodyMd: body.bodyMd ?? null,
       raisedByMemberId: body.raisedByMemberId ?? null,
+      assigneeMemberId: body.assigneeMemberId ?? null,
+      priority: workItemPriorityFromBody(body),
     });
     const origin = env.APP_URL.replace(/\/$/, "");
     const permanentPath = await getWorkspacePermanentPathForEntity({ workspaceId, entityType: "Tension", entityId: tension.id });
+    const tensionForResponse = await loadTensionWorkItemResponse(workspaceId, tension.id) ?? tension;
     return NextResponse.json({
-      tension,
+      tension: serializeTensionWorkItem(tensionForResponse),
       webUrl: `${origin}/workspaces/${workspaceId}/tensions/${tension.id}`,
       permanentUrl: permanentPath ? `${origin}${permanentPath}` : null,
     }, { status: 201 });

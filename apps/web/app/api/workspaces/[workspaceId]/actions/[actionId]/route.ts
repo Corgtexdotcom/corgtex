@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { updateAction, deleteAction } from "@corgtex/domain";
 import { resolveRequestActor } from "@/lib/auth";
 import { handleRouteError } from "@/lib/http";
+import { loadActionWorkItemResponse, serializeActionWorkItem, workItemPriorityFromBody } from "@/lib/work-item-api";
 
 type Params = { params: Promise<{ workspaceId: string; actionId: string }> };
 
@@ -18,9 +19,11 @@ export async function PATCH(request: NextRequest, { params }: Params) {
       status: body.status ?? undefined,
       circleId: body.circleId !== undefined ? body.circleId : undefined,
       assigneeMemberId: body.assigneeMemberId !== undefined ? body.assigneeMemberId : undefined,
+      priority: workItemPriorityFromBody(body),
       dueAt: body.dueAt ? new Date(body.dueAt) : body.dueAt === null ? null : undefined,
     });
-    return NextResponse.json({ action });
+    const actionForResponse = await loadActionWorkItemResponse(workspaceId, action.id) ?? action;
+    return NextResponse.json({ action: serializeActionWorkItem(actionForResponse) });
   } catch (error) {
     return handleRouteError(error);
   }

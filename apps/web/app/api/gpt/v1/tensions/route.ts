@@ -3,6 +3,7 @@ import { requireGptAuth } from "@/lib/gpt-auth";
 import { listTensions, createTension, getWorkspacePermanentPathForEntity } from "@corgtex/domain";
 import { env } from "@corgtex/shared";
 import { handleRouteError } from "@/lib/http";
+import { loadTensionWorkItemResponse, serializeTensionWorkItem, workItemPriorityFromBody } from "@/lib/work-item-api";
 
 export async function GET(request: NextRequest) {
   try {
@@ -14,15 +15,26 @@ export async function GET(request: NextRequest) {
 
     const result = await listTensions(actor, workspaceId, { take, skip });
 
-    const simplified = result.items.map((t) => ({
-      id: t.id,
-      title: t.title,
-      status: t.status,
-      priority: t.priority,
-      author: t.author?.displayName ?? t.author?.email ?? "Unknown",
-      raisedBy: t.raisedByMember?.user?.displayName ?? t.raisedByMember?.user?.email ?? null,
-      createdAt: t.createdAt,
-    }));
+    const simplified = result.items.map((t) => {
+      const item = serializeTensionWorkItem(t);
+      return {
+        id: item.id,
+        title: item.title,
+        status: item.status,
+        priority: item.priority,
+        priorityLabel: item.priorityLabel,
+        author: t.author?.displayName ?? t.author?.email ?? "Unknown",
+        assigneeMemberId: item.assigneeMemberId,
+        assigneeMemberName: item.assigneeMemberName,
+        responsibleMemberId: item.responsibleMemberId,
+        responsibleMemberName: item.responsibleMemberName,
+        responsiblePerson: item.responsiblePerson,
+        raisedByMemberId: item.raisedByMemberId,
+        raisedByMemberName: item.raisedByMemberName,
+        raisedBy: item.raisedBy,
+        createdAt: t.createdAt,
+      };
+    });
 
     return NextResponse.json({ items: simplified, total: result.total });
   } catch (error) {
@@ -45,7 +57,11 @@ export async function POST(request: NextRequest) {
       title: body.title,
       bodyMd: body.bodyMd,
       raisedByMemberId: body.raisedByMemberId ?? null,
+      assigneeMemberId: body.assigneeMemberId ?? null,
+      priority: workItemPriorityFromBody(body),
     });
+    const tensionForResponse = await loadTensionWorkItemResponse(workspaceId, tension.id) ?? tension;
+    const item = serializeTensionWorkItem(tensionForResponse);
 
     const origin = env.APP_URL.replace(/\/$/, "");
     const permanentPath = await getWorkspacePermanentPathForEntity({
@@ -56,6 +72,12 @@ export async function POST(request: NextRequest) {
 
     return NextResponse.json({
       id: tension.id,
+      priority: item.priority,
+      priorityLabel: item.priorityLabel,
+      assigneeMemberId: item.assigneeMemberId,
+      assigneeMemberName: item.assigneeMemberName,
+      responsibleMemberId: item.responsibleMemberId,
+      responsibleMemberName: item.responsibleMemberName,
       status: tension.status,
       webUrl: `${origin}/workspaces/${workspaceId}/tensions/${tension.id}`,
       permanentUrl: permanentPath ? `${origin}${permanentPath}` : null,

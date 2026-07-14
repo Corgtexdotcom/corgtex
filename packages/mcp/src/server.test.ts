@@ -1,9 +1,18 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+const createActionMock = vi.fn();
 const createGoalMock = vi.fn();
+const createProposalMock = vi.fn();
+const createTensionMock = vi.fn();
+const listActionsMock = vi.fn();
 const listGoalsMock = vi.fn();
+const listProposalsMock = vi.fn();
+const listTensionsMock = vi.fn();
 const getGoalMock = vi.fn();
+const updateActionMock = vi.fn();
 const updateGoalMock = vi.fn();
+const updateProposalMock = vi.fn();
+const updateTensionMock = vi.fn();
 const deleteGoalMock = vi.fn();
 const listWorkspaceToolLinksMock = vi.fn();
 const upsertWorkspaceToolLinkMock = vi.fn();
@@ -61,6 +70,7 @@ const getWorkspacePermanentPathForEntityMock = vi.fn();
 
 vi.mock("@corgtex/domain", async () => {
   const { MCP_TOOL_CAPABILITIES } = await import("../../domain/src/mcp-tool-capabilities");
+  const { coerceWorkItemPriorityInput, formatWorkItemPriority } = await import("../../domain/src/work-item-priority");
 
   return {
   AppError: class AppError extends Error {
@@ -77,9 +87,12 @@ vi.mock("@corgtex/domain", async () => {
     { flag: "GOALS", label: "Goals", description: "Goals", defaultEnabled: true },
     { flag: "FINANCE", label: "Finance", description: "Finance", defaultEnabled: false },
   ],
+  coerceWorkItemPriorityInput,
+  formatWorkItemPriority,
   requireWorkspaceMembership: requireWorkspaceMembershipMock,
-  listProposals: vi.fn(),
-  createProposal: vi.fn(),
+  listProposals: listProposalsMock,
+  createProposal: createProposalMock,
+  updateProposal: updateProposalMock,
   supportReopenResolvedProposals: supportReopenResolvedProposalsMock,
   evaluateDelegatedActionPolicy: vi.fn((input: { toolName?: string | null; operation?: "read" | "write" | null; confidence?: number | null; explicitUserIntent?: boolean }) => {
     if ([
@@ -104,10 +117,12 @@ vi.mock("@corgtex/domain", async () => {
   }),
   executeExternalMcpTool: executeExternalMcpToolMock,
   fetchConnectedExternalMcpContext: fetchConnectedExternalMcpContextMock,
-  listActions: vi.fn(),
-  createAction: vi.fn(),
-  listTensions: vi.fn(),
-  createTension: vi.fn(),
+  listActions: listActionsMock,
+  createAction: createActionMock,
+  updateAction: updateActionMock,
+  listTensions: listTensionsMock,
+  createTension: createTensionMock,
+  updateTension: updateTensionMock,
   listExternalMcpConnections: listExternalMcpConnectionsMock,
   listGoals: listGoalsMock,
   getGoal: getGoalMock,
@@ -195,6 +210,15 @@ vi.mock("@corgtex/agents", () => ({
 vi.mock("@corgtex/shared", () => ({
   prisma: {
     $transaction: vi.fn(async (callback: (tx: unknown) => Promise<unknown>) => callback({})),
+    action: {
+      findFirst: vi.fn(),
+    },
+    proposal: {
+      findFirst: vi.fn(),
+    },
+    tension: {
+      findFirst: vi.fn(),
+    },
     workspace: {
       findUnique: vi.fn(),
     },
@@ -216,15 +240,65 @@ vi.mock("./auth", () => ({
 
 describe("createCorgtexMcpServer", () => {
   beforeEach(async () => {
+    createActionMock.mockReset().mockResolvedValue({
+      id: "action-1",
+      title: "Follow up",
+      status: "DRAFT",
+      version: 1,
+      priority: 2,
+      assigneeMemberId: "member-assignee",
+    });
     createGoalMock.mockReset().mockResolvedValue({
       id: "goal-1",
       title: "Transform 1,000 businesses",
       status: "ACTIVE",
       cadence: "TEN_YEAR",
+      ownerMemberId: "member-owner",
     });
+    createProposalMock.mockReset().mockResolvedValue({
+      id: "proposal-1",
+      title: "Clarify ownership",
+      status: "DRAFT",
+      version: 1,
+      priority: 3,
+      ownerMemberId: "member-owner",
+    });
+    createTensionMock.mockReset().mockResolvedValue({
+      id: "tension-1",
+      title: "No clear owner",
+      status: "DRAFT",
+      version: 1,
+      priority: 1,
+      assigneeMemberId: "member-responsible",
+      raisedByMemberId: "member-raiser",
+    });
+    listActionsMock.mockReset().mockResolvedValue({ items: [], total: 0 });
     listGoalsMock.mockReset().mockResolvedValue([]);
+    listProposalsMock.mockReset().mockResolvedValue({ items: [], total: 0 });
+    listTensionsMock.mockReset().mockResolvedValue({ items: [], total: 0 });
     getGoalMock.mockReset().mockResolvedValue({ id: "goal-1", cadence: "QUARTERLY" });
+    updateActionMock.mockReset().mockResolvedValue({
+      id: "action-1",
+      status: "OPEN",
+      version: 2,
+      priority: 3,
+      assigneeMemberId: "member-assignee",
+    });
     updateGoalMock.mockReset().mockResolvedValue({ id: "goal-1", status: "ACTIVE", cadence: "QUARTERLY" });
+    updateProposalMock.mockReset().mockResolvedValue({
+      id: "proposal-1",
+      status: "DRAFT",
+      version: 2,
+      priority: 2,
+      ownerMemberId: "member-owner",
+    });
+    updateTensionMock.mockReset().mockResolvedValue({
+      id: "tension-1",
+      status: "OPEN",
+      version: 2,
+      priority: 2,
+      assigneeMemberId: "member-responsible",
+    });
     deleteGoalMock.mockReset().mockResolvedValue(undefined);
     listWorkspaceToolLinksMock.mockReset().mockResolvedValue([]);
     listInstalledAppsMock.mockReset().mockResolvedValue({ installed: [], available: [], webUrl: "/workspaces/ws-1/tools?type=APP" });
@@ -349,6 +423,9 @@ describe("createCorgtexMcpServer", () => {
       isActive: true,
     });
     const { prisma } = await import("@corgtex/shared");
+    vi.mocked(prisma.action.findFirst).mockReset().mockResolvedValue(null as never);
+    vi.mocked(prisma.proposal.findFirst).mockReset().mockResolvedValue(null as never);
+    vi.mocked(prisma.tension.findFirst).mockReset().mockResolvedValue(null as never);
     vi.mocked(prisma.workspace.findUnique).mockReset().mockResolvedValue({
       id: "ws-1",
       slug: "acme",
@@ -1406,6 +1483,186 @@ describe("createCorgtexMcpServer", () => {
     }));
   });
 
+  it("preserves responsibility and labeled priority through MCP work-item write tools", async () => {
+    const { createCorgtexMcpServer } = await import("./server");
+    const { requireScope } = await import("./auth");
+    const { prisma } = await import("@corgtex/shared");
+
+    vi.mocked(prisma.action.findFirst)
+      .mockResolvedValueOnce({
+        id: "action-1",
+        status: "DRAFT",
+        version: 1,
+        priority: 2,
+        assigneeMemberId: "member-assignee",
+        assigneeMember: { id: "member-assignee", user: { displayName: "Assignee", email: "assignee@example.test" } },
+      } as never)
+      .mockResolvedValueOnce({
+        id: "action-1",
+        status: "OPEN",
+        version: 2,
+        priority: 3,
+        assigneeMemberId: "member-assignee",
+        assigneeMember: { id: "member-assignee", user: { displayName: "Assignee", email: "assignee@example.test" } },
+      } as never);
+    vi.mocked(prisma.tension.findFirst)
+      .mockResolvedValueOnce({
+        id: "tension-1",
+        status: "DRAFT",
+        version: 1,
+        priority: 1,
+        assigneeMemberId: "member-responsible",
+        raisedByMemberId: "member-raiser",
+        assigneeMember: { id: "member-responsible", user: { displayName: "Responsible", email: "responsible@example.test" } },
+        raisedByMember: { id: "member-raiser", user: { displayName: "Raiser", email: "raiser@example.test" } },
+      } as never)
+      .mockResolvedValueOnce({
+        id: "tension-1",
+        status: "OPEN",
+        version: 2,
+        priority: 2,
+        assigneeMemberId: "member-responsible",
+        raisedByMemberId: "member-raiser",
+        assigneeMember: { id: "member-responsible", user: { displayName: "Responsible", email: "responsible@example.test" } },
+        raisedByMember: { id: "member-raiser", user: { displayName: "Raiser", email: "raiser@example.test" } },
+      } as never);
+    vi.mocked(prisma.proposal.findFirst)
+      .mockResolvedValueOnce({
+        id: "proposal-1",
+        title: "Clarify ownership",
+        status: "DRAFT",
+        version: 1,
+        priority: 3,
+        ownerMemberId: "member-owner",
+        ownerMember: { id: "member-owner", user: { displayName: "Owner", email: "owner@example.test" } },
+      } as never)
+      .mockResolvedValueOnce({
+        id: "proposal-1",
+        title: "Clarify ownership",
+        status: "DRAFT",
+        version: 2,
+        priority: 2,
+        ownerMemberId: "member-owner",
+        ownerMember: { id: "member-owner", user: { displayName: "Owner", email: "owner@example.test" } },
+      } as never);
+
+    const server = createCorgtexMcpServer({
+      actor: { kind: "agent", authProvider: "bootstrap" } as any,
+      workspaceId: "ws-1",
+      authKind: "agent",
+    });
+
+    const createActionResponse = await (server as any)._registeredTools.create_action.handler({
+      title: "Follow up",
+      assigneeMemberId: "member-assignee",
+      priority: "Important",
+    });
+    const updateActionResponse = await (server as any)._registeredTools.update_action.handler({
+      actionId: "action-1",
+      assigneeMemberId: "member-assignee",
+      priority: "Urgent",
+    });
+    const createTensionResponse = await (server as any)._registeredTools.create_tension.handler({
+      title: "No clear owner",
+      assigneeMemberId: "member-responsible",
+      raisedByMemberId: "member-raiser",
+      priority: "Medium",
+    });
+    const updateTensionResponse = await (server as any)._registeredTools.update_tension.handler({
+      tensionId: "tension-1",
+      assigneeMemberId: "member-responsible",
+      priority: "Important",
+    });
+    const createProposalResponse = await (server as any)._registeredTools.create_proposal.handler({
+      title: "Clarify ownership",
+      bodyMd: "Assign an owner before adoption.",
+      ownerMemberId: "member-owner",
+      priority: "Urgent",
+    });
+    const updateProposalResponse = await (server as any)._registeredTools.update_proposal.handler({
+      proposalId: "proposal-1",
+      ownerMemberId: "member-owner",
+      priority: "Important",
+    });
+
+    expect(vi.mocked(requireScope)).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: "ws-1" }), "actions:write");
+    expect(vi.mocked(requireScope)).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: "ws-1" }), "tensions:write");
+    expect(vi.mocked(requireScope)).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: "ws-1" }), "proposals:write");
+    expect(createActionMock).toHaveBeenCalledWith(expect.objectContaining({ kind: "agent" }), expect.objectContaining({
+      workspaceId: "ws-1",
+      assigneeMemberId: "member-assignee",
+      priority: 2,
+    }));
+    expect(updateActionMock).toHaveBeenCalledWith(expect.objectContaining({ kind: "agent" }), expect.objectContaining({
+      workspaceId: "ws-1",
+      actionId: "action-1",
+      assigneeMemberId: "member-assignee",
+      priority: 3,
+    }));
+    expect(createTensionMock).toHaveBeenCalledWith(expect.objectContaining({ kind: "agent" }), expect.objectContaining({
+      workspaceId: "ws-1",
+      assigneeMemberId: "member-responsible",
+      raisedByMemberId: "member-raiser",
+      priority: 1,
+    }));
+    expect(updateTensionMock).toHaveBeenCalledWith(expect.objectContaining({ kind: "agent" }), expect.objectContaining({
+      workspaceId: "ws-1",
+      tensionId: "tension-1",
+      assigneeMemberId: "member-responsible",
+      priority: 2,
+    }));
+    expect(createProposalMock).toHaveBeenCalledWith(expect.objectContaining({ kind: "agent" }), expect.objectContaining({
+      workspaceId: "ws-1",
+      ownerMemberId: "member-owner",
+      priority: 3,
+    }));
+    expect(updateProposalMock).toHaveBeenCalledWith(expect.objectContaining({ kind: "agent" }), expect.objectContaining({
+      workspaceId: "ws-1",
+      proposalId: "proposal-1",
+      ownerMemberId: "member-owner",
+      priority: 2,
+    }));
+
+    expect(JSON.parse(createActionResponse.content[0].text)).toMatchObject({
+      priorityLabel: "Important",
+      assigneeMemberId: "member-assignee",
+      assigneeMemberName: "Assignee",
+      assignee: "Assignee",
+    });
+    expect(JSON.parse(updateActionResponse.content[0].text)).toMatchObject({
+      priorityLabel: "Urgent",
+      assigneeMemberId: "member-assignee",
+      assigneeMemberName: "Assignee",
+      assignee: "Assignee",
+    });
+    expect(JSON.parse(createTensionResponse.content[0].text)).toMatchObject({
+      priorityLabel: "Medium",
+      responsibleMemberId: "member-responsible",
+      responsibleMemberName: "Responsible",
+      responsiblePerson: "Responsible",
+      raisedByMemberId: "member-raiser",
+      raisedByMemberName: "Raiser",
+    });
+    expect(JSON.parse(updateTensionResponse.content[0].text)).toMatchObject({
+      priorityLabel: "Important",
+      responsibleMemberId: "member-responsible",
+      responsibleMemberName: "Responsible",
+      responsiblePerson: "Responsible",
+    });
+    expect(JSON.parse(createProposalResponse.content[0].text)).toMatchObject({
+      priorityLabel: "Urgent",
+      ownerMemberId: "member-owner",
+      ownerMemberName: "Owner",
+      owner: "Owner",
+    });
+    expect(JSON.parse(updateProposalResponse.content[0].text)).toMatchObject({
+      priorityLabel: "Important",
+      ownerMemberId: "member-owner",
+      ownerMemberName: "Owner",
+      owner: "Owner",
+    });
+  });
+
   it("returns the created goal identifier from create_goal", async () => {
     const { createCorgtexMcpServer } = await import("./server");
     const { requireScope } = await import("./auth");
@@ -1440,6 +1697,8 @@ describe("createCorgtexMcpServer", () => {
       id: "goal-1",
       title: "Transform 1,000 businesses",
       status: "ACTIVE",
+      ownerMemberId: "member-owner",
+      ownerMemberName: null,
       webUrl: "https://app.test/workspaces/ws-1/goals?view=tree&cadence=TEN_YEAR",
       permanentUrl: null,
     });
@@ -1477,10 +1736,14 @@ describe("createCorgtexMcpServer", () => {
     expect(vi.mocked(requireScope)).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: "ws-1" }), "goals:read");
     expect(vi.mocked(requireScope)).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: "ws-1" }), "goals:write");
     expect(JSON.parse(listResponse.content[0].text).items[0].webUrl).toBe("https://app.test/workspaces/ws-1/goals?view=tree&cadence=QUARTERLY");
+    expect(JSON.parse(listResponse.content[0].text).items[0]).not.toHaveProperty("priorityLabel");
     expect(JSON.parse(getResponse.content[0].text).webUrl).toBe("https://app.test/workspaces/ws-1/goals?view=tree&cadence=QUARTERLY");
+    expect(JSON.parse(getResponse.content[0].text)).not.toHaveProperty("priorityLabel");
     expect(JSON.parse(updateResponse.content[0].text)).toEqual({
       id: "goal-1",
       status: "ON_TRACK",
+      ownerMemberId: null,
+      ownerMemberName: null,
       webUrl: "https://app.test/workspaces/ws-1/goals?view=tree&cadence=QUARTERLY",
     });
     expect(JSON.parse(archiveResponse.content[0].text)).toEqual({

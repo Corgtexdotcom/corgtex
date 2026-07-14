@@ -1,3 +1,5 @@
+import { AppError } from "./errors";
+
 export const WORK_ITEM_PRIORITY_OPTIONS = [
   { value: 3, labelKey: "priorityUrgent", fallbackLabel: "Urgent" },
   { value: 2, labelKey: "priorityImportant", fallbackLabel: "Important" },
@@ -54,5 +56,5 @@ export function coerceWorkItemPriorityInput(input: unknown, fieldName = "priorit
   const parsed = parseWorkItemPriorityInput(input);
   if (parsed !== undefined) return parsed;
   if (input === undefined || input === null || input === "") return undefined;
-  throw new Error(`${fieldName} must be Urgent, Important, Medium, Low, or an integer priority.`);
+  throw new AppError(400, "INVALID_INPUT", `${fieldName} must be Urgent, Important, Medium, Low, or an integer priority.`);
 }
