@@ -3,6 +3,7 @@ import { z } from "zod";
 import { updateTension, deleteTension } from "@corgtex/domain";
 import { resolveRequestActor } from "@/lib/auth";
 import { handleRouteError, validateBody } from "@/lib/http";
+import { serializeTensionWorkItem, workItemPriorityFromBody } from "@/lib/work-item-api";
 
 type Params = { params: Promise<{ workspaceId: string; tensionId: string }> };
 const updateTensionSchema = z.object({
@@ -13,7 +14,8 @@ const updateTensionSchema = z.object({
   circleId: z.string().optional().nullable(),
   assigneeMemberId: z.string().optional().nullable(),
   raisedByMemberId: z.string().optional().nullable(),
-  priority: z.number().int().optional(),
+  priority: z.union([z.number().int(), z.string()]).optional().nullable(),
+  priorityLabel: z.string().optional().nullable(),
 });
 
 export async function PATCH(request: NextRequest, { params }: Params) {
@@ -31,9 +33,9 @@ export async function PATCH(request: NextRequest, { params }: Params) {
       circleId: body.circleId !== undefined ? body.circleId : undefined,
       assigneeMemberId: body.assigneeMemberId !== undefined ? body.assigneeMemberId : undefined,
       raisedByMemberId: body.raisedByMemberId !== undefined ? body.raisedByMemberId : undefined,
-      priority: body.priority,
+      priority: workItemPriorityFromBody(body),
     });
-    return NextResponse.json({ tension });
+    return NextResponse.json({ tension: serializeTensionWorkItem(tension) });
   } catch (error) {
     return handleRouteError(error);
   }

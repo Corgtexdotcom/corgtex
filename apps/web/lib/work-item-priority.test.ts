@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { formatWorkItemPriority, normalizeWorkItemPriority } from "./work-item-priority";
+import { formatWorkItemPriority, normalizeWorkItemPriority, parseWorkItemPriorityInput } from "./work-item-priority";
 
 describe("work item priority labels", () => {
   it("maps stored integer priorities to standard labels", () => {
@@ -18,5 +18,10 @@ describe("work item priority labels", () => {
     expect(formatWorkItemPriority(null)).toBe("Low");
     expect(formatWorkItemPriority(undefined)).toBe("Low");
     expect(formatWorkItemPriority(-1)).toBe("Low");
+  });
+
+  it("re-exports standard label parsing for web API routes", () => {
+    expect(parseWorkItemPriorityInput("Urgent")).toBe(3);
+    expect(parseWorkItemPriorityInput("Medium")).toBe(1);
   });
 });

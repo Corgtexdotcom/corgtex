@@ -23,6 +23,12 @@ const paginationParameters = [
 ];
 
 const okResponse = { "200": { description: "Successful response" } };
+const priorityInputSchema = {
+  oneOf: [
+    { type: "integer", minimum: 0, description: "0=Low, 1=Medium, 2=Important, 3=Urgent. Values above 3 are treated as Urgent." },
+    { type: "string", enum: ["Urgent", "Important", "Medium", "Low"] },
+  ],
+};
 
 export async function GET() {
   try {
@@ -107,6 +113,9 @@ export async function GET() {
                 description: "Optional existing action IDs to link as implementation or follow-up work.",
                 items: { type: "string" },
               },
+              ownerMemberId: { type: "string", nullable: true, description: "Optional active workspace member ID responsible for the proposal." },
+              priority: priorityInputSchema,
+              priorityLabel: { type: "string", enum: ["Urgent", "Important", "Medium", "Low"] },
             },
             [],
           ),
@@ -177,7 +186,9 @@ export async function GET() {
             {
               title: { type: "string" },
               bodyMd: { type: "string" },
-              raisedByMemberId: { type: "string", nullable: true },
+              assigneeMemberId: { type: "string", nullable: true, description: "Optional active workspace member ID assigned to this action." },
+              priority: priorityInputSchema,
+              priorityLabel: { type: "string", enum: ["Urgent", "Important", "Medium", "Low"] },
             },
             ["title"],
           ),
@@ -200,6 +211,10 @@ export async function GET() {
             {
               title: { type: "string" },
               bodyMd: { type: "string" },
+              raisedByMemberId: { type: "string", nullable: true, description: "Optional active workspace member ID who raised the tension." },
+              assigneeMemberId: { type: "string", nullable: true, description: "Optional active workspace member ID responsible for the tension." },
+              priority: priorityInputSchema,
+              priorityLabel: { type: "string", enum: ["Urgent", "Important", "Medium", "Low"] },
             },
             ["title"],
           ),

@@ -3,6 +3,7 @@ import { requireGptAuth } from "@/lib/gpt-auth";
 import { listProposals, createProposal, createProposalFromTension, getWorkspacePermanentPathForEntity } from "@corgtex/domain";
 import { env } from "@corgtex/shared";
 import { handleRouteError } from "@/lib/http";
+import { serializeProposalWorkItem, workItemPriorityFromBody } from "@/lib/work-item-api";
 
 export async function GET(request: NextRequest) {
   try {
@@ -14,14 +15,22 @@ export async function GET(request: NextRequest) {
 
     const result = await listProposals(actor, workspaceId, { take, skip });
 
-    const simplified = result.items.map((p) => ({
-      id: p.id,
-      title: p.title,
-      status: p.status,
-      summary: p.summary,
-      author: p.author?.displayName ?? p.author?.email ?? "Unknown",
-      createdAt: p.createdAt,
-    }));
+    const simplified = result.items.map((p) => {
+      const item = serializeProposalWorkItem(p);
+      return {
+        id: item.id,
+        title: item.title,
+        status: item.status,
+        priority: item.priority,
+        priorityLabel: item.priorityLabel,
+        summary: p.summary,
+        author: p.author?.displayName ?? p.author?.email ?? "Unknown",
+        ownerMemberId: item.ownerMemberId,
+        ownerMemberName: item.ownerMemberName,
+        owner: item.owner,
+        createdAt: p.createdAt,
+      };
+    });
 
     return NextResponse.json({ items: simplified, total: result.total });
   } catch (error) {
@@ -47,6 +56,8 @@ export async function POST(request: NextRequest) {
           bodyMd: typeof body.bodyMd === "string" ? body.bodyMd : null,
           summary: typeof body.summary === "string" ? body.summary : null,
           relatedActionIds: Array.isArray(body.relatedActionIds) ? body.relatedActionIds.map(String) : null,
+          ownerMemberId: body.ownerMemberId ?? null,
+          priority: workItemPriorityFromBody(body),
         })
       : await createProposal(actor, {
           workspaceId,
@@ -54,7 +65,10 @@ export async function POST(request: NextRequest) {
           bodyMd: body.bodyMd,
           summary: body.summary,
           relatedActionIds: Array.isArray(body.relatedActionIds) ? body.relatedActionIds.map(String) : null,
+          ownerMemberId: body.ownerMemberId ?? null,
+          priority: workItemPriorityFromBody(body),
         });
+    const item = serializeProposalWorkItem(proposal);
 
     const origin = env.APP_URL.replace(/\/$/, "");
     const permanentPath = await getWorkspacePermanentPathForEntity({
@@ -66,6 +80,10 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({
       id: proposal.id,
       title: proposal.title,
+      priority: item.priority,
+      priorityLabel: item.priorityLabel,
+      ownerMemberId: item.ownerMemberId,
+      ownerMemberName: item.ownerMemberName,
       status: proposal.status,
       webUrl: `${origin}/workspaces/${workspaceId}/proposals/${proposal.id}`,
       permanentUrl: permanentPath ? `${origin}${permanentPath}` : null,
