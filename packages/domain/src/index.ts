@@ -98,6 +98,7 @@ export * from "./trial-entitlements";
 export * from "./meeting-intelligence";
 export * from "./meeting-intelligence-context";
 export * from "./meeting-blocks";
+export * from "./meeting-evidence-state";
 export * from "./meeting-transcript-chunks";
 export * from "./meeting-transcript-processing";
 export * from "./meeting-transcript-intake";

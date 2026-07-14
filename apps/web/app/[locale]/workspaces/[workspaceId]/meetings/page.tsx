@@ -1,4 +1,4 @@
-import { getMeetingRecorderConfig, listHumanMembers, listMeetingRecordings, listMeetings } from "@corgtex/domain";
+import { deriveMeetingEvidenceState, getMeetingRecorderConfig, listHumanMembers, listMeetingRecordings, listMeetings } from "@corgtex/domain";
 import { requirePageActor } from "@/lib/auth";
 import {
   archiveMeetingAction,
@@ -33,16 +33,7 @@ export const dynamic = "force-dynamic";
 
 const MEETING_STATUS_FILTERS = ["COMPLETED", "SCHEDULED"] as const;
 type MeetingStatusFilter = (typeof MEETING_STATUS_FILTERS)[number];
-
-function isPastScheduledMeetingWithoutTranscript(meeting: {
-  recordedAt: Date | string;
-  scheduledEndAt: Date | string | null;
-  transcript: string | null;
-}, now: Date) {
-  if (meeting.transcript) return false;
-  const reference = new Date(meeting.scheduledEndAt ?? meeting.recordedAt);
-  return reference <= now;
-}
+const NEEDS_TRANSCRIPT_EVIDENCE_STATES = new Set<string>(["needs_transcript", "provider_recovery_pending"]);
 
 function normalizeMeetingStatusFilters(value: string | string[] | undefined): MeetingStatusFilter[] {
   const values = Array.isArray(value) ? value : value ? [value] : [];
@@ -86,13 +77,26 @@ export default async function MeetingsPage({
   const completedMeetings = statusFilters.includes("SCHEDULED") ? [] : filteredCompletedMeetings;
   const scheduledMeetings = statusFilters.includes("COMPLETED") ? [] : filteredUpcomingMeetings;
   const now = new Date();
-  const needsTranscriptMeetings = scheduledMeetings.filter((meeting) => isPastScheduledMeetingWithoutTranscript(meeting, now));
-  const upcomingMeetings = scheduledMeetings.filter((meeting) => !isPastScheduledMeetingWithoutTranscript(meeting, now));
   const recorderEnabled = Boolean(featureFlags.MEETING_RECORDERS && recorderConfig?.featureEnabled && recorderConfig.config.enabled);
   const recordings = recorderEnabled
     ? await listMeetingRecordings(workspaceId, scheduledMeetings.map((meeting) => meeting.id))
     : [];
   const latestRecordingByMeeting = new Map(recordings.map((recording) => [recording.meetingId, recording]));
+  const meetingEvidenceStateById = new Map(scheduledMeetings.map((meeting) => [
+    meeting.id,
+    deriveMeetingEvidenceState({
+      now,
+      recorderEnabled,
+      meeting,
+      latestRecording: latestRecordingByMeeting.get(meeting.id) ?? null,
+    }),
+  ] as const));
+  const needsTranscriptMeetings = scheduledMeetings.filter((meeting) => (
+    NEEDS_TRANSCRIPT_EVIDENCE_STATES.has(meetingEvidenceStateById.get(meeting.id)?.state ?? "")
+  ));
+  const upcomingMeetings = scheduledMeetings.filter((meeting) => (
+    !NEEDS_TRANSCRIPT_EVIDENCE_STATES.has(meetingEvidenceStateById.get(meeting.id)?.state ?? "")
+  ));
   const recorderSentMeetingId = Array.isArray(resolvedSearch.recorderSent)
     ? resolvedSearch.recorderSent[0] ?? null
     : resolvedSearch.recorderSent ?? null;
@@ -109,12 +113,29 @@ export default async function MeetingsPage({
   const memberName = (member: { user: { displayName: string | null; email: string } }) => member.user.displayName || member.user.email;
   const renderRecorderControls = (meeting: (typeof scheduledMeetings)[number]) => {
     const recording = latestRecordingByMeeting.get(meeting.id);
+    const evidenceState = meetingEvidenceStateById.get(meeting.id) ?? deriveMeetingEvidenceState({
+      now,
+      recorderEnabled,
+      meeting,
+      latestRecording: recording ?? null,
+    });
+    const statusLabel = evidenceState.state === "provider_recovery_pending"
+      ? t("recorderRecoveryPending")
+      : evidenceState.state === "needs_transcript"
+        ? t("meetingEvidenceNeedsTranscript")
+        : recording
+          ? `Recorder ${recording.status}`
+          : evidenceState.state === "missing_meeting_link"
+            ? t("recorderNoMeetingLink")
+            : t("recorderReady");
+    const isWarning = evidenceState.state === "needs_transcript"
+      || evidenceState.state === "provider_recovery_pending"
+      || recording?.status === "FAILED";
+
     return recorderEnabled ? (
       <div className="row" style={{ alignItems: "flex-start", gap: 12, marginBottom: 8 }}>
         <div>
-          <span className={`tag ${recording?.status === "FAILED" ? "warning" : ""}`}>
-            {recording ? `Recorder ${recording.status}` : meeting.meetingUrl ? t("recorderReady") : t("recorderNoMeetingLink")}
-          </span>
+          <span className={`tag ${isWarning ? "warning" : ""}`}>{statusLabel}</span>
           {recording?.failureMessage ? (
             <div className="nr-item-meta" style={{ fontSize: "0.82rem", marginTop: 4 }}>
               {recording.provider}: {recording.failureMessage}
@@ -125,13 +146,13 @@ export default async function MeetingsPage({
             </div>
           ) : null}
         </div>
-        {recording && ["PENDING", "SCHEDULED", "JOINING", "RECORDING"].includes(recording.status) ? (
+        {evidenceState.action === "cancel_recorder" ? (
           <form action={cancelMeetingRecordingAction}>
             <input type="hidden" name="workspaceId" value={workspaceId} />
             <input type="hidden" name="meetingId" value={meeting.id} />
             <button type="submit" className="secondary small">{t("btnCancelRecorder")}</button>
           </form>
-        ) : meeting.meetingUrl ? (
+        ) : evidenceState.action === "schedule_recorder" ? (
           <form action={scheduleMeetingRecordingAction}>
             <input type="hidden" name="workspaceId" value={workspaceId} />
             <input type="hidden" name="meetingId" value={meeting.id} />
