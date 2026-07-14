@@ -66,6 +66,8 @@ describe("tension server actions", () => {
     formData.set("title", "Clarify handoff");
     formData.set("bodyMd", "Details");
     formData.set("priority", "5");
+    formData.set("assigneeMemberId", "member-2");
+    formData.set("raisedByMemberId", "member-1");
     formData.set("isPrivate", "on");
 
     await createTensionAction(formData);
@@ -77,7 +79,27 @@ describe("tension server actions", () => {
       title: "Clarify handoff",
       bodyMd: "Details",
       priority: 5,
+      assigneeMemberId: "member-2",
+      raisedByMemberId: "member-1",
       isPrivate: true,
+    }));
+  });
+
+  it("passes responsible person updates through to the domain action", async () => {
+    const { updateTensionAction } = await import("./actions");
+    const formData = new FormData();
+    formData.set("workspaceId", "workspace-1");
+    formData.set("tensionId", "tension-1");
+    formData.set("assigneeMemberId", "member-2");
+    formData.set("priority", "3");
+
+    await updateTensionAction(formData);
+
+    expect(updateTension).toHaveBeenCalledWith(actor, expect.objectContaining({
+      workspaceId: "workspace-1",
+      tensionId: "tension-1",
+      assigneeMemberId: "member-2",
+      priority: 3,
     }));
   });
 

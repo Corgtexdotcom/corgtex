@@ -6,6 +6,7 @@ import { actorUserIdForWorkspace, requireWorkspaceMembership } from "./auth";
 import { recordAudit } from "./audit-trail";
 import { archiveFilterWhere, archiveWorkspaceArtifact, type ArchiveFilter } from "./archive";
 import { invariant } from "./errors";
+import { humanMemberIdentityWhere } from "./member-identity";
 import { requireDraftManager } from "./draft-permissions";
 import { resolveWorkspaceProposalLink } from "./proposal-links";
 import { createWorkItemEvidenceLinks } from "./work-item-evidence";
@@ -74,6 +75,22 @@ function workItemOrderBy(sort: WorkItemSort | undefined): Prisma.ActionOrderByWi
     return [{ createdAt: "desc" }, { id: "desc" }];
   }
   return [{ priority: "desc" }, { createdAt: "desc" }, { id: "desc" }];
+}
+
+async function resolveAssigneeMemberId(tx: Prisma.TransactionClient, workspaceId: string, assigneeMemberId?: string | null) {
+  if (!assigneeMemberId) return null;
+
+  const member = await tx.member.findFirst({
+    where: {
+      id: assigneeMemberId,
+      workspaceId,
+      isActive: true,
+      ...humanMemberIdentityWhere(),
+    },
+    select: { id: true },
+  });
+  invariant(member, 400, "INVALID_INPUT", "Action assignee must be an active human member of this workspace.");
+  return member.id;
 }
 
 export async function listActions(actor: AppActor, workspaceId: string, opts?: ListActionsOptions) {
@@ -219,11 +236,12 @@ export async function createAction(actor: AppActor, params: {
   const publishedAt = isPrivate ? null : new Date();
 
   return prisma.$transaction(async (tx) => {
+    const assigneeMemberId = await resolveAssigneeMemberId(tx, params.workspaceId, params.assigneeMemberId);
     const proposalId = await resolveWorkspaceProposalLink(tx, actor, membership, params.workspaceId, params.proposalId);
     let authorUserId = actor.kind === "user"
       ? actor.user.id
       : await actorUserIdForWorkspace(actor, params.workspaceId);
-    const attributedMemberId = params.authorMemberId || params.assigneeMemberId || null;
+    const attributedMemberId = params.authorMemberId || assigneeMemberId;
     if (actor.kind === "agent" && attributedMemberId) {
       authorUserId = await resolveWorkspaceMemberUserId(tx, params.workspaceId, attributedMemberId, "Action author must be an active member of this workspace.");
     }
@@ -234,7 +252,7 @@ export async function createAction(actor: AppActor, params: {
         title,
         bodyMd: params.bodyMd?.trim() || null,
         circleId: params.circleId || null,
-        assigneeMemberId: params.assigneeMemberId || null,
+        assigneeMemberId,
         dueAt: params.dueAt ?? null,
         proposalId,
         priority: params.priority ?? 0,
@@ -379,7 +397,9 @@ export async function updateAction(actor: AppActor, params: {
       }
     }
     if (params.circleId !== undefined) data.circleId = params.circleId || null;
-    if (params.assigneeMemberId !== undefined) data.assigneeMemberId = params.assigneeMemberId || null;
+    if (params.assigneeMemberId !== undefined) {
+      data.assigneeMemberId = await resolveAssigneeMemberId(tx, params.workspaceId, params.assigneeMemberId);
+    }
     if (params.dueAt !== undefined) data.dueAt = params.dueAt;
     if (params.isPrivate !== undefined) data.isPrivate = params.isPrivate;
 

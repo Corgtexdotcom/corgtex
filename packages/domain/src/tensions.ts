@@ -5,6 +5,7 @@ import { appendEvents } from "./events";
 import { actorUserIdForWorkspace, requireWorkspaceMembership } from "./auth";
 import { archiveFilterWhere, archiveWorkspaceArtifact, type ArchiveFilter } from "./archive";
 import { invariant } from "./errors";
+import { humanMemberIdentityWhere } from "./member-identity";
 import { requireDraftManager } from "./draft-permissions";
 import { resolveWorkspaceProposalLink } from "./proposal-links";
 import { createWorkItemEvidenceLinks } from "./work-item-evidence";
@@ -49,6 +50,22 @@ async function resolveRaisedByMemberId(tx: Prisma.TransactionClient, workspaceId
     select: { id: true },
   });
   invariant(member, 400, "INVALID_INPUT", "Raised-by member must be an active member of this workspace.");
+  return member.id;
+}
+
+async function resolveResponsibleMemberId(tx: Prisma.TransactionClient, workspaceId: string, assigneeMemberId?: string | null) {
+  if (!assigneeMemberId) return null;
+
+  const member = await tx.member.findFirst({
+    where: {
+      id: assigneeMemberId,
+      workspaceId,
+      isActive: true,
+      ...humanMemberIdentityWhere(),
+    },
+    select: { id: true },
+  });
+  invariant(member, 400, "INVALID_INPUT", "Responsible person must be an active human member of this workspace.");
   return member.id;
 }
 
@@ -199,6 +216,7 @@ export async function createTension(actor: AppActor, params: {
 
   return prisma.$transaction(async (tx) => {
     const raisedByMemberId = await resolveRaisedByMemberId(tx, params.workspaceId, params.raisedByMemberId);
+    const assigneeMemberId = await resolveResponsibleMemberId(tx, params.workspaceId, params.assigneeMemberId);
     const proposalId = await resolveWorkspaceProposalLink(tx, actor, membership, params.workspaceId, params.proposalId);
     let authorUserId = actor.kind === "user"
       ? actor.user.id
@@ -214,7 +232,7 @@ export async function createTension(actor: AppActor, params: {
         title,
         bodyMd: params.bodyMd?.trim() || null,
         circleId: params.circleId || null,
-        assigneeMemberId: params.assigneeMemberId || null,
+        assigneeMemberId,
         raisedByMemberId,
         proposalId,
         priority: params.priority ?? 0,
@@ -365,7 +383,9 @@ export async function updateTension(actor: AppActor, params: {
       data.resolvedVia = params.resolvedVia?.trim() || null;
     }
     if (params.circleId !== undefined) data.circleId = params.circleId || null;
-    if (params.assigneeMemberId !== undefined) data.assigneeMemberId = params.assigneeMemberId || null;
+    if (params.assigneeMemberId !== undefined) {
+      data.assigneeMemberId = await resolveResponsibleMemberId(tx, params.workspaceId, params.assigneeMemberId);
+    }
     if (params.raisedByMemberId !== undefined) {
       data.raisedByMemberId = await resolveRaisedByMemberId(tx, params.workspaceId, params.raisedByMemberId);
     }
@@ -614,6 +634,7 @@ export async function getTension(actor: AppActor, params: { workspaceId: string;
     include: {
       author: { select: { id: true, displayName: true, email: true } },
       circle: { select: { id: true, name: true } },
+      assigneeMember: { include: { user: { select: { displayName: true, email: true } } } },
       raisedByMember: { include: { user: { select: { displayName: true, email: true } } } },
       proposal: { select: { id: true, title: true, status: true } },
       upvotes: true,

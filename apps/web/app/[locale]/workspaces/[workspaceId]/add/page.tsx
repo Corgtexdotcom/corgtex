@@ -27,6 +27,9 @@ import { requirePageActor } from "@/lib/auth";
 import { enforceDemoGuard } from "@/lib/demo-guard";
 import { MarkdownEditor } from "@/lib/components/MarkdownEditor";
 import { TimeZoneSelect } from "@/lib/components/TimeZoneSelect";
+import { WorkItemMemberSelect, type WorkItemMemberOption } from "@/lib/components/WorkItemMemberSelect";
+import { WorkItemPrioritySelect } from "@/lib/components/WorkItemPrioritySelect";
+import { DEFAULT_WORK_ITEM_PRIORITY_LABELS } from "@/lib/work-item-priority";
 import { getWorkspaceFeatureFlags } from "@/lib/workspace-feature-flags";
 import {
   DEFAULT_MEETING_DURATION_MINUTES,
@@ -200,7 +203,8 @@ export default async function WorkspaceAddPage({
   if (!allowedActions.some((action) => action.kind === kind)) notFound();
 
   const needsProposals = kind === "action" || kind === "tension";
-  const needsMembers = kind === "tension"
+  const needsMembers = kind === "action"
+    || kind === "tension"
     || kind === "goal"
     || kind === "allocation"
     || kind === "role_assignment"
@@ -242,6 +246,10 @@ export default async function WorkspaceAddPage({
 
   const proposals = proposalsResult.items;
   const activeProposals = proposals.filter((proposal) => proposal.status === "DRAFT" || proposal.status === "OPEN");
+  const memberOptions: WorkItemMemberOption[] = members.map((member) => ({
+    id: member.id,
+    label: member.user.displayName ?? member.user.email,
+  }));
   const contacts = contactsResult.items;
   const accounts = accountsResult.items;
   const deals = dealsResult.items;
@@ -599,7 +607,13 @@ export default async function WorkspaceAddPage({
             {hiddenWorkspace(workspaceId)}
             <label>Title<input name="title" required /></label>
             <label>Notes<MarkdownEditor name="bodyMd" rows={5} /></label>
-            <label>Priority<input name="priority" type="number" min={0} defaultValue={0} /></label>
+            <WorkItemMemberSelect
+              name="assigneeMemberId"
+              label="Assignee"
+              noneLabel="No assignee"
+              members={memberOptions}
+            />
+            <WorkItemPrioritySelect label="Priority" labels={DEFAULT_WORK_ITEM_PRIORITY_LABELS} defaultValue={0} />
             <label>
               Link to proposal
               <select name="proposalId" defaultValue="">
@@ -616,7 +630,13 @@ export default async function WorkspaceAddPage({
             {hiddenWorkspace(workspaceId)}
             <label>Title<input name="title" required /></label>
             <label>Description<MarkdownEditor name="bodyMd" rows={5} /></label>
-            <label>Priority<input name="priority" type="number" min={0} defaultValue={0} /></label>
+            <WorkItemMemberSelect
+              name="assigneeMemberId"
+              label="Responsible person"
+              noneLabel="No responsible person"
+              members={memberOptions}
+            />
+            <WorkItemPrioritySelect label="Priority" labels={DEFAULT_WORK_ITEM_PRIORITY_LABELS} defaultValue={0} />
             <label>
               Raised by
               <select name="raisedByMemberId" defaultValue="">
@@ -645,7 +665,7 @@ export default async function WorkspaceAddPage({
             <label>Title<input name="title" required /></label>
             <label>Summary<input name="summary" /></label>
             <label>Body<MarkdownEditor name="bodyMd" required rows={8} /></label>
-            <label>Priority<input name="priority" type="number" min={0} defaultValue={0} /></label>
+            <WorkItemPrioritySelect label="Priority" labels={DEFAULT_WORK_ITEM_PRIORITY_LABELS} defaultValue={0} />
             <label style={{ display: "flex", alignItems: "center", flexDirection: "row", gap: 8 }}>
               <input type="checkbox" name="isPrivate" defaultChecked style={{ width: "auto" }} />
               Private draft

@@ -1,8 +1,10 @@
 import Link from "next/link";
-import { AppError, getAction, getWorkspaceArchiveRecord, listDeliberationEntries, listExternalResourceAttachments, listWorkItemEvidence, listWorkItemVersions, requireWorkspaceMembership } from "@corgtex/domain";
+import { AppError, getAction, getWorkspaceArchiveRecord, listDeliberationEntries, listExternalResourceAttachments, listHumanMembers, listWorkItemEvidence, listWorkItemVersions, requireWorkspaceMembership } from "@corgtex/domain";
 import { requirePageActor } from "@/lib/auth";
 import { MarkdownEditor } from "@/lib/components/MarkdownEditor";
 import { MarkdownRenderer } from "@/lib/components/MarkdownRenderer";
+import { WorkItemMemberSelect, type WorkItemMemberOption } from "@/lib/components/WorkItemMemberSelect";
+import { WorkItemPrioritySelect } from "@/lib/components/WorkItemPrioritySelect";
 import { WorkItemResolutionDialog } from "@/lib/components/WorkItemResolutionDialog";
 import { ArchivedItemBanner } from "@/lib/components/ArchivedItemBanner";
 import { UnavailableItemStatus } from "@/lib/components/UnavailableItemStatus";
@@ -13,6 +15,7 @@ import { getDeliberationTargets } from "@/lib/deliberation-targets";
 import { canOpenPrivateDraft } from "@/lib/governance-open-guards";
 import { attachActionExternalResourceAction, deleteActionAction, postActionDeliberationAction, publishActionAction, resolveActionDeliberationAction, returnActionToDraftAction, updateActionAction, updateActionDeliberationAction } from "../../actions";
 import { getTranslations } from "next-intl/server";
+import { formatWorkItemPriority, type WorkItemPriorityLabels } from "@/lib/work-item-priority";
 
 export const dynamic = "force-dynamic";
 
@@ -62,7 +65,7 @@ export default async function ActionDetailPage({
     throw error;
   }
   const isArchived = Boolean(action.archivedAt);
-  const [versionHistory, evidence, externalResourceAttachments, deliberationEntries, archiveRecord] = await Promise.all([
+  const [versionHistory, evidence, externalResourceAttachments, deliberationEntries, archiveRecord, members] = await Promise.all([
     archivedSafeRead(isArchived, listWorkItemVersions(actor, { workspaceId, entityType: "ACTION", entityId: actionId }), {
       entityType: "Action" as const,
       entityId: actionId,
@@ -75,6 +78,7 @@ export default async function ActionDetailPage({
     isArchived
       ? archivedSafeRead(true, getWorkspaceArchiveRecord(actor, { workspaceId, entityType: "Action", entityId: action.id }), null)
       : Promise.resolve(null),
+    isArchived ? Promise.resolve([]) : listHumanMembers(workspaceId),
   ]);
   const completionEvidence = evidence.filter((row) => row.purpose === "completion_evidence");
   const feedbackContextEvidence = evidence.filter((row) => row.purpose === "feedback_context");
@@ -103,6 +107,15 @@ export default async function ActionDetailPage({
   }[action.status];
   const authorName = action.author?.displayName || action.author?.email || "Unknown";
   const assigneeName = action.assigneeMember?.user?.displayName || action.assigneeMember?.user?.email || null;
+  const memberName = (member: { user: { displayName: string | null; email: string } }) => member.user.displayName || member.user.email;
+  const memberOptions: WorkItemMemberOption[] = members.map((member) => ({ id: member.id, label: memberName(member) }));
+  const priorityLabels = {
+    3: tWork("priorityUrgent"),
+    2: tWork("priorityImportant"),
+    1: tWork("priorityMedium"),
+    0: tWork("priorityLow"),
+  } satisfies WorkItemPriorityLabels;
+  const priorityText = (priority: number | null | undefined) => formatWorkItemPriority(priority, priorityLabels);
   const canManage = !isArchived && (actor.kind === "agent"
     || membership?.role === "ADMIN"
     || (actor.kind === "user" && action.authorUserId === actor.user.id));
@@ -142,7 +155,7 @@ export default async function ActionDetailPage({
           <span className={`tag ${statusClass}`}>{statusLabel}</span>
           <span>{t("metaCreator", { name: authorName })}</span>
           {assigneeName && <span>{t("metaAssignee", { name: assigneeName })}</span>}
-          <span>{tWork("priorityN", { priority: action.priority })}</span>
+          <span>{priorityText(action.priority)}</span>
           <span>{new Date(action.createdAt).toLocaleDateString()}</span>
           <span>
             {versionHistory.versions.length > 0 ? (
@@ -227,10 +240,14 @@ export default async function ActionDetailPage({
                   {t("formNotes")}
                   <MarkdownEditor name="bodyMd" defaultValue={action.bodyMd ?? ""} rows={6} />
                 </label>
-                <label>
-                  {t("formPriority")}
-                  <input name="priority" type="number" min={0} defaultValue={action.priority} />
-                </label>
+                <WorkItemMemberSelect
+                  name="assigneeMemberId"
+                  label={t("formAssignee")}
+                  noneLabel={t("formAssigneeNone")}
+                  members={memberOptions}
+                  defaultValue={action.assigneeMemberId}
+                />
+                <WorkItemPrioritySelect label={t("formPriority")} labels={priorityLabels} defaultValue={action.priority} />
                 <button type="submit" className="secondary small">{action.status === "DRAFT" ? t("btnSaveDraft") : tCommon("save")}</button>
               </form>
             </details>

@@ -1,8 +1,10 @@
 import Link from "next/link";
-import { AppError, getTension, getWorkspaceArchiveRecord, listAdviceRequests, listDeliberationEntries, listExternalResourceAttachments, listWorkItemEvidence, listWorkItemVersions, requireWorkspaceMembership } from "@corgtex/domain";
+import { AppError, getTension, getWorkspaceArchiveRecord, listAdviceRequests, listDeliberationEntries, listExternalResourceAttachments, listHumanMembers, listWorkItemEvidence, listWorkItemVersions, requireWorkspaceMembership } from "@corgtex/domain";
 import { requirePageActor } from "@/lib/auth";
 import { MarkdownEditor } from "@/lib/components/MarkdownEditor";
 import { MarkdownRenderer } from "@/lib/components/MarkdownRenderer";
+import { WorkItemMemberSelect, type WorkItemMemberOption } from "@/lib/components/WorkItemMemberSelect";
+import { WorkItemPrioritySelect } from "@/lib/components/WorkItemPrioritySelect";
 import { WorkItemResolutionDialog } from "@/lib/components/WorkItemResolutionDialog";
 import { ArchivedItemBanner } from "@/lib/components/ArchivedItemBanner";
 import { UnavailableItemStatus } from "@/lib/components/UnavailableItemStatus";
@@ -14,6 +16,7 @@ import { getDeliberationTargets } from "@/lib/deliberation-targets";
 import { canOpenPrivateDraft } from "@/lib/governance-open-guards";
 import { attachTensionExternalResourceAction, createProposalFromTensionAction, postTensionDeliberationAction, publishTensionAction, requestTensionInputAction, returnTensionToDraftAction, resolveTensionDeliberationAction, updateTensionAction, updateTensionDeliberationAction } from "../../actions";
 import { getFormatter, getTranslations } from "next-intl/server";
+import { formatWorkItemPriority, type WorkItemPriorityLabels } from "@/lib/work-item-priority";
 
 export const dynamic = "force-dynamic";
 
@@ -65,7 +68,7 @@ export default async function TensionDetailPage({
   }
   const isArchived = Boolean(tension.archivedAt);
   const membership = await requireWorkspaceMembership({ actor, workspaceId });
-  const [entries, versionHistory, evidence, externalResourceAttachments, inputRequests, archiveRecord] = await Promise.all([
+  const [entries, versionHistory, evidence, externalResourceAttachments, inputRequests, archiveRecord, members] = await Promise.all([
     archivedSafeRead(isArchived, listDeliberationEntries(actor, { workspaceId, parentType: "TENSION", parentId: tensionId }), []),
     archivedSafeRead(isArchived, listWorkItemVersions(actor, { workspaceId, entityType: "TENSION", entityId: tensionId }), {
       entityType: "Tension" as const,
@@ -79,6 +82,7 @@ export default async function TensionDetailPage({
     isArchived
       ? archivedSafeRead(true, getWorkspaceArchiveRecord(actor, { workspaceId, entityType: "Tension", entityId: tension.id }), null)
       : Promise.resolve(null),
+    isArchived ? Promise.resolve([]) : listHumanMembers(workspaceId),
   ]);
   const deliberationTargets = isArchived
     ? { options: [], defaultValue: "", actorMemberId: null, actorCircleIds: [] }
@@ -109,9 +113,18 @@ export default async function TensionDetailPage({
     return labels[status] ?? status;
   };
 
-  const priorityText = tension.priority > 0 ? t("priorityN", { priority: tension.priority }) : t("noPriority");
+  const priorityLabels = {
+    3: tWork("priorityUrgent"),
+    2: tWork("priorityImportant"),
+    1: tWork("priorityMedium"),
+    0: tWork("priorityLow"),
+  } satisfies WorkItemPriorityLabels;
+  const priorityText = formatWorkItemPriority(tension.priority, priorityLabels);
   const authorName = tension.author?.displayName || tension.author?.email || t("authorUnknown");
   const raisedByName = tension.raisedByMember?.user?.displayName || tension.raisedByMember?.user?.email || null;
+  const responsibleName = tension.assigneeMember?.user?.displayName || tension.assigneeMember?.user?.email || null;
+  const memberName = (member: { user: { displayName: string | null; email: string } }) => member.user.displayName || member.user.email;
+  const memberOptions: WorkItemMemberOption[] = members.map((member) => ({ id: member.id, label: memberName(member) }));
   const canManage = !isArchived && (actor.kind === "agent" || membership?.role === "ADMIN" || (actor.kind === "user" && tension.authorUserId === actor.user.id));
   const isAdmin = actor.kind === "agent" || membership?.role === "ADMIN";
   const actorUserId = actor.kind === "user" ? actor.user.id : null;
@@ -189,6 +202,7 @@ export default async function TensionDetailPage({
           </span>
           <span>{t("detailAuthorMeta", { author: authorName })}</span>
           {raisedByName && <span>{t("detailRaisedByMeta", { name: raisedByName })}</span>}
+          {responsibleName && <span>{t("detailResponsiblePersonMeta", { name: responsibleName })}</span>}
           <span>{t("detailPriorityMeta", { priority: priorityText })}</span>
           <span>{t("detailCreatedMeta", { date: new Date(tension.createdAt).toLocaleDateString() })}</span>
           <span>
@@ -268,10 +282,21 @@ export default async function TensionDetailPage({
                   {t("formDescription")}
                   <MarkdownEditor name="bodyMd" defaultValue={tension.bodyMd ?? ""} rows={6} />
                 </label>
-                <label>
-                  {t("formPriority")}
-                  <input name="priority" type="number" min={0} defaultValue={tension.priority} />
-                </label>
+                <WorkItemMemberSelect
+                  name="assigneeMemberId"
+                  label={t("formResponsiblePerson")}
+                  noneLabel={t("formResponsiblePersonNone")}
+                  members={memberOptions}
+                  defaultValue={tension.assigneeMemberId}
+                />
+                <WorkItemMemberSelect
+                  name="raisedByMemberId"
+                  label={t("formRaisedBy")}
+                  noneLabel={t("formRaisedByNone")}
+                  members={memberOptions}
+                  defaultValue={tension.raisedByMemberId}
+                />
+                <WorkItemPrioritySelect label={t("formPriority")} labels={priorityLabels} defaultValue={tension.priority} />
                 <button type="submit" className="secondary small">{tension.status === "DRAFT" ? t("btnSaveDraft") : tCommon("save")}</button>
               </form>
             </details>

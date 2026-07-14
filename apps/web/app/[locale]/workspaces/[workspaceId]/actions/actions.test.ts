@@ -50,6 +50,7 @@ function buildCreateFormData() {
   formData.set("title", "Follow up");
   formData.set("bodyMd", "Notes");
   formData.set("priority", "4");
+  formData.set("assigneeMemberId", "member-2");
   return formData;
 }
 
@@ -70,8 +71,27 @@ describe("action item server actions", () => {
       title: "Follow up",
       bodyMd: "Notes",
       priority: 4,
+      assigneeMemberId: "member-2",
       proposalId: null,
       isPrivate: true,
+    }));
+  });
+
+  it("passes assignee updates through to the domain action", async () => {
+    const { updateActionAction } = await import("./actions");
+    const formData = new FormData();
+    formData.set("workspaceId", "workspace-1");
+    formData.set("actionId", "action-1");
+    formData.set("assigneeMemberId", "member-3");
+    formData.set("priority", "2");
+
+    await updateActionAction(formData);
+
+    expect(updateAction).toHaveBeenCalledWith(actor, expect.objectContaining({
+      workspaceId: "workspace-1",
+      actionId: "action-1",
+      assigneeMemberId: "member-3",
+      priority: 2,
     }));
   });
 

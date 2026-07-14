@@ -12,6 +12,9 @@ const { prismaMock } = vi.hoisted(() => ({
       update: vi.fn(),
       count: vi.fn(),
     },
+    member: {
+      findFirst: vi.fn(),
+    },
     document: {
       findMany: vi.fn(),
     },
@@ -79,6 +82,7 @@ describe("action domain lifecycle", () => {
     prismaMock.workItemVersion.create.mockResolvedValue({});
     prismaMock.workItemVersion.findUnique.mockResolvedValue(null);
     prismaMock.workspacePermalink.upsert.mockResolvedValue({});
+    prismaMock.member.findFirst.mockResolvedValue({ id: "member-2" });
   });
 
   it("creates form-submitted actions as private drafts by default", async () => {
@@ -123,6 +127,60 @@ describe("action domain lifecycle", () => {
     expect(recordAudit).not.toHaveBeenCalledWith(expect.anything(), actor, expect.objectContaining({
       action: "action.published",
     }));
+  });
+
+  it("creates an action with a valid assignee member", async () => {
+    prismaMock.action.create.mockResolvedValueOnce({
+      id: "action-assigned",
+      workspaceId: "workspace-1",
+      authorUserId: "user-1",
+      title: "Follow up",
+      assigneeMemberId: "member-2",
+      status: "DRAFT",
+      isPrivate: true,
+      publishedAt: null,
+    });
+
+    const { createAction } = await import("./actions");
+    await expect(createAction(actor, {
+      workspaceId: "workspace-1",
+      title: "Follow up",
+      assigneeMemberId: "member-2",
+    })).resolves.toMatchObject({
+      id: "action-assigned",
+      assigneeMemberId: "member-2",
+    });
+
+    expect(prismaMock.member.findFirst).toHaveBeenCalledWith({
+      where: expect.objectContaining({
+        id: "member-2",
+        workspaceId: "workspace-1",
+        isActive: true,
+        NOT: expect.any(Array),
+      }),
+      select: { id: true },
+    });
+    expect(prismaMock.action.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        assigneeMemberId: "member-2",
+      }),
+    });
+  });
+
+  it("rejects invalid action assignees", async () => {
+    prismaMock.member.findFirst.mockResolvedValueOnce(null);
+
+    const { createAction } = await import("./actions");
+    await expect(createAction(actor, {
+      workspaceId: "workspace-1",
+      title: "Follow up",
+      assigneeMemberId: "missing-member",
+    })).rejects.toMatchObject({
+      status: 400,
+      code: "INVALID_INPUT",
+    });
+
+    expect(prismaMock.action.create).not.toHaveBeenCalled();
   });
 
   it("combines member filters with the existing privacy filter", async () => {
@@ -389,6 +447,61 @@ describe("action domain lifecycle", () => {
     expect(prismaMock.action.update).toHaveBeenCalledWith(expect.objectContaining({
       where: { id: "action-1" },
       data: { title: "Follow up now", priority: 5, version: 2 },
+    }));
+  });
+
+  it("updates an action assignee and snapshots the previous version", async () => {
+    prismaMock.action.findUnique.mockResolvedValue({
+      id: "action-1",
+      workspaceId: "workspace-1",
+      authorUserId: "user-1",
+      title: "Follow up",
+      bodyMd: "Old notes",
+      assigneeMemberId: null,
+      priority: 1,
+      status: "OPEN",
+      version: 1,
+      isPrivate: false,
+      publishedAt: new Date("2026-06-01T00:00:00.000Z"),
+      archivedAt: null,
+    });
+    prismaMock.action.update.mockResolvedValue({
+      id: "action-1",
+      workspaceId: "workspace-1",
+      assigneeMemberId: "member-2",
+      status: "OPEN",
+      version: 2,
+    });
+
+    const { updateAction } = await import("./actions");
+    await expect(updateAction(actor, {
+      workspaceId: "workspace-1",
+      actionId: "action-1",
+      assigneeMemberId: "member-2",
+    })).resolves.toMatchObject({
+      assigneeMemberId: "member-2",
+      version: 2,
+    });
+
+    expect(prismaMock.member.findFirst).toHaveBeenCalledWith({
+      where: expect.objectContaining({
+        id: "member-2",
+        workspaceId: "workspace-1",
+        isActive: true,
+        NOT: expect.any(Array),
+      }),
+      select: { id: true },
+    });
+    expect(prismaMock.workItemVersion.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        entityType: "Action",
+        entityId: "action-1",
+        changedFields: ["assigneeMemberId"],
+      }),
+    }));
+    expect(prismaMock.action.update).toHaveBeenCalledWith(expect.objectContaining({
+      where: { id: "action-1" },
+      data: { assigneeMemberId: "member-2", version: 2 },
     }));
   });
 

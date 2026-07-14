@@ -3,6 +3,8 @@
 import { useMemo, useState } from "react";
 import { useTranslations } from "next-intl";
 import { MarkdownEditor } from "@/lib/components/MarkdownEditor";
+import { WorkItemPrioritySelect } from "@/lib/components/WorkItemPrioritySelect";
+import type { WorkItemPriorityLabels } from "@/lib/work-item-priority";
 
 const AI_SUMMARY_WORD_THRESHOLD = 120;
 
@@ -38,6 +40,7 @@ export function ProposalDraftFields({
   defaultPriority?: number;
 }) {
   const t = useTranslations("proposals");
+  const tWork = useTranslations("workItems");
   const [title, setTitle] = useState(defaultTitle);
   const [bodyMd, setBodyMd] = useState(defaultBodyMd);
   const [includeAiSummary, setIncludeAiSummary] = useState(true);
@@ -45,6 +48,12 @@ export function ProposalDraftFields({
     () => proposalWordCount(title, bodyMd) > AI_SUMMARY_WORD_THRESHOLD,
     [title, bodyMd],
   );
+  const priorityLabels = {
+    3: tWork("priorityUrgent"),
+    2: tWork("priorityImportant"),
+    1: tWork("priorityMedium"),
+    0: tWork("priorityLow"),
+  } satisfies WorkItemPriorityLabels;
 
   return (
     <>
@@ -62,10 +71,7 @@ export function ProposalDraftFields({
           placeholder={t("formBodyPlaceholder")}
         />
       </label>
-      <label>
-        {t("formPriority")}
-        <input name="priority" type="number" min={0} defaultValue={defaultPriority} />
-      </label>
+      <WorkItemPrioritySelect label={t("formPriority")} labels={priorityLabels} defaultValue={defaultPriority} />
       {showAiSummaryToggle && (
         <label style={{ display: "flex", alignItems: "center", gap: "8px", fontWeight: "normal", cursor: "pointer" }}>
           <input type="hidden" name="includeAiSummaryRendered" value="1" />

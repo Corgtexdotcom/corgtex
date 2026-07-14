@@ -22,10 +22,13 @@ import {
 import { MarkdownEditor } from "@/lib/components/MarkdownEditor";
 import { MarkdownExcerpt } from "@/lib/components/MarkdownRenderer";
 import { ItemActions } from "@/lib/components/ui/ItemActions";
+import { WorkItemMemberSelect, type WorkItemMemberOption } from "@/lib/components/WorkItemMemberSelect";
 import { WorkItemFilterControls, WorkItemToolbar } from "@/lib/components/WorkItemControls";
 import { WorkItemKanbanBoard, type WorkItemKanbanColumn } from "@/lib/components/WorkItemKanbanBoard";
+import { WorkItemPrioritySelect } from "@/lib/components/WorkItemPrioritySelect";
 import { WorkItemResolutionDialog } from "@/lib/components/WorkItemResolutionDialog";
 import { WorkItemTable, type WorkItemTableColumn, type WorkItemTableRow } from "@/lib/components/WorkItemTable";
+import { formatWorkItemPriority, type WorkItemPriorityLabels } from "@/lib/work-item-priority";
 import {
   buildWorkItemQuery,
   normalizeVisibleWorkItemColumns,
@@ -142,6 +145,14 @@ export default async function ActionsPage({
   };
 
   const memberName = (member: { user: { displayName: string | null; email: string } }) => member.user.displayName || member.user.email;
+  const memberOptions: WorkItemMemberOption[] = members.map((member) => ({ id: member.id, label: memberName(member) }));
+  const priorityLabels = {
+    3: tWork("priorityUrgent"),
+    2: tWork("priorityImportant"),
+    1: tWork("priorityMedium"),
+    0: tWork("priorityLow"),
+  } satisfies WorkItemPriorityLabels;
+  const priorityText = (priority: number | null | undefined) => formatWorkItemPriority(priority, priorityLabels);
 
   function actionMoveLabel(status: ActionColumnStatus) {
     if (status === "DRAFT") return t("btnReturnToDraft");
@@ -261,10 +272,14 @@ export default async function ActionsPage({
               {t("formNotes")}
               <MarkdownEditor name="bodyMd" defaultValue={action.bodyMd ?? ""} rows={5} />
             </label>
-            <label>
-              {t("formPriority")}
-              <input name="priority" type="number" min={0} defaultValue={action.priority} />
-            </label>
+            <WorkItemMemberSelect
+              name="assigneeMemberId"
+              label={t("formAssignee")}
+              noneLabel={t("formAssigneeNone")}
+              members={memberOptions}
+              defaultValue={action.assigneeMemberId}
+            />
+            <WorkItemPrioritySelect label={t("formPriority")} labels={priorityLabels} defaultValue={action.priority} />
             <button type="submit" className="secondary small">{action.status === "DRAFT" ? t("btnSaveDraft") : tCommon("save")}</button>
           </form>
         </details>,
@@ -308,7 +323,7 @@ export default async function ActionsPage({
             {t("metaCreator", { name: authorName })}
             {createdAge ? ` · ${createdAge}` : ""}
             {assigneeName ? ` · ${t("metaAssignee", { name: assigneeName })}` : ""}
-            {` · ${tWork("priorityN", { priority: action.priority })}`}
+            {` · ${priorityText(action.priority)}`}
             {action.circle ? ` · ${action.circle.name}` : ""}
             {dueDate ? ` · ${t("metaDue", { date: dueDate })}` : ""}
             {action.proposal?.title ? ` · ${t("metaLinkedToProposal", { title: action.proposal.title })}` : ""}
@@ -353,7 +368,7 @@ export default async function ActionsPage({
   const actionTableColumns: WorkItemTableColumn[] = [
     { id: "item", label: tWork("tableItem"), cellClassName: "nr-work-item-table-main" },
     { id: "status", label: tWork("tableStatus") },
-    { id: "owner", label: tWork("tableOwner") },
+    { id: "owner", label: t("formAssignee") },
     { id: "dates", label: tWork("tableDates") },
     { id: "priority", label: t("formPriority"), align: "right" },
     { id: "links", label: tWork("tableLinks") },
@@ -412,7 +427,7 @@ export default async function ActionsPage({
             {dueDate && <div>{t("metaDue", { date: dueDate })}</div>}
           </div>
         ),
-        priority: tWork("priorityN", { priority: action.priority }),
+        priority: priorityText(action.priority),
         links: (
           <div className="nr-work-item-table-meta nr-work-item-table-tags">
             {action.version > 1 ? (
@@ -462,10 +477,13 @@ export default async function ActionsPage({
             {t("formNotes")}
             <MarkdownEditor name="bodyMd" rows={4} />
           </label>
-          <label>
-            {t("formPriority")}
-            <input name="priority" type="number" min={0} defaultValue={0} />
-          </label>
+          <WorkItemMemberSelect
+            name="assigneeMemberId"
+            label={t("formAssignee")}
+            noneLabel={t("formAssigneeNone")}
+            members={memberOptions}
+          />
+          <WorkItemPrioritySelect label={t("formPriority")} labels={priorityLabels} defaultValue={0} />
           <button type="submit">{t("btnCreateAction")}</button>
         </form>
       </details>
