@@ -4,7 +4,7 @@ import type { ArchiveFilter } from "@corgtex/domain";
 import type { ActionStatus } from "@prisma/client";
 import { searchParamValues } from "@/lib/filter-query";
 import { withWorkspaceRoute } from "@/lib/route-handler";
-import { serializeActionWorkItem, workItemPriorityFromBody } from "@/lib/work-item-api";
+import { loadActionWorkItemResponse, serializeActionWorkItem, workItemPriorityFromBody } from "@/lib/work-item-api";
 import { normalizeWorkItemSort } from "@/lib/work-item-view";
 import { env } from "@corgtex/shared";
 
@@ -57,8 +57,9 @@ export const POST = withWorkspaceRoute(async (req, { actor, workspaceId, members
   });
   const origin = env.APP_URL.replace(/\/$/, "");
   const permanentPath = await getWorkspacePermanentPathForEntity({ workspaceId, entityType: "Action", entityId: action.id });
+  const actionForResponse = await loadActionWorkItemResponse(workspaceId, action.id) ?? action;
   return NextResponse.json({
-    action: serializeActionWorkItem(action),
+    action: serializeActionWorkItem(actionForResponse),
     webUrl: `${origin}/workspaces/${workspaceId}/actions/${action.id}`,
     permanentUrl: permanentPath ? `${origin}${permanentPath}` : null,
   }, { status: 201 });

@@ -1,4 +1,5 @@
 import { coerceWorkItemPriorityInput, formatWorkItemPriority } from "@corgtex/domain";
+import { prisma } from "@corgtex/shared";
 
 type UserLike = {
   displayName?: string | null;
@@ -31,10 +32,19 @@ type ProposalLike = PriorityLike & {
   ownerMember?: MemberLike;
 };
 
-type GoalLike = PriorityLike & {
+type GoalLike = {
   ownerMemberId?: string | null;
   ownerMember?: MemberLike;
 };
+
+const memberUserInclude = {
+  user: {
+    select: {
+      displayName: true,
+      email: true,
+    },
+  },
+} as const;
 
 export function workItemPriorityFromBody(body: Record<string, unknown>) {
   if ("priority" in body) return coerceWorkItemPriorityInput(body.priority);
@@ -100,9 +110,36 @@ export function serializeGoalWorkItem<T extends GoalLike>(goal: T) {
   const ownerMemberName = memberDisplayName(goal.ownerMember);
   return {
     ...goal,
-    ...priorityFields(goal),
     ownerMemberId: goal.ownerMemberId ?? goal.ownerMember?.id ?? null,
     ownerMemberName,
     owner: ownerMemberName,
   };
+}
+
+export async function loadActionWorkItemResponse(workspaceId: string, actionId: string) {
+  return prisma.action.findFirst({
+    where: { id: actionId, workspaceId },
+    include: {
+      assigneeMember: { include: memberUserInclude },
+    },
+  });
+}
+
+export async function loadTensionWorkItemResponse(workspaceId: string, tensionId: string) {
+  return prisma.tension.findFirst({
+    where: { id: tensionId, workspaceId },
+    include: {
+      assigneeMember: { include: memberUserInclude },
+      raisedByMember: { include: memberUserInclude },
+    },
+  });
+}
+
+export async function loadProposalWorkItemResponse(workspaceId: string, proposalId: string) {
+  return prisma.proposal.findFirst({
+    where: { id: proposalId, workspaceId },
+    include: {
+      ownerMember: { include: memberUserInclude },
+    },
+  });
 }

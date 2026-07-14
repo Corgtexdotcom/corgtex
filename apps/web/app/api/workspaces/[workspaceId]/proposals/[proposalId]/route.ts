@@ -3,7 +3,7 @@ import { z } from "zod";
 import { updateProposal, deleteProposal } from "@corgtex/domain";
 import { resolveRequestActor } from "@/lib/auth";
 import { handleRouteError, validateBody } from "@/lib/http";
-import { serializeProposalWorkItem, workItemPriorityFromBody } from "@/lib/work-item-api";
+import { loadProposalWorkItemResponse, serializeProposalWorkItem, workItemPriorityFromBody } from "@/lib/work-item-api";
 
 type Params = { params: Promise<{ workspaceId: string; proposalId: string }> };
 const updateProposalSchema = z.object({
@@ -31,7 +31,8 @@ export async function PATCH(request: NextRequest, { params }: Params) {
       ownerMemberId: body.ownerMemberId !== undefined ? body.ownerMemberId : undefined,
       priority: workItemPriorityFromBody(body),
     });
-    return NextResponse.json({ proposal: serializeProposalWorkItem(proposal) });
+    const proposalForResponse = await loadProposalWorkItemResponse(workspaceId, proposal.id) ?? proposal;
+    return NextResponse.json({ proposal: serializeProposalWorkItem(proposalForResponse) });
   } catch (error) {
     return handleRouteError(error);
   }

@@ -3,7 +3,7 @@ import { requireGptAuth } from "@/lib/gpt-auth";
 import { listActions, createAction, getWorkspacePermanentPathForEntity } from "@corgtex/domain";
 import { env } from "@corgtex/shared";
 import { handleRouteError } from "@/lib/http";
-import { serializeActionWorkItem, workItemPriorityFromBody } from "@/lib/work-item-api";
+import { loadActionWorkItemResponse, serializeActionWorkItem, workItemPriorityFromBody } from "@/lib/work-item-api";
 
 export async function GET(request: NextRequest) {
   try {
@@ -55,7 +55,8 @@ export async function POST(request: NextRequest) {
       assigneeMemberId: body.assigneeMemberId ?? null,
       priority: workItemPriorityFromBody(body),
     });
-    const item = serializeActionWorkItem(action);
+    const actionForResponse = await loadActionWorkItemResponse(workspaceId, action.id) ?? action;
+    const item = serializeActionWorkItem(actionForResponse);
 
     const origin = env.APP_URL.replace(/\/$/, "");
     const permanentPath = await getWorkspacePermanentPathForEntity({

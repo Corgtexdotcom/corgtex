@@ -3,7 +3,7 @@ import { requireGptAuth } from "@/lib/gpt-auth";
 import { listProposals, createProposal, createProposalFromTension, getWorkspacePermanentPathForEntity } from "@corgtex/domain";
 import { env } from "@corgtex/shared";
 import { handleRouteError } from "@/lib/http";
-import { serializeProposalWorkItem, workItemPriorityFromBody } from "@/lib/work-item-api";
+import { loadProposalWorkItemResponse, serializeProposalWorkItem, workItemPriorityFromBody } from "@/lib/work-item-api";
 
 export async function GET(request: NextRequest) {
   try {
@@ -68,7 +68,8 @@ export async function POST(request: NextRequest) {
           ownerMemberId: body.ownerMemberId ?? null,
           priority: workItemPriorityFromBody(body),
         });
-    const item = serializeProposalWorkItem(proposal);
+    const proposalForResponse = await loadProposalWorkItemResponse(workspaceId, proposal.id) ?? proposal;
+    const item = serializeProposalWorkItem(proposalForResponse);
 
     const origin = env.APP_URL.replace(/\/$/, "");
     const permanentPath = await getWorkspacePermanentPathForEntity({

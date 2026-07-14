@@ -5,7 +5,7 @@ import type { ArchiveFilter } from "@corgtex/domain";
 import { env } from "@corgtex/shared";
 import { resolveRequestActor } from "@/lib/auth";
 import { handleRouteError, validateBody } from "@/lib/http";
-import { serializeTensionWorkItem, workItemPriorityFromBody } from "@/lib/work-item-api";
+import { loadTensionWorkItemResponse, serializeTensionWorkItem, workItemPriorityFromBody } from "@/lib/work-item-api";
 
 const createTensionSchema = z.object({
   title: z.string().trim().min(1),
@@ -49,8 +49,9 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
     });
     const origin = env.APP_URL.replace(/\/$/, "");
     const permanentPath = await getWorkspacePermanentPathForEntity({ workspaceId, entityType: "Tension", entityId: tension.id });
+    const tensionForResponse = await loadTensionWorkItemResponse(workspaceId, tension.id) ?? tension;
     return NextResponse.json({
-      tension: serializeTensionWorkItem(tension),
+      tension: serializeTensionWorkItem(tensionForResponse),
       webUrl: `${origin}/workspaces/${workspaceId}/tensions/${tension.id}`,
       permanentUrl: permanentPath ? `${origin}${permanentPath}` : null,
     }, { status: 201 });

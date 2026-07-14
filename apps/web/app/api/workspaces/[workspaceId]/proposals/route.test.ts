@@ -29,6 +29,11 @@ const formatWorkItemPriority = vi.fn((priority: number | null | undefined) => {
 });
 const getWorkspacePermanentPathForEntity = vi.fn(async () => null);
 const listProposals = vi.fn();
+const prisma = {
+  proposal: {
+    findFirst: vi.fn(),
+  },
+};
 const requireWorkspaceMembership = vi.fn();
 const resolveRequestActor = vi.fn(async () => actor);
 const updateProposal = vi.fn();
@@ -49,6 +54,13 @@ vi.mock("@corgtex/domain", () => ({
   updateProposal,
 }));
 
+vi.mock("@corgtex/shared", () => ({
+  env: {
+    APP_URL: "https://app.corgtex.com",
+  },
+  prisma,
+}));
+
 function context(workspaceId = "workspace-1") {
   return { params: Promise.resolve({ workspaceId }) };
 }
@@ -66,6 +78,14 @@ describe("POST /api/workspaces/[workspaceId]/proposals", () => {
       status: "DRAFT",
       priority: 2,
       ownerMemberId: "member-owner",
+    });
+    prisma.proposal.findFirst.mockResolvedValue({
+      id: "proposal-1",
+      title: "Resolve tension",
+      status: "DRAFT",
+      priority: 2,
+      ownerMemberId: "member-owner",
+      ownerMember: { id: "member-owner", user: { displayName: "Owner", email: "owner@example.test" } },
     });
 
     const { POST } = await import("./route");
@@ -96,6 +116,8 @@ describe("POST /api/workspaces/[workspaceId]/proposals", () => {
       proposal: {
         id: "proposal-1",
         ownerMemberId: "member-owner",
+        ownerMemberName: "Owner",
+        owner: "Owner",
         priority: 2,
         priorityLabel: "Important",
       },
@@ -109,6 +131,14 @@ describe("POST /api/workspaces/[workspaceId]/proposals", () => {
       status: "DRAFT",
       priority: 3,
       ownerMemberId: "member-owner",
+    });
+    prisma.proposal.findFirst.mockResolvedValue({
+      id: "proposal-2",
+      title: "Improve follow-through",
+      status: "DRAFT",
+      priority: 3,
+      ownerMemberId: "member-owner",
+      ownerMember: { id: "member-owner", user: { displayName: "Owner", email: "owner@example.test" } },
     });
 
     const { POST } = await import("./route");
@@ -136,6 +166,8 @@ describe("POST /api/workspaces/[workspaceId]/proposals", () => {
       proposal: {
         id: "proposal-2",
         ownerMemberId: "member-owner",
+        ownerMemberName: "Owner",
+        owner: "Owner",
         priorityLabel: "Urgent",
       },
     });
@@ -149,6 +181,13 @@ describe("PATCH /api/workspaces/[workspaceId]/proposals/[proposalId]", () => {
       status: "DRAFT",
       priority: 1,
       ownerMemberId: "member-owner",
+    });
+    prisma.proposal.findFirst.mockResolvedValue({
+      id: "proposal-1",
+      status: "DRAFT",
+      priority: 1,
+      ownerMemberId: "member-owner",
+      ownerMember: { id: "member-owner", user: { displayName: "Owner", email: "owner@example.test" } },
     });
 
     const { PATCH } = await import("./[proposalId]/route");
@@ -174,6 +213,8 @@ describe("PATCH /api/workspaces/[workspaceId]/proposals/[proposalId]", () => {
       proposal: {
         id: "proposal-1",
         ownerMemberId: "member-owner",
+        ownerMemberName: "Owner",
+        owner: "Owner",
         priority: 1,
         priorityLabel: "Medium",
       },

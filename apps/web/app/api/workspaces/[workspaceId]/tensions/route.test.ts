@@ -28,6 +28,11 @@ const formatWorkItemPriority = vi.fn((priority: number | null | undefined) => {
 });
 const getWorkspacePermanentPathForEntity = vi.fn(async () => null);
 const listTensions = vi.fn();
+const prisma = {
+  tension: {
+    findFirst: vi.fn(),
+  },
+};
 const requireWorkspaceMembership = vi.fn();
 const resolveRequestActor = vi.fn(async () => actor);
 const updateTension = vi.fn();
@@ -45,6 +50,13 @@ vi.mock("@corgtex/domain", () => ({
   listTensions,
   requireWorkspaceMembership,
   updateTension,
+}));
+
+vi.mock("@corgtex/shared", () => ({
+  env: {
+    APP_URL: "https://app.corgtex.com",
+  },
+  prisma,
 }));
 
 function context(workspaceId = "workspace-1") {
@@ -65,6 +77,16 @@ describe("POST /api/workspaces/[workspaceId]/tensions", () => {
       priority: 3,
       assigneeMemberId: "member-responsible",
       raisedByMemberId: "member-raiser",
+    });
+    prisma.tension.findFirst.mockResolvedValue({
+      id: "tension-1",
+      title: "Clarify owner",
+      status: "DRAFT",
+      priority: 3,
+      assigneeMemberId: "member-responsible",
+      raisedByMemberId: "member-raiser",
+      assigneeMember: { id: "member-responsible", user: { displayName: "Responsible", email: "responsible@example.test" } },
+      raisedByMember: { id: "member-raiser", user: { displayName: "Raiser", email: "raiser@example.test" } },
     });
 
     const { POST } = await import("./route");
@@ -95,7 +117,11 @@ describe("POST /api/workspaces/[workspaceId]/tensions", () => {
         id: "tension-1",
         priorityLabel: "Urgent",
         responsibleMemberId: "member-responsible",
+        responsibleMemberName: "Responsible",
+        responsiblePerson: "Responsible",
         raisedByMemberId: "member-raiser",
+        raisedByMemberName: "Raiser",
+        raisedBy: "Raiser",
       },
     });
   });
@@ -108,6 +134,13 @@ describe("PATCH /api/workspaces/[workspaceId]/tensions/[tensionId]", () => {
       status: "OPEN",
       priority: 2,
       assigneeMemberId: "member-responsible",
+    });
+    prisma.tension.findFirst.mockResolvedValue({
+      id: "tension-1",
+      status: "OPEN",
+      priority: 2,
+      assigneeMemberId: "member-responsible",
+      assigneeMember: { id: "member-responsible", user: { displayName: "Responsible", email: "responsible@example.test" } },
     });
 
     const { PATCH } = await import("./[tensionId]/route");
@@ -134,6 +167,8 @@ describe("PATCH /api/workspaces/[workspaceId]/tensions/[tensionId]", () => {
         id: "tension-1",
         priorityLabel: "Important",
         responsibleMemberId: "member-responsible",
+        responsibleMemberName: "Responsible",
+        responsiblePerson: "Responsible",
       },
     });
   });

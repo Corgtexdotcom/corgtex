@@ -42,8 +42,6 @@ export async function GET(request: NextRequest) {
         cadence: goal.cadence,
         level: goal.level,
         status: goal.status,
-        priority: item.priority,
-        priorityLabel: item.priorityLabel,
         progressPercent: goal.progressPercent,
         startDate: goal.startDate,
         targetDate: goal.targetDate,

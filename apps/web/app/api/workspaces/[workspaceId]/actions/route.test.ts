@@ -9,6 +9,7 @@ const {
   formatWorkItemPriority,
   getWorkspacePermanentPathForEntity,
   listActions,
+  prisma,
   updateAction,
 } = vi.hoisted(() => ({
   actor: {
@@ -37,6 +38,11 @@ const {
   }),
   getWorkspacePermanentPathForEntity: vi.fn(),
   listActions: vi.fn(),
+  prisma: {
+    action: {
+      findFirst: vi.fn(),
+    },
+  },
   updateAction: vi.fn(),
 }));
 
@@ -54,6 +60,7 @@ vi.mock("@corgtex/shared", () => ({
   env: {
     APP_URL: "https://app.corgtex.com",
   },
+  prisma,
 }));
 
 vi.mock("@/lib/route-handler", () => ({
@@ -145,6 +152,14 @@ describe("POST /api/workspaces/[workspaceId]/actions", () => {
       priority: 2,
       assigneeMemberId: "member-2",
     });
+    prisma.action.findFirst.mockResolvedValue({
+      id: "action-1",
+      title: "Follow up",
+      status: "DRAFT",
+      priority: 2,
+      assigneeMemberId: "member-2",
+      assigneeMember: { id: "member-2", user: { displayName: "Assignee", email: "assignee@example.test" } },
+    });
   });
 
   it("passes assignee and labeled priority into the action create backend", async () => {
@@ -178,6 +193,8 @@ describe("POST /api/workspaces/[workspaceId]/actions", () => {
         priority: 2,
         priorityLabel: "Important",
         assigneeMemberId: "member-2",
+        assigneeMemberName: "Assignee",
+        assignee: "Assignee",
       },
     });
   });
@@ -191,6 +208,13 @@ describe("PATCH /api/workspaces/[workspaceId]/actions/[actionId]", () => {
       status: "OPEN",
       priority: 3,
       assigneeMemberId: "member-2",
+    });
+    prisma.action.findFirst.mockResolvedValue({
+      id: "action-1",
+      status: "OPEN",
+      priority: 3,
+      assigneeMemberId: "member-2",
+      assigneeMember: { id: "member-2", user: { displayName: "Assignee", email: "assignee@example.test" } },
     });
   });
 
@@ -220,6 +244,8 @@ describe("PATCH /api/workspaces/[workspaceId]/actions/[actionId]", () => {
         id: "action-1",
         priorityLabel: "Urgent",
         assigneeMemberId: "member-2",
+        assigneeMemberName: "Assignee",
+        assignee: "Assignee",
       },
     });
   });

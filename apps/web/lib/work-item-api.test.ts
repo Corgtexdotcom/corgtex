@@ -47,7 +47,7 @@ describe("work item API helpers", () => {
     });
   });
 
-  it("serializes proposal and goal owners", () => {
+  it("serializes proposal priority and owner fields", () => {
     expect(serializeProposalWorkItem({
       id: "proposal-1",
       priority: 1,
@@ -58,15 +58,21 @@ describe("work item API helpers", () => {
       ownerMemberId: "member-1",
       ownerMemberName: "owner@example.test",
     });
+  });
+
+  it("serializes goal owners without synthetic priority fields", () => {
     expect(serializeGoalWorkItem({
       id: "goal-1",
-      priority: 0,
       ownerMemberId: "member-2",
       ownerMember: { id: "member-2", user: { displayName: "Goal Owner", email: "goal@example.test" } },
     })).toMatchObject({
-      priorityLabel: "Low",
       ownerMemberId: "member-2",
       ownerMemberName: "Goal Owner",
     });
+    expect(serializeGoalWorkItem({
+      id: "goal-1",
+      ownerMemberId: "member-2",
+      ownerMember: { id: "member-2", user: { displayName: "Goal Owner", email: "goal@example.test" } },
+    })).not.toHaveProperty("priorityLabel");
   });
 });

@@ -233,6 +233,43 @@ function priorityFields(item: { priority?: number | null }) {
   };
 }
 
+const memberUserInclude = {
+  user: {
+    select: {
+      displayName: true,
+      email: true,
+    },
+  },
+};
+
+async function loadActionWorkItemResponse(workspaceId: string, actionId: string, fallback: any) {
+  return await prisma.action.findFirst({
+    where: { id: actionId, workspaceId },
+    include: {
+      assigneeMember: { include: memberUserInclude },
+    },
+  }) ?? fallback;
+}
+
+async function loadTensionWorkItemResponse(workspaceId: string, tensionId: string, fallback: any) {
+  return await prisma.tension.findFirst({
+    where: { id: tensionId, workspaceId },
+    include: {
+      assigneeMember: { include: memberUserInclude },
+      raisedByMember: { include: memberUserInclude },
+    },
+  }) ?? fallback;
+}
+
+async function loadProposalWorkItemResponse(workspaceId: string, proposalId: string, fallback: any) {
+  return await prisma.proposal.findFirst({
+    where: { id: proposalId, workspaceId },
+    include: {
+      ownerMember: { include: memberUserInclude },
+    },
+  }) ?? fallback;
+}
+
 function structuredJsonResult(value: Record<string, unknown>) {
   return {
     content: [{ type: "text" as const, text: JSON.stringify(value, null, 2) }],
@@ -2228,15 +2265,17 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
     async ({ title, bodyMd, summary, ownerMemberId, priority, authorMemberId }: { title: string; bodyMd: string; summary?: string; ownerMemberId?: string; priority?: number | string; authorMemberId?: string }) => {
       requireScope(sessionCtx, "proposals:write");
       const proposal = await createProposal(actor, { workspaceId, title, bodyMd, summary, ownerMemberId, priority: coerceWorkItemPriorityInput(priority), authorMemberId });
+      const proposalForResponse = await loadProposalWorkItemResponse(workspaceId, proposal.id, proposal);
       const permanent = await permanentUrl(workspaceId, "Proposal", proposal.id);
       return jsonResult({
-        id: proposal.id,
-        title: proposal.title,
-        status: proposal.status,
-        ...priorityFields(proposal),
-        ownerMemberId: proposal.ownerMemberId ?? null,
-        ownerMemberName: memberDisplayName(proposal.ownerMember),
-        version: proposal.version,
+        id: proposalForResponse.id,
+        title: proposalForResponse.title,
+        status: proposalForResponse.status,
+        ...priorityFields(proposalForResponse),
+        ownerMemberId: proposalForResponse.ownerMemberId ?? proposalForResponse.ownerMember?.id ?? null,
+        ownerMemberName: memberDisplayName(proposalForResponse.ownerMember),
+        owner: memberDisplayName(proposalForResponse.ownerMember),
+        version: proposalForResponse.version,
         webUrl: webUrl(workspaceId, `/proposals/${proposal.id}`),
         permanentUrl: permanent,
       });
@@ -2267,13 +2306,15 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
         ownerMemberId: params.ownerMemberId,
         priority: coerceWorkItemPriorityInput(params.priority),
       });
+      const proposalForResponse = await loadProposalWorkItemResponse(workspaceId, updated.id, updated);
       return jsonResult({
-        id: updated.id,
-        status: updated.status,
-        ...priorityFields(updated),
-        ownerMemberId: updated.ownerMemberId ?? null,
-        ownerMemberName: memberDisplayName(updated.ownerMember),
-        version: updated.version,
+        id: proposalForResponse.id,
+        status: proposalForResponse.status,
+        ...priorityFields(proposalForResponse),
+        ownerMemberId: proposalForResponse.ownerMemberId ?? proposalForResponse.ownerMember?.id ?? null,
+        ownerMemberName: memberDisplayName(proposalForResponse.ownerMember),
+        owner: memberDisplayName(proposalForResponse.ownerMember),
+        version: proposalForResponse.version,
         webUrl: webUrl(workspaceId, `/proposals/${updated.id}`),
       });
     },
@@ -2436,14 +2477,16 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
     async ({ title, bodyMd, assigneeMemberId, priority, authorMemberId }: { title: string; bodyMd?: string; assigneeMemberId?: string; priority?: number | string; authorMemberId?: string }) => {
       requireScope(sessionCtx, "actions:write");
       const action = await createAction(actor, { workspaceId, title, bodyMd, assigneeMemberId, priority: coerceWorkItemPriorityInput(priority), authorMemberId });
+      const actionForResponse = await loadActionWorkItemResponse(workspaceId, action.id, action);
       const permanent = await permanentUrl(workspaceId, "Action", action.id);
       return jsonResult({
-        id: action.id,
-        status: action.status,
-        ...priorityFields(action),
-        assigneeMemberId: action.assigneeMemberId ?? null,
-        assigneeMemberName: memberDisplayName(action.assigneeMember),
-        version: action.version,
+        id: actionForResponse.id,
+        status: actionForResponse.status,
+        ...priorityFields(actionForResponse),
+        assigneeMemberId: actionForResponse.assigneeMemberId ?? actionForResponse.assigneeMember?.id ?? null,
+        assigneeMemberName: memberDisplayName(actionForResponse.assigneeMember),
+        assignee: memberDisplayName(actionForResponse.assigneeMember),
+        version: actionForResponse.version,
         webUrl: webUrl(workspaceId, `/actions/${action.id}`),
         permanentUrl: permanent,
       });
@@ -2488,13 +2531,15 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
         dueAt: params.dueAt ? new Date(params.dueAt) : undefined,
         completedVia: params.completedVia,
       });
+      const actionForResponse = await loadActionWorkItemResponse(workspaceId, updated.id, updated);
       return jsonResult({
-        id: updated.id,
-        status: updated.status,
-        ...priorityFields(updated),
-        assigneeMemberId: updated.assigneeMemberId ?? null,
-        assigneeMemberName: memberDisplayName(updated.assigneeMember),
-        version: updated.version,
+        id: actionForResponse.id,
+        status: actionForResponse.status,
+        ...priorityFields(actionForResponse),
+        assigneeMemberId: actionForResponse.assigneeMemberId ?? actionForResponse.assigneeMember?.id ?? null,
+        assigneeMemberName: memberDisplayName(actionForResponse.assigneeMember),
+        assignee: memberDisplayName(actionForResponse.assigneeMember),
+        version: actionForResponse.version,
         webUrl: webUrl(workspaceId, `/actions/${updated.id}`),
       });
     },
@@ -2601,16 +2646,21 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
     async ({ title, bodyMd, assigneeMemberId, raisedByMemberId, priority, authorMemberId }: { title: string; bodyMd?: string; assigneeMemberId?: string; raisedByMemberId?: string; priority?: number | string; authorMemberId?: string }) => {
       requireScope(sessionCtx, "tensions:write");
       const tension = await createTension(actor, { workspaceId, title, bodyMd, assigneeMemberId, raisedByMemberId, priority: coerceWorkItemPriorityInput(priority), authorMemberId });
+      const tensionForResponse = await loadTensionWorkItemResponse(workspaceId, tension.id, tension);
       const permanent = await permanentUrl(workspaceId, "Tension", tension.id);
       return jsonResult({
-        id: tension.id,
-        status: tension.status,
-        ...priorityFields(tension),
-        assigneeMemberId: tension.assigneeMemberId ?? null,
-        assigneeMemberName: memberDisplayName(tension.assigneeMember),
-        responsibleMemberId: tension.assigneeMemberId ?? null,
-        responsibleMemberName: memberDisplayName(tension.assigneeMember),
-        version: tension.version,
+        id: tensionForResponse.id,
+        status: tensionForResponse.status,
+        ...priorityFields(tensionForResponse),
+        assigneeMemberId: tensionForResponse.assigneeMemberId ?? tensionForResponse.assigneeMember?.id ?? null,
+        assigneeMemberName: memberDisplayName(tensionForResponse.assigneeMember),
+        responsibleMemberId: tensionForResponse.assigneeMemberId ?? tensionForResponse.assigneeMember?.id ?? null,
+        responsibleMemberName: memberDisplayName(tensionForResponse.assigneeMember),
+        responsiblePerson: memberDisplayName(tensionForResponse.assigneeMember),
+        raisedByMemberId: tensionForResponse.raisedByMemberId ?? tensionForResponse.raisedByMember?.id ?? null,
+        raisedByMemberName: memberDisplayName(tensionForResponse.raisedByMember),
+        raisedBy: memberDisplayName(tensionForResponse.raisedByMember),
+        version: tensionForResponse.version,
         webUrl: webUrl(workspaceId, `/tensions/${tension.id}`),
         permanentUrl: permanent,
       });
@@ -2655,15 +2705,20 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
         priority: coerceWorkItemPriorityInput(params.priority),
         resolvedVia: params.resolvedVia,
       });
+      const tensionForResponse = await loadTensionWorkItemResponse(workspaceId, updated.id, updated);
       return jsonResult({
-        id: updated.id,
-        status: updated.status,
-        ...priorityFields(updated),
-        assigneeMemberId: updated.assigneeMemberId ?? null,
-        assigneeMemberName: memberDisplayName(updated.assigneeMember),
-        responsibleMemberId: updated.assigneeMemberId ?? null,
-        responsibleMemberName: memberDisplayName(updated.assigneeMember),
-        version: updated.version,
+        id: tensionForResponse.id,
+        status: tensionForResponse.status,
+        ...priorityFields(tensionForResponse),
+        assigneeMemberId: tensionForResponse.assigneeMemberId ?? tensionForResponse.assigneeMember?.id ?? null,
+        assigneeMemberName: memberDisplayName(tensionForResponse.assigneeMember),
+        responsibleMemberId: tensionForResponse.assigneeMemberId ?? tensionForResponse.assigneeMember?.id ?? null,
+        responsibleMemberName: memberDisplayName(tensionForResponse.assigneeMember),
+        responsiblePerson: memberDisplayName(tensionForResponse.assigneeMember),
+        raisedByMemberId: tensionForResponse.raisedByMemberId ?? tensionForResponse.raisedByMember?.id ?? null,
+        raisedByMemberName: memberDisplayName(tensionForResponse.raisedByMember),
+        raisedBy: memberDisplayName(tensionForResponse.raisedByMember),
+        version: tensionForResponse.version,
         webUrl: webUrl(workspaceId, `/tensions/${updated.id}`),
       });
     },
@@ -2828,7 +2883,6 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
         cadence: goal.cadence,
         level: goal.level,
         status: goal.status,
-        ...priorityFields(goal),
         version: goal.version,
         progressPercent: goal.progressPercent,
         circle: goal.circle?.name ?? null,
@@ -2860,7 +2914,6 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
       const goal = await getGoal(actor, { workspaceId, goalId });
       return jsonResult({
         ...goal,
-        ...priorityFields(goal),
         ownerMemberId: goal.ownerMemberId ?? goal.ownerMember?.id ?? null,
         ownerMemberName: memberDisplayName(goal.ownerMember),
         owner: memberDisplayName(goal.ownerMember),

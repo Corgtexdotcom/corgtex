@@ -3,7 +3,7 @@ import { z } from "zod";
 import { updateTension, deleteTension } from "@corgtex/domain";
 import { resolveRequestActor } from "@/lib/auth";
 import { handleRouteError, validateBody } from "@/lib/http";
-import { serializeTensionWorkItem, workItemPriorityFromBody } from "@/lib/work-item-api";
+import { loadTensionWorkItemResponse, serializeTensionWorkItem, workItemPriorityFromBody } from "@/lib/work-item-api";
 
 type Params = { params: Promise<{ workspaceId: string; tensionId: string }> };
 const updateTensionSchema = z.object({
@@ -35,7 +35,8 @@ export async function PATCH(request: NextRequest, { params }: Params) {
       raisedByMemberId: body.raisedByMemberId !== undefined ? body.raisedByMemberId : undefined,
       priority: workItemPriorityFromBody(body),
     });
-    return NextResponse.json({ tension: serializeTensionWorkItem(tension) });
+    const tensionForResponse = await loadTensionWorkItemResponse(workspaceId, tension.id) ?? tension;
+    return NextResponse.json({ tension: serializeTensionWorkItem(tensionForResponse) });
   } catch (error) {
     return handleRouteError(error);
   }

@@ -5,7 +5,7 @@ import type { ArchiveFilter } from "@corgtex/domain";
 import { env } from "@corgtex/shared";
 import { resolveRequestActor } from "@/lib/auth";
 import { handleRouteError, validateBody } from "@/lib/http";
-import { serializeProposalWorkItem, workItemPriorityFromBody } from "@/lib/work-item-api";
+import { loadProposalWorkItemResponse, serializeProposalWorkItem, workItemPriorityFromBody } from "@/lib/work-item-api";
 
 const createProposalSchema = z.object({
   title: z.string().trim().min(1).optional(),
@@ -70,8 +70,9 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
         });
     const origin = env.APP_URL.replace(/\/$/, "");
     const permanentPath = await getWorkspacePermanentPathForEntity({ workspaceId, entityType: "Proposal", entityId: proposal.id });
+    const proposalForResponse = await loadProposalWorkItemResponse(workspaceId, proposal.id) ?? proposal;
     return NextResponse.json({
-      proposal: serializeProposalWorkItem(proposal),
+      proposal: serializeProposalWorkItem(proposalForResponse),
       webUrl: `${origin}/workspaces/${workspaceId}/proposals/${proposal.id}`,
       permanentUrl: permanentPath ? `${origin}${permanentPath}` : null,
     }, { status: 201 });

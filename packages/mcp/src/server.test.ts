@@ -210,6 +210,15 @@ vi.mock("@corgtex/agents", () => ({
 vi.mock("@corgtex/shared", () => ({
   prisma: {
     $transaction: vi.fn(async (callback: (tx: unknown) => Promise<unknown>) => callback({})),
+    action: {
+      findFirst: vi.fn(),
+    },
+    proposal: {
+      findFirst: vi.fn(),
+    },
+    tension: {
+      findFirst: vi.fn(),
+    },
     workspace: {
       findUnique: vi.fn(),
     },
@@ -414,6 +423,9 @@ describe("createCorgtexMcpServer", () => {
       isActive: true,
     });
     const { prisma } = await import("@corgtex/shared");
+    vi.mocked(prisma.action.findFirst).mockReset().mockResolvedValue(null as never);
+    vi.mocked(prisma.proposal.findFirst).mockReset().mockResolvedValue(null as never);
+    vi.mocked(prisma.tension.findFirst).mockReset().mockResolvedValue(null as never);
     vi.mocked(prisma.workspace.findUnique).mockReset().mockResolvedValue({
       id: "ws-1",
       slug: "acme",
@@ -1474,6 +1486,65 @@ describe("createCorgtexMcpServer", () => {
   it("preserves responsibility and labeled priority through MCP work-item write tools", async () => {
     const { createCorgtexMcpServer } = await import("./server");
     const { requireScope } = await import("./auth");
+    const { prisma } = await import("@corgtex/shared");
+
+    vi.mocked(prisma.action.findFirst)
+      .mockResolvedValueOnce({
+        id: "action-1",
+        status: "DRAFT",
+        version: 1,
+        priority: 2,
+        assigneeMemberId: "member-assignee",
+        assigneeMember: { id: "member-assignee", user: { displayName: "Assignee", email: "assignee@example.test" } },
+      } as never)
+      .mockResolvedValueOnce({
+        id: "action-1",
+        status: "OPEN",
+        version: 2,
+        priority: 3,
+        assigneeMemberId: "member-assignee",
+        assigneeMember: { id: "member-assignee", user: { displayName: "Assignee", email: "assignee@example.test" } },
+      } as never);
+    vi.mocked(prisma.tension.findFirst)
+      .mockResolvedValueOnce({
+        id: "tension-1",
+        status: "DRAFT",
+        version: 1,
+        priority: 1,
+        assigneeMemberId: "member-responsible",
+        raisedByMemberId: "member-raiser",
+        assigneeMember: { id: "member-responsible", user: { displayName: "Responsible", email: "responsible@example.test" } },
+        raisedByMember: { id: "member-raiser", user: { displayName: "Raiser", email: "raiser@example.test" } },
+      } as never)
+      .mockResolvedValueOnce({
+        id: "tension-1",
+        status: "OPEN",
+        version: 2,
+        priority: 2,
+        assigneeMemberId: "member-responsible",
+        raisedByMemberId: "member-raiser",
+        assigneeMember: { id: "member-responsible", user: { displayName: "Responsible", email: "responsible@example.test" } },
+        raisedByMember: { id: "member-raiser", user: { displayName: "Raiser", email: "raiser@example.test" } },
+      } as never);
+    vi.mocked(prisma.proposal.findFirst)
+      .mockResolvedValueOnce({
+        id: "proposal-1",
+        title: "Clarify ownership",
+        status: "DRAFT",
+        version: 1,
+        priority: 3,
+        ownerMemberId: "member-owner",
+        ownerMember: { id: "member-owner", user: { displayName: "Owner", email: "owner@example.test" } },
+      } as never)
+      .mockResolvedValueOnce({
+        id: "proposal-1",
+        title: "Clarify ownership",
+        status: "DRAFT",
+        version: 2,
+        priority: 2,
+        ownerMemberId: "member-owner",
+        ownerMember: { id: "member-owner", user: { displayName: "Owner", email: "owner@example.test" } },
+      } as never);
 
     const server = createCorgtexMcpServer({
       actor: { kind: "agent", authProvider: "bootstrap" } as any,
@@ -1555,26 +1626,40 @@ describe("createCorgtexMcpServer", () => {
     expect(JSON.parse(createActionResponse.content[0].text)).toMatchObject({
       priorityLabel: "Important",
       assigneeMemberId: "member-assignee",
+      assigneeMemberName: "Assignee",
+      assignee: "Assignee",
     });
     expect(JSON.parse(updateActionResponse.content[0].text)).toMatchObject({
       priorityLabel: "Urgent",
       assigneeMemberId: "member-assignee",
+      assigneeMemberName: "Assignee",
+      assignee: "Assignee",
     });
     expect(JSON.parse(createTensionResponse.content[0].text)).toMatchObject({
       priorityLabel: "Medium",
       responsibleMemberId: "member-responsible",
+      responsibleMemberName: "Responsible",
+      responsiblePerson: "Responsible",
+      raisedByMemberId: "member-raiser",
+      raisedByMemberName: "Raiser",
     });
     expect(JSON.parse(updateTensionResponse.content[0].text)).toMatchObject({
       priorityLabel: "Important",
       responsibleMemberId: "member-responsible",
+      responsibleMemberName: "Responsible",
+      responsiblePerson: "Responsible",
     });
     expect(JSON.parse(createProposalResponse.content[0].text)).toMatchObject({
       priorityLabel: "Urgent",
       ownerMemberId: "member-owner",
+      ownerMemberName: "Owner",
+      owner: "Owner",
     });
     expect(JSON.parse(updateProposalResponse.content[0].text)).toMatchObject({
       priorityLabel: "Important",
       ownerMemberId: "member-owner",
+      ownerMemberName: "Owner",
+      owner: "Owner",
     });
   });
 
@@ -1651,7 +1736,9 @@ describe("createCorgtexMcpServer", () => {
     expect(vi.mocked(requireScope)).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: "ws-1" }), "goals:read");
     expect(vi.mocked(requireScope)).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: "ws-1" }), "goals:write");
     expect(JSON.parse(listResponse.content[0].text).items[0].webUrl).toBe("https://app.test/workspaces/ws-1/goals?view=tree&cadence=QUARTERLY");
+    expect(JSON.parse(listResponse.content[0].text).items[0]).not.toHaveProperty("priorityLabel");
     expect(JSON.parse(getResponse.content[0].text).webUrl).toBe("https://app.test/workspaces/ws-1/goals?view=tree&cadence=QUARTERLY");
+    expect(JSON.parse(getResponse.content[0].text)).not.toHaveProperty("priorityLabel");
     expect(JSON.parse(updateResponse.content[0].text)).toEqual({
       id: "goal-1",
       status: "ON_TRACK",
