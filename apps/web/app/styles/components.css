@@ -803,6 +803,8 @@ details[open] > .settings-disclosure-summary::before {
   padding: 28px;
   max-width: 560px;
   width: calc(100vw - 48px);
+  max-height: calc(100dvh - 48px);
+  overflow: hidden;
   box-shadow: 0 24px 48px rgba(0, 0, 0, 0.18);
 }
 
@@ -819,6 +821,8 @@ details[open] > .settings-disclosure-summary::before {
   display: flex;
   flex-direction: column;
   gap: 16px;
+  max-height: calc(100dvh - 104px);
+  min-height: 0;
 }
 
 .dialog-header {
@@ -859,6 +863,21 @@ details[open] > .settings-disclosure-summary::before {
   display: flex;
   flex-direction: column;
   gap: 16px;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+@media (max-width: 640px) {
+  .dialog {
+    width: calc(100vw - 24px);
+    max-height: calc(100dvh - 24px);
+    padding: 20px;
+    border-radius: 16px;
+  }
+
+  .dialog-content {
+    max-height: calc(100dvh - 64px);
+  }
 }
 
 /* ── Product Feedback ── */
@@ -4444,4 +4463,35 @@ a.meeting-agenda-item:hover {
 .nr-upload-item-fields {
   gap: 10px;
   margin-top: 12px;
+}
+
+.source-intake-panel {
+  gap: 14px;
+}
+
+.source-intake-section {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  padding: 16px;
+  min-width: 0;
+}
+
+.source-intake-section h3 {
+  margin: 0 0 6px;
+  font-size: 1rem;
+}
+
+.source-intake-section .nr-upload-dropzone {
+  margin-bottom: 0;
+  padding: 0;
+  border: 0;
+}
+
+.source-intake-section .nr-upload-area {
+  padding: 14px;
+}
+
+.source-intake-section .nr-form-section {
+  gap: 14px;
 }

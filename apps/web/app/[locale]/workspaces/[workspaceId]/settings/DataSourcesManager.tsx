@@ -2,11 +2,10 @@
 
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import { TextPasteUploader } from "./TextPasteUploader";
 import { RecentUploads } from "./RecentUploads";
 import { useLocale, useTranslations } from "next-intl";
 import { CheckboxFilter, TableActionGroup } from "@/lib/components/ControlPrimitives";
-import { KnowledgeFileUploader } from "../KnowledgeFileUploader";
+import { SourceIntakePanel } from "../SourceIntakePanel";
 
 type DataSource = {
   id: string;
@@ -137,13 +136,10 @@ export function DataSourcesManager({ workspaceId, dataSources, documents }: { wo
           </div>
         </div>
         
-        <KnowledgeFileUploader
+        <SourceIntakePanel
           workspaceId={workspaceId}
-          defaultSource="settings-upload"
-          initiallyOpen
-          showTrigger={false}
+          uploadDefaultSource="settings-upload"
         />
-        <TextPasteUploader workspaceId={workspaceId} />
 
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 40, marginBottom: 16 }}>
           <h2 className="nr-section-header" style={{ margin: 0, border: 'none' }}>{t("sectionExternalDatabases")}</h2>

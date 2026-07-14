@@ -8,9 +8,8 @@ import "driver.js/dist/driver.css";
 import "../../../demo-tour-theme.css";
 import { Dialog } from "@/lib/components/Dialog";
 import type { AiWorkspaceLaunchState } from "@/lib/ai-workspace-launch";
-import { KnowledgeFileUploader } from "./KnowledgeFileUploader";
-import { GoogleDrivePicker } from "./tools/GoogleDrivePicker";
 import { OnboardingAiWorkspaceSetup } from "./OnboardingAiWorkspaceSetup";
+import { SourceIntakePanel } from "./SourceIntakePanel";
 import { workspaceRouteMatches, workspaceStepUrl } from "./onboarding-tour-routing";
 
 const RESTART_EVENT = "corgtex:restart-self-serve-tour";
@@ -426,21 +425,17 @@ export function WorkspaceOnboardingTour({
         {setupMessage && <p className="form-message form-message-success">{setupMessage}</p>}
 
         <div className="onboarding-setup-grid">
-          <section className="onboarding-setup-panel stack">
-            <div>
-              <h3>{t("uploadTitle")}</h3>
-              <p className="nr-item-meta">{t("uploadDescription")}</p>
-            </div>
-            <KnowledgeFileUploader
-              workspaceId={workspaceId}
-              defaultSource="onboarding-upload"
-              initiallyOpen
-              showTrigger={false}
-              doneLabel={t("setupContinueTour")}
-              onUploaded={handleUploaded}
-              onDone={startTour}
-            />
-          </section>
+          <SourceIntakePanel
+            workspaceId={workspaceId}
+            uploadDefaultSource="onboarding-upload"
+            uploadDoneLabel={t("setupContinueTour")}
+            googleDrivePicker={googleDrivePicker}
+            googleDriveConnectHref={`/api/integrations/google/connect?workspaceId=${workspaceId}&intent=documents&returnTo=${encodeURIComponent(`/workspaces/${workspaceId}?onboarding=setup&googleDrivePicker=1`)}`}
+            openGoogleDrivePicker={openGoogleDrivePicker}
+            onUploaded={handleUploaded}
+            onDone={startTour}
+            onDriveSynced={handleDriveSynced}
+          />
 
           <OnboardingAiWorkspaceSetup
             workspaceId={workspaceId}
@@ -448,36 +443,6 @@ export function WorkspaceOnboardingTour({
             connectorUrl={connectorUrl}
             origin={origin}
           />
-
-          <section className="onboarding-setup-panel stack">
-            <div>
-              <h3>{t("drivePickerTitle")}</h3>
-              <p className="nr-item-meta">{t("drivePickerDescription")}</p>
-            </div>
-            {googleDrivePicker?.hasDocumentScope ? (
-              <GoogleDrivePicker
-                workspaceId={workspaceId}
-                clientId={googleDrivePicker.clientId}
-                developerKey={googleDrivePicker.developerKey}
-                appId={googleDrivePicker.appId}
-                initialSelectedIds={googleDrivePicker.initialSelectedIds}
-                autoOpen={openGoogleDrivePicker}
-                onSynced={handleDriveSynced}
-              />
-            ) : (
-              <div className="stack" style={{ gap: 8 }}>
-                <p className="nr-item-meta" style={{ margin: 0 }}>
-                  {t("drivePickerConnectDescription")}
-                </p>
-                <a
-                  className="button secondary small"
-                  href={`/api/integrations/google/connect?workspaceId=${workspaceId}&intent=documents&returnTo=${encodeURIComponent(`/workspaces/${workspaceId}?onboarding=setup&googleDrivePicker=1`)}`}
-                >
-                  {t("drivePickerConnectAction")}
-                </a>
-              </div>
-            )}
-          </section>
 
           <section className="onboarding-setup-panel stack">
             <div>

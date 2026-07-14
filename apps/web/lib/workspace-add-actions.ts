@@ -114,10 +114,13 @@ export const WORKSPACE_ADD_ACTION_DEFINITIONS = {
   upload_file: {
     label: "Upload file",
     description: "Upload files into workspace knowledge.",
+    mobileLabel: "Upload files from this device",
+    mobileDescription: "Choose files or folders from this phone or computer.",
   },
   paste_text: {
     label: "Paste text",
     description: "Ingest pasted text or a transcript.",
+    mobileDescription: "Paste notes, transcripts, or reference text.",
   },
   database_source: {
     label: "Database source",
@@ -232,13 +235,13 @@ const MOBILE_CAPTURE_SPECS: Array<{
   kind: WorkspaceAddActionKind;
   subpath: string;
 }> = [
+  { kind: "upload_file", subpath: "/brain" },
+  { kind: "paste_text", subpath: "/settings?tab=data-sources" },
   { kind: "tension", subpath: "/tensions" },
   { kind: "action", subpath: "/actions" },
   { kind: "meeting_transcript", subpath: "/meetings" },
   { kind: "meeting_audio_upload", subpath: "/meetings" },
   { kind: "meeting_manual_recording", subpath: "/meetings" },
-  { kind: "upload_file", subpath: "/brain" },
-  { kind: "paste_text", subpath: "/settings?tab=data-sources" },
 ];
 
 export function getWorkspaceAddActions(context: WorkspaceAddActionContext): WorkspaceAddAction[] {
@@ -364,9 +367,12 @@ export function getMobileCaptureActions(
     });
     const action = actions.find((item) => item.kind === spec.kind);
     if (!action) return [];
+    const definition = WORKSPACE_ADD_ACTION_DEFINITIONS[action.kind];
 
     return [{
       ...action,
+      label: "mobileLabel" in definition ? definition.mobileLabel : action.label,
+      description: "mobileDescription" in definition ? definition.mobileDescription : action.description,
       href: `/workspaces/${context.workspaceId}/add?kind=${encodeURIComponent(action.kind)}&returnTo=${encodeURIComponent(returnTo)}`,
     }];
   });
