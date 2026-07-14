@@ -596,6 +596,93 @@ describe("execution plumbing domain", () => {
     expect(prismaMock.tension.findMany).not.toHaveBeenCalled();
   });
 
+  it("returns labeled priority and responsibility fields in company context", async () => {
+    const contextAgent: AppActor = {
+      ...agentActor,
+      scopes: [
+        "execution:read",
+        "workspace:read",
+        "actions:read",
+        "tensions:read",
+        "proposals:read",
+        "meetings:read",
+        "brain:read",
+      ],
+    };
+    prismaMock.action.findMany.mockResolvedValueOnce([{
+      id: "action-1",
+      title: "Follow up",
+      status: "OPEN",
+      priority: 2,
+      assigneeMemberId: "member-assignee",
+      assigneeMember: { user: { displayName: "Assignee", email: "assignee@example.com" } },
+      dueAt: null,
+      updatedAt: new Date("2026-06-02T10:00:00.000Z"),
+    }]);
+    prismaMock.tension.findMany.mockResolvedValueOnce([{
+      id: "tension-1",
+      title: "No owner",
+      status: "OPEN",
+      priority: 7,
+      assigneeMemberId: "member-responsible",
+      assigneeMember: { user: { displayName: "Responsible", email: "responsible@example.com" } },
+      raisedByMemberId: "member-raiser",
+      raisedByMember: { user: { displayName: null, email: "raiser@example.com" } },
+      updatedAt: new Date("2026-06-02T10:00:00.000Z"),
+    }]);
+    prismaMock.proposal.findMany.mockResolvedValueOnce([{
+      id: "proposal-1",
+      title: "Clarify ownership",
+      summary: null,
+      status: "OPEN",
+      priority: 1,
+      ownerMemberId: "member-owner",
+      ownerMember: { user: { displayName: "Owner", email: "owner@example.com" } },
+      updatedAt: new Date("2026-06-02T10:00:00.000Z"),
+    }]);
+    prismaMock.meeting.findMany.mockResolvedValueOnce([]);
+    prismaMock.brainArticle.findMany.mockResolvedValueOnce([]);
+
+    const { getCompanyContext } = await import("./execution-plumbing");
+    const context = await getCompanyContext(contextAgent, "workspace-1") as {
+      recent: {
+        actions: Array<Record<string, unknown>>;
+        tensions: Array<Record<string, unknown>>;
+        proposals: Array<Record<string, unknown>>;
+      };
+    };
+
+    expect(context.recent.actions[0]).toMatchObject({
+      priority: 2,
+      priorityLabel: "Important",
+      assigneeMemberId: "member-assignee",
+      assigneeMemberName: "Assignee",
+      assignee: "Assignee",
+    });
+    expect(context.recent.actions[0]).not.toHaveProperty("assigneeMember");
+    expect(context.recent.tensions[0]).toMatchObject({
+      priority: 7,
+      priorityLabel: "Urgent",
+      assigneeMemberId: "member-responsible",
+      responsibleMemberId: "member-responsible",
+      responsibleMemberName: "Responsible",
+      responsiblePerson: "Responsible",
+      raisedByMemberId: "member-raiser",
+      raisedByMemberName: "raiser@example.com",
+      raisedBy: "raiser@example.com",
+    });
+    expect(context.recent.tensions[0]).not.toHaveProperty("assigneeMember");
+    expect(context.recent.tensions[0]).not.toHaveProperty("raisedByMember");
+    expect(context.recent.proposals[0]).toMatchObject({
+      priority: 1,
+      priorityLabel: "Medium",
+      ownerMemberId: "member-owner",
+      ownerMemberName: "Owner",
+      owner: "Owner",
+    });
+    expect(context.recent.proposals[0]).not.toHaveProperty("ownerMember");
+  });
+
   it("applies Brain draft visibility when listing article write-back targets", async () => {
     requireWorkspaceMembership.mockResolvedValueOnce({ id: "member-1", workspaceId: "workspace-1", userId: "user-1", role: "MEMBER", isActive: true });
     prismaMock.brainArticle.findMany.mockResolvedValueOnce([]);

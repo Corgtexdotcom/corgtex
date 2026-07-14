@@ -24,6 +24,7 @@ import { actorUserIdForWorkspace, requireWorkspaceMembership } from "./auth";
 import { AppError, invariant } from "./errors";
 import { isKnownScope, type AgentScope } from "./agent-auth";
 import { privacyFilter } from "./privacy";
+import { formatWorkItemPriority } from "./work-item-priority";
 
 const SECRET_KEY_PATTERN = /(token|secret|password|credential|api[_-]?key|access[_-]?key|refresh|authorization|bearer)/i;
 const SECRET_QUERY_VALUE_PATTERN = /([?&](?:access[_-]?token|refresh[_-]?token|id[_-]?token|token|api[_-]?key|secret|signature|sig|authorization)=)[^&#\s]+/gi;
@@ -330,6 +331,10 @@ function brainArticlePrivacyFilter(actor: AppActor, membership?: MembershipSumma
     return [{ isPrivate: false }, { isPrivate: true, ownerMemberId: membership.id }];
   }
   return [{ isPrivate: false }];
+}
+
+function memberName(member: { user?: { displayName?: string | null; email?: string | null } | null } | null | undefined) {
+  return member?.user?.displayName ?? member?.user?.email ?? null;
 }
 
 const executionRequestInclude = {
@@ -800,19 +805,47 @@ export async function getCompanyContext(actor: AppActor, workspaceId: string) {
     }),
     prisma.action.findMany({
       where: { workspaceId, archivedAt: null, isPrivate: false },
-      select: { id: true, title: true, status: true, dueAt: true, updatedAt: true },
+      select: {
+        id: true,
+        title: true,
+        status: true,
+        priority: true,
+        assigneeMemberId: true,
+        assigneeMember: { select: { user: { select: { displayName: true, email: true } } } },
+        dueAt: true,
+        updatedAt: true,
+      },
       orderBy: { updatedAt: "desc" },
       take: MAX_CONTEXT_ITEMS,
     }),
     prisma.tension.findMany({
       where: { workspaceId, archivedAt: null, isPrivate: false },
-      select: { id: true, title: true, status: true, priority: true, updatedAt: true },
+      select: {
+        id: true,
+        title: true,
+        status: true,
+        priority: true,
+        assigneeMemberId: true,
+        assigneeMember: { select: { user: { select: { displayName: true, email: true } } } },
+        raisedByMemberId: true,
+        raisedByMember: { select: { user: { select: { displayName: true, email: true } } } },
+        updatedAt: true,
+      },
       orderBy: { updatedAt: "desc" },
       take: MAX_CONTEXT_ITEMS,
     }),
     prisma.proposal.findMany({
       where: { workspaceId, archivedAt: null, isPrivate: false },
-      select: { id: true, title: true, summary: true, status: true, updatedAt: true },
+      select: {
+        id: true,
+        title: true,
+        summary: true,
+        status: true,
+        priority: true,
+        ownerMemberId: true,
+        ownerMember: { select: { user: { select: { displayName: true, email: true } } } },
+        updatedAt: true,
+      },
       orderBy: { updatedAt: "desc" },
       take: MAX_CONTEXT_ITEMS,
     }),
@@ -831,9 +864,41 @@ export async function getCompanyContext(actor: AppActor, workspaceId: string) {
   ]);
   invariant(workspace, 404, "NOT_FOUND", "Workspace not found.");
 
+  const mappedActions = actions.map(({ assigneeMember, ...action }) => {
+    const assignee = memberName(assigneeMember);
+    return {
+      ...action,
+      priorityLabel: formatWorkItemPriority(action.priority),
+      assigneeMemberName: assignee,
+      assignee,
+    };
+  });
+  const mappedTensions = tensions.map(({ assigneeMember, raisedByMember, ...tension }) => {
+    const responsiblePerson = memberName(assigneeMember);
+    const raisedBy = memberName(raisedByMember);
+    return {
+      ...tension,
+      priorityLabel: formatWorkItemPriority(tension.priority),
+      responsibleMemberId: tension.assigneeMemberId,
+      responsibleMemberName: responsiblePerson,
+      responsiblePerson,
+      raisedByMemberName: raisedBy,
+      raisedBy,
+    };
+  });
+  const mappedProposals = proposals.map(({ ownerMember, ...proposal }) => {
+    const owner = memberName(ownerMember);
+    return {
+      ...proposal,
+      priorityLabel: formatWorkItemPriority(proposal.priority),
+      ownerMemberName: owner,
+      owner,
+    };
+  });
+
   return redactJson({
     workspace,
-    recent: { actions, tensions, proposals, meetings, articles },
+    recent: { actions: mappedActions, tensions: mappedTensions, proposals: mappedProposals, meetings, articles },
     policy: {
       externalExecution: "External AI workspaces execute; Corgtex supplies scoped context, policy constraints, audit, and reviewable write-back.",
       defaultWritebackMode: "draft_or_comment",
