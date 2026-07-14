@@ -258,6 +258,8 @@ export default async function WorkspaceAddPage({
     ? "Record meeting now"
     : kind === "meeting_audio_upload"
       ? "Upload meeting audio"
+    : kind === "upload_file"
+      ? "Upload files from this device"
     : `Add ${WORKSPACE_ADD_ACTION_DEFINITIONS[kind].label}`;
   const uploadDefaultSource = workspaceSubpath(returnUrl.pathname, workspaceId)?.startsWith("/settings")
     ? "settings-upload"
@@ -1120,6 +1122,8 @@ export default async function WorkspaceAddPage({
             defaultSource={uploadDefaultSource}
             initiallyOpen
             showTrigger={false}
+            heading="Upload files from this device"
+            description="Choose PDFs, docs, spreadsheets, notes, images, or folders from this phone or computer."
             cancelHref={returnTo}
           />
         )}

@@ -8,7 +8,17 @@ import { TimeZoneSelect } from "@/lib/components/TimeZoneSelect";
 
 const SOURCE_TYPES = ["MEETING","TICKET","PR","RFC","INCIDENT","SLACK","CUSTOMER_FEEDBACK","COMPETITOR","RESEARCH","ARTICLE","DOC","RUNBOOK","EMAIL","FILE_UPLOAD","EXTERNAL_CONTENT"];
 
-export function TextPasteUploader({ workspaceId }: { workspaceId: string }) {
+export function TextPasteUploader({
+  workspaceId,
+  heading,
+  description,
+  surface = "standalone",
+}: {
+  workspaceId: string;
+  heading?: string;
+  description?: string;
+  surface?: "standalone" | "embedded";
+}) {
   const router = useRouter();
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [title, setTitle] = useState("");
@@ -84,10 +94,14 @@ export function TextPasteUploader({ workspaceId }: { workspaceId: string }) {
     }
   };
 
+  const formStyle = surface === "embedded"
+    ? { marginBottom: 0, padding: 0, border: "none", borderRadius: 0 }
+    : { marginBottom: 32, padding: 24, border: "1px solid var(--line)", borderRadius: 8 };
+
   return (
-    <form className="nr-form-section stack" style={{ marginBottom: 32, padding: 24, border: "1px solid var(--line)", borderRadius: 8 }} onSubmit={handleSubmit}>
-      <h3>{t("titlePasteText")}</h3>
-      <p className="nr-item-meta" style={{ marginBottom: 16 }}>{t("descPasteText")}</p>
+    <form className="nr-form-section stack" style={formStyle} onSubmit={handleSubmit}>
+      <h3>{heading ?? t("titlePasteText")}</h3>
+      <p className="nr-item-meta" style={{ marginBottom: 16 }}>{description ?? t("descPasteText")}</p>
       
       {error && <div style={{ color: "var(--danger)", padding: "8px", background: "var(--danger-soft)" }}>{error}</div>}
       {clarification && <div style={{ color: "var(--warning-text, #b08800)", padding: "8px", background: "var(--warning-soft, #fff8e1)", borderRadius: 4 }}>{clarification}</div>}

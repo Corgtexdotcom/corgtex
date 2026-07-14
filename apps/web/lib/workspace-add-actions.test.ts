@@ -165,16 +165,26 @@ describe("workspace add actions", () => {
   });
 
   it("selects mobile capture actions through the same Add page rules", () => {
-    expect(getMobileCaptureActions(context()).map((action) => action.kind)).toEqual([
+    const captureActions = getMobileCaptureActions(context());
+
+    expect(captureActions.map((action) => action.kind)).toEqual([
+      "upload_file",
+      "paste_text",
       "tension",
       "action",
       "meeting_transcript",
       "meeting_audio_upload",
-      "upload_file",
-      "paste_text",
     ]);
-    expect(getMobileCaptureActions(context())[0]?.href).toBe(
-      "/workspaces/ws-1/add?kind=tension&returnTo=%2Fworkspaces%2Fws-1%2Ftensions",
+    expect(captureActions[0]).toMatchObject({
+      kind: "upload_file",
+      label: "Upload files from this device",
+      description: "Choose files or folders from this phone or computer.",
+    });
+    expect(captureActions[0]?.href).toBe(
+      "/workspaces/ws-1/add?kind=upload_file&returnTo=%2Fworkspaces%2Fws-1%2Fbrain",
+    );
+    expect(captureActions[1]?.href).toBe(
+      "/workspaces/ws-1/add?kind=paste_text&returnTo=%2Fworkspaces%2Fws-1%2Fsettings%3Ftab%3Ddata-sources",
     );
   });
 

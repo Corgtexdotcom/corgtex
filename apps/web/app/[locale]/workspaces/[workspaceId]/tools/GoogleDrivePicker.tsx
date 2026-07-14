@@ -26,6 +26,28 @@ declare global {
 
 const DRIVE_FILE_SCOPE = "https://www.googleapis.com/auth/drive.file";
 
+export type GoogleDrivePickerLabels = {
+  selectedTitle: string;
+  chooseAction: string;
+  openingAction: string;
+  description: string;
+  syncQueued: string;
+  missingConfig: string;
+  syncError: string;
+  openError: string;
+};
+
+const DEFAULT_GOOGLE_DRIVE_PICKER_LABELS: GoogleDrivePickerLabels = {
+  selectedTitle: "Selected Google Drive files",
+  chooseAction: "Choose Drive files",
+  openingAction: "Opening Drive...",
+  description: "Pick only the Google Docs, Sheets, or Slides that Corgtex should sync into this workspace Brain.",
+  syncQueued: "Google Drive document sync is queued.",
+  missingConfig: "Missing public Picker config",
+  syncError: "Could not sync selected Google Drive files.",
+  openError: "Could not open Google Drive Picker.",
+};
+
 function loadScript(id: string, src: string) {
   return new Promise<void>((resolve, reject) => {
     if (document.getElementById(id)) {
@@ -85,6 +107,7 @@ export function GoogleDrivePicker({
   initialSelectedIds,
   autoOpen = false,
   onSynced,
+  labels,
 }: {
   workspaceId: string;
   clientId: string | null;
@@ -93,6 +116,7 @@ export function GoogleDrivePicker({
   initialSelectedIds: string[];
   autoOpen?: boolean;
   onSynced?: (count: number) => void;
+  labels?: Partial<GoogleDrivePickerLabels>;
 }) {
   const autoOpenRef = useRef(false);
   const [selectedIds, setSelectedIds] = useState(initialSelectedIds);
@@ -108,6 +132,10 @@ export function GoogleDrivePicker({
     if (!appId) missing.push("Google Cloud project number");
     return missing;
   }, [appId, clientId, developerKey]);
+  const pickerLabels = useMemo(() => ({
+    ...DEFAULT_GOOGLE_DRIVE_PICKER_LABELS,
+    ...labels,
+  }), [labels]);
 
   const saveSelection = useCallback(async (docs: Array<{ id?: string; name?: string }>) => {
     const documentIds = docs.map((doc) => doc.id).filter((id): id is string => Boolean(id));
@@ -120,18 +148,18 @@ export function GoogleDrivePicker({
     });
     const data = await response.json().catch(() => null);
     if (!response.ok) {
-      throw new Error(data?.error?.message || "Could not sync selected Google Drive files.");
+      throw new Error(data?.error?.message || pickerLabels.syncError);
     }
 
     setSelectedIds(documentIds);
     setSelectedNames(docs.map((doc) => doc.name).filter((name): name is string => Boolean(name)));
-    setStatus("Google Drive document sync is queued.");
+    setStatus(pickerLabels.syncQueued);
     onSynced?.(documentIds.length);
-  }, [onSynced, workspaceId]);
+  }, [onSynced, pickerLabels.syncError, pickerLabels.syncQueued, workspaceId]);
 
   const openPicker = useCallback(async () => {
     if (!clientId || !developerKey || !appId) {
-      setError(`Missing ${missingConfig.join(", ")}.`);
+      setError(`${pickerLabels.missingConfig}: ${missingConfig.join(", ")}.`);
       return;
     }
 
@@ -171,17 +199,17 @@ export function GoogleDrivePicker({
         .setCallback((data: any) => {
           if (data.action !== pickerApi.Action.PICKED) return;
           void saveSelection(Array.isArray(data.docs) ? data.docs : []).catch((selectionError) => {
-            setError(selectionError instanceof Error ? selectionError.message : "Could not sync selected Google Drive files.");
+            setError(selectionError instanceof Error ? selectionError.message : pickerLabels.syncError);
           });
         })
         .build();
       picker.setVisible(true);
     } catch (pickerError) {
-      setError(pickerError instanceof Error ? pickerError.message : "Could not open Google Drive Picker.");
+      setError(pickerError instanceof Error ? pickerError.message : pickerLabels.openError);
     } finally {
       setIsOpening(false);
     }
-  }, [appId, clientId, developerKey, missingConfig, saveSelection]);
+  }, [appId, clientId, developerKey, missingConfig, pickerLabels.missingConfig, pickerLabels.openError, pickerLabels.syncError, saveSelection]);
 
   useEffect(() => {
     if (!autoOpen || autoOpenRef.current || missingConfig.length > 0) return;
@@ -192,17 +220,17 @@ export function GoogleDrivePicker({
   return (
     <div className="nr-item stack" style={{ gap: 8, padding: 12, marginTop: 8 }}>
       <div className="row">
-        <strong className="nr-item-title" style={{ fontSize: "0.95rem" }}>Selected Google Drive files</strong>
+        <strong className="nr-item-title" style={{ fontSize: "0.95rem" }}>{pickerLabels.selectedTitle}</strong>
         <button type="button" className="button secondary small" onClick={openPicker} disabled={isOpening || missingConfig.length > 0}>
-          {isOpening ? "Opening Drive..." : "Choose Drive files"}
+          {isOpening ? pickerLabels.openingAction : pickerLabels.chooseAction}
         </button>
       </div>
       <p className="nr-item-meta" style={{ fontSize: "0.78rem", margin: 0 }}>
-        Pick only the Google Docs, Sheets, or Slides that Corgtex should sync into this workspace Brain.
+        {pickerLabels.description}
       </p>
       {missingConfig.length > 0 && (
         <p className="form-message form-message-error">
-          Missing public Picker config: {missingConfig.join(", ")}.
+          {pickerLabels.missingConfig}: {missingConfig.join(", ")}.
         </p>
       )}
       {error && <p className="form-message form-message-error">{error}</p>}
