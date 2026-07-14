@@ -77,6 +77,9 @@ export function KnowledgeFileUploader({
   initiallyOpen = false,
   showTrigger = true,
   showFolderSelect = true,
+  heading,
+  description,
+  surface = "standalone",
   doneLabel,
   cancelHref,
   onUploaded,
@@ -87,6 +90,9 @@ export function KnowledgeFileUploader({
   initiallyOpen?: boolean;
   showTrigger?: boolean;
   showFolderSelect?: boolean;
+  heading?: string;
+  description?: string;
+  surface?: "standalone" | "embedded";
   doneLabel?: string;
   cancelHref?: string;
   onUploaded?: (count: number) => void;
@@ -223,7 +229,7 @@ export function KnowledgeFileUploader({
   const hasCompletedUploads = doneCount > 0 && !hasPendingUploads && !isUploading;
 
   return (
-    <section className="stack mb-8">
+    <section className={surface === "embedded" ? "stack" : "stack mb-8"}>
       {showTrigger && (
         <div className="actions-inline">
           <button type="button" className="small" onClick={() => setIsOpen((open) => !open)}>
@@ -248,9 +254,9 @@ export function KnowledgeFileUploader({
         >
           <div className="nr-upload-header">
             <div>
-              <h3 className="nr-upload-title">{t("uploadFilesTitle")}</h3>
+              <h3 className="nr-upload-title">{heading ?? t("uploadFilesTitle")}</h3>
               <p className="nr-upload-desc">
-                {t("uploadFilesDescription")}
+                {description ?? t("uploadFilesDescription")}
               </p>
             </div>
             <div className="actions-inline">

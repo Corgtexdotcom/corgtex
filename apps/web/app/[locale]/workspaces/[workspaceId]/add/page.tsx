@@ -25,6 +25,7 @@ import { prisma } from "@corgtex/shared";
 
 import { requirePageActor } from "@/lib/auth";
 import { enforceDemoGuard } from "@/lib/demo-guard";
+import { ActionEditorForm } from "@/lib/components/ActionEditorForm";
 import { MarkdownEditor } from "@/lib/components/MarkdownEditor";
 import { TimeZoneSelect } from "@/lib/components/TimeZoneSelect";
 import { WorkItemMemberSelect, type WorkItemMemberOption } from "@/lib/components/WorkItemMemberSelect";
@@ -264,10 +265,26 @@ export default async function WorkspaceAddPage({
     ? "Record meeting now"
     : kind === "meeting_audio_upload"
       ? "Upload meeting audio"
+    : kind === "upload_file"
+      ? "Upload files from this device"
     : `Add ${WORKSPACE_ADD_ACTION_DEFINITIONS[kind].label}`;
   const uploadDefaultSource = workspaceSubpath(returnUrl.pathname, workspaceId)?.startsWith("/settings")
     ? "settings-upload"
     : "brain-upload";
+  const actionMembers = members.map((member) => ({
+    id: member.id,
+    label: member.user.displayName ?? member.user.email,
+  }));
+  const actionEditorLabels = {
+    title: "Title",
+    notes: "Notes",
+    assignee: "Assignee",
+    assigneeNone: "No assignee",
+    submit: "Create action",
+    cancel: "Cancel",
+    priorityLabel: "Priority",
+    priority: DEFAULT_WORK_ITEM_PRIORITY_LABELS,
+  };
 
   async function createActionAndReturn(formData: FormData) {
     "use server";
@@ -603,17 +620,14 @@ export default async function WorkspaceAddPage({
         )}
 
         {kind === "action" && (
-          <form action={createActionAndReturn} className="stack nr-form-section">
-            {hiddenWorkspace(workspaceId)}
-            <label>Title<input name="title" required /></label>
-            <label>Notes<MarkdownEditor name="bodyMd" rows={5} /></label>
-            <WorkItemMemberSelect
-              name="assigneeMemberId"
-              label="Assignee"
-              noneLabel="No assignee"
-              members={memberOptions}
-            />
-            <WorkItemPrioritySelect label="Priority" labels={DEFAULT_WORK_ITEM_PRIORITY_LABELS} defaultValue={0} />
+          <ActionEditorForm
+            action={createActionAndReturn}
+            workspaceId={workspaceId}
+            members={actionMembers}
+            labels={actionEditorLabels}
+            priority={1}
+            cancelHref={returnTo}
+          >
             <label>
               Link to proposal
               <select name="proposalId" defaultValue="">
@@ -621,8 +635,7 @@ export default async function WorkspaceAddPage({
                 {activeProposals.map((proposal) => <option value={proposal.id} key={proposal.id}>{proposal.title}</option>)}
               </select>
             </label>
-            <div className="actions-inline"><button type="submit">Create action</button>{cancelLink(returnTo)}</div>
-          </form>
+          </ActionEditorForm>
         )}
 
         {kind === "tension" && (
@@ -1114,6 +1127,8 @@ export default async function WorkspaceAddPage({
             defaultSource={uploadDefaultSource}
             initiallyOpen
             showTrigger={false}
+            heading="Upload files from this device"
+            description="Choose PDFs, docs, spreadsheets, notes, images, or folders from this phone or computer."
             cancelHref={returnTo}
           />
         )}

@@ -1,10 +1,8 @@
 import Link from "next/link";
-import { AppError, getAction, getWorkspaceArchiveRecord, listDeliberationEntries, listExternalResourceAttachments, listHumanMembers, listWorkItemEvidence, listWorkItemVersions, requireWorkspaceMembership } from "@corgtex/domain";
+import { AppError, getAction, getWorkspaceArchiveRecord, listDeliberationEntries, listExternalResourceAttachments, listWorkItemEvidence, listWorkItemVersions, requireWorkspaceMembership } from "@corgtex/domain";
 import { requirePageActor } from "@/lib/auth";
-import { MarkdownEditor } from "@/lib/components/MarkdownEditor";
+import { ConfirmSubmitButton } from "@/lib/components/ConfirmSubmitButton";
 import { MarkdownRenderer } from "@/lib/components/MarkdownRenderer";
-import { WorkItemMemberSelect, type WorkItemMemberOption } from "@/lib/components/WorkItemMemberSelect";
-import { WorkItemPrioritySelect } from "@/lib/components/WorkItemPrioritySelect";
 import { WorkItemResolutionDialog } from "@/lib/components/WorkItemResolutionDialog";
 import { ArchivedItemBanner } from "@/lib/components/ArchivedItemBanner";
 import { UnavailableItemStatus } from "@/lib/components/UnavailableItemStatus";
@@ -65,7 +63,7 @@ export default async function ActionDetailPage({
     throw error;
   }
   const isArchived = Boolean(action.archivedAt);
-  const [versionHistory, evidence, externalResourceAttachments, deliberationEntries, archiveRecord, members] = await Promise.all([
+  const [versionHistory, evidence, externalResourceAttachments, deliberationEntries, archiveRecord] = await Promise.all([
     archivedSafeRead(isArchived, listWorkItemVersions(actor, { workspaceId, entityType: "ACTION", entityId: actionId }), {
       entityType: "Action" as const,
       entityId: actionId,
@@ -78,7 +76,6 @@ export default async function ActionDetailPage({
     isArchived
       ? archivedSafeRead(true, getWorkspaceArchiveRecord(actor, { workspaceId, entityType: "Action", entityId: action.id }), null)
       : Promise.resolve(null),
-    isArchived ? Promise.resolve([]) : listHumanMembers(workspaceId),
   ]);
   const completionEvidence = evidence.filter((row) => row.purpose === "completion_evidence");
   const feedbackContextEvidence = evidence.filter((row) => row.purpose === "feedback_context");
@@ -105,17 +102,15 @@ export default async function ActionDetailPage({
     IN_PROGRESS: t("statusInProgress"),
     COMPLETED: t("statusCompleted"),
   }[action.status];
-  const authorName = action.author?.displayName || action.author?.email || "Unknown";
-  const assigneeName = action.assigneeMember?.user?.displayName || action.assigneeMember?.user?.email || null;
-  const memberName = (member: { user: { displayName: string | null; email: string } }) => member.user.displayName || member.user.email;
-  const memberOptions: WorkItemMemberOption[] = members.map((member) => ({ id: member.id, label: memberName(member) }));
   const priorityLabels = {
     3: tWork("priorityUrgent"),
     2: tWork("priorityImportant"),
     1: tWork("priorityMedium"),
     0: tWork("priorityLow"),
   } satisfies WorkItemPriorityLabels;
-  const priorityText = (priority: number | null | undefined) => formatWorkItemPriority(priority, priorityLabels);
+  const priorityText = formatWorkItemPriority(action.priority, priorityLabels);
+  const authorName = action.author?.displayName || action.author?.email || "Unknown";
+  const assigneeName = action.assigneeMember?.user?.displayName || action.assigneeMember?.user?.email || null;
   const canManage = !isArchived && (actor.kind === "agent"
     || membership?.role === "ADMIN"
     || (actor.kind === "user" && action.authorUserId === actor.user.id));
@@ -155,7 +150,7 @@ export default async function ActionDetailPage({
           <span className={`tag ${statusClass}`}>{statusLabel}</span>
           <span>{t("metaCreator", { name: authorName })}</span>
           {assigneeName && <span>{t("metaAssignee", { name: assigneeName })}</span>}
-          <span>{priorityText(action.priority)}</span>
+          <span>{priorityText}</span>
           <span>{new Date(action.createdAt).toLocaleDateString()}</span>
           <span>
             {versionHistory.versions.length > 0 ? (
@@ -220,38 +215,19 @@ export default async function ActionDetailPage({
                 <button type="submit" className="secondary small">{t("btnReturnToDraft")}</button>
               </form>
             )}
+            {canEditContent && (
+              <Link href={`/workspaces/${workspaceId}/actions/${action.id}/edit`} className="secondary small">
+                {t("btnEdit")}
+              </Link>
+            )}
             <form action={deleteActionAction}>
               <input type="hidden" name="workspaceId" value={workspaceId} />
               <input type="hidden" name="actionId" value={action.id} />
-              <button type="submit" className="secondary small danger">{t("btnDelete")}</button>
+              <ConfirmSubmitButton className="secondary small danger" confirmMessage={t("confirmArchive")}>
+                {t("btnDelete")}
+              </ConfirmSubmitButton>
             </form>
           </div>
-          {canEditContent && (
-            <details style={{ marginTop: 12 }}>
-              <summary className="secondary small nr-hide-marker" style={{ cursor: "pointer", display: "inline-block" }}>{t("btnEdit")}</summary>
-              <form action={updateActionAction} className="stack nr-form-section" style={{ marginTop: 12 }}>
-                <input type="hidden" name="workspaceId" value={workspaceId} />
-                <input type="hidden" name="actionId" value={action.id} />
-                <label>
-                  {t("formTitle")}
-                  <input name="title" defaultValue={action.title} required />
-                </label>
-                <label>
-                  {t("formNotes")}
-                  <MarkdownEditor name="bodyMd" defaultValue={action.bodyMd ?? ""} rows={6} />
-                </label>
-                <WorkItemMemberSelect
-                  name="assigneeMemberId"
-                  label={t("formAssignee")}
-                  noneLabel={t("formAssigneeNone")}
-                  members={memberOptions}
-                  defaultValue={action.assigneeMemberId}
-                />
-                <WorkItemPrioritySelect label={t("formPriority")} labels={priorityLabels} defaultValue={action.priority} />
-                <button type="submit" className="secondary small">{action.status === "DRAFT" ? t("btnSaveDraft") : tCommon("save")}</button>
-              </form>
-            </details>
-          )}
         </section>
       )}
 

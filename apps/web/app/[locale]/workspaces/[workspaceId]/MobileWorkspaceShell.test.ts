@@ -1,7 +1,12 @@
 import { describe, expect, it } from "vitest";
 
 import { WORKSPACE_NAV_GROUPS, type NavGroup } from "@/lib/nav-config";
-import { buildMobileNavModel, containsActiveNavItem, isActiveWorkspacePath } from "./mobile-nav-model";
+import {
+  buildMobileNavModel,
+  containsActiveNavItem,
+  isActiveWorkspacePath,
+  shouldHideMobileBottomNavForWorkspacePath,
+} from "./mobile-nav-model";
 
 function withoutModules(navGroups: NavGroup[], moduleKeys: string[]) {
   const hidden = new Set(moduleKeys);
@@ -51,5 +56,14 @@ describe("mobile workspace nav model", () => {
 
     expect(containsActiveNavItem(model.overflowGroups, "/workspaces/ws-1/proposals/new", "ws-1")).toBe(true);
     expect(containsActiveNavItem(model.overflowGroups, "/workspaces/ws-1/actions", "ws-1")).toBe(false);
+  });
+
+  it("hides the bottom nav on focused Action routes without hiding normal lists", () => {
+    expect(shouldHideMobileBottomNavForWorkspacePath("/en/workspaces/ws-1/actions", "ws-1")).toBe(false);
+    expect(shouldHideMobileBottomNavForWorkspacePath("/en/workspaces/ws-1/actions/action-1", "ws-1")).toBe(true);
+    expect(shouldHideMobileBottomNavForWorkspacePath("/en/workspaces/ws-1/actions/action-1/edit", "ws-1")).toBe(true);
+    expect(shouldHideMobileBottomNavForWorkspacePath("/en/workspaces/ws-1/add", "ws-1", "action")).toBe(true);
+    expect(shouldHideMobileBottomNavForWorkspacePath("/en/workspaces/ws-1/add", "ws-1", "tension")).toBe(false);
+    expect(shouldHideMobileBottomNavForWorkspacePath("/en/workspaces/ws-2/actions/action-1", "ws-1")).toBe(false);
   });
 });

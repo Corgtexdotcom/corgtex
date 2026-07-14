@@ -77,21 +77,25 @@ describe("action item server actions", () => {
     }));
   });
 
-  it("passes assignee updates through to the domain action", async () => {
+  it("updates editable action metadata including priority and assignee", async () => {
     const { updateActionAction } = await import("./actions");
     const formData = new FormData();
     formData.set("workspaceId", "workspace-1");
     formData.set("actionId", "action-1");
+    formData.set("title", "Close the loop");
+    formData.set("bodyMd", "Follow up with Eduardo.");
+    formData.set("priority", "3");
     formData.set("assigneeMemberId", "member-3");
-    formData.set("priority", "2");
 
     await updateActionAction(formData);
 
     expect(updateAction).toHaveBeenCalledWith(actor, expect.objectContaining({
       workspaceId: "workspace-1",
       actionId: "action-1",
+      title: "Close the loop",
+      bodyMd: "Follow up with Eduardo.",
+      priority: 3,
       assigneeMemberId: "member-3",
-      priority: 2,
     }));
   });
 
