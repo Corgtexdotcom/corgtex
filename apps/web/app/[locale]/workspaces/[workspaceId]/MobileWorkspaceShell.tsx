@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { usePathname } from "next/navigation";
+import { usePathname, useSearchParams } from "next/navigation";
 import { useTranslations } from "next-intl";
 import { ChatInterface } from "./chat/ChatInterface";
 import { AiWorkspaceLaunchPanel } from "./AiWorkspaceLaunchPanel";
@@ -9,7 +9,12 @@ import type { NavGroup } from "@/lib/nav-config";
 import type { AiWorkspaceLaunchState } from "@/lib/ai-workspace-launch";
 import type { MobileCaptureAction } from "@/lib/workspace-add-actions";
 import { WorkspaceNavIcon, WorkspaceUtilityIcon } from "./WorkspaceNavIcon";
-import { buildMobileNavModel, containsActiveNavItem, isActiveWorkspacePath } from "./mobile-nav-model";
+import {
+  buildMobileNavModel,
+  containsActiveNavItem,
+  isActiveWorkspacePath,
+  shouldHideMobileBottomNavForWorkspacePath,
+} from "./mobile-nav-model";
 
 type MobileMode = "workspace" | "ai";
 type MobileAiTab = "work" | "ask" | "capture";
@@ -53,6 +58,7 @@ export function MobileWorkspaceShell({
   utilityActions,
 }: MobileWorkspaceShellProps) {
   const pathname = usePathname() ?? "";
+  const searchParams = useSearchParams();
   const tNav = useTranslations("nav");
   const tMobile = useTranslations("mobile");
   const [mode, setModeState] = useState<MobileMode>("workspace");
@@ -63,6 +69,7 @@ export function MobileWorkspaceShell({
 
   const mobileNav = useMemo(() => buildMobileNavModel(navGroups, { reserveMoreSlot: true }), [navGroups]);
   const isMoreActive = containsActiveNavItem(mobileNav.overflowGroups, pathname, workspaceId);
+  const hideBottomNav = shouldHideMobileBottomNavForWorkspacePath(pathname, workspaceId, searchParams?.get("kind"));
 
   const trackMobileMode = useCallback((eventName: "mode_viewed" | "mode_changed", nextMode: MobileMode, options: {
     previousMode?: MobileMode;
@@ -133,6 +140,12 @@ export function MobileWorkspaceShell({
   }, [pathname]);
 
   useEffect(() => {
+    if (hideBottomNav) {
+      setIsMoreOpen(false);
+    }
+  }, [hideBottomNav]);
+
+  useEffect(() => {
     if (!hasLoadedStoredMode) return;
     const viewedKey = `${pathname}:${mode}`;
     if (lastViewedKeyRef.current === viewedKey) return;
@@ -173,7 +186,7 @@ export function MobileWorkspaceShell({
           </div>
         </header>
 
-        {mode === "workspace" && (
+        {mode === "workspace" && !hideBottomNav && (
           <nav className="mobile-bottom-nav" aria-label={tMobile("bottomNavLabel")}>
             {mobileNav.primaryItems.map((item) => {
               const isActive = isActiveWorkspacePath(pathname, workspaceId, item.href);
@@ -211,7 +224,7 @@ export function MobileWorkspaceShell({
         )}
       </div>
 
-      {mode === "workspace" && isMoreOpen && (
+      {mode === "workspace" && !hideBottomNav && isMoreOpen && (
         <section id="mobile-more-menu" className="mobile-more-panel" role="dialog" aria-modal="true" aria-label={tMobile("morePanelLabel")}>
           <div className="mobile-more-header">
             <div>

@@ -28,6 +28,7 @@ export async function createActionAction(formData: FormData) {
     title: asString(formData, "title"),
     bodyMd: asOptional(formData, "bodyMd"),
     proposalId: asOptional(formData, "proposalId"),
+    assigneeMemberId: asOptional(formData, "assigneeMemberId"),
     priority: asOptionalInt(formData, "priority"),
     isPrivate: formData.has("isPrivate") ? formData.get("isPrivate") === "on" : true,
   });
@@ -57,6 +58,7 @@ export async function updateActionAction(formData: FormData) {
     title: asOptional(formData, "title") ?? undefined,
     bodyMd: formData.has("bodyMd") ? asOptional(formData, "bodyMd") : undefined,
     priority: formData.has("priority") ? (asOptionalInt(formData, "priority") ?? 0) : undefined,
+    assigneeMemberId: formData.has("assigneeMemberId") ? asOptional(formData, "assigneeMemberId") : undefined,
     status: status ?? undefined,
     completedVia: asOptional(formData, "completedVia") ?? undefined,
     evidenceDocumentIds,

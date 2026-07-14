@@ -73,6 +73,11 @@ describe("workspace add actions", () => {
     expect(kinds({ pathname: "/workspaces/ws-1/proposals" })).toEqual(["proposal"]);
   });
 
+  it("hides the global action add shortcut on action detail and edit routes", () => {
+    expect(kinds({ pathname: "/workspaces/ws-1/actions/action-1" })).toEqual([]);
+    expect(kinds({ pathname: "/workspaces/ws-1/actions/action-1/edit" })).toEqual([]);
+  });
+
   it("offers goal creation plus evidence capture from Goals", () => {
     expect(kinds({ pathname: "/workspaces/ws-1/goals" })).toEqual([
       "goal",

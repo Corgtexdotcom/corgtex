@@ -2,11 +2,12 @@
 
 import html2canvas from "html2canvas";
 import { Camera, ImagePlus, MessageSquareText, Trash2 } from "lucide-react";
-import { usePathname } from "next/navigation";
+import { usePathname, useSearchParams } from "next/navigation";
 import { useTranslations } from "next-intl";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Dialog } from "@/lib/components/Dialog";
 import { useToast } from "@/lib/components/Toast";
+import { shouldHideMobileBottomNavForWorkspacePath } from "./mobile-nav-model";
 
 const MAX_SCREENSHOTS = 5;
 const MAX_SCREENSHOT_BYTES = 10 * 1024 * 1024;
@@ -40,6 +41,7 @@ export function ProductFeedbackWidget({
   workspaceId: string;
 }) {
   const pathname = usePathname();
+  const searchParams = useSearchParams();
   const t = useTranslations("productFeedback");
   const { addToast } = useToast();
   const inputRef = useRef<HTMLInputElement | null>(null);
@@ -51,6 +53,7 @@ export function ProductFeedbackWidget({
   const [isCapturing, setIsCapturing] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const hideForFocusedActionRoute = shouldHideMobileBottomNavForWorkspacePath(pathname, workspaceId, searchParams?.get("kind"));
 
   const clearScreenshots = useCallback(() => {
     setScreenshots((current) => {
@@ -188,6 +191,10 @@ export function ProductFeedbackWidget({
     } finally {
       setIsSubmitting(false);
     }
+  }
+
+  if (hideForFocusedActionRoute) {
+    return null;
   }
 
   return (
