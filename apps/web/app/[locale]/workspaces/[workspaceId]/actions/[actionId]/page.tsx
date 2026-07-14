@@ -1,7 +1,7 @@
 import Link from "next/link";
 import { AppError, getAction, getWorkspaceArchiveRecord, listDeliberationEntries, listExternalResourceAttachments, listWorkItemEvidence, listWorkItemVersions, requireWorkspaceMembership } from "@corgtex/domain";
 import { requirePageActor } from "@/lib/auth";
-import { MarkdownEditor } from "@/lib/components/MarkdownEditor";
+import { ConfirmSubmitButton } from "@/lib/components/ConfirmSubmitButton";
 import { MarkdownRenderer } from "@/lib/components/MarkdownRenderer";
 import { WorkItemResolutionDialog } from "@/lib/components/WorkItemResolutionDialog";
 import { ArchivedItemBanner } from "@/lib/components/ArchivedItemBanner";
@@ -207,34 +207,19 @@ export default async function ActionDetailPage({
                 <button type="submit" className="secondary small">{t("btnReturnToDraft")}</button>
               </form>
             )}
+            {canEditContent && (
+              <Link href={`/workspaces/${workspaceId}/actions/${action.id}/edit`} className="secondary small">
+                {t("btnEdit")}
+              </Link>
+            )}
             <form action={deleteActionAction}>
               <input type="hidden" name="workspaceId" value={workspaceId} />
               <input type="hidden" name="actionId" value={action.id} />
-              <button type="submit" className="secondary small danger">{t("btnDelete")}</button>
+              <ConfirmSubmitButton className="secondary small danger" confirmMessage={t("confirmArchive")}>
+                {t("btnDelete")}
+              </ConfirmSubmitButton>
             </form>
           </div>
-          {canEditContent && (
-            <details style={{ marginTop: 12 }}>
-              <summary className="secondary small nr-hide-marker" style={{ cursor: "pointer", display: "inline-block" }}>{t("btnEdit")}</summary>
-              <form action={updateActionAction} className="stack nr-form-section" style={{ marginTop: 12 }}>
-                <input type="hidden" name="workspaceId" value={workspaceId} />
-                <input type="hidden" name="actionId" value={action.id} />
-                <label>
-                  {t("formTitle")}
-                  <input name="title" defaultValue={action.title} required />
-                </label>
-                <label>
-                  {t("formNotes")}
-                  <MarkdownEditor name="bodyMd" defaultValue={action.bodyMd ?? ""} rows={6} />
-                </label>
-                <label>
-                  {t("formPriority")}
-                  <input name="priority" type="number" min={0} defaultValue={action.priority} />
-                </label>
-                <button type="submit" className="secondary small">{action.status === "DRAFT" ? t("btnSaveDraft") : tCommon("save")}</button>
-              </form>
-            </details>
-          )}
         </section>
       )}
 

@@ -25,6 +25,7 @@ import { prisma } from "@corgtex/shared";
 
 import { requirePageActor } from "@/lib/auth";
 import { enforceDemoGuard } from "@/lib/demo-guard";
+import { ActionEditorForm } from "@/lib/components/ActionEditorForm";
 import { MarkdownEditor } from "@/lib/components/MarkdownEditor";
 import { TimeZoneSelect } from "@/lib/components/TimeZoneSelect";
 import { getWorkspaceFeatureFlags } from "@/lib/workspace-feature-flags";
@@ -200,7 +201,8 @@ export default async function WorkspaceAddPage({
   if (!allowedActions.some((action) => action.kind === kind)) notFound();
 
   const needsProposals = kind === "action" || kind === "tension";
-  const needsMembers = kind === "tension"
+  const needsMembers = kind === "action"
+    || kind === "tension"
     || kind === "goal"
     || kind === "allocation"
     || kind === "role_assignment"
@@ -260,6 +262,28 @@ export default async function WorkspaceAddPage({
   const uploadDefaultSource = workspaceSubpath(returnUrl.pathname, workspaceId)?.startsWith("/settings")
     ? "settings-upload"
     : "brain-upload";
+  const actionMembers = members.map((member) => ({
+    id: member.id,
+    label: member.user.displayName ?? member.user.email,
+  }));
+  const actionEditorLabels = {
+    title: "Title",
+    notes: "Notes",
+    assignee: "Assignee",
+    assigneeNone: "No assignee",
+    submit: "Create action",
+    cancel: "Cancel",
+    priority: {
+      label: "Priority",
+      help: "Use Normal for ordinary follow-up, High or Urgent when it should rise above other work.",
+      none: "None",
+      low: "Low",
+      normal: "Normal",
+      high: "High",
+      urgent: "Urgent",
+      legacy: "Current custom priority P{priority}",
+    },
+  };
 
   async function createActionAndReturn(formData: FormData) {
     "use server";
@@ -595,11 +619,14 @@ export default async function WorkspaceAddPage({
         )}
 
         {kind === "action" && (
-          <form action={createActionAndReturn} className="stack nr-form-section">
-            {hiddenWorkspace(workspaceId)}
-            <label>Title<input name="title" required /></label>
-            <label>Notes<MarkdownEditor name="bodyMd" rows={5} /></label>
-            <label>Priority<input name="priority" type="number" min={0} defaultValue={0} /></label>
+          <ActionEditorForm
+            action={createActionAndReturn}
+            workspaceId={workspaceId}
+            members={actionMembers}
+            labels={actionEditorLabels}
+            priority={2}
+            cancelHref={returnTo}
+          >
             <label>
               Link to proposal
               <select name="proposalId" defaultValue="">
@@ -607,8 +634,7 @@ export default async function WorkspaceAddPage({
                 {activeProposals.map((proposal) => <option value={proposal.id} key={proposal.id}>{proposal.title}</option>)}
               </select>
             </label>
-            <div className="actions-inline"><button type="submit">Create action</button>{cancelLink(returnTo)}</div>
-          </form>
+          </ActionEditorForm>
         )}
 
         {kind === "tension" && (

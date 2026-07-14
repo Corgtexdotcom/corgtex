@@ -10,6 +10,8 @@ import {
   returnActionToDraftAction,
 } from "../actions";
 import { getTranslations } from "next-intl/server";
+import { ActionEditorForm } from "@/lib/components/ActionEditorForm";
+import { ConfirmSubmitButton } from "@/lib/components/ConfirmSubmitButton";
 import {
   ACTION_STATUS_FILTERS,
   ACTION_STATUS_META,
@@ -19,7 +21,6 @@ import {
   groupActionsByStatus,
   resolveActionStatusSearch,
 } from "./view-model";
-import { MarkdownEditor } from "@/lib/components/MarkdownEditor";
 import { MarkdownExcerpt } from "@/lib/components/MarkdownRenderer";
 import { ItemActions } from "@/lib/components/ui/ItemActions";
 import { WorkItemFilterControls, WorkItemToolbar } from "@/lib/components/WorkItemControls";
@@ -142,6 +143,25 @@ export default async function ActionsPage({
   };
 
   const memberName = (member: { user: { displayName: string | null; email: string } }) => member.user.displayName || member.user.email;
+  const actionMembers = members.map((member) => ({ id: member.id, label: memberName(member) }));
+  const actionEditorLabels = {
+    title: t("formTitle"),
+    notes: t("formNotes"),
+    assignee: t("formAssignee"),
+    assigneeNone: t("formAssigneeNone"),
+    submit: t("btnCreateAction"),
+    cancel: tCommon("cancel"),
+    priority: {
+      label: t("formPriority"),
+      help: t("priorityHelp"),
+      none: t("priorityNone"),
+      low: t("priorityLow"),
+      normal: t("priorityNormal"),
+      high: t("priorityHigh"),
+      urgent: t("priorityUrgent"),
+      legacy: t("priorityLegacy", { priority: "{priority}" }),
+    },
+  };
 
   function actionMoveLabel(status: ActionColumnStatus) {
     if (status === "DRAFT") return t("btnReturnToDraft");
@@ -246,28 +266,9 @@ export default async function ActionsPage({
     }
     if (canEditContent) {
       moreItems.push(
-        <details key="edit">
-          <summary className="nr-hide-marker nr-action-summary">
-            {t("btnEdit")}
-          </summary>
-          <form action={updateActionAction} className="action-menu-form">
-            <input type="hidden" name="workspaceId" value={workspaceId} />
-            <input type="hidden" name="actionId" value={action.id} />
-            <label>
-              {t("formTitle")}
-              <input name="title" defaultValue={action.title} required />
-            </label>
-            <label>
-              {t("formNotes")}
-              <MarkdownEditor name="bodyMd" defaultValue={action.bodyMd ?? ""} rows={5} />
-            </label>
-            <label>
-              {t("formPriority")}
-              <input name="priority" type="number" min={0} defaultValue={action.priority} />
-            </label>
-            <button type="submit" className="secondary small">{action.status === "DRAFT" ? t("btnSaveDraft") : tCommon("save")}</button>
-          </form>
-        </details>,
+        <a key="edit" className="secondary small" href={`/workspaces/${workspaceId}/actions/${action.id}/edit`}>
+          {t("btnEdit")}
+        </a>,
       );
     }
     if (moreItems.length > 0) moreItems.push(<div key="divider" className="action-menu-divider" />);
@@ -275,7 +276,9 @@ export default async function ActionsPage({
       <form key="delete" action={deleteActionAction}>
         <input type="hidden" name="workspaceId" value={workspaceId} />
         <input type="hidden" name="actionId" value={action.id} />
-        <button type="submit" className="danger">{t("btnDelete")}</button>
+        <ConfirmSubmitButton className="danger" confirmMessage={t("confirmArchive")}>
+          {t("btnDelete")}
+        </ConfirmSubmitButton>
       </form>,
     );
 
@@ -451,23 +454,15 @@ export default async function ActionsPage({
         <summary className="nr-hide-marker nr-kanban-add-trigger">
           {tWork("newDraftCard")}
         </summary>
-        <form action={createActionAction} className="stack nr-form-section nr-inline-draft-form">
-          <input type="hidden" name="workspaceId" value={workspaceId} />
+        <ActionEditorForm
+          action={createActionAction}
+          workspaceId={workspaceId}
+          priority={2}
+          members={actionMembers}
+          labels={actionEditorLabels}
+        >
           <input type="hidden" name="isPrivate" value="on" />
-          <label>
-            {t("formTitle")}
-            <input name="title" required />
-          </label>
-          <label>
-            {t("formNotes")}
-            <MarkdownEditor name="bodyMd" rows={4} />
-          </label>
-          <label>
-            {t("formPriority")}
-            <input name="priority" type="number" min={0} defaultValue={0} />
-          </label>
-          <button type="submit">{t("btnCreateAction")}</button>
-        </form>
+        </ActionEditorForm>
       </details>
     );
   }

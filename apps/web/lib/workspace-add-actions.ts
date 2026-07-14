@@ -259,7 +259,7 @@ export function getWorkspaceAddActions(context: WorkspaceAddActionContext): Work
         ...(canRecordMeetingsManually(context) ? [action("meeting_manual_recording")] : []),
       ];
     case "actions":
-      return [action("action")];
+      return (segments?.length ?? 0) > 1 ? [] : [action("action")];
     case "tensions":
       return [action("tension")];
     case "proposals":

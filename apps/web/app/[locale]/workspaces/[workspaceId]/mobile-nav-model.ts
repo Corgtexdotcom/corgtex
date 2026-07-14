@@ -24,6 +24,25 @@ export function isActiveWorkspacePath(pathname: string | null, workspaceId: stri
   return currentPath === fullHref || currentPath.startsWith(`${fullHref}/`);
 }
 
+export function shouldHideMobileBottomNavForWorkspacePath(
+  pathname: string | null,
+  workspaceId: string,
+  addKind?: string | null,
+) {
+  const currentPath = workspacePathname(pathname ?? "", workspaceId);
+  const addPath = navHref(workspaceId, "/add");
+  if (currentPath === addPath || currentPath === `${addPath}/`) {
+    return addKind === "action";
+  }
+
+  const actionsPath = navHref(workspaceId, "/actions");
+  const nestedActionPath = currentPath.startsWith(`${actionsPath}/`) ? currentPath.slice(actionsPath.length + 1) : "";
+  if (!nestedActionPath) return false;
+
+  const segments = nestedActionPath.split("/").filter(Boolean);
+  return segments.length === 1 || (segments.length === 2 && segments[1] === "edit");
+}
+
 export function buildMobileNavModel(
   navGroups: NavGroup[],
   options: { reserveMoreSlot?: boolean } = {},
