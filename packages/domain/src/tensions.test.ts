@@ -138,6 +138,55 @@ describe("tensions domain", () => {
     });
   });
 
+  it("creates a tension with a valid responsible person", async () => {
+    prismaMock.member.findFirst.mockResolvedValueOnce({ id: "responsible-member-1" });
+    prismaMock.tension.create.mockResolvedValueOnce({
+      id: "t-1",
+      workspaceId: "ws-1",
+      title: "Test tension",
+      assigneeMemberId: "responsible-member-1",
+    });
+    const { createTension } = await import("./tensions");
+
+    const result = await createTension(actor, {
+      workspaceId: "ws-1",
+      title: "Test tension",
+      assigneeMemberId: "responsible-member-1",
+    });
+
+    expect(result.assigneeMemberId).toBe("responsible-member-1");
+    expect(prismaMock.member.findFirst).toHaveBeenCalledWith({
+      where: expect.objectContaining({
+        id: "responsible-member-1",
+        workspaceId: "ws-1",
+        isActive: true,
+        NOT: expect.any(Array),
+      }),
+      select: { id: true },
+    });
+    expect(prismaMock.tension.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        assigneeMemberId: "responsible-member-1",
+      }),
+    });
+  });
+
+  it("rejects responsible people outside the active human workspace membership set", async () => {
+    prismaMock.member.findFirst.mockResolvedValueOnce(null);
+    const { createTension } = await import("./tensions");
+
+    await expect(createTension(actor, {
+      workspaceId: "ws-1",
+      title: "Test tension",
+      assigneeMemberId: "system-member",
+    })).rejects.toMatchObject({
+      status: 400,
+      code: "INVALID_INPUT",
+    });
+
+    expect(prismaMock.tension.create).not.toHaveBeenCalled();
+  });
+
   it("creates unchecked-private tensions as open public records", async () => {
     prismaMock.tension.create.mockResolvedValueOnce({
       id: "t-public",
@@ -263,6 +312,51 @@ describe("tensions domain", () => {
     expect(prismaMock.tension.update).toHaveBeenCalledWith({
       where: { id: "t-1" },
       data: { raisedByMemberId: "raised-member-1", version: 2 },
+    });
+  });
+
+  it("updates a tension responsible person", async () => {
+    prismaMock.tension.findUnique.mockResolvedValueOnce({
+      id: "t-1",
+      workspaceId: "ws-1",
+      authorUserId: "u-1",
+      title: "Test tension",
+      status: "DRAFT",
+      version: 1,
+      publishedAt: null,
+      archivedAt: null,
+      assigneeMemberId: null,
+      raisedByMemberId: null,
+    });
+    prismaMock.member.findFirst.mockResolvedValueOnce({ id: "responsible-member-1" });
+    const { updateTension } = await import("./tensions");
+
+    await updateTension(actor, {
+      workspaceId: "ws-1",
+      tensionId: "t-1",
+      assigneeMemberId: "responsible-member-1",
+    });
+
+    expect(prismaMock.member.findFirst).toHaveBeenCalledWith({
+      where: expect.objectContaining({
+        id: "responsible-member-1",
+        workspaceId: "ws-1",
+        isActive: true,
+        NOT: expect.any(Array),
+      }),
+      select: { id: true },
+    });
+    expect(prismaMock.workItemVersion.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        entityType: "Tension",
+        entityId: "t-1",
+        version: 1,
+        changedFields: ["assigneeMemberId"],
+      }),
+    }));
+    expect(prismaMock.tension.update).toHaveBeenCalledWith({
+      where: { id: "t-1" },
+      data: { assigneeMemberId: "responsible-member-1", version: 2 },
     });
   });
 
@@ -718,6 +812,7 @@ describe("tensions domain", () => {
       include: {
         author: { select: { id: true, displayName: true, email: true } },
         circle: { select: { id: true, name: true } },
+        assigneeMember: { include: { user: { select: { displayName: true, email: true } } } },
         raisedByMember: { include: { user: { select: { displayName: true, email: true } } } },
         proposal: { select: { id: true, title: true, status: true } },
         upvotes: true,

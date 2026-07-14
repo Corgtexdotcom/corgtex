@@ -40,6 +40,7 @@ export async function createTensionAction(formData: FormData) {
     title: asString(formData, "title"),
     bodyMd: asOptional(formData, "bodyMd"),
     proposalId: asOptional(formData, "proposalId"),
+    assigneeMemberId: asOptional(formData, "assigneeMemberId"),
     raisedByMemberId: asOptional(formData, "raisedByMemberId"),
     priority: asOptionalInt(formData, "priority"),
     isPrivate: formData.get("isPrivate") === "on",
@@ -110,6 +111,7 @@ export async function updateTensionAction(formData: FormData) {
     status: status ?? undefined,
     resolvedVia: asOptional(formData, "resolvedVia") ?? undefined,
     evidenceDocumentIds,
+    assigneeMemberId: formData.has("assigneeMemberId") ? asOptional(formData, "assigneeMemberId") : undefined,
     raisedByMemberId: formData.has("raisedByMemberId") ? asOptional(formData, "raisedByMemberId") : undefined,
     priority: formData.has("priority") ? Number.parseInt(asString(formData, "priority"), 10) : undefined,
   });

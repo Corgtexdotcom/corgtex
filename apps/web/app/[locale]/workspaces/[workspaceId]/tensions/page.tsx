@@ -13,10 +13,13 @@ import {
 import { MarkdownEditor } from "@/lib/components/MarkdownEditor";
 import { MarkdownExcerpt } from "@/lib/components/MarkdownRenderer";
 import { ItemActions } from "@/lib/components/ui/ItemActions";
+import { WorkItemMemberSelect, type WorkItemMemberOption } from "@/lib/components/WorkItemMemberSelect";
 import { WorkItemFilterControls, WorkItemToolbar } from "@/lib/components/WorkItemControls";
 import { WorkItemKanbanBoard, type WorkItemKanbanColumn } from "@/lib/components/WorkItemKanbanBoard";
+import { WorkItemPrioritySelect } from "@/lib/components/WorkItemPrioritySelect";
 import { WorkItemResolutionDialog } from "@/lib/components/WorkItemResolutionDialog";
 import { WorkItemTable, type WorkItemTableColumn, type WorkItemTableRow } from "@/lib/components/WorkItemTable";
+import { formatWorkItemPriority, type WorkItemPriorityLabels } from "@/lib/work-item-priority";
 import {
   buildWorkItemQuery,
   normalizeVisibleWorkItemColumns,
@@ -115,6 +118,14 @@ export default async function TensionsPage({
   };
 
   const memberName = (member: { user: { displayName: string | null; email: string } }) => member.user.displayName || member.user.email;
+  const memberOptions: WorkItemMemberOption[] = members.map((member) => ({ id: member.id, label: memberName(member) }));
+  const priorityLabels = {
+    3: tWork("priorityUrgent"),
+    2: tWork("priorityImportant"),
+    1: tWork("priorityMedium"),
+    0: tWork("priorityLow"),
+  } satisfies WorkItemPriorityLabels;
+  const priorityText = (priority: number | null | undefined) => formatWorkItemPriority(priority, priorityLabels);
   const canManageTension = (tension: { authorUserId: string }) => actor.kind === "agent"
     || membership?.role === "ADMIN"
     || (actor.kind === "user" && tension.authorUserId === actor.user.id);
@@ -231,8 +242,8 @@ export default async function TensionsPage({
           <span className="action-menu-label">{t("btnEditRaisedBy")}</span>
           <select name="raisedByMemberId" defaultValue={tension.raisedByMemberId || ""} aria-label={t("formRaisedBy")}>
             <option value="">{t("formRaisedByNone")}</option>
-            {members.map((member) => (
-              <option value={member.id} key={member.id}>{memberName(member)}</option>
+            {memberOptions.map((member) => (
+              <option value={member.id} key={member.id}>{member.label}</option>
             ))}
           </select>
           <button type="submit" className="secondary small">{t("btnSaveRaisedBy")}</button>
@@ -254,10 +265,14 @@ export default async function TensionsPage({
               {t("formDescription")}
               <MarkdownEditor name="bodyMd" defaultValue={tension.bodyMd ?? ""} rows={5} />
             </label>
-            <label>
-              {t("formPriority")}
-              <input name="priority" type="number" min={0} defaultValue={tension.priority} />
-            </label>
+            <WorkItemMemberSelect
+              name="assigneeMemberId"
+              label={t("formResponsiblePerson")}
+              noneLabel={t("formResponsiblePersonNone")}
+              members={memberOptions}
+              defaultValue={tension.assigneeMemberId}
+            />
+            <WorkItemPrioritySelect label={t("formPriority")} labels={priorityLabels} defaultValue={tension.priority} />
             <button type="submit" className="secondary small">{tension.status === "DRAFT" ? t("btnSaveDraft") : tCommon("save")}</button>
           </form>
         </details>,
@@ -279,6 +294,7 @@ export default async function TensionsPage({
     const detailHref = `/workspaces/${workspaceId}/tensions/${tension.id}`;
     const authorName = tension.author.displayName || tension.author.email || t("authorUnknown");
     const raisedByName = tension.raisedByMember ? memberName(tension.raisedByMember) : null;
+    const responsibleName = tension.assigneeMember ? memberName(tension.assigneeMember) : null;
     const openedDate = tension.publishedAt ? new Date(tension.publishedAt).toLocaleDateString() : null;
     const closedDate = tension.resolvedAt ? new Date(tension.resolvedAt).toLocaleDateString() : null;
     const inputRequestCount = activeInputRequestCounts.get(tension.id) ?? 0;
@@ -306,7 +322,8 @@ export default async function TensionsPage({
           <div className="nr-item-meta" style={{ marginTop: 8 }}>
             {t("createdByMeta", { name: authorName })}
             {raisedByName ? ` · ${t("raisedByMeta", { name: raisedByName })}` : ""}
-            {` · ${ageText(tension.createdAt)} · ${t("upvotes", { count: tension.upvotes.length })} · ${t("priorityN", { priority: tension.priority })}`}
+            {responsibleName ? ` · ${t("responsiblePersonMeta", { name: responsibleName })}` : ""}
+            {` · ${ageText(tension.createdAt)} · ${t("upvotes", { count: tension.upvotes.length })} · ${priorityText(tension.priority)}`}
             {tension.circle ? ` · ${tension.circle.name}` : ""}
             {openedDate ? ` · ${t("openedOnMeta", { date: openedDate })}` : ""}
             {closedDate ? ` · ${t("closedOnMeta", { date: closedDate })}` : ""}
@@ -352,7 +369,7 @@ export default async function TensionsPage({
   const tensionTableColumns: WorkItemTableColumn[] = [
     { id: "item", label: tWork("tableItem"), cellClassName: "nr-work-item-table-main" },
     { id: "status", label: tWork("tableStatus") },
-    { id: "owner", label: tWork("tableOwner") },
+    { id: "owner", label: t("formResponsiblePerson") },
     { id: "dates", label: tWork("tableDates") },
     { id: "priority", label: t("formPriority"), align: "right" },
     { id: "links", label: tWork("tableLinks") },
@@ -363,6 +380,7 @@ export default async function TensionsPage({
     const detailHref = `/workspaces/${workspaceId}/tensions/${tension.id}`;
     const authorName = tension.author.displayName || tension.author.email || t("authorUnknown");
     const raisedByName = tension.raisedByMember ? memberName(tension.raisedByMember) : null;
+    const responsibleName = tension.assigneeMember ? memberName(tension.assigneeMember) : null;
     const openedDate = tension.publishedAt ? new Date(tension.publishedAt).toLocaleDateString() : null;
     const closedDate = tension.resolvedAt ? new Date(tension.resolvedAt).toLocaleDateString() : null;
     const inputRequestCount = activeInputRequestCounts.get(tension.id) ?? 0;
@@ -390,6 +408,7 @@ export default async function TensionsPage({
           <div className="nr-work-item-table-meta">
             <div>{t("createdByMeta", { name: authorName })}</div>
             {raisedByName && <div>{t("raisedByMeta", { name: raisedByName })}</div>}
+            {responsibleName && <div>{t("responsiblePersonMeta", { name: responsibleName })}</div>}
             {tension.circle && <div>{tension.circle.name}</div>}
           </div>
         ),
@@ -400,7 +419,7 @@ export default async function TensionsPage({
             {closedDate && <div>{t("closedOnMeta", { date: closedDate })}</div>}
           </div>
         ),
-        priority: tWork("priorityN", { priority: tension.priority }),
+        priority: priorityText(tension.priority),
         links: (
           <div className="nr-work-item-table-meta nr-work-item-table-tags">
             {tension.version > 1 ? (
@@ -453,10 +472,13 @@ export default async function TensionsPage({
             {t("formDescription")}
             <MarkdownEditor name="bodyMd" rows={4} />
           </label>
-          <label>
-            {t("formPriority")}
-            <input name="priority" type="number" min={0} defaultValue={0} />
-          </label>
+          <WorkItemMemberSelect
+            name="assigneeMemberId"
+            label={t("formResponsiblePerson")}
+            noneLabel={t("formResponsiblePersonNone")}
+            members={memberOptions}
+          />
+          <WorkItemPrioritySelect label={t("formPriority")} labels={priorityLabels} defaultValue={0} />
           <button type="submit">{t("btnCreateTension")}</button>
         </form>
       </details>

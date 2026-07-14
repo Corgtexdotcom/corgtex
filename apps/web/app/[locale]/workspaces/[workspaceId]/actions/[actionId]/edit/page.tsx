@@ -6,6 +6,7 @@ import { ActionEditorForm } from "@/lib/components/ActionEditorForm";
 import { UnavailableItemStatus } from "@/lib/components/UnavailableItemStatus";
 import { updateActionAction } from "../../../actions";
 import { getTranslations } from "next-intl/server";
+import type { WorkItemPriorityLabels } from "@/lib/work-item-priority";
 
 export const dynamic = "force-dynamic";
 
@@ -18,6 +19,7 @@ export default async function ActionEditPage({
   const actor = await requirePageActor();
   const t = await getTranslations("actions");
   const tCommon = await getTranslations("common");
+  const tWork = await getTranslations("workItems");
   const membership = await requireWorkspaceMembership({ actor, workspaceId });
   let action: Awaited<ReturnType<typeof getAction>>;
   try {
@@ -60,6 +62,12 @@ export default async function ActionEditPage({
     id: member.id,
     label: member.user.displayName ?? member.user.email,
   }));
+  const priorityLabels = {
+    3: tWork("priorityUrgent"),
+    2: tWork("priorityImportant"),
+    1: tWork("priorityMedium"),
+    0: tWork("priorityLow"),
+  } satisfies WorkItemPriorityLabels;
 
   async function updateActionAndReturn(formData: FormData) {
     "use server";
@@ -74,16 +82,8 @@ export default async function ActionEditPage({
     assigneeNone: t("formAssigneeNone"),
     submit: action.status === "DRAFT" ? t("btnSaveDraft") : tCommon("save"),
     cancel: tCommon("cancel"),
-    priority: {
-      label: t("formPriority"),
-      help: t("priorityHelp"),
-      none: t("priorityNone"),
-      low: t("priorityLow"),
-      normal: t("priorityNormal"),
-      high: t("priorityHigh"),
-      urgent: t("priorityUrgent"),
-      legacy: t("priorityLegacy", { priority: "{priority}" }),
-    },
+    priorityLabel: t("formPriority"),
+    priority: priorityLabels,
   };
 
   return (

@@ -1,11 +1,10 @@
 import type { ReactNode } from "react";
-import { ActionPrioritySelect, type ActionPriorityLabels } from "@/lib/components/ActionPrioritySelect";
 import { MarkdownEditor } from "@/lib/components/MarkdownEditor";
+import { WorkItemMemberSelect, type WorkItemMemberOption } from "@/lib/components/WorkItemMemberSelect";
+import { WorkItemPrioritySelect } from "@/lib/components/WorkItemPrioritySelect";
+import type { WorkItemPriorityLabels } from "@/lib/work-item-priority";
 
-export type ActionEditorMemberOption = {
-  id: string;
-  label: string;
-};
+export type ActionEditorMemberOption = WorkItemMemberOption;
 
 export type ActionEditorLabels = {
   title: string;
@@ -14,7 +13,8 @@ export type ActionEditorLabels = {
   assigneeNone: string;
   submit: string;
   cancel: string;
-  priority: ActionPriorityLabels;
+  priorityLabel: string;
+  priority: WorkItemPriorityLabels;
 };
 
 export function ActionEditorForm({
@@ -54,16 +54,14 @@ export function ActionEditorForm({
         {labels.notes}
         <MarkdownEditor name="bodyMd" defaultValue={bodyMd ?? ""} rows={6} />
       </label>
-      <label>
-        {labels.assignee}
-        <select name="assigneeMemberId" defaultValue={assigneeMemberId ?? ""}>
-          <option value="">{labels.assigneeNone}</option>
-          {members.map((member) => (
-            <option value={member.id} key={member.id}>{member.label}</option>
-          ))}
-        </select>
-      </label>
-      <ActionPrioritySelect defaultValue={priority ?? 2} labels={labels.priority} />
+      <WorkItemMemberSelect
+        name="assigneeMemberId"
+        label={labels.assignee}
+        noneLabel={labels.assigneeNone}
+        members={members}
+        defaultValue={assigneeMemberId}
+      />
+      <WorkItemPrioritySelect label={labels.priorityLabel} defaultValue={priority ?? 1} labels={labels.priority} />
       {children}
       <div className="actions-inline">
         <button type="submit">{labels.submit}</button>

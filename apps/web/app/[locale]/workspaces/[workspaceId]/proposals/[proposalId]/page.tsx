@@ -15,6 +15,7 @@ import { canOpenPrivateDraft } from "@/lib/governance-open-guards";
 import { attachProposalExternalResourceAction, postDeliberationEntryAction, requestProposalAdviceAction, resolveDeliberationEntryAction, resolveProposalAction, returnProposalToDraftAction, submitProposalAction, updateDeliberationEntryAction, updateProposalAction } from "../actions";
 import { ProposalDraftFields } from "../ProposalDraftFields";
 import { getFormatter, getTranslations } from "next-intl/server";
+import { formatWorkItemPriority, type WorkItemPriorityLabels } from "@/lib/work-item-priority";
 
 export const dynamic = "force-dynamic";
 
@@ -123,6 +124,13 @@ export default async function ProposalDetailPage({
   })();
 
   const authorName = proposal.author?.displayName || proposal.author?.email || t("authorUnknown");
+  const priorityLabels = {
+    3: tWork("priorityUrgent"),
+    2: tWork("priorityImportant"),
+    1: tWork("priorityMedium"),
+    0: tWork("priorityLow"),
+  } satisfies WorkItemPriorityLabels;
+  const priorityText = formatWorkItemPriority(proposal.priority, priorityLabels);
   const isAuthor = proposal.authorUserId === (actor.kind === "user" ? actor.user.id : "");
   const isAdmin = actor.kind === "agent" || membership?.role === "ADMIN";
   const actorUserId = actor.kind === "user" ? actor.user.id : null;
@@ -188,7 +196,7 @@ export default async function ProposalDetailPage({
             {proposal.status === "RESOLVED" && proposal.resolutionOutcome ? `${proposal.status} · ${proposal.resolutionOutcome.replace("_", " ")}` : proposal.status}
           </span>
           <span>·</span>
-          <span>{tWork("priorityN", { priority: proposal.priority })}</span>
+          <span>{priorityText}</span>
           <span>·</span>
           <span>
             {versionHistory.versions.length > 0 ? (

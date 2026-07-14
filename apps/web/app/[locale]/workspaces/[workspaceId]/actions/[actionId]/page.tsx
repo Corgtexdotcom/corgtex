@@ -13,6 +13,7 @@ import { getDeliberationTargets } from "@/lib/deliberation-targets";
 import { canOpenPrivateDraft } from "@/lib/governance-open-guards";
 import { attachActionExternalResourceAction, deleteActionAction, postActionDeliberationAction, publishActionAction, resolveActionDeliberationAction, returnActionToDraftAction, updateActionAction, updateActionDeliberationAction } from "../../actions";
 import { getTranslations } from "next-intl/server";
+import { formatWorkItemPriority, type WorkItemPriorityLabels } from "@/lib/work-item-priority";
 
 export const dynamic = "force-dynamic";
 
@@ -101,6 +102,13 @@ export default async function ActionDetailPage({
     IN_PROGRESS: t("statusInProgress"),
     COMPLETED: t("statusCompleted"),
   }[action.status];
+  const priorityLabels = {
+    3: tWork("priorityUrgent"),
+    2: tWork("priorityImportant"),
+    1: tWork("priorityMedium"),
+    0: tWork("priorityLow"),
+  } satisfies WorkItemPriorityLabels;
+  const priorityText = formatWorkItemPriority(action.priority, priorityLabels);
   const authorName = action.author?.displayName || action.author?.email || "Unknown";
   const assigneeName = action.assigneeMember?.user?.displayName || action.assigneeMember?.user?.email || null;
   const canManage = !isArchived && (actor.kind === "agent"
@@ -142,7 +150,7 @@ export default async function ActionDetailPage({
           <span className={`tag ${statusClass}`}>{statusLabel}</span>
           <span>{t("metaCreator", { name: authorName })}</span>
           {assigneeName && <span>{t("metaAssignee", { name: assigneeName })}</span>}
-          <span>{tWork("priorityN", { priority: action.priority })}</span>
+          <span>{priorityText}</span>
           <span>{new Date(action.createdAt).toLocaleDateString()}</span>
           <span>
             {versionHistory.versions.length > 0 ? (

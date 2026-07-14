@@ -6,6 +6,7 @@ import { WorkItemFilterControls, WorkItemToolbar } from "@/lib/components/WorkIt
 import { WorkItemKanbanBoard, type WorkItemKanbanColumn } from "@/lib/components/WorkItemKanbanBoard";
 import { WorkItemResolutionDialog } from "@/lib/components/WorkItemResolutionDialog";
 import { WorkItemTable, type WorkItemTableColumn, type WorkItemTableRow } from "@/lib/components/WorkItemTable";
+import { formatWorkItemPriority, type WorkItemPriorityLabels } from "@/lib/work-item-priority";
 import {
   buildWorkItemQuery,
   normalizeVisibleWorkItemColumns,
@@ -70,6 +71,13 @@ export default async function ProposalsPage({
     || membership?.role === "ADMIN"
     || (actor.kind === "user" && proposal.authorUserId === actor.user.id);
   const canResolveProposal = actor.kind === "agent" || Boolean(membership);
+  const priorityLabels = {
+    3: tWork("priorityUrgent"),
+    2: tWork("priorityImportant"),
+    1: tWork("priorityMedium"),
+    0: tWork("priorityLow"),
+  } satisfies WorkItemPriorityLabels;
+  const priorityText = (priority: number | null | undefined) => formatWorkItemPriority(priority, priorityLabels);
   const activeProposals = proposals.filter((proposal) => !proposal.archivedAt);
 
   const groupedProposals = {
@@ -276,7 +284,7 @@ export default async function ProposalsPage({
           </div>
           <MarkdownExcerpt markdown={proposal.summary ?? proposal.bodyMd} maxLength={compact ? 120 : 180} as="div" className="nr-excerpt" />
           <div className="nr-item-meta mt-2">
-            {proposal.author.displayName || proposal.author.email} · {new Date(proposal.createdAt).toLocaleDateString()} · {tWork("priorityN", { priority: proposal.priority })}
+            {proposal.author.displayName || proposal.author.email} · {new Date(proposal.createdAt).toLocaleDateString()} · {priorityText(proposal.priority)}
             {proposal.circle ? ` · ${proposal.circle.name}` : ""}
             {" · "}
             {proposal.version > 1 ? (
@@ -369,7 +377,7 @@ export default async function ProposalsPage({
           </div>
         ),
         created: <span className="nr-work-item-table-meta">{new Date(proposal.createdAt).toLocaleDateString()}</span>,
-        priority: tWork("priorityN", { priority: proposal.priority }),
+        priority: priorityText(proposal.priority),
         links: (
           <div className="nr-work-item-table-meta nr-work-item-table-tags">
             {proposal.version > 1 ? (

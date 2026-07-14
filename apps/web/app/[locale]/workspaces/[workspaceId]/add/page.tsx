@@ -28,6 +28,9 @@ import { enforceDemoGuard } from "@/lib/demo-guard";
 import { ActionEditorForm } from "@/lib/components/ActionEditorForm";
 import { MarkdownEditor } from "@/lib/components/MarkdownEditor";
 import { TimeZoneSelect } from "@/lib/components/TimeZoneSelect";
+import { WorkItemMemberSelect, type WorkItemMemberOption } from "@/lib/components/WorkItemMemberSelect";
+import { WorkItemPrioritySelect } from "@/lib/components/WorkItemPrioritySelect";
+import { DEFAULT_WORK_ITEM_PRIORITY_LABELS } from "@/lib/work-item-priority";
 import { getWorkspaceFeatureFlags } from "@/lib/workspace-feature-flags";
 import {
   DEFAULT_MEETING_DURATION_MINUTES,
@@ -244,6 +247,10 @@ export default async function WorkspaceAddPage({
 
   const proposals = proposalsResult.items;
   const activeProposals = proposals.filter((proposal) => proposal.status === "DRAFT" || proposal.status === "OPEN");
+  const memberOptions: WorkItemMemberOption[] = members.map((member) => ({
+    id: member.id,
+    label: member.user.displayName ?? member.user.email,
+  }));
   const contacts = contactsResult.items;
   const accounts = accountsResult.items;
   const deals = dealsResult.items;
@@ -275,16 +282,8 @@ export default async function WorkspaceAddPage({
     assigneeNone: "No assignee",
     submit: "Create action",
     cancel: "Cancel",
-    priority: {
-      label: "Priority",
-      help: "Use Normal for ordinary follow-up, High or Urgent when it should rise above other work.",
-      none: "None",
-      low: "Low",
-      normal: "Normal",
-      high: "High",
-      urgent: "Urgent",
-      legacy: "Current custom priority P{priority}",
-    },
+    priorityLabel: "Priority",
+    priority: DEFAULT_WORK_ITEM_PRIORITY_LABELS,
   };
 
   async function createActionAndReturn(formData: FormData) {
@@ -626,7 +625,7 @@ export default async function WorkspaceAddPage({
             workspaceId={workspaceId}
             members={actionMembers}
             labels={actionEditorLabels}
-            priority={2}
+            priority={1}
             cancelHref={returnTo}
           >
             <label>
@@ -644,7 +643,13 @@ export default async function WorkspaceAddPage({
             {hiddenWorkspace(workspaceId)}
             <label>Title<input name="title" required /></label>
             <label>Description<MarkdownEditor name="bodyMd" rows={5} /></label>
-            <label>Priority<input name="priority" type="number" min={0} defaultValue={0} /></label>
+            <WorkItemMemberSelect
+              name="assigneeMemberId"
+              label="Responsible person"
+              noneLabel="No responsible person"
+              members={memberOptions}
+            />
+            <WorkItemPrioritySelect label="Priority" labels={DEFAULT_WORK_ITEM_PRIORITY_LABELS} defaultValue={0} />
             <label>
               Raised by
               <select name="raisedByMemberId" defaultValue="">
@@ -673,7 +678,7 @@ export default async function WorkspaceAddPage({
             <label>Title<input name="title" required /></label>
             <label>Summary<input name="summary" /></label>
             <label>Body<MarkdownEditor name="bodyMd" required rows={8} /></label>
-            <label>Priority<input name="priority" type="number" min={0} defaultValue={0} /></label>
+            <WorkItemPrioritySelect label="Priority" labels={DEFAULT_WORK_ITEM_PRIORITY_LABELS} defaultValue={0} />
             <label style={{ display: "flex", alignItems: "center", flexDirection: "row", gap: 8 }}>
               <input type="checkbox" name="isPrivate" defaultChecked style={{ width: "auto" }} />
               Private draft

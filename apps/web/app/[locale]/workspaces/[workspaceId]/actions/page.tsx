@@ -34,6 +34,7 @@ import {
   resolveWorkItemFilters,
   toggleWorkItemColumnVisibility,
 } from "@/lib/work-item-view";
+import { formatWorkItemPriority, type WorkItemPriorityLabels } from "@/lib/work-item-priority";
 
 export const dynamic = "force-dynamic";
 
@@ -144,6 +145,13 @@ export default async function ActionsPage({
 
   const memberName = (member: { user: { displayName: string | null; email: string } }) => member.user.displayName || member.user.email;
   const actionMembers = members.map((member) => ({ id: member.id, label: memberName(member) }));
+  const priorityLabels = {
+    3: tWork("priorityUrgent"),
+    2: tWork("priorityImportant"),
+    1: tWork("priorityMedium"),
+    0: tWork("priorityLow"),
+  } satisfies WorkItemPriorityLabels;
+  const priorityText = (priority: number | null | undefined) => formatWorkItemPriority(priority, priorityLabels);
   const actionEditorLabels = {
     title: t("formTitle"),
     notes: t("formNotes"),
@@ -151,16 +159,8 @@ export default async function ActionsPage({
     assigneeNone: t("formAssigneeNone"),
     submit: t("btnCreateAction"),
     cancel: tCommon("cancel"),
-    priority: {
-      label: t("formPriority"),
-      help: t("priorityHelp"),
-      none: t("priorityNone"),
-      low: t("priorityLow"),
-      normal: t("priorityNormal"),
-      high: t("priorityHigh"),
-      urgent: t("priorityUrgent"),
-      legacy: t("priorityLegacy", { priority: "{priority}" }),
-    },
+    priorityLabel: t("formPriority"),
+    priority: priorityLabels,
   };
 
   function actionMoveLabel(status: ActionColumnStatus) {
@@ -311,7 +311,7 @@ export default async function ActionsPage({
             {t("metaCreator", { name: authorName })}
             {createdAge ? ` · ${createdAge}` : ""}
             {assigneeName ? ` · ${t("metaAssignee", { name: assigneeName })}` : ""}
-            {` · ${tWork("priorityN", { priority: action.priority })}`}
+            {` · ${priorityText(action.priority)}`}
             {action.circle ? ` · ${action.circle.name}` : ""}
             {dueDate ? ` · ${t("metaDue", { date: dueDate })}` : ""}
             {action.proposal?.title ? ` · ${t("metaLinkedToProposal", { title: action.proposal.title })}` : ""}
@@ -356,7 +356,7 @@ export default async function ActionsPage({
   const actionTableColumns: WorkItemTableColumn[] = [
     { id: "item", label: tWork("tableItem"), cellClassName: "nr-work-item-table-main" },
     { id: "status", label: tWork("tableStatus") },
-    { id: "owner", label: tWork("tableOwner") },
+    { id: "owner", label: t("formAssignee") },
     { id: "dates", label: tWork("tableDates") },
     { id: "priority", label: t("formPriority"), align: "right" },
     { id: "links", label: tWork("tableLinks") },
@@ -415,7 +415,7 @@ export default async function ActionsPage({
             {dueDate && <div>{t("metaDue", { date: dueDate })}</div>}
           </div>
         ),
-        priority: tWork("priorityN", { priority: action.priority }),
+        priority: priorityText(action.priority),
         links: (
           <div className="nr-work-item-table-meta nr-work-item-table-tags">
             {action.version > 1 ? (
@@ -457,7 +457,7 @@ export default async function ActionsPage({
         <ActionEditorForm
           action={createActionAction}
           workspaceId={workspaceId}
-          priority={2}
+          priority={1}
           members={actionMembers}
           labels={actionEditorLabels}
         >
