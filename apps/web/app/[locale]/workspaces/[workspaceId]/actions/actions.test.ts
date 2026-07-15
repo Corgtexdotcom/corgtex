@@ -10,6 +10,7 @@ const actor = {
   },
 };
 
+const createAdviceRequest = vi.fn();
 const createAction = vi.fn();
 const deleteAction = vi.fn();
 const enforceDemoGuard = vi.fn();
@@ -30,6 +31,7 @@ vi.mock("@/lib/auth", () => ({
 }));
 
 vi.mock("@corgtex/domain", () => ({
+  createAdviceRequest,
   createAction,
   deleteAction,
   postDeliberationEntry,
@@ -130,6 +132,60 @@ describe("action item server actions", () => {
       bodyMd: "Needs a clearer owner.",
       targetMemberId: "member-1",
       targetCircleId: undefined,
+      adviceRequestId: undefined,
     });
+  });
+
+  it("creates action input requests for selected people", async () => {
+    const { requestActionInputAction } = await import("./actions");
+    const formData = new FormData();
+    formData.set("workspaceId", "workspace-1");
+    formData.set("actionId", "action-1");
+    formData.set("audienceType", "MEMBERS");
+    formData.append("memberIds", "member-1");
+    formData.append("memberIds", "member-2");
+    formData.set("targetCircleId", "circle-ignored");
+    formData.set("messageMd", "Please confirm whether this task is blocked.");
+    formData.set("deadlineAt", "2030-01-02T03:04");
+    formData.set("reminderAt", "2030-01-01T03:04");
+    formData.set("preferredChannel", "EMAIL");
+
+    await requestActionInputAction(formData);
+
+    expect(enforceDemoGuard).toHaveBeenCalledWith("workspace-1");
+    expect(createAdviceRequest).toHaveBeenCalledWith(actor, expect.objectContaining({
+      workspaceId: "workspace-1",
+      subjectType: "ACTION",
+      subjectId: "action-1",
+      audienceType: "MEMBERS",
+      memberIds: ["member-1", "member-2"],
+      targetCircleId: null,
+      messageMd: "Please confirm whether this task is blocked.",
+      preferredChannel: "EMAIL",
+    }));
+    const payload = createAdviceRequest.mock.calls[0][1];
+    expect(payload.deadlineAt).toEqual(new Date("2030-01-02T03:04"));
+    expect(payload.reminderAt).toEqual(new Date("2030-01-01T03:04"));
+  });
+
+  it("links action replies to an input request", async () => {
+    const { postActionDeliberationAction } = await import("./actions");
+    const formData = new FormData();
+    formData.set("workspaceId", "workspace-1");
+    formData.set("parentId", "action-1");
+    formData.set("entryType", "REACTION");
+    formData.set("bodyMd", "I added the missing renewal date.");
+    formData.set("adviceRequestId", "request-1");
+
+    await postActionDeliberationAction(formData);
+
+    expect(postDeliberationEntry).toHaveBeenCalledWith(actor, expect.objectContaining({
+      workspaceId: "workspace-1",
+      parentType: "ACTION",
+      parentId: "action-1",
+      entryType: "REACTION",
+      bodyMd: "I added the missing renewal date.",
+      adviceRequestId: "request-1",
+    }));
   });
 });
