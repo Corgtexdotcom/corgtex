@@ -135,6 +135,45 @@ describe("workspace briefing", () => {
     expect(prismaMock.brainArticle.findMany).toHaveBeenCalledWith(expect.objectContaining({
       where: expect.objectContaining({ workspaceId: "ws-1", isPrivate: false, archivedAt: null }),
     }));
+    expect(prismaMock.adviceRequest.findMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({ workspaceId: "ws-1", audienceType: "WORKSPACE" }),
+    }));
+  });
+
+  it("does not attach unrelated source refs to digest-derived sections", async () => {
+    const { buildWorkspaceBriefingFromDigest } = await import("./workspace-briefing");
+
+    const briefing = buildWorkspaceBriefingFromDigest({
+      workspaceId: "ws-1",
+      period: "DAILY",
+      dateKey: "2026-04-30",
+      title: "Daily Workspace Briefing - 2026-04-30",
+      generatedAt: new Date("2026-04-30T12:00:00.000Z"),
+      digest: {
+        intro: null,
+        sections: [{
+          id: "meetingBriefs",
+          title: "Meeting Briefs",
+          items: ["The meeting surfaced a customer-readiness decision."],
+        }],
+      },
+      candidates: [
+        baseCandidate({
+          sourceType: "ACTION",
+          sourceId: "action-1",
+          title: "Unrelated action",
+          href: "/workspaces/ws-1/actions/action-1",
+          sourceRefs: [{ type: "ACTION", id: "action-1", label: "Unrelated action", href: "/workspaces/ws-1/actions/action-1" }],
+        }),
+      ],
+    });
+
+    expect(briefing.items[0]).toEqual(expect.objectContaining({
+      kind: "MEETING",
+      title: "Meeting Briefs",
+      href: null,
+      sourceRefs: [],
+    }));
   });
 
   it("creates an honest quiet briefing when there are no candidates", async () => {

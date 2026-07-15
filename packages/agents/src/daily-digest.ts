@@ -1413,12 +1413,7 @@ Rules:
         }`,
         input: allTranscripts,
       })).output)
-    : normalizeNewspaperDigestPayload({
-        intro: "No major new operating activity was detected for this period.",
-        otherUpdates: [
-          "No new high-signal meetings, decisions, proposals, actions, tensions, shipped work, or source updates were found.",
-        ],
-      });
+    : normalizeNewspaperDigestPayload({});
 
   const briefingPeriod = workspaceBriefingPeriodFromCadence(cadence);
   const workspaceBriefing = digest.sections.length > 0

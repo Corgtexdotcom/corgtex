@@ -315,9 +315,8 @@ function pickCandidateForSection(
 ) {
   const expectedKind = sectionKind(sectionId);
   const direct = candidates.find((entry) => entry.sourceType === expectedKind && !used.has(`${entry.sourceType}:${entry.sourceId}`));
-  const fallback = direct ?? candidates.find((entry) => !used.has(`${entry.sourceType}:${entry.sourceId}`));
-  if (fallback) used.add(`${fallback.sourceType}:${fallback.sourceId}`);
-  return fallback ?? null;
+  if (direct) used.add(`${direct.sourceType}:${direct.sourceId}`);
+  return direct ?? null;
 }
 
 export function buildWorkspaceBriefingFromDigest(params: {
@@ -625,6 +624,7 @@ export async function collectWorkspaceBriefingCandidates(params: {
     prisma.adviceRequest.findMany({
       where: {
         workspaceId: params.workspaceId,
+        audienceType: "WORKSPACE",
         OR: [
           { status: "ACTIVE" },
           { createdAt: { gte: params.since } },

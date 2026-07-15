@@ -266,24 +266,36 @@ vi.mock("@corgtex/domain", () => ({
     sourceRefs: [],
     sourceCounts: {},
   }),
-  buildWorkspaceBriefingFromCandidates: ({ title, period, dateKey }: any) => ({
+  buildWorkspaceBriefingFromCandidates: ({ title, period, dateKey, candidates }: any) => ({
     title,
     period,
     dateKey,
     generatedAt: "2026-04-30T12:00:00.000Z",
-    introMd: "This was a quiet period.",
-    items: [{
-      kind: "QUIET",
-      title: "No major operating changes found",
-      summaryMd: "No new high-signal updates were found.",
-      whyItMattersMd: "The briefing stays short.",
-      prominence: "lead",
-      sourceRefs: [],
-      href: null,
-      occurredAt: "2026-04-30T12:00:00.000Z",
-      confidence: 0.8,
-    }],
-    sourceRefs: [],
+    introMd: candidates.length > 0 ? "Here is what matters most." : "This was a quiet period.",
+    items: candidates.length > 0
+      ? candidates.map((candidate: any, index: number) => ({
+          kind: candidate.sourceType,
+          title: candidate.title,
+          summaryMd: candidate.summaryMd,
+          whyItMattersMd: candidate.whyItMattersMd ?? "Selected for the workspace briefing.",
+          prominence: index === 0 ? "lead" : "standard",
+          sourceRefs: candidate.sourceRefs ?? [],
+          href: candidate.href ?? null,
+          occurredAt: candidate.occurredAt instanceof Date ? candidate.occurredAt.toISOString() : "2026-04-30T12:00:00.000Z",
+          confidence: candidate.confidence ?? 0.8,
+        }))
+      : [{
+          kind: "QUIET",
+          title: "No major operating changes found",
+          summaryMd: "No new high-signal updates were found.",
+          whyItMattersMd: "The briefing stays short.",
+          prominence: "lead",
+          sourceRefs: [],
+          href: null,
+          occurredAt: "2026-04-30T12:00:00.000Z",
+          confidence: 0.8,
+        }],
+    sourceRefs: candidates.flatMap((candidate: any) => candidate.sourceRefs ?? []),
     sourceCounts: {},
   }),
   renderWorkspaceBriefingMarkdown: (briefing: any) => `# ${briefing.title}\n\n${briefing.items.map((item: any) => `- ${item.summaryMd}`).join("\n")}`,
@@ -1024,6 +1036,55 @@ describe("runDailyDigest", () => {
       memberId: "member-1",
       cadence: "WEEKLY",
       status: "SENT",
+    }));
+  });
+
+  it("uses collected briefing candidates when there are no transcript inputs", async () => {
+    collectWorkspaceBriefingCandidatesMock.mockResolvedValue([{
+      sourceType: "GOAL",
+      sourceId: "goal-1",
+      title: "Customer rollout goal needs attention",
+      summaryMd: "The customer rollout goal is active and should anchor the workspace briefing.",
+      whyItMattersMd: "This is durable operating context even when the day has no new transcript inputs.",
+      href: "/workspaces/workspace-1/goals/goal-1",
+      sourceRefs: [{
+        type: "GOAL",
+        id: "goal-1",
+        label: "Customer rollout goal",
+        href: "/workspaces/workspace-1/goals/goal-1",
+      }],
+      occurredAt: new Date("2026-04-30T10:00:00.000Z"),
+      updatedAt: new Date("2026-04-30T10:00:00.000Z"),
+      score: 17,
+      importanceScore: 4,
+      freshnessScore: 2,
+      actionabilityScore: 2,
+      strategicScore: 5,
+      evidenceScore: 2,
+      contextDepthScore: 2,
+      confidence: 0.86,
+    }]);
+
+    const { runDailyDigest } = await import("./daily-digest");
+    await runDailyDigest({
+      workspaceId: "workspace-1",
+      dateISO: "2026-04-30T12:00:00.000Z",
+    });
+
+    expect(extractMock.mock.calls.some(([request]) => request.instruction.startsWith("Generate a structured"))).toBe(false);
+    expect(upsertWorkspaceBriefingMock).toHaveBeenCalledWith(expect.objectContaining({
+      briefing: expect.objectContaining({
+        introMd: "Here is what matters most.",
+        items: [expect.objectContaining({
+          kind: "GOAL",
+          title: "Customer rollout goal needs attention",
+          summaryMd: "The customer rollout goal is active and should anchor the workspace briefing.",
+          href: "/workspaces/workspace-1/goals/goal-1",
+        })],
+      }),
+    }));
+    expect(sendEmailMock).toHaveBeenCalledWith(expect.objectContaining({
+      html: expect.stringContaining("customer rollout goal is active"),
     }));
   });
 
