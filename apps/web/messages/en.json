@@ -1437,6 +1437,7 @@
     "chooseTranscriptMeeting": "Choose meeting",
     "completedMeetings": "Completed meetings",
     "concerns": "Concerns: {count}",
+    "createNewTranscriptMeeting": "None of these - create a new meeting",
     "formDescription": "Description",
     "formDurationMinutes": "Duration (minutes)",
     "formInviteFile": "Calendar invite (.ics)",

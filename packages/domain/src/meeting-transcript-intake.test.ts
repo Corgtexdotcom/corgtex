@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const { modelGatewayMock, uploadMeetingTranscriptMock } = vi.hoisted(() => ({
+const { createMeetingMock, modelGatewayMock, uploadMeetingTranscriptMock } = vi.hoisted(() => ({
+  createMeetingMock: vi.fn(),
   modelGatewayMock: {
     extract: vi.fn(),
   },
@@ -12,6 +13,7 @@ vi.mock("@corgtex/models", () => ({
 }));
 
 vi.mock("./meetings", () => ({
+  createMeeting: createMeetingMock,
   uploadMeetingTranscript: uploadMeetingTranscriptMock,
 }));
 
@@ -129,5 +131,36 @@ describe("meeting transcript intake", () => {
         score: 0.52,
       }],
     });
+  });
+
+  it("creates a new meeting when candidate matches are explicitly rejected", async () => {
+    createMeetingMock.mockResolvedValueOnce({
+      id: "meeting-new",
+      title: "Weekly Tactical",
+    });
+    const { intakeMeetingTranscript } = await import("./meeting-transcript-intake");
+
+    await expect(intakeMeetingTranscript({
+      kind: "agent",
+      authProvider: "bootstrap",
+      label: "test-agent",
+      workspaceIds: ["workspace-1"],
+    }, {
+      workspaceId: "workspace-1",
+      title: "Weekly Tactical",
+      recordedAt: new Date("2026-05-17T10:00:00.000Z"),
+      source: "transcript-upload",
+      transcript: "Jan: Follow up next week.",
+      createNewMeeting: true,
+    })).resolves.toMatchObject({
+      status: "meeting_created",
+      meeting: { id: "meeting-new" },
+    });
+    expect(uploadMeetingTranscriptMock).not.toHaveBeenCalled();
+    expect(createMeetingMock).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+      workspaceId: "workspace-1",
+      title: "Weekly Tactical",
+      transcript: "Jan: Follow up next week.",
+    }));
   });
 });

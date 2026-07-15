@@ -334,6 +334,7 @@ export default async function MeetingDetailPage({
               submit: t("btnUploadTranscript"),
               retrySubmit: t("btnUploadTranscript"),
               chooseMeeting: t("chooseTranscriptMeeting"),
+              createNewMeeting: t("createNewTranscriptMeeting"),
               retryUpload: t("retryTranscriptUpload"),
             }}
           />

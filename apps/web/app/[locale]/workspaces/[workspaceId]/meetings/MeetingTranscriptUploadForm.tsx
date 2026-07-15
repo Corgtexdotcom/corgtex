@@ -30,9 +30,12 @@ type Labels = {
   submit: string;
   retrySubmit?: string;
   chooseMeeting?: string;
+  createNewMeeting?: string;
   retryUpload?: string;
   cancel?: string;
 };
+
+const CREATE_NEW_MEETING_CHOICE = "__create_new_meeting__";
 
 type Props = {
   workspaceId: string;
@@ -113,9 +116,12 @@ export function MeetingTranscriptUploadForm({
   );
   const stateTimeZone = fieldValue(state, defaultValues, "timeZone");
   const [selectedTimeZone, setSelectedTimeZone] = useState(stateTimeZone || undefined);
+  const [selectedMeetingChoice, setSelectedMeetingChoice] = useState<string | undefined>();
   const requiresMeetingChoice = state.status === "needs_clarification"
     && state.requiredFields?.includes("meetingId")
     && (state.candidates?.length ?? 0) > 0;
+  const creatingNewMeetingFromChoice = requiresMeetingChoice && selectedMeetingChoice === CREATE_NEW_MEETING_CHOICE;
+  const showDetailFields = !requiresMeetingChoice || creatingNewMeetingFromChoice;
   const requiresRecordedAt = state.status === "needs_clarification"
     && state.requiredFields?.includes("recordedAt");
   const mustRetryUpload = state.status === "needs_clarification" && state.retryRequiresTranscriptUpload;
@@ -141,6 +147,12 @@ export function MeetingTranscriptUploadForm({
   useEffect(() => {
     if (stateTimeZone) setSelectedTimeZone(stateTimeZone);
   }, [stateTimeZone]);
+
+  useEffect(() => {
+    if (state.status === "needs_clarification") {
+      setSelectedMeetingChoice(undefined);
+    }
+  }, [state.status, state.pendingTranscriptToken]);
 
   return (
     <form action={formAction} className={className} key={formKey} ref={formRef}>
@@ -179,22 +191,34 @@ export function MeetingTranscriptUploadForm({
                 name="meetingId"
                 value={candidate.meetingId}
                 required
+                onChange={() => setSelectedMeetingChoice(candidate.meetingId)}
                 style={{ width: "auto", marginTop: 3 }}
               />
               <span>{candidateLabel(candidate)}</span>
             </label>
           ))}
+          <label style={{ flexDirection: "row", alignItems: "flex-start", gap: 8 }}>
+            <input
+              type="radio"
+              name="meetingId"
+              value={CREATE_NEW_MEETING_CHOICE}
+              required
+              onChange={() => setSelectedMeetingChoice(CREATE_NEW_MEETING_CHOICE)}
+              style={{ width: "auto", marginTop: 3 }}
+            />
+            <span>{labels.createNewMeeting ?? "None of these - create a new meeting"}</span>
+          </label>
         </fieldset>
       ) : null}
 
-      {showTitle && !requiresMeetingChoice ? (
+      {showTitle && showDetailFields ? (
         <label>
           {labels.title ?? "Title"}
           <input name="title" defaultValue={fieldValue(state, defaultValues, "title")} />
         </label>
       ) : null}
 
-      {(showSource || showRecordedAt) && !requiresMeetingChoice ? (
+      {(showSource || showRecordedAt) && showDetailFields ? (
         <div className="actions-inline">
           {showSource ? (
             <label style={{ flex: 1 }}>
@@ -211,18 +235,18 @@ export function MeetingTranscriptUploadForm({
         </div>
       ) : null}
 
-      {requiresRecordedAt && requiresMeetingChoice ? (
+      {requiresRecordedAt && requiresMeetingChoice && !creatingNewMeetingFromChoice ? (
         <label>
           {labels.recordedAt ?? "Recorded at"}
           <input name="recordedAt" type="datetime-local" defaultValue={fieldValue(state, defaultValues, "recordedAt")} required />
         </label>
       ) : null}
 
-      {showTimeZone && !requiresMeetingChoice ? (
+      {showTimeZone && showDetailFields ? (
         <TimeZoneSelect value={selectedTimeZone} onValueChange={setSelectedTimeZone} />
       ) : null}
 
-      {showParticipants && !requiresMeetingChoice ? (
+      {showParticipants && showDetailFields ? (
         <label>
           {labels.participantEmails ?? "Participant emails"}
           <input
@@ -233,7 +257,7 @@ export function MeetingTranscriptUploadForm({
         </label>
       ) : null}
 
-      {showParticipantIds && !requiresMeetingChoice ? (
+      {showParticipantIds && showDetailFields ? (
         <label>
           {labels.participantIds ?? "Participant IDs"}
           <input
@@ -244,7 +268,7 @@ export function MeetingTranscriptUploadForm({
         </label>
       ) : null}
 
-      {(showGuidance && !requiresMeetingChoice) || (showGuidance && mustRetryUpload) ? (
+      {(showGuidance && showDetailFields) || (showGuidance && mustRetryUpload) ? (
         <label>
           {labels.ingestionGuidance ?? "Ingestion guidance"}
           <MarkdownEditor
@@ -258,14 +282,14 @@ export function MeetingTranscriptUploadForm({
         </label>
       ) : null}
 
-      {(showFile && !requiresMeetingChoice) || (showFile && mustRetryUpload) ? (
+      {(showFile && showDetailFields) || (showFile && mustRetryUpload) ? (
         <label>
           {labels.file ?? "Transcript file"}
           <input name="file" type="file" accept=".txt,.md,.csv,.json,.pdf,.docx" />
         </label>
       ) : null}
 
-      {(showTranscript && !requiresMeetingChoice) || (showTranscript && mustRetryUpload) ? (
+      {(showTranscript && showDetailFields) || (showTranscript && mustRetryUpload) ? (
         <label>
           {labels.transcript ?? "Transcript"}
           <textarea

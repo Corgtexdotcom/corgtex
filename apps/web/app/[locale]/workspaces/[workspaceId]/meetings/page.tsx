@@ -182,6 +182,7 @@ export default async function MeetingsPage({
           submit: t("btnUploadTranscript"),
           retrySubmit: t("btnUploadTranscript"),
           chooseMeeting: t("chooseTranscriptMeeting"),
+          createNewMeeting: t("createNewTranscriptMeeting"),
           retryUpload: t("retryTranscriptUpload"),
         }}
       />
@@ -342,11 +343,13 @@ export default async function MeetingsPage({
                 <ItemActions
                   moreLabel={tCommon("moreActions")}
                   primary={
-                    <Link className="link-button small" href={`/workspaces/${workspaceId}/meetings/${meeting.id}`}>
-                      {tCommon("btnView")}
-                    </Link>
+                    <>
+                      <Link className="link-button small" href={`/workspaces/${workspaceId}/meetings/${meeting.id}`}>
+                        {tCommon("btnView")}
+                      </Link>
+                      {renderTranscriptUploadMenu(meeting)}
+                    </>
                   }
-                  more={renderTranscriptUploadMenu(meeting)}
                 />
               </div>
             ))}
@@ -484,6 +487,7 @@ export default async function MeetingsPage({
                 submit: t("btnUploadTranscript"),
                 retrySubmit: t("btnUploadTranscript"),
                 chooseMeeting: t("chooseTranscriptMeeting"),
+                createNewMeeting: t("createNewTranscriptMeeting"),
                 retryUpload: t("retryTranscriptUpload"),
               }}
             />

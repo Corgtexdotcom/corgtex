@@ -33,6 +33,7 @@ import {
 } from "@/lib/meeting-timezone";
 
 const PENDING_TRANSCRIPT_TTL_SECONDS = 20 * 60;
+const CREATE_NEW_MEETING_CHOICE = "__create_new_meeting__";
 
 export type MeetingTranscriptActionCandidate = {
   meetingId: string;
@@ -113,6 +114,7 @@ type PendingTranscriptPayload = {
 
 type TranscriptUploadPayload = PendingTranscriptPayload & {
   meetingId: string | null;
+  createNewMeeting: boolean;
   pendingTranscriptToken: string | null;
   retryRequiresTranscriptUpload: boolean;
 };
@@ -198,6 +200,20 @@ function actionValuesFromPayload(payload: PendingTranscriptPayload): MeetingTran
     ingestionGuidanceMd: payload.ingestionGuidanceMd ?? undefined,
     participantIds: serializeFormList(payload.participantIds),
     participantEmails: serializeFormList(payload.participantEmails),
+  };
+}
+
+function actionValuesFromFormData(formData: FormData): MeetingTranscriptActionValues {
+  return {
+    title: optionalFormString(formData, "title") ?? undefined,
+    source: optionalFormString(formData, "source") ?? undefined,
+    recordedAt: optionalFormString(formData, "recordedAt") ?? undefined,
+    timeZone: optionalFormString(formData, "timeZone") ?? undefined,
+    transcript: optionalFormString(formData, "transcript") ?? undefined,
+    summaryMd: optionalFormString(formData, "summaryMd") ?? undefined,
+    ingestionGuidanceMd: optionalFormString(formData, "ingestionGuidanceMd") ?? undefined,
+    participantIds: optionalFormString(formData, "participantIds") ?? undefined,
+    participantEmails: optionalFormString(formData, "participantEmails") ?? undefined,
   };
 }
 
@@ -290,13 +306,17 @@ async function buildTranscriptUploadPayload(formData: FormData): Promise<Transcr
     };
   }
 
+  const meetingChoice = optionalFormString(formData, "meetingId");
+  const createNewMeeting = meetingChoice === CREATE_NEW_MEETING_CHOICE || optionalFormString(formData, "createNewMeeting") === "true";
+
   return {
     workspaceId,
     pendingTranscriptToken,
     retryRequiresTranscriptUpload,
     transcript,
     fileName,
-    meetingId: optionalFormString(formData, "meetingId"),
+    meetingId: createNewMeeting ? null : meetingChoice,
+    createNewMeeting,
     title: optionalFormString(formData, "title") ?? existingPayload?.title ?? null,
     source: optionalFormString(formData, "source") ?? existingPayload?.source ?? "transcript-upload",
     recordedAt: optionalFormString(formData, "recordedAt") ?? existingPayload?.recordedAt ?? null,
@@ -422,7 +442,7 @@ export async function uploadMeetingTranscriptAction(formData: FormData) {
 }
 
 export async function uploadMeetingTranscriptStateAction(
-  _previousState: MeetingTranscriptActionState,
+  previousState: MeetingTranscriptActionState,
   formData: FormData,
 ): Promise<MeetingTranscriptActionState> {
   const _demoGuardWsId = formData.get("workspaceId") as string;
@@ -444,6 +464,7 @@ export async function uploadMeetingTranscriptStateAction(
       recordedAt: parseOptionalMeetingDateTimeInput(payload.recordedAt, payload.timeZone, "Recorded at"),
       transcript: payload.transcript,
       fileName: payload.fileName,
+      createNewMeeting: payload.createNewMeeting,
       summaryMd: payload.summaryMd,
       ingestionGuidanceMd: payload.ingestionGuidanceMd,
       participantIds: payload.participantIds,
@@ -475,9 +496,15 @@ export async function uploadMeetingTranscriptStateAction(
       meetingId: result.meeting.id,
     };
   } catch (error) {
+    const pendingTranscriptToken = previousState.status === "needs_clarification"
+      ? previousState.pendingTranscriptToken
+      : null;
     return {
       status: "error",
       message: expectedTranscriptActionErrorMessage(error),
+      pendingTranscriptToken,
+      values: pendingTranscriptToken ? actionValuesFromFormData(formData) : undefined,
+      retryRequiresTranscriptUpload: pendingTranscriptToken ? previousState.retryRequiresTranscriptUpload : undefined,
     };
   }
 }

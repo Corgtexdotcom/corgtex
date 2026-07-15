@@ -1437,6 +1437,7 @@
     "chooseTranscriptMeeting": "Elegir reunión",
     "completedMeetings": "Reuniones completadas",
     "concerns": "Inquietudes: {count}",
+    "createNewTranscriptMeeting": "Ninguna de estas - crear una nueva reunión",
     "formDescription": "Descripción",
     "formDurationMinutes": "Duración (minutos)",
     "formInviteFile": "Invitación de calendario (.ics)",

@@ -594,6 +594,7 @@ export default async function WorkspaceAddPage({
               submit: "Upload transcript",
               retrySubmit: "Continue",
               chooseMeeting: "Choose meeting",
+              createNewMeeting: "None of these - create a new meeting",
               retryUpload: "Upload or paste the transcript again to continue.",
               cancel: "Cancel",
             }}

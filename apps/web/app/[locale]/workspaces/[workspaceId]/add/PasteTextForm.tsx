@@ -64,6 +64,7 @@ export function PasteTextForm({ workspaceId, sourceTypes, ingestAction, cancelHr
           submit: "Ingest text",
           retrySubmit: "Continue",
           chooseMeeting: "Choose meeting",
+          createNewMeeting: "None of these - create a new meeting",
           cancel: "Cancel",
         }}
         cancelHref={cancelHref}

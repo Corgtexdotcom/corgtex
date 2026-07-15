@@ -2,7 +2,7 @@ import type { Meeting, MeetingTranscriptSourceProvider } from "@prisma/client";
 import { defaultModelGateway } from "@corgtex/models";
 import { prisma } from "@corgtex/shared";
 import type { AppActor } from "@corgtex/shared";
-import { uploadMeetingTranscript } from "./meetings";
+import { createMeeting, uploadMeetingTranscript } from "./meetings";
 
 type IntakeStatus = "meeting_created" | "meeting_matched" | "needs_clarification";
 
@@ -180,6 +180,7 @@ export async function intakeMeetingTranscript(actor: AppActor, params: {
   sourceRecordId?: string | null;
   batchMetadata?: Record<string, unknown> | null;
   replaceTranscript?: boolean;
+  createNewMeeting?: boolean;
   recordedAt?: Date | string | null;
   summaryMd?: string | null;
   ingestionGuidanceMd?: string | null;
@@ -210,6 +211,30 @@ export async function intakeMeetingTranscript(actor: AppActor, params: {
       requiredFields: ["recordedAt"],
       inferred,
       message: "I can save this as a meeting transcript, but I need the meeting date/time first.",
+    };
+  }
+
+  if (params.createNewMeeting) {
+    const meeting = await createMeeting(actor, {
+      workspaceId: params.workspaceId,
+      title: inferred.title,
+      source: inferred.source,
+      externalId: params.externalId ?? null,
+      calendarExternalId: params.calendarExternalId ?? null,
+      meetingUrl: params.meetingUrl ?? null,
+      recordedAt: inferred.recordedAt,
+      transcript,
+      summaryMd: params.summaryMd,
+      ingestionGuidanceMd: params.ingestionGuidanceMd,
+      participantIds: params.participantIds ?? [],
+      participantEmails: inferred.participantEmails,
+      sourceRecordId: params.sourceRecordId ?? null,
+    });
+    return {
+      status: "meeting_created",
+      meeting,
+      inferred,
+      message: `Transcript saved as meeting "${meeting.title ?? inferred.title ?? "Untitled meeting"}". Summary and follow-up extraction are queued.`,
     };
   }
 

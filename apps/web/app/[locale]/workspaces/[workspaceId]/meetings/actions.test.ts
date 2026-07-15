@@ -312,6 +312,80 @@ describe("meeting server actions", () => {
     }));
   });
 
+  it("preserves a pending transcript token when clarification validation fails", async () => {
+    const { uploadMeetingTranscriptStateAction } = await import("./actions");
+    redisClient.get.mockResolvedValueOnce(JSON.stringify({
+      workspaceId: "workspace-1",
+      transcript: "Jan: We discussed follow-up actions.",
+      fileName: "weekly.txt",
+      title: "Weekly Review",
+      source: "transcript-upload",
+      recordedAt: "2026-07-15T09:00",
+      timeZone: "America/Los_Angeles",
+      summaryMd: null,
+      ingestionGuidanceMd: null,
+      participantIds: [],
+      participantEmails: [],
+    }));
+
+    const state = await uploadMeetingTranscriptStateAction({
+      status: "needs_clarification",
+      message: "Choose a meeting.",
+      pendingTranscriptToken: "token-1",
+      retryRequiresTranscriptUpload: false,
+      values: {
+        title: "Weekly Review",
+        recordedAt: "2026-07-15T09:00",
+        timeZone: "America/Los_Angeles",
+      },
+    }, formData({
+      workspaceId: "workspace-1",
+      pendingTranscriptToken: "token-1",
+      recordedAt: "not-a-date",
+      timeZone: "America/Los_Angeles",
+    }));
+
+    expect(state).toMatchObject({
+      status: "error",
+      pendingTranscriptToken: "token-1",
+      retryRequiresTranscriptUpload: false,
+      values: {
+        recordedAt: "not-a-date",
+        timeZone: "America/Los_Angeles",
+      },
+    });
+  });
+
+  it("forwards an explicit new-meeting choice instead of a candidate meeting id", async () => {
+    const { uploadMeetingTranscriptStateAction } = await import("./actions");
+    intakeMeetingTranscript.mockResolvedValueOnce({
+      status: "meeting_created",
+      message: "Transcript saved as meeting \"Weekly Review\". Summary and follow-up extraction are queued.",
+      meeting: { id: "meeting-new" },
+      inferred: {
+        title: "Weekly Review",
+        recordedAt: new Date("2026-07-15T16:00:00.000Z"),
+        participantEmails: [],
+        source: "transcript-upload",
+      },
+    });
+
+    const state = await uploadMeetingTranscriptStateAction(initialTranscriptState, formData({
+      workspaceId: "workspace-1",
+      meetingId: "__create_new_meeting__",
+      title: "Weekly Review",
+      recordedAt: "2026-07-15T09:00",
+      timeZone: "America/Los_Angeles",
+      transcript: "Jan: We discussed follow-up actions.",
+    }));
+
+    expect(state.status).toBe("success");
+    expect(intakeMeetingTranscript).toHaveBeenCalledWith(actor, expect.objectContaining({
+      meetingId: null,
+      createNewMeeting: true,
+    }));
+  });
+
   it("keeps clarification inline and asks for retry when Redis cannot hold the pending transcript", async () => {
     const { uploadMeetingTranscriptStateAction } = await import("./actions");
     getRedisClient.mockResolvedValueOnce(null);
