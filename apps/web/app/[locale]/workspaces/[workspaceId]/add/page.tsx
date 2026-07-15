@@ -581,6 +581,7 @@ export default async function WorkspaceAddPage({
                 <option value="FREQ=MONTHLY">Monthly</option>
               </select>
             </label>
+            <label>Meeting URL<input name="meetingUrl" type="url" placeholder="https://teams.microsoft.com/meet/..." /></label>
             <label>Participant emails<input name="participantEmails" placeholder="one@example.com, two@example.com" /></label>
             <label>Participant IDs<input name="participantIds" placeholder="member ids, comma-separated" /></label>
             <div className="actions-inline"><button type="submit">Schedule meeting</button>{cancelLink(returnTo)}</div>

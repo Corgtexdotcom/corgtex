@@ -425,6 +425,10 @@ export default async function MeetingsPage({
                 </select>
               </label>
               <label>
+                Meeting URL
+                <input name="meetingUrl" type="url" placeholder="https://teams.microsoft.com/meet/..." />
+              </label>
+              <label>
                 {t("formParticipantEmails")}
                 <input name="participantEmails" placeholder={t("formParticipantEmailsPlaceholder")} />
               </label>

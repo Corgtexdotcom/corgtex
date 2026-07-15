@@ -28,22 +28,26 @@ describe("meeting URL policy", () => {
     });
   });
 
-  it("recognizes Teams meet links but does not mark them provider schedulable", () => {
-    expect(normalizeRecorderMeetingUrl("https://teams.microsoft.com/meet/21377000607471?p=abc")).toEqual({
-      url: "https://teams.microsoft.com/meet/21377000607471?p=abc",
+  it("recognizes Teams short business meet links as provider schedulable", () => {
+    expect(normalizeRecorderMeetingUrl("https://teams.microsoft.com/meet/12345678901234?p=abc")).toEqual({
+      url: "https://teams.microsoft.com/meet/12345678901234?p=abc",
+      kind: "MICROSOFT_TEAMS_MEET",
+      providerSchedulable: true,
+    });
+    expect(isMicrosoftTeamsRecorderUrl("https://teams.microsoft.com/meet/12345678901234?p=abc")).toBe(true);
+    expect(isMicrosoftTeamsMeetingUrl("https://teams.microsoft.com/meet/12345678901234?p=abc")).toBe(true);
+    expect(TEAMS_FULL_JOIN_LINK_REQUIRED_MESSAGE).toContain("supported live meeting link");
+    expect(normalizeRecorderMeetingUrl("https://teams.microsoft.com/meet/12345678901234")).toMatchObject({
       kind: "MICROSOFT_TEAMS_MEET",
       providerSchedulable: false,
     });
-    expect(isMicrosoftTeamsRecorderUrl("https://teams.microsoft.com/meet/21377000607471?p=abc")).toBe(true);
-    expect(isMicrosoftTeamsMeetingUrl("https://teams.microsoft.com/meet/21377000607471?p=abc")).toBe(false);
-    expect(TEAMS_FULL_JOIN_LINK_REQUIRED_MESSAGE).toContain("/l/meetup-join/");
   });
 
   it("extracts only provider schedulable links through the compatibility helper", () => {
-    expect(extractRecorderMeetingUrlFromText("Join https://teams.microsoft.com/meet/21377000607471?p=abc."))
-      .toMatchObject({ kind: "MICROSOFT_TEAMS_MEET", providerSchedulable: false });
-    expect(extractSupportedMeetingUrlFromText("Join https://teams.microsoft.com/meet/21377000607471?p=abc."))
-      .toBeNull();
+    expect(extractRecorderMeetingUrlFromText("Join https://teams.microsoft.com/meet/12345678901234?p=abc."))
+      .toMatchObject({ kind: "MICROSOFT_TEAMS_MEET", providerSchedulable: true });
+    expect(extractSupportedMeetingUrlFromText("Join https://teams.microsoft.com/meet/12345678901234?p=abc."))
+      .toBe("https://teams.microsoft.com/meet/12345678901234?p=abc");
     expect(extractSupportedMeetingUrlFromText("Join https://teams.microsoft.com/l/meetup-join/abc."))
       .toBe("https://teams.microsoft.com/l/meetup-join/abc");
   });

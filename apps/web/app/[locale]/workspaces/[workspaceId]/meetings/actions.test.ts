@@ -81,13 +81,13 @@ describe("meeting server actions", () => {
   it("returns inline state and preserves values when manual recorder validation fails", async () => {
     const { scheduleManualMeetingRecordingAction } = await import("./actions");
     sendManualMeetingRecorder.mockRejectedValueOnce(Object.assign(
-      new Error("Paste the full Microsoft Teams join link that starts with https://teams.microsoft.com/l/meetup-join/."),
+      new Error("Paste a supported live meeting link from Microsoft Teams, Google Meet, or Zoom."),
       { status: 400, code: "RECORDER_TEAMS_FULL_JOIN_LINK_REQUIRED" },
     ));
 
     const state = await scheduleManualMeetingRecordingAction(initialState, formData({
       workspaceId: "workspace-1",
-      meetingUrl: "https://teams.microsoft.com/meet/21377000607471?p=abc",
+      meetingUrl: "https://teams.microsoft.com/meet/12345678901234?p=abc",
       title: "Client call",
       durationMinutes: "60",
       participantEmails: "team@example.com",
@@ -95,9 +95,9 @@ describe("meeting server actions", () => {
 
     expect(state).toEqual({
       status: "error",
-      message: "Paste the full Microsoft Teams join link that starts with https://teams.microsoft.com/l/meetup-join/.",
+      message: "Paste a supported live meeting link from Microsoft Teams, Google Meet, or Zoom.",
       values: {
-        meetingUrl: "https://teams.microsoft.com/meet/21377000607471?p=abc",
+        meetingUrl: "https://teams.microsoft.com/meet/12345678901234?p=abc",
         title: "Client call",
         durationMinutes: "60",
         participantEmails: "team@example.com",
@@ -107,7 +107,7 @@ describe("meeting server actions", () => {
     expect(requirePageActor).toHaveBeenCalled();
     expect(sendManualMeetingRecorder).toHaveBeenCalledWith(actor, expect.objectContaining({
       workspaceId: "workspace-1",
-      meetingUrl: "https://teams.microsoft.com/meet/21377000607471?p=abc",
+      meetingUrl: "https://teams.microsoft.com/meet/12345678901234?p=abc",
       title: "Client call",
       durationMinutes: "60",
       participantEmails: ["team@example.com"],

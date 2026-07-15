@@ -8,7 +8,7 @@ import { requireWorkspaceMembership } from "./auth";
 import { archiveFilterWhere, archiveWorkspaceArtifact, type ArchiveFilter } from "./archive";
 import { ensureWorkspacePermalink, workspaceEntityCanonicalPath } from "./permalinks";
 import { invariant } from "./errors";
-import { meetingUrlHash, normalizeMeetingUrl } from "./meeting-urls";
+import { extractSupportedMeetingUrlFromText, meetingUrlHash, normalizeMeetingUrl, normalizeRecorderMeetingUrl } from "./meeting-urls";
 import { resetMeetingTranscriptProcessingProgress } from "./meeting-transcript-processing";
 
 const DEFAULT_OCCURRENCE_LOOKBACK_DAYS = 14;
@@ -35,6 +35,8 @@ type MeetingSeriesForExpansion = {
   source: string;
   externalId: string | null;
   recurrenceRule: string | null;
+  meetingUrl: string | null;
+  meetingUrlHash: string | null;
   startsAt: Date;
   defaultDurationMinutes: number;
   participantIds: string[];
@@ -55,6 +57,13 @@ function normalizeIds(values?: string[] | null) {
 
 function normalizeTitle(value?: string | null) {
   return (value ?? "").trim().toLowerCase().replace(/\s+/g, " ");
+}
+
+function normalizeSeriesRecorderUrl(value?: string | null) {
+  if (!value?.trim()) return null;
+  const recorderUrl = normalizeRecorderMeetingUrl(value);
+  invariant(recorderUrl?.providerSchedulable, 400, "UNSUPPORTED_MEETING_URL", "Paste a supported live meeting link.");
+  return recorderUrl.url;
 }
 
 function normalizeTranscriptForCompare(value?: string | null) {
@@ -230,6 +239,8 @@ async function materializeMeetingSeriesOccurrencesTx(
         "source",
         "externalId",
         "calendarExternalId",
+        "meetingUrl",
+        "meetingUrlHash",
         "recordedAt",
         "scheduledEndAt",
         "participantIds",
@@ -245,6 +256,8 @@ async function materializeMeetingSeriesOccurrencesTx(
         ${series.source},
         ${occurrence.externalId},
         ${occurrence.calendarExternalId},
+        ${series.meetingUrl},
+        ${series.meetingUrlHash},
         ${occurrence.start},
         ${occurrence.end},
         ${series.participantIds},
@@ -265,6 +278,38 @@ async function materializeMeetingSeriesOccurrencesTx(
   }
 
   return meetings;
+}
+
+async function refreshMeetingSeriesRecorderUrlOccurrencesTx(
+  tx: Prisma.TransactionClient,
+  params: {
+    workspaceId: string;
+    seriesId: string;
+    meetingUrl: string;
+    meetingUrlHash: string;
+    previousMeetingUrlHash?: string | null;
+    now: Date;
+  }
+) {
+  const updateTarget = params.previousMeetingUrlHash
+    ? { OR: [{ meetingUrl: null }, { meetingUrlHash: params.previousMeetingUrlHash }] }
+    : { meetingUrl: null };
+  return tx.meeting.updateMany({
+    where: {
+      workspaceId: params.workspaceId,
+      seriesId: params.seriesId,
+      status: "SCHEDULED",
+      archivedAt: null,
+      recordedAt: { gte: params.now },
+      transcript: null,
+      summaryMd: null,
+      ...updateTarget,
+    },
+    data: {
+      meetingUrl: params.meetingUrl,
+      meetingUrlHash: params.meetingUrlHash,
+    },
+  });
 }
 
 export async function ensureMeetingSeriesOccurrences(params: {
@@ -735,6 +780,7 @@ export async function createMeetingSeries(actor: AppActor, params: {
   startsAt: Date;
   scheduledEndAt?: Date | null;
   recurrenceRule?: string | null;
+  meetingUrl?: string | null;
   participantIds?: string[] | null;
   participantEmails?: string[] | null;
 }) {
@@ -749,6 +795,7 @@ export async function createMeetingSeries(actor: AppActor, params: {
   const defaultDurationMinutes = params.scheduledEndAt && !Number.isNaN(params.scheduledEndAt.valueOf())
     ? Math.max(1, Math.round((params.scheduledEndAt.getTime() - params.startsAt.getTime()) / 60_000))
     : 60;
+  const meetingUrl = normalizeSeriesRecorderUrl(params.meetingUrl);
 
   return prisma.$transaction(async (tx) => {
     const series = await tx.meetingSeries.create({
@@ -758,6 +805,8 @@ export async function createMeetingSeries(actor: AppActor, params: {
         description: params.description?.trim() || null,
         source: "internal",
         recurrenceRule: params.recurrenceRule?.trim() || null,
+        meetingUrl,
+        meetingUrlHash: meetingUrl ? meetingUrlHash(meetingUrl) : null,
         startsAt: params.startsAt,
         defaultDurationMinutes,
         participantIds: normalizeIds(params.participantIds),
@@ -778,11 +827,80 @@ export async function createMeetingSeries(actor: AppActor, params: {
           title: series.title,
           recurrenceRule: series.recurrenceRule,
           materializedMeetings: meetings.length,
+          hasMeetingUrl: Boolean(series.meetingUrl),
         },
       },
     });
 
     return { series, meetings };
+  });
+}
+
+export async function setMeetingSeriesRecorderUrl(actor: AppActor, params: {
+  workspaceId: string;
+  seriesId: string;
+  meetingUrl: string;
+  now?: Date;
+}) {
+  await requireWorkspaceMembership({
+    actor,
+    workspaceId: params.workspaceId,
+    allowedRoles: ["ADMIN", "FACILITATOR"],
+  });
+
+  const meetingUrl = normalizeSeriesRecorderUrl(params.meetingUrl);
+  invariant(meetingUrl, 400, "MEETING_URL_REQUIRED", "A meeting URL is required.");
+  const nextHash = meetingUrlHash(meetingUrl);
+  const now = params.now ?? new Date();
+
+  return prisma.$transaction(async (tx) => {
+    const series = await tx.meetingSeries.findFirst({
+      where: { id: params.seriesId, workspaceId: params.workspaceId, archivedAt: null },
+      select: {
+        id: true,
+        title: true,
+        meetingUrlHash: true,
+      },
+    });
+    invariant(series, 404, "NOT_FOUND", "Meeting series not found.");
+
+    const previousHash = series.meetingUrlHash;
+    const updatedSeries = await tx.meetingSeries.update({
+      where: { id: series.id },
+      data: {
+        meetingUrl,
+        meetingUrlHash: nextHash,
+      },
+    });
+
+    const updatedMeetings = await refreshMeetingSeriesRecorderUrlOccurrencesTx(tx, {
+      workspaceId: params.workspaceId,
+      seriesId: series.id,
+      meetingUrl,
+      meetingUrlHash: nextHash,
+      previousMeetingUrlHash: previousHash,
+      now,
+    });
+
+    await tx.auditLog.create({
+      data: {
+        workspaceId: params.workspaceId,
+        actorUserId: actor.kind === "user" ? actor.user.id : null,
+        action: "meeting-series.recorder-url-updated",
+        entityType: "MeetingSeries",
+        entityId: series.id,
+        meta: {
+          title: series.title,
+          hasMeetingUrl: true,
+          updatedFutureScheduledMeetings: updatedMeetings.count,
+        },
+      },
+    });
+
+    return {
+      series: updatedSeries,
+      updatedFutureScheduledMeetings: updatedMeetings.count,
+    };
   });
 }
 
@@ -893,6 +1011,14 @@ export async function importMeetingInvite(actor: AppActor, params: {
       const seriesExternalId = `ics-series:${params.workspaceId}:${uid}`;
       const recurrenceRule = readIcsRecurrenceRule(component);
       const participantEmails = readIcsEventEmails(component);
+      const meetingUrl = extractSupportedMeetingUrlFromText([
+        event.location,
+        event.description,
+      ].filter(Boolean).join("\n"));
+      const previousSeries = await tx.meetingSeries.findUnique({
+        where: { externalId: seriesExternalId },
+        select: { meetingUrlHash: true },
+      });
 
       const series = await tx.meetingSeries.upsert({
         where: { externalId: seriesExternalId },
@@ -902,6 +1028,8 @@ export async function importMeetingInvite(actor: AppActor, params: {
           description: event.description || null,
           source: "ics",
           recurrenceRule,
+          meetingUrl: meetingUrl ?? undefined,
+          meetingUrlHash: meetingUrl ? meetingUrlHash(meetingUrl) : undefined,
           startsAt,
           defaultDurationMinutes: durationMinutes,
           participantEmails,
@@ -913,12 +1041,24 @@ export async function importMeetingInvite(actor: AppActor, params: {
           source: "ics",
           externalId: seriesExternalId,
           recurrenceRule,
+          meetingUrl,
+          meetingUrlHash: meetingUrl ? meetingUrlHash(meetingUrl) : null,
           startsAt,
           defaultDurationMinutes: durationMinutes,
           participantIds: [],
           participantEmails,
         },
       });
+      if (meetingUrl) {
+        await refreshMeetingSeriesRecorderUrlOccurrencesTx(tx, {
+          workspaceId: params.workspaceId,
+          seriesId: series.id,
+          meetingUrl,
+          meetingUrlHash: meetingUrlHash(meetingUrl),
+          previousMeetingUrlHash: previousSeries?.meetingUrlHash ?? null,
+          now: new Date(),
+        });
+      }
 
       const meetings = await materializeMeetingSeriesOccurrencesTx(tx, {
         ...series,

@@ -6,6 +6,7 @@ import { isGlobalOperator } from "./auth";
 import { createMember, deactivateMember, listMembersEnriched, resendMemberAccessLink, sendMemberSetupEmail, updateMember } from "./members";
 import {
   enqueueRecorderCalendarSync,
+  getMeetingRecorderCoverageReadiness,
   getMeetingRecorderEnterpriseReadiness,
   getMeetingRecorderMonthlyUsage,
   getRecorderCalendarSource,
@@ -103,6 +104,7 @@ const MUTATING_SUPPORT_ACTIONS = new Set([
   "tensions.update",
   "tensions.return_to_draft",
   "meetings.upload",
+  "meeting_series.set_recorder_url",
   "runtime.retry_failed_job",
   "runtime.discard_failed_job",
   "agent_credentials.update_scopes",
@@ -161,6 +163,8 @@ const SUPPORT_ACTION_TO_MCP_TOOL = {
   "meetings.list": "list_meetings",
   "meetings.get": "get_meeting",
   "meetings.upload": "upload_meeting",
+  "meeting_recorders.readiness": "get_meeting_recorder_coverage_readiness",
+  "meeting_series.set_recorder_url": "set_meeting_series_recorder_url",
 } as const;
 
 export type SupportAction = keyof typeof SUPPORT_ACTION_TO_MCP_TOOL;
@@ -460,6 +464,12 @@ function redactValue(key: string, value: unknown): unknown {
   const normalizedKey = key.toLowerCase();
   const isSecretLikeKey = /token|secret|password|authorization|bearer|connectionstring/.test(normalizedKey)
     || normalizedKey === "supportcredential"
+    || normalizedKey.includes("meetingurl")
+    || normalizedKey === "meeting_url"
+    || normalizedKey.includes("externalbot")
+    || normalizedKey.includes("providerbot")
+    || normalizedKey === "botid"
+    || normalizedKey === "bot_id"
     || (normalizedKey.includes("credential") && /(enc|hash|secret|token|password|value)$/.test(normalizedKey));
   if (isSecretLikeKey) {
     return "[redacted]";
@@ -487,6 +497,10 @@ function normalizeReason(reason: string | null | undefined, action: string) {
   if (trimmed) return trimmed;
   invariant(!MUTATING_SUPPORT_ACTIONS.has(action), 400, "SUPPORT_REASON_REQUIRED", "A support reason is required for mutating support actions.");
   return "Read-only support inspection.";
+}
+
+function sanitizeSupportReadinessDetail(value: string) {
+  return value.replace(/https?:\/\/\S+/g, "[url]").slice(0, 500);
 }
 
 function requireMutationReason(reason: string | null | undefined) {
@@ -6158,16 +6172,65 @@ export async function getControlPlaneMeetingOperationsReadiness(actor: AppActor,
   requireControlPlaneScope(actor, "control-plane:read");
   const deployment = await getControlPlaneDeploymentWithWorkspace(actor, deploymentId);
   const managedWorkspaceId = deployment.managedWorkspaceId;
-  invariant(managedWorkspaceId, 400, "MANAGED_WORKSPACE_REQUIRED", "Meeting operations readiness requires a managed workspace link.");
-  const [agenda, recorder] = await Promise.all([
+  if (!managedWorkspaceId) {
+    try {
+      const operation = await runCustomerSupportOperation(actor, {
+        deploymentId,
+        action: "meeting_recorders.readiness",
+      });
+      return {
+        deploymentId,
+        managedWorkspaceId: null,
+        accessMode: "support_connector" as const,
+        agenda: null,
+        recorder: operation.resultSummary ?? {
+          ready: false,
+          checks: [{
+            key: "support_connector",
+            label: "Support connector",
+            ok: false,
+            detail: "Recorder readiness result was not returned by the customer support connector.",
+          }],
+        },
+      };
+    } catch (error) {
+      return {
+        deploymentId,
+        managedWorkspaceId: null,
+        accessMode: "support_connector" as const,
+        agenda: null,
+        recorder: {
+          ready: false,
+          checks: [{
+            key: "support_connector",
+            label: "Support connector",
+            ok: false,
+            detail: error instanceof Error
+              ? sanitizeSupportReadinessDetail(error.message)
+              : "Support connector readiness check failed.",
+          }],
+        },
+      };
+    }
+  }
+  const [agenda, recorder, coverage] = await Promise.all([
     getMeetingAgendaReadiness(managedWorkspaceId),
     getMeetingRecorderEnterpriseReadiness(managedWorkspaceId),
+    getMeetingRecorderCoverageReadiness(managedWorkspaceId),
   ]);
   return {
     deploymentId,
     managedWorkspaceId,
+    accessMode: "managed_workspace" as const,
     agenda,
-    recorder: compactRecorderMeetingOpsReadiness(recorder),
+    recorder: {
+      ...compactRecorderMeetingOpsReadiness(recorder),
+      upcomingCoverage: {
+        window: coverage.window,
+        counts: coverage.counts,
+        meetings: coverage.meetings,
+      },
+    },
   };
 }
 

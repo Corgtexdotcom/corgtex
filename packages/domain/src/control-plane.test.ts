@@ -2887,9 +2887,82 @@ describe("control plane domain", () => {
         status: "ready",
         ready: true,
         provider: "RECALL_AI",
+        upcomingCoverage: {
+          counts: expect.objectContaining({
+            total: expect.any(Number),
+          }),
+          meetings: expect.any(Array),
+        },
       },
     });
     expect(JSON.stringify(result)).not.toContain("supportCredentialEnc");
+  });
+
+  it("returns meeting operations readiness through support connector when no managed workspace exists", async () => {
+    const { getControlPlaneMeetingOperationsReadiness } = await import("./control-plane");
+    const remoteReadiness = {
+      workspaceId: "remote-workspace",
+      counts: {
+        total: 1,
+        eligible: 0,
+        blockers: { no_url: 1 },
+      },
+      meetings: [{
+        meetingId: "meeting-1",
+        recordedAt: "2026-07-22T16:00:00.000Z",
+        hasOccurrenceUrl: false,
+        hasSeriesUrl: false,
+        blockerReasons: ["no_url"],
+      }],
+    };
+    prismaMock.customerDeployment.findUnique
+      .mockResolvedValueOnce({
+        id: "inst-1",
+        label: "Remote Acme",
+        customerAccountId: "cust-1",
+        managedWorkspaceId: null,
+        supportCredentialEnc: "encrypted:support-token",
+        managedWorkspace: null,
+      })
+      .mockResolvedValueOnce({
+        id: "inst-1",
+        label: "Remote Acme",
+        url: "https://remote.example",
+        customerSlug: "remote-acme",
+        customerAccountId: "cust-1",
+        deploymentKind: "RAILWAY",
+        deploymentStatus: "ACTIVE",
+        supportMcpUrl: "https://remote.example/api/mcp",
+        supportCredentialEnc: "encrypted:support-token",
+        supportConnectorStatus: "ACTIVE",
+      });
+    prismaMock.supportOperation.create.mockResolvedValueOnce({ id: "op-readiness", action: "meeting_recorders.readiness" });
+    prismaMock.supportOperation.update.mockResolvedValueOnce({
+      id: "op-readiness",
+      status: "COMPLETED",
+      resultSummary: remoteReadiness,
+    });
+    global.fetch = vi.fn(async () => mcpToolResult(remoteReadiness)) as any;
+
+    const result = await getControlPlaneMeetingOperationsReadiness(operatorActor, "inst-1");
+
+    expect(result).toMatchObject({
+      deploymentId: "inst-1",
+      managedWorkspaceId: null,
+      accessMode: "support_connector",
+      agenda: null,
+      recorder: remoteReadiness,
+    });
+    expect(prismaMock.supportOperation.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        action: "meeting_recorders.readiness",
+        inputSummary: {},
+      }),
+    }));
+    const body = JSON.parse(String(vi.mocked(global.fetch).mock.calls[0][1]?.body));
+    expect(body.params.name).toBe("get_meeting_recorder_coverage_readiness");
+    expect(JSON.stringify(result)).not.toContain("support-token");
+    expect(JSON.stringify(result)).not.toContain("teams.microsoft.com");
   });
 
   it("queues agenda preparation for managed workspaces and audits the reason", async () => {

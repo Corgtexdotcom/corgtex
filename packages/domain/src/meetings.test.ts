@@ -12,12 +12,16 @@ const { prismaMock } = vi.hoisted(() => {
       create: vi.fn(),
       upsert: vi.fn(),
       update: vi.fn(),
+      updateMany: vi.fn(),
       delete: vi.fn(),
     },
     meetingSeries: {
       create: vi.fn(),
+      findFirst: vi.fn(),
+      findUnique: vi.fn(),
       findMany: vi.fn(),
       upsert: vi.fn(),
+      update: vi.fn(),
     },
     workflowJob: {
       upsert: vi.fn(),
@@ -85,6 +89,10 @@ describe("meetings domain", () => {
     prismaMock.meetingTranscriptProcessingProgress.upsert.mockResolvedValue({ id: "progress-1" });
     prismaMock.workspacePermalink.upsert.mockResolvedValue({});
     prismaMock.meetingSeries.findMany.mockResolvedValue([]);
+    prismaMock.meetingSeries.findFirst.mockResolvedValue(null);
+    prismaMock.meetingSeries.findUnique.mockResolvedValue(null);
+    prismaMock.meetingSeries.update.mockResolvedValue({});
+    prismaMock.meeting.updateMany.mockResolvedValue({ count: 0 });
     prismaMock.workflowJob.upsert.mockResolvedValue({ id: "job-1" });
   });
 
@@ -316,6 +324,98 @@ describe("meetings domain", () => {
     expect(prismaMock.meeting.create).not.toHaveBeenCalled();
   });
 
+  it("createMeetingSeries stores a supported recorder URL for inherited occurrences", async () => {
+    const startsAt = new Date("2026-04-30T17:00:00.000Z");
+    const scheduledEndAt = new Date("2026-04-30T18:00:00.000Z");
+    prismaMock.meetingSeries.create.mockResolvedValue({
+      id: "series-1",
+      workspaceId: "workspace-1",
+      title: "Weekly Tactical",
+      description: null,
+      source: "internal",
+      externalId: null,
+      recurrenceRule: "FREQ=WEEKLY;COUNT=1",
+      meetingUrl: "https://teams.microsoft.com/meet/12345678901234?p=abc",
+      meetingUrlHash: "hash-1",
+      startsAt,
+      defaultDurationMinutes: 60,
+      participantIds: [],
+      participantEmails: [],
+    });
+    prismaMock.meeting.findUnique.mockResolvedValue({
+      id: "meeting-1",
+      workspaceId: "workspace-1",
+      seriesId: "series-1",
+      status: "SCHEDULED",
+      title: "Weekly Tactical",
+      source: "internal",
+      meetingUrl: "https://teams.microsoft.com/meet/12345678901234?p=abc",
+    });
+
+    const { createMeetingSeries } = await import("./meetings");
+    await expect(createMeetingSeries(actor, {
+      workspaceId: "workspace-1",
+      title: "Weekly Tactical",
+      startsAt,
+      scheduledEndAt,
+      recurrenceRule: "FREQ=WEEKLY;COUNT=1",
+      meetingUrl: "https://TEAMS.microsoft.com/meet/12345678901234?p=abc#ignored",
+    })).resolves.toMatchObject({
+      series: { id: "series-1", meetingUrl: "https://teams.microsoft.com/meet/12345678901234?p=abc" },
+      meetings: [expect.objectContaining({ meetingUrl: "https://teams.microsoft.com/meet/12345678901234?p=abc" })],
+    });
+
+    expect(prismaMock.meetingSeries.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        meetingUrl: "https://teams.microsoft.com/meet/12345678901234?p=abc",
+        meetingUrlHash: expect.any(String),
+      }),
+    });
+    expect(prismaMock.$executeRaw).toHaveBeenCalledTimes(1);
+  });
+
+  it("setMeetingSeriesRecorderUrl updates only future empty scheduled occurrences", async () => {
+    const now = new Date("2026-04-30T16:00:00.000Z");
+    prismaMock.meetingSeries.findFirst.mockResolvedValue({
+      id: "series-1",
+      title: "Weekly Tactical",
+      meetingUrlHash: "old-hash",
+    });
+    prismaMock.meetingSeries.update.mockResolvedValue({
+      id: "series-1",
+      meetingUrl: "https://teams.microsoft.com/meet/12345678901234?p=abc",
+      meetingUrlHash: "new-hash",
+    });
+    prismaMock.meeting.updateMany.mockResolvedValue({ count: 2 });
+
+    const { setMeetingSeriesRecorderUrl } = await import("./meetings");
+    await expect(setMeetingSeriesRecorderUrl(actor, {
+      workspaceId: "workspace-1",
+      seriesId: "series-1",
+      meetingUrl: "https://teams.microsoft.com/meet/12345678901234?p=abc",
+      now,
+    })).resolves.toMatchObject({
+      updatedFutureScheduledMeetings: 2,
+    });
+
+    expect(prismaMock.meeting.updateMany).toHaveBeenCalledWith({
+      where: expect.objectContaining({
+        workspaceId: "workspace-1",
+        seriesId: "series-1",
+        status: "SCHEDULED",
+        archivedAt: null,
+        recordedAt: { gte: now },
+        transcript: null,
+        summaryMd: null,
+        OR: [{ meetingUrl: null }, { meetingUrlHash: "old-hash" }],
+      }),
+      data: expect.objectContaining({
+        meetingUrl: "https://teams.microsoft.com/meet/12345678901234?p=abc",
+        meetingUrlHash: expect.any(String),
+      }),
+    });
+  });
+
   it("importMeetingInvite parses .ics attendees and dedupes by external IDs", async () => {
     prismaMock.meetingSeries.upsert.mockResolvedValue({
       id: "series-ics",
@@ -371,6 +471,73 @@ describe("meetings domain", () => {
     }));
     expect(prismaMock.$executeRaw).toHaveBeenCalledTimes(2);
     expect(prismaMock.meeting.create).not.toHaveBeenCalled();
+  });
+
+  it("importMeetingInvite refreshes future inherited occurrences when an ICS link changes", async () => {
+    prismaMock.meetingSeries.findUnique.mockResolvedValue({ meetingUrlHash: "old-hash" });
+    prismaMock.meetingSeries.upsert.mockResolvedValue({
+      id: "series-ics",
+      workspaceId: "workspace-1",
+      title: "Imported Tactical",
+      description: "Join https://teams.microsoft.com/meet/12345678901234?p=newcode",
+      source: "ics",
+      externalId: "ics-series:workspace-1:invite-1",
+      recurrenceRule: "FREQ=WEEKLY;COUNT=1",
+      meetingUrl: "https://teams.microsoft.com/meet/12345678901234?p=newcode",
+      meetingUrlHash: "new-hash",
+      startsAt: new Date("2026-04-30T17:00:00.000Z"),
+      defaultDurationMinutes: 60,
+      participantIds: [],
+      participantEmails: [],
+    });
+    prismaMock.meeting.updateMany.mockResolvedValue({ count: 1 });
+    prismaMock.meeting.findUnique.mockImplementation(async (args: any) => ({
+      id: "meeting-ics",
+      workspaceId: "workspace-1",
+      seriesId: "series-ics",
+      status: "SCHEDULED",
+      title: "Imported Tactical",
+      source: "ics",
+      externalId: args.where.externalId,
+      meetingUrl: "https://teams.microsoft.com/meet/12345678901234?p=newcode",
+    }));
+
+    const icsText = [
+      "BEGIN:VCALENDAR",
+      "VERSION:2.0",
+      "BEGIN:VEVENT",
+      "UID:invite-1",
+      "DTSTART:20260430T170000Z",
+      "DTEND:20260430T180000Z",
+      "RRULE:FREQ=WEEKLY;COUNT=1",
+      "SUMMARY:Imported Tactical",
+      "DESCRIPTION:Join https://teams.microsoft.com/meet/12345678901234?p=newcode",
+      "END:VEVENT",
+      "END:VCALENDAR",
+    ].join("\n");
+
+    const { importMeetingInvite } = await import("./meetings");
+    await importMeetingInvite(actor, {
+      workspaceId: "workspace-1",
+      icsText,
+    });
+
+    expect(prismaMock.meeting.updateMany).toHaveBeenCalledWith({
+      where: expect.objectContaining({
+        workspaceId: "workspace-1",
+        seriesId: "series-ics",
+        status: "SCHEDULED",
+        archivedAt: null,
+        recordedAt: { gte: expect.any(Date) },
+        transcript: null,
+        summaryMd: null,
+        OR: [{ meetingUrl: null }, { meetingUrlHash: "old-hash" }],
+      }),
+      data: expect.objectContaining({
+        meetingUrl: "https://teams.microsoft.com/meet/12345678901234?p=newcode",
+        meetingUrlHash: expect.any(String),
+      }),
+    });
   });
 
   it("ensureMeetingSeriesOccurrences creates missing weekly occurrences in the repair window", async () => {

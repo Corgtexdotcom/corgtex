@@ -24,6 +24,7 @@ const SUPPORT_CONTROL_PLANE_MUTATION_TOOL_NAMES = new Set([
   "record_support_audit",
   "set_feature_flag",
   "support_reopen_resolved_proposals",
+  "set_meeting_series_recorder_url",
   "update_agent_credential_scopes",
   "revoke_agent_credential",
   "update_agent_policy",

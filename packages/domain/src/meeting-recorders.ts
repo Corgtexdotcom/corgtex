@@ -45,6 +45,7 @@ const DEFAULT_ENTRY_MESSAGE = "Corgtex Recorder is joining to transcribe this me
 const DEFAULT_MONTHLY_MINUTE_CAP = 6000;
 const AUTO_SCHEDULE_MIN_LEAD_MS = 10 * 60 * 1000;
 const STALE_RECORDING_TIMEOUT_MS = 6 * 60 * 60 * 1000;
+const MEETING_URL_CHANGED_FAILURE_CODE = "MEETING_URL_CHANGED";
 const RECALL_TERMINAL_STATUS_CHECK_GRACE_MS = 30 * 60 * 1000;
 const RECALL_TRANSCRIPT_RECOVERY_GRACE_MS = 20 * 60 * 1000;
 const RECALL_RECORDING_RETENTION_HOURS = 7 * 24;
@@ -2000,6 +2001,12 @@ function providerRuntimeChecks(config: {
   return checks;
 }
 
+function providerCanSchedule(config: {
+  defaultProvider: MeetingRecorderProvider;
+}) {
+  return providerRuntimeChecks({ defaultProvider: config.defaultProvider, fallbackProvider: null }).every((check) => check.ok);
+}
+
 function recorderProofObservedAt(recording: {
   endedAt?: Date | null;
   startedAt?: Date | null;
@@ -2333,9 +2340,9 @@ export async function runMeetingRecorderSmoke(params: {
       key: "meeting_url",
       label: "Supported meeting URL",
       ok: Boolean(url && isMicrosoftTeamsMeetingUrl(url)),
-      detail: recorderUrl?.kind === "MICROSOFT_TEAMS_MEET"
-        ? TEAMS_FULL_JOIN_LINK_REQUIRED_MESSAGE
-        : url ? "Business Microsoft Teams URL detected." : "A supported Microsoft Teams meeting URL is required.",
+      detail: url && isMicrosoftTeamsMeetingUrl(url)
+        ? "Business Microsoft Teams URL detected."
+        : "A supported Microsoft Teams meeting URL is required.",
     },
     {
       key: "join_time",
@@ -2497,11 +2504,66 @@ async function createRecordingAttempt(params: {
   }
 }
 
+async function retireMismatchedActiveRecordings(params: {
+  workspaceId: string;
+  meetingId: string;
+  meetingUrl: string;
+  recordedAt: Date;
+}) {
+  const normalizedMeetingUrl = normalizeMeetingUrl(params.meetingUrl);
+  const recordings = await prisma.meetingRecording.findMany({
+    where: {
+      workspaceId: params.workspaceId,
+      meetingId: params.meetingId,
+      status: { in: ACTIVE_RECORDING_STATUSES },
+      NOT: { meetingUrl: normalizedMeetingUrl },
+    },
+  });
+
+  for (const recording of recordings) {
+    if (recording.externalBotId) {
+      try {
+        await providerCancel(recording.provider, recording.externalBotId, {
+          joinAt: recorderJoinInstant({ joinAt: recording.joinAt, meeting: { recordedAt: params.recordedAt } }),
+          status: recording.status,
+        });
+      } catch (error) {
+        recorderLog("warn", "schedule_url_changed_cancel_failed", {
+          workspaceId: params.workspaceId,
+          meetingId: params.meetingId,
+          recordingId: recording.id,
+          provider: recording.provider,
+          failureCode: providerFailureCode(error),
+        });
+        throw recorderSchedulingFailedError();
+      }
+    }
+    await prisma.meetingRecording.update({
+      where: { id: recording.id },
+      data: {
+        status: "FAILED",
+        activeDedupeKey: null,
+        failureCode: MEETING_URL_CHANGED_FAILURE_CODE,
+        failureMessage: "Recorder rescheduled because the meeting URL changed.",
+        endedAt: new Date(),
+      },
+    });
+    recorderLog("warn", "schedule_url_changed_retired", {
+      workspaceId: params.workspaceId,
+      meetingId: params.meetingId,
+      recordingId: recording.id,
+      provider: recording.provider,
+    });
+  }
+
+  return recordings.length;
+}
+
 function unsupportedRecorderMeetingUrlError() {
   return new AppError(
     400,
     "RECORDER_UNSUPPORTED_MEETING_URL",
-    "Paste a supported Google Meet, Zoom, or full Microsoft Teams join link.",
+    "Paste a supported live meeting link from Microsoft Teams, Google Meet, or Zoom.",
   );
 }
 
@@ -2599,18 +2661,25 @@ export async function scheduleMeetingRecording(actor: AppActor, params: {
         scheduledEndAt: true,
         meetingUrl: true,
         participantEmails: true,
+        series: {
+          select: {
+            meetingUrl: true,
+          },
+        },
       },
     }),
   ]);
   invariant(config.enabled, 403, "RECORDER_DISABLED", "Meeting recorder is disabled for this workspace.");
   invariant(meeting, 404, "NOT_FOUND", "Meeting not found.");
-  invariant(meeting.meetingUrl, 400, "MEETING_URL_REQUIRED", "A meeting URL is required before a recorder can be scheduled.");
+  const meetingUrl = meeting.meetingUrl ?? meeting.series?.meetingUrl ?? null;
+  invariant(meetingUrl, 400, "MEETING_URL_REQUIRED", "A meeting URL is required before a recorder can be scheduled.");
 
   const existing = await prisma.meetingRecording.findFirst({
     where: {
       workspaceId: params.workspaceId,
       meetingId: params.meetingId,
       status: { in: ACTIVE_RECORDING_STATUSES },
+      meetingUrl: normalizeMeetingUrl(meetingUrl),
     },
     orderBy: { createdAt: "desc" },
   });
@@ -2638,12 +2707,18 @@ export async function scheduleMeetingRecording(actor: AppActor, params: {
     estimatedMinutes: estimatedMeetingMinutes(meeting),
     allowOverride: params.mode !== "auto" && Boolean(isAdmin),
   });
+  await retireMismatchedActiveRecordings({
+    workspaceId: params.workspaceId,
+    meetingId: params.meetingId,
+    meetingUrl,
+    recordedAt: meeting.recordedAt,
+  });
 
   const reusable = await reuseFutureProviderBotIfPresent({
     workspaceId: params.workspaceId,
     meetingId: params.meetingId,
     provider,
-    meetingUrl: meeting.meetingUrl,
+    meetingUrl,
     joinAt: meeting.recordedAt,
   });
   if (reusable) {
@@ -2651,7 +2726,7 @@ export async function scheduleMeetingRecording(actor: AppActor, params: {
   }
 
   const inputBase = {
-    meetingUrl: meeting.meetingUrl,
+    meetingUrl,
     joinAt: meeting.recordedAt,
     joinMode: recorderJoinMode(meeting.recordedAt),
     botName: config.botName || DEFAULT_BOT_NAME,
@@ -2672,7 +2747,7 @@ export async function scheduleMeetingRecording(actor: AppActor, params: {
     workspaceId: params.workspaceId,
     meetingId: params.meetingId,
     provider: fallbackProvider,
-    meetingUrl: meeting.meetingUrl,
+    meetingUrl,
     joinAt: meeting.recordedAt,
   });
   if (reusableFallback) {
@@ -2704,6 +2779,204 @@ export async function scheduleMeetingRecording(actor: AppActor, params: {
     fallbackStatus: fallback.recording.status,
   });
   return fallback.recording;
+}
+
+type RecorderCoverageBlockerReason =
+  | "no_url"
+  | "url_unsupported"
+  | "auto_recording_off"
+  | "recorder_disabled"
+  | "no_provider_config"
+  | "within_lead_window"
+  | "already_covered"
+  | "provider_scheduling_failed";
+
+const RECORDER_COVERAGE_BLOCKER_REASONS: RecorderCoverageBlockerReason[] = [
+  "no_url",
+  "url_unsupported",
+  "auto_recording_off",
+  "recorder_disabled",
+  "no_provider_config",
+  "within_lead_window",
+  "already_covered",
+  "provider_scheduling_failed",
+];
+
+function emptyRecorderCoverageCounts() {
+  return Object.fromEntries(RECORDER_COVERAGE_BLOCKER_REASONS.map((reason) => [reason, 0])) as Record<RecorderCoverageBlockerReason, number>;
+}
+
+function effectiveMeetingRecorderUrl(meeting: {
+  meetingUrl?: string | null;
+  series?: { meetingUrl?: string | null } | null;
+}) {
+  return meeting.meetingUrl ?? meeting.series?.meetingUrl ?? null;
+}
+
+function recordingUrlMatchesMeeting(recording: { meetingUrl?: string | null }, meetingUrl: string | null) {
+  return Boolean(recording.meetingUrl && meetingUrl && normalizeMeetingUrl(recording.meetingUrl) === normalizeMeetingUrl(meetingUrl));
+}
+
+function recordingCoversMeeting(recording: { status: MeetingRecordingStatus; meetingUrl?: string | null }, meetingUrl: string | null) {
+  return recordingUrlMatchesMeeting(recording, meetingUrl) && (ACTIVE_RECORDING_STATUSES.includes(recording.status) || recording.status === "COMPLETED");
+}
+
+function recordingShowsSchedulingFailure(recording: { status: MeetingRecordingStatus; failureCode?: string | null }) {
+  return recording.status === "FAILED"
+    && recording.failureCode !== "STALE_RECORDER"
+    && recording.failureCode !== MEETING_URL_CHANGED_FAILURE_CODE
+    && recording.failureCode !== DUPLICATE_RECORDER_FAILURE_CODE;
+}
+
+export async function getMeetingRecorderCoverageReadiness(workspaceId: string, now = new Date()) {
+  const [featureEnabled, config] = await Promise.all([
+    isRecorderFeatureEnabled(workspaceId),
+    getEffectiveRecorderConfig(workspaceId),
+  ]);
+  const providerChecks = providerRuntimeChecks(config);
+  const providerConfigOk = providerCanSchedule(config);
+  const to = new Date(now.getTime() + RECORDER_CALENDAR_SYNC_LOOKAHEAD_MS);
+  const meetings = await prisma.meeting.findMany({
+    where: {
+      workspaceId,
+      status: "SCHEDULED",
+      archivedAt: null,
+      recordedAt: { gte: now, lte: to },
+    },
+    orderBy: { recordedAt: "asc" },
+    take: 100,
+    select: {
+      id: true,
+      seriesId: true,
+      recordedAt: true,
+      scheduledEndAt: true,
+      meetingUrl: true,
+      series: {
+        select: {
+          meetingUrl: true,
+        },
+      },
+      recordings: {
+        where: {
+          status: { in: [...ACTIVE_RECORDING_STATUSES, "COMPLETED", "FAILED"] },
+        },
+        select: {
+          status: true,
+          meetingUrl: true,
+          failureCode: true,
+        },
+      },
+    },
+  });
+
+  const blockerCounts = emptyRecorderCoverageCounts();
+  let eligible = 0;
+  const coverage = meetings.map((meeting) => {
+    const effectiveUrl = effectiveMeetingRecorderUrl(meeting);
+    const recorderUrl = normalizeRecorderMeetingUrl(effectiveUrl);
+    const blockers = new Set<RecorderCoverageBlockerReason>();
+    if (!effectiveUrl) {
+      blockers.add("no_url");
+    } else if (!recorderUrl?.providerSchedulable) {
+      blockers.add("url_unsupported");
+    }
+    if (!featureEnabled || !config.enabled) {
+      blockers.add("recorder_disabled");
+    }
+    if (!config.autoRecordEnabled) {
+      blockers.add("auto_recording_off");
+    }
+    if (!providerConfigOk) {
+      blockers.add("no_provider_config");
+    }
+    if (meeting.recordedAt.getTime() - now.getTime() <= AUTO_SCHEDULE_MIN_LEAD_MS) {
+      blockers.add("within_lead_window");
+    }
+
+    const normalizedEffectiveUrl = recorderUrl?.url ?? null;
+    const covered = meeting.recordings.some((recording) => recordingCoversMeeting(recording, normalizedEffectiveUrl));
+    if (covered) {
+      blockers.add("already_covered");
+    } else if (meeting.recordings.some(recordingShowsSchedulingFailure)) {
+      blockers.add("provider_scheduling_failed");
+    }
+
+    const blockerReasons = [...blockers];
+    if (blockerReasons.length === 0) {
+      eligible += 1;
+    } else {
+      for (const reason of blockerReasons) {
+        blockerCounts[reason] += 1;
+      }
+    }
+
+    return {
+      meetingId: meeting.id,
+      seriesId: meeting.seriesId,
+      recordedAt: meeting.recordedAt,
+      scheduledEndAt: meeting.scheduledEndAt,
+      urlKind: recorderUrl?.kind ?? null,
+      hasOccurrenceUrl: Boolean(meeting.meetingUrl),
+      hasSeriesUrl: Boolean(!meeting.meetingUrl && meeting.series?.meetingUrl),
+      hasRecorderCoverage: covered,
+      blockerReasons,
+    };
+  });
+
+  return {
+    workspaceId,
+    generatedAt: now,
+    window: { from: now, to },
+    featureEnabled,
+    configEnabled: Boolean(config.enabled),
+    autoRecordEnabled: Boolean(config.autoRecordEnabled),
+    providerConfigOk,
+    providerChecks,
+    counts: {
+      total: coverage.length,
+      eligible,
+      blockers: blockerCounts,
+    },
+    meetings: coverage,
+  };
+}
+
+export async function ensureUpcomingScheduledMeetingRecorderCoverage(workspaceId: string, now = new Date()) {
+  const readiness = await getMeetingRecorderCoverageReadiness(workspaceId, now);
+  let scheduled = 0;
+  let providerSchedulingFailed = 0;
+  const attemptedMeetingIds: string[] = [];
+
+  for (const meeting of readiness.meetings) {
+    if (meeting.blockerReasons.length > 0) continue;
+    attemptedMeetingIds.push(meeting.meetingId);
+    try {
+      const recording = await scheduleMeetingRecording(systemRecorderActor(workspaceId), {
+        workspaceId,
+        meetingId: meeting.meetingId,
+        mode: "auto",
+      });
+      if (recording.status === "FAILED") {
+        providerSchedulingFailed += 1;
+      } else {
+        scheduled += 1;
+      }
+    } catch (error) {
+      providerSchedulingFailed += 1;
+      recorderLog("warn", "coverage_schedule_failed", {
+        workspaceId,
+        meetingId: meeting.meetingId,
+        failureCode: providerFailureCode(error),
+      });
+    }
+  }
+
+  return {
+    ...readiness,
+    attemptedMeetingIds,
+    scheduled,
+    providerSchedulingFailed,
+  };
 }
 
 async function attemptProviderSchedule(params: {
@@ -3808,6 +4081,7 @@ export async function reconcileMeetingRecorders(workspaceId: string) {
       failureCode: "stale_recorder",
     });
   }
+  const coverage = await ensureUpcomingScheduledMeetingRecorderCoverage(workspaceId);
   await prisma.meetingRecorderProviderEvent.updateMany({
     where: {
       workspaceId,
@@ -3821,6 +4095,9 @@ export async function reconcileMeetingRecorders(workspaceId: string) {
     staleFailed,
     terminalFailed,
     recoveredTranscripts,
+    scheduledUpcomingRecorders: coverage.scheduled,
+    upcomingRecorderCoverage: coverage.counts,
+    providerSchedulingFailures: coverage.providerSchedulingFailed,
     duplicateRecordersSkipped: duplicateCleanup.duplicateRecordersSkipped,
     duplicateProviderBotsCancelled: duplicateCleanup.duplicateProviderBotsCancelled,
     canonicalRecordingsRestored: duplicateCleanup.canonicalRecordingsRestored,

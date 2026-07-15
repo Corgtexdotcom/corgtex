@@ -40,6 +40,7 @@ describe("POST /api/workspaces/[workspaceId]/meetings/schedule", () => {
           startsAt: "2026-04-30T17:00:00.000Z",
           scheduledEndAt: "2026-04-30T18:00:00.000Z",
           recurrenceRule: "FREQ=WEEKLY",
+          meetingUrl: "https://teams.microsoft.com/meet/12345678901234?p=abc",
           participantEmails: ["jan@example.com"],
         }),
       }) as never,
@@ -55,6 +56,7 @@ describe("POST /api/workspaces/[workspaceId]/meetings/schedule", () => {
         startsAt: new Date("2026-04-30T17:00:00.000Z"),
         scheduledEndAt: new Date("2026-04-30T18:00:00.000Z"),
         recurrenceRule: "FREQ=WEEKLY",
+        meetingUrl: "https://teams.microsoft.com/meet/12345678901234?p=abc",
         participantEmails: ["jan@example.com"],
       }),
     );
