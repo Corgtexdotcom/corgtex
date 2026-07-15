@@ -522,7 +522,20 @@ describe("workspace briefing", () => {
       where: expect.objectContaining({ workspaceId: "ws-1", isPrivate: false, archivedAt: null }),
     }));
     expect(prismaMock.adviceRequest.findMany).toHaveBeenCalledWith(expect.objectContaining({
-      where: expect.objectContaining({ workspaceId: "ws-1", audienceType: "WORKSPACE", status: "ACTIVE" }),
+      where: expect.objectContaining({
+        workspaceId: "ws-1",
+        audienceType: "WORKSPACE",
+        OR: [
+          { status: "ACTIVE" },
+          {
+            status: "COMPLETED",
+            OR: [
+              { completedAt: { gte: new Date("2026-04-29T00:00:00.000Z") } },
+              { updatedAt: { gte: new Date("2026-04-29T00:00:00.000Z") } },
+            ],
+          },
+        ],
+      }),
     }));
   });
 
@@ -606,9 +619,19 @@ describe("workspace briefing", () => {
       messageMd: "Please advise on the support risk.",
       status: "ACTIVE",
       deadlineAt: null,
+      completedAt: null,
       createdAt: new Date("2026-04-30T08:00:00.000Z"),
       updatedAt: new Date("2026-04-30T09:00:00.000Z"),
       process: { subjectType: "TENSION", subjectId: "tension-1" },
+    }, {
+      id: "request-2",
+      messageMd: "The support risk decision was completed.",
+      status: "COMPLETED",
+      deadlineAt: null,
+      completedAt: new Date("2026-04-30T10:00:00.000Z"),
+      createdAt: new Date("2026-04-29T08:00:00.000Z"),
+      updatedAt: new Date("2026-04-30T10:00:00.000Z"),
+      process: { subjectType: "PROPOSAL", subjectId: "proposal-1" },
     }]);
 
     const candidates = await collectWorkspaceBriefingCandidates({
@@ -620,7 +643,15 @@ describe("workspace briefing", () => {
       expect.objectContaining({
         sourceType: "ADVICE_REQUEST",
         sourceId: "request-1",
+        title: "Advice request awaiting input",
         href: "/workspaces/ws-1/tensions/tension-1",
+      }),
+      expect.objectContaining({
+        sourceType: "ADVICE_REQUEST",
+        sourceId: "request-2",
+        title: "Advice request completed",
+        href: "/workspaces/ws-1/proposals/proposal-1",
+        occurredAt: new Date("2026-04-30T10:00:00.000Z"),
       }),
     ]));
   });

@@ -825,7 +825,16 @@ export async function collectWorkspaceBriefingCandidates(params: {
       where: {
         workspaceId: params.workspaceId,
         audienceType: "WORKSPACE",
-        status: "ACTIVE",
+        OR: [
+          { status: "ACTIVE" },
+          {
+            status: "COMPLETED",
+            OR: [
+              { completedAt: { gte: params.since } },
+              { updatedAt: { gte: params.since } },
+            ],
+          },
+        ],
       },
       orderBy: [{ deadlineAt: "asc" }, { updatedAt: "desc" }],
       take: 30,
@@ -834,6 +843,7 @@ export async function collectWorkspaceBriefingCandidates(params: {
         messageMd: true,
         status: true,
         deadlineAt: true,
+        completedAt: true,
         createdAt: true,
         updatedAt: true,
         process: { select: { subjectType: true, subjectId: true } },
@@ -987,10 +997,10 @@ export async function collectWorkspaceBriefingCandidates(params: {
       workspaceId: params.workspaceId,
       sourceType: "ADVICE_REQUEST" as const,
       sourceId: request.id,
-      title: "Advice request awaiting input",
+      title: request.status === "ACTIVE" ? "Advice request awaiting input" : "Advice request completed",
       summaryMd: compactText(request.messageMd, 700),
       href: adviceSubjectHref(params.workspaceId, request.process.subjectType, request.process.subjectId),
-      occurredAt: request.updatedAt ?? request.createdAt,
+      occurredAt: request.completedAt ?? request.updatedAt ?? request.createdAt,
       updatedAt: request.updatedAt,
       status: request.status,
       dueAt: request.deadlineAt,
