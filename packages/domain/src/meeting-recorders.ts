@@ -2941,6 +2941,38 @@ export async function getMeetingRecorderCoverageReadiness(workspaceId: string, n
   };
 }
 
+export async function setMeetingRecorderAutoRecordingForSupport(workspaceId: string, enabled: boolean) {
+  if (enabled) {
+    const latestSmoke = await prisma.meetingRecorderSmokeRun.findFirst({
+      where: {
+        workspaceId,
+        status: "COMPLETED",
+      },
+      orderBy: { createdAt: "desc" },
+    });
+    invariant(latestSmoke, 400, "RECORDER_SMOKE_REQUIRED", "A completed recorder smoke run is required before enabling auto-recording.");
+  }
+
+  const defaults = defaultConfigData();
+  const config = await prisma.workspaceMeetingRecorderConfig.upsert({
+    where: { workspaceId },
+    update: { autoRecordEnabled: enabled },
+    create: {
+      workspaceId,
+      ...defaults,
+      autoRecordEnabled: enabled,
+      providerSettings: Prisma.JsonNull,
+    },
+  });
+  const readiness = await getMeetingRecorderCoverageReadiness(workspaceId);
+  return {
+    workspaceId,
+    autoRecordEnabled: config.autoRecordEnabled,
+    configEnabled: config.enabled,
+    readiness,
+  };
+}
+
 export async function ensureUpcomingScheduledMeetingRecorderCoverage(workspaceId: string, now = new Date()) {
   const readiness = await getMeetingRecorderCoverageReadiness(workspaceId, now);
   let scheduled = 0;

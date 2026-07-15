@@ -6333,6 +6333,47 @@ describe("control plane domain", () => {
     expect(result).toMatchObject({ id: "op-1", status: "COMPLETED" });
   });
 
+  it("routes remote recorder policy and coverage support operations through audited MCP tools", async () => {
+    const { runCustomerSupportOperation } = await import("./control-plane");
+    prismaMock.supportOperation.create.mockResolvedValue({
+      id: "op-recorder",
+      action: "meeting_recorders.set_auto_recording",
+    });
+    prismaMock.customerDeployment.findUnique.mockResolvedValue({
+      id: "inst-1",
+      label: "Acme",
+      url: "https://customer.test",
+      supportMcpUrl: "https://customer.test/api/mcp",
+      supportCredentialEnc: "encrypted-token",
+      supportConnectorStatus: "connected",
+    });
+    prismaMock.supportOperation.update.mockResolvedValue({
+      id: "op-recorder",
+      status: "COMPLETED",
+    });
+
+    await runCustomerSupportOperation(operatorActor, {
+      deploymentId: "inst-1",
+      action: "meeting_recorders.set_auto_recording",
+      reason: "Customer approved recorder coverage policy.",
+      arguments: { enabled: true },
+    });
+    await runCustomerSupportOperation(operatorActor, {
+      deploymentId: "inst-1",
+      action: "meeting_recorders.ensure_coverage",
+      reason: "Ensure recurring recorder coverage after policy update.",
+      arguments: {},
+    });
+
+    const toolNames = vi.mocked(fetch).mock.calls
+      .map(([, init]) => JSON.parse(String(init?.body)).params?.name)
+      .filter((name) => name !== "record_support_audit");
+    expect(toolNames).toEqual([
+      "set_meeting_recorder_auto_recording",
+      "ensure_meeting_recorder_coverage",
+    ]);
+  });
+
   it("fails support operations when the remote MCP returns a scope error as text", async () => {
     const { runCustomerSupportOperation } = await import("./control-plane");
     prismaMock.supportOperation.create.mockResolvedValueOnce({

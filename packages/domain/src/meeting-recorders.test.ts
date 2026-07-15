@@ -1794,6 +1794,69 @@ describe("meeting recorder domain", () => {
     }
   });
 
+  it("requires completed smoke proof before support enables auto-recording", async () => {
+    const { setMeetingRecorderAutoRecordingForSupport } = await import("./meeting-recorders");
+
+    await expect(setMeetingRecorderAutoRecordingForSupport("workspace-1", true)).rejects.toMatchObject({
+      status: 400,
+      code: "RECORDER_SMOKE_REQUIRED",
+    });
+
+    expect(prismaMock.workspaceMeetingRecorderConfig.upsert).not.toHaveBeenCalled();
+  });
+
+  it("allows support to disable auto-recording without smoke proof", async () => {
+    const { setMeetingRecorderAutoRecordingForSupport } = await import("./meeting-recorders");
+    prismaMock.workspaceMeetingRecorderConfig.upsert.mockResolvedValue({
+      workspaceId: "workspace-1",
+      enabled: true,
+      defaultProvider: "RECALL_AI",
+      fallbackProvider: "MEETING_BAAS",
+      botName: "Corgtex Recorder",
+      entryMessage: "Recording notice",
+      autoRecordEnabled: false,
+      monthlyMinuteCap: 6000,
+    });
+
+    const result = await setMeetingRecorderAutoRecordingForSupport("workspace-1", false);
+
+    expect(prismaMock.meetingRecorderSmokeRun.findFirst).not.toHaveBeenCalled();
+    expect(prismaMock.workspaceMeetingRecorderConfig.upsert).toHaveBeenCalledWith(expect.objectContaining({
+      update: { autoRecordEnabled: false },
+    }));
+    expect(result.autoRecordEnabled).toBe(false);
+  });
+
+  it("allows support to enable auto-recording after completed smoke proof", async () => {
+    const { setMeetingRecorderAutoRecordingForSupport } = await import("./meeting-recorders");
+    prismaMock.meetingRecorderSmokeRun.findFirst.mockResolvedValue({
+      id: "smoke-1",
+      workspaceId: "workspace-1",
+      status: "COMPLETED",
+      createdAt: new Date("2026-06-24T15:00:00.000Z"),
+    });
+    prismaMock.workspaceMeetingRecorderConfig.upsert.mockResolvedValue({
+      workspaceId: "workspace-1",
+      enabled: true,
+      defaultProvider: "RECALL_AI",
+      fallbackProvider: "MEETING_BAAS",
+      botName: "Corgtex Recorder",
+      entryMessage: "Recording notice",
+      autoRecordEnabled: true,
+      monthlyMinuteCap: 6000,
+    });
+
+    const result = await setMeetingRecorderAutoRecordingForSupport("workspace-1", true);
+
+    expect(prismaMock.meetingRecorderSmokeRun.findFirst).toHaveBeenCalledWith(expect.objectContaining({
+      where: {
+        workspaceId: "workspace-1",
+        status: "COMPLETED",
+      },
+    }));
+    expect(result.autoRecordEnabled).toBe(true);
+  });
+
   it("ensures upcoming recorder coverage once and skips already covered meetings", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-06-24T16:00:00.000Z"));

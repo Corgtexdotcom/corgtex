@@ -85,6 +85,8 @@ describe("delegated action policy", () => {
       "reveal_tool_link_credential",
       "set_feature_flag",
       "set_meeting_series_recorder_url",
+      "set_meeting_recorder_auto_recording",
+      "ensure_meeting_recorder_coverage",
       "record_support_audit",
       "support_reopen_resolved_proposals",
       "update_agent_policy",

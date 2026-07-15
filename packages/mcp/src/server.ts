@@ -54,8 +54,10 @@ import {
   listMeetings,
   getMeeting,
   createMeeting,
+  ensureUpcomingScheduledMeetingRecorderCoverage,
   getMeetingRecorderCoverageReadiness,
   intakeMeetingTranscript,
+  setMeetingRecorderAutoRecordingForSupport,
   setMeetingSeriesRecorderUrl,
   deleteMeeting,
   createArticle,
@@ -3340,6 +3342,37 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
         hasMeetingUrl: Boolean(result.series.meetingUrl),
         webUrl: webUrl(workspaceId, `/meetings`),
       });
+    },
+  );
+
+  tool(
+    "set_meeting_recorder_auto_recording",
+    "Enable or disable automatic recorder scheduling for this workspace. Support connector only.",
+    {
+      enabled: z.boolean(),
+    },
+    async ({ enabled }: { enabled: boolean }) => {
+      requireScope(sessionCtx, "meetings:write");
+      requireSupportCredential();
+      const result = await setMeetingRecorderAutoRecordingForSupport(workspaceId, enabled);
+      return jsonResult({
+        workspaceId: result.workspaceId,
+        configEnabled: result.configEnabled,
+        autoRecordEnabled: result.autoRecordEnabled,
+        readiness: result.readiness,
+      });
+    },
+  );
+
+  tool(
+    "ensure_meeting_recorder_coverage",
+    "Run idempotent automatic recorder coverage scheduling for upcoming scheduled meetings. Support connector only.",
+    {},
+    async () => {
+      requireScope(sessionCtx, "meetings:write");
+      requireSupportCredential();
+      const result = await ensureUpcomingScheduledMeetingRecorderCoverage(workspaceId);
+      return jsonResult(result);
     },
   );
 
