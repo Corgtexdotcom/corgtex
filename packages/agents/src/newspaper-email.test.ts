@@ -6,6 +6,7 @@ import {
   renderNewspaperDigestMarkdown,
   renderNewspaperEditionEmailHtml,
   renderNewspaperEmailHtml,
+  renderWorkspaceBriefingEmailHtml,
   withNewspaperAdviceRequests,
 } from "./newspaper-email";
 
@@ -151,6 +152,42 @@ describe("newspaper email rendering", () => {
     expect(html).toContain("Shared edition intro.");
     expect(html).toContain("Built / Shipped Work");
     expect(html).toContain("Stored edition powers the newsletter.");
+  });
+
+  it("renders newsletter html from a stored workspace briefing", () => {
+    const html = renderWorkspaceBriefingEmailHtml({
+      briefing: {
+        title: "Daily Workspace Briefing - 2026-07-11",
+        briefingJson: {
+          title: "Daily Workspace Briefing - 2026-07-11",
+          period: "DAILY",
+          dateKey: "2026-07-11",
+          generatedAt: "2026-07-11T12:00:00.000Z",
+          introMd: "Shared briefing intro.",
+          items: [{
+            kind: "BUILD_ARTIFACT",
+            title: "Briefing system",
+            summaryMd: "The canonical briefing powers the newsletter.",
+            whyItMattersMd: "One artifact now feeds homepage and email.",
+            prominence: "lead",
+            sourceRefs: [],
+            href: null,
+            occurredAt: "2026-07-11T12:00:00.000Z",
+            confidence: 0.9,
+          }],
+          sourceRefs: [],
+          sourceCounts: { BUILD_ARTIFACT: 1 },
+        },
+      },
+      workspaceName: "Acme",
+      recipientName: "Pat",
+      workspaceUrl: "https://app.example.com/workspaces/ws-1",
+    });
+
+    expect(html).toContain("Daily Workspace Briefing - 2026-07-11");
+    expect(html).toContain("Shared briefing intro.");
+    expect(html).toContain("Built / Shipped Work");
+    expect(html).toContain("The canonical briefing powers the newsletter.");
   });
 
   it("uses deterministic markdown output", () => {

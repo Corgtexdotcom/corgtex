@@ -1,10 +1,12 @@
 import {
   computeNewspaperLayout,
   countUnreadNotifications,
+  getLatestWorkspaceBriefing,
   listNewspaperEditions,
   listMembers, listNotifications, listTensions,
   listArticles, listMeetings,
-  normalizeNewspaperEditionDigest
+  normalizeNewspaperEditionDigest,
+  normalizeWorkspaceBriefingPayload
 } from "@corgtex/domain";
 import { prisma, workspaceBranding } from "@corgtex/shared";
 import { requirePageActor } from "@/lib/auth";
@@ -42,6 +44,7 @@ export default async function WorkspaceDashboard({
     notifications,
     unreadNotificationsCount,
     articlesResult,
+    latestWorkspaceBriefing,
     newspaperEditions,
     meetings,
     openProposalCandidates,
@@ -57,6 +60,7 @@ export default async function WorkspaceDashboard({
     listNotifications(actor, workspaceId, { take: 5, unreadOnly: true }),
     actor.kind === "user" ? countUnreadNotifications(actor.user.id, workspaceId) : Promise.resolve(0),
     listArticles(actor, { workspaceId, take: 50 }),
+    getLatestWorkspaceBriefing({ actor, workspaceId, period: "DAILY" }),
     listNewspaperEditions(actor, workspaceId, { take: 1 }),
     listMeetings(workspaceId, { status: "COMPLETED" }),
     prisma.proposal.findMany({
@@ -200,6 +204,10 @@ export default async function WorkspaceDashboard({
     ? normalizeNewspaperEditionDigest(latestNewspaperEdition)
     : null;
   const latestEditionSections = latestEditionDigest?.sections ?? [];
+  const latestBriefing = latestWorkspaceBriefing
+    ? normalizeWorkspaceBriefingPayload(latestWorkspaceBriefing.briefingJson)
+    : null;
+  const briefingItems = latestBriefing?.items ?? [];
   const dashboardFeedItems = selectDashboardFeedItems({
     articles: allArticles,
     meetings,
@@ -284,6 +292,13 @@ export default async function WorkspaceDashboard({
       excerptMaxLength: layoutSection.excerptMaxLength,
     }];
   });
+  const cappedBriefingItems = briefingItems
+    .filter((item) => item.prominence !== "reference")
+    .slice(0, 8);
+  const referenceBriefingItems = briefingItems
+    .filter((item) => item.prominence === "reference")
+    .slice(0, 4);
+  const hasWorkspaceBriefing = !!latestWorkspaceBriefing && cappedBriefingItems.length > 0;
   const hasStoredEdition = !!latestNewspaperEdition && cappedEditionSections.length > 0;
   const knowledgeFeedLayout = dashboardSectionLayout("knowledgeFeed");
   const proposalLayout = dashboardSectionLayout("proposals");
@@ -298,7 +313,7 @@ export default async function WorkspaceDashboard({
     || teamActionItems.length > 0
     || openTensionItems.length > 0
     || myWorkItems.length > 0;
-  const hasDashboardContent = hasStoredEdition || cappedFeedItems.length > 0 || hasWorkRail;
+  const hasDashboardContent = hasWorkspaceBriefing || hasStoredEdition || cappedFeedItems.length > 0 || hasWorkRail;
   const hasStrategicDirection = strategicGoals.length > 0 || !!recentRecognition;
   const attentionPanel = totalAttentionItems > 0 ? (
     <section className="nr-rail-section nr-rail-section-attention">
@@ -376,8 +391,106 @@ export default async function WorkspaceDashboard({
       )}
 
       {hasDashboardContent && (
-      <section className="nr-dashboard-grid">
-        {hasStoredEdition && latestNewspaperEdition && latestEditionDigest ? (
+      <section className={`nr-dashboard-grid${hasWorkRail ? "" : " nr-dashboard-grid-single"}`}>
+        {hasWorkspaceBriefing && latestWorkspaceBriefing && latestBriefing ? (
+          <div className="nr-knowledge-feed nr-workspace-briefing">
+            <div className="nr-section-heading-row">
+              <div>
+                <h2 className="nr-section-header">{t("latestWorkspaceBriefing")}</h2>
+                <div className="nr-feed-meta">
+                  <span>{latestBriefing.period === "DAILY" ? t("dailyEdition") : t("weeklyEdition")}</span>
+                  <span>·</span>
+                  <span suppressHydrationWarning>
+                    {t("generatedOn", {
+                      date: format.dateTime(latestWorkspaceBriefing.generatedAt, {
+                        month: "short",
+                        day: "numeric",
+                        hour: "numeric",
+                        minute: "2-digit",
+                      }),
+                    })}
+                  </span>
+                </div>
+              </div>
+            </div>
+            {latestBriefing.introMd && (
+              <MarkdownExcerpt markdown={latestBriefing.introMd} maxLength={360} as="p" className="nr-excerpt nr-edition-intro" />
+            )}
+            <div className="nr-briefing-list">
+              {cappedBriefingItems.map((item, index) => {
+                const occurredAt = new Date(item.occurredAt);
+                const isExternalHref = item.href?.startsWith("http://") || item.href?.startsWith("https://");
+                const sourceLink = item.href
+                  ? isExternalHref
+                    ? <a href={item.href} className="nr-link" target="_blank" rel="noopener noreferrer">{t("openSource")}</a>
+                    : <Link href={item.href} className="nr-link">{t("openSource")}</Link>
+                  : null;
+
+                return (
+                  <article
+                    key={`${item.kind}-${index}-${item.title}`}
+                    className={`nr-briefing-item nr-briefing-item-${item.prominence}`}
+                  >
+                    <div className="nr-feed-meta">
+                      <span>{item.kind.replace(/_/g, " ")}</span>
+                      <span>·</span>
+                      <span suppressHydrationWarning>
+                        {Number.isNaN(occurredAt.getTime()) ? latestBriefing.dateKey : ageText(occurredAt)}
+                      </span>
+                    </div>
+                    <h3 className="nr-feed-title">{item.title}</h3>
+                    <MarkdownExcerpt
+                      markdown={item.summaryMd}
+                      maxLength={item.prominence === "lead" ? 520 : item.prominence === "standard" ? 320 : 180}
+                      as="p"
+                      className="nr-excerpt"
+                    />
+                    {item.prominence !== "compact" && item.whyItMattersMd && (
+                      <p className="nr-briefing-why">
+                        <span>{t("whyItMatters")}:</span>{" "}
+                        <MarkdownExcerpt markdown={item.whyItMattersMd} maxLength={220} as="span" />
+                      </p>
+                    )}
+                    {sourceLink && (
+                      <div className="nr-briefing-actions">
+                        {sourceLink}
+                      </div>
+                    )}
+                  </article>
+                );
+              })}
+            </div>
+            {referenceBriefingItems.length > 0 && (
+              <div className="nr-briefing-reference">
+                {referenceBriefingItems.map((item) => {
+                  const isExternalHref = item.href?.startsWith("http://") || item.href?.startsWith("https://");
+                  const content = (
+                    <>
+                      <span>{item.kind.replace(/_/g, " ")}</span>
+                      <strong>{item.title}</strong>
+                    </>
+                  );
+                  if (!item.href) {
+                    return (
+                    <div key={`${item.kind}-${item.title}`} className="nr-briefing-reference-item">
+                      {content}
+                    </div>
+                    );
+                  }
+                  return isExternalHref ? (
+                    <a key={`${item.kind}-${item.title}`} href={item.href} className="nr-briefing-reference-item" target="_blank" rel="noopener noreferrer">
+                      {content}
+                    </a>
+                  ) : (
+                    <Link key={`${item.kind}-${item.title}`} href={item.href} className="nr-briefing-reference-item">
+                      {content}
+                    </Link>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        ) : hasStoredEdition && latestNewspaperEdition && latestEditionDigest ? (
           <div className="nr-knowledge-feed">
             <div className="nr-section-heading-row">
               <div>

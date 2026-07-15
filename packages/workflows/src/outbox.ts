@@ -1419,8 +1419,12 @@ export async function scheduleDailyJobs() {
     const hasWeeklyRecipients = workspaceMembers.some((member) => (
       (member.newspaperCadence ?? workspaceCadence) === "WEEKLY"
     ));
+    const hasAnyNewspaperRecipient = workspaceMembers.some((member) => (
+      (member.newspaperCadence ?? workspaceCadence) !== "OFF"
+    ));
+    const shouldGenerateDailyBriefing = workspaceCadence !== "OFF" || hasAnyNewspaperRecipient;
 
-    if (hasDailyRecipients && isNewspaperScheduleDue({ now, schedule: setting, cadence: "DAILY" })) {
+    if (shouldGenerateDailyBriefing && isNewspaperScheduleDue({ now, schedule: setting, cadence: "DAILY" })) {
       newspaperSchedules.push({
         workspaceId: workspace.id,
         cadence: "DAILY",
@@ -1431,7 +1435,8 @@ export async function scheduleDailyJobs() {
       logger.info("newspaper_schedule_skipped", {
         workspaceId: workspace.id,
         cadence: "DAILY",
-        reason: hasDailyRecipients ? "outside_schedule_window" : "no_daily_recipients",
+        reason: shouldGenerateDailyBriefing ? "outside_schedule_window" : "daily_briefing_off",
+        dailyRecipients: hasDailyRecipients,
       });
     }
 

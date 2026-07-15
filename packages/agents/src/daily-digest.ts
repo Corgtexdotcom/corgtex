@@ -9,7 +9,14 @@ import {
   isHumanNewspaperRecipientIdentity,
   normalizeNewspaperCadence,
   recordNewspaperDelivery,
+  buildWorkspaceBriefingFromCandidates,
+  buildWorkspaceBriefingFromDigest,
+  collectWorkspaceBriefingCandidates,
+  renderWorkspaceBriefingMarkdown,
   upsertNewspaperEdition,
+  upsertWorkspaceBriefing,
+  workspaceBriefingPeriodFromCadence,
+  workspaceBriefingToNewspaperDigest,
 } from "@corgtex/domain";
 import { 
   batchIngestDailyConversations, 
@@ -23,7 +30,7 @@ import {
   normalizeNewspaperDigestPayload,
   normalizeNewspaperPersonalizationPayload,
   renderNewspaperDigestMarkdown,
-  renderNewspaperEditionEmailHtml,
+  renderWorkspaceBriefingEmailHtml,
   withNewspaperAdviceRequests,
 } from "./newspaper-email";
 
@@ -634,7 +641,6 @@ async function loadPendingAdviceRequestsByMember(params: {
       workspaceId: params.workspaceId,
       status: "ACTIVE",
       OR: [
-        { audienceType: "WORKSPACE" },
         {
           audienceType: "MEMBERS",
           recipients: {
@@ -699,8 +705,7 @@ async function loadPendingAdviceRequestsByMember(params: {
 
     const explicitRecipientMemberIds = new Set(request.recipients.map((recipient) => recipient.memberId));
     for (const member of params.recipientMembers) {
-      const isRecipient = request.audienceType === "WORKSPACE"
-        || (request.audienceType === "MEMBERS" && explicitRecipientMemberIds.has(member.id))
+      const isRecipient = (request.audienceType === "MEMBERS" && explicitRecipientMemberIds.has(member.id))
         || (request.audienceType === "CIRCLE" && request.targetCircleId !== null && (circleIdsByMemberId.get(member.id)?.has(request.targetCircleId) ?? false));
       if (!isRecipient) continue;
 
@@ -1132,18 +1137,8 @@ export async function runDailyDigest(params: {
       workspaceId: params.workspaceId,
       cadence,
       reason: "no_matching_recipients",
+      generationContinues: true,
     });
-    return {
-      success: true,
-      message: `No active members configured for the ${cadence.toLowerCase()} newspaper.`,
-      cadence,
-      processedSessions: 0,
-      processedSlackMessages: 0,
-      updatedProfiles: 0,
-      sentEmails: 0,
-      failedEmails: 0,
-      skippedEmails: 0,
-    };
   }
   const workspace = await prisma.workspace.findUnique({
     where: { id: params.workspaceId },
@@ -1223,12 +1218,15 @@ export async function runDailyDigest(params: {
     workspaceId: params.workspaceId,
     since,
   });
+  const briefingCandidates = await collectWorkspaceBriefingCandidates({
+    workspaceId: params.workspaceId,
+    since,
+  });
   const personalItemsByMemberId = buildPersonalActionItemsByMember({
     workspaceId: params.workspaceId,
     pendingAdviceByMemberId,
     openActions: operatingInputs.openActions,
   });
-  const hasPersonalActionItems = Array.from(personalItemsByMemberId.values()).some((items) => items.length > 0);
   const sourceCounts = buildDigestSourceCounts({
     operatingInputs,
     sessions,
@@ -1241,40 +1239,14 @@ export async function runDailyDigest(params: {
   const digestSlug = `${cadence.toLowerCase()}-newspaper-${digestDateKey}`;
   const runKey = params.workflowJobId ?? `${params.workspaceId}:${cadence.toLowerCase()}-newspaper:${digestDateKey}`;
 
-  if (!hasDigestSourceInputs(sourceCounts)) {
-    const reason = "No digest inputs.";
-    logger.info("newspaper_delivery_skipped", {
+  const hasSourceInputs = hasDigestSourceInputs(sourceCounts);
+  if (!hasSourceInputs) {
+    logger.info("workspace_briefing_quiet_day", {
       workspaceId: params.workspaceId,
       workflowJobId: params.workflowJobId ?? null,
       cadence,
-      reason: "no_digest_inputs",
       sourceCounts,
     });
-    for (const member of recipientMembers) {
-      await recordNewspaperDelivery({
-        workspaceId: params.workspaceId,
-        workflowJobId: params.workflowJobId ?? null,
-        memberId: member.id,
-        kind: "MEMBER_NEWSPAPER",
-        cadence,
-        runKey,
-        recipientEmail: member.user.email,
-        subject: `${digestTitle} - Your Personal Briefing`,
-        status: "SKIPPED",
-        error: reason,
-      });
-    }
-    return {
-      success: true,
-      message: "No operating activity to digest.",
-      cadence,
-      processedSessions: 0,
-      processedSlackMessages: 0,
-      updatedProfiles: 0,
-      sentEmails: 0,
-      failedEmails: 0,
-      skippedEmails: recipientMembers.length,
-    };
   }
 
   // 3. Extract member insights and update PERSON profiles
@@ -1415,70 +1387,69 @@ Rules:
     buildArtifacts.length > 0 ? `Built / PR activity for accomplishments and shipped work:\n${formatBuildArtifactDigestInput(buildArtifacts)}` : "",
   ].filter(Boolean).join("\n\n---\n\n").slice(0, 22000);
 
-  const digestExtraction = await defaultModelGateway.extract({
-    model,
-    workspaceId: params.workspaceId,
-    workflowJobId: params.workflowJobId,
-    agentRunId: params.agentRunId,
-    instruction: `Generate a structured ${cadenceLabel(cadence)} Newspaper for the workspace based on the last ${lookbackDays} day(s) of Corgtex operating data. Prioritize meeting summaries, decisions, resolved tensions, proposals, open actions, goals, roles, people changes, and source-backed updates. Return concise, non-empty section arrays only when the source material supports them.`,
-    schemaHint: `{
-      intro: string | null,
-      meetingBriefs: string[],
-      decisionsAndProposals: string[],
-      resolvedTensions: string[],
-      openActions: string[],
-      goalsProgress: string[],
-      rolesAndPeople: string[],
-      adviceRequests: string[],
-      builtWork: string[],
-      conversationHighlights: string[],
-      teamPulse: string[],
-      emergingTensions: string[],
-      otherUpdates: string[]
-    }`,
-    input: allTranscripts,
-  });
-  const digest = normalizeNewspaperDigestPayload(digestExtraction.output);
-
-  if (digest.sections.length === 0 && !hasPersonalActionItems) {
-    const reason = "No digest sections generated.";
-    logger.info("newspaper_delivery_skipped", {
-      workspaceId: params.workspaceId,
-      workflowJobId: params.workflowJobId ?? null,
-      cadence,
-      reason: "empty_digest_sections",
-    });
-    for (const member of recipientMembers) {
-      await recordNewspaperDelivery({
+  const digest = hasSourceInputs
+    ? normalizeNewspaperDigestPayload((await defaultModelGateway.extract({
+        model,
         workspaceId: params.workspaceId,
-        workflowJobId: params.workflowJobId ?? null,
-        memberId: member.id,
-        kind: "MEMBER_NEWSPAPER",
-        cadence,
-        runKey,
-        recipientEmail: member.user.email,
-        subject: `${digestTitle} - Your Personal Briefing`,
-        status: "SKIPPED",
-        error: reason,
+        workflowJobId: params.workflowJobId,
+        agentRunId: params.agentRunId,
+        instruction: `Generate a structured ${cadenceLabel(cadence)} Newspaper for the workspace based on the last ${lookbackDays} day(s) of Corgtex operating data. Prioritize meeting summaries, decisions, resolved tensions, proposals, open actions, goals, roles, people changes, and source-backed updates. Return concise, non-empty section arrays only when the source material supports them.`,
+        schemaHint: `{
+          intro: string | null,
+          meetingBriefs: string[],
+          decisionsAndProposals: string[],
+          resolvedTensions: string[],
+          openActions: string[],
+          goalsProgress: string[],
+          rolesAndPeople: string[],
+          adviceRequests: string[],
+          builtWork: string[],
+          conversationHighlights: string[],
+          teamPulse: string[],
+          emergingTensions: string[],
+          otherUpdates: string[]
+        }`,
+        input: allTranscripts,
+      })).output)
+    : normalizeNewspaperDigestPayload({});
+
+  const briefingPeriod = workspaceBriefingPeriodFromCadence(cadence);
+  const workspaceBriefing = digest.sections.length > 0
+    ? buildWorkspaceBriefingFromDigest({
+        workspaceId: params.workspaceId,
+        period: briefingPeriod,
+        dateKey: digestDateKey,
+        title: digestTitle,
+        digest,
+        candidates: briefingCandidates,
+      })
+    : buildWorkspaceBriefingFromCandidates({
+        workspaceId: params.workspaceId,
+        period: briefingPeriod,
+        dateKey: digestDateKey,
+        title: digestTitle,
+        candidates: briefingCandidates,
       });
-    }
-    return {
-      success: true,
-      digestSlug,
-      cadence,
-      processedSessions: sessions.length,
-      processedSlackMessages: slackMessages.length,
-      updatedProfiles: memberUpdates.length,
-      sentEmails: 0,
-      failedEmails: 0,
-      skippedEmails: recipientMembers.length,
-    };
-  }
+  const briefingBodyMd = renderWorkspaceBriefingMarkdown(workspaceBriefing);
+  const storedBriefing = await upsertWorkspaceBriefing({
+    workspaceId: params.workspaceId,
+    workflowJobId: params.workflowJobId ?? null,
+    period: briefingPeriod,
+    dateKey: digestDateKey,
+    runKey,
+    title: digestTitle,
+    modelUsed: model,
+    briefing: workspaceBriefing,
+    bodyMd: briefingBodyMd,
+    sourceCounts,
+  });
+  const editionDigest = workspaceBriefingToNewspaperDigest({
+    briefingJson: storedBriefing.briefingJson,
+  });
+  const shouldPersistNewspaperEdition = recipientMembers.length > 0;
 
-  let sharedEdition: { title: string; digestJson: unknown } | null = null;
-
-  if (digest.sections.length > 0) {
-    const digestBodyMd = renderNewspaperDigestMarkdown({ title: digestTitle, digest });
+  if (editionDigest.sections.length > 0 && shouldPersistNewspaperEdition) {
+    const digestBodyMd = renderNewspaperDigestMarkdown({ title: digestTitle, digest: editionDigest });
     const existingDigestArticle = await prisma.brainArticle.findUnique({
       where: {
         workspaceId_slug: {
@@ -1516,7 +1487,7 @@ Rules:
       });
     }
 
-    const storedEdition = await upsertNewspaperEdition({
+    await upsertNewspaperEdition({
       workspaceId: params.workspaceId,
       workflowJobId: params.workflowJobId ?? null,
       cadence,
@@ -1524,14 +1495,10 @@ Rules:
       runKey,
       title: digestTitle,
       slug: digestSlug,
-      digestJson: digest,
+      digestJson: editionDigest,
       bodyMd: digestBodyMd,
       sourceCounts,
     });
-    sharedEdition = {
-      title: storedEdition.title,
-      digestJson: storedEdition.digestJson,
-    };
 
     // 5. Rebuild backlinks
     await rebuildBacklinks(agentActor, { workspaceId: params.workspaceId });
@@ -1540,7 +1507,7 @@ Rules:
       workspaceId: params.workspaceId,
       workflowJobId: params.workflowJobId ?? null,
       slug: digestSlug,
-      reason: "personal_advice_requests_only",
+      reason: editionDigest.sections.length === 0 ? "empty_workspace_briefing_digest" : "no_matching_recipients",
     });
   }
 
@@ -1560,12 +1527,12 @@ Rules:
       })
     : [];
   const recipientPersonArticleBySlug = new Map(recipientPersonArticles.map((article) => [article.slug, article]));
-  const editionDigest = sharedEdition ? normalizeNewspaperDigestPayload(sharedEdition.digestJson) : digest;
+  const emailDigest = editionDigest;
 
   for (const member of recipientMembers) {
     const personArticle = recipientPersonArticleBySlug.get(`person-${member.user.id}`) ?? null;
-    const recipientDigest = withNewspaperAdviceRequests(editionDigest, personalItemsByMemberId.get(member.id) ?? []);
-    const subject = `${sharedEdition?.title ?? digestTitle} - Your Personal Briefing`;
+    const recipientDigest = withNewspaperAdviceRequests(emailDigest, personalItemsByMemberId.get(member.id) ?? []);
+    const subject = `${storedBriefing.title} - Your Personal Briefing`;
 
     if (recipientDigest.sections.length === 0) {
       const reason = "No digest sections generated for this recipient.";
@@ -1609,8 +1576,11 @@ Rules:
       workspaceId: params.workspaceId,
       workflowJobId: params.workflowJobId ?? null,
       runKey,
-      html: renderNewspaperEditionEmailHtml({
-        edition: sharedEdition ?? { title: digestTitle, digestJson: digest },
+      html: renderWorkspaceBriefingEmailHtml({
+        briefing: {
+          title: storedBriefing.title,
+          briefingJson: storedBriefing.briefingJson,
+        },
         workspaceName,
         recipientName: member.user.displayName || member.user.email,
         workspaceUrl: workspaceUrl(params.workspaceId),
@@ -1704,6 +1674,7 @@ Rules:
   return {
     success: true,
     digestSlug,
+    briefingId: storedBriefing.id,
     cadence,
     processedSessions: sessions.length,
     processedSlackMessages: slackMessages.length,

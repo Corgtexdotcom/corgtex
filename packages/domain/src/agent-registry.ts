@@ -104,7 +104,7 @@ export const AGENT_REGISTRY = {
     description: "Generates org-wide digest, updates person profiles, sends personalized emails.",
     category: "knowledge",
     canDisable: true,
-    defaultModelTier: "standard" as const,
+    defaultModelTier: "excellent" as const,
     costTier: "very-high" as const,
     inputs: ["24h conversation history"],
     outputs: ["digest article", "person profile updates", "personalized emails"],

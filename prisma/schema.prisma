@@ -56,6 +56,16 @@ enum NewspaperDeliveryKind {
   DEMO_WELCOME
 }
 
+enum WorkspaceBriefingPeriod {
+  DAILY
+  WEEKLY
+}
+
+enum WorkspaceBriefingStatus {
+  GENERATED
+  FAILED
+}
+
 enum MemberInviteRequestStatus {
   PENDING
   APPROVED
@@ -674,6 +684,7 @@ model Workspace {
   appSurfaceAssignments          AppSurfaceAssignment[]
   appSessions                    AppSession[]
   buildArtifacts                 BuildArtifact[]
+  workspaceBriefings             WorkspaceBriefing[]
   newspaperEditions              NewspaperEdition[]
   newspaperDeliveries            NewspaperDelivery[]
   newspaperTrackedLinks          NewspaperTrackedLink[]
@@ -2911,12 +2922,42 @@ model WorkflowJob {
   dependents            WorkflowJob[]          @relation("JobDependency")
   modelUsage            ModelUsage[]
   meetingAudioAssets    MeetingAudioAsset[]
+  workspaceBriefings    WorkspaceBriefing[]
   newspaperEditions     NewspaperEdition[]
   newspaperDeliveries   NewspaperDelivery[]
   newspaperTrackedLinks NewspaperTrackedLink[]
 
   @@index([status, runAfter, createdAt])
   @@index([dependsOnJobId])
+}
+
+model WorkspaceBriefing {
+  id             String                  @id @default(uuid())
+  workspaceId    String
+  workflowJobId  String?
+  period         WorkspaceBriefingPeriod
+  dateKey        String
+  runKey         String
+  title          String
+  status         WorkspaceBriefingStatus @default(GENERATED)
+  modelUsed      String?
+  introMd        String?                 @db.Text
+  bodyMd         String                  @db.Text
+  briefingJson   Json
+  sourceRefsJson Json
+  sourceCounts   Json?
+  generatedAt    DateTime                @default(now())
+  createdAt      DateTime                @default(now())
+  updatedAt      DateTime                @updatedAt
+
+  workspace   Workspace    @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  workflowJob WorkflowJob? @relation(fields: [workflowJobId], references: [id], onDelete: SetNull)
+
+  @@unique([workspaceId, period, dateKey])
+  @@unique([workspaceId, runKey])
+  @@index([workspaceId, generatedAt])
+  @@index([workflowJobId])
+  @@index([status])
 }
 
 model NewspaperEdition {
