@@ -1085,7 +1085,7 @@ function formatWorkspaceAdviceRequestDigestInput(requests: OperatingDigestInputs
   return requests.map((request) => {
     const subjectType = validAdviceSubjectType(request.process.subjectType);
     const subjectLabel = subjectType ? adviceSubjectLabel(subjectType) : "subject";
-    const statusLabel = request.status === "COMPLETED" ? "Completed workspace advice request" : "Active workspace advice request";
+    const statusLabel = request.status === "COMPLETED" ? "Advice request completed" : "Advice request awaiting input";
     const completed = formatAdviceDigestDate(request.completedAt);
     const deadline = formatAdviceDigestDate(request.deadlineAt);
     return [

@@ -553,7 +553,7 @@ describe("runDailyDigest", () => {
     const digestCall = extractMock.mock.calls.find(([request]) => request.instruction.startsWith("Generate a structured"));
     const digestInput = digestCall?.[0].input;
     expect(digestInput).toContain("Workspace advice requests and closures");
-    expect(digestInput).toContain("Completed workspace advice request");
+    expect(digestInput).toContain("Advice request completed");
     expect(digestInput).toContain("The support risk decision was completed after stakeholder review.");
     expect(digestInput).toContain("Completed: 2026-04-30");
     expect(digestInput).not.toContain("Deadline: 2026-04-29");
