@@ -238,6 +238,115 @@ describe("workspace briefing", () => {
     expect(briefing.items.findIndex((item) => item.title === "Older marketing proposal")).toBeGreaterThan(0);
   });
 
+  it("does not boost canceled advice requests or draft tensions", async () => {
+    const { scoreWorkspaceBriefingCandidate } = await import("./workspace-briefing");
+    const now = new Date("2026-04-30T12:00:00.000Z");
+    const activeAdviceScore = scoreWorkspaceBriefingCandidate(baseCandidate({
+      sourceType: "ADVICE_REQUEST",
+      sourceId: "advice-active",
+      title: "Critical review needed",
+      summaryMd: "Waiting on critical review before a decision can move forward.",
+      occurredAt: new Date("2026-04-30T10:00:00.000Z"),
+      updatedAt: new Date("2026-04-30T10:00:00.000Z"),
+      status: "ACTIVE",
+      strategicScore: 2,
+      actionabilityScore: 4,
+      evidenceScore: 2,
+      sourceRefs: [{ type: "ADVICE_REQUEST", id: "advice-active", label: "Critical review needed", href: "/workspaces/ws-1/proposals/p1" }],
+    }), now);
+    const canceledAdviceScore = scoreWorkspaceBriefingCandidate(baseCandidate({
+      sourceType: "ADVICE_REQUEST",
+      sourceId: "advice-canceled",
+      title: "Critical review needed",
+      summaryMd: "Waiting on critical review before a decision can move forward.",
+      occurredAt: new Date("2026-04-30T10:00:00.000Z"),
+      updatedAt: new Date("2026-04-30T10:00:00.000Z"),
+      status: "CANCELED",
+      strategicScore: 2,
+      actionabilityScore: 4,
+      evidenceScore: 2,
+      sourceRefs: [{ type: "ADVICE_REQUEST", id: "advice-canceled", label: "Critical review needed", href: "/workspaces/ws-1/proposals/p1" }],
+    }), now);
+    const draftTensionScore = scoreWorkspaceBriefingCandidate(baseCandidate({
+      sourceType: "TENSION",
+      sourceId: "tension-draft",
+      title: "Critical draft tension",
+      summaryMd: "A critical draft has not been published.",
+      occurredAt: new Date("2026-04-30T10:00:00.000Z"),
+      updatedAt: new Date("2026-04-30T10:00:00.000Z"),
+      status: "DRAFT",
+      strategicScore: 1,
+      actionabilityScore: 1,
+      evidenceScore: 2,
+      sourceRefs: [{ type: "TENSION", id: "tension-draft", label: "Critical draft tension", href: "/workspaces/ws-1/tensions/tension-draft" }],
+    }), now);
+
+    expect(activeAdviceScore).toBeGreaterThan(canceledAdviceScore);
+    expect(activeAdviceScore).toBeGreaterThan(draftTensionScore);
+  });
+
+  it("applies boosted candidate ranking to digest-derived briefing order", async () => {
+    const { buildWorkspaceBriefingFromDigest } = await import("./workspace-briefing");
+    const briefing = buildWorkspaceBriefingFromDigest({
+      workspaceId: "ws-1",
+      period: "DAILY",
+      dateKey: "2026-04-30",
+      title: "Daily Workspace Briefing - 2026-04-30",
+      generatedAt: new Date("2026-04-30T12:00:00.000Z"),
+      digest: {
+        intro: null,
+        sections: [
+          {
+            id: "decisionsAndProposals",
+            title: "Decisions & Proposals",
+            items: ["Team alignment proposal: A proposal from last week still needs input."],
+          },
+          {
+            id: "emergingTensions",
+            title: "Emerging Tensions",
+            items: ["Critical assumptions not being reviewed in weekly meetings: Critical assumptions are visible on the dashboard but are not being reviewed."],
+          },
+        ],
+      },
+      candidates: [
+        baseCandidate({
+          sourceType: "PROPOSAL",
+          sourceId: "proposal-current",
+          title: "Team alignment proposal",
+          summaryMd: "A proposal from last week still needs input.",
+          href: "/workspaces/ws-1/proposals/proposal-current",
+          occurredAt: new Date("2026-04-25T12:00:00.000Z"),
+          updatedAt: new Date("2026-04-25T12:00:00.000Z"),
+          status: "OPEN",
+          strategicScore: 3,
+          actionabilityScore: 3,
+          evidenceScore: 2,
+          sourceRefs: [{ type: "PROPOSAL", id: "proposal-current", label: "Team alignment proposal", href: "/workspaces/ws-1/proposals/proposal-current" }],
+        }),
+        baseCandidate({
+          sourceType: "TENSION",
+          sourceId: "tension-critical",
+          title: "Critical assumptions not being reviewed in weekly meetings",
+          summaryMd: "Critical assumptions are visible on the dashboard but are not being reviewed.",
+          href: "/workspaces/ws-1/tensions/tension-critical",
+          occurredAt: new Date("2026-04-30T10:00:00.000Z"),
+          updatedAt: new Date("2026-04-30T10:00:00.000Z"),
+          status: "PUBLISHED",
+          strategicScore: 1,
+          actionabilityScore: 1,
+          evidenceScore: 2,
+          sourceRefs: [{ type: "TENSION", id: "tension-critical", label: "Critical assumptions not being reviewed in weekly meetings", href: "/workspaces/ws-1/tensions/tension-critical" }],
+        }),
+      ],
+    });
+
+    expect(briefing.items[0]).toEqual(expect.objectContaining({
+      kind: "TENSION",
+      title: "Critical assumptions not being reviewed in weekly meetings",
+      prominence: "lead",
+    }));
+  });
+
   it("keeps stale strategic work visible without making it the lead", async () => {
     const { buildWorkspaceBriefingFromCandidates } = await import("./workspace-briefing");
     const briefing = buildWorkspaceBriefingFromCandidates({
