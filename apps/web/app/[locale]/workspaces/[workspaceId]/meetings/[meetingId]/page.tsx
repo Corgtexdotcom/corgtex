@@ -21,6 +21,7 @@ import { ArchivedItemBanner } from "@/lib/components/ArchivedItemBanner";
 import { UnavailableItemStatus } from "@/lib/components/UnavailableItemStatus";
 import { DeliberationThread } from "@/lib/components/DeliberationThread";
 import { DeliberationComposer } from "@/lib/components/DeliberationComposer";
+import { WorkItemConversationSurface } from "@/lib/components/WorkItemConversation";
 import { MarkdownEditor } from "@/lib/components/MarkdownEditor";
 import { getDeliberationTargets } from "@/lib/deliberation-targets";
 import { listDeliberationEntries } from "@corgtex/domain";
@@ -631,10 +632,15 @@ export default async function MeetingDetailPage({
         )}
       </div>
 
-      <section className="ws-section" style={{ marginBottom: 48 }}>
-        <h2 className="nr-section-header">{t("discussion")}</h2>
-        <DeliberationThread entries={mappedEntries} canResolve={!isArchived} resolveAction={resolveMeetingDeliberationAction} hiddenFields={{ workspaceId, parentId: meetingId }} />
-        {!isArchived && <div style={{ marginTop: 24 }}>
+      <WorkItemConversationSurface title={t("discussion")}>
+        <DeliberationThread
+          entries={mappedEntries}
+          canResolve={!isArchived}
+          resolveAction={resolveMeetingDeliberationAction}
+          hiddenFields={{ workspaceId, parentId: meetingId }}
+          emptyMessage={t("discussionEmpty")}
+        />
+        {!isArchived && (
           <DeliberationComposer 
             postAction={postMeetingDeliberationAction} 
             hiddenFields={{ workspaceId, parentId: meetingId }}
@@ -644,8 +650,8 @@ export default async function MeetingDetailPage({
               { value: "OBJECTION", label: t("entryObjection"), variant: "danger" },
             ]}
           />
-        </div>}
-      </section>
+        )}
+      </WorkItemConversationSurface>
     </>
   );
 }

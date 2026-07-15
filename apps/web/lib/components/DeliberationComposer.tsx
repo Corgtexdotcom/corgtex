@@ -137,7 +137,7 @@ export function DeliberationComposer({ postAction, hiddenFields, entryTypes, tar
 
   return (
     <div className="delib-composer">
-      {title && <h3 className="font-semibold mb-4 text-[1.1rem]">{title}</h3>}
+      {title && <h3 className="delib-composer-title">{title}</h3>}
       
       {message && (
         <div className="mb-4">
@@ -145,7 +145,7 @@ export function DeliberationComposer({ postAction, hiddenFields, entryTypes, tar
         </div>
       )}
 
-      <form onSubmit={handleSubmit} style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
+      <form onSubmit={handleSubmit} className="delib-composer-form">
         {Object.entries(hiddenFields).map(([k, v]) => (
           <input key={k} type="hidden" name={k} value={v} />
         ))}
