@@ -272,7 +272,22 @@ async function resolveProposalOwnerMemberId(
   tx: Prisma.TransactionClient,
   workspaceId: string,
   ownerMemberId?: string | null,
+  defaultAuthorUserId?: string | null,
 ) {
+  if (ownerMemberId === undefined) {
+    if (!defaultAuthorUserId) return null;
+    const defaultOwner = await tx.member.findFirst({
+      where: {
+        workspaceId,
+        userId: defaultAuthorUserId,
+        isActive: true,
+        ...humanMemberIdentityWhere(),
+      },
+      select: { id: true },
+    });
+    return defaultOwner?.id ?? null;
+  }
+
   const normalizedOwnerMemberId = ownerMemberId?.trim();
   if (!normalizedOwnerMemberId) return null;
   const owner = await tx.member.findFirst({
@@ -468,13 +483,13 @@ export async function createProposal(actor: AppActor, params: CreateProposalPara
   return prisma.$transaction(async (tx) => {
     const sourceTension = await loadVisibleSourceTension(tx, actor, membership, params.workspaceId, params.sourceTensionId);
     const relatedActionIds = await validateRelatedActions(tx, actor, membership, params.workspaceId, params.relatedActionIds);
-    const ownerMemberId = await resolveProposalOwnerMemberId(tx, params.workspaceId, params.ownerMemberId);
     let authorUserId = actor.kind === "user"
       ? actor.user.id
       : await actorUserIdForWorkspace(actor, params.workspaceId);
     if (actor.kind === "agent" && params.authorMemberId) {
       authorUserId = await resolveWorkspaceMemberUserId(tx, params.workspaceId, params.authorMemberId, "Proposal author must be an active member of this workspace.");
     }
+    const ownerMemberId = await resolveProposalOwnerMemberId(tx, params.workspaceId, params.ownerMemberId, authorUserId);
     const proposal = await tx.proposal.create({
       data: {
         workspaceId: params.workspaceId,
@@ -587,7 +602,6 @@ export async function createProposalFromTension(actor: AppActor, params: CreateP
     const sourceTension = await loadVisibleSourceTension(tx, actor, membership, params.workspaceId, params.sourceTensionId);
     invariant(sourceTension, 404, "NOT_FOUND", "Source tension not found.");
     const relatedActionIds = await validateRelatedActions(tx, actor, membership, params.workspaceId, params.relatedActionIds);
-    const ownerMemberId = await resolveProposalOwnerMemberId(tx, params.workspaceId, params.ownerMemberId);
     const draft = proposalDraftFromTension(sourceTension, params);
     let authorUserId = actor.kind === "user"
       ? actor.user.id
@@ -595,6 +609,7 @@ export async function createProposalFromTension(actor: AppActor, params: CreateP
     if (actor.kind === "agent" && params.authorMemberId) {
       authorUserId = await resolveWorkspaceMemberUserId(tx, params.workspaceId, params.authorMemberId, "Proposal author must be an active member of this workspace.");
     }
+    const ownerMemberId = await resolveProposalOwnerMemberId(tx, params.workspaceId, params.ownerMemberId, authorUserId);
 
     const proposal = await tx.proposal.create({
       data: {

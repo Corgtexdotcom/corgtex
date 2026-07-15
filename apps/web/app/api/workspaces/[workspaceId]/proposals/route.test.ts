@@ -172,6 +172,85 @@ describe("POST /api/workspaces/[workspaceId]/proposals", () => {
       },
     });
   });
+
+  it("omits ownerMemberId when the create body omits the owner", async () => {
+    createProposal.mockResolvedValue({
+      id: "proposal-3",
+      title: "Default to author",
+      status: "DRAFT",
+      priority: 0,
+      ownerMemberId: "member-default",
+    });
+    prisma.proposal.findFirst.mockResolvedValue({
+      id: "proposal-3",
+      title: "Default to author",
+      status: "DRAFT",
+      priority: 0,
+      ownerMemberId: "member-default",
+      ownerMember: { id: "member-default", user: { displayName: "Default Owner", email: "default@example.test" } },
+    });
+
+    const { POST } = await import("./route");
+    const response = await POST(
+      new NextRequest("http://localhost/api/workspaces/workspace-1/proposals", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          title: "Default to author",
+          bodyMd: "No owner field is sent.",
+        }),
+      }),
+      context(),
+    );
+
+    expect(response.status).toBe(201);
+    expect(createProposal.mock.calls[0]?.[1]).not.toHaveProperty("ownerMemberId");
+    await expect(response.json()).resolves.toMatchObject({
+      proposal: {
+        id: "proposal-3",
+        ownerMemberId: "member-default",
+        ownerMemberName: "Default Owner",
+      },
+    });
+  });
+
+  it("passes explicit null owner into direct proposal creation", async () => {
+    createProposal.mockResolvedValue({
+      id: "proposal-4",
+      title: "No owner",
+      status: "DRAFT",
+      priority: 0,
+      ownerMemberId: null,
+    });
+    prisma.proposal.findFirst.mockResolvedValue({
+      id: "proposal-4",
+      title: "No owner",
+      status: "DRAFT",
+      priority: 0,
+      ownerMemberId: null,
+      ownerMember: null,
+    });
+
+    const { POST } = await import("./route");
+    const response = await POST(
+      new NextRequest("http://localhost/api/workspaces/workspace-1/proposals", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          title: "No owner",
+          bodyMd: "Explicitly ownerless.",
+          ownerMemberId: null,
+        }),
+      }),
+      context(),
+    );
+
+    expect(response.status).toBe(201);
+    expect(createProposal).toHaveBeenCalledWith(actor, expect.objectContaining({
+      workspaceId: "workspace-1",
+      ownerMemberId: null,
+    }));
+  });
 });
 
 describe("PATCH /api/workspaces/[workspaceId]/proposals/[proposalId]", () => {

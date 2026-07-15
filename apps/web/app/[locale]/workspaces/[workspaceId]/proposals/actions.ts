@@ -33,19 +33,24 @@ function asOptionalDate(formData: FormData, key: string) {
   return value ? new Date(value) : null;
 }
 
+function ownerMemberIdFromForm(formData: FormData) {
+  return formData.has("ownerMemberId") ? asOptional(formData, "ownerMemberId") : undefined;
+}
+
 export async function createProposalAction(formData: FormData) {
   const _demoGuardWsId = formData.get("workspaceId") as string;
   if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
 
   const actor = await requirePageActor();
   const workspaceId = asString(formData, "workspaceId");
+  const ownerMemberId = ownerMemberIdFromForm(formData);
   await createProposal(actor, {
     workspaceId,
     title: asString(formData, "title"),
     bodyMd: asString(formData, "bodyMd"),
     includeAiSummary: formData.get("includeAiSummary") === "on",
     priority: asOptionalInt(formData, "priority"),
-    ownerMemberId: asOptional(formData, "ownerMemberId"),
+    ...(ownerMemberId !== undefined ? { ownerMemberId } : {}),
     isPrivate: formData.get("isPrivate") === "on",
     sourceTensionId: asOptional(formData, "sourceTensionId"),
     relatedActionIds: asStringArray(formData, "relatedActionIds"),
@@ -59,13 +64,14 @@ export async function createProposalFromTensionAction(formData: FormData) {
 
   const actor = await requirePageActor();
   const workspaceId = asString(formData, "workspaceId");
+  const ownerMemberId = ownerMemberIdFromForm(formData);
   await createProposalFromTension(actor, {
     workspaceId,
     sourceTensionId: asString(formData, "sourceTensionId"),
     title: asOptional(formData, "title"),
     summary: asOptional(formData, "summary"),
     bodyMd: asOptional(formData, "bodyMd"),
-    ownerMemberId: asOptional(formData, "ownerMemberId"),
+    ...(ownerMemberId !== undefined ? { ownerMemberId } : {}),
     relatedActionIds: asStringArray(formData, "relatedActionIds"),
     isPrivate: formData.has("isPrivate") ? formData.get("isPrivate") === "on" : true,
   });

@@ -113,7 +113,7 @@ export async function GET() {
                 description: "Optional existing action IDs to link as implementation or follow-up work.",
                 items: { type: "string" },
               },
-              ownerMemberId: { type: "string", nullable: true, description: "Optional active workspace member ID responsible for the proposal." },
+              ownerMemberId: { type: "string", nullable: true, description: "Optional active workspace member ID responsible for the proposal. Omit to default to the author; send null for no owner." },
               priority: priorityInputSchema,
               priorityLabel: { type: "string", enum: ["Urgent", "Important", "Medium", "Low"] },
             },

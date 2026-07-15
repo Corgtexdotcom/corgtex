@@ -251,6 +251,13 @@ export default async function WorkspaceAddPage({
     id: member.id,
     label: member.user.displayName ?? member.user.email,
   }));
+  const actorMemberId = actor.kind === "user"
+    ? members.find((member) => member.user.id === actor.user.id)?.id
+    : null;
+  const defaultProposalOwnerMemberId = actorMemberId
+    ?? (membership?.id && memberOptions.some((member) => member.id === membership.id)
+      ? membership.id
+      : "");
   const contacts = contactsResult.items;
   const accounts = accountsResult.items;
   const deals = dealsResult.items;
@@ -674,6 +681,7 @@ export default async function WorkspaceAddPage({
               label="Owner"
               noneLabel="No owner"
               members={memberOptions}
+              defaultValue={defaultProposalOwnerMemberId}
             />
             <WorkItemPrioritySelect label="Priority" labels={DEFAULT_WORK_ITEM_PRIORITY_LABELS} defaultValue={0} />
             <label style={{ display: "flex", alignItems: "center", flexDirection: "row", gap: 8 }}>

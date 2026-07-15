@@ -5,6 +5,18 @@ import { env } from "@corgtex/shared";
 import { handleRouteError } from "@/lib/http";
 import { loadProposalWorkItemResponse, serializeProposalWorkItem, workItemPriorityFromBody } from "@/lib/work-item-api";
 
+function ownerMemberIdFromBody(body: Record<string, unknown>) {
+  if (!Object.prototype.hasOwnProperty.call(body, "ownerMemberId")) {
+    return { valid: true, value: undefined } as const;
+  }
+
+  if (typeof body.ownerMemberId === "string" || body.ownerMemberId === null) {
+    return { valid: true, value: body.ownerMemberId } as const;
+  }
+
+  return { valid: false, value: undefined } as const;
+}
+
 export async function GET(request: NextRequest) {
   try {
     const sessionCtx = await requireGptAuth(request, "read");
@@ -48,6 +60,11 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: "Missing required fields (title, bodyMd) unless sourceTensionId is provided" }, { status: 400 });
     }
 
+    const ownerMemberId = ownerMemberIdFromBody(body);
+    if (!ownerMemberId.valid) {
+      return NextResponse.json({ error: "ownerMemberId must be a string, null, or omitted" }, { status: 400 });
+    }
+
     const proposal = body.sourceTensionId
       ? await createProposalFromTension(actor, {
           workspaceId,
@@ -56,7 +73,7 @@ export async function POST(request: NextRequest) {
           bodyMd: typeof body.bodyMd === "string" ? body.bodyMd : null,
           summary: typeof body.summary === "string" ? body.summary : null,
           relatedActionIds: Array.isArray(body.relatedActionIds) ? body.relatedActionIds.map(String) : null,
-          ownerMemberId: body.ownerMemberId ?? null,
+          ...(ownerMemberId.value !== undefined ? { ownerMemberId: ownerMemberId.value } : {}),
           priority: workItemPriorityFromBody(body),
         })
       : await createProposal(actor, {
@@ -65,7 +82,7 @@ export async function POST(request: NextRequest) {
           bodyMd: body.bodyMd,
           summary: body.summary,
           relatedActionIds: Array.isArray(body.relatedActionIds) ? body.relatedActionIds.map(String) : null,
-          ownerMemberId: body.ownerMemberId ?? null,
+          ...(ownerMemberId.value !== undefined ? { ownerMemberId: ownerMemberId.value } : {}),
           priority: workItemPriorityFromBody(body),
         });
     const proposalForResponse = await loadProposalWorkItemResponse(workspaceId, proposal.id) ?? proposal;

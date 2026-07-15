@@ -74,6 +74,13 @@ export default async function ProposalsPage({
   const isDemo = currentWorkspace?.slug === "jnj-demo";
   const memberName = (member: { user: { displayName: string | null; email: string } }) => member.user.displayName || member.user.email;
   const memberOptions = members.map((member) => ({ id: member.id, label: memberName(member) }));
+  const actorMemberId = actor.kind === "user"
+    ? members.find((member) => member.user.id === actor.user.id)?.id
+    : null;
+  const defaultProposalOwnerMemberId = actorMemberId
+    ?? (membership?.id && memberOptions.some((member) => member.id === membership.id)
+      ? membership.id
+      : "");
   const canManageProposal = (proposal: { authorUserId: string; ownerMemberId?: string | null }) => actor.kind === "agent"
     || membership?.role === "ADMIN"
     || (actor.kind === "user" && proposal.authorUserId === actor.user.id)
@@ -464,7 +471,12 @@ export default async function ProposalsPage({
         <summary className="nr-hide-marker nr-kanban-add-trigger">
           {tWork("newDraftCard")}
         </summary>
-        <CreateProposalForm workspaceId={workspaceId} members={memberOptions} compact />
+        <CreateProposalForm
+          workspaceId={workspaceId}
+          members={memberOptions}
+          defaultOwnerMemberId={defaultProposalOwnerMemberId}
+          compact
+        />
       </details>
     );
   }
