@@ -553,14 +553,15 @@ export async function listProposalDecisionStates(
       eligibleApprovers: eligibleIds.length,
       openObjections: flow.objections.length,
     });
-    const currentMemberDecision = membership
-      ? flow.decisions.find((decision) => decision.memberId === membership.id) ?? null
+    const reviewMembership = membership && eligibleIds.includes(membership.id) ? membership : null;
+    const currentMemberDecision = reviewMembership
+      ? flow.decisions.find((decision) => decision.memberId === reviewMembership.id) ?? null
       : null;
-    const currentUserOpenObjection = membership
-      ? flow.objections.find((objection) => objection.userId === membership.userId) ?? null
+    const currentUserOpenObjection = reviewMembership
+      ? flow.objections.find((objection) => objection.userId === reviewMembership.userId) ?? null
       : null;
     const needsReview = Boolean(
-      membership
+      reviewMembership
       && (flow.mode === "CONSENT"
         ? !currentMemberDecision && !currentUserOpenObjection
         : !currentMemberDecision),

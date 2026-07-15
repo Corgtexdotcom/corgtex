@@ -333,6 +333,44 @@ describe("listProposalDecisionStates", () => {
       ],
     });
   });
+
+  it("does not mark synthetic operator memberships as proposal reviewers", async () => {
+    requireWorkspaceMembershipMock.mockResolvedValueOnce({
+      id: "global-operator",
+      workspaceId: "ws-1",
+      userId: "operator-user",
+      role: "ADMIN",
+      isActive: true,
+    });
+    prismaMock.member.findMany.mockResolvedValue([{ id: "member-1" }, { id: "member-2" }]);
+    prismaMock.approvalFlow.findMany.mockResolvedValue([
+      {
+        id: "flow-operator",
+        workspaceId: "ws-1",
+        subjectType: "PROPOSAL",
+        subjectId: "proposal-operator",
+        status: "ACTIVE",
+        mode: "MAJORITY",
+        openedAt: new Date("2026-05-26T12:00:00.000Z"),
+        closesAt: null,
+        quorumPercent: 50,
+        minApproverCount: 1,
+        decisions: [],
+        objections: [],
+      },
+    ]);
+
+    const states = await listProposalDecisionStates(
+      { kind: "user", user: { id: "operator-user", globalRole: "OPERATOR" } } as any,
+      { workspaceId: "ws-1", proposalIds: ["proposal-operator"] },
+    );
+
+    expect(states.get("proposal-operator")).toMatchObject({
+      currentMemberDecision: null,
+      currentUserOpenObjectionId: null,
+      needsReview: false,
+    });
+  });
 });
 
 describe("withdrawActiveApprovalFlowForSubject", () => {

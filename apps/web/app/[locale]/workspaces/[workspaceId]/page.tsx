@@ -53,6 +53,7 @@ export default async function WorkspaceDashboard({
     newspaperEditions,
     meetings,
     openProposalCandidates,
+    proposalReviewCandidates,
     teamActionCandidates,
     chunksCount,
     workspaceData,
@@ -87,6 +88,23 @@ export default async function WorkspaceDashboard({
       },
       orderBy: { createdAt: "desc" },
       take: 20,
+    }),
+    prisma.proposal.findMany({
+      where: {
+        workspaceId,
+        status: "OPEN",
+        isPrivate: false,
+        archivedAt: null,
+      },
+      select: {
+        id: true,
+        title: true,
+        status: true,
+        isPrivate: true,
+        archivedAt: true,
+        createdAt: true,
+      },
+      orderBy: { createdAt: "desc" },
     }),
     prisma.action.findMany({
       where: {
@@ -152,11 +170,15 @@ export default async function WorkspaceDashboard({
   const isUnreadNotificationsCountCapped = isDashboardUnreadNotificationCountCapped(unreadNotificationsCount);
   const notificationPreviewLimit = selectDashboardNotificationPreviewLimit(unreadNotificationsCount);
   const openProposalItems = selectDashboardOpenProposals(openProposalCandidates);
+  const proposalReviewCandidatesForDecision = selectDashboardOpenProposals(
+    proposalReviewCandidates,
+    proposalReviewCandidates.length,
+  );
   const proposalDecisionStates = await listProposalDecisionStates(actor, {
     workspaceId,
-    proposalIds: openProposalItems.map((proposal) => proposal.id),
+    proposalIds: proposalReviewCandidatesForDecision.map((proposal) => proposal.id),
   });
-  const proposalReviewItems = openProposalItems.filter((proposal) => proposalDecisionStates.get(proposal.id)?.needsReview);
+  const proposalReviewItems = proposalReviewCandidatesForDecision.filter((proposal) => proposalDecisionStates.get(proposal.id)?.needsReview);
   const teamActionItems = selectDashboardActionItems(teamActionCandidates);
   const openTensionItems = tensions.filter((tension) => tension.status === "OPEN");
   const currentUserId = actor.kind === "user" ? actor.user.id : null;
