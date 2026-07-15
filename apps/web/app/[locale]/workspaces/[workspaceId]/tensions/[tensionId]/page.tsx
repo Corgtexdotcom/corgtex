@@ -79,7 +79,7 @@ export default async function TensionDetailPage({
     }),
     archivedSafeRead(isArchived, listWorkItemEvidence(actor, { workspaceId, entityType: "Tension", entityId: tensionId }), []),
     archivedSafeRead(isArchived, listExternalResourceAttachments(actor, { workspaceId, entityType: "Tension", entityId: tensionId }), []),
-    isArchived ? Promise.resolve([]) : listAdviceRequests(actor, { workspaceId, subjectType: "TENSION", subjectId: tensionId, status: "ACTIVE" }),
+    isArchived ? Promise.resolve([]) : listAdviceRequests(actor, { workspaceId, subjectType: "TENSION", subjectId: tensionId }),
     isArchived
       ? archivedSafeRead(true, getWorkspaceArchiveRecord(actor, { workspaceId, entityType: "Tension", entityId: tension.id }), null)
       : Promise.resolve(null),
@@ -169,6 +169,19 @@ export default async function TensionDetailPage({
     };
     return labels[channel] ?? channel;
   };
+  const requestStatusLabel = (status: string) => {
+    const labels: Record<string, string> = {
+      ACTIVE: t("inputStatusActive"),
+      COMPLETED: t("inputStatusCompleted"),
+      CANCELED: t("inputStatusCanceled"),
+    };
+    return labels[status] ?? status;
+  };
+  const requestStatusClass = (status: string) => {
+    if (status === "ACTIVE") return "warning";
+    if (status === "COMPLETED") return "success";
+    return "";
+  };
   const tensionPath = `/workspaces/${workspaceId}/tensions/${tension.id}`;
   const appBaseUrl = process.env.NEXT_PUBLIC_APP_URL?.replace(/\/$/, "") ?? "";
   const tensionUrl = `${appBaseUrl}${tensionPath}`;
@@ -184,25 +197,36 @@ export default async function TensionDetailPage({
     request.deadlineAt ? t("inputCopyableDeadline", { date: dateTimeLabel(request.deadlineAt) ?? "" }) : null,
     t("inputCopyableLink", { url: tensionUrl }),
   ].filter(Boolean).join("\n\n");
-  const discussionEntries = mappedEntries.filter((entry) => !entry.adviceRequestId);
+  const requestIds = new Set(inputRequests.map((request) => request.id));
+  const discussionEntries = mappedEntries.filter((entry) => !entry.adviceRequestId || !requestIds.has(entry.adviceRequestId));
   const inputRequestCards = inputRequests.map((request) => {
     const linkedReplies = mappedEntries.filter((entry) => entry.adviceRequestId === request.id);
     return {
       id: request.id,
       audienceLabel: requestAudienceLabel(request),
       channelLabel: channelLabel(request.preferredChannel),
+      statusLabel: requestStatusLabel(request.status),
+      statusClass: requestStatusClass(request.status),
       deadlineLabel: request.deadlineAt ? t("inputDeadlineTag", { date: dateTimeLabel(request.deadlineAt) ?? "" }) : null,
       reminderLabel: request.reminderAt ? t("inputReminderMeta", { date: dateTimeLabel(request.reminderAt) ?? "" }) : null,
       requestedByLabel: t("inputRequestedByMeta", { name: request.requestedBy.displayName || request.requestedBy.email }),
       messageMd: request.messageMd,
       copyableMessage: copyableRequestMessage(request),
-      linkedReplies: linkedReplies.map((reply) => ({
-        id: reply.id,
-        authorName: reply.authorName,
-        createdAtLabel: dateTimeLabel(reply.createdAt),
-        bodyMd: reply.bodyMd,
-      })),
-      replyForm: !isArchived && tension.status === "OPEN" ? (
+      linkedRepliesCount: linkedReplies.length,
+      replyThread: linkedReplies.length > 0 ? (
+        <DeliberationThread
+          entries={linkedReplies.map((entry) => ({
+            ...entry,
+            canEdit: canManageEntry(entry),
+            canResolve: canManageEntry(entry),
+          }))}
+          canResolve={!isArchived}
+          resolveAction={resolveTensionDeliberationAction}
+          updateAction={updateTensionDeliberationAction}
+          hiddenFields={{ workspaceId, parentId: tensionId }}
+        />
+      ) : null,
+      replyForm: !isArchived && tension.status === "OPEN" && request.status === "ACTIVE" ? (
         <DeliberationComposer
           postAction={postTensionDeliberationAction}
           hiddenFields={{ workspaceId, parentId: tensionId, adviceRequestId: request.id }}
@@ -388,7 +412,7 @@ export default async function TensionDetailPage({
             }}
           />
           {canRequestInput && (
-            <details open={inputRequests.length === 0}>
+            <details open={!inputRequests.some((request) => request.status === "ACTIVE")}>
               <summary className="work-request-action nr-hide-marker">{t("btnRequestInput")}</summary>
               <AdviceRequestForm
                 action={requestTensionInputAction}

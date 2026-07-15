@@ -2,23 +2,19 @@ import type { ReactNode } from "react";
 
 import { MarkdownRenderer } from "./MarkdownRenderer";
 
-export type WorkItemRequestReply = {
-  id: string;
-  authorName: string;
-  createdAtLabel: string | null;
-  bodyMd?: string | null;
-};
-
 export type WorkItemRequestCard = {
   id: string;
   audienceLabel: string;
   channelLabel: string;
   requestedByLabel: string;
+  statusLabel?: string | null;
+  statusClass?: string;
   deadlineLabel?: string | null;
   reminderLabel?: string | null;
   messageMd: string;
   copyableMessage: string;
-  linkedReplies: WorkItemRequestReply[];
+  linkedRepliesCount: number;
+  replyThread?: ReactNode;
   replyForm?: ReactNode;
 };
 
@@ -68,6 +64,7 @@ export function WorkItemRequestList({
               <span>{request.requestedByLabel}</span>
             </div>
             <div className="work-request-card-tags">
+              {request.statusLabel && <span className={`tag ${request.statusClass ?? ""}`.trim()}>{request.statusLabel}</span>}
               <span className="tag info">{request.channelLabel}</span>
               {request.deadlineLabel && <span className="tag warning">{request.deadlineLabel}</span>}
             </div>
@@ -86,20 +83,10 @@ export function WorkItemRequestList({
             <textarea readOnly rows={6} value={request.copyableMessage} />
           </details>
 
-          {request.linkedReplies.length > 0 && (
+          {request.linkedRepliesCount > 0 && request.replyThread && (
             <div className="work-request-replies">
-              <div className="work-request-replies-title">{labels.linkedReplies(request.linkedReplies.length)}</div>
-              <div className="work-request-reply-list">
-                {request.linkedReplies.map((reply) => (
-                  <article key={reply.id} className="work-request-reply">
-                    <div className="work-request-reply-meta">
-                      <span>{reply.authorName}</span>
-                      {reply.createdAtLabel && <span>{reply.createdAtLabel}</span>}
-                    </div>
-                    {reply.bodyMd && <MarkdownRenderer markdown={reply.bodyMd} variant="document" />}
-                  </article>
-                ))}
-              </div>
+              <div className="work-request-replies-title">{labels.linkedReplies(request.linkedRepliesCount)}</div>
+              {request.replyThread}
             </div>
           )}
 

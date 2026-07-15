@@ -84,7 +84,7 @@ export default async function ProposalDetailPage({
     }),
     archivedSafeRead(isArchived, listWorkItemEvidence(actor, { workspaceId, entityType: "Proposal", entityId: proposalId }), []),
     archivedSafeRead(isArchived, listExternalResourceAttachments(actor, { workspaceId, entityType: "Proposal", entityId: proposalId }), []),
-    isArchived ? Promise.resolve([]) : listAdviceRequests(actor, { workspaceId, subjectType: "PROPOSAL", subjectId: proposalId, status: "ACTIVE" }),
+    isArchived ? Promise.resolve([]) : listAdviceRequests(actor, { workspaceId, subjectType: "PROPOSAL", subjectId: proposalId }),
     isArchived
       ? archivedSafeRead(true, getWorkspaceArchiveRecord(actor, { workspaceId, entityType: "Proposal", entityId: proposal.id }), null)
       : Promise.resolve(null),
@@ -175,6 +175,19 @@ export default async function ProposalDetailPage({
     };
     return labels[channel] ?? channel;
   };
+  const requestStatusLabel = (status: string) => {
+    const labels: Record<string, string> = {
+      ACTIVE: t("adviceStatusActive"),
+      COMPLETED: t("adviceStatusCompleted"),
+      CANCELED: t("adviceStatusCanceled"),
+    };
+    return labels[status] ?? status;
+  };
+  const requestStatusClass = (status: string) => {
+    if (status === "ACTIVE") return "warning";
+    if (status === "COMPLETED") return "success";
+    return "";
+  };
   const requestAudienceLabel = (request: (typeof adviceRequests)[number]) => {
     if (request.audienceType === "WORKSPACE") return t("adviceAudienceWorkspace");
     if (request.audienceType === "CIRCLE") return request.targetCircle ? t("targetCircle", { name: request.targetCircle.name }) : t("adviceAudienceCircle");
@@ -190,25 +203,36 @@ export default async function ProposalDetailPage({
     request.deadlineAt ? t("adviceCopyableDeadline", { date: dateTimeLabel(request.deadlineAt) ?? "" }) : null,
     t("adviceCopyableLink", { url: proposalUrl }),
   ].filter(Boolean).join("\n\n");
-  const discussionEntries = mappedEntries.filter((entry) => !entry.adviceRequestId);
+  const requestIds = new Set(adviceRequests.map((request) => request.id));
+  const discussionEntries = mappedEntries.filter((entry) => !entry.adviceRequestId || !requestIds.has(entry.adviceRequestId));
   const adviceRequestCards = adviceRequests.map((request) => {
     const linkedReplies = mappedEntries.filter((entry) => entry.adviceRequestId === request.id);
     return {
       id: request.id,
       audienceLabel: requestAudienceLabel(request),
       channelLabel: channelLabel(request.preferredChannel),
+      statusLabel: requestStatusLabel(request.status),
+      statusClass: requestStatusClass(request.status),
       deadlineLabel: request.deadlineAt ? t("adviceDeadlineTag", { date: dateTimeLabel(request.deadlineAt) ?? "" }) : null,
       reminderLabel: request.reminderAt ? t("adviceReminderMeta", { date: dateTimeLabel(request.reminderAt) ?? "" }) : null,
       requestedByLabel: t("adviceRequestedByMeta", { name: request.requestedBy.displayName || request.requestedBy.email }),
       messageMd: request.messageMd,
       copyableMessage: copyableRequestMessage(request),
-      linkedReplies: linkedReplies.map((reply) => ({
-        id: reply.id,
-        authorName: reply.authorName,
-        createdAtLabel: dateTimeLabel(reply.createdAt),
-        bodyMd: reply.bodyMd,
-      })),
-      replyForm: !isArchived && proposal.status === "OPEN" ? (
+      linkedRepliesCount: linkedReplies.length,
+      replyThread: linkedReplies.length > 0 ? (
+        <DeliberationThread
+          entries={linkedReplies.map((entry) => ({
+            ...entry,
+            canEdit: canManageEntry(entry),
+            canResolve: canManageEntry(entry),
+          }))}
+          canResolve={!isArchived && (isAuthor || actor.kind === "agent")}
+          resolveAction={resolveDeliberationEntryAction}
+          updateAction={updateDeliberationEntryAction}
+          hiddenFields={{ workspaceId, proposalId }}
+        />
+      ) : null,
+      replyForm: !isArchived && proposal.status === "OPEN" && request.status === "ACTIVE" ? (
         <DeliberationComposer
           postAction={postDeliberationEntryAction}
           hiddenFields={{ workspaceId, proposalId, adviceRequestId: request.id }}
@@ -322,7 +346,7 @@ export default async function ProposalDetailPage({
                 }}
               />
               {canRequestAdvice && (
-                <details open={adviceRequests.length === 0}>
+                <details open={!adviceRequests.some((request) => request.status === "ACTIVE")}>
                   <summary className="work-request-action nr-hide-marker">{t("btnRequestAdvice")}</summary>
                   <AdviceRequestForm
                     action={requestProposalAdviceAction}
