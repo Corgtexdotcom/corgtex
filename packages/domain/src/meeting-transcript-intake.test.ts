@@ -94,4 +94,40 @@ describe("meeting transcript intake", () => {
       meetingUrl: null,
     }));
   });
+
+  it("uses single-candidate clarification copy when auto-match confidence is too low", async () => {
+    uploadMeetingTranscriptMock.mockResolvedValueOnce({
+      status: "needs_selection",
+      meeting: null,
+      candidates: [{
+        meetingId: "meeting-1",
+        title: "Weekly Tactical",
+        recordedAt: new Date("2026-05-17T10:00:00.000Z"),
+        score: 0.52,
+        reason: "time",
+      }],
+    });
+    const { intakeMeetingTranscript } = await import("./meeting-transcript-intake");
+
+    await expect(intakeMeetingTranscript({
+      kind: "agent",
+      authProvider: "bootstrap",
+      label: "test-agent",
+      workspaceIds: ["workspace-1"],
+    }, {
+      workspaceId: "workspace-1",
+      title: "Weekly Tactical",
+      recordedAt: new Date("2026-05-17T10:00:00.000Z"),
+      source: "transcript-upload",
+      transcript: "Jan: Follow up next week.",
+    })).resolves.toMatchObject({
+      status: "needs_clarification",
+      requiredFields: ["meetingId"],
+      message: "I found a scheduled meeting that may match this transcript, but it was not confident enough to auto-match. Choose it or add more meeting details and upload again.",
+      candidates: [{
+        meetingId: "meeting-1",
+        score: 0.52,
+      }],
+    });
+  });
 });

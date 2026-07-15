@@ -232,12 +232,15 @@ export async function intakeMeetingTranscript(actor: AppActor, params: {
   });
 
   if (result.status === "needs_selection") {
+    const multipleCandidates = result.candidates.length > 1;
     return {
       status: "needs_clarification",
       requiredFields: ["meetingId"],
       inferred,
       candidates: result.candidates,
-      message: "I found multiple scheduled meetings that could match this transcript. Choose one and upload again.",
+      message: multipleCandidates
+        ? "I found multiple scheduled meetings that could match this transcript. Choose one and upload again."
+        : "I found a scheduled meeting that may match this transcript, but it was not confident enough to auto-match. Choose it or add more meeting details and upload again.",
     };
   }
 

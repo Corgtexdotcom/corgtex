@@ -6,15 +6,14 @@ import {
   createMeetingSeriesAction,
   importMeetingInviteAction,
   scheduleMeetingRecordingAction,
-  uploadMeetingTranscriptAction,
 } from "../actions";
 import { getTranslations } from "next-intl/server";
 import Link from "next/link";
 import { getWorkspaceFeatureFlags } from "@/lib/workspace-feature-flags";
-import { MarkdownEditor } from "@/lib/components/MarkdownEditor";
 import { MarkdownExcerpt } from "@/lib/components/MarkdownRenderer";
 import { TimeZoneSelect } from "@/lib/components/TimeZoneSelect";
 import { ItemActions } from "@/lib/components/ui/ItemActions";
+import { MeetingTranscriptUploadForm } from "./MeetingTranscriptUploadForm";
 import { WorkItemFilterControls } from "@/lib/components/WorkItemControls";
 import {
   DEFAULT_MEETING_DURATION_MINUTES,
@@ -167,26 +166,25 @@ export default async function MeetingsPage({
       <summary className="nr-hide-marker nr-action-summary">
         {t("uploadTranscriptForMeeting")}
       </summary>
-      <form action={uploadMeetingTranscriptAction} className="action-menu-form">
-        <input type="hidden" name="workspaceId" value={workspaceId} />
-        <input type="hidden" name="meetingId" value={meeting.id} />
-        <input type="hidden" name="title" value={meeting.title ?? ""} />
-        <input type="hidden" name="recordedAt" value={new Date(meeting.recordedAt).toISOString()} />
-        <label>
-          {t("formTranscriptFile")}
-          <input name="file" type="file" accept=".txt,.md,.csv,.json,.pdf,.docx" />
-        </label>
-        <label>
-          {t("formTranscript")}
-          <textarea name="transcript" />
-        </label>
-        <label>
-          {t("formIngestionGuidance")}
-          <MarkdownEditor name="ingestionGuidanceMd" rows={3} />
-          <span className="nr-item-meta" style={{ display: "block", marginTop: 4 }}>{t("helpIngestionGuidance")}</span>
-        </label>
-        <button type="submit">{t("btnUploadTranscript")}</button>
-      </form>
+      <MeetingTranscriptUploadForm
+        workspaceId={workspaceId}
+        className="action-menu-form"
+        hiddenFields={[
+          { name: "meetingId", value: meeting.id },
+          { name: "title", value: meeting.title ?? "" },
+          { name: "recordedAt", value: new Date(meeting.recordedAt).toISOString() },
+        ]}
+        labels={{
+          file: t("formTranscriptFile"),
+          transcript: t("formTranscript"),
+          ingestionGuidance: t("formIngestionGuidance"),
+          ingestionGuidanceHelp: t("helpIngestionGuidance"),
+          submit: t("btnUploadTranscript"),
+          retrySubmit: t("btnUploadTranscript"),
+          chooseMeeting: t("chooseTranscriptMeeting"),
+          retryUpload: t("retryTranscriptUpload"),
+        }}
+      />
     </details>
   );
 
@@ -466,42 +464,29 @@ export default async function MeetingsPage({
             <span className="nr-section-header" style={{ borderTop: "none", display: "inline-block", padding: 0, margin: 0 }}>{t("newMeetingTitle")}</span>
           </summary>
           <div style={{ marginTop: "24px" }}>
-            <form action={uploadMeetingTranscriptAction} className="stack panel">
-              <input type="hidden" name="workspaceId" value={workspaceId} />
-              <label>
-                {t("formTitle")}
-                <input name="title" />
-              </label>
-              <div className="actions-inline">
-                <label style={{ flex: 1 }}>
-                  {t("formSource")}
-                  <input name="source" defaultValue="transcript-upload" required />
-                </label>
-                <label style={{ flex: 1 }}>
-                  {t("formRecordedAt")}
-                  <input name="recordedAt" type="datetime-local" required />
-                </label>
-              </div>
-              <TimeZoneSelect />
-              <label>
-                {t("formParticipantEmails")}
-                <input name="participantEmails" placeholder={t("formParticipantEmailsPlaceholder")} />
-              </label>
-              <label>
-                {t("formIngestionGuidance")}
-                <MarkdownEditor name="ingestionGuidanceMd" rows={3} />
-                <span className="nr-item-meta" style={{ display: "block", marginTop: 4 }}>{t("helpIngestionGuidance")}</span>
-              </label>
-              <label>
-                {t("formTranscriptFile")}
-                <input name="file" type="file" accept=".txt,.md,.csv,.json,.pdf,.docx" />
-              </label>
-              <label>
-                {t("formTranscript")}
-                <textarea name="transcript" />
-              </label>
-              <button type="submit">{t("btnUploadTranscript")}</button>
-            </form>
+            <MeetingTranscriptUploadForm
+              workspaceId={workspaceId}
+              showTitle
+              showSource
+              showRecordedAt
+              showTimeZone
+              showParticipants
+              labels={{
+                title: t("formTitle"),
+                source: t("formSource"),
+                recordedAt: t("formRecordedAt"),
+                participantEmails: t("formParticipantEmails"),
+                participantEmailsPlaceholder: t("formParticipantEmailsPlaceholder"),
+                file: t("formTranscriptFile"),
+                transcript: t("formTranscript"),
+                ingestionGuidance: t("formIngestionGuidance"),
+                ingestionGuidanceHelp: t("helpIngestionGuidance"),
+                submit: t("btnUploadTranscript"),
+                retrySubmit: t("btnUploadTranscript"),
+                chooseMeeting: t("chooseTranscriptMeeting"),
+                retryUpload: t("retryTranscriptUpload"),
+              }}
+            />
           </div>
         </details>
       </div>
