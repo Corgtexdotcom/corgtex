@@ -1,7 +1,7 @@
 import { prisma } from "@corgtex/shared";
 import type { AppActor } from "@corgtex/shared";
 import type { ModelTool } from "@corgtex/models";
-import { createTension, updateTension, createAction, updateAction, createProposal, createProposalFromTension, createGoal } from "@corgtex/domain";
+import { AppError, createTension, updateTension, createAction, updateAction, createProposal, createProposalFromTension, createGoal } from "@corgtex/domain";
 import type { TensionStatus, ActionStatus, GoalCadence, GoalLevel, GoalStatus, Prisma } from "@prisma/client";
 
 export const createTensionTool: ModelTool = {
@@ -97,7 +97,7 @@ export const createProposalTool: ModelTool = {
         circleId: { type: "string" },
         sourceTensionId: { type: "string", description: "Optional UUID of the tension this proposal is drafted from" },
         ownerMemberId: {
-          type: "string",
+          type: ["string", "null"],
           description: "Optional owner member UUID. Omit to default to the creator; pass null only when the user explicitly asks for no owner.",
         },
         relatedActionIds: {
@@ -245,9 +245,10 @@ export async function createProposalAction(actor: AppActor, ctx: any, args: any)
     ? args.sourceTensionId
     : null;
   const hasOwnerMemberId = Object.prototype.hasOwnProperty.call(args, "ownerMemberId");
-  const ownerMemberId = hasOwnerMemberId && (typeof args.ownerMemberId === "string" || args.ownerMemberId === null)
-    ? args.ownerMemberId
-    : undefined;
+  if (hasOwnerMemberId && typeof args.ownerMemberId !== "string" && args.ownerMemberId !== null) {
+    throw new AppError(400, "INVALID_OWNER_MEMBER_ID", "ownerMemberId must be a string, null, or omitted.");
+  }
+  const ownerMemberId = hasOwnerMemberId ? args.ownerMemberId as string | null : undefined;
   const result = sourceTensionId
     ? await createProposalFromTension(actor, {
         workspaceId: ctx.workspaceId,

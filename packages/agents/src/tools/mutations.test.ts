@@ -4,6 +4,16 @@ import { prisma } from "@corgtex/shared";
 import { createGoalAction, createGoalTool, createProposalAction, createProposalTool } from "./mutations";
 
 vi.mock("@corgtex/domain", () => ({
+  AppError: class AppError extends Error {
+    status: number;
+    code: string;
+
+    constructor(status: number, code: string, message: string) {
+      super(message);
+      this.status = status;
+      this.code = code;
+    }
+  },
   createAction: vi.fn(),
   updateAction: vi.fn(),
   createGoal: vi.fn(),
@@ -70,10 +80,15 @@ describe("proposal mutation tool", () => {
   });
 
   it("declares optional tension and action link fields", () => {
+    const properties = createProposalTool.function.parameters.properties as Record<string, unknown>;
+
     expect(createProposalTool.function.name).toBe("create_proposal");
-    expect(createProposalTool.function.parameters.properties).toHaveProperty("sourceTensionId");
-    expect(createProposalTool.function.parameters.properties).toHaveProperty("relatedActionIds");
-    expect(createProposalTool.function.parameters.properties).toHaveProperty("ownerMemberId");
+    expect(properties).toHaveProperty("sourceTensionId");
+    expect(properties).toHaveProperty("relatedActionIds");
+    expect(properties).toHaveProperty("ownerMemberId");
+    expect(properties.ownerMemberId).toMatchObject({
+      type: ["string", "null"],
+    });
     expect(createProposalTool.function.parameters.required).toEqual([]);
   });
 
@@ -183,5 +198,25 @@ describe("proposal mutation tool", () => {
         ownerMemberId: null,
       }),
     );
+  });
+
+  it("rejects malformed explicit owner values before proposal creation", async () => {
+    await expect(
+      createProposalAction(
+        { kind: "agent", authProvider: "bootstrap", workspaceIds: ["ws-1"] } as any,
+        { workspaceId: "ws-1", sessionId: "session-1" },
+        {
+          title: "Clarify approval policy",
+          bodyMd: "Proposal body",
+          ownerMemberId: 42,
+        },
+      ),
+    ).rejects.toMatchObject({
+      status: 400,
+      code: "INVALID_OWNER_MEMBER_ID",
+    });
+
+    expect(createProposal).not.toHaveBeenCalled();
+    expect(createProposalFromTension).not.toHaveBeenCalled();
   });
 });
