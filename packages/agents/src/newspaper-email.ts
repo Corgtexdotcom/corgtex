@@ -3,6 +3,7 @@ import {
   capNewspaperDigestSections,
   normalizeNewspaperDigestPayload,
   renderNewspaperDigestMarkdown,
+  workspaceBriefingToNewspaperDigest,
   type NormalizedNewspaperDigest,
   type NewspaperDigestSection,
   type NewspaperEmailSectionId,
@@ -166,6 +167,27 @@ export function renderNewspaperEditionEmailHtml(params: {
     recipientName: params.recipientName,
     workspaceUrl: params.workspaceUrl,
     digest: params.digest ?? normalizeNewspaperDigestPayload(params.edition.digestJson),
+    personalization: params.personalization,
+  });
+}
+
+export function renderWorkspaceBriefingEmailHtml(params: {
+  briefing: {
+    title: string;
+    briefingJson: unknown;
+  };
+  workspaceName: string;
+  recipientName: string | null;
+  workspaceUrl: string;
+  digest?: NormalizedNewspaperDigest;
+  personalization?: NewspaperPersonalization;
+}) {
+  return renderNewspaperEmailHtml({
+    title: params.briefing.title,
+    workspaceName: params.workspaceName,
+    recipientName: params.recipientName,
+    workspaceUrl: params.workspaceUrl,
+    digest: params.digest ?? workspaceBriefingToNewspaperDigest(params.briefing),
     personalization: params.personalization,
   });
 }

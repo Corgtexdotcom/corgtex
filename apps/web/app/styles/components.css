@@ -1883,6 +1883,10 @@ a.meeting-agenda-item:hover {
     margin-bottom: 48px;
   }
 
+  .nr-dashboard-grid-single {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
   .nr-knowledge-feed,
   .nr-work-rail {
     min-width: 0;
@@ -1958,6 +1962,99 @@ a.meeting-agenda-item:hover {
   .nr-edition-items li {
     min-width: 0;
     color: var(--text);
+  }
+
+  .nr-workspace-briefing {
+    min-width: 0;
+  }
+
+  .nr-briefing-list {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 16px;
+    margin-top: 18px;
+  }
+
+  .nr-briefing-item {
+    min-width: 0;
+    min-height: 148px;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    background: var(--surface);
+    padding: 16px;
+  }
+
+  .nr-briefing-list > .nr-briefing-item-lead {
+    grid-column: span 2;
+    min-height: 220px;
+    padding: 20px;
+  }
+
+  .nr-briefing-item-lead .nr-feed-title {
+    font-size: 1.65rem;
+    line-height: 1.16;
+  }
+
+  .nr-briefing-item-compact,
+  .nr-briefing-item-reference {
+    min-height: 120px;
+  }
+
+  .nr-briefing-item-compact .nr-feed-title,
+  .nr-briefing-item-reference .nr-feed-title {
+    font-size: 1rem;
+    line-height: 1.25;
+  }
+
+  .nr-briefing-why {
+    margin: 12px 0 0;
+    color: var(--muted);
+    font-size: 0.9rem;
+    line-height: 1.45;
+  }
+
+  .nr-briefing-why span:first-child {
+    color: var(--text);
+    font-weight: 700;
+  }
+
+  .nr-briefing-actions {
+    margin-top: 12px;
+  }
+
+  .nr-briefing-reference {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(min(220px, 100%), 1fr));
+    gap: 10px;
+    margin-top: 18px;
+    padding-top: 16px;
+    border-top: 1px solid var(--line);
+  }
+
+  .nr-briefing-reference-item {
+    display: block;
+    min-width: 0;
+    border: 1px dashed var(--line);
+    border-radius: 8px;
+    padding: 10px 12px;
+    color: inherit;
+    text-decoration: none;
+  }
+
+  .nr-briefing-reference-item span {
+    display: block;
+    margin-bottom: 4px;
+    color: var(--muted);
+    font-size: 0.72rem;
+    line-height: 1.25;
+    text-transform: uppercase;
+  }
+
+  .nr-briefing-reference-item strong {
+    display: block;
+    overflow-wrap: anywhere;
+    font-size: 0.9rem;
+    line-height: 1.3;
   }
 
   .nr-work-rail {
@@ -2202,6 +2299,15 @@ a.meeting-agenda-item:hover {
     .nr-paper-balanced,
     .nr-paper-meeting-heavy {
       grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .nr-briefing-list {
+      grid-template-columns: minmax(0, 1fr);
+    }
+
+    .nr-briefing-list > .nr-briefing-item-lead {
+      grid-column-start: auto;
+      grid-column-end: auto;
     }
   }
 

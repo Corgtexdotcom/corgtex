@@ -16,6 +16,8 @@ const {
   instrumentNewspaperHtmlLinksMock,
   recordNewspaperDeliveryMock,
   upsertNewspaperEditionMock,
+  collectWorkspaceBriefingCandidatesMock,
+  upsertWorkspaceBriefingMock,
 } = vi.hoisted(() => ({
   txMock: {
     demoLead: {
@@ -96,6 +98,8 @@ const {
   instrumentNewspaperHtmlLinksMock: vi.fn(),
   recordNewspaperDeliveryMock: vi.fn(),
   upsertNewspaperEditionMock: vi.fn(),
+  collectWorkspaceBriefingCandidatesMock: vi.fn(),
+  upsertWorkspaceBriefingMock: vi.fn(),
 }));
 
 vi.mock("@corgtex/shared", () => ({
@@ -116,7 +120,7 @@ vi.mock("@corgtex/models", () => ({
 vi.mock("@corgtex/domain", () => ({
   AGENT_REGISTRY: {
     "daily-digest": {
-      defaultModelTier: "standard",
+      defaultModelTier: "excellent",
     },
   },
   NEWSPAPER_SECTION_DEFINITIONS: [
@@ -224,6 +228,86 @@ vi.mock("@corgtex/domain", () => ({
   },
   instrumentNewspaperHtmlLinks: instrumentNewspaperHtmlLinksMock,
   recordNewspaperDelivery: recordNewspaperDeliveryMock,
+  workspaceBriefingPeriodFromCadence: (cadence: string) => cadence === "WEEKLY" ? "WEEKLY" : "DAILY",
+  collectWorkspaceBriefingCandidates: collectWorkspaceBriefingCandidatesMock,
+  buildWorkspaceBriefingFromDigest: ({ title, period, dateKey, digest }: any) => ({
+    title,
+    period,
+    dateKey,
+    generatedAt: "2026-04-30T12:00:00.000Z",
+    introMd: digest.intro ?? null,
+    items: digest.sections.flatMap((section: any) => section.items.map((item: string, index: number) => ({
+      kind: section.id === "meetingBriefs"
+        ? "MEETING"
+        : section.id === "decisionsAndProposals"
+          ? "PROPOSAL"
+          : section.id === "resolvedTensions" || section.id === "emergingTensions"
+            ? "TENSION"
+            : section.id === "openActions" || section.id === "actionItems"
+              ? "ACTION"
+              : section.id === "goalsProgress"
+                ? "GOAL"
+                : section.id === "adviceRequests"
+                  ? "ADVICE_REQUEST"
+                  : section.id === "builtWork"
+                    ? "BUILD_ARTIFACT"
+                    : section.id === "conversationHighlights"
+                      ? "COMMUNICATION"
+                      : "BRAIN_ARTICLE",
+      title: section.title,
+      summaryMd: item,
+      whyItMattersMd: "Selected for the workspace briefing.",
+      prominence: index === 0 ? "lead" : "standard",
+      sourceRefs: [],
+      href: null,
+      occurredAt: "2026-04-30T12:00:00.000Z",
+      confidence: 0.8,
+    }))),
+    sourceRefs: [],
+    sourceCounts: {},
+  }),
+  buildWorkspaceBriefingFromCandidates: ({ title, period, dateKey }: any) => ({
+    title,
+    period,
+    dateKey,
+    generatedAt: "2026-04-30T12:00:00.000Z",
+    introMd: "This was a quiet period.",
+    items: [{
+      kind: "QUIET",
+      title: "No major operating changes found",
+      summaryMd: "No new high-signal updates were found.",
+      whyItMattersMd: "The briefing stays short.",
+      prominence: "lead",
+      sourceRefs: [],
+      href: null,
+      occurredAt: "2026-04-30T12:00:00.000Z",
+      confidence: 0.8,
+    }],
+    sourceRefs: [],
+    sourceCounts: {},
+  }),
+  renderWorkspaceBriefingMarkdown: (briefing: any) => `# ${briefing.title}\n\n${briefing.items.map((item: any) => `- ${item.summaryMd}`).join("\n")}`,
+  upsertWorkspaceBriefing: upsertWorkspaceBriefingMock,
+  workspaceBriefingToNewspaperDigest: ({ briefingJson }: any) => {
+    const sectionForKind = (kind: string) => {
+      if (kind === "MEETING") return { id: "meetingBriefs", title: "Meeting Briefs" };
+      if (kind === "PROPOSAL") return { id: "decisionsAndProposals", title: "Decisions & Proposals" };
+      if (kind === "TENSION") return { id: "emergingTensions", title: "Emerging Tensions" };
+      if (kind === "ACTION") return { id: "openActions", title: "Open Actions" };
+      if (kind === "GOAL") return { id: "goalsProgress", title: "Goals & Quarterly Progress" };
+      if (kind === "ADVICE_REQUEST") return { id: "adviceRequests", title: "Requests Awaiting Your Input" };
+      if (kind === "BUILD_ARTIFACT") return { id: "builtWork", title: "Built / Shipped Work" };
+      if (kind === "COMMUNICATION") return { id: "conversationHighlights", title: "Conversation Highlights" };
+      return { id: "otherUpdates", title: "Other Updates" };
+    };
+    return {
+      intro: briefingJson.introMd ?? null,
+      sections: briefingJson.items.map((item: any) => ({
+        ...sectionForKind(item.kind),
+        items: [item.summaryMd],
+      })),
+    };
+  },
   upsertNewspaperEdition: upsertNewspaperEditionMock,
   batchIngestDailyConversations: batchIngestDailyConversationsMock,
   createArticle: createArticleMock,
@@ -317,6 +401,12 @@ describe("runDailyDigest", () => {
       id: "edition-1",
       title: params.title,
       digestJson: params.digestJson,
+    }));
+    collectWorkspaceBriefingCandidatesMock.mockReset().mockResolvedValue([]);
+    upsertWorkspaceBriefingMock.mockReset().mockImplementation(async (params: any) => ({
+      id: "briefing-1",
+      title: params.title,
+      briefingJson: params.briefing,
     }));
     txMock.demoLead.update.mockResolvedValue({ id: "lead-1" });
     txMock.crmActivity.create.mockResolvedValue({ id: "activity-1" });
@@ -425,14 +515,32 @@ describe("runDailyDigest", () => {
     }));
   });
 
-  it("renders member newsletters from the stored canonical edition", async () => {
+  it("renders member newsletters from the stored canonical workspace briefing", async () => {
     prismaMock.buildArtifact.findMany.mockResolvedValue([mockRecentBuildArtifact()]);
-    upsertNewspaperEditionMock.mockResolvedValueOnce({
-      id: "edition-1",
-      title: "Stored Weekly Newspaper - 2026-04-30",
-      digestJson: {
-        intro: "Stored shared intro.",
-        builtWork: ["Stored edition item."],
+    upsertWorkspaceBriefingMock.mockResolvedValueOnce({
+      id: "briefing-1",
+      title: "Stored Workspace Briefing - 2026-04-30",
+      briefingJson: {
+        title: "Stored Workspace Briefing - 2026-04-30",
+        period: "WEEKLY",
+        dateKey: "2026-04-30",
+        generatedAt: "2026-04-30T12:00:00.000Z",
+        introMd: "Stored shared intro.",
+        items: [{
+          kind: "BUILD_ARTIFACT",
+          title: "Stored shipped work",
+          summaryMd: "Stored briefing item.",
+          whyItMattersMd: "The briefing is canonical.",
+          prominence: "lead",
+          sourceRefs: [],
+          href: null,
+          occurredAt: "2026-04-30T12:00:00.000Z",
+          confidence: 0.9,
+        }],
+        sourceRefs: [],
+        sourceCounts: {
+          BUILD_ARTIFACT: 1,
+        },
       },
     });
 
@@ -444,11 +552,11 @@ describe("runDailyDigest", () => {
 
     expect(sendEmailMock).toHaveBeenCalledWith(expect.objectContaining({
       to: "member@example.com",
-      subject: "Stored Weekly Newspaper - 2026-04-30 - Your Personal Briefing",
-      html: expect.stringContaining("Stored Weekly Newspaper - 2026-04-30"),
+      subject: "Stored Workspace Briefing - 2026-04-30 - Your Personal Briefing",
+      html: expect.stringContaining("Stored Workspace Briefing - 2026-04-30"),
     }));
     expect(sendEmailMock).toHaveBeenCalledWith(expect.objectContaining({
-      html: expect.stringContaining("Stored edition item."),
+      html: expect.stringContaining("Stored briefing item."),
     }));
   });
 
@@ -574,7 +682,7 @@ describe("runDailyDigest", () => {
     );
   });
 
-  it("skips digest generation when no active members match the requested cadence", async () => {
+  it("generates the briefing but sends no email when no active members match the requested cadence", async () => {
     getWorkspaceNewspaperCadenceMock.mockResolvedValue("WEEKLY");
     prismaMock.member.findMany.mockResolvedValue([
       {
@@ -598,9 +706,15 @@ describe("runDailyDigest", () => {
     expect(result).toEqual(expect.objectContaining({
       success: true,
       cadence: "DAILY",
+      briefingId: "briefing-1",
       processedSessions: 0,
     }));
-    expect(batchIngestDailyConversationsMock).not.toHaveBeenCalled();
+    expect(batchIngestDailyConversationsMock).toHaveBeenCalledWith(expect.objectContaining({
+      workspaceId: "workspace-1",
+    }));
+    expect(upsertWorkspaceBriefingMock).toHaveBeenCalledWith(expect.objectContaining({
+      period: "DAILY",
+    }));
     expect(chatMock).not.toHaveBeenCalled();
     expect(sendEmailMock).not.toHaveBeenCalled();
   });
@@ -812,7 +926,7 @@ describe("runDailyDigest", () => {
     expect(memberBHtml).not.toContain("Clarify support ownership");
   });
 
-  it("sends a personal advice-only newspaper only to members with pending requests", async () => {
+  it("adds personal advice requests while quiet briefings still reach scheduled recipients", async () => {
     prismaMock.member.findMany.mockResolvedValue([
       { id: "member-a", newspaperCadence: "DAILY", roleAssignments: [], user: { id: "user-a", email: "a@example.com", displayName: "A" } },
       { id: "member-b", newspaperCadence: "DAILY", roleAssignments: [], user: { id: "user-b", email: "b@example.com", displayName: "B" } },
@@ -848,23 +962,20 @@ describe("runDailyDigest", () => {
     });
 
     expect(result).toEqual(expect.objectContaining({
-      sentEmails: 1,
-      skippedEmails: 1,
+      sentEmails: 2,
+      skippedEmails: 0,
     }));
-    expect(createArticleMock).not.toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ type: "DIGEST" }));
-    expect(rebuildBacklinksMock).not.toHaveBeenCalled();
     expect(sendEmailMock).toHaveBeenCalledWith(expect.objectContaining({
       to: "a@example.com",
       html: expect.stringContaining("Advice request: Proposal - Approve pricing"),
     }));
-    expect(sendEmailMock).not.toHaveBeenCalledWith(expect.objectContaining({
+    expect(sendEmailMock).toHaveBeenCalledWith(expect.objectContaining({
       to: "b@example.com",
     }));
-    expect(recordNewspaperDeliveryMock).toHaveBeenCalledWith(expect.objectContaining({
-      memberId: "member-b",
-      status: "SKIPPED",
-      error: "No digest sections generated for this recipient.",
-    }));
+    const htmlByRecipient = new Map(sendEmailMock.mock.calls.map(([request]) => [request.to, request.html]));
+    expect(htmlByRecipient.get("b@example.com")).not.toContain("Approve pricing");
+    expect(recordNewspaperDeliveryMock).toHaveBeenCalledWith(expect.objectContaining({ memberId: "member-a", status: "SENT" }));
+    expect(recordNewspaperDeliveryMock).toHaveBeenCalledWith(expect.objectContaining({ memberId: "member-b", status: "SENT" }));
   });
 
   it("records skipped deliveries when email is not configured", async () => {
@@ -889,7 +1000,7 @@ describe("runDailyDigest", () => {
     }));
   });
 
-  it("records skipped deliveries for true no-input runs", async () => {
+  it("sends a quiet briefing for true no-input runs", async () => {
     const { runDailyDigest } = await import("./daily-digest");
     const result = await runDailyDigest({
       workspaceId: "workspace-1",
@@ -897,20 +1008,49 @@ describe("runDailyDigest", () => {
     });
 
     expect(result).toEqual(expect.objectContaining({
-      sentEmails: 0,
-      skippedEmails: 1,
+      sentEmails: 1,
+      skippedEmails: 0,
     }));
-    expect(extractMock).not.toHaveBeenCalled();
+    expect(extractMock.mock.calls.some(([request]) => request.instruction.startsWith("Generate a structured"))).toBe(false);
+    expect(upsertWorkspaceBriefingMock).toHaveBeenCalledWith(expect.objectContaining({
+      title: "Weekly Newspaper - 2026-04-30",
+    }));
+    expect(upsertNewspaperEditionMock).toHaveBeenCalled();
+    expect(sendEmailMock).toHaveBeenCalledWith(expect.objectContaining({
+      to: "member@example.com",
+      subject: "Weekly Newspaper - 2026-04-30 - Your Personal Briefing",
+    }));
     expect(recordNewspaperDeliveryMock).toHaveBeenCalledWith(expect.objectContaining({
       memberId: "member-1",
       cadence: "WEEKLY",
-      status: "SKIPPED",
-      error: "No digest inputs.",
+      status: "SENT",
     }));
-    expect(upsertNewspaperEditionMock).not.toHaveBeenCalled();
   });
 
-  it("records skipped deliveries instead of sending empty structured newspapers", async () => {
+  it("generates the daily workspace briefing even when no members receive daily email", async () => {
+    getWorkspaceNewspaperCadenceMock.mockResolvedValue("WEEKLY");
+
+    const { runDailyDigest } = await import("./daily-digest");
+    const result = await runDailyDigest({
+      workspaceId: "workspace-1",
+      dateISO: "2026-04-30T12:00:00.000Z",
+      cadence: "DAILY",
+    });
+
+    expect(result).toEqual(expect.objectContaining({
+      briefingId: "briefing-1",
+      sentEmails: 0,
+      skippedEmails: 0,
+    }));
+    expect(upsertWorkspaceBriefingMock).toHaveBeenCalledWith(expect.objectContaining({
+      period: "DAILY",
+      title: "Daily Newspaper - 2026-04-30",
+    }));
+    expect(sendEmailMock).not.toHaveBeenCalled();
+    expect(recordNewspaperDeliveryMock).not.toHaveBeenCalled();
+  });
+
+  it("falls back to candidate briefing when the structured newspaper is empty", async () => {
     getWorkspaceNewspaperCadenceMock.mockResolvedValue("DAILY");
     prismaMock.buildArtifact.findMany.mockResolvedValue([mockRecentBuildArtifact()]);
     extractMock.mockImplementation(async ({ instruction }: { instruction: string }) => {
@@ -928,16 +1068,18 @@ describe("runDailyDigest", () => {
     });
 
     expect(result).toEqual(expect.objectContaining({
-      sentEmails: 0,
-      skippedEmails: 1,
+      sentEmails: 1,
+      skippedEmails: 0,
     }));
-    expect(sendEmailMock).not.toHaveBeenCalled();
-    expect(createArticleMock).not.toHaveBeenCalled();
-    expect(upsertNewspaperEditionMock).not.toHaveBeenCalled();
+    expect(upsertWorkspaceBriefingMock).toHaveBeenCalled();
+    expect(upsertNewspaperEditionMock).toHaveBeenCalled();
+    expect(sendEmailMock).toHaveBeenCalledWith(expect.objectContaining({
+      to: "member@example.com",
+      subject: "Daily Newspaper - 2026-04-30 - Your Personal Briefing",
+    }));
     expect(recordNewspaperDeliveryMock).toHaveBeenCalledWith(expect.objectContaining({
       memberId: "member-1",
-      status: "SKIPPED",
-      error: "No digest sections generated.",
+      status: "SENT",
     }));
   });
 

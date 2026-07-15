@@ -1277,7 +1277,7 @@ describe("scheduleDailyJobs", () => {
       ["ws-2", { enabled: false, cadence: "WEEKLY", weekday: "MONDAY", localTime: "08:00", timeZone: "UTC" }],
     ]));
 
-    await expect(scheduleDailyJobs()).resolves.toBe(4);
+    await expect(scheduleDailyJobs()).resolves.toBe(5);
 
     expect(createdWorkflowJobs()).toEqual(expect.arrayContaining([
       expect.objectContaining({
@@ -1288,15 +1288,14 @@ describe("scheduleDailyJobs", () => {
       }),
       expect.objectContaining({
         workspaceId: "ws-1",
-        type: "context-graph.reconcile",
-        dedupeKey: "ws-1:context-graph-reconcile:2026-05-04",
+        type: "brain.daily-digest",
+        payload: { dateISO: "2026-05-04T20:15:00.000Z", dateKey: "2026-05-04", cadence: "DAILY" },
+        dedupeKey: "ws-1:daily-digest:2026-05-04",
       }),
-    ]));
-    expect(createdWorkflowJobs()).not.toEqual(expect.arrayContaining([
       expect.objectContaining({
         workspaceId: "ws-1",
-        type: "brain.daily-digest",
-        dedupeKey: "ws-1:daily-digest:2026-05-04",
+        type: "context-graph.reconcile",
+        dedupeKey: "ws-1:context-graph-reconcile:2026-05-04",
       }),
     ]));
   });
@@ -1321,7 +1320,7 @@ describe("scheduleDailyJobs", () => {
     expect(loggerMock.info).toHaveBeenCalledWith("newspaper_schedule_skipped", expect.objectContaining({
       workspaceId: "ws-1",
       cadence: "DAILY",
-      reason: "no_daily_recipients",
+      reason: "daily_briefing_off",
     }));
   });
 
