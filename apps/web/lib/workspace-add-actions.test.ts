@@ -73,6 +73,11 @@ describe("workspace add actions", () => {
     expect(kinds({ pathname: "/workspaces/ws-1/proposals" })).toEqual(["proposal"]);
   });
 
+  it("offers proposal and Brain article creation from Agreements", () => {
+    expect(kinds({ pathname: "/workspaces/ws-1/agreements" })).toEqual(["proposal", "article"]);
+    expect(kinds({ pathname: "/workspaces/ws-1/agreements", isDemo: true })).toEqual([]);
+  });
+
   it("hides the global action add shortcut on action detail and edit routes", () => {
     expect(kinds({ pathname: "/workspaces/ws-1/actions/action-1" })).toEqual([]);
     expect(kinds({ pathname: "/workspaces/ws-1/actions/action-1/edit" })).toEqual([]);

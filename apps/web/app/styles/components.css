@@ -3062,6 +3062,29 @@ a.meeting-agenda-item:hover {
     display: grid;
     gap: 18px;
   }
+  .agreements-section {
+    margin-top: 28px;
+  }
+  .agreements-list {
+    display: grid;
+    gap: 0;
+  }
+  .agreements-item {
+    padding: 16px 0;
+    margin-bottom: 0;
+  }
+  .agreements-document {
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    background: var(--surface);
+    padding: 16px;
+  }
+  .agreements-policy-body {
+    margin-top: 14px;
+  }
+  .agreements-scope-filter {
+    margin-bottom: 18px;
+  }
   .work-conversation-empty {
     margin: 0;
     padding: 18px;
