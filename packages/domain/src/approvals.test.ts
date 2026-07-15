@@ -261,6 +261,7 @@ describe("listProposalDecisionStates", () => {
       mode: "MAJORITY",
       eligibleApprovers: 3,
       currentMemberDecision: { choice: "APPROVE", rationale: "Works" },
+      canReview: true,
       needsReview: false,
       outcome: {
         quorumMet: true,
@@ -321,11 +322,13 @@ describe("listProposalDecisionStates", () => {
     );
 
     expect(states.get("proposal-review")).toMatchObject({
+      canReview: true,
       needsReview: true,
       currentMemberDecision: null,
       currentUserOpenObjectionId: null,
     });
     expect(states.get("proposal-objected")).toMatchObject({
+      canReview: true,
       needsReview: false,
       currentUserOpenObjectionId: "objection-1",
       openObjections: [
@@ -368,6 +371,7 @@ describe("listProposalDecisionStates", () => {
     expect(states.get("proposal-operator")).toMatchObject({
       currentMemberDecision: null,
       currentUserOpenObjectionId: null,
+      canReview: false,
       needsReview: false,
     });
   });

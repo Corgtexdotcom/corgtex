@@ -203,7 +203,7 @@ export default async function ProposalDetailPage({
       abstain: state.outcome.summary.abstain,
     });
   };
-  const canSubmitDecision = actor.kind === "user" && Boolean(membership) && Boolean(decisionState) && proposal.status === "OPEN" && !isArchived;
+  const canSubmitDecision = actor.kind === "user" && Boolean(decisionState?.canReview) && proposal.status === "OPEN" && !isArchived;
   const decisionButton = (choice: ApprovalDecisionChoice, label: string, className = "secondary small") => {
     if (!decisionState || !canSubmitDecision) return null;
     const selected = decisionState.currentMemberDecision?.choice === choice;

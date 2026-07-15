@@ -75,6 +75,7 @@ export type ProposalDecisionState = {
     };
   }>;
   currentUserOpenObjectionId: string | null;
+  canReview: boolean;
   needsReview: boolean;
 };
 
@@ -586,6 +587,7 @@ export async function listProposalDecisionStates(
         : null,
       openObjections: flow.objections,
       currentUserOpenObjectionId: currentUserOpenObjection?.id ?? null,
+      canReview: Boolean(reviewMembership),
       needsReview,
     });
   }
