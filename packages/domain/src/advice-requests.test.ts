@@ -185,6 +185,24 @@ describe("advice requests", () => {
     });
   });
 
+  it("rejects selected-person requests without recipients", async () => {
+    const { createAdviceRequest } = await import("./advice-requests");
+
+    await expect(createAdviceRequest(actor, {
+      workspaceId: "workspace-1",
+      subjectType: "TENSION",
+      subjectId: "tension-1",
+      audienceType: "MEMBERS",
+      memberIds: [],
+      messageMd: "Please confirm who owns the launch decision.",
+      preferredChannel: "IN_APP",
+    })).rejects.toThrow(/Choose at least one person/);
+
+    expect(tx.adviceProcess.create).not.toHaveBeenCalled();
+    expect(tx.adviceRequest.create).not.toHaveBeenCalled();
+    expect(tx.adviceRequestRecipient.createMany).not.toHaveBeenCalled();
+  });
+
   it("uses the proposal owner as the advice subject owner", async () => {
     const { createAdviceRequest } = await import("./advice-requests");
 
