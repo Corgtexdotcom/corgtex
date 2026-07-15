@@ -161,6 +161,83 @@ describe("workspace briefing", () => {
     expect(briefing.items.map((item) => item.title)).toContain("Old open proposal");
   });
 
+  it("promotes recent decision-shaping tensions above older proposals and routine zero-percent goals", async () => {
+    const { buildWorkspaceBriefingFromCandidates } = await import("./workspace-briefing");
+    const briefing = buildWorkspaceBriefingFromCandidates({
+      workspaceId: "ws-1",
+      period: "DAILY",
+      dateKey: "2026-04-30",
+      title: "Daily Workspace Briefing - 2026-04-30",
+      generatedAt: new Date("2026-04-30T12:00:00.000Z"),
+      candidates: [
+        baseCandidate({
+          sourceType: "PROPOSAL",
+          sourceId: "proposal-current",
+          title: "Team alignment proposal",
+          summaryMd: "A proposal from last week still needs input.",
+          href: "/workspaces/ws-1/proposals/proposal-current",
+          occurredAt: new Date("2026-04-25T12:00:00.000Z"),
+          updatedAt: new Date("2026-04-25T12:00:00.000Z"),
+          status: "OPEN",
+          strategicScore: 3,
+          actionabilityScore: 3,
+          evidenceScore: 2,
+          sourceRefs: [{ type: "PROPOSAL", id: "proposal-current", label: "Team alignment proposal", href: "/workspaces/ws-1/proposals/proposal-current" }],
+        }),
+        baseCandidate({
+          sourceType: "GOAL",
+          sourceId: "goal-routine",
+          title: "Recruit feedback participants",
+          summaryMd: "0% complete: Recruit a few people to provide feedback.",
+          href: "/workspaces/ws-1/goals",
+          occurredAt: new Date("2026-04-28T12:00:00.000Z"),
+          updatedAt: new Date("2026-04-28T12:00:00.000Z"),
+          status: "ACTIVE",
+          strategicScore: 4,
+          actionabilityScore: 1,
+          evidenceScore: 2,
+          sourceRefs: [{ type: "GOAL", id: "goal-routine", label: "Recruit feedback participants", href: "/workspaces/ws-1/goals" }],
+        }),
+        baseCandidate({
+          sourceType: "PROPOSAL",
+          sourceId: "proposal-stale",
+          title: "Older marketing proposal",
+          summaryMd: "An older proposal remains open without recent evidence.",
+          href: "/workspaces/ws-1/proposals/proposal-stale",
+          occurredAt: new Date("2026-04-02T12:00:00.000Z"),
+          updatedAt: new Date("2026-04-02T12:00:00.000Z"),
+          status: "OPEN",
+          strategicScore: 3,
+          actionabilityScore: 3,
+          evidenceScore: 2,
+          sourceRefs: [{ type: "PROPOSAL", id: "proposal-stale", label: "Older marketing proposal", href: "/workspaces/ws-1/proposals/proposal-stale" }],
+        }),
+        baseCandidate({
+          sourceType: "TENSION",
+          sourceId: "tension-critical",
+          title: "Critical assumptions not being reviewed in weekly meetings",
+          summaryMd: "Critical assumptions are visible on the dashboard but are not being reviewed in weekly meetings.",
+          href: "/workspaces/ws-1/tensions/tension-critical",
+          occurredAt: new Date("2026-04-30T10:00:00.000Z"),
+          updatedAt: new Date("2026-04-30T10:00:00.000Z"),
+          status: "PUBLISHED",
+          strategicScore: 1,
+          actionabilityScore: 1,
+          evidenceScore: 2,
+          sourceRefs: [{ type: "TENSION", id: "tension-critical", label: "Critical assumptions not being reviewed in weekly meetings", href: "/workspaces/ws-1/tensions/tension-critical" }],
+        }),
+      ],
+    });
+
+    expect(briefing.items[0]).toEqual(expect.objectContaining({
+      kind: "TENSION",
+      title: "Critical assumptions not being reviewed in weekly meetings",
+      prominence: "lead",
+    }));
+    expect(briefing.items.findIndex((item) => item.title === "Recruit feedback participants")).toBeGreaterThan(0);
+    expect(briefing.items.findIndex((item) => item.title === "Older marketing proposal")).toBeGreaterThan(0);
+  });
+
   it("keeps stale strategic work visible without making it the lead", async () => {
     const { buildWorkspaceBriefingFromCandidates } = await import("./workspace-briefing");
     const briefing = buildWorkspaceBriefingFromCandidates({

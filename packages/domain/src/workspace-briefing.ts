@@ -236,6 +236,27 @@ function routineGoalPenalty(candidate: WorkspaceBriefingCandidate, now: Date) {
   return candidate.summaryMd?.trim().startsWith("0% complete") ? 2 : 0;
 }
 
+function isClosedCandidateStatus(status: string | null | undefined) {
+  return status === "RESOLVED" || status === "CLOSED" || status === "DONE" || status === "COMPLETED" || status === "CANCELLED" || status === "ARCHIVED";
+}
+
+function highSignalActionableText(candidate: WorkspaceBriefingCandidate) {
+  return `${candidate.title} ${candidate.summaryMd ?? ""}`.toLowerCase();
+}
+
+function recentActionableSignalBoost(candidate: WorkspaceBriefingCandidate, now: Date) {
+  if (candidate.sourceType !== "TENSION" && candidate.sourceType !== "ACTION" && candidate.sourceType !== "ADVICE_REQUEST") return 0;
+  if (isClosedCandidateStatus(candidate.status)) return 0;
+
+  const ageDays = candidateAgeDays(candidate, now);
+  if (ageDays > 2) return 0;
+
+  const text = highSignalActionableText(candidate);
+  const isDecisionShaping = /\b(block|blocked|blocker|critical|urgent|risk|assumption|decision|alignment|review|stuck|waiting)\b/.test(text);
+  const recentBase = ageDays <= 1 ? 3 : 2;
+  return recentBase + (isDecisionShaping ? 2 : 0);
+}
+
 export function scoreWorkspaceBriefingCandidate(candidate: WorkspaceBriefingCandidate, now = new Date()) {
   const statusBoost = candidate.status === "OPEN" || candidate.status === "IN_PROGRESS" || candidate.status === "ACTIVE"
     ? 2
@@ -251,6 +272,7 @@ export function scoreWorkspaceBriefingCandidate(candidate: WorkspaceBriefingCand
     + candidate.evidenceScore
     + statusBoost
     + Math.min(3, Math.max(0, candidate.priority ?? 0))
+    + recentActionableSignalBoost(candidate, now)
     - staleOpenWorkPenalty(candidate, now)
     - routineGoalPenalty(candidate, now)
   );
