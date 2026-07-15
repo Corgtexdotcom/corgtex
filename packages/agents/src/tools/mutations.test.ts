@@ -73,6 +73,7 @@ describe("proposal mutation tool", () => {
     expect(createProposalTool.function.name).toBe("create_proposal");
     expect(createProposalTool.function.parameters.properties).toHaveProperty("sourceTensionId");
     expect(createProposalTool.function.parameters.properties).toHaveProperty("relatedActionIds");
+    expect(createProposalTool.function.parameters.properties).toHaveProperty("ownerMemberId");
     expect(createProposalTool.function.parameters.required).toEqual([]);
   });
 
@@ -106,6 +107,31 @@ describe("proposal mutation tool", () => {
     expect(result).toEqual({ success: true, proposalId: "proposal-1" });
   });
 
+  it("passes explicit ownerless requests from source tension proposals", async () => {
+    vi.mocked(createProposalFromTension).mockResolvedValueOnce({
+      id: "proposal-ownerless",
+      title: "Clarify approval policy",
+    } as any);
+
+    await createProposalAction(
+      { kind: "agent", authProvider: "bootstrap", workspaceIds: ["ws-1"] } as any,
+      { workspaceId: "ws-1", sessionId: "session-1" },
+      {
+        sourceTensionId: "tension-1",
+        ownerMemberId: null,
+      },
+    );
+
+    expect(createProposalFromTension).toHaveBeenCalledWith(
+      expect.objectContaining({ kind: "agent" }),
+      expect.objectContaining({
+        workspaceId: "ws-1",
+        sourceTensionId: "tension-1",
+        ownerMemberId: null,
+      }),
+    );
+  });
+
   it("creates a regular proposal without a source tension", async () => {
     vi.mocked(createProposal).mockResolvedValueOnce({
       id: "proposal-2",
@@ -131,5 +157,31 @@ describe("proposal mutation tool", () => {
       }),
     );
     expect(result).toEqual({ success: true, proposalId: "proposal-2" });
+  });
+
+  it("passes explicit ownerless requests into regular proposal creation", async () => {
+    vi.mocked(createProposal).mockResolvedValueOnce({
+      id: "proposal-ownerless",
+      title: "Clarify approval policy",
+    } as any);
+
+    await createProposalAction(
+      { kind: "agent", authProvider: "bootstrap", workspaceIds: ["ws-1"] } as any,
+      { workspaceId: "ws-1", sessionId: "session-1" },
+      {
+        title: "Clarify approval policy",
+        bodyMd: "Proposal body",
+        ownerMemberId: null,
+      },
+    );
+
+    expect(createProposal).toHaveBeenCalledWith(
+      expect.objectContaining({ kind: "agent" }),
+      expect.objectContaining({
+        workspaceId: "ws-1",
+        title: "Clarify approval policy",
+        ownerMemberId: null,
+      }),
+    );
   });
 });

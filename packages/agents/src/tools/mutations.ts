@@ -96,6 +96,10 @@ export const createProposalTool: ModelTool = {
         bodyMd: { type: "string", description: "The full proposal text in Markdown. Required unless sourceTensionId is provided." },
         circleId: { type: "string" },
         sourceTensionId: { type: "string", description: "Optional UUID of the tension this proposal is drafted from" },
+        ownerMemberId: {
+          type: "string",
+          description: "Optional owner member UUID. Omit to default to the creator; pass null only when the user explicitly asks for no owner.",
+        },
         relatedActionIds: {
           type: "array",
           description: "Optional UUIDs of existing action items related to implementing or following up on this proposal",
@@ -240,6 +244,10 @@ export async function createProposalAction(actor: AppActor, ctx: any, args: any)
   const sourceTensionId = typeof args.sourceTensionId === "string" && args.sourceTensionId.trim().length > 0
     ? args.sourceTensionId
     : null;
+  const hasOwnerMemberId = Object.prototype.hasOwnProperty.call(args, "ownerMemberId");
+  const ownerMemberId = hasOwnerMemberId && (typeof args.ownerMemberId === "string" || args.ownerMemberId === null)
+    ? args.ownerMemberId
+    : undefined;
   const result = sourceTensionId
     ? await createProposalFromTension(actor, {
         workspaceId: ctx.workspaceId,
@@ -249,6 +257,7 @@ export async function createProposalAction(actor: AppActor, ctx: any, args: any)
         bodyMd: typeof args.bodyMd === "string" ? args.bodyMd : null,
         circleId: typeof args.circleId === "string" ? args.circleId : null,
         relatedActionIds,
+        ...(hasOwnerMemberId ? { ownerMemberId } : {}),
       })
     : await createProposal(actor, {
         workspaceId: ctx.workspaceId,
@@ -257,6 +266,7 @@ export async function createProposalAction(actor: AppActor, ctx: any, args: any)
         bodyMd: typeof args.bodyMd === "string" ? args.bodyMd : "",
         circleId: typeof args.circleId === "string" ? args.circleId : null,
         relatedActionIds,
+        ...(hasOwnerMemberId ? { ownerMemberId } : {}),
       });
 
   await appendAuditMeta("Proposal", result.id, "proposal.created", {
