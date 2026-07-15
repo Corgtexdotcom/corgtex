@@ -524,7 +524,9 @@ export default async function ProposalDetailPage({
 
               {canSubmitDecision && decisionState.mode === "CONSENT" && (
                 <div className="nr-decision-actions">
-                  {!decisionState.currentMemberDecision && decisionButton("AGREE", t("decisionMarkReviewed"), "primary small")}
+                  {!decisionState.currentMemberDecision
+                    && !decisionState.currentUserOpenObjectionId
+                    && decisionButton("AGREE", t("decisionMarkReviewed"), "primary small")}
                   {decisionState.currentMemberDecision && (
                     <span className="tag success">{t("decisionMarkedReviewed")}</span>
                   )}
