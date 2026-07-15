@@ -19,6 +19,7 @@ const redirect = vi.fn((url: string) => {
 const sendManualMeetingRecorder = vi.fn();
 const intakeMeetingTranscript = vi.fn();
 const extractTextFromFileBuffer = vi.fn();
+const requireWorkspaceMembership = vi.fn();
 const redisClient = {
   del: vi.fn(),
   get: vi.fn(),
@@ -64,7 +65,7 @@ vi.mock("@corgtex/domain", () => ({
   importMeetingInvite: vi.fn(),
   intakeMeetingTranscript,
   postDeliberationEntry: vi.fn(),
-  requireWorkspaceMembership: vi.fn(),
+  requireWorkspaceMembership,
   requestMeetingIntelligenceRegeneration: vi.fn(),
   replayWorkflowJob: vi.fn(),
   resolveDeliberationEntry: vi.fn(),
@@ -92,6 +93,7 @@ const initialTranscriptState: MeetingTranscriptActionState = {
 };
 
 beforeEach(() => {
+  requireWorkspaceMembership.mockResolvedValue(null);
   getRedisClient.mockResolvedValue(redisClient);
   redisClient.del.mockResolvedValue(1);
   redisClient.get.mockResolvedValue(null);
@@ -200,6 +202,10 @@ describe("meeting server actions", () => {
       }],
     });
     expect(state.pendingTranscriptToken).toEqual(expect.any(String));
+    expect(requireWorkspaceMembership).toHaveBeenCalledWith({ actor, workspaceId: "workspace-1" });
+    expect(requireWorkspaceMembership.mock.invocationCallOrder[0]).toBeLessThan(
+      redisClient.setEx.mock.invocationCallOrder[0],
+    );
     expect(redisClient.setEx).toHaveBeenCalledWith(
       expect.stringContaining("meeting-transcript-upload:workspace-1:"),
       1200,
@@ -255,6 +261,55 @@ describe("meeting server actions", () => {
       participantEmails: ["jan@example.com"],
     }));
     expect(redisClient.del).toHaveBeenCalledWith("test:meeting-transcript-upload:workspace-1:token-1");
+  });
+
+  it("lets a replacement file override a pending transcript during clarification", async () => {
+    const { uploadMeetingTranscriptStateAction } = await import("./actions");
+    redisClient.get.mockResolvedValueOnce(JSON.stringify({
+      workspaceId: "workspace-1",
+      transcript: "Old cached transcript.",
+      fileName: "old.txt",
+      title: "Weekly Review",
+      source: "transcript-upload",
+      recordedAt: "2026-07-15T09:00",
+      timeZone: "America/Los_Angeles",
+      summaryMd: null,
+      ingestionGuidanceMd: null,
+      participantIds: [],
+      participantEmails: [],
+    }));
+    extractTextFromFileBuffer.mockResolvedValueOnce({
+      textContent: "Updated transcript from replacement file.",
+    });
+    intakeMeetingTranscript.mockResolvedValueOnce({
+      status: "meeting_matched",
+      message: "Transcript saved as meeting \"Weekly Review\". Summary and follow-up extraction are queued.",
+      meeting: { id: "meeting-1" },
+      inferred: {
+        title: "Weekly Review",
+        recordedAt: new Date("2026-07-15T16:00:00.000Z"),
+        participantEmails: [],
+        source: "transcript-upload",
+      },
+    });
+    const data = formData({
+      workspaceId: "workspace-1",
+      pendingTranscriptToken: "token-1",
+      recordedAt: "2026-07-15T09:00",
+    });
+    data.set("file", new File(["updated"], "updated.txt", { type: "text/plain" }));
+
+    const state = await uploadMeetingTranscriptStateAction(initialTranscriptState, data);
+
+    expect(state.status).toBe("success");
+    expect(extractTextFromFileBuffer).toHaveBeenCalledWith(expect.objectContaining({
+      fileName: "updated.txt",
+      mimeType: "text/plain",
+    }));
+    expect(intakeMeetingTranscript).toHaveBeenCalledWith(actor, expect.objectContaining({
+      transcript: "Updated transcript from replacement file.",
+      fileName: "updated.txt",
+    }));
   });
 
   it("keeps clarification inline and asks for retry when Redis cannot hold the pending transcript", async () => {

@@ -1,6 +1,6 @@
 "use client";
 
-import { useActionState, useEffect, useRef, type ReactNode } from "react";
+import { useActionState, useEffect, useRef, useState, type ReactNode } from "react";
 import { MarkdownEditor } from "@/lib/components/MarkdownEditor";
 import { TimeZoneSelect } from "@/lib/components/TimeZoneSelect";
 import {
@@ -111,6 +111,8 @@ export function MeetingTranscriptUploadForm({
     uploadMeetingTranscriptStateAction,
     initialMeetingTranscriptActionState,
   );
+  const stateTimeZone = fieldValue(state, defaultValues, "timeZone");
+  const [selectedTimeZone, setSelectedTimeZone] = useState(stateTimeZone || undefined);
   const requiresMeetingChoice = state.status === "needs_clarification"
     && state.requiredFields?.includes("meetingId")
     && (state.candidates?.length ?? 0) > 0;
@@ -135,6 +137,10 @@ export function MeetingTranscriptUploadForm({
     }
     form.scrollIntoView({ behavior: "smooth", block: "start" });
   }, [state.status, successHref]);
+
+  useEffect(() => {
+    if (stateTimeZone) setSelectedTimeZone(stateTimeZone);
+  }, [stateTimeZone]);
 
   return (
     <form action={formAction} className={className} key={formKey} ref={formRef}>
@@ -166,14 +172,13 @@ export function MeetingTranscriptUploadForm({
           <legend className="nr-meta" style={{ padding: "0 6px" }}>
             {labels.chooseMeeting ?? "Choose meeting"}
           </legend>
-          {state.candidates?.map((candidate, index) => (
+          {state.candidates?.map((candidate) => (
             <label key={candidate.meetingId} style={{ flexDirection: "row", alignItems: "flex-start", gap: 8 }}>
               <input
                 type="radio"
                 name="meetingId"
                 value={candidate.meetingId}
                 required
-                defaultChecked={index === 0}
                 style={{ width: "auto", marginTop: 3 }}
               />
               <span>{candidateLabel(candidate)}</span>
@@ -213,7 +218,9 @@ export function MeetingTranscriptUploadForm({
         </label>
       ) : null}
 
-      {showTimeZone && !requiresMeetingChoice ? <TimeZoneSelect /> : null}
+      {showTimeZone && !requiresMeetingChoice ? (
+        <TimeZoneSelect value={selectedTimeZone} onValueChange={setSelectedTimeZone} />
+      ) : null}
 
       {showParticipants && !requiresMeetingChoice ? (
         <label>

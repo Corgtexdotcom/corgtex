@@ -257,11 +257,12 @@ async function buildTranscriptUploadPayload(formData: FormData): Promise<Transcr
   }
 
   const file = formData.get("file");
-  let transcript = existingPayload?.transcript ?? asOptional(formData, "transcript") ?? "";
+  const submittedTranscript = asOptional(formData, "transcript");
+  let transcript = submittedTranscript?.trim() ? submittedTranscript : existingPayload?.transcript ?? "";
   let fileName = existingPayload?.fileName ?? null;
   let retryRequiresTranscriptUpload = false;
 
-  if (!existingPayload && file instanceof File && file.size > 0) {
+  if (file instanceof File && file.size > 0) {
     const extracted = await extractTextFromFileBuffer({
       fileBuffer: Buffer.from(await file.arrayBuffer()),
       fileName: file.name,
@@ -431,6 +432,7 @@ export async function uploadMeetingTranscriptStateAction(
     if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
 
     const actor = await requirePageActor();
+    await requireWorkspaceMembership({ actor, workspaceId });
     const payload = await buildTranscriptUploadPayload(formData);
     if (!isTranscriptUploadPayload(payload)) return payload;
 
