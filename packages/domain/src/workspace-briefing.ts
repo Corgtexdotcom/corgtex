@@ -58,6 +58,7 @@ export type WorkspaceBriefingItem = {
   sourceRefs: WorkspaceBriefingSourceRef[];
   href: string | null;
   occurredAt: string;
+  status?: string | null;
   confidence: number;
 };
 
@@ -108,6 +109,11 @@ const SECTION_TITLES: Record<NewspaperEmailSectionId, string> = {
   emergingTensions: "Emerging Tensions",
   otherUpdates: "Other Updates",
 };
+
+function sectionForBriefingItem(item: WorkspaceBriefingItem): NewspaperEmailSectionId {
+  if (item.kind === "ADVICE_REQUEST" && item.status && item.status !== "ACTIVE") return "otherUpdates";
+  return KIND_TO_SECTION[item.kind] ?? "otherUpdates";
+}
 
 const WORKSPACE_BRIEFING_SOURCE_LABELS: Record<WorkspaceBriefingSourceType, string> = {
   ACTION: "Action",
@@ -349,6 +355,7 @@ function itemFromCandidate(candidate: WorkspaceBriefingCandidate, index: number,
     sourceRefs: candidate.sourceRefs,
     href: candidate.href,
     occurredAt: candidate.occurredAt.toISOString(),
+    status: candidate.status ?? null,
     confidence: Math.max(0.55, Math.min(0.98, 0.55 + score / 25)),
   };
 }
@@ -612,6 +619,7 @@ export function normalizeWorkspaceBriefingPayload(input: unknown): NormalizedWor
         sourceRefs,
         href: typeof entry.href === "string" ? entry.href : null,
         occurredAt: typeof entry.occurredAt === "string" ? entry.occurredAt : new Date().toISOString(),
+        status: typeof entry.status === "string" ? entry.status : null,
         confidence: typeof entry.confidence === "number" ? Math.max(0, Math.min(1, entry.confidence)) : 0.75,
       }];
     })
@@ -640,7 +648,7 @@ export function workspaceBriefingToNewspaperDigest(input: { briefingJson: unknow
   const sectionsById = new Map<NewspaperEmailSectionId, string[]>();
 
   for (const item of briefing.items) {
-    const sectionId = KIND_TO_SECTION[item.kind] ?? "otherUpdates";
+    const sectionId = sectionForBriefingItem(item);
     const body = [
       item.title,
       item.summaryMd && item.summaryMd !== item.title ? item.summaryMd : null,
