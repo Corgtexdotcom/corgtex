@@ -112,6 +112,8 @@ export const MCP_TOOL_CAPABILITIES = {
   get_meeting: { scopes: ["meetings:read"] },
   get_meeting_recorder_coverage_readiness: { scopes: ["meetings:read"] },
   set_meeting_series_recorder_url: { scopes: ["meetings:write", "support:write"], sensitive: true },
+  set_meeting_recorder_auto_recording: { scopes: ["meetings:write", "support:write"], sensitive: true },
+  ensure_meeting_recorder_coverage: { scopes: ["meetings:write", "support:write"], sensitive: true },
   upload_meeting: { scopes: ["meetings:write"] },
   delete_meeting: { scopes: ["meetings:write"] },
   list_articles: { scopes: ["brain:read"] },

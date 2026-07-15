@@ -105,6 +105,8 @@ const MUTATING_SUPPORT_ACTIONS = new Set([
   "tensions.return_to_draft",
   "meetings.upload",
   "meeting_series.set_recorder_url",
+  "meeting_recorders.set_auto_recording",
+  "meeting_recorders.ensure_coverage",
   "runtime.retry_failed_job",
   "runtime.discard_failed_job",
   "agent_credentials.update_scopes",
@@ -165,6 +167,8 @@ const SUPPORT_ACTION_TO_MCP_TOOL = {
   "meetings.upload": "upload_meeting",
   "meeting_recorders.readiness": "get_meeting_recorder_coverage_readiness",
   "meeting_series.set_recorder_url": "set_meeting_series_recorder_url",
+  "meeting_recorders.set_auto_recording": "set_meeting_recorder_auto_recording",
+  "meeting_recorders.ensure_coverage": "ensure_meeting_recorder_coverage",
 } as const;
 
 export type SupportAction = keyof typeof SUPPORT_ACTION_TO_MCP_TOOL;
