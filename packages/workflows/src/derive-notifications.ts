@@ -52,10 +52,10 @@ export function deriveNotificationsForEvent(event: {
       type: event.type,
       entityType,
       entityId,
-      title: title ? `Proposal for review: ${title}` : "Proposal submitted for review",
+      title: title ? `Review requested: ${title}` : "Proposal review requested",
       bodyMd: title
-        ? `The proposal **${title}** is awaiting approval.`
-        : "A proposal is awaiting approval in the workspace dashboard.",
+        ? `The proposal **${title}** is open for advisory review.`
+        : "A proposal is open for advisory review in the workspace dashboard.",
     }] satisfies NotificationDraft[];
   }
 

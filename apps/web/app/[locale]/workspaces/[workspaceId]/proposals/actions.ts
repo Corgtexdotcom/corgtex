@@ -8,8 +8,11 @@ import {
   createProposal,
   createProposalFromTension,
   createAdviceRequest,
+  createObjection,
+  recordApprovalDecision,
   reopenProposal,
   resolveProposal,
+  resolveObjection,
   returnProposalToDraft,
   submitProposal,
   updateProposal,
@@ -200,6 +203,49 @@ export async function requestProposalAdviceAction(formData: FormData) {
     deadlineAt: asOptionalDate(formData, "deadlineAt"),
     reminderAt: asOptionalDate(formData, "reminderAt"),
     preferredChannel: asOptional(formData, "preferredChannel") as AdviceRequestPreferredChannel | null,
+  });
+  refresh(workspaceId);
+}
+
+export async function decideProposalApprovalAction(formData: FormData) {
+  const _demoGuardWsId = formData.get("workspaceId") as string;
+  if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
+
+  const actor = await requirePageActor();
+  const workspaceId = asString(formData, "workspaceId");
+  await recordApprovalDecision(actor, {
+    workspaceId,
+    flowId: asString(formData, "flowId"),
+    choice: asString(formData, "choice") as "APPROVE" | "REJECT" | "ABSTAIN" | "AGREE" | "BLOCK",
+    rationale: asOptional(formData, "rationale"),
+  });
+  refresh(workspaceId);
+}
+
+export async function createProposalObjectionAction(formData: FormData) {
+  const _demoGuardWsId = formData.get("workspaceId") as string;
+  if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
+
+  const actor = await requirePageActor();
+  const workspaceId = asString(formData, "workspaceId");
+  await createObjection(actor, {
+    workspaceId,
+    flowId: asString(formData, "flowId"),
+    bodyMd: asString(formData, "bodyMd"),
+  });
+  refresh(workspaceId);
+}
+
+export async function resolveProposalObjectionAction(formData: FormData) {
+  const _demoGuardWsId = formData.get("workspaceId") as string;
+  if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
+
+  const actor = await requirePageActor();
+  const workspaceId = asString(formData, "workspaceId");
+  await resolveObjection(actor, {
+    workspaceId,
+    flowId: asString(formData, "flowId"),
+    objectionId: asString(formData, "objectionId"),
   });
   refresh(workspaceId);
 }

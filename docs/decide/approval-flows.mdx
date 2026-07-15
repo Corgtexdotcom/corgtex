@@ -3,7 +3,7 @@ title: "Approval Flows"
 description: "Configure how automated decisions and objections are processed."
 ---
 
-**Approval Flows** govern exactly how a [Proposal](/decide/proposals) or [Spend Request](/see/spend-requests) transitions from submitted to approved.
+**Approval Flows** govern how a [Proposal](/decide/proposals) or [Spend Request](/see/spend-requests) collects review input before a final outcome is recorded.
 
 Corgtex provides a flexible policy engine. Different types of decisions or different Circles can be bound to different Approval Policies. 
 
@@ -13,25 +13,25 @@ When configuring an Approval Policy, you define the required mode:
 
 - **SINGLE**: Requires approval from a single designated role (e.g., the Finance Steward for small expenses).
 - **MAJORITY**: Requires a simple >50% vote from the eligible voters.
-- **CONSENSUS**: Requires unanimous agreement (`APPROVE`) from all eligible voters.
-- **CONSENT**: (Recommended) The proposal passes automatically after a defined time limit, *unless* a valid objection is raised (`BLOCK`).
+- **CONSENSUS**: Requires unanimous agreement (`AGREE`) from all eligible voters.
+- **CONSENT**: (Recommended) The proposal is open for review during a defined window. People can mark it reviewed or raise a reasoned objection.
 
 ## Objections and Integration
 
 In a Consent-based flow, the primary way to stop a proposal is by raising an **Objection**. 
 
-When a user selects `BLOCK` (Object) on an active proposal, they must provide the reasoning. Corgtex records this objection and halts the timer.
+When a user selects **Object** on an active proposal, they must provide the reasoning. Corgtex records this objection so the team can integrate the concern before the proposal is resolved.
 
 The focus then shifts to **Integration**:
 1. The proposer and the objector engage in a discussion directly on the platform.
 2. The proposer can edit the draft proposal to address the concerns.
 3. Once the objector feels their concern has been integrated (the proposal is no longer harmful), they can **Resolve** their objection.
-4. If all objections are resolved, the proposal passes.
+4. If all objections are resolved, the proposal is ready for the resolver to adopt manually.
 
 ## Automation and Time Limits
 
-Every active Approval Flow has an expiration. 
+Approval Flow windows make review timing visible.
 
-If a policy is set to a 48-hour Consent window, and 48 hours pass without any un-resolved objections, Corgtex's background worker automatically transitions the Proposal to `APPROVED` and executes the requested database mutations safely. 
+For proposals, the current product treats approval input as advisory: the review window, vote counts, and objections are visible to the resolver, but the proposal only becomes adopted, not adopted, or withdrawn when someone uses the Resolve action.
 
-This guarantees that proposals don't stagnate for weeks waiting for someone to "sign off." Silence means consent.
+This avoids silent automatic adoption while still making it obvious which proposals are waiting for review.

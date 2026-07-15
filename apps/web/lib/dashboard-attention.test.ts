@@ -3,11 +3,12 @@ import { describe, expect, it } from "vitest";
 import { getDashboardAttentionCounts } from "./dashboard-attention";
 
 describe("getDashboardAttentionCounts", () => {
-  it("counts only unread notifications", () => {
+  it("counts unread notifications and proposal reviews", () => {
     expect(getDashboardAttentionCounts({
       unreadNotificationsCount: 2,
+      proposalReviewRequestsCount: 3,
     })).toEqual({
-      totalAttentionItems: 2,
+      totalAttentionItems: 5,
     });
   });
 

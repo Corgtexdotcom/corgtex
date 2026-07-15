@@ -3,6 +3,7 @@ import {
   calculateApprovalOutcome,
   finalizeExpiredApprovalFlows,
   listActionableApprovalFlows,
+  listProposalDecisionStates,
   recordApprovalDecision,
   withdrawActiveApprovalFlowForSubject,
 } from "./approvals";
@@ -222,6 +223,157 @@ describe("listActionableApprovalFlows", () => {
       ],
     });
     expect(prismaMock.approvalFlow.findMany).toHaveBeenCalledWith(expect.not.objectContaining({ take: expect.any(Number) }));
+  });
+});
+
+describe("listProposalDecisionStates", () => {
+  it("summarizes majority decisions and current member review state", async () => {
+    const updatedAt = new Date("2026-05-26T12:15:00.000Z");
+    prismaMock.member.findMany.mockResolvedValue([{ id: "member-1" }, { id: "member-2" }, { id: "member-3" }]);
+    prismaMock.approvalFlow.findMany.mockResolvedValue([
+      {
+        id: "flow-majority",
+        workspaceId: "ws-1",
+        subjectType: "PROPOSAL",
+        subjectId: "proposal-1",
+        status: "ACTIVE",
+        mode: "MAJORITY",
+        openedAt: new Date("2026-05-26T12:00:00.000Z"),
+        closesAt: null,
+        quorumPercent: 50,
+        minApproverCount: 2,
+        decisions: [
+          { memberId: "member-1", choice: "APPROVE", rationale: "Works", updatedAt },
+          { memberId: "member-2", choice: "REJECT", rationale: null, updatedAt },
+        ],
+        objections: [],
+      },
+    ]);
+
+    const states = await listProposalDecisionStates(
+      { kind: "user", user: { id: "u-1" } } as any,
+      { workspaceId: "ws-1", proposalIds: ["proposal-1"] },
+    );
+
+    expect(states.get("proposal-1")).toMatchObject({
+      proposalId: "proposal-1",
+      flowId: "flow-majority",
+      mode: "MAJORITY",
+      eligibleApprovers: 3,
+      currentMemberDecision: { choice: "APPROVE", rationale: "Works" },
+      canReview: true,
+      needsReview: false,
+      outcome: {
+        quorumMet: true,
+        minApproverCountMet: true,
+        summary: {
+          approve: 1,
+          reject: 1,
+          abstain: 0,
+        },
+      },
+    });
+  });
+
+  it("marks consent review needed until the user reviews or has an open objection", async () => {
+    prismaMock.member.findMany.mockResolvedValue([{ id: "member-1" }, { id: "member-2" }]);
+    prismaMock.approvalFlow.findMany.mockResolvedValue([
+      {
+        id: "flow-needs-review",
+        workspaceId: "ws-1",
+        subjectType: "PROPOSAL",
+        subjectId: "proposal-review",
+        status: "ACTIVE",
+        mode: "CONSENT",
+        openedAt: new Date("2026-05-26T12:00:00.000Z"),
+        closesAt: new Date("2026-05-29T12:00:00.000Z"),
+        quorumPercent: 0,
+        minApproverCount: 1,
+        decisions: [],
+        objections: [],
+      },
+      {
+        id: "flow-objected",
+        workspaceId: "ws-1",
+        subjectType: "PROPOSAL",
+        subjectId: "proposal-objected",
+        status: "ACTIVE",
+        mode: "CONSENT",
+        openedAt: new Date("2026-05-26T12:00:00.000Z"),
+        closesAt: new Date("2026-05-29T12:00:00.000Z"),
+        quorumPercent: 0,
+        minApproverCount: 1,
+        decisions: [],
+        objections: [
+          {
+            id: "objection-1",
+            userId: "u-1",
+            bodyMd: "This creates risk.",
+            createdAt: new Date("2026-05-26T13:00:00.000Z"),
+            user: { displayName: "Reviewer", email: "reviewer@example.com" },
+          },
+        ],
+      },
+    ]);
+
+    const states = await listProposalDecisionStates(
+      { kind: "user", user: { id: "u-1" } } as any,
+      { workspaceId: "ws-1", proposalIds: ["proposal-review", "proposal-objected"] },
+    );
+
+    expect(states.get("proposal-review")).toMatchObject({
+      canReview: true,
+      needsReview: true,
+      currentMemberDecision: null,
+      currentUserOpenObjectionId: null,
+    });
+    expect(states.get("proposal-objected")).toMatchObject({
+      canReview: true,
+      needsReview: false,
+      currentUserOpenObjectionId: "objection-1",
+      openObjections: [
+        expect.objectContaining({ bodyMd: "This creates risk." }),
+      ],
+    });
+  });
+
+  it("does not mark synthetic operator memberships as proposal reviewers", async () => {
+    requireWorkspaceMembershipMock.mockResolvedValueOnce({
+      id: "global-operator",
+      workspaceId: "ws-1",
+      userId: "operator-user",
+      role: "ADMIN",
+      isActive: true,
+    });
+    prismaMock.member.findMany.mockResolvedValue([{ id: "member-1" }, { id: "member-2" }]);
+    prismaMock.approvalFlow.findMany.mockResolvedValue([
+      {
+        id: "flow-operator",
+        workspaceId: "ws-1",
+        subjectType: "PROPOSAL",
+        subjectId: "proposal-operator",
+        status: "ACTIVE",
+        mode: "MAJORITY",
+        openedAt: new Date("2026-05-26T12:00:00.000Z"),
+        closesAt: null,
+        quorumPercent: 50,
+        minApproverCount: 1,
+        decisions: [],
+        objections: [],
+      },
+    ]);
+
+    const states = await listProposalDecisionStates(
+      { kind: "user", user: { id: "operator-user", globalRole: "OPERATOR" } } as any,
+      { workspaceId: "ws-1", proposalIds: ["proposal-operator"] },
+    );
+
+    expect(states.get("proposal-operator")).toMatchObject({
+      currentMemberDecision: null,
+      currentUserOpenObjectionId: null,
+      canReview: false,
+      needsReview: false,
+    });
   });
 });
 

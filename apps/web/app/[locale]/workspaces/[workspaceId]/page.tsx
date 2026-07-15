@@ -5,6 +5,7 @@ import {
   listNewspaperEditions,
   listMembers, listNotifications, listTensions,
   listArticles, listMeetings,
+  listProposalDecisionStates,
   normalizeNewspaperEditionDigest,
   normalizeWorkspaceBriefingPayload,
   workspaceBriefingSourceLabel
@@ -52,6 +53,7 @@ export default async function WorkspaceDashboard({
     newspaperEditions,
     meetings,
     openProposalCandidates,
+    proposalReviewCandidates,
     teamActionCandidates,
     chunksCount,
     workspaceData,
@@ -86,6 +88,23 @@ export default async function WorkspaceDashboard({
       },
       orderBy: { createdAt: "desc" },
       take: 20,
+    }),
+    prisma.proposal.findMany({
+      where: {
+        workspaceId,
+        status: "OPEN",
+        isPrivate: false,
+        archivedAt: null,
+      },
+      select: {
+        id: true,
+        title: true,
+        status: true,
+        isPrivate: true,
+        archivedAt: true,
+        createdAt: true,
+      },
+      orderBy: { createdAt: "desc" },
     }),
     prisma.action.findMany({
       where: {
@@ -151,6 +170,15 @@ export default async function WorkspaceDashboard({
   const isUnreadNotificationsCountCapped = isDashboardUnreadNotificationCountCapped(unreadNotificationsCount);
   const notificationPreviewLimit = selectDashboardNotificationPreviewLimit(unreadNotificationsCount);
   const openProposalItems = selectDashboardOpenProposals(openProposalCandidates);
+  const proposalReviewCandidatesForDecision = selectDashboardOpenProposals(
+    proposalReviewCandidates,
+    proposalReviewCandidates.length,
+  );
+  const proposalDecisionStates = await listProposalDecisionStates(actor, {
+    workspaceId,
+    proposalIds: proposalReviewCandidatesForDecision.map((proposal) => proposal.id),
+  });
+  const proposalReviewItems = proposalReviewCandidatesForDecision.filter((proposal) => proposalDecisionStates.get(proposal.id)?.needsReview);
   const teamActionItems = selectDashboardActionItems(teamActionCandidates);
   const openTensionItems = tensions.filter((tension) => tension.status === "OPEN");
   const currentUserId = actor.kind === "user" ? actor.user.id : null;
@@ -198,6 +226,7 @@ export default async function WorkspaceDashboard({
   
   const attentionCounts = getDashboardAttentionCounts({
     unreadNotificationsCount,
+    proposalReviewRequestsCount: proposalReviewItems.length,
   });
   const totalAttentionItems = attentionCounts.totalAttentionItems;
 
@@ -322,53 +351,86 @@ export default async function WorkspaceDashboard({
     || myWorkItems.length > 0;
   const hasDashboardContent = hasWorkspaceBriefing || hasStoredEdition || cappedFeedItems.length > 0 || hasWorkRail;
   const hasStrategicDirection = strategicGoals.length > 0 || !!recentRecognition;
+  const attentionSummary = [
+    unreadNotificationsCount > 0
+      ? t(isUnreadNotificationsCountCapped ? "unreadNotificationsSummaryCapped" : "unreadNotificationsSummary", {
+        count: unreadNotificationsDisplayCount,
+      })
+      : null,
+    proposalReviewItems.length > 0 ? t("proposalReviewsSummary", { count: proposalReviewItems.length }) : null,
+  ].filter(Boolean).join(" · ");
   const attentionPanel = totalAttentionItems > 0 ? (
     <section className="nr-rail-section nr-rail-section-attention">
       <h2 className="nr-section-header">{t("attention")}</h2>
       <div className="nr-attention nr-attention-rail">
         <div className="nr-attention-summary">
-          {t(isUnreadNotificationsCountCapped ? "unreadNotificationsSummaryCapped" : "unreadNotificationsSummary", {
-            count: unreadNotificationsDisplayCount,
-          })}
+          {attentionSummary}
         </div>
 
         <div className="nr-attention-body">
-          <div className="nr-attention-block">
-            <div className="nr-attention-block-header">
-              <strong>
-                <Link href={`/workspaces/${workspaceId}/notifications`} className="nr-attention-heading-link">
-                  {t("notifications")}
-                </Link>
-              </strong>
-              <form action={markAllNotificationsReadAction} className="nr-attention-mark-read">
-                <input type="hidden" name="workspaceId" value={workspaceId} />
-                <button type="submit" className="nr-attention-mark-read-button">{t("markRead")}</button>
-              </form>
-            </div>
-            {unreadNotifications.slice(0, notificationPreviewLimit).map((n) => {
-              const href = resolveWorkspaceEntityUrl(workspaceId, n.entityType, n.entityId);
-              return (
-                <div key={n.id} className="nr-attention-notification">
-                  <div className="nr-attention-notification-head">
-                    {href ? (
-                      <Link href={href} className="nr-attention-title nr-attention-title-truncate">
-                        {n.title}
-                      </Link>
-                    ) : (
-                      <span className="nr-attention-title nr-attention-title-truncate">{n.title}</span>
-                    )}
-                    <span className="nr-attention-time" suppressHydrationWarning>{ageText(n.createdAt)}</span>
+          {proposalReviewItems.length > 0 && (
+            <div className="nr-attention-block">
+              <div className="nr-attention-block-header">
+                <strong>
+                  <Link href={`/workspaces/${workspaceId}/proposals?status=OPEN`} className="nr-attention-heading-link">
+                    {t("proposalReviews")}
+                  </Link>
+                </strong>
+              </div>
+              {proposalReviewItems.slice(0, 3).map((proposal) => (
+                <div key={proposal.id} className="nr-attention-item">
+                  <div className="nr-attention-item-main">
+                    <Link href={`/workspaces/${workspaceId}/proposals/${proposal.id}`} className="nr-attention-title nr-attention-title-truncate">
+                      {proposal.title}
+                    </Link>
+                    <span className="nr-attention-copy" suppressHydrationWarning>{ageText(proposal.createdAt)}</span>
                   </div>
-                  {n.bodyMd && (
-                    <div className="nr-attention-copy">
-                      <MarkdownExcerpt markdown={n.bodyMd} maxLength={100} />
-                    </div>
-                  )}
+                  <span className="tag warning tag-sm">{t("proposalReviewRequestedTag")}</span>
                 </div>
-              );
-            })}
-            <Link href={`/workspaces/${workspaceId}/notifications`} className="nr-attention-inline-link">{t("viewAll")}</Link>
-          </div>
+              ))}
+              {proposalReviewItems.length > 3 && (
+                <Link href={`/workspaces/${workspaceId}/proposals?status=OPEN`} className="nr-attention-inline-link">{t("viewAllProposals")}</Link>
+              )}
+            </div>
+          )}
+          {unreadNotificationsCount > 0 && (
+            <div className="nr-attention-block">
+              <div className="nr-attention-block-header">
+                <strong>
+                  <Link href={`/workspaces/${workspaceId}/notifications`} className="nr-attention-heading-link">
+                    {t("notifications")}
+                  </Link>
+                </strong>
+                <form action={markAllNotificationsReadAction} className="nr-attention-mark-read">
+                  <input type="hidden" name="workspaceId" value={workspaceId} />
+                  <button type="submit" className="nr-attention-mark-read-button">{t("markRead")}</button>
+                </form>
+              </div>
+              {unreadNotifications.slice(0, notificationPreviewLimit).map((n) => {
+                const href = resolveWorkspaceEntityUrl(workspaceId, n.entityType, n.entityId);
+                return (
+                  <div key={n.id} className="nr-attention-notification">
+                    <div className="nr-attention-notification-head">
+                      {href ? (
+                        <Link href={href} className="nr-attention-title nr-attention-title-truncate">
+                          {n.title}
+                        </Link>
+                      ) : (
+                        <span className="nr-attention-title nr-attention-title-truncate">{n.title}</span>
+                      )}
+                      <span className="nr-attention-time" suppressHydrationWarning>{ageText(n.createdAt)}</span>
+                    </div>
+                    {n.bodyMd && (
+                      <div className="nr-attention-copy">
+                        <MarkdownExcerpt markdown={n.bodyMd} maxLength={100} />
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+              <Link href={`/workspaces/${workspaceId}/notifications`} className="nr-attention-inline-link">{t("viewAll")}</Link>
+            </div>
+          )}
         </div>
       </div>
     </section>
