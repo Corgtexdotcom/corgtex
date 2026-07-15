@@ -18,6 +18,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
       durationMinutes?: unknown;
       scheduledEndAt?: unknown;
       recurrenceRule?: unknown;
+      meetingUrl?: unknown;
       participantIds?: unknown;
       participantEmails?: unknown;
       timeZone?: unknown;
@@ -42,6 +43,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
       startsAt,
       scheduledEndAt,
       recurrenceRule: typeof body.recurrenceRule === "string" ? body.recurrenceRule : null,
+      meetingUrl: typeof body.meetingUrl === "string" ? body.meetingUrl : null,
       participantIds: Array.isArray(body.participantIds) ? body.participantIds.map((value) => String(value)) : [],
       participantEmails: Array.isArray(body.participantEmails) ? body.participantEmails.map((value) => String(value)) : [],
     });

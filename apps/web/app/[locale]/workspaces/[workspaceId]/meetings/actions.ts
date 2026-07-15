@@ -100,6 +100,7 @@ export async function createMeetingSeriesAction(formData: FormData) {
     startsAt,
     scheduledEndAt,
     recurrenceRule: asOptional(formData, "recurrenceRule"),
+    meetingUrl: asOptional(formData, "meetingUrl"),
     participantIds: asOptional(formData, "participantIds")?.split(",").map((value) => value.trim()).filter(Boolean) ?? [],
     participantEmails: asOptional(formData, "participantEmails")?.split(",").map((value) => value.trim()).filter(Boolean) ?? [],
   });

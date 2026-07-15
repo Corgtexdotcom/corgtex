@@ -31,6 +31,7 @@ const { prismaMock, fetchMock } = vi.hoisted(() => {
     meeting: {
       create: vi.fn(),
       delete: vi.fn(),
+      findMany: vi.fn(),
       findFirst: vi.fn(),
       update: vi.fn(),
       upsert: vi.fn(),
@@ -169,8 +170,10 @@ describe("meeting recorder domain", () => {
       recordedAt: new Date("2026-05-05T17:00:00.000Z"),
       scheduledEndAt: new Date("2026-05-05T18:00:00.000Z"),
       meetingUrl: "https://meet.google.com/abc-defg-hij",
+      series: { meetingUrl: null },
       participantEmails: ["team@example.com"],
     });
+    prismaMock.meeting.findMany.mockResolvedValue([]);
     prismaMock.meetingRecording.findFirst.mockResolvedValue(null);
     prismaMock.meetingRecording.findMany.mockResolvedValue([]);
     prismaMock.meetingRecording.findUnique.mockResolvedValue(null);
@@ -246,16 +249,42 @@ describe("meeting recorder domain", () => {
     }
   });
 
-  it("rejects non-schedulable Teams meet links before creating a manual meeting", async () => {
+  it("accepts Teams short business meet links for manual recorder scheduling", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-06-24T17:00:00.000Z"));
+    try {
+      const { sendManualMeetingRecorder } = await import("./meeting-recorders");
+      fetchMock.mockResolvedValue({ ok: true, status: 200, text: async () => JSON.stringify({ id: "recall-bot-1" }) });
+
+      await expect(sendManualMeetingRecorder(facilitatorActor, {
+        workspaceId: "workspace-1",
+        meetingUrl: "https://teams.microsoft.com/meet/12345678901234?p=abc",
+      })).resolves.toMatchObject({
+        meeting: { id: "meeting-1" },
+        recording: { status: "SCHEDULED", externalBotId: "recall-bot-1" },
+      });
+
+      expect(prismaMock.meeting.create).toHaveBeenCalledWith({
+        data: expect.objectContaining({
+          meetingUrl: "https://teams.microsoft.com/meet/12345678901234?p=abc",
+        }),
+      });
+      expect(fetchMock).toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("rejects malformed Teams short links before creating a manual meeting", async () => {
     const { sendManualMeetingRecorder } = await import("./meeting-recorders");
 
     await expect(sendManualMeetingRecorder(facilitatorActor, {
       workspaceId: "workspace-1",
-      meetingUrl: "https://teams.microsoft.com/meet/21377000607471?p=abc",
+      meetingUrl: "https://teams.microsoft.com/meet/12345678901234",
     })).rejects.toMatchObject({
       status: 400,
       code: "RECORDER_TEAMS_FULL_JOIN_LINK_REQUIRED",
-      message: expect.stringContaining("/l/meetup-join/"),
+      message: expect.stringContaining("supported live meeting link"),
     });
 
     expect(prismaMock.meeting.create).not.toHaveBeenCalled();
@@ -1267,7 +1296,7 @@ describe("meeting recorder domain", () => {
         title: "Client sync",
         recordedAt: new Date("2026-05-05T17:00:00.000Z"),
         scheduledEndAt: new Date("2026-05-05T18:00:00.000Z"),
-        meetingUrl: "https://teams.microsoft.com/l/meetup-join/abc",
+        meetingUrl: "https://teams.microsoft.com/meet/12345678901234?p=abc",
         participantEmails: [],
       });
     prismaMock.meeting.upsert.mockResolvedValue({
@@ -1276,7 +1305,7 @@ describe("meeting recorder domain", () => {
       title: "Client sync",
       recordedAt: new Date("2026-05-05T17:00:00.000Z"),
       scheduledEndAt: new Date("2026-05-05T18:00:00.000Z"),
-      meetingUrl: "https://teams.microsoft.com/l/meetup-join/abc",
+      meetingUrl: "https://teams.microsoft.com/meet/12345678901234?p=abc",
     });
     prismaMock.meetingRecording.create.mockResolvedValue({
       id: "recording-teams",
@@ -1304,7 +1333,7 @@ describe("meeting recorder domain", () => {
               subject: "Client sync",
               start: { dateTime: "2026-05-05T10:00:00", timeZone: "Pacific Standard Time" },
               end: { dateTime: "2026-05-05T11:00:00", timeZone: "Pacific Standard Time" },
-              onlineMeeting: { joinUrl: "https://teams.microsoft.com/l/meetup-join/abc" },
+              onlineMeeting: { joinUrl: "https://teams.microsoft.com/meet/12345678901234?p=abc" },
               showAs: "busy",
               sensitivity: "normal",
             },
@@ -1575,6 +1604,337 @@ describe("meeting recorder domain", () => {
     });
 
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("retires an active recorder for an old URL before scheduling the current URL", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-06-24T16:00:00.000Z"));
+    try {
+      const { scheduleMeetingRecording } = await import("./meeting-recorders");
+      prismaMock.meeting.findFirst.mockResolvedValue({
+        id: "meeting-1",
+        title: "Weekly",
+        recordedAt: new Date("2026-06-24T19:00:00.000Z"),
+        scheduledEndAt: new Date("2026-06-24T20:00:00.000Z"),
+        meetingUrl: "https://teams.microsoft.com/meet/12345678901234?p=newcode",
+        series: { meetingUrl: null },
+        participantEmails: [],
+      });
+      prismaMock.meetingRecording.findFirst.mockResolvedValue(null);
+      prismaMock.meetingRecording.findMany
+        .mockResolvedValueOnce([{
+          id: "recording-old-url",
+          workspaceId: "workspace-1",
+          meetingId: "meeting-1",
+          provider: "RECALL_AI",
+          externalBotId: "recall-bot-old",
+          status: "SCHEDULED",
+          meetingUrl: "https://teams.microsoft.com/meet/12345678901234?p=oldcode",
+          joinAt: new Date("2026-06-24T19:00:00.000Z"),
+        }])
+        .mockResolvedValueOnce([]);
+      prismaMock.meetingRecording.create.mockResolvedValue({
+        id: "recording-new-url",
+        workspaceId: "workspace-1",
+        meetingId: "meeting-1",
+        provider: "RECALL_AI",
+        status: "PENDING",
+      });
+      fetchMock
+        .mockResolvedValueOnce({ ok: true, status: 200, text: async () => "" })
+        .mockResolvedValueOnce({ ok: true, status: 200, text: async () => JSON.stringify({ id: "recall-bot-new" }) });
+
+      await expect(scheduleMeetingRecording(operatorActor, {
+        workspaceId: "workspace-1",
+        meetingId: "meeting-1",
+        mode: "auto",
+      })).resolves.toMatchObject({
+        id: "recording-new-url",
+        status: "SCHEDULED",
+      });
+
+      expect(fetchMock).toHaveBeenCalledWith(
+        "https://us-west-2.recall.ai/api/v1/bot/recall-bot-old/",
+        expect.objectContaining({ method: "DELETE" }),
+      );
+      expect(prismaMock.meetingRecording.update).toHaveBeenCalledWith(expect.objectContaining({
+        where: { id: "recording-old-url" },
+        data: expect.objectContaining({
+          status: "FAILED",
+          activeDedupeKey: null,
+          failureCode: "MEETING_URL_CHANGED",
+        }),
+      }));
+      expect(prismaMock.meetingRecording.create).toHaveBeenCalledWith(expect.objectContaining({
+        data: expect.objectContaining({
+          meetingId: "meeting-1",
+          meetingUrl: "https://teams.microsoft.com/meet/12345678901234?p=newcode",
+        }),
+      }));
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("reports upcoming recorder coverage blockers without exposing raw meeting URLs", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-06-24T16:00:00.000Z"));
+    try {
+      const { getMeetingRecorderCoverageReadiness } = await import("./meeting-recorders");
+      prismaMock.meeting.findMany.mockResolvedValue([
+        {
+          id: "meeting-no-url",
+          seriesId: "series-1",
+          recordedAt: new Date("2026-06-24T17:00:00.000Z"),
+          scheduledEndAt: new Date("2026-06-24T18:00:00.000Z"),
+          meetingUrl: null,
+          series: { meetingUrl: null },
+          recordings: [],
+        },
+        {
+          id: "meeting-covered",
+          seriesId: "series-1",
+          recordedAt: new Date("2026-06-24T19:00:00.000Z"),
+          scheduledEndAt: new Date("2026-06-24T20:00:00.000Z"),
+          meetingUrl: "https://teams.microsoft.com/meet/12345678901234?p=private-code",
+          series: { meetingUrl: null },
+          recordings: [{ status: "SCHEDULED", meetingUrl: "https://teams.microsoft.com/meet/12345678901234?p=private-code", failureCode: null }],
+        },
+      ]);
+
+      const readiness = await getMeetingRecorderCoverageReadiness("workspace-1");
+
+      expect(readiness.counts.blockers.no_url).toBe(1);
+      expect(readiness.counts.blockers.already_covered).toBe(1);
+      expect(readiness.meetings).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          meetingId: "meeting-covered",
+          urlKind: "MICROSOFT_TEAMS_MEET",
+          hasOccurrenceUrl: true,
+          blockerReasons: ["already_covered"],
+        }),
+      ]));
+      expect(JSON.stringify(readiness)).not.toContain("12345678901234");
+      expect(JSON.stringify(readiness)).not.toContain("private-code");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not treat an active recorder for an old URL as current coverage", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-06-24T16:00:00.000Z"));
+    try {
+      const { getMeetingRecorderCoverageReadiness } = await import("./meeting-recorders");
+      prismaMock.meeting.findMany.mockResolvedValue([
+        {
+          id: "meeting-url-changed",
+          seriesId: "series-1",
+          recordedAt: new Date("2026-06-24T19:00:00.000Z"),
+          scheduledEndAt: new Date("2026-06-24T20:00:00.000Z"),
+          meetingUrl: "https://teams.microsoft.com/meet/12345678901234?p=newcode",
+          series: { meetingUrl: null },
+          recordings: [{
+            status: "SCHEDULED",
+            meetingUrl: "https://teams.microsoft.com/meet/12345678901234?p=oldcode",
+            failureCode: null,
+          }],
+        },
+      ]);
+
+      const readiness = await getMeetingRecorderCoverageReadiness("workspace-1");
+
+      expect(readiness.counts.eligible).toBe(1);
+      expect(readiness.counts.blockers.already_covered).toBe(0);
+      expect(readiness.meetings[0]).toMatchObject({
+        meetingId: "meeting-url-changed",
+        hasRecorderCoverage: false,
+        blockerReasons: [],
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not block primary scheduling when only the fallback provider config is missing", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-06-24T16:00:00.000Z"));
+    const { env } = await import("@corgtex/shared");
+    const mutableEnv = env as unknown as { MEETING_BAAS_API_KEY: string; MEETING_BAAS_WEBHOOK_SECRET: string };
+    const originalBaasKey = mutableEnv.MEETING_BAAS_API_KEY;
+    const originalBaasSecret = mutableEnv.MEETING_BAAS_WEBHOOK_SECRET;
+    try {
+      mutableEnv.MEETING_BAAS_API_KEY = "";
+      mutableEnv.MEETING_BAAS_WEBHOOK_SECRET = "";
+      const { getMeetingRecorderCoverageReadiness } = await import("./meeting-recorders");
+      prismaMock.meeting.findMany.mockResolvedValue([
+        {
+          id: "meeting-primary-ready",
+          seriesId: "series-1",
+          recordedAt: new Date("2026-06-24T19:00:00.000Z"),
+          scheduledEndAt: new Date("2026-06-24T20:00:00.000Z"),
+          meetingUrl: "https://teams.microsoft.com/meet/12345678901234?p=abc",
+          series: { meetingUrl: null },
+          recordings: [],
+        },
+      ]);
+
+      const readiness = await getMeetingRecorderCoverageReadiness("workspace-1");
+
+      expect(readiness.providerChecks).toEqual(expect.arrayContaining([
+        expect.objectContaining({ key: "meeting_baas_api_key", ok: false }),
+      ]));
+      expect(readiness.providerConfigOk).toBe(true);
+      expect(readiness.counts.eligible).toBe(1);
+      expect(readiness.counts.blockers.no_provider_config).toBe(0);
+    } finally {
+      mutableEnv.MEETING_BAAS_API_KEY = originalBaasKey;
+      mutableEnv.MEETING_BAAS_WEBHOOK_SECRET = originalBaasSecret;
+      vi.useRealTimers();
+    }
+  });
+
+  it("ensures upcoming recorder coverage once and skips already covered meetings", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-06-24T16:00:00.000Z"));
+    try {
+      const { ensureUpcomingScheduledMeetingRecorderCoverage } = await import("./meeting-recorders");
+      prismaMock.meeting.findMany.mockResolvedValue([
+        {
+          id: "meeting-eligible",
+          seriesId: "series-1",
+          recordedAt: new Date("2026-06-24T17:00:00.000Z"),
+          scheduledEndAt: new Date("2026-06-24T18:00:00.000Z"),
+          meetingUrl: null,
+          series: { meetingUrl: "https://teams.microsoft.com/meet/12345678901234?p=abc" },
+          recordings: [],
+        },
+        {
+          id: "meeting-covered",
+          seriesId: "series-1",
+          recordedAt: new Date("2026-06-24T19:00:00.000Z"),
+          scheduledEndAt: new Date("2026-06-24T20:00:00.000Z"),
+          meetingUrl: "https://teams.microsoft.com/meet/12345678901234?p=abc",
+          series: { meetingUrl: null },
+          recordings: [{ status: "SCHEDULED", meetingUrl: "https://teams.microsoft.com/meet/12345678901234?p=abc", failureCode: null }],
+        },
+      ]);
+      prismaMock.meeting.findFirst.mockResolvedValue({
+        id: "meeting-eligible",
+        title: "Weekly",
+        recordedAt: new Date("2026-06-24T17:00:00.000Z"),
+        scheduledEndAt: new Date("2026-06-24T18:00:00.000Z"),
+        meetingUrl: null,
+        series: { meetingUrl: "https://teams.microsoft.com/meet/12345678901234?p=abc" },
+        participantEmails: [],
+      });
+      prismaMock.meetingRecording.create.mockResolvedValue({
+        id: "recording-eligible",
+        workspaceId: "workspace-1",
+        meetingId: "meeting-eligible",
+        provider: "RECALL_AI",
+        status: "PENDING",
+      });
+      prismaMock.meetingRecording.update.mockResolvedValue({
+        id: "recording-eligible",
+        workspaceId: "workspace-1",
+        meetingId: "meeting-eligible",
+        provider: "RECALL_AI",
+        status: "SCHEDULED",
+        externalBotId: "recall-bot-1",
+      });
+      fetchMock.mockResolvedValue({ ok: true, status: 200, text: async () => JSON.stringify({ id: "recall-bot-1" }) });
+
+      await expect(ensureUpcomingScheduledMeetingRecorderCoverage("workspace-1")).resolves.toMatchObject({
+        scheduled: 1,
+        providerSchedulingFailed: 0,
+        attemptedMeetingIds: ["meeting-eligible"],
+        counts: {
+          eligible: 1,
+          blockers: expect.objectContaining({ already_covered: 1 }),
+        },
+      });
+
+      expect(prismaMock.meetingRecording.create).toHaveBeenCalledTimes(1);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("cleans stale active recordings before scheduling replacement coverage", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-06-24T16:00:00.000Z"));
+    try {
+      const { reconcileMeetingRecorders } = await import("./meeting-recorders");
+      prismaMock.meetingRecording.findMany
+        .mockResolvedValueOnce([])
+        .mockResolvedValueOnce([])
+        .mockResolvedValueOnce([{
+          id: "recording-stale",
+          workspaceId: "workspace-1",
+          meetingId: "meeting-eligible",
+          provider: "RECALL_AI",
+          status: "PENDING",
+          externalBotId: null,
+          createdAt: new Date("2026-06-24T08:00:00.000Z"),
+          joinAt: null,
+          meeting: {
+            recordedAt: new Date("2026-06-24T19:00:00.000Z"),
+            scheduledEndAt: new Date("2026-06-24T20:00:00.000Z"),
+          },
+        }]);
+      prismaMock.meeting.findMany.mockResolvedValue([
+        {
+          id: "meeting-eligible",
+          seriesId: "series-1",
+          recordedAt: new Date("2026-06-24T19:00:00.000Z"),
+          scheduledEndAt: new Date("2026-06-24T20:00:00.000Z"),
+          meetingUrl: "https://teams.microsoft.com/meet/12345678901234?p=abc",
+          series: { meetingUrl: null },
+          recordings: [{
+            status: "FAILED",
+            meetingUrl: "https://teams.microsoft.com/meet/12345678901234?p=abc",
+            failureCode: "STALE_RECORDER",
+          }],
+        },
+      ]);
+      prismaMock.meeting.findFirst.mockResolvedValue({
+        id: "meeting-eligible",
+        title: "Weekly",
+        recordedAt: new Date("2026-06-24T19:00:00.000Z"),
+        scheduledEndAt: new Date("2026-06-24T20:00:00.000Z"),
+        meetingUrl: "https://teams.microsoft.com/meet/12345678901234?p=abc",
+        series: { meetingUrl: null },
+        participantEmails: [],
+      });
+      prismaMock.meetingRecording.create.mockResolvedValue({
+        id: "recording-replacement",
+        workspaceId: "workspace-1",
+        meetingId: "meeting-eligible",
+        provider: "RECALL_AI",
+        status: "PENDING",
+      });
+      fetchMock.mockResolvedValue({ ok: true, status: 200, text: async () => JSON.stringify({ id: "recall-bot-replacement" }) });
+
+      await expect(reconcileMeetingRecorders("workspace-1")).resolves.toMatchObject({
+        staleFailed: 1,
+        scheduledUpcomingRecorders: 1,
+      });
+
+      expect(prismaMock.meetingRecording.update).toHaveBeenCalledWith(expect.objectContaining({
+        where: { id: "recording-stale" },
+        data: expect.objectContaining({ failureCode: "STALE_RECORDER" }),
+      }));
+      expect(prismaMock.meetingRecording.create).toHaveBeenCalledWith(expect.objectContaining({
+        data: expect.objectContaining({ meetingId: "meeting-eligible" }),
+      }));
+      expect(prismaMock.meetingRecording.update.mock.invocationCallOrder[0]).toBeLessThan(
+        prismaMock.meetingRecording.create.mock.invocationCallOrder[0],
+      );
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("marks stale active recordings failed during reconciliation", async () => {
@@ -2215,7 +2575,9 @@ describe("meeting recorder domain", () => {
         participantEmails: [],
       });
       prismaMock.meetingRecording.findFirst.mockResolvedValueOnce(null);
-      prismaMock.meetingRecording.findMany.mockResolvedValueOnce([reusable]);
+      prismaMock.meetingRecording.findMany
+        .mockResolvedValueOnce([])
+        .mockResolvedValueOnce([reusable]);
       prismaMock.meetingRecording.update.mockResolvedValue({
         ...reusable,
         status: "SCHEDULED",
@@ -2237,7 +2599,7 @@ describe("meeting recorder domain", () => {
 
       expect(prismaMock.meetingRecording.create).not.toHaveBeenCalled();
       expect(fetchMock).not.toHaveBeenCalled();
-      expect(prismaMock.meetingRecording.findMany).toHaveBeenCalledWith(expect.objectContaining({
+      expect(prismaMock.meetingRecording.findMany).toHaveBeenNthCalledWith(2, expect.objectContaining({
         where: expect.objectContaining({
           meetingUrl: "https://teams.microsoft.com/l/meetup-join/abc",
         }),
@@ -2286,7 +2648,7 @@ describe("meeting recorder domain", () => {
       });
       prismaMock.meetingRecording.findFirst.mockResolvedValueOnce(null);
       prismaMock.meetingRecording.findMany.mockImplementation(async ({ where }: { where: Record<string, unknown> }) => (
-        where.meetingUrl === currentUrl ? [] : [oldReusable]
+        "NOT" in where || where.meetingUrl === currentUrl ? [] : [oldReusable]
       ));
       prismaMock.meetingRecording.create.mockResolvedValue({
         id: "recording-new-url",
@@ -2371,6 +2733,7 @@ describe("meeting recorder domain", () => {
       prismaMock.meetingRecording.findFirst.mockResolvedValueOnce(null);
       prismaMock.meetingRecording.findMany
         .mockResolvedValueOnce([])
+        .mockResolvedValueOnce([])
         .mockResolvedValueOnce([fallbackReusable]);
       prismaMock.meetingRecording.create.mockResolvedValueOnce(primaryAttempt);
       prismaMock.meetingRecording.update.mockImplementation(async ({ where, data }: { where: { id: string }; data: Record<string, unknown> }) => ({
@@ -2391,7 +2754,7 @@ describe("meeting recorder domain", () => {
       });
 
       expect(fetchMock).toHaveBeenCalledTimes(1);
-      expect(prismaMock.meetingRecording.findMany).toHaveBeenNthCalledWith(2, expect.objectContaining({
+      expect(prismaMock.meetingRecording.findMany).toHaveBeenNthCalledWith(3, expect.objectContaining({
         where: expect.objectContaining({
           provider: "MEETING_BAAS",
           meetingUrl,
@@ -2546,6 +2909,7 @@ describe("meeting recorder domain", () => {
           return where.joinAt === requestedJoinAt ? requestedActive : oldActive;
         });
       prismaMock.meetingRecording.findMany
+        .mockResolvedValueOnce([])
         .mockResolvedValueOnce([requestedCanonical, requestedDuplicate])
         .mockResolvedValueOnce([requestedCanonical, requestedDuplicate, oldCanonical, oldDuplicate]);
       fetchMock.mockResolvedValue(new Response("", { status: 200 }));
@@ -2571,7 +2935,7 @@ describe("meeting recorder domain", () => {
           status: { in: ["PENDING", "SCHEDULED", "JOINING", "RECORDING"] },
         }),
       }));
-      expect(prismaMock.meetingRecording.findMany).toHaveBeenNthCalledWith(2, expect.objectContaining({
+      expect(prismaMock.meetingRecording.findMany).toHaveBeenNthCalledWith(3, expect.objectContaining({
         where: expect.objectContaining({
           meetingId: "meeting-1",
           provider: "RECALL_AI",

@@ -2169,6 +2169,8 @@ model MeetingSeries {
   source                 String    @default("internal")
   externalId             String?   @unique
   recurrenceRule         String?
+  meetingUrl             String?   @db.Text
+  meetingUrlHash         String?
   startsAt               DateTime
   defaultDurationMinutes Int       @default(60)
   participantIds         String[]  @default([])

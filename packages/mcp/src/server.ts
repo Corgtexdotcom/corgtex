@@ -54,7 +54,9 @@ import {
   listMeetings,
   getMeeting,
   createMeeting,
+  getMeetingRecorderCoverageReadiness,
   intakeMeetingTranscript,
+  setMeetingSeriesRecorderUrl,
   deleteMeeting,
   createArticle,
   updateArticle,
@@ -3302,6 +3304,41 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
       return jsonResult({
         ...meeting,
         webUrl: webUrl(workspaceId, `/meetings/${meeting.id}`),
+      });
+    },
+  );
+
+  tool(
+    "get_meeting_recorder_coverage_readiness",
+    "Read-only recorder coverage readiness for upcoming scheduled meetings. Does not return raw meeting URLs, bot IDs, transcripts, or secrets.",
+    {},
+    async () => {
+      requireScope(sessionCtx, "meetings:read");
+      const readiness = await getMeetingRecorderCoverageReadiness(workspaceId);
+      return jsonResult(readiness);
+    },
+  );
+
+  tool(
+    "set_meeting_series_recorder_url",
+    "Set a supported recorder URL on a meeting series and refresh future empty scheduled occurrences. Support connector only; raw URL is not returned.",
+    {
+      seriesId: z.string(),
+      meetingUrl: z.string(),
+    },
+    async ({ seriesId, meetingUrl }: { seriesId: string; meetingUrl: string }) => {
+      requireScope(sessionCtx, "meetings:write");
+      requireSupportCredential();
+      const result = await setMeetingSeriesRecorderUrl(actor, {
+        workspaceId,
+        seriesId,
+        meetingUrl,
+      });
+      return jsonResult({
+        seriesId: result.series.id,
+        updatedFutureScheduledMeetings: result.updatedFutureScheduledMeetings,
+        hasMeetingUrl: Boolean(result.series.meetingUrl),
+        webUrl: webUrl(workspaceId, `/meetings`),
       });
     },
   );

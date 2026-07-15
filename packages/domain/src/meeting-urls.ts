@@ -13,7 +13,7 @@ export type RecorderMeetingUrl = {
 };
 
 export const TEAMS_FULL_JOIN_LINK_REQUIRED_MESSAGE =
-  "Paste the full Microsoft Teams join link that starts with https://teams.microsoft.com/l/meetup-join/.";
+  "Paste a supported live meeting link from Microsoft Teams, Google Meet, or Zoom.";
 
 const CANDIDATE_URL_PATTERN = /https:\/\/[^\s<>"']+/gi;
 const TRAILING_PUNCTUATION_PATTERN = /[),.;\]}]+$/;
@@ -62,7 +62,12 @@ export function normalizeRecorderMeetingUrl(value?: string | null): RecorderMeet
     return { url: normalized, kind: "MICROSOFT_TEAMS_MEETUP_JOIN", providerSchedulable: true };
   }
   if (hostname === "teams.microsoft.com" && pathname.startsWith("/meet/")) {
-    return { url: normalized, kind: "MICROSOFT_TEAMS_MEET", providerSchedulable: false };
+    const hasMeetingId = pathname.replace(/^\/meet\/?/, "").length > 0;
+    return {
+      url: normalized,
+      kind: "MICROSOFT_TEAMS_MEET",
+      providerSchedulable: hasMeetingId && url.searchParams.has("p"),
+    };
   }
   return null;
 }
@@ -89,5 +94,7 @@ export function isMicrosoftTeamsRecorderUrl(value?: string | null) {
 
 export function isMicrosoftTeamsMeetingUrl(value?: string | null) {
   const match = normalizeRecorderMeetingUrl(value);
-  return match?.kind === "MICROSOFT_TEAMS_MEETUP_JOIN" && match.providerSchedulable;
+  return Boolean(match?.providerSchedulable && (
+    match.kind === "MICROSOFT_TEAMS_MEETUP_JOIN" || match.kind === "MICROSOFT_TEAMS_MEET"
+  ));
 }

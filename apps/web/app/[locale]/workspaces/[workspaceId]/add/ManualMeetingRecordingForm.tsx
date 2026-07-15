@@ -46,7 +46,7 @@ export function ManualMeetingRecordingForm({
         <input
           name="meetingUrl"
           type="url"
-          placeholder="https://teams.microsoft.com/l/meetup-join/..."
+          placeholder="https://teams.microsoft.com/meet/..."
           defaultValue={values.meetingUrl ?? ""}
           required
         />
