@@ -1,5 +1,6 @@
 "use server";
 
+import { randomUUID } from "node:crypto";
 import { enforceDemoGuard } from "@/lib/demo-guard";
 import { requirePageActor } from "@/lib/auth";
 import { asString, asOptional, refresh } from "../action-utils";
@@ -21,13 +22,54 @@ import {
   scheduleMeetingRecording,
   cancelMeetingRecording,
   sendManualMeetingRecorder,
+  type MeetingTranscriptIntakeResult,
 } from "@corgtex/domain";
 import { extractTextFromFileBuffer } from "@corgtex/knowledge";
+import { getRedisClient, redisKey } from "@corgtex/shared";
 import {
   parseMeetingDateTimeInput,
   parseOptionalMeetingDateTimeInput,
   resolveMeetingEndFromDurationOrInput,
 } from "@/lib/meeting-timezone";
+
+const PENDING_TRANSCRIPT_TTL_SECONDS = 20 * 60;
+const CREATE_NEW_MEETING_CHOICE = "__create_new_meeting__";
+
+export type MeetingTranscriptActionCandidate = {
+  meetingId: string;
+  title: string | null;
+  recordedAt: string;
+  score: number;
+  reason: string;
+};
+
+export type MeetingTranscriptActionValues = {
+  title?: string;
+  source?: string;
+  recordedAt?: string;
+  timeZone?: string;
+  transcript?: string;
+  summaryMd?: string;
+  ingestionGuidanceMd?: string;
+  participantIds?: string;
+  participantEmails?: string;
+};
+
+export type MeetingTranscriptActionState = {
+  status: "idle" | "success" | "needs_clarification" | "error";
+  message?: string | null;
+  meetingId?: string | null;
+  pendingTranscriptToken?: string | null;
+  requiredFields?: Array<"recordedAt" | "meetingId">;
+  candidates?: MeetingTranscriptActionCandidate[];
+  values?: MeetingTranscriptActionValues;
+  retryRequiresTranscriptUpload?: boolean;
+};
+
+const initialMeetingTranscriptActionState: MeetingTranscriptActionState = {
+  status: "idle",
+  message: null,
+};
 
 export type ManualMeetingRecordingActionState = {
   status: "idle" | "error";
@@ -45,6 +87,245 @@ function splitFormList(value: string | null) {
     .split(/[\n,]+/)
     .map((item) => item.trim())
     .filter(Boolean);
+}
+
+function serializeFormList(value: string[] | null | undefined) {
+  return (value ?? []).join(", ");
+}
+
+function optionalFormString(formData: FormData, key: string) {
+  const value = asOptional(formData, key);
+  return value && value.trim() ? value.trim() : null;
+}
+
+type PendingTranscriptPayload = {
+  workspaceId: string;
+  transcript: string;
+  fileName: string | null;
+  title: string | null;
+  source: string | null;
+  recordedAt: string | null;
+  timeZone: string | null;
+  summaryMd: string | null;
+  ingestionGuidanceMd: string | null;
+  participantIds: string[];
+  participantEmails: string[];
+};
+
+type TranscriptUploadPayload = PendingTranscriptPayload & {
+  meetingId: string | null;
+  createNewMeeting: boolean;
+  pendingTranscriptToken: string | null;
+  retryRequiresTranscriptUpload: boolean;
+};
+
+type TranscriptUploadPayloadError = MeetingTranscriptActionState & {
+  status: "error";
+};
+
+function isTranscriptUploadPayload(value: TranscriptUploadPayload | TranscriptUploadPayloadError): value is TranscriptUploadPayload {
+  return !("status" in value);
+}
+
+function pendingTranscriptKey(workspaceId: string, token: string) {
+  return redisKey(`meeting-transcript-upload:${workspaceId}:${token}`);
+}
+
+function isPendingTranscriptPayload(value: unknown): value is PendingTranscriptPayload {
+  if (!value || typeof value !== "object") return false;
+  const record = value as Record<string, unknown>;
+  return typeof record.workspaceId === "string"
+    && typeof record.transcript === "string"
+    && (typeof record.fileName === "string" || record.fileName === null)
+    && (typeof record.title === "string" || record.title === null)
+    && (typeof record.source === "string" || record.source === null)
+    && (typeof record.recordedAt === "string" || record.recordedAt === null)
+    && (typeof record.timeZone === "string" || record.timeZone === null)
+    && (typeof record.summaryMd === "string" || record.summaryMd === null)
+    && (typeof record.ingestionGuidanceMd === "string" || record.ingestionGuidanceMd === null)
+    && Array.isArray(record.participantIds)
+    && Array.isArray(record.participantEmails);
+}
+
+async function storePendingTranscriptPayload(payload: PendingTranscriptPayload) {
+  try {
+    const client = await getRedisClient();
+    if (!client) return null;
+    const token = randomUUID();
+    await client.setEx(
+      pendingTranscriptKey(payload.workspaceId, token),
+      PENDING_TRANSCRIPT_TTL_SECONDS,
+      JSON.stringify(payload),
+    );
+    return token;
+  } catch (error) {
+    console.warn("Unable to store pending meeting transcript upload.", error);
+    return null;
+  }
+}
+
+async function readPendingTranscriptPayload(workspaceId: string, token: string) {
+  try {
+    const client = await getRedisClient();
+    if (!client) return null;
+    const raw = await client.get(pendingTranscriptKey(workspaceId, token));
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as unknown;
+    if (!isPendingTranscriptPayload(parsed) || parsed.workspaceId !== workspaceId) return null;
+    return parsed;
+  } catch (error) {
+    console.warn("Unable to read pending meeting transcript upload.", error);
+    return null;
+  }
+}
+
+async function deletePendingTranscriptPayload(workspaceId: string, token: string | null) {
+  if (!token) return;
+  try {
+    const client = await getRedisClient();
+    if (!client) return;
+    await client.del(pendingTranscriptKey(workspaceId, token));
+  } catch (error) {
+    console.warn("Unable to clear pending meeting transcript upload.", error);
+  }
+}
+
+function actionValuesFromPayload(payload: PendingTranscriptPayload): MeetingTranscriptActionValues {
+  return {
+    title: payload.title ?? undefined,
+    source: payload.source ?? undefined,
+    recordedAt: payload.recordedAt ?? undefined,
+    timeZone: payload.timeZone ?? undefined,
+    summaryMd: payload.summaryMd ?? undefined,
+    ingestionGuidanceMd: payload.ingestionGuidanceMd ?? undefined,
+    participantIds: serializeFormList(payload.participantIds),
+    participantEmails: serializeFormList(payload.participantEmails),
+  };
+}
+
+function actionValuesFromFormData(formData: FormData): MeetingTranscriptActionValues {
+  return {
+    title: optionalFormString(formData, "title") ?? undefined,
+    source: optionalFormString(formData, "source") ?? undefined,
+    recordedAt: optionalFormString(formData, "recordedAt") ?? undefined,
+    timeZone: optionalFormString(formData, "timeZone") ?? undefined,
+    transcript: optionalFormString(formData, "transcript") ?? undefined,
+    summaryMd: optionalFormString(formData, "summaryMd") ?? undefined,
+    ingestionGuidanceMd: optionalFormString(formData, "ingestionGuidanceMd") ?? undefined,
+    participantIds: optionalFormString(formData, "participantIds") ?? undefined,
+    participantEmails: optionalFormString(formData, "participantEmails") ?? undefined,
+  };
+}
+
+function pendingPayloadFromUpload(payload: TranscriptUploadPayload): PendingTranscriptPayload {
+  return {
+    workspaceId: payload.workspaceId,
+    transcript: payload.transcript,
+    fileName: payload.fileName,
+    title: payload.title,
+    source: payload.source,
+    recordedAt: payload.recordedAt,
+    timeZone: payload.timeZone,
+    summaryMd: payload.summaryMd,
+    ingestionGuidanceMd: payload.ingestionGuidanceMd,
+    participantIds: payload.participantIds,
+    participantEmails: payload.participantEmails,
+  };
+}
+
+function expectedTranscriptActionErrorMessage(error: unknown) {
+  if (
+    error instanceof Error
+    && "status" in error
+    && typeof (error as { status?: unknown }).status === "number"
+    && (error as { status: number }).status >= 400
+    && (error as { status: number }).status < 500
+  ) {
+    return error.message;
+  }
+  console.error("Meeting transcript upload action failed.", error);
+  return "Transcript upload is temporarily unavailable. Try again.";
+}
+
+function serializeClarificationCandidates(result: Extract<MeetingTranscriptIntakeResult, { status: "needs_clarification" }>) {
+  return result.candidates?.map((candidate) => ({
+    meetingId: candidate.meetingId,
+    title: candidate.title,
+    recordedAt: candidate.recordedAt.toISOString(),
+    score: candidate.score,
+    reason: candidate.reason,
+  })) ?? [];
+}
+
+async function buildTranscriptUploadPayload(formData: FormData): Promise<TranscriptUploadPayload | TranscriptUploadPayloadError> {
+  const workspaceId = asString(formData, "workspaceId");
+  const pendingTranscriptToken = optionalFormString(formData, "pendingTranscriptToken");
+  const existingPayload = pendingTranscriptToken
+    ? await readPendingTranscriptPayload(workspaceId, pendingTranscriptToken)
+    : null;
+
+  if (pendingTranscriptToken && !existingPayload) {
+    return {
+      status: "error",
+      message: "The pending transcript upload expired. Upload the transcript again.",
+      retryRequiresTranscriptUpload: true,
+    };
+  }
+
+  const file = formData.get("file");
+  const submittedTranscript = asOptional(formData, "transcript");
+  let transcript = submittedTranscript?.trim() ? submittedTranscript : existingPayload?.transcript ?? "";
+  let fileName = existingPayload?.fileName ?? null;
+  let retryRequiresTranscriptUpload = false;
+
+  if (file instanceof File && file.size > 0) {
+    const extracted = await extractTextFromFileBuffer({
+      fileBuffer: Buffer.from(await file.arrayBuffer()),
+      fileName: file.name,
+      mimeType: file.type || "application/octet-stream",
+    });
+    transcript = extracted.textContent ?? transcript;
+    fileName = file.name;
+    retryRequiresTranscriptUpload = true;
+  }
+
+  if (!transcript.trim()) {
+    return {
+      status: "error",
+      message: "Transcript text or a readable transcript file is required.",
+      values: existingPayload ? actionValuesFromPayload(existingPayload) : {
+        title: optionalFormString(formData, "title") ?? undefined,
+        source: optionalFormString(formData, "source") ?? undefined,
+        recordedAt: optionalFormString(formData, "recordedAt") ?? undefined,
+        timeZone: optionalFormString(formData, "timeZone") ?? undefined,
+        summaryMd: optionalFormString(formData, "summaryMd") ?? undefined,
+        ingestionGuidanceMd: optionalFormString(formData, "ingestionGuidanceMd") ?? undefined,
+        participantIds: optionalFormString(formData, "participantIds") ?? undefined,
+        participantEmails: optionalFormString(formData, "participantEmails") ?? undefined,
+      },
+    };
+  }
+
+  const meetingChoice = optionalFormString(formData, "meetingId");
+  const createNewMeeting = meetingChoice === CREATE_NEW_MEETING_CHOICE || optionalFormString(formData, "createNewMeeting") === "true";
+
+  return {
+    workspaceId,
+    pendingTranscriptToken,
+    retryRequiresTranscriptUpload,
+    transcript,
+    fileName,
+    meetingId: createNewMeeting ? null : meetingChoice,
+    createNewMeeting,
+    title: optionalFormString(formData, "title") ?? existingPayload?.title ?? null,
+    source: optionalFormString(formData, "source") ?? existingPayload?.source ?? "transcript-upload",
+    recordedAt: optionalFormString(formData, "recordedAt") ?? existingPayload?.recordedAt ?? null,
+    timeZone: optionalFormString(formData, "timeZone") ?? existingPayload?.timeZone ?? null,
+    summaryMd: optionalFormString(formData, "summaryMd") ?? existingPayload?.summaryMd ?? null,
+    ingestionGuidanceMd: optionalFormString(formData, "ingestionGuidanceMd") ?? existingPayload?.ingestionGuidanceMd ?? null,
+    participantIds: splitFormList(optionalFormString(formData, "participantIds") ?? serializeFormList(existingPayload?.participantIds)),
+    participantEmails: splitFormList(optionalFormString(formData, "participantEmails") ?? serializeFormList(existingPayload?.participantEmails)),
+  };
 }
 
 function manualRecordingFormValues(formData: FormData): NonNullable<ManualMeetingRecordingActionState["values"]> {
@@ -155,39 +436,77 @@ export async function importMeetingInviteAction(formData: FormData) {
 }
 
 export async function uploadMeetingTranscriptAction(formData: FormData) {
+  const result = await uploadMeetingTranscriptStateAction(initialMeetingTranscriptActionState, formData);
+  if (result.status === "success") return;
+  throw new Error(result.message ?? "Transcript upload needs more information.");
+}
+
+export async function uploadMeetingTranscriptStateAction(
+  previousState: MeetingTranscriptActionState,
+  formData: FormData,
+): Promise<MeetingTranscriptActionState> {
   const _demoGuardWsId = formData.get("workspaceId") as string;
-  if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
-
-  const actor = await requirePageActor();
   const workspaceId = asString(formData, "workspaceId");
-  const file = formData.get("file");
-  let transcript = asOptional(formData, "transcript") ?? "";
-  if (file instanceof File && file.size > 0) {
-    const extracted = await extractTextFromFileBuffer({
-      fileBuffer: Buffer.from(await file.arrayBuffer()),
-      fileName: file.name,
-      mimeType: file.type || "application/octet-stream",
+
+  try {
+    if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
+
+    const actor = await requirePageActor();
+    await requireWorkspaceMembership({ actor, workspaceId });
+    const payload = await buildTranscriptUploadPayload(formData);
+    if (!isTranscriptUploadPayload(payload)) return payload;
+
+    const result = await intakeMeetingTranscript(actor, {
+      workspaceId,
+      meetingId: payload.meetingId,
+      title: payload.title,
+      source: payload.source || "transcript-upload",
+      recordedAt: parseOptionalMeetingDateTimeInput(payload.recordedAt, payload.timeZone, "Recorded at"),
+      transcript: payload.transcript,
+      fileName: payload.fileName,
+      createNewMeeting: payload.createNewMeeting,
+      summaryMd: payload.summaryMd,
+      ingestionGuidanceMd: payload.ingestionGuidanceMd,
+      participantIds: payload.participantIds,
+      participantEmails: payload.participantEmails,
     });
-    transcript = extracted.textContent ?? transcript;
-  }
-  const result = await intakeMeetingTranscript(actor, {
-    workspaceId,
-    meetingId: asOptional(formData, "meetingId"),
-    title: asOptional(formData, "title"),
-    source: asOptional(formData, "source") || "transcript-upload",
-    recordedAt: parseOptionalMeetingDateTimeInput(asOptional(formData, "recordedAt"), asOptional(formData, "timeZone"), "Recorded at"),
-    transcript,
-    summaryMd: asOptional(formData, "summaryMd"),
-    ingestionGuidanceMd: asOptional(formData, "ingestionGuidanceMd"),
-    participantIds: asOptional(formData, "participantIds")?.split(",").map((value) => value.trim()).filter(Boolean) ?? [],
-    participantEmails: asOptional(formData, "participantEmails")?.split(",").map((value) => value.trim()).filter(Boolean) ?? [],
-  });
 
-  if (result.status === "needs_clarification") {
-    throw new Error(result.message);
-  }
+    if (result.status === "needs_clarification") {
+      const pendingPayload = pendingPayloadFromUpload(payload);
+      const nextToken = await storePendingTranscriptPayload(pendingPayload);
+      if (nextToken) {
+        await deletePendingTranscriptPayload(workspaceId, payload.pendingTranscriptToken);
+      }
+      return {
+        status: "needs_clarification",
+        message: result.message,
+        pendingTranscriptToken: nextToken,
+        requiredFields: result.requiredFields,
+        candidates: serializeClarificationCandidates(result),
+        values: actionValuesFromPayload(pendingPayload),
+        retryRequiresTranscriptUpload: !nextToken,
+      };
+    }
 
-  refresh(workspaceId);
+    await deletePendingTranscriptPayload(workspaceId, payload.pendingTranscriptToken);
+    refresh(workspaceId);
+    return {
+      status: "success",
+      message: result.message,
+      meetingId: result.meeting.id,
+    };
+  } catch (error) {
+    const pendingTranscriptToken = previousState.status === "needs_clarification"
+      ? previousState.pendingTranscriptToken
+      : null;
+    return {
+      status: "error",
+      message: expectedTranscriptActionErrorMessage(error),
+      pendingTranscriptToken,
+      values: pendingTranscriptToken ? actionValuesFromFormData(formData) : undefined,
+      retryRequiresTranscriptUpload: pendingTranscriptToken ? previousState.retryRequiresTranscriptUpload : undefined,
+    };
+  }
 }
 
 export async function archiveMeetingAction(formData: FormData) {

@@ -22,10 +22,10 @@ import { UnavailableItemStatus } from "@/lib/components/UnavailableItemStatus";
 import { DeliberationThread } from "@/lib/components/DeliberationThread";
 import { DeliberationComposer } from "@/lib/components/DeliberationComposer";
 import { WorkItemConversationSurface } from "@/lib/components/WorkItemConversation";
-import { MarkdownEditor } from "@/lib/components/MarkdownEditor";
 import { getDeliberationTargets } from "@/lib/deliberation-targets";
 import { listDeliberationEntries } from "@corgtex/domain";
-import { postMeetingDeliberationAction, resolveMeetingDeliberationAction, retryMeetingProcessingJobAction, uploadMeetingTranscriptAction } from "../actions";
+import { postMeetingDeliberationAction, resolveMeetingDeliberationAction, retryMeetingProcessingJobAction } from "../actions";
+import { MeetingTranscriptUploadForm } from "../MeetingTranscriptUploadForm";
 import MeetingIntelligence, { MeetingRegenerationPanel, type InsightTargetMetadata } from "./MeetingIntelligence";
 import {
   agendaItemHref,
@@ -319,26 +319,25 @@ export default async function MeetingDetailPage({
       {!isArchived && !meeting.transcript && (
         <section className="ws-section" style={{ marginBottom: 32 }}>
           <h2 className="nr-section-header">{t("uploadTranscriptForMeeting")}</h2>
-          <form action={uploadMeetingTranscriptAction} className="stack panel">
-            <input type="hidden" name="workspaceId" value={workspaceId} />
-            <input type="hidden" name="meetingId" value={meeting.id} />
-            <input type="hidden" name="title" value={meeting.title ?? ""} />
-            <input type="hidden" name="recordedAt" value={new Date(meeting.recordedAt).toISOString()} />
-            <label>
-              {t("formTranscriptFile")}
-              <input name="file" type="file" accept=".txt,.md,.csv,.json,.pdf,.docx" />
-            </label>
-            <label>
-              {t("formTranscript")}
-              <textarea name="transcript" />
-            </label>
-            <label>
-              {t("formIngestionGuidance")}
-              <MarkdownEditor name="ingestionGuidanceMd" rows={3} />
-              <span className="nr-item-meta" style={{ display: "block", marginTop: 4 }}>{t("helpIngestionGuidance")}</span>
-            </label>
-            <button type="submit">{t("btnUploadTranscript")}</button>
-          </form>
+          <MeetingTranscriptUploadForm
+            workspaceId={workspaceId}
+            hiddenFields={[
+              { name: "meetingId", value: meeting.id },
+              { name: "title", value: meeting.title ?? "" },
+              { name: "recordedAt", value: new Date(meeting.recordedAt).toISOString() },
+            ]}
+            labels={{
+              file: t("formTranscriptFile"),
+              transcript: t("formTranscript"),
+              ingestionGuidance: t("formIngestionGuidance"),
+              ingestionGuidanceHelp: t("helpIngestionGuidance"),
+              submit: t("btnUploadTranscript"),
+              retrySubmit: t("btnUploadTranscript"),
+              chooseMeeting: t("chooseTranscriptMeeting"),
+              createNewMeeting: t("createNewTranscriptMeeting"),
+              retryUpload: t("retryTranscriptUpload"),
+            }}
+          />
         </section>
       )}
 

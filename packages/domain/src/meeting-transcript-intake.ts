@@ -2,7 +2,7 @@ import type { Meeting, MeetingTranscriptSourceProvider } from "@prisma/client";
 import { defaultModelGateway } from "@corgtex/models";
 import { prisma } from "@corgtex/shared";
 import type { AppActor } from "@corgtex/shared";
-import { uploadMeetingTranscript } from "./meetings";
+import { createMeeting, uploadMeetingTranscript } from "./meetings";
 
 type IntakeStatus = "meeting_created" | "meeting_matched" | "needs_clarification";
 
@@ -180,6 +180,7 @@ export async function intakeMeetingTranscript(actor: AppActor, params: {
   sourceRecordId?: string | null;
   batchMetadata?: Record<string, unknown> | null;
   replaceTranscript?: boolean;
+  createNewMeeting?: boolean;
   recordedAt?: Date | string | null;
   summaryMd?: string | null;
   ingestionGuidanceMd?: string | null;
@@ -213,6 +214,30 @@ export async function intakeMeetingTranscript(actor: AppActor, params: {
     };
   }
 
+  if (params.createNewMeeting) {
+    const meeting = await createMeeting(actor, {
+      workspaceId: params.workspaceId,
+      title: inferred.title,
+      source: inferred.source,
+      externalId: params.externalId ?? null,
+      calendarExternalId: params.calendarExternalId ?? null,
+      meetingUrl: params.meetingUrl ?? null,
+      recordedAt: inferred.recordedAt,
+      transcript,
+      summaryMd: params.summaryMd,
+      ingestionGuidanceMd: params.ingestionGuidanceMd,
+      participantIds: params.participantIds ?? [],
+      participantEmails: inferred.participantEmails,
+      sourceRecordId: params.sourceRecordId ?? null,
+    });
+    return {
+      status: "meeting_created",
+      meeting,
+      inferred,
+      message: `Transcript saved as meeting "${meeting.title ?? inferred.title ?? "Untitled meeting"}". Summary and follow-up extraction are queued.`,
+    };
+  }
+
   const result = await uploadMeetingTranscript(actor, {
     workspaceId: params.workspaceId,
     meetingId: params.meetingId ?? null,
@@ -232,12 +257,15 @@ export async function intakeMeetingTranscript(actor: AppActor, params: {
   });
 
   if (result.status === "needs_selection") {
+    const multipleCandidates = result.candidates.length > 1;
     return {
       status: "needs_clarification",
       requiredFields: ["meetingId"],
       inferred,
       candidates: result.candidates,
-      message: "I found multiple scheduled meetings that could match this transcript. Choose one and upload again.",
+      message: multipleCandidates
+        ? "I found multiple scheduled meetings that could match this transcript. Choose one and upload again."
+        : "I found a scheduled meeting that may match this transcript, but it was not confident enough to auto-match. Choose it or add more meeting details and upload again.",
     };
   }
 

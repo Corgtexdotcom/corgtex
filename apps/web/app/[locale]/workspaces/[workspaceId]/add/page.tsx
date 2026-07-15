@@ -9,7 +9,6 @@ import {
   listCrmAccounts,
   listDeals,
   ingestSource,
-  intakeMeetingTranscript,
   listCircles,
   listContacts,
   listCycles,
@@ -36,7 +35,6 @@ import {
   DEFAULT_MEETING_DURATION_MINUTES,
   MAX_MEETING_DURATION_MINUTES,
   MIN_MEETING_DURATION_MINUTES,
-  parseOptionalMeetingDateTimeInput,
 } from "@/lib/meeting-timezone";
 import { KnowledgeFileUploader } from "../KnowledgeFileUploader";
 import { ManualMeetingRecordingForm } from "./ManualMeetingRecordingForm";
@@ -72,7 +70,6 @@ import {
   inviteMemberAction,
   provisionProspectWorkspaceAction,
   requestMemberInviteAction,
-  uploadMeetingTranscriptAction,
 } from "../actions";
 import { createArticleAction } from "../brain/actions";
 import { createGoalFormAction, refreshCompanyDirectionFromBrainFormAction } from "../goals/actions";
@@ -84,6 +81,8 @@ import {
   CRM_RELATIONSHIP_OPTIONS,
   labelFromCrmCode,
 } from "../leads/view-model";
+import { MeetingTranscriptUploadForm } from "../meetings/MeetingTranscriptUploadForm";
+import { PasteTextForm } from "./PasteTextForm";
 
 export const dynamic = "force-dynamic";
 
@@ -365,12 +364,6 @@ export default async function WorkspaceAddPage({
     redirect(returnTo);
   }
 
-  async function uploadMeetingTranscriptAndReturn(formData: FormData) {
-    "use server";
-    await uploadMeetingTranscriptAction(formData);
-    redirect(returnTo);
-  }
-
   async function createContactAndReturn(formData: FormData) {
     "use server";
     await createContactAction(formData);
@@ -496,34 +489,16 @@ export default async function WorkspaceAddPage({
     const membership = await requireWorkspaceMembership({ actor, workspaceId });
     const sourceType = asString(formData, "sourceType") as BrainSourceType;
     const content = asString(formData, "content");
-    if (sourceType === "MEETING") {
-      const result = await intakeMeetingTranscript(actor, {
-        workspaceId,
-        transcript: content,
-        title: asOptional(formData, "title"),
-        source: asOptional(formData, "channel") ?? "text-paste",
-        recordedAt: parseOptionalMeetingDateTimeInput(
-          asOptional(formData, "recordedAt"),
-          asOptional(formData, "timeZone"),
-          "Meeting recorded at",
-        ),
-        ingestionGuidanceMd: asOptional(formData, "ingestionGuidanceMd"),
-      });
-      if (result.status === "needs_clarification") {
-        throw new Error(result.message);
-      }
-    } else {
-      await ingestSource(actor, {
-        workspaceId,
-        sourceType,
-        tier: 1,
-        content,
-        title: asOptional(formData, "title") ?? undefined,
-        channel: asOptional(formData, "channel") ?? undefined,
-        authorMemberId: membership?.id === "global-operator" ? null : membership?.id ?? null,
-        ingestionGuidanceMd: asOptional(formData, "ingestionGuidanceMd"),
-      });
-    }
+    await ingestSource(actor, {
+      workspaceId,
+      sourceType,
+      tier: 1,
+      content,
+      title: asOptional(formData, "title") ?? undefined,
+      channel: asOptional(formData, "channel") ?? undefined,
+      authorMemberId: membership?.id === "global-operator" ? null : membership?.id ?? null,
+      ingestionGuidanceMd: asOptional(formData, "ingestionGuidanceMd"),
+    });
     refresh(workspaceId);
     redirect(returnTo);
   }
@@ -597,20 +572,34 @@ export default async function WorkspaceAddPage({
         )}
 
         {kind === "meeting_transcript" && (
-          <form action={uploadMeetingTranscriptAndReturn} className="stack nr-form-section">
-            {hiddenWorkspace(workspaceId)}
-            <label>Title<input name="title" /></label>
-            <div className="actions-inline">
-              <label style={{ flex: 1 }}>Source<input name="source" defaultValue="transcript-upload" required /></label>
-              <label style={{ flex: 1 }}>Recorded at<input name="recordedAt" type="datetime-local" required /></label>
-            </div>
-            <TimeZoneSelect />
-            <label>Participant emails<input name="participantEmails" placeholder="one@example.com, two@example.com" /></label>
-            <label>Ingestion guidance<MarkdownEditor name="ingestionGuidanceMd" rows={3} /></label>
-            <label>Transcript file<input name="file" type="file" accept=".txt,.md,.csv,.json,.pdf,.docx" /></label>
-            <label>Transcript<textarea name="transcript" rows={8} /></label>
-            <div className="actions-inline"><button type="submit">Upload transcript</button>{cancelLink(returnTo)}</div>
-          </form>
+          <MeetingTranscriptUploadForm
+            workspaceId={workspaceId}
+            className="stack nr-form-section"
+            successHref={returnTo}
+            showTitle
+            showSource
+            showRecordedAt
+            showTimeZone
+            showParticipants
+            transcriptRows={8}
+            labels={{
+              title: "Title",
+              source: "Source",
+              recordedAt: "Recorded at",
+              participantEmails: "Participant emails",
+              participantEmailsPlaceholder: "one@example.com, two@example.com",
+              ingestionGuidance: "Ingestion guidance",
+              file: "Transcript file",
+              transcript: "Transcript",
+              submit: "Upload transcript",
+              retrySubmit: "Continue",
+              chooseMeeting: "Choose meeting",
+              createNewMeeting: "None of these - create a new meeting",
+              retryUpload: "Upload or paste the transcript again to continue.",
+              cancel: "Cancel",
+            }}
+            cancelHref={returnTo}
+          />
         )}
 
         {kind === "meeting_manual_recording" && (
@@ -1142,19 +1131,12 @@ export default async function WorkspaceAddPage({
         )}
 
         {kind === "paste_text" && (
-          <form action={pasteTextAndReturn} className="stack nr-form-section">
-            {hiddenWorkspace(workspaceId)}
-            <label>Title<input name="title" /></label>
-            <div className="actions-inline">
-              <label style={{ flex: 1 }}>Source type<select name="sourceType" defaultValue="ARTICLE">{SOURCE_TYPES.map((sourceType) => <option key={sourceType} value={sourceType}>{sourceType}</option>)}</select></label>
-              <label style={{ flex: 1 }}>Channel or source<input name="channel" placeholder="text-paste" /></label>
-            </div>
-            <label>Meeting recorded at<input name="recordedAt" type="datetime-local" /></label>
-            <TimeZoneSelect />
-            <label>Content<textarea name="content" rows={10} required /></label>
-            <label>Ingestion guidance<MarkdownEditor name="ingestionGuidanceMd" rows={3} /></label>
-            <div className="actions-inline"><button type="submit">Ingest text</button>{cancelLink(returnTo)}</div>
-          </form>
+          <PasteTextForm
+            workspaceId={workspaceId}
+            sourceTypes={SOURCE_TYPES}
+            ingestAction={pasteTextAndReturn}
+            cancelHref={returnTo}
+          />
         )}
 
         {kind === "database_source" && (
