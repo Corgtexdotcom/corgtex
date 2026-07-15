@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { AppError, getAction, getWorkspaceArchiveRecord, listDeliberationEntries, listExternalResourceAttachments, listWorkItemEvidence, listWorkItemVersions, requireWorkspaceMembership } from "@corgtex/domain";
+import { AppError, getAction, getWorkspaceArchiveRecord, listAdviceRequests, listDeliberationEntries, listExternalResourceAttachments, listHumanMembers, listWorkItemEvidence, listWorkItemVersions, requireWorkspaceMembership } from "@corgtex/domain";
 import { requirePageActor } from "@/lib/auth";
 import { ConfirmSubmitButton } from "@/lib/components/ConfirmSubmitButton";
 import { MarkdownRenderer } from "@/lib/components/MarkdownRenderer";
@@ -7,13 +7,14 @@ import { WorkItemResolutionDialog } from "@/lib/components/WorkItemResolutionDia
 import { ArchivedItemBanner } from "@/lib/components/ArchivedItemBanner";
 import { UnavailableItemStatus } from "@/lib/components/UnavailableItemStatus";
 import { ExternalResourceAttachForm, ExternalResourceCards } from "@/lib/components/ExternalResourceCards";
+import { AdviceRequestForm } from "@/lib/components/AdviceRequestForm";
 import { DeliberationComposer } from "@/lib/components/DeliberationComposer";
 import { DeliberationThread } from "@/lib/components/DeliberationThread";
-import { WorkItemConversationSurface } from "@/lib/components/WorkItemConversation";
+import { WorkItemConversationSurface, WorkItemRequestList } from "@/lib/components/WorkItemConversation";
 import { getDeliberationTargets } from "@/lib/deliberation-targets";
 import { canOpenPrivateDraft } from "@/lib/governance-open-guards";
-import { attachActionExternalResourceAction, deleteActionAction, postActionDeliberationAction, publishActionAction, resolveActionDeliberationAction, returnActionToDraftAction, updateActionAction, updateActionDeliberationAction } from "../../actions";
-import { getTranslations } from "next-intl/server";
+import { attachActionExternalResourceAction, deleteActionAction, postActionDeliberationAction, publishActionAction, requestActionInputAction, resolveActionDeliberationAction, returnActionToDraftAction, updateActionAction, updateActionDeliberationAction } from "../../actions";
+import { getFormatter, getTranslations } from "next-intl/server";
 import { formatWorkItemPriority, type WorkItemPriorityLabels } from "@/lib/work-item-priority";
 
 export const dynamic = "force-dynamic";
@@ -37,6 +38,7 @@ export default async function ActionDetailPage({
   const t = await getTranslations("actions");
   const tCommon = await getTranslations("common");
   const tWork = await getTranslations("workItems");
+  const format = await getFormatter();
   const membership = await requireWorkspaceMembership({ actor, workspaceId });
   let action: Awaited<ReturnType<typeof getAction>>;
   try {
@@ -64,7 +66,7 @@ export default async function ActionDetailPage({
     throw error;
   }
   const isArchived = Boolean(action.archivedAt);
-  const [versionHistory, evidence, externalResourceAttachments, deliberationEntries, archiveRecord] = await Promise.all([
+  const [versionHistory, evidence, externalResourceAttachments, deliberationEntries, inputRequests, archiveRecord, members] = await Promise.all([
     archivedSafeRead(isArchived, listWorkItemVersions(actor, { workspaceId, entityType: "ACTION", entityId: actionId }), {
       entityType: "Action" as const,
       entityId: actionId,
@@ -74,9 +76,11 @@ export default async function ActionDetailPage({
     archivedSafeRead(isArchived, listWorkItemEvidence(actor, { workspaceId, entityType: "Action", entityId: actionId }), []),
     archivedSafeRead(isArchived, listExternalResourceAttachments(actor, { workspaceId, entityType: "Action", entityId: actionId }), []),
     archivedSafeRead(isArchived, listDeliberationEntries(actor, { workspaceId, parentType: "ACTION", parentId: actionId }), []),
+    isArchived ? Promise.resolve([]) : listAdviceRequests(actor, { workspaceId, subjectType: "ACTION", subjectId: actionId }),
     isArchived
       ? archivedSafeRead(true, getWorkspaceArchiveRecord(actor, { workspaceId, entityType: "Action", entityId: action.id }), null)
       : Promise.resolve(null),
+    isArchived ? Promise.resolve([]) : listHumanMembers(workspaceId),
   ]);
   const completionEvidence = evidence.filter((row) => row.purpose === "completion_evidence");
   const feedbackContextEvidence = evidence.filter((row) => row.purpose === "feedback_context");
@@ -88,6 +92,16 @@ export default async function ActionDetailPage({
     label: option.kind === "circle"
       ? t("targetCircle", { name: option.name })
       : t("targetPerson", { name: option.name }),
+  }));
+  const mappedEntries = deliberationEntries.map((entry) => ({
+    ...entry,
+    authorName: entry.author?.displayName || entry.author?.email || "Unknown",
+    authorInitials: (entry.author?.displayName || entry.author?.email || "?").substring(0, 2).toUpperCase(),
+    targetLabel: entry.targetCircle
+      ? t("targetCircle", { name: entry.targetCircle.name })
+      : entry.targetMember
+        ? t("targetPerson", { name: entry.targetMember.user.displayName || entry.targetMember.user.email })
+        : null,
   }));
 
   const statusClass = action.status === "DRAFT"
@@ -135,6 +149,100 @@ export default async function ActionDetailPage({
   const canEditContent = !isArchived && action.status === "DRAFT"
     ? canManage
     : !isArchived && (action.status === "OPEN" || action.status === "IN_PROGRESS") && canSubmittedEditorEdit;
+  const canRequestInput = !isArchived
+    && (action.status === "OPEN" || action.status === "IN_PROGRESS")
+    && !action.isPrivate
+    && (canManage || isParentResponsible);
+  const memberName = (member: { user: { displayName: string | null; email: string } }) => member.user.displayName || member.user.email;
+  const memberRequestOptions = members.map((member) => ({ value: member.id, label: memberName(member) }));
+  const circleRequestOptions = targetOptions
+    .filter((option) => option.kind === "circle")
+    .map((option) => ({ value: option.value.slice("circle:".length), label: option.name }));
+  const defaultCircleValue = action.circleId && circleRequestOptions.some((option) => option.value === action.circleId)
+    ? action.circleId
+    : circleRequestOptions[0]?.value ?? "";
+  const dateTimeLabel = (value: Date | string | null | undefined) => value
+    ? format.dateTime(new Date(value), { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })
+    : null;
+  const channelLabel = (channel: string) => {
+    const labels: Record<string, string> = {
+      IN_APP: t("inputChannelInApp"),
+      SLACK: t("inputChannelSlack"),
+      EMAIL: t("inputChannelEmail"),
+      COPY: t("inputChannelCopy"),
+    };
+    return labels[channel] ?? channel;
+  };
+  const requestStatusLabel = (requestStatus: string) => {
+    const labels: Record<string, string> = {
+      ACTIVE: t("inputStatusActive"),
+      COMPLETED: t("inputStatusCompleted"),
+      CANCELED: t("inputStatusCanceled"),
+    };
+    return labels[requestStatus] ?? requestStatus;
+  };
+  const requestStatusClass = (requestStatus: string) => {
+    if (requestStatus === "ACTIVE") return "warning";
+    if (requestStatus === "COMPLETED") return "success";
+    return "";
+  };
+  const actionPath = `/workspaces/${workspaceId}/actions/${action.id}`;
+  const appBaseUrl = process.env.NEXT_PUBLIC_APP_URL?.replace(/\/$/, "") ?? "";
+  const actionUrl = `${appBaseUrl}${actionPath}`;
+  const requestAudienceLabel = (request: (typeof inputRequests)[number]) => {
+    if (request.audienceType === "WORKSPACE") return t("inputAudienceWorkspace");
+    if (request.audienceType === "CIRCLE") return request.targetCircle ? t("targetCircle", { name: request.targetCircle.name }) : t("inputAudienceCircle");
+    const names = request.recipients.map((recipient) => recipient.member.user.displayName || recipient.member.user.email);
+    return names.length > 0 ? names.join(", ") : t("inputAudienceMembers");
+  };
+  const copyableRequestMessage = (request: (typeof inputRequests)[number]) => [
+    t("inputCopyableSubject", { title: action.title }),
+    request.messageMd,
+    request.deadlineAt ? t("inputCopyableDeadline", { date: dateTimeLabel(request.deadlineAt) ?? "" }) : null,
+    t("inputCopyableLink", { url: actionUrl }),
+  ].filter(Boolean).join("\n\n");
+  const requestIds = new Set(inputRequests.map((request) => request.id));
+  const discussionEntries = mappedEntries.filter((entry) => !entry.adviceRequestId || !requestIds.has(entry.adviceRequestId));
+  const inputRequestCards = inputRequests.map((request) => {
+    const linkedReplies = mappedEntries.filter((entry) => entry.adviceRequestId === request.id);
+    return {
+      id: request.id,
+      audienceLabel: requestAudienceLabel(request),
+      channelLabel: channelLabel(request.preferredChannel),
+      statusLabel: requestStatusLabel(request.status),
+      statusClass: requestStatusClass(request.status),
+      deadlineLabel: request.deadlineAt ? t("inputDeadlineTag", { date: dateTimeLabel(request.deadlineAt) ?? "" }) : null,
+      reminderLabel: request.reminderAt ? t("inputReminderMeta", { date: dateTimeLabel(request.reminderAt) ?? "" }) : null,
+      requestedByLabel: t("inputRequestedByMeta", { name: request.requestedBy.displayName || request.requestedBy.email }),
+      messageMd: request.messageMd,
+      copyableMessage: copyableRequestMessage(request),
+      linkedRepliesCount: linkedReplies.length,
+      replyThread: linkedReplies.length > 0 ? (
+        <DeliberationThread
+          entries={linkedReplies.map((entry) => ({
+            ...entry,
+            canEdit: canManageEntry(entry),
+            canResolve: canManageEntry(entry),
+          }))}
+          canResolve={false}
+          resolveAction={resolveActionDeliberationAction}
+          updateAction={updateActionDeliberationAction}
+          hiddenFields={{ workspaceId, parentId: actionId }}
+        />
+      ) : null,
+      replyForm: !isArchived && (action.status === "OPEN" || action.status === "IN_PROGRESS") && request.status === "ACTIVE" ? (
+        <DeliberationComposer
+          postAction={postActionDeliberationAction}
+          hiddenFields={{ workspaceId, parentId: actionId, adviceRequestId: request.id }}
+          targetOptions={targetOptions}
+          entryTypes={[
+            { value: "REACTION", label: t("entryReaction"), variant: "secondary" },
+            { value: "OBJECTION", label: t("entryObjection"), variant: "danger" },
+          ]}
+        />
+      ) : null,
+    };
+  });
 
   return (
     <>
@@ -269,23 +377,70 @@ export default async function ActionDetailPage({
         </section>
       )}
 
+      {(canRequestInput || inputRequests.length > 0) && (
+        <WorkItemConversationSurface title={t("sectionInputRequests")} className="work-request-surface">
+          <WorkItemRequestList
+            requests={inputRequestCards}
+            labels={{
+              copyableMessage: t("inputCopyableMessage"),
+              linkedReplies: (count) => t("inputLinkedReplies", { count }),
+              replyToRequest: t("btnReplyToInputRequest"),
+            }}
+          />
+          {canRequestInput && (
+            <details open={!inputRequests.some((request) => request.status === "ACTIVE")}>
+              <summary className="work-request-action nr-hide-marker">{t("btnRequestInput")}</summary>
+              <AdviceRequestForm
+                action={requestActionInputAction}
+                hiddenFields={{ workspaceId, actionId: action.id }}
+                memberOptions={memberRequestOptions}
+                circleOptions={circleRequestOptions}
+                defaultAudienceType={defaultCircleValue ? "CIRCLE" : "WORKSPACE"}
+                defaultCircleId={defaultCircleValue}
+                labels={{
+                  audience: t("inputAudience"),
+                  audienceMembers: t("inputAudienceMembers"),
+                  audienceCircle: t("inputAudienceCircle"),
+                  audienceWorkspace: t("inputAudienceWorkspace"),
+                  people: t("inputPeople"),
+                  choosePeople: t("inputChoosePeople"),
+                  circle: t("inputCircle"),
+                  membersAudienceNote: t("inputMembersAudienceNote"),
+                  circleAudienceNote: t("inputCircleAudienceNote"),
+                  workspaceAudienceNote: t("inputWorkspaceAudienceNote"),
+                  message: t("inputMessage"),
+                  deadline: t("inputDeadline"),
+                  reminder: t("inputReminder"),
+                  preferredChannel: t("inputPreferredChannel"),
+                  channelInApp: t("inputChannelInApp"),
+                  channelSlack: t("inputChannelSlack"),
+                  channelEmail: t("inputChannelEmail"),
+                  channelCopy: t("inputChannelCopy"),
+                  selectAll: tWork("selectAll"),
+                  unselectAll: tWork("unselectAll"),
+                  selectedCount: tWork("selectedCount", { count: "{count}" }),
+                  submit: t("btnSendInputRequest"),
+                  sending: t("btnSendingInputRequest"),
+                  sent: t("inputRequestSent"),
+                  submitError: t("inputRequestSubmitError"),
+                  choosePeopleError: t("inputChoosePeopleError"),
+                  messageRequiredError: t("inputMessageRequiredError"),
+                  deadlineInvalidError: t("inputDeadlineInvalidError"),
+                  deadlineFutureError: t("inputDeadlineFutureError"),
+                  reminderInvalidError: t("inputReminderInvalidError"),
+                  reminderFutureError: t("inputReminderFutureError"),
+                  reminderBeforeDeadlineError: t("inputReminderBeforeDeadlineError"),
+                }}
+              />
+            </details>
+          )}
+        </WorkItemConversationSurface>
+      )}
+
       <WorkItemConversationSurface title={t("sectionDiscussion")}>
         <DeliberationThread
-          entries={deliberationEntries.map((entry) => ({
-            id: entry.id,
-            entryType: entry.entryType,
-            authorName: entry.author?.displayName || entry.author?.email || "Unknown",
-            authorInitials: (entry.author?.displayName || entry.author?.email || "?").substring(0, 2).toUpperCase(),
-            bodyMd: entry.bodyMd,
-            createdAt: entry.createdAt,
-            parentVersion: entry.parentVersion,
-            resolvedAt: entry.resolvedAt,
-            resolvedNote: entry.resolvedNote,
-            targetLabel: entry.targetCircle
-              ? t("targetCircle", { name: entry.targetCircle.name })
-              : entry.targetMember
-                ? t("targetPerson", { name: entry.targetMember.user.displayName || entry.targetMember.user.email })
-                : null,
+          entries={discussionEntries.map((entry) => ({
+            ...entry,
             canEdit: canManageEntry(entry),
             canResolve: canManageEntry(entry),
           }))}

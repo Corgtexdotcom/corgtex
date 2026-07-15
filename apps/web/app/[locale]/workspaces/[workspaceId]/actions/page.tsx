@@ -1,4 +1,4 @@
-import { listActions, listCircles, listHumanMembers, requireWorkspaceMembership } from "@corgtex/domain";
+import { listActions, listAdviceRequests, listCircles, listHumanMembers, requireWorkspaceMembership } from "@corgtex/domain";
 import { prisma } from "@corgtex/shared";
 import type { ReactNode } from "react";
 import { requirePageActor } from "@/lib/auth";
@@ -58,7 +58,7 @@ export default async function ActionsPage({
     view === "kanban" ? null : "OPEN",
   );
   const { circleIds, memberIds, sort } = resolveWorkItemFilters(resolvedSearch);
-  const [{ items: actions }, circles, members] = await Promise.all([
+  const [{ items: actions }, circles, members, activeInputRequests] = await Promise.all([
     listActions(actor, workspaceId, {
       take: 200,
       circleIds,
@@ -67,6 +67,7 @@ export default async function ActionsPage({
     }),
     listCircles(workspaceId),
     listHumanMembers(workspaceId),
+    listAdviceRequests(actor, { workspaceId, subjectType: "ACTION", status: "ACTIVE", take: 500 }),
   ]);
 
   const actionIds = actions.map((action) => action.id);
@@ -94,6 +95,11 @@ export default async function ActionsPage({
   const evidenceByActionId = new Map<string, typeof evidenceRows>();
   for (const row of evidenceRows) {
     evidenceByActionId.set(row.entityId, [...(evidenceByActionId.get(row.entityId) ?? []), row]);
+  }
+  const activeRequestCountByActionId = new Map<string, number>();
+  for (const request of activeInputRequests) {
+    const subjectId = request.process.subjectId;
+    activeRequestCountByActionId.set(subjectId, (activeRequestCountByActionId.get(subjectId) ?? 0) + 1);
   }
 
   const groupedActions = groupActionsByStatus(actions);
@@ -293,6 +299,7 @@ export default async function ActionsPage({
     const createdAge = ageText(action.createdAt);
     const dueDate = action.dueAt ? new Date(action.dueAt).toLocaleDateString() : null;
     const evidence = evidenceByActionId.get(action.id) ?? [];
+    const activeRequestCount = activeRequestCountByActionId.get(action.id) ?? 0;
     const { hiddenTransitions, moreItems, primary } = actionControls(action);
 
     return (
@@ -304,6 +311,7 @@ export default async function ActionsPage({
             {action.title}
           </strong>
           {!compact && <span className={`tag ${statusMeta.tagClass}`}>{t(statusMeta.labelKey)}</span>}
+          {activeRequestCount > 0 && <span className="tag warning">{t("inputRequestCount", { count: activeRequestCount })}</span>}
         </div>
         <div className="nr-card-content">
           {action.bodyMd && <MarkdownExcerpt markdown={action.bodyMd} maxLength={compact ? 120 : 220} as="div" className="nr-excerpt" />}
@@ -371,6 +379,7 @@ export default async function ActionsPage({
     const createdAge = ageText(action.createdAt);
     const dueDate = action.dueAt ? new Date(action.dueAt).toLocaleDateString() : null;
     const evidence = evidenceByActionId.get(action.id) ?? [];
+    const activeRequestCount = activeRequestCountByActionId.get(action.id) ?? 0;
     const { hiddenTransitions, moreItems, primary } = actionControls(action);
 
     return {
@@ -382,6 +391,11 @@ export default async function ActionsPage({
               {action.status === "DRAFT" && <span title={t("statusDraft")} style={{ marginRight: 6 }}>◆</span>}
               {action.title}
             </a>
+            {activeRequestCount > 0 && (
+              <div className="nr-work-item-table-meta nr-work-item-table-tags">
+                <span className="tag warning">{t("inputRequestCount", { count: activeRequestCount })}</span>
+              </div>
+            )}
             {action.bodyMd && <MarkdownExcerpt markdown={action.bodyMd} maxLength={140} as="div" className="nr-work-item-table-meta" />}
             {action.status === "COMPLETED" && action.completedVia && (
               <div className="nr-work-item-table-meta">

@@ -261,6 +261,78 @@ describe("advice requests", () => {
     })).rejects.toThrow(/open tensions/);
   });
 
+  it("creates input requests for open public actions", async () => {
+    tx.action.findUnique.mockResolvedValueOnce({
+      id: "action-1",
+      workspaceId: "workspace-1",
+      title: "Collect evidence",
+      status: "OPEN",
+      circleId: "circle-1",
+      authorUserId: "user-author",
+      assigneeMemberId: "member-owner",
+      archivedAt: null,
+      isPrivate: false,
+    });
+
+    const { createAdviceRequest } = await import("./advice-requests");
+    await createAdviceRequest(actor, {
+      workspaceId: "workspace-1",
+      subjectType: "ACTION",
+      subjectId: "action-1",
+      audienceType: "WORKSPACE",
+      messageMd: "Please confirm the evidence owner.",
+      preferredChannel: "IN_APP",
+    });
+
+    expect(tx.adviceProcess.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        workspaceId: "workspace-1",
+        proposalId: null,
+        authorMemberId: "member-owner",
+        ownerMemberId: "member-owner",
+        subjectType: "ACTION",
+        subjectId: "action-1",
+      }),
+    });
+    expect(tx.event.createMany).toHaveBeenCalledWith({
+      data: [expect.objectContaining({
+        workspaceId: "workspace-1",
+        type: "advice.requested",
+        aggregateType: "AdviceRequest",
+        aggregateId: "request-1",
+        payload: expect.objectContaining({
+          adviceRequestId: "request-1",
+          subjectType: "ACTION",
+          subjectId: "action-1",
+          subjectTitle: "Collect evidence",
+        }),
+      })],
+    });
+  });
+
+  it("rejects input requests for private actions", async () => {
+    tx.action.findUnique.mockResolvedValueOnce({
+      id: "action-1",
+      workspaceId: "workspace-1",
+      title: "Private action",
+      status: "OPEN",
+      circleId: "circle-1",
+      authorUserId: "user-owner",
+      assigneeMemberId: "member-owner",
+      archivedAt: null,
+      isPrivate: true,
+    });
+
+    const { createAdviceRequest } = await import("./advice-requests");
+    await expect(createAdviceRequest(actor, {
+      workspaceId: "workspace-1",
+      subjectType: "ACTION",
+      subjectId: "action-1",
+      audienceType: "WORKSPACE",
+      messageMd: "Please advise.",
+    })).rejects.toThrow(/private actions/);
+  });
+
   it("resolves circle recipients dynamically and excludes the requester", async () => {
     tx.adviceRequest.findUnique.mockResolvedValueOnce({
       id: "request-1",
