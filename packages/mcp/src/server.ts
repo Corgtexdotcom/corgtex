@@ -1175,7 +1175,16 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
 
       const inFlightProposals = proposals.items
         .filter((p) => p.status === "DRAFT" || p.status === "OPEN")
-        .map((p) => ({ id: p.id, title: p.title, status: p.status, resolutionOutcome: p.resolutionOutcome, createdAt: p.createdAt }));
+        .map((p) => ({
+          id: p.id,
+          title: p.title,
+          status: p.status,
+          resolutionOutcome: p.resolutionOutcome,
+          ownerMemberId: p.ownerMemberId ?? p.ownerMember?.id ?? null,
+          ownerMemberName: memberDisplayName(p.ownerMember),
+          owner: memberDisplayName(p.ownerMember),
+          createdAt: p.createdAt,
+        }));
 
       const freshTensions = tensions.items
         .filter((t) => new Date(t.createdAt) >= since || t.status === "OPEN")
@@ -2262,13 +2271,21 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
       title: z.string().describe("Proposal title"),
       bodyMd: z.string().describe("Proposal body in Markdown"),
       summary: z.string().optional().describe("Optional short summary"),
-      ownerMemberId: z.string().optional().describe("Optional active member ID responsible for the proposal"),
+      ownerMemberId: z.string().nullable().optional().describe("Optional active member ID responsible for the proposal. Omit to default to the author; pass null for no owner."),
       priority: workItemPriorityInputSchema.optional().describe("Urgent, Important, Medium, Low, or integer priority"),
       authorMemberId: z.string().optional().describe("Optional active member ID to attribute as author when an internal/credential agent creates the proposal"),
     },
-    async ({ title, bodyMd, summary, ownerMemberId, priority, authorMemberId }: { title: string; bodyMd: string; summary?: string; ownerMemberId?: string; priority?: number | string; authorMemberId?: string }) => {
+    async ({ title, bodyMd, summary, ownerMemberId, priority, authorMemberId }: { title: string; bodyMd: string; summary?: string; ownerMemberId?: string | null; priority?: number | string; authorMemberId?: string }) => {
       requireScope(sessionCtx, "proposals:write");
-      const proposal = await createProposal(actor, { workspaceId, title, bodyMd, summary, ownerMemberId, priority: coerceWorkItemPriorityInput(priority), authorMemberId });
+      const proposal = await createProposal(actor, {
+        workspaceId,
+        title,
+        bodyMd,
+        summary,
+        ...(ownerMemberId !== undefined ? { ownerMemberId } : {}),
+        priority: coerceWorkItemPriorityInput(priority),
+        authorMemberId,
+      });
       const proposalForResponse = await loadProposalWorkItemResponse(workspaceId, proposal.id, proposal);
       const permanent = await permanentUrl(workspaceId, "Proposal", proposal.id);
       return jsonResult({

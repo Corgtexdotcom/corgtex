@@ -25,6 +25,10 @@ const createProposalSchema = z.object({
   }
 });
 
+function ownerMemberIdFromBody(body: { ownerMemberId?: string | null }) {
+  return body.ownerMemberId === undefined ? undefined : body.ownerMemberId;
+}
+
 export async function GET(request: NextRequest, { params }: { params: Promise<{ workspaceId: string }> }) {
   try {
     const actor = await resolveRequestActor(request);
@@ -48,6 +52,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
     const actor = await resolveRequestActor(request);
     const { workspaceId } = await params;
     const body = await validateBody(request, createProposalSchema);
+    const ownerMemberId = ownerMemberIdFromBody(body);
     const proposal = body.sourceTensionId
       ? await createProposalFromTension(actor, {
           workspaceId,
@@ -56,7 +61,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
           summary: body.summary ?? null,
           bodyMd: body.bodyMd ?? null,
           relatedActionIds: body.relatedActionIds ?? null,
-          ownerMemberId: body.ownerMemberId ?? null,
+          ...(ownerMemberId !== undefined ? { ownerMemberId } : {}),
           priority: workItemPriorityFromBody(body),
         })
       : await createProposal(actor, {
@@ -65,7 +70,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
           summary: body.summary ?? null,
           bodyMd: body.bodyMd!,
           relatedActionIds: body.relatedActionIds ?? null,
-          ownerMemberId: body.ownerMemberId ?? null,
+          ...(ownerMemberId !== undefined ? { ownerMemberId } : {}),
           priority: workItemPriorityFromBody(body),
         });
     const origin = env.APP_URL.replace(/\/$/, "");

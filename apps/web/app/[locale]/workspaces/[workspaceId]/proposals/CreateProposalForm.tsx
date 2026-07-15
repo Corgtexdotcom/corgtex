@@ -22,10 +22,12 @@ export function CreateProposalForm({
   workspaceId,
   compact = false,
   members,
+  defaultOwnerMemberId = "",
 }: {
   workspaceId: string;
   compact?: boolean;
   members: WorkItemMemberOption[];
+  defaultOwnerMemberId?: string | null;
 }) {
   const formRef = useRef<HTMLFormElement | null>(null);
   const [editorKey, setEditorKey] = useState(0);
@@ -42,7 +44,7 @@ export function CreateProposalForm({
   return (
     <form ref={formRef} action={handleCreateProposal} className={`stack nr-form-section ${compact ? "nr-inline-draft-form" : "mt-4"}`}>
       <input type="hidden" name="workspaceId" value={workspaceId} />
-      <ProposalDraftFields key={editorKey} members={members} />
+      <ProposalDraftFields key={editorKey} members={members} defaultOwnerMemberId={defaultOwnerMemberId} />
       <label className="nr-checkbox-label">
         <input type="checkbox" name="isPrivate" defaultChecked />
         <span>{t("formPrivateDraft")}</span>

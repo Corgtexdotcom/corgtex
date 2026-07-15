@@ -101,6 +101,23 @@ describe("proposal server actions", () => {
       workspaceId: "workspace-1",
       isPrivate: true,
     }));
+    expect(createProposal.mock.calls[0]?.[1]).not.toHaveProperty("ownerMemberId");
+  });
+
+  it("passes an empty proposal owner select as explicit null", async () => {
+    const { createProposalAction } = await import("./actions");
+    const formData = new FormData();
+    formData.set("workspaceId", "workspace-1");
+    formData.set("title", "Clarify approval policy");
+    formData.set("bodyMd", "Proposal body");
+    formData.set("ownerMemberId", "");
+
+    await createProposalAction(formData);
+
+    expect(createProposal).toHaveBeenCalledWith(actor, expect.objectContaining({
+      workspaceId: "workspace-1",
+      ownerMemberId: null,
+    }));
   });
 
   it("drafts a proposal from a tension through the dedicated server action", async () => {
@@ -119,6 +136,7 @@ describe("proposal server actions", () => {
       relatedActionIds: [],
       isPrivate: true,
     }));
+    expect(createProposalFromTension.mock.calls[0]?.[1]).not.toHaveProperty("ownerMemberId");
   });
 
   it("passes false when the AI summary toggle was rendered but unchecked", async () => {

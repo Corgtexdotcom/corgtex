@@ -491,6 +491,45 @@ describe("createCorgtexMcpServer", () => {
     expect(JSON.stringify(payload)).not.toContain("secret");
   });
 
+  it("includes proposal owner fields in the daily overview", async () => {
+    const { createCorgtexMcpServer } = await import("./server");
+    const { requireScope } = await import("./auth");
+    const { listMeetings } = await import("@corgtex/domain");
+
+    listActionsMock.mockResolvedValueOnce({ items: [], total: 0 });
+    listProposalsMock.mockResolvedValueOnce({
+      items: [{
+        id: "proposal-1",
+        title: "Clarify ownership",
+        status: "OPEN",
+        resolutionOutcome: null,
+        ownerMemberId: "member-owner",
+        ownerMember: { id: "member-owner", user: { displayName: "Owner", email: "owner@example.test" } },
+        createdAt: new Date("2026-07-15T12:00:00.000Z"),
+      }],
+      total: 1,
+    });
+    listTensionsMock.mockResolvedValueOnce({ items: [], total: 0 });
+    vi.mocked(listMeetings).mockResolvedValueOnce([]);
+
+    const server = createCorgtexMcpServer({
+      actor: { kind: "agent", authProvider: "bootstrap" } as any,
+      workspaceId: "ws-1",
+      authKind: "agent",
+    });
+
+    const response = await (server as any)._registeredTools.daily_overview.handler({ windowHours: 12 });
+    const payload = JSON.parse(response.content[0].text);
+
+    expect(vi.mocked(requireScope)).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: "ws-1" }), "proposals:read");
+    expect(payload.inFlightProposals).toEqual([expect.objectContaining({
+      id: "proposal-1",
+      ownerMemberId: "member-owner",
+      ownerMemberName: "Owner",
+      owner: "Owner",
+    })]);
+  });
+
   it("lists and fetches work item versions with the matching entity read scope", async () => {
     const { createCorgtexMcpServer } = await import("./server");
     const { requireScope } = await import("./auth");
@@ -1660,6 +1699,42 @@ describe("createCorgtexMcpServer", () => {
       ownerMemberId: "member-owner",
       ownerMemberName: "Owner",
       owner: "Owner",
+    });
+  });
+
+  it("omits ownerMemberId from MCP create_proposal input so the domain default applies", async () => {
+    const { createCorgtexMcpServer } = await import("./server");
+    const { prisma } = await import("@corgtex/shared");
+
+    vi.mocked(prisma.proposal.findFirst).mockResolvedValueOnce({
+      id: "proposal-1",
+      title: "Clarify ownership",
+      status: "DRAFT",
+      version: 1,
+      priority: 0,
+      ownerMemberId: "member-default",
+      ownerMember: { id: "member-default", user: { displayName: "Default Owner", email: "default@example.test" } },
+    } as never);
+
+    const server = createCorgtexMcpServer({
+      actor: { kind: "agent", authProvider: "bootstrap" } as any,
+      workspaceId: "ws-1",
+      authKind: "agent",
+    });
+
+    const response = await (server as any)._registeredTools.create_proposal.handler({
+      title: "Clarify ownership",
+      bodyMd: "Assign an owner before adoption.",
+    });
+
+    expect(createProposalMock).toHaveBeenCalledWith(
+      expect.objectContaining({ kind: "agent" }),
+      expect.not.objectContaining({ ownerMemberId: expect.anything() }),
+    );
+    expect(JSON.parse(response.content[0].text)).toMatchObject({
+      ownerMemberId: "member-default",
+      ownerMemberName: "Default Owner",
+      owner: "Default Owner",
     });
   });
 

@@ -451,6 +451,71 @@ describe("proposal creation visibility", () => {
     }));
   });
 
+  it("defaults an omitted proposal owner to the creator's active human member", async () => {
+    const { createProposal } = await import("./proposals");
+    const actor = { kind: "user", user: { id: "u-1" } } as any;
+
+    vi.mocked((prisma as any).member.findFirst).mockResolvedValueOnce({ id: "mem-1" });
+    vi.mocked(prisma.proposal.create).mockResolvedValueOnce({
+      id: "p-default-owner",
+      workspaceId: "ws-1",
+      authorUserId: "u-1",
+      ownerMemberId: "mem-1",
+      title: "Default-owned proposal",
+      status: "DRAFT",
+      isPrivate: true,
+    } as any);
+
+    await createProposal(actor, {
+      workspaceId: "ws-1",
+      title: "Default-owned proposal",
+      bodyMd: "Proposal body",
+    });
+
+    expect((prisma as any).member.findFirst).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({
+        workspaceId: "ws-1",
+        userId: "u-1",
+        isActive: true,
+      }),
+      select: { id: true },
+    }));
+    expect(prisma.proposal.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        ownerMemberId: "mem-1",
+      }),
+    }));
+  });
+
+  it("keeps an explicitly null proposal owner empty", async () => {
+    const { createProposal } = await import("./proposals");
+    const actor = { kind: "user", user: { id: "u-1" } } as any;
+
+    vi.mocked(prisma.proposal.create).mockResolvedValueOnce({
+      id: "p-no-owner",
+      workspaceId: "ws-1",
+      authorUserId: "u-1",
+      ownerMemberId: null,
+      title: "Ownerless proposal",
+      status: "DRAFT",
+      isPrivate: true,
+    } as any);
+
+    await createProposal(actor, {
+      workspaceId: "ws-1",
+      title: "Ownerless proposal",
+      bodyMd: "Proposal body",
+      ownerMemberId: null,
+    });
+
+    expect((prisma as any).member.findFirst).not.toHaveBeenCalled();
+    expect(prisma.proposal.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        ownerMemberId: null,
+      }),
+    }));
+  });
+
   it("rejects proposal owners that are not active human members in the workspace", async () => {
     const { createProposal } = await import("./proposals");
     const actor = { kind: "user", user: { id: "u-1" } } as any;
@@ -991,11 +1056,13 @@ describe("createProposalFromTension", () => {
     vi.mocked(prisma.proposal.create).mockResolvedValueOnce({
       id: "p-1",
       workspaceId: "ws-1",
+      ownerMemberId: "mem-1",
       title: "Resolve tension: Reimbursements are slow",
       bodyMd: "Draft body",
       status: "DRAFT",
       isPrivate: true,
     } as any);
+    vi.mocked((prisma as any).member.findFirst).mockResolvedValueOnce({ id: "mem-1" });
     vi.mocked(prisma.tension.update).mockResolvedValueOnce({ id: "t-1", proposalId: "p-1" } as any);
 
     await expect(createProposalFromTension(actor, {
@@ -1026,6 +1093,7 @@ describe("createProposalFromTension", () => {
         summary: "Proposal drafted from tension: Reimbursements are slow",
         bodyMd: expect.stringContaining("The current flow takes two weeks."),
         circleId: "circle-1",
+        ownerMemberId: "mem-1",
         isPrivate: true,
         publishedAt: null,
       }),
@@ -1033,6 +1101,45 @@ describe("createProposalFromTension", () => {
     expect(prisma.tension.update).toHaveBeenCalledWith({
       where: { id: "t-1" },
       data: { proposalId: "p-1" },
+    });
+  });
+
+  it("keeps an explicitly null proposal-from-tension owner empty", async () => {
+    const { createProposalFromTension } = await import("./proposals");
+    const actor = { kind: "user", user: { id: "u-1" } } as any;
+
+    vi.mocked(prisma.tension.findFirst).mockResolvedValueOnce({
+      id: "t-no-owner",
+      workspaceId: "ws-1",
+      authorUserId: "u-1",
+      title: "Document ownership",
+      bodyMd: "No owner should be set.",
+      circleId: null,
+      meetingId: null,
+      proposalId: null,
+      status: "OPEN",
+    } as any);
+    vi.mocked(prisma.proposal.create).mockResolvedValueOnce({
+      id: "p-no-owner-from-tension",
+      workspaceId: "ws-1",
+      ownerMemberId: null,
+      title: "Resolve tension: Document ownership",
+      status: "DRAFT",
+      isPrivate: true,
+    } as any);
+    vi.mocked(prisma.tension.update).mockResolvedValueOnce({ id: "t-no-owner", proposalId: "p-no-owner-from-tension" } as any);
+
+    await createProposalFromTension(actor, {
+      workspaceId: "ws-1",
+      sourceTensionId: "t-no-owner",
+      ownerMemberId: null,
+    });
+
+    expect((prisma as any).member.findFirst).not.toHaveBeenCalled();
+    expect(prisma.proposal.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        ownerMemberId: null,
+      }),
     });
   });
 
