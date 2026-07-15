@@ -10,4 +10,5 @@ export * from "./email";
 export * from "./branding";
 export * from "./math";
 export * from "./redis";
-export * from './logger';
+export * from "./telemetry";
+export * from "./logger";

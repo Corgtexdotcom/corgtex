@@ -10,6 +10,7 @@
     "paths": {
       "@/*": ["./*"],
       "@corgtex/shared": ["../../packages/shared/src/index.ts"],
+      "@corgtex/shared/telemetry": ["../../packages/shared/src/telemetry.ts"],
       "@corgtex/domain": ["../../packages/domain/src/index.ts"],
       "@corgtex/domain/modules": ["../../packages/domain/src/modules/index.ts"],
       "@corgtex/workflows": ["../../packages/workflows/src/index.ts"],

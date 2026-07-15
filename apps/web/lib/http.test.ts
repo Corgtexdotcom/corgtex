@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-const { capturePostHogEvent } = vi.hoisted(() => ({
-  capturePostHogEvent: vi.fn(),
+const { captureErrorTelemetry } = vi.hoisted(() => ({
+  captureErrorTelemetry: vi.fn(),
 }));
 
 class MockAppError extends Error {
@@ -19,8 +19,8 @@ vi.mock("@corgtex/domain", () => ({
   AppError: MockAppError,
 }));
 
-vi.mock("@/lib/posthog-server", () => ({
-  capturePostHogEvent,
+vi.mock("@corgtex/shared/telemetry", () => ({
+  captureErrorTelemetry,
 }));
 
 afterEach(() => {
@@ -40,16 +40,18 @@ describe("handleRouteError", () => {
         message: "Invalid email or password.",
       },
     });
-    expect(capturePostHogEvent).toHaveBeenCalledWith({
-      event: "corgtex_app_route_error",
-      distinctId: "route:UNKNOWN:unknown",
-      properties: expect.objectContaining({
-        code: "UNAUTHENTICATED",
-        status: 401,
-        surface: "api",
+    expect(captureErrorTelemetry).toHaveBeenCalledWith({
+      attributes: expect.objectContaining({
+        feature_surface: "api",
         transient: false,
       }),
-      processPersonProfile: false,
+      code: "UNAUTHENTICATED",
+      error: expect.any(MockAppError),
+      method: undefined,
+      route: undefined,
+      status: 401,
+      surface: "route",
+      workspaceId: undefined,
     });
   });
 
@@ -73,15 +75,18 @@ describe("handleRouteError", () => {
       "Route failed because the database is unavailable.",
       expect.any(Error),
     );
-    expect(capturePostHogEvent).toHaveBeenCalledWith({
-      event: "corgtex_app_route_error",
-      distinctId: "route:UNKNOWN:unknown",
-      properties: expect.objectContaining({
-        code: "SERVICE_UNAVAILABLE",
-        status: 503,
+    expect(captureErrorTelemetry).toHaveBeenCalledWith({
+      attributes: expect.objectContaining({
+        feature_surface: "api",
         transient: true,
       }),
-      processPersonProfile: false,
+      code: "SERVICE_UNAVAILABLE",
+      error,
+      method: undefined,
+      route: undefined,
+      status: 503,
+      surface: "route",
+      workspaceId: undefined,
     });
   });
 });

@@ -9,6 +9,7 @@ export const dynamic = "force-dynamic";
 
 const upgradeReleaseSchema = z.object({
   releaseVersion: z.string().trim().min(1).nullable().optional(),
+  releaseGitSha: z.string().trim().min(1).nullable().optional(),
   releaseImageTag: z.string().trim().min(1),
   webImage: z.string().trim().min(1).nullable().optional(),
   workerImage: z.string().trim().min(1).nullable().optional(),

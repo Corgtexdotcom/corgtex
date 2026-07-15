@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { createServer } from "node:http";
-import { prisma, logger } from "@corgtex/shared";
+import { captureErrorTelemetry, prisma, logger } from "@corgtex/shared";
 import { finalizeExpiredApprovalFlows } from "@corgtex/domain";
 import { dispatchPendingEvents, renderWorkflowJobMetrics, runPendingJobs, scheduleDailyJobs, schedulePeriodicJobs, scheduleDripCampaigns } from "@corgtex/workflows";
 import * as Sentry from "@sentry/node";
@@ -117,6 +117,17 @@ async function tick(): Promise<WorkerPollOutcome | null> {
     Sentry.captureException(error, {
       tags: { component: "worker", workerId },
       extra: { event: "tick_error", durationMs: lastTickMs },
+    });
+    void captureErrorTelemetry({
+      action: "tick",
+      attributes: {
+        duration_ms: lastTickMs,
+        worker_id: workerId,
+      },
+      code: "WORKER_TICK_ERROR",
+      error,
+      status: 500,
+      surface: "worker",
     });
     log("error", {
       event: "tick_error",
@@ -289,6 +300,16 @@ async function main() {
           tags: { component: "worker", workerId },
           extra: { event: "unhandled_tick_error" },
         });
+        void captureErrorTelemetry({
+          action: "scheduleNextTick",
+          attributes: {
+            worker_id: workerId,
+          },
+          code: "WORKER_UNHANDLED_TICK_ERROR",
+          error,
+          status: 500,
+          surface: "worker",
+        });
         log("error", {
           event: "unhandled_tick_error",
           error: error instanceof Error ? error.message : "Unknown",
@@ -306,6 +327,16 @@ main().catch((error) => {
   Sentry.captureException(error, {
     tags: { component: "worker", workerId },
     extra: { event: "fatal" },
+  });
+  void captureErrorTelemetry({
+    action: "main",
+    attributes: {
+      worker_id: workerId,
+    },
+    code: "WORKER_FATAL",
+    error,
+    status: 500,
+    surface: "worker",
   });
   log("error", { event: "fatal", error: error instanceof Error ? error.message : "Unknown" });
   process.exitCode = 1;
