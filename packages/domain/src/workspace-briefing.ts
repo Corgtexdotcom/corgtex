@@ -109,12 +109,53 @@ const SECTION_TITLES: Record<NewspaperEmailSectionId, string> = {
   otherUpdates: "Other Updates",
 };
 
+const WORKSPACE_BRIEFING_SOURCE_LABELS: Record<WorkspaceBriefingSourceType, string> = {
+  ACTION: "Action",
+  ADVICE_REQUEST: "Advice request",
+  BRAIN_ARTICLE: "Knowledge",
+  BUILD_ARTIFACT: "Build",
+  COMMUNICATION: "Conversation",
+  DOCUMENT: "Document",
+  GOAL: "Goal",
+  MEETING: "Meeting",
+  PROPOSAL: "Proposal",
+  QUIET: "Quiet",
+  RECOGNITION: "Recognition",
+  TENSION: "Tension",
+};
+
+const WORKSPACE_BRIEFING_SOURCE_INTRO_LABELS: Record<WorkspaceBriefingSourceType, string> = {
+  ACTION: "open actions",
+  ADVICE_REQUEST: "advice requests",
+  BRAIN_ARTICLE: "knowledge updates",
+  BUILD_ARTIFACT: "shipped or in-flight work",
+  COMMUNICATION: "workspace conversations",
+  DOCUMENT: "document updates",
+  GOAL: "strategic goals",
+  MEETING: "recent meetings",
+  PROPOSAL: "open proposals",
+  QUIET: "quiet context",
+  RECOGNITION: "recognition",
+  TENSION: "active tensions",
+};
+
 function dateKeyFromISO(dateISO: string) {
   return new Date(dateISO).toISOString().split("T")[0];
 }
 
 export function workspaceBriefingPeriodFromCadence(cadence: NewspaperCadence): WorkspaceBriefingPeriod {
   return cadence === "WEEKLY" ? "WEEKLY" : "DAILY";
+}
+
+export function workspaceBriefingSourceLabel(kind: WorkspaceBriefingSourceType | string) {
+  const normalized = kind.trim().toUpperCase() as WorkspaceBriefingSourceType;
+  if (WORKSPACE_BRIEFING_SOURCE_LABELS[normalized]) return WORKSPACE_BRIEFING_SOURCE_LABELS[normalized];
+  return kind
+    .toLowerCase()
+    .split(/[_\s-]+/)
+    .filter(Boolean)
+    .map((part) => `${part.charAt(0).toUpperCase()}${part.slice(1)}`)
+    .join(" ");
 }
 
 function workspacePath(workspaceId: string, path: string) {
@@ -153,12 +194,16 @@ function candidate(params: Omit<WorkspaceBriefingCandidate, "sourceRefs"> & { wo
 }
 
 function recencyScore(candidate: WorkspaceBriefingCandidate, now: Date) {
-  const ageDays = Math.max(0, (now.getTime() - candidate.occurredAt.getTime()) / (24 * 60 * 60 * 1000));
+  const ageDays = candidateAgeDays(candidate, now);
   if (ageDays <= 1) return 4;
   if (ageDays <= 3) return 3;
   if (ageDays <= 7) return 2;
   if (ageDays <= 30) return 1;
   return 0;
+}
+
+function candidateAgeDays(candidate: WorkspaceBriefingCandidate, now: Date) {
+  return Math.max(0, (now.getTime() - candidate.occurredAt.getTime()) / (24 * 60 * 60 * 1000));
 }
 
 function dueScore(candidate: WorkspaceBriefingCandidate, now: Date) {
@@ -170,6 +215,27 @@ function dueScore(candidate: WorkspaceBriefingCandidate, now: Date) {
   return 1;
 }
 
+function staleOpenWorkPenalty(candidate: WorkspaceBriefingCandidate, now: Date) {
+  if (candidate.status !== "OPEN") return 0;
+  if (candidate.sourceType !== "PROPOSAL" && candidate.sourceType !== "TENSION") return 0;
+
+  const ageDays = candidateAgeDays(candidate, now);
+  if (ageDays <= 14) return 0;
+
+  const priority = candidate.priority ?? 0;
+  const hasUrgencyOrImportance = priority >= 3 || candidate.strategicScore >= 4 || dueScore(candidate, now) >= 2;
+  if (ageDays > 45) return hasUrgencyOrImportance ? 1 : 4;
+  if (ageDays > 21) return hasUrgencyOrImportance ? 1 : 3;
+  return hasUrgencyOrImportance ? 0 : 2;
+}
+
+function routineGoalPenalty(candidate: WorkspaceBriefingCandidate, now: Date) {
+  if (candidate.sourceType !== "GOAL") return 0;
+  if (candidate.status === "AT_RISK" || candidate.status === "BEHIND") return 0;
+  if (dueScore(candidate, now) >= 2) return 0;
+  return candidate.summaryMd?.trim().startsWith("0% complete") ? 2 : 0;
+}
+
 export function scoreWorkspaceBriefingCandidate(candidate: WorkspaceBriefingCandidate, now = new Date()) {
   const statusBoost = candidate.status === "OPEN" || candidate.status === "IN_PROGRESS" || candidate.status === "ACTIVE"
     ? 2
@@ -177,7 +243,7 @@ export function scoreWorkspaceBriefingCandidate(candidate: WorkspaceBriefingCand
       ? 3
       : 0;
 
-  return (
+  const score = (
     recencyScore(candidate, now)
     + dueScore(candidate, now)
     + candidate.strategicScore
@@ -185,7 +251,11 @@ export function scoreWorkspaceBriefingCandidate(candidate: WorkspaceBriefingCand
     + candidate.evidenceScore
     + statusBoost
     + Math.min(3, Math.max(0, candidate.priority ?? 0))
+    - staleOpenWorkPenalty(candidate, now)
+    - routineGoalPenalty(candidate, now)
   );
+
+  return Math.max(0, score);
 }
 
 export function rankWorkspaceBriefingCandidates(candidates: WorkspaceBriefingCandidate[], now = new Date()) {
@@ -197,17 +267,17 @@ export function rankWorkspaceBriefingCandidates(candidates: WorkspaceBriefingCan
 }
 
 function prominenceFor(score: number, index: number): WorkspaceBriefingProminence {
-  if (index === 0 || score >= 12) return "lead";
+  if (index === 0) return score >= 8 ? "lead" : "standard";
   if (score >= 8) return "standard";
   if (score >= 4) return "compact";
   return "reference";
 }
 
 function whyCandidateMatters(candidate: WorkspaceBriefingCandidate) {
-  if (candidate.sourceType === "ACTION") return candidate.dueAt ? "This action has timing or ownership attached." : "This is open work that may need follow-through.";
-  if (candidate.sourceType === "TENSION") return candidate.status === "OPEN" ? "This tension is still active and may affect coordination." : "This tension changed recently and may explain current direction.";
-  if (candidate.sourceType === "PROPOSAL") return candidate.status === "OPEN" ? "This proposal is still open for decision or advice." : "This proposal records a decision or operating change.";
-  if (candidate.sourceType === "MEETING") return "This meeting is recent operating evidence and may contain decisions or follow-ups.";
+  if (candidate.sourceType === "ACTION") return candidate.dueAt ? "Timing or ownership is attached, so this is worth checking before it slips." : "This is active work that may need follow-through.";
+  if (candidate.sourceType === "TENSION") return candidate.status === "OPEN" ? "This is unresolved and can affect coordination or priorities." : "This changed recently and may explain the current direction.";
+  if (candidate.sourceType === "PROPOSAL") return candidate.status === "OPEN" ? "A decision, advice, or alignment may still be needed before this moves forward." : "This records a decision or operating change.";
+  if (candidate.sourceType === "MEETING") return "This is recent operating evidence and may contain decisions or follow-ups.";
   if (candidate.sourceType === "GOAL") return "This connects today’s work to current strategic direction.";
   if (candidate.sourceType === "ADVICE_REQUEST") return "Someone is asking for input before work can move forward.";
   if (candidate.sourceType === "BUILD_ARTIFACT") return "This reflects shipped or in-flight implementation work.";
@@ -245,6 +315,32 @@ function countSources(candidates: WorkspaceBriefingCandidate[]) {
     counts[entry.sourceType] = (counts[entry.sourceType] ?? 0) + 1;
   }
   return counts;
+}
+
+function formatIntroList(labels: string[]) {
+  if (labels.length === 0) return null;
+  if (labels.length === 1) return `Today centers on ${labels[0]}.`;
+  if (labels.length === 2) return `Today is mostly about ${labels[0]} and ${labels[1]}.`;
+  return `Today is mostly about ${labels.slice(0, -1).join(", ")}, and ${labels[labels.length - 1]}.`;
+}
+
+function workspaceBriefingIntro(items: WorkspaceBriefingItem[]) {
+  const counts = new Map<WorkspaceBriefingSourceType, { count: number; firstIndex: number }>();
+  for (const [index, item] of items.entries()) {
+    if (item.kind === "QUIET") continue;
+    const current = counts.get(item.kind);
+    counts.set(item.kind, {
+      count: (current?.count ?? 0) + 1,
+      firstIndex: current?.firstIndex ?? index,
+    });
+  }
+
+  const labels = [...counts.entries()]
+    .sort((a, b) => b[1].count - a[1].count || a[1].firstIndex - b[1].firstIndex)
+    .slice(0, 3)
+    .map(([kind]) => WORKSPACE_BRIEFING_SOURCE_INTRO_LABELS[kind] ?? workspaceBriefingSourceLabel(kind).toLowerCase());
+
+  return formatIntroList(labels);
 }
 
 function quietBriefingItem(date: Date): WorkspaceBriefingItem {
@@ -285,7 +381,7 @@ export function buildWorkspaceBriefingFromCandidates(params: {
   return {
     title: params.title,
     introMd: sourceKinds
-      ? `This briefing prioritizes the highest-signal workspace activity from ${sourceKinds}.`
+      ? workspaceBriefingIntro(items)
       : "This was a quiet period. The briefing stays short because no major new operating signals were found.",
     period: params.period,
     dateKey: params.dateKey,

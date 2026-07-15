@@ -113,6 +113,156 @@ describe("workspace briefing", () => {
     expect(briefing.sourceRefs).toContainEqual(expect.objectContaining({ type: "ACTION", id: "action-1" }));
   });
 
+  it("keeps stale open proposals from outranking newer active tensions", async () => {
+    const { buildWorkspaceBriefingFromCandidates } = await import("./workspace-briefing");
+    const briefing = buildWorkspaceBriefingFromCandidates({
+      workspaceId: "ws-1",
+      period: "DAILY",
+      dateKey: "2026-04-30",
+      title: "Daily Workspace Briefing - 2026-04-30",
+      generatedAt: new Date("2026-04-30T12:00:00.000Z"),
+      candidates: [
+        baseCandidate({
+          sourceType: "PROPOSAL",
+          sourceId: "proposal-old",
+          title: "Old open proposal",
+          summaryMd: "An old proposal remains open without recent movement.",
+          href: "/workspaces/ws-1/proposals/proposal-old",
+          occurredAt: new Date("2026-03-20T12:00:00.000Z"),
+          updatedAt: new Date("2026-03-20T12:00:00.000Z"),
+          status: "OPEN",
+          strategicScore: 3,
+          actionabilityScore: 3,
+          evidenceScore: 2,
+          sourceRefs: [{ type: "PROPOSAL", id: "proposal-old", label: "Old open proposal", href: "/workspaces/ws-1/proposals/proposal-old" }],
+        }),
+        baseCandidate({
+          sourceType: "TENSION",
+          sourceId: "tension-new",
+          title: "New implementation blocker",
+          summaryMd: "A fresh tension is blocking the implementation decision.",
+          href: "/workspaces/ws-1/tensions/tension-new",
+          occurredAt: new Date("2026-04-30T09:00:00.000Z"),
+          updatedAt: new Date("2026-04-30T09:00:00.000Z"),
+          status: "OPEN",
+          strategicScore: 2,
+          actionabilityScore: 3,
+          evidenceScore: 2,
+          sourceRefs: [{ type: "TENSION", id: "tension-new", label: "New implementation blocker", href: "/workspaces/ws-1/tensions/tension-new" }],
+        }),
+      ],
+    });
+
+    expect(briefing.items[0]).toEqual(expect.objectContaining({
+      kind: "TENSION",
+      title: "New implementation blocker",
+      prominence: "lead",
+    }));
+    expect(briefing.items.map((item) => item.title)).toContain("Old open proposal");
+  });
+
+  it("keeps stale strategic work visible without making it the lead", async () => {
+    const { buildWorkspaceBriefingFromCandidates } = await import("./workspace-briefing");
+    const briefing = buildWorkspaceBriefingFromCandidates({
+      workspaceId: "ws-1",
+      period: "DAILY",
+      dateKey: "2026-04-30",
+      title: "Daily Workspace Briefing - 2026-04-30",
+      generatedAt: new Date("2026-04-30T12:00:00.000Z"),
+      candidates: [
+        baseCandidate({
+          sourceType: "ACTION",
+          sourceId: "action-urgent",
+          title: "Confirm launch owner",
+          summaryMd: "Ownership must be confirmed before launch.",
+          href: "/workspaces/ws-1/actions/action-urgent",
+          occurredAt: new Date("2026-04-30T10:00:00.000Z"),
+          updatedAt: new Date("2026-04-30T10:00:00.000Z"),
+          status: "OPEN",
+          priority: 3,
+          dueAt: new Date("2026-04-29T12:00:00.000Z"),
+          strategicScore: 2,
+          actionabilityScore: 4,
+          evidenceScore: 2,
+          sourceRefs: [{ type: "ACTION", id: "action-urgent", label: "Confirm launch owner", href: "/workspaces/ws-1/actions/action-urgent" }],
+        }),
+        baseCandidate({
+          sourceType: "PROPOSAL",
+          sourceId: "proposal-strategic",
+          title: "Strategic market entry proposal",
+          summaryMd: "A strategic proposal remains open and still matters.",
+          href: "/workspaces/ws-1/proposals/proposal-strategic",
+          occurredAt: new Date("2026-03-10T12:00:00.000Z"),
+          updatedAt: new Date("2026-03-10T12:00:00.000Z"),
+          status: "OPEN",
+          priority: 3,
+          strategicScore: 3,
+          actionabilityScore: 3,
+          evidenceScore: 2,
+          sourceRefs: [{ type: "PROPOSAL", id: "proposal-strategic", label: "Strategic market entry proposal", href: "/workspaces/ws-1/proposals/proposal-strategic" }],
+        }),
+      ],
+    });
+
+    expect(briefing.items[0].title).toBe("Confirm launch owner");
+    expect(briefing.items[1]).toEqual(expect.objectContaining({
+      title: "Strategic market entry proposal",
+      prominence: "standard",
+    }));
+  });
+
+  it("uses natural intro text instead of mechanical source counts", async () => {
+    const { buildWorkspaceBriefingFromCandidates } = await import("./workspace-briefing");
+    const briefing = buildWorkspaceBriefingFromCandidates({
+      workspaceId: "ws-1",
+      period: "DAILY",
+      dateKey: "2026-04-30",
+      title: "Daily Workspace Briefing - 2026-04-30",
+      generatedAt: new Date("2026-04-30T12:00:00.000Z"),
+      candidates: [
+        baseCandidate({
+          sourceType: "PROPOSAL",
+          sourceId: "proposal-1",
+          title: "Proposal update",
+          status: "OPEN",
+          strategicScore: 3,
+          actionabilityScore: 3,
+          sourceRefs: [{ type: "PROPOSAL", id: "proposal-1", label: "Proposal update", href: "/workspaces/ws-1/proposals/proposal-1" }],
+        }),
+        baseCandidate({
+          sourceType: "TENSION",
+          sourceId: "tension-1",
+          title: "Active tension",
+          status: "OPEN",
+          strategicScore: 2,
+          actionabilityScore: 3,
+          sourceRefs: [{ type: "TENSION", id: "tension-1", label: "Active tension", href: "/workspaces/ws-1/tensions/tension-1" }],
+        }),
+        baseCandidate({
+          sourceType: "GOAL",
+          sourceId: "goal-1",
+          title: "Strategic goal",
+          strategicScore: 4,
+          actionabilityScore: 1,
+          sourceRefs: [{ type: "GOAL", id: "goal-1", label: "Strategic goal", href: "/workspaces/ws-1/goals" }],
+        }),
+      ],
+    });
+
+    expect(briefing.introMd).toContain("Today is mostly about");
+    expect(briefing.introMd).toContain("open proposals");
+    expect(briefing.introMd).toContain("active tensions");
+    expect(briefing.introMd).not.toContain("1 proposal");
+  });
+
+  it("formats source labels for homepage display", async () => {
+    const { workspaceBriefingSourceLabel } = await import("./workspace-briefing");
+
+    expect(workspaceBriefingSourceLabel("ADVICE_REQUEST")).toBe("Advice request");
+    expect(workspaceBriefingSourceLabel("BRAIN_ARTICLE")).toBe("Knowledge");
+    expect(workspaceBriefingSourceLabel("custom_source")).toBe("Custom Source");
+  });
+
   it("collects only public workspace work items and requires membership when an actor is supplied", async () => {
     const { collectWorkspaceBriefingCandidates } = await import("./workspace-briefing");
 

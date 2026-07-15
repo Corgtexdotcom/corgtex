@@ -1,9 +1,12 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  capDashboardUnreadNotificationCount,
+  isDashboardUnreadNotificationCountCapped,
   selectDashboardActionItems,
   selectDashboardFeedItems,
   selectDashboardKnowledgeArticles,
+  selectDashboardNotificationPreviewLimit,
   selectDashboardOpenProposals,
   selectLatestMeetingRecap,
 } from "./dashboard-briefing";
@@ -383,5 +386,19 @@ describe("dashboard work rail selectors", () => {
     ]);
 
     expect(selected.map((proposal) => proposal.id)).toEqual(["open-public"]);
+  });
+});
+
+describe("dashboard briefing presentation helpers", () => {
+  it("caps large unread notification counts for the homepage summary", () => {
+    expect(capDashboardUnreadNotificationCount(133)).toBe(99);
+    expect(isDashboardUnreadNotificationCountCapped(133)).toBe(true);
+    expect(capDashboardUnreadNotificationCount(12)).toBe(12);
+    expect(isDashboardUnreadNotificationCountCapped(12)).toBe(false);
+  });
+
+  it("shows fewer notification previews when the unread pile is large", () => {
+    expect(selectDashboardNotificationPreviewLimit(133)).toBe(2);
+    expect(selectDashboardNotificationPreviewLimit(20)).toBe(3);
   });
 });
