@@ -267,6 +267,8 @@ export function getWorkspaceAddActions(context: WorkspaceAddActionContext): Work
       return [action("tension")];
     case "proposals":
       return [action("proposal")];
+    case "agreements":
+      return [action("proposal"), action("article")];
     case "goals":
       return context.featureFlags.GOALS
         ? [
