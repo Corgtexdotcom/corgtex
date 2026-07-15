@@ -248,6 +248,14 @@ function isClosedCandidateStatus(status: string | null | undefined) {
     || normalized === "DRAFT";
 }
 
+function isResolvedCandidateStatus(status: string | null | undefined) {
+  const normalized = status?.trim().toUpperCase();
+  return normalized === "RESOLVED"
+    || normalized === "CLOSED"
+    || normalized === "DONE"
+    || normalized === "COMPLETED";
+}
+
 function highSignalActionableText(candidate: WorkspaceBriefingCandidate) {
   return `${candidate.title} ${candidate.summaryMd ?? ""}`.toLowerCase();
 }
@@ -263,6 +271,19 @@ function recentActionableSignalBoost(candidate: WorkspaceBriefingCandidate, now:
   const isDecisionShaping = /\b(block|blocked|blocker|critical|urgent|risk|assumption|decision|alignment|review|stuck|waiting)\b/.test(text);
   const recentBase = ageDays <= 1 ? 3 : 2;
   return recentBase + (isDecisionShaping ? 2 : 0);
+}
+
+function recentClosureSignalBoost(candidate: WorkspaceBriefingCandidate, now: Date) {
+  if (candidate.sourceType !== "TENSION" && candidate.sourceType !== "PROPOSAL" && candidate.sourceType !== "ADVICE_REQUEST") return 0;
+  if (!isResolvedCandidateStatus(candidate.status)) return 0;
+
+  const ageDays = candidateAgeDays(candidate, now);
+  if (ageDays > 2) return 0;
+
+  const text = highSignalActionableText(candidate);
+  const isDecisionShaping = /\b(block|blocked|blocker|critical|urgent|risk|assumption|decision|alignment|review|resolved|resolution)\b/.test(text);
+  const recentBase = ageDays <= 1 ? 2 : 1;
+  return recentBase + (isDecisionShaping ? 1 : 0);
 }
 
 export function scoreWorkspaceBriefingCandidate(candidate: WorkspaceBriefingCandidate, now = new Date()) {
@@ -281,6 +302,7 @@ export function scoreWorkspaceBriefingCandidate(candidate: WorkspaceBriefingCand
     + statusBoost
     + Math.min(3, Math.max(0, candidate.priority ?? 0))
     + recentActionableSignalBoost(candidate, now)
+    + recentClosureSignalBoost(candidate, now)
     - staleOpenWorkPenalty(candidate, now)
     - routineGoalPenalty(candidate, now)
   );

@@ -285,6 +285,53 @@ describe("workspace briefing", () => {
     expect(activeAdviceScore).toBeGreaterThan(draftTensionScore);
   });
 
+  it("keeps fresh resolved decision context above stale reference goals", async () => {
+    const { buildWorkspaceBriefingFromCandidates } = await import("./workspace-briefing");
+    const briefing = buildWorkspaceBriefingFromCandidates({
+      workspaceId: "ws-1",
+      period: "DAILY",
+      dateKey: "2026-04-30",
+      title: "Daily Workspace Briefing - 2026-04-30",
+      generatedAt: new Date("2026-04-30T12:00:00.000Z"),
+      candidates: [
+        baseCandidate({
+          sourceType: "GOAL",
+          sourceId: "goal-old",
+          title: "Maintain strategic glossary",
+          summaryMd: "0% complete. This is stable reference context.",
+          href: "/workspaces/ws-1/goals/goal-old",
+          occurredAt: new Date("2026-03-10T12:00:00.000Z"),
+          updatedAt: new Date("2026-03-10T12:00:00.000Z"),
+          status: "ACTIVE",
+          strategicScore: 4,
+          actionabilityScore: 1,
+          evidenceScore: 2,
+          sourceRefs: [{ type: "GOAL", id: "goal-old", label: "Maintain strategic glossary", href: "/workspaces/ws-1/goals/goal-old" }],
+        }),
+        baseCandidate({
+          sourceType: "TENSION",
+          sourceId: "tension-resolved",
+          title: "Critical assumptions not being reviewed in weekly meetings",
+          summaryMd: "Critical assumptions were reviewed and the tension was resolved today.",
+          href: "/workspaces/ws-1/tensions/tension-resolved",
+          occurredAt: new Date("2026-04-30T10:00:00.000Z"),
+          updatedAt: new Date("2026-04-30T10:00:00.000Z"),
+          status: "RESOLVED",
+          strategicScore: 0,
+          actionabilityScore: 1,
+          evidenceScore: 2,
+          sourceRefs: [{ type: "TENSION", id: "tension-resolved", label: "Critical assumptions not being reviewed in weekly meetings", href: "/workspaces/ws-1/tensions/tension-resolved" }],
+        }),
+      ],
+    });
+
+    expect(briefing.items[0]).toEqual(expect.objectContaining({
+      kind: "TENSION",
+      title: "Critical assumptions not being reviewed in weekly meetings",
+      prominence: "lead",
+    }));
+  });
+
   it("applies boosted candidate ranking to digest-derived briefing order", async () => {
     const { buildWorkspaceBriefingFromDigest } = await import("./workspace-briefing");
     const briefing = buildWorkspaceBriefingFromDigest({
