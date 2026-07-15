@@ -236,6 +236,35 @@ function routineGoalPenalty(candidate: WorkspaceBriefingCandidate, now: Date) {
   return candidate.summaryMd?.trim().startsWith("0% complete") ? 2 : 0;
 }
 
+function isClosedCandidateStatus(status: string | null | undefined) {
+  const normalized = status?.trim().toUpperCase();
+  return normalized === "RESOLVED"
+    || normalized === "CLOSED"
+    || normalized === "DONE"
+    || normalized === "COMPLETED"
+    || normalized === "CANCELED"
+    || normalized === "CANCELLED"
+    || normalized === "ARCHIVED"
+    || normalized === "DRAFT";
+}
+
+function highSignalActionableText(candidate: WorkspaceBriefingCandidate) {
+  return `${candidate.title} ${candidate.summaryMd ?? ""}`.toLowerCase();
+}
+
+function recentActionableSignalBoost(candidate: WorkspaceBriefingCandidate, now: Date) {
+  if (candidate.sourceType !== "TENSION" && candidate.sourceType !== "ACTION" && candidate.sourceType !== "ADVICE_REQUEST") return 0;
+  if (isClosedCandidateStatus(candidate.status)) return 0;
+
+  const ageDays = candidateAgeDays(candidate, now);
+  if (ageDays > 2) return 0;
+
+  const text = highSignalActionableText(candidate);
+  const isDecisionShaping = /\b(block|blocked|blocker|critical|urgent|risk|assumption|decision|alignment|review|stuck|waiting)\b/.test(text);
+  const recentBase = ageDays <= 1 ? 3 : 2;
+  return recentBase + (isDecisionShaping ? 2 : 0);
+}
+
 export function scoreWorkspaceBriefingCandidate(candidate: WorkspaceBriefingCandidate, now = new Date()) {
   const statusBoost = candidate.status === "OPEN" || candidate.status === "IN_PROGRESS" || candidate.status === "ACTIVE"
     ? 2
@@ -251,6 +280,7 @@ export function scoreWorkspaceBriefingCandidate(candidate: WorkspaceBriefingCand
     + candidate.evidenceScore
     + statusBoost
     + Math.min(3, Math.max(0, candidate.priority ?? 0))
+    + recentActionableSignalBoost(candidate, now)
     - staleOpenWorkPenalty(candidate, now)
     - routineGoalPenalty(candidate, now)
   );
@@ -460,23 +490,41 @@ export function buildWorkspaceBriefingFromDigest(params: {
   const generatedAt = params.generatedAt ?? new Date();
   const rankedCandidates = rankWorkspaceBriefingCandidates(params.candidates, generatedAt);
   const used = new Set<string>();
-  const items = params.digest.sections.flatMap((section) => (
+  const digestEntries = params.digest.sections.flatMap((section, sectionIndex) => (
     section.items.map((rawItem, itemIndex) => {
       const source = pickCandidateForSection(section.id, rawItem, rankedCandidates, used);
       const score = source ? scoreWorkspaceBriefingCandidate(source, generatedAt) : Math.max(4, 8 - itemIndex);
       return {
+        digestIndex: sectionIndex * 100 + itemIndex,
         kind: source?.sourceType ?? sectionKind(section.id),
         title: source?.title ?? section.title,
-        summaryMd: compactText(rawItem, itemIndex === 0 ? 900 : 560) ?? rawItem,
+        rawItem,
         whyItMattersMd: source ? whyCandidateMatters(source) : `This was selected for the ${section.title.toLowerCase()} briefing section.`,
-        prominence: prominenceFor(score, itemIndex),
         sourceRefs: source?.sourceRefs ?? [],
         href: source?.href ?? null,
-        occurredAt: (source?.occurredAt ?? generatedAt).toISOString(),
+        occurredAt: source?.occurredAt ?? generatedAt,
         confidence: source ? Math.max(0.62, Math.min(0.98, 0.6 + score / 25)) : 0.72,
-      } satisfies WorkspaceBriefingItem;
+        score,
+      };
     })
   ));
+  const items = digestEntries
+    .sort((a, b) => (
+      b.score - a.score
+      || b.occurredAt.getTime() - a.occurredAt.getTime()
+      || a.digestIndex - b.digestIndex
+    ))
+    .map((entry, itemIndex) => ({
+      kind: entry.kind,
+      title: entry.title,
+      summaryMd: compactText(entry.rawItem, itemIndex === 0 ? 900 : 560) ?? entry.rawItem,
+      whyItMattersMd: entry.whyItMattersMd,
+      prominence: prominenceFor(entry.score, itemIndex),
+      sourceRefs: entry.sourceRefs,
+      href: entry.href,
+      occurredAt: entry.occurredAt.toISOString(),
+      confidence: entry.confidence,
+    }) satisfies WorkspaceBriefingItem);
 
   if (items.length === 0) {
     return buildWorkspaceBriefingFromCandidates({
