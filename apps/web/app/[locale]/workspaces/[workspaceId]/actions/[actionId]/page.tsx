@@ -9,6 +9,7 @@ import { UnavailableItemStatus } from "@/lib/components/UnavailableItemStatus";
 import { ExternalResourceAttachForm, ExternalResourceCards } from "@/lib/components/ExternalResourceCards";
 import { DeliberationComposer } from "@/lib/components/DeliberationComposer";
 import { DeliberationThread } from "@/lib/components/DeliberationThread";
+import { WorkItemConversationSurface } from "@/lib/components/WorkItemConversation";
 import { getDeliberationTargets } from "@/lib/deliberation-targets";
 import { canOpenPrivateDraft } from "@/lib/governance-open-guards";
 import { attachActionExternalResourceAction, deleteActionAction, postActionDeliberationAction, publishActionAction, resolveActionDeliberationAction, returnActionToDraftAction, updateActionAction, updateActionDeliberationAction } from "../../actions";
@@ -268,8 +269,7 @@ export default async function ActionDetailPage({
         </section>
       )}
 
-      <section className="ws-section" style={{ marginBottom: 48 }}>
-        <h2 className="nr-section-header">{t("sectionDiscussion")}</h2>
+      <WorkItemConversationSurface title={t("sectionDiscussion")}>
         <DeliberationThread
           entries={deliberationEntries.map((entry) => ({
             id: entry.id,
@@ -293,21 +293,20 @@ export default async function ActionDetailPage({
           resolveAction={resolveActionDeliberationAction}
           updateAction={updateActionDeliberationAction}
           hiddenFields={{ workspaceId, parentId: actionId }}
+          emptyMessage={t("discussionEmpty")}
         />
         {!isArchived && (action.status === "OPEN" || action.status === "IN_PROGRESS") && (
-          <div style={{ marginTop: 24 }}>
-            <DeliberationComposer
-              postAction={postActionDeliberationAction}
-              hiddenFields={{ workspaceId, parentId: actionId }}
-              targetOptions={targetOptions}
-              entryTypes={[
-                { value: "REACTION", label: t("entryReaction"), variant: "secondary" },
-                { value: "OBJECTION", label: t("entryObjection"), variant: "danger" },
-              ]}
-            />
-          </div>
+          <DeliberationComposer
+            postAction={postActionDeliberationAction}
+            hiddenFields={{ workspaceId, parentId: actionId }}
+            targetOptions={targetOptions}
+            entryTypes={[
+              { value: "REACTION", label: t("entryReaction"), variant: "secondary" },
+              { value: "OBJECTION", label: t("entryObjection"), variant: "danger" },
+            ]}
+          />
         )}
-      </section>
+      </WorkItemConversationSurface>
 
       {action.status === "COMPLETED" && action.completedVia && (
         <section className="ws-section" style={{ marginBottom: 48 }}>

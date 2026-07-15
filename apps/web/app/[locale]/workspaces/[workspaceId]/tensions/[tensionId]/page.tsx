@@ -12,6 +12,7 @@ import { ExternalResourceAttachForm, ExternalResourceCards } from "@/lib/compone
 import { DeliberationThread } from "@/lib/components/DeliberationThread";
 import { DeliberationComposer } from "@/lib/components/DeliberationComposer";
 import { AdviceRequestForm } from "@/lib/components/AdviceRequestForm";
+import { WorkItemConversationSurface, WorkItemRequestList } from "@/lib/components/WorkItemConversation";
 import { getDeliberationTargets } from "@/lib/deliberation-targets";
 import { canOpenPrivateDraft } from "@/lib/governance-open-guards";
 import { attachTensionExternalResourceAction, createProposalFromTensionAction, postTensionDeliberationAction, publishTensionAction, requestTensionInputAction, returnTensionToDraftAction, resolveTensionDeliberationAction, updateTensionAction, updateTensionDeliberationAction } from "../../actions";
@@ -183,6 +184,37 @@ export default async function TensionDetailPage({
     request.deadlineAt ? t("inputCopyableDeadline", { date: dateTimeLabel(request.deadlineAt) ?? "" }) : null,
     t("inputCopyableLink", { url: tensionUrl }),
   ].filter(Boolean).join("\n\n");
+  const discussionEntries = mappedEntries.filter((entry) => !entry.adviceRequestId);
+  const inputRequestCards = inputRequests.map((request) => {
+    const linkedReplies = mappedEntries.filter((entry) => entry.adviceRequestId === request.id);
+    return {
+      id: request.id,
+      audienceLabel: requestAudienceLabel(request),
+      channelLabel: channelLabel(request.preferredChannel),
+      deadlineLabel: request.deadlineAt ? t("inputDeadlineTag", { date: dateTimeLabel(request.deadlineAt) ?? "" }) : null,
+      reminderLabel: request.reminderAt ? t("inputReminderMeta", { date: dateTimeLabel(request.reminderAt) ?? "" }) : null,
+      requestedByLabel: t("inputRequestedByMeta", { name: request.requestedBy.displayName || request.requestedBy.email }),
+      messageMd: request.messageMd,
+      copyableMessage: copyableRequestMessage(request),
+      linkedReplies: linkedReplies.map((reply) => ({
+        id: reply.id,
+        authorName: reply.authorName,
+        createdAtLabel: dateTimeLabel(reply.createdAt),
+        bodyMd: reply.bodyMd,
+      })),
+      replyForm: !isArchived && tension.status === "OPEN" ? (
+        <DeliberationComposer
+          postAction={postTensionDeliberationAction}
+          hiddenFields={{ workspaceId, parentId: tensionId, adviceRequestId: request.id }}
+          targetOptions={targetOptions}
+          entryTypes={[
+            { value: "REACTION", label: t("entryReaction"), variant: "secondary" },
+            { value: "OBJECTION", label: t("entryObjection"), variant: "danger" },
+          ]}
+        />
+      ) : null,
+    };
+  });
 
   return (
     <>
@@ -346,72 +378,18 @@ export default async function TensionDetailPage({
       )}
 
       {(canRequestInput || inputRequests.length > 0) && (
-        <section className="ws-section" style={{ marginBottom: 48 }}>
-          <h2 className="nr-section-header">{t("sectionInputRequests")}</h2>
-          {inputRequests.length > 0 && (
-            <div className="stack" style={{ marginBottom: canRequestInput ? 24 : 0 }}>
-              {inputRequests.map((request) => {
-                const linkedReplies = mappedEntries.filter((entry) => entry.adviceRequestId === request.id);
-                return (
-                  <div key={request.id} className="nr-item">
-                    <div className="row" style={{ alignItems: "center", gap: 8, marginBottom: 8 }}>
-                      <strong>{requestAudienceLabel(request)}</strong>
-                      <span className="tag info">{channelLabel(request.preferredChannel)}</span>
-                      {request.deadlineAt && <span className="tag warning">{t("inputDeadlineTag", { date: dateTimeLabel(request.deadlineAt) ?? "" })}</span>}
-                    </div>
-                    <div className="nr-item-meta" style={{ marginBottom: 12 }}>
-                      {t("inputRequestedByMeta", { name: request.requestedBy.displayName || request.requestedBy.email })}
-                      {request.reminderAt ? ` · ${t("inputReminderMeta", { date: dateTimeLabel(request.reminderAt) ?? "" })}` : ""}
-                    </div>
-                    <MarkdownRenderer markdown={request.messageMd} variant="document" />
-                    <details style={{ marginTop: 16 }}>
-                      <summary className="secondary small nr-hide-marker" style={{ cursor: "pointer", display: "inline-block" }}>{t("inputCopyableMessage")}</summary>
-                      <textarea
-                        readOnly
-                        rows={6}
-                        value={copyableRequestMessage(request)}
-                        style={{ marginTop: 8, width: "100%" }}
-                      />
-                    </details>
-                    {linkedReplies.length > 0 && (
-                      <div style={{ marginTop: 16 }}>
-                        <strong>{t("inputLinkedReplies", { count: linkedReplies.length })}</strong>
-                        <div className="stack" style={{ marginTop: 8, gap: 0 }}>
-                          {linkedReplies.map((reply) => (
-                            <div key={reply.id} style={{ borderTop: "1px solid var(--line)", padding: "10px 0" }}>
-                              <div className="nr-item-meta" style={{ marginBottom: 6 }}>
-                                {reply.authorName} · {dateTimeLabel(reply.createdAt)}
-                              </div>
-                              {reply.bodyMd && <MarkdownRenderer markdown={reply.bodyMd} variant="document" />}
-                            </div>
-                          ))}
-                        </div>
-                      </div>
-                    )}
-                    {!isArchived && tension.status === "OPEN" && (
-                      <details style={{ marginTop: 16 }}>
-                        <summary className="secondary small nr-hide-marker" style={{ cursor: "pointer", display: "inline-block" }}>{t("btnReplyToInputRequest")}</summary>
-                        <div style={{ marginTop: 12 }}>
-                          <DeliberationComposer
-                            postAction={postTensionDeliberationAction}
-                            hiddenFields={{ workspaceId, parentId: tensionId, adviceRequestId: request.id }}
-                            targetOptions={targetOptions}
-                            entryTypes={[
-                              { value: "REACTION", label: t("entryReaction"), variant: "secondary" },
-                              { value: "OBJECTION", label: t("entryObjection"), variant: "danger" },
-                            ]}
-                          />
-                        </div>
-                      </details>
-                    )}
-                  </div>
-                );
-              })}
-            </div>
-          )}
+        <WorkItemConversationSurface title={t("sectionInputRequests")} className="work-request-surface">
+          <WorkItemRequestList
+            requests={inputRequestCards}
+            labels={{
+              copyableMessage: t("inputCopyableMessage"),
+              linkedReplies: (count) => t("inputLinkedReplies", { count }),
+              replyToRequest: t("btnReplyToInputRequest"),
+            }}
+          />
           {canRequestInput && (
             <details open={inputRequests.length === 0}>
-              <summary className="secondary small nr-hide-marker" style={{ cursor: "pointer", display: "inline-block" }}>{t("btnRequestInput")}</summary>
+              <summary className="work-request-action nr-hide-marker">{t("btnRequestInput")}</summary>
               <AdviceRequestForm
                 action={requestTensionInputAction}
                 hiddenFields={{ workspaceId, tensionId: tension.id }}
@@ -456,13 +434,12 @@ export default async function TensionDetailPage({
               />
             </details>
           )}
-        </section>
+        </WorkItemConversationSurface>
       )}
 
-      <section className="ws-section" style={{ marginBottom: 48 }}>
-        <h2 className="nr-section-header">{t("sectionDiscussion")}</h2>
+      <WorkItemConversationSurface title={t("sectionDiscussion")}>
         <DeliberationThread
-          entries={mappedEntries.map((entry) => ({
+          entries={discussionEntries.map((entry) => ({
             ...entry,
             canEdit: canManageEntry(entry),
             canResolve: canManageEntry(entry),
@@ -471,9 +448,9 @@ export default async function TensionDetailPage({
           resolveAction={resolveTensionDeliberationAction}
           updateAction={updateTensionDeliberationAction}
           hiddenFields={{ workspaceId, parentId: tensionId }}
+          emptyMessage={t("discussionEmpty")}
         />
         {!isArchived && tension.status === "OPEN" && (
-        <div style={{ marginTop: 24 }}>
           <DeliberationComposer
             postAction={postTensionDeliberationAction}
             hiddenFields={{ workspaceId, parentId: tensionId }}
@@ -483,9 +460,8 @@ export default async function TensionDetailPage({
               { value: "OBJECTION", label: t("entryObjection"), variant: "danger" },
             ]}
           />
-        </div>
         )}
-      </section>
+      </WorkItemConversationSurface>
     </>
   );
 }

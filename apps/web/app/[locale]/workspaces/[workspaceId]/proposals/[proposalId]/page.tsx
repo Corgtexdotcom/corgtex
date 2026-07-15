@@ -10,6 +10,7 @@ import { ExternalResourceAttachForm, ExternalResourceCards } from "@/lib/compone
 import { DeliberationThread } from "@/lib/components/DeliberationThread";
 import { DeliberationComposer } from "@/lib/components/DeliberationComposer";
 import { AdviceRequestForm } from "@/lib/components/AdviceRequestForm";
+import { WorkItemConversationSurface, WorkItemRequestList } from "@/lib/components/WorkItemConversation";
 import { getDeliberationTargets } from "@/lib/deliberation-targets";
 import { canOpenPrivateDraft } from "@/lib/governance-open-guards";
 import { attachProposalExternalResourceAction, postDeliberationEntryAction, requestProposalAdviceAction, resolveDeliberationEntryAction, resolveProposalAction, returnProposalToDraftAction, submitProposalAction, updateDeliberationEntryAction, updateProposalAction } from "../actions";
@@ -189,6 +190,37 @@ export default async function ProposalDetailPage({
     request.deadlineAt ? t("adviceCopyableDeadline", { date: dateTimeLabel(request.deadlineAt) ?? "" }) : null,
     t("adviceCopyableLink", { url: proposalUrl }),
   ].filter(Boolean).join("\n\n");
+  const discussionEntries = mappedEntries.filter((entry) => !entry.adviceRequestId);
+  const adviceRequestCards = adviceRequests.map((request) => {
+    const linkedReplies = mappedEntries.filter((entry) => entry.adviceRequestId === request.id);
+    return {
+      id: request.id,
+      audienceLabel: requestAudienceLabel(request),
+      channelLabel: channelLabel(request.preferredChannel),
+      deadlineLabel: request.deadlineAt ? t("adviceDeadlineTag", { date: dateTimeLabel(request.deadlineAt) ?? "" }) : null,
+      reminderLabel: request.reminderAt ? t("adviceReminderMeta", { date: dateTimeLabel(request.reminderAt) ?? "" }) : null,
+      requestedByLabel: t("adviceRequestedByMeta", { name: request.requestedBy.displayName || request.requestedBy.email }),
+      messageMd: request.messageMd,
+      copyableMessage: copyableRequestMessage(request),
+      linkedReplies: linkedReplies.map((reply) => ({
+        id: reply.id,
+        authorName: reply.authorName,
+        createdAtLabel: dateTimeLabel(reply.createdAt),
+        bodyMd: reply.bodyMd,
+      })),
+      replyForm: !isArchived && proposal.status === "OPEN" ? (
+        <DeliberationComposer
+          postAction={postDeliberationEntryAction}
+          hiddenFields={{ workspaceId, proposalId, adviceRequestId: request.id }}
+          targetOptions={targetOptions}
+          entryTypes={[
+            { value: "REACTION", label: t("entryReaction"), variant: "secondary" },
+            { value: "OBJECTION", label: t("entryObjection"), variant: "danger" },
+          ]}
+        />
+      ) : null,
+    };
+  });
 
   return (
     <>
@@ -280,72 +312,18 @@ export default async function ProposalDetailPage({
           <hr className="nr-divider nr-divider-lg" />
 
           {(canRequestAdvice || adviceRequests.length > 0) && (
-            <section style={{ marginBottom: 40 }}>
-              <h3 className="font-playfair font-semibold mb-6 text-[1.4rem]">{t("sectionAdviceRequests")}</h3>
-              {adviceRequests.length > 0 && (
-                <div className="stack" style={{ marginBottom: canRequestAdvice ? 24 : 0 }}>
-                  {adviceRequests.map((request) => {
-                    const linkedReplies = mappedEntries.filter((entry) => entry.adviceRequestId === request.id);
-                    return (
-                      <div key={request.id} className="nr-item">
-                        <div className="row" style={{ alignItems: "center", gap: 8, marginBottom: 8 }}>
-                          <strong>{requestAudienceLabel(request)}</strong>
-                          <span className="tag info">{channelLabel(request.preferredChannel)}</span>
-                          {request.deadlineAt && <span className="tag warning">{t("adviceDeadlineTag", { date: dateTimeLabel(request.deadlineAt) ?? "" })}</span>}
-                        </div>
-                        <div className="nr-item-meta" style={{ marginBottom: 12 }}>
-                          {t("adviceRequestedByMeta", { name: request.requestedBy.displayName || request.requestedBy.email })}
-                          {request.reminderAt ? ` · ${t("adviceReminderMeta", { date: dateTimeLabel(request.reminderAt) ?? "" })}` : ""}
-                        </div>
-                        <MarkdownRenderer markdown={request.messageMd} variant="document" />
-                        <details style={{ marginTop: 16 }}>
-                          <summary className="secondary small nr-hide-marker" style={{ cursor: "pointer", display: "inline-block" }}>{t("adviceCopyableMessage")}</summary>
-                          <textarea
-                            readOnly
-                            rows={6}
-                            value={copyableRequestMessage(request)}
-                            style={{ marginTop: 8, width: "100%" }}
-                          />
-                        </details>
-                        {linkedReplies.length > 0 && (
-                          <div style={{ marginTop: 16 }}>
-                            <strong>{t("adviceLinkedReplies", { count: linkedReplies.length })}</strong>
-                            <div className="stack" style={{ marginTop: 8, gap: 0 }}>
-                              {linkedReplies.map((reply) => (
-                                <div key={reply.id} style={{ borderTop: "1px solid var(--line)", padding: "10px 0" }}>
-                                  <div className="nr-item-meta" style={{ marginBottom: 6 }}>
-                                    {reply.authorName} · {dateTimeLabel(reply.createdAt)}
-                                  </div>
-                                  {reply.bodyMd && <MarkdownRenderer markdown={reply.bodyMd} variant="document" />}
-                                </div>
-                              ))}
-                            </div>
-                          </div>
-                        )}
-                        {!isArchived && proposal.status === "OPEN" && (
-                          <details style={{ marginTop: 16 }}>
-                            <summary className="secondary small nr-hide-marker" style={{ cursor: "pointer", display: "inline-block" }}>{t("btnReplyToAdviceRequest")}</summary>
-                            <div style={{ marginTop: 12 }}>
-                              <DeliberationComposer
-                                postAction={postDeliberationEntryAction}
-                                hiddenFields={{ workspaceId, proposalId, adviceRequestId: request.id }}
-                                targetOptions={targetOptions}
-                                entryTypes={[
-                                  { value: "REACTION", label: t("entryReaction"), variant: "secondary" },
-                                  { value: "OBJECTION", label: t("entryObjection"), variant: "danger" },
-                                ]}
-                              />
-                            </div>
-                          </details>
-                        )}
-                      </div>
-                    );
-                  })}
-                </div>
-              )}
+            <WorkItemConversationSurface title={t("sectionAdviceRequests")} className="work-request-surface">
+              <WorkItemRequestList
+                requests={adviceRequestCards}
+                labels={{
+                  copyableMessage: t("adviceCopyableMessage"),
+                  linkedReplies: (count) => t("adviceLinkedReplies", { count }),
+                  replyToRequest: t("btnReplyToAdviceRequest"),
+                }}
+              />
               {canRequestAdvice && (
                 <details open={adviceRequests.length === 0}>
-                  <summary className="secondary small nr-hide-marker" style={{ cursor: "pointer", display: "inline-block" }}>{t("btnRequestAdvice")}</summary>
+                  <summary className="work-request-action nr-hide-marker">{t("btnRequestAdvice")}</summary>
                   <AdviceRequestForm
                     action={requestProposalAdviceAction}
                     hiddenFields={{ workspaceId, proposalId: proposal.id }}
@@ -390,34 +368,35 @@ export default async function ProposalDetailPage({
                   />
                 </details>
               )}
-            </section>
+            </WorkItemConversationSurface>
           )}
 
-          <h3 className="font-playfair font-semibold mb-6 text-[1.4rem]">{t("sectionDeliberation")}</h3>
-          <DeliberationThread
-            entries={mappedEntries.map((entry) => ({
-              ...entry,
-              canEdit: canManageEntry(entry),
-              canResolve: canManageEntry(entry),
-            }))}
-            canResolve={!isArchived && (isAuthor || actor.kind === "agent")}
-            resolveAction={resolveDeliberationEntryAction}
-            updateAction={updateDeliberationEntryAction}
-            hiddenFields={{ workspaceId, proposalId }}
-          />
-
-          {!isArchived && proposal.status === "OPEN" && (
-            <DeliberationComposer
-              postAction={postDeliberationEntryAction}
+          <WorkItemConversationSurface title={t("sectionDeliberation")}>
+            <DeliberationThread
+              entries={discussionEntries.map((entry) => ({
+                ...entry,
+                canEdit: canManageEntry(entry),
+                canResolve: canManageEntry(entry),
+              }))}
+              canResolve={!isArchived && (isAuthor || actor.kind === "agent")}
+              resolveAction={resolveDeliberationEntryAction}
+              updateAction={updateDeliberationEntryAction}
               hiddenFields={{ workspaceId, proposalId }}
-              title={t("sectionDeliberation")}
-              targetOptions={targetOptions}
-              entryTypes={[
-                { value: "REACTION", label: t("entryReaction"), variant: "secondary" },
-                { value: "OBJECTION", label: t("entryObjection"), variant: "danger" },
-              ]}
+              emptyMessage={t("discussionEmpty")}
             />
-          )}
+
+            {!isArchived && proposal.status === "OPEN" && (
+              <DeliberationComposer
+                postAction={postDeliberationEntryAction}
+                hiddenFields={{ workspaceId, proposalId }}
+                targetOptions={targetOptions}
+                entryTypes={[
+                  { value: "REACTION", label: t("entryReaction"), variant: "secondary" },
+                  { value: "OBJECTION", label: t("entryObjection"), variant: "danger" },
+                ]}
+              />
+            )}
+          </WorkItemConversationSurface>
         </article>
 
         {/* Sidebar */}
