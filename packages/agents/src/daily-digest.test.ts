@@ -527,6 +527,38 @@ describe("runDailyDigest", () => {
     }));
   });
 
+  it("includes completed workspace advice requests in the digest input", async () => {
+    prismaMock.adviceRequest.findMany.mockImplementation(async (params: any) => {
+      if (params?.where?.audienceType === "WORKSPACE" && params?.where?.status === "COMPLETED") {
+        return [{
+          id: "advice-completed-1",
+          messageMd: "The support risk decision was completed after stakeholder review.",
+          status: "COMPLETED",
+          deadlineAt: new Date("2026-04-29T12:00:00.000Z"),
+          completedAt: new Date("2026-04-30T09:00:00.000Z"),
+          createdAt: new Date("2026-04-29T09:00:00.000Z"),
+          updatedAt: new Date("2026-04-30T09:00:00.000Z"),
+          process: { subjectType: "PROPOSAL", subjectId: "proposal-1" },
+        }];
+      }
+      return [];
+    });
+
+    const { runDailyDigest } = await import("./daily-digest");
+    await runDailyDigest({
+      workspaceId: "workspace-1",
+      dateISO: "2026-04-30T12:00:00.000Z",
+    });
+
+    const digestCall = extractMock.mock.calls.find(([request]) => request.instruction.startsWith("Generate a structured"));
+    const digestInput = digestCall?.[0].input;
+    expect(digestInput).toContain("Workspace advice requests and closures");
+    expect(digestInput).toContain("Advice request completed");
+    expect(digestInput).toContain("The support risk decision was completed after stakeholder review.");
+    expect(digestInput).toContain("Completed: 2026-04-30");
+    expect(digestInput).not.toContain("Deadline: 2026-04-29");
+  });
+
   it("renders member newsletters from the stored canonical workspace briefing", async () => {
     prismaMock.buildArtifact.findMany.mockResolvedValue([mockRecentBuildArtifact()]);
     upsertWorkspaceBriefingMock.mockResolvedValueOnce({

@@ -285,6 +285,83 @@ describe("workspace briefing", () => {
     expect(activeAdviceScore).toBeGreaterThan(draftTensionScore);
   });
 
+  it("keeps fresh resolved decision context above stale reference goals", async () => {
+    const { buildWorkspaceBriefingFromCandidates } = await import("./workspace-briefing");
+    const briefing = buildWorkspaceBriefingFromCandidates({
+      workspaceId: "ws-1",
+      period: "DAILY",
+      dateKey: "2026-04-30",
+      title: "Daily Workspace Briefing - 2026-04-30",
+      generatedAt: new Date("2026-04-30T12:00:00.000Z"),
+      candidates: [
+        baseCandidate({
+          sourceType: "GOAL",
+          sourceId: "goal-old",
+          title: "Maintain strategic glossary",
+          summaryMd: "0% complete. This is stable reference context.",
+          href: "/workspaces/ws-1/goals/goal-old",
+          occurredAt: new Date("2026-03-10T12:00:00.000Z"),
+          updatedAt: new Date("2026-03-10T12:00:00.000Z"),
+          status: "ACTIVE",
+          strategicScore: 4,
+          actionabilityScore: 1,
+          evidenceScore: 2,
+          sourceRefs: [{ type: "GOAL", id: "goal-old", label: "Maintain strategic glossary", href: "/workspaces/ws-1/goals/goal-old" }],
+        }),
+        baseCandidate({
+          sourceType: "TENSION",
+          sourceId: "tension-resolved",
+          title: "Critical assumptions not being reviewed in weekly meetings",
+          summaryMd: "Critical assumptions were reviewed and the tension was resolved today.",
+          href: "/workspaces/ws-1/tensions/tension-resolved",
+          occurredAt: new Date("2026-04-30T10:00:00.000Z"),
+          updatedAt: new Date("2026-04-30T10:00:00.000Z"),
+          status: "RESOLVED",
+          strategicScore: 0,
+          actionabilityScore: 1,
+          evidenceScore: 2,
+          sourceRefs: [{ type: "TENSION", id: "tension-resolved", label: "Critical assumptions not being reviewed in weekly meetings", href: "/workspaces/ws-1/tensions/tension-resolved" }],
+        }),
+      ],
+    });
+
+    expect(briefing.items[0]).toEqual(expect.objectContaining({
+      kind: "TENSION",
+      title: "Critical assumptions not being reviewed in weekly meetings",
+      prominence: "lead",
+    }));
+  });
+
+  it("renders completed advice requests as closed input context", async () => {
+    const { buildWorkspaceBriefingFromCandidates } = await import("./workspace-briefing");
+    const briefing = buildWorkspaceBriefingFromCandidates({
+      workspaceId: "ws-1",
+      period: "DAILY",
+      dateKey: "2026-04-30",
+      title: "Daily Workspace Briefing - 2026-04-30",
+      generatedAt: new Date("2026-04-30T12:00:00.000Z"),
+      candidates: [
+        baseCandidate({
+          sourceType: "ADVICE_REQUEST",
+          sourceId: "request-completed",
+          title: "Advice request completed",
+          summaryMd: "The support risk decision was completed.",
+          href: "/workspaces/ws-1/proposals/proposal-1",
+          occurredAt: new Date("2026-04-30T10:00:00.000Z"),
+          updatedAt: new Date("2026-04-30T10:00:00.000Z"),
+          status: "COMPLETED",
+          strategicScore: 2,
+          actionabilityScore: 1,
+          evidenceScore: 2,
+          sourceRefs: [{ type: "ADVICE_REQUEST", id: "request-completed", label: "Advice request completed", href: "/workspaces/ws-1/proposals/proposal-1" }],
+        }),
+      ],
+    });
+
+    expect(briefing.items[0].whyItMattersMd).toBe("This records input or advice that was closed recently.");
+    expect(briefing.items[0].status).toBe("COMPLETED");
+  });
+
   it("applies boosted candidate ranking to digest-derived briefing order", async () => {
     const { buildWorkspaceBriefingFromDigest } = await import("./workspace-briefing");
     const briefing = buildWorkspaceBriefingFromDigest({
@@ -474,9 +551,29 @@ describe("workspace briefing", () => {
     expect(prismaMock.brainArticle.findMany).toHaveBeenCalledWith(expect.objectContaining({
       where: expect.objectContaining({ workspaceId: "ws-1", isPrivate: false, archivedAt: null }),
     }));
-    expect(prismaMock.adviceRequest.findMany).toHaveBeenCalledWith(expect.objectContaining({
-      where: expect.objectContaining({ workspaceId: "ws-1", audienceType: "WORKSPACE", status: "ACTIVE" }),
-    }));
+    const adviceRequestCalls = prismaMock.adviceRequest.findMany.mock.calls.map(([args]) => args);
+    expect(adviceRequestCalls).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        where: expect.objectContaining({
+          workspaceId: "ws-1",
+          audienceType: "WORKSPACE",
+          status: "ACTIVE",
+        }),
+        take: 30,
+      }),
+      expect.objectContaining({
+        where: expect.objectContaining({
+          workspaceId: "ws-1",
+          audienceType: "WORKSPACE",
+          status: "COMPLETED",
+          OR: [
+            { completedAt: { gte: new Date("2026-04-29T00:00:00.000Z") } },
+            { updatedAt: { gte: new Date("2026-04-29T00:00:00.000Z") } },
+          ],
+        }),
+        take: 10,
+      }),
+    ]));
   });
 
   it("does not attach unrelated source refs to digest-derived sections", async () => {
@@ -554,14 +651,24 @@ describe("workspace briefing", () => {
 
   it("links workspace advice requests to their actual subject", async () => {
     const { collectWorkspaceBriefingCandidates } = await import("./workspace-briefing");
-    prismaMock.adviceRequest.findMany.mockResolvedValue([{
+    prismaMock.adviceRequest.findMany.mockResolvedValueOnce([{
       id: "request-1",
       messageMd: "Please advise on the support risk.",
       status: "ACTIVE",
       deadlineAt: null,
+      completedAt: null,
       createdAt: new Date("2026-04-30T08:00:00.000Z"),
       updatedAt: new Date("2026-04-30T09:00:00.000Z"),
       process: { subjectType: "TENSION", subjectId: "tension-1" },
+    }]).mockResolvedValueOnce([{
+      id: "request-2",
+      messageMd: "The support risk decision was completed.",
+      status: "COMPLETED",
+      deadlineAt: null,
+      completedAt: new Date("2026-04-30T10:00:00.000Z"),
+      createdAt: new Date("2026-04-29T08:00:00.000Z"),
+      updatedAt: new Date("2026-04-30T10:00:00.000Z"),
+      process: { subjectType: "PROPOSAL", subjectId: "proposal-1" },
     }]);
 
     const candidates = await collectWorkspaceBriefingCandidates({
@@ -573,7 +680,16 @@ describe("workspace briefing", () => {
       expect.objectContaining({
         sourceType: "ADVICE_REQUEST",
         sourceId: "request-1",
+        title: "Advice request awaiting input",
         href: "/workspaces/ws-1/tensions/tension-1",
+      }),
+      expect.objectContaining({
+        sourceType: "ADVICE_REQUEST",
+        sourceId: "request-2",
+        title: "Advice request completed",
+        href: "/workspaces/ws-1/proposals/proposal-1",
+        occurredAt: new Date("2026-04-30T10:00:00.000Z"),
+        dueAt: null,
       }),
     ]));
   });
@@ -627,6 +743,94 @@ describe("workspace briefing", () => {
         title: "Built / Shipped Work",
         items: [expect.stringContaining("The new briefing surface shipped.")],
       }),
+    ]));
+  });
+
+  it("routes completed advice requests to neutral newsletter updates", async () => {
+    const { buildWorkspaceBriefingFromCandidates, workspaceBriefingToNewspaperDigest } = await import("./workspace-briefing");
+    const briefing = buildWorkspaceBriefingFromCandidates({
+      workspaceId: "ws-1",
+      period: "DAILY",
+      dateKey: "2026-04-30",
+      title: "Daily Workspace Briefing - 2026-04-30",
+      generatedAt: new Date("2026-04-30T12:00:00.000Z"),
+      candidates: [
+        baseCandidate({
+          sourceType: "ADVICE_REQUEST",
+          sourceId: "request-completed",
+          title: "Advice request completed",
+          summaryMd: "The support risk decision was completed.",
+          href: "/workspaces/ws-1/proposals/proposal-1",
+          occurredAt: new Date("2026-04-30T10:00:00.000Z"),
+          updatedAt: new Date("2026-04-30T10:00:00.000Z"),
+          status: "COMPLETED",
+          strategicScore: 2,
+          actionabilityScore: 1,
+          evidenceScore: 2,
+          sourceRefs: [{ type: "ADVICE_REQUEST", id: "request-completed", label: "Advice request completed", href: "/workspaces/ws-1/proposals/proposal-1" }],
+        }),
+      ],
+    });
+
+    const digest = workspaceBriefingToNewspaperDigest(briefing);
+
+    expect(digest.sections).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        id: "otherUpdates",
+        title: "Other Updates",
+        items: [expect.stringContaining("The support risk decision was completed.")],
+      }),
+    ]));
+    expect(digest.sections).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: "adviceRequests" }),
+    ]));
+  });
+
+  it("preserves completed advice status for digest-derived newsletter routing", async () => {
+    const { buildWorkspaceBriefingFromDigest, workspaceBriefingToNewspaperDigest } = await import("./workspace-briefing");
+    const briefing = buildWorkspaceBriefingFromDigest({
+      workspaceId: "ws-1",
+      period: "DAILY",
+      dateKey: "2026-04-30",
+      title: "Daily Workspace Briefing - 2026-04-30",
+      generatedAt: new Date("2026-04-30T12:00:00.000Z"),
+      digest: {
+        intro: null,
+        sections: [{
+          id: "adviceRequests",
+          title: "Requests Awaiting Your Input",
+          items: ["Advice request completed: The support risk decision was completed."],
+        }],
+      },
+      candidates: [
+        baseCandidate({
+          sourceType: "ADVICE_REQUEST",
+          sourceId: "request-completed",
+          title: "Advice request completed",
+          summaryMd: "The support risk decision was completed.",
+          href: "/workspaces/ws-1/proposals/proposal-1",
+          occurredAt: new Date("2026-04-30T10:00:00.000Z"),
+          updatedAt: new Date("2026-04-30T10:00:00.000Z"),
+          status: "COMPLETED",
+          strategicScore: 2,
+          actionabilityScore: 1,
+          evidenceScore: 2,
+          sourceRefs: [{ type: "ADVICE_REQUEST", id: "request-completed", label: "Advice request completed", href: "/workspaces/ws-1/proposals/proposal-1" }],
+        }),
+      ],
+    });
+
+    const digest = workspaceBriefingToNewspaperDigest(briefing);
+
+    expect(briefing.items[0].status).toBe("COMPLETED");
+    expect(digest.sections).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        id: "otherUpdates",
+        title: "Other Updates",
+      }),
+    ]));
+    expect(digest.sections).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: "adviceRequests" }),
     ]));
   });
 

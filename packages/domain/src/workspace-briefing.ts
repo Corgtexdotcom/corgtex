@@ -58,6 +58,7 @@ export type WorkspaceBriefingItem = {
   sourceRefs: WorkspaceBriefingSourceRef[];
   href: string | null;
   occurredAt: string;
+  status?: string | null;
   confidence: number;
 };
 
@@ -108,6 +109,11 @@ const SECTION_TITLES: Record<NewspaperEmailSectionId, string> = {
   emergingTensions: "Emerging Tensions",
   otherUpdates: "Other Updates",
 };
+
+function sectionForBriefingItem(item: WorkspaceBriefingItem): NewspaperEmailSectionId {
+  if (item.kind === "ADVICE_REQUEST" && item.status && item.status !== "ACTIVE") return "otherUpdates";
+  return KIND_TO_SECTION[item.kind] ?? "otherUpdates";
+}
 
 const WORKSPACE_BRIEFING_SOURCE_LABELS: Record<WorkspaceBriefingSourceType, string> = {
   ACTION: "Action",
@@ -248,6 +254,14 @@ function isClosedCandidateStatus(status: string | null | undefined) {
     || normalized === "DRAFT";
 }
 
+function isResolvedCandidateStatus(status: string | null | undefined) {
+  const normalized = status?.trim().toUpperCase();
+  return normalized === "RESOLVED"
+    || normalized === "CLOSED"
+    || normalized === "DONE"
+    || normalized === "COMPLETED";
+}
+
 function highSignalActionableText(candidate: WorkspaceBriefingCandidate) {
   return `${candidate.title} ${candidate.summaryMd ?? ""}`.toLowerCase();
 }
@@ -263,6 +277,19 @@ function recentActionableSignalBoost(candidate: WorkspaceBriefingCandidate, now:
   const isDecisionShaping = /\b(block|blocked|blocker|critical|urgent|risk|assumption|decision|alignment|review|stuck|waiting)\b/.test(text);
   const recentBase = ageDays <= 1 ? 3 : 2;
   return recentBase + (isDecisionShaping ? 2 : 0);
+}
+
+function recentClosureSignalBoost(candidate: WorkspaceBriefingCandidate, now: Date) {
+  if (candidate.sourceType !== "TENSION" && candidate.sourceType !== "PROPOSAL" && candidate.sourceType !== "ADVICE_REQUEST") return 0;
+  if (!isResolvedCandidateStatus(candidate.status)) return 0;
+
+  const ageDays = candidateAgeDays(candidate, now);
+  if (ageDays > 2) return 0;
+
+  const text = highSignalActionableText(candidate);
+  const isDecisionShaping = /\b(block|blocked|blocker|critical|urgent|risk|assumption|decision|alignment|review|resolved|resolution)\b/.test(text);
+  const recentBase = ageDays <= 1 ? 2 : 1;
+  return recentBase + (isDecisionShaping ? 1 : 0);
 }
 
 export function scoreWorkspaceBriefingCandidate(candidate: WorkspaceBriefingCandidate, now = new Date()) {
@@ -281,6 +308,7 @@ export function scoreWorkspaceBriefingCandidate(candidate: WorkspaceBriefingCand
     + statusBoost
     + Math.min(3, Math.max(0, candidate.priority ?? 0))
     + recentActionableSignalBoost(candidate, now)
+    + recentClosureSignalBoost(candidate, now)
     - staleOpenWorkPenalty(candidate, now)
     - routineGoalPenalty(candidate, now)
   );
@@ -309,7 +337,9 @@ function whyCandidateMatters(candidate: WorkspaceBriefingCandidate) {
   if (candidate.sourceType === "PROPOSAL") return candidate.status === "OPEN" ? "A decision, advice, or alignment may still be needed before this moves forward." : "This records a decision or operating change.";
   if (candidate.sourceType === "MEETING") return "This is recent operating evidence and may contain decisions or follow-ups.";
   if (candidate.sourceType === "GOAL") return "This connects today’s work to current strategic direction.";
-  if (candidate.sourceType === "ADVICE_REQUEST") return "Someone is asking for input before work can move forward.";
+  if (candidate.sourceType === "ADVICE_REQUEST") return candidate.status === "ACTIVE"
+    ? "Someone is asking for input before work can move forward."
+    : "This records input or advice that was closed recently.";
   if (candidate.sourceType === "BUILD_ARTIFACT") return "This reflects shipped or in-flight implementation work.";
   return "This is useful context for understanding the workspace right now.";
 }
@@ -325,6 +355,7 @@ function itemFromCandidate(candidate: WorkspaceBriefingCandidate, index: number,
     sourceRefs: candidate.sourceRefs,
     href: candidate.href,
     occurredAt: candidate.occurredAt.toISOString(),
+    status: candidate.status ?? null,
     confidence: Math.max(0.55, Math.min(0.98, 0.55 + score / 25)),
   };
 }
@@ -503,6 +534,7 @@ export function buildWorkspaceBriefingFromDigest(params: {
         sourceRefs: source?.sourceRefs ?? [],
         href: source?.href ?? null,
         occurredAt: source?.occurredAt ?? generatedAt,
+        status: source?.status ?? null,
         confidence: source ? Math.max(0.62, Math.min(0.98, 0.6 + score / 25)) : 0.72,
         score,
       };
@@ -523,6 +555,7 @@ export function buildWorkspaceBriefingFromDigest(params: {
       sourceRefs: entry.sourceRefs,
       href: entry.href,
       occurredAt: entry.occurredAt.toISOString(),
+      status: entry.status,
       confidence: entry.confidence,
     }) satisfies WorkspaceBriefingItem);
 
@@ -588,6 +621,7 @@ export function normalizeWorkspaceBriefingPayload(input: unknown): NormalizedWor
         sourceRefs,
         href: typeof entry.href === "string" ? entry.href : null,
         occurredAt: typeof entry.occurredAt === "string" ? entry.occurredAt : new Date().toISOString(),
+        status: typeof entry.status === "string" ? entry.status : null,
         confidence: typeof entry.confidence === "number" ? Math.max(0, Math.min(1, entry.confidence)) : 0.75,
       }];
     })
@@ -616,7 +650,7 @@ export function workspaceBriefingToNewspaperDigest(input: { briefingJson: unknow
   const sectionsById = new Map<NewspaperEmailSectionId, string[]>();
 
   for (const item of briefing.items) {
-    const sectionId = KIND_TO_SECTION[item.kind] ?? "otherUpdates";
+    const sectionId = sectionForBriefingItem(item);
     const body = [
       item.title,
       item.summaryMd && item.summaryMd !== item.title ? item.summaryMd : null,
@@ -651,6 +685,17 @@ export async function collectWorkspaceBriefingCandidates(params: {
     await requireWorkspaceMembership({ actor: params.actor, workspaceId: params.workspaceId });
   }
 
+  const adviceRequestSelect = {
+    id: true,
+    messageMd: true,
+    status: true,
+    deadlineAt: true,
+    completedAt: true,
+    createdAt: true,
+    updatedAt: true,
+    process: { select: { subjectType: true, subjectId: true } },
+  } as const;
+
   const [
     meetings,
     proposals,
@@ -662,7 +707,8 @@ export async function collectWorkspaceBriefingCandidates(params: {
     documents,
     communicationSummaries,
     buildArtifacts,
-    adviceRequests,
+    activeAdviceRequests,
+    completedAdviceRequests,
   ] = await Promise.all([
     prisma.meeting.findMany({
       where: {
@@ -807,17 +853,25 @@ export async function collectWorkspaceBriefingCandidates(params: {
       },
       orderBy: [{ deadlineAt: "asc" }, { updatedAt: "desc" }],
       take: 30,
-      select: {
-        id: true,
-        messageMd: true,
-        status: true,
-        deadlineAt: true,
-        createdAt: true,
-        updatedAt: true,
-        process: { select: { subjectType: true, subjectId: true } },
+      select: adviceRequestSelect,
+    }),
+    prisma.adviceRequest.findMany({
+      where: {
+        workspaceId: params.workspaceId,
+        audienceType: "WORKSPACE",
+        status: "COMPLETED",
+        OR: [
+          { completedAt: { gte: params.since } },
+          { updatedAt: { gte: params.since } },
+        ],
       },
+      orderBy: [{ completedAt: "desc" }, { updatedAt: "desc" }],
+      take: 10,
+      select: adviceRequestSelect,
     }),
   ]);
+
+  const adviceRequests = [...activeAdviceRequests, ...completedAdviceRequests];
 
   return [
     ...meetings.map((meeting) => candidate({
@@ -965,13 +1019,13 @@ export async function collectWorkspaceBriefingCandidates(params: {
       workspaceId: params.workspaceId,
       sourceType: "ADVICE_REQUEST" as const,
       sourceId: request.id,
-      title: "Advice request awaiting input",
+      title: request.status === "ACTIVE" ? "Advice request awaiting input" : "Advice request completed",
       summaryMd: compactText(request.messageMd, 700),
       href: adviceSubjectHref(params.workspaceId, request.process.subjectType, request.process.subjectId),
-      occurredAt: request.updatedAt ?? request.createdAt,
+      occurredAt: request.completedAt ?? request.updatedAt ?? request.createdAt,
       updatedAt: request.updatedAt,
       status: request.status,
-      dueAt: request.deadlineAt,
+      dueAt: request.status === "ACTIVE" ? request.deadlineAt : null,
       strategicScore: 2,
       actionabilityScore: request.status === "ACTIVE" ? 4 : 1,
       evidenceScore: 2,

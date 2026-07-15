@@ -290,6 +290,19 @@ type OperatingDigestInputs = {
     source: string;
     updatedAt: Date;
   }>;
+  workspaceAdviceRequests: Array<{
+    id: string;
+    messageMd: string;
+    status: string;
+    deadlineAt: Date | null;
+    completedAt: Date | null;
+    createdAt: Date;
+    updatedAt: Date;
+    process: {
+      subjectType: string;
+      subjectId: string;
+    };
+  }>;
 };
 
 type DigestSourceCounts = {
@@ -737,6 +750,8 @@ async function loadOperatingDigestInputs(params: {
     newMembers,
     brainArticles,
     documents,
+    activeWorkspaceAdviceRequests,
+    completedWorkspaceAdviceRequests,
   ] = await Promise.all([
     prisma.meeting.findMany({
       where: {
@@ -972,6 +987,48 @@ async function loadOperatingDigestInputs(params: {
         updatedAt: true,
       },
     }),
+    prisma.adviceRequest.findMany({
+      where: {
+        workspaceId: params.workspaceId,
+        audienceType: "WORKSPACE",
+        status: "ACTIVE",
+      },
+      orderBy: [{ deadlineAt: "asc" }, { updatedAt: "desc" }],
+      take: 30,
+      select: {
+        id: true,
+        messageMd: true,
+        status: true,
+        deadlineAt: true,
+        completedAt: true,
+        createdAt: true,
+        updatedAt: true,
+        process: { select: { subjectType: true, subjectId: true } },
+      },
+    }),
+    prisma.adviceRequest.findMany({
+      where: {
+        workspaceId: params.workspaceId,
+        audienceType: "WORKSPACE",
+        status: "COMPLETED",
+        OR: [
+          { completedAt: { gte: params.since } },
+          { updatedAt: { gte: params.since } },
+        ],
+      },
+      orderBy: [{ completedAt: "desc" }, { updatedAt: "desc" }],
+      take: 10,
+      select: {
+        id: true,
+        messageMd: true,
+        status: true,
+        deadlineAt: true,
+        completedAt: true,
+        createdAt: true,
+        updatedAt: true,
+        process: { select: { subjectType: true, subjectId: true } },
+      },
+    }),
   ]);
 
   return {
@@ -985,6 +1042,10 @@ async function loadOperatingDigestInputs(params: {
     newMembers: newMembers as OperatingDigestInputs["newMembers"],
     brainArticles: brainArticles as OperatingDigestInputs["brainArticles"],
     documents: documents as OperatingDigestInputs["documents"],
+    workspaceAdviceRequests: [
+      ...activeWorkspaceAdviceRequests,
+      ...completedWorkspaceAdviceRequests,
+    ] as OperatingDigestInputs["workspaceAdviceRequests"],
   };
 }
 
@@ -998,6 +1059,9 @@ function buildDigestSourceCounts(params: {
   const adviceRequestIds = new Set<string>();
   for (const items of params.pendingAdviceByMemberId.values()) {
     for (const item of items) adviceRequestIds.add(item);
+  }
+  for (const request of params.operatingInputs.workspaceAdviceRequests) {
+    adviceRequestIds.add(request.id);
   }
   return {
     meetings: params.operatingInputs.meetings.length,
@@ -1017,6 +1081,22 @@ function buildDigestSourceCounts(params: {
   };
 }
 
+function formatWorkspaceAdviceRequestDigestInput(requests: OperatingDigestInputs["workspaceAdviceRequests"]) {
+  return requests.map((request) => {
+    const subjectType = validAdviceSubjectType(request.process.subjectType);
+    const subjectLabel = subjectType ? adviceSubjectLabel(subjectType) : "subject";
+    const statusLabel = request.status === "COMPLETED" ? "Advice request completed" : "Advice request awaiting input";
+    const completed = formatAdviceDigestDate(request.completedAt);
+    const deadline = formatAdviceDigestDate(request.deadlineAt);
+    return [
+      `${statusLabel}: ${subjectLabel} ${request.process.subjectId}`,
+      `Request: ${truncateDigestText(request.messageMd)}`,
+      request.status === "COMPLETED" && completed ? `Completed: ${completed}` : null,
+      request.status === "ACTIVE" && deadline ? `Deadline: ${deadline}` : null,
+    ].filter(Boolean).join("\n");
+  }).join("\n\n");
+}
+
 function buildOperatingDigestInput(inputs: OperatingDigestInputs, counts: DigestSourceCounts) {
   return [
     `Operating source counts: ${sourceCountsLine(counts)}`,
@@ -1024,6 +1104,7 @@ function buildOperatingDigestInput(inputs: OperatingDigestInputs, counts: Digest
     inputs.proposals.length > 0 ? `Decisions and proposals:\n${formatProposalDigestInput(inputs.proposals)}` : null,
     inputs.resolvedTensions.length > 0 ? `Resolved tensions:\n${formatResolvedTensionDigestInput(inputs.resolvedTensions)}` : null,
     inputs.openActions.length > 0 ? `Open actions:\n${formatOpenActionDigestInput(inputs.openActions)}` : null,
+    inputs.workspaceAdviceRequests.length > 0 ? `Workspace advice requests and closures:\n${formatWorkspaceAdviceRequestDigestInput(inputs.workspaceAdviceRequests)}` : null,
     inputs.goals.length > 0 ? `Goals and quarterly progress:\n${formatGoalDigestInput(inputs.goals)}` : null,
     inputs.roleVersions.length + inputs.roleHolderHistory.length + inputs.newMembers.length > 0
       ? `Roles and people changes:\n${formatRolesAndPeopleDigestInput(inputs)}`
