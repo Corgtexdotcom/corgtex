@@ -534,6 +534,7 @@ export function buildWorkspaceBriefingFromDigest(params: {
         sourceRefs: source?.sourceRefs ?? [],
         href: source?.href ?? null,
         occurredAt: source?.occurredAt ?? generatedAt,
+        status: source?.status ?? null,
         confidence: source ? Math.max(0.62, Math.min(0.98, 0.6 + score / 25)) : 0.72,
         score,
       };
@@ -554,6 +555,7 @@ export function buildWorkspaceBriefingFromDigest(params: {
       sourceRefs: entry.sourceRefs,
       href: entry.href,
       occurredAt: entry.occurredAt.toISOString(),
+      status: entry.status,
       confidence: entry.confidence,
     }) satisfies WorkspaceBriefingItem);
 

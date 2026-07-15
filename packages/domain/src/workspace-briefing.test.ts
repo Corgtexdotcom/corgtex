@@ -786,6 +786,54 @@ describe("workspace briefing", () => {
     ]));
   });
 
+  it("preserves completed advice status for digest-derived newsletter routing", async () => {
+    const { buildWorkspaceBriefingFromDigest, workspaceBriefingToNewspaperDigest } = await import("./workspace-briefing");
+    const briefing = buildWorkspaceBriefingFromDigest({
+      workspaceId: "ws-1",
+      period: "DAILY",
+      dateKey: "2026-04-30",
+      title: "Daily Workspace Briefing - 2026-04-30",
+      generatedAt: new Date("2026-04-30T12:00:00.000Z"),
+      digest: {
+        intro: null,
+        sections: [{
+          id: "adviceRequests",
+          title: "Requests Awaiting Your Input",
+          items: ["Advice request completed: The support risk decision was completed."],
+        }],
+      },
+      candidates: [
+        baseCandidate({
+          sourceType: "ADVICE_REQUEST",
+          sourceId: "request-completed",
+          title: "Advice request completed",
+          summaryMd: "The support risk decision was completed.",
+          href: "/workspaces/ws-1/proposals/proposal-1",
+          occurredAt: new Date("2026-04-30T10:00:00.000Z"),
+          updatedAt: new Date("2026-04-30T10:00:00.000Z"),
+          status: "COMPLETED",
+          strategicScore: 2,
+          actionabilityScore: 1,
+          evidenceScore: 2,
+          sourceRefs: [{ type: "ADVICE_REQUEST", id: "request-completed", label: "Advice request completed", href: "/workspaces/ws-1/proposals/proposal-1" }],
+        }),
+      ],
+    });
+
+    const digest = workspaceBriefingToNewspaperDigest(briefing);
+
+    expect(briefing.items[0].status).toBe("COMPLETED");
+    expect(digest.sections).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        id: "otherUpdates",
+        title: "Other Updates",
+      }),
+    ]));
+    expect(digest.sections).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: "adviceRequests" }),
+    ]));
+  });
+
   it("persists the canonical briefing with source refs and generated markdown", async () => {
     const { buildWorkspaceBriefingFromCandidates, upsertWorkspaceBriefing } = await import("./workspace-briefing");
     const briefing = buildWorkspaceBriefingFromCandidates({
