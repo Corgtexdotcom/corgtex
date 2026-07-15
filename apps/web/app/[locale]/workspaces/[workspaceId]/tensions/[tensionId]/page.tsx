@@ -442,6 +442,16 @@ export default async function TensionDetailPage({
                   unselectAll: tWork("unselectAll"),
                   selectedCount: tWork("selectedCount", { count: "{count}" }),
                   submit: t("btnSendInputRequest"),
+                  sending: t("btnSendingInputRequest"),
+                  sent: t("inputRequestSent"),
+                  submitError: t("inputRequestSubmitError"),
+                  choosePeopleError: t("inputChoosePeopleError"),
+                  messageRequiredError: t("inputMessageRequiredError"),
+                  deadlineInvalidError: t("inputDeadlineInvalidError"),
+                  deadlineFutureError: t("inputDeadlineFutureError"),
+                  reminderInvalidError: t("inputReminderInvalidError"),
+                  reminderFutureError: t("inputReminderFutureError"),
+                  reminderBeforeDeadlineError: t("inputReminderBeforeDeadlineError"),
                 }}
               />
             </details>

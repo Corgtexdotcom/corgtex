@@ -376,6 +376,16 @@ export default async function ProposalDetailPage({
                       unselectAll: tWork("unselectAll"),
                       selectedCount: tWork("selectedCount", { count: "{count}" }),
                       submit: t("btnSendAdviceRequest"),
+                      sending: t("btnSendingAdviceRequest"),
+                      sent: t("adviceRequestSent"),
+                      submitError: t("adviceRequestSubmitError"),
+                      choosePeopleError: t("adviceChoosePeopleError"),
+                      messageRequiredError: t("adviceMessageRequiredError"),
+                      deadlineInvalidError: t("adviceDeadlineInvalidError"),
+                      deadlineFutureError: t("adviceDeadlineFutureError"),
+                      reminderInvalidError: t("adviceReminderInvalidError"),
+                      reminderFutureError: t("adviceReminderFutureError"),
+                      reminderBeforeDeadlineError: t("adviceReminderBeforeDeadlineError"),
                     }}
                   />
                 </details>

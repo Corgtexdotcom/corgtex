@@ -4,6 +4,8 @@ import React, { useEffect, useId, useMemo, useRef, useState } from "react";
 import { Check, ChevronDown } from "lucide-react";
 import { cn } from "@/lib/utils";
 
+const EMPTY_SELECTED_VALUES: readonly string[] = [];
+
 export type MultiSelectFilterOption = {
   value: string;
   label: string;
@@ -14,7 +16,7 @@ export function MultiSelectFilter({
   name,
   label,
   options,
-  selectedValues = [],
+  selectedValues,
   allLabel,
   selectAllLabel = "Select all",
   unselectAllLabel = "Unselect all",
@@ -41,13 +43,23 @@ export function MultiSelectFilter({
 }) {
   const id = useId();
   const rootRef = useRef<HTMLDivElement>(null);
+  const isControlled = selectedValues !== undefined;
   const [open, setOpen] = useState(false);
-  const [currentValues, setCurrentValues] = useState<string[]>(() => normalizeValues(selectedValues, options, collapseAllToEmpty));
+  const [currentValues, setCurrentValues] = useState<string[]>(() => normalizeValues(
+    selectedValues ?? EMPTY_SELECTED_VALUES,
+    options,
+    collapseAllToEmpty,
+  ));
   const optionByValue = useMemo(() => new Map(options.map((option) => [option.value, option])), [options]);
 
   useEffect(() => {
-    setCurrentValues(normalizeValues(selectedValues, options, collapseAllToEmpty));
-  }, [collapseAllToEmpty, options, selectedValues]);
+    if (isControlled) {
+      setCurrentValues(normalizeValues(selectedValues ?? EMPTY_SELECTED_VALUES, options, collapseAllToEmpty));
+      return;
+    }
+
+    setCurrentValues((values) => normalizeValues(values, options, collapseAllToEmpty));
+  }, [collapseAllToEmpty, isControlled, options, selectedValues]);
 
   useEffect(() => {
     if (!open) return;
