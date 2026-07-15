@@ -308,15 +308,48 @@ function sectionKind(sectionId: NewspaperEmailSectionId): WorkspaceBriefingSourc
   return "BRAIN_ARTICLE";
 }
 
+function normalizeMatchText(value: string | null | undefined) {
+  return (value ?? "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
+}
+
+function candidateMatchesDigestItem(candidate: WorkspaceBriefingCandidate, rawItem: string) {
+  const normalizedItem = normalizeMatchText(rawItem);
+  if (!normalizedItem) return false;
+
+  const normalizedTitle = normalizeMatchText(candidate.title);
+  if (normalizedTitle && normalizedItem.includes(normalizedTitle)) return true;
+
+  const normalizedSummary = normalizeMatchText(candidate.summaryMd);
+  return normalizedSummary.length >= 32 && (
+    normalizedItem.includes(normalizedSummary.slice(0, 80))
+    || normalizedSummary.includes(normalizedItem.slice(0, 80))
+  );
+}
+
 function pickCandidateForSection(
   sectionId: NewspaperEmailSectionId,
+  rawItem: string,
   candidates: WorkspaceBriefingCandidate[],
   used: Set<string>,
 ) {
   const expectedKind = sectionKind(sectionId);
-  const direct = candidates.find((entry) => entry.sourceType === expectedKind && !used.has(`${entry.sourceType}:${entry.sourceId}`));
+  const direct = candidates.find((entry) => (
+    entry.sourceType === expectedKind
+    && !used.has(`${entry.sourceType}:${entry.sourceId}`)
+    && candidateMatchesDigestItem(entry, rawItem)
+  ));
   if (direct) used.add(`${direct.sourceType}:${direct.sourceId}`);
   return direct ?? null;
+}
+
+function adviceSubjectHref(workspaceId: string, subjectType: string, subjectId: string) {
+  const normalized = subjectType.trim().toUpperCase();
+  if (normalized === "TENSION") return workspacePath(workspaceId, `/tensions/${subjectId}`);
+  if (normalized === "ACTION") return workspacePath(workspaceId, `/actions/${subjectId}`);
+  return workspacePath(workspaceId, `/proposals/${subjectId}`);
 }
 
 export function buildWorkspaceBriefingFromDigest(params: {
@@ -333,7 +366,7 @@ export function buildWorkspaceBriefingFromDigest(params: {
   const used = new Set<string>();
   const items = params.digest.sections.flatMap((section) => (
     section.items.map((rawItem, itemIndex) => {
-      const source = pickCandidateForSection(section.id, rankedCandidates, used);
+      const source = pickCandidateForSection(section.id, rawItem, rankedCandidates, used);
       const score = source ? scoreWorkspaceBriefingCandidate(source, generatedAt) : Math.max(4, 8 - itemIndex);
       return {
         kind: source?.sourceType ?? sectionKind(section.id),
@@ -491,6 +524,7 @@ export async function collectWorkspaceBriefingCandidates(params: {
       where: {
         workspaceId: params.workspaceId,
         archivedAt: null,
+        status: "COMPLETED",
         OR: [
           { recordedAt: { gte: params.since } },
           { updatedAt: { gte: params.since } },
@@ -541,8 +575,8 @@ export async function collectWorkspaceBriefingCandidates(params: {
         workspaceId: params.workspaceId,
         archivedAt: null,
         isPrivate: false,
+        status: { in: ["OPEN", "IN_PROGRESS"] },
         OR: [
-          { status: { in: ["OPEN", "IN_PROGRESS"] } },
           { createdAt: { gte: params.since } },
           { updatedAt: { gte: params.since } },
           { publishedAt: { gte: params.since } },
@@ -625,15 +659,19 @@ export async function collectWorkspaceBriefingCandidates(params: {
       where: {
         workspaceId: params.workspaceId,
         audienceType: "WORKSPACE",
-        OR: [
-          { status: "ACTIVE" },
-          { createdAt: { gte: params.since } },
-          { updatedAt: { gte: params.since } },
-        ],
+        status: "ACTIVE",
       },
       orderBy: [{ deadlineAt: "asc" }, { updatedAt: "desc" }],
       take: 30,
-      select: { id: true, messageMd: true, status: true, deadlineAt: true, createdAt: true, updatedAt: true },
+      select: {
+        id: true,
+        messageMd: true,
+        status: true,
+        deadlineAt: true,
+        createdAt: true,
+        updatedAt: true,
+        process: { select: { subjectType: true, subjectId: true } },
+      },
     }),
   ]);
 
@@ -785,7 +823,7 @@ export async function collectWorkspaceBriefingCandidates(params: {
       sourceId: request.id,
       title: "Advice request awaiting input",
       summaryMd: compactText(request.messageMd, 700),
-      href: workspacePath(params.workspaceId, "/proposals"),
+      href: adviceSubjectHref(params.workspaceId, request.process.subjectType, request.process.subjectId),
       occurredAt: request.updatedAt ?? request.createdAt,
       updatedAt: request.updatedAt,
       status: request.status,

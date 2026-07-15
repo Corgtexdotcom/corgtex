@@ -729,6 +729,8 @@ describe("runDailyDigest", () => {
     }));
     expect(chatMock).not.toHaveBeenCalled();
     expect(sendEmailMock).not.toHaveBeenCalled();
+    expect(upsertNewspaperEditionMock).not.toHaveBeenCalled();
+    expect(createArticleMock).not.toHaveBeenCalled();
   });
 
   it("does not generate a newspaper when the requested cadence is off", async () => {
@@ -929,11 +931,11 @@ describe("runDailyDigest", () => {
     expect(memberAHtml).toContain("Requests Awaiting Your Input");
     expect(memberAHtml).toContain("Advice request: Proposal - Approve pricing");
     expect(memberAHtml).toContain("Input request: Tension - Clarify support ownership");
-    expect(memberAHtml).toContain("Input request: Action - Prepare launch checklist");
     expect(memberAHtml).toContain("Deadline: 2026-05-03");
     expect(memberAHtml).toContain("Audience: Support circle");
-    expect(memberBHtml).toContain("Requests Awaiting Your Input");
-    expect(memberBHtml).toContain("Input request: Action - Prepare launch checklist");
+    expect(memberAHtml).not.toContain("Prepare launch checklist");
+    expect(memberBHtml).not.toContain("Requests Awaiting Your Input");
+    expect(memberBHtml).not.toContain("Prepare launch checklist");
     expect(memberBHtml).not.toContain("Approve pricing");
     expect(memberBHtml).not.toContain("Clarify support ownership");
   });
@@ -1109,6 +1111,9 @@ describe("runDailyDigest", () => {
     }));
     expect(sendEmailMock).not.toHaveBeenCalled();
     expect(recordNewspaperDeliveryMock).not.toHaveBeenCalled();
+    expect(upsertNewspaperEditionMock).not.toHaveBeenCalled();
+    expect(createArticleMock).not.toHaveBeenCalled();
+    expect(rebuildBacklinksMock).not.toHaveBeenCalled();
   });
 
   it("falls back to candidate briefing when the structured newspaper is empty", async () => {

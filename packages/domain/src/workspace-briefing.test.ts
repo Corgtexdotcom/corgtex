@@ -130,13 +130,16 @@ describe("workspace briefing", () => {
       where: expect.objectContaining({ workspaceId: "ws-1", isPrivate: false, archivedAt: null }),
     }));
     expect(prismaMock.action.findMany).toHaveBeenCalledWith(expect.objectContaining({
-      where: expect.objectContaining({ workspaceId: "ws-1", isPrivate: false, archivedAt: null }),
+      where: expect.objectContaining({ workspaceId: "ws-1", isPrivate: false, archivedAt: null, status: { in: ["OPEN", "IN_PROGRESS"] } }),
+    }));
+    expect(prismaMock.meeting.findMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({ workspaceId: "ws-1", archivedAt: null, status: "COMPLETED" }),
     }));
     expect(prismaMock.brainArticle.findMany).toHaveBeenCalledWith(expect.objectContaining({
       where: expect.objectContaining({ workspaceId: "ws-1", isPrivate: false, archivedAt: null }),
     }));
     expect(prismaMock.adviceRequest.findMany).toHaveBeenCalledWith(expect.objectContaining({
-      where: expect.objectContaining({ workspaceId: "ws-1", audienceType: "WORKSPACE" }),
+      where: expect.objectContaining({ workspaceId: "ws-1", audienceType: "WORKSPACE", status: "ACTIVE" }),
     }));
   });
 
@@ -174,6 +177,69 @@ describe("workspace briefing", () => {
       href: null,
       sourceRefs: [],
     }));
+  });
+
+  it("does not attach same-kind source refs unless the digest item matches the source", async () => {
+    const { buildWorkspaceBriefingFromDigest } = await import("./workspace-briefing");
+
+    const briefing = buildWorkspaceBriefingFromDigest({
+      workspaceId: "ws-1",
+      period: "DAILY",
+      dateKey: "2026-04-30",
+      title: "Daily Workspace Briefing - 2026-04-30",
+      generatedAt: new Date("2026-04-30T12:00:00.000Z"),
+      digest: {
+        intro: null,
+        sections: [{
+          id: "openActions",
+          title: "Open Actions",
+          items: ["Confirm the customer rollout owner before launch."],
+        }],
+      },
+      candidates: [
+        baseCandidate({
+          sourceType: "ACTION",
+          sourceId: "action-1",
+          title: "Prepare vendor contract",
+          summaryMd: "Legal needs a procurement contract by Friday.",
+          href: "/workspaces/ws-1/actions/action-1",
+          sourceRefs: [{ type: "ACTION", id: "action-1", label: "Prepare vendor contract", href: "/workspaces/ws-1/actions/action-1" }],
+        }),
+      ],
+    });
+
+    expect(briefing.items[0]).toEqual(expect.objectContaining({
+      kind: "ACTION",
+      title: "Open Actions",
+      href: null,
+      sourceRefs: [],
+    }));
+  });
+
+  it("links workspace advice requests to their actual subject", async () => {
+    const { collectWorkspaceBriefingCandidates } = await import("./workspace-briefing");
+    prismaMock.adviceRequest.findMany.mockResolvedValue([{
+      id: "request-1",
+      messageMd: "Please advise on the support risk.",
+      status: "ACTIVE",
+      deadlineAt: null,
+      createdAt: new Date("2026-04-30T08:00:00.000Z"),
+      updatedAt: new Date("2026-04-30T09:00:00.000Z"),
+      process: { subjectType: "TENSION", subjectId: "tension-1" },
+    }]);
+
+    const candidates = await collectWorkspaceBriefingCandidates({
+      workspaceId: "ws-1",
+      since: new Date("2026-04-29T00:00:00.000Z"),
+    });
+
+    expect(candidates).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        sourceType: "ADVICE_REQUEST",
+        sourceId: "request-1",
+        href: "/workspaces/ws-1/tensions/tension-1",
+      }),
+    ]));
   });
 
   it("creates an honest quiet briefing when there are no candidates", async () => {

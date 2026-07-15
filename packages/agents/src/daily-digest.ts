@@ -641,7 +641,6 @@ async function loadPendingAdviceRequestsByMember(params: {
       workspaceId: params.workspaceId,
       status: "ACTIVE",
       OR: [
-        { audienceType: "WORKSPACE" },
         {
           audienceType: "MEMBERS",
           recipients: {
@@ -706,8 +705,7 @@ async function loadPendingAdviceRequestsByMember(params: {
 
     const explicitRecipientMemberIds = new Set(request.recipients.map((recipient) => recipient.memberId));
     for (const member of params.recipientMembers) {
-      const isRecipient = request.audienceType === "WORKSPACE"
-        || (request.audienceType === "MEMBERS" && explicitRecipientMemberIds.has(member.id))
+      const isRecipient = (request.audienceType === "MEMBERS" && explicitRecipientMemberIds.has(member.id))
         || (request.audienceType === "CIRCLE" && request.targetCircleId !== null && (circleIdsByMemberId.get(member.id)?.has(request.targetCircleId) ?? false));
       if (!isRecipient) continue;
 
@@ -1448,8 +1446,9 @@ Rules:
   const editionDigest = workspaceBriefingToNewspaperDigest({
     briefingJson: storedBriefing.briefingJson,
   });
+  const shouldPersistNewspaperEdition = recipientMembers.length > 0;
 
-  if (editionDigest.sections.length > 0) {
+  if (editionDigest.sections.length > 0 && shouldPersistNewspaperEdition) {
     const digestBodyMd = renderNewspaperDigestMarkdown({ title: digestTitle, digest: editionDigest });
     const existingDigestArticle = await prisma.brainArticle.findUnique({
       where: {
@@ -1508,7 +1507,7 @@ Rules:
       workspaceId: params.workspaceId,
       workflowJobId: params.workflowJobId ?? null,
       slug: digestSlug,
-      reason: "empty_workspace_briefing_digest",
+      reason: editionDigest.sections.length === 0 ? "empty_workspace_briefing_digest" : "no_matching_recipients",
     });
   }
 
