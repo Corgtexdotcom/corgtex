@@ -1,6 +1,8 @@
 import { notFound } from "next/navigation";
 import Link from "next/link";
-import { AppError, getProposal, getWorkspaceArchiveRecord, listAdviceRequests, listDeliberationEntries, listExternalResourceAttachments, listHumanMembers, listWorkItemEvidence, listWorkItemVersions, requireWorkspaceMembership } from "@corgtex/domain";
+import { AppError, getProposal, getWorkspaceArchiveRecord, listAdviceRequests, listDeliberationEntries, listExternalResourceAttachments, listHumanMembers, listProposalDecisionStates, listWorkItemEvidence, listWorkItemVersions, requireWorkspaceMembership } from "@corgtex/domain";
+import type { ProposalDecisionState } from "@corgtex/domain";
+import type { ApprovalDecisionChoice } from "@prisma/client";
 import { requirePageActor } from "@/lib/auth";
 import { MarkdownRenderer } from "@/lib/components/MarkdownRenderer";
 import { WorkItemResolutionDialog } from "@/lib/components/WorkItemResolutionDialog";
@@ -13,7 +15,7 @@ import { AdviceRequestForm } from "@/lib/components/AdviceRequestForm";
 import { WorkItemConversationSurface, WorkItemRequestList } from "@/lib/components/WorkItemConversation";
 import { getDeliberationTargets } from "@/lib/deliberation-targets";
 import { canOpenPrivateDraft } from "@/lib/governance-open-guards";
-import { attachProposalExternalResourceAction, postDeliberationEntryAction, requestProposalAdviceAction, resolveDeliberationEntryAction, resolveProposalAction, returnProposalToDraftAction, submitProposalAction, updateDeliberationEntryAction, updateProposalAction } from "../actions";
+import { attachProposalExternalResourceAction, createProposalObjectionAction, decideProposalApprovalAction, postDeliberationEntryAction, requestProposalAdviceAction, resolveDeliberationEntryAction, resolveProposalAction, resolveProposalObjectionAction, returnProposalToDraftAction, submitProposalAction, updateDeliberationEntryAction, updateProposalAction } from "../actions";
 import { ProposalDraftFields } from "../ProposalDraftFields";
 import { getFormatter, getTranslations } from "next-intl/server";
 import { formatWorkItemPriority, type WorkItemPriorityLabels } from "@/lib/work-item-priority";
@@ -70,7 +72,7 @@ export default async function ProposalDetailPage({
   if (!proposal) notFound();
   const isArchived = Boolean(proposal.archivedAt);
 
-  const [deliberationEntries, versionHistory, evidence, externalResourceAttachments, adviceRequests, archiveRecord, members] = await Promise.all([
+  const [deliberationEntries, versionHistory, evidence, externalResourceAttachments, adviceRequests, archiveRecord, members, decisionStates] = await Promise.all([
     archivedSafeRead(isArchived, listDeliberationEntries(actor, {
       workspaceId,
       parentType: "PROPOSAL",
@@ -89,7 +91,9 @@ export default async function ProposalDetailPage({
       ? archivedSafeRead(true, getWorkspaceArchiveRecord(actor, { workspaceId, entityType: "Proposal", entityId: proposal.id }), null)
       : Promise.resolve(null),
     isArchived ? Promise.resolve([]) : listHumanMembers(workspaceId),
+    isArchived ? Promise.resolve(new Map<string, ProposalDecisionState>()) : listProposalDecisionStates(actor, { workspaceId, proposalIds: [proposalId] }),
   ]);
+  const decisionState = decisionStates.get(proposal.id) ?? null;
   const deliberationTargets = isArchived
     ? { options: [], defaultValue: "", actorMemberId: null, actorCircleIds: [] }
     : await getDeliberationTargets({ actor, workspaceId, parentCircleId: proposal.circleId });
@@ -166,6 +170,59 @@ export default async function ProposalDetailPage({
   const dateTimeLabel = (value: Date | string | null | undefined) => value
     ? format.dateTime(new Date(value), { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })
     : null;
+  const decisionModeLabel = (mode: string) => {
+    const labels: Record<string, string> = {
+      SINGLE: t("decisionModeSingle"),
+      MAJORITY: t("decisionModeMajority"),
+      CONSENSUS: t("decisionModeConsensus"),
+      CONSENT: t("decisionModeConsent"),
+    };
+    return labels[mode] ?? mode;
+  };
+  const decisionChoiceLabel = (choice: string) => {
+    const labels: Record<string, string> = {
+      APPROVE: t("decisionApprove"),
+      REJECT: t("decisionReject"),
+      ABSTAIN: t("decisionAbstain"),
+      AGREE: t("decisionAgree"),
+      BLOCK: t("decisionBlock"),
+    };
+    return labels[choice] ?? choice;
+  };
+  const decisionSummaryLabel = (state: ProposalDecisionState) => {
+    if (state.mode === "CONSENT") {
+      return t("decisionConsentSummary", {
+        reviewed: state.outcome.summary.agree + state.outcome.summary.abstain,
+        objections: state.openObjections.length,
+      });
+    }
+
+    return t("decisionVoteSummary", {
+      approve: state.outcome.summary.approve + state.outcome.summary.agree,
+      reject: state.outcome.summary.reject + state.outcome.summary.block,
+      abstain: state.outcome.summary.abstain,
+    });
+  };
+  const canSubmitDecision = actor.kind === "user" && Boolean(membership) && Boolean(decisionState) && proposal.status === "OPEN" && !isArchived;
+  const decisionButton = (choice: ApprovalDecisionChoice, label: string, className = "secondary small") => {
+    if (!decisionState || !canSubmitDecision) return null;
+    const selected = decisionState.currentMemberDecision?.choice === choice;
+    return (
+      <form action={decideProposalApprovalAction}>
+        <input type="hidden" name="workspaceId" value={workspaceId} />
+        <input type="hidden" name="flowId" value={decisionState.flowId} />
+        <input type="hidden" name="choice" value={choice} />
+        <button type="submit" className={selected ? "primary small" : className}>
+          {selected ? t("decisionSelected", { label }) : label}
+        </button>
+      </form>
+    );
+  };
+  const canResolveDecisionObjection = (objection: ProposalDecisionState["openObjections"][number]) => actor.kind === "user" && Boolean(
+    objection.userId === actor.user.id
+      || membership?.role === "FACILITATOR"
+      || membership?.role === "ADMIN",
+  );
   const channelLabel = (channel: string) => {
     const labels: Record<string, string> = {
       IN_APP: t("adviceChannelInApp"),
@@ -277,6 +334,16 @@ export default async function ProposalDetailPage({
           </span>
         </div>
       </div>
+
+      {decisionState?.needsReview && (
+        <div className="nr-proposal-review-strip">
+          <div>
+            <strong>{t("decisionReviewNeededTitle")}</strong>
+            <p>{t("decisionReviewNeededBody", { mode: decisionModeLabel(decisionState.mode) })}</p>
+          </div>
+          <a href="#proposal-decision" className="nr-link">{t("decisionReviewNeededAction")}</a>
+        </div>
+      )}
 
       {isArchived && (
         <ArchivedItemBanner
@@ -425,6 +492,101 @@ export default async function ProposalDetailPage({
 
         {/* Sidebar */}
         <aside className="nr-sidebar">
+          {decisionState && (
+            <section
+              id="proposal-decision"
+              className={`nr-decision-panel ${decisionState.needsReview ? "nr-decision-panel-needed" : ""}`}
+            >
+              <h3 className="nr-sidebar-title">{t("decisionTitle")}</h3>
+              <p className="nr-decision-copy">{t("decisionAdvisoryBody")}</p>
+              <div className="nr-decision-tags">
+                <span className="tag info">{decisionModeLabel(decisionState.mode)}</span>
+                {decisionState.needsReview ? (
+                  <span className="tag warning">{t("decisionTagReviewRequested")}</span>
+                ) : decisionState.currentMemberDecision || decisionState.currentUserOpenObjectionId ? (
+                  <span className="tag success">{t("decisionTagReviewed")}</span>
+                ) : (
+                  <span className="tag">{t("decisionTagOpen")}</span>
+                )}
+                {decisionState.openObjections.length > 0 && (
+                  <span className="tag danger">{t("decisionTagObjectionOpen", { count: decisionState.openObjections.length })}</span>
+                )}
+              </div>
+              <div className="nr-decision-counts">
+                <strong>{decisionSummaryLabel(decisionState)}</strong>
+                {decisionState.closesAt && (
+                  <span>{t("decisionWindowCloses", { date: dateTimeLabel(decisionState.closesAt) ?? "" })}</span>
+                )}
+                {decisionState.currentMemberDecision && (
+                  <span>{t("decisionCurrentChoice", { choice: decisionChoiceLabel(decisionState.currentMemberDecision.choice) })}</span>
+                )}
+              </div>
+
+              {canSubmitDecision && decisionState.mode === "CONSENT" && (
+                <div className="nr-decision-actions">
+                  {!decisionState.currentMemberDecision && decisionButton("AGREE", t("decisionMarkReviewed"), "primary small")}
+                  {decisionState.currentMemberDecision && (
+                    <span className="tag success">{t("decisionMarkedReviewed")}</span>
+                  )}
+                  {!decisionState.currentUserOpenObjectionId && (
+                    <details className="nr-decision-objection-form">
+                      <summary className="secondary small nr-hide-marker cursor-pointer">{t("decisionObject")}</summary>
+                      <form action={createProposalObjectionAction} className="nr-form-stack mt-3">
+                        <input type="hidden" name="workspaceId" value={workspaceId} />
+                        <input type="hidden" name="flowId" value={decisionState.flowId} />
+                        <label>
+                          {t("decisionObjectionReason")}
+                          <textarea name="bodyMd" rows={4} required />
+                        </label>
+                        <button type="submit" className="danger small">{t("decisionObject")}</button>
+                      </form>
+                    </details>
+                  )}
+                </div>
+              )}
+
+              {canSubmitDecision && decisionState.mode !== "CONSENT" && (
+                <div className="nr-decision-actions">
+                  {decisionState.mode === "CONSENSUS" ? (
+                    <>
+                      {decisionButton("AGREE", t("decisionAgree"), "secondary small")}
+                      {decisionButton("BLOCK", t("decisionBlock"), "danger small")}
+                      {decisionButton("ABSTAIN", t("decisionAbstain"), "secondary small")}
+                    </>
+                  ) : (
+                    <>
+                      {decisionButton("APPROVE", t("decisionApprove"), "secondary small")}
+                      {decisionButton("REJECT", t("decisionReject"), "danger small")}
+                      {decisionButton("ABSTAIN", t("decisionAbstain"), "secondary small")}
+                    </>
+                  )}
+                </div>
+              )}
+
+              {decisionState.openObjections.length > 0 && (
+                <div className="nr-decision-objections">
+                  <strong>{t("decisionOpenObjections")}</strong>
+                  {decisionState.openObjections.map((objection) => (
+                    <div key={objection.id} className="nr-decision-objection">
+                      <div className="nr-item-meta">
+                        {objection.user.displayName || objection.user.email} · {dateTimeLabel(objection.createdAt)}
+                      </div>
+                      <MarkdownRenderer markdown={objection.bodyMd} variant="compact" />
+                      {canResolveDecisionObjection(objection) && (
+                        <form action={resolveProposalObjectionAction}>
+                          <input type="hidden" name="workspaceId" value={workspaceId} />
+                          <input type="hidden" name="flowId" value={decisionState.flowId} />
+                          <input type="hidden" name="objectionId" value={objection.id} />
+                          <button type="submit" className="secondary small">{t("decisionResolveObjection")}</button>
+                        </form>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </section>
+          )}
+
           {canManage && canOpenPrivateDraft(proposal) && (
             <div className="stack mb-8">
               <form action={submitProposalAction} className="nr-form-stack">
@@ -464,6 +626,9 @@ export default async function ProposalDetailPage({
           {canResolve && proposal.status === "OPEN" && (
             <div className="stack mb-8">
               <h3 className="nr-sidebar-title">{t("resolveProposalTitle")}</h3>
+              {decisionState && (
+                <p className="nr-decision-copy">{t("decisionResolveContext", { summary: decisionSummaryLabel(decisionState) })}</p>
+              )}
               <WorkItemResolutionDialog
                 action={resolveProposalAction}
                 buttonLabel={t("btnResolve")}

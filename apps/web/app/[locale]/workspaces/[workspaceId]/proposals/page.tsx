@@ -1,4 +1,5 @@
-import { listAdviceRequests, listCircles, listHumanMembers, listProposals, requireWorkspaceMembership } from "@corgtex/domain";
+import { listAdviceRequests, listCircles, listHumanMembers, listProposalDecisionStates, listProposals, requireWorkspaceMembership } from "@corgtex/domain";
+import type { ProposalDecisionState } from "@corgtex/domain";
 import type { ReactNode } from "react";
 import { requirePageActor } from "@/lib/auth";
 import { MarkdownExcerpt } from "@/lib/components/MarkdownRenderer";
@@ -66,6 +67,10 @@ export default async function ProposalsPage({
     listHumanMembers(workspaceId),
     listAdviceRequests(actor, { workspaceId, subjectType: "PROPOSAL", status: "ACTIVE", take: 500 }),
   ]);
+  const decisionStates = await listProposalDecisionStates(actor, {
+    workspaceId,
+    proposalIds: proposals.map((proposal) => proposal.id),
+  });
   const isDemo = currentWorkspace?.slug === "jnj-demo";
   const memberName = (member: { user: { displayName: string | null; email: string } }) => member.user.displayName || member.user.email;
   const memberOptions = members.map((member) => ({ id: member.id, label: memberName(member) }));
@@ -142,6 +147,22 @@ export default async function ProposalsPage({
     if (status === "DRAFT") return t("btnReturnToDraft");
     if (status === "OPEN") return t("btnOpen");
     return t("btnResolve");
+  }
+
+  function proposalDecisionTags(state: ProposalDecisionState | null) {
+    if (!state) return [];
+    const tags: ReactNode[] = [];
+    if (state.needsReview) {
+      tags.push(<span key="review-requested" className="tag warning">{t("decisionTagReviewRequested")}</span>);
+    } else if (state.currentMemberDecision || state.currentUserOpenObjectionId) {
+      tags.push(<span key="reviewed" className="tag success">{t("decisionTagReviewed")}</span>);
+    } else {
+      tags.push(<span key="decision-open" className="tag info">{t("decisionTagOpen")}</span>);
+    }
+    if (state.openObjections.length > 0) {
+      tags.push(<span key="objection-open" className="tag danger">{t("decisionTagObjectionOpen", { count: state.openObjections.length })}</span>);
+    }
+    return tags;
   }
 
   function renderProposalMove(proposal: ProposalListItem, targetStatus: ProposalMoveStatus, options: { hidden?: boolean; primary?: boolean } = {}) {
@@ -276,6 +297,7 @@ export default async function ProposalsPage({
     const detailHref = `/workspaces/${workspaceId}/proposals/${proposal.id}`;
     const { hiddenTransitions, moreItems, primaryAction } = proposalControls(proposal);
     const adviceRequestCount = activeAdviceRequestCounts.get(proposal.id) ?? 0;
+    const decisionTags = proposalDecisionTags(decisionStates.get(proposal.id) ?? null);
 
     return (
       <div className={`${compact ? "nr-kanban-card" : "nr-item nr-list-card"} nr-clickable-card`} key={proposal.id}>
@@ -294,6 +316,7 @@ export default async function ProposalsPage({
             {adviceRequestCount > 0 && (
               <span className="tag warning">{t("adviceRequestedCount", { count: adviceRequestCount })}</span>
             )}
+            {decisionTags}
           </div>
           <MarkdownExcerpt markdown={proposal.summary ?? proposal.bodyMd} maxLength={compact ? 120 : 180} as="div" className="nr-excerpt" />
           <div className="nr-item-meta mt-2">
@@ -362,6 +385,7 @@ export default async function ProposalsPage({
     const detailHref = `/workspaces/${workspaceId}/proposals/${proposal.id}`;
     const { hiddenTransitions, moreItems, primaryAction } = proposalControls(proposal);
     const adviceRequestCount = activeAdviceRequestCounts.get(proposal.id) ?? 0;
+    const decisionTags = proposalDecisionTags(decisionStates.get(proposal.id) ?? null);
     const statusText = proposal.status === "RESOLVED" && proposal.resolutionOutcome
       ? `${proposalStatusLabel("RESOLVED")} · ${proposal.resolutionOutcome.replace("_", " ")}`
       : proposalStatusLabel(proposal.archivedAt ? "ARCHIVED" : proposal.status as ProposalColumnStatus);
@@ -412,6 +436,7 @@ export default async function ProposalsPage({
             {adviceRequestCount > 0 && (
               <span className="tag warning">{t("adviceRequestedCount", { count: adviceRequestCount })}</span>
             )}
+            {decisionTags}
           </div>
         ),
         actions: !isDemo ? (

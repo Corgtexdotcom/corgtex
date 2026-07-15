@@ -12,7 +12,7 @@ import { invariant } from "./errors";
 import { appendEvents } from "./events";
 import { requireWorkspaceMembership } from "./auth";
 
-type DecisionSummary = {
+export type DecisionSummary = {
   approve: number;
   reject: number;
   abstain: number;
@@ -20,7 +20,7 @@ type DecisionSummary = {
   block: number;
 };
 
-type ApprovalOutcome = {
+export type ApprovalOutcome = {
   approved: boolean;
   quorumMet: boolean;
   minApproverCountMet: boolean;
@@ -47,6 +47,35 @@ export type ActionableApprovalFlow = ApprovalFlow & {
     choice: ApprovalDecisionChoice;
   }>;
   subjectLabel: string;
+};
+
+export type ProposalDecisionState = {
+  proposalId: string;
+  flowId: string;
+  mode: ApprovalMode;
+  openedAt: Date | null;
+  closesAt: Date | null;
+  quorumPercent: number;
+  minApproverCount: number;
+  eligibleApprovers: number;
+  outcome: ApprovalOutcome;
+  currentMemberDecision: {
+    choice: ApprovalDecisionChoice;
+    rationale: string | null;
+    updatedAt: Date;
+  } | null;
+  openObjections: Array<{
+    id: string;
+    userId: string;
+    bodyMd: string;
+    createdAt: Date;
+    user: {
+      displayName: string | null;
+      email: string;
+    };
+  }>;
+  currentUserOpenObjectionId: string | null;
+  needsReview: boolean;
 };
 
 export function buildDecisionSummary(decisions: Array<{ choice: ApprovalDecisionChoice }>): DecisionSummary {
@@ -454,6 +483,113 @@ export async function listActionableApprovalFlows(
     take,
     skip,
   };
+}
+
+export async function listProposalDecisionStates(
+  actor: AppActor,
+  params: {
+    workspaceId: string;
+    proposalIds: string[];
+  },
+) {
+  const membership = await requireWorkspaceMembership({
+    actor,
+    workspaceId: params.workspaceId,
+  });
+  const proposalIds = Array.from(new Set(params.proposalIds.filter(Boolean)));
+  if (proposalIds.length === 0) {
+    return new Map<string, ProposalDecisionState>();
+  }
+
+  const [eligibleIds, flows] = await Promise.all([
+    eligibleApproverIds(prisma, params.workspaceId),
+    prisma.approvalFlow.findMany({
+      where: {
+        workspaceId: params.workspaceId,
+        subjectType: "PROPOSAL",
+        subjectId: { in: proposalIds },
+        status: "ACTIVE",
+      },
+      include: {
+        decisions: {
+          select: {
+            memberId: true,
+            choice: true,
+            rationale: true,
+            updatedAt: true,
+          },
+        },
+        objections: {
+          where: {
+            resolvedAt: null,
+          },
+          select: {
+            id: true,
+            userId: true,
+            bodyMd: true,
+            createdAt: true,
+            user: {
+              select: {
+                displayName: true,
+                email: true,
+              },
+            },
+          },
+          orderBy: { createdAt: "asc" },
+        },
+      },
+      orderBy: { createdAt: "desc" },
+    }),
+  ]);
+
+  const states = new Map<string, ProposalDecisionState>();
+
+  for (const flow of flows) {
+    const outcome = calculateApprovalOutcome({
+      mode: flow.mode,
+      quorumPercent: flow.quorumPercent,
+      minApproverCount: flow.minApproverCount,
+      decisions: flow.decisions,
+      eligibleApprovers: eligibleIds.length,
+      openObjections: flow.objections.length,
+    });
+    const currentMemberDecision = membership
+      ? flow.decisions.find((decision) => decision.memberId === membership.id) ?? null
+      : null;
+    const currentUserOpenObjection = membership
+      ? flow.objections.find((objection) => objection.userId === membership.userId) ?? null
+      : null;
+    const needsReview = Boolean(
+      membership
+      && (flow.mode === "CONSENT"
+        ? !currentMemberDecision && !currentUserOpenObjection
+        : !currentMemberDecision),
+    );
+
+    states.set(flow.subjectId, {
+      proposalId: flow.subjectId,
+      flowId: flow.id,
+      mode: flow.mode,
+      openedAt: flow.openedAt,
+      closesAt: flow.closesAt,
+      quorumPercent: flow.quorumPercent,
+      minApproverCount: flow.minApproverCount,
+      eligibleApprovers: eligibleIds.length,
+      outcome,
+      currentMemberDecision: currentMemberDecision
+        ? {
+          choice: currentMemberDecision.choice,
+          rationale: currentMemberDecision.rationale,
+          updatedAt: currentMemberDecision.updatedAt,
+        }
+        : null,
+      openObjections: flow.objections,
+      currentUserOpenObjectionId: currentUserOpenObjection?.id ?? null,
+      needsReview,
+    });
+  }
+
+  return states;
 }
 
 export async function withdrawActiveApprovalFlowForSubject(tx: Prisma.TransactionClient, params: {

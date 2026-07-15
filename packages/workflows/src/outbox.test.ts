@@ -255,8 +255,8 @@ describe("deriveNotificationsForEvent", () => {
         type: "proposal.submitted",
         entityType: "Proposal",
         entityId: "proposal-1",
-        title: "Proposal for review: Adopt async standup policy",
-        bodyMd: "The proposal **Adopt async standup policy** is awaiting approval.",
+        title: "Review requested: Adopt async standup policy",
+        bodyMd: "The proposal **Adopt async standup policy** is open for advisory review.",
       },
     ]);
   });
@@ -277,8 +277,8 @@ describe("deriveNotificationsForEvent", () => {
         type: "proposal.submitted",
         entityType: "Proposal",
         entityId: "proposal-1",
-        title: "Proposal submitted for review",
-        bodyMd: "A proposal is awaiting approval in the workspace dashboard.",
+        title: "Proposal review requested",
+        bodyMd: "A proposal is open for advisory review in the workspace dashboard.",
       },
     ]);
   });
@@ -301,8 +301,8 @@ describe("deriveNotificationsForEvent", () => {
         type: "proposal.opened",
         entityType: "Proposal",
         entityId: "proposal-1",
-        title: "Proposal for review: Hire a PM for growth",
-        bodyMd: "The proposal **Hire a PM for growth** is awaiting approval.",
+        title: "Review requested: Hire a PM for growth",
+        bodyMd: "The proposal **Hire a PM for growth** is open for advisory review.",
       },
     ]);
   });
