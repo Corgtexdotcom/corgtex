@@ -332,6 +332,35 @@ describe("workspace briefing", () => {
     }));
   });
 
+  it("renders completed advice requests as closed input context", async () => {
+    const { buildWorkspaceBriefingFromCandidates } = await import("./workspace-briefing");
+    const briefing = buildWorkspaceBriefingFromCandidates({
+      workspaceId: "ws-1",
+      period: "DAILY",
+      dateKey: "2026-04-30",
+      title: "Daily Workspace Briefing - 2026-04-30",
+      generatedAt: new Date("2026-04-30T12:00:00.000Z"),
+      candidates: [
+        baseCandidate({
+          sourceType: "ADVICE_REQUEST",
+          sourceId: "request-completed",
+          title: "Advice request completed",
+          summaryMd: "The support risk decision was completed.",
+          href: "/workspaces/ws-1/proposals/proposal-1",
+          occurredAt: new Date("2026-04-30T10:00:00.000Z"),
+          updatedAt: new Date("2026-04-30T10:00:00.000Z"),
+          status: "COMPLETED",
+          strategicScore: 2,
+          actionabilityScore: 1,
+          evidenceScore: 2,
+          sourceRefs: [{ type: "ADVICE_REQUEST", id: "request-completed", label: "Advice request completed", href: "/workspaces/ws-1/proposals/proposal-1" }],
+        }),
+      ],
+    });
+
+    expect(briefing.items[0].whyItMattersMd).toBe("This records input or advice that was closed recently.");
+  });
+
   it("applies boosted candidate ranking to digest-derived briefing order", async () => {
     const { buildWorkspaceBriefingFromDigest } = await import("./workspace-briefing");
     const briefing = buildWorkspaceBriefingFromDigest({
@@ -521,22 +550,29 @@ describe("workspace briefing", () => {
     expect(prismaMock.brainArticle.findMany).toHaveBeenCalledWith(expect.objectContaining({
       where: expect.objectContaining({ workspaceId: "ws-1", isPrivate: false, archivedAt: null }),
     }));
-    expect(prismaMock.adviceRequest.findMany).toHaveBeenCalledWith(expect.objectContaining({
-      where: expect.objectContaining({
-        workspaceId: "ws-1",
-        audienceType: "WORKSPACE",
-        OR: [
-          { status: "ACTIVE" },
-          {
-            status: "COMPLETED",
-            OR: [
-              { completedAt: { gte: new Date("2026-04-29T00:00:00.000Z") } },
-              { updatedAt: { gte: new Date("2026-04-29T00:00:00.000Z") } },
-            ],
-          },
-        ],
+    const adviceRequestCalls = prismaMock.adviceRequest.findMany.mock.calls.map(([args]) => args);
+    expect(adviceRequestCalls).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        where: expect.objectContaining({
+          workspaceId: "ws-1",
+          audienceType: "WORKSPACE",
+          status: "ACTIVE",
+        }),
+        take: 30,
       }),
-    }));
+      expect.objectContaining({
+        where: expect.objectContaining({
+          workspaceId: "ws-1",
+          audienceType: "WORKSPACE",
+          status: "COMPLETED",
+          OR: [
+            { completedAt: { gte: new Date("2026-04-29T00:00:00.000Z") } },
+            { updatedAt: { gte: new Date("2026-04-29T00:00:00.000Z") } },
+          ],
+        }),
+        take: 10,
+      }),
+    ]));
   });
 
   it("does not attach unrelated source refs to digest-derived sections", async () => {
@@ -614,7 +650,7 @@ describe("workspace briefing", () => {
 
   it("links workspace advice requests to their actual subject", async () => {
     const { collectWorkspaceBriefingCandidates } = await import("./workspace-briefing");
-    prismaMock.adviceRequest.findMany.mockResolvedValue([{
+    prismaMock.adviceRequest.findMany.mockResolvedValueOnce([{
       id: "request-1",
       messageMd: "Please advise on the support risk.",
       status: "ACTIVE",
@@ -623,7 +659,7 @@ describe("workspace briefing", () => {
       createdAt: new Date("2026-04-30T08:00:00.000Z"),
       updatedAt: new Date("2026-04-30T09:00:00.000Z"),
       process: { subjectType: "TENSION", subjectId: "tension-1" },
-    }, {
+    }]).mockResolvedValueOnce([{
       id: "request-2",
       messageMd: "The support risk decision was completed.",
       status: "COMPLETED",
@@ -652,6 +688,7 @@ describe("workspace briefing", () => {
         title: "Advice request completed",
         href: "/workspaces/ws-1/proposals/proposal-1",
         occurredAt: new Date("2026-04-30T10:00:00.000Z"),
+        dueAt: null,
       }),
     ]));
   });

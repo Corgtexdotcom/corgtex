@@ -331,7 +331,9 @@ function whyCandidateMatters(candidate: WorkspaceBriefingCandidate) {
   if (candidate.sourceType === "PROPOSAL") return candidate.status === "OPEN" ? "A decision, advice, or alignment may still be needed before this moves forward." : "This records a decision or operating change.";
   if (candidate.sourceType === "MEETING") return "This is recent operating evidence and may contain decisions or follow-ups.";
   if (candidate.sourceType === "GOAL") return "This connects today’s work to current strategic direction.";
-  if (candidate.sourceType === "ADVICE_REQUEST") return "Someone is asking for input before work can move forward.";
+  if (candidate.sourceType === "ADVICE_REQUEST") return candidate.status === "ACTIVE"
+    ? "Someone is asking for input before work can move forward."
+    : "This records input or advice that was closed recently.";
   if (candidate.sourceType === "BUILD_ARTIFACT") return "This reflects shipped or in-flight implementation work.";
   return "This is useful context for understanding the workspace right now.";
 }
@@ -673,6 +675,17 @@ export async function collectWorkspaceBriefingCandidates(params: {
     await requireWorkspaceMembership({ actor: params.actor, workspaceId: params.workspaceId });
   }
 
+  const adviceRequestSelect = {
+    id: true,
+    messageMd: true,
+    status: true,
+    deadlineAt: true,
+    completedAt: true,
+    createdAt: true,
+    updatedAt: true,
+    process: { select: { subjectType: true, subjectId: true } },
+  } as const;
+
   const [
     meetings,
     proposals,
@@ -684,7 +697,8 @@ export async function collectWorkspaceBriefingCandidates(params: {
     documents,
     communicationSummaries,
     buildArtifacts,
-    adviceRequests,
+    activeAdviceRequests,
+    completedAdviceRequests,
   ] = await Promise.all([
     prisma.meeting.findMany({
       where: {
@@ -825,31 +839,29 @@ export async function collectWorkspaceBriefingCandidates(params: {
       where: {
         workspaceId: params.workspaceId,
         audienceType: "WORKSPACE",
-        OR: [
-          { status: "ACTIVE" },
-          {
-            status: "COMPLETED",
-            OR: [
-              { completedAt: { gte: params.since } },
-              { updatedAt: { gte: params.since } },
-            ],
-          },
-        ],
+        status: "ACTIVE",
       },
       orderBy: [{ deadlineAt: "asc" }, { updatedAt: "desc" }],
       take: 30,
-      select: {
-        id: true,
-        messageMd: true,
-        status: true,
-        deadlineAt: true,
-        completedAt: true,
-        createdAt: true,
-        updatedAt: true,
-        process: { select: { subjectType: true, subjectId: true } },
+      select: adviceRequestSelect,
+    }),
+    prisma.adviceRequest.findMany({
+      where: {
+        workspaceId: params.workspaceId,
+        audienceType: "WORKSPACE",
+        status: "COMPLETED",
+        OR: [
+          { completedAt: { gte: params.since } },
+          { updatedAt: { gte: params.since } },
+        ],
       },
+      orderBy: [{ completedAt: "desc" }, { updatedAt: "desc" }],
+      take: 10,
+      select: adviceRequestSelect,
     }),
   ]);
+
+  const adviceRequests = [...activeAdviceRequests, ...completedAdviceRequests];
 
   return [
     ...meetings.map((meeting) => candidate({
@@ -1003,7 +1015,7 @@ export async function collectWorkspaceBriefingCandidates(params: {
       occurredAt: request.completedAt ?? request.updatedAt ?? request.createdAt,
       updatedAt: request.updatedAt,
       status: request.status,
-      dueAt: request.deadlineAt,
+      dueAt: request.status === "ACTIVE" ? request.deadlineAt : null,
       strategicScore: 2,
       actionabilityScore: request.status === "ACTIVE" ? 4 : 1,
       evidenceScore: 2,
