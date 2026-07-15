@@ -953,6 +953,7 @@
     "system": "Sistema",
     "tension": "Tensión",
     "updated": "Actualizado",
+    "unreadNotificationsSummaryCapped": "{count}+ notificaciones sin leer",
     "unreadNotificationsSummary": "{count, plural, =1 {# notificación sin leer} other {# notificaciones sin leer}}",
     "viewAll": "Ver todo →",
     "weeklyEdition": "Edición semanal",

@@ -6,7 +6,8 @@ import {
   listMembers, listNotifications, listTensions,
   listArticles, listMeetings,
   normalizeNewspaperEditionDigest,
-  normalizeWorkspaceBriefingPayload
+  normalizeWorkspaceBriefingPayload,
+  workspaceBriefingSourceLabel
 } from "@corgtex/domain";
 import { prisma, workspaceBranding } from "@corgtex/shared";
 import { requirePageActor } from "@/lib/auth";
@@ -21,8 +22,11 @@ import { getDashboardAttentionCounts } from "@/lib/dashboard-attention";
 import { MarkdownExcerpt } from "@/lib/components/MarkdownRenderer";
 import { resolveWorkspaceEntityUrl } from "@/lib/workspace-entity-url";
 import {
+  capDashboardUnreadNotificationCount,
+  isDashboardUnreadNotificationCountCapped,
   selectDashboardActionItems,
   selectDashboardFeedItems,
+  selectDashboardNotificationPreviewLimit,
   selectDashboardOpenProposals,
 } from "@/lib/dashboard-briefing";
 
@@ -143,6 +147,9 @@ export default async function WorkspaceDashboard({
   const currentMemberUrl = currentMember?.id;
 
   const unreadNotifications = notifications;
+  const unreadNotificationsDisplayCount = capDashboardUnreadNotificationCount(unreadNotificationsCount);
+  const isUnreadNotificationsCountCapped = isDashboardUnreadNotificationCountCapped(unreadNotificationsCount);
+  const notificationPreviewLimit = selectDashboardNotificationPreviewLimit(unreadNotificationsCount);
   const openProposalItems = selectDashboardOpenProposals(openProposalCandidates);
   const teamActionItems = selectDashboardActionItems(teamActionCandidates);
   const openTensionItems = tensions.filter((tension) => tension.status === "OPEN");
@@ -320,7 +327,9 @@ export default async function WorkspaceDashboard({
       <h2 className="nr-section-header">{t("attention")}</h2>
       <div className="nr-attention nr-attention-rail">
         <div className="nr-attention-summary">
-          {t("unreadNotificationsSummary", { count: unreadNotificationsCount })}
+          {t(isUnreadNotificationsCountCapped ? "unreadNotificationsSummaryCapped" : "unreadNotificationsSummary", {
+            count: unreadNotificationsDisplayCount,
+          })}
         </div>
 
         <div className="nr-attention-body">
@@ -336,7 +345,7 @@ export default async function WorkspaceDashboard({
                 <button type="submit" className="nr-attention-mark-read-button">{t("markRead")}</button>
               </form>
             </div>
-            {unreadNotifications.slice(0, 3).map((n) => {
+            {unreadNotifications.slice(0, notificationPreviewLimit).map((n) => {
               const href = resolveWorkspaceEntityUrl(workspaceId, n.entityType, n.entityId);
               return (
                 <div key={n.id} className="nr-attention-notification">
@@ -432,7 +441,7 @@ export default async function WorkspaceDashboard({
                     className={`nr-briefing-item nr-briefing-item-${item.prominence}`}
                   >
                     <div className="nr-feed-meta">
-                      <span>{item.kind.replace(/_/g, " ")}</span>
+                      <span>{workspaceBriefingSourceLabel(item.kind)}</span>
                       <span>·</span>
                       <span suppressHydrationWarning>
                         {Number.isNaN(occurredAt.getTime()) ? latestBriefing.dateKey : ageText(occurredAt)}
@@ -466,7 +475,7 @@ export default async function WorkspaceDashboard({
                   const isExternalHref = item.href?.startsWith("http://") || item.href?.startsWith("https://");
                   const content = (
                     <>
-                      <span>{item.kind.replace(/_/g, " ")}</span>
+                      <span>{workspaceBriefingSourceLabel(item.kind)}</span>
                       <strong>{item.title}</strong>
                     </>
                   );

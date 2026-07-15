@@ -953,6 +953,7 @@
     "system": "System",
     "tension": "Tension",
     "updated": "Updated",
+    "unreadNotificationsSummaryCapped": "{count}+ unread notifications",
     "unreadNotificationsSummary": "{count, plural, =1 {# unread notification} other {# unread notifications}}",
     "viewAll": "View All →",
     "weeklyEdition": "Weekly edition",

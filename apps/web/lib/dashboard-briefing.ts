@@ -237,3 +237,15 @@ export function selectDashboardActionItems<T extends DashboardAction>(actions: T
     })
     .slice(0, Math.max(0, Math.floor(limit)));
 }
+
+export function capDashboardUnreadNotificationCount(count: number) {
+  return Math.min(99, Math.max(0, Math.floor(count)));
+}
+
+export function isDashboardUnreadNotificationCountCapped(count: number) {
+  return Math.floor(count) > 99;
+}
+
+export function selectDashboardNotificationPreviewLimit(unreadCount: number) {
+  return unreadCount > 20 ? 2 : 3;
+}
