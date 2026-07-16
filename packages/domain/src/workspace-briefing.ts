@@ -500,16 +500,20 @@ function composeWorkspaceBriefingNarrative(params: {
     label: params.period === "WEEKLY" ? "Last 30-90 days" : "Current month context",
   });
   const meaningfulItems = params.items.filter((item) => item.kind !== "QUIET");
-  const leadItem = params.items[0] ?? quietBriefingItem(params.generatedAt);
   const freshItems = meaningfulItems.filter((item) => isFreshBriefingItem(item, params.period, params.generatedAt));
+  const hasFreshItems = freshItems.length > 0;
+  const leadItem = hasFreshItems ? freshItems[0] ?? quietBriefingItem(params.generatedAt) : quietBriefingItem(params.generatedAt);
 
-  const leadMd = leadItem.kind === "QUIET"
+  const leadMd = !hasFreshItems
     ? "No major new operating signal was found for this edition. The briefing stays short and uses continuing context instead of inventing activity."
     : sentenceFromItem(leadItem, params.period === "WEEKLY" ? 980 : 860);
   const bodyCandidates = freshItems.filter((item) => item !== leadItem);
-  const bodyItems = (bodyCandidates.length > 0 ? bodyCandidates : meaningfulItems.slice(1))
+  const bodyItems = (bodyCandidates.length > 0 ? bodyCandidates : hasFreshItems ? meaningfulItems.slice(1) : [])
     .slice(0, params.period === "WEEKLY" ? 5 : 4);
-  const usedKeys = new Set([itemKey(leadItem), ...bodyItems.map(itemKey)]);
+  const usedKeys = new Set([
+    ...(hasFreshItems ? [itemKey(leadItem)] : []),
+    ...bodyItems.map(itemKey),
+  ]);
   const attentionItems = meaningfulItems
     .filter((item) => isAttentionBriefingItem(item) && !usedKeys.has(itemKey(item)))
     .slice(0, 3);
@@ -528,7 +532,11 @@ function composeWorkspaceBriefingNarrative(params: {
     : meaningfulItems.length > 0
       ? "No source links are attached to this edition, so the story above is the complete generated briefing."
       : "No source links are attached because no high-signal workspace activity was found for this period.";
-  const introMd = params.fallbackIntro
+  const introMd = !hasFreshItems && meaningfulItems.length > 0 && !params.fallbackIntro
+    ? params.period === "WEEKLY"
+      ? "This weekly edition found no fresh operating signal in the last 7 days, so it keeps unresolved context that still affects current work."
+      : "This daily edition found no fresh operating signal in the last 24-36 hours, so it keeps continuing context that still matters today."
+    : params.fallbackIntro
     ? normalizeNarrativeText(params.fallbackIntro, 640)
     : params.period === "WEEKLY"
       ? "This weekly edition starts with the strongest operating development from the week, then keeps unresolved context that still affects current work."
@@ -996,6 +1004,7 @@ export async function collectWorkspaceBriefingCandidates(params: {
   workspaceId: string;
   since: Date;
   actor?: AppActor;
+  now?: Date;
 }): Promise<WorkspaceBriefingCandidate[]> {
   if (params.actor) {
     await requireWorkspaceMembership({ actor: params.actor, workspaceId: params.workspaceId });
@@ -1207,7 +1216,7 @@ export async function collectWorkspaceBriefingCandidates(params: {
       title: meeting.title?.trim() || "Meeting recap",
       summaryMd: compactText(meeting.summaryMd, 1200),
       href: workspacePath(params.workspaceId, `/meetings/${meeting.id}`),
-      occurredAt: meetingFreshnessDate(meeting),
+      occurredAt: meetingFreshnessDate(meeting, params.now),
       updatedAt: meeting.updatedAt,
       strategicScore: meeting.decisionsJson ? 3 : 2,
       actionabilityScore: meeting.summaryMd ? 1 : 0,
@@ -1471,6 +1480,7 @@ export async function generateWorkspaceBriefing(params: {
   const candidates = await collectWorkspaceBriefingCandidates({
     workspaceId: params.workspaceId,
     since,
+    now: date,
   });
   const briefing = buildWorkspaceBriefingFromCandidates({
     workspaceId: params.workspaceId,

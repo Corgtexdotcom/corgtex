@@ -1306,6 +1306,7 @@ export async function runDailyDigest(params: {
   const briefingCandidates = await collectWorkspaceBriefingCandidates({
     workspaceId: params.workspaceId,
     since: briefingSince,
+    now: generationDate,
   });
   const personalItemsByMemberId = buildPersonalActionItemsByMember({
     workspaceId: params.workspaceId,

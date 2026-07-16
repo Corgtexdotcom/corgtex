@@ -161,6 +161,13 @@ export default async function WorkspaceDashboard({
             <MarkdownRenderer markdown={fallbackNarrative.leadMd} variant="document" className="nr-newspaper-lead" />
             <MarkdownRenderer markdown={fallbackNarrative.bodyMd} variant="document" />
             <MarkdownRenderer markdown={fallbackNarrative.closingMd} variant="document" className="nr-newspaper-closing" />
+            {latestNewspaperEdition && (
+              <p>
+                <Link href={`/workspaces/${workspaceId}/brain/${latestNewspaperEdition.slug}`} className="nr-link">
+                  {t("readFullEdition")}
+                </Link>
+              </p>
+            )}
           </div>
         ) : (
           <div className="nr-newspaper-body">

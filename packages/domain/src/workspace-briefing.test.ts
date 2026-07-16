@@ -768,6 +768,41 @@ describe("workspace briefing", () => {
     }));
   });
 
+  it("frames all-stale editions as continuing context instead of a fresh lead", async () => {
+    const { buildWorkspaceBriefingFromCandidates } = await import("./workspace-briefing");
+    const briefing = buildWorkspaceBriefingFromCandidates({
+      workspaceId: "ws-1",
+      period: "DAILY",
+      dateKey: "2026-04-30",
+      title: "Daily Workspace Briefing - 2026-04-30",
+      generatedAt: new Date("2026-04-30T12:00:00.000Z"),
+      candidates: [
+        baseCandidate({
+          sourceType: "PROPOSAL",
+          sourceId: "proposal-stale",
+          title: "Strategic market entry proposal",
+          summaryMd: "A strategic proposal remains open and still matters.",
+          href: "/workspaces/ws-1/proposals/proposal-stale",
+          occurredAt: new Date("2026-03-10T12:00:00.000Z"),
+          updatedAt: new Date("2026-03-10T12:00:00.000Z"),
+          status: "OPEN",
+          priority: 3,
+          strategicScore: 5,
+          actionabilityScore: 4,
+          evidenceScore: 3,
+          sourceRefs: [{ type: "PROPOSAL", id: "proposal-stale", label: "Strategic market entry proposal", href: "/workspaces/ws-1/proposals/proposal-stale" }],
+        }),
+      ],
+    });
+
+    expect(briefing.introMd).toContain("found no fresh operating signal");
+    expect(briefing.leadMd).toContain("No major new operating signal");
+    expect([
+      briefing.attentionMd,
+      briefing.continuingContextMd,
+    ].filter(Boolean).join("\n")).toContain("Strategic market entry proposal");
+  });
+
   it("uses narrative text instead of mechanical source counts or visible categories", async () => {
     const { buildWorkspaceBriefingFromCandidates } = await import("./workspace-briefing");
     const briefing = buildWorkspaceBriefingFromCandidates({
@@ -781,6 +816,8 @@ describe("workspace briefing", () => {
           sourceType: "PROPOSAL",
           sourceId: "proposal-1",
           title: "Proposal update",
+          occurredAt: new Date("2026-04-30T10:00:00.000Z"),
+          updatedAt: new Date("2026-04-30T10:00:00.000Z"),
           status: "OPEN",
           strategicScore: 3,
           actionabilityScore: 3,
@@ -790,6 +827,8 @@ describe("workspace briefing", () => {
           sourceType: "TENSION",
           sourceId: "tension-1",
           title: "Active tension",
+          occurredAt: new Date("2026-04-30T09:00:00.000Z"),
+          updatedAt: new Date("2026-04-30T09:00:00.000Z"),
           status: "OPEN",
           strategicScore: 2,
           actionabilityScore: 3,
@@ -799,6 +838,8 @@ describe("workspace briefing", () => {
           sourceType: "GOAL",
           sourceId: "goal-1",
           title: "Strategic goal",
+          occurredAt: new Date("2026-04-30T08:00:00.000Z"),
+          updatedAt: new Date("2026-04-30T08:00:00.000Z"),
           strategicScore: 4,
           actionabilityScore: 1,
           sourceRefs: [{ type: "GOAL", id: "goal-1", label: "Strategic goal", href: "/workspaces/ws-1/goals" }],
@@ -1076,6 +1117,35 @@ describe("workspace briefing", () => {
     ]));
   });
 
+  it("compares future meetings against the briefing edition timestamp on retries", async () => {
+    const { collectWorkspaceBriefingCandidates } = await import("./workspace-briefing");
+    prismaMock.meeting.findMany.mockResolvedValueOnce([{
+      id: "meeting-after-edition",
+      title: "Future meeting for historical edition",
+      summaryMd: "The recap was uploaded after the edition cutoff.",
+      recordedAt: new Date("2026-05-01T12:00:00.000Z"),
+      updatedAt: new Date("2026-04-30T09:00:00.000Z"),
+      createdAt: new Date("2026-04-30T08:00:00.000Z"),
+      summaryPostedAt: null,
+      aiProcessedAt: null,
+      decisionsJson: null,
+    }]);
+
+    const candidates = await collectWorkspaceBriefingCandidates({
+      workspaceId: "ws-1",
+      since: new Date("2026-04-01T00:00:00.000Z"),
+      now: new Date("2026-04-30T12:00:00.000Z"),
+    });
+
+    expect(candidates).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        sourceType: "MEETING",
+        sourceId: "meeting-after-edition",
+        occurredAt: new Date("2026-04-30T09:00:00.000Z"),
+      }),
+    ]));
+  });
+
   it("converts briefing narrative into the shared newsletter digest shape", async () => {
     const { buildWorkspaceBriefingFromCandidates, workspaceBriefingToNewspaperDigest } = await import("./workspace-briefing");
     const briefing = buildWorkspaceBriefingFromCandidates({
@@ -1090,6 +1160,8 @@ describe("workspace briefing", () => {
           sourceId: "build-1",
           title: "Homepage briefing shipped",
           summaryMd: "The new briefing surface shipped.",
+          occurredAt: new Date("2026-04-30T10:00:00.000Z"),
+          updatedAt: new Date("2026-04-30T10:00:00.000Z"),
           strategicScore: 3,
           evidenceScore: 2,
           sourceRefs: [{ type: "BUILD_ARTIFACT", id: "build-1", label: "Homepage briefing shipped", href: "https://github.com/example/pull/1" }],
