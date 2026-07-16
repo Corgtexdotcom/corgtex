@@ -4,12 +4,9 @@ import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { PrismaClient } from "@prisma/client";
 
-export const MANUAL_TRANSCRIPT_SOURCES = new Set([
-  "chat-transcript-upload",
-  "chat-upload",
-  "text-paste",
-  "transcript-upload",
-]);
+const PROVIDER_SOURCE_PREFIX = "meeting-transcript:";
+const RECORDER_SOURCE_PREFIXES = ["recorder:", "meeting-recorder"];
+const RECORDER_SOURCES = new Set(["manual-recorder", "recorder"]);
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -64,6 +61,27 @@ function minutesBetween(left, right) {
   return Math.round(Math.abs(left.getTime() - right.getTime()) / 60_000);
 }
 
+function isManualTranscriptMeeting(meeting) {
+  const source = meeting.source ?? "";
+  return !source.startsWith(PROVIDER_SOURCE_PREFIX)
+    && !RECORDER_SOURCES.has(source)
+    && !RECORDER_SOURCE_PREFIXES.some((prefix) => source.startsWith(prefix));
+}
+
+function progressDate(progress, key) {
+  const value = progress?.[key];
+  return value instanceof Date && !Number.isNaN(value.valueOf()) ? value : null;
+}
+
+function transcriptObservedAt(meeting) {
+  const progress = meeting.transcriptProcessingProgress ?? null;
+  return progressDate(progress, "createdAt")
+    ?? progressDate(progress, "startedAt")
+    ?? progressDate(progress, "updatedAt")
+    ?? meeting.updatedAt
+    ?? meeting.createdAt;
+}
+
 function serializableMeeting(meeting) {
   const progress = meeting.transcriptProcessingProgress ?? null;
   return {
@@ -77,6 +95,8 @@ function serializableMeeting(meeting) {
       ? {
           currentStage: progress.currentStage ?? null,
           currentWorkflowJobStatus: progress.currentWorkflowJobStatus ?? null,
+          createdAt: progress.createdAt?.toISOString?.() ?? null,
+          startedAt: progress.startedAt?.toISOString?.() ?? null,
           failedAt: progress.failedAt?.toISOString?.() ?? null,
           updatedAt: progress.updatedAt?.toISOString?.() ?? null,
         }
@@ -94,12 +114,13 @@ export function buildMeetingTranscriptUploadDiagnostics({
   const transcriptGroups = new Map();
 
   for (const meeting of meetings) {
-    if (!MANUAL_TRANSCRIPT_SOURCES.has(meeting.source ?? "")) continue;
+    if (!isManualTranscriptMeeting(meeting)) continue;
     if (!meeting.transcript?.trim()) continue;
 
     const meetingSummary = serializableMeeting(meeting);
-    const driftDays = meeting.recordedAt && meeting.createdAt
-      ? daysBetween(meeting.recordedAt, meeting.createdAt)
+    const observedAt = transcriptObservedAt(meeting);
+    const driftDays = meeting.recordedAt && observedAt
+      ? daysBetween(meeting.recordedAt, observedAt)
       : null;
 
     if (driftDays !== null && driftDays > maxRecordedAtDriftDays) {
@@ -116,8 +137,13 @@ export function buildMeetingTranscriptUploadDiagnostics({
     group.push(meeting);
     transcriptGroups.set(hash, group);
 
-    const ageMinutes = meeting.createdAt ? minutesBetween(checkedAt, meeting.createdAt) : 0;
     const progress = meeting.transcriptProcessingProgress ?? null;
+    const processingObservedAt = progressDate(progress, "createdAt")
+      ?? progressDate(progress, "startedAt")
+      ?? progressDate(progress, "updatedAt")
+      ?? meeting.updatedAt
+      ?? meeting.createdAt;
+    const ageMinutes = processingObservedAt ? minutesBetween(checkedAt, processingObservedAt) : 0;
     if (ageMinutes >= processingPendingMinutes && progress?.currentStage !== "READY") {
       advisories.push({
         kind: "transcript_processing_not_ready",
@@ -167,7 +193,6 @@ async function loadMeetings(prisma, workspaceId, since) {
       workspaceId,
       transcript: { not: null },
       archivedAt: null,
-      source: { in: [...MANUAL_TRANSCRIPT_SOURCES] },
       OR: [
         { createdAt: { gte: since } },
         { updatedAt: { gte: since } },
@@ -186,6 +211,8 @@ async function loadMeetings(prisma, workspaceId, since) {
         select: {
           currentStage: true,
           currentWorkflowJobStatus: true,
+          createdAt: true,
+          startedAt: true,
           failedAt: true,
           updatedAt: true,
         },

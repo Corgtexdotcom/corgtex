@@ -80,6 +80,16 @@ function asPlausibleRecordedAt(value: unknown, now = new Date()) {
   return isPlausibleMeetingRecordedAt(recordedAt, now) ? recordedAt : null;
 }
 
+function recordedAtForCanonicalWrite(params: {
+  value: unknown;
+  validatePlausibility?: boolean;
+  now?: Date;
+}) {
+  return params.validatePlausibility
+    ? asPlausibleRecordedAt(params.value, params.now)
+    : asValidDate(params.value);
+}
+
 function parseDateFromText(input: string) {
   const iso = input.match(/\b20\d{2}-\d{2}-\d{2}(?:[T\s]\d{1,2}:\d{2}(?::\d{2})?(?:\.\d{3})?(?:Z|[+-]\d{2}:?\d{2})?)?\b/);
   if (iso) return asValidDate(iso[0]);
@@ -154,10 +164,15 @@ export async function inferMeetingTranscriptMetadata(params: {
   recordedAt?: Date | string | null;
   participantEmails?: string[] | null;
   allowInferredRecordedAt?: boolean;
+  validateExplicitRecordedAt?: boolean;
   now?: Date;
 }) {
   const explicitTitle = cleanTitle(params.title);
-  const explicitRecordedAt = asPlausibleRecordedAt(params.recordedAt, params.now);
+  const explicitRecordedAt = recordedAtForCanonicalWrite({
+    value: params.recordedAt,
+    validatePlausibility: params.validateExplicitRecordedAt,
+    now: params.now,
+  });
   const needsModelMetadata = !explicitTitle || !explicitRecordedAt;
   const modelMetadata = needsModelMetadata
     ? await inferMetadataWithModel(params)
@@ -223,8 +238,9 @@ export async function intakeMeetingTranscript(actor: AppActor, params: {
     userMessage: params.userMessage,
     title: params.title ?? existingMeeting?.title ?? null,
     source: params.source,
-    recordedAt: params.recordedAt ?? existingMeeting?.recordedAt ?? null,
+    recordedAt: existingMeeting?.recordedAt ?? params.recordedAt ?? null,
     participantEmails: [...(params.participantEmails ?? []), ...(existingMeeting?.participantEmails ?? [])],
+    validateExplicitRecordedAt: Boolean(!params.provider && !existingMeeting),
     now: params.now,
   });
 

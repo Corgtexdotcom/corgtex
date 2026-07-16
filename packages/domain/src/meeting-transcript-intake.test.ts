@@ -132,6 +132,36 @@ describe("meeting transcript intake", () => {
     expect(uploadMeetingTranscriptMock).not.toHaveBeenCalled();
   });
 
+  it("allows trusted provider imports to keep historical recordedAt values", async () => {
+    uploadMeetingTranscriptMock.mockResolvedValueOnce({
+      status: "created",
+      meeting: { id: "meeting-provider" },
+      candidates: [],
+    });
+    const { intakeMeetingTranscript } = await import("./meeting-transcript-intake");
+
+    await expect(intakeMeetingTranscript({
+      kind: "agent",
+      authProvider: "bootstrap",
+      label: "test-agent",
+      workspaceIds: ["workspace-1"],
+    }, {
+      workspaceId: "workspace-1",
+      title: "Historical provider transcript",
+      recordedAt: new Date("2001-07-15T11:00:00.000Z"),
+      source: "meeting-transcript:fireflies",
+      provider: "FIREFLIES",
+      transcript: "Jan: Provider imported this historical meeting.",
+      now: TEST_NOW,
+    })).resolves.toMatchObject({
+      status: "meeting_created",
+      meeting: { id: "meeting-provider" },
+    });
+    expect(uploadMeetingTranscriptMock).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+      recordedAt: new Date("2001-07-15T11:00:00.000Z"),
+    }));
+  });
+
   it("keeps source URLs out of meeting join URL matching", async () => {
     uploadMeetingTranscriptMock.mockResolvedValueOnce({
       status: "created",

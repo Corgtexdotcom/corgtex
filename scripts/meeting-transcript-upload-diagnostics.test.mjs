@@ -18,6 +18,8 @@ function meeting(overrides) {
     transcriptProcessingProgress: {
       currentStage: "READY",
       currentWorkflowJobStatus: "COMPLETED",
+      createdAt: new Date("2026-07-15T17:01:00.000Z"),
+      startedAt: new Date("2026-07-15T17:02:00.000Z"),
       failedAt: null,
       updatedAt: new Date("2026-07-15T17:05:00.000Z"),
     },
@@ -59,8 +61,8 @@ describe("meeting transcript upload diagnostics", () => {
     const summary = buildMeetingTranscriptUploadDiagnostics({
       checkedAt: new Date("2026-07-16T12:00:00.000Z"),
       meetings: [
-        meeting({ id: "meeting-a", transcript: "Jan: Same transcript." }),
-        meeting({ id: "meeting-b", transcript: "Jan:   Same transcript.\n" }),
+        meeting({ id: "meeting-a", source: "customer-interview", transcript: "Jan: Same transcript." }),
+        meeting({ id: "meeting-b", source: "Zoom", transcript: "Jan:   Same transcript.\n" }),
       ],
     });
 
@@ -76,6 +78,21 @@ describe("meeting transcript upload diagnostics", () => {
     expect(JSON.stringify(duplicate)).not.toContain("Same transcript");
   });
 
+  it("excludes provider transcript source records from manual upload diagnostics", () => {
+    const summary = buildMeetingTranscriptUploadDiagnostics({
+      checkedAt: new Date("2026-07-16T12:00:00.000Z"),
+      meetings: [
+        meeting({
+          id: "provider-import",
+          source: "meeting-transcript:fireflies",
+          recordedAt: new Date("2001-07-15T16:00:00.000Z"),
+        }),
+      ],
+    });
+
+    expect(summary.advisories).toEqual([]);
+  });
+
   it("flags transcript processing that has not reached READY", () => {
     const summary = buildMeetingTranscriptUploadDiagnostics({
       checkedAt: new Date("2026-07-16T12:00:00.000Z"),
@@ -86,6 +103,8 @@ describe("meeting transcript upload diagnostics", () => {
           transcriptProcessingProgress: {
             currentStage: "SUMMARIZING",
             currentWorkflowJobStatus: "PENDING",
+            createdAt: new Date("2026-07-16T10:00:00.000Z"),
+            startedAt: new Date("2026-07-16T10:01:00.000Z"),
             failedAt: null,
             updatedAt: new Date("2026-07-16T10:01:00.000Z"),
           },
@@ -97,5 +116,28 @@ describe("meeting transcript upload diagnostics", () => {
       kind: "transcript_processing_not_ready",
       meeting: expect.objectContaining({ id: "stuck-processing" }),
     }));
+  });
+
+  it("does not mark newly started processing stale because the meeting record is old", () => {
+    const summary = buildMeetingTranscriptUploadDiagnostics({
+      checkedAt: new Date("2026-07-16T12:00:00.000Z"),
+      meetings: [
+        meeting({
+          id: "fresh-processing-existing-meeting",
+          createdAt: new Date("2026-06-01T10:00:00.000Z"),
+          updatedAt: new Date("2026-07-16T11:59:00.000Z"),
+          transcriptProcessingProgress: {
+            currentStage: "SUMMARIZING",
+            currentWorkflowJobStatus: "PENDING",
+            createdAt: new Date("2026-07-16T11:59:00.000Z"),
+            startedAt: new Date("2026-07-16T11:59:30.000Z"),
+            failedAt: null,
+            updatedAt: new Date("2026-07-16T11:59:30.000Z"),
+          },
+        }),
+      ],
+    });
+
+    expect(summary.advisories).toEqual([]);
   });
 });
