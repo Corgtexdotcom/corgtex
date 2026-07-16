@@ -461,6 +461,10 @@ function rawStringValue(value: unknown) {
   return typeof value === "string" && value.length > 0 ? value : null;
 }
 
+function escapeRegExp(value: string) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 function escapeMarkdownText(value: string) {
   return value.replace(/([\\`*_{}\[\]()#+.!<>|])/g, "\\$1");
 }
@@ -532,6 +536,92 @@ function crmCurrentAccountAnswer(ctx: ConversationContext) {
   if (visibleAccount) return visibleAccount;
 
   return "I do not have a selected CRM account in the current CRM page context.";
+}
+
+function explicitCrmToolCommand(message: string) {
+  if (/^\s*Use\s+list_due_relationship_work\s+for\s+selected\s+account\s+[A-Za-z0-9-]+\.\s+Reply\s+with\s+a\s+short\s+due-work\s+summary\.?\s*$/i.test(message)) {
+    return "list_due_relationship_work";
+  }
+  if (/^\s*Prepare\s+a\s+pending\s+CRM\s+follow-up\s+by\s+calling\s+record_relationship_activity\s+now\./i.test(message)) {
+    return "record_relationship_activity";
+  }
+  if (/^\s*Prepare\s+a\s+pending\s+completion\s+by\s+calling\s+complete_relationship_activity\s+now\b/i.test(message)) {
+    return "complete_relationship_activity";
+  }
+  return null;
+}
+
+function labeledCrmCommandValue(message: string, label: string, nextLabels: string[] = []) {
+  const nextPattern = nextLabels.length > 0
+    ? `(?=\\.\\s*(?:${nextLabels.map(escapeRegExp).join("|")})\\s*:|\\.\\s*Return\\b|$)`
+    : "(?=\\.\\s*Return\\b|$)";
+  const pattern = new RegExp(`${escapeRegExp(label)}\\s*:\\s*([\\s\\S]*?)\\s*${nextPattern}`, "i");
+  return stringValue(message.match(pattern)?.[1]);
+}
+
+function explicitCrmAccountId(message: string) {
+  return rawStringValue(message.match(/\baccountId\s*:\s*([A-Za-z0-9-]+)/i)?.[1])
+    ?? rawStringValue(message.match(/\bselected\s+account\s+([A-Za-z0-9-]+)/i)?.[1])
+    ?? rawStringValue(message.match(/\baccount\s+([A-Za-z0-9-]+)/i)?.[1]);
+}
+
+function explicitCrmActivityId(message: string) {
+  return rawStringValue(message.match(/\bactivityId\s*:\s*([A-Za-z0-9-]+)/i)?.[1])
+    ?? rawStringValue(message.match(/\b(?:follow-up|followup|activity)\s+([A-Za-z0-9-]+)/i)?.[1]);
+}
+
+function explicitDueWorkArgs(ctx: ConversationContext) {
+  const args = {
+    accountId: explicitCrmAccountId(ctx.userMessage) ?? undefined,
+    dueTo: labeledCrmCommandValue(ctx.userMessage, "dueTo") ?? undefined,
+    take: 5,
+  };
+  return effectiveToolArgs("list_due_relationship_work", ctx, JSON.stringify(args));
+}
+
+function explicitRecordActivityArgs(ctx: ConversationContext) {
+  return normalizeCrmWriteToolArgs("record_relationship_activity", ctx, {
+    title: labeledCrmCommandValue(ctx.userMessage, "Title", ["Type", "accountId", "dueAt"]),
+    type: labeledCrmCommandValue(ctx.userMessage, "Type", ["accountId", "dueAt"]),
+    accountId: explicitCrmAccountId(ctx.userMessage) ?? undefined,
+    dueAt: labeledCrmCommandValue(ctx.userMessage, "dueAt"),
+  });
+}
+
+function explicitCompleteActivityArgs(ctx: ConversationContext) {
+  return normalizeCrmWriteToolArgs("complete_relationship_activity", ctx, {
+    activityId: explicitCrmActivityId(ctx.userMessage) ?? undefined,
+    completedAt: labeledCrmCommandValue(ctx.userMessage, "completedAt"),
+  });
+}
+
+async function handleExplicitCrmToolCommand(ctx: ConversationContext) {
+  if (!ctx.pageContext || ctx.pageContext.surface !== "crm") return null;
+  const toolName = explicitCrmToolCommand(ctx.userMessage);
+  if (!toolName) return null;
+
+  const actor = requireConversationToolActor(ctx);
+  if (toolName === "list_due_relationship_work") {
+    const args = explicitDueWorkArgs(ctx);
+    const result = await listDueRelationshipWorkAction(actor, ctx, args);
+    return crmDueWorkFallback(result, args, ctx.pageContext) ?? emptyAssistantFallback();
+  }
+
+  if (toolName === "record_relationship_activity") {
+    const args = explicitRecordActivityArgs(ctx);
+    validateCrmWriteToolArgs(toolName, args);
+    const operation = await createPendingCrmOperation({ ctx, toolName, args });
+    return crmPendingToolResult(operation).message;
+  }
+
+  if (toolName === "complete_relationship_activity") {
+    const args = explicitCompleteActivityArgs(ctx);
+    validateCrmWriteToolArgs(toolName, args);
+    const operation = await createPendingCrmOperation({ ctx, toolName, args });
+    return crmPendingToolResult(operation).message;
+  }
+
+  return null;
 }
 
 function dueToScope(value: unknown) {
@@ -736,6 +826,16 @@ export async function processConversationTurn(ctx: ConversationContext): Promise
   if (directCrmAnswer) {
     return {
       assistantMessage: directCrmAnswer,
+      contextUsed: {
+        pageContext: ctx.pageContext ?? undefined,
+      },
+    };
+  }
+
+  const explicitCrmToolResponse = await handleExplicitCrmToolCommand(ctx);
+  if (explicitCrmToolResponse) {
+    return {
+      assistantMessage: explicitCrmToolResponse,
       contextUsed: {
         pageContext: ctx.pageContext ?? undefined,
       },
@@ -1002,6 +1102,17 @@ export async function* processConversationTurnStream(ctx: ConversationContext): 
     yield directCrmAnswer;
     return {
       assistantMessage: directCrmAnswer,
+      contextUsed: {
+        pageContext: ctx.pageContext ?? undefined,
+      },
+    };
+  }
+
+  const explicitCrmToolResponse = await handleExplicitCrmToolCommand(ctx);
+  if (explicitCrmToolResponse) {
+    yield explicitCrmToolResponse;
+    return {
+      assistantMessage: explicitCrmToolResponse,
       contextUsed: {
         pageContext: ctx.pageContext ?? undefined,
       },

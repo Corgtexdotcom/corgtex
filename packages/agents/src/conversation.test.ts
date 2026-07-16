@@ -990,6 +990,108 @@ describe("processConversationTurn", () => {
     expect(chatStreamMock).toHaveBeenCalled();
   });
 
+  it("answers explicit CRM due-work tool commands without invoking the model", async () => {
+    const actor = testUserActor();
+
+    const { processConversationTurnStream } = await import("./conversation");
+    const { chunks, result } = await collectConversationStream(processConversationTurnStream({
+      workspaceId: "ws-1",
+      sessionId: "session-1",
+      userId: "user-1",
+      agentKey: "assistant",
+      userMessage: "Use list_due_relationship_work for selected account account-1. Reply with a short due-work summary.",
+      actor,
+      pageContext: crmPageContext(),
+    }));
+
+    const streamedMessage = chunks.join("");
+    expect(streamedMessage).toContain("1 open CRM relationship work item");
+    expect(streamedMessage).toContain("Follow up");
+    expect(result.assistantMessage).toBe(streamedMessage);
+    expect(listCrmActivitiesMock).toHaveBeenCalledWith(actor, "ws-1", expect.objectContaining({
+      accountId: "account-1",
+      type: "TASK",
+      completion: "open",
+      take: 5,
+    }));
+    expect(chatStreamMock).not.toHaveBeenCalled();
+  });
+
+  it("prepares explicit CRM record-activity commands as pending operations without invoking the model", async () => {
+    const actor = testUserActor();
+    const dueAt = "2026-07-20T15:00:00.000Z";
+
+    const { processConversationTurnStream } = await import("./conversation");
+    const { chunks, result } = await collectConversationStream(processConversationTurnStream({
+      workspaceId: "ws-1",
+      sessionId: "session-1",
+      userId: "user-1",
+      agentKey: "assistant",
+      userMessage: `Prepare a pending CRM follow-up by calling record_relationship_activity now. Title: Exact validation follow-up. Type: TASK. accountId: account-1. dueAt: ${dueAt}. Return the pending operation ID for confirmation.`,
+      actor,
+      pageContext: crmPageContext(),
+    }));
+
+    const streamedMessage = chunks.join("");
+    expect(streamedMessage).toContain(`Pending operation ID: ${pendingOperationId(1)}`);
+    expect(streamedMessage).toContain("CRM operation: record_relationship_activity");
+    expect(streamedMessage).toContain("confirm");
+    expect(result.assistantMessage).toBe(streamedMessage);
+    expect(conversationPendingOperationCreateMock).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        workspaceId: "ws-1",
+        conversationId: "session-1",
+        userId: "user-1",
+        toolName: "record_relationship_activity",
+        argsJson: {
+          title: "Exact validation follow-up",
+          type: "TASK",
+          accountId: "account-1",
+          dueAt,
+        },
+        relatedEntityType: "CrmAccount",
+        relatedEntityId: "account-1",
+        riskLabel: "crm-write:record-activity",
+      }),
+    }));
+    expect(createActivityMock).not.toHaveBeenCalled();
+    expect(chatStreamMock).not.toHaveBeenCalled();
+  });
+
+  it("prepares explicit CRM completion commands as pending operations without invoking the model", async () => {
+    const actor = testUserActor();
+
+    const { processConversationTurnStream } = await import("./conversation");
+    const { chunks, result } = await collectConversationStream(processConversationTurnStream({
+      workspaceId: "ws-1",
+      sessionId: "session-1",
+      userId: "user-1",
+      agentKey: "assistant",
+      userMessage: "Prepare a pending completion by calling complete_relationship_activity now for selected CRM follow-up activity-1. Return the pending operation ID for confirmation.",
+      actor,
+      pageContext: crmPageContext(),
+    }));
+
+    const streamedMessage = chunks.join("");
+    expect(streamedMessage).toContain(`Pending operation ID: ${pendingOperationId(1)}`);
+    expect(streamedMessage).toContain("CRM operation: complete_relationship_activity");
+    expect(result.assistantMessage).toBe(streamedMessage);
+    expect(conversationPendingOperationCreateMock).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        workspaceId: "ws-1",
+        conversationId: "session-1",
+        userId: "user-1",
+        toolName: "complete_relationship_activity",
+        argsJson: { activityId: "activity-1" },
+        relatedEntityType: "CrmActivity",
+        relatedEntityId: "activity-1",
+        riskLabel: "crm-write:complete-activity",
+      }),
+    }));
+    expect(completeActivityMock).not.toHaveBeenCalled();
+    expect(chatStreamMock).not.toHaveBeenCalled();
+  });
+
   it("streams a grounded CRM page-context fallback when the model returns empty text", async () => {
     const actor = testUserActor();
     chatStreamMock.mockReturnValueOnce(streamResponse([], { content: "" }));
