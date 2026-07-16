@@ -54,6 +54,7 @@
     "seed:demo-video": "npm run seed:jnj-demo && npx tsx scripts/seed-demo-video.ts",
     "seed:brain": "node scripts/seed-brain.mjs",
     "seed:client-stable": "node scripts/seed-client-stable.mjs",
+    "seed:validation": "node scripts/seed-internal-validation-workspace.mjs",
     "seed:jnj-demo": "node scripts/seed-jnj-demo.mjs",
     "cleanup:test-artifacts": "node scripts/cleanup-test-artifacts.mjs",
     "contrast-audit": "node scripts/contrast-audit.mjs",

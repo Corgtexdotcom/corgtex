@@ -3,6 +3,12 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { chromium } from "playwright";
 
+import {
+  DEMO_WORKSPACE_SLUG,
+  selectWorkspaceForValidation,
+  validationWorkspaceSelectorFromEnv,
+} from "./lib/validation-workspace.mjs";
+
 const [, , baseUrlArg, outDirArg] = process.argv;
 
 const baseUrl = (baseUrlArg || process.env.CLIENT_READINESS_BASE_URL || "http://localhost:3000").replace(/\/$/, "");
@@ -115,6 +121,38 @@ async function resolveLoginPath() {
 
 function routeUrl(locale, workspacePath, suffix) {
   return `${baseUrl}${locale}${workspacePath}${suffix}`;
+}
+
+export function demoAddGuardRouteSuffix(workspacePath) {
+  return `/add?kind=upload_file&returnTo=${encodeURIComponent(`${workspacePath}/brain`)}`;
+}
+
+async function resolveSelectedWorkspace(page, currentWorkspacePath) {
+  const selector = validationWorkspaceSelectorFromEnv(process.env, "CLIENT_READINESS");
+  if (!selector.explicit) {
+    return {
+      workspacePath: currentWorkspacePath,
+      workspaceSlug: null,
+      selected: false,
+    };
+  }
+
+  const response = await page.request.get(`${baseUrl}/api/session`);
+  if (!response.ok()) {
+    throw new Error(`/api/session failed while selecting client-readiness workspace: ${response.status()}`);
+  }
+  const session = await response.json();
+  const workspace = selectWorkspaceForValidation(session.workspaces ?? [], {
+    workspaceId: selector.workspaceId,
+    workspaceSlug: selector.workspaceSlug,
+    purpose: "client readiness smoke",
+  });
+
+  return {
+    workspacePath: `/workspaces/${workspace.id}`,
+    workspaceSlug: workspace.slug ?? null,
+    selected: true,
+  };
 }
 
 export function labelConsoleEntry(entry, routeLabel) {
@@ -553,7 +591,16 @@ async function main() {
     if (!match) {
       throw new Error(`Login did not land in a workspace: ${page.url()}`);
     }
-    const [, locale = "", workspacePath] = match;
+    const [, locale = "", initialWorkspacePath] = match;
+    const selectedWorkspace = await resolveSelectedWorkspace(page, initialWorkspacePath);
+    const workspacePath = selectedWorkspace.workspacePath;
+    const disabledRoutePaths = new Set(expectedDisabledRoutePaths);
+    if (
+      selectedWorkspace.workspaceSlug === DEMO_WORKSPACE_SLUG
+      || process.env.CLIENT_READINESS_ASSERT_DEMO_GUARDS === "true"
+    ) {
+      disabledRoutePaths.add(demoAddGuardRouteSuffix(workspacePath));
+    }
 
     for (const [name, suffix] of desktopRoutes) {
       await captureRoute(
@@ -576,9 +623,9 @@ async function main() {
     await captureScreenshot(page, "desktop-invalid-route.png");
     expectedNotFoundRoute = false;
 
-    if (expectedDisabledRoutePaths.size > 0) {
+    if (disabledRoutePaths.size > 0) {
       expectedNotFoundRoute = true;
-      for (const suffix of expectedDisabledRoutePaths) {
+      for (const suffix of disabledRoutePaths) {
         await verifyDisabledRoute(page, locale, workspacePath, suffix, findings, routeResults);
       }
       expectedNotFoundRoute = false;

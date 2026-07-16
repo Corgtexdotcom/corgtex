@@ -381,6 +381,7 @@ describe("fleet release runner", () => {
       CORGTEX_RELEASE_GIT_SHA: SHA,
       CORGTEX_STARTUP_MODE: "combined",
       CORGTEX_AUTO_SEED_JNJ_DEMO: "false",
+      CORGTEX_AUTO_SEED_INTERNAL_VALIDATION: "true",
       SEED_SCRIPTS: "",
     });
   });
@@ -396,6 +397,7 @@ describe("fleet release runner", () => {
       CORGTEX_RELEASE_GIT_SHA: SHA,
       CORGTEX_STARTUP_MODE: "migrate-and-web",
       CORGTEX_AUTO_SEED_JNJ_DEMO: "false",
+      CORGTEX_AUTO_SEED_INTERNAL_VALIDATION: "false",
       SEED_SCRIPTS: "",
     });
   });
@@ -1560,6 +1562,7 @@ describe("fleet release runner", () => {
     for (const [, args] of updateCalls) {
       expect(args).toContain("CORGTEX_STARTUP_MODE=migrate-and-web");
       expect(args).toContain("CORGTEX_AUTO_SEED_JNJ_DEMO=false");
+      expect(args).toContain("CORGTEX_AUTO_SEED_INTERNAL_VALIDATION=false");
       expect(args).toContain("SEED_SCRIPTS=");
       expect(args).toContain(`CORGTEX_RELEASE_IMAGE_TAG=sha-${SHA}`);
       expect(args).toContain(`CORGTEX_RELEASE_GIT_SHA=${SHA}`);

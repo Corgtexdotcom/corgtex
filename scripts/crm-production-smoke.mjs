@@ -10,6 +10,13 @@ import {
   recordValidationResult,
   writeValidationArtifacts,
 } from "./lib/production-validation.mjs";
+import {
+  DEMO_WORKSPACE_SLUG,
+  requireInternalValidationWorkspace,
+  selectWorkspaceForValidation,
+  validationWorkspaceSelectorFromEnv,
+  workspaceTenant,
+} from "./lib/validation-workspace.mjs";
 
 const DEFAULT_BASE_URL = "https://app.corgtex.com";
 const DEFAULT_OUT_DIR = ".artifacts/crm-production-smoke";
@@ -18,12 +25,14 @@ function usage() {
   return [
     "usage: node scripts/crm-production-smoke.mjs [base-url] [out-dir]",
     "",
-    "Runs a production-safe CRM smoke against a test/demo workspace.",
-    "Default auth uses /api/auth/demo-login; no local E2E credentials are read.",
+    "Runs a production-safe CRM smoke against an explicitly selected validation workspace.",
+    "When no workspace is selected, legacy demo-login behavior is used for manual demo visual checks.",
     "",
     "Environment:",
     "  CRM_SMOKE_EXPECTED_GIT_SHA  optional /api/health release SHA to require",
-    "  CRM_SMOKE_WORKSPACE_SLUG    workspace slug to select after login, default jnj-demo",
+    "  CRM_SMOKE_WORKSPACE_SLUG    workspace slug to select after login",
+    "  CRM_SMOKE_EMAIL             login email for validation workspace runs; falls back to ADMIN_EMAIL only when a workspace is selected",
+    "  CRM_SMOKE_PASSWORD          login password for validation workspace runs; falls back to ADMIN_PASSWORD only when a workspace is selected",
     "  CRM_SMOKE_HEADLESS          false to show Chromium, default true",
     "  CRM_SMOKE_PR_NUMBERS        comma-separated PR numbers covered by this validation run",
   ].join("\n");
@@ -121,11 +130,29 @@ function crmPageContext(workspaceId, account, activityId = null, title = null) {
 }
 
 class CrmSmoke {
-  constructor({ baseUrl, outDir, expectedGitSha, workspaceSlug, headless, prNumbers }) {
+  constructor({
+    baseUrl,
+    outDir,
+    expectedGitSha,
+    workspaceSelector,
+    authEmail,
+    authPassword,
+    requireSafeWorkspace,
+    headless,
+    prNumbers,
+  }) {
     this.baseUrl = normalizeBaseUrl(baseUrl);
     this.outDir = path.resolve(outDir || DEFAULT_OUT_DIR);
     this.expectedGitSha = expectedGitSha || null;
-    this.workspaceSlug = workspaceSlug || "jnj-demo";
+    this.workspaceSelector = workspaceSelector ?? {
+      workspaceId: null,
+      workspaceSlug: DEMO_WORKSPACE_SLUG,
+      explicit: false,
+    };
+    this.workspaceSlug = this.workspaceSelector.workspaceSlug || DEMO_WORKSPACE_SLUG;
+    this.authEmail = authEmail || null;
+    this.authPassword = authPassword || null;
+    this.requireSafeWorkspace = Boolean(requireSafeWorkspace);
     this.headless = headless;
     this.runId = `crm-smoke-${Date.now().toString(36)}`;
     this.validationRun = createValidationRun({
@@ -134,7 +161,11 @@ class CrmSmoke {
       prNumbers,
       baseUrl: this.baseUrl,
       environment: "production",
-      metadata: { script: "crm-production-smoke" },
+      metadata: {
+        script: "crm-production-smoke",
+        workspaceSelector: this.workspaceSelector,
+        strictInternalValidationWorkspace: this.requireSafeWorkspace,
+      },
     });
     this.cleanupRegistry = createValidationCleanupRegistry(this.validationRun);
     this.validationTag = validationRecordPrefix(this.validationRun, "crm-production-smoke");
@@ -248,15 +279,52 @@ class CrmSmoke {
     this.workspaceId = body.workspaceId;
 
     const session = await this.sessionFetch("/api/session");
-    const workspace = session.body.workspaces.find((item) => item.slug === this.workspaceSlug || item.id === this.workspaceId);
+    const workspace = selectWorkspaceForValidation(session.body.workspaces ?? [], {
+      workspaceId: this.workspaceSelector.workspaceId,
+      workspaceSlug: this.workspaceSlug,
+      purpose: "CRM production smoke demo login",
+    });
     assert(workspace, `Workspace ${this.workspaceSlug} was not available after demo login.`);
     this.workspaceId = workspace.id;
-    this.validationRun.tenant = {
-      id: workspace.id,
-      slug: workspace.slug ?? this.workspaceSlug,
-      label: workspace.name ?? workspace.slug ?? workspace.id,
-    };
+    if (this.requireSafeWorkspace) {
+      requireInternalValidationWorkspace(workspace, { purpose: "CRM production smoke writes" });
+    }
+    this.validationRun.tenant = workspaceTenant(workspace);
     this.record("demo login", { workspaceId: this.workspaceId, workspaceSlug: workspace.slug ?? null });
+  }
+
+  async loginPassword() {
+    assert(this.authEmail && this.authPassword, "CRM validation workspace smoke requires CRM_SMOKE_EMAIL/CRM_SMOKE_PASSWORD or ADMIN_EMAIL/ADMIN_PASSWORD.");
+    const login = await fetch(`${this.baseUrl}/api/auth/login`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ email: this.authEmail, password: this.authPassword }),
+      redirect: "manual",
+    });
+    const text = await login.text();
+    assert(login.ok, `/api/auth/login failed ${login.status}: ${text.slice(0, 300)}`);
+    this.cookie = parseSetCookie(login.headers.get("set-cookie"));
+
+    const session = await this.sessionFetch("/api/session");
+    const workspace = selectWorkspaceForValidation(session.body.workspaces ?? [], {
+      workspaceId: this.workspaceSelector.workspaceId,
+      workspaceSlug: this.workspaceSlug,
+      purpose: "CRM production smoke password login",
+    });
+    if (this.requireSafeWorkspace) {
+      requireInternalValidationWorkspace(workspace, { purpose: "CRM production smoke writes" });
+    }
+    this.workspaceId = workspace.id;
+    this.validationRun.tenant = workspaceTenant(workspace);
+    this.record("password login", { workspaceId: this.workspaceId, workspaceSlug: workspace.slug ?? null });
+  }
+
+  async login() {
+    if (this.workspaceSelector.explicit) {
+      await this.loginPassword();
+      return;
+    }
+    await this.loginDemo();
   }
 
   async issueCredential() {
@@ -549,7 +617,7 @@ class CrmSmoke {
   async run() {
     await mkdir(this.outDir, { recursive: true });
     await this.verifyHealth();
-    await this.loginDemo();
+    await this.login();
     await this.issueCredential();
 
     const accounts = await this.callTool("list_relationship_accounts", { take: 1 });
@@ -581,11 +649,23 @@ async function main() {
   }
 
   const [, , baseUrlArg, outDirArg] = process.argv;
+  const envWorkspaceSelector = validationWorkspaceSelectorFromEnv(process.env, "CRM_SMOKE");
+  const workspaceSelector = envWorkspaceSelector.explicit
+    ? envWorkspaceSelector
+    : { ...envWorkspaceSelector, workspaceSlug: DEMO_WORKSPACE_SLUG };
+  const usePasswordAuth = workspaceSelector.explicit;
   const smoke = new CrmSmoke({
     baseUrl: baseUrlArg || process.env.CRM_SMOKE_BASE_URL || DEFAULT_BASE_URL,
     outDir: outDirArg || process.env.CRM_SMOKE_OUT_DIR || DEFAULT_OUT_DIR,
     expectedGitSha: process.env.CRM_SMOKE_EXPECTED_GIT_SHA?.trim() || null,
-    workspaceSlug: process.env.CRM_SMOKE_WORKSPACE_SLUG?.trim() || "jnj-demo",
+    workspaceSelector,
+    authEmail: usePasswordAuth
+      ? (process.env.CRM_SMOKE_EMAIL?.trim() || process.env.ADMIN_EMAIL?.trim() || null)
+      : null,
+    authPassword: usePasswordAuth
+      ? (process.env.CRM_SMOKE_PASSWORD?.trim() || process.env.ADMIN_PASSWORD?.trim() || null)
+      : null,
+    requireSafeWorkspace: workspaceSelector.explicit,
     headless: process.env.CRM_SMOKE_HEADLESS !== "false",
     prNumbers: parseValidationPrNumbers(process.env.CRM_SMOKE_PR_NUMBERS ?? process.env.PRODUCTION_VALIDATION_PR_NUMBERS),
   });
