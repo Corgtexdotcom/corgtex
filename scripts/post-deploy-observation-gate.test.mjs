@@ -159,6 +159,7 @@ describe("post-deploy observation gate", () => {
         POSTHOG_PROJECT_ID: "452941",
         POSTHOG_PERSONAL_API_KEY: "phx_test",
         POSTHOG_API_HOST: "https://us.i.posthog.com",
+        POSTHOG_ENVIRONMENT: "production",
       },
       deps: { fetchImpl },
     });
@@ -167,7 +168,34 @@ describe("post-deploy observation gate", () => {
       "https://us.posthog.com/api/projects/452941/query/",
       expect.objectContaining({ method: "POST" }),
     );
+    const requestBody = JSON.parse(fetchImpl.mock.calls[0][1].body);
+    expect(requestBody.query.query).toContain("properties['environment'] = 'production'");
     expect(summary.status).toBe("blocked");
+  });
+
+  it("does not fail a passing gate when advisory publishing fails", async () => {
+    const summary = await runObservationGate({
+      manifest,
+      since: new Date("2026-07-16T05:52:00.000Z"),
+      rows: [{
+        source: "posthog",
+        event: "corgtex_server_action_error",
+        instance_id: "backup-app",
+        release_git_sha: "older-sha",
+        action: "saveSettings",
+        code: "ACTION_FAILED",
+      }],
+      publishAdvisories: true,
+      deps: {
+        spawnSync: vi.fn(() => ({ status: 1 })),
+      },
+    });
+
+    expect(summary.status).toBe("passed");
+    expect(summary.advisoryPublish).toMatchObject({
+      attempted: true,
+      status: "failed",
+    });
   });
 
   it("parses PostHog rows without exposing full properties blobs", () => {

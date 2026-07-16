@@ -39,9 +39,21 @@ export async function runObservationGate(options = {}) {
     rows,
     targets: options.targets ?? null,
   });
+  summary.advisoryPublish = {
+    attempted: false,
+    status: "skipped",
+  };
 
   if (options.publishAdvisories && summary.advisoryIncidents.length > 0) {
-    publishAdvisoryIncidents(summary.advisoryIncidents, options.deps ?? {});
+    summary.advisoryPublish.attempted = true;
+    try {
+      publishAdvisoryIncidents(summary.advisoryIncidents, options.deps ?? {});
+      summary.advisoryPublish.status = "published";
+    } catch (error) {
+      summary.advisoryPublish.status = "failed";
+      summary.advisoryPublish.error = errorMessage(error);
+      console.warn(`[observation] advisory publishing failed: ${summary.advisoryPublish.error}`);
+    }
   }
 
   if (options.summaryFile) {
@@ -154,6 +166,7 @@ export async function queryPostHogRows({ env = process.env, since, deps = {} }) 
   const apiHost = postHogQueryHost(env);
   const projectId = requiredText(env.POSTHOG_PROJECT_ID, "POSTHOG_PROJECT_ID");
   const token = requiredText(env.POSTHOG_PERSONAL_API_KEY ?? env.POSTHOG_QUERY_API_KEY, "POSTHOG_PERSONAL_API_KEY or POSTHOG_QUERY_API_KEY");
+  const environment = postHogEnvironment(env);
   const fetchImpl = deps.fetchImpl ?? fetch;
   const response = await fetchImpl(`${apiHost}/api/projects/${encodeURIComponent(projectId)}/query/`, {
     method: "POST",
@@ -164,7 +177,7 @@ export async function queryPostHogRows({ env = process.env, since, deps = {} }) 
     body: JSON.stringify({
       query: {
         kind: "HogQLQuery",
-        query: postHogQuery(since),
+        query: postHogQuery(since, environment),
       },
     }),
   });
@@ -305,19 +318,28 @@ function azureMonitorQuery(since) {
   ].join(" ");
 }
 
-function postHogQuery(since) {
+function postHogQuery(since, environment) {
   const events = FAILURE_EVENTS.map((event) => `'${event}'`).join(",");
   const nonStatusEvents = [...NON_STATUS_FAILURE_EVENTS].map((event) => `'${event}'`).join(",");
   return [
     "SELECT event AS name, properties['instance_id'] AS instance_id, properties['provider'] AS provider, properties['release_git_sha'] AS release_git_sha, properties['release_image_tag'] AS release_image_tag, properties['release_version'] AS release_version, properties['surface'] AS surface, properties['route'] AS route, properties['action'] AS action, properties['status'] AS status, properties['code'] AS code, count() AS events, min(timestamp) AS first_seen, max(timestamp) AS last_seen",
     "FROM events",
     `WHERE timestamp >= toDateTime('${since.toISOString().replace("T", " ").replace(/\.\d{3}Z$/, "")}')`,
+    `AND properties['environment'] = '${hogQlString(environment)}'`,
     `AND event IN (${events})`,
     `AND (event IN (${nonStatusEvents}) OR toInt(coalesce(properties['status'], 0)) >= 500)`,
     "GROUP BY name, instance_id, provider, release_git_sha, release_image_tag, release_version, surface, route, action, status, code",
     "ORDER BY events DESC",
     "LIMIT 100",
   ].join(" ");
+}
+
+function postHogEnvironment(env) {
+  return safeText(env.POSTHOG_ENVIRONMENT) ?? "production";
+}
+
+function hogQlString(value) {
+  return String(value).replace(/\\/g, "\\\\").replace(/'/g, "\\'");
 }
 
 function rowObject(columns, row, extra) {

@@ -166,9 +166,17 @@ jobs:
           fi
           node scripts/azure-selfserve-production-release.mjs "${args[@]}"
 
+      - name: Checkout observation gate source
+        if: ${{ inputs.operation == 'deploy' && inputs.run_health_smoke }}
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ github.sha }}
+          path: .workflow-source
+
       - name: Run post-deploy observation gate
         if: ${{ inputs.operation == 'deploy' && inputs.run_health_smoke }}
         shell: bash
+        working-directory: .workflow-source
         run: |
           set -euo pipefail
           mkdir -p .artifacts/post-deploy-observation-gate
@@ -186,5 +194,5 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: post-deploy-observation-azure-selfserve
-          path: .artifacts/post-deploy-observation-gate/azure-selfserve-production.json
+          path: .workflow-source/.artifacts/post-deploy-observation-gate/azure-selfserve-production.json
           if-no-files-found: ignore

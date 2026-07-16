@@ -208,7 +208,7 @@ jobs:
             --manifest-json "$MANIFEST_JSON"
 
       - name: Log in to Azure
-        if: ${{ !inputs.dry_run }}
+        if: ${{ !inputs.dry_run && (inputs.targets == 'all' || contains(inputs.targets, 'azure-selfserve')) }}
         uses: azure/login@v2
         with:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
@@ -246,6 +246,10 @@ jobs:
           OBSERVATION_WINDOW_MINUTES: ${{ vars.OBSERVATION_WINDOW_MINUTES || '20' }}
         run: |
           mkdir -p .artifacts/post-deploy-observation-gate
+          if [[ "$TARGETS_INPUT" != "all" && "$TARGETS_INPUT" != *"azure-selfserve"* ]]; then
+            unset AZURE_APPLICATIONINSIGHTS_APP_NAME
+            unset AZURE_APPLICATIONINSIGHTS_RESOURCE_GROUP
+          fi
           node scripts/post-deploy-observation-gate.mjs \
             --manifest-json "$MANIFEST_JSON" \
             --targets "$TARGETS_INPUT" \
