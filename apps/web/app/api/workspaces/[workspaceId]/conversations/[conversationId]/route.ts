@@ -6,6 +6,66 @@ import { resolveRequestActor } from "@/lib/auth";
 import { handleRouteError } from "@/lib/http";
 
 const MAX_MESSAGE_LENGTH = 100_000;
+const STREAM_KEEPALIVE_INTERVAL_MS = 10_000;
+
+type ConversationStreamResult = {
+  assistantMessage: string;
+  contextUsed: {
+    knowledgeResults?: unknown[];
+    knowledgeSearch?: unknown;
+    memories?: unknown[];
+    pageContext?: unknown;
+    mapGraphChanged?: boolean;
+  };
+};
+
+function encodeStreamPayload(encoder: TextEncoder, payload: Record<string, unknown>) {
+  return encoder.encode(`data: ${JSON.stringify(payload)}\n\n`);
+}
+
+function keepAliveTimeout() {
+  let timeout: ReturnType<typeof setTimeout> | null = null;
+  const promise = new Promise<{ type: "keepalive" }>((resolve) => {
+    timeout = setTimeout(() => resolve({ type: "keepalive" }), STREAM_KEEPALIVE_INTERVAL_MS);
+  });
+
+  return {
+    cancel() {
+      if (timeout) {
+        clearTimeout(timeout);
+        timeout = null;
+      }
+    },
+    promise,
+  };
+}
+
+function enqueueKeepAlive(controller: ReadableStreamDefaultController<Uint8Array>, encoder: TextEncoder) {
+  controller.enqueue(encodeStreamPayload(encoder, { keepAlive: true }));
+}
+
+async function nextConversationStreamResult(
+  iterator: AsyncGenerator<string, ConversationStreamResult>,
+  controller: ReadableStreamDefaultController<Uint8Array>,
+  encoder: TextEncoder,
+): Promise<IteratorResult<string, ConversationStreamResult>> {
+  const nextChunk = iterator.next();
+
+  while (true) {
+    const timeout = keepAliveTimeout();
+    const result = await Promise.race([
+      nextChunk.then((chunk) => ({ type: "chunk" as const, chunk })),
+      timeout.promise,
+    ]).finally(() => timeout.cancel());
+
+    if (result.type === "keepalive") {
+      enqueueKeepAlive(controller, encoder);
+      continue;
+    }
+
+    return result.chunk;
+  }
+}
 
 function catalogUsageContext(actor: Awaited<ReturnType<typeof resolveRequestActor>>) {
   if (actor.kind === "agent" && actor.authProvider === "credential") {
@@ -71,19 +131,17 @@ export async function POST(
     const stream = new ReadableStream({
       async start(controller) {
         try {
-          let finalResult: {
-            assistantMessage: string;
-            contextUsed: { knowledgeResults?: unknown[]; knowledgeSearch?: unknown; memories?: unknown[]; pageContext?: unknown; mapGraphChanged?: boolean };
-          } | undefined;
+          enqueueKeepAlive(controller, encoder);
+          let finalResult: ConversationStreamResult | undefined;
 
           while (true) {
-            const { done, value } = await iterator.next();
+            const { done, value } = await nextConversationStreamResult(iterator, controller, encoder);
             if (done) {
               finalResult = value;
               break;
             }
             if (value) {
-              controller.enqueue(encoder.encode(`data: ${JSON.stringify({ text: value })}\n\n`));
+              controller.enqueue(encodeStreamPayload(encoder, { text: value }));
             }
           }
 
@@ -118,9 +176,7 @@ export async function POST(
                     conversationId,
                     topic: generatedTopic,
                   });
-                  controller.enqueue(
-                    encoder.encode(`data: ${JSON.stringify({ topic: generatedTopic })}\n\n`)
-                  );
+                  controller.enqueue(encodeStreamPayload(encoder, { topic: generatedTopic }));
                 }
               } catch {
                 // Auto-naming is best-effort; don't break the stream
@@ -128,9 +184,7 @@ export async function POST(
             }
 
             if (finalResult.contextUsed.mapGraphChanged) {
-              controller.enqueue(
-                encoder.encode(`data: ${JSON.stringify({ refreshCurrentRoute: true })}\n\n`)
-              );
+              controller.enqueue(encodeStreamPayload(encoder, { refreshCurrentRoute: true }));
             }
           }
 
