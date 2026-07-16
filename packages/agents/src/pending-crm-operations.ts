@@ -428,9 +428,16 @@ export async function cancelCrmPendingOperation(operation: PendingOperationRecor
 
 export async function beginCrmPendingOperationExecution(operation: PendingOperationRecord) {
   if (operation.status === STATUS.EXECUTED) return { state: "already-executed" as const, operation };
-  if (operation.status !== STATUS.PENDING) return { state: "unavailable" as const, operation };
 
   const now = new Date();
+  if (operation.status !== STATUS.PENDING) {
+    const refreshed = await refreshReusableOperationState(operation, now);
+    if (refreshed?.status === STATUS.EXECUTED) {
+      return { state: "already-executed" as const, operation: refreshed };
+    }
+    return { state: "unavailable" as const, operation: refreshed ?? operation };
+  }
+
   if (operation.expiresAt <= now) {
     const expired = await prisma.conversationPendingOperation.updateMany({
       where: {

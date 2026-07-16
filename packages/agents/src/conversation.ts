@@ -500,6 +500,16 @@ export async function processConversationTurn(ctx: ConversationContext): Promise
   assistantMessage: string;
   contextUsed: ConversationContextUsed;
 }> {
+  const pendingOperationResponse = await handleCrmPendingOperationIntent(ctx);
+  if (pendingOperationResponse) {
+    return {
+      assistantMessage: pendingOperationResponse,
+      contextUsed: {
+        pageContext: ctx.pageContext ?? undefined,
+      },
+    };
+  }
+
   await assertWorkspaceModelBudget(ctx.workspaceId);
 
   const effectiveHistoryTurns = ctx.userMessage.length > 10_000 ? 5 : MAX_HISTORY_TURNS;
@@ -516,15 +526,6 @@ export async function processConversationTurn(ctx: ConversationContext): Promise
   });
   const priorTurns = [...priorTurnsDesc].reverse();
   const turnCount = priorTurns.at(-1)?.sequenceNumber ?? 0;
-  const pendingOperationResponse = await handleCrmPendingOperationIntent(ctx);
-  if (pendingOperationResponse) {
-    return {
-      assistantMessage: pendingOperationResponse,
-      contextUsed: {
-        pageContext: ctx.pageContext ?? undefined,
-      },
-    };
-  }
 
   let knowledgeResults: unknown[] = [];
   let knowledgeSearch: ConversationContextUsed["knowledgeSearch"] | undefined;

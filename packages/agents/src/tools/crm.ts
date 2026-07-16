@@ -23,6 +23,24 @@ function definedEntries(value: Record<string, unknown>) {
   return Object.fromEntries(Object.entries(value).filter(([, entry]) => entry !== undefined));
 }
 
+const CRM_ACTIVITY_TYPES = new Set(["NOTE", "EMAIL", "CALL", "MEETING", "TASK"]);
+const CRM_COMMUNICATION_CHANNEL_PATTERN = /^[A-Z][A-Z0-9_]{1,31}$/;
+
+function normalizeOptionalUpperCode(value: unknown) {
+  if (value == null) return undefined;
+  if (typeof value !== "string") return value;
+  return value.trim().toUpperCase().replace(/[\s-]+/g, "_");
+}
+
+function normalizeOptionalDateString(value: unknown) {
+  if (value == null) return undefined;
+  if (typeof value !== "string") return value;
+  const trimmed = value.trim();
+  if (!trimmed) return trimmed;
+  const date = new Date(trimmed);
+  return Number.isNaN(date.getTime()) ? trimmed : date.toISOString();
+}
+
 function selectedAccountId(ctx: CrmToolContext, value?: string | null) {
   return value ?? (ctx.pageContext?.surface === "crm" ? ctx.pageContext.selectedIds?.accountId ?? undefined : undefined);
 }
@@ -57,19 +75,19 @@ export function normalizeCrmWriteToolArgs(toolName: string, ctx: CrmToolContext,
   if (toolName === "record_relationship_activity") {
     return definedEntries({
       title: args.title,
-      type: args.type,
+      type: normalizeOptionalUpperCode(args.type),
       bodyMd: args.bodyMd,
       accountId: selectedAccountId(ctx, args.accountId),
       contactId: args.contactId,
       dealId: args.dealId,
-      dueAt: args.dueAt,
+      dueAt: normalizeOptionalDateString(args.dueAt),
     });
   }
 
   if (toolName === "complete_relationship_activity") {
     return definedEntries({
       activityId: selectedActivityId(ctx, args.activityId),
-      completedAt: args.completedAt,
+      completedAt: normalizeOptionalDateString(args.completedAt),
     });
   }
 
@@ -80,7 +98,7 @@ export function normalizeCrmWriteToolArgs(toolName: string, ctx: CrmToolContext,
       subject: args.subject,
       recipientEmail: args.recipientEmail,
       recipientName: args.recipientName,
-      channel: args.channel,
+      channel: normalizeOptionalUpperCode(args.channel),
       accountId: selectedAccountId(ctx, args.accountId),
       contactId: args.contactId,
       dealId: args.dealId,
@@ -95,12 +113,28 @@ function hasNonEmptyString(value: unknown) {
   return typeof value === "string" && value.trim().length > 0;
 }
 
+function validateOptionalIsoDate(value: unknown, label: string) {
+  if (value == null) return;
+  if (typeof value !== "string" || !value.trim() || Number.isNaN(new Date(value).getTime())) {
+    throw new Error(`${label} must be a valid date before preparing a pending CRM operation.`);
+  }
+}
+
 export function validateCrmWriteToolArgs(toolName: string, args: Record<string, unknown>) {
   if (toolName === "record_relationship_activity" && !hasNonEmptyString(args.title)) {
     throw new Error("A CRM activity title is required to prepare a pending CRM activity.");
   }
+  if (toolName === "record_relationship_activity") {
+    if (args.type !== undefined && (typeof args.type !== "string" || !CRM_ACTIVITY_TYPES.has(args.type))) {
+      throw new Error("Unsupported CRM activity type. Use NOTE, EMAIL, CALL, MEETING, or TASK.");
+    }
+    validateOptionalIsoDate(args.dueAt, "CRM activity due date");
+  }
   if (toolName === "complete_relationship_activity" && !hasNonEmptyString(args.activityId)) {
     throw new Error("A CRM activity ID is required to prepare a pending CRM activity completion.");
+  }
+  if (toolName === "complete_relationship_activity") {
+    validateOptionalIsoDate(args.completedAt, "CRM activity completion date");
   }
   if (toolName === "create_communication_suggestion") {
     if (!hasNonEmptyString(args.title)) {
@@ -108,6 +142,12 @@ export function validateCrmWriteToolArgs(toolName: string, args: Record<string, 
     }
     if (!hasNonEmptyString(args.bodyMd)) {
       throw new Error("CRM communication suggestion body text is required to prepare a pending CRM suggestion.");
+    }
+    if (
+      args.channel !== undefined
+      && (typeof args.channel !== "string" || !CRM_COMMUNICATION_CHANNEL_PATTERN.test(args.channel))
+    ) {
+      throw new Error("CRM communication suggestion channel must be an uppercase code.");
     }
   }
 }
