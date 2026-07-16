@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import type { Prisma } from "@prisma/client";
-import { AppError, createMeetingAudioAsset, requireWorkspaceMembership } from "@corgtex/domain";
+import { AppError, createMeetingAudioAsset, isPlausibleMeetingRecordedAt, requireWorkspaceMembership } from "@corgtex/domain";
 import { prisma } from "@corgtex/shared";
 import { resolveRequestActor } from "@/lib/auth";
 import { handleRouteError } from "@/lib/http";
@@ -70,11 +70,17 @@ function formStringList(formData: FormData, key: string) {
     .filter(Boolean);
 }
 
-function parseRecordedAt(value: string | null) {
-  if (!value) return null;
+function parseRecordedAt(value: string | null, required: boolean) {
+  if (!value) {
+    if (required) throw new AppError(400, "INVALID_INPUT", "recordedAt is required.");
+    return null;
+  }
   const recordedAt = new Date(value);
   if (Number.isNaN(recordedAt.valueOf())) {
     throw new AppError(400, "INVALID_INPUT", "recordedAt must be a valid date.");
+  }
+  if (!isPlausibleMeetingRecordedAt(recordedAt)) {
+    throw new AppError(400, "INVALID_INPUT", "recordedAt must be within the last 10 years and no more than 90 days in the future.");
   }
   return recordedAt;
 }
@@ -169,15 +175,16 @@ export async function POST(request: NextRequest, { params }: RouteContext) {
     ({ workspaceId } = await params);
     const formData = await request.formData();
     const file = requireAudioFile(formData.get("file"));
+    const meetingId = formString(formData, "meetingId");
 
     const result = await createMeetingAudioAsset(actor, {
       workspaceId,
       fileName: file.name,
       mimeType: file.type || null,
       fileBuffer: Buffer.from(await file.arrayBuffer()),
-      meetingId: formString(formData, "meetingId"),
+      meetingId,
       title: formString(formData, "title"),
-      recordedAt: parseRecordedAt(formString(formData, "recordedAt")),
+      recordedAt: meetingId ? null : parseRecordedAt(formString(formData, "recordedAt"), true),
       durationSeconds: parseDurationSeconds(formString(formData, "durationSeconds")),
       participantEmails: formStringList(formData, "participantEmails"),
     });

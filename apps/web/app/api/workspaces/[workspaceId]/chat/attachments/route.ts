@@ -44,19 +44,31 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
     });
 
     if (classification.classification === "meeting_transcript" && extracted.textContent) {
+      const meetingId = formString(formData, "meetingId");
+      const recordedAt = parseOptionalMeetingDateTimeInput(
+        formString(formData, "recordedAt"),
+        formString(formData, "timeZone"),
+        "Recorded at",
+      );
+      if (!recordedAt && !meetingId) {
+        return NextResponse.json({
+          status: "needs_meeting_details",
+          requiredFields: ["recordedAt"],
+          classification,
+          message: "This looks like a meeting transcript. Add it from Meetings so you can set the meeting date/time and resolve duplicates.",
+          webUrl: `/workspaces/${workspaceId}/add?kind=meeting_transcript`,
+        });
+      }
+
       const intake = await intakeMeetingTranscript(actor, {
         workspaceId,
         transcript: extracted.textContent,
         fileName: file.name,
         userMessage,
-        meetingId: formString(formData, "meetingId"),
+        meetingId,
         title: formString(formData, "title"),
         source: formString(formData, "source") ?? "chat-transcript-upload",
-        recordedAt: parseOptionalMeetingDateTimeInput(
-          formString(formData, "recordedAt"),
-          formString(formData, "timeZone"),
-          "Recorded at",
-        ),
+        recordedAt,
         participantEmails: formList(formData, "participantEmails"),
       });
 

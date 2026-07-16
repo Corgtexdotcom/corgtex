@@ -70,6 +70,8 @@ describe("POST /api/workspaces/[workspaceId]/chat/attachments", () => {
     const formData = new FormData();
     formData.set("file", new File(["hello"], "weekly-transcript.txt", { type: "text/plain" }));
     formData.set("message", "April 30 2026 weekly transcript");
+    formData.set("recordedAt", "2026-04-30T09:00");
+    formData.set("timeZone", "America/Los_Angeles");
 
     const response = await POST(
       new Request("http://localhost/api/workspaces/ws-1/chat/attachments", {
@@ -89,7 +91,71 @@ describe("POST /api/workspaces/[workspaceId]/chat/attachments", () => {
         workspaceId: "ws-1",
         transcript: "Jan: Milan owns onboarding.",
         userMessage: "April 30 2026 weekly transcript",
+        recordedAt: new Date("2026-04-30T16:00:00.000Z"),
       }),
+    );
+    expect(ingestFile).not.toHaveBeenCalled();
+  });
+
+  it("routes chat meeting transcripts without date/time to the full upload flow", async () => {
+    resolveRequestActor.mockResolvedValue({ kind: "user", user: { id: "user-1" } });
+    extractTextFromFileBuffer.mockResolvedValue({ textContent: "Jan: Milan owns onboarding.", supported: true });
+    classifyUploadedTextForMeeting.mockReturnValue({
+      classification: "meeting_transcript",
+      confidence: 0.91,
+      reason: "meeting",
+    });
+
+    const { POST } = await import("./route");
+    const formData = new FormData();
+    formData.set("file", new File(["hello"], "weekly-transcript.txt", { type: "text/plain" }));
+
+    const response = await POST(
+      new Request("http://localhost/api/workspaces/ws-1/chat/attachments", {
+        method: "POST",
+        body: formData,
+      }) as never,
+      { params: Promise.resolve({ workspaceId: "ws-1" }) },
+    );
+    const json = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(json.status).toBe("needs_meeting_details");
+    expect(json.requiredFields).toEqual(["recordedAt"]);
+    expect(json.webUrl).toBe("/workspaces/ws-1/add?kind=meeting_transcript");
+    expect(intakeMeetingTranscript).not.toHaveBeenCalled();
+    expect(ingestFile).not.toHaveBeenCalled();
+  });
+
+  it("uses a selected meeting for chat transcript uploads without a new date/time", async () => {
+    resolveRequestActor.mockResolvedValue({ kind: "user", user: { id: "user-1" } });
+    extractTextFromFileBuffer.mockResolvedValue({ textContent: "Jan: Milan owns onboarding.", supported: true });
+    classifyUploadedTextForMeeting.mockReturnValue({
+      classification: "meeting_transcript",
+      confidence: 0.91,
+      reason: "meeting",
+    });
+    intakeMeetingTranscript.mockResolvedValue({
+      status: "meeting_matched",
+      meeting: { id: "meeting-1", title: "Weekly" },
+      message: "Transcript saved as meeting.",
+      inferred: {},
+    });
+
+    const { POST } = await import("./route");
+    const formData = new FormData();
+    formData.set("file", new File(["hello"], "weekly-transcript.txt", { type: "text/plain" }));
+    formData.set("meetingId", "meeting-1");
+
+    const response = await POST(
+      new Request("http://localhost/api/workspaces/ws-1/chat/attachments", { method: "POST", body: formData }) as never,
+      { params: Promise.resolve({ workspaceId: "ws-1" }) },
+    );
+
+    expect(response.status).toBe(200);
+    expect(intakeMeetingTranscript).toHaveBeenCalledWith(
+      { kind: "user", user: { id: "user-1" } },
+      expect.objectContaining({ meetingId: "meeting-1", recordedAt: null }),
     );
     expect(ingestFile).not.toHaveBeenCalled();
   });

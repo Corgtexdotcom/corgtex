@@ -122,7 +122,12 @@ export function TextPasteUploader({
           <>
             <label>
               {t("labelMeetingRecordedAt")}
-              <input type="datetime-local" value={recordedAt} onChange={e => setRecordedAt(e.target.value)} />
+              <input
+                type="datetime-local"
+                value={recordedAt}
+                onChange={e => setRecordedAt(e.target.value)}
+                required
+              />
             </label>
             <TimeZoneSelect onValueChange={setTimeZone} />
           </>
@@ -151,7 +156,7 @@ export function TextPasteUploader({
       </label>
       
       <div style={{ marginTop: 8 }}>
-        <button type="submit" disabled={isSubmitting || !content.trim()}>
+        <button type="submit" disabled={isSubmitting || !content.trim() || (isMeeting && !recordedAt)}>
           {isSubmitting ? t("btnIngesting") : isMeeting ? t("btnIngestMeetingTranscript") : t("btnIngestText")}
         </button>
       </div>

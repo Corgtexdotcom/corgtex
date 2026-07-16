@@ -1,9 +1,14 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const { createMeetingMock, modelGatewayMock, uploadMeetingTranscriptMock } = vi.hoisted(() => ({
+const { createMeetingMock, modelGatewayMock, prismaMock, uploadMeetingTranscriptMock } = vi.hoisted(() => ({
   createMeetingMock: vi.fn(),
   modelGatewayMock: {
     extract: vi.fn(),
+  },
+  prismaMock: {
+    meeting: {
+      findFirst: vi.fn(),
+    },
   },
   uploadMeetingTranscriptMock: vi.fn(),
 }));
@@ -12,27 +17,36 @@ vi.mock("@corgtex/models", () => ({
   defaultModelGateway: modelGatewayMock,
 }));
 
+vi.mock("@corgtex/shared", () => ({
+  prisma: prismaMock,
+}));
+
 vi.mock("./meetings", () => ({
   createMeeting: createMeetingMock,
   uploadMeetingTranscript: uploadMeetingTranscriptMock,
 }));
 
+const TEST_NOW = new Date("2026-07-16T12:00:00.000Z");
+
 describe("meeting transcript intake", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    prismaMock.meeting.findFirst.mockResolvedValue(null);
   });
 
   it("skips model metadata extraction when title and recordedAt are explicit", async () => {
-    const { inferMeetingTranscriptMetadata } = await import("./meeting-transcript-intake");
+    const { inferMeetingTranscriptMetadata, isPlausibleMeetingRecordedAt } = await import("./meeting-transcript-intake");
 
     const metadata = await inferMeetingTranscriptMetadata({
       workspaceId: "workspace-1",
       title: " Weekly Tactical ",
-      recordedAt: "2026-05-17T10:00:00.000Z",
+      recordedAt: "2016-07-16T12:00:00.000Z",
+      validateExplicitRecordedAt: true,
+      now: TEST_NOW,
       source: " production-smoke ",
       transcript: [
         "Meeting title: Weekly Tactical",
-        "Date: 2026-05-17T10:00:00.000Z",
+        "Date: 2016-07-16T12:00:00.000Z",
         "Jan: Andy@example.com owns the follow-up.",
       ].join("\n"),
     });
@@ -40,10 +54,11 @@ describe("meeting transcript intake", () => {
     expect(modelGatewayMock.extract).not.toHaveBeenCalled();
     expect(metadata).toEqual({
       title: "Weekly Tactical",
-      recordedAt: new Date("2026-05-17T10:00:00.000Z"),
+      recordedAt: new Date("2016-07-16T12:00:00.000Z"),
       participantEmails: ["andy@example.com"],
       source: "production-smoke",
     });
+    expect(isPlausibleMeetingRecordedAt(new Date("2018-02-28T12:00:00.000Z"), new Date("2028-02-29T12:00:00.000Z"))).toBe(true);
   });
 
   it("uses model metadata when required fields are missing", async () => {
@@ -64,10 +79,133 @@ describe("meeting transcript intake", () => {
     expect(modelGatewayMock.extract).toHaveBeenCalledTimes(1);
     expect(metadata).toEqual({
       title: "Model Tactical",
-      recordedAt: new Date("2026-05-17T11:00:00.000Z"),
+      recordedAt: null,
       participantEmails: ["model@example.com"],
       source: "chat-transcript-upload",
     });
+  });
+
+  it("does not accept model-inferred dates as canonical manual upload dates", async () => {
+    modelGatewayMock.extract.mockResolvedValueOnce({
+      output: {
+        title: "Model Tactical",
+        recordedAt: "2001-07-15T11:00:00.000Z",
+        participantEmails: ["model@example.com"],
+      },
+    });
+    const { intakeMeetingTranscript } = await import("./meeting-transcript-intake");
+
+    await expect(intakeMeetingTranscript({
+      kind: "agent",
+      authProvider: "bootstrap",
+      label: "test-agent",
+      workspaceIds: ["workspace-1"],
+    }, {
+      workspaceId: "workspace-1",
+      source: "meeting-transcript:fireflies", provider: "FIREFLIES",
+      transcript: "Date: 2001-07-15\nJan: We need a follow-up.",
+      now: TEST_NOW,
+    })).resolves.toMatchObject({
+      status: "needs_clarification",
+      requiredFields: ["recordedAt"],
+      inferred: {
+        title: "Model Tactical",
+        recordedAt: null,
+      },
+    });
+    expect(createMeetingMock).not.toHaveBeenCalled();
+    expect(uploadMeetingTranscriptMock).not.toHaveBeenCalled();
+  });
+
+  it("rejects implausible explicit manual upload dates", async () => {
+    const { intakeMeetingTranscript } = await import("./meeting-transcript-intake");
+
+    await expect(intakeMeetingTranscript({
+      kind: "agent",
+      authProvider: "bootstrap",
+      label: "test-agent",
+      workspaceIds: ["workspace-1"],
+    }, {
+      workspaceId: "workspace-1",
+      title: "Weekly Tactical",
+      recordedAt: new Date("2001-07-15T11:00:00.000Z"),
+      source: "transcript-upload",
+      transcript: "Jan: We need a follow-up.",
+      now: TEST_NOW,
+    })).resolves.toMatchObject({
+      status: "needs_clarification",
+      requiredFields: ["recordedAt"],
+      inferred: {
+        title: "Weekly Tactical",
+        recordedAt: null,
+      },
+    });
+    expect(createMeetingMock).not.toHaveBeenCalled();
+    expect(uploadMeetingTranscriptMock).not.toHaveBeenCalled();
+  });
+
+  it("allows trusted provider imports to keep historical recordedAt values", async () => {
+    uploadMeetingTranscriptMock.mockResolvedValueOnce({
+      status: "created",
+      meeting: { id: "meeting-provider" },
+      candidates: [],
+    });
+    const { intakeMeetingTranscript } = await import("./meeting-transcript-intake");
+
+    await expect(intakeMeetingTranscript({
+      kind: "agent",
+      authProvider: "bootstrap",
+      label: "test-agent",
+      workspaceIds: ["workspace-1"],
+    }, {
+      workspaceId: "workspace-1",
+      title: "Historical provider transcript",
+      recordedAt: new Date("2001-07-15T11:00:00.000Z"),
+      source: "meeting-transcript:fireflies",
+      provider: "FIREFLIES", sourceRecordId: "source-record-1",
+      transcript: "Jan: Provider imported this historical meeting.",
+      now: TEST_NOW,
+    })).resolves.toMatchObject({
+      status: "meeting_created",
+      meeting: { id: "meeting-provider" },
+    });
+    expect(uploadMeetingTranscriptMock).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+      recordedAt: new Date("2001-07-15T11:00:00.000Z"),
+    }));
+  });
+
+  it("lets trusted provider revisions update an existing meeting date", async () => {
+    prismaMock.meeting.findFirst.mockResolvedValueOnce({
+      recordedAt: new Date("2026-07-15T16:00:00.000Z"),
+      title: "Existing meeting",
+      participantEmails: [],
+    });
+    uploadMeetingTranscriptMock.mockResolvedValueOnce({
+      status: "matched",
+      meeting: { id: "meeting-1", title: "Existing meeting" },
+      candidates: [],
+    });
+    const { intakeMeetingTranscript } = await import("./meeting-transcript-intake");
+
+    await intakeMeetingTranscript({
+      kind: "agent",
+      authProvider: "bootstrap",
+      label: "test-agent",
+      workspaceIds: ["workspace-1"],
+    }, {
+      workspaceId: "workspace-1",
+      meetingId: "meeting-1",
+      recordedAt: new Date("2001-07-15T11:00:00.000Z"),
+      source: "meeting-transcript:fireflies",
+      provider: "FIREFLIES",
+      sourceRecordId: "source-record-1",
+      transcript: "Jan: Provider corrected this historical meeting.",
+      now: TEST_NOW,
+    });
+    expect(uploadMeetingTranscriptMock).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+      meetingId: "meeting-1",
+      recordedAt: new Date("2001-07-15T11:00:00.000Z"),
+    }));
   });
 
   it("keeps source URLs out of meeting join URL matching", async () => {
@@ -90,6 +228,7 @@ describe("meeting transcript intake", () => {
       source: "meeting-transcript:fireflies",
       sourceUrl: "https://app.fireflies.ai/view/transcript-123",
       transcript: "Jan: Follow up next week.",
+      now: TEST_NOW,
     });
 
     expect(uploadMeetingTranscriptMock).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
@@ -122,10 +261,11 @@ describe("meeting transcript intake", () => {
       recordedAt: new Date("2026-05-17T10:00:00.000Z"),
       source: "transcript-upload",
       transcript: "Jan: Follow up next week.",
+      now: TEST_NOW,
     })).resolves.toMatchObject({
       status: "needs_clarification",
       requiredFields: ["meetingId"],
-      message: "I found a scheduled meeting that may match this transcript, but it was not confident enough to auto-match. Choose it or add more meeting details and upload again.",
+      message: "I found a scheduled meeting that may match this transcript, but it was not confident enough to auto-match. Choose it or create a new meeting to continue.",
       candidates: [{
         meetingId: "meeting-1",
         score: 0.52,
@@ -152,6 +292,7 @@ describe("meeting transcript intake", () => {
       source: "transcript-upload",
       transcript: "Jan: Follow up next week.",
       createNewMeeting: true,
+      now: TEST_NOW,
     })).resolves.toMatchObject({
       status: "meeting_created",
       meeting: { id: "meeting-new" },

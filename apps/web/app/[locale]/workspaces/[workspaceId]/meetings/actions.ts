@@ -1,6 +1,6 @@
 "use server";
 
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { enforceDemoGuard } from "@/lib/demo-guard";
 import { requirePageActor } from "@/lib/auth";
 import { asString, asOptional, refresh } from "../action-utils";
@@ -25,7 +25,7 @@ import {
   type MeetingTranscriptIntakeResult,
 } from "@corgtex/domain";
 import { extractTextFromFileBuffer } from "@corgtex/knowledge";
-import { getRedisClient, redisKey } from "@corgtex/shared";
+import { captureTelemetryEvent, getRedisClient, redisKey } from "@corgtex/shared";
 import {
   parseMeetingDateTimeInput,
   parseOptionalMeetingDateTimeInput,
@@ -129,6 +129,21 @@ function isTranscriptUploadPayload(value: TranscriptUploadPayload | TranscriptUp
 
 function pendingTranscriptKey(workspaceId: string, token: string) {
   return redisKey(`meeting-transcript-upload:${workspaceId}:${token}`);
+}
+
+function pendingTranscriptClarificationId(token: string | null | undefined) {
+  if (!token) return null;
+  return createHash("sha256").update(token).digest("hex").slice(0, 16);
+}
+
+function captureMeetingTranscriptIntakeAdvisory(properties: Record<string, unknown>) {
+  void captureTelemetryEvent({
+    event: "corgtex_meeting_transcript_intake_advisory",
+    distinctId: typeof properties.workspace_id === "string"
+      ? `workspace:${properties.workspace_id}`
+      : "meeting-transcript-intake",
+    properties,
+  });
 }
 
 function isPendingTranscriptPayload(value: unknown): value is PendingTranscriptPayload {
@@ -477,6 +492,15 @@ export async function uploadMeetingTranscriptStateAction(
       if (nextToken) {
         await deletePendingTranscriptPayload(workspaceId, payload.pendingTranscriptToken);
       }
+      captureMeetingTranscriptIntakeAdvisory({
+        kind: "needs_clarification",
+        workspace_id: workspaceId,
+        surface: "server_action",
+        required_fields: result.requiredFields,
+        candidate_count: result.candidates?.length ?? 0,
+        pending_upload_stored: Boolean(nextToken),
+        clarification_id: pendingTranscriptClarificationId(nextToken),
+      });
       return {
         status: "needs_clarification",
         message: result.message,
@@ -488,6 +512,16 @@ export async function uploadMeetingTranscriptStateAction(
       };
     }
 
+    if (payload.pendingTranscriptToken) {
+      captureMeetingTranscriptIntakeAdvisory({
+        kind: "needs_clarification_completed",
+        workspace_id: workspaceId,
+        surface: "server_action",
+        meeting_id: result.meeting.id,
+        create_new_meeting: payload.createNewMeeting,
+        clarification_id: pendingTranscriptClarificationId(payload.pendingTranscriptToken),
+      });
+    }
     await deletePendingTranscriptPayload(workspaceId, payload.pendingTranscriptToken);
     refresh(workspaceId);
     return {

@@ -46,6 +46,7 @@ type Props = {
   showTitle?: boolean;
   showSource?: boolean;
   showRecordedAt?: boolean;
+  requireRecordedAt?: boolean;
   showTimeZone?: boolean;
   showParticipants?: boolean;
   showParticipantIds?: boolean;
@@ -98,6 +99,7 @@ export function MeetingTranscriptUploadForm({
   showTitle = false,
   showSource = false,
   showRecordedAt = false,
+  requireRecordedAt = false,
   showTimeZone = false,
   showParticipants = false,
   showParticipantIds = false,
@@ -125,6 +127,9 @@ export function MeetingTranscriptUploadForm({
   const requiresRecordedAt = state.status === "needs_clarification"
     && state.requiredFields?.includes("recordedAt");
   const mustRetryUpload = state.status === "needs_clarification" && state.retryRequiresTranscriptUpload;
+  const hasPendingTranscript = Boolean(state.pendingTranscriptToken) && !mustRetryUpload;
+  const recordedAtRequired = requireRecordedAt || requiresRecordedAt;
+  const showUploadFields = showDetailFields && !hasPendingTranscript;
   const formKey = `${state.status}:${state.pendingTranscriptToken ?? "no-token"}:${mustRetryUpload ? "retry" : "normal"}`;
 
   useEffect(() => {
@@ -229,7 +234,13 @@ export function MeetingTranscriptUploadForm({
           {showRecordedAt ? (
             <label style={{ flex: 1 }}>
               {labels.recordedAt ?? "Recorded at"}
-              <input name="recordedAt" type="datetime-local" defaultValue={fieldValue(state, defaultValues, "recordedAt")} required={requiresRecordedAt} />
+              <input
+                name="recordedAt"
+                type="datetime-local"
+                defaultValue={fieldValue(state, defaultValues, "recordedAt")}
+                required={recordedAtRequired}
+                aria-required={recordedAtRequired}
+              />
             </label>
           ) : null}
         </div>
@@ -282,14 +293,14 @@ export function MeetingTranscriptUploadForm({
         </label>
       ) : null}
 
-      {(showFile && showDetailFields) || (showFile && mustRetryUpload) ? (
+      {(showFile && showUploadFields) || (showFile && mustRetryUpload) ? (
         <label>
           {labels.file ?? "Transcript file"}
           <input name="file" type="file" accept=".txt,.md,.csv,.json,.pdf,.docx" />
         </label>
       ) : null}
 
-      {(showTranscript && showDetailFields) || (showTranscript && mustRetryUpload) ? (
+      {(showTranscript && showUploadFields) || (showTranscript && mustRetryUpload) ? (
         <label>
           {labels.transcript ?? "Transcript"}
           <textarea

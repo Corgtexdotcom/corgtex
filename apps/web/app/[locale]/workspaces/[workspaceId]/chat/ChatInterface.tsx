@@ -79,6 +79,7 @@ export function ChatInterface({
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [errorAction, setErrorAction] = useState<{ message: string; href: string; label: string } | null>(null);
   const [isFullScreen, setIsFullScreen] = useState(false);
   const [attachedFile, setAttachedFile] = useState<File | null>(null);
   const [showNewChat, setShowNewChat] = useState(mobileMode);
@@ -354,8 +355,12 @@ export function ChatInterface({
         if (!uploadRes.ok) {
           throw new Error(uploadData.message || t("errorFailedToSend"));
         }
-        if (uploadData.status === "needs_clarification") {
-          setError(uploadData.message || "Please add the missing meeting details and send again.");
+        if (uploadData.status === "needs_clarification" || uploadData.status === "needs_meeting_details") {
+          const uploadMessage = uploadData.message || "Please add the missing meeting details and send again.";
+          setError(uploadMessage);
+          setErrorAction(uploadData.webUrl
+            ? { message: uploadMessage, href: uploadData.webUrl, label: "Open meeting upload" }
+            : null);
           setLoading(false);
           inputRef.current?.focus();
           return;
@@ -826,7 +831,13 @@ export function ChatInterface({
 
           {error && (
             <div className="form-message form-message-error" style={{ margin: "0 16px 8px" }}>
-              {error}
+              <span>{error}</span>
+              {errorAction?.message === error ? (
+                <>
+                  {" "}
+                  <a href={errorAction.href}>{errorAction.label}</a>
+                </>
+              ) : null}
             </div>
           )}
 

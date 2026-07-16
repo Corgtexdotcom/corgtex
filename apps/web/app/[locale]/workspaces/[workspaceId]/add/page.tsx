@@ -598,6 +598,7 @@ export default async function WorkspaceAddPage({
             showTitle
             showSource
             showRecordedAt
+            requireRecordedAt
             showTimeZone
             showParticipants
             transcriptRows={8}

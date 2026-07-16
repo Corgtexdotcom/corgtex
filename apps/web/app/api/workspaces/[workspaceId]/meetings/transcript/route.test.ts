@@ -49,7 +49,7 @@ describe("POST /api/workspaces/[workspaceId]/meetings/transcript", () => {
       requiredFields: ["meetingId"],
       candidates: [{ meetingId: "meeting-1", score: 0.72 }],
       inferred: {},
-      message: "I found multiple scheduled meetings that could match this transcript. Choose one and upload again.",
+      message: "I found multiple scheduled meetings that could match this transcript. Choose one or create a new meeting to continue.",
     });
 
     const { POST } = await import("./route");
