@@ -424,6 +424,72 @@ describe("workspace briefing", () => {
     }));
   });
 
+  it("carries unmatched unresolved context into digest-derived briefings", async () => {
+    const { buildWorkspaceBriefingFromDigest } = await import("./workspace-briefing");
+    const briefing = buildWorkspaceBriefingFromDigest({
+      workspaceId: "ws-1",
+      period: "DAILY",
+      dateKey: "2026-04-30",
+      title: "Daily Workspace Briefing - 2026-04-30",
+      generatedAt: new Date("2026-04-30T12:00:00.000Z"),
+      digest: {
+        intro: null,
+        sections: [
+          {
+            id: "meetingBriefs",
+            title: "Meeting Briefs",
+            items: ["Weekly operating review uploaded today: The team aligned follow-up priorities from the newest meeting notes."],
+          },
+        ],
+      },
+      candidates: [
+        baseCandidate({
+          sourceType: "MEETING",
+          sourceId: "meeting-current",
+          title: "Weekly operating review uploaded today",
+          summaryMd: "The team aligned follow-up priorities from the newest meeting notes.",
+          href: "/workspaces/ws-1/meetings/meeting-current",
+          occurredAt: new Date("2026-04-30T10:00:00.000Z"),
+          updatedAt: new Date("2026-04-30T10:00:00.000Z"),
+          status: "COMPLETED",
+          strategicScore: 5,
+          actionabilityScore: 5,
+          evidenceScore: 5,
+          sourceRefs: [{ type: "MEETING", id: "meeting-current", label: "Weekly operating review uploaded today", href: "/workspaces/ws-1/meetings/meeting-current" }],
+        }),
+        baseCandidate({
+          sourceType: "PROPOSAL",
+          sourceId: "proposal-continuing",
+          title: "Strategic operating proposal still needs a decision",
+          summaryMd: "The proposal is older than the fresh window, but it remains unresolved and still changes what the team needs to know this week.",
+          href: "/workspaces/ws-1/proposals/proposal-continuing",
+          occurredAt: new Date("2026-04-12T12:00:00.000Z"),
+          updatedAt: new Date("2026-04-12T12:00:00.000Z"),
+          status: "OPEN",
+          priority: 4,
+          strategicScore: 5,
+          actionabilityScore: 4,
+          evidenceScore: 4,
+          sourceRefs: [{ type: "PROPOSAL", id: "proposal-continuing", label: "Strategic operating proposal still needs a decision", href: "/workspaces/ws-1/proposals/proposal-continuing" }],
+        }),
+      ],
+    });
+
+    expect(briefing.items[0]).toEqual(expect.objectContaining({
+      kind: "MEETING",
+      title: "Weekly operating review uploaded today",
+    }));
+    expect(briefing.items).toContainEqual(expect.objectContaining({
+      kind: "PROPOSAL",
+      title: "Strategic operating proposal still needs a decision",
+    }));
+    expect(briefing.continuingContextMd).toContain("Strategic operating proposal still needs a decision");
+    expect(briefing.sourceRefs).toContainEqual(expect.objectContaining({
+      type: "PROPOSAL",
+      id: "proposal-continuing",
+    }));
+  });
+
   it("keeps stale strategic work visible without making it the lead", async () => {
     const { buildWorkspaceBriefingFromCandidates } = await import("./workspace-briefing");
     const briefing = buildWorkspaceBriefingFromCandidates({

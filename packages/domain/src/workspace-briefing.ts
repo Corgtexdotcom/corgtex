@@ -593,6 +593,10 @@ function candidateMatchesDigestItem(candidate: WorkspaceBriefingCandidate, rawIt
   );
 }
 
+function candidateKey(candidate: Pick<WorkspaceBriefingCandidate, "sourceType" | "sourceId">) {
+  return `${candidate.sourceType}:${candidate.sourceId}`;
+}
+
 function titleFromDigestItem(rawItem: string) {
   const compact = normalizeNarrativeText(rawItem, 160);
   if (!compact) return "Workspace update";
@@ -615,11 +619,27 @@ function pickCandidateForSection(
   const expectedKind = sectionKind(sectionId);
   const direct = candidates.find((entry) => (
     entry.sourceType === expectedKind
-    && !used.has(`${entry.sourceType}:${entry.sourceId}`)
+    && !used.has(candidateKey(entry))
     && candidateMatchesDigestItem(entry, rawItem)
   ));
-  if (direct) used.add(`${direct.sourceType}:${direct.sourceId}`);
+  if (direct) used.add(candidateKey(direct));
   return direct ?? null;
+}
+
+function shouldCarryUnmatchedDigestCandidate(candidate: WorkspaceBriefingCandidate, generatedAt: Date) {
+  const status = (candidate.status ?? "").toUpperCase();
+  const isOpenContext = ["OPEN", "IN_PROGRESS", "ACTIVE", "PUBLISHED"].includes(status);
+  const isContextKind = candidate.sourceType === "GOAL"
+    || candidate.sourceType === "PROPOSAL"
+    || candidate.sourceType === "TENSION"
+    || candidate.sourceType === "ACTION"
+    || candidate.sourceType === "ADVICE_REQUEST";
+  if (!isContextKind || !isOpenContext) return false;
+  const score = scoreWorkspaceBriefingCandidate(candidate, generatedAt);
+  return score >= 6
+    || candidate.strategicScore >= 4
+    || candidate.actionabilityScore >= 4
+    || dueScore(candidate, generatedAt) > 0;
 }
 
 function adviceSubjectHref(workspaceId: string, subjectType: string, subjectId: string) {
@@ -675,7 +695,27 @@ export function buildWorkspaceBriefingFromDigest(params: {
       };
     })
   ));
-  const items = digestEntries
+  const carryForwardEntries = rankedCandidates
+    .filter((candidate) => !used.has(candidateKey(candidate)))
+    .filter((candidate) => shouldCarryUnmatchedDigestCandidate(candidate, generatedAt))
+    .slice(0, params.period === "WEEKLY" ? 6 : 4)
+    .map((source, index) => {
+      const score = Math.max(0, scoreWorkspaceBriefingCandidate(source, generatedAt) - 0.25);
+      return {
+        digestIndex: 10_000 + index,
+        kind: source.sourceType,
+        title: source.title,
+        rawItem: source.summaryMd ?? source.title,
+        whyItMattersMd: whyCandidateMatters(source),
+        sourceRefs: source.sourceRefs,
+        href: source.href,
+        occurredAt: source.occurredAt,
+        status: source.status ?? null,
+        confidence: Math.max(0.62, Math.min(0.98, 0.6 + score / 25)),
+        score,
+      };
+    });
+  const items = [...digestEntries, ...carryForwardEntries]
     .sort((a, b) => (
       b.score - a.score
       || b.occurredAt.getTime() - a.occurredAt.getTime()
