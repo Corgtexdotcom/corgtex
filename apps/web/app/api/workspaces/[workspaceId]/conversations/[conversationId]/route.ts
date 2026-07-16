@@ -44,6 +44,15 @@ function enqueueKeepAlive(controller: ReadableStreamDefaultController<Uint8Array
   controller.enqueue(encodeStreamPayload(encoder, { keepAlive: true }));
 }
 
+function unstreamedAssistantText(streamedAssistantMessage: string, assistantMessage: string) {
+  if (!assistantMessage) return "";
+  if (!streamedAssistantMessage.trim()) return assistantMessage;
+  if (assistantMessage.startsWith(streamedAssistantMessage)) {
+    return assistantMessage.slice(streamedAssistantMessage.length);
+  }
+  return "";
+}
+
 async function nextConversationStreamResult(
   iterator: AsyncGenerator<string, ConversationStreamResult>,
   controller: ReadableStreamDefaultController<Uint8Array>,
@@ -133,6 +142,7 @@ export async function POST(
         try {
           enqueueKeepAlive(controller, encoder);
           let finalResult: ConversationStreamResult | undefined;
+          let streamedAssistantMessage = "";
 
           while (true) {
             const { done, value } = await nextConversationStreamResult(iterator, controller, encoder);
@@ -141,11 +151,18 @@ export async function POST(
               break;
             }
             if (value) {
+              streamedAssistantMessage += value;
               controller.enqueue(encodeStreamPayload(encoder, { text: value }));
             }
           }
 
           if (finalResult && finalResult.assistantMessage) {
+            const missingText = unstreamedAssistantText(streamedAssistantMessage, finalResult.assistantMessage);
+            if (missingText) {
+              streamedAssistantMessage += missingText;
+              controller.enqueue(encodeStreamPayload(encoder, { text: missingText }));
+            }
+
             await addConversationTurn(actor, {
               workspaceId,
               conversationId,
