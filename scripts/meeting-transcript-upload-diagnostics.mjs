@@ -11,14 +11,12 @@ const RECORDER_SOURCES = new Set(["manual-recorder", "recorder"]);
 const DAY_MS = 24 * 60 * 60 * 1000;
 
 function usage() {
-  return [
-    "usage: node scripts/meeting-transcript-upload-diagnostics.mjs --workspace <id-or-slug> [options]",
-    "",
-    "options:",
-    "  --since <iso-date>                       Emit non-duplicate advisories for meetings changed since this date.",
-    "  --max-recorded-at-drift-days <number>    Flag manual transcript dates this far from upload time. Default: 30.",
-    "  --processing-pending-minutes <number>    Flag transcript processing not READY after this age. Default: 30.",
-  ].join("\n");
+  return `usage: node scripts/meeting-transcript-upload-diagnostics.mjs --workspace <id-or-slug> [options]
+
+options:
+  --since <iso-date>                       Emit non-duplicate advisories for meetings changed since this date.
+  --max-recorded-at-drift-days <number>    Flag manual transcript dates this far from upload time. Default: 30.
+  --processing-pending-minutes <number>    Flag transcript processing not READY after this age. Default: 30.`;
 }
 
 function readArg(argv, name) {
@@ -26,10 +24,6 @@ function readArg(argv, name) {
   if (index === -1) return null;
   const value = argv[index + 1];
   return value && !value.startsWith("--") ? value : null;
-}
-
-function hasArg(argv, name) {
-  return argv.includes(name);
 }
 
 function parsePositiveNumber(value, fallback) {
@@ -94,15 +88,13 @@ function serializableMeeting(meeting) {
     recordedAt: meeting.recordedAt?.toISOString?.() ?? null,
     createdAt: meeting.createdAt?.toISOString?.() ?? null,
     updatedAt: meeting.updatedAt?.toISOString?.() ?? null,
-    transcriptProcessingProgress: progress
-        ? {
-            currentStage: progress.currentStage ?? null,
-            createdAt: progress.createdAt?.toISOString?.() ?? null,
-            startedAt: progress.startedAt?.toISOString?.() ?? null,
-            failedAt: progress.failedAt?.toISOString?.() ?? null,
-          updatedAt: progress.updatedAt?.toISOString?.() ?? null,
-        }
-      : null,
+    transcriptProcessingProgress: progress ? {
+      currentStage: progress.currentStage ?? null,
+      createdAt: progress.createdAt?.toISOString?.() ?? null,
+      startedAt: progress.startedAt?.toISOString?.() ?? null,
+      failedAt: progress.failedAt?.toISOString?.() ?? null,
+      updatedAt: progress.updatedAt?.toISOString?.() ?? null,
+    } : null,
   };
 }
 
@@ -177,10 +169,7 @@ export function buildMeetingTranscriptUploadDiagnostics({
 async function findWorkspace(prisma, workspace) {
   const found = await prisma.workspace.findFirst({
     where: {
-      OR: [
-        { id: workspace },
-        { slug: workspace },
-      ],
+      OR: [{ id: workspace }, { slug: workspace }],
     },
     select: { id: true, slug: true, name: true },
   });
@@ -206,15 +195,7 @@ async function loadMeetings(prisma, workspaceId, since) {
       createdAt: true,
       updatedAt: true,
       transcript: true,
-      transcriptProcessingProgress: {
-        select: {
-          currentStage: true,
-          createdAt: true,
-          startedAt: true,
-          failedAt: true,
-          updatedAt: true,
-        },
-      },
+      transcriptProcessingProgress: { select: { currentStage: true, createdAt: true, startedAt: true, failedAt: true, updatedAt: true } },
     },
   });
   return meetings.map((meeting) => ({
@@ -224,7 +205,7 @@ async function loadMeetings(prisma, workspaceId, since) {
 }
 
 export async function runCli(argv = process.argv.slice(2), env = process.env) {
-  if (hasArg(argv, "--help") || hasArg(argv, "-h")) {
+  if (argv.includes("--help") || argv.includes("-h")) {
     console.log(usage());
     return 0;
   }
@@ -256,7 +237,7 @@ export async function runCli(argv = process.argv.slice(2), env = process.env) {
       since: since.toISOString(),
     };
 
-    console.log(JSON.stringify(summary, null, hasArg(argv, "--json") ? 0 : 2));
+    console.log(JSON.stringify(summary, null, argv.includes("--json") ? 0 : 2));
 
     return 0;
   } finally {

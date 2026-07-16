@@ -70,7 +70,9 @@ function asValidDate(value: unknown) {
 export function isPlausibleMeetingRecordedAt(value: Date | null, now = new Date()) {
   if (!value || Number.isNaN(value.valueOf())) return false;
   const earliest = new Date(now);
+  const originalMonth = earliest.getMonth();
   earliest.setFullYear(earliest.getFullYear() - 10);
+  if (earliest.getMonth() !== originalMonth) earliest.setDate(0);
   const latest = now.getTime() + NINETY_DAYS_MS;
   return value.getTime() >= earliest.getTime() && value.getTime() <= latest;
 }

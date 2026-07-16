@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import type { Prisma } from "@prisma/client";
-import { AppError, createMeetingAudioAsset, requireWorkspaceMembership } from "@corgtex/domain";
+import { AppError, createMeetingAudioAsset, isPlausibleMeetingRecordedAt, requireWorkspaceMembership } from "@corgtex/domain";
 import { prisma } from "@corgtex/shared";
 import { resolveRequestActor } from "@/lib/auth";
 import { handleRouteError } from "@/lib/http";
@@ -78,6 +78,9 @@ function parseRecordedAt(value: string | null, required: boolean) {
   const recordedAt = new Date(value);
   if (Number.isNaN(recordedAt.valueOf())) {
     throw new AppError(400, "INVALID_INPUT", "recordedAt must be a valid date.");
+  }
+  if (!isPlausibleMeetingRecordedAt(recordedAt)) {
+    throw new AppError(400, "INVALID_INPUT", "recordedAt must be within the last 10 years and no more than 90 days in the future.");
   }
   return recordedAt;
 }

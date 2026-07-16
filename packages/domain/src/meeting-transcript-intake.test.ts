@@ -25,7 +25,7 @@ describe("meeting transcript intake", () => {
   });
 
   it("skips model metadata extraction when title and recordedAt are explicit", async () => {
-    const { inferMeetingTranscriptMetadata } = await import("./meeting-transcript-intake");
+    const { inferMeetingTranscriptMetadata, isPlausibleMeetingRecordedAt } = await import("./meeting-transcript-intake");
 
     const metadata = await inferMeetingTranscriptMetadata({
       workspaceId: "workspace-1",
@@ -48,6 +48,7 @@ describe("meeting transcript intake", () => {
       participantEmails: ["andy@example.com"],
       source: "production-smoke",
     });
+    expect(isPlausibleMeetingRecordedAt(new Date("2018-02-28T12:00:00.000Z"), new Date("2028-02-29T12:00:00.000Z"))).toBe(true);
   });
 
   it("uses model metadata when required fields are missing", async () => {

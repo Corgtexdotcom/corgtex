@@ -5,12 +5,14 @@ const {
   createMeetingAudioAsset,
   findManyMeetingAudioAssets,
   handleRouteError,
+  isPlausibleMeetingRecordedAt,
   requireWorkspaceMembership,
   resolveRequestActor,
 } = vi.hoisted(() => ({
   createMeetingAudioAsset: vi.fn(),
   findManyMeetingAudioAssets: vi.fn(),
   handleRouteError: vi.fn((error: unknown) => NextResponse.json({ error: String(error) }, { status: 500 })),
+  isPlausibleMeetingRecordedAt: vi.fn((value: Date | null) => Boolean(value && value.getUTCFullYear() >= 2016 && value.getUTCFullYear() <= 2026)),
   requireWorkspaceMembership: vi.fn(),
   resolveRequestActor: vi.fn(),
 }));
@@ -21,7 +23,7 @@ class MockAppError extends Error {
   }
 }
 
-vi.mock("@corgtex/domain", () => ({ AppError: MockAppError, createMeetingAudioAsset, requireWorkspaceMembership }));
+vi.mock("@corgtex/domain", () => ({ AppError: MockAppError, createMeetingAudioAsset, isPlausibleMeetingRecordedAt, requireWorkspaceMembership }));
 vi.mock("@corgtex/shared", () => ({ prisma: { meetingAudioAsset: { findMany: findManyMeetingAudioAssets } } }));
 vi.mock("@/lib/auth", () => ({ resolveRequestActor }));
 vi.mock("@/lib/http", async () => ({ ...(await vi.importActual<typeof import("@/lib/http")>("@/lib/http")), handleRouteError }));
@@ -155,6 +157,9 @@ describe("/api/workspaces/[workspaceId]/meeting-audio-assets", () => {
       surface: "meeting_audio_assets",
       workspaceId: "workspace-1",
     });
+    formData.set("recordedAt", "2001-07-15T11:00:00.000Z");
+    await POST(request({ method: "POST", body: formData }), context());
+    expect(createMeetingAudioAsset).not.toHaveBeenCalled();
 
     await POST(request({ method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({}) }), context());
     expect(handleRouteError).toHaveBeenLastCalledWith(expect.any(MockAppError), {
@@ -162,6 +167,5 @@ describe("/api/workspaces/[workspaceId]/meeting-audio-assets", () => {
       surface: "meeting_audio_assets",
       workspaceId: undefined,
     });
-    expect(createMeetingAudioAsset).not.toHaveBeenCalled();
   });
 });
