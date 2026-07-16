@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 
 import {
   expectedHealthGitSha,
+  configuredReleaseMatchRequired,
+  healthConfiguredReleaseDrift,
   healthPayloadMismatch,
   healthReleaseMismatch,
   releaseMatchDisabled,
@@ -33,6 +35,13 @@ describe("railway smoke release validation", () => {
     })).toBeNull();
   });
 
+  it("only requires configured release metadata matching when explicitly enabled", () => {
+    expect(configuredReleaseMatchRequired({})).toBe(false);
+    expect(configuredReleaseMatchRequired({
+      CORGTEX_REQUIRE_CONFIGURED_RELEASE_MATCH: "true",
+    })).toBe(true);
+  });
+
   it("does not require release matching outside CI-like environments", () => {
     expect(expectedHealthGitSha({})).toBeNull();
     expect(healthReleaseMismatch({ release: { gitSha: "older-sha" } }, null)).toBeNull();
@@ -46,13 +55,13 @@ describe("railway smoke release validation", () => {
     }, "current-sha")).toBeNull();
   });
 
-  it("accepts matching health release image tags when runtime gitSha metadata lags", () => {
+  it("does not accept a matching image tag when runtime gitSha metadata lags", () => {
     expect(healthReleaseMismatch({
       release: {
         gitSha: "older-sha",
         imageTag: "current-sha",
       },
-    }, "current-sha")).toBeNull();
+    }, "current-sha")).toContain("release.gitSha older-sha did not match expected current-sha");
   });
 
   it("reports mismatched or missing health release SHAs", () => {
@@ -60,8 +69,44 @@ describe("railway smoke release validation", () => {
       release: {
         gitSha: "older-sha",
       },
-    }, "current-sha")).toContain("older-sha or release.imageTag missing did not match expected current-sha");
-    expect(healthReleaseMismatch({}, "current-sha")).toContain("release.gitSha missing or release.imageTag missing did not match expected current-sha");
+    }, "current-sha")).toContain("release.gitSha older-sha did not match expected current-sha");
+    expect(healthReleaseMismatch({}, "current-sha")).toContain("release.gitSha missing did not match expected current-sha");
+  });
+
+  it("reports configured/runtime release metadata drift from the health payload", () => {
+    expect(healthConfiguredReleaseDrift({
+      release: {
+        gitSha: "current-sha",
+        drift: {
+          gitSha: true,
+          imageTag: true,
+          version: false,
+          details: [
+            "configured.gitSha=older-sha does not match runtime.gitSha=current-sha",
+          ],
+        },
+      },
+    }, "current-sha")).toContain("configured.gitSha=older-sha");
+
+    expect(healthConfiguredReleaseDrift({
+      release: {
+        gitSha: "current-sha",
+        configured: { gitSha: "older-sha" },
+      },
+    }, "current-sha")).toContain("configured.gitSha older-sha");
+
+    expect(healthConfiguredReleaseDrift({
+      release: {
+        gitSha: "current-sha",
+        configured: { gitSha: "current-sha" },
+        drift: {
+          gitSha: false,
+          imageTag: false,
+          version: false,
+          details: [],
+        },
+      },
+    }, "current-sha")).toBeNull();
   });
 
   it("reports non-JSON health payloads as retryable mismatches", () => {

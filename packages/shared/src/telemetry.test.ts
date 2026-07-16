@@ -88,6 +88,23 @@ describe("telemetry", () => {
     }));
   });
 
+  it("uses the same runtime-over-configured release SHA precedence as health", () => {
+    expect(telemetryRuntimeContext(testEnv({
+      CORGTEX_RELEASE_GIT_SHA: "older-sha",
+      CORGTEX_RELEASE_IMAGE_TAG: "sha-older-sha",
+      CORGTEX_RELEASE_VERSION: "main-older",
+      RAILWAY_GIT_COMMIT_SHA: "current-sha",
+    }))).toEqual(expect.objectContaining({
+      provider: "railway",
+      release_configured_git_sha: "older-sha",
+      release_drift_git_sha: true,
+      release_drift_image_tag: true,
+      release_git_sha: "current-sha",
+      release_git_sha_source: "railway",
+      release_runtime_git_sha: "current-sha",
+    }));
+  });
+
   it("sends sanitized events to PostHog and Application Insights when configured", async () => {
     const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response("{}", { status: 200 }));
 
@@ -114,5 +131,22 @@ describe("telemetry", () => {
     expect(azureBody[0].iKey).toBe("ikey");
     expect(azureBody[0].data.baseData.name).toBe("corgtex_test_event");
     expect(JSON.stringify(azureBody)).not.toContain("private transcript");
+  });
+
+  it("honors explicit event sample-rate overrides for smoke events", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response("{}", { status: 200 }));
+
+    await expect(captureTelemetryEvent({
+      distinctId: "smoke:release",
+      event: "corgtex_release_telemetry_smoke",
+      sampleRate: 1,
+    }, testEnv({
+      POSTHOG_ENABLED: "true",
+      POSTHOG_EVENT_SAMPLE_RATE: "0",
+      POSTHOG_PROJECT_TOKEN: "phc_test",
+    }))).resolves.toEqual({ azure: "disabled", posthog: "sent" });
+
+    const postHogBody = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body));
+    expect(postHogBody.properties.corgtex_sample_rate).toBe(1);
   });
 });

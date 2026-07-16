@@ -1,7 +1,7 @@
 import { existsSync, readdirSync } from "node:fs";
 import path from "node:path";
 import { NextResponse } from "next/server";
-import { prisma } from "@corgtex/shared";
+import { prisma, resolveReleaseMetadata } from "@corgtex/shared";
 import {
   resolveAzureBlobStorageRuntimeConfig,
   resolveStorageProviderName,
@@ -28,35 +28,8 @@ function handleRouteError(error: unknown) {
   );
 }
 
-function optionalEnv(name: string) {
-  const value = process.env[name]?.trim();
-  return value || null;
-}
-
 function releaseFingerprint() {
-  const configuredVersion = optionalEnv("CORGTEX_RELEASE_VERSION");
-  const configuredImageTag = optionalEnv("CORGTEX_RELEASE_IMAGE_TAG");
-  const configuredGitSha = optionalEnv("CORGTEX_RELEASE_GIT_SHA");
-  const railwayGitSha = optionalEnv("RAILWAY_GIT_COMMIT_SHA");
-  const githubSha = optionalEnv("GITHUB_SHA");
-  const packageVersion = optionalEnv("npm_package_version");
-  const runtimeGitSha = railwayGitSha ?? githubSha;
-
-  return {
-    version: configuredVersion ?? packageVersion ?? "development",
-    imageTag: configuredImageTag,
-    gitSha: runtimeGitSha ?? configuredGitSha,
-    source: {
-      version: configuredVersion ? "configured" : packageVersion ? "package" : "development",
-      imageTag: configuredImageTag ? "configured" : "missing",
-      gitSha: railwayGitSha ? "railway" : githubSha ? "github" : configuredGitSha ? "configured" : "missing",
-    },
-    configured: {
-      version: configuredVersion,
-      imageTag: configuredImageTag,
-      gitSha: configuredGitSha,
-    },
-  };
+  return resolveReleaseMetadata(process.env, { service: "web" });
 }
 
 function runtimeFingerprint() {

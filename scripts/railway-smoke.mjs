@@ -15,6 +15,10 @@ function pass(message) {
   console.log(`OK   ${message}`);
 }
 
+function warn(message) {
+  console.warn(`WARN ${message}`);
+}
+
 export function expectedHealthGitSha(env = process.env) {
   if (releaseMatchDisabled(env)) {
     return null;
@@ -24,6 +28,11 @@ export function expectedHealthGitSha(env = process.env) {
 
 export function releaseMatchDisabled(env = process.env) {
   const value = env.CORGTEX_SKIP_RELEASE_MATCH?.trim().toLowerCase();
+  return value === "1" || value === "true" || value === "yes";
+}
+
+export function configuredReleaseMatchRequired(env = process.env) {
+  const value = env.CORGTEX_REQUIRE_CONFIGURED_RELEASE_MATCH?.trim().toLowerCase();
   return value === "1" || value === "true" || value === "yes";
 }
 
@@ -53,10 +62,32 @@ export function healthReleaseMismatch(health, expectedGitSha) {
   if (!expectedGitSha) return null;
 
   const actualGitSha = typeof health?.release?.gitSha === "string" ? health.release.gitSha : null;
-  const actualImageTag = typeof health?.release?.imageTag === "string" ? health.release.imageTag : null;
-  if (actualGitSha === expectedGitSha || actualImageTag === expectedGitSha) return null;
+  if (actualGitSha === expectedGitSha) return null;
 
-  return `/api/health release.gitSha ${actualGitSha ?? "missing"} or release.imageTag ${actualImageTag ?? "missing"} did not match expected ${expectedGitSha}`;
+  return `/api/health release.gitSha ${actualGitSha ?? "missing"} did not match expected ${expectedGitSha}`;
+}
+
+export function healthConfiguredReleaseDrift(health, expectedGitSha = null) {
+  const release = health?.release;
+  if (!release || typeof release !== "object") return null;
+
+  const driftDetails = Array.isArray(release.drift?.details)
+    ? release.drift.details.filter((detail) => typeof detail === "string")
+    : [];
+  if (release.drift?.gitSha || release.drift?.imageTag || release.drift?.version) {
+    return `/api/health release configured/runtime drift: ${driftDetails.length > 0 ? driftDetails.join("; ") : JSON.stringify(release.drift)}`;
+  }
+
+  const configuredGitSha = typeof release.configured?.gitSha === "string" ? release.configured.gitSha : null;
+  const runtimeGitSha = typeof release.runtime?.gitSha === "string" ? release.runtime.gitSha : null;
+  const actualGitSha = typeof release.gitSha === "string" ? release.gitSha : null;
+  const comparisonGitSha = expectedGitSha ?? runtimeGitSha ?? actualGitSha;
+
+  if (configuredGitSha && comparisonGitSha && configuredGitSha !== comparisonGitSha) {
+    return `/api/health release configured.gitSha ${configuredGitSha} did not match runtime git SHA ${comparisonGitSha}`;
+  }
+
+  return null;
 }
 
 function errorMessage(error) {
@@ -142,7 +173,7 @@ async function waitForExpectedRelease(baseUrl, expectedGitSha, initialMismatch) 
 
     const { healthResponse, health, parseError, fetchError } = await fetchHealth(baseUrl);
     lastMismatch = healthPayloadMismatch(healthResponse, health, parseError, fetchError) ?? healthReleaseMismatch(health, expectedGitSha);
-    if (!lastMismatch) return;
+    if (!lastMismatch) return health;
   }
 
   fail(`${lastMismatch}; expected release did not appear within ${timeoutMs}ms`);
@@ -170,7 +201,7 @@ async function main() {
   }
 
   const expectedGitSha = expectedHealthGitSha();
-  const { healthResponse, health, parseError, fetchError } = await fetchHealth(baseUrl);
+  let { healthResponse, health, parseError, fetchError } = await fetchHealth(baseUrl);
   const healthMismatch = healthPayloadMismatch(healthResponse, health, parseError, fetchError);
   if (healthMismatch && !expectedGitSha) {
     fail(healthMismatch);
@@ -178,12 +209,21 @@ async function main() {
 
   const releaseMismatch = healthMismatch ?? healthReleaseMismatch(health, expectedGitSha);
   if (releaseMismatch && expectedGitSha) {
-    await waitForExpectedRelease(baseUrl, expectedGitSha, releaseMismatch);
+    health = await waitForExpectedRelease(baseUrl, expectedGitSha, releaseMismatch);
   }
 
   pass("/api/health reports the Corgtex fingerprint");
   if (expectedGitSha) {
     pass(`/api/health release.gitSha matches ${expectedGitSha.slice(0, 12)}`);
+  }
+  const configuredDrift = healthConfiguredReleaseDrift(health, expectedGitSha);
+  if (configuredDrift) {
+    if (configuredReleaseMatchRequired()) {
+      fail(configuredDrift);
+    }
+    warn(configuredDrift);
+  } else {
+    pass("/api/health release configured metadata matches runtime metadata");
   }
 
   const loginResponse = await fetchWithRetry(new URL("/login", baseUrl), undefined, "/login");
