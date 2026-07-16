@@ -14,6 +14,7 @@ jobs:
   publish:
     name: Build and publish web/worker images
     runs-on: ubuntu-latest
+    environment: fleet-release-production
 
     steps:
       - uses: actions/checkout@v5
@@ -38,6 +39,17 @@ jobs:
           echo "worker_sha=${repo}/worker:${sha_tag}" >> "$GITHUB_OUTPUT"
           echo "web_version=${repo}/web:${version_tag}" >> "$GITHUB_OUTPUT"
           echo "worker_version=${repo}/worker:${version_tag}" >> "$GITHUB_OUTPUT"
+
+      - name: Validate image release secrets
+        shell: bash
+        env:
+          NEXT_SERVER_ACTIONS_ENCRYPTION_KEY: ${{ secrets.NEXT_SERVER_ACTIONS_ENCRYPTION_KEY }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${NEXT_SERVER_ACTIONS_ENCRYPTION_KEY:-}" ]]; then
+            echo "::error::NEXT_SERVER_ACTIONS_ENCRYPTION_KEY must be configured in the fleet-release-production environment for Release Images."
+            exit 1
+          fi
 
       - name: Build and push web image
         uses: docker/build-push-action@v6
