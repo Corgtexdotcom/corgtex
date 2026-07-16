@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import { resolveDeliberationEntry } from "@corgtex/domain";
+import { checkApiDemoGuard } from "@/lib/demo-guard";
 import { validateBody } from "@/lib/http";
 import { withWorkspaceRoute } from "@/lib/route-handler";
 
@@ -12,6 +13,8 @@ const resolveDeliberationEntrySchema = z.object({
 
 export const POST = withWorkspaceRoute(async (request, { actor, workspaceId, params }) => {
   const parsed = await validateBody(request, resolveDeliberationEntrySchema);
+  await checkApiDemoGuard(workspaceId);
+
   const entry = await resolveDeliberationEntry(actor, {
     workspaceId,
     entryId: params.entryId,

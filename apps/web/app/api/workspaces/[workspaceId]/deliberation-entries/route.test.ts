@@ -4,6 +4,10 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const {
   actor,
   AppError,
+  checkApiDemoGuard,
+  getAction,
+  getProposal,
+  getTension,
   postDeliberationEntry,
   requireWorkspaceMembership,
   resolveDeliberationEntry,
@@ -32,6 +36,10 @@ const {
       },
     },
     AppError: MockAppError,
+    checkApiDemoGuard: vi.fn(),
+    getAction: vi.fn(),
+    getProposal: vi.fn(),
+    getTension: vi.fn(),
     postDeliberationEntry: vi.fn(),
     requireWorkspaceMembership: vi.fn(),
     resolveDeliberationEntry: vi.fn(),
@@ -44,8 +52,15 @@ vi.mock("@/lib/auth", () => ({
   resolveRequestActor,
 }));
 
+vi.mock("@/lib/demo-guard", () => ({
+  checkApiDemoGuard,
+}));
+
 vi.mock("@corgtex/domain", () => ({
   AppError,
+  getAction,
+  getProposal,
+  getTension,
   postDeliberationEntry,
   requireWorkspaceMembership,
   resolveDeliberationEntry,
@@ -80,6 +95,10 @@ beforeEach(() => {
   vi.clearAllMocks();
   resolveRequestActor.mockResolvedValue(actor);
   requireWorkspaceMembership.mockResolvedValue({ id: "membership-1", role: "ADMIN" });
+  checkApiDemoGuard.mockResolvedValue(undefined);
+  getAction.mockResolvedValue({ id: "action-1", archivedAt: null });
+  getProposal.mockResolvedValue({ id: "proposal-1", archivedAt: null });
+  getTension.mockResolvedValue({ id: "tension-1", archivedAt: null });
   postDeliberationEntry.mockResolvedValue({ id: "entry-1", bodyMd: "Looks good." });
   updateDeliberationEntry.mockResolvedValue({ id: "entry-1", bodyMd: "Updated." });
   resolveDeliberationEntry.mockResolvedValue({ id: "entry-1", resolvedNote: "Handled." });
@@ -102,6 +121,17 @@ describe("POST /api/workspaces/[workspaceId]/deliberation-entries", () => {
     );
 
     expect(response.status).toBe(201);
+    expect(checkApiDemoGuard).toHaveBeenCalledWith("workspace-1");
+    expect(getProposal).toHaveBeenCalledWith(actor, {
+      workspaceId: "workspace-1",
+      proposalId: "proposal-1",
+    });
+    expect(checkApiDemoGuard.mock.invocationCallOrder[0]).toBeLessThan(
+      postDeliberationEntry.mock.invocationCallOrder[0],
+    );
+    expect(getProposal.mock.invocationCallOrder[0]).toBeLessThan(
+      postDeliberationEntry.mock.invocationCallOrder[0],
+    );
     expect(postDeliberationEntry).toHaveBeenCalledWith(actor, {
       workspaceId: "workspace-1",
       parentType: "PROPOSAL",
@@ -131,6 +161,87 @@ describe("POST /api/workspaces/[workspaceId]/deliberation-entries", () => {
     );
 
     expect(response.status).toBe(400);
+    expect(postDeliberationEntry).not.toHaveBeenCalled();
+  });
+
+  it("rejects demo workspace writes before creating a deliberation entry", async () => {
+    checkApiDemoGuard.mockRejectedValueOnce(
+      new AppError(403, "DEMO_MODE", "This is a read-only demo environment. Modifications are disabled."),
+    );
+    const { POST } = await import("./route");
+
+    const response = await POST(
+      jsonRequest("http://localhost/api/workspaces/workspace-1/deliberation-entries", {
+        parentType: "PROPOSAL",
+        parentId: "proposal-1",
+        entryType: "REACTION",
+        bodyMd: "Looks good.",
+      }),
+      workspaceContext(),
+    );
+
+    expect(response.status).toBe(403);
+    expect(getProposal).not.toHaveBeenCalled();
+    expect(postDeliberationEntry).not.toHaveBeenCalled();
+  });
+
+  it("rejects unreadable proposal parents before creating a deliberation entry", async () => {
+    getProposal.mockRejectedValueOnce(new AppError(404, "NOT_FOUND", "Proposal not found."));
+    const { POST } = await import("./route");
+
+    const response = await POST(
+      jsonRequest("http://localhost/api/workspaces/workspace-1/deliberation-entries", {
+        parentType: "PROPOSAL",
+        parentId: "proposal-private",
+        entryType: "REACTION",
+        bodyMd: "Looks good.",
+      }),
+      workspaceContext(),
+    );
+
+    expect(response.status).toBe(404);
+    expect(postDeliberationEntry).not.toHaveBeenCalled();
+  });
+
+  it("checks action parent visibility before creating a deliberation entry", async () => {
+    const { POST } = await import("./route");
+
+    const response = await POST(
+      jsonRequest("http://localhost/api/workspaces/workspace-1/deliberation-entries", {
+        parentType: "action",
+        parentId: "action-1",
+        entryType: "REACTION",
+        bodyMd: "Looks good.",
+      }),
+      workspaceContext(),
+    );
+
+    expect(response.status).toBe(201);
+    expect(getAction).toHaveBeenCalledWith(actor, {
+      workspaceId: "workspace-1",
+      actionId: "action-1",
+    });
+    expect(postDeliberationEntry).toHaveBeenCalledWith(actor, expect.objectContaining({
+      parentType: "ACTION",
+      parentId: "action-1",
+    }));
+  });
+
+  it("rejects archived tension parents before creating a deliberation entry", async () => {
+    getTension.mockResolvedValueOnce({ id: "tension-1", archivedAt: new Date("2026-01-01T00:00:00.000Z") });
+    const { POST } = await import("./route");
+
+    const response = await POST(
+      jsonRequest("http://localhost/api/workspaces/workspace-1/deliberation-entries", {
+        parentType: "TENSION",
+        parentId: "tension-1",
+        entryType: "REACTION",
+        bodyMd: "Looks good.",
+      }),
+      workspaceContext(),
+    );
+
+    expect(response.status).toBe(404);
     expect(postDeliberationEntry).not.toHaveBeenCalled();
   });
 
@@ -184,6 +295,7 @@ describe("PATCH /api/workspaces/[workspaceId]/deliberation-entries/[entryId]", (
     );
 
     expect(response.status).toBe(200);
+    expect(checkApiDemoGuard).toHaveBeenCalledWith("workspace-1");
     expect(updateDeliberationEntry).toHaveBeenCalledWith(actor, {
       workspaceId: "workspace-1",
       entryId: "entry-1",
@@ -201,6 +313,23 @@ describe("PATCH /api/workspaces/[workspaceId]/deliberation-entries/[entryId]", (
     );
 
     expect(response.status).toBe(400);
+    expect(updateDeliberationEntry).not.toHaveBeenCalled();
+  });
+
+  it("rejects demo workspace writes before editing a deliberation entry", async () => {
+    checkApiDemoGuard.mockRejectedValueOnce(
+      new AppError(403, "DEMO_MODE", "This is a read-only demo environment. Modifications are disabled."),
+    );
+    const { PATCH } = await import("./[entryId]/route");
+
+    const response = await PATCH(
+      jsonRequest("http://localhost/api/workspaces/workspace-1/deliberation-entries/entry-1", {
+        bodyMd: "Edited.",
+      }, "PATCH"),
+      entryContext(),
+    );
+
+    expect(response.status).toBe(403);
     expect(updateDeliberationEntry).not.toHaveBeenCalled();
   });
 
@@ -251,6 +380,7 @@ describe("POST /api/workspaces/[workspaceId]/deliberation-entries/[entryId]/reso
     );
 
     expect(response.status).toBe(200);
+    expect(checkApiDemoGuard).toHaveBeenCalledWith("workspace-1");
     expect(resolveDeliberationEntry).toHaveBeenCalledWith(actor, {
       workspaceId: "workspace-1",
       entryId: "entry-1",
@@ -269,6 +399,23 @@ describe("POST /api/workspaces/[workspaceId]/deliberation-entries/[entryId]/reso
     );
 
     expect(response.status).toBe(400);
+    expect(resolveDeliberationEntry).not.toHaveBeenCalled();
+  });
+
+  it("rejects demo workspace writes before resolving a deliberation entry", async () => {
+    checkApiDemoGuard.mockRejectedValueOnce(
+      new AppError(403, "DEMO_MODE", "This is a read-only demo environment. Modifications are disabled."),
+    );
+    const { POST } = await import("./[entryId]/resolve/route");
+
+    const response = await POST(
+      jsonRequest("http://localhost/api/workspaces/workspace-1/deliberation-entries/entry-1/resolve", {
+        resolvedNote: "Handled.",
+      }),
+      entryContext(),
+    );
+
+    expect(response.status).toBe(403);
     expect(resolveDeliberationEntry).not.toHaveBeenCalled();
   });
 });

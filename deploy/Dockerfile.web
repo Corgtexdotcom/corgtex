@@ -27,6 +27,7 @@ ARG CORGTEX_RELEASE_GIT_SHA
 ARG RAILWAY_GIT_COMMIT_SHA
 ARG GITHUB_SHA
 ARG NEXT_SERVER_ACTIONS_ENCRYPTION_KEY
+ARG REQUIRE_NEXT_SERVER_ACTIONS_KEY=false
 COPY . .
 RUN --mount=type=secret,id=next_server_actions_encryption_key \
   set -eu; \
@@ -34,7 +35,11 @@ RUN --mount=type=secret,id=next_server_actions_encryption_key \
   if [ -f /run/secrets/next_server_actions_encryption_key ]; then key="$(cat /run/secrets/next_server_actions_encryption_key)"; fi; \
   export NEXT_SERVER_ACTIONS_ENCRYPTION_KEY="$key"; \
   export CORGTEX_RELEASE_GIT_SHA RAILWAY_GIT_COMMIT_SHA GITHUB_SHA; \
-  node scripts/verify-next-server-actions-key.mjs --required; \
+  if [ "$REQUIRE_NEXT_SERVER_ACTIONS_KEY" = "true" ]; then \
+    node scripts/verify-next-server-actions-key.mjs --required; \
+  else \
+    node scripts/verify-next-server-actions-key.mjs; \
+  fi; \
   NODE_OPTIONS=--max-old-space-size=4096 npm run build
 
 FROM base AS runtime

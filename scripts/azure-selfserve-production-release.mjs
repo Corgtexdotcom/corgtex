@@ -77,6 +77,8 @@ if (!skipBuild) {
     `CORGTEX_RELEASE_GIT_SHA=${releaseGitSha}`,
     "--build-arg",
     `GITHUB_SHA=${releaseGitSha}`,
+    "--build-arg",
+    "REQUIRE_NEXT_SERVER_ACTIONS_KEY=true",
     "--secret-build-arg",
     `NEXT_SERVER_ACTIONS_ENCRYPTION_KEY=${nextServerActionsEncryptionKey}`,
     sourceDir,
