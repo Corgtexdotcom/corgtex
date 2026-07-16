@@ -10,6 +10,9 @@ const { prismaMock } = vi.hoisted(() => {
       update: vi.fn(),
       delete: vi.fn(),
     },
+    conversationPendingOperation: {
+      deleteMany: vi.fn(),
+    },
     conversationTurn: {
       findFirst: vi.fn(),
       create: vi.fn(),
@@ -46,6 +49,7 @@ describe("conversations domain", () => {
     prismaMock.$executeRaw.mockResolvedValue(0);
     prismaMock.$transaction.mockImplementation(async (callback: (tx: typeof prismaMock) => Promise<unknown>) => callback(prismaMock));
     prismaMock.roleOnboardingSession.updateMany.mockResolvedValue({ count: 1 });
+    prismaMock.conversationPendingOperation.deleteMany.mockResolvedValue({ count: 2 });
   });
 
   it("serializes turn numbering with a per-conversation lock", async () => {
@@ -104,6 +108,13 @@ describe("conversations domain", () => {
         dismissedAt: expect.any(Date),
       }),
     });
+    expect(prismaMock.conversationPendingOperation.deleteMany).toHaveBeenCalledWith({
+      where: {
+        workspaceId: "workspace-1",
+        conversationId: "conversation-1",
+        status: { not: "EXECUTING" },
+      },
+    });
     expect(prismaMock.conversationSession.delete).not.toHaveBeenCalled();
   });
 
@@ -124,6 +135,13 @@ describe("conversations domain", () => {
 
     expect(prismaMock.conversationSession.delete).toHaveBeenCalledWith({
       where: { id: "conversation-1" },
+    });
+    expect(prismaMock.conversationPendingOperation.deleteMany).toHaveBeenCalledWith({
+      where: {
+        workspaceId: "workspace-1",
+        conversationId: "conversation-1",
+        status: { not: "EXECUTING" },
+      },
     });
   });
 });

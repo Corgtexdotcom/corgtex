@@ -490,6 +490,16 @@ class CrmSmoke {
       body: JSON.stringify({ agentKey: "assistant", topic: this.validationTag }),
     });
     const conversationId = conversation.body.session.id;
+    const conversationCleanupActionId = `delete:ConversationSession:${conversationId}`;
+    this.cleanupRegistry.add({
+      id: conversationCleanupActionId,
+      action: "delete",
+      target: { type: "ConversationSession", id: conversationId, label: this.validationTag },
+      runner: async () => {
+        await this.sessionFetch(`/api/workspaces/${this.workspaceId}/conversations/${conversationId}`, { method: "DELETE" });
+        return "Synthetic CRM validation conversation deleted.";
+      },
+    });
     const context = crmPageContext(this.workspaceId, account);
 
     const contextAnswer = await this.chat(
@@ -610,24 +620,30 @@ class CrmSmoke {
   recordValidationOutcome(status, error, smokeResultPath) {
     if (this.validationResultRecorded) return;
     this.validationResultRecorded = true;
-    recordValidationResult(this.validationRun, {
-      intent: "CRM pages, MCP reads, chat context, and safe writeback",
-      method: "crm-production-smoke",
-      result: status === "passed" ? "pass" : "partial",
-      blocker: status === "passed" ? null : (error?.message ?? "CRM production smoke failed."),
-      evidence: [
-        { type: "json", path: smokeResultPath, summary: "CRM production smoke output" },
-        ...this.results
-          .filter((item) => Array.isArray(item.screenshots))
-          .flatMap((item) => item.screenshots.map((fileName) => ({
-            type: "screenshot",
-            path: path.join(this.outDir, fileName),
-            summary: fileName,
-          }))),
-      ],
-      createdRecordIds: this.validationRun.createdRecords.map((record) => record.id),
-      cleanupActionIds: this.validationRun.cleanupActions.map((entry) => entry.id),
-    });
+    const coveredPrNumbers = this.validationRun.prNumbers.length > 0
+      ? this.validationRun.prNumbers
+      : [null];
+    for (const prNumber of coveredPrNumbers) {
+      recordValidationResult(this.validationRun, {
+        ...(prNumber ? { prNumber } : {}),
+        intent: "CRM pages, MCP reads, chat context, and safe writeback",
+        method: "crm-production-smoke",
+        result: status === "passed" ? "pass" : "partial",
+        blocker: status === "passed" ? null : (error?.message ?? "CRM production smoke failed."),
+        evidence: [
+          { type: "json", path: smokeResultPath, summary: "CRM production smoke output" },
+          ...this.results
+            .filter((item) => Array.isArray(item.screenshots))
+            .flatMap((item) => item.screenshots.map((fileName) => ({
+              type: "screenshot",
+              path: path.join(this.outDir, fileName),
+              summary: fileName,
+            }))),
+        ],
+        createdRecordIds: this.validationRun.createdRecords.map((record) => record.id),
+        cleanupActionIds: this.validationRun.cleanupActions.map((entry) => entry.id),
+      });
+    }
   }
 
   async writeResult(status, error = null) {
