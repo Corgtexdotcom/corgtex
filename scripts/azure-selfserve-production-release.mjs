@@ -33,6 +33,11 @@ const dryRun = Boolean(args.dryRun);
 const skipBuild = Boolean(args.skipBuild);
 const skipHealthSmoke = Boolean(args.skipHealthSmoke);
 validateRuntimeObservabilityBooleans();
+const nextServerActionsEncryptionKey = skipBuild
+  ? null
+  : dryRun
+    ? "dry-run-next-server-actions-key"
+    : requiredEnv(process.env.NEXT_SERVER_ACTIONS_ENCRYPTION_KEY, "NEXT_SERVER_ACTIONS_ENCRYPTION_KEY");
 
 const webImage = `${acrServer}/${webRepository}:${imageTag}`;
 const workerImage = `${acrServer}/${workerRepository}:${imageTag}`;
@@ -70,6 +75,14 @@ if (!skipBuild) {
     `${webRepository}:${imageTag}`,
     "--file",
     "deploy/Dockerfile.web",
+    "--build-arg",
+    `CORGTEX_RELEASE_GIT_SHA=${releaseGitSha}`,
+    "--build-arg",
+    `GITHUB_SHA=${releaseGitSha}`,
+    "--build-arg",
+    "REQUIRE_NEXT_SERVER_ACTIONS_KEY=true",
+    "--secret-build-arg",
+    `NEXT_SERVER_ACTIONS_ENCRYPTION_KEY=${nextServerActionsEncryptionKey}`,
     sourceDir,
   ]);
   await run("az", [
@@ -120,6 +133,14 @@ function required(value, label) {
   const normalized = String(value ?? "").trim();
   if (!normalized) {
     throw new Error(`Missing ${label}. Pass --sha or run from GitHub Actions with GITHUB_SHA.`);
+  }
+  return normalized;
+}
+
+function requiredEnv(value, name) {
+  const normalized = String(value ?? "").trim();
+  if (!normalized) {
+    throw new Error(`Missing ${name}. Set it in the release environment or pass --skip-build.`);
   }
   return normalized;
 }

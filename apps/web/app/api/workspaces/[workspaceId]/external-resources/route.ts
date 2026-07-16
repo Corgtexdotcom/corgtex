@@ -6,6 +6,7 @@ import {
   WORKSPACE_EXTERNAL_RESOURCE_ENTITY_TYPES,
   WORKSPACE_EXTERNAL_RESOURCE_PURPOSES,
 } from "@corgtex/domain";
+import { checkApiDemoGuard } from "@/lib/demo-guard";
 import { validateBody } from "@/lib/http";
 import { withWorkspaceRoute } from "@/lib/route-handler";
 
@@ -33,6 +34,8 @@ export const GET = withWorkspaceRoute(async (request, { actor, workspaceId }) =>
 
 export const POST = withWorkspaceRoute(async (request, { actor, workspaceId }) => {
   const parsed = await validateBody(request, resourceSchema);
+  await checkApiDemoGuard(workspaceId);
+
   const item = await upsertWorkspaceExternalResourceFromUrl(actor, {
     workspaceId,
     url: parsed.url,

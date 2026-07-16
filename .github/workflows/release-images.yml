@@ -44,6 +44,12 @@ jobs:
         with:
           context: .
           file: deploy/Dockerfile.web
+          build-args: |
+            CORGTEX_RELEASE_GIT_SHA=${{ github.sha }}
+            GITHUB_SHA=${{ github.sha }}
+            REQUIRE_NEXT_SERVER_ACTIONS_KEY=true
+          secrets: |
+            next_server_actions_encryption_key=${{ secrets.NEXT_SERVER_ACTIONS_ENCRYPTION_KEY }}
           push: true
           tags: |
             ${{ steps.image.outputs.web_sha }}

@@ -63,6 +63,7 @@
     "smoke:azure-domain-readiness": "node scripts/azure-selfserve-domain-readiness.mjs",
     "smoke:self-serve-hidden-prod": "node scripts/self-serve-hidden-production-smoke.mjs",
     "smoke:stripe-billing": "node scripts/stripe-billing-smoke.mjs",
+    "smoke:proposal-discussion": "node scripts/proposal-discussion-smoke.mjs",
     "ops:health-sweep": "node scripts/ops/health-sweep.mjs",
     "ops:github-incident": "node scripts/ops/github-incident.mjs",
     "ops:railway-action": "node scripts/ops/railway-action.mjs",

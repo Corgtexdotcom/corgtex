@@ -1,6 +1,7 @@
 "use client";
 
-import { useId, useMemo, useRef, useState, useTransition } from "react";
+import { useEffect, useId, useMemo, useRef, useState, useTransition } from "react";
+import { useRouter } from "next/navigation";
 import { useTranslations } from "next-intl";
 import {
   applyMentionSelection,
@@ -17,14 +18,40 @@ function isSameMentionRange(a: ActiveMentionRange | null, b: ActiveMentionRange 
 }
 
 type DeliberationComposerProps = {
-  postAction: (formData: FormData) => Promise<void>;
+  postAction?: (formData: FormData) => Promise<void>;
+  apiEndpoint?: string;
   hiddenFields: Record<string, string>;
   entryTypes: Array<{ value: string; label: string; variant: string }>;
   targetOptions?: DeliberationMentionTarget[];
   title?: string;
 };
 
-export function DeliberationComposer({ postAction, hiddenFields, entryTypes, targetOptions = [], title }: DeliberationComposerProps) {
+function formDataJson(formData: FormData) {
+  const payload: Record<string, string> = {};
+  for (const [key, value] of formData.entries()) {
+    if (typeof value === "string" && value.length > 0) {
+      payload[key] = value;
+    }
+  }
+  return payload;
+}
+
+async function responseErrorMessage(response: Response, fallback: string) {
+  try {
+    const body = await response.json();
+    const message = body?.error?.message;
+    return typeof message === "string" && message.length > 0 ? message : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function unknownErrorMessage(error: unknown, fallback: string) {
+  return error instanceof Error && error.message.length > 0 ? error.message : fallback;
+}
+
+export function DeliberationComposer({ postAction, apiEndpoint, hiddenFields, entryTypes, targetOptions = [], title }: DeliberationComposerProps) {
+  const router = useRouter();
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const listboxId = useId();
   const [selectedType, setSelectedType] = useState(entryTypes[0]?.value || "REACTION");
@@ -32,6 +59,7 @@ export function DeliberationComposer({ postAction, hiddenFields, entryTypes, tar
   const [bodyMd, setBodyMd] = useState("");
   const [activeMention, setActiveMention] = useState<ActiveMentionRange | null>(null);
   const [activeTargetIndex, setActiveTargetIndex] = useState(0);
+  const [isHydrated, setIsHydrated] = useState(false);
   const [isPending, startTransition] = useTransition();
   const [message, setMessage] = useState<{ type: "success" | "error"; text: string } | null>(null);
   const t = useTranslations("deliberation");
@@ -42,6 +70,11 @@ export function DeliberationComposer({ postAction, hiddenFields, entryTypes, tar
   const activeOptionIndex = filteredTargets.length > 0
     ? Math.min(activeTargetIndex, filteredTargets.length - 1)
     : -1;
+  const submitDisabled = isPending || (Boolean(apiEndpoint) && !isHydrated);
+
+  useEffect(() => {
+    setIsHydrated(true);
+  }, []);
 
   const syncMentionForCursor = (value: string, cursorIndex: number) => {
     const nextMention = getActiveMentionRange(value, cursorIndex);
@@ -120,7 +153,21 @@ export function DeliberationComposer({ postAction, hiddenFields, entryTypes, tar
 
     startTransition(async () => {
       try {
-        await postAction(formData);
+        if (apiEndpoint) {
+          const response = await fetch(apiEndpoint, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(formDataJson(formData)),
+          });
+          if (!response.ok) {
+            throw new Error(await responseErrorMessage(response, t("entryPostFailed")));
+          }
+          router.refresh();
+        } else if (postAction) {
+          await postAction(formData);
+        } else {
+          throw new Error(t("entryPostFailed"));
+        }
         setMessage({ type: "success", text: t("entryPosted") });
         const form = e.target as HTMLFormElement;
         form.reset();
@@ -129,8 +176,8 @@ export function DeliberationComposer({ postAction, hiddenFields, entryTypes, tar
         setActiveMention(null);
         setActiveTargetIndex(0);
         setTimeout(() => setMessage(null), 3000);
-      } catch (err: any) {
-        setMessage({ type: "error", text: err.message || t("entryPostFailed") });
+      } catch (err: unknown) {
+        setMessage({ type: "error", text: unknownErrorMessage(err, t("entryPostFailed")) });
       }
     });
   };
@@ -145,7 +192,7 @@ export function DeliberationComposer({ postAction, hiddenFields, entryTypes, tar
         </div>
       )}
 
-      <form onSubmit={handleSubmit} className="delib-composer-form">
+      <form onSubmit={handleSubmit} className="delib-composer-form" data-api-ready={apiEndpoint ? String(isHydrated) : undefined}>
         {Object.entries(hiddenFields).map(([k, v]) => (
           <input key={k} type="hidden" name={k} value={v} />
         ))}
@@ -159,7 +206,7 @@ export function DeliberationComposer({ postAction, hiddenFields, entryTypes, tar
             onValueChange={handleBodyChange}
             placeholder={t("entryPlaceholder")}
             rows={4}
-            disabled={isPending}
+            disabled={submitDisabled}
             ariaAutocomplete={targetOptions.length > 0 ? "list" : undefined}
             ariaControls={isMentionOpen ? listboxId : undefined}
             ariaActivedescendant={activeOptionIndex >= 0 ? `${listboxId}-${activeOptionIndex}` : undefined}
@@ -208,7 +255,7 @@ export function DeliberationComposer({ postAction, hiddenFields, entryTypes, tar
               </button>
             ))}
           </div>
-          <button type="submit" disabled={isPending} className="small">
+          <button type="submit" disabled={submitDisabled} className="small">
             {isPending ? t("posting") : t("postEntry")}
           </button>
         </div>

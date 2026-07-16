@@ -15,6 +15,16 @@ The variables defined here are strictly required to start the web and worker pro
 | `APP_URL` | The fully qualified base URL where this runtime is hosted (for example, `https://app.corgtex.com` for the dogfood product app, `https://ops.corgtex.com` for Ops, or a customer runtime domain). Used for OAuth redirects and webhook signing. |
 | `SESSION_COOKIE_SECRET` | A 32+ character random string used for signing secure cookies. Never expose this. |
 
+## Build-Time Production Settings
+
+Production web image builds also require stable build metadata. These values are consumed while building the Next.js app and must be supplied by the build system without committing secrets.
+
+| Variable | Description |
+|---|---|
+| `NEXT_SERVER_ACTIONS_ENCRYPTION_KEY` | Build-time-only 32-byte base64 key used by Next.js Server Actions that still remain in the app. Required for production web image builds so every instance of the same release can decrypt and identify Server Actions consistently. Generate once per environment and provide it as a Docker BuildKit secret or equivalent build secret; do not commit it or print it in logs. |
+| `CORGTEX_RELEASE_GIT_SHA` | Preferred immutable release SHA used for the Next.js `deploymentId`, build ID, and `/api/health` release metadata. The release workflow sets this from the Git commit SHA. |
+| `RAILWAY_GIT_COMMIT_SHA` / `GITHUB_SHA` | Fallback SHA sources used when `CORGTEX_RELEASE_GIT_SHA` is absent. |
+
 ## Initial Seeding Settings
 
 When you launch a fresh Corgtex instance, the database must be seeded with an initial workspace and an administrative user.
@@ -165,6 +175,7 @@ DATABASE_URL="postgresql://postgres:postgres@postgres:5432/corgtex"
 # Core App
 APP_URL="http://localhost:3000"
 SESSION_COOKIE_SECRET="<replace-with-32-character-random-secret>"
+NEXT_SERVER_ACTIONS_ENCRYPTION_KEY=""
 
 # Seed Data (First Workspace)
 WORKSPACE_NAME="Acme Demo"

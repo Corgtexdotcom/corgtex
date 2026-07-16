@@ -140,6 +140,7 @@ jobs:
       AZURE_OPENAI_BASE_URL: ${{ vars.AZURE_SELFSERVE_STAGING_OPENAI_BASE_URL }}
       SMOKE_EMAIL_CAPTURE_SECRET: ${{ secrets.AZURE_SELFSERVE_STAGING_SMOKE_EMAIL_CAPTURE_SECRET }}
       SELF_SERVE_SMOKE_EMAIL_DOMAIN: ${{ vars.AZURE_SELFSERVE_STAGING_SMOKE_EMAIL_DOMAIN }}
+      NEXT_SERVER_ACTIONS_ENCRYPTION_KEY: ${{ secrets.NEXT_SERVER_ACTIONS_ENCRYPTION_KEY }}
       REGISTRY_USERNAME: corgtex-deploy
 
     steps:
@@ -164,6 +165,10 @@ jobs:
           require AZURE_SUBSCRIPTION_ID
           require POSTGRES_ADMIN_PASSWORD
           require AZURE_OPENAI_BASE_URL
+
+          if [[ "$OPERATION" == "deploy" && "$DEPLOY_CONTAINER_APPS" == "true" ]]; then
+            require NEXT_SERVER_ACTIONS_ENCRYPTION_KEY
+          fi
 
           if [[ "$RUN_BROWSER_SMOKE" == "true" ]]; then
             require SMOKE_EMAIL_CAPTURE_SECRET
@@ -230,6 +235,12 @@ jobs:
         with:
           context: .
           file: deploy/Dockerfile.web
+          build-args: |
+            CORGTEX_RELEASE_GIT_SHA=${{ github.sha }}
+            GITHUB_SHA=${{ github.sha }}
+            REQUIRE_NEXT_SERVER_ACTIONS_KEY=true
+          secrets: |
+            next_server_actions_encryption_key=${{ secrets.NEXT_SERVER_ACTIONS_ENCRYPTION_KEY }}
           push: true
           tags: ${{ steps.image.outputs.web }}
 
