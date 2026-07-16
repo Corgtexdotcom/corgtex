@@ -6,7 +6,7 @@ CREATE TABLE "ConversationPendingOperation" (
     "id" TEXT NOT NULL,
     "workspaceId" TEXT NOT NULL,
     "conversationId" TEXT NOT NULL,
-    "userId" TEXT NOT NULL,
+    "userId" TEXT,
     "agentKey" TEXT NOT NULL,
     "toolName" TEXT NOT NULL,
     "argsJson" JSONB NOT NULL,
@@ -36,10 +36,10 @@ CREATE INDEX "ConversationPendingOperation_conversationId_status_createdA_idx" O
 CREATE INDEX "ConversationPendingOperation_workspaceId_status_expiresAt_idx" ON "ConversationPendingOperation"("workspaceId", "status", "expiresAt");
 
 -- CreateIndex
+CREATE INDEX "ConversationPendingOperation_userId_idx" ON "ConversationPendingOperation"("userId");
+
+-- CreateIndex
 CREATE UNIQUE INDEX "ConversationPendingOperation_workspaceId_idempotencyKey_key" ON "ConversationPendingOperation"("workspaceId", "idempotencyKey");
 
 -- AddForeignKey
 ALTER TABLE "ConversationPendingOperation" ADD CONSTRAINT "ConversationPendingOperation_workspaceId_fkey" FOREIGN KEY ("workspaceId") REFERENCES "Workspace"("id") ON DELETE CASCADE ON UPDATE CASCADE;
-
--- AddForeignKey
-ALTER TABLE "ConversationPendingOperation" ADD CONSTRAINT "ConversationPendingOperation_userId_fkey" FOREIGN KEY ("userId") REFERENCES "User"("id") ON DELETE CASCADE ON UPDATE CASCADE;

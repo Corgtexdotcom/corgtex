@@ -165,7 +165,7 @@ describe("processConversationTurn", () => {
         (!where?.id || operation.id === where.id)
         && (!where?.workspaceId || operation.workspaceId === where.workspaceId)
         && (!where?.conversationId || operation.conversationId === where.conversationId)
-        && (!where?.userId || operation.userId === where.userId)
+        && (!Object.prototype.hasOwnProperty.call(where ?? {}, "userId") || operation.userId === where.userId)
         && (!where?.agentKey || operation.agentKey === where.agentKey)
       ));
       return Promise.resolve(matches.at(-1) ?? null);
@@ -197,7 +197,8 @@ describe("processConversationTurn", () => {
       let count = 0;
       for (const operation of conversationPendingOperationStore) {
         const expiresAfter = where?.expiresAt?.gt ? operation.expiresAt > where.expiresAt.gt : true;
-        if (operation.id === where.id && operation.status === where.status && expiresAfter) {
+        const expiresBeforeOrEqual = where?.expiresAt?.lte ? operation.expiresAt <= where.expiresAt.lte : true;
+        if (operation.id === where.id && operation.status === where.status && expiresAfter && expiresBeforeOrEqual) {
           Object.assign(operation, data, { updatedAt: new Date() });
           count += 1;
         }
@@ -844,6 +845,85 @@ describe("processConversationTurn", () => {
     expect(result.assistantMessage).toContain(`Pending operation ID: ${pendingOperationId(1)}`);
   });
 
+  it("persists CRM pending operations for agent chats without a user row", async () => {
+    const actor = {
+      kind: "agent" as const,
+      authProvider: "credential",
+      credentialId: "credential-1",
+      catalogItemId: "catalog-1",
+    } as any;
+    chatMock
+      .mockResolvedValueOnce({
+        content: "",
+        tool_calls: [{
+          id: "call-1",
+          function: {
+            name: "record_relationship_activity",
+            arguments: JSON.stringify({ title: "Agent follow up", type: "TASK", accountId: "account-1" }),
+          },
+        }],
+      })
+      .mockResolvedValueOnce({ content: "Pending operation is ready." });
+
+    const { processConversationTurn } = await import("./conversation");
+    const result = await processConversationTurn({
+      workspaceId: "ws-1",
+      sessionId: "mcp-ws-1-agent",
+      userId: "",
+      agentKey: "assistant",
+      userMessage: "Create a CRM follow-up for Acme.",
+      actor,
+    });
+
+    expect(conversationPendingOperationCreateMock).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        workspaceId: "ws-1",
+        conversationId: "mcp-ws-1-agent",
+        userId: null,
+        toolName: "record_relationship_activity",
+      }),
+    }));
+    expect(result.assistantMessage).toContain(`Pending operation ID: ${pendingOperationId(1)}`);
+    expect(result.assistantMessage).toContain("Stored args:");
+  });
+
+  it("appends stored args when the model mentions only the pending operation ID", async () => {
+    const actor = {
+      kind: "user" as const,
+      user: {
+        id: "user-1",
+        email: "user@example.com",
+        displayName: "User",
+      },
+    };
+    chatMock
+      .mockResolvedValueOnce({
+        content: "",
+        tool_calls: [{
+          id: "call-1",
+          function: {
+            name: "record_relationship_activity",
+            arguments: JSON.stringify({ title: "Follow up", type: "TASK", accountId: "account-1" }),
+          },
+        }],
+      })
+      .mockResolvedValueOnce({ content: `Pending operation ${pendingOperationId(1)} is ready.` });
+
+    const { processConversationTurn } = await import("./conversation");
+    const result = await processConversationTurn({
+      workspaceId: "ws-1",
+      sessionId: "session-1",
+      userId: "user-1",
+      agentKey: "assistant",
+      userMessage: "Create a CRM follow-up for Acme.",
+      actor,
+    });
+
+    expect(result.assistantMessage).toContain(`Pending operation ${pendingOperationId(1)} is ready.`);
+    expect(result.assistantMessage).toContain("Stored args: {\"accountId\":\"account-1\",\"title\":\"Follow up\",\"type\":\"TASK\"}");
+    expect(createActivityMock).not.toHaveBeenCalled();
+  });
+
   it("executes confirmed CRM writes from stored pending operation args", async () => {
     addPendingCrmOperation({
       argsJson: {
@@ -943,6 +1023,33 @@ describe("processConversationTurn", () => {
     expect(result.assistantMessage).toContain("confirm the pending operation ID");
   });
 
+  it("does not execute CRM pending operations from hypothetical confirmation text", async () => {
+    addPendingCrmOperation();
+    const actor = {
+      kind: "user" as const,
+      user: {
+        id: "user-1",
+        email: "user@example.com",
+        displayName: "User",
+      },
+    };
+    chatMock.mockResolvedValueOnce({ content: "Confirmation would create the stored CRM follow-up." });
+
+    const { processConversationTurn } = await import("./conversation");
+    const result = await processConversationTurn({
+      workspaceId: "ws-1",
+      sessionId: "session-1",
+      userId: "user-1",
+      agentKey: "assistant",
+      userMessage: `what happens if I confirm ${pendingOperationId(1)}?`,
+      actor,
+    });
+
+    expect(createActivityMock).not.toHaveBeenCalled();
+    expect(conversationPendingOperationStore[0].status).toBe("PENDING");
+    expect(result.assistantMessage).toBe("Confirmation would create the stored CRM follow-up.");
+  });
+
   it("cancels pending CRM operations without executing the write", async () => {
     addPendingCrmOperation();
     const actor = {
@@ -995,6 +1102,38 @@ describe("processConversationTurn", () => {
     expect(createActivityMock).not.toHaveBeenCalled();
     expect(conversationPendingOperationStore[0].status).toBe("EXPIRED");
     expect(result.assistantMessage).toContain("expired before confirmation");
+  });
+
+  it("does not overwrite an in-flight CRM pending operation as expired", async () => {
+    addPendingCrmOperation({
+      expiresAt: new Date(Date.now() - 60_000),
+    });
+    conversationPendingOperationUpdateManyMock.mockImplementationOnce(() => {
+      conversationPendingOperationStore[0].status = "EXECUTING";
+      return Promise.resolve({ count: 0 });
+    });
+    const actor = {
+      kind: "user" as const,
+      user: {
+        id: "user-1",
+        email: "user@example.com",
+        displayName: "User",
+      },
+    };
+
+    const { processConversationTurn } = await import("./conversation");
+    const result = await processConversationTurn({
+      workspaceId: "ws-1",
+      sessionId: "session-1",
+      userId: "user-1",
+      agentKey: "assistant",
+      userMessage: `confirm ${pendingOperationId(1)}`,
+      actor,
+    });
+
+    expect(createActivityMock).not.toHaveBeenCalled();
+    expect(conversationPendingOperationStore[0].status).toBe("EXECUTING");
+    expect(result.assistantMessage).toContain("cannot be confirmed because it is executing");
   });
 
   it("does not expose context map tools when the premium AI flag is disabled", async () => {

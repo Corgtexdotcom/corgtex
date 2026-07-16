@@ -50,6 +50,9 @@ describe("CRM pending operation helpers", () => {
 
   it("does not treat unrelated text as pending-operation confirmation", () => {
     expect(crmPendingOperationIntent("what changed in the CRM today?")).toBeNull();
+    expect(crmPendingOperationIntent("what happens if I confirm 123e4567-e89b-12d3-a456-426614174000?")).toBeNull();
+    expect(crmPendingOperationIntent("don't confirm 123e4567-e89b-12d3-a456-426614174000")).toBeNull();
+    expect(crmPendingOperationIntent("yes 123e4567-e89b-12d3-a456-426614174000")).toBeNull();
   });
 
   it("renders a deterministic confirmation contract notice", () => {

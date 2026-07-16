@@ -416,8 +416,8 @@ function catalogUsageContext(ctx: ConversationContext) {
 
 function appendCrmPendingNotices(message: string, operations: Array<import("./pending-crm-operations").PendingOperationRecord>) {
   const missingNotices = operations
-    .filter((operation) => !message.includes(operation.id))
-    .map((operation) => crmPendingOperationNotice(operation));
+    .map((operation) => crmPendingOperationNotice(operation))
+    .filter((notice) => !message.includes(notice));
   if (missingNotices.length === 0) return message;
   return [message.trim(), ...missingNotices].filter(Boolean).join("\n\n");
 }

@@ -19,7 +19,7 @@ type PendingOperationStatus = typeof STATUS[keyof typeof STATUS];
 type PendingOperationContext = {
   workspaceId: string;
   sessionId: string;
-  userId: string;
+  userId: string | null;
   agentKey: string;
   userMessage: string;
 };
@@ -28,7 +28,7 @@ export type PendingOperationRecord = {
   id: string;
   workspaceId: string;
   conversationId: string;
-  userId: string;
+  userId: string | null;
   agentKey: string;
   toolName: string;
   argsJson: unknown;
@@ -107,19 +107,33 @@ function pendingOperationIdFromMessage(message: string) {
   return message.match(/\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/i)?.[0] ?? null;
 }
 
-export function crmPendingOperationIntent(message: string): PendingOperationIntent | null {
-  const normalized = message.trim().toLowerCase();
-  if (!normalized) return null;
+function normalizedUserId(userId: string | null) {
+  const trimmed = userId?.trim();
+  return trimmed ? trimmed : null;
+}
 
+function escapeRegExp(value: string) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+export function crmPendingOperationIntent(message: string): PendingOperationIntent | null {
+  const trimmed = message.trim();
+  if (!trimmed) return null;
   const pendingOperationId = pendingOperationIdFromMessage(message);
-  if (/^(cancel|never mind|nevermind|stop|abort|discard)\b/.test(normalized)
-    || /\b(cancel|abort|discard) (it|that|the pending|operation|crm)\b/.test(normalized)) {
-    return pendingOperationId ? { kind: "cancel", pendingOperationId } : null;
+  if (!pendingOperationId) return null;
+
+  const idPattern = escapeRegExp(pendingOperationId);
+  const cancelPattern = new RegExp(`^(?:cancel|abort|discard)\\s+(?:pending\\s+operation\\s+)?${idPattern}\\b`, "i");
+  if (cancelPattern.test(trimmed)) {
+    return { kind: "cancel", pendingOperationId };
   }
 
-  if (/^(yes|yep|yeah|ok|okay|confirm|confirmed|approved|approve|go ahead|do it|please do|proceed|run it|create it|record it|draft it|complete it)\b/.test(normalized)
-    || /\b(confirm(ed)?|go ahead|do it|please do|proceed|run it)\b/.test(normalized)) {
-    return pendingOperationId ? { kind: "confirm", pendingOperationId } : null;
+  const confirmPattern = new RegExp(
+    `^(?:confirm|approve)\\s+(?:pending\\s+operation\\s+)?${idPattern}\\b`,
+    "i"
+  );
+  if (confirmPattern.test(trimmed)) {
+    return { kind: "confirm", pendingOperationId };
   }
 
   return null;
@@ -177,6 +191,7 @@ export async function createPendingCrmOperation({
   const argsJson = jsonSafe(args) as Record<string, unknown>;
   const argsHash = operationArgsHash(toolName, argsJson);
   const idempotencyKey = operationIdempotencyKey(ctx, toolName, argsHash);
+  const userId = normalizedUserId(ctx.userId);
   const existing = await prisma.conversationPendingOperation.findUnique({
     where: {
       workspaceId_idempotencyKey: {
@@ -194,7 +209,7 @@ export async function createPendingCrmOperation({
     data: {
       workspaceId: ctx.workspaceId,
       conversationId: ctx.sessionId,
-      userId: ctx.userId,
+      userId,
       agentKey: ctx.agentKey,
       toolName,
       argsJson: argsJson as Prisma.InputJsonValue,
@@ -209,10 +224,11 @@ export async function createPendingCrmOperation({
 }
 
 export async function findCrmPendingOperationForIntent(ctx: PendingOperationContext, intent: PendingOperationIntent) {
+  const userId = normalizedUserId(ctx.userId);
   const where = {
     workspaceId: ctx.workspaceId,
     conversationId: ctx.sessionId,
-    userId: ctx.userId,
+    userId,
     agentKey: ctx.agentKey,
   };
 
@@ -252,15 +268,22 @@ export async function beginCrmPendingOperationExecution(operation: PendingOperat
 
   const now = new Date();
   if (operation.expiresAt <= now) {
-    const expired = await prisma.conversationPendingOperation.update({
-      where: { id: operation.id },
+    const expired = await prisma.conversationPendingOperation.updateMany({
+      where: {
+        id: operation.id,
+        status: STATUS.PENDING,
+        expiresAt: { lte: now },
+      },
       data: {
         status: STATUS.EXPIRED,
         errorCode: "CRM_PENDING_OPERATION_EXPIRED",
         errorMessage: "The pending operation expired before confirmation.",
       },
-    }) as PendingOperationRecord;
-    return { state: "expired" as const, operation: expired };
+    });
+    const latest = await prisma.conversationPendingOperation.findUnique({ where: { id: operation.id } });
+    if (expired.count === 1 && latest) return { state: "expired" as const, operation: latest as PendingOperationRecord };
+    if (!latest) return { state: "unavailable" as const, operation };
+    return { state: latest.status === STATUS.EXECUTED ? "already-executed" as const : "unavailable" as const, operation: latest as PendingOperationRecord };
   }
 
   const updated = await prisma.conversationPendingOperation.updateMany({

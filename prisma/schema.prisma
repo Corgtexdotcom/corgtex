@@ -983,7 +983,6 @@ model User {
   agentCreds                    AgentCredential[]                     @relation("AgentCredentialCreator")
   notifications                 Notification[]
   conversations                 ConversationSession[]
-  conversationPendingOperations ConversationPendingOperation[]
   oauthConnections              OAuthConnection[]
   mcpOAuthCodes                 McpOAuthAuthorizationCode[]
   mcpOAuthTokens                McpOAuthAccessToken[]
@@ -3414,7 +3413,7 @@ model ConversationPendingOperation {
   id                String                             @id @default(uuid())
   workspaceId       String
   conversationId    String
-  userId            String
+  userId            String?
   agentKey          String
   toolName          String
   argsJson          Json
@@ -3435,11 +3434,11 @@ model ConversationPendingOperation {
   updatedAt         DateTime                           @updatedAt
 
   workspace    Workspace           @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-  user         User                @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@unique([workspaceId, idempotencyKey])
   @@index([conversationId, status, createdAt])
   @@index([workspaceId, status, expiresAt])
+  @@index([userId])
 }
 
 enum RoleHolderKind {
