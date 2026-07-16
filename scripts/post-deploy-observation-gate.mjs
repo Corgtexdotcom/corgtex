@@ -48,18 +48,21 @@ export async function runObservationGate(options = {}) {
   const now = options.now ? new Date(options.now) : new Date();
   const since = options.since ?? sinceFromWindow(options.windowMinutes ?? DEFAULT_WINDOW_MINUTES, now);
   const until = options.until ?? now;
-  const rows = options.rows ?? await collectObservationRows({
-    env: options.env ?? process.env,
-    manifest,
-    since,
-    until,
-    targets: options.targets ?? null,
-    deps: options.deps ?? {},
-  });
+  const collected = options.rows
+    ? { rows: options.rows, sourceChecks: options.sourceChecks ?? [] }
+    : await collectObservationData({
+      env: options.env ?? process.env,
+      manifest,
+      since,
+      until,
+      targets: options.targets ?? null,
+      deps: options.deps ?? {},
+    });
   const summary = buildObservationSummary({
     manifest,
     since,
-    rows,
+    rows: collected.rows,
+    sourceChecks: collected.sourceChecks,
     targets: options.targets ?? null,
   });
   summary.advisoryPublish = {
@@ -90,7 +93,7 @@ export async function runObservationGate(options = {}) {
   return summary;
 }
 
-export function buildObservationSummary({ manifest, since, rows, targets = null }) {
+export function buildObservationSummary({ manifest, since, rows, sourceChecks = [], targets = null }) {
   const normalizedRows = rows.map(normalizeObservationRow).filter(Boolean);
   const failureRows = normalizedRows.filter(isBlockingClassFailure);
   const releaseMatchers = observationReleaseMatchers(manifest, targets);
@@ -123,6 +126,7 @@ export function buildObservationSummary({ manifest, since, rows, targets = null 
     targets,
     since: since.toISOString(),
     sources: sourceSummaries(normalizedRows),
+    sourceChecks: normalizeSourceChecks(sourceChecks),
     checkedRows: normalizedRows.length,
     blockingFailures,
     advisoryFailures,
@@ -130,21 +134,37 @@ export function buildObservationSummary({ manifest, since, rows, targets = null 
   };
 }
 
-export async function collectObservationRows({ env = process.env, manifest = {}, since, until = new Date(), targets = null, deps = {} }) {
+export async function collectObservationRows(options = {}) {
+  const result = await collectObservationData(options);
+  return result.rows;
+}
+
+async function collectObservationData({ env = process.env, manifest = {}, since, until = new Date(), targets = null, deps = {} }) {
   const rows = [];
   const sourceNotes = [];
+  const sourceChecks = [];
   const queriedSources = new Set();
   const sourceErrors = new Map();
+  const addSourceNote = (note) => {
+    sourceNotes.push(note);
+    sourceChecks.push(note);
+  };
 
   if (isAzureMonitorConfigured(env)) {
     try {
-      rows.push(...await queryAzureMonitorRows({ env, since, until, deps }));
+      const azureRows = await queryAzureMonitorRows({ env, since, until, deps });
+      rows.push(...azureRows);
       queriedSources.add("azure_monitor");
+      sourceChecks.push({
+        source: "azure_monitor",
+        status: "queried",
+        rowCount: azureRows.length,
+      });
     } catch (error) {
       throw new Error(`Azure Monitor observation query failed: ${errorMessage(error)}`);
     }
   } else {
-    sourceNotes.push({
+    addSourceNote({
       source: "azure_monitor",
       status: "skipped",
       reason: "AZURE_APPLICATIONINSIGHTS_APP_NAME and AZURE_APPLICATIONINSIGHTS_RESOURCE_GROUP are required",
@@ -154,15 +174,23 @@ export async function collectObservationRows({ env = process.env, manifest = {},
   const railwayTargets = railwayTargetsFromEnv(env, targets);
   if (safeText(env.RAILWAY_API_TOKEN) && railwayTargets.length > 0) {
     try {
-      rows.push(...await queryRailwayRows({ env, manifest, since, until, targets, deps }));
+      const railwayRows = await queryRailwayRows({ env, manifest, since, until, targets, deps });
+      rows.push(...railwayRows);
       for (const group of new Set(railwayTargets.map((target) => target.group).filter(Boolean))) {
         queriedSources.add(`railway:${group}`);
+        sourceChecks.push({
+          source: "railway",
+          group,
+          status: "queried",
+          rowCount: railwayRows.filter((row) => row?.surface === group).length,
+          targetCount: railwayTargets.filter((target) => target.group === group).length,
+        });
       }
     } catch (error) {
       sourceErrors.set("railway", error);
     }
   } else if (railwayTargets.length > 0 || selectedRailwayTargetGroups(targets).size > 0) {
-    sourceNotes.push({
+    addSourceNote({
       source: "railway",
       status: "skipped",
       reason: "RAILWAY_API_TOKEN and Railway target metadata are required",
@@ -171,13 +199,19 @@ export async function collectObservationRows({ env = process.env, manifest = {},
 
   if (isPostHogQueryConfigured(env)) {
     try {
-      rows.push(...await queryPostHogRows({ env, since, deps }));
+      const postHogRows = await queryPostHogRows({ env, since, deps });
+      rows.push(...postHogRows);
       queriedSources.add("posthog");
+      sourceChecks.push({
+        source: "posthog",
+        status: "queried",
+        rowCount: postHogRows.length,
+      });
     } catch (error) {
       sourceErrors.set("posthog", error);
     }
   } else {
-    sourceNotes.push({
+    addSourceNote({
       source: "posthog",
       status: "skipped",
       reason: "POSTHOG_PROJECT_ID and POSTHOG_PERSONAL_API_KEY or POSTHOG_QUERY_API_KEY are required",
@@ -190,7 +224,7 @@ export async function collectObservationRows({ env = process.env, manifest = {},
   for (const [source, error] of sourceErrors) {
     const isSatisfiedAlternative = missingSourceGroups.every((group) => !sourceMatchesRequiredGroup(source, group));
     if (requiresObservationSource(env) && isSatisfiedAlternative) {
-      sourceNotes.push({
+      addSourceNote({
         source,
         status: "failed",
         reason: errorMessage(error),
@@ -215,7 +249,7 @@ export async function collectObservationRows({ env = process.env, manifest = {},
     }
   }
 
-  return rows;
+  return { rows, sourceChecks };
 }
 
 export async function queryAzureMonitorRows({ env = process.env, since, until = new Date(), deps = {} }) {
@@ -588,6 +622,27 @@ function sourceSummaries(rows) {
   return [...grouped.entries()].map(([source, rows]) => ({ source, rows }));
 }
 
+function normalizeSourceChecks(sourceChecks) {
+  if (!Array.isArray(sourceChecks)) return [];
+  return sourceChecks.map((sourceCheck) => {
+    const source = safeText(sourceCheck?.source);
+    const status = safeText(sourceCheck?.status);
+    if (!source || !status) return null;
+
+    const normalized = { source, status };
+    const group = safeText(sourceCheck.group);
+    const reason = safeText(sourceCheck.reason);
+    const rowCount = nonNegativeInteger(sourceCheck.rowCount);
+    const targetCount = nonNegativeInteger(sourceCheck.targetCount);
+
+    if (group) normalized.group = group;
+    if (rowCount !== null) normalized.rowCount = rowCount;
+    if (targetCount !== null) normalized.targetCount = targetCount;
+    if (reason) normalized.reason = reason;
+    return normalized;
+  }).filter(Boolean);
+}
+
 function normalizeManifest(manifest) {
   const normalized = normalizeReleaseManifest(manifest);
   const targetManifests = Array.isArray(manifest.targetManifests)
@@ -909,6 +964,12 @@ function numericStatus(value) {
 function positiveInteger(value) {
   const parsed = Number.parseInt(String(value ?? ""), 10);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : 1;
+}
+
+function nonNegativeInteger(value) {
+  if (value === null || value === undefined || value === "") return null;
+  const parsed = Number.parseInt(String(value), 10);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
 }
 
 function isoText(value) {
