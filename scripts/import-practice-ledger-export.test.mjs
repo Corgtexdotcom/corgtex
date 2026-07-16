@@ -134,6 +134,14 @@ describe("parsePortableRecord", () => {
 });
 
 describe("planImport", () => {
+  it("keeps dependency parents before dependent ledger entries", () => {
+    expect(ENTITY_ORDER.indexOf("clients")).toBeLessThan(ENTITY_ORDER.indexOf("projects"));
+    expect(ENTITY_ORDER.indexOf("projects")).toBeLessThan(ENTITY_ORDER.indexOf("projectLines"));
+    expect(ENTITY_ORDER.indexOf("consultants")).toBeLessThan(ENTITY_ORDER.indexOf("timeEntries"));
+    expect(ENTITY_ORDER.indexOf("timeEntries")).toBeLessThan(ENTITY_ORDER.indexOf("entryReviews"));
+    expect(ENTITY_ORDER.indexOf("expenses")).toBeLessThan(ENTITY_ORDER.indexOf("entryReviews"));
+  });
+
   it("plans every supported entity in dependency order", () => {
     const plan = planImport(fullBatch());
 
