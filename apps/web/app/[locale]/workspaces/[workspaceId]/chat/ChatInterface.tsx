@@ -354,8 +354,11 @@ export function ChatInterface({
         if (!uploadRes.ok) {
           throw new Error(uploadData.message || t("errorFailedToSend"));
         }
-        if (uploadData.status === "needs_clarification") {
-          setError(uploadData.message || "Please add the missing meeting details and send again.");
+        if (uploadData.status === "needs_clarification" || uploadData.status === "needs_meeting_details") {
+          const uploadMessage = uploadData.webUrl
+            ? `${uploadData.message || "Please add the missing meeting details and send again."} ${uploadData.webUrl}`
+            : uploadData.message || "Please add the missing meeting details and send again.";
+          setError(uploadMessage);
           setLoading(false);
           inputRef.current?.focus();
           return;

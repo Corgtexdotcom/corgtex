@@ -472,6 +472,7 @@ export default async function MeetingsPage({
               showTitle
               showSource
               showRecordedAt
+              requireRecordedAt
               showTimeZone
               showParticipants
               labels={{

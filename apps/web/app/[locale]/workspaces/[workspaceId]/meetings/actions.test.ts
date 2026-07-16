@@ -20,6 +20,7 @@ const sendManualMeetingRecorder = vi.fn();
 const intakeMeetingTranscript = vi.fn();
 const extractTextFromFileBuffer = vi.fn();
 const requireWorkspaceMembership = vi.fn();
+const captureTelemetryEvent = vi.fn();
 const redisClient = {
   del: vi.fn(),
   get: vi.fn(),
@@ -48,6 +49,7 @@ vi.mock("@corgtex/knowledge", () => ({
 }));
 
 vi.mock("@corgtex/shared", () => ({
+  captureTelemetryEvent,
   getRedisClient,
   redisKey: (key: string) => `test:${key}`,
 }));
@@ -161,7 +163,7 @@ describe("meeting server actions", () => {
     const { uploadMeetingTranscriptStateAction } = await import("./actions");
     intakeMeetingTranscript.mockResolvedValueOnce({
       status: "needs_clarification",
-      message: "I found multiple scheduled meetings that could match this transcript. Choose one and upload again.",
+      message: "I found multiple scheduled meetings that could match this transcript. Choose one or create a new meeting to continue.",
       requiredFields: ["meetingId"],
       inferred: {
         title: "Weekly Review",
@@ -190,7 +192,7 @@ describe("meeting server actions", () => {
 
     expect(state).toMatchObject({
       status: "needs_clarification",
-      message: "I found multiple scheduled meetings that could match this transcript. Choose one and upload again.",
+      message: "I found multiple scheduled meetings that could match this transcript. Choose one or create a new meeting to continue.",
       requiredFields: ["meetingId"],
       retryRequiresTranscriptUpload: false,
       candidates: [{
@@ -211,6 +213,19 @@ describe("meeting server actions", () => {
       1200,
       expect.stringContaining("Jan: We discussed follow-up actions."),
     );
+    expect(captureTelemetryEvent).toHaveBeenCalledWith(expect.objectContaining({
+      event: "corgtex_meeting_transcript_intake_advisory",
+      distinctId: "workspace:workspace-1",
+      properties: expect.objectContaining({
+        kind: "needs_clarification",
+        workspace_id: "workspace-1",
+        required_fields: ["meetingId"],
+        candidate_count: 1,
+        pending_upload_stored: true,
+        clarification_id: expect.any(String),
+      }),
+    }));
+    expect(JSON.stringify(captureTelemetryEvent.mock.calls)).not.toContain("Jan: We discussed follow-up actions.");
     expect(redirect).not.toHaveBeenCalled();
   });
 
@@ -259,6 +274,17 @@ describe("meeting server actions", () => {
       fileName: "weekly.txt",
       ingestionGuidanceMd: "Preserve owners.",
       participantEmails: ["jan@example.com"],
+    }));
+    expect(captureTelemetryEvent).toHaveBeenCalledWith(expect.objectContaining({
+      event: "corgtex_meeting_transcript_intake_advisory",
+      distinctId: "workspace:workspace-1",
+      properties: expect.objectContaining({
+        kind: "needs_clarification_completed",
+        workspace_id: "workspace-1",
+        meeting_id: "meeting-1",
+        create_new_meeting: false,
+        clarification_id: expect.any(String),
+      }),
     }));
     expect(redisClient.del).toHaveBeenCalledWith("test:meeting-transcript-upload:workspace-1:token-1");
   });
@@ -384,6 +410,56 @@ describe("meeting server actions", () => {
       meetingId: null,
       createNewMeeting: true,
     }));
+  });
+
+  it("uses a pending transcript token for new-meeting resubmission and clears it", async () => {
+    const { uploadMeetingTranscriptStateAction } = await import("./actions");
+    redisClient.get.mockResolvedValueOnce(JSON.stringify({
+      workspaceId: "workspace-1",
+      transcript: "Jan: We discussed follow-up actions.",
+      fileName: "weekly.txt",
+      title: "Weekly Review",
+      source: "transcript-upload",
+      recordedAt: "2026-07-15T09:00",
+      timeZone: "America/Los_Angeles",
+      summaryMd: null,
+      ingestionGuidanceMd: "Preserve owners.",
+      participantIds: [],
+      participantEmails: ["jan@example.com"],
+    }));
+    intakeMeetingTranscript.mockResolvedValueOnce({
+      status: "meeting_created",
+      message: "Transcript saved as meeting \"Weekly Review\". Summary and follow-up extraction are queued.",
+      meeting: { id: "meeting-new" },
+      inferred: {
+        title: "Weekly Review",
+        recordedAt: new Date("2026-07-15T16:00:00.000Z"),
+        participantEmails: ["jan@example.com"],
+        source: "transcript-upload",
+      },
+    });
+
+    const state = await uploadMeetingTranscriptStateAction(initialTranscriptState, formData({
+      workspaceId: "workspace-1",
+      pendingTranscriptToken: "token-1",
+      meetingId: "__create_new_meeting__",
+    }));
+
+    expect(state).toEqual({
+      status: "success",
+      message: "Transcript saved as meeting \"Weekly Review\". Summary and follow-up extraction are queued.",
+      meetingId: "meeting-new",
+    });
+    expect(intakeMeetingTranscript).toHaveBeenCalledWith(actor, expect.objectContaining({
+      workspaceId: "workspace-1",
+      meetingId: null,
+      createNewMeeting: true,
+      transcript: "Jan: We discussed follow-up actions.",
+      fileName: "weekly.txt",
+      ingestionGuidanceMd: "Preserve owners.",
+      participantEmails: ["jan@example.com"],
+    }));
+    expect(redisClient.del).toHaveBeenCalledWith("test:meeting-transcript-upload:workspace-1:token-1");
   });
 
   it("keeps clarification inline and asks for retry when Redis cannot hold the pending transcript", async () => {

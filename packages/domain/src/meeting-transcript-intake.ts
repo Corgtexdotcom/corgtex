@@ -41,6 +41,9 @@ export type MeetingTranscriptSegment = {
   text: string;
 };
 
+const TEN_YEARS_MS = 10 * 365 * 24 * 60 * 60 * 1000;
+const NINETY_DAYS_MS = 90 * 24 * 60 * 60 * 1000;
+
 function cleanTitle(value: string | null | undefined) {
   const title = value?.trim().replace(/\.[A-Za-z0-9]+$/, "").replace(/[-_]+/g, " ");
   return title && title.length > 0 ? title : null;
@@ -63,6 +66,18 @@ function asValidDate(value: unknown) {
     if (!Number.isNaN(parsed.valueOf())) return parsed;
   }
   return null;
+}
+
+export function isPlausibleMeetingRecordedAt(value: Date | null, now = new Date()) {
+  if (!value || Number.isNaN(value.valueOf())) return false;
+  const earliest = now.getTime() - TEN_YEARS_MS;
+  const latest = now.getTime() + NINETY_DAYS_MS;
+  return value.getTime() >= earliest && value.getTime() <= latest;
+}
+
+function asPlausibleRecordedAt(value: unknown, now = new Date()) {
+  const recordedAt = asValidDate(value);
+  return isPlausibleMeetingRecordedAt(recordedAt, now) ? recordedAt : null;
 }
 
 function parseDateFromText(input: string) {
@@ -138,15 +153,21 @@ export async function inferMeetingTranscriptMetadata(params: {
   source?: string | null;
   recordedAt?: Date | string | null;
   participantEmails?: string[] | null;
+  allowInferredRecordedAt?: boolean;
+  now?: Date;
 }) {
   const explicitTitle = cleanTitle(params.title);
-  const explicitRecordedAt = asValidDate(params.recordedAt);
+  const explicitRecordedAt = asPlausibleRecordedAt(params.recordedAt, params.now);
   const needsModelMetadata = !explicitTitle || !explicitRecordedAt;
   const modelMetadata = needsModelMetadata
     ? await inferMetadataWithModel(params)
     : { title: null, recordedAt: null, participantEmails: [] };
   const combinedText = `${params.userMessage ?? ""}\n${params.fileName ?? ""}\n${params.transcript.slice(0, 4000)}`;
-  const recordedAt = explicitRecordedAt ?? modelMetadata.recordedAt ?? parseDateFromText(combinedText);
+  const inferredRecordedAt = params.allowInferredRecordedAt
+    ? asPlausibleRecordedAt(modelMetadata.recordedAt, params.now)
+      ?? asPlausibleRecordedAt(parseDateFromText(combinedText), params.now)
+    : null;
+  const recordedAt = explicitRecordedAt ?? inferredRecordedAt;
   const participantEmails = [
     ...(params.participantEmails ?? []),
     ...modelMetadata.participantEmails,
@@ -186,6 +207,7 @@ export async function intakeMeetingTranscript(actor: AppActor, params: {
   ingestionGuidanceMd?: string | null;
   participantIds?: string[] | null;
   participantEmails?: string[] | null;
+  now?: Date;
 }): Promise<MeetingTranscriptIntakeResult> {
   const transcript = params.transcript.trim();
   const existingMeeting = params.meetingId
@@ -203,6 +225,7 @@ export async function intakeMeetingTranscript(actor: AppActor, params: {
     source: params.source,
     recordedAt: params.recordedAt ?? existingMeeting?.recordedAt ?? null,
     participantEmails: [...(params.participantEmails ?? []), ...(existingMeeting?.participantEmails ?? [])],
+    now: params.now,
   });
 
   if (!inferred.recordedAt) {
@@ -264,8 +287,8 @@ export async function intakeMeetingTranscript(actor: AppActor, params: {
       inferred,
       candidates: result.candidates,
       message: multipleCandidates
-        ? "I found multiple scheduled meetings that could match this transcript. Choose one and upload again."
-        : "I found a scheduled meeting that may match this transcript, but it was not confident enough to auto-match. Choose it or add more meeting details and upload again.",
+        ? "I found multiple scheduled meetings that could match this transcript. Choose one or create a new meeting to continue."
+        : "I found a scheduled meeting that may match this transcript, but it was not confident enough to auto-match. Choose it or create a new meeting to continue.",
     };
   }
 

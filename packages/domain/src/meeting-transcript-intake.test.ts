@@ -17,6 +17,8 @@ vi.mock("./meetings", () => ({
   uploadMeetingTranscript: uploadMeetingTranscriptMock,
 }));
 
+const TEST_NOW = new Date("2026-07-16T12:00:00.000Z");
+
 describe("meeting transcript intake", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -29,6 +31,7 @@ describe("meeting transcript intake", () => {
       workspaceId: "workspace-1",
       title: " Weekly Tactical ",
       recordedAt: "2026-05-17T10:00:00.000Z",
+      now: TEST_NOW,
       source: " production-smoke ",
       transcript: [
         "Meeting title: Weekly Tactical",
@@ -64,10 +67,69 @@ describe("meeting transcript intake", () => {
     expect(modelGatewayMock.extract).toHaveBeenCalledTimes(1);
     expect(metadata).toEqual({
       title: "Model Tactical",
-      recordedAt: new Date("2026-05-17T11:00:00.000Z"),
+      recordedAt: null,
       participantEmails: ["model@example.com"],
       source: "chat-transcript-upload",
     });
+  });
+
+  it("does not accept model-inferred dates as canonical manual upload dates", async () => {
+    modelGatewayMock.extract.mockResolvedValueOnce({
+      output: {
+        title: "Model Tactical",
+        recordedAt: "2001-07-15T11:00:00.000Z",
+        participantEmails: ["model@example.com"],
+      },
+    });
+    const { intakeMeetingTranscript } = await import("./meeting-transcript-intake");
+
+    await expect(intakeMeetingTranscript({
+      kind: "agent",
+      authProvider: "bootstrap",
+      label: "test-agent",
+      workspaceIds: ["workspace-1"],
+    }, {
+      workspaceId: "workspace-1",
+      source: "transcript-upload",
+      transcript: "Date: 2001-07-15\nJan: We need a follow-up.",
+      now: TEST_NOW,
+    })).resolves.toMatchObject({
+      status: "needs_clarification",
+      requiredFields: ["recordedAt"],
+      inferred: {
+        title: "Model Tactical",
+        recordedAt: null,
+      },
+    });
+    expect(createMeetingMock).not.toHaveBeenCalled();
+    expect(uploadMeetingTranscriptMock).not.toHaveBeenCalled();
+  });
+
+  it("rejects implausible explicit manual upload dates", async () => {
+    const { intakeMeetingTranscript } = await import("./meeting-transcript-intake");
+
+    await expect(intakeMeetingTranscript({
+      kind: "agent",
+      authProvider: "bootstrap",
+      label: "test-agent",
+      workspaceIds: ["workspace-1"],
+    }, {
+      workspaceId: "workspace-1",
+      title: "Weekly Tactical",
+      recordedAt: new Date("2001-07-15T11:00:00.000Z"),
+      source: "transcript-upload",
+      transcript: "Jan: We need a follow-up.",
+      now: TEST_NOW,
+    })).resolves.toMatchObject({
+      status: "needs_clarification",
+      requiredFields: ["recordedAt"],
+      inferred: {
+        title: "Weekly Tactical",
+        recordedAt: null,
+      },
+    });
+    expect(createMeetingMock).not.toHaveBeenCalled();
+    expect(uploadMeetingTranscriptMock).not.toHaveBeenCalled();
   });
 
   it("keeps source URLs out of meeting join URL matching", async () => {
@@ -90,6 +152,7 @@ describe("meeting transcript intake", () => {
       source: "meeting-transcript:fireflies",
       sourceUrl: "https://app.fireflies.ai/view/transcript-123",
       transcript: "Jan: Follow up next week.",
+      now: TEST_NOW,
     });
 
     expect(uploadMeetingTranscriptMock).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
@@ -122,10 +185,11 @@ describe("meeting transcript intake", () => {
       recordedAt: new Date("2026-05-17T10:00:00.000Z"),
       source: "transcript-upload",
       transcript: "Jan: Follow up next week.",
+      now: TEST_NOW,
     })).resolves.toMatchObject({
       status: "needs_clarification",
       requiredFields: ["meetingId"],
-      message: "I found a scheduled meeting that may match this transcript, but it was not confident enough to auto-match. Choose it or add more meeting details and upload again.",
+      message: "I found a scheduled meeting that may match this transcript, but it was not confident enough to auto-match. Choose it or create a new meeting to continue.",
       candidates: [{
         meetingId: "meeting-1",
         score: 0.52,
@@ -152,6 +216,7 @@ describe("meeting transcript intake", () => {
       source: "transcript-upload",
       transcript: "Jan: Follow up next week.",
       createNewMeeting: true,
+      now: TEST_NOW,
     })).resolves.toMatchObject({
       status: "meeting_created",
       meeting: { id: "meeting-new" },

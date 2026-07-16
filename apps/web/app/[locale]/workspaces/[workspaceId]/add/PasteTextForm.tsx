@@ -50,6 +50,7 @@ export function PasteTextForm({ workspaceId, sourceTypes, ingestAction, cancelHr
         showTitle
         showSource
         showRecordedAt
+        requireRecordedAt
         showTimeZone
         showFile={false}
         showTranscript
