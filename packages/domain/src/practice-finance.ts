@@ -7,6 +7,7 @@ import {
   type PracticeContributionType,
   type PracticeProject,
   type PracticeProjectStatus,
+  type Prisma,
   type User,
 } from "@prisma/client";
 import { prisma } from "@corgtex/shared";
@@ -26,6 +27,7 @@ import { invariant } from "./errors";
 export const BUDGET_RUNWAY_ATTENTION_WEEKS = 6;
 export const SLICING_PIE_TIME_MULTIPLIER = 2;
 export const SLICING_PIE_EXPENSE_MULTIPLIER = 4;
+export const PRACTICE_LEDGER_CURRENCY = "USD";
 
 export type PracticeAttentionIssue = "setup" | "budget" | "margin";
 
@@ -83,6 +85,12 @@ export type SlicingPieSummary = {
   totalSlices: number;
   contributors: SlicingPieContributorSummary[];
   entries: PracticeContributionEntryWithContext[];
+  nextSourceCursor: string | null;
+};
+
+export type PracticeContributionEntryPage = {
+  entries: PracticeContributionEntryWithContext[];
+  nextCursor: string | null;
 };
 
 type ProjectFinance = Pick<
@@ -246,6 +254,16 @@ export async function canManagePracticeFinanceProjects(
   return workspaceAllowsAllMemberPracticeProjectWrites(workspaceId);
 }
 
+export async function canManagePracticeContributionPayments(
+  actor: AppActor,
+  workspaceId: string,
+  options: { resolvedMembership?: { role: MemberRole | string | null } | null } = {},
+) {
+  if (actor.kind === "agent") return true;
+  const membership = options.resolvedMembership ?? await requireWorkspaceMembership({ actor, workspaceId });
+  return Boolean(membership?.role && PRACTICE_FINANCE_MANAGE_ROLES.includes(membership.role as MemberRole));
+}
+
 async function requirePracticeFinanceWrite(actor: AppActor, workspaceId: string) {
   if (actor.kind === "agent") {
     await requireWorkspaceMembership({ actor, workspaceId, allowedRoles: PRACTICE_FINANCE_MANAGE_ROLES });
@@ -296,6 +314,16 @@ export type ListPracticeProjectsOptions = {
   cursor?: string | null;
 };
 
+export type ListPracticeContributionEntriesOptions = {
+  take?: number | null;
+  cursor?: string | null;
+};
+
+export type SlicingPieSummaryOptions = {
+  sourceTake?: number | null;
+  sourceCursor?: string | null;
+};
+
 export type CrmAccountPracticeFinanceProject = PracticeProject & {
   crmDeal: {
     id: string;
@@ -326,6 +354,8 @@ export type CreatePracticeProjectFromWonDealInput = {
 
 const DEFAULT_PRACTICE_PROJECT_TAKE = 100;
 const MAX_PRACTICE_PROJECT_TAKE = 200;
+const DEFAULT_CONTRIBUTION_ENTRY_TAKE = 50;
+const MAX_CONTRIBUTION_ENTRY_TAKE = 100;
 const PRACTICE_PROJECT_STATUSES: PracticeProjectStatus[] = ["ACTIVE", "ON_HOLD", "CLOSED"];
 
 function normalizeCents(value: number | undefined, label: string): number {
@@ -376,8 +406,14 @@ function normalizeContributionDate(value: Date): Date {
 }
 
 function normalizeCurrency(value: string | null | undefined): string {
-  const currency = (value?.trim() || "USD").toUpperCase();
+  const currency = (value?.trim() || PRACTICE_LEDGER_CURRENCY).toUpperCase();
   invariant(/^[A-Z]{3}$/.test(currency), 400, "INVALID_INPUT", "Currency must be a three-letter code.");
+  invariant(
+    currency === PRACTICE_LEDGER_CURRENCY,
+    400,
+    "INVALID_INPUT",
+    `Practice Ledger contributions must use ${PRACTICE_LEDGER_CURRENCY} until currency conversion is supported.`,
+  );
   return currency;
 }
 
@@ -443,6 +479,12 @@ function normalizeTake(value: number | null | undefined): number {
   if (value == null) return DEFAULT_PRACTICE_PROJECT_TAKE;
   invariant(Number.isInteger(value), 400, "INVALID_INPUT", "take must be an integer.");
   return Math.min(Math.max(value, 1), MAX_PRACTICE_PROJECT_TAKE);
+}
+
+function normalizeContributionTake(value: number | null | undefined): number {
+  if (value == null) return DEFAULT_CONTRIBUTION_ENTRY_TAKE;
+  invariant(Number.isInteger(value), 400, "INVALID_INPUT", "take must be an integer.");
+  return Math.min(Math.max(value, 1), MAX_CONTRIBUTION_ENTRY_TAKE);
 }
 
 function normalizeCursor(value: string | null | undefined): string | null {
@@ -539,17 +581,51 @@ const CONTRIBUTION_INCLUDE = {
 export async function listPracticeContributionEntries(
   actor: AppActor,
   workspaceId: string,
-  options: ListPracticeProjectsOptions = {},
+  options: ListPracticeContributionEntriesOptions = {},
 ): Promise<PracticeContributionEntryWithContext[]> {
-  await requireWorkspaceMembership({ actor, workspaceId });
+  return (await listPracticeContributionEntryPage(actor, workspaceId, options)).entries;
+}
+
+async function findPracticeContributionEntryPage(
+  where: Prisma.PracticeContributionEntryWhereInput,
+  options: ListPracticeContributionEntriesOptions = {},
+): Promise<PracticeContributionEntryPage> {
   const cursor = normalizeCursor(options.cursor);
-  return prisma.practiceContributionEntry.findMany({
-    where: { workspaceId },
+  const take = normalizeContributionTake(options.take);
+  const rows = await prisma.practiceContributionEntry.findMany({
+    where,
     include: CONTRIBUTION_INCLUDE,
     orderBy: [{ occurredAt: "desc" }, { createdAt: "desc" }, { id: "asc" }],
-    take: normalizeTake(options.take),
+    take: take + 1,
     ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
   });
+  const entries = rows.slice(0, take);
+  return {
+    entries,
+    nextCursor: rows.length > take ? entries.at(-1)?.id ?? null : null,
+  };
+}
+
+export async function listPracticeContributionEntryPage(
+  actor: AppActor,
+  workspaceId: string,
+  options: ListPracticeContributionEntriesOptions = {},
+): Promise<PracticeContributionEntryPage> {
+  await requireWorkspaceMembership({ actor, workspaceId });
+  return findPracticeContributionEntryPage({ workspaceId }, options);
+}
+
+export async function listRequestedPracticeContributionPayables(
+  actor: AppActor,
+  workspaceId: string,
+  options: ListPracticeContributionEntriesOptions = {},
+): Promise<PracticeContributionEntryPage> {
+  await requireWorkspaceMembership({ actor, workspaceId });
+  return findPracticeContributionEntryPage({
+    workspaceId,
+    paymentChoice: "CASH",
+    cashStatus: "REQUESTED",
+  }, options);
 }
 
 export async function createPracticeContributionEntry(
@@ -612,30 +688,52 @@ export async function markPracticeContributionEntryPaid(
   invariant(entry && entry.workspaceId === workspaceId, 404, "NOT_FOUND", "Contribution entry not found.");
   invariant(entry.paymentChoice === "CASH", 400, "INVALID_STATE", "Only cash entries can be marked paid.");
   invariant(entry.cashStatus !== "PAID", 400, "INVALID_STATE", "Contribution entry is already paid.");
-  return prisma.practiceContributionEntry.update({
-    where: { id },
+  const updated = await prisma.practiceContributionEntry.updateMany({
+    where: { id, workspaceId, paymentChoice: "CASH", cashStatus: "REQUESTED" },
     data: {
       cashStatus: "PAID",
       paidAt: new Date(),
       paidByUserId: actor.kind === "user" ? actor.user.id : null,
     },
   });
+  invariant(updated.count === 1, 409, "CONFLICT", "Contribution entry is no longer payable.");
+  const paid = await prisma.practiceContributionEntry.findUnique({ where: { id } });
+  invariant(paid, 500, "INTERNAL_ERROR", "Paid contribution entry could not be loaded.");
+  return paid;
 }
 
-export async function getSlicingPieSummary(actor: AppActor, workspaceId: string): Promise<SlicingPieSummary> {
+export async function getSlicingPieSummary(
+  actor: AppActor,
+  workspaceId: string,
+  options: SlicingPieSummaryOptions = {},
+): Promise<SlicingPieSummary> {
   await requireWorkspaceMembership({ actor, workspaceId });
-  const entries = await prisma.practiceContributionEntry.findMany({
-    where: { workspaceId },
-    include: CONTRIBUTION_INCLUDE,
-    orderBy: [{ occurredAt: "desc" }, { createdAt: "desc" }, { id: "asc" }],
+  const [sourcePage, aggregateRows] = await Promise.all([
+    findPracticeContributionEntryPage({ workspaceId }, {
+      take: options.sourceTake,
+      cursor: options.sourceCursor,
+    }),
+    prisma.practiceContributionEntry.groupBy({
+      by: ["contributorUserId", "type", "paymentChoice", "cashStatus"],
+      where: { workspaceId },
+      _sum: { amountCents: true, slices: true },
+    }),
+  ]);
+  const contributorIds = [...new Set(aggregateRows.map((row) => row.contributorUserId))];
+  const users = contributorIds.length === 0 ? [] : await prisma.user.findMany({
+    where: { id: { in: contributorIds } },
+    select: { id: true, displayName: true, email: true },
   });
+  const usersById = new Map(users.map((user) => [user.id, user]));
   const byContributor = new Map<string, SlicingPieContributorSummary>();
-  for (const entry of entries) {
-    const displayName = entry.contributor.displayName || entry.contributor.email;
-    const summary = byContributor.get(entry.contributorUserId) ?? {
-      userId: entry.contributorUserId,
+  for (const row of aggregateRows) {
+    const user = usersById.get(row.contributorUserId);
+    const email = user?.email ?? "unknown@example.invalid";
+    const displayName = user?.displayName || email;
+    const summary = byContributor.get(row.contributorUserId) ?? {
+      userId: row.contributorUserId,
       displayName,
-      email: entry.contributor.email,
+      email,
       timeValueCents: 0,
       expenseValueCents: 0,
       cashRequestedCents: 0,
@@ -643,16 +741,18 @@ export async function getSlicingPieSummary(actor: AppActor, workspaceId: string)
       slices: 0,
       ownershipBps: 0,
     };
-    if (entry.paymentChoice === "SLICING_PIE") {
-      if (entry.type === "TIME") summary.timeValueCents += entry.amountCents;
-      else summary.expenseValueCents += entry.amountCents;
-      summary.slices += entry.slices;
-    } else if (entry.cashStatus === "PAID") {
-      summary.cashPaidCents += entry.amountCents;
+    const amountCents = row._sum.amountCents ?? 0;
+    const slices = row._sum.slices ?? 0;
+    if (row.paymentChoice === "SLICING_PIE") {
+      if (row.type === "TIME") summary.timeValueCents += amountCents;
+      else summary.expenseValueCents += amountCents;
+      summary.slices += slices;
+    } else if (row.cashStatus === "PAID") {
+      summary.cashPaidCents += amountCents;
     } else {
-      summary.cashRequestedCents += entry.amountCents;
+      summary.cashRequestedCents += amountCents;
     }
-    byContributor.set(entry.contributorUserId, summary);
+    byContributor.set(row.contributorUserId, summary);
   }
   const totalSlices = [...byContributor.values()].reduce((sum, contributor) => sum + contributor.slices, 0);
   const contributors = [...byContributor.values()]
@@ -661,7 +761,12 @@ export async function getSlicingPieSummary(actor: AppActor, workspaceId: string)
       ownershipBps: totalSlices > 0 ? Math.round((contributor.slices * 10000) / totalSlices) : 0,
     }))
     .sort((a, b) => b.slices - a.slices || a.displayName.localeCompare(b.displayName));
-  return { totalSlices, contributors, entries };
+  return {
+    totalSlices,
+    contributors,
+    entries: sourcePage.entries,
+    nextSourceCursor: sourcePage.nextCursor,
+  };
 }
 
 export async function getCrmAccountPracticeFinance(

@@ -1701,6 +1701,8 @@ async function buildMigrationInventory(deployment: {
       { entityType: "GoalLink", modelName: "goalLink", where: { goal: { workspaceId } }, createIdMap: true },
       { entityType: "Recognition", modelName: "recognition", where: { workspaceId }, createIdMap: true },
       { entityType: "CheckIn", modelName: "checkIn", where: { workspaceId }, createIdMap: true },
+      { entityType: "PracticeProject", modelName: "practiceProject", where: { workspaceId }, createIdMap: true },
+      { entityType: "PracticeContributionEntry", modelName: "practiceContributionEntry", where: { workspaceId }, createIdMap: true },
       { entityType: "ModelUsageBudget", modelName: "modelUsageBudget", where: { workspaceId }, createIdMap: true },
       { entityType: "WorkspaceBillingProfile", modelName: "workspaceBillingProfile", where: { workspaceId }, createIdMap: true },
       { entityType: "WorkspaceEnterpriseService", modelName: "workspaceEnterpriseService", where: { workspaceId }, createIdMap: true },

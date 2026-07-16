@@ -15,7 +15,9 @@ const { prismaMock, requireWorkspaceMembershipMock } = vi.hoisted(() => ({
       create: vi.fn(),
       findMany: vi.fn(),
       findUnique: vi.fn(),
+      groupBy: vi.fn(),
       update: vi.fn(),
+      updateMany: vi.fn(),
     },
     practiceProject: {
       create: vi.fn(),
@@ -25,6 +27,9 @@ const { prismaMock, requireWorkspaceMembershipMock } = vi.hoisted(() => ({
     },
     workspaceFeatureFlag: {
       findUnique: vi.fn(),
+    },
+    user: {
+      findMany: vi.fn(),
     },
   },
   requireWorkspaceMembershipMock: vi.fn(),
@@ -53,6 +58,7 @@ import {
   getPracticeFinanceDashboard,
   getSlicingPieSummary,
   listPracticeContributionEntries,
+  listRequestedPracticeContributionPayables,
   listPracticeProjects,
   markPracticeContributionEntryPaid,
   projectAttentionItems,
@@ -277,6 +283,7 @@ describe("practice-finance I/O", () => {
     requireWorkspaceMembershipMock.mockResolvedValue({ id: "member-1", role: "ADMIN" });
     prismaMock.workspaceFeatureFlag.findUnique.mockResolvedValue({ enabled: true, config: null });
     prismaMock.member.findFirst.mockResolvedValue({ id: "member-1" });
+    prismaMock.user.findMany.mockResolvedValue([]);
     prismaMock.practiceContributionEntry.create.mockResolvedValue({
       id: "contribution-1",
       workspaceId: "workspace-1",
@@ -301,6 +308,8 @@ describe("practice-finance I/O", () => {
     });
     prismaMock.practiceContributionEntry.findMany.mockResolvedValue([]);
     prismaMock.practiceContributionEntry.findUnique.mockResolvedValue(null);
+    prismaMock.practiceContributionEntry.groupBy.mockResolvedValue([]);
+    prismaMock.practiceContributionEntry.updateMany.mockResolvedValue({ count: 0 });
     prismaMock.practiceContributionEntry.update.mockResolvedValue({
       id: "contribution-1",
       workspaceId: "workspace-1",
@@ -443,9 +452,31 @@ describe("practice-finance I/O", () => {
     expect(requireWorkspaceMembershipMock).toHaveBeenCalledWith({ actor, workspaceId: "workspace-1" });
     expect(prismaMock.practiceContributionEntry.findMany).toHaveBeenCalledWith(expect.objectContaining({
       where: { workspaceId: "workspace-1" },
-      take: 25,
+      take: 26,
       cursor: { id: "contribution-0" },
       skip: 1,
+    }));
+  });
+
+  it("lists requested cash payables through a dedicated paginated query", async () => {
+    prismaMock.practiceContributionEntry.findMany.mockResolvedValueOnce([
+      contributionEntry({ id: "payable-1", paymentChoice: "CASH", cashStatus: "REQUESTED" }),
+      contributionEntry({ id: "payable-2", paymentChoice: "CASH", cashStatus: "REQUESTED" }),
+    ]);
+
+    const page = await listRequestedPracticeContributionPayables(actor, "workspace-1", {
+      take: 1,
+    });
+
+    expect(page.entries).toHaveLength(1);
+    expect(page.nextCursor).toBe("payable-1");
+    expect(prismaMock.practiceContributionEntry.findMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: {
+        workspaceId: "workspace-1",
+        paymentChoice: "CASH",
+        cashStatus: "REQUESTED",
+      },
+      take: 2,
     }));
   });
 
@@ -505,7 +536,7 @@ describe("practice-finance I/O", () => {
       description: "Client travel",
       occurredAt: new Date("2026-06-18T00:00:00.000Z"),
       amountCents: 4_400,
-      currency: " eur ",
+      currency: " usd ",
       receiptUrl: " https://receipts.example/1 ",
     });
 
@@ -515,7 +546,7 @@ describe("practice-finance I/O", () => {
         paymentChoice: "CASH",
         cashStatus: "REQUESTED",
         amountCents: 4_400,
-        currency: "EUR",
+        currency: "USD",
         receiptUrl: "https://receipts.example/1",
         sliceMultiplier: 0,
         slices: 0,
@@ -523,13 +554,40 @@ describe("practice-finance I/O", () => {
     });
   });
 
-  it("marks cash contribution entries paid through finance-manager access", async () => {
-    prismaMock.practiceContributionEntry.findUnique.mockResolvedValueOnce({
-      id: "contribution-1",
+  it("rejects non-USD contribution currencies until conversion is supported", async () => {
+    prismaMock.practiceProject.findUnique.mockResolvedValueOnce({
+      id: "project-1",
       workspaceId: "workspace-1",
-      paymentChoice: "CASH",
-      cashStatus: "REQUESTED",
     });
+
+    await expect(createPracticeContributionEntry(actor, "workspace-1", {
+      projectId: "project-1",
+      type: "EXPENSE",
+      paymentChoice: "SLICING_PIE",
+      description: "Client travel",
+      occurredAt: new Date("2026-06-18T00:00:00.000Z"),
+      amountCents: 4_400,
+      currency: "EUR",
+    })).rejects.toMatchObject({ status: 400, code: "INVALID_INPUT" });
+    expect(prismaMock.practiceContributionEntry.create).not.toHaveBeenCalled();
+  });
+
+  it("marks cash contribution entries paid through finance-manager access", async () => {
+    prismaMock.practiceContributionEntry.findUnique
+      .mockResolvedValueOnce({
+        id: "contribution-1",
+        workspaceId: "workspace-1",
+        paymentChoice: "CASH",
+        cashStatus: "REQUESTED",
+      })
+      .mockResolvedValueOnce(contributionEntry({
+        id: "contribution-1",
+        paymentChoice: "CASH",
+        cashStatus: "PAID",
+        sliceMultiplier: 0,
+        slices: 0,
+      }));
+    prismaMock.practiceContributionEntry.updateMany.mockResolvedValueOnce({ count: 1 });
 
     await markPracticeContributionEntryPaid(actor, "workspace-1", " contribution-1 ");
 
@@ -538,14 +596,32 @@ describe("practice-finance I/O", () => {
       workspaceId: "workspace-1",
       allowedRoles: expect.arrayContaining(["FINANCE_STEWARD", "ADMIN"]),
     });
-    expect(prismaMock.practiceContributionEntry.update).toHaveBeenCalledWith({
-      where: { id: "contribution-1" },
+    expect(prismaMock.practiceContributionEntry.updateMany).toHaveBeenCalledWith({
+      where: {
+        id: "contribution-1",
+        workspaceId: "workspace-1",
+        paymentChoice: "CASH",
+        cashStatus: "REQUESTED",
+      },
       data: {
         cashStatus: "PAID",
         paidAt: expect.any(Date),
         paidByUserId: "user-1",
       },
     });
+  });
+
+  it("rejects stale cash payable payment attempts after a concurrent update", async () => {
+    prismaMock.practiceContributionEntry.findUnique.mockResolvedValueOnce({
+      id: "contribution-1",
+      workspaceId: "workspace-1",
+      paymentChoice: "CASH",
+      cashStatus: "REQUESTED",
+    });
+    prismaMock.practiceContributionEntry.updateMany.mockResolvedValueOnce({ count: 0 });
+
+    await expect(markPracticeContributionEntryPaid(actor, "workspace-1", " contribution-1 "))
+      .rejects.toMatchObject({ status: 409, code: "CONFLICT" });
   });
 
   it("rejects marking Slicing Pie contribution entries paid", async () => {
@@ -558,7 +634,7 @@ describe("practice-finance I/O", () => {
 
     await expect(markPracticeContributionEntryPaid(actor, "workspace-1", "contribution-1"))
       .rejects.toMatchObject({ status: 400, code: "INVALID_STATE" });
-    expect(prismaMock.practiceContributionEntry.update).not.toHaveBeenCalled();
+    expect(prismaMock.practiceContributionEntry.updateMany).not.toHaveBeenCalled();
   });
 
   it("derives Slicing Pie ownership and cash totals from contribution entries", async () => {
@@ -605,6 +681,40 @@ describe("practice-finance I/O", () => {
         slices: 0,
         contributor: { id: "user-2", displayName: "Bob", email: "bob@example.com" },
       }),
+    ]);
+    prismaMock.practiceContributionEntry.groupBy.mockResolvedValueOnce([
+      {
+        contributorUserId: "user-1",
+        type: "TIME",
+        paymentChoice: "SLICING_PIE",
+        cashStatus: "NOT_APPLICABLE",
+        _sum: { amountCents: 10_000, slices: 20_000 },
+      },
+      {
+        contributorUserId: "user-2",
+        type: "EXPENSE",
+        paymentChoice: "SLICING_PIE",
+        cashStatus: "NOT_APPLICABLE",
+        _sum: { amountCents: 5_000, slices: 20_000 },
+      },
+      {
+        contributorUserId: "user-1",
+        type: "EXPENSE",
+        paymentChoice: "CASH",
+        cashStatus: "PAID",
+        _sum: { amountCents: 3_000, slices: 0 },
+      },
+      {
+        contributorUserId: "user-2",
+        type: "EXPENSE",
+        paymentChoice: "CASH",
+        cashStatus: "REQUESTED",
+        _sum: { amountCents: 1_000, slices: 0 },
+      },
+    ]);
+    prismaMock.user.findMany.mockResolvedValueOnce([
+      { id: "user-1", displayName: "Alice", email: "alice@example.com" },
+      { id: "user-2", displayName: "Bob", email: "bob@example.com" },
     ]);
 
     const summary = await getSlicingPieSummary(actor, "workspace-1");

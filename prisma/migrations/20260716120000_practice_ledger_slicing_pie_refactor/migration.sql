@@ -74,6 +74,24 @@ SELECT
 FROM retired_cycle_archive
 ON CONFLICT (id) DO NOTHING;
 
+-- Remove retired Cycle MCP scopes from persisted clients and credentials before
+-- runtime scope validation drops the live Cycle scope registry entries.
+UPDATE "AgentCredential"
+SET "scopes" = array_remove(array_remove("scopes", 'cycles:read'), 'cycles:write')
+WHERE "scopes" && ARRAY['cycles:read', 'cycles:write']::text[];
+
+UPDATE "McpOAuthClient"
+SET "scopes" = array_remove(array_remove("scopes", 'cycles:read'), 'cycles:write')
+WHERE "scopes" && ARRAY['cycles:read', 'cycles:write']::text[];
+
+UPDATE "McpOAuthAuthorizationCode"
+SET "scopes" = array_remove(array_remove("scopes", 'cycles:read'), 'cycles:write')
+WHERE "scopes" && ARRAY['cycles:read', 'cycles:write']::text[];
+
+UPDATE "McpOAuthAccessToken"
+SET "scopes" = array_remove(array_remove("scopes", 'cycles:read'), 'cycles:write')
+WHERE "scopes" && ARRAY['cycles:read', 'cycles:write']::text[];
+
 CREATE TYPE "PracticeContributionType" AS ENUM ('TIME', 'EXPENSE');
 CREATE TYPE "PracticeContributionPaymentChoice" AS ENUM ('CASH', 'SLICING_PIE');
 CREATE TYPE "PracticeContributionCashStatus" AS ENUM ('NOT_APPLICABLE', 'REQUESTED', 'PAID');

@@ -228,22 +228,100 @@ function ContributionForms({
   );
 }
 
+function RequestedPayables({
+  workspaceId,
+  entries,
+  nextCursor,
+  canMarkPaid,
+}: {
+  workspaceId: string;
+  entries: PracticeContributionEntryWithContext[];
+  nextCursor: string | null;
+  canMarkPaid: boolean;
+}) {
+  if (entries.length === 0 && !nextCursor) return null;
+
+  return (
+    <div className="nr-item" style={{ padding: 0 }}>
+      <div style={{ padding: "12px 16px", borderBottom: "1px solid var(--line)" }}>
+        <strong>Requested cash payables</strong>
+      </div>
+      {entries.length === 0 ? (
+        <p className="nr-item-meta" style={{ padding: 16, margin: 0 }}>No requested cash payables on this page.</p>
+      ) : (
+        <div className="nr-table-wrap">
+          <table className="nr-table">
+            <thead>
+              <tr>
+                <th>Date</th>
+                <th>Contributor</th>
+                <th>Project</th>
+                <th>Type</th>
+                <th style={{ textAlign: "right" }}>Value</th>
+                {canMarkPaid && <th>Actions</th>}
+              </tr>
+            </thead>
+            <tbody>
+              {entries.map((entry) => (
+                <tr key={entry.id}>
+                  <td>{formatDate(entry.occurredAt)}</td>
+                  <td>{entry.contributor.displayName || entry.contributor.email}</td>
+                  <td>
+                    <div>{entry.project.name}</div>
+                    <div className="nr-item-meta" style={{ fontSize: 11 }}>{entry.project.code}</div>
+                  </td>
+                  <td>{entryKindLabel(entry)}</td>
+                  <td style={{ textAlign: "right" }}>{usd(entry.amountCents)}</td>
+                  {canMarkPaid && (
+                    <td>
+                      <form action={markPracticeContributionEntryPaidAction}>
+                        <input type="hidden" name="workspaceId" value={workspaceId} />
+                        <input type="hidden" name="entryId" value={entry.id} />
+                        <button type="submit" className="small">Mark paid</button>
+                      </form>
+                    </td>
+                  )}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+      {nextCursor && (
+        <div style={{ borderTop: "1px solid var(--line)", padding: 12 }}>
+          <a className="link-button small secondary" href={`/workspaces/${workspaceId}/finance?payablesCursor=${encodeURIComponent(nextCursor)}`}>
+            Next payables
+          </a>
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function PracticeFinanceDashboard({
   workspaceId,
   canManageProjects,
+  canRecordContributions,
+  canMarkContributionPaid,
   slicingPieEnabled,
   summary,
   attention,
   projects,
   contributionEntries,
+  requestedPayables,
+  requestedPayablesNextCursor,
 }: {
   workspaceId: string;
   canManageProjects: boolean;
+  canRecordContributions: boolean;
+  canMarkContributionPaid: boolean;
   slicingPieEnabled: boolean;
   summary: PracticeFinanceSummary;
   attention: PracticeAttentionItem[];
   projects: PracticeProject[];
   contributionEntries: PracticeContributionEntryWithContext[];
+  requestedPayables: PracticeContributionEntryWithContext[];
+  requestedPayablesNextCursor: string | null;
 }) {
   return (
     <section className="stack" style={{ gap: 20 }} data-finance-surface="practice-dashboard">
@@ -255,6 +333,9 @@ export function PracticeFinanceDashboard({
               <span>Project margin, budget burn, client portfolio, and alerts for the active practice.</span>
             </div>
           </div>
+          {slicingPieEnabled && (
+            <a className="link-button secondary" href={`/workspaces/${workspaceId}/finance/slicing-pie`}>Slicing Pie</a>
+          )}
         </div>
       </header>
 
@@ -283,7 +364,13 @@ export function PracticeFinanceDashboard({
 
       {slicingPieEnabled && (
         <>
-          <ContributionForms workspaceId={workspaceId} projects={projects} />
+          {canRecordContributions && <ContributionForms workspaceId={workspaceId} projects={projects} />}
+          <RequestedPayables
+            workspaceId={workspaceId}
+            entries={requestedPayables}
+            nextCursor={requestedPayablesNextCursor}
+            canMarkPaid={canMarkContributionPaid}
+          />
           <div className="nr-item" style={{ padding: 0 }}>
             <div style={{ padding: "12px 16px", borderBottom: "1px solid var(--line)" }}>
               <strong>Recent contributions</strong>
@@ -302,7 +389,7 @@ export function PracticeFinanceDashboard({
                       <th style={{ textAlign: "right" }}>Value</th>
                       <th>Payment</th>
                       <th style={{ textAlign: "right" }}>Slices</th>
-                      {canManageProjects && <th>Actions</th>}
+                      {canMarkContributionPaid && <th>Actions</th>}
                     </tr>
                   </thead>
                   <tbody>
@@ -318,7 +405,7 @@ export function PracticeFinanceDashboard({
                         <td style={{ textAlign: "right" }}>{usd(entry.amountCents)}</td>
                         <td>{paymentLabel(entry)}</td>
                         <td style={{ textAlign: "right" }}>{entry.slices.toLocaleString("en-US")}</td>
-                        {canManageProjects && (
+                        {canMarkContributionPaid && (
                           <td>
                             {entry.paymentChoice === "CASH" && entry.cashStatus === "REQUESTED" ? (
                               <form action={markPracticeContributionEntryPaidAction}>

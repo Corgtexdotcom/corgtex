@@ -26,14 +26,21 @@ function paymentLabel(entry: PracticeContributionEntryWithContext): string {
 
 export default async function SlicingPiePage({
   params,
+  searchParams,
 }: {
   params: Promise<{ workspaceId: string }>;
+  searchParams?: Promise<Record<string, string | string[] | undefined>>;
 }) {
   const { workspaceId } = await params;
+  const query = await searchParams;
+  const sourceCursor = Array.isArray(query?.sourceCursor) ? query?.sourceCursor[0] : query?.sourceCursor;
   const actor = await requirePageActor();
   await requireWorkspaceFeature(workspaceId, "FINANCE");
   await requireWorkspaceFeature(workspaceId, "SLICING_PIE");
-  const summary = await getSlicingPieSummary(actor, workspaceId);
+  const summary = await getSlicingPieSummary(actor, workspaceId, {
+    sourceTake: 50,
+    sourceCursor,
+  });
 
   return (
     <section className="stack" style={{ gap: 20 }} data-finance-surface="slicing-pie">
@@ -138,6 +145,13 @@ export default async function SlicingPiePage({
                 ))}
               </tbody>
             </table>
+          </div>
+        )}
+        {summary.nextSourceCursor && (
+          <div style={{ borderTop: "1px solid var(--line)", padding: 12 }}>
+            <a className="link-button small secondary" href={`/workspaces/${workspaceId}/finance/slicing-pie?sourceCursor=${encodeURIComponent(summary.nextSourceCursor)}`}>
+              Next source entries
+            </a>
           </div>
         )}
       </div>
