@@ -164,6 +164,22 @@ describe("newspaper email rendering", () => {
           dateKey: "2026-07-11",
           generatedAt: "2026-07-11T12:00:00.000Z",
           introMd: "Shared briefing intro.",
+          leadMd: "**Briefing system**: The canonical briefing powers the newsletter.",
+          bodyMd: "The homepage and email now read from the same narrative artifact.",
+          attentionMd: "The main attention point is to review the generated briefing before sending.",
+          continuingContextMd: "The source trail remains available for evidence.",
+          closingMd: "The story is meant to stand on its own.",
+          editorialMode: "daily_homepage",
+          freshWindow: {
+            label: "Last 24-36 hours",
+            since: "2026-07-10T00:00:00.000Z",
+            until: "2026-07-11T12:00:00.000Z",
+          },
+          contextWindow: {
+            label: "Current month context",
+            since: "2026-06-11T12:00:00.000Z",
+            until: "2026-07-11T12:00:00.000Z",
+          },
           items: [{
             kind: "BUILD_ARTIFACT",
             title: "Briefing system",
@@ -186,8 +202,49 @@ describe("newspaper email rendering", () => {
 
     expect(html).toContain("Daily Workspace Briefing - 2026-07-11");
     expect(html).toContain("Shared briefing intro.");
-    expect(html).toContain("Built / Shipped Work");
     expect(html).toContain("The canonical briefing powers the newsletter.");
+    expect(html).toContain("The homepage and email now read from the same narrative artifact.");
+    expect(html).not.toContain("Built / Shipped Work");
+    expect(html).not.toContain("<h2");
+  });
+
+  it("folds member personalization into prose for workspace briefing email", () => {
+    const html = renderWorkspaceBriefingEmailHtml({
+      briefing: {
+        title: "Weekly Workspace Briefing - 2026-07-11",
+        briefingJson: {
+          title: "Weekly Workspace Briefing - 2026-07-11",
+          period: "WEEKLY",
+          dateKey: "2026-07-11",
+          generatedAt: "2026-07-11T12:00:00.000Z",
+          introMd: "The weekly story starts with the strongest operating development.",
+          leadMd: "**Factory visit recap**: The team uploaded the most useful operating context from the week.",
+          bodyMd: null,
+          attentionMd: null,
+          continuingContextMd: "The weekly meeting remains relevant context for current work.",
+          closingMd: "The story is complete without clicking through.",
+          editorialMode: "weekly_email",
+          freshWindow: { label: "Last 7 days", since: "2026-07-04T12:00:00.000Z", until: "2026-07-11T12:00:00.000Z" },
+          contextWindow: { label: "Last 30-90 days", since: "2026-04-12T12:00:00.000Z", until: "2026-07-11T12:00:00.000Z" },
+          items: [],
+          sourceRefs: [],
+          sourceCounts: {},
+        },
+      },
+      workspaceName: "Acme",
+      recipientName: "Pat",
+      workspaceUrl: "https://app.example.com/workspaces/ws-1",
+      personalization: {
+        greeting: "Hi Pat,",
+        intro: null,
+        memberNote: "For you, the pricing review is the one item to check today.",
+        emphasizedSectionIds: ["adviceRequests"],
+      },
+    });
+
+    expect(html).toContain("For you, the pricing review is the one item to check today.");
+    expect(html).not.toContain("Requests Awaiting Your Input");
+    expect(html).not.toContain("<ul");
   });
 
   it("uses deterministic markdown output", () => {

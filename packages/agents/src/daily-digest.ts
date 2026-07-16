@@ -15,6 +15,7 @@ import {
   renderWorkspaceBriefingMarkdown,
   upsertNewspaperEdition,
   upsertWorkspaceBriefing,
+  workspaceBriefingContextSince,
   workspaceBriefingPeriodFromCadence,
   workspaceBriefingToNewspaperDigest,
 } from "@corgtex/domain";
@@ -1228,7 +1229,10 @@ export async function runDailyDigest(params: {
   const workspaceName = workspace?.name?.trim() || "Corgtex";
 
   const lookbackDays = LOOKBACK_DAYS_BY_CADENCE[cadence];
-  const since = new Date(new Date(params.dateISO).getTime() - lookbackDays * 24 * 60 * 60 * 1000);
+  const briefingPeriod = workspaceBriefingPeriodFromCadence(cadence);
+  const generationDate = new Date(params.dateISO);
+  const since = new Date(generationDate.getTime() - lookbackDays * 24 * 60 * 60 * 1000);
+  const briefingSince = workspaceBriefingContextSince(briefingPeriod, generationDate);
   const model = params.model ?? resolveModel(
     AGENT_REGISTRY["daily-digest"].defaultModelTier,
     await getAgentModelOverride(params.workspaceId, "daily-digest"),
@@ -1301,7 +1305,7 @@ export async function runDailyDigest(params: {
   });
   const briefingCandidates = await collectWorkspaceBriefingCandidates({
     workspaceId: params.workspaceId,
-    since,
+    since: briefingSince,
   });
   const personalItemsByMemberId = buildPersonalActionItemsByMember({
     workspaceId: params.workspaceId,
@@ -1474,7 +1478,7 @@ Rules:
         workspaceId: params.workspaceId,
         workflowJobId: params.workflowJobId,
         agentRunId: params.agentRunId,
-        instruction: `Generate a structured ${cadenceLabel(cadence)} Newspaper for the workspace based on the last ${lookbackDays} day(s) of Corgtex operating data. Prioritize meeting summaries, decisions, resolved tensions, proposals, open actions, goals, roles, people changes, and source-backed updates. Return concise, non-empty section arrays only when the source material supports them.`,
+        instruction: `Generate a structured ${cadenceLabel(cadence)} Newspaper evidence summary for the workspace based on the last ${lookbackDays} day(s) of Corgtex operating data. Prioritize what helps the reader understand the workspace: what changed, what decisions or blockers matter, what needs attention, and what evidence supports it. Return complete, readable item sentences with no ellipses or truncated titles. Use the arrays only as internal evidence buckets; do not write category headings inside the item text. Return concise, non-empty arrays only when the source material supports them.`,
         schemaHint: `{
           intro: string | null,
           meetingBriefs: string[],
@@ -1494,7 +1498,6 @@ Rules:
       })).output)
     : normalizeNewspaperDigestPayload({});
 
-  const briefingPeriod = workspaceBriefingPeriodFromCadence(cadence);
   const workspaceBriefing = digest.sections.length > 0
     ? buildWorkspaceBriefingFromDigest({
         workspaceId: params.workspaceId,
@@ -1503,6 +1506,8 @@ Rules:
         title: digestTitle,
         digest,
         candidates: briefingCandidates,
+        generatedAt: generationDate,
+        editorialMode: cadence === "WEEKLY" ? "weekly_email" : "daily_homepage",
       })
     : buildWorkspaceBriefingFromCandidates({
         workspaceId: params.workspaceId,
@@ -1510,6 +1515,8 @@ Rules:
         dateKey: digestDateKey,
         title: digestTitle,
         candidates: briefingCandidates,
+        generatedAt: generationDate,
+        editorialMode: cadence === "WEEKLY" ? "weekly_email" : "daily_homepage",
       });
   const briefingBodyMd = renderWorkspaceBriefingMarkdown(workspaceBriefing);
   const storedBriefing = await upsertWorkspaceBriefing({
@@ -1638,7 +1645,7 @@ Rules:
       workspaceId: params.workspaceId,
       workflowJobId: params.workflowJobId,
       agentRunId: params.agentRunId,
-      instruction: `Personalize this structured newspaper for a specific member. Return short text fields only; do not return HTML.`,
+      instruction: `Personalize this workspace newspaper for a specific member. Fold any member-specific advice requests or assigned work into one short prose memberNote. Do not create section headings, category labels, bullet lists, or HTML.`,
       schemaHint: `{
         greeting: string | null,
         intro: string | null,

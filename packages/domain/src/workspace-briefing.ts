@@ -3,8 +3,6 @@ import type { AppActor } from "@corgtex/shared";
 import type { NewspaperCadence, WorkspaceBriefingPeriod, WorkspaceBriefingStatus } from "@prisma/client";
 import { requireWorkspaceMembership } from "./auth";
 import {
-  capNewspaperDigestSections,
-  renderNewspaperDigestMarkdown,
   type NewspaperEmailSectionId,
   type NormalizedNewspaperDigest,
 } from "./newspaper-edition-rendering";
@@ -24,6 +22,14 @@ export type WorkspaceBriefingSourceType =
   | "QUIET";
 
 export type WorkspaceBriefingProminence = "lead" | "standard" | "compact" | "reference";
+
+export type WorkspaceBriefingEditorialMode = "daily_homepage" | "daily_email" | "weekly_email";
+
+export type WorkspaceBriefingWindow = {
+  label: string;
+  since: string;
+  until: string;
+};
 
 export type WorkspaceBriefingSourceRef = {
   type: WorkspaceBriefingSourceType;
@@ -65,6 +71,14 @@ export type WorkspaceBriefingItem = {
 export type NormalizedWorkspaceBriefing = {
   title: string;
   introMd: string | null;
+  leadMd: string | null;
+  bodyMd: string | null;
+  attentionMd: string | null;
+  continuingContextMd: string | null;
+  closingMd: string | null;
+  editorialMode: WorkspaceBriefingEditorialMode;
+  freshWindow: WorkspaceBriefingWindow;
+  contextWindow: WorkspaceBriefingWindow;
   period: WorkspaceBriefingPeriod;
   dateKey: string;
   generatedAt: string;
@@ -73,47 +87,15 @@ export type NormalizedWorkspaceBriefing = {
   sourceCounts: Record<string, number>;
 };
 
-const PERIOD_LOOKBACK_DAYS: Record<WorkspaceBriefingPeriod, number> = {
-  DAILY: 1,
+const FRESH_WINDOW_DAYS: Record<WorkspaceBriefingPeriod, number> = {
+  DAILY: 1.5,
   WEEKLY: 7,
 };
 
-const KIND_TO_SECTION: Record<WorkspaceBriefingSourceType, NewspaperEmailSectionId> = {
-  MEETING: "meetingBriefs",
-  PROPOSAL: "decisionsAndProposals",
-  TENSION: "emergingTensions",
-  ACTION: "openActions",
-  GOAL: "goalsProgress",
-  RECOGNITION: "goalsProgress",
-  BRAIN_ARTICLE: "otherUpdates",
-  DOCUMENT: "otherUpdates",
-  COMMUNICATION: "conversationHighlights",
-  BUILD_ARTIFACT: "builtWork",
-  ADVICE_REQUEST: "adviceRequests",
-  QUIET: "otherUpdates",
+const CONTEXT_WINDOW_DAYS: Record<WorkspaceBriefingPeriod, number> = {
+  DAILY: 30,
+  WEEKLY: 90,
 };
-
-const SECTION_TITLES: Record<NewspaperEmailSectionId, string> = {
-  adviceRequests: "Requests Awaiting Your Input",
-  meetingBriefs: "Meeting Briefs",
-  decisionsAndProposals: "Decisions & Proposals",
-  resolvedTensions: "Resolved Tensions",
-  openActions: "Open Actions",
-  goalsProgress: "Goals & Quarterly Progress",
-  rolesAndPeople: "Roles & People",
-  keyDecisions: "Key Decisions Made",
-  actionItems: "Action Items Identified",
-  builtWork: "Built / Shipped Work",
-  conversationHighlights: "Conversation Highlights",
-  teamPulse: "Team Pulse",
-  emergingTensions: "Emerging Tensions",
-  otherUpdates: "Other Updates",
-};
-
-function sectionForBriefingItem(item: WorkspaceBriefingItem): NewspaperEmailSectionId {
-  if (item.kind === "ADVICE_REQUEST" && item.status && item.status !== "ACTIVE") return "otherUpdates";
-  return KIND_TO_SECTION[item.kind] ?? "otherUpdates";
-}
 
 const WORKSPACE_BRIEFING_SOURCE_LABELS: Record<WorkspaceBriefingSourceType, string> = {
   ACTION: "Action",
@@ -128,21 +110,6 @@ const WORKSPACE_BRIEFING_SOURCE_LABELS: Record<WorkspaceBriefingSourceType, stri
   QUIET: "Quiet",
   RECOGNITION: "Recognition",
   TENSION: "Tension",
-};
-
-const WORKSPACE_BRIEFING_SOURCE_INTRO_LABELS: Record<WorkspaceBriefingSourceType, string> = {
-  ACTION: "open actions",
-  ADVICE_REQUEST: "advice requests",
-  BRAIN_ARTICLE: "knowledge updates",
-  BUILD_ARTIFACT: "shipped or in-flight work",
-  COMMUNICATION: "workspace conversations",
-  DOCUMENT: "document updates",
-  GOAL: "strategic goals",
-  MEETING: "recent meetings",
-  PROPOSAL: "open proposals",
-  QUIET: "quiet context",
-  RECOGNITION: "recognition",
-  TENSION: "active tensions",
 };
 
 function dateKeyFromISO(dateISO: string) {
@@ -172,7 +139,59 @@ function compactText(value: string | null | undefined, maxLength = 520) {
   if (!value) return null;
   const normalized = value.replace(/\s+/g, " ").trim();
   if (!normalized) return null;
-  return normalized.length <= maxLength ? normalized : `${normalized.slice(0, maxLength - 3).trimEnd()}...`;
+  if (normalized.length <= maxLength) return normalized;
+
+  const slice = normalized.slice(0, maxLength).trimEnd();
+  const sentenceBoundary = Math.max(
+    slice.lastIndexOf("."),
+    slice.lastIndexOf("!"),
+    slice.lastIndexOf("?"),
+  );
+  if (sentenceBoundary > Math.floor(maxLength * 0.55)) {
+    return slice.slice(0, sentenceBoundary + 1).trim();
+  }
+
+  const wordBoundary = slice.lastIndexOf(" ");
+  const trimmed = wordBoundary > Math.floor(maxLength * 0.55)
+    ? slice.slice(0, wordBoundary).trim()
+    : slice;
+  return /[.!?]$/.test(trimmed) ? trimmed : `${trimmed}.`;
+}
+
+function normalizeNarrativeText(value: string | null | undefined, maxLength = 1200) {
+  const compacted = compactText(value, maxLength);
+  if (!compacted) return null;
+  return compacted
+    .replace(/\s*(?:\.{3}|…)\s*$/u, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function cleanBriefingTitle(value: string | null | undefined, fallback: string) {
+  const normalized = value?.replace(/\s+/g, " ").trim();
+  if (!normalized) return fallback;
+  const withoutEllipsis = normalized.replace(/\s*(?:\.{3}|…)\s*$/u, "").trim();
+  return withoutEllipsis || fallback;
+}
+
+function periodEditorialMode(period: WorkspaceBriefingPeriod): WorkspaceBriefingEditorialMode {
+  return period === "WEEKLY" ? "weekly_email" : "daily_homepage";
+}
+
+function windowFromDays(params: {
+  generatedAt: Date;
+  days: number;
+  label: string;
+}): WorkspaceBriefingWindow {
+  return {
+    label: params.label,
+    since: new Date(params.generatedAt.getTime() - params.days * 24 * 60 * 60 * 1000).toISOString(),
+    until: params.generatedAt.toISOString(),
+  };
+}
+
+export function workspaceBriefingContextSince(period: WorkspaceBriefingPeriod, date: Date) {
+  return new Date(date.getTime() - CONTEXT_WINDOW_DAYS[period] * 24 * 60 * 60 * 1000);
 }
 
 function sourceRef(
@@ -191,10 +210,12 @@ function sourceRef(
 }
 
 function candidate(params: Omit<WorkspaceBriefingCandidate, "sourceRefs"> & { workspaceId: string }) {
+  const title = cleanBriefingTitle(params.title, workspaceBriefingSourceLabel(params.sourceType));
   return {
     ...params,
+    title,
     sourceRefs: [
-      sourceRef(params.workspaceId, params.sourceType, params.sourceId, params.title, params.href),
+      sourceRef(params.workspaceId, params.sourceType, params.sourceId, title, params.href),
     ],
   };
 }
@@ -333,9 +354,9 @@ function prominenceFor(score: number, index: number): WorkspaceBriefingProminenc
 
 function whyCandidateMatters(candidate: WorkspaceBriefingCandidate) {
   if (candidate.sourceType === "ACTION") return candidate.dueAt ? "Timing or ownership is attached, so this is worth checking before it slips." : "This is active work that may need follow-through.";
-  if (candidate.sourceType === "TENSION") return candidate.status === "OPEN" ? "This is unresolved and can affect coordination or priorities." : "This changed recently and may explain the current direction.";
-  if (candidate.sourceType === "PROPOSAL") return candidate.status === "OPEN" ? "A decision, advice, or alignment may still be needed before this moves forward." : "This records a decision or operating change.";
-  if (candidate.sourceType === "MEETING") return "This is recent operating evidence and may contain decisions or follow-ups.";
+  if (candidate.sourceType === "TENSION") return candidate.status === "OPEN" ? "It is unresolved and can affect coordination or priorities." : "It changed recently and may explain the current direction.";
+  if (candidate.sourceType === "PROPOSAL") return candidate.status === "OPEN" ? "A decision, advice, or alignment may still be needed before this moves forward." : "It records a decision or operating change.";
+  if (candidate.sourceType === "MEETING") return "It is operating evidence and may contain decisions or follow-ups.";
   if (candidate.sourceType === "GOAL") return "This connects today’s work to current strategic direction.";
   if (candidate.sourceType === "ADVICE_REQUEST") return candidate.status === "ACTIVE"
     ? "Someone is asking for input before work can move forward."
@@ -348,8 +369,8 @@ function itemFromCandidate(candidate: WorkspaceBriefingCandidate, index: number,
   const score = scoreWorkspaceBriefingCandidate(candidate, now);
   return {
     kind: candidate.sourceType,
-    title: candidate.title,
-    summaryMd: compactText(candidate.summaryMd, index === 0 ? 900 : 560) ?? candidate.title,
+    title: cleanBriefingTitle(candidate.title, workspaceBriefingSourceLabel(candidate.sourceType)),
+    summaryMd: normalizeNarrativeText(candidate.summaryMd, index === 0 ? 1100 : 720) ?? cleanBriefingTitle(candidate.title, workspaceBriefingSourceLabel(candidate.sourceType)),
     whyItMattersMd: whyCandidateMatters(candidate),
     prominence: prominenceFor(score, index),
     sourceRefs: candidate.sourceRefs,
@@ -378,32 +399,6 @@ function countSources(candidates: WorkspaceBriefingCandidate[]) {
   return counts;
 }
 
-function formatIntroList(labels: string[]) {
-  if (labels.length === 0) return null;
-  if (labels.length === 1) return `Today centers on ${labels[0]}.`;
-  if (labels.length === 2) return `Today is mostly about ${labels[0]} and ${labels[1]}.`;
-  return `Today is mostly about ${labels.slice(0, -1).join(", ")}, and ${labels[labels.length - 1]}.`;
-}
-
-function workspaceBriefingIntro(items: WorkspaceBriefingItem[]) {
-  const counts = new Map<WorkspaceBriefingSourceType, { count: number; firstIndex: number }>();
-  for (const [index, item] of items.entries()) {
-    if (item.kind === "QUIET") continue;
-    const current = counts.get(item.kind);
-    counts.set(item.kind, {
-      count: (current?.count ?? 0) + 1,
-      firstIndex: current?.firstIndex ?? index,
-    });
-  }
-
-  const labels = [...counts.entries()]
-    .sort((a, b) => b[1].count - a[1].count || a[1].firstIndex - b[1].firstIndex)
-    .slice(0, 3)
-    .map(([kind]) => WORKSPACE_BRIEFING_SOURCE_INTRO_LABELS[kind] ?? workspaceBriefingSourceLabel(kind).toLowerCase());
-
-  return formatIntroList(labels);
-}
-
 function quietBriefingItem(date: Date): WorkspaceBriefingItem {
   return {
     kind: "QUIET",
@@ -418,6 +413,111 @@ function quietBriefingItem(date: Date): WorkspaceBriefingItem {
   };
 }
 
+function isFreshBriefingItem(item: WorkspaceBriefingItem, period: WorkspaceBriefingPeriod, generatedAt: Date) {
+  const occurredAt = new Date(item.occurredAt);
+  if (Number.isNaN(occurredAt.getTime())) return false;
+  const ageDays = Math.max(0, (generatedAt.getTime() - occurredAt.getTime()) / (24 * 60 * 60 * 1000));
+  return ageDays <= FRESH_WINDOW_DAYS[period];
+}
+
+function isAttentionBriefingItem(item: WorkspaceBriefingItem) {
+  const status = item.status?.trim().toUpperCase();
+  return status === "OPEN"
+    || status === "IN_PROGRESS"
+    || status === "ACTIVE"
+    || status === "AT_RISK"
+    || status === "BEHIND";
+}
+
+function isContinuingBriefingItem(item: WorkspaceBriefingItem, period: WorkspaceBriefingPeriod, generatedAt: Date) {
+  if (item.kind === "QUIET") return false;
+  if (isFreshBriefingItem(item, period, generatedAt)) return false;
+  if (isAttentionBriefingItem(item)) return true;
+  return item.kind === "GOAL"
+    || item.kind === "PROPOSAL"
+    || item.kind === "TENSION"
+    || item.kind === "ADVICE_REQUEST";
+}
+
+function sentenceFromItem(item: WorkspaceBriefingItem, maxLength = 760) {
+  const title = cleanBriefingTitle(item.title, workspaceBriefingSourceLabel(item.kind));
+  const summary = normalizeNarrativeText(item.summaryMd, maxLength);
+  const titleMd = `**${title}**`;
+  if (!summary || summary === title) return titleMd;
+  return `${titleMd}: ${summary}`;
+}
+
+function joinNarrativeParagraphs(items: WorkspaceBriefingItem[], maxItems: number, maxLength = 760) {
+  return items
+    .slice(0, maxItems)
+    .map((item) => sentenceFromItem(item, maxLength))
+    .join("\n\n")
+    .trim() || null;
+}
+
+function joinAttentionItems(items: WorkspaceBriefingItem[]) {
+  if (items.length === 0) return null;
+  const details = items.slice(0, 4).map((item) => {
+    const summary = normalizeNarrativeText(item.summaryMd, 260);
+    if (!summary || summary === item.title) return cleanBriefingTitle(item.title, workspaceBriefingSourceLabel(item.kind));
+    return `${cleanBriefingTitle(item.title, workspaceBriefingSourceLabel(item.kind))}: ${summary}`;
+  });
+  return `The main attention points are ${details.join("; ")}.`;
+}
+
+function composeWorkspaceBriefingNarrative(params: {
+  period: WorkspaceBriefingPeriod;
+  editorialMode?: WorkspaceBriefingEditorialMode;
+  generatedAt: Date;
+  items: WorkspaceBriefingItem[];
+  fallbackIntro?: string | null;
+}) {
+  const editorialMode = params.editorialMode ?? periodEditorialMode(params.period);
+  const freshWindow = windowFromDays({
+    generatedAt: params.generatedAt,
+    days: FRESH_WINDOW_DAYS[params.period],
+    label: params.period === "WEEKLY" ? "Last 7 days" : "Last 24-36 hours",
+  });
+  const contextWindow = windowFromDays({
+    generatedAt: params.generatedAt,
+    days: CONTEXT_WINDOW_DAYS[params.period],
+    label: params.period === "WEEKLY" ? "Last 30-90 days" : "Current month context",
+  });
+  const meaningfulItems = params.items.filter((item) => item.kind !== "QUIET");
+  const leadItem = params.items[0] ?? quietBriefingItem(params.generatedAt);
+  const freshItems = meaningfulItems.filter((item) => isFreshBriefingItem(item, params.period, params.generatedAt));
+  const continuingItems = meaningfulItems.filter((item) => isContinuingBriefingItem(item, params.period, params.generatedAt));
+  const attentionItems = meaningfulItems.filter(isAttentionBriefingItem);
+
+  const leadMd = leadItem.kind === "QUIET"
+    ? "No major new operating signal was found for this edition. The briefing stays short and uses continuing context instead of inventing activity."
+    : sentenceFromItem(leadItem, params.period === "WEEKLY" ? 980 : 860);
+  const bodyItems = freshItems.filter((item) => item !== leadItem);
+  const bodyMd = joinNarrativeParagraphs(bodyItems.length > 0 ? bodyItems : meaningfulItems.slice(1), params.period === "WEEKLY" ? 5 : 4);
+  const attentionMd = joinAttentionItems(attentionItems);
+  const continuingContextMd = continuingItems.length > 0
+    ? joinNarrativeParagraphs(continuingItems, params.period === "WEEKLY" ? 5 : 4, 560)
+    : params.fallbackIntro ?? (leadItem.kind === "QUIET" ? "There is no unresolved high-signal context in the evidence pool for this edition." : null);
+  const closingMd = meaningfulItems.length > 0
+    ? "The source trail below is the evidence path for this edition. Use it when you need detail, but the story above is meant to stand on its own."
+    : "No source links are attached because no high-signal workspace activity was found for this period.";
+  const introMd = params.period === "WEEKLY"
+    ? "This weekly edition starts with the strongest operating development from the week, then keeps unresolved context that still affects current work."
+    : "This daily edition starts with the strongest signal since the last briefing, then keeps context that still matters for today.";
+
+  return {
+    introMd,
+    leadMd,
+    bodyMd,
+    attentionMd,
+    continuingContextMd,
+    closingMd,
+    editorialMode,
+    freshWindow,
+    contextWindow,
+  };
+}
+
 export function buildWorkspaceBriefingFromCandidates(params: {
   workspaceId: string;
   period: WorkspaceBriefingPeriod;
@@ -426,6 +526,7 @@ export function buildWorkspaceBriefingFromCandidates(params: {
   candidates: WorkspaceBriefingCandidate[];
   generatedAt?: Date;
   maxItems?: number;
+  editorialMode?: WorkspaceBriefingEditorialMode;
 }): NormalizedWorkspaceBriefing {
   const generatedAt = params.generatedAt ?? new Date();
   const ranked = rankWorkspaceBriefingCandidates(params.candidates, generatedAt);
@@ -433,17 +534,16 @@ export function buildWorkspaceBriefingFromCandidates(params: {
     ? ranked.slice(0, params.maxItems ?? 10).map((entry, index) => itemFromCandidate(entry, index, generatedAt))
     : [quietBriefingItem(generatedAt)];
   const counts = countSources(params.candidates);
-  const sourceKinds = Object.entries(counts)
-    .filter(([, count]) => count > 0)
-    .map(([kind, count]) => `${count} ${kind.toLowerCase().replace(/_/g, " ")}`)
-    .slice(0, 5)
-    .join(", ");
+  const narrative = composeWorkspaceBriefingNarrative({
+    period: params.period,
+    editorialMode: params.editorialMode,
+    generatedAt,
+    items,
+  });
 
   return {
     title: params.title,
-    introMd: sourceKinds
-      ? workspaceBriefingIntro(items)
-      : "This was a quiet period. The briefing stays short because no major new operating signals were found.",
+    ...narrative,
     period: params.period,
     dateKey: params.dateKey,
     generatedAt: generatedAt.toISOString(),
@@ -486,6 +586,19 @@ function candidateMatchesDigestItem(candidate: WorkspaceBriefingCandidate, rawIt
   );
 }
 
+function titleFromDigestItem(rawItem: string) {
+  const compact = normalizeNarrativeText(rawItem, 160);
+  if (!compact) return "Workspace update";
+  const colonIndex = compact.indexOf(":");
+  const firstSentence = compact.match(/^(.+?[.!?])(?:\s|$)/)?.[1];
+  const title = colonIndex > 8 && colonIndex < 90
+    ? compact.slice(0, colonIndex)
+    : firstSentence && firstSentence.length <= 90
+      ? firstSentence
+      : "Workspace update";
+  return cleanBriefingTitle(title, "Workspace update").replace(/[.!?]$/u, "");
+}
+
 function pickCandidateForSection(
   sectionId: NewspaperEmailSectionId,
   rawItem: string,
@@ -509,6 +622,20 @@ function adviceSubjectHref(workspaceId: string, subjectType: string, subjectId: 
   return workspacePath(workspaceId, `/proposals/${subjectId}`);
 }
 
+function meetingFreshnessDate(meeting: {
+  recordedAt: Date;
+  updatedAt: Date;
+  createdAt: Date;
+  summaryPostedAt: Date | null;
+  aiProcessedAt: Date | null;
+}, now = new Date()) {
+  if (meeting.recordedAt.getTime() <= now.getTime()) return meeting.recordedAt;
+  return meeting.summaryPostedAt
+    ?? meeting.aiProcessedAt
+    ?? meeting.updatedAt
+    ?? meeting.createdAt;
+}
+
 export function buildWorkspaceBriefingFromDigest(params: {
   workspaceId: string;
   period: WorkspaceBriefingPeriod;
@@ -517,6 +644,7 @@ export function buildWorkspaceBriefingFromDigest(params: {
   digest: NormalizedNewspaperDigest;
   candidates: WorkspaceBriefingCandidate[];
   generatedAt?: Date;
+  editorialMode?: WorkspaceBriefingEditorialMode;
 }): NormalizedWorkspaceBriefing {
   const generatedAt = params.generatedAt ?? new Date();
   const rankedCandidates = rankWorkspaceBriefingCandidates(params.candidates, generatedAt);
@@ -528,9 +656,9 @@ export function buildWorkspaceBriefingFromDigest(params: {
       return {
         digestIndex: sectionIndex * 100 + itemIndex,
         kind: source?.sourceType ?? sectionKind(section.id),
-        title: source?.title ?? section.title,
+        title: source?.title ?? titleFromDigestItem(rawItem),
         rawItem,
-        whyItMattersMd: source ? whyCandidateMatters(source) : `This was selected for the ${section.title.toLowerCase()} briefing section.`,
+        whyItMattersMd: source ? whyCandidateMatters(source) : "This was selected because it helps explain the current workspace picture.",
         sourceRefs: source?.sourceRefs ?? [],
         href: source?.href ?? null,
         occurredAt: source?.occurredAt ?? generatedAt,
@@ -548,8 +676,8 @@ export function buildWorkspaceBriefingFromDigest(params: {
     ))
     .map((entry, itemIndex) => ({
       kind: entry.kind,
-      title: entry.title,
-      summaryMd: compactText(entry.rawItem, itemIndex === 0 ? 900 : 560) ?? entry.rawItem,
+      title: cleanBriefingTitle(entry.title, workspaceBriefingSourceLabel(entry.kind)),
+      summaryMd: normalizeNarrativeText(entry.rawItem, itemIndex === 0 ? 1100 : 720) ?? cleanBriefingTitle(entry.title, workspaceBriefingSourceLabel(entry.kind)),
       whyItMattersMd: entry.whyItMattersMd,
       prominence: prominenceFor(entry.score, itemIndex),
       sourceRefs: entry.sourceRefs,
@@ -564,15 +692,23 @@ export function buildWorkspaceBriefingFromDigest(params: {
       workspaceId: params.workspaceId,
       period: params.period,
       dateKey: params.dateKey,
-      title: params.title,
-      candidates: params.candidates,
-      generatedAt,
-    });
+        title: params.title,
+        candidates: params.candidates,
+        generatedAt,
+        editorialMode: params.editorialMode,
+      });
   }
+  const narrative = composeWorkspaceBriefingNarrative({
+    period: params.period,
+    editorialMode: params.editorialMode,
+    generatedAt,
+    items,
+    fallbackIntro: params.digest.intro,
+  });
 
   return {
     title: params.title,
-    introMd: params.digest.intro,
+    ...narrative,
     period: params.period,
     dateKey: params.dateKey,
     generatedAt: generatedAt.toISOString(),
@@ -628,15 +764,48 @@ export function normalizeWorkspaceBriefingPayload(input: unknown): NormalizedWor
     : [];
   const period = record.period === "WEEKLY" ? "WEEKLY" : "DAILY";
   const fallbackTitle = period === "WEEKLY" ? "Weekly Workspace Briefing" : "Daily Workspace Briefing";
+  const generatedAt = typeof record.generatedAt === "string" ? record.generatedAt : new Date().toISOString();
+  const normalizedItems = items.length > 0 ? items : [quietBriefingItem(new Date(generatedAt))];
+  const editorialMode = record.editorialMode === "daily_email" || record.editorialMode === "weekly_email" || record.editorialMode === "daily_homepage"
+    ? record.editorialMode
+    : periodEditorialMode(period);
+  const fallbackNarrative = composeWorkspaceBriefingNarrative({
+    period,
+    editorialMode,
+    generatedAt: new Date(generatedAt),
+    items: normalizedItems,
+    fallbackIntro: typeof record.introMd === "string" && record.introMd.trim() ? record.introMd.trim() : null,
+  });
+  const recordWindow = (value: unknown, fallback: WorkspaceBriefingWindow): WorkspaceBriefingWindow => {
+    if (typeof value !== "object" || value === null || Array.isArray(value)) return fallback;
+    const entry = value as Record<string, unknown>;
+    return {
+      label: typeof entry.label === "string" && entry.label.trim() ? entry.label.trim() : fallback.label,
+      since: typeof entry.since === "string" && entry.since.trim() ? entry.since.trim() : fallback.since,
+      until: typeof entry.until === "string" && entry.until.trim() ? entry.until.trim() : fallback.until,
+    };
+  };
+  const recordMd = (key: string, fallback: string | null) => {
+    const value = record[key];
+    return typeof value === "string" && value.trim() ? value.trim() : fallback;
+  };
 
   return {
     title: typeof record.title === "string" && record.title.trim() ? record.title.trim() : fallbackTitle,
-    introMd: typeof record.introMd === "string" && record.introMd.trim() ? record.introMd.trim() : null,
+    introMd: recordMd("introMd", fallbackNarrative.introMd),
+    leadMd: recordMd("leadMd", fallbackNarrative.leadMd),
+    bodyMd: recordMd("bodyMd", fallbackNarrative.bodyMd),
+    attentionMd: recordMd("attentionMd", fallbackNarrative.attentionMd),
+    continuingContextMd: recordMd("continuingContextMd", fallbackNarrative.continuingContextMd),
+    closingMd: recordMd("closingMd", fallbackNarrative.closingMd),
+    editorialMode,
+    freshWindow: recordWindow(record.freshWindow, fallbackNarrative.freshWindow),
+    contextWindow: recordWindow(record.contextWindow, fallbackNarrative.contextWindow),
     period,
     dateKey: typeof record.dateKey === "string" && record.dateKey.trim() ? record.dateKey.trim() : dateKeyFromISO(new Date().toISOString()),
-    generatedAt: typeof record.generatedAt === "string" ? record.generatedAt : new Date().toISOString(),
-    items: items.length > 0 ? items : [quietBriefingItem(new Date())],
-    sourceRefs: Array.isArray(record.sourceRefs) ? uniqueSourceRefs(items) : uniqueSourceRefs(items),
+    generatedAt,
+    items: normalizedItems,
+    sourceRefs: Array.isArray(record.sourceRefs) ? uniqueSourceRefs(normalizedItems) : uniqueSourceRefs(normalizedItems),
     sourceCounts: typeof record.sourceCounts === "object" && record.sourceCounts !== null && !Array.isArray(record.sourceCounts)
       ? Object.fromEntries(Object.entries(record.sourceCounts as Record<string, unknown>).flatMap(([key, value]) => (
         typeof value === "number" ? [[key, value]] : []
@@ -647,33 +816,49 @@ export function normalizeWorkspaceBriefingPayload(input: unknown): NormalizedWor
 
 export function workspaceBriefingToNewspaperDigest(input: { briefingJson: unknown } | NormalizedWorkspaceBriefing): NormalizedNewspaperDigest {
   const briefing = "briefingJson" in input ? normalizeWorkspaceBriefingPayload(input.briefingJson) : input;
-  const sectionsById = new Map<NewspaperEmailSectionId, string[]>();
-
-  for (const item of briefing.items) {
-    const sectionId = sectionForBriefingItem(item);
-    const body = [
-      item.title,
-      item.summaryMd && item.summaryMd !== item.title ? item.summaryMd : null,
-      item.whyItMattersMd ? `Why it matters: ${item.whyItMattersMd}` : null,
-    ].filter(Boolean).join("\n");
-    sectionsById.set(sectionId, [...(sectionsById.get(sectionId) ?? []), body]);
-  }
+  const narrativeItems = [
+    briefing.leadMd,
+    briefing.bodyMd,
+    briefing.attentionMd,
+    briefing.continuingContextMd,
+    briefing.closingMd,
+  ].filter((item): item is string => !!item?.trim());
 
   return {
     intro: briefing.introMd,
-    sections: capNewspaperDigestSections([...sectionsById.entries()].map(([id, items]) => ({
-      id,
-      title: SECTION_TITLES[id],
-      items,
-    }))),
+    sections: narrativeItems.length > 0
+      ? [{
+        id: "otherUpdates",
+        title: "Workspace Narrative",
+        items: narrativeItems,
+      }]
+      : [],
   };
 }
 
 export function renderWorkspaceBriefingMarkdown(briefing: NormalizedWorkspaceBriefing) {
-  return renderNewspaperDigestMarkdown({
-    title: briefing.title,
-    digest: workspaceBriefingToNewspaperDigest(briefing),
-  });
+  const lines = [`# ${briefing.title}`];
+  const sections = [
+    briefing.introMd,
+    briefing.leadMd,
+    briefing.bodyMd,
+    briefing.attentionMd,
+    briefing.continuingContextMd,
+    briefing.closingMd,
+  ].filter((item): item is string => !!item?.trim());
+
+  for (const section of sections) {
+    lines.push("", section);
+  }
+
+  if (briefing.sourceRefs.length > 0) {
+    lines.push("", "## Source trail", "");
+    for (const ref of briefing.sourceRefs.slice(0, 12)) {
+      lines.push(ref.href ? `- [${ref.label}](${ref.href})` : `- ${ref.label}`);
+    }
+  }
+
+  return lines.join("\n").trim();
 }
 
 export async function collectWorkspaceBriefingCandidates(params: {
@@ -724,7 +909,17 @@ export async function collectWorkspaceBriefingCandidates(params: {
       },
       orderBy: { recordedAt: "desc" },
       take: 20,
-      select: { id: true, title: true, summaryMd: true, recordedAt: true, updatedAt: true, decisionsJson: true },
+      select: {
+        id: true,
+        title: true,
+        summaryMd: true,
+        recordedAt: true,
+        updatedAt: true,
+        createdAt: true,
+        summaryPostedAt: true,
+        aiProcessedAt: true,
+        decisionsJson: true,
+      },
     }),
     prisma.proposal.findMany({
       where: {
@@ -881,7 +1076,7 @@ export async function collectWorkspaceBriefingCandidates(params: {
       title: meeting.title?.trim() || "Meeting recap",
       summaryMd: compactText(meeting.summaryMd, 1200),
       href: workspacePath(params.workspaceId, `/meetings/${meeting.id}`),
-      occurredAt: meeting.recordedAt,
+      occurredAt: meetingFreshnessDate(meeting),
       updatedAt: meeting.updatedAt,
       strategicScore: meeting.decisionsJson ? 3 : 2,
       actionabilityScore: meeting.summaryMd ? 1 : 0,
@@ -1135,9 +1330,10 @@ export async function generateWorkspaceBriefing(params: {
   workflowJobId?: string | null;
   agentRunId?: string | null;
   model?: string | null;
+  editorialMode?: WorkspaceBriefingEditorialMode;
 }) {
   const date = new Date(params.dateISO);
-  const since = new Date(date.getTime() - PERIOD_LOOKBACK_DAYS[params.period] * 24 * 60 * 60 * 1000);
+  const since = workspaceBriefingContextSince(params.period, date);
   const dateKey = dateKeyFromISO(params.dateISO);
   const title = `${params.period === "WEEKLY" ? "Weekly" : "Daily"} Workspace Briefing - ${dateKey}`;
   const runKey = params.workflowJobId ?? `${params.workspaceId}:${params.period.toLowerCase()}-workspace-briefing:${dateKey}`;
@@ -1152,6 +1348,7 @@ export async function generateWorkspaceBriefing(params: {
     title,
     candidates,
     generatedAt: date,
+    editorialMode: params.editorialMode,
   });
 
   return upsertWorkspaceBriefing({

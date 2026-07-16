@@ -2,8 +2,8 @@ import {
   NEWSPAPER_SECTION_DEFINITIONS,
   capNewspaperDigestSections,
   normalizeNewspaperDigestPayload,
+  normalizeWorkspaceBriefingPayload,
   renderNewspaperDigestMarkdown,
-  workspaceBriefingToNewspaperDigest,
   type NormalizedNewspaperDigest,
   type NewspaperDigestSection,
   type NewspaperEmailSectionId,
@@ -86,6 +86,21 @@ function escapeAttribute(value: string) {
 
 function renderHtmlText(value: string) {
   return escapeHtml(value).replace(/\r?\n/g, "<br>");
+}
+
+function renderNarrativeMarkdown(value: string) {
+  return escapeHtml(value)
+    .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
+    .replace(/\r?\n/g, "<br>");
+}
+
+function renderNarrativeParagraphs(values: Array<string | null | undefined>) {
+  return values
+    .flatMap((value) => value?.split(/\n{2,}/).map((part) => part.trim()).filter(Boolean) ?? [])
+    .map((paragraph, index) => (
+      `<p style="font-size:${index === 0 ? "17px" : "15px"};line-height:1.65;margin:0 0 16px;color:#2d2a24;">${renderNarrativeMarkdown(paragraph)}</p>`
+    ))
+    .join("");
 }
 
 export function renderNewspaperEmailHtml(params: {
@@ -182,12 +197,58 @@ export function renderWorkspaceBriefingEmailHtml(params: {
   digest?: NormalizedNewspaperDigest;
   personalization?: NewspaperPersonalization;
 }) {
-  return renderNewspaperEmailHtml({
-    title: params.briefing.title,
-    workspaceName: params.workspaceName,
-    recipientName: params.recipientName,
-    workspaceUrl: params.workspaceUrl,
-    digest: params.digest ?? workspaceBriefingToNewspaperDigest(params.briefing),
-    personalization: params.personalization,
+  const recipient = params.recipientName?.trim() || "there";
+  const greeting = params.personalization?.greeting ?? `Hello ${recipient},`;
+  const briefing = normalizeWorkspaceBriefingPayload(params.briefing.briefingJson);
+  const intro = params.personalization?.intro ?? briefing.introMd;
+  const articleHtml = renderNarrativeParagraphs([
+    intro,
+    briefing.leadMd,
+    briefing.bodyMd,
+    briefing.attentionMd,
+    briefing.continuingContextMd,
+    briefing.closingMd,
+  ]);
+  const memberNote = params.personalization?.memberNote
+    ? `<p style="font-size:15px;line-height:1.6;margin:18px 0 0;color:#5b5448;">${renderNarrativeMarkdown(params.personalization.memberNote)}</p>`
+    : "";
+  const sourceLinks = briefing.sourceRefs.slice(0, 8).flatMap((ref) => {
+    if (!ref.href) return [];
+    return [`<a href="${escapeAttribute(ref.href)}" style="color:#6750a4;text-decoration:underline;">${escapeHtml(ref.label)}</a>`];
   });
+  const sourceTrail = sourceLinks.length > 0
+    ? `<p style="font-size:13px;line-height:1.5;margin:14px 0 0;color:#5b5448;">Source trail: ${sourceLinks.join(" · ")}</p>`
+    : "";
+
+  return `<!doctype html>
+<html>
+  <body style="margin:0;background:#f4f1ea;color:#1f1d1a;font-family:Arial,Helvetica,sans-serif;">
+    <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="background:#f4f1ea;padding:24px 12px;">
+      <tr>
+        <td align="center">
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="max-width:680px;background:#fffaf0;border:1px solid #2d2a24;">
+            <tr>
+              <td style="padding:24px 28px 12px;border-bottom:3px double #2d2a24;text-align:center;">
+                <div style="font-size:12px;letter-spacing:1.6px;text-transform:uppercase;color:#5b5448;">The ${escapeHtml(params.workspaceName)} Edition</div>
+                <h1 style="font-family:Georgia,'Times New Roman',serif;font-size:34px;line-height:1.05;margin:8px 0 6px;font-weight:700;color:#1f1d1a;">${escapeHtml(params.briefing.title)}</h1>
+                <div style="font-size:13px;text-transform:uppercase;letter-spacing:1px;color:#5b5448;">Your workspace briefing</div>
+              </td>
+            </tr>
+            <tr>
+              <td style="padding:24px 28px;">
+                <p style="font-size:16px;line-height:1.6;margin:0 0 12px;color:#2d2a24;">${renderHtmlText(greeting)}</p>
+                ${articleHtml}
+                ${memberNote}
+                <div style="margin-top:24px;padding-top:16px;border-top:1px solid #d9d1bd;font-size:13px;line-height:1.5;color:#5b5448;">
+                  <a href="${escapeAttribute(params.workspaceUrl)}" style="color:#6750a4;text-decoration:underline;">Open Corgtex</a> to review the source work and decisions behind this newspaper.
+                  ${sourceTrail}
+                </div>
+              </td>
+            </tr>
+          </table>
+        </td>
+      </tr>
+    </table>
+  </body>
+</html>`;
 }

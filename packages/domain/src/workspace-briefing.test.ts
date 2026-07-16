@@ -474,7 +474,7 @@ describe("workspace briefing", () => {
     }));
   });
 
-  it("uses natural intro text instead of mechanical source counts", async () => {
+  it("uses narrative text instead of mechanical source counts or visible categories", async () => {
     const { buildWorkspaceBriefingFromCandidates } = await import("./workspace-briefing");
     const briefing = buildWorkspaceBriefingFromCandidates({
       workspaceId: "ws-1",
@@ -512,10 +512,18 @@ describe("workspace briefing", () => {
       ],
     });
 
-    expect(briefing.introMd).toContain("Today is mostly about");
-    expect(briefing.introMd).toContain("open proposals");
-    expect(briefing.introMd).toContain("active tensions");
+    expect(briefing.introMd).toContain("strongest signal");
+    expect(briefing.leadMd).toContain("**");
+    expect(briefing.attentionMd).toContain("attention points");
+    expect(briefing.continuingContextMd).toContain("**");
     expect(briefing.introMd).not.toContain("1 proposal");
+    expect([
+      briefing.introMd,
+      briefing.leadMd,
+      briefing.bodyMd,
+      briefing.attentionMd,
+      briefing.continuingContextMd,
+    ].join("\n")).not.toMatch(/Meeting Briefs|Open Actions|Open Proposals|Action Items/);
   });
 
   it("formats source labels for homepage display", async () => {
@@ -606,7 +614,7 @@ describe("workspace briefing", () => {
 
     expect(briefing.items[0]).toEqual(expect.objectContaining({
       kind: "MEETING",
-      title: "Meeting Briefs",
+      title: "The meeting surfaced a customer-readiness decision",
       href: null,
       sourceRefs: [],
     }));
@@ -643,7 +651,7 @@ describe("workspace briefing", () => {
 
     expect(briefing.items[0]).toEqual(expect.objectContaining({
       kind: "ACTION",
-      title: "Open Actions",
+      title: "Confirm the customer rollout owner before launch",
       href: null,
       sourceRefs: [],
     }));
@@ -714,7 +722,64 @@ describe("workspace briefing", () => {
     expect(briefing.items[0].summaryMd).toContain("No new high-signal");
   });
 
-  it("converts briefing items into the existing newsletter digest shape", async () => {
+  it("renders briefing markdown as narrative instead of source-category sections", async () => {
+    const { buildWorkspaceBriefingFromCandidates, renderWorkspaceBriefingMarkdown } = await import("./workspace-briefing");
+    const briefing = buildWorkspaceBriefingFromCandidates({
+      workspaceId: "ws-1",
+      period: "DAILY",
+      dateKey: "2026-04-30",
+      title: "Daily Workspace Briefing - 2026-04-30",
+      generatedAt: new Date("2026-04-30T12:00:00.000Z"),
+      candidates: [
+        baseCandidate({
+          sourceType: "ACTION",
+          sourceId: "action-1",
+          title: "Review launch",
+          summaryMd: "Review the launch decision with the team today.",
+          status: "OPEN",
+          strategicScore: 2,
+          actionabilityScore: 4,
+          sourceRefs: [{ type: "ACTION", id: "action-1", label: "Review launch", href: "/workspaces/ws-1/actions/action-1" }],
+        }),
+      ],
+    });
+
+    const markdown = renderWorkspaceBriefingMarkdown(briefing);
+
+    expect(markdown).toContain("Review the launch decision");
+    expect(markdown).toContain("## Source trail");
+    expect(markdown).not.toMatch(/## Open Actions|## Meeting Briefs|## Action Items Identified/);
+  });
+
+  it("uses upload freshness instead of future meeting dates for ranking", async () => {
+    const { collectWorkspaceBriefingCandidates } = await import("./workspace-briefing");
+    prismaMock.meeting.findMany.mockResolvedValueOnce([{
+      id: "meeting-future",
+      title: "CRINA weekly recap",
+      summaryMd: "The team uploaded a weekly recap today.",
+      recordedAt: new Date("2099-01-01T12:00:00.000Z"),
+      updatedAt: new Date("2026-04-30T09:00:00.000Z"),
+      createdAt: new Date("2026-04-30T08:00:00.000Z"),
+      summaryPostedAt: new Date("2026-04-30T10:00:00.000Z"),
+      aiProcessedAt: new Date("2026-04-30T09:30:00.000Z"),
+      decisionsJson: null,
+    }]);
+
+    const candidates = await collectWorkspaceBriefingCandidates({
+      workspaceId: "ws-1",
+      since: new Date("2026-04-01T00:00:00.000Z"),
+    });
+
+    expect(candidates).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        sourceType: "MEETING",
+        sourceId: "meeting-future",
+        occurredAt: new Date("2026-04-30T10:00:00.000Z"),
+      }),
+    ]));
+  });
+
+  it("converts briefing narrative into the shared newsletter digest shape", async () => {
     const { buildWorkspaceBriefingFromCandidates, workspaceBriefingToNewspaperDigest } = await import("./workspace-briefing");
     const briefing = buildWorkspaceBriefingFromCandidates({
       workspaceId: "ws-1",
@@ -737,13 +802,14 @@ describe("workspace briefing", () => {
 
     const digest = workspaceBriefingToNewspaperDigest(briefing);
 
-    expect(digest.sections).toEqual(expect.arrayContaining([
+    expect(digest.sections).toEqual([
       expect.objectContaining({
-        id: "builtWork",
-        title: "Built / Shipped Work",
-        items: [expect.stringContaining("The new briefing surface shipped.")],
+        id: "otherUpdates",
+        title: "Workspace Narrative",
+        items: expect.arrayContaining([expect.stringContaining("The new briefing surface shipped.")]),
       }),
-    ]));
+    ]);
+    expect(digest.sections[0]?.title).not.toBe("Built / Shipped Work");
   });
 
   it("routes completed advice requests to neutral newsletter updates", async () => {
@@ -774,13 +840,13 @@ describe("workspace briefing", () => {
 
     const digest = workspaceBriefingToNewspaperDigest(briefing);
 
-    expect(digest.sections).toEqual(expect.arrayContaining([
+    expect(digest.sections).toEqual([
       expect.objectContaining({
         id: "otherUpdates",
-        title: "Other Updates",
-        items: [expect.stringContaining("The support risk decision was completed.")],
+        title: "Workspace Narrative",
+        items: expect.arrayContaining([expect.stringContaining("The support risk decision was completed.")]),
       }),
-    ]));
+    ]);
     expect(digest.sections).not.toEqual(expect.arrayContaining([
       expect.objectContaining({ id: "adviceRequests" }),
     ]));
@@ -823,12 +889,12 @@ describe("workspace briefing", () => {
     const digest = workspaceBriefingToNewspaperDigest(briefing);
 
     expect(briefing.items[0].status).toBe("COMPLETED");
-    expect(digest.sections).toEqual(expect.arrayContaining([
+    expect(digest.sections).toEqual([
       expect.objectContaining({
         id: "otherUpdates",
-        title: "Other Updates",
+        title: "Workspace Narrative",
       }),
-    ]));
+    ]);
     expect(digest.sections).not.toEqual(expect.arrayContaining([
       expect.objectContaining({ id: "adviceRequests" }),
     ]));
