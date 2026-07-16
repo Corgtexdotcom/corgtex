@@ -460,7 +460,12 @@ export async function seedStableClient(config) {
   const clientUsers = parseClientUsers(envPrefix);
 
   try {
-    const result = await prisma.$transaction(async (tx) => {
+    // Keep the stable-client seed rerunnable instead of wrapping all fixture
+    // writes in one interactive transaction. Production release jobs can exceed
+    // Prisma's transaction window on slow connections, while each write below is
+    // already idempotent and safe to complete on a later retry.
+    const result = await (async () => {
+      const tx = prisma;
       const workspace = await tx.workspace.upsert({
         where: { slug: workspaceSlug },
         update: {
@@ -635,7 +640,7 @@ export async function seedStableClient(config) {
       }
 
       return { workspace, inviteResults };
-    });
+    })();
 
     for (const invite of result.inviteResults) {
       await sendInvitationEmail(config, invite.email, invite.displayName, invite.setupUrl);
