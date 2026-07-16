@@ -2,6 +2,7 @@
 
 import process from "node:process";
 import { pathToFileURL } from "node:url";
+import { releaseDriftSummary } from "./lib/release-health-validation.mjs";
 
 function fail(message) {
   console.error(`FAIL ${message}`);
@@ -64,6 +65,10 @@ async function main() {
 
   if (expectedGitSha && payload?.release?.gitSha !== expectedGitSha) {
     fail(`release.gitSha ${payload?.release?.gitSha ?? "missing"} did not match expected ${expectedGitSha}`);
+  }
+  const releaseDrift = releaseDriftSummary(payload?.release);
+  if (releaseDrift) {
+    fail(`release metadata drift blocked telemetry proof: ${releaseDrift}`);
   }
   if (!telemetrySent(payload?.telemetry)) {
     fail(`telemetry was not sent by any sink: ${JSON.stringify(payload?.telemetry ?? null)}`);

@@ -41,8 +41,8 @@ describe("capturePostHogEvent", () => {
       corgtex_provider: "railway",
       corgtex_release_git_sha: "current-sha",
       corgtex_release_git_sha_source: "railway",
-      corgtex_release_image_tag: "sha-older-sha",
-      corgtex_release_version: "main-older",
+      corgtex_release_image_tag: "sha-current-sha",
+      corgtex_release_version: "main-current-sha",
       corgtex_release_drift_git_sha: true,
       corgtex_release_drift_image_tag: true,
     });

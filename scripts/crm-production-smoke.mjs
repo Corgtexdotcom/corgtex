@@ -18,6 +18,10 @@ import {
   validationWorkspaceSelectorFromEnv,
   workspaceTenant,
 } from "./lib/validation-workspace.mjs";
+import {
+  healthConfiguredReleaseDrift,
+  healthReleaseMismatch,
+} from "./lib/release-health-validation.mjs";
 
 const DEFAULT_BASE_URL = "https://app.corgtex.com";
 const DEFAULT_OUT_DIR = ".artifacts/crm-production-smoke";
@@ -111,6 +115,11 @@ function evaluateKanbanSnapshot(snapshot) {
     return `${snapshot.clippedWithoutPageScrollCount} Kanban card(s) extended below the viewport while the page could not scroll.`;
   }
   return null;
+}
+
+function crmHealthReleaseBlocker(health, expectedGitSha = null) {
+  return healthReleaseMismatch(health, expectedGitSha)
+    ?? healthConfiguredReleaseDrift(health, expectedGitSha);
 }
 
 function crmPageContext(workspaceId, account, activityId = null, title = null) {
@@ -276,10 +285,16 @@ class CrmSmoke {
     assert(body.database === "up", `/api/health database was ${body.database}`);
     assert(body.schema === "ready", `/api/health schema was ${body.schema}`);
     if (this.expectedGitSha) {
-      const actual = body.release?.gitSha || body.release?.imageTag;
-      assert(actual === this.expectedGitSha, `/api/health release ${actual} did not match ${this.expectedGitSha}`);
+      const actual = body.release?.gitSha ?? null;
+      assert(actual === this.expectedGitSha, `/api/health release.gitSha ${actual ?? "missing"} did not match ${this.expectedGitSha}`);
     }
-    this.record("health", { gitSha: body.release?.gitSha ?? null });
+    const releaseBlocker = crmHealthReleaseBlocker(body, this.expectedGitSha);
+    assert(!releaseBlocker, releaseBlocker);
+    this.record("health", {
+      gitSha: body.release?.gitSha ?? null,
+      imageTag: body.release?.imageTag ?? null,
+      version: body.release?.version ?? null,
+    });
   }
 
   async loginDemo() {
@@ -754,6 +769,7 @@ if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) 
 export {
   CrmSmoke,
   crmPageContext,
+  crmHealthReleaseBlocker,
   crmScreenshotFileName,
   crmVisualTargets,
   evaluateKanbanSnapshot,

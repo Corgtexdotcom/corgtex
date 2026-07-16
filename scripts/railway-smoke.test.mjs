@@ -6,6 +6,7 @@ import {
   healthConfiguredReleaseDrift,
   healthPayloadMismatch,
   healthReleaseMismatch,
+  healthReleaseValidationMismatch,
   releaseMatchDisabled,
   releaseMatchRetryConfig,
   smokeFetchRetryConfig,
@@ -35,7 +36,7 @@ describe("railway smoke release validation", () => {
     })).toBeNull();
   });
 
-  it("only requires configured release metadata matching when explicitly enabled", () => {
+  it("keeps configured release metadata matching opt-in outside expected release gates", () => {
     expect(configuredReleaseMatchRequired({})).toBe(false);
     expect(configuredReleaseMatchRequired({
       CORGTEX_REQUIRE_CONFIGURED_RELEASE_MATCH: "true",
@@ -107,6 +108,25 @@ describe("railway smoke release validation", () => {
         },
       },
     }, "current-sha")).toBeNull();
+  });
+
+  it("requires configured metadata alignment when strict release validation is enabled", () => {
+    const health = {
+      release: {
+        gitSha: "current-sha",
+        drift: {
+          gitSha: true,
+          imageTag: true,
+          version: true,
+          details: ["configured.gitSha=older-sha does not match runtime.gitSha=current-sha"],
+        },
+      },
+    };
+
+    expect(healthReleaseValidationMismatch(health, "current-sha")).toBeNull();
+    expect(healthReleaseValidationMismatch(health, "current-sha", {
+      requireConfiguredMatch: true,
+    })).toContain("configured.gitSha=older-sha");
   });
 
   it("reports non-JSON health payloads as retryable mismatches", () => {
