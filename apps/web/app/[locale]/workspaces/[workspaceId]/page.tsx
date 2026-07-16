@@ -152,7 +152,9 @@ export default async function WorkspaceDashboard({
     ? workspaceBranding(workspaceData)
     : { primaryName: "Corgtex", secondaryLabel: "powered by Corgtex" };
   const currentMember = actor.kind === "user" ? members.find((member) => member.userId === actor.user.id) : undefined;
-  const latestWorkspaceBriefing = latestDailyWorkspaceBriefing ?? latestWeeklyWorkspaceBriefing;
+  const latestWorkspaceBriefing = [latestDailyWorkspaceBriefing, latestWeeklyWorkspaceBriefing]
+    .filter((briefing): briefing is NonNullable<typeof latestDailyWorkspaceBriefing> => Boolean(briefing))
+    .sort((left, right) => right.generatedAt.getTime() - left.generatedAt.getTime())[0] ?? null;
   const latestNewspaperEdition = newspaperEditions[0] ?? null;
   const latestEditionDigest = latestNewspaperEdition
     ? normalizeNewspaperEditionDigest(latestNewspaperEdition)
