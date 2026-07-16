@@ -35,7 +35,9 @@ const skipHealthSmoke = Boolean(args.skipHealthSmoke);
 validateRuntimeObservabilityBooleans();
 const nextServerActionsEncryptionKey = skipBuild
   ? null
-  : requiredEnv(process.env.NEXT_SERVER_ACTIONS_ENCRYPTION_KEY, "NEXT_SERVER_ACTIONS_ENCRYPTION_KEY");
+  : dryRun
+    ? "dry-run-next-server-actions-key"
+    : requiredEnv(process.env.NEXT_SERVER_ACTIONS_ENCRYPTION_KEY, "NEXT_SERVER_ACTIONS_ENCRYPTION_KEY");
 
 const webImage = `${acrServer}/${webRepository}:${imageTag}`;
 const workerImage = `${acrServer}/${workerRepository}:${imageTag}`;
