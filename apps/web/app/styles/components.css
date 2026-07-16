@@ -57,10 +57,6 @@
     display: none;
   }
 
-  .ws-layout:has(.nr-newspaper-page) .mobile-bottom-nav {
-    display: none;
-  }
-
   .ws-layout:has(.nr-newspaper-page) .product-feedback-widget {
     display: none;
   }

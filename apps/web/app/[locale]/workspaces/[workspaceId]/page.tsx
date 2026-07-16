@@ -78,6 +78,7 @@ export default async function WorkspaceDashboard({
     : null;
   const fallbackNarrative = latestBriefing ? null : legacyEditionNarrative(latestEditionDigest);
   const generatedAt = latestWorkspaceBriefing?.generatedAt ?? latestNewspaperEdition?.generatedAt ?? null;
+  const displayedEditionPeriod = latestBriefing?.period ?? (latestNewspaperEdition?.cadence === "WEEKLY" ? "WEEKLY" : "DAILY");
   const unreadNotificationsDisplayCount = capDashboardUnreadNotificationCount(unreadNotificationsCount);
   const isUnreadNotificationsCountCapped = isDashboardUnreadNotificationCountCapped(unreadNotificationsCount);
   const notificationLabel = unreadNotificationsCount > 0
@@ -125,7 +126,7 @@ export default async function WorkspaceDashboard({
       <article className="nr-newspaper-page">
         <header className="nr-newspaper-header">
           <p className="nr-newspaper-kicker">
-            {latestBriefing?.period === "WEEKLY" ? t("weeklyEdition") : t("dailyEdition")}
+            {displayedEditionPeriod === "WEEKLY" ? t("weeklyEdition") : t("dailyEdition")}
             {generatedAt && (
               <>
                 <span> · </span>
@@ -163,13 +164,13 @@ export default async function WorkspaceDashboard({
           </div>
         ) : (
           <div className="nr-newspaper-body">
-            <p>No daily briefing has been generated yet. Once the workspace briefing job runs, this page will show the current operating story here.</p>
+            <p>{t("newspaperEmptyBody")}</p>
           </div>
         )}
 
         {latestBriefing?.sourceRefs.length ? (
           <footer className="nr-newspaper-sources">
-            <span>Source trail</span>
+            <span>{t("sourceTrail")}</span>
             <div>
               {latestBriefing.sourceRefs.slice(0, 12).map((ref) => {
                 if (!ref.href) return <span key={`${ref.type}-${ref.id}`}>{ref.label}</span>;
@@ -190,7 +191,7 @@ export default async function WorkspaceDashboard({
 
       {!hasArticle && (
         <p className="nr-newspaper-empty">
-          The homepage is waiting on the first generated workspace briefing. Notifications and source records are still available from the workspace navigation.
+          {t("newspaperWaiting")}
         </p>
       )}
 

@@ -186,7 +186,12 @@ describe("newspaper email rendering", () => {
             summaryMd: "The canonical briefing powers the newsletter.",
             whyItMattersMd: "One artifact now feeds homepage and email.",
             prominence: "lead",
-            sourceRefs: [],
+            sourceRefs: [{
+              type: "PROPOSAL",
+              id: "proposal-1",
+              label: "Review proposal",
+              href: "/workspaces/ws-1/proposals/proposal-1",
+            }],
             href: null,
             occurredAt: "2026-07-11T12:00:00.000Z",
             confidence: 0.9,
@@ -206,6 +211,53 @@ describe("newspaper email rendering", () => {
     expect(html).toContain("The homepage and email now read from the same narrative artifact.");
     expect(html).not.toContain("Built / Shipped Work");
     expect(html).not.toContain("<h2");
+  });
+
+  it("resolves workspace source links against the email app origin", () => {
+    const html = renderWorkspaceBriefingEmailHtml({
+      briefing: {
+        title: "Daily Workspace Briefing - 2026-07-11",
+        briefingJson: {
+          title: "Daily Workspace Briefing - 2026-07-11",
+          period: "DAILY",
+          dateKey: "2026-07-11",
+          generatedAt: "2026-07-11T12:00:00.000Z",
+          introMd: null,
+          leadMd: "**Decision**: The workspace needs a review.",
+          bodyMd: null,
+          attentionMd: null,
+          continuingContextMd: null,
+          closingMd: null,
+          editorialMode: "daily_email",
+          freshWindow: { label: "Last 24-36 hours", since: "2026-07-10T00:00:00.000Z", until: "2026-07-11T12:00:00.000Z" },
+          contextWindow: { label: "Current month context", since: "2026-06-11T12:00:00.000Z", until: "2026-07-11T12:00:00.000Z" },
+          items: [{
+            kind: "PROPOSAL",
+            title: "Review proposal",
+            summaryMd: "The workspace needs a review.",
+            whyItMattersMd: "This decision is ready for review.",
+            prominence: "lead",
+            sourceRefs: [{
+              type: "PROPOSAL",
+              id: "proposal-1",
+              label: "Review proposal",
+              href: "/workspaces/ws-1/proposals/proposal-1",
+            }],
+            href: "/workspaces/ws-1/proposals/proposal-1",
+            occurredAt: "2026-07-11T12:00:00.000Z",
+            confidence: 0.9,
+          }],
+          sourceRefs: [],
+          sourceCounts: { PROPOSAL: 1 },
+        },
+      },
+      workspaceName: "Acme",
+      recipientName: "Pat",
+      workspaceUrl: "https://app.example.com/workspaces/ws-1",
+    });
+
+    expect(html).toContain('href="https://app.example.com/workspaces/ws-1/proposals/proposal-1"');
+    expect(html).not.toContain('href="/workspaces/ws-1/proposals/proposal-1"');
   });
 
   it("folds member personalization into prose for workspace briefing email", () => {
@@ -243,6 +295,55 @@ describe("newspaper email rendering", () => {
     });
 
     expect(html).toContain("For you, the pricing review is the one item to check today.");
+    expect(html).not.toContain("Requests Awaiting Your Input");
+    expect(html).not.toContain("<ul");
+  });
+
+  it("keeps recipient-specific items visible when model personalization omits a member note", () => {
+    const recipientDigest = withNewspaperAdviceRequests(normalizeNewspaperDigestPayload({}), [
+      [
+        "Assigned action: Review the pricing memo",
+        "Detail: Confirm the final handoff before Friday.",
+        "Open: https://app.example.com/workspaces/ws-1/actions/action-1",
+      ].join("\n"),
+    ]);
+    const html = renderWorkspaceBriefingEmailHtml({
+      briefing: {
+        title: "Daily Workspace Briefing - 2026-07-11",
+        briefingJson: {
+          title: "Daily Workspace Briefing - 2026-07-11",
+          period: "DAILY",
+          dateKey: "2026-07-11",
+          generatedAt: "2026-07-11T12:00:00.000Z",
+          introMd: null,
+          leadMd: "**Workspace update**: The main briefing is complete.",
+          bodyMd: null,
+          attentionMd: null,
+          continuingContextMd: null,
+          closingMd: null,
+          editorialMode: "daily_email",
+          freshWindow: { label: "Last 24-36 hours", since: "2026-07-10T00:00:00.000Z", until: "2026-07-11T12:00:00.000Z" },
+          contextWindow: { label: "Current month context", since: "2026-06-11T12:00:00.000Z", until: "2026-07-11T12:00:00.000Z" },
+          items: [],
+          sourceRefs: [],
+          sourceCounts: {},
+        },
+      },
+      workspaceName: "Acme",
+      recipientName: "Pat",
+      workspaceUrl: "https://app.example.com/workspaces/ws-1",
+      digest: recipientDigest,
+      personalization: {
+        greeting: "Hi Pat,",
+        intro: null,
+        memberNote: null,
+        emphasizedSectionIds: [],
+      },
+    });
+
+    expect(html).toContain("For you: Assigned action: Review the pricing memo");
+    expect(html).toContain("Confirm the final handoff before Friday.");
+    expect(html).toContain('href="https://app.example.com/workspaces/ws-1/actions/action-1"');
     expect(html).not.toContain("Requests Awaiting Your Input");
     expect(html).not.toContain("<ul");
   });

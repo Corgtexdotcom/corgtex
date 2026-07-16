@@ -103,6 +103,55 @@ function renderNarrativeParagraphs(values: Array<string | null | undefined>) {
     .join("");
 }
 
+function absoluteEmailHref(href: string, workspaceUrl: string) {
+  try {
+    return new URL(href, workspaceUrl).toString();
+  } catch {
+    return href;
+  }
+}
+
+function compactRecipientLine(value: string) {
+  return value
+    .split(/\r?\n/)
+    .filter((line) => !/^open:\s*/i.test(line.trim()))
+    .join(" ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 420);
+}
+
+function recipientItemHref(value: string, workspaceUrl: string) {
+  const href = value.match(/^Open:\s*(\S+)/im)?.[1];
+  return href ? absoluteEmailHref(href, workspaceUrl) : workspaceUrl;
+}
+
+function renderRecipientFallbackNote(params: {
+  digest?: NormalizedNewspaperDigest;
+  workspaceUrl: string;
+}) {
+  const personalItems = params.digest?.sections
+    .find((section) => section.id === "adviceRequests")
+    ?.items
+    .slice(0, 3) ?? [];
+  if (personalItems.length === 0) return "";
+
+  const itemText = personalItems
+    .map((item, index) => {
+      const compact = compactRecipientLine(item);
+      if (!compact) return null;
+      const href = recipientItemHref(item, params.workspaceUrl);
+      const prefix = index === 0 ? "For you: " : "Also: ";
+      return `${prefix}${renderNarrativeMarkdown(compact)} <a href="${escapeAttribute(href)}" style="color:#6750a4;text-decoration:underline;">Open it</a>.`;
+    })
+    .filter(Boolean)
+    .join(" ");
+
+  return itemText
+    ? `<p style="font-size:15px;line-height:1.6;margin:18px 0 0;color:#5b5448;">${itemText}</p>`
+    : "";
+}
+
 export function renderNewspaperEmailHtml(params: {
   title: string;
   workspaceName: string;
@@ -211,10 +260,13 @@ export function renderWorkspaceBriefingEmailHtml(params: {
   ]);
   const memberNote = params.personalization?.memberNote
     ? `<p style="font-size:15px;line-height:1.6;margin:18px 0 0;color:#5b5448;">${renderNarrativeMarkdown(params.personalization.memberNote)}</p>`
-    : "";
+    : renderRecipientFallbackNote({
+      digest: params.digest,
+      workspaceUrl: params.workspaceUrl,
+    });
   const sourceLinks = briefing.sourceRefs.slice(0, 8).flatMap((ref) => {
     if (!ref.href) return [];
-    return [`<a href="${escapeAttribute(ref.href)}" style="color:#6750a4;text-decoration:underline;">${escapeHtml(ref.label)}</a>`];
+    return [`<a href="${escapeAttribute(absoluteEmailHref(ref.href, params.workspaceUrl))}" style="color:#6750a4;text-decoration:underline;">${escapeHtml(ref.label)}</a>`];
   });
   const sourceTrail = sourceLinks.length > 0
     ? `<p style="font-size:13px;line-height:1.5;margin:14px 0 0;color:#5b5448;">Source trail: ${sourceLinks.join(" · ")}</p>`

@@ -472,6 +472,13 @@ function joinAttentionItems(items: WorkspaceBriefingItem[]) {
   ].join("\n\n");
 }
 
+function itemKey(item: WorkspaceBriefingItem) {
+  const primaryRef = item.sourceRefs[0];
+  return primaryRef
+    ? `${primaryRef.type}:${primaryRef.id}`
+    : `${item.kind}:${item.title}`;
+}
+
 function composeWorkspaceBriefingNarrative(params: {
   period: WorkspaceBriefingPeriod;
   editorialMode?: WorkspaceBriefingEditorialMode;
@@ -493,14 +500,22 @@ function composeWorkspaceBriefingNarrative(params: {
   const meaningfulItems = params.items.filter((item) => item.kind !== "QUIET");
   const leadItem = params.items[0] ?? quietBriefingItem(params.generatedAt);
   const freshItems = meaningfulItems.filter((item) => isFreshBriefingItem(item, params.period, params.generatedAt));
-  const continuingItems = meaningfulItems.filter((item) => isContinuingBriefingItem(item, params.period, params.generatedAt));
-  const attentionItems = meaningfulItems.filter(isAttentionBriefingItem);
 
   const leadMd = leadItem.kind === "QUIET"
     ? "No major new operating signal was found for this edition. The briefing stays short and uses continuing context instead of inventing activity."
     : sentenceFromItem(leadItem, params.period === "WEEKLY" ? 980 : 860);
-  const bodyItems = freshItems.filter((item) => item !== leadItem);
-  const bodyMd = joinNarrativeParagraphs(bodyItems.length > 0 ? bodyItems : meaningfulItems.slice(1), params.period === "WEEKLY" ? 5 : 4);
+  const bodyCandidates = freshItems.filter((item) => item !== leadItem);
+  const bodyItems = (bodyCandidates.length > 0 ? bodyCandidates : meaningfulItems.slice(1))
+    .slice(0, params.period === "WEEKLY" ? 5 : 4);
+  const usedKeys = new Set([itemKey(leadItem), ...bodyItems.map(itemKey)]);
+  const attentionItems = meaningfulItems
+    .filter((item) => isAttentionBriefingItem(item) && !usedKeys.has(itemKey(item)))
+    .slice(0, 3);
+  for (const item of attentionItems) usedKeys.add(itemKey(item));
+  const continuingItems = meaningfulItems
+    .filter((item) => isContinuingBriefingItem(item, params.period, params.generatedAt) && !usedKeys.has(itemKey(item)))
+    .slice(0, params.period === "WEEKLY" ? 5 : 4);
+  const bodyMd = joinNarrativeParagraphs(bodyItems, params.period === "WEEKLY" ? 5 : 4);
   const attentionMd = joinAttentionItems(attentionItems);
   const continuingContextMd = continuingItems.length > 0
     ? joinNarrativeParagraphs(continuingItems, params.period === "WEEKLY" ? 5 : 4, 560)
@@ -628,7 +643,7 @@ function pickCandidateForSection(
 
 function shouldCarryUnmatchedDigestCandidate(candidate: WorkspaceBriefingCandidate, generatedAt: Date) {
   const status = (candidate.status ?? "").toUpperCase();
-  const isOpenContext = ["OPEN", "IN_PROGRESS", "ACTIVE", "PUBLISHED"].includes(status);
+  const isOpenContext = ["OPEN", "IN_PROGRESS", "ACTIVE", "PUBLISHED", "AT_RISK", "BEHIND"].includes(status);
   const isContextKind = candidate.sourceType === "GOAL"
     || candidate.sourceType === "PROPOSAL"
     || candidate.sourceType === "TENSION"
