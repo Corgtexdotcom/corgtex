@@ -240,6 +240,7 @@ export async function intakeMeetingTranscript(actor: AppActor, params: {
     source: params.source,
     recordedAt: existingMeeting?.recordedAt ?? params.recordedAt ?? null,
     participantEmails: [...(params.participantEmails ?? []), ...(existingMeeting?.participantEmails ?? [])],
+    allowInferredRecordedAt: params.source === "meeting-audio-upload",
     validateExplicitRecordedAt: Boolean(!(params.provider && params.sourceRecordId) && !existingMeeting),
     now: params.now,
   });
@@ -249,7 +250,7 @@ export async function intakeMeetingTranscript(actor: AppActor, params: {
       status: "needs_clarification",
       requiredFields: ["recordedAt"],
       inferred,
-      message: "I can save this as a meeting transcript, but I need the meeting date/time first.",
+      message: params.recordedAt && !isPlausibleMeetingRecordedAt(asValidDate(params.recordedAt), params.now) ? "The meeting date/time must be within the last 10 years and no more than 90 days in the future." : "I can save this as a meeting transcript, but I need the meeting date/time first.",
     };
   }
 
