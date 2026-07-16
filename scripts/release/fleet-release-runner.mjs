@@ -88,7 +88,7 @@ export async function runFleetRelease(argv = process.argv.slice(2), deps = {}) {
 
   const preflight = targets.map((target) => ({
     target,
-    blockers: preflightTarget(target, deps.env ?? process.env),
+    blockers: preflightTarget(target, deps.env ?? process.env, { requireObservability: !dryRun }),
   }));
   const blockers = preflight.filter((item) => item.blockers.length > 0);
   const plan = formatReleasePlan({ manifest, targets, dryRun, concurrency });
@@ -245,6 +245,7 @@ function validateReleaseEnvironment(args, env) {
         missing.push("GHCR_IMPORT_TOKEN or GITHUB_TOKEN");
       }
     }
+    requireProductionObservability(selectedGroups, env, missing, invalid);
   }
 
   return {
@@ -281,6 +282,44 @@ function validateOptionalBoolean(name, env, invalid) {
       name,
       reason: error instanceof Error ? error.message : String(error),
     });
+  }
+}
+
+function optionalBoolean(name, env) {
+  if (!optionalText(env[name])) return null;
+  try {
+    return parseBoolean(env[name], false);
+  } catch {
+    return null;
+  }
+}
+
+function requireProductionObservability(selectedGroups, env, missing, invalid) {
+  const includesRailwayTarget = selectedGroups.some((group) => group !== "azure-selfserve");
+  if (includesRailwayTarget) {
+    const postHogEnabled = optionalBoolean("POSTHOG_ENABLED", env);
+    if (!optionalText(env.POSTHOG_ENABLED)) {
+      missing.push("POSTHOG_ENABLED");
+    } else if (postHogEnabled === false) {
+      invalid.push({
+        name: "POSTHOG_ENABLED",
+        reason: "must be true for non-dry-run Railway release observability",
+      });
+    }
+    const postHogKillSwitch = optionalBoolean("POSTHOG_CAPTURE_KILL_SWITCH", env);
+    if (postHogKillSwitch === true) {
+      invalid.push({
+        name: "POSTHOG_CAPTURE_KILL_SWITCH",
+        reason: "must be false for non-dry-run Railway release observability",
+      });
+    }
+    if (!env.POSTHOG_PROJECT_TOKEN?.trim()) {
+      missing.push("POSTHOG_PROJECT_TOKEN");
+    }
+  }
+
+  if (selectedGroups.includes("azure-selfserve") && !env.APPLICATIONINSIGHTS_CONNECTION_STRING?.trim()) {
+    missing.push("APPLICATIONINSIGHTS_CONNECTION_STRING");
   }
 }
 
@@ -370,13 +409,27 @@ function dedupeTargets(targets) {
   return deduped;
 }
 
-function preflightTarget(target, env) {
+function preflightTarget(target, env, options = {}) {
   const blockers = [...providerBoundaryErrors(target)];
+  const requireObservability = options.requireObservability === true;
   if (!target.url) blockers.push("runtime URL is missing");
   if (target.deploymentId && !env.CONTROL_PLANE_AGENT_API_KEY) {
     blockers.push("CONTROL_PLANE_AGENT_API_KEY is missing for verified inventory recording");
   }
   if (target.provider === "railway") {
+    if (requireObservability) {
+      const postHogEnabled = optionalBoolean("POSTHOG_ENABLED", env);
+      const postHogKillSwitch = optionalBoolean("POSTHOG_CAPTURE_KILL_SWITCH", env);
+      if (!optionalText(env.POSTHOG_ENABLED)) {
+        blockers.push("POSTHOG_ENABLED is missing for Railway observability");
+      } else if (postHogEnabled === false) {
+        blockers.push("POSTHOG_ENABLED must be true for Railway observability");
+      }
+      if (postHogKillSwitch === true) {
+        blockers.push("POSTHOG_CAPTURE_KILL_SWITCH must be false for Railway observability");
+      }
+      if (!optionalText(env.POSTHOG_PROJECT_TOKEN)) blockers.push("POSTHOG_PROJECT_TOKEN is missing for Railway observability");
+    }
     if (!env.RAILWAY_API_TOKEN) blockers.push("RAILWAY_API_TOKEN is missing");
     if (!env.GHCR_IMPORT_TOKEN && !env.GITHUB_TOKEN) {
       blockers.push("GHCR import token is missing for Railway image pull");
@@ -388,6 +441,9 @@ function preflightTarget(target, env) {
     }
   } else if (target.provider === "azure") {
     if (!target.deploymentId) blockers.push("Azure deploymentId is missing for provider readiness checks");
+    if (requireObservability && !optionalText(env.APPLICATIONINSIGHTS_CONNECTION_STRING)) {
+      blockers.push("APPLICATIONINSIGHTS_CONNECTION_STRING is missing for Azure observability");
+    }
     if (!env.AZURE_CLIENT_ID) blockers.push("AZURE_CLIENT_ID is missing");
     if (!env.AZURE_TENANT_ID) blockers.push("AZURE_TENANT_ID is missing");
     if (!env.AZURE_SUBSCRIPTION_ID) blockers.push("AZURE_SUBSCRIPTION_ID is missing");
@@ -634,7 +690,7 @@ function optionalRuntimeObservabilityVariables(env, options = {}) {
     variables.POSTHOG_CAPTURE_TIMEOUT_MS = optionalText(env.POSTHOG_CAPTURE_TIMEOUT_MS) ?? "1500";
     variables.POSTHOG_CAPTURE_DEBUG = canonicalBoolean(env.POSTHOG_CAPTURE_DEBUG, false);
     assignPostHogInstanceId(variables, env, options);
-  } else if (optionalText(env.POSTHOG_ENABLED) || postHogProjectToken) {
+  } else if (optionalText(env.POSTHOG_ENABLED)) {
     variables.POSTHOG_ENABLED = "false";
     variables.POSTHOG_CAPTURE_KILL_SWITCH = "true";
     variables.POSTHOG_PROJECT_TOKEN = "";
