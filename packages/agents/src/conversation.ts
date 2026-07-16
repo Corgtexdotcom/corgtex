@@ -449,7 +449,7 @@ async function handleCrmPendingOperationIntent(ctx: ConversationContext) {
   }
 
   try {
-    const result = await handler(actor, ctx, begin.operation.argsJson);
+    const result = await handler(actor, { ...ctx, pageContext: null }, begin.operation.argsJson);
     const executed = await markCrmPendingOperationExecuted(begin.operation, result);
     return crmPendingOperationResultNotice(executed, result);
   } catch (error) {

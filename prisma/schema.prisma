@@ -3389,7 +3389,6 @@ model ConversationSession {
   workspace      Workspace              @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   user           User                   @relation(fields: [userId], references: [id], onDelete: Cascade)
   turns          ConversationTurn[]
-  pendingOps     ConversationPendingOperation[]
   roleOnboarding RoleOnboardingSession?
   checkIns       CheckIn[]
 
@@ -3436,7 +3435,6 @@ model ConversationPendingOperation {
   updatedAt         DateTime                           @updatedAt
 
   workspace    Workspace           @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-  conversation ConversationSession @relation(fields: [conversationId], references: [id], onDelete: Cascade)
   user         User                @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@unique([workspaceId, idempotencyKey])

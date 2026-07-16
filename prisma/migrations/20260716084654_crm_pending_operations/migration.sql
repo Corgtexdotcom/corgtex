@@ -42,7 +42,4 @@ CREATE UNIQUE INDEX "ConversationPendingOperation_workspaceId_idempotencyKey_key
 ALTER TABLE "ConversationPendingOperation" ADD CONSTRAINT "ConversationPendingOperation_workspaceId_fkey" FOREIGN KEY ("workspaceId") REFERENCES "Workspace"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 
 -- AddForeignKey
-ALTER TABLE "ConversationPendingOperation" ADD CONSTRAINT "ConversationPendingOperation_conversationId_fkey" FOREIGN KEY ("conversationId") REFERENCES "ConversationSession"("id") ON DELETE CASCADE ON UPDATE CASCADE;
-
--- AddForeignKey
 ALTER TABLE "ConversationPendingOperation" ADD CONSTRAINT "ConversationPendingOperation_userId_fkey" FOREIGN KEY ("userId") REFERENCES "User"("id") ON DELETE CASCADE ON UPDATE CASCADE;

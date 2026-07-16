@@ -137,6 +137,10 @@ vi.mock("@corgtex/domain", () => ({
 
 import { searchIndexedKnowledge } from "@corgtex/knowledge";
 
+function pendingOperationId(index: number) {
+  return `123e4567-e89b-12d3-a456-42661417400${index}`;
+}
+
 describe("processConversationTurn", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -168,7 +172,7 @@ describe("processConversationTurn", () => {
     });
     conversationPendingOperationCreateMock.mockImplementation(({ data }: any) => {
       const operation = {
-        id: `pending-${conversationPendingOperationStore.length + 1}`,
+        id: pendingOperationId(conversationPendingOperationStore.length + 1),
         createdAt: new Date(),
         updatedAt: new Date(),
         proposedAt: new Date(),
@@ -241,7 +245,7 @@ describe("processConversationTurn", () => {
 
   function addPendingCrmOperation(overrides: Record<string, any> = {}) {
     const operation = {
-      id: `pending-${conversationPendingOperationStore.length + 1}`,
+      id: pendingOperationId(conversationPendingOperationStore.length + 1),
       workspaceId: "ws-1",
       conversationId: "session-1",
       userId: "user-1",
@@ -837,7 +841,7 @@ describe("processConversationTurn", () => {
     }));
     expect(createActivityMock).not.toHaveBeenCalled();
     expect(result.assistantMessage).toContain("Please confirm before I create that CRM follow-up.");
-    expect(result.assistantMessage).toContain("Pending operation ID: pending-1");
+    expect(result.assistantMessage).toContain(`Pending operation ID: ${pendingOperationId(1)}`);
   });
 
   it("executes confirmed CRM writes from stored pending operation args", async () => {
@@ -864,7 +868,7 @@ describe("processConversationTurn", () => {
       sessionId: "session-1",
       userId: "user-1",
       agentKey: "assistant",
-      userMessage: "yes, do it, but call it Different follow up",
+      userMessage: `confirm ${pendingOperationId(1)}, but call it Different follow up`,
       actor,
     });
 
@@ -878,7 +882,7 @@ describe("processConversationTurn", () => {
     }));
     expect(chatMock).not.toHaveBeenCalled();
     expect(conversationPendingOperationStore[0].status).toBe("EXECUTED");
-    expect(result.assistantMessage).toContain("Confirmed pending operation ID: pending-1");
+    expect(result.assistantMessage).toContain(`Confirmed pending operation ID: ${pendingOperationId(1)}`);
     expect(result.assistantMessage).toContain("Activity ID: activity-1");
   });
 
@@ -903,13 +907,40 @@ describe("processConversationTurn", () => {
       sessionId: "session-1",
       userId: "user-1",
       agentKey: "assistant",
-      userMessage: "confirm pending-1 again",
+      userMessage: `confirm ${pendingOperationId(1)} again`,
       actor,
     });
 
     expect(createActivityMock).not.toHaveBeenCalled();
-    expect(result.assistantMessage).toContain("Confirmed pending operation ID: pending-1");
+    expect(result.assistantMessage).toContain(`Confirmed pending operation ID: ${pendingOperationId(1)}`);
     expect(result.assistantMessage).toContain("Activity ID: activity-1");
+  });
+
+  it("does not execute CRM pending operations from generic confirmation without the operation ID", async () => {
+    addPendingCrmOperation();
+    const actor = {
+      kind: "user" as const,
+      user: {
+        id: "user-1",
+        email: "user@example.com",
+        displayName: "User",
+      },
+    };
+    chatMock.mockResolvedValueOnce({ content: "Please confirm the pending operation ID before I make that CRM change." });
+
+    const { processConversationTurn } = await import("./conversation");
+    const result = await processConversationTurn({
+      workspaceId: "ws-1",
+      sessionId: "session-1",
+      userId: "user-1",
+      agentKey: "assistant",
+      userMessage: "yes, do it",
+      actor,
+    });
+
+    expect(createActivityMock).not.toHaveBeenCalled();
+    expect(conversationPendingOperationStore[0].status).toBe("PENDING");
+    expect(result.assistantMessage).toContain("confirm the pending operation ID");
   });
 
   it("cancels pending CRM operations without executing the write", async () => {
@@ -929,13 +960,13 @@ describe("processConversationTurn", () => {
       sessionId: "session-1",
       userId: "user-1",
       agentKey: "assistant",
-      userMessage: "cancel that pending CRM operation",
+      userMessage: `cancel ${pendingOperationId(1)}`,
       actor,
     });
 
     expect(createActivityMock).not.toHaveBeenCalled();
     expect(conversationPendingOperationStore[0].status).toBe("CANCELED");
-    expect(result.assistantMessage).toBe("Canceled pending operation ID: pending-1");
+    expect(result.assistantMessage).toBe(`Canceled pending operation ID: ${pendingOperationId(1)}`);
   });
 
   it("expires stale CRM pending operations before executing", async () => {
@@ -957,7 +988,7 @@ describe("processConversationTurn", () => {
       sessionId: "session-1",
       userId: "user-1",
       agentKey: "assistant",
-      userMessage: "yes, do it",
+      userMessage: `confirm ${pendingOperationId(1)}`,
       actor,
     });
 

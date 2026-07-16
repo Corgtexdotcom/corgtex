@@ -58,5 +58,6 @@ describe("CRM pending operation helpers", () => {
     expect(notice).toContain("Pending operation ID: 123e4567-e89b-12d3-a456-426614174000");
     expect(notice).toContain("CRM operation: record_relationship_activity");
     expect(notice).toContain("Risk: crm-write:record-activity");
+    expect(notice).toContain("Stored args: {\"title\":\"Follow up\"}");
   });
 });

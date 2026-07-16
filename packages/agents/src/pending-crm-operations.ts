@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 
 import { prisma } from "@corgtex/shared";
 import type { Prisma } from "@prisma/client";
@@ -114,22 +114,24 @@ export function crmPendingOperationIntent(message: string): PendingOperationInte
   const pendingOperationId = pendingOperationIdFromMessage(message);
   if (/^(cancel|never mind|nevermind|stop|abort|discard)\b/.test(normalized)
     || /\b(cancel|abort|discard) (it|that|the pending|operation|crm)\b/.test(normalized)) {
-    return { kind: "cancel", pendingOperationId };
+    return pendingOperationId ? { kind: "cancel", pendingOperationId } : null;
   }
 
   if (/^(yes|yep|yeah|ok|okay|confirm|confirmed|approved|approve|go ahead|do it|please do|proceed|run it|create it|record it|draft it|complete it)\b/.test(normalized)
     || /\b(confirm(ed)?|go ahead|do it|please do|proceed|run it)\b/.test(normalized)) {
-    return { kind: "confirm", pendingOperationId };
+    return pendingOperationId ? { kind: "confirm", pendingOperationId } : null;
   }
 
   return null;
 }
 
 export function crmPendingOperationNotice(operation: PendingOperationRecord) {
+  const storedArgs = stableJson(operation.argsJson);
   return [
     `Pending operation ID: ${operation.id}`,
     `CRM operation: ${operation.toolName}`,
     `Risk: ${operation.riskLabel}`,
+    `Stored args: ${storedArgs}`,
     `Approve by replying "confirm ${operation.id}" or cancel with "cancel ${operation.id}".`,
   ].join("\n");
 }
@@ -183,7 +185,9 @@ export async function createPendingCrmOperation({
       },
     },
   });
-  if (existing) return existing as PendingOperationRecord;
+  if (existing?.status === STATUS.PENDING || existing?.status === STATUS.EXECUTING) {
+    return existing as PendingOperationRecord;
+  }
 
   const related = relatedEntity(toolName, argsJson);
   return await prisma.conversationPendingOperation.create({
@@ -195,7 +199,7 @@ export async function createPendingCrmOperation({
       toolName,
       argsJson: argsJson as Prisma.InputJsonValue,
       argsHash,
-      idempotencyKey,
+      idempotencyKey: existing ? `${idempotencyKey}:${randomUUID()}` : idempotencyKey,
       relatedEntityType: related.type,
       relatedEntityId: related.id,
       riskLabel: riskLabel(toolName),
@@ -227,13 +231,19 @@ export async function findCrmPendingOperationForIntent(ctx: PendingOperationCont
 
 export async function cancelCrmPendingOperation(operation: PendingOperationRecord) {
   if (operation.status !== STATUS.PENDING) return operation;
-  return await prisma.conversationPendingOperation.update({
-    where: { id: operation.id },
+  const canceled = await prisma.conversationPendingOperation.updateMany({
+    where: {
+      id: operation.id,
+      status: STATUS.PENDING,
+    },
     data: {
       status: STATUS.CANCELED,
       canceledAt: new Date(),
     },
-  }) as PendingOperationRecord;
+  });
+  const latest = await prisma.conversationPendingOperation.findUnique({ where: { id: operation.id } });
+  if (canceled.count === 1 && latest) return latest as PendingOperationRecord;
+  return (latest ?? operation) as PendingOperationRecord;
 }
 
 export async function beginCrmPendingOperationExecution(operation: PendingOperationRecord) {
