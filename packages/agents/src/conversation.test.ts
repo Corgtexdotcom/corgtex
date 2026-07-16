@@ -6,6 +6,7 @@ const {
   buildRoleOnboardingContextForConversationMock,
   checkBudgetMock,
   chatMock,
+  chatStreamMock,
   completeActivityMock,
   conversationPendingOperationCreateMock,
   conversationPendingOperationCountMock,
@@ -34,6 +35,7 @@ const {
   buildRoleOnboardingContextForConversationMock: vi.fn(),
   checkBudgetMock: vi.fn(),
   chatMock: vi.fn(),
+  chatStreamMock: vi.fn(),
   completeActivityMock: vi.fn(),
   conversationPendingOperationCreateMock: vi.fn(),
   conversationPendingOperationCountMock: vi.fn(),
@@ -93,6 +95,7 @@ vi.mock("@corgtex/knowledge", () => ({
 vi.mock("@corgtex/models", () => ({
   defaultModelGateway: {
     chat: chatMock,
+    chatStream: chatStreamMock,
   },
 }));
 
@@ -291,6 +294,28 @@ describe("processConversationTurn", () => {
       { flag: "CONTEXT_MAPS", enabled: true },
       { flag: "CONTEXT_MAP_AI", enabled: true },
     ]);
+  }
+
+  function streamResponse(chunks: string[], result: Record<string, any>) {
+    return (async function* () {
+      for (const chunk of chunks) {
+        yield chunk;
+      }
+      return result;
+    })();
+  }
+
+  async function collectConversationStream(
+    stream: AsyncGenerator<string, { assistantMessage: string; contextUsed: Record<string, any> }>
+  ) {
+    const chunks: string[] = [];
+    while (true) {
+      const { done, value } = await stream.next();
+      if (done) {
+        return { chunks, result: value };
+      }
+      chunks.push(value);
+    }
   }
 
   function addPendingCrmOperation(overrides: Record<string, any> = {}) {
@@ -956,6 +981,85 @@ describe("processConversationTurn", () => {
     expect(createActivityMock).not.toHaveBeenCalled();
     expect(result.assistantMessage).toContain("Please confirm before I create that CRM follow-up.");
     expect(result.assistantMessage).toContain(`Pending operation ID: ${pendingOperationId(1)}`);
+  });
+
+  it("returns the CRM pending operation ID when the follow-up model budget is exhausted", async () => {
+    const actor = {
+      kind: "user" as const,
+      user: {
+        id: "user-1",
+        email: "user@example.com",
+        displayName: "User",
+      },
+    };
+    checkBudgetMock
+      .mockResolvedValueOnce({ allowed: true, usedPct: 80, usedUsd: 4, capUsd: 5 })
+      .mockResolvedValueOnce({ allowed: false, usedPct: 100, usedUsd: 5, capUsd: 5 });
+    chatMock.mockResolvedValueOnce({
+      content: "",
+      tool_calls: [{
+        id: "call-1",
+        function: {
+          name: "record_relationship_activity",
+          arguments: JSON.stringify({ title: "Follow up", type: "TASK", accountId: "account-1" }),
+        },
+      }],
+    });
+
+    const { processConversationTurn } = await import("./conversation");
+    const result = await processConversationTurn({
+      workspaceId: "ws-1",
+      sessionId: "session-1",
+      userId: "user-1",
+      agentKey: "assistant",
+      userMessage: "Create a CRM follow-up for Acme.",
+      actor,
+    });
+
+    expect(result.assistantMessage).toContain(`Pending operation ID: ${pendingOperationId(1)}`);
+    expect(result.assistantMessage).toContain("Stored args:");
+    expect(chatMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("streams complete CRM pending operation notices after follow-up whitespace", async () => {
+    const actor = {
+      kind: "user" as const,
+      user: {
+        id: "user-1",
+        email: "user@example.com",
+        displayName: "User",
+      },
+    };
+    chatStreamMock
+      .mockReturnValueOnce(streamResponse([], {
+        content: "",
+        tool_calls: [{
+          id: "call-1",
+          function: {
+            name: "record_relationship_activity",
+            arguments: JSON.stringify({ title: "Follow up", type: "TASK", accountId: "account-1" }),
+          },
+        }],
+      }))
+      .mockReturnValueOnce(streamResponse(["Pending operation is ready.\n"], {
+        content: "Pending operation is ready.\n",
+      }));
+
+    const { processConversationTurnStream } = await import("./conversation");
+    const { chunks, result } = await collectConversationStream(processConversationTurnStream({
+      workspaceId: "ws-1",
+      sessionId: "session-1",
+      userId: "user-1",
+      agentKey: "assistant",
+      userMessage: "Create a CRM follow-up for Acme.",
+      actor,
+    }));
+
+    const streamedMessage = chunks.join("");
+    expect(streamedMessage).toContain("Pending operation is ready.\n\nPending operation ID:");
+    expect(streamedMessage).not.toContain("\n\nending operation ID:");
+    expect(result.assistantMessage).toContain(`Pending operation ID: ${pendingOperationId(1)}`);
+    expect(result.assistantMessage).toContain("Stored args:");
   });
 
   it("persists CRM pending operations for agent chats without a user row", async () => {

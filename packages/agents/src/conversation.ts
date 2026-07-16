@@ -423,6 +423,40 @@ function appendCrmPendingNotices(message: string, operations: Array<import("./pe
   return [message.trim(), ...missingNotices].filter(Boolean).join("\n\n");
 }
 
+function pendingNoticeAppendix(originalMessage: string, messageWithNotices: string) {
+  if (messageWithNotices === originalMessage) return "";
+  const trimmedOriginal = originalMessage.trim();
+  if (trimmedOriginal && messageWithNotices.startsWith(trimmedOriginal)) {
+    const appendix = messageWithNotices.slice(trimmedOriginal.length);
+    const streamedTrailingNewlines = originalMessage.match(/\n+$/)?.[0].length ?? 0;
+    if (streamedTrailingNewlines > 0 && appendix.startsWith("\n\n")) {
+      return appendix.slice(Math.min(streamedTrailingNewlines, 2));
+    }
+    return appendix;
+  }
+  return messageWithNotices;
+}
+
+function isBudgetExceededError(err: unknown) {
+  return (err as { status?: number; code?: string } | null)?.status === 429
+    && (err as { status?: number; code?: string } | null)?.code === "BUDGET_EXCEEDED";
+}
+
+async function canRunFollowupModelAfterTools(
+  ctx: ConversationContext,
+  pendingCrmOperations: Array<import("./pending-crm-operations").PendingOperationRecord>
+) {
+  try {
+    await assertWorkspaceModelBudget(ctx.workspaceId);
+    return true;
+  } catch (err) {
+    if (pendingCrmOperations.length > 0 && isBudgetExceededError(err)) {
+      return false;
+    }
+    throw err;
+  }
+}
+
 async function handleCrmPendingOperationIntent(ctx: ConversationContext) {
   const intent = crmPendingOperationIntent(ctx.userMessage);
   if (!intent) return null;
@@ -685,17 +719,18 @@ export async function processConversationTurn(ctx: ConversationContext): Promise
       }
     }
 
-    await assertWorkspaceModelBudget(ctx.workspaceId);
-    const followup = await defaultModelGateway.chat({
-      workspaceId: ctx.workspaceId,
-      ...catalogUsageContext(ctx),
-      model: env.MODEL_CHAT_CONVERSATION,
-      taskType: "AGENT",
-      messages,
-      tools,
-    });
-    
-    finalMessage = followup.content;
+    if (await canRunFollowupModelAfterTools(ctx, pendingCrmOperations)) {
+      const followup = await defaultModelGateway.chat({
+        workspaceId: ctx.workspaceId,
+        ...catalogUsageContext(ctx),
+        model: env.MODEL_CHAT_CONVERSATION,
+        taskType: "AGENT",
+        messages,
+        tools,
+      });
+
+      finalMessage = followup.content;
+    }
     finalMessage = appendCrmPendingNotices(finalMessage, pendingCrmOperations);
   }
 
@@ -895,26 +930,27 @@ export async function* processConversationTurnStream(ctx: ConversationContext): 
       }
     }
 
-    await assertWorkspaceModelBudget(ctx.workspaceId);
-    const followupIterator = defaultModelGateway.chatStream({
-      workspaceId: ctx.workspaceId,
-      ...catalogUsageContext(ctx),
-      model: env.MODEL_CHAT_CONVERSATION,
-      taskType: "AGENT",
-      messages,
-      tools,
-    })[Symbol.asyncIterator]();
+    if (await canRunFollowupModelAfterTools(ctx, pendingCrmOperations)) {
+      const followupIterator = defaultModelGateway.chatStream({
+        workspaceId: ctx.workspaceId,
+        ...catalogUsageContext(ctx),
+        model: env.MODEL_CHAT_CONVERSATION,
+        taskType: "AGENT",
+        messages,
+        tools,
+      })[Symbol.asyncIterator]();
 
-    while (true) {
-      const { done, value } = await followupIterator.next();
-      if (done) {
-        break;
+      while (true) {
+        const { done, value } = await followupIterator.next();
+        if (done) {
+          break;
+        }
+        yield value;
+        finalMessage += value;
       }
-      yield value;
-      finalMessage += value;
     }
     const finalMessageWithNotices = appendCrmPendingNotices(finalMessage, pendingCrmOperations);
-    const noticeAppendix = finalMessageWithNotices.slice(finalMessage.length);
+    const noticeAppendix = pendingNoticeAppendix(finalMessage, finalMessageWithNotices);
     if (noticeAppendix) {
       yield noticeAppendix;
       finalMessage = finalMessageWithNotices;
