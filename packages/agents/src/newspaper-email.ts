@@ -133,7 +133,7 @@ function renderRecipientFallbackNote(params: {
   const personalItems = params.digest?.sections
     .find((section) => section.id === "adviceRequests")
     ?.items
-    .slice(0, 3) ?? [];
+    ?? [];
   if (personalItems.length === 0) return "";
 
   const itemText = personalItems

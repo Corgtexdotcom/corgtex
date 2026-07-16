@@ -348,6 +348,53 @@ describe("newspaper email rendering", () => {
     expect(html).not.toContain("<ul");
   });
 
+  it("keeps every retained recipient item in deterministic fallback prose", () => {
+    const recipientDigest = withNewspaperAdviceRequests(normalizeNewspaperDigestPayload({}), [
+      "Assigned action: First recipient item\nOpen: https://app.example.com/workspaces/ws-1/actions/action-1",
+      "Assigned action: Second recipient item\nOpen: https://app.example.com/workspaces/ws-1/actions/action-2",
+      "Assigned action: Third recipient item\nOpen: https://app.example.com/workspaces/ws-1/actions/action-3",
+      "Assigned action: Fourth recipient item\nOpen: https://app.example.com/workspaces/ws-1/actions/action-4",
+    ]);
+    const html = renderWorkspaceBriefingEmailHtml({
+      briefing: {
+        title: "Daily Workspace Briefing - 2026-07-11",
+        briefingJson: {
+          title: "Daily Workspace Briefing - 2026-07-11",
+          period: "DAILY",
+          dateKey: "2026-07-11",
+          generatedAt: "2026-07-11T12:00:00.000Z",
+          introMd: null,
+          leadMd: "**Workspace update**: The main briefing is complete.",
+          bodyMd: null,
+          attentionMd: null,
+          continuingContextMd: null,
+          closingMd: null,
+          editorialMode: "daily_email",
+          freshWindow: { label: "Last 24-36 hours", since: "2026-07-10T00:00:00.000Z", until: "2026-07-11T12:00:00.000Z" },
+          contextWindow: { label: "Current month context", since: "2026-06-11T12:00:00.000Z", until: "2026-07-11T12:00:00.000Z" },
+          items: [],
+          sourceRefs: [],
+          sourceCounts: {},
+        },
+      },
+      workspaceName: "Acme",
+      recipientName: "Pat",
+      workspaceUrl: "https://app.example.com/workspaces/ws-1",
+      digest: recipientDigest,
+      personalization: {
+        greeting: "Hi Pat,",
+        intro: null,
+        memberNote: null,
+        emphasizedSectionIds: [],
+      },
+    });
+
+    expect(html).toContain("First recipient item");
+    expect(html).toContain("Second recipient item");
+    expect(html).toContain("Third recipient item");
+    expect(html).toContain("Fourth recipient item");
+  });
+
   it("uses deterministic markdown output", () => {
     const digest = normalizeNewspaperDigestPayload({
       summary: "The workspace shipped a useful update.",

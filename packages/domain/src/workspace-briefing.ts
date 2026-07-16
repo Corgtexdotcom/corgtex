@@ -455,20 +455,22 @@ function joinNarrativeParagraphs(items: WorkspaceBriefingItem[], maxItems: numbe
     .trim() || null;
 }
 
-function joinAttentionItems(items: WorkspaceBriefingItem[]) {
+function joinAttentionItems(items: WorkspaceBriefingItem[], period: WorkspaceBriefingPeriod) {
   if (items.length === 0) return null;
+  const leadLabel = period === "WEEKLY" ? "Needs attention this week" : "Needs attention today";
+  const alsoLabel = period === "WEEKLY" ? "Also keep watch this week on" : "Also keep watch on";
   const details = items.slice(0, 3).map((item) => {
     const summary = normalizeNarrativeText(item.summaryMd, 260);
     if (!summary || summary === item.title) return cleanBriefingTitle(item.title, workspaceBriefingSourceLabel(item.kind));
     return `${cleanBriefingTitle(item.title, workspaceBriefingSourceLabel(item.kind))}: ${summary}`;
   });
   if (details.length === 1) {
-    return `Needs attention today: ${details[0]}`;
+    return `${leadLabel}: ${details[0]}`;
   }
   const [primary, ...rest] = details;
   return [
-    `Needs attention today: ${primary}`,
-    `Also keep watch on ${rest.join(". ")}`,
+    `${leadLabel}: ${primary}`,
+    `${alsoLabel} ${rest.join(". ")}`,
   ].join("\n\n");
 }
 
@@ -516,16 +518,21 @@ function composeWorkspaceBriefingNarrative(params: {
     .filter((item) => isContinuingBriefingItem(item, params.period, params.generatedAt) && !usedKeys.has(itemKey(item)))
     .slice(0, params.period === "WEEKLY" ? 5 : 4);
   const bodyMd = joinNarrativeParagraphs(bodyItems, params.period === "WEEKLY" ? 5 : 4);
-  const attentionMd = joinAttentionItems(attentionItems);
+  const attentionMd = joinAttentionItems(attentionItems, params.period);
   const continuingContextMd = continuingItems.length > 0
     ? joinNarrativeParagraphs(continuingItems, params.period === "WEEKLY" ? 5 : 4, 560)
-    : params.fallbackIntro ?? (leadItem.kind === "QUIET" ? "There is no unresolved high-signal context in the evidence pool for this edition." : null);
-  const closingMd = meaningfulItems.length > 0
+    : leadItem.kind === "QUIET" ? "There is no unresolved high-signal context in the evidence pool for this edition." : null;
+  const hasSourceRefs = uniqueSourceRefs(params.items).length > 0;
+  const closingMd = meaningfulItems.length > 0 && hasSourceRefs
     ? "The source trail below is the evidence path for this edition. Use it when you need detail, but the story above is meant to stand on its own."
-    : "No source links are attached because no high-signal workspace activity was found for this period.";
-  const introMd = params.period === "WEEKLY"
-    ? "This weekly edition starts with the strongest operating development from the week, then keeps unresolved context that still affects current work."
-    : "This daily edition starts with the strongest signal since the last briefing, then keeps context that still matters for today.";
+    : meaningfulItems.length > 0
+      ? "No source links are attached to this edition, so the story above is the complete generated briefing."
+      : "No source links are attached because no high-signal workspace activity was found for this period.";
+  const introMd = params.fallbackIntro
+    ? normalizeNarrativeText(params.fallbackIntro, 640)
+    : params.period === "WEEKLY"
+      ? "This weekly edition starts with the strongest operating development from the week, then keeps unresolved context that still affects current work."
+      : "This daily edition starts with the strongest signal since the last briefing, then keeps context that still matters for today.";
 
   return {
     introMd,
@@ -594,6 +601,66 @@ function normalizeMatchText(value: string | null | undefined) {
     .trim();
 }
 
+const DIGEST_MATCH_STOPWORDS = new Set([
+  "about",
+  "after",
+  "again",
+  "also",
+  "before",
+  "being",
+  "current",
+  "from",
+  "have",
+  "into",
+  "more",
+  "needs",
+  "open",
+  "still",
+  "that",
+  "their",
+  "there",
+  "this",
+  "today",
+  "week",
+  "with",
+  "work",
+]);
+
+function digestMatchStem(token: string) {
+  return token
+    .replace(/ies$/u, "y")
+    .replace(/tion$/u, "t")
+    .replace(/ing$/u, "")
+    .replace(/ed$/u, "")
+    .replace(/s$/u, "");
+}
+
+function digestMatchTokens(value: string | null | undefined) {
+  return new Set(normalizeMatchText(value)
+    .split(/\s+/)
+    .map(digestMatchStem)
+    .filter((token) => token.length >= 4 && !DIGEST_MATCH_STOPWORDS.has(token)));
+}
+
+function tokenOverlapScore(left: Set<string>, right: Set<string>) {
+  if (left.size === 0 || right.size === 0) return 0;
+  let overlap = 0;
+  for (const token of left) {
+    if (right.has(token)) overlap++;
+  }
+  return overlap / Math.min(left.size, right.size);
+}
+
+function candidateProbablyMatchesDigestItem(candidate: WorkspaceBriefingCandidate, rawItem: string) {
+  const candidateTokens = digestMatchTokens([
+    candidate.title,
+    candidate.summaryMd,
+  ].filter(Boolean).join(" "));
+  const itemTokens = digestMatchTokens(rawItem);
+  if (candidateTokens.size < 3 || itemTokens.size < 3) return false;
+  return tokenOverlapScore(candidateTokens, itemTokens) >= 0.5;
+}
+
 function candidateMatchesDigestItem(candidate: WorkspaceBriefingCandidate, rawItem: string) {
   const normalizedItem = normalizeMatchText(rawItem);
   if (!normalizedItem) return false;
@@ -602,10 +669,12 @@ function candidateMatchesDigestItem(candidate: WorkspaceBriefingCandidate, rawIt
   if (normalizedTitle && normalizedItem.includes(normalizedTitle)) return true;
 
   const normalizedSummary = normalizeMatchText(candidate.summaryMd);
-  return normalizedSummary.length >= 32 && (
+  if (normalizedSummary.length >= 32 && (
     normalizedItem.includes(normalizedSummary.slice(0, 80))
     || normalizedSummary.includes(normalizedItem.slice(0, 80))
-  );
+  )) return true;
+
+  return candidateProbablyMatchesDigestItem(candidate, rawItem);
 }
 
 function candidateKey(candidate: Pick<WorkspaceBriefingCandidate, "sourceType" | "sourceId">) {

@@ -556,6 +556,116 @@ describe("workspace briefing", () => {
     ].filter(Boolean).join("\n")).toContain("Quarterly retention goal is behind");
   });
 
+  it("does not carry forward paraphrased candidates already represented by digest text", async () => {
+    const { buildWorkspaceBriefingFromDigest } = await import("./workspace-briefing");
+    const briefing = buildWorkspaceBriefingFromDigest({
+      workspaceId: "ws-1",
+      period: "DAILY",
+      dateKey: "2026-04-30",
+      title: "Daily Workspace Briefing - 2026-04-30",
+      generatedAt: new Date("2026-04-30T12:00:00.000Z"),
+      digest: {
+        intro: null,
+        sections: [{
+          id: "openActions",
+          title: "Open Actions",
+          items: ["Launch ownership remains unresolved before the customer rollout and needs one accountable owner."],
+        }],
+      },
+      candidates: [
+        baseCandidate({
+          sourceType: "ACTION",
+          sourceId: "action-owner",
+          title: "Confirm launch owner",
+          summaryMd: "Ownership remains unresolved before the customer rollout and needs one accountable owner.",
+          href: "/workspaces/ws-1/actions/action-owner",
+          occurredAt: new Date("2026-04-30T10:00:00.000Z"),
+          updatedAt: new Date("2026-04-30T10:00:00.000Z"),
+          status: "OPEN",
+          priority: 3,
+          strategicScore: 4,
+          actionabilityScore: 5,
+          evidenceScore: 4,
+          sourceRefs: [{ type: "ACTION", id: "action-owner", label: "Confirm launch owner", href: "/workspaces/ws-1/actions/action-owner" }],
+        }),
+      ],
+    });
+
+    expect(briefing.items).toHaveLength(1);
+    expect(briefing.sourceRefs).toContainEqual(expect.objectContaining({
+      type: "ACTION",
+      id: "action-owner",
+    }));
+  });
+
+  it("uses weekly timing language for weekly attention items", async () => {
+    const { buildWorkspaceBriefingFromCandidates } = await import("./workspace-briefing");
+    const briefing = buildWorkspaceBriefingFromCandidates({
+      workspaceId: "ws-1",
+      period: "WEEKLY",
+      dateKey: "2026-04-30",
+      title: "Weekly Workspace Briefing - 2026-04-30",
+      generatedAt: new Date("2026-04-30T12:00:00.000Z"),
+      candidates: [
+        ...Array.from({ length: 6 }, (_, index) => baseCandidate({
+          sourceType: "MEETING" as const,
+          sourceId: `meeting-${index + 1}`,
+          title: `Weekly operating review ${index + 1}`,
+          summaryMd: `The meeting recapped important operating work ${index + 1}.`,
+          occurredAt: new Date("2026-04-30T10:00:00.000Z"),
+          updatedAt: new Date("2026-04-30T10:00:00.000Z"),
+          status: "COMPLETED",
+          strategicScore: 5,
+          actionabilityScore: 4,
+          evidenceScore: 5,
+          sourceRefs: [{ type: "MEETING", id: `meeting-${index + 1}`, label: `Weekly operating review ${index + 1}`, href: `/workspaces/ws-1/meetings/meeting-${index + 1}` }],
+        })),
+        baseCandidate({
+          sourceType: "ACTION",
+          sourceId: "action-weekly",
+          title: "Resolve weekly delivery blocker",
+          summaryMd: "The blocker still affects work this week.",
+          occurredAt: new Date("2026-04-20T10:00:00.000Z"),
+          updatedAt: new Date("2026-04-20T10:00:00.000Z"),
+          status: "OPEN",
+          priority: 3,
+          strategicScore: 1,
+          actionabilityScore: 1,
+          evidenceScore: 1,
+          sourceRefs: [{ type: "ACTION", id: "action-weekly", label: "Resolve weekly delivery blocker", href: "/workspaces/ws-1/actions/action-weekly" }],
+        }),
+      ],
+    });
+
+    expect(briefing.attentionMd).toContain("Needs attention this week");
+    expect(briefing.attentionMd).not.toContain("Needs attention today");
+  });
+
+  it("keeps digest introduction in the intro slot and only promises source trail when refs exist", async () => {
+    const { buildWorkspaceBriefingFromDigest } = await import("./workspace-briefing");
+    const briefing = buildWorkspaceBriefingFromDigest({
+      workspaceId: "ws-1",
+      period: "DAILY",
+      dateKey: "2026-04-30",
+      title: "Daily Workspace Briefing - 2026-04-30",
+      generatedAt: new Date("2026-04-30T12:00:00.000Z"),
+      digest: {
+        intro: "The generated intro explains the day in one sentence.",
+        sections: [{
+          id: "meetingBriefs",
+          title: "Meeting Briefs",
+          items: ["The meeting surfaced a customer-readiness decision."],
+        }],
+      },
+      candidates: [],
+    });
+
+    expect(briefing.introMd).toBe("The generated intro explains the day in one sentence.");
+    expect(briefing.continuingContextMd ?? "").not.toContain("The generated intro");
+    expect(briefing.sourceRefs).toEqual([]);
+    expect(briefing.closingMd).not.toContain("source trail below");
+  });
+
   it("does not repeat the same active item across narrative blocks", async () => {
     const { buildWorkspaceBriefingFromCandidates } = await import("./workspace-briefing");
     const briefing = buildWorkspaceBriefingFromCandidates({
