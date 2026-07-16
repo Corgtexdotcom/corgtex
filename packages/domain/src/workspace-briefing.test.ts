@@ -1308,6 +1308,44 @@ describe("workspace briefing", () => {
     expect(briefing.sourceRefs).toEqual([]);
   });
 
+  it("does not bind prefix titles to unrelated digest prose", async () => {
+    const { buildWorkspaceBriefingFromDigest } = await import("./workspace-briefing");
+
+    const briefing = buildWorkspaceBriefingFromDigest({
+      workspaceId: "ws-1",
+      period: "DAILY",
+      dateKey: "2026-04-30",
+      title: "Daily Workspace Briefing - 2026-04-30",
+      generatedAt: new Date("2026-04-30T12:00:00.000Z"),
+      digest: {
+        intro: null,
+        sections: [{
+          id: "openActions",
+          title: "Open Actions",
+          items: ["Planning customer rollout will continue after the weekly review."],
+        }],
+      },
+      candidates: [
+        baseCandidate({
+          sourceType: "ACTION",
+          sourceId: "action-plan",
+          title: "Plan",
+          summaryMd: "A separate planning note that should not match planning prose by prefix.",
+          href: "/workspaces/ws-1/actions/action-plan",
+          sourceRefs: [{ type: "ACTION", id: "action-plan", label: "Plan", href: "/workspaces/ws-1/actions/action-plan" }],
+        }),
+      ],
+    });
+
+    expect(briefing.items[0]).toEqual(expect.objectContaining({
+      kind: "ACTION",
+      summaryMd: "Planning customer rollout will continue after the weekly review.",
+      href: null,
+      sourceRefs: [],
+    }));
+    expect(briefing.sourceRefs).toEqual([]);
+  });
+
   it("links workspace advice requests to their actual subject", async () => {
     const { collectWorkspaceBriefingCandidates } = await import("./workspace-briefing");
     prismaMock.adviceRequest.findMany.mockResolvedValueOnce([{

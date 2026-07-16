@@ -895,7 +895,7 @@ async function loadOperatingDigestInputs(params: {
         targetDate: true,
         updatedAt: true,
         updates: {
-          where: { createdAt: { gte: params.since } },
+          where: { createdAt: windowRange },
           orderBy: { createdAt: "desc" },
           take: 3,
           select: {

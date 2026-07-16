@@ -636,6 +636,18 @@ describe("runDailyDigest", () => {
         updatedAt: { lte: cutoff },
       }),
     }));
+    expect(prismaMock.goal.findMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({
+        workspaceId: "workspace-1",
+        createdAt: { lte: cutoff },
+        updatedAt: { lte: cutoff },
+      }),
+      select: expect.objectContaining({
+        updates: expect.objectContaining({
+          where: { createdAt: windowRange },
+        }),
+      }),
+    }));
     expect(prismaMock.adviceRequest.findMany).toHaveBeenCalledWith(expect.objectContaining({
       where: expect.objectContaining({
         workspaceId: "workspace-1",

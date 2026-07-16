@@ -686,6 +686,11 @@ function tokenOverlapScore(left: Set<string>, right: Set<string>) {
   return overlap / Math.min(left.size, right.size);
 }
 
+function normalizedPhraseIncludes(value: string, phrase: string) {
+  if (!value || !phrase) return false;
+  return ` ${value} `.includes(` ${phrase} `);
+}
+
 function candidateProbablyMatchesDigestItem(candidate: WorkspaceBriefingCandidate, rawItem: string) {
   const candidateTokens = digestMatchTokens([
     candidate.title,
@@ -711,7 +716,7 @@ function candidateMatchesDigestItem(candidate: WorkspaceBriefingCandidate, rawIt
   if (!normalizedItem) return false;
 
   const normalizedTitle = normalizeMatchText(candidate.title);
-  if (normalizedTitle && normalizedItem.includes(normalizedTitle)) return true;
+  if (normalizedPhraseIncludes(normalizedItem, normalizedTitle)) return true;
 
   const normalizedSummary = normalizeMatchText(candidate.summaryMd);
   if (normalizedSummary.length >= 32 && (
