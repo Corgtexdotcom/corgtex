@@ -107,11 +107,11 @@ jobs:
         id: credentials
         shell: bash
         env:
-          ADMIN_EMAIL: ${{ secrets.PRODUCTION_VALIDATION_ADMIN_EMAIL }}
-          ADMIN_PASSWORD: ${{ secrets.PRODUCTION_VALIDATION_ADMIN_PASSWORD }}
+          CRM_SMOKE_EMAIL: ${{ secrets.PRODUCTION_VALIDATION_ADMIN_EMAIL || secrets.ADMIN_EMAIL }}
+          CRM_SMOKE_PASSWORD: ${{ secrets.PRODUCTION_VALIDATION_ADMIN_PASSWORD || secrets.ADMIN_PASSWORD }}
         run: |
           set -euo pipefail
-          if [ -z "$ADMIN_EMAIL" ] || [ -z "$ADMIN_PASSWORD" ]; then
+          if [ -z "$CRM_SMOKE_EMAIL" ] || [ -z "$CRM_SMOKE_PASSWORD" ]; then
             echo "available=false" >> "$GITHUB_OUTPUT"
           else
             echo "available=true" >> "$GITHUB_OUTPUT"
@@ -139,7 +139,7 @@ jobs:
             --pr-numbers="$PR_NUMBERS" \
             --method="crm-production-smoke" \
             --intent="CRM pages, MCP reads, chat context, and safe writeback" \
-            --blocker="PRODUCTION_VALIDATION_ADMIN_EMAIL and PRODUCTION_VALIDATION_ADMIN_PASSWORD environment secrets are required."
+            --blocker="PRODUCTION_VALIDATION_ADMIN_EMAIL/PASSWORD or ADMIN_EMAIL/PASSWORD production smoke secrets are required."
 
       - run: npm ci
         if: steps.trusted_ref.outputs.trusted == 'true' && steps.credentials.outputs.available == 'true'
@@ -155,8 +155,8 @@ jobs:
           set -euo pipefail
           node scripts/crm-production-smoke.mjs "$BASE_URL" "$OUT_DIR" 2>&1 | tee "$OUT_DIR/crm-production-smoke.log"
         env:
-          ADMIN_EMAIL: ${{ secrets.PRODUCTION_VALIDATION_ADMIN_EMAIL }}
-          ADMIN_PASSWORD: ${{ secrets.PRODUCTION_VALIDATION_ADMIN_PASSWORD }}
+          CRM_SMOKE_EMAIL: ${{ secrets.PRODUCTION_VALIDATION_ADMIN_EMAIL || secrets.ADMIN_EMAIL }}
+          CRM_SMOKE_PASSWORD: ${{ secrets.PRODUCTION_VALIDATION_ADMIN_PASSWORD || secrets.ADMIN_PASSWORD }}
           CRM_SMOKE_WORKSPACE_SLUG: ${{ env.WORKSPACE_SLUG }}
           CRM_SMOKE_PR_NUMBERS: ${{ env.PR_NUMBERS }}
           CRM_SMOKE_EXPECTED_GIT_SHA: ${{ steps.validation_inputs.outputs.expected_git_sha }}
