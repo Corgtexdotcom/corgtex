@@ -107,10 +107,8 @@ describe("start-web startup modes", () => {
     ]);
   });
 
-  it("adds the internal validation seed for production startup", () => {
-    expect(configuredSeedScripts({ NODE_ENV: "production" })).toEqual([
-      "scripts/seed-internal-validation-workspace.mjs",
-    ]);
+  it("does not add the internal validation seed implicitly for production web startup", () => {
+    expect(configuredSeedScripts({ NODE_ENV: "production" })).toEqual([]);
   });
 
   it("deduplicates the internal validation seed when explicitly configured", () => {

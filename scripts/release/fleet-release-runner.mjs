@@ -725,7 +725,7 @@ export function releaseVariables(manifest, env = process.env, options = {}) {
     CORGTEX_RELEASE_GIT_SHA: manifest.gitSha,
     CORGTEX_STARTUP_MODE: "combined",
     CORGTEX_AUTO_SEED_JNJ_DEMO: "false",
-    CORGTEX_AUTO_SEED_INTERNAL_VALIDATION: "true",
+    CORGTEX_AUTO_SEED_INTERNAL_VALIDATION: "false",
     SEED_SCRIPTS: "",
     ...optionalRuntimeObservabilityVariables(env, options),
   };
