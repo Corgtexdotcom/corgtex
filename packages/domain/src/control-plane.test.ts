@@ -87,18 +87,6 @@ const { prismaMock, encryptSecretMock, decryptSecretMock, memberMocks, communica
       count: vi.fn(),
       findMany: vi.fn(),
     },
-    cycle: {
-      count: vi.fn(),
-      findMany: vi.fn(),
-    },
-    cycleUpdate: {
-      count: vi.fn(),
-      findMany: vi.fn(),
-    },
-    allocation: {
-      count: vi.fn(),
-      findMany: vi.fn(),
-    },
     customerDeployment: {
       findMany: vi.fn(),
       findUnique: vi.fn(),
@@ -318,6 +306,14 @@ const { prismaMock, encryptSecretMock, decryptSecretMock, memberMocks, communica
       count: vi.fn(),
       findMany: vi.fn(),
     },
+    practiceProject: {
+      count: vi.fn(),
+      findMany: vi.fn(),
+    },
+    practiceContributionEntry: {
+      count: vi.fn(),
+      findMany: vi.fn(),
+    },
     supportOperation: {
       count: vi.fn(),
       create: vi.fn(),
@@ -521,9 +517,6 @@ describe("control plane domain", () => {
       "approvalFlow",
       "approvalDecision",
       "objection",
-      "cycle",
-      "cycleUpdate",
-      "allocation",
       "workspaceFeatureFlag",
       "workspaceToolLink",
       "workspaceToolLinkCircleTag",
@@ -556,6 +549,8 @@ describe("control plane domain", () => {
       "goalLink",
       "recognition",
       "checkIn",
+      "practiceProject",
+      "practiceContributionEntry",
       "modelUsageBudget",
       "workspaceBillingProfile",
       "workspaceEnterpriseService",

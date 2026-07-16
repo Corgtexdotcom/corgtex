@@ -912,8 +912,10 @@ const CLIENT_FEATURE_POSTURES = {
   },
   // Consulting practices (e.g. Chirone) opt into the Practice Ledger project
   // portfolio capability on top of the always-on expenses/ledger baseline.
+  // Slicing Pie stays explicitly opt-in because it changes how contributions
+  // are analyzed and is not appropriate for every practice.
   consulting: {
-    "practice-ledger": true,
+    "practice-ledger": { PRACTICE_PROJECTS: true },
   },
 } satisfies Record<string, ModulePostureBundle>;
 
@@ -1667,9 +1669,6 @@ async function buildMigrationInventory(deployment: {
       { entityType: "ApprovalFlow", modelName: "approvalFlow", where: { workspaceId }, createIdMap: true },
       { entityType: "ApprovalDecision", modelName: "approvalDecision", where: { flow: { workspaceId } }, createIdMap: true },
       { entityType: "Objection", modelName: "objection", where: { flow: { workspaceId } }, createIdMap: true },
-      { entityType: "Cycle", modelName: "cycle", where: { workspaceId }, createIdMap: true },
-      { entityType: "CycleUpdate", modelName: "cycleUpdate", where: { cycle: { workspaceId } }, createIdMap: true },
-      { entityType: "Allocation", modelName: "allocation", where: { cycle: { workspaceId } }, createIdMap: true },
       { entityType: "WorkspaceFeatureFlag", modelName: "workspaceFeatureFlag", where: { workspaceId }, createIdMap: true },
       { entityType: "WorkspaceToolLink", modelName: "workspaceToolLink", where: { workspaceId }, createIdMap: true },
       { entityType: "WorkspaceToolLinkCircleTag", modelName: "workspaceToolLinkCircleTag", where: { toolLink: { workspaceId } }, createIdMap: true },
@@ -1702,6 +1701,8 @@ async function buildMigrationInventory(deployment: {
       { entityType: "GoalLink", modelName: "goalLink", where: { goal: { workspaceId } }, createIdMap: true },
       { entityType: "Recognition", modelName: "recognition", where: { workspaceId }, createIdMap: true },
       { entityType: "CheckIn", modelName: "checkIn", where: { workspaceId }, createIdMap: true },
+      { entityType: "PracticeProject", modelName: "practiceProject", where: { workspaceId }, createIdMap: true },
+      { entityType: "PracticeContributionEntry", modelName: "practiceContributionEntry", where: { workspaceId }, createIdMap: true },
       { entityType: "ModelUsageBudget", modelName: "modelUsageBudget", where: { workspaceId }, createIdMap: true },
       { entityType: "WorkspaceBillingProfile", modelName: "workspaceBillingProfile", where: { workspaceId }, createIdMap: true },
       { entityType: "WorkspaceEnterpriseService", modelName: "workspaceEnterpriseService", where: { workspaceId }, createIdMap: true },

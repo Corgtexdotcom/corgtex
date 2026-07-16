@@ -55,14 +55,6 @@ export const WORKSPACE_ADD_ACTION_DEFINITIONS = {
     label: "Member assignment",
     description: "Assign a member to a role in this circle.",
   },
-  cycle: {
-    label: "Cycle",
-    description: "Create a contribution cycle.",
-  },
-  allocation: {
-    label: "Allocation",
-    description: "Allocate points in an open cycle.",
-  },
   finance_project: {
     label: "Project",
     description: "Create a Practice Ledger project.",
@@ -287,8 +279,6 @@ export function getWorkspaceAddActions(context: WorkspaceAddActionContext): Work
       return (segments?.length ?? 0) > 1
         ? [action("circle"), action("role"), action("role_assignment")]
         : [action("circle"), action("role")];
-    case "cycles":
-      return context.featureFlags.CYCLES ? [action("cycle"), action("allocation")] : [];
     case "finance":
       return context.featureFlags.FINANCE ? [action("finance_project")] : [];
     case "brain":

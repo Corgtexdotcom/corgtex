@@ -52,7 +52,6 @@ export const MCP_CONNECTOR_LEGACY_DEFAULT_SCOPES: AgentScope[] = [
   "tensions:read",
   "members:read",
   "circles:read",
-  "cycles:read",
   "finance:read",
   "conversations:write",
 ];
@@ -68,7 +67,6 @@ export const MCP_CONNECTOR_DEFAULT_SCOPES: AgentScope[] = [
   "goals:read",
   "members:read",
   "meetings:read",
-  "cycles:read",
   "circles:read",
   "tools:read",
   "conversations:write",

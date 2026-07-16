@@ -89,7 +89,7 @@ const validationSeedConfig = {
   featureFlags: {
     RELATIONSHIPS: true,
     GOALS: true,
-    CYCLES: true,
+    SLICING_PIE: true,
     TOOL_LINKS: true,
     MEETING_TRANSCRIPT_SOURCES: true,
     MEETING_CONTEXTUAL_INTELLIGENCE: true,

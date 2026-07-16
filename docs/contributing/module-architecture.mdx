@@ -15,7 +15,7 @@ A module's `tier` is a field on its manifest, not a repo boundary.
   audit, the nav shell, the feature-flag and access engines, the catalog, and
   the MCP gateway. Lives in the monorepo and ships to every workspace.
 - **First-party.** Features we build and own that share the Corgtex Postgres
-  schema (finance, goals, meetings, relationships, cycles, agent governance).
+  schema (finance, goals, meetings, relationships, agent governance).
   Live in the monorepo and are toggled per workspace by a feature flag and
   gated per principal by the access model.
 - **Satellite.** An app that owns its own datastore or release cadence, or is

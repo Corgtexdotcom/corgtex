@@ -1,36 +1,41 @@
 ---
-title: "Budgets, Cycles, and Ledgers"
-description: "Allocate and track organizational resources dynamically."
+title: "Practice Ledger and Contributions"
+description: "Track contribution value, cash payables, and optional internal ownership analysis."
 ---
 
-Finance in Corgtex revolves around three interconnected models: **Cycles**, **Allocations**, and **Ledger Accounts**.
+Finance in Corgtex centers on the **Practice Ledger**: a single operating record
+for project work, time, expenses, invoices, and cash payment status.
 
-## Cycles
+## Contribution Entries
 
-Annual budgets are often too rigid for fast-moving organizations. Corgtex introduces **Cycles** (e.g., Q1, 2024-H2, or Month-08). 
+Practice Ledger contribution entries capture actual work and costs:
 
-Cycles define the temporal boundaries within which your financial goals are evaluated and resources are pooled.
+- **Time entries** record the project, contributor, date, description, hours, and internal value.
+- **Expense entries** record the project, contributor, date, description, USD amount, and receipt metadata when available.
+- Every entry chooses one payment path: cash reimbursement or internal Slicing Pie contribution treatment.
 
-## Ledger Accounts
+## Cash Payables
 
-A **Ledger Account** is the internal representation of funds. 
+Cash entries stay in the Practice Ledger as requested payables until a finance
+steward or admin confirms they were paid. This keeps reimbursement workflow
+separate from ownership analysis while preserving a complete audit trail.
 
-- Every Circle can hold one or more Ledger Accounts (e.g., "Marketing Operational Budget", "Engineering Cloud Spend").
-- Ledger Accounts provide absolute transparency. The organization can see exactly what funds are available to a specific team at any given moment.
-- Whenever a [Spend Request](/see/spend-requests) is marked as Paid, a double-entry `LedgerEntry` is recorded against the specific Ledger Account.
+## Optional Slicing Pie
 
-## Allocations
+When enabled for a workspace, Slicing Pie is an internal calculation view derived
+from recorded Practice Ledger entries. It does not replace the ledger and does
+not act as a legal cap table.
 
-An **Allocation** is the act of moving funds from a parent Circle's ledger down to a sub-circle's ledger for a specific Cycle.
+- Unpaid work contributes slices at a fixed 2x multiplier.
+- Unreimbursed cash expenses contribute slices at a fixed 4x multiplier.
+- Cash-paid entries are excluded from slice totals.
+- Ownership percentages are derived at read time from each contributor's slices divided by total slices.
 
-For example, the parent General Company Circle might allocate $50,000 to the Product Circle's ledger for the Q3 Cycle.
-
-### Top-Down vs Bottom-Up
-
-To create an Allocation, the parent circle usually reviews the historical spend and upcoming tensions of the sub-circle. Because all Tensions and Proposals are transparent on the platform, allocatees have unprecedented visibility into *why* the sub-circle needs the budget they are requesting.
+The Slicing Pie page shows contributor totals and source-entry evidence so the
+calculation can be backed up from the underlying ledger.
 
 ## AI Cost Budgets
 
-Beyond standard fiat currency, certain Ledger Accounts can be configured to represent **Model Usage Budgets**.
+Beyond standard fiat currency, workspaces can configure **Model Usage Budgets**.
 
 Because AI agents consume tokens during execution, Corgtex allows you to manage this exposure securely. You can provision a specific monthly budget (e.g., $250 API exposure) to a Circle's agent pool. When the agent nears the 80% threshold, Corgtex alerts the relevant roles, preventing runaway infrastructural costs caused by unmonitored LLM loops.

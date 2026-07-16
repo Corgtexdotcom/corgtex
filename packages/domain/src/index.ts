@@ -28,7 +28,6 @@ export * from "./communication";
 export * from "./control-plane";
 export * from "./control-plane-adapters";
 export * from "./customer-lifecycle";
-export * from "./cycles";
 export * from "./documents";
 export * from "./errors";
 export * from "./events";

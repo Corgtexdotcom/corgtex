@@ -33,10 +33,10 @@ export const WORKSPACE_FEATURE_FLAG_ORDER = [
   "GOALS",
   "TOOL_LINKS",
   "FINANCE",
+  "SLICING_PIE",
   "BUILD_ARTIFACTS",
   "RELATIONSHIPS",
   "CONTEXT_MAPS",
-  "CYCLES",
   "AGENT_GOVERNANCE",
   "OS_METRICS",
   "SETTINGS_GENERAL",
@@ -233,17 +233,6 @@ export const MODULE_MANIFESTS: readonly ModuleManifest[] = [
     nav: { href: "/circles", labelKey: "circles", icon: "circles", group: "governance" },
     scopes: ["circles:read"],
   },
-  {
-    key: "cycles",
-    tier: "first_party",
-    title: "Cycles",
-    description: "Planning cycles, updates, and allocations.",
-    dataOwnership: "corgtex_postgres",
-    featureFlag: flag("CYCLES", "Cycles", "Planning cycles, updates, and allocations.", true),
-    nav: { href: "/cycles", labelKey: "cycles", icon: "cycles", group: "governance" },
-    scopes: ["cycles:read", "cycles:write"],
-  },
-
   // --- First-party: finance group ---
   {
     key: "finance",
@@ -382,6 +371,12 @@ export const MODULE_MANIFESTS: readonly ModuleManifest[] = [
         "PRACTICE_PROJECTS",
         "Practice projects",
         "Consulting project portfolio: budgets, burn, remaining, and margin tracking with an attention queue.",
+        false,
+      ),
+      flag(
+        "SLICING_PIE",
+        "Slicing Pie",
+        "Internal Slicing Pie ownership calculations from Practice Ledger time and expense entries.",
         false,
       ),
     ],
