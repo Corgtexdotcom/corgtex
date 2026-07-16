@@ -516,8 +516,12 @@ function crmVisibleAccountFallback(pageContext: ConversationContext["pageContext
 }
 
 function isCrmCurrentAccountQuestion(message: string) {
-  return /\b(what|which)\b[\s\S]{0,80}\bcrm\s+account\b[\s\S]{0,80}\b(viewing|looking at|current|selected)\b/i.test(message)
-    || /\bcrm\s+account\s+am\s+i\s+(viewing|looking at)\b/i.test(message);
+  const standalone = message
+    .replace(/^\s*use\s+the\s+current\s+crm\s+page\s+context[.:]?\s*/i, "")
+    .replace(/\s*include\s+(?:this\s+exact\s+)?(?:crm\s+)?account\s+id(?:\s+if\s+available)?(?:\s*:\s*[A-Za-z0-9-]+)?\.?\s*$/i, "")
+    .trim();
+  return /^(?:what|which)\s+crm\s+account\s+(?:am\s+i\s+)?(?:viewing|looking\s+at|on)\??$/i.test(standalone)
+    || /^(?:what|which)\s+(?:is\s+)?(?:the\s+)?(?:current|selected)\s+crm\s+account\??$/i.test(standalone);
 }
 
 function crmCurrentAccountAnswer(ctx: ConversationContext) {

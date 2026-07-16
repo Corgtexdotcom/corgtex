@@ -959,6 +959,28 @@ describe("processConversationTurn", () => {
     expect(chatStreamMock).not.toHaveBeenCalled();
   });
 
+  it("does not bypass the model for compound CRM account requests", async () => {
+    const actor = testUserActor();
+    chatStreamMock.mockReturnValueOnce(streamResponse(["I can help with both requests."], {
+      content: "I can help with both requests.",
+    }));
+
+    const { processConversationTurnStream } = await import("./conversation");
+    const { chunks, result } = await collectConversationStream(processConversationTurnStream({
+      workspaceId: "ws-1",
+      sessionId: "session-1",
+      userId: "user-1",
+      agentKey: "assistant",
+      userMessage: "What CRM account am I viewing, and prepare a pending CRM follow-up for tomorrow?",
+      actor,
+      pageContext: crmPageContext(),
+    }));
+
+    expect(chunks.join("")).toBe("I can help with both requests.");
+    expect(result.assistantMessage).toBe("I can help with both requests.");
+    expect(chatStreamMock).toHaveBeenCalled();
+  });
+
   it("streams a grounded CRM page-context fallback when the model returns empty text", async () => {
     const actor = testUserActor();
     chatStreamMock.mockReturnValueOnce(streamResponse([], { content: "" }));
