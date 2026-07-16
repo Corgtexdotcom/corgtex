@@ -1121,18 +1121,22 @@ export async function* processConversationTurnStream(ctx: ConversationContext): 
     tools,
   })[Symbol.asyncIterator]();
 
-  let firstResult: import("@corgtex/models").ChatCompletionResponse;
-  while (true) {
-    const { done, value } = await iterator.next();
-    if (done) {
-      firstResult = value;
-      break;
+  let firstResult: import("@corgtex/models").ChatCompletionResponse | null = null;
+  try {
+    while (true) {
+      const { done, value } = await iterator.next();
+      if (done) {
+        firstResult = value;
+        break;
+      }
+      yield value;
+      finalMessage += value;
     }
-    yield value;
-    finalMessage += value;
+  } catch {
+    firstResult = null;
   }
 
-  if (firstResult.tool_calls && firstResult.tool_calls.length > 0) {
+  if (firstResult?.tool_calls && firstResult.tool_calls.length > 0) {
     toolExecutionAttempted = true;
     messages.push({ role: "assistant", content: firstResult.content || "", tool_calls: firstResult.tool_calls });
     const actor = requireConversationToolActor(ctx);
@@ -1169,6 +1173,7 @@ export async function* processConversationTurnStream(ctx: ConversationContext): 
     }
 
     let followupMessage = "";
+    let followupStreamFailed = false;
     if (await canRunFollowupModelAfterTools(ctx, pendingCrmOperations)) {
       const followupIterator = defaultModelGateway.chatStream({
         workspaceId: ctx.workspaceId,
@@ -1179,17 +1184,21 @@ export async function* processConversationTurnStream(ctx: ConversationContext): 
         tools,
       })[Symbol.asyncIterator]();
 
-      while (true) {
-        const { done, value } = await followupIterator.next();
-        if (done) {
-          break;
+      try {
+        while (true) {
+          const { done, value } = await followupIterator.next();
+          if (done) {
+            break;
+          }
+          yield value;
+          finalMessage += value;
+          followupMessage += value;
         }
-        yield value;
-        finalMessage += value;
-        followupMessage += value;
+      } catch {
+        followupStreamFailed = true;
       }
     }
-    if (!followupMessage.trim()) {
+    if (!followupMessage.trim() || followupStreamFailed) {
       const toolFallback = crmToolFallback(executedToolResults, ctx.pageContext, failedToolResults)
         ?? (pendingCrmOperations.length === 0 && toolExecutionAttempted ? emptyAssistantFallback() : null);
       if (toolFallback) {

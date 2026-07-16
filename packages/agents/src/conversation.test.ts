@@ -312,6 +312,15 @@ describe("processConversationTurn", () => {
     })();
   }
 
+  function throwingStream(chunks: string[] = [], error = new Error("model stream failed")) {
+    return (async function* () {
+      for (const chunk of chunks) {
+        yield chunk;
+      }
+      throw error;
+    })();
+  }
+
   async function collectConversationStream(
     stream: AsyncGenerator<string, { assistantMessage: string; contextUsed: Record<string, any> }>
   ) {
@@ -1101,6 +1110,64 @@ describe("processConversationTurn", () => {
       type: "TASK",
       completion: "open",
     }));
+  });
+
+  it("streams a CRM due-work fallback when the follow-up model stream fails", async () => {
+    const actor = testUserActor();
+    chatStreamMock
+      .mockReturnValueOnce(streamResponse([], {
+        content: "",
+        tool_calls: [{
+          id: "call-1",
+          function: {
+            name: "list_due_relationship_work",
+            arguments: JSON.stringify({ accountId: "account-1", take: 5 }),
+          },
+        }],
+      }))
+      .mockReturnValueOnce(throwingStream());
+
+    const { processConversationTurnStream } = await import("./conversation");
+    const { chunks, result } = await collectConversationStream(processConversationTurnStream({
+      workspaceId: "ws-1",
+      sessionId: "session-1",
+      userId: "user-1",
+      agentKey: "assistant",
+      userMessage: "Use list_due_relationship_work for selected account account-1.",
+      actor,
+      pageContext: crmPageContext(),
+    }));
+
+    const streamedMessage = chunks.join("");
+    expect(streamedMessage).toContain("1 open CRM relationship work item");
+    expect(streamedMessage).toContain("Follow up");
+    expect(result.assistantMessage).toContain("1 open CRM relationship work item");
+    expect(result.assistantMessage).toBe(streamedMessage);
+    expect(listCrmActivitiesMock).toHaveBeenCalledWith(actor, "ws-1", expect.objectContaining({
+      accountId: "account-1",
+      type: "TASK",
+      completion: "open",
+    }));
+  });
+
+  it("streams a clear fallback when the first model stream fails before tools run", async () => {
+    const actor = testUserActor();
+    chatStreamMock.mockReturnValueOnce(throwingStream());
+
+    const { processConversationTurnStream } = await import("./conversation");
+    const { chunks, result } = await collectConversationStream(processConversationTurnStream({
+      workspaceId: "ws-1",
+      sessionId: "session-1",
+      userId: "user-1",
+      agentKey: "assistant",
+      userMessage: "Summarize the workspace.",
+      actor,
+    }));
+
+    const streamedMessage = chunks.join("");
+    expect(streamedMessage).toContain("The assistant did not return a natural-language response");
+    expect(result.assistantMessage).toBe(streamedMessage);
+    expect(listCrmActivitiesMock).not.toHaveBeenCalled();
   });
 
   it("uses the due-work tool scope and escapes CRM titles in empty-model fallbacks", async () => {
