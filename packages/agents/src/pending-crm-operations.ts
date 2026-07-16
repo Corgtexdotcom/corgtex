@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from "node:crypto";
+import { createHash } from "node:crypto";
 
 import { prisma } from "@corgtex/shared";
 import type { Prisma } from "@prisma/client";
@@ -87,6 +87,10 @@ function operationArgsHash(toolName: string, args: unknown) {
 function operationIdempotencyKey(ctx: PendingOperationContext, toolName: string, argsHash: string) {
   const messageHash = hash(ctx.userMessage.trim()).slice(0, 16);
   return `crm-pending:${ctx.sessionId}:${toolName}:${messageHash}:${argsHash.slice(0, 24)}`;
+}
+
+function retryIdempotencyKeyPrefix(idempotencyKey: string) {
+  return `${idempotencyKey}:retry:`;
 }
 
 function relatedEntity(toolName: string, args: Record<string, unknown>) {
@@ -235,6 +239,88 @@ function assertReusableOperationAvailable(operation: PendingOperationRecord | nu
   return null;
 }
 
+function isUniqueConstraintError(error: unknown) {
+  return Boolean(error && typeof error === "object" && (error as { code?: unknown }).code === "P2002");
+}
+
+async function findReusableRetryOperation({
+  ctx,
+  userId,
+  idempotencyKey,
+  now,
+}: {
+  ctx: PendingOperationContext;
+  userId: string | null;
+  idempotencyKey: string;
+  now: Date;
+}) {
+  const retry = await prisma.conversationPendingOperation.findFirst({
+    where: {
+      workspaceId: ctx.workspaceId,
+      conversationId: ctx.sessionId,
+      userId,
+      agentKey: ctx.agentKey,
+      idempotencyKey: { startsWith: retryIdempotencyKeyPrefix(idempotencyKey) },
+      status: { in: [STATUS.PENDING, STATUS.EXECUTING] },
+    },
+    orderBy: { createdAt: "desc" },
+  });
+  const reusableRetry = await refreshReusableOperationState(retry as PendingOperationRecord | null, now);
+  return assertReusableOperationAvailable(reusableRetry);
+}
+
+async function nextRetryIdempotencyKey(workspaceId: string, idempotencyKey: string) {
+  const retryCount = await prisma.conversationPendingOperation.count({
+    where: {
+      workspaceId,
+      idempotencyKey: { startsWith: retryIdempotencyKeyPrefix(idempotencyKey) },
+    },
+  });
+  return `${retryIdempotencyKeyPrefix(idempotencyKey)}${retryCount + 1}`;
+}
+
+async function reloadReusableOperationAfterUniqueConflict({
+  ctx,
+  userId,
+  idempotencyKey,
+  attemptedIdempotencyKey,
+  now,
+}: {
+  ctx: PendingOperationContext;
+  userId: string | null;
+  idempotencyKey: string;
+  attemptedIdempotencyKey: string;
+  now: Date;
+}) {
+  const collided = await prisma.conversationPendingOperation.findUnique({
+    where: {
+      workspaceId_idempotencyKey: {
+        workspaceId: ctx.workspaceId,
+        idempotencyKey: attemptedIdempotencyKey,
+      },
+    },
+  });
+  const reusableCollided = assertReusableOperationAvailable(
+    await refreshReusableOperationState(collided as PendingOperationRecord | null, now)
+  );
+  if (reusableCollided) return reusableCollided;
+
+  const latestBase = await prisma.conversationPendingOperation.findUnique({
+    where: {
+      workspaceId_idempotencyKey: {
+        workspaceId: ctx.workspaceId,
+        idempotencyKey,
+      },
+    },
+  });
+  const reusableBase = assertReusableOperationAvailable(
+    await refreshReusableOperationState(latestBase as PendingOperationRecord | null, now)
+  );
+  if (reusableBase) return reusableBase;
+
+  return await findReusableRetryOperation({ ctx, userId, idempotencyKey, now });
+}
+
 export async function createPendingCrmOperation({
   ctx,
   toolName,
@@ -261,40 +347,44 @@ export async function createPendingCrmOperation({
   const reusableBase = assertReusableOperationAvailable(reusableExisting);
   if (reusableBase) return reusableBase;
 
-  const retry = await prisma.conversationPendingOperation.findFirst({
-    where: {
-      workspaceId: ctx.workspaceId,
-      conversationId: ctx.sessionId,
-      userId,
-      agentKey: ctx.agentKey,
-      idempotencyKey: { startsWith: `${idempotencyKey}:` },
-      status: { in: [STATUS.PENDING, STATUS.EXECUTING] },
-    },
-    orderBy: { createdAt: "desc" },
-  });
-  const reusableRetry = await refreshReusableOperationState(retry as PendingOperationRecord | null, now);
-  const reusablePendingRetry = assertReusableOperationAvailable(reusableRetry);
+  const reusablePendingRetry = await findReusableRetryOperation({ ctx, userId, idempotencyKey, now });
   if (reusablePendingRetry) {
     return reusablePendingRetry;
   }
 
   const related = relatedEntity(toolName, argsJson);
-  return await prisma.conversationPendingOperation.create({
-    data: {
-      workspaceId: ctx.workspaceId,
-      conversationId: ctx.sessionId,
+  const attemptedIdempotencyKey = existing
+    ? await nextRetryIdempotencyKey(ctx.workspaceId, idempotencyKey)
+    : idempotencyKey;
+  try {
+    return await prisma.conversationPendingOperation.create({
+      data: {
+        workspaceId: ctx.workspaceId,
+        conversationId: ctx.sessionId,
+        userId,
+        agentKey: ctx.agentKey,
+        toolName,
+        argsJson: argsJson as Prisma.InputJsonValue,
+        argsHash,
+        idempotencyKey: attemptedIdempotencyKey,
+        relatedEntityType: related.type,
+        relatedEntityId: related.id,
+        riskLabel: riskLabel(toolName),
+        expiresAt: new Date(Date.now() + PENDING_OPERATION_TTL_MS),
+      },
+    }) as PendingOperationRecord;
+  } catch (error) {
+    if (!isUniqueConstraintError(error)) throw error;
+    const reusable = await reloadReusableOperationAfterUniqueConflict({
+      ctx,
       userId,
-      agentKey: ctx.agentKey,
-      toolName,
-      argsJson: argsJson as Prisma.InputJsonValue,
-      argsHash,
-      idempotencyKey: existing ? `${idempotencyKey}:${randomUUID()}` : idempotencyKey,
-      relatedEntityType: related.type,
-      relatedEntityId: related.id,
-      riskLabel: riskLabel(toolName),
-      expiresAt: new Date(Date.now() + PENDING_OPERATION_TTL_MS),
-    },
-  }) as PendingOperationRecord;
+      idempotencyKey,
+      attemptedIdempotencyKey,
+      now,
+    });
+    if (reusable) return reusable;
+    throw error;
+  }
 }
 
 export async function findCrmPendingOperationForIntent(ctx: PendingOperationContext, intent: PendingOperationIntent) {

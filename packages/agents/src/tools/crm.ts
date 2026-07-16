@@ -96,8 +96,19 @@ function hasNonEmptyString(value: unknown) {
 }
 
 export function validateCrmWriteToolArgs(toolName: string, args: Record<string, unknown>) {
+  if (toolName === "record_relationship_activity" && !hasNonEmptyString(args.title)) {
+    throw new Error("A CRM activity title is required to prepare a pending CRM activity.");
+  }
   if (toolName === "complete_relationship_activity" && !hasNonEmptyString(args.activityId)) {
     throw new Error("A CRM activity ID is required to prepare a pending CRM activity completion.");
+  }
+  if (toolName === "create_communication_suggestion") {
+    if (!hasNonEmptyString(args.title)) {
+      throw new Error("A CRM communication suggestion title is required to prepare a pending CRM suggestion.");
+    }
+    if (!hasNonEmptyString(args.bodyMd)) {
+      throw new Error("CRM communication suggestion body text is required to prepare a pending CRM suggestion.");
+    }
   }
 }
 

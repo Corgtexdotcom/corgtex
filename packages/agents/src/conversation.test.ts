@@ -8,6 +8,7 @@ const {
   chatMock,
   completeActivityMock,
   conversationPendingOperationCreateMock,
+  conversationPendingOperationCountMock,
   conversationPendingOperationFindFirstMock,
   conversationPendingOperationFindUniqueMock,
   conversationPendingOperationStore,
@@ -35,6 +36,7 @@ const {
   chatMock: vi.fn(),
   completeActivityMock: vi.fn(),
   conversationPendingOperationCreateMock: vi.fn(),
+  conversationPendingOperationCountMock: vi.fn(),
   conversationPendingOperationFindFirstMock: vi.fn(),
   conversationPendingOperationFindUniqueMock: vi.fn(),
   conversationPendingOperationStore: [] as any[],
@@ -66,6 +68,7 @@ vi.mock("@corgtex/shared", () => ({
     },
     conversationPendingOperation: {
       create: conversationPendingOperationCreateMock,
+      count: conversationPendingOperationCountMock,
       findFirst: conversationPendingOperationFindFirstMock,
       findUnique: conversationPendingOperationFindUniqueMock,
       update: conversationPendingOperationUpdateMock,
@@ -172,7 +175,21 @@ describe("processConversationTurn", () => {
       ));
       return Promise.resolve(matches.at(-1) ?? null);
     });
+    conversationPendingOperationCountMock.mockImplementation(({ where }: any) => {
+      const matches = conversationPendingOperationStore.filter((operation: any) => (
+        (!where?.workspaceId || operation.workspaceId === where.workspaceId)
+        && (!where?.idempotencyKey?.startsWith || operation.idempotencyKey.startsWith(where.idempotencyKey.startsWith))
+      ));
+      return Promise.resolve(matches.length);
+    });
     conversationPendingOperationCreateMock.mockImplementation(({ data }: any) => {
+      if (conversationPendingOperationStore.some((operation: any) => (
+        operation.workspaceId === data.workspaceId && operation.idempotencyKey === data.idempotencyKey
+      ))) {
+        const error = new Error("Unique constraint failed on the fields: (`workspaceId`,`idempotencyKey`)");
+        (error as any).code = "P2002";
+        throw error;
+      }
       const operation = {
         id: pendingOperationId(conversationPendingOperationStore.length + 1),
         createdAt: new Date(),
@@ -939,6 +956,7 @@ describe("processConversationTurn", () => {
     expect(conversationPendingOperationStore[0].status).toBe("EXPIRED");
     expect(conversationPendingOperationStore[1].status).toBe("PENDING");
     expect(conversationPendingOperationStore[1].idempotencyKey).not.toBe(conversationPendingOperationStore[0].idempotencyKey);
+    expect(conversationPendingOperationStore[1].idempotencyKey).toBe(`${conversationPendingOperationStore[0].idempotencyKey}:retry:1`);
     expect(result.assistantMessage).toContain(`Pending operation ID: ${pendingOperationId(2)}`);
 
     const repeatResult = await processConversationTurn({
@@ -952,6 +970,75 @@ describe("processConversationTurn", () => {
 
     expect(conversationPendingOperationStore).toHaveLength(2);
     expect(repeatResult.assistantMessage).toContain(`Pending operation ID: ${pendingOperationId(2)}`);
+  });
+
+  it("reuses the winning retry operation when concurrent retry creation hits a unique key", async () => {
+    const actor = {
+      kind: "user" as const,
+      user: {
+        id: "user-1",
+        email: "user@example.com",
+        displayName: "User",
+      },
+    };
+    const userMessage = "Create a CRM follow-up for Acme.";
+    const toolCall = {
+      id: "call-1",
+      function: {
+        name: "record_relationship_activity",
+        arguments: JSON.stringify({ title: "Follow up", type: "TASK", accountId: "account-1" }),
+      },
+    };
+    chatMock
+      .mockResolvedValueOnce({ content: "", tool_calls: [toolCall] })
+      .mockResolvedValueOnce({ content: "Pending operation is ready." })
+      .mockResolvedValueOnce({ content: "", tool_calls: [toolCall] })
+      .mockResolvedValueOnce({ content: "Concurrent pending operation is ready." });
+
+    const { processConversationTurn } = await import("./conversation");
+    await processConversationTurn({
+      workspaceId: "ws-1",
+      sessionId: "session-1",
+      userId: "user-1",
+      agentKey: "assistant",
+      userMessage,
+      actor,
+    });
+    conversationPendingOperationStore[0].expiresAt = new Date(Date.now() - 60_000);
+
+    conversationPendingOperationCreateMock.mockImplementationOnce(({ data }: any) => {
+      const competingOperation = {
+        id: pendingOperationId(2),
+        createdAt: new Date(),
+        updatedAt: new Date(),
+        proposedAt: new Date(),
+        canceledAt: null,
+        executedAt: null,
+        resultJson: null,
+        errorCode: null,
+        errorMessage: null,
+        status: "PENDING",
+        ...data,
+      };
+      conversationPendingOperationStore.push(competingOperation);
+      const error = new Error("Unique constraint failed on the fields: (`workspaceId`,`idempotencyKey`)");
+      (error as any).code = "P2002";
+      throw error;
+    });
+
+    const result = await processConversationTurn({
+      workspaceId: "ws-1",
+      sessionId: "session-1",
+      userId: "user-1",
+      agentKey: "assistant",
+      userMessage,
+      actor,
+    });
+
+    expect(conversationPendingOperationStore).toHaveLength(2);
+    expect(conversationPendingOperationStore[0].status).toBe("EXPIRED");
+    expect(conversationPendingOperationStore[1].idempotencyKey).toBe(`${conversationPendingOperationStore[0].idempotencyKey}:retry:1`);
+    expect(result.assistantMessage).toContain(`Pending operation ID: ${pendingOperationId(2)}`);
   });
 
   it("does not reuse abandoned executing CRM operations as confirmable pending operations", async () => {
@@ -1043,6 +1130,84 @@ describe("processConversationTurn", () => {
     expect(conversationPendingOperationCreateMock).not.toHaveBeenCalled();
     expect(completeActivityMock).not.toHaveBeenCalled();
     expect(result.assistantMessage).toBe("Please select a CRM activity before preparing completion.");
+  });
+
+  it("rejects CRM activity preparations without a title before storing a pending operation", async () => {
+    const actor = {
+      kind: "user" as const,
+      user: {
+        id: "user-1",
+        email: "user@example.com",
+        displayName: "User",
+      },
+    };
+    chatMock
+      .mockResolvedValueOnce({
+        content: "",
+        tool_calls: [{
+          id: "call-1",
+          function: {
+            name: "record_relationship_activity",
+            arguments: JSON.stringify({ type: "TASK", accountId: "account-1" }),
+          },
+        }],
+      })
+      .mockResolvedValueOnce({ content: "Please provide a title before I prepare the CRM activity." });
+
+    const { processConversationTurn } = await import("./conversation");
+    const result = await processConversationTurn({
+      workspaceId: "ws-1",
+      sessionId: "session-1",
+      userId: "user-1",
+      agentKey: "assistant",
+      userMessage: "Create a CRM follow-up for Acme.",
+      actor,
+    });
+
+    const toolMessage = chatMock.mock.calls[1]?.[0]?.messages.find((message: any) => message.role === "tool");
+    expect(toolMessage.content).toContain("A CRM activity title is required");
+    expect(conversationPendingOperationCreateMock).not.toHaveBeenCalled();
+    expect(createActivityMock).not.toHaveBeenCalled();
+    expect(result.assistantMessage).toBe("Please provide a title before I prepare the CRM activity.");
+  });
+
+  it("rejects CRM suggestion preparations without required fields before storing a pending operation", async () => {
+    const actor = {
+      kind: "user" as const,
+      user: {
+        id: "user-1",
+        email: "user@example.com",
+        displayName: "User",
+      },
+    };
+    chatMock
+      .mockResolvedValueOnce({
+        content: "",
+        tool_calls: [{
+          id: "call-1",
+          function: {
+            name: "create_communication_suggestion",
+            arguments: JSON.stringify({ title: "Draft outreach", accountId: "account-1" }),
+          },
+        }],
+      })
+      .mockResolvedValueOnce({ content: "Please provide the draft body before I prepare the CRM suggestion." });
+
+    const { processConversationTurn } = await import("./conversation");
+    const result = await processConversationTurn({
+      workspaceId: "ws-1",
+      sessionId: "session-1",
+      userId: "user-1",
+      agentKey: "assistant",
+      userMessage: "Prepare a CRM communication suggestion for Acme.",
+      actor,
+    });
+
+    const toolMessage = chatMock.mock.calls[1]?.[0]?.messages.find((message: any) => message.role === "tool");
+    expect(toolMessage.content).toContain("CRM communication suggestion body text is required");
+    expect(conversationPendingOperationCreateMock).not.toHaveBeenCalled();
+    expect(createCommunicationSuggestionMock).not.toHaveBeenCalled();
+    expect(result.assistantMessage).toBe("Please provide the draft body before I prepare the CRM suggestion.");
   });
 
   it("appends stored args when the model mentions only the pending operation ID", async () => {
