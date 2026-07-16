@@ -4,6 +4,8 @@ import {
   crmScreenshotFileName,
   crmVisualTargets,
   evaluateKanbanSnapshot,
+  parseActivityId,
+  parsePendingOperationId,
 } from "./crm-production-smoke.mjs";
 
 describe("CRM production smoke visual targets", () => {
@@ -81,5 +83,16 @@ describe("CRM production smoke Kanban assertions", () => {
       cardCount: 3,
       clippedWithoutPageScrollCount: 1,
     })).toContain("extended below the viewport");
+  });
+});
+
+describe("CRM production smoke pending operation parsing", () => {
+  it("extracts pending operation and activity IDs from deterministic chat output", () => {
+    expect(parsePendingOperationId("Pending operation ID: 123e4567-e89b-12d3-a456-426614174000")).toBe("123e4567-e89b-12d3-a456-426614174000");
+    expect(parseActivityId("Confirmed pending operation ID: op-1\nActivity ID: activity-1")).toBe("activity-1");
+  });
+
+  it("fails loudly when chat omits the pending operation contract", () => {
+    expect(() => parsePendingOperationId("Please say yes.")).toThrow("pending operation ID");
   });
 });

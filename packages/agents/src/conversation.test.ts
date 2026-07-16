@@ -7,6 +7,12 @@ const {
   checkBudgetMock,
   chatMock,
   completeActivityMock,
+  conversationPendingOperationCreateMock,
+  conversationPendingOperationFindFirstMock,
+  conversationPendingOperationFindUniqueMock,
+  conversationPendingOperationStore,
+  conversationPendingOperationUpdateManyMock,
+  conversationPendingOperationUpdateMock,
   conversationTurnFindManyMock,
   createActivityMock,
   createCommunicationSuggestionMock,
@@ -28,6 +34,12 @@ const {
   checkBudgetMock: vi.fn(),
   chatMock: vi.fn(),
   completeActivityMock: vi.fn(),
+  conversationPendingOperationCreateMock: vi.fn(),
+  conversationPendingOperationFindFirstMock: vi.fn(),
+  conversationPendingOperationFindUniqueMock: vi.fn(),
+  conversationPendingOperationStore: [] as any[],
+  conversationPendingOperationUpdateManyMock: vi.fn(),
+  conversationPendingOperationUpdateMock: vi.fn(),
   conversationTurnFindManyMock: vi.fn(),
   createActivityMock: vi.fn(),
   createCommunicationSuggestionMock: vi.fn(),
@@ -51,6 +63,13 @@ vi.mock("@corgtex/shared", () => ({
   prisma: {
     conversationTurn: {
       findMany: conversationTurnFindManyMock,
+    },
+    conversationPendingOperation: {
+      create: conversationPendingOperationCreateMock,
+      findFirst: conversationPendingOperationFindFirstMock,
+      findUnique: conversationPendingOperationFindUniqueMock,
+      update: conversationPendingOperationUpdateMock,
+      updateMany: conversationPendingOperationUpdateManyMock,
     },
     brainArticle: {
       findUnique: vi.fn().mockResolvedValue(null),
@@ -124,6 +143,63 @@ describe("processConversationTurn", () => {
     vi.mocked(searchIndexedKnowledge).mockReset().mockResolvedValue([]);
     checkBudgetMock.mockResolvedValue({ allowed: true, usedPct: 0, usedUsd: 0, capUsd: 5 });
     conversationTurnFindManyMock.mockResolvedValue([]);
+    conversationPendingOperationStore.length = 0;
+    conversationPendingOperationFindUniqueMock.mockImplementation(({ where }: any) => {
+      if (where?.id) {
+        return Promise.resolve(conversationPendingOperationStore.find((operation: any) => operation.id === where.id) ?? null);
+      }
+      const key = where?.workspaceId_idempotencyKey;
+      if (key) {
+        return Promise.resolve(conversationPendingOperationStore.find((operation: any) => (
+          operation.workspaceId === key.workspaceId && operation.idempotencyKey === key.idempotencyKey
+        )) ?? null);
+      }
+      return Promise.resolve(null);
+    });
+    conversationPendingOperationFindFirstMock.mockImplementation(({ where }: any) => {
+      const matches = conversationPendingOperationStore.filter((operation: any) => (
+        (!where?.id || operation.id === where.id)
+        && (!where?.workspaceId || operation.workspaceId === where.workspaceId)
+        && (!where?.conversationId || operation.conversationId === where.conversationId)
+        && (!where?.userId || operation.userId === where.userId)
+        && (!where?.agentKey || operation.agentKey === where.agentKey)
+      ));
+      return Promise.resolve(matches.at(-1) ?? null);
+    });
+    conversationPendingOperationCreateMock.mockImplementation(({ data }: any) => {
+      const operation = {
+        id: `pending-${conversationPendingOperationStore.length + 1}`,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+        proposedAt: new Date(),
+        canceledAt: null,
+        executedAt: null,
+        resultJson: null,
+        errorCode: null,
+        errorMessage: null,
+        status: "PENDING",
+        ...data,
+      };
+      conversationPendingOperationStore.push(operation);
+      return Promise.resolve(operation);
+    });
+    conversationPendingOperationUpdateMock.mockImplementation(({ where, data }: any) => {
+      const operation = conversationPendingOperationStore.find((item: any) => item.id === where.id);
+      if (!operation) throw new Error(`Missing pending operation ${where.id}`);
+      Object.assign(operation, data, { updatedAt: new Date() });
+      return Promise.resolve(operation);
+    });
+    conversationPendingOperationUpdateManyMock.mockImplementation(({ where, data }: any) => {
+      let count = 0;
+      for (const operation of conversationPendingOperationStore) {
+        const expiresAfter = where?.expiresAt?.gt ? operation.expiresAt > where.expiresAt.gt : true;
+        if (operation.id === where.id && operation.status === where.status && expiresAfter) {
+          Object.assign(operation, data, { updatedAt: new Date() });
+          count += 1;
+        }
+      }
+      return Promise.resolve({ count });
+    });
     loadRelevantMemoriesMock.mockResolvedValue([]);
     storeAgentMemoryMock.mockResolvedValue(undefined);
     workspaceFeatureFlagFindManyMock.mockResolvedValue([]);
@@ -161,6 +237,41 @@ describe("processConversationTurn", () => {
       { flag: "CONTEXT_MAPS", enabled: true },
       { flag: "CONTEXT_MAP_AI", enabled: true },
     ]);
+  }
+
+  function addPendingCrmOperation(overrides: Record<string, any> = {}) {
+    const operation = {
+      id: `pending-${conversationPendingOperationStore.length + 1}`,
+      workspaceId: "ws-1",
+      conversationId: "session-1",
+      userId: "user-1",
+      agentKey: "assistant",
+      toolName: "record_relationship_activity",
+      argsJson: {
+        title: "Follow up",
+        type: "TASK",
+        accountId: "account-1",
+        dueAt: "2026-06-20T10:00:00.000Z",
+      },
+      argsHash: "args-hash",
+      idempotencyKey: "crm-pending:test",
+      relatedEntityType: "CrmAccount",
+      relatedEntityId: "account-1",
+      riskLabel: "crm-write:record-activity",
+      status: "PENDING",
+      resultJson: null,
+      errorCode: null,
+      errorMessage: null,
+      proposedAt: new Date(),
+      expiresAt: new Date(Date.now() + 60_000),
+      executedAt: null,
+      canceledAt: null,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+      ...overrides,
+    };
+    conversationPendingOperationStore.push(operation);
+    return operation;
   }
 
   it("executes chat tools with the real user actor", async () => {
@@ -393,7 +504,7 @@ describe("processConversationTurn", () => {
     expect(firstCall.messages).toEqual(expect.arrayContaining([
       expect.objectContaining({
         role: "system",
-        content: expect.stringContaining("CRM write tools require explicit confirmation"),
+        content: expect.stringContaining("CRM write tools use a pending-operation approval contract"),
       }),
       expect.objectContaining({
         role: "system",
@@ -673,7 +784,7 @@ describe("processConversationTurn", () => {
     expect(JSON.stringify(context)).not.toContain("unsafe");
   });
 
-  it("blocks CRM write tool calls until the user explicitly confirms", async () => {
+  it("persists CRM write tool calls as pending operations before confirmation", async () => {
     const actor = {
       kind: "user" as const,
       user: {
@@ -706,17 +817,38 @@ describe("processConversationTurn", () => {
     });
 
     const toolMessage = chatMock.mock.calls[1]?.[0]?.messages.find((message: any) => message.role === "tool");
-    expect(toolMessage.content).toContain("CRM_WRITE_REQUIRES_CONFIRMATION");
+    expect(toolMessage.content).toContain("PENDING_CONFIRMATION");
+    expect(toolMessage.content).toContain("pendingOperationId");
+    expect(conversationPendingOperationCreateMock).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        workspaceId: "ws-1",
+        conversationId: "session-1",
+        userId: "user-1",
+        toolName: "record_relationship_activity",
+        argsJson: expect.objectContaining({
+          title: "Follow up",
+          type: "TASK",
+          accountId: "account-1",
+        }),
+        relatedEntityType: "CrmAccount",
+        relatedEntityId: "account-1",
+        riskLabel: "crm-write:record-activity",
+      }),
+    }));
     expect(createActivityMock).not.toHaveBeenCalled();
-    expect(result.assistantMessage).toBe("Please confirm before I create that CRM follow-up.");
+    expect(result.assistantMessage).toContain("Please confirm before I create that CRM follow-up.");
+    expect(result.assistantMessage).toContain("Pending operation ID: pending-1");
   });
 
-  it("executes confirmed CRM writes through the same domain behavior", async () => {
-    conversationTurnFindManyMock.mockResolvedValueOnce([{
-      sequenceNumber: 1,
-      userMessage: "Create a CRM follow-up for Acme.",
-      assistantMessage: "I can create a CRM follow-up for Acme. Please confirm before I write it.",
-    }]);
+  it("executes confirmed CRM writes from stored pending operation args", async () => {
+    addPendingCrmOperation({
+      argsJson: {
+        title: "Stored follow up",
+        type: "TASK",
+        accountId: "account-1",
+        dueAt: "2026-06-20T10:00:00.000Z",
+      },
+    });
     const actor = {
       kind: "user" as const,
       user: {
@@ -725,23 +857,99 @@ describe("processConversationTurn", () => {
         displayName: "User",
       },
     };
-    chatMock
-      .mockResolvedValueOnce({
-        content: "",
-        tool_calls: [{
-          id: "call-1",
-          function: {
-            name: "record_relationship_activity",
-            arguments: JSON.stringify({
-              title: "Follow up",
-              type: "TASK",
-              accountId: "account-1",
-              dueAt: "2026-06-20T10:00:00.000Z",
-            }),
-          },
-        }],
-      })
-      .mockResolvedValueOnce({ content: "Created the CRM follow-up." });
+
+    const { processConversationTurn } = await import("./conversation");
+    const result = await processConversationTurn({
+      workspaceId: "ws-1",
+      sessionId: "session-1",
+      userId: "user-1",
+      agentKey: "assistant",
+      userMessage: "yes, do it, but call it Different follow up",
+      actor,
+    });
+
+    expect(createActivityMock).toHaveBeenCalledWith(actor, expect.objectContaining({
+      workspaceId: "ws-1",
+      title: "Stored follow up",
+      type: "TASK",
+      accountId: "account-1",
+      source: "workspace-chat",
+      dueAt: new Date("2026-06-20T10:00:00.000Z"),
+    }));
+    expect(chatMock).not.toHaveBeenCalled();
+    expect(conversationPendingOperationStore[0].status).toBe("EXECUTED");
+    expect(result.assistantMessage).toContain("Confirmed pending operation ID: pending-1");
+    expect(result.assistantMessage).toContain("Activity ID: activity-1");
+  });
+
+  it("repeated CRM confirmation is idempotent and does not duplicate writes", async () => {
+    addPendingCrmOperation({
+      status: "EXECUTED",
+      resultJson: { success: true, activity: { id: "activity-1" } },
+      executedAt: new Date(),
+    });
+    const actor = {
+      kind: "user" as const,
+      user: {
+        id: "user-1",
+        email: "user@example.com",
+        displayName: "User",
+      },
+    };
+
+    const { processConversationTurn } = await import("./conversation");
+    const result = await processConversationTurn({
+      workspaceId: "ws-1",
+      sessionId: "session-1",
+      userId: "user-1",
+      agentKey: "assistant",
+      userMessage: "confirm pending-1 again",
+      actor,
+    });
+
+    expect(createActivityMock).not.toHaveBeenCalled();
+    expect(result.assistantMessage).toContain("Confirmed pending operation ID: pending-1");
+    expect(result.assistantMessage).toContain("Activity ID: activity-1");
+  });
+
+  it("cancels pending CRM operations without executing the write", async () => {
+    addPendingCrmOperation();
+    const actor = {
+      kind: "user" as const,
+      user: {
+        id: "user-1",
+        email: "user@example.com",
+        displayName: "User",
+      },
+    };
+
+    const { processConversationTurn } = await import("./conversation");
+    const result = await processConversationTurn({
+      workspaceId: "ws-1",
+      sessionId: "session-1",
+      userId: "user-1",
+      agentKey: "assistant",
+      userMessage: "cancel that pending CRM operation",
+      actor,
+    });
+
+    expect(createActivityMock).not.toHaveBeenCalled();
+    expect(conversationPendingOperationStore[0].status).toBe("CANCELED");
+    expect(result.assistantMessage).toBe("Canceled pending operation ID: pending-1");
+  });
+
+  it("expires stale CRM pending operations before executing", async () => {
+    addPendingCrmOperation({
+      expiresAt: new Date(Date.now() - 60_000),
+    });
+    const actor = {
+      kind: "user" as const,
+      user: {
+        id: "user-1",
+        email: "user@example.com",
+        displayName: "User",
+      },
+    };
 
     const { processConversationTurn } = await import("./conversation");
     const result = await processConversationTurn({
@@ -753,17 +961,9 @@ describe("processConversationTurn", () => {
       actor,
     });
 
-    expect(createActivityMock).toHaveBeenCalledWith(actor, expect.objectContaining({
-      workspaceId: "ws-1",
-      title: "Follow up",
-      type: "TASK",
-      accountId: "account-1",
-      source: "workspace-chat",
-      dueAt: new Date("2026-06-20T10:00:00.000Z"),
-    }));
-    const toolMessage = chatMock.mock.calls[1]?.[0]?.messages.find((message: any) => message.role === "tool");
-    expect(toolMessage.content).toContain("\"success\":true");
-    expect(result.assistantMessage).toBe("Created the CRM follow-up.");
+    expect(createActivityMock).not.toHaveBeenCalled();
+    expect(conversationPendingOperationStore[0].status).toBe("EXPIRED");
+    expect(result.assistantMessage).toContain("expired before confirmation");
   });
 
   it("does not expose context map tools when the premium AI flag is disabled", async () => {

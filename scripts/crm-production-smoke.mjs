@@ -7,6 +7,7 @@ import {
   createValidationRun,
   parseValidationPrNumbers,
   productionValidationTag,
+  recordCreatedRecord,
   recordValidationResult,
   writeValidationArtifacts,
 } from "./lib/production-validation.mjs";
@@ -60,6 +61,17 @@ function parseToolResult(result) {
   const text = result?.content?.find?.((item) => item.type === "text")?.text;
   assert(text, "MCP result did not include JSON text content.");
   return JSON.parse(text);
+}
+
+function parsePendingOperationId(message) {
+  const match = String(message).match(/Pending operation ID:\s*([A-Za-z0-9-]+)/i)
+    ?? String(message).match(/pendingOperationId["'`:\s]+([A-Za-z0-9-]+)/i);
+  assert(match?.[1], `Chat did not expose a pending operation ID. Message: ${String(message).slice(0, 500)}`);
+  return match[1];
+}
+
+function parseActivityId(message) {
+  return String(message).match(/Activity ID:\s*([A-Za-z0-9-]+)/i)?.[1] ?? null;
 }
 
 function crmVisualTargets(workspaceId, accountId) {
@@ -464,6 +476,11 @@ class CrmSmoke {
     return due.items?.find((item) => item.id === activityId || item.title === title) ?? null;
   }
 
+  async dueWorkMatches(accountId, title, dueTo) {
+    const due = await this.callTool("list_due_relationship_work", { accountId, dueTo, take: 50 });
+    return due.items?.filter((item) => item.title === title) ?? [];
+  }
+
   async verifyChatAndWriteback(page, account) {
     const title = `${this.validationTag} CRM follow-up`;
     const dueAt = new Date(Date.now() + 60 * 60 * 1000).toISOString();
@@ -495,18 +512,28 @@ class CrmSmoke {
       context,
     );
     assert(/confirm|yes|go ahead|do it/i.test(askCreate), "Chat did not ask for confirmation before creating follow-up.");
+    const createPendingOperationId = parsePendingOperationId(askCreate);
     assert(!(await this.dueWorkContains(account.id, null, title, dueTo)), "Follow-up was created before confirmation.");
 
-    let createAnswer = await this.chat(conversationId, "yes, do it", context);
+    let createAnswer = await this.chat(conversationId, `confirm ${createPendingOperationId}`, context);
     let activity = null;
     for (let attempt = 0; attempt < 3; attempt += 1) {
       activity = await this.dueWorkContains(account.id, null, title, dueTo);
       if (activity) break;
-      createAnswer = await this.chat(conversationId, "confirm, create the CRM follow-up now", context);
+      createAnswer = await this.chat(conversationId, `confirm ${createPendingOperationId}`, context);
       await sleep(500);
     }
     assert(activity, `Chat did not create follow-up after confirmation. Last reply: ${createAnswer}`);
+    const responseActivityId = parseActivityId(createAnswer);
+    assert(!responseActivityId || responseActivityId === activity.id, `Chat confirmed a different activity ID (${responseActivityId}) than production created (${activity.id}).`);
     const activityCleanupActionId = `complete:CrmActivity:${activity.id}`;
+    recordCreatedRecord(this.validationRun, {
+      type: "CrmActivity",
+      id: activity.id,
+      label: title,
+      tenant: workspaceTenant({ id: this.workspaceId, slug: this.workspaceSlug }),
+      cleanupActionId: activityCleanupActionId,
+    });
     this.cleanupRegistry.add({
       id: activityCleanupActionId,
       action: "complete",
@@ -520,6 +547,10 @@ class CrmSmoke {
     await page.goto(activity.webUrl, { waitUntil: "networkidle", timeout: 30_000 });
     await page.getByText(title, { exact: false }).first().waitFor({ timeout: 15_000 });
     await page.screenshot({ path: path.join(this.outDir, "chat-created-follow-up.png"), fullPage: true }).catch(() => null);
+    const duplicateCreateAnswer = await this.chat(conversationId, `confirm ${createPendingOperationId}`, context);
+    assert(duplicateCreateAnswer.includes(createPendingOperationId), "Duplicate CRM confirmation did not return the original pending operation ID.");
+    const duplicateMatches = await this.dueWorkMatches(account.id, title, dueTo);
+    assert(duplicateMatches.length === 1, `Duplicate confirmation created ${duplicateMatches.length} follow-ups with title ${title}.`);
 
     const completeContext = crmPageContext(this.workspaceId, account, activity.id, title);
     const askComplete = await this.chat(
@@ -528,8 +559,9 @@ class CrmSmoke {
       completeContext,
     );
     assert(/confirm|yes|go ahead|do it/i.test(askComplete), "Chat did not ask for confirmation before completing follow-up.");
+    const completePendingOperationId = parsePendingOperationId(askComplete);
 
-    let completeAnswer = await this.chat(conversationId, `yes, call complete_relationship_activity for activityId ${activity.id} now`, completeContext);
+    let completeAnswer = await this.chat(conversationId, `confirm ${completePendingOperationId}`, completeContext);
     for (let attempt = 0; attempt < 3; attempt += 1) {
       if (!(await this.dueWorkContains(account.id, activity.id, title, dueTo))) {
         this.cleanupRegistry.markCompleted(activityCleanupActionId, "CRM activity completed by validation flow.");
@@ -537,13 +569,17 @@ class CrmSmoke {
       }
       completeAnswer = await this.chat(
         conversationId,
-        `MCP verification still shows activity ${activity.id} open. This write is confirmed. Call complete_relationship_activity with activityId ${activity.id} now.`,
+        `confirm ${completePendingOperationId}`,
         completeContext,
       );
       await sleep(500);
     }
     assert(!(await this.dueWorkContains(account.id, activity.id, title, dueTo)), `Chat did not complete follow-up after confirmation. Last reply: ${completeAnswer}`);
-    this.record("chat context and safe writeback", { conversationId, activityId: activity.id });
+    this.record("chat context and safe writeback", {
+      conversationId,
+      activityId: activity.id,
+      pendingOperationIds: [createPendingOperationId, completePendingOperationId],
+    });
   }
 
   async cleanup() {
@@ -706,6 +742,8 @@ export {
   crmVisualTargets,
   evaluateKanbanSnapshot,
   normalizeBaseUrl,
+  parseActivityId,
+  parsePendingOperationId,
   parseSetCookie,
   parseToolResult,
   usage,

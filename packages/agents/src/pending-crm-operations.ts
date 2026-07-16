@@ -1,0 +1,297 @@
+import { createHash } from "node:crypto";
+
+import { prisma } from "@corgtex/shared";
+import type { Prisma } from "@prisma/client";
+
+const PENDING_OPERATION_TTL_MS = 15 * 60 * 1000;
+
+const STATUS = {
+  PENDING: "PENDING",
+  EXECUTING: "EXECUTING",
+  EXECUTED: "EXECUTED",
+  CANCELED: "CANCELED",
+  EXPIRED: "EXPIRED",
+  FAILED: "FAILED",
+} as const;
+
+type PendingOperationStatus = typeof STATUS[keyof typeof STATUS];
+
+type PendingOperationContext = {
+  workspaceId: string;
+  sessionId: string;
+  userId: string;
+  agentKey: string;
+  userMessage: string;
+};
+
+export type PendingOperationRecord = {
+  id: string;
+  workspaceId: string;
+  conversationId: string;
+  userId: string;
+  agentKey: string;
+  toolName: string;
+  argsJson: unknown;
+  argsHash: string;
+  idempotencyKey: string;
+  relatedEntityType: string | null;
+  relatedEntityId: string | null;
+  riskLabel: string;
+  status: PendingOperationStatus;
+  resultJson: unknown | null;
+  errorCode: string | null;
+  errorMessage: string | null;
+  proposedAt: Date;
+  expiresAt: Date;
+  executedAt: Date | null;
+  canceledAt: Date | null;
+};
+
+type PendingOperationIntent = {
+  kind: "confirm" | "cancel";
+  pendingOperationId: string | null;
+};
+
+function hash(value: string) {
+  return createHash("sha256").update(value).digest("hex");
+}
+
+function jsonSafe(value: unknown) {
+  return JSON.parse(JSON.stringify(value ?? null));
+}
+
+function canonicalize(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map((item) => canonicalize(item));
+  if (value && typeof value === "object") {
+    const result: Record<string, unknown> = {};
+    for (const key of Object.keys(value).sort()) {
+      const entry = (value as Record<string, unknown>)[key];
+      if (entry !== undefined) result[key] = canonicalize(entry);
+    }
+    return result;
+  }
+  return value;
+}
+
+function stableJson(value: unknown) {
+  return JSON.stringify(canonicalize(value));
+}
+
+function operationArgsHash(toolName: string, args: unknown) {
+  return hash(stableJson({ toolName, args }));
+}
+
+function operationIdempotencyKey(ctx: PendingOperationContext, toolName: string, argsHash: string) {
+  const messageHash = hash(ctx.userMessage.trim()).slice(0, 16);
+  return `crm-pending:${ctx.sessionId}:${toolName}:${messageHash}:${argsHash.slice(0, 24)}`;
+}
+
+function relatedEntity(toolName: string, args: Record<string, unknown>) {
+  if (toolName === "complete_relationship_activity" && typeof args.activityId === "string") {
+    return { type: "CrmActivity", id: args.activityId };
+  }
+  if (typeof args.activityId === "string") return { type: "CrmActivity", id: args.activityId };
+  if (typeof args.accountId === "string") return { type: "CrmAccount", id: args.accountId };
+  if (typeof args.contactId === "string") return { type: "CrmContact", id: args.contactId };
+  if (typeof args.dealId === "string") return { type: "CrmDeal", id: args.dealId };
+  return { type: null, id: null };
+}
+
+function riskLabel(toolName: string) {
+  if (toolName === "complete_relationship_activity") return "crm-write:complete-activity";
+  if (toolName === "create_communication_suggestion") return "crm-write:create-suggestion";
+  return "crm-write:record-activity";
+}
+
+function pendingOperationIdFromMessage(message: string) {
+  return message.match(/\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/i)?.[0] ?? null;
+}
+
+export function crmPendingOperationIntent(message: string): PendingOperationIntent | null {
+  const normalized = message.trim().toLowerCase();
+  if (!normalized) return null;
+
+  const pendingOperationId = pendingOperationIdFromMessage(message);
+  if (/^(cancel|never mind|nevermind|stop|abort|discard)\b/.test(normalized)
+    || /\b(cancel|abort|discard) (it|that|the pending|operation|crm)\b/.test(normalized)) {
+    return { kind: "cancel", pendingOperationId };
+  }
+
+  if (/^(yes|yep|yeah|ok|okay|confirm|confirmed|approved|approve|go ahead|do it|please do|proceed|run it|create it|record it|draft it|complete it)\b/.test(normalized)
+    || /\b(confirm(ed)?|go ahead|do it|please do|proceed|run it)\b/.test(normalized)) {
+    return { kind: "confirm", pendingOperationId };
+  }
+
+  return null;
+}
+
+export function crmPendingOperationNotice(operation: PendingOperationRecord) {
+  return [
+    `Pending operation ID: ${operation.id}`,
+    `CRM operation: ${operation.toolName}`,
+    `Risk: ${operation.riskLabel}`,
+    `Approve by replying "confirm ${operation.id}" or cancel with "cancel ${operation.id}".`,
+  ].join("\n");
+}
+
+export function crmPendingOperationResultNotice(operation: PendingOperationRecord, result: unknown) {
+  const json = jsonSafe(result) as Record<string, any>;
+  const activityId = json.activity?.id;
+  const suggestionId = json.suggestion?.id;
+  const recordLine = activityId
+    ? `Activity ID: ${activityId}`
+    : suggestionId
+      ? `Suggestion ID: ${suggestionId}`
+      : "Record ID: unavailable";
+  return [
+    `Confirmed pending operation ID: ${operation.id}`,
+    `CRM operation: ${operation.toolName}`,
+    recordLine,
+  ].join("\n");
+}
+
+export function crmPendingOperationCancelNotice(operation: PendingOperationRecord) {
+  return `Canceled pending operation ID: ${operation.id}`;
+}
+
+export function crmPendingOperationExpiredNotice(operation: PendingOperationRecord) {
+  return `Pending CRM operation ${operation.id} expired before confirmation. Please ask me to prepare the CRM change again.`;
+}
+
+export function crmPendingOperationFailedNotice(operation: PendingOperationRecord) {
+  const message = operation.errorMessage ? ` ${operation.errorMessage}` : "";
+  return `Pending CRM operation ${operation.id} cannot be confirmed because it is ${operation.status.toLowerCase()}.${message}`;
+}
+
+export async function createPendingCrmOperation({
+  ctx,
+  toolName,
+  args,
+}: {
+  ctx: PendingOperationContext;
+  toolName: string;
+  args: Record<string, unknown>;
+}) {
+  const argsJson = jsonSafe(args) as Record<string, unknown>;
+  const argsHash = operationArgsHash(toolName, argsJson);
+  const idempotencyKey = operationIdempotencyKey(ctx, toolName, argsHash);
+  const existing = await prisma.conversationPendingOperation.findUnique({
+    where: {
+      workspaceId_idempotencyKey: {
+        workspaceId: ctx.workspaceId,
+        idempotencyKey,
+      },
+    },
+  });
+  if (existing) return existing as PendingOperationRecord;
+
+  const related = relatedEntity(toolName, argsJson);
+  return await prisma.conversationPendingOperation.create({
+    data: {
+      workspaceId: ctx.workspaceId,
+      conversationId: ctx.sessionId,
+      userId: ctx.userId,
+      agentKey: ctx.agentKey,
+      toolName,
+      argsJson: argsJson as Prisma.InputJsonValue,
+      argsHash,
+      idempotencyKey,
+      relatedEntityType: related.type,
+      relatedEntityId: related.id,
+      riskLabel: riskLabel(toolName),
+      expiresAt: new Date(Date.now() + PENDING_OPERATION_TTL_MS),
+    },
+  }) as PendingOperationRecord;
+}
+
+export async function findCrmPendingOperationForIntent(ctx: PendingOperationContext, intent: PendingOperationIntent) {
+  const where = {
+    workspaceId: ctx.workspaceId,
+    conversationId: ctx.sessionId,
+    userId: ctx.userId,
+    agentKey: ctx.agentKey,
+  };
+
+  if (intent.pendingOperationId) {
+    return await prisma.conversationPendingOperation.findFirst({
+      where: { ...where, id: intent.pendingOperationId },
+      orderBy: { createdAt: "desc" },
+    }) as PendingOperationRecord | null;
+  }
+
+  return await prisma.conversationPendingOperation.findFirst({
+    where,
+    orderBy: { createdAt: "desc" },
+  }) as PendingOperationRecord | null;
+}
+
+export async function cancelCrmPendingOperation(operation: PendingOperationRecord) {
+  if (operation.status !== STATUS.PENDING) return operation;
+  return await prisma.conversationPendingOperation.update({
+    where: { id: operation.id },
+    data: {
+      status: STATUS.CANCELED,
+      canceledAt: new Date(),
+    },
+  }) as PendingOperationRecord;
+}
+
+export async function beginCrmPendingOperationExecution(operation: PendingOperationRecord) {
+  if (operation.status === STATUS.EXECUTED) return { state: "already-executed" as const, operation };
+  if (operation.status !== STATUS.PENDING) return { state: "unavailable" as const, operation };
+
+  const now = new Date();
+  if (operation.expiresAt <= now) {
+    const expired = await prisma.conversationPendingOperation.update({
+      where: { id: operation.id },
+      data: {
+        status: STATUS.EXPIRED,
+        errorCode: "CRM_PENDING_OPERATION_EXPIRED",
+        errorMessage: "The pending operation expired before confirmation.",
+      },
+    }) as PendingOperationRecord;
+    return { state: "expired" as const, operation: expired };
+  }
+
+  const updated = await prisma.conversationPendingOperation.updateMany({
+    where: {
+      id: operation.id,
+      status: STATUS.PENDING,
+      expiresAt: { gt: now },
+    },
+    data: { status: STATUS.EXECUTING },
+  });
+  if (updated.count === 1) {
+    const executing = await prisma.conversationPendingOperation.findUnique({ where: { id: operation.id } });
+    return { state: "ready" as const, operation: executing as PendingOperationRecord };
+  }
+
+  const latest = await prisma.conversationPendingOperation.findUnique({ where: { id: operation.id } });
+  if (!latest) return { state: "unavailable" as const, operation };
+  return { state: latest?.status === STATUS.EXECUTED ? "already-executed" as const : "unavailable" as const, operation: latest as PendingOperationRecord };
+}
+
+export async function markCrmPendingOperationExecuted(operation: PendingOperationRecord, result: unknown) {
+  return await prisma.conversationPendingOperation.update({
+    where: { id: operation.id },
+    data: {
+      status: STATUS.EXECUTED,
+      resultJson: jsonSafe(result),
+      executedAt: new Date(),
+      errorCode: null,
+      errorMessage: null,
+    },
+  }) as PendingOperationRecord;
+}
+
+export async function markCrmPendingOperationFailed(operation: PendingOperationRecord, error: unknown) {
+  const message = error instanceof Error ? error.message : String(error);
+  return await prisma.conversationPendingOperation.update({
+    where: { id: operation.id },
+    data: {
+      status: STATUS.FAILED,
+      errorCode: "CRM_PENDING_OPERATION_FAILED",
+      errorMessage: message,
+    },
+  }) as PendingOperationRecord;
+}

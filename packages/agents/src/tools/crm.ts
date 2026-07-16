@@ -19,6 +19,10 @@ export const CRM_WRITE_TOOL_NAMES = new Set([
   "create_communication_suggestion",
 ]);
 
+function definedEntries(value: Record<string, unknown>) {
+  return Object.fromEntries(Object.entries(value).filter(([, entry]) => entry !== undefined));
+}
+
 function selectedAccountId(ctx: CrmToolContext, value?: string | null) {
   return value ?? (ctx.pageContext?.surface === "crm" ? ctx.pageContext.selectedIds?.accountId ?? undefined : undefined);
 }
@@ -49,6 +53,44 @@ function activityResult(workspaceId: string, activity: any) {
   };
 }
 
+export function normalizeCrmWriteToolArgs(toolName: string, ctx: CrmToolContext, args: any) {
+  if (toolName === "record_relationship_activity") {
+    return definedEntries({
+      title: args.title,
+      type: args.type,
+      bodyMd: args.bodyMd,
+      accountId: selectedAccountId(ctx, args.accountId),
+      contactId: args.contactId,
+      dealId: args.dealId,
+      dueAt: args.dueAt,
+    });
+  }
+
+  if (toolName === "complete_relationship_activity") {
+    return definedEntries({
+      activityId: selectedActivityId(ctx, args.activityId),
+      completedAt: args.completedAt,
+    });
+  }
+
+  if (toolName === "create_communication_suggestion") {
+    return definedEntries({
+      title: args.title,
+      bodyMd: args.bodyMd,
+      subject: args.subject,
+      recipientEmail: args.recipientEmail,
+      recipientName: args.recipientName,
+      channel: args.channel,
+      accountId: selectedAccountId(ctx, args.accountId),
+      contactId: args.contactId,
+      dealId: args.dealId,
+      activityId: args.activityId,
+    });
+  }
+
+  return args;
+}
+
 export const crmTools: ModelTool[] = [
   {
     type: "function",
@@ -71,7 +113,7 @@ export const crmTools: ModelTool[] = [
     type: "function",
     function: {
       name: "record_relationship_activity",
-      description: "After explicit user confirmation, record a CRM note, task, activity, or follow-up. This does not send email.",
+      description: "Prepare a pending CRM note, task, activity, or follow-up for explicit user confirmation. This does not send email or execute until the pending operation is confirmed.",
       parameters: {
         type: "object",
         properties: {
@@ -91,7 +133,7 @@ export const crmTools: ModelTool[] = [
     type: "function",
     function: {
       name: "complete_relationship_activity",
-      description: "After explicit user confirmation, complete a CRM activity or follow-up reminder. This closes tracked work only and does not send email.",
+      description: "Prepare a pending completion for a CRM activity or follow-up reminder. This closes tracked work only after the pending operation is confirmed and does not send email.",
       parameters: {
         type: "object",
         properties: {
@@ -105,7 +147,7 @@ export const crmTools: ModelTool[] = [
     type: "function",
     function: {
       name: "create_communication_suggestion",
-      description: "After explicit user confirmation, create a CRM communication suggestion draft. Corgtex stores the draft only; it does not send email.",
+      description: "Prepare a pending CRM communication suggestion draft for explicit user confirmation. Corgtex stores the draft only after confirmation; it does not send email.",
       parameters: {
         type: "object",
         properties: {
