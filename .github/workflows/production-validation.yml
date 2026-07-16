@@ -1,0 +1,114 @@
+name: Production Validation
+
+on:
+  workflow_dispatch:
+    inputs:
+      base_url:
+        description: Production app base URL.
+        required: true
+        default: https://app.corgtex.com
+      expected_git_sha:
+        description: Expected production release SHA. Defaults to the workflow ref SHA.
+        required: false
+        default: ""
+      pr_numbers:
+        description: Comma-separated PR numbers covered by this validation run.
+        required: false
+        default: ""
+      crm_smoke:
+        description: Run the CRM pending-operation production smoke.
+        required: true
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+jobs:
+  crm-production-smoke:
+    name: CRM Pending-Operation Smoke
+    if: ${{ inputs.crm_smoke }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      BASE_URL: ${{ inputs.base_url }}
+      OUT_DIR: .artifacts/production-validation/crm
+      PR_NUMBERS: ${{ inputs.pr_numbers }}
+      WORKSPACE_SLUG: corgtex-validation
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Resolve expected release SHA
+        id: release
+        shell: bash
+        run: |
+          set -euo pipefail
+          expected="${{ inputs.expected_git_sha }}"
+          if [ -z "$expected" ]; then
+            expected="$GITHUB_SHA"
+          fi
+          echo "expected_git_sha=$expected" >> "$GITHUB_OUTPUT"
+
+      - name: Check production smoke credentials
+        id: credentials
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -z "${{ secrets.ADMIN_EMAIL }}" ] || [ -z "${{ secrets.ADMIN_PASSWORD }}" ]; then
+            echo "available=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Record blocked CRM validation
+        if: steps.credentials.outputs.available != 'true'
+        run: |
+          node scripts/production-validation-blocked.mjs \
+            --out-dir="$OUT_DIR" \
+            --base-url="$BASE_URL" \
+            --tenant-slug="$WORKSPACE_SLUG" \
+            --pr-numbers="$PR_NUMBERS" \
+            --method="crm-production-smoke" \
+            --intent="CRM pages, MCP reads, chat context, and safe writeback" \
+            --blocker="ADMIN_EMAIL and ADMIN_PASSWORD repository secrets are required."
+
+      - run: npm ci
+        if: steps.credentials.outputs.available == 'true'
+
+      - name: Install browser runtime
+        if: steps.credentials.outputs.available == 'true'
+        run: npx playwright install --with-deps chromium
+
+      - name: Run CRM pending-operation production smoke
+        if: steps.credentials.outputs.available == 'true'
+        run: node scripts/crm-production-smoke.mjs "$BASE_URL" "$OUT_DIR"
+        env:
+          ADMIN_EMAIL: ${{ secrets.ADMIN_EMAIL }}
+          ADMIN_PASSWORD: ${{ secrets.ADMIN_PASSWORD }}
+          CRM_SMOKE_WORKSPACE_SLUG: ${{ env.WORKSPACE_SLUG }}
+          CRM_SMOKE_PR_NUMBERS: ${{ env.PR_NUMBERS }}
+          CRM_SMOKE_EXPECTED_GIT_SHA: ${{ steps.release.outputs.expected_git_sha }}
+
+      - name: Add validation report to summary
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          report="$(find "$OUT_DIR" -maxdepth 1 -name '*.report.md' -print -quit 2>/dev/null || true)"
+          if [ -n "$report" ]; then
+            cat "$report" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "No CRM validation report was produced." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: production-validation-crm
+          path: .artifacts/production-validation/crm
+          if-no-files-found: warn
