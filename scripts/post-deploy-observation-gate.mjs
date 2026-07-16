@@ -291,8 +291,17 @@ export function rowMatchesRelease(row, manifest) {
 export function rowMatchesTargets(row, selectedTargets) {
   if (!selectedTargets || selectedTargets.size === 0) return true;
   const rowTargets = observationTargetsForRow(row);
-  if (rowTargets.length === 0) return true;
+  if (rowTargets.length === 0) return rowMatchesUnknownTargetProvider(row, selectedTargets);
   return rowTargets.some((target) => selectedTargets.has(target));
+}
+
+function rowMatchesUnknownTargetProvider(row, selectedTargets) {
+  const provider = safeText(row.provider)?.toLowerCase();
+  if (provider === "azure") return selectedTargets.has("azure-selfserve");
+  if (provider === "railway") {
+    return ["railway-customers", "ops", "backup-app"].some((target) => selectedTargets.has(target));
+  }
+  return true;
 }
 
 export function observationTargetsForRow(row) {

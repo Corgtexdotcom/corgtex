@@ -215,6 +215,12 @@ jobs:
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
+      - name: Mark observation window start
+        if: ${{ !inputs.dry_run }}
+        id: observation-window
+        shell: bash
+        run: echo "since=$(date -u +'%Y-%m-%dT%H:%M:%SZ')" >> "$GITHUB_OUTPUT"
+
       - name: Promote release through rings
         if: ${{ !inputs.dry_run }}
         env:
@@ -245,6 +251,7 @@ jobs:
           POSTHOG_QUERY_API_HOST: ${{ vars.POSTHOG_QUERY_API_HOST }}
           OBSERVATION_REQUIRE_SOURCE: "true"
           OBSERVATION_WINDOW_MINUTES: ${{ vars.OBSERVATION_WINDOW_MINUTES || '20' }}
+          OBSERVATION_SINCE: ${{ steps.observation-window.outputs.since }}
         run: |
           mkdir -p .artifacts/post-deploy-observation-gate
           if [[ "$TARGETS_INPUT" != "all" && "$TARGETS_INPUT" != *"azure-selfserve"* ]]; then
@@ -254,6 +261,7 @@ jobs:
           node scripts/post-deploy-observation-gate.mjs \
             --manifest-json "$MANIFEST_JSON" \
             --targets "$TARGETS_INPUT" \
+            --since "$OBSERVATION_SINCE" \
             --summary-file .artifacts/post-deploy-observation-gate/fleet-release.json \
             --publish-advisories
 

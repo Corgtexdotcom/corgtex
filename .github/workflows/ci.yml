@@ -472,59 +472,49 @@ jobs:
             ' <<< "$health_json"
           }
 
-          if [[ "${SMOKE_SKIP_RELEASE_MATCH:-}" == "true" ]]; then
-            {
-              read -r app_git_sha
-              read -r app_image_tag
-              read -r app_version
-            } < <(read_health_release "https://app.corgtex.com/api/health")
+          {
+            read -r app_git_sha
+            read -r app_image_tag
+            read -r app_version
+          } < <(read_health_release "https://app.corgtex.com/api/health")
 
-            {
-              read -r selfserve_git_sha
-              read -r selfserve_image_tag
-              read -r selfserve_version
-            } < <(read_health_release "https://selfserve.corgtex.com/api/health")
+          {
+            read -r selfserve_git_sha
+            read -r selfserve_image_tag
+            read -r selfserve_version
+          } < <(read_health_release "https://selfserve.corgtex.com/api/health")
 
-            {
-              read -r ops_git_sha
-              read -r ops_image_tag
-              read -r ops_version
-            } < <(read_health_release "https://ops.corgtex.com/api/health")
+          {
+            read -r ops_git_sha
+            read -r ops_image_tag
+            read -r ops_version
+          } < <(read_health_release "https://ops.corgtex.com/api/health")
 
-            manifest_json="$(
-              APP_GIT_SHA="$app_git_sha" \
-              APP_IMAGE_TAG="$app_image_tag" \
-              APP_VERSION="$app_version" \
-              SELFSERVE_GIT_SHA="$selfserve_git_sha" \
-              SELFSERVE_IMAGE_TAG="$selfserve_image_tag" \
-              SELFSERVE_VERSION="$selfserve_version" \
-              OPS_GIT_SHA="$ops_git_sha" \
-              OPS_IMAGE_TAG="$ops_image_tag" \
-              OPS_VERSION="$ops_version" \
-              node -e '
-                const targetManifests = [
-                  { target: "backup-app", gitSha: process.env.APP_GIT_SHA, imageTag: process.env.APP_IMAGE_TAG, releaseVersion: process.env.APP_VERSION },
-                  { target: "azure-selfserve", gitSha: process.env.SELFSERVE_GIT_SHA, imageTag: process.env.SELFSERVE_IMAGE_TAG, releaseVersion: process.env.SELFSERVE_VERSION },
-                  { target: "ops", gitSha: process.env.OPS_GIT_SHA, imageTag: process.env.OPS_IMAGE_TAG, releaseVersion: process.env.OPS_VERSION },
-                ];
-                console.log(JSON.stringify({ targetManifests }));
-              '
-            )"
-            echo "Observation uses live target releases from app, selfserve, and ops health"
-            node scripts/post-deploy-observation-gate.mjs \
-              --manifest-json "$manifest_json" \
-              --targets main-production-smoke \
-              --summary-file .artifacts/post-deploy-observation-gate/main-production-smoke.json \
-              --publish-advisories
-          else
-            node scripts/post-deploy-observation-gate.mjs \
-              --release-git-sha "$GITHUB_SHA" \
-              --release-image-tag "sha-$GITHUB_SHA" \
-              --release-version "main-${GITHUB_SHA:0:12}" \
-              --targets main-production-smoke \
-              --summary-file .artifacts/post-deploy-observation-gate/main-production-smoke.json \
-              --publish-advisories
-          fi
+          manifest_json="$(
+            APP_GIT_SHA="$app_git_sha" \
+            APP_IMAGE_TAG="$app_image_tag" \
+            APP_VERSION="$app_version" \
+            SELFSERVE_GIT_SHA="$selfserve_git_sha" \
+            SELFSERVE_IMAGE_TAG="$selfserve_image_tag" \
+            SELFSERVE_VERSION="$selfserve_version" \
+            OPS_GIT_SHA="$ops_git_sha" \
+            OPS_IMAGE_TAG="$ops_image_tag" \
+            OPS_VERSION="$ops_version" \
+            node -e '
+              const targetManifests = [
+                { target: "backup-app", gitSha: process.env.APP_GIT_SHA, imageTag: process.env.APP_IMAGE_TAG, releaseVersion: process.env.APP_VERSION },
+                { target: "azure-selfserve", gitSha: process.env.SELFSERVE_GIT_SHA, imageTag: process.env.SELFSERVE_IMAGE_TAG, releaseVersion: process.env.SELFSERVE_VERSION },
+                { target: "ops", gitSha: process.env.OPS_GIT_SHA, imageTag: process.env.OPS_IMAGE_TAG, releaseVersion: process.env.OPS_VERSION },
+              ];
+              console.log(JSON.stringify({ targetManifests }));
+            '
+          )"
+          echo "Observation uses live target releases from app, selfserve, and ops health"
+          node scripts/post-deploy-observation-gate.mjs \
+            --manifest-json "$manifest_json" \
+            --targets main-production-smoke \
+            --summary-file .artifacts/post-deploy-observation-gate/main-production-smoke.json \
+            --publish-advisories
 
       - name: Upload observation summary
         if: always()

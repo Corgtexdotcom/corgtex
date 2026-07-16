@@ -198,6 +198,28 @@ describe("post-deploy observation gate", () => {
     expect(summary.blockingFailures[0].instance_id).toBe("railway-runtime-without-target-metadata");
   });
 
+  it("does not block Azure-only gates on unknown Railway target rows", () => {
+    const summary = buildObservationSummary({
+      manifest,
+      since: new Date("2026-07-16T05:52:00.000Z"),
+      targets: "azure-selfserve",
+      rows: [{
+        source: "posthog",
+        event: "corgtex_route_error",
+        instance_id: "railway-runtime-without-target-metadata",
+        provider: "railway",
+        release_git_sha: SHA,
+        route: "/api/current-release",
+        status: "500",
+        events: 1,
+      }],
+    });
+
+    expect(summary.status).toBe("passed");
+    expect(summary.blockingFailures).toHaveLength(0);
+    expect(summary.advisoryFailures).toHaveLength(1);
+  });
+
   it("treats main production smoke as all production targets", () => {
     const summary = buildObservationSummary({
       manifest,
