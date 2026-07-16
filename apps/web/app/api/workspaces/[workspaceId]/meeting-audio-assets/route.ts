@@ -70,8 +70,11 @@ function formStringList(formData: FormData, key: string) {
     .filter(Boolean);
 }
 
-function parseRecordedAt(value: string | null) {
-  if (!value) throw new AppError(400, "INVALID_INPUT", "recordedAt is required.");
+function parseRecordedAt(value: string | null, required: boolean) {
+  if (!value) {
+    if (required) throw new AppError(400, "INVALID_INPUT", "recordedAt is required.");
+    return null;
+  }
   const recordedAt = new Date(value);
   if (Number.isNaN(recordedAt.valueOf())) {
     throw new AppError(400, "INVALID_INPUT", "recordedAt must be a valid date.");
@@ -169,15 +172,16 @@ export async function POST(request: NextRequest, { params }: RouteContext) {
     ({ workspaceId } = await params);
     const formData = await request.formData();
     const file = requireAudioFile(formData.get("file"));
+    const meetingId = formString(formData, "meetingId");
 
     const result = await createMeetingAudioAsset(actor, {
       workspaceId,
       fileName: file.name,
       mimeType: file.type || null,
       fileBuffer: Buffer.from(await file.arrayBuffer()),
-      meetingId: formString(formData, "meetingId"),
+      meetingId,
       title: formString(formData, "title"),
-      recordedAt: parseRecordedAt(formString(formData, "recordedAt")),
+      recordedAt: parseRecordedAt(formString(formData, "recordedAt"), !meetingId),
       durationSeconds: parseDurationSeconds(formString(formData, "durationSeconds")),
       participantEmails: formStringList(formData, "participantEmails"),
     });

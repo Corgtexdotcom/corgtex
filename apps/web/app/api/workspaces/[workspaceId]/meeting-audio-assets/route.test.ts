@@ -116,7 +116,6 @@ describe("/api/workspaces/[workspaceId]/meeting-audio-assets", () => {
     formData.set("file", new File(["audio"], "Team Sync.m4a", { type: "audio/mp4" }));
     formData.set("meetingId", "meeting-1");
     formData.set("title", "Team Sync");
-    formData.set("recordedAt", "2026-07-10T15:00:00.000Z");
     formData.set("durationSeconds", "180");
     formData.append("participantEmails", "jan@example.com, milan@example.com");
     formData.append("participantEmails", "david@example.com");
@@ -133,7 +132,7 @@ describe("/api/workspaces/[workspaceId]/meeting-audio-assets", () => {
         fileName: "Team Sync.m4a",
         mimeType: "audio/mp4",
         meetingId: "meeting-1",
-        recordedAt: new Date("2026-07-10T15:00:00.000Z"),
+        recordedAt: null,
         durationSeconds: 180,
         participantEmails: ["jan@example.com", "milan@example.com", "david@example.com"],
         fileBuffer: expect.any(Buffer),
@@ -148,7 +147,7 @@ describe("/api/workspaces/[workspaceId]/meeting-audio-assets", () => {
   it("rejects invalid upload input before domain creation", async () => {
     const { POST } = await import("./route");
     const formData = new FormData();
-    formData.set("file", new File(["text"], "notes.txt", { type: "text/plain" }));
+    formData.set("file", new File(["audio"], "Team Sync.m4a", { type: "audio/mp4" }));
 
     await POST(request({ method: "POST", body: formData }), context());
     expect(handleRouteError).toHaveBeenLastCalledWith(expect.any(MockAppError), {

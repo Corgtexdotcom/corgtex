@@ -48,7 +48,7 @@ describe("meeting transcript upload diagnostics", () => {
     const summary = buildMeetingTranscriptUploadDiagnostics({
       checkedAt: new Date("2026-07-16T12:00:00.000Z"),
       meetings: [
-        meeting({ id: "meeting-a", source: "customer-interview", transcript: "Jan: Same transcript." }),
+        meeting({ id: "meeting-a", source: "customer-interview", isDiagnosticTarget: false, transcript: "Jan: Same transcript." }),
         meeting({ id: "meeting-b", source: "Zoom", transcript: "Jan:   Same transcript.\n" }),
       ],
     });

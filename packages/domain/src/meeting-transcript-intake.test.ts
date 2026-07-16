@@ -30,12 +30,13 @@ describe("meeting transcript intake", () => {
     const metadata = await inferMeetingTranscriptMetadata({
       workspaceId: "workspace-1",
       title: " Weekly Tactical ",
-      recordedAt: "2026-05-17T10:00:00.000Z",
+      recordedAt: "2016-07-16T12:00:00.000Z",
+      validateExplicitRecordedAt: true,
       now: TEST_NOW,
       source: " production-smoke ",
       transcript: [
         "Meeting title: Weekly Tactical",
-        "Date: 2026-05-17T10:00:00.000Z",
+        "Date: 2016-07-16T12:00:00.000Z",
         "Jan: Andy@example.com owns the follow-up.",
       ].join("\n"),
     });
@@ -43,7 +44,7 @@ describe("meeting transcript intake", () => {
     expect(modelGatewayMock.extract).not.toHaveBeenCalled();
     expect(metadata).toEqual({
       title: "Weekly Tactical",
-      recordedAt: new Date("2026-05-17T10:00:00.000Z"),
+      recordedAt: new Date("2016-07-16T12:00:00.000Z"),
       participantEmails: ["andy@example.com"],
       source: "production-smoke",
     });

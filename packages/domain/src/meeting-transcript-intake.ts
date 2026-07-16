@@ -41,7 +41,6 @@ export type MeetingTranscriptSegment = {
   text: string;
 };
 
-const TEN_YEARS_MS = 10 * 365 * 24 * 60 * 60 * 1000;
 const NINETY_DAYS_MS = 90 * 24 * 60 * 60 * 1000;
 
 function cleanTitle(value: string | null | undefined) {
@@ -70,9 +69,10 @@ function asValidDate(value: unknown) {
 
 export function isPlausibleMeetingRecordedAt(value: Date | null, now = new Date()) {
   if (!value || Number.isNaN(value.valueOf())) return false;
-  const earliest = now.getTime() - TEN_YEARS_MS;
+  const earliest = new Date(now);
+  earliest.setFullYear(earliest.getFullYear() - 10);
   const latest = now.getTime() + NINETY_DAYS_MS;
-  return value.getTime() >= earliest && value.getTime() <= latest;
+  return value.getTime() >= earliest.getTime() && value.getTime() <= latest;
 }
 
 function asPlausibleRecordedAt(value: unknown, now = new Date()) {

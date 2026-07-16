@@ -15,10 +15,9 @@ function usage() {
     "usage: node scripts/meeting-transcript-upload-diagnostics.mjs --workspace <id-or-slug> [options]",
     "",
     "options:",
-    "  --since <iso-date>                       Only inspect meetings created/updated since this date.",
+    "  --since <iso-date>                       Emit non-duplicate advisories for meetings changed since this date.",
     "  --max-recorded-at-drift-days <number>    Flag manual transcript dates this far from upload time. Default: 30.",
     "  --processing-pending-minutes <number>    Flag transcript processing not READY after this age. Default: 30.",
-    "  --json                                  Print compact JSON only.",
   ].join("\n");
 }
 
@@ -66,6 +65,10 @@ function isManualTranscriptMeeting(meeting) {
   return !source.startsWith(PROVIDER_SOURCE_PREFIX)
     && !RECORDER_SOURCES.has(source)
     && !RECORDER_SOURCE_PREFIXES.some((prefix) => source.startsWith(prefix));
+}
+
+function isDiagnosticTarget(meeting) {
+  return meeting.isDiagnosticTarget !== false;
 }
 
 function progressDate(progress, key) {
@@ -116,13 +119,14 @@ export function buildMeetingTranscriptUploadDiagnostics({
     if (!isManualTranscriptMeeting(meeting)) continue;
     if (!meeting.transcript?.trim()) continue;
 
+    const isTarget = isDiagnosticTarget(meeting);
     const meetingSummary = serializableMeeting(meeting);
     const observedAt = transcriptObservedAt(meeting);
     const driftDays = meeting.recordedAt && observedAt
       ? daysBetween(meeting.recordedAt, observedAt)
       : null;
 
-    if (driftDays !== null && driftDays > maxRecordedAtDriftDays) {
+    if (isTarget && driftDays !== null && driftDays > maxRecordedAtDriftDays) {
       advisories.push({
         kind: "manual_transcript_recorded_at_outlier",
         severity: "warning",
@@ -143,7 +147,7 @@ export function buildMeetingTranscriptUploadDiagnostics({
       ?? meeting.updatedAt
       ?? meeting.createdAt;
     const ageMinutes = processingObservedAt ? minutesBetween(checkedAt, processingObservedAt) : 0;
-    if (ageMinutes >= processingPendingMinutes && progress?.currentStage !== "READY") {
+    if (isTarget && ageMinutes >= processingPendingMinutes && progress?.currentStage !== "READY") {
       advisories.push({
         kind: "transcript_processing_not_ready",
         severity: "warning",
@@ -154,7 +158,7 @@ export function buildMeetingTranscriptUploadDiagnostics({
   }
 
   for (const [hash, group] of transcriptGroups.entries()) {
-    if (group.length < 2) continue;
+    if (group.length < 2 || !group.some(isDiagnosticTarget)) continue;
     advisories.push({
       kind: "duplicate_manual_transcript_content",
       severity: "warning",
@@ -187,15 +191,11 @@ async function findWorkspace(prisma, workspace) {
 }
 
 async function loadMeetings(prisma, workspaceId, since) {
-  return prisma.meeting.findMany({
+  const meetings = await prisma.meeting.findMany({
     where: {
       workspaceId,
       transcript: { not: null },
       archivedAt: null,
-      OR: [
-        { createdAt: { gte: since } },
-        { updatedAt: { gte: since } },
-      ],
     },
     orderBy: { createdAt: "desc" },
     select: {
@@ -217,27 +217,10 @@ async function loadMeetings(prisma, workspaceId, since) {
       },
     },
   });
-}
-
-function printHuman(summary) {
-  console.log(`Workspace: ${summary.workspace.name} (${summary.workspace.slug ?? summary.workspace.id})`);
-  console.log(`Checked: ${summary.checkedAt}`);
-  console.log(`Advisories: ${summary.advisoryCount}`);
-  for (const advisory of summary.advisories) {
-    if (advisory.kind === "duplicate_manual_transcript_content") {
-      console.log(`\n- duplicate_manual_transcript_content hash=${advisory.transcriptHash}`);
-      for (const meeting of advisory.meetings) {
-        console.log(`  ${meeting.id} recordedAt=${meeting.recordedAt} title=${meeting.title ?? "Untitled meeting"}`);
-      }
-    } else {
-      const meeting = advisory.meeting;
-      const detail = advisory.driftDays
-        ? `driftDays=${advisory.driftDays}`
-        : `ageMinutes=${advisory.ageMinutes}`;
-      console.log(`\n- ${advisory.kind} ${meeting.id} ${detail}`);
-      console.log(`  recordedAt=${meeting.recordedAt} createdAt=${meeting.createdAt} title=${meeting.title ?? "Untitled meeting"}`);
-    }
-  }
+  return meetings.map((meeting) => ({
+    ...meeting,
+    isDiagnosticTarget: meeting.createdAt >= since || meeting.updatedAt >= since,
+  }));
 }
 
 export async function runCli(argv = process.argv.slice(2), env = process.env) {
@@ -273,11 +256,7 @@ export async function runCli(argv = process.argv.slice(2), env = process.env) {
       since: since.toISOString(),
     };
 
-    if (hasArg(argv, "--json")) {
-      console.log(JSON.stringify(summary));
-    } else {
-      printHuman(summary);
-    }
+    console.log(JSON.stringify(summary, null, hasArg(argv, "--json") ? 0 : 2));
 
     return 0;
   } finally {
