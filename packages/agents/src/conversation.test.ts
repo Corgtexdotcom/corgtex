@@ -296,6 +296,13 @@ describe("processConversationTurn", () => {
     ]);
   }
 
+  function testUserActor() {
+    return {
+      kind: "user" as const,
+      user: { id: "user-1", email: "user@example.com", displayName: "User" },
+    };
+  }
+
   function streamResponse(chunks: string[], result: Record<string, any>) {
     return (async function* () {
       for (const chunk of chunks) {
@@ -316,6 +323,34 @@ describe("processConversationTurn", () => {
       }
       chunks.push(value);
     }
+  }
+
+  function crmPageContext() {
+    return {
+      surface: "crm" as const,
+      route: "/workspaces/ws-1/leads/accounts/account-1",
+      workspaceId: "ws-1",
+      view: "account-detail",
+      section: "overview",
+      selectedIds: { accountId: "account-1", contactId: null, dealId: null, activityId: null, suggestionId: null },
+      filters: { view: "overview" },
+      pagination: { page: null, pageCount: null, total: null },
+      visibleContext: {
+        metrics: [],
+        accounts: [{
+          id: "account-1",
+          name: "Acme",
+          domain: "acme.test",
+          relationshipType: "CLIENT",
+          lifecycleStage: "ACTIVE",
+          webUrl: "/workspaces/ws-1/leads/accounts/account-1",
+        }],
+        contacts: [],
+        deals: [],
+        activities: [],
+        suggestions: [],
+      },
+    };
   }
 
   function addPendingCrmOperation(overrides: Record<string, any> = {}) {
@@ -900,6 +935,446 @@ describe("processConversationTurn", () => {
     }));
   });
 
+  it("streams a grounded CRM page-context fallback when the model returns empty text", async () => {
+    const actor = testUserActor();
+    chatStreamMock.mockReturnValueOnce(streamResponse([], { content: "" }));
+
+    const { processConversationTurnStream } = await import("./conversation");
+    const { chunks, result } = await collectConversationStream(processConversationTurnStream({
+      workspaceId: "ws-1",
+      sessionId: "session-1",
+      userId: "user-1",
+      agentKey: "assistant",
+      userMessage: "What CRM account am I viewing?",
+      actor,
+      pageContext: crmPageContext(),
+    }));
+
+    const streamedMessage = chunks.join("");
+    expect(streamedMessage).toContain("Acme (account-1)");
+    expect(result.assistantMessage).toContain("Acme (account-1)");
+    expect(result.contextUsed.pageContext).toMatchObject({
+      surface: "crm",
+      selectedIds: { accountId: "account-1" },
+    });
+  });
+
+  it("escapes named CRM account IDs in page-context fallbacks", async () => {
+    const actor = testUserActor();
+    const maliciousId = "[Open](javascript:alert(document.domain))";
+    const context = crmPageContext();
+    chatStreamMock.mockReturnValueOnce(streamResponse([], { content: "" }));
+
+    const { processConversationTurnStream } = await import("./conversation");
+    const { chunks } = await collectConversationStream(processConversationTurnStream({
+      workspaceId: "ws-1",
+      sessionId: "session-1",
+      userId: "user-1",
+      agentKey: "assistant",
+      userMessage: "What CRM account am I viewing?",
+      actor,
+      pageContext: {
+        ...context,
+        selectedIds: { ...context.selectedIds, accountId: maliciousId },
+        visibleContext: {
+          ...context.visibleContext,
+          accounts: [{
+            id: maliciousId,
+            name: "Malicious Account",
+            stage: null,
+            ownerId: null,
+            updatedAt: null,
+            nextActivityAt: null,
+            webUrl: "/workspaces/ws-1/leads/accounts/malicious",
+          }],
+        },
+      },
+    }));
+
+    const streamedMessage = chunks.join("");
+    expect(streamedMessage).toContain("Malicious Account (\\[Open\\]\\(javascript:alert\\(document\\.domain\\)\\))");
+    expect(streamedMessage).not.toContain("Malicious Account ([Open](javascript:alert(document.domain)))");
+  });
+
+  it("does not claim the first listed CRM account is selected when no account is selected", async () => {
+    const actor = testUserActor();
+    const context = crmPageContext();
+    chatStreamMock.mockReturnValueOnce(streamResponse([], { content: "" }));
+
+    const { processConversationTurnStream } = await import("./conversation");
+    const { chunks, result } = await collectConversationStream(processConversationTurnStream({
+      workspaceId: "ws-1",
+      sessionId: "session-1",
+      userId: "user-1",
+      agentKey: "assistant",
+      userMessage: "What CRM account am I viewing?",
+      actor,
+      pageContext: {
+        ...context,
+        view: "accounts",
+        selectedIds: { ...context.selectedIds, accountId: null },
+      },
+    }));
+
+    const streamedMessage = chunks.join("");
+    expect(streamedMessage).not.toContain("Acme (account-1)");
+    expect(result.assistantMessage).toContain("did not return a natural-language response");
+  });
+
+  it("streams a CRM due-work fallback when tool execution succeeds but the follow-up model is empty", async () => {
+    const actor = testUserActor();
+    chatStreamMock
+      .mockReturnValueOnce(streamResponse([], {
+        content: "",
+        tool_calls: [{
+          id: "call-1",
+          function: {
+            name: "list_due_relationship_work",
+            arguments: JSON.stringify({ accountId: "account-1", take: 5 }),
+          },
+        }],
+      }))
+      .mockReturnValueOnce(streamResponse([], { content: "" }));
+
+    const { processConversationTurnStream } = await import("./conversation");
+    const { chunks, result } = await collectConversationStream(processConversationTurnStream({
+      workspaceId: "ws-1",
+      sessionId: "session-1",
+      userId: "user-1",
+      agentKey: "assistant",
+      userMessage: "Use list_due_relationship_work for selected account account-1.",
+      actor,
+      pageContext: crmPageContext(),
+    }));
+
+    const streamedMessage = chunks.join("");
+    expect(streamedMessage).toContain("1 open CRM relationship work item");
+    expect(streamedMessage).toContain("Follow up");
+    expect(result.assistantMessage).toContain("1 open CRM relationship work item");
+    expect(listCrmActivitiesMock).toHaveBeenCalledWith(actor, "ws-1", expect.objectContaining({
+      accountId: "account-1",
+      type: "TASK",
+      completion: "open",
+    }));
+  });
+
+  it("uses the due-work tool scope and escapes CRM titles in empty-model fallbacks", async () => {
+    const actor = testUserActor();
+    listCrmActivitiesMock.mockResolvedValueOnce({
+      total: 1,
+      items: [{
+        id: "activity-2",
+        title: "[Open](javascript:alert(document.domain))",
+        type: "TASK",
+        accountId: "account-2",
+        dueAt: new Date("2026-06-20T10:00:00.000Z"),
+        completedAt: null,
+      }],
+    });
+    chatStreamMock
+      .mockReturnValueOnce(streamResponse([], {
+        content: "",
+        tool_calls: [{
+          id: "call-1",
+          function: {
+            name: "list_due_relationship_work",
+            arguments: JSON.stringify({ accountId: "account-2", take: 5 }),
+          },
+        }],
+      }))
+      .mockReturnValueOnce(streamResponse([], { content: "" }));
+
+    const { processConversationTurnStream } = await import("./conversation");
+    const { chunks } = await collectConversationStream(processConversationTurnStream({
+      workspaceId: "ws-1",
+      sessionId: "session-1",
+      userId: "user-1",
+      agentKey: "assistant",
+      userMessage: "Use list_due_relationship_work for account account-2.",
+      actor,
+      pageContext: crmPageContext(),
+    }));
+
+    const streamedMessage = chunks.join("");
+    expect(streamedMessage).toContain("for CRM account account-2");
+    expect(streamedMessage).not.toContain("for CRM account Acme (account-1)");
+    expect(streamedMessage).not.toContain("[Open](javascript:alert(document.domain))");
+    expect(streamedMessage).toContain("\\[Open\\]\\(javascript:alert\\(document\\.domain\\)\\)");
+  });
+
+  it("does not attribute empty account-id CRM due-work requests to the selected account", async () => {
+    const actor = testUserActor();
+    listCrmActivitiesMock.mockResolvedValueOnce({
+      total: 1,
+      items: [{
+        id: "activity-2",
+        title: "Workspace-wide follow up",
+        type: "TASK",
+        accountId: "account-2",
+        dueAt: new Date("2026-06-20T10:00:00.000Z"),
+        completedAt: null,
+      }],
+    });
+    chatStreamMock
+      .mockReturnValueOnce(streamResponse([], {
+        content: "",
+        tool_calls: [{
+          id: "call-1",
+          function: {
+            name: "list_due_relationship_work",
+            arguments: JSON.stringify({ accountId: "", take: 5 }),
+          },
+        }],
+      }))
+      .mockReturnValueOnce(streamResponse([], { content: "" }));
+
+    const { processConversationTurnStream } = await import("./conversation");
+    const { chunks } = await collectConversationStream(processConversationTurnStream({
+      workspaceId: "ws-1",
+      sessionId: "session-1",
+      userId: "user-1",
+      agentKey: "assistant",
+      userMessage: "Use list_due_relationship_work with an empty account id.",
+      actor,
+      pageContext: crmPageContext(),
+    }));
+
+    const streamedMessage = chunks.join("");
+    expect(listCrmActivitiesMock).toHaveBeenCalledWith(actor, "ws-1", expect.objectContaining({
+      accountId: "",
+      type: "TASK",
+      completion: "open",
+    }));
+    expect(streamedMessage).toContain("Workspace-wide follow up");
+    expect(streamedMessage).toContain("for the requested CRM scope");
+    expect(streamedMessage).not.toContain("Acme (account-1)");
+  });
+
+  it("preserves whitespace in CRM due-work query scope labels", async () => {
+    const actor = testUserActor();
+    listCrmActivitiesMock.mockResolvedValueOnce({ total: 0, items: [] });
+    chatStreamMock
+      .mockReturnValueOnce(streamResponse([], {
+        content: "",
+        tool_calls: [{
+          id: "call-1",
+          function: {
+            name: "list_due_relationship_work",
+            arguments: JSON.stringify({ accountId: " account-1 ", take: 5 }),
+          },
+        }],
+      }))
+      .mockReturnValueOnce(streamResponse([], { content: "" }));
+
+    const { processConversationTurnStream } = await import("./conversation");
+    const { chunks } = await collectConversationStream(processConversationTurnStream({
+      workspaceId: "ws-1",
+      sessionId: "session-1",
+      userId: "user-1",
+      agentKey: "assistant",
+      userMessage: "Use list_due_relationship_work for this exact account filter.",
+      actor,
+      pageContext: crmPageContext(),
+    }));
+
+    const streamedMessage = chunks.join("");
+    expect(listCrmActivitiesMock).toHaveBeenCalledWith(actor, "ws-1", expect.objectContaining({
+      accountId: " account-1 ",
+    }));
+    expect(streamedMessage).toContain("CRM account  account-1 ");
+    expect(streamedMessage).not.toContain("CRM account Acme (account-1)");
+  });
+
+  it("keeps streamed preambles and partial CRM due-work failures alongside successful fallbacks", async () => {
+    const actor = testUserActor();
+    listCrmActivitiesMock
+      .mockResolvedValueOnce({
+        total: 1,
+        items: [{ id: "activity-1", title: "First follow up", type: "TASK", accountId: "account-1", dueAt: null, completedAt: null }],
+      })
+      .mockRejectedValueOnce(new Error("CRM unavailable"));
+    chatStreamMock
+      .mockReturnValueOnce(streamResponse(["I'll check that."], {
+        content: "",
+        tool_calls: [
+          {
+            id: "call-1",
+            function: {
+              name: "list_due_relationship_work",
+              arguments: JSON.stringify({ accountId: "account-1", take: 5 }),
+            },
+          },
+          {
+            id: "call-2",
+            function: {
+              name: "list_due_relationship_work",
+              arguments: JSON.stringify({ accountId: "account-2", take: 5 }),
+            },
+          },
+        ],
+      }))
+      .mockReturnValueOnce(streamResponse([], { content: "" }));
+
+    const { processConversationTurnStream } = await import("./conversation");
+    const { chunks } = await collectConversationStream(processConversationTurnStream({
+      workspaceId: "ws-1",
+      sessionId: "session-1",
+      userId: "user-1",
+      agentKey: "assistant",
+      userMessage: "Compare due work for account-1 and account-2.",
+      actor,
+      pageContext: crmPageContext(),
+    }));
+
+    const streamedMessage = chunks.join("");
+    expect(streamedMessage).toContain("I'll check that.");
+    expect(streamedMessage).toContain("First follow up");
+    expect(streamedMessage).toContain("I could not complete the CRM relationship-work request for CRM account account-2");
+    expect(streamedMessage).toContain("The CRM request could not be completed");
+    expect(streamedMessage).not.toContain("CRM unavailable");
+    expect(streamedMessage).not.toContain("You are viewing the CRM account");
+  });
+
+  it("includes due-date bounds and escapes CRM filter IDs in empty-model fallbacks", async () => {
+    const actor = testUserActor();
+    listCrmActivitiesMock.mockResolvedValueOnce({ total: 0, items: [] });
+    chatStreamMock
+      .mockReturnValueOnce(streamResponse([], {
+        content: "",
+        tool_calls: [{
+          id: "call-1",
+          function: {
+            name: "list_due_relationship_work",
+            arguments: JSON.stringify({
+              contactId: "[Open](javascript:alert(document.domain))",
+              dealId: "deal-1",
+              dueTo: "2026-07-20T00:00:00.000Z",
+              take: 5,
+            }),
+          },
+        }],
+      }))
+      .mockReturnValueOnce(streamResponse([], { content: "" }));
+
+    const { processConversationTurnStream } = await import("./conversation");
+    const { chunks } = await collectConversationStream(processConversationTurnStream({
+      workspaceId: "ws-1",
+      sessionId: "session-1",
+      userId: "user-1",
+      agentKey: "assistant",
+      userMessage: "Use list_due_relationship_work for this contact before July 20.",
+      actor,
+      pageContext: crmPageContext(),
+    }));
+
+    const streamedMessage = chunks.join("");
+    expect(streamedMessage).toContain("CRM account Acme (account-1)");
+    expect(streamedMessage).toContain("CRM contact \\[Open\\]\\(javascript:alert\\(document\\.domain\\)\\)");
+    expect(streamedMessage).toContain("CRM deal deal-1");
+    expect(streamedMessage).toContain("due by 2026-07-20");
+    expect(streamedMessage).not.toContain("CRM contact [Open](javascript:alert(document.domain))");
+  });
+
+  it("includes every successful CRM due-work result in empty-model fallbacks", async () => {
+    const actor = testUserActor();
+    listCrmActivitiesMock
+      .mockResolvedValueOnce({
+        total: 1,
+        items: [{ id: "activity-1", title: "First follow up", type: "TASK", accountId: "account-1", dueAt: null, completedAt: null }],
+      })
+      .mockResolvedValueOnce({
+        total: 1,
+        items: [{ id: "activity-2", title: "Second follow up", type: "TASK", accountId: "account-2", dueAt: null, completedAt: null }],
+      });
+    chatStreamMock
+      .mockReturnValueOnce(streamResponse([], {
+        content: "",
+        tool_calls: [
+          {
+            id: "call-1",
+            function: {
+              name: "list_due_relationship_work",
+              arguments: JSON.stringify({ accountId: "account-1", take: 5 }),
+            },
+          },
+          {
+            id: "call-2",
+            function: {
+              name: "list_due_relationship_work",
+              arguments: JSON.stringify({ accountId: "account-2", take: 5 }),
+            },
+          },
+        ],
+      }))
+      .mockReturnValueOnce(streamResponse([], { content: "" }));
+
+    const { processConversationTurnStream } = await import("./conversation");
+    const { chunks } = await collectConversationStream(processConversationTurnStream({
+      workspaceId: "ws-1",
+      sessionId: "session-1",
+      userId: "user-1",
+      agentKey: "assistant",
+      userMessage: "Compare due CRM work for account-1 and account-2.",
+      actor,
+      pageContext: crmPageContext(),
+    }));
+
+    const streamedMessage = chunks.join("");
+    expect(streamedMessage).toContain("First follow up");
+    expect(streamedMessage).toContain("Second follow up");
+    expect(streamedMessage).toContain("for CRM account Acme (account-1)");
+    expect(streamedMessage).toContain("for CRM account account-2");
+  });
+
+  it("keeps due-work fallback text when the same empty-model turn also creates a pending CRM operation", async () => {
+    const actor = {
+      kind: "user" as const,
+      user: {
+        id: "user-1",
+        email: "user@example.com",
+        displayName: "User",
+      },
+    };
+    chatStreamMock
+      .mockReturnValueOnce(streamResponse([], {
+        content: "",
+        tool_calls: [
+          {
+            id: "call-1",
+            function: {
+              name: "list_due_relationship_work",
+              arguments: JSON.stringify({ accountId: "account-1", take: 5 }),
+            },
+          },
+          {
+            id: "call-2",
+            function: {
+              name: "record_relationship_activity",
+              arguments: JSON.stringify({ title: "New follow up", type: "TASK", accountId: "account-1" }),
+            },
+          },
+        ],
+      }))
+      .mockReturnValueOnce(streamResponse([], { content: "" }));
+
+    const { processConversationTurnStream } = await import("./conversation");
+    const { chunks, result } = await collectConversationStream(processConversationTurnStream({
+      workspaceId: "ws-1",
+      sessionId: "session-1",
+      userId: "user-1",
+      agentKey: "assistant",
+      userMessage: "Summarize due work and prepare a follow-up for account-1.",
+      actor,
+      pageContext: crmPageContext(),
+    }));
+
+    const streamedMessage = chunks.join("");
+    expect(streamedMessage).toContain("1 open CRM relationship work item");
+    expect(streamedMessage).toContain("Pending operation ID:");
+    expect(result.assistantMessage).toContain("1 open CRM relationship work item");
+    expect(result.assistantMessage).toContain(`Pending operation ID: ${pendingOperationId(1)}`);
+  });
+
   it("sanitizes CRM page context before model use", async () => {
     const { sanitizeConversationPageContext } = await import("./page-context");
     const context = sanitizeConversationPageContext({
@@ -1028,15 +1503,28 @@ describe("processConversationTurn", () => {
     checkBudgetMock
       .mockResolvedValueOnce({ allowed: true, usedPct: 80, usedUsd: 4, capUsd: 5 })
       .mockResolvedValueOnce({ allowed: false, usedPct: 100, usedUsd: 5, capUsd: 5 });
+    listCrmActivitiesMock.mockResolvedValueOnce({
+      total: 1,
+      items: [{ id: "activity-1", title: "First follow up", type: "TASK", accountId: "account-1", dueAt: null, completedAt: null }],
+    });
     chatMock.mockResolvedValueOnce({
-      content: "",
-      tool_calls: [{
-        id: "call-1",
-        function: {
-          name: "record_relationship_activity",
-          arguments: JSON.stringify({ title: "Follow up", type: "TASK", accountId: "account-1" }),
+      content: "I'll check that.",
+      tool_calls: [
+        {
+          id: "call-1",
+          function: {
+            name: "list_due_relationship_work",
+            arguments: JSON.stringify({ accountId: "account-1", take: 5 }),
+          },
         },
-      }],
+        {
+          id: "call-2",
+          function: {
+            name: "record_relationship_activity",
+            arguments: JSON.stringify({ title: "Follow up", type: "TASK", accountId: "account-1" }),
+          },
+        },
+      ],
     });
 
     const { processConversationTurn } = await import("./conversation");
@@ -1049,6 +1537,8 @@ describe("processConversationTurn", () => {
       actor,
     });
 
+    expect(result.assistantMessage).toContain("I'll check that.");
+    expect(result.assistantMessage).toContain("1 open CRM relationship work item");
     expect(result.assistantMessage).toContain(`Pending operation ID: ${pendingOperationId(1)}`);
     expect(result.assistantMessage).toContain("Stored args:");
     expect(chatMock).toHaveBeenCalledTimes(1);

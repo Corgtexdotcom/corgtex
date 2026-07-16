@@ -236,6 +236,18 @@ type PriorConversationTurn = {
   assistantMessage: string;
 };
 
+type ExecutedConversationToolResult = {
+  toolName: string;
+  args: Record<string, unknown>;
+  result: unknown;
+};
+
+type FailedConversationToolResult = {
+  toolName: string;
+  args: Record<string, unknown>;
+  error: string;
+};
+
 function compactForSearch(value: string | null | undefined, maxLength = 500) {
   return (value ?? "").replace(/\s+/g, " ").trim().slice(0, maxLength);
 }
@@ -435,6 +447,163 @@ function pendingNoticeAppendix(originalMessage: string, messageWithNotices: stri
     return appendix;
   }
   return messageWithNotices;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function stringValue(value: unknown) {
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+function rawStringValue(value: unknown) {
+  return typeof value === "string" && value.length > 0 ? value : null;
+}
+
+function escapeMarkdownText(value: string) {
+  return value.replace(/([\\`*_{}\[\]()#+.!<>|])/g, "\\$1");
+}
+
+function emptyAssistantFallback() {
+  return "The assistant did not return a natural-language response. Please retry or ask for a more specific summary.";
+}
+
+function publicToolFailureMessage() {
+  return "The CRM request could not be completed. Please retry or contact support if it keeps failing.";
+}
+
+function parseToolArgs(rawArguments?: string) {
+  if (!rawArguments) return {};
+  try {
+    const parsed = JSON.parse(rawArguments);
+    return isRecord(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function effectiveToolArgs(toolName: string, ctx: ConversationContext, rawArguments?: string) {
+  const args = parseToolArgs(rawArguments);
+  if (
+    toolName === "list_due_relationship_work"
+    && args.accountId == null
+    && ctx.pageContext?.surface === "crm"
+    && ctx.pageContext.selectedIds.accountId
+  ) {
+    return { ...args, accountId: ctx.pageContext.selectedIds.accountId };
+  }
+  return args;
+}
+
+function crmAccountLabel(pageContext: ConversationContext["pageContext"], accountId: string) {
+  if (!pageContext || pageContext.surface !== "crm") return escapeMarkdownText(accountId);
+  const account = pageContext.visibleContext.accounts.find((candidate) => candidate.id === accountId);
+  const accountName = stringValue(account?.name);
+  return accountName
+    ? `${escapeMarkdownText(accountName)} (${escapeMarkdownText(accountId)})`
+    : escapeMarkdownText(accountId);
+}
+
+function crmVisibleAccountFallback(pageContext: ConversationContext["pageContext"]) {
+  if (!pageContext || pageContext.surface !== "crm") return null;
+  const selectedAccountId = pageContext.selectedIds.accountId;
+  if (!selectedAccountId) return null;
+
+  const accountLabel = crmAccountLabel(pageContext, selectedAccountId);
+  const section = pageContext.section ? ` in the ${escapeMarkdownText(pageContext.section)} section` : "";
+  return `You are viewing the CRM account ${accountLabel}${section}.`;
+}
+
+function dueToScope(value: unknown) {
+  const dueTo = stringValue(value);
+  if (!dueTo) return null;
+  const parsed = new Date(dueTo);
+  const label = Number.isNaN(parsed.getTime()) ? dueTo : parsed.toISOString();
+  return `due by ${escapeMarkdownText(label)}`;
+}
+
+function joinScopeLabels(scopes: string[]) {
+  if (scopes.length <= 2) return scopes.join(" and ");
+  return `${scopes.slice(0, -1).join(", ")} and ${scopes[scopes.length - 1]}`;
+}
+
+function crmDueWorkScope(args: Record<string, unknown>, pageContext: ConversationContext["pageContext"]) {
+  const scopes: string[] = [];
+  const accountId = rawStringValue(args.accountId);
+  if (accountId) scopes.push(`CRM account ${crmAccountLabel(pageContext, accountId)}`);
+
+  const contactId = rawStringValue(args.contactId);
+  if (contactId) scopes.push(`CRM contact ${escapeMarkdownText(contactId)}`);
+
+  const dealId = rawStringValue(args.dealId);
+  if (dealId) scopes.push(`CRM deal ${escapeMarkdownText(dealId)}`);
+
+  const dueTo = dueToScope(args.dueTo);
+  if (dueTo) scopes.push(dueTo);
+
+  if (scopes.length > 0) return `for ${joinScopeLabels(scopes)}`;
+
+  return "for the requested CRM scope";
+}
+
+function crmDueWorkFallback(
+  toolResult: unknown,
+  args: Record<string, unknown>,
+  pageContext: ConversationContext["pageContext"],
+) {
+  if (!isRecord(toolResult)) return null;
+  const total = typeof toolResult.total === "number" ? toolResult.total : null;
+  const items = Array.isArray(toolResult.items) ? toolResult.items.filter(isRecord) : [];
+  const scope = crmDueWorkScope(args, pageContext);
+  const workKind = rawStringValue(args.dueTo) ? "open due CRM relationship work" : "open CRM relationship work";
+  if (items.length === 0) {
+    return total === 0
+      ? `There is no ${workKind} ${scope}.`
+      : `I could not find ${workKind} ${scope}.`;
+  }
+
+  const titles = items
+    .map((item) => stringValue(item.title))
+    .filter((title): title is string => Boolean(title))
+    .map(escapeMarkdownText)
+    .slice(0, 3);
+  const totalText = total == null ? `${items.length}` : `${total}`;
+  const titleText = titles.length > 0 ? `: ${titles.join("; ")}` : ".";
+  return `There ${totalText === "1" ? "is" : "are"} ${totalText} ${workKind} ${totalText === "1" ? "item" : "items"} ${scope}${titleText}`;
+}
+
+function crmToolFallback(
+  toolResults: ExecutedConversationToolResult[],
+  pageContext: ConversationContext["pageContext"],
+  toolFailures: FailedConversationToolResult[] = [],
+) {
+  const dueWorkResults = toolResults
+    .filter((toolResult) => toolResult.toolName === "list_due_relationship_work")
+    .map((toolResult) => crmDueWorkFallback(toolResult.result, toolResult.args, pageContext))
+    .filter((fallback): fallback is string => Boolean(fallback));
+  const dueWorkFailures = toolFailures
+    .filter((toolFailure) => toolFailure.toolName === "list_due_relationship_work")
+    .map((toolFailure) => {
+      const scope = crmDueWorkScope(toolFailure.args, pageContext);
+      return `I could not complete the CRM relationship-work request ${scope}. ${publicToolFailureMessage()}`;
+    });
+  const fallbacks = [...dueWorkResults, ...dueWorkFailures];
+  return fallbacks.length > 0 ? fallbacks.join("\n") : null;
+}
+
+function ensureAssistantMessage(
+  message: string,
+  ctx: ConversationContext,
+  toolResults: ExecutedConversationToolResult[],
+  toolFailures: FailedConversationToolResult[] = [],
+  toolExecutionAttempted = false,
+) {
+  if (message.trim()) return message;
+  const toolFallback = crmToolFallback(toolResults, ctx.pageContext, toolFailures);
+  if (toolFallback) return toolFallback;
+  if (toolExecutionAttempted) return emptyAssistantFallback();
+  return crmVisibleAccountFallback(ctx.pageContext) ?? emptyAssistantFallback();
 }
 
 function isBudgetExceededError(err: unknown) {
@@ -684,9 +853,13 @@ export async function processConversationTurn(ctx: ConversationContext): Promise
     tools,
   });
 
-  let finalMessage = response.content;
+  const initialMessage = response.content;
+  let finalMessage = initialMessage;
   let mapGraphChanged = false;
   const pendingCrmOperations: Array<import("./pending-crm-operations").PendingOperationRecord> = [];
+  const executedToolResults: ExecutedConversationToolResult[] = [];
+  const failedToolResults: FailedConversationToolResult[] = [];
+  const toolExecutionAttempted = Boolean(response.tool_calls?.length);
 
   // Execute tools if the LLM requests it
   if (response.tool_calls && response.tool_calls.length > 0) {
@@ -695,6 +868,7 @@ export async function processConversationTurn(ctx: ConversationContext): Promise
 
     for (const call of response.tool_calls) {
       const handler = TOOL_HANDLERS[call.function.name];
+      const toolArgs = effectiveToolArgs(call.function.name, ctx, call.function.arguments);
       if (handler) {
         try {
           const outcome = await executeConversationToolCall({
@@ -710,15 +884,20 @@ export async function processConversationTurn(ctx: ConversationContext): Promise
           if (outcome.pendingOperation) {
             pendingCrmOperations.push(outcome.pendingOperation);
           }
+          executedToolResults.push({ toolName: call.function.name, args: toolArgs, result: outcome.result });
           messages.push({ role: "tool", content: JSON.stringify(outcome.result), name: call.function.name, tool_call_id: call.id });
         } catch (err: any) {
-          messages.push({ role: "tool", content: JSON.stringify({ error: err.message }), name: call.function.name, tool_call_id: call.id });
+          const error = err instanceof Error ? err.message : String(err);
+          failedToolResults.push({ toolName: call.function.name, args: toolArgs, error });
+          messages.push({ role: "tool", content: JSON.stringify({ error }), name: call.function.name, tool_call_id: call.id });
         }
       } else {
+        failedToolResults.push({ toolName: call.function.name, args: toolArgs, error: "Unknown capability" });
         messages.push({ role: "tool", content: JSON.stringify({ error: "Unknown capability" }), name: call.function.name, tool_call_id: call.id });
       }
     }
 
+    let followupMessage = "";
     if (await canRunFollowupModelAfterTools(ctx, pendingCrmOperations)) {
       const followup = await defaultModelGateway.chat({
         workspaceId: ctx.workspaceId,
@@ -729,10 +908,19 @@ export async function processConversationTurn(ctx: ConversationContext): Promise
         tools,
       });
 
-      finalMessage = followup.content;
+      followupMessage = followup.content;
+      finalMessage = followupMessage;
+    }
+    if (!followupMessage.trim()) {
+      const toolFallback = crmToolFallback(executedToolResults, ctx.pageContext, failedToolResults)
+        ?? (pendingCrmOperations.length === 0 && toolExecutionAttempted ? emptyAssistantFallback() : null);
+      if (toolFallback) {
+        finalMessage = [initialMessage.trim(), toolFallback].filter(Boolean).join("\n\n");
+      }
     }
     finalMessage = appendCrmPendingNotices(finalMessage, pendingCrmOperations);
   }
+  finalMessage = ensureAssistantMessage(finalMessage, ctx, executedToolResults, failedToolResults, toolExecutionAttempted);
 
   // Store observation as memory if the conversation reveals something useful
   if (turnCount > 0 && turnCount % 5 === 0) {
@@ -880,6 +1068,9 @@ export async function* processConversationTurnStream(ctx: ConversationContext): 
   let finalMessage = "";
   let mapGraphChanged = false;
   const pendingCrmOperations: Array<import("./pending-crm-operations").PendingOperationRecord> = [];
+  const executedToolResults: ExecutedConversationToolResult[] = [];
+  const failedToolResults: FailedConversationToolResult[] = [];
+  let toolExecutionAttempted = false;
 
   const iterator = defaultModelGateway.chatStream({
     workspaceId: ctx.workspaceId,
@@ -902,11 +1093,13 @@ export async function* processConversationTurnStream(ctx: ConversationContext): 
   }
 
   if (firstResult.tool_calls && firstResult.tool_calls.length > 0) {
+    toolExecutionAttempted = true;
     messages.push({ role: "assistant", content: firstResult.content || "", tool_calls: firstResult.tool_calls });
     const actor = requireConversationToolActor(ctx);
 
     for (const call of firstResult.tool_calls) {
       const handler = TOOL_HANDLERS[call.function.name];
+      const toolArgs = effectiveToolArgs(call.function.name, ctx, call.function.arguments);
       if (handler) {
         try {
           const outcome = await executeConversationToolCall({
@@ -922,15 +1115,20 @@ export async function* processConversationTurnStream(ctx: ConversationContext): 
           if (outcome.pendingOperation) {
             pendingCrmOperations.push(outcome.pendingOperation);
           }
+          executedToolResults.push({ toolName: call.function.name, args: toolArgs, result: outcome.result });
           messages.push({ role: "tool", content: JSON.stringify(outcome.result), name: call.function.name, tool_call_id: call.id });
         } catch (err: any) {
-          messages.push({ role: "tool", content: JSON.stringify({ error: err.message }), name: call.function.name, tool_call_id: call.id });
+          const error = err instanceof Error ? err.message : String(err);
+          failedToolResults.push({ toolName: call.function.name, args: toolArgs, error });
+          messages.push({ role: "tool", content: JSON.stringify({ error }), name: call.function.name, tool_call_id: call.id });
         }
       } else {
+        failedToolResults.push({ toolName: call.function.name, args: toolArgs, error: "Unknown capability" });
         messages.push({ role: "tool", content: JSON.stringify({ error: "Unknown capability" }), name: call.function.name, tool_call_id: call.id });
       }
     }
 
+    let followupMessage = "";
     if (await canRunFollowupModelAfterTools(ctx, pendingCrmOperations)) {
       const followupIterator = defaultModelGateway.chatStream({
         workspaceId: ctx.workspaceId,
@@ -948,6 +1146,19 @@ export async function* processConversationTurnStream(ctx: ConversationContext): 
         }
         yield value;
         finalMessage += value;
+        followupMessage += value;
+      }
+    }
+    if (!followupMessage.trim()) {
+      const toolFallback = crmToolFallback(executedToolResults, ctx.pageContext, failedToolResults)
+        ?? (pendingCrmOperations.length === 0 && toolExecutionAttempted ? emptyAssistantFallback() : null);
+      if (toolFallback) {
+        const nextMessage = [finalMessage.trim(), toolFallback].filter(Boolean).join("\n\n");
+        const toolFallbackAppendix = pendingNoticeAppendix(finalMessage, nextMessage);
+        if (toolFallbackAppendix) {
+          yield toolFallbackAppendix;
+          finalMessage = nextMessage;
+        }
       }
     }
     const finalMessageWithNotices = appendCrmPendingNotices(finalMessage, pendingCrmOperations);
@@ -956,6 +1167,13 @@ export async function* processConversationTurnStream(ctx: ConversationContext): 
       yield noticeAppendix;
       finalMessage = finalMessageWithNotices;
     }
+  }
+
+  const ensuredFinalMessage = ensureAssistantMessage(finalMessage, ctx, executedToolResults, failedToolResults, toolExecutionAttempted);
+  const fallbackAppendix = pendingNoticeAppendix(finalMessage, ensuredFinalMessage);
+  if (fallbackAppendix) {
+    yield fallbackAppendix;
+    finalMessage = ensuredFinalMessage;
   }
 
   if (turnCount > 0 && turnCount % 5 === 0) {

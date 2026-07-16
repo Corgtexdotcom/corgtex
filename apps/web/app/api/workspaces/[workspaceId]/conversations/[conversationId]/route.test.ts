@@ -177,4 +177,27 @@ describe("POST /api/workspaces/[workspaceId]/conversations/[conversationId]", ()
 
     clearTimeoutSpy.mockRestore();
   });
+
+  it("streams final assistant text when the generator returns without chunks", async () => {
+    async function* finalOnlyConversationStream() {
+      return {
+        assistantMessage: "Final assistant reply",
+        contextUsed: {},
+      };
+    }
+
+    processConversationTurnStream.mockReturnValue(finalOnlyConversationStream());
+
+    const { POST } = await import("./route");
+    const response = await POST(request() as never, routeParams());
+    const reader = response.body!.getReader();
+    const body = await readRemainingBody(reader);
+
+    expect(body).toContain("\"keepAlive\":true");
+    expect(body).toContain("Final assistant reply");
+    expect(body).toContain("data: [DONE]");
+    expect(addConversationTurn).toHaveBeenCalledWith(actor, expect.objectContaining({
+      assistantMessage: "Final assistant reply",
+    }));
+  });
 });
