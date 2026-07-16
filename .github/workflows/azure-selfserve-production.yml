@@ -58,6 +58,7 @@ on:
 permissions:
   contents: read
   id-token: write
+  issues: write
 
 concurrency:
   group: azure-selfserve-production
@@ -92,6 +93,15 @@ jobs:
       POSTHOG_CAPTURE_TIMEOUT_MS: ${{ vars.POSTHOG_CAPTURE_TIMEOUT_MS || '1500' }}
       POSTHOG_CAPTURE_DEBUG: ${{ vars.POSTHOG_CAPTURE_DEBUG || 'false' }}
       POSTHOG_INSTANCE_ID: ${{ vars.POSTHOG_INSTANCE_ID || '' }}
+      AZURE_APPLICATIONINSIGHTS_APP_NAME: ${{ vars.AZURE_APPLICATIONINSIGHTS_APP_NAME || 'appi-corgtex-ss-prod' }}
+      AZURE_APPLICATIONINSIGHTS_RESOURCE_GROUP: ${{ vars.AZURE_APPLICATIONINSIGHTS_RESOURCE_GROUP || inputs.resource_group }}
+      POSTHOG_PROJECT_ID: ${{ vars.POSTHOG_PROJECT_ID }}
+      POSTHOG_PERSONAL_API_KEY: ${{ secrets.POSTHOG_PERSONAL_API_KEY || secrets.POSTHOG_QUERY_API_KEY }}
+      POSTHOG_QUERY_API_HOST: ${{ vars.POSTHOG_QUERY_API_HOST }}
+      GITHUB_TOKEN: ${{ github.token }}
+      OPS_GITHUB_REPOSITORY: ${{ github.repository }}
+      OBSERVATION_REQUIRE_SOURCE: "true"
+      OBSERVATION_WINDOW_MINUTES: ${{ vars.OBSERVATION_WINDOW_MINUTES || '20' }}
 
     steps:
       - name: Validate workflow configuration
@@ -156,3 +166,34 @@ jobs:
             args+=(--skip-health-smoke)
           fi
           node scripts/azure-selfserve-production-release.mjs "${args[@]}"
+
+      - name: Checkout observation gate source
+        if: ${{ inputs.operation == 'deploy' && inputs.run_health_smoke }}
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ github.sha }}
+          path: .workflow-source
+
+      - name: Run post-deploy observation gate
+        if: ${{ inputs.operation == 'deploy' && inputs.run_health_smoke }}
+        shell: bash
+        working-directory: .workflow-source
+        run: |
+          set -euo pipefail
+          mkdir -p .artifacts/post-deploy-observation-gate
+          release_version="${RELEASE_VERSION:-main-${RELEASE_GIT_SHA:0:12}}"
+          node scripts/post-deploy-observation-gate.mjs \
+            --release-git-sha "$RELEASE_GIT_SHA" \
+            --release-image-tag "sha-$RELEASE_GIT_SHA" \
+            --release-version "$release_version" \
+            --targets azure-selfserve \
+            --summary-file .artifacts/post-deploy-observation-gate/azure-selfserve-production.json \
+            --publish-advisories
+
+      - name: Upload observation summary
+        if: ${{ always() && inputs.operation == 'deploy' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: post-deploy-observation-azure-selfserve
+          path: .workflow-source/.artifacts/post-deploy-observation-gate/azure-selfserve-production.json
+          if-no-files-found: ignore

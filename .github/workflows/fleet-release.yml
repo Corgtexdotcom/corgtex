@@ -215,6 +215,12 @@ jobs:
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
+      - name: Mark observation window start
+        if: ${{ !inputs.dry_run }}
+        id: observation-window
+        shell: bash
+        run: echo "since=$(date -u +'%Y-%m-%dT%H:%M:%SZ')" >> "$GITHUB_OUTPUT"
+
       - name: Promote release through rings
         if: ${{ !inputs.dry_run }}
         env:
@@ -232,3 +238,37 @@ jobs:
             --dry-run "$DRY_RUN_INPUT" \
             --concurrency "$CONCURRENCY_INPUT" \
             --force-after-failure "$FORCE_AFTER_FAILURE_INPUT"
+
+      - name: Run post-deploy observation gate
+        if: ${{ !inputs.dry_run }}
+        env:
+          MANIFEST_JSON: ${{ steps.manifest.outputs.manifest_json }}
+          TARGETS_INPUT: ${{ inputs.targets }}
+          AZURE_APPLICATIONINSIGHTS_APP_NAME: ${{ vars.AZURE_APPLICATIONINSIGHTS_APP_NAME || 'appi-corgtex-ss-prod' }}
+          AZURE_APPLICATIONINSIGHTS_RESOURCE_GROUP: ${{ vars.AZURE_APPLICATIONINSIGHTS_RESOURCE_GROUP || 'rg-corgtex-selfserve-production-wus3' }}
+          POSTHOG_PROJECT_ID: ${{ vars.POSTHOG_PROJECT_ID }}
+          POSTHOG_PERSONAL_API_KEY: ${{ secrets.POSTHOG_PERSONAL_API_KEY || secrets.POSTHOG_QUERY_API_KEY }}
+          POSTHOG_QUERY_API_HOST: ${{ vars.POSTHOG_QUERY_API_HOST }}
+          OBSERVATION_REQUIRE_SOURCE: "true"
+          OBSERVATION_WINDOW_MINUTES: ${{ vars.OBSERVATION_WINDOW_MINUTES || '20' }}
+          OBSERVATION_SINCE: ${{ steps.observation-window.outputs.since }}
+        run: |
+          mkdir -p .artifacts/post-deploy-observation-gate
+          if [[ "$TARGETS_INPUT" != "all" && "$TARGETS_INPUT" != *"azure-selfserve"* ]]; then
+            unset AZURE_APPLICATIONINSIGHTS_APP_NAME
+            unset AZURE_APPLICATIONINSIGHTS_RESOURCE_GROUP
+          fi
+          node scripts/post-deploy-observation-gate.mjs \
+            --manifest-json "$MANIFEST_JSON" \
+            --targets "$TARGETS_INPUT" \
+            --since "$OBSERVATION_SINCE" \
+            --summary-file .artifacts/post-deploy-observation-gate/fleet-release.json \
+            --publish-advisories
+
+      - name: Upload observation summary
+        if: ${{ always() && !inputs.dry_run }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: post-deploy-observation-fleet
+          path: .artifacts/post-deploy-observation-gate/fleet-release.json
+          if-no-files-found: ignore

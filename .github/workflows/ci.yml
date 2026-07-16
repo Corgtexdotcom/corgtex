@@ -294,6 +294,10 @@ jobs:
       - check
       - db-sync
       - build
+    outputs:
+      smoke_proof: ${{ steps.smoke-proof.outputs.available }}
+      skip_release_match: ${{ steps.app-release.outputs.skip_release_match }}
+      observation_since: ${{ steps.observation-window.outputs.since }}
     steps:
       - name: Non-production smoke gate
         if: github.ref != 'refs/heads/main'
@@ -309,6 +313,12 @@ jobs:
           else
             echo "skip=false" >> "$GITHUB_OUTPUT"
           fi
+
+      - name: Mark observation window start
+        if: github.ref == 'refs/heads/main' && steps.check-secrets.outputs.skip != 'true'
+        id: observation-window
+        shell: bash
+        run: echo "since=$(date -u +'%Y-%m-%dT%H:%M:%SZ')" >> "$GITHUB_OUTPUT"
 
       - uses: actions/checkout@v5
         if: github.ref == 'refs/heads/main' && steps.check-secrets.outputs.skip != 'true'
@@ -395,3 +405,130 @@ jobs:
         if: github.ref == 'refs/heads/main' && steps.check-secrets.outputs.skip != 'true'
         env:
           DATABASE_URL: ${{ secrets.PRODUCTION_DATABASE_URL }}
+
+      - name: Mark production smoke proof available
+        id: smoke-proof
+        if: github.ref == 'refs/heads/main' && steps.check-secrets.outputs.skip != 'true'
+        run: echo "available=true" >> "$GITHUB_OUTPUT"
+
+  observe-prod:
+    name: Post-deploy Observation Gate
+    runs-on: ubuntu-latest
+    needs:
+      - smoke-prod
+    if: github.ref == 'refs/heads/main' && needs.smoke-prod.outputs.smoke_proof == 'true'
+    environment: fleet-release-production
+    permissions:
+      contents: read
+      id-token: write
+      issues: write
+    env:
+      AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+      AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+      AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      AZURE_APPLICATIONINSIGHTS_APP_NAME: ${{ vars.AZURE_APPLICATIONINSIGHTS_APP_NAME || 'appi-corgtex-ss-prod' }}
+      AZURE_APPLICATIONINSIGHTS_RESOURCE_GROUP: ${{ vars.AZURE_APPLICATIONINSIGHTS_RESOURCE_GROUP || 'rg-corgtex-selfserve-production-wus3' }}
+      POSTHOG_PROJECT_ID: ${{ vars.POSTHOG_PROJECT_ID }}
+      POSTHOG_PERSONAL_API_KEY: ${{ secrets.POSTHOG_PERSONAL_API_KEY || secrets.POSTHOG_QUERY_API_KEY }}
+      POSTHOG_QUERY_API_HOST: ${{ vars.POSTHOG_QUERY_API_HOST }}
+      POSTHOG_API_HOST: ${{ vars.POSTHOG_API_HOST || 'https://us.i.posthog.com' }}
+      GITHUB_TOKEN: ${{ github.token }}
+      OPS_GITHUB_REPOSITORY: ${{ github.repository }}
+      OBSERVATION_REQUIRE_SOURCE: "true"
+      OBSERVATION_WINDOW_MINUTES: ${{ vars.OBSERVATION_WINDOW_MINUTES || '20' }}
+      OBSERVATION_SINCE: ${{ needs.smoke-prod.outputs.observation_since }}
+      SMOKE_SKIP_RELEASE_MATCH: ${{ needs.smoke-prod.outputs.skip_release_match }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+
+      - name: Log in to Azure for observation queries
+        if: ${{ env.AZURE_CLIENT_ID != '' && env.AZURE_TENANT_ID != '' && env.AZURE_SUBSCRIPTION_ID != '' }}
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Run post-deploy observation gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .artifacts/post-deploy-observation-gate
+
+          if [[ -z "${AZURE_CLIENT_ID:-}" || -z "${AZURE_TENANT_ID:-}" || -z "${AZURE_SUBSCRIPTION_ID:-}" ]]; then
+            unset AZURE_APPLICATIONINSIGHTS_APP_NAME
+            unset AZURE_APPLICATIONINSIGHTS_RESOURCE_GROUP
+          fi
+
+          read_health_release() {
+            local health_url="$1"
+            local health_json
+            health_json="$(curl --connect-timeout 10 --max-time 30 -fsS "$health_url")"
+            node -e '
+              const fs = require("fs");
+              const health = JSON.parse(fs.readFileSync(0, "utf8"));
+              const gitSha = health?.release?.gitSha || process.env.GITHUB_SHA;
+              const imageTag = health?.release?.imageTag || `sha-${gitSha}`;
+              const version = health?.release?.version || `main-${gitSha.slice(0, 12)}`;
+              console.log(gitSha);
+              console.log(imageTag);
+              console.log(version);
+            ' <<< "$health_json"
+          }
+
+          {
+            read -r app_git_sha
+            read -r app_image_tag
+            read -r app_version
+          } < <(read_health_release "https://app.corgtex.com/api/health")
+
+          {
+            read -r selfserve_git_sha
+            read -r selfserve_image_tag
+            read -r selfserve_version
+          } < <(read_health_release "https://selfserve.corgtex.com/api/health")
+
+          {
+            read -r ops_git_sha
+            read -r ops_image_tag
+            read -r ops_version
+          } < <(read_health_release "https://ops.corgtex.com/api/health")
+
+          manifest_json="$(
+            APP_GIT_SHA="$app_git_sha" \
+            APP_IMAGE_TAG="$app_image_tag" \
+            APP_VERSION="$app_version" \
+            SELFSERVE_GIT_SHA="$selfserve_git_sha" \
+            SELFSERVE_IMAGE_TAG="$selfserve_image_tag" \
+            SELFSERVE_VERSION="$selfserve_version" \
+            OPS_GIT_SHA="$ops_git_sha" \
+            OPS_IMAGE_TAG="$ops_image_tag" \
+            OPS_VERSION="$ops_version" \
+            node -e '
+              const targetManifests = [
+                { target: "backup-app", gitSha: process.env.APP_GIT_SHA, imageTag: process.env.APP_IMAGE_TAG, releaseVersion: process.env.APP_VERSION },
+                { target: "azure-selfserve", gitSha: process.env.SELFSERVE_GIT_SHA, imageTag: process.env.SELFSERVE_IMAGE_TAG, releaseVersion: process.env.SELFSERVE_VERSION },
+                { target: "ops", gitSha: process.env.OPS_GIT_SHA, imageTag: process.env.OPS_IMAGE_TAG, releaseVersion: process.env.OPS_VERSION },
+              ];
+              console.log(JSON.stringify({ targetManifests }));
+            '
+          )"
+          echo "Observation uses live target releases from app, selfserve, and ops health"
+          node scripts/post-deploy-observation-gate.mjs \
+            --manifest-json "$manifest_json" \
+            --targets main-production-smoke \
+            --since "$OBSERVATION_SINCE" \
+            --summary-file .artifacts/post-deploy-observation-gate/main-production-smoke.json \
+            --publish-advisories
+
+      - name: Upload observation summary
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: post-deploy-observation-main
+          path: .artifacts/post-deploy-observation-gate/main-production-smoke.json
+          if-no-files-found: ignore
