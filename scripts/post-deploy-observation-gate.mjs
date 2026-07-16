@@ -20,6 +20,8 @@ const NON_STATUS_FAILURE_EVENTS = new Set([
   "corgtex_worker_error",
 ]);
 const DEFAULT_WINDOW_MINUTES = 20;
+const DEFAULT_RAILWAY_GRAPHQL_ENDPOINT = "https://backboard.railway.com/graphql/v2";
+const DEFAULT_RAILWAY_LOG_LIMIT = 100;
 const TARGET_GROUPS = Object.freeze([
   "railway-customers",
   "azure-selfserve",
@@ -43,6 +45,7 @@ export async function runObservationGate(options = {}) {
   const until = options.until ?? now;
   const rows = options.rows ?? await collectObservationRows({
     env: options.env ?? process.env,
+    manifest,
     since,
     until,
     targets: options.targets ?? null,
@@ -122,7 +125,7 @@ export function buildObservationSummary({ manifest, since, rows, targets = null 
   };
 }
 
-export async function collectObservationRows({ env = process.env, since, until = new Date(), targets = null, deps = {} }) {
+export async function collectObservationRows({ env = process.env, manifest = {}, since, until = new Date(), targets = null, deps = {} }) {
   const rows = [];
   const sourceNotes = [];
   const queriedSources = new Set();
@@ -139,6 +142,21 @@ export async function collectObservationRows({ env = process.env, since, until =
       source: "azure_monitor",
       status: "skipped",
       reason: "AZURE_APPLICATIONINSIGHTS_APP_NAME and AZURE_APPLICATIONINSIGHTS_RESOURCE_GROUP are required",
+    });
+  }
+
+  if (isRailwayQueryConfigured(env, targets)) {
+    try {
+      rows.push(...await queryRailwayRows({ env, manifest, since, until, targets, deps }));
+      queriedSources.add("railway");
+    } catch (error) {
+      throw new Error(`Railway observation query failed: ${errorMessage(error)}`);
+    }
+  } else if (railwayTargetsFromEnv(env, targets).length > 0) {
+    sourceNotes.push({
+      source: "railway",
+      status: "skipped",
+      reason: "RAILWAY_API_TOKEN and Railway target metadata are required",
     });
   }
 
@@ -166,8 +184,9 @@ export async function collectObservationRows({ env = process.env, since, until =
   }
 
   if (requiresObservationSource(env)) {
-    const missingSources = [...requiredObservationSourcesForTargets(targets)]
-      .filter((source) => !queriedSources.has(source));
+    const missingSources = requiredObservationSourceGroupsForTargets(targets)
+      .filter((group) => !group.sources.some((source) => queriedSources.has(source)))
+      .map((group) => group.label);
     if (missingSources.length > 0) {
       throw new Error(`Missing required observation query source(s) for targets ${targets ?? "production"}: ${missingSources.join(", ")}`);
     }
@@ -230,6 +249,31 @@ export async function queryPostHogRows({ env = process.env, since, deps = {} }) 
   return parsePostHogRows(payload, env);
 }
 
+export async function queryRailwayRows({ env = process.env, manifest = {}, since, until = new Date(), targets = null, deps = {} }) {
+  const railwayTargets = railwayTargetsFromEnv(env, targets);
+  if (railwayTargets.length === 0) return [];
+
+  const rows = [];
+  for (const target of railwayTargets) {
+    const deployment = await latestRailwayDeployment(target, { env, deps });
+    const httpLogs = await queryRailwayHttpLogs({
+      env,
+      deploymentId: deployment.id,
+      since,
+      until,
+      deps,
+    });
+    rows.push(...parseRailwayHttpLogRows(httpLogs, {
+      target,
+      deployment,
+      manifest,
+      source_url: railwayDeploymentUrl(target, deployment.id),
+    }));
+  }
+
+  return rows;
+}
+
 export function parseAzureMonitorRows(payload, env = process.env) {
   const table = payload?.tables?.[0];
   if (!table) return [];
@@ -249,6 +293,35 @@ export function parsePostHogRows(payload, env = process.env) {
     source: "posthog",
     source_url: postHogProjectUrl(env),
   }));
+}
+
+export function parseRailwayHttpLogRows(payload, { target, deployment, manifest = {}, source_url = null }) {
+  const logs = Array.isArray(payload) ? payload : payload?.httpLogs ?? [];
+  const release = railwayTargetRelease(target, manifest);
+  return logs
+    .map((log) => {
+      const status = numericStatus(log?.httpStatus);
+      if (!Number.isFinite(status) || status < 500) return null;
+      return {
+        source: "railway",
+        source_url,
+        event: "corgtex_route_error",
+        instance_id: safeText(target.id ?? target.label),
+        provider: "railway",
+        release_git_sha: release.gitSha,
+        release_image_tag: release.imageTag,
+        release_version: release.releaseVersion,
+        surface: safeText(target.group ?? "railway"),
+        route: safeText(log.path ?? log.requestPath ?? log.host),
+        status,
+        code: safeText(log.responseDetails ?? "RAILWAY_HTTP_5XX"),
+        events: 1,
+        first_seen: isoText(log.timestamp),
+        last_seen: isoText(log.timestamp),
+        deployment_id: safeText(deployment?.id),
+      };
+    })
+    .filter(Boolean);
 }
 
 export function normalizeObservationRow(input) {
@@ -321,6 +394,10 @@ export function observationTargetsForRow(row) {
 
   if (provider === "azure" || text.includes("azure-selfserve") || text.includes("selfserve") || text.includes("ca-corgtex-ss")) {
     targets.add("azure-selfserve");
+  }
+
+  if (text.includes("railway-customers")) {
+    targets.add("railway-customers");
   }
 
   if (text.includes("backup-app") || text.includes("app.corgtex.com")) {
@@ -566,6 +643,10 @@ function isPostHogQueryConfigured(env) {
   return Boolean(safeText(env.POSTHOG_PROJECT_ID) && postHogQueryToken(env));
 }
 
+function isRailwayQueryConfigured(env, targets) {
+  return Boolean(safeText(env.RAILWAY_API_TOKEN) && railwayTargetsFromEnv(env, targets).length > 0);
+}
+
 function postHogQueryToken(env) {
   return safeText(env.POSTHOG_PERSONAL_API_KEY) ?? safeText(env.POSTHOG_QUERY_API_KEY);
 }
@@ -574,15 +655,17 @@ function requiresObservationSource(env) {
   return /^(1|true|yes)$/i.test(String(env.OBSERVATION_REQUIRE_SOURCE ?? ""));
 }
 
-function requiredObservationSourcesForTargets(targets) {
+function requiredObservationSourceGroupsForTargets(targets) {
   const selectedTargets = normalizeObservationTargets(targets);
   const targetList = selectedTargets ? [...selectedTargets] : TARGET_GROUPS;
-  const sources = new Set();
-  if (targetList.includes("azure-selfserve")) sources.add("azure_monitor");
-  if (targetList.some((target) => ["railway-customers", "ops", "backup-app"].includes(target))) {
-    sources.add("posthog");
+  const groups = [];
+  if (targetList.includes("azure-selfserve")) {
+    groups.push({ label: "azure_monitor", sources: ["azure_monitor"] });
   }
-  return sources;
+  if (targetList.some((target) => ["railway-customers", "ops", "backup-app"].includes(target))) {
+    groups.push({ label: "railway or posthog", sources: ["railway", "posthog"] });
+  }
+  return groups;
 }
 
 function postHogQueryHost(env) {
@@ -603,6 +686,177 @@ function azurePortalUrl(env) {
   const resourceGroup = safeText(env.AZURE_APPLICATIONINSIGHTS_RESOURCE_GROUP);
   if (!app || !resourceGroup) return null;
   return `Azure Monitor Application Insights ${resourceGroup}/${app}`;
+}
+
+function railwayTargetsFromEnv(env, targets) {
+  const selectedTargets = normalizeObservationTargets(targets);
+  const targetList = selectedTargets ? [...selectedTargets] : TARGET_GROUPS;
+  const entries = [];
+
+  if (targetList.includes("railway-customers")) {
+    for (const target of parseJsonArray(env.FLEET_RELEASE_TARGETS_JSON)) {
+      if (target?.provider === "railway" && target?.railway?.webServiceId && target?.railway?.environmentId) {
+        entries.push({
+          id: safeText(target.id ?? target.deploymentId ?? target.label),
+          label: safeText(target.label ?? target.id),
+          group: "railway-customers",
+          projectId: safeText(target.railway.projectId),
+          environmentId: safeText(target.railway.environmentId),
+          webServiceId: safeText(target.railway.webServiceId),
+        });
+      }
+    }
+  }
+
+  if (targetList.includes("ops")) {
+    const target = parseJsonObject(env.FLEET_RELEASE_OPS_TARGET_JSON);
+    if (target?.provider === "railway" && target?.railway?.webServiceId && target?.railway?.environmentId) {
+      entries.push({
+        id: "ops",
+        label: safeText(target.label ?? "Ops"),
+        group: "ops",
+        projectId: safeText(target.railway.projectId),
+        environmentId: safeText(target.railway.environmentId),
+        webServiceId: safeText(target.railway.webServiceId),
+      });
+    }
+  }
+
+  if (targetList.includes("backup-app")) {
+    const target = parseJsonObject(env.FLEET_RELEASE_BACKUP_APP_TARGET_JSON);
+    if (target?.provider === "railway" && target?.railway?.webServiceId && target?.railway?.environmentId) {
+      entries.push({
+        id: "backup-app",
+        label: safeText(target.label ?? "Backup App"),
+        group: "backup-app",
+        projectId: safeText(target.railway.projectId),
+        environmentId: safeText(target.railway.environmentId),
+        webServiceId: safeText(target.railway.webServiceId),
+      });
+    }
+  }
+
+  return entries.filter((entry) => entry.environmentId && entry.webServiceId);
+}
+
+async function latestRailwayDeployment(target, { env = process.env, deps = {} }) {
+  const data = await railwayGraphql({
+    env,
+    deps,
+    query: `query LatestDeployment($serviceId: String!, $environmentId: String!) {
+      deployments(first: 1, input: { serviceId: $serviceId, environmentId: $environmentId }) {
+        edges {
+          node {
+            id
+            status
+            createdAt
+            meta
+          }
+        }
+      }
+    }`,
+    variables: {
+      serviceId: target.webServiceId,
+      environmentId: target.environmentId,
+    },
+  });
+  const deployment = data?.deployments?.edges?.[0]?.node;
+  if (!deployment?.id) {
+    throw new Error(`No Railway deployment found for ${target.label ?? target.id ?? target.webServiceId}.`);
+  }
+  return deployment;
+}
+
+async function queryRailwayHttpLogs({ env = process.env, deploymentId, since, until = new Date(), deps = {} }) {
+  const data = await railwayGraphql({
+    env,
+    deps,
+    query: `query HttpLogs($deploymentId: String!, $filter: String, $beforeLimit: Int!, $beforeDate: String) {
+      httpLogs(
+        deploymentId: $deploymentId
+        filter: $filter
+        beforeLimit: $beforeLimit
+        beforeDate: $beforeDate
+      ) {
+        timestamp
+        method
+        path
+        httpStatus
+        requestId
+        host
+        responseDetails
+        deploymentId
+        deploymentInstanceId
+      }
+    }`,
+    variables: {
+      deploymentId,
+      filter: "@httpStatus:500..599",
+      beforeLimit: railwayLogLimit(env),
+      beforeDate: new Date(until).toISOString(),
+    },
+  });
+  const sinceDate = new Date(since);
+  return (data?.httpLogs ?? []).filter((log) => {
+    const timestamp = new Date(log?.timestamp ?? "");
+    return !Number.isNaN(timestamp.getTime()) && timestamp >= sinceDate;
+  });
+}
+
+async function railwayGraphql({ env = process.env, deps = {}, query, variables }) {
+  const token = requiredText(env.RAILWAY_API_TOKEN, "RAILWAY_API_TOKEN");
+  const endpoint = safeText(env.RAILWAY_GRAPHQL_ENDPOINT) ?? DEFAULT_RAILWAY_GRAPHQL_ENDPOINT;
+  const response = await (deps.fetchImpl ?? fetch)(endpoint, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ query, variables }),
+  });
+  const text = await response.text();
+  const body = text ? JSON.parse(text) : null;
+  if (!response.ok || body?.errors?.length) {
+    throw new Error(body?.errors?.map((error) => error.message).filter(Boolean).join("; ") || `Railway API failed with ${response.status}`);
+  }
+  return body?.data ?? {};
+}
+
+function railwayTargetRelease(target, manifest) {
+  const normalized = normalizeManifest(manifest);
+  const targetManifests = normalized.targetManifests ?? [];
+  const exact = targetManifests.find((targetManifest) => targetManifest.target === target.group || targetManifest.target === target.id);
+  return exact ?? normalized;
+}
+
+function railwayDeploymentUrl(target, deploymentId) {
+  if (!target?.projectId || !target?.webServiceId || !target?.environmentId || !deploymentId) return null;
+  return `https://railway.com/project/${encodeURIComponent(target.projectId)}/service/${encodeURIComponent(target.webServiceId)}?environmentId=${encodeURIComponent(target.environmentId)}&deploymentId=${encodeURIComponent(deploymentId)}`;
+}
+
+function railwayLogLimit(env) {
+  const parsed = Number.parseInt(String(env.RAILWAY_OBSERVATION_LOG_LIMIT ?? DEFAULT_RAILWAY_LOG_LIMIT), 10);
+  return Number.isFinite(parsed) && parsed > 0 ? Math.min(parsed, 500) : DEFAULT_RAILWAY_LOG_LIMIT;
+}
+
+function parseJsonArray(value) {
+  const parsed = parseJsonValue(value);
+  return Array.isArray(parsed) ? parsed : [];
+}
+
+function parseJsonObject(value) {
+  const parsed = parseJsonValue(value);
+  return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : null;
+}
+
+function parseJsonValue(value) {
+  const raw = String(value ?? "").trim();
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
 }
 
 function numericStatus(value) {
