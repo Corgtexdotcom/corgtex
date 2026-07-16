@@ -103,7 +103,7 @@ export function buildObservationSummary({ manifest, since, rows, sourceChecks = 
   const normalizedMissingRequiredSources = missingRequiredSources.map(safeText).filter(Boolean);
 
   for (const row of failureRows) {
-    if (releaseMatchers.some((matcher) => rowMatchesRelease(row, matcher.manifest) && rowMatchesTargets(row, matcher.selectedTargets))) {
+    if (releaseMatchers.some((matcher) => matcher.currentRelease && rowMatchesRelease(row, matcher.manifest) && rowMatchesTargets(row, matcher.selectedTargets))) {
       blockingFailures.push(row);
     } else {
       advisoryFailures.push(row);
@@ -127,6 +127,7 @@ export function buildObservationSummary({ manifest, since, rows, sourceChecks = 
         gitSha: matcher.manifest.gitSha,
         imageTag: matcher.manifest.imageTag,
         version: matcher.manifest.releaseVersion,
+        currentRelease: matcher.currentRelease,
       })),
     targets,
     since: since.toISOString(),
@@ -419,18 +420,50 @@ export function isBlockingClassFailure(row) {
 }
 
 export function rowMatchesRelease(row, manifest) {
-  const expected = [
-    manifest.gitSha,
-    manifest.imageTag,
-    manifest.releaseVersion,
-  ].filter(Boolean);
+  const expected = releaseIdentities(manifest);
   if (expected.length === 0) return false;
-  const observed = [
-    row.release_git_sha,
-    row.release_image_tag,
-    row.release_version,
-  ].filter(Boolean);
-  return observed.some((value) => expected.includes(value));
+  const observed = releaseIdentities({
+    gitSha: row.release_git_sha,
+    imageTag: row.release_image_tag,
+    releaseVersion: row.release_version,
+  });
+  return releaseIdentitySetsIntersect(expected, observed);
+}
+
+function releaseIdentities(manifest) {
+  const gitSha = safeText(manifest.gitSha);
+  const imageTag = safeText(manifest.imageTag);
+  const releaseVersion = safeText(manifest.releaseVersion);
+  const identities = [];
+
+  if (gitSha) identities.push(gitSha);
+  if (imageTag && releaseMetadataBelongsToGitSha(imageTag, gitSha)) identities.push(imageTag);
+  if (releaseVersion && releaseMetadataBelongsToGitSha(releaseVersion, gitSha)) identities.push(releaseVersion);
+
+  return [...new Set(identities)];
+}
+
+function releaseIdentitySetsIntersect(left, right) {
+  if (left.length === 0 || right.length === 0) return false;
+  const rightSet = new Set(right);
+  return left.some((identity) => rightSet.has(identity));
+}
+
+function releaseMetadataBelongsToGitSha(value, gitSha) {
+  if (!gitSha) return true;
+  const normalized = safeText(value);
+  if (!normalized) return false;
+  const shortSha = gitSha.slice(0, 12);
+  if (/^[0-9a-f]{7,40}$/i.test(normalized)) {
+    return gitSha.startsWith(normalized) || normalized === shortSha;
+  }
+  if (/^sha-[0-9a-f]{7,40}$/i.test(normalized)) {
+    return normalized.includes(gitSha) || normalized.includes(shortSha);
+  }
+  if (/^main-[0-9a-f]{7,40}$/i.test(normalized)) {
+    return normalized.includes(gitSha) || normalized.includes(shortSha);
+  }
+  return false;
 }
 
 export function rowMatchesTargets(row, selectedTargets) {
@@ -491,18 +524,34 @@ export function normalizeObservationTargets(value) {
 }
 
 function observationReleaseMatchers(manifest, targets) {
+  const primaryIdentities = releaseIdentities(manifest);
+  const hasPrimaryRelease = primaryIdentities.length > 0;
+  const rootMatcher = hasPrimaryRelease
+    ? [{
+      target: null,
+      manifest,
+      selectedTargets: normalizeObservationTargets(targets),
+      currentRelease: true,
+    }]
+    : [];
+
   if (Array.isArray(manifest.targetManifests) && manifest.targetManifests.length > 0) {
-    return manifest.targetManifests.map((targetManifest) => ({
-      target: targetManifest.target,
-      manifest: targetManifest,
-      selectedTargets: normalizeObservationTargets(targetManifest.target ?? targets),
-    }));
+    return [
+      ...rootMatcher,
+      ...manifest.targetManifests.map((targetManifest) => ({
+        target: targetManifest.target,
+        manifest: targetManifest,
+        selectedTargets: normalizeObservationTargets(targetManifest.target ?? targets),
+        currentRelease: !hasPrimaryRelease || releaseIdentitySetsIntersect(primaryIdentities, releaseIdentities(targetManifest)),
+      })),
+    ];
   }
 
-  return [{
+  return rootMatcher.length > 0 ? rootMatcher : [{
     target: null,
     manifest,
     selectedTargets: normalizeObservationTargets(targets),
+    currentRelease: true,
   }];
 }
 
@@ -1015,7 +1064,7 @@ function errorMessage(error) {
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   const manifest = args["manifest-json"]
-    ? JSON.parse(String(args["manifest-json"]))
+    ? manifestJsonWithRuntimeDefaults(JSON.parse(String(args["manifest-json"])), process.env)
     : {
       gitSha: args["release-git-sha"] ?? process.env.RELEASE_GIT_SHA ?? process.env.GITHUB_SHA,
       imageTag: args["release-image-tag"] ?? process.env.RELEASE_IMAGE_TAG,
@@ -1040,6 +1089,22 @@ async function main() {
   if (summary.blockingFailures.length > 0) {
     process.exitCode = 1;
   }
+}
+
+function manifestJsonWithRuntimeDefaults(manifest, env) {
+  const explicitRelease = normalizeReleaseManifest(manifest);
+  if (explicitRelease.gitSha || explicitRelease.imageTag || explicitRelease.releaseVersion) {
+    return manifest;
+  }
+  if (Array.isArray(manifest?.targetManifests) && manifest.targetManifests.length > 0) {
+    return manifest;
+  }
+  return {
+    gitSha: env.GITHUB_SHA,
+    imageTag: env.RELEASE_IMAGE_TAG,
+    releaseVersion: env.RELEASE_VERSION,
+    ...manifest,
+  };
 }
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.argv[1])) {

@@ -64,6 +64,51 @@ describe("post-deploy observation gate", () => {
     expect(summary.missingRequiredSources).toContain("azure_monitor");
   });
 
+  it("preserves explicit manifest aliases over runtime defaults", () => {
+    const scriptPath = fileURLToPath(new URL("./post-deploy-observation-gate.mjs", import.meta.url));
+    const explicitSha = "1111111111111111111111111111111111111111";
+    const runtimeSha = "2222222222222222222222222222222222222222";
+    const output = execFileSync(process.execPath, [
+      scriptPath,
+      "--manifest-json",
+      JSON.stringify({ release_git_sha: explicitSha }),
+      "--window-minutes",
+      "1",
+    ], {
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        AZURE_APPLICATIONINSIGHTS_APP_NAME: "",
+        AZURE_APPLICATIONINSIGHTS_RESOURCE_GROUP: "",
+        GITHUB_SHA: runtimeSha,
+      },
+    });
+
+    expect(JSON.parse(output).release.gitSha).toBe(explicitSha);
+  });
+
+  it("preserves target-only manifest JSON without runtime defaults", () => {
+    const scriptPath = fileURLToPath(new URL("./post-deploy-observation-gate.mjs", import.meta.url));
+    const runtimeSha = "2222222222222222222222222222222222222222";
+    const output = execFileSync(process.execPath, [
+      scriptPath,
+      "--manifest-json",
+      JSON.stringify({ targetManifests: [{ target: "backup-app", gitSha: runtimeSha }] }),
+      "--window-minutes",
+      "1",
+    ], {
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        AZURE_APPLICATIONINSIGHTS_APP_NAME: "",
+        AZURE_APPLICATIONINSIGHTS_RESOURCE_GROUP: "",
+        GITHUB_SHA: runtimeSha,
+      },
+    });
+
+    expect(JSON.parse(output).release.gitSha).toBeNull();
+  });
+
   it("blocks release-correlated route failures", () => {
     const summary = buildObservationSummary({
       manifest,
@@ -111,6 +156,94 @@ describe("post-deploy observation gate", () => {
     expect(summary.advisoryFailures).toHaveLength(1);
     expect(summary.advisoryIncidents[0].recommendedAction).toContain("follow-up");
     expect(JSON.stringify(summary.advisoryIncidents[0])).toContain("older-sha");
+  });
+
+  it("does not identify a runtime release by stale configured image tag or version", () => {
+    const currentSha = "80e365cf2bcfd0b01a5cfdf0656a0c4fbfc7b4ba";
+    const oldSha = "ea3fc329fe1df04d739a0abf7cb37d9c21282697";
+    const summary = buildObservationSummary({
+      manifest: {
+        gitSha: currentSha,
+        imageTag: oldSha,
+        releaseVersion: `main-${oldSha.slice(0, 12)}`,
+      },
+      since: new Date("2026-07-16T13:05:05.000Z"),
+      rows: [{
+        source: "azure_monitor",
+        event: "corgtex_worker_error",
+        instance_id: "corgtex",
+        provider: "railway",
+        release_git_sha: oldSha,
+        release_image_tag: oldSha,
+        release_version: `main-${oldSha.slice(0, 12)}`,
+        surface: "worker",
+        action: "tick",
+        code: "WORKER_TICK_ERROR",
+        events: 1,
+      }],
+    });
+
+    expect(summary.status).toBe("passed");
+    expect(summary.blockingFailures).toHaveLength(0);
+    expect(summary.advisoryFailures).toHaveLength(1);
+  });
+
+  it("prefers observed runtime SHA over observed configured image tag", () => {
+    const currentSha = "80e365cf2bcfd0b01a5cfdf0656a0c4fbfc7b4ba";
+    const oldSha = "ea3fc329fe1df04d739a0abf7cb37d9c21282697";
+    const summary = buildObservationSummary({
+      manifest: {
+        gitSha: currentSha,
+        imageTag: `sha-${currentSha}`,
+        releaseVersion: `main-${currentSha.slice(0, 12)}`,
+      },
+      since: new Date("2026-07-16T13:05:05.000Z"),
+      rows: [{
+        source: "azure_monitor",
+        event: "corgtex_worker_error",
+        instance_id: "corgtex",
+        provider: "railway",
+        release_git_sha: oldSha,
+        release_image_tag: `sha-${currentSha}`,
+        release_version: `main-${currentSha.slice(0, 12)}`,
+        surface: "worker",
+        action: "tick",
+        code: "WORKER_TICK_ERROR",
+        events: 1,
+      }],
+    });
+
+    expect(summary.status).toBe("passed");
+    expect(summary.blockingFailures).toHaveLength(0);
+    expect(summary.advisoryFailures).toHaveLength(1);
+  });
+
+  it("keeps date-style versions subordinate to observed runtime SHA", () => {
+    const currentSha = "80e365cf2bcfd0b01a5cfdf0656a0c4fbfc7b4ba";
+    const oldSha = "ea3fc329fe1df04d739a0abf7cb37d9c21282697";
+    const summary = buildObservationSummary({
+      manifest: {
+        gitSha: currentSha,
+        releaseVersion: "main-2026-07-16",
+      },
+      since: new Date("2026-07-16T13:05:05.000Z"),
+      rows: [{
+        source: "azure_monitor",
+        event: "corgtex_worker_error",
+        instance_id: "corgtex",
+        provider: "railway",
+        release_git_sha: oldSha,
+        release_version: "main-2026-07-16",
+        surface: "worker",
+        action: "tick",
+        code: "WORKER_TICK_ERROR",
+        events: 1,
+      }],
+    });
+
+    expect(summary.status).toBe("passed");
+    expect(summary.blockingFailures).toHaveLength(0);
+    expect(summary.advisoryFailures).toHaveLength(1);
   });
 
   it("passes a clean observation window", () => {
@@ -316,6 +449,67 @@ describe("post-deploy observation gate", () => {
     expect(summary.blockingFailures).toHaveLength(2);
     expect(summary.advisoryFailures).toHaveLength(1);
     expect(summary.targetReleases.map((release) => release.target)).toEqual(["backup-app", "azure-selfserve", "ops"]);
+  });
+
+  it("keeps older live target releases advisory when a primary pushed release is known", () => {
+    const currentSha = "80e365cf2bcfd0b01a5cfdf0656a0c4fbfc7b4ba";
+    const oldSha = "ea3fc329fe1df04d739a0abf7cb37d9c21282697";
+    const summary = buildObservationSummary({
+      manifest: {
+        gitSha: currentSha,
+        targetManifests: [
+          {
+            target: "backup-app",
+            gitSha: currentSha,
+            imageTag: `sha-${oldSha}`,
+            releaseVersion: `main-${oldSha.slice(0, 12)}`,
+          },
+          {
+            target: "ops",
+            gitSha: oldSha,
+            imageTag: `sha-${oldSha}`,
+            releaseVersion: `main-${oldSha.slice(0, 12)}`,
+          },
+        ],
+      },
+      since: new Date("2026-07-16T13:05:05.000Z"),
+      targets: "main-production-smoke",
+      rows: [
+        {
+          source: "azure_monitor",
+          event: "corgtex_worker_error",
+          instance_id: "corgtex",
+          provider: "railway",
+          release_git_sha: oldSha,
+          release_image_tag: `sha-${oldSha}`,
+          release_version: `main-${oldSha.slice(0, 12)}`,
+          surface: "worker",
+          action: "tick",
+          code: "WORKER_TICK_ERROR",
+          events: 1,
+        },
+        {
+          source: "railway",
+          event: "corgtex_route_error",
+          instance_id: "backup-app",
+          provider: "railway",
+          release_git_sha: currentSha,
+          route: "https://app.corgtex.com/api/current-release",
+          status: "500",
+          events: 1,
+        },
+      ],
+    });
+
+    expect(summary.status).toBe("blocked");
+    expect(summary.blockingFailures).toHaveLength(1);
+    expect(summary.blockingFailures[0].release_git_sha).toBe(currentSha);
+    expect(summary.advisoryFailures).toHaveLength(1);
+    expect(summary.advisoryFailures[0].release_git_sha).toBe(oldSha);
+    expect(summary.targetReleases).toEqual([
+      expect.objectContaining({ target: "backup-app", currentRelease: true }),
+      expect.objectContaining({ target: "ops", currentRelease: false }),
+    ]);
   });
 
   it("parses Azure Monitor table rows into observation rows", () => {
