@@ -92,12 +92,11 @@ function serializableMeeting(meeting) {
     createdAt: meeting.createdAt?.toISOString?.() ?? null,
     updatedAt: meeting.updatedAt?.toISOString?.() ?? null,
     transcriptProcessingProgress: progress
-      ? {
-          currentStage: progress.currentStage ?? null,
-          currentWorkflowJobStatus: progress.currentWorkflowJobStatus ?? null,
-          createdAt: progress.createdAt?.toISOString?.() ?? null,
-          startedAt: progress.startedAt?.toISOString?.() ?? null,
-          failedAt: progress.failedAt?.toISOString?.() ?? null,
+        ? {
+            currentStage: progress.currentStage ?? null,
+            createdAt: progress.createdAt?.toISOString?.() ?? null,
+            startedAt: progress.startedAt?.toISOString?.() ?? null,
+            failedAt: progress.failedAt?.toISOString?.() ?? null,
           updatedAt: progress.updatedAt?.toISOString?.() ?? null,
         }
       : null,
@@ -210,7 +209,6 @@ async function loadMeetings(prisma, workspaceId, since) {
       transcriptProcessingProgress: {
         select: {
           currentStage: true,
-          currentWorkflowJobStatus: true,
           createdAt: true,
           startedAt: true,
           failedAt: true,

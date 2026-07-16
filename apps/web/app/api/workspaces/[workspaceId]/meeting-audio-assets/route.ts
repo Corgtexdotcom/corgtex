@@ -71,7 +71,7 @@ function formStringList(formData: FormData, key: string) {
 }
 
 function parseRecordedAt(value: string | null) {
-  if (!value) return null;
+  if (!value) throw new AppError(400, "INVALID_INPUT", "recordedAt is required.");
   const recordedAt = new Date(value);
   if (Number.isNaN(recordedAt.valueOf())) {
     throw new AppError(400, "INVALID_INPUT", "recordedAt must be a valid date.");

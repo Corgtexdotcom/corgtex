@@ -12,7 +12,6 @@ function meeting(overrides) {
     transcript: "Jan: We discussed follow-up actions.",
     transcriptProcessingProgress: {
       currentStage: "READY",
-      currentWorkflowJobStatus: "COMPLETED",
       createdAt: new Date("2026-07-15T17:01:00.000Z"),
       startedAt: new Date("2026-07-15T17:02:00.000Z"),
       failedAt: null,
@@ -90,7 +89,6 @@ describe("meeting transcript upload diagnostics", () => {
           createdAt: new Date("2026-07-16T10:00:00.000Z"),
           transcriptProcessingProgress: {
             currentStage: "SUMMARIZING",
-            currentWorkflowJobStatus: "PENDING",
             createdAt: new Date("2026-07-16T10:00:00.000Z"),
             startedAt: new Date("2026-07-16T10:01:00.000Z"),
             failedAt: null,
@@ -116,7 +114,6 @@ describe("meeting transcript upload diagnostics", () => {
           updatedAt: new Date("2026-07-16T11:59:00.000Z"),
           transcriptProcessingProgress: {
             currentStage: "SUMMARIZING",
-            currentWorkflowJobStatus: "PENDING",
             createdAt: new Date("2026-06-01T10:00:00.000Z"),
             startedAt: new Date("2026-07-16T11:59:30.000Z"),
             failedAt: null,

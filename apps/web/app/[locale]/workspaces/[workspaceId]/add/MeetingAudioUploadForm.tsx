@@ -117,7 +117,7 @@ export function MeetingAudioUploadForm({
 
   return (
     <div className="stack" style={{ gap: 20, paddingBottom: 96 }}>
-      <form ref={formRef} onSubmit={onSubmit} className="stack nr-form-section" noValidate>
+      <form ref={formRef} onSubmit={onSubmit} className="stack nr-form-section">
         <label>
           Audio file
           <input name="file" type="file" accept="audio/*" required />
@@ -128,7 +128,7 @@ export function MeetingAudioUploadForm({
         </label>
         <label>
           Recorded at
-          <input name="recordedAt" type="datetime-local" />
+          <input name="recordedAt" type="datetime-local" required />
         </label>
         <label>
           Duration seconds

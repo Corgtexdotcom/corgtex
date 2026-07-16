@@ -61,13 +61,13 @@ describe("meeting transcript intake", () => {
 
     const metadata = await inferMeetingTranscriptMetadata({
       workspaceId: "workspace-1",
-      transcript: "Jan: We need a follow-up.", allowInferredRecordedAt: true, now: TEST_NOW,
+      transcript: "Jan: We need a follow-up.",
     });
 
     expect(modelGatewayMock.extract).toHaveBeenCalledTimes(1);
     expect(metadata).toEqual({
       title: "Model Tactical",
-      recordedAt: new Date("2026-05-17T11:00:00.000Z"),
+      recordedAt: null,
       participantEmails: ["model@example.com"],
       source: "chat-transcript-upload",
     });
