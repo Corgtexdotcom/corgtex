@@ -251,17 +251,23 @@ function bootstrapSignaturePayload(params: {
 
 export function buildCustomerDeploymentRuntimeVariables(params: {
   customerSlug: string;
+  releaseGitSha?: string | null;
   url: string;
   releaseImageTag: string;
   releaseVersion?: string | null;
   overrides?: Record<string, string>;
 }) {
+  const releaseGitSha = normalizeOptional(params.releaseGitSha)
+    ?? (params.releaseImageTag.startsWith("sha-") ? params.releaseImageTag.slice("sha-".length) : null);
+
   return {
     APP_URL: params.url,
     WORKSPACE_SLUG: params.customerSlug,
     REDIS_KEY_PREFIX: `${params.customerSlug}-prod`,
+    ...(releaseGitSha ? { CORGTEX_RELEASE_GIT_SHA: releaseGitSha } : {}),
     CORGTEX_RELEASE_IMAGE_TAG: params.releaseImageTag,
     ...(normalizeOptional(params.releaseVersion) ? { CORGTEX_RELEASE_VERSION: normalizeOptional(params.releaseVersion)! } : {}),
+    ...buildCustomerDeploymentApplicationInsightsVariables(),
     ...buildCustomerDeploymentPostHogVariables(params.customerSlug),
     ...(params.overrides ?? {}),
   };
@@ -292,6 +298,17 @@ function buildCustomerDeploymentPostHogVariables(customerSlug: string): Record<s
     POSTHOG_EVENT_SAMPLE_RATE: postHogEnv("POSTHOG_EVENT_SAMPLE_RATE", "1"),
     POSTHOG_CAPTURE_TIMEOUT_MS: postHogEnv("POSTHOG_CAPTURE_TIMEOUT_MS", "1500"),
     POSTHOG_CAPTURE_DEBUG: postHogEnv("POSTHOG_CAPTURE_DEBUG", "false"),
+  };
+}
+
+function buildCustomerDeploymentApplicationInsightsVariables(): Record<string, string> {
+  const connectionString = normalizeOptional(process.env.APPLICATIONINSIGHTS_CONNECTION_STRING);
+  if (!connectionString) {
+    return {};
+  }
+
+  return {
+    APPLICATIONINSIGHTS_CONNECTION_STRING: connectionString,
   };
 }
 
@@ -768,6 +785,7 @@ export async function provisionCustomerDeployment(actor: AppActor, params: {
   customDomain?: string | null;
   supportOwnerEmail?: string | null;
   releaseVersion?: string | null;
+  releaseGitSha?: string | null;
   releaseImageTag: string;
   webImage?: string | null;
   workerImage?: string | null;
@@ -862,6 +880,7 @@ export async function provisionCustomerDeployment(actor: AppActor, params: {
       variables: buildCustomerDeploymentRuntimeVariables({
         customerSlug,
         url,
+        releaseGitSha: params.releaseGitSha,
         releaseImageTag: params.releaseImageTag,
         releaseVersion: params.releaseVersion,
         overrides: params.variables,
@@ -1084,6 +1103,7 @@ export function buildCustomerDeploymentReadiness(deployment: {
 export async function upgradeCustomerDeploymentRelease(actor: AppActor, params: {
   deploymentId: string;
   releaseVersion?: string | null;
+  releaseGitSha?: string | null;
   releaseImageTag: string;
   webImage?: string | null;
   workerImage?: string | null;
@@ -1126,12 +1146,14 @@ export async function upgradeCustomerDeploymentRelease(actor: AppActor, params: 
       workerImage: params.workerImage,
       webSource: params.webSource,
       workerSource: params.workerSource,
-      variables: {
-        CORGTEX_RELEASE_IMAGE_TAG: params.releaseImageTag,
-        ...(releaseVersion ? { CORGTEX_RELEASE_VERSION: releaseVersion } : {}),
-        ...buildCustomerDeploymentPostHogVariables(deployment.customerSlug),
-        ...(params.variables ?? {}),
-      },
+      variables: buildCustomerDeploymentRuntimeVariables({
+        customerSlug: deployment.customerSlug,
+        url: deployment.url,
+        releaseGitSha: params.releaseGitSha,
+        releaseImageTag: params.releaseImageTag,
+        releaseVersion,
+        overrides: params.variables,
+      }),
     });
 
     const updated = await prisma.customerDeployment.update({

@@ -2,8 +2,8 @@ import type { NextRequest } from "next/server";
 import { NextResponse } from "next/server";
 import { AppError } from "@corgtex/domain";
 import { isDatabaseUnavailableError } from "@corgtex/shared";
+import { captureErrorTelemetry } from "@corgtex/shared/telemetry";
 import { z } from "zod";
-import { capturePostHogEvent } from "@/lib/posthog-server";
 
 type RouteErrorTelemetryContext = {
   actorKind?: string;
@@ -92,21 +92,19 @@ function captureRouteError(error: unknown, info: RouteErrorInfo, context: RouteE
   const route = sanitizedRequestPath(context.request);
   const method = requestMethod(context.request);
 
-  void capturePostHogEvent({
-    event: "corgtex_app_route_error",
-    distinctId: context.workspaceId ? `workspace:${context.workspaceId}` : `route:${method ?? "UNKNOWN"}:${route ?? "unknown"}`,
-    properties: {
+  void captureErrorTelemetry({
+    attributes: {
       actor_kind: context.actorKind,
-      code: info.code,
-      error_class: error instanceof Error ? error.name : typeof error,
-      method,
-      route,
-      status: info.status,
-      surface: context.surface ?? "api",
+      feature_surface: context.surface ?? "api",
       transient: info.status >= 500,
-      workspace_id: context.workspaceId,
     },
-    processPersonProfile: false,
+    code: info.code,
+    error,
+    method,
+    route,
+    status: info.status,
+    surface: "route",
+    workspaceId: context.workspaceId,
   });
 }
 

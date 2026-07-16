@@ -1336,6 +1336,7 @@ export async function createControlPlaneClient(actor: AppActor, params: {
     customDomain: normalizeOptionalControlPlaneText(params.customDomain),
     supportOwnerEmail,
     releaseVersion: normalizeOptionalControlPlaneText(params.releaseVersion) ?? latestTarget?.releaseVersion ?? null,
+    releaseGitSha: latestTarget?.releaseGitSha ?? null,
     releaseImageTag,
     webImage,
     workerImage,

@@ -755,6 +755,7 @@ describe("Platform Admin Tools", () => {
       dataResidency: "eu",
       customDomain: "acme.corgtex.com",
       supportOwnerEmail: "ops@corgtex.com",
+      releaseGitSha: "abc123",
       releaseImageTag: "sha-1",
       webImage: "ghcr.io/corgtex/web:sha-1",
       workerImage: "ghcr.io/corgtex/worker:sha-1",
@@ -793,6 +794,17 @@ describe("Platform Admin Tools", () => {
     expect(prisma.customerDeployment.upsert).toHaveBeenCalledWith(expect.not.objectContaining({
       create: expect.objectContaining({ railwayApiToken: expect.anything() }),
     }));
+    expect(railwayClient.graphql).toHaveBeenNthCalledWith(
+      7,
+      expect.any(String),
+      expect.objectContaining({
+        variables: expect.objectContaining({
+          CORGTEX_RELEASE_GIT_SHA: "abc123",
+          CORGTEX_RELEASE_IMAGE_TAG: "sha-1",
+          MODEL_PROVIDER: "openrouter",
+        }),
+      }),
+    );
     expect(railwayClient.graphql).toHaveBeenCalledTimes(9);
   });
 
@@ -884,10 +896,30 @@ describe("Platform Admin Tools", () => {
       APP_URL: "https://acme.corgtex.com",
       WORKSPACE_SLUG: "acme-prod",
       REDIS_KEY_PREFIX: "acme-prod-prod",
+      CORGTEX_RELEASE_GIT_SHA: "1",
       CORGTEX_RELEASE_IMAGE_TAG: "sha-1",
       CORGTEX_RELEASE_VERSION: "0.1.0",
       MODEL_PROVIDER: "openrouter",
     });
+  });
+
+  it("buildCustomerDeploymentRuntimeVariables can propagate explicit release SHA and Application Insights settings", () => {
+    vi.stubEnv("APPLICATIONINSIGHTS_CONNECTION_STRING", "InstrumentationKey=ikey;IngestionEndpoint=https://example.monitor.azure.com/");
+
+    try {
+      expect(admin.buildCustomerDeploymentRuntimeVariables({
+        customerSlug: "acme-prod",
+        releaseGitSha: "abc123",
+        releaseImageTag: "image-tag",
+        url: "https://acme.corgtex.com",
+      })).toEqual(expect.objectContaining({
+        APPLICATIONINSIGHTS_CONNECTION_STRING: "InstrumentationKey=ikey;IngestionEndpoint=https://example.monitor.azure.com/",
+        CORGTEX_RELEASE_GIT_SHA: "abc123",
+        CORGTEX_RELEASE_IMAGE_TAG: "image-tag",
+      }));
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 
   it("buildCustomerDeploymentRuntimeVariables includes capped PostHog settings when control-plane capture is enabled", () => {
@@ -993,6 +1025,7 @@ describe("Platform Admin Tools", () => {
   it("upgradeCustomerDeploymentRelease updates Railway service images and records the target release", async () => {
     (prisma.customerDeployment.findUniqueOrThrow as any).mockResolvedValueOnce({
       id: "inst_1",
+      url: "https://acme.corgtex.com",
       customerSlug: "acme-prod",
       railwayProjectId: "project-1",
       railwayEnvironmentId: "env-1",
@@ -1011,13 +1044,20 @@ describe("Platform Admin Tools", () => {
         .mockResolvedValueOnce({ web: "deploy-web", worker: "deploy-worker" }),
     } as any;
 
-    await admin.upgradeCustomerDeploymentRelease(dummyActor, {
-      deploymentId: "inst_1",
-      releaseVersion: "0.2.0",
-      releaseImageTag: "sha-2",
-      webImage: "ghcr.io/corgtex/web:sha-2",
-      workerImage: "ghcr.io/corgtex/worker:sha-2",
-    }, railwayClient);
+    vi.stubEnv("APPLICATIONINSIGHTS_CONNECTION_STRING", "InstrumentationKey=ikey;IngestionEndpoint=https://example.monitor.azure.com/");
+
+    try {
+      await admin.upgradeCustomerDeploymentRelease(dummyActor, {
+        deploymentId: "inst_1",
+        releaseVersion: "0.2.0",
+        releaseGitSha: "abc456",
+        releaseImageTag: "sha-2",
+        webImage: "ghcr.io/corgtex/web:sha-2",
+        workerImage: "ghcr.io/corgtex/worker:sha-2",
+      }, railwayClient);
+    } finally {
+      vi.unstubAllEnvs();
+    }
 
     expect(requireGlobalOperator).toHaveBeenCalledWith(dummyActor);
     expect(prisma.customerDeployment.update).toHaveBeenCalledWith({
@@ -1038,6 +1078,20 @@ describe("Platform Admin Tools", () => {
       }),
     });
     expect(railwayClient.graphql).toHaveBeenCalledTimes(3);
+    expect(railwayClient.graphql).toHaveBeenNthCalledWith(
+      2,
+      expect.any(String),
+      expect.objectContaining({
+        variables: expect.objectContaining({
+          APP_URL: "https://acme.corgtex.com",
+          WORKSPACE_SLUG: "acme-prod",
+          APPLICATIONINSIGHTS_CONNECTION_STRING: "InstrumentationKey=ikey;IngestionEndpoint=https://example.monitor.azure.com/",
+          CORGTEX_RELEASE_GIT_SHA: "abc456",
+          CORGTEX_RELEASE_IMAGE_TAG: "sha-2",
+          CORGTEX_RELEASE_VERSION: "0.2.0",
+        }),
+      }),
+    );
     expect(prisma.customerDeploymentEvent.create).toHaveBeenCalledWith({
       data: expect.objectContaining({
         deploymentId: "inst_1",
