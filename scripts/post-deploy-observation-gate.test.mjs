@@ -39,6 +39,31 @@ describe("post-deploy observation gate", () => {
     expect(JSON.parse(output).status).toBe("passed");
   });
 
+  it("reports missing required observation sources without failing the CLI", () => {
+    const scriptPath = fileURLToPath(new URL("./post-deploy-observation-gate.mjs", import.meta.url));
+    const output = execFileSync(process.execPath, [
+      scriptPath,
+      "--release-git-sha",
+      SHA,
+      "--release-image-tag",
+      `sha-${SHA}`,
+      "--window-minutes",
+      "1",
+    ], {
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        AZURE_APPLICATIONINSIGHTS_APP_NAME: "",
+        AZURE_APPLICATIONINSIGHTS_RESOURCE_GROUP: "",
+        OBSERVATION_REQUIRE_SOURCE: "true",
+      },
+    });
+    const summary = JSON.parse(output);
+    expect(summary.status).toBe("blocked");
+    expect(summary.blockerReason).toContain("missing_observation_sources");
+    expect(summary.missingRequiredSources).toContain("azure_monitor");
+  });
+
   it("blocks release-correlated route failures", () => {
     const summary = buildObservationSummary({
       manifest,
@@ -497,7 +522,7 @@ describe("post-deploy observation gate", () => {
     expect(fetchImpl).toHaveBeenCalledTimes(2);
   });
 
-  it("requires Railway coverage for every selected Railway target group", async () => {
+  it("reports missing Railway coverage for every selected Railway target group", async () => {
     const fetchImpl = vi.fn(async (_url, init) => {
       const body = JSON.parse(init.body);
       if (body.query.includes("LatestDeployment")) {
@@ -512,7 +537,7 @@ describe("post-deploy observation gate", () => {
       return new Response(JSON.stringify({ data: { httpLogs: [] } }), { status: 200 });
     });
 
-    await expect(runObservationGate({
+    const summary = await runObservationGate({
       manifest,
       since: new Date("2026-07-16T05:52:00.000Z"),
       targets: "railway-customers,ops",
@@ -530,7 +555,18 @@ describe("post-deploy observation gate", () => {
         OBSERVATION_REQUIRE_SOURCE: "true",
       },
       deps: { fetchImpl, onSourceNote: vi.fn() },
-    })).rejects.toThrow("Missing required observation query source(s) for targets railway-customers,ops: railway-customers: railway or posthog");
+    });
+
+    expect(summary.status).toBe("blocked");
+    expect(summary.blockingFailures).toHaveLength(0);
+    expect(summary.missingRequiredSources).toEqual(["railway-customers: railway or posthog"]);
+    expect(summary.sourceChecks).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        source: "observation_requirements",
+        status: "blocked",
+        reason: expect.stringContaining("railway-customers: railway or posthog"),
+      }),
+    ]));
   });
 
   it("allows PostHog to satisfy the required source when Railway errors", async () => {
@@ -580,7 +616,7 @@ describe("post-deploy observation gate", () => {
     }));
   });
 
-  it("requires Railway or PostHog when fail-closed observation includes Railway targets", async () => {
+  it("reports missing Railway or PostHog when observation includes Railway targets", async () => {
     const runCommand = vi.fn(() => JSON.stringify({
       tables: [{
         columns: [{ name: "name" }],
@@ -588,7 +624,7 @@ describe("post-deploy observation gate", () => {
       }],
     }));
 
-    await expect(runObservationGate({
+    const summary = await runObservationGate({
       manifest,
       since: new Date("2026-07-16T05:52:00.000Z"),
       targets: "railway-customers,azure-selfserve",
@@ -609,7 +645,11 @@ describe("post-deploy observation gate", () => {
         }]),
       },
       deps: { runCommand, onSourceNote: vi.fn() },
-    })).rejects.toThrow("Missing required observation query source(s) for targets railway-customers,azure-selfserve: railway-customers: railway or posthog");
+    });
+
+    expect(summary.status).toBe("blocked");
+    expect(summary.blockingFailures).toHaveLength(0);
+    expect(summary.missingRequiredSources).toEqual(["railway-customers: railway or posthog"]);
   });
 
   it("blocks current-release Railway HTTP 5xx logs", async () => {
@@ -767,8 +807,8 @@ describe("post-deploy observation gate", () => {
     expect(query).not.toContain("take 100");
   });
 
-  it("fails closed when production requires observation sources and none are configured", async () => {
-    await expect(runObservationGate({
+  it("returns a blocked summary when production requires observation sources and none are configured", async () => {
+    const summary = await runObservationGate({
       manifest,
       since: new Date("2026-07-16T05:52:00.000Z"),
       env: {
@@ -777,7 +817,18 @@ describe("post-deploy observation gate", () => {
       deps: {
         onSourceNote: vi.fn(),
       },
-    })).rejects.toThrow("Missing required observation query source(s) for targets production: azure_monitor, railway-customers: railway or posthog, ops: railway or posthog, backup-app: railway or posthog");
+    });
+
+    expect(summary.status).toBe("blocked");
+    expect(summary.blockerReason).toBe(
+      "missing_observation_sources: azure_monitor, railway-customers: railway or posthog, ops: railway or posthog, backup-app: railway or posthog",
+    );
+    expect(summary.sourceChecks).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        source: "observation_requirements",
+        status: "blocked",
+      }),
+    ]));
   });
 
   it("does not fail a passing gate when advisory publishing fails", async () => {

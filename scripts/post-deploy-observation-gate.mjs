@@ -49,7 +49,7 @@ export async function runObservationGate(options = {}) {
   const since = options.since ?? sinceFromWindow(options.windowMinutes ?? DEFAULT_WINDOW_MINUTES, now);
   const until = options.until ?? now;
   const collected = options.rows
-    ? { rows: options.rows, sourceChecks: options.sourceChecks ?? [] }
+    ? { rows: options.rows, sourceChecks: options.sourceChecks ?? [], missingRequiredSources: [] }
     : await collectObservationData({
       env: options.env ?? process.env,
       manifest,
@@ -63,6 +63,7 @@ export async function runObservationGate(options = {}) {
     since,
     rows: collected.rows,
     sourceChecks: collected.sourceChecks,
+    missingRequiredSources: collected.missingRequiredSources ?? [],
     targets: options.targets ?? null,
   });
   summary.advisoryPublish = {
@@ -93,12 +94,13 @@ export async function runObservationGate(options = {}) {
   return summary;
 }
 
-export function buildObservationSummary({ manifest, since, rows, sourceChecks = [], targets = null }) {
+export function buildObservationSummary({ manifest, since, rows, sourceChecks = [], missingRequiredSources = [], targets = null }) {
   const normalizedRows = rows.map(normalizeObservationRow).filter(Boolean);
   const failureRows = normalizedRows.filter(isBlockingClassFailure);
   const releaseMatchers = observationReleaseMatchers(manifest, targets);
   const blockingFailures = [];
   const advisoryFailures = [];
+  const normalizedMissingRequiredSources = missingRequiredSources.map(safeText).filter(Boolean);
 
   for (const row of failureRows) {
     if (releaseMatchers.some((matcher) => rowMatchesRelease(row, matcher.manifest) && rowMatchesTargets(row, matcher.selectedTargets))) {
@@ -109,7 +111,10 @@ export function buildObservationSummary({ manifest, since, rows, sourceChecks = 
   }
 
   return {
-    status: blockingFailures.length > 0 ? "blocked" : "passed",
+    status: blockingFailures.length > 0 || normalizedMissingRequiredSources.length > 0 ? "blocked" : "passed",
+    blockerReason: normalizedMissingRequiredSources.length > 0
+      ? `missing_observation_sources: ${normalizedMissingRequiredSources.join(", ")}`
+      : null,
     release: {
       gitSha: manifest.gitSha,
       imageTag: manifest.imageTag,
@@ -127,6 +132,7 @@ export function buildObservationSummary({ manifest, since, rows, sourceChecks = 
     since: since.toISOString(),
     sources: sourceSummaries(normalizedRows),
     sourceChecks: normalizeSourceChecks(sourceChecks),
+    missingRequiredSources: normalizedMissingRequiredSources,
     checkedRows: normalizedRows.length,
     blockingFailures,
     advisoryFailures,
@@ -242,14 +248,18 @@ async function collectObservationData({ env = process.env, manifest = {}, since,
     }
   }
 
-  if (requiresObservationSource(env)) {
-    const missingSources = missingSourceGroups.map((group) => group.label);
-    if (missingSources.length > 0) {
-      throw new Error(`Missing required observation query source(s) for targets ${targets ?? "production"}: ${missingSources.join(", ")}`);
-    }
+  const missingRequiredSources = requiresObservationSource(env)
+    ? missingSourceGroups.map((group) => group.label)
+    : [];
+  if (missingRequiredSources.length > 0) {
+    sourceChecks.push({
+      source: "observation_requirements",
+      status: "blocked",
+      reason: `Missing required observation query source(s) for targets ${targets ?? "production"}: ${missingRequiredSources.join(", ")}`,
+    });
   }
 
-  return { rows, sourceChecks };
+  return { rows, sourceChecks, missingRequiredSources };
 }
 
 export async function queryAzureMonitorRows({ env = process.env, since, until = new Date(), deps = {} }) {
@@ -538,6 +548,13 @@ export function renderMarkdownSummary(summary) {
     `Blocking failures: ${summary.blockingFailures.length}`,
     `Advisory failures: ${summary.advisoryFailures.length}`,
   ];
+
+  if (summary.missingRequiredSources?.length > 0) {
+    lines.push("", "### Missing observation sources", "");
+    for (const source of summary.missingRequiredSources) {
+      lines.push(`- ${source}`);
+    }
+  }
 
   if (summary.blockingFailures.length > 0) {
     lines.push("", "### Blocking evidence", "");
@@ -1020,7 +1037,7 @@ async function main() {
   });
 
   console.log(JSON.stringify(summary, null, 2));
-  if (summary.status !== "passed") {
+  if (summary.blockingFailures.length > 0) {
     process.exitCode = 1;
   }
 }
