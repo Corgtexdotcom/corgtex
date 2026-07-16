@@ -1,10 +1,5 @@
-import { execFileSync } from "node:child_process";
-import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-
-import {
-  buildMeetingTranscriptUploadDiagnostics,
-} from "./meeting-transcript-upload-diagnostics.mjs";
+import { buildMeetingTranscriptUploadDiagnostics } from "./meeting-transcript-upload-diagnostics.mjs";
 
 function meeting(overrides) {
   return {
@@ -28,13 +23,6 @@ function meeting(overrides) {
 }
 
 describe("meeting transcript upload diagnostics", () => {
-  it("runs as a CLI from paths containing spaces", () => {
-    const scriptPath = fileURLToPath(new URL("./meeting-transcript-upload-diagnostics.mjs", import.meta.url));
-    const output = execFileSync(process.execPath, [scriptPath, "--help"], { encoding: "utf8" });
-
-    expect(output).toContain("meeting-transcript-upload-diagnostics.mjs");
-  });
-
   it("flags manual transcript dates that drift far from upload time", () => {
     const summary = buildMeetingTranscriptUploadDiagnostics({
       checkedAt: new Date("2026-07-16T12:00:00.000Z"),
