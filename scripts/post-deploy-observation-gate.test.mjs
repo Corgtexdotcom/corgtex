@@ -42,7 +42,7 @@ describe("post-deploy observation gate", () => {
       rows: [{
         source: "azure_monitor",
         name: "corgtex_route_error",
-        instance_id: "crina",
+        instance_id: "tenant-a",
         provider: "railway",
         release_git_sha: SHA,
         release_image_tag: `sha-${SHA}`,
@@ -91,7 +91,7 @@ describe("post-deploy observation gate", () => {
       rows: [{
         source: "azure_monitor",
         name: "corgtex_route_error",
-        instance_id: "crina",
+        instance_id: "tenant-a",
         release_git_sha: SHA,
         route: "/api/auth/login",
         status: "400",
@@ -144,7 +144,7 @@ describe("post-deploy observation gate", () => {
       columns: ["name", "instance_id", "release_git_sha", "route", "status", "events"],
       results: [[
         "corgtex_route_error",
-        "crina",
+        "tenant-a",
         SHA,
         "/api/upload",
         "500",
@@ -175,7 +175,7 @@ describe("post-deploy observation gate", () => {
       columns: ["name", "instance_id", "release_git_sha", "route", "status", "events"],
       results: [[
         "corgtex_route_error",
-        "crina",
+        "tenant-a",
         SHA,
         "/api/upload",
         "500",
