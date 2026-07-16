@@ -214,7 +214,7 @@ export function WorkspaceOnboardingTour({
       },
       {
         href: "/",
-        element: ".ws-main-content",
+        element: ".ws-assistant-launch",
         popover: {
           title: t("assistantTitle"),
           description: t("assistantDescription"),

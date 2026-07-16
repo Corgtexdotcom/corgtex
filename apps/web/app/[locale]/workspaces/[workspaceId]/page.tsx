@@ -130,7 +130,8 @@ export default async function WorkspaceDashboard({
     members,
     unreadNotificationsCount,
     articlesResult,
-    latestWorkspaceBriefing,
+    latestDailyWorkspaceBriefing,
+    latestWeeklyWorkspaceBriefing,
     newspaperEditions,
     meetings,
     chunksCount,
@@ -140,6 +141,7 @@ export default async function WorkspaceDashboard({
     actor.kind === "user" ? countUnreadNotifications(actor.user.id, workspaceId) : Promise.resolve(0),
     listArticles(actor, { workspaceId, take: 50 }),
     getLatestWorkspaceBriefing({ actor, workspaceId, period: "DAILY" }),
+    getLatestWorkspaceBriefing({ actor, workspaceId, period: "WEEKLY" }),
     listNewspaperEditions(actor, workspaceId, { take: 1 }),
     listMeetings(workspaceId, { status: "COMPLETED" }),
     prisma.knowledgeChunk.count({ where: { workspaceId } }),
@@ -150,6 +152,7 @@ export default async function WorkspaceDashboard({
     ? workspaceBranding(workspaceData)
     : { primaryName: "Corgtex", secondaryLabel: "powered by Corgtex" };
   const currentMember = actor.kind === "user" ? members.find((member) => member.userId === actor.user.id) : undefined;
+  const latestWorkspaceBriefing = latestDailyWorkspaceBriefing ?? latestWeeklyWorkspaceBriefing;
   const latestNewspaperEdition = newspaperEditions[0] ?? null;
   const latestEditionDigest = latestNewspaperEdition
     ? normalizeNewspaperEditionDigest(latestNewspaperEdition)
@@ -210,6 +213,9 @@ export default async function WorkspaceDashboard({
             {t("viewFullProfile")}
           </Link>
         )}
+        <Link href={`/workspaces/${workspaceId}/chat`} className="nr-newspaper-assistant-pill ws-assistant-launch">
+          {t("askAgent")}
+        </Link>
         <Link href={`/workspaces/${workspaceId}/notifications`} className="nr-newspaper-notification-pill">
           {notificationLabel}
         </Link>

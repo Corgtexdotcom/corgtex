@@ -532,7 +532,11 @@ function composeWorkspaceBriefingNarrative(params: {
     : meaningfulItems.length > 0
       ? "No source links are attached to this edition, so the story above is the complete generated briefing."
       : "No source links are attached because no high-signal workspace activity was found for this period.";
-  const introMd = !hasFreshItems && meaningfulItems.length > 0 && !params.fallbackIntro
+  const introMd = !hasFreshItems && meaningfulItems.length === 0 && !params.fallbackIntro
+    ? params.period === "WEEKLY"
+      ? "This weekly edition found no high-signal workspace activity in the evidence pool, so it stays intentionally quiet."
+      : "This daily edition found no high-signal workspace activity in the evidence pool, so it stays intentionally quiet."
+    : !hasFreshItems && meaningfulItems.length > 0 && !params.fallbackIntro
     ? params.period === "WEEKLY"
       ? "This weekly edition found no fresh operating signal in the last 7 days, so it keeps unresolved context that still affects current work."
       : "This daily edition found no fresh operating signal in the last 24-36 hours, so it keeps continuing context that still matters today."

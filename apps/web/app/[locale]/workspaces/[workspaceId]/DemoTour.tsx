@@ -85,7 +85,7 @@ export function DemoTour({ workspaceId }: { workspaceId: string }) {
     },
     {
       path: "/",
-      element: ".ws-main-content",
+      element: ".ws-assistant-launch",
       popover: {
         title: t("askTitle"),
         description: t("askDescription"),

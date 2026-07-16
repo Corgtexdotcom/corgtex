@@ -1095,6 +1095,8 @@ describe("workspace briefing", () => {
       prominence: "lead",
     }));
     expect(briefing.items[0].summaryMd).toContain("No new high-signal");
+    expect(briefing.introMd).toContain("stays intentionally quiet");
+    expect(briefing.introMd).not.toContain("strongest signal");
   });
 
   it("renders briefing markdown as narrative instead of source-category sections", async () => {

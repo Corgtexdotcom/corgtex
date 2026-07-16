@@ -1899,7 +1899,8 @@ a.meeting-agenda-item:hover {
     margin: -6px 0 28px;
   }
 
-  .nr-newspaper-notification-pill {
+  .nr-newspaper-notification-pill,
+  .nr-newspaper-assistant-pill {
     display: inline-flex;
     align-items: center;
     min-height: 30px;
@@ -1916,7 +1917,8 @@ a.meeting-agenda-item:hover {
     overflow-wrap: anywhere;
   }
 
-  .nr-newspaper-notification-pill:hover {
+  .nr-newspaper-notification-pill:hover,
+  .nr-newspaper-assistant-pill:hover {
     text-decoration: underline;
   }
 
