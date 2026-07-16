@@ -2,6 +2,15 @@ import process from "node:process";
 import { File } from "node:buffer";
 import { PrismaClient } from "@prisma/client";
 
+import {
+  createValidationCleanupRegistry,
+  createValidationRun,
+  parseValidationPrNumbers,
+  productionValidationTag,
+  recordValidationResult,
+  writeValidationArtifacts,
+} from "./lib/production-validation.mjs";
+
 function fail(message) {
   console.error(`FAIL ${message}`);
   process.exit(1);
@@ -54,6 +63,27 @@ function eventPayloadFilter(key, value) {
       equals: value,
     },
   };
+}
+
+function validationRecordPrefix(run, fallback) {
+  if (run.prNumbers.length === 0) return `${fallback} ${run.runId}`;
+  return productionValidationTag({
+    date: run.startedAt,
+    prNumber: run.prNumbers[0],
+    runId: run.runId,
+  });
+}
+
+function validationRunId() {
+  return process.env.PRODUCTION_VALIDATION_RUN_ID?.trim()
+    || process.env.INGESTION_GUIDANCE_SMOKE_RUN_ID?.trim()
+    || `ingestion-guidance-smoke-${Date.now().toString(36)}`;
+}
+
+function validationOutDir() {
+  return process.env.PRODUCTION_VALIDATION_OUT_DIR?.trim()
+    || process.env.INGESTION_GUIDANCE_SMOKE_OUT_DIR?.trim()
+    || ".artifacts/ingestion-guidance-smoke";
 }
 
 async function cleanupStaleMeetingSmokeArtifacts(prisma, workspaceId) {
@@ -290,11 +320,23 @@ async function main() {
     }
     pass("/api/session returned a workspace for ingestion guidance smoke");
 
-    const tag = `ingestion-guidance-smoke-${Date.now()}`;
+    const validationRun = createValidationRun({
+      runId: validationRunId(),
+      tenant: { id: workspaceId, label: workspaceId },
+      prNumbers: parseValidationPrNumbers(process.env.INGESTION_GUIDANCE_SMOKE_PR_NUMBERS ?? process.env.PRODUCTION_VALIDATION_PR_NUMBERS),
+      baseUrl,
+      environment: "production",
+      metadata: { script: "ingestion-guidance-smoke" },
+    });
+    const cleanupRegistry = createValidationCleanupRegistry(validationRun);
+    const tag = validationRecordPrefix(validationRun, "ingestion-guidance-smoke");
     let sourceId = null;
     let meetingId = null;
     const sourceTitle = `Temporary source ${tag}`;
     const meetingTitle = `Temporary meeting ${tag}`;
+    let sourceCleanupActionId = null;
+    let meetingCleanupActionId = null;
+    let fatalError = null;
 
     try {
       const sourceGuidance = `Preserve the source guidance for ${tag}.`;
@@ -315,14 +357,24 @@ async function main() {
 
       sourceId = source.body?.id;
       if (!sourceId || source.body?.ingestionGuidanceMd !== sourceGuidance) {
-        fail("non-meeting text ingestion did not persist trimmed ingestionGuidanceMd");
+        throw new Error("non-meeting text ingestion did not persist trimmed ingestionGuidanceMd");
       }
-      pass("non-meeting text ingestion persists trimmed ingestionGuidanceMd");
-      await cleanupSmokeArtifacts(prisma, {
-        workspaceId,
-        sourceId,
-        sourceTitle,
+      sourceCleanupActionId = `delete-temporary:BrainSource:${sourceId}`;
+      cleanupRegistry.add({
+        id: sourceCleanupActionId,
+        action: "delete-temporary",
+        target: { type: "BrainSource", id: sourceId, label: sourceTitle },
+        runner: async () => {
+          await cleanupSmokeArtifacts(prisma, {
+            workspaceId,
+            sourceId,
+            sourceTitle,
+          });
+          return "Temporary non-meeting text ingestion record was removed.";
+        },
       });
+      pass("non-meeting text ingestion persists trimmed ingestionGuidanceMd");
+      await cleanupRegistry.runAction(sourceCleanupActionId);
       sourceId = null;
       pass("temporary non-meeting text ingestion record was removed");
 
@@ -356,13 +408,28 @@ async function main() {
       });
 
       if (meeting.body?.status !== "meeting_created") {
-        fail(`meeting transcript upload did not create an isolated smoke meeting: ${JSON.stringify(meeting.body)}`);
+        throw new Error(`meeting transcript upload did not create an isolated smoke meeting: ${JSON.stringify(meeting.body)}`);
       }
 
       meetingId = meeting.body?.meeting?.id;
       if (!meetingId || meeting.body?.meeting?.ingestionGuidanceMd !== meetingGuidance) {
-        fail("meeting transcript upload did not persist trimmed ingestionGuidanceMd");
+        throw new Error("meeting transcript upload did not persist trimmed ingestionGuidanceMd");
       }
+      meetingCleanupActionId = `delete-temporary:Meeting:${meetingId}`;
+      cleanupRegistry.add({
+        id: meetingCleanupActionId,
+        action: "delete-temporary",
+        target: { type: "Meeting", id: meetingId, label: meetingTitle },
+        runner: async () => {
+          await cleanupSmokeArtifacts(prisma, {
+            workspaceId,
+            meetingId,
+            meetingTitle,
+            tag,
+          });
+          return "Temporary meeting transcript records were removed.";
+        },
+      });
       pass("meeting transcript upload persists trimmed ingestionGuidanceMd");
 
       const duplicateGuidance = `Add the duplicate-upload guidance for ${tag}.`;
@@ -383,17 +450,17 @@ async function main() {
       });
 
       if (duplicateMeeting.body?.status !== "meeting_matched" || duplicateMeeting.body?.meeting?.id !== meetingId) {
-        fail(`duplicate MEETING text ingestion did not update the existing meeting: ${JSON.stringify(duplicateMeeting.body)}`);
+        throw new Error(`duplicate MEETING text ingestion did not update the existing meeting: ${JSON.stringify(duplicateMeeting.body)}`);
       }
       const afterTextDuplicate = await prisma.meeting.findFirst({
         where: { id: meetingId, workspaceId },
         select: { transcript: true, ingestionGuidanceMd: true, aiProcessedAt: true },
       });
       if (!afterTextDuplicate?.transcript?.includes(`Additional transcript upload note for ${tag}`)) {
-        fail("duplicate MEETING text ingestion did not merge useful new transcript text");
+        throw new Error("duplicate MEETING text ingestion did not merge useful new transcript text");
       }
       if (!afterTextDuplicate.ingestionGuidanceMd?.includes(duplicateGuidance) || afterTextDuplicate.aiProcessedAt !== null) {
-        fail("duplicate MEETING text ingestion did not merge guidance and reset AI processing state");
+        throw new Error("duplicate MEETING text ingestion did not merge guidance and reset AI processing state");
       }
       pass("duplicate MEETING text ingestion updates the existing meeting and resets processing");
 
@@ -421,35 +488,62 @@ async function main() {
         body: chatForm,
       });
       if (chatDuplicate.body?.status !== "meeting_matched" || chatDuplicate.body?.meeting?.id !== meetingId) {
-        fail(`chat transcript upload did not update the existing meeting: ${JSON.stringify(chatDuplicate.body)}`);
+        throw new Error(`chat transcript upload did not update the existing meeting: ${JSON.stringify(chatDuplicate.body)}`);
       }
       const afterChatDuplicate = await prisma.meeting.findFirst({
         where: { id: meetingId, workspaceId },
         select: { transcript: true },
       });
       if (!afterChatDuplicate?.transcript?.includes(`Chat upload note for ${tag}`)) {
-        fail("chat transcript upload did not merge useful new transcript text");
+        throw new Error("chat transcript upload did not merge useful new transcript text");
       }
       pass("chat transcript upload updates the existing meeting");
 
-      await cleanupSmokeArtifacts(prisma, {
-        workspaceId,
-        meetingId,
-        meetingTitle,
-        tag,
-      });
+      await cleanupRegistry.runAction(meetingCleanupActionId);
       meetingId = null;
       pass("temporary meeting transcript records were removed");
+    } catch (error) {
+      fatalError = error;
+      throw error;
     } finally {
-      await cleanupSmokeArtifacts(prisma, {
-        workspaceId,
-        sourceId,
-        sourceTitle,
-        meetingId,
-        meetingTitle,
-        tag,
+      const cleanup = await cleanupRegistry.runAll({ throwOnFailure: false });
+      let fallbackCleanupError = null;
+      try {
+        await cleanupSmokeArtifacts(prisma, {
+          workspaceId,
+          sourceId,
+          sourceTitle,
+          meetingId,
+          meetingTitle,
+          tag,
+        });
+        sourceId = null;
+        meetingId = null;
+        await cleanupStaleMeetingSmokeArtifacts(prisma, workspaceId);
+      } catch (error) {
+        fallbackCleanupError = error;
+      }
+      const cleanupFailure = cleanup.failed[0]?.error ?? fallbackCleanupError;
+      recordValidationResult(validationRun, {
+        intent: "Source and meeting ingestion guidance write paths",
+        method: "ingestion-guidance-smoke",
+        result: fatalError || cleanupFailure ? "partial" : "pass",
+        blocker: fatalError || cleanupFailure
+          ? (fatalError?.message ?? cleanupFailure?.message ?? "Ingestion guidance smoke cleanup failed.")
+          : null,
+        evidence: [
+          "non-meeting text ingestion",
+          "meeting transcript upload",
+          "duplicate meeting text ingestion",
+          "chat transcript duplicate upload",
+        ],
+        createdRecordIds: validationRun.createdRecords.map((record) => record.id),
+        cleanupActionIds: validationRun.cleanupActions.map((entry) => entry.id),
       });
-      await cleanupStaleMeetingSmokeArtifacts(prisma, workspaceId);
+      await writeValidationArtifacts(validationRun, validationOutDir());
+      if (!fatalError && cleanupFailure) {
+        throw cleanupFailure;
+      }
     }
   } finally {
     await prisma.$disconnect();

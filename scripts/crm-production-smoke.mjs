@@ -2,6 +2,15 @@ import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 
+import {
+  createValidationCleanupRegistry,
+  createValidationRun,
+  parseValidationPrNumbers,
+  productionValidationTag,
+  recordValidationResult,
+  writeValidationArtifacts,
+} from "./lib/production-validation.mjs";
+
 const DEFAULT_BASE_URL = "https://app.corgtex.com";
 const DEFAULT_OUT_DIR = ".artifacts/crm-production-smoke";
 
@@ -16,6 +25,7 @@ function usage() {
     "  CRM_SMOKE_EXPECTED_GIT_SHA  optional /api/health release SHA to require",
     "  CRM_SMOKE_WORKSPACE_SLUG    workspace slug to select after login, default jnj-demo",
     "  CRM_SMOKE_HEADLESS          false to show Chromium, default true",
+    "  CRM_SMOKE_PR_NUMBERS        comma-separated PR numbers covered by this validation run",
   ].join("\n");
 }
 
@@ -64,6 +74,15 @@ function crmScreenshotFileName(targetName, theme) {
   return `${targetName}-${theme}.png`;
 }
 
+function validationRecordPrefix(run, fallback) {
+  if (run.prNumbers.length === 0) return `${fallback} ${run.runId}`;
+  return productionValidationTag({
+    date: run.startedAt,
+    prNumber: run.prNumbers[0],
+    runId: run.runId,
+  });
+}
+
 function evaluateKanbanSnapshot(snapshot) {
   if (!snapshot?.boardVisible) return "Kanban board was not visible.";
   if (snapshot.cardCount < 1) return "Kanban board did not render any visible cards.";
@@ -102,18 +121,28 @@ function crmPageContext(workspaceId, account, activityId = null, title = null) {
 }
 
 class CrmSmoke {
-  constructor({ baseUrl, outDir, expectedGitSha, workspaceSlug, headless }) {
+  constructor({ baseUrl, outDir, expectedGitSha, workspaceSlug, headless, prNumbers }) {
     this.baseUrl = normalizeBaseUrl(baseUrl);
     this.outDir = path.resolve(outDir || DEFAULT_OUT_DIR);
     this.expectedGitSha = expectedGitSha || null;
     this.workspaceSlug = workspaceSlug || "jnj-demo";
     this.headless = headless;
     this.runId = `crm-smoke-${Date.now().toString(36)}`;
+    this.validationRun = createValidationRun({
+      runId: this.runId,
+      tenant: { slug: this.workspaceSlug, label: this.workspaceSlug },
+      prNumbers,
+      baseUrl: this.baseUrl,
+      environment: "production",
+      metadata: { script: "crm-production-smoke" },
+    });
+    this.cleanupRegistry = createValidationCleanupRegistry(this.validationRun);
+    this.validationTag = validationRecordPrefix(this.validationRun, "crm-production-smoke");
+    this.validationResultRecorded = false;
     this.cookie = null;
     this.workspaceId = null;
     this.credentialId = null;
     this.mcpToken = null;
-    this.activityIdForCleanup = null;
     this.results = [];
   }
 
@@ -222,6 +251,11 @@ class CrmSmoke {
     const workspace = session.body.workspaces.find((item) => item.slug === this.workspaceSlug || item.id === this.workspaceId);
     assert(workspace, `Workspace ${this.workspaceSlug} was not available after demo login.`);
     this.workspaceId = workspace.id;
+    this.validationRun.tenant = {
+      id: workspace.id,
+      slug: workspace.slug ?? this.workspaceSlug,
+      label: workspace.name ?? workspace.slug ?? workspace.id,
+    };
     this.record("demo login", { workspaceId: this.workspaceId, workspaceSlug: workspace.slug ?? null });
   }
 
@@ -239,7 +273,21 @@ class CrmSmoke {
     this.credentialId = result.body.credential.id;
     this.mcpToken = result.body.token;
     this.rpcSeq = 0;
-    this.record("temporary MCP credential issued", { credentialId: this.credentialId });
+    const cleanupActionId = `revoke:AgentCredential:${this.credentialId}`;
+    this.cleanupRegistry.add({
+      id: cleanupActionId,
+      action: "revoke",
+      target: {
+        type: "AgentCredential",
+        id: this.credentialId,
+        label: `CRM production smoke ${this.runId}`,
+      },
+      runner: async () => {
+        await this.sessionFetch(`/api/workspaces/${this.workspaceId}/agent-credentials/${this.credentialId}/revoke`, { method: "POST" });
+        return "Temporary MCP credential revoked.";
+      },
+    });
+    this.record("temporary MCP credential issued", { credentialId: this.credentialId, cleanupActionId });
   }
 
   async verifyMcpReads(account) {
@@ -349,12 +397,12 @@ class CrmSmoke {
   }
 
   async verifyChatAndWriteback(page, account) {
-    const title = `CRM production smoke follow-up ${this.runId}`;
+    const title = `${this.validationTag} CRM follow-up`;
     const dueAt = new Date(Date.now() + 60 * 60 * 1000).toISOString();
     const dueTo = new Date(Date.now() + 36 * 60 * 60 * 1000).toISOString();
     const conversation = await this.sessionFetch(`/api/workspaces/${this.workspaceId}/conversations`, {
       method: "POST",
-      body: JSON.stringify({ agentKey: "assistant", topic: `CRM production smoke ${this.runId}` }),
+      body: JSON.stringify({ agentKey: "assistant", topic: this.validationTag }),
     });
     const conversationId = conversation.body.session.id;
     const context = crmPageContext(this.workspaceId, account);
@@ -390,7 +438,16 @@ class CrmSmoke {
       await sleep(500);
     }
     assert(activity, `Chat did not create follow-up after confirmation. Last reply: ${createAnswer}`);
-    this.activityIdForCleanup = activity.id;
+    const activityCleanupActionId = `complete:CrmActivity:${activity.id}`;
+    this.cleanupRegistry.add({
+      id: activityCleanupActionId,
+      action: "complete",
+      target: { type: "CrmActivity", id: activity.id, label: title },
+      runner: async () => {
+        await this.callTool("complete_relationship_activity", { activityId: activity.id, completedAt: new Date().toISOString() });
+        return "CRM activity completed.";
+      },
+    });
 
     await page.goto(activity.webUrl, { waitUntil: "networkidle", timeout: 30_000 });
     await page.getByText(title, { exact: false }).first().waitFor({ timeout: 15_000 });
@@ -407,7 +464,7 @@ class CrmSmoke {
     let completeAnswer = await this.chat(conversationId, `yes, call complete_relationship_activity for activityId ${activity.id} now`, completeContext);
     for (let attempt = 0; attempt < 3; attempt += 1) {
       if (!(await this.dueWorkContains(account.id, activity.id, title, dueTo))) {
-        this.activityIdForCleanup = null;
+        this.cleanupRegistry.markCompleted(activityCleanupActionId, "CRM activity completed by validation flow.");
         break;
       }
       completeAnswer = await this.chat(
@@ -422,29 +479,69 @@ class CrmSmoke {
   }
 
   async cleanup() {
-    if (this.activityIdForCleanup && this.mcpToken) {
-      try {
-        await this.callTool("complete_relationship_activity", { activityId: this.activityIdForCleanup, completedAt: new Date().toISOString() });
-        this.record("cleanup completed leftover activity", { activityId: this.activityIdForCleanup });
-      } catch (error) {
-        this.results.push({ name: "cleanup activity", status: "failed", message: error instanceof Error ? error.message : String(error) });
-      }
+    const cleanup = await this.cleanupRegistry.runAll({ throwOnFailure: false });
+    for (const entry of cleanup.completed) {
+      this.results.push({
+        name: `cleanup ${entry.action}`,
+        status: "ok",
+        cleanupActionId: entry.id,
+        target: entry.target,
+        message: entry.message,
+      });
     }
-    if (this.workspaceId && this.credentialId && this.cookie) {
-      await this.sessionFetch(`/api/workspaces/${this.workspaceId}/agent-credentials/${this.credentialId}/revoke`, { method: "POST" });
-      this.record("temporary MCP credential revoked", { credentialId: this.credentialId });
+    for (const { entry, error } of cleanup.failed) {
+      this.results.push({
+        name: `cleanup ${entry.action}`,
+        status: "failed",
+        cleanupActionId: entry.id,
+        target: entry.target,
+        message: error instanceof Error ? error.message : String(error),
+      });
     }
+    if (cleanup.failed.length > 0) {
+      throw new Error(`Validation cleanup failed for ${cleanup.failed.map(({ entry }) => entry.id).join(", ")}`);
+    }
+  }
+
+  recordValidationOutcome(status, error, smokeResultPath) {
+    if (this.validationResultRecorded) return;
+    this.validationResultRecorded = true;
+    recordValidationResult(this.validationRun, {
+      intent: "CRM pages, MCP reads, chat context, and safe writeback",
+      method: "crm-production-smoke",
+      result: status === "passed" ? "pass" : "partial",
+      blocker: status === "passed" ? null : (error?.message ?? "CRM production smoke failed."),
+      evidence: [
+        { type: "json", path: smokeResultPath, summary: "CRM production smoke output" },
+        ...this.results
+          .filter((item) => Array.isArray(item.screenshots))
+          .flatMap((item) => item.screenshots.map((fileName) => ({
+            type: "screenshot",
+            path: path.join(this.outDir, fileName),
+            summary: fileName,
+          }))),
+      ],
+      createdRecordIds: this.validationRun.createdRecords.map((record) => record.id),
+      cleanupActionIds: this.validationRun.cleanupActions.map((entry) => entry.id),
+    });
   }
 
   async writeResult(status, error = null) {
     await mkdir(this.outDir, { recursive: true });
-    await writeFile(path.join(this.outDir, "crm-production-smoke.json"), `${JSON.stringify({
+    const smokeResultPath = path.join(this.outDir, "crm-production-smoke.json");
+    this.recordValidationOutcome(status, error, smokeResultPath);
+    const validationArtifacts = await writeValidationArtifacts(this.validationRun, this.outDir);
+    await writeFile(smokeResultPath, `${JSON.stringify({
       status,
       runId: this.runId,
       baseUrl: this.baseUrl,
       workspaceId: this.workspaceId,
       checkedAt: new Date().toISOString(),
       results: this.results,
+      validation: {
+        run: this.validationRun,
+        artifacts: validationArtifacts,
+      },
       error: error ? { message: error.message, stack: error.stack } : null,
     }, null, 2)}\n`);
   }
@@ -490,6 +587,7 @@ async function main() {
     expectedGitSha: process.env.CRM_SMOKE_EXPECTED_GIT_SHA?.trim() || null,
     workspaceSlug: process.env.CRM_SMOKE_WORKSPACE_SLUG?.trim() || "jnj-demo",
     headless: process.env.CRM_SMOKE_HEADLESS !== "false",
+    prNumbers: parseValidationPrNumbers(process.env.CRM_SMOKE_PR_NUMBERS ?? process.env.PRODUCTION_VALIDATION_PR_NUMBERS),
   });
 
   let failed = false;
