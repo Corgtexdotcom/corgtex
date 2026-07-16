@@ -3,6 +3,8 @@
 import { spawn } from "node:child_process";
 import { setTimeout as delay } from "node:timers/promises";
 
+import { parseBoolean } from "./release/fleet-release-core.mjs";
+
 const DEFAULTS = {
   resourceGroup: "rg-corgtex-selfserve-production-wus3",
   acrName: "acrcorgtexssstgwus3",
@@ -30,9 +32,14 @@ const sourceDir = args.sourceDir ?? ".";
 const dryRun = Boolean(args.dryRun);
 const skipBuild = Boolean(args.skipBuild);
 const skipHealthSmoke = Boolean(args.skipHealthSmoke);
+validateRuntimeObservabilityBooleans();
 
 const webImage = `${acrServer}/${webRepository}:${imageTag}`;
 const workerImage = `${acrServer}/${workerRepository}:${imageTag}`;
+const AZURE_OBSERVABILITY_SECRET_NAMES = {
+  APPLICATIONINSIGHTS_CONNECTION_STRING: "ai-conn-secret",
+  POSTHOG_PROJECT_TOKEN: "posthog-token",
+};
 
 const summary = {
   resourceGroup,
@@ -122,6 +129,23 @@ function normalizeBaseUrl(value) {
 }
 
 async function updateContainerApp(name, image) {
+  const releaseSecrets = runtimeObservabilitySecretArgs();
+  if (releaseSecrets.length) {
+    await run("az", [
+      "containerapp",
+      "secret",
+      "set",
+      "--name",
+      name,
+      "--resource-group",
+      resourceGroup,
+      "--secrets",
+      ...releaseSecrets,
+      "--output",
+      "none",
+    ]);
+  }
+
   await run("az", [
     "containerapp",
     "update",
@@ -138,9 +162,83 @@ async function updateContainerApp(name, image) {
     "CORGTEX_STARTUP_MODE=migrate-and-web",
     "CORGTEX_AUTO_SEED_JNJ_DEMO=false",
     "SEED_SCRIPTS=",
+    ...runtimeObservabilityEnvArgs(),
     "--output",
     "none",
   ]);
+}
+
+function optionalText(value) {
+  const normalized = String(value ?? "").trim();
+  return normalized ? normalized : null;
+}
+
+function booleanFromEnv(name, fallback = false) {
+  return parseBoolean(process.env[name], fallback);
+}
+
+function canonicalBooleanFromEnv(name, fallback = false) {
+  return booleanFromEnv(name, fallback) ? "true" : "false";
+}
+
+function validateRuntimeObservabilityBooleans() {
+  for (const name of ["POSTHOG_ENABLED", "POSTHOG_CAPTURE_KILL_SWITCH", "POSTHOG_CAPTURE_DEBUG"]) {
+    if (!optionalText(process.env[name])) continue;
+    try {
+      parseBoolean(process.env[name], false);
+    } catch (error) {
+      throw new Error(`${name}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+}
+
+function runtimeObservabilityEnvArgs() {
+  const variables = [];
+  const applicationInsightsConnectionString = optionalText(process.env.APPLICATIONINSIGHTS_CONNECTION_STRING);
+  if (applicationInsightsConnectionString) {
+    variables.push(`APPLICATIONINSIGHTS_CONNECTION_STRING=secretref:${AZURE_OBSERVABILITY_SECRET_NAMES.APPLICATIONINSIGHTS_CONNECTION_STRING}`);
+  } else if (Object.hasOwn(process.env, "APPLICATIONINSIGHTS_CONNECTION_STRING")) {
+    variables.push("APPLICATIONINSIGHTS_CONNECTION_STRING=");
+  }
+
+  const postHogProjectToken = optionalText(process.env.POSTHOG_PROJECT_TOKEN);
+  if (booleanFromEnv("POSTHOG_ENABLED") && postHogProjectToken) {
+    variables.push("POSTHOG_ENABLED=true");
+    variables.push(`POSTHOG_CAPTURE_KILL_SWITCH=${canonicalBooleanFromEnv("POSTHOG_CAPTURE_KILL_SWITCH", false)}`);
+    variables.push(`POSTHOG_PROJECT_TOKEN=secretref:${AZURE_OBSERVABILITY_SECRET_NAMES.POSTHOG_PROJECT_TOKEN}`);
+    variables.push(`POSTHOG_API_HOST=${optionalText(process.env.POSTHOG_API_HOST) ?? "https://us.i.posthog.com"}`);
+    variables.push(`POSTHOG_ENVIRONMENT=${optionalText(process.env.POSTHOG_ENVIRONMENT) ?? "production"}`);
+    variables.push(`POSTHOG_EVENT_SAMPLE_RATE=${optionalText(process.env.POSTHOG_EVENT_SAMPLE_RATE) ?? "1"}`);
+    variables.push(`POSTHOG_CAPTURE_TIMEOUT_MS=${optionalText(process.env.POSTHOG_CAPTURE_TIMEOUT_MS) ?? "1500"}`);
+    variables.push(`POSTHOG_CAPTURE_DEBUG=${canonicalBooleanFromEnv("POSTHOG_CAPTURE_DEBUG", false)}`);
+    if (Object.hasOwn(process.env, "POSTHOG_INSTANCE_ID")) {
+      variables.push(`POSTHOG_INSTANCE_ID=${optionalText(process.env.POSTHOG_INSTANCE_ID) ?? ""}`);
+    }
+  } else if (optionalText(process.env.POSTHOG_ENABLED) || postHogProjectToken) {
+    variables.push("POSTHOG_ENABLED=false");
+    variables.push("POSTHOG_CAPTURE_KILL_SWITCH=true");
+    variables.push("POSTHOG_PROJECT_TOKEN=");
+    if (Object.hasOwn(process.env, "POSTHOG_INSTANCE_ID")) {
+      variables.push("POSTHOG_INSTANCE_ID=");
+    }
+  }
+
+  return variables;
+}
+
+function runtimeObservabilitySecretArgs() {
+  const secrets = [];
+  const applicationInsightsConnectionString = optionalText(process.env.APPLICATIONINSIGHTS_CONNECTION_STRING);
+  if (applicationInsightsConnectionString) {
+    secrets.push(`${AZURE_OBSERVABILITY_SECRET_NAMES.APPLICATIONINSIGHTS_CONNECTION_STRING}=${applicationInsightsConnectionString}`);
+  }
+
+  const postHogProjectToken = optionalText(process.env.POSTHOG_PROJECT_TOKEN);
+  if (booleanFromEnv("POSTHOG_ENABLED") && postHogProjectToken) {
+    secrets.push(`${AZURE_OBSERVABILITY_SECRET_NAMES.POSTHOG_PROJECT_TOKEN}=${postHogProjectToken}`);
+  }
+
+  return secrets;
 }
 
 async function smokeHealth(url, expectedGitSha) {
@@ -180,7 +278,7 @@ async function smokeHealth(url, expectedGitSha) {
 }
 
 async function run(command, commandArgs) {
-  const rendered = [command, ...commandArgs].join(" ");
+  const rendered = renderCommand(command, commandArgs);
   if (dryRun) {
     console.log(`[dry-run] ${rendered}`);
     return;
@@ -200,4 +298,34 @@ async function run(command, commandArgs) {
       reject(new Error(`${rendered} failed with ${signal || code}`));
     });
   });
+}
+
+function renderCommand(command, commandArgs) {
+  return [command, ...commandArgs.map((arg, index) => redactCommandArg(arg, index, commandArgs))].join(" ");
+}
+
+function redactCommandArg(arg, index, commandArgs) {
+  const text = String(arg);
+  if (index > 0 && isSensitiveCommandFlag(commandArgs[index - 1])) {
+    return "<redacted>";
+  }
+
+  const separatorIndex = text.indexOf("=");
+  if (separatorIndex <= 0) return text;
+
+  const key = text.slice(0, separatorIndex);
+  if (!isSensitiveCommandKey(key)) {
+    return text;
+  }
+  return `${key}=<redacted>`;
+}
+
+function isSensitiveCommandKey(value) {
+  return /(token|secret|password|api[_-]?key|connection[_-]?string)/i.test(String(value));
+}
+
+function isSensitiveCommandFlag(value) {
+  const text = String(value);
+  if (/^--?secrets$/i.test(text)) return false;
+  return /^--?.*(token|secret|password|api[_-]?key|connection[_-]?string)/i.test(text);
 }

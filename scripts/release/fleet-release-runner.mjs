@@ -67,13 +67,15 @@ export async function runFleetRelease(argv = process.argv.slice(2), deps = {}) {
     throw new Error(`Unsupported fleet release command: ${command}`);
   }
 
+  const env = deps.env ?? process.env;
+  validateRuntimeObservabilityEnvironment(env);
   const manifest = await resolveManifest(args, deps);
-  const selectedGroups = normalizeTargets(args.targets ?? process.env.FLEET_RELEASE_TARGETS);
-  const dryRun = parseBoolean(args.dryRun ?? process.env.FLEET_RELEASE_DRY_RUN, false);
-  const failOnBlockers = parseBoolean(args.failOnBlockers ?? process.env.FLEET_RELEASE_FAIL_ON_BLOCKERS, false);
-  const forceAfterFailure = parseBoolean(args.forceAfterFailure ?? process.env.FLEET_RELEASE_FORCE_AFTER_FAILURE, false);
-  const concurrency = parsePositiveInteger(args.concurrency ?? process.env.FLEET_RELEASE_CONCURRENCY, 2);
-  const reason = args.reason ?? process.env.FLEET_RELEASE_REASON ?? "";
+  const selectedGroups = normalizeTargets(args.targets ?? env.FLEET_RELEASE_TARGETS);
+  const dryRun = parseBoolean(args.dryRun ?? env.FLEET_RELEASE_DRY_RUN, false);
+  const failOnBlockers = parseBoolean(args.failOnBlockers ?? env.FLEET_RELEASE_FAIL_ON_BLOCKERS, false);
+  const forceAfterFailure = parseBoolean(args.forceAfterFailure ?? env.FLEET_RELEASE_FORCE_AFTER_FAILURE, false);
+  const concurrency = parsePositiveInteger(args.concurrency ?? env.FLEET_RELEASE_CONCURRENCY, 2);
+  const reason = args.reason ?? env.FLEET_RELEASE_REASON ?? "";
   if (!reason.trim()) {
     throw new Error("A release reason is required.");
   }
@@ -209,6 +211,9 @@ function validateReleaseEnvironment(args, env) {
       reason: "extra seed scripts must run through explicit DB release or fixture jobs, not web startup",
     });
   }
+  validateOptionalBoolean("POSTHOG_ENABLED", env, invalid);
+  validateOptionalBoolean("POSTHOG_CAPTURE_KILL_SWITCH", env, invalid);
+  validateOptionalBoolean("POSTHOG_CAPTURE_DEBUG", env, invalid);
 
   if (selectedGroups.includes("railway-customers") && !env.FLEET_RELEASE_TARGETS_JSON?.trim() && !env.CONTROL_PLANE_AGENT_API_KEY?.trim()) {
     missing.push("FLEET_RELEASE_TARGETS_JSON or CONTROL_PLANE_AGENT_API_KEY");
@@ -264,6 +269,28 @@ function validateConfiguredTargetJson(name, raw, invalid) {
       name,
       reason: error instanceof Error ? error.message : String(error),
     });
+  }
+}
+
+function validateOptionalBoolean(name, env, invalid) {
+  if (!optionalText(env[name])) return;
+  try {
+    parseBoolean(env[name], false);
+  } catch (error) {
+    invalid.push({
+      name,
+      reason: error instanceof Error ? error.message : String(error),
+    });
+  }
+}
+
+function validateRuntimeObservabilityEnvironment(env) {
+  const invalid = [];
+  validateOptionalBoolean("POSTHOG_ENABLED", env, invalid);
+  validateOptionalBoolean("POSTHOG_CAPTURE_KILL_SWITCH", env, invalid);
+  validateOptionalBoolean("POSTHOG_CAPTURE_DEBUG", env, invalid);
+  if (invalid.length > 0) {
+    throw new Error(formatConfigValidationFailure({ missing: [], invalid }));
   }
 }
 
@@ -550,7 +577,9 @@ async function deployRailwayTarget(target, manifest, deps) {
       projectId: target.railway.projectId,
       environmentId: target.railway.environmentId,
       serviceId: service.serviceId,
-      variables: releaseVariables(manifest),
+      variables: releaseVariables(manifest, deps.env ?? process.env, {
+        includePostHogInstanceId: target.group !== "railway-customers",
+      }),
     }, deps);
   }
   const deployments = [];
@@ -570,7 +599,70 @@ async function deployRailwayTarget(target, manifest, deps) {
   return { deployments };
 }
 
-export function releaseVariables(manifest) {
+function optionalText(value) {
+  const normalized = String(value ?? "").trim();
+  return normalized ? normalized : null;
+}
+
+const AZURE_OBSERVABILITY_SECRET_NAMES = {
+  APPLICATIONINSIGHTS_CONNECTION_STRING: "ai-conn-secret",
+  POSTHOG_PROJECT_TOKEN: "posthog-token",
+};
+
+function optionalRuntimeObservabilityVariables(env, options = {}) {
+  const variables = {};
+  const applicationInsightsConnectionString = optionalText(env.APPLICATIONINSIGHTS_CONNECTION_STRING);
+  if (applicationInsightsConnectionString) {
+    variables.APPLICATIONINSIGHTS_CONNECTION_STRING = options.azureSecretRefs
+      ? `secretref:${AZURE_OBSERVABILITY_SECRET_NAMES.APPLICATIONINSIGHTS_CONNECTION_STRING}`
+      : applicationInsightsConnectionString;
+  } else if (Object.hasOwn(env, "APPLICATIONINSIGHTS_CONNECTION_STRING")) {
+    variables.APPLICATIONINSIGHTS_CONNECTION_STRING = "";
+  }
+
+  const postHogProjectToken = optionalText(env.POSTHOG_PROJECT_TOKEN);
+  const postHogEnabled = parseBoolean(env.POSTHOG_ENABLED, false);
+  if (postHogEnabled && postHogProjectToken) {
+    variables.POSTHOG_ENABLED = "true";
+    variables.POSTHOG_CAPTURE_KILL_SWITCH = canonicalBoolean(env.POSTHOG_CAPTURE_KILL_SWITCH, false);
+    variables.POSTHOG_PROJECT_TOKEN = options.azureSecretRefs
+      ? `secretref:${AZURE_OBSERVABILITY_SECRET_NAMES.POSTHOG_PROJECT_TOKEN}`
+      : postHogProjectToken;
+    variables.POSTHOG_API_HOST = optionalText(env.POSTHOG_API_HOST) ?? "https://us.i.posthog.com";
+    variables.POSTHOG_ENVIRONMENT = optionalText(env.POSTHOG_ENVIRONMENT) ?? "production";
+    variables.POSTHOG_EVENT_SAMPLE_RATE = optionalText(env.POSTHOG_EVENT_SAMPLE_RATE) ?? "1";
+    variables.POSTHOG_CAPTURE_TIMEOUT_MS = optionalText(env.POSTHOG_CAPTURE_TIMEOUT_MS) ?? "1500";
+    variables.POSTHOG_CAPTURE_DEBUG = canonicalBoolean(env.POSTHOG_CAPTURE_DEBUG, false);
+    assignPostHogInstanceId(variables, env, options);
+  } else if (optionalText(env.POSTHOG_ENABLED) || postHogProjectToken) {
+    variables.POSTHOG_ENABLED = "false";
+    variables.POSTHOG_CAPTURE_KILL_SWITCH = "true";
+    variables.POSTHOG_PROJECT_TOKEN = "";
+    clearPostHogInstanceId(variables, env, options);
+  }
+
+  return variables;
+}
+
+function assignPostHogInstanceId(variables, env, options) {
+  if (options.includePostHogInstanceId === false || !Object.hasOwn(env, "POSTHOG_INSTANCE_ID")) {
+    return;
+  }
+  variables.POSTHOG_INSTANCE_ID = optionalText(env.POSTHOG_INSTANCE_ID) ?? "";
+}
+
+function canonicalBoolean(value, fallback) {
+  return parseBoolean(value, fallback) ? "true" : "false";
+}
+
+function clearPostHogInstanceId(variables, env, options) {
+  if (options.includePostHogInstanceId === false || !Object.hasOwn(env, "POSTHOG_INSTANCE_ID")) {
+    return;
+  }
+  variables.POSTHOG_INSTANCE_ID = "";
+}
+
+export function releaseVariables(manifest, env = process.env, options = {}) {
   return {
     CORGTEX_RELEASE_VERSION: manifest.releaseVersion,
     CORGTEX_RELEASE_IMAGE_TAG: manifest.imageTag,
@@ -578,14 +670,32 @@ export function releaseVariables(manifest) {
     CORGTEX_STARTUP_MODE: "combined",
     CORGTEX_AUTO_SEED_JNJ_DEMO: "false",
     SEED_SCRIPTS: "",
+    ...optionalRuntimeObservabilityVariables(env, options),
   };
 }
 
-export function azureReleaseVariables(manifest) {
+export function azureReleaseVariables(manifest, env = process.env) {
   return {
-    ...releaseVariables(manifest),
+    ...releaseVariables(manifest, env),
     CORGTEX_STARTUP_MODE: "migrate-and-web",
+    ...optionalRuntimeObservabilityVariables(env, { azureSecretRefs: true }),
   };
+}
+
+function azureObservabilitySecrets(env = process.env) {
+  const secrets = {};
+  const applicationInsightsConnectionString = optionalText(env.APPLICATIONINSIGHTS_CONNECTION_STRING);
+  if (applicationInsightsConnectionString) {
+    secrets[AZURE_OBSERVABILITY_SECRET_NAMES.APPLICATIONINSIGHTS_CONNECTION_STRING] = applicationInsightsConnectionString;
+  }
+
+  const postHogProjectToken = optionalText(env.POSTHOG_PROJECT_TOKEN);
+  const postHogEnabled = parseBoolean(env.POSTHOG_ENABLED, false);
+  if (postHogEnabled && postHogProjectToken) {
+    secrets[AZURE_OBSERVABILITY_SECRET_NAMES.POSTHOG_PROJECT_TOKEN] = postHogProjectToken;
+  }
+
+  return secrets;
 }
 
 function railwayServiceUpdateInput(image, deps) {
@@ -670,7 +780,25 @@ async function deployAzureTarget(target, manifest, deps) {
 }
 
 function updateAzureContainerApp(name, image, target, manifest, deps) {
-  const releaseEnv = Object.entries(azureReleaseVariables(manifest)).map(([key, value]) => `${key}=${value}`);
+  const releaseSecrets = Object.entries(azureObservabilitySecrets(deps.env ?? process.env))
+    .map(([key, value]) => `${key}=${value}`);
+  if (releaseSecrets.length) {
+    runCommand("az", [
+      "containerapp",
+      "secret",
+      "set",
+      "--name",
+      name,
+      "--resource-group",
+      target.azure.resourceGroup,
+      "--secrets",
+      ...releaseSecrets,
+      "--output",
+      "none",
+    ], deps);
+  }
+
+  const releaseEnv = Object.entries(azureReleaseVariables(manifest, deps.env ?? process.env)).map(([key, value]) => `${key}=${value}`);
   runCommand("az", [
     "containerapp",
     "update",
@@ -787,11 +915,68 @@ async function runWithConcurrency(items, concurrency, worker) {
 
 function runCommand(command, args, deps) {
   if (deps.runCommand) return deps.runCommand(command, args);
-  const result = spawnSync(command, args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+  const result = spawnSync(command, args, {
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+    env: deps.env ?? process.env,
+  });
   if (result.status !== 0) {
-    throw new Error(result.stderr?.trim() || `${command} ${args.join(" ")} failed.`);
+    const rendered = renderCommand(command, args);
+    throw new Error(redactCommandText(result.stderr?.trim(), args) || `${rendered} failed.`);
   }
   return { stdout: result.stdout ?? "", stderr: result.stderr ?? "" };
+}
+
+function renderCommand(command, args) {
+  return [command, ...args.map((arg, index) => redactCommandArg(arg, index, args))].join(" ");
+}
+
+function redactCommandArg(arg, index, args) {
+  const text = String(arg);
+  if (index > 0 && isSensitiveCommandFlag(args[index - 1])) {
+    return "<redacted>";
+  }
+
+  const separatorIndex = text.indexOf("=");
+  if (separatorIndex <= 0) return text;
+
+  const key = text.slice(0, separatorIndex);
+  if (!isSensitiveCommandKey(key)) {
+    return text;
+  }
+  return `${key}=<redacted>`;
+}
+
+function redactCommandText(text, args) {
+  if (!text) return "";
+  let redacted = text;
+  for (const [index, arg] of args.entries()) {
+    const raw = String(arg);
+    if (index > 0 && isSensitiveCommandFlag(args[index - 1])) {
+      redacted = redacted.split(raw).join("<redacted>");
+      continue;
+    }
+
+    const separatorIndex = raw.indexOf("=");
+    if (separatorIndex <= 0) continue;
+
+    const key = raw.slice(0, separatorIndex);
+    const value = raw.slice(separatorIndex + 1);
+    if (!value || !isSensitiveCommandKey(key)) continue;
+
+    redacted = redacted.split(value).join("<redacted>");
+  }
+  return redacted;
+}
+
+function isSensitiveCommandKey(value) {
+  return /(token|secret|password|api[_-]?key|connection[_-]?string)/i.test(String(value));
+}
+
+function isSensitiveCommandFlag(value) {
+  const text = String(value);
+  if (/^--?secrets$/i.test(text)) return false;
+  return /^--?.*(token|secret|password|api[_-]?key|connection[_-]?string)/i.test(text);
 }
 
 function emitGithubOutput(key, value, deps) {
