@@ -6,11 +6,15 @@ const fsMock = vi.hoisted(() => ({
   readdirSync: vi.fn((): Array<{ name: string; isDirectory: () => boolean }> => []),
 }));
 
-vi.mock("@corgtex/shared", () => ({
-  prisma: {
-    $queryRaw: queryRaw,
-  },
-}));
+vi.mock("@corgtex/shared", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@corgtex/shared")>();
+  return {
+    ...actual,
+    prisma: {
+      $queryRaw: queryRaw,
+    },
+  };
+});
 
 vi.mock("node:fs", () => ({
   existsSync: fsMock.existsSync,
@@ -68,7 +72,7 @@ describe("GET /api/health", () => {
     const response = await GET();
 
     expect(response.status).toBe(200);
-    await expect(response.json()).resolves.toEqual({
+    await expect(response.json()).resolves.toMatchObject({
       status: "ok",
       service: "web",
       database: "up",
@@ -110,7 +114,7 @@ describe("GET /api/health", () => {
     const response = await GET();
 
     expect(response.status).toBe(503);
-    await expect(response.json()).resolves.toEqual({
+    await expect(response.json()).resolves.toMatchObject({
       status: "degraded",
       service: "web",
       database: "up",
@@ -179,7 +183,7 @@ describe("GET /api/health", () => {
     const response = await GET();
 
     expect(response.status).toBe(503);
-    await expect(response.json()).resolves.toEqual({
+    await expect(response.json()).resolves.toMatchObject({
       status: "degraded",
       service: "web",
       database: "down",

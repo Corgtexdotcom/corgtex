@@ -1,3 +1,5 @@
+import { resolveReleaseMetadata } from "./release-metadata";
+
 type TelemetrySurface = "route" | "server_action" | "render" | "worker";
 type TelemetryProvider = "azure" | "local" | "railway" | "vercel";
 type TelemetrySinkStatus = "disabled" | "sampled" | "sent" | "failed";
@@ -25,6 +27,7 @@ export type TelemetryEventInput = {
   distinctId?: string | null;
   event: string;
   properties?: Record<string, unknown>;
+  sampleRate?: number;
   timestamp?: string;
 };
 
@@ -64,48 +67,22 @@ function postHogEnabled(env: NodeJS.ProcessEnv) {
     && Boolean(optional(env, "POSTHOG_PROJECT_TOKEN"));
 }
 
-function runtimeProvider(env: NodeJS.ProcessEnv): TelemetryProvider {
-  if (optional(env, "RAILWAY_SERVICE_ID") || optional(env, "RAILWAY_GIT_COMMIT_SHA")) return "railway";
-  if (optional(env, "WEBSITE_SITE_NAME") || optional(env, "CONTAINER_APP_NAME") || optional(env, "APPLICATIONINSIGHTS_CONNECTION_STRING")) return "azure";
-  if (optional(env, "VERCEL")) return "vercel";
-  return "local";
-}
-
-function environmentName(env: NodeJS.ProcessEnv) {
-  return optional(env, "POSTHOG_ENVIRONMENT")
-    ?? optional(env, "NEXT_PUBLIC_VERCEL_ENV")
-    ?? optional(env, "NODE_ENV")
-    ?? "development";
-}
-
-function instanceId(env: NodeJS.ProcessEnv) {
-  return optional(env, "POSTHOG_INSTANCE_ID")
-    ?? optional(env, "MCP_DEFAULT_INSTANCE_SLUG")
-    ?? optional(env, "WORKSPACE_SLUG")
-    ?? optional(env, "RAILWAY_SERVICE_NAME")
-    ?? optional(env, "WEBSITE_INSTANCE_ID")
-    ?? optional(env, "HOSTNAME")
-    ?? "corgtex";
-}
-
-function releaseGitSha(env: NodeJS.ProcessEnv) {
-  const imageTag = optional(env, "CORGTEX_RELEASE_IMAGE_TAG");
-  const imageTagSha = imageTag?.startsWith("sha-") ? imageTag.slice("sha-".length) : undefined;
-  return optional(env, "CORGTEX_RELEASE_GIT_SHA")
-    ?? optional(env, "RAILWAY_GIT_COMMIT_SHA")
-    ?? optional(env, "VERCEL_GIT_COMMIT_SHA")
-    ?? optional(env, "GITHUB_SHA")
-    ?? imageTagSha;
-}
-
 export function telemetryRuntimeContext(env: NodeJS.ProcessEnv = process.env) {
+  const release = resolveReleaseMetadata(env);
   return {
-    environment: environmentName(env),
-    instance_id: instanceId(env),
-    provider: runtimeProvider(env),
-    release_git_sha: releaseGitSha(env),
-    release_image_tag: optional(env, "CORGTEX_RELEASE_IMAGE_TAG"),
-    release_version: optional(env, "CORGTEX_RELEASE_VERSION"),
+    environment: release.environment,
+    instance_id: release.service,
+    provider: release.provider satisfies TelemetryProvider,
+    release_build_time: release.buildTime ?? undefined,
+    release_configured_git_sha: release.configured.gitSha ?? undefined,
+    release_drift_git_sha: release.drift.gitSha,
+    release_drift_image_tag: release.drift.imageTag,
+    release_drift_version: release.drift.version,
+    release_git_sha: release.gitSha ?? undefined,
+    release_git_sha_source: release.source.gitSha,
+    release_image_tag: release.imageTag ?? undefined,
+    release_runtime_git_sha: release.runtime.gitSha ?? undefined,
+    release_version: release.version,
   };
 }
 
@@ -118,8 +95,15 @@ function hashBucket(input: string) {
   return (hash >>> 0) / 0xffffffff;
 }
 
-function shouldSample(env: NodeJS.ProcessEnv, event: string, distinctId: string) {
-  const sampleRate = numberFromEnv(env, "POSTHOG_EVENT_SAMPLE_RATE", 1, 0, 1);
+function telemetrySampleRate(env: NodeJS.ProcessEnv, override?: number) {
+  if (typeof override === "number" && Number.isFinite(override) && override >= 0 && override <= 1) {
+    return override;
+  }
+  return numberFromEnv(env, "POSTHOG_EVENT_SAMPLE_RATE", 1, 0, 1);
+}
+
+function shouldSample(env: NodeJS.ProcessEnv, event: string, distinctId: string, override?: number) {
+  const sampleRate = telemetrySampleRate(env, override);
   if (sampleRate >= 1) return true;
   if (sampleRate <= 0) return false;
   return hashBucket(`${event}:${distinctId}`) <= sampleRate;
@@ -248,7 +232,7 @@ async function capturePostHog(input: TelemetryEventInput, env: NodeJS.ProcessEnv
 
   const event = normalizeString(input.event);
   const distinctId = normalizeString(input.distinctId ?? "corgtex:unknown");
-  if (!event || !distinctId || !shouldSample(env, event, distinctId)) return "sampled" as const;
+  if (!event || !distinctId || !shouldSample(env, event, distinctId, input.sampleRate)) return "sampled" as const;
 
   const response = await fetchWithTimeout(`${postHogApiHost(env)}/i/v0/e/`, {
     method: "POST",
@@ -261,7 +245,7 @@ async function capturePostHog(input: TelemetryEventInput, env: NodeJS.ProcessEnv
         ...sanitizeProperties(input.properties ?? {}),
         "$lib": "corgtex-server",
         "$process_person_profile": false,
-        corgtex_sample_rate: numberFromEnv(env, "POSTHOG_EVENT_SAMPLE_RATE", 1, 0, 1),
+        corgtex_sample_rate: telemetrySampleRate(env, input.sampleRate),
       },
       timestamp: input.timestamp,
     }),

@@ -11,4 +11,5 @@ export * from "./branding";
 export * from "./math";
 export * from "./redis";
 export * from "./telemetry";
+export * from "./release-metadata";
 export * from "./logger";

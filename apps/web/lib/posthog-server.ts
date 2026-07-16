@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { telemetryRuntimeContext } from "@corgtex/shared/telemetry";
 
 type CaptureStatus = "disabled" | "sampled" | "sent" | "failed";
 
@@ -43,20 +44,6 @@ function numberFromEnv(name: string, fallback: number, min: number, max: number)
 
 function apiHost() {
   return (optional("POSTHOG_API_HOST") ?? DEFAULT_API_HOST).replace(/\/+$/, "");
-}
-
-function environmentName() {
-  return optional("POSTHOG_ENVIRONMENT")
-    ?? optional("NEXT_PUBLIC_VERCEL_ENV")
-    ?? optional("NODE_ENV")
-    ?? "development";
-}
-
-function instanceId() {
-  return optional("POSTHOG_INSTANCE_ID")
-    ?? optional("MCP_DEFAULT_INSTANCE_SLUG")
-    ?? optional("WORKSPACE_SLUG")
-    ?? "corgtex";
 }
 
 function captureEnabled() {
@@ -134,6 +121,7 @@ export async function capturePostHogEvent(input: CaptureInput): Promise<CaptureR
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), numberFromEnv("POSTHOG_CAPTURE_TIMEOUT_MS", DEFAULT_TIMEOUT_MS, 250, 10_000));
   const properties = sanitizeProperties(input.properties ?? {});
+  const runtime = telemetryRuntimeContext();
 
   try {
     const response = await fetch(`${apiHost()}/i/v0/e/`, {
@@ -147,8 +135,16 @@ export async function capturePostHogEvent(input: CaptureInput): Promise<CaptureR
           ...properties,
           "$lib": "corgtex-server",
           "$process_person_profile": input.processPersonProfile ?? false,
-          corgtex_environment: environmentName(),
-          corgtex_instance_id: instanceId(),
+          corgtex_environment: runtime.environment,
+          corgtex_instance_id: runtime.instance_id,
+          corgtex_provider: runtime.provider,
+          corgtex_release_git_sha: runtime.release_git_sha,
+          corgtex_release_git_sha_source: runtime.release_git_sha_source,
+          corgtex_release_image_tag: runtime.release_image_tag,
+          corgtex_release_version: runtime.release_version,
+          corgtex_release_drift_git_sha: runtime.release_drift_git_sha,
+          corgtex_release_drift_image_tag: runtime.release_drift_image_tag,
+          corgtex_release_drift_version: runtime.release_drift_version,
           corgtex_sample_rate: numberFromEnv("POSTHOG_EVENT_SAMPLE_RATE", 1, 0, 1),
         },
         timestamp: input.timestamp,
