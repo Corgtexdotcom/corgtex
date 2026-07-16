@@ -515,6 +515,21 @@ function crmVisibleAccountFallback(pageContext: ConversationContext["pageContext
   return `You are viewing the CRM account ${accountLabel}${section}.`;
 }
 
+function isCrmCurrentAccountQuestion(message: string) {
+  return /\b(what|which)\b[\s\S]{0,80}\bcrm\s+account\b[\s\S]{0,80}\b(viewing|looking at|current|selected)\b/i.test(message)
+    || /\bcrm\s+account\s+am\s+i\s+(viewing|looking at)\b/i.test(message);
+}
+
+function crmCurrentAccountAnswer(ctx: ConversationContext) {
+  if (!ctx.pageContext || ctx.pageContext.surface !== "crm") return null;
+  if (!isCrmCurrentAccountQuestion(ctx.userMessage)) return null;
+
+  const visibleAccount = crmVisibleAccountFallback(ctx.pageContext);
+  if (visibleAccount) return visibleAccount;
+
+  return "I do not have a selected CRM account in the current CRM page context.";
+}
+
 function dueToScope(value: unknown) {
   const dueTo = stringValue(value);
   if (!dueTo) return null;
@@ -707,6 +722,16 @@ export async function processConversationTurn(ctx: ConversationContext): Promise
   if (pendingOperationResponse) {
     return {
       assistantMessage: pendingOperationResponse,
+      contextUsed: {
+        pageContext: ctx.pageContext ?? undefined,
+      },
+    };
+  }
+
+  const directCrmAnswer = crmCurrentAccountAnswer(ctx);
+  if (directCrmAnswer) {
+    return {
+      assistantMessage: directCrmAnswer,
       contextUsed: {
         pageContext: ctx.pageContext ?? undefined,
       },
@@ -962,6 +987,17 @@ export async function* processConversationTurnStream(ctx: ConversationContext): 
     yield pendingOperationResponse;
     return {
       assistantMessage: pendingOperationResponse,
+      contextUsed: {
+        pageContext: ctx.pageContext ?? undefined,
+      },
+    };
+  }
+
+  const directCrmAnswer = crmCurrentAccountAnswer(ctx);
+  if (directCrmAnswer) {
+    yield directCrmAnswer;
+    return {
+      assistantMessage: directCrmAnswer,
       contextUsed: {
         pageContext: ctx.pageContext ?? undefined,
       },

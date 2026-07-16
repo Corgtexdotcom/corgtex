@@ -196,6 +196,7 @@ class CrmSmoke {
     this.credentialId = null;
     this.mcpToken = null;
     this.results = [];
+    this.chatDiagnosticSeq = 0;
   }
 
   record(name, detail = {}) {
@@ -254,6 +255,8 @@ class CrmSmoke {
     const decoder = new TextDecoder();
     let buffer = "";
     let assistantMessage = "";
+    let rawStreamText = "";
+    const parsedPayloads = [];
     const consume = () => {
       let newline = buffer.indexOf("\n");
       while (newline >= 0) {
@@ -261,6 +264,7 @@ class CrmSmoke {
         buffer = buffer.slice(newline + 1);
         if (line.startsWith("data: ") && line !== "data: [DONE]") {
           const payload = JSON.parse(line.slice(6));
+          parsedPayloads.push(payload);
           if (payload.text) assistantMessage += payload.text;
         }
         newline = buffer.indexOf("\n");
@@ -270,12 +274,33 @@ class CrmSmoke {
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
-      buffer += decoder.decode(value, { stream: true });
+      const chunk = decoder.decode(value, { stream: true });
+      rawStreamText += chunk;
+      buffer += chunk;
       consume();
     }
-    buffer += decoder.decode();
+    const finalChunk = decoder.decode();
+    rawStreamText += finalChunk;
+    buffer += finalChunk;
     consume();
-    assert(assistantMessage.trim(), `Chat returned an empty response for: ${message}`);
+    if (!assistantMessage.trim()) {
+      await mkdir(this.outDir, { recursive: true });
+      const diagnosticPath = path.join(this.outDir, `chat-empty-${++this.chatDiagnosticSeq}.json`);
+      await writeFile(diagnosticPath, `${JSON.stringify({
+        message,
+        conversationId,
+        pageContext,
+        responseStatus: response.status,
+        parsedPayloads,
+        rawStreamText,
+      }, null, 2)}\n`);
+      this.results.push({
+        name: "chat empty stream diagnostics",
+        status: "diagnostic",
+        path: diagnosticPath,
+      });
+      assert(false, `Chat returned an empty response for: ${message}. Raw stream saved to ${diagnosticPath}`);
+    }
     return assistantMessage;
   }
 

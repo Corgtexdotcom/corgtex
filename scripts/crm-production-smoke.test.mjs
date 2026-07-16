@@ -1,3 +1,6 @@
+import { readFile, rm } from "node:fs/promises";
+import path from "node:path";
+
 import { describe, expect, it } from "vitest";
 
 import {
@@ -155,5 +158,57 @@ describe("CRM production smoke validation matrix", () => {
 
     expect(smoke.validationRun.results.map((result) => result.prNumber)).toEqual([696, 706]);
     expect(smoke.validationRun.results.every((result) => result.result === "pass")).toBe(true);
+  });
+});
+
+describe("CRM production smoke chat diagnostics", () => {
+  it("keeps failing on blank chat responses and writes raw stream diagnostics", async () => {
+    const outDir = path.resolve(".artifacts/test-crm-production-smoke-empty-chat");
+    await rm(outDir, { recursive: true, force: true });
+
+    const smoke = new CrmSmoke({
+      baseUrl: "https://app.corgtex.com",
+      outDir,
+      expectedGitSha: null,
+      workspaceSelector: { workspaceSlug: "corgtex-validation", explicit: true },
+      authEmail: "admin@example.com",
+      authPassword: "password",
+      requireSafeWorkspace: true,
+      headless: true,
+      prNumbers: [696],
+    });
+    smoke.cookie = "corgtex-session=test";
+    smoke.workspaceId = "workspace-1";
+
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async () => new Response(new ReadableStream({
+      start(controller) {
+        const encoder = new TextEncoder();
+        controller.enqueue(encoder.encode("data: {\"keepAlive\":true}\n\n"));
+        controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+        controller.close();
+      },
+    }), {
+      status: 200,
+      headers: { "content-type": "text/event-stream" },
+    });
+
+    try {
+      await expect(smoke.chat("conversation-1", "What CRM account am I viewing?", {
+        surface: "crm",
+        selectedIds: { accountId: "account-1" },
+      })).rejects.toThrow(/Raw stream saved/);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+
+    const diagnostic = smoke.results.find((result) => result.name === "chat empty stream diagnostics");
+    expect(diagnostic).toBeTruthy();
+    expect(diagnostic.path).toBe(path.join(outDir, "chat-empty-1.json"));
+
+    const body = JSON.parse(await readFile(diagnostic.path, "utf8"));
+    expect(body.message).toBe("What CRM account am I viewing?");
+    expect(body.rawStreamText).toContain("\"keepAlive\":true");
+    expect(body.parsedPayloads).toEqual([{ keepAlive: true }]);
   });
 });
