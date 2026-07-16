@@ -78,7 +78,10 @@ function legacyEditionNarrative(
 }
 
 function liveWorkspaceNarrative(params: {
+  workspaceId: string;
   articles: Array<{
+    id: string;
+    slug: string;
     title: string;
     bodyMd?: string | null;
     type?: string | null;
@@ -87,6 +90,7 @@ function liveWorkspaceNarrative(params: {
     createdAt?: Date | string | null;
   }>;
   meetings: Array<{
+    id: string;
     title?: string | null;
     summaryMd?: string | null;
     recordedAt?: Date | string | null;
@@ -96,16 +100,31 @@ function liveWorkspaceNarrative(params: {
   labels: { intro: string; closing: string };
 }) {
   const entries = [
-    ...params.meetings.slice(0, 4).map((meeting) => ({
-      occurredAt: new Date(meeting.updatedAt ?? meeting.recordedAt ?? meeting.createdAt ?? 0).getTime(),
-      line: narrativeLine(meeting.title || "Meeting recap", compactNarrativeText(meeting.summaryMd, 620)),
-    })),
+    ...params.meetings.slice(0, 4).map((meeting) => {
+      const title = meeting.title || "Meeting recap";
+      return {
+        occurredAt: new Date(meeting.updatedAt ?? meeting.recordedAt ?? meeting.createdAt ?? 0).getTime(),
+        line: narrativeLine(title, compactNarrativeText(meeting.summaryMd, 620)),
+        sourceRef: {
+          type: "MEETING",
+          id: meeting.id,
+          label: title,
+          href: `/workspaces/${params.workspaceId}/meetings/${meeting.id}`,
+        },
+      };
+    }),
     ...params.articles
       .filter((article) => article.type !== "DIGEST")
       .slice(0, 4)
       .map((article) => ({
         occurredAt: new Date(article.publishedAt ?? article.updatedAt ?? article.createdAt ?? 0).getTime(),
         line: narrativeLine(article.title, compactNarrativeText(article.bodyMd, 560)),
+        sourceRef: {
+          type: "BRAIN_ARTICLE",
+          id: article.id,
+          label: article.title,
+          href: `/workspaces/${params.workspaceId}/brain/${article.slug}`,
+        },
       })),
   ]
     .filter((entry) => entry.line.trim())
@@ -118,6 +137,7 @@ function liveWorkspaceNarrative(params: {
     leadMd: entries[0]?.line ?? null,
     bodyMd: entries.slice(1).map((entry) => entry.line).join("\n\n") || null,
     closingMd: params.labels.closing,
+    sourceRefs: entries.map((entry) => entry.sourceRef),
   };
 }
 
@@ -172,6 +192,7 @@ export default async function WorkspaceDashboard({
     closing: t("newspaperLegacyClosing"),
   });
   const liveNarrative = latestBriefing || fallbackNarrative ? null : liveWorkspaceNarrative({
+    workspaceId,
     articles: articlesResult.items,
     meetings,
     labels: {
@@ -196,6 +217,7 @@ export default async function WorkspaceDashboard({
   });
   const articleTitle = latestBriefing?.title ?? latestNewspaperEdition?.title ?? t("latestWorkspaceBriefing");
   const hasArticle = !!latestBriefing || !!fallbackNarrative || !!liveNarrative;
+  const sourceRefs = latestBriefing?.sourceRefs ?? liveNarrative?.sourceRefs ?? [];
 
   return (
     <>
@@ -287,11 +309,11 @@ export default async function WorkspaceDashboard({
           </div>
         )}
 
-        {latestBriefing?.sourceRefs.length ? (
+        {sourceRefs.length ? (
           <footer className="nr-newspaper-sources">
             <span>{t("sourceTrail")}</span>
             <div>
-              {latestBriefing.sourceRefs.slice(0, 12).map((ref) => {
+              {sourceRefs.slice(0, 12).map((ref) => {
                 if (!ref.href) return <span key={`${ref.type}-${ref.id}`}>{ref.label}</span>;
                 return isExternalHref(ref.href) ? (
                   <a key={`${ref.type}-${ref.id}`} href={ref.href} target="_blank" rel="noopener noreferrer">

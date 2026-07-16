@@ -556,6 +556,67 @@ describe("workspace briefing", () => {
     ].filter(Boolean).join("\n")).toContain("Quarterly retention goal is behind");
   });
 
+  it("carries unmatched on-track goals into digest-derived briefings", async () => {
+    const { buildWorkspaceBriefingFromDigest } = await import("./workspace-briefing");
+    const briefing = buildWorkspaceBriefingFromDigest({
+      workspaceId: "ws-1",
+      period: "WEEKLY",
+      dateKey: "2026-04-30",
+      title: "Weekly Workspace Briefing - 2026-04-30",
+      generatedAt: new Date("2026-04-30T12:00:00.000Z"),
+      digest: {
+        intro: null,
+        sections: [{
+          id: "meetingBriefs",
+          title: "Meeting Briefs",
+          items: ["Weekly operating review uploaded today: The team aligned follow-up priorities."],
+        }],
+      },
+      candidates: [
+        baseCandidate({
+          sourceType: "MEETING",
+          sourceId: "meeting-current",
+          title: "Weekly operating review uploaded today",
+          summaryMd: "The team aligned follow-up priorities.",
+          href: "/workspaces/ws-1/meetings/meeting-current",
+          occurredAt: new Date("2026-04-30T10:00:00.000Z"),
+          updatedAt: new Date("2026-04-30T10:00:00.000Z"),
+          status: "COMPLETED",
+          strategicScore: 4,
+          actionabilityScore: 4,
+          evidenceScore: 4,
+          sourceRefs: [{ type: "MEETING", id: "meeting-current", label: "Weekly operating review uploaded today", href: "/workspaces/ws-1/meetings/meeting-current" }],
+        }),
+        baseCandidate({
+          sourceType: "GOAL",
+          sourceId: "goal-on-track",
+          title: "Customer onboarding goal is on track",
+          summaryMd: "The goal is on track and still frames this week's operating priorities.",
+          href: "/workspaces/ws-1/goals/goal-on-track",
+          occurredAt: new Date("2026-04-01T12:00:00.000Z"),
+          updatedAt: new Date("2026-04-20T12:00:00.000Z"),
+          status: "ON_TRACK",
+          priority: 3,
+          strategicScore: 5,
+          actionabilityScore: 2,
+          evidenceScore: 4,
+          sourceRefs: [{ type: "GOAL", id: "goal-on-track", label: "Customer onboarding goal is on track", href: "/workspaces/ws-1/goals/goal-on-track" }],
+        }),
+      ],
+    });
+
+    expect(briefing.items).toContainEqual(expect.objectContaining({
+      kind: "GOAL",
+      title: "Customer onboarding goal is on track",
+    }));
+    expect([
+      briefing.leadMd,
+      briefing.bodyMd,
+      briefing.attentionMd,
+      briefing.continuingContextMd,
+    ].filter(Boolean).join("\n")).toContain("Customer onboarding goal is on track");
+  });
+
   it("does not carry forward paraphrased candidates already represented by digest text", async () => {
     const { buildWorkspaceBriefingFromDigest } = await import("./workspace-briefing");
     const briefing = buildWorkspaceBriefingFromDigest({

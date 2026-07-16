@@ -739,7 +739,7 @@ function pickCandidateForSection(
 
 function shouldCarryUnmatchedDigestCandidate(candidate: WorkspaceBriefingCandidate, generatedAt: Date) {
   const status = (candidate.status ?? "").toUpperCase();
-  const isOpenContext = ["OPEN", "IN_PROGRESS", "ACTIVE", "PUBLISHED", "AT_RISK", "BEHIND"].includes(status);
+  const isOpenContext = ["OPEN", "IN_PROGRESS", "ACTIVE", "PUBLISHED", "ON_TRACK", "AT_RISK", "BEHIND"].includes(status);
   const isContextKind = candidate.sourceType === "GOAL"
     || candidate.sourceType === "PROPOSAL"
     || candidate.sourceType === "TENSION"
