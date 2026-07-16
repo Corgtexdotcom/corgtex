@@ -100,6 +100,7 @@ jobs:
       POSTHOG_QUERY_API_HOST: ${{ vars.POSTHOG_QUERY_API_HOST }}
       GITHUB_TOKEN: ${{ github.token }}
       OPS_GITHUB_REPOSITORY: ${{ github.repository }}
+      OBSERVATION_REQUIRE_SOURCE: "true"
       OBSERVATION_WINDOW_MINUTES: ${{ vars.OBSERVATION_WINDOW_MINUTES || '20' }}
 
     steps:

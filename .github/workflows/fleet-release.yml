@@ -243,6 +243,7 @@ jobs:
           POSTHOG_PROJECT_ID: ${{ vars.POSTHOG_PROJECT_ID }}
           POSTHOG_PERSONAL_API_KEY: ${{ secrets.POSTHOG_PERSONAL_API_KEY || secrets.POSTHOG_QUERY_API_KEY }}
           POSTHOG_QUERY_API_HOST: ${{ vars.POSTHOG_QUERY_API_HOST }}
+          OBSERVATION_REQUIRE_SOURCE: "true"
           OBSERVATION_WINDOW_MINUTES: ${{ vars.OBSERVATION_WINDOW_MINUTES || '20' }}
         run: |
           mkdir -p .artifacts/post-deploy-observation-gate

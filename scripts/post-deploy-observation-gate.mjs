@@ -27,10 +27,13 @@ const POSTHOG_CAPTURE_HOSTS = new Map([
 
 export async function runObservationGate(options = {}) {
   const manifest = normalizeManifest(options.manifest ?? {});
-  const since = options.since ?? sinceFromWindow(options.windowMinutes ?? DEFAULT_WINDOW_MINUTES, options.now);
+  const now = options.now ? new Date(options.now) : new Date();
+  const since = options.since ?? sinceFromWindow(options.windowMinutes ?? DEFAULT_WINDOW_MINUTES, now);
+  const until = options.until ?? now;
   const rows = options.rows ?? await collectObservationRows({
     env: options.env ?? process.env,
     since,
+    until,
     deps: options.deps ?? {},
   });
   const summary = buildObservationSummary({
@@ -98,13 +101,15 @@ export function buildObservationSummary({ manifest, since, rows, targets = null 
   };
 }
 
-export async function collectObservationRows({ env = process.env, since, deps = {} }) {
+export async function collectObservationRows({ env = process.env, since, until = new Date(), deps = {} }) {
   const rows = [];
   const sourceNotes = [];
+  let queriedSources = 0;
 
   if (isAzureMonitorConfigured(env)) {
+    queriedSources += 1;
     try {
-      rows.push(...await queryAzureMonitorRows({ env, since, deps }));
+      rows.push(...await queryAzureMonitorRows({ env, since, until, deps }));
     } catch (error) {
       throw new Error(`Azure Monitor observation query failed: ${errorMessage(error)}`);
     }
@@ -117,6 +122,7 @@ export async function collectObservationRows({ env = process.env, since, deps = 
   }
 
   if (isPostHogQueryConfigured(env)) {
+    queriedSources += 1;
     try {
       rows.push(...await queryPostHogRows({ env, since, deps }));
     } catch (error) {
@@ -138,11 +144,15 @@ export async function collectObservationRows({ env = process.env, since, deps = 
     }
   }
 
+  if (requiresObservationSource(env) && queriedSources === 0) {
+    throw new Error("No observation query source configured; set Azure Monitor or PostHog query credentials before running the production observation gate");
+  }
+
   return rows;
 }
 
-export async function queryAzureMonitorRows({ env = process.env, since, deps = {} }) {
-  const query = azureMonitorQuery(since);
+export async function queryAzureMonitorRows({ env = process.env, since, until = new Date(), deps = {} }) {
+  const query = azureMonitorQuery(since, observationEnvironment(env));
   const app = requiredText(env.AZURE_APPLICATIONINSIGHTS_APP_NAME, "AZURE_APPLICATIONINSIGHTS_APP_NAME");
   const resourceGroup = requiredText(env.AZURE_APPLICATIONINSIGHTS_RESOURCE_GROUP, "AZURE_APPLICATIONINSIGHTS_RESOURCE_GROUP");
   const command = deps.runCommand ?? defaultRunCommand;
@@ -158,6 +168,8 @@ export async function queryAzureMonitorRows({ env = process.env, since, deps = {
     query,
     "--start-time",
     since.toISOString(),
+    "--end-time",
+    new Date(until).toISOString(),
     "-o",
     "json",
   ]);
@@ -305,12 +317,13 @@ export function renderMarkdownSummary(summary) {
   return `${lines.join("\n")}\n`;
 }
 
-function azureMonitorQuery(since) {
+function azureMonitorQuery(since, environment) {
   const events = FAILURE_EVENTS.map((event) => `'${event}'`).join(",");
   const nonStatusEvents = [...NON_STATUS_FAILURE_EVENTS].map((event) => `'${event}'`).join(",");
   return [
     "customEvents",
     `| where timestamp >= datetime(${since.toISOString()})`,
+    `| where tostring(customDimensions.environment) == '${kustoString(environment)}'`,
     `| where name in (${events})`,
     "| extend statusInt=toint(customDimensions.status)",
     `| where name in (${nonStatusEvents}) or statusInt >= 500`,
@@ -335,11 +348,19 @@ function postHogQuery(since, environment) {
 }
 
 function postHogEnvironment(env) {
-  return safeText(env.POSTHOG_ENVIRONMENT) ?? "production";
+  return observationEnvironment(env);
 }
 
 function hogQlString(value) {
   return String(value).replace(/\\/g, "\\\\").replace(/'/g, "\\'");
+}
+
+function kustoString(value) {
+  return String(value).replace(/'/g, "''");
+}
+
+function observationEnvironment(env) {
+  return safeText(env.OBSERVATION_ENVIRONMENT ?? env.POSTHOG_ENVIRONMENT ?? env.AZURE_MONITOR_ENVIRONMENT) ?? "production";
 }
 
 function rowObject(columns, row, extra) {
@@ -418,6 +439,10 @@ function isAzureMonitorConfigured(env) {
 
 function isPostHogQueryConfigured(env) {
   return Boolean(safeText(env.POSTHOG_PROJECT_ID) && safeText(env.POSTHOG_PERSONAL_API_KEY ?? env.POSTHOG_QUERY_API_KEY));
+}
+
+function requiresObservationSource(env) {
+  return /^(1|true|yes)$/i.test(String(env.OBSERVATION_REQUIRE_SOURCE ?? ""));
 }
 
 function postHogQueryHost(env) {

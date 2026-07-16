@@ -210,6 +210,7 @@ describe("post-deploy observation gate", () => {
 
   it("queries Azure Monitor with the requested observation window", async () => {
     const since = new Date("2026-07-16T05:52:00.000Z");
+    const until = new Date("2026-07-16T06:52:00.000Z");
     const runCommand = vi.fn(() => JSON.stringify({
       tables: [{
         columns: [{ name: "name" }],
@@ -219,9 +220,11 @@ describe("post-deploy observation gate", () => {
 
     await queryAzureMonitorRows({
       since,
+      until,
       env: {
         AZURE_APPLICATIONINSIGHTS_APP_NAME: "appi-corgtex-ss-prod",
         AZURE_APPLICATIONINSIGHTS_RESOURCE_GROUP: "rg-corgtex-selfserve-production-wus3",
+        OBSERVATION_ENVIRONMENT: "production",
       },
       deps: { runCommand },
     });
@@ -229,7 +232,25 @@ describe("post-deploy observation gate", () => {
     const args = runCommand.mock.calls[0][1];
     expect(args).toContain("--start-time");
     expect(args[args.indexOf("--start-time") + 1]).toBe(since.toISOString());
-    expect(args[args.indexOf("--analytics-query") + 1]).not.toContain("take 100");
+    expect(args).toContain("--end-time");
+    expect(args[args.indexOf("--end-time") + 1]).toBe(until.toISOString());
+    const query = args[args.indexOf("--analytics-query") + 1];
+    expect(query).toContain("customDimensions.environment");
+    expect(query).toContain("production");
+    expect(query).not.toContain("take 100");
+  });
+
+  it("fails closed when production requires observation sources and none are configured", async () => {
+    await expect(runObservationGate({
+      manifest,
+      since: new Date("2026-07-16T05:52:00.000Z"),
+      env: {
+        OBSERVATION_REQUIRE_SOURCE: "true",
+      },
+      deps: {
+        onSourceNote: vi.fn(),
+      },
+    })).rejects.toThrow("No observation query source configured");
   });
 
   it("does not fail a passing gate when advisory publishing fails", async () => {
