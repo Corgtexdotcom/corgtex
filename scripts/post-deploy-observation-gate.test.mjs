@@ -176,6 +176,28 @@ describe("post-deploy observation gate", () => {
     expect(summary.advisoryFailures[0].instance_id).toBe("azure-selfserve-production");
   });
 
+  it("keeps unknown Railway rows blocking for selected Railway-backed targets", () => {
+    const summary = buildObservationSummary({
+      manifest,
+      since: new Date("2026-07-16T05:52:00.000Z"),
+      targets: "ops",
+      rows: [{
+        source: "posthog",
+        event: "corgtex_route_error",
+        instance_id: "railway-runtime-without-target-metadata",
+        provider: "railway",
+        release_git_sha: SHA,
+        route: "/api/current-release",
+        status: "500",
+        events: 1,
+      }],
+    });
+
+    expect(summary.status).toBe("blocked");
+    expect(summary.blockingFailures).toHaveLength(1);
+    expect(summary.blockingFailures[0].instance_id).toBe("railway-runtime-without-target-metadata");
+  });
+
   it("treats main production smoke as all production targets", () => {
     const summary = buildObservationSummary({
       manifest,
@@ -196,6 +218,56 @@ describe("post-deploy observation gate", () => {
     expect(summary.blockingFailures).toHaveLength(1);
     expect(normalizeObservationTargets("main-production-smoke")).toBeNull();
     expect(observationTargetsForRow(summary.blockingFailures[0])).toEqual(["azure-selfserve"]);
+  });
+
+  it("matches target-specific live releases in one production observation window", () => {
+    const summary = buildObservationSummary({
+      manifest: {
+        targetManifests: [
+          { target: "backup-app", gitSha: "app-sha" },
+          { target: "azure-selfserve", gitSha: "selfserve-sha" },
+          { target: "ops", gitSha: "ops-sha" },
+        ],
+      },
+      since: new Date("2026-07-16T05:52:00.000Z"),
+      targets: "main-production-smoke",
+      rows: [
+        {
+          source: "posthog",
+          event: "corgtex_route_error",
+          instance_id: "backup-app",
+          provider: "railway",
+          release_git_sha: "app-sha",
+          route: "https://app.corgtex.com/api/current-release",
+          status: "500",
+          events: 1,
+        },
+        {
+          source: "posthog",
+          event: "corgtex_render_error",
+          instance_id: "azure-selfserve-production",
+          provider: "azure",
+          release_git_sha: "selfserve-sha",
+          route: "/workspaces/example",
+          events: 1,
+        },
+        {
+          source: "posthog",
+          event: "corgtex_route_error",
+          instance_id: "older-runtime",
+          provider: "railway",
+          release_git_sha: "older-sha",
+          route: "/api/older",
+          status: "500",
+          events: 1,
+        },
+      ],
+    });
+
+    expect(summary.status).toBe("blocked");
+    expect(summary.blockingFailures).toHaveLength(2);
+    expect(summary.advisoryFailures).toHaveLength(1);
+    expect(summary.targetReleases.map((release) => release.target)).toEqual(["backup-app", "azure-selfserve", "ops"]);
   });
 
   it("parses Azure Monitor table rows into observation rows", () => {
@@ -288,6 +360,29 @@ describe("post-deploy observation gate", () => {
 
     expect(summary.status).toBe("passed");
     expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
+  it("falls back to the PostHog query key when the personal key is blank", async () => {
+    const fetchImpl = vi.fn(async () => new Response(JSON.stringify({
+      columns: ["name", "instance_id", "release_git_sha", "route", "status", "events"],
+      results: [],
+    }), { status: 200 }));
+
+    await runObservationGate({
+      manifest,
+      since: new Date("2026-07-16T05:52:00.000Z"),
+      env: {
+        POSTHOG_PROJECT_ID: "452941",
+        POSTHOG_PERSONAL_API_KEY: " ",
+        POSTHOG_QUERY_API_KEY: "phx_query",
+        POSTHOG_API_HOST: "https://us.i.posthog.com",
+        POSTHOG_ENVIRONMENT: "production",
+        OBSERVATION_REQUIRE_SOURCE: "true",
+      },
+      deps: { fetchImpl, onSourceNote: vi.fn() },
+    });
+
+    expect(fetchImpl.mock.calls[0][1].headers.Authorization).toBe("Bearer phx_query");
   });
 
   it("queries Azure Monitor with the requested observation window", async () => {

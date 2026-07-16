@@ -84,12 +84,12 @@ export async function runObservationGate(options = {}) {
 export function buildObservationSummary({ manifest, since, rows, targets = null }) {
   const normalizedRows = rows.map(normalizeObservationRow).filter(Boolean);
   const failureRows = normalizedRows.filter(isBlockingClassFailure);
-  const selectedTargets = normalizeObservationTargets(targets);
+  const releaseMatchers = observationReleaseMatchers(manifest, targets);
   const blockingFailures = [];
   const advisoryFailures = [];
 
   for (const row of failureRows) {
-    if (rowMatchesRelease(row, manifest) && rowMatchesTargets(row, selectedTargets)) {
+    if (releaseMatchers.some((matcher) => rowMatchesRelease(row, matcher.manifest) && rowMatchesTargets(row, matcher.selectedTargets))) {
       blockingFailures.push(row);
     } else {
       advisoryFailures.push(row);
@@ -103,6 +103,14 @@ export function buildObservationSummary({ manifest, since, rows, targets = null 
       imageTag: manifest.imageTag,
       version: manifest.releaseVersion,
     },
+    targetReleases: releaseMatchers
+      .filter((matcher) => matcher.target)
+      .map((matcher) => ({
+        target: matcher.target,
+        gitSha: matcher.manifest.gitSha,
+        imageTag: matcher.manifest.imageTag,
+        version: matcher.manifest.releaseVersion,
+      })),
     targets,
     since: since.toISOString(),
     sources: sourceSummaries(normalizedRows),
@@ -191,7 +199,7 @@ export async function queryAzureMonitorRows({ env = process.env, since, until = 
 export async function queryPostHogRows({ env = process.env, since, deps = {} }) {
   const apiHost = postHogQueryHost(env);
   const projectId = requiredText(env.POSTHOG_PROJECT_ID, "POSTHOG_PROJECT_ID");
-  const token = requiredText(env.POSTHOG_PERSONAL_API_KEY ?? env.POSTHOG_QUERY_API_KEY, "POSTHOG_PERSONAL_API_KEY or POSTHOG_QUERY_API_KEY");
+  const token = requiredText(postHogQueryToken(env), "POSTHOG_PERSONAL_API_KEY or POSTHOG_QUERY_API_KEY");
   const environment = postHogEnvironment(env);
   const fetchImpl = deps.fetchImpl ?? fetch;
   const response = await fetchImpl(`${apiHost}/api/projects/${encodeURIComponent(projectId)}/query/`, {
@@ -309,10 +317,6 @@ export function observationTargetsForRow(row) {
     targets.add("ops");
   }
 
-  if (provider === "railway" && targets.size === 0) {
-    targets.add("railway-customers");
-  }
-
   return [...targets];
 }
 
@@ -328,6 +332,33 @@ export function normalizeObservationTargets(value) {
   return selected.length > 0 ? new Set(selected) : null;
 }
 
+function observationReleaseMatchers(manifest, targets) {
+  if (Array.isArray(manifest.targetManifests) && manifest.targetManifests.length > 0) {
+    return manifest.targetManifests.map((targetManifest) => ({
+      target: targetManifest.target,
+      manifest: targetManifest,
+      selectedTargets: normalizeObservationTargets(targetManifest.target ?? targets),
+    }));
+  }
+
+  return [{
+    target: null,
+    manifest,
+    selectedTargets: normalizeObservationTargets(targets),
+  }];
+}
+
+function currentReleaseLabel(manifest) {
+  const release = manifest.gitSha ?? manifest.imageTag ?? manifest.releaseVersion;
+  if (release) return release;
+  if (Array.isArray(manifest.targetManifests) && manifest.targetManifests.length > 0) {
+    return manifest.targetManifests
+      .map((targetManifest) => `${targetManifest.target ?? "target"}:${targetManifest.gitSha ?? targetManifest.imageTag ?? targetManifest.releaseVersion ?? "unknown"}`)
+      .join(",");
+  }
+  return "unknown";
+}
+
 export function advisoryIncidentForRow(row, manifest) {
   const route = row.route ?? row.action ?? row.surface ?? "unknown";
   const release = row.release_git_sha ?? row.release_image_tag ?? row.release_version ?? "unknown-release";
@@ -339,7 +370,7 @@ export function advisoryIncidentForRow(row, manifest) {
     summary: `Unrelated production ${row.event} on ${row.instance_id ?? row.provider ?? "unknown"} ${route}`,
     evidence: [
       `${row.source}: ${row.event} count=${row.count} status=${row.status ?? "n/a"} code=${row.code ?? "n/a"}`,
-      `observedRelease=${release}; currentRelease=${manifest.gitSha ?? manifest.imageTag ?? manifest.releaseVersion ?? "unknown"}`,
+      `observedRelease=${release}; currentRelease=${currentReleaseLabel(manifest)}`,
       `firstSeen=${row.first_seen ?? "n/a"} lastSeen=${row.last_seen ?? "n/a"}`,
       row.source_url ? `source=${row.source_url}` : null,
     ].filter(Boolean),
@@ -440,6 +471,22 @@ function sourceSummaries(rows) {
 }
 
 function normalizeManifest(manifest) {
+  const normalized = normalizeReleaseManifest(manifest);
+  const targetManifests = Array.isArray(manifest.targetManifests)
+    ? manifest.targetManifests
+      .map((targetManifest) => ({
+        target: safeText(targetManifest.target ?? targetManifest.targets),
+        ...normalizeReleaseManifest(targetManifest),
+      }))
+      .filter((targetManifest) => targetManifest.gitSha || targetManifest.imageTag || targetManifest.releaseVersion)
+    : [];
+  if (targetManifests.length > 0) {
+    normalized.targetManifests = targetManifests;
+  }
+  return normalized;
+}
+
+function normalizeReleaseManifest(manifest) {
   return {
     gitSha: safeText(manifest.gitSha ?? manifest.release_git_sha),
     imageTag: safeText(manifest.imageTag ?? manifest.release_image_tag),
@@ -498,7 +545,11 @@ function isAzureMonitorConfigured(env) {
 }
 
 function isPostHogQueryConfigured(env) {
-  return Boolean(safeText(env.POSTHOG_PROJECT_ID) && safeText(env.POSTHOG_PERSONAL_API_KEY ?? env.POSTHOG_QUERY_API_KEY));
+  return Boolean(safeText(env.POSTHOG_PROJECT_ID) && postHogQueryToken(env));
+}
+
+function postHogQueryToken(env) {
+  return safeText(env.POSTHOG_PERSONAL_API_KEY) ?? safeText(env.POSTHOG_QUERY_API_KEY);
 }
 
 function requiresObservationSource(env) {
