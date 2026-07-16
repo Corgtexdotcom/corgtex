@@ -82,6 +82,16 @@ jobs:
       AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
       AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
       AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      APPLICATIONINSIGHTS_CONNECTION_STRING: ${{ secrets.APPLICATIONINSIGHTS_CONNECTION_STRING }}
+      POSTHOG_ENABLED: ${{ vars.POSTHOG_ENABLED }}
+      POSTHOG_CAPTURE_KILL_SWITCH: ${{ vars.POSTHOG_CAPTURE_KILL_SWITCH || 'false' }}
+      POSTHOG_PROJECT_TOKEN: ${{ secrets.POSTHOG_PROJECT_TOKEN }}
+      POSTHOG_API_HOST: ${{ vars.POSTHOG_API_HOST || 'https://us.i.posthog.com' }}
+      POSTHOG_ENVIRONMENT: ${{ vars.POSTHOG_ENVIRONMENT || 'production' }}
+      POSTHOG_EVENT_SAMPLE_RATE: ${{ vars.POSTHOG_EVENT_SAMPLE_RATE || '1' }}
+      POSTHOG_CAPTURE_TIMEOUT_MS: ${{ vars.POSTHOG_CAPTURE_TIMEOUT_MS || '1500' }}
+      POSTHOG_CAPTURE_DEBUG: ${{ vars.POSTHOG_CAPTURE_DEBUG || 'false' }}
+      POSTHOG_INSTANCE_ID: ${{ vars.POSTHOG_INSTANCE_ID || '' }}
 
     steps:
       - name: Validate workflow configuration

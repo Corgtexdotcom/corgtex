@@ -1,3 +1,7 @@
+import { execFileSync } from "node:child_process";
+import { chmodSync, mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 
 import { azureReleaseVariables, latestRailwayStatus, releaseVariables, runFleetRelease } from "./fleet-release-runner.mjs";
@@ -364,7 +368,7 @@ describe("fleet release runner", () => {
       releaseVersion: "main-c9077ff031e",
       imageTag: `sha-${SHA}`,
       gitSha: SHA,
-    })).toEqual({
+    }, {})).toEqual({
       CORGTEX_RELEASE_VERSION: "main-c9077ff031e",
       CORGTEX_RELEASE_IMAGE_TAG: `sha-${SHA}`,
       CORGTEX_RELEASE_GIT_SHA: SHA,
@@ -379,7 +383,7 @@ describe("fleet release runner", () => {
       releaseVersion: "main-c9077ff031e",
       imageTag: `sha-${SHA}`,
       gitSha: SHA,
-    })).toEqual({
+    }, {})).toEqual({
       CORGTEX_RELEASE_VERSION: "main-c9077ff031e",
       CORGTEX_RELEASE_IMAGE_TAG: `sha-${SHA}`,
       CORGTEX_RELEASE_GIT_SHA: SHA,
@@ -387,6 +391,193 @@ describe("fleet release runner", () => {
       CORGTEX_AUTO_SEED_JNJ_DEMO: "false",
       SEED_SCRIPTS: "",
     });
+  });
+
+  it("adds observability variables when release telemetry env is configured", async () => {
+    const env = {
+      APPLICATIONINSIGHTS_CONNECTION_STRING: "InstrumentationKey=00000000-0000-0000-0000-000000000000;IngestionEndpoint=https://example.monitor.azure.com/",
+      POSTHOG_ENABLED: "true",
+      POSTHOG_CAPTURE_KILL_SWITCH: "false",
+      POSTHOG_PROJECT_TOKEN: "posthog-project-token",
+      POSTHOG_API_HOST: "https://us.i.posthog.com",
+      POSTHOG_ENVIRONMENT: "production",
+      POSTHOG_EVENT_SAMPLE_RATE: "1",
+      POSTHOG_CAPTURE_TIMEOUT_MS: "1500",
+      POSTHOG_CAPTURE_DEBUG: "false",
+      POSTHOG_INSTANCE_ID: "corgtex-production",
+    };
+
+    expect(releaseVariables({
+      releaseVersion: "main-c9077ff031e",
+      imageTag: `sha-${SHA}`,
+      gitSha: SHA,
+    }, env)).toMatchObject({
+      APPLICATIONINSIGHTS_CONNECTION_STRING: env.APPLICATIONINSIGHTS_CONNECTION_STRING,
+      POSTHOG_ENABLED: "true",
+      POSTHOG_CAPTURE_KILL_SWITCH: "false",
+      POSTHOG_PROJECT_TOKEN: "posthog-project-token",
+      POSTHOG_API_HOST: "https://us.i.posthog.com",
+      POSTHOG_ENVIRONMENT: "production",
+      POSTHOG_EVENT_SAMPLE_RATE: "1",
+      POSTHOG_CAPTURE_TIMEOUT_MS: "1500",
+      POSTHOG_CAPTURE_DEBUG: "false",
+      POSTHOG_INSTANCE_ID: "corgtex-production",
+    });
+
+    expect(azureReleaseVariables({
+      releaseVersion: "main-c9077ff031e",
+      imageTag: `sha-${SHA}`,
+      gitSha: SHA,
+    }, env)).toMatchObject({
+      APPLICATIONINSIGHTS_CONNECTION_STRING: "secretref:ai-conn-secret",
+      POSTHOG_ENABLED: "true",
+      POSTHOG_PROJECT_TOKEN: "secretref:posthog-token",
+      POSTHOG_INSTANCE_ID: "corgtex-production",
+      CORGTEX_STARTUP_MODE: "migrate-and-web",
+    });
+  });
+
+  it("canonicalizes accepted PostHog boolean spellings in release variables", async () => {
+    const variables = releaseVariables({
+      releaseVersion: "main-c9077ff031e",
+      imageTag: `sha-${SHA}`,
+      gitSha: SHA,
+    }, {
+      POSTHOG_ENABLED: "yes",
+      POSTHOG_CAPTURE_KILL_SWITCH: "on",
+      POSTHOG_PROJECT_TOKEN: "posthog-project-token",
+      POSTHOG_CAPTURE_DEBUG: "1",
+    });
+
+    expect(variables).toMatchObject({
+      POSTHOG_ENABLED: "true",
+      POSTHOG_CAPTURE_KILL_SWITCH: "true",
+      POSTHOG_PROJECT_TOKEN: "posthog-project-token",
+      POSTHOG_CAPTURE_DEBUG: "true",
+    });
+  });
+
+  it("propagates explicit observability disables to provider runtime variables", async () => {
+    const env = {
+      APPLICATIONINSIGHTS_CONNECTION_STRING: "",
+      POSTHOG_ENABLED: "false",
+      POSTHOG_PROJECT_TOKEN: "stale-token",
+      POSTHOG_INSTANCE_ID: "",
+    };
+
+    expect(releaseVariables({
+      releaseVersion: "main-c9077ff031e",
+      imageTag: `sha-${SHA}`,
+      gitSha: SHA,
+    }, env)).toMatchObject({
+      APPLICATIONINSIGHTS_CONNECTION_STRING: "",
+      POSTHOG_ENABLED: "false",
+      POSTHOG_CAPTURE_KILL_SWITCH: "true",
+      POSTHOG_PROJECT_TOKEN: "",
+      POSTHOG_INSTANCE_ID: "",
+    });
+
+    expect(releaseVariables({
+      releaseVersion: "main-c9077ff031e",
+      imageTag: `sha-${SHA}`,
+      gitSha: SHA,
+    }, { POSTHOG_ENABLED: "true" })).toMatchObject({
+      POSTHOG_ENABLED: "false",
+      POSTHOG_CAPTURE_KILL_SWITCH: "true",
+      POSTHOG_PROJECT_TOKEN: "",
+    });
+  });
+
+  it("does not treat blank PostHog workflow env as an explicit disable", async () => {
+    const variables = releaseVariables({
+      releaseVersion: "main-c9077ff031e",
+      imageTag: `sha-${SHA}`,
+      gitSha: SHA,
+    }, {
+      POSTHOG_ENABLED: "",
+      POSTHOG_PROJECT_TOKEN: "",
+    });
+
+    expect(variables).not.toHaveProperty("POSTHOG_ENABLED");
+    expect(variables).not.toHaveProperty("POSTHOG_CAPTURE_KILL_SWITCH");
+    expect(variables).not.toHaveProperty("POSTHOG_PROJECT_TOKEN");
+  });
+
+  it("clears blank PostHog instance IDs without overwriting customer-scoped IDs", async () => {
+    expect(releaseVariables({
+      releaseVersion: "main-c9077ff031e",
+      imageTag: `sha-${SHA}`,
+      gitSha: SHA,
+    }, {
+      POSTHOG_ENABLED: "true",
+      POSTHOG_PROJECT_TOKEN: "posthog-project-token",
+      POSTHOG_INSTANCE_ID: "",
+    })).toMatchObject({
+      POSTHOG_ENABLED: "true",
+      POSTHOG_PROJECT_TOKEN: "posthog-project-token",
+      POSTHOG_INSTANCE_ID: "",
+    });
+
+    const customerVariables = releaseVariables({
+      releaseVersion: "main-c9077ff031e",
+      imageTag: `sha-${SHA}`,
+      gitSha: SHA,
+    }, {
+      POSTHOG_ENABLED: "true",
+      POSTHOG_PROJECT_TOKEN: "posthog-project-token",
+      POSTHOG_INSTANCE_ID: "global-fleet-id",
+    }, {
+      includePostHogInstanceId: false,
+    });
+
+    expect(customerVariables).toMatchObject({
+      POSTHOG_ENABLED: "true",
+      POSTHOG_PROJECT_TOKEN: "posthog-project-token",
+    });
+    expect(customerVariables).not.toHaveProperty("POSTHOG_INSTANCE_ID");
+  });
+
+  it("redacts observability secrets in standalone Azure release dry-run logs", async () => {
+    const output = execFileSync(process.execPath, [
+      "scripts/azure-selfserve-production-release.mjs",
+      "--sha",
+      SHA,
+      "--dry-run",
+      "--skip-build",
+      "--resource-group",
+      "rg-1",
+      "--acr-name",
+      "acr1",
+      "--web-app-name",
+      "web-app",
+      "--worker-app-name",
+      "worker-app",
+      "--app-url",
+      "https://selfserve.corgtex.com",
+    ], {
+      cwd: process.cwd(),
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        APPLICATIONINSIGHTS_CONNECTION_STRING: "InstrumentationKey=00000000-0000-0000-0000-000000000000",
+        POSTHOG_ENABLED: "yes",
+        POSTHOG_CAPTURE_KILL_SWITCH: "on",
+        POSTHOG_PROJECT_TOKEN: "ph-project-secret",
+        POSTHOG_CAPTURE_DEBUG: "1",
+        POSTHOG_INSTANCE_ID: "",
+      },
+    });
+
+    expect(output).toContain("APPLICATIONINSIGHTS_CONNECTION_STRING=<redacted>");
+    expect(output).toContain("POSTHOG_ENABLED=true");
+    expect(output).toContain("POSTHOG_CAPTURE_KILL_SWITCH=true");
+    expect(output).toContain("POSTHOG_PROJECT_TOKEN=<redacted>");
+    expect(output).toContain("POSTHOG_CAPTURE_DEBUG=true");
+    expect(output).toContain("POSTHOG_INSTANCE_ID=");
+    expect(output).toContain("ai-conn-secret=<redacted>");
+    expect(output).toContain("posthog-token=<redacted>");
+    expect(output).not.toContain("InstrumentationKey=00000000-0000-0000-0000-000000000000");
+    expect(output).not.toContain("ph-project-secret");
   });
 
   it("prints a dry-run plan without mutating providers", async () => {
@@ -485,6 +676,33 @@ describe("fleet release runner", () => {
       sleep: vi.fn(),
     })).rejects.toThrow("RAILWAY_API_TOKEN is missing");
     expect(runCommand).not.toHaveBeenCalled();
+  });
+
+  it("fails telemetry boolean validation before provider mutation", async () => {
+    const runCommand = vi.fn();
+    const fetchImpl = vi.fn();
+    await expect(runFleetRelease([
+      "deploy",
+      "--release",
+      SHA,
+      "--targets",
+      "ops",
+      "--reason",
+      "Deploy release.",
+    ], {
+      env: {
+        FLEET_RELEASE_TARGETS_JSON: targetJson(),
+        RAILWAY_API_TOKEN: "railway-token",
+        GHCR_IMPORT_USERNAME: "github-user",
+        GITHUB_TOKEN: "github-token",
+        POSTHOG_ENABLED: "truthy",
+      },
+      runCommand,
+      fetchImpl,
+      sleep: vi.fn(),
+    })).rejects.toThrow("POSTHOG_ENABLED");
+    expect(runCommand).not.toHaveBeenCalled();
+    expect(fetchImpl).not.toHaveBeenCalled();
   });
 
   it("requires Railway worker service metadata before mutation", async () => {
@@ -729,6 +947,9 @@ describe("fleet release runner", () => {
         RAILWAY_API_TOKEN: "railway-token",
         GHCR_IMPORT_USERNAME: "github-user",
         GITHUB_TOKEN: "github-token",
+        APPLICATIONINSIGHTS_CONNECTION_STRING: "InstrumentationKey=00000000-0000-0000-0000-000000000000",
+        POSTHOG_ENABLED: "true",
+        POSTHOG_PROJECT_TOKEN: "posthog-project-token",
       },
       runCommand: vi.fn(),
       fetchImpl,
@@ -756,6 +977,19 @@ describe("fleet release runner", () => {
         password: "github-token",
       },
     });
+    const variableCalls = railwayCalls.filter((call) => call.query.includes("variableCollectionUpsert"));
+    expect(variableCalls).toHaveLength(2);
+    for (const call of variableCalls) {
+      expect(call.variables.variables).toMatchObject({
+        APPLICATIONINSIGHTS_CONNECTION_STRING: "InstrumentationKey=00000000-0000-0000-0000-000000000000",
+        POSTHOG_ENABLED: "true",
+        POSTHOG_PROJECT_TOKEN: "posthog-project-token",
+        POSTHOG_API_HOST: "https://us.i.posthog.com",
+        POSTHOG_ENVIRONMENT: "production",
+        CORGTEX_RELEASE_IMAGE_TAG: `sha-${SHA}`,
+        CORGTEX_RELEASE_GIT_SHA: SHA,
+      });
+    }
     const deployAndWaitCalls = railwayCalls
       .filter((call) => call.query.includes("serviceInstanceDeployV2") || call.query.includes("deployments("))
       .map((call) => `${call.query.includes("serviceInstanceDeployV2") ? "deploy" : "wait"}:${call.variables.serviceId}`);
@@ -765,6 +999,103 @@ describe("fleet release runner", () => {
       "deploy:worker-1",
       "wait:worker-1",
     ]);
+  });
+
+  it("preserves customer PostHog instance ids during Railway customer releases", async () => {
+    const railwayCalls = [];
+    const fetchImpl = vi.fn(async (url, options) => {
+      if (String(url).includes("backboard.railway.com")) {
+        const body = JSON.parse(options.body);
+        railwayCalls.push(body);
+        if (body.query.includes("serviceInstanceDeployV2")) {
+          return {
+            ok: true,
+            json: async () => ({
+              data: {
+                deploymentId: body.variables.serviceId === "web-customer" ? "deploy-web" : "deploy-worker",
+              },
+            }),
+          };
+        }
+        if (body.query.includes("deployments(")) {
+          return {
+            ok: true,
+            json: async () => ({
+              data: {
+                deployments: {
+                  edges: [{
+                    node: {
+                      id: body.variables.serviceId === "web-customer" ? "deploy-web" : "deploy-worker",
+                      status: "SUCCESS",
+                    },
+                  }],
+                },
+              },
+            }),
+          };
+        }
+        return { ok: true, json: async () => ({ data: {} }) };
+      }
+      return {
+        ok: true,
+        json: async () => ({
+          status: "ok",
+          database: "up",
+          schema: "ready",
+          release: {
+            imageTag: `sha-${SHA}`,
+            gitSha: SHA,
+          },
+        }),
+      };
+    });
+
+    await runFleetRelease([
+      "deploy",
+      "--release",
+      SHA,
+      "--targets",
+      "railway-customers",
+      "--reason",
+      "Deploy release.",
+    ], {
+      env: {
+        FLEET_RELEASE_TARGETS_JSON: targetJson({
+          id: "customer",
+          deploymentId: null,
+          label: "Customer",
+          url: "https://customer.corgtex.com",
+          group: "railway-customers",
+          railway: {
+            projectId: "project-customer",
+            environmentId: "env-customer",
+            webServiceId: "web-customer",
+            workerServiceId: "worker-customer",
+          },
+        }),
+        RAILWAY_API_TOKEN: "railway-token",
+        GHCR_IMPORT_USERNAME: "github-user",
+        GITHUB_TOKEN: "github-token",
+        POSTHOG_ENABLED: "true",
+        POSTHOG_PROJECT_TOKEN: "posthog-project-token",
+        POSTHOG_INSTANCE_ID: "global-fleet-id",
+      },
+      runCommand: vi.fn(),
+      fetchImpl,
+      sleep: vi.fn(),
+    });
+
+    const variableCalls = railwayCalls.filter((call) => call.query.includes("variableCollectionUpsert"));
+    expect(variableCalls).toHaveLength(2);
+    for (const call of variableCalls) {
+      expect(call.variables.variables).toMatchObject({
+        POSTHOG_ENABLED: "true",
+        POSTHOG_PROJECT_TOKEN: "posthog-project-token",
+        CORGTEX_RELEASE_IMAGE_TAG: `sha-${SHA}`,
+        CORGTEX_RELEASE_GIT_SHA: SHA,
+      });
+      expect(call.variables.variables).not.toHaveProperty("POSTHOG_INSTANCE_ID");
+    }
   });
 
   it("requires control-plane credentials before verified inventory recording", async () => {
@@ -1052,6 +1383,10 @@ describe("fleet release runner", () => {
         GITHUB_ACTOR: "github-user",
         GITHUB_TOKEN: "github-token",
         CONTROL_PLANE_AGENT_API_KEY: "control-plane-token",
+        APPLICATIONINSIGHTS_CONNECTION_STRING: "InstrumentationKey=00000000-0000-0000-0000-000000000000",
+        POSTHOG_ENABLED: "true",
+        POSTHOG_PROJECT_TOKEN: "posthog-project-token",
+        POSTHOG_INSTANCE_ID: "azure-selfserve-production",
       },
       runCommand,
       fetchImpl,
@@ -1062,6 +1397,14 @@ describe("fleet release runner", () => {
     const updateCalls = runCommand.mock.calls.filter(([command, args]) => (
       command === "az" && args[0] === "containerapp" && args[1] === "update"
     ));
+    const secretCalls = runCommand.mock.calls.filter(([command, args]) => (
+      command === "az" && args[0] === "containerapp" && args[1] === "secret" && args[2] === "set"
+    ));
+    expect(secretCalls).toHaveLength(2);
+    for (const [, args] of secretCalls) {
+      expect(args).toContain("ai-conn-secret=InstrumentationKey=00000000-0000-0000-0000-000000000000");
+      expect(args).toContain("posthog-token=posthog-project-token");
+    }
     expect(updateCalls).toHaveLength(2);
     for (const [, args] of updateCalls) {
       expect(args).toContain("CORGTEX_STARTUP_MODE=migrate-and-web");
@@ -1069,6 +1412,11 @@ describe("fleet release runner", () => {
       expect(args).toContain("SEED_SCRIPTS=");
       expect(args).toContain(`CORGTEX_RELEASE_IMAGE_TAG=sha-${SHA}`);
       expect(args).toContain(`CORGTEX_RELEASE_GIT_SHA=${SHA}`);
+      expect(args).toContain("APPLICATIONINSIGHTS_CONNECTION_STRING=secretref:ai-conn-secret");
+      expect(args).toContain("POSTHOG_PROJECT_TOKEN=secretref:posthog-token");
+      expect(args).toContain("POSTHOG_INSTANCE_ID=azure-selfserve-production");
+      expect(args).not.toContain("APPLICATIONINSIGHTS_CONNECTION_STRING=InstrumentationKey=00000000-0000-0000-0000-000000000000");
+      expect(args).not.toContain("POSTHOG_PROJECT_TOKEN=posthog-project-token");
     }
     expect(toolCalls).toEqual([
       "record_verified_release",
@@ -1085,6 +1433,66 @@ describe("fleet release runner", () => {
       providerStatusReleaseImageTag: "sha-old",
       providerStatusReleaseDrift: "Release drift: expected sha-old",
     });
+  });
+
+  it("redacts fleet Azure observability secrets when command fallback errors render argv", async () => {
+    const binDir = mkdtempSync(join(tmpdir(), "corgtex-fake-az-"));
+    const fakeAz = join(binDir, "az");
+    writeFileSync(fakeAz, [
+      "#!/bin/sh",
+      "if [ \"$1\" = \"containerapp\" ] && [ \"$2\" = \"secret\" ] && [ \"$3\" = \"set\" ]; then",
+      "  exit 1",
+      "fi",
+      "if [ \"$1\" = \"containerapp\" ] && [ \"$2\" = \"show\" ]; then",
+      "  printf 'fake-revision\\n'",
+      "  exit 0",
+      "fi",
+      "exit 0",
+      "",
+    ].join("\n"));
+    chmodSync(fakeAz, 0o755);
+
+    const logs = [];
+    const consoleSpy = vi.spyOn(console, "log").mockImplementation((message) => {
+      logs.push(String(message));
+    });
+    try {
+      await runFleetRelease([
+        "deploy",
+        "--release",
+        SHA,
+        "--targets",
+        "azure-selfserve",
+        "--reason",
+        "Deploy release.",
+      ], {
+        env: {
+          PATH: binDir,
+          FLEET_RELEASE_TARGETS_JSON: azureTargetJson(),
+          AZURE_CLIENT_ID: "azure-client",
+          AZURE_TENANT_ID: "azure-tenant",
+          AZURE_SUBSCRIPTION_ID: "azure-subscription",
+          GITHUB_ACTOR: "github-user",
+          GITHUB_TOKEN: "github-token",
+          CONTROL_PLANE_AGENT_API_KEY: "control-plane-token",
+          APPLICATIONINSIGHTS_CONNECTION_STRING: "InstrumentationKey=00000000-0000-0000-0000-000000000000",
+          POSTHOG_ENABLED: "true",
+          POSTHOG_PROJECT_TOKEN: "posthog-project-token",
+        },
+        fetchImpl: vi.fn(),
+        sleep: vi.fn(),
+      });
+    } catch (error) {
+      expect(error instanceof Error ? error.message : String(error)).toContain("Ring 2 failed");
+    } finally {
+      consoleSpy.mockRestore();
+    }
+
+    const output = logs.join("\n");
+    expect(output).toContain("ai-conn-secret=<redacted>");
+    expect(output).toContain("posthog-token=<redacted>");
+    expect(output).not.toContain("InstrumentationKey=00000000-0000-0000-0000-000000000000");
+    expect(output).not.toContain("posthog-project-token=posthog-project-token");
   });
 
   it("does not treat a different Railway deployment status as proof", async () => {
