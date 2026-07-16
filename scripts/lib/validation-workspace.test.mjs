@@ -35,6 +35,17 @@ describe("validation workspace contract", () => {
     });
   });
 
+  it("lets a script-specific slug override a global workspace id", () => {
+    expect(validationWorkspaceSelectorFromEnv({
+      CRM_SMOKE_WORKSPACE_SLUG: "crm-target",
+      PRODUCTION_VALIDATION_WORKSPACE_ID: "ws-global",
+    }, "CRM_SMOKE")).toEqual({
+      workspaceId: null,
+      workspaceSlug: "crm-target",
+      explicit: true,
+    });
+  });
+
   it("classifies demo, internal validation, and customer workspaces", () => {
     expect(classifyWorkspaceSlug(DEMO_WORKSPACE_SLUG)).toBe("demo");
     expect(classifyWorkspaceSlug(INTERNAL_VALIDATION_WORKSPACE_SLUG)).toBe("internal-validation");

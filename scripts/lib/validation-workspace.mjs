@@ -19,22 +19,25 @@ export function boolEnv(env, name) {
 
 export function validationWorkspaceSelectorFromEnv(env = process.env, prefix = "PRODUCTION_VALIDATION") {
   const normalizedPrefix = String(prefix || "PRODUCTION_VALIDATION").replace(/_+$/, "");
-  const idNames = [
-    `${normalizedPrefix}_WORKSPACE_ID`,
-    "PRODUCTION_VALIDATION_WORKSPACE_ID",
+  const selectors = [
+    { workspaceId: firstEnv(env, [`${normalizedPrefix}_WORKSPACE_ID`]), workspaceSlug: null },
+    { workspaceId: null, workspaceSlug: firstEnv(env, [`${normalizedPrefix}_WORKSPACE_SLUG`]) },
+    { workspaceId: firstEnv(env, ["PRODUCTION_VALIDATION_WORKSPACE_ID"]), workspaceSlug: null },
+    {
+      workspaceId: null,
+      workspaceSlug: firstEnv(env, [
+        "PRODUCTION_VALIDATION_WORKSPACE_SLUG",
+        "VALIDATION_WORKSPACE_SLUG",
+      ]),
+    },
   ];
-  const slugNames = [
-    `${normalizedPrefix}_WORKSPACE_SLUG`,
-    "PRODUCTION_VALIDATION_WORKSPACE_SLUG",
-    "VALIDATION_WORKSPACE_SLUG",
-  ];
-  const workspaceId = firstEnv(env, idNames);
-  const workspaceSlug = firstEnv(env, slugNames);
+
+  const selector = selectors.find((item) => item.workspaceId || item.workspaceSlug);
 
   return {
-    workspaceId,
-    workspaceSlug: workspaceSlug ?? INTERNAL_VALIDATION_WORKSPACE_SLUG,
-    explicit: Boolean(workspaceId || workspaceSlug),
+    workspaceId: selector?.workspaceId ?? null,
+    workspaceSlug: selector?.workspaceSlug ?? INTERNAL_VALIDATION_WORKSPACE_SLUG,
+    explicit: Boolean(selector),
   };
 }
 

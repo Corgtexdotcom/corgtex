@@ -23,15 +23,28 @@ function requiredEnv(names) {
 }
 
 function pinValidationSeedEnvironment() {
+  const explicitValidationAdminEmail = process.env.VALIDATION_BOOTSTRAP_ADMIN_EMAIL?.trim();
+  const globalAdminEmail = process.env.ADMIN_EMAIL?.trim().toLowerCase();
   const adminEmail = requiredEnv(["VALIDATION_BOOTSTRAP_ADMIN_EMAIL", "ADMIN_EMAIL"]).toLowerCase();
+  const reusesGlobalAdmin = Boolean(globalAdminEmail && adminEmail === globalAdminEmail);
   process.env.VALIDATION_BOOTSTRAP_ADMIN_EMAIL = adminEmail;
   process.env.VALIDATION_WORKSPACE_SLUG = INTERNAL_VALIDATION_WORKSPACE_SLUG;
   process.env.VALIDATION_WORKSPACE_NAME = INTERNAL_VALIDATION_WORKSPACE_NAME;
-  process.env.VALIDATION_ADMIN_DISPLAY_NAME ??= "Corgtex Validation Admin";
+  if (explicitValidationAdminEmail && !reusesGlobalAdmin) {
+    process.env.VALIDATION_ADMIN_DISPLAY_NAME ??= "Corgtex Validation Admin";
+  } else {
+    delete process.env.ADMIN_DISPLAY_NAME;
+    delete process.env.CLIENT_ADMIN_DISPLAY_NAME;
+    delete process.env.VALIDATION_ADMIN_DISPLAY_NAME;
+  }
   process.env.VALIDATION_USERS_JSON = "[]";
   process.env.VALIDATION_SEND_INVITES = "false";
   process.env.VALIDATION_PRINT_INVITE_LINKS = "false";
   process.env.VALIDATION_SEED_SAMPLE_DATA = "true";
+  delete process.env.CLIENT_USERS_JSON;
+  delete process.env.CLIENT_USERS_CSV;
+  delete process.env.CLIENT_SEND_INVITES;
+  delete process.env.CLIENT_PRINT_INVITE_LINKS;
 }
 
 const validationSeedConfig = {
