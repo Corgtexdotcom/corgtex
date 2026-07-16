@@ -440,6 +440,128 @@ describe("post-deploy observation gate", () => {
     expect(fetchImpl).toHaveBeenCalledTimes(2);
   });
 
+  it("accepts array-form ops Railway target metadata", async () => {
+    const fetchImpl = vi.fn(async (_url, init) => {
+      const body = JSON.parse(init.body);
+      if (body.query.includes("LatestDeployment")) {
+        return new Response(JSON.stringify({
+          data: {
+            deployments: {
+              edges: [{ node: { id: "ops-deployment-1", status: "SUCCESS", createdAt: "2026-07-16T05:50:00.000Z" } }],
+            },
+          },
+        }), { status: 200 });
+      }
+      return new Response(JSON.stringify({ data: { httpLogs: [] } }), { status: 200 });
+    });
+
+    const summary = await runObservationGate({
+      manifest,
+      since: new Date("2026-07-16T05:52:00.000Z"),
+      targets: "ops",
+      env: {
+        RAILWAY_API_TOKEN: "railway-token",
+        FLEET_RELEASE_OPS_TARGET_JSON: JSON.stringify([{
+          label: "Ops",
+          provider: "railway",
+          railway: {
+            projectId: "project-ops",
+            environmentId: "environment-ops",
+            webServiceId: "web-ops",
+          },
+        }]),
+        OBSERVATION_REQUIRE_SOURCE: "true",
+      },
+      deps: { fetchImpl, onSourceNote: vi.fn() },
+    });
+
+    expect(summary.status).toBe("passed");
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+  });
+
+  it("requires Railway coverage for every selected Railway target group", async () => {
+    const fetchImpl = vi.fn(async (_url, init) => {
+      const body = JSON.parse(init.body);
+      if (body.query.includes("LatestDeployment")) {
+        return new Response(JSON.stringify({
+          data: {
+            deployments: {
+              edges: [{ node: { id: "ops-deployment-1", status: "SUCCESS", createdAt: "2026-07-16T05:50:00.000Z" } }],
+            },
+          },
+        }), { status: 200 });
+      }
+      return new Response(JSON.stringify({ data: { httpLogs: [] } }), { status: 200 });
+    });
+
+    await expect(runObservationGate({
+      manifest,
+      since: new Date("2026-07-16T05:52:00.000Z"),
+      targets: "railway-customers,ops",
+      env: {
+        RAILWAY_API_TOKEN: "railway-token",
+        FLEET_RELEASE_OPS_TARGET_JSON: JSON.stringify([{
+          label: "Ops",
+          provider: "railway",
+          railway: {
+            projectId: "project-ops",
+            environmentId: "environment-ops",
+            webServiceId: "web-ops",
+          },
+        }]),
+        OBSERVATION_REQUIRE_SOURCE: "true",
+      },
+      deps: { fetchImpl, onSourceNote: vi.fn() },
+    })).rejects.toThrow("Missing required observation query source(s) for targets railway-customers,ops: railway-customers: railway or posthog");
+  });
+
+  it("allows PostHog to satisfy the required source when Railway errors", async () => {
+    const onSourceNote = vi.fn();
+    const fetchImpl = vi.fn(async (_url, init) => {
+      const body = JSON.parse(init.body);
+      if (typeof body.query === "string" && body.query.includes("LatestDeployment")) {
+        return new Response(JSON.stringify({
+          errors: [{ message: "Railway logs unavailable" }],
+        }), { status: 200 });
+      }
+      return new Response(JSON.stringify({
+        columns: ["name", "instance_id", "release_git_sha", "route", "status", "events"],
+        results: [],
+      }), { status: 200 });
+    });
+
+    const summary = await runObservationGate({
+      manifest,
+      since: new Date("2026-07-16T05:52:00.000Z"),
+      targets: "railway-customers",
+      env: {
+        POSTHOG_PROJECT_ID: "452941",
+        POSTHOG_PERSONAL_API_KEY: "phx_test",
+        RAILWAY_API_TOKEN: "railway-token",
+        FLEET_RELEASE_TARGETS_JSON: JSON.stringify([{
+          id: "customer-a",
+          label: "Customer A",
+          provider: "railway",
+          railway: {
+            projectId: "project-a",
+            environmentId: "environment-a",
+            webServiceId: "web-a",
+          },
+        }]),
+        OBSERVATION_REQUIRE_SOURCE: "true",
+      },
+      deps: { fetchImpl, onSourceNote },
+    });
+
+    expect(summary.status).toBe("passed");
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+    expect(onSourceNote).toHaveBeenCalledWith(expect.objectContaining({
+      source: "railway",
+      status: "failed",
+      reason: "Railway logs unavailable",
+    }));
+  });
+
   it("requires Railway or PostHog when fail-closed observation includes Railway targets", async () => {
     const runCommand = vi.fn(() => JSON.stringify({
       tables: [{
@@ -469,7 +591,7 @@ describe("post-deploy observation gate", () => {
         }]),
       },
       deps: { runCommand, onSourceNote: vi.fn() },
-    })).rejects.toThrow("Missing required observation query source(s) for targets railway-customers,azure-selfserve: railway or posthog");
+    })).rejects.toThrow("Missing required observation query source(s) for targets railway-customers,azure-selfserve: railway-customers: railway or posthog");
   });
 
   it("blocks current-release Railway HTTP 5xx logs", async () => {
@@ -487,7 +609,12 @@ describe("post-deploy observation gate", () => {
       expect(body.variables).toMatchObject({
         deploymentId: "railway-deployment-1",
         filter: "@httpStatus:500..599",
+        limit: 100,
       });
+      expect(body.variables).not.toHaveProperty("beforeLimit");
+      expect(body.variables).not.toHaveProperty("beforeDate");
+      expect(body.query).toContain("limit: $limit");
+      expect(body.query).not.toContain("beforeLimit");
       return new Response(JSON.stringify({
         data: {
           httpLogs: [{
@@ -632,7 +759,7 @@ describe("post-deploy observation gate", () => {
       deps: {
         onSourceNote: vi.fn(),
       },
-    })).rejects.toThrow("Missing required observation query source(s) for targets production: azure_monitor, railway or posthog");
+    })).rejects.toThrow("Missing required observation query source(s) for targets production: azure_monitor, railway-customers: railway or posthog, ops: railway or posthog, backup-app: railway or posthog");
   });
 
   it("does not fail a passing gate when advisory publishing fails", async () => {

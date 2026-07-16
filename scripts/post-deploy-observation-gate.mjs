@@ -28,6 +28,11 @@ const TARGET_GROUPS = Object.freeze([
   "ops",
   "backup-app",
 ]);
+const RAILWAY_TARGET_GROUPS = Object.freeze([
+  "railway-customers",
+  "ops",
+  "backup-app",
+]);
 const DEFAULT_TARGET_GROUPS = Object.freeze([
   "railway-customers",
   "azure-selfserve",
@@ -129,6 +134,7 @@ export async function collectObservationRows({ env = process.env, manifest = {},
   const rows = [];
   const sourceNotes = [];
   const queriedSources = new Set();
+  const sourceErrors = new Map();
 
   if (isAzureMonitorConfigured(env)) {
     try {
@@ -145,14 +151,17 @@ export async function collectObservationRows({ env = process.env, manifest = {},
     });
   }
 
-  if (isRailwayQueryConfigured(env, targets)) {
+  const railwayTargets = railwayTargetsFromEnv(env, targets);
+  if (safeText(env.RAILWAY_API_TOKEN) && railwayTargets.length > 0) {
     try {
       rows.push(...await queryRailwayRows({ env, manifest, since, until, targets, deps }));
-      queriedSources.add("railway");
+      for (const group of new Set(railwayTargets.map((target) => target.group).filter(Boolean))) {
+        queriedSources.add(`railway:${group}`);
+      }
     } catch (error) {
-      throw new Error(`Railway observation query failed: ${errorMessage(error)}`);
+      sourceErrors.set("railway", error);
     }
-  } else if (railwayTargetsFromEnv(env, targets).length > 0) {
+  } else if (railwayTargets.length > 0 || selectedRailwayTargetGroups(targets).size > 0) {
     sourceNotes.push({
       source: "railway",
       status: "skipped",
@@ -165,7 +174,7 @@ export async function collectObservationRows({ env = process.env, manifest = {},
       rows.push(...await queryPostHogRows({ env, since, deps }));
       queriedSources.add("posthog");
     } catch (error) {
-      throw new Error(`PostHog observation query failed: ${errorMessage(error)}`);
+      sourceErrors.set("posthog", error);
     }
   } else {
     sourceNotes.push({
@@ -173,6 +182,22 @@ export async function collectObservationRows({ env = process.env, manifest = {},
       status: "skipped",
       reason: "POSTHOG_PROJECT_ID and POSTHOG_PERSONAL_API_KEY or POSTHOG_QUERY_API_KEY are required",
     });
+  }
+
+  const missingSourceGroups = requiredObservationSourceGroupsForTargets(targets)
+    .filter((group) => !group.sources.some((source) => queriedSources.has(source)));
+
+  for (const [source, error] of sourceErrors) {
+    const isSatisfiedAlternative = missingSourceGroups.every((group) => !sourceMatchesRequiredGroup(source, group));
+    if (requiresObservationSource(env) && isSatisfiedAlternative) {
+      sourceNotes.push({
+        source,
+        status: "failed",
+        reason: errorMessage(error),
+      });
+      continue;
+    }
+    throw new Error(`${sourceLabel(source)} observation query failed: ${errorMessage(error)}`);
   }
 
   for (const note of sourceNotes) {
@@ -184,9 +209,7 @@ export async function collectObservationRows({ env = process.env, manifest = {},
   }
 
   if (requiresObservationSource(env)) {
-    const missingSources = requiredObservationSourceGroupsForTargets(targets)
-      .filter((group) => !group.sources.some((source) => queriedSources.has(source)))
-      .map((group) => group.label);
+    const missingSources = missingSourceGroups.map((group) => group.label);
     if (missingSources.length > 0) {
       throw new Error(`Missing required observation query source(s) for targets ${targets ?? "production"}: ${missingSources.join(", ")}`);
     }
@@ -643,10 +666,6 @@ function isPostHogQueryConfigured(env) {
   return Boolean(safeText(env.POSTHOG_PROJECT_ID) && postHogQueryToken(env));
 }
 
-function isRailwayQueryConfigured(env, targets) {
-  return Boolean(safeText(env.RAILWAY_API_TOKEN) && railwayTargetsFromEnv(env, targets).length > 0);
-}
-
 function postHogQueryToken(env) {
   return safeText(env.POSTHOG_PERSONAL_API_KEY) ?? safeText(env.POSTHOG_QUERY_API_KEY);
 }
@@ -662,10 +681,16 @@ function requiredObservationSourceGroupsForTargets(targets) {
   if (targetList.includes("azure-selfserve")) {
     groups.push({ label: "azure_monitor", sources: ["azure_monitor"] });
   }
-  if (targetList.some((target) => ["railway-customers", "ops", "backup-app"].includes(target))) {
-    groups.push({ label: "railway or posthog", sources: ["railway", "posthog"] });
+  for (const target of targetList.filter((target) => RAILWAY_TARGET_GROUPS.includes(target))) {
+    groups.push({ label: `${target}: railway or posthog`, sources: [`railway:${target}`, "posthog"] });
   }
   return groups;
+}
+
+function selectedRailwayTargetGroups(targets) {
+  const selectedTargets = normalizeObservationTargets(targets);
+  const targetList = selectedTargets ? [...selectedTargets] : TARGET_GROUPS;
+  return new Set(targetList.filter((target) => RAILWAY_TARGET_GROUPS.includes(target)));
 }
 
 function postHogQueryHost(env) {
@@ -709,7 +734,7 @@ function railwayTargetsFromEnv(env, targets) {
   }
 
   if (targetList.includes("ops")) {
-    const target = parseJsonObject(env.FLEET_RELEASE_OPS_TARGET_JSON);
+    const target = parseJsonObjectOrSingleItemArray(env.FLEET_RELEASE_OPS_TARGET_JSON);
     if (target?.provider === "railway" && target?.railway?.webServiceId && target?.railway?.environmentId) {
       entries.push({
         id: "ops",
@@ -723,7 +748,7 @@ function railwayTargetsFromEnv(env, targets) {
   }
 
   if (targetList.includes("backup-app")) {
-    const target = parseJsonObject(env.FLEET_RELEASE_BACKUP_APP_TARGET_JSON);
+    const target = parseJsonObjectOrSingleItemArray(env.FLEET_RELEASE_BACKUP_APP_TARGET_JSON);
     if (target?.provider === "railway" && target?.railway?.webServiceId && target?.railway?.environmentId) {
       entries.push({
         id: "backup-app",
@@ -771,12 +796,11 @@ async function queryRailwayHttpLogs({ env = process.env, deploymentId, since, un
   const data = await railwayGraphql({
     env,
     deps,
-    query: `query HttpLogs($deploymentId: String!, $filter: String, $beforeLimit: Int!, $beforeDate: String) {
+    query: `query HttpLogs($deploymentId: String!, $filter: String, $limit: Int!) {
       httpLogs(
         deploymentId: $deploymentId
         filter: $filter
-        beforeLimit: $beforeLimit
-        beforeDate: $beforeDate
+        limit: $limit
       ) {
         timestamp
         method
@@ -792,14 +816,14 @@ async function queryRailwayHttpLogs({ env = process.env, deploymentId, since, un
     variables: {
       deploymentId,
       filter: "@httpStatus:500..599",
-      beforeLimit: railwayLogLimit(env),
-      beforeDate: new Date(until).toISOString(),
+      limit: railwayLogLimit(env),
     },
   });
   const sinceDate = new Date(since);
+  const untilDate = new Date(until);
   return (data?.httpLogs ?? []).filter((log) => {
     const timestamp = new Date(log?.timestamp ?? "");
-    return !Number.isNaN(timestamp.getTime()) && timestamp >= sinceDate;
+    return !Number.isNaN(timestamp.getTime()) && timestamp >= sinceDate && timestamp <= untilDate;
   });
 }
 
@@ -844,9 +868,13 @@ function parseJsonArray(value) {
   return Array.isArray(parsed) ? parsed : [];
 }
 
-function parseJsonObject(value) {
+function parseJsonObjectOrSingleItemArray(value) {
   const parsed = parseJsonValue(value);
-  return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : null;
+  if (Array.isArray(parsed)) {
+    const [first] = parsed;
+    return first && typeof first === "object" && !Array.isArray(first) ? first : null;
+  }
+  return parsed && typeof parsed === "object" ? parsed : null;
 }
 
 function parseJsonValue(value) {
@@ -857,6 +885,20 @@ function parseJsonValue(value) {
   } catch {
     return null;
   }
+}
+
+function sourceLabel(source) {
+  if (source === "posthog") return "PostHog";
+  if (source === "railway") return "Railway";
+  if (source === "azure_monitor") return "Azure Monitor";
+  return source;
+}
+
+function sourceMatchesRequiredGroup(source, group) {
+  if (source === "railway") {
+    return group.sources.some((requiredSource) => requiredSource.startsWith("railway:"));
+  }
+  return group.sources.includes(source);
 }
 
 function numericStatus(value) {
