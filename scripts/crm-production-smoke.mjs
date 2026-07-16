@@ -508,7 +508,7 @@ class CrmSmoke {
 
     const askCreate = await this.chat(
       conversationId,
-      `I want a CRM follow-up created with record_relationship_activity. Title: ${title}. Type: TASK. accountId: ${account.id}. dueAt: ${dueAt}. Ask me to confirm before calling the tool.`,
+      `Prepare a pending CRM follow-up by calling record_relationship_activity now. Title: ${title}. Type: TASK. accountId: ${account.id}. dueAt: ${dueAt}. Return the pending operation ID for confirmation.`,
       context,
     );
     assert(/confirm|yes|go ahead|do it/i.test(askCreate), "Chat did not ask for confirmation before creating follow-up.");
@@ -555,7 +555,7 @@ class CrmSmoke {
     const completeContext = crmPageContext(this.workspaceId, account, activity.id, title);
     const askComplete = await this.chat(
       conversationId,
-      `Complete the selected CRM follow-up ${activity.id}. Ask me to confirm before calling complete_relationship_activity.`,
+      `Prepare a pending completion by calling complete_relationship_activity now for selected CRM follow-up ${activity.id}. Return the pending operation ID for confirmation.`,
       completeContext,
     );
     assert(/confirm|yes|go ahead|do it/i.test(askComplete), "Chat did not ask for confirmation before completing follow-up.");

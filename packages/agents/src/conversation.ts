@@ -51,6 +51,7 @@ import {
   listDueRelationshipWorkAction,
   normalizeCrmWriteToolArgs,
   recordRelationshipActivityAction,
+  validateCrmWriteToolArgs,
 } from "./tools/crm";
 import {
   beginCrmPendingOperationExecution,
@@ -474,6 +475,7 @@ async function executeConversationToolCall({
   const args = rawArguments ? JSON.parse(rawArguments) : {};
   if (isCrmWriteTool(toolName)) {
     const normalizedArgs = normalizeCrmWriteToolArgs(toolName, ctx, args);
+    validateCrmWriteToolArgs(toolName, normalizedArgs);
     const operation = await createPendingCrmOperation({
       ctx,
       toolName,

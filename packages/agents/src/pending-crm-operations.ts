@@ -200,8 +200,25 @@ export async function createPendingCrmOperation({
       },
     },
   });
-  if (existing?.status === STATUS.PENDING || existing?.status === STATUS.EXECUTING) {
-    return existing as PendingOperationRecord;
+  let reusableExisting = existing;
+  const now = new Date();
+  if (existing?.status === STATUS.PENDING && existing.expiresAt <= now) {
+    await prisma.conversationPendingOperation.updateMany({
+      where: {
+        id: existing.id,
+        status: STATUS.PENDING,
+        expiresAt: { lte: now },
+      },
+      data: {
+        status: STATUS.EXPIRED,
+        errorCode: "CRM_PENDING_OPERATION_EXPIRED",
+        errorMessage: "The pending operation expired before confirmation.",
+      },
+    });
+    reusableExisting = await prisma.conversationPendingOperation.findUnique({ where: { id: existing.id } });
+  }
+  if (reusableExisting?.status === STATUS.PENDING || reusableExisting?.status === STATUS.EXECUTING) {
+    return reusableExisting as PendingOperationRecord;
   }
 
   const related = relatedEntity(toolName, argsJson);
@@ -214,7 +231,7 @@ export async function createPendingCrmOperation({
       toolName,
       argsJson: argsJson as Prisma.InputJsonValue,
       argsHash,
-      idempotencyKey: existing ? `${idempotencyKey}:${randomUUID()}` : idempotencyKey,
+      idempotencyKey: reusableExisting ? `${idempotencyKey}:${randomUUID()}` : idempotencyKey,
       relatedEntityType: related.type,
       relatedEntityId: related.id,
       riskLabel: riskLabel(toolName),

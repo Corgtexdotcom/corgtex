@@ -91,6 +91,16 @@ export function normalizeCrmWriteToolArgs(toolName: string, ctx: CrmToolContext,
   return args;
 }
 
+function hasNonEmptyString(value: unknown) {
+  return typeof value === "string" && value.trim().length > 0;
+}
+
+export function validateCrmWriteToolArgs(toolName: string, args: Record<string, unknown>) {
+  if (toolName === "complete_relationship_activity" && !hasNonEmptyString(args.activityId)) {
+    throw new Error("A CRM activity ID is required to prepare a pending CRM activity completion.");
+  }
+}
+
 export const crmTools: ModelTool[] = [
   {
     type: "function",

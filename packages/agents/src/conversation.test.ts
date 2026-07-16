@@ -887,6 +887,95 @@ describe("processConversationTurn", () => {
     expect(result.assistantMessage).toContain("Stored args:");
   });
 
+  it("does not reuse expired pending operations when preparing the same CRM write again", async () => {
+    const actor = {
+      kind: "user" as const,
+      user: {
+        id: "user-1",
+        email: "user@example.com",
+        displayName: "User",
+      },
+    };
+    const userMessage = "Create a CRM follow-up for Acme.";
+    const toolCall = {
+      id: "call-1",
+      function: {
+        name: "record_relationship_activity",
+        arguments: JSON.stringify({ title: "Follow up", type: "TASK", accountId: "account-1" }),
+      },
+    };
+    chatMock
+      .mockResolvedValueOnce({ content: "", tool_calls: [toolCall] })
+      .mockResolvedValueOnce({ content: "Pending operation is ready." })
+      .mockResolvedValueOnce({ content: "", tool_calls: [toolCall] })
+      .mockResolvedValueOnce({ content: "Fresh pending operation is ready." });
+
+    const { processConversationTurn } = await import("./conversation");
+    await processConversationTurn({
+      workspaceId: "ws-1",
+      sessionId: "session-1",
+      userId: "user-1",
+      agentKey: "assistant",
+      userMessage,
+      actor,
+    });
+    conversationPendingOperationStore[0].expiresAt = new Date(Date.now() - 60_000);
+
+    const result = await processConversationTurn({
+      workspaceId: "ws-1",
+      sessionId: "session-1",
+      userId: "user-1",
+      agentKey: "assistant",
+      userMessage,
+      actor,
+    });
+
+    expect(conversationPendingOperationStore).toHaveLength(2);
+    expect(conversationPendingOperationStore[0].status).toBe("EXPIRED");
+    expect(conversationPendingOperationStore[1].status).toBe("PENDING");
+    expect(conversationPendingOperationStore[1].idempotencyKey).not.toBe(conversationPendingOperationStore[0].idempotencyKey);
+    expect(result.assistantMessage).toContain(`Pending operation ID: ${pendingOperationId(2)}`);
+  });
+
+  it("rejects unbound CRM activity completions before storing a pending operation", async () => {
+    const actor = {
+      kind: "user" as const,
+      user: {
+        id: "user-1",
+        email: "user@example.com",
+        displayName: "User",
+      },
+    };
+    chatMock
+      .mockResolvedValueOnce({
+        content: "",
+        tool_calls: [{
+          id: "call-1",
+          function: {
+            name: "complete_relationship_activity",
+            arguments: JSON.stringify({ completedAt: "2026-06-20T11:00:00.000Z" }),
+          },
+        }],
+      })
+      .mockResolvedValueOnce({ content: "Please select a CRM activity before preparing completion." });
+
+    const { processConversationTurn } = await import("./conversation");
+    const result = await processConversationTurn({
+      workspaceId: "ws-1",
+      sessionId: "session-1",
+      userId: "user-1",
+      agentKey: "assistant",
+      userMessage: "Complete the CRM follow-up.",
+      actor,
+    });
+
+    const toolMessage = chatMock.mock.calls[1]?.[0]?.messages.find((message: any) => message.role === "tool");
+    expect(toolMessage.content).toContain("A CRM activity ID is required");
+    expect(conversationPendingOperationCreateMock).not.toHaveBeenCalled();
+    expect(completeActivityMock).not.toHaveBeenCalled();
+    expect(result.assistantMessage).toBe("Please select a CRM activity before preparing completion.");
+  });
+
   it("appends stored args when the model mentions only the pending operation ID", async () => {
     const actor = {
       kind: "user" as const,
