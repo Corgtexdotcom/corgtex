@@ -2,11 +2,16 @@ import {
   projectBudgetRunwayWeeks,
   projectRemainingCents,
   projectUsedRatio,
+  type PracticeContributionEntryWithContext,
   type PracticeAttentionItem,
   type PracticeFinanceSummary,
 } from "@corgtex/domain";
 import type { PracticeProject, PracticeProjectStatus } from "@prisma/client";
-import { updatePracticeProjectAction } from "./actions";
+import {
+  createPracticeContributionEntryAction,
+  markPracticeContributionEntryPaidAction,
+  updatePracticeProjectAction,
+} from "./actions";
 
 function usd(cents: number): string {
   const sign = cents < 0 ? "-" : "";
@@ -25,6 +30,10 @@ function weeksLabel(weeks: number | null): string {
   return weeks == null ? "No risk" : `${weeks.toFixed(1)}w`;
 }
 
+function formatDate(value: Date): string {
+  return new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric", year: "numeric" }).format(new Date(value));
+}
+
 function statusLabel(status: PracticeProjectStatus): string {
   return status.toLowerCase().replace("_", " ");
 }
@@ -35,6 +44,15 @@ function centsInput(cents: number): string {
 
 function bpsInput(bps: number | null): string {
   return bps == null ? "" : (bps / 100).toFixed(1);
+}
+
+function entryKindLabel(entry: PracticeContributionEntryWithContext): string {
+  return entry.type === "TIME" ? "Time" : "Expense";
+}
+
+function paymentLabel(entry: PracticeContributionEntryWithContext): string {
+  if (entry.paymentChoice === "SLICING_PIE") return `Slicing Pie (${entry.sliceMultiplier}x)`;
+  return entry.cashStatus === "PAID" ? "Cash paid" : "Cash requested";
 }
 
 const metricStyle: React.CSSProperties = {
@@ -140,18 +158,92 @@ function ProjectEdit({ workspaceId, project }: { workspaceId: string; project: P
   );
 }
 
-export function PracticeFinanceDashboard({
+function ProjectSelect({ projects }: { projects: PracticeProject[] }) {
+  return (
+    <select name="projectId" required defaultValue={projects[0]?.id ?? ""}>
+      {projects.map((project) => (
+        <option key={project.id} value={project.id}>{project.code} - {project.name}</option>
+      ))}
+    </select>
+  );
+}
+
+function ContributionForms({
   workspaceId,
-  canManageProjects,
-  summary,
-  attention,
   projects,
 }: {
   workspaceId: string;
+  projects: PracticeProject[];
+}) {
+  const disabled = projects.length === 0;
+  return (
+    <div className="nr-item" style={{ padding: 0 }}>
+      <div style={{ alignItems: "center", borderBottom: "1px solid var(--line)", display: "flex", gap: 12, justifyContent: "space-between", padding: "12px 16px" }}>
+        <strong>Contributions</strong>
+        <a className="link-button small" href={`/workspaces/${workspaceId}/finance/slicing-pie`}>Slicing Pie</a>
+      </div>
+      <div style={{ display: "grid", gap: 16, gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))", padding: 16 }}>
+        <form action={createPracticeContributionEntryAction} className="stack nr-form-section" style={{ marginTop: 0 }}>
+          <input type="hidden" name="workspaceId" value={workspaceId} />
+          <input type="hidden" name="type" value="TIME" />
+          <strong>Time</strong>
+          <label>Project<ProjectSelect projects={projects} /></label>
+          <div style={formGridStyle}>
+            <label>Date<input name="occurredAt" type="date" required /></label>
+            <label>Hours<input name="hours" type="number" min="0.1" step="0.1" required /></label>
+            <label>Rate<input name="rate" type="number" min="0.01" step="0.01" required /></label>
+          </div>
+          <label>Description<input name="description" required /></label>
+          <label>Payment
+            <select name="paymentChoice" defaultValue="SLICING_PIE">
+              <option value="SLICING_PIE">Slicing Pie</option>
+              <option value="CASH">Cash</option>
+            </select>
+          </label>
+          <button type="submit" disabled={disabled} style={{ width: "fit-content" }}>Record time</button>
+        </form>
+        <form action={createPracticeContributionEntryAction} className="stack nr-form-section" style={{ marginTop: 0 }}>
+          <input type="hidden" name="workspaceId" value={workspaceId} />
+          <input type="hidden" name="type" value="EXPENSE" />
+          <strong>Expense</strong>
+          <label>Project<ProjectSelect projects={projects} /></label>
+          <div style={formGridStyle}>
+            <label>Date<input name="occurredAt" type="date" required /></label>
+            <label>Amount<input name="amount" type="number" min="0.01" step="0.01" required /></label>
+            <label>Currency<input name="currency" defaultValue="USD" required /></label>
+          </div>
+          <label>Description<input name="description" required /></label>
+          <label>Receipt URL<input name="receiptUrl" type="url" /></label>
+          <label>Payment
+            <select name="paymentChoice" defaultValue="SLICING_PIE">
+              <option value="SLICING_PIE">Slicing Pie</option>
+              <option value="CASH">Cash</option>
+            </select>
+          </label>
+          <button type="submit" disabled={disabled} style={{ width: "fit-content" }}>Record expense</button>
+        </form>
+      </div>
+      {disabled && <p className="nr-item-meta" style={{ margin: 0, padding: "0 16px 16px" }}>Create a project before recording contributions.</p>}
+    </div>
+  );
+}
+
+export function PracticeFinanceDashboard({
+  workspaceId,
+  canManageProjects,
+  slicingPieEnabled,
+  summary,
+  attention,
+  projects,
+  contributionEntries,
+}: {
+  workspaceId: string;
   canManageProjects: boolean;
+  slicingPieEnabled: boolean;
   summary: PracticeFinanceSummary;
   attention: PracticeAttentionItem[];
   projects: PracticeProject[];
+  contributionEntries: PracticeContributionEntryWithContext[];
 }) {
   return (
     <section className="stack" style={{ gap: 20 }} data-finance-surface="practice-dashboard">
@@ -188,6 +280,66 @@ export function PracticeFinanceDashboard({
           <div style={{ fontSize: 26, marginTop: 6 }}>{marginPct(summary.marginBps)}</div>
         </div>
       </div>
+
+      {slicingPieEnabled && (
+        <>
+          <ContributionForms workspaceId={workspaceId} projects={projects} />
+          <div className="nr-item" style={{ padding: 0 }}>
+            <div style={{ padding: "12px 16px", borderBottom: "1px solid var(--line)" }}>
+              <strong>Recent contributions</strong>
+            </div>
+            {contributionEntries.length === 0 ? (
+              <p className="nr-item-meta" style={{ padding: 16, margin: 0 }}>No time or expense contributions have been recorded.</p>
+            ) : (
+              <div className="nr-table-wrap">
+                <table className="nr-table">
+                  <thead>
+                    <tr>
+                      <th>Date</th>
+                      <th>Contributor</th>
+                      <th>Project</th>
+                      <th>Type</th>
+                      <th style={{ textAlign: "right" }}>Value</th>
+                      <th>Payment</th>
+                      <th style={{ textAlign: "right" }}>Slices</th>
+                      {canManageProjects && <th>Actions</th>}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {contributionEntries.map((entry) => (
+                      <tr key={entry.id}>
+                        <td>{formatDate(entry.occurredAt)}</td>
+                        <td>{entry.contributor.displayName || entry.contributor.email}</td>
+                        <td>
+                          <div>{entry.project.name}</div>
+                          <div className="nr-item-meta" style={{ fontSize: 11 }}>{entry.project.code}</div>
+                        </td>
+                        <td>{entryKindLabel(entry)}</td>
+                        <td style={{ textAlign: "right" }}>{usd(entry.amountCents)}</td>
+                        <td>{paymentLabel(entry)}</td>
+                        <td style={{ textAlign: "right" }}>{entry.slices.toLocaleString("en-US")}</td>
+                        {canManageProjects && (
+                          <td>
+                            {entry.paymentChoice === "CASH" && entry.cashStatus === "REQUESTED" ? (
+                              <form action={markPracticeContributionEntryPaidAction}>
+                                <input type="hidden" name="workspaceId" value={workspaceId} />
+                                <input type="hidden" name="entryId" value={entry.id} />
+                                <button type="submit" className="small">Mark paid</button>
+                              </form>
+                            ) : (
+                              <span className="nr-item-meta">-</span>
+                            )}
+                          </td>
+                        )}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        </>
+      )}
 
       <div className="nr-item" style={{ padding: 0 }}>
         <div style={{ padding: "12px 16px", borderBottom: "1px solid var(--line)" }}>

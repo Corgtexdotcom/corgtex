@@ -30,7 +30,6 @@ type ArchiveEntityType =
   | "CrmAccount"
   | "CrmContact"
   | "CrmDeal"
-  | "Cycle"
   | "Document"
   | "ExpertiseTag"
   | "ExternalDataSource"
@@ -139,12 +138,6 @@ const ENTITY_CONFIGS: Record<ArchiveEntityType, ArchiveConfig> = {
   CrmDeal: {
     entityType: "CrmDeal",
     delegate: "crmDeal",
-    findWhere: directWorkspace,
-    label: titleOrName,
-  },
-  Cycle: {
-    entityType: "Cycle",
-    delegate: "cycle",
     findWhere: directWorkspace,
     label: titleOrName,
   },

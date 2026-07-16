@@ -50,7 +50,6 @@ const coreRouteCatalog = [
 
 const optionalRouteCatalog = [
   ["leads", "/leads"],
-  ["cycles", "/cycles"],
   ["agents", "/agents"],
   ["governance", "/governance"],
   ["operator", "/operator"],

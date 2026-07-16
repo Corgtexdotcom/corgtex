@@ -12,7 +12,6 @@ import {
   ingestSource,
   listCircles,
   listContacts,
-  listCycles,
   listGoals,
   listHumanMembers,
   listProposals,
@@ -54,12 +53,10 @@ import {
   bulkInviteAction,
   createActionAction,
   createActivityAction,
-  createAllocationAction,
   createCircleAction,
   createCommunicationSuggestionAction,
   createContactAction,
   createCrmAccountAction,
-  createCycleAction,
   createDealAction,
   createMeetingSeriesAction,
   createMemberAction,
@@ -213,7 +210,6 @@ export default async function WorkspaceAddPage({
     || kind === "tension"
     || kind === "proposal"
     || kind === "goal"
-    || kind === "allocation"
     || kind === "role_assignment"
     || kind === "deal"
     || kind === "crm_activity"
@@ -224,7 +220,6 @@ export default async function WorkspaceAddPage({
   const needsContacts = kind === "deal" || kind === "crm_activity" || kind === "communication_suggestion";
   const needsAccounts = (kind === "crm_activity" || kind === "communication_suggestion") && !contextAccountId;
   const needsDeals = kind === "crm_activity" || kind === "communication_suggestion";
-  const needsCycles = kind === "allocation";
   const needsApprovedProspects = kind === "prospect_instance";
 
   const [
@@ -235,7 +230,6 @@ export default async function WorkspaceAddPage({
     contactsResult,
     accountsResult,
     dealsResult,
-    cyclesResult,
     approvedQualificationsResult,
     roles,
   ] = await Promise.all([
@@ -246,7 +240,6 @@ export default async function WorkspaceAddPage({
     needsContacts ? listContacts(actor, workspaceId, { take: 100, accountId: contextAccountId ?? undefined }) : Promise.resolve({ items: [] }),
     needsAccounts ? listCrmAccounts(actor, workspaceId, { take: 100 }) : Promise.resolve({ items: [] }),
     needsDeals ? listDeals(actor, workspaceId, { take: 100, accountId: contextAccountId ?? undefined }) : Promise.resolve({ items: [] }),
-    needsCycles ? listCycles(workspaceId, { take: 100 }) : Promise.resolve({ items: [] }),
     needsApprovedProspects ? listQualifications(actor, workspaceId, { status: "APPROVED" }) : Promise.resolve({ items: [] }),
     needsRoles ? listRoles(workspaceId) : Promise.resolve([]),
   ]);
@@ -267,13 +260,10 @@ export default async function WorkspaceAddPage({
   const contacts = contactsResult.items;
   const accounts = accountsResult.items;
   const deals = dealsResult.items;
-  const cycles = cyclesResult.items;
-  const allocatableCycles = cycles.filter((cycle) => cycle.status === "OPEN_ALLOCATIONS");
   const approvedQualifications = approvedQualificationsResult.items;
   const roleAssignmentRoles = contextCircleId
     ? roles.filter((role) => role.circle?.id === contextCircleId)
     : roles;
-  const currentUserId = actor.kind === "user" ? actor.user.id : "";
   const title = kind === "meeting_manual_recording"
     ? "Record meeting now"
     : kind === "meeting_audio_upload"
@@ -344,18 +334,6 @@ export default async function WorkspaceAddPage({
   async function assignRoleAndReturn(formData: FormData) {
     "use server";
     await assignRoleAction(formData);
-    redirect(returnTo);
-  }
-
-  async function createCycleAndReturn(formData: FormData) {
-    "use server";
-    await createCycleAction(formData);
-    redirect(returnTo);
-  }
-
-  async function createAllocationAndReturn(formData: FormData) {
-    "use server";
-    await createAllocationAction(formData);
     redirect(returnTo);
   }
 
@@ -797,37 +775,6 @@ export default async function WorkspaceAddPage({
               <button type="submit" disabled={roleAssignmentRoles.length === 0 || members.length === 0}>Add member</button>
               {cancelLink(returnTo)}
             </div>
-          </form>
-        )}
-
-        {kind === "cycle" && (
-          <form action={createCycleAndReturn} className="stack nr-form-section">
-            {hiddenWorkspace(workspaceId)}
-            <label>Name<input name="name" required /></label>
-            <label>Cadence<input name="cadence" defaultValue="monthly" required /></label>
-            <div className="actions-inline">
-              <label style={{ flex: 1 }}>Start date<input name="startDate" type="date" required /></label>
-              <label style={{ flex: 1 }}>End date<input name="endDate" type="date" required /></label>
-            </div>
-            <label>Points per member<input name="pointsPerUser" type="number" min={1} defaultValue={100} required /></label>
-            <div className="actions-inline"><button type="submit">Create cycle</button>{cancelLink(returnTo)}</div>
-          </form>
-        )}
-
-        {kind === "allocation" && (
-          <form action={createAllocationAndReturn} className="stack nr-form-section">
-            {hiddenWorkspace(workspaceId)}
-            <label>Cycle<select name="cycleId" required defaultValue={allocatableCycles[0]?.id ?? ""}>{allocatableCycles.map((cycle) => <option key={cycle.id} value={cycle.id}>{cycle.name}</option>)}</select></label>
-            <div className="actions-inline">
-              <label style={{ flex: 1 }}>From<select name="fromUserId" defaultValue={currentUserId}>{members.map((member) => <option key={member.id} value={member.userId}>{member.user.displayName ?? member.user.email}</option>)}</select></label>
-              <label style={{ flex: 1 }}>To<select name="toUserId" required defaultValue={members[0]?.userId ?? ""}>{members.map((member) => <option key={member.id} value={member.userId}>{member.user.displayName ?? member.user.email}</option>)}</select></label>
-            </div>
-            <div className="actions-inline">
-              <input name="points" type="number" min={1} placeholder="Points" required />
-              <input name="note" placeholder="Note" />
-            </div>
-            {allocatableCycles.length === 0 && <p className="form-message form-message-error">No cycles are currently open for allocations.</p>}
-            <div className="actions-inline"><button type="submit" disabled={allocatableCycles.length === 0}>Create allocation</button>{cancelLink(returnTo)}</div>
           </form>
         )}
 

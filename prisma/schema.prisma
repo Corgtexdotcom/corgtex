@@ -121,14 +121,6 @@ enum ApprovalDecisionChoice {
   BLOCK
 }
 
-enum CycleStatus {
-  PLANNED
-  OPEN_UPDATES
-  OPEN_ALLOCATIONS
-  REVIEW
-  FINALIZED
-}
-
 enum EventStatus {
   PENDING
   DISPATCHED
@@ -578,7 +570,6 @@ model Workspace {
   proposals                      Proposal[]
   approvalFlows                  ApprovalFlow[]
   approvalPolicy                 ApprovalPolicy[]
-  cycles                         Cycle[]
   meetings                       Meeting[]
   meetingSeries                  MeetingSeries[]
   meetingAudioAssets             MeetingAudioAsset[]
@@ -641,6 +632,7 @@ model Workspace {
   moduleGrants                   WorkspaceModuleGrant[]
   moduleAccessRequests           WorkspaceModuleAccessRequest[]
   practiceProjects               PracticeProject[]
+  practiceContributionEntries    PracticeContributionEntry[]
   meetingRecorderConfig          WorkspaceMeetingRecorderConfig?
   recorderCalendarSources        WorkspaceRecorderCalendarSource[]
   meetingRecordings              MeetingRecording[]
@@ -975,9 +967,8 @@ model User {
   authoredActions               Action[]                              @relation("ActionAuthor")
   authoredTensions              Tension[]                             @relation("TensionAuthor")
   authoredProposals             Proposal[]                            @relation("ProposalAuthor")
-  cycleUpdates                  CycleUpdate[]
-  allocationsFrom               Allocation[]                          @relation("AllocFrom")
-  allocationsTo                 Allocation[]                          @relation("AllocTo")
+  practiceContributionEntries   PracticeContributionEntry[]            @relation("PracticeContributionContributor")
+  paidPracticeContributionEntries PracticeContributionEntry[]          @relation("PracticeContributionPaidBy")
   objections                    Objection[]
   tensionUpvotes                TensionUpvote[]
   agentCreds                    AgentCredential[]                     @relation("AgentCredentialCreator")
@@ -1964,67 +1955,26 @@ model Objection {
   @@index([flowId])
 }
 
-model Cycle {
-  id               String      @id @default(uuid())
-  workspaceId      String
-  name             String
-  cadence          String
-  status           CycleStatus @default(PLANNED)
-  startDate        DateTime
-  endDate          DateTime
-  pointsPerUser    Int         @default(100)
-  archivedAt       DateTime?
-  archivedByUserId String?
-  archiveReason    String?
-  createdAt        DateTime    @default(now())
-  updatedAt        DateTime    @updatedAt
-
-  workspace   Workspace     @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-  updates     CycleUpdate[]
-  allocations Allocation[]
-
-  @@index([workspaceId, archivedAt])
-}
-
-model CycleUpdate {
-  id                    String   @id @default(uuid())
-  cycleId               String
-  userId                String
-  updateMd              String
-  cashPaidCents         Int?
-  cashPaidCurrency      String?
-  valueEstimateCents    Int?
-  valueEstimateCurrency String?
-  valueConfidence       String?
-  createdAt             DateTime @default(now())
-  updatedAt             DateTime @updatedAt
-
-  cycle Cycle @relation(fields: [cycleId], references: [id], onDelete: Cascade)
-  user  User  @relation(fields: [userId], references: [id], onDelete: Cascade)
-
-  @@unique([cycleId, userId])
-}
-
-model Allocation {
-  id         String   @id @default(uuid())
-  cycleId    String
-  fromUserId String
-  toUserId   String
-  points     Int
-  note       String?
-  createdAt  DateTime @default(now())
-
-  cycle    Cycle @relation(fields: [cycleId], references: [id], onDelete: Cascade)
-  fromUser User  @relation("AllocFrom", fields: [fromUserId], references: [id], onDelete: Cascade)
-  toUser   User  @relation("AllocTo", fields: [toUserId], references: [id], onDelete: Cascade)
-
-  @@index([cycleId])
-}
-
 enum PracticeProjectStatus {
   ACTIVE
   ON_HOLD
   CLOSED
+}
+
+enum PracticeContributionType {
+  TIME
+  EXPENSE
+}
+
+enum PracticeContributionPaymentChoice {
+  CASH
+  SLICING_PIE
+}
+
+enum PracticeContributionCashStatus {
+  NOT_APPLICABLE
+  REQUESTED
+  PAID
 }
 
 /// Native first-party practice-finance project, the cutover target for the
@@ -2054,11 +2004,46 @@ model PracticeProject {
   workspace  Workspace   @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   crmAccount CrmAccount? @relation(fields: [crmAccountId], references: [id], onDelete: SetNull)
   crmDeal    CrmDeal?    @relation(fields: [crmDealId], references: [id], onDelete: SetNull)
+  contributionEntries PracticeContributionEntry[]
 
   @@unique([workspaceId, code])
   @@unique([workspaceId, sourceSatelliteId])
   @@index([workspaceId, status])
   @@index([workspaceId, crmAccountId])
+}
+
+model PracticeContributionEntry {
+  id                  String                            @id @default(uuid())
+  workspaceId         String
+  projectId           String
+  contributorUserId   String
+  type                PracticeContributionType
+  paymentChoice       PracticeContributionPaymentChoice
+  cashStatus          PracticeContributionCashStatus    @default(NOT_APPLICABLE)
+  description         String                            @db.Text
+  occurredAt          DateTime
+  hoursTenths         Int?
+  rateCents           Int?
+  amountCents         Int
+  currency            String                            @default("USD")
+  receiptUrl          String?                           @db.Text
+  sliceMultiplier     Int
+  slices              Int
+  paidAt              DateTime?
+  paidByUserId        String?
+  createdAt           DateTime                          @default(now())
+  updatedAt           DateTime                          @updatedAt
+
+  workspace         Workspace       @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  project           PracticeProject @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  contributor       User            @relation("PracticeContributionContributor", fields: [contributorUserId], references: [id], onDelete: Cascade)
+  paidBy            User?           @relation("PracticeContributionPaidBy", fields: [paidByUserId], references: [id], onDelete: SetNull)
+
+  @@index([workspaceId, occurredAt])
+  @@index([workspaceId, contributorUserId])
+  @@index([projectId, occurredAt])
+  @@index([workspaceId, paymentChoice])
+  @@index([workspaceId, cashStatus])
 }
 
 enum MeetingStatus {

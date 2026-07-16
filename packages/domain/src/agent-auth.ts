@@ -82,10 +82,6 @@ export const SCOPE_REGISTRY = {
   // ---- brain (writes) ----
   "brain:write":         { label: "Write to the Brain",         group: "knowledge",  default: true,  delegatedDefault: true,  description: "Create and edit knowledge articles, post discussion comments, resolve threads." },
 
-  // ---- cycles / sprints ----
-  "cycles:read":         { label: "Read cycles",                group: "operations", default: true,  delegatedDefault: true,  description: "List cycles, allocations, and cycle updates." },
-  "cycles:write":        { label: "Create & edit cycles",       group: "operations", default: true,  delegatedDefault: true,  description: "Create and update cycles, allocations, and cycle updates." },
-
   // ---- circles / org structure ----
   "circles:read":        { label: "Read circles",               group: "people",     default: true,  delegatedDefault: true,  description: "List circles and their members for org-structure context." },
 

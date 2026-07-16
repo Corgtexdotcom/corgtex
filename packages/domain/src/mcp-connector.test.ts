@@ -234,7 +234,7 @@ describe("MCP connector registry", () => {
           clientId: "mcp_client_test",
           isActive: true,
           redirectUris: ["https://client.example/callback"],
-          scopes: ["workspace:read", "brain:read", "governance:read", "context-graph:read", "proposals:read", "actions:read", "tensions:read", "goals:read", "members:read", "meetings:read", "cycles:read", "circles:read", "tools:read", "conversations:write"],
+          scopes: ["workspace:read", "brain:read", "governance:read", "context-graph:read", "proposals:read", "actions:read", "tensions:read", "goals:read", "members:read", "meetings:read", "circles:read", "tools:read", "conversations:write"],
         }),
       },
       member: {
@@ -317,7 +317,7 @@ describe("MCP connector registry", () => {
           clientId: "mcp_client_test",
           isActive: true,
           redirectUris: ["https://client.example/callback"],
-          scopes: ["workspace:read", "brain:read", "governance:read", "context-graph:read", "proposals:read", "actions:read", "tensions:read", "goals:read", "members:read", "meetings:read", "cycles:read", "circles:read", "tools:read", "conversations:write"],
+          scopes: ["workspace:read", "brain:read", "governance:read", "context-graph:read", "proposals:read", "actions:read", "tensions:read", "goals:read", "members:read", "meetings:read", "circles:read", "tools:read", "conversations:write"],
         }),
       },
       member: {

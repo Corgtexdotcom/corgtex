@@ -342,6 +342,40 @@ const PRACTICE_PROJECTS = [
   },
 ];
 
+const PRACTICE_CONTRIBUTIONS = [
+  {
+    projectCode: "MEDTECH-EMEA",
+    memberKey: "tschmid",
+    type: "TIME",
+    paymentChoice: "SLICING_PIE",
+    description: "Program steering and EMEA rollout working sessions",
+    occurredAt: nDaysAgoAtNoonUtc(18),
+    hoursTenths: 125,
+    rateCents: 18500,
+  },
+  {
+    projectCode: "ESG-SUPPLIER",
+    memberKey: "vbroadhurst",
+    type: "EXPENSE",
+    paymentChoice: "SLICING_PIE",
+    description: "Supplier evidence review and verification travel",
+    occurredAt: nDaysAgoAtNoonUtc(12),
+    amountCents: 680000,
+    currency: "USD",
+  },
+  {
+    projectCode: "MEDTECH-EMEA",
+    memberKey: "jwolk",
+    type: "EXPENSE",
+    paymentChoice: "CASH",
+    description: "Finance review workshop expenses",
+    occurredAt: nDaysAgoAtNoonUtc(7),
+    amountCents: 240000,
+    currency: "USD",
+    paid: true,
+  },
+];
+
 const SHOWCASE_GOALS = [
   {
     title: "Ship Agent Governance v2",
@@ -2726,6 +2760,7 @@ async function main() {
   }
   
   const practiceProjectIds = PRACTICE_PROJECTS.map((project) => `${wsId}-practice-project-${slugify(project.code)}`);
+  const practiceProjectIdByCode = new Map(PRACTICE_PROJECTS.map((project, index) => [project.code, practiceProjectIds[index]]));
   await prisma.practiceProject.deleteMany({
     where: {
       workspaceId: wsId,
@@ -2758,6 +2793,51 @@ async function main() {
       create: { id: projectId, ...data },
     });
   }
+  const practiceContributionIds = PRACTICE_CONTRIBUTIONS.map((_, index) => `${wsId}-practice-contribution-${index + 1}`);
+  await prisma.practiceContributionEntry.deleteMany({
+    where: {
+      workspaceId: wsId,
+      id: {
+        startsWith: `${wsId}-practice-contribution-`,
+        notIn: practiceContributionIds,
+      },
+    },
+  });
+  for (const [index, contribution] of PRACTICE_CONTRIBUTIONS.entries()) {
+    const projectId = practiceProjectIdByCode.get(contribution.projectCode);
+    const contributor = memberMappings[contribution.memberKey];
+    if (!projectId || !contributor) continue;
+    const amountCents = contribution.type === "TIME"
+      ? Math.round((contribution.hoursTenths * contribution.rateCents) / 10)
+      : contribution.amountCents;
+    const sliceMultiplier = contribution.paymentChoice === "SLICING_PIE"
+      ? (contribution.type === "TIME" ? 2 : 4)
+      : 0;
+    const data = {
+      workspaceId: wsId,
+      projectId,
+      contributorUserId: contributor.userId,
+      type: contribution.type,
+      paymentChoice: contribution.paymentChoice,
+      cashStatus: contribution.paymentChoice === "CASH" ? (contribution.paid ? "PAID" : "REQUESTED") : "NOT_APPLICABLE",
+      description: contribution.description,
+      occurredAt: contribution.occurredAt,
+      hoursTenths: contribution.type === "TIME" ? contribution.hoursTenths : null,
+      rateCents: contribution.type === "TIME" ? contribution.rateCents : null,
+      amountCents,
+      currency: contribution.currency ?? "USD",
+      receiptUrl: null,
+      sliceMultiplier,
+      slices: amountCents * sliceMultiplier,
+      paidAt: contribution.paymentChoice === "CASH" && contribution.paid ? nDaysAgoAtNoonUtc(4) : null,
+      paidByUserId: contribution.paymentChoice === "CASH" && contribution.paid ? memberMappings["jwolk"]?.userId ?? null : null,
+    };
+    await prisma.practiceContributionEntry.upsert({
+      where: { id: practiceContributionIds[index] },
+      update: data,
+      create: { id: practiceContributionIds[index], ...data },
+    });
+  }
 
   // 13. Policy Corpus
   const policies = [
@@ -2788,6 +2868,7 @@ async function main() {
   // 14. Safe showcase data for current customer-visible feature surfaces.
   await enableWorkspaceFeature(wsId, "AI_WORKSPACES");
   await enableWorkspaceFeature(wsId, "FINANCE");
+  await enableWorkspaceFeature(wsId, "SLICING_PIE");
   await enableWorkspaceFeature(wsId, "PRACTICE_PROJECTS");
   await enableWorkspaceFeature(wsId, "RELATIONSHIPS");
   await seedShowcaseData({ wsId, memberMappings });
@@ -2812,6 +2893,7 @@ async function main() {
     crmContacts: await prisma.crmContact.count({ where: { workspaceId: wsId, archivedAt: null } }),
     crmDeals: await prisma.crmDeal.count({ where: { workspaceId: wsId, archivedAt: null } }),
     practiceProjects: await prisma.practiceProject.count({ where: { workspaceId: wsId } }),
+    practiceContributions: await prisma.practiceContributionEntry.count({ where: { workspaceId: wsId } }),
   };
 
   console.log("Demo workspace refreshed:");

@@ -2,7 +2,6 @@ export * from "./settings/actions";
 export * from "./circles/actions";
 export * from "./actions/actions";
 export * from "./tensions/actions";
-export * from "./cycles/actions";
 export * from "./meetings/actions";
 export {
   archiveProposalAction,

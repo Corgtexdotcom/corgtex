@@ -150,7 +150,6 @@ async function main() {
     crmContacts,
     crmDeals,
     goals,
-    cycles,
     circles,
     roles,
     webhookEndpoints,
@@ -198,9 +197,6 @@ async function main() {
     }),
     prisma.goal.findMany({
       where: { workspaceId: workspace.id, archivedAt: null, title: { startsWith: TEST_PREFIX } },
-    }),
-    prisma.cycle.findMany({
-      where: { workspaceId: workspace.id, archivedAt: null, name: { startsWith: TEST_PREFIX } },
     }),
     prisma.circle.findMany({
       where: { workspaceId: workspace.id, archivedAt: null, name: { startsWith: TEST_PREFIX } },
@@ -254,7 +250,6 @@ async function main() {
     counts.CrmContact = await archiveBatch(tx, { ...base, entityType: "CrmContact", delegate: "crmContact", records: crmContacts });
     counts.CrmDeal = await archiveBatch(tx, { ...base, entityType: "CrmDeal", delegate: "crmDeal", records: crmDeals });
     counts.Goal = await archiveBatch(tx, { ...base, entityType: "Goal", delegate: "goal", records: goals });
-    counts.Cycle = await archiveBatch(tx, { ...base, entityType: "Cycle", delegate: "cycle", records: cycles });
     counts.Circle = await archiveBatch(tx, { ...base, entityType: "Circle", delegate: "circle", records: circles });
     counts.Role = await archiveBatch(tx, { ...base, entityType: "Role", delegate: "role", records: roles });
     counts.WebhookEndpoint = await archiveBatch(tx, {

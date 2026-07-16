@@ -40,7 +40,7 @@ const ARTICLES = [
   { title: "Governance System", type: "PRODUCT", authority: "AUTHORITATIVE",
     body: `# Governance System\n\nBuilt on Consent-based decision-making. Circles represent domains, Roles have accountabilities, and Proposals must pass through an objection checking phase (integrated or withdrawn) before execution.` },
   { title: "Practice Ledger", type: "PRODUCT", authority: "AUTHORITATIVE",
-    body: `# Practice Ledger\n\nPractice Ledger is the native Finance workspace surface. It tracks client projects, revenue, expenses, invoices, and budget health through \`PracticeProject\`, \`PracticeExpense\`, and \`PracticeInvoice\` records.` },
+    body: `# Practice Ledger\n\nPractice Ledger is the native Finance workspace surface. It tracks client projects, budget health, time contributions, expense contributions, cash payables, and optional internal Slicing Pie ownership analysis through \`PracticeProject\` and \`PracticeContributionEntry\` records.` },
   { title: "Organization Brain", type: "PRODUCT", authority: "AUTHORITATIVE",
     body: `# Organization Brain\n\nDynamic AI knowledge base with Versioning. Submits backlinks and automatically groups organizational knowledge based on semantic relevance via AI bots.` },
   { title: "O2 Integration — Organic Organization", type: "PRODUCT", authority: "REFERENCE",

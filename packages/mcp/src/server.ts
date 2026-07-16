@@ -73,12 +73,6 @@ import {
   listDeliberationEntries,
   postDeliberationEntry,
   resolveDeliberationEntry,
-  listCycles,
-  createCycle,
-  updateCycle,
-  getCycle,
-  listCycleUpdates,
-  listAllocations,
   listCircles,
   getCurrentConstitution,
   listPolicyCorpus,
@@ -382,7 +376,6 @@ const GOAL_CADENCE = ["WEEKLY", "MONTHLY", "QUARTERLY", "ANNUAL", "FIVE_YEAR", "
 const GOAL_STATUS = ["DRAFT", "ACTIVE", "ON_TRACK", "AT_RISK", "BEHIND", "COMPLETED", "ABANDONED"] as const;
 const GOAL_LEVEL = ["COMPANY", "CIRCLE", "PERSONAL"] as const;
 const MEMBER_ROLE = ["CONTRIBUTOR", "FACILITATOR", "FINANCE_STEWARD", "ADMIN"] as const;
-const CYCLE_STATUS = ["PLANNED", "OPEN_UPDATES", "OPEN_ALLOCATIONS", "REVIEW", "FINALIZED"] as const;
 const BRAIN_ARTICLE_TYPE = [
   "PRODUCT", "ARCHITECTURE", "PROCESS", "RUNBOOK", "DECISION",
   "TEAM", "PERSON", "CUSTOMER", "INCIDENT", "PROJECT",
@@ -3708,134 +3701,6 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
       requireScope(sessionCtx, "brain:write");
       const updated = await resolveDiscussionThread(actor, { workspaceId, threadId });
       return jsonResult({ id: updated.id, status: updated.status });
-    },
-  );
-
-  // ===========================================================================
-  // CYCLES
-  // ===========================================================================
-
-  tool(
-    "list_cycles",
-    "List all cycles (sprints / planning periods) in the workspace.",
-    {
-      take: z.number().optional(),
-      skip: z.number().optional(),
-    },
-    async ({ take, skip }: { take?: number; skip?: number }) => {
-      requireScope(sessionCtx, "cycles:read");
-      const result = await listCycles(workspaceId, { take, skip });
-      return jsonResult(result);
-    },
-  );
-
-  tool(
-    "get_cycle",
-    "Get a cycle with its updates and allocations.",
-    {
-      cycleId: z.string(),
-    },
-    async ({ cycleId }: { cycleId: string }) => {
-      requireScope(sessionCtx, "cycles:read");
-      const cycle = await getCycle(workspaceId, cycleId);
-      return jsonResult({
-        ...cycle,
-        webUrl: webUrl(workspaceId, `/cycles/${cycle.id}`),
-      });
-    },
-  );
-
-  tool(
-    "list_cycle_updates",
-    "List the updates posted by members during a cycle.",
-    {
-      cycleId: z.string(),
-    },
-    async ({ cycleId }: { cycleId: string }) => {
-      requireScope(sessionCtx, "cycles:read");
-      const updates = await listCycleUpdates(workspaceId, cycleId);
-      return jsonResult(updates);
-    },
-  );
-
-  tool(
-    "list_allocations",
-    "List point allocations made by members within a cycle.",
-    {
-      cycleId: z.string(),
-    },
-    async ({ cycleId }: { cycleId: string }) => {
-      requireScope(sessionCtx, "cycles:read");
-      const allocations = await listAllocations(workspaceId, cycleId);
-      return jsonResult(allocations);
-    },
-  );
-
-  tool(
-    "create_cycle",
-    "Create a new cycle. Facilitator/Admin only.",
-    {
-      name: z.string(),
-      cadence: z.string().describe("e.g. 'monthly', 'quarterly'"),
-      startDate: z.string().describe("ISO 8601 date"),
-      endDate: z.string().describe("ISO 8601 date"),
-      pointsPerUser: z.number().describe("Allocation budget per member (positive integer)"),
-    },
-    async (params: { name: string; cadence: string; startDate: string; endDate: string; pointsPerUser: number }) => {
-      requireScope(sessionCtx, "cycles:write");
-      const cycle = await createCycle(actor, {
-        workspaceId,
-        name: params.name,
-        cadence: params.cadence,
-        startDate: new Date(params.startDate),
-        endDate: new Date(params.endDate),
-        pointsPerUser: params.pointsPerUser,
-      });
-      return jsonResult({
-        id: cycle.id,
-        status: cycle.status,
-        webUrl: webUrl(workspaceId, `/cycles/${cycle.id}`),
-      });
-    },
-  );
-
-  tool(
-    "update_cycle",
-    "Update a cycle's metadata or status. Facilitator/Admin only.",
-    {
-      cycleId: z.string(),
-      name: z.string().optional(),
-      cadence: z.string().optional(),
-      status: z.enum(CYCLE_STATUS).optional(),
-      startDate: z.string().optional(),
-      endDate: z.string().optional(),
-      pointsPerUser: z.number().optional(),
-    },
-    async (params: {
-      cycleId: string;
-      name?: string;
-      cadence?: string;
-      status?: typeof CYCLE_STATUS[number];
-      startDate?: string;
-      endDate?: string;
-      pointsPerUser?: number;
-    }) => {
-      requireScope(sessionCtx, "cycles:write");
-      const updated = await updateCycle(actor, {
-        workspaceId,
-        cycleId: params.cycleId,
-        name: params.name,
-        cadence: params.cadence,
-        status: params.status,
-        startDate: params.startDate ? new Date(params.startDate) : undefined,
-        endDate: params.endDate ? new Date(params.endDate) : undefined,
-        pointsPerUser: params.pointsPerUser,
-      });
-      return jsonResult({
-        id: updated.id,
-        status: updated.status,
-        webUrl: webUrl(workspaceId, `/cycles/${updated.id}`),
-      });
     },
   );
 

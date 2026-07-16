@@ -43,7 +43,6 @@ export type WorkspaceNavIconName =
   | "agreements"
   | "proposals"
   | "circles"
-  | "cycles"
   | "finance"
   | "agents"
   | "governance"
