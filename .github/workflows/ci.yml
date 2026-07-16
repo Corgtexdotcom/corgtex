@@ -294,6 +294,8 @@ jobs:
       - check
       - db-sync
       - build
+    outputs:
+      smoke_proof: ${{ steps.smoke-proof.outputs.available }}
     steps:
       - name: Non-production smoke gate
         if: github.ref != 'refs/heads/main'
@@ -396,12 +398,17 @@ jobs:
         env:
           DATABASE_URL: ${{ secrets.PRODUCTION_DATABASE_URL }}
 
+      - name: Mark production smoke proof available
+        id: smoke-proof
+        if: github.ref == 'refs/heads/main' && steps.check-secrets.outputs.skip != 'true'
+        run: echo "available=true" >> "$GITHUB_OUTPUT"
+
   observe-prod:
     name: Post-deploy Observation Gate
     runs-on: ubuntu-latest
     needs:
       - smoke-prod
-    if: github.ref == 'refs/heads/main'
+    if: github.ref == 'refs/heads/main' && needs.smoke-prod.outputs.smoke_proof == 'true'
     environment: fleet-release-production
     permissions:
       contents: read

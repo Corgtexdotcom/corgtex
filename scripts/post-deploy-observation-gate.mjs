@@ -156,6 +156,8 @@ export async function queryAzureMonitorRows({ env = process.env, since, deps = {
     resourceGroup,
     "--analytics-query",
     query,
+    "--start-time",
+    since.toISOString(),
     "-o",
     "json",
   ]);
@@ -314,7 +316,6 @@ function azureMonitorQuery(since) {
     `| where name in (${nonStatusEvents}) or statusInt >= 500`,
     "| summarize events=count(), first_seen=min(timestamp), last_seen=max(timestamp) by name, instance_id=tostring(customDimensions.instance_id), provider=tostring(customDimensions.provider), release_git_sha=tostring(customDimensions.release_git_sha), release_image_tag=tostring(customDimensions.release_image_tag), release_version=tostring(customDimensions.release_version), surface=tostring(customDimensions.surface), route=tostring(customDimensions.route), action=tostring(customDimensions.action), status=tostring(customDimensions.status), code=tostring(customDimensions.code)",
     "| order by events desc",
-    "| take 100",
   ].join(" ");
 }
 
@@ -330,7 +331,6 @@ function postHogQuery(since, environment) {
     `AND (event IN (${nonStatusEvents}) OR toInt(coalesce(properties['status'], 0)) >= 500)`,
     "GROUP BY name, instance_id, provider, release_git_sha, release_image_tag, release_version, surface, route, action, status, code",
     "ORDER BY events DESC",
-    "LIMIT 100",
   ].join(" ");
 }
 

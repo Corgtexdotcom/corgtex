@@ -7,6 +7,7 @@ import {
   buildObservationSummary,
   parseAzureMonitorRows,
   parsePostHogRows,
+  queryAzureMonitorRows,
   runObservationGate,
 } from "./post-deploy-observation-gate.mjs";
 
@@ -105,6 +106,39 @@ describe("post-deploy observation gate", () => {
     expect(summary.advisoryFailures).toHaveLength(0);
   });
 
+  it("keeps release-correlated blockers even when older failures are noisy", () => {
+    const olderRows = Array.from({ length: 150 }, (_, index) => ({
+      source: "posthog",
+      event: "corgtex_route_error",
+      instance_id: `older-${index}`,
+      release_git_sha: `older-sha-${index}`,
+      route: "/api/noisy",
+      status: "500",
+      events: 10_000 - index,
+    }));
+
+    const summary = buildObservationSummary({
+      manifest,
+      since: new Date("2026-07-16T05:52:00.000Z"),
+      rows: [
+        ...olderRows,
+        {
+          source: "posthog",
+          event: "corgtex_route_error",
+          instance_id: "current",
+          release_git_sha: SHA,
+          route: "/api/current-release",
+          status: "500",
+          events: 1,
+        },
+      ],
+    });
+
+    expect(summary.status).toBe("blocked");
+    expect(summary.blockingFailures).toHaveLength(1);
+    expect(summary.blockingFailures[0].route).toBe("/api/current-release");
+  });
+
   it("parses Azure Monitor table rows into observation rows", () => {
     const rows = parseAzureMonitorRows({
       tables: [{
@@ -170,7 +204,32 @@ describe("post-deploy observation gate", () => {
     );
     const requestBody = JSON.parse(fetchImpl.mock.calls[0][1].body);
     expect(requestBody.query.query).toContain("properties['environment'] = 'production'");
+    expect(requestBody.query.query).not.toContain("LIMIT 100");
     expect(summary.status).toBe("blocked");
+  });
+
+  it("queries Azure Monitor with the requested observation window", async () => {
+    const since = new Date("2026-07-16T05:52:00.000Z");
+    const runCommand = vi.fn(() => JSON.stringify({
+      tables: [{
+        columns: [{ name: "name" }],
+        rows: [],
+      }],
+    }));
+
+    await queryAzureMonitorRows({
+      since,
+      env: {
+        AZURE_APPLICATIONINSIGHTS_APP_NAME: "appi-corgtex-ss-prod",
+        AZURE_APPLICATIONINSIGHTS_RESOURCE_GROUP: "rg-corgtex-selfserve-production-wus3",
+      },
+      deps: { runCommand },
+    });
+
+    const args = runCommand.mock.calls[0][1];
+    expect(args).toContain("--start-time");
+    expect(args[args.indexOf("--start-time") + 1]).toBe(since.toISOString());
+    expect(args[args.indexOf("--analytics-query") + 1]).not.toContain("take 100");
   });
 
   it("does not fail a passing gate when advisory publishing fails", async () => {
