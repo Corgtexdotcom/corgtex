@@ -116,6 +116,13 @@ function dateKeyFromISO(dateISO: string) {
   return new Date(dateISO).toISOString().split("T")[0];
 }
 
+function latestDate(...values: Array<Date | null | undefined>) {
+  const times = values
+    .map((value) => value?.getTime() ?? Number.NaN)
+    .filter((time) => Number.isFinite(time));
+  return times.length > 0 ? new Date(Math.max(...times)) : new Date(0);
+}
+
 export function workspaceBriefingPeriodFromCadence(cadence: NewspaperCadence): WorkspaceBriefingPeriod {
   return cadence === "WEEKLY" ? "WEEKLY" : "DAILY";
 }
@@ -434,10 +441,22 @@ function isAttentionBriefingItem(item: WorkspaceBriefingItem) {
     || status === "BEHIND";
 }
 
+function isActiveContinuingStatus(status: string | null | undefined) {
+  const normalized = status?.trim().toUpperCase();
+  return normalized === "OPEN"
+    || normalized === "IN_PROGRESS"
+    || normalized === "ACTIVE"
+    || normalized === "PUBLISHED"
+    || normalized === "ON_TRACK"
+    || normalized === "AT_RISK"
+    || normalized === "BEHIND";
+}
+
 function isContinuingBriefingItem(item: WorkspaceBriefingItem, period: WorkspaceBriefingPeriod, generatedAt: Date) {
   if (item.kind === "QUIET") return false;
   if (isFreshBriefingItem(item, period, generatedAt)) return false;
   if (isAttentionBriefingItem(item)) return true;
+  if (!isActiveContinuingStatus(item.status)) return false;
   return item.kind === "GOAL"
     || item.kind === "PROPOSAL"
     || item.kind === "TENSION"
@@ -513,12 +532,7 @@ function composeWorkspaceBriefingNarrative(params: {
     ? "No major new operating signal was found for this edition. The briefing stays short and uses continuing context instead of inventing activity."
     : sentenceFromItem(leadItem, params.period === "WEEKLY" ? 980 : 860);
   const bodyCandidates = freshItems.filter((item) => item !== leadItem);
-  const bodyItems = (bodyCandidates.length > 0
-    ? bodyCandidates
-    : hasFreshItems
-      ? meaningfulItems.filter((item) => itemKey(item) !== itemKey(leadItem))
-      : [])
-    .slice(0, params.period === "WEEKLY" ? 5 : 4);
+  const bodyItems = bodyCandidates.slice(0, params.period === "WEEKLY" ? 5 : 4);
   const usedKeys = new Set([
     ...(hasFreshItems ? [itemKey(leadItem)] : []),
     ...bodyItems.map(itemKey),
@@ -771,11 +785,10 @@ function meetingFreshnessDate(meeting: {
   summaryPostedAt: Date | null;
   aiProcessedAt: Date | null;
 }, now = new Date()) {
-  if (meeting.recordedAt.getTime() <= now.getTime()) return meeting.recordedAt;
-  return meeting.summaryPostedAt
-    ?? meeting.aiProcessedAt
-    ?? meeting.updatedAt
-    ?? meeting.createdAt;
+  if (meeting.recordedAt.getTime() <= now.getTime()) {
+    return latestDate(meeting.summaryPostedAt, meeting.aiProcessedAt, meeting.updatedAt, meeting.recordedAt, meeting.createdAt);
+  }
+  return latestDate(meeting.summaryPostedAt, meeting.aiProcessedAt, meeting.updatedAt, meeting.createdAt);
 }
 
 export function buildWorkspaceBriefingFromDigest(params: {
@@ -1350,7 +1363,7 @@ export async function collectWorkspaceBriefingCandidates(params: {
       title: article.title,
       summaryMd: compactText(article.bodyMd, 700),
       href: workspacePath(params.workspaceId, `/brain/${article.slug}`),
-      occurredAt: article.publishedAt ?? article.updatedAt ?? article.createdAt,
+      occurredAt: latestDate(article.updatedAt, article.publishedAt, article.createdAt),
       updatedAt: article.updatedAt,
       status: article.authority,
       strategicScore: article.authority === "AUTHORITATIVE" || article.authority === "REFERENCE" ? 2 : 1,
@@ -1390,7 +1403,7 @@ export async function collectWorkspaceBriefingCandidates(params: {
       title: artifact.title,
       summaryMd: compactText(artifact.summaryMd, 900),
       href: artifact.pullRequestUrl ?? workspacePath(params.workspaceId, "/versions"),
-      occurredAt: artifact.mergedAt ?? artifact.closedAt ?? artifact.updatedAt,
+      occurredAt: latestDate(artifact.updatedAt, artifact.mergedAt, artifact.closedAt),
       updatedAt: artifact.updatedAt,
       status: artifact.status,
       strategicScore: artifact.status === "MERGED" ? 3 : 2,

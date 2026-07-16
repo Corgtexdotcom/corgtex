@@ -925,6 +925,7 @@
     "unreadNotificationsSummary": "{count, plural, =1 {# notificación sin leer} other {# notificaciones sin leer}}",
     "viewAll": "Ver todo →",
     "weeklyEdition": "Edición semanal",
+    "workspaceEdition": "Edición del espacio",
     "whyItMatters": "Por qué importa",
     "viewAllActions": "Ver todas las acciones →",
     "viewAllProposals": "Ver todas las propuestas →",

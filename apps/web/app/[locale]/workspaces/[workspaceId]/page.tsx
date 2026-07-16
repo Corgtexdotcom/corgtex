@@ -70,6 +70,8 @@ function latestActivityTime(...values: Array<Date | string | null | undefined>) 
   return times.length > 0 ? Math.max(...times) : 0;
 }
 
+type DisplayedEditionPeriod = "DAILY" | "WEEKLY" | null;
+
 function legacyEditionNarrative(
   editionDigest: ReturnType<typeof normalizeNewspaperEditionDigest> | null,
   labels: { intro: string; closing: string },
@@ -108,10 +110,10 @@ function liveWorkspaceNarrative(params: {
   labels: { intro: string; closing: string };
 }) {
   const entries = [
-    ...params.meetings.slice(0, 4).map((meeting) => {
+    ...params.meetings.map((meeting) => {
       const title = meeting.title || "Meeting recap";
       return {
-        occurredAt: new Date(meeting.updatedAt ?? meeting.recordedAt ?? meeting.createdAt ?? 0).getTime(),
+        occurredAt: latestActivityTime(meeting.updatedAt, meeting.recordedAt, meeting.createdAt),
         line: narrativeLine(title, compactNarrativeText(meeting.summaryMd, 620)),
         sourceRef: {
           type: "MEETING",
@@ -123,7 +125,6 @@ function liveWorkspaceNarrative(params: {
     }),
     ...params.articles
       .filter((article) => article.type !== "DIGEST" && !article.isPrivate)
-      .slice(0, 4)
       .map((article) => ({
         occurredAt: latestActivityTime(article.updatedAt, article.publishedAt, article.createdAt),
         line: narrativeLine(article.title, compactNarrativeText(article.bodyMd, 560)),
@@ -146,6 +147,7 @@ function liveWorkspaceNarrative(params: {
     bodyMd: entries.slice(1).map((entry) => entry.line).join("\n\n") || null,
     closingMd: params.labels.closing,
     sourceRefs: entries.map((entry) => entry.sourceRef),
+    latestActivityAt: entries[0]?.occurredAt ?? 0,
   };
 }
 
@@ -195,11 +197,12 @@ export default async function WorkspaceDashboard({
   const latestBriefing = latestWorkspaceBriefing
     ? normalizeWorkspaceBriefingPayload(latestWorkspaceBriefing.briefingJson)
     : null;
-  const fallbackNarrative = latestBriefing ? null : legacyEditionNarrative(latestEditionDigest, {
+  const storedGeneratedAt = latestWorkspaceBriefing?.generatedAt ?? latestNewspaperEdition?.generatedAt ?? null;
+  const legacyNarrative = latestBriefing ? null : legacyEditionNarrative(latestEditionDigest, {
     intro: t("newspaperLegacyIntro"),
     closing: t("newspaperLegacyClosing"),
   });
-  const liveNarrative = latestBriefing || fallbackNarrative ? null : liveWorkspaceNarrative({
+  const liveNarrativeCandidate = liveWorkspaceNarrative({
     workspaceId,
     articles: articlesResult.items,
     meetings,
@@ -208,8 +211,21 @@ export default async function WorkspaceDashboard({
       closing: t("newspaperLiveClosing"),
     },
   });
-  const generatedAt = latestWorkspaceBriefing?.generatedAt ?? latestNewspaperEdition?.generatedAt ?? null;
-  const displayedEditionPeriod = latestBriefing?.period ?? (latestNewspaperEdition?.cadence === "WEEKLY" ? "WEEKLY" : "DAILY");
+  const liveNarrativeIsNewer = !!liveNarrativeCandidate
+    && (!storedGeneratedAt || liveNarrativeCandidate.latestActivityAt > storedGeneratedAt.getTime());
+  const useLiveNarrative = !!liveNarrativeCandidate
+    && ((!latestBriefing && !legacyNarrative) || liveNarrativeIsNewer);
+  const displayedBriefing = useLiveNarrative ? null : latestBriefing;
+  const fallbackNarrative = useLiveNarrative ? null : legacyNarrative;
+  const liveNarrative = useLiveNarrative ? liveNarrativeCandidate : null;
+  const generatedAt = useLiveNarrative ? null : storedGeneratedAt;
+  const displayedEditionPeriod: DisplayedEditionPeriod = displayedBriefing?.period
+    ?? (fallbackNarrative ? (latestNewspaperEdition?.cadence === "WEEKLY" ? "WEEKLY" : "DAILY") : null);
+  const displayedEditionLabel = displayedEditionPeriod === "WEEKLY"
+    ? t("weeklyEdition")
+    : displayedEditionPeriod === "DAILY"
+      ? t("dailyEdition")
+      : t("workspaceEdition");
   const unreadNotificationsDisplayCount = capDashboardUnreadNotificationCount(unreadNotificationsCount);
   const isUnreadNotificationsCountCapped = isDashboardUnreadNotificationCountCapped(unreadNotificationsCount);
   const notificationLabel = unreadNotificationsCount > 0
@@ -223,9 +239,9 @@ export default async function WorkspaceDashboard({
     month: "long",
     day: "numeric",
   });
-  const articleTitle = latestBriefing?.title ?? latestNewspaperEdition?.title ?? t("latestWorkspaceBriefing");
-  const hasArticle = !!latestBriefing || !!fallbackNarrative || !!liveNarrative;
-  const sourceRefs = latestBriefing?.sourceRefs ?? liveNarrative?.sourceRefs ?? [];
+  const articleTitle = displayedBriefing?.title ?? (fallbackNarrative ? latestNewspaperEdition?.title : null) ?? t("latestWorkspaceBriefing");
+  const hasArticle = !!displayedBriefing || !!fallbackNarrative || !!liveNarrative;
+  const sourceRefs = displayedBriefing?.sourceRefs ?? liveNarrative?.sourceRefs ?? [];
 
   return (
     <>
@@ -261,7 +277,7 @@ export default async function WorkspaceDashboard({
       <article className="nr-newspaper-page">
         <header className="nr-newspaper-header">
           <p className="nr-newspaper-kicker">
-            {displayedEditionPeriod === "WEEKLY" ? t("weeklyEdition") : t("dailyEdition")}
+            {displayedEditionLabel}
             {generatedAt && (
               <>
                 <span> · </span>
@@ -281,14 +297,14 @@ export default async function WorkspaceDashboard({
           <h2>{articleTitle}</h2>
         </header>
 
-        {latestBriefing ? (
+        {displayedBriefing ? (
           <div className="nr-newspaper-body">
-            <MarkdownRenderer markdown={latestBriefing.introMd} variant="document" allowImages={false} />
-            <MarkdownRenderer markdown={latestBriefing.leadMd} variant="document" className="nr-newspaper-lead" allowImages={false} />
-            <MarkdownRenderer markdown={latestBriefing.bodyMd} variant="document" allowImages={false} />
-            <MarkdownRenderer markdown={latestBriefing.attentionMd} variant="document" allowImages={false} />
-            <MarkdownRenderer markdown={latestBriefing.continuingContextMd} variant="document" allowImages={false} />
-            <MarkdownRenderer markdown={latestBriefing.closingMd} variant="document" className="nr-newspaper-closing" allowImages={false} />
+            <MarkdownRenderer markdown={displayedBriefing.introMd} variant="document" allowImages={false} />
+            <MarkdownRenderer markdown={displayedBriefing.leadMd} variant="document" className="nr-newspaper-lead" allowImages={false} />
+            <MarkdownRenderer markdown={displayedBriefing.bodyMd} variant="document" allowImages={false} />
+            <MarkdownRenderer markdown={displayedBriefing.attentionMd} variant="document" allowImages={false} />
+            <MarkdownRenderer markdown={displayedBriefing.continuingContextMd} variant="document" allowImages={false} />
+            <MarkdownRenderer markdown={displayedBriefing.closingMd} variant="document" className="nr-newspaper-closing" allowImages={false} />
           </div>
         ) : fallbackNarrative ? (
           <div className="nr-newspaper-body">

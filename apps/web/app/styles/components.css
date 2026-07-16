@@ -4361,7 +4361,8 @@ a.meeting-agenda-item:hover {
     margin-top: 0;
   }
 
-  .nr-newspaper-notification-pill {
+  .nr-newspaper-notification-pill,
+  .nr-newspaper-assistant-pill {
     justify-content: center;
     width: 100%;
   }

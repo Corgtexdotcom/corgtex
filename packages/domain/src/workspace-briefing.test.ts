@@ -912,6 +912,48 @@ describe("workspace briefing", () => {
     ].filter(Boolean).join("\n");
 
     expect(narrative.match(/Fresh operating recap/g)).toHaveLength(1);
+    expect(briefing.bodyMd ?? "").not.toContain("Strategic market entry proposal");
+    expect([
+      briefing.attentionMd,
+      briefing.continuingContextMd,
+    ].filter(Boolean).join("\n")).toContain("Strategic market entry proposal");
+  });
+
+  it("keeps stale completed work out of continuing context", async () => {
+    const { buildWorkspaceBriefingFromCandidates } = await import("./workspace-briefing");
+    const briefing = buildWorkspaceBriefingFromCandidates({
+      workspaceId: "ws-1",
+      period: "DAILY",
+      dateKey: "2026-04-30",
+      title: "Daily Workspace Briefing - 2026-04-30",
+      generatedAt: new Date("2026-04-30T12:00:00.000Z"),
+      candidates: [
+        baseCandidate({
+          sourceType: "ADVICE_REQUEST",
+          sourceId: "request-completed-stale",
+          title: "Completed support decision",
+          summaryMd: "The support decision closed last month.",
+          href: "/workspaces/ws-1/proposals/proposal-1",
+          occurredAt: new Date("2026-03-10T12:00:00.000Z"),
+          updatedAt: new Date("2026-03-10T12:00:00.000Z"),
+          status: "COMPLETED",
+          strategicScore: 4,
+          actionabilityScore: 1,
+          evidenceScore: 3,
+          sourceRefs: [{ type: "ADVICE_REQUEST", id: "request-completed-stale", label: "Completed support decision", href: "/workspaces/ws-1/proposals/proposal-1" }],
+        }),
+      ],
+    });
+
+    const narrative = [
+      briefing.leadMd,
+      briefing.bodyMd,
+      briefing.attentionMd,
+      briefing.continuingContextMd,
+    ].filter(Boolean).join("\n");
+
+    expect(narrative).not.toContain("Completed support decision");
+    expect(briefing.continuingContextMd).toContain("no unresolved high-signal context");
   });
 
   it("uses narrative text instead of mechanical source counts or visible categories", async () => {
@@ -1094,6 +1136,65 @@ describe("workspace briefing", () => {
     expect(articleCandidate?.summaryMd).toBe(firstSentence);
     expect(articleCandidate?.summaryMd).not.toContain("https://updates.example.");
     expect(articleCandidate?.summaryMd).not.toContain("v3.");
+  });
+
+  it("uses latest source activity for updated meetings, articles, and builds", async () => {
+    const { collectWorkspaceBriefingCandidates } = await import("./workspace-briefing");
+    prismaMock.meeting.findMany.mockResolvedValueOnce([{
+      id: "meeting-updated",
+      title: "Updated weekly recap",
+      summaryMd: "A recap from last week was summarized today.",
+      recordedAt: new Date("2026-04-20T12:00:00.000Z"),
+      updatedAt: new Date("2026-04-30T09:00:00.000Z"),
+      createdAt: new Date("2026-04-20T10:00:00.000Z"),
+      summaryPostedAt: null,
+      aiProcessedAt: null,
+      decisionsJson: null,
+    }]);
+    prismaMock.brainArticle.findMany.mockResolvedValueOnce([{
+      id: "article-updated",
+      title: "Updated operating context",
+      slug: "updated-operating-context",
+      bodyMd: "The article was refreshed with new operating context today.",
+      authority: "REFERENCE",
+      publishedAt: new Date("2026-04-15T08:00:00.000Z"),
+      createdAt: new Date("2026-04-15T08:00:00.000Z"),
+      updatedAt: new Date("2026-04-30T08:30:00.000Z"),
+    }]);
+    prismaMock.buildArtifact.findMany.mockResolvedValueOnce([{
+      id: "build-updated",
+      title: "Deployment follow-up",
+      summaryMd: "The shipped work received a new follow-up today.",
+      status: "MERGED",
+      pullRequestUrl: "https://github.com/example/pull/1",
+      mergedAt: new Date("2026-04-10T12:00:00.000Z"),
+      closedAt: null,
+      updatedAt: new Date("2026-04-30T10:00:00.000Z"),
+    }]);
+
+    const candidates = await collectWorkspaceBriefingCandidates({
+      workspaceId: "ws-1",
+      since: new Date("2026-04-29T00:00:00.000Z"),
+      now: new Date("2026-04-30T12:00:00.000Z"),
+    });
+
+    expect(candidates).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        sourceType: "MEETING",
+        sourceId: "meeting-updated",
+        occurredAt: new Date("2026-04-30T09:00:00.000Z"),
+      }),
+      expect.objectContaining({
+        sourceType: "BRAIN_ARTICLE",
+        sourceId: "article-updated",
+        occurredAt: new Date("2026-04-30T08:30:00.000Z"),
+      }),
+      expect.objectContaining({
+        sourceType: "BUILD_ARTIFACT",
+        sourceId: "build-updated",
+        occurredAt: new Date("2026-04-30T10:00:00.000Z"),
+      }),
+    ]));
   });
 
   it("does not attach unrelated source refs to digest-derived sections", async () => {
