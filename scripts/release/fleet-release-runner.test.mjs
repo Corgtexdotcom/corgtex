@@ -9,6 +9,13 @@ import { buildFleetReleaseIncident, fleetReleaseSlackPayload } from "./fleet-rel
 import { assertPostDeployProbeReady, postDeployProbeFailureSummary, sanitizePostDeployProbe } from "./fleet-release-probes.mjs";
 
 const SHA = "c9077ff031e8e672923c84d52eeef862368f3493";
+const railwayObservabilityEnv = {
+  POSTHOG_ENABLED: "true",
+  POSTHOG_PROJECT_TOKEN: "posthog-project-token",
+};
+const azureObservabilityEnv = {
+  APPLICATIONINSIGHTS_CONNECTION_STRING: "InstrumentationKey=00000000-0000-0000-0000-000000000000;IngestionEndpoint=https://example.monitor.azure.com/",
+};
 
 function targetJson(overrides = {}) {
   return JSON.stringify([{
@@ -503,6 +510,20 @@ describe("fleet release runner", () => {
     expect(variables).not.toHaveProperty("POSTHOG_PROJECT_TOKEN");
   });
 
+  it("does not clear PostHog when a token exists without an explicit enable flag", async () => {
+    const variables = releaseVariables({
+      releaseVersion: "main-c9077ff031e",
+      imageTag: `sha-${SHA}`,
+      gitSha: SHA,
+    }, {
+      POSTHOG_PROJECT_TOKEN: "posthog-project-token",
+    });
+
+    expect(variables).not.toHaveProperty("POSTHOG_ENABLED");
+    expect(variables).not.toHaveProperty("POSTHOG_CAPTURE_KILL_SWITCH");
+    expect(variables).not.toHaveProperty("POSTHOG_PROJECT_TOKEN");
+  });
+
   it("clears blank PostHog instance IDs without overwriting customer-scoped IDs", async () => {
     expect(releaseVariables({
       releaseVersion: "main-c9077ff031e",
@@ -705,6 +726,131 @@ describe("fleet release runner", () => {
     expect(fetchImpl).not.toHaveBeenCalled();
   });
 
+  it("requires PostHog for non-dry-run Railway release observability", async () => {
+    await expect(runFleetRelease([
+      "validate-config",
+      "--release",
+      SHA,
+      "--targets",
+      "railway-customers",
+      "--dry-run",
+      "false",
+    ], {
+      env: {
+        FLEET_RELEASE_TARGETS_JSON: targetJson({ group: "railway-customers" }),
+        CONTROL_PLANE_AGENT_API_KEY: "control-plane-key",
+        RAILWAY_API_TOKEN: "railway-token",
+        GHCR_IMPORT_USERNAME: "github-user",
+        GITHUB_TOKEN: "github-token",
+      },
+      runCommand: vi.fn(),
+      fetchImpl: vi.fn(),
+      sleep: vi.fn(),
+    })).rejects.toThrow("POSTHOG_PROJECT_TOKEN");
+  });
+
+  it("rejects enabled PostHog kill switches for non-dry-run Railway observability", async () => {
+    await expect(runFleetRelease([
+      "validate-config",
+      "--release",
+      SHA,
+      "--targets",
+      "railway-customers",
+      "--dry-run",
+      "false",
+    ], {
+      env: {
+        FLEET_RELEASE_TARGETS_JSON: targetJson({ group: "railway-customers" }),
+        CONTROL_PLANE_AGENT_API_KEY: "control-plane-key",
+        RAILWAY_API_TOKEN: "railway-token",
+        GHCR_IMPORT_USERNAME: "github-user",
+        GITHUB_TOKEN: "github-token",
+        POSTHOG_ENABLED: "true",
+        POSTHOG_CAPTURE_KILL_SWITCH: "true",
+        POSTHOG_PROJECT_TOKEN: "posthog-project-token",
+      },
+      runCommand: vi.fn(),
+      fetchImpl: vi.fn(),
+      sleep: vi.fn(),
+    })).rejects.toThrow("POSTHOG_CAPTURE_KILL_SWITCH");
+  });
+
+  it("trims PostHog tokens during direct Railway deploy preflight", async () => {
+    await expect(runFleetRelease([
+      "deploy",
+      "--release",
+      SHA,
+      "--targets",
+      "ops",
+      "--reason",
+      "Deploy release.",
+    ], {
+      env: {
+        FLEET_RELEASE_TARGETS_JSON: targetJson(),
+        CONTROL_PLANE_AGENT_API_KEY: "control-plane-key",
+        RAILWAY_API_TOKEN: "railway-token",
+        GHCR_IMPORT_USERNAME: "github-user",
+        GITHUB_TOKEN: "github-token",
+        POSTHOG_ENABLED: "true",
+        POSTHOG_PROJECT_TOKEN: "   ",
+      },
+      runCommand: vi.fn(),
+      fetchImpl: vi.fn(),
+      sleep: vi.fn(),
+    })).rejects.toThrow("POSTHOG_PROJECT_TOKEN is missing for Railway observability");
+  });
+
+  it("requires Application Insights for non-dry-run Azure release observability", async () => {
+    await expect(runFleetRelease([
+      "validate-config",
+      "--release",
+      SHA,
+      "--targets",
+      "azure-selfserve",
+      "--dry-run",
+      "false",
+    ], {
+      env: {
+        FLEET_RELEASE_AZURE_TARGET_JSON: azureTargetJson(),
+        CONTROL_PLANE_AGENT_API_KEY: "control-plane-key",
+        GHCR_IMPORT_USERNAME: "github-user",
+        GITHUB_TOKEN: "github-token",
+        AZURE_CLIENT_ID: "azure-client",
+        AZURE_TENANT_ID: "azure-tenant",
+        AZURE_SUBSCRIPTION_ID: "azure-subscription",
+      },
+      runCommand: vi.fn(),
+      fetchImpl: vi.fn(),
+      sleep: vi.fn(),
+    })).rejects.toThrow("APPLICATIONINSIGHTS_CONNECTION_STRING");
+  });
+
+  it("trims Application Insights connection strings during direct Azure deploy preflight", async () => {
+    await expect(runFleetRelease([
+      "deploy",
+      "--release",
+      SHA,
+      "--targets",
+      "azure-selfserve",
+      "--reason",
+      "Deploy release.",
+    ], {
+      env: {
+        FLEET_RELEASE_TARGETS_JSON: azureTargetJson(),
+        CONTROL_PLANE_AGENT_API_KEY: "control-plane-key",
+        GHCR_IMPORT_USERNAME: "github-user",
+        GITHUB_TOKEN: "github-token",
+        AZURE_CLIENT_ID: "azure-client",
+        AZURE_TENANT_ID: "azure-tenant",
+        AZURE_SUBSCRIPTION_ID: "azure-subscription",
+        APPLICATIONINSIGHTS_CONNECTION_STRING: "   ",
+      },
+      runCommand: vi.fn(),
+      fetchImpl: vi.fn(),
+      sleep: vi.fn(),
+    })).rejects.toThrow("APPLICATIONINSIGHTS_CONNECTION_STRING is missing for Azure observability");
+  });
+
   it("requires Railway worker service metadata before mutation", async () => {
     await expect(runFleetRelease([
       "deploy",
@@ -777,6 +923,7 @@ describe("fleet release runner", () => {
         AZURE_CLIENT_ID: "azure-client",
         AZURE_TENANT_ID: "azure-tenant",
         AZURE_SUBSCRIPTION_ID: "azure-subscription",
+        ...azureObservabilityEnv,
       },
       runCommand: vi.fn(),
       fetchImpl: vi.fn(),
@@ -804,6 +951,7 @@ describe("fleet release runner", () => {
         AZURE_CLIENT_ID: "azure-client",
         AZURE_TENANT_ID: "azure-tenant",
         AZURE_SUBSCRIPTION_ID: "azure-subscription",
+        ...azureObservabilityEnv,
       },
       runCommand: vi.fn(),
       fetchImpl: vi.fn(),
@@ -1167,6 +1315,7 @@ describe("fleet release runner", () => {
         RAILWAY_API_TOKEN: "railway-token",
         GHCR_IMPORT_USERNAME: "github-user",
         GITHUB_TOKEN: "github-token",
+        ...railwayObservabilityEnv,
       },
       runCommand: vi.fn(),
       fetchImpl,
@@ -1229,6 +1378,7 @@ describe("fleet release runner", () => {
         GHCR_IMPORT_USERNAME: "github-user",
         GITHUB_TOKEN: "github-token",
         OPS_SLACK_WEBHOOK_URL: "https://hooks.slack.test/fleet",
+        ...railwayObservabilityEnv,
       },
       runCommand: vi.fn(),
       fetchImpl,
@@ -1287,6 +1437,7 @@ describe("fleet release runner", () => {
         GHCR_IMPORT_USERNAME: "github-user",
         GITHUB_REPOSITORY: "Corgtexdotcom/corgtex",
         GITHUB_TOKEN: "github-token",
+        ...railwayObservabilityEnv,
       },
       runCommand: vi.fn(),
       fetchImpl,
