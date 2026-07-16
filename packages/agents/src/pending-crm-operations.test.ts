@@ -32,6 +32,8 @@ function operation(overrides: Partial<PendingOperationRecord> = {}): PendingOper
     expiresAt: new Date("2026-07-16T10:15:00.000Z"),
     executedAt: null,
     canceledAt: null,
+    createdAt: new Date("2026-07-16T10:00:00.000Z"),
+    updatedAt: new Date("2026-07-16T10:00:00.000Z"),
     ...overrides,
   };
 }

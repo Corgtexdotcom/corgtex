@@ -167,6 +167,8 @@ describe("processConversationTurn", () => {
         && (!where?.conversationId || operation.conversationId === where.conversationId)
         && (!Object.prototype.hasOwnProperty.call(where ?? {}, "userId") || operation.userId === where.userId)
         && (!where?.agentKey || operation.agentKey === where.agentKey)
+        && (!where?.idempotencyKey?.startsWith || operation.idempotencyKey.startsWith(where.idempotencyKey.startsWith))
+        && (!where?.status?.in || where.status.in.includes(operation.status))
       ));
       return Promise.resolve(matches.at(-1) ?? null);
     });
@@ -198,7 +200,8 @@ describe("processConversationTurn", () => {
       for (const operation of conversationPendingOperationStore) {
         const expiresAfter = where?.expiresAt?.gt ? operation.expiresAt > where.expiresAt.gt : true;
         const expiresBeforeOrEqual = where?.expiresAt?.lte ? operation.expiresAt <= where.expiresAt.lte : true;
-        if (operation.id === where.id && operation.status === where.status && expiresAfter && expiresBeforeOrEqual) {
+        const updatedBeforeOrEqual = where?.updatedAt?.lte ? operation.updatedAt <= where.updatedAt.lte : true;
+        if (operation.id === where.id && operation.status === where.status && expiresAfter && expiresBeforeOrEqual && updatedBeforeOrEqual) {
           Object.assign(operation, data, { updatedAt: new Date() });
           count += 1;
         }
@@ -908,7 +911,9 @@ describe("processConversationTurn", () => {
       .mockResolvedValueOnce({ content: "", tool_calls: [toolCall] })
       .mockResolvedValueOnce({ content: "Pending operation is ready." })
       .mockResolvedValueOnce({ content: "", tool_calls: [toolCall] })
-      .mockResolvedValueOnce({ content: "Fresh pending operation is ready." });
+      .mockResolvedValueOnce({ content: "Fresh pending operation is ready." })
+      .mockResolvedValueOnce({ content: "", tool_calls: [toolCall] })
+      .mockResolvedValueOnce({ content: "Existing pending operation is ready." });
 
     const { processConversationTurn } = await import("./conversation");
     await processConversationTurn({
@@ -935,6 +940,70 @@ describe("processConversationTurn", () => {
     expect(conversationPendingOperationStore[1].status).toBe("PENDING");
     expect(conversationPendingOperationStore[1].idempotencyKey).not.toBe(conversationPendingOperationStore[0].idempotencyKey);
     expect(result.assistantMessage).toContain(`Pending operation ID: ${pendingOperationId(2)}`);
+
+    const repeatResult = await processConversationTurn({
+      workspaceId: "ws-1",
+      sessionId: "session-1",
+      userId: "user-1",
+      agentKey: "assistant",
+      userMessage,
+      actor,
+    });
+
+    expect(conversationPendingOperationStore).toHaveLength(2);
+    expect(repeatResult.assistantMessage).toContain(`Pending operation ID: ${pendingOperationId(2)}`);
+  });
+
+  it("does not reuse abandoned executing CRM operations as confirmable pending operations", async () => {
+    const actor = {
+      kind: "user" as const,
+      user: {
+        id: "user-1",
+        email: "user@example.com",
+        displayName: "User",
+      },
+    };
+    const userMessage = "Create a CRM follow-up for Acme.";
+    const toolCall = {
+      id: "call-1",
+      function: {
+        name: "record_relationship_activity",
+        arguments: JSON.stringify({ title: "Follow up", type: "TASK", accountId: "account-1" }),
+      },
+    };
+    chatMock
+      .mockResolvedValueOnce({ content: "", tool_calls: [toolCall] })
+      .mockResolvedValueOnce({ content: "Pending operation is ready." })
+      .mockResolvedValueOnce({ content: "", tool_calls: [toolCall] })
+      .mockResolvedValueOnce({ content: "Please check CRM before preparing this change again." });
+
+    const { processConversationTurn } = await import("./conversation");
+    await processConversationTurn({
+      workspaceId: "ws-1",
+      sessionId: "session-1",
+      userId: "user-1",
+      agentKey: "assistant",
+      userMessage,
+      actor,
+    });
+    conversationPendingOperationStore[0].status = "EXECUTING";
+    conversationPendingOperationStore[0].updatedAt = new Date(Date.now() - 10 * 60_000);
+
+    const result = await processConversationTurn({
+      workspaceId: "ws-1",
+      sessionId: "session-1",
+      userId: "user-1",
+      agentKey: "assistant",
+      userMessage,
+      actor,
+    });
+
+    const toolMessage = chatMock.mock.calls[3]?.[0]?.messages.find((message: any) => message.role === "tool");
+    expect(toolMessage.content).toContain("Check CRM before preparing this change again");
+    expect(conversationPendingOperationStore).toHaveLength(1);
+    expect(conversationPendingOperationStore[0].status).toBe("FAILED");
+    expect(conversationPendingOperationStore[0].errorCode).toBe("CRM_PENDING_OPERATION_EXECUTION_ABANDONED");
+    expect(result.assistantMessage).toBe("Please check CRM before preparing this change again.");
   });
 
   it("rejects unbound CRM activity completions before storing a pending operation", async () => {

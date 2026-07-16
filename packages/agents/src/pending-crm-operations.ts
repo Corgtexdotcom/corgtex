@@ -4,6 +4,7 @@ import { prisma } from "@corgtex/shared";
 import type { Prisma } from "@prisma/client";
 
 const PENDING_OPERATION_TTL_MS = 15 * 60 * 1000;
+const EXECUTING_OPERATION_LEASE_MS = 5 * 60 * 1000;
 
 const STATUS = {
   PENDING: "PENDING",
@@ -45,6 +46,8 @@ export type PendingOperationRecord = {
   expiresAt: Date;
   executedAt: Date | null;
   canceledAt: Date | null;
+  createdAt: Date;
+  updatedAt: Date;
 };
 
 type PendingOperationIntent = {
@@ -179,6 +182,59 @@ export function crmPendingOperationFailedNotice(operation: PendingOperationRecor
   return `Pending CRM operation ${operation.id} cannot be confirmed because it is ${operation.status.toLowerCase()}.${message}`;
 }
 
+async function refreshReusableOperationState(operation: PendingOperationRecord | null, now: Date) {
+  if (!operation) return null;
+
+  if (operation.status === STATUS.PENDING && operation.expiresAt <= now) {
+    await prisma.conversationPendingOperation.updateMany({
+      where: {
+        id: operation.id,
+        status: STATUS.PENDING,
+        expiresAt: { lte: now },
+      },
+      data: {
+        status: STATUS.EXPIRED,
+        errorCode: "CRM_PENDING_OPERATION_EXPIRED",
+        errorMessage: "The pending operation expired before confirmation.",
+      },
+    });
+    return await prisma.conversationPendingOperation.findUnique({ where: { id: operation.id } }) as PendingOperationRecord | null;
+  }
+
+  if (operation.status === STATUS.EXECUTING) {
+    const leaseCutoff = new Date(now.getTime() - EXECUTING_OPERATION_LEASE_MS);
+    if (operation.updatedAt <= leaseCutoff) {
+      await prisma.conversationPendingOperation.updateMany({
+        where: {
+          id: operation.id,
+          status: STATUS.EXECUTING,
+          updatedAt: { lte: leaseCutoff },
+        },
+        data: {
+          status: STATUS.FAILED,
+          errorCode: "CRM_PENDING_OPERATION_EXECUTION_ABANDONED",
+          errorMessage: "Execution state is unknown after the operation lease timed out. Check CRM before preparing this change again.",
+        },
+      });
+      return await prisma.conversationPendingOperation.findUnique({ where: { id: operation.id } }) as PendingOperationRecord | null;
+    }
+  }
+
+  return operation;
+}
+
+function assertReusableOperationAvailable(operation: PendingOperationRecord | null) {
+  if (!operation) return null;
+  if (operation.status === STATUS.PENDING) return operation;
+  if (operation.status === STATUS.EXECUTING) {
+    throw new Error("A matching CRM operation is already executing. Wait for it to finish before preparing the same CRM change again.");
+  }
+  if (operation.status === STATUS.FAILED && operation.errorCode === "CRM_PENDING_OPERATION_EXECUTION_ABANDONED") {
+    throw new Error(operation.errorMessage ?? "A matching CRM operation was left in an uncertain execution state. Check CRM before preparing this change again.");
+  }
+  return null;
+}
+
 export async function createPendingCrmOperation({
   ctx,
   toolName,
@@ -200,25 +256,26 @@ export async function createPendingCrmOperation({
       },
     },
   });
-  let reusableExisting = existing;
   const now = new Date();
-  if (existing?.status === STATUS.PENDING && existing.expiresAt <= now) {
-    await prisma.conversationPendingOperation.updateMany({
-      where: {
-        id: existing.id,
-        status: STATUS.PENDING,
-        expiresAt: { lte: now },
-      },
-      data: {
-        status: STATUS.EXPIRED,
-        errorCode: "CRM_PENDING_OPERATION_EXPIRED",
-        errorMessage: "The pending operation expired before confirmation.",
-      },
-    });
-    reusableExisting = await prisma.conversationPendingOperation.findUnique({ where: { id: existing.id } });
-  }
-  if (reusableExisting?.status === STATUS.PENDING || reusableExisting?.status === STATUS.EXECUTING) {
-    return reusableExisting as PendingOperationRecord;
+  const reusableExisting = await refreshReusableOperationState(existing as PendingOperationRecord | null, now);
+  const reusableBase = assertReusableOperationAvailable(reusableExisting);
+  if (reusableBase) return reusableBase;
+
+  const retry = await prisma.conversationPendingOperation.findFirst({
+    where: {
+      workspaceId: ctx.workspaceId,
+      conversationId: ctx.sessionId,
+      userId,
+      agentKey: ctx.agentKey,
+      idempotencyKey: { startsWith: `${idempotencyKey}:` },
+      status: { in: [STATUS.PENDING, STATUS.EXECUTING] },
+    },
+    orderBy: { createdAt: "desc" },
+  });
+  const reusableRetry = await refreshReusableOperationState(retry as PendingOperationRecord | null, now);
+  const reusablePendingRetry = assertReusableOperationAvailable(reusableRetry);
+  if (reusablePendingRetry) {
+    return reusablePendingRetry;
   }
 
   const related = relatedEntity(toolName, argsJson);
@@ -231,7 +288,7 @@ export async function createPendingCrmOperation({
       toolName,
       argsJson: argsJson as Prisma.InputJsonValue,
       argsHash,
-      idempotencyKey: reusableExisting ? `${idempotencyKey}:${randomUUID()}` : idempotencyKey,
+      idempotencyKey: existing ? `${idempotencyKey}:${randomUUID()}` : idempotencyKey,
       relatedEntityType: related.type,
       relatedEntityId: related.id,
       riskLabel: riskLabel(toolName),
