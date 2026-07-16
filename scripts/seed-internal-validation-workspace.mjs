@@ -41,10 +41,33 @@ function pinValidationSeedEnvironment() {
   process.env.VALIDATION_SEND_INVITES = "false";
   process.env.VALIDATION_PRINT_INVITE_LINKS = "false";
   process.env.VALIDATION_SEED_SAMPLE_DATA = "true";
+  delete process.env.PRODUCTION_VALIDATION_WORKSPACE_ID;
+  delete process.env.PRODUCTION_VALIDATION_WORKSPACE_SLUG;
+  delete process.env.CLIENT_WORKSPACE_SLUG;
+  delete process.env.CLIENT_WORKSPACE_NAME;
+  delete process.env.WORKSPACE_SLUG;
+  delete process.env.WORKSPACE_NAME;
   delete process.env.CLIENT_USERS_JSON;
   delete process.env.CLIENT_USERS_CSV;
   delete process.env.CLIENT_SEND_INVITES;
   delete process.env.CLIENT_PRINT_INVITE_LINKS;
+}
+
+function assertValidationSeedEnvironmentPinned() {
+  if (process.env.VALIDATION_WORKSPACE_SLUG !== INTERNAL_VALIDATION_WORKSPACE_SLUG) {
+    throw new Error(`Validation seed must stay pinned to ${INTERNAL_VALIDATION_WORKSPACE_SLUG}.`);
+  }
+  if (process.env.VALIDATION_USERS_JSON !== "[]") {
+    throw new Error("Validation seed must not import client users.");
+  }
+  if (process.env.VALIDATION_SEND_INVITES !== "false" || process.env.CLIENT_SEND_INVITES) {
+    throw new Error("Validation seed must not send invitation emails.");
+  }
+  for (const name of ["CLIENT_USERS_JSON", "CLIENT_USERS_CSV", "CLIENT_WORKSPACE_SLUG", "WORKSPACE_SLUG"]) {
+    if (process.env[name]?.trim()) {
+      throw new Error(`Validation seed must not inherit ${name}.`);
+    }
+  }
 }
 
 const validationSeedConfig = {
@@ -380,5 +403,6 @@ async function upsertRelationshipFixtures() {
 }
 
 pinValidationSeedEnvironment();
+assertValidationSeedEnvironmentPinned();
 await seedStableClient(validationSeedConfig);
 await upsertRelationshipFixtures();
