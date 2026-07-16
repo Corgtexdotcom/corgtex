@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
 import { AppError } from "@corgtex/domain";
-import { captureTelemetryEvent, env, resolveReleaseMetadata } from "@corgtex/shared";
+import { captureTelemetryEvent, env, releaseDriftSummary, resolveReleaseMetadata } from "@corgtex/shared";
 import { z } from "zod";
 import { handleRouteError, validateBody } from "@/lib/http";
 
@@ -35,6 +35,10 @@ export async function POST(request: NextRequest) {
     const release = resolveReleaseMetadata(process.env, { service: "web" });
     if (body.expectedGitSha && release.gitSha !== body.expectedGitSha) {
       throw new AppError(409, "RELEASE_MISMATCH", `Release git SHA ${release.gitSha ?? "missing"} did not match expected ${body.expectedGitSha}.`);
+    }
+    const releaseDrift = releaseDriftSummary(release);
+    if (releaseDrift) {
+      throw new AppError(409, "RELEASE_DRIFT", `Release metadata drift must be resolved before emitting telemetry smoke: ${releaseDrift}`);
     }
 
     const telemetry = await captureTelemetryEvent({

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   CrmSmoke,
+  crmHealthReleaseBlocker,
   crmScreenshotFileName,
   crmVisualTargets,
   evaluateKanbanSnapshot,
@@ -95,6 +96,44 @@ describe("CRM production smoke pending operation parsing", () => {
 
   it("fails loudly when chat omits the pending operation contract", () => {
     expect(() => parsePendingOperationId("Please say yes.")).toThrow("pending operation ID");
+  });
+});
+
+describe("CRM production smoke release validation", () => {
+  it("blocks before write-path checks when expected release SHA is missing or drifted", () => {
+    expect(crmHealthReleaseBlocker({
+      release: {
+        gitSha: "older-sha",
+      },
+    }, "current-sha")).toContain("release.gitSha older-sha");
+
+    expect(crmHealthReleaseBlocker({
+      release: {
+        gitSha: "current-sha",
+        configured: { gitSha: "older-sha" },
+        drift: {
+          gitSha: true,
+          imageTag: true,
+          version: false,
+          details: ["configured.gitSha=older-sha does not match runtime.gitSha=current-sha"],
+        },
+      },
+    }, "current-sha")).toContain("configured.gitSha=older-sha");
+  });
+
+  it("accepts aligned release metadata", () => {
+    expect(crmHealthReleaseBlocker({
+      release: {
+        gitSha: "current-sha",
+        configured: { gitSha: "current-sha" },
+        drift: {
+          gitSha: false,
+          imageTag: false,
+          version: false,
+          details: [],
+        },
+      },
+    }, "current-sha")).toBeNull();
   });
 });
 

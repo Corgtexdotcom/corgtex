@@ -101,7 +101,9 @@ describe("telemetry", () => {
       release_drift_image_tag: true,
       release_git_sha: "current-sha",
       release_git_sha_source: "railway",
+      release_image_tag: "sha-current-sha",
       release_runtime_git_sha: "current-sha",
+      release_version: "main-current-sha",
     }));
   });
 

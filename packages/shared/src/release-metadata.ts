@@ -163,6 +163,18 @@ function driftDetails(params: {
   return { version, imageTag, gitSha, details };
 }
 
+export function releaseDriftSummary(release: Pick<ReleaseMetadata, "drift"> | null | undefined) {
+  const drift = release?.drift;
+  if (!drift?.gitSha && !drift?.imageTag && !drift?.version) return null;
+
+  const details = Array.isArray(drift.details)
+    ? drift.details.filter((detail) => detail.trim().length > 0)
+    : [];
+  return details.length > 0
+    ? details.join("; ")
+    : `release metadata drift: gitSha=${drift.gitSha}, imageTag=${drift.imageTag}, version=${drift.version}`;
+}
+
 export function resolveReleaseMetadata(
   env: NodeJS.ProcessEnv = process.env,
   options: ReleaseMetadataOptions = {},
@@ -185,18 +197,30 @@ export function resolveReleaseMetadata(
         ? "image_tag"
         : "missing";
   const buildTimeSource = configuredBuildTime ? "configured" : "missing";
+  const drift = driftDetails({
+    configuredGitSha,
+    configuredImageTag,
+    configuredVersion,
+    runtimeGitSha: runtime.value,
+  });
+  const runtimeVersion = runtime.value ? releaseVersionForGitSha(runtime.value) : null;
+  const runtimeImageTag = runtime.value ? `sha-${runtime.value}` : null;
+  const version = drift.version && runtimeVersion
+    ? runtimeVersion
+    : configuredVersion ?? runtimeVersion ?? packageVersion ?? "development";
+  const imageTag = drift.imageTag && runtimeImageTag ? runtimeImageTag : configuredImageTag ?? runtimeImageTag;
 
   return {
-    version: configuredVersion ?? packageVersion ?? "development",
-    imageTag: configuredImageTag,
+    version,
+    imageTag,
     gitSha,
     buildTime: configuredBuildTime,
     environment: environmentName(env),
     provider: runtimeProvider(env),
     service: serviceName(env, options),
     source: {
-      version: configuredVersion ? "configured" : packageVersion ? "package" : "development",
-      imageTag: configuredImageTag ? "configured" : "missing",
+      version: drift.version && runtimeVersion ? runtime.source : configuredVersion ? "configured" : runtimeVersion ? runtime.source : packageVersion ? "package" : "development",
+      imageTag: drift.imageTag && runtimeImageTag ? runtime.source : configuredImageTag ? "configured" : runtimeImageTag ? runtime.source : "missing",
       gitSha: gitShaSource,
       buildTime: buildTimeSource,
       environment: environmentSource(env),
@@ -214,11 +238,6 @@ export function resolveReleaseMetadata(
       environment: configuredEnvironment,
       service: configuredService,
     },
-    drift: driftDetails({
-      configuredGitSha,
-      configuredImageTag,
-      configuredVersion,
-      runtimeGitSha: runtime.value,
-    }),
+    drift,
   };
 }

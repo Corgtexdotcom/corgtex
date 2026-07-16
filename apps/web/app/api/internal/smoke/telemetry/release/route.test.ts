@@ -70,7 +70,26 @@ describe("POST /api/internal/smoke/telemetry/release", () => {
     expect(captureTelemetryEventMock).not.toHaveBeenCalled();
   });
 
-  it("emits a sanitized release telemetry event for the live runtime release", async () => {
+  it("rejects release metadata drift before emitting telemetry", async () => {
+    const { POST } = await import("./route");
+    const response = await POST(smokeRequest({
+      expectedGitSha: "current-sha",
+      runId: "run-1",
+    }));
+
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toMatchObject({
+      error: {
+        code: "RELEASE_DRIFT",
+      },
+    });
+    expect(captureTelemetryEventMock).not.toHaveBeenCalled();
+  });
+
+  it("emits a sanitized release telemetry event for an aligned live runtime release", async () => {
+    delete process.env.CORGTEX_RELEASE_GIT_SHA;
+    delete process.env.CORGTEX_RELEASE_IMAGE_TAG;
+    delete process.env.CORGTEX_RELEASE_VERSION;
     const { POST } = await import("./route");
     const response = await POST(smokeRequest({
       expectedGitSha: "current-sha",
@@ -82,10 +101,10 @@ describe("POST /api/internal/smoke/telemetry/release", () => {
     expect(body.release).toMatchObject({
       gitSha: "current-sha",
       configured: {
-        gitSha: "older-sha",
+        gitSha: null,
       },
       drift: {
-        gitSha: true,
+        gitSha: false,
       },
     });
     expect(body.telemetry).toEqual({ azure: "disabled", posthog: "sent" });

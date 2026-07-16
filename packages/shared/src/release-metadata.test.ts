@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { releaseVersionForGitSha, resolveReleaseMetadata } from "./release-metadata";
+import { releaseDriftSummary, releaseVersionForGitSha, resolveReleaseMetadata } from "./release-metadata";
 
 const SHA = "0123456789abcdef0123456789abcdef01234567";
 const OLD_SHA = "fedcba9876543210fedcba9876543210fedcba98";
@@ -39,23 +39,25 @@ describe("release metadata", () => {
     });
   });
 
-  it("prefers runtime git SHA over stale configured release metadata and reports drift", () => {
-    expect(resolveReleaseMetadata(testEnv({
+  it("prefers runtime git SHA and derived release labels over stale configured metadata", () => {
+    const release = resolveReleaseMetadata(testEnv({
       CORGTEX_RELEASE_GIT_SHA: OLD_SHA,
       CORGTEX_RELEASE_IMAGE_TAG: `sha-${OLD_SHA}`,
       CORGTEX_RELEASE_VERSION: releaseVersionForGitSha(OLD_SHA),
       RAILWAY_GIT_COMMIT_SHA: SHA,
       RAILWAY_SERVICE_ID: "railway-service",
       RAILWAY_SERVICE_NAME: "web",
-    }))).toMatchObject({
-      version: releaseVersionForGitSha(OLD_SHA),
-      imageTag: `sha-${OLD_SHA}`,
+    }));
+
+    expect(release).toMatchObject({
+      version: releaseVersionForGitSha(SHA),
+      imageTag: `sha-${SHA}`,
       gitSha: SHA,
       provider: "railway",
       service: "web",
       source: {
-        version: "configured",
-        imageTag: "configured",
+        version: "railway",
+        imageTag: "railway",
         gitSha: "railway",
         service: "railway",
       },
@@ -73,6 +75,7 @@ describe("release metadata", () => {
         gitSha: true,
       },
     });
+    expect(releaseDriftSummary(release)).toContain("configured.gitSha");
   });
 
   it("accepts configured image tags that use either raw SHA or sha-prefixed SHA", () => {

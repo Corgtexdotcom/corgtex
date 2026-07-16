@@ -12,9 +12,10 @@ const withNextIntl = createNextIntlPlugin("./i18n/request.ts");
 
 function releaseGitSha() {
   return [
-    process.env.CORGTEX_RELEASE_GIT_SHA,
     process.env.RAILWAY_GIT_COMMIT_SHA,
+    process.env.VERCEL_GIT_COMMIT_SHA,
     process.env.GITHUB_SHA,
+    process.env.CORGTEX_RELEASE_GIT_SHA,
   ]
     .map((value) => value?.trim())
     .find((value): value is string => Boolean(value));

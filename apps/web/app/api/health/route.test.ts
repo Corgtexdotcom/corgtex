@@ -302,7 +302,7 @@ describe("GET /api/health", () => {
     });
   });
 
-  it("prefers runtime deployment SHAs over stale configured release variables", async () => {
+  it("prefers runtime deployment metadata over stale configured release variables", async () => {
     const { GET } = await import("./route");
     process.env.CORGTEX_RELEASE_VERSION = "main-older";
     process.env.CORGTEX_RELEASE_IMAGE_TAG = "older-sha";
@@ -319,12 +319,12 @@ describe("GET /api/health", () => {
     expect(response.status).toBe(200);
     await expect(response.json()).resolves.toMatchObject({
       release: {
-        version: "main-older",
-        imageTag: "older-sha",
+        version: "main-current-sha",
+        imageTag: "sha-current-sha",
         gitSha: "current-sha",
         source: {
-          version: "configured",
-          imageTag: "configured",
+          version: "railway",
+          imageTag: "railway",
           gitSha: "railway",
         },
         configured: {
