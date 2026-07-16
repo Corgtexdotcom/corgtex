@@ -48,16 +48,20 @@ export function createBlockedValidationRun({
     },
   });
 
-  recordValidationResult(run, {
-    intent: required(intent, "intent"),
-    method: required(method, "method"),
-    result: "blocked",
-    blocker: required(blocker, "blocker"),
-    evidence: [{
-      type: "workflow",
-      summary: "Validation was blocked before the smoke could execute.",
-    }],
-  });
+  const resultPrNumbers = run.prNumbers.length > 0 ? run.prNumbers : [null];
+  for (const prNumber of resultPrNumbers) {
+    recordValidationResult(run, {
+      ...(prNumber ? { prNumber } : {}),
+      intent: required(intent, "intent"),
+      method: required(method, "method"),
+      result: "blocked",
+      blocker: required(blocker, "blocker"),
+      evidence: [{
+        type: "workflow",
+        summary: "Validation was blocked before the smoke could execute.",
+      }],
+    });
+  }
 
   return run;
 }

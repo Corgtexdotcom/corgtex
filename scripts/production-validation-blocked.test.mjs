@@ -30,4 +30,20 @@ describe("production validation blocked artifacts", () => {
       blocker: "ADMIN_EMAIL and ADMIN_PASSWORD are required.",
     }]);
   });
+
+  it("records one blocked result per requested PR", () => {
+    const run = createBlockedValidationRun({
+      runId: "blocked-many",
+      tenantSlug: "corgtex-validation",
+      prNumbers: [696, 705],
+      baseUrl: "https://app.corgtex.com",
+      method: "crm-production-smoke",
+      intent: "CRM pending operation smoke",
+      blocker: "Production validation must run from main.",
+    });
+
+    expect(run.results.map((result) => result.prNumber)).toEqual([696, 705]);
+    expect(run.results.every((result) => result.result === "blocked")).toBe(true);
+    expect(run.blockers.map((blocker) => blocker.prNumber)).toEqual([696, 705]);
+  });
 });
