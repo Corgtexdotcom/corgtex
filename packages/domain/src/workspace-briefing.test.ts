@@ -514,7 +514,7 @@ describe("workspace briefing", () => {
 
     expect(briefing.introMd).toContain("strongest signal");
     expect(briefing.leadMd).toContain("**");
-    expect(briefing.attentionMd).toContain("attention points");
+    expect(briefing.attentionMd).toContain("Needs attention today");
     expect(briefing.continuingContextMd).toContain("**");
     expect(briefing.introMd).not.toContain("1 proposal");
     expect([

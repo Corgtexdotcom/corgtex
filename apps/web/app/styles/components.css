@@ -45,6 +45,26 @@
     grid-template-columns: var(--ws-sidebar-width) minmax(0, 1fr) var(--ws-agent-rail-width);
   }
 
+  .ws-layout:has(.nr-newspaper-page) {
+    --ws-agent-rail-width: 0px;
+    --ws-agent-rail-half-width: 0px;
+    --ws-main-content-max-width: 1120px;
+    --ws-main-content-half-max-width: 560px;
+    grid-template-columns: var(--ws-sidebar-width) minmax(0, 1fr) 0;
+  }
+
+  .ws-layout:has(.nr-newspaper-page) .ws-agent-sidebar {
+    display: none;
+  }
+
+  .ws-layout:has(.nr-newspaper-page) .mobile-bottom-nav {
+    display: none;
+  }
+
+  .ws-layout:has(.nr-newspaper-page) .product-feedback-widget {
+    display: none;
+  }
+
   .ws-layout:has([data-workspace-surface="enterprise-app"]) .workspace-add-menu {
     display: none;
   }

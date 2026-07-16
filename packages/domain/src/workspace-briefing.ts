@@ -457,12 +457,19 @@ function joinNarrativeParagraphs(items: WorkspaceBriefingItem[], maxItems: numbe
 
 function joinAttentionItems(items: WorkspaceBriefingItem[]) {
   if (items.length === 0) return null;
-  const details = items.slice(0, 4).map((item) => {
+  const details = items.slice(0, 3).map((item) => {
     const summary = normalizeNarrativeText(item.summaryMd, 260);
     if (!summary || summary === item.title) return cleanBriefingTitle(item.title, workspaceBriefingSourceLabel(item.kind));
     return `${cleanBriefingTitle(item.title, workspaceBriefingSourceLabel(item.kind))}: ${summary}`;
   });
-  return `The main attention points are ${details.join("; ")}.`;
+  if (details.length === 1) {
+    return `Needs attention today: ${details[0]}`;
+  }
+  const [primary, ...rest] = details;
+  return [
+    `Needs attention today: ${primary}`,
+    `Also keep watch on ${rest.join(". ")}`,
+  ].join("\n\n");
 }
 
 function composeWorkspaceBriefingNarrative(params: {
