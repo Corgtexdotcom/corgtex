@@ -75,8 +75,8 @@ function progressDate(progress, key) {
 
 function transcriptObservedAt(meeting) {
   const progress = meeting.transcriptProcessingProgress ?? null;
-  return progressDate(progress, "createdAt")
-    ?? progressDate(progress, "startedAt")
+  return progressDate(progress, "startedAt")
+    ?? progressDate(progress, "createdAt")
     ?? progressDate(progress, "updatedAt")
     ?? meeting.updatedAt
     ?? meeting.createdAt;
@@ -138,8 +138,8 @@ export function buildMeetingTranscriptUploadDiagnostics({
     transcriptGroups.set(hash, group);
 
     const progress = meeting.transcriptProcessingProgress ?? null;
-    const processingObservedAt = progressDate(progress, "createdAt")
-      ?? progressDate(progress, "startedAt")
+    const processingObservedAt = progressDate(progress, "startedAt")
+      ?? progressDate(progress, "createdAt")
       ?? progressDate(progress, "updatedAt")
       ?? meeting.updatedAt
       ?? meeting.createdAt;

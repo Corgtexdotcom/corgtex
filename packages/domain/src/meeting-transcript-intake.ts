@@ -240,7 +240,7 @@ export async function intakeMeetingTranscript(actor: AppActor, params: {
     source: params.source,
     recordedAt: existingMeeting?.recordedAt ?? params.recordedAt ?? null,
     participantEmails: [...(params.participantEmails ?? []), ...(existingMeeting?.participantEmails ?? [])],
-    validateExplicitRecordedAt: Boolean(!params.provider && !existingMeeting),
+    validateExplicitRecordedAt: Boolean(!(params.provider && params.sourceRecordId) && !existingMeeting),
     now: params.now,
   });
 

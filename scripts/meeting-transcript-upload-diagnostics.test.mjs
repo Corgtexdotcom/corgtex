@@ -106,7 +106,7 @@ describe("meeting transcript upload diagnostics", () => {
     }));
   });
 
-  it("does not mark newly started processing stale because the meeting record is old", () => {
+  it("does not mark newly restarted processing stale because older records exist", () => {
     const summary = buildMeetingTranscriptUploadDiagnostics({
       checkedAt: new Date("2026-07-16T12:00:00.000Z"),
       meetings: [
@@ -117,7 +117,7 @@ describe("meeting transcript upload diagnostics", () => {
           transcriptProcessingProgress: {
             currentStage: "SUMMARIZING",
             currentWorkflowJobStatus: "PENDING",
-            createdAt: new Date("2026-07-16T11:59:00.000Z"),
+            createdAt: new Date("2026-06-01T10:00:00.000Z"),
             startedAt: new Date("2026-07-16T11:59:30.000Z"),
             failedAt: null,
             updatedAt: new Date("2026-07-16T11:59:30.000Z"),

@@ -90,7 +90,7 @@ describe("meeting transcript intake", () => {
       workspaceIds: ["workspace-1"],
     }, {
       workspaceId: "workspace-1",
-      source: "transcript-upload",
+      source: "meeting-transcript:fireflies", provider: "FIREFLIES",
       transcript: "Date: 2001-07-15\nJan: We need a follow-up.",
       now: TEST_NOW,
     })).resolves.toMatchObject({
@@ -150,7 +150,7 @@ describe("meeting transcript intake", () => {
       title: "Historical provider transcript",
       recordedAt: new Date("2001-07-15T11:00:00.000Z"),
       source: "meeting-transcript:fireflies",
-      provider: "FIREFLIES",
+      provider: "FIREFLIES", sourceRecordId: "source-record-1",
       transcript: "Jan: Provider imported this historical meeting.",
       now: TEST_NOW,
     })).resolves.toMatchObject({
