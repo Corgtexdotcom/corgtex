@@ -2,7 +2,7 @@
 
 process.env.CORGTEX_STARTUP_MODE = "migrate-and-seed";
 process.env.CORGTEX_AUTO_SEED_JNJ_DEMO = "false";
-process.env.SEED_SCRIPTS = "";
+process.env.SEED_SCRIPTS = "scripts/seed-internal-validation-workspace.mjs";
 
 const { main } = await import("./start-web.mjs");
 

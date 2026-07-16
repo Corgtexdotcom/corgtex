@@ -5,6 +5,7 @@ import {
   activateMobileAskTab,
   activateMobileMode,
   activateMobileWorkspaceMode,
+  demoAddGuardRouteSuffix,
   isWorkspaceUrl,
   labelConsoleEntry,
   submitLoginForm,
@@ -91,6 +92,12 @@ describe("client readiness smoke login handling", () => {
       type: "error",
       text: "boom",
     });
+  });
+
+  it("builds a demo Add route guard check with the selected workspace path", () => {
+    expect(demoAddGuardRouteSuffix("/workspaces/ws-1")).toBe(
+      "/add?kind=upload_file&returnTo=%2Fworkspaces%2Fws-1%2Fbrain",
+    );
   });
 });
 
