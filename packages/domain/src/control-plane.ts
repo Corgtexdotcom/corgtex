@@ -912,8 +912,10 @@ const CLIENT_FEATURE_POSTURES = {
   },
   // Consulting practices (e.g. Chirone) opt into the Practice Ledger project
   // portfolio capability on top of the always-on expenses/ledger baseline.
+  // Slicing Pie stays explicitly opt-in because it changes how contributions
+  // are analyzed and is not appropriate for every practice.
   consulting: {
-    "practice-ledger": true,
+    "practice-ledger": { PRACTICE_PROJECTS: true },
   },
 } satisfies Record<string, ModulePostureBundle>;
 
