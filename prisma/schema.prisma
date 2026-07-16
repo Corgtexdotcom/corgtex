@@ -633,6 +633,17 @@ model Workspace {
   moduleAccessRequests           WorkspaceModuleAccessRequest[]
   practiceProjects               PracticeProject[]
   practiceContributionEntries    PracticeContributionEntry[]
+  practiceClients                PracticeClient[]
+  practiceBillingCodes           PracticeBillingCode[]
+  practiceConsultants            PracticeConsultant[]
+  practiceProjectLines           PracticeProjectLine[]
+  practicePurchaseOrders         PracticePurchaseOrder[]
+  practiceProjectAssignments     PracticeProjectAssignment[]
+  practiceSourceDocuments        PracticeSourceDocument[]
+  practiceTimeEntries            PracticeTimeEntry[]
+  practiceExpenses               PracticeExpense[]
+  practiceEntryReviews           PracticeEntryReview[]
+  practicePaymentBatches         PracticePaymentBatch[]
   meetingRecorderConfig          WorkspaceMeetingRecorderConfig?
   recorderCalendarSources        WorkspaceRecorderCalendarSource[]
   meetingRecordings              MeetingRecording[]
@@ -1977,6 +1988,119 @@ enum PracticeContributionCashStatus {
   PAID
 }
 
+enum PracticeClientStatus {
+  ACTIVE
+  ARCHIVED
+}
+
+enum PracticeProjectLineKind {
+  SERVICES
+  EXPENSES
+  SUBSCRIPTIONS
+  COMMISSION
+  INTERNAL
+}
+
+enum PracticeEntryStatus {
+  POSTED
+  REVERSED
+}
+
+enum PracticeSourceDocumentType {
+  INVOICE
+  STATEMENT
+  RECEIPT
+  TIMESHEET
+  OTHER
+}
+
+enum PracticeSourceDocumentStatus {
+  POSTED
+  NEEDS_REVIEW
+  ARCHIVED
+}
+
+enum PracticeEntryReviewTarget {
+  TIME_ENTRY
+  EXPENSE
+}
+
+enum PracticeEntryReviewStatus {
+  DRAFT
+  SUBMITTED
+  APPROVED
+  SETTLED
+}
+
+model PracticeClient {
+  id                String               @id @default(uuid())
+  workspaceId       String
+  crmAccountId      String?
+  code              String
+  name              String
+  leadName          String?
+  status            PracticeClientStatus @default(ACTIVE)
+  sourceSatelliteId String?
+  createdAt         DateTime             @default(now())
+  updatedAt         DateTime             @updatedAt
+
+  workspace    Workspace             @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  crmAccount   CrmAccount?           @relation(fields: [crmAccountId], references: [id], onDelete: SetNull)
+  billingCodes PracticeBillingCode[]
+  projects     PracticeProject[]
+  timeEntries  PracticeTimeEntry[]
+  expenses     PracticeExpense[]
+
+  @@unique([workspaceId, code])
+  @@unique([workspaceId, sourceSatelliteId])
+  @@index([workspaceId, status])
+  @@index([workspaceId, crmAccountId])
+}
+
+model PracticeBillingCode {
+  id                String   @id @default(uuid())
+  workspaceId       String
+  clientId          String?
+  code              String
+  name              String
+  billable          Boolean  @default(true)
+  sourceSatelliteId String?
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  workspace   Workspace          @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  client      PracticeClient?    @relation(fields: [clientId], references: [id], onDelete: SetNull)
+  projects    PracticeProject[]
+  timeEntries PracticeTimeEntry[]
+  expenses    PracticeExpense[]
+
+  @@unique([workspaceId, code])
+  @@unique([workspaceId, sourceSatelliteId])
+  @@index([workspaceId, clientId])
+}
+
+model PracticeConsultant {
+  id                String   @id @default(uuid())
+  workspaceId       String
+  name              String
+  email             String?
+  homeCurrency      String   @default("USD")
+  active            Boolean  @default(true)
+  sourceSatelliteId String?
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  workspace      Workspace                   @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  assignments    PracticeProjectAssignment[]
+  timeEntries    PracticeTimeEntry[]
+  expenses       PracticeExpense[]
+  paymentBatches PracticePaymentBatch[]
+
+  @@unique([workspaceId, sourceSatelliteId])
+  @@index([workspaceId, active])
+  @@index([workspaceId, email])
+}
+
 /// Native first-party practice-finance project, the cutover target for the
 /// Practice Ledger satellite (tier 3 -> tier 2). Owns the data Corgtex Postgres
 /// now holds; `sourceSatelliteId` carries the stable Practice Ledger id so a
@@ -1986,10 +2110,13 @@ model PracticeProject {
   workspaceId        String
   crmAccountId       String?
   crmDealId          String?               @unique
+  clientId           String?
+  billingCodeId      String?
   code               String
   name               String
   clientName         String
   status             PracticeProjectStatus @default(ACTIVE)
+  currency           String                @default("USD")
   poValueCents       Int                   @default(0)
   serviceBudgetCents Int                   @default(0)
   expenseBudgetCents Int                   @default(0)
@@ -1997,19 +2124,257 @@ model PracticeProject {
   weeklyBurnCents    Int                   @default(0)
   targetMarginBps    Int?
   currentMarginBps   Int?
+  startsOn           DateTime?
+  endsOn             DateTime?
   sourceSatelliteId  String?
   createdAt          DateTime              @default(now())
   updatedAt          DateTime              @updatedAt
 
-  workspace  Workspace   @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-  crmAccount CrmAccount? @relation(fields: [crmAccountId], references: [id], onDelete: SetNull)
-  crmDeal    CrmDeal?    @relation(fields: [crmDealId], references: [id], onDelete: SetNull)
+  workspace      Workspace                   @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  crmAccount     CrmAccount?                 @relation(fields: [crmAccountId], references: [id], onDelete: SetNull)
+  crmDeal        CrmDeal?                    @relation(fields: [crmDealId], references: [id], onDelete: SetNull)
+  client         PracticeClient?             @relation(fields: [clientId], references: [id], onDelete: SetNull)
+  billingCode    PracticeBillingCode?        @relation(fields: [billingCodeId], references: [id], onDelete: SetNull)
   contributionEntries PracticeContributionEntry[]
+  lines          PracticeProjectLine[]
+  purchaseOrders PracticePurchaseOrder[]
+  assignments    PracticeProjectAssignment[]
+  timeEntries    PracticeTimeEntry[]
+  expenses       PracticeExpense[]
 
   @@unique([workspaceId, code])
   @@unique([workspaceId, sourceSatelliteId])
   @@index([workspaceId, status])
   @@index([workspaceId, crmAccountId])
+  @@index([workspaceId, clientId])
+  @@index([workspaceId, billingCodeId])
+}
+
+model PracticeProjectLine {
+  id                String                  @id @default(uuid())
+  workspaceId       String
+  projectId         String
+  kind              PracticeProjectLineKind
+  name              String
+  budgetCents       Int                     @default(0)
+  billRateCents     Int?
+  costRateCents     Int?
+  sourceSatelliteId String?
+  createdAt         DateTime                @default(now())
+  updatedAt         DateTime                @updatedAt
+
+  workspace   Workspace          @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  project     PracticeProject    @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  timeEntries PracticeTimeEntry[]
+  expenses    PracticeExpense[]
+
+  @@unique([workspaceId, sourceSatelliteId])
+  @@index([workspaceId, projectId])
+  @@index([projectId, kind])
+}
+
+model PracticePurchaseOrder {
+  id                  String    @id @default(uuid())
+  workspaceId         String
+  projectId           String
+  poNumber            String
+  issuedOn            DateTime?
+  amountCents         Int       @default(0)
+  remainingPriorCents Int       @default(0)
+  sourceSatelliteId   String?
+  createdAt           DateTime  @default(now())
+  updatedAt           DateTime  @updatedAt
+
+  workspace Workspace       @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  project   PracticeProject @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@unique([projectId, poNumber])
+  @@unique([workspaceId, sourceSatelliteId])
+  @@index([workspaceId, projectId])
+}
+
+model PracticeProjectAssignment {
+  id                String   @id @default(uuid())
+  workspaceId       String
+  projectId         String
+  consultantId      String
+  role              String
+  sourceSatelliteId String?
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  workspace  Workspace          @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  project    PracticeProject    @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  consultant PracticeConsultant @relation(fields: [consultantId], references: [id], onDelete: Cascade)
+
+  @@unique([workspaceId, projectId, consultantId])
+  @@unique([workspaceId, sourceSatelliteId])
+  @@index([workspaceId, projectId])
+  @@index([workspaceId, consultantId])
+}
+
+model PracticeSourceDocument {
+  id                String                       @id @default(uuid())
+  workspaceId       String
+  type              PracticeSourceDocumentType
+  status            PracticeSourceDocumentStatus @default(POSTED)
+  fileName          String?
+  mimeType          String?
+  storageKey        String?
+  contentHash       String?
+  parserClient      String?
+  parserConfidence  Decimal?                     @db.Decimal(5, 4)
+  submittedPayload  Json?
+  createdRecords    Json?
+  sourceSatelliteId String?
+  createdAt         DateTime                     @default(now())
+  updatedAt         DateTime                     @updatedAt
+
+  workspace   Workspace           @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  timeEntries PracticeTimeEntry[]
+  expenses    PracticeExpense[]
+
+  @@unique([workspaceId, sourceSatelliteId])
+  @@index([workspaceId, type])
+  @@index([workspaceId, contentHash])
+}
+
+model PracticePaymentBatch {
+  id                String   @id @default(uuid())
+  workspaceId       String
+  consultantId      String
+  currency          String   @default("USD")
+  totalAmountCents  Int      @default(0)
+  cashAmountCents   Int      @default(0)
+  sliceAmountCents  Int      @default(0)
+  memo              String?
+  settledAt         DateTime @default(now())
+  sourceSatelliteId String?
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  workspace   Workspace            @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  consultant  PracticeConsultant   @relation(fields: [consultantId], references: [id], onDelete: Restrict)
+  timeEntries PracticeTimeEntry[]
+  expenses    PracticeExpense[]
+
+  @@unique([workspaceId, sourceSatelliteId])
+  @@index([workspaceId, consultantId, settledAt])
+}
+
+model PracticeTimeEntry {
+  id                String              @id @default(uuid())
+  workspaceId       String
+  clientId          String
+  billingCodeId     String?
+  projectId         String
+  projectLineId     String?
+  consultantId      String
+  sourceDocumentId  String?
+  paymentBatchId    String?
+  workedOn          DateTime
+  weekEndingOn      DateTime
+  hours             Decimal             @db.Decimal(8, 2)
+  assignmentType    String
+  currency          String              @default("USD")
+  billCurrency      String?
+  costCurrency      String?
+  functionalCurrency String?
+  billRateCents     Int                 @default(0)
+  costRateCents     Int                 @default(0)
+  billAmountCents   Int?
+  costAmountCents   Int?
+  paidAmountCents   Int?
+  status            PracticeEntryStatus @default(POSTED)
+  sourceSatelliteId String?
+  idempotencyKey    String?
+  createdAt         DateTime            @default(now())
+  updatedAt         DateTime            @updatedAt
+
+  workspace      Workspace               @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  client         PracticeClient           @relation(fields: [clientId], references: [id], onDelete: Restrict)
+  billingCode    PracticeBillingCode?     @relation(fields: [billingCodeId], references: [id], onDelete: SetNull)
+  project        PracticeProject          @relation(fields: [projectId], references: [id], onDelete: Restrict)
+  projectLine    PracticeProjectLine?     @relation(fields: [projectLineId], references: [id], onDelete: SetNull)
+  consultant     PracticeConsultant       @relation(fields: [consultantId], references: [id], onDelete: Restrict)
+  sourceDocument PracticeSourceDocument?  @relation(fields: [sourceDocumentId], references: [id], onDelete: SetNull)
+  paymentBatch   PracticePaymentBatch?    @relation(fields: [paymentBatchId], references: [id], onDelete: SetNull)
+  reviews        PracticeEntryReview[]    @relation("PracticeTimeEntryReviews")
+
+  @@unique([workspaceId, sourceSatelliteId])
+  @@unique([workspaceId, idempotencyKey])
+  @@index([workspaceId, workedOn])
+  @@index([projectId, weekEndingOn])
+  @@index([consultantId, weekEndingOn])
+  @@index([paymentBatchId])
+}
+
+model PracticeExpense {
+  id                    String              @id @default(uuid())
+  workspaceId           String
+  clientId              String
+  billingCodeId         String?
+  projectId             String
+  projectLineId         String?
+  consultantId          String?
+  sourceDocumentId      String?
+  paymentBatchId        String?
+  spentOn               DateTime
+  vendor                String?
+  category              String
+  businessPurpose       String
+  amountCents           Int
+  currency              String              @default("USD")
+  amountFunctionalCents Int?
+  functionalCurrency    String?
+  billable              Boolean             @default(true)
+  status                PracticeEntryStatus @default(POSTED)
+  sourceSatelliteId     String?
+  idempotencyKey        String?
+  createdAt             DateTime            @default(now())
+  updatedAt             DateTime            @updatedAt
+
+  workspace      Workspace               @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  client         PracticeClient           @relation(fields: [clientId], references: [id], onDelete: Restrict)
+  billingCode    PracticeBillingCode?     @relation(fields: [billingCodeId], references: [id], onDelete: SetNull)
+  project        PracticeProject          @relation(fields: [projectId], references: [id], onDelete: Restrict)
+  projectLine    PracticeProjectLine?     @relation(fields: [projectLineId], references: [id], onDelete: SetNull)
+  consultant     PracticeConsultant?      @relation(fields: [consultantId], references: [id], onDelete: SetNull)
+  sourceDocument PracticeSourceDocument?  @relation(fields: [sourceDocumentId], references: [id], onDelete: SetNull)
+  paymentBatch   PracticePaymentBatch?    @relation(fields: [paymentBatchId], references: [id], onDelete: SetNull)
+  reviews        PracticeEntryReview[]    @relation("PracticeExpenseReviews")
+
+  @@unique([workspaceId, sourceSatelliteId])
+  @@unique([workspaceId, idempotencyKey])
+  @@index([workspaceId, spentOn])
+  @@index([projectId, spentOn])
+  @@index([consultantId, spentOn])
+  @@index([paymentBatchId])
+}
+
+model PracticeEntryReview {
+  id                String                    @id @default(uuid())
+  workspaceId       String
+  targetType        PracticeEntryReviewTarget
+  timeEntryId       String?
+  expenseId         String?
+  status            PracticeEntryReviewStatus @default(SUBMITTED)
+  note              String?
+  reviewedByUserId  String?
+  sourceSatelliteId String?
+  createdAt         DateTime                  @default(now())
+  updatedAt         DateTime                  @updatedAt
+
+  workspace Workspace          @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  timeEntry PracticeTimeEntry? @relation("PracticeTimeEntryReviews", fields: [timeEntryId], references: [id], onDelete: Cascade)
+  expense   PracticeExpense?   @relation("PracticeExpenseReviews", fields: [expenseId], references: [id], onDelete: Cascade)
+
+  @@unique([workspaceId, sourceSatelliteId])
+  @@unique([workspaceId, targetType, timeEntryId])
+  @@unique([workspaceId, targetType, expenseId])
+  @@index([workspaceId, status])
+  @@index([timeEntryId])
+  @@index([expenseId])
 }
 
 model PracticeContributionEntry {
@@ -3950,6 +4315,7 @@ model CrmAccount {
   crmConversations         CrmConversation[]
   prospectWorkspaces       CrmProspectWorkspace[]
   practiceProjects         PracticeProject[]
+  practiceClients          PracticeClient[]
 
   @@unique([workspaceId, slug])
   @@index([workspaceId, relationshipType, lifecycleStage])
