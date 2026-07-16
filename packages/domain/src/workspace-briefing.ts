@@ -513,7 +513,11 @@ function composeWorkspaceBriefingNarrative(params: {
     ? "No major new operating signal was found for this edition. The briefing stays short and uses continuing context instead of inventing activity."
     : sentenceFromItem(leadItem, params.period === "WEEKLY" ? 980 : 860);
   const bodyCandidates = freshItems.filter((item) => item !== leadItem);
-  const bodyItems = (bodyCandidates.length > 0 ? bodyCandidates : hasFreshItems ? meaningfulItems.slice(1) : [])
+  const bodyItems = (bodyCandidates.length > 0
+    ? bodyCandidates
+    : hasFreshItems
+      ? meaningfulItems.filter((item) => itemKey(item) !== itemKey(leadItem))
+      : [])
     .slice(0, params.period === "WEEKLY" ? 5 : 4);
   const usedKeys = new Set([
     ...(hasFreshItems ? [itemKey(leadItem)] : []),

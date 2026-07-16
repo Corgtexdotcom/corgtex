@@ -63,6 +63,13 @@ function narrativeLine(title: string | null | undefined, summary: string | null 
     : `**${normalizedTitle}**`;
 }
 
+function latestActivityTime(...values: Array<Date | string | null | undefined>) {
+  const times = values
+    .map((value) => value ? new Date(value).getTime() : Number.NaN)
+    .filter((time) => Number.isFinite(time));
+  return times.length > 0 ? Math.max(...times) : 0;
+}
+
 function legacyEditionNarrative(
   editionDigest: ReturnType<typeof normalizeNewspaperEditionDigest> | null,
   labels: { intro: string; closing: string },
@@ -85,6 +92,7 @@ function liveWorkspaceNarrative(params: {
     title: string;
     bodyMd?: string | null;
     type?: string | null;
+    isPrivate?: boolean | null;
     updatedAt?: Date | string | null;
     publishedAt?: Date | string | null;
     createdAt?: Date | string | null;
@@ -114,10 +122,10 @@ function liveWorkspaceNarrative(params: {
       };
     }),
     ...params.articles
-      .filter((article) => article.type !== "DIGEST")
+      .filter((article) => article.type !== "DIGEST" && !article.isPrivate)
       .slice(0, 4)
       .map((article) => ({
-        occurredAt: new Date(article.publishedAt ?? article.updatedAt ?? article.createdAt ?? 0).getTime(),
+        occurredAt: latestActivityTime(article.updatedAt, article.publishedAt, article.createdAt),
         line: narrativeLine(article.title, compactNarrativeText(article.bodyMd, 560)),
         sourceRef: {
           type: "BRAIN_ARTICLE",

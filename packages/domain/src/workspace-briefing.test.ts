@@ -864,6 +864,56 @@ describe("workspace briefing", () => {
     ].filter(Boolean).join("\n")).toContain("Strategic market entry proposal");
   });
 
+  it("does not repeat the only fresh item when stale context sorts first", async () => {
+    const { buildWorkspaceBriefingFromCandidates } = await import("./workspace-briefing");
+    const briefing = buildWorkspaceBriefingFromCandidates({
+      workspaceId: "ws-1",
+      period: "DAILY",
+      dateKey: "2026-04-30",
+      title: "Daily Workspace Briefing - 2026-04-30",
+      generatedAt: new Date("2026-04-30T12:00:00.000Z"),
+      candidates: [
+        baseCandidate({
+          sourceType: "PROPOSAL",
+          sourceId: "proposal-stale",
+          title: "Strategic market entry proposal",
+          summaryMd: "A strategic proposal remains open and still matters.",
+          href: "/workspaces/ws-1/proposals/proposal-stale",
+          occurredAt: new Date("2026-03-10T12:00:00.000Z"),
+          updatedAt: new Date("2026-03-10T12:00:00.000Z"),
+          status: "OPEN",
+          priority: 3,
+          strategicScore: 5,
+          actionabilityScore: 4,
+          evidenceScore: 4,
+          sourceRefs: [{ type: "PROPOSAL", id: "proposal-stale", label: "Strategic market entry proposal", href: "/workspaces/ws-1/proposals/proposal-stale" }],
+        }),
+        baseCandidate({
+          sourceType: "MEETING",
+          sourceId: "meeting-fresh",
+          title: "Fresh operating recap",
+          summaryMd: "The team uploaded the only new meeting recap today.",
+          href: "/workspaces/ws-1/meetings/meeting-fresh",
+          occurredAt: new Date("2026-04-30T10:00:00.000Z"),
+          updatedAt: new Date("2026-04-30T10:00:00.000Z"),
+          status: "COMPLETED",
+          strategicScore: 1,
+          actionabilityScore: 1,
+          evidenceScore: 2,
+          sourceRefs: [{ type: "MEETING", id: "meeting-fresh", label: "Fresh operating recap", href: "/workspaces/ws-1/meetings/meeting-fresh" }],
+        }),
+      ],
+    });
+    const narrative = [
+      briefing.leadMd,
+      briefing.bodyMd,
+      briefing.attentionMd,
+      briefing.continuingContextMd,
+    ].filter(Boolean).join("\n");
+
+    expect(narrative.match(/Fresh operating recap/g)).toHaveLength(1);
+  });
+
   it("uses narrative text instead of mechanical source counts or visible categories", async () => {
     const { buildWorkspaceBriefingFromCandidates } = await import("./workspace-briefing");
     const briefing = buildWorkspaceBriefingFromCandidates({
