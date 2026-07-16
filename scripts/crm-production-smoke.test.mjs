@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  CrmSmoke,
   crmScreenshotFileName,
   crmVisualTargets,
   evaluateKanbanSnapshot,
@@ -94,5 +95,26 @@ describe("CRM production smoke pending operation parsing", () => {
 
   it("fails loudly when chat omits the pending operation contract", () => {
     expect(() => parsePendingOperationId("Please say yes.")).toThrow("pending operation ID");
+  });
+});
+
+describe("CRM production smoke validation matrix", () => {
+  it("records one validation result per covered PR number", () => {
+    const smoke = new CrmSmoke({
+      baseUrl: "https://app.corgtex.com",
+      outDir: ".artifacts/test-crm-production-smoke",
+      expectedGitSha: null,
+      workspaceSelector: { workspaceSlug: "corgtex-validation", explicit: true },
+      authEmail: "admin@example.com",
+      authPassword: "password",
+      requireSafeWorkspace: true,
+      headless: true,
+      prNumbers: [696, 706],
+    });
+
+    smoke.recordValidationOutcome("passed", null, "/tmp/crm-production-smoke.json");
+
+    expect(smoke.validationRun.results.map((result) => result.prNumber)).toEqual([696, 706]);
+    expect(smoke.validationRun.results.every((result) => result.result === "pass")).toBe(true);
   });
 });

@@ -236,6 +236,13 @@ export async function deleteConversation(actor: AppActor, params: {
   if (session.roleOnboarding) {
     return prisma.$transaction(async (tx) => {
       const now = new Date();
+      await tx.conversationPendingOperation.deleteMany({
+        where: {
+          workspaceId: params.workspaceId,
+          conversationId: params.conversationId,
+          status: { not: "EXECUTING" },
+        },
+      });
       await tx.roleOnboardingSession.updateMany({
         where: {
           conversationId: params.conversationId,
@@ -254,7 +261,16 @@ export async function deleteConversation(actor: AppActor, params: {
     });
   }
 
-  return prisma.conversationSession.delete({
-    where: { id: params.conversationId },
+  return prisma.$transaction(async (tx) => {
+    await tx.conversationPendingOperation.deleteMany({
+      where: {
+        workspaceId: params.workspaceId,
+        conversationId: params.conversationId,
+        status: { not: "EXECUTING" },
+      },
+    });
+    return tx.conversationSession.delete({
+      where: { id: params.conversationId },
+    });
   });
 }
