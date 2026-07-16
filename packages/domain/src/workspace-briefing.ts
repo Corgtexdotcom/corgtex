@@ -675,7 +675,17 @@ function candidateProbablyMatchesDigestItem(candidate: WorkspaceBriefingCandidat
   ].filter(Boolean).join(" "));
   const itemTokens = digestMatchTokens(rawItem);
   if (candidateTokens.size < 3 || itemTokens.size < 3) return false;
-  return tokenOverlapScore(candidateTokens, itemTokens) >= 0.5;
+  const overlapScore = tokenOverlapScore(candidateTokens, itemTokens);
+  let overlap = 0;
+  for (const token of itemTokens) {
+    if (candidateTokens.has(token)) overlap++;
+  }
+  const itemCoverage = overlap / itemTokens.size;
+  const candidateCoverage = overlap / candidateTokens.size;
+  if (itemTokens.size <= 5) {
+    return overlapScore >= 0.85 && itemCoverage >= 0.85 && candidateCoverage >= 0.65;
+  }
+  return overlapScore >= 0.65 && itemCoverage >= 0.65 && candidateCoverage >= 0.35;
 }
 
 function candidateMatchesDigestItem(candidate: WorkspaceBriefingCandidate, rawItem: string) {

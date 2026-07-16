@@ -1058,6 +1058,44 @@ describe("workspace briefing", () => {
     }));
   });
 
+  it("does not bind short digest items to merely similar source titles", async () => {
+    const { buildWorkspaceBriefingFromDigest } = await import("./workspace-briefing");
+
+    const briefing = buildWorkspaceBriefingFromDigest({
+      workspaceId: "ws-1",
+      period: "DAILY",
+      dateKey: "2026-04-30",
+      title: "Daily Workspace Briefing - 2026-04-30",
+      generatedAt: new Date("2026-04-30T12:00:00.000Z"),
+      digest: {
+        intro: null,
+        sections: [{
+          id: "actionItems",
+          title: "Action Items",
+          items: ["Review customer launch owner"],
+        }],
+      },
+      candidates: [
+        baseCandidate({
+          sourceType: "ACTION",
+          sourceId: "action-checklist",
+          title: "Review customer launch checklist",
+          summaryMd: "The checklist must be reviewed before launch.",
+          href: "/workspaces/ws-1/actions/action-checklist",
+          sourceRefs: [{ type: "ACTION", id: "action-checklist", label: "Review customer launch checklist", href: "/workspaces/ws-1/actions/action-checklist" }],
+        }),
+      ],
+    });
+
+    expect(briefing.items[0]).toEqual(expect.objectContaining({
+      kind: "ACTION",
+      summaryMd: "Review customer launch owner",
+      href: null,
+      sourceRefs: [],
+    }));
+    expect(briefing.sourceRefs).toEqual([]);
+  });
+
   it("links workspace advice requests to their actual subject", async () => {
     const { collectWorkspaceBriefingCandidates } = await import("./workspace-briefing");
     prismaMock.adviceRequest.findMany.mockResolvedValueOnce([{
