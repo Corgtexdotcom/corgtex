@@ -54,6 +54,21 @@ jobs:
           fi
           echo "expected_git_sha=$expected" >> "$GITHUB_OUTPUT"
 
+      - name: Prepare validation artifact directory
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$OUT_DIR"
+          {
+            echo "workflow=$GITHUB_WORKFLOW"
+            echo "run_id=$GITHUB_RUN_ID"
+            echo "sha=$GITHUB_SHA"
+            echo "base_url=$BASE_URL"
+            echo "workspace_slug=$WORKSPACE_SLUG"
+            echo "pr_numbers=$PR_NUMBERS"
+            echo "expected_git_sha=${{ steps.release.outputs.expected_git_sha }}"
+          } > "$OUT_DIR/workflow.log"
+
       - name: Check production smoke credentials
         id: credentials
         shell: bash
