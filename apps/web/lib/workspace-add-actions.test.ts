@@ -117,11 +117,19 @@ describe("workspace add actions", () => {
       featureFlags: { ...DEFAULT_WORKSPACE_FEATURE_FLAGS, GOALS: false },
     })).toEqual([]);
     expect(kinds({ pathname: "/workspaces/ws-1/meetings", isDemo: true })).toEqual([]);
+    expect(kinds({ pathname: "/workspaces/ws-1/finance", isDemo: true })).toEqual([]);
+    expect(kinds({
+      pathname: "/workspaces/ws-1/finance",
+      featureFlags: { ...DEFAULT_WORKSPACE_FEATURE_FLAGS, FINANCE: false },
+    })).toEqual([]);
   });
 
   it("uses tab and view context for multi-surface pages", () => {
-    expect(kinds({ pathname: "/workspaces/ws-1/finance" })).toEqual([]);
-    expect(kinds({ pathname: "/workspaces/ws-1/finance", searchParams: "tab=accounts" })).toEqual([]);
+    expect(kinds({ pathname: "/workspaces/ws-1/finance" })).toEqual(["finance_project"]);
+    expect(kinds({ pathname: "/workspaces/ws-1/finance", role: "FINANCE_STEWARD" })).toEqual(["finance_project"]);
+    expect(kinds({ pathname: "/workspaces/ws-1/finance", role: "FACILITATOR" })).toEqual(["finance_project"]);
+    expect(kinds({ pathname: "/workspaces/ws-1/finance", role: "CONTRIBUTOR" })).toEqual(["finance_project"]);
+    expect(kinds({ pathname: "/workspaces/ws-1/finance", searchParams: "tab=accounts" })).toEqual(["finance_project"]);
     expect(kinds({ pathname: "/workspaces/ws-1/leads" })).toEqual([
       "crm_account",
       "contact",

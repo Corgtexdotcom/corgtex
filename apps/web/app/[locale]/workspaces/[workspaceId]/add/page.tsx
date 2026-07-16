@@ -4,6 +4,7 @@ import {
   createCatalogRequest,
   createExternalDataSource,
   createWorkspaceToolLink,
+  canManagePracticeFinanceProjects,
   getMeetingRecorderConfig,
   getMemberInvitePolicy,
   listCrmAccounts,
@@ -81,8 +82,10 @@ import {
   CRM_RELATIONSHIP_OPTIONS,
   labelFromCrmCode,
 } from "../leads/view-model";
+import { createPracticeProjectAction } from "../finance/actions";
 import { MeetingTranscriptUploadForm } from "../meetings/MeetingTranscriptUploadForm";
 import { PasteTextForm } from "./PasteTextForm";
+import { PracticeProjectAddPanel } from "./PracticeProjectAddPanel";
 
 export const dynamic = "force-dynamic";
 
@@ -184,6 +187,9 @@ export default async function WorkspaceAddPage({
   const meetingRecorderEnabled = Boolean(
     featureFlags.MEETING_RECORDERS && meetingRecorderConfig?.featureEnabled && meetingRecorderConfig.config.enabled,
   );
+  const canManagePracticeProjects = await canManagePracticeFinanceProjects(actor, workspaceId, {
+    resolvedMembership: membership,
+  });
 
   const returnTo = sanitizeWorkspaceReturnTo(workspaceId, search.returnTo);
   const contextCircleId = circleIdFromReturnTo(returnTo, workspaceId);
@@ -350,6 +356,12 @@ export default async function WorkspaceAddPage({
   async function createAllocationAndReturn(formData: FormData) {
     "use server";
     await createAllocationAction(formData);
+    redirect(returnTo);
+  }
+
+  async function createPracticeProjectAndReturn(formData: FormData) {
+    "use server";
+    await createPracticeProjectAction(formData);
     redirect(returnTo);
   }
 
@@ -817,6 +829,15 @@ export default async function WorkspaceAddPage({
             {allocatableCycles.length === 0 && <p className="form-message form-message-error">No cycles are currently open for allocations.</p>}
             <div className="actions-inline"><button type="submit" disabled={allocatableCycles.length === 0}>Create allocation</button>{cancelLink(returnTo)}</div>
           </form>
+        )}
+
+        {kind === "finance_project" && (
+          <PracticeProjectAddPanel
+            action={createPracticeProjectAndReturn}
+            canManagePracticeProjects={canManagePracticeProjects}
+            returnTo={returnTo}
+            workspaceId={workspaceId}
+          />
         )}
 
         {kind === "article" && (

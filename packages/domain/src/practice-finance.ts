@@ -165,6 +165,51 @@ const PRACTICE_FINANCE_MANAGE_ROLES: MemberRole[] = (() => {
   const roles = financeModule ? rolesWithDefaultAccess(financeModule, "write") : ["FINANCE_STEWARD", "ADMIN"];
   return roles as MemberRole[];
 })();
+const FINANCE_FEATURE_FLAG = "FINANCE";
+const PRACTICE_PROJECTS_ALL_MEMBER_WRITE_CONFIG_KEY = "practiceProjectsAllMemberWrite";
+
+function practiceProjectAllMemberWriteEnabled(config: unknown) {
+  return Boolean(
+    config
+      && typeof config === "object"
+      && PRACTICE_PROJECTS_ALL_MEMBER_WRITE_CONFIG_KEY in config
+      && (config as Record<string, unknown>)[PRACTICE_PROJECTS_ALL_MEMBER_WRITE_CONFIG_KEY] === true,
+  );
+}
+
+async function workspaceAllowsAllMemberPracticeProjectWrites(workspaceId: string) {
+  const flag = await prisma.workspaceFeatureFlag.findUnique({
+    where: { workspaceId_flag: { workspaceId, flag: FINANCE_FEATURE_FLAG } },
+    select: { enabled: true, config: true },
+  });
+  return Boolean(flag?.enabled && practiceProjectAllMemberWriteEnabled(flag.config));
+}
+
+export async function canManagePracticeFinanceProjects(
+  actor: AppActor,
+  workspaceId: string,
+  options: { resolvedMembership?: { role: MemberRole | string | null } | null } = {},
+) {
+  if (actor.kind === "agent") return true;
+  const membership = options.resolvedMembership ?? await requireWorkspaceMembership({ actor, workspaceId });
+  if (membership?.role && PRACTICE_FINANCE_MANAGE_ROLES.includes(membership.role as MemberRole)) return true;
+  return workspaceAllowsAllMemberPracticeProjectWrites(workspaceId);
+}
+
+async function requirePracticeFinanceWrite(actor: AppActor, workspaceId: string) {
+  if (actor.kind === "agent") {
+    await requireWorkspaceMembership({ actor, workspaceId, allowedRoles: PRACTICE_FINANCE_MANAGE_ROLES });
+    return;
+  }
+
+  const membership = await requireWorkspaceMembership({ actor, workspaceId });
+  invariant(
+    await canManagePracticeFinanceProjects(actor, workspaceId, { resolvedMembership: membership }),
+    403,
+    "FORBIDDEN",
+    "Insufficient permissions.",
+  );
+}
 
 export type PracticeProjectInput = {
   code: string;
@@ -366,7 +411,7 @@ export async function createPracticeProject(
   workspaceId: string,
   input: PracticeProjectInput,
 ): Promise<PracticeProject> {
-  await requireWorkspaceMembership({ actor, workspaceId, allowedRoles: PRACTICE_FINANCE_MANAGE_ROLES });
+  await requirePracticeFinanceWrite(actor, workspaceId);
 
   const code = normalizeRequiredText(input.code, "Project code");
   const name = normalizeRequiredText(input.name, "Project name");
@@ -396,7 +441,7 @@ export async function updatePracticeProject(
   workspaceId: string,
   input: UpdatePracticeProjectInput,
 ): Promise<PracticeProject> {
-  await requireWorkspaceMembership({ actor, workspaceId, allowedRoles: PRACTICE_FINANCE_MANAGE_ROLES });
+  await requirePracticeFinanceWrite(actor, workspaceId);
   const projectId = input.projectId.trim();
   invariant(projectId, 400, "INVALID_INPUT", "Project ID is required.");
 
@@ -431,7 +476,7 @@ export async function createPracticeProjectFromWonDeal(
   workspaceId: string,
   input: CreatePracticeProjectFromWonDealInput,
 ): Promise<PracticeProject> {
-  await requireWorkspaceMembership({ actor, workspaceId, allowedRoles: PRACTICE_FINANCE_MANAGE_ROLES });
+  await requirePracticeFinanceWrite(actor, workspaceId);
 
   const deal = await prisma.crmDeal.findUnique({
     where: { id: input.dealId },
