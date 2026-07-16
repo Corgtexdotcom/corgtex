@@ -1264,6 +1264,45 @@ describe("processConversationTurn", () => {
     expect(result.assistantMessage).toBe("Please provide a title before I prepare the CRM activity.");
   });
 
+  it("rejects CRM activity preparations without a relationship link before storing a pending operation", async () => {
+    const actor = {
+      kind: "user" as const,
+      user: {
+        id: "user-1",
+        email: "user@example.com",
+        displayName: "User",
+      },
+    };
+    chatMock
+      .mockResolvedValueOnce({
+        content: "",
+        tool_calls: [{
+          id: "call-1",
+          function: {
+            name: "record_relationship_activity",
+            arguments: JSON.stringify({ title: "Follow up", type: "TASK" }),
+          },
+        }],
+      })
+      .mockResolvedValueOnce({ content: "Please select the CRM relationship before I prepare the activity." });
+
+    const { processConversationTurn } = await import("./conversation");
+    const result = await processConversationTurn({
+      workspaceId: "ws-1",
+      sessionId: "session-1",
+      userId: "user-1",
+      agentKey: "assistant",
+      userMessage: "Create a CRM follow-up.",
+      actor,
+    });
+
+    const toolMessage = chatMock.mock.calls[1]?.[0]?.messages.find((message: any) => message.role === "tool");
+    expect(toolMessage.content).toContain("A CRM activity must be linked to an account, contact, or deal");
+    expect(conversationPendingOperationCreateMock).not.toHaveBeenCalled();
+    expect(createActivityMock).not.toHaveBeenCalled();
+    expect(result.assistantMessage).toBe("Please select the CRM relationship before I prepare the activity.");
+  });
+
   it("rejects CRM activity preparations with invalid due dates before storing a pending operation", async () => {
     const actor = {
       kind: "user" as const,
@@ -1384,6 +1423,45 @@ describe("processConversationTurn", () => {
     expect(conversationPendingOperationCreateMock).not.toHaveBeenCalled();
     expect(createCommunicationSuggestionMock).not.toHaveBeenCalled();
     expect(result.assistantMessage).toBe("Please provide the draft body before I prepare the CRM suggestion.");
+  });
+
+  it("rejects CRM suggestions without a relationship link before storing a pending operation", async () => {
+    const actor = {
+      kind: "user" as const,
+      user: {
+        id: "user-1",
+        email: "user@example.com",
+        displayName: "User",
+      },
+    };
+    chatMock
+      .mockResolvedValueOnce({
+        content: "",
+        tool_calls: [{
+          id: "call-1",
+          function: {
+            name: "create_communication_suggestion",
+            arguments: JSON.stringify({ title: "Draft outreach", bodyMd: "Hello from Corgtex." }),
+          },
+        }],
+      })
+      .mockResolvedValueOnce({ content: "Please select the CRM relationship before I prepare the suggestion." });
+
+    const { processConversationTurn } = await import("./conversation");
+    const result = await processConversationTurn({
+      workspaceId: "ws-1",
+      sessionId: "session-1",
+      userId: "user-1",
+      agentKey: "assistant",
+      userMessage: "Prepare a CRM communication suggestion.",
+      actor,
+    });
+
+    const toolMessage = chatMock.mock.calls[1]?.[0]?.messages.find((message: any) => message.role === "tool");
+    expect(toolMessage.content).toContain("A CRM communication suggestion must be linked to an account, contact, deal, or activity");
+    expect(conversationPendingOperationCreateMock).not.toHaveBeenCalled();
+    expect(createCommunicationSuggestionMock).not.toHaveBeenCalled();
+    expect(result.assistantMessage).toBe("Please select the CRM relationship before I prepare the suggestion.");
   });
 
   it("rejects CRM activity completions with invalid completion dates before storing a pending operation", async () => {

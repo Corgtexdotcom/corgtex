@@ -113,6 +113,10 @@ function hasNonEmptyString(value: unknown) {
   return typeof value === "string" && value.trim().length > 0;
 }
 
+function hasAnyNonEmptyString(args: Record<string, unknown>, keys: string[]) {
+  return keys.some((key) => hasNonEmptyString(args[key]));
+}
+
 function validateOptionalIsoDate(value: unknown, label: string) {
   if (value == null) return;
   if (typeof value !== "string" || !value.trim() || Number.isNaN(new Date(value).getTime())) {
@@ -125,6 +129,9 @@ export function validateCrmWriteToolArgs(toolName: string, args: Record<string, 
     throw new Error("A CRM activity title is required to prepare a pending CRM activity.");
   }
   if (toolName === "record_relationship_activity") {
+    if (!hasAnyNonEmptyString(args, ["accountId", "contactId", "dealId"])) {
+      throw new Error("A CRM activity must be linked to an account, contact, or deal before preparing a pending CRM activity.");
+    }
     if (args.type !== undefined && (typeof args.type !== "string" || !CRM_ACTIVITY_TYPES.has(args.type))) {
       throw new Error("Unsupported CRM activity type. Use NOTE, EMAIL, CALL, MEETING, or TASK.");
     }
@@ -142,6 +149,9 @@ export function validateCrmWriteToolArgs(toolName: string, args: Record<string, 
     }
     if (!hasNonEmptyString(args.bodyMd)) {
       throw new Error("CRM communication suggestion body text is required to prepare a pending CRM suggestion.");
+    }
+    if (!hasAnyNonEmptyString(args, ["accountId", "contactId", "dealId", "activityId"])) {
+      throw new Error("A CRM communication suggestion must be linked to an account, contact, deal, or activity before preparing a pending CRM suggestion.");
     }
     if (
       args.channel !== undefined
