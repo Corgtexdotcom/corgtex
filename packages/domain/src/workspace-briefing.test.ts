@@ -878,6 +878,7 @@ describe("workspace briefing", () => {
     await collectWorkspaceBriefingCandidates({
       workspaceId: "ws-1",
       since: new Date("2026-04-29T00:00:00.000Z"),
+      now: new Date("2026-04-30T12:00:00.000Z"),
       actor: { kind: "user", user: { id: "user-1", email: "u@example.com", displayName: "User" } },
     });
 
@@ -913,13 +914,49 @@ describe("workspace briefing", () => {
           audienceType: "WORKSPACE",
           status: "COMPLETED",
           OR: [
-            { completedAt: { gte: new Date("2026-04-29T00:00:00.000Z") } },
-            { updatedAt: { gte: new Date("2026-04-29T00:00:00.000Z") } },
+            { completedAt: { gte: new Date("2026-04-29T00:00:00.000Z"), lte: new Date("2026-04-30T12:00:00.000Z") } },
+            { updatedAt: { gte: new Date("2026-04-29T00:00:00.000Z"), lte: new Date("2026-04-30T12:00:00.000Z") } },
           ],
         }),
         take: 10,
       }),
     ]));
+  });
+
+  it("bounds candidate collection by the edition cutoff", async () => {
+    const { collectWorkspaceBriefingCandidates } = await import("./workspace-briefing");
+    prismaMock.proposal.findMany.mockResolvedValueOnce([{
+      id: "proposal-after-cutoff",
+      title: "Future proposal",
+      summary: "This proposal was created after the historical edition cutoff.",
+      status: "OPEN",
+      priority: 2,
+      decisionMd: null,
+      createdAt: new Date("2026-05-01T09:00:00.000Z"),
+      updatedAt: new Date("2026-05-01T09:00:00.000Z"),
+      decidedAt: null,
+    }]);
+
+    const candidates = await collectWorkspaceBriefingCandidates({
+      workspaceId: "ws-1",
+      since: new Date("2026-04-01T00:00:00.000Z"),
+      now: new Date("2026-04-30T12:00:00.000Z"),
+    });
+
+    expect(candidates).not.toContainEqual(expect.objectContaining({
+      sourceType: "PROPOSAL",
+      sourceId: "proposal-after-cutoff",
+    }));
+    expect(prismaMock.proposal.findMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({
+        createdAt: { lte: new Date("2026-04-30T12:00:00.000Z") },
+        updatedAt: { lte: new Date("2026-04-30T12:00:00.000Z") },
+        OR: expect.arrayContaining([
+          { updatedAt: { gte: new Date("2026-04-01T00:00:00.000Z"), lte: new Date("2026-04-30T12:00:00.000Z") } },
+          { decidedAt: { gte: new Date("2026-04-01T00:00:00.000Z"), lte: new Date("2026-04-30T12:00:00.000Z") } },
+        ]),
+      }),
+    }));
   });
 
   it("does not attach unrelated source refs to digest-derived sections", async () => {

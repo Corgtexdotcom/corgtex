@@ -1005,10 +1005,15 @@ export async function collectWorkspaceBriefingCandidates(params: {
   since: Date;
   actor?: AppActor;
   now?: Date;
+  until?: Date;
 }): Promise<WorkspaceBriefingCandidate[]> {
   if (params.actor) {
     await requireWorkspaceMembership({ actor: params.actor, workspaceId: params.workspaceId });
   }
+
+  const cutoff = params.until ?? params.now ?? new Date();
+  const windowRange = { gte: params.since, lte: cutoff };
+  const beforeCutoff = { lte: cutoff };
 
   const adviceRequestSelect = {
     id: true,
@@ -1040,11 +1045,12 @@ export async function collectWorkspaceBriefingCandidates(params: {
         workspaceId: params.workspaceId,
         archivedAt: null,
         status: "COMPLETED",
+        createdAt: beforeCutoff,
         OR: [
-          { recordedAt: { gte: params.since } },
-          { updatedAt: { gte: params.since } },
-          { summaryPostedAt: { gte: params.since } },
-          { aiProcessedAt: { gte: params.since } },
+          { recordedAt: windowRange },
+          { updatedAt: windowRange },
+          { summaryPostedAt: windowRange },
+          { aiProcessedAt: windowRange },
         ],
       },
       orderBy: { recordedAt: "desc" },
@@ -1066,12 +1072,14 @@ export async function collectWorkspaceBriefingCandidates(params: {
         workspaceId: params.workspaceId,
         archivedAt: null,
         isPrivate: false,
+        createdAt: beforeCutoff,
+        updatedAt: beforeCutoff,
         OR: [
           { status: "OPEN" },
-          { createdAt: { gte: params.since } },
-          { updatedAt: { gte: params.since } },
-          { publishedAt: { gte: params.since } },
-          { decidedAt: { gte: params.since } },
+          { createdAt: windowRange },
+          { updatedAt: windowRange },
+          { publishedAt: windowRange },
+          { decidedAt: windowRange },
         ],
       },
       orderBy: [{ priority: "desc" }, { updatedAt: "desc" }],
@@ -1083,12 +1091,14 @@ export async function collectWorkspaceBriefingCandidates(params: {
         workspaceId: params.workspaceId,
         archivedAt: null,
         isPrivate: false,
+        createdAt: beforeCutoff,
+        updatedAt: beforeCutoff,
         OR: [
           { status: "OPEN" },
-          { createdAt: { gte: params.since } },
-          { updatedAt: { gte: params.since } },
-          { resolvedAt: { gte: params.since } },
-          { publishedAt: { gte: params.since } },
+          { createdAt: windowRange },
+          { updatedAt: windowRange },
+          { resolvedAt: windowRange },
+          { publishedAt: windowRange },
         ],
       },
       orderBy: [{ priority: "desc" }, { updatedAt: "desc" }],
@@ -1101,10 +1111,12 @@ export async function collectWorkspaceBriefingCandidates(params: {
         archivedAt: null,
         isPrivate: false,
         status: { in: ["OPEN", "IN_PROGRESS"] },
+        createdAt: beforeCutoff,
+        updatedAt: beforeCutoff,
         OR: [
-          { createdAt: { gte: params.since } },
-          { updatedAt: { gte: params.since } },
-          { publishedAt: { gte: params.since } },
+          { createdAt: windowRange },
+          { updatedAt: windowRange },
+          { publishedAt: windowRange },
         ],
       },
       orderBy: [{ dueAt: "asc" }, { priority: "desc" }, { updatedAt: "desc" }],
@@ -1115,6 +1127,8 @@ export async function collectWorkspaceBriefingCandidates(params: {
       where: {
         workspaceId: params.workspaceId,
         archivedAt: null,
+        createdAt: beforeCutoff,
+        updatedAt: beforeCutoff,
         status: { notIn: ["DRAFT", "ABANDONED"] },
       },
       orderBy: [{ level: "asc" }, { sortOrder: "asc" }, { updatedAt: "desc" }],
@@ -1122,7 +1136,7 @@ export async function collectWorkspaceBriefingCandidates(params: {
       select: { id: true, title: true, descriptionMd: true, status: true, progressPercent: true, targetDate: true, updatedAt: true, level: true },
     }),
     prisma.recognition.findMany({
-      where: { workspaceId: params.workspaceId, createdAt: { gte: params.since } },
+      where: { workspaceId: params.workspaceId, createdAt: windowRange },
       orderBy: { createdAt: "desc" },
       take: 10,
       select: { id: true, title: true, storyMd: true, createdAt: true },
@@ -1133,11 +1147,13 @@ export async function collectWorkspaceBriefingCandidates(params: {
         archivedAt: null,
         isPrivate: false,
         type: { not: "DIGEST" },
+        createdAt: beforeCutoff,
+        updatedAt: beforeCutoff,
         OR: [
-          { createdAt: { gte: params.since } },
-          { updatedAt: { gte: params.since } },
-          { publishedAt: { gte: params.since } },
-          { lastVerifiedAt: { gte: params.since } },
+          { createdAt: windowRange },
+          { updatedAt: windowRange },
+          { publishedAt: windowRange },
+          { lastVerifiedAt: windowRange },
         ],
       },
       orderBy: { updatedAt: "desc" },
@@ -1148,9 +1164,11 @@ export async function collectWorkspaceBriefingCandidates(params: {
       where: {
         workspaceId: params.workspaceId,
         archivedAt: null,
+        createdAt: beforeCutoff,
+        updatedAt: beforeCutoff,
         OR: [
-          { createdAt: { gte: params.since } },
-          { updatedAt: { gte: params.since } },
+          { createdAt: windowRange },
+          { updatedAt: windowRange },
         ],
       },
       orderBy: { updatedAt: "desc" },
@@ -1160,7 +1178,8 @@ export async function collectWorkspaceBriefingCandidates(params: {
     prisma.communicationContextSummary.findMany({
       where: {
         workspaceId: params.workspaceId,
-        summaryDate: { gte: params.since },
+        summaryDate: windowRange,
+        updatedAt: beforeCutoff,
       },
       orderBy: { summaryDate: "desc" },
       take: 20,
@@ -1169,11 +1188,12 @@ export async function collectWorkspaceBriefingCandidates(params: {
     prisma.buildArtifact.findMany({
       where: {
         workspaceId: params.workspaceId,
+        updatedAt: beforeCutoff,
         OR: [
           { status: "OPEN" },
-          { updatedAt: { gte: params.since } },
-          { mergedAt: { gte: params.since } },
-          { closedAt: { gte: params.since } },
+          { updatedAt: windowRange },
+          { mergedAt: windowRange },
+          { closedAt: windowRange },
         ],
       },
       orderBy: { updatedAt: "desc" },
@@ -1185,6 +1205,8 @@ export async function collectWorkspaceBriefingCandidates(params: {
         workspaceId: params.workspaceId,
         audienceType: "WORKSPACE",
         status: "ACTIVE",
+        createdAt: beforeCutoff,
+        updatedAt: beforeCutoff,
       },
       orderBy: [{ deadlineAt: "asc" }, { updatedAt: "desc" }],
       take: 30,
@@ -1195,9 +1217,11 @@ export async function collectWorkspaceBriefingCandidates(params: {
         workspaceId: params.workspaceId,
         audienceType: "WORKSPACE",
         status: "COMPLETED",
+        createdAt: beforeCutoff,
+        updatedAt: beforeCutoff,
         OR: [
-          { completedAt: { gte: params.since } },
-          { updatedAt: { gte: params.since } },
+          { completedAt: windowRange },
+          { updatedAt: windowRange },
         ],
       },
       orderBy: [{ completedAt: "desc" }, { updatedAt: "desc" }],
@@ -1365,7 +1389,10 @@ export async function collectWorkspaceBriefingCandidates(params: {
       actionabilityScore: request.status === "ACTIVE" ? 4 : 1,
       evidenceScore: 2,
     })),
-  ];
+  ].filter((entry) => (
+    entry.occurredAt.getTime() <= cutoff.getTime()
+    && entry.updatedAt.getTime() <= cutoff.getTime()
+  ));
 }
 
 export async function upsertWorkspaceBriefing(params: {
@@ -1481,6 +1508,7 @@ export async function generateWorkspaceBriefing(params: {
     workspaceId: params.workspaceId,
     since,
     now: date,
+    until: date,
   });
   const briefing = buildWorkspaceBriefingFromCandidates({
     workspaceId: params.workspaceId,

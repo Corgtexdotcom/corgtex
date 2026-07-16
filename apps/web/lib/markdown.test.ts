@@ -48,4 +48,14 @@ block code
     expect(html).not.toContain("src=\"javascript:");
     expect(html).not.toContain("onerror");
   });
+
+  it("can render trusted text without loading images", () => {
+    const defaultHtml = renderMarkdown("![tracker](https://example.com/pixel.png)");
+    const imageFreeHtml = renderMarkdown("![tracker](https://example.com/pixel.png)", { allowImages: false });
+
+    expect(defaultHtml).toContain("<img");
+    expect(defaultHtml).toContain("src=\"https://example.com/pixel.png\"");
+    expect(imageFreeHtml).not.toContain("<img");
+    expect(imageFreeHtml).not.toContain("https://example.com/pixel.png");
+  });
 });

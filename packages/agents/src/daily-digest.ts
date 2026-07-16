@@ -1307,6 +1307,7 @@ export async function runDailyDigest(params: {
     workspaceId: params.workspaceId,
     since: briefingSince,
     now: generationDate,
+    until: generationDate,
   });
   const personalItemsByMemberId = buildPersonalActionItemsByMember({
     workspaceId: params.workspaceId,
