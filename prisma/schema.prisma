@@ -598,6 +598,7 @@ model Workspace {
   agentCreds                     AgentCredential[]
   notifications                  Notification[]
   conversations                  ConversationSession[]
+  conversationPendingOperations  ConversationPendingOperation[]
   agentMemories                  AgentMemory[]
   webhookEndpoints               WebhookEndpoint[]
   inboundWebhooks                InboundWebhook[]
@@ -3397,6 +3398,47 @@ enum ConversationStatus {
   ACTIVE
   COMPLETED
   PAUSED
+}
+
+enum ConversationPendingOperationStatus {
+  PENDING
+  EXECUTING
+  EXECUTED
+  CANCELED
+  EXPIRED
+  FAILED
+}
+
+model ConversationPendingOperation {
+  id                String                             @id @default(uuid())
+  workspaceId       String
+  conversationId    String
+  userId            String?
+  agentKey          String
+  toolName          String
+  argsJson          Json
+  argsHash          String
+  idempotencyKey    String
+  relatedEntityType String?
+  relatedEntityId   String?
+  riskLabel         String
+  status            ConversationPendingOperationStatus @default(PENDING)
+  resultJson        Json?
+  errorCode         String?
+  errorMessage      String?                            @db.Text
+  proposedAt        DateTime                           @default(now())
+  expiresAt         DateTime
+  executedAt        DateTime?
+  canceledAt        DateTime?
+  createdAt         DateTime                           @default(now())
+  updatedAt         DateTime                           @updatedAt
+
+  workspace    Workspace           @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@unique([workspaceId, idempotencyKey])
+  @@index([conversationId, status, createdAt])
+  @@index([workspaceId, status, expiresAt])
+  @@index([userId])
 }
 
 enum RoleHolderKind {

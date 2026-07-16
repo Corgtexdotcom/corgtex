@@ -19,6 +19,28 @@ export const CRM_WRITE_TOOL_NAMES = new Set([
   "create_communication_suggestion",
 ]);
 
+function definedEntries(value: Record<string, unknown>) {
+  return Object.fromEntries(Object.entries(value).filter(([, entry]) => entry !== undefined));
+}
+
+const CRM_ACTIVITY_TYPES = new Set(["NOTE", "EMAIL", "CALL", "MEETING", "TASK"]);
+const CRM_COMMUNICATION_CHANNEL_PATTERN = /^[A-Z][A-Z0-9_]{1,31}$/;
+
+function normalizeOptionalUpperCode(value: unknown) {
+  if (value == null) return undefined;
+  if (typeof value !== "string") return value;
+  return value.trim().toUpperCase().replace(/[\s-]+/g, "_");
+}
+
+function normalizeOptionalDateString(value: unknown) {
+  if (value == null) return undefined;
+  if (typeof value !== "string") return value;
+  const trimmed = value.trim();
+  if (!trimmed) return trimmed;
+  const date = new Date(trimmed);
+  return Number.isNaN(date.getTime()) ? trimmed : date.toISOString();
+}
+
 function selectedAccountId(ctx: CrmToolContext, value?: string | null) {
   return value ?? (ctx.pageContext?.surface === "crm" ? ctx.pageContext.selectedIds?.accountId ?? undefined : undefined);
 }
@@ -49,6 +71,97 @@ function activityResult(workspaceId: string, activity: any) {
   };
 }
 
+export function normalizeCrmWriteToolArgs(toolName: string, ctx: CrmToolContext, args: any) {
+  if (toolName === "record_relationship_activity") {
+    return definedEntries({
+      title: args.title,
+      type: normalizeOptionalUpperCode(args.type),
+      bodyMd: args.bodyMd,
+      accountId: selectedAccountId(ctx, args.accountId),
+      contactId: args.contactId,
+      dealId: args.dealId,
+      dueAt: normalizeOptionalDateString(args.dueAt),
+    });
+  }
+
+  if (toolName === "complete_relationship_activity") {
+    return definedEntries({
+      activityId: selectedActivityId(ctx, args.activityId),
+      completedAt: normalizeOptionalDateString(args.completedAt),
+    });
+  }
+
+  if (toolName === "create_communication_suggestion") {
+    return definedEntries({
+      title: args.title,
+      bodyMd: args.bodyMd,
+      subject: args.subject,
+      recipientEmail: args.recipientEmail,
+      recipientName: args.recipientName,
+      channel: normalizeOptionalUpperCode(args.channel),
+      accountId: selectedAccountId(ctx, args.accountId),
+      contactId: args.contactId,
+      dealId: args.dealId,
+      activityId: args.activityId,
+    });
+  }
+
+  return args;
+}
+
+function hasNonEmptyString(value: unknown) {
+  return typeof value === "string" && value.trim().length > 0;
+}
+
+function hasAnyNonEmptyString(args: Record<string, unknown>, keys: string[]) {
+  return keys.some((key) => hasNonEmptyString(args[key]));
+}
+
+function validateOptionalIsoDate(value: unknown, label: string) {
+  if (value == null) return;
+  if (typeof value !== "string" || !value.trim() || Number.isNaN(new Date(value).getTime())) {
+    throw new Error(`${label} must be a valid date before preparing a pending CRM operation.`);
+  }
+}
+
+export function validateCrmWriteToolArgs(toolName: string, args: Record<string, unknown>) {
+  if (toolName === "record_relationship_activity" && !hasNonEmptyString(args.title)) {
+    throw new Error("A CRM activity title is required to prepare a pending CRM activity.");
+  }
+  if (toolName === "record_relationship_activity") {
+    if (!hasAnyNonEmptyString(args, ["accountId", "contactId", "dealId"])) {
+      throw new Error("A CRM activity must be linked to an account, contact, or deal before preparing a pending CRM activity.");
+    }
+    if (args.type !== undefined && (typeof args.type !== "string" || !CRM_ACTIVITY_TYPES.has(args.type))) {
+      throw new Error("Unsupported CRM activity type. Use NOTE, EMAIL, CALL, MEETING, or TASK.");
+    }
+    validateOptionalIsoDate(args.dueAt, "CRM activity due date");
+  }
+  if (toolName === "complete_relationship_activity" && !hasNonEmptyString(args.activityId)) {
+    throw new Error("A CRM activity ID is required to prepare a pending CRM activity completion.");
+  }
+  if (toolName === "complete_relationship_activity") {
+    validateOptionalIsoDate(args.completedAt, "CRM activity completion date");
+  }
+  if (toolName === "create_communication_suggestion") {
+    if (!hasNonEmptyString(args.title)) {
+      throw new Error("A CRM communication suggestion title is required to prepare a pending CRM suggestion.");
+    }
+    if (!hasNonEmptyString(args.bodyMd)) {
+      throw new Error("CRM communication suggestion body text is required to prepare a pending CRM suggestion.");
+    }
+    if (!hasAnyNonEmptyString(args, ["accountId", "contactId", "dealId", "activityId"])) {
+      throw new Error("A CRM communication suggestion must be linked to an account, contact, deal, or activity before preparing a pending CRM suggestion.");
+    }
+    if (
+      args.channel !== undefined
+      && (typeof args.channel !== "string" || !CRM_COMMUNICATION_CHANNEL_PATTERN.test(args.channel))
+    ) {
+      throw new Error("CRM communication suggestion channel must be an uppercase code.");
+    }
+  }
+}
+
 export const crmTools: ModelTool[] = [
   {
     type: "function",
@@ -71,7 +184,7 @@ export const crmTools: ModelTool[] = [
     type: "function",
     function: {
       name: "record_relationship_activity",
-      description: "After explicit user confirmation, record a CRM note, task, activity, or follow-up. This does not send email.",
+      description: "Prepare a pending CRM note, task, activity, or follow-up for explicit user confirmation. This does not send email or execute until the pending operation is confirmed.",
       parameters: {
         type: "object",
         properties: {
@@ -91,7 +204,7 @@ export const crmTools: ModelTool[] = [
     type: "function",
     function: {
       name: "complete_relationship_activity",
-      description: "After explicit user confirmation, complete a CRM activity or follow-up reminder. This closes tracked work only and does not send email.",
+      description: "Prepare a pending completion for a CRM activity or follow-up reminder. This closes tracked work only after the pending operation is confirmed and does not send email.",
       parameters: {
         type: "object",
         properties: {
@@ -105,7 +218,7 @@ export const crmTools: ModelTool[] = [
     type: "function",
     function: {
       name: "create_communication_suggestion",
-      description: "After explicit user confirmation, create a CRM communication suggestion draft. Corgtex stores the draft only; it does not send email.",
+      description: "Prepare a pending CRM communication suggestion draft for explicit user confirmation. Corgtex stores the draft only after confirmation; it does not send email.",
       parameters: {
         type: "object",
         properties: {

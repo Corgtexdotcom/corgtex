@@ -49,8 +49,24 @@ import {
   createCommunicationSuggestionAction,
   crmTools,
   listDueRelationshipWorkAction,
+  normalizeCrmWriteToolArgs,
   recordRelationshipActivityAction,
+  validateCrmWriteToolArgs,
 } from "./tools/crm";
+import {
+  beginCrmPendingOperationExecution,
+  cancelCrmPendingOperation,
+  createPendingCrmOperation,
+  crmPendingOperationCancelNotice,
+  crmPendingOperationExpiredNotice,
+  crmPendingOperationFailedNotice,
+  crmPendingOperationIntent,
+  crmPendingOperationNotice,
+  crmPendingOperationResultNotice,
+  findCrmPendingOperationForIntent,
+  markCrmPendingOperationExecuted,
+  markCrmPendingOperationFailed,
+} from "./pending-crm-operations";
 import { formatConversationPageContextForModel, type ConversationPageContext } from "./page-context";
 import type { AppActor } from "@corgtex/shared";
 import type { KnowledgeSourceType } from "@prisma/client";
@@ -98,7 +114,7 @@ WRITE TOOLS:
 
 When asked about current state, ALWAYS use a query tool instead of guessing.
 When asked to create or update something, execute the write tool immediately — do not ask for confirmation, except for CRM write tools. Report what you did clearly after executing.
-CRM write tools require explicit confirmation in a separate user reply before execution. First summarize the exact CRM change you plan to make and ask the user to confirm. After the user replies with a clear confirmation such as "yes", "confirm", "go ahead", or "do it", execute the CRM write tool. CRM tools may draft, suggest, record, or mark tracked work complete, but they must not send email directly.
+CRM write tools use a pending-operation approval contract. When the user asks for a CRM write, call the CRM write tool once with the exact title, due date, entity IDs, and operation you intend to perform. The server will store those exact args as a pending operation and return a pendingOperationId without executing the write. Ask the user to confirm or cancel that pendingOperationId. After the user confirms, the server executes the stored operation directly; do not regenerate CRM write arguments from natural language. CRM tools may draft, suggest, record, or mark tracked work complete, but they must not send email directly.
 Every write action is fully audited and traceable.
 For context map work, use CURRENT PAGE CONTEXT only as a pointer to the map/view/selection. Fetch bounded map details with 'get_context_map_info' or 'get_selected_context_map_region' before proposing or applying graph changes. If the user asks for an ambiguous change, ask a clarifying question instead of guessing. If the user confirms with "yes", "do it", or similar, use the prior chat turns plus CURRENT PAGE CONTEXT to carry out the last clear map-change intent. For merge requests, ask which item survives if unclear; otherwise update the survivor, re-point absorbed relationships, archive the absorbed item, and preserve evidence refs on the survivor where available.
 Tool credential reveals are sensitive and audited. Use them only when the user asks to access or reveal a saved tool credential.
@@ -321,7 +337,7 @@ function knowledgeSearchInstruction(search: ConversationContextUsed["knowledgeSe
   return `Knowledge retrieval already searched ${sourceLabel} for this turn. Use the supplied results when answering from workspace context, cite them when relevant, and do not claim to have checked any other source unless a tool result is present.`;
 }
 
-const TOOL_HANDLERS: Record<string, (actor: AppActor, ctx: ConversationContext, args: any) => Promise<unknown>> = {
+const TOOL_HANDLERS: Partial<Record<string, (actor: AppActor, ctx: ConversationContext, args: any) => Promise<unknown>>> = {
   check_calendar_availability: async (actor, ctx, args) => checkCalendarAvailability(ctx.userId, ctx.workspaceId, args.emails, args.timeMin, args.timeMax),
   schedule_meeting: async (actor, ctx, args) => scheduleMeeting(ctx.userId, ctx.workspaceId, args.title, args.description, args.startTime, args.endTime, args.attendeeEmails),
   create_corgtex_scheduled_meeting: async (actor, ctx, args) => createCorgtexScheduledMeeting(actor, ctx.workspaceId, args),
@@ -364,30 +380,19 @@ function isCrmWriteTool(toolName: string) {
   return CRM_WRITE_TOOL_NAMES.has(toolName);
 }
 
-function userMessageConfirmsWrite(message: string) {
-  const normalized = message.trim().toLowerCase();
-  if (!normalized) return false;
-  return /^(yes|yep|yeah|ok|okay|confirm|confirmed|approved|approve|go ahead|do it|please do|proceed|run it|create it|record it|draft it|complete it)\b/.test(normalized)
-    || /\b(confirm(ed)?|go ahead|do it|please do|proceed|run it)\b/.test(normalized);
-}
-
-function assistantAskedForCrmWriteConfirmation(priorTurns: Array<{ assistantMessage: string }>) {
-  return priorTurns.slice(-4).some((turn) => {
-    const message = turn.assistantMessage.toLowerCase();
-    return /(confirm|reply|say yes|go ahead|do it)/.test(message)
-      && /(crm|relationship|account|follow[- ]?up|activity|note|communication suggestion|suggestion|draft)/.test(message);
-  });
-}
-
-function hasConfirmedCrmWrite(ctx: ConversationContext, priorTurns: Array<{ assistantMessage: string }>) {
-  return userMessageConfirmsWrite(ctx.userMessage) && assistantAskedForCrmWriteConfirmation(priorTurns);
-}
-
-function crmWriteConfirmationError(toolName: string) {
+function crmPendingToolResult(operation: import("./pending-crm-operations").PendingOperationRecord) {
   return {
-    error: "CRM_WRITE_REQUIRES_CONFIRMATION",
-    toolName,
-    message: "CRM write tools require explicit confirmation in a separate user reply. Ask the user to confirm the exact CRM change before calling this tool.",
+    status: "PENDING_CONFIRMATION",
+    pendingOperationId: operation.id,
+    toolName: operation.toolName,
+    args: operation.argsJson,
+    idempotencyKey: operation.idempotencyKey,
+    relatedEntity: operation.relatedEntityType && operation.relatedEntityId
+      ? { type: operation.relatedEntityType, id: operation.relatedEntityId }
+      : null,
+    riskLabel: operation.riskLabel,
+    expiresAt: operation.expiresAt.toISOString(),
+    message: crmPendingOperationNotice(operation),
   };
 }
 
@@ -410,10 +415,135 @@ function catalogUsageContext(ctx: ConversationContext) {
   return {};
 }
 
+function appendCrmPendingNotices(message: string, operations: Array<import("./pending-crm-operations").PendingOperationRecord>) {
+  const missingNotices = operations
+    .map((operation) => crmPendingOperationNotice(operation))
+    .filter((notice) => !message.includes(notice));
+  if (missingNotices.length === 0) return message;
+  return [message.trim(), ...missingNotices].filter(Boolean).join("\n\n");
+}
+
+function pendingNoticeAppendix(originalMessage: string, messageWithNotices: string) {
+  if (messageWithNotices === originalMessage) return "";
+  const trimmedOriginal = originalMessage.trim();
+  if (trimmedOriginal && messageWithNotices.startsWith(trimmedOriginal)) {
+    const appendix = messageWithNotices.slice(trimmedOriginal.length);
+    const streamedTrailingNewlines = originalMessage.match(/\n+$/)?.[0].length ?? 0;
+    if (streamedTrailingNewlines > 0 && appendix.startsWith("\n\n")) {
+      return appendix.slice(Math.min(streamedTrailingNewlines, 2));
+    }
+    return appendix;
+  }
+  return messageWithNotices;
+}
+
+function isBudgetExceededError(err: unknown) {
+  return (err as { status?: number; code?: string } | null)?.status === 429
+    && (err as { status?: number; code?: string } | null)?.code === "BUDGET_EXCEEDED";
+}
+
+async function canRunFollowupModelAfterTools(
+  ctx: ConversationContext,
+  pendingCrmOperations: Array<import("./pending-crm-operations").PendingOperationRecord>
+) {
+  try {
+    await assertWorkspaceModelBudget(ctx.workspaceId);
+    return true;
+  } catch (err) {
+    if (pendingCrmOperations.length > 0 && isBudgetExceededError(err)) {
+      return false;
+    }
+    throw err;
+  }
+}
+
+async function handleCrmPendingOperationIntent(ctx: ConversationContext) {
+  const intent = crmPendingOperationIntent(ctx.userMessage);
+  if (!intent) return null;
+
+  const operation = await findCrmPendingOperationForIntent(ctx, intent);
+  if (!operation) return null;
+
+  if (intent.kind === "cancel") {
+    const canceled = await cancelCrmPendingOperation(operation);
+    return canceled.status === "CANCELED"
+      ? crmPendingOperationCancelNotice(canceled)
+      : crmPendingOperationFailedNotice(canceled);
+  }
+
+  const actor = requireConversationToolActor(ctx);
+  const begin = await beginCrmPendingOperationExecution(operation);
+  if (begin.state === "expired") return crmPendingOperationExpiredNotice(begin.operation);
+  if (begin.state === "already-executed") return crmPendingOperationResultNotice(begin.operation, begin.operation.resultJson);
+  if (begin.state !== "ready") return crmPendingOperationFailedNotice(begin.operation);
+
+  const handler = TOOL_HANDLERS[begin.operation.toolName];
+  if (!handler) {
+    const failed = await markCrmPendingOperationFailed(begin.operation, new Error(`Unknown CRM operation ${begin.operation.toolName}.`));
+    return crmPendingOperationFailedNotice(failed);
+  }
+
+  try {
+    const result = await handler(actor, { ...ctx, pageContext: null }, begin.operation.argsJson);
+    const executed = await markCrmPendingOperationExecuted(begin.operation, result);
+    return crmPendingOperationResultNotice(executed, result);
+  } catch (error) {
+    const failed = await markCrmPendingOperationFailed(begin.operation, error);
+    return crmPendingOperationFailedNotice(failed);
+  }
+}
+
+async function executeConversationToolCall({
+  actor,
+  ctx,
+  toolName,
+  rawArguments,
+  handler,
+}: {
+  actor: AppActor;
+  ctx: ConversationContext;
+  toolName: string;
+  rawArguments?: string;
+  handler: (actor: AppActor, ctx: ConversationContext, args: any) => Promise<unknown>;
+}) {
+  const args = rawArguments ? JSON.parse(rawArguments) : {};
+  if (isCrmWriteTool(toolName)) {
+    const normalizedArgs = normalizeCrmWriteToolArgs(toolName, ctx, args);
+    validateCrmWriteToolArgs(toolName, normalizedArgs);
+    const operation = await createPendingCrmOperation({
+      ctx,
+      toolName,
+      args: normalizedArgs,
+    });
+    return {
+      result: crmPendingToolResult(operation),
+      pendingOperation: operation,
+      mapGraphChanged: false,
+    };
+  }
+
+  const result = await handler(actor, ctx, args);
+  return {
+    result,
+    pendingOperation: null,
+    mapGraphChanged: isContextMapMutationTool(toolName),
+  };
+}
+
 export async function processConversationTurn(ctx: ConversationContext): Promise<{
   assistantMessage: string;
   contextUsed: ConversationContextUsed;
 }> {
+  const pendingOperationResponse = await handleCrmPendingOperationIntent(ctx);
+  if (pendingOperationResponse) {
+    return {
+      assistantMessage: pendingOperationResponse,
+      contextUsed: {
+        pageContext: ctx.pageContext ?? undefined,
+      },
+    };
+  }
+
   await assertWorkspaceModelBudget(ctx.workspaceId);
 
   const effectiveHistoryTurns = ctx.userMessage.length > 10_000 ? 5 : MAX_HISTORY_TURNS;
@@ -556,7 +686,7 @@ export async function processConversationTurn(ctx: ConversationContext): Promise
 
   let finalMessage = response.content;
   let mapGraphChanged = false;
-  const crmWriteConfirmed = hasConfirmedCrmWrite(ctx, priorTurns);
+  const pendingCrmOperations: Array<import("./pending-crm-operations").PendingOperationRecord> = [];
 
   // Execute tools if the LLM requests it
   if (response.tool_calls && response.tool_calls.length > 0) {
@@ -567,16 +697,20 @@ export async function processConversationTurn(ctx: ConversationContext): Promise
       const handler = TOOL_HANDLERS[call.function.name];
       if (handler) {
         try {
-          if (isCrmWriteTool(call.function.name) && !crmWriteConfirmed) {
-            messages.push({ role: "tool", content: JSON.stringify(crmWriteConfirmationError(call.function.name)), name: call.function.name, tool_call_id: call.id });
-            continue;
-          }
-          const args = call.function.arguments ? JSON.parse(call.function.arguments) : {};
-          const result = await handler(actor, ctx, args);
-          if (isContextMapMutationTool(call.function.name)) {
+          const outcome = await executeConversationToolCall({
+            actor,
+            ctx,
+            toolName: call.function.name,
+            rawArguments: call.function.arguments,
+            handler,
+          });
+          if (outcome.mapGraphChanged) {
             mapGraphChanged = true;
           }
-          messages.push({ role: "tool", content: JSON.stringify(result), name: call.function.name, tool_call_id: call.id });
+          if (outcome.pendingOperation) {
+            pendingCrmOperations.push(outcome.pendingOperation);
+          }
+          messages.push({ role: "tool", content: JSON.stringify(outcome.result), name: call.function.name, tool_call_id: call.id });
         } catch (err: any) {
           messages.push({ role: "tool", content: JSON.stringify({ error: err.message }), name: call.function.name, tool_call_id: call.id });
         }
@@ -585,17 +719,19 @@ export async function processConversationTurn(ctx: ConversationContext): Promise
       }
     }
 
-    await assertWorkspaceModelBudget(ctx.workspaceId);
-    const followup = await defaultModelGateway.chat({
-      workspaceId: ctx.workspaceId,
-      ...catalogUsageContext(ctx),
-      model: env.MODEL_CHAT_CONVERSATION,
-      taskType: "AGENT",
-      messages,
-      tools,
-    });
-    
-    finalMessage = followup.content;
+    if (await canRunFollowupModelAfterTools(ctx, pendingCrmOperations)) {
+      const followup = await defaultModelGateway.chat({
+        workspaceId: ctx.workspaceId,
+        ...catalogUsageContext(ctx),
+        model: env.MODEL_CHAT_CONVERSATION,
+        taskType: "AGENT",
+        messages,
+        tools,
+      });
+
+      finalMessage = followup.content;
+    }
+    finalMessage = appendCrmPendingNotices(finalMessage, pendingCrmOperations);
   }
 
   // Store observation as memory if the conversation reveals something useful
@@ -633,6 +769,17 @@ export async function* processConversationTurnStream(ctx: ConversationContext): 
   assistantMessage: string;
   contextUsed: ConversationContextUsed;
 }> {
+  const pendingOperationResponse = await handleCrmPendingOperationIntent(ctx);
+  if (pendingOperationResponse) {
+    yield pendingOperationResponse;
+    return {
+      assistantMessage: pendingOperationResponse,
+      contextUsed: {
+        pageContext: ctx.pageContext ?? undefined,
+      },
+    };
+  }
+
   await assertWorkspaceModelBudget(ctx.workspaceId);
 
   const effectiveHistoryTurns = ctx.userMessage.length > 10_000 ? 5 : MAX_HISTORY_TURNS;
@@ -732,7 +879,7 @@ export async function* processConversationTurnStream(ctx: ConversationContext): 
 
   let finalMessage = "";
   let mapGraphChanged = false;
-  const crmWriteConfirmed = hasConfirmedCrmWrite(ctx, priorTurns);
+  const pendingCrmOperations: Array<import("./pending-crm-operations").PendingOperationRecord> = [];
 
   const iterator = defaultModelGateway.chatStream({
     workspaceId: ctx.workspaceId,
@@ -762,16 +909,20 @@ export async function* processConversationTurnStream(ctx: ConversationContext): 
       const handler = TOOL_HANDLERS[call.function.name];
       if (handler) {
         try {
-          if (isCrmWriteTool(call.function.name) && !crmWriteConfirmed) {
-            messages.push({ role: "tool", content: JSON.stringify(crmWriteConfirmationError(call.function.name)), name: call.function.name, tool_call_id: call.id });
-            continue;
-          }
-          const args = call.function.arguments ? JSON.parse(call.function.arguments) : {};
-          const result = await handler(actor, ctx, args);
-          if (isContextMapMutationTool(call.function.name)) {
+          const outcome = await executeConversationToolCall({
+            actor,
+            ctx,
+            toolName: call.function.name,
+            rawArguments: call.function.arguments,
+            handler,
+          });
+          if (outcome.mapGraphChanged) {
             mapGraphChanged = true;
           }
-          messages.push({ role: "tool", content: JSON.stringify(result), name: call.function.name, tool_call_id: call.id });
+          if (outcome.pendingOperation) {
+            pendingCrmOperations.push(outcome.pendingOperation);
+          }
+          messages.push({ role: "tool", content: JSON.stringify(outcome.result), name: call.function.name, tool_call_id: call.id });
         } catch (err: any) {
           messages.push({ role: "tool", content: JSON.stringify({ error: err.message }), name: call.function.name, tool_call_id: call.id });
         }
@@ -780,23 +931,30 @@ export async function* processConversationTurnStream(ctx: ConversationContext): 
       }
     }
 
-    await assertWorkspaceModelBudget(ctx.workspaceId);
-    const followupIterator = defaultModelGateway.chatStream({
-      workspaceId: ctx.workspaceId,
-      ...catalogUsageContext(ctx),
-      model: env.MODEL_CHAT_CONVERSATION,
-      taskType: "AGENT",
-      messages,
-      tools,
-    })[Symbol.asyncIterator]();
+    if (await canRunFollowupModelAfterTools(ctx, pendingCrmOperations)) {
+      const followupIterator = defaultModelGateway.chatStream({
+        workspaceId: ctx.workspaceId,
+        ...catalogUsageContext(ctx),
+        model: env.MODEL_CHAT_CONVERSATION,
+        taskType: "AGENT",
+        messages,
+        tools,
+      })[Symbol.asyncIterator]();
 
-    while (true) {
-      const { done, value } = await followupIterator.next();
-      if (done) {
-        break;
+      while (true) {
+        const { done, value } = await followupIterator.next();
+        if (done) {
+          break;
+        }
+        yield value;
+        finalMessage += value;
       }
-      yield value;
-      finalMessage += value;
+    }
+    const finalMessageWithNotices = appendCrmPendingNotices(finalMessage, pendingCrmOperations);
+    const noticeAppendix = pendingNoticeAppendix(finalMessage, finalMessageWithNotices);
+    if (noticeAppendix) {
+      yield noticeAppendix;
+      finalMessage = finalMessageWithNotices;
     }
   }
 
