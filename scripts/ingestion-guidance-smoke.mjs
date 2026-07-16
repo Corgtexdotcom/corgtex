@@ -10,6 +10,12 @@ import {
   recordValidationResult,
   writeValidationArtifacts,
 } from "./lib/production-validation.mjs";
+import {
+  requireInternalValidationWorkspace,
+  selectWorkspaceForValidation,
+  validationWorkspaceSelectorFromEnv,
+  workspaceTenant,
+} from "./lib/validation-workspace.mjs";
 
 function fail(message) {
   console.error(`FAIL ${message}`);
@@ -314,19 +320,29 @@ async function main() {
         cookie: cookieHeader,
       },
     });
-    const workspaceId = session.body?.workspaces?.[0]?.id;
-    if (!workspaceId) {
-      fail("/api/session did not return a workspace for ingestion guidance smoke");
-    }
-    pass("/api/session returned a workspace for ingestion guidance smoke");
+    const workspaceSelector = validationWorkspaceSelectorFromEnv(process.env, "INGESTION_GUIDANCE_SMOKE");
+    const workspace = selectWorkspaceForValidation(session.body?.workspaces ?? [], {
+      workspaceId: workspaceSelector.workspaceId,
+      workspaceSlug: workspaceSelector.workspaceSlug,
+      purpose: "ingestion guidance smoke",
+    });
+    requireInternalValidationWorkspace(workspace, {
+      purpose: "ingestion guidance smoke writes",
+    });
+    const workspaceId = workspace.id;
+    pass(`/api/session returned workspace '${workspace.slug ?? workspace.id}' for ingestion guidance smoke`);
 
     const validationRun = createValidationRun({
       runId: validationRunId(),
-      tenant: { id: workspaceId, label: workspaceId },
+      tenant: workspaceTenant(workspace),
       prNumbers: parseValidationPrNumbers(process.env.INGESTION_GUIDANCE_SMOKE_PR_NUMBERS ?? process.env.PRODUCTION_VALIDATION_PR_NUMBERS),
       baseUrl,
       environment: "production",
-      metadata: { script: "ingestion-guidance-smoke" },
+      metadata: {
+        script: "ingestion-guidance-smoke",
+        workspaceSelector,
+        strictInternalValidationWorkspace: true,
+      },
     });
     const cleanupRegistry = createValidationCleanupRegistry(validationRun);
     const tag = validationRecordPrefix(validationRun, "ingestion-guidance-smoke");

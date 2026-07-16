@@ -9,6 +9,7 @@ const prismaBin = path.join(rootDir, "node_modules", ".bin", "prisma");
 const nextBin = path.join(rootDir, "node_modules", "next", "dist", "bin", "next");
 const migrationsDir = path.join(rootDir, "prisma", "migrations");
 const STARTUP_MODES = new Set(["combined", "migrate-and-seed", "migrate-and-web", "web"]);
+const INTERNAL_VALIDATION_SEED_SCRIPT = "scripts/seed-internal-validation-workspace.mjs";
 
 function run(command, args, options = {}) {
   execFileSync(command, args, {
@@ -27,6 +28,14 @@ export function configuredSeedScripts(env = process.env) {
   const seedScripts = env.SEED_SCRIPTS
     ? env.SEED_SCRIPTS.split(",").map((script) => script.trim()).filter(Boolean)
     : [];
+
+  const internalValidationSetting = env.CORGTEX_AUTO_SEED_INTERNAL_VALIDATION?.trim();
+  const shouldSeedInternalValidation = internalValidationSetting
+    ? flagEnabled("CORGTEX_AUTO_SEED_INTERNAL_VALIDATION", env)
+    : env.NODE_ENV === "production";
+  if (shouldSeedInternalValidation) {
+    seedScripts.push(INTERNAL_VALIDATION_SEED_SCRIPT);
+  }
 
   if (flagEnabled("CORGTEX_AUTO_SEED_JNJ_DEMO", env)) {
     seedScripts.push("scripts/seed-jnj-demo.mjs");

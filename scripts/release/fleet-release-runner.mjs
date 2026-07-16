@@ -725,6 +725,7 @@ export function releaseVariables(manifest, env = process.env, options = {}) {
     CORGTEX_RELEASE_GIT_SHA: manifest.gitSha,
     CORGTEX_STARTUP_MODE: "combined",
     CORGTEX_AUTO_SEED_JNJ_DEMO: "false",
+    CORGTEX_AUTO_SEED_INTERNAL_VALIDATION: "true",
     SEED_SCRIPTS: "",
     ...optionalRuntimeObservabilityVariables(env, options),
   };
@@ -734,6 +735,7 @@ export function azureReleaseVariables(manifest, env = process.env) {
   return {
     ...releaseVariables(manifest, env),
     CORGTEX_STARTUP_MODE: "migrate-and-web",
+    CORGTEX_AUTO_SEED_INTERNAL_VALIDATION: "false",
     ...optionalRuntimeObservabilityVariables(env, { azureSecretRefs: true }),
   };
 }

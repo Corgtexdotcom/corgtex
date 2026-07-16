@@ -107,6 +107,19 @@ describe("start-web startup modes", () => {
     ]);
   });
 
+  it("adds the internal validation seed for production startup", () => {
+    expect(configuredSeedScripts({ NODE_ENV: "production" })).toEqual([
+      "scripts/seed-internal-validation-workspace.mjs",
+    ]);
+  });
+
+  it("deduplicates the internal validation seed when explicitly configured", () => {
+    expect(configuredSeedScripts({
+      CORGTEX_AUTO_SEED_INTERNAL_VALIDATION: "true",
+      SEED_SCRIPTS: "scripts/seed-internal-validation-workspace.mjs",
+    })).toEqual(["scripts/seed-internal-validation-workspace.mjs"]);
+  });
+
   it("parses common enabled flag values", () => {
     expect(flagEnabled("FEATURE", { FEATURE: "on" })).toBe(true);
     expect(flagEnabled("FEATURE", { FEATURE: "false" })).toBe(false);
