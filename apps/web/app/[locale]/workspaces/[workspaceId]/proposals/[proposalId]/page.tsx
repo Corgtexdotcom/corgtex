@@ -15,7 +15,7 @@ import { AdviceRequestForm } from "@/lib/components/AdviceRequestForm";
 import { WorkItemConversationSurface, WorkItemRequestList } from "@/lib/components/WorkItemConversation";
 import { getDeliberationTargets } from "@/lib/deliberation-targets";
 import { canOpenPrivateDraft } from "@/lib/governance-open-guards";
-import { attachProposalExternalResourceAction, createProposalObjectionAction, decideProposalApprovalAction, postDeliberationEntryAction, requestProposalAdviceAction, resolveDeliberationEntryAction, resolveProposalAction, resolveProposalObjectionAction, returnProposalToDraftAction, submitProposalAction, updateDeliberationEntryAction, updateProposalAction } from "../actions";
+import { createProposalObjectionAction, decideProposalApprovalAction, requestProposalAdviceAction, resolveProposalAction, resolveProposalObjectionAction, returnProposalToDraftAction, submitProposalAction, updateProposalAction } from "../actions";
 import { ProposalDraftFields } from "../ProposalDraftFields";
 import { getFormatter, getTranslations } from "next-intl/server";
 import { formatWorkItemPriority, type WorkItemPriorityLabels } from "@/lib/work-item-priority";
@@ -254,6 +254,8 @@ export default async function ProposalDetailPage({
   const proposalPath = `/workspaces/${workspaceId}/proposals/${proposal.id}`;
   const appBaseUrl = process.env.NEXT_PUBLIC_APP_URL?.replace(/\/$/, "") ?? "";
   const proposalUrl = `${appBaseUrl}${proposalPath}`;
+  const deliberationApiEndpoint = `/api/workspaces/${workspaceId}/deliberation-entries`;
+  const externalResourcesApiEndpoint = `/api/workspaces/${workspaceId}/external-resources`;
   const copyableRequestMessage = (request: (typeof adviceRequests)[number]) => [
     t("adviceCopyableSubject", { title: proposal.title }),
     request.messageMd,
@@ -284,15 +286,14 @@ export default async function ProposalDetailPage({
             canResolve: canManageEntry(entry),
           }))}
           canResolve={!isArchived && (isAuthor || actor.kind === "agent")}
-          resolveAction={resolveDeliberationEntryAction}
-          updateAction={updateDeliberationEntryAction}
+          apiEndpoint={deliberationApiEndpoint}
           hiddenFields={{ workspaceId, proposalId }}
         />
       ) : null,
       replyForm: !isArchived && proposal.status === "OPEN" && request.status === "ACTIVE" ? (
         <DeliberationComposer
-          postAction={postDeliberationEntryAction}
-          hiddenFields={{ workspaceId, proposalId, adviceRequestId: request.id }}
+          apiEndpoint={deliberationApiEndpoint}
+          hiddenFields={{ parentType: "PROPOSAL", parentId: proposalId, adviceRequestId: request.id }}
           targetOptions={targetOptions}
           entryTypes={[
             { value: "REACTION", label: t("entryReaction"), variant: "secondary" },
@@ -375,8 +376,8 @@ export default async function ProposalDetailPage({
             <ExternalResourceCards attachments={externalResourceAttachments} />
             {!isArchived && (
               <ExternalResourceAttachForm
-                action={attachProposalExternalResourceAction}
-                hiddenFields={{ workspaceId, proposalId: proposal.id }}
+                apiEndpoint={externalResourcesApiEndpoint}
+                hiddenFields={{ entityType: "Proposal", entityId: proposal.id, purpose: "reference" }}
               />
             )}
           </section>
@@ -470,16 +471,15 @@ export default async function ProposalDetailPage({
                 canResolve: canManageEntry(entry),
               }))}
               canResolve={!isArchived && (isAuthor || actor.kind === "agent")}
-              resolveAction={resolveDeliberationEntryAction}
-              updateAction={updateDeliberationEntryAction}
+              apiEndpoint={deliberationApiEndpoint}
               hiddenFields={{ workspaceId, proposalId }}
               emptyMessage={t("discussionEmpty")}
             />
 
             {!isArchived && proposal.status === "OPEN" && (
               <DeliberationComposer
-                postAction={postDeliberationEntryAction}
-                hiddenFields={{ workspaceId, proposalId }}
+                apiEndpoint={deliberationApiEndpoint}
+                hiddenFields={{ parentType: "PROPOSAL", parentId: proposalId }}
                 targetOptions={targetOptions}
                 entryTypes={[
                   { value: "REACTION", label: t("entryReaction"), variant: "secondary" },

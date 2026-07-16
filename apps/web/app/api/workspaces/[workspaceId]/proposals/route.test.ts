@@ -149,6 +149,7 @@ describe("POST /api/workspaces/[workspaceId]/proposals", () => {
         body: JSON.stringify({
           title: "Improve follow-through",
           bodyMd: "Assign one owner.",
+          isPrivate: false,
           ownerMemberId: "member-owner",
           priority: "Urgent",
         }),
@@ -159,6 +160,7 @@ describe("POST /api/workspaces/[workspaceId]/proposals", () => {
     expect(response.status).toBe(201);
     expect(createProposal).toHaveBeenCalledWith(actor, expect.objectContaining({
       workspaceId: "workspace-1",
+      isPrivate: false,
       ownerMemberId: "member-owner",
       priority: 3,
     }));

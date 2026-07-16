@@ -1,4 +1,8 @@
+"use client";
+
 import type { ReactNode } from "react";
+import { useEffect, useState, useTransition } from "react";
+import { useRouter } from "next/navigation";
 
 type ExternalResourceAttachment = {
   id: string;
@@ -50,13 +54,79 @@ export function ExternalResourceCards({ attachments }: { attachments: ExternalRe
   );
 }
 
-export function ExternalResourceAttachForm({ action, hiddenFields, children }: {
-  action: (formData: FormData) => void | Promise<void>;
+function formDataJson(formData: FormData) {
+  const payload: Record<string, string> = {};
+  for (const [key, value] of formData.entries()) {
+    if (typeof value === "string" && value.length > 0) {
+      payload[key] = value;
+    }
+  }
+  return payload;
+}
+
+async function responseErrorMessage(response: Response) {
+  try {
+    const body = await response.json();
+    const message = body?.error?.message;
+    return typeof message === "string" && message.length > 0 ? message : "Could not save reference.";
+  } catch {
+    return "Could not save reference.";
+  }
+}
+
+export function ExternalResourceAttachForm({ action, apiEndpoint, hiddenFields, children }: {
+  action?: (formData: FormData) => void | Promise<void>;
+  apiEndpoint?: string;
   hiddenFields: Record<string, string>;
   children?: ReactNode;
 }) {
+  const router = useRouter();
+  const [isPending, startTransition] = useTransition();
+  const [isHydrated, setIsHydrated] = useState(false);
+  const [message, setMessage] = useState<{ type: "success" | "error"; text: string } | null>(null);
+  const submitDisabled = isPending || (Boolean(apiEndpoint) && !isHydrated);
+
+  useEffect(() => {
+    setIsHydrated(true);
+  }, []);
+
+  const handleSubmit = (event: React.FormEvent<HTMLFormElement>) => {
+    if (!apiEndpoint) return;
+
+    event.preventDefault();
+    const form = event.currentTarget;
+    const formData = new FormData(form);
+
+    startTransition(async () => {
+      try {
+        const response = await fetch(apiEndpoint, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(formDataJson(formData)),
+        });
+        if (!response.ok) {
+          throw new Error(await responseErrorMessage(response));
+        }
+        form.reset();
+        setMessage({ type: "success", text: "Reference saved." });
+        router.refresh();
+      } catch (error: unknown) {
+        setMessage({
+          type: "error",
+          text: error instanceof Error && error.message.length > 0 ? error.message : "Could not save reference.",
+        });
+      }
+    });
+  };
+
   return (
-    <form action={action} className="stack nr-form-section" style={{ gap: 10, marginTop: 12 }}>
+    <form
+      action={apiEndpoint ? undefined : action}
+      onSubmit={handleSubmit}
+      className="stack nr-form-section"
+      data-api-ready={apiEndpoint ? String(isHydrated) : undefined}
+      style={{ gap: 10, marginTop: 12 }}
+    >
       {Object.entries(hiddenFields).map(([name, value]) => (
         <input key={name} type="hidden" name={name} value={value} />
       ))}
@@ -68,9 +138,10 @@ export function ExternalResourceAttachForm({ action, hiddenFields, children }: {
         Description
         <textarea name="descriptionMd" rows={3} placeholder="What this file is for" />
       </label>
-      <button type="submit" className="secondary small" style={{ alignSelf: "flex-start" }}>
+      <button type="submit" className="secondary small" disabled={submitDisabled} style={{ alignSelf: "flex-start" }}>
         Save reference
       </button>
+      {message && <div className={`form-message form-message-${message.type}`}>{message.text}</div>}
       {children}
     </form>
   );

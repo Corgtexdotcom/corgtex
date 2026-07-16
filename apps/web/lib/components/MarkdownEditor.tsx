@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslations } from "next-intl";
 import { htmlToMarkdown } from "@/lib/markdown-paste";
 import { MarkdownRenderer } from "./MarkdownRenderer";
@@ -8,6 +8,7 @@ import { MarkdownRenderer } from "./MarkdownRenderer";
 export function MarkdownEditor({
   name,
   defaultValue,
+  resetKey,
   value,
   onValueChange,
   placeholder,
@@ -24,6 +25,7 @@ export function MarkdownEditor({
 }: {
   name: string;
   defaultValue?: string;
+  resetKey?: string;
   value?: string;
   onValueChange?: (value: string, event?: React.ChangeEvent<HTMLTextAreaElement>) => void;
   placeholder?: string;
@@ -39,10 +41,18 @@ export function MarkdownEditor({
   ariaActivedescendant?: string;
 }) {
   const internalRef = useRef<HTMLTextAreaElement | null>(null);
+  const lastResetKeyRef = useRef(resetKey);
   const [internalValue, setInternalValue] = useState(defaultValue ?? "");
   const [preview, setPreview] = useState(false);
   const t = useTranslations("shared.markdownEditor");
   const editorValue = value ?? internalValue;
+
+  useEffect(() => {
+    if (value !== undefined || resetKey === undefined || resetKey === lastResetKeyRef.current) return;
+    lastResetKeyRef.current = resetKey;
+    setInternalValue(defaultValue ?? "");
+    setPreview(false);
+  }, [defaultValue, resetKey, value]);
 
   const setTextareaRef = useCallback((node: HTMLTextAreaElement | null) => {
     internalRef.current = node;
