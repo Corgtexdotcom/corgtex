@@ -514,7 +514,7 @@ jobs:
                 { target: "azure-selfserve", gitSha: process.env.SELFSERVE_GIT_SHA, imageTag: process.env.SELFSERVE_IMAGE_TAG, releaseVersion: process.env.SELFSERVE_VERSION },
                 { target: "ops", gitSha: process.env.OPS_GIT_SHA, imageTag: process.env.OPS_IMAGE_TAG, releaseVersion: process.env.OPS_VERSION },
               ];
-              console.log(JSON.stringify({ targetManifests }));
+              console.log(JSON.stringify({ gitSha: process.env.GITHUB_SHA, targetManifests }));
             '
           )"
           echo "Observation uses live target releases from app, selfserve, and ops health"
