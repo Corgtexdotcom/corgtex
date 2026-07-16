@@ -470,6 +470,39 @@ describe("processConversationTurn", () => {
     checkBudgetMock.mockResolvedValue({ allowed: true, usedPct: 0, usedUsd: 0, capUsd: 5 });
   });
 
+  it("streams pending CRM confirmations before model budget gating", async () => {
+    const actor = {
+      kind: "user" as const,
+      user: {
+        id: "user-1",
+        email: "user@example.com",
+        displayName: "User",
+      },
+    };
+    conversationPendingOperationStore.push(pendingOperationFixture());
+    checkBudgetMock.mockResolvedValue({ allowed: false, usedPct: 100, usedUsd: 5, capUsd: 5 });
+
+    const { processConversationTurnStream } = await import("./conversation");
+    const { chunks, result } = await collectConversationStream(processConversationTurnStream({
+      workspaceId: "ws-1",
+      sessionId: "session-1",
+      userId: "user-1",
+      agentKey: "assistant",
+      userMessage: `confirm ${pendingOperationId(1)}`,
+      actor,
+    }));
+
+    expect(chunks.join("")).toContain("Activity ID: activity-1");
+    expect(result.assistantMessage).toContain("Activity ID: activity-1");
+    expect(createActivityMock).toHaveBeenCalledWith(actor, expect.objectContaining({
+      title: "Follow up",
+      type: "TASK",
+      accountId: "account-1",
+    }));
+    expect(checkBudgetMock).not.toHaveBeenCalled();
+    expect(chatStreamMock).not.toHaveBeenCalled();
+  });
+
   it("recovers stale executing pending CRM operations when confirmation is retried", async () => {
     const actor = {
       kind: "user" as const,
