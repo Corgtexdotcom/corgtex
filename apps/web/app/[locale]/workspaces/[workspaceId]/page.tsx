@@ -35,11 +35,7 @@ function compactNarrativeText(markdown: string | null | undefined, maxLength = 5
   if (text.length <= maxLength) return text;
 
   const slice = text.slice(0, maxLength).trimEnd();
-  const sentenceBoundary = Math.max(
-    slice.lastIndexOf("."),
-    slice.lastIndexOf("!"),
-    slice.lastIndexOf("?"),
-  );
+  const sentenceBoundary = lastSentenceBoundary(slice);
   if (sentenceBoundary > Math.floor(maxLength * 0.55)) {
     return slice.slice(0, sentenceBoundary + 1).trim();
   }
@@ -49,6 +45,15 @@ function compactNarrativeText(markdown: string | null | undefined, maxLength = 5
     ? slice.slice(0, wordBoundary).trim()
     : slice;
   return /[.!?]$/.test(trimmed) ? trimmed : `${trimmed}.`;
+}
+
+function lastSentenceBoundary(value: string) {
+  let boundary = -1;
+  const sentenceBoundaryPattern = /[.!?](?=(?:["')\]]?\s|["')\]]?$|$))/g;
+  for (const match of value.matchAll(sentenceBoundaryPattern)) {
+    boundary = match.index ?? boundary;
+  }
+  return boundary;
 }
 
 function narrativeLine(title: string | null | undefined, summary: string | null | undefined) {

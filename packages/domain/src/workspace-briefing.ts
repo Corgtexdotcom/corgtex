@@ -142,11 +142,7 @@ function compactText(value: string | null | undefined, maxLength = 520) {
   if (normalized.length <= maxLength) return normalized;
 
   const slice = normalized.slice(0, maxLength).trimEnd();
-  const sentenceBoundary = Math.max(
-    slice.lastIndexOf("."),
-    slice.lastIndexOf("!"),
-    slice.lastIndexOf("?"),
-  );
+  const sentenceBoundary = lastSentenceBoundary(slice);
   if (sentenceBoundary > Math.floor(maxLength * 0.55)) {
     return slice.slice(0, sentenceBoundary + 1).trim();
   }
@@ -156,6 +152,15 @@ function compactText(value: string | null | undefined, maxLength = 520) {
     ? slice.slice(0, wordBoundary).trim()
     : slice;
   return /[.!?]$/.test(trimmed) ? trimmed : `${trimmed}.`;
+}
+
+function lastSentenceBoundary(value: string) {
+  let boundary = -1;
+  const sentenceBoundaryPattern = /[.!?](?=(?:["')\]]?\s|["')\]]?$|$))/g;
+  for (const match of value.matchAll(sentenceBoundaryPattern)) {
+    boundary = match.index ?? boundary;
+  }
+  return boundary;
 }
 
 function normalizeNarrativeText(value: string | null | undefined, maxLength = 1200) {

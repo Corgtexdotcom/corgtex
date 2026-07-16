@@ -959,6 +959,32 @@ describe("workspace briefing", () => {
     }));
   });
 
+  it("compacts source summaries at sentence boundaries instead of URL or version dots", async () => {
+    const { collectWorkspaceBriefingCandidates } = await import("./workspace-briefing");
+    const firstSentence = `${"Operating context ".repeat(26)}The team chose the production path.`;
+    prismaMock.brainArticle.findMany.mockResolvedValueOnce([{
+      id: "article-1",
+      title: "Release context",
+      slug: "release-context",
+      bodyMd: `${firstSentence} Read https://example.com/releases/v2.1 and compare https://updates.example.com/build/v3.2 notes ${"before rollout ".repeat(20)}`,
+      authority: "REFERENCE",
+      publishedAt: new Date("2026-04-30T08:00:00.000Z"),
+      createdAt: new Date("2026-04-30T08:00:00.000Z"),
+      updatedAt: new Date("2026-04-30T09:00:00.000Z"),
+    }]);
+
+    const candidates = await collectWorkspaceBriefingCandidates({
+      workspaceId: "ws-1",
+      since: new Date("2026-04-29T00:00:00.000Z"),
+      now: new Date("2026-04-30T12:00:00.000Z"),
+    });
+
+    const articleCandidate = candidates.find((candidate) => candidate.sourceType === "BRAIN_ARTICLE");
+    expect(articleCandidate?.summaryMd).toBe(firstSentence);
+    expect(articleCandidate?.summaryMd).not.toContain("https://updates.example.");
+    expect(articleCandidate?.summaryMd).not.toContain("v3.");
+  });
+
   it("does not attach unrelated source refs to digest-derived sections", async () => {
     const { buildWorkspaceBriefingFromDigest } = await import("./workspace-briefing");
 

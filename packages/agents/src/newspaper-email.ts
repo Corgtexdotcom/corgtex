@@ -88,27 +88,49 @@ function renderHtmlText(value: string) {
   return escapeHtml(value).replace(/\r?\n/g, "<br>");
 }
 
-function renderNarrativeMarkdown(value: string) {
-  return escapeHtml(value)
-    .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
-    .replace(/\r?\n/g, "<br>");
+function renderBoldMarkers(value: string) {
+  return value.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
 }
 
-function renderNarrativeParagraphs(values: Array<string | null | undefined>) {
-  return values
-    .flatMap((value) => value?.split(/\n{2,}/).map((part) => part.trim()).filter(Boolean) ?? [])
-    .map((paragraph, index) => (
-      `<p style="font-size:${index === 0 ? "17px" : "15px"};line-height:1.65;margin:0 0 16px;color:#2d2a24;">${renderNarrativeMarkdown(paragraph)}</p>`
-    ))
-    .join("");
+function safeAbsoluteEmailHref(href: string, workspaceUrl: string) {
+  try {
+    const url = new URL(href, workspaceUrl);
+    return url.protocol === "http:" || url.protocol === "https:" ? url.toString() : null;
+  } catch {
+    return null;
+  }
 }
 
 function absoluteEmailHref(href: string, workspaceUrl: string) {
-  try {
-    return new URL(href, workspaceUrl).toString();
-  } catch {
-    return href;
+  return safeAbsoluteEmailHref(href, workspaceUrl) ?? workspaceUrl;
+}
+
+function renderNarrativeMarkdown(value: string, workspaceUrl: string) {
+  const withoutImages = value.replace(/!\[([^\]\n]*)\]\([^)]+\)/g, "$1");
+  const linkPattern = /\[([^\]\n]+)\]\((https?:\/\/[^\s)]+|\/[^\s)]*)\)/g;
+  let rendered = "";
+  let cursor = 0;
+  for (const match of withoutImages.matchAll(linkPattern)) {
+    const index = match.index ?? 0;
+    rendered += renderBoldMarkers(escapeHtml(withoutImages.slice(cursor, index)));
+    const label = match[1] ?? "";
+    const href = safeAbsoluteEmailHref(match[2] ?? "", workspaceUrl);
+    rendered += href
+      ? `<a href="${escapeAttribute(href)}" style="color:#6750a4;text-decoration:underline;">${renderBoldMarkers(escapeHtml(label))}</a>`
+      : renderBoldMarkers(escapeHtml(match[0] ?? ""));
+    cursor = index + (match[0]?.length ?? 0);
   }
+  rendered += renderBoldMarkers(escapeHtml(withoutImages.slice(cursor)));
+  return rendered.replace(/\r?\n/g, "<br>");
+}
+
+function renderNarrativeParagraphs(values: Array<string | null | undefined>, workspaceUrl: string) {
+  return values
+    .flatMap((value) => value?.split(/\n{2,}/).map((part) => part.trim()).filter(Boolean) ?? [])
+    .map((paragraph, index) => (
+      `<p style="font-size:${index === 0 ? "17px" : "15px"};line-height:1.65;margin:0 0 16px;color:#2d2a24;">${renderNarrativeMarkdown(paragraph, workspaceUrl)}</p>`
+    ))
+    .join("");
 }
 
 function compactRecipientLine(value: string) {
@@ -142,7 +164,7 @@ function renderRecipientFallbackNote(params: {
       if (!compact) return null;
       const href = recipientItemHref(item, params.workspaceUrl);
       const prefix = index === 0 ? "For you: " : "Also: ";
-      return `${prefix}${renderNarrativeMarkdown(compact)} <a href="${escapeAttribute(href)}" style="color:#6750a4;text-decoration:underline;">Open it</a>.`;
+      return `${prefix}${renderNarrativeMarkdown(compact, params.workspaceUrl)} <a href="${escapeAttribute(href)}" style="color:#6750a4;text-decoration:underline;">Open it</a>.`;
     })
     .filter(Boolean)
     .join(" ");
@@ -257,13 +279,15 @@ export function renderWorkspaceBriefingEmailHtml(params: {
     briefing.attentionMd,
     briefing.continuingContextMd,
     briefing.closingMd,
-  ]);
-  const memberNote = params.personalization?.memberNote
-    ? `<p style="font-size:15px;line-height:1.6;margin:18px 0 0;color:#5b5448;">${renderNarrativeMarkdown(params.personalization.memberNote)}</p>`
-    : renderRecipientFallbackNote({
-      digest: params.digest,
-      workspaceUrl: params.workspaceUrl,
-    });
+  ], params.workspaceUrl);
+  const memberPersonalNote = params.personalization?.memberNote
+    ? `<p style="font-size:15px;line-height:1.6;margin:18px 0 0;color:#5b5448;">${renderNarrativeMarkdown(params.personalization.memberNote, params.workspaceUrl)}</p>`
+    : "";
+  const memberFallbackNote = renderRecipientFallbackNote({
+    digest: params.digest,
+    workspaceUrl: params.workspaceUrl,
+  });
+  const memberNote = `${memberPersonalNote}${memberFallbackNote}`;
   const sourceLinks = briefing.sourceRefs.slice(0, 8).flatMap((ref) => {
     if (!ref.href) return [];
     return [`<a href="${escapeAttribute(absoluteEmailHref(ref.href, params.workspaceUrl))}" style="color:#6750a4;text-decoration:underline;">${escapeHtml(ref.label)}</a>`];

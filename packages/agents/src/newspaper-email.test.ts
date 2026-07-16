@@ -299,6 +299,41 @@ describe("newspaper email rendering", () => {
     expect(html).not.toContain("<ul");
   });
 
+  it("renders narrative markdown links without rendering markdown images in workspace briefing email", () => {
+    const html = renderWorkspaceBriefingEmailHtml({
+      briefing: {
+        title: "Daily Workspace Briefing - 2026-07-11",
+        briefingJson: {
+          title: "Daily Workspace Briefing - 2026-07-11",
+          period: "DAILY",
+          dateKey: "2026-07-11",
+          generatedAt: "2026-07-11T12:00:00.000Z",
+          introMd: null,
+          leadMd: "**Workspace update**: Read the [runbook](/workspaces/ws-1/brain/runbook) before acting. ![tracker](https://attacker.example/pixel)",
+          bodyMd: null,
+          attentionMd: null,
+          continuingContextMd: null,
+          closingMd: null,
+          editorialMode: "daily_email",
+          freshWindow: { label: "Last 24-36 hours", since: "2026-07-10T00:00:00.000Z", until: "2026-07-11T12:00:00.000Z" },
+          contextWindow: { label: "Current month context", since: "2026-06-11T12:00:00.000Z", until: "2026-07-11T12:00:00.000Z" },
+          items: [],
+          sourceRefs: [],
+          sourceCounts: {},
+        },
+      },
+      workspaceName: "Acme",
+      recipientName: "Pat",
+      workspaceUrl: "https://app.example.com/workspaces/ws-1",
+    });
+
+    expect(html).toContain('href="https://app.example.com/workspaces/ws-1/brain/runbook"');
+    expect(html).toContain("<strong>Workspace update</strong>");
+    expect(html).not.toContain("[runbook]");
+    expect(html).not.toContain("<img");
+    expect(html).not.toContain("attacker.example");
+  });
+
   it("keeps recipient-specific items visible when model personalization omits a member note", () => {
     const recipientDigest = withNewspaperAdviceRequests(normalizeNewspaperDigestPayload({}), [
       [
@@ -344,6 +379,52 @@ describe("newspaper email rendering", () => {
     expect(html).toContain("For you: Assigned action: Review the pricing memo");
     expect(html).toContain("Confirm the final handoff before Friday.");
     expect(html).toContain('href="https://app.example.com/workspaces/ws-1/actions/action-1"');
+    expect(html).not.toContain("Requests Awaiting Your Input");
+    expect(html).not.toContain("<ul");
+  });
+
+  it("keeps recipient-specific items visible alongside partial model personalization", () => {
+    const recipientDigest = withNewspaperAdviceRequests(normalizeNewspaperDigestPayload({}), [
+      "Assigned action: Review the pricing memo\nOpen: https://app.example.com/workspaces/ws-1/actions/action-1",
+      "Assigned action: Confirm the launch owner\nOpen: https://app.example.com/workspaces/ws-1/actions/action-2",
+    ]);
+    const html = renderWorkspaceBriefingEmailHtml({
+      briefing: {
+        title: "Daily Workspace Briefing - 2026-07-11",
+        briefingJson: {
+          title: "Daily Workspace Briefing - 2026-07-11",
+          period: "DAILY",
+          dateKey: "2026-07-11",
+          generatedAt: "2026-07-11T12:00:00.000Z",
+          introMd: null,
+          leadMd: "**Workspace update**: The main briefing is complete.",
+          bodyMd: null,
+          attentionMd: null,
+          continuingContextMd: null,
+          closingMd: null,
+          editorialMode: "daily_email",
+          freshWindow: { label: "Last 24-36 hours", since: "2026-07-10T00:00:00.000Z", until: "2026-07-11T12:00:00.000Z" },
+          contextWindow: { label: "Current month context", since: "2026-06-11T12:00:00.000Z", until: "2026-07-11T12:00:00.000Z" },
+          items: [],
+          sourceRefs: [],
+          sourceCounts: {},
+        },
+      },
+      workspaceName: "Acme",
+      recipientName: "Pat",
+      workspaceUrl: "https://app.example.com/workspaces/ws-1",
+      digest: recipientDigest,
+      personalization: {
+        greeting: "Hi Pat,",
+        intro: null,
+        memberNote: "For you, the pricing review is the one item to check today.",
+        emphasizedSectionIds: ["adviceRequests"],
+      },
+    });
+
+    expect(html).toContain("For you, the pricing review is the one item to check today.");
+    expect(html).toContain("Assigned action: Review the pricing memo");
+    expect(html).toContain("Assigned action: Confirm the launch owner");
     expect(html).not.toContain("Requests Awaiting Your Input");
     expect(html).not.toContain("<ul");
   });
