@@ -20,6 +20,17 @@ const NON_STATUS_FAILURE_EVENTS = new Set([
   "corgtex_worker_error",
 ]);
 const DEFAULT_WINDOW_MINUTES = 20;
+const TARGET_GROUPS = Object.freeze([
+  "railway-customers",
+  "azure-selfserve",
+  "ops",
+  "backup-app",
+]);
+const DEFAULT_TARGET_GROUPS = Object.freeze([
+  "railway-customers",
+  "azure-selfserve",
+  "ops",
+]);
 const POSTHOG_CAPTURE_HOSTS = new Map([
   ["https://us.i.posthog.com", "https://us.posthog.com"],
   ["https://eu.i.posthog.com", "https://eu.posthog.com"],
@@ -73,11 +84,12 @@ export async function runObservationGate(options = {}) {
 export function buildObservationSummary({ manifest, since, rows, targets = null }) {
   const normalizedRows = rows.map(normalizeObservationRow).filter(Boolean);
   const failureRows = normalizedRows.filter(isBlockingClassFailure);
+  const selectedTargets = normalizeObservationTargets(targets);
   const blockingFailures = [];
   const advisoryFailures = [];
 
   for (const row of failureRows) {
-    if (rowMatchesRelease(row, manifest)) {
+    if (rowMatchesRelease(row, manifest) && rowMatchesTargets(row, selectedTargets)) {
       blockingFailures.push(row);
     } else {
       advisoryFailures.push(row);
@@ -266,6 +278,54 @@ export function rowMatchesRelease(row, manifest) {
     row.release_version,
   ].filter(Boolean);
   return observed.some((value) => expected.includes(value));
+}
+
+export function rowMatchesTargets(row, selectedTargets) {
+  if (!selectedTargets || selectedTargets.size === 0) return true;
+  const rowTargets = observationTargetsForRow(row);
+  if (rowTargets.length === 0) return true;
+  return rowTargets.some((target) => selectedTargets.has(target));
+}
+
+export function observationTargetsForRow(row) {
+  const provider = safeText(row.provider)?.toLowerCase();
+  const text = [
+    row.instance_id,
+    row.surface,
+    row.route,
+    row.action,
+  ].filter(Boolean).join(" ").toLowerCase();
+  const targets = new Set();
+
+  if (provider === "azure" || text.includes("azure-selfserve") || text.includes("selfserve") || text.includes("ca-corgtex-ss")) {
+    targets.add("azure-selfserve");
+  }
+
+  if (text.includes("backup-app") || text.includes("app.corgtex.com")) {
+    targets.add("backup-app");
+  }
+
+  if (text.includes("ops") || text.includes("control-plane") || text.includes("ops.corgtex.com")) {
+    targets.add("ops");
+  }
+
+  if (provider === "railway" && targets.size === 0) {
+    targets.add("railway-customers");
+  }
+
+  return [...targets];
+}
+
+export function normalizeObservationTargets(value) {
+  const raw = safeText(value);
+  if (!raw || raw === "main-production-smoke" || raw === "production") return null;
+  if (raw === "all") return new Set(TARGET_GROUPS);
+  if (raw === "default") return new Set(DEFAULT_TARGET_GROUPS);
+
+  const selected = raw.split(",")
+    .map((part) => part.trim())
+    .filter((part) => TARGET_GROUPS.includes(part));
+  return selected.length > 0 ? new Set(selected) : null;
 }
 
 export function advisoryIncidentForRow(row, manifest) {

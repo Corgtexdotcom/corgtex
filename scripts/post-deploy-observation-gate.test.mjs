@@ -5,6 +5,8 @@ import { describe, expect, it, vi } from "vitest";
 
 import {
   buildObservationSummary,
+  normalizeObservationTargets,
+  observationTargetsForRow,
   parseAzureMonitorRows,
   parsePostHogRows,
   queryAzureMonitorRows,
@@ -139,6 +141,63 @@ describe("post-deploy observation gate", () => {
     expect(summary.blockingFailures[0].route).toBe("/api/current-release");
   });
 
+  it("keeps same-release failures from unselected targets advisory-only", () => {
+    const summary = buildObservationSummary({
+      manifest,
+      since: new Date("2026-07-16T05:52:00.000Z"),
+      targets: "railway-customers",
+      rows: [
+        {
+          source: "posthog",
+          event: "corgtex_render_error",
+          instance_id: "azure-selfserve-production",
+          provider: "azure",
+          release_git_sha: SHA,
+          route: "/workspaces/example",
+          events: 1,
+        },
+        {
+          source: "posthog",
+          event: "corgtex_route_error",
+          instance_id: "customer-a",
+          provider: "railway",
+          release_git_sha: SHA,
+          route: "/api/workspaces/ws/meetings/transcript",
+          status: "500",
+          events: 1,
+        },
+      ],
+    });
+
+    expect(summary.status).toBe("blocked");
+    expect(summary.blockingFailures).toHaveLength(1);
+    expect(summary.blockingFailures[0].instance_id).toBe("customer-a");
+    expect(summary.advisoryFailures).toHaveLength(1);
+    expect(summary.advisoryFailures[0].instance_id).toBe("azure-selfserve-production");
+  });
+
+  it("treats main production smoke as all production targets", () => {
+    const summary = buildObservationSummary({
+      manifest,
+      since: new Date("2026-07-16T05:52:00.000Z"),
+      targets: "main-production-smoke",
+      rows: [{
+        source: "azure_monitor",
+        event: "corgtex_render_error",
+        instance_id: "azure-selfserve-production",
+        provider: "azure",
+        release_git_sha: SHA,
+        route: "/workspaces/example",
+        events: 1,
+      }],
+    });
+
+    expect(summary.status).toBe("blocked");
+    expect(summary.blockingFailures).toHaveLength(1);
+    expect(normalizeObservationTargets("main-production-smoke")).toBeNull();
+    expect(observationTargetsForRow(summary.blockingFailures[0])).toEqual(["azure-selfserve"]);
+  });
+
   it("parses Azure Monitor table rows into observation rows", () => {
     const rows = parseAzureMonitorRows({
       tables: [{
@@ -206,6 +265,29 @@ describe("post-deploy observation gate", () => {
     expect(requestBody.query.query).toContain("properties['environment'] = 'production'");
     expect(requestBody.query.query).not.toContain("LIMIT 100");
     expect(summary.status).toBe("blocked");
+  });
+
+  it("supports PostHog-only fail-closed production observation", async () => {
+    const fetchImpl = vi.fn(async () => new Response(JSON.stringify({
+      columns: ["name", "instance_id", "release_git_sha", "route", "status", "events"],
+      results: [],
+    }), { status: 200 }));
+
+    const summary = await runObservationGate({
+      manifest,
+      since: new Date("2026-07-16T05:52:00.000Z"),
+      env: {
+        POSTHOG_PROJECT_ID: "452941",
+        POSTHOG_PERSONAL_API_KEY: "phx_test",
+        POSTHOG_API_HOST: "https://us.i.posthog.com",
+        POSTHOG_ENVIRONMENT: "production",
+        OBSERVATION_REQUIRE_SOURCE: "true",
+      },
+      deps: { fetchImpl, onSourceNote: vi.fn() },
+    });
+
+    expect(summary.status).toBe("passed");
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
   });
 
   it("queries Azure Monitor with the requested observation window", async () => {
