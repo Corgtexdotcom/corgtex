@@ -32,7 +32,7 @@ export function configuredSeedScripts(env = process.env) {
   const internalValidationSetting = env.CORGTEX_AUTO_SEED_INTERNAL_VALIDATION?.trim();
   const shouldSeedInternalValidation = internalValidationSetting
     ? flagEnabled("CORGTEX_AUTO_SEED_INTERNAL_VALIDATION", env)
-    : env.NODE_ENV === "production";
+    : false;
   if (shouldSeedInternalValidation) {
     seedScripts.push(INTERNAL_VALIDATION_SEED_SCRIPT);
   }

@@ -370,7 +370,7 @@ describe("fleet release runner", () => {
     })).rejects.toThrow("SEED_SCRIPTS");
   });
 
-  it("forces Railway release services into combined startup", async () => {
+  it("forces Railway release services into combined startup without validation seeds", async () => {
     expect(releaseVariables({
       releaseVersion: "main-c9077ff031e",
       imageTag: `sha-${SHA}`,
@@ -381,7 +381,7 @@ describe("fleet release runner", () => {
       CORGTEX_RELEASE_GIT_SHA: SHA,
       CORGTEX_STARTUP_MODE: "combined",
       CORGTEX_AUTO_SEED_JNJ_DEMO: "false",
-      CORGTEX_AUTO_SEED_INTERNAL_VALIDATION: "true",
+      CORGTEX_AUTO_SEED_INTERNAL_VALIDATION: "false",
       SEED_SCRIPTS: "",
     });
   });
@@ -1138,6 +1138,7 @@ describe("fleet release runner", () => {
         POSTHOG_ENVIRONMENT: "production",
         CORGTEX_RELEASE_IMAGE_TAG: `sha-${SHA}`,
         CORGTEX_RELEASE_GIT_SHA: SHA,
+        CORGTEX_AUTO_SEED_INTERNAL_VALIDATION: "false",
       });
     }
     const deployAndWaitCalls = railwayCalls
