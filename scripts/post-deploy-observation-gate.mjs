@@ -45,6 +45,7 @@ export async function runObservationGate(options = {}) {
     env: options.env ?? process.env,
     since,
     until,
+    targets: options.targets ?? null,
     deps: options.deps ?? {},
   });
   const summary = buildObservationSummary({
@@ -121,15 +122,15 @@ export function buildObservationSummary({ manifest, since, rows, targets = null 
   };
 }
 
-export async function collectObservationRows({ env = process.env, since, until = new Date(), deps = {} }) {
+export async function collectObservationRows({ env = process.env, since, until = new Date(), targets = null, deps = {} }) {
   const rows = [];
   const sourceNotes = [];
-  let queriedSources = 0;
+  const queriedSources = new Set();
 
   if (isAzureMonitorConfigured(env)) {
-    queriedSources += 1;
     try {
       rows.push(...await queryAzureMonitorRows({ env, since, until, deps }));
+      queriedSources.add("azure_monitor");
     } catch (error) {
       throw new Error(`Azure Monitor observation query failed: ${errorMessage(error)}`);
     }
@@ -142,9 +143,9 @@ export async function collectObservationRows({ env = process.env, since, until =
   }
 
   if (isPostHogQueryConfigured(env)) {
-    queriedSources += 1;
     try {
       rows.push(...await queryPostHogRows({ env, since, deps }));
+      queriedSources.add("posthog");
     } catch (error) {
       throw new Error(`PostHog observation query failed: ${errorMessage(error)}`);
     }
@@ -164,8 +165,12 @@ export async function collectObservationRows({ env = process.env, since, until =
     }
   }
 
-  if (requiresObservationSource(env) && queriedSources === 0) {
-    throw new Error("No observation query source configured; set Azure Monitor or PostHog query credentials before running the production observation gate");
+  if (requiresObservationSource(env)) {
+    const missingSources = [...requiredObservationSourcesForTargets(targets)]
+      .filter((source) => !queriedSources.has(source));
+    if (missingSources.length > 0) {
+      throw new Error(`Missing required observation query source(s) for targets ${targets ?? "production"}: ${missingSources.join(", ")}`);
+    }
   }
 
   return rows;
@@ -438,7 +443,7 @@ function postHogQuery(since, environment) {
   return [
     "SELECT event AS name, properties['instance_id'] AS instance_id, properties['provider'] AS provider, properties['release_git_sha'] AS release_git_sha, properties['release_image_tag'] AS release_image_tag, properties['release_version'] AS release_version, properties['surface'] AS surface, properties['route'] AS route, properties['action'] AS action, properties['status'] AS status, properties['code'] AS code, count() AS events, min(timestamp) AS first_seen, max(timestamp) AS last_seen",
     "FROM events",
-    `WHERE timestamp >= toDateTime('${since.toISOString().replace("T", " ").replace(/\.\d{3}Z$/, "")}')`,
+    `WHERE timestamp >= ${hogQlUtcDateTime(since)}`,
     `AND properties['environment'] = '${hogQlString(environment)}'`,
     `AND event IN (${events})`,
     `AND (event IN (${nonStatusEvents}) OR toInt(coalesce(properties['status'], 0)) >= 500)`,
@@ -453,6 +458,10 @@ function postHogEnvironment(env) {
 
 function hogQlString(value) {
   return String(value).replace(/\\/g, "\\\\").replace(/'/g, "\\'");
+}
+
+function hogQlUtcDateTime(value) {
+  return `toDateTime64('${hogQlString(value.toISOString().replace("T", " ").replace("Z", ""))}', 3, 'UTC')`;
 }
 
 function kustoString(value) {
@@ -563,6 +572,17 @@ function postHogQueryToken(env) {
 
 function requiresObservationSource(env) {
   return /^(1|true|yes)$/i.test(String(env.OBSERVATION_REQUIRE_SOURCE ?? ""));
+}
+
+function requiredObservationSourcesForTargets(targets) {
+  const selectedTargets = normalizeObservationTargets(targets);
+  const targetList = selectedTargets ? [...selectedTargets] : TARGET_GROUPS;
+  const sources = new Set();
+  if (targetList.includes("azure-selfserve")) sources.add("azure_monitor");
+  if (targetList.some((target) => ["railway-customers", "ops", "backup-app"].includes(target))) {
+    sources.add("posthog");
+  }
+  return sources;
 }
 
 function postHogQueryHost(env) {

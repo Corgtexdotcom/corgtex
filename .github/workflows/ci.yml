@@ -297,6 +297,7 @@ jobs:
     outputs:
       smoke_proof: ${{ steps.smoke-proof.outputs.available }}
       skip_release_match: ${{ steps.app-release.outputs.skip_release_match }}
+      observation_since: ${{ steps.observation-window.outputs.since }}
     steps:
       - name: Non-production smoke gate
         if: github.ref != 'refs/heads/main'
@@ -312,6 +313,12 @@ jobs:
           else
             echo "skip=false" >> "$GITHUB_OUTPUT"
           fi
+
+      - name: Mark observation window start
+        if: github.ref == 'refs/heads/main' && steps.check-secrets.outputs.skip != 'true'
+        id: observation-window
+        shell: bash
+        run: echo "since=$(date -u +'%Y-%m-%dT%H:%M:%SZ')" >> "$GITHUB_OUTPUT"
 
       - uses: actions/checkout@v5
         if: github.ref == 'refs/heads/main' && steps.check-secrets.outputs.skip != 'true'
@@ -429,6 +436,7 @@ jobs:
       OPS_GITHUB_REPOSITORY: ${{ github.repository }}
       OBSERVATION_REQUIRE_SOURCE: "true"
       OBSERVATION_WINDOW_MINUTES: ${{ vars.OBSERVATION_WINDOW_MINUTES || '20' }}
+      OBSERVATION_SINCE: ${{ needs.smoke-prod.outputs.observation_since }}
       SMOKE_SKIP_RELEASE_MATCH: ${{ needs.smoke-prod.outputs.skip_release_match }}
     steps:
       - uses: actions/checkout@v5
@@ -459,7 +467,7 @@ jobs:
           read_health_release() {
             local health_url="$1"
             local health_json
-            health_json="$(curl -fsS "$health_url")"
+            health_json="$(curl --connect-timeout 10 --max-time 30 -fsS "$health_url")"
             node -e '
               const fs = require("fs");
               const health = JSON.parse(fs.readFileSync(0, "utf8"));
@@ -513,6 +521,7 @@ jobs:
           node scripts/post-deploy-observation-gate.mjs \
             --manifest-json "$manifest_json" \
             --targets main-production-smoke \
+            --since "$OBSERVATION_SINCE" \
             --summary-file .artifacts/post-deploy-observation-gate/main-production-smoke.json \
             --publish-advisories
 

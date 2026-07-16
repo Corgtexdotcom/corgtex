@@ -357,6 +357,7 @@ describe("post-deploy observation gate", () => {
     );
     const requestBody = JSON.parse(fetchImpl.mock.calls[0][1].body);
     expect(requestBody.query.query).toContain("properties['environment'] = 'production'");
+    expect(requestBody.query.query).toContain("toDateTime64('2026-07-16 05:52:00.000', 3, 'UTC')");
     expect(requestBody.query.query).not.toContain("LIMIT 100");
     expect(summary.status).toBe("blocked");
   });
@@ -370,6 +371,7 @@ describe("post-deploy observation gate", () => {
     const summary = await runObservationGate({
       manifest,
       since: new Date("2026-07-16T05:52:00.000Z"),
+      targets: "railway-customers",
       env: {
         POSTHOG_PROJECT_ID: "452941",
         POSTHOG_PERSONAL_API_KEY: "phx_test",
@@ -384,6 +386,28 @@ describe("post-deploy observation gate", () => {
     expect(fetchImpl).toHaveBeenCalledTimes(1);
   });
 
+  it("requires PostHog when fail-closed observation includes Railway targets", async () => {
+    const runCommand = vi.fn(() => JSON.stringify({
+      tables: [{
+        columns: [{ name: "name" }],
+        rows: [],
+      }],
+    }));
+
+    await expect(runObservationGate({
+      manifest,
+      since: new Date("2026-07-16T05:52:00.000Z"),
+      targets: "railway-customers,azure-selfserve",
+      env: {
+        AZURE_APPLICATIONINSIGHTS_APP_NAME: "appi-corgtex-ss-prod",
+        AZURE_APPLICATIONINSIGHTS_RESOURCE_GROUP: "rg-corgtex-selfserve-production-wus3",
+        OBSERVATION_ENVIRONMENT: "production",
+        OBSERVATION_REQUIRE_SOURCE: "true",
+      },
+      deps: { runCommand, onSourceNote: vi.fn() },
+    })).rejects.toThrow("Missing required observation query source(s) for targets railway-customers,azure-selfserve: posthog");
+  });
+
   it("falls back to the PostHog query key when the personal key is blank", async () => {
     const fetchImpl = vi.fn(async () => new Response(JSON.stringify({
       columns: ["name", "instance_id", "release_git_sha", "route", "status", "events"],
@@ -393,6 +417,7 @@ describe("post-deploy observation gate", () => {
     await runObservationGate({
       manifest,
       since: new Date("2026-07-16T05:52:00.000Z"),
+      targets: "railway-customers",
       env: {
         POSTHOG_PROJECT_ID: "452941",
         POSTHOG_PERSONAL_API_KEY: " ",
@@ -449,7 +474,7 @@ describe("post-deploy observation gate", () => {
       deps: {
         onSourceNote: vi.fn(),
       },
-    })).rejects.toThrow("No observation query source configured");
+    })).rejects.toThrow("Missing required observation query source(s) for targets production: azure_monitor, posthog");
   });
 
   it("does not fail a passing gate when advisory publishing fails", async () => {
