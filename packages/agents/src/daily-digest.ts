@@ -739,7 +739,10 @@ async function loadPendingAdviceRequestsByMember(params: {
 async function loadOperatingDigestInputs(params: {
   workspaceId: string;
   since: Date;
+  until: Date;
 }): Promise<OperatingDigestInputs> {
+  const windowRange = { gte: params.since, lte: params.until };
+  const beforeCutoff = { lte: params.until };
   const [
     meetings,
     proposals,
@@ -758,11 +761,12 @@ async function loadOperatingDigestInputs(params: {
       where: {
         workspaceId: params.workspaceId,
         archivedAt: null,
+        createdAt: beforeCutoff,
         OR: [
-          { recordedAt: { gte: params.since } },
-          { updatedAt: { gte: params.since } },
-          { summaryPostedAt: { gte: params.since } },
-          { aiProcessedAt: { gte: params.since } },
+          { recordedAt: windowRange },
+          { updatedAt: windowRange },
+          { summaryPostedAt: windowRange },
+          { aiProcessedAt: windowRange },
         ],
       },
       orderBy: { recordedAt: "desc" },
@@ -778,8 +782,8 @@ async function loadOperatingDigestInputs(params: {
           where: {
             status: { in: ["SUGGESTED", "CONFIRMED", "APPLIED"] },
             OR: [
-              { createdAt: { gte: params.since } },
-              { updatedAt: { gte: params.since } },
+              { createdAt: windowRange },
+              { updatedAt: windowRange },
             ],
           },
           orderBy: [{ status: "asc" }, { createdAt: "desc" }],
@@ -800,11 +804,13 @@ async function loadOperatingDigestInputs(params: {
         workspaceId: params.workspaceId,
         archivedAt: null,
         isPrivate: false,
+        createdAt: beforeCutoff,
+        updatedAt: beforeCutoff,
         OR: [
-          { createdAt: { gte: params.since } },
-          { updatedAt: { gte: params.since } },
-          { publishedAt: { gte: params.since } },
-          { decidedAt: { gte: params.since } },
+          { createdAt: windowRange },
+          { updatedAt: windowRange },
+          { publishedAt: windowRange },
+          { decidedAt: windowRange },
         ],
       },
       orderBy: [{ decidedAt: "desc" }, { updatedAt: "desc" }],
@@ -827,9 +833,10 @@ async function loadOperatingDigestInputs(params: {
         archivedAt: null,
         isPrivate: false,
         status: "RESOLVED",
+        updatedAt: beforeCutoff,
         OR: [
-          { resolvedAt: { gte: params.since } },
-          { updatedAt: { gte: params.since } },
+          { resolvedAt: windowRange },
+          { updatedAt: windowRange },
         ],
       },
       orderBy: [{ resolvedAt: "desc" }, { updatedAt: "desc" }],
@@ -850,6 +857,8 @@ async function loadOperatingDigestInputs(params: {
         archivedAt: null,
         isPrivate: false,
         status: { in: ["OPEN", "IN_PROGRESS"] },
+        createdAt: beforeCutoff,
+        updatedAt: beforeCutoff,
       },
       orderBy: [{ dueAt: "asc" }, { priority: "desc" }, { updatedAt: "desc" }],
       take: 50,
@@ -868,8 +877,10 @@ async function loadOperatingDigestInputs(params: {
       where: {
         workspaceId: params.workspaceId,
         archivedAt: null,
+        createdAt: beforeCutoff,
+        updatedAt: beforeCutoff,
         OR: [
-          { updatedAt: { gte: params.since } },
+          { updatedAt: windowRange },
           { status: { in: ["ACTIVE", "ON_TRACK", "AT_RISK", "BEHIND"] } },
         ],
       },
@@ -899,7 +910,7 @@ async function loadOperatingDigestInputs(params: {
     prisma.roleVersion.findMany({
       where: {
         workspaceId: params.workspaceId,
-        createdAt: { gte: params.since },
+        createdAt: windowRange,
       },
       orderBy: { createdAt: "desc" },
       take: 25,
@@ -914,8 +925,8 @@ async function loadOperatingDigestInputs(params: {
       where: {
         workspaceId: params.workspaceId,
         OR: [
-          { startedAt: { gte: params.since } },
-          { endedAt: { gte: params.since } },
+          { startedAt: windowRange },
+          { endedAt: windowRange },
         ],
       },
       orderBy: { startedAt: "desc" },
@@ -937,7 +948,7 @@ async function loadOperatingDigestInputs(params: {
       where: {
         workspaceId: params.workspaceId,
         isActive: true,
-        joinedAt: { gte: params.since },
+        joinedAt: windowRange,
       },
       orderBy: { joinedAt: "desc" },
       take: 25,
@@ -953,10 +964,12 @@ async function loadOperatingDigestInputs(params: {
         archivedAt: null,
         isPrivate: false,
         type: { not: "DIGEST" },
+        createdAt: beforeCutoff,
+        updatedAt: beforeCutoff,
         OR: [
-          { createdAt: { gte: params.since } },
-          { updatedAt: { gte: params.since } },
-          { publishedAt: { gte: params.since } },
+          { createdAt: windowRange },
+          { updatedAt: windowRange },
+          { publishedAt: windowRange },
         ],
       },
       orderBy: { updatedAt: "desc" },
@@ -974,9 +987,11 @@ async function loadOperatingDigestInputs(params: {
       where: {
         workspaceId: params.workspaceId,
         archivedAt: null,
+        createdAt: beforeCutoff,
+        updatedAt: beforeCutoff,
         OR: [
-          { createdAt: { gte: params.since } },
-          { updatedAt: { gte: params.since } },
+          { createdAt: windowRange },
+          { updatedAt: windowRange },
         ],
       },
       orderBy: { updatedAt: "desc" },
@@ -993,6 +1008,8 @@ async function loadOperatingDigestInputs(params: {
         workspaceId: params.workspaceId,
         audienceType: "WORKSPACE",
         status: "ACTIVE",
+        createdAt: beforeCutoff,
+        updatedAt: beforeCutoff,
       },
       orderBy: [{ deadlineAt: "asc" }, { updatedAt: "desc" }],
       take: 30,
@@ -1012,9 +1029,11 @@ async function loadOperatingDigestInputs(params: {
         workspaceId: params.workspaceId,
         audienceType: "WORKSPACE",
         status: "COMPLETED",
+        createdAt: beforeCutoff,
+        updatedAt: beforeCutoff,
         OR: [
-          { completedAt: { gte: params.since } },
-          { updatedAt: { gte: params.since } },
+          { completedAt: windowRange },
+          { updatedAt: windowRange },
         ],
       },
       orderBy: [{ completedAt: "desc" }, { updatedAt: "desc" }],
@@ -1232,6 +1251,7 @@ export async function runDailyDigest(params: {
   const briefingPeriod = workspaceBriefingPeriodFromCadence(cadence);
   const generationDate = new Date(params.dateISO);
   const since = new Date(generationDate.getTime() - lookbackDays * 24 * 60 * 60 * 1000);
+  const windowRange = { gte: since, lte: generationDate };
   const briefingSince = workspaceBriefingContextSince(briefingPeriod, generationDate);
   const model = params.model ?? resolveModel(
     AGENT_REGISTRY["daily-digest"].defaultModelTier,
@@ -1248,11 +1268,11 @@ export async function runDailyDigest(params: {
   const sessions = await prisma.conversationSession.findMany({
     where: {
       workspaceId: params.workspaceId,
-      turns: { some: { createdAt: { gte: since } } }
+      turns: { some: { createdAt: windowRange } }
     },
     include: {
       turns: {
-        where: { createdAt: { gte: since } },
+        where: { createdAt: windowRange },
         orderBy: { sequenceNumber: "asc" }
       },
       user: {
@@ -1260,14 +1280,15 @@ export async function runDailyDigest(params: {
       }
     }
   });
-  const slackMessages = await listSlackMessagesForDigest(params.workspaceId, since);
+  const slackMessages = await listSlackMessagesForDigest(params.workspaceId, since, generationDate);
   const buildArtifacts = await prisma.buildArtifact.findMany({
     where: {
       workspaceId: params.workspaceId,
+      updatedAt: { lte: generationDate },
       OR: [
-        { updatedAt: { gte: since } },
-        { mergedAt: { gte: since } },
-        { closedAt: { gte: since } },
+        { updatedAt: windowRange },
+        { mergedAt: windowRange },
+        { closedAt: windowRange },
       ],
     },
     orderBy: { updatedAt: "desc" },
@@ -1302,6 +1323,7 @@ export async function runDailyDigest(params: {
   const operatingInputs = await loadOperatingDigestInputs({
     workspaceId: params.workspaceId,
     since,
+    until: generationDate,
   });
   const briefingCandidates = await collectWorkspaceBriefingCandidates({
     workspaceId: params.workspaceId,

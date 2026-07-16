@@ -63,10 +63,11 @@ function narrativeLine(title: string | null | undefined, summary: string | null 
     : `**${normalizedTitle}**`;
 }
 
-function latestActivityTime(...values: Array<Date | string | null | undefined>) {
+function latestActivityTimeBefore(until: Date, ...values: Array<Date | string | null | undefined>) {
+  const cutoff = until.getTime();
   const times = values
     .map((value) => value ? new Date(value).getTime() : Number.NaN)
-    .filter((time) => Number.isFinite(time));
+    .filter((time) => Number.isFinite(time) && time <= cutoff);
   return times.length > 0 ? Math.max(...times) : 0;
 }
 
@@ -109,11 +110,12 @@ function liveWorkspaceNarrative(params: {
   }>;
   labels: { intro: string; closing: string };
 }) {
+  const now = new Date();
   const entries = [
     ...params.meetings.map((meeting) => {
       const title = meeting.title || "Meeting recap";
       return {
-        occurredAt: latestActivityTime(meeting.updatedAt, meeting.recordedAt, meeting.createdAt),
+        occurredAt: latestActivityTimeBefore(now, meeting.updatedAt, meeting.recordedAt, meeting.createdAt),
         line: narrativeLine(title, compactNarrativeText(meeting.summaryMd, 620)),
         sourceRef: {
           type: "MEETING",
@@ -126,7 +128,7 @@ function liveWorkspaceNarrative(params: {
     ...params.articles
       .filter((article) => article.type !== "DIGEST" && !article.isPrivate)
       .map((article) => ({
-        occurredAt: latestActivityTime(article.updatedAt, article.publishedAt, article.createdAt),
+        occurredAt: latestActivityTimeBefore(now, article.updatedAt, article.publishedAt, article.createdAt),
         line: narrativeLine(article.title, compactNarrativeText(article.bodyMd, 560)),
         sourceRef: {
           type: "BRAIN_ARTICLE",
@@ -136,7 +138,7 @@ function liveWorkspaceNarrative(params: {
         },
       })),
   ]
-    .filter((entry) => entry.line.trim())
+    .filter((entry) => entry.occurredAt > 0 && entry.line.trim())
     .sort((left, right) => right.occurredAt - left.occurredAt)
     .slice(0, 5);
 

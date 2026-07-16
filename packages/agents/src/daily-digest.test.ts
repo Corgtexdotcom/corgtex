@@ -572,6 +572,81 @@ describe("runDailyDigest", () => {
     }));
   });
 
+  it("bounds digest model inputs by the edition cutoff", async () => {
+    const { runDailyDigest } = await import("./daily-digest");
+    const cutoff = new Date("2026-04-30T12:00:00.000Z");
+    const since = new Date("2026-04-23T12:00:00.000Z");
+    const windowRange = { gte: since, lte: cutoff };
+
+    await runDailyDigest({
+      workspaceId: "workspace-1",
+      dateISO: cutoff.toISOString(),
+    });
+
+    expect(prismaMock.conversationSession.findMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({
+        workspaceId: "workspace-1",
+        turns: { some: { createdAt: windowRange } },
+      }),
+      include: expect.objectContaining({
+        turns: expect.objectContaining({
+          where: { createdAt: windowRange },
+        }),
+      }),
+    }));
+    expect(listSlackMessagesForDigestMock).toHaveBeenCalledWith("workspace-1", since, cutoff);
+    expect(prismaMock.buildArtifact.findMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({
+        workspaceId: "workspace-1",
+        updatedAt: { lte: cutoff },
+        OR: expect.arrayContaining([
+          { updatedAt: windowRange },
+          { mergedAt: windowRange },
+          { closedAt: windowRange },
+        ]),
+      }),
+    }));
+    expect(prismaMock.meeting.findMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({
+        workspaceId: "workspace-1",
+        createdAt: { lte: cutoff },
+        OR: expect.arrayContaining([
+          { recordedAt: windowRange },
+          { updatedAt: windowRange },
+          { summaryPostedAt: windowRange },
+          { aiProcessedAt: windowRange },
+        ]),
+      }),
+    }));
+    expect(prismaMock.proposal.findMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({
+        workspaceId: "workspace-1",
+        createdAt: { lte: cutoff },
+        updatedAt: { lte: cutoff },
+        OR: expect.arrayContaining([
+          { updatedAt: windowRange },
+          { decidedAt: windowRange },
+        ]),
+      }),
+    }));
+    expect(prismaMock.action.findMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({
+        workspaceId: "workspace-1",
+        createdAt: { lte: cutoff },
+        updatedAt: { lte: cutoff },
+      }),
+    }));
+    expect(prismaMock.adviceRequest.findMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({
+        workspaceId: "workspace-1",
+        audienceType: "WORKSPACE",
+        status: "ACTIVE",
+        createdAt: { lte: cutoff },
+        updatedAt: { lte: cutoff },
+      }),
+    }));
+  });
+
   it("includes completed workspace advice requests in the digest input", async () => {
     prismaMock.adviceRequest.findMany.mockImplementation(async (params: any) => {
       if (params?.where?.audienceType === "WORKSPACE" && params?.where?.status === "COMPLETED") {

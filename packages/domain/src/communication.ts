@@ -1947,12 +1947,12 @@ export async function purgeExpiredCommunicationMessages(workspaceId?: string) {
   return result;
 }
 
-export async function listSlackMessagesForDigest(workspaceId: string, since: Date) {
+export async function listSlackMessagesForDigest(workspaceId: string, since: Date, until?: Date) {
   return prisma.communicationMessage.findMany({
     where: {
       workspaceId,
       provider: "SLACK",
-      receivedAt: { gte: since },
+      receivedAt: until ? { gte: since, lte: until } : { gte: since },
       text: { not: null },
       isBot: false,
       isHidden: false,
