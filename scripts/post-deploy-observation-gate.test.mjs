@@ -438,6 +438,24 @@ describe("post-deploy observation gate", () => {
 
     expect(summary.status).toBe("passed");
     expect(fetchImpl).toHaveBeenCalledTimes(2);
+    expect(summary.sourceChecks).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        source: "azure_monitor",
+        status: "queried",
+        rowCount: 0,
+      }),
+      expect.objectContaining({
+        source: "railway",
+        group: "railway-customers",
+        status: "queried",
+        rowCount: 0,
+        targetCount: 1,
+      }),
+      expect.objectContaining({
+        source: "posthog",
+        status: "skipped",
+      }),
+    ]));
   });
 
   it("accepts array-form ops Railway target metadata", async () => {
