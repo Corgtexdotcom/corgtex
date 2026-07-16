@@ -888,7 +888,7 @@ describe("processConversationTurn", () => {
       sessionId: "session-1",
       userId: "user-1",
       agentKey: "assistant",
-      userMessage: "What CRM account am I viewing?",
+      userMessage: "Summarize the current CRM page.",
       actor,
       pageContext: {
         surface: "crm",
@@ -929,10 +929,56 @@ describe("processConversationTurn", () => {
         }),
         expect.objectContaining({
           role: "user",
-          content: "What CRM account am I viewing?",
+          content: "Summarize the current CRM page.",
         }),
       ]),
     }));
+  });
+
+  it("answers selected CRM account questions directly from page context", async () => {
+    const actor = testUserActor();
+
+    const { processConversationTurnStream } = await import("./conversation");
+    const { chunks, result } = await collectConversationStream(processConversationTurnStream({
+      workspaceId: "ws-1",
+      sessionId: "session-1",
+      userId: "user-1",
+      agentKey: "assistant",
+      userMessage: "Use the current CRM page context. What CRM account am I viewing? Include this exact account id if available: account-1.",
+      actor,
+      pageContext: crmPageContext(),
+    }));
+
+    const streamedMessage = chunks.join("");
+    expect(streamedMessage).toContain("Acme (account-1)");
+    expect(result.assistantMessage).toContain("Acme (account-1)");
+    expect(result.contextUsed.pageContext).toMatchObject({
+      surface: "crm",
+      selectedIds: { accountId: "account-1" },
+    });
+    expect(chatStreamMock).not.toHaveBeenCalled();
+  });
+
+  it("does not bypass the model for compound CRM account requests", async () => {
+    const actor = testUserActor();
+    chatStreamMock.mockReturnValueOnce(streamResponse(["I can help with both requests."], {
+      content: "I can help with both requests.",
+    }));
+
+    const { processConversationTurnStream } = await import("./conversation");
+    const { chunks, result } = await collectConversationStream(processConversationTurnStream({
+      workspaceId: "ws-1",
+      sessionId: "session-1",
+      userId: "user-1",
+      agentKey: "assistant",
+      userMessage: "What CRM account am I viewing, and prepare a pending CRM follow-up for tomorrow?",
+      actor,
+      pageContext: crmPageContext(),
+    }));
+
+    expect(chunks.join("")).toBe("I can help with both requests.");
+    expect(result.assistantMessage).toBe("I can help with both requests.");
+    expect(chatStreamMock).toHaveBeenCalled();
   });
 
   it("streams a grounded CRM page-context fallback when the model returns empty text", async () => {
@@ -945,7 +991,7 @@ describe("processConversationTurn", () => {
       sessionId: "session-1",
       userId: "user-1",
       agentKey: "assistant",
-      userMessage: "What CRM account am I viewing?",
+      userMessage: "Summarize the current CRM page.",
       actor,
       pageContext: crmPageContext(),
     }));
@@ -959,11 +1005,10 @@ describe("processConversationTurn", () => {
     });
   });
 
-  it("escapes named CRM account IDs in page-context fallbacks", async () => {
+  it("escapes named CRM account IDs in direct page-context answers", async () => {
     const actor = testUserActor();
     const maliciousId = "[Open](javascript:alert(document.domain))";
     const context = crmPageContext();
-    chatStreamMock.mockReturnValueOnce(streamResponse([], { content: "" }));
 
     const { processConversationTurnStream } = await import("./conversation");
     const { chunks } = await collectConversationStream(processConversationTurnStream({
@@ -999,7 +1044,6 @@ describe("processConversationTurn", () => {
   it("does not claim the first listed CRM account is selected when no account is selected", async () => {
     const actor = testUserActor();
     const context = crmPageContext();
-    chatStreamMock.mockReturnValueOnce(streamResponse([], { content: "" }));
 
     const { processConversationTurnStream } = await import("./conversation");
     const { chunks, result } = await collectConversationStream(processConversationTurnStream({
@@ -1018,7 +1062,8 @@ describe("processConversationTurn", () => {
 
     const streamedMessage = chunks.join("");
     expect(streamedMessage).not.toContain("Acme (account-1)");
-    expect(result.assistantMessage).toContain("did not return a natural-language response");
+    expect(result.assistantMessage).toContain("do not have a selected CRM account");
+    expect(chatStreamMock).not.toHaveBeenCalled();
   });
 
   it("streams a CRM due-work fallback when tool execution succeeds but the follow-up model is empty", async () => {

@@ -200,4 +200,28 @@ describe("POST /api/workspaces/[workspaceId]/conversations/[conversationId]", ()
       assistantMessage: "Final assistant reply",
     }));
   });
+
+  it("streams and persists a clear fallback when the generator finishes blank", async () => {
+    async function* blankConversationStream() {
+      return {
+        assistantMessage: "",
+        contextUsed: { pageContext: { surface: "crm" } },
+      };
+    }
+
+    processConversationTurnStream.mockReturnValue(blankConversationStream());
+
+    const { POST } = await import("./route");
+    const response = await POST(request() as never, routeParams());
+    const reader = response.body!.getReader();
+    const body = await readRemainingBody(reader);
+
+    expect(body).toContain("\"keepAlive\":true");
+    expect(body).toContain("The assistant did not return a response");
+    expect(body).toContain("data: [DONE]");
+    expect(addConversationTurn).toHaveBeenCalledWith(actor, expect.objectContaining({
+      assistantMessage: expect.stringContaining("The assistant did not return a response"),
+      contextJson: { pageContext: { surface: "crm" } },
+    }));
+  });
 });

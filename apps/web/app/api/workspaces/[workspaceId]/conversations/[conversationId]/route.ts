@@ -7,6 +7,7 @@ import { handleRouteError } from "@/lib/http";
 
 const MAX_MESSAGE_LENGTH = 100_000;
 const STREAM_KEEPALIVE_INTERVAL_MS = 10_000;
+const EMPTY_ASSISTANT_STREAM_MESSAGE = "The assistant did not return a response. Please retry or ask a more specific question.";
 
 type ConversationStreamResult = {
   assistantMessage: string;
@@ -51,6 +52,12 @@ function unstreamedAssistantText(streamedAssistantMessage: string, assistantMess
     return assistantMessage.slice(streamedAssistantMessage.length);
   }
   return "";
+}
+
+function resolvedAssistantMessage(finalResult: ConversationStreamResult | undefined, streamedAssistantMessage: string) {
+  if (finalResult?.assistantMessage?.trim()) return finalResult.assistantMessage;
+  if (streamedAssistantMessage.trim()) return streamedAssistantMessage;
+  return EMPTY_ASSISTANT_STREAM_MESSAGE;
 }
 
 async function nextConversationStreamResult(
@@ -156,8 +163,9 @@ export async function POST(
             }
           }
 
-          if (finalResult && finalResult.assistantMessage) {
-            const missingText = unstreamedAssistantText(streamedAssistantMessage, finalResult.assistantMessage);
+          const assistantMessage = resolvedAssistantMessage(finalResult, streamedAssistantMessage);
+          if (assistantMessage) {
+            const missingText = unstreamedAssistantText(streamedAssistantMessage, assistantMessage);
             if (missingText) {
               streamedAssistantMessage += missingText;
               controller.enqueue(encodeStreamPayload(encoder, { text: missingText }));
@@ -167,8 +175,8 @@ export async function POST(
               workspaceId,
               conversationId,
               userMessage,
-              assistantMessage: finalResult.assistantMessage,
-              contextJson: finalResult.contextUsed,
+              assistantMessage,
+              contextJson: finalResult?.contextUsed ?? {},
             });
 
             // Auto-name: generate a title from the first message if none exists

@@ -515,6 +515,25 @@ function crmVisibleAccountFallback(pageContext: ConversationContext["pageContext
   return `You are viewing the CRM account ${accountLabel}${section}.`;
 }
 
+function isCrmCurrentAccountQuestion(message: string) {
+  const standalone = message
+    .replace(/^\s*use\s+the\s+current\s+crm\s+page\s+context[.:]?\s*/i, "")
+    .replace(/\s*include\s+(?:this\s+exact\s+)?(?:crm\s+)?account\s+id(?:\s+if\s+available)?(?:\s*:\s*[A-Za-z0-9-]+)?\.?\s*$/i, "")
+    .trim();
+  return /^(?:what|which)\s+crm\s+account\s+(?:am\s+i\s+)?(?:viewing|looking\s+at|on)\??$/i.test(standalone)
+    || /^(?:what|which)\s+(?:is\s+)?(?:the\s+)?(?:current|selected)\s+crm\s+account\??$/i.test(standalone);
+}
+
+function crmCurrentAccountAnswer(ctx: ConversationContext) {
+  if (!ctx.pageContext || ctx.pageContext.surface !== "crm") return null;
+  if (!isCrmCurrentAccountQuestion(ctx.userMessage)) return null;
+
+  const visibleAccount = crmVisibleAccountFallback(ctx.pageContext);
+  if (visibleAccount) return visibleAccount;
+
+  return "I do not have a selected CRM account in the current CRM page context.";
+}
+
 function dueToScope(value: unknown) {
   const dueTo = stringValue(value);
   if (!dueTo) return null;
@@ -707,6 +726,16 @@ export async function processConversationTurn(ctx: ConversationContext): Promise
   if (pendingOperationResponse) {
     return {
       assistantMessage: pendingOperationResponse,
+      contextUsed: {
+        pageContext: ctx.pageContext ?? undefined,
+      },
+    };
+  }
+
+  const directCrmAnswer = crmCurrentAccountAnswer(ctx);
+  if (directCrmAnswer) {
+    return {
+      assistantMessage: directCrmAnswer,
       contextUsed: {
         pageContext: ctx.pageContext ?? undefined,
       },
@@ -962,6 +991,17 @@ export async function* processConversationTurnStream(ctx: ConversationContext): 
     yield pendingOperationResponse;
     return {
       assistantMessage: pendingOperationResponse,
+      contextUsed: {
+        pageContext: ctx.pageContext ?? undefined,
+      },
+    };
+  }
+
+  const directCrmAnswer = crmCurrentAccountAnswer(ctx);
+  if (directCrmAnswer) {
+    yield directCrmAnswer;
+    return {
+      assistantMessage: directCrmAnswer,
       contextUsed: {
         pageContext: ctx.pageContext ?? undefined,
       },
