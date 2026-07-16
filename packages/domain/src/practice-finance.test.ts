@@ -14,6 +14,9 @@ const { prismaMock, requireWorkspaceMembershipMock } = vi.hoisted(() => ({
       findMany: vi.fn(),
       update: vi.fn(),
     },
+    workspaceFeatureFlag: {
+      findUnique: vi.fn(),
+    },
   },
   requireWorkspaceMembershipMock: vi.fn(),
 }));
@@ -28,6 +31,7 @@ vi.mock("./auth", () => ({
 
 import {
   BUDGET_RUNWAY_ATTENTION_WEEKS,
+  canManagePracticeFinanceProjects,
   collectAttention,
   createPracticeProject,
   createPracticeProjectFromWonDeal,
@@ -164,7 +168,8 @@ describe("practice-finance I/O", () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
-    requireWorkspaceMembershipMock.mockResolvedValue({ id: "member-1" });
+    requireWorkspaceMembershipMock.mockResolvedValue({ id: "member-1", role: "ADMIN" });
+    prismaMock.workspaceFeatureFlag.findUnique.mockResolvedValue({ enabled: true, config: null });
     prismaMock.crmAccount.findUnique.mockResolvedValue({
       id: "account-1",
       workspaceId: "workspace-1",
@@ -339,7 +344,6 @@ describe("practice-finance I/O", () => {
     expect(requireWorkspaceMembershipMock).toHaveBeenCalledWith({
       actor,
       workspaceId: "workspace-1",
-      allowedRoles: expect.arrayContaining(["FINANCE_STEWARD", "ADMIN"]),
     });
     expect(projectResult.id).toBe("project-1");
     expect(prismaMock.practiceProject.create).toHaveBeenCalledWith({
@@ -353,6 +357,66 @@ describe("practice-finance I/O", () => {
         targetMarginBps: 5500,
       }),
     });
+  });
+
+  it("rejects ordinary contributors without explicit all-member finance write config for manual practice projects", async () => {
+    requireWorkspaceMembershipMock.mockResolvedValueOnce({ id: "member-1", role: "CONTRIBUTOR" });
+    prismaMock.workspaceFeatureFlag.findUnique.mockResolvedValueOnce({ enabled: true, config: null });
+
+    await expect(createPracticeProject(actor, "workspace-1", {
+      code: "DPRJ-001",
+      name: "Manual rollout",
+      clientName: "Example",
+    })).rejects.toMatchObject({ status: 403, code: "FORBIDDEN" });
+    expect(prismaMock.practiceProject.create).not.toHaveBeenCalled();
+  });
+
+  it("allows contributors to create and update practice projects when all-member finance writes are configured", async () => {
+    requireWorkspaceMembershipMock.mockResolvedValue({ id: "member-1", role: "CONTRIBUTOR" });
+    prismaMock.workspaceFeatureFlag.findUnique.mockResolvedValue({
+      enabled: true,
+      config: { practiceProjectsAllMemberWrite: true },
+    });
+
+    await createPracticeProject(actor, "workspace-1", {
+      code: "DPRJ-001",
+      name: "Manual rollout",
+      clientName: "Example",
+    });
+
+    prismaMock.practiceProject.findUnique.mockResolvedValueOnce({
+      id: "project-1",
+      workspaceId: "workspace-1",
+    });
+
+    await updatePracticeProject(actor, "workspace-1", {
+      projectId: "project-1",
+      status: "ON_HOLD",
+    });
+
+    expect(prismaMock.practiceProject.create).toHaveBeenCalled();
+    expect(prismaMock.practiceProject.update).toHaveBeenCalledWith(expect.objectContaining({
+      where: { id: "project-1" },
+    }));
+  });
+
+  it("keeps the finance manage helper aligned with configured all-member writes", async () => {
+    requireWorkspaceMembershipMock.mockResolvedValue({ id: "member-1", role: "CONTRIBUTOR" });
+    prismaMock.workspaceFeatureFlag.findUnique.mockResolvedValueOnce({
+      enabled: true,
+      config: { practiceProjectsAllMemberWrite: true },
+    });
+    await expect(canManagePracticeFinanceProjects(actor, "workspace-1")).resolves.toBe(true);
+
+    prismaMock.workspaceFeatureFlag.findUnique.mockResolvedValueOnce({ enabled: true, config: null });
+    await expect(canManagePracticeFinanceProjects(actor, "workspace-1")).resolves.toBe(false);
+
+    await expect(canManagePracticeFinanceProjects(actor, "workspace-1", {
+      resolvedMembership: { role: "FINANCE_STEWARD" },
+    })).resolves.toBe(true);
+    await expect(canManagePracticeFinanceProjects(actor, "workspace-1", {
+      resolvedMembership: { role: "ADMIN" },
+    })).resolves.toBe(true);
   });
 
   it("updates a workspace-scoped practice project behind finance-write access", async () => {
@@ -379,7 +443,6 @@ describe("practice-finance I/O", () => {
     expect(requireWorkspaceMembershipMock).toHaveBeenCalledWith({
       actor,
       workspaceId: "workspace-1",
-      allowedRoles: expect.arrayContaining(["FINANCE_STEWARD", "ADMIN"]),
     });
     expect(projectResult.status).toBe("ON_HOLD");
     expect(prismaMock.practiceProject.findUnique).toHaveBeenCalledWith({
@@ -437,7 +500,6 @@ describe("practice-finance I/O", () => {
     expect(requireWorkspaceMembershipMock).toHaveBeenCalledWith({
       actor,
       workspaceId: "workspace-1",
-      allowedRoles: expect.arrayContaining(["FINANCE_STEWARD", "ADMIN"]),
     });
     expect(projectResult.id).toBe("project-1");
     expect(prismaMock.practiceProject.create).toHaveBeenCalledWith({

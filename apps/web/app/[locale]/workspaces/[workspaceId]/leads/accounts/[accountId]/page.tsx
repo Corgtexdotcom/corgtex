@@ -3,7 +3,7 @@ import { isWorkspaceFeatureEnabled, requireWorkspaceFeature } from "@/lib/worksp
 import { MarkdownEditor } from "@/lib/components/MarkdownEditor";
 import { MarkdownRenderer } from "@/lib/components/MarkdownRenderer";
 import { normalizeVisibleWorkItemColumns, toggleWorkItemColumnVisibility } from "@/lib/work-item-view";
-import { getCrmAccount, getCrmAccountPracticeFinance, listCommunicationSuggestions, listMembers, projectRemainingCents, requireWorkspaceMembership } from "@corgtex/domain";
+import { canManagePracticeFinanceProjects, getCrmAccount, getCrmAccountPracticeFinance, listCommunicationSuggestions, listMembers, projectRemainingCents, requireWorkspaceMembership } from "@corgtex/domain";
 import { getTranslations } from "next-intl/server";
 
 import {
@@ -106,9 +106,9 @@ export default async function AccountDetailPage({
     .filter((project) => project.crmDealId)
     .map((project) => [project.crmDealId as string, project]));
   const closedWonDealsWithoutProject = account.deals.filter((deal) => deal.stage === "CLOSED_WON" && !financeProjectByDealId.has(deal.id));
-  const canCreateFinanceProjects = canShowPracticeFinance && (
-    actor.kind === "agent" || membership?.role === "ADMIN" || membership?.role === "FINANCE_STEWARD"
-  );
+  const canCreateFinanceProjects = canShowPracticeFinance && await canManagePracticeFinanceProjects(actor, workspaceId, {
+    resolvedMembership: membership,
+  });
   const isClientAccount = account.relationshipType === "CLIENT" && account.lifecycleStage === "ACTIVE";
   const canConvertToClient = !isClientAccount;
   const memberNames = new Map(members.map((member) => [

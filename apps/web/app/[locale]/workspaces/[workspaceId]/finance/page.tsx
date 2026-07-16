@@ -1,4 +1,4 @@
-import { getPracticeFinanceDashboard, requireWorkspaceMembership } from "@corgtex/domain";
+import { canManagePracticeFinanceProjects, getPracticeFinanceDashboard, requireWorkspaceMembership } from "@corgtex/domain";
 import { prisma } from "@corgtex/shared";
 import { requirePageActor } from "@/lib/auth";
 import { requireWorkspaceFeature } from "@/lib/workspace-feature-flags";
@@ -24,11 +24,9 @@ export default async function FinancePage({
       select: { slug: true },
     }),
   ]);
-  const canManageProjects = workspace?.slug !== "jnj-demo" && (
-    actor.kind === "agent" ||
-    membership?.role === "ADMIN" ||
-    membership?.role === "FINANCE_STEWARD"
-  );
+  const canManageProjects = workspace?.slug !== "jnj-demo" && await canManagePracticeFinanceProjects(actor, workspaceId, {
+    resolvedMembership: membership,
+  });
 
   return (
     <PracticeFinanceDashboard

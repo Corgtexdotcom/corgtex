@@ -7,7 +7,6 @@ import {
 } from "@corgtex/domain";
 import type { PracticeProject, PracticeProjectStatus } from "@prisma/client";
 import { updatePracticeProjectAction } from "./actions";
-import { PracticeProjectCreateControl } from "./PracticeProjectCreateControl";
 
 function usd(cents: number): string {
   const sign = cents < 0 ? "-" : "";
@@ -164,7 +163,6 @@ export function PracticeFinanceDashboard({
               <span>Project margin, budget burn, client portfolio, and alerts for the active practice.</span>
             </div>
           </div>
-          {canManageProjects && <PracticeProjectCreateControl workspaceId={workspaceId} />}
         </div>
       </header>
 
