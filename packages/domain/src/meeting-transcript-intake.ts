@@ -233,6 +233,10 @@ export async function intakeMeetingTranscript(actor: AppActor, params: {
         select: { recordedAt: true, title: true, participantEmails: true },
       })
     : null;
+  const trustedProviderIngestion = Boolean(params.provider && params.sourceRecordId);
+  const canonicalRecordedAt = trustedProviderIngestion && params.recordedAt
+    ? params.recordedAt
+    : existingMeeting?.recordedAt ?? params.recordedAt ?? null;
   const inferred = await inferMeetingTranscriptMetadata({
     workspaceId: params.workspaceId,
     transcript,
@@ -240,9 +244,9 @@ export async function intakeMeetingTranscript(actor: AppActor, params: {
     userMessage: params.userMessage,
     title: params.title ?? existingMeeting?.title ?? null,
     source: params.source,
-    recordedAt: existingMeeting?.recordedAt ?? params.recordedAt ?? null,
+    recordedAt: canonicalRecordedAt,
     participantEmails: [...(params.participantEmails ?? []), ...(existingMeeting?.participantEmails ?? [])],
-    validateExplicitRecordedAt: Boolean(!(params.provider && params.sourceRecordId) && !existingMeeting),
+    validateExplicitRecordedAt: Boolean(!trustedProviderIngestion && !existingMeeting),
     now: params.now,
   });
 

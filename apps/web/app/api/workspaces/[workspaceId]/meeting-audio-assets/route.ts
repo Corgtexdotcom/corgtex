@@ -184,7 +184,7 @@ export async function POST(request: NextRequest, { params }: RouteContext) {
       fileBuffer: Buffer.from(await file.arrayBuffer()),
       meetingId,
       title: formString(formData, "title"),
-      recordedAt: parseRecordedAt(formString(formData, "recordedAt"), !meetingId),
+      recordedAt: meetingId ? null : parseRecordedAt(formString(formData, "recordedAt"), true),
       durationSeconds: parseDurationSeconds(formString(formData, "durationSeconds")),
       participantEmails: formStringList(formData, "participantEmails"),
     });

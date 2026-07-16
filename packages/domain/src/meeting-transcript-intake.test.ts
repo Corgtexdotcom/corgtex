@@ -1,15 +1,24 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const { createMeetingMock, modelGatewayMock, uploadMeetingTranscriptMock } = vi.hoisted(() => ({
+const { createMeetingMock, modelGatewayMock, prismaMock, uploadMeetingTranscriptMock } = vi.hoisted(() => ({
   createMeetingMock: vi.fn(),
   modelGatewayMock: {
     extract: vi.fn(),
+  },
+  prismaMock: {
+    meeting: {
+      findFirst: vi.fn(),
+    },
   },
   uploadMeetingTranscriptMock: vi.fn(),
 }));
 
 vi.mock("@corgtex/models", () => ({
   defaultModelGateway: modelGatewayMock,
+}));
+
+vi.mock("@corgtex/shared", () => ({
+  prisma: prismaMock,
 }));
 
 vi.mock("./meetings", () => ({
@@ -22,6 +31,7 @@ const TEST_NOW = new Date("2026-07-16T12:00:00.000Z");
 describe("meeting transcript intake", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    prismaMock.meeting.findFirst.mockResolvedValue(null);
   });
 
   it("skips model metadata extraction when title and recordedAt are explicit", async () => {
@@ -160,6 +170,40 @@ describe("meeting transcript intake", () => {
       meeting: { id: "meeting-provider" },
     });
     expect(uploadMeetingTranscriptMock).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+      recordedAt: new Date("2001-07-15T11:00:00.000Z"),
+    }));
+  });
+
+  it("lets trusted provider revisions update an existing meeting date", async () => {
+    prismaMock.meeting.findFirst.mockResolvedValueOnce({
+      recordedAt: new Date("2026-07-15T16:00:00.000Z"),
+      title: "Existing meeting",
+      participantEmails: [],
+    });
+    uploadMeetingTranscriptMock.mockResolvedValueOnce({
+      status: "matched",
+      meeting: { id: "meeting-1", title: "Existing meeting" },
+      candidates: [],
+    });
+    const { intakeMeetingTranscript } = await import("./meeting-transcript-intake");
+
+    await intakeMeetingTranscript({
+      kind: "agent",
+      authProvider: "bootstrap",
+      label: "test-agent",
+      workspaceIds: ["workspace-1"],
+    }, {
+      workspaceId: "workspace-1",
+      meetingId: "meeting-1",
+      recordedAt: new Date("2001-07-15T11:00:00.000Z"),
+      source: "meeting-transcript:fireflies",
+      provider: "FIREFLIES",
+      sourceRecordId: "source-record-1",
+      transcript: "Jan: Provider corrected this historical meeting.",
+      now: TEST_NOW,
+    });
+    expect(uploadMeetingTranscriptMock).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+      meetingId: "meeting-1",
       recordedAt: new Date("2001-07-15T11:00:00.000Z"),
     }));
   });

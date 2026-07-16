@@ -118,6 +118,7 @@ describe("/api/workspaces/[workspaceId]/meeting-audio-assets", () => {
     formData.set("file", new File(["audio"], "Team Sync.m4a", { type: "audio/mp4" }));
     formData.set("meetingId", "meeting-1");
     formData.set("title", "Team Sync");
+    formData.set("recordedAt", "2001-07-15T11:00:00.000Z");
     formData.set("durationSeconds", "180");
     formData.append("participantEmails", "jan@example.com, milan@example.com");
     formData.append("participantEmails", "david@example.com");
