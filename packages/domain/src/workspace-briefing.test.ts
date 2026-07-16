@@ -755,7 +755,7 @@ describe("workspace briefing", () => {
     const { collectWorkspaceBriefingCandidates } = await import("./workspace-briefing");
     prismaMock.meeting.findMany.mockResolvedValueOnce([{
       id: "meeting-future",
-      title: "CRINA weekly recap",
+      title: "Weekly operations recap",
       summaryMd: "The team uploaded a weekly recap today.",
       recordedAt: new Date("2099-01-01T12:00:00.000Z"),
       updatedAt: new Date("2026-04-30T09:00:00.000Z"),
