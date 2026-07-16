@@ -2,6 +2,7 @@ import { existsSync, readdirSync } from "fs";
 import { execFileSync } from "child_process";
 import path from "path";
 import { fileURLToPath, pathToFileURL } from "url";
+import { formatReleaseNormalizationLog, normalizeRuntimeReleaseEnv } from "./lib/release-env.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const rootDir = path.resolve(__dirname, "..");
@@ -167,6 +168,7 @@ function startWeb() {
 
 export async function main() {
   console.log("[start-web] === Production Startup Sequence ===");
+  console.log(formatReleaseNormalizationLog(normalizeRuntimeReleaseEnv()));
   const mode = resolveStartupMode();
   const plan = startupPlanForMode(mode);
   console.log(`[start-web] Startup mode: ${mode}`);

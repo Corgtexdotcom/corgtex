@@ -35,4 +35,4 @@ COPY --from=build /app/apps/site/package.json ./apps/site/package.json
 COPY --from=build /app/packages ./packages
 COPY --from=build /app/prisma ./prisma
 COPY --from=build /app/scripts ./scripts
-CMD ["node", "/app/node_modules/tsx/dist/cli.mjs", "/app/apps/worker/src/index.ts"]
+CMD ["node", "/app/scripts/start-worker.mjs"]
