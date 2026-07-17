@@ -12,6 +12,9 @@ const { prismaMock } = vi.hoisted(() => {
       findUnique: vi.fn(),
       update: vi.fn(),
     },
+    adviceProcess: {
+      findMany: vi.fn(),
+    },
     tensionUpvote: {
       upsert: vi.fn(),
     },
@@ -79,6 +82,7 @@ describe("tensions domain", () => {
       title: "Test tension",
     });
     prismaMock.tension.findMany.mockResolvedValue([{ id: "t-1" }]);
+    prismaMock.adviceProcess.findMany.mockResolvedValue([]);
     prismaMock.tension.findUnique.mockResolvedValue({
       id: "t-1",
       workspaceId: "ws-1",
@@ -538,7 +542,11 @@ describe("tensions domain", () => {
     const { listTensions } = await import("./tensions");
 
     await expect(listTensions(actor, "ws-1")).resolves.toMatchObject({
-      items: [{ id: "t-1" }],
+      items: [{
+        id: "t-1",
+        inputRequestCount: 0,
+        activeInputRequestCount: 0,
+      }],
       total: 1,
     });
 
@@ -562,6 +570,43 @@ describe("tensions domain", () => {
         { id: "desc" },
       ],
     }));
+    expect(prismaMock.adviceProcess.findMany).toHaveBeenCalledWith({
+      where: {
+        workspaceId: "ws-1",
+        subjectType: "TENSION",
+        subjectId: { in: ["t-1"] },
+      },
+      select: {
+        subjectId: true,
+        requests: {
+          select: { status: true },
+        },
+      },
+    });
+  });
+
+  it("adds tension input-request counts from advice processes", async () => {
+    const { listTensions } = await import("./tensions");
+
+    prismaMock.tension.findMany.mockResolvedValueOnce([{ id: "t-1" }]);
+    prismaMock.adviceProcess.findMany.mockResolvedValueOnce([
+      {
+        subjectId: "t-1",
+        requests: [
+          { status: "ACTIVE" },
+          { status: "CANCELED" },
+          { status: "COMPLETED" },
+        ],
+      },
+    ]);
+
+    await expect(listTensions(actor, "ws-1")).resolves.toMatchObject({
+      items: [{
+        id: "t-1",
+        inputRequestCount: 3,
+        activeInputRequestCount: 1,
+      }],
+    });
   });
 
   it("sorts tensions by title when requested", async () => {

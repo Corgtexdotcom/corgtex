@@ -136,8 +136,13 @@ import {
   listWorkItemVersions,
   getWorkItemVersion,
   AppError,
+  classifyMemberIdentity,
   coerceWorkItemPriorityInput,
-  formatWorkItemPriority,
+  loadAdviceRequestCountSummaries,
+  normalizeActionWorkItem,
+  normalizeProposalWorkItem,
+  normalizeTensionWorkItem,
+  workItemMemberDisplayName,
   getWorkspacePermanentPathForEntity,
   MCP_TOOL_CAPABILITIES,
   requireWorkspaceMembership,
@@ -221,14 +226,7 @@ function userDisplayName(user: any) {
 }
 
 function memberDisplayName(member: any) {
-  return userDisplayName(member?.user);
-}
-
-function priorityFields(item: { priority?: number | null }) {
-  return {
-    priority: item.priority ?? 0,
-    priorityLabel: formatWorkItemPriority(item.priority),
-  };
+  return workItemMemberDisplayName(member);
 }
 
 const memberUserInclude = {
@@ -241,22 +239,35 @@ const memberUserInclude = {
 };
 
 async function loadActionWorkItemResponse(workspaceId: string, actionId: string, fallback: any) {
-  return await prisma.action.findFirst({
+  const action = await prisma.action.findFirst({
     where: { id: actionId, workspaceId },
     include: {
       assigneeMember: { include: memberUserInclude },
     },
   }) ?? fallback;
+  if (!action?.id) return action;
+  const requestCountSummaries = await loadAdviceRequestCountSummaries(workspaceId, "ACTION", [action.id]);
+  return {
+    ...action,
+    ...requestCountSummaries.get(action.id),
+  };
 }
 
 async function loadTensionWorkItemResponse(workspaceId: string, tensionId: string, fallback: any) {
-  return await prisma.tension.findFirst({
+  const tension = await prisma.tension.findFirst({
     where: { id: tensionId, workspaceId },
     include: {
       assigneeMember: { include: memberUserInclude },
       raisedByMember: { include: memberUserInclude },
+      upvotes: true,
     },
   }) ?? fallback;
+  if (!tension?.id) return tension;
+  const requestCountSummaries = await loadAdviceRequestCountSummaries(workspaceId, "TENSION", [tension.id]);
+  return {
+    ...tension,
+    ...requestCountSummaries.get(tension.id),
+  };
 }
 
 async function loadProposalWorkItemResponse(workspaceId: string, proposalId: string, fallback: any) {
@@ -264,6 +275,13 @@ async function loadProposalWorkItemResponse(workspaceId: string, proposalId: str
     where: { id: proposalId, workspaceId },
     include: {
       ownerMember: { include: memberUserInclude },
+      adviceProcess: {
+        include: {
+          requests: {
+            select: { status: true },
+          },
+        },
+      },
     },
   }) ?? fallback;
 }
@@ -1168,16 +1186,21 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
 
       const inFlightProposals = proposals.items
         .filter((p) => p.status === "DRAFT" || p.status === "OPEN")
-        .map((p) => ({
-          id: p.id,
-          title: p.title,
-          status: p.status,
-          resolutionOutcome: p.resolutionOutcome,
-          ownerMemberId: p.ownerMemberId ?? p.ownerMember?.id ?? null,
-          ownerMemberName: memberDisplayName(p.ownerMember),
-          owner: memberDisplayName(p.ownerMember),
-          createdAt: p.createdAt,
-        }));
+        .map((p) => {
+          const item = normalizeProposalWorkItem(p);
+          return {
+            id: item.id,
+            title: item.title,
+            status: item.status,
+            priority: item.priority,
+            priorityLabel: item.priorityLabel,
+            resolutionOutcome: item.resolutionOutcome,
+            ownerMemberId: item.ownerMemberId,
+            ownerMemberName: item.ownerMemberName,
+            owner: item.owner,
+            createdAt: item.createdAt,
+          };
+        });
 
       const freshTensions = tensions.items
         .filter((t) => new Date(t.createdAt) >= since || t.status === "OPEN")
@@ -2132,22 +2155,33 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
     async ({ take, skip, archiveFilter }: { take?: number; skip?: number; archiveFilter?: typeof ARCHIVE_FILTER[number] }) => {
       requireScope(sessionCtx, "proposals:read");
       const result = await listProposals(actor, workspaceId, { take, skip, archiveFilter });
-      const simplified = result.items.map((p) => ({
-        id: p.id,
-        title: p.title,
-        status: p.status,
-        ...priorityFields(p),
-        version: p.version,
-        resolutionOutcome: p.resolutionOutcome,
-        decidedAt: p.decidedAt,
-        archivedAt: p.archivedAt,
-        summary: p.summary,
-        author: p.author?.displayName ?? p.author?.email ?? "Unknown",
-        ownerMemberId: p.ownerMemberId ?? p.ownerMember?.id ?? null,
-        ownerMemberName: memberDisplayName(p.ownerMember),
-        owner: memberDisplayName(p.ownerMember),
-        createdAt: p.createdAt,
-      }));
+      const simplified = result.items.map((p) => {
+        const item = normalizeProposalWorkItem(p);
+        return {
+          id: item.id,
+          title: item.title,
+          status: item.status,
+          priority: item.priority,
+          priorityLabel: item.priorityLabel,
+          version: item.version,
+          resolutionOutcome: item.resolutionOutcome,
+          decidedAt: item.decidedAt,
+          archivedAt: item.archivedAt,
+          summary: item.summary,
+          author: p.author?.displayName ?? p.author?.email ?? "Unknown",
+          ownerMemberId: item.ownerMemberId,
+          ownerMemberName: item.ownerMemberName,
+          owner: item.owner,
+          responsibleMemberId: item.responsibleMemberId,
+          responsibleMemberName: item.responsibleMemberName,
+          responsiblePerson: item.responsiblePerson,
+          adviceRequestCount: item.adviceRequestCount,
+          activeAdviceRequestCount: item.activeAdviceRequestCount,
+          inputRequestCount: item.inputRequestCount,
+          activeInputRequestCount: item.activeInputRequestCount,
+          createdAt: item.createdAt,
+        };
+      });
       return jsonResult({ items: simplified, total: result.total });
     },
   );
@@ -2166,15 +2200,19 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
           author: { select: { displayName: true, email: true } },
           ownerMember: { include: { user: { select: { displayName: true, email: true } } } },
           circle: { select: { id: true, name: true } },
+          adviceProcess: {
+            include: {
+              requests: {
+                select: { status: true },
+              },
+            },
+          },
         },
       });
       if (!proposal) return jsonResult({ error: "Not found" });
+      const item = normalizeProposalWorkItem(proposal);
       return jsonResult({
-        ...proposal,
-        ...priorityFields(proposal),
-        ownerMemberId: proposal.ownerMemberId ?? proposal.ownerMember?.id ?? null,
-        ownerMemberName: memberDisplayName(proposal.ownerMember),
-        owner: memberDisplayName(proposal.ownerMember),
+        ...item,
         webUrl: webUrl(workspaceId, `/proposals/${proposal.id}`),
       });
     },
@@ -2281,15 +2319,24 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
       });
       const proposalForResponse = await loadProposalWorkItemResponse(workspaceId, proposal.id, proposal);
       const permanent = await permanentUrl(workspaceId, "Proposal", proposal.id);
+      const item = normalizeProposalWorkItem(proposalForResponse);
       return jsonResult({
-        id: proposalForResponse.id,
-        title: proposalForResponse.title,
-        status: proposalForResponse.status,
-        ...priorityFields(proposalForResponse),
-        ownerMemberId: proposalForResponse.ownerMemberId ?? proposalForResponse.ownerMember?.id ?? null,
-        ownerMemberName: memberDisplayName(proposalForResponse.ownerMember),
-        owner: memberDisplayName(proposalForResponse.ownerMember),
-        version: proposalForResponse.version,
+        id: item.id,
+        title: item.title,
+        status: item.status,
+        priority: item.priority,
+        priorityLabel: item.priorityLabel,
+        ownerMemberId: item.ownerMemberId,
+        ownerMemberName: item.ownerMemberName,
+        owner: item.owner,
+        responsibleMemberId: item.responsibleMemberId,
+        responsibleMemberName: item.responsibleMemberName,
+        responsiblePerson: item.responsiblePerson,
+        adviceRequestCount: item.adviceRequestCount,
+        activeAdviceRequestCount: item.activeAdviceRequestCount,
+        inputRequestCount: item.inputRequestCount,
+        activeInputRequestCount: item.activeInputRequestCount,
+        version: item.version,
         webUrl: webUrl(workspaceId, `/proposals/${proposal.id}`),
         permanentUrl: permanent,
       });
@@ -2321,14 +2368,23 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
         priority: coerceWorkItemPriorityInput(params.priority),
       });
       const proposalForResponse = await loadProposalWorkItemResponse(workspaceId, updated.id, updated);
+      const item = normalizeProposalWorkItem(proposalForResponse);
       return jsonResult({
-        id: proposalForResponse.id,
-        status: proposalForResponse.status,
-        ...priorityFields(proposalForResponse),
-        ownerMemberId: proposalForResponse.ownerMemberId ?? proposalForResponse.ownerMember?.id ?? null,
-        ownerMemberName: memberDisplayName(proposalForResponse.ownerMember),
-        owner: memberDisplayName(proposalForResponse.ownerMember),
-        version: proposalForResponse.version,
+        id: item.id,
+        status: item.status,
+        priority: item.priority,
+        priorityLabel: item.priorityLabel,
+        ownerMemberId: item.ownerMemberId,
+        ownerMemberName: item.ownerMemberName,
+        owner: item.owner,
+        responsibleMemberId: item.responsibleMemberId,
+        responsibleMemberName: item.responsibleMemberName,
+        responsiblePerson: item.responsiblePerson,
+        adviceRequestCount: item.adviceRequestCount,
+        activeAdviceRequestCount: item.activeAdviceRequestCount,
+        inputRequestCount: item.inputRequestCount,
+        activeInputRequestCount: item.activeInputRequestCount,
+        version: item.version,
         webUrl: webUrl(workspaceId, `/proposals/${updated.id}`),
       });
     },
@@ -2460,20 +2516,32 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
     async ({ take, skip, archiveFilter }: { take?: number; skip?: number; archiveFilter?: typeof ARCHIVE_FILTER[number] }) => {
       requireScope(sessionCtx, "actions:read");
       const result = await listActions(actor, workspaceId, { take, skip, archiveFilter });
-      const simplified = result.items.map((a) => ({
-        id: a.id,
-        title: a.title,
-        status: a.status,
-        ...priorityFields(a),
-        version: a.version,
-        author: a.author?.displayName ?? a.author?.email ?? "Unknown",
-        assigneeMemberId: a.assigneeMemberId ?? a.assigneeMember?.id ?? null,
-        assigneeMemberName: memberDisplayName(a.assigneeMember),
-        assignee: memberDisplayName(a.assigneeMember),
-        dueAt: (a as Record<string, unknown>).dueAt ?? null,
-        archivedAt: a.archivedAt,
-        createdAt: a.createdAt,
-      }));
+      const simplified = result.items.map((a) => {
+        const item = normalizeActionWorkItem(a);
+        return {
+          id: item.id,
+          title: item.title,
+          status: item.status,
+          priority: item.priority,
+          priorityLabel: item.priorityLabel,
+          version: item.version,
+          author: a.author?.displayName ?? a.author?.email ?? "Unknown",
+          assigneeMemberId: item.assigneeMemberId,
+          assigneeMemberName: item.assigneeMemberName,
+          assignee: item.assignee,
+          responsibleMemberId: item.responsibleMemberId,
+          responsibleMemberName: item.responsibleMemberName,
+          responsiblePerson: item.responsiblePerson,
+          ownerMemberId: item.ownerMemberId,
+          ownerMemberName: item.ownerMemberName,
+          owner: item.owner,
+          inputRequestCount: item.inputRequestCount,
+          activeInputRequestCount: item.activeInputRequestCount,
+          dueAt: (item as Record<string, unknown>).dueAt ?? null,
+          archivedAt: item.archivedAt,
+          createdAt: item.createdAt,
+        };
+      });
       return jsonResult({ items: simplified, total: result.total });
     },
   );
@@ -2493,14 +2561,24 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
       const action = await createAction(actor, { workspaceId, title, bodyMd, assigneeMemberId, priority: coerceWorkItemPriorityInput(priority), authorMemberId });
       const actionForResponse = await loadActionWorkItemResponse(workspaceId, action.id, action);
       const permanent = await permanentUrl(workspaceId, "Action", action.id);
+      const item = normalizeActionWorkItem(actionForResponse);
       return jsonResult({
-        id: actionForResponse.id,
-        status: actionForResponse.status,
-        ...priorityFields(actionForResponse),
-        assigneeMemberId: actionForResponse.assigneeMemberId ?? actionForResponse.assigneeMember?.id ?? null,
-        assigneeMemberName: memberDisplayName(actionForResponse.assigneeMember),
-        assignee: memberDisplayName(actionForResponse.assigneeMember),
-        version: actionForResponse.version,
+        id: item.id,
+        status: item.status,
+        priority: item.priority,
+        priorityLabel: item.priorityLabel,
+        assigneeMemberId: item.assigneeMemberId,
+        assigneeMemberName: item.assigneeMemberName,
+        assignee: item.assignee,
+        responsibleMemberId: item.responsibleMemberId,
+        responsibleMemberName: item.responsibleMemberName,
+        responsiblePerson: item.responsiblePerson,
+        ownerMemberId: item.ownerMemberId,
+        ownerMemberName: item.ownerMemberName,
+        owner: item.owner,
+        inputRequestCount: item.inputRequestCount,
+        activeInputRequestCount: item.activeInputRequestCount,
+        version: item.version,
         webUrl: webUrl(workspaceId, `/actions/${action.id}`),
         permanentUrl: permanent,
       });
@@ -2546,14 +2624,24 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
         completedVia: params.completedVia,
       });
       const actionForResponse = await loadActionWorkItemResponse(workspaceId, updated.id, updated);
+      const item = normalizeActionWorkItem(actionForResponse);
       return jsonResult({
-        id: actionForResponse.id,
-        status: actionForResponse.status,
-        ...priorityFields(actionForResponse),
-        assigneeMemberId: actionForResponse.assigneeMemberId ?? actionForResponse.assigneeMember?.id ?? null,
-        assigneeMemberName: memberDisplayName(actionForResponse.assigneeMember),
-        assignee: memberDisplayName(actionForResponse.assigneeMember),
-        version: actionForResponse.version,
+        id: item.id,
+        status: item.status,
+        priority: item.priority,
+        priorityLabel: item.priorityLabel,
+        assigneeMemberId: item.assigneeMemberId,
+        assigneeMemberName: item.assigneeMemberName,
+        assignee: item.assignee,
+        responsibleMemberId: item.responsibleMemberId,
+        responsibleMemberName: item.responsibleMemberName,
+        responsiblePerson: item.responsiblePerson,
+        ownerMemberId: item.ownerMemberId,
+        ownerMemberName: item.ownerMemberName,
+        owner: item.owner,
+        inputRequestCount: item.inputRequestCount,
+        activeInputRequestCount: item.activeInputRequestCount,
+        version: item.version,
         webUrl: webUrl(workspaceId, `/actions/${updated.id}`),
       });
     },
@@ -2623,25 +2711,36 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
     async ({ take, skip, archiveFilter }: { take?: number; skip?: number; archiveFilter?: typeof ARCHIVE_FILTER[number] }) => {
       requireScope(sessionCtx, "tensions:read");
       const result = await listTensions(actor, workspaceId, { take, skip, archiveFilter });
-      const simplified = result.items.map((t) => ({
-        id: t.id,
-        title: t.title,
-        status: t.status,
-        ...priorityFields(t),
-        version: t.version,
-        author: t.author?.displayName ?? t.author?.email ?? "Unknown",
-        assigneeMemberId: t.assigneeMemberId ?? t.assigneeMember?.id ?? null,
-        assigneeMemberName: memberDisplayName(t.assigneeMember),
-        responsibleMemberId: t.assigneeMemberId ?? t.assigneeMember?.id ?? null,
-        responsibleMemberName: memberDisplayName(t.assigneeMember),
-        responsiblePerson: memberDisplayName(t.assigneeMember),
-        raisedByMemberId: t.raisedByMemberId ?? t.raisedByMember?.id ?? null,
-        raisedByMemberName: memberDisplayName(t.raisedByMember),
-        raisedBy: memberDisplayName(t.raisedByMember),
-        resolvedVia: t.resolvedVia,
-        archivedAt: t.archivedAt,
-        createdAt: t.createdAt,
-      }));
+      const simplified = result.items.map((t) => {
+        const item = normalizeTensionWorkItem(t);
+        return {
+          id: item.id,
+          title: item.title,
+          status: item.status,
+          priority: item.priority,
+          priorityLabel: item.priorityLabel,
+          version: item.version,
+          author: t.author?.displayName ?? t.author?.email ?? "Unknown",
+          assigneeMemberId: item.assigneeMemberId,
+          assigneeMemberName: item.assigneeMemberName,
+          assignee: item.assignee,
+          responsibleMemberId: item.responsibleMemberId,
+          responsibleMemberName: item.responsibleMemberName,
+          responsiblePerson: item.responsiblePerson,
+          raisedByMemberId: item.raisedByMemberId,
+          raisedByMemberName: item.raisedByMemberName,
+          raisedBy: item.raisedBy,
+          ownerMemberId: item.ownerMemberId,
+          ownerMemberName: item.ownerMemberName,
+          owner: item.owner,
+          upvoteCount: item.upvoteCount,
+          inputRequestCount: item.inputRequestCount,
+          activeInputRequestCount: item.activeInputRequestCount,
+          resolvedVia: item.resolvedVia,
+          archivedAt: item.archivedAt,
+          createdAt: item.createdAt,
+        };
+      });
       return jsonResult({ items: simplified, total: result.total });
     },
   );
@@ -2662,19 +2761,28 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
       const tension = await createTension(actor, { workspaceId, title, bodyMd, assigneeMemberId, raisedByMemberId, priority: coerceWorkItemPriorityInput(priority), authorMemberId });
       const tensionForResponse = await loadTensionWorkItemResponse(workspaceId, tension.id, tension);
       const permanent = await permanentUrl(workspaceId, "Tension", tension.id);
+      const item = normalizeTensionWorkItem(tensionForResponse);
       return jsonResult({
-        id: tensionForResponse.id,
-        status: tensionForResponse.status,
-        ...priorityFields(tensionForResponse),
-        assigneeMemberId: tensionForResponse.assigneeMemberId ?? tensionForResponse.assigneeMember?.id ?? null,
-        assigneeMemberName: memberDisplayName(tensionForResponse.assigneeMember),
-        responsibleMemberId: tensionForResponse.assigneeMemberId ?? tensionForResponse.assigneeMember?.id ?? null,
-        responsibleMemberName: memberDisplayName(tensionForResponse.assigneeMember),
-        responsiblePerson: memberDisplayName(tensionForResponse.assigneeMember),
-        raisedByMemberId: tensionForResponse.raisedByMemberId ?? tensionForResponse.raisedByMember?.id ?? null,
-        raisedByMemberName: memberDisplayName(tensionForResponse.raisedByMember),
-        raisedBy: memberDisplayName(tensionForResponse.raisedByMember),
-        version: tensionForResponse.version,
+        id: item.id,
+        status: item.status,
+        priority: item.priority,
+        priorityLabel: item.priorityLabel,
+        assigneeMemberId: item.assigneeMemberId,
+        assigneeMemberName: item.assigneeMemberName,
+        assignee: item.assignee,
+        responsibleMemberId: item.responsibleMemberId,
+        responsibleMemberName: item.responsibleMemberName,
+        responsiblePerson: item.responsiblePerson,
+        raisedByMemberId: item.raisedByMemberId,
+        raisedByMemberName: item.raisedByMemberName,
+        raisedBy: item.raisedBy,
+        ownerMemberId: item.ownerMemberId,
+        ownerMemberName: item.ownerMemberName,
+        owner: item.owner,
+        upvoteCount: item.upvoteCount,
+        inputRequestCount: item.inputRequestCount,
+        activeInputRequestCount: item.activeInputRequestCount,
+        version: item.version,
         webUrl: webUrl(workspaceId, `/tensions/${tension.id}`),
         permanentUrl: permanent,
       });
@@ -2720,19 +2828,28 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
         resolvedVia: params.resolvedVia,
       });
       const tensionForResponse = await loadTensionWorkItemResponse(workspaceId, updated.id, updated);
+      const item = normalizeTensionWorkItem(tensionForResponse);
       return jsonResult({
-        id: tensionForResponse.id,
-        status: tensionForResponse.status,
-        ...priorityFields(tensionForResponse),
-        assigneeMemberId: tensionForResponse.assigneeMemberId ?? tensionForResponse.assigneeMember?.id ?? null,
-        assigneeMemberName: memberDisplayName(tensionForResponse.assigneeMember),
-        responsibleMemberId: tensionForResponse.assigneeMemberId ?? tensionForResponse.assigneeMember?.id ?? null,
-        responsibleMemberName: memberDisplayName(tensionForResponse.assigneeMember),
-        responsiblePerson: memberDisplayName(tensionForResponse.assigneeMember),
-        raisedByMemberId: tensionForResponse.raisedByMemberId ?? tensionForResponse.raisedByMember?.id ?? null,
-        raisedByMemberName: memberDisplayName(tensionForResponse.raisedByMember),
-        raisedBy: memberDisplayName(tensionForResponse.raisedByMember),
-        version: tensionForResponse.version,
+        id: item.id,
+        status: item.status,
+        priority: item.priority,
+        priorityLabel: item.priorityLabel,
+        assigneeMemberId: item.assigneeMemberId,
+        assigneeMemberName: item.assigneeMemberName,
+        assignee: item.assignee,
+        responsibleMemberId: item.responsibleMemberId,
+        responsibleMemberName: item.responsibleMemberName,
+        responsiblePerson: item.responsiblePerson,
+        raisedByMemberId: item.raisedByMemberId,
+        raisedByMemberName: item.raisedByMemberName,
+        raisedBy: item.raisedBy,
+        ownerMemberId: item.ownerMemberId,
+        ownerMemberName: item.ownerMemberName,
+        owner: item.owner,
+        upvoteCount: item.upvoteCount,
+        inputRequestCount: item.inputRequestCount,
+        activeInputRequestCount: item.activeInputRequestCount,
+        version: item.version,
         webUrl: webUrl(workspaceId, `/tensions/${updated.id}`),
       });
     },
@@ -3106,6 +3223,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
         displayName: m.user.displayName,
         email: m.user.email,
         role: m.role,
+        kind: classifyMemberIdentity(m),
         isActive: m.isActive,
         joinedAt: m.joinedAt,
       }));

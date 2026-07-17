@@ -4,6 +4,7 @@ import type { Prisma, TensionStatus } from "@prisma/client";
 import { appendEvents } from "./events";
 import { actorUserIdForWorkspace, requireWorkspaceMembership } from "./auth";
 import { archiveFilterWhere, archiveWorkspaceArtifact, type ArchiveFilter } from "./archive";
+import { loadAdviceRequestCountSummaries } from "./advice-requests";
 import { invariant } from "./errors";
 import { humanMemberIdentityWhere } from "./member-identity";
 import { requireDraftManager } from "./draft-permissions";
@@ -188,7 +189,16 @@ export async function listTensions(actor: AppActor, workspaceId: string, opts?: 
     }),
     prisma.tension.count({ where }),
   ]);
-  return { items, total, take, skip };
+  const requestCountSummaries = await loadAdviceRequestCountSummaries(workspaceId, "TENSION", items.map((item) => item.id));
+  return {
+    items: items.map((item) => ({
+      ...item,
+      ...requestCountSummaries.get(item.id),
+    })),
+    total,
+    take,
+    skip,
+  };
 }
 
 export async function createTension(actor: AppActor, params: {
