@@ -9,6 +9,28 @@ import { collectProductionValidationPrNumbers } from "./production-validation-pr
 
 const DEFAULT_BASE_URL = "https://app.corgtex.com";
 const DEFAULT_RECORDER_DEPLOYMENTS = "managed-recorder-validation";
+const DEFAULT_CLIENT_READINESS_ROUTES = "leads";
+const CLIENT_READINESS_ROUTE_NAMES = new Set([
+  "home",
+  "goals",
+  "brain",
+  "brain-sources",
+  "brain-status",
+  "members",
+  "tensions",
+  "actions",
+  "meetings",
+  "proposals",
+  "circles",
+  "finance",
+  "audit",
+  "settings",
+  "chat",
+  "leads",
+  "agents",
+  "governance",
+  "operator",
+]);
 const UNKNOWN_PRODUCTION_APP_RELEASE_REQUIRED = "__unknown_production_app_release_required__";
 
 function boolOutput(value) {
@@ -47,6 +69,19 @@ function validateBaseUrl(value) {
     throw new Error(`base_url must be exactly ${DEFAULT_BASE_URL}.`);
   }
   return parsed.origin;
+}
+
+function normalizeClientReadinessRoutes(value) {
+  const raw = normalizeOptionalText(value) || DEFAULT_CLIENT_READINESS_ROUTES;
+  const routeNames = [...new Set(raw.split(",").map((item) => item.trim()).filter(Boolean))];
+  if (routeNames.length === 0) {
+    throw new Error("client_readiness_routes must include at least one route name.");
+  }
+  const unknown = routeNames.filter((name) => !CLIENT_READINESS_ROUTE_NAMES.has(name));
+  if (unknown.length > 0) {
+    throw new Error(`client_readiness_routes contains unsupported route name(s): ${unknown.join(", ")}`);
+  }
+  return routeNames.join(",");
 }
 
 export function productionAppReleaseRelevantPath(filePath) {
@@ -168,6 +203,7 @@ export function resolveProductionValidationContext({
   prNumbersInput,
   baselinePrNumbers,
   recorderDeploymentsInput,
+  clientReadinessRoutesInput,
   smokeInputs = {},
   changedFiles = [],
 }) {
@@ -199,6 +235,9 @@ export function resolveProductionValidationContext({
     expected_git_sha: expectedGitSha,
     pr_numbers: prNumbers,
     crm_smoke: boolOutput(enabled && dispatchSmokeEnabled(smokeInputs.crm, eventName)),
+    telemetry_release_smoke: boolOutput(enabled && dispatchSmokeEnabled(smokeInputs.telemetryRelease, eventName)),
+    client_readiness_smoke: boolOutput(enabled && dispatchSmokeEnabled(smokeInputs.clientReadiness, eventName)),
+    client_readiness_routes: normalizeClientReadinessRoutes(clientReadinessRoutesInput),
     source_intake_smoke: boolOutput(enabled && dispatchSmokeEnabled(smokeInputs.sourceIntake, eventName)),
     work_item_parity_smoke: boolOutput(enabled && dispatchSmokeEnabled(smokeInputs.workItemParity, eventName)),
     briefing_fixture_smoke: boolOutput(enabled && dispatchSmokeEnabled(smokeInputs.briefingFixture, eventName)),
@@ -252,8 +291,11 @@ async function main() {
     prNumbersInput: process.env.PRODUCTION_VALIDATION_PR_NUMBERS_INPUT,
     baselinePrNumbers: process.env.PRODUCTION_VALIDATION_BASELINE_PR_NUMBERS,
     recorderDeploymentsInput: process.env.PRODUCTION_VALIDATION_RECORDER_DEPLOYMENTS_INPUT,
+    clientReadinessRoutesInput: process.env.PRODUCTION_VALIDATION_CLIENT_READINESS_ROUTES_INPUT,
     smokeInputs: {
       crm: process.env.PRODUCTION_VALIDATION_CRM_SMOKE_INPUT,
+      telemetryRelease: process.env.PRODUCTION_VALIDATION_TELEMETRY_RELEASE_SMOKE_INPUT,
+      clientReadiness: process.env.PRODUCTION_VALIDATION_CLIENT_READINESS_SMOKE_INPUT,
       sourceIntake: process.env.PRODUCTION_VALIDATION_SOURCE_INTAKE_SMOKE_INPUT,
       workItemParity: process.env.PRODUCTION_VALIDATION_WORK_ITEM_PARITY_SMOKE_INPUT,
       briefingFixture: process.env.PRODUCTION_VALIDATION_BRIEFING_FIXTURE_SMOKE_INPUT,

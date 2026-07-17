@@ -74,6 +74,9 @@ describe("production validation context", () => {
       expected_git_sha: MAIN_SHA,
       pr_numbers: "725",
       crm_smoke: "true",
+      telemetry_release_smoke: "true",
+      client_readiness_smoke: "true",
+      client_readiness_routes: "leads",
       source_intake_smoke: "true",
       work_item_parity_smoke: "true",
       briefing_fixture_smoke: "true",
@@ -96,6 +99,8 @@ describe("production validation context", () => {
     })).toMatchObject({
       enabled: "false",
       crm_smoke: "false",
+      telemetry_release_smoke: "false",
+      client_readiness_smoke: "false",
       source_intake_smoke: "false",
       work_item_parity_smoke: "false",
       briefing_fixture_smoke: "false",
@@ -113,8 +118,11 @@ describe("production validation context", () => {
       prNumbersInput: "725,726",
       baselinePrNumbers: "724",
       recorderDeploymentsInput: "managed-recorder-validation,example",
+      clientReadinessRoutesInput: "leads,governance",
       smokeInputs: {
         crm: "false",
+        telemetryRelease: "false",
+        clientReadiness: "true",
         sourceIntake: "true",
         workItemParity: "false",
         briefingFixture: "true",
@@ -126,12 +134,25 @@ describe("production validation context", () => {
       expected_git_sha: NEXT_SHA,
       pr_numbers: "724,725,726",
       crm_smoke: "false",
+      telemetry_release_smoke: "false",
+      client_readiness_smoke: "true",
+      client_readiness_routes: "leads,governance",
       source_intake_smoke: "true",
       work_item_parity_smoke: "false",
       briefing_fixture_smoke: "true",
       recorder_readiness_smoke: "false",
       recorder_readiness_deployments: "managed-recorder-validation,example",
     });
+  });
+
+  it("rejects unknown client-readiness route names", () => {
+    expect(() => resolve({
+      eventName: "workflow_dispatch",
+      event: { inputs: {} },
+      githubRef: "refs/heads/main",
+      clientReadinessRoutesInput: "relationships,cycles",
+      changedFiles: [],
+    })).toThrow("client_readiness_routes contains unsupported route name(s): relationships, cycles");
   });
 
   it("keeps scheduled runs release-agnostic unless an explicit SHA is supplied", () => {

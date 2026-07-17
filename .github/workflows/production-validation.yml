@@ -20,6 +20,20 @@ on:
         required: true
         type: boolean
         default: true
+      telemetry_release_smoke:
+        description: Run the release metadata and synthetic telemetry production smoke.
+        required: true
+        type: boolean
+        default: true
+      client_readiness_smoke:
+        description: Run the client-readiness production smoke.
+        required: true
+        type: boolean
+        default: true
+      client_readiness_routes:
+        description: Comma-separated client-readiness route names to validate.
+        required: false
+        default: leads
       source_intake_smoke:
         description: Run the Add/source-intake production smoke.
         required: true
@@ -67,6 +81,9 @@ jobs:
       expected_git_sha: ${{ steps.context.outputs.expected_git_sha }}
       pr_numbers: ${{ steps.context.outputs.pr_numbers }}
       crm_smoke: ${{ steps.context.outputs.crm_smoke }}
+      telemetry_release_smoke: ${{ steps.context.outputs.telemetry_release_smoke }}
+      client_readiness_smoke: ${{ steps.context.outputs.client_readiness_smoke }}
+      client_readiness_routes: ${{ steps.context.outputs.client_readiness_routes }}
       source_intake_smoke: ${{ steps.context.outputs.source_intake_smoke }}
       work_item_parity_smoke: ${{ steps.context.outputs.work_item_parity_smoke }}
       briefing_fixture_smoke: ${{ steps.context.outputs.briefing_fixture_smoke }}
@@ -103,6 +120,9 @@ jobs:
           PRODUCTION_VALIDATION_BASELINE_PR_NUMBERS: ${{ vars.PRODUCTION_VALIDATION_BASELINE_PR_NUMBERS || vars.PRODUCTION_VALIDATION_CRM_BASELINE_PR_NUMBERS || '696' }}
           PRODUCTION_VALIDATION_RECORDER_DEPLOYMENTS_INPUT: ${{ inputs.recorder_readiness_deployments || vars.PRODUCTION_VALIDATION_RECORDER_DEPLOYMENTS || 'managed-recorder-validation' }}
           PRODUCTION_VALIDATION_CRM_SMOKE_INPUT: ${{ inputs.crm_smoke }}
+          PRODUCTION_VALIDATION_TELEMETRY_RELEASE_SMOKE_INPUT: ${{ inputs.telemetry_release_smoke }}
+          PRODUCTION_VALIDATION_CLIENT_READINESS_SMOKE_INPUT: ${{ inputs.client_readiness_smoke }}
+          PRODUCTION_VALIDATION_CLIENT_READINESS_ROUTES_INPUT: ${{ inputs.client_readiness_routes || vars.PRODUCTION_VALIDATION_CLIENT_READINESS_ROUTES || 'leads' }}
           PRODUCTION_VALIDATION_SOURCE_INTAKE_SMOKE_INPUT: ${{ inputs.source_intake_smoke }}
           PRODUCTION_VALIDATION_WORK_ITEM_PARITY_SMOKE_INPUT: ${{ inputs.work_item_parity_smoke }}
           PRODUCTION_VALIDATION_BRIEFING_FIXTURE_SMOKE_INPUT: ${{ inputs.briefing_fixture_smoke }}
@@ -119,6 +139,9 @@ jobs:
           EXPECTED_SHA_SUMMARY: ${{ steps.context.outputs.expected_git_sha }}
           PR_NUMBERS_SUMMARY: ${{ steps.context.outputs.pr_numbers }}
           CRM_SMOKE_SUMMARY: ${{ steps.context.outputs.crm_smoke }}
+          TELEMETRY_RELEASE_SMOKE_SUMMARY: ${{ steps.context.outputs.telemetry_release_smoke }}
+          CLIENT_READINESS_SMOKE_SUMMARY: ${{ steps.context.outputs.client_readiness_smoke }}
+          CLIENT_READINESS_ROUTES_SUMMARY: ${{ steps.context.outputs.client_readiness_routes }}
           SOURCE_INTAKE_SMOKE_SUMMARY: ${{ steps.context.outputs.source_intake_smoke }}
           WORK_ITEM_PARITY_SMOKE_SUMMARY: ${{ steps.context.outputs.work_item_parity_smoke }}
           BRIEFING_FIXTURE_SMOKE_SUMMARY: ${{ steps.context.outputs.briefing_fixture_smoke }}
@@ -142,12 +165,348 @@ jobs:
             printf -- '- Expected SHA: %s\n' "$expected_sha"
             printf -- '- PR numbers: %s\n' "$pr_numbers"
             printf -- '- CRM smoke: %s\n' "$CRM_SMOKE_SUMMARY"
+            printf -- '- Telemetry release smoke: %s\n' "$TELEMETRY_RELEASE_SMOKE_SUMMARY"
+            printf -- '- Client readiness smoke: %s\n' "$CLIENT_READINESS_SMOKE_SUMMARY"
+            printf -- '- Client readiness routes: %s\n' "$CLIENT_READINESS_ROUTES_SUMMARY"
             printf -- '- Source intake smoke: %s\n' "$SOURCE_INTAKE_SMOKE_SUMMARY"
             printf -- '- Work-item parity smoke: %s\n' "$WORK_ITEM_PARITY_SMOKE_SUMMARY"
             printf -- '- Briefing fixture smoke: %s\n' "$BRIEFING_FIXTURE_SMOKE_SUMMARY"
             printf -- '- Recorder readiness smoke: %s\n' "$RECORDER_READINESS_SMOKE_SUMMARY"
             printf -- '- Recorder readiness deployments: %s\n' "$RECORDER_READINESS_DEPLOYMENTS_SUMMARY"
           } >> "$GITHUB_STEP_SUMMARY"
+
+  telemetry-release-production-smoke:
+    name: Telemetry Release Smoke
+    needs: validation-context
+    if: ${{ needs.validation-context.outputs.telemetry_release_smoke == 'true' }}
+    runs-on: ubuntu-latest
+    environment: fleet-release-production
+    timeout-minutes: 10
+    env:
+      OUT_DIR: .artifacts/production-validation/telemetry-release
+      PR_NUMBERS: ${{ needs.validation-context.outputs.pr_numbers }}
+      TENANT_SLUG: fleet-release
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.validation-context.outputs.trusted_ref == 'true' && (github.event.workflow_run.head_sha || github.sha) || 'main' }}
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Validate production validation inputs
+        id: validation_inputs
+        shell: bash
+        env:
+          BASE_URL_INPUT: ${{ needs.validation-context.outputs.base_url }}
+          EXPECTED_GIT_SHA_INPUT: ${{ needs.validation-context.outputs.expected_git_sha }}
+          TRUSTED_REF_OUTPUT: ${{ needs.validation-context.outputs.trusted_ref }}
+        run: |
+          set -euo pipefail
+          node <<'NODE'
+          const { execFileSync } = require("node:child_process");
+          const fs = require("node:fs");
+
+          const baseUrlInput = String(process.env.BASE_URL_INPUT || "").trim();
+          let baseUrl;
+          try {
+            baseUrl = new URL(baseUrlInput);
+          } catch {
+            throw new Error("base_url must be a valid URL.");
+          }
+          if (baseUrl.origin !== "https://app.corgtex.com" || !["", "/"].includes(baseUrl.pathname) || baseUrl.search || baseUrl.hash) {
+            throw new Error("base_url must be exactly https://app.corgtex.com.");
+          }
+
+          const expectedGitSha = String(process.env.EXPECTED_GIT_SHA_INPUT || "").trim().toLowerCase();
+          if (expectedGitSha && !/^[a-f0-9]{40}$/i.test(expectedGitSha)) {
+            throw new Error("expected_git_sha must be a 40-character git SHA when provided.");
+          }
+          const checkedOutGitSha = execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim().toLowerCase();
+          if (!/^[a-f0-9]{40}$/i.test(checkedOutGitSha)) {
+            throw new Error("checked-out git SHA must be a 40-character git SHA.");
+          }
+          if (expectedGitSha && process.env.TRUSTED_REF_OUTPUT === "true" && expectedGitSha !== checkedOutGitSha) {
+            throw new Error(`telemetry release smoke imports repository code and must run from the same revision expected in production; expected_git_sha=${expectedGitSha} checked_out_sha=${checkedOutGitSha}`);
+          }
+
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, `base_url=${baseUrl.origin}\n`);
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, `expected_git_sha=${expectedGitSha}\n`);
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, `checked_out_git_sha=${checkedOutGitSha}\n`);
+          fs.appendFileSync(process.env.GITHUB_ENV, `BASE_URL=${baseUrl.origin}\n`);
+          fs.appendFileSync(process.env.GITHUB_ENV, `EXPECTED_GIT_SHA=${expectedGitSha}\n`);
+          fs.appendFileSync(process.env.GITHUB_ENV, `CHECKED_OUT_GIT_SHA=${checkedOutGitSha}\n`);
+          NODE
+
+      - name: Check trusted workflow ref
+        id: trusted_ref
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${{ needs.validation-context.outputs.trusted_ref }}" = "true" ]; then
+            echo "trusted=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "trusted=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Prepare validation artifact directory
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$OUT_DIR"
+          {
+            echo "workflow=$GITHUB_WORKFLOW"
+            echo "run_id=$GITHUB_RUN_ID"
+            echo "sha=$CHECKED_OUT_GIT_SHA"
+            echo "base_url=$BASE_URL"
+            echo "tenant_slug=$TENANT_SLUG"
+            echo "pr_numbers=$PR_NUMBERS"
+            echo "expected_git_sha=$EXPECTED_GIT_SHA"
+          } > "$OUT_DIR/workflow.log"
+
+      - name: Check telemetry smoke secret
+        if: steps.trusted_ref.outputs.trusted == 'true'
+        id: credentials
+        shell: bash
+        env:
+          SMOKE_EMAIL_CAPTURE_SECRET: ${{ secrets.SMOKE_EMAIL_CAPTURE_SECRET || secrets.CORGTEX_SMOKE_SECRET }}
+        run: |
+          set -euo pipefail
+          if [ -z "$SMOKE_EMAIL_CAPTURE_SECRET" ]; then
+            echo "available=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Record blocked telemetry release validation for untrusted ref
+        if: steps.trusted_ref.outputs.trusted != 'true'
+        run: |
+          node scripts/production-validation-blocked.mjs \
+            --out-dir="$OUT_DIR" \
+            --base-url="$BASE_URL" \
+            --tenant-slug="$TENANT_SLUG" \
+            --pr-numbers="$PR_NUMBERS" \
+            --method="telemetry-release-production-smoke" \
+            --intent="Release metadata and synthetic telemetry event tagging" \
+            --blocker="Production telemetry validation with smoke secrets must be dispatched from refs/heads/main."
+
+      - name: Record blocked telemetry release validation for missing credentials
+        if: steps.trusted_ref.outputs.trusted == 'true' && steps.credentials.outputs.available != 'true'
+        run: |
+          node scripts/production-validation-blocked.mjs \
+            --out-dir="$OUT_DIR" \
+            --base-url="$BASE_URL" \
+            --tenant-slug="$TENANT_SLUG" \
+            --pr-numbers="$PR_NUMBERS" \
+            --method="telemetry-release-production-smoke" \
+            --intent="Release metadata and synthetic telemetry event tagging" \
+            --blocker="SMOKE_EMAIL_CAPTURE_SECRET or CORGTEX_SMOKE_SECRET production smoke secret is required."
+
+      - name: Run telemetry release production smoke
+        if: steps.trusted_ref.outputs.trusted == 'true' && steps.credentials.outputs.available == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          node scripts/telemetry-release-production-smoke.mjs "$BASE_URL" "$OUT_DIR" 2>&1 | tee "$OUT_DIR/telemetry-release-production-smoke.log"
+        env:
+          SMOKE_EMAIL_CAPTURE_SECRET: ${{ secrets.SMOKE_EMAIL_CAPTURE_SECRET || secrets.CORGTEX_SMOKE_SECRET }}
+          CORGTEX_EXPECTED_RELEASE_GIT_SHA: ${{ steps.validation_inputs.outputs.expected_git_sha }}
+          TELEMETRY_RELEASE_SMOKE_TENANT_SLUG: ${{ env.TENANT_SLUG }}
+          TELEMETRY_RELEASE_SMOKE_PR_NUMBERS: ${{ env.PR_NUMBERS }}
+          TELEMETRY_RELEASE_SMOKE_RUN_ID: telemetry-release-${{ github.run_id }}
+
+      - name: Add validation report to summary
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          report="$(find "$OUT_DIR" -maxdepth 1 -name '*.report.md' -print -quit 2>/dev/null || true)"
+          if [ -n "$report" ]; then
+            cat "$report" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "No telemetry release validation report was produced." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: production-validation-telemetry-release
+          path: .artifacts/production-validation/telemetry-release
+          if-no-files-found: warn
+
+  client-readiness-production-smoke:
+    name: Client Readiness Smoke
+    needs: validation-context
+    if: ${{ needs.validation-context.outputs.client_readiness_smoke == 'true' }}
+    runs-on: ubuntu-latest
+    environment: fleet-release-production
+    timeout-minutes: 25
+    env:
+      OUT_DIR: .artifacts/production-validation/client-readiness
+      PR_NUMBERS: ${{ needs.validation-context.outputs.pr_numbers }}
+      WORKSPACE_SLUG: corgtex-validation
+      ROUTE_NAMES: ${{ needs.validation-context.outputs.client_readiness_routes }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.validation-context.outputs.trusted_ref == 'true' && (github.event.workflow_run.head_sha || github.sha) || 'main' }}
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Validate production validation inputs
+        id: validation_inputs
+        shell: bash
+        env:
+          BASE_URL_INPUT: ${{ needs.validation-context.outputs.base_url }}
+          EXPECTED_GIT_SHA_INPUT: ${{ needs.validation-context.outputs.expected_git_sha }}
+          TRUSTED_REF_OUTPUT: ${{ needs.validation-context.outputs.trusted_ref }}
+        run: |
+          set -euo pipefail
+          node <<'NODE'
+          const { execFileSync } = require("node:child_process");
+          const fs = require("node:fs");
+
+          const baseUrlInput = String(process.env.BASE_URL_INPUT || "").trim();
+          let baseUrl;
+          try {
+            baseUrl = new URL(baseUrlInput);
+          } catch {
+            throw new Error("base_url must be a valid URL.");
+          }
+          if (baseUrl.origin !== "https://app.corgtex.com" || !["", "/"].includes(baseUrl.pathname) || baseUrl.search || baseUrl.hash) {
+            throw new Error("base_url must be exactly https://app.corgtex.com.");
+          }
+
+          const expectedGitSha = String(process.env.EXPECTED_GIT_SHA_INPUT || "").trim().toLowerCase();
+          if (expectedGitSha && !/^[a-f0-9]{40}$/i.test(expectedGitSha)) {
+            throw new Error("expected_git_sha must be a 40-character git SHA when provided.");
+          }
+          const checkedOutGitSha = execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim().toLowerCase();
+          if (!/^[a-f0-9]{40}$/i.test(checkedOutGitSha)) {
+            throw new Error("checked-out git SHA must be a 40-character git SHA.");
+          }
+          if (expectedGitSha && process.env.TRUSTED_REF_OUTPUT === "true" && expectedGitSha !== checkedOutGitSha) {
+            throw new Error(`client readiness smoke imports repository code and must run from the same revision expected in production; expected_git_sha=${expectedGitSha} checked_out_sha=${checkedOutGitSha}`);
+          }
+
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, `base_url=${baseUrl.origin}\n`);
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, `expected_git_sha=${expectedGitSha}\n`);
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, `checked_out_git_sha=${checkedOutGitSha}\n`);
+          fs.appendFileSync(process.env.GITHUB_ENV, `BASE_URL=${baseUrl.origin}\n`);
+          fs.appendFileSync(process.env.GITHUB_ENV, `EXPECTED_GIT_SHA=${expectedGitSha}\n`);
+          fs.appendFileSync(process.env.GITHUB_ENV, `CHECKED_OUT_GIT_SHA=${checkedOutGitSha}\n`);
+          NODE
+
+      - name: Check trusted workflow ref
+        id: trusted_ref
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${{ needs.validation-context.outputs.trusted_ref }}" = "true" ]; then
+            echo "trusted=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "trusted=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Prepare validation artifact directory
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$OUT_DIR"
+          {
+            echo "workflow=$GITHUB_WORKFLOW"
+            echo "run_id=$GITHUB_RUN_ID"
+            echo "sha=$CHECKED_OUT_GIT_SHA"
+            echo "base_url=$BASE_URL"
+            echo "workspace_slug=$WORKSPACE_SLUG"
+            echo "route_names=$ROUTE_NAMES"
+            echo "pr_numbers=$PR_NUMBERS"
+            echo "expected_git_sha=$EXPECTED_GIT_SHA"
+          } > "$OUT_DIR/workflow.log"
+
+      - name: Check production smoke credentials
+        if: steps.trusted_ref.outputs.trusted == 'true'
+        id: credentials
+        shell: bash
+        env:
+          CLIENT_READINESS_EMAIL: ${{ secrets.PRODUCTION_VALIDATION_ADMIN_EMAIL || secrets.ADMIN_EMAIL }}
+          CLIENT_READINESS_PASSWORD: ${{ secrets.PRODUCTION_VALIDATION_ADMIN_PASSWORD || secrets.ADMIN_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [ -z "$CLIENT_READINESS_EMAIL" ] || [ -z "$CLIENT_READINESS_PASSWORD" ]; then
+            echo "available=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Record blocked client-readiness validation for untrusted ref
+        if: steps.trusted_ref.outputs.trusted != 'true'
+        run: |
+          node scripts/production-validation-blocked.mjs \
+            --out-dir="$OUT_DIR" \
+            --base-url="$BASE_URL" \
+            --tenant-slug="$WORKSPACE_SLUG" \
+            --pr-numbers="$PR_NUMBERS" \
+            --method="client-readiness-production-smoke" \
+            --intent="Client-readiness route, selected workspace, desktop and mobile proof" \
+            --blocker="Production client-readiness validation with admin secrets must be dispatched from refs/heads/main."
+
+      - name: Record blocked client-readiness validation for missing credentials
+        if: steps.trusted_ref.outputs.trusted == 'true' && steps.credentials.outputs.available != 'true'
+        run: |
+          node scripts/production-validation-blocked.mjs \
+            --out-dir="$OUT_DIR" \
+            --base-url="$BASE_URL" \
+            --tenant-slug="$WORKSPACE_SLUG" \
+            --pr-numbers="$PR_NUMBERS" \
+            --method="client-readiness-production-smoke" \
+            --intent="Client-readiness route, selected workspace, desktop and mobile proof" \
+            --blocker="PRODUCTION_VALIDATION_ADMIN_EMAIL/PASSWORD or ADMIN_EMAIL/PASSWORD production smoke secrets are required."
+
+      - run: npm ci
+        if: steps.trusted_ref.outputs.trusted == 'true' && steps.credentials.outputs.available == 'true'
+
+      - name: Install browser runtime
+        if: steps.trusted_ref.outputs.trusted == 'true' && steps.credentials.outputs.available == 'true'
+        run: npx playwright install --with-deps chromium
+
+      - name: Run client-readiness production smoke
+        if: steps.trusted_ref.outputs.trusted == 'true' && steps.credentials.outputs.available == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          node scripts/client-readiness-production-smoke.mjs "$BASE_URL" "$OUT_DIR" 2>&1 | tee "$OUT_DIR/client-readiness-production-smoke-wrapper.log"
+        env:
+          AGENT_E2E_EMAIL: ${{ secrets.PRODUCTION_VALIDATION_ADMIN_EMAIL || secrets.ADMIN_EMAIL }}
+          AGENT_E2E_PASSWORD: ${{ secrets.PRODUCTION_VALIDATION_ADMIN_PASSWORD || secrets.ADMIN_PASSWORD }}
+          CLIENT_READINESS_WORKSPACE_SLUG: ${{ env.WORKSPACE_SLUG }}
+          CLIENT_READINESS_ROUTE_NAMES: ${{ env.ROUTE_NAMES }}
+          CLIENT_READINESS_SMOKE_PR_NUMBERS: ${{ env.PR_NUMBERS }}
+          CLIENT_READINESS_SMOKE_EXPECTED_GIT_SHA: ${{ steps.validation_inputs.outputs.expected_git_sha }}
+
+      - name: Add validation report to summary
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          report="$(find "$OUT_DIR" -maxdepth 1 -name '*.report.md' -print -quit 2>/dev/null || true)"
+          if [ -n "$report" ]; then
+            cat "$report" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "No client-readiness validation report was produced." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: production-validation-client-readiness
+          path: .artifacts/production-validation/client-readiness
+          if-no-files-found: warn
 
   crm-production-smoke:
     name: CRM Pending-Operation Smoke
