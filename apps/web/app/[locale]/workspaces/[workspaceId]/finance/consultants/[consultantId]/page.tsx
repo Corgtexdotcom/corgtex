@@ -1,0 +1,180 @@
+import { getNativePracticeConsultantDetail } from "@corgtex/domain";
+import { requirePageActor } from "@/lib/auth";
+import { isWorkspaceFeatureEnabled, requireWorkspaceFeature } from "@/lib/workspace-feature-flags";
+import {
+  PracticeFinanceNav,
+  PracticeMetric,
+  formatDate,
+  hoursLabel,
+  marginLabel,
+  money,
+  statusLabel,
+  wholeMoney,
+} from "../../components";
+
+export const dynamic = "force-dynamic";
+
+function utilizationLabel(bps: number): string {
+  return `${(bps / 100).toFixed(1)}%`;
+}
+
+function decimalAmount(hours: { toString(): string }, rateCents: number): number {
+  return Math.round(Number.parseFloat(hours.toString()) * rateCents);
+}
+
+export default async function PracticeConsultantDetailPage({
+  params,
+}: {
+  params: Promise<{ workspaceId: string; consultantId: string }>;
+}) {
+  const { workspaceId, consultantId } = await params;
+  const actor = await requirePageActor();
+  await requireWorkspaceFeature(workspaceId, "FINANCE");
+  await requireWorkspaceFeature(workspaceId, "PRACTICE_PROJECTS");
+  const [detail, slicingPieEnabled] = await Promise.all([
+    getNativePracticeConsultantDetail(actor, workspaceId, consultantId),
+    isWorkspaceFeatureEnabled(workspaceId, "SLICING_PIE"),
+  ]);
+  const { consultant, utilization } = detail;
+
+  return (
+    <section className="stack" style={{ gap: 20 }} data-finance-surface="practice-consultant-detail">
+      <header className="nr-masthead" style={{ textAlign: "left", marginBottom: 0 }}>
+        <a className="link-button small secondary" href={`/workspaces/${workspaceId}/finance/consultants`}>Back to consultants</a>
+        <h1 style={{ marginTop: 12 }}>{consultant.name}</h1>
+        <div className="nr-masthead-meta">
+          {consultant.email && <span>{consultant.email}</span>}
+          <span>{consultant.active ? "active" : "inactive"}</span>
+          <span>{consultant.homeCurrency}</span>
+        </div>
+        <div style={{ marginTop: 16 }}>
+          <PracticeFinanceNav workspaceId={workspaceId} active="consultants" slicingPieEnabled={slicingPieEnabled} />
+        </div>
+      </header>
+
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 12 }}>
+        <PracticeMetric label="Utilization" value={utilizationLabel(utilization.utilizationBps)} />
+        <PracticeMetric label="Avg weekly hours" value={utilization.averageWeeklyHours.toLocaleString("en-US")} />
+        <PracticeMetric label="Recent hours" value={utilization.recentHours.toLocaleString("en-US")} />
+        <PracticeMetric label="Billed" value={wholeMoney(utilization.billedCents, utilization.currency ?? "USD")} />
+        <PracticeMetric label="Cost" value={wholeMoney(utilization.costCents, utilization.currency ?? "USD")} />
+        <PracticeMetric label="Expenses" value={wholeMoney(utilization.expenseCents, utilization.currency ?? "USD")} />
+      </div>
+
+      <div className="nr-item" style={{ padding: 0 }}>
+        <div style={{ borderBottom: "1px solid var(--line)", padding: "12px 16px" }}>
+          <strong>Projects</strong>
+        </div>
+        {detail.projectHealth.length === 0 ? (
+          <p className="nr-item-meta" style={{ margin: 0, padding: 16 }}>No projects are linked to this consultant.</p>
+        ) : (
+          <div className="nr-table-wrap">
+            <table className="nr-table">
+              <thead>
+                <tr>
+                  <th>Project</th>
+                  <th>Client</th>
+                  <th>Status</th>
+                  <th style={{ textAlign: "right" }}>Budget</th>
+                  <th style={{ textAlign: "right" }}>Used</th>
+                  <th style={{ textAlign: "right" }}>Margin</th>
+                </tr>
+              </thead>
+              <tbody>
+                {detail.projectHealth.map((project) => (
+                  <tr key={project.projectId}>
+                    <td>
+                      <a href={`/workspaces/${workspaceId}/finance/projects/${project.projectId}`}>{project.projectName}</a>
+                      <div className="nr-item-meta" style={{ fontSize: 11 }}>{project.projectCode}</div>
+                    </td>
+                    <td>{project.clientName}</td>
+                    <td>{statusLabel(project.status)}</td>
+                    <td style={{ textAlign: "right" }}>{wholeMoney(project.budgetCents, project.currency)}</td>
+                    <td style={{ textAlign: "right" }}>{wholeMoney(project.usedBudgetCents, project.currency)}</td>
+                    <td style={{ textAlign: "right" }}>{marginLabel(project.grossMarginBps)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+
+      <div className="nr-item" style={{ padding: 0 }}>
+        <div style={{ borderBottom: "1px solid var(--line)", padding: "12px 16px" }}>
+          <strong>Recent time</strong>
+        </div>
+        {detail.recentTimeEntries.length === 0 ? (
+          <p className="nr-item-meta" style={{ margin: 0, padding: 16 }}>No recent time entries are linked to this consultant.</p>
+        ) : (
+          <div className="nr-table-wrap">
+            <table className="nr-table">
+              <thead>
+                <tr>
+                  <th>Date</th>
+                  <th>Project</th>
+                  <th style={{ textAlign: "right" }}>Hours</th>
+                  <th style={{ textAlign: "right" }}>Bill amount</th>
+                  <th style={{ textAlign: "right" }}>Cost amount</th>
+                  <th>Status</th>
+                </tr>
+              </thead>
+              <tbody>
+                {detail.recentTimeEntries.map((entry) => (
+                  <tr key={entry.id}>
+                    <td>{formatDate(entry.workedOn)}</td>
+                    <td><a href={`/workspaces/${workspaceId}/finance/projects/${entry.project.id}`}>{entry.project.name}</a></td>
+                    <td style={{ textAlign: "right" }}>{hoursLabel(entry.hours)}</td>
+                    <td style={{ textAlign: "right" }}>
+                      {money(entry.billAmountCents ?? decimalAmount(entry.hours, entry.billRateCents), entry.functionalCurrency ?? entry.billCurrency ?? entry.currency)}
+                    </td>
+                    <td style={{ textAlign: "right" }}>
+                      {money(entry.costAmountCents ?? decimalAmount(entry.hours, entry.costRateCents), entry.functionalCurrency ?? entry.costCurrency ?? entry.currency)}
+                    </td>
+                    <td>{statusLabel(entry.status)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+
+      <div className="nr-item" style={{ padding: 0 }}>
+        <div style={{ borderBottom: "1px solid var(--line)", padding: "12px 16px" }}>
+          <strong>Recent expenses</strong>
+        </div>
+        {detail.recentExpenses.length === 0 ? (
+          <p className="nr-item-meta" style={{ margin: 0, padding: 16 }}>No recent expenses are linked to this consultant.</p>
+        ) : (
+          <div className="nr-table-wrap">
+            <table className="nr-table">
+              <thead>
+                <tr>
+                  <th>Date</th>
+                  <th>Project</th>
+                  <th>Category</th>
+                  <th>Purpose</th>
+                  <th style={{ textAlign: "right" }}>Amount</th>
+                  <th>Status</th>
+                </tr>
+              </thead>
+              <tbody>
+                {detail.recentExpenses.map((entry) => (
+                  <tr key={entry.id}>
+                    <td>{formatDate(entry.spentOn)}</td>
+                    <td><a href={`/workspaces/${workspaceId}/finance/projects/${entry.project.id}`}>{entry.project.name}</a></td>
+                    <td>{entry.category}</td>
+                    <td>{entry.businessPurpose}</td>
+                    <td style={{ textAlign: "right" }}>{money(entry.amountFunctionalCents ?? entry.amountCents, entry.functionalCurrency ?? entry.currency)}</td>
+                    <td>{statusLabel(entry.status)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+    </section>
+  );
+}

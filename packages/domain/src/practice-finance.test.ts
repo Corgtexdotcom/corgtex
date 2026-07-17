@@ -32,6 +32,7 @@ const { prismaMock, requireWorkspaceMembershipMock } = vi.hoisted(() => {
       create: vi.fn(),
       findFirst: vi.fn(),
       findMany: vi.fn(),
+      findUnique: vi.fn(),
       update: vi.fn(),
     },
     practiceExpense: {
@@ -89,10 +90,16 @@ import {
   createPracticeProject,
   createPracticeProjectFromWonDeal,
   getCrmAccountPracticeFinance,
+  getNativePracticeClientDetail,
+  getNativePracticeConsultantDetail,
   getNativePracticeFinanceDashboard,
   getPracticeFinanceDashboard,
   getSlicingPieSummary,
+  listNativePracticeClients,
+  listNativePracticeConsultants,
+  listNativePracticeExpensePage,
   listNativePracticeProjectHealth,
+  listNativePracticeTimeEntryPage,
   listPracticeContributionEntries,
   listRequestedPracticeContributionPayables,
   listPracticeProjects,
@@ -1480,6 +1487,7 @@ describe("practice-finance I/O", () => {
     prismaMock.practiceConsultant.create.mockResolvedValue({ id: "consultant-1" });
     prismaMock.practiceConsultant.findFirst.mockResolvedValue(null);
     prismaMock.practiceConsultant.findMany.mockResolvedValue([]);
+    prismaMock.practiceConsultant.findUnique.mockResolvedValue(null);
     prismaMock.practiceConsultant.update.mockResolvedValue({ id: "consultant-1" });
     prismaMock.practiceExpense.create.mockResolvedValue({
       id: "expense-1",
@@ -1653,6 +1661,281 @@ describe("practice-finance I/O", () => {
       cursor: { id: "project-10" },
       skip: 1,
     });
+  });
+
+  it("lists native practice clients as a bounded cursor page", async () => {
+    prismaMock.practiceClient.findMany.mockResolvedValueOnce([
+      {
+        id: "client-1",
+        workspaceId: "workspace-1",
+        crmAccountId: "account-1",
+        code: "CLIENT-1",
+        name: "Client One",
+        leadName: null,
+        status: "ACTIVE",
+        sourceSatelliteId: null,
+        createdAt: new Date("2026-06-18T00:00:00.000Z"),
+        updatedAt: new Date("2026-06-18T00:00:00.000Z"),
+        crmAccount: { id: "account-1", name: "Client One" },
+        _count: { billingCodes: 1, projects: 2, timeEntries: 3, expenses: 4 },
+      },
+      {
+        id: "client-2",
+        workspaceId: "workspace-1",
+        crmAccountId: null,
+        code: "CLIENT-2",
+        name: "Client Two",
+        leadName: null,
+        status: "ACTIVE",
+        sourceSatelliteId: null,
+        createdAt: new Date("2026-06-18T00:00:00.000Z"),
+        updatedAt: new Date("2026-06-18T00:00:00.000Z"),
+        crmAccount: null,
+        _count: { billingCodes: 0, projects: 1, timeEntries: 0, expenses: 0 },
+      },
+      {
+        id: "client-3",
+        workspaceId: "workspace-1",
+        crmAccountId: null,
+        code: "CLIENT-3",
+        name: "Client Three",
+        leadName: null,
+        status: "ON_HOLD",
+        sourceSatelliteId: null,
+        createdAt: new Date("2026-06-18T00:00:00.000Z"),
+        updatedAt: new Date("2026-06-18T00:00:00.000Z"),
+        crmAccount: null,
+        _count: { billingCodes: 0, projects: 0, timeEntries: 0, expenses: 0 },
+      },
+    ]);
+
+    const page = await listNativePracticeClients(actor, "workspace-1", { take: 2, cursor: " client-0 " });
+
+    expect(page.items.map((client) => client.id)).toEqual(["client-1", "client-2"]);
+    expect(page.nextCursor).toBe("client-2");
+    expect(prismaMock.practiceClient.findMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: { workspaceId: "workspace-1" },
+      take: 3,
+      cursor: { id: "client-0" },
+      skip: 1,
+    }));
+  });
+
+  it("lists native practice consultants as a bounded cursor page", async () => {
+    prismaMock.practiceConsultant.findMany.mockResolvedValueOnce([
+      {
+        id: "consultant-1",
+        workspaceId: "workspace-1",
+        name: "Consultant One",
+        email: "one@example.test",
+        homeCurrency: "USD",
+        active: true,
+        sourceSatelliteId: null,
+        createdAt: new Date("2026-06-18T00:00:00.000Z"),
+        updatedAt: new Date("2026-06-18T00:00:00.000Z"),
+        _count: { assignments: 1, timeEntries: 2, expenses: 3, paymentBatches: 4 },
+      },
+      {
+        id: "consultant-2",
+        workspaceId: "workspace-1",
+        name: "Consultant Two",
+        email: null,
+        homeCurrency: "USD",
+        active: false,
+        sourceSatelliteId: null,
+        createdAt: new Date("2026-06-18T00:00:00.000Z"),
+        updatedAt: new Date("2026-06-18T00:00:00.000Z"),
+        _count: { assignments: 0, timeEntries: 0, expenses: 0, paymentBatches: 0 },
+      },
+    ]);
+
+    const page = await listNativePracticeConsultants(actor, "workspace-1", { take: 1 });
+
+    expect(page.items).toHaveLength(1);
+    expect(page.nextCursor).toBe("consultant-1");
+    expect(prismaMock.practiceConsultant.findMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: { workspaceId: "workspace-1" },
+      orderBy: [{ active: "desc" }, { name: "asc" }, { id: "asc" }],
+      take: 2,
+    }));
+  });
+
+  it("lists native practice time entries with workspace and context filters", async () => {
+    prismaMock.practiceTimeEntry.findMany.mockResolvedValueOnce([
+      {
+        ...nativeTimeEntry(),
+        workspaceId: "workspace-1",
+        clientId: "client-1",
+        assignmentType: "CONSULTING",
+        idempotencyKey: null,
+        createdAt: new Date("2026-06-18T00:00:00.000Z"),
+        updatedAt: new Date("2026-06-18T00:00:00.000Z"),
+        client: { id: "client-1", code: "CLIENT-1", name: "Client One" },
+        consultant: { id: "consultant-1", name: "Consultant One", email: "one@example.test" },
+        project: { id: "project-1", code: "DPRJ-001", name: "Native project", clientName: "Client One" },
+        reviews: [],
+      },
+    ]);
+
+    const page = await listNativePracticeTimeEntryPage(actor, "workspace-1", {
+      consultantId: " consultant-1 ",
+      projectId: " project-1 ",
+      take: 20,
+    });
+
+    expect(page.items).toHaveLength(1);
+    expect(prismaMock.practiceTimeEntry.findMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: { workspaceId: "workspace-1", consultantId: "consultant-1", projectId: "project-1" },
+      take: 21,
+    }));
+  });
+
+  it("lists native practice expenses with workspace and context filters", async () => {
+    prismaMock.practiceExpense.findMany.mockResolvedValueOnce([
+      {
+        ...nativeExpense(),
+        workspaceId: "workspace-1",
+        clientId: "client-1",
+        vendor: "Airline",
+        businessPurpose: "Client travel",
+        idempotencyKey: null,
+        createdAt: new Date("2026-06-18T00:00:00.000Z"),
+        updatedAt: new Date("2026-06-18T00:00:00.000Z"),
+        client: { id: "client-1", code: "CLIENT-1", name: "Client One" },
+        consultant: { id: "consultant-1", name: "Consultant One", email: "one@example.test" },
+        project: { id: "project-1", code: "DPRJ-001", name: "Native project", clientName: "Client One" },
+        reviews: [],
+      },
+    ]);
+
+    const page = await listNativePracticeExpensePage(actor, "workspace-1", {
+      clientId: " client-1 ",
+      cursor: " expense-0 ",
+      take: 10,
+    });
+
+    expect(page.items).toHaveLength(1);
+    expect(prismaMock.practiceExpense.findMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: { workspaceId: "workspace-1", clientId: "client-1" },
+      take: 11,
+      cursor: { id: "expense-0" },
+      skip: 1,
+    }));
+  });
+
+  it("loads native practice client detail with bounded project and ledger context", async () => {
+    prismaMock.practiceClient.findUnique.mockResolvedValueOnce({
+      id: "client-1",
+      workspaceId: "workspace-1",
+      crmAccountId: "account-1",
+      code: "CLIENT-1",
+      name: "Client One",
+      leadName: null,
+      status: "ACTIVE",
+      sourceSatelliteId: null,
+      createdAt: new Date("2026-06-18T00:00:00.000Z"),
+      updatedAt: new Date("2026-06-18T00:00:00.000Z"),
+      crmAccount: { id: "account-1", name: "Client One" },
+      _count: { billingCodes: 1, projects: 1, timeEntries: 1, expenses: 1 },
+    });
+    prismaMock.practiceProject.findMany.mockResolvedValueOnce([nativeProject({ clientId: "client-1", clientName: "Client One" })]);
+    prismaMock.$queryRaw
+      .mockResolvedValueOnce([{
+        projectId: "project-1",
+        timeRevenueCents: 150_000n,
+        timeCostCents: 80_000n,
+        recentTimeRevenueCents: 150_000n,
+        recentTimeCostCents: 80_000n,
+        invalidHoursRows: 0n,
+        invalidCurrencyRows: 0n,
+        timeEntryCount: 1n,
+      }])
+      .mockResolvedValueOnce([{
+        projectId: "project-1",
+        billableExpenseCents: 40_000n,
+        directExpenseCents: 40_000n,
+        recentBillableExpenseCents: 40_000n,
+        recentDirectExpenseCents: 40_000n,
+        invalidCurrencyRows: 0n,
+        expenseCount: 1n,
+      }]);
+
+    const detail = await getNativePracticeClientDetail(actor, "workspace-1", " client-1 ", {
+      now: new Date("2026-06-30T00:00:00.000Z"),
+    });
+
+    expect(detail.client.name).toBe("Client One");
+    expect(detail.projectHealth[0]).toMatchObject({
+      projectId: "project-1",
+      usedBudgetCents: 190_000,
+    });
+    expect(prismaMock.practiceProject.findMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: { workspaceId: "workspace-1", clientId: "client-1" },
+      take: 100,
+    }));
+    expect(prismaMock.practiceTimeEntry.findMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: { workspaceId: "workspace-1", clientId: "client-1" },
+      take: 50,
+    }));
+    expect(prismaMock.practiceExpense.findMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: { workspaceId: "workspace-1", clientId: "client-1" },
+      take: 50,
+    }));
+  });
+
+  it("loads native practice consultant detail with recent utilization context", async () => {
+    prismaMock.practiceConsultant.findUnique.mockResolvedValueOnce({
+      id: "consultant-1",
+      workspaceId: "workspace-1",
+      name: "Consultant One",
+      email: "one@example.test",
+      homeCurrency: "USD",
+      active: true,
+      sourceSatelliteId: null,
+      createdAt: new Date("2026-06-18T00:00:00.000Z"),
+      updatedAt: new Date("2026-06-18T00:00:00.000Z"),
+      _count: { assignments: 1, timeEntries: 1, expenses: 1, paymentBatches: 0 },
+    });
+    prismaMock.practiceProject.findMany.mockResolvedValueOnce([nativeProject()]);
+    prismaMock.practiceTimeEntry.findMany.mockResolvedValueOnce([nativeTimeEntry()]);
+    prismaMock.practiceExpense.findMany.mockResolvedValueOnce([nativeExpense()]);
+    prismaMock.$queryRaw
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([]);
+
+    const detail = await getNativePracticeConsultantDetail(actor, "workspace-1", " consultant-1 ", {
+      now: new Date("2026-06-30T00:00:00.000Z"),
+    });
+
+    expect(detail.consultant.name).toBe("Consultant One");
+    expect(detail.utilization).toMatchObject({
+      consultantId: "consultant-1",
+      recentHours: 10,
+      billedCents: 150_000,
+      costCents: 80_000,
+      expenseCents: 40_000,
+    });
+    expect(prismaMock.practiceProject.findMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: {
+        workspaceId: "workspace-1",
+        assignments: { some: { consultantId: "consultant-1" } },
+      },
+      take: 100,
+    }));
+    expect(prismaMock.practiceTimeEntry.findMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({
+        workspaceId: "workspace-1",
+        consultantId: "consultant-1",
+      }),
+      take: 200,
+    }));
+    expect(prismaMock.practiceExpense.findMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({
+        workspaceId: "workspace-1",
+        consultantId: "consultant-1",
+      }),
+      take: 200,
+    }));
   });
 
   it("builds the dashboard from the bounded project list", async () => {

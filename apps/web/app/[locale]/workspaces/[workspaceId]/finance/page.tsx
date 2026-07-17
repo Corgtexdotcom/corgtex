@@ -72,15 +72,6 @@ export default async function FinancePage({
 }
 
 async function listAllPracticeProjects(actor: Awaited<ReturnType<typeof requirePageActor>>, workspaceId: string) {
-  const projects: Awaited<ReturnType<typeof listPracticeProjects>> = [];
-  let cursor: string | null = null;
   const take = 200;
-
-  while (true) {
-    const page = await listPracticeProjects(actor, workspaceId, { take, cursor });
-    projects.push(...page);
-    if (page.length < take) return projects;
-    cursor = page.at(-1)?.id ?? null;
-    if (!cursor) return projects;
-  }
+  return listPracticeProjects(actor, workspaceId, { take });
 }

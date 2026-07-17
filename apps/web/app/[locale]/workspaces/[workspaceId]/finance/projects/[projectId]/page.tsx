@@ -12,6 +12,7 @@ import {
   createNativePracticeExpenseAction,
   createNativePracticeTimeEntryAction,
 } from "../../actions";
+import { PracticeFinanceNav } from "../../components";
 
 export const dynamic = "force-dynamic";
 
@@ -147,6 +148,14 @@ export default async function PracticeProjectDetailPage({
             <a className="link-button secondary" href={`/workspaces/${workspaceId}/leads/accounts/${project.crmAccountId}`}>
               Open CRM account
             </a>
+          )}
+        </div>
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginTop: 16 }}>
+          <PracticeFinanceNav workspaceId={workspaceId} active="overview" />
+          <a className="link-button small secondary" href={`/workspaces/${workspaceId}/finance/time?projectId=${encodeURIComponent(project.id)}`}>Project time</a>
+          <a className="link-button small secondary" href={`/workspaces/${workspaceId}/finance/expenses?projectId=${encodeURIComponent(project.id)}`}>Project expenses</a>
+          {project.clientId && (
+            <a className="link-button small secondary" href={`/workspaces/${workspaceId}/finance/clients/${project.clientId}`}>Client</a>
           )}
         </div>
       </header>

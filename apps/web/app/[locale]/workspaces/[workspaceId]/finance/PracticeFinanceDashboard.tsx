@@ -10,6 +10,7 @@ import {
   markPracticeContributionEntryPaidAction,
   updatePracticeProjectAction,
 } from "./actions";
+import { PracticeFinanceNav } from "./components";
 
 function money(cents: number, currency = "USD"): string {
   const sign = cents < 0 ? "-" : "";
@@ -343,6 +344,9 @@ export function PracticeFinanceDashboard({
           {slicingPieEnabled && (
             <a className="link-button secondary" href={`/workspaces/${workspaceId}/finance/slicing-pie`}>Slicing Pie</a>
           )}
+        </div>
+        <div style={{ marginTop: 16 }}>
+          <PracticeFinanceNav workspaceId={workspaceId} active="overview" slicingPieEnabled={slicingPieEnabled} />
         </div>
       </header>
 
