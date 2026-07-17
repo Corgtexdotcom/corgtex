@@ -6,11 +6,15 @@ import {
   activateMobileMode,
   activateMobileWorkspaceMode,
   demoAddGuardRouteSuffix,
+  isFindAccountUrl,
   isWorkspaceUrl,
   labelConsoleEntry,
+  localePrefixFromUrl,
+  resolveSelectedWorkspace,
   submitLoginForm,
   visibleLoginErrorMessage,
   waitForLoginResult,
+  workspacePathFromUrl,
 } from "./client-readiness-smoke.mjs";
 
 function locator(items) {
@@ -39,6 +43,16 @@ describe("client readiness smoke login handling", () => {
     expect(isWorkspaceUrl("http://localhost/workspaces/workspace-1")).toBe(true);
     expect(isWorkspaceUrl("http://localhost/es/workspaces/workspace-1/settings")).toBe(true);
     expect(isWorkspaceUrl("http://localhost/login")).toBe(false);
+  });
+
+  it("recognizes account-picker redirects and extracts localized workspace paths", () => {
+    expect(isFindAccountUrl("http://localhost/find-account")).toBe(true);
+    expect(isFindAccountUrl("http://localhost/en/find-account")).toBe(true);
+    expect(isFindAccountUrl("http://localhost/en/workspaces/workspace-1")).toBe(false);
+    expect(localePrefixFromUrl("http://localhost/en/find-account")).toBe("/en");
+    expect(localePrefixFromUrl("http://localhost/workspaces/workspace-1")).toBe("");
+    expect(workspacePathFromUrl("http://localhost/en/workspaces/workspace-1/settings")).toBe("/workspaces/workspace-1");
+    expect(workspacePathFromUrl("http://localhost/en/find-account")).toBe(null);
   });
 
   it("ignores empty visible alert regions and returns the first visible message", async () => {
@@ -80,6 +94,83 @@ describe("client readiness smoke login handling", () => {
     await expect(waitForLoginResult(fakePage)).resolves.toBeUndefined();
     expect(fakePage.waitForLoadState).toHaveBeenCalledWith("domcontentloaded", { timeout: 5000 });
     expect(fakePage.screenshot).not.toHaveBeenCalled();
+  });
+
+  it("returns after authenticated account-picker navigation", async () => {
+    const fakePage = page({ url: "http://localhost/en/find-account" });
+
+    await expect(waitForLoginResult(fakePage)).resolves.toBeUndefined();
+    expect(fakePage.waitForLoadState).toHaveBeenCalledWith("domcontentloaded", { timeout: 5000 });
+    expect(fakePage.screenshot).not.toHaveBeenCalled();
+  });
+
+  it("selects the explicit validation workspace after an account-picker redirect", async () => {
+    const previousSlug = process.env.CLIENT_READINESS_WORKSPACE_SLUG;
+    try {
+      process.env.CLIENT_READINESS_WORKSPACE_SLUG = "corgtex-validation";
+      const fakePage = {
+        request: {
+          get: vi.fn(async () => ({
+            ok: () => true,
+            json: async () => ({
+              workspaces: [
+                { id: "customer-1", slug: "customer", name: "Customer" },
+                { id: "validation-1", slug: "corgtex-validation", name: "Validation" },
+              ],
+            }),
+          })),
+        },
+      };
+
+      await expect(resolveSelectedWorkspace(fakePage, null)).resolves.toEqual({
+        workspacePath: "/workspaces/validation-1",
+        workspaceSlug: "corgtex-validation",
+        selected: true,
+      });
+    } finally {
+      if (previousSlug === undefined) {
+        delete process.env.CLIENT_READINESS_WORKSPACE_SLUG;
+      } else {
+        process.env.CLIENT_READINESS_WORKSPACE_SLUG = previousSlug;
+      }
+    }
+  });
+
+  it("requires an explicit tenant when the account picker has multiple workspaces", async () => {
+    const previousSlug = process.env.CLIENT_READINESS_WORKSPACE_SLUG;
+    const previousId = process.env.CLIENT_READINESS_WORKSPACE_ID;
+    try {
+      delete process.env.CLIENT_READINESS_WORKSPACE_SLUG;
+      delete process.env.CLIENT_READINESS_WORKSPACE_ID;
+      const fakePage = {
+        request: {
+          get: vi.fn(async () => ({
+            ok: () => true,
+            json: async () => ({
+              workspaces: [
+                { id: "workspace-1", slug: "one", name: "One" },
+                { id: "workspace-2", slug: "two", name: "Two" },
+              ],
+            }),
+          })),
+        },
+      };
+
+      await expect(resolveSelectedWorkspace(fakePage, null)).rejects.toThrow(
+        "Set CLIENT_READINESS_WORKSPACE_ID or CLIENT_READINESS_WORKSPACE_SLUG",
+      );
+    } finally {
+      if (previousSlug === undefined) {
+        delete process.env.CLIENT_READINESS_WORKSPACE_SLUG;
+      } else {
+        process.env.CLIENT_READINESS_WORKSPACE_SLUG = previousSlug;
+      }
+      if (previousId === undefined) {
+        delete process.env.CLIENT_READINESS_WORKSPACE_ID;
+      } else {
+        process.env.CLIENT_READINESS_WORKSPACE_ID = previousId;
+      }
+    }
   });
 
   it("adds route labels to console and page error entries", () => {
