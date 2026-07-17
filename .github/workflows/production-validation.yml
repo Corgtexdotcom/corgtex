@@ -44,23 +44,126 @@ on:
         description: Comma-separated deployment ids, slugs, labels, or managed workspace slugs for recorder readiness.
         required: false
         default: managed-recorder-validation
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+    branches: [main]
+  schedule:
+    - cron: "47 10 * * *"
 
 permissions:
+  actions: read
   contents: read
+  pull-requests: read
 
 jobs:
+  validation-context:
+    name: Production Validation Context
+    runs-on: ubuntu-latest
+    outputs:
+      enabled: ${{ steps.context.outputs.enabled }}
+      trusted_ref: ${{ steps.context.outputs.trusted_ref }}
+      base_url: ${{ steps.context.outputs.base_url }}
+      expected_git_sha: ${{ steps.context.outputs.expected_git_sha }}
+      pr_numbers: ${{ steps.context.outputs.pr_numbers }}
+      crm_smoke: ${{ steps.context.outputs.crm_smoke }}
+      source_intake_smoke: ${{ steps.context.outputs.source_intake_smoke }}
+      work_item_parity_smoke: ${{ steps.context.outputs.work_item_parity_smoke }}
+      briefing_fixture_smoke: ${{ steps.context.outputs.briefing_fixture_smoke }}
+      recorder_readiness_smoke: ${{ steps.context.outputs.recorder_readiness_smoke }}
+      recorder_readiness_deployments: ${{ steps.context.outputs.recorder_readiness_deployments }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: main
+          fetch-depth: 2
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Download CI release context
+        if: ${{ github.event_name == 'workflow_run' }}
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: production-app-release-context
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ github.token }}
+          path: .artifacts/ci-release-context
+
+      - name: Resolve production validation context
+        id: context
+        shell: bash
+        env:
+          PRODUCTION_VALIDATION_BASE_URL_INPUT: ${{ inputs.base_url || 'https://app.corgtex.com' }}
+          PRODUCTION_VALIDATION_EXPECTED_GIT_SHA_INPUT: ${{ inputs.expected_git_sha || '' }}
+          PRODUCTION_VALIDATION_PR_NUMBERS_INPUT: ${{ inputs.pr_numbers || '' }}
+          PRODUCTION_VALIDATION_BASELINE_PR_NUMBERS: ${{ vars.PRODUCTION_VALIDATION_BASELINE_PR_NUMBERS || vars.PRODUCTION_VALIDATION_CRM_BASELINE_PR_NUMBERS || '696' }}
+          PRODUCTION_VALIDATION_RECORDER_DEPLOYMENTS_INPUT: ${{ inputs.recorder_readiness_deployments || vars.PRODUCTION_VALIDATION_RECORDER_DEPLOYMENTS || 'managed-recorder-validation' }}
+          PRODUCTION_VALIDATION_CRM_SMOKE_INPUT: ${{ inputs.crm_smoke }}
+          PRODUCTION_VALIDATION_SOURCE_INTAKE_SMOKE_INPUT: ${{ inputs.source_intake_smoke }}
+          PRODUCTION_VALIDATION_WORK_ITEM_PARITY_SMOKE_INPUT: ${{ inputs.work_item_parity_smoke }}
+          PRODUCTION_VALIDATION_BRIEFING_FIXTURE_SMOKE_INPUT: ${{ inputs.briefing_fixture_smoke }}
+          PRODUCTION_VALIDATION_RECORDER_READINESS_SMOKE_INPUT: ${{ inputs.recorder_readiness_smoke }}
+          PRODUCTION_VALIDATION_CI_RELEASE_CONTEXT_PATH: .artifacts/ci-release-context/release-context.json
+          GITHUB_TOKEN: ${{ github.token }}
+        run: node scripts/production-validation-context.mjs --output="$GITHUB_OUTPUT"
+
+      - name: Add validation context to summary
+        shell: bash
+        env:
+          ENABLED_SUMMARY: ${{ steps.context.outputs.enabled }}
+          BASE_URL_SUMMARY: ${{ steps.context.outputs.base_url }}
+          EXPECTED_SHA_SUMMARY: ${{ steps.context.outputs.expected_git_sha }}
+          PR_NUMBERS_SUMMARY: ${{ steps.context.outputs.pr_numbers }}
+          CRM_SMOKE_SUMMARY: ${{ steps.context.outputs.crm_smoke }}
+          SOURCE_INTAKE_SMOKE_SUMMARY: ${{ steps.context.outputs.source_intake_smoke }}
+          WORK_ITEM_PARITY_SMOKE_SUMMARY: ${{ steps.context.outputs.work_item_parity_smoke }}
+          BRIEFING_FIXTURE_SMOKE_SUMMARY: ${{ steps.context.outputs.briefing_fixture_smoke }}
+          RECORDER_READINESS_SMOKE_SUMMARY: ${{ steps.context.outputs.recorder_readiness_smoke }}
+          RECORDER_READINESS_DEPLOYMENTS_SUMMARY: ${{ steps.context.outputs.recorder_readiness_deployments }}
+        run: |
+          set -euo pipefail
+          expected_sha="$EXPECTED_SHA_SUMMARY"
+          if [ -z "$expected_sha" ]; then
+            expected_sha="release-agnostic"
+          fi
+          pr_numbers="$PR_NUMBERS_SUMMARY"
+          if [ -z "$pr_numbers" ]; then
+            pr_numbers="n/a"
+          fi
+          {
+            printf '%s\n' "## Production Validation Context"
+            printf '\n'
+            printf -- '- Enabled: %s\n' "$ENABLED_SUMMARY"
+            printf -- '- Base URL: %s\n' "$BASE_URL_SUMMARY"
+            printf -- '- Expected SHA: %s\n' "$expected_sha"
+            printf -- '- PR numbers: %s\n' "$pr_numbers"
+            printf -- '- CRM smoke: %s\n' "$CRM_SMOKE_SUMMARY"
+            printf -- '- Source intake smoke: %s\n' "$SOURCE_INTAKE_SMOKE_SUMMARY"
+            printf -- '- Work-item parity smoke: %s\n' "$WORK_ITEM_PARITY_SMOKE_SUMMARY"
+            printf -- '- Briefing fixture smoke: %s\n' "$BRIEFING_FIXTURE_SMOKE_SUMMARY"
+            printf -- '- Recorder readiness smoke: %s\n' "$RECORDER_READINESS_SMOKE_SUMMARY"
+            printf -- '- Recorder readiness deployments: %s\n' "$RECORDER_READINESS_DEPLOYMENTS_SUMMARY"
+          } >> "$GITHUB_STEP_SUMMARY"
+
   crm-production-smoke:
     name: CRM Pending-Operation Smoke
-    if: ${{ inputs.crm_smoke }}
+    needs: validation-context
+    if: ${{ needs.validation-context.outputs.crm_smoke == 'true' }}
     runs-on: ubuntu-latest
     environment: fleet-release-production
     timeout-minutes: 25
     env:
       OUT_DIR: .artifacts/production-validation/crm
-      PR_NUMBERS: ${{ inputs.pr_numbers }}
+      PR_NUMBERS: ${{ needs.validation-context.outputs.pr_numbers }}
       WORKSPACE_SLUG: corgtex-validation
     steps:
       - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.validation-context.outputs.trusted_ref == 'true' && (github.event.workflow_run.head_sha || github.sha) || 'main' }}
 
       - uses: actions/setup-node@v5
         with:
@@ -71,11 +174,13 @@ jobs:
         id: validation_inputs
         shell: bash
         env:
-          BASE_URL_INPUT: ${{ inputs.base_url }}
-          EXPECTED_GIT_SHA_INPUT: ${{ inputs.expected_git_sha }}
+          BASE_URL_INPUT: ${{ needs.validation-context.outputs.base_url }}
+          EXPECTED_GIT_SHA_INPUT: ${{ needs.validation-context.outputs.expected_git_sha }}
+          TRUSTED_REF_OUTPUT: ${{ needs.validation-context.outputs.trusted_ref }}
         run: |
           set -euo pipefail
           node <<'NODE'
+          const { execFileSync } = require("node:child_process");
           const fs = require("node:fs");
 
           const baseUrlInput = String(process.env.BASE_URL_INPUT || "").trim();
@@ -89,15 +194,24 @@ jobs:
             throw new Error("base_url must be exactly https://app.corgtex.com.");
           }
 
-          const expectedInput = String(process.env.EXPECTED_GIT_SHA_INPUT || "").trim();
-          const expectedGitSha = expectedInput || process.env.GITHUB_SHA;
-          if (!/^[a-f0-9]{40}$/i.test(expectedGitSha || "")) {
+          const expectedGitSha = String(process.env.EXPECTED_GIT_SHA_INPUT || "").trim().toLowerCase();
+          if (expectedGitSha && !/^[a-f0-9]{40}$/i.test(expectedGitSha)) {
             throw new Error("expected_git_sha must be a 40-character git SHA when provided.");
+          }
+          const checkedOutGitSha = execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim().toLowerCase();
+          if (!/^[a-f0-9]{40}$/i.test(checkedOutGitSha)) {
+            throw new Error("checked-out git SHA must be a 40-character git SHA.");
+          }
+          if (expectedGitSha && process.env.TRUSTED_REF_OUTPUT === "true" && expectedGitSha !== checkedOutGitSha) {
+            throw new Error(`CRM smoke imports repository code and must run from the same revision expected in production; expected_git_sha=${expectedGitSha} checked_out_sha=${checkedOutGitSha}`);
           }
 
           fs.appendFileSync(process.env.GITHUB_OUTPUT, `base_url=${baseUrl.origin}\n`);
-          fs.appendFileSync(process.env.GITHUB_OUTPUT, `expected_git_sha=${expectedGitSha.toLowerCase()}\n`);
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, `expected_git_sha=${expectedGitSha}\n`);
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, `checked_out_git_sha=${checkedOutGitSha}\n`);
           fs.appendFileSync(process.env.GITHUB_ENV, `BASE_URL=${baseUrl.origin}\n`);
+          fs.appendFileSync(process.env.GITHUB_ENV, `EXPECTED_GIT_SHA=${expectedGitSha}\n`);
+          fs.appendFileSync(process.env.GITHUB_ENV, `CHECKED_OUT_GIT_SHA=${checkedOutGitSha}\n`);
           NODE
 
       - name: Check trusted workflow ref
@@ -105,7 +219,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if [ "$GITHUB_REF" = "refs/heads/main" ]; then
+          if [ "${{ needs.validation-context.outputs.trusted_ref }}" = "true" ]; then
             echo "trusted=true" >> "$GITHUB_OUTPUT"
           else
             echo "trusted=false" >> "$GITHUB_OUTPUT"
@@ -119,11 +233,11 @@ jobs:
           {
             echo "workflow=$GITHUB_WORKFLOW"
             echo "run_id=$GITHUB_RUN_ID"
-            echo "sha=$GITHUB_SHA"
+            echo "sha=$CHECKED_OUT_GIT_SHA"
             echo "base_url=$BASE_URL"
             echo "workspace_slug=$WORKSPACE_SLUG"
             echo "pr_numbers=$PR_NUMBERS"
-            echo "expected_git_sha=${{ steps.validation_inputs.outputs.expected_git_sha }}"
+            echo "expected_git_sha=$EXPECTED_GIT_SHA"
           } > "$OUT_DIR/workflow.log"
 
       - name: Check production smoke credentials
@@ -206,16 +320,19 @@ jobs:
 
   source-intake-production-smoke:
     name: Source Intake Contract Smoke
-    if: ${{ inputs.source_intake_smoke }}
+    needs: validation-context
+    if: ${{ needs.validation-context.outputs.source_intake_smoke == 'true' }}
     runs-on: ubuntu-latest
     environment: fleet-release-production
     timeout-minutes: 20
     env:
       OUT_DIR: .artifacts/production-validation/source-intake
-      PR_NUMBERS: ${{ inputs.pr_numbers }}
+      PR_NUMBERS: ${{ needs.validation-context.outputs.pr_numbers }}
       WORKSPACE_SLUG: corgtex-validation
     steps:
       - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.validation-context.outputs.trusted_ref == 'true' && (github.event.workflow_run.head_sha || github.sha) || 'main' }}
 
       - uses: actions/setup-node@v5
         with:
@@ -226,11 +343,13 @@ jobs:
         id: validation_inputs
         shell: bash
         env:
-          BASE_URL_INPUT: ${{ inputs.base_url }}
-          EXPECTED_GIT_SHA_INPUT: ${{ inputs.expected_git_sha }}
+          BASE_URL_INPUT: ${{ needs.validation-context.outputs.base_url }}
+          EXPECTED_GIT_SHA_INPUT: ${{ needs.validation-context.outputs.expected_git_sha }}
+          TRUSTED_REF_OUTPUT: ${{ needs.validation-context.outputs.trusted_ref }}
         run: |
           set -euo pipefail
           node <<'NODE'
+          const { execFileSync } = require("node:child_process");
           const fs = require("node:fs");
 
           const baseUrlInput = String(process.env.BASE_URL_INPUT || "").trim();
@@ -244,15 +363,24 @@ jobs:
             throw new Error("base_url must be exactly https://app.corgtex.com.");
           }
 
-          const expectedInput = String(process.env.EXPECTED_GIT_SHA_INPUT || "").trim();
-          const expectedGitSha = expectedInput || process.env.GITHUB_SHA;
-          if (!/^[a-f0-9]{40}$/i.test(expectedGitSha || "")) {
+          const expectedGitSha = String(process.env.EXPECTED_GIT_SHA_INPUT || "").trim().toLowerCase();
+          if (expectedGitSha && !/^[a-f0-9]{40}$/i.test(expectedGitSha)) {
             throw new Error("expected_git_sha must be a 40-character git SHA when provided.");
+          }
+          const checkedOutGitSha = execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim().toLowerCase();
+          if (!/^[a-f0-9]{40}$/i.test(checkedOutGitSha)) {
+            throw new Error("checked-out git SHA must be a 40-character git SHA.");
+          }
+          if (expectedGitSha && process.env.TRUSTED_REF_OUTPUT === "true" && expectedGitSha !== checkedOutGitSha) {
+            throw new Error(`source-intake smoke imports repository code and must run from the same revision expected in production; expected_git_sha=${expectedGitSha} checked_out_sha=${checkedOutGitSha}`);
           }
 
           fs.appendFileSync(process.env.GITHUB_OUTPUT, `base_url=${baseUrl.origin}\n`);
-          fs.appendFileSync(process.env.GITHUB_OUTPUT, `expected_git_sha=${expectedGitSha.toLowerCase()}\n`);
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, `expected_git_sha=${expectedGitSha}\n`);
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, `checked_out_git_sha=${checkedOutGitSha}\n`);
           fs.appendFileSync(process.env.GITHUB_ENV, `BASE_URL=${baseUrl.origin}\n`);
+          fs.appendFileSync(process.env.GITHUB_ENV, `EXPECTED_GIT_SHA=${expectedGitSha}\n`);
+          fs.appendFileSync(process.env.GITHUB_ENV, `CHECKED_OUT_GIT_SHA=${checkedOutGitSha}\n`);
           NODE
 
       - name: Check trusted workflow ref
@@ -260,7 +388,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if [ "$GITHUB_REF" = "refs/heads/main" ]; then
+          if [ "${{ needs.validation-context.outputs.trusted_ref }}" = "true" ]; then
             echo "trusted=true" >> "$GITHUB_OUTPUT"
           else
             echo "trusted=false" >> "$GITHUB_OUTPUT"
@@ -274,11 +402,11 @@ jobs:
           {
             echo "workflow=$GITHUB_WORKFLOW"
             echo "run_id=$GITHUB_RUN_ID"
-            echo "sha=$GITHUB_SHA"
+            echo "sha=$CHECKED_OUT_GIT_SHA"
             echo "base_url=$BASE_URL"
             echo "workspace_slug=$WORKSPACE_SLUG"
             echo "pr_numbers=$PR_NUMBERS"
-            echo "expected_git_sha=${{ steps.validation_inputs.outputs.expected_git_sha }}"
+            echo "expected_git_sha=$EXPECTED_GIT_SHA"
           } > "$OUT_DIR/workflow.log"
 
       - name: Check production smoke credentials
@@ -363,16 +491,19 @@ jobs:
 
   work-item-parity-production-smoke:
     name: Work-Item Parity Smoke
-    if: ${{ inputs.work_item_parity_smoke }}
+    needs: validation-context
+    if: ${{ needs.validation-context.outputs.work_item_parity_smoke == 'true' }}
     runs-on: ubuntu-latest
     environment: fleet-release-production
     timeout-minutes: 15
     env:
       OUT_DIR: .artifacts/production-validation/work-item-parity
-      PR_NUMBERS: ${{ inputs.pr_numbers }}
+      PR_NUMBERS: ${{ needs.validation-context.outputs.pr_numbers }}
       WORKSPACE_SLUG: corgtex-validation
     steps:
       - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.validation-context.outputs.trusted_ref == 'true' && (github.event.workflow_run.head_sha || github.sha) || 'main' }}
 
       - uses: actions/setup-node@v5
         with:
@@ -383,11 +514,13 @@ jobs:
         id: validation_inputs
         shell: bash
         env:
-          BASE_URL_INPUT: ${{ inputs.base_url }}
-          EXPECTED_GIT_SHA_INPUT: ${{ inputs.expected_git_sha }}
+          BASE_URL_INPUT: ${{ needs.validation-context.outputs.base_url }}
+          EXPECTED_GIT_SHA_INPUT: ${{ needs.validation-context.outputs.expected_git_sha }}
+          TRUSTED_REF_OUTPUT: ${{ needs.validation-context.outputs.trusted_ref }}
         run: |
           set -euo pipefail
           node <<'NODE'
+          const { execFileSync } = require("node:child_process");
           const fs = require("node:fs");
 
           const baseUrlInput = String(process.env.BASE_URL_INPUT || "").trim();
@@ -401,15 +534,24 @@ jobs:
             throw new Error("base_url must be exactly https://app.corgtex.com.");
           }
 
-          const expectedInput = String(process.env.EXPECTED_GIT_SHA_INPUT || "").trim();
-          const expectedGitSha = expectedInput || process.env.GITHUB_SHA;
-          if (!/^[a-f0-9]{40}$/i.test(expectedGitSha || "")) {
+          const expectedGitSha = String(process.env.EXPECTED_GIT_SHA_INPUT || "").trim().toLowerCase();
+          if (expectedGitSha && !/^[a-f0-9]{40}$/i.test(expectedGitSha)) {
             throw new Error("expected_git_sha must be a 40-character git SHA when provided.");
+          }
+          const checkedOutGitSha = execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim().toLowerCase();
+          if (!/^[a-f0-9]{40}$/i.test(checkedOutGitSha)) {
+            throw new Error("checked-out git SHA must be a 40-character git SHA.");
+          }
+          if (expectedGitSha && process.env.TRUSTED_REF_OUTPUT === "true" && expectedGitSha !== checkedOutGitSha) {
+            throw new Error(`work-item parity smoke imports repository code and must run from the same revision expected in production; expected_git_sha=${expectedGitSha} checked_out_sha=${checkedOutGitSha}`);
           }
 
           fs.appendFileSync(process.env.GITHUB_OUTPUT, `base_url=${baseUrl.origin}\n`);
-          fs.appendFileSync(process.env.GITHUB_OUTPUT, `expected_git_sha=${expectedGitSha.toLowerCase()}\n`);
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, `expected_git_sha=${expectedGitSha}\n`);
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, `checked_out_git_sha=${checkedOutGitSha}\n`);
           fs.appendFileSync(process.env.GITHUB_ENV, `BASE_URL=${baseUrl.origin}\n`);
+          fs.appendFileSync(process.env.GITHUB_ENV, `EXPECTED_GIT_SHA=${expectedGitSha}\n`);
+          fs.appendFileSync(process.env.GITHUB_ENV, `CHECKED_OUT_GIT_SHA=${checkedOutGitSha}\n`);
           NODE
 
       - name: Check trusted workflow ref
@@ -417,7 +559,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if [ "$GITHUB_REF" = "refs/heads/main" ]; then
+          if [ "${{ needs.validation-context.outputs.trusted_ref }}" = "true" ]; then
             echo "trusted=true" >> "$GITHUB_OUTPUT"
           else
             echo "trusted=false" >> "$GITHUB_OUTPUT"
@@ -431,11 +573,11 @@ jobs:
           {
             echo "workflow=$GITHUB_WORKFLOW"
             echo "run_id=$GITHUB_RUN_ID"
-            echo "sha=$GITHUB_SHA"
+            echo "sha=$CHECKED_OUT_GIT_SHA"
             echo "base_url=$BASE_URL"
             echo "workspace_slug=$WORKSPACE_SLUG"
             echo "pr_numbers=$PR_NUMBERS"
-            echo "expected_git_sha=${{ steps.validation_inputs.outputs.expected_git_sha }}"
+            echo "expected_git_sha=$EXPECTED_GIT_SHA"
           } > "$OUT_DIR/workflow.log"
 
       - name: Check production smoke credentials
@@ -514,7 +656,8 @@ jobs:
 
   briefing-fixture-production-smoke:
     name: Briefing Fixture Smoke
-    if: ${{ inputs.briefing_fixture_smoke }}
+    needs: validation-context
+    if: ${{ needs.validation-context.outputs.briefing_fixture_smoke == 'true' }}
     runs-on: ubuntu-latest
     environment: fleet-release-production
     timeout-minutes: 15
@@ -523,10 +666,12 @@ jobs:
       cancel-in-progress: false
     env:
       OUT_DIR: .artifacts/production-validation/briefing-fixture
-      PR_NUMBERS: ${{ inputs.pr_numbers }}
+      PR_NUMBERS: ${{ needs.validation-context.outputs.pr_numbers }}
       WORKSPACE_SLUG: corgtex-validation
     steps:
       - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.validation-context.outputs.trusted_ref == 'true' && (github.event.workflow_run.head_sha || github.sha) || 'main' }}
 
       - uses: actions/setup-node@v5
         with:
@@ -537,11 +682,13 @@ jobs:
         id: validation_inputs
         shell: bash
         env:
-          BASE_URL_INPUT: ${{ inputs.base_url }}
-          EXPECTED_GIT_SHA_INPUT: ${{ inputs.expected_git_sha }}
+          BASE_URL_INPUT: ${{ needs.validation-context.outputs.base_url }}
+          EXPECTED_GIT_SHA_INPUT: ${{ needs.validation-context.outputs.expected_git_sha }}
+          TRUSTED_REF_OUTPUT: ${{ needs.validation-context.outputs.trusted_ref }}
         run: |
           set -euo pipefail
           node <<'NODE'
+          const { execFileSync } = require("node:child_process");
           const fs = require("node:fs");
 
           const baseUrlInput = String(process.env.BASE_URL_INPUT || "").trim();
@@ -555,22 +702,24 @@ jobs:
             throw new Error("base_url must be exactly https://app.corgtex.com.");
           }
 
-          const expectedInput = String(process.env.EXPECTED_GIT_SHA_INPUT || "").trim();
-          const expectedGitSha = expectedInput || process.env.GITHUB_SHA;
-          if (!/^[a-f0-9]{40}$/i.test(expectedGitSha || "")) {
+          const expectedGitSha = String(process.env.EXPECTED_GIT_SHA_INPUT || "").trim().toLowerCase();
+          if (expectedGitSha && !/^[a-f0-9]{40}$/i.test(expectedGitSha)) {
             throw new Error("expected_git_sha must be a 40-character git SHA when provided.");
           }
-          const workflowGitSha = String(process.env.GITHUB_SHA || "").trim().toLowerCase();
-          if (!/^[a-f0-9]{40}$/i.test(workflowGitSha)) {
-            throw new Error("GITHUB_SHA must be a 40-character git SHA.");
+          const checkedOutGitSha = execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim().toLowerCase();
+          if (!/^[a-f0-9]{40}$/i.test(checkedOutGitSha)) {
+            throw new Error("checked-out git SHA must be a 40-character git SHA.");
           }
-          if (process.env.GITHUB_REF === "refs/heads/main" && expectedGitSha.toLowerCase() !== workflowGitSha) {
-            throw new Error(`briefing fixture smoke imports repository code and must run from the same revision expected in production; expected_git_sha=${expectedGitSha.toLowerCase()} workflow_sha=${workflowGitSha}`);
+          if (expectedGitSha && process.env.TRUSTED_REF_OUTPUT === "true" && expectedGitSha !== checkedOutGitSha) {
+            throw new Error(`briefing fixture smoke imports repository code and must run from the same revision expected in production; expected_git_sha=${expectedGitSha} checked_out_sha=${checkedOutGitSha}`);
           }
 
           fs.appendFileSync(process.env.GITHUB_OUTPUT, `base_url=${baseUrl.origin}\n`);
-          fs.appendFileSync(process.env.GITHUB_OUTPUT, `expected_git_sha=${expectedGitSha.toLowerCase()}\n`);
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, `expected_git_sha=${expectedGitSha}\n`);
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, `checked_out_git_sha=${checkedOutGitSha}\n`);
           fs.appendFileSync(process.env.GITHUB_ENV, `BASE_URL=${baseUrl.origin}\n`);
+          fs.appendFileSync(process.env.GITHUB_ENV, `EXPECTED_GIT_SHA=${expectedGitSha}\n`);
+          fs.appendFileSync(process.env.GITHUB_ENV, `CHECKED_OUT_GIT_SHA=${checkedOutGitSha}\n`);
           NODE
 
       - name: Check trusted workflow ref
@@ -578,7 +727,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if [ "$GITHUB_REF" = "refs/heads/main" ]; then
+          if [ "${{ needs.validation-context.outputs.trusted_ref }}" = "true" ]; then
             echo "trusted=true" >> "$GITHUB_OUTPUT"
           else
             echo "trusted=false" >> "$GITHUB_OUTPUT"
@@ -592,11 +741,11 @@ jobs:
           {
             echo "workflow=$GITHUB_WORKFLOW"
             echo "run_id=$GITHUB_RUN_ID"
-            echo "sha=$GITHUB_SHA"
+            echo "sha=$CHECKED_OUT_GIT_SHA"
             echo "base_url=$BASE_URL"
             echo "workspace_slug=$WORKSPACE_SLUG"
             echo "pr_numbers=$PR_NUMBERS"
-            echo "expected_git_sha=${{ steps.validation_inputs.outputs.expected_git_sha }}"
+            echo "expected_git_sha=$EXPECTED_GIT_SHA"
           } > "$OUT_DIR/workflow.log"
 
       - name: Check production smoke credentials
@@ -677,16 +826,19 @@ jobs:
 
   recorder-readiness-production-smoke:
     name: Recorder Readiness Smoke
-    if: ${{ inputs.recorder_readiness_smoke }}
+    needs: validation-context
+    if: ${{ needs.validation-context.outputs.recorder_readiness_smoke == 'true' }}
     runs-on: ubuntu-latest
     environment: fleet-release-production
     timeout-minutes: 10
     env:
       OUT_DIR: .artifacts/production-validation/recorder-readiness
-      PR_NUMBERS: ${{ inputs.pr_numbers }}
-      DEPLOYMENTS: ${{ inputs.recorder_readiness_deployments }}
+      PR_NUMBERS: ${{ needs.validation-context.outputs.pr_numbers }}
+      DEPLOYMENTS: ${{ needs.validation-context.outputs.recorder_readiness_deployments }}
     steps:
       - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.validation-context.outputs.trusted_ref == 'true' && (github.event.workflow_run.head_sha || github.sha) || 'main' }}
 
       - uses: actions/setup-node@v5
         with:
@@ -697,11 +849,13 @@ jobs:
         id: validation_inputs
         shell: bash
         env:
-          BASE_URL_INPUT: ${{ inputs.base_url }}
-          EXPECTED_GIT_SHA_INPUT: ${{ inputs.expected_git_sha }}
+          BASE_URL_INPUT: ${{ needs.validation-context.outputs.base_url }}
+          EXPECTED_GIT_SHA_INPUT: ${{ needs.validation-context.outputs.expected_git_sha }}
+          TRUSTED_REF_OUTPUT: ${{ needs.validation-context.outputs.trusted_ref }}
         run: |
           set -euo pipefail
           node <<'NODE'
+          const { execFileSync } = require("node:child_process");
           const fs = require("node:fs");
 
           const baseUrlInput = String(process.env.BASE_URL_INPUT || "").trim();
@@ -715,22 +869,24 @@ jobs:
             throw new Error("base_url must be exactly https://app.corgtex.com.");
           }
 
-          const expectedInput = String(process.env.EXPECTED_GIT_SHA_INPUT || "").trim();
-          const expectedGitSha = expectedInput || process.env.GITHUB_SHA;
-          if (!/^[a-f0-9]{40}$/i.test(expectedGitSha || "")) {
+          const expectedGitSha = String(process.env.EXPECTED_GIT_SHA_INPUT || "").trim().toLowerCase();
+          if (expectedGitSha && !/^[a-f0-9]{40}$/i.test(expectedGitSha)) {
             throw new Error("expected_git_sha must be a 40-character git SHA when provided.");
           }
-          const workflowGitSha = String(process.env.GITHUB_SHA || "").trim().toLowerCase();
-          if (!/^[a-f0-9]{40}$/i.test(workflowGitSha)) {
-            throw new Error("GITHUB_SHA must be a 40-character git SHA.");
+          const checkedOutGitSha = execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim().toLowerCase();
+          if (!/^[a-f0-9]{40}$/i.test(checkedOutGitSha)) {
+            throw new Error("checked-out git SHA must be a 40-character git SHA.");
           }
-          if (process.env.GITHUB_REF === "refs/heads/main" && expectedGitSha.toLowerCase() !== workflowGitSha) {
-            throw new Error(`recorder readiness smoke imports repository code and must run from the same revision expected in production; expected_git_sha=${expectedGitSha.toLowerCase()} workflow_sha=${workflowGitSha}`);
+          if (expectedGitSha && process.env.TRUSTED_REF_OUTPUT === "true" && expectedGitSha !== checkedOutGitSha) {
+            throw new Error(`recorder readiness smoke imports repository code and must run from the same revision expected in production; expected_git_sha=${expectedGitSha} checked_out_sha=${checkedOutGitSha}`);
           }
 
           fs.appendFileSync(process.env.GITHUB_OUTPUT, `base_url=${baseUrl.origin}\n`);
-          fs.appendFileSync(process.env.GITHUB_OUTPUT, `expected_git_sha=${expectedGitSha.toLowerCase()}\n`);
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, `expected_git_sha=${expectedGitSha}\n`);
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, `checked_out_git_sha=${checkedOutGitSha}\n`);
           fs.appendFileSync(process.env.GITHUB_ENV, `BASE_URL=${baseUrl.origin}\n`);
+          fs.appendFileSync(process.env.GITHUB_ENV, `EXPECTED_GIT_SHA=${expectedGitSha}\n`);
+          fs.appendFileSync(process.env.GITHUB_ENV, `CHECKED_OUT_GIT_SHA=${checkedOutGitSha}\n`);
           NODE
 
       - name: Check trusted workflow ref
@@ -738,7 +894,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if [ "$GITHUB_REF" = "refs/heads/main" ]; then
+          if [ "${{ needs.validation-context.outputs.trusted_ref }}" = "true" ]; then
             echo "trusted=true" >> "$GITHUB_OUTPUT"
           else
             echo "trusted=false" >> "$GITHUB_OUTPUT"
@@ -752,11 +908,11 @@ jobs:
           {
             echo "workflow=$GITHUB_WORKFLOW"
             echo "run_id=$GITHUB_RUN_ID"
-            echo "sha=$GITHUB_SHA"
+            echo "sha=$CHECKED_OUT_GIT_SHA"
             echo "base_url=$BASE_URL"
             echo "deployments=$DEPLOYMENTS"
             echo "pr_numbers=$PR_NUMBERS"
-            echo "expected_git_sha=${{ steps.validation_inputs.outputs.expected_git_sha }}"
+            echo "expected_git_sha=$EXPECTED_GIT_SHA"
           } > "$OUT_DIR/workflow.log"
 
       - name: Check recorder readiness prerequisites
