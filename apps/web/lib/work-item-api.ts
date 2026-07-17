@@ -1,5 +1,6 @@
 import {
   coerceWorkItemPriorityInput,
+  loadAdviceRequestCountSummaries,
   normalizeActionWorkItem,
   normalizeGoalWorkItem,
   normalizeProposalWorkItem,
@@ -85,16 +86,22 @@ export function serializeGoalWorkItem<T extends GoalLike>(goal: T) {
 }
 
 export async function loadActionWorkItemResponse(workspaceId: string, actionId: string) {
-  return prisma.action.findFirst({
+  const action = await prisma.action.findFirst({
     where: { id: actionId, workspaceId },
     include: {
       assigneeMember: { include: memberUserInclude },
     },
   });
+  if (!action) return null;
+  const requestCountSummaries = await loadAdviceRequestCountSummaries(workspaceId, "ACTION", [action.id]);
+  return {
+    ...action,
+    ...requestCountSummaries.get(action.id),
+  };
 }
 
 export async function loadTensionWorkItemResponse(workspaceId: string, tensionId: string) {
-  return prisma.tension.findFirst({
+  const tension = await prisma.tension.findFirst({
     where: { id: tensionId, workspaceId },
     include: {
       assigneeMember: { include: memberUserInclude },
@@ -102,6 +109,12 @@ export async function loadTensionWorkItemResponse(workspaceId: string, tensionId
       upvotes: true,
     },
   });
+  if (!tension) return null;
+  const requestCountSummaries = await loadAdviceRequestCountSummaries(workspaceId, "TENSION", [tension.id]);
+  return {
+    ...tension,
+    ...requestCountSummaries.get(tension.id),
+  };
 }
 
 export async function loadProposalWorkItemResponse(workspaceId: string, proposalId: string) {
@@ -111,7 +124,9 @@ export async function loadProposalWorkItemResponse(workspaceId: string, proposal
       ownerMember: { include: memberUserInclude },
       adviceProcess: {
         include: {
-          requests: true,
+          requests: {
+            select: { status: true },
+          },
         },
       },
     },

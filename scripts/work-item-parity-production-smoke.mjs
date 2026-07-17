@@ -490,8 +490,20 @@ export class WorkItemParitySmoke {
     throw new Error(`${label} did not include record ${recordId}.`);
   }
 
+  recordValidationOutcome(result) {
+    const coveredPrNumbers = this.validationRun.prNumbers.length > 0
+      ? this.validationRun.prNumbers
+      : [null];
+    for (const prNumber of coveredPrNumbers) {
+      recordValidationResult(this.validationRun, {
+        ...(prNumber ? { prNumber } : {}),
+        ...result,
+      });
+    }
+  }
+
   recordValidationPass() {
-    recordValidationResult(this.validationRun, {
+    this.recordValidationOutcome({
       intent: "Work-item owner/responsibility/priority parity across Action, Tension, and Proposal surfaces",
       method: "work-item-parity-production-smoke",
       result: "pass",
@@ -512,7 +524,7 @@ export class WorkItemParitySmoke {
 
   recordValidationFailure(error) {
     if (this.validationRun.results.length > 0) return;
-    recordValidationResult(this.validationRun, {
+    this.recordValidationOutcome({
       intent: "Work-item owner/responsibility/priority parity across Action, Tension, and Proposal surfaces",
       method: "work-item-parity-production-smoke",
       result: "partial",

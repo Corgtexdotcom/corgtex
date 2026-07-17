@@ -3,6 +3,7 @@ import {
   assertFields,
   cleanupFailureMessage,
   isHumanValidationMember,
+  WorkItemParitySmoke,
   workItemExpectations,
   workItemParityHealthReleaseBlocker,
 } from "./work-item-parity-production-smoke.mjs";
@@ -70,6 +71,29 @@ describe("work-item parity production smoke helpers", () => {
         { entry: { id: "revoke:AgentCredential:credential-1" } },
       ],
     })).toBe("Validation cleanup failed for archive:Action:action-1, revoke:AgentCredential:credential-1");
+  });
+
+  it("records one validation result per covered PR", () => {
+    const smoke = new WorkItemParitySmoke({
+      baseUrl: "https://app.corgtex.com",
+      outDir: ".artifacts/work-item-parity-test",
+      workspaceSelector: { workspaceSlug: "corgtex-validation" },
+      prNumbers: [722, 723],
+    });
+    smoke.created = {
+      action: { id: "action-1", cleanupActionId: "archive:Action:action-1" },
+      tension: { id: "tension-1", cleanupActionId: "archive:Tension:tension-1" },
+      proposal: { id: "proposal-1", cleanupActionId: "archive:Proposal:proposal-1" },
+    };
+
+    smoke.recordValidationPass();
+
+    expect(smoke.validationRun.results).toHaveLength(2);
+    expect(smoke.validationRun.results.map((result) => result.prNumber)).toEqual([722, 723]);
+    expect(smoke.validationRun.results[0]).toMatchObject({
+      result: "pass",
+      createdRecordIds: ["action-1", "tension-1", "proposal-1"],
+    });
   });
 
   it("returns null when health release metadata matches", () => {

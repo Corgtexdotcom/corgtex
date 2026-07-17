@@ -28,6 +28,7 @@ const formatWorkItemPriority = vi.fn((priority: number | null | undefined) => {
   return "Low";
 });
 const getWorkspacePermanentPathForEntity = vi.fn(async () => null);
+const loadAdviceRequestCountSummaries = vi.fn();
 const listProposals = vi.fn();
 const prisma = {
   proposal: {
@@ -69,6 +70,7 @@ vi.mock("@corgtex/domain", async () => {
     deleteProposal,
     formatWorkItemPriority,
     getWorkspacePermanentPathForEntity,
+    loadAdviceRequestCountSummaries,
     listProposals,
     normalizeActionWorkItem,
     normalizeGoalWorkItem,
@@ -215,6 +217,17 @@ describe("POST /api/workspaces/[workspaceId]/proposals", () => {
       ownerMemberId: "member-owner",
       priority: 3,
     }));
+    expect(prisma.proposal.findFirst).toHaveBeenCalledWith(expect.objectContaining({
+      include: expect.objectContaining({
+        adviceProcess: {
+          include: {
+            requests: {
+              select: { status: true },
+            },
+          },
+        },
+      }),
+    }));
     await expect(response.json()).resolves.toMatchObject({
       proposal: {
         id: "proposal-2",
@@ -340,6 +353,17 @@ describe("PATCH /api/workspaces/[workspaceId]/proposals/[proposalId]", () => {
       proposalId: "proposal-1",
       ownerMemberId: "member-owner",
       priority: 1,
+    }));
+    expect(prisma.proposal.findFirst).toHaveBeenCalledWith(expect.objectContaining({
+      include: expect.objectContaining({
+        adviceProcess: {
+          include: {
+            requests: {
+              select: { status: true },
+            },
+          },
+        },
+      }),
     }));
     await expect(response.json()).resolves.toMatchObject({
       proposal: {
