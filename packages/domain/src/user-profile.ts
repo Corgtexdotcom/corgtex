@@ -2,6 +2,7 @@ import { prisma, hashPassword, verifyPassword } from "@corgtex/shared";
 import type { AppActor } from "@corgtex/shared";
 import { AppError, invariant } from "./errors";
 import { requireWorkspaceMembership } from "./auth";
+import { isNotificationPreferenceChannel } from "./notifications";
 import type { NewspaperCadence } from "@prisma/client";
 
 // ------------------------------------------------------------------
@@ -218,8 +219,17 @@ export async function getUserNotificationPreferences(actor: AppActor) {
 export async function updateNotificationPreference(actor: AppActor, params: { notifType: string; channel: string }) {
   invariant(actor.kind === "user", 403, "FORBIDDEN", "Only user accounts have notification preferences.");
 
-  const validChannels = ["IN_APP", "EMAIL", "BOTH", "OFF"];
-  invariant(validChannels.includes(params.channel), 400, "INVALID_INPUT", "Invalid notification channel.");
+  invariant(isNotificationPreferenceChannel(params.channel), 400, "INVALID_INPUT", "Invalid notification channel.");
+
+  if (params.channel === "USE_DEFAULT") {
+    await prisma.notificationPreference.deleteMany({
+      where: {
+        userId: actor.user.id,
+        notifType: params.notifType,
+      },
+    });
+    return null;
+  }
 
   const pref = await prisma.notificationPreference.upsert({
     where: {

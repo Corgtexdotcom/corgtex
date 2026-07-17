@@ -28,6 +28,7 @@ const {
   isNewspaperScheduleDueMock,
   recordMeetingTranscriptProcessingStageMock,
   markMeetingTranscriptProcessingReadyMock,
+  createNotificationIntentMock,
 } = vi.hoisted(() => ({
   prismaMock: {
     $transaction: vi.fn(),
@@ -95,6 +96,7 @@ const {
   isNewspaperScheduleDueMock: vi.fn(),
   recordMeetingTranscriptProcessingStageMock: vi.fn(),
   markMeetingTranscriptProcessingReadyMock: vi.fn(),
+  createNotificationIntentMock: vi.fn(),
 }));
 
 vi.mock("@corgtex/shared", () => ({
@@ -160,6 +162,7 @@ vi.mock("@corgtex/domain", () => ({
   },
   recordMeetingTranscriptProcessingStage: recordMeetingTranscriptProcessingStageMock,
   markMeetingTranscriptProcessingReady: markMeetingTranscriptProcessingReadyMock,
+  createNotificationIntent: createNotificationIntentMock,
   isHumanNewspaperRecipientIdentity: (identity: { kind?: string | null; user?: { email?: string | null; displayName?: string | null } | null; email?: string | null; displayName?: string | null }) => {
     const user = identity.user ?? identity;
     const email = user.email?.trim().toLowerCase() ?? "";
@@ -236,6 +239,7 @@ describe("runPendingJobs", () => {
     getWorkspaceDigestSettingsMock.mockReset().mockResolvedValue(new Map());
     recordMeetingTranscriptProcessingStageMock.mockReset().mockResolvedValue(undefined);
     markMeetingTranscriptProcessingReadyMock.mockReset().mockResolvedValue(undefined);
+    createNotificationIntentMock.mockReset().mockResolvedValue({ count: 1 });
     getNewspaperLocalDatePartsMock.mockReset().mockReturnValue({
       dateKey: "2026-04-29",
       weekday: "WEDNESDAY",

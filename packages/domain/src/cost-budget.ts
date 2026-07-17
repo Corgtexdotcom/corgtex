@@ -3,6 +3,7 @@ import { getWorkspaceMonthlyUsage } from "./agent-run-usage";
 import { AppError } from "./errors";
 import type { AppActor } from "@corgtex/shared";
 import { requireWorkspaceMembership } from "./auth";
+import { createNotificationIntent } from "./notifications";
 
 export async function getModelUsageBudget(actor: AppActor, workspaceId: string) {
   await requireWorkspaceMembership({ actor, workspaceId, allowedRoles: ["ADMIN"] });
@@ -159,20 +160,22 @@ export async function checkBudget(workspaceId: string): Promise<{
       });
 
       if (admins.length > 0) {
-        await prisma.notification.createMany({
-          data: admins.map(admin => ({
-            userId: admin.userId,
+        await prisma.$transaction(async (tx) => {
+          await createNotificationIntent(tx, {
             workspaceId,
-            type: "system",
+            type: "budget.threshold_reached",
+            recipientUserIds: admins.map((admin) => admin.userId),
+            entityType: "ModelUsageBudget",
+            entityId: budget.id,
             title: "Budget Alert",
-            message: `Workspace agent usage has reached ${usedPct.toFixed(1)}% of your monthly budget. ($${usedUsd.toFixed(2)} of $${capUsd})`,
-            redirectUrl: `/workspaces/${workspaceId}/settings?tab=agents`
-          }))
-        });
+            bodyMd: `Workspace agent usage has reached ${usedPct.toFixed(1)}% of your monthly budget. ($${usedUsd.toFixed(2)} of $${capUsd})`,
+            priority: "HIGH",
+          });
 
-        await prisma.modelUsageBudget.update({
-          where: { id: budget.id },
-          data: { alertSentAt: new Date() }
+          await tx.modelUsageBudget.update({
+            where: { id: budget.id },
+            data: { alertSentAt: new Date() }
+          });
         });
       }
     }

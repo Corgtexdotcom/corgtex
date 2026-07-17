@@ -17,6 +17,10 @@ vi.mock("@corgtex/shared", async () => {
         findUnique: vi.fn(),
         update: vi.fn(),
       },
+      notificationPreference: {
+        upsert: vi.fn(),
+        deleteMany: vi.fn(),
+      },
     },
   };
 });
@@ -149,6 +153,48 @@ describe("User Profile Domain", () => {
       });
 
       expect(prisma.user.update).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("updateNotificationPreference", () => {
+    it("deletes the override when channel is USE_DEFAULT", async () => {
+      const { updateNotificationPreference } = await import("./user-profile");
+      await expect(updateNotificationPreference(mockActor as any, {
+        notifType: "deliberation.mention",
+        channel: "USE_DEFAULT",
+      })).resolves.toBeNull();
+
+      expect(prisma.notificationPreference.deleteMany).toHaveBeenCalledWith({
+        where: {
+          userId: "u1",
+          notifType: "deliberation.mention",
+        },
+      });
+      expect(prisma.notificationPreference.upsert).not.toHaveBeenCalled();
+    });
+
+    it("stores valid notification preference channels", async () => {
+      vi.mocked(prisma.notificationPreference.upsert).mockResolvedValue({
+        id: "pref-1",
+        userId: "u1",
+        notifType: "deliberation.mention",
+        channel: "IN_APP",
+      } as any);
+
+      const { updateNotificationPreference } = await import("./user-profile");
+      await expect(updateNotificationPreference(mockActor as any, {
+        notifType: "deliberation.mention",
+        channel: "IN_APP",
+      })).resolves.toMatchObject({ id: "pref-1" });
+
+      expect(prisma.notificationPreference.upsert).toHaveBeenCalledWith(expect.objectContaining({
+        where: {
+          userId_notifType: {
+            userId: "u1",
+            notifType: "deliberation.mention",
+          },
+        },
+      }));
     });
   });
 

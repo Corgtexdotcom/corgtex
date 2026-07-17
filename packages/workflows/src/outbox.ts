@@ -33,6 +33,7 @@ import {
   reportPendingAiUsageToStripe,
   createRoleOnboardingIntro,
   runEnterpriseAppHealthCheckJob,
+  createNotificationIntent,
   resolveAdviceRequestRecipientUsers,
   resolveAdviceRequestRequesterUsers,
   runAdviceRequestReminderJob,
@@ -376,16 +377,16 @@ async function createAdviceNotificationsForEvent(tx: Prisma.TransactionClient, e
   }
 
   const notification = deriveAdviceNotificationContent(event);
-  await tx.notification.createMany({
-    data: targets.map((target) => ({
-      workspaceId: event.workspaceId as string,
-      userId: target.userId,
-      type: event.type,
-      entityType: notification.entityType,
-      entityId: notification.entityId,
-      title: notification.title,
-      bodyMd: notification.bodyMd,
-    })),
+  await createNotificationIntent(tx, {
+    workspaceId: event.workspaceId,
+    type: event.type,
+    recipientUserIds: targets.map((target) => target.userId),
+    actorUserId: Array.from(excludeUserIds)[0] ?? null,
+    entityType: notification.entityType,
+    entityId: notification.entityId,
+    title: notification.title,
+    bodyMd: notification.bodyMd,
+    priority: "HIGH",
   });
 
   return true;
@@ -431,19 +432,19 @@ async function createNotificationsForEvent(tx: Prisma.TransactionClient, event: 
     return;
   }
 
-  await tx.notification.createMany({
-    data: notifications.flatMap((notification) => (
-      members.map((member) => ({
-        workspaceId: event.workspaceId as string,
-        userId: member.userId,
-        type: notification.type,
-        entityType: notification.entityType,
-        entityId: notification.entityId,
-        title: notification.title,
-        bodyMd: notification.bodyMd,
-      }))
-    )),
-  });
+  for (const notification of notifications) {
+    await createNotificationIntent(tx, {
+      workspaceId: event.workspaceId,
+      type: notification.type,
+      recipientUserIds: members.map((member) => member.userId),
+      actorUserId: actorAudit?.actorUserId ?? null,
+      entityType: notification.entityType,
+      entityId: notification.entityId,
+      title: notification.title,
+      bodyMd: notification.bodyMd,
+      priority: "NORMAL",
+    });
+  }
 }
 
 async function claimPendingJobs(workerId: string, batchSize: number) {

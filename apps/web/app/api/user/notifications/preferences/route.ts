@@ -1,12 +1,12 @@
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
-import { getUserNotificationPreferences, updateNotificationPreference } from "@corgtex/domain";
+import { getUserNotificationPreferences, NOTIFICATION_PREFERENCE_CHANNELS, updateNotificationPreference } from "@corgtex/domain";
 import { resolveRequestActor } from "@/lib/auth";
 import { handleRouteError, validateBody } from "@/lib/http";
 
 const updatePrefSchema = z.object({
   notifType: z.string().min(1),
-  channel: z.enum(["IN_APP", "EMAIL", "BOTH", "OFF"]),
+  channel: z.enum(NOTIFICATION_PREFERENCE_CHANNELS),
 });
 
 export async function GET(request: NextRequest) {

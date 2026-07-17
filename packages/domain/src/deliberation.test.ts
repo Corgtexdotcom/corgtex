@@ -31,12 +31,17 @@ const { prismaMock, state } = vi.hoisted(() => {
   const store = {
     users: new Map<string, UserRecord>(),
     members: new Map<string, MemberRecord>(),
-    proposals: new Map<string, { id: string; workspaceId: string; authorUserId: string; version: number }>(),
-    actions: new Map<string, { id: string; workspaceId: string; authorUserId: string; assigneeMemberId: string | null; version: number }>(),
+    proposals: new Map<string, { id: string; workspaceId: string; authorUserId: string; version: number; isPrivate?: boolean }>(),
+    tensions: new Map<string, { id: string; workspaceId: string; authorUserId: string; assigneeMemberId: string | null; title: string; version: number; isPrivate?: boolean }>(),
+    actions: new Map<string, { id: string; workspaceId: string; authorUserId: string; assigneeMemberId: string | null; version: number; isPrivate?: boolean }>(),
+    circles: new Map<string, { id: string; workspaceId: string; archivedAt: Date | null }>(),
+    roleAssignments: [] as Array<{ memberId: string; circleId: string; expiresAt: Date | null }>,
     adviceRequests: new Map<string, { id: string; workspaceId: string; status: string; process: { subjectType: string; subjectId: string } }>(),
     entries: [] as EntryRecord[],
     auditLogs: [] as any[],
     events: [] as any[],
+    notifications: [] as any[],
+    notificationPreferences: [] as any[],
     nextEntry: 1,
   };
 
@@ -75,12 +80,34 @@ const { prismaMock, state } = vi.hoisted(() => {
             && (where.isActive === undefined || member.isActive === where.isActive)
         )) ?? null;
       }),
+      findMany: vi.fn(async ({ where, include, select }: any) => {
+        return Array.from(store.members.values())
+          .filter((member) => (
+            (!where.workspaceId || member.workspaceId === where.workspaceId)
+              && (!where.userId?.in || where.userId.in.includes(member.userId))
+              && (where.isActive === undefined || member.isActive === where.isActive)
+          ))
+          .map((member) => {
+            if (include?.user) return { ...member, user: store.users.get(member.userId) };
+            if (select?.userId) return { userId: member.userId };
+            return member;
+          });
+      }),
     },
     circle: {
-      findUnique: vi.fn(async () => null),
+      findUnique: vi.fn(async ({ where }: any) => store.circles.get(where.id) ?? null),
     },
     roleAssignment: {
       findFirst: vi.fn(async () => null),
+      findMany: vi.fn(async ({ where }: any) => store.roleAssignments
+        .filter((assignment) => (
+          assignment.circleId === where.role?.circleId
+            && (!assignment.expiresAt || assignment.expiresAt > new Date())
+        ))
+        .map((assignment) => {
+          const member = store.members.get(assignment.memberId)!;
+          return { member: { userId: member.userId } };
+        })),
     },
     proposal: {
       findFirst: vi.fn(async ({ where, select }: any) => {
@@ -108,6 +135,20 @@ const { prismaMock, state } = vi.hoisted(() => {
         const action = store.actions.get(where.id) ?? null;
         if (!action || !select) return action;
         return Object.fromEntries(Object.keys(select).map((field) => [field, (action as any)[field]]));
+      }),
+    },
+    tension: {
+      findFirst: vi.fn(async ({ where, select }: any) => {
+        const tension = Array.from(store.tensions.values()).find((item) => (
+          item.id === where.id && item.workspaceId === where.workspaceId
+        )) ?? null;
+        if (!tension || !select) return tension;
+        return Object.fromEntries(Object.keys(select).map((field) => [field, (tension as any)[field]]));
+      }),
+      findUnique: vi.fn(async ({ where, select }: any) => {
+        const tension = store.tensions.get(where.id) ?? null;
+        if (!tension || !select) return tension;
+        return Object.fromEntries(Object.keys(select).map((field) => [field, (tension as any)[field]]));
       }),
     },
     meeting: {
@@ -162,6 +203,17 @@ const { prismaMock, state } = vi.hoisted(() => {
         return { count: data.length };
       }),
     },
+    notificationPreference: {
+      findMany: vi.fn(async ({ where }: any) => store.notificationPreferences.filter((preference) => (
+        where.userId.in.includes(preference.userId) && where.notifType.in.includes(preference.notifType)
+      ))),
+    },
+    notification: {
+      createMany: vi.fn(async ({ data }: any) => {
+        store.notifications.push(...data);
+        return { count: data.length };
+      }),
+    },
   };
 
   return {
@@ -201,11 +253,16 @@ describe("deliberation", () => {
     state.users.clear();
     state.members.clear();
     state.proposals.clear();
+    state.tensions.clear();
     state.actions.clear();
+    state.circles.clear();
+    state.roleAssignments.length = 0;
     state.adviceRequests.clear();
     state.entries.length = 0;
     state.auditLogs.length = 0;
     state.events.length = 0;
+    state.notifications.length = 0;
+    state.notificationPreferences.length = 0;
     state.nextEntry = 1;
 
     state.users.set("admin-user", { id: "admin-user", displayName: "Admin", email: "admin@example.com" });
@@ -215,6 +272,7 @@ describe("deliberation", () => {
     state.members.set(memberId, { id: memberId, workspaceId, userId: "member-user", role: "CONTRIBUTOR", isActive: true });
     state.members.set("other-member", { id: "other-member", workspaceId, userId: "other-user", role: "CONTRIBUTOR", isActive: true });
     state.proposals.set(proposalId, { id: proposalId, workspaceId, authorUserId: "admin-user", version: 1 });
+    state.tensions.set("tension-1", { id: "tension-1", workspaceId, authorUserId: "admin-user", assigneeMemberId: null, title: "Clarify launch owner", version: 1 });
     state.actions.set(actionId, { id: actionId, workspaceId, authorUserId: "admin-user", assigneeMemberId: memberId, version: 1 });
     state.adviceRequests.set("request-1", {
       id: "request-1",
@@ -249,6 +307,112 @@ describe("deliberation", () => {
     expect(list[0].id).toBe(entry.id);
     expect(list[0].author.displayName).toBe("Member");
     expect(list[0].parentVersion).toBe(1);
+  });
+
+  it("notifies a selected person target when posting a deliberation entry", async () => {
+    const entry = await postDeliberationEntry(otherActor, {
+      workspaceId,
+      parentType: "TENSION",
+      parentId: "tension-1",
+      entryType: "REACTION",
+      bodyMd: "@Member can you weigh in before Friday?",
+      targetMemberId: memberId,
+    });
+
+    expect(state.notifications).toEqual([
+      expect.objectContaining({
+        workspaceId,
+        userId: "member-user",
+        type: "deliberation.mention",
+        entityType: "Tension",
+        entityId: "tension-1",
+        title: "Other mentioned you in a tension: Clarify launch owner",
+        bodyMd: "@Member can you weigh in before Friday?",
+      }),
+    ]);
+    expect(state.notifications[0]).not.toMatchObject({ userId: "other-user" });
+    expect(entry.targetMemberId).toBe(memberId);
+  });
+
+  it("notifies a uniquely resolved manual @mention", async () => {
+    await postDeliberationEntry(otherActor, {
+      workspaceId,
+      parentType: "TENSION",
+      parentId: "tension-1",
+      entryType: "REACTION",
+      bodyMd: "Looping in @Member because this affects onboarding.",
+    });
+
+    expect(state.notifications).toHaveLength(1);
+    expect(state.notifications[0]).toMatchObject({
+      userId: "member-user",
+      type: "deliberation.mention",
+      entityType: "Tension",
+      entityId: "tension-1",
+    });
+  });
+
+  it("does not notify ambiguous manual @mentions", async () => {
+    state.users.set("duplicate-user", { id: "duplicate-user", displayName: "Member", email: "duplicate@example.com" });
+    state.members.set("duplicate-member", { id: "duplicate-member", workspaceId, userId: "duplicate-user", role: "CONTRIBUTOR", isActive: true });
+
+    await postDeliberationEntry(otherActor, {
+      workspaceId,
+      parentType: "TENSION",
+      parentId: "tension-1",
+      entryType: "REACTION",
+      bodyMd: "Looping in @Member because there are two possible matches.",
+    });
+
+    expect(state.notifications).toEqual([]);
+  });
+
+  it("notifies selected target circle members without resolving the circle label as a user mention", async () => {
+    state.users.set("finance-user", { id: "finance-user", displayName: "Finance", email: "finance@example.com" });
+    state.members.set("finance-member", { id: "finance-member", workspaceId, userId: "finance-user", role: "CONTRIBUTOR", isActive: true });
+    state.circles.set("circle-1", { id: "circle-1", workspaceId, archivedAt: null });
+    state.roleAssignments.push({ memberId, circleId: "circle-1", expiresAt: null });
+
+    await postDeliberationEntry(otherActor, {
+      workspaceId,
+      parentType: "TENSION",
+      parentId: "tension-1",
+      entryType: "REACTION",
+      bodyMd: "@Finance Team should weigh in.",
+      targetCircleId: "circle-1",
+    });
+
+    expect(state.notifications).toEqual([
+      expect.objectContaining({ userId: "member-user", type: "deliberation.mention" }),
+    ]);
+  });
+
+  it("does not expose private parent title or body in mention notifications", async () => {
+    state.tensions.set("private-tension", {
+      id: "private-tension",
+      workspaceId,
+      authorUserId: "other-user",
+      assigneeMemberId: null,
+      title: "Private launch risk",
+      version: 1,
+      isPrivate: true,
+    });
+
+    await postDeliberationEntry(otherActor, {
+      workspaceId,
+      parentType: "TENSION",
+      parentId: "private-tension",
+      entryType: "REACTION",
+      bodyMd: "@Member this draft is confidential.",
+    });
+
+    expect(state.notifications).toEqual([
+      expect.objectContaining({
+        userId: "member-user",
+        title: "Other mentioned you in a tension",
+        bodyMd: null,
+      }),
+    ]);
   });
 
   it("links a deliberation entry to an active advice request", async () => {
