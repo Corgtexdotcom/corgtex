@@ -150,10 +150,13 @@ describe("planImport", () => {
     const plan = planImport(fullBatch());
 
     for (const entity of ENTITY_ORDER) {
+      expect(plan.counts.source[entity], entity).toBeGreaterThan(0);
       expect(plan.counts.planned[entity], entity).toBeGreaterThan(0);
       expect(plan.counts.skipped[entity], entity).toBe(0);
     }
     expect(plan.valid).toHaveLength(1);
+    expect(plan.counts.source.entryReviews).toBe(2);
+    expect(plan.counts.planned.entryReviews).toBe(2);
   });
 
   it("still accepts the old project-only array shape", () => {
@@ -228,6 +231,7 @@ describe("planImport", () => {
     });
 
     expect(plan.counts.planned.clients).toBe(1);
+    expect(plan.counts.source.unknownRecords).toBe(1);
     expect(plan.counts.skipped.unknownRecords).toBe(1);
     expect(plan.entities.unknownRecords.skipped[0].reason).toBe("unknown_record_type");
   });
@@ -377,6 +381,9 @@ describe("importPracticeLedgerExport", () => {
 
     expect(prisma.practiceProject.upsert).not.toHaveBeenCalled();
     expect(result).toMatchObject({ dryRun: true, imported: 0, skipped: 0 });
+    expect(result.reconciliation.source.total).toBe(13);
+    expect(result.reconciliation.targetBefore.missing.total).toBe(13);
+    expect(result.reconciliation.targetAfter).toBeNull();
     expect(result.counts.planned.timeEntries).toBe(1);
     expect(result.planned).toBe(13);
   });
@@ -588,6 +595,46 @@ describe("importPracticeLedgerExport", () => {
     expect(result.counts.planned.clients).toBe(0);
     expect(result.counts.skipped.clients).toBe(1);
     expect(prisma.practiceClient.upsert).not.toHaveBeenCalled();
+  });
+
+  it("reports already-imported target rows during dry runs", async () => {
+    const prisma = prismaFixture();
+    prisma.practiceClient.findMany
+      .mockResolvedValueOnce([{ code: "C001", sourceSatelliteId: "client-1" }])
+      .mockResolvedValueOnce([{ sourceSatelliteId: "client-1" }]);
+
+    const result = await importPracticeLedgerExport({
+      prisma,
+      workspaceId: "ws1",
+      batch: {
+        clients: [{ id: "client-1", code: "C001", name: "Client One" }],
+      },
+    });
+
+    expect(result.counts.source.clients).toBe(1);
+    expect(result.reconciliation.targetBefore.matched.byEntity.clients).toBe(1);
+    expect(result.reconciliation.targetBefore.missing.byEntity.clients).toBe(0);
+  });
+
+  it("reports target reconciliation after an apply", async () => {
+    const prisma = prismaFixture();
+    prisma.practiceClient.findMany
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([{ sourceSatelliteId: "client-1" }]);
+
+    const result = await importPracticeLedgerExport({
+      prisma,
+      workspaceId: "ws1",
+      apply: true,
+      batch: {
+        clients: [{ id: "client-1", code: "C001", name: "Client One" }],
+      },
+    });
+
+    expect(result.reconciliation.targetBefore.missing.byEntity.clients).toBe(1);
+    expect(result.reconciliation.targetAfter.matched.byEntity.clients).toBe(1);
+    expect(result.reconciliation.targetAfter.missing.byEntity.clients).toBe(0);
   });
 
   it("counts upsert failures as skipped without stopping later entities", async () => {
