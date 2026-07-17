@@ -27,6 +27,7 @@ function prismaFixture() {
     practiceTimeEntry: delegate(),
     practiceExpense: delegate(),
     practiceEntryReview: delegate(),
+    crmAccount: { findFirst: vi.fn().mockResolvedValue({ id: "crm-1" }) },
   };
 }
 
@@ -167,6 +168,42 @@ describe("planImport", () => {
     expect(plan.counts.planned.projects).toBe(1);
   });
 
+  it("routes versioned PortableRecordBatch records by entity", () => {
+    const plan = planImport({
+      moduleKey: "practice-ledger",
+      schemaVersion: PRACTICE_FINANCE_SCHEMA_VERSION,
+      records: [
+        { entity: "client", id: "client-1", code: "C001", name: "Client One" },
+        { entityType: "consultant", id: "consultant-1", name: "Consultant One" },
+        { recordType: "project", id: "project-1", code: "P001", name: "Project One", clientName: "Client One", clientId: "client-1" },
+        { entity: "time_entry", id: "time-1", clientId: "client-1", projectId: "project-1", consultantId: "consultant-1", workedOn: "2026-06-10", weekEndingOn: "2026-06-12", hours: 1 },
+      ],
+    });
+
+    expect(plan.counts.planned.clients).toBe(1);
+    expect(plan.counts.planned.consultants).toBe(1);
+    expect(plan.counts.planned.projects).toBe(1);
+    expect(plan.counts.planned.timeEntries).toBe(1);
+  });
+
+  it("rejects missing required financial quantities and unknown posted-entry statuses", () => {
+    const plan = planImport({
+      clients: [{ id: "client-1", code: "C001", name: "Client One" }],
+      consultants: [{ id: "consultant-1", name: "Consultant One" }],
+      projects: [project({ id: "project-1", clientSourceId: "client-1" })],
+      timeEntries: [
+        { id: "time-missing-hours", clientId: "client-1", projectId: "project-1", consultantId: "consultant-1", workedOn: "2026-06-10", weekEndingOn: "2026-06-12" },
+        { id: "time-unknown-status", clientId: "client-1", projectId: "project-1", consultantId: "consultant-1", workedOn: "2026-06-10", weekEndingOn: "2026-06-12", hours: 1, status: "pending" },
+      ],
+      expenses: [
+        { id: "expense-missing-amount", clientId: "client-1", projectId: "project-1", spentOn: "2026-06-11", category: "Travel", businessPurpose: "Workshop" },
+      ],
+    });
+
+    expect(plan.counts.skipped.timeEntries).toBe(2);
+    expect(plan.counts.skipped.expenses).toBe(1);
+  });
+
   it("skips dependent records whose parent source id is not in the batch", () => {
     const plan = planImport({
       clients: [{ id: "client-1", code: "C001", name: "Client One" }],
@@ -186,6 +223,41 @@ describe("planImport", () => {
     expect(plan.counts.skipped.projects).toBe(1);
     expect(plan.counts.skipped.timeEntries).toBe(1);
     expect(plan.entities.projects.skipped[0].reason).toBe("missing_dependency");
+  });
+
+  it("skips dependent records whose referenced parents disagree", () => {
+    const plan = planImport({
+      clients: [{ id: "client-1", code: "C001", name: "Client One" }, { id: "client-2", code: "C002", name: "Client Two" }],
+      consultants: [{ id: "consultant-1", name: "Consultant One" }],
+      projects: [project({ id: "project-1", clientSourceId: "client-1" })],
+      projectLines: [{ id: "line-1", projectId: "project-1", kind: "services", name: "Services" }],
+      timeEntries: [{
+        id: "time-1",
+        clientId: "client-2",
+        projectId: "project-1",
+        budgetLineId: "line-1",
+        consultantId: "consultant-1",
+        workedOn: "2026-06-10",
+        weekEndingOn: "2026-06-12",
+        hours: 1,
+      }],
+    });
+
+    expect(plan.counts.skipped.timeEntries).toBe(1);
+    expect(plan.entities.timeEntries.skipped[0].reason).toBe("relationship_mismatch");
+  });
+
+  it("skips duplicate target unique keys during dry runs", () => {
+    const plan = planImport({
+      clients: [
+        { id: "client-1", code: "C001", name: "Client One" },
+        { id: "client-2", code: "C001", name: "Client Duplicate" },
+      ],
+    });
+
+    expect(plan.counts.planned.clients).toBe(1);
+    expect(plan.counts.skipped.clients).toBe(1);
+    expect(plan.entities.clients.skipped[0].reason).toBe("duplicate_unique_key");
   });
 });
 
@@ -232,6 +304,106 @@ describe("importPracticeLedgerExport", () => {
         consultant: { connect: { workspaceId_sourceSatelliteId: { workspaceId: "ws1", sourceSatelliteId: "consultant-1" } } },
       }),
     }));
+  });
+
+  it("preserves nullable JSON values and disconnects cleared optional relations on update", async () => {
+    const prisma = prismaFixture();
+    await importPracticeLedgerExport({
+      prisma,
+      workspaceId: "ws1",
+      apply: true,
+      batch: {
+        clients: [{ id: "client-1", code: "C001", name: "Client One" }],
+        consultants: [{ id: "consultant-1", name: "Consultant One" }],
+        projects: [project({ id: "project-1", clientId: "client-1" })],
+        sourceDocuments: [{ id: "doc-1", submittedPayload: null, createdRecords: null }],
+        timeEntries: [{
+          id: "time-1",
+          clientId: "client-1",
+          projectId: "project-1",
+          consultantId: "consultant-1",
+          workedOn: "2026-06-10",
+          weekEndingOn: "2026-06-12",
+          hours: 1,
+        }],
+      },
+    });
+
+    expect(prisma.practiceSourceDocument.upsert).toHaveBeenCalledWith(expect.objectContaining({
+      update: expect.objectContaining({
+        submittedPayload: expect.anything(),
+        createdRecords: expect.anything(),
+      }),
+    }));
+    expect(prisma.practiceTimeEntry.upsert).toHaveBeenCalledWith(expect.objectContaining({
+      update: expect.objectContaining({
+        billingCode: { disconnect: true },
+        projectLine: { disconnect: true },
+        sourceDocument: { disconnect: true },
+        paymentBatch: { disconnect: true },
+      }),
+      create: expect.not.objectContaining({
+        billingCode: expect.anything(),
+        projectLine: expect.anything(),
+        sourceDocument: expect.anything(),
+        paymentBatch: expect.anything(),
+      }),
+    }));
+  });
+
+  it("omits payment batch settledAt when the export omits it", async () => {
+    const prisma = prismaFixture();
+    await importPracticeLedgerExport({
+      prisma,
+      workspaceId: "ws1",
+      apply: true,
+      batch: {
+        consultants: [{ id: "consultant-1", name: "Consultant One" }],
+        paymentBatches: [{ id: "batch-1", consultantId: "consultant-1", totalAmountCents: 1000_00 }],
+      },
+    });
+
+    expect(prisma.practicePaymentBatch.upsert).toHaveBeenCalledWith(expect.objectContaining({
+      update: expect.not.objectContaining({ settledAt: expect.anything() }),
+      create: expect.not.objectContaining({ settledAt: expect.anything() }),
+    }));
+  });
+
+  it("does not erase project dates when legacy exports omit them", async () => {
+    const prisma = prismaFixture();
+    await importPracticeLedgerExport({
+      prisma,
+      workspaceId: "ws1",
+      apply: true,
+      batch: { moduleKey: "practice-ledger", schemaVersion: "1", records: [project()] },
+    });
+
+    expect(prisma.practiceProject.upsert).toHaveBeenCalledWith(expect.objectContaining({
+      update: expect.not.objectContaining({
+        startsOn: expect.anything(),
+        endsOn: expect.anything(),
+      }),
+    }));
+  });
+
+  it("requires imported CRM account links to belong to the target workspace", async () => {
+    const prisma = prismaFixture();
+    prisma.crmAccount.findFirst.mockResolvedValueOnce(null);
+    const result = await importPracticeLedgerExport({
+      prisma,
+      workspaceId: "ws1",
+      apply: true,
+      batch: {
+        clients: [{ id: "client-1", code: "C001", name: "Client One", crmAccountId: "crm-other" }],
+      },
+    });
+
+    expect(prisma.crmAccount.findFirst).toHaveBeenCalledWith({
+      where: { id: "crm-other", workspaceId: "ws1" },
+      select: { id: true },
+    });
+    expect(result.counts.skipped.clients).toBe(1);
+    expect(prisma.practiceClient.upsert).not.toHaveBeenCalled();
   });
 
   it("counts upsert failures as skipped without stopping later entities", async () => {

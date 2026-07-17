@@ -13,6 +13,7 @@
  */
 import { readFileSync } from "node:fs";
 import process from "node:process";
+import { Prisma } from "@prisma/client";
 
 export const PRACTICE_FINANCE_MODULE_KEY = "practice-ledger";
 export const PRACTICE_FINANCE_SCHEMA_VERSION = "2";
@@ -41,11 +42,57 @@ const ENTITY_ALIASES = {
   paymentBatches: ["paymentBatches", "payment_batches"],
   timeEntries: ["timeEntries", "time_entries"],
   entryReviews: ["entryReviews", "entry_reviews", "reviews"],
-  projects: ["projects", "budgets", "records"],
+  projects: ["projects", "budgets"],
   clients: ["clients"],
   consultants: ["consultants"],
   expenses: ["expenses"],
 };
+
+const PORTABLE_RECORD_ENTITY_ALIASES = new Map([
+  ["client", "clients"],
+  ["clients", "clients"],
+  ["practiceclient", "clients"],
+  ["billingcode", "billingCodes"],
+  ["billingcodes", "billingCodes"],
+  ["practicebillingcode", "billingCodes"],
+  ["consultant", "consultants"],
+  ["consultants", "consultants"],
+  ["practiceconsultant", "consultants"],
+  ["project", "projects"],
+  ["projects", "projects"],
+  ["budget", "projects"],
+  ["budgets", "projects"],
+  ["practiceproject", "projects"],
+  ["projectline", "projectLines"],
+  ["projectlines", "projectLines"],
+  ["budgetline", "projectLines"],
+  ["budgetlines", "projectLines"],
+  ["practiceprojectline", "projectLines"],
+  ["purchaseorder", "purchaseOrders"],
+  ["purchaseorders", "purchaseOrders"],
+  ["practicepurchaseorder", "purchaseOrders"],
+  ["assignment", "assignments"],
+  ["assignments", "assignments"],
+  ["projectassignment", "assignments"],
+  ["practiceprojectassignment", "assignments"],
+  ["sourcedocument", "sourceDocuments"],
+  ["sourcedocuments", "sourceDocuments"],
+  ["practicesourcedocument", "sourceDocuments"],
+  ["paymentbatch", "paymentBatches"],
+  ["paymentbatches", "paymentBatches"],
+  ["practicepaymentbatch", "paymentBatches"],
+  ["timeentry", "timeEntries"],
+  ["timeentries", "timeEntries"],
+  ["practicetimeentry", "timeEntries"],
+  ["expense", "expenses"],
+  ["expenses", "expenses"],
+  ["practiceexpense", "expenses"],
+  ["entryreview", "entryReviews"],
+  ["entryreviews", "entryReviews"],
+  ["review", "entryReviews"],
+  ["reviews", "entryReviews"],
+  ["practiceentryreview", "entryReviews"],
+]);
 
 const VALID_PROJECT_STATUSES = new Set(["ACTIVE", "ON_HOLD", "CLOSED"]);
 const VALID_CLIENT_STATUSES = new Set(["ACTIVE", "ARCHIVED"]);
@@ -113,16 +160,30 @@ function sourceId(record) {
   return trim(record?.sourceSatelliteId ?? record?.id);
 }
 
-function toCents(value) {
-  if (value == null || value === "") return 0;
+function hasOwn(record, key) {
+  return Object.prototype.hasOwnProperty.call(record ?? {}, key);
+}
+
+function parseFiniteNumber(value) {
+  if (value == null || value === "") return null;
   const n = typeof value === "string" ? Number(value) : value;
-  if (!Number.isFinite(n)) return 0;
+  return Number.isFinite(n) ? n : null;
+}
+
+function toCents(value) {
+  const n = parseFiniteNumber(value);
+  if (n == null) return 0;
   return Math.round(n);
 }
 
 function toOptionalCents(value) {
   if (value == null || value === "") return undefined;
   return toCents(value);
+}
+
+function toRequiredCents(value) {
+  const n = parseFiniteNumber(value);
+  return n == null ? null : Math.round(n);
 }
 
 function toBpsOrNull(value) {
@@ -142,12 +203,16 @@ function toDate(value) {
 }
 
 function toJson(value) {
-  return value === undefined ? undefined : value;
+  if (value === undefined) return undefined;
+  if (value === null) return Prisma.JsonNull;
+  return value;
 }
 
-function normalizeEnum(value, valid, fallback) {
-  const normalized = String(value ?? fallback).trim().toUpperCase().replace(/[\s-]+/g, "_");
-  return valid.has(normalized) ? normalized : fallback;
+function normalizeEnumStrict(value, valid, fallback) {
+  const text = trim(value);
+  if (!text) return fallback;
+  const normalized = text.toUpperCase().replace(/[\s-]+/g, "_");
+  return valid.has(normalized) ? normalized : null;
 }
 
 function relationSource(record, ...names) {
@@ -158,12 +223,24 @@ function relationSource(record, ...names) {
   return null;
 }
 
+function portableRecordEntity(record) {
+  const raw = trim(record?.entity ?? record?.entityType ?? record?.recordType ?? record?.table ?? record?.model);
+  if (!raw) return null;
+  const normalized = raw.toLowerCase().replace(/[^a-z0-9]/g, "");
+  return PORTABLE_RECORD_ENTITY_ALIASES.get(normalized) ?? null;
+}
+
 function entityRecords(batch, entity) {
   if (Array.isArray(batch)) return entity === "projects" ? batch : [];
   if (!batch || typeof batch !== "object") return [];
   for (const alias of ENTITY_ALIASES[entity] ?? [entity]) {
     const records = batch[alias];
     if (Array.isArray(records)) return records;
+  }
+  if (Array.isArray(batch.records)) {
+    const version = String(batch.schemaVersion ?? "").trim();
+    if (version === "1" || !version) return entity === "projects" ? batch.records : [];
+    return batch.records.filter((record) => portableRecordEntity(record) === entity);
   }
   return [];
 }
@@ -176,13 +253,15 @@ function parseClient(record) {
   const sourceSatelliteId = sourceId(record);
   const code = trim(record?.code);
   const name = trim(record?.name);
+  const status = normalizeEnumStrict(record?.status, VALID_CLIENT_STATUSES, "ACTIVE");
+  if (!status) return null;
   if (!sourceSatelliteId || !code || !name) return null;
   return {
     sourceSatelliteId,
     code,
     name,
     leadName: trim(record?.leadName),
-    status: normalizeEnum(record?.status, VALID_CLIENT_STATUSES, "ACTIVE"),
+    status,
     crmAccountId: trim(record?.crmAccountId),
   };
 }
@@ -220,13 +299,15 @@ function parseProject(record) {
   const code = trim(record.code);
   const name = trim(record.name);
   const clientName = trim(record.clientName ?? record.client);
+  const status = normalizeEnumStrict(record.status, VALID_PROJECT_STATUSES, "ACTIVE");
+  if (!status) return null;
   if (!sourceSatelliteId || !code || !name || !clientName) return null;
   return {
     sourceSatelliteId,
     code,
     name,
     clientName,
-    status: normalizeEnum(record.status, VALID_PROJECT_STATUSES, "ACTIVE"),
+    status,
     currency: trim(record.currency) ?? "USD",
     poValueCents: toCents(record.poValueCents ?? record.budgetCents),
     serviceBudgetCents: toCents(record.serviceBudgetCents),
@@ -235,8 +316,8 @@ function parseProject(record) {
     weeklyBurnCents: toCents(record.weeklyBurnCents),
     targetMarginBps: toBpsOrNull(record.targetMarginBps),
     currentMarginBps: toBpsOrNull(record.currentMarginBps),
-    startsOn: toDate(record.startsOn),
-    endsOn: toDate(record.endsOn),
+    startsOn: hasOwn(record, "startsOn") ? toDate(record.startsOn) : undefined,
+    endsOn: hasOwn(record, "endsOn") ? toDate(record.endsOn) : undefined,
     clientSourceId: relationSource(record, "clientSourceId", "clientId"),
     billingCodeSourceId: relationSource(record, "billingCodeSourceId", "billingCodeId"),
   };
@@ -246,11 +327,13 @@ function parseProjectLine(record) {
   const sourceSatelliteId = sourceId(record);
   const projectSourceId = relationSource(record, "projectSourceId", "projectId", "budgetId");
   const name = trim(record?.name);
+  const kind = normalizeEnumStrict(record?.kind, VALID_LINE_KINDS, "SERVICES");
+  if (!kind) return null;
   if (!sourceSatelliteId || !projectSourceId || !name) return null;
   return {
     sourceSatelliteId,
     projectSourceId,
-    kind: normalizeEnum(record?.kind, VALID_LINE_KINDS, "SERVICES"),
+    kind,
     name,
     budgetCents: toCents(record?.budgetCents),
     billRateCents: toOptionalCents(record?.billRateCents),
@@ -288,11 +371,14 @@ function parseAssignment(record) {
 
 function parseSourceDocument(record) {
   const sourceSatelliteId = sourceId(record);
+  const type = normalizeEnumStrict(record?.type, VALID_SOURCE_DOCUMENT_TYPES, "OTHER");
+  const status = normalizeEnumStrict(record?.status, VALID_SOURCE_DOCUMENT_STATUSES, "POSTED");
+  if (!type || !status) return null;
   if (!sourceSatelliteId) return null;
   return {
     sourceSatelliteId,
-    type: normalizeEnum(record?.type, VALID_SOURCE_DOCUMENT_TYPES, "OTHER"),
-    status: normalizeEnum(record?.status, VALID_SOURCE_DOCUMENT_STATUSES, "POSTED"),
+    type,
+    status,
     fileName: trim(record?.fileName),
     mimeType: trim(record?.mimeType),
     storageKey: trim(record?.storageKey),
@@ -316,7 +402,7 @@ function parsePaymentBatch(record) {
     cashAmountCents: toCents(record?.cashAmountCents),
     sliceAmountCents: toCents(record?.sliceAmountCents),
     memo: trim(record?.memo),
-    settledAt: toDate(record?.settledAt) ?? new Date(),
+    settledAt: hasOwn(record, "settledAt") ? toDate(record?.settledAt) : undefined,
   };
 }
 
@@ -327,7 +413,9 @@ function parseTimeEntry(record) {
   const consultantSourceId = relationSource(record, "consultantSourceId", "consultantId");
   const workedOn = toDate(record?.workedOn);
   const weekEndingOn = toDate(record?.weekEndingOn);
-  if (!sourceSatelliteId || !clientSourceId || !projectSourceId || !consultantSourceId || !workedOn || !weekEndingOn) return null;
+  const hours = parseFiniteNumber(record?.hours);
+  const status = normalizeEnumStrict(record?.status, VALID_ENTRY_STATUSES, "POSTED");
+  if (!sourceSatelliteId || !clientSourceId || !projectSourceId || !consultantSourceId || !workedOn || !weekEndingOn || hours == null || !status) return null;
   return {
     sourceSatelliteId,
     clientSourceId,
@@ -339,7 +427,7 @@ function parseTimeEntry(record) {
     paymentBatchSourceId: relationSource(record, "paymentBatchSourceId", "paymentBatchId"),
     workedOn,
     weekEndingOn,
-    hours: Number(record?.hours ?? 0),
+    hours,
     assignmentType: trim(record?.assignmentType) ?? "PB",
     currency: trim(record?.currency) ?? "USD",
     billCurrency: trim(record?.billCurrency),
@@ -350,7 +438,7 @@ function parseTimeEntry(record) {
     billAmountCents: toOptionalCents(record?.billAmountCents),
     costAmountCents: toOptionalCents(record?.costAmountCents),
     paidAmountCents: toOptionalCents(record?.paidAmountCents),
-    status: normalizeEnum(record?.status, VALID_ENTRY_STATUSES, "POSTED"),
+    status,
     idempotencyKey: trim(record?.idempotencyKey),
   };
 }
@@ -362,7 +450,9 @@ function parseExpense(record) {
   const spentOn = toDate(record?.spentOn);
   const category = trim(record?.category);
   const businessPurpose = trim(record?.businessPurpose);
-  if (!sourceSatelliteId || !clientSourceId || !projectSourceId || !spentOn || !category || !businessPurpose) return null;
+  const amountCents = toRequiredCents(record?.amountCents);
+  const status = normalizeEnumStrict(record?.status, VALID_ENTRY_STATUSES, "POSTED");
+  if (!sourceSatelliteId || !clientSourceId || !projectSourceId || !spentOn || !category || !businessPurpose || amountCents == null || !status) return null;
   return {
     sourceSatelliteId,
     clientSourceId,
@@ -376,33 +466,36 @@ function parseExpense(record) {
     vendor: trim(record?.vendor),
     category,
     businessPurpose,
-    amountCents: toCents(record?.amountCents),
+    amountCents,
     currency: trim(record?.currency) ?? "USD",
     amountFunctionalCents: toOptionalCents(record?.amountFunctionalCents),
     functionalCurrency: trim(record?.functionalCurrency),
     billable: record?.billable !== false,
-    status: normalizeEnum(record?.status, VALID_ENTRY_STATUSES, "POSTED"),
+    status,
     idempotencyKey: trim(record?.idempotencyKey),
   };
 }
 
 function parseEntryReview(record) {
   const sourceSatelliteId = sourceId(record);
-  const rawTarget = normalizeEnum(record?.targetType ?? record?.entryType, VALID_REVIEW_TARGETS, "TIME_ENTRY");
+  const rawTarget = normalizeEnumStrict(record?.targetType ?? record?.entryType, VALID_REVIEW_TARGETS, "TIME_ENTRY");
+  if (!rawTarget) return null;
   const genericEntrySourceId = relationSource(record, "entrySourceId", "entryId");
   const timeEntrySourceId = relationSource(record, "timeEntrySourceId", "timeEntryId")
     ?? (rawTarget === "TIME_ENTRY" ? genericEntrySourceId : null);
   const expenseSourceId = relationSource(record, "expenseSourceId", "expenseId")
     ?? (rawTarget === "EXPENSE" ? genericEntrySourceId : null);
   const inferredTarget = timeEntrySourceId ? "TIME_ENTRY" : expenseSourceId ? "EXPENSE" : undefined;
-  const targetType = normalizeEnum(record?.targetType ?? record?.entryType ?? inferredTarget, VALID_REVIEW_TARGETS, inferredTarget ?? "TIME_ENTRY");
+  const targetType = normalizeEnumStrict(record?.targetType ?? record?.entryType ?? inferredTarget, VALID_REVIEW_TARGETS, inferredTarget ?? "TIME_ENTRY");
+  const status = normalizeEnumStrict(record?.status, VALID_REVIEW_STATUSES, "SUBMITTED");
+  if (!targetType || !status) return null;
   if (!sourceSatelliteId || (targetType === "TIME_ENTRY" && !timeEntrySourceId) || (targetType === "EXPENSE" && !expenseSourceId)) return null;
   return {
     sourceSatelliteId,
     targetType,
     timeEntrySourceId: targetType === "TIME_ENTRY" ? timeEntrySourceId : null,
     expenseSourceId: targetType === "EXPENSE" ? expenseSourceId : null,
-    status: normalizeEnum(record?.status, VALID_REVIEW_STATUSES, "SUBMITTED"),
+    status,
     note: trim(record?.note),
     reviewedByUserId: trim(record?.reviewedByUserId),
   };
@@ -439,10 +532,57 @@ function dependencyMisses(row, available, entity) {
   });
 }
 
+function uniqueKeys(row, entity) {
+  const keys = [`${entity}:sourceSatelliteId:${row.sourceSatelliteId}`];
+  if (entity === "clients") keys.push(`clients:code:${row.code}`);
+  if (entity === "billingCodes") keys.push(`billingCodes:code:${row.code}`);
+  if (entity === "projects") keys.push(`projects:code:${row.code}`);
+  if (entity === "purchaseOrders") keys.push(`purchaseOrders:project_po:${row.projectSourceId}:${row.poNumber}`);
+  if (entity === "assignments") keys.push(`assignments:project_consultant:${row.projectSourceId}:${row.consultantSourceId}`);
+  if (entity === "timeEntries" && row.idempotencyKey) keys.push(`timeEntries:idempotencyKey:${row.idempotencyKey}`);
+  if (entity === "expenses" && row.idempotencyKey) keys.push(`expenses:idempotencyKey:${row.idempotencyKey}`);
+  if (entity === "entryReviews" && row.timeEntrySourceId) keys.push(`entryReviews:time:${row.timeEntrySourceId}`);
+  if (entity === "entryReviews" && row.expenseSourceId) keys.push(`entryReviews:expense:${row.expenseSourceId}`);
+  return keys;
+}
+
+function relationshipMisses(row, rowsByEntity, entity) {
+  const misses = [];
+  const client = row.clientSourceId ? rowsByEntity.clients.get(row.clientSourceId) : null;
+  const billingCode = row.billingCodeSourceId ? rowsByEntity.billingCodes.get(row.billingCodeSourceId) : null;
+  const project = row.projectSourceId ? rowsByEntity.projects.get(row.projectSourceId) : null;
+  const projectLine = row.projectLineSourceId ? rowsByEntity.projectLines.get(row.projectLineSourceId) : null;
+  const paymentBatch = row.paymentBatchSourceId ? rowsByEntity.paymentBatches.get(row.paymentBatchSourceId) : null;
+
+  if (billingCode?.clientSourceId && client && billingCode.clientSourceId !== row.clientSourceId) {
+    misses.push("billing_code_client_mismatch");
+  }
+  if (project?.clientSourceId && client && project.clientSourceId !== row.clientSourceId) {
+    misses.push("project_client_mismatch");
+  }
+  if (project?.billingCodeSourceId && billingCode && project.billingCodeSourceId !== row.billingCodeSourceId) {
+    misses.push("project_billing_code_mismatch");
+  }
+  if (projectLine && projectLine.projectSourceId !== row.projectSourceId) {
+    misses.push("project_line_project_mismatch");
+  }
+  if (paymentBatch?.consultantSourceId && row.consultantSourceId && paymentBatch.consultantSourceId !== row.consultantSourceId) {
+    misses.push("payment_batch_consultant_mismatch");
+  }
+
+  if (entity === "projects" && billingCode?.clientSourceId && row.clientSourceId && billingCode.clientSourceId !== row.clientSourceId) {
+    misses.push("project_billing_code_client_mismatch");
+  }
+
+  return misses;
+}
+
 /** Split records into importable rows and skipped records, validating dependencies. */
 export function planImport(batch) {
   const entities = emptyEntityBuckets();
   const available = Object.fromEntries(ENTITY_ORDER.map((entity) => [entity, new Set()]));
+  const rowsByEntity = Object.fromEntries(ENTITY_ORDER.map((entity) => [entity, new Map()]));
+  const seenUniqueKeys = new Set();
 
   for (const entity of ENTITY_ORDER) {
     const parser = PARSERS[entity];
@@ -461,8 +601,28 @@ export function planImport(batch) {
         });
         continue;
       }
+      const duplicateKeys = uniqueKeys(parsed, entity).filter((key) => seenUniqueKeys.has(key));
+      if (duplicateKeys.length > 0) {
+        entities[entity].skipped.push({
+          reason: "duplicate_unique_key",
+          duplicate: duplicateKeys,
+          record,
+        });
+        continue;
+      }
+      const relationshipErrors = relationshipMisses(parsed, rowsByEntity, entity);
+      if (relationshipErrors.length > 0) {
+        entities[entity].skipped.push({
+          reason: "relationship_mismatch",
+          mismatches: relationshipErrors,
+          record,
+        });
+        continue;
+      }
       entities[entity].valid.push(parsed);
       available[entity].add(parsed.sourceSatelliteId);
+      rowsByEntity[entity].set(parsed.sourceSatelliteId, parsed);
+      for (const key of uniqueKeys(parsed, entity)) seenUniqueKeys.add(key);
     }
   }
 
@@ -492,34 +652,61 @@ function connectSource(workspaceId, sourceSatelliteId) {
   return sourceSatelliteId ? { connect: sourceWhere(workspaceId, sourceSatelliteId) } : undefined;
 }
 
+function disconnectableSource(workspaceId, sourceSatelliteId) {
+  return sourceSatelliteId ? { connect: sourceWhere(workspaceId, sourceSatelliteId) } : { disconnect: true };
+}
+
+async function crmAccountRelation(prisma, workspaceId, crmAccountId, mode) {
+  if (!crmAccountId) return mode === "update" ? { disconnect: true } : undefined;
+  const account = await prisma.crmAccount.findFirst({
+    where: { id: crmAccountId, workspaceId },
+    select: { id: true },
+  });
+  if (!account) throw new Error("CRM account does not belong to the target workspace.");
+  return { connect: { id: crmAccountId } };
+}
+
 function withDefinedValues(data) {
   return Object.fromEntries(Object.entries(data).filter(([, value]) => value !== undefined));
 }
 
 async function upsertClient(prisma, workspaceId, row) {
   const { sourceSatelliteId, crmAccountId, ...fields } = row;
-  const data = withDefinedValues({
+  const update = withDefinedValues({
     ...fields,
     leadName: row.leadName,
-    crmAccount: crmAccountId ? { connect: { id: crmAccountId } } : undefined,
+    crmAccount: await crmAccountRelation(prisma, workspaceId, crmAccountId, "update"),
+  });
+  const create = withDefinedValues({
+    workspaceId,
+    sourceSatelliteId,
+    ...fields,
+    leadName: row.leadName,
+    crmAccount: await crmAccountRelation(prisma, workspaceId, crmAccountId, "create"),
   });
   return prisma.practiceClient.upsert({
     where: sourceWhere(workspaceId, sourceSatelliteId),
-    update: data,
-    create: { workspaceId, sourceSatelliteId, ...data },
+    update,
+    create,
   });
 }
 
 async function upsertBillingCode(prisma, workspaceId, row) {
   const { sourceSatelliteId, clientSourceId, ...fields } = row;
-  const data = withDefinedValues({
+  const update = withDefinedValues({
+    ...fields,
+    client: disconnectableSource(workspaceId, clientSourceId),
+  });
+  const create = withDefinedValues({
+    workspaceId,
+    sourceSatelliteId,
     ...fields,
     client: connectSource(workspaceId, clientSourceId),
   });
   return prisma.practiceBillingCode.upsert({
     where: sourceWhere(workspaceId, sourceSatelliteId),
-    update: data,
-    create: { workspaceId, sourceSatelliteId, ...data },
+    update,
+    create,
   });
 }
 
@@ -534,15 +721,22 @@ async function upsertConsultant(prisma, workspaceId, row) {
 
 async function upsertProject(prisma, workspaceId, row) {
   const { sourceSatelliteId, clientSourceId, billingCodeSourceId, ...fields } = row;
-  const data = withDefinedValues({
+  const update = withDefinedValues({
+    ...fields,
+    client: disconnectableSource(workspaceId, clientSourceId),
+    billingCode: disconnectableSource(workspaceId, billingCodeSourceId),
+  });
+  const create = withDefinedValues({
+    workspaceId,
+    sourceSatelliteId,
     ...fields,
     client: connectSource(workspaceId, clientSourceId),
     billingCode: connectSource(workspaceId, billingCodeSourceId),
   });
   return prisma.practiceProject.upsert({
     where: sourceWhere(workspaceId, sourceSatelliteId),
-    update: data,
-    create: { workspaceId, sourceSatelliteId, ...data },
+    update,
+    create,
   });
 }
 
@@ -598,10 +792,10 @@ async function upsertSourceDocument(prisma, workspaceId, row) {
 
 async function upsertPaymentBatch(prisma, workspaceId, row) {
   const { sourceSatelliteId, consultantSourceId, ...fields } = row;
-  const data = {
+  const data = withDefinedValues({
     ...fields,
     consultant: connectSource(workspaceId, consultantSourceId),
-  };
+  });
   return prisma.practicePaymentBatch.upsert({
     where: sourceWhere(workspaceId, sourceSatelliteId),
     update: data,
@@ -621,7 +815,19 @@ async function upsertTimeEntry(prisma, workspaceId, row) {
     paymentBatchSourceId,
     ...fields
   } = row;
-  const data = withDefinedValues({
+  const update = withDefinedValues({
+    ...fields,
+    client: connectSource(workspaceId, clientSourceId),
+    billingCode: disconnectableSource(workspaceId, billingCodeSourceId),
+    project: connectSource(workspaceId, projectSourceId),
+    projectLine: disconnectableSource(workspaceId, projectLineSourceId),
+    consultant: connectSource(workspaceId, consultantSourceId),
+    sourceDocument: disconnectableSource(workspaceId, sourceDocumentSourceId),
+    paymentBatch: disconnectableSource(workspaceId, paymentBatchSourceId),
+  });
+  const create = withDefinedValues({
+    workspaceId,
+    sourceSatelliteId,
     ...fields,
     client: connectSource(workspaceId, clientSourceId),
     billingCode: connectSource(workspaceId, billingCodeSourceId),
@@ -633,8 +839,8 @@ async function upsertTimeEntry(prisma, workspaceId, row) {
   });
   return prisma.practiceTimeEntry.upsert({
     where: sourceWhere(workspaceId, sourceSatelliteId),
-    update: data,
-    create: { workspaceId, sourceSatelliteId, ...data },
+    update,
+    create,
   });
 }
 
@@ -650,7 +856,19 @@ async function upsertExpense(prisma, workspaceId, row) {
     paymentBatchSourceId,
     ...fields
   } = row;
-  const data = withDefinedValues({
+  const update = withDefinedValues({
+    ...fields,
+    client: connectSource(workspaceId, clientSourceId),
+    billingCode: disconnectableSource(workspaceId, billingCodeSourceId),
+    project: connectSource(workspaceId, projectSourceId),
+    projectLine: disconnectableSource(workspaceId, projectLineSourceId),
+    consultant: disconnectableSource(workspaceId, consultantSourceId),
+    sourceDocument: disconnectableSource(workspaceId, sourceDocumentSourceId),
+    paymentBatch: disconnectableSource(workspaceId, paymentBatchSourceId),
+  });
+  const create = withDefinedValues({
+    workspaceId,
+    sourceSatelliteId,
     ...fields,
     client: connectSource(workspaceId, clientSourceId),
     billingCode: connectSource(workspaceId, billingCodeSourceId),
@@ -662,22 +880,29 @@ async function upsertExpense(prisma, workspaceId, row) {
   });
   return prisma.practiceExpense.upsert({
     where: sourceWhere(workspaceId, sourceSatelliteId),
-    update: data,
-    create: { workspaceId, sourceSatelliteId, ...data },
+    update,
+    create,
   });
 }
 
 async function upsertEntryReview(prisma, workspaceId, row) {
   const { sourceSatelliteId, timeEntrySourceId, expenseSourceId, ...fields } = row;
-  const data = withDefinedValues({
+  const update = withDefinedValues({
+    ...fields,
+    timeEntry: disconnectableSource(workspaceId, timeEntrySourceId),
+    expense: disconnectableSource(workspaceId, expenseSourceId),
+  });
+  const create = withDefinedValues({
+    workspaceId,
+    sourceSatelliteId,
     ...fields,
     timeEntry: connectSource(workspaceId, timeEntrySourceId),
     expense: connectSource(workspaceId, expenseSourceId),
   });
   return prisma.practiceEntryReview.upsert({
     where: sourceWhere(workspaceId, sourceSatelliteId),
-    update: data,
-    create: { workspaceId, sourceSatelliteId, ...data },
+    update,
+    create,
   });
 }
 
