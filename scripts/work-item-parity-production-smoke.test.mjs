@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
   assertFields,
+  cleanupFailureMessage,
+  isHumanValidationMember,
   workItemExpectations,
   workItemParityHealthReleaseBlocker,
 } from "./work-item-parity-production-smoke.mjs";
@@ -52,6 +54,22 @@ describe("work-item parity production smoke helpers", () => {
       { priority: 2, priorityLabel: "Important" },
       "REST action list",
     )).toThrow("REST action list priority mismatch");
+  });
+
+  it("selects only write-safe human validation members", () => {
+    expect(isHumanValidationMember({ id: "system", isActive: true, kind: "SYSTEM", email: "human@example.test" })).toBe(false);
+    expect(isHumanValidationMember({ id: "system-email", isActive: true, email: "system+corgtex@example.test" })).toBe(false);
+    expect(isHumanValidationMember({ id: "support", isActive: true, displayName: "Corgtex Support", email: "support@example.test" })).toBe(false);
+    expect(isHumanValidationMember({ id: "human", isActive: true, displayName: "Validation User", email: "human@example.test" })).toBe(true);
+  });
+
+  it("describes cleanup failures so the smoke can fail instead of passing", () => {
+    expect(cleanupFailureMessage({
+      failed: [
+        { entry: { id: "archive:Action:action-1" } },
+        { entry: { id: "revoke:AgentCredential:credential-1" } },
+      ],
+    })).toBe("Validation cleanup failed for archive:Action:action-1, revoke:AgentCredential:credential-1");
   });
 
   it("returns null when health release metadata matches", () => {

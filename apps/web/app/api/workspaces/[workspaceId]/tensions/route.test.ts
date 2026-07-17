@@ -95,6 +95,30 @@ afterEach(() => {
   getWorkspacePermanentPathForEntity.mockResolvedValue(null);
 });
 
+describe("GET /api/workspaces/[workspaceId]/tensions", () => {
+  it("passes pagination and archive filters into tension listing", async () => {
+    listTensions.mockResolvedValue({
+      items: [],
+      total: 0,
+      take: 100,
+      skip: 20,
+    });
+
+    const { GET } = await import("./route");
+    const response = await GET(
+      new NextRequest("http://localhost/api/workspaces/workspace-1/tensions?archiveFilter=active&take=100&skip=20"),
+      context(),
+    );
+
+    expect(response.status).toBe(200);
+    expect(listTensions).toHaveBeenCalledWith(actor, "workspace-1", {
+      archiveFilter: "active",
+      take: 100,
+      skip: 20,
+    });
+  });
+});
+
 describe("POST /api/workspaces/[workspaceId]/tensions", () => {
   it("passes responsible person and labeled priority into tension creation", async () => {
     createTension.mockResolvedValue({

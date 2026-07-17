@@ -97,6 +97,30 @@ afterEach(() => {
   getWorkspacePermanentPathForEntity.mockResolvedValue(null);
 });
 
+describe("GET /api/workspaces/[workspaceId]/proposals", () => {
+  it("passes pagination and archive filters into proposal listing", async () => {
+    listProposals.mockResolvedValue({
+      items: [],
+      total: 0,
+      take: 100,
+      skip: 20,
+    });
+
+    const { GET } = await import("./route");
+    const response = await GET(
+      new NextRequest("http://localhost/api/workspaces/workspace-1/proposals?archiveFilter=active&take=100&skip=20"),
+      context(),
+    );
+
+    expect(response.status).toBe(200);
+    expect(listProposals).toHaveBeenCalledWith(actor, "workspace-1", {
+      archiveFilter: "active",
+      take: 100,
+      skip: 20,
+    });
+  });
+});
+
 describe("POST /api/workspaces/[workspaceId]/proposals", () => {
   it("creates a proposal from a source tension without requiring title or body input", async () => {
     createProposalFromTension.mockResolvedValue({

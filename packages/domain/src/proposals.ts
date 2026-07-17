@@ -420,7 +420,11 @@ export async function listProposals(actor: AppActor, workspaceId: string, opts?:
         circle: { select: { id: true, name: true } },
         tensions: { select: { id: true, title: true, status: true } },
         actions: { select: { id: true, title: true, status: true } },
-        adviceProcess: true,
+        adviceProcess: {
+          include: {
+            requests: true,
+          },
+        },
       },
       orderBy: workItemOrderBy(opts?.sort),
       take,
@@ -456,7 +460,11 @@ export async function getProposal(actor: AppActor, params: {
       circle: { select: { id: true, name: true } },
       tensions: { select: { id: true, title: true, status: true } },
       actions: { select: { id: true, title: true, status: true } },
-      adviceProcess: true,
+      adviceProcess: {
+        include: {
+          requests: true,
+        },
+      },
     },
   });
   invariant(proposal, 404, "NOT_FOUND", "Proposal not found.");

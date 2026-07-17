@@ -78,10 +78,21 @@ function normalizeDateForTitle(value = new Date()) {
   return value.toISOString().slice(0, 10);
 }
 
-function findById(items, id, label) {
-  const item = items?.find?.((candidate) => candidate.id === id);
-  assert(item, `${label} did not include record ${id}.`);
-  return item;
+export function isHumanValidationMember(member) {
+  if (!member?.isActive) return false;
+  if (!(member.displayName || member.email)) return false;
+  if (member.kind === "SYSTEM") return false;
+  const email = String(member.email ?? "").trim().toLowerCase();
+  const displayName = String(member.displayName ?? "").trim().toLowerCase();
+  if (email.startsWith("system+") || email.startsWith("support+")) return false;
+  if (displayName === "corgtex support") return false;
+  return true;
+}
+
+export function cleanupFailureMessage(cleanup) {
+  const failed = cleanup?.failed ?? [];
+  if (failed.length === 0) return null;
+  return `Validation cleanup failed for ${failed.map(({ entry }) => entry.id).join(", ")}`;
 }
 
 export function assertFields(actual, expected, label) {
@@ -306,8 +317,8 @@ export class WorkItemParitySmoke {
 
   async selectValidationMember() {
     const members = await this.callTool("list_members", { includeInactive: false });
-    const member = members.members?.find((item) => item.isActive && (item.displayName || item.email));
-    assert(member, "No active validation member was available.");
+    const member = members.members?.find((item) => isHumanValidationMember(item));
+    assert(member, "No active human validation member was available.");
     this.record("validation member selected", { memberId: member.id, email: member.email });
     return member;
   }
@@ -399,15 +410,26 @@ export class WorkItemParitySmoke {
   }
 
   async verifyRestLists(member) {
-    const [actions, tensions, proposals] = await Promise.all([
-      this.sessionFetch(`/api/workspaces/${this.workspaceId}/actions?archiveFilter=active&take=100`),
-      this.sessionFetch(`/api/workspaces/${this.workspaceId}/tensions?archiveFilter=active`),
-      this.sessionFetch(`/api/workspaces/${this.workspaceId}/proposals?archiveFilter=active`),
+    const [action, tension, proposal] = await Promise.all([
+      this.findRestListRecord({
+        path: `/api/workspaces/${this.workspaceId}/actions?archiveFilter=active`,
+        responseKey: "actions",
+        recordId: this.created.action.id,
+        label: "REST action list",
+      }),
+      this.findRestListRecord({
+        path: `/api/workspaces/${this.workspaceId}/tensions?archiveFilter=active`,
+        responseKey: "tensions",
+        recordId: this.created.tension.id,
+        label: "REST tension list",
+      }),
+      this.findRestListRecord({
+        path: `/api/workspaces/${this.workspaceId}/proposals?archiveFilter=active`,
+        responseKey: "proposals",
+        recordId: this.created.proposal.id,
+        label: "REST proposal list",
+      }),
     ]);
-
-    const action = findById(actions.body.actions.items, this.created.action.id, "REST action list");
-    const tension = findById(tensions.body.tensions.items, this.created.tension.id, "REST tension list");
-    const proposal = findById(proposals.body.proposals.items, this.created.proposal.id, "REST proposal list");
 
     assertFields(action, workItemExpectations(member, { type: "action", priority: 2, priorityLabel: "Important" }), "REST action list");
     assertFields(tension, workItemExpectations(member, { type: "tension", priority: 3, priorityLabel: "Urgent" }), "REST tension list");
@@ -415,21 +437,57 @@ export class WorkItemParitySmoke {
     this.record("REST list parity", { actionId: action.id, tensionId: tension.id, proposalId: proposal.id });
   }
 
+  async findRestListRecord({ path: listPath, responseKey, recordId, label }) {
+    const pageSize = 100;
+    for (let skip = 0; ; skip += pageSize) {
+      const separator = listPath.includes("?") ? "&" : "?";
+      const result = await this.sessionFetch(`${listPath}${separator}take=${pageSize}&skip=${skip}`);
+      const collection = result.body?.[responseKey] ?? {};
+      const item = collection.items?.find?.((candidate) => candidate.id === recordId);
+      if (item) return item;
+      const itemCount = collection.items?.length ?? 0;
+      const total = collection.total ?? skip + itemCount;
+      if (itemCount === 0 || skip + itemCount >= total) break;
+    }
+    throw new Error(`${label} did not include record ${recordId}.`);
+  }
+
   async verifyMcpLists(member) {
     const [actions, tensions, proposals] = await Promise.all([
-      this.callTool("list_actions", { take: 100, archiveFilter: "active" }),
-      this.callTool("list_tensions", { take: 100, archiveFilter: "active" }),
-      this.callTool("list_proposals", { take: 100, archiveFilter: "active" }),
+      this.findMcpListRecord({
+        toolName: "list_actions",
+        recordId: this.created.action.id,
+        label: "MCP action list",
+      }),
+      this.findMcpListRecord({
+        toolName: "list_tensions",
+        recordId: this.created.tension.id,
+        label: "MCP tension list",
+      }),
+      this.findMcpListRecord({
+        toolName: "list_proposals",
+        recordId: this.created.proposal.id,
+        label: "MCP proposal list",
+      }),
     ]);
 
-    const action = findById(actions.items, this.created.action.id, "MCP action list");
-    const tension = findById(tensions.items, this.created.tension.id, "MCP tension list");
-    const proposal = findById(proposals.items, this.created.proposal.id, "MCP proposal list");
+    assertFields(actions, workItemExpectations(member, { type: "action", priority: 2, priorityLabel: "Important" }), "MCP action list");
+    assertFields(tensions, workItemExpectations(member, { type: "tension", priority: 3, priorityLabel: "Urgent" }), "MCP tension list");
+    assertFields(proposals, workItemExpectations(member, { type: "proposal", priority: 1, priorityLabel: "Medium" }), "MCP proposal list");
+    this.record("MCP list parity", { actionId: actions.id, tensionId: tensions.id, proposalId: proposals.id });
+  }
 
-    assertFields(action, workItemExpectations(member, { type: "action", priority: 2, priorityLabel: "Important" }), "MCP action list");
-    assertFields(tension, workItemExpectations(member, { type: "tension", priority: 3, priorityLabel: "Urgent" }), "MCP tension list");
-    assertFields(proposal, workItemExpectations(member, { type: "proposal", priority: 1, priorityLabel: "Medium" }), "MCP proposal list");
-    this.record("MCP list parity", { actionId: action.id, tensionId: tension.id, proposalId: proposal.id });
+  async findMcpListRecord({ toolName, recordId, label }) {
+    const pageSize = 100;
+    for (let skip = 0; ; skip += pageSize) {
+      const result = await this.callTool(toolName, { take: pageSize, skip, archiveFilter: "active" });
+      const item = result.items?.find?.((candidate) => candidate.id === recordId);
+      if (item) return item;
+      const itemCount = result.items?.length ?? 0;
+      const total = result.total ?? skip + itemCount;
+      if (itemCount === 0 || skip + itemCount >= total) break;
+    }
+    throw new Error(`${label} did not include record ${recordId}.`);
   }
 
   recordValidationPass() {
@@ -482,6 +540,12 @@ export class WorkItemParitySmoke {
       this.recordValidationFailure(error);
     } finally {
       const cleanup = await this.cleanupRegistry.runAll({ throwOnFailure: false });
+      const cleanupErrorMessage = cleanupFailureMessage(cleanup);
+      if (cleanupErrorMessage && !runError) {
+        runError = new Error(cleanupErrorMessage);
+        this.validationRun.results = [];
+        this.recordValidationFailure(runError);
+      }
       const resultsPath = path.join(this.outDir, "work-item-parity-production-smoke.json");
       await writeFile(resultsPath, `${JSON.stringify({
         runId: this.runId,

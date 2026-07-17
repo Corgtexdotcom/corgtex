@@ -99,6 +99,7 @@ export async function loadTensionWorkItemResponse(workspaceId: string, tensionId
     include: {
       assigneeMember: { include: memberUserInclude },
       raisedByMember: { include: memberUserInclude },
+      upvotes: true,
     },
   });
 }
@@ -108,6 +109,11 @@ export async function loadProposalWorkItemResponse(workspaceId: string, proposal
     where: { id: proposalId, workspaceId },
     include: {
       ownerMember: { include: memberUserInclude },
+      adviceProcess: {
+        include: {
+          requests: true,
+        },
+      },
     },
   });
 }

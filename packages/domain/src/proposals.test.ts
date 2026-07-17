@@ -689,6 +689,13 @@ describe("listProposals", () => {
         { createdAt: "desc" },
         { id: "desc" },
       ],
+      include: expect.objectContaining({
+        adviceProcess: {
+          include: {
+            requests: true,
+          },
+        },
+      }),
     }));
   });
 });

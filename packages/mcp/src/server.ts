@@ -136,6 +136,7 @@ import {
   listWorkItemVersions,
   getWorkItemVersion,
   AppError,
+  classifyMemberIdentity,
   coerceWorkItemPriorityInput,
   normalizeActionWorkItem,
   normalizeProposalWorkItem,
@@ -251,6 +252,7 @@ async function loadTensionWorkItemResponse(workspaceId: string, tensionId: strin
     include: {
       assigneeMember: { include: memberUserInclude },
       raisedByMember: { include: memberUserInclude },
+      upvotes: true,
     },
   }) ?? fallback;
 }
@@ -260,6 +262,11 @@ async function loadProposalWorkItemResponse(workspaceId: string, proposalId: str
     where: { id: proposalId, workspaceId },
     include: {
       ownerMember: { include: memberUserInclude },
+      adviceProcess: {
+        include: {
+          requests: true,
+        },
+      },
     },
   }) ?? fallback;
 }
@@ -2152,8 +2159,11 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
           owner: item.owner,
           responsibleMemberId: item.responsibleMemberId,
           responsibleMemberName: item.responsibleMemberName,
+          responsiblePerson: item.responsiblePerson,
           adviceRequestCount: item.adviceRequestCount,
           activeAdviceRequestCount: item.activeAdviceRequestCount,
+          inputRequestCount: item.inputRequestCount,
+          activeInputRequestCount: item.activeInputRequestCount,
           createdAt: item.createdAt,
         };
       });
@@ -2299,6 +2309,11 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
         owner: item.owner,
         responsibleMemberId: item.responsibleMemberId,
         responsibleMemberName: item.responsibleMemberName,
+        responsiblePerson: item.responsiblePerson,
+        adviceRequestCount: item.adviceRequestCount,
+        activeAdviceRequestCount: item.activeAdviceRequestCount,
+        inputRequestCount: item.inputRequestCount,
+        activeInputRequestCount: item.activeInputRequestCount,
         version: item.version,
         webUrl: webUrl(workspaceId, `/proposals/${proposal.id}`),
         permanentUrl: permanent,
@@ -2342,6 +2357,11 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
         owner: item.owner,
         responsibleMemberId: item.responsibleMemberId,
         responsibleMemberName: item.responsibleMemberName,
+        responsiblePerson: item.responsiblePerson,
+        adviceRequestCount: item.adviceRequestCount,
+        activeAdviceRequestCount: item.activeAdviceRequestCount,
+        inputRequestCount: item.inputRequestCount,
+        activeInputRequestCount: item.activeInputRequestCount,
         version: item.version,
         webUrl: webUrl(workspaceId, `/proposals/${updated.id}`),
       });
@@ -3173,6 +3193,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
         displayName: m.user.displayName,
         email: m.user.email,
         role: m.role,
+        kind: m.kind ?? classifyMemberIdentity(m),
         isActive: m.isActive,
         joinedAt: m.joinedAt,
       }));

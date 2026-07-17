@@ -93,6 +93,12 @@ vi.mock("@corgtex/domain", async () => {
     { flag: "GOALS", label: "Goals", description: "Goals", defaultEnabled: true },
     { flag: "FINANCE", label: "Finance", description: "Finance", defaultEnabled: false },
   ],
+  classifyMemberIdentity: vi.fn((member: { kind?: string | null; user?: { email?: string | null; displayName?: string | null } | null }) => {
+    if (member.kind === "SYSTEM") return "SYSTEM";
+    const email = member.user?.email?.toLowerCase() ?? "";
+    const displayName = member.user?.displayName?.toLowerCase() ?? "";
+    return email.startsWith("system+") || email.startsWith("support+") || displayName === "corgtex support" ? "SYSTEM" : "HUMAN";
+  }),
   coerceWorkItemPriorityInput,
   formatWorkItemPriority,
   normalizeActionWorkItem,

@@ -16,13 +16,24 @@ const createTensionSchema = z.object({
   priorityLabel: z.string().optional().nullable(),
 });
 
+function optionalIntParam(request: NextRequest, name: string) {
+  const value = request.nextUrl.searchParams.get(name);
+  if (!value) return undefined;
+  const parsed = Number.parseInt(value, 10);
+  return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : undefined;
+}
+
 export async function GET(request: NextRequest, { params }: { params: Promise<{ workspaceId: string }> }) {
   try {
     const actor = await resolveRequestActor(request);
     const { workspaceId } = await params;
     await requireWorkspaceMembership({ actor, workspaceId });
     const archiveFilter = request.nextUrl.searchParams.get("archiveFilter") as ArchiveFilter | null;
-    const tensions = await listTensions(actor, workspaceId, { archiveFilter: archiveFilter ?? undefined });
+    const tensions = await listTensions(actor, workspaceId, {
+      archiveFilter: archiveFilter ?? undefined,
+      take: optionalIntParam(request, "take"),
+      skip: optionalIntParam(request, "skip"),
+    });
     return NextResponse.json({
       tensions: {
         ...tensions,
