@@ -196,6 +196,31 @@ describe("planImport", () => {
     })).toThrow(/Unsupported Practice Ledger export schema version: 3/);
   });
 
+  it("rejects PortableRecordBatch records from another module", () => {
+    expect(() => planImport({
+      moduleKey: "another-module",
+      schemaVersion: PRACTICE_FINANCE_SCHEMA_VERSION,
+      records: [
+        { entity: "client", id: "client-1", code: "C001", name: "Client One" },
+      ],
+    })).toThrow(/Unsupported Practice Ledger export module: another-module/);
+  });
+
+  it("counts unknown PortableRecordBatch record types as skipped", () => {
+    const plan = planImport({
+      moduleKey: "practice-ledger",
+      schemaVersion: PRACTICE_FINANCE_SCHEMA_VERSION,
+      records: [
+        { entity: "client", id: "client-1", code: "C001", name: "Client One" },
+        { entity: "new_future_entity", id: "future-1", name: "Future One" },
+      ],
+    });
+
+    expect(plan.counts.planned.clients).toBe(1);
+    expect(plan.counts.skipped.unknownRecords).toBe(1);
+    expect(plan.entities.unknownRecords.skipped[0].reason).toBe("unknown_record_type");
+  });
+
   it("rejects missing required financial quantities and unknown posted-entry statuses", () => {
     const plan = planImport({
       clients: [{ id: "client-1", code: "C001", name: "Client One" }],
@@ -212,6 +237,37 @@ describe("planImport", () => {
 
     expect(plan.counts.skipped.timeEntries).toBe(2);
     expect(plan.counts.skipped.expenses).toBe(1);
+  });
+
+  it("rejects supplied invalid money and impossible calendar dates", () => {
+    const plan = planImport({
+      clients: [{ id: "client-1", code: "C001", name: "Client One" }],
+      consultants: [{ id: "consultant-1", name: "Consultant One" }],
+      projects: [project({ id: "project-1", clientSourceId: "client-1" })],
+      projectLines: [
+        { id: "line-invalid-money", projectId: "project-1", kind: "services", name: "Services", billRateCents: "not-a-number" },
+      ],
+      purchaseOrders: [
+        { id: "po-invalid-date", projectId: "project-1", poNumber: "PO-001", issuedOn: "2026-02-30" },
+      ],
+      paymentBatches: [
+        { id: "batch-invalid-money", consultantId: "consultant-1", totalAmountCents: "bad" },
+      ],
+      timeEntries: [
+        { id: "time-invalid-money", clientId: "client-1", projectId: "project-1", consultantId: "consultant-1", workedOn: "2026-06-10", weekEndingOn: "2026-06-12", hours: 1, billRateCents: "bad" },
+        { id: "time-invalid-date", clientId: "client-1", projectId: "project-1", consultantId: "consultant-1", workedOn: "2026-02-30", weekEndingOn: "2026-06-12", hours: 1 },
+      ],
+      expenses: [
+        { id: "expense-invalid-money", clientId: "client-1", projectId: "project-1", spentOn: "2026-06-11", category: "Travel", businessPurpose: "Workshop", amountCents: 1000, amountFunctionalCents: "bad" },
+        { id: "expense-invalid-date", clientId: "client-1", projectId: "project-1", spentOn: "2026-02-30", category: "Travel", businessPurpose: "Workshop", amountCents: 1000 },
+      ],
+    });
+
+    expect(plan.counts.skipped.projectLines).toBe(1);
+    expect(plan.counts.skipped.purchaseOrders).toBe(1);
+    expect(plan.counts.skipped.paymentBatches).toBe(1);
+    expect(plan.counts.skipped.timeEntries).toBe(2);
+    expect(plan.counts.skipped.expenses).toBe(2);
   });
 
   it("skips dependent records whose parent source id is not in the batch", () => {

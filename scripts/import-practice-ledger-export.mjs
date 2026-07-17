@@ -102,6 +102,7 @@ const VALID_SOURCE_DOCUMENT_TYPES = new Set(["INVOICE", "STATEMENT", "RECEIPT", 
 const VALID_SOURCE_DOCUMENT_STATUSES = new Set(["POSTED", "NEEDS_REVIEW", "ARCHIVED"]);
 const VALID_REVIEW_TARGETS = new Set(["TIME_ENTRY", "EXPENSE"]);
 const VALID_REVIEW_STATUSES = new Set(["DRAFT", "SUBMITTED", "APPROVED", "SETTLED"]);
+const INVALID_IMPORT_VALUE = Symbol("invalid_import_value");
 
 const DEPENDENCIES = {
   billingCodes: [{ field: "clientSourceId", entity: "clients", optional: true }],
@@ -176,9 +177,21 @@ function toCents(value) {
   return Math.round(n);
 }
 
+function toCentsStrict(value) {
+  if (value == null || value === "") return 0;
+  const n = parseFiniteNumber(value);
+  return n == null ? null : Math.round(n);
+}
+
 function toOptionalCents(value) {
   if (value == null || value === "") return undefined;
   return toCents(value);
+}
+
+function toOptionalCentsStrict(value) {
+  if (value == null || value === "") return undefined;
+  const n = parseFiniteNumber(value);
+  return n == null ? null : Math.round(n);
 }
 
 function toRequiredCents(value) {
@@ -198,8 +211,25 @@ function toBpsOrNull(value) {
 function toDate(value) {
   const text = trim(value);
   if (!text) return null;
+  const calendarDate = text.match(/^(\d{4})-(\d{2})-(\d{2})$/);
   const date = new Date(text);
-  return Number.isFinite(date.getTime()) ? date : null;
+  if (!Number.isFinite(date.getTime())) return null;
+  if (calendarDate) {
+    const [, year, month, day] = calendarDate;
+    if (
+      date.getUTCFullYear() !== Number(year)
+      || date.getUTCMonth() + 1 !== Number(month)
+      || date.getUTCDate() !== Number(day)
+    ) {
+      return null;
+    }
+  }
+  return date;
+}
+
+function toOptionalDate(value) {
+  if (value == null || value === "") return null;
+  return toDate(value) ?? INVALID_IMPORT_VALUE;
 }
 
 function toJson(value) {
@@ -239,8 +269,19 @@ function portableRecordEntity(record) {
 
 function portableBatchSchemaVersion(batch) {
   const version = String(batch?.schemaVersion ?? "").trim();
+  const moduleKey = trim(batch?.moduleKey);
+  if (version && moduleKey !== PRACTICE_FINANCE_MODULE_KEY) {
+    throw new Error(`Unsupported Practice Ledger export module: ${moduleKey ?? "missing"}`);
+  }
   if (!version || version === "1" || version === PRACTICE_FINANCE_SCHEMA_VERSION) return version;
   throw new Error(`Unsupported Practice Ledger export schema version: ${version}`);
+}
+
+function unknownPortableRecords(batch) {
+  if (!batch || typeof batch !== "object" || !Array.isArray(batch.records)) return [];
+  const version = portableBatchSchemaVersion(batch);
+  if (version !== PRACTICE_FINANCE_SCHEMA_VERSION) return [];
+  return batch.records.filter((record) => !portableRecordEntity(record));
 }
 
 function entityRecords(batch, entity) {
@@ -313,7 +354,16 @@ function parseProject(record) {
   const name = trim(record.name);
   const clientName = trim(record.clientName ?? record.client);
   const status = normalizeEnumStrict(record.status, VALID_PROJECT_STATUSES, "ACTIVE");
+  const poValueCents = toCentsStrict(record.poValueCents ?? record.budgetCents);
+  const serviceBudgetCents = toCentsStrict(record.serviceBudgetCents);
+  const expenseBudgetCents = toCentsStrict(record.expenseBudgetCents);
+  const usedCents = toCentsStrict(record.usedCents);
+  const weeklyBurnCents = toCentsStrict(record.weeklyBurnCents);
+  const startsOn = hasOwn(record, "startsOn") ? toOptionalDate(record.startsOn) : undefined;
+  const endsOn = hasOwn(record, "endsOn") ? toOptionalDate(record.endsOn) : undefined;
   if (!status) return null;
+  if ([poValueCents, serviceBudgetCents, expenseBudgetCents, usedCents, weeklyBurnCents].some((value) => value == null)) return null;
+  if ([startsOn, endsOn].some((value) => value === INVALID_IMPORT_VALUE)) return null;
   if (!sourceSatelliteId || !code || !name || !clientName) return null;
   return {
     sourceSatelliteId,
@@ -322,15 +372,15 @@ function parseProject(record) {
     clientName,
     status,
     currency: hasOwn(record, "currency") ? trim(record.currency) ?? undefined : undefined,
-    poValueCents: toCents(record.poValueCents ?? record.budgetCents),
-    serviceBudgetCents: toCents(record.serviceBudgetCents),
-    expenseBudgetCents: toCents(record.expenseBudgetCents),
-    usedCents: toCents(record.usedCents),
-    weeklyBurnCents: toCents(record.weeklyBurnCents),
+    poValueCents,
+    serviceBudgetCents,
+    expenseBudgetCents,
+    usedCents,
+    weeklyBurnCents,
     targetMarginBps: toBpsOrNull(record.targetMarginBps),
     currentMarginBps: toBpsOrNull(record.currentMarginBps),
-    startsOn: hasOwn(record, "startsOn") ? toDate(record.startsOn) : undefined,
-    endsOn: hasOwn(record, "endsOn") ? toDate(record.endsOn) : undefined,
+    startsOn,
+    endsOn,
     clientSourceId: optionalRelationSource(record, "clientSourceId", "clientId"),
     billingCodeSourceId: optionalRelationSource(record, "billingCodeSourceId", "billingCodeId"),
   };
@@ -341,16 +391,20 @@ function parseProjectLine(record) {
   const projectSourceId = relationSource(record, "projectSourceId", "projectId", "budgetId");
   const name = trim(record?.name);
   const kind = normalizeEnumStrict(record?.kind, VALID_LINE_KINDS, "SERVICES");
+  const budgetCents = toCentsStrict(record?.budgetCents);
+  const billRateCents = toOptionalCentsStrict(record?.billRateCents);
+  const costRateCents = toOptionalCentsStrict(record?.costRateCents);
   if (!kind) return null;
+  if ([budgetCents, billRateCents, costRateCents].some((value) => value === null)) return null;
   if (!sourceSatelliteId || !projectSourceId || !name) return null;
   return {
     sourceSatelliteId,
     projectSourceId,
     kind,
     name,
-    budgetCents: toCents(record?.budgetCents),
-    billRateCents: toOptionalCents(record?.billRateCents),
-    costRateCents: toOptionalCents(record?.costRateCents),
+    budgetCents,
+    billRateCents,
+    costRateCents,
   };
 }
 
@@ -358,14 +412,19 @@ function parsePurchaseOrder(record) {
   const sourceSatelliteId = sourceId(record);
   const projectSourceId = relationSource(record, "projectSourceId", "projectId", "budgetId");
   const poNumber = trim(record?.poNumber);
+  const amountCents = toCentsStrict(record?.amountCents);
+  const remainingPriorCents = toCentsStrict(record?.remainingPriorCents);
+  const issuedOn = hasOwn(record, "issuedOn") ? toOptionalDate(record?.issuedOn) : undefined;
+  if ([amountCents, remainingPriorCents].some((value) => value == null)) return null;
+  if (issuedOn === INVALID_IMPORT_VALUE) return null;
   if (!sourceSatelliteId || !projectSourceId || !poNumber) return null;
   return {
     sourceSatelliteId,
     projectSourceId,
     poNumber,
-    issuedOn: toDate(record?.issuedOn),
-    amountCents: toCents(record?.amountCents),
-    remainingPriorCents: toCents(record?.remainingPriorCents),
+    issuedOn,
+    amountCents,
+    remainingPriorCents,
   };
 }
 
@@ -406,16 +465,22 @@ function parseSourceDocument(record) {
 function parsePaymentBatch(record) {
   const sourceSatelliteId = sourceId(record);
   const consultantSourceId = relationSource(record, "consultantSourceId", "consultantId");
+  const totalAmountCents = toCentsStrict(record?.totalAmountCents);
+  const cashAmountCents = toCentsStrict(record?.cashAmountCents);
+  const sliceAmountCents = toCentsStrict(record?.sliceAmountCents);
+  const settledAt = hasOwn(record, "settledAt") ? toOptionalDate(record?.settledAt) : undefined;
+  if ([totalAmountCents, cashAmountCents, sliceAmountCents].some((value) => value == null)) return null;
+  if (settledAt === INVALID_IMPORT_VALUE) return null;
   if (!sourceSatelliteId || !consultantSourceId) return null;
   return {
     sourceSatelliteId,
     consultantSourceId,
     currency: trim(record?.currency) ?? "USD",
-    totalAmountCents: toCents(record?.totalAmountCents),
-    cashAmountCents: toCents(record?.cashAmountCents),
-    sliceAmountCents: toCents(record?.sliceAmountCents),
+    totalAmountCents,
+    cashAmountCents,
+    sliceAmountCents,
     memo: trim(record?.memo),
-    settledAt: hasOwn(record, "settledAt") ? toDate(record?.settledAt) : undefined,
+    settledAt,
   };
 }
 
@@ -428,7 +493,13 @@ function parseTimeEntry(record) {
   const weekEndingOn = toDate(record?.weekEndingOn);
   const hours = parseFiniteNumber(record?.hours);
   const status = normalizeEnumStrict(record?.status, VALID_ENTRY_STATUSES, "POSTED");
+  const billRateCents = toCentsStrict(record?.billRateCents);
+  const costRateCents = toCentsStrict(record?.costRateCents);
+  const billAmountCents = toOptionalCentsStrict(record?.billAmountCents);
+  const costAmountCents = toOptionalCentsStrict(record?.costAmountCents);
+  const paidAmountCents = toOptionalCentsStrict(record?.paidAmountCents);
   if (!sourceSatelliteId || !clientSourceId || !projectSourceId || !consultantSourceId || !workedOn || !weekEndingOn || hours == null || !status) return null;
+  if ([billRateCents, costRateCents, billAmountCents, costAmountCents, paidAmountCents].some((value) => value === null)) return null;
   return {
     sourceSatelliteId,
     clientSourceId,
@@ -446,11 +517,11 @@ function parseTimeEntry(record) {
     billCurrency: trim(record?.billCurrency),
     costCurrency: trim(record?.costCurrency),
     functionalCurrency: trim(record?.functionalCurrency),
-    billRateCents: toCents(record?.billRateCents),
-    costRateCents: toCents(record?.costRateCents),
-    billAmountCents: toOptionalCents(record?.billAmountCents),
-    costAmountCents: toOptionalCents(record?.costAmountCents),
-    paidAmountCents: toOptionalCents(record?.paidAmountCents),
+    billRateCents,
+    costRateCents,
+    billAmountCents,
+    costAmountCents,
+    paidAmountCents,
     status,
     idempotencyKey: trim(record?.idempotencyKey),
   };
@@ -465,7 +536,9 @@ function parseExpense(record) {
   const businessPurpose = trim(record?.businessPurpose);
   const amountCents = toRequiredCents(record?.amountCents);
   const status = normalizeEnumStrict(record?.status, VALID_ENTRY_STATUSES, "POSTED");
+  const amountFunctionalCents = toOptionalCentsStrict(record?.amountFunctionalCents);
   if (!sourceSatelliteId || !clientSourceId || !projectSourceId || !spentOn || !category || !businessPurpose || amountCents == null || !status) return null;
+  if (amountFunctionalCents === null) return null;
   return {
     sourceSatelliteId,
     clientSourceId,
@@ -481,7 +554,7 @@ function parseExpense(record) {
     businessPurpose,
     amountCents,
     currency: trim(record?.currency) ?? "USD",
-    amountFunctionalCents: toOptionalCents(record?.amountFunctionalCents),
+    amountFunctionalCents,
     functionalCurrency: trim(record?.functionalCurrency),
     billable: record?.billable !== false,
     status,
@@ -596,6 +669,7 @@ export function planImport(batch) {
   const available = Object.fromEntries(ENTITY_ORDER.map((entity) => [entity, new Set()]));
   const rowsByEntity = Object.fromEntries(ENTITY_ORDER.map((entity) => [entity, new Map()]));
   const seenUniqueKeys = new Set();
+  const unknownSkipped = unknownPortableRecords(batch).map((record) => ({ reason: "unknown_record_type", record }));
 
   for (const entity of ENTITY_ORDER) {
     const parser = PARSERS[entity];
@@ -644,12 +718,17 @@ export function planImport(batch) {
     counts.planned[entity] = entities[entity].valid.length;
     counts.skipped[entity] = entities[entity].skipped.length;
   }
+  if (unknownSkipped.length > 0) {
+    entities.unknownRecords = { valid: [], skipped: unknownSkipped };
+    counts.planned.unknownRecords = 0;
+    counts.skipped.unknownRecords = unknownSkipped.length;
+  }
 
   return {
     entities,
     counts,
     valid: entities.projects.valid,
-    skipped: entities.projects.skipped,
+    skipped: [...entities.projects.skipped, ...unknownSkipped],
   };
 }
 
