@@ -1116,11 +1116,9 @@ export type NativePracticeFinanceDashboard = {
 export type NativePracticeProjectDetail = {
   project: Prisma.PracticeProjectGetPayload<{
     include: {
-      assignments: { include: { consultant: true } };
       billingCode: true;
       client: true;
-      lines: true;
-      purchaseOrders: true;
+      _count: { select: { assignments: true; lines: true; purchaseOrders: true } };
     };
   }>;
   health: NativePracticeProjectHealth;
@@ -1979,17 +1977,14 @@ export async function getNativePracticeProjectDetail(
   const project = await prisma.practiceProject.findUnique({
     where: { id },
     include: {
-      assignments: {
-        include: { consultant: true },
-        orderBy: [{ role: "asc" }, { id: "asc" }],
-      },
       billingCode: true,
       client: true,
-      lines: {
-        orderBy: [{ kind: "asc" }, { name: "asc" }, { id: "asc" }],
-      },
-      purchaseOrders: {
-        orderBy: [{ issuedOn: "desc" }, { poNumber: "asc" }, { id: "asc" }],
+      _count: {
+        select: {
+          assignments: true,
+          lines: true,
+          purchaseOrders: true,
+        },
       },
     },
   });

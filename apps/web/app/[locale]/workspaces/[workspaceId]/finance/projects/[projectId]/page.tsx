@@ -146,11 +146,11 @@ export default async function PracticeProjectDetailPage({
           </div>
           <div>
             <div style={labelStyle}>Purchase orders</div>
-            <div>{project.purchaseOrders.length}</div>
+            <div>{project._count.purchaseOrders}</div>
           </div>
           <div>
             <div style={labelStyle}>Assignments</div>
-            <div>{project.assignments.length}</div>
+            <div>{project._count.assignments}</div>
           </div>
         </div>
       </div>
