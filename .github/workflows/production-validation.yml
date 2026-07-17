@@ -35,6 +35,15 @@ on:
         required: true
         type: boolean
         default: true
+      recorder_readiness_smoke:
+        description: Run the configured customer recorder readiness production smoke.
+        required: true
+        type: boolean
+        default: true
+      recorder_readiness_deployments:
+        description: Comma-separated deployment ids, slugs, labels, or managed workspace slugs for recorder readiness.
+        required: false
+        default: managed-recorder-validation
 
 permissions:
   contents: read
@@ -664,4 +673,162 @@ jobs:
         with:
           name: production-validation-briefing-fixture
           path: .artifacts/production-validation/briefing-fixture
+          if-no-files-found: warn
+
+  recorder-readiness-production-smoke:
+    name: Recorder Readiness Smoke
+    if: ${{ inputs.recorder_readiness_smoke }}
+    runs-on: ubuntu-latest
+    environment: fleet-release-production
+    timeout-minutes: 10
+    env:
+      OUT_DIR: .artifacts/production-validation/recorder-readiness
+      PR_NUMBERS: ${{ inputs.pr_numbers }}
+      DEPLOYMENTS: ${{ inputs.recorder_readiness_deployments }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Validate production validation inputs
+        id: validation_inputs
+        shell: bash
+        env:
+          BASE_URL_INPUT: ${{ inputs.base_url }}
+          EXPECTED_GIT_SHA_INPUT: ${{ inputs.expected_git_sha }}
+        run: |
+          set -euo pipefail
+          node <<'NODE'
+          const fs = require("node:fs");
+
+          const baseUrlInput = String(process.env.BASE_URL_INPUT || "").trim();
+          let baseUrl;
+          try {
+            baseUrl = new URL(baseUrlInput);
+          } catch {
+            throw new Error("base_url must be a valid URL.");
+          }
+          if (baseUrl.origin !== "https://app.corgtex.com" || !["", "/"].includes(baseUrl.pathname) || baseUrl.search || baseUrl.hash) {
+            throw new Error("base_url must be exactly https://app.corgtex.com.");
+          }
+
+          const expectedInput = String(process.env.EXPECTED_GIT_SHA_INPUT || "").trim();
+          const expectedGitSha = expectedInput || process.env.GITHUB_SHA;
+          if (!/^[a-f0-9]{40}$/i.test(expectedGitSha || "")) {
+            throw new Error("expected_git_sha must be a 40-character git SHA when provided.");
+          }
+          const workflowGitSha = String(process.env.GITHUB_SHA || "").trim().toLowerCase();
+          if (!/^[a-f0-9]{40}$/i.test(workflowGitSha)) {
+            throw new Error("GITHUB_SHA must be a 40-character git SHA.");
+          }
+          if (process.env.GITHUB_REF === "refs/heads/main" && expectedGitSha.toLowerCase() !== workflowGitSha) {
+            throw new Error(`recorder readiness smoke imports repository code and must run from the same revision expected in production; expected_git_sha=${expectedGitSha.toLowerCase()} workflow_sha=${workflowGitSha}`);
+          }
+
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, `base_url=${baseUrl.origin}\n`);
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, `expected_git_sha=${expectedGitSha.toLowerCase()}\n`);
+          fs.appendFileSync(process.env.GITHUB_ENV, `BASE_URL=${baseUrl.origin}\n`);
+          NODE
+
+      - name: Check trusted workflow ref
+        id: trusted_ref
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "$GITHUB_REF" = "refs/heads/main" ]; then
+            echo "trusted=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "trusted=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Prepare validation artifact directory
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$OUT_DIR"
+          {
+            echo "workflow=$GITHUB_WORKFLOW"
+            echo "run_id=$GITHUB_RUN_ID"
+            echo "sha=$GITHUB_SHA"
+            echo "base_url=$BASE_URL"
+            echo "deployments=$DEPLOYMENTS"
+            echo "pr_numbers=$PR_NUMBERS"
+            echo "expected_git_sha=${{ steps.validation_inputs.outputs.expected_git_sha }}"
+          } > "$OUT_DIR/workflow.log"
+
+      - name: Check recorder readiness prerequisites
+        if: steps.trusted_ref.outputs.trusted == 'true'
+        id: credentials
+        shell: bash
+        env:
+          DATABASE_URL: ${{ secrets.PRODUCTION_DATABASE_URL }}
+          CONTROL_PLANE_AGENT_API_KEY: ${{ secrets.CONTROL_PLANE_AGENT_API_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "$DATABASE_URL" ] || [ -z "$CONTROL_PLANE_AGENT_API_KEY" ]; then
+            echo "available=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Record blocked recorder readiness validation for untrusted ref
+        if: steps.trusted_ref.outputs.trusted != 'true'
+        run: |
+          node scripts/production-validation-blocked.mjs \
+            --out-dir="$OUT_DIR" \
+            --base-url="$BASE_URL" \
+            --tenant-slug="fleet-recorder-readiness" \
+            --pr-numbers="$PR_NUMBERS" \
+            --method="recorder-readiness-production-smoke" \
+            --intent="Configured customer recorder readiness across control-plane, tenant config, vendor, calendar, meetings, and live proof gates" \
+            --blocker="Production recorder readiness validation with database secrets must be dispatched from refs/heads/main."
+
+      - name: Record blocked recorder readiness validation for missing database access
+        if: steps.trusted_ref.outputs.trusted == 'true' && steps.credentials.outputs.available != 'true'
+        run: |
+          node scripts/production-validation-blocked.mjs \
+            --out-dir="$OUT_DIR" \
+            --base-url="$BASE_URL" \
+            --tenant-slug="fleet-recorder-readiness" \
+            --pr-numbers="$PR_NUMBERS" \
+            --method="recorder-readiness-production-smoke" \
+            --intent="Configured customer recorder readiness across control-plane, tenant config, vendor, calendar, meetings, and live proof gates" \
+            --blocker="PRODUCTION_DATABASE_URL and CONTROL_PLANE_AGENT_API_KEY production smoke secrets are required for read-only recorder readiness."
+
+      - run: npm ci
+        if: steps.trusted_ref.outputs.trusted == 'true' && steps.credentials.outputs.available == 'true'
+
+      - name: Run recorder readiness production smoke
+        if: steps.trusted_ref.outputs.trusted == 'true' && steps.credentials.outputs.available == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          npx tsx scripts/recorder-readiness-production-smoke.mjs "$BASE_URL" "$OUT_DIR" 2>&1 | tee "$OUT_DIR/recorder-readiness-production-smoke.log"
+        env:
+          RECORDER_READINESS_SMOKE_DEPLOYMENTS: ${{ env.DEPLOYMENTS }}
+          RECORDER_READINESS_SMOKE_PR_NUMBERS: ${{ env.PR_NUMBERS }}
+          RECORDER_READINESS_SMOKE_EXPECTED_GIT_SHA: ${{ steps.validation_inputs.outputs.expected_git_sha }}
+          CONTROL_PLANE_AGENT_API_KEY: ${{ secrets.CONTROL_PLANE_AGENT_API_KEY }}
+          DATABASE_URL: ${{ secrets.PRODUCTION_DATABASE_URL }}
+
+      - name: Add validation report to summary
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          report="$(find "$OUT_DIR" -maxdepth 1 -name '*.report.md' -print -quit 2>/dev/null || true)"
+          if [ -n "$report" ]; then
+            cat "$report" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "No recorder readiness validation report was produced." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: production-validation-recorder-readiness
+          path: .artifacts/production-validation/recorder-readiness
           if-no-files-found: warn
