@@ -32,6 +32,7 @@ const { prismaMock, requireWorkspaceMembershipMock } = vi.hoisted(() => {
       create: vi.fn(),
       findFirst: vi.fn(),
       findMany: vi.fn(),
+      update: vi.fn(),
     },
     practiceExpense: {
       create: vi.fn(),
@@ -1474,6 +1475,7 @@ describe("practice-finance I/O", () => {
     prismaMock.practiceConsultant.create.mockResolvedValue({ id: "consultant-1" });
     prismaMock.practiceConsultant.findFirst.mockResolvedValue(null);
     prismaMock.practiceConsultant.findMany.mockResolvedValue([]);
+    prismaMock.practiceConsultant.update.mockResolvedValue({ id: "consultant-1" });
     prismaMock.practiceExpense.create.mockResolvedValue({
       id: "expense-1",
       workspaceId: "workspace-1",
@@ -2332,9 +2334,12 @@ describe("practice-finance I/O", () => {
     expect(prismaMock.practiceConsultant.findMany).toHaveBeenCalledWith({
       where: {
         workspaceId: "workspace-1",
-        email: { equals: "priya@example.test", mode: "insensitive" },
+        OR: [
+          { email: { equals: "priya@example.test", mode: "insensitive" } },
+          { name: { equals: "Priya Shah", mode: "insensitive" } },
+        ],
       },
-      select: { id: true },
+      select: { id: true, name: true, email: true },
       orderBy: [{ id: "asc" }],
       take: 2,
     });
@@ -2384,7 +2389,11 @@ describe("practice-finance I/O", () => {
       clientName: "Example",
       currency: "USD",
     });
-    prismaMock.practiceConsultant.findMany.mockResolvedValueOnce([{ id: "consultant-2" }]);
+    prismaMock.practiceConsultant.findMany.mockResolvedValueOnce([{
+      id: "consultant-2",
+      name: "Priya Shah",
+      email: "priya@example.test",
+    }]);
 
     await createNativePracticeExpense(actor, "workspace-1", {
       projectId: "project-1",
@@ -2418,6 +2427,57 @@ describe("practice-finance I/O", () => {
         functionalCurrency: "USD",
         billable: false,
         status: "POSTED",
+      }),
+    });
+  });
+
+  it("reuses a name-only consultant when a later native entry includes email", async () => {
+    prismaMock.practiceProject.findUnique.mockResolvedValueOnce({
+      id: "project-1",
+      workspaceId: "workspace-1",
+      crmAccountId: "account-1",
+      clientId: "client-existing",
+      billingCodeId: "billing-1",
+      code: "EXAMPLE-1",
+      clientName: "Example",
+      currency: "USD",
+    });
+    prismaMock.practiceConsultant.findMany
+      .mockResolvedValueOnce([{
+        id: "consultant-name-only",
+        name: "Priya Shah",
+        email: null,
+      }])
+      .mockResolvedValueOnce([{
+        id: "consultant-name-only",
+        name: "Priya Shah",
+        email: null,
+      }]);
+    prismaMock.practiceConsultant.update.mockResolvedValueOnce({ id: "consultant-name-only" });
+
+    await createNativePracticeTimeEntry(actor, "workspace-1", {
+      projectId: "project-1",
+      consultantName: "Priya Shah",
+      consultantEmail: "priya@example.test",
+      workedOn: new Date("2026-06-18T00:00:00.000Z"),
+      hours: 2.5,
+      billRateCents: 12_000,
+      costRateCents: 8_000,
+    });
+
+    expect(prismaMock.$transaction).toHaveBeenCalled();
+    expect(prismaMock.$queryRaw).toHaveBeenCalledTimes(2);
+    expect(prismaSqlText(prismaMock.$queryRaw.mock.calls[0]?.[0])).toContain("pg_advisory_xact_lock");
+    expect(prismaSqlText(prismaMock.$queryRaw.mock.calls[1]?.[0])).toContain("pg_advisory_xact_lock");
+    expect(prismaMock.practiceConsultant.update).toHaveBeenCalledWith({
+      where: { id: "consultant-name-only" },
+      data: { email: "priya@example.test" },
+      select: { id: true },
+    });
+    expect(prismaMock.practiceConsultant.create).not.toHaveBeenCalled();
+    expect(prismaMock.practiceTimeEntry.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        consultantId: "consultant-name-only",
       }),
     });
   });

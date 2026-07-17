@@ -2093,13 +2093,30 @@ function nativePracticeConsultantLookupWhere(params: {
   displayName: string;
   email: string | null;
 }) {
+  const nameLookup = { name: { equals: params.displayName, mode: "insensitive" as const } };
+  if (params.email && params.displayName !== params.email) {
+    return {
+      workspaceId: params.workspaceId,
+      OR: [
+        { email: { equals: params.email, mode: "insensitive" as const } },
+        nameLookup,
+      ],
+    };
+  }
+
   return {
     workspaceId: params.workspaceId,
     ...(params.email
       ? { email: { equals: params.email, mode: "insensitive" as const } }
-      : { name: { equals: params.displayName, mode: "insensitive" as const } }),
+      : nameLookup),
   };
 }
+
+type NativePracticeConsultantMatch = {
+  id: string;
+  name: string;
+  email: string | null;
+};
 
 async function findNativePracticeConsultantMatches(
   db: PracticeFinanceDbClient,
@@ -2111,14 +2128,14 @@ async function findNativePracticeConsultantMatches(
 ) {
   return db.practiceConsultant.findMany({
     where: nativePracticeConsultantLookupWhere(params),
-    select: { id: true },
+    select: { id: true, name: true, email: true },
     orderBy: [{ id: "asc" }],
     take: 2,
   });
 }
 
 function assertUnambiguousNativePracticeConsultant(
-  matches: Array<{ id: string }>,
+  matches: NativePracticeConsultantMatch[],
   email: string | null,
 ) {
   invariant(
@@ -2131,22 +2148,67 @@ function assertUnambiguousNativePracticeConsultant(
   );
 }
 
-function nativePracticeConsultantIdentityLockKey(params: {
+function nativePracticeConsultantEmailEquals(email: string | null, expected: string) {
+  return email?.toLocaleLowerCase("en-US") === expected;
+}
+
+function assertNativePracticeConsultantMatchUsable(
+  match: NativePracticeConsultantMatch,
+  email: string | null,
+) {
+  invariant(
+    !email || !match.email || nativePracticeConsultantEmailEquals(match.email, email),
+    409,
+    "AMBIGUOUS_CONSULTANT",
+    "Consultant name matches an existing consultant with a different email; resolve duplicate consultants.",
+  );
+}
+
+function nativePracticeConsultantMatchNeedsEmail(
+  match: NativePracticeConsultantMatch,
+  email: string | null,
+) {
+  return Boolean(email && !match.email);
+}
+
+async function applyNativePracticeConsultantMatch(
+  db: PracticeFinanceDbClient,
+  match: NativePracticeConsultantMatch,
+  email: string | null,
+) {
+  assertNativePracticeConsultantMatchUsable(match, email);
+  if (!nativePracticeConsultantMatchNeedsEmail(match, email)) return match.id;
+  const updated = await db.practiceConsultant.update({
+    where: { id: match.id },
+    data: { email },
+    select: { id: true },
+  });
+  return updated.id;
+}
+
+function nativePracticeConsultantIdentityLockKeys(params: {
   workspaceId: string;
   displayName: string;
   email: string | null;
 }) {
-  const identity = params.email
-    ? `email:${params.email}`
-    : `name:${params.displayName.toLocaleLowerCase("en-US")}`;
-  return `native-practice-consultant:${params.workspaceId}:${identity}`;
+  const identities = new Set<string>();
+  if (params.email) identities.add(`email:${params.email}`);
+  if (params.displayName !== params.email) {
+    identities.add(`name:${params.displayName.toLocaleLowerCase("en-US")}`);
+  }
+  if (identities.size === 0) identities.add(`name:${params.displayName.toLocaleLowerCase("en-US")}`);
+  return Array.from(identities)
+    .sort()
+    .map((identity) => `native-practice-consultant:${params.workspaceId}:${identity}`);
 }
 
 async function lockNativePracticeConsultantIdentity(
   tx: Prisma.TransactionClient,
-  lockKey: string,
+  lockKeys: string[],
 ) {
-  await tx.$queryRaw(Prisma.sql`SELECT pg_advisory_xact_lock(hashtextextended(${lockKey}, 0))`);
+  for (const lockKey of lockKeys) {
+    await tx.$queryRaw(Prisma.sql`SELECT pg_advisory_xact_lock(hashtextextended(${lockKey}, 0))`);
+  }
 }
 
 async function ensureNativePracticeClientForProject(project: Awaited<ReturnType<typeof loadNativePracticeProjectForLedgerWrite>>) {
@@ -2285,7 +2347,9 @@ async function resolveNativePracticeConsultant(params: {
   const lookup = { workspaceId: params.workspaceId, displayName, email };
   const matches = await findNativePracticeConsultantMatches(prisma, lookup);
   assertUnambiguousNativePracticeConsultant(matches, email);
-  if (matches[0]) return matches[0].id;
+  if (matches[0] && !nativePracticeConsultantMatchNeedsEmail(matches[0], email)) {
+    return applyNativePracticeConsultantMatch(prisma, matches[0], email);
+  }
 
   const sourceSatelliteId = manualLedgerConsultantSourceId(params.idempotencyKey);
   if (sourceSatelliteId) {
@@ -2297,11 +2361,11 @@ async function resolveNativePracticeConsultant(params: {
   }
 
   return prisma.$transaction(async (tx) => {
-    await lockNativePracticeConsultantIdentity(tx, nativePracticeConsultantIdentityLockKey(lookup));
+    await lockNativePracticeConsultantIdentity(tx, nativePracticeConsultantIdentityLockKeys(lookup));
 
     const lockedMatches = await findNativePracticeConsultantMatches(tx, lookup);
     assertUnambiguousNativePracticeConsultant(lockedMatches, email);
-    if (lockedMatches[0]) return lockedMatches[0].id;
+    if (lockedMatches[0]) return applyNativePracticeConsultantMatch(tx, lockedMatches[0], email);
 
     if (sourceSatelliteId) {
       const sourceMatch = await tx.practiceConsultant.findFirst({
