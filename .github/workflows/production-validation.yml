@@ -30,6 +30,11 @@ on:
         required: true
         type: boolean
         default: true
+      briefing_fixture_smoke:
+        description: Run the deterministic briefing fixture production smoke.
+        required: true
+        type: boolean
+        default: true
 
 permissions:
   contents: read
@@ -496,4 +501,167 @@ jobs:
         with:
           name: production-validation-work-item-parity
           path: .artifacts/production-validation/work-item-parity
+          if-no-files-found: warn
+
+  briefing-fixture-production-smoke:
+    name: Briefing Fixture Smoke
+    if: ${{ inputs.briefing_fixture_smoke }}
+    runs-on: ubuntu-latest
+    environment: fleet-release-production
+    timeout-minutes: 15
+    concurrency:
+      group: production-validation-briefing-fixture-corgtex-validation
+      cancel-in-progress: false
+    env:
+      OUT_DIR: .artifacts/production-validation/briefing-fixture
+      PR_NUMBERS: ${{ inputs.pr_numbers }}
+      WORKSPACE_SLUG: corgtex-validation
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Validate production validation inputs
+        id: validation_inputs
+        shell: bash
+        env:
+          BASE_URL_INPUT: ${{ inputs.base_url }}
+          EXPECTED_GIT_SHA_INPUT: ${{ inputs.expected_git_sha }}
+        run: |
+          set -euo pipefail
+          node <<'NODE'
+          const fs = require("node:fs");
+
+          const baseUrlInput = String(process.env.BASE_URL_INPUT || "").trim();
+          let baseUrl;
+          try {
+            baseUrl = new URL(baseUrlInput);
+          } catch {
+            throw new Error("base_url must be a valid URL.");
+          }
+          if (baseUrl.origin !== "https://app.corgtex.com" || !["", "/"].includes(baseUrl.pathname) || baseUrl.search || baseUrl.hash) {
+            throw new Error("base_url must be exactly https://app.corgtex.com.");
+          }
+
+          const expectedInput = String(process.env.EXPECTED_GIT_SHA_INPUT || "").trim();
+          const expectedGitSha = expectedInput || process.env.GITHUB_SHA;
+          if (!/^[a-f0-9]{40}$/i.test(expectedGitSha || "")) {
+            throw new Error("expected_git_sha must be a 40-character git SHA when provided.");
+          }
+          const workflowGitSha = String(process.env.GITHUB_SHA || "").trim().toLowerCase();
+          if (!/^[a-f0-9]{40}$/i.test(workflowGitSha)) {
+            throw new Error("GITHUB_SHA must be a 40-character git SHA.");
+          }
+          if (process.env.GITHUB_REF === "refs/heads/main" && expectedGitSha.toLowerCase() !== workflowGitSha) {
+            throw new Error(`briefing fixture smoke imports repository code and must run from the same revision expected in production; expected_git_sha=${expectedGitSha.toLowerCase()} workflow_sha=${workflowGitSha}`);
+          }
+
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, `base_url=${baseUrl.origin}\n`);
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, `expected_git_sha=${expectedGitSha.toLowerCase()}\n`);
+          fs.appendFileSync(process.env.GITHUB_ENV, `BASE_URL=${baseUrl.origin}\n`);
+          NODE
+
+      - name: Check trusted workflow ref
+        id: trusted_ref
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "$GITHUB_REF" = "refs/heads/main" ]; then
+            echo "trusted=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "trusted=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Prepare validation artifact directory
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$OUT_DIR"
+          {
+            echo "workflow=$GITHUB_WORKFLOW"
+            echo "run_id=$GITHUB_RUN_ID"
+            echo "sha=$GITHUB_SHA"
+            echo "base_url=$BASE_URL"
+            echo "workspace_slug=$WORKSPACE_SLUG"
+            echo "pr_numbers=$PR_NUMBERS"
+            echo "expected_git_sha=${{ steps.validation_inputs.outputs.expected_git_sha }}"
+          } > "$OUT_DIR/workflow.log"
+
+      - name: Check production smoke credentials
+        if: steps.trusted_ref.outputs.trusted == 'true'
+        id: credentials
+        shell: bash
+        env:
+          BRIEFING_FIXTURE_SMOKE_EMAIL: ${{ secrets.PRODUCTION_VALIDATION_ADMIN_EMAIL || secrets.ADMIN_EMAIL }}
+          BRIEFING_FIXTURE_SMOKE_PASSWORD: ${{ secrets.PRODUCTION_VALIDATION_ADMIN_PASSWORD || secrets.ADMIN_PASSWORD }}
+          DATABASE_URL: ${{ secrets.PRODUCTION_DATABASE_URL }}
+        run: |
+          set -euo pipefail
+          if [ -z "$BRIEFING_FIXTURE_SMOKE_EMAIL" ] || [ -z "$BRIEFING_FIXTURE_SMOKE_PASSWORD" ] || [ -z "$DATABASE_URL" ]; then
+            echo "available=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Record blocked briefing fixture validation for untrusted ref
+        if: steps.trusted_ref.outputs.trusted != 'true'
+        run: |
+          node scripts/production-validation-blocked.mjs \
+            --out-dir="$OUT_DIR" \
+            --base-url="$BASE_URL" \
+            --tenant-slug="$WORKSPACE_SLUG" \
+            --pr-numbers="$PR_NUMBERS" \
+            --method="briefing-fixture-production-smoke" \
+            --intent="Deterministic workspace briefing fixture proves ranking, recency, stale context, source labels, and dashboard display" \
+            --blocker="Production briefing fixture validation with admin and database secrets must be dispatched from refs/heads/main."
+
+      - name: Record blocked briefing fixture validation for missing credentials
+        if: steps.trusted_ref.outputs.trusted == 'true' && steps.credentials.outputs.available != 'true'
+        run: |
+          node scripts/production-validation-blocked.mjs \
+            --out-dir="$OUT_DIR" \
+            --base-url="$BASE_URL" \
+            --tenant-slug="$WORKSPACE_SLUG" \
+            --pr-numbers="$PR_NUMBERS" \
+            --method="briefing-fixture-production-smoke" \
+            --intent="Deterministic workspace briefing fixture proves ranking, recency, stale context, source labels, and dashboard display" \
+            --blocker="PRODUCTION_VALIDATION_ADMIN_EMAIL/PASSWORD or ADMIN_EMAIL/PASSWORD and PRODUCTION_DATABASE_URL production smoke secrets are required."
+
+      - run: npm ci
+        if: steps.trusted_ref.outputs.trusted == 'true' && steps.credentials.outputs.available == 'true'
+
+      - name: Run briefing fixture production smoke
+        if: steps.trusted_ref.outputs.trusted == 'true' && steps.credentials.outputs.available == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          npx tsx scripts/briefing-fixture-production-smoke.mjs "$BASE_URL" "$OUT_DIR" 2>&1 | tee "$OUT_DIR/briefing-fixture-production-smoke.log"
+        env:
+          BRIEFING_FIXTURE_SMOKE_EMAIL: ${{ secrets.PRODUCTION_VALIDATION_ADMIN_EMAIL || secrets.ADMIN_EMAIL }}
+          BRIEFING_FIXTURE_SMOKE_PASSWORD: ${{ secrets.PRODUCTION_VALIDATION_ADMIN_PASSWORD || secrets.ADMIN_PASSWORD }}
+          BRIEFING_FIXTURE_SMOKE_WORKSPACE_SLUG: ${{ env.WORKSPACE_SLUG }}
+          BRIEFING_FIXTURE_SMOKE_PR_NUMBERS: ${{ env.PR_NUMBERS }}
+          BRIEFING_FIXTURE_SMOKE_EXPECTED_GIT_SHA: ${{ steps.validation_inputs.outputs.expected_git_sha }}
+          DATABASE_URL: ${{ secrets.PRODUCTION_DATABASE_URL }}
+
+      - name: Add validation report to summary
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          report="$(find "$OUT_DIR" -maxdepth 1 -name '*.report.md' -print -quit 2>/dev/null || true)"
+          if [ -n "$report" ]; then
+            cat "$report" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "No briefing fixture validation report was produced." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: production-validation-briefing-fixture
+          path: .artifacts/production-validation/briefing-fixture
           if-no-files-found: warn
