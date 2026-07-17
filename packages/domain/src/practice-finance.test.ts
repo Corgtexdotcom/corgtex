@@ -463,6 +463,21 @@ describe("practice-finance pure derivations", () => {
     }
   });
 
+  it("canonicalizes equivalent native project currency labels before summarizing", () => {
+    const uppercase = calculateNativePracticeProjectHealth({
+      project: nativeProject({ id: "uppercase", currency: "USD" }),
+      timeEntries: [],
+      expenses: [],
+    });
+    const lowercase = calculateNativePracticeProjectHealth({
+      project: nativeProject({ id: "lowercase", currency: "usd" }),
+      timeEntries: [],
+      expenses: [],
+    });
+
+    expect(summarizeNativePracticeFinance([uppercase, lowercase]).activeProjects).toBe(2);
+  });
+
   it("rejects ledger rows that are not normalized to the native project currency", () => {
     try {
       calculateNativePracticeProjectHealth({
@@ -486,6 +501,19 @@ describe("practice-finance pure derivations", () => {
         ],
       });
       throw new Error("Expected mixed expense currencies to be rejected.");
+    } catch (error) {
+      expect(error).toMatchObject({ code: "MIXED_CURRENCY" });
+    }
+
+    try {
+      calculateNativePracticeProjectHealth({
+        project: nativeProject({ currency: "USD" }),
+        timeEntries: [],
+        expenses: [
+          nativeExpense({ currency: "EUR", functionalCurrency: "USD", amountFunctionalCents: null }),
+        ],
+      });
+      throw new Error("Expected expenses without functional amounts to use their source currency.");
     } catch (error) {
       expect(error).toMatchObject({ code: "MIXED_CURRENCY" });
     }

@@ -316,12 +316,19 @@ function assertNativePracticeTimeEntryCurrency(project: NativePracticeProject, e
 
 function assertNativePracticeExpenseCurrency(project: NativePracticeProject, expense: NativePracticeExpense) {
   const projectCurrency = normalizeCurrencyCode(project.currency);
-  const expenseCurrency = firstCurrencyCode(expense.functionalCurrency, expense.currency);
+  const expenseCurrency = practiceExpenseAmountCurrency(expense);
   invariant(
     expenseCurrency === projectCurrency,
     400,
     "MIXED_CURRENCY",
     "Native practice finance requires expenses to be normalized to the project currency.",
+  );
+}
+
+function practiceExpenseAmountCurrency(expense: NativePracticeExpense): string | null {
+  return firstCurrencyCode(
+    expense.amountFunctionalCents == null ? null : expense.functionalCurrency,
+    expense.currency,
   );
 }
 
@@ -402,7 +409,7 @@ function assertSingleNativePracticeLedgerCurrency(
     if (costCurrency) currencies.add(costCurrency);
   }
   for (const expense of expenses) {
-    const expenseCurrency = firstCurrencyCode(expense.functionalCurrency, expense.currency);
+    const expenseCurrency = practiceExpenseAmountCurrency(expense);
     if (expenseCurrency) currencies.add(expenseCurrency);
   }
   invariant(currencies.size <= 1, 400, "MIXED_CURRENCY", message);
@@ -555,7 +562,7 @@ export function calculateNativePracticeProjectHealthFromRollup(params: {
 
 export function summarizeNativePracticeFinance(health: NativePracticeProjectHealth[]): NativePracticeFinanceSummary {
   const active = health.filter((item) => item.status === "ACTIVE");
-  const currencies = new Set(active.map((item) => item.currency));
+  const currencies = new Set(active.map((item) => normalizeCurrencyCode(item.currency)));
   invariant(
     currencies.size <= 1,
     400,
@@ -1318,7 +1325,10 @@ export async function listNativePracticeProjectHealth(
         ), 0)::bigint AS "recentDirectExpenseCents",
         COALESCE(SUM(
           CASE WHEN UPPER(COALESCE(
-              NULLIF(BTRIM(e."functionalCurrency"), ''),
+              CASE WHEN e."amountFunctionalCents" IS NOT NULL
+                THEN NULLIF(BTRIM(e."functionalCurrency"), '')
+                ELSE NULL
+              END,
               NULLIF(BTRIM(e."currency"), '')
             )) <> UPPER(NULLIF(BTRIM(p."currency"), ''))
             THEN 1
