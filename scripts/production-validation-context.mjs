@@ -27,7 +27,6 @@ const CLIENT_READINESS_ROUTE_NAMES = new Set([
   "settings",
   "chat",
   "leads",
-  "cycles",
   "agents",
   "governance",
   "operator",

@@ -150,9 +150,9 @@ describe("production validation context", () => {
       eventName: "workflow_dispatch",
       event: { inputs: {} },
       githubRef: "refs/heads/main",
-      clientReadinessRoutesInput: "relationships",
+      clientReadinessRoutesInput: "relationships,cycles",
       changedFiles: [],
-    })).toThrow("client_readiness_routes contains unsupported route name(s): relationships");
+    })).toThrow("client_readiness_routes contains unsupported route name(s): relationships, cycles");
   });
 
   it("keeps scheduled runs release-agnostic unless an explicit SHA is supplied", () => {
