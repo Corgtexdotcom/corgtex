@@ -11,12 +11,13 @@ import { isWorkspaceFeatureEnabled, requireWorkspaceFeature } from "@/lib/worksp
 import { createNativePracticeExpenseAction } from "../actions";
 import {
   PracticeFinanceNav,
-  formGridStyle,
+  expenseAmount,
   formatDate,
   money,
   nextHref,
   statusLabel,
 } from "../components";
+import { PracticeExpenseSubmitForm } from "./PracticeExpenseSubmitForm";
 
 export const dynamic = "force-dynamic";
 
@@ -72,39 +73,18 @@ export default async function PracticeExpensesPage({
       </header>
 
       {canSubmit && (
-        <form action={createNativePracticeExpenseAction} className="stack nr-form-section" style={{ marginTop: 0 }}>
-          <input type="hidden" name="workspaceId" value={workspaceId} />
-          <input type="hidden" name="idempotencyKey" value={`manual-expense-${randomUUID()}`} />
-          <strong>Submit expense</strong>
-          <label>
-            Project
-            <select name="projectId" required defaultValue={selectedProject?.id ?? ""} disabled={projects.length === 0}>
-              {projects.map((project) => (
-                <option key={project.id} value={project.id}>{project.code} - {project.name}</option>
-              ))}
-            </select>
-          </label>
-          <div style={formGridStyle}>
-            <label>Date<input name="spentOn" type="date" required /></label>
-            <label>Amount<input name="amount" type="number" min="0.01" step="0.01" required /></label>
-            <label>Currency<input name="currency" defaultValue={selectedProject?.currency ?? "USD"} required /></label>
-          </div>
-          <div style={formGridStyle}>
-            <label>Vendor<input name="vendor" /></label>
-            <label>Category<input name="category" defaultValue="Client expense" required /></label>
-          </div>
-          <div style={formGridStyle}>
-            <label>Consultant<input name="consultantName" /></label>
-            <label>Email<input name="consultantEmail" type="email" /></label>
-          </div>
-          <label>Business purpose<input name="businessPurpose" required /></label>
-          <label style={{ alignItems: "center", display: "flex", flexDirection: "row", gap: 8 }}>
-            <input name="billable" type="checkbox" defaultChecked />
-            Billable to client
-          </label>
-          <button type="submit" className="fin-action-btn" disabled={projects.length === 0}>Submit expense</button>
-          {projects.length === 0 && <p className="nr-item-meta" style={{ margin: 0 }}>Create a project before submitting expenses.</p>}
-        </form>
+        <PracticeExpenseSubmitForm
+          action={createNativePracticeExpenseAction}
+          idempotencyKey={`manual-expense-${randomUUID()}`}
+          projects={projects.map((project) => ({
+            code: project.code,
+            currency: project.currency,
+            id: project.id,
+            name: project.name,
+          }))}
+          selectedProjectId={selectedProject?.id ?? ""}
+          workspaceId={workspaceId}
+        />
       )}
 
       <div className="nr-item" style={{ padding: 0 }}>
@@ -130,26 +110,29 @@ export default async function PracticeExpensesPage({
                 </tr>
               </thead>
               <tbody>
-                {page.items.map((entry) => (
-                  <tr key={entry.id}>
-                    <td>{formatDate(entry.spentOn)}</td>
-                    <td>
-                      <a href={`/workspaces/${workspaceId}/finance/projects/${entry.project.id}`}>{entry.project.name}</a>
-                      <div className="nr-item-meta" style={{ fontSize: 11 }}>{entry.project.code}</div>
-                    </td>
-                    <td><a href={`/workspaces/${workspaceId}/finance/clients/${entry.client.id}`}>{entry.client.name}</a></td>
-                    <td>
-                      {entry.consultant ? (
-                        <a href={`/workspaces/${workspaceId}/finance/consultants/${entry.consultant.id}`}>{entry.consultant.name}</a>
-                      ) : "-"}
-                    </td>
-                    <td>{entry.category}</td>
-                    <td>{entry.businessPurpose}</td>
-                    <td style={{ textAlign: "right" }}>{money(entry.amountFunctionalCents ?? entry.amountCents, entry.functionalCurrency ?? entry.currency)}</td>
-                    <td>{entry.billable ? "Yes" : "No"}</td>
-                    <td>{statusLabel(entry.status)}</td>
-                  </tr>
-                ))}
+                {page.items.map((entry) => {
+                  const amount = expenseAmount(entry);
+                  return (
+                    <tr key={entry.id}>
+                      <td>{formatDate(entry.spentOn)}</td>
+                      <td>
+                        <a href={`/workspaces/${workspaceId}/finance/projects/${entry.project.id}`}>{entry.project.name}</a>
+                        <div className="nr-item-meta" style={{ fontSize: 11 }}>{entry.project.code}</div>
+                      </td>
+                      <td><a href={`/workspaces/${workspaceId}/finance/clients/${entry.client.id}`}>{entry.client.name}</a></td>
+                      <td>
+                        {entry.consultant ? (
+                          <a href={`/workspaces/${workspaceId}/finance/consultants/${entry.consultant.id}`}>{entry.consultant.name}</a>
+                        ) : "-"}
+                      </td>
+                      <td>{entry.category}</td>
+                      <td>{entry.businessPurpose}</td>
+                      <td style={{ textAlign: "right" }}>{money(amount.cents, amount.currency)}</td>
+                      <td>{entry.billable ? "Yes" : "No"}</td>
+                      <td>{statusLabel(entry.status)}</td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           </div>

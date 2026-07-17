@@ -1281,6 +1281,43 @@ const PRACTICE_EXPENSE_LIST_INCLUDE = {
   reviews: { select: { id: true, status: true, note: true, updatedAt: true } },
 } satisfies Prisma.PracticeExpenseInclude;
 
+const NATIVE_PRACTICE_TIME_ENTRY_SELECT = {
+  id: true,
+  projectId: true,
+  consultantId: true,
+  workedOn: true,
+  weekEndingOn: true,
+  hours: true,
+  currency: true,
+  billCurrency: true,
+  costCurrency: true,
+  functionalCurrency: true,
+  billRateCents: true,
+  costRateCents: true,
+  billAmountCents: true,
+  costAmountCents: true,
+  paidAmountCents: true,
+  paymentBatchId: true,
+  status: true,
+  sourceSatelliteId: true,
+} satisfies Prisma.PracticeTimeEntrySelect;
+
+const NATIVE_PRACTICE_EXPENSE_SELECT = {
+  id: true,
+  projectId: true,
+  consultantId: true,
+  spentOn: true,
+  category: true,
+  amountCents: true,
+  currency: true,
+  amountFunctionalCents: true,
+  functionalCurrency: true,
+  billable: true,
+  paymentBatchId: true,
+  status: true,
+  sourceSatelliteId: true,
+} satisfies Prisma.PracticeExpenseSelect;
+
 export type NativePracticeTimeEntryWithContext = Prisma.PracticeTimeEntryGetPayload<{
   include: typeof PRACTICE_TIME_ENTRY_LIST_INCLUDE;
 }>;
@@ -2195,6 +2232,28 @@ export async function listNativePracticeClients(
   return pagedItems(rows, take);
 }
 
+async function listNativePracticeClientProjectRows(workspaceId: string, clientId: string): Promise<NativePracticeProject[]> {
+  const projects: NativePracticeProject[] = [];
+  let cursor: string | null = null;
+  const take = MAX_PRACTICE_PROJECT_TAKE;
+
+  while (true) {
+    const page: NativePracticeProject[] = await prisma.practiceProject.findMany({
+      where: { workspaceId, clientId },
+      select: NATIVE_PRACTICE_PROJECT_SELECT,
+      orderBy: [{ status: "asc" }, { code: "asc" }, { id: "asc" }],
+      take,
+      ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
+    });
+    projects.push(...page);
+    if (page.length < take) break;
+    cursor = page.at(-1)?.id ?? null;
+    if (!cursor) break;
+  }
+
+  return projects;
+}
+
 export async function getNativePracticeClientDetail(
   actor: AppActor,
   workspaceId: string,
@@ -2211,12 +2270,7 @@ export async function getNativePracticeClientDetail(
   invariant(client && client.workspaceId === workspaceId, 404, "NOT_FOUND", "Practice client not found.");
 
   const [projects, recentTimeEntries, recentExpenses] = await Promise.all([
-    prisma.practiceProject.findMany({
-      where: { workspaceId, clientId: client.id },
-      select: NATIVE_PRACTICE_PROJECT_SELECT,
-      orderBy: [{ status: "asc" }, { code: "asc" }, { id: "asc" }],
-      take: 100,
-    }),
+    listNativePracticeClientProjectRows(workspaceId, client.id),
     prisma.practiceTimeEntry.findMany({
       where: { workspaceId, clientId: client.id },
       include: PRACTICE_TIME_ENTRY_LIST_INCLUDE,
@@ -2275,7 +2329,7 @@ export async function getNativePracticeConsultantDetail(
   const now = normalizeNow(options.now);
   const recentWindowWeeks = normalizeRecentWindowWeeks(options.recentWindowWeeks);
   const recent = weekWindow(now, recentWindowWeeks);
-  const [projects, recentTimeEntries, recentExpenses] = await Promise.all([
+  const [projects, utilizationTimeEntries, utilizationExpenses, recentTimeEntries, recentExpenses] = await Promise.all([
     prisma.practiceProject.findMany({
       where: {
         workspaceId,
@@ -2289,11 +2343,31 @@ export async function getNativePracticeConsultantDetail(
       where: {
         workspaceId,
         consultantId: consultant.id,
+        status: "POSTED",
+        workedOn: { gt: recent.startsOn, lte: recent.endsOn },
+      },
+      select: NATIVE_PRACTICE_TIME_ENTRY_SELECT,
+      orderBy: [{ workedOn: "desc" }, { createdAt: "desc" }, { id: "asc" }],
+    }),
+    prisma.practiceExpense.findMany({
+      where: {
+        workspaceId,
+        consultantId: consultant.id,
+        status: "POSTED",
+        spentOn: { gt: recent.startsOn, lte: recent.endsOn },
+      },
+      select: NATIVE_PRACTICE_EXPENSE_SELECT,
+      orderBy: [{ spentOn: "desc" }, { createdAt: "desc" }, { id: "asc" }],
+    }),
+    prisma.practiceTimeEntry.findMany({
+      where: {
+        workspaceId,
+        consultantId: consultant.id,
         workedOn: { gt: recent.startsOn, lte: recent.endsOn },
       },
       include: PRACTICE_TIME_ENTRY_LIST_INCLUDE,
       orderBy: [{ workedOn: "desc" }, { createdAt: "desc" }, { id: "asc" }],
-      take: 200,
+      take: 50,
     }),
     prisma.practiceExpense.findMany({
       where: {
@@ -2303,11 +2377,11 @@ export async function getNativePracticeConsultantDetail(
       },
       include: PRACTICE_EXPENSE_LIST_INCLUDE,
       orderBy: [{ spentOn: "desc" }, { createdAt: "desc" }, { id: "asc" }],
-      take: 200,
+      take: 50,
     }),
   ]);
-  const timeProjectIds = recentTimeEntries.map((entry) => entry.projectId);
-  const expenseProjectIds = recentExpenses.map((entry) => entry.projectId);
+  const timeProjectIds = utilizationTimeEntries.map((entry) => entry.projectId);
+  const expenseProjectIds = utilizationExpenses.map((entry) => entry.projectId);
   const projectIds = Array.from(new Set([...projects.map((project) => project.id), ...timeProjectIds, ...expenseProjectIds]));
   const projectRows = projectIds.length === projects.length
     ? projects
@@ -2315,21 +2389,20 @@ export async function getNativePracticeConsultantDetail(
       where: { workspaceId, id: { in: projectIds } },
       select: NATIVE_PRACTICE_PROJECT_SELECT,
       orderBy: [{ status: "asc" }, { code: "asc" }, { id: "asc" }],
-      take: 100,
     });
 
   return {
     consultant,
     utilization: calculateNativePracticeConsultantUtilization({
       consultant,
-      timeEntries: recentTimeEntries,
-      expenses: recentExpenses,
+      timeEntries: utilizationTimeEntries,
+      expenses: utilizationExpenses,
       now,
       recentWindowWeeks,
     }),
     projectHealth: await healthForNativePracticeProjects(workspaceId, projectRows, { now, recentWindowWeeks }),
-    recentTimeEntries: recentTimeEntries.slice(0, 50),
-    recentExpenses: recentExpenses.slice(0, 50),
+    recentTimeEntries,
+    recentExpenses,
   };
 }
 

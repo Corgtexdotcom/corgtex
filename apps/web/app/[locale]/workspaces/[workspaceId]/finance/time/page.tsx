@@ -17,16 +17,14 @@ import {
   money,
   nextHref,
   statusLabel,
+  timeBillAmount,
+  timeCostAmount,
 } from "../components";
 
 export const dynamic = "force-dynamic";
 
 function firstQueryValue(value: string | string[] | undefined) {
   return Array.isArray(value) ? value[0] : value;
-}
-
-function decimalAmount(hours: { toString(): string }, rateCents: number): number {
-  return Math.round(Number.parseFloat(hours.toString()) * rateCents);
 }
 
 export default async function PracticeTimePage({
@@ -129,25 +127,25 @@ export default async function PracticeTimePage({
                 </tr>
               </thead>
               <tbody>
-                {page.items.map((entry) => (
-                  <tr key={entry.id}>
-                    <td>{formatDate(entry.workedOn)}</td>
-                    <td>
-                      <a href={`/workspaces/${workspaceId}/finance/projects/${entry.project.id}`}>{entry.project.name}</a>
-                      <div className="nr-item-meta" style={{ fontSize: 11 }}>{entry.project.code}</div>
-                    </td>
-                    <td><a href={`/workspaces/${workspaceId}/finance/clients/${entry.client.id}`}>{entry.client.name}</a></td>
-                    <td><a href={`/workspaces/${workspaceId}/finance/consultants/${entry.consultant.id}`}>{entry.consultant.name}</a></td>
-                    <td style={{ textAlign: "right" }}>{hoursLabel(entry.hours)}</td>
-                    <td style={{ textAlign: "right" }}>
-                      {money(entry.billAmountCents ?? decimalAmount(entry.hours, entry.billRateCents), entry.functionalCurrency ?? entry.billCurrency ?? entry.currency)}
-                    </td>
-                    <td style={{ textAlign: "right" }}>
-                      {money(entry.costAmountCents ?? decimalAmount(entry.hours, entry.costRateCents), entry.functionalCurrency ?? entry.costCurrency ?? entry.currency)}
-                    </td>
-                    <td>{statusLabel(entry.status)}</td>
-                  </tr>
-                ))}
+                {page.items.map((entry) => {
+                  const billAmount = timeBillAmount(entry);
+                  const costAmount = timeCostAmount(entry);
+                  return (
+                    <tr key={entry.id}>
+                      <td>{formatDate(entry.workedOn)}</td>
+                      <td>
+                        <a href={`/workspaces/${workspaceId}/finance/projects/${entry.project.id}`}>{entry.project.name}</a>
+                        <div className="nr-item-meta" style={{ fontSize: 11 }}>{entry.project.code}</div>
+                      </td>
+                      <td><a href={`/workspaces/${workspaceId}/finance/clients/${entry.client.id}`}>{entry.client.name}</a></td>
+                      <td><a href={`/workspaces/${workspaceId}/finance/consultants/${entry.consultant.id}`}>{entry.consultant.name}</a></td>
+                      <td style={{ textAlign: "right" }}>{hoursLabel(entry.hours)}</td>
+                      <td style={{ textAlign: "right" }}>{money(billAmount.cents, billAmount.currency)}</td>
+                      <td style={{ textAlign: "right" }}>{money(costAmount.cents, costAmount.currency)}</td>
+                      <td>{statusLabel(entry.status)}</td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           </div>

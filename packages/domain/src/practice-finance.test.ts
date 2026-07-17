@@ -1871,7 +1871,7 @@ describe("practice-finance I/O", () => {
     });
     expect(prismaMock.practiceProject.findMany).toHaveBeenCalledWith(expect.objectContaining({
       where: { workspaceId: "workspace-1", clientId: "client-1" },
-      take: 100,
+      take: 200,
     }));
     expect(prismaMock.practiceTimeEntry.findMany).toHaveBeenCalledWith(expect.objectContaining({
       where: { workspaceId: "workspace-1", clientId: "client-1" },
@@ -1880,6 +1880,51 @@ describe("practice-finance I/O", () => {
     expect(prismaMock.practiceExpense.findMany).toHaveBeenCalledWith(expect.objectContaining({
       where: { workspaceId: "workspace-1", clientId: "client-1" },
       take: 50,
+    }));
+  });
+
+  it("loads native practice client project health across every client project page", async () => {
+    prismaMock.practiceClient.findUnique.mockResolvedValueOnce({
+      id: "client-1",
+      workspaceId: "workspace-1",
+      crmAccountId: "account-1",
+      code: "CLIENT-1",
+      name: "Client One",
+      leadName: null,
+      status: "ACTIVE",
+      sourceSatelliteId: null,
+      createdAt: new Date("2026-06-18T00:00:00.000Z"),
+      updatedAt: new Date("2026-06-18T00:00:00.000Z"),
+      crmAccount: { id: "account-1", name: "Client One" },
+      _count: { billingCodes: 1, projects: 201, timeEntries: 0, expenses: 0 },
+    });
+    const firstPage = Array.from({ length: 200 }, (_, index) => nativeProject({
+      id: `project-${String(index + 1).padStart(3, "0")}`,
+      code: `DPRJ-${String(index + 1).padStart(3, "0")}`,
+      clientId: "client-1",
+      clientName: "Client One",
+    }));
+    prismaMock.practiceProject.findMany
+      .mockResolvedValueOnce(firstPage)
+      .mockResolvedValueOnce([nativeProject({
+        id: "project-201",
+        code: "DPRJ-201",
+        clientId: "client-1",
+        clientName: "Client One",
+      })]);
+
+    const detail = await getNativePracticeClientDetail(actor, "workspace-1", "client-1");
+
+    expect(detail.projectHealth).toHaveLength(201);
+    expect(prismaMock.practiceProject.findMany).toHaveBeenCalledTimes(2);
+    expect(prismaMock.practiceProject.findMany).toHaveBeenNthCalledWith(1, expect.objectContaining({
+      where: { workspaceId: "workspace-1", clientId: "client-1" },
+      take: 200,
+    }));
+    expect(prismaMock.practiceProject.findMany).toHaveBeenNthCalledWith(2, expect.objectContaining({
+      cursor: { id: "project-200" },
+      skip: 1,
+      take: 200,
     }));
   });
 
@@ -1897,8 +1942,23 @@ describe("practice-finance I/O", () => {
       _count: { assignments: 1, timeEntries: 1, expenses: 1, paymentBatches: 0 },
     });
     prismaMock.practiceProject.findMany.mockResolvedValueOnce([nativeProject()]);
-    prismaMock.practiceTimeEntry.findMany.mockResolvedValueOnce([nativeTimeEntry()]);
-    prismaMock.practiceExpense.findMany.mockResolvedValueOnce([nativeExpense()]);
+    prismaMock.practiceTimeEntry.findMany
+      .mockResolvedValueOnce([
+        nativeTimeEntry(),
+        nativeTimeEntry({
+          id: "time-2",
+          hours: decimal(5),
+          billRateCents: 20_000,
+          costRateCents: 10_000,
+        }),
+      ])
+      .mockResolvedValueOnce([nativeTimeEntry()]);
+    prismaMock.practiceExpense.findMany
+      .mockResolvedValueOnce([
+        nativeExpense(),
+        nativeExpense({ id: "expense-2", amountCents: 10_000 }),
+      ])
+      .mockResolvedValueOnce([nativeExpense()]);
     prismaMock.$queryRaw
       .mockResolvedValueOnce([])
       .mockResolvedValueOnce([]);
@@ -1910,11 +1970,13 @@ describe("practice-finance I/O", () => {
     expect(detail.consultant.name).toBe("Consultant One");
     expect(detail.utilization).toMatchObject({
       consultantId: "consultant-1",
-      recentHours: 10,
-      billedCents: 150_000,
-      costCents: 80_000,
-      expenseCents: 40_000,
+      recentHours: 15,
+      billedCents: 250_000,
+      costCents: 130_000,
+      expenseCents: 50_000,
     });
+    expect(detail.recentTimeEntries).toHaveLength(1);
+    expect(detail.recentExpenses).toHaveLength(1);
     expect(prismaMock.practiceProject.findMany).toHaveBeenCalledWith(expect.objectContaining({
       where: {
         workspaceId: "workspace-1",
@@ -1922,19 +1984,37 @@ describe("practice-finance I/O", () => {
       },
       take: 100,
     }));
-    expect(prismaMock.practiceTimeEntry.findMany).toHaveBeenCalledWith(expect.objectContaining({
+    expect(prismaMock.practiceTimeEntry.findMany).toHaveBeenNthCalledWith(1, expect.objectContaining({
       where: expect.objectContaining({
         workspaceId: "workspace-1",
         consultantId: "consultant-1",
+        status: "POSTED",
       }),
-      take: 200,
+      select: expect.any(Object),
     }));
-    expect(prismaMock.practiceExpense.findMany).toHaveBeenCalledWith(expect.objectContaining({
+    expect(prismaMock.practiceTimeEntry.findMany).toHaveBeenNthCalledWith(2, expect.objectContaining({
       where: expect.objectContaining({
         workspaceId: "workspace-1",
         consultantId: "consultant-1",
       }),
-      take: 200,
+      include: expect.any(Object),
+      take: 50,
+    }));
+    expect(prismaMock.practiceExpense.findMany).toHaveBeenNthCalledWith(1, expect.objectContaining({
+      where: expect.objectContaining({
+        workspaceId: "workspace-1",
+        consultantId: "consultant-1",
+        status: "POSTED",
+      }),
+      select: expect.any(Object),
+    }));
+    expect(prismaMock.practiceExpense.findMany).toHaveBeenNthCalledWith(2, expect.objectContaining({
+      where: expect.objectContaining({
+        workspaceId: "workspace-1",
+        consultantId: "consultant-1",
+      }),
+      include: expect.any(Object),
+      take: 50,
     }));
   });
 

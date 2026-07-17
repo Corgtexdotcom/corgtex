@@ -1,4 +1,5 @@
 import type { ReactNode } from "react";
+import { Prisma } from "@prisma/client";
 
 export type PracticeFinanceSection =
   | "overview"
@@ -18,6 +19,8 @@ const navItems: Array<{ key: PracticeFinanceSection; label: string; href: (works
   { key: "reports", label: "Reports", href: (workspaceId) => `/workspaces/${workspaceId}/finance/reports` },
   { key: "slicing-pie", label: "Slicing Pie", href: (workspaceId) => `/workspaces/${workspaceId}/finance/slicing-pie` },
 ];
+
+const nativePracticeSections = new Set<PracticeFinanceSection>(["clients", "consultants", "time", "expenses", "reports"]);
 
 export const metricStyle: React.CSSProperties = {
   border: "1px solid var(--line)",
@@ -44,15 +47,18 @@ export const formGridStyle: React.CSSProperties = {
 export function PracticeFinanceNav({
   workspaceId,
   active,
+  practiceProjectsEnabled = true,
   slicingPieEnabled = false,
 }: {
   workspaceId: string;
   active: PracticeFinanceSection;
+  practiceProjectsEnabled?: boolean;
   slicingPieEnabled?: boolean;
 }) {
   return (
     <nav style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
       {navItems
+        .filter((item) => practiceProjectsEnabled || !nativePracticeSections.has(item.key))
         .filter((item) => item.key !== "slicing-pie" || slicingPieEnabled)
         .map((item) => (
           <a
@@ -103,6 +109,50 @@ export function wholeMoney(cents: number | null | undefined, currency = "USD"): 
   } catch {
     return `${currency} ${Math.round(cents / 100).toLocaleString("en-US")}`;
   }
+}
+
+export function rateDerivedCents(hours: { toString(): string }, rateCents: number): number {
+  return new Prisma.Decimal(hours.toString()).mul(rateCents).toDecimalPlaces(0).toNumber();
+}
+
+export function timeBillAmount(entry: {
+  billAmountCents: number | null;
+  billCurrency: string | null;
+  currency: string;
+  functionalCurrency: string | null;
+  hours: { toString(): string };
+  billRateCents: number;
+}): { cents: number; currency: string } {
+  if (entry.billAmountCents != null) {
+    return { cents: entry.billAmountCents, currency: entry.functionalCurrency ?? entry.billCurrency ?? entry.currency };
+  }
+  return { cents: rateDerivedCents(entry.hours, entry.billRateCents), currency: entry.billCurrency ?? entry.currency };
+}
+
+export function timeCostAmount(entry: {
+  costAmountCents: number | null;
+  costCurrency: string | null;
+  currency: string;
+  functionalCurrency: string | null;
+  hours: { toString(): string };
+  costRateCents: number;
+}): { cents: number; currency: string } {
+  if (entry.costAmountCents != null) {
+    return { cents: entry.costAmountCents, currency: entry.functionalCurrency ?? entry.costCurrency ?? entry.currency };
+  }
+  return { cents: rateDerivedCents(entry.hours, entry.costRateCents), currency: entry.costCurrency ?? entry.currency };
+}
+
+export function expenseAmount(entry: {
+  amountCents: number;
+  amountFunctionalCents: number | null;
+  currency: string;
+  functionalCurrency: string | null;
+}): { cents: number; currency: string } {
+  if (entry.amountFunctionalCents != null && entry.functionalCurrency?.trim()) {
+    return { cents: entry.amountFunctionalCents, currency: entry.functionalCurrency };
+  }
+  return { cents: entry.amountCents, currency: entry.currency };
 }
 
 export function formatDate(value: Date): string {

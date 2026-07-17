@@ -33,8 +33,9 @@ function dateOnly(value: Date | null | undefined): string {
 
 function csvEscape(value: unknown): string {
   const text = value == null ? "" : String(value);
-  if (!/[",\n\r]/.test(text)) return text;
-  return `"${text.replaceAll("\"", "\"\"")}"`;
+  const safeText = /^[\s]*[=+\-@]/.test(text) ? `'${text}` : text;
+  if (!/[",\n\r]/.test(safeText)) return safeText;
+  return `"${safeText.replaceAll("\"", "\"\"")}"`;
 }
 
 function csv(headers: string[], rows: unknown[][]): string {

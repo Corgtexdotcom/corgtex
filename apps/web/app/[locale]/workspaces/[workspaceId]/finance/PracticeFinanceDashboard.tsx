@@ -311,6 +311,7 @@ export function PracticeFinanceDashboard({
   attention,
   projectHealth,
   projects,
+  projectEditRows,
   contributionEntries,
   requestedPayables,
   requestedPayablesNextCursor,
@@ -325,11 +326,12 @@ export function PracticeFinanceDashboard({
   attention: PracticeAttentionItem[];
   projectHealth: NativePracticeProjectHealth[];
   projects: PracticeProject[];
+  projectEditRows: PracticeProject[];
   contributionEntries: PracticeContributionEntryWithContext[];
   requestedPayables: PracticeContributionEntryWithContext[];
   requestedPayablesNextCursor: string | null;
 }) {
-  const projectById = new Map(projects.map((project) => [project.id, project]));
+  const projectById = new Map(projectEditRows.map((project) => [project.id, project]));
 
   return (
     <section className="stack" style={{ gap: 20 }} data-finance-surface="practice-dashboard">
@@ -346,7 +348,12 @@ export function PracticeFinanceDashboard({
           )}
         </div>
         <div style={{ marginTop: 16 }}>
-          <PracticeFinanceNav workspaceId={workspaceId} active="overview" slicingPieEnabled={slicingPieEnabled} />
+          <PracticeFinanceNav
+            workspaceId={workspaceId}
+            active="overview"
+            practiceProjectsEnabled={practiceProjectsEnabled}
+            slicingPieEnabled={slicingPieEnabled}
+          />
         </div>
       </header>
 

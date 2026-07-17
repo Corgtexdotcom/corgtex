@@ -4,11 +4,14 @@ import { isWorkspaceFeatureEnabled, requireWorkspaceFeature } from "@/lib/worksp
 import {
   PracticeFinanceNav,
   PracticeMetric,
+  expenseAmount,
   formatDate,
   hoursLabel,
   marginLabel,
   money,
   statusLabel,
+  timeBillAmount,
+  timeCostAmount,
   wholeMoney,
 } from "../../components";
 
@@ -16,10 +19,6 @@ export const dynamic = "force-dynamic";
 
 function utilizationLabel(bps: number): string {
   return `${(bps / 100).toFixed(1)}%`;
-}
-
-function decimalAmount(hours: { toString(): string }, rateCents: number): number {
-  return Math.round(Number.parseFloat(hours.toString()) * rateCents);
 }
 
 export default async function PracticeConsultantDetailPage({
@@ -120,20 +119,20 @@ export default async function PracticeConsultantDetailPage({
                 </tr>
               </thead>
               <tbody>
-                {detail.recentTimeEntries.map((entry) => (
-                  <tr key={entry.id}>
-                    <td>{formatDate(entry.workedOn)}</td>
-                    <td><a href={`/workspaces/${workspaceId}/finance/projects/${entry.project.id}`}>{entry.project.name}</a></td>
-                    <td style={{ textAlign: "right" }}>{hoursLabel(entry.hours)}</td>
-                    <td style={{ textAlign: "right" }}>
-                      {money(entry.billAmountCents ?? decimalAmount(entry.hours, entry.billRateCents), entry.functionalCurrency ?? entry.billCurrency ?? entry.currency)}
-                    </td>
-                    <td style={{ textAlign: "right" }}>
-                      {money(entry.costAmountCents ?? decimalAmount(entry.hours, entry.costRateCents), entry.functionalCurrency ?? entry.costCurrency ?? entry.currency)}
-                    </td>
-                    <td>{statusLabel(entry.status)}</td>
-                  </tr>
-                ))}
+                {detail.recentTimeEntries.map((entry) => {
+                  const billAmount = timeBillAmount(entry);
+                  const costAmount = timeCostAmount(entry);
+                  return (
+                    <tr key={entry.id}>
+                      <td>{formatDate(entry.workedOn)}</td>
+                      <td><a href={`/workspaces/${workspaceId}/finance/projects/${entry.project.id}`}>{entry.project.name}</a></td>
+                      <td style={{ textAlign: "right" }}>{hoursLabel(entry.hours)}</td>
+                      <td style={{ textAlign: "right" }}>{money(billAmount.cents, billAmount.currency)}</td>
+                      <td style={{ textAlign: "right" }}>{money(costAmount.cents, costAmount.currency)}</td>
+                      <td>{statusLabel(entry.status)}</td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           </div>
@@ -160,16 +159,19 @@ export default async function PracticeConsultantDetailPage({
                 </tr>
               </thead>
               <tbody>
-                {detail.recentExpenses.map((entry) => (
-                  <tr key={entry.id}>
-                    <td>{formatDate(entry.spentOn)}</td>
-                    <td><a href={`/workspaces/${workspaceId}/finance/projects/${entry.project.id}`}>{entry.project.name}</a></td>
-                    <td>{entry.category}</td>
-                    <td>{entry.businessPurpose}</td>
-                    <td style={{ textAlign: "right" }}>{money(entry.amountFunctionalCents ?? entry.amountCents, entry.functionalCurrency ?? entry.currency)}</td>
-                    <td>{statusLabel(entry.status)}</td>
-                  </tr>
-                ))}
+                {detail.recentExpenses.map((entry) => {
+                  const amount = expenseAmount(entry);
+                  return (
+                    <tr key={entry.id}>
+                      <td>{formatDate(entry.spentOn)}</td>
+                      <td><a href={`/workspaces/${workspaceId}/finance/projects/${entry.project.id}`}>{entry.project.name}</a></td>
+                      <td>{entry.category}</td>
+                      <td>{entry.businessPurpose}</td>
+                      <td style={{ textAlign: "right" }}>{money(amount.cents, amount.currency)}</td>
+                      <td>{statusLabel(entry.status)}</td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           </div>

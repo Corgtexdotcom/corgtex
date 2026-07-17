@@ -4,18 +4,45 @@ import { isWorkspaceFeatureEnabled, requireWorkspaceFeature } from "@/lib/worksp
 import {
   PracticeFinanceNav,
   PracticeMetric,
+  expenseAmount,
   formatDate,
   hoursLabel,
   marginLabel,
   money,
   statusLabel,
+  timeBillAmount,
   wholeMoney,
 } from "../../components";
 
 export const dynamic = "force-dynamic";
 
-function decimalAmount(hours: { toString(): string }, rateCents: number): number {
-  return Math.round(Number.parseFloat(hours.toString()) * rateCents);
+type CurrencyTotals = {
+  budgetCents: number;
+  remainingCents: number;
+  usedCents: number;
+};
+
+function groupedProjectTotals(
+  projects: Array<{ currency: string; budgetCents: number; remainingBudgetCents: number; usedBudgetCents: number }>,
+): Map<string, CurrencyTotals> {
+  const totals = new Map<string, CurrencyTotals>();
+  for (const project of projects) {
+    const currency = project.currency || "USD";
+    const current = totals.get(currency) ?? { budgetCents: 0, remainingCents: 0, usedCents: 0 };
+    current.budgetCents += project.budgetCents;
+    current.usedCents += project.usedBudgetCents;
+    current.remainingCents += project.remainingBudgetCents;
+    totals.set(currency, current);
+  }
+  return totals;
+}
+
+function groupedMoney(totals: Map<string, CurrencyTotals>, key: keyof CurrencyTotals): string {
+  if (totals.size === 0) return "-";
+  return Array.from(totals.entries())
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([currency, values]) => wholeMoney(values[key], currency))
+    .join(" / ");
 }
 
 export default async function PracticeClientDetailPage({
@@ -32,9 +59,8 @@ export default async function PracticeClientDetailPage({
     isWorkspaceFeatureEnabled(workspaceId, "SLICING_PIE"),
   ]);
   const { client } = detail;
-  const budgetCents = detail.projectHealth.reduce((sum, project) => sum + project.budgetCents, 0);
-  const usedCents = detail.projectHealth.reduce((sum, project) => sum + project.usedBudgetCents, 0);
-  const remainingCents = detail.projectHealth.reduce((sum, project) => sum + project.remainingBudgetCents, 0);
+  const totalsByCurrency = groupedProjectTotals(detail.projectHealth);
+  const visibleProjectHealth = detail.projectHealth.slice(0, 100);
 
   return (
     <section className="stack" style={{ gap: 20 }} data-finance-surface="practice-client-detail">
@@ -53,9 +79,9 @@ export default async function PracticeClientDetailPage({
 
       <div style={{ display: "flex", flexWrap: "wrap", gap: 12 }}>
         <PracticeMetric label="Projects" value={client._count.projects} />
-        <PracticeMetric label="Budget" value={wholeMoney(budgetCents)} />
-        <PracticeMetric label="Used" value={wholeMoney(usedCents)} />
-        <PracticeMetric label="Remaining" value={wholeMoney(remainingCents)} />
+        <PracticeMetric label="Budget" value={groupedMoney(totalsByCurrency, "budgetCents")} />
+        <PracticeMetric label="Used" value={groupedMoney(totalsByCurrency, "usedCents")} />
+        <PracticeMetric label="Remaining" value={groupedMoney(totalsByCurrency, "remainingCents")} />
       </div>
 
       <div className="nr-item" style={{ padding: 0 }}>
@@ -78,7 +104,7 @@ export default async function PracticeClientDetailPage({
                 </tr>
               </thead>
               <tbody>
-                {detail.projectHealth.map((project) => (
+                {visibleProjectHealth.map((project) => (
                   <tr key={project.projectId}>
                     <td>
                       <a href={`/workspaces/${workspaceId}/finance/projects/${project.projectId}`}>{project.projectName}</a>
@@ -94,6 +120,11 @@ export default async function PracticeClientDetailPage({
               </tbody>
             </table>
           </div>
+        )}
+        {detail.projectHealth.length > visibleProjectHealth.length && (
+          <p className="nr-item-meta" style={{ borderTop: "1px solid var(--line)", margin: 0, padding: 12 }}>
+            Showing first {visibleProjectHealth.length.toLocaleString("en-US")} of {detail.projectHealth.length.toLocaleString("en-US")} linked projects. Totals include all linked projects.
+          </p>
         )}
       </div>
 
@@ -117,18 +148,19 @@ export default async function PracticeClientDetailPage({
                 </tr>
               </thead>
               <tbody>
-                {detail.recentTimeEntries.map((entry) => (
-                  <tr key={entry.id}>
-                    <td>{formatDate(entry.workedOn)}</td>
-                    <td><a href={`/workspaces/${workspaceId}/finance/projects/${entry.project.id}`}>{entry.project.name}</a></td>
-                    <td>{entry.consultant.name}</td>
-                    <td style={{ textAlign: "right" }}>{hoursLabel(entry.hours)}</td>
-                    <td style={{ textAlign: "right" }}>
-                      {money(entry.billAmountCents ?? decimalAmount(entry.hours, entry.billRateCents), entry.functionalCurrency ?? entry.billCurrency ?? entry.currency)}
-                    </td>
-                    <td>{statusLabel(entry.status)}</td>
-                  </tr>
-                ))}
+                {detail.recentTimeEntries.map((entry) => {
+                  const billAmount = timeBillAmount(entry);
+                  return (
+                    <tr key={entry.id}>
+                      <td>{formatDate(entry.workedOn)}</td>
+                      <td><a href={`/workspaces/${workspaceId}/finance/projects/${entry.project.id}`}>{entry.project.name}</a></td>
+                      <td>{entry.consultant.name}</td>
+                      <td style={{ textAlign: "right" }}>{hoursLabel(entry.hours)}</td>
+                      <td style={{ textAlign: "right" }}>{money(billAmount.cents, billAmount.currency)}</td>
+                      <td>{statusLabel(entry.status)}</td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           </div>
@@ -155,16 +187,19 @@ export default async function PracticeClientDetailPage({
                 </tr>
               </thead>
               <tbody>
-                {detail.recentExpenses.map((entry) => (
-                  <tr key={entry.id}>
-                    <td>{formatDate(entry.spentOn)}</td>
-                    <td><a href={`/workspaces/${workspaceId}/finance/projects/${entry.project.id}`}>{entry.project.name}</a></td>
-                    <td>{entry.category}</td>
-                    <td>{entry.businessPurpose}</td>
-                    <td style={{ textAlign: "right" }}>{money(entry.amountFunctionalCents ?? entry.amountCents, entry.functionalCurrency ?? entry.currency)}</td>
-                    <td>{statusLabel(entry.status)}</td>
-                  </tr>
-                ))}
+                {detail.recentExpenses.map((entry) => {
+                  const amount = expenseAmount(entry);
+                  return (
+                    <tr key={entry.id}>
+                      <td>{formatDate(entry.spentOn)}</td>
+                      <td><a href={`/workspaces/${workspaceId}/finance/projects/${entry.project.id}`}>{entry.project.name}</a></td>
+                      <td>{entry.category}</td>
+                      <td>{entry.businessPurpose}</td>
+                      <td style={{ textAlign: "right" }}>{money(amount.cents, amount.currency)}</td>
+                      <td>{statusLabel(entry.status)}</td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           </div>
