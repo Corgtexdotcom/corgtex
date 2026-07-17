@@ -610,22 +610,27 @@ export function calculateNativePracticeProjectHealthFromRollup(params: {
     "MIXED_CURRENCY",
     "Native practice project health requires a project currency.",
   );
-  const hasNativeLedgerRows = params.rollup.timeEntryCount > 0 || params.rollup.expenseCount > 0;
   const ledgerUsedBudgetCents = params.rollup.timeRevenueCents + params.rollup.billableExpenseCents;
   const legacyGrossMarginBps = params.project.currentMarginBps ?? 0;
-  const usedBudgetCents = hasNativeLedgerRows ? ledgerUsedBudgetCents : params.project.usedCents;
-  const directCostCents = hasNativeLedgerRows
-    ? params.rollup.timeCostCents + params.rollup.directExpenseCents
-    : Math.max(0, usedBudgetCents - Math.round((usedBudgetCents * legacyGrossMarginBps) / 10_000));
+  const legacyUsedBudgetCents = params.project.usedCents;
+  const legacyDirectCostCents = Math.max(
+    0,
+    legacyUsedBudgetCents - Math.round((legacyUsedBudgetCents * legacyGrossMarginBps) / 10_000),
+  );
+  const usedBudgetCents = legacyUsedBudgetCents + ledgerUsedBudgetCents;
+  const directCostCents = legacyDirectCostCents + params.rollup.timeCostCents + params.rollup.directExpenseCents;
   const remainingBudgetCents = params.project.poValueCents - usedBudgetCents;
   const grossProfitCents = usedBudgetCents - directCostCents;
   const grossMarginBps = usedBudgetCents > 0 ? Math.round((grossProfitCents / usedBudgetCents) * 10_000) : 0;
-  const recentUsedBudgetCents = hasNativeLedgerRows
-    ? params.rollup.recentTimeRevenueCents + params.rollup.recentBillableExpenseCents
-    : params.project.weeklyBurnCents * recentWindowWeeks;
-  const recentDirectCostCents = hasNativeLedgerRows
-    ? params.rollup.recentTimeCostCents + params.rollup.recentDirectExpenseCents
-    : Math.max(0, recentUsedBudgetCents - Math.round((recentUsedBudgetCents * legacyGrossMarginBps) / 10_000));
+  const legacyRecentUsedBudgetCents = params.project.weeklyBurnCents * recentWindowWeeks;
+  const legacyRecentDirectCostCents = Math.max(
+    0,
+    legacyRecentUsedBudgetCents - Math.round((legacyRecentUsedBudgetCents * legacyGrossMarginBps) / 10_000),
+  );
+  const recentUsedBudgetCents =
+    legacyRecentUsedBudgetCents + params.rollup.recentTimeRevenueCents + params.rollup.recentBillableExpenseCents;
+  const recentDirectCostCents =
+    legacyRecentDirectCostCents + params.rollup.recentTimeCostCents + params.rollup.recentDirectExpenseCents;
 
   const exactRecentBudgetBurnPerWeekCents = recentUsedBudgetCents / recentWindowWeeks;
   const exactRecentCostBurnPerWeekCents = recentDirectCostCents / recentWindowWeeks;
@@ -2085,6 +2090,26 @@ async function ensureNativePracticeClientForProject(project: Awaited<ReturnType<
     );
     if (crmClients[0]) {
       return linkNativePracticeProjectClient(project.id, crmClients[0].id);
+    }
+  } else {
+    const namedClients = await prisma.practiceClient.findMany({
+      where: {
+        workspaceId: project.workspaceId,
+        crmAccountId: null,
+        name: { equals: project.clientName, mode: "insensitive" },
+      },
+      select: { id: true },
+      orderBy: [{ id: "asc" }],
+      take: 2,
+    });
+    invariant(
+      namedClients.length <= 1,
+      409,
+      "AMBIGUOUS_CLIENT",
+      "Client name is linked to multiple practice clients; resolve duplicate clients before recording ledger entries.",
+    );
+    if (namedClients[0]) {
+      return linkNativePracticeProjectClient(project.id, namedClients[0].id);
     }
   }
 
