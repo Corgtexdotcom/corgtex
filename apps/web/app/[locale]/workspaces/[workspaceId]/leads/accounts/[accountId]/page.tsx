@@ -129,9 +129,9 @@ export default async function AccountDetailPage({
     member.user.displayName || member.user.email,
   ]));
 
-  const formatCurrency = (cents: number) => new Intl.NumberFormat(locale, {
+  const formatCurrency = (cents: number, currency = "USD") => new Intl.NumberFormat(locale, {
     style: "currency",
-    currency: "USD",
+    currency,
     maximumFractionDigits: 0,
   }).format(cents / 100);
 
@@ -508,9 +508,9 @@ export default async function AccountDetailPage({
                         </div>
                         <div className="nr-tag-group" style={{ marginTop: 12 }}>
                           {project.crmDeal && <span className="tag-sm">{t("financeDealValue")}: {formatCurrency(project.crmDeal.valueCents ?? 0)}</span>}
-                          <span className="tag-sm">{t("financePoValue")}: {formatCurrency(health?.budgetCents ?? project.poValueCents)}</span>
-                          <span className="tag-sm">{t("financeUsedBudget")}: {formatCurrency(health?.usedBudgetCents ?? 0)}</span>
-                          <span className="tag-sm">{t("financeRemainingBudget")}: {formatCurrency(health?.remainingBudgetCents ?? project.poValueCents)}</span>
+                          <span className="tag-sm">{t("financePoValue")}: {formatCurrency(health?.budgetCents ?? project.poValueCents, health?.currency ?? project.currency)}</span>
+                          <span className="tag-sm">{t("financeUsedBudget")}: {formatCurrency(health?.usedBudgetCents ?? 0, health?.currency ?? project.currency)}</span>
+                          <span className="tag-sm">{t("financeRemainingBudget")}: {formatCurrency(health?.remainingBudgetCents ?? project.poValueCents, health?.currency ?? project.currency)}</span>
                           <span className="tag-sm">{t("financeMargin")}: {formatMargin(health?.grossMarginBps ?? null)}</span>
                           <a className="link-button small secondary" href={`/workspaces/${workspaceId}/finance/projects/${project.id}`}>
                             Open project

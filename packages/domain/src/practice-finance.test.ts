@@ -2306,6 +2306,63 @@ describe("practice-finance I/O", () => {
     expect(prismaMock.practiceTimeEntry.create).not.toHaveBeenCalled();
   });
 
+  it("rejects ambiguous native time consultants before provisioning an unlinked client", async () => {
+    prismaMock.practiceProject.findUnique.mockResolvedValueOnce({
+      id: "project-1",
+      workspaceId: "workspace-1",
+      crmAccountId: "account-1",
+      clientId: null,
+      billingCodeId: "billing-1",
+      code: "EXAMPLE-1",
+      clientName: "Example",
+      currency: "USD",
+    });
+    prismaMock.practiceConsultant.findMany.mockResolvedValueOnce([{ id: "consultant-1" }, { id: "consultant-2" }]);
+
+    await expect(createNativePracticeTimeEntry(actor, "workspace-1", {
+      projectId: "project-1",
+      consultantName: "Priya Shah",
+      workedOn: new Date("2026-06-18T00:00:00.000Z"),
+      hours: 2.5,
+      billRateCents: 12_000,
+      costRateCents: 8_000,
+    })).rejects.toMatchObject({ status: 409, code: "AMBIGUOUS_CONSULTANT" });
+
+    expect(prismaMock.practiceClient.findUnique).not.toHaveBeenCalled();
+    expect(prismaMock.practiceClient.create).not.toHaveBeenCalled();
+    expect(prismaMock.practiceProject.update).not.toHaveBeenCalled();
+    expect(prismaMock.practiceTimeEntry.create).not.toHaveBeenCalled();
+  });
+
+  it("rejects ambiguous native expense consultants before provisioning an unlinked client", async () => {
+    prismaMock.practiceProject.findUnique.mockResolvedValueOnce({
+      id: "project-1",
+      workspaceId: "workspace-1",
+      crmAccountId: "account-1",
+      clientId: null,
+      billingCodeId: "billing-1",
+      code: "EXAMPLE-1",
+      clientName: "Example",
+      currency: "USD",
+    });
+    prismaMock.practiceConsultant.findMany.mockResolvedValueOnce([{ id: "consultant-1" }, { id: "consultant-2" }]);
+
+    await expect(createNativePracticeExpense(actor, "workspace-1", {
+      projectId: "project-1",
+      consultantName: "Priya Shah",
+      spentOn: new Date("2026-06-19T00:00:00.000Z"),
+      category: "Travel",
+      businessPurpose: "Client workshop",
+      amountCents: 45_678,
+      currency: "USD",
+    })).rejects.toMatchObject({ status: 409, code: "AMBIGUOUS_CONSULTANT" });
+
+    expect(prismaMock.practiceClient.findUnique).not.toHaveBeenCalled();
+    expect(prismaMock.practiceClient.create).not.toHaveBeenCalled();
+    expect(prismaMock.practiceProject.update).not.toHaveBeenCalled();
+    expect(prismaMock.practiceExpense.create).not.toHaveBeenCalled();
+  });
+
   it("reuses idempotency-scoped consultants when duplicate manual creation races", async () => {
     prismaMock.practiceProject.findUnique.mockResolvedValueOnce({
       id: "project-1",

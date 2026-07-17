@@ -2138,7 +2138,6 @@ export async function createNativePracticeTimeEntry(
     : null;
   if (existingEntry) return existingEntry;
 
-  const clientId = await ensureNativePracticeClientForProject(project);
   const consultantId = await resolveNativePracticeConsultant({
     workspaceId,
     name: consultantName,
@@ -2147,6 +2146,7 @@ export async function createNativePracticeTimeEntry(
     required: true,
   });
   invariant(consultantId, 400, "INVALID_INPUT", "Consultant is required.");
+  const clientId = await ensureNativePracticeClientForProject(project);
 
   const data = {
     workspaceId,
@@ -2205,7 +2205,6 @@ export async function createNativePracticeExpense(
     : null;
   if (existingEntry) return existingEntry;
 
-  const clientId = await ensureNativePracticeClientForProject(project);
   const consultantId = await resolveNativePracticeConsultant({
     workspaceId,
     name: consultantName,
@@ -2213,6 +2212,7 @@ export async function createNativePracticeExpense(
     idempotencyKey,
     required: false,
   });
+  const clientId = await ensureNativePracticeClientForProject(project);
 
   const data = {
     workspaceId,

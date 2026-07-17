@@ -5,6 +5,7 @@ import {
   requireWorkspaceMembership,
 } from "@corgtex/domain";
 import { prisma } from "@corgtex/shared";
+import { Prisma } from "@prisma/client";
 import { requirePageActor } from "@/lib/auth";
 import { requireWorkspaceFeature } from "@/lib/workspace-feature-flags";
 import {
@@ -15,16 +16,49 @@ import {
 export const dynamic = "force-dynamic";
 
 function money(cents: number, currency: string): string {
-  const sign = cents < 0 ? "-" : "";
   try {
-    return `${sign}${new Intl.NumberFormat("en-US", {
+    return new Intl.NumberFormat("en-US", {
       currency,
-      maximumFractionDigits: 0,
       style: "currency",
-    }).format(Math.abs(Math.round(cents / 100)))}`;
+    }).format(cents / 100);
   } catch {
-    return `${sign}${currency} ${Math.abs(Math.round(cents / 100)).toLocaleString("en-US")}`;
+    return `${currency} ${(cents / 100).toLocaleString("en-US", {
+      maximumFractionDigits: 2,
+      minimumFractionDigits: 2,
+    })}`;
   }
+}
+
+function rateDerivedCents(hours: { toString(): string }, rateCents: number): number {
+  return new Prisma.Decimal(hours.toString()).mul(rateCents).toDecimalPlaces(0).toNumber();
+}
+
+function timeBillAmount(entry: {
+  billAmountCents: number | null;
+  billCurrency: string | null;
+  currency: string;
+  functionalCurrency: string | null;
+  hours: { toString(): string };
+  billRateCents: number;
+}): { cents: number; currency: string } {
+  if (entry.billAmountCents != null) {
+    return { cents: entry.billAmountCents, currency: entry.functionalCurrency ?? entry.billCurrency ?? entry.currency };
+  }
+  return { cents: rateDerivedCents(entry.hours, entry.billRateCents), currency: entry.billCurrency ?? entry.currency };
+}
+
+function timeCostAmount(entry: {
+  costAmountCents: number | null;
+  costCurrency: string | null;
+  currency: string;
+  functionalCurrency: string | null;
+  hours: { toString(): string };
+  costRateCents: number;
+}): { cents: number; currency: string } {
+  if (entry.costAmountCents != null) {
+    return { cents: entry.costAmountCents, currency: entry.functionalCurrency ?? entry.costCurrency ?? entry.currency };
+  }
+  return { cents: rateDerivedCents(entry.hours, entry.costRateCents), currency: entry.costCurrency ?? entry.currency };
 }
 
 function marginLabel(bps: number | null): string {
@@ -233,7 +267,10 @@ export default async function PracticeProjectDetailPage({
                 </tr>
               </thead>
               <tbody>
-                {detail.recentTimeEntries.map((entry) => (
+                {detail.recentTimeEntries.map((entry) => {
+                  const billAmount = timeBillAmount(entry);
+                  const costAmount = timeCostAmount(entry);
+                  return (
                   <tr key={entry.id}>
                     <td>{formatDate(entry.workedOn)}</td>
                     <td>
@@ -241,11 +278,12 @@ export default async function PracticeProjectDetailPage({
                       {entry.consultant.email && <div className="nr-item-meta" style={{ fontSize: 11 }}>{entry.consultant.email}</div>}
                     </td>
                     <td style={{ textAlign: "right" }}>{entry.hours.toString()}</td>
-                    <td style={{ textAlign: "right" }}>{money(entry.billAmountCents ?? Math.round(Number(entry.hours.toString()) * entry.billRateCents), entry.billCurrency ?? entry.currency)}</td>
-                    <td style={{ textAlign: "right" }}>{money(entry.costAmountCents ?? Math.round(Number(entry.hours.toString()) * entry.costRateCents), entry.costCurrency ?? entry.currency)}</td>
+                    <td style={{ textAlign: "right" }}>{money(billAmount.cents, billAmount.currency)}</td>
+                    <td style={{ textAlign: "right" }}>{money(costAmount.cents, costAmount.currency)}</td>
                     <td>{statusLabel(entry.status)}</td>
                   </tr>
-                ))}
+                  );
+                })}
               </tbody>
             </table>
           </div>
