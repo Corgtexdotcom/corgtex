@@ -46,15 +46,42 @@ const {
   updateAction: vi.fn(),
 }));
 
-vi.mock("@corgtex/domain", () => ({
-  coerceWorkItemPriorityInput,
-  createAction,
-  deleteAction,
-  formatWorkItemPriority,
-  getWorkspacePermanentPathForEntity,
-  listActions,
-  updateAction,
-}));
+vi.mock("@corgtex/domain", async () => {
+  const {
+    normalizeActionWorkItem,
+    normalizeGoalWorkItem,
+    normalizeProposalWorkItem,
+    normalizeTensionWorkItem,
+    workItemMemberDisplayName,
+    workItemUserDisplayName,
+  } = await import("../../../../../../../packages/domain/src/work-item-normalization");
+
+  return {
+    AppError: class AppError extends Error {
+      status: number;
+      code: string;
+
+      constructor(status: number, code: string, message: string) {
+        super(message);
+        this.status = status;
+        this.code = code;
+      }
+    },
+    coerceWorkItemPriorityInput,
+    createAction,
+    deleteAction,
+    formatWorkItemPriority,
+    getWorkspacePermanentPathForEntity,
+    listActions,
+    normalizeActionWorkItem,
+    normalizeGoalWorkItem,
+    normalizeProposalWorkItem,
+    normalizeTensionWorkItem,
+    updateAction,
+    workItemMemberDisplayName,
+    workItemUserDisplayName,
+  };
+});
 
 vi.mock("@corgtex/shared", () => ({
   env: {
@@ -122,6 +149,16 @@ describe("GET /api/workspaces/[workspaceId]/actions", () => {
           assigneeMemberId: "member-2",
           assigneeMemberName: "Assignee",
           assignee: "Assignee",
+          responsibleMemberId: "member-2",
+          responsibleMemberName: "Assignee",
+          responsiblePerson: "Assignee",
+          ownerMemberId: "member-2",
+          ownerMemberName: "Assignee",
+          owner: "Assignee",
+          adviceRequestCount: null,
+          activeAdviceRequestCount: null,
+          inputRequestCount: null,
+          activeInputRequestCount: null,
           assigneeMember: { id: "member-2", user: { displayName: "Assignee", email: "assignee@example.test" } },
         }],
         total: 1,

@@ -42,17 +42,44 @@ vi.mock("@/lib/auth", () => ({
   resolveRequestActor,
 }));
 
-vi.mock("@corgtex/domain", () => ({
-  coerceWorkItemPriorityInput,
-  createProposal,
-  createProposalFromTension,
-  deleteProposal,
-  formatWorkItemPriority,
-  getWorkspacePermanentPathForEntity,
-  listProposals,
-  requireWorkspaceMembership,
-  updateProposal,
-}));
+vi.mock("@corgtex/domain", async () => {
+  const {
+    normalizeActionWorkItem,
+    normalizeGoalWorkItem,
+    normalizeProposalWorkItem,
+    normalizeTensionWorkItem,
+    workItemMemberDisplayName,
+    workItemUserDisplayName,
+  } = await import("../../../../../../../packages/domain/src/work-item-normalization");
+
+  return {
+    AppError: class AppError extends Error {
+      status: number;
+      code: string;
+
+      constructor(status: number, code: string, message: string) {
+        super(message);
+        this.status = status;
+        this.code = code;
+      }
+    },
+    coerceWorkItemPriorityInput,
+    createProposal,
+    createProposalFromTension,
+    deleteProposal,
+    formatWorkItemPriority,
+    getWorkspacePermanentPathForEntity,
+    listProposals,
+    normalizeActionWorkItem,
+    normalizeGoalWorkItem,
+    normalizeProposalWorkItem,
+    normalizeTensionWorkItem,
+    requireWorkspaceMembership,
+    updateProposal,
+    workItemMemberDisplayName,
+    workItemUserDisplayName,
+  };
+});
 
 vi.mock("@corgtex/shared", () => ({
   env: {
