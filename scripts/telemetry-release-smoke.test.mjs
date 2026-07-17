@@ -4,6 +4,7 @@ import {
   expectedReleaseGitSha,
   telemetrySent,
 } from "./telemetry-release-smoke.mjs";
+import { expectedProductionReleaseGitSha } from "./telemetry-release-production-smoke.mjs";
 
 describe("telemetry release smoke", () => {
   it("prefers an explicit expected release SHA over the GitHub SHA", () => {
@@ -17,6 +18,17 @@ describe("telemetry release smoke", () => {
     expect(expectedReleaseGitSha({
       GITHUB_SHA: "github-sha",
     })).toBe("github-sha");
+  });
+
+  it("keeps production wrapper runs release-agnostic when no expected SHA is configured", () => {
+    expect(expectedProductionReleaseGitSha({
+      GITHUB_SHA: "github-sha",
+      CORGTEX_EXPECTED_RELEASE_GIT_SHA: "",
+    })).toBeNull();
+    expect(expectedProductionReleaseGitSha({
+      TELEMETRY_RELEASE_SMOKE_EXPECTED_GIT_SHA: " production-sha ",
+      GITHUB_SHA: "github-sha",
+    })).toBe("production-sha");
   });
 
   it("requires at least one telemetry sink to send", () => {
