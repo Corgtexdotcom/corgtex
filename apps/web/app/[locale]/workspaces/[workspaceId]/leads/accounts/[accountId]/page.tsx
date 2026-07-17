@@ -129,11 +129,18 @@ export default async function AccountDetailPage({
     member.user.displayName || member.user.email,
   ]));
 
-  const formatCurrency = (cents: number, currency = "USD") => new Intl.NumberFormat(locale, {
-    style: "currency",
-    currency,
-    maximumFractionDigits: 0,
-  }).format(cents / 100);
+  const formatCurrency = (cents: number, currency = "USD") => {
+    const normalizedCurrency = currency.trim() || "USD";
+    try {
+      return new Intl.NumberFormat(locale, {
+        style: "currency",
+        currency: normalizedCurrency,
+        maximumFractionDigits: 0,
+      }).format(cents / 100);
+    } catch {
+      return `${normalizedCurrency} ${(cents / 100).toLocaleString(locale, { maximumFractionDigits: 0 })}`;
+    }
+  };
   const financeRemainingLabel = accountFinance.summary.currency == null && accountFinance.summary.activeProjects > 0
     ? "Mixed"
     : formatCurrency(accountFinance.summary.remainingCents, accountFinance.summary.currency ?? "USD");

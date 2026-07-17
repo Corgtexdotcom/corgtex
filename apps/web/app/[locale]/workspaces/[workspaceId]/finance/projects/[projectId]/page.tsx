@@ -7,7 +7,7 @@ import {
 import { prisma } from "@corgtex/shared";
 import { Prisma } from "@prisma/client";
 import { requirePageActor } from "@/lib/auth";
-import { requireWorkspaceFeature } from "@/lib/workspace-feature-flags";
+import { isWorkspaceFeatureEnabled, requireWorkspaceFeature } from "@/lib/workspace-feature-flags";
 import {
   createNativePracticeExpenseAction,
   createNativePracticeTimeEntryAction,
@@ -116,10 +116,11 @@ export default async function PracticeProjectDetailPage({
   const actor = await requirePageActor();
   await requireWorkspaceFeature(workspaceId, "FINANCE");
   await requireWorkspaceFeature(workspaceId, "PRACTICE_PROJECTS");
-  const [membership, workspace, detail] = await Promise.all([
+  const [membership, workspace, detail, relationshipsEnabled] = await Promise.all([
     requireWorkspaceMembership({ actor, workspaceId }),
     prisma.workspace.findUnique({ where: { id: workspaceId }, select: { slug: true } }),
     getNativePracticeProjectDetail(actor, workspaceId, projectId),
+    isWorkspaceFeatureEnabled(workspaceId, "RELATIONSHIPS"),
   ]);
   const readOnlyDemo = workspace?.slug === "jnj-demo";
   const canManageProject = !readOnlyDemo && await canManagePracticeFinanceProjects(actor, workspaceId, {
@@ -142,7 +143,7 @@ export default async function PracticeProjectDetailPage({
               <span>{statusLabel(project.status)}</span>
             </div>
           </div>
-          {project.crmAccountId && (
+          {project.crmAccountId && relationshipsEnabled && (
             <a className="link-button secondary" href={`/workspaces/${workspaceId}/leads/accounts/${project.crmAccountId}`}>
               Open CRM account
             </a>

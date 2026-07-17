@@ -2089,6 +2089,7 @@ async function ensureNativePracticeClientForProject(project: Awaited<ReturnType<
   }
 
   const baseCode = normalizeProjectCodeBase(project.clientName).slice(0, 80) || `CLIENT-${projectIdCodeSuffix(project.id)}`;
+  const suffixedCode = `${baseCode.slice(0, 67)}-${project.id.slice(0, 12)}`;
   const existingCodeClient = await prisma.practiceClient.findUnique({
     where: { workspaceId_code: { workspaceId: project.workspaceId, code: baseCode } },
     select: { id: true, crmAccountId: true, name: true },
@@ -2097,7 +2098,7 @@ async function ensureNativePracticeClientForProject(project: Awaited<ReturnType<
     return linkNativePracticeProjectClient(project.id, existingCodeClient.id);
   }
 
-  const code = existingCodeClient ? `${baseCode.slice(0, 67)}-${project.id.slice(0, 12)}` : baseCode;
+  const code = existingCodeClient ? suffixedCode : baseCode;
   try {
     const client = await prisma.practiceClient.create({
       data: {
@@ -2117,6 +2118,30 @@ async function ensureNativePracticeClientForProject(project: Awaited<ReturnType<
     });
     if (client && nativePracticeClientMatchesProject(client, project)) {
       return linkNativePracticeProjectClient(project.id, client.id);
+    }
+    if (code !== suffixedCode) {
+      try {
+        const fallbackClient = await prisma.practiceClient.create({
+          data: {
+            workspaceId: project.workspaceId,
+            crmAccountId: project.crmAccountId,
+            code: suffixedCode,
+            name: project.clientName,
+          },
+          select: { id: true },
+        });
+        return linkNativePracticeProjectClient(project.id, fallbackClient.id);
+      } catch (fallbackError) {
+        if (!isUniqueConstraintError(fallbackError)) throw fallbackError;
+        const fallbackClient = await prisma.practiceClient.findUnique({
+          where: { workspaceId_code: { workspaceId: project.workspaceId, code: suffixedCode } },
+          select: { id: true, crmAccountId: true, name: true },
+        });
+        if (fallbackClient && nativePracticeClientMatchesProject(fallbackClient, project)) {
+          return linkNativePracticeProjectClient(project.id, fallbackClient.id);
+        }
+        throw fallbackError;
+      }
     }
     throw error;
   }
@@ -2282,6 +2307,8 @@ export async function createNativePracticeTimeEntry(
     : null;
   if (existingEntry) return existingEntry;
 
+  const billAmountCents = normalizeCents(centsFromHours(hours, billRateCents), "Bill amount");
+  const costAmountCents = normalizeCents(centsFromHours(hours, costRateCents), "Cost amount");
   const consultantId = await resolveNativePracticeConsultant({
     workspaceId,
     name: consultantName,
@@ -2308,8 +2335,8 @@ export async function createNativePracticeTimeEntry(
     functionalCurrency: currency,
     billRateCents,
     costRateCents,
-    billAmountCents: centsFromHours(hours, billRateCents),
-    costAmountCents: centsFromHours(hours, costRateCents),
+    billAmountCents,
+    costAmountCents,
     status: "POSTED" as const,
     idempotencyKey,
   };
