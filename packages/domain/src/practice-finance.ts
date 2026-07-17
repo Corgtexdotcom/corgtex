@@ -669,18 +669,13 @@ export function summarizeNativePracticeFinance(health: NativePracticeProjectHeal
     );
     currencies.add(currency);
   }
-  invariant(
-    currencies.size <= 1,
-    400,
-    "MIXED_CURRENCY",
-    "Native practice finance summary requires a single currency until conversion is supported.",
-  );
-  const currency = currencies.values().next().value ?? null;
-  const budgetCents = active.reduce((sum, item) => sum + item.budgetCents, 0);
-  const usedCents = active.reduce((sum, item) => sum + item.usedBudgetCents, 0);
-  const grossProfitCents = active.reduce((sum, item) => sum + item.grossProfitCents, 0);
-  const directCostCents = active.reduce((sum, item) => sum + item.directCostCents, 0);
-  const marginBps = usedCents > 0 ? Math.round((grossProfitCents / usedCents) * 10_000) : null;
+  const mixedCurrency = currencies.size > 1;
+  const currency = mixedCurrency ? null : currencies.values().next().value ?? null;
+  const budgetCents = mixedCurrency ? 0 : active.reduce((sum, item) => sum + item.budgetCents, 0);
+  const usedCents = mixedCurrency ? 0 : active.reduce((sum, item) => sum + item.usedBudgetCents, 0);
+  const grossProfitCents = mixedCurrency ? 0 : active.reduce((sum, item) => sum + item.grossProfitCents, 0);
+  const directCostCents = mixedCurrency ? 0 : active.reduce((sum, item) => sum + item.directCostCents, 0);
+  const marginBps = !mixedCurrency && usedCents > 0 ? Math.round((grossProfitCents / usedCents) * 10_000) : null;
 
   return {
     activeProjects: active.length,
@@ -1347,19 +1342,27 @@ function normalizeCursor(value: string | null | undefined): string | null {
 }
 
 function normalizeProjectCode(value: string) {
-  const normalized = value
+  const normalized = normalizeProjectCodeBase(value).slice(0, 80);
+  invariant(normalized.length > 0, 400, "INVALID_INPUT", "Project code is required.");
+  return normalized;
+}
+
+function normalizeProjectCodeBase(value: string) {
+  return value
     .trim()
     .toUpperCase()
     .replace(/[^A-Z0-9]+/g, "-")
     .replace(/^-+|-+$/g, "")
     .slice(0, 80);
-  invariant(normalized.length > 0, 400, "INVALID_INPUT", "Project code is required.");
-  return normalized;
+}
+
+function projectIdCodeSuffix(projectId: string) {
+  return projectId.toUpperCase().replace(/[^A-Z0-9]+/g, "").slice(0, 12) || "PROJECT";
 }
 
 function defaultProjectCode(deal: { id: string; title: string; account?: { slug: string } | null }) {
   const base = deal.account?.slug || deal.title;
-  const normalizedBase = normalizeProjectCode(base).slice(0, 48).replace(/-+$/g, "") || "CRM";
+  const normalizedBase = normalizeProjectCodeBase(base).slice(0, 48).replace(/-+$/g, "") || "CRM";
   return `${normalizedBase}-${deal.id.slice(0, 8).toUpperCase()}`;
 }
 
@@ -1371,7 +1374,9 @@ function normalizeNativeLedgerDate(value: Date, label: string): Date {
 function normalizeNativeLedgerHours(value: number): Prisma.Decimal {
   invariant(Number.isFinite(value) && value > 0, 400, "INVALID_INPUT", "Hours must be greater than zero.");
   invariant(value <= 999_999.99, 400, "INVALID_INPUT", "Hours exceed the native Practice Ledger limit.");
-  return new Prisma.Decimal(value).toDecimalPlaces(2);
+  const hours = new Prisma.Decimal(value).toDecimalPlaces(2);
+  invariant(hours.gt(0), 400, "INVALID_INPUT", "Hours must be greater than zero.");
+  return hours;
 }
 
 function normalizeNativeLedgerCurrency(value: string | null | undefined, projectCurrency: string): string {
@@ -1933,7 +1938,7 @@ async function ensureNativePracticeClientForProject(project: Awaited<ReturnType<
     }
   }
 
-  const baseCode = normalizeProjectCode(project.clientName).slice(0, 80);
+  const baseCode = normalizeProjectCodeBase(project.clientName).slice(0, 80) || `CLIENT-${projectIdCodeSuffix(project.id)}`;
   const existingCodeClient = await prisma.practiceClient.findUnique({
     where: { workspaceId_code: { workspaceId: project.workspaceId, code: baseCode } },
     select: { id: true, crmAccountId: true, name: true },

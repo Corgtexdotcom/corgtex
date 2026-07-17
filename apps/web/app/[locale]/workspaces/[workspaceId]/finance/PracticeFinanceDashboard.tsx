@@ -24,6 +24,11 @@ function money(cents: number, currency = "USD"): string {
   }
 }
 
+function summaryMoney(summary: NativePracticeFinanceSummary, cents: number): string {
+  if (summary.currency == null && summary.activeProjects > 0) return "Mixed";
+  return money(cents, summary.currency ?? "USD");
+}
+
 function pct(ratio: number): string {
   return `${(ratio * 100).toFixed(1)}%`;
 }
@@ -348,15 +353,15 @@ export function PracticeFinanceDashboard({
         </div>
         <div style={metricStyle}>
           <div style={labelStyle}>Budget</div>
-          <div style={{ fontSize: 26, marginTop: 6 }}>{money(summary.budgetCents, summary.currency ?? "USD")}</div>
+          <div style={{ fontSize: 26, marginTop: 6 }}>{summaryMoney(summary, summary.budgetCents)}</div>
         </div>
         <div style={metricStyle}>
           <div style={labelStyle}>Used</div>
-          <div style={{ fontSize: 26, marginTop: 6 }}>{money(summary.usedCents, summary.currency ?? "USD")}</div>
+          <div style={{ fontSize: 26, marginTop: 6 }}>{summaryMoney(summary, summary.usedCents)}</div>
         </div>
         <div style={metricStyle}>
           <div style={labelStyle}>Remaining</div>
-          <div style={{ fontSize: 26, marginTop: 6 }}>{money(summary.remainingCents, summary.currency ?? "USD")}</div>
+          <div style={{ fontSize: 26, marginTop: 6 }}>{summaryMoney(summary, summary.remainingCents)}</div>
         </div>
         <div style={metricStyle}>
           <div style={labelStyle}>Margin</div>

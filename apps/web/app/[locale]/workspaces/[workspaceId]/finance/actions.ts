@@ -58,7 +58,7 @@ async function requirePracticeProjectsActionContext(formData: FormData) {
 }
 
 async function requireSlicingPieActionContext(formData: FormData) {
-  const context = await requirePracticeProjectsActionContext(formData);
+  const context = await requireFinanceActionContext(formData);
   await requireWorkspaceFeature(context.workspaceId, "SLICING_PIE");
   return context;
 }
