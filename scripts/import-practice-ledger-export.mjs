@@ -617,6 +617,17 @@ function emptyEntityCounts() {
   return Object.fromEntries(ENTITY_ORDER.map((entity) => [entity, 0]));
 }
 
+function totalCounts(counts) {
+  return Object.values(counts).reduce((sum, count) => sum + count, 0);
+}
+
+function importTotals(counts) {
+  return {
+    total: totalCounts(counts),
+    byEntity: counts,
+  };
+}
+
 function dependencyMisses(row, available, entity) {
   return (DEPENDENCIES[entity] ?? []).filter((dependency) => {
     const value = row[dependency.field];
@@ -671,6 +682,8 @@ function relationshipMisses(row, rowsByEntity, entity) {
 export function planImport(batch) {
   portableBatchSchemaVersion(batch);
   const entities = emptyEntityBuckets();
+  const sourceCounts = emptyEntityCounts();
+  const reconciliationSourceIds = Object.fromEntries(ENTITY_ORDER.map((entity) => [entity, []]));
   const available = Object.fromEntries(ENTITY_ORDER.map((entity) => [entity, new Set()]));
   const rowsByEntity = Object.fromEntries(ENTITY_ORDER.map((entity) => [entity, new Map()]));
   const seenUniqueKeys = new Set();
@@ -678,12 +691,15 @@ export function planImport(batch) {
 
   for (const entity of ENTITY_ORDER) {
     const parser = PARSERS[entity];
-    for (const record of entityRecords(batch, entity)) {
+    const records = entityRecords(batch, entity);
+    sourceCounts[entity] = records.length;
+    for (const record of records) {
       const parsed = parser(record);
       if (!parsed) {
         entities[entity].skipped.push({ reason: "invalid", record });
         continue;
       }
+      reconciliationSourceIds[entity].push(parsed.sourceSatelliteId);
       const misses = dependencyMisses(parsed, available, entity);
       if (misses.length > 0) {
         entities[entity].skipped.push({
@@ -725,20 +741,22 @@ export function planImport(batch) {
   }
   if (unknownSkipped.length > 0) {
     entities.unknownRecords = { valid: [], skipped: unknownSkipped };
+    sourceCounts.unknownRecords = unknownSkipped.length;
     counts.planned.unknownRecords = 0;
     counts.skipped.unknownRecords = unknownSkipped.length;
   }
 
   return {
     entities,
-    counts,
+    reconciliationSourceIds,
+    counts: {
+      source: sourceCounts,
+      planned: counts.planned,
+      skipped: counts.skipped,
+    },
     valid: entities.projects.valid,
     skipped: [...entities.projects.skipped, ...unknownSkipped],
   };
-}
-
-function totalCounts(counts) {
-  return Object.values(counts).reduce((sum, count) => sum + count, 0);
 }
 
 function rowKey(entity, row) {
@@ -1210,6 +1228,68 @@ const UPSERTS = {
   entryReviews: upsertEntryReview,
 };
 
+const TARGET_SOURCE_DELEGATES = {
+  clients: "practiceClient",
+  billingCodes: "practiceBillingCode",
+  consultants: "practiceConsultant",
+  projects: "practiceProject",
+  projectLines: "practiceProjectLine",
+  purchaseOrders: "practicePurchaseOrder",
+  assignments: "practiceProjectAssignment",
+  sourceDocuments: "practiceSourceDocument",
+  paymentBatches: "practicePaymentBatch",
+  timeEntries: "practiceTimeEntry",
+  expenses: "practiceExpense",
+  entryReviews: "practiceEntryReview",
+};
+
+const TARGET_SOURCE_ID_CHUNK_SIZE = 1000;
+
+function chunked(values, size) {
+  const chunks = [];
+  for (let index = 0; index < values.length; index += size) {
+    chunks.push(values.slice(index, index + size));
+  }
+  return chunks;
+}
+
+function reconciliationSourceIds(plan) {
+  return Object.fromEntries(ENTITY_ORDER.map((entity) => [
+    entity,
+    collectUnique(plan.reconciliationSourceIds?.[entity] ?? plan.entities[entity].valid.map((row) => row.sourceSatelliteId)),
+  ]));
+}
+
+function reconciliationSourceCounts(sourceIdsByEntity) {
+  return Object.fromEntries(ENTITY_ORDER.map((entity) => [entity, sourceIdsByEntity[entity]?.length ?? 0]));
+}
+
+async function targetSourceReconciliation(prisma, workspaceId, sourceIdsByEntity) {
+  const matched = emptyEntityCounts();
+  const missing = emptyEntityCounts();
+
+  for (const entity of ENTITY_ORDER) {
+    const sourceSatelliteIds = sourceIdsByEntity[entity] ?? [];
+    if (sourceSatelliteIds.length === 0) continue;
+    const delegateName = TARGET_SOURCE_DELEGATES[entity];
+    const found = new Set();
+    for (const chunk of chunked(sourceSatelliteIds, TARGET_SOURCE_ID_CHUNK_SIZE)) {
+      const rows = await prisma[delegateName].findMany({
+        where: { workspaceId, sourceSatelliteId: { in: chunk } },
+        select: { sourceSatelliteId: true },
+      });
+      for (const row of rows) found.add(row.sourceSatelliteId);
+    }
+    matched[entity] = found.size;
+    missing[entity] = sourceSatelliteIds.filter((sourceSatelliteId) => !found.has(sourceSatelliteId)).length;
+  }
+
+  return {
+    matched: importTotals(matched),
+    missing: importTotals(missing),
+  };
+}
+
 /**
  * Idempotently upsert a Practice Ledger export batch.
  * Dry run (apply=false) plans only and writes nothing.
@@ -1217,7 +1297,10 @@ const UPSERTS = {
 export async function importPracticeLedgerExport({ prisma, workspaceId, batch, apply = false }) {
   if (!workspaceId) throw new Error("workspaceId is required.");
   const plan = planImport(batch);
+  const sourceIdsByEntity = reconciliationSourceIds(plan);
+  const sourceIdCounts = reconciliationSourceCounts(sourceIdsByEntity);
   applyTargetUniqueConflicts(plan, await targetUniqueConflicts(prisma, workspaceId, plan));
+  const targetBefore = await targetSourceReconciliation(prisma, workspaceId, sourceIdsByEntity);
   const imported = emptyEntityCounts();
   const skipped = { ...plan.counts.skipped };
 
@@ -1234,15 +1317,23 @@ export async function importPracticeLedgerExport({ prisma, workspaceId, batch, a
     }
   }
 
+  const targetAfter = apply ? await targetSourceReconciliation(prisma, workspaceId, sourceIdsByEntity) : null;
+
   return {
     dryRun: !apply,
     planned: totalCounts(plan.counts.planned),
     imported: apply ? totalCounts(imported) : 0,
     skipped: totalCounts(skipped),
     counts: {
+      source: plan.counts.source,
       planned: plan.counts.planned,
       imported,
       skipped,
+    },
+    reconciliation: {
+      source: importTotals(sourceIdCounts),
+      targetBefore,
+      targetAfter,
     },
   };
 }
@@ -1262,7 +1353,11 @@ async function main() {
     const result = await importPracticeLedgerExport({ prisma, workspaceId, batch: raw, apply });
     console.log(JSON.stringify(result));
     if (result.dryRun) {
-      console.error(`Dry run: ${result.planned} record(s) would import, ${result.skipped} skipped. Re-run with --apply to write.`);
+      console.error(
+        `Dry run: ${result.planned} record(s) planned, ${result.skipped} skipped, `
+        + `${result.reconciliation.targetBefore.matched.total} already present, `
+        + `${result.reconciliation.targetBefore.missing.total} missing. Re-run with --apply to write.`,
+      );
     }
   } finally {
     await prisma.$disconnect();
