@@ -71,6 +71,12 @@ const getWorkspacePermanentPathForEntityMock = vi.fn();
 vi.mock("@corgtex/domain", async () => {
   const { MCP_TOOL_CAPABILITIES } = await import("../../domain/src/mcp-tool-capabilities");
   const { coerceWorkItemPriorityInput, formatWorkItemPriority } = await import("../../domain/src/work-item-priority");
+  const {
+    normalizeActionWorkItem,
+    normalizeProposalWorkItem,
+    normalizeTensionWorkItem,
+    workItemMemberDisplayName,
+  } = await import("../../domain/src/work-item-normalization");
 
   return {
   AppError: class AppError extends Error {
@@ -89,6 +95,10 @@ vi.mock("@corgtex/domain", async () => {
   ],
   coerceWorkItemPriorityInput,
   formatWorkItemPriority,
+  normalizeActionWorkItem,
+  normalizeProposalWorkItem,
+  normalizeTensionWorkItem,
+  workItemMemberDisplayName,
   requireWorkspaceMembership: requireWorkspaceMembershipMock,
   listProposals: listProposalsMock,
   createProposal: createProposalMock,

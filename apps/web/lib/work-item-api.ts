@@ -1,4 +1,12 @@
-import { coerceWorkItemPriorityInput, formatWorkItemPriority } from "@corgtex/domain";
+import {
+  coerceWorkItemPriorityInput,
+  normalizeActionWorkItem,
+  normalizeGoalWorkItem,
+  normalizeProposalWorkItem,
+  normalizeTensionWorkItem,
+  workItemMemberDisplayName,
+  workItemUserDisplayName,
+} from "@corgtex/domain";
 import { prisma } from "@corgtex/shared";
 
 type UserLike = {
@@ -53,67 +61,27 @@ export function workItemPriorityFromBody(body: Record<string, unknown>) {
 }
 
 export function userDisplayName(user: UserLike | null | undefined) {
-  return user?.displayName ?? user?.email ?? null;
+  return workItemUserDisplayName(user);
 }
 
 export function memberDisplayName(member: MemberLike) {
-  return userDisplayName(member?.user);
-}
-
-function priorityFields(item: PriorityLike) {
-  return {
-    priority: item.priority ?? 0,
-    priorityLabel: formatWorkItemPriority(item.priority),
-  };
+  return workItemMemberDisplayName(member);
 }
 
 export function serializeActionWorkItem<T extends ActionLike>(action: T) {
-  const assigneeMemberName = memberDisplayName(action.assigneeMember);
-  return {
-    ...action,
-    ...priorityFields(action),
-    assigneeMemberId: action.assigneeMemberId ?? action.assigneeMember?.id ?? null,
-    assigneeMemberName,
-    assignee: assigneeMemberName,
-  };
+  return normalizeActionWorkItem(action);
 }
 
 export function serializeTensionWorkItem<T extends TensionLike>(tension: T) {
-  const responsibleMemberName = memberDisplayName(tension.assigneeMember);
-  const raisedByMemberName = memberDisplayName(tension.raisedByMember);
-  return {
-    ...tension,
-    ...priorityFields(tension),
-    assigneeMemberId: tension.assigneeMemberId ?? tension.assigneeMember?.id ?? null,
-    assigneeMemberName: responsibleMemberName,
-    responsibleMemberId: tension.assigneeMemberId ?? tension.assigneeMember?.id ?? null,
-    responsibleMemberName,
-    responsiblePerson: responsibleMemberName,
-    raisedByMemberId: tension.raisedByMemberId ?? tension.raisedByMember?.id ?? null,
-    raisedByMemberName,
-    raisedBy: raisedByMemberName,
-  };
+  return normalizeTensionWorkItem(tension);
 }
 
 export function serializeProposalWorkItem<T extends ProposalLike>(proposal: T) {
-  const ownerMemberName = memberDisplayName(proposal.ownerMember);
-  return {
-    ...proposal,
-    ...priorityFields(proposal),
-    ownerMemberId: proposal.ownerMemberId ?? proposal.ownerMember?.id ?? null,
-    ownerMemberName,
-    owner: ownerMemberName,
-  };
+  return normalizeProposalWorkItem(proposal);
 }
 
 export function serializeGoalWorkItem<T extends GoalLike>(goal: T) {
-  const ownerMemberName = memberDisplayName(goal.ownerMember);
-  return {
-    ...goal,
-    ownerMemberId: goal.ownerMemberId ?? goal.ownerMember?.id ?? null,
-    ownerMemberName,
-    owner: ownerMemberName,
-  };
+  return normalizeGoalWorkItem(goal);
 }
 
 export async function loadActionWorkItemResponse(workspaceId: string, actionId: string) {
