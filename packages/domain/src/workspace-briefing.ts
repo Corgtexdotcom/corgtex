@@ -405,6 +405,7 @@ function selectBriefingCandidates(
   maxItems = 10,
 ) {
   if (ranked.length <= maxItems) return ranked;
+  const rankedIndexes = new Map(ranked.map((candidate, index) => [candidateKey(candidate), index]));
   const selected = ranked.slice(0, maxItems);
   const selectedKeys = new Set(selected.map(candidateKey));
   const reservedFreshCount = Math.min(maxItems, Math.max(1, Math.ceil(maxItems * 0.25)));
@@ -425,7 +426,10 @@ function selectBriefingCandidates(
     selectedKeys.add(freshKey);
   }
 
-  return selected;
+  return selected.sort((left, right) => (
+    (rankedIndexes.get(candidateKey(left)) ?? Number.MAX_SAFE_INTEGER)
+    - (rankedIndexes.get(candidateKey(right)) ?? Number.MAX_SAFE_INTEGER)
+  ));
 }
 
 function uniqueSourceRefs(items: WorkspaceBriefingItem[]) {
@@ -599,6 +603,7 @@ function composeWorkspaceBriefingNarrative(params: {
   const continuingContextMd = continuingItems.length > 0
     ? joinNarrativeParagraphs(continuingItems, params.period === "WEEKLY" ? 5 : 4, 560)
     : leadItem.kind === "QUIET" ? "There is no unresolved high-signal context in the evidence pool for this edition." : null;
+  const hasContinuingNarrative = attentionItems.length > 0 || continuingItems.length > 0;
   const narratedItems = [
     ...(hasFreshItems ? [leadItem] : []),
     ...bodyItems,
@@ -616,6 +621,10 @@ function composeWorkspaceBriefingNarrative(params: {
     ? params.period === "WEEKLY"
       ? "This weekly edition found no high-signal workspace activity in the evidence pool, so it stays intentionally quiet."
       : "This daily edition found no high-signal workspace activity in the evidence pool, so it stays intentionally quiet."
+    : !hasFreshItems && !hasContinuingNarrative && !params.fallbackIntro
+    ? params.period === "WEEKLY"
+      ? "This weekly edition found no fresh operating signal and no unresolved high-signal context, so it stays intentionally quiet."
+      : "This daily edition found no fresh operating signal and no unresolved high-signal context, so it stays intentionally quiet."
     : !hasFreshItems && meaningfulItems.length > 0 && !params.fallbackIntro
     ? params.period === "WEEKLY"
       ? "This weekly edition found no fresh operating signal in the last 7 days, so it keeps unresolved context that still affects current work."

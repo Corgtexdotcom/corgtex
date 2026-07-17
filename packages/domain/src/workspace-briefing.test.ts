@@ -834,6 +834,65 @@ describe("workspace briefing", () => {
     }));
   });
 
+  it("preserves fresh candidate ranking when reserving capped slots", async () => {
+    const { buildWorkspaceBriefingFromCandidates } = await import("./workspace-briefing");
+    const briefing = buildWorkspaceBriefingFromCandidates({
+      workspaceId: "ws-1",
+      period: "DAILY",
+      dateKey: "2026-04-30",
+      title: "Daily Workspace Briefing - 2026-04-30",
+      generatedAt: new Date("2026-04-30T12:00:00.000Z"),
+      maxItems: 5,
+      candidates: [
+        ...Array.from({ length: 5 }, (_, index) => baseCandidate({
+          sourceType: "PROPOSAL" as const,
+          sourceId: `proposal-stale-${index + 1}`,
+          title: `Strategic unresolved proposal ${index + 1}`,
+          summaryMd: `The old proposal still has strategic context ${index + 1}.`,
+          occurredAt: new Date("2026-04-01T12:00:00.000Z"),
+          updatedAt: new Date("2026-04-01T12:00:00.000Z"),
+          status: "OPEN",
+          priority: 3,
+          strategicScore: 5,
+          actionabilityScore: 4,
+          evidenceScore: 5,
+          sourceRefs: [{ type: "PROPOSAL", id: `proposal-stale-${index + 1}`, label: `Strategic unresolved proposal ${index + 1}`, href: `/workspaces/ws-1/proposals/proposal-stale-${index + 1}` }],
+        })),
+        baseCandidate({
+          sourceType: "MEETING",
+          sourceId: "meeting-strong",
+          title: "Fresh customer decision recap",
+          summaryMd: "The recap has the strongest fresh operating signal.",
+          href: "/workspaces/ws-1/meetings/meeting-strong",
+          occurredAt: new Date("2026-04-30T09:00:00.000Z"),
+          updatedAt: new Date("2026-04-30T09:00:00.000Z"),
+          status: "COMPLETED",
+          strategicScore: 1,
+          actionabilityScore: 1,
+          evidenceScore: 2,
+          sourceRefs: [{ type: "MEETING", id: "meeting-strong", label: "Fresh customer decision recap", href: "/workspaces/ws-1/meetings/meeting-strong" }],
+        }),
+        baseCandidate({
+          sourceType: "MEETING",
+          sourceId: "meeting-weaker",
+          title: "Fresh lower-signal recap",
+          summaryMd: "The recap is fresh but less important.",
+          href: "/workspaces/ws-1/meetings/meeting-weaker",
+          occurredAt: new Date("2026-04-30T08:00:00.000Z"),
+          updatedAt: new Date("2026-04-30T08:00:00.000Z"),
+          status: "COMPLETED",
+          strategicScore: 1,
+          actionabilityScore: 1,
+          evidenceScore: 1,
+          sourceRefs: [{ type: "MEETING", id: "meeting-weaker", label: "Fresh lower-signal recap", href: "/workspaces/ws-1/meetings/meeting-weaker" }],
+        }),
+      ],
+    });
+
+    expect(briefing.leadMd).toContain("Fresh customer decision recap");
+    expect(briefing.leadMd).not.toContain("Fresh lower-signal recap");
+  });
+
   it("limits source trail refs to items included in the narrative", async () => {
     const { buildWorkspaceBriefingFromCandidates } = await import("./workspace-briefing");
     const briefing = buildWorkspaceBriefingFromCandidates({
@@ -889,6 +948,37 @@ describe("workspace briefing", () => {
     expect(briefing.continuingContextMd ?? "").not.toContain("The generated intro");
     expect(briefing.sourceRefs).toEqual([]);
     expect(briefing.closingMd).not.toContain("source trail below");
+  });
+
+  it("uses quiet intro when stale evidence has no continuing context", async () => {
+    const { buildWorkspaceBriefingFromCandidates } = await import("./workspace-briefing");
+    const briefing = buildWorkspaceBriefingFromCandidates({
+      workspaceId: "ws-1",
+      period: "DAILY",
+      dateKey: "2026-04-30",
+      title: "Daily Workspace Briefing - 2026-04-30",
+      generatedAt: new Date("2026-04-30T12:00:00.000Z"),
+      candidates: [
+        baseCandidate({
+          sourceType: "MEETING",
+          sourceId: "meeting-old",
+          title: "Old completed recap",
+          summaryMd: "The meeting is old and does not need continuing attention.",
+          href: "/workspaces/ws-1/meetings/meeting-old",
+          occurredAt: new Date("2026-04-01T12:00:00.000Z"),
+          updatedAt: new Date("2026-04-01T12:00:00.000Z"),
+          status: "COMPLETED",
+          strategicScore: 2,
+          actionabilityScore: 1,
+          evidenceScore: 2,
+          sourceRefs: [{ type: "MEETING", id: "meeting-old", label: "Old completed recap", href: "/workspaces/ws-1/meetings/meeting-old" }],
+        }),
+      ],
+    });
+
+    expect(briefing.introMd).toContain("no unresolved high-signal context");
+    expect(briefing.introMd).not.toContain("keeps continuing context");
+    expect(briefing.continuingContextMd).toContain("There is no unresolved high-signal context");
   });
 
   it("does not repeat the same active item across narrative blocks", async () => {
