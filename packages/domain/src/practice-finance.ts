@@ -2064,11 +2064,26 @@ async function loadNativePracticeProjectForLedgerWrite(workspaceId: string, proj
       code: true,
       clientName: true,
       currency: true,
+      client: { select: { id: true, crmAccountId: true, name: true } },
     },
   });
   invariant(project && project.workspaceId === workspaceId, 404, "NOT_FOUND", "Practice project not found.");
   normalizeNativeLedgerCurrency(null, project.currency);
   return project;
+}
+
+function nativePracticeClientNameMatchesProject(
+  client: { name: string },
+  project: Awaited<ReturnType<typeof loadNativePracticeProjectForLedgerWrite>>,
+) {
+  return client.name.localeCompare(project.clientName, undefined, { sensitivity: "accent" }) === 0;
+}
+
+function nativePracticeLinkedClientMatchesProject(
+  client: { crmAccountId: string | null; name: string },
+  project: Awaited<ReturnType<typeof loadNativePracticeProjectForLedgerWrite>>,
+) {
+  return client.crmAccountId === project.crmAccountId && nativePracticeClientNameMatchesProject(client, project);
 }
 
 function nativePracticeClientMatchesProject(
@@ -2080,7 +2095,7 @@ function nativePracticeClientMatchesProject(
     || (
       !project.crmAccountId
       && !client.crmAccountId
-      && client.name.localeCompare(project.clientName, undefined, { sensitivity: "accent" }) === 0
+      && nativePracticeClientNameMatchesProject(client, project)
     )
   );
 }
@@ -2208,12 +2223,12 @@ async function lockNativePracticeConsultantIdentity(
   }
 }
 
-async function lockNativePracticeClientCode(
+async function lockNativePracticeClientIdentity(
   db: PracticeFinanceDbClient,
   workspaceId: string,
-  code: string,
+  identity: string,
 ) {
-  const lockKey = `native-practice-client:${workspaceId}:code:${code}`;
+  const lockKey = `native-practice-client:${workspaceId}:${identity}`;
   await db.$queryRaw(Prisma.sql`SELECT pg_advisory_xact_lock(hashtextextended(${lockKey}, 0))`);
 }
 
@@ -2221,7 +2236,23 @@ async function ensureNativePracticeClientForProject(
   db: PracticeFinanceDbClient,
   project: Awaited<ReturnType<typeof loadNativePracticeProjectForLedgerWrite>>,
 ) {
-  if (project.clientId) return project.clientId;
+  if (project.clientId && project.client && nativePracticeLinkedClientMatchesProject(project.client, project)) {
+    return project.clientId;
+  }
+
+  const hasStaleLinkedClient = Boolean(
+    project.clientId && (!project.client || !nativePracticeLinkedClientMatchesProject(project.client, project)),
+  );
+  const normalizedBaseCode = normalizeProjectCodeBase(project.clientName).slice(0, 80);
+  const baseCode = normalizedBaseCode || `CLIENT-${projectIdCodeSuffix(project.id)}`;
+  const clientIdentity = project.crmAccountId
+    ? `crm:${project.crmAccountId}:name:${project.clientName.toLocaleLowerCase("en-US")}`
+    : normalizedBaseCode
+      ? `code:${normalizedBaseCode}`
+      : `name:${project.clientName.toLocaleLowerCase("en-US")}`;
+  const suffixedCode = `${baseCode.slice(0, 67)}-${project.id.slice(0, 12)}`;
+
+  await lockNativePracticeClientIdentity(db, project.workspaceId, clientIdentity);
 
   if (project.crmAccountId) {
     const namedCrmClients = await db.practiceClient.findMany({
@@ -2244,20 +2275,22 @@ async function ensureNativePracticeClientForProject(
       return linkNativePracticeProjectClient(db, project.id, namedCrmClients[0].id);
     }
 
-    const crmClients = await db.practiceClient.findMany({
-      where: { workspaceId: project.workspaceId, crmAccountId: project.crmAccountId },
-      select: { id: true },
-      orderBy: [{ id: "asc" }],
-      take: 2,
-    });
-    invariant(
-      crmClients.length <= 1,
-      409,
-      "AMBIGUOUS_CLIENT",
-      "CRM account is linked to multiple practice clients; resolve duplicate clients before recording ledger entries.",
-    );
-    if (crmClients[0]) {
-      return linkNativePracticeProjectClient(db, project.id, crmClients[0].id);
+    if (!hasStaleLinkedClient) {
+      const crmClients = await db.practiceClient.findMany({
+        where: { workspaceId: project.workspaceId, crmAccountId: project.crmAccountId },
+        select: { id: true },
+        orderBy: [{ id: "asc" }],
+        take: 2,
+      });
+      invariant(
+        crmClients.length <= 1,
+        409,
+        "AMBIGUOUS_CLIENT",
+        "CRM account is linked to multiple practice clients; resolve duplicate clients before recording ledger entries.",
+      );
+      if (crmClients[0]) {
+        return linkNativePracticeProjectClient(db, project.id, crmClients[0].id);
+      }
     }
   } else {
     const namedClients = await db.practiceClient.findMany({
@@ -2281,9 +2314,6 @@ async function ensureNativePracticeClientForProject(
     }
   }
 
-  const baseCode = normalizeProjectCodeBase(project.clientName).slice(0, 80) || `CLIENT-${projectIdCodeSuffix(project.id)}`;
-  const suffixedCode = `${baseCode.slice(0, 67)}-${project.id.slice(0, 12)}`;
-  await lockNativePracticeClientCode(db, project.workspaceId, baseCode);
   const existingCodeClient = await db.practiceClient.findUnique({
     where: { workspaceId_code: { workspaceId: project.workspaceId, code: baseCode } },
     select: { id: true, crmAccountId: true, name: true },
@@ -2923,14 +2953,15 @@ export async function updatePracticeProject(
 
   const existing = await prisma.practiceProject.findUnique({
     where: { id: projectId },
-    select: { id: true, workspaceId: true },
+    select: { id: true, workspaceId: true, clientId: true, clientName: true },
   });
   invariant(existing && existing.workspaceId === workspaceId, 404, "NOT_FOUND", "Practice project not found.");
 
-  const data = {
+  const clientName = normalizeOptionalText(input.clientName, "Client name");
+  const data: Prisma.PracticeProjectUpdateInput = {
     code: normalizeOptionalText(input.code, "Project code"),
     name: normalizeOptionalText(input.name, "Project name"),
-    clientName: normalizeOptionalText(input.clientName, "Client name"),
+    clientName,
     status: normalizeProjectStatus(input.status),
     poValueCents: normalizeOptionalCents(input.poValueCents, "PO value"),
     serviceBudgetCents: normalizeOptionalCents(input.serviceBudgetCents, "Service budget"),
@@ -2940,6 +2971,13 @@ export async function updatePracticeProject(
     targetMarginBps: normalizeOptionalBps(input.targetMarginBps, "Target margin"),
     currentMarginBps: normalizeOptionalBps(input.currentMarginBps, "Current margin"),
   };
+  if (
+    existing.clientId
+    && clientName !== undefined
+    && clientName.localeCompare(existing.clientName, undefined, { sensitivity: "accent" }) !== 0
+  ) {
+    data.client = { disconnect: true };
+  }
 
   return prisma.practiceProject.update({
     where: { id: projectId },
