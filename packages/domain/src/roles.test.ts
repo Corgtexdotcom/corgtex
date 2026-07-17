@@ -68,8 +68,10 @@ const { prismaMock } = vi.hoisted(() => {
 
 vi.mock("@corgtex/shared", () => ({
   prisma: prismaMock,
+  sendEmail: vi.fn(),
   parseAllowedWorkspaceIds: vi.fn(() => new Set<string>()),
   env: {
+    APP_URL: "https://app.example.test",
     SESSION_LAST_SEEN_WRITE_INTERVAL_MS: 5 * 60 * 1000,
   },
 }));

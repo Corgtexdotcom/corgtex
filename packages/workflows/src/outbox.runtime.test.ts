@@ -29,6 +29,7 @@ const {
   recordMeetingTranscriptProcessingStageMock,
   markMeetingTranscriptProcessingReadyMock,
   createNotificationIntentMock,
+  deliverNotificationDeliveryMock,
 } = vi.hoisted(() => ({
   prismaMock: {
     $transaction: vi.fn(),
@@ -97,6 +98,7 @@ const {
   recordMeetingTranscriptProcessingStageMock: vi.fn(),
   markMeetingTranscriptProcessingReadyMock: vi.fn(),
   createNotificationIntentMock: vi.fn(),
+  deliverNotificationDeliveryMock: vi.fn(),
 }));
 
 vi.mock("@corgtex/shared", () => ({
@@ -163,6 +165,8 @@ vi.mock("@corgtex/domain", () => ({
   recordMeetingTranscriptProcessingStage: recordMeetingTranscriptProcessingStageMock,
   markMeetingTranscriptProcessingReady: markMeetingTranscriptProcessingReadyMock,
   createNotificationIntent: createNotificationIntentMock,
+  deliverNotificationDelivery: deliverNotificationDeliveryMock,
+  NOTIFICATION_DELIVERY_JOB_TYPE: "notification.delivery",
   isHumanNewspaperRecipientIdentity: (identity: { kind?: string | null; user?: { email?: string | null; displayName?: string | null } | null; email?: string | null; displayName?: string | null }) => {
     const user = identity.user ?? identity;
     const email = user.email?.trim().toLowerCase() ?? "";
@@ -239,6 +243,7 @@ describe("runPendingJobs", () => {
     getWorkspaceDigestSettingsMock.mockReset().mockResolvedValue(new Map());
     recordMeetingTranscriptProcessingStageMock.mockReset().mockResolvedValue(undefined);
     markMeetingTranscriptProcessingReadyMock.mockReset().mockResolvedValue(undefined);
+    deliverNotificationDeliveryMock.mockReset().mockResolvedValue({ status: "SENT" });
     createNotificationIntentMock.mockReset().mockResolvedValue({ count: 1 });
     getNewspaperLocalDatePartsMock.mockReset().mockReturnValue({
       dateKey: "2026-04-29",
@@ -798,6 +803,28 @@ describe("runPendingJobs", () => {
       demoLeadId: "lead-1",
       workflowJobId: "job-1",
     });
+    expect(prismaMock.workflowJob.update).toHaveBeenCalledWith({
+      where: { id: "job-1" },
+      data: expect.objectContaining({
+        status: "COMPLETED",
+      }),
+    });
+  });
+
+  it("dispatches notification delivery jobs", async () => {
+    txMock.$queryRaw.mockResolvedValue([
+      {
+        id: "job-1",
+        workspaceId: "ws-1",
+        type: "notification.delivery",
+        payload: { deliveryId: "delivery-1" },
+        attempts: 1,
+      },
+    ]);
+
+    await expect(runPendingJobs("worker-1", 1)).resolves.toBe(1);
+
+    expect(deliverNotificationDeliveryMock).toHaveBeenCalledWith("delivery-1");
     expect(prismaMock.workflowJob.update).toHaveBeenCalledWith({
       where: { id: "job-1" },
       data: expect.objectContaining({
