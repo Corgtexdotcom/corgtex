@@ -126,9 +126,28 @@ export function demoAddGuardRouteSuffix(workspacePath) {
   return `/add?kind=upload_file&returnTo=${encodeURIComponent(`${workspacePath}/brain`)}`;
 }
 
-async function resolveSelectedWorkspace(page, currentWorkspacePath) {
+export async function resolveSelectedWorkspace(page, currentWorkspacePath) {
   const selector = validationWorkspaceSelectorFromEnv(process.env, "CLIENT_READINESS");
   if (!selector.explicit) {
+    if (!currentWorkspacePath) {
+      const response = await page.request.get(`${baseUrl}/api/session`);
+      if (!response.ok()) {
+        throw new Error(`/api/session failed while resolving client-readiness workspace: ${response.status()}`);
+      }
+      const session = await response.json();
+      const workspaces = session.workspaces ?? [];
+      if (workspaces.length === 1 && workspaces[0]) {
+        return {
+          workspacePath: `/workspaces/${workspaces[0].id}`,
+          workspaceSlug: workspaces[0].slug ?? null,
+          selected: false,
+        };
+      }
+      throw new Error(
+        "Login reached the account picker. Set CLIENT_READINESS_WORKSPACE_ID or CLIENT_READINESS_WORKSPACE_SLUG " +
+        "so the production client-readiness smoke can select the intended tenant.",
+      );
+    }
     return {
       workspacePath: currentWorkspacePath,
       workspaceSlug: null,
@@ -194,6 +213,31 @@ export function isWorkspaceUrl(value) {
   }
 }
 
+export function isFindAccountUrl(value) {
+  try {
+    return /^(?:\/[a-z]{2})?\/find-account\/?$/.test(new URL(value).pathname);
+  } catch {
+    return false;
+  }
+}
+
+export function localePrefixFromUrl(value) {
+  try {
+    const match = new URL(value).pathname.match(/^(\/[a-z]{2})(?:\/|$)/);
+    return match?.[1] ?? "";
+  } catch {
+    return "";
+  }
+}
+
+export function workspacePathFromUrl(value) {
+  try {
+    return new URL(value).pathname.match(/^(?:\/[a-z]{2})?(\/workspaces\/[^/]+)/)?.[1] ?? null;
+  } catch {
+    return null;
+  }
+}
+
 export async function visibleLoginErrorMessage(page) {
   const locators = page.locator('[role="alert"], .form-message-error');
   const count = await locators.count().catch(() => 0);
@@ -214,6 +258,11 @@ export async function waitForLoginResult(page) {
 
   while (Date.now() < deadline) {
     if (isWorkspaceUrl(page.url())) {
+      await page.waitForLoadState("domcontentloaded", { timeout: 5000 }).catch(() => null);
+      return;
+    }
+
+    if (isFindAccountUrl(page.url())) {
       await page.waitForLoadState("domcontentloaded", { timeout: 5000 }).catch(() => null);
       return;
     }
@@ -586,13 +635,15 @@ async function main() {
     await waitForPageSettled(page);
     await captureScreenshot(page, "01-after-login.png");
 
-    const match = new URL(page.url()).pathname.match(/^(\/[a-z]{2})?(\/workspaces\/[^/]+)/);
-    if (!match) {
-      throw new Error(`Login did not land in a workspace: ${page.url()}`);
-    }
-    const [, locale = "", initialWorkspacePath] = match;
+    const locale = localePrefixFromUrl(page.url());
+    const initialWorkspacePath = workspacePathFromUrl(page.url());
     const selectedWorkspace = await resolveSelectedWorkspace(page, initialWorkspacePath);
     const workspacePath = selectedWorkspace.workspacePath;
+    if (workspacePath !== initialWorkspacePath) {
+      await page.goto(routeUrl(locale, workspacePath, ""), { waitUntil: "domcontentloaded" });
+      await waitForPageSettled(page);
+      await captureScreenshot(page, "02-selected-workspace.png");
+    }
     const disabledRoutePaths = new Set(expectedDisabledRoutePaths);
     if (
       selectedWorkspace.workspaceSlug === DEMO_WORKSPACE_SLUG
