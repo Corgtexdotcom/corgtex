@@ -318,8 +318,8 @@ function firstCurrencyCode(...values: Array<string | null | undefined>): string 
 
 function assertNativePracticeTimeEntryCurrency(project: NativePracticeProject, entry: NativePracticeTimeEntry) {
   const projectCurrency = normalizeCurrencyCode(project.currency);
-  const billCurrency = firstCurrencyCode(entry.functionalCurrency, entry.billCurrency, entry.currency);
-  const costCurrency = firstCurrencyCode(entry.functionalCurrency, entry.costCurrency, entry.currency);
+  const billCurrency = practiceTimeBillAmountCurrency(entry);
+  const costCurrency = practiceTimeCostAmountCurrency(entry);
   invariant(
     billCurrency === projectCurrency && costCurrency === projectCurrency,
     400,
@@ -336,6 +336,22 @@ function assertNativePracticeExpenseCurrency(project: NativePracticeProject, exp
     400,
     "MIXED_CURRENCY",
     "Native practice finance requires expenses to be normalized to the project currency.",
+  );
+}
+
+function practiceTimeBillAmountCurrency(entry: NativePracticeTimeEntry): string | null {
+  return firstCurrencyCode(
+    entry.billAmountCents == null ? null : entry.functionalCurrency,
+    entry.billCurrency,
+    entry.currency,
+  );
+}
+
+function practiceTimeCostAmountCurrency(entry: NativePracticeTimeEntry): string | null {
+  return firstCurrencyCode(
+    entry.costAmountCents == null ? null : entry.functionalCurrency,
+    entry.costCurrency,
+    entry.currency,
   );
 }
 
@@ -422,8 +438,8 @@ function assertSingleNativePracticeLedgerCurrency(
 ) {
   const currencies = new Set<string>();
   for (const entry of timeEntries) {
-    const billCurrency = firstCurrencyCode(entry.functionalCurrency, entry.billCurrency, entry.currency);
-    const costCurrency = firstCurrencyCode(entry.functionalCurrency, entry.costCurrency, entry.currency);
+    const billCurrency = practiceTimeBillAmountCurrency(entry);
+    const costCurrency = practiceTimeCostAmountCurrency(entry);
     if (billCurrency) currencies.add(billCurrency);
     if (costCurrency) currencies.add(costCurrency);
   }
@@ -755,7 +771,7 @@ export function previewSlicingPieContributionFromTimeEntry(entry: NativePractice
     projectId: entry.projectId,
     consultantId: entry.consultantId,
     occurredAt: entry.workedOn,
-    currency: firstCurrencyCode(entry.functionalCurrency, entry.costCurrency, entry.currency) ?? PRACTICE_LEDGER_CURRENCY,
+    currency: practiceTimeCostAmountCurrency(entry) ?? PRACTICE_LEDGER_CURRENCY,
     marketValueCents,
     paidAmountCents: entry.paidAmountCents ?? 0,
     multiplier: SLICING_PIE_TIME_MULTIPLIER,
@@ -1312,12 +1328,18 @@ export async function listNativePracticeProjectHealth(
         COALESCE(SUM(
           CASE WHEN
             UPPER(COALESCE(
-              NULLIF(BTRIM(t."functionalCurrency"), ''),
+              CASE WHEN t."billAmountCents" IS NOT NULL
+                THEN NULLIF(BTRIM(t."functionalCurrency"), '')
+                ELSE NULL
+              END,
               NULLIF(BTRIM(t."billCurrency"), ''),
               NULLIF(BTRIM(t."currency"), '')
             )) <> UPPER(NULLIF(BTRIM(p."currency"), ''))
             OR UPPER(COALESCE(
-              NULLIF(BTRIM(t."functionalCurrency"), ''),
+              CASE WHEN t."costAmountCents" IS NOT NULL
+                THEN NULLIF(BTRIM(t."functionalCurrency"), '')
+                ELSE NULL
+              END,
               NULLIF(BTRIM(t."costCurrency"), ''),
               NULLIF(BTRIM(t."currency"), '')
             )) <> UPPER(NULLIF(BTRIM(p."currency"), ''))

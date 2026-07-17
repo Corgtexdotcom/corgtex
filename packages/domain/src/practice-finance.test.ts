@@ -562,6 +562,42 @@ describe("practice-finance pure derivations", () => {
     try {
       calculateNativePracticeProjectHealth({
         project: nativeProject({ currency: "USD" }),
+        timeEntries: [
+          nativeTimeEntry({
+            functionalCurrency: "USD",
+            billCurrency: "EUR",
+            costCurrency: "USD",
+            billAmountCents: null,
+            costAmountCents: null,
+          }),
+        ],
+        expenses: [],
+      });
+      throw new Error("Expected rate-derived time entry amounts to use bill and cost currencies.");
+    } catch (error) {
+      expect(error).toMatchObject({ code: "MIXED_CURRENCY" });
+    }
+
+    expect(calculateNativePracticeProjectHealth({
+      project: nativeProject({ currency: "USD" }),
+      timeEntries: [
+        nativeTimeEntry({
+          functionalCurrency: "USD",
+          billCurrency: "EUR",
+          costCurrency: "EUR",
+          billAmountCents: 100_00,
+          costAmountCents: 80_00,
+        }),
+      ],
+      expenses: [],
+    })).toMatchObject({
+      usedBudgetCents: 100_00,
+      directCostCents: 80_00,
+    });
+
+    try {
+      calculateNativePracticeProjectHealth({
+        project: nativeProject({ currency: "USD" }),
         timeEntries: [],
         expenses: [
           nativeExpense({ currency: "EUR" }),
@@ -672,6 +708,16 @@ describe("practice-finance pure derivations", () => {
       multiplier: SLICING_PIE_TIME_MULTIPLIER,
       slices: 50_000,
       paymentBatchId: "batch-1",
+    });
+
+    expect(previewSlicingPieContributionFromTimeEntry(nativeTimeEntry({
+      currency: "EUR",
+      costCurrency: "eur",
+      functionalCurrency: "USD",
+      costAmountCents: null,
+    }))).toMatchObject({
+      currency: "EUR",
+      marketValueCents: 80_000,
     });
 
     expect(previewSlicingPieContributionFromExpense(nativeExpense({
