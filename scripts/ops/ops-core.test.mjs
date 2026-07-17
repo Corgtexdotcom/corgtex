@@ -5,6 +5,7 @@ import {
   buildHealthTargets,
   checkHealthTarget,
   fetchControlPlaneCustomers,
+  incidentBody,
   incidentLabels,
   incidentTitle,
   normalizeIncident,
@@ -41,6 +42,20 @@ describe("ops-core incidents", () => {
     expect(incidentTitle(incident)).toContain("P1 web");
     expect(incidentLabels(incident)).toContain("ops-auto-fix");
     expect(incidentLabels(incident)).toContain("severity-p1");
+  });
+
+  it("routes advisory incidents outside unattended auto-fix", () => {
+    const incident = normalizeIncident({
+      service: "post-deploy-observation",
+      status: "advisory",
+      summary: "Unrelated production worker error",
+      evidence: ["observed release differs from current release"],
+    });
+
+    expect(incidentLabels(incident)).toContain("ops-advisory");
+    expect(incidentLabels(incident)).toContain("ops-incident");
+    expect(incidentLabels(incident)).not.toContain("ops-auto-fix");
+    expect(incidentBody(incident)).toContain("not routed to the unattended Builder Loop");
   });
 
   it("maps health statuses to severity", () => {

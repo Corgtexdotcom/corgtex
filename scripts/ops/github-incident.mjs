@@ -74,7 +74,7 @@ async function readStdin() {
 }
 
 async function publishWithGitHubApi(api, plans, options = {}) {
-  const openIssues = await listOpenOpsIssuesWithApi(api);
+  const openIssues = await listOpenIncidentIssuesWithApi(api);
   for (const plan of plans) {
     await ensureLabelsWithApi(api, plan.labels);
     const existing = findExistingIssueFromList(openIssues, plan.searchToken);
@@ -170,12 +170,12 @@ async function githubRequest(api, path, options = {}) {
   return payload;
 }
 
-async function listOpenOpsIssuesWithApi(api) {
+async function listOpenIncidentIssuesWithApi(api) {
   const issues = [];
   for (let page = 1; ; page += 1) {
     const batch = await githubRequest(
       api,
-      `/repos/${api.owner}/${api.repo}/issues?state=open&labels=ops-auto-fix&per_page=100&page=${page}`,
+      `/repos/${api.owner}/${api.repo}/issues?state=open&labels=ops-incident&per_page=100&page=${page}`,
     );
     issues.push(...batch);
     if (batch.length < 100) break;
@@ -247,7 +247,7 @@ function findExistingIssue(searchToken) {
     "--state",
     "open",
     "--label",
-    "ops-auto-fix",
+    "ops-incident",
     "--search",
     `${searchToken} in:title`,
     "--json",
@@ -285,7 +285,7 @@ function listOpenOpsIssuesWithGhApi() {
       "-f",
       "state=open",
       "-f",
-      "labels=ops-auto-fix",
+      "labels=ops-incident",
       "-f",
       "per_page=100",
       "-f",
@@ -378,6 +378,7 @@ function updateBody(plan) {
 
 function labelColor(label) {
   if (label === "ops-auto-fix") return "D93F0B";
+  if (label === "ops-advisory") return "FBCA04";
   if (label === "ops-incident") return "B60205";
   if (label === "severity-p1") return "B60205";
   if (label === "severity-p2") return "D93F0B";

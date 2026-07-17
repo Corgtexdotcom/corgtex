@@ -132,6 +132,30 @@ describe("github-incident resolved issue sync", () => {
     expect(result.state.calls.some((call) => call[0] === "issue" && call[1] === "list")).toBe(false);
   });
 
+  it("dedupes advisory ops incidents that are not builder auto-fix work", async () => {
+    const dedupeKey = "observation:azure_monitor:corgtex_worker_error:corgtex:tick:WORKER_TICK_ERROR:old-release";
+    const advisoryToken = opsToken(dedupeKey);
+    const result = await runWithFakeGh(githubIncidentPath, [], [
+      {
+        dedupeKey,
+        severity: "P2",
+        service: "post-deploy-observation",
+        status: "advisory",
+        summary: "Unrelated production worker error",
+      },
+    ], {
+      issues: [
+        issue(16, `[${advisoryToken}] P2 post-deploy-observation: Unrelated production worker error`, ["ops-advisory", "ops-incident"], dedupeKey),
+      ],
+    });
+
+    expect(result.code).toBe(0);
+    expect(result.state.issues).toHaveLength(1);
+    expect(result.state.issues[0].comments[0]).toContain("Repeated signal");
+    expect(result.state.calls).toContainEqual(expect.arrayContaining(["issue", "list", "--label", "ops-incident"]));
+    expect(result.state.calls.some((call) => call[0] === "issue" && call[1] === "create")).toBe(false);
+  });
+
   it("runs resolved sync from clean health sweeps that create issues", async () => {
     const server = await startHealthServer();
     try {
