@@ -5,6 +5,9 @@ import {
   type PracticeContributionEntry,
   type PracticeContributionPaymentChoice,
   type PracticeContributionType,
+  type PracticeConsultant,
+  type PracticeExpense,
+  type PracticeTimeEntry,
   type PracticeProject,
   type PracticeProjectStatus,
   type Prisma,
@@ -28,6 +31,7 @@ export const BUDGET_RUNWAY_ATTENTION_WEEKS = 6;
 export const SLICING_PIE_TIME_MULTIPLIER = 2;
 export const SLICING_PIE_EXPENSE_MULTIPLIER = 4;
 export const PRACTICE_LEDGER_CURRENCY = "USD";
+const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
 
 export type PracticeAttentionIssue = "setup" | "budget" | "margin";
 
@@ -93,6 +97,128 @@ export type PracticeContributionEntryPage = {
   nextCursor: string | null;
 };
 
+export type NativePracticeProject = Pick<
+  PracticeProject,
+  | "id"
+  | "code"
+  | "name"
+  | "clientName"
+  | "clientId"
+  | "status"
+  | "currency"
+  | "poValueCents"
+  | "serviceBudgetCents"
+  | "expenseBudgetCents"
+  | "targetMarginBps"
+>;
+
+export type NativePracticeTimeEntry = Pick<
+  PracticeTimeEntry,
+  | "id"
+  | "projectId"
+  | "consultantId"
+  | "workedOn"
+  | "weekEndingOn"
+  | "hours"
+  | "currency"
+  | "costCurrency"
+  | "functionalCurrency"
+  | "billRateCents"
+  | "costRateCents"
+  | "billAmountCents"
+  | "costAmountCents"
+  | "paidAmountCents"
+  | "paymentBatchId"
+  | "status"
+>;
+
+export type NativePracticeExpense = Pick<
+  PracticeExpense,
+  | "id"
+  | "projectId"
+  | "consultantId"
+  | "spentOn"
+  | "category"
+  | "amountCents"
+  | "currency"
+  | "amountFunctionalCents"
+  | "functionalCurrency"
+  | "billable"
+  | "paymentBatchId"
+  | "status"
+>;
+
+export type NativePracticeConsultant = Pick<PracticeConsultant, "id" | "name" | "email" | "active">;
+
+export type NativePracticeProjectHealth = {
+  projectId: string;
+  projectCode: string;
+  projectName: string;
+  clientId: string | null;
+  clientName: string;
+  status: PracticeProjectStatus;
+  currency: string;
+  budgetCents: number;
+  serviceBudgetCents: number;
+  expenseBudgetCents: number;
+  usedBudgetCents: number;
+  remainingBudgetCents: number;
+  directCostCents: number;
+  grossProfitCents: number;
+  grossMarginBps: number;
+  recentBudgetBurnPerWeekCents: number;
+  recentCostBurnPerWeekCents: number;
+  weeksToBudgetExhaustion: number | null;
+  weeksToTargetMarginRisk: number | null;
+  targetMarginBps: number | null;
+  hasBudgetSetup: boolean;
+  hasRecentBurn: boolean;
+};
+
+export type NativePracticeFinanceSummary = PracticeFinanceSummary & {
+  directCostCents: number;
+  grossProfitCents: number;
+  riskBudgetCount: number;
+  riskMarginCount: number;
+};
+
+export type NativePracticeConsultantUtilization = {
+  consultantId: string;
+  consultantName: string;
+  consultantEmail: string | null;
+  active: boolean;
+  projectIds: string[];
+  capacityHoursPerWeek: number;
+  recentHours: number;
+  averageWeeklyHours: number;
+  utilizationBps: number;
+  billedCents: number;
+  costCents: number;
+  expenseCents: number;
+};
+
+export type NativePracticeContributionSourceType = "TIME_ENTRY" | "EXPENSE";
+
+export type NativePracticeContributionPreview = {
+  sourceType: NativePracticeContributionSourceType;
+  sourceId: string;
+  projectId: string;
+  consultantId: string | null;
+  occurredAt: Date;
+  currency: string;
+  marketValueCents: number;
+  paidAmountCents: number;
+  unpaidAmountCents: number;
+  multiplier: number;
+  slices: number;
+  paymentBatchId: string | null;
+};
+
+export type NativePracticeProjectHealthOptions = {
+  now?: Date | null;
+  recentWindowWeeks?: number | null;
+};
+
 type ProjectFinance = Pick<
   PracticeProject,
   | "id"
@@ -113,6 +239,349 @@ function centsToDollars(cents: number) {
 
 function bpsToPct(bps: number) {
   return `${(bps / 100).toFixed(1)}%`;
+}
+
+function decimalToNumber(value: { toNumber: () => number } | number | string): number {
+  if (typeof value === "number") return value;
+  if (typeof value === "string") return Number(value);
+  return value.toNumber();
+}
+
+function centsFromHours(hours: { toNumber: () => number } | number | string, rateCents: number): number {
+  return Math.round(decimalToNumber(hours) * rateCents);
+}
+
+function roundWeeks(value: number): number {
+  if (!Number.isFinite(value)) return 0;
+  return Math.round(value * 10) / 10;
+}
+
+function roundHours(value: number): number {
+  if (!Number.isFinite(value)) return 0;
+  return Math.round(value * 10) / 10;
+}
+
+function weekWindow(now: Date, weeks: number): { startsOn: Date; endsOn: Date } {
+  return {
+    startsOn: new Date(now.getTime() - weeks * WEEK_MS),
+    endsOn: now,
+  };
+}
+
+function isWithinDateWindow(value: Date, window: { startsOn: Date; endsOn: Date }): boolean {
+  return value >= window.startsOn && value <= window.endsOn;
+}
+
+function normalizeRecentWindowWeeks(value: number | null | undefined): number {
+  if (value == null) return 4;
+  invariant(Number.isInteger(value) && value > 0 && value <= 52, 400, "INVALID_INPUT", "recentWindowWeeks must be 1-52.");
+  return value;
+}
+
+function normalizeNow(value: Date | null | undefined): Date {
+  if (value == null) return new Date();
+  invariant(value instanceof Date && !Number.isNaN(value.valueOf()), 400, "INVALID_INPUT", "now must be a valid date.");
+  return value;
+}
+
+function calculateWeeksToMarginFloor(params: {
+  usedBudgetCents: number;
+  grossProfitCents: number;
+  grossMarginBps: number;
+  recentRevenueBurnPerWeekCents: number;
+  recentCostBurnPerWeekCents: number;
+  targetMarginBps: number | null;
+}): number | null {
+  if (params.targetMarginBps == null || params.targetMarginBps <= 0) return null;
+  if (params.usedBudgetCents > 0 && params.grossMarginBps < params.targetMarginBps) return 0;
+  if (params.recentRevenueBurnPerWeekCents <= 0 && params.recentCostBurnPerWeekCents <= 0) return null;
+
+  const targetMargin = params.targetMarginBps / 10_000;
+  const currentHeadroomCents = params.grossProfitCents - params.usedBudgetCents * targetMargin;
+  const weeklyHeadroomDeltaCents =
+    params.recentRevenueBurnPerWeekCents * (1 - targetMargin) - params.recentCostBurnPerWeekCents;
+
+  if (currentHeadroomCents <= 0) return 0;
+  if (weeklyHeadroomDeltaCents >= 0) return null;
+
+  return roundWeeks(currentHeadroomCents / Math.abs(weeklyHeadroomDeltaCents));
+}
+
+function postedTimeEntries(entries: NativePracticeTimeEntry[]) {
+  return entries.filter((entry) => entry.status === "POSTED");
+}
+
+function postedExpenses(expenses: NativePracticeExpense[]) {
+  return expenses.filter((expense) => expense.status === "POSTED");
+}
+
+export function practiceTimeBillAmountCents(entry: NativePracticeTimeEntry): number {
+  return entry.billAmountCents ?? centsFromHours(entry.hours, entry.billRateCents);
+}
+
+export function practiceTimeCostAmountCents(entry: NativePracticeTimeEntry): number {
+  return entry.costAmountCents ?? centsFromHours(entry.hours, entry.costRateCents);
+}
+
+export function practiceExpenseFunctionalAmountCents(expense: NativePracticeExpense): number {
+  return expense.amountFunctionalCents ?? expense.amountCents;
+}
+
+export function calculateNativePracticeProjectHealth(params: {
+  project: NativePracticeProject;
+  timeEntries: NativePracticeTimeEntry[];
+  expenses: NativePracticeExpense[];
+} & NativePracticeProjectHealthOptions): NativePracticeProjectHealth {
+  const now = normalizeNow(params.now);
+  const recentWindowWeeks = normalizeRecentWindowWeeks(params.recentWindowWeeks);
+  const recent = weekWindow(now, recentWindowWeeks);
+  const timeEntries = postedTimeEntries(params.timeEntries).filter((entry) => entry.projectId === params.project.id);
+  const expenses = postedExpenses(params.expenses).filter((expense) => expense.projectId === params.project.id);
+
+  const timeRevenueCents = timeEntries.reduce((sum, entry) => sum + practiceTimeBillAmountCents(entry), 0);
+  const timeCostCents = timeEntries.reduce((sum, entry) => sum + practiceTimeCostAmountCents(entry), 0);
+  const billableExpenseCents = expenses
+    .filter((expense) => expense.billable)
+    .reduce((sum, expense) => sum + practiceExpenseFunctionalAmountCents(expense), 0);
+  const directExpenseCents = expenses.reduce((sum, expense) => sum + practiceExpenseFunctionalAmountCents(expense), 0);
+
+  const usedBudgetCents = timeRevenueCents + billableExpenseCents;
+  const directCostCents = timeCostCents + directExpenseCents;
+  const remainingBudgetCents = Math.max(0, params.project.poValueCents - usedBudgetCents);
+  const grossProfitCents = usedBudgetCents - directCostCents;
+  const grossMarginBps = usedBudgetCents > 0 ? Math.round((grossProfitCents / usedBudgetCents) * 10_000) : 0;
+
+  const recentUsedBudgetCents =
+    timeEntries
+      .filter((entry) => isWithinDateWindow(entry.weekEndingOn, recent))
+      .reduce((sum, entry) => sum + practiceTimeBillAmountCents(entry), 0)
+    + expenses
+      .filter((expense) => expense.billable && isWithinDateWindow(expense.spentOn, recent))
+      .reduce((sum, expense) => sum + practiceExpenseFunctionalAmountCents(expense), 0);
+
+  const recentDirectCostCents =
+    timeEntries
+      .filter((entry) => isWithinDateWindow(entry.weekEndingOn, recent))
+      .reduce((sum, entry) => sum + practiceTimeCostAmountCents(entry), 0)
+    + expenses
+      .filter((expense) => isWithinDateWindow(expense.spentOn, recent))
+      .reduce((sum, expense) => sum + practiceExpenseFunctionalAmountCents(expense), 0);
+
+  const recentBudgetBurnPerWeekCents = Math.round(recentUsedBudgetCents / recentWindowWeeks);
+  const recentCostBurnPerWeekCents = Math.round(recentDirectCostCents / recentWindowWeeks);
+  const hasBudgetSetup =
+    params.project.poValueCents > 0
+    && params.project.serviceBudgetCents > 0
+    && params.project.expenseBudgetCents > 0
+    && params.project.targetMarginBps != null;
+  const hasRecentBurn = recentBudgetBurnPerWeekCents > 0 || recentCostBurnPerWeekCents > 0;
+  const weeksToBudgetExhaustion = hasBudgetSetup && recentBudgetBurnPerWeekCents > 0
+    ? roundWeeks(remainingBudgetCents / recentBudgetBurnPerWeekCents)
+    : null;
+  const weeksToTargetMarginRisk = calculateWeeksToMarginFloor({
+    grossMarginBps,
+    grossProfitCents,
+    recentCostBurnPerWeekCents,
+    recentRevenueBurnPerWeekCents: recentBudgetBurnPerWeekCents,
+    targetMarginBps: params.project.targetMarginBps,
+    usedBudgetCents,
+  });
+
+  return {
+    projectId: params.project.id,
+    projectCode: params.project.code,
+    projectName: params.project.name,
+    clientId: params.project.clientId,
+    clientName: params.project.clientName,
+    status: params.project.status,
+    currency: params.project.currency,
+    budgetCents: params.project.poValueCents,
+    serviceBudgetCents: params.project.serviceBudgetCents,
+    expenseBudgetCents: params.project.expenseBudgetCents,
+    usedBudgetCents,
+    remainingBudgetCents,
+    directCostCents,
+    grossProfitCents,
+    grossMarginBps,
+    recentBudgetBurnPerWeekCents,
+    recentCostBurnPerWeekCents,
+    weeksToBudgetExhaustion,
+    weeksToTargetMarginRisk,
+    targetMarginBps: params.project.targetMarginBps,
+    hasBudgetSetup,
+    hasRecentBurn,
+  };
+}
+
+export function summarizeNativePracticeFinance(health: NativePracticeProjectHealth[]): NativePracticeFinanceSummary {
+  const active = health.filter((item) => item.status === "ACTIVE");
+  const budgetCents = active.reduce((sum, item) => sum + item.budgetCents, 0);
+  const usedCents = active.reduce((sum, item) => sum + item.usedBudgetCents, 0);
+  const grossProfitCents = active.reduce((sum, item) => sum + item.grossProfitCents, 0);
+  const directCostCents = active.reduce((sum, item) => sum + item.directCostCents, 0);
+  const marginBps = usedCents > 0 ? Math.round((grossProfitCents / usedCents) * 10_000) : null;
+
+  return {
+    activeProjects: active.length,
+    budgetCents,
+    usedCents,
+    remainingCents: active.reduce((sum, item) => sum + item.remainingBudgetCents, 0),
+    marginBps,
+    directCostCents,
+    grossProfitCents,
+    riskBudgetCount: active.filter((item) =>
+      item.weeksToBudgetExhaustion != null && item.weeksToBudgetExhaustion <= BUDGET_RUNWAY_ATTENTION_WEEKS
+    ).length,
+    riskMarginCount: active.filter((item) =>
+      item.weeksToTargetMarginRisk != null && item.weeksToTargetMarginRisk <= BUDGET_RUNWAY_ATTENTION_WEEKS
+    ).length,
+  };
+}
+
+export function nativePracticeProjectAttentionItems(health: NativePracticeProjectHealth): PracticeAttentionItem[] {
+  if (health.status !== "ACTIVE") return [];
+  const items: PracticeAttentionItem[] = [];
+
+  if (!health.hasBudgetSetup) {
+    items.push({
+      projectId: health.projectId,
+      projectName: health.projectName,
+      issue: "setup",
+      weeks: null,
+      detail: "Add PO value, service budget, expense budget, and target margin before forecasting.",
+    });
+    return items;
+  }
+
+  if (health.weeksToBudgetExhaustion != null && health.weeksToBudgetExhaustion <= BUDGET_RUNWAY_ATTENTION_WEEKS) {
+    items.push({
+      projectId: health.projectId,
+      projectName: health.projectName,
+      issue: "budget",
+      weeks: health.weeksToBudgetExhaustion,
+      detail: `${centsToDollars(health.remainingBudgetCents)} remaining at ${centsToDollars(health.recentBudgetBurnPerWeekCents)} / week.`,
+    });
+  }
+
+  if (health.weeksToTargetMarginRisk != null && health.weeksToTargetMarginRisk <= BUDGET_RUNWAY_ATTENTION_WEEKS && health.targetMarginBps != null) {
+    items.push({
+      projectId: health.projectId,
+      projectName: health.projectName,
+      issue: "margin",
+      weeks: health.weeksToTargetMarginRisk,
+      detail: `Current margin ${bpsToPct(health.grossMarginBps)} vs target ${bpsToPct(health.targetMarginBps)}.`,
+    });
+  }
+
+  return items;
+}
+
+export function collectNativePracticeAttention(health: NativePracticeProjectHealth[]): PracticeAttentionItem[] {
+  return health.flatMap(nativePracticeProjectAttentionItems);
+}
+
+export function calculateNativePracticeConsultantUtilization(params: {
+  consultant: NativePracticeConsultant;
+  timeEntries: NativePracticeTimeEntry[];
+  expenses: NativePracticeExpense[];
+  capacityHoursPerWeek?: number | null;
+} & NativePracticeProjectHealthOptions): NativePracticeConsultantUtilization {
+  const now = normalizeNow(params.now);
+  const recentWindowWeeks = normalizeRecentWindowWeeks(params.recentWindowWeeks);
+  const recent = weekWindow(now, recentWindowWeeks);
+  const timeEntries = postedTimeEntries(params.timeEntries).filter((entry) => entry.consultantId === params.consultant.id);
+  const expenses = postedExpenses(params.expenses).filter((expense) => expense.consultantId === params.consultant.id);
+  const recentHours = timeEntries
+    .filter((entry) => isWithinDateWindow(entry.weekEndingOn, recent))
+    .reduce((sum, entry) => sum + decimalToNumber(entry.hours), 0);
+  const billedCents = timeEntries.reduce((sum, entry) => sum + practiceTimeBillAmountCents(entry), 0);
+  const costCents = timeEntries.reduce((sum, entry) => sum + practiceTimeCostAmountCents(entry), 0);
+  const expenseCents = expenses.reduce((sum, expense) => sum + practiceExpenseFunctionalAmountCents(expense), 0);
+  const capacityHoursPerWeek = params.capacityHoursPerWeek ?? 40;
+  const averageWeeklyHours = roundHours(recentHours / recentWindowWeeks);
+  const utilizationBps = capacityHoursPerWeek > 0 ? Math.round((averageWeeklyHours / capacityHoursPerWeek) * 10_000) : 0;
+  const projectIds = [...new Set([
+    ...timeEntries.map((entry) => entry.projectId),
+    ...expenses.map((expense) => expense.projectId),
+  ])].sort();
+
+  return {
+    consultantId: params.consultant.id,
+    consultantName: params.consultant.name,
+    consultantEmail: params.consultant.email,
+    active: params.consultant.active,
+    projectIds,
+    capacityHoursPerWeek,
+    recentHours: roundHours(recentHours),
+    averageWeeklyHours,
+    utilizationBps,
+    billedCents,
+    costCents,
+    expenseCents,
+  };
+}
+
+function calculateContributionPreview(params: {
+  sourceType: NativePracticeContributionSourceType;
+  sourceId: string;
+  projectId: string;
+  consultantId: string | null;
+  occurredAt: Date;
+  currency: string;
+  marketValueCents: number;
+  paidAmountCents: number;
+  multiplier: number;
+  paymentBatchId: string | null;
+}): NativePracticeContributionPreview {
+  const paidAmountCents = Math.min(Math.max(0, params.paidAmountCents), params.marketValueCents);
+  const unpaidAmountCents = Math.max(0, params.marketValueCents - paidAmountCents);
+
+  return {
+    sourceType: params.sourceType,
+    sourceId: params.sourceId,
+    projectId: params.projectId,
+    consultantId: params.consultantId,
+    occurredAt: params.occurredAt,
+    currency: params.currency,
+    marketValueCents: params.marketValueCents,
+    paidAmountCents,
+    unpaidAmountCents,
+    multiplier: params.multiplier,
+    slices: unpaidAmountCents * params.multiplier,
+    paymentBatchId: params.paymentBatchId,
+  };
+}
+
+export function previewSlicingPieContributionFromTimeEntry(entry: NativePracticeTimeEntry): NativePracticeContributionPreview {
+  const marketValueCents = practiceTimeCostAmountCents(entry);
+  return calculateContributionPreview({
+    sourceType: "TIME_ENTRY",
+    sourceId: entry.id,
+    projectId: entry.projectId,
+    consultantId: entry.consultantId,
+    occurredAt: entry.workedOn,
+    currency: entry.functionalCurrency ?? entry.costCurrency ?? entry.currency,
+    marketValueCents,
+    paidAmountCents: entry.paidAmountCents ?? 0,
+    multiplier: SLICING_PIE_TIME_MULTIPLIER,
+    paymentBatchId: entry.paymentBatchId,
+  });
+}
+
+export function previewSlicingPieContributionFromExpense(expense: NativePracticeExpense): NativePracticeContributionPreview {
+  const marketValueCents = practiceExpenseFunctionalAmountCents(expense);
+  return calculateContributionPreview({
+    sourceType: "EXPENSE",
+    sourceId: expense.id,
+    projectId: expense.projectId,
+    consultantId: expense.consultantId,
+    occurredAt: expense.spentOn,
+    currency: expense.functionalCurrency ?? expense.currency,
+    marketValueCents,
+    paidAmountCents: expense.paymentBatchId ? marketValueCents : 0,
+    multiplier: SLICING_PIE_EXPENSE_MULTIPLIER,
+    paymentBatchId: expense.paymentBatchId,
+  });
 }
 
 export function projectRemainingCents(p: Pick<ProjectFinance, "poValueCents" | "usedCents">): number {
@@ -312,6 +781,14 @@ export type UpdatePracticeProjectInput = {
 export type ListPracticeProjectsOptions = {
   take?: number | null;
   cursor?: string | null;
+};
+
+export type ListNativePracticeProjectHealthOptions = ListPracticeProjectsOptions & NativePracticeProjectHealthOptions;
+
+export type NativePracticeFinanceDashboard = {
+  summary: NativePracticeFinanceSummary;
+  attention: PracticeAttentionItem[];
+  projectHealth: NativePracticeProjectHealth[];
 };
 
 export type ListPracticeContributionEntriesOptions = {
@@ -534,6 +1011,126 @@ export async function getPracticeFinanceDashboard(
     summary: summarizePracticeFinance(projects),
     attention: collectAttention(projects),
     projects,
+  };
+}
+
+const NATIVE_PRACTICE_PROJECT_SELECT = {
+  id: true,
+  code: true,
+  name: true,
+  clientName: true,
+  clientId: true,
+  status: true,
+  currency: true,
+  poValueCents: true,
+  serviceBudgetCents: true,
+  expenseBudgetCents: true,
+  targetMarginBps: true,
+} satisfies Prisma.PracticeProjectSelect;
+
+const NATIVE_PRACTICE_TIME_ENTRY_SELECT = {
+  id: true,
+  projectId: true,
+  consultantId: true,
+  workedOn: true,
+  weekEndingOn: true,
+  hours: true,
+  currency: true,
+  costCurrency: true,
+  functionalCurrency: true,
+  billRateCents: true,
+  costRateCents: true,
+  billAmountCents: true,
+  costAmountCents: true,
+  paidAmountCents: true,
+  paymentBatchId: true,
+  status: true,
+} satisfies Prisma.PracticeTimeEntrySelect;
+
+const NATIVE_PRACTICE_EXPENSE_SELECT = {
+  id: true,
+  projectId: true,
+  consultantId: true,
+  spentOn: true,
+  category: true,
+  amountCents: true,
+  currency: true,
+  amountFunctionalCents: true,
+  functionalCurrency: true,
+  billable: true,
+  paymentBatchId: true,
+  status: true,
+} satisfies Prisma.PracticeExpenseSelect;
+
+function groupByProjectId<T extends { projectId: string }>(rows: T[]) {
+  const grouped = new Map<string, T[]>();
+  for (const row of rows) {
+    const existing = grouped.get(row.projectId) ?? [];
+    existing.push(row);
+    grouped.set(row.projectId, existing);
+  }
+  return grouped;
+}
+
+export async function listNativePracticeProjectHealth(
+  actor: AppActor,
+  workspaceId: string,
+  options: ListNativePracticeProjectHealthOptions = {},
+): Promise<NativePracticeProjectHealth[]> {
+  await requireWorkspaceMembership({ actor, workspaceId });
+  const cursor = normalizeCursor(options.cursor);
+  const projects = await prisma.practiceProject.findMany({
+    where: { workspaceId },
+    select: NATIVE_PRACTICE_PROJECT_SELECT,
+    orderBy: [{ status: "asc" }, { code: "asc" }, { id: "asc" }],
+    take: normalizeTake(options.take),
+    ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
+  });
+
+  const projectIds = projects.map((project) => project.id);
+  if (projectIds.length === 0) return [];
+
+  const [timeEntries, expenses] = await Promise.all([
+    prisma.practiceTimeEntry.findMany({
+      where: {
+        workspaceId,
+        projectId: { in: projectIds },
+        status: "POSTED",
+      },
+      select: NATIVE_PRACTICE_TIME_ENTRY_SELECT,
+    }),
+    prisma.practiceExpense.findMany({
+      where: {
+        workspaceId,
+        projectId: { in: projectIds },
+        status: "POSTED",
+      },
+      select: NATIVE_PRACTICE_EXPENSE_SELECT,
+    }),
+  ]);
+
+  const timeByProject = groupByProjectId(timeEntries);
+  const expensesByProject = groupByProjectId(expenses);
+
+  return projects.map((project) => calculateNativePracticeProjectHealth({
+    project,
+    timeEntries: timeByProject.get(project.id) ?? [],
+    expenses: expensesByProject.get(project.id) ?? [],
+    now: options.now,
+    recentWindowWeeks: options.recentWindowWeeks,
+  }));
+}
+
+export async function getNativePracticeFinanceDashboard(
+  actor: AppActor,
+  workspaceId: string,
+  options: ListNativePracticeProjectHealthOptions = {},
+): Promise<NativePracticeFinanceDashboard> {
+  const projectHealth = await listNativePracticeProjectHealth(actor, workspaceId, options);
+  return {
+    summary: summarizeNativePracticeFinance(projectHealth),
+    attention: collectNativePracticeAttention(projectHealth),
+    projectHealth,
   };
 }
 

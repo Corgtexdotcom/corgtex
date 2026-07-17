@@ -19,11 +19,17 @@ const { prismaMock, requireWorkspaceMembershipMock } = vi.hoisted(() => ({
       update: vi.fn(),
       updateMany: vi.fn(),
     },
+    practiceExpense: {
+      findMany: vi.fn(),
+    },
     practiceProject: {
       create: vi.fn(),
       findUnique: vi.fn(),
       findMany: vi.fn(),
       update: vi.fn(),
+    },
+    practiceTimeEntry: {
+      findMany: vi.fn(),
     },
     workspaceFeatureFlag: {
       findUnique: vi.fn(),
@@ -49,23 +55,32 @@ import {
   SLICING_PIE_TIME_MULTIPLIER,
   calculatePracticeContributionAmount,
   calculatePracticeContributionSlices,
+  calculateNativePracticeConsultantUtilization,
+  calculateNativePracticeProjectHealth,
   canManagePracticeFinanceProjects,
   collectAttention,
+  collectNativePracticeAttention,
   createPracticeContributionEntry,
   createPracticeProject,
   createPracticeProjectFromWonDeal,
   getCrmAccountPracticeFinance,
+  getNativePracticeFinanceDashboard,
   getPracticeFinanceDashboard,
   getSlicingPieSummary,
+  listNativePracticeProjectHealth,
   listPracticeContributionEntries,
   listRequestedPracticeContributionPayables,
   listPracticeProjects,
   markPracticeContributionEntryPaid,
+  nativePracticeProjectAttentionItems,
+  previewSlicingPieContributionFromExpense,
+  previewSlicingPieContributionFromTimeEntry,
   projectAttentionItems,
   projectBudgetRunwayWeeks,
   projectNeedsSetup,
   projectRemainingCents,
   projectUsedRatio,
+  summarizeNativePracticeFinance,
   summarizePracticeFinance,
   updatePracticeProject,
 } from "./practice-finance";
@@ -84,6 +99,82 @@ function project(overrides: Partial<Fixture> = {}): Fixture {
     weeklyBurnCents: 0,
     targetMarginBps: 5500,
     currentMarginBps: 6400,
+    ...overrides,
+  };
+}
+
+type NativeProjectFixture = Parameters<typeof calculateNativePracticeProjectHealth>[0]["project"];
+type NativeTimeEntryFixture = Parameters<typeof calculateNativePracticeProjectHealth>[0]["timeEntries"][number];
+type NativeExpenseFixture = Parameters<typeof calculateNativePracticeProjectHealth>[0]["expenses"][number];
+type NativeConsultantFixture = Parameters<typeof calculateNativePracticeConsultantUtilization>[0]["consultant"];
+
+function decimal(value: number): NativeTimeEntryFixture["hours"] {
+  return { toNumber: () => value } as NativeTimeEntryFixture["hours"];
+}
+
+function nativeProject(overrides: Partial<NativeProjectFixture> = {}): NativeProjectFixture {
+  return {
+    id: "project-1",
+    code: "DPRJ-001",
+    name: "Native project",
+    clientName: "Example",
+    clientId: "client-1",
+    status: "ACTIVE",
+    currency: "USD",
+    poValueCents: 10_000_00,
+    serviceBudgetCents: 8_000_00,
+    expenseBudgetCents: 2_000_00,
+    targetMarginBps: 5000,
+    ...overrides,
+  };
+}
+
+function nativeTimeEntry(overrides: Partial<NativeTimeEntryFixture> = {}): NativeTimeEntryFixture {
+  return {
+    id: "time-1",
+    projectId: "project-1",
+    consultantId: "consultant-1",
+    workedOn: new Date("2026-06-27T00:00:00.000Z"),
+    weekEndingOn: new Date("2026-06-29T00:00:00.000Z"),
+    hours: decimal(10),
+    currency: "USD",
+    costCurrency: null,
+    functionalCurrency: null,
+    billRateCents: 15_000,
+    costRateCents: 8_000,
+    billAmountCents: null,
+    costAmountCents: null,
+    paidAmountCents: null,
+    paymentBatchId: null,
+    status: "POSTED",
+    ...overrides,
+  };
+}
+
+function nativeExpense(overrides: Partial<NativeExpenseFixture> = {}): NativeExpenseFixture {
+  return {
+    id: "expense-1",
+    projectId: "project-1",
+    consultantId: "consultant-1",
+    spentOn: new Date("2026-06-28T00:00:00.000Z"),
+    category: "Travel",
+    amountCents: 40_000,
+    currency: "USD",
+    amountFunctionalCents: null,
+    functionalCurrency: null,
+    billable: true,
+    paymentBatchId: null,
+    status: "POSTED",
+    ...overrides,
+  };
+}
+
+function nativeConsultant(overrides: Partial<NativeConsultantFixture> = {}): NativeConsultantFixture {
+  return {
+    id: "consultant-1",
+    name: "Priya Shah",
+    email: "priya@example.test",
+    active: true,
     ...overrides,
   };
 }
@@ -175,6 +266,142 @@ describe("practice-finance pure derivations", () => {
       project({ id: "ok", weeklyBurnCents: 0 }),
     ]);
     expect(all.map((i) => i.projectId)).toEqual(["s"]);
+  });
+
+  it("calculates native project health from posted time and expenses", () => {
+    const health = calculateNativePracticeProjectHealth({
+      project: nativeProject(),
+      now: new Date("2026-06-30T00:00:00.000Z"),
+      timeEntries: [
+        nativeTimeEntry(),
+        nativeTimeEntry({
+          id: "time-reversed",
+          billAmountCents: 9_999_00,
+          costAmountCents: 9_999_00,
+          status: "REVERSED",
+        }),
+      ],
+      expenses: [
+        nativeExpense(),
+        nativeExpense({
+          id: "expense-nonbillable",
+          amountCents: 10_000,
+          billable: false,
+        }),
+      ],
+    });
+
+    expect(health).toMatchObject({
+      projectId: "project-1",
+      budgetCents: 10_000_00,
+      usedBudgetCents: 190_000,
+      remainingBudgetCents: 810_000,
+      directCostCents: 130_000,
+      grossProfitCents: 60_000,
+      grossMarginBps: 3158,
+      recentBudgetBurnPerWeekCents: 47_500,
+      recentCostBurnPerWeekCents: 32_500,
+      weeksToBudgetExhaustion: 17.1,
+      weeksToTargetMarginRisk: 0,
+      hasBudgetSetup: true,
+      hasRecentBurn: true,
+    });
+  });
+
+  it("marks native project health as setup-incomplete until budget and margin inputs exist", () => {
+    const health = calculateNativePracticeProjectHealth({
+      project: nativeProject({ targetMarginBps: null }),
+      now: new Date("2026-06-30T00:00:00.000Z"),
+      timeEntries: [nativeTimeEntry()],
+      expenses: [],
+    });
+
+    expect(health.hasBudgetSetup).toBe(false);
+    expect(health.weeksToBudgetExhaustion).toBeNull();
+    expect(nativePracticeProjectAttentionItems(health)).toEqual([{
+      projectId: "project-1",
+      projectName: "Native project",
+      issue: "setup",
+      weeks: null,
+      detail: "Add PO value, service budget, expense budget, and target margin before forecasting.",
+    }]);
+  });
+
+  it("summarizes native project health and collects margin attention", () => {
+    const risky = calculateNativePracticeProjectHealth({
+      project: nativeProject({ id: "risk", name: "Risky" }),
+      now: new Date("2026-06-30T00:00:00.000Z"),
+      timeEntries: [nativeTimeEntry({ projectId: "risk" })],
+      expenses: [nativeExpense({ projectId: "risk" })],
+    });
+    const closed = calculateNativePracticeProjectHealth({
+      project: nativeProject({ id: "closed", status: "CLOSED" }),
+      timeEntries: [],
+      expenses: [],
+      now: new Date("2026-06-30T00:00:00.000Z"),
+    });
+
+    const summary = summarizeNativePracticeFinance([risky, closed]);
+    expect(summary.activeProjects).toBe(1);
+    expect(summary.usedCents).toBe(190_000);
+    expect(summary.directCostCents).toBe(120_000);
+    expect(summary.marginBps).toBe(3684);
+    expect(summary.riskMarginCount).toBe(1);
+    expect(collectNativePracticeAttention([risky, closed]).map((item) => item.issue)).toEqual(["margin"]);
+  });
+
+  it("calculates native consultant utilization from posted time and expenses", () => {
+    const utilization = calculateNativePracticeConsultantUtilization({
+      consultant: nativeConsultant(),
+      now: new Date("2026-06-30T00:00:00.000Z"),
+      recentWindowWeeks: 4,
+      capacityHoursPerWeek: 40,
+      timeEntries: [
+        nativeTimeEntry({ hours: decimal(12), billRateCents: 20_000, costRateCents: 10_000 }),
+        nativeTimeEntry({ id: "old", workedOn: new Date("2026-01-01T00:00:00.000Z"), weekEndingOn: new Date("2026-01-05T00:00:00.000Z"), hours: decimal(4) }),
+      ],
+      expenses: [nativeExpense({ amountFunctionalCents: 12_345 })],
+    });
+
+    expect(utilization).toMatchObject({
+      consultantId: "consultant-1",
+      projectIds: ["project-1"],
+      recentHours: 12,
+      averageWeeklyHours: 3,
+      utilizationBps: 750,
+      billedCents: 300_000,
+      costCents: 152_000,
+      expenseCents: 12_345,
+    });
+  });
+
+  it("previews Slicing Pie contribution data from native time and expense rows", () => {
+    expect(previewSlicingPieContributionFromTimeEntry(nativeTimeEntry({
+      costAmountCents: 40_000,
+      paidAmountCents: 15_000,
+      paymentBatchId: "batch-1",
+    }))).toMatchObject({
+      sourceType: "TIME_ENTRY",
+      sourceId: "time-1",
+      marketValueCents: 40_000,
+      paidAmountCents: 15_000,
+      unpaidAmountCents: 25_000,
+      multiplier: SLICING_PIE_TIME_MULTIPLIER,
+      slices: 50_000,
+      paymentBatchId: "batch-1",
+    });
+
+    expect(previewSlicingPieContributionFromExpense(nativeExpense({
+      amountFunctionalCents: 12_000,
+    }))).toMatchObject({
+      sourceType: "EXPENSE",
+      sourceId: "expense-1",
+      marketValueCents: 12_000,
+      paidAmountCents: 0,
+      unpaidAmountCents: 12_000,
+      multiplier: SLICING_PIE_EXPENSE_MULTIPLIER,
+      slices: 48_000,
+    });
   });
 
   it("calculates contribution values and fixed Slicing Pie multipliers", () => {
@@ -310,6 +537,8 @@ describe("practice-finance I/O", () => {
     prismaMock.practiceContributionEntry.findUnique.mockResolvedValue(null);
     prismaMock.practiceContributionEntry.groupBy.mockResolvedValue([]);
     prismaMock.practiceContributionEntry.updateMany.mockResolvedValue({ count: 0 });
+    prismaMock.practiceExpense.findMany.mockResolvedValue([]);
+    prismaMock.practiceTimeEntry.findMany.mockResolvedValue([]);
     prismaMock.practiceContributionEntry.update.mockResolvedValue({
       id: "contribution-1",
       workspaceId: "workspace-1",
@@ -437,6 +666,69 @@ describe("practice-finance I/O", () => {
     expect(dashboard.summary.activeProjects).toBe(1);
     expect(prismaMock.practiceProject.findMany).toHaveBeenCalledWith(expect.objectContaining({
       take: 100,
+    }));
+  });
+
+  it("lists native project health through a bounded project page and scoped ledger rows", async () => {
+    prismaMock.practiceProject.findMany.mockResolvedValueOnce([
+      nativeProject(),
+    ]);
+    prismaMock.practiceTimeEntry.findMany.mockResolvedValueOnce([
+      nativeTimeEntry(),
+    ]);
+    prismaMock.practiceExpense.findMany.mockResolvedValueOnce([
+      nativeExpense(),
+    ]);
+
+    const health = await listNativePracticeProjectHealth(actor, "workspace-1", {
+      take: 5,
+      cursor: " project-0 ",
+      now: new Date("2026-06-30T00:00:00.000Z"),
+    });
+
+    expect(health[0]).toMatchObject({
+      projectId: "project-1",
+      usedBudgetCents: 190_000,
+      directCostCents: 120_000,
+    });
+    expect(prismaMock.practiceProject.findMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: { workspaceId: "workspace-1" },
+      take: 5,
+      cursor: { id: "project-0" },
+      skip: 1,
+    }));
+    expect(prismaMock.practiceTimeEntry.findMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: {
+        workspaceId: "workspace-1",
+        projectId: { in: ["project-1"] },
+        status: "POSTED",
+      },
+      select: expect.any(Object),
+    }));
+    expect(prismaMock.practiceExpense.findMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: {
+        workspaceId: "workspace-1",
+        projectId: { in: ["project-1"] },
+        status: "POSTED",
+      },
+      select: expect.any(Object),
+    }));
+  });
+
+  it("builds the native finance dashboard from project health", async () => {
+    prismaMock.practiceProject.findMany.mockResolvedValueOnce([
+      nativeProject({ targetMarginBps: null }),
+    ]);
+
+    const dashboard = await getNativePracticeFinanceDashboard(actor, "workspace-1", {
+      now: new Date("2026-06-30T00:00:00.000Z"),
+    });
+
+    expect(dashboard.summary.activeProjects).toBe(1);
+    expect(dashboard.attention).toHaveLength(1);
+    expect(dashboard.attention[0]).toMatchObject({ issue: "setup" });
+    expect(prismaMock.practiceTimeEntry.findMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({ projectId: { in: ["project-1"] } }),
     }));
   });
 
