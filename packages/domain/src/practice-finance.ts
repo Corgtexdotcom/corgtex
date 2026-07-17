@@ -1477,8 +1477,13 @@ function normalizeConsultantEmail(value: string | null | undefined): string | nu
   return normalized || null;
 }
 
-function manualLedgerConsultantSourceId(idempotencyKey: string | null | undefined): string | null {
-  return idempotencyKey ? `manual-ledger-consultant:${idempotencyKey}` : null;
+type ManualLedgerConsultantSourceKind = "time" | "expense";
+
+function manualLedgerConsultantSourceId(
+  sourceKind: ManualLedgerConsultantSourceKind,
+  idempotencyKey: string | null | undefined,
+): string | null {
+  return idempotencyKey ? `manual-ledger-consultant:${sourceKind}:${idempotencyKey}` : null;
 }
 
 function weekEndingSundayUtc(workedOn: Date): Date {
@@ -2335,6 +2340,7 @@ async function resolveNativePracticeConsultant(params: {
   workspaceId: string;
   name?: string | null;
   email?: string | null;
+  sourceKind: ManualLedgerConsultantSourceKind;
   idempotencyKey?: string | null;
   required: boolean;
 }) {
@@ -2351,7 +2357,7 @@ async function resolveNativePracticeConsultant(params: {
     return applyNativePracticeConsultantMatch(prisma, matches[0], email);
   }
 
-  const sourceSatelliteId = manualLedgerConsultantSourceId(params.idempotencyKey);
+  const sourceSatelliteId = manualLedgerConsultantSourceId(params.sourceKind, params.idempotencyKey);
   if (sourceSatelliteId) {
     const sourceMatch = await prisma.practiceConsultant.findFirst({
       where: { workspaceId: params.workspaceId, sourceSatelliteId },
@@ -2499,6 +2505,7 @@ export async function createNativePracticeTimeEntry(
     workspaceId,
     name: consultantName,
     email: consultantEmail,
+    sourceKind: "time",
     idempotencyKey,
     required: true,
   });
@@ -2566,6 +2573,7 @@ export async function createNativePracticeExpense(
     workspaceId,
     name: consultantName,
     email: consultantEmail,
+    sourceKind: "expense",
     idempotencyKey,
     required: false,
   });

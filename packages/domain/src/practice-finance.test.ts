@@ -2661,7 +2661,7 @@ describe("practice-finance I/O", () => {
     expect(prismaMock.practiceConsultant.findFirst).toHaveBeenCalledWith({
       where: {
         workspaceId: "workspace-1",
-        sourceSatelliteId: "manual-ledger-consultant:manual-time-key",
+        sourceSatelliteId: "manual-ledger-consultant:time:manual-time-key",
       },
       select: { id: true },
     });
@@ -2671,6 +2671,57 @@ describe("practice-finance I/O", () => {
       data: expect.objectContaining({
         consultantId: "consultant-race",
         idempotencyKey: "manual-time-key",
+      }),
+    });
+  });
+
+  it("namespaces manual consultant source ids by native ledger entry type", async () => {
+    prismaMock.practiceProject.findUnique.mockResolvedValueOnce({
+      id: "project-1",
+      workspaceId: "workspace-1",
+      crmAccountId: "account-1",
+      clientId: "client-existing",
+      billingCodeId: "billing-1",
+      code: "EXAMPLE-1",
+      clientName: "Example",
+      currency: "USD",
+    });
+
+    await createNativePracticeExpense(actor, "workspace-1", {
+      projectId: "project-1",
+      consultantName: "Priya Shah",
+      spentOn: new Date("2026-06-19T00:00:00.000Z"),
+      category: "Travel",
+      businessPurpose: "Client workshop",
+      amountCents: 12_345,
+      currency: "usd",
+      idempotencyKey: "shared-manual-key",
+    });
+
+    expect(prismaMock.practiceConsultant.findFirst).toHaveBeenCalledWith({
+      where: {
+        workspaceId: "workspace-1",
+        sourceSatelliteId: "manual-ledger-consultant:expense:shared-manual-key",
+      },
+      select: { id: true },
+    });
+    expect(prismaMock.practiceConsultant.findFirst).not.toHaveBeenCalledWith({
+      where: {
+        workspaceId: "workspace-1",
+        sourceSatelliteId: "manual-ledger-consultant:time:shared-manual-key",
+      },
+      select: { id: true },
+    });
+    expect(prismaMock.practiceConsultant.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        sourceSatelliteId: "manual-ledger-consultant:expense:shared-manual-key",
+      }),
+      select: { id: true },
+    });
+    expect(prismaMock.practiceExpense.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        consultantId: "consultant-1",
+        idempotencyKey: "shared-manual-key",
       }),
     });
   });
