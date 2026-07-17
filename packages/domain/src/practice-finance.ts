@@ -2246,7 +2246,7 @@ async function ensureNativePracticeClientForProject(
   const normalizedBaseCode = normalizeProjectCodeBase(project.clientName).slice(0, 80);
   const baseCode = normalizedBaseCode || `CLIENT-${projectIdCodeSuffix(project.id)}`;
   const clientIdentity = project.crmAccountId
-    ? `crm:${project.crmAccountId}:name:${project.clientName.toLocaleLowerCase("en-US")}`
+    ? `crm:${project.crmAccountId}`
     : normalizedBaseCode
       ? `code:${normalizedBaseCode}`
       : `name:${project.clientName.toLocaleLowerCase("en-US")}`;

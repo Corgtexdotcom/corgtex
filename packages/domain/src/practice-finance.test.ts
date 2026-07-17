@@ -2466,7 +2466,7 @@ describe("practice-finance I/O", () => {
       currency: "usd",
     });
 
-    expect(prismaSqlValues(prismaMock.$queryRaw.mock.calls[0]?.[0])).toContain("native-practice-client:workspace-1:crm:account-1:name:new client");
+    expect(prismaSqlValues(prismaMock.$queryRaw.mock.calls[0]?.[0])).toContain("native-practice-client:workspace-1:crm:account-1");
     expect(prismaMock.practiceClient.findMany).toHaveBeenCalledTimes(1);
     expect(prismaMock.practiceClient.findMany).toHaveBeenCalledWith({
       where: {
@@ -3202,7 +3202,7 @@ describe("practice-finance I/O", () => {
     });
 
     expect(prismaSqlText(prismaMock.$queryRaw.mock.calls[0]?.[0])).toContain("pg_advisory_xact_lock");
-    expect(prismaSqlValues(prismaMock.$queryRaw.mock.calls[0]?.[0])).toContain("native-practice-client:workspace-1:crm:account-1:name:example");
+    expect(prismaSqlValues(prismaMock.$queryRaw.mock.calls[0]?.[0])).toContain("native-practice-client:workspace-1:crm:account-1");
     expect(prismaMock.practiceClient.findUnique).toHaveBeenCalledWith({
       where: { workspaceId_code: { workspaceId: "workspace-1", code: "EXAMPLE" } },
       select: { id: true, crmAccountId: true, name: true },
@@ -3215,6 +3215,61 @@ describe("practice-finance I/O", () => {
     expect(prismaMock.practiceExpense.create).toHaveBeenCalledWith({
       data: expect.objectContaining({
         clientId: "client-race",
+        projectId: "project-1",
+      }),
+    });
+  });
+
+  it("serializes CRM client provisioning by account before name-specific fallback", async () => {
+    prismaMock.practiceProject.findUnique.mockResolvedValueOnce({
+      id: "project-1",
+      workspaceId: "workspace-1",
+      crmAccountId: "account-1",
+      clientId: null,
+      billingCodeId: null,
+      code: "PROJECT-1",
+      clientName: "Alternate Account Name",
+      currency: "USD",
+    });
+    prismaMock.practiceClient.findMany
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([{ id: "client-account" }]);
+
+    await createNativePracticeExpense(actor, "workspace-1", {
+      projectId: "project-1",
+      spentOn: new Date("2026-06-19T00:00:00.000Z"),
+      category: "Travel",
+      businessPurpose: "Client workshop",
+      amountCents: 45_678,
+      currency: "usd",
+    });
+
+    expect(prismaSqlText(prismaMock.$queryRaw.mock.calls[0]?.[0])).toContain("pg_advisory_xact_lock");
+    expect(prismaSqlValues(prismaMock.$queryRaw.mock.calls[0]?.[0])).toEqual(["native-practice-client:workspace-1:crm:account-1"]);
+    expect(prismaMock.practiceClient.findMany).toHaveBeenNthCalledWith(1, {
+      where: {
+        workspaceId: "workspace-1",
+        crmAccountId: "account-1",
+        name: { equals: "Alternate Account Name", mode: "insensitive" },
+      },
+      select: { id: true },
+      orderBy: [{ id: "asc" }],
+      take: 2,
+    });
+    expect(prismaMock.practiceClient.findMany).toHaveBeenNthCalledWith(2, {
+      where: { workspaceId: "workspace-1", crmAccountId: "account-1" },
+      select: { id: true },
+      orderBy: [{ id: "asc" }],
+      take: 2,
+    });
+    expect(prismaMock.practiceClient.create).not.toHaveBeenCalled();
+    expect(prismaMock.practiceProject.update).toHaveBeenCalledWith({
+      where: { id: "project-1" },
+      data: { clientId: "client-account" },
+    });
+    expect(prismaMock.practiceExpense.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        clientId: "client-account",
         projectId: "project-1",
       }),
     });
@@ -3343,7 +3398,7 @@ describe("practice-finance I/O", () => {
       currency: "usd",
     });
 
-    expect(prismaSqlValues(prismaMock.$queryRaw.mock.calls[0]?.[0])).toContain("native-practice-client:workspace-1:crm:account-2:name:株式会社例");
+    expect(prismaSqlValues(prismaMock.$queryRaw.mock.calls[0]?.[0])).toContain("native-practice-client:workspace-1:crm:account-2");
     expect(prismaMock.practiceClient.findUnique).toHaveBeenCalledWith({
       where: { workspaceId_code: { workspaceId: "workspace-1", code: "CLIENT-PROJECTABC12" } },
       select: { id: true, crmAccountId: true, name: true },
