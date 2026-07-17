@@ -422,7 +422,9 @@ export async function listProposals(actor: AppActor, workspaceId: string, opts?:
         actions: { select: { id: true, title: true, status: true } },
         adviceProcess: {
           include: {
-            requests: true,
+            requests: {
+              select: { status: true },
+            },
           },
         },
       },
@@ -462,7 +464,9 @@ export async function getProposal(actor: AppActor, params: {
       actions: { select: { id: true, title: true, status: true } },
       adviceProcess: {
         include: {
-          requests: true,
+          requests: {
+            select: { status: true },
+          },
         },
       },
     },

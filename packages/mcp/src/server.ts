@@ -264,7 +264,9 @@ async function loadProposalWorkItemResponse(workspaceId: string, proposalId: str
       ownerMember: { include: memberUserInclude },
       adviceProcess: {
         include: {
-          requests: true,
+          requests: {
+            select: { status: true },
+          },
         },
       },
     },
@@ -2185,6 +2187,13 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
           author: { select: { displayName: true, email: true } },
           ownerMember: { include: { user: { select: { displayName: true, email: true } } } },
           circle: { select: { id: true, name: true } },
+          adviceProcess: {
+            include: {
+              requests: {
+                select: { status: true },
+              },
+            },
+          },
         },
       });
       if (!proposal) return jsonResult({ error: "Not found" });
@@ -3193,7 +3202,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
         displayName: m.user.displayName,
         email: m.user.email,
         role: m.role,
-        kind: m.kind ?? classifyMemberIdentity(m),
+        kind: classifyMemberIdentity(m),
         isActive: m.isActive,
         joinedAt: m.joinedAt,
       }));

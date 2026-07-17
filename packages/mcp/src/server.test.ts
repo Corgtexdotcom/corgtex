@@ -1754,6 +1754,95 @@ describe("createCorgtexMcpServer", () => {
     });
   });
 
+  it("keeps MCP get_proposal advice counts aligned with list responses", async () => {
+    const { createCorgtexMcpServer } = await import("./server");
+    const { requireScope } = await import("./auth");
+    const { prisma } = await import("@corgtex/shared");
+
+    vi.mocked(prisma.proposal.findFirst).mockResolvedValueOnce({
+      id: "proposal-1",
+      title: "Clarify ownership",
+      status: "DRAFT",
+      version: 1,
+      priority: 2,
+      ownerMemberId: "member-owner",
+      ownerMember: { id: "member-owner", user: { displayName: "Owner", email: "owner@example.test" } },
+      adviceProcess: {
+        requests: [
+          { status: "ACTIVE" },
+          { status: "RESOLVED" },
+        ],
+      },
+    } as never);
+
+    const server = createCorgtexMcpServer({
+      actor: { kind: "agent", authProvider: "bootstrap" } as any,
+      workspaceId: "ws-1",
+      authKind: "agent",
+    });
+
+    const response = await (server as any)._registeredTools.get_proposal.handler({
+      proposalId: "proposal-1",
+    });
+
+    expect(vi.mocked(requireScope)).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: "ws-1" }), "proposals:read");
+    expect(prisma.proposal.findFirst).toHaveBeenCalledWith(expect.objectContaining({
+      include: expect.objectContaining({
+        adviceProcess: {
+          include: {
+            requests: {
+              select: { status: true },
+            },
+          },
+        },
+      }),
+    }));
+    expect(JSON.parse(response.content[0].text)).toMatchObject({
+      adviceRequestCount: 2,
+      activeAdviceRequestCount: 1,
+      inputRequestCount: 2,
+      activeInputRequestCount: 1,
+    });
+  });
+
+  it("classifies MCP member kind instead of trusting stale stored kind", async () => {
+    const { createCorgtexMcpServer } = await import("./server");
+    const { requireScope } = await import("./auth");
+    const { listMembers } = await import("@corgtex/domain");
+
+    vi.mocked(listMembers).mockResolvedValueOnce([
+      {
+        id: "member-system",
+        role: "MEMBER",
+        kind: "HUMAN",
+        isActive: true,
+        joinedAt: new Date("2026-07-17T00:00:00.000Z"),
+        user: {
+          displayName: "Corgtex Support",
+          email: "support+corgtex@example.test",
+        },
+      },
+    ] as never);
+
+    const server = createCorgtexMcpServer({
+      actor: { kind: "agent", authProvider: "bootstrap" } as any,
+      workspaceId: "ws-1",
+      authKind: "agent",
+    });
+
+    const response = await (server as any)._registeredTools.list_members.handler({});
+
+    expect(vi.mocked(requireScope)).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: "ws-1" }), "members:read");
+    expect(JSON.parse(response.content[0].text)).toMatchObject({
+      members: [
+        {
+          id: "member-system",
+          kind: "SYSTEM",
+        },
+      ],
+    });
+  });
+
   it("returns the created goal identifier from create_goal", async () => {
     const { createCorgtexMcpServer } = await import("./server");
     const { requireScope } = await import("./auth");
