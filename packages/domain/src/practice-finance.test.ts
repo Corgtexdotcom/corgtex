@@ -426,6 +426,23 @@ describe("practice-finance pure derivations", () => {
     expect(collectNativePracticeAttention([incomplete]).map((item) => item.issue)).toEqual(["setup"]);
   });
 
+  it("flags negative native project margin against a zero percent target", () => {
+    const negativeMargin = calculateNativePracticeProjectHealth({
+      project: nativeProject({ targetMarginBps: 0 }),
+      timeEntries: [nativeTimeEntry({
+        billAmountCents: 100_00,
+        costAmountCents: 120_00,
+      })],
+      expenses: [],
+    });
+
+    const summary = summarizeNativePracticeFinance([negativeMargin]);
+    expect(negativeMargin.grossMarginBps).toBe(-2000);
+    expect(negativeMargin.weeksToTargetMarginRisk).toBe(0);
+    expect(summary.riskMarginCount).toBe(1);
+    expect(collectNativePracticeAttention([negativeMargin]).map((item) => item.issue)).toEqual(["margin"]);
+  });
+
   it("rejects mixed active currencies before aggregating native finance summaries", () => {
     const usd = calculateNativePracticeProjectHealth({
       project: nativeProject({ id: "usd", currency: "USD" }),
@@ -469,6 +486,22 @@ describe("practice-finance pure derivations", () => {
         ],
       });
       throw new Error("Expected mixed expense currencies to be rejected.");
+    } catch (error) {
+      expect(error).toMatchObject({ code: "MIXED_CURRENCY" });
+    }
+  });
+
+  it("rejects mixed currencies in native consultant financial totals", () => {
+    try {
+      calculateNativePracticeConsultantUtilization({
+        consultant: nativeConsultant(),
+        timeEntries: [
+          nativeTimeEntry({ billCurrency: "USD", costCurrency: "USD" }),
+          nativeTimeEntry({ id: "eur-time", billCurrency: "EUR", costCurrency: "EUR" }),
+        ],
+        expenses: [],
+      });
+      throw new Error("Expected mixed consultant currencies to be rejected.");
     } catch (error) {
       expect(error).toMatchObject({ code: "MIXED_CURRENCY" });
     }

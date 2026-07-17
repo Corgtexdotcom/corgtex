@@ -366,7 +366,7 @@ function calculateWeeksToMarginFloor(params: {
   recentCostBurnPerWeekCents: number;
   targetMarginBps: number | null;
 }): number | null {
-  if (params.targetMarginBps == null || params.targetMarginBps <= 0) return null;
+  if (params.targetMarginBps == null) return null;
   if (params.usedBudgetCents > 0 && params.grossMarginBps < params.targetMarginBps) return 0;
   if (params.recentRevenueBurnPerWeekCents <= 0 && params.recentCostBurnPerWeekCents <= 0) return null;
 
@@ -387,6 +387,25 @@ function postedTimeEntries(entries: NativePracticeTimeEntry[]) {
 
 function postedExpenses(expenses: NativePracticeExpense[]) {
   return expenses.filter((expense) => expense.status === "POSTED");
+}
+
+function assertSingleNativePracticeLedgerCurrency(
+  timeEntries: NativePracticeTimeEntry[],
+  expenses: NativePracticeExpense[],
+  message: string,
+) {
+  const currencies = new Set<string>();
+  for (const entry of timeEntries) {
+    const billCurrency = firstCurrencyCode(entry.functionalCurrency, entry.billCurrency, entry.currency);
+    const costCurrency = firstCurrencyCode(entry.functionalCurrency, entry.costCurrency, entry.currency);
+    if (billCurrency) currencies.add(billCurrency);
+    if (costCurrency) currencies.add(costCurrency);
+  }
+  for (const expense of expenses) {
+    const expenseCurrency = firstCurrencyCode(expense.functionalCurrency, expense.currency);
+    if (expenseCurrency) currencies.add(expenseCurrency);
+  }
+  invariant(currencies.size <= 1, 400, "MIXED_CURRENCY", message);
 }
 
 function emptyNativePracticeProjectLedgerRollup(projectId: string): NativePracticeProjectLedgerRollup {
@@ -621,6 +640,11 @@ export function calculateNativePracticeConsultantUtilization(params: {
   const recent = weekWindow(now, recentWindowWeeks);
   const timeEntries = postedTimeEntries(params.timeEntries).filter((entry) => entry.consultantId === params.consultant.id);
   const expenses = postedExpenses(params.expenses).filter((expense) => expense.consultantId === params.consultant.id);
+  assertSingleNativePracticeLedgerCurrency(
+    timeEntries,
+    expenses,
+    "Native practice consultant financial totals require one normalized currency.",
+  );
   const recentHours = timeEntries
     .filter((entry) => isWithinDateWindow(entry.workedOn, recent))
     .reduce((sum, entry) => sum + decimalToNumber(entry.hours), 0);
