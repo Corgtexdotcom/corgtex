@@ -1113,6 +1113,58 @@ export type NativePracticeFinanceDashboard = {
   projectHealth: NativePracticeProjectHealth[];
 };
 
+export type NativePracticeProjectDetail = {
+  project: Prisma.PracticeProjectGetPayload<{
+    include: {
+      assignments: { include: { consultant: true } };
+      billingCode: true;
+      client: true;
+      lines: true;
+      purchaseOrders: true;
+    };
+  }>;
+  health: NativePracticeProjectHealth;
+  recentTimeEntries: Array<Prisma.PracticeTimeEntryGetPayload<{
+    include: {
+      consultant: { select: { id: true; name: true; email: true } };
+      reviews: { select: { id: true; status: true; note: true; updatedAt: true } };
+    };
+  }>>;
+  recentExpenses: Array<Prisma.PracticeExpenseGetPayload<{
+    include: {
+      consultant: { select: { id: true; name: true; email: true } };
+      reviews: { select: { id: true; status: true; note: true; updatedAt: true } };
+    };
+  }>>;
+  consultants: NativePracticeConsultant[];
+};
+
+export type CreateNativePracticeTimeEntryInput = {
+  projectId: string;
+  consultantName: string;
+  consultantEmail?: string | null;
+  workedOn: Date;
+  hours: number;
+  assignmentType?: string | null;
+  billRateCents?: number | null;
+  costRateCents?: number | null;
+  idempotencyKey?: string | null;
+};
+
+export type CreateNativePracticeExpenseInput = {
+  projectId: string;
+  consultantName?: string | null;
+  consultantEmail?: string | null;
+  spentOn: Date;
+  vendor?: string | null;
+  category: string;
+  businessPurpose: string;
+  amountCents: number;
+  currency?: string | null;
+  billable?: boolean | null;
+  idempotencyKey?: string | null;
+};
+
 export type ListPracticeContributionEntriesOptions = {
   take?: number | null;
   cursor?: string | null;
@@ -1134,8 +1186,9 @@ export type CrmAccountPracticeFinanceProject = PracticeProject & {
 };
 
 export type CrmAccountPracticeFinance = {
-  summary: PracticeFinanceSummary;
+  summary: NativePracticeFinanceSummary;
   projects: CrmAccountPracticeFinanceProject[];
+  projectHealth: NativePracticeProjectHealth[];
 };
 
 export type CreatePracticeProjectFromWonDealInput = {
@@ -1308,6 +1361,76 @@ function defaultProjectCode(deal: { id: string; title: string; account?: { slug:
   return `${normalizedBase}-${deal.id.slice(0, 8).toUpperCase()}`;
 }
 
+function normalizeNativeLedgerDate(value: Date, label: string): Date {
+  invariant(value instanceof Date && !Number.isNaN(value.valueOf()), 400, "INVALID_INPUT", `${label} is required.`);
+  return value;
+}
+
+function normalizeNativeLedgerHours(value: number): Prisma.Decimal {
+  invariant(Number.isFinite(value) && value > 0, 400, "INVALID_INPUT", "Hours must be greater than zero.");
+  invariant(value <= 999_999.99, 400, "INVALID_INPUT", "Hours exceed the native Practice Ledger limit.");
+  return new Prisma.Decimal(value).toDecimalPlaces(2);
+}
+
+function normalizeNativeLedgerCurrency(value: string | null | undefined, projectCurrency: string): string {
+  const normalizedProjectCurrency = normalizeCurrencyCode(projectCurrency);
+  const normalizedInputCurrency = normalizeCurrencyCode(value) ?? normalizedProjectCurrency;
+  invariant(normalizedProjectCurrency, 400, "MIXED_CURRENCY", "Native practice ledger entries require a project currency.");
+  invariant(
+    normalizedInputCurrency === normalizedProjectCurrency,
+    400,
+    "MIXED_CURRENCY",
+    "Native practice ledger entries must use the project currency until conversion is supported.",
+  );
+  return normalizedProjectCurrency;
+}
+
+function normalizeOptionalNativeText(value: string | null | undefined): string | null {
+  const normalized = value?.trim();
+  return normalized || null;
+}
+
+function normalizeConsultantEmail(value: string | null | undefined): string | null {
+  const normalized = value?.trim().toLowerCase();
+  return normalized || null;
+}
+
+function weekEndingSundayUtc(workedOn: Date): Date {
+  const date = new Date(Date.UTC(workedOn.getUTCFullYear(), workedOn.getUTCMonth(), workedOn.getUTCDate()));
+  const day = date.getUTCDay();
+  date.setUTCDate(date.getUTCDate() + ((7 - day) % 7));
+  return date;
+}
+
+function nativePracticeProjectFromProject(project: Pick<
+  PracticeProject,
+  | "id"
+  | "code"
+  | "name"
+  | "clientName"
+  | "clientId"
+  | "status"
+  | "currency"
+  | "poValueCents"
+  | "serviceBudgetCents"
+  | "expenseBudgetCents"
+  | "targetMarginBps"
+>): NativePracticeProject {
+  return {
+    id: project.id,
+    code: project.code,
+    name: project.name,
+    clientName: project.clientName,
+    clientId: project.clientId,
+    status: project.status,
+    currency: project.currency,
+    poValueCents: project.poValueCents,
+    serviceBudgetCents: project.serviceBudgetCents,
+    expenseBudgetCents: project.expenseBudgetCents,
+    targetMarginBps: project.targetMarginBps,
+  };
+}
+
 export async function listPracticeProjects(
   actor: AppActor,
   workspaceId: string,
@@ -1397,6 +1520,161 @@ function mergeNativePracticeLedgerRollups(
   }
 
   return rollups;
+}
+
+async function queryNativePracticeLedgerRollups(
+  workspaceId: string,
+  projectIds: string[],
+  recent: { startsOn: Date; endsOn: Date },
+): Promise<Map<string, NativePracticeProjectLedgerRollup>> {
+  if (projectIds.length === 0) return new Map();
+
+  const [timeRollups, expenseRollups] = await Promise.all([
+    prisma.$queryRaw<NativePracticeTimeRollupRow[]>(Prisma.sql`
+      SELECT
+        t."projectId",
+        COALESCE(SUM(COALESCE(t."billAmountCents"::numeric, ROUND(t."hours" * t."billRateCents"))), 0)::bigint AS "timeRevenueCents",
+        COALESCE(SUM(COALESCE(t."costAmountCents"::numeric, ROUND(t."hours" * t."costRateCents"))), 0)::bigint AS "timeCostCents",
+        COALESCE(SUM(
+          CASE WHEN t."workedOn" > ${recent.startsOn} AND t."workedOn" <= ${recent.endsOn}
+            THEN COALESCE(t."billAmountCents"::numeric, ROUND(t."hours" * t."billRateCents"))
+            ELSE 0
+          END
+        ), 0)::bigint AS "recentTimeRevenueCents",
+        COALESCE(SUM(
+          CASE WHEN t."workedOn" > ${recent.startsOn} AND t."workedOn" <= ${recent.endsOn}
+            THEN COALESCE(t."costAmountCents"::numeric, ROUND(t."hours" * t."costRateCents"))
+            ELSE 0
+          END
+        ), 0)::bigint AS "recentTimeCostCents",
+        COALESCE(SUM(
+          CASE WHEN t."hours" < 0
+            THEN 1
+            ELSE 0
+          END
+        ), 0)::bigint AS "invalidHoursRows",
+        COALESCE(SUM(
+          CASE WHEN
+            NULLIF(BTRIM(p."currency"), '') IS NULL
+            OR COALESCE(
+              CASE WHEN t."billAmountCents" IS NOT NULL
+                THEN NULLIF(BTRIM(t."functionalCurrency"), '')
+                ELSE NULL
+              END,
+              NULLIF(BTRIM(t."billCurrency"), ''),
+              NULLIF(BTRIM(t."currency"), '')
+            ) IS NULL
+            OR COALESCE(
+              CASE WHEN t."costAmountCents" IS NOT NULL
+                THEN NULLIF(BTRIM(t."functionalCurrency"), '')
+                ELSE NULL
+              END,
+              NULLIF(BTRIM(t."costCurrency"), ''),
+              NULLIF(BTRIM(t."currency"), '')
+            ) IS NULL
+            OR UPPER(COALESCE(
+              CASE WHEN t."billAmountCents" IS NOT NULL
+                THEN NULLIF(BTRIM(t."functionalCurrency"), '')
+                ELSE NULL
+              END,
+              NULLIF(BTRIM(t."billCurrency"), ''),
+              NULLIF(BTRIM(t."currency"), '')
+            )) IS DISTINCT FROM UPPER(NULLIF(BTRIM(p."currency"), ''))
+            OR UPPER(COALESCE(
+              CASE WHEN t."costAmountCents" IS NOT NULL
+                THEN NULLIF(BTRIM(t."functionalCurrency"), '')
+                ELSE NULL
+              END,
+              NULLIF(BTRIM(t."costCurrency"), ''),
+              NULLIF(BTRIM(t."currency"), '')
+            )) IS DISTINCT FROM UPPER(NULLIF(BTRIM(p."currency"), ''))
+            THEN 1
+            ELSE 0
+          END
+        ), 0)::bigint AS "invalidCurrencyRows"
+      FROM "PracticeTimeEntry" t
+      JOIN "PracticeProject" p
+        ON p."id" = t."projectId"
+        AND p."workspaceId" = t."workspaceId"
+      WHERE t."workspaceId" = ${workspaceId}
+        AND t."projectId" IN (${Prisma.join(projectIds)})
+        AND t."status" = 'POSTED'
+      GROUP BY t."projectId"
+    `),
+    prisma.$queryRaw<NativePracticeExpenseRollupRow[]>(Prisma.sql`
+      SELECT
+        e."projectId",
+        COALESCE(SUM(
+          CASE WHEN e."billable"
+            THEN (
+              CASE WHEN e."amountFunctionalCents" IS NOT NULL AND NULLIF(BTRIM(e."functionalCurrency"), '') IS NOT NULL
+                THEN e."amountFunctionalCents"
+                ELSE e."amountCents"
+              END
+            )::numeric
+            ELSE 0
+          END
+        ), 0)::bigint AS "billableExpenseCents",
+        COALESCE(SUM((
+          CASE WHEN e."amountFunctionalCents" IS NOT NULL AND NULLIF(BTRIM(e."functionalCurrency"), '') IS NOT NULL
+            THEN e."amountFunctionalCents"
+            ELSE e."amountCents"
+          END
+        )::numeric), 0)::bigint AS "directExpenseCents",
+        COALESCE(SUM(
+          CASE WHEN e."billable" AND e."spentOn" > ${recent.startsOn} AND e."spentOn" <= ${recent.endsOn}
+            THEN (
+              CASE WHEN e."amountFunctionalCents" IS NOT NULL AND NULLIF(BTRIM(e."functionalCurrency"), '') IS NOT NULL
+                THEN e."amountFunctionalCents"
+                ELSE e."amountCents"
+              END
+            )::numeric
+            ELSE 0
+          END
+        ), 0)::bigint AS "recentBillableExpenseCents",
+        COALESCE(SUM(
+          CASE WHEN e."spentOn" > ${recent.startsOn} AND e."spentOn" <= ${recent.endsOn}
+            THEN (
+              CASE WHEN e."amountFunctionalCents" IS NOT NULL AND NULLIF(BTRIM(e."functionalCurrency"), '') IS NOT NULL
+                THEN e."amountFunctionalCents"
+                ELSE e."amountCents"
+              END
+            )::numeric
+            ELSE 0
+          END
+        ), 0)::bigint AS "recentDirectExpenseCents",
+        COALESCE(SUM(
+          CASE WHEN NULLIF(BTRIM(p."currency"), '') IS NULL
+            OR COALESCE(
+              CASE WHEN e."amountFunctionalCents" IS NOT NULL AND NULLIF(BTRIM(e."functionalCurrency"), '') IS NOT NULL
+                THEN NULLIF(BTRIM(e."functionalCurrency"), '')
+                ELSE NULL
+              END,
+              NULLIF(BTRIM(e."currency"), '')
+            ) IS NULL
+            OR UPPER(COALESCE(
+              CASE WHEN e."amountFunctionalCents" IS NOT NULL AND NULLIF(BTRIM(e."functionalCurrency"), '') IS NOT NULL
+                THEN NULLIF(BTRIM(e."functionalCurrency"), '')
+                ELSE NULL
+              END,
+              NULLIF(BTRIM(e."currency"), '')
+            )) IS DISTINCT FROM UPPER(NULLIF(BTRIM(p."currency"), ''))
+            THEN 1
+            ELSE 0
+          END
+        ), 0)::bigint AS "invalidCurrencyRows"
+      FROM "PracticeExpense" e
+      JOIN "PracticeProject" p
+        ON p."id" = e."projectId"
+        AND p."workspaceId" = e."workspaceId"
+      WHERE e."workspaceId" = ${workspaceId}
+        AND e."projectId" IN (${Prisma.join(projectIds)})
+        AND e."status" = 'POSTED'
+      GROUP BY e."projectId"
+    `),
+  ]);
+
+  return mergeNativePracticeLedgerRollups(projectIds, timeRollups, expenseRollups);
 }
 
 export async function listNativePracticeProjectHealth(
@@ -1609,6 +1887,245 @@ async function requireProjectInWorkspace(workspaceId: string, projectId: string)
   });
   invariant(project && project.workspaceId === workspaceId, 404, "NOT_FOUND", "Practice project not found.");
   return project;
+}
+
+async function loadNativePracticeProjectForLedgerWrite(workspaceId: string, projectId: string) {
+  const id = projectId.trim();
+  invariant(id, 400, "INVALID_INPUT", "Project is required.");
+  const project = await prisma.practiceProject.findUnique({
+    where: { id },
+    select: {
+      id: true,
+      workspaceId: true,
+      crmAccountId: true,
+      clientId: true,
+      billingCodeId: true,
+      code: true,
+      clientName: true,
+      currency: true,
+    },
+  });
+  invariant(project && project.workspaceId === workspaceId, 404, "NOT_FOUND", "Practice project not found.");
+  normalizeNativeLedgerCurrency(null, project.currency);
+  return project;
+}
+
+async function ensureNativePracticeClientForProject(project: Awaited<ReturnType<typeof loadNativePracticeProjectForLedgerWrite>>) {
+  if (project.clientId) return project.clientId;
+  const code = normalizeProjectCode(project.clientName).slice(0, 80);
+  const client = await prisma.practiceClient.upsert({
+    where: { workspaceId_code: { workspaceId: project.workspaceId, code } },
+    update: {
+      crmAccountId: project.crmAccountId ?? undefined,
+      name: project.clientName,
+    },
+    create: {
+      workspaceId: project.workspaceId,
+      crmAccountId: project.crmAccountId,
+      code,
+      name: project.clientName,
+    },
+    select: { id: true },
+  });
+  await prisma.practiceProject.update({
+    where: { id: project.id },
+    data: { clientId: client.id },
+  });
+  return client.id;
+}
+
+async function resolveNativePracticeConsultant(params: {
+  workspaceId: string;
+  name?: string | null;
+  email?: string | null;
+  required: boolean;
+}) {
+  const email = normalizeConsultantEmail(params.email);
+  const name = normalizeOptionalNativeText(params.name);
+  if (!name && !email && !params.required) return null;
+  const displayName = name || email;
+  invariant(displayName, 400, "INVALID_INPUT", "Consultant is required.");
+
+  const existing = await prisma.practiceConsultant.findFirst({
+    where: {
+      workspaceId: params.workspaceId,
+      ...(email ? { email } : { name: displayName }),
+    },
+    select: { id: true },
+  });
+  if (existing) return existing.id;
+
+  const created = await prisma.practiceConsultant.create({
+    data: {
+      workspaceId: params.workspaceId,
+      name: displayName,
+      email,
+      active: true,
+    },
+    select: { id: true },
+  });
+  return created.id;
+}
+
+export async function getNativePracticeProjectDetail(
+  actor: AppActor,
+  workspaceId: string,
+  projectId: string,
+  options: NativePracticeProjectHealthOptions = {},
+): Promise<NativePracticeProjectDetail> {
+  await requireWorkspaceMembership({ actor, workspaceId });
+  const id = projectId.trim();
+  invariant(id, 400, "INVALID_INPUT", "Project is required.");
+  const project = await prisma.practiceProject.findUnique({
+    where: { id },
+    include: {
+      assignments: {
+        include: { consultant: true },
+        orderBy: [{ role: "asc" }, { id: "asc" }],
+      },
+      billingCode: true,
+      client: true,
+      lines: {
+        orderBy: [{ kind: "asc" }, { name: "asc" }, { id: "asc" }],
+      },
+      purchaseOrders: {
+        orderBy: [{ issuedOn: "desc" }, { poNumber: "asc" }, { id: "asc" }],
+      },
+    },
+  });
+  invariant(project && project.workspaceId === workspaceId, 404, "NOT_FOUND", "Practice project not found.");
+
+  const now = normalizeNow(options.now);
+  const recentWindowWeeks = normalizeRecentWindowWeeks(options.recentWindowWeeks);
+  const rollups = await queryNativePracticeLedgerRollups(workspaceId, [project.id], weekWindow(now, recentWindowWeeks));
+  const health = calculateNativePracticeProjectHealthFromRollup({
+    project: nativePracticeProjectFromProject(project),
+    rollup: rollups.get(project.id) ?? emptyNativePracticeProjectLedgerRollup(project.id),
+    recentWindowWeeks,
+  });
+
+  const [recentTimeEntries, recentExpenses, consultants] = await Promise.all([
+    prisma.practiceTimeEntry.findMany({
+      where: { workspaceId, projectId: project.id },
+      include: {
+        consultant: { select: { id: true, name: true, email: true } },
+        reviews: { select: { id: true, status: true, note: true, updatedAt: true } },
+      },
+      orderBy: [{ workedOn: "desc" }, { createdAt: "desc" }, { id: "asc" }],
+      take: 50,
+    }),
+    prisma.practiceExpense.findMany({
+      where: { workspaceId, projectId: project.id },
+      include: {
+        consultant: { select: { id: true, name: true, email: true } },
+        reviews: { select: { id: true, status: true, note: true, updatedAt: true } },
+      },
+      orderBy: [{ spentOn: "desc" }, { createdAt: "desc" }, { id: "asc" }],
+      take: 50,
+    }),
+    prisma.practiceConsultant.findMany({
+      where: { workspaceId, active: true },
+      select: { id: true, name: true, email: true, active: true },
+      orderBy: [{ name: "asc" }, { id: "asc" }],
+      take: 100,
+    }),
+  ]);
+
+  return {
+    project,
+    health,
+    recentTimeEntries,
+    recentExpenses,
+    consultants,
+  };
+}
+
+export async function createNativePracticeTimeEntry(
+  actor: AppActor,
+  workspaceId: string,
+  input: CreateNativePracticeTimeEntryInput,
+): Promise<PracticeTimeEntry> {
+  await requirePracticeFinanceWrite(actor, workspaceId);
+  const project = await loadNativePracticeProjectForLedgerWrite(workspaceId, input.projectId);
+  const clientId = await ensureNativePracticeClientForProject(project);
+  const consultantId = await resolveNativePracticeConsultant({
+    workspaceId,
+    name: input.consultantName,
+    email: input.consultantEmail,
+    required: true,
+  });
+  invariant(consultantId, 400, "INVALID_INPUT", "Consultant is required.");
+
+  const workedOn = normalizeNativeLedgerDate(input.workedOn, "Work date");
+  const hours = normalizeNativeLedgerHours(input.hours);
+  const billRateCents = normalizeCents(input.billRateCents ?? undefined, "Bill rate");
+  const costRateCents = normalizeCents(input.costRateCents ?? undefined, "Cost rate");
+  const currency = normalizeNativeLedgerCurrency(null, project.currency);
+  const assignmentType = normalizeOptionalNativeText(input.assignmentType) || "CONSULTING";
+
+  return prisma.practiceTimeEntry.create({
+    data: {
+      workspaceId,
+      clientId,
+      billingCodeId: project.billingCodeId,
+      projectId: project.id,
+      consultantId,
+      workedOn,
+      weekEndingOn: weekEndingSundayUtc(workedOn),
+      hours,
+      assignmentType,
+      currency,
+      billCurrency: currency,
+      costCurrency: currency,
+      functionalCurrency: currency,
+      billRateCents,
+      costRateCents,
+      billAmountCents: centsFromHours(hours, billRateCents),
+      costAmountCents: centsFromHours(hours, costRateCents),
+      status: "POSTED",
+      idempotencyKey: normalizeOptionalNativeText(input.idempotencyKey),
+    },
+  });
+}
+
+export async function createNativePracticeExpense(
+  actor: AppActor,
+  workspaceId: string,
+  input: CreateNativePracticeExpenseInput,
+): Promise<PracticeExpense> {
+  await requirePracticeFinanceWrite(actor, workspaceId);
+  const project = await loadNativePracticeProjectForLedgerWrite(workspaceId, input.projectId);
+  const clientId = await ensureNativePracticeClientForProject(project);
+  const consultantId = await resolveNativePracticeConsultant({
+    workspaceId,
+    name: input.consultantName,
+    email: input.consultantEmail,
+    required: false,
+  });
+  const spentOn = normalizeNativeLedgerDate(input.spentOn, "Expense date");
+  const amountCents = normalizePositiveCents(input.amountCents, "Expense amount");
+  const currency = normalizeNativeLedgerCurrency(input.currency, project.currency);
+
+  return prisma.practiceExpense.create({
+    data: {
+      workspaceId,
+      clientId,
+      billingCodeId: project.billingCodeId,
+      projectId: project.id,
+      consultantId,
+      spentOn,
+      vendor: normalizeOptionalNativeText(input.vendor),
+      category: normalizeRequiredText(input.category, "Category"),
+      businessPurpose: normalizeRequiredText(input.businessPurpose, "Business purpose"),
+      amountCents,
+      currency,
+      amountFunctionalCents: amountCents,
+      functionalCurrency: currency,
+      billable: input.billable ?? true,
+      status: "POSTED",
+      idempotencyKey: normalizeOptionalNativeText(input.idempotencyKey),
+    },
+  });
 }
 
 async function resolveContributionUserId(actor: AppActor, workspaceId: string, contributorUserId?: string | null) {
@@ -1863,10 +2380,22 @@ export async function getCrmAccountPracticeFinance(
     },
     orderBy: [{ status: "asc" }, { code: "asc" }, { id: "asc" }],
   });
+  const now = new Date();
+  const recentWindowWeeks = normalizeRecentWindowWeeks(null);
+  const projectIds = projects.map((project) => project.id);
+  const rollups = await queryNativePracticeLedgerRollups(params.workspaceId, projectIds, weekWindow(now, recentWindowWeeks));
+  const projectHealth = projects.map((project) =>
+    calculateNativePracticeProjectHealthFromRollup({
+      project: nativePracticeProjectFromProject(project),
+      rollup: rollups.get(project.id) ?? emptyNativePracticeProjectLedgerRollup(project.id),
+      recentWindowWeeks,
+    })
+  );
 
   return {
-    summary: summarizePracticeFinance(projects),
+    summary: summarizeNativePracticeFinance(projectHealth),
     projects,
+    projectHealth,
   };
 }
 

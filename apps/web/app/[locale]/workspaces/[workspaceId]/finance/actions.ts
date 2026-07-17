@@ -5,6 +5,8 @@ import { requirePageActor } from "@/lib/auth";
 import { requireWorkspaceFeature } from "@/lib/workspace-feature-flags";
 import { asString, asOptional, refresh } from "../action-utils";
 import {
+  createNativePracticeExpense,
+  createNativePracticeTimeEntry,
   createPracticeContributionEntry,
   createPracticeProject,
   markPracticeContributionEntryPaid,
@@ -32,6 +34,15 @@ function optionalTenths(formData: FormData, name: string): number | undefined {
   return Number.isNaN(parsed) ? undefined : Math.round(parsed * 10);
 }
 
+function requiredNumber(formData: FormData, name: string): number {
+  const parsed = Number.parseFloat(asString(formData, name));
+  return Number.isNaN(parsed) ? Number.NaN : parsed;
+}
+
+function requiredDate(formData: FormData, name: string): Date {
+  return new Date(asString(formData, name));
+}
+
 async function requireFinanceActionContext(formData: FormData) {
   const workspaceId = asString(formData, "workspaceId");
   await enforceDemoGuard(workspaceId);
@@ -40,14 +51,20 @@ async function requireFinanceActionContext(formData: FormData) {
   return { actor, workspaceId };
 }
 
-async function requireSlicingPieActionContext(formData: FormData) {
+async function requirePracticeProjectsActionContext(formData: FormData) {
   const context = await requireFinanceActionContext(formData);
+  await requireWorkspaceFeature(context.workspaceId, "PRACTICE_PROJECTS");
+  return context;
+}
+
+async function requireSlicingPieActionContext(formData: FormData) {
+  const context = await requirePracticeProjectsActionContext(formData);
   await requireWorkspaceFeature(context.workspaceId, "SLICING_PIE");
   return context;
 }
 
 export async function createPracticeProjectAction(formData: FormData) {
-  const { actor, workspaceId } = await requireFinanceActionContext(formData);
+  const { actor, workspaceId } = await requirePracticeProjectsActionContext(formData);
   await createPracticeProject(actor, workspaceId, {
     code: asString(formData, "code"),
     name: asString(formData, "name"),
@@ -65,7 +82,7 @@ export async function createPracticeProjectAction(formData: FormData) {
 }
 
 export async function updatePracticeProjectAction(formData: FormData) {
-  const { actor, workspaceId } = await requireFinanceActionContext(formData);
+  const { actor, workspaceId } = await requirePracticeProjectsActionContext(formData);
   await updatePracticeProject(actor, workspaceId, {
     projectId: asString(formData, "projectId"),
     code: asString(formData, "code"),
@@ -79,6 +96,38 @@ export async function updatePracticeProjectAction(formData: FormData) {
     weeklyBurnCents: optionalCents(formData, "weeklyBurn"),
     targetMarginBps: optionalBps(formData, "targetMargin"),
     currentMarginBps: optionalBps(formData, "currentMargin"),
+  });
+  refresh(workspaceId);
+}
+
+export async function createNativePracticeTimeEntryAction(formData: FormData) {
+  const { actor, workspaceId } = await requirePracticeProjectsActionContext(formData);
+  await createNativePracticeTimeEntry(actor, workspaceId, {
+    projectId: asString(formData, "projectId"),
+    consultantName: asString(formData, "consultantName"),
+    consultantEmail: asOptional(formData, "consultantEmail"),
+    workedOn: requiredDate(formData, "workedOn"),
+    hours: requiredNumber(formData, "hours"),
+    assignmentType: asOptional(formData, "assignmentType"),
+    billRateCents: optionalCents(formData, "billRate"),
+    costRateCents: optionalCents(formData, "costRate"),
+  });
+  refresh(workspaceId);
+}
+
+export async function createNativePracticeExpenseAction(formData: FormData) {
+  const { actor, workspaceId } = await requirePracticeProjectsActionContext(formData);
+  await createNativePracticeExpense(actor, workspaceId, {
+    projectId: asString(formData, "projectId"),
+    consultantName: asOptional(formData, "consultantName"),
+    consultantEmail: asOptional(formData, "consultantEmail"),
+    spentOn: requiredDate(formData, "spentOn"),
+    vendor: asOptional(formData, "vendor"),
+    category: asString(formData, "category"),
+    businessPurpose: asString(formData, "businessPurpose"),
+    amountCents: optionalCents(formData, "amount") ?? 0,
+    currency: asOptional(formData, "currency"),
+    billable: formData.get("billable") === "on",
   });
   refresh(workspaceId);
 }

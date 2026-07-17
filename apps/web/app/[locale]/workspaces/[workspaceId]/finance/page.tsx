@@ -1,8 +1,9 @@
 import {
   canManagePracticeContributionPayments,
   canManagePracticeFinanceProjects,
-  getPracticeFinanceDashboard,
+  getNativePracticeFinanceDashboard,
   listPracticeContributionEntries,
+  listPracticeProjects,
   listRequestedPracticeContributionPayables,
   requireWorkspaceMembership,
 } from "@corgtex/domain";
@@ -25,9 +26,11 @@ export default async function FinancePage({
   const payablesCursor = Array.isArray(query?.payablesCursor) ? query?.payablesCursor[0] : query?.payablesCursor;
   const actor = await requirePageActor();
   await requireWorkspaceFeature(workspaceId, "FINANCE");
+  await requireWorkspaceFeature(workspaceId, "PRACTICE_PROJECTS");
 
-  const [practiceDashboard, slicingPieEnabled, membership, workspace] = await Promise.all([
-    getPracticeFinanceDashboard(actor, workspaceId),
+  const [practiceDashboard, projects, slicingPieEnabled, membership, workspace] = await Promise.all([
+    getNativePracticeFinanceDashboard(actor, workspaceId),
+    listPracticeProjects(actor, workspaceId, { take: 100 }),
     isWorkspaceFeatureEnabled(workspaceId, "SLICING_PIE"),
     requireWorkspaceMembership({ actor, workspaceId }),
     prisma.workspace.findUnique({
@@ -58,7 +61,8 @@ export default async function FinancePage({
       slicingPieEnabled={slicingPieEnabled}
       summary={practiceDashboard.summary}
       attention={practiceDashboard.attention}
-      projects={practiceDashboard.projects}
+      projectHealth={practiceDashboard.projectHealth}
+      projects={projects}
       contributionEntries={contributionEntries}
       requestedPayables={requestedPayables.entries}
       requestedPayablesNextCursor={requestedPayables.nextCursor}

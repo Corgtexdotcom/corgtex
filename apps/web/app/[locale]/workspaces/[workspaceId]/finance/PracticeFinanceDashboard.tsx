@@ -1,10 +1,8 @@
 import {
-  projectBudgetRunwayWeeks,
-  projectRemainingCents,
-  projectUsedRatio,
   type PracticeContributionEntryWithContext,
   type PracticeAttentionItem,
-  type PracticeFinanceSummary,
+  type NativePracticeFinanceSummary,
+  type NativePracticeProjectHealth,
 } from "@corgtex/domain";
 import type { PracticeProject, PracticeProjectStatus } from "@prisma/client";
 import {
@@ -28,6 +26,11 @@ function marginPct(bps: number | null): string {
 
 function weeksLabel(weeks: number | null): string {
   return weeks == null ? "No risk" : `${weeks.toFixed(1)}w`;
+}
+
+function usedRatio(health: NativePracticeProjectHealth): number {
+  if (health.budgetCents <= 0) return 0;
+  return Math.min(Math.max(health.usedBudgetCents / health.budgetCents, 0), 1);
 }
 
 function formatDate(value: Date): string {
@@ -117,23 +120,8 @@ function ProjectFields({ project }: { project?: PracticeProject }) {
           <input name="expenseBudget" type="number" step="0.01" min="0" defaultValue={project ? centsInput(project.expenseBudgetCents) : ""} />
         </label>
         <label>
-          Used
-          <input name="used" type="number" step="0.01" min="0" defaultValue={project ? centsInput(project.usedCents) : ""} />
-        </label>
-      </div>
-
-      <div style={formGridStyle}>
-        <label>
-          Weekly burn
-          <input name="weeklyBurn" type="number" step="0.01" min="0" defaultValue={project ? centsInput(project.weeklyBurnCents) : ""} />
-        </label>
-        <label>
           Target margin %
           <input name="targetMargin" type="number" step="0.1" min="0" max="100" defaultValue={project ? bpsInput(project.targetMarginBps) : ""} />
-        </label>
-        <label>
-          Current margin %
-          <input name="currentMargin" type="number" step="0.1" min="0" max="100" defaultValue={project ? bpsInput(project.currentMarginBps) : ""} />
         </label>
       </div>
     </>
@@ -306,6 +294,7 @@ export function PracticeFinanceDashboard({
   slicingPieEnabled,
   summary,
   attention,
+  projectHealth,
   projects,
   contributionEntries,
   requestedPayables,
@@ -316,13 +305,16 @@ export function PracticeFinanceDashboard({
   canRecordContributions: boolean;
   canMarkContributionPaid: boolean;
   slicingPieEnabled: boolean;
-  summary: PracticeFinanceSummary;
+  summary: NativePracticeFinanceSummary;
   attention: PracticeAttentionItem[];
+  projectHealth: NativePracticeProjectHealth[];
   projects: PracticeProject[];
   contributionEntries: PracticeContributionEntryWithContext[];
   requestedPayables: PracticeContributionEntryWithContext[];
   requestedPayablesNextCursor: string | null;
 }) {
+  const projectById = new Map(projects.map((project) => [project.id, project]));
+
   return (
     <section className="stack" style={{ gap: 20 }} data-finance-surface="practice-dashboard">
       <header className="nr-masthead" style={{ textAlign: "left", marginBottom: 0 }}>
@@ -448,7 +440,7 @@ export function PracticeFinanceDashboard({
               <tbody>
                 {attention.map((item, index) => (
                   <tr key={`${item.projectId}-${item.issue}-${index}`}>
-                    <td>{item.projectName}</td>
+                    <td><a href={`/workspaces/${workspaceId}/finance/projects/${item.projectId}`}>{item.projectName}</a></td>
                     <td>{item.issue}</td>
                     <td>{item.weeks == null ? "-" : item.weeks.toFixed(1)}</td>
                     <td className="nr-item-meta">{item.detail}</td>
@@ -464,7 +456,7 @@ export function PracticeFinanceDashboard({
         <div style={{ padding: "12px 16px", borderBottom: "1px solid var(--line)" }}>
           <strong>Projects</strong>
         </div>
-        {projects.length === 0 ? (
+        {projectHealth.length === 0 ? (
           <div style={{ padding: 24 }}>
             <strong style={{ display: "block", marginBottom: 6 }}>No projects yet</strong>
             <p className="nr-item-meta" style={{ margin: 0 }}>
@@ -489,27 +481,32 @@ export function PracticeFinanceDashboard({
                 </tr>
               </thead>
               <tbody>
-                {projects.map((project) => (
-                  <tr key={project.id}>
+                {projectHealth.map((health) => {
+                  const project = projectById.get(health.projectId);
+                  return (
+                  <tr key={health.projectId}>
                     <td>
-                      <div>{project.name}</div>
-                      <div className="nr-item-meta" style={{ fontSize: 11 }}>{project.code}</div>
+                      <div>
+                        <a href={`/workspaces/${workspaceId}/finance/projects/${health.projectId}`}>{health.projectName}</a>
+                      </div>
+                      <div className="nr-item-meta" style={{ fontSize: 11 }}>{health.projectCode}</div>
                     </td>
-                    <td>{project.clientName}</td>
-                    <td>{statusLabel(project.status)}</td>
-                    <td style={{ textAlign: "right" }}>{usd(project.poValueCents)}</td>
-                    <td style={{ textAlign: "right" }}>{usd(project.usedCents)}</td>
-                    <td style={{ textAlign: "right" }}>{usd(projectRemainingCents(project))}</td>
-                    <td style={{ textAlign: "right" }}>{pct(projectUsedRatio(project))}</td>
-                    <td style={{ textAlign: "right" }}>{marginPct(project.currentMarginBps)}</td>
-                    <td style={{ textAlign: "right" }}>{weeksLabel(projectBudgetRunwayWeeks(project))}</td>
+                    <td>{health.clientName}</td>
+                    <td>{statusLabel(health.status)}</td>
+                    <td style={{ textAlign: "right" }}>{usd(health.budgetCents)}</td>
+                    <td style={{ textAlign: "right" }}>{usd(health.usedBudgetCents)}</td>
+                    <td style={{ textAlign: "right" }}>{usd(health.remainingBudgetCents)}</td>
+                    <td style={{ textAlign: "right" }}>{pct(usedRatio(health))}</td>
+                    <td style={{ textAlign: "right" }}>{marginPct(health.grossMarginBps)}</td>
+                    <td style={{ textAlign: "right" }}>{weeksLabel(health.weeksToBudgetExhaustion)}</td>
                     {canManageProjects && (
                       <td>
-                        <ProjectEdit workspaceId={workspaceId} project={project} />
+                        {project ? <ProjectEdit workspaceId={workspaceId} project={project} /> : <span className="nr-item-meta">-</span>}
                       </td>
                     )}
                   </tr>
-                ))}
+                  );
+                })}
               </tbody>
             </table>
           </div>
