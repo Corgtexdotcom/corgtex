@@ -110,7 +110,15 @@ type NativeExpenseFixture = Parameters<typeof calculateNativePracticeProjectHeal
 type NativeConsultantFixture = Parameters<typeof calculateNativePracticeConsultantUtilization>[0]["consultant"];
 
 function decimal(value: number): NativeTimeEntryFixture["hours"] {
-  return { toNumber: () => value } as NativeTimeEntryFixture["hours"];
+  return {
+    toNumber: () => value,
+    toString: () => String(value),
+  } as NativeTimeEntryFixture["hours"];
+}
+
+function prismaSqlText(value: unknown): string {
+  const query = value as { sql?: string; text?: string; strings?: readonly string[] };
+  return query.sql ?? query.text ?? query.strings?.join("?") ?? String(value);
 }
 
 function nativeProject(overrides: Partial<NativeProjectFixture> = {}): NativeProjectFixture {
@@ -481,6 +489,30 @@ describe("practice-finance pure derivations", () => {
     expect(collectNativePracticeAttention([nearThreshold])).toEqual([]);
   });
 
+  it("uses exact native weekly budget burn for runway decisions", () => {
+    const nearThreshold = calculateNativePracticeProjectHealth({
+      project: nativeProject({
+        poValueCents: 997,
+        serviceBudgetCents: 1,
+        expenseBudgetCents: 1,
+        targetMarginBps: 0,
+      }),
+      now: new Date("2026-06-30T00:00:00.000Z"),
+      recentWindowWeeks: 4,
+      timeEntries: [nativeTimeEntry({
+        billAmountCents: 398,
+        costAmountCents: 0,
+      })],
+      expenses: [],
+    });
+
+    const summary = summarizeNativePracticeFinance([nearThreshold]);
+    expect(nearThreshold.recentBudgetBurnPerWeekCents).toBe(100);
+    expect(nearThreshold.weeksToBudgetExhaustion).toBeCloseTo(6.02, 2);
+    expect(summary.riskBudgetCount).toBe(0);
+    expect(collectNativePracticeAttention([nearThreshold])).toEqual([]);
+  });
+
   it("compares unrounded native margin runway against the attention threshold", () => {
     const nearThreshold = calculateNativePracticeProjectHealth({
       project: nativeProject({
@@ -508,6 +540,39 @@ describe("practice-finance pure derivations", () => {
 
     const summary = summarizeNativePracticeFinance([nearThreshold]);
     expect(nearThreshold.weeksToTargetMarginRisk).toBeCloseTo(6.029, 2);
+    expect(summary.riskMarginCount).toBe(0);
+    expect(collectNativePracticeAttention([nearThreshold])).toEqual([]);
+  });
+
+  it("uses exact native weekly margin burn for runway decisions", () => {
+    const nearThreshold = calculateNativePracticeProjectHealth({
+      project: nativeProject({
+        poValueCents: 10_000_00,
+        targetMarginBps: 5000,
+      }),
+      now: new Date("2026-06-30T00:00:00.000Z"),
+      recentWindowWeeks: 4,
+      timeEntries: [
+        nativeTimeEntry({
+          id: "old-margin-headroom",
+          workedOn: new Date("2026-01-01T00:00:00.000Z"),
+          weekEndingOn: new Date("2026-01-05T00:00:00.000Z"),
+          billAmountCents: 2000,
+          costAmountCents: 491,
+        }),
+        nativeTimeEntry({
+          id: "recent-margin-drift",
+          billAmountCents: 398,
+          costAmountCents: 402,
+        }),
+      ],
+      expenses: [],
+    });
+
+    const summary = summarizeNativePracticeFinance([nearThreshold]);
+    expect(nearThreshold.recentBudgetBurnPerWeekCents).toBe(100);
+    expect(nearThreshold.recentCostBurnPerWeekCents).toBe(101);
+    expect(nearThreshold.weeksToTargetMarginRisk).toBeCloseTo(6.03, 2);
     expect(summary.riskMarginCount).toBe(0);
     expect(collectNativePracticeAttention([nearThreshold])).toEqual([]);
   });
@@ -693,6 +758,42 @@ describe("practice-finance pure derivations", () => {
     }
   });
 
+  it("rejects posted native ledger rows when project and row currencies are both missing", () => {
+    try {
+      calculateNativePracticeProjectHealth({
+        project: nativeProject({ currency: " " }),
+        timeEntries: [nativeTimeEntry({
+          currency: " ",
+          billCurrency: null,
+          costCurrency: null,
+          functionalCurrency: null,
+          billAmountCents: 100,
+          costAmountCents: 80,
+        })],
+        expenses: [],
+      });
+      throw new Error("Expected both-null time entry currencies to be rejected.");
+    } catch (error) {
+      expect(error).toMatchObject({ code: "MIXED_CURRENCY" });
+    }
+
+    try {
+      calculateNativePracticeProjectHealth({
+        project: nativeProject({ currency: " " }),
+        timeEntries: [],
+        expenses: [nativeExpense({
+          currency: " ",
+          functionalCurrency: null,
+          amountFunctionalCents: null,
+          amountCents: 100,
+        })],
+      });
+      throw new Error("Expected both-null expense currencies to be rejected.");
+    } catch (error) {
+      expect(error).toMatchObject({ code: "MIXED_CURRENCY" });
+    }
+  });
+
   it("returns the normalized portfolio currency for non-USD native summaries", () => {
     const eur = calculateNativePracticeProjectHealth({
       project: nativeProject({ id: "eur", currency: "eur" }),
@@ -712,6 +813,29 @@ describe("practice-finance pure derivations", () => {
       budgetCents: 10_000_00,
       usedCents: 100_00,
       directCostCents: 80_00,
+    });
+  });
+
+  it("derives rate-based native cents with decimal arithmetic", () => {
+    const timeEntry = nativeTimeEntry({
+      hours: decimal(0.29),
+      billRateCents: 50,
+      costRateCents: 50,
+      billAmountCents: null,
+      costAmountCents: null,
+    });
+
+    const health = calculateNativePracticeProjectHealth({
+      project: nativeProject(),
+      timeEntries: [timeEntry],
+      expenses: [],
+    });
+
+    expect(health.usedBudgetCents).toBe(15);
+    expect(health.directCostCents).toBe(15);
+    expect(previewSlicingPieContributionFromTimeEntry(timeEntry)).toMatchObject({
+      marketValueCents: 15,
+      slices: 30,
     });
   });
 
@@ -1378,6 +1502,12 @@ describe("practice-finance I/O", () => {
     expect(prismaMock.$queryRaw).toHaveBeenCalledTimes(2);
     expect(prismaMock.practiceTimeEntry.findMany).not.toHaveBeenCalled();
     expect(prismaMock.practiceExpense.findMany).not.toHaveBeenCalled();
+    expect(prismaSqlText(prismaMock.$queryRaw.mock.calls[0]?.[0])).toContain(
+      "NULLIF(BTRIM(p.\"currency\"), '') IS NULL",
+    );
+    expect(prismaSqlText(prismaMock.$queryRaw.mock.calls[1]?.[0])).toContain(
+      "NULLIF(BTRIM(p.\"currency\"), '') IS NULL",
+    );
   });
 
   it("rejects native project health rows with unnormalized ledger currencies", async () => {

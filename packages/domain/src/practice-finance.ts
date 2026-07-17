@@ -290,10 +290,19 @@ function bpsToPct(bps: number) {
   return `${(bps / 100).toFixed(1)}%`;
 }
 
-function decimalToNumber(value: { toNumber: () => number } | number | string): number {
+type NativePracticeDecimalValue = { toNumber: () => number; toString?: () => string } | number | string;
+
+function decimalToNumber(value: NativePracticeDecimalValue): number {
   if (typeof value === "number") return value;
   if (typeof value === "string") return Number(value);
   return value.toNumber();
+}
+
+function decimalToString(value: NativePracticeDecimalValue): string {
+  if (typeof value === "number") return String(value);
+  if (typeof value === "string") return value;
+  const text = value.toString?.();
+  return text && text !== "[object Object]" ? text : String(value.toNumber());
 }
 
 function dbIntToNumber(value: DbInt): number {
@@ -301,8 +310,18 @@ function dbIntToNumber(value: DbInt): number {
   return Number(value);
 }
 
-function centsFromHours(hours: { toNumber: () => number } | number | string, rateCents: number): number {
-  return Math.round(decimalToNumber(hours) * rateCents);
+function centsFromHours(hours: NativePracticeDecimalValue, rateCents: number): number {
+  const cents = new Prisma.Decimal(decimalToString(hours))
+    .mul(rateCents)
+    .toDecimalPlaces(0)
+    .toNumber();
+  invariant(
+    Number.isSafeInteger(cents),
+    400,
+    "INVALID_INPUT",
+    "Rate-derived cents must fit within the safe integer range.",
+  );
+  return cents;
 }
 
 function normalizeCurrencyCode(value: string | null | undefined): string | null {
@@ -323,7 +342,11 @@ function assertNativePracticeTimeEntryCurrency(project: NativePracticeProject, e
   const billCurrency = practiceTimeBillAmountCurrency(entry);
   const costCurrency = practiceTimeCostAmountCurrency(entry);
   invariant(
-    billCurrency === projectCurrency && costCurrency === projectCurrency,
+    projectCurrency != null
+    && billCurrency != null
+    && costCurrency != null
+    && billCurrency === projectCurrency
+    && costCurrency === projectCurrency,
     400,
     "MIXED_CURRENCY",
     "Native practice finance requires time entry bill and cost amounts to be normalized to the project currency.",
@@ -334,7 +357,9 @@ function assertNativePracticeExpenseCurrency(project: NativePracticeProject, exp
   const projectCurrency = normalizeCurrencyCode(project.currency);
   const expenseCurrency = practiceExpenseAmountCurrency(expense);
   invariant(
-    expenseCurrency === projectCurrency,
+    projectCurrency != null
+    && expenseCurrency != null
+    && expenseCurrency === projectCurrency,
     400,
     "MIXED_CURRENCY",
     "Native practice finance requires expenses to be normalized to the project currency.",
@@ -562,24 +587,26 @@ export function calculateNativePracticeProjectHealthFromRollup(params: {
   const recentUsedBudgetCents = params.rollup.recentTimeRevenueCents + params.rollup.recentBillableExpenseCents;
   const recentDirectCostCents = params.rollup.recentTimeCostCents + params.rollup.recentDirectExpenseCents;
 
-  const recentBudgetBurnPerWeekCents = Math.round(recentUsedBudgetCents / recentWindowWeeks);
-  const recentCostBurnPerWeekCents = Math.round(recentDirectCostCents / recentWindowWeeks);
+  const exactRecentBudgetBurnPerWeekCents = recentUsedBudgetCents / recentWindowWeeks;
+  const exactRecentCostBurnPerWeekCents = recentDirectCostCents / recentWindowWeeks;
+  const recentBudgetBurnPerWeekCents = Math.round(exactRecentBudgetBurnPerWeekCents);
+  const recentCostBurnPerWeekCents = Math.round(exactRecentCostBurnPerWeekCents);
   const hasBudgetSetup =
     params.project.poValueCents > 0
     && params.project.serviceBudgetCents > 0
     && params.project.expenseBudgetCents > 0
     && params.project.targetMarginBps != null;
-  const hasRecentBurn = recentBudgetBurnPerWeekCents > 0 || recentCostBurnPerWeekCents > 0;
+  const hasRecentBurn = exactRecentBudgetBurnPerWeekCents > 0 || exactRecentCostBurnPerWeekCents > 0;
   const weeksToBudgetExhaustion = hasBudgetSetup && remainingBudgetCents <= 0
     ? 0
-    : hasBudgetSetup && recentBudgetBurnPerWeekCents > 0
-      ? remainingBudgetCents / recentBudgetBurnPerWeekCents
+    : hasBudgetSetup && exactRecentBudgetBurnPerWeekCents > 0
+      ? remainingBudgetCents / exactRecentBudgetBurnPerWeekCents
       : null;
   const weeksToTargetMarginRisk = calculateWeeksToMarginFloor({
     grossMarginBps,
     grossProfitCents,
-    recentCostBurnPerWeekCents,
-    recentRevenueBurnPerWeekCents: recentBudgetBurnPerWeekCents,
+    recentCostBurnPerWeekCents: exactRecentCostBurnPerWeekCents,
+    recentRevenueBurnPerWeekCents: exactRecentBudgetBurnPerWeekCents,
     targetMarginBps: params.project.targetMarginBps,
     usedBudgetCents,
   });
@@ -1385,7 +1412,24 @@ export async function listNativePracticeProjectHealth(
         ), 0)::bigint AS "recentTimeCostCents",
         COALESCE(SUM(
           CASE WHEN
-            UPPER(COALESCE(
+            NULLIF(BTRIM(p."currency"), '') IS NULL
+            OR COALESCE(
+              CASE WHEN t."billAmountCents" IS NOT NULL
+                THEN NULLIF(BTRIM(t."functionalCurrency"), '')
+                ELSE NULL
+              END,
+              NULLIF(BTRIM(t."billCurrency"), ''),
+              NULLIF(BTRIM(t."currency"), '')
+            ) IS NULL
+            OR COALESCE(
+              CASE WHEN t."costAmountCents" IS NOT NULL
+                THEN NULLIF(BTRIM(t."functionalCurrency"), '')
+                ELSE NULL
+              END,
+              NULLIF(BTRIM(t."costCurrency"), ''),
+              NULLIF(BTRIM(t."currency"), '')
+            ) IS NULL
+            OR UPPER(COALESCE(
               CASE WHEN t."billAmountCents" IS NOT NULL
                 THEN NULLIF(BTRIM(t."functionalCurrency"), '')
                 ELSE NULL
@@ -1457,7 +1501,15 @@ export async function listNativePracticeProjectHealth(
           END
         ), 0)::bigint AS "recentDirectExpenseCents",
         COALESCE(SUM(
-          CASE WHEN UPPER(COALESCE(
+          CASE WHEN NULLIF(BTRIM(p."currency"), '') IS NULL
+            OR COALESCE(
+              CASE WHEN e."amountFunctionalCents" IS NOT NULL AND NULLIF(BTRIM(e."functionalCurrency"), '') IS NOT NULL
+                THEN NULLIF(BTRIM(e."functionalCurrency"), '')
+                ELSE NULL
+              END,
+              NULLIF(BTRIM(e."currency"), '')
+            ) IS NULL
+            OR UPPER(COALESCE(
               CASE WHEN e."amountFunctionalCents" IS NOT NULL AND NULLIF(BTRIM(e."functionalCurrency"), '') IS NOT NULL
                 THEN NULLIF(BTRIM(e."functionalCurrency"), '')
                 ELSE NULL
