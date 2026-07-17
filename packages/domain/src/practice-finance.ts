@@ -177,6 +177,7 @@ export type NativePracticeProjectHealth = {
 };
 
 export type NativePracticeFinanceSummary = PracticeFinanceSummary & {
+  currency: string | null;
   directCostCents: number;
   grossProfitCents: number;
   riskBudgetCount: number;
@@ -421,7 +422,7 @@ function calculateWeeksToMarginFloor(params: {
   if (weeklyHeadroomDeltaCents >= 0) return null;
   if (currentHeadroomCents <= 0) return 0;
 
-  return roundWeeks(currentHeadroomCents / Math.abs(weeklyHeadroomDeltaCents));
+  return currentHeadroomCents / Math.abs(weeklyHeadroomDeltaCents);
 }
 
 function postedTimeEntries(entries: NativePracticeTimeEntry[]) {
@@ -562,7 +563,7 @@ export function calculateNativePracticeProjectHealthFromRollup(params: {
   const weeksToBudgetExhaustion = hasBudgetSetup && remainingBudgetCents <= 0
     ? 0
     : hasBudgetSetup && recentBudgetBurnPerWeekCents > 0
-      ? roundWeeks(remainingBudgetCents / recentBudgetBurnPerWeekCents)
+      ? remainingBudgetCents / recentBudgetBurnPerWeekCents
       : null;
   const weeksToTargetMarginRisk = calculateWeeksToMarginFloor({
     grossMarginBps,
@@ -608,6 +609,7 @@ export function summarizeNativePracticeFinance(health: NativePracticeProjectHeal
     "MIXED_CURRENCY",
     "Native practice finance summary requires a single currency until conversion is supported.",
   );
+  const currency = currencies.values().next().value ?? null;
   const budgetCents = active.reduce((sum, item) => sum + item.budgetCents, 0);
   const usedCents = active.reduce((sum, item) => sum + item.usedBudgetCents, 0);
   const grossProfitCents = active.reduce((sum, item) => sum + item.grossProfitCents, 0);
@@ -616,6 +618,7 @@ export function summarizeNativePracticeFinance(health: NativePracticeProjectHeal
 
   return {
     activeProjects: active.length,
+    currency,
     budgetCents,
     usedCents,
     remainingCents: budgetCents - usedCents,
@@ -653,7 +656,7 @@ export function nativePracticeProjectAttentionItems(health: NativePracticeProjec
       projectId: health.projectId,
       projectName: health.projectName,
       issue: "budget",
-      weeks: health.weeksToBudgetExhaustion,
+      weeks: roundWeeks(health.weeksToBudgetExhaustion),
       detail: `${centsToCurrency(health.remainingBudgetCents, health.currency)} remaining at ${centsToCurrency(health.recentBudgetBurnPerWeekCents, health.currency)} / week.`,
     });
   }
@@ -663,7 +666,7 @@ export function nativePracticeProjectAttentionItems(health: NativePracticeProjec
       projectId: health.projectId,
       projectName: health.projectName,
       issue: "margin",
-      weeks: health.weeksToTargetMarginRisk,
+      weeks: roundWeeks(health.weeksToTargetMarginRisk),
       detail: `Current margin ${bpsToPct(health.grossMarginBps)} vs target ${bpsToPct(health.targetMarginBps)}.`,
     });
   }
@@ -741,10 +744,10 @@ function calculateContributionPreview(params: {
   paymentBatchId: string | null;
 }): NativePracticeContributionPreview {
   invariant(
-    params.marketValueCents >= 0,
+    Number.isInteger(params.marketValueCents) && params.marketValueCents >= 0,
     400,
     "INVALID_INPUT",
-    "Contribution preview market value must be non-negative.",
+    "Contribution preview market value must be a non-negative integer number of cents.",
   );
   invariant(
     Number.isInteger(params.paidAmountCents) && params.paidAmountCents >= 0,
@@ -798,6 +801,12 @@ export function previewSlicingPieContributionFromExpense(
     400,
     "INVALID_INPUT",
     "Posted expenses must have a consultant before producing contribution previews.",
+  );
+  invariant(
+    expense.paymentBatchId == null || options.paidAmountCents != null,
+    400,
+    "INVALID_INPUT",
+    "Batched expense contribution previews require the paid amount allocation.",
   );
   const marketValueCents = practiceExpenseFunctionalAmountCents(expense);
   return calculateContributionPreview({

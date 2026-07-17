@@ -303,11 +303,11 @@ describe("practice-finance pure derivations", () => {
       grossMarginBps: 3158,
       recentBudgetBurnPerWeekCents: 47_500,
       recentCostBurnPerWeekCents: 32_500,
-      weeksToBudgetExhaustion: 17.1,
       weeksToTargetMarginRisk: 0,
       hasBudgetSetup: true,
       hasRecentBurn: true,
     });
+    expect(health.weeksToBudgetExhaustion).toBeCloseTo(17.052, 2);
   });
 
   it("marks native project health as setup-incomplete until budget and margin inputs exist", () => {
@@ -370,6 +370,7 @@ describe("practice-finance pure derivations", () => {
 
     const summary = summarizeNativePracticeFinance([risky, closed]);
     expect(summary.activeProjects).toBe(1);
+    expect(summary.currency).toBe("USD");
     expect(summary.usedCents).toBe(190_000);
     expect(summary.directCostCents).toBe(120_000);
     expect(summary.marginBps).toBe(3684);
@@ -407,6 +408,60 @@ describe("practice-finance pure derivations", () => {
     expect(overrun.remainingBudgetCents).toBe(-100_00);
     expect(overrun.weeksToBudgetExhaustion).toBe(0);
     expect(summary.remainingCents).toBe(0);
+  });
+
+  it("compares unrounded native budget runway against the attention threshold", () => {
+    const nearThreshold = calculateNativePracticeProjectHealth({
+      project: nativeProject({
+        poValueCents: 704,
+        serviceBudgetCents: 1,
+        expenseBudgetCents: 1,
+        targetMarginBps: 0,
+      }),
+      now: new Date("2026-06-30T00:00:00.000Z"),
+      recentWindowWeeks: 1,
+      timeEntries: [nativeTimeEntry({
+        billAmountCents: 100,
+        costAmountCents: 0,
+      })],
+      expenses: [],
+    });
+
+    const summary = summarizeNativePracticeFinance([nearThreshold]);
+    expect(nearThreshold.weeksToBudgetExhaustion).toBeCloseTo(6.04, 2);
+    expect(summary.riskBudgetCount).toBe(0);
+    expect(collectNativePracticeAttention([nearThreshold])).toEqual([]);
+  });
+
+  it("compares unrounded native margin runway against the attention threshold", () => {
+    const nearThreshold = calculateNativePracticeProjectHealth({
+      project: nativeProject({
+        poValueCents: 10_000_00,
+        targetMarginBps: 5000,
+      }),
+      now: new Date("2026-06-30T00:00:00.000Z"),
+      recentWindowWeeks: 1,
+      timeEntries: [
+        nativeTimeEntry({
+          id: "old-margin-headroom",
+          workedOn: new Date("2026-01-01T00:00:00.000Z"),
+          weekEndingOn: new Date("2026-01-05T00:00:00.000Z"),
+          billAmountCents: 1900,
+          costAmountCents: 711,
+        }),
+        nativeTimeEntry({
+          id: "recent-margin-drift",
+          billAmountCents: 100,
+          costAmountCents: 84,
+        }),
+      ],
+      expenses: [],
+    });
+
+    const summary = summarizeNativePracticeFinance([nearThreshold]);
+    expect(nearThreshold.weeksToTargetMarginRisk).toBeCloseTo(6.029, 2);
+    expect(summary.riskMarginCount).toBe(0);
+    expect(collectNativePracticeAttention([nearThreshold])).toEqual([]);
   });
 
   it("flags exhausted native project budgets even without recent burn", () => {
@@ -570,7 +625,31 @@ describe("practice-finance pure derivations", () => {
       expenses: [],
     });
 
-    expect(summarizeNativePracticeFinance([uppercase, lowercase]).activeProjects).toBe(2);
+    const summary = summarizeNativePracticeFinance([uppercase, lowercase]);
+    expect(summary.activeProjects).toBe(2);
+    expect(summary.currency).toBe("USD");
+  });
+
+  it("returns the normalized portfolio currency for non-USD native summaries", () => {
+    const eur = calculateNativePracticeProjectHealth({
+      project: nativeProject({ id: "eur", currency: "eur" }),
+      timeEntries: [nativeTimeEntry({
+        projectId: "eur",
+        currency: "EUR",
+        billCurrency: "EUR",
+        costCurrency: "EUR",
+        billAmountCents: 100_00,
+        costAmountCents: 80_00,
+      })],
+      expenses: [],
+    });
+
+    expect(summarizeNativePracticeFinance([eur])).toMatchObject({
+      currency: "EUR",
+      budgetCents: 10_000_00,
+      usedCents: 100_00,
+      directCostCents: 80_00,
+    });
   });
 
   it("rejects ledger rows that are not normalized to the native project currency", () => {
@@ -774,14 +853,14 @@ describe("practice-finance pure derivations", () => {
       amountFunctionalCents: 12_000,
       functionalCurrency: "USD",
       paymentBatchId: "mixed-batch",
-    }))).toMatchObject({
+    }), { paidAmountCents: 5_000 })).toMatchObject({
       sourceType: "EXPENSE",
       sourceId: "expense-1",
       marketValueCents: 12_000,
-      paidAmountCents: 0,
-      unpaidAmountCents: 12_000,
+      paidAmountCents: 5_000,
+      unpaidAmountCents: 7_000,
       multiplier: SLICING_PIE_EXPENSE_MULTIPLIER,
-      slices: 48_000,
+      slices: 28_000,
       paymentBatchId: "mixed-batch",
     });
 
@@ -834,6 +913,12 @@ describe("practice-finance pure derivations", () => {
     } catch (error) {
       expect(error).toMatchObject({ code: "INVALID_INPUT" });
     }
+    try {
+      previewSlicingPieContributionFromTimeEntry(nativeTimeEntry({ costAmountCents: Number.POSITIVE_INFINITY }));
+      throw new Error("Expected non-finite time contribution value to be rejected.");
+    } catch (error) {
+      expect(error).toMatchObject({ code: "INVALID_INPUT" });
+    }
   });
 
   it("rejects invalid paid amounts when previewing Slicing Pie contributions", () => {
@@ -851,6 +936,15 @@ describe("practice-finance pure derivations", () => {
     try {
       previewSlicingPieContributionFromExpense(nativeExpense({ consultantId: null }));
       throw new Error("Expected unattributed expenses to be rejected.");
+    } catch (error) {
+      expect(error).toMatchObject({ code: "INVALID_INPUT" });
+    }
+  });
+
+  it("requires paid allocation overrides for batched expense contribution previews", () => {
+    try {
+      previewSlicingPieContributionFromExpense(nativeExpense({ paymentBatchId: "batch-1" }));
+      throw new Error("Expected batched expenses without paid allocations to be rejected.");
     } catch (error) {
       expect(error).toMatchObject({ code: "INVALID_INPUT" });
     }
