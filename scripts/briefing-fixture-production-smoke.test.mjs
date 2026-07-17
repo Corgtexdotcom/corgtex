@@ -7,6 +7,7 @@ import {
   briefingFixtureHealthReleaseBlocker,
   briefingFixtureTimestamps,
   cleanupFailureMessage,
+  isSmokeOwnedBriefing,
   normalizeBaseUrl,
   parseSetCookie,
 } from "./briefing-fixture-production-smoke.mjs";
@@ -111,6 +112,28 @@ describe("briefing fixture production smoke helpers", () => {
         },
       },
     }, "current-sha")).toBeNull();
+  });
+
+  it("only lets cleanup restore or delete the smoke-owned briefing row", () => {
+    const expected = {
+      id: "briefing-1",
+      title: "Daily Workspace Briefing - 2026-04-30",
+      modelUsed: "production-validation-fixture",
+      generatedAt: new Date("2026-04-30T12:00:00.000Z"),
+    };
+
+    expect(isSmokeOwnedBriefing({
+      ...expected,
+      generatedAt: "2026-04-30T12:00:00.000Z",
+    }, expected)).toBe(true);
+    expect(isSmokeOwnedBriefing({
+      ...expected,
+      modelUsed: "gpt-5",
+    }, expected)).toBe(false);
+    expect(isSmokeOwnedBriefing({
+      ...expected,
+      generatedAt: "2026-04-30T12:05:00.000Z",
+    }, expected)).toBe(false);
   });
 });
 

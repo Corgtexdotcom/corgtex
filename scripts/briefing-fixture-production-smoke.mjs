@@ -27,6 +27,7 @@ import {
 
 const DEFAULT_BASE_URL = "https://app.corgtex.com";
 const DEFAULT_OUT_DIR = ".artifacts/briefing-fixture-production-smoke";
+const SMOKE_BRIEFING_MODEL = "production-validation-fixture";
 
 function usage() {
   return [
@@ -182,6 +183,19 @@ function snapshotWorkspaceBriefing(record) {
     generatedAt: record.generatedAt,
     createdAt: record.createdAt,
   };
+}
+
+function timestampMs(value) {
+  const date = value instanceof Date ? value : new Date(value);
+  return Number.isNaN(date.getTime()) ? null : date.getTime();
+}
+
+export function isSmokeOwnedBriefing(current, expected) {
+  if (!current || !expected) return false;
+  return current.id === expected.id
+    && current.title === expected.title
+    && current.modelUsed === SMOKE_BRIEFING_MODEL
+    && timestampMs(current.generatedAt) === timestampMs(expected.generatedAt);
 }
 
 export class BriefingFixtureSmoke {
@@ -451,6 +465,18 @@ export class BriefingFixtureSmoke {
       action: hadPreviousBriefing ? "restore" : "delete",
       target: { type: "WorkspaceBriefing", id: briefing.id, label: briefing.title },
       runner: async () => {
+        const current = await this.prisma.workspaceBriefing.findUnique({
+          where: { id: briefing.id },
+          select: {
+            id: true,
+            title: true,
+            modelUsed: true,
+            generatedAt: true,
+          },
+        });
+        if (!isSmokeOwnedBriefing(current, briefing)) {
+          return "Skipped workspace briefing cleanup because another producer changed the row after validation.";
+        }
         if (this.previousBriefing) {
           await this.prisma.workspaceBriefing.update({
             where: { id: this.previousBriefing.id },
@@ -485,7 +511,7 @@ export class BriefingFixtureSmoke {
       workspaceId: this.workspace.id,
       period: "DAILY",
       dateISO: this.generatedAt.toISOString(),
-      model: "production-validation-fixture",
+      model: SMOKE_BRIEFING_MODEL,
       editorialMode: "daily_homepage",
     });
     const cleanupActionId = this.registerBriefingCleanup(stored);
