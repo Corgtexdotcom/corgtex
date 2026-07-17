@@ -132,7 +132,7 @@ async function main() {
   try {
     const health = await fetchHealth(baseUrl, healthPath);
     const releaseMismatch = healthReleaseValidationMismatch(health, expectedGitSha, {
-      requireConfiguredMatch: Boolean(expectedGitSha),
+      requireConfiguredMatch: true,
     });
     if (releaseMismatch) throw new Error(releaseMismatch);
 

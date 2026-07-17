@@ -10,6 +10,28 @@ import { collectProductionValidationPrNumbers } from "./production-validation-pr
 const DEFAULT_BASE_URL = "https://app.corgtex.com";
 const DEFAULT_RECORDER_DEPLOYMENTS = "managed-recorder-validation";
 const DEFAULT_CLIENT_READINESS_ROUTES = "leads";
+const CLIENT_READINESS_ROUTE_NAMES = new Set([
+  "home",
+  "goals",
+  "brain",
+  "brain-sources",
+  "brain-status",
+  "members",
+  "tensions",
+  "actions",
+  "meetings",
+  "proposals",
+  "circles",
+  "finance",
+  "audit",
+  "settings",
+  "chat",
+  "leads",
+  "cycles",
+  "agents",
+  "governance",
+  "operator",
+]);
 const UNKNOWN_PRODUCTION_APP_RELEASE_REQUIRED = "__unknown_production_app_release_required__";
 
 function boolOutput(value) {
@@ -48,6 +70,19 @@ function validateBaseUrl(value) {
     throw new Error(`base_url must be exactly ${DEFAULT_BASE_URL}.`);
   }
   return parsed.origin;
+}
+
+function normalizeClientReadinessRoutes(value) {
+  const raw = normalizeOptionalText(value) || DEFAULT_CLIENT_READINESS_ROUTES;
+  const routeNames = [...new Set(raw.split(",").map((item) => item.trim()).filter(Boolean))];
+  if (routeNames.length === 0) {
+    throw new Error("client_readiness_routes must include at least one route name.");
+  }
+  const unknown = routeNames.filter((name) => !CLIENT_READINESS_ROUTE_NAMES.has(name));
+  if (unknown.length > 0) {
+    throw new Error(`client_readiness_routes contains unsupported route name(s): ${unknown.join(", ")}`);
+  }
+  return routeNames.join(",");
 }
 
 export function productionAppReleaseRelevantPath(filePath) {
@@ -203,7 +238,7 @@ export function resolveProductionValidationContext({
     crm_smoke: boolOutput(enabled && dispatchSmokeEnabled(smokeInputs.crm, eventName)),
     telemetry_release_smoke: boolOutput(enabled && dispatchSmokeEnabled(smokeInputs.telemetryRelease, eventName)),
     client_readiness_smoke: boolOutput(enabled && dispatchSmokeEnabled(smokeInputs.clientReadiness, eventName)),
-    client_readiness_routes: normalizeOptionalText(clientReadinessRoutesInput) || DEFAULT_CLIENT_READINESS_ROUTES,
+    client_readiness_routes: normalizeClientReadinessRoutes(clientReadinessRoutesInput),
     source_intake_smoke: boolOutput(enabled && dispatchSmokeEnabled(smokeInputs.sourceIntake, eventName)),
     work_item_parity_smoke: boolOutput(enabled && dispatchSmokeEnabled(smokeInputs.workItemParity, eventName)),
     briefing_fixture_smoke: boolOutput(enabled && dispatchSmokeEnabled(smokeInputs.briefingFixture, eventName)),

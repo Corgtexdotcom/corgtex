@@ -118,7 +118,7 @@ describe("production validation context", () => {
       prNumbersInput: "725,726",
       baselinePrNumbers: "724",
       recorderDeploymentsInput: "managed-recorder-validation,example",
-      clientReadinessRoutesInput: "leads,relationships",
+      clientReadinessRoutesInput: "leads,governance",
       smokeInputs: {
         crm: "false",
         telemetryRelease: "false",
@@ -136,13 +136,23 @@ describe("production validation context", () => {
       crm_smoke: "false",
       telemetry_release_smoke: "false",
       client_readiness_smoke: "true",
-      client_readiness_routes: "leads,relationships",
+      client_readiness_routes: "leads,governance",
       source_intake_smoke: "true",
       work_item_parity_smoke: "false",
       briefing_fixture_smoke: "true",
       recorder_readiness_smoke: "false",
       recorder_readiness_deployments: "managed-recorder-validation,example",
     });
+  });
+
+  it("rejects unknown client-readiness route names", () => {
+    expect(() => resolve({
+      eventName: "workflow_dispatch",
+      event: { inputs: {} },
+      githubRef: "refs/heads/main",
+      clientReadinessRoutesInput: "relationships",
+      changedFiles: [],
+    })).toThrow("client_readiness_routes contains unsupported route name(s): relationships");
   });
 
   it("keeps scheduled runs release-agnostic unless an explicit SHA is supplied", () => {

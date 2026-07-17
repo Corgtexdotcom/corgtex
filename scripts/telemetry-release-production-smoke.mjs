@@ -12,13 +12,19 @@ import {
   writeValidationArtifacts,
 } from "./lib/production-validation.mjs";
 import { releaseDriftSummary } from "./lib/release-health-validation.mjs";
-import { expectedReleaseGitSha, telemetrySent } from "./telemetry-release-smoke.mjs";
+import { telemetrySent } from "./telemetry-release-smoke.mjs";
 
 const [, , baseUrlArg, outDirArg] = process.argv;
 
 function optionalEnv(name) {
   const value = process.env[name]?.trim();
   return value || null;
+}
+
+export function expectedProductionReleaseGitSha(env = process.env) {
+  return env.TELEMETRY_RELEASE_SMOKE_EXPECTED_GIT_SHA?.trim()
+    || env.CORGTEX_EXPECTED_RELEASE_GIT_SHA?.trim()
+    || null;
 }
 
 function smokeSecret() {
@@ -53,7 +59,7 @@ async function recordForEachPr(run, result) {
 async function main() {
   const baseUrl = (baseUrlArg || optionalEnv("APP_URL") || "https://app.corgtex.com").replace(/\/$/, "");
   const outDir = path.resolve(outDirArg || optionalEnv("TELEMETRY_RELEASE_SMOKE_OUT_DIR") || ".artifacts/production-validation/telemetry-release");
-  const expectedGitSha = expectedReleaseGitSha();
+  const expectedGitSha = expectedProductionReleaseGitSha();
   const runId = smokeRunId();
   const responsePath = path.join(outDir, "telemetry-release-response.json");
   const run = createValidationRun({
