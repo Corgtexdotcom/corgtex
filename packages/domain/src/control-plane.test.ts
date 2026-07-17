@@ -306,7 +306,51 @@ const { prismaMock, encryptSecretMock, decryptSecretMock, memberMocks, communica
       count: vi.fn(),
       findMany: vi.fn(),
     },
+    practiceClient: {
+      count: vi.fn(),
+      findMany: vi.fn(),
+    },
+    practiceBillingCode: {
+      count: vi.fn(),
+      findMany: vi.fn(),
+    },
+    practiceConsultant: {
+      count: vi.fn(),
+      findMany: vi.fn(),
+    },
     practiceProject: {
+      count: vi.fn(),
+      findMany: vi.fn(),
+    },
+    practiceProjectLine: {
+      count: vi.fn(),
+      findMany: vi.fn(),
+    },
+    practicePurchaseOrder: {
+      count: vi.fn(),
+      findMany: vi.fn(),
+    },
+    practiceProjectAssignment: {
+      count: vi.fn(),
+      findMany: vi.fn(),
+    },
+    practiceSourceDocument: {
+      count: vi.fn(),
+      findMany: vi.fn(),
+    },
+    practicePaymentBatch: {
+      count: vi.fn(),
+      findMany: vi.fn(),
+    },
+    practiceTimeEntry: {
+      count: vi.fn(),
+      findMany: vi.fn(),
+    },
+    practiceExpense: {
+      count: vi.fn(),
+      findMany: vi.fn(),
+    },
+    practiceEntryReview: {
       count: vi.fn(),
       findMany: vi.fn(),
     },
@@ -549,7 +593,18 @@ describe("control plane domain", () => {
       "goalLink",
       "recognition",
       "checkIn",
+      "practiceClient",
+      "practiceBillingCode",
+      "practiceConsultant",
       "practiceProject",
+      "practiceProjectLine",
+      "practicePurchaseOrder",
+      "practiceProjectAssignment",
+      "practiceSourceDocument",
+      "practicePaymentBatch",
+      "practiceTimeEntry",
+      "practiceExpense",
+      "practiceEntryReview",
       "practiceContributionEntry",
       "modelUsageBudget",
       "workspaceBillingProfile",
@@ -839,6 +894,99 @@ describe("control plane domain", () => {
         },
       },
     });
+  });
+
+  it("includes native Practice Ledger entities in managed-workspace migration inventory", async () => {
+    const { runControlPlaneClientMigrationDryRun } = await import("./control-plane");
+    const sourceDeployment = {
+      id: "dep-source",
+      label: "Acme Shared",
+      customerSlug: "acme",
+      customerAccountId: "acct_1",
+      customerAccount: {
+        id: "acct_1",
+        slug: "acme",
+        displayName: "Acme",
+        status: "ACTIVE",
+        managementAuthority: "CORGTEX",
+        supportOwnerEmail: null,
+        notes: null,
+        primaryDeploymentId: "dep-source",
+        createdAt: new Date("2026-01-01T00:00:00Z"),
+        updatedAt: new Date("2026-01-01T00:00:00Z"),
+      },
+      deploymentKind: "SHARED_WORKSPACE",
+      deploymentStatus: "ACTIVE",
+      managedWorkspaceId: "ws-1",
+      supportCredentialEnc: null,
+    };
+    prismaMock.customerDeployment.findUnique
+      .mockResolvedValueOnce(sourceDeployment)
+      .mockResolvedValueOnce(sourceDeployment);
+    prismaMock.practiceClient.count.mockResolvedValueOnce(2);
+    prismaMock.practiceClient.findMany.mockResolvedValueOnce([{ id: "practice-client-1" }, { id: "practice-client-2" }]);
+    prismaMock.practiceTimeEntry.count.mockResolvedValueOnce(1);
+    prismaMock.practiceTimeEntry.findMany.mockResolvedValueOnce([{ id: "time-entry-1" }]);
+    prismaMock.clientMigrationRun.create.mockResolvedValue({
+      id: "mig-1",
+      customerAccountId: "acct_1",
+      sourceDeploymentId: "dep-source",
+      destinationDeploymentId: null,
+      direction: "shared_to_hosted",
+      status: "planned",
+      reason: "Move to hosted.",
+      planSummary: {},
+    });
+    prismaMock.clientMigrationRun.update.mockImplementationOnce(async ({ data }) => ({
+      id: "mig-1",
+      customerAccountId: "acct_1",
+      sourceDeploymentId: "dep-source",
+      destinationDeploymentId: null,
+      direction: "shared_to_hosted",
+      status: data.status,
+      reason: "Move to hosted.",
+      verificationSummary: data.verificationSummary,
+      sourceDeployment,
+      destinationDeployment: null,
+      customerAccount: sourceDeployment.customerAccount,
+      _count: { idMaps: data.verificationSummary.dryRun.idMapSeedCount },
+    }));
+
+    await runControlPlaneClientMigrationDryRun(operatorActor, {
+      sourceDeploymentId: "dep-source",
+      targetMode: "hosted_dedicated",
+      writesQuiesced: true,
+      reason: "Move to hosted.",
+    });
+
+    const updateArg = prismaMock.clientMigrationRun.update.mock.calls[0]?.[0];
+    expect(updateArg.data.verificationSummary.dryRun.inventory).toEqual(expect.arrayContaining([
+      { entityType: "PracticeClient", count: 2, idMapSampled: 2 },
+      { entityType: "PracticeBillingCode", count: 0, idMapSampled: 0 },
+      { entityType: "PracticeConsultant", count: 0, idMapSampled: 0 },
+      { entityType: "PracticeProject", count: 0, idMapSampled: 0 },
+      { entityType: "PracticeProjectLine", count: 0, idMapSampled: 0 },
+      { entityType: "PracticePurchaseOrder", count: 0, idMapSampled: 0 },
+      { entityType: "PracticeProjectAssignment", count: 0, idMapSampled: 0 },
+      { entityType: "PracticeSourceDocument", count: 0, idMapSampled: 0 },
+      { entityType: "PracticePaymentBatch", count: 0, idMapSampled: 0 },
+      { entityType: "PracticeTimeEntry", count: 1, idMapSampled: 1 },
+      { entityType: "PracticeExpense", count: 0, idMapSampled: 0 },
+      { entityType: "PracticeEntryReview", count: 0, idMapSampled: 0 },
+    ]));
+    expect(updateArg.data.verificationSummary.dryRun.idMapSeedCount).toBe(3);
+    expect(prismaMock.clientMigrationIdMap.upsert).toHaveBeenCalledWith(expect.objectContaining({
+      create: expect.objectContaining({
+        entityType: "PracticeClient",
+        sourceId: "practice-client-1",
+      }),
+    }));
+    expect(prismaMock.clientMigrationIdMap.upsert).toHaveBeenCalledWith(expect.objectContaining({
+      create: expect.objectContaining({
+        entityType: "PracticeTimeEntry",
+        sourceId: "time-entry-1",
+      }),
+    }));
   });
 
   it("keeps production migration dry-run disabled unless explicitly enabled", async () => {
