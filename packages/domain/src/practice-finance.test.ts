@@ -624,11 +624,13 @@ describe("practice-finance pure derivations", () => {
   it("previews Slicing Pie contribution data from native time and expense rows", () => {
     expect(previewSlicingPieContributionFromTimeEntry(nativeTimeEntry({
       costAmountCents: 40_000,
+      currency: "usd",
       paidAmountCents: 15_000,
       paymentBatchId: "batch-1",
     }))).toMatchObject({
       sourceType: "TIME_ENTRY",
       sourceId: "time-1",
+      currency: "USD",
       marketValueCents: 40_000,
       paidAmountCents: 15_000,
       unpaidAmountCents: 25_000,

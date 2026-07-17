@@ -748,7 +748,7 @@ export function previewSlicingPieContributionFromTimeEntry(entry: NativePractice
     projectId: entry.projectId,
     consultantId: entry.consultantId,
     occurredAt: entry.workedOn,
-    currency: entry.functionalCurrency ?? entry.costCurrency ?? entry.currency,
+    currency: firstCurrencyCode(entry.functionalCurrency, entry.costCurrency, entry.currency) ?? PRACTICE_LEDGER_CURRENCY,
     marketValueCents,
     paidAmountCents: entry.paidAmountCents ?? 0,
     multiplier: SLICING_PIE_TIME_MULTIPLIER,
