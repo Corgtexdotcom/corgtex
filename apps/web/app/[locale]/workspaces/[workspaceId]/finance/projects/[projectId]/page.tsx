@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import {
   canManagePracticeFinanceProjects,
   getNativePracticeProjectDetail,
@@ -13,17 +14,21 @@ import {
 
 export const dynamic = "force-dynamic";
 
-function money(cents: number): string {
+function money(cents: number, currency: string): string {
   const sign = cents < 0 ? "-" : "";
-  return `${sign}$${Math.abs(Math.round(cents / 100)).toLocaleString("en-US")}`;
+  try {
+    return `${sign}${new Intl.NumberFormat("en-US", {
+      currency,
+      maximumFractionDigits: 0,
+      style: "currency",
+    }).format(Math.abs(Math.round(cents / 100)))}`;
+  } catch {
+    return `${sign}${currency} ${Math.abs(Math.round(cents / 100)).toLocaleString("en-US")}`;
+  }
 }
 
 function marginLabel(bps: number | null): string {
   return bps == null ? "-" : `${(bps / 100).toFixed(1)}%`;
-}
-
-function dateInputValue(value = new Date()): string {
-  return value.toISOString().slice(0, 10);
 }
 
 function formatDate(value: Date): string {
@@ -75,6 +80,8 @@ export default async function PracticeProjectDetailPage({
     resolvedMembership: membership,
   });
   const { project, health } = detail;
+  const timeIdempotencyKey = `manual-time-${project.id}-${randomUUID()}`;
+  const expenseIdempotencyKey = `manual-expense-${project.id}-${randomUUID()}`;
 
   return (
     <section className="stack" style={{ gap: 20 }} data-finance-surface="practice-project-detail">
@@ -100,19 +107,19 @@ export default async function PracticeProjectDetailPage({
       <div style={{ display: "flex", flexWrap: "wrap", gap: 12 }}>
         <div style={metricStyle}>
           <div style={labelStyle}>Budget</div>
-          <div style={{ fontSize: 24, marginTop: 6 }}>{money(health.budgetCents)}</div>
+          <div style={{ fontSize: 24, marginTop: 6 }}>{money(health.budgetCents, health.currency)}</div>
         </div>
         <div style={metricStyle}>
           <div style={labelStyle}>Used</div>
-          <div style={{ fontSize: 24, marginTop: 6 }}>{money(health.usedBudgetCents)}</div>
+          <div style={{ fontSize: 24, marginTop: 6 }}>{money(health.usedBudgetCents, health.currency)}</div>
         </div>
         <div style={metricStyle}>
           <div style={labelStyle}>Remaining</div>
-          <div style={{ fontSize: 24, marginTop: 6 }}>{money(health.remainingBudgetCents)}</div>
+          <div style={{ fontSize: 24, marginTop: 6 }}>{money(health.remainingBudgetCents, health.currency)}</div>
         </div>
         <div style={metricStyle}>
           <div style={labelStyle}>Direct cost</div>
-          <div style={{ fontSize: 24, marginTop: 6 }}>{money(health.directCostCents)}</div>
+          <div style={{ fontSize: 24, marginTop: 6 }}>{money(health.directCostCents, health.currency)}</div>
         </div>
         <div style={metricStyle}>
           <div style={labelStyle}>Gross margin</div>
@@ -138,11 +145,11 @@ export default async function PracticeProjectDetailPage({
           </div>
           <div>
             <div style={labelStyle}>Service budget</div>
-            <div>{money(project.serviceBudgetCents)}</div>
+            <div>{money(project.serviceBudgetCents, project.currency)}</div>
           </div>
           <div>
             <div style={labelStyle}>Expense budget</div>
-            <div>{money(project.expenseBudgetCents)}</div>
+            <div>{money(project.expenseBudgetCents, project.currency)}</div>
           </div>
           <div>
             <div style={labelStyle}>Purchase orders</div>
@@ -160,13 +167,14 @@ export default async function PracticeProjectDetailPage({
           <form action={createNativePracticeTimeEntryAction} className="stack nr-form-section" style={{ marginTop: 0 }}>
             <input type="hidden" name="workspaceId" value={workspaceId} />
             <input type="hidden" name="projectId" value={project.id} />
+            <input type="hidden" name="idempotencyKey" value={timeIdempotencyKey} />
             <strong>Record time</strong>
             <div style={formGridStyle}>
               <label>Consultant<input name="consultantName" required /></label>
               <label>Email<input name="consultantEmail" type="email" /></label>
             </div>
             <div style={formGridStyle}>
-              <label>Date<input name="workedOn" type="date" defaultValue={dateInputValue()} required /></label>
+              <label>Date<input name="workedOn" type="date" required /></label>
               <label>Hours<input name="hours" type="number" min="0.01" step="0.01" required /></label>
               <label>Assignment<input name="assignmentType" defaultValue="CONSULTING" required /></label>
             </div>
@@ -174,15 +182,16 @@ export default async function PracticeProjectDetailPage({
               <label>Bill rate<input name="billRate" type="number" min="0" step="0.01" defaultValue="0.00" /></label>
               <label>Cost rate<input name="costRate" type="number" min="0" step="0.01" defaultValue="0.00" /></label>
             </div>
-            <button type="submit" style={{ width: "fit-content" }}>Submit time</button>
+            <button type="submit" className="fin-action-btn">Submit time</button>
           </form>
 
           <form action={createNativePracticeExpenseAction} className="stack nr-form-section" style={{ marginTop: 0 }}>
             <input type="hidden" name="workspaceId" value={workspaceId} />
             <input type="hidden" name="projectId" value={project.id} />
+            <input type="hidden" name="idempotencyKey" value={expenseIdempotencyKey} />
             <strong>Record expense</strong>
             <div style={formGridStyle}>
-              <label>Date<input name="spentOn" type="date" defaultValue={dateInputValue()} required /></label>
+              <label>Date<input name="spentOn" type="date" required /></label>
               <label>Amount<input name="amount" type="number" min="0.01" step="0.01" required /></label>
               <label>Currency<input name="currency" defaultValue={project.currency} required /></label>
             </div>
@@ -199,7 +208,7 @@ export default async function PracticeProjectDetailPage({
               <input name="billable" type="checkbox" defaultChecked />
               Billable to client
             </label>
-            <button type="submit" style={{ width: "fit-content" }}>Submit expense</button>
+            <button type="submit" className="fin-action-btn">Submit expense</button>
           </form>
         </div>
       )}
@@ -232,8 +241,8 @@ export default async function PracticeProjectDetailPage({
                       {entry.consultant.email && <div className="nr-item-meta" style={{ fontSize: 11 }}>{entry.consultant.email}</div>}
                     </td>
                     <td style={{ textAlign: "right" }}>{entry.hours.toString()}</td>
-                    <td style={{ textAlign: "right" }}>{money(entry.billAmountCents ?? Math.round(Number(entry.hours.toString()) * entry.billRateCents))}</td>
-                    <td style={{ textAlign: "right" }}>{money(entry.costAmountCents ?? Math.round(Number(entry.hours.toString()) * entry.costRateCents))}</td>
+                    <td style={{ textAlign: "right" }}>{money(entry.billAmountCents ?? Math.round(Number(entry.hours.toString()) * entry.billRateCents), entry.billCurrency ?? entry.currency)}</td>
+                    <td style={{ textAlign: "right" }}>{money(entry.costAmountCents ?? Math.round(Number(entry.hours.toString()) * entry.costRateCents), entry.costCurrency ?? entry.currency)}</td>
                     <td>{statusLabel(entry.status)}</td>
                   </tr>
                 ))}
@@ -271,7 +280,7 @@ export default async function PracticeProjectDetailPage({
                       {entry.vendor && <div className="nr-item-meta" style={{ fontSize: 11 }}>{entry.vendor}</div>}
                     </td>
                     <td>{entry.businessPurpose}</td>
-                    <td style={{ textAlign: "right" }}>{money(entry.amountFunctionalCents ?? entry.amountCents)}</td>
+                    <td style={{ textAlign: "right" }}>{money(entry.amountFunctionalCents ?? entry.amountCents, entry.functionalCurrency ?? entry.currency)}</td>
                     <td>{entry.billable ? "Yes" : "No"}</td>
                     <td>{statusLabel(entry.status)}</td>
                   </tr>

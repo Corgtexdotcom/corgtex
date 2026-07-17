@@ -111,6 +111,7 @@ export async function createNativePracticeTimeEntryAction(formData: FormData) {
     assignmentType: asOptional(formData, "assignmentType"),
     billRateCents: optionalCents(formData, "billRate"),
     costRateCents: optionalCents(formData, "costRate"),
+    idempotencyKey: asOptional(formData, "idempotencyKey"),
   });
   refresh(workspaceId);
 }
@@ -128,6 +129,7 @@ export async function createNativePracticeExpenseAction(formData: FormData) {
     amountCents: optionalCents(formData, "amount") ?? 0,
     currency: asOptional(formData, "currency"),
     billable: formData.get("billable") === "on",
+    idempotencyKey: asOptional(formData, "idempotencyKey"),
   });
   refresh(workspaceId);
 }

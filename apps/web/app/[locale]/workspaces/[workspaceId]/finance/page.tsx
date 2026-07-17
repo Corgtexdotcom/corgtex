@@ -26,12 +26,12 @@ export default async function FinancePage({
   const payablesCursor = Array.isArray(query?.payablesCursor) ? query?.payablesCursor[0] : query?.payablesCursor;
   const actor = await requirePageActor();
   await requireWorkspaceFeature(workspaceId, "FINANCE");
-  await requireWorkspaceFeature(workspaceId, "PRACTICE_PROJECTS");
 
-  const [practiceDashboard, projects, slicingPieEnabled, membership, workspace] = await Promise.all([
+  const [practiceDashboard, projects, slicingPieEnabled, practiceProjectsEnabled, membership, workspace] = await Promise.all([
     getNativePracticeFinanceDashboard(actor, workspaceId),
-    listPracticeProjects(actor, workspaceId, { take: 100 }),
+    listAllPracticeProjects(actor, workspaceId),
     isWorkspaceFeatureEnabled(workspaceId, "SLICING_PIE"),
+    isWorkspaceFeatureEnabled(workspaceId, "PRACTICE_PROJECTS"),
     requireWorkspaceMembership({ actor, workspaceId }),
     prisma.workspace.findUnique({
       where: { id: workspaceId },
@@ -39,7 +39,7 @@ export default async function FinancePage({
     }),
   ]);
   const readOnlyDemo = workspace?.slug === "jnj-demo";
-  const canManageProjects = !readOnlyDemo && await canManagePracticeFinanceProjects(actor, workspaceId, {
+  const canManageProjects = practiceProjectsEnabled && !readOnlyDemo && await canManagePracticeFinanceProjects(actor, workspaceId, {
     resolvedMembership: membership,
   });
   const canMarkContributionPaid = !readOnlyDemo && await canManagePracticeContributionPayments(actor, workspaceId, {
@@ -68,4 +68,18 @@ export default async function FinancePage({
       requestedPayablesNextCursor={requestedPayables.nextCursor}
     />
   );
+}
+
+async function listAllPracticeProjects(actor: Awaited<ReturnType<typeof requirePageActor>>, workspaceId: string) {
+  const projects: Awaited<ReturnType<typeof listPracticeProjects>> = [];
+  let cursor: string | null = null;
+  const take = 200;
+
+  while (true) {
+    const page = await listPracticeProjects(actor, workspaceId, { take, cursor });
+    projects.push(...page);
+    if (page.length < take) return projects;
+    cursor = page.at(-1)?.id ?? null;
+    if (!cursor) return projects;
+  }
 }

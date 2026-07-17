@@ -11,9 +11,17 @@ import {
   updatePracticeProjectAction,
 } from "./actions";
 
-function usd(cents: number): string {
+function money(cents: number, currency = "USD"): string {
   const sign = cents < 0 ? "-" : "";
-  return `${sign}$${Math.abs(Math.round(cents / 100)).toLocaleString("en-US")}`;
+  try {
+    return `${sign}${new Intl.NumberFormat("en-US", {
+      currency,
+      maximumFractionDigits: 0,
+      style: "currency",
+    }).format(Math.abs(Math.round(cents / 100)))}`;
+  } catch {
+    return `${sign}${currency} ${Math.abs(Math.round(cents / 100)).toLocaleString("en-US")}`;
+  }
 }
 
 function pct(ratio: number): string {
@@ -30,7 +38,7 @@ function weeksLabel(weeks: number | null): string {
 
 function usedRatio(health: NativePracticeProjectHealth): number {
   if (health.budgetCents <= 0) return 0;
-  return Math.min(Math.max(health.usedBudgetCents / health.budgetCents, 0), 1);
+  return Math.max(health.usedBudgetCents / health.budgetCents, 0);
 }
 
 function formatDate(value: Date): string {
@@ -259,7 +267,7 @@ function RequestedPayables({
                     <div className="nr-item-meta" style={{ fontSize: 11 }}>{entry.project.code}</div>
                   </td>
                   <td>{entryKindLabel(entry)}</td>
-                  <td style={{ textAlign: "right" }}>{usd(entry.amountCents)}</td>
+                  <td style={{ textAlign: "right" }}>{money(entry.amountCents)}</td>
                   {canMarkPaid && (
                     <td>
                       <form action={markPracticeContributionEntryPaidAction}>
@@ -338,15 +346,15 @@ export function PracticeFinanceDashboard({
         </div>
         <div style={metricStyle}>
           <div style={labelStyle}>Budget</div>
-          <div style={{ fontSize: 26, marginTop: 6 }}>{usd(summary.budgetCents)}</div>
+          <div style={{ fontSize: 26, marginTop: 6 }}>{money(summary.budgetCents, summary.currency ?? "USD")}</div>
         </div>
         <div style={metricStyle}>
           <div style={labelStyle}>Used</div>
-          <div style={{ fontSize: 26, marginTop: 6 }}>{usd(summary.usedCents)}</div>
+          <div style={{ fontSize: 26, marginTop: 6 }}>{money(summary.usedCents, summary.currency ?? "USD")}</div>
         </div>
         <div style={metricStyle}>
           <div style={labelStyle}>Remaining</div>
-          <div style={{ fontSize: 26, marginTop: 6 }}>{usd(summary.remainingCents)}</div>
+          <div style={{ fontSize: 26, marginTop: 6 }}>{money(summary.remainingCents, summary.currency ?? "USD")}</div>
         </div>
         <div style={metricStyle}>
           <div style={labelStyle}>Margin</div>
@@ -394,7 +402,7 @@ export function PracticeFinanceDashboard({
                           <div className="nr-item-meta" style={{ fontSize: 11 }}>{entry.project.code}</div>
                         </td>
                         <td>{entryKindLabel(entry)}</td>
-                        <td style={{ textAlign: "right" }}>{usd(entry.amountCents)}</td>
+                        <td style={{ textAlign: "right" }}>{money(entry.amountCents)}</td>
                         <td>{paymentLabel(entry)}</td>
                         <td style={{ textAlign: "right" }}>{entry.slices.toLocaleString("en-US")}</td>
                         {canMarkContributionPaid && (
@@ -493,9 +501,9 @@ export function PracticeFinanceDashboard({
                     </td>
                     <td>{health.clientName}</td>
                     <td>{statusLabel(health.status)}</td>
-                    <td style={{ textAlign: "right" }}>{usd(health.budgetCents)}</td>
-                    <td style={{ textAlign: "right" }}>{usd(health.usedBudgetCents)}</td>
-                    <td style={{ textAlign: "right" }}>{usd(health.remainingBudgetCents)}</td>
+                    <td style={{ textAlign: "right" }}>{money(health.budgetCents, health.currency)}</td>
+                    <td style={{ textAlign: "right" }}>{money(health.usedBudgetCents, health.currency)}</td>
+                    <td style={{ textAlign: "right" }}>{money(health.remainingBudgetCents, health.currency)}</td>
                     <td style={{ textAlign: "right" }}>{pct(usedRatio(health))}</td>
                     <td style={{ textAlign: "right" }}>{marginPct(health.grossMarginBps)}</td>
                     <td style={{ textAlign: "right" }}>{weeksLabel(health.weeksToBudgetExhaustion)}</td>

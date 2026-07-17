@@ -1220,6 +1220,10 @@ function normalizePositiveCents(value: number | null | undefined, label: string)
   return cents;
 }
 
+function isUniqueConstraintError(error: unknown): error is { code: string } {
+  return typeof error === "object" && error !== null && (error as { code?: unknown }).code === "P2002";
+}
+
 function normalizeBps(value: number | null | undefined, label: string): number | null {
   if (value == null) return null;
   invariant(Number.isInteger(value) && value >= 0 && value <= 10000, 400, "INVALID_INPUT", `${label} must be 0-10000 basis points.`);
@@ -1910,14 +1914,47 @@ async function loadNativePracticeProjectForLedgerWrite(workspaceId: string, proj
 
 async function ensureNativePracticeClientForProject(project: Awaited<ReturnType<typeof loadNativePracticeProjectForLedgerWrite>>) {
   if (project.clientId) return project.clientId;
-  const code = normalizeProjectCode(project.clientName).slice(0, 80);
-  const client = await prisma.practiceClient.upsert({
-    where: { workspaceId_code: { workspaceId: project.workspaceId, code } },
-    update: {
-      crmAccountId: project.crmAccountId ?? undefined,
-      name: project.clientName,
-    },
-    create: {
+
+  if (project.crmAccountId) {
+    const crmClient = await prisma.practiceClient.findFirst({
+      where: { workspaceId: project.workspaceId, crmAccountId: project.crmAccountId },
+      select: { id: true },
+    });
+    if (crmClient) {
+      await prisma.practiceProject.update({
+        where: { id: project.id },
+        data: { clientId: crmClient.id },
+      });
+      return crmClient.id;
+    }
+  }
+
+  const baseCode = normalizeProjectCode(project.clientName).slice(0, 80);
+  const existingCodeClient = await prisma.practiceClient.findUnique({
+    where: { workspaceId_code: { workspaceId: project.workspaceId, code: baseCode } },
+    select: { id: true, crmAccountId: true, name: true },
+  });
+  if (
+    existingCodeClient
+    && (
+      (project.crmAccountId && existingCodeClient.crmAccountId === project.crmAccountId)
+      || (
+        !project.crmAccountId
+        && !existingCodeClient.crmAccountId
+        && existingCodeClient.name.localeCompare(project.clientName, undefined, { sensitivity: "accent" }) === 0
+      )
+    )
+  ) {
+    await prisma.practiceProject.update({
+      where: { id: project.id },
+      data: { clientId: existingCodeClient.id },
+    });
+    return existingCodeClient.id;
+  }
+
+  const code = existingCodeClient ? `${baseCode.slice(0, 67)}-${project.id.slice(0, 12)}` : baseCode;
+  const client = await prisma.practiceClient.create({
+    data: {
       workspaceId: project.workspaceId,
       crmAccountId: project.crmAccountId,
       code,
@@ -1947,7 +1984,9 @@ async function resolveNativePracticeConsultant(params: {
   const existing = await prisma.practiceConsultant.findFirst({
     where: {
       workspaceId: params.workspaceId,
-      ...(email ? { email } : { name: displayName }),
+      ...(email
+        ? { email: { equals: email, mode: "insensitive" } }
+        : { name: { equals: displayName, mode: "insensitive" } }),
     },
     select: { id: true },
   });
@@ -2042,45 +2081,64 @@ export async function createNativePracticeTimeEntry(
 ): Promise<PracticeTimeEntry> {
   await requirePracticeFinanceWrite(actor, workspaceId);
   const project = await loadNativePracticeProjectForLedgerWrite(workspaceId, input.projectId);
-  const clientId = await ensureNativePracticeClientForProject(project);
-  const consultantId = await resolveNativePracticeConsultant({
-    workspaceId,
-    name: input.consultantName,
-    email: input.consultantEmail,
-    required: true,
-  });
-  invariant(consultantId, 400, "INVALID_INPUT", "Consultant is required.");
-
   const workedOn = normalizeNativeLedgerDate(input.workedOn, "Work date");
   const hours = normalizeNativeLedgerHours(input.hours);
   const billRateCents = normalizeCents(input.billRateCents ?? undefined, "Bill rate");
   const costRateCents = normalizeCents(input.costRateCents ?? undefined, "Cost rate");
   const currency = normalizeNativeLedgerCurrency(null, project.currency);
   const assignmentType = normalizeOptionalNativeText(input.assignmentType) || "CONSULTING";
+  const idempotencyKey = normalizeOptionalNativeText(input.idempotencyKey);
+  const consultantName = normalizeOptionalNativeText(input.consultantName);
+  const consultantEmail = normalizeConsultantEmail(input.consultantEmail);
+  invariant(consultantName || consultantEmail, 400, "INVALID_INPUT", "Consultant is required.");
+  const existingEntry = idempotencyKey
+    ? await prisma.practiceTimeEntry.findUnique({
+      where: { workspaceId_idempotencyKey: { workspaceId, idempotencyKey } },
+    })
+    : null;
+  if (existingEntry) return existingEntry;
 
-  return prisma.practiceTimeEntry.create({
-    data: {
-      workspaceId,
-      clientId,
-      billingCodeId: project.billingCodeId,
-      projectId: project.id,
-      consultantId,
-      workedOn,
-      weekEndingOn: weekEndingSundayUtc(workedOn),
-      hours,
-      assignmentType,
-      currency,
-      billCurrency: currency,
-      costCurrency: currency,
-      functionalCurrency: currency,
-      billRateCents,
-      costRateCents,
-      billAmountCents: centsFromHours(hours, billRateCents),
-      costAmountCents: centsFromHours(hours, costRateCents),
-      status: "POSTED",
-      idempotencyKey: normalizeOptionalNativeText(input.idempotencyKey),
-    },
+  const clientId = await ensureNativePracticeClientForProject(project);
+  const consultantId = await resolveNativePracticeConsultant({
+    workspaceId,
+    name: consultantName,
+    email: consultantEmail,
+    required: true,
   });
+  invariant(consultantId, 400, "INVALID_INPUT", "Consultant is required.");
+
+  const data = {
+    workspaceId,
+    clientId,
+    billingCodeId: project.billingCodeId,
+    projectId: project.id,
+    consultantId,
+    workedOn,
+    weekEndingOn: weekEndingSundayUtc(workedOn),
+    hours,
+    assignmentType,
+    currency,
+    billCurrency: currency,
+    costCurrency: currency,
+    functionalCurrency: currency,
+    billRateCents,
+    costRateCents,
+    billAmountCents: centsFromHours(hours, billRateCents),
+    costAmountCents: centsFromHours(hours, costRateCents),
+    status: "POSTED" as const,
+    idempotencyKey,
+  };
+
+  try {
+    return await prisma.practiceTimeEntry.create({ data });
+  } catch (error) {
+    if (!idempotencyKey || !isUniqueConstraintError(error)) throw error;
+    const created = await prisma.practiceTimeEntry.findUnique({
+      where: { workspaceId_idempotencyKey: { workspaceId, idempotencyKey } },
+    });
+    if (created) return created;
+    throw error;
+  }
 }
 
 export async function createNativePracticeExpense(
@@ -2090,37 +2148,59 @@ export async function createNativePracticeExpense(
 ): Promise<PracticeExpense> {
   await requirePracticeFinanceWrite(actor, workspaceId);
   const project = await loadNativePracticeProjectForLedgerWrite(workspaceId, input.projectId);
-  const clientId = await ensureNativePracticeClientForProject(project);
-  const consultantId = await resolveNativePracticeConsultant({
-    workspaceId,
-    name: input.consultantName,
-    email: input.consultantEmail,
-    required: false,
-  });
   const spentOn = normalizeNativeLedgerDate(input.spentOn, "Expense date");
   const amountCents = normalizePositiveCents(input.amountCents, "Expense amount");
   const currency = normalizeNativeLedgerCurrency(input.currency, project.currency);
+  const vendor = normalizeOptionalNativeText(input.vendor);
+  const category = normalizeRequiredText(input.category, "Category");
+  const businessPurpose = normalizeRequiredText(input.businessPurpose, "Business purpose");
+  const idempotencyKey = normalizeOptionalNativeText(input.idempotencyKey);
+  const consultantName = normalizeOptionalNativeText(input.consultantName);
+  const consultantEmail = normalizeConsultantEmail(input.consultantEmail);
+  const existingEntry = idempotencyKey
+    ? await prisma.practiceExpense.findUnique({
+      where: { workspaceId_idempotencyKey: { workspaceId, idempotencyKey } },
+    })
+    : null;
+  if (existingEntry) return existingEntry;
 
-  return prisma.practiceExpense.create({
-    data: {
-      workspaceId,
-      clientId,
-      billingCodeId: project.billingCodeId,
-      projectId: project.id,
-      consultantId,
-      spentOn,
-      vendor: normalizeOptionalNativeText(input.vendor),
-      category: normalizeRequiredText(input.category, "Category"),
-      businessPurpose: normalizeRequiredText(input.businessPurpose, "Business purpose"),
-      amountCents,
-      currency,
-      amountFunctionalCents: amountCents,
-      functionalCurrency: currency,
-      billable: input.billable ?? true,
-      status: "POSTED",
-      idempotencyKey: normalizeOptionalNativeText(input.idempotencyKey),
-    },
+  const clientId = await ensureNativePracticeClientForProject(project);
+  const consultantId = await resolveNativePracticeConsultant({
+    workspaceId,
+    name: consultantName,
+    email: consultantEmail,
+    required: false,
   });
+
+  const data = {
+    workspaceId,
+    clientId,
+    billingCodeId: project.billingCodeId,
+    projectId: project.id,
+    consultantId,
+    spentOn,
+    vendor,
+    category,
+    businessPurpose,
+    amountCents,
+    currency,
+    amountFunctionalCents: amountCents,
+    functionalCurrency: currency,
+    billable: input.billable ?? true,
+    status: "POSTED" as const,
+    idempotencyKey,
+  };
+
+  try {
+    return await prisma.practiceExpense.create({ data });
+  } catch (error) {
+    if (!idempotencyKey || !isUniqueConstraintError(error)) throw error;
+    const created = await prisma.practiceExpense.findUnique({
+      where: { workspaceId_idempotencyKey: { workspaceId, idempotencyKey } },
+    });
+    if (created) return created;
+    throw error;
+  }
 }
 
 async function resolveContributionUserId(actor: AppActor, workspaceId: string, contributorUserId?: string | null) {
