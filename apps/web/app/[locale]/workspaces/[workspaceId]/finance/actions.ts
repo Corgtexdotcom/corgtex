@@ -83,7 +83,7 @@ export async function createPracticeProjectAction(formData: FormData) {
 
 export async function updatePracticeProjectAction(formData: FormData) {
   const { actor, workspaceId } = await requirePracticeProjectsActionContext(formData);
-  await updatePracticeProject(actor, workspaceId, {
+  const input: Parameters<typeof updatePracticeProject>[2] = {
     projectId: asString(formData, "projectId"),
     code: asString(formData, "code"),
     name: asString(formData, "name"),
@@ -95,8 +95,11 @@ export async function updatePracticeProjectAction(formData: FormData) {
     usedCents: optionalCents(formData, "used"),
     weeklyBurnCents: optionalCents(formData, "weeklyBurn"),
     targetMarginBps: optionalBps(formData, "targetMargin"),
-    currentMarginBps: optionalBps(formData, "currentMargin"),
-  });
+  };
+  if (formData.has("currentMargin")) {
+    input.currentMarginBps = optionalBps(formData, "currentMargin");
+  }
+  await updatePracticeProject(actor, workspaceId, input);
   refresh(workspaceId);
 }
 
