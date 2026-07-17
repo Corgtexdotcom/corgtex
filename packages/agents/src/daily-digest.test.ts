@@ -229,14 +229,10 @@ vi.mock("@corgtex/domain", () => ({
   instrumentNewspaperHtmlLinks: instrumentNewspaperHtmlLinksMock,
   recordNewspaperDelivery: recordNewspaperDeliveryMock,
   workspaceBriefingPeriodFromCadence: (cadence: string) => cadence === "WEEKLY" ? "WEEKLY" : "DAILY",
+  workspaceBriefingContextSince: (period: string, date: Date) => new Date(date.getTime() - (period === "WEEKLY" ? 90 : 30) * 24 * 60 * 60 * 1000),
   collectWorkspaceBriefingCandidates: collectWorkspaceBriefingCandidatesMock,
-  buildWorkspaceBriefingFromDigest: ({ title, period, dateKey, digest }: any) => ({
-    title,
-    period,
-    dateKey,
-    generatedAt: "2026-04-30T12:00:00.000Z",
-    introMd: digest.intro ?? null,
-    items: digest.sections.flatMap((section: any) => section.items.map((item: string, index: number) => ({
+  buildWorkspaceBriefingFromDigest: ({ title, period, dateKey, digest }: any) => {
+    const items = digest.sections.flatMap((section: any) => section.items.map((item: string, index: number) => ({
       kind: section.id === "meetingBriefs"
         ? "MEETING"
         : section.id === "decisionsAndProposals"
@@ -254,7 +250,7 @@ vi.mock("@corgtex/domain", () => ({
                     : section.id === "conversationHighlights"
                       ? "COMMUNICATION"
                       : "BRAIN_ARTICLE",
-      title: section.title,
+      title: item.split(":")[0] || "Workspace update",
       summaryMd: item,
       whyItMattersMd: "Selected for the workspace briefing.",
       prominence: index === 0 ? "lead" : "standard",
@@ -262,17 +258,28 @@ vi.mock("@corgtex/domain", () => ({
       href: null,
       occurredAt: "2026-04-30T12:00:00.000Z",
       confidence: 0.8,
-    }))),
-    sourceRefs: [],
-    sourceCounts: {},
-  }),
-  buildWorkspaceBriefingFromCandidates: ({ title, period, dateKey, candidates }: any) => ({
-    title,
-    period,
-    dateKey,
-    generatedAt: "2026-04-30T12:00:00.000Z",
-    introMd: candidates.length > 0 ? "Here is what matters most." : "This was a quiet period.",
-    items: candidates.length > 0
+    })));
+    return {
+      title,
+      period,
+      dateKey,
+      generatedAt: "2026-04-30T12:00:00.000Z",
+      introMd: digest.intro ?? "This edition starts with the strongest operating signal.",
+      leadMd: items[0]?.summaryMd ?? "No major operating changes found.",
+      bodyMd: items.slice(1).map((item: any) => item.summaryMd).join("\n\n") || null,
+      attentionMd: items.some((item: any) => item.kind === "ACTION" || item.kind === "ADVICE_REQUEST") ? "The main attention points are included in the story above." : null,
+      continuingContextMd: "Continuing context remains available when unresolved work still matters.",
+      closingMd: "The source trail is the evidence path for this edition.",
+      editorialMode: period === "WEEKLY" ? "weekly_email" : "daily_homepage",
+      freshWindow: { label: period === "WEEKLY" ? "Last 7 days" : "Last 24-36 hours", since: "2026-04-29T00:00:00.000Z", until: "2026-04-30T12:00:00.000Z" },
+      contextWindow: { label: period === "WEEKLY" ? "Last 30-90 days" : "Current month context", since: "2026-03-31T12:00:00.000Z", until: "2026-04-30T12:00:00.000Z" },
+      items,
+      sourceRefs: [],
+      sourceCounts: {},
+    };
+  },
+  buildWorkspaceBriefingFromCandidates: ({ title, period, dateKey, candidates }: any) => {
+    const items = candidates.length > 0
       ? candidates.map((candidate: any, index: number) => ({
           kind: candidate.sourceType,
           title: candidate.title,
@@ -294,30 +301,68 @@ vi.mock("@corgtex/domain", () => ({
           href: null,
           occurredAt: "2026-04-30T12:00:00.000Z",
           confidence: 0.8,
-        }],
-    sourceRefs: candidates.flatMap((candidate: any) => candidate.sourceRefs ?? []),
-    sourceCounts: {},
+        }];
+    return {
+      title,
+      period,
+      dateKey,
+      generatedAt: "2026-04-30T12:00:00.000Z",
+      introMd: candidates.length > 0 ? "Here is what matters most." : "This was a quiet period.",
+      leadMd: items[0]?.summaryMd ?? "No major operating changes found.",
+      bodyMd: items.slice(1).map((item: any) => item.summaryMd).join("\n\n") || null,
+      attentionMd: candidates.length > 0 ? "The main attention points are included in the story above." : null,
+      continuingContextMd: candidates.length > 0 ? "Continuing context remains visible while it matters." : "There is no unresolved high-signal context in the evidence pool for this edition.",
+      closingMd: "The source trail is the evidence path for this edition.",
+      editorialMode: period === "WEEKLY" ? "weekly_email" : "daily_homepage",
+      freshWindow: { label: period === "WEEKLY" ? "Last 7 days" : "Last 24-36 hours", since: "2026-04-29T00:00:00.000Z", until: "2026-04-30T12:00:00.000Z" },
+      contextWindow: { label: period === "WEEKLY" ? "Last 30-90 days" : "Current month context", since: "2026-03-31T12:00:00.000Z", until: "2026-04-30T12:00:00.000Z" },
+      items,
+      sourceRefs: candidates.flatMap((candidate: any) => candidate.sourceRefs ?? []),
+      sourceCounts: {},
+    };
+  },
+  normalizeWorkspaceBriefingPayload: (input: any) => ({
+    title: input.title ?? "Workspace Briefing",
+    introMd: input.introMd ?? null,
+    leadMd: input.leadMd ?? input.items?.[0]?.summaryMd ?? null,
+    bodyMd: input.bodyMd ?? null,
+    attentionMd: input.attentionMd ?? null,
+    continuingContextMd: input.continuingContextMd ?? null,
+    closingMd: input.closingMd ?? null,
+    editorialMode: input.editorialMode ?? "daily_homepage",
+    freshWindow: input.freshWindow ?? { label: "Last 24-36 hours", since: "2026-04-29T00:00:00.000Z", until: "2026-04-30T12:00:00.000Z" },
+    contextWindow: input.contextWindow ?? { label: "Current month context", since: "2026-03-31T12:00:00.000Z", until: "2026-04-30T12:00:00.000Z" },
+    period: input.period ?? "DAILY",
+    dateKey: input.dateKey ?? "2026-04-30",
+    generatedAt: input.generatedAt ?? "2026-04-30T12:00:00.000Z",
+    items: input.items ?? [],
+    sourceRefs: input.sourceRefs ?? [],
+    sourceCounts: input.sourceCounts ?? {},
   }),
-  renderWorkspaceBriefingMarkdown: (briefing: any) => `# ${briefing.title}\n\n${briefing.items.map((item: any) => `- ${item.summaryMd}`).join("\n")}`,
+  renderWorkspaceBriefingMarkdown: (briefing: any) => `# ${briefing.title}\n\n${[
+    briefing.introMd,
+    briefing.leadMd,
+    briefing.bodyMd,
+    briefing.attentionMd,
+    briefing.continuingContextMd,
+    briefing.closingMd,
+  ].filter(Boolean).join("\n\n")}`,
   upsertWorkspaceBriefing: upsertWorkspaceBriefingMock,
   workspaceBriefingToNewspaperDigest: ({ briefingJson }: any) => {
-    const sectionForKind = (kind: string) => {
-      if (kind === "MEETING") return { id: "meetingBriefs", title: "Meeting Briefs" };
-      if (kind === "PROPOSAL") return { id: "decisionsAndProposals", title: "Decisions & Proposals" };
-      if (kind === "TENSION") return { id: "emergingTensions", title: "Emerging Tensions" };
-      if (kind === "ACTION") return { id: "openActions", title: "Open Actions" };
-      if (kind === "GOAL") return { id: "goalsProgress", title: "Goals & Quarterly Progress" };
-      if (kind === "ADVICE_REQUEST") return { id: "adviceRequests", title: "Requests Awaiting Your Input" };
-      if (kind === "BUILD_ARTIFACT") return { id: "builtWork", title: "Built / Shipped Work" };
-      if (kind === "COMMUNICATION") return { id: "conversationHighlights", title: "Conversation Highlights" };
-      return { id: "otherUpdates", title: "Other Updates" };
-    };
+    const items = [
+      briefingJson.leadMd,
+      briefingJson.bodyMd,
+      briefingJson.attentionMd,
+      briefingJson.continuingContextMd,
+      briefingJson.closingMd,
+    ].filter(Boolean);
     return {
       intro: briefingJson.introMd ?? null,
-      sections: briefingJson.items.map((item: any) => ({
-        ...sectionForKind(item.kind),
-        items: [item.summaryMd],
-      })),
+      sections: items.length > 0 ? [{
+        id: "otherUpdates",
+        title: "Workspace Narrative",
+        items,
+      }] : [],
     };
   },
   upsertNewspaperEdition: upsertNewspaperEditionMock,
@@ -392,7 +437,7 @@ describe("runDailyDigest", () => {
           },
         };
       }
-      if (instruction.startsWith("Personalize this structured")) {
+      if (instruction.startsWith("Personalize this workspace")) {
         return {
           output: {
             greeting: "Hello Member One,",
@@ -482,7 +527,7 @@ describe("runDailyDigest", () => {
     expect(createArticleMock).toHaveBeenCalledWith(expect.objectContaining({ kind: "agent" }), expect.objectContaining({
       workspaceId: "workspace-1",
       type: "DIGEST",
-      bodyMd: expect.stringContaining("## Built / Shipped Work"),
+      bodyMd: expect.stringContaining("## Workspace Narrative"),
       title: "Weekly Newspaper - 2026-04-30",
     }));
     expect(upsertNewspaperEditionMock).toHaveBeenCalledWith(expect.objectContaining({
@@ -494,10 +539,10 @@ describe("runDailyDigest", () => {
       slug: "weekly-newspaper-2026-04-30",
       digestJson: expect.objectContaining({
         sections: expect.arrayContaining([
-          expect.objectContaining({ id: "builtWork" }),
+          expect.objectContaining({ id: "otherUpdates", title: "Workspace Narrative" }),
         ]),
       }),
-      bodyMd: expect.stringContaining("## Built / Shipped Work"),
+      bodyMd: expect.stringContaining("## Workspace Narrative"),
       sourceCounts: expect.objectContaining({
         buildArtifacts: 2,
       }),
@@ -524,6 +569,93 @@ describe("runDailyDigest", () => {
       cadence: "WEEKLY",
       status: "SENT",
       providerMessageId: "email-1",
+    }));
+  });
+
+  it("bounds digest model inputs by the edition cutoff", async () => {
+    const { runDailyDigest } = await import("./daily-digest");
+    const cutoff = new Date("2026-04-30T12:00:00.000Z");
+    const since = new Date("2026-04-23T12:00:00.000Z");
+    const windowRange = { gte: since, lte: cutoff };
+
+    await runDailyDigest({
+      workspaceId: "workspace-1",
+      dateISO: cutoff.toISOString(),
+    });
+
+    expect(prismaMock.conversationSession.findMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({
+        workspaceId: "workspace-1",
+        turns: { some: { createdAt: windowRange } },
+      }),
+      include: expect.objectContaining({
+        turns: expect.objectContaining({
+          where: { createdAt: windowRange },
+        }),
+      }),
+    }));
+    expect(listSlackMessagesForDigestMock).toHaveBeenCalledWith("workspace-1", since, cutoff);
+    expect(prismaMock.buildArtifact.findMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({
+        workspaceId: "workspace-1",
+        updatedAt: { lte: cutoff },
+        OR: expect.arrayContaining([
+          { updatedAt: windowRange },
+          { mergedAt: windowRange },
+          { closedAt: windowRange },
+        ]),
+      }),
+    }));
+    expect(prismaMock.meeting.findMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({
+        workspaceId: "workspace-1",
+        createdAt: { lte: cutoff },
+        OR: expect.arrayContaining([
+          { recordedAt: windowRange },
+          { updatedAt: windowRange },
+          { summaryPostedAt: windowRange },
+          { aiProcessedAt: windowRange },
+        ]),
+      }),
+    }));
+    expect(prismaMock.proposal.findMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({
+        workspaceId: "workspace-1",
+        createdAt: { lte: cutoff },
+        updatedAt: { lte: cutoff },
+        OR: expect.arrayContaining([
+          { updatedAt: windowRange },
+          { decidedAt: windowRange },
+        ]),
+      }),
+    }));
+    expect(prismaMock.action.findMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({
+        workspaceId: "workspace-1",
+        createdAt: { lte: cutoff },
+        updatedAt: { lte: cutoff },
+      }),
+    }));
+    expect(prismaMock.goal.findMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({
+        workspaceId: "workspace-1",
+        createdAt: { lte: cutoff },
+        updatedAt: { lte: cutoff },
+      }),
+      select: expect.objectContaining({
+        updates: expect.objectContaining({
+          where: { createdAt: windowRange },
+        }),
+      }),
+    }));
+    expect(prismaMock.adviceRequest.findMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({
+        workspaceId: "workspace-1",
+        audienceType: "WORKSPACE",
+        status: "ACTIVE",
+        createdAt: { lte: cutoff },
+        updatedAt: { lte: cutoff },
+      }),
     }));
   });
 
@@ -570,6 +702,14 @@ describe("runDailyDigest", () => {
         dateKey: "2026-04-30",
         generatedAt: "2026-04-30T12:00:00.000Z",
         introMd: "Stored shared intro.",
+        leadMd: "Stored briefing item.",
+        bodyMd: "The stored workspace briefing is the canonical newsletter source.",
+        attentionMd: null,
+        continuingContextMd: "The shared artifact remains available for traceability.",
+        closingMd: "The story above is meant to stand on its own.",
+        editorialMode: "weekly_email",
+        freshWindow: { label: "Last 7 days", since: "2026-04-23T12:00:00.000Z", until: "2026-04-30T12:00:00.000Z" },
+        contextWindow: { label: "Last 30-90 days", since: "2026-01-30T12:00:00.000Z", until: "2026-04-30T12:00:00.000Z" },
         items: [{
           kind: "BUILD_ARTIFACT",
           title: "Stored shipped work",
@@ -635,7 +775,7 @@ describe("runDailyDigest", () => {
           },
         };
       }
-      if (instruction.startsWith("Personalize this structured")) return { output: {} };
+      if (instruction.startsWith("Personalize this workspace")) return { output: {} };
       return { output: {} };
     });
 
@@ -654,11 +794,14 @@ describe("runDailyDigest", () => {
     }));
     expect(createArticleMock).toHaveBeenCalledWith(expect.objectContaining({ kind: "agent" }), expect.objectContaining({
       type: "DIGEST",
-      bodyMd: expect.stringContaining("## Meeting Briefs"),
+      bodyMd: expect.stringContaining("## Workspace Narrative"),
       title: "Weekly Newspaper - 2026-04-30",
     }));
     expect(sendEmailMock).toHaveBeenCalledWith(expect.objectContaining({
       to: "member@example.com",
+      html: expect.stringContaining("Weekly tactical: onboarding progress and role handoff were reviewed."),
+    }));
+    expect(sendEmailMock).not.toHaveBeenCalledWith(expect.objectContaining({
       html: expect.stringContaining("Meeting Briefs"),
     }));
   });
@@ -948,6 +1091,28 @@ describe("runDailyDigest", () => {
     prismaMock.proposal.findMany.mockResolvedValue([{ id: "proposal-1", title: "Approve pricing" }]);
     prismaMock.tension.findMany.mockResolvedValue([{ id: "tension-1", title: "Clarify support ownership" }]);
     prismaMock.action.findMany.mockResolvedValue([{ id: "action-1", title: "Prepare launch checklist" }]);
+    extractMock.mockImplementation(async ({ instruction, input }: { instruction: string; input?: string }) => {
+      if (instruction.startsWith("Generate a structured")) {
+        return {
+          output: {
+            intro: "Structured daily brief.",
+            builtWork: ["Shipped a useful update."],
+            conversationHighlights: ["Discussed operating priorities."],
+          },
+        };
+      }
+      if (instruction.startsWith("Personalize this workspace")) {
+        const text = String(input ?? "");
+        return {
+          output: text.includes("Approve pricing")
+            ? {
+              memberNote: "For you: Advice request: Proposal - Approve pricing. Input request: Tension - Clarify support ownership. Deadline: 2026-05-03. Audience: Support circle.",
+            }
+            : {},
+        };
+      }
+      return { output: {} };
+    });
 
     const { runDailyDigest } = await import("./daily-digest");
     await runDailyDigest({
@@ -960,11 +1125,11 @@ describe("runDailyDigest", () => {
     const htmlByRecipient = new Map(sendEmailMock.mock.calls.map(([request]) => [request.to, request.html]));
     const memberAHtml = htmlByRecipient.get("a@example.com");
     const memberBHtml = htmlByRecipient.get("b@example.com");
-    expect(memberAHtml).toContain("Requests Awaiting Your Input");
     expect(memberAHtml).toContain("Advice request: Proposal - Approve pricing");
     expect(memberAHtml).toContain("Input request: Tension - Clarify support ownership");
     expect(memberAHtml).toContain("Deadline: 2026-05-03");
     expect(memberAHtml).toContain("Audience: Support circle");
+    expect(memberAHtml).not.toContain("Requests Awaiting Your Input");
     expect(memberAHtml).not.toContain("Prepare launch checklist");
     expect(memberBHtml).not.toContain("Requests Awaiting Your Input");
     expect(memberBHtml).not.toContain("Prepare launch checklist");
@@ -994,9 +1159,16 @@ describe("runDailyDigest", () => {
       },
     ]);
     prismaMock.proposal.findMany.mockResolvedValue([{ id: "proposal-1", title: "Approve pricing" }]);
-    extractMock.mockImplementation(async ({ instruction }: { instruction: string }) => {
+    extractMock.mockImplementation(async ({ instruction, input }: { instruction: string; input?: string }) => {
       if (instruction.startsWith("Generate a structured")) return { output: {} };
-      if (instruction.startsWith("Personalize this structured")) return { output: {} };
+      if (instruction.startsWith("Personalize this workspace")) {
+        const text = String(input ?? "");
+        return {
+          output: text.includes("Approve pricing")
+            ? { memberNote: "For you: Advice request: Proposal - Approve pricing." }
+            : {},
+        };
+      }
       return { output: {} };
     });
 
@@ -1267,7 +1439,7 @@ describe("runDailyDigest", () => {
       workspaceId: "workspace-1",
       slug: "daily-newspaper-2026-04-30",
       title: "Daily Newspaper - 2026-04-30",
-      bodyMd: expect.stringContaining("## Built / Shipped Work"),
+      bodyMd: expect.stringContaining("## Workspace Narrative"),
     }));
   });
 

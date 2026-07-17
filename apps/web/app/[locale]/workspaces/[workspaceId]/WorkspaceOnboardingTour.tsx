@@ -214,11 +214,11 @@ export function WorkspaceOnboardingTour({
       },
       {
         href: "/",
-        element: ".ws-agent-sidebar",
+        element: ".ws-assistant-launch",
         popover: {
           title: t("assistantTitle"),
           description: t("assistantDescription"),
-          side: "left",
+          side: "top",
         },
       },
     );

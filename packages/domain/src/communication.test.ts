@@ -221,6 +221,26 @@ describe("communication Slack integration", () => {
     expect(verifySlackRequest(body, signedHeaders(body))).toBe(true);
   });
 
+  it("bounds Slack digest messages by an optional upper cutoff", async () => {
+    const { listSlackMessagesForDigest } = await import("./communication");
+    const since = new Date("2026-04-29T12:00:00.000Z");
+    const until = new Date("2026-04-30T12:00:00.000Z");
+
+    await listSlackMessagesForDigest("workspace-1", since, until);
+
+    expect(prismaMock.communicationMessage.findMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({
+        workspaceId: "workspace-1",
+        provider: "SLACK",
+        receivedAt: { gte: since, lte: until },
+        text: { not: null },
+        isBot: false,
+        isHidden: false,
+        isDeleted: false,
+      }),
+    }));
+  });
+
   it("rejects stale Slack request timestamps", async () => {
     const { verifySlackRequest } = await import("./communication");
     const body = "{}";

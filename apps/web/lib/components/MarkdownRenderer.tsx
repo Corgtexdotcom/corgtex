@@ -6,17 +6,19 @@ export function MarkdownRenderer({
   markdown,
   variant = "document",
   className = "",
+  allowImages = true,
 }: {
   markdown?: string | null;
   variant?: MarkdownVariant;
   className?: string;
+  allowImages?: boolean;
 }) {
   if (!markdown?.trim()) return null;
 
   return (
     <div
       className={`markdown-body markdown-body-${variant} ${className}`.trim()}
-      dangerouslySetInnerHTML={{ __html: renderMarkdown(markdown) }}
+      dangerouslySetInnerHTML={{ __html: renderMarkdown(markdown, { allowImages }) }}
     />
   );
 }
