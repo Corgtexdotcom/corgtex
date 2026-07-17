@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import {
   assertBriefingFixturePayload,
@@ -10,6 +10,7 @@ import {
   isSmokeOwnedBriefing,
   normalizeBaseUrl,
   parseSetCookie,
+  smokeOwnedBriefingWhere,
 } from "./briefing-fixture-production-smoke.mjs";
 
 function fixture() {
@@ -134,6 +135,77 @@ describe("briefing fixture production smoke helpers", () => {
       ...expected,
       generatedAt: "2026-04-30T12:05:00.000Z",
     }, expected)).toBe(false);
+
+    expect(smokeOwnedBriefingWhere(expected)).toEqual({
+      id: "briefing-1",
+      title: "Daily Workspace Briefing - 2026-04-30",
+      modelUsed: "production-validation-fixture",
+      generatedAt: new Date("2026-04-30T12:00:00.000Z"),
+    });
+  });
+
+  it("creates fixture records directly with deterministic timestamps and no product write API calls", async () => {
+    const actionCreate = vi.fn().mockResolvedValue({ id: "action-1" });
+    const proposalCreate = vi.fn().mockResolvedValue({ id: "proposal-1" });
+    const articleCreate = vi.fn().mockResolvedValue({ id: "article-1", slug: "briefing-fixture-run" });
+    const smoke = new BriefingFixtureSmoke({
+      baseUrl: "https://app.corgtex.com",
+      outDir: ".artifacts/test-briefing-fixture-production-smoke",
+      expectedGitSha: null,
+      workspaceSelector: { workspaceSlug: "corgtex-validation", explicit: true },
+      authEmail: "Admin@Example.com",
+      authPassword: "password",
+      prNumbers: [724],
+      prisma: {
+        user: {
+          findFirst: vi.fn().mockResolvedValue({ id: "user-1", email: "admin@example.com" }),
+        },
+        member: {
+          findUnique: vi.fn().mockResolvedValue({ id: "member-1", isActive: true }),
+        },
+        action: { create: actionCreate },
+        proposal: { create: proposalCreate },
+        brainArticle: { create: articleCreate },
+      },
+      generatedAt: "2026-04-30T12:00:00.000Z",
+    });
+    smoke.workspace = { id: "ws-1", slug: "corgtex-validation" };
+    smoke.sessionFetch = vi.fn(async () => {
+      throw new Error("product write API should not be used during fixture creation");
+    });
+
+    await smoke.createFixtureRecords();
+
+    expect(smoke.sessionFetch).not.toHaveBeenCalled();
+    expect(actionCreate).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        workspaceId: "ws-1",
+        authorUserId: "user-1",
+        status: "OPEN",
+        priority: 3,
+        dueAt: new Date("2026-04-30T11:00:00.000Z"),
+        updatedAt: new Date("2026-04-30T11:45:00.000Z"),
+      }),
+    });
+    expect(proposalCreate).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        workspaceId: "ws-1",
+        authorUserId: "user-1",
+        ownerMemberId: "member-1",
+        status: "OPEN",
+        priority: 9,
+        updatedAt: new Date("2026-03-16T12:00:00.000Z"),
+      }),
+    });
+    expect(articleCreate).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        workspaceId: "ws-1",
+        slug: expect.stringMatching(/^briefing-fixture-/),
+        authority: "REFERENCE",
+        isPrivate: false,
+        updatedAt: new Date("2026-04-30T11:45:00.000Z"),
+      }),
+    });
   });
 });
 

@@ -28,6 +28,8 @@ import {
 const DEFAULT_BASE_URL = "https://app.corgtex.com";
 const DEFAULT_OUT_DIR = ".artifacts/briefing-fixture-production-smoke";
 const SMOKE_BRIEFING_MODEL = "production-validation-fixture";
+const BRIEFING_FIXTURE_OPEN_PRIORITY = 3;
+const BRIEFING_FIXTURE_STALE_PROPOSAL_PRIORITY = 9;
 
 function usage() {
   return [
@@ -182,6 +184,7 @@ function snapshotWorkspaceBriefing(record) {
     sourceCounts: record.sourceCounts,
     generatedAt: record.generatedAt,
     createdAt: record.createdAt,
+    updatedAt: record.updatedAt,
   };
 }
 
@@ -196,6 +199,19 @@ export function isSmokeOwnedBriefing(current, expected) {
     && current.title === expected.title
     && current.modelUsed === SMOKE_BRIEFING_MODEL
     && timestampMs(current.generatedAt) === timestampMs(expected.generatedAt);
+}
+
+export function smokeOwnedBriefingWhere(expected) {
+  assert(expected?.id, "Expected briefing cleanup row must include an id.");
+  assert(expected?.title, "Expected briefing cleanup row must include a title.");
+  const generatedAt = expected.generatedAt instanceof Date ? expected.generatedAt : new Date(expected.generatedAt);
+  assert(!Number.isNaN(generatedAt.getTime()), "Expected briefing cleanup row must include a valid generatedAt timestamp.");
+  return {
+    id: expected.id,
+    title: expected.title,
+    modelUsed: SMOKE_BRIEFING_MODEL,
+    generatedAt,
+  };
 }
 
 export class BriefingFixtureSmoke {
@@ -318,22 +334,52 @@ export class BriefingFixtureSmoke {
     return cleanupActionId;
   }
 
+  async resolveValidationActor() {
+    const email = String(this.authEmail || "").trim().toLowerCase();
+    assert(email, "Briefing fixture smoke requires a login email before fixture creation.");
+    const user = await this.prisma.user.findFirst({
+      where: { email: { equals: email, mode: "insensitive" } },
+      select: { id: true, email: true },
+    });
+    assert(user, `Validation admin user ${email} was not found in production.`);
+    const member = await this.prisma.member.findUnique({
+      where: {
+        workspaceId_userId: {
+          workspaceId: this.workspace.id,
+          userId: user.id,
+        },
+      },
+      select: { id: true, isActive: true },
+    });
+    assert(member?.isActive, `Validation admin user ${user.email} is not an active member of workspace ${this.workspace.slug ?? this.workspace.id}.`);
+    return { user, member };
+  }
+
   async createFixtureRecords() {
     const workspaceId = this.workspace.id;
+    const { user, member } = await this.resolveValidationActor();
+    const { freshAt, staleAt, overdueAt } = briefingFixtureTimestamps(this.generatedAt);
     const slugSafeRunId = this.runId.replace(/[^a-z0-9-]+/gi, "-").toLowerCase();
     const actionTitle = `${this.validationTag} critical blocker briefing action`;
     const proposalTitle = `${this.validationTag} strategic stale briefing proposal`;
     const articleTitle = `${this.validationTag} briefing knowledge label`;
 
-    const action = await this.sessionFetch(`/api/workspaces/${workspaceId}/actions`, {
-      method: "POST",
-      body: JSON.stringify({
+    const action = await this.prisma.action.create({
+      data: {
+        workspaceId,
+        authorUserId: user.id,
         title: actionTitle,
         bodyMd: "Temporary briefing validation action. Critical blocker decision needs an owner today.",
-        priorityLabel: "Urgent",
-      }),
+        status: "OPEN",
+        priority: BRIEFING_FIXTURE_OPEN_PRIORITY,
+        dueAt: overdueAt,
+        isPrivate: false,
+        publishedAt: freshAt,
+        createdAt: freshAt,
+        updatedAt: freshAt,
+      },
     });
-    this.created.action = action.body.action;
+    this.created.action = action;
     this.created.action.cleanupActionId = this.addApiArchiveCleanup({
       type: "Action",
       id: this.created.action.id,
@@ -341,17 +387,23 @@ export class BriefingFixtureSmoke {
       endpoint: `/api/workspaces/${workspaceId}/actions/${this.created.action.id}`,
     });
 
-    const proposal = await this.sessionFetch(`/api/workspaces/${workspaceId}/proposals`, {
-      method: "POST",
-      body: JSON.stringify({
+    const proposal = await this.prisma.proposal.create({
+      data: {
+        workspaceId,
+        authorUserId: user.id,
+        ownerMemberId: member.id,
         title: proposalTitle,
         summary: "Temporary stale proposal that should remain visible as continuing context.",
         bodyMd: "Temporary briefing validation proposal. It is intentionally stale but strategically relevant.",
+        status: "OPEN",
         isPrivate: false,
-        priorityLabel: "Urgent",
-      }),
+        priority: BRIEFING_FIXTURE_STALE_PROPOSAL_PRIORITY,
+        publishedAt: staleAt,
+        createdAt: staleAt,
+        updatedAt: staleAt,
+      },
     });
-    this.created.proposal = proposal.body.proposal;
+    this.created.proposal = proposal;
     this.created.proposal.cleanupActionId = this.addApiArchiveCleanup({
       type: "Proposal",
       id: this.created.proposal.id,
@@ -359,17 +411,25 @@ export class BriefingFixtureSmoke {
       endpoint: `/api/workspaces/${workspaceId}/proposals/${this.created.proposal.id}`,
     });
 
-    const article = await this.sessionFetch(`/api/workspaces/${workspaceId}/brain/articles`, {
-      method: "POST",
-      body: JSON.stringify({
+    const article = await this.prisma.brainArticle.create({
+      data: {
+        workspaceId,
         title: articleTitle,
         slug: `briefing-fixture-${slugSafeRunId}`,
         type: "RUNBOOK",
         authority: "REFERENCE",
         bodyMd: "Temporary briefing validation knowledge fixture. It proves source labels and dashboard presentation.",
-      }),
+        frontmatterJson: {},
+        isPrivate: false,
+        publishedAt: freshAt,
+        lastVerifiedAt: freshAt,
+        staleAfterDays: 90,
+        sourceIds: [],
+        createdAt: freshAt,
+        updatedAt: freshAt,
+      },
     });
-    this.created.article = article.body.article;
+    this.created.article = article;
     this.created.article.cleanupActionId = this.addApiArchiveCleanup({
       type: "BrainArticle",
       id: this.created.article.id,
@@ -388,57 +448,9 @@ export class BriefingFixtureSmoke {
       actionId: this.created.action.id,
       proposalId: this.created.proposal.id,
       articleId: this.created.article.id,
-    });
-  }
-
-  async pinFixtureTimestamps() {
-    const { freshAt, staleAt, overdueAt } = briefingFixtureTimestamps(this.generatedAt);
-    const workspaceId = this.workspace.id;
-
-    await Promise.all([
-      this.prisma.action.update({
-        where: { id: this.created.action.id },
-        data: {
-          workspaceId,
-          status: "OPEN",
-          isPrivate: false,
-          priority: 3,
-          bodyMd: "Temporary briefing validation action. Critical blocker decision needs an owner today.",
-          dueAt: overdueAt,
-          publishedAt: freshAt,
-          createdAt: freshAt,
-          updatedAt: freshAt,
-        },
-      }),
-      this.prisma.proposal.update({
-        where: { id: this.created.proposal.id },
-        data: {
-          workspaceId,
-          status: "OPEN",
-          isPrivate: false,
-          priority: 3,
-          summary: "Temporary stale proposal that should remain visible as continuing context.",
-          bodyMd: "Temporary briefing validation proposal. It is intentionally stale but strategically relevant.",
-          publishedAt: staleAt,
-          createdAt: staleAt,
-          updatedAt: staleAt,
-        },
-      }),
-      this.prisma.brainArticle.update({
-        where: { id: this.created.article.id },
-        data: {
-          workspaceId,
-          authority: "REFERENCE",
-          isPrivate: false,
-          publishedAt: freshAt,
-          lastVerifiedAt: freshAt,
-          createdAt: freshAt,
-          updatedAt: freshAt,
-        },
-      }),
-    ]);
-
-    this.record("fixture timestamps pinned", {
+      actorUserId: user.id,
+      creationMode: "direct-prisma-no-product-events",
+      staleProposalPriority: BRIEFING_FIXTURE_STALE_PROPOSAL_PRIORITY,
       freshAt: freshAt.toISOString(),
       staleAt: staleAt.toISOString(),
       generatedAt: this.generatedAt.toISOString(),
@@ -465,21 +477,10 @@ export class BriefingFixtureSmoke {
       action: hadPreviousBriefing ? "restore" : "delete",
       target: { type: "WorkspaceBriefing", id: briefing.id, label: briefing.title },
       runner: async () => {
-        const current = await this.prisma.workspaceBriefing.findUnique({
-          where: { id: briefing.id },
-          select: {
-            id: true,
-            title: true,
-            modelUsed: true,
-            generatedAt: true,
-          },
-        });
-        if (!isSmokeOwnedBriefing(current, briefing)) {
-          return "Skipped workspace briefing cleanup because another producer changed the row after validation.";
-        }
+        const ownershipWhere = smokeOwnedBriefingWhere(briefing);
         if (this.previousBriefing) {
-          await this.prisma.workspaceBriefing.update({
-            where: { id: this.previousBriefing.id },
+          const result = await this.prisma.workspaceBriefing.updateMany({
+            where: ownershipWhere,
             data: {
               workflowJobId: this.previousBriefing.workflowJobId,
               runKey: this.previousBriefing.runKey,
@@ -493,11 +494,18 @@ export class BriefingFixtureSmoke {
               sourceCounts: this.previousBriefing.sourceCounts,
               generatedAt: this.previousBriefing.generatedAt,
               createdAt: this.previousBriefing.createdAt,
+              updatedAt: this.previousBriefing.updatedAt,
             },
           });
+          if (result.count === 0) {
+            return "Skipped workspace briefing cleanup because another producer changed the row after validation.";
+          }
           return "Previous workspace briefing restored.";
         }
-        const result = await this.prisma.workspaceBriefing.deleteMany({ where: { id: briefing.id } });
+        const result = await this.prisma.workspaceBriefing.deleteMany({ where: ownershipWhere });
+        if (result.count === 0) {
+          return "Skipped workspace briefing cleanup because another producer changed the row after validation.";
+        }
         return `Temporary workspace briefing deleted (${result.count}).`;
       },
     });
@@ -601,7 +609,6 @@ export class BriefingFixtureSmoke {
       await this.verifyHealth();
       await this.login();
       await this.createFixtureRecords();
-      await this.pinFixtureTimestamps();
       const briefing = await this.generateBriefing();
       const payloadSummary = assertBriefingFixturePayload(briefing, this.fixture);
       this.record("briefing payload verified", payloadSummary);
