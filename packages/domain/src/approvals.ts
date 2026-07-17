@@ -216,6 +216,31 @@ async function loadFlow(tx: Prisma.TransactionClient, flowId: string) {
   });
 }
 
+async function proposalAuthorUserIdForFlow(tx: Prisma.TransactionClient, flow: { workspaceId: string; subjectType: string; subjectId: string }) {
+  if (flow.subjectType !== "PROPOSAL") return null;
+  const [proposal] = await tx.proposal.findMany({
+    where: {
+      id: flow.subjectId,
+      workspaceId: flow.workspaceId,
+    },
+    select: {
+      authorUserId: true,
+    },
+    take: 1,
+  });
+  return proposal?.authorUserId ?? null;
+}
+
+async function assertProposalAuthorCanReview(tx: Prisma.TransactionClient, flow: { workspaceId: string; subjectType: string; subjectId: string }, actorUserId: string) {
+  const authorUserId = await proposalAuthorUserIdForFlow(tx, flow);
+  invariant(
+    !authorUserId || authorUserId !== actorUserId,
+    403,
+    "FORBIDDEN",
+    "Proposal authors cannot review their own proposal.",
+  );
+}
+
 function approvalDecisionMd(params: {
   mode: ApprovalMode;
   status: "APPROVED" | "REJECTED";
@@ -502,7 +527,7 @@ export async function listProposalDecisionStates(
     return new Map<string, ProposalDecisionState>();
   }
 
-  const [eligibleIds, flows] = await Promise.all([
+  const [eligibleIds, flows, proposals] = await Promise.all([
     eligibleApproverIds(prisma, params.workspaceId),
     prisma.approvalFlow.findMany({
       where: {
@@ -541,9 +566,21 @@ export async function listProposalDecisionStates(
       },
       orderBy: { createdAt: "desc" },
     }),
+    prisma.proposal.findMany({
+      where: {
+        workspaceId: params.workspaceId,
+        id: { in: proposalIds },
+      },
+      select: {
+        id: true,
+        authorUserId: true,
+      },
+    }),
   ]);
 
   const states = new Map<string, ProposalDecisionState>();
+  const proposalAuthorById = new Map(proposals.map((proposal) => [proposal.id, proposal.authorUserId]));
+  const actorUserId = actor.kind === "user" ? actor.user.id : null;
 
   for (const flow of flows) {
     const outcome = calculateApprovalOutcome({
@@ -554,7 +591,8 @@ export async function listProposalDecisionStates(
       eligibleApprovers: eligibleIds.length,
       openObjections: flow.objections.length,
     });
-    const reviewMembership = membership && eligibleIds.includes(membership.id) ? membership : null;
+    const isProposalAuthor = actorUserId !== null && proposalAuthorById.get(flow.subjectId) === actorUserId;
+    const reviewMembership = membership && eligibleIds.includes(membership.id) && !isProposalAuthor ? membership : null;
     const currentMemberDecision = reviewMembership
       ? flow.decisions.find((decision) => decision.memberId === reviewMembership.id) ?? null
       : null;
@@ -681,6 +719,7 @@ export async function recordApprovalDecision(actor: AppActor, params: {
 
     invariant(current && current.workspaceId === params.workspaceId, 404, "NOT_FOUND", "Approval flow not found.");
     invariant(current.status === "ACTIVE", 400, "INVALID_STATE", "Approval flow is not active.");
+    await assertProposalAuthorCanReview(tx, current, actorUserId);
     assertConsentWindowOpen(current);
     validateDecisionChoice(current.mode, params.choice);
 
@@ -825,6 +864,7 @@ export async function createObjection(actor: AppActor, params: {
     invariant(flow && flow.workspaceId === params.workspaceId, 404, "NOT_FOUND", "Approval flow not found.");
     invariant(flow.status === "ACTIVE", 400, "INVALID_STATE", "Approval flow is not active.");
     invariant(flow.mode === "CONSENT", 400, "INVALID_STATE", "Objections are only supported on consent flows.");
+    await assertProposalAuthorCanReview(tx, flow, membership.userId);
     assertConsentWindowOpen(flow);
 
     const existing = await tx.objection.findFirst({

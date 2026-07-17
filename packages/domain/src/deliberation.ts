@@ -13,6 +13,17 @@ const VALID_ENTRY_TYPES = ["REACTION", "OBJECTION"];
 const VALID_PARENT_TYPES = ["PROPOSAL", "TENSION", "MEETING", "BRAIN_ARTICLE", "ACTION"];
 const MENTION_PATTERN = /(^|[^\p{L}\p{N}_])@([\p{L}\p{N}][\p{L}\p{N}._-]{0,80})/gu;
 const NOTIFICATION_EXCERPT_LIMIT = 240;
+type LinkedAdviceRequest = {
+  id: string;
+  workspaceId: string;
+  status: string;
+  requestedByUserId: string;
+  audienceType: string;
+  targetCircleId: string | null;
+  processId: string;
+  process: { subjectType: string; subjectId: string };
+  recipients: Array<{ memberId: string }>;
+};
 const deliberationEntryListInclude = {
   author: {
     select: {
@@ -254,6 +265,46 @@ async function isMemberOfTargetCircle(tx: Prisma.TransactionClient, memberId: st
   return Boolean(assignment);
 }
 
+async function isAdviceRequestAudienceMember(tx: Prisma.TransactionClient, params: {
+  request: LinkedAdviceRequest;
+  actorUserId: string;
+  actorMemberId: string | null;
+  workspaceId: string;
+}) {
+  if (!params.actorMemberId || params.request.requestedByUserId === params.actorUserId) {
+    return false;
+  }
+
+  if (params.request.audienceType === "MEMBERS") {
+    return params.request.recipients.some((recipient) => recipient.memberId === params.actorMemberId);
+  }
+
+  if (params.request.audienceType === "WORKSPACE") {
+    return true;
+  }
+
+  if (params.request.audienceType === "CIRCLE" && params.request.targetCircleId) {
+    const assignment = await tx.roleAssignment.findFirst({
+      where: {
+        memberId: params.actorMemberId,
+        ...activeRoleAssignmentWhere(),
+        role: {
+          archivedAt: null,
+          circleId: params.request.targetCircleId,
+          circle: {
+            workspaceId: params.workspaceId,
+            archivedAt: null,
+          },
+        },
+      },
+      select: { id: true },
+    });
+    return Boolean(assignment);
+  }
+
+  return false;
+}
+
 async function isTargetedActor(tx: Prisma.TransactionClient, params: {
   entry: Pick<DeliberationEntryRecord, "targetMemberId" | "targetCircleId">;
   actorMemberId?: string | null;
@@ -332,7 +383,7 @@ export async function postDeliberationEntry(actor: AppActor, params: {
   targetCircleId?: string;
   adviceRequestId?: string;
 }) {
-  await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
+  const membership = await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
   const authorUserId = await actorUserIdForWorkspace(actor, params.workspaceId);
 
   validateEntryType(params.entryType);
@@ -346,12 +397,8 @@ export async function postDeliberationEntry(actor: AppActor, params: {
     let explicitTargetUserId: string | null = null;
     let explicitTargetUserIds: string[] = [];
     let skipManualMentionParsing = false;
-    let linkedAdviceRequest: {
-      id: string;
-      workspaceId: string;
-      status: string;
-      process: { subjectType: string; subjectId: string };
-    } | null = null;
+    let linkedAdviceRequest: LinkedAdviceRequest | null = null;
+    let completesAdviceRequest = false;
     if (params.adviceRequestId) {
       linkedAdviceRequest = await tx.adviceRequest.findUnique({
         where: { id: params.adviceRequestId },
@@ -359,6 +406,15 @@ export async function postDeliberationEntry(actor: AppActor, params: {
           id: true,
           workspaceId: true,
           status: true,
+          requestedByUserId: true,
+          audienceType: true,
+          targetCircleId: true,
+          processId: true,
+          recipients: {
+            select: {
+              memberId: true,
+            },
+          },
           process: {
             select: {
               subjectType: true,
@@ -382,6 +438,12 @@ export async function postDeliberationEntry(actor: AppActor, params: {
         "INVALID_INPUT",
         "Advice request must belong to the deliberation parent.",
       );
+      completesAdviceRequest = await isAdviceRequestAudienceMember(tx, {
+        request: linkedAdviceRequest,
+        actorUserId: authorUserId,
+        actorMemberId: membership?.id ?? null,
+        workspaceId: params.workspaceId,
+      });
     }
 
     if (params.targetMemberId) {
@@ -430,6 +492,30 @@ export async function postDeliberationEntry(actor: AppActor, params: {
         meta: { parentType: params.parentType, parentId: params.parentId, entryType: params.entryType, parentVersion }
       }
     });
+
+    if (linkedAdviceRequest && completesAdviceRequest) {
+      await tx.adviceRequest.update({
+        where: { id: linkedAdviceRequest.id },
+        data: {
+          status: "COMPLETED",
+          completedAt: new Date(),
+        },
+      });
+      await tx.auditLog.create({
+        data: {
+          workspaceId: params.workspaceId,
+          actorUserId: authorUserId,
+          action: "advice.request.completed",
+          entityType: "AdviceRequest",
+          entityId: linkedAdviceRequest.id,
+          meta: {
+            processId: linkedAdviceRequest.processId,
+            completedBy: "reply",
+            entryId: entry.id,
+          },
+        },
+      });
+    }
 
     const mentionedUserIds = await resolveMentionedUserIds(tx, {
       workspaceId: params.workspaceId,
@@ -483,6 +569,19 @@ export async function postDeliberationEntry(actor: AppActor, params: {
           parentType: params.parentType,
           parentId: params.parentId,
           entryType: params.entryType,
+          authorUserId,
+        },
+      }] : []),
+      ...(linkedAdviceRequest && completesAdviceRequest ? [{
+        workspaceId: params.workspaceId,
+        type: "advice.request.completed",
+        aggregateType: "AdviceRequest",
+        aggregateId: linkedAdviceRequest.id,
+        payload: {
+          adviceRequestId: linkedAdviceRequest.id,
+          processId: linkedAdviceRequest.processId,
+          completedBy: "reply",
+          entryId: entry.id,
           authorUserId,
         },
       }] : []),

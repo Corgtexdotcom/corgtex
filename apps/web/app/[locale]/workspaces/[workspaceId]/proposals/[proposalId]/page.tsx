@@ -14,6 +14,7 @@ import { DeliberationComposer } from "@/lib/components/DeliberationComposer";
 import { AdviceRequestForm } from "@/lib/components/AdviceRequestForm";
 import { WorkItemConversationSurface, WorkItemRequestList } from "@/lib/components/WorkItemConversation";
 import { getDeliberationTargets } from "@/lib/deliberation-targets";
+import { canActorReplyToAdviceRequest } from "@/lib/advice-request-audience";
 import { canOpenPrivateDraft } from "@/lib/governance-open-guards";
 import { createProposalObjectionAction, decideProposalApprovalAction, requestProposalAdviceAction, resolveProposalAction, resolveProposalObjectionAction, returnProposalToDraftAction, submitProposalAction, updateProposalAction } from "../actions";
 import { ProposalDraftFields } from "../ProposalDraftFields";
@@ -158,6 +159,13 @@ export default async function ProposalDetailPage({
       || (actorMemberId && entry.targetMemberId === actorMemberId)
       || (entry.targetCircleId && actorCircleIds.has(entry.targetCircleId)),
   );
+  const canReplyToAdviceRequest = (request: (typeof adviceRequests)[number]) => {
+    return canActorReplyToAdviceRequest(request, {
+      userId: actorUserId,
+      memberId: actorMemberId,
+      circleIds: actorCircleIds,
+    });
+  };
   const memberRequestOptions = targetOptions
     .filter((option) => option.kind === "member")
     .map((option) => ({ value: option.value.slice("member:".length), label: option.name }));
@@ -290,7 +298,7 @@ export default async function ProposalDetailPage({
           hiddenFields={{ workspaceId, proposalId }}
         />
       ) : null,
-      replyForm: !isArchived && proposal.status === "OPEN" && request.status === "ACTIVE" ? (
+      replyForm: !isArchived && proposal.status === "OPEN" && request.status === "ACTIVE" && canReplyToAdviceRequest(request) ? (
         <DeliberationComposer
           apiEndpoint={deliberationApiEndpoint}
           hiddenFields={{ parentType: "PROPOSAL", parentId: proposalId, adviceRequestId: request.id }}
