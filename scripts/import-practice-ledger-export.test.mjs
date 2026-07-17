@@ -186,6 +186,16 @@ describe("planImport", () => {
     expect(plan.counts.planned.timeEntries).toBe(1);
   });
 
+  it("rejects unsupported PortableRecordBatch schema versions", () => {
+    expect(() => planImport({
+      moduleKey: "practice-ledger",
+      schemaVersion: "3",
+      records: [
+        { entity: "client", id: "client-1", code: "C001", name: "Client One" },
+      ],
+    })).toThrow(/Unsupported Practice Ledger export schema version: 3/);
+  });
+
   it("rejects missing required financial quantities and unknown posted-entry statuses", () => {
     const plan = planImport({
       clients: [{ id: "client-1", code: "C001", name: "Client One" }],
@@ -369,7 +379,7 @@ describe("importPracticeLedgerExport", () => {
     }));
   });
 
-  it("does not erase project dates when legacy exports omit them", async () => {
+  it("does not erase native project fields when legacy exports omit them", async () => {
     const prisma = prismaFixture();
     await importPracticeLedgerExport({
       prisma,
@@ -380,6 +390,9 @@ describe("importPracticeLedgerExport", () => {
 
     expect(prisma.practiceProject.upsert).toHaveBeenCalledWith(expect.objectContaining({
       update: expect.not.objectContaining({
+        currency: expect.anything(),
+        client: expect.anything(),
+        billingCode: expect.anything(),
         startsOn: expect.anything(),
         endsOn: expect.anything(),
       }),

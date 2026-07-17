@@ -223,11 +223,24 @@ function relationSource(record, ...names) {
   return null;
 }
 
+function optionalRelationSource(record, ...names) {
+  for (const name of names) {
+    if (hasOwn(record, name)) return trim(record?.[name]);
+  }
+  return undefined;
+}
+
 function portableRecordEntity(record) {
   const raw = trim(record?.entity ?? record?.entityType ?? record?.recordType ?? record?.table ?? record?.model);
   if (!raw) return null;
   const normalized = raw.toLowerCase().replace(/[^a-z0-9]/g, "");
   return PORTABLE_RECORD_ENTITY_ALIASES.get(normalized) ?? null;
+}
+
+function portableBatchSchemaVersion(batch) {
+  const version = String(batch?.schemaVersion ?? "").trim();
+  if (!version || version === "1" || version === PRACTICE_FINANCE_SCHEMA_VERSION) return version;
+  throw new Error(`Unsupported Practice Ledger export schema version: ${version}`);
 }
 
 function entityRecords(batch, entity) {
@@ -238,7 +251,7 @@ function entityRecords(batch, entity) {
     if (Array.isArray(records)) return records;
   }
   if (Array.isArray(batch.records)) {
-    const version = String(batch.schemaVersion ?? "").trim();
+    const version = portableBatchSchemaVersion(batch);
     if (version === "1" || !version) return entity === "projects" ? batch.records : [];
     return batch.records.filter((record) => portableRecordEntity(record) === entity);
   }
@@ -308,7 +321,7 @@ function parseProject(record) {
     name,
     clientName,
     status,
-    currency: trim(record.currency) ?? "USD",
+    currency: hasOwn(record, "currency") ? trim(record.currency) ?? undefined : undefined,
     poValueCents: toCents(record.poValueCents ?? record.budgetCents),
     serviceBudgetCents: toCents(record.serviceBudgetCents),
     expenseBudgetCents: toCents(record.expenseBudgetCents),
@@ -318,8 +331,8 @@ function parseProject(record) {
     currentMarginBps: toBpsOrNull(record.currentMarginBps),
     startsOn: hasOwn(record, "startsOn") ? toDate(record.startsOn) : undefined,
     endsOn: hasOwn(record, "endsOn") ? toDate(record.endsOn) : undefined,
-    clientSourceId: relationSource(record, "clientSourceId", "clientId"),
-    billingCodeSourceId: relationSource(record, "billingCodeSourceId", "billingCodeId"),
+    clientSourceId: optionalRelationSource(record, "clientSourceId", "clientId"),
+    billingCodeSourceId: optionalRelationSource(record, "billingCodeSourceId", "billingCodeId"),
   };
 }
 
@@ -653,6 +666,7 @@ function connectSource(workspaceId, sourceSatelliteId) {
 }
 
 function disconnectableSource(workspaceId, sourceSatelliteId) {
+  if (sourceSatelliteId === undefined) return undefined;
   return sourceSatelliteId ? { connect: sourceWhere(workspaceId, sourceSatelliteId) } : { disconnect: true };
 }
 
