@@ -10,7 +10,10 @@ import {
 } from "./import-practice-ledger-export.mjs";
 
 function delegate() {
-  return { upsert: vi.fn().mockResolvedValue({}) };
+  return {
+    findMany: vi.fn().mockResolvedValue([]),
+    upsert: vi.fn().mockResolvedValue({}),
+  };
 }
 
 function prismaFixture() {
@@ -206,6 +209,14 @@ describe("planImport", () => {
     })).toThrow(/Unsupported Practice Ledger export module: another-module/);
   });
 
+  it("rejects unsupported metadata before accepting top-level entity arrays", () => {
+    expect(() => planImport({
+      moduleKey: "another-module",
+      schemaVersion: "3",
+      clients: [{ id: "client-1", code: "C001", name: "Client One" }],
+    })).toThrow(/Unsupported Practice Ledger export module: another-module/);
+  });
+
   it("counts unknown PortableRecordBatch record types as skipped", () => {
     const plan = planImport({
       moduleKey: "practice-ledger",
@@ -256,18 +267,21 @@ describe("planImport", () => {
       timeEntries: [
         { id: "time-invalid-money", clientId: "client-1", projectId: "project-1", consultantId: "consultant-1", workedOn: "2026-06-10", weekEndingOn: "2026-06-12", hours: 1, billRateCents: "bad" },
         { id: "time-invalid-date", clientId: "client-1", projectId: "project-1", consultantId: "consultant-1", workedOn: "2026-02-30", weekEndingOn: "2026-06-12", hours: 1 },
+        { id: "time-invalid-timestamp", clientId: "client-1", projectId: "project-1", consultantId: "consultant-1", workedOn: "2026-02-30T00:00:00Z", weekEndingOn: "2026-06-12", hours: 1 },
+        { id: "time-whitespace-hours", clientId: "client-1", projectId: "project-1", consultantId: "consultant-1", workedOn: "2026-06-10", weekEndingOn: "2026-06-12", hours: " " },
       ],
       expenses: [
         { id: "expense-invalid-money", clientId: "client-1", projectId: "project-1", spentOn: "2026-06-11", category: "Travel", businessPurpose: "Workshop", amountCents: 1000, amountFunctionalCents: "bad" },
         { id: "expense-invalid-date", clientId: "client-1", projectId: "project-1", spentOn: "2026-02-30", category: "Travel", businessPurpose: "Workshop", amountCents: 1000 },
+        { id: "expense-whitespace-amount", clientId: "client-1", projectId: "project-1", spentOn: "2026-06-11", category: "Travel", businessPurpose: "Workshop", amountCents: " " },
       ],
     });
 
     expect(plan.counts.skipped.projectLines).toBe(1);
     expect(plan.counts.skipped.purchaseOrders).toBe(1);
     expect(plan.counts.skipped.paymentBatches).toBe(1);
-    expect(plan.counts.skipped.timeEntries).toBe(2);
-    expect(plan.counts.skipped.expenses).toBe(2);
+    expect(plan.counts.skipped.timeEntries).toBe(4);
+    expect(plan.counts.skipped.expenses).toBe(3);
   });
 
   it("skips dependent records whose parent source id is not in the batch", () => {
@@ -311,6 +325,31 @@ describe("planImport", () => {
 
     expect(plan.counts.skipped.timeEntries).toBe(1);
     expect(plan.entities.timeEntries.skipped[0].reason).toBe("relationship_mismatch");
+  });
+
+  it("allows entry billing codes that belong to the same client", () => {
+    const plan = planImport({
+      clients: [{ id: "client-1", code: "C001", name: "Client One" }],
+      billingCodes: [
+        { id: "billing-services", clientId: "client-1", code: "SERV", name: "Services" },
+        { id: "billing-travel", clientId: "client-1", code: "TRVL", name: "Travel" },
+      ],
+      consultants: [{ id: "consultant-1", name: "Consultant One" }],
+      projects: [project({ id: "project-1", clientSourceId: "client-1", billingCodeSourceId: "billing-services" })],
+      timeEntries: [{
+        id: "time-1",
+        clientId: "client-1",
+        billingCodeId: "billing-travel",
+        projectId: "project-1",
+        consultantId: "consultant-1",
+        workedOn: "2026-06-10",
+        weekEndingOn: "2026-06-12",
+        hours: 1,
+      }],
+    });
+
+    expect(plan.counts.planned.timeEntries).toBe(1);
+    expect(plan.counts.skipped.timeEntries).toBe(0);
   });
 
   it("skips duplicate target unique keys during dry runs", () => {
@@ -417,6 +456,62 @@ describe("importPracticeLedgerExport", () => {
     }));
   });
 
+  it("preserves explicit nulls for nullable financial values on update", async () => {
+    const prisma = prismaFixture();
+    await importPracticeLedgerExport({
+      prisma,
+      workspaceId: "ws1",
+      apply: true,
+      batch: {
+        clients: [{ id: "client-1", code: "C001", name: "Client One" }],
+        consultants: [{ id: "consultant-1", name: "Consultant One" }],
+        projects: [project({ id: "project-1", clientId: "client-1" })],
+        projectLines: [{ id: "line-1", projectId: "project-1", kind: "services", name: "Services", billRateCents: null, costRateCents: null }],
+        timeEntries: [{
+          id: "time-1",
+          clientId: "client-1",
+          projectId: "project-1",
+          consultantId: "consultant-1",
+          workedOn: "2026-06-10",
+          weekEndingOn: "2026-06-12",
+          hours: 1,
+          billAmountCents: null,
+          costAmountCents: null,
+          paidAmountCents: null,
+        }],
+        expenses: [{
+          id: "expense-1",
+          clientId: "client-1",
+          projectId: "project-1",
+          spentOn: "2026-06-11",
+          category: "Travel",
+          businessPurpose: "Workshop",
+          amountCents: 1000,
+          amountFunctionalCents: null,
+        }],
+      },
+    });
+
+    expect(prisma.practiceProjectLine.upsert).toHaveBeenCalledWith(expect.objectContaining({
+      update: expect.objectContaining({
+        billRateCents: null,
+        costRateCents: null,
+      }),
+    }));
+    expect(prisma.practiceTimeEntry.upsert).toHaveBeenCalledWith(expect.objectContaining({
+      update: expect.objectContaining({
+        billAmountCents: null,
+        costAmountCents: null,
+        paidAmountCents: null,
+      }),
+    }));
+    expect(prisma.practiceExpense.upsert).toHaveBeenCalledWith(expect.objectContaining({
+      update: expect.objectContaining({
+        amountFunctionalCents: null,
+      }),
+    }));
+  });
+
   it("omits payment batch settledAt when the export omits it", async () => {
     const prisma = prismaFixture();
     await importPracticeLedgerExport({
@@ -471,6 +566,26 @@ describe("importPracticeLedgerExport", () => {
       where: { id: "crm-other", workspaceId: "ws1" },
       select: { id: true },
     });
+    expect(result.counts.skipped.clients).toBe(1);
+    expect(prisma.practiceClient.upsert).not.toHaveBeenCalled();
+  });
+
+  it("reports existing target unique-key conflicts during dry runs", async () => {
+    const prisma = prismaFixture();
+    prisma.practiceClient.findMany.mockResolvedValueOnce([
+      { code: "C001", sourceSatelliteId: "native-client" },
+    ]);
+
+    const result = await importPracticeLedgerExport({
+      prisma,
+      workspaceId: "ws1",
+      batch: {
+        clients: [{ id: "client-1", code: "C001", name: "Client One" }],
+      },
+    });
+
+    expect(result.dryRun).toBe(true);
+    expect(result.counts.planned.clients).toBe(0);
     expect(result.counts.skipped.clients).toBe(1);
     expect(prisma.practiceClient.upsert).not.toHaveBeenCalled();
   });

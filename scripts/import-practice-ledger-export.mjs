@@ -166,8 +166,10 @@ function hasOwn(record, key) {
 }
 
 function parseFiniteNumber(value) {
-  if (value == null || value === "") return null;
-  const n = typeof value === "string" ? Number(value) : value;
+  if (value == null) return null;
+  const candidate = typeof value === "string" ? value.trim() : value;
+  if (candidate === "") return null;
+  const n = typeof candidate === "string" ? Number(candidate) : candidate;
   return Number.isFinite(n) ? n : null;
 }
 
@@ -189,9 +191,10 @@ function toOptionalCents(value) {
 }
 
 function toOptionalCentsStrict(value) {
-  if (value == null || value === "") return undefined;
+  if (value === undefined || value === "") return undefined;
+  if (value === null) return null;
   const n = parseFiniteNumber(value);
-  return n == null ? null : Math.round(n);
+  return n == null ? INVALID_IMPORT_VALUE : Math.round(n);
 }
 
 function toRequiredCents(value) {
@@ -211,19 +214,20 @@ function toBpsOrNull(value) {
 function toDate(value) {
   const text = trim(value);
   if (!text) return null;
-  const calendarDate = text.match(/^(\d{4})-(\d{2})-(\d{2})$/);
-  const date = new Date(text);
-  if (!Number.isFinite(date.getTime())) return null;
+  const calendarDate = text.match(/^(\d{4})-(\d{2})-(\d{2})(?:$|[T\s])/);
   if (calendarDate) {
     const [, year, month, day] = calendarDate;
+    const normalized = new Date(Date.UTC(Number(year), Number(month) - 1, Number(day)));
     if (
-      date.getUTCFullYear() !== Number(year)
-      || date.getUTCMonth() + 1 !== Number(month)
-      || date.getUTCDate() !== Number(day)
+      normalized.getUTCFullYear() !== Number(year)
+      || normalized.getUTCMonth() + 1 !== Number(month)
+      || normalized.getUTCDate() !== Number(day)
     ) {
       return null;
     }
   }
+  const date = new Date(text);
+  if (!Number.isFinite(date.getTime())) return null;
   return date;
 }
 
@@ -270,6 +274,9 @@ function portableRecordEntity(record) {
 function portableBatchSchemaVersion(batch) {
   const version = String(batch?.schemaVersion ?? "").trim();
   const moduleKey = trim(batch?.moduleKey);
+  if (moduleKey && moduleKey !== PRACTICE_FINANCE_MODULE_KEY) {
+    throw new Error(`Unsupported Practice Ledger export module: ${moduleKey}`);
+  }
   if (version && moduleKey !== PRACTICE_FINANCE_MODULE_KEY) {
     throw new Error(`Unsupported Practice Ledger export module: ${moduleKey ?? "missing"}`);
   }
@@ -395,7 +402,7 @@ function parseProjectLine(record) {
   const billRateCents = toOptionalCentsStrict(record?.billRateCents);
   const costRateCents = toOptionalCentsStrict(record?.costRateCents);
   if (!kind) return null;
-  if ([budgetCents, billRateCents, costRateCents].some((value) => value === null)) return null;
+  if (budgetCents == null || [billRateCents, costRateCents].some((value) => value === INVALID_IMPORT_VALUE)) return null;
   if (!sourceSatelliteId || !projectSourceId || !name) return null;
   return {
     sourceSatelliteId,
@@ -499,7 +506,7 @@ function parseTimeEntry(record) {
   const costAmountCents = toOptionalCentsStrict(record?.costAmountCents);
   const paidAmountCents = toOptionalCentsStrict(record?.paidAmountCents);
   if (!sourceSatelliteId || !clientSourceId || !projectSourceId || !consultantSourceId || !workedOn || !weekEndingOn || hours == null || !status) return null;
-  if ([billRateCents, costRateCents, billAmountCents, costAmountCents, paidAmountCents].some((value) => value === null)) return null;
+  if (billRateCents == null || costRateCents == null || [billAmountCents, costAmountCents, paidAmountCents].some((value) => value === INVALID_IMPORT_VALUE)) return null;
   return {
     sourceSatelliteId,
     clientSourceId,
@@ -538,7 +545,7 @@ function parseExpense(record) {
   const status = normalizeEnumStrict(record?.status, VALID_ENTRY_STATUSES, "POSTED");
   const amountFunctionalCents = toOptionalCentsStrict(record?.amountFunctionalCents);
   if (!sourceSatelliteId || !clientSourceId || !projectSourceId || !spentOn || !category || !businessPurpose || amountCents == null || !status) return null;
-  if (amountFunctionalCents === null) return null;
+  if (amountFunctionalCents === INVALID_IMPORT_VALUE) return null;
   return {
     sourceSatelliteId,
     clientSourceId,
@@ -646,9 +653,6 @@ function relationshipMisses(row, rowsByEntity, entity) {
   if (project?.clientSourceId && client && project.clientSourceId !== row.clientSourceId) {
     misses.push("project_client_mismatch");
   }
-  if (project?.billingCodeSourceId && billingCode && project.billingCodeSourceId !== row.billingCodeSourceId) {
-    misses.push("project_billing_code_mismatch");
-  }
   if (projectLine && projectLine.projectSourceId !== row.projectSourceId) {
     misses.push("project_line_project_mismatch");
   }
@@ -665,6 +669,7 @@ function relationshipMisses(row, rowsByEntity, entity) {
 
 /** Split records into importable rows and skipped records, validating dependencies. */
 export function planImport(batch) {
+  portableBatchSchemaVersion(batch);
   const entities = emptyEntityBuckets();
   const available = Object.fromEntries(ENTITY_ORDER.map((entity) => [entity, new Set()]));
   const rowsByEntity = Object.fromEntries(ENTITY_ORDER.map((entity) => [entity, new Map()]));
@@ -734,6 +739,197 @@ export function planImport(batch) {
 
 function totalCounts(counts) {
   return Object.values(counts).reduce((sum, count) => sum + count, 0);
+}
+
+function rowKey(entity, row) {
+  return `${entity}:${row.sourceSatelliteId}`;
+}
+
+function addConflict(conflicts, entity, row, key) {
+  const id = rowKey(entity, row);
+  const current = conflicts.get(id) ?? [];
+  current.push(key);
+  conflicts.set(id, current);
+}
+
+function collectUnique(values) {
+  return [...new Set(values.filter(Boolean))];
+}
+
+function rowsByValue(rows, field) {
+  const grouped = new Map();
+  for (const row of rows) {
+    const value = row[field];
+    if (!value) continue;
+    const current = grouped.get(value) ?? [];
+    current.push(row);
+    grouped.set(value, current);
+  }
+  return grouped;
+}
+
+function conflictingSource(existing, row) {
+  return existing.sourceSatelliteId !== row.sourceSatelliteId;
+}
+
+async function addCodeConflicts({ conflicts, delegate, workspaceId, entity, rows, keyPrefix }) {
+  const codes = collectUnique(rows.map((row) => row.code));
+  if (codes.length === 0) return;
+  const existingRows = await delegate.findMany({
+    where: { workspaceId, code: { in: codes } },
+    select: { code: true, sourceSatelliteId: true },
+  });
+  const incoming = rowsByValue(rows, "code");
+  for (const existing of existingRows) {
+    for (const row of incoming.get(existing.code) ?? []) {
+      if (conflictingSource(existing, row)) addConflict(conflicts, entity, row, `${keyPrefix}:${existing.code}`);
+    }
+  }
+}
+
+async function sourceIdMap(delegate, workspaceId, sourceSatelliteIds) {
+  const ids = collectUnique(sourceSatelliteIds);
+  if (ids.length === 0) return new Map();
+  const rows = await delegate.findMany({
+    where: { workspaceId, sourceSatelliteId: { in: ids } },
+    select: { id: true, sourceSatelliteId: true },
+  });
+  return new Map(rows.map((row) => [row.sourceSatelliteId, row.id]));
+}
+
+async function targetUniqueConflicts(prisma, workspaceId, plan) {
+  const conflicts = new Map();
+  await addCodeConflicts({
+    conflicts,
+    delegate: prisma.practiceClient,
+    workspaceId,
+    entity: "clients",
+    rows: plan.entities.clients.valid,
+    keyPrefix: "clients:code",
+  });
+  await addCodeConflicts({
+    conflicts,
+    delegate: prisma.practiceBillingCode,
+    workspaceId,
+    entity: "billingCodes",
+    rows: plan.entities.billingCodes.valid,
+    keyPrefix: "billingCodes:code",
+  });
+  await addCodeConflicts({
+    conflicts,
+    delegate: prisma.practiceProject,
+    workspaceId,
+    entity: "projects",
+    rows: plan.entities.projects.valid,
+    keyPrefix: "projects:code",
+  });
+
+  const purchaseOrders = plan.entities.purchaseOrders.valid;
+  const purchaseOrderProjectIds = await sourceIdMap(prisma.practiceProject, workspaceId, purchaseOrders.map((row) => row.projectSourceId));
+  const purchaseOrderProjectDbIds = collectUnique(purchaseOrders.map((row) => purchaseOrderProjectIds.get(row.projectSourceId)));
+  const purchaseOrderNumbers = collectUnique(purchaseOrders.map((row) => row.poNumber));
+  if (purchaseOrderProjectDbIds.length > 0 && purchaseOrderNumbers.length > 0) {
+    const existingPurchaseOrders = await prisma.practicePurchaseOrder.findMany({
+      where: { workspaceId, projectId: { in: purchaseOrderProjectDbIds }, poNumber: { in: purchaseOrderNumbers } },
+      select: { projectId: true, poNumber: true, sourceSatelliteId: true },
+    });
+    for (const row of purchaseOrders) {
+      const projectId = purchaseOrderProjectIds.get(row.projectSourceId);
+      if (!projectId) continue;
+      const existing = existingPurchaseOrders.find((candidate) => candidate.projectId === projectId && candidate.poNumber === row.poNumber);
+      if (existing && conflictingSource(existing, row)) addConflict(conflicts, "purchaseOrders", row, `purchaseOrders:project_po:${row.projectSourceId}:${row.poNumber}`);
+    }
+  }
+
+  const assignments = plan.entities.assignments.valid;
+  const assignmentProjectIds = await sourceIdMap(prisma.practiceProject, workspaceId, assignments.map((row) => row.projectSourceId));
+  const assignmentConsultantIds = await sourceIdMap(prisma.practiceConsultant, workspaceId, assignments.map((row) => row.consultantSourceId));
+  const assignmentProjectDbIds = collectUnique(assignments.map((row) => assignmentProjectIds.get(row.projectSourceId)));
+  const assignmentConsultantDbIds = collectUnique(assignments.map((row) => assignmentConsultantIds.get(row.consultantSourceId)));
+  if (assignmentProjectDbIds.length > 0 && assignmentConsultantDbIds.length > 0) {
+    const existingAssignments = await prisma.practiceProjectAssignment.findMany({
+      where: { workspaceId, projectId: { in: assignmentProjectDbIds }, consultantId: { in: assignmentConsultantDbIds } },
+      select: { projectId: true, consultantId: true, sourceSatelliteId: true },
+    });
+    for (const row of assignments) {
+      const projectId = assignmentProjectIds.get(row.projectSourceId);
+      const consultantId = assignmentConsultantIds.get(row.consultantSourceId);
+      if (!projectId || !consultantId) continue;
+      const existing = existingAssignments.find((candidate) => candidate.projectId === projectId && candidate.consultantId === consultantId);
+      if (existing && conflictingSource(existing, row)) addConflict(conflicts, "assignments", row, `assignments:project_consultant:${row.projectSourceId}:${row.consultantSourceId}`);
+    }
+  }
+
+  for (const [entity, delegate, keyPrefix] of [
+    ["timeEntries", prisma.practiceTimeEntry, "timeEntries:idempotencyKey"],
+    ["expenses", prisma.practiceExpense, "expenses:idempotencyKey"],
+  ]) {
+    const rows = plan.entities[entity].valid.filter((row) => row.idempotencyKey);
+    const idempotencyKeys = collectUnique(rows.map((row) => row.idempotencyKey));
+    if (idempotencyKeys.length === 0) continue;
+    const existingRows = await delegate.findMany({
+      where: { workspaceId, idempotencyKey: { in: idempotencyKeys } },
+      select: { idempotencyKey: true, sourceSatelliteId: true },
+    });
+    const incoming = rowsByValue(rows, "idempotencyKey");
+    for (const existing of existingRows) {
+      for (const row of incoming.get(existing.idempotencyKey) ?? []) {
+        if (conflictingSource(existing, row)) addConflict(conflicts, entity, row, `${keyPrefix}:${existing.idempotencyKey}`);
+      }
+    }
+  }
+
+  const timeReviews = plan.entities.entryReviews.valid.filter((row) => row.timeEntrySourceId);
+  const timeEntryIds = await sourceIdMap(prisma.practiceTimeEntry, workspaceId, timeReviews.map((row) => row.timeEntrySourceId));
+  const timeEntryDbIds = collectUnique(timeReviews.map((row) => timeEntryIds.get(row.timeEntrySourceId)));
+  if (timeEntryDbIds.length > 0) {
+    const existingReviews = await prisma.practiceEntryReview.findMany({
+      where: { workspaceId, targetType: "TIME_ENTRY", timeEntryId: { in: timeEntryDbIds } },
+      select: { timeEntryId: true, sourceSatelliteId: true },
+    });
+    for (const row of timeReviews) {
+      const timeEntryId = timeEntryIds.get(row.timeEntrySourceId);
+      const existing = existingReviews.find((candidate) => candidate.timeEntryId === timeEntryId);
+      if (existing && conflictingSource(existing, row)) addConflict(conflicts, "entryReviews", row, `entryReviews:time:${row.timeEntrySourceId}`);
+    }
+  }
+
+  const expenseReviews = plan.entities.entryReviews.valid.filter((row) => row.expenseSourceId);
+  const expenseIds = await sourceIdMap(prisma.practiceExpense, workspaceId, expenseReviews.map((row) => row.expenseSourceId));
+  const expenseDbIds = collectUnique(expenseReviews.map((row) => expenseIds.get(row.expenseSourceId)));
+  if (expenseDbIds.length > 0) {
+    const existingReviews = await prisma.practiceEntryReview.findMany({
+      where: { workspaceId, targetType: "EXPENSE", expenseId: { in: expenseDbIds } },
+      select: { expenseId: true, sourceSatelliteId: true },
+    });
+    for (const row of expenseReviews) {
+      const expenseId = expenseIds.get(row.expenseSourceId);
+      const existing = existingReviews.find((candidate) => candidate.expenseId === expenseId);
+      if (existing && conflictingSource(existing, row)) addConflict(conflicts, "entryReviews", row, `entryReviews:expense:${row.expenseSourceId}`);
+    }
+  }
+
+  return conflicts;
+}
+
+function applyTargetUniqueConflicts(plan, conflicts) {
+  if (conflicts.size === 0) return;
+  for (const entity of ENTITY_ORDER) {
+    const valid = [];
+    for (const row of plan.entities[entity].valid) {
+      const duplicate = conflicts.get(rowKey(entity, row));
+      if (!duplicate) {
+        valid.push(row);
+        continue;
+      }
+      plan.entities[entity].skipped.push({ reason: "existing_unique_key", duplicate, record: row });
+    }
+    plan.entities[entity].valid = valid;
+    plan.counts.planned[entity] = valid.length;
+    plan.counts.skipped[entity] = plan.entities[entity].skipped.length;
+  }
+  plan.valid = plan.entities.projects.valid;
+  plan.skipped = [...plan.entities.projects.skipped, ...(plan.entities.unknownRecords?.skipped ?? [])];
 }
 
 function sourceWhere(workspaceId, sourceSatelliteId) {
@@ -1021,6 +1217,7 @@ const UPSERTS = {
 export async function importPracticeLedgerExport({ prisma, workspaceId, batch, apply = false }) {
   if (!workspaceId) throw new Error("workspaceId is required.");
   const plan = planImport(batch);
+  applyTargetUniqueConflicts(plan, await targetUniqueConflicts(prisma, workspaceId, plan));
   const imported = emptyEntityCounts();
   const skipped = { ...plan.counts.skipped };
 
