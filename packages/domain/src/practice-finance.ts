@@ -193,6 +193,7 @@ export type NativePracticeConsultantUtilization = {
   recentHours: number;
   averageWeeklyHours: number;
   utilizationBps: number;
+  currency: string | null;
   billedCents: number;
   costCents: number;
   expenseCents: number;
@@ -417,8 +418,8 @@ function calculateWeeksToMarginFloor(params: {
   const weeklyHeadroomDeltaCents =
     params.recentRevenueBurnPerWeekCents * (1 - targetMargin) - params.recentCostBurnPerWeekCents;
 
-  if (currentHeadroomCents <= 0) return 0;
   if (weeklyHeadroomDeltaCents >= 0) return null;
+  if (currentHeadroomCents <= 0) return 0;
 
   return roundWeeks(currentHeadroomCents / Math.abs(weeklyHeadroomDeltaCents));
 }
@@ -435,7 +436,7 @@ function assertSingleNativePracticeLedgerCurrency(
   timeEntries: NativePracticeTimeEntry[],
   expenses: NativePracticeExpense[],
   message: string,
-) {
+): string | null {
   const currencies = new Set<string>();
   for (const entry of timeEntries) {
     const billCurrency = practiceTimeBillAmountCurrency(entry);
@@ -448,6 +449,7 @@ function assertSingleNativePracticeLedgerCurrency(
     if (expenseCurrency) currencies.add(expenseCurrency);
   }
   invariant(currencies.size <= 1, 400, "MIXED_CURRENCY", message);
+  return currencies.values().next().value ?? null;
 }
 
 function emptyNativePracticeProjectLedgerRollup(projectId: string): NativePracticeProjectLedgerRollup {
@@ -684,7 +686,7 @@ export function calculateNativePracticeConsultantUtilization(params: {
   const recent = weekWindow(now, recentWindowWeeks);
   const timeEntries = postedTimeEntries(params.timeEntries).filter((entry) => entry.consultantId === params.consultant.id);
   const expenses = postedExpenses(params.expenses).filter((expense) => expense.consultantId === params.consultant.id);
-  assertSingleNativePracticeLedgerCurrency(
+  const currency = assertSingleNativePracticeLedgerCurrency(
     timeEntries,
     expenses,
     "Native practice consultant financial totals require one normalized currency.",
@@ -719,6 +721,7 @@ export function calculateNativePracticeConsultantUtilization(params: {
     recentHours: roundHours(recentHours),
     averageWeeklyHours,
     utilizationBps,
+    currency,
     billedCents,
     costCents,
     expenseCents,
@@ -742,6 +745,12 @@ function calculateContributionPreview(params: {
     400,
     "INVALID_INPUT",
     "Contribution preview market value must be non-negative.",
+  );
+  invariant(
+    Number.isInteger(params.paidAmountCents) && params.paidAmountCents >= 0,
+    400,
+    "INVALID_INPUT",
+    "Contribution preview paid amount must be a non-negative integer number of cents.",
   );
   const paidAmountCents = Math.min(Math.max(0, params.paidAmountCents), params.marketValueCents);
   const unpaidAmountCents = Math.max(0, params.marketValueCents - paidAmountCents);
@@ -784,6 +793,12 @@ export function previewSlicingPieContributionFromExpense(
   options: { paidAmountCents?: number | null } = {},
 ): NativePracticeContributionPreview {
   invariant(expense.status === "POSTED", 400, "INVALID_STATE", "Only posted expenses can produce contribution previews.");
+  invariant(
+    expense.consultantId != null,
+    400,
+    "INVALID_INPUT",
+    "Posted expenses must have a consultant before producing contribution previews.",
+  );
   const marketValueCents = practiceExpenseFunctionalAmountCents(expense);
   return calculateContributionPreview({
     sourceType: "EXPENSE",
@@ -1334,7 +1349,7 @@ export async function listNativePracticeProjectHealth(
               END,
               NULLIF(BTRIM(t."billCurrency"), ''),
               NULLIF(BTRIM(t."currency"), '')
-            )) <> UPPER(NULLIF(BTRIM(p."currency"), ''))
+            )) IS DISTINCT FROM UPPER(NULLIF(BTRIM(p."currency"), ''))
             OR UPPER(COALESCE(
               CASE WHEN t."costAmountCents" IS NOT NULL
                 THEN NULLIF(BTRIM(t."functionalCurrency"), '')
@@ -1342,7 +1357,7 @@ export async function listNativePracticeProjectHealth(
               END,
               NULLIF(BTRIM(t."costCurrency"), ''),
               NULLIF(BTRIM(t."currency"), '')
-            )) <> UPPER(NULLIF(BTRIM(p."currency"), ''))
+            )) IS DISTINCT FROM UPPER(NULLIF(BTRIM(p."currency"), ''))
             THEN 1
             ELSE 0
           END
@@ -1405,7 +1420,7 @@ export async function listNativePracticeProjectHealth(
                 ELSE NULL
               END,
               NULLIF(BTRIM(e."currency"), '')
-            )) <> UPPER(NULLIF(BTRIM(p."currency"), ''))
+            )) IS DISTINCT FROM UPPER(NULLIF(BTRIM(p."currency"), ''))
             THEN 1
             ELSE 0
           END

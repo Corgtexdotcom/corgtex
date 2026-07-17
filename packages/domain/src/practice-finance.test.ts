@@ -510,6 +510,34 @@ describe("practice-finance pure derivations", () => {
     expect(collectNativePracticeAttention([costOnlyLoss]).map((item) => item.issue)).toEqual(["margin"]);
   });
 
+  it("does not flag exact target margin when the recent trend improves", () => {
+    const steadyMargin = calculateNativePracticeProjectHealth({
+      project: nativeProject({ targetMarginBps: 5000 }),
+      now: new Date("2026-06-30T00:00:00.000Z"),
+      timeEntries: [
+        nativeTimeEntry({
+          id: "old-margin",
+          workedOn: new Date("2026-01-01T00:00:00.000Z"),
+          weekEndingOn: new Date("2026-01-05T00:00:00.000Z"),
+          billAmountCents: 100_00,
+          costAmountCents: 80_00,
+        }),
+        nativeTimeEntry({
+          id: "recent-margin",
+          billAmountCents: 100_00,
+          costAmountCents: 20_00,
+        }),
+      ],
+      expenses: [],
+    });
+
+    const summary = summarizeNativePracticeFinance([steadyMargin]);
+    expect(steadyMargin.grossMarginBps).toBe(5000);
+    expect(steadyMargin.weeksToTargetMarginRisk).toBeNull();
+    expect(summary.riskMarginCount).toBe(0);
+    expect(collectNativePracticeAttention([steadyMargin])).toEqual([]);
+  });
+
   it("rejects mixed active currencies before aggregating native finance summaries", () => {
     const usd = calculateNativePracticeProjectHealth({
       project: nativeProject({ id: "usd", currency: "USD" }),
@@ -667,6 +695,27 @@ describe("practice-finance pure derivations", () => {
     }
   });
 
+  it("returns the normalized currency for native consultant financial totals", () => {
+    const utilization = calculateNativePracticeConsultantUtilization({
+      consultant: nativeConsultant(),
+      timeEntries: [nativeTimeEntry({
+        currency: "eur",
+        billCurrency: "EUR",
+        costCurrency: "EUR",
+        billAmountCents: 100_00,
+        costAmountCents: 80_00,
+      })],
+      expenses: [nativeExpense({ amountCents: 12_00, currency: "EUR" })],
+    });
+
+    expect(utilization).toMatchObject({
+      currency: "EUR",
+      billedCents: 100_00,
+      costCents: 80_00,
+      expenseCents: 12_00,
+    });
+  });
+
   it("calculates native consultant utilization from posted time and expenses", () => {
     const utilization = calculateNativePracticeConsultantUtilization({
       consultant: nativeConsultant(),
@@ -686,6 +735,7 @@ describe("practice-finance pure derivations", () => {
       recentHours: 12,
       averageWeeklyHours: 3,
       utilizationBps: 750,
+      currency: "USD",
       billedCents: 300_000,
       costCents: 152_000,
       expenseCents: 12_345,
@@ -781,6 +831,26 @@ describe("practice-finance pure derivations", () => {
     try {
       previewSlicingPieContributionFromExpense(nativeExpense({ amountFunctionalCents: -100, functionalCurrency: "USD" }));
       throw new Error("Expected negative expense contribution value to be rejected.");
+    } catch (error) {
+      expect(error).toMatchObject({ code: "INVALID_INPUT" });
+    }
+  });
+
+  it("rejects invalid paid amounts when previewing Slicing Pie contributions", () => {
+    for (const paidAmountCents of [12.5, Number.POSITIVE_INFINITY, -1]) {
+      try {
+        previewSlicingPieContributionFromExpense(nativeExpense(), { paidAmountCents });
+        throw new Error("Expected invalid paid amount to be rejected.");
+      } catch (error) {
+        expect(error).toMatchObject({ code: "INVALID_INPUT" });
+      }
+    }
+  });
+
+  it("rejects unattributed expense contribution previews", () => {
+    try {
+      previewSlicingPieContributionFromExpense(nativeExpense({ consultantId: null }));
+      throw new Error("Expected unattributed expenses to be rejected.");
     } catch (error) {
       expect(error).toMatchObject({ code: "INVALID_INPUT" });
     }
