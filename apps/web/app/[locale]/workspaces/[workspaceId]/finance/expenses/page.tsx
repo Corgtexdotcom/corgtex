@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import {
   canManagePracticeFinanceProjects,
   listNativePracticeExpensePage,
-  listPracticeProjects,
+  listPracticeProjectsWithSelection,
   requireWorkspaceMembership,
 } from "@corgtex/domain";
 import { prisma } from "@corgtex/shared";
@@ -45,7 +45,7 @@ export default async function PracticeExpensesPage({
     requireWorkspaceMembership({ actor, workspaceId }),
     prisma.workspace.findUnique({ where: { id: workspaceId }, select: { slug: true } }),
     listNativePracticeExpensePage(actor, workspaceId, { take: 50, cursor, projectId, consultantId, clientId }),
-    listPracticeProjects(actor, workspaceId, { take: 200 }),
+    listPracticeProjectsWithSelection(actor, workspaceId, { take: 200, selectedProjectId: projectId }),
     isWorkspaceFeatureEnabled(workspaceId, "SLICING_PIE"),
   ]);
   const readOnlyDemo = workspace?.slug === "jnj-demo";

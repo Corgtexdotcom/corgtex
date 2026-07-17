@@ -1,4 +1,4 @@
-import { getNativePracticeFinanceDashboard } from "@corgtex/domain";
+import { getNativePracticeFinanceDashboard, type NativePracticeFinanceSummary } from "@corgtex/domain";
 import { requirePageActor } from "@/lib/auth";
 import { isWorkspaceFeatureEnabled, requireWorkspaceFeature } from "@/lib/workspace-feature-flags";
 import { PracticeFinanceNav, PracticeMetric, marginLabel, wholeMoney } from "../components";
@@ -13,6 +13,11 @@ const exports = [
   { kind: "expenses", label: "Expenses" },
 ];
 
+function summaryMoney(summary: NativePracticeFinanceSummary, cents: number): string {
+  if (summary.currency == null && summary.activeProjects > 0) return "Mixed";
+  return wholeMoney(cents, summary.currency ?? "USD");
+}
+
 export default async function PracticeReportsPage({
   params,
 }: {
@@ -26,7 +31,6 @@ export default async function PracticeReportsPage({
     getNativePracticeFinanceDashboard(actor, workspaceId),
     isWorkspaceFeatureEnabled(workspaceId, "SLICING_PIE"),
   ]);
-  const currency = dashboard.summary.currency ?? "USD";
 
   return (
     <section className="stack" style={{ gap: 20 }} data-finance-surface="practice-reports">
@@ -43,9 +47,9 @@ export default async function PracticeReportsPage({
 
       <div style={{ display: "flex", flexWrap: "wrap", gap: 12 }}>
         <PracticeMetric label="Active projects" value={dashboard.summary.activeProjects} />
-        <PracticeMetric label="Budget" value={wholeMoney(dashboard.summary.budgetCents, currency)} />
-        <PracticeMetric label="Used" value={wholeMoney(dashboard.summary.usedCents, currency)} />
-        <PracticeMetric label="Remaining" value={wholeMoney(dashboard.summary.remainingCents, currency)} />
+        <PracticeMetric label="Budget" value={summaryMoney(dashboard.summary, dashboard.summary.budgetCents)} />
+        <PracticeMetric label="Used" value={summaryMoney(dashboard.summary, dashboard.summary.usedCents)} />
+        <PracticeMetric label="Remaining" value={summaryMoney(dashboard.summary, dashboard.summary.remainingCents)} />
         <PracticeMetric label="Margin" value={marginLabel(dashboard.summary.marginBps)} />
       </div>
 

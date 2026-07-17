@@ -42,6 +42,7 @@ const { prismaMock, requireWorkspaceMembershipMock } = vi.hoisted(() => {
     },
     practiceProject: {
       create: vi.fn(),
+      findFirst: vi.fn(),
       findUnique: vi.fn(),
       findMany: vi.fn(),
       update: vi.fn(),
@@ -98,11 +99,13 @@ import {
   listNativePracticeClients,
   listNativePracticeConsultants,
   listNativePracticeExpensePage,
+  listNativePracticeProjectExportRows,
   listNativePracticeProjectHealth,
   listNativePracticeTimeEntryPage,
   listPracticeContributionEntries,
   listRequestedPracticeContributionPayables,
   listPracticeProjects,
+  listPracticeProjectsWithSelection,
   markPracticeContributionEntryPaid,
   nativePracticeProjectAttentionItems,
   previewSlicingPieContributionFromExpense,
@@ -470,6 +473,49 @@ describe("practice-finance pure derivations", () => {
     expect(health.recentBudgetBurnPerWeekCents).toBe(150_000);
     expect(health.recentCostBurnPerWeekCents).toBe(80_000);
     expect(utilization.recentHours).toBe(10);
+  });
+
+  it("keeps consultant utilization hours and groups financial totals across currencies", () => {
+    const utilization = calculateNativePracticeConsultantUtilization({
+      consultant: nativeConsultant(),
+      now: new Date("2026-06-30T00:00:00.000Z"),
+      recentWindowWeeks: 4,
+      timeEntries: [
+        nativeTimeEntry(),
+        nativeTimeEntry({
+          id: "time-eur",
+          currency: "EUR",
+          hours: decimal(2),
+          billRateCents: 10_000,
+          costRateCents: 5_000,
+        }),
+      ],
+      expenses: [
+        nativeExpense({
+          id: "expense-eur",
+          currency: "EUR",
+          amountCents: 12_000,
+        }),
+      ],
+    });
+
+    expect(utilization.currency).toBeNull();
+    expect(utilization.billedCents).toBe(0);
+    expect(utilization.recentHours).toBe(12);
+    expect(utilization.financialTotals).toEqual([
+      {
+        currency: "EUR",
+        billedCents: 20_000,
+        costCents: 10_000,
+        expenseCents: 12_000,
+      },
+      {
+        currency: "USD",
+        billedCents: 150_000,
+        costCents: 80_000,
+        expenseCents: 0,
+      },
+    ]);
   });
 
   it("excludes lower-boundary rows from recent native windows", () => {
@@ -1049,20 +1095,18 @@ describe("practice-finance pure derivations", () => {
     }
   });
 
-  it("rejects mixed currencies in native consultant financial totals", () => {
-    try {
-      calculateNativePracticeConsultantUtilization({
-        consultant: nativeConsultant(),
-        timeEntries: [
-          nativeTimeEntry({ billCurrency: "USD", costCurrency: "USD" }),
-          nativeTimeEntry({ id: "eur-time", billCurrency: "EUR", costCurrency: "EUR" }),
-        ],
-        expenses: [],
-      });
-      throw new Error("Expected mixed consultant currencies to be rejected.");
-    } catch (error) {
-      expect(error).toMatchObject({ code: "MIXED_CURRENCY" });
-    }
+  it("groups mixed currencies in native consultant financial totals", () => {
+    const utilization = calculateNativePracticeConsultantUtilization({
+      consultant: nativeConsultant(),
+      timeEntries: [
+        nativeTimeEntry({ billCurrency: "USD", costCurrency: "USD" }),
+        nativeTimeEntry({ id: "eur-time", billCurrency: "EUR", costCurrency: "EUR" }),
+      ],
+      expenses: [],
+    });
+
+    expect(utilization.currency).toBeNull();
+    expect(utilization.financialTotals.map((total) => total.currency)).toEqual(["EUR", "USD"]);
   });
 
   it("rejects unknown currencies in native consultant financial totals", () => {
@@ -1636,6 +1680,7 @@ describe("practice-finance I/O", () => {
       createdAt: new Date("2026-06-18T00:00:00.000Z"),
       updatedAt: new Date("2026-06-19T00:00:00.000Z"),
     });
+    prismaMock.practiceProject.findFirst.mockResolvedValue(null);
     prismaMock.practiceProject.findUnique.mockResolvedValue(null);
     prismaMock.practiceProject.findMany.mockResolvedValue([]);
   });
@@ -1648,6 +1693,23 @@ describe("practice-finance I/O", () => {
       where: { workspaceId: "workspace-1" },
       orderBy: [{ status: "asc" }, { code: "asc" }, { id: "asc" }],
       take: 100,
+    });
+  });
+
+  it("keeps a deep-linked selected project in bounded project selectors", async () => {
+    prismaMock.practiceProject.findMany.mockResolvedValueOnce([
+      project({ id: "project-1" }),
+    ]);
+    prismaMock.practiceProject.findFirst.mockResolvedValueOnce(project({ id: "project-250" }));
+
+    const projects = await listPracticeProjectsWithSelection(actor, "workspace-1", {
+      selectedProjectId: " project-250 ",
+      take: 200,
+    });
+
+    expect(projects.map((item) => item.id)).toEqual(["project-250", "project-1"]);
+    expect(prismaMock.practiceProject.findFirst).toHaveBeenCalledWith({
+      where: { id: "project-250", workspaceId: "workspace-1" },
     });
   });
 
@@ -1951,12 +2013,25 @@ describe("practice-finance I/O", () => {
           billRateCents: 20_000,
           costRateCents: 10_000,
         }),
+        nativeTimeEntry({
+          id: "old-time",
+          workedOn: new Date("2026-01-01T00:00:00.000Z"),
+          weekEndingOn: new Date("2026-01-05T00:00:00.000Z"),
+          hours: decimal(3),
+          billAmountCents: 30_000,
+          costAmountCents: 12_000,
+        }),
       ])
       .mockResolvedValueOnce([nativeTimeEntry()]);
     prismaMock.practiceExpense.findMany
       .mockResolvedValueOnce([
         nativeExpense(),
         nativeExpense({ id: "expense-2", amountCents: 10_000 }),
+        nativeExpense({
+          id: "old-expense",
+          spentOn: new Date("2026-01-02T00:00:00.000Z"),
+          amountCents: 7_000,
+        }),
       ])
       .mockResolvedValueOnce([nativeExpense()]);
     prismaMock.$queryRaw
@@ -1971,10 +2046,16 @@ describe("practice-finance I/O", () => {
     expect(detail.utilization).toMatchObject({
       consultantId: "consultant-1",
       recentHours: 15,
-      billedCents: 250_000,
-      costCents: 130_000,
-      expenseCents: 50_000,
+      billedCents: 280_000,
+      costCents: 142_000,
+      expenseCents: 57_000,
     });
+    expect(detail.utilization.financialTotals).toEqual([{
+      currency: "USD",
+      billedCents: 280_000,
+      costCents: 142_000,
+      expenseCents: 57_000,
+    }]);
     expect(detail.recentTimeEntries).toHaveLength(1);
     expect(detail.recentExpenses).toHaveLength(1);
     expect(prismaMock.practiceProject.findMany).toHaveBeenCalledWith(expect.objectContaining({
@@ -1982,7 +2063,7 @@ describe("practice-finance I/O", () => {
         workspaceId: "workspace-1",
         assignments: { some: { consultantId: "consultant-1" } },
       },
-      take: 100,
+      take: 200,
     }));
     expect(prismaMock.practiceTimeEntry.findMany).toHaveBeenNthCalledWith(1, expect.objectContaining({
       where: expect.objectContaining({
@@ -1990,6 +2071,7 @@ describe("practice-finance I/O", () => {
         consultantId: "consultant-1",
         status: "POSTED",
       }),
+      orderBy: [{ id: "asc" }],
       select: expect.any(Object),
     }));
     expect(prismaMock.practiceTimeEntry.findMany).toHaveBeenNthCalledWith(2, expect.objectContaining({
@@ -2015,6 +2097,57 @@ describe("practice-finance I/O", () => {
       }),
       include: expect.any(Object),
       take: 50,
+    }));
+  });
+
+  it("loads all native consultant assigned project pages before calculating detail health", async () => {
+    prismaMock.practiceConsultant.findUnique.mockResolvedValueOnce({
+      id: "consultant-1",
+      workspaceId: "workspace-1",
+      name: "Consultant One",
+      email: "one@example.test",
+      homeCurrency: "USD",
+      active: true,
+      sourceSatelliteId: null,
+      createdAt: new Date("2026-06-18T00:00:00.000Z"),
+      updatedAt: new Date("2026-06-18T00:00:00.000Z"),
+      _count: { assignments: 201, timeEntries: 0, expenses: 0, paymentBatches: 0 },
+    });
+    const firstPage = Array.from({ length: 200 }, (_, index) =>
+      nativeProject({
+        id: `project-${String(index).padStart(3, "0")}`,
+        code: `P-${String(index).padStart(3, "0")}`,
+      })
+    );
+    const secondPage = [
+      nativeProject({ id: "project-200", code: "P-200" }),
+    ];
+    prismaMock.practiceProject.findMany
+      .mockResolvedValueOnce(firstPage)
+      .mockResolvedValueOnce(secondPage);
+    prismaMock.practiceTimeEntry.findMany
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([]);
+    prismaMock.practiceExpense.findMany
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([]);
+    prismaMock.$queryRaw
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([]);
+
+    const detail = await getNativePracticeConsultantDetail(actor, "workspace-1", "consultant-1", {
+      now: new Date("2026-06-30T00:00:00.000Z"),
+    });
+
+    expect(detail.projectHealth).toHaveLength(201);
+    expect(prismaMock.practiceProject.findMany).toHaveBeenNthCalledWith(1, expect.objectContaining({
+      take: 200,
+    }));
+    expect(prismaMock.practiceProject.findMany.mock.calls[0]?.[0]).not.toHaveProperty("cursor");
+    expect(prismaMock.practiceProject.findMany).toHaveBeenNthCalledWith(2, expect.objectContaining({
+      cursor: { id: "project-199" },
+      skip: 1,
+      take: 200,
     }));
   });
 
@@ -2084,6 +2217,46 @@ describe("practice-finance I/O", () => {
     expect(prismaSqlText(prismaMock.$queryRaw.mock.calls[1]?.[0])).toContain(
       "NULLIF(BTRIM(p.\"currency\"), '') IS NULL",
     );
+  });
+
+  it("lists native project export rows with calculated native ledger usage", async () => {
+    prismaMock.practiceProject.findMany.mockResolvedValueOnce([
+      nativeProject({ usedCents: 0, weeklyBurnCents: 0 }),
+    ]);
+    prismaMock.$queryRaw
+      .mockResolvedValueOnce([{
+        projectId: "project-1",
+        timeRevenueCents: 150_000n,
+        timeCostCents: 80_000n,
+        recentTimeRevenueCents: 150_000n,
+        recentTimeCostCents: 80_000n,
+        timeEntryCount: 1n,
+        invalidHoursRows: 0n,
+        invalidCurrencyRows: 0n,
+      }])
+      .mockResolvedValueOnce([{
+        projectId: "project-1",
+        billableExpenseCents: 40_000n,
+        directExpenseCents: 40_000n,
+        recentBillableExpenseCents: 40_000n,
+        recentDirectExpenseCents: 40_000n,
+        expenseCount: 1n,
+        invalidCurrencyRows: 0n,
+      }]);
+
+    const page = await listNativePracticeProjectExportRows(actor, "workspace-1", {
+      now: new Date("2026-06-30T00:00:00.000Z"),
+      take: 5,
+    });
+
+    expect(page.items).toHaveLength(1);
+    expect(page.nextCursor).toBeNull();
+    expect(page.items[0]?.project.id).toBe("project-1");
+    expect(page.items[0]?.health).toMatchObject({
+      usedBudgetCents: 190_000,
+      recentBudgetBurnPerWeekCents: 47_500,
+      grossMarginBps: 3684,
+    });
   });
 
   it("rejects native project health rows with unnormalized ledger currencies", async () => {

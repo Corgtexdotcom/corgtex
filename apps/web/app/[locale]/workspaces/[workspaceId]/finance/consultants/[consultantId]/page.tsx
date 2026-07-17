@@ -21,6 +21,14 @@ function utilizationLabel(bps: number): string {
   return `${(bps / 100).toFixed(1)}%`;
 }
 
+function consultantTotalsLabel(
+  totals: Array<{ currency: string; billedCents: number; costCents: number; expenseCents: number }>,
+  key: "billedCents" | "costCents" | "expenseCents",
+): string {
+  if (totals.length === 0) return "-";
+  return totals.map((total) => wholeMoney(total[key], total.currency)).join(" / ");
+}
+
 export default async function PracticeConsultantDetailPage({
   params,
 }: {
@@ -55,9 +63,9 @@ export default async function PracticeConsultantDetailPage({
         <PracticeMetric label="Utilization" value={utilizationLabel(utilization.utilizationBps)} />
         <PracticeMetric label="Avg weekly hours" value={utilization.averageWeeklyHours.toLocaleString("en-US")} />
         <PracticeMetric label="Recent hours" value={utilization.recentHours.toLocaleString("en-US")} />
-        <PracticeMetric label="Billed" value={wholeMoney(utilization.billedCents, utilization.currency ?? "USD")} />
-        <PracticeMetric label="Cost" value={wholeMoney(utilization.costCents, utilization.currency ?? "USD")} />
-        <PracticeMetric label="Expenses" value={wholeMoney(utilization.expenseCents, utilization.currency ?? "USD")} />
+        <PracticeMetric label="Billed" value={consultantTotalsLabel(utilization.financialTotals, "billedCents")} />
+        <PracticeMetric label="Cost" value={consultantTotalsLabel(utilization.financialTotals, "costCents")} />
+        <PracticeMetric label="Expenses" value={consultantTotalsLabel(utilization.financialTotals, "expenseCents")} />
       </div>
 
       <div className="nr-item" style={{ padding: 0 }}>

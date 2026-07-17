@@ -4,8 +4,8 @@ import {
   listNativePracticeClients,
   listNativePracticeConsultants,
   listNativePracticeExpensePage,
+  listNativePracticeProjectExportRows,
   listNativePracticeTimeEntryPage,
-  listPracticeProjects,
 } from "@corgtex/domain";
 import { getWorkspaceFeatureFlags } from "@/lib/workspace-feature-flags";
 import { withWorkspaceRoute } from "@/lib/route-handler";
@@ -52,15 +52,14 @@ async function requirePracticeLedgerExport(workspaceId: string) {
   }
 }
 
-async function projectCsv(actor: Parameters<typeof listPracticeProjects>[0], workspaceId: string) {
-  const rows: Awaited<ReturnType<typeof listPracticeProjects>> = [];
+async function projectCsv(actor: Parameters<typeof listNativePracticeProjectExportRows>[0], workspaceId: string) {
+  const rows: Awaited<ReturnType<typeof listNativePracticeProjectExportRows>>["items"] = [];
   let cursor: string | null = null;
   while (rows.length < EXPORT_ROW_LIMIT) {
-    const page = await listPracticeProjects(actor, workspaceId, { take: EXPORT_PAGE_SIZE, cursor });
-    rows.push(...page);
-    if (page.length < EXPORT_PAGE_SIZE) break;
-    cursor = page.at(-1)?.id ?? null;
-    if (!cursor) break;
+    const page = await listNativePracticeProjectExportRows(actor, workspaceId, { take: EXPORT_PAGE_SIZE, cursor });
+    rows.push(...page.items);
+    if (!page.nextCursor) break;
+    cursor = page.nextCursor;
   }
   return csv(
     [
@@ -80,19 +79,19 @@ async function projectCsv(actor: Parameters<typeof listPracticeProjects>[0], wor
       "crm_deal_id",
       "source_satellite_id",
     ],
-    rows.slice(0, EXPORT_ROW_LIMIT).map((project) => [
+    rows.slice(0, EXPORT_ROW_LIMIT).map(({ project, health }) => [
       project.code,
       project.name,
       project.clientName,
       project.status,
-      project.currency,
-      dollars(project.poValueCents),
-      dollars(project.serviceBudgetCents),
-      dollars(project.expenseBudgetCents),
-      dollars(project.usedCents),
-      dollars(project.weeklyBurnCents),
-      project.targetMarginBps ?? "",
-      project.currentMarginBps ?? "",
+      health.currency,
+      dollars(health.budgetCents),
+      dollars(health.serviceBudgetCents),
+      dollars(health.expenseBudgetCents),
+      dollars(health.usedBudgetCents),
+      dollars(health.recentBudgetBurnPerWeekCents),
+      health.targetMarginBps ?? "",
+      health.grossMarginBps ?? "",
       project.crmAccountId ?? "",
       project.crmDealId ?? "",
       project.sourceSatelliteId ?? "",
