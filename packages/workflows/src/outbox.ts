@@ -34,6 +34,8 @@ import {
   createRoleOnboardingIntro,
   runEnterpriseAppHealthCheckJob,
   createNotificationIntent,
+  deliverNotificationDelivery,
+  NOTIFICATION_DELIVERY_JOB_TYPE,
   resolveAdviceRequestRecipientUsers,
   resolveAdviceRequestRequesterUsers,
   runAdviceRequestReminderJob,
@@ -651,6 +653,15 @@ async function handleJob(job: ClaimedJob) {
       workspaceId: job.workspaceId,
       adviceRequestId,
     });
+    return;
+  }
+
+  if (job.type === NOTIFICATION_DELIVERY_JOB_TYPE) {
+    const deliveryId = (payload as { deliveryId?: string }).deliveryId;
+    if (!deliveryId) {
+      throw new Error("Notification delivery job is missing deliveryId.");
+    }
+    await deliverNotificationDelivery(deliveryId);
     return;
   }
 

@@ -588,6 +588,7 @@ model Workspace {
   agentRuns                      AgentRun[]
   agentCreds                     AgentCredential[]
   notifications                  Notification[]
+  notificationDeliveries         NotificationDelivery[]
   conversations                  ConversationSession[]
   conversationPendingOperations  ConversationPendingOperation[]
   agentMemories                  AgentMemory[]
@@ -984,6 +985,7 @@ model User {
   tensionUpvotes                TensionUpvote[]
   agentCreds                    AgentCredential[]                     @relation("AgentCredentialCreator")
   notifications                 Notification[]
+  notificationDeliveries        NotificationDelivery[]
   conversations                 ConversationSession[]
   oauthConnections              OAuthConnection[]
   mcpOAuthCodes                 McpOAuthAuthorizationCode[]
@@ -3699,6 +3701,8 @@ model Notification {
   workspaceId String
   userId      String
   type        String
+  dedupeKey   String?   @unique
+  priority    String    @default("NORMAL")
   entityType  String?
   entityId    String?
   title       String
@@ -3706,10 +3710,38 @@ model Notification {
   readAt      DateTime?
   createdAt   DateTime  @default(now())
 
-  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  workspace  Workspace              @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  user       User                   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  deliveries NotificationDelivery[]
 
   @@index([workspaceId, userId, readAt])
+}
+
+model NotificationDelivery {
+  id                String    @id @default(uuid())
+  notificationId    String
+  workspaceId       String
+  userId            String
+  channel           String    @db.VarChar(50)
+  status            String    @default("PENDING") @db.VarChar(50)
+  attempts          Int       @default(0)
+  nextAttemptAt     DateTime  @default(now())
+  sentAt            DateTime?
+  failedAt          DateTime?
+  providerMessageId String?
+  error             String?   @db.Text
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+
+  notification Notification @relation(fields: [notificationId], references: [id], onDelete: Cascade)
+  workspace    Workspace    @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  user         User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([notificationId, channel])
+  @@index([status, nextAttemptAt])
+  @@index([workspaceId, status])
+  @@index([userId, status])
+  @@index([channel, status])
 }
 
 model NotificationPreference {

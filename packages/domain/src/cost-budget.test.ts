@@ -38,6 +38,8 @@ const { prismaMock, txMock, getWorkspaceMonthlyUsageMock } = vi.hoisted(() => {
 
 vi.mock("@corgtex/shared", () => ({
   prisma: prismaMock,
+  sendEmail: vi.fn(),
+  env: { APP_URL: "https://app.example.test" },
 }));
 
 vi.mock("./agent-run-usage", () => ({
