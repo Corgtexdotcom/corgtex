@@ -1397,6 +1397,10 @@ function normalizeConsultantEmail(value: string | null | undefined): string | nu
   return normalized || null;
 }
 
+function manualLedgerConsultantSourceId(idempotencyKey: string | null | undefined): string | null {
+  return idempotencyKey ? `manual-ledger-consultant:${idempotencyKey}` : null;
+}
+
 function weekEndingSundayUtc(workedOn: Date): Date {
   const date = new Date(Date.UTC(workedOn.getUTCFullYear(), workedOn.getUTCMonth(), workedOn.getUTCDate()));
   const day = date.getUTCDay();
@@ -1973,6 +1977,7 @@ async function resolveNativePracticeConsultant(params: {
   workspaceId: string;
   name?: string | null;
   email?: string | null;
+  idempotencyKey?: string | null;
   required: boolean;
 }) {
   const email = normalizeConsultantEmail(params.email);
@@ -1981,7 +1986,7 @@ async function resolveNativePracticeConsultant(params: {
   const displayName = name || email;
   invariant(displayName, 400, "INVALID_INPUT", "Consultant is required.");
 
-  const existing = await prisma.practiceConsultant.findFirst({
+  const matches = await prisma.practiceConsultant.findMany({
     where: {
       workspaceId: params.workspaceId,
       ...(email
@@ -1989,19 +1994,49 @@ async function resolveNativePracticeConsultant(params: {
         : { name: { equals: displayName, mode: "insensitive" } }),
     },
     select: { id: true },
+    orderBy: [{ id: "asc" }],
+    take: 2,
   });
-  if (existing) return existing.id;
+  invariant(
+    matches.length <= 1,
+    409,
+    "AMBIGUOUS_CONSULTANT",
+    email
+      ? "Consultant email is ambiguous; resolve duplicate consultants."
+      : "Consultant name is ambiguous; include an email.",
+  );
+  if (matches[0]) return matches[0].id;
 
-  const created = await prisma.practiceConsultant.create({
-    data: {
-      workspaceId: params.workspaceId,
-      name: displayName,
-      email,
-      active: true,
-    },
-    select: { id: true },
-  });
-  return created.id;
+  const sourceSatelliteId = manualLedgerConsultantSourceId(params.idempotencyKey);
+  if (sourceSatelliteId) {
+    const sourceMatch = await prisma.practiceConsultant.findFirst({
+      where: { workspaceId: params.workspaceId, sourceSatelliteId },
+      select: { id: true },
+    });
+    if (sourceMatch) return sourceMatch.id;
+  }
+
+  try {
+    const created = await prisma.practiceConsultant.create({
+      data: {
+        workspaceId: params.workspaceId,
+        name: displayName,
+        email,
+        sourceSatelliteId,
+        active: true,
+      },
+      select: { id: true },
+    });
+    return created.id;
+  } catch (error) {
+    if (!sourceSatelliteId || !isUniqueConstraintError(error)) throw error;
+    const created = await prisma.practiceConsultant.findFirst({
+      where: { workspaceId: params.workspaceId, sourceSatelliteId },
+      select: { id: true },
+    });
+    if (created) return created.id;
+    throw error;
+  }
 }
 
 export async function getNativePracticeProjectDetail(
@@ -2103,6 +2138,7 @@ export async function createNativePracticeTimeEntry(
     workspaceId,
     name: consultantName,
     email: consultantEmail,
+    idempotencyKey,
     required: true,
   });
   invariant(consultantId, 400, "INVALID_INPUT", "Consultant is required.");
@@ -2169,6 +2205,7 @@ export async function createNativePracticeExpense(
     workspaceId,
     name: consultantName,
     email: consultantEmail,
+    idempotencyKey,
     required: false,
   });
 

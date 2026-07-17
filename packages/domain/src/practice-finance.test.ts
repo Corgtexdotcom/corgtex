@@ -2155,18 +2155,21 @@ describe("practice-finance I/O", () => {
       where: { id: "project-1" },
       data: { clientId: "client-1" },
     });
-    expect(prismaMock.practiceConsultant.findFirst).toHaveBeenCalledWith({
+    expect(prismaMock.practiceConsultant.findMany).toHaveBeenCalledWith({
       where: {
         workspaceId: "workspace-1",
         email: { equals: "priya@example.test", mode: "insensitive" },
       },
       select: { id: true },
+      orderBy: [{ id: "asc" }],
+      take: 2,
     });
     expect(prismaMock.practiceConsultant.create).toHaveBeenCalledWith({
       data: {
         workspaceId: "workspace-1",
         name: "Priya Shah",
         email: "priya@example.test",
+        sourceSatelliteId: null,
         active: true,
       },
       select: { id: true },
@@ -2207,7 +2210,7 @@ describe("practice-finance I/O", () => {
       clientName: "Example",
       currency: "USD",
     });
-    prismaMock.practiceConsultant.findFirst.mockResolvedValueOnce({ id: "consultant-2" });
+    prismaMock.practiceConsultant.findMany.mockResolvedValueOnce([{ id: "consultant-2" }]);
 
     await createNativePracticeExpense(actor, "workspace-1", {
       projectId: "project-1",
@@ -2272,7 +2275,86 @@ describe("practice-finance I/O", () => {
     expect(result).toBe(existingEntry);
     expect(prismaMock.practiceClient.create).not.toHaveBeenCalled();
     expect(prismaMock.practiceConsultant.findFirst).not.toHaveBeenCalled();
+    expect(prismaMock.practiceConsultant.findMany).not.toHaveBeenCalled();
     expect(prismaMock.practiceTimeEntry.create).not.toHaveBeenCalled();
+  });
+
+  it("rejects ambiguous name-only consultants for native ledger submissions", async () => {
+    prismaMock.practiceProject.findUnique.mockResolvedValueOnce({
+      id: "project-1",
+      workspaceId: "workspace-1",
+      crmAccountId: "account-1",
+      clientId: "client-existing",
+      billingCodeId: "billing-1",
+      code: "EXAMPLE-1",
+      clientName: "Example",
+      currency: "USD",
+    });
+    prismaMock.practiceConsultant.findMany.mockResolvedValueOnce([{ id: "consultant-1" }, { id: "consultant-2" }]);
+
+    await expect(createNativePracticeTimeEntry(actor, "workspace-1", {
+      projectId: "project-1",
+      consultantName: "Priya Shah",
+      workedOn: new Date("2026-06-18T00:00:00.000Z"),
+      hours: 2.5,
+      billRateCents: 12_000,
+      costRateCents: 8_000,
+    })).rejects.toMatchObject({ status: 409, code: "AMBIGUOUS_CONSULTANT" });
+
+    expect(prismaMock.practiceConsultant.create).not.toHaveBeenCalled();
+    expect(prismaMock.practiceTimeEntry.create).not.toHaveBeenCalled();
+  });
+
+  it("reuses idempotency-scoped consultants when duplicate manual creation races", async () => {
+    prismaMock.practiceProject.findUnique.mockResolvedValueOnce({
+      id: "project-1",
+      workspaceId: "workspace-1",
+      crmAccountId: "account-1",
+      clientId: "client-existing",
+      billingCodeId: "billing-1",
+      code: "EXAMPLE-1",
+      clientName: "Example",
+      currency: "USD",
+    });
+    prismaMock.practiceConsultant.findMany.mockResolvedValueOnce([]);
+    prismaMock.practiceConsultant.findFirst
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce({ id: "consultant-race" });
+    prismaMock.practiceConsultant.create.mockRejectedValueOnce(Object.assign(new Error("Unique constraint failed"), { code: "P2002" }));
+
+    await createNativePracticeTimeEntry(actor, "workspace-1", {
+      projectId: "project-1",
+      consultantName: "Priya Shah",
+      workedOn: new Date("2026-06-18T00:00:00.000Z"),
+      hours: 2.5,
+      billRateCents: 12_000,
+      costRateCents: 8_000,
+      idempotencyKey: "manual-time-key",
+    });
+
+    expect(prismaMock.practiceConsultant.findFirst).toHaveBeenCalledWith({
+      where: {
+        workspaceId: "workspace-1",
+        sourceSatelliteId: "manual-ledger-consultant:manual-time-key",
+      },
+      select: { id: true },
+    });
+    expect(prismaMock.practiceConsultant.create).toHaveBeenCalledWith({
+      data: {
+        workspaceId: "workspace-1",
+        name: "Priya Shah",
+        email: null,
+        sourceSatelliteId: "manual-ledger-consultant:manual-time-key",
+        active: true,
+      },
+      select: { id: true },
+    });
+    expect(prismaMock.practiceTimeEntry.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        consultantId: "consultant-race",
+        idempotencyKey: "manual-time-key",
+      }),
+    });
   });
 
   it("validates native expense input before creating related client or consultant records", async () => {
@@ -2298,6 +2380,7 @@ describe("practice-finance I/O", () => {
 
     expect(prismaMock.practiceClient.create).not.toHaveBeenCalled();
     expect(prismaMock.practiceConsultant.findFirst).not.toHaveBeenCalled();
+    expect(prismaMock.practiceConsultant.findMany).not.toHaveBeenCalled();
     expect(prismaMock.practiceConsultant.create).not.toHaveBeenCalled();
     expect(prismaMock.practiceExpense.create).not.toHaveBeenCalled();
   });

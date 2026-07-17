@@ -56,6 +56,7 @@ export default async function FinancePage({
     <PracticeFinanceDashboard
       workspaceId={workspaceId}
       canManageProjects={canManageProjects}
+      practiceProjectsEnabled={practiceProjectsEnabled}
       canRecordContributions={!readOnlyDemo}
       canMarkContributionPaid={canMarkContributionPaid}
       slicingPieEnabled={slicingPieEnabled}

@@ -147,7 +147,7 @@ function ProjectEdit({ workspaceId, project }: { workspaceId: string; project: P
           <input type="hidden" name="workspaceId" value={workspaceId} />
           <input type="hidden" name="projectId" value={project.id} />
           <ProjectFields project={project} />
-          <button type="submit" className="fin-action-btn" style={{ width: "fit-content" }}>Save</button>
+          <button type="submit" className="fin-action-btn">Save</button>
         </form>
       </div>
     </details>
@@ -196,7 +196,7 @@ function ContributionForms({
               <option value="CASH">Cash</option>
             </select>
           </label>
-          <button type="submit" disabled={disabled} style={{ width: "fit-content" }}>Record time</button>
+          <button type="submit" className="fin-action-btn" disabled={disabled}>Record time</button>
         </form>
         <form action={createPracticeContributionEntryAction} className="stack nr-form-section" style={{ marginTop: 0 }}>
           <input type="hidden" name="workspaceId" value={workspaceId} />
@@ -216,7 +216,7 @@ function ContributionForms({
               <option value="CASH">Cash</option>
             </select>
           </label>
-          <button type="submit" disabled={disabled} style={{ width: "fit-content" }}>Record expense</button>
+          <button type="submit" className="fin-action-btn" disabled={disabled}>Record expense</button>
         </form>
       </div>
       {disabled && <p className="nr-item-meta" style={{ margin: 0, padding: "0 16px 16px" }}>Create a project before recording contributions.</p>}
@@ -297,6 +297,7 @@ function RequestedPayables({
 export function PracticeFinanceDashboard({
   workspaceId,
   canManageProjects,
+  practiceProjectsEnabled,
   canRecordContributions,
   canMarkContributionPaid,
   slicingPieEnabled,
@@ -310,6 +311,7 @@ export function PracticeFinanceDashboard({
 }: {
   workspaceId: string;
   canManageProjects: boolean;
+  practiceProjectsEnabled: boolean;
   canRecordContributions: boolean;
   canMarkContributionPaid: boolean;
   slicingPieEnabled: boolean;
@@ -448,7 +450,13 @@ export function PracticeFinanceDashboard({
               <tbody>
                 {attention.map((item, index) => (
                   <tr key={`${item.projectId}-${item.issue}-${index}`}>
-                    <td><a href={`/workspaces/${workspaceId}/finance/projects/${item.projectId}`}>{item.projectName}</a></td>
+                    <td>
+                      {practiceProjectsEnabled ? (
+                        <a href={`/workspaces/${workspaceId}/finance/projects/${item.projectId}`}>{item.projectName}</a>
+                      ) : (
+                        item.projectName
+                      )}
+                    </td>
                     <td>{item.issue}</td>
                     <td>{item.weeks == null ? "-" : item.weeks.toFixed(1)}</td>
                     <td className="nr-item-meta">{item.detail}</td>
@@ -495,7 +503,11 @@ export function PracticeFinanceDashboard({
                   <tr key={health.projectId}>
                     <td>
                       <div>
-                        <a href={`/workspaces/${workspaceId}/finance/projects/${health.projectId}`}>{health.projectName}</a>
+                        {practiceProjectsEnabled ? (
+                          <a href={`/workspaces/${workspaceId}/finance/projects/${health.projectId}`}>{health.projectName}</a>
+                        ) : (
+                          health.projectName
+                        )}
                       </div>
                       <div className="nr-item-meta" style={{ fontSize: 11 }}>{health.projectCode}</div>
                     </td>
