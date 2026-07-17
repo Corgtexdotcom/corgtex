@@ -19,10 +19,9 @@ A module's `tier` is a field on its manifest, not a repo boundary.
   Live in the monorepo and are toggled per workspace by a feature flag and
   gated per principal by the access model.
 - **Satellite.** An app that owns its own datastore or release cadence, or is
-  client-specific / third-party (for example, the Practice Ledger app at
-  `github.com/Corgtexdotcom/practice-ledger`). Lives in its own repo and
-  integrates through a stable contract: a catalog manifest, an MCP surface, a
-  Brain-sync provenance stream, and a launch/embed URL.
+  client-specific / third-party. Lives in its own repo and integrates through a
+  stable contract: a catalog manifest, an MCP surface, a Brain-sync provenance
+  stream, and a launch/embed URL.
 
 ### The decision rule
 
@@ -99,3 +98,8 @@ Satellites are built **portable from day one** to keep graduation bounded:
 stable UUIDs, an exportable Corgtex-shaped record schema, mandatory Brain
 provenance (a standing shadow trail), and a capability-keyed interface so
 promotion swaps the implementation behind the same contract.
+
+Practice Ledger has completed this graduation path. Its normal project, time,
+expense, payable, and contribution data now belongs to Corgtex native Finance
+and the Corgtex Prisma schema; do not route new Practice Ledger work to the
+retired standalone repository, launch-token flow, or app runtime.
