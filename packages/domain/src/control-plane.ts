@@ -230,6 +230,42 @@ export type ControlPlaneRecorderAvailabilityStatus =
   | "requires_connector"
   | "unavailable";
 
+export type ControlPlaneRecorderReadinessGateStatus =
+  | "pass"
+  | "warning"
+  | "blocked"
+  | "unknown";
+
+export type ControlPlaneRecorderReadinessGateCheck = {
+  key: string;
+  label: string;
+  status: Exclude<ControlPlaneRecorderReadinessGateStatus, "warning" | "unknown">;
+  detail: string;
+};
+
+export type ControlPlaneRecorderReadinessGate = {
+  key:
+    | "control_plane"
+    | "tenant_config"
+    | "vendor"
+    | "calendar"
+    | "meeting_state"
+    | "live_vendor_proof";
+  label: string;
+  status: ControlPlaneRecorderReadinessGateStatus;
+  detail: string;
+  checks: ControlPlaneRecorderReadinessGateCheck[];
+};
+
+export type ControlPlaneRecorderReadinessGates = {
+  controlPlane: ControlPlaneRecorderReadinessGate;
+  tenantConfig: ControlPlaneRecorderReadinessGate;
+  vendor: ControlPlaneRecorderReadinessGate;
+  calendar: ControlPlaneRecorderReadinessGate;
+  meetingState: ControlPlaneRecorderReadinessGate;
+  liveVendorProof: ControlPlaneRecorderReadinessGate;
+};
+
 export type ControlPlaneIssueSource = "health" | "release" | "recorder" | "agents" | "users" | "support";
 export type ControlPlaneIssueSeverity = "warning" | "critical";
 
@@ -6155,6 +6191,282 @@ function recorderMeetingOpsStatus(readiness: Awaited<ReturnType<typeof getMeetin
   return "degraded" as const;
 }
 
+type RecorderEnterpriseReadiness = Awaited<ReturnType<typeof getMeetingRecorderEnterpriseReadiness>>;
+type RecorderCoverageReadiness = Awaited<ReturnType<typeof getMeetingRecorderCoverageReadiness>>;
+type RecorderReadinessCheck = RecorderEnterpriseReadiness["checks"][number];
+
+const RECORDER_TENANT_CONFIG_CHECK_KEYS = new Set(["entitlement", "recorder_config"]);
+const RECORDER_VENDOR_CHECK_KEYS = new Set([
+  "public_base_url",
+  "recall_api_key",
+  "recall_webhook_secret",
+  "meeting_baas_api_key",
+  "meeting_baas_webhook_secret",
+]);
+const RECORDER_CALENDAR_CHECK_KEYS = new Set(["calendar_source", "worker_sync"]);
+const RECORDER_LIVE_VENDOR_CHECK_KEYS = new Set(["provider_proof"]);
+
+function normalizeRecorderGateCheck(check: RecorderReadinessCheck): ControlPlaneRecorderReadinessGateCheck {
+  return {
+    key: check.key,
+    label: check.label,
+    status: check.ok ? "pass" : "blocked",
+    detail: sanitizeDiagnosticText(check.detail),
+  };
+}
+
+function recorderGateFromChecks(params: {
+  key: ControlPlaneRecorderReadinessGate["key"];
+  label: string;
+  checks: RecorderReadinessCheck[];
+  passDetail: string;
+  emptyDetail: string;
+  emptyStatus?: ControlPlaneRecorderReadinessGateStatus;
+}): ControlPlaneRecorderReadinessGate {
+  const normalizedChecks = params.checks.map(normalizeRecorderGateCheck);
+  if (normalizedChecks.length === 0) {
+    return {
+      key: params.key,
+      label: params.label,
+      status: params.emptyStatus ?? "unknown",
+      detail: params.emptyDetail,
+      checks: [],
+    };
+  }
+  const failed = normalizedChecks.find((check) => check.status === "blocked");
+  return {
+    key: params.key,
+    label: params.label,
+    status: failed ? "blocked" : "pass",
+    detail: failed?.detail ?? params.passDetail,
+    checks: normalizedChecks,
+  };
+}
+
+function recorderCoverageBlockerLabel(key: string) {
+  return key
+    .split("_")
+    .map((part) => `${part.slice(0, 1).toUpperCase()}${part.slice(1)}`)
+    .join(" ");
+}
+
+function recorderMeetingStateGate(coverage: RecorderCoverageReadiness): ControlPlaneRecorderReadinessGate {
+  const coverageEntries = Object.entries(coverage.counts.blockers)
+    .filter(([, count]) => count > 0);
+  const alreadyCoveredCount = coverageEntries.find(([key]) => key === "already_covered")?.[1] ?? 0;
+  const blockers = coverageEntries
+    .filter(([key]) => key !== "already_covered")
+    .map(([key, count]) => ({
+      key,
+      label: recorderCoverageBlockerLabel(key),
+      status: "blocked" as const,
+      detail: `${count} upcoming scheduled meeting(s) are blocked by ${key}.`,
+    }));
+  const coveredCheck = alreadyCoveredCount > 0
+    ? [{
+      key: "already_covered",
+      label: "Already Covered",
+      status: "pass" as const,
+      detail: `${alreadyCoveredCount} upcoming scheduled meeting(s) already have recorder coverage.`,
+    }]
+    : [];
+  const checks = [...coveredCheck, ...blockers];
+
+  if (coverage.counts.total === 0) {
+    return {
+      key: "meeting_state",
+      label: "Scheduled meetings",
+      status: "warning",
+      detail: "No upcoming scheduled meetings were found in the recorder coverage window.",
+      checks: [],
+    };
+  }
+
+  if (coverage.counts.eligible === 0 && blockers.length > 0) {
+    return {
+      key: "meeting_state",
+      label: "Scheduled meetings",
+      status: "blocked",
+      detail: blockers[0]?.detail ?? "No upcoming scheduled meetings are eligible for recorder coverage.",
+      checks,
+    };
+  }
+
+  return {
+    key: "meeting_state",
+    label: "Scheduled meetings",
+    status: blockers.length > 0 ? "warning" : "pass",
+    detail: blockers.length > 0
+      ? `${coverage.counts.eligible} of ${coverage.counts.total} upcoming scheduled meeting(s) are eligible; ${blockers.length} blocker type(s) remain.`
+      : alreadyCoveredCount > 0 && coverage.counts.eligible === 0
+        ? `${alreadyCoveredCount} of ${coverage.counts.total} upcoming scheduled meeting(s) already have recorder coverage.`
+        : `${coverage.counts.eligible} of ${coverage.counts.total} upcoming scheduled meeting(s) are eligible for recorder coverage.`,
+    checks,
+  };
+}
+
+function buildManagedRecorderReadinessGates(
+  readiness: RecorderEnterpriseReadiness,
+  coverage: RecorderCoverageReadiness,
+): ControlPlaneRecorderReadinessGates {
+  return {
+    controlPlane: {
+      key: "control_plane",
+      label: "Control Plane access",
+      status: "pass",
+      detail: "Managed workspace recorder readiness was inspected directly.",
+      checks: [],
+    },
+    tenantConfig: recorderGateFromChecks({
+      key: "tenant_config",
+      label: "Tenant configuration",
+      checks: readiness.checks.filter((check) => RECORDER_TENANT_CONFIG_CHECK_KEYS.has(check.key)),
+      passDetail: "Recorder entitlement and workspace configuration are enabled.",
+      emptyDetail: "Tenant recorder configuration checks were not returned.",
+    }),
+    vendor: recorderGateFromChecks({
+      key: "vendor",
+      label: "Vendor credentials",
+      checks: readiness.checks.filter((check) => RECORDER_VENDOR_CHECK_KEYS.has(check.key)),
+      passDetail: "Recorder vendor runtime credentials are configured.",
+      emptyDetail: "Recorder vendor credential checks were not returned.",
+    }),
+    calendar: recorderGateFromChecks({
+      key: "calendar",
+      label: "Calendar connection",
+      checks: readiness.checks.filter((check) => RECORDER_CALENDAR_CHECK_KEYS.has(check.key)),
+      passDetail: "Recorder calendar connection and sync checks are passing.",
+      emptyDetail: "Recorder calendar checks were not returned.",
+    }),
+    meetingState: recorderMeetingStateGate(coverage),
+    liveVendorProof: recorderGateFromChecks({
+      key: "live_vendor_proof",
+      label: "Live vendor proof",
+      checks: readiness.checks.filter((check) => RECORDER_LIVE_VENDOR_CHECK_KEYS.has(check.key)),
+      passDetail: "A recent vendor-backed recorder smoke or real recording exists.",
+      emptyDetail: "Live recorder vendor proof check was not returned.",
+    }),
+  };
+}
+
+function supportConnectorRecorderReadinessGates(params: {
+  resultSummary?: unknown;
+  errorDetail?: string | null;
+}): ControlPlaneRecorderReadinessGates {
+  const hasError = Boolean(params.errorDetail);
+  const maybeSummary = params.resultSummary && typeof params.resultSummary === "object"
+    ? params.resultSummary as JsonRecord
+    : {};
+  const counts = maybeSummary.counts && typeof maybeSummary.counts === "object"
+    ? maybeSummary.counts as { total?: unknown; eligible?: unknown; blockers?: unknown }
+    : null;
+  const total = typeof counts?.total === "number" ? counts.total : null;
+  const eligible = typeof counts?.eligible === "number" ? counts.eligible : null;
+  const blockerEntries = counts?.blockers && typeof counts.blockers === "object"
+    ? Object.entries(counts.blockers as Record<string, unknown>)
+      .filter(([key, count]) => key !== "already_covered" && typeof count === "number" && count > 0)
+      .map(([key, count]) => ({
+        key,
+        label: recorderCoverageBlockerLabel(key),
+        status: "blocked" as const,
+        detail: `${count} upcoming scheduled meeting(s) are blocked by ${key}.`,
+      }))
+    : [];
+  const alreadyCoveredCount = counts?.blockers
+    && typeof counts.blockers === "object"
+    && typeof (counts.blockers as Record<string, unknown>).already_covered === "number"
+    ? (counts.blockers as Record<string, number>).already_covered
+    : 0;
+  const coveredEntries = alreadyCoveredCount > 0
+    ? [{
+      key: "already_covered",
+      label: "Already Covered",
+      status: "pass" as const,
+      detail: `${alreadyCoveredCount} upcoming scheduled meeting(s) already have recorder coverage.`,
+    }]
+    : [];
+  const meetingStatus: ControlPlaneRecorderReadinessGateStatus = total === null
+    ? "unknown"
+    : total === 0
+      ? "warning"
+      : eligible === 0 && blockerEntries.length > 0
+        ? "blocked"
+        : blockerEntries.length > 0
+          ? "warning"
+          : "pass";
+  const sanitizedError = sanitizeDiagnosticText(params.errorDetail);
+
+  return {
+    controlPlane: {
+      key: "control_plane",
+      label: "Control Plane access",
+      status: hasError ? "blocked" : "pass",
+      detail: hasError
+        ? sanitizedError
+        : "Support connector returned recorder readiness.",
+      checks: hasError
+        ? [{
+          key: "support_connector",
+          label: "Support connector",
+          status: "blocked",
+          detail: sanitizedError,
+        }]
+        : [],
+    },
+    tenantConfig: {
+      key: "tenant_config",
+      label: "Tenant configuration",
+      status: "unknown",
+      detail: "Support connector readiness did not include tenant recorder configuration checks.",
+      checks: [],
+    },
+    vendor: {
+      key: "vendor",
+      label: "Vendor credentials",
+      status: "unknown",
+      detail: "Support connector readiness did not include vendor credential checks.",
+      checks: [],
+    },
+    calendar: {
+      key: "calendar",
+      label: "Calendar connection",
+      status: "unknown",
+      detail: "Support connector readiness did not include calendar connection checks.",
+      checks: [],
+    },
+    meetingState: {
+      key: "meeting_state",
+      label: "Scheduled meetings",
+      status: meetingStatus,
+      detail: total === null
+        ? "Support connector readiness did not include scheduled meeting coverage counts."
+        : total === 0
+          ? "No upcoming scheduled meetings were found by the support connector."
+          : alreadyCoveredCount > 0 && (eligible ?? 0) === 0 && blockerEntries.length === 0
+            ? `${alreadyCoveredCount} of ${total} upcoming scheduled meeting(s) already have recorder coverage.`
+            : `${eligible ?? 0} of ${total} upcoming scheduled meeting(s) are eligible for recorder coverage.`,
+      checks: [...coveredEntries, ...blockerEntries],
+    },
+    liveVendorProof: {
+      key: "live_vendor_proof",
+      label: "Live vendor proof",
+      status: "unknown",
+      detail: "Support connector readiness did not include live vendor-backed recorder proof.",
+      checks: [],
+    },
+  };
+}
+
+function compactSupportConnectorRecorderReadiness(resultSummary: unknown, errorDetail?: string | null) {
+  const summary = resultSummary && typeof resultSummary === "object" ? resultSummary as JsonRecord : {};
+  return {
+    ...summary,
+    ready: Boolean(summary.ready) && !errorDetail,
+    status: errorDetail ? "blocked" : (summary.ready ? "ready" : "unknown"),
+    gates: supportConnectorRecorderReadinessGates({ resultSummary, errorDetail }),
+  };
+}
+
 function compactRecorderMeetingOpsReadiness(readiness: Awaited<ReturnType<typeof getMeetingRecorderEnterpriseReadiness>>) {
   const failedChecks = readiness.checks
     .filter((check) => !check.ok)
@@ -6200,33 +6512,21 @@ export async function getControlPlaneMeetingOperationsReadiness(actor: AppActor,
         managedWorkspaceId: null,
         accessMode: "support_connector" as const,
         agenda: null,
-        recorder: operation.resultSummary ?? {
-          ready: false,
-          checks: [{
-            key: "support_connector",
-            label: "Support connector",
-            ok: false,
-            detail: "Recorder readiness result was not returned by the customer support connector.",
-          }],
-        },
+        recorder: compactSupportConnectorRecorderReadiness(
+          operation.resultSummary,
+          operation.resultSummary ? null : "Recorder readiness result was not returned by the customer support connector.",
+        ),
       };
     } catch (error) {
+      const detail = error instanceof Error
+        ? sanitizeSupportReadinessDetail(error.message)
+        : "Support connector readiness check failed.";
       return {
         deploymentId,
         managedWorkspaceId: null,
         accessMode: "support_connector" as const,
         agenda: null,
-        recorder: {
-          ready: false,
-          checks: [{
-            key: "support_connector",
-            label: "Support connector",
-            ok: false,
-            detail: error instanceof Error
-              ? sanitizeSupportReadinessDetail(error.message)
-              : "Support connector readiness check failed.",
-          }],
-        },
+        recorder: compactSupportConnectorRecorderReadiness(null, detail),
       };
     }
   }
@@ -6242,6 +6542,7 @@ export async function getControlPlaneMeetingOperationsReadiness(actor: AppActor,
     agenda,
     recorder: {
       ...compactRecorderMeetingOpsReadiness(recorder),
+      gates: buildManagedRecorderReadinessGates(recorder, coverage),
       upcomingCoverage: {
         window: coverage.window,
         counts: coverage.counts,

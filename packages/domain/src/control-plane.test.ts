@@ -2968,31 +2968,60 @@ describe("control plane domain", () => {
       id: "slack-1",
       settings: { defaultAgendaChannelId: "C123", agendaTimezone: "UTC" },
     });
-    prismaMock.meeting.findMany.mockResolvedValueOnce([
-      {
-        id: "meeting-1",
-        workspaceId: "ws-1",
-        title: "Weekly update",
-        status: "SCHEDULED",
-        recordedAt: nextMeetingAt,
-        scheduledEndAt: new Date(nextMeetingAt.getTime() + 60 * 60 * 1000),
-        agendaJson: { title: "Agenda", sections: [] },
-        agendaChannelId: "C123",
-        agendaMessageTs: "1710000001.000100",
-        agendaPostedAt: recent,
-        seriesId: "series-1",
-        series: { recurrenceRule: "FREQ=WEEKLY" },
-      },
-    ]);
+    const recorderMeetingUrl = "https://meet.google.com/abc-defg-hij";
+    prismaMock.meeting.findMany
+      .mockResolvedValueOnce([
+        {
+          id: "meeting-1",
+          workspaceId: "ws-1",
+          title: "Weekly update",
+          status: "SCHEDULED",
+          recordedAt: nextMeetingAt,
+          scheduledEndAt: new Date(nextMeetingAt.getTime() + 60 * 60 * 1000),
+          agendaJson: { title: "Agenda", sections: [] },
+          agendaChannelId: "C123",
+          agendaMessageTs: "1710000001.000100",
+          agendaPostedAt: recent,
+          seriesId: "series-1",
+          series: { recurrenceRule: "FREQ=WEEKLY" },
+        },
+      ])
+      .mockResolvedValueOnce([
+        {
+          id: "meeting-covered",
+          seriesId: "series-1",
+          recordedAt: nextMeetingAt,
+          scheduledEndAt: new Date(nextMeetingAt.getTime() + 60 * 60 * 1000),
+          meetingUrl: recorderMeetingUrl,
+          series: { meetingUrl: null },
+          recordings: [{
+            status: "SCHEDULED",
+            meetingUrl: recorderMeetingUrl,
+            failureCode: null,
+          }],
+        },
+      ]);
     prismaMock.workflowJob.findFirst.mockResolvedValue(null);
-    prismaMock.workspaceFeatureFlag.findUnique.mockResolvedValueOnce({ enabled: true });
-    prismaMock.workspaceMeetingRecorderConfig.findUnique.mockResolvedValueOnce({
-      workspaceId: "ws-1",
-      enabled: true,
-      defaultProvider: "RECALL_AI",
-      fallbackProvider: null,
-      monthlyMinuteCap: 6000,
-    });
+    prismaMock.workspaceFeatureFlag.findUnique
+      .mockResolvedValueOnce({ enabled: true })
+      .mockResolvedValueOnce({ enabled: true });
+    prismaMock.workspaceMeetingRecorderConfig.findUnique
+      .mockResolvedValueOnce({
+        workspaceId: "ws-1",
+        enabled: true,
+        autoRecordEnabled: true,
+        defaultProvider: "RECALL_AI",
+        fallbackProvider: null,
+        monthlyMinuteCap: 6000,
+      })
+      .mockResolvedValueOnce({
+        workspaceId: "ws-1",
+        enabled: true,
+        autoRecordEnabled: true,
+        defaultProvider: "RECALL_AI",
+        fallbackProvider: null,
+        monthlyMinuteCap: 6000,
+      });
     prismaMock.workspaceRecorderCalendarSource.findUnique.mockResolvedValueOnce({
       workspaceId: "ws-1",
       status: "ACTIVE",
@@ -3030,6 +3059,14 @@ describe("control plane domain", () => {
         status: "ready",
         ready: true,
         provider: "RECALL_AI",
+        gates: {
+          controlPlane: { status: "pass" },
+          tenantConfig: { status: "pass" },
+          vendor: { status: "pass" },
+          calendar: { status: "pass" },
+          meetingState: { status: "pass" },
+          liveVendorProof: { status: "pass" },
+        },
         upcomingCoverage: {
           counts: expect.objectContaining({
             total: expect.any(Number),
@@ -3096,6 +3133,14 @@ describe("control plane domain", () => {
       agenda: null,
       recorder: remoteReadiness,
     });
+    expect(result.recorder.gates).toMatchObject({
+      controlPlane: { status: "pass" },
+      tenantConfig: { status: "unknown" },
+      vendor: { status: "unknown" },
+      calendar: { status: "unknown" },
+      meetingState: { status: "blocked" },
+      liveVendorProof: { status: "unknown" },
+    });
     expect(prismaMock.supportOperation.create).toHaveBeenCalledWith(expect.objectContaining({
       data: expect.objectContaining({
         action: "meeting_recorders.readiness",
@@ -3106,6 +3151,65 @@ describe("control plane domain", () => {
     expect(body.params.name).toBe("get_meeting_recorder_coverage_readiness");
     expect(JSON.stringify(result)).not.toContain("support-token");
     expect(JSON.stringify(result)).not.toContain("teams.microsoft.com");
+  });
+
+  it("returns explicit control-plane recorder readiness blockers when support connector readiness fails", async () => {
+    const { getControlPlaneMeetingOperationsReadiness } = await import("./control-plane");
+    prismaMock.customerDeployment.findUnique
+      .mockResolvedValueOnce({
+        id: "inst-1",
+        label: "Remote Acme",
+        customerAccountId: "cust-1",
+        managedWorkspaceId: null,
+        supportCredentialEnc: "encrypted:support-token",
+        managedWorkspace: null,
+      })
+      .mockResolvedValueOnce({
+        id: "inst-1",
+        label: "Remote Acme",
+        url: "https://remote.example",
+        customerSlug: "remote-acme",
+        customerAccountId: "cust-1",
+        deploymentKind: "RAILWAY",
+        deploymentStatus: "ACTIVE",
+        supportMcpUrl: "https://remote.example/api/mcp",
+        supportCredentialEnc: "encrypted:support-token",
+        supportConnectorStatus: "ACTIVE",
+      });
+    prismaMock.supportOperation.create.mockResolvedValueOnce({ id: "op-readiness", action: "meeting_recorders.readiness" });
+    prismaMock.supportOperation.update.mockResolvedValueOnce({
+      id: "op-readiness",
+      status: "FAILED",
+      error: "Support connector unavailable.",
+    });
+    global.fetch = vi.fn(async () => {
+      throw new Error("Connector 401 from https://teams.microsoft.com/l/meetup-join/private");
+    }) as any;
+
+    const result = await getControlPlaneMeetingOperationsReadiness(operatorActor, "inst-1");
+
+    expect(result).toMatchObject({
+      deploymentId: "inst-1",
+      managedWorkspaceId: null,
+      accessMode: "support_connector",
+      recorder: {
+        ready: false,
+        status: "blocked",
+        gates: {
+          controlPlane: {
+            status: "blocked",
+            checks: [{
+              key: "support_connector",
+              status: "blocked",
+            }],
+          },
+          vendor: { status: "unknown" },
+          liveVendorProof: { status: "unknown" },
+        },
+      },
+    });
+    expect(result.recorder.gates.controlPlane.detail).not.toContain("teams.microsoft.com");
+    expect(JSON.stringify(result)).not.toContain("support-token");
   });
 
   it("queues agenda preparation for managed workspaces and audits the reason", async () => {
