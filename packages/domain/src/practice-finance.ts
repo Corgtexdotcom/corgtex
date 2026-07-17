@@ -32,6 +32,7 @@ export const SLICING_PIE_TIME_MULTIPLIER = 2;
 export const SLICING_PIE_EXPENSE_MULTIPLIER = 4;
 export const PRACTICE_LEDGER_CURRENCY = "USD";
 const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
+const PRISMA_INT_MAX = 2_147_483_647;
 
 export type PracticeAttentionIssue = "setup" | "budget" | "margin";
 
@@ -109,7 +110,10 @@ export type NativePracticeProject = Pick<
   | "poValueCents"
   | "serviceBudgetCents"
   | "expenseBudgetCents"
+  | "usedCents"
+  | "weeklyBurnCents"
   | "targetMarginBps"
+  | "currentMarginBps"
 >;
 
 export type NativePracticeTimeEntry = Pick<
@@ -232,6 +236,8 @@ export type NativePracticeProjectLedgerRollup = {
   recentTimeCostCents: number;
   recentBillableExpenseCents: number;
   recentDirectExpenseCents: number;
+  timeEntryCount: number;
+  expenseCount: number;
 };
 
 type DbInt = number | bigint | string | null;
@@ -242,6 +248,7 @@ type NativePracticeTimeRollupRow = {
   timeCostCents: DbInt;
   recentTimeRevenueCents: DbInt;
   recentTimeCostCents: DbInt;
+  timeEntryCount: DbInt;
   invalidHoursRows: DbInt;
   invalidCurrencyRows: DbInt;
 };
@@ -252,6 +259,7 @@ type NativePracticeExpenseRollupRow = {
   directExpenseCents: DbInt;
   recentBillableExpenseCents: DbInt;
   recentDirectExpenseCents: DbInt;
+  expenseCount: DbInt;
   invalidCurrencyRows: DbInt;
 };
 
@@ -510,6 +518,8 @@ function emptyNativePracticeProjectLedgerRollup(projectId: string): NativePracti
     recentTimeCostCents: 0,
     recentBillableExpenseCents: 0,
     recentDirectExpenseCents: 0,
+    timeEntryCount: 0,
+    expenseCount: 0,
   };
 }
 
@@ -528,6 +538,7 @@ function rollupNativePracticeLedgerRows(params: {
   for (const entry of timeEntries) {
     assertNativePracticeTimeEntryHours(entry);
     assertNativePracticeTimeEntryCurrency(params.project, entry);
+    rollup.timeEntryCount += 1;
     const revenueCents = practiceTimeBillAmountCents(entry);
     const costCents = practiceTimeCostAmountCents(entry);
     rollup.timeRevenueCents += revenueCents;
@@ -540,6 +551,7 @@ function rollupNativePracticeLedgerRows(params: {
 
   for (const expense of expenses) {
     assertNativePracticeExpenseCurrency(params.project, expense);
+    rollup.expenseCount += 1;
     const amountCents = practiceExpenseFunctionalAmountCents(expense);
     rollup.directExpenseCents += amountCents;
     if (expense.billable) rollup.billableExpenseCents += amountCents;
@@ -598,13 +610,22 @@ export function calculateNativePracticeProjectHealthFromRollup(params: {
     "MIXED_CURRENCY",
     "Native practice project health requires a project currency.",
   );
-  const usedBudgetCents = params.rollup.timeRevenueCents + params.rollup.billableExpenseCents;
-  const directCostCents = params.rollup.timeCostCents + params.rollup.directExpenseCents;
+  const hasNativeLedgerRows = params.rollup.timeEntryCount > 0 || params.rollup.expenseCount > 0;
+  const ledgerUsedBudgetCents = params.rollup.timeRevenueCents + params.rollup.billableExpenseCents;
+  const legacyGrossMarginBps = params.project.currentMarginBps ?? 0;
+  const usedBudgetCents = hasNativeLedgerRows ? ledgerUsedBudgetCents : params.project.usedCents;
+  const directCostCents = hasNativeLedgerRows
+    ? params.rollup.timeCostCents + params.rollup.directExpenseCents
+    : Math.max(0, usedBudgetCents - Math.round((usedBudgetCents * legacyGrossMarginBps) / 10_000));
   const remainingBudgetCents = params.project.poValueCents - usedBudgetCents;
   const grossProfitCents = usedBudgetCents - directCostCents;
   const grossMarginBps = usedBudgetCents > 0 ? Math.round((grossProfitCents / usedBudgetCents) * 10_000) : 0;
-  const recentUsedBudgetCents = params.rollup.recentTimeRevenueCents + params.rollup.recentBillableExpenseCents;
-  const recentDirectCostCents = params.rollup.recentTimeCostCents + params.rollup.recentDirectExpenseCents;
+  const recentUsedBudgetCents = hasNativeLedgerRows
+    ? params.rollup.recentTimeRevenueCents + params.rollup.recentBillableExpenseCents
+    : params.project.weeklyBurnCents * recentWindowWeeks;
+  const recentDirectCostCents = hasNativeLedgerRows
+    ? params.rollup.recentTimeCostCents + params.rollup.recentDirectExpenseCents
+    : Math.max(0, recentUsedBudgetCents - Math.round((recentUsedBudgetCents * legacyGrossMarginBps) / 10_000));
 
   const exactRecentBudgetBurnPerWeekCents = recentUsedBudgetCents / recentWindowWeeks;
   const exactRecentCostBurnPerWeekCents = recentDirectCostCents / recentWindowWeeks;
@@ -1205,7 +1226,12 @@ const PRACTICE_PROJECT_STATUSES: PracticeProjectStatus[] = ["ACTIVE", "ON_HOLD",
 
 function normalizeCents(value: number | undefined, label: string): number {
   const cents = value ?? 0;
-  invariant(Number.isInteger(cents) && cents >= 0, 400, "INVALID_INPUT", `${label} must be a non-negative integer (cents).`);
+  invariant(
+    Number.isInteger(cents) && cents >= 0 && cents <= PRISMA_INT_MAX,
+    400,
+    "INVALID_INPUT",
+    `${label} must be a non-negative integer (cents) within the database range.`,
+  );
   return cents;
 }
 
@@ -1218,6 +1244,8 @@ function normalizePositiveCents(value: number | null | undefined, label: string)
 function isUniqueConstraintError(error: unknown): error is { code: string } {
   return typeof error === "object" && error !== null && (error as { code?: unknown }).code === "P2002";
 }
+
+type PracticeFinanceDbClient = typeof prisma | Prisma.TransactionClient;
 
 function normalizeBps(value: number | null | undefined, label: string): number | null {
   if (value == null) return null;
@@ -1425,7 +1453,10 @@ function nativePracticeProjectFromProject(project: Pick<
   | "poValueCents"
   | "serviceBudgetCents"
   | "expenseBudgetCents"
+  | "usedCents"
+  | "weeklyBurnCents"
   | "targetMarginBps"
+  | "currentMarginBps"
 >): NativePracticeProject {
   return {
     id: project.id,
@@ -1438,7 +1469,10 @@ function nativePracticeProjectFromProject(project: Pick<
     poValueCents: project.poValueCents,
     serviceBudgetCents: project.serviceBudgetCents,
     expenseBudgetCents: project.expenseBudgetCents,
+    usedCents: project.usedCents,
+    weeklyBurnCents: project.weeklyBurnCents,
     targetMarginBps: project.targetMarginBps,
+    currentMarginBps: project.currentMarginBps,
   };
 }
 
@@ -1481,7 +1515,10 @@ const NATIVE_PRACTICE_PROJECT_SELECT = {
   poValueCents: true,
   serviceBudgetCents: true,
   expenseBudgetCents: true,
+  usedCents: true,
+  weeklyBurnCents: true,
   targetMarginBps: true,
+  currentMarginBps: true,
 } satisfies Prisma.PracticeProjectSelect;
 
 function mergeNativePracticeLedgerRollups(
@@ -1512,6 +1549,7 @@ function mergeNativePracticeLedgerRollups(
     rollup.timeCostCents = dbIntToNumber(row.timeCostCents);
     rollup.recentTimeRevenueCents = dbIntToNumber(row.recentTimeRevenueCents);
     rollup.recentTimeCostCents = dbIntToNumber(row.recentTimeCostCents);
+    rollup.timeEntryCount = Math.max(1, dbIntToNumber(row.timeEntryCount));
     rollups.set(row.projectId, rollup);
   }
 
@@ -1527,6 +1565,7 @@ function mergeNativePracticeLedgerRollups(
     rollup.directExpenseCents = dbIntToNumber(row.directExpenseCents);
     rollup.recentBillableExpenseCents = dbIntToNumber(row.recentBillableExpenseCents);
     rollup.recentDirectExpenseCents = dbIntToNumber(row.recentDirectExpenseCents);
+    rollup.expenseCount = Math.max(1, dbIntToNumber(row.expenseCount));
     rollups.set(row.projectId, rollup);
   }
 
@@ -1602,7 +1641,8 @@ async function queryNativePracticeLedgerRollups(
             THEN 1
             ELSE 0
           END
-        ), 0)::bigint AS "invalidCurrencyRows"
+        ), 0)::bigint AS "invalidCurrencyRows",
+        COUNT(*)::bigint AS "timeEntryCount"
       FROM "PracticeTimeEntry" t
       JOIN "PracticeProject" p
         ON p."id" = t."projectId"
@@ -1673,7 +1713,8 @@ async function queryNativePracticeLedgerRollups(
             THEN 1
             ELSE 0
           END
-        ), 0)::bigint AS "invalidCurrencyRows"
+        ), 0)::bigint AS "invalidCurrencyRows",
+        COUNT(*)::bigint AS "expenseCount"
       FROM "PracticeExpense" e
       JOIN "PracticeProject" p
         ON p."id" = e."projectId"
@@ -1771,7 +1812,8 @@ export async function listNativePracticeProjectHealth(
             THEN 1
             ELSE 0
           END
-        ), 0)::bigint AS "invalidCurrencyRows"
+        ), 0)::bigint AS "invalidCurrencyRows",
+        COUNT(*)::bigint AS "timeEntryCount"
       FROM "PracticeTimeEntry" t
       JOIN "PracticeProject" p
         ON p."id" = t."projectId"
@@ -1842,7 +1884,8 @@ export async function listNativePracticeProjectHealth(
             THEN 1
             ELSE 0
           END
-        ), 0)::bigint AS "invalidCurrencyRows"
+        ), 0)::bigint AS "invalidCurrencyRows",
+        COUNT(*)::bigint AS "expenseCount"
       FROM "PracticeExpense" e
       JOIN "PracticeProject" p
         ON p."id" = e."projectId"
@@ -1943,16 +1986,105 @@ async function linkNativePracticeProjectClient(projectId: string, clientId: stri
   return clientId;
 }
 
+function nativePracticeConsultantLookupWhere(params: {
+  workspaceId: string;
+  displayName: string;
+  email: string | null;
+}) {
+  return {
+    workspaceId: params.workspaceId,
+    ...(params.email
+      ? { email: { equals: params.email, mode: "insensitive" as const } }
+      : { name: { equals: params.displayName, mode: "insensitive" as const } }),
+  };
+}
+
+async function findNativePracticeConsultantMatches(
+  db: PracticeFinanceDbClient,
+  params: {
+    workspaceId: string;
+    displayName: string;
+    email: string | null;
+  },
+) {
+  return db.practiceConsultant.findMany({
+    where: nativePracticeConsultantLookupWhere(params),
+    select: { id: true },
+    orderBy: [{ id: "asc" }],
+    take: 2,
+  });
+}
+
+function assertUnambiguousNativePracticeConsultant(
+  matches: Array<{ id: string }>,
+  email: string | null,
+) {
+  invariant(
+    matches.length <= 1,
+    409,
+    "AMBIGUOUS_CONSULTANT",
+    email
+      ? "Consultant email is ambiguous; resolve duplicate consultants."
+      : "Consultant name is ambiguous; include an email.",
+  );
+}
+
+function nativePracticeConsultantIdentityLockKey(params: {
+  workspaceId: string;
+  displayName: string;
+  email: string | null;
+}) {
+  const identity = params.email
+    ? `email:${params.email}`
+    : `name:${params.displayName.toLocaleLowerCase("en-US")}`;
+  return `native-practice-consultant:${params.workspaceId}:${identity}`;
+}
+
+async function lockNativePracticeConsultantIdentity(
+  tx: Prisma.TransactionClient,
+  lockKey: string,
+) {
+  await tx.$queryRaw(Prisma.sql`SELECT pg_advisory_xact_lock(hashtextextended(${lockKey}, 0))`);
+}
+
 async function ensureNativePracticeClientForProject(project: Awaited<ReturnType<typeof loadNativePracticeProjectForLedgerWrite>>) {
   if (project.clientId) return project.clientId;
 
   if (project.crmAccountId) {
-    const crmClient = await prisma.practiceClient.findFirst({
+    const namedCrmClients = await prisma.practiceClient.findMany({
+      where: {
+        workspaceId: project.workspaceId,
+        crmAccountId: project.crmAccountId,
+        name: { equals: project.clientName, mode: "insensitive" },
+      },
+      select: { id: true },
+      orderBy: [{ id: "asc" }],
+      take: 2,
+    });
+    invariant(
+      namedCrmClients.length <= 1,
+      409,
+      "AMBIGUOUS_CLIENT",
+      "CRM account is linked to multiple matching practice clients; resolve duplicate clients before recording ledger entries.",
+    );
+    if (namedCrmClients[0]) {
+      return linkNativePracticeProjectClient(project.id, namedCrmClients[0].id);
+    }
+
+    const crmClients = await prisma.practiceClient.findMany({
       where: { workspaceId: project.workspaceId, crmAccountId: project.crmAccountId },
       select: { id: true },
+      orderBy: [{ id: "asc" }],
+      take: 2,
     });
-    if (crmClient) {
-      return linkNativePracticeProjectClient(project.id, crmClient.id);
+    invariant(
+      crmClients.length <= 1,
+      409,
+      "AMBIGUOUS_CLIENT",
+      "CRM account is linked to multiple practice clients; resolve duplicate clients before recording ledger entries.",
+    );
+    if (crmClients[0]) {
+      return linkNativePracticeProjectClient(project.id, crmClients[0].id);
     }
   }
 
@@ -2003,25 +2135,9 @@ async function resolveNativePracticeConsultant(params: {
   const displayName = name || email;
   invariant(displayName, 400, "INVALID_INPUT", "Consultant is required.");
 
-  const matches = await prisma.practiceConsultant.findMany({
-    where: {
-      workspaceId: params.workspaceId,
-      ...(email
-        ? { email: { equals: email, mode: "insensitive" } }
-        : { name: { equals: displayName, mode: "insensitive" } }),
-    },
-    select: { id: true },
-    orderBy: [{ id: "asc" }],
-    take: 2,
-  });
-  invariant(
-    matches.length <= 1,
-    409,
-    "AMBIGUOUS_CONSULTANT",
-    email
-      ? "Consultant email is ambiguous; resolve duplicate consultants."
-      : "Consultant name is ambiguous; include an email.",
-  );
+  const lookup = { workspaceId: params.workspaceId, displayName, email };
+  const matches = await findNativePracticeConsultantMatches(prisma, lookup);
+  assertUnambiguousNativePracticeConsultant(matches, email);
   if (matches[0]) return matches[0].id;
 
   const sourceSatelliteId = manualLedgerConsultantSourceId(params.idempotencyKey);
@@ -2033,27 +2149,43 @@ async function resolveNativePracticeConsultant(params: {
     if (sourceMatch) return sourceMatch.id;
   }
 
-  try {
-    const created = await prisma.practiceConsultant.create({
-      data: {
-        workspaceId: params.workspaceId,
-        name: displayName,
-        email,
-        sourceSatelliteId,
-        active: true,
-      },
-      select: { id: true },
-    });
-    return created.id;
-  } catch (error) {
-    if (!sourceSatelliteId || !isUniqueConstraintError(error)) throw error;
-    const created = await prisma.practiceConsultant.findFirst({
-      where: { workspaceId: params.workspaceId, sourceSatelliteId },
-      select: { id: true },
-    });
-    if (created) return created.id;
-    throw error;
-  }
+  return prisma.$transaction(async (tx) => {
+    await lockNativePracticeConsultantIdentity(tx, nativePracticeConsultantIdentityLockKey(lookup));
+
+    const lockedMatches = await findNativePracticeConsultantMatches(tx, lookup);
+    assertUnambiguousNativePracticeConsultant(lockedMatches, email);
+    if (lockedMatches[0]) return lockedMatches[0].id;
+
+    if (sourceSatelliteId) {
+      const sourceMatch = await tx.practiceConsultant.findFirst({
+        where: { workspaceId: params.workspaceId, sourceSatelliteId },
+        select: { id: true },
+      });
+      if (sourceMatch) return sourceMatch.id;
+    }
+
+    try {
+      const created = await tx.practiceConsultant.create({
+        data: {
+          workspaceId: params.workspaceId,
+          name: displayName,
+          email,
+          sourceSatelliteId,
+          active: true,
+        },
+        select: { id: true },
+      });
+      return created.id;
+    } catch (error) {
+      if (!sourceSatelliteId || !isUniqueConstraintError(error)) throw error;
+      const created = await tx.practiceConsultant.findFirst({
+        where: { workspaceId: params.workspaceId, sourceSatelliteId },
+        select: { id: true },
+      });
+      if (created) return created.id;
+      throw error;
+    }
+  });
 }
 
 export async function getNativePracticeProjectDetail(
