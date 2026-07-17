@@ -606,6 +606,21 @@ describe("practice-finance pure derivations", () => {
     }
   });
 
+  it("rejects negative market values when previewing Slicing Pie contributions", () => {
+    try {
+      previewSlicingPieContributionFromTimeEntry(nativeTimeEntry({ costAmountCents: -100 }));
+      throw new Error("Expected negative time contribution value to be rejected.");
+    } catch (error) {
+      expect(error).toMatchObject({ code: "INVALID_INPUT" });
+    }
+    try {
+      previewSlicingPieContributionFromExpense(nativeExpense({ amountFunctionalCents: -100 }));
+      throw new Error("Expected negative expense contribution value to be rejected.");
+    } catch (error) {
+      expect(error).toMatchObject({ code: "INVALID_INPUT" });
+    }
+  });
+
   it("calculates contribution values and fixed Slicing Pie multipliers", () => {
     const timeAmount = calculatePracticeContributionAmount({
       type: "TIME",

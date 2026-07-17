@@ -694,6 +694,12 @@ function calculateContributionPreview(params: {
   multiplier: number;
   paymentBatchId: string | null;
 }): NativePracticeContributionPreview {
+  invariant(
+    params.marketValueCents >= 0,
+    400,
+    "INVALID_INPUT",
+    "Contribution preview market value must be non-negative.",
+  );
   const paidAmountCents = Math.min(Math.max(0, params.paidAmountCents), params.marketValueCents);
   const unpaidAmountCents = Math.max(0, params.marketValueCents - paidAmountCents);
 
