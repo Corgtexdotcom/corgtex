@@ -25,6 +25,7 @@ const { prismaMock } = vi.hoisted(() => {
     },
     member: {
       findUnique: vi.fn(),
+      findMany: vi.fn(),
     },
     roleAssignment: {
       create: vi.fn(),
@@ -50,7 +51,10 @@ const { prismaMock } = vi.hoisted(() => {
       updateMany: vi.fn(),
     },
     notification: {
-      create: vi.fn(),
+      createMany: vi.fn(),
+    },
+    notificationPreference: {
+      findMany: vi.fn(),
     },
     auditLog: {
       create: vi.fn(),
@@ -99,7 +103,9 @@ describe("roles domain", () => {
       conversation: { id: "conversation-1" },
     });
     prismaMock.roleOnboardingSession.updateMany.mockResolvedValue({ count: 1 });
-    prismaMock.notification.create.mockResolvedValue({});
+    prismaMock.notification.createMany.mockResolvedValue({ count: 1 });
+    prismaMock.notificationPreference.findMany.mockResolvedValue([]);
+    prismaMock.member.findMany.mockResolvedValue([{ userId: "user-1" }]);
     prismaMock.roleAssignment.upsert.mockResolvedValue({ id: "assignment-1" });
     prismaMock.roleAssignment.deleteMany.mockResolvedValue({ count: 1 });
     prismaMock.circleAgentAssignment.updateMany.mockResolvedValue({ count: 1 });
@@ -436,13 +442,16 @@ describe("roles domain", () => {
         topic: "Onboarding: Lead",
       }),
     }));
-    expect(prismaMock.notification.create).toHaveBeenCalledWith(expect.objectContaining({
-      data: expect.objectContaining({
-        userId: "user-1",
-        entityType: "ConversationSession",
-        entityId: "conversation-1",
-      }),
-    }));
+    expect(prismaMock.notification.createMany).toHaveBeenCalledWith({
+      data: [
+        expect.objectContaining({
+          userId: "user-1",
+          entityType: "ConversationSession",
+          entityId: "conversation-1",
+          type: "role-onboarding.assigned",
+        }),
+      ],
+    });
     expect(prismaMock.roleAssignment.upsert).toHaveBeenCalledWith(expect.objectContaining({
       where: {
         roleId_memberId: {

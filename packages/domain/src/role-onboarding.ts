@@ -3,6 +3,7 @@ import { prisma } from "@corgtex/shared";
 import type { AppActor } from "@corgtex/shared";
 import { requireWorkspaceMembership } from "./auth";
 import { invariant } from "./errors";
+import { createNotificationIntent } from "./notifications";
 import { activeRoleAssignmentWhere, isRoleAssignmentActive } from "./role-assignment-activity";
 
 const ACTIVE_ONBOARDING_STATUSES: RoleOnboardingStatus[] = ["PENDING", "ACTIVE"];
@@ -172,16 +173,15 @@ export async function ensureRoleOnboardingForAssignment(
     include: { conversation: true },
   });
 
-  await tx.notification.create({
-    data: {
-      workspaceId: params.workspaceId,
-      userId: params.member.userId,
-      type: "role-onboarding.assigned",
-      entityType: "ConversationSession",
-      entityId: conversation.id,
-      title: `Role onboarding: ${params.role.name}`,
-      bodyMd: `${assigneeName}, your guided onboarding chat for **${params.role.name}** is ready.`,
-    },
+  await createNotificationIntent(tx, {
+    workspaceId: params.workspaceId,
+    type: "role-onboarding.assigned",
+    recipientUserIds: [params.member.userId],
+    entityType: "ConversationSession",
+    entityId: conversation.id,
+    title: `Role onboarding: ${params.role.name}`,
+    bodyMd: `${assigneeName}, your guided onboarding chat for **${params.role.name}** is ready.`,
+    priority: "HIGH",
   });
 
   return { ...session, wasCreated: true };

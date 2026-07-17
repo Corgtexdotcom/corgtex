@@ -4,10 +4,15 @@ import { prisma } from "@corgtex/shared";
 import { requireWorkspaceMembership, actorUserIdForWorkspace } from "./auth";
 import { invariant } from "./errors";
 import { appendEvents } from "./events";
+import { humanMemberIdentityWhere } from "./member-identity";
+import { createNotificationIntent } from "./notifications";
+import { activeRoleAssignmentWhere } from "./role-assignment-activity";
 import { getParentWorkItemVersion } from "./work-item-versions";
 
 const VALID_ENTRY_TYPES = ["REACTION", "OBJECTION"];
 const VALID_PARENT_TYPES = ["PROPOSAL", "TENSION", "MEETING", "BRAIN_ARTICLE", "ACTION"];
+const MENTION_PATTERN = /(^|[^\p{L}\p{N}_])@([\p{L}\p{N}][\p{L}\p{N}._-]{0,80})/gu;
+const NOTIFICATION_EXCERPT_LIMIT = 240;
 const deliberationEntryListInclude = {
   author: {
     select: {
@@ -39,6 +44,189 @@ type DeliberationEntryRecord = DeliberationEntry;
 
 function validateEntryType(entryType: string) {
   invariant(VALID_ENTRY_TYPES.includes(entryType), 400, "INVALID_INPUT", `Invalid entryType: ${entryType}`);
+}
+
+function actorLabel(actor: AppActor) {
+  if (actor.kind === "user") {
+    return actor.user.displayName || actor.user.email || "Someone";
+  }
+  return actor.label || "Corgtex";
+}
+
+function parentLabel(parentType: string) {
+  if (parentType === "BRAIN_ARTICLE") return "Brain article";
+  return parentType.toLocaleLowerCase().replace(/_/g, " ");
+}
+
+function parentEntityType(parentType: string) {
+  if (parentType === "TENSION") return "Tension";
+  if (parentType === "PROPOSAL") return "Proposal";
+  if (parentType === "ACTION") return "Action";
+  if (parentType === "MEETING") return "Meeting";
+  if (parentType === "BRAIN_ARTICLE") return "BrainArticle";
+  return parentType;
+}
+
+function normalizeMentionAlias(value: string) {
+  return value
+    .normalize("NFKD")
+    .replace(/\p{Diacritic}/gu, "")
+    .toLocaleLowerCase()
+    .replace(/^@+/, "")
+    .trim()
+    .replace(/[^\p{L}\p{N}._-]+/gu, "");
+}
+
+function mentionTokens(bodyMd: string) {
+  const tokens = new Set<string>();
+  for (const match of bodyMd.matchAll(MENTION_PATTERN)) {
+    const alias = normalizeMentionAlias(match[2]);
+    if (alias) tokens.add(alias);
+  }
+  return tokens;
+}
+
+function memberAliasCandidates(member: { user: { displayName: string | null; email: string } }) {
+  const aliases = new Set<string>();
+  const emailAlias = normalizeMentionAlias(member.user.email.split("@")[0] ?? "");
+  if (emailAlias) {
+    aliases.add(emailAlias);
+    const compactEmailAlias = normalizeMentionAlias(emailAlias.replace(/[._-]+/g, ""));
+    if (compactEmailAlias) aliases.add(compactEmailAlias);
+  }
+
+  const name = member.user.displayName?.trim();
+  if (name) {
+    const nameParts = name
+      .normalize("NFKD")
+      .replace(/\p{Diacritic}/gu, "")
+      .split(/[^\p{L}\p{N}]+/gu)
+      .map((part) => normalizeMentionAlias(part))
+      .filter(Boolean);
+    for (const part of nameParts) aliases.add(part);
+    if (nameParts.length > 1) {
+      aliases.add(nameParts.join(""));
+      aliases.add(nameParts.join("."));
+      aliases.add(nameParts.join("-"));
+      aliases.add(nameParts.join("_"));
+    }
+  }
+
+  return aliases;
+}
+
+async function resolveMentionedUserIds(tx: Prisma.TransactionClient, params: {
+  workspaceId: string;
+  bodyMd: string;
+  authorUserId: string;
+  explicitTargetUserId?: string | null;
+  explicitTargetUserIds?: string[];
+  skipManualMentions?: boolean;
+}) {
+  const userIds = new Set<string>();
+  for (const userId of [params.explicitTargetUserId, ...(params.explicitTargetUserIds ?? [])]) {
+    if (userId && userId !== params.authorUserId) userIds.add(userId);
+  }
+  if (params.skipManualMentions) {
+    return Array.from(userIds);
+  }
+
+  const tokens = mentionTokens(params.bodyMd);
+  if (tokens.size === 0) {
+    return Array.from(userIds);
+  }
+
+  const members = await tx.member.findMany({
+    where: {
+      workspaceId: params.workspaceId,
+      isActive: true,
+      ...humanMemberIdentityWhere(),
+    },
+    include: {
+      user: {
+        select: {
+          id: true,
+          displayName: true,
+          email: true,
+        },
+      },
+    },
+  });
+
+  const aliases = new Map<string, Set<string>>();
+  for (const member of members) {
+    if (member.userId === params.authorUserId || !member.user) continue;
+    for (const alias of memberAliasCandidates(member)) {
+      const existing = aliases.get(alias) ?? new Set<string>();
+      existing.add(member.userId);
+      aliases.set(alias, existing);
+    }
+  }
+
+  for (const token of tokens) {
+    const matchedUserIds = aliases.get(token);
+    if (matchedUserIds?.size === 1) {
+      userIds.add(Array.from(matchedUserIds)[0]);
+    }
+  }
+
+  return Array.from(userIds);
+}
+
+async function circleTargetUserIds(tx: Prisma.TransactionClient, params: {
+  workspaceId: string;
+  circleId: string;
+  authorUserId: string;
+}) {
+  const assignments = await tx.roleAssignment.findMany({
+    where: {
+      ...activeRoleAssignmentWhere(),
+      role: { circleId: params.circleId },
+      member: {
+        workspaceId: params.workspaceId,
+        isActive: true,
+        ...humanMemberIdentityWhere(),
+      },
+    },
+    select: { member: { select: { userId: true } } },
+  });
+  return Array.from(new Set(assignments
+    .map((assignment) => assignment.member.userId)
+    .filter((userId) => userId !== params.authorUserId)));
+}
+
+async function parentNotificationContext(tx: Prisma.TransactionClient, params: {
+  workspaceId: string;
+  parentType: string;
+  parentId: string;
+}) {
+  if (params.parentType === "TENSION") {
+    const parent = await tx.tension.findFirst({ where: { id: params.parentId, workspaceId: params.workspaceId }, select: { title: true, isPrivate: true } });
+    return { title: parent && !parent.isPrivate ? parent.title : null, includeBody: !parent?.isPrivate };
+  }
+  if (params.parentType === "PROPOSAL") {
+    const parent = await tx.proposal.findFirst({ where: { id: params.parentId, workspaceId: params.workspaceId }, select: { title: true, isPrivate: true } });
+    return { title: parent && !parent.isPrivate ? parent.title : null, includeBody: !parent?.isPrivate };
+  }
+  if (params.parentType === "ACTION") {
+    const parent = await tx.action.findFirst({ where: { id: params.parentId, workspaceId: params.workspaceId }, select: { title: true, isPrivate: true } });
+    return { title: parent && !parent.isPrivate ? parent.title : null, includeBody: !parent?.isPrivate };
+  }
+  if (params.parentType === "MEETING") {
+    const parent = await tx.meeting.findUnique({ where: { id: params.parentId }, select: { title: true, workspaceId: true } });
+    return { title: parent?.workspaceId === params.workspaceId ? parent.title : null, includeBody: true };
+  }
+  if (params.parentType === "BRAIN_ARTICLE") {
+    const parent = await tx.brainArticle.findUnique({ where: { id: params.parentId }, select: { title: true, workspaceId: true } });
+    return { title: parent?.workspaceId === params.workspaceId ? parent.title : null, includeBody: true };
+  }
+  return { title: null, includeBody: true };
+}
+
+function notificationExcerpt(bodyMd: string) {
+  const normalized = bodyMd.replace(/\s+/g, " ").trim();
+  if (normalized.length <= NOTIFICATION_EXCERPT_LIMIT) return normalized;
+  return `${normalized.slice(0, NOTIFICATION_EXCERPT_LIMIT - 3).trimEnd()}...`;
 }
 
 async function findActorMember(tx: Prisma.TransactionClient, workspaceId: string, actorUserId: string) {
@@ -155,6 +343,9 @@ export async function postDeliberationEntry(actor: AppActor, params: {
   invariant(!(params.targetMemberId && params.targetCircleId), 400, "INVALID_INPUT", "Choose either a person or a circle target, not both.");
 
   return prisma.$transaction(async (tx) => {
+    let explicitTargetUserId: string | null = null;
+    let explicitTargetUserIds: string[] = [];
+    let skipManualMentionParsing = false;
     let linkedAdviceRequest: {
       id: string;
       workspaceId: string;
@@ -196,10 +387,17 @@ export async function postDeliberationEntry(actor: AppActor, params: {
     if (params.targetMemberId) {
       const targetMember = await tx.member.findUnique({ where: { id: params.targetMemberId } });
       invariant(targetMember && targetMember.workspaceId === params.workspaceId && targetMember.isActive, 400, "INVALID_INPUT", "Target member must belong to this workspace.");
+      explicitTargetUserId = targetMember.userId;
     }
     if (params.targetCircleId) {
       const targetCircle = await tx.circle.findUnique({ where: { id: params.targetCircleId } });
       invariant(targetCircle && targetCircle.workspaceId === params.workspaceId && !targetCircle.archivedAt, 400, "INVALID_INPUT", "Target circle must belong to this workspace.");
+      explicitTargetUserIds = await circleTargetUserIds(tx, {
+        workspaceId: params.workspaceId,
+        circleId: targetCircle.id,
+        authorUserId,
+      });
+      skipManualMentionParsing = true;
     }
     const parentVersion = await getParentWorkItemVersion(tx, {
       workspaceId: params.workspaceId,
@@ -232,6 +430,33 @@ export async function postDeliberationEntry(actor: AppActor, params: {
         meta: { parentType: params.parentType, parentId: params.parentId, entryType: params.entryType, parentVersion }
       }
     });
+
+    const mentionedUserIds = await resolveMentionedUserIds(tx, {
+      workspaceId: params.workspaceId,
+      bodyMd,
+      authorUserId,
+      explicitTargetUserId,
+      explicitTargetUserIds,
+      skipManualMentions: skipManualMentionParsing,
+    });
+    if (mentionedUserIds.length > 0) {
+      const context = await parentNotificationContext(tx, {
+        workspaceId: params.workspaceId,
+        parentType: params.parentType,
+        parentId: params.parentId,
+      });
+      await createNotificationIntent(tx, {
+        workspaceId: params.workspaceId,
+        type: "deliberation.mention",
+        recipientUserIds: mentionedUserIds,
+        actorUserId: authorUserId,
+        entityType: parentEntityType(params.parentType),
+        entityId: params.parentId,
+        title: `${actorLabel(actor)} mentioned you in a ${parentLabel(params.parentType)}${context.title ? `: ${context.title}` : ""}`,
+        bodyMd: context.includeBody ? notificationExcerpt(bodyMd) : null,
+        priority: "HIGH",
+      });
+    }
 
     await appendEvents(tx, [
       {
