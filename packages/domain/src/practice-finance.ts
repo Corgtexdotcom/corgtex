@@ -1921,6 +1921,28 @@ async function loadNativePracticeProjectForLedgerWrite(workspaceId: string, proj
   return project;
 }
 
+function nativePracticeClientMatchesProject(
+  client: { crmAccountId: string | null; name: string },
+  project: Awaited<ReturnType<typeof loadNativePracticeProjectForLedgerWrite>>,
+) {
+  return (
+    (project.crmAccountId && client.crmAccountId === project.crmAccountId)
+    || (
+      !project.crmAccountId
+      && !client.crmAccountId
+      && client.name.localeCompare(project.clientName, undefined, { sensitivity: "accent" }) === 0
+    )
+  );
+}
+
+async function linkNativePracticeProjectClient(projectId: string, clientId: string) {
+  await prisma.practiceProject.update({
+    where: { id: projectId },
+    data: { clientId },
+  });
+  return clientId;
+}
+
 async function ensureNativePracticeClientForProject(project: Awaited<ReturnType<typeof loadNativePracticeProjectForLedgerWrite>>) {
   if (project.clientId) return project.clientId;
 
@@ -1930,11 +1952,7 @@ async function ensureNativePracticeClientForProject(project: Awaited<ReturnType<
       select: { id: true },
     });
     if (crmClient) {
-      await prisma.practiceProject.update({
-        where: { id: project.id },
-        data: { clientId: crmClient.id },
-      });
-      return crmClient.id;
+      return linkNativePracticeProjectClient(project.id, crmClient.id);
     }
   }
 
@@ -1943,39 +1961,33 @@ async function ensureNativePracticeClientForProject(project: Awaited<ReturnType<
     where: { workspaceId_code: { workspaceId: project.workspaceId, code: baseCode } },
     select: { id: true, crmAccountId: true, name: true },
   });
-  if (
-    existingCodeClient
-    && (
-      (project.crmAccountId && existingCodeClient.crmAccountId === project.crmAccountId)
-      || (
-        !project.crmAccountId
-        && !existingCodeClient.crmAccountId
-        && existingCodeClient.name.localeCompare(project.clientName, undefined, { sensitivity: "accent" }) === 0
-      )
-    )
-  ) {
-    await prisma.practiceProject.update({
-      where: { id: project.id },
-      data: { clientId: existingCodeClient.id },
-    });
-    return existingCodeClient.id;
+  if (existingCodeClient && nativePracticeClientMatchesProject(existingCodeClient, project)) {
+    return linkNativePracticeProjectClient(project.id, existingCodeClient.id);
   }
 
   const code = existingCodeClient ? `${baseCode.slice(0, 67)}-${project.id.slice(0, 12)}` : baseCode;
-  const client = await prisma.practiceClient.create({
-    data: {
-      workspaceId: project.workspaceId,
-      crmAccountId: project.crmAccountId,
-      code,
-      name: project.clientName,
-    },
-    select: { id: true },
-  });
-  await prisma.practiceProject.update({
-    where: { id: project.id },
-    data: { clientId: client.id },
-  });
-  return client.id;
+  try {
+    const client = await prisma.practiceClient.create({
+      data: {
+        workspaceId: project.workspaceId,
+        crmAccountId: project.crmAccountId,
+        code,
+        name: project.clientName,
+      },
+      select: { id: true },
+    });
+    return linkNativePracticeProjectClient(project.id, client.id);
+  } catch (error) {
+    if (!isUniqueConstraintError(error)) throw error;
+    const client = await prisma.practiceClient.findUnique({
+      where: { workspaceId_code: { workspaceId: project.workspaceId, code } },
+      select: { id: true, crmAccountId: true, name: true },
+    });
+    if (client && nativePracticeClientMatchesProject(client, project)) {
+      return linkNativePracticeProjectClient(project.id, client.id);
+    }
+    throw error;
+  }
 }
 
 async function resolveNativePracticeConsultant(params: {

@@ -134,6 +134,9 @@ export default async function AccountDetailPage({
     currency,
     maximumFractionDigits: 0,
   }).format(cents / 100);
+  const financeRemainingLabel = accountFinance.summary.currency == null && accountFinance.summary.activeProjects > 0
+    ? "Mixed"
+    : formatCurrency(accountFinance.summary.remainingCents, accountFinance.summary.currency ?? "USD");
 
   const formatMargin = (bps?: number | null) => bps == null ? t("emptyValue") : `${(bps / 100).toFixed(1)}%`;
 
@@ -330,7 +333,7 @@ export default async function AccountDetailPage({
                 <span>{t("statFinanceProjects")}</span>
               </div>
               <div className="ws-stat-card">
-                <strong>{formatCurrency(accountFinance.summary.remainingCents)}</strong>
+                <strong>{financeRemainingLabel}</strong>
                 <span>{t("statFinanceRemaining")}</span>
               </div>
             </>
@@ -477,7 +480,7 @@ export default async function AccountDetailPage({
                     <div className="muted" style={{ fontSize: "0.85rem", marginTop: 4 }}>
                       {t("financeBridgeMeta", {
                         projects: accountFinance.projects.length,
-                        remaining: formatCurrency(accountFinance.summary.remainingCents),
+                        remaining: financeRemainingLabel,
                       })}
                     </div>
                   </div>

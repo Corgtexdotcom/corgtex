@@ -2512,6 +2512,60 @@ describe("practice-finance I/O", () => {
     });
   });
 
+  it("recovers when concurrent first-entry submissions create the project client", async () => {
+    prismaMock.practiceProject.findUnique.mockResolvedValueOnce({
+      id: "project-1",
+      workspaceId: "workspace-1",
+      crmAccountId: "account-1",
+      clientId: null,
+      billingCodeId: null,
+      code: "PROJECT-1",
+      clientName: "Example",
+      currency: "USD",
+    });
+    prismaMock.practiceClient.findUnique
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce({
+        id: "client-race",
+        crmAccountId: "account-1",
+        name: "Example",
+      });
+    prismaMock.practiceClient.create.mockRejectedValueOnce(Object.assign(new Error("Unique constraint failed"), { code: "P2002" }));
+
+    await createNativePracticeExpense(actor, "workspace-1", {
+      projectId: "project-1",
+      spentOn: new Date("2026-06-19T00:00:00.000Z"),
+      category: "Travel",
+      businessPurpose: "Client workshop",
+      amountCents: 45_678,
+      currency: "usd",
+    });
+
+    expect(prismaMock.practiceClient.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        workspaceId: "workspace-1",
+        crmAccountId: "account-1",
+        code: "EXAMPLE",
+        name: "Example",
+      }),
+      select: { id: true },
+    });
+    expect(prismaMock.practiceClient.findUnique).toHaveBeenLastCalledWith({
+      where: { workspaceId_code: { workspaceId: "workspace-1", code: "EXAMPLE" } },
+      select: { id: true, crmAccountId: true, name: true },
+    });
+    expect(prismaMock.practiceProject.update).toHaveBeenCalledWith({
+      where: { id: "project-1" },
+      data: { clientId: "client-race" },
+    });
+    expect(prismaMock.practiceExpense.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        clientId: "client-race",
+        projectId: "project-1",
+      }),
+    });
+  });
+
   it("creates a fallback native client code for client names without ASCII code characters", async () => {
     prismaMock.practiceProject.findUnique.mockResolvedValueOnce({
       id: "project-abc-123",

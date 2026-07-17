@@ -61,6 +61,18 @@ function timeCostAmount(entry: {
   return { cents: rateDerivedCents(entry.hours, entry.costRateCents), currency: entry.costCurrency ?? entry.currency };
 }
 
+function expenseAmount(entry: {
+  amountCents: number;
+  amountFunctionalCents: number | null;
+  currency: string;
+  functionalCurrency: string | null;
+}): { cents: number; currency: string } {
+  if (entry.amountFunctionalCents != null && entry.functionalCurrency?.trim()) {
+    return { cents: entry.amountFunctionalCents, currency: entry.functionalCurrency };
+  }
+  return { cents: entry.amountCents, currency: entry.currency };
+}
+
 function marginLabel(bps: number | null): string {
   return bps == null ? "-" : `${(bps / 100).toFixed(1)}%`;
 }
@@ -310,7 +322,9 @@ export default async function PracticeProjectDetailPage({
                 </tr>
               </thead>
               <tbody>
-                {detail.recentExpenses.map((entry) => (
+                {detail.recentExpenses.map((entry) => {
+                  const amount = expenseAmount(entry);
+                  return (
                   <tr key={entry.id}>
                     <td>{formatDate(entry.spentOn)}</td>
                     <td>
@@ -318,11 +332,12 @@ export default async function PracticeProjectDetailPage({
                       {entry.vendor && <div className="nr-item-meta" style={{ fontSize: 11 }}>{entry.vendor}</div>}
                     </td>
                     <td>{entry.businessPurpose}</td>
-                    <td style={{ textAlign: "right" }}>{money(entry.amountFunctionalCents ?? entry.amountCents, entry.functionalCurrency ?? entry.currency)}</td>
+                    <td style={{ textAlign: "right" }}>{money(amount.cents, amount.currency)}</td>
                     <td>{entry.billable ? "Yes" : "No"}</td>
                     <td>{statusLabel(entry.status)}</td>
                   </tr>
-                ))}
+                  );
+                })}
               </tbody>
             </table>
           </div>
