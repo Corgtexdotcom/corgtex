@@ -329,6 +329,16 @@ function normalizeCurrencyCode(value: string | null | undefined): string | null 
   return normalized || null;
 }
 
+function assertNativePracticeTimeEntryHours(entry: NativePracticeTimeEntry) {
+  const hours = decimalToNumber(entry.hours);
+  invariant(
+    Number.isFinite(hours) && hours >= 0,
+    400,
+    "INVALID_INPUT",
+    "Native practice time entry hours must be finite and non-negative.",
+  );
+}
+
 function firstCurrencyCode(...values: Array<string | null | undefined>): string | null {
   for (const value of values) {
     const normalized = normalizeCurrencyCode(value);
@@ -515,6 +525,7 @@ function rollupNativePracticeLedgerRows(params: {
   const expenses = postedExpenses(params.expenses).filter((expense) => expense.projectId === params.project.id);
 
   for (const entry of timeEntries) {
+    assertNativePracticeTimeEntryHours(entry);
     assertNativePracticeTimeEntryCurrency(params.project, entry);
     const revenueCents = practiceTimeBillAmountCents(entry);
     const costCents = practiceTimeCostAmountCents(entry);
@@ -579,6 +590,13 @@ export function calculateNativePracticeProjectHealthFromRollup(params: {
   recentWindowWeeks?: number | null;
 }): NativePracticeProjectHealth {
   const recentWindowWeeks = normalizeRecentWindowWeeks(params.recentWindowWeeks);
+  const currency = normalizeCurrencyCode(params.project.currency);
+  invariant(
+    currency != null,
+    400,
+    "MIXED_CURRENCY",
+    "Native practice project health requires a project currency.",
+  );
   const usedBudgetCents = params.rollup.timeRevenueCents + params.rollup.billableExpenseCents;
   const directCostCents = params.rollup.timeCostCents + params.rollup.directExpenseCents;
   const remainingBudgetCents = params.project.poValueCents - usedBudgetCents;
@@ -618,7 +636,7 @@ export function calculateNativePracticeProjectHealthFromRollup(params: {
     clientId: params.project.clientId,
     clientName: params.project.clientName,
     status: params.project.status,
-    currency: params.project.currency,
+    currency,
     budgetCents: params.project.poValueCents,
     serviceBudgetCents: params.project.serviceBudgetCents,
     expenseBudgetCents: params.project.expenseBudgetCents,
@@ -736,6 +754,9 @@ export function calculateNativePracticeConsultantUtilization(params: {
   const recent = weekWindow(now, recentWindowWeeks);
   const timeEntries = postedTimeEntries(params.timeEntries).filter((entry) => entry.consultantId === params.consultant.id);
   const expenses = postedExpenses(params.expenses).filter((expense) => expense.consultantId === params.consultant.id);
+  for (const entry of timeEntries) {
+    assertNativePracticeTimeEntryHours(entry);
+  }
   const currency = assertSingleNativePracticeLedgerCurrency(
     timeEntries,
     expenses,
@@ -785,7 +806,7 @@ function calculateContributionPreview(params: {
   projectId: string;
   consultantId: string | null;
   occurredAt: Date;
-  currency: string;
+  currency: string | null;
   marketValueCents: number;
   paidAmountCents: number;
   multiplier: number;
@@ -844,7 +865,7 @@ export function previewSlicingPieContributionFromTimeEntry(entry: NativePractice
     projectId: entry.projectId,
     consultantId: entry.consultantId,
     occurredAt: entry.workedOn,
-    currency: practiceTimeCostAmountCurrency(entry) ?? PRACTICE_LEDGER_CURRENCY,
+    currency: practiceTimeCostAmountCurrency(entry),
     marketValueCents,
     paidAmountCents: entry.paidAmountCents ?? 0,
     multiplier: SLICING_PIE_TIME_MULTIPLIER,

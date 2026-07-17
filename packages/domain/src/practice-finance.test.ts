@@ -744,15 +744,24 @@ describe("practice-finance pure derivations", () => {
   });
 
   it("rejects active native projects without a portfolio currency", () => {
-    const missingCurrency = calculateNativePracticeProjectHealth({
-      project: nativeProject({ currency: " " }),
-      timeEntries: [],
-      expenses: [],
-    });
+    try {
+      calculateNativePracticeProjectHealth({
+        project: nativeProject({ currency: " " }),
+        timeEntries: [],
+        expenses: [],
+      });
+      throw new Error("Expected active native projects without currency to be rejected.");
+    } catch (error) {
+      expect(error).toMatchObject({ code: "MIXED_CURRENCY" });
+    }
 
     try {
-      summarizeNativePracticeFinance([missingCurrency]);
-      throw new Error("Expected active native projects without currency to be rejected.");
+      calculateNativePracticeProjectHealth({
+        project: nativeProject({ currency: " ", status: "CLOSED" }),
+        timeEntries: [],
+        expenses: [],
+      });
+      throw new Error("Expected rowless inactive native projects without currency to be rejected.");
     } catch (error) {
       expect(error).toMatchObject({ code: "MIXED_CURRENCY" });
     }
@@ -979,6 +988,25 @@ describe("practice-finance pure derivations", () => {
     }
   });
 
+  it("rejects negative native time entry hours before calculating utilization", () => {
+    try {
+      calculateNativePracticeConsultantUtilization({
+        consultant: nativeConsultant(),
+        timeEntries: [
+          nativeTimeEntry({
+            hours: decimal(-1),
+            billAmountCents: 100_00,
+            costAmountCents: 80_00,
+          }),
+        ],
+        expenses: [],
+      });
+      throw new Error("Expected negative consultant time entry hours to be rejected.");
+    } catch (error) {
+      expect(error).toMatchObject({ code: "INVALID_INPUT" });
+    }
+  });
+
   it("rejects invalid native consultant capacity inputs", () => {
     for (const capacityHoursPerWeek of [-40, Number.POSITIVE_INFINITY]) {
       try {
@@ -1095,6 +1123,18 @@ describe("practice-finance pure derivations", () => {
   });
 
   it("rejects non-USD native Slicing Pie contribution previews until conversion is supported", () => {
+    try {
+      previewSlicingPieContributionFromTimeEntry(nativeTimeEntry({
+        currency: " ",
+        costCurrency: null,
+        functionalCurrency: null,
+        costAmountCents: null,
+      }));
+      throw new Error("Expected unknown time contribution preview currencies to be rejected.");
+    } catch (error) {
+      expect(error).toMatchObject({ code: "MIXED_CURRENCY" });
+    }
+
     try {
       previewSlicingPieContributionFromTimeEntry(nativeTimeEntry({
         currency: "EUR",
