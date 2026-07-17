@@ -121,6 +121,7 @@ export type NativePracticeTimeEntry = Pick<
   | "weekEndingOn"
   | "hours"
   | "currency"
+  | "billCurrency"
   | "costCurrency"
   | "functionalCurrency"
   | "billRateCents"
@@ -239,6 +240,7 @@ type NativePracticeTimeRollupRow = {
   timeCostCents: DbInt;
   recentTimeRevenueCents: DbInt;
   recentTimeCostCents: DbInt;
+  invalidCurrencyRows: DbInt;
 };
 
 type NativePracticeExpenseRollupRow = {
@@ -247,6 +249,7 @@ type NativePracticeExpenseRollupRow = {
   directExpenseCents: DbInt;
   recentBillableExpenseCents: DbInt;
   recentDirectExpenseCents: DbInt;
+  invalidCurrencyRows: DbInt;
 };
 
 type ProjectFinance = Pick<
@@ -284,6 +287,42 @@ function dbIntToNumber(value: DbInt): number {
 
 function centsFromHours(hours: { toNumber: () => number } | number | string, rateCents: number): number {
   return Math.round(decimalToNumber(hours) * rateCents);
+}
+
+function normalizeCurrencyCode(value: string | null | undefined): string | null {
+  const normalized = value?.trim().toUpperCase();
+  return normalized || null;
+}
+
+function firstCurrencyCode(...values: Array<string | null | undefined>): string | null {
+  for (const value of values) {
+    const normalized = normalizeCurrencyCode(value);
+    if (normalized) return normalized;
+  }
+  return null;
+}
+
+function assertNativePracticeTimeEntryCurrency(project: NativePracticeProject, entry: NativePracticeTimeEntry) {
+  const projectCurrency = normalizeCurrencyCode(project.currency);
+  const billCurrency = firstCurrencyCode(entry.functionalCurrency, entry.billCurrency, entry.currency);
+  const costCurrency = firstCurrencyCode(entry.functionalCurrency, entry.costCurrency, entry.currency);
+  invariant(
+    billCurrency === projectCurrency && costCurrency === projectCurrency,
+    400,
+    "MIXED_CURRENCY",
+    "Native practice finance requires time entry bill and cost amounts to be normalized to the project currency.",
+  );
+}
+
+function assertNativePracticeExpenseCurrency(project: NativePracticeProject, expense: NativePracticeExpense) {
+  const projectCurrency = normalizeCurrencyCode(project.currency);
+  const expenseCurrency = firstCurrencyCode(expense.functionalCurrency, expense.currency);
+  invariant(
+    expenseCurrency === projectCurrency,
+    400,
+    "MIXED_CURRENCY",
+    "Native practice finance requires expenses to be normalized to the project currency.",
+  );
 }
 
 function roundWeeks(value: number): number {
@@ -365,18 +404,19 @@ function emptyNativePracticeProjectLedgerRollup(projectId: string): NativePracti
 }
 
 function rollupNativePracticeLedgerRows(params: {
-  projectId: string;
+  project: NativePracticeProject;
   timeEntries: NativePracticeTimeEntry[];
   expenses: NativePracticeExpense[];
   now: Date;
   recentWindowWeeks: number;
 }): NativePracticeProjectLedgerRollup {
   const recent = weekWindow(params.now, params.recentWindowWeeks);
-  const rollup = emptyNativePracticeProjectLedgerRollup(params.projectId);
-  const timeEntries = postedTimeEntries(params.timeEntries).filter((entry) => entry.projectId === params.projectId);
-  const expenses = postedExpenses(params.expenses).filter((expense) => expense.projectId === params.projectId);
+  const rollup = emptyNativePracticeProjectLedgerRollup(params.project.id);
+  const timeEntries = postedTimeEntries(params.timeEntries).filter((entry) => entry.projectId === params.project.id);
+  const expenses = postedExpenses(params.expenses).filter((expense) => expense.projectId === params.project.id);
 
   for (const entry of timeEntries) {
+    assertNativePracticeTimeEntryCurrency(params.project, entry);
     const revenueCents = practiceTimeBillAmountCents(entry);
     const costCents = practiceTimeCostAmountCents(entry);
     rollup.timeRevenueCents += revenueCents;
@@ -388,6 +428,7 @@ function rollupNativePracticeLedgerRows(params: {
   }
 
   for (const expense of expenses) {
+    assertNativePracticeExpenseCurrency(params.project, expense);
     const amountCents = practiceExpenseFunctionalAmountCents(expense);
     rollup.directExpenseCents += amountCents;
     if (expense.billable) rollup.billableExpenseCents += amountCents;
@@ -420,7 +461,7 @@ export function calculateNativePracticeProjectHealth(params: {
   const now = normalizeNow(params.now);
   const recentWindowWeeks = normalizeRecentWindowWeeks(params.recentWindowWeeks);
   const rollup = rollupNativePracticeLedgerRows({
-    projectId: params.project.id,
+    project: params.project,
     timeEntries: params.timeEntries,
     expenses: params.expenses,
     now,
@@ -1133,6 +1174,12 @@ function mergeNativePracticeLedgerRollups(
   ]));
 
   for (const row of timeRows) {
+    invariant(
+      dbIntToNumber(row.invalidCurrencyRows) === 0,
+      400,
+      "MIXED_CURRENCY",
+      "Native practice finance requires time entry bill and cost amounts to be normalized to the project currency.",
+    );
     const rollup = rollups.get(row.projectId) ?? emptyNativePracticeProjectLedgerRollup(row.projectId);
     rollup.timeRevenueCents = dbIntToNumber(row.timeRevenueCents);
     rollup.timeCostCents = dbIntToNumber(row.timeCostCents);
@@ -1142,6 +1189,12 @@ function mergeNativePracticeLedgerRollups(
   }
 
   for (const row of expenseRows) {
+    invariant(
+      dbIntToNumber(row.invalidCurrencyRows) === 0,
+      400,
+      "MIXED_CURRENCY",
+      "Native practice finance requires expenses to be normalized to the project currency.",
+    );
     const rollup = rollups.get(row.projectId) ?? emptyNativePracticeProjectLedgerRollup(row.projectId);
     rollup.billableExpenseCents = dbIntToNumber(row.billableExpenseCents);
     rollup.directExpenseCents = dbIntToNumber(row.directExpenseCents);
@@ -1177,54 +1230,85 @@ export async function listNativePracticeProjectHealth(
   const [timeRollups, expenseRollups] = await Promise.all([
     prisma.$queryRaw<NativePracticeTimeRollupRow[]>(Prisma.sql`
       SELECT
-        "projectId",
-        COALESCE(SUM(COALESCE("billAmountCents"::numeric, ROUND("hours" * "billRateCents"))), 0)::bigint AS "timeRevenueCents",
-        COALESCE(SUM(COALESCE("costAmountCents"::numeric, ROUND("hours" * "costRateCents"))), 0)::bigint AS "timeCostCents",
+        t."projectId",
+        COALESCE(SUM(COALESCE(t."billAmountCents"::numeric, ROUND(t."hours" * t."billRateCents"))), 0)::bigint AS "timeRevenueCents",
+        COALESCE(SUM(COALESCE(t."costAmountCents"::numeric, ROUND(t."hours" * t."costRateCents"))), 0)::bigint AS "timeCostCents",
         COALESCE(SUM(
-          CASE WHEN "workedOn" >= ${recent.startsOn} AND "workedOn" <= ${recent.endsOn}
-            THEN COALESCE("billAmountCents"::numeric, ROUND("hours" * "billRateCents"))
+          CASE WHEN t."workedOn" >= ${recent.startsOn} AND t."workedOn" <= ${recent.endsOn}
+            THEN COALESCE(t."billAmountCents"::numeric, ROUND(t."hours" * t."billRateCents"))
             ELSE 0
           END
         ), 0)::bigint AS "recentTimeRevenueCents",
         COALESCE(SUM(
-          CASE WHEN "workedOn" >= ${recent.startsOn} AND "workedOn" <= ${recent.endsOn}
-            THEN COALESCE("costAmountCents"::numeric, ROUND("hours" * "costRateCents"))
+          CASE WHEN t."workedOn" >= ${recent.startsOn} AND t."workedOn" <= ${recent.endsOn}
+            THEN COALESCE(t."costAmountCents"::numeric, ROUND(t."hours" * t."costRateCents"))
             ELSE 0
           END
-        ), 0)::bigint AS "recentTimeCostCents"
-      FROM "PracticeTimeEntry"
-      WHERE "workspaceId" = ${workspaceId}
-        AND "projectId" IN (${Prisma.join(projectIds)})
-        AND "status" = 'POSTED'
-      GROUP BY "projectId"
+        ), 0)::bigint AS "recentTimeCostCents",
+        COALESCE(SUM(
+          CASE WHEN
+            UPPER(COALESCE(
+              NULLIF(BTRIM(t."functionalCurrency"), ''),
+              NULLIF(BTRIM(t."billCurrency"), ''),
+              NULLIF(BTRIM(t."currency"), '')
+            )) <> UPPER(NULLIF(BTRIM(p."currency"), ''))
+            OR UPPER(COALESCE(
+              NULLIF(BTRIM(t."functionalCurrency"), ''),
+              NULLIF(BTRIM(t."costCurrency"), ''),
+              NULLIF(BTRIM(t."currency"), '')
+            )) <> UPPER(NULLIF(BTRIM(p."currency"), ''))
+            THEN 1
+            ELSE 0
+          END
+        ), 0)::bigint AS "invalidCurrencyRows"
+      FROM "PracticeTimeEntry" t
+      JOIN "PracticeProject" p
+        ON p."id" = t."projectId"
+        AND p."workspaceId" = t."workspaceId"
+      WHERE t."workspaceId" = ${workspaceId}
+        AND t."projectId" IN (${Prisma.join(projectIds)})
+        AND t."status" = 'POSTED'
+      GROUP BY t."projectId"
     `),
     prisma.$queryRaw<NativePracticeExpenseRollupRow[]>(Prisma.sql`
       SELECT
-        "projectId",
+        e."projectId",
         COALESCE(SUM(
-          CASE WHEN "billable"
-            THEN COALESCE("amountFunctionalCents", "amountCents")::numeric
+          CASE WHEN e."billable"
+            THEN COALESCE(e."amountFunctionalCents", e."amountCents")::numeric
             ELSE 0
           END
         ), 0)::bigint AS "billableExpenseCents",
-        COALESCE(SUM(COALESCE("amountFunctionalCents", "amountCents")::numeric), 0)::bigint AS "directExpenseCents",
+        COALESCE(SUM(COALESCE(e."amountFunctionalCents", e."amountCents")::numeric), 0)::bigint AS "directExpenseCents",
         COALESCE(SUM(
-          CASE WHEN "billable" AND "spentOn" >= ${recent.startsOn} AND "spentOn" <= ${recent.endsOn}
-            THEN COALESCE("amountFunctionalCents", "amountCents")::numeric
+          CASE WHEN e."billable" AND e."spentOn" >= ${recent.startsOn} AND e."spentOn" <= ${recent.endsOn}
+            THEN COALESCE(e."amountFunctionalCents", e."amountCents")::numeric
             ELSE 0
           END
         ), 0)::bigint AS "recentBillableExpenseCents",
         COALESCE(SUM(
-          CASE WHEN "spentOn" >= ${recent.startsOn} AND "spentOn" <= ${recent.endsOn}
-            THEN COALESCE("amountFunctionalCents", "amountCents")::numeric
+          CASE WHEN e."spentOn" >= ${recent.startsOn} AND e."spentOn" <= ${recent.endsOn}
+            THEN COALESCE(e."amountFunctionalCents", e."amountCents")::numeric
             ELSE 0
           END
-        ), 0)::bigint AS "recentDirectExpenseCents"
-      FROM "PracticeExpense"
-      WHERE "workspaceId" = ${workspaceId}
-        AND "projectId" IN (${Prisma.join(projectIds)})
-        AND "status" = 'POSTED'
-      GROUP BY "projectId"
+        ), 0)::bigint AS "recentDirectExpenseCents",
+        COALESCE(SUM(
+          CASE WHEN UPPER(COALESCE(
+              NULLIF(BTRIM(e."functionalCurrency"), ''),
+              NULLIF(BTRIM(e."currency"), '')
+            )) <> UPPER(NULLIF(BTRIM(p."currency"), ''))
+            THEN 1
+            ELSE 0
+          END
+        ), 0)::bigint AS "invalidCurrencyRows"
+      FROM "PracticeExpense" e
+      JOIN "PracticeProject" p
+        ON p."id" = e."projectId"
+        AND p."workspaceId" = e."workspaceId"
+      WHERE e."workspaceId" = ${workspaceId}
+        AND e."projectId" IN (${Prisma.join(projectIds)})
+        AND e."status" = 'POSTED'
+      GROUP BY e."projectId"
     `),
   ]);
 

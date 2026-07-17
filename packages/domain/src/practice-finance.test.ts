@@ -139,6 +139,7 @@ function nativeTimeEntry(overrides: Partial<NativeTimeEntryFixture> = {}): Nativ
     weekEndingOn: new Date("2026-06-29T00:00:00.000Z"),
     hours: decimal(10),
     currency: "USD",
+    billCurrency: null,
     costCurrency: null,
     functionalCurrency: null,
     billRateCents: 15_000,
@@ -440,6 +441,34 @@ describe("practice-finance pure derivations", () => {
     try {
       summarizeNativePracticeFinance([usd, eur]);
       throw new Error("Expected summarizeNativePracticeFinance to reject mixed currencies.");
+    } catch (error) {
+      expect(error).toMatchObject({ code: "MIXED_CURRENCY" });
+    }
+  });
+
+  it("rejects ledger rows that are not normalized to the native project currency", () => {
+    try {
+      calculateNativePracticeProjectHealth({
+        project: nativeProject({ currency: "USD" }),
+        timeEntries: [
+          nativeTimeEntry({ billCurrency: "EUR", costCurrency: "USD" }),
+        ],
+        expenses: [],
+      });
+      throw new Error("Expected mixed time entry currencies to be rejected.");
+    } catch (error) {
+      expect(error).toMatchObject({ code: "MIXED_CURRENCY" });
+    }
+
+    try {
+      calculateNativePracticeProjectHealth({
+        project: nativeProject({ currency: "USD" }),
+        timeEntries: [],
+        expenses: [
+          nativeExpense({ currency: "EUR" }),
+        ],
+      });
+      throw new Error("Expected mixed expense currencies to be rejected.");
     } catch (error) {
       expect(error).toMatchObject({ code: "MIXED_CURRENCY" });
     }
@@ -793,6 +822,7 @@ describe("practice-finance I/O", () => {
         timeCostCents: 80_000n,
         recentTimeRevenueCents: 150_000n,
         recentTimeCostCents: 80_000n,
+        invalidCurrencyRows: 0n,
       }])
       .mockResolvedValueOnce([{
         projectId: "project-1",
@@ -800,6 +830,7 @@ describe("practice-finance I/O", () => {
         directExpenseCents: 40_000n,
         recentBillableExpenseCents: 40_000n,
         recentDirectExpenseCents: 40_000n,
+        invalidCurrencyRows: 0n,
       }]);
 
     const health = await listNativePracticeProjectHealth(actor, "workspace-1", {
@@ -822,6 +853,29 @@ describe("practice-finance I/O", () => {
     expect(prismaMock.$queryRaw).toHaveBeenCalledTimes(2);
     expect(prismaMock.practiceTimeEntry.findMany).not.toHaveBeenCalled();
     expect(prismaMock.practiceExpense.findMany).not.toHaveBeenCalled();
+  });
+
+  it("rejects native project health rows with unnormalized ledger currencies", async () => {
+    prismaMock.practiceProject.findMany.mockResolvedValueOnce([
+      nativeProject(),
+    ]);
+    prismaMock.$queryRaw
+      .mockResolvedValueOnce([{
+        projectId: "project-1",
+        timeRevenueCents: 150_000n,
+        timeCostCents: 80_000n,
+        recentTimeRevenueCents: 150_000n,
+        recentTimeCostCents: 80_000n,
+        invalidCurrencyRows: 1n,
+      }])
+      .mockResolvedValueOnce([]);
+
+    try {
+      await listNativePracticeProjectHealth(actor, "workspace-1");
+      throw new Error("Expected native project health to reject mixed ledger currencies.");
+    } catch (error) {
+      expect(error).toMatchObject({ code: "MIXED_CURRENCY" });
+    }
   });
 
   it("builds the native finance dashboard from project health", async () => {
