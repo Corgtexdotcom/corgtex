@@ -209,7 +209,7 @@ export default async function WorkspaceDashboard({
     articles: articlesResult.items,
     meetings,
     labels: {
-      intro: t("newspaperLiveIntro"),
+      intro: storedGeneratedAt ? t("newspaperLiveUpdatedIntro") : t("newspaperLiveIntro"),
       closing: t("newspaperLiveClosing"),
     },
   });

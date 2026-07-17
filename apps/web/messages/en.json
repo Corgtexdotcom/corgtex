@@ -899,6 +899,7 @@
     "newspaperLegacyIntro": "This edition was generated before the narrative briefing format. The source items are shown as one readable update.",
     "newspaperLiveClosing": "This is a temporary live-data view. The generated briefing will replace it with a fuller operating story once the workspace newspaper job runs.",
     "newspaperLiveIntro": "No generated briefing exists yet, so this page is showing the latest live workspace records as a temporary newspaper.",
+    "newspaperLiveUpdatedIntro": "New workspace activity arrived after the latest generated briefing, so this page is showing the newer live records until the next newspaper run.",
     "newspaperWaiting": "The homepage is waiting on the first generated workspace briefing. Notifications and source records are still available from the workspace navigation.",
     "openProposals": "Open Proposals",
     "openSource": "Open source →",

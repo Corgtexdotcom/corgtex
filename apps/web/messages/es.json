@@ -899,6 +899,7 @@
     "newspaperLegacyIntro": "Esta edición se generó antes del formato narrativo del resumen. Los elementos fuente se muestran como una actualización legible.",
     "newspaperLiveClosing": "Esta es una vista temporal con datos en vivo. El resumen generado la reemplazará con una historia operativa más completa cuando se ejecute el trabajo del periódico del espacio.",
     "newspaperLiveIntro": "Aún no existe un resumen generado, así que esta página muestra los registros recientes del espacio como un periódico temporal.",
+    "newspaperLiveUpdatedIntro": "Llegó nueva actividad del espacio después del último resumen generado, así que esta página muestra esos registros en vivo hasta la próxima ejecución del periódico.",
     "newspaperWaiting": "La página principal está esperando el primer resumen generado del espacio de trabajo. Las notificaciones y los registros fuente siguen disponibles desde la navegación del espacio.",
     "openProposals": "Propuestas abiertas",
     "openSource": "Abrir fuente →",
