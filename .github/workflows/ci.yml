@@ -358,16 +358,59 @@ jobs:
         if: github.ref == 'refs/heads/main' && steps.check-secrets.outputs.skip != 'true'
         run: |
           set -euo pipefail
+          release_context_dir=".artifacts/production-app-release-context"
+          release_context_path="$release_context_dir/release-context.json"
+          changed_files_path="$release_context_dir/changed-files.txt"
+          unknown_release_required="__unknown_production_app_release_required__"
+          mkdir -p "$release_context_dir"
           before="${{ github.event.before }}"
           after="${{ github.sha }}"
 
+          write_release_context() {
+            local skip_release_match="$1"
+            printf '%s\n' "$changed_files" > "$changed_files_path"
+            RELEASE_CONTEXT_BEFORE="$before" \
+            RELEASE_CONTEXT_AFTER="$after" \
+            RELEASE_CONTEXT_CHANGED_FILES_PATH="$changed_files_path" \
+            RELEASE_CONTEXT_PATH="$release_context_path" \
+            RELEASE_CONTEXT_SKIP_RELEASE_MATCH="$skip_release_match" \
+            node <<'NODE'
+          const fs = require("node:fs");
+
+          const changedFiles = fs.readFileSync(process.env.RELEASE_CONTEXT_CHANGED_FILES_PATH, "utf8")
+            .split(/\r?\n/)
+            .map((line) => line.trim())
+            .filter(Boolean);
+          const skipReleaseMatch = process.env.RELEASE_CONTEXT_SKIP_RELEASE_MATCH === "true";
+          const context = {
+            source: "ci-push-range",
+            before: process.env.RELEASE_CONTEXT_BEFORE,
+            after: process.env.RELEASE_CONTEXT_AFTER,
+            changedFiles,
+            skipReleaseMatch,
+            requiresProductionAppRelease: !skipReleaseMatch,
+          };
+          fs.writeFileSync(process.env.RELEASE_CONTEXT_PATH, `${JSON.stringify(context, null, 2)}\n`);
+          NODE
+          }
+
           if [ -z "$before" ] || [ "$before" = "0000000000000000000000000000000000000000" ]; then
+            changed_files="$unknown_release_required"
             echo "skip_release_match=false" >> "$GITHUB_OUTPUT"
             echo "Previous main commit is unknown; release match remains required."
+            write_release_context "false"
             exit 0
           fi
 
-          changed_files="$(git diff --name-only "$before" "$after")"
+          changed_files="$(
+            git diff --name-status "$before" "$after" \
+              | awk -F '\t' '
+                $1 ~ /^[RC]/ { print $2; print $3; next }
+                { print $2 }
+              ' \
+              | awk 'NF' \
+              | sort -u
+          )"
           echo "Changed files:"
           printf '%s\n' "$changed_files"
 
@@ -386,10 +429,21 @@ jobs:
           if [ "$requires_app_release" = "true" ]; then
             echo "skip_release_match=false" >> "$GITHUB_OUTPUT"
             echo "Production app-affecting changes detected; release match required."
+            write_release_context "false"
           else
             echo "skip_release_match=true" >> "$GITHUB_OUTPUT"
             echo "Only docs, workflow, agent-guidance, cleanup-tooling config, or site-only files changed; release match skipped while live smoke still runs."
+            write_release_context "true"
           fi
+
+      - name: Upload production app release context
+        if: github.ref == 'refs/heads/main' && steps.check-secrets.outputs.skip != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: production-app-release-context
+          path: .artifacts/production-app-release-context/release-context.json
+          if-no-files-found: error
+
       - run: node scripts/check-migration-health.mjs
         if: github.ref == 'refs/heads/main' && steps.check-secrets.outputs.skip != 'true'
         env:
