@@ -141,6 +141,7 @@ export default async function WorkspaceLayout({
   const isDemo = current?.slug === "jnj-demo";
   const showPlatformAdmin = isGlobalOperator(actor);
   const showSelfServeOnboarding = !isDemo && workspaceRuntime?.plan !== "ENTERPRISE_MANAGED" && Boolean(onboardingState);
+  const intercomConfigured = Boolean(process.env.NEXT_PUBLIC_INTERCOM_APP_ID);
   const googleScopes = (googleConnection?.scopes ?? []).join(" ").toLowerCase();
   const googleDocuments = syncSettingsRecord(syncSettingsRecord(googleConnection?.syncSettings).documents);
   const googleDrivePicker = {
@@ -259,7 +260,11 @@ export default async function WorkspaceLayout({
         <div className="ws-sidebar-footer">
           {featureFlags.MULTILINGUAL && <LanguageSwitcher />}
           <ThemeToggle />
-          <WorkspaceIntercomMessenger locale={locale} workspaceId={workspaceId} />
+          <WorkspaceIntercomMessenger
+            intercomConfigured={intercomConfigured}
+            locale={locale}
+            workspaceId={workspaceId}
+          />
           
           <a href={`/workspaces/${workspaceId}/settings?tab=user`} className="ws-nav-link ws-logout-btn mt-1">
             {tNav("settings")} (User)

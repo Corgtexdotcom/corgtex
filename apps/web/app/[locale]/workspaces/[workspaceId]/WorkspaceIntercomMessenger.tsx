@@ -29,7 +29,6 @@ declare global {
   }
 }
 
-const configuredAppId = process.env.NEXT_PUBLIC_INTERCOM_APP_ID;
 const SCRIPT_ID = "intercom-widget-script";
 
 function installIntercomScript(appId: string) {
@@ -70,19 +69,21 @@ async function fetchIntercomToken(workspaceId: string, locale: string, signal?: 
 }
 
 export function WorkspaceIntercomMessenger({
+  intercomConfigured,
   locale,
   workspaceId,
 }: {
+  intercomConfigured: boolean;
   locale: string;
   workspaceId: string;
 }) {
   const pathname = usePathname();
   const tNav = useTranslations("nav");
   const bootedRef = useRef(false);
-  const [isEnabled, setIsEnabled] = useState(Boolean(configuredAppId));
+  const [isEnabled, setIsEnabled] = useState(intercomConfigured);
 
   const bootOrUpdate = useCallback(async (mode: "boot" | "update", signal?: AbortSignal) => {
-    if (!configuredAppId) {
+    if (!intercomConfigured) {
       setIsEnabled(false);
       return false;
     }
@@ -119,7 +120,7 @@ export function WorkspaceIntercomMessenger({
 
     setIsEnabled(true);
     return true;
-  }, [locale, workspaceId]);
+  }, [intercomConfigured, locale, workspaceId]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -151,7 +152,7 @@ export function WorkspaceIntercomMessenger({
     window.Intercom?.("show");
   }
 
-  if (!configuredAppId || !isEnabled) {
+  if (!intercomConfigured || !isEnabled) {
     return null;
   }
 
