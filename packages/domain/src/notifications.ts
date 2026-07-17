@@ -7,6 +7,7 @@ import { humanMemberIdentityWhere } from "./member-identity";
 export const DEFAULT_NOTIFICATION_CHANNEL = "IN_APP";
 export const NOTIFICATION_DELIVERY_JOB_TYPE = "notification.delivery";
 export const NOTIFICATION_DELIVERY_EMAIL_CHANNEL = "EMAIL";
+export const NOTIFICATION_DELIVERY_SLACK_CHANNEL = "SLACK";
 const NOTIFICATION_DELIVERY_MAX_ATTEMPTS = 5;
 const RETRY_BASE_DELAY_MS = 5_000;
 const RETRY_MAX_DELAY_MS = 5 * 60 * 1_000;
@@ -25,6 +26,11 @@ export const OUTBOUND_ELIGIBLE_NOTIFICATION_TYPES = new Set([
 export const STORED_NOTIFICATION_CHANNELS = [
   "IN_APP",
   "EMAIL",
+  "SLACK",
+  "IN_APP_EMAIL",
+  "IN_APP_SLACK",
+  "EMAIL_SLACK",
+  "ALL",
   "BOTH",
   "OFF",
 ] as const;
@@ -67,7 +73,18 @@ function channelEnablesInApp(channel: StoredNotificationChannel) {
 }
 
 function channelEnablesEmail(channel: StoredNotificationChannel) {
-  return channel === "EMAIL" || channel === "BOTH";
+  return channel === "EMAIL"
+    || channel === "IN_APP_EMAIL"
+    || channel === "EMAIL_SLACK"
+    || channel === "ALL"
+    || channel === "BOTH";
+}
+
+function channelEnablesSlack(channel: StoredNotificationChannel) {
+  return channel === "SLACK"
+    || channel === "IN_APP_SLACK"
+    || channel === "EMAIL_SLACK"
+    || channel === "ALL";
 }
 
 function effectiveChannels(preferences: Array<{ userId: string; notifType: string; channel: string }>, userId: string, type: string) {
@@ -125,16 +142,77 @@ function renderNotificationEmail(params: {
   return { html, text };
 }
 
-async function createEmailDeliveryIntent(
-  tx: Prisma.TransactionClient,
+function escapeSlackMrkdwn(value: string) {
+  return value
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;");
+}
+
+function slackText(value: string, maxLength: number) {
+  const escaped = escapeSlackMrkdwn(value.trim());
+  return escaped.length > maxLength ? `${escaped.slice(0, Math.max(0, maxLength - 3))}...` : escaped;
+}
+
+function renderNotificationSlackMessage(params: {
+  workspaceId: string;
+  title: string;
+  bodyMd?: string | null;
+}) {
+  const url = notificationUrl(params.workspaceId);
+  const body = params.bodyMd?.trim() ?? "";
+  const text = [
+    params.title,
+    body,
+    `Open in Corgtex: ${url}`,
+  ].filter(Boolean).join("\n\n");
+  const blocks = [
+    {
+      type: "section",
+      text: {
+        type: "mrkdwn",
+        text: `*${slackText(params.title, 250)}*`,
+      },
+    },
+    body
+      ? {
+        type: "section",
+        text: {
+          type: "mrkdwn",
+          text: slackText(body, 2_900),
+        },
+      }
+      : null,
+    {
+      type: "actions",
+      elements: [
+        {
+          type: "button",
+          text: {
+            type: "plain_text",
+            text: "Open in Corgtex",
+          },
+          url,
+        },
+      ],
+    },
+  ].filter(Boolean);
+  return { blocks, text };
+}
+
+type NotificationDeliveryIntentClient = Pick<Prisma.TransactionClient, "notificationDelivery" | "workflowJob">;
+
+async function createNotificationDeliveryIntent(
+  tx: NotificationDeliveryIntentClient,
   notification: { id: string; workspaceId: string; userId: string },
+  channel: string,
 ) {
   const nextAttemptAt = new Date();
   const delivery = await tx.notificationDelivery.upsert({
     where: {
       notificationId_channel: {
         notificationId: notification.id,
-        channel: NOTIFICATION_DELIVERY_EMAIL_CHANNEL,
+        channel,
       },
     },
     update: {},
@@ -142,7 +220,7 @@ async function createEmailDeliveryIntent(
       notificationId: notification.id,
       workspaceId: notification.workspaceId,
       userId: notification.userId,
-      channel: NOTIFICATION_DELIVERY_EMAIL_CHANNEL,
+      channel,
       status: "PENDING",
       nextAttemptAt,
     },
@@ -160,6 +238,20 @@ async function createEmailDeliveryIntent(
       runAfter: nextAttemptAt,
     },
   });
+}
+
+async function createEmailDeliveryIntent(
+  tx: NotificationDeliveryIntentClient,
+  notification: { id: string; workspaceId: string; userId: string },
+) {
+  await createNotificationDeliveryIntent(tx, notification, NOTIFICATION_DELIVERY_EMAIL_CHANNEL);
+}
+
+async function createSlackDeliveryIntent(
+  tx: NotificationDeliveryIntentClient,
+  notification: { id: string; workspaceId: string; userId: string },
+) {
+  await createNotificationDeliveryIntent(tx, notification, NOTIFICATION_DELIVERY_SLACK_CHANNEL);
 }
 
 export async function createNotificationIntent(
@@ -203,17 +295,30 @@ export async function createNotificationIntent(
     },
   });
 
+  const channelByUserId = new Map(uniqueActiveRecipients.map((recipient) => [
+    recipient.userId,
+    effectiveChannels(preferences, recipient.userId, params.type),
+  ]));
   const recipients = uniqueActiveRecipients
-    .filter((recipient) => channelEnablesInApp(effectiveChannels(preferences, recipient.userId, params.type)));
+    .filter((recipient) => channelEnablesInApp(channelByUserId.get(recipient.userId) ?? DEFAULT_NOTIFICATION_CHANNEL));
   if (recipients.length === 0) {
     return { count: 0 };
   }
 
   const priority = params.priority ?? "NORMAL";
-  const shouldAllowEmail = OUTBOUND_ELIGIBLE_NOTIFICATION_TYPES.has(params.type);
+  const shouldAllowOutbound = OUTBOUND_ELIGIBLE_NOTIFICATION_TYPES.has(params.type);
+  const shouldCreateEmailDelivery = (recipient: typeof recipients[number]) => {
+    const channel = channelByUserId.get(recipient.userId) ?? DEFAULT_NOTIFICATION_CHANNEL;
+    return shouldAllowOutbound && channelEnablesEmail(channel) && Boolean(recipient.user?.email);
+  };
+  const shouldCreateSlackDelivery = (recipient: typeof recipients[number]) => {
+    const channel = channelByUserId.get(recipient.userId) ?? DEFAULT_NOTIFICATION_CHANNEL;
+    return shouldAllowOutbound && channelEnablesSlack(channel);
+  };
   const bulkRecipients = recipients.filter((recipient) => (
     !notificationDedupeKey(params.dedupeKey, recipient.userId)
-      && !(shouldAllowEmail && channelEnablesEmail(effectiveChannels(preferences, recipient.userId, params.type)) && recipient.user?.email)
+      && !shouldCreateEmailDelivery(recipient)
+      && !shouldCreateSlackDelivery(recipient)
   ));
   const individualRecipients = recipients.filter((recipient) => !bulkRecipients.includes(recipient));
   let count = 0;
@@ -261,37 +366,34 @@ export async function createNotificationIntent(
 
     count += 1;
 
-    const channel = effectiveChannels(preferences, recipient.userId, params.type);
-    if (shouldAllowEmail && channelEnablesEmail(channel) && recipient.user?.email) {
+    if (shouldCreateEmailDelivery(recipient)) {
       await createEmailDeliveryIntent(tx, notification);
+    }
+    if (shouldCreateSlackDelivery(recipient)) {
+      await createSlackDeliveryIntent(tx, notification);
     }
   }
 
   return { count };
 }
 
-export async function deliverNotificationDelivery(deliveryId: string) {
-  const delivery = await prisma.notificationDelivery.findUnique({
-    where: { id: deliveryId },
-    include: {
-      notification: true,
-      user: { select: { email: true } },
-    },
+type NotificationDeliveryWithRecipient = Prisma.NotificationDeliveryGetPayload<{
+  include: {
+    notification: true;
+    user: { select: { email: true } };
+  };
+}>;
+
+async function createEmailFallbackDelivery(delivery: NotificationDeliveryWithRecipient) {
+  if (!delivery.user.email) return;
+  await createEmailDeliveryIntent(prisma, {
+    id: delivery.notificationId,
+    workspaceId: delivery.workspaceId,
+    userId: delivery.userId,
   });
-  if (!delivery || delivery.status === "SENT" || delivery.status === "SKIPPED" || delivery.status === "FAILED") {
-    return { status: "SKIPPED" as const };
-  }
-  if (delivery.channel !== NOTIFICATION_DELIVERY_EMAIL_CHANNEL) {
-    await prisma.notificationDelivery.update({
-      where: { id: delivery.id },
-      data: {
-        status: "SKIPPED",
-        failedAt: new Date(),
-        error: `Unsupported notification delivery channel: ${delivery.channel}`,
-      },
-    });
-    return { status: "SKIPPED" as const };
-  }
+}
+
+async function deliverEmailNotificationDelivery(delivery: NotificationDeliveryWithRecipient) {
   if (!delivery.user.email) {
     await prisma.notificationDelivery.update({
       where: { id: delivery.id },
@@ -371,6 +473,98 @@ export async function deliverNotificationDelivery(deliveryId: string) {
       throw error;
     }
     return { status: "FAILED" as const };
+  }
+}
+
+async function deliverSlackNotificationDelivery(delivery: NotificationDeliveryWithRecipient) {
+  const attempt = delivery.attempts + 1;
+
+  try {
+    const { resolveSlackNotificationRecipient, sendSlackMessage } = await import("./communication");
+    const recipient = await resolveSlackNotificationRecipient({
+      workspaceId: delivery.workspaceId,
+      userId: delivery.userId,
+      email: delivery.user.email,
+    });
+    if (!recipient) {
+      await prisma.notificationDelivery.update({
+        where: { id: delivery.id },
+        data: {
+          status: "SKIPPED",
+          attempts: attempt,
+          failedAt: new Date(),
+          error: "Recipient user has no mapped Slack identity.",
+        },
+      });
+      await createEmailFallbackDelivery(delivery);
+      return { status: "SKIPPED" as const };
+    }
+
+    const slack = renderNotificationSlackMessage({
+      workspaceId: delivery.workspaceId,
+      title: delivery.notification.title,
+      bodyMd: delivery.notification.bodyMd,
+    });
+    const result = await sendSlackMessage(recipient.installationId, {
+      channel: recipient.externalUserId,
+      text: slack.text,
+    }, slack.blocks);
+
+    await prisma.notificationDelivery.update({
+      where: { id: delivery.id },
+      data: {
+        status: "SENT",
+        attempts: attempt,
+        sentAt: new Date(),
+        failedAt: null,
+        providerMessageId: typeof result.ts === "string" ? result.ts : null,
+        error: null,
+      },
+    });
+    return { status: "SENT" as const };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Unknown notification Slack delivery error.";
+    await prisma.notificationDelivery.update({
+      where: { id: delivery.id },
+      data: {
+        status: "FAILED",
+        attempts: attempt,
+        failedAt: new Date(),
+        error: message,
+      },
+    });
+    await createEmailFallbackDelivery(delivery);
+    return { status: "FAILED" as const };
+  }
+}
+
+export async function deliverNotificationDelivery(deliveryId: string) {
+  const delivery = await prisma.notificationDelivery.findUnique({
+    where: { id: deliveryId },
+    include: {
+      notification: true,
+      user: { select: { email: true } },
+    },
+  });
+  if (!delivery || delivery.status === "SENT" || delivery.status === "SKIPPED" || delivery.status === "FAILED") {
+    return { status: "SKIPPED" as const };
+  }
+  if (delivery.channel === NOTIFICATION_DELIVERY_EMAIL_CHANNEL) {
+    return deliverEmailNotificationDelivery(delivery);
+  }
+  if (delivery.channel === NOTIFICATION_DELIVERY_SLACK_CHANNEL) {
+    return deliverSlackNotificationDelivery(delivery);
+  }
+  {
+    await prisma.notificationDelivery.update({
+      where: { id: delivery.id },
+      data: {
+        status: "SKIPPED",
+        failedAt: new Date(),
+        error: `Unsupported notification delivery channel: ${delivery.channel}`,
+      },
+    });
+    return { status: "SKIPPED" as const };
   }
 }
 

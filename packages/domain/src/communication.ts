@@ -515,6 +515,106 @@ async function resolveHumanActorForSlackUser(installationId: string, externalUse
   }
 }
 
+export type SlackNotificationRecipient = {
+  installationId: string;
+  externalUserId: string;
+};
+
+export async function resolveSlackNotificationRecipient(params: {
+  workspaceId: string;
+  userId: string;
+  email?: string | null;
+}): Promise<SlackNotificationRecipient | null> {
+  const installation = await prisma.communicationInstallation.findFirst({
+    where: {
+      workspaceId: params.workspaceId,
+      provider: "SLACK",
+      status: "ACTIVE",
+      botTokenEnc: { not: null },
+    },
+    orderBy: { installedAt: "desc" },
+    select: {
+      id: true,
+      workspaceId: true,
+      botTokenEnc: true,
+    },
+  });
+  if (!installation) return null;
+
+  const cached = await prisma.communicationExternalUser.findFirst({
+    where: {
+      installationId: installation.id,
+      workspaceId: params.workspaceId,
+      provider: "SLACK",
+      userId: params.userId,
+      isBot: false,
+      isDeleted: false,
+    },
+    orderBy: { updatedAt: "desc" },
+    select: { externalUserId: true },
+  });
+  if (cached?.externalUserId) {
+    return {
+      installationId: installation.id,
+      externalUserId: cached.externalUserId,
+    };
+  }
+
+  const email = params.email?.trim();
+  if (!email) return null;
+
+  try {
+    const profile = await slackClient(encryptedBotToken(installation)).users.lookupByEmail({ email });
+    const slackUser = isRecord(profile.user) ? profile.user : null;
+    if (!slackUser) return null;
+    const externalUserId = asString(slackUser?.id);
+    if (!externalUserId) return null;
+
+    const userProfile = isRecord(slackUser?.profile) ? slackUser.profile : {};
+    const displayName = asString(userProfile.display_name) || asString(userProfile.real_name) || asString(slackUser.name);
+    const isBot = Boolean(slackUser.is_bot);
+    const isDeleted = Boolean(slackUser.deleted);
+
+    await prisma.communicationExternalUser.upsert({
+      where: { installationId_externalUserId: { installationId: installation.id, externalUserId } },
+      update: {
+        userId: params.userId,
+        email,
+        displayName: displayName || null,
+        isBot,
+        isDeleted,
+        rawProfile: toInputJson(slackUser),
+        lastSeenAt: new Date(),
+      },
+      create: {
+        installationId: installation.id,
+        workspaceId: params.workspaceId,
+        provider: "SLACK",
+        externalUserId,
+        userId: params.userId,
+        email,
+        displayName: displayName || null,
+        isBot,
+        isDeleted,
+        rawProfile: toInputJson(slackUser),
+        lastSeenAt: new Date(),
+      },
+    });
+
+    if (isBot || isDeleted) return null;
+    return {
+      installationId: installation.id,
+      externalUserId,
+    };
+  } catch (error) {
+    const slackCode = (error as { data?: { error?: string } }).data?.error;
+    if (slackCode === "users_not_found" || slackCode === "user_not_found") {
+      return null;
+    }
+    throw error;
+  }
+}
+
 async function ensureSlackChannel(installation: { id: string; workspaceId: string }, event: Record<string, unknown>) {
   const externalChannelId = asString(event.channel);
   if (!externalChannelId) return null;
@@ -1677,6 +1777,7 @@ export async function handleSlackInteraction(payload: Record<string, unknown>) {
 export async function sendSlackMessage(installationId: string, target: {
   channel: string;
   threadTs?: string;
+  text?: string;
 }, blocks: unknown[], tokenOverride?: string) {
   const installation = await prisma.communicationInstallation.findUnique({
     where: { id: installationId },
@@ -1687,7 +1788,7 @@ export async function sendSlackMessage(installationId: string, target: {
   return slackClient(token).chat.postMessage({
     channel: target.channel,
     thread_ts: target.threadTs,
-    text: "Corgtex update",
+    text: target.text ?? "Corgtex update",
     blocks: blocks as any,
     unfurl_links: false,
     unfurl_media: false,
