@@ -381,7 +381,7 @@ function rollupNativePracticeLedgerRows(params: {
     const costCents = practiceTimeCostAmountCents(entry);
     rollup.timeRevenueCents += revenueCents;
     rollup.timeCostCents += costCents;
-    if (isWithinDateWindow(entry.weekEndingOn, recent)) {
+    if (isWithinDateWindow(entry.workedOn, recent)) {
       rollup.recentTimeRevenueCents += revenueCents;
       rollup.recentTimeCostCents += costCents;
     }
@@ -441,7 +441,7 @@ export function calculateNativePracticeProjectHealthFromRollup(params: {
   const recentWindowWeeks = normalizeRecentWindowWeeks(params.recentWindowWeeks);
   const usedBudgetCents = params.rollup.timeRevenueCents + params.rollup.billableExpenseCents;
   const directCostCents = params.rollup.timeCostCents + params.rollup.directExpenseCents;
-  const remainingBudgetCents = Math.max(0, params.project.poValueCents - usedBudgetCents);
+  const remainingBudgetCents = params.project.poValueCents - usedBudgetCents;
   const grossProfitCents = usedBudgetCents - directCostCents;
   const grossMarginBps = usedBudgetCents > 0 ? Math.round((grossProfitCents / usedBudgetCents) * 10_000) : 0;
   const recentUsedBudgetCents = params.rollup.recentTimeRevenueCents + params.rollup.recentBillableExpenseCents;
@@ -456,7 +456,7 @@ export function calculateNativePracticeProjectHealthFromRollup(params: {
     && params.project.targetMarginBps != null;
   const hasRecentBurn = recentBudgetBurnPerWeekCents > 0 || recentCostBurnPerWeekCents > 0;
   const weeksToBudgetExhaustion = hasBudgetSetup && recentBudgetBurnPerWeekCents > 0
-    ? roundWeeks(remainingBudgetCents / recentBudgetBurnPerWeekCents)
+    ? (remainingBudgetCents <= 0 ? 0 : roundWeeks(remainingBudgetCents / recentBudgetBurnPerWeekCents))
     : null;
   const weeksToTargetMarginRisk = calculateWeeksToMarginFloor({
     grossMarginBps,
@@ -512,7 +512,7 @@ export function summarizeNativePracticeFinance(health: NativePracticeProjectHeal
     activeProjects: active.length,
     budgetCents,
     usedCents,
-    remainingCents: active.reduce((sum, item) => sum + item.remainingBudgetCents, 0),
+    remainingCents: budgetCents - usedCents,
     marginBps,
     directCostCents,
     grossProfitCents,
@@ -520,7 +520,9 @@ export function summarizeNativePracticeFinance(health: NativePracticeProjectHeal
       item.weeksToBudgetExhaustion != null && item.weeksToBudgetExhaustion <= BUDGET_RUNWAY_ATTENTION_WEEKS
     ).length,
     riskMarginCount: active.filter((item) =>
-      item.weeksToTargetMarginRisk != null && item.weeksToTargetMarginRisk <= BUDGET_RUNWAY_ATTENTION_WEEKS
+      item.hasBudgetSetup
+      && item.weeksToTargetMarginRisk != null
+      && item.weeksToTargetMarginRisk <= BUDGET_RUNWAY_ATTENTION_WEEKS
     ).length,
   };
 }
@@ -579,7 +581,7 @@ export function calculateNativePracticeConsultantUtilization(params: {
   const timeEntries = postedTimeEntries(params.timeEntries).filter((entry) => entry.consultantId === params.consultant.id);
   const expenses = postedExpenses(params.expenses).filter((expense) => expense.consultantId === params.consultant.id);
   const recentHours = timeEntries
-    .filter((entry) => isWithinDateWindow(entry.weekEndingOn, recent))
+    .filter((entry) => isWithinDateWindow(entry.workedOn, recent))
     .reduce((sum, entry) => sum + decimalToNumber(entry.hours), 0);
   const billedCents = timeEntries.reduce((sum, entry) => sum + practiceTimeBillAmountCents(entry), 0);
   const costCents = timeEntries.reduce((sum, entry) => sum + practiceTimeCostAmountCents(entry), 0);
@@ -1179,13 +1181,13 @@ export async function listNativePracticeProjectHealth(
         COALESCE(SUM(COALESCE("billAmountCents"::numeric, ROUND("hours" * "billRateCents"))), 0)::bigint AS "timeRevenueCents",
         COALESCE(SUM(COALESCE("costAmountCents"::numeric, ROUND("hours" * "costRateCents"))), 0)::bigint AS "timeCostCents",
         COALESCE(SUM(
-          CASE WHEN "weekEndingOn" >= ${recent.startsOn} AND "weekEndingOn" <= ${recent.endsOn}
+          CASE WHEN "workedOn" >= ${recent.startsOn} AND "workedOn" <= ${recent.endsOn}
             THEN COALESCE("billAmountCents"::numeric, ROUND("hours" * "billRateCents"))
             ELSE 0
           END
         ), 0)::bigint AS "recentTimeRevenueCents",
         COALESCE(SUM(
-          CASE WHEN "weekEndingOn" >= ${recent.startsOn} AND "weekEndingOn" <= ${recent.endsOn}
+          CASE WHEN "workedOn" >= ${recent.startsOn} AND "workedOn" <= ${recent.endsOn}
             THEN COALESCE("costAmountCents"::numeric, ROUND("hours" * "costRateCents"))
             ELSE 0
           END
@@ -1240,7 +1242,22 @@ export async function getNativePracticeFinanceDashboard(
   workspaceId: string,
   options: ListNativePracticeProjectHealthOptions = {},
 ): Promise<NativePracticeFinanceDashboard> {
-  const projectHealth = await listNativePracticeProjectHealth(actor, workspaceId, options);
+  const projectHealth: NativePracticeProjectHealth[] = [];
+  let cursor: string | null = null;
+  const take = MAX_PRACTICE_PROJECT_TAKE;
+
+  while (true) {
+    const page = await listNativePracticeProjectHealth(actor, workspaceId, {
+      ...options,
+      cursor,
+      take,
+    });
+    projectHealth.push(...page);
+    if (page.length < take) break;
+    cursor = page.at(-1)?.projectId ?? null;
+    if (!cursor) break;
+  }
+
   return {
     summary: summarizeNativePracticeFinance(projectHealth),
     attention: collectNativePracticeAttention(projectHealth),

@@ -328,6 +328,31 @@ describe("practice-finance pure derivations", () => {
     }]);
   });
 
+  it("counts current-week work in recent native project and consultant burn", () => {
+    const currentWeekEntry = nativeTimeEntry({
+      workedOn: new Date("2026-06-27T00:00:00.000Z"),
+      weekEndingOn: new Date("2026-07-03T00:00:00.000Z"),
+    });
+    const health = calculateNativePracticeProjectHealth({
+      project: nativeProject(),
+      now: new Date("2026-06-28T00:00:00.000Z"),
+      recentWindowWeeks: 1,
+      timeEntries: [currentWeekEntry],
+      expenses: [],
+    });
+    const utilization = calculateNativePracticeConsultantUtilization({
+      consultant: nativeConsultant(),
+      now: new Date("2026-06-28T00:00:00.000Z"),
+      recentWindowWeeks: 1,
+      timeEntries: [currentWeekEntry],
+      expenses: [],
+    });
+
+    expect(health.recentBudgetBurnPerWeekCents).toBe(150_000);
+    expect(health.recentCostBurnPerWeekCents).toBe(80_000);
+    expect(utilization.recentHours).toBe(10);
+  });
+
   it("summarizes native project health and collects margin attention", () => {
     const risky = calculateNativePracticeProjectHealth({
       project: nativeProject({ id: "risk", name: "Risky" }),
@@ -349,6 +374,55 @@ describe("practice-finance pure derivations", () => {
     expect(summary.marginBps).toBe(3684);
     expect(summary.riskMarginCount).toBe(1);
     expect(collectNativePracticeAttention([risky, closed]).map((item) => item.issue)).toEqual(["margin"]);
+  });
+
+  it("preserves native project overruns in portfolio remaining totals", () => {
+    const overrun = calculateNativePracticeProjectHealth({
+      project: nativeProject({
+        id: "overrun",
+        poValueCents: 100_00,
+        serviceBudgetCents: 80_00,
+        expenseBudgetCents: 20_00,
+      }),
+      timeEntries: [nativeTimeEntry({
+        projectId: "overrun",
+        billAmountCents: 200_00,
+        costAmountCents: 0,
+      })],
+      expenses: [],
+    });
+    const untouched = calculateNativePracticeProjectHealth({
+      project: nativeProject({
+        id: "untouched",
+        poValueCents: 100_00,
+        serviceBudgetCents: 80_00,
+        expenseBudgetCents: 20_00,
+      }),
+      timeEntries: [],
+      expenses: [],
+    });
+
+    const summary = summarizeNativePracticeFinance([overrun, untouched]);
+    expect(overrun.remainingBudgetCents).toBe(-100_00);
+    expect(overrun.weeksToBudgetExhaustion).toBe(0);
+    expect(summary.remainingCents).toBe(0);
+  });
+
+  it("does not count setup-incomplete projects as native margin risks", () => {
+    const incomplete = calculateNativePracticeProjectHealth({
+      project: nativeProject({ expenseBudgetCents: 0 }),
+      timeEntries: [nativeTimeEntry({
+        billAmountCents: 100_00,
+        costAmountCents: 80_00,
+      })],
+      expenses: [],
+    });
+
+    const summary = summarizeNativePracticeFinance([incomplete]);
+    expect(incomplete.hasBudgetSetup).toBe(false);
+    expect(incomplete.weeksToTargetMarginRisk).toBe(0);
+    expect(summary.riskMarginCount).toBe(0);
+    expect(collectNativePracticeAttention([incomplete]).map((item) => item.issue)).toEqual(["setup"]);
   });
 
   it("rejects mixed active currencies before aggregating native finance summaries", () => {
@@ -763,6 +837,42 @@ describe("practice-finance I/O", () => {
     expect(dashboard.attention).toHaveLength(1);
     expect(dashboard.attention[0]).toMatchObject({ issue: "setup" });
     expect(prismaMock.$queryRaw).toHaveBeenCalledTimes(2);
+  });
+
+  it("builds the native finance dashboard from every project health page", async () => {
+    const firstPage = Array.from({ length: 200 }, (_, index) => nativeProject({
+      id: `project-${String(index + 1).padStart(3, "0")}`,
+      code: `DPRJ-${String(index + 1).padStart(3, "0")}`,
+    }));
+    const secondPage = [
+      nativeProject({
+        id: "project-201",
+        code: "DPRJ-201",
+      }),
+    ];
+    prismaMock.practiceProject.findMany
+      .mockResolvedValueOnce(firstPage)
+      .mockResolvedValueOnce(secondPage);
+
+    const dashboard = await getNativePracticeFinanceDashboard(actor, "workspace-1", {
+      take: 5,
+      cursor: "ignored-for-dashboard",
+      now: new Date("2026-06-30T00:00:00.000Z"),
+    });
+
+    expect(dashboard.projectHealth).toHaveLength(201);
+    expect(dashboard.summary.activeProjects).toBe(201);
+    expect(prismaMock.practiceProject.findMany).toHaveBeenCalledTimes(2);
+    expect(prismaMock.practiceProject.findMany).toHaveBeenNthCalledWith(1, expect.objectContaining({
+      take: 200,
+    }));
+    expect(prismaMock.practiceProject.findMany.mock.calls[0]?.[0]).not.toHaveProperty("cursor");
+    expect(prismaMock.practiceProject.findMany).toHaveBeenNthCalledWith(2, expect.objectContaining({
+      take: 200,
+      cursor: { id: "project-200" },
+      skip: 1,
+    }));
+    expect(prismaMock.$queryRaw).toHaveBeenCalledTimes(4);
   });
 
   it("lists Practice Ledger contribution entries with contributor and project evidence", async () => {
