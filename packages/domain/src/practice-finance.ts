@@ -2093,30 +2093,6 @@ async function linkNativePracticeProjectClient(db: PracticeFinanceDbClient, proj
   return clientId;
 }
 
-function nativePracticeConsultantLookupWhere(params: {
-  workspaceId: string;
-  displayName: string;
-  email: string | null;
-}) {
-  const nameLookup = { name: { equals: params.displayName, mode: "insensitive" as const } };
-  if (params.email && params.displayName !== params.email) {
-    return {
-      workspaceId: params.workspaceId,
-      OR: [
-        { email: { equals: params.email, mode: "insensitive" as const } },
-        nameLookup,
-      ],
-    };
-  }
-
-  return {
-    workspaceId: params.workspaceId,
-    ...(params.email
-      ? { email: { equals: params.email, mode: "insensitive" as const } }
-      : nameLookup),
-  };
-}
-
 type NativePracticeConsultantMatch = {
   id: string;
   name: string;
@@ -2131,8 +2107,24 @@ async function findNativePracticeConsultantMatches(
     email: string | null;
   },
 ) {
+  if (params.email) {
+    const emailMatches = await db.practiceConsultant.findMany({
+      where: {
+        workspaceId: params.workspaceId,
+        email: { equals: params.email, mode: "insensitive" },
+      },
+      select: { id: true, name: true, email: true },
+      orderBy: [{ id: "asc" }],
+      take: 2,
+    });
+    if (emailMatches.length > 0 || params.displayName === params.email) return emailMatches;
+  }
+
   return db.practiceConsultant.findMany({
-    where: nativePracticeConsultantLookupWhere(params),
+    where: {
+      workspaceId: params.workspaceId,
+      name: { equals: params.displayName, mode: "insensitive" },
+    },
     select: { id: true, name: true, email: true },
     orderBy: [{ id: "asc" }],
     take: 2,
@@ -2216,6 +2208,15 @@ async function lockNativePracticeConsultantIdentity(
   }
 }
 
+async function lockNativePracticeClientCode(
+  db: PracticeFinanceDbClient,
+  workspaceId: string,
+  code: string,
+) {
+  const lockKey = `native-practice-client:${workspaceId}:code:${code}`;
+  await db.$queryRaw(Prisma.sql`SELECT pg_advisory_xact_lock(hashtextextended(${lockKey}, 0))`);
+}
+
 async function ensureNativePracticeClientForProject(
   db: PracticeFinanceDbClient,
   project: Awaited<ReturnType<typeof loadNativePracticeProjectForLedgerWrite>>,
@@ -2282,6 +2283,7 @@ async function ensureNativePracticeClientForProject(
 
   const baseCode = normalizeProjectCodeBase(project.clientName).slice(0, 80) || `CLIENT-${projectIdCodeSuffix(project.id)}`;
   const suffixedCode = `${baseCode.slice(0, 67)}-${project.id.slice(0, 12)}`;
+  await lockNativePracticeClientCode(db, project.workspaceId, baseCode);
   const existingCodeClient = await db.practiceClient.findUnique({
     where: { workspaceId_code: { workspaceId: project.workspaceId, code: baseCode } },
     select: { id: true, crmAccountId: true, name: true },
@@ -2290,53 +2292,33 @@ async function ensureNativePracticeClientForProject(
     return linkNativePracticeProjectClient(db, project.id, existingCodeClient.id);
   }
 
-  const code = existingCodeClient ? suffixedCode : baseCode;
-  try {
-    const client = await db.practiceClient.create({
-      data: {
-        workspaceId: project.workspaceId,
-        crmAccountId: project.crmAccountId,
-        code,
-        name: project.clientName,
-      },
-      select: { id: true },
-    });
-    return linkNativePracticeProjectClient(db, project.id, client.id);
-  } catch (error) {
-    if (!isUniqueConstraintError(error)) throw error;
-    const client = await db.practiceClient.findUnique({
-      where: { workspaceId_code: { workspaceId: project.workspaceId, code } },
+  if (existingCodeClient) {
+    const existingSuffixedClient = await db.practiceClient.findUnique({
+      where: { workspaceId_code: { workspaceId: project.workspaceId, code: suffixedCode } },
       select: { id: true, crmAccountId: true, name: true },
     });
-    if (client && nativePracticeClientMatchesProject(client, project)) {
-      return linkNativePracticeProjectClient(db, project.id, client.id);
+    if (existingSuffixedClient && nativePracticeClientMatchesProject(existingSuffixedClient, project)) {
+      return linkNativePracticeProjectClient(db, project.id, existingSuffixedClient.id);
     }
-    if (code !== suffixedCode) {
-      try {
-        const fallbackClient = await db.practiceClient.create({
-          data: {
-            workspaceId: project.workspaceId,
-            crmAccountId: project.crmAccountId,
-            code: suffixedCode,
-            name: project.clientName,
-          },
-          select: { id: true },
-        });
-        return linkNativePracticeProjectClient(db, project.id, fallbackClient.id);
-      } catch (fallbackError) {
-        if (!isUniqueConstraintError(fallbackError)) throw fallbackError;
-        const fallbackClient = await db.practiceClient.findUnique({
-          where: { workspaceId_code: { workspaceId: project.workspaceId, code: suffixedCode } },
-          select: { id: true, crmAccountId: true, name: true },
-        });
-        if (fallbackClient && nativePracticeClientMatchesProject(fallbackClient, project)) {
-          return linkNativePracticeProjectClient(db, project.id, fallbackClient.id);
-        }
-        throw fallbackError;
-      }
-    }
-    throw error;
+    invariant(
+      !existingSuffixedClient,
+      409,
+      "AMBIGUOUS_CLIENT",
+      "Generated project client code is already linked to another practice client.",
+    );
   }
+
+  const code = existingCodeClient ? suffixedCode : baseCode;
+  const client = await db.practiceClient.create({
+    data: {
+      workspaceId: project.workspaceId,
+      crmAccountId: project.crmAccountId,
+      code,
+      name: project.clientName,
+    },
+    select: { id: true },
+  });
+  return linkNativePracticeProjectClient(db, project.id, client.id);
 }
 
 async function resolveNativePracticeConsultant(db: Prisma.TransactionClient, params: {
