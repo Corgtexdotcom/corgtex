@@ -31,6 +31,10 @@ const {
       postEphemeral: vi.fn(),
       update: vi.fn(),
     },
+    users: {
+      lookupByEmail: vi.fn(),
+      info: vi.fn(),
+    },
     views: {
       publish: vi.fn(),
       open: vi.fn(),
@@ -55,6 +59,7 @@ const {
         upsert: vi.fn(),
       },
       communicationExternalUser: {
+        findFirst: vi.fn(),
         findUnique: vi.fn(),
         upsert: vi.fn(),
       },
@@ -179,7 +184,9 @@ describe("communication Slack integration", () => {
     prismaMock.communicationInstallation.findFirst.mockReset();
     prismaMock.communicationInstallation.findUnique.mockReset();
     prismaMock.communicationChannel.upsert.mockReset();
+    prismaMock.communicationExternalUser.findFirst.mockReset();
     prismaMock.communicationExternalUser.findUnique.mockReset();
+    prismaMock.communicationExternalUser.upsert.mockReset();
     prismaMock.user.findUnique.mockReset();
     prismaMock.communicationMessage.upsert.mockReset();
     prismaMock.communicationInstallation.update.mockReset();
@@ -188,6 +195,8 @@ describe("communication Slack integration", () => {
     slackWebClientMock.conversations.history.mockReset();
     slackWebClientMock.conversations.info.mockReset();
     slackWebClientMock.chat.update.mockReset();
+    slackWebClientMock.users.lookupByEmail.mockReset();
+    slackWebClientMock.users.info.mockReset();
     slackWebClientMock.views.open.mockReset();
     prismaMock.meeting.findFirst.mockReset();
     meetingReviewConfirmMock.mockReset().mockResolvedValue({
@@ -335,6 +344,80 @@ describe("communication Slack integration", () => {
         provider: "SLACK",
         externalWorkspaceId: "T1",
         installedByUserId: "operator-1",
+      }),
+    }));
+  });
+
+  it("resolves notification recipients from cached Slack user mappings before API lookup", async () => {
+    const { resolveSlackNotificationRecipient } = await import("./communication");
+    prismaMock.communicationInstallation.findFirst.mockResolvedValueOnce({
+      id: "install-1",
+      workspaceId: "workspace-1",
+      botTokenEnc: "enc:xoxb-token",
+    });
+    prismaMock.communicationExternalUser.findFirst.mockResolvedValueOnce({
+      externalUserId: "U1",
+    });
+
+    await expect(resolveSlackNotificationRecipient({
+      workspaceId: "workspace-1",
+      userId: "user-1",
+      email: "user@example.test",
+    })).resolves.toEqual({
+      installationId: "install-1",
+      externalUserId: "U1",
+    });
+
+    expect(slackWebClientMock.users.lookupByEmail).not.toHaveBeenCalled();
+  });
+
+  it("looks up notification recipients by email and caches the Slack mapping", async () => {
+    const { resolveSlackNotificationRecipient } = await import("./communication");
+    prismaMock.communicationInstallation.findFirst.mockResolvedValueOnce({
+      id: "install-1",
+      workspaceId: "workspace-1",
+      botTokenEnc: "enc:xoxb-token",
+    });
+    prismaMock.communicationExternalUser.findFirst.mockResolvedValueOnce(null);
+    slackWebClientMock.users.lookupByEmail.mockResolvedValueOnce({
+      user: {
+        id: "U1",
+        name: "andy",
+        deleted: false,
+        is_bot: false,
+        profile: {
+          email: "andy@example.test",
+          display_name: "Andy",
+        },
+      },
+    });
+    prismaMock.communicationExternalUser.upsert.mockResolvedValueOnce({ id: "external-user-1" });
+
+    await expect(resolveSlackNotificationRecipient({
+      workspaceId: "workspace-1",
+      userId: "user-1",
+      email: "andy@example.test",
+    })).resolves.toEqual({
+      installationId: "install-1",
+      externalUserId: "U1",
+    });
+
+    expect(slackWebClientMock.users.lookupByEmail).toHaveBeenCalledWith({ email: "andy@example.test" });
+    expect(prismaMock.communicationExternalUser.upsert).toHaveBeenCalledWith(expect.objectContaining({
+      where: { installationId_externalUserId: { installationId: "install-1", externalUserId: "U1" } },
+      update: expect.objectContaining({
+        userId: "user-1",
+        email: "andy@example.test",
+        displayName: "Andy",
+        isBot: false,
+        isDeleted: false,
+      }),
+      create: expect.objectContaining({
+        installationId: "install-1",
+        workspaceId: "workspace-1",
+        provider: "SLACK",
+        externalUserId: "U1",
+        userId: "user-1",
       }),
     }));
   });

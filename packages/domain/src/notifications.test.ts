@@ -1,7 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { AppActor } from "@corgtex/shared";
 
-const { prismaMock, sendEmailMock } = vi.hoisted(() => ({
+const {
+  prismaMock,
+  sendEmailMock,
+  resolveSlackNotificationRecipientMock,
+  sendSlackMessageMock,
+} = vi.hoisted(() => ({
   prismaMock: {
     notification: {
       findMany: vi.fn(),
@@ -27,6 +32,8 @@ const { prismaMock, sendEmailMock } = vi.hoisted(() => ({
     },
   },
   sendEmailMock: vi.fn(),
+  resolveSlackNotificationRecipientMock: vi.fn(),
+  sendSlackMessageMock: vi.fn(),
 }));
 
 vi.mock("@corgtex/shared", () => ({
@@ -37,6 +44,11 @@ vi.mock("@corgtex/shared", () => ({
     APP_URL: "https://app.example.test",
     SESSION_LAST_SEEN_WRITE_INTERVAL_MS: 5 * 60 * 1000,
   },
+}));
+
+vi.mock("./communication", () => ({
+  resolveSlackNotificationRecipient: resolveSlackNotificationRecipientMock,
+  sendSlackMessage: sendSlackMessageMock,
 }));
 
 const actor: AppActor = {
@@ -72,6 +84,11 @@ describe("notifications domain", () => {
     prismaMock.notificationDelivery.findUnique.mockResolvedValue(null);
     prismaMock.workflowJob.upsert.mockResolvedValue({ id: "job-1" });
     sendEmailMock.mockReset().mockResolvedValue({ status: "SENT", providerMessageId: "resend-1" });
+    resolveSlackNotificationRecipientMock.mockReset().mockResolvedValue({
+      installationId: "slack-install-1",
+      externalUserId: "U1",
+    });
+    sendSlackMessageMock.mockReset().mockResolvedValue({ ts: "1714320000.000100" });
     prismaMock.notificationPreference.findMany.mockResolvedValue([]);
     prismaMock.member.findMany.mockResolvedValue([
       { userId: "user-1", user: { email: "user-1@example.com" } },
@@ -263,12 +280,78 @@ describe("notifications domain", () => {
     expect(sendEmailMock).not.toHaveBeenCalled();
   });
 
+  it("createNotificationIntent creates pending Slack delivery jobs for outbound-eligible Slack preferences", async () => {
+    prismaMock.notificationPreference.findMany.mockResolvedValue([
+      { userId: "user-1", notifType: "deliberation.mention", channel: "SLACK" },
+    ]);
+
+    const { createNotificationIntent } = await import("./notifications");
+    await createNotificationIntent(prismaMock as any, {
+      workspaceId: "workspace-1",
+      type: "deliberation.mention",
+      recipientUserIds: ["user-1"],
+      title: "Mentioned you",
+      bodyMd: "Please review this note.",
+    });
+
+    expect(prismaMock.notification.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        workspaceId: "workspace-1",
+        userId: "user-1",
+        type: "deliberation.mention",
+      }),
+      select: { id: true, workspaceId: true, userId: true },
+    }));
+    expect(prismaMock.notificationDelivery.upsert).toHaveBeenCalledWith(expect.objectContaining({
+      create: expect.objectContaining({
+        notificationId: "notification-user-1",
+        workspaceId: "workspace-1",
+        userId: "user-1",
+        channel: "SLACK",
+        status: "PENDING",
+      }),
+    }));
+    expect(prismaMock.workflowJob.upsert).toHaveBeenCalledWith(expect.objectContaining({
+      create: expect.objectContaining({
+        workspaceId: "workspace-1",
+        type: "notification.delivery",
+        payload: { deliveryId: "delivery-notification-user-1-SLACK" },
+      }),
+    }));
+    expect(sendSlackMessageMock).not.toHaveBeenCalled();
+  });
+
   it("createNotificationIntent does not email broad activity notifications", async () => {
     prismaMock.member.findMany.mockResolvedValue([
       { userId: "user-1", user: { email: "user-1@example.com" } },
     ]);
     prismaMock.notificationPreference.findMany.mockResolvedValue([
       { userId: "user-1", notifType: "meeting.created", channel: "EMAIL" },
+    ]);
+
+    const { createNotificationIntent } = await import("./notifications");
+    await createNotificationIntent(prismaMock as any, {
+      workspaceId: "workspace-1",
+      type: "meeting.created",
+      recipientUserIds: ["user-1"],
+      title: "Meeting created",
+    });
+
+    expect(prismaMock.notification.createMany).toHaveBeenCalledWith({
+      data: [
+        expect.objectContaining({ userId: "user-1", type: "meeting.created" }),
+      ],
+    });
+    expect(prismaMock.notificationDelivery.upsert).not.toHaveBeenCalled();
+    expect(prismaMock.workflowJob.upsert).not.toHaveBeenCalled();
+  });
+
+  it("createNotificationIntent does not create Slack deliveries for broad activity notifications", async () => {
+    prismaMock.member.findMany.mockResolvedValue([
+      { userId: "user-1", user: { email: "user-1@example.com" } },
+    ]);
+    prismaMock.notificationPreference.findMany.mockResolvedValue([
+      { userId: "user-1", notifType: "meeting.created", channel: "SLACK" },
     ]);
 
     const { createNotificationIntent } = await import("./notifications");
@@ -414,5 +497,140 @@ describe("notifications domain", () => {
         error: "resend still failing",
       }),
     });
+  });
+
+  it("deliverNotificationDelivery sends Slack and records provider success", async () => {
+    prismaMock.notificationDelivery.findUnique.mockResolvedValue({
+      id: "delivery-1",
+      notificationId: "notification-1",
+      workspaceId: "workspace-1",
+      userId: "user-1",
+      channel: "SLACK",
+      status: "PENDING",
+      attempts: 0,
+      notification: {
+        id: "notification-1",
+        type: "deliberation.mention",
+        title: "Mentioned you",
+        bodyMd: "Please review this note.",
+      },
+      user: { email: "user-1@example.com" },
+    });
+
+    const { deliverNotificationDelivery } = await import("./notifications");
+    await expect(deliverNotificationDelivery("delivery-1")).resolves.toEqual({ status: "SENT" });
+
+    expect(resolveSlackNotificationRecipientMock).toHaveBeenCalledWith({
+      workspaceId: "workspace-1",
+      userId: "user-1",
+      email: "user-1@example.com",
+    });
+    expect(sendSlackMessageMock).toHaveBeenCalledWith(
+      "slack-install-1",
+      expect.objectContaining({
+        channel: "U1",
+        text: expect.stringContaining("Mentioned you"),
+      }),
+      expect.arrayContaining([
+        expect.objectContaining({ type: "section" }),
+      ]),
+    );
+    expect(prismaMock.notificationDelivery.update).toHaveBeenCalledWith({
+      where: { id: "delivery-1" },
+      data: expect.objectContaining({
+        status: "SENT",
+        attempts: 1,
+        providerMessageId: "1714320000.000100",
+        error: null,
+      }),
+    });
+  });
+
+  it("deliverNotificationDelivery records missing Slack identity and queues email fallback", async () => {
+    prismaMock.notificationDelivery.findUnique.mockResolvedValue({
+      id: "delivery-1",
+      notificationId: "notification-1",
+      workspaceId: "workspace-1",
+      userId: "user-1",
+      channel: "SLACK",
+      status: "PENDING",
+      attempts: 0,
+      notification: {
+        id: "notification-1",
+        type: "deliberation.mention",
+        title: "Mentioned you",
+        bodyMd: null,
+      },
+      user: { email: "user-1@example.com" },
+    });
+    resolveSlackNotificationRecipientMock.mockResolvedValue(null);
+
+    const { deliverNotificationDelivery } = await import("./notifications");
+    await expect(deliverNotificationDelivery("delivery-1")).resolves.toEqual({ status: "SKIPPED" });
+
+    expect(prismaMock.notificationDelivery.update).toHaveBeenCalledWith({
+      where: { id: "delivery-1" },
+      data: expect.objectContaining({
+        status: "SKIPPED",
+        attempts: 1,
+        error: "Recipient user has no mapped Slack identity.",
+      }),
+    });
+    expect(prismaMock.notificationDelivery.upsert).toHaveBeenCalledWith(expect.objectContaining({
+      create: expect.objectContaining({
+        notificationId: "notification-1",
+        workspaceId: "workspace-1",
+        userId: "user-1",
+        channel: "EMAIL",
+        status: "PENDING",
+      }),
+    }));
+    expect(prismaMock.workflowJob.upsert).toHaveBeenCalledWith(expect.objectContaining({
+      create: expect.objectContaining({
+        type: "notification.delivery",
+        payload: { deliveryId: "delivery-notification-1-EMAIL" },
+      }),
+    }));
+    expect(sendSlackMessageMock).not.toHaveBeenCalled();
+  });
+
+  it("deliverNotificationDelivery records Slack failure and queues email fallback", async () => {
+    prismaMock.notificationDelivery.findUnique.mockResolvedValue({
+      id: "delivery-1",
+      notificationId: "notification-1",
+      workspaceId: "workspace-1",
+      userId: "user-1",
+      channel: "SLACK",
+      status: "PENDING",
+      attempts: 0,
+      notification: {
+        id: "notification-1",
+        type: "deliberation.mention",
+        title: "Mentioned you",
+        bodyMd: null,
+      },
+      user: { email: "user-1@example.com" },
+    });
+    sendSlackMessageMock.mockRejectedValue(new Error("slack api unavailable"));
+
+    const { deliverNotificationDelivery } = await import("./notifications");
+    await expect(deliverNotificationDelivery("delivery-1")).resolves.toEqual({ status: "FAILED" });
+
+    expect(prismaMock.notificationDelivery.update).toHaveBeenCalledWith({
+      where: { id: "delivery-1" },
+      data: expect.objectContaining({
+        status: "FAILED",
+        attempts: 1,
+        failedAt: new Date("2026-04-24T12:00:00.000Z"),
+        error: "slack api unavailable",
+      }),
+    });
+    expect(prismaMock.notificationDelivery.upsert).toHaveBeenCalledWith(expect.objectContaining({
+      create: expect.objectContaining({
+        notificationId: "notification-1",
+        channel: "EMAIL",
+        status: "PENDING",
+      }),
+    }));
   });
 });
