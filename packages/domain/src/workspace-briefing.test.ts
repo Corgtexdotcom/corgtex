@@ -702,6 +702,46 @@ describe("workspace briefing", () => {
     expect(briefing.sourceRefs).toEqual([]);
   });
 
+  it("preserves stale evidence time for unmatched digest prose", async () => {
+    const { buildWorkspaceBriefingFromDigest } = await import("./workspace-briefing");
+    const briefing = buildWorkspaceBriefingFromDigest({
+      workspaceId: "ws-1",
+      period: "DAILY",
+      dateKey: "2026-04-30",
+      title: "Daily Workspace Briefing - 2026-04-30",
+      generatedAt: new Date("2026-04-30T12:00:00.000Z"),
+      digest: {
+        intro: null,
+        sections: [{
+          id: "conversationHighlights",
+          title: "Conversation Highlights",
+          items: ["Customer rollout still has unresolved ownership; one accountable launch owner is needed before work moves."],
+        }],
+      },
+      candidates: [
+        baseCandidate({
+          sourceType: "ACTION",
+          sourceId: "action-owner",
+          title: "Confirm launch owner",
+          summaryMd: "Ownership remains unresolved before the customer rollout and needs one accountable owner.",
+          href: "/workspaces/ws-1/actions/action-owner",
+          occurredAt: new Date("2026-04-01T10:00:00.000Z"),
+          updatedAt: new Date("2026-04-01T10:00:00.000Z"),
+          status: "OPEN",
+          priority: 3,
+          strategicScore: 4,
+          actionabilityScore: 5,
+          evidenceScore: 4,
+          sourceRefs: [{ type: "ACTION", id: "action-owner", label: "Confirm launch owner", href: "/workspaces/ws-1/actions/action-owner" }],
+        }),
+      ],
+    });
+
+    expect(briefing.items[0]?.occurredAt).toBe("2026-04-01T10:00:00.000Z");
+    expect(briefing.leadMd).toContain("No major new operating signal");
+    expect(briefing.attentionMd).toContain("Customer rollout still has unresolved ownership");
+  });
+
   it("uses weekly timing language for weekly attention items", async () => {
     const { buildWorkspaceBriefingFromCandidates } = await import("./workspace-briefing");
     const briefing = buildWorkspaceBriefingFromCandidates({

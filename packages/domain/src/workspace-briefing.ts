@@ -888,18 +888,28 @@ export function buildWorkspaceBriefingFromDigest(params: {
   const digestEntries = params.digest.sections.flatMap((section, sectionIndex) => (
     section.items.map((rawItem, itemIndex) => {
       const source = pickCandidateForSection(section.id, rawItem, rankedCandidates, used);
-      const score = source ? scoreWorkspaceBriefingCandidate(source, generatedAt) : Math.max(4, 8 - itemIndex);
+      const semanticSource = source ?? rankedCandidates.find((entry) => (
+        !used.has(candidateKey(entry))
+        && candidateSemanticallyOverlapsDigestItem(entry, rawItem)
+      ));
+      if (!source && semanticSource) used.add(candidateKey(semanticSource));
+      const scoreSource = source ?? semanticSource;
+      const score = source
+        ? scoreWorkspaceBriefingCandidate(source, generatedAt)
+        : semanticSource
+          ? Math.max(4, scoreWorkspaceBriefingCandidate(semanticSource, generatedAt) - 0.5)
+          : Math.max(4, 8 - itemIndex);
       return {
         digestIndex: sectionIndex * 100 + itemIndex,
         kind: source?.sourceType ?? sectionKind(section.id),
         title: source?.title ?? titleFromDigestItem(rawItem),
         rawItem,
-        whyItMattersMd: source ? whyCandidateMatters(source) : "This was selected because it helps explain the current workspace picture.",
+        whyItMattersMd: scoreSource ? whyCandidateMatters(scoreSource) : "This was selected because it helps explain the current workspace picture.",
         sourceRefs: source?.sourceRefs ?? [],
         href: source?.href ?? null,
-        occurredAt: source?.occurredAt ?? generatedAt,
-        status: source?.status ?? null,
-        confidence: source ? Math.max(0.62, Math.min(0.98, 0.6 + score / 25)) : 0.72,
+        occurredAt: scoreSource?.occurredAt ?? generatedAt,
+        status: scoreSource?.status ?? null,
+        confidence: scoreSource ? Math.max(0.62, Math.min(0.98, 0.6 + score / 25)) : 0.72,
         score,
       };
     })
