@@ -63,6 +63,7 @@ const createConversationMessageMock = vi.fn();
 const listWorkItemVersionsMock = vi.fn();
 const getWorkItemVersionMock = vi.fn();
 const requireWorkspaceMembershipMock = vi.fn();
+const loadAdviceRequestCountSummariesMock = vi.fn();
 const listDeliberationEntriesMock = vi.fn();
 const postDeliberationEntryMock = vi.fn();
 const resolveDeliberationEntryMock = vi.fn();
@@ -106,6 +107,7 @@ vi.mock("@corgtex/domain", async () => {
   normalizeTensionWorkItem,
   workItemMemberDisplayName,
   requireWorkspaceMembership: requireWorkspaceMembershipMock,
+  loadAdviceRequestCountSummaries: loadAdviceRequestCountSummariesMock,
   listProposals: listProposalsMock,
   createProposal: createProposalMock,
   updateProposal: updateProposalMock,
@@ -292,6 +294,14 @@ describe("createCorgtexMcpServer", () => {
     listGoalsMock.mockReset().mockResolvedValue([]);
     listProposalsMock.mockReset().mockResolvedValue({ items: [], total: 0 });
     listTensionsMock.mockReset().mockResolvedValue({ items: [], total: 0 });
+    loadAdviceRequestCountSummariesMock.mockReset().mockImplementation(async (_workspaceId: string, _subjectType: string, subjectIds: string[]) => new Map(
+      subjectIds.map((subjectId) => [subjectId, {
+        adviceRequestCount: 0,
+        activeAdviceRequestCount: 0,
+        inputRequestCount: 0,
+        activeInputRequestCount: 0,
+      }]),
+    ));
     getGoalMock.mockReset().mockResolvedValue({ id: "goal-1", cadence: "QUARTERLY" });
     updateActionMock.mockReset().mockResolvedValue({
       id: "action-1",
@@ -1600,6 +1610,31 @@ describe("createCorgtexMcpServer", () => {
         ownerMemberId: "member-owner",
         ownerMember: { id: "member-owner", user: { displayName: "Owner", email: "owner@example.test" } },
       } as never);
+    loadAdviceRequestCountSummariesMock
+      .mockResolvedValueOnce(new Map([["action-1", {
+        adviceRequestCount: 0,
+        activeAdviceRequestCount: 0,
+        inputRequestCount: 0,
+        activeInputRequestCount: 0,
+      }]]))
+      .mockResolvedValueOnce(new Map([["action-1", {
+        adviceRequestCount: 2,
+        activeAdviceRequestCount: 1,
+        inputRequestCount: 2,
+        activeInputRequestCount: 1,
+      }]]))
+      .mockResolvedValueOnce(new Map([["tension-1", {
+        adviceRequestCount: 0,
+        activeAdviceRequestCount: 0,
+        inputRequestCount: 0,
+        activeInputRequestCount: 0,
+      }]]))
+      .mockResolvedValueOnce(new Map([["tension-1", {
+        adviceRequestCount: 3,
+        activeAdviceRequestCount: 2,
+        inputRequestCount: 3,
+        activeInputRequestCount: 2,
+      }]]));
 
     const server = createCorgtexMcpServer({
       actor: { kind: "agent", authProvider: "bootstrap" } as any,
@@ -1683,12 +1718,16 @@ describe("createCorgtexMcpServer", () => {
       assigneeMemberId: "member-assignee",
       assigneeMemberName: "Assignee",
       assignee: "Assignee",
+      inputRequestCount: 0,
+      activeInputRequestCount: 0,
     });
     expect(JSON.parse(updateActionResponse.content[0].text)).toMatchObject({
       priorityLabel: "Urgent",
       assigneeMemberId: "member-assignee",
       assigneeMemberName: "Assignee",
       assignee: "Assignee",
+      inputRequestCount: 2,
+      activeInputRequestCount: 1,
     });
     expect(JSON.parse(createTensionResponse.content[0].text)).toMatchObject({
       priorityLabel: "Medium",
@@ -1697,12 +1736,16 @@ describe("createCorgtexMcpServer", () => {
       responsiblePerson: "Responsible",
       raisedByMemberId: "member-raiser",
       raisedByMemberName: "Raiser",
+      inputRequestCount: 0,
+      activeInputRequestCount: 0,
     });
     expect(JSON.parse(updateTensionResponse.content[0].text)).toMatchObject({
       priorityLabel: "Important",
       responsibleMemberId: "member-responsible",
       responsibleMemberName: "Responsible",
       responsiblePerson: "Responsible",
+      inputRequestCount: 3,
+      activeInputRequestCount: 2,
     });
     expect(JSON.parse(createProposalResponse.content[0].text)).toMatchObject({
       priorityLabel: "Urgent",

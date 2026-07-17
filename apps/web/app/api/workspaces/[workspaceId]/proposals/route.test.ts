@@ -100,7 +100,7 @@ afterEach(() => {
 });
 
 describe("GET /api/workspaces/[workspaceId]/proposals", () => {
-  it("passes pagination and archive filters into proposal listing", async () => {
+  it("caps pagination and passes archive filters into proposal listing", async () => {
     listProposals.mockResolvedValue({
       items: [],
       total: 0,
@@ -110,7 +110,7 @@ describe("GET /api/workspaces/[workspaceId]/proposals", () => {
 
     const { GET } = await import("./route");
     const response = await GET(
-      new NextRequest("http://localhost/api/workspaces/workspace-1/proposals?archiveFilter=active&take=100&skip=20"),
+      new NextRequest("http://localhost/api/workspaces/workspace-1/proposals?archiveFilter=active&take=5000&skip=20"),
       context(),
     );
 

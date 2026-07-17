@@ -138,6 +138,7 @@ import {
   AppError,
   classifyMemberIdentity,
   coerceWorkItemPriorityInput,
+  loadAdviceRequestCountSummaries,
   normalizeActionWorkItem,
   normalizeProposalWorkItem,
   normalizeTensionWorkItem,
@@ -238,16 +239,22 @@ const memberUserInclude = {
 };
 
 async function loadActionWorkItemResponse(workspaceId: string, actionId: string, fallback: any) {
-  return await prisma.action.findFirst({
+  const action = await prisma.action.findFirst({
     where: { id: actionId, workspaceId },
     include: {
       assigneeMember: { include: memberUserInclude },
     },
   }) ?? fallback;
+  if (!action?.id) return action;
+  const requestCountSummaries = await loadAdviceRequestCountSummaries(workspaceId, "ACTION", [action.id]);
+  return {
+    ...action,
+    ...requestCountSummaries.get(action.id),
+  };
 }
 
 async function loadTensionWorkItemResponse(workspaceId: string, tensionId: string, fallback: any) {
-  return await prisma.tension.findFirst({
+  const tension = await prisma.tension.findFirst({
     where: { id: tensionId, workspaceId },
     include: {
       assigneeMember: { include: memberUserInclude },
@@ -255,6 +262,12 @@ async function loadTensionWorkItemResponse(workspaceId: string, tensionId: strin
       upvotes: true,
     },
   }) ?? fallback;
+  if (!tension?.id) return tension;
+  const requestCountSummaries = await loadAdviceRequestCountSummaries(workspaceId, "TENSION", [tension.id]);
+  return {
+    ...tension,
+    ...requestCountSummaries.get(tension.id),
+  };
 }
 
 async function loadProposalWorkItemResponse(workspaceId: string, proposalId: string, fallback: any) {
@@ -2563,6 +2576,8 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
         ownerMemberId: item.ownerMemberId,
         ownerMemberName: item.ownerMemberName,
         owner: item.owner,
+        inputRequestCount: item.inputRequestCount,
+        activeInputRequestCount: item.activeInputRequestCount,
         version: item.version,
         webUrl: webUrl(workspaceId, `/actions/${action.id}`),
         permanentUrl: permanent,
@@ -2624,6 +2639,8 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
         ownerMemberId: item.ownerMemberId,
         ownerMemberName: item.ownerMemberName,
         owner: item.owner,
+        inputRequestCount: item.inputRequestCount,
+        activeInputRequestCount: item.activeInputRequestCount,
         version: item.version,
         webUrl: webUrl(workspaceId, `/actions/${updated.id}`),
       });
@@ -2763,6 +2780,8 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
         ownerMemberName: item.ownerMemberName,
         owner: item.owner,
         upvoteCount: item.upvoteCount,
+        inputRequestCount: item.inputRequestCount,
+        activeInputRequestCount: item.activeInputRequestCount,
         version: item.version,
         webUrl: webUrl(workspaceId, `/tensions/${tension.id}`),
         permanentUrl: permanent,
@@ -2828,6 +2847,8 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
         ownerMemberName: item.ownerMemberName,
         owner: item.owner,
         upvoteCount: item.upvoteCount,
+        inputRequestCount: item.inputRequestCount,
+        activeInputRequestCount: item.activeInputRequestCount,
         version: item.version,
         webUrl: webUrl(workspaceId, `/tensions/${updated.id}`),
       });

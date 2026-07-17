@@ -98,7 +98,7 @@ afterEach(() => {
 });
 
 describe("GET /api/workspaces/[workspaceId]/tensions", () => {
-  it("passes pagination and archive filters into tension listing", async () => {
+  it("caps pagination and passes archive filters into tension listing", async () => {
     listTensions.mockResolvedValue({
       items: [],
       total: 0,
@@ -108,7 +108,7 @@ describe("GET /api/workspaces/[workspaceId]/tensions", () => {
 
     const { GET } = await import("./route");
     const response = await GET(
-      new NextRequest("http://localhost/api/workspaces/workspace-1/tensions?archiveFilter=active&take=100&skip=20"),
+      new NextRequest("http://localhost/api/workspaces/workspace-1/tensions?archiveFilter=active&take=5000&skip=20"),
       context(),
     );
 
