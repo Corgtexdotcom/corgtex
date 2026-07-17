@@ -166,7 +166,9 @@ export default async function PracticeProjectDetailPage({
         </div>
         <div style={metricStyle}>
           <div style={labelStyle}>Direct cost</div>
-          <div style={{ fontSize: 24, marginTop: 6 }}>{money(health.directCostCents, health.currency)}</div>
+          <div style={{ fontSize: 24, marginTop: 6 }}>
+            {health.directCostCents == null ? "-" : money(health.directCostCents, health.currency)}
+          </div>
         </div>
         <div style={metricStyle}>
           <div style={labelStyle}>Gross margin</div>

@@ -114,7 +114,7 @@ export type NativePracticeProject = Pick<
   | "weeklyBurnCents"
   | "targetMarginBps"
   | "currentMarginBps"
->;
+> & { sourceSatelliteId?: string | null };
 
 export type NativePracticeTimeEntry = Pick<
   PracticeTimeEntry,
@@ -135,7 +135,7 @@ export type NativePracticeTimeEntry = Pick<
   | "paidAmountCents"
   | "paymentBatchId"
   | "status"
->;
+> & { sourceSatelliteId?: string | null };
 
 export type NativePracticeExpense = Pick<
   PracticeExpense,
@@ -151,7 +151,7 @@ export type NativePracticeExpense = Pick<
   | "billable"
   | "paymentBatchId"
   | "status"
->;
+> & { sourceSatelliteId?: string | null };
 
 export type NativePracticeConsultant = Pick<PracticeConsultant, "id" | "name" | "email" | "active">;
 
@@ -168,9 +168,9 @@ export type NativePracticeProjectHealth = {
   expenseBudgetCents: number;
   usedBudgetCents: number;
   remainingBudgetCents: number;
-  directCostCents: number;
-  grossProfitCents: number;
-  grossMarginBps: number;
+  directCostCents: number | null;
+  grossProfitCents: number | null;
+  grossMarginBps: number | null;
   recentBudgetBurnPerWeekCents: number;
   recentCostBurnPerWeekCents: number;
   weeksToBudgetExhaustion: number | null;
@@ -182,8 +182,8 @@ export type NativePracticeProjectHealth = {
 
 export type NativePracticeFinanceSummary = PracticeFinanceSummary & {
   currency: string | null;
-  directCostCents: number;
-  grossProfitCents: number;
+  directCostCents: number | null;
+  grossProfitCents: number | null;
   riskBudgetCount: number;
   riskMarginCount: number;
 };
@@ -523,6 +523,14 @@ function emptyNativePracticeProjectLedgerRollup(projectId: string): NativePracti
   };
 }
 
+function hasLegacyPracticeProjectFinanceBaseline(project: Pick<NativePracticeProject, "usedCents" | "weeklyBurnCents" | "currentMarginBps">) {
+  return project.usedCents !== 0 || project.weeklyBurnCents !== 0 || project.currentMarginBps != null;
+}
+
+function importedLedgerRowsAreRepresentedByBaseline(project: NativePracticeProject) {
+  return Boolean(project.sourceSatelliteId && hasLegacyPracticeProjectFinanceBaseline(project));
+}
+
 function rollupNativePracticeLedgerRows(params: {
   project: NativePracticeProject;
   timeEntries: NativePracticeTimeEntry[];
@@ -532,8 +540,13 @@ function rollupNativePracticeLedgerRows(params: {
 }): NativePracticeProjectLedgerRollup {
   const recent = weekWindow(params.now, params.recentWindowWeeks);
   const rollup = emptyNativePracticeProjectLedgerRollup(params.project.id);
-  const timeEntries = postedTimeEntries(params.timeEntries).filter((entry) => entry.projectId === params.project.id);
-  const expenses = postedExpenses(params.expenses).filter((expense) => expense.projectId === params.project.id);
+  const excludeImportedBaselineRows = importedLedgerRowsAreRepresentedByBaseline(params.project);
+  const timeEntries = postedTimeEntries(params.timeEntries).filter((entry) =>
+    entry.projectId === params.project.id && !(excludeImportedBaselineRows && entry.sourceSatelliteId)
+  );
+  const expenses = postedExpenses(params.expenses).filter((expense) =>
+    expense.projectId === params.project.id && !(excludeImportedBaselineRows && expense.sourceSatelliteId)
+  );
 
   for (const entry of timeEntries) {
     assertNativePracticeTimeEntryHours(entry);
@@ -611,50 +624,65 @@ export function calculateNativePracticeProjectHealthFromRollup(params: {
     "Native practice project health requires a project currency.",
   );
   const ledgerUsedBudgetCents = params.rollup.timeRevenueCents + params.rollup.billableExpenseCents;
-  const legacyGrossMarginBps = params.project.currentMarginBps ?? 0;
+  const legacyGrossMarginBps = params.project.currentMarginBps;
   const legacyUsedBudgetCents = params.project.usedCents;
-  const legacyDirectCostCents = Math.max(
-    0,
-    legacyUsedBudgetCents - Math.round((legacyUsedBudgetCents * legacyGrossMarginBps) / 10_000),
-  );
+  const legacyDirectCostCents = legacyUsedBudgetCents > 0 && legacyGrossMarginBps == null
+    ? null
+    : Math.max(
+      0,
+      legacyUsedBudgetCents - Math.round((legacyUsedBudgetCents * (legacyGrossMarginBps ?? 0)) / 10_000),
+    );
   const usedBudgetCents = legacyUsedBudgetCents + ledgerUsedBudgetCents;
-  const directCostCents = legacyDirectCostCents + params.rollup.timeCostCents + params.rollup.directExpenseCents;
+  const directCostCents = legacyDirectCostCents == null
+    ? null
+    : legacyDirectCostCents + params.rollup.timeCostCents + params.rollup.directExpenseCents;
   const remainingBudgetCents = params.project.poValueCents - usedBudgetCents;
-  const grossProfitCents = usedBudgetCents - directCostCents;
-  const grossMarginBps = usedBudgetCents > 0 ? Math.round((grossProfitCents / usedBudgetCents) * 10_000) : 0;
+  const grossProfitCents = directCostCents == null ? null : usedBudgetCents - directCostCents;
+  const grossMarginBps = usedBudgetCents > 0 && grossProfitCents != null
+    ? Math.round((grossProfitCents / usedBudgetCents) * 10_000)
+    : usedBudgetCents > 0
+      ? null
+      : 0;
   const legacyRecentUsedBudgetCents = params.project.weeklyBurnCents * recentWindowWeeks;
-  const legacyRecentDirectCostCents = Math.max(
-    0,
-    legacyRecentUsedBudgetCents - Math.round((legacyRecentUsedBudgetCents * legacyGrossMarginBps) / 10_000),
-  );
+  const legacyRecentDirectCostCents = legacyRecentUsedBudgetCents > 0 && legacyGrossMarginBps == null
+    ? null
+    : Math.max(
+      0,
+      legacyRecentUsedBudgetCents - Math.round((legacyRecentUsedBudgetCents * (legacyGrossMarginBps ?? 0)) / 10_000),
+    );
   const recentUsedBudgetCents =
     legacyRecentUsedBudgetCents + params.rollup.recentTimeRevenueCents + params.rollup.recentBillableExpenseCents;
-  const recentDirectCostCents =
-    legacyRecentDirectCostCents + params.rollup.recentTimeCostCents + params.rollup.recentDirectExpenseCents;
+  const recentDirectCostCents = legacyRecentDirectCostCents == null
+    ? null
+    : legacyRecentDirectCostCents + params.rollup.recentTimeCostCents + params.rollup.recentDirectExpenseCents;
 
   const exactRecentBudgetBurnPerWeekCents = recentUsedBudgetCents / recentWindowWeeks;
-  const exactRecentCostBurnPerWeekCents = recentDirectCostCents / recentWindowWeeks;
+  const exactRecentCostBurnPerWeekCents = recentDirectCostCents == null ? null : recentDirectCostCents / recentWindowWeeks;
   const recentBudgetBurnPerWeekCents = Math.round(exactRecentBudgetBurnPerWeekCents);
-  const recentCostBurnPerWeekCents = Math.round(exactRecentCostBurnPerWeekCents);
+  const recentCostBurnPerWeekCents = exactRecentCostBurnPerWeekCents == null
+    ? 0
+    : Math.round(exactRecentCostBurnPerWeekCents);
   const hasBudgetSetup =
     params.project.poValueCents > 0
     && params.project.serviceBudgetCents > 0
     && params.project.expenseBudgetCents > 0
     && params.project.targetMarginBps != null;
-  const hasRecentBurn = exactRecentBudgetBurnPerWeekCents > 0 || exactRecentCostBurnPerWeekCents > 0;
+  const hasRecentBurn = exactRecentBudgetBurnPerWeekCents > 0 || (exactRecentCostBurnPerWeekCents ?? 0) > 0;
   const weeksToBudgetExhaustion = hasBudgetSetup && remainingBudgetCents <= 0
     ? 0
     : hasBudgetSetup && exactRecentBudgetBurnPerWeekCents > 0
       ? remainingBudgetCents / exactRecentBudgetBurnPerWeekCents
       : null;
-  const weeksToTargetMarginRisk = calculateWeeksToMarginFloor({
-    grossMarginBps,
-    grossProfitCents,
-    recentCostBurnPerWeekCents: exactRecentCostBurnPerWeekCents,
-    recentRevenueBurnPerWeekCents: exactRecentBudgetBurnPerWeekCents,
-    targetMarginBps: params.project.targetMarginBps,
-    usedBudgetCents,
-  });
+  const weeksToTargetMarginRisk = grossProfitCents == null || grossMarginBps == null || exactRecentCostBurnPerWeekCents == null
+    ? null
+    : calculateWeeksToMarginFloor({
+      grossMarginBps,
+      grossProfitCents,
+      recentCostBurnPerWeekCents: exactRecentCostBurnPerWeekCents,
+      recentRevenueBurnPerWeekCents: exactRecentBudgetBurnPerWeekCents,
+      targetMarginBps: params.project.targetMarginBps,
+      usedBudgetCents,
+    });
 
   return {
     projectId: params.project.id,
@@ -699,9 +727,18 @@ export function summarizeNativePracticeFinance(health: NativePracticeProjectHeal
   const currency = mixedCurrency ? null : currencies.values().next().value ?? null;
   const budgetCents = mixedCurrency ? 0 : active.reduce((sum, item) => sum + item.budgetCents, 0);
   const usedCents = mixedCurrency ? 0 : active.reduce((sum, item) => sum + item.usedBudgetCents, 0);
-  const grossProfitCents = mixedCurrency ? 0 : active.reduce((sum, item) => sum + item.grossProfitCents, 0);
-  const directCostCents = mixedCurrency ? 0 : active.reduce((sum, item) => sum + item.directCostCents, 0);
-  const marginBps = !mixedCurrency && usedCents > 0 ? Math.round((grossProfitCents / usedCents) * 10_000) : null;
+  const hasUnknownMargin = active.some((item) =>
+    item.usedBudgetCents > 0 && (item.directCostCents == null || item.grossProfitCents == null || item.grossMarginBps == null)
+  );
+  const grossProfitCents = mixedCurrency || hasUnknownMargin
+    ? null
+    : active.reduce((sum, item) => sum + (item.grossProfitCents ?? 0), 0);
+  const directCostCents = mixedCurrency || hasUnknownMargin
+    ? null
+    : active.reduce((sum, item) => sum + (item.directCostCents ?? 0), 0);
+  const marginBps = !mixedCurrency && usedCents > 0 && grossProfitCents != null
+    ? Math.round((grossProfitCents / usedCents) * 10_000)
+    : null;
 
   return {
     activeProjects: active.length,
@@ -748,7 +785,12 @@ export function nativePracticeProjectAttentionItems(health: NativePracticeProjec
     });
   }
 
-  if (health.weeksToTargetMarginRisk != null && health.weeksToTargetMarginRisk <= BUDGET_RUNWAY_ATTENTION_WEEKS && health.targetMarginBps != null) {
+  if (
+    health.weeksToTargetMarginRisk != null
+    && health.weeksToTargetMarginRisk <= BUDGET_RUNWAY_ATTENTION_WEEKS
+    && health.targetMarginBps != null
+    && health.grossMarginBps != null
+  ) {
     items.push({
       projectId: health.projectId,
       projectName: health.projectName,
@@ -1462,7 +1504,7 @@ function nativePracticeProjectFromProject(project: Pick<
   | "weeklyBurnCents"
   | "targetMarginBps"
   | "currentMarginBps"
->): NativePracticeProject {
+> & { sourceSatelliteId?: string | null }): NativePracticeProject {
   return {
     id: project.id,
     code: project.code,
@@ -1478,6 +1520,7 @@ function nativePracticeProjectFromProject(project: Pick<
     weeklyBurnCents: project.weeklyBurnCents,
     targetMarginBps: project.targetMarginBps,
     currentMarginBps: project.currentMarginBps,
+    sourceSatelliteId: project.sourceSatelliteId ?? null,
   };
 }
 
@@ -1524,6 +1567,7 @@ const NATIVE_PRACTICE_PROJECT_SELECT = {
   weeklyBurnCents: true,
   targetMarginBps: true,
   currentMarginBps: true,
+  sourceSatelliteId: true,
 } satisfies Prisma.PracticeProjectSelect;
 
 function mergeNativePracticeLedgerRollups(
@@ -1655,6 +1699,11 @@ async function queryNativePracticeLedgerRollups(
       WHERE t."workspaceId" = ${workspaceId}
         AND t."projectId" IN (${Prisma.join(projectIds)})
         AND t."status" = 'POSTED'
+        AND NOT (
+          p."sourceSatelliteId" IS NOT NULL
+          AND t."sourceSatelliteId" IS NOT NULL
+          AND (p."usedCents" <> 0 OR p."weeklyBurnCents" <> 0 OR p."currentMarginBps" IS NOT NULL)
+        )
       GROUP BY t."projectId"
     `),
     prisma.$queryRaw<NativePracticeExpenseRollupRow[]>(Prisma.sql`
@@ -1727,6 +1776,11 @@ async function queryNativePracticeLedgerRollups(
       WHERE e."workspaceId" = ${workspaceId}
         AND e."projectId" IN (${Prisma.join(projectIds)})
         AND e."status" = 'POSTED'
+        AND NOT (
+          p."sourceSatelliteId" IS NOT NULL
+          AND e."sourceSatelliteId" IS NOT NULL
+          AND (p."usedCents" <> 0 OR p."weeklyBurnCents" <> 0 OR p."currentMarginBps" IS NOT NULL)
+        )
       GROUP BY e."projectId"
     `),
   ]);
@@ -1826,6 +1880,11 @@ export async function listNativePracticeProjectHealth(
       WHERE t."workspaceId" = ${workspaceId}
         AND t."projectId" IN (${Prisma.join(projectIds)})
         AND t."status" = 'POSTED'
+        AND NOT (
+          p."sourceSatelliteId" IS NOT NULL
+          AND t."sourceSatelliteId" IS NOT NULL
+          AND (p."usedCents" <> 0 OR p."weeklyBurnCents" <> 0 OR p."currentMarginBps" IS NOT NULL)
+        )
       GROUP BY t."projectId"
     `),
     prisma.$queryRaw<NativePracticeExpenseRollupRow[]>(Prisma.sql`
@@ -1898,6 +1957,11 @@ export async function listNativePracticeProjectHealth(
       WHERE e."workspaceId" = ${workspaceId}
         AND e."projectId" IN (${Prisma.join(projectIds)})
         AND e."status" = 'POSTED'
+        AND NOT (
+          p."sourceSatelliteId" IS NOT NULL
+          AND e."sourceSatelliteId" IS NOT NULL
+          AND (p."usedCents" <> 0 OR p."weeklyBurnCents" <> 0 OR p."currentMarginBps" IS NOT NULL)
+        )
       GROUP BY e."projectId"
     `),
   ]);
@@ -1909,6 +1973,39 @@ export async function listNativePracticeProjectHealth(
     rollup: rollups.get(project.id) ?? emptyNativePracticeProjectLedgerRollup(project.id),
     recentWindowWeeks,
   }));
+}
+
+export async function listNativePracticeProjectHealthByIds(
+  actor: AppActor,
+  workspaceId: string,
+  projectIds: string[],
+  options: NativePracticeProjectHealthOptions = {},
+): Promise<Map<string, NativePracticeProjectHealth>> {
+  await requireWorkspaceMembership({ actor, workspaceId });
+  const ids = Array.from(new Set(projectIds.map((id) => id.trim()).filter(Boolean)));
+  if (ids.length === 0) return new Map();
+
+  const now = normalizeNow(options.now);
+  const recentWindowWeeks = normalizeRecentWindowWeeks(options.recentWindowWeeks);
+  const projects = await prisma.practiceProject.findMany({
+    where: { workspaceId, id: { in: ids } },
+    select: NATIVE_PRACTICE_PROJECT_SELECT,
+    orderBy: [{ status: "asc" }, { code: "asc" }, { id: "asc" }],
+  });
+  const rollups = await queryNativePracticeLedgerRollups(
+    workspaceId,
+    projects.map((project) => project.id),
+    weekWindow(now, recentWindowWeeks),
+  );
+
+  return new Map(projects.map((project) => [
+    project.id,
+    calculateNativePracticeProjectHealthFromRollup({
+      project,
+      rollup: rollups.get(project.id) ?? emptyNativePracticeProjectLedgerRollup(project.id),
+      recentWindowWeeks,
+    }),
+  ]));
 }
 
 export async function getNativePracticeFinanceDashboard(

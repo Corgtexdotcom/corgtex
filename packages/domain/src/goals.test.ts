@@ -67,6 +67,7 @@ vi.mock("@corgtex/shared", () => ({
       upsert: vi.fn(),
     },
     $executeRaw: vi.fn(),
+    $queryRaw: vi.fn(),
     $transaction: vi.fn((fn) => fn(prisma)),
   },
   AppActor: {},
@@ -99,6 +100,7 @@ describe("Goals Domain", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     vi.mocked((prisma as any).$executeRaw).mockResolvedValue({});
+    vi.mocked((prisma as any).$queryRaw).mockResolvedValue([]);
     vi.mocked((prisma as any).workItemVersion.create).mockResolvedValue({});
     vi.mocked((prisma as any).workItemVersion.findUnique).mockResolvedValue(null);
     vi.mocked(prisma.member.findFirst).mockResolvedValue({
@@ -368,7 +370,9 @@ describe("Goals Domain", () => {
           code: "DEMO-Q3",
           name: "Demo Q3 enablement",
           clientName: "Demo Client",
+          clientId: "client-1",
           status: "ACTIVE",
+          currency: "USD",
           poValueCents: 1000000,
           serviceBudgetCents: 600000,
           expenseBudgetCents: 100000,
@@ -376,6 +380,7 @@ describe("Goals Domain", () => {
           weeklyBurnCents: 50000,
           targetMarginBps: 3000,
           currentMarginBps: 2500,
+          sourceSatelliteId: null,
         },
       ] as any);
 
@@ -415,6 +420,74 @@ describe("Goals Domain", () => {
       ]);
     });
 
+    it("uses native practice ledger health for linked finance projects", async () => {
+      const createdAt = new Date("2026-07-11T09:00:00.000Z");
+      vi.mocked(prisma.goalLink.findMany).mockResolvedValueOnce([
+        {
+          id: "link-1",
+          goalId: "goal-1",
+          entityId: "project-1",
+          confidence: 1,
+          source: "practice-finance",
+          createdAt,
+        },
+      ] as any);
+      vi.mocked(prisma.practiceProject.findMany).mockResolvedValueOnce([
+        {
+          id: "project-1",
+          code: "DEMO-Q3",
+          name: "Demo Q3 enablement",
+          clientName: "Demo Client",
+          clientId: "client-1",
+          status: "ACTIVE",
+          currency: "USD",
+          poValueCents: 1000000,
+          serviceBudgetCents: 600000,
+          expenseBudgetCents: 100000,
+          usedCents: 250000,
+          weeklyBurnCents: 50000,
+          targetMarginBps: 3000,
+          currentMarginBps: 6000,
+          sourceSatelliteId: null,
+        },
+      ] as any);
+      vi.mocked((prisma as any).$queryRaw)
+        .mockResolvedValueOnce([{
+          projectId: "project-1",
+          timeRevenueCents: 150000n,
+          timeCostCents: 80000n,
+          recentTimeRevenueCents: 150000n,
+          recentTimeCostCents: 80000n,
+          invalidHoursRows: 0n,
+          invalidCurrencyRows: 0n,
+          timeEntryCount: 1n,
+        }])
+        .mockResolvedValueOnce([{
+          projectId: "project-1",
+          billableExpenseCents: 40000n,
+          directExpenseCents: 40000n,
+          recentBillableExpenseCents: 40000n,
+          recentDirectExpenseCents: 40000n,
+          invalidCurrencyRows: 0n,
+          expenseCount: 1n,
+        }]);
+
+      const result = await listGoalFinanceProjectLinks(actor, {
+        workspaceId: "ws-1",
+        goalIds: ["goal-1"],
+      });
+
+      expect(result[0]?.project).toMatchObject({
+        id: "project-1",
+        usedCents: 440000,
+        remainingCents: 560000,
+        weeklyBurnCents: 97500,
+        usedRatio: 0.44,
+        currentMarginBps: 5000,
+      });
+      expect(result[0]?.project.budgetRunwayWeeks).toBeCloseTo(5.744, 3);
+    });
+
     it("short-circuits when no goal ids are provided", async () => {
       await expect(listGoalFinanceProjectLinks(actor, {
         workspaceId: "ws-1",
@@ -423,6 +496,7 @@ describe("Goals Domain", () => {
 
       expect(prisma.goalLink.findMany).not.toHaveBeenCalled();
       expect(prisma.practiceProject.findMany).not.toHaveBeenCalled();
+      expect((prisma as any).$queryRaw).not.toHaveBeenCalled();
     });
   });
 

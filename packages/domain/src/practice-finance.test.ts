@@ -344,6 +344,77 @@ describe("practice-finance pure derivations", () => {
     expect(health.weeksToBudgetExhaustion).toBeCloseTo(17.052, 2);
   });
 
+  it("excludes imported ledger rows already represented by an imported project baseline", () => {
+    const health = calculateNativePracticeProjectHealth({
+      project: nativeProject({
+        sourceSatelliteId: "legacy-project-1",
+        usedCents: 250_000,
+        weeklyBurnCents: 50_000,
+        currentMarginBps: 6000,
+      }),
+      now: new Date("2026-06-30T00:00:00.000Z"),
+      timeEntries: [
+        nativeTimeEntry({
+          id: "imported-time",
+          billAmountCents: 90_000,
+          costAmountCents: 40_000,
+          sourceSatelliteId: "legacy-time-1",
+        }),
+        nativeTimeEntry({ id: "manual-time" }),
+      ],
+      expenses: [
+        nativeExpense({
+          id: "imported-expense",
+          amountCents: 25_000,
+          sourceSatelliteId: "legacy-expense-1",
+        }),
+        nativeExpense({ id: "manual-expense" }),
+      ],
+    });
+
+    expect(health).toMatchObject({
+      usedBudgetCents: 440_000,
+      remainingBudgetCents: 560_000,
+      directCostCents: 220_000,
+      grossProfitCents: 220_000,
+      grossMarginBps: 5000,
+      recentBudgetBurnPerWeekCents: 97_500,
+      recentCostBurnPerWeekCents: 50_000,
+    });
+  });
+
+  it("preserves unknown legacy margin semantics for projects with historical usage", () => {
+    const health = calculateNativePracticeProjectHealth({
+      project: nativeProject({
+        usedCents: 250_000,
+        weeklyBurnCents: 50_000,
+        currentMarginBps: null,
+      }),
+      now: new Date("2026-06-30T00:00:00.000Z"),
+      timeEntries: [],
+      expenses: [],
+    });
+
+    expect(health).toMatchObject({
+      usedBudgetCents: 250_000,
+      remainingBudgetCents: 750_000,
+      directCostCents: null,
+      grossProfitCents: null,
+      grossMarginBps: null,
+      recentBudgetBurnPerWeekCents: 50_000,
+      recentCostBurnPerWeekCents: 0,
+      weeksToTargetMarginRisk: null,
+    });
+    expect(nativePracticeProjectAttentionItems(health).some((item) => item.issue === "margin")).toBe(false);
+    expect(summarizeNativePracticeFinance([health])).toMatchObject({
+      usedCents: 250_000,
+      remainingCents: 750_000,
+      directCostCents: null,
+      grossProfitCents: null,
+      marginBps: null,
+    });
+  });
+
   it("marks native project health as setup-incomplete until budget and margin inputs exist", () => {
     const health = calculateNativePracticeProjectHealth({
       project: nativeProject({ targetMarginBps: null }),
