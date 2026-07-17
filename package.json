@@ -37,6 +37,7 @@
     "smoke:ingestion-guidance": "node scripts/ingestion-guidance-smoke.mjs",
     "smoke:source-intake": "node scripts/source-intake-production-smoke.mjs",
     "smoke:work-item-parity": "node scripts/work-item-parity-production-smoke.mjs",
+    "smoke:briefing-fixture": "tsx scripts/briefing-fixture-production-smoke.mjs",
     "meeting-recorder:enable": "node scripts/meeting-recorder-enable.mjs",
     "meeting-recorder:backfill-paid-access": "node scripts/backfill-paid-recorder-access.mjs",
     "member:cleanup": "tsx scripts/member-cleanup-runner.ts",
