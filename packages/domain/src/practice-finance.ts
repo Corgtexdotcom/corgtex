@@ -392,11 +392,12 @@ function calculateWeeksToMarginFloor(params: {
   targetMarginBps: number | null;
 }): number | null {
   if (params.targetMarginBps == null) return null;
-  if (params.usedBudgetCents > 0 && params.grossMarginBps < params.targetMarginBps) return 0;
-  if (params.recentRevenueBurnPerWeekCents <= 0 && params.recentCostBurnPerWeekCents <= 0) return null;
-
   const targetMargin = params.targetMarginBps / 10_000;
   const currentHeadroomCents = params.grossProfitCents - params.usedBudgetCents * targetMargin;
+  if (params.usedBudgetCents > 0 && params.grossMarginBps < params.targetMarginBps) return 0;
+  if (currentHeadroomCents < 0) return 0;
+  if (params.recentRevenueBurnPerWeekCents <= 0 && params.recentCostBurnPerWeekCents <= 0) return null;
+
   const weeklyHeadroomDeltaCents =
     params.recentRevenueBurnPerWeekCents * (1 - targetMargin) - params.recentCostBurnPerWeekCents;
 
@@ -679,6 +680,12 @@ export function calculateNativePracticeConsultantUtilization(params: {
   const costCents = timeEntries.reduce((sum, entry) => sum + practiceTimeCostAmountCents(entry), 0);
   const expenseCents = expenses.reduce((sum, expense) => sum + practiceExpenseFunctionalAmountCents(expense), 0);
   const capacityHoursPerWeek = params.capacityHoursPerWeek ?? 40;
+  invariant(
+    Number.isFinite(capacityHoursPerWeek) && capacityHoursPerWeek >= 0,
+    400,
+    "INVALID_INPUT",
+    "capacityHoursPerWeek must be finite and non-negative.",
+  );
   const averageWeeklyHours = roundHours(recentHours / recentWindowWeeks);
   const utilizationBps = capacityHoursPerWeek > 0 ? Math.round((averageWeeklyHours / capacityHoursPerWeek) * 10_000) : 0;
   const projectIds = [...new Set([

@@ -491,6 +491,25 @@ describe("practice-finance pure derivations", () => {
     expect(collectNativePracticeAttention([negativeMargin]).map((item) => item.issue)).toEqual(["margin"]);
   });
 
+  it("flags historical native margin losses even without recent burn", () => {
+    const costOnlyLoss = calculateNativePracticeProjectHealth({
+      project: nativeProject(),
+      now: new Date("2026-06-30T00:00:00.000Z"),
+      timeEntries: [],
+      expenses: [nativeExpense({
+        amountCents: 100_00,
+        billable: false,
+        spentOn: new Date("2026-01-01T00:00:00.000Z"),
+      })],
+    });
+
+    const summary = summarizeNativePracticeFinance([costOnlyLoss]);
+    expect(costOnlyLoss.recentBudgetBurnPerWeekCents).toBe(0);
+    expect(costOnlyLoss.weeksToTargetMarginRisk).toBe(0);
+    expect(summary.riskMarginCount).toBe(1);
+    expect(collectNativePracticeAttention([costOnlyLoss]).map((item) => item.issue)).toEqual(["margin"]);
+  });
+
   it("rejects mixed active currencies before aggregating native finance summaries", () => {
     const usd = calculateNativePracticeProjectHealth({
       project: nativeProject({ id: "usd", currency: "USD" }),
@@ -593,6 +612,22 @@ describe("practice-finance pure derivations", () => {
       throw new Error("Expected mixed consultant currencies to be rejected.");
     } catch (error) {
       expect(error).toMatchObject({ code: "MIXED_CURRENCY" });
+    }
+  });
+
+  it("rejects invalid native consultant capacity inputs", () => {
+    for (const capacityHoursPerWeek of [-40, Number.POSITIVE_INFINITY]) {
+      try {
+        calculateNativePracticeConsultantUtilization({
+          consultant: nativeConsultant(),
+          capacityHoursPerWeek,
+          timeEntries: [nativeTimeEntry()],
+          expenses: [],
+        });
+        throw new Error("Expected invalid consultant capacity to be rejected.");
+      } catch (error) {
+        expect(error).toMatchObject({ code: "INVALID_INPUT" });
+      }
     }
   });
 
