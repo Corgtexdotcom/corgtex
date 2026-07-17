@@ -393,6 +393,41 @@ function itemFromCandidate(candidate: WorkspaceBriefingCandidate, index: number,
   };
 }
 
+function isFreshBriefingCandidate(candidate: WorkspaceBriefingCandidate, period: WorkspaceBriefingPeriod, generatedAt: Date) {
+  const ageDays = Math.max(0, (generatedAt.getTime() - candidate.occurredAt.getTime()) / (24 * 60 * 60 * 1000));
+  return ageDays <= FRESH_WINDOW_DAYS[period];
+}
+
+function selectBriefingCandidates(
+  ranked: WorkspaceBriefingCandidate[],
+  period: WorkspaceBriefingPeriod,
+  generatedAt: Date,
+  maxItems = 10,
+) {
+  if (ranked.length <= maxItems) return ranked;
+  const selected = ranked.slice(0, maxItems);
+  const selectedKeys = new Set(selected.map(candidateKey));
+  const reservedFreshCount = Math.min(maxItems, Math.max(1, Math.ceil(maxItems * 0.25)));
+  const freshCandidates = ranked
+    .filter((candidate) => isFreshBriefingCandidate(candidate, period, generatedAt))
+    .slice(0, reservedFreshCount);
+
+  for (const freshCandidate of freshCandidates) {
+    const freshKey = candidateKey(freshCandidate);
+    if (selectedKeys.has(freshKey)) continue;
+    const replaceIndex = selected
+      .map((candidate, index) => ({ candidate, index }))
+      .reverse()
+      .find(({ candidate }) => !isFreshBriefingCandidate(candidate, period, generatedAt))?.index;
+    if (replaceIndex === undefined) break;
+    selectedKeys.delete(candidateKey(selected[replaceIndex]));
+    selected[replaceIndex] = freshCandidate;
+    selectedKeys.add(freshKey);
+  }
+
+  return selected;
+}
+
 function uniqueSourceRefs(items: WorkspaceBriefingItem[]) {
   const refs = new Map<string, WorkspaceBriefingSourceRef>();
   for (const item of items) {
@@ -401,6 +436,21 @@ function uniqueSourceRefs(items: WorkspaceBriefingItem[]) {
     }
   }
   return [...refs.values()];
+}
+
+function normalizeSourceRefs(value: unknown) {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((ref): WorkspaceBriefingSourceRef[] => {
+    if (typeof ref !== "object" || ref === null || Array.isArray(ref)) return [];
+    const sourceRef = ref as Record<string, unknown>;
+    if (typeof sourceRef.type !== "string" || typeof sourceRef.id !== "string" || typeof sourceRef.label !== "string") return [];
+    return [{
+      type: sourceRef.type as WorkspaceBriefingSourceType,
+      id: sourceRef.id,
+      label: sourceRef.label,
+      href: typeof sourceRef.href === "string" ? sourceRef.href : null,
+    }];
+  });
 }
 
 function countSources(candidates: WorkspaceBriefingCandidate[]) {
@@ -549,7 +599,14 @@ function composeWorkspaceBriefingNarrative(params: {
   const continuingContextMd = continuingItems.length > 0
     ? joinNarrativeParagraphs(continuingItems, params.period === "WEEKLY" ? 5 : 4, 560)
     : leadItem.kind === "QUIET" ? "There is no unresolved high-signal context in the evidence pool for this edition." : null;
-  const hasSourceRefs = uniqueSourceRefs(params.items).length > 0;
+  const narratedItems = [
+    ...(hasFreshItems ? [leadItem] : []),
+    ...bodyItems,
+    ...attentionItems,
+    ...continuingItems,
+  ];
+  const narratedSourceRefs = uniqueSourceRefs(narratedItems);
+  const hasSourceRefs = narratedSourceRefs.length > 0;
   const closingMd = meaningfulItems.length > 0 && hasSourceRefs
     ? "The source trail below is the evidence path for this edition. Use it when you need detail, but the story above is meant to stand on its own."
     : meaningfulItems.length > 0
@@ -579,6 +636,7 @@ function composeWorkspaceBriefingNarrative(params: {
     editorialMode,
     freshWindow,
     contextWindow,
+    narratedSourceRefs,
   };
 }
 
@@ -594,11 +652,12 @@ export function buildWorkspaceBriefingFromCandidates(params: {
 }): NormalizedWorkspaceBriefing {
   const generatedAt = params.generatedAt ?? new Date();
   const ranked = rankWorkspaceBriefingCandidates(params.candidates, generatedAt);
+  const selected = selectBriefingCandidates(ranked, params.period, generatedAt, params.maxItems ?? 10);
   const items = ranked.length > 0
-    ? ranked.slice(0, params.maxItems ?? 10).map((entry, index) => itemFromCandidate(entry, index, generatedAt))
+    ? selected.map((entry, index) => itemFromCandidate(entry, index, generatedAt))
     : [quietBriefingItem(generatedAt)];
   const counts = countSources(params.candidates);
-  const narrative = composeWorkspaceBriefingNarrative({
+  const { narratedSourceRefs, ...narrative } = composeWorkspaceBriefingNarrative({
     period: params.period,
     editorialMode: params.editorialMode,
     generatedAt,
@@ -612,7 +671,7 @@ export function buildWorkspaceBriefingFromCandidates(params: {
     dateKey: params.dateKey,
     generatedAt: generatedAt.toISOString(),
     items,
-    sourceRefs: uniqueSourceRefs(items),
+    sourceRefs: narratedSourceRefs,
     sourceCounts: counts,
   };
 }
@@ -727,6 +786,23 @@ function candidateMatchesDigestItem(candidate: WorkspaceBriefingCandidate, rawIt
   return candidateProbablyMatchesDigestItem(candidate, rawItem);
 }
 
+function candidateSemanticallyOverlapsDigestItem(candidate: WorkspaceBriefingCandidate, rawItem: string) {
+  if (candidateMatchesDigestItem(candidate, rawItem)) return true;
+  const candidateTokens = digestMatchTokens([
+    candidate.title,
+    candidate.summaryMd,
+  ].filter(Boolean).join(" "));
+  const itemTokens = digestMatchTokens(rawItem);
+  if (candidateTokens.size < 4 || itemTokens.size < 4) return false;
+  let overlap = 0;
+  for (const token of itemTokens) {
+    if (candidateTokens.has(token)) overlap++;
+  }
+  const itemCoverage = overlap / itemTokens.size;
+  const candidateCoverage = overlap / candidateTokens.size;
+  return overlap >= 4 && itemCoverage >= 0.5 && candidateCoverage >= 0.35;
+}
+
 function candidateKey(candidate: Pick<WorkspaceBriefingCandidate, "sourceType" | "sourceId">) {
   return `${candidate.sourceType}:${candidate.sourceId}`;
 }
@@ -831,6 +907,7 @@ export function buildWorkspaceBriefingFromDigest(params: {
   const carryForwardEntries = rankedCandidates
     .filter((candidate) => !used.has(candidateKey(candidate)))
     .filter((candidate) => shouldCarryUnmatchedDigestCandidate(candidate, generatedAt))
+    .filter((candidate) => !digestEntries.some((entry) => candidateSemanticallyOverlapsDigestItem(candidate, entry.rawItem)))
     .slice(0, params.period === "WEEKLY" ? 6 : 4)
     .map((source, index) => {
       const score = Math.max(0, scoreWorkspaceBriefingCandidate(source, generatedAt) - 0.25);
@@ -878,7 +955,7 @@ export function buildWorkspaceBriefingFromDigest(params: {
         editorialMode: params.editorialMode,
       });
   }
-  const narrative = composeWorkspaceBriefingNarrative({
+  const { narratedSourceRefs, ...narrative } = composeWorkspaceBriefingNarrative({
     period: params.period,
     editorialMode: params.editorialMode,
     generatedAt,
@@ -893,7 +970,7 @@ export function buildWorkspaceBriefingFromDigest(params: {
     dateKey: params.dateKey,
     generatedAt: generatedAt.toISOString(),
     items,
-    sourceRefs: uniqueSourceRefs(items),
+    sourceRefs: narratedSourceRefs,
     sourceCounts: countSources(params.candidates),
   };
 }
@@ -913,19 +990,7 @@ export function normalizeWorkspaceBriefingPayload(input: unknown): NormalizedWor
       const prominence = entry.prominence === "lead" || entry.prominence === "standard" || entry.prominence === "compact" || entry.prominence === "reference"
         ? entry.prominence
         : "compact";
-      const sourceRefs = Array.isArray(entry.sourceRefs)
-        ? entry.sourceRefs.flatMap((ref): WorkspaceBriefingSourceRef[] => {
-          if (typeof ref !== "object" || ref === null || Array.isArray(ref)) return [];
-          const sourceRef = ref as Record<string, unknown>;
-          if (typeof sourceRef.type !== "string" || typeof sourceRef.id !== "string" || typeof sourceRef.label !== "string") return [];
-          return [{
-            type: sourceRef.type as WorkspaceBriefingSourceType,
-            id: sourceRef.id,
-            label: sourceRef.label,
-            href: typeof sourceRef.href === "string" ? sourceRef.href : null,
-          }];
-        })
-        : [];
+      const sourceRefs = normalizeSourceRefs(entry.sourceRefs);
       return [{
         kind,
         title,
@@ -969,6 +1034,8 @@ export function normalizeWorkspaceBriefingPayload(input: unknown): NormalizedWor
     const value = record[key];
     return typeof value === "string" && value.trim() ? value.trim() : fallback;
   };
+  const hasRecordSourceRefs = Array.isArray(record.sourceRefs);
+  const recordSourceRefs = normalizeSourceRefs(record.sourceRefs);
 
   return {
     title: typeof record.title === "string" && record.title.trim() ? record.title.trim() : fallbackTitle,
@@ -985,7 +1052,7 @@ export function normalizeWorkspaceBriefingPayload(input: unknown): NormalizedWor
     dateKey: typeof record.dateKey === "string" && record.dateKey.trim() ? record.dateKey.trim() : dateKeyFromISO(new Date().toISOString()),
     generatedAt,
     items: normalizedItems,
-    sourceRefs: Array.isArray(record.sourceRefs) ? uniqueSourceRefs(normalizedItems) : uniqueSourceRefs(normalizedItems),
+    sourceRefs: hasRecordSourceRefs ? recordSourceRefs : fallbackNarrative.narratedSourceRefs,
     sourceCounts: typeof record.sourceCounts === "object" && record.sourceCounts !== null && !Array.isArray(record.sourceCounts)
       ? Object.fromEntries(Object.entries(record.sourceCounts as Record<string, unknown>).flatMap(([key, value]) => (
         typeof value === "number" ? [[key, value]] : []

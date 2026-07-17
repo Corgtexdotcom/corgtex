@@ -247,7 +247,12 @@ describe("newspaper email rendering", () => {
             occurredAt: "2026-07-11T12:00:00.000Z",
             confidence: 0.9,
           }],
-          sourceRefs: [],
+          sourceRefs: [{
+            type: "PROPOSAL",
+            id: "proposal-1",
+            label: "Review proposal",
+            href: "/workspaces/ws-1/proposals/proposal-1",
+          }],
           sourceCounts: { PROPOSAL: 1 },
         },
       },
