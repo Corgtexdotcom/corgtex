@@ -678,6 +678,21 @@ describe("practice-finance pure derivations", () => {
     expect(summary.currency).toBe("USD");
   });
 
+  it("rejects active native projects without a portfolio currency", () => {
+    const missingCurrency = calculateNativePracticeProjectHealth({
+      project: nativeProject({ currency: " " }),
+      timeEntries: [],
+      expenses: [],
+    });
+
+    try {
+      summarizeNativePracticeFinance([missingCurrency]);
+      throw new Error("Expected active native projects without currency to be rejected.");
+    } catch (error) {
+      expect(error).toMatchObject({ code: "MIXED_CURRENCY" });
+    }
+  });
+
   it("returns the normalized portfolio currency for non-USD native summaries", () => {
     const eur = calculateNativePracticeProjectHealth({
       project: nativeProject({ id: "eur", currency: "eur" }),
@@ -939,16 +954,6 @@ describe("practice-finance pure derivations", () => {
       paymentBatchId: "batch-1",
     });
 
-    expect(previewSlicingPieContributionFromTimeEntry(nativeTimeEntry({
-      currency: "EUR",
-      costCurrency: "eur",
-      functionalCurrency: "USD",
-      costAmountCents: null,
-    }))).toMatchObject({
-      currency: "EUR",
-      marketValueCents: 80_000,
-    });
-
     expect(previewSlicingPieContributionFromExpense(nativeExpense({
       amountFunctionalCents: 12_000,
       functionalCurrency: "USD",
@@ -963,26 +968,32 @@ describe("practice-finance pure derivations", () => {
       slices: 28_000,
       paymentBatchId: "mixed-batch",
     });
+  });
 
-    expect(previewSlicingPieContributionFromExpense(nativeExpense({
-      amountCents: 12_000,
-      amountFunctionalCents: null,
-      currency: "EUR",
-      functionalCurrency: "USD",
-    }))).toMatchObject({
-      currency: "EUR",
-      marketValueCents: 12_000,
-    });
+  it("rejects non-USD native Slicing Pie contribution previews until conversion is supported", () => {
+    try {
+      previewSlicingPieContributionFromTimeEntry(nativeTimeEntry({
+        currency: "EUR",
+        costCurrency: "eur",
+        functionalCurrency: "USD",
+        costAmountCents: null,
+      }));
+      throw new Error("Expected non-USD time contribution previews to be rejected.");
+    } catch (error) {
+      expect(error).toMatchObject({ code: "MIXED_CURRENCY" });
+    }
 
-    expect(previewSlicingPieContributionFromExpense(nativeExpense({
-      amountCents: 12_000,
-      amountFunctionalCents: 13_500,
-      currency: "EUR",
-      functionalCurrency: null,
-    }))).toMatchObject({
-      currency: "EUR",
-      marketValueCents: 12_000,
-    });
+    try {
+      previewSlicingPieContributionFromExpense(nativeExpense({
+        amountCents: 12_000,
+        amountFunctionalCents: null,
+        currency: "EUR",
+        functionalCurrency: "USD",
+      }));
+      throw new Error("Expected non-USD expense contribution previews to be rejected.");
+    } catch (error) {
+      expect(error).toMatchObject({ code: "MIXED_CURRENCY" });
+    }
   });
 
   it("rejects reversed native rows when previewing Slicing Pie contributions", () => {

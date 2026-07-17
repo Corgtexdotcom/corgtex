@@ -612,7 +612,17 @@ export function calculateNativePracticeProjectHealthFromRollup(params: {
 
 export function summarizeNativePracticeFinance(health: NativePracticeProjectHealth[]): NativePracticeFinanceSummary {
   const active = health.filter((item) => item.status === "ACTIVE");
-  const currencies = new Set(active.map((item) => normalizeCurrencyCode(item.currency)));
+  const currencies = new Set<string>();
+  for (const item of active) {
+    const currency = normalizeCurrencyCode(item.currency);
+    invariant(
+      currency != null,
+      400,
+      "MIXED_CURRENCY",
+      "Native practice finance summary requires active projects to have a currency.",
+    );
+    currencies.add(currency);
+  }
   invariant(
     currencies.size <= 1,
     400,
@@ -754,6 +764,13 @@ function calculateContributionPreview(params: {
   multiplier: number;
   paymentBatchId: string | null;
 }): NativePracticeContributionPreview {
+  const currency = normalizeCurrencyCode(params.currency);
+  invariant(
+    currency === PRACTICE_LEDGER_CURRENCY,
+    400,
+    "MIXED_CURRENCY",
+    "Slicing Pie contribution previews require USD amounts until contribution currency conversion is supported.",
+  );
   invariant(
     Number.isInteger(params.marketValueCents) && params.marketValueCents >= 0,
     400,
@@ -775,7 +792,7 @@ function calculateContributionPreview(params: {
     projectId: params.projectId,
     consultantId: params.consultantId,
     occurredAt: params.occurredAt,
-    currency: params.currency,
+    currency,
     marketValueCents: params.marketValueCents,
     paidAmountCents,
     unpaidAmountCents,
