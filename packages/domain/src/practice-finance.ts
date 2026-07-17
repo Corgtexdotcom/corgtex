@@ -1,13 +1,16 @@
 import {
   CrmDealStage,
+  Prisma,
   type MemberRole,
   type PracticeContributionCashStatus,
   type PracticeContributionEntry,
   type PracticeContributionPaymentChoice,
   type PracticeContributionType,
+  type PracticeConsultant,
+  type PracticeExpense,
+  type PracticeTimeEntry,
   type PracticeProject,
   type PracticeProjectStatus,
-  type Prisma,
   type User,
 } from "@prisma/client";
 import { prisma } from "@corgtex/shared";
@@ -28,6 +31,7 @@ export const BUDGET_RUNWAY_ATTENTION_WEEKS = 6;
 export const SLICING_PIE_TIME_MULTIPLIER = 2;
 export const SLICING_PIE_EXPENSE_MULTIPLIER = 4;
 export const PRACTICE_LEDGER_CURRENCY = "USD";
+const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
 
 export type PracticeAttentionIssue = "setup" | "budget" | "margin";
 
@@ -93,6 +97,164 @@ export type PracticeContributionEntryPage = {
   nextCursor: string | null;
 };
 
+export type NativePracticeProject = Pick<
+  PracticeProject,
+  | "id"
+  | "code"
+  | "name"
+  | "clientName"
+  | "clientId"
+  | "status"
+  | "currency"
+  | "poValueCents"
+  | "serviceBudgetCents"
+  | "expenseBudgetCents"
+  | "targetMarginBps"
+>;
+
+export type NativePracticeTimeEntry = Pick<
+  PracticeTimeEntry,
+  | "id"
+  | "projectId"
+  | "consultantId"
+  | "workedOn"
+  | "weekEndingOn"
+  | "hours"
+  | "currency"
+  | "billCurrency"
+  | "costCurrency"
+  | "functionalCurrency"
+  | "billRateCents"
+  | "costRateCents"
+  | "billAmountCents"
+  | "costAmountCents"
+  | "paidAmountCents"
+  | "paymentBatchId"
+  | "status"
+>;
+
+export type NativePracticeExpense = Pick<
+  PracticeExpense,
+  | "id"
+  | "projectId"
+  | "consultantId"
+  | "spentOn"
+  | "category"
+  | "amountCents"
+  | "currency"
+  | "amountFunctionalCents"
+  | "functionalCurrency"
+  | "billable"
+  | "paymentBatchId"
+  | "status"
+>;
+
+export type NativePracticeConsultant = Pick<PracticeConsultant, "id" | "name" | "email" | "active">;
+
+export type NativePracticeProjectHealth = {
+  projectId: string;
+  projectCode: string;
+  projectName: string;
+  clientId: string | null;
+  clientName: string;
+  status: PracticeProjectStatus;
+  currency: string;
+  budgetCents: number;
+  serviceBudgetCents: number;
+  expenseBudgetCents: number;
+  usedBudgetCents: number;
+  remainingBudgetCents: number;
+  directCostCents: number;
+  grossProfitCents: number;
+  grossMarginBps: number;
+  recentBudgetBurnPerWeekCents: number;
+  recentCostBurnPerWeekCents: number;
+  weeksToBudgetExhaustion: number | null;
+  weeksToTargetMarginRisk: number | null;
+  targetMarginBps: number | null;
+  hasBudgetSetup: boolean;
+  hasRecentBurn: boolean;
+};
+
+export type NativePracticeFinanceSummary = PracticeFinanceSummary & {
+  currency: string | null;
+  directCostCents: number;
+  grossProfitCents: number;
+  riskBudgetCount: number;
+  riskMarginCount: number;
+};
+
+export type NativePracticeConsultantUtilization = {
+  consultantId: string;
+  consultantName: string;
+  consultantEmail: string | null;
+  active: boolean;
+  projectIds: string[];
+  capacityHoursPerWeek: number;
+  recentHours: number;
+  averageWeeklyHours: number;
+  utilizationBps: number;
+  currency: string | null;
+  billedCents: number;
+  costCents: number;
+  expenseCents: number;
+};
+
+export type NativePracticeContributionSourceType = "TIME_ENTRY" | "EXPENSE";
+
+export type NativePracticeContributionPreview = {
+  sourceType: NativePracticeContributionSourceType;
+  sourceId: string;
+  projectId: string;
+  consultantId: string | null;
+  occurredAt: Date;
+  currency: string;
+  marketValueCents: number;
+  paidAmountCents: number;
+  unpaidAmountCents: number;
+  multiplier: number;
+  slices: number;
+  paymentBatchId: string | null;
+};
+
+export type NativePracticeProjectHealthOptions = {
+  now?: Date | null;
+  recentWindowWeeks?: number | null;
+};
+
+export type NativePracticeProjectLedgerRollup = {
+  projectId: string;
+  timeRevenueCents: number;
+  timeCostCents: number;
+  billableExpenseCents: number;
+  directExpenseCents: number;
+  recentTimeRevenueCents: number;
+  recentTimeCostCents: number;
+  recentBillableExpenseCents: number;
+  recentDirectExpenseCents: number;
+};
+
+type DbInt = number | bigint | string | null;
+
+type NativePracticeTimeRollupRow = {
+  projectId: string;
+  timeRevenueCents: DbInt;
+  timeCostCents: DbInt;
+  recentTimeRevenueCents: DbInt;
+  recentTimeCostCents: DbInt;
+  invalidHoursRows: DbInt;
+  invalidCurrencyRows: DbInt;
+};
+
+type NativePracticeExpenseRollupRow = {
+  projectId: string;
+  billableExpenseCents: DbInt;
+  directExpenseCents: DbInt;
+  recentBillableExpenseCents: DbInt;
+  recentDirectExpenseCents: DbInt;
+  invalidCurrencyRows: DbInt;
+};
+
 type ProjectFinance = Pick<
   PracticeProject,
   | "id"
@@ -107,12 +269,641 @@ type ProjectFinance = Pick<
   | "currentMarginBps"
 >;
 
+function centsToCurrency(cents: number, currency = PRACTICE_LEDGER_CURRENCY) {
+  const amount = Math.round(cents / 100);
+  const normalizedCurrency = normalizeCurrencyCode(currency) ?? PRACTICE_LEDGER_CURRENCY;
+  try {
+    return new Intl.NumberFormat("en-US", {
+      currency: normalizedCurrency,
+      maximumFractionDigits: 0,
+      style: "currency",
+    }).format(amount);
+  } catch {
+    return `${normalizedCurrency} ${amount.toLocaleString("en-US")}`;
+  }
+}
+
 function centsToDollars(cents: number) {
-  return `$${Math.round(cents / 100).toLocaleString("en-US")}`;
+  return centsToCurrency(cents, PRACTICE_LEDGER_CURRENCY);
 }
 
 function bpsToPct(bps: number) {
   return `${(bps / 100).toFixed(1)}%`;
+}
+
+type NativePracticeDecimalValue = { toNumber: () => number; toString?: () => string } | number | string;
+
+function decimalToNumber(value: NativePracticeDecimalValue): number {
+  if (typeof value === "number") return value;
+  if (typeof value === "string") return Number(value);
+  return value.toNumber();
+}
+
+function decimalToString(value: NativePracticeDecimalValue): string {
+  if (typeof value === "number") return String(value);
+  if (typeof value === "string") return value;
+  const text = value.toString?.();
+  return text && text !== "[object Object]" ? text : String(value.toNumber());
+}
+
+function dbIntToNumber(value: DbInt): number {
+  if (value == null) return 0;
+  return Number(value);
+}
+
+function centsFromHours(hours: NativePracticeDecimalValue, rateCents: number): number {
+  const cents = new Prisma.Decimal(decimalToString(hours))
+    .mul(rateCents)
+    .toDecimalPlaces(0)
+    .toNumber();
+  invariant(
+    Number.isSafeInteger(cents),
+    400,
+    "INVALID_INPUT",
+    "Rate-derived cents must fit within the safe integer range.",
+  );
+  return cents;
+}
+
+function normalizeCurrencyCode(value: string | null | undefined): string | null {
+  const normalized = value?.trim().toUpperCase();
+  return normalized || null;
+}
+
+function assertNativePracticeTimeEntryHours(entry: NativePracticeTimeEntry) {
+  const hours = decimalToNumber(entry.hours);
+  invariant(
+    Number.isFinite(hours) && hours >= 0,
+    400,
+    "INVALID_INPUT",
+    "Native practice time entry hours must be finite and non-negative.",
+  );
+}
+
+function firstCurrencyCode(...values: Array<string | null | undefined>): string | null {
+  for (const value of values) {
+    const normalized = normalizeCurrencyCode(value);
+    if (normalized) return normalized;
+  }
+  return null;
+}
+
+function assertNativePracticeTimeEntryCurrency(project: NativePracticeProject, entry: NativePracticeTimeEntry) {
+  const projectCurrency = normalizeCurrencyCode(project.currency);
+  const billCurrency = practiceTimeBillAmountCurrency(entry);
+  const costCurrency = practiceTimeCostAmountCurrency(entry);
+  invariant(
+    projectCurrency != null
+    && billCurrency != null
+    && costCurrency != null
+    && billCurrency === projectCurrency
+    && costCurrency === projectCurrency,
+    400,
+    "MIXED_CURRENCY",
+    "Native practice finance requires time entry bill and cost amounts to be normalized to the project currency.",
+  );
+}
+
+function assertNativePracticeExpenseCurrency(project: NativePracticeProject, expense: NativePracticeExpense) {
+  const projectCurrency = normalizeCurrencyCode(project.currency);
+  const expenseCurrency = practiceExpenseAmountCurrency(expense);
+  invariant(
+    projectCurrency != null
+    && expenseCurrency != null
+    && expenseCurrency === projectCurrency,
+    400,
+    "MIXED_CURRENCY",
+    "Native practice finance requires expenses to be normalized to the project currency.",
+  );
+}
+
+function practiceTimeBillAmountCurrency(entry: NativePracticeTimeEntry): string | null {
+  return firstCurrencyCode(
+    entry.billAmountCents == null ? null : entry.functionalCurrency,
+    entry.billCurrency,
+    entry.currency,
+  );
+}
+
+function practiceTimeCostAmountCurrency(entry: NativePracticeTimeEntry): string | null {
+  return firstCurrencyCode(
+    entry.costAmountCents == null ? null : entry.functionalCurrency,
+    entry.costCurrency,
+    entry.currency,
+  );
+}
+
+function practiceExpenseAmountCurrency(expense: NativePracticeExpense): string | null {
+  return firstCurrencyCode(
+    hasPracticeExpenseFunctionalAmount(expense) ? expense.functionalCurrency : null,
+    expense.currency,
+  );
+}
+
+function hasPracticeExpenseFunctionalAmount(expense: NativePracticeExpense): boolean {
+  return expense.amountFunctionalCents != null && firstCurrencyCode(expense.functionalCurrency) != null;
+}
+
+function roundWeeks(value: number): number {
+  if (!Number.isFinite(value)) return 0;
+  return Math.round(value * 10) / 10;
+}
+
+function roundHours(value: number): number {
+  if (!Number.isFinite(value)) return 0;
+  return Math.round(value * 10) / 10;
+}
+
+function weekWindow(now: Date, weeks: number): { startsOn: Date; endsOn: Date } {
+  return {
+    startsOn: new Date(now.getTime() - weeks * WEEK_MS),
+    endsOn: now,
+  };
+}
+
+function isWithinDateWindow(value: Date, window: { startsOn: Date; endsOn: Date }): boolean {
+  return value > window.startsOn && value <= window.endsOn;
+}
+
+function normalizeRecentWindowWeeks(value: number | null | undefined): number {
+  if (value == null) return 4;
+  invariant(Number.isInteger(value) && value > 0 && value <= 52, 400, "INVALID_INPUT", "recentWindowWeeks must be 1-52.");
+  return value;
+}
+
+function normalizeNow(value: Date | null | undefined): Date {
+  if (value == null) return new Date();
+  invariant(value instanceof Date && !Number.isNaN(value.valueOf()), 400, "INVALID_INPUT", "now must be a valid date.");
+  return value;
+}
+
+function calculateWeeksToMarginFloor(params: {
+  usedBudgetCents: number;
+  grossProfitCents: number;
+  grossMarginBps: number;
+  recentRevenueBurnPerWeekCents: number;
+  recentCostBurnPerWeekCents: number;
+  targetMarginBps: number | null;
+}): number | null {
+  if (params.targetMarginBps == null) return null;
+  const targetMargin = params.targetMarginBps / 10_000;
+  const currentHeadroomCents = params.grossProfitCents - params.usedBudgetCents * targetMargin;
+  if (params.usedBudgetCents > 0 && params.grossMarginBps < params.targetMarginBps) return 0;
+  if (currentHeadroomCents < 0) return 0;
+  if (params.recentRevenueBurnPerWeekCents <= 0 && params.recentCostBurnPerWeekCents <= 0) return null;
+
+  const weeklyHeadroomDeltaCents =
+    params.recentRevenueBurnPerWeekCents * (1 - targetMargin) - params.recentCostBurnPerWeekCents;
+
+  if (weeklyHeadroomDeltaCents >= 0) return null;
+  if (currentHeadroomCents <= 0) return 0;
+
+  return currentHeadroomCents / Math.abs(weeklyHeadroomDeltaCents);
+}
+
+function postedTimeEntries(entries: NativePracticeTimeEntry[]) {
+  return entries.filter((entry) => entry.status === "POSTED");
+}
+
+function postedExpenses(expenses: NativePracticeExpense[]) {
+  return expenses.filter((expense) => expense.status === "POSTED");
+}
+
+function addRequiredNativePracticeLedgerCurrency(
+  currencies: Set<string>,
+  currency: string | null,
+  amountCents: number,
+  message: string,
+) {
+  invariant(amountCents === 0 || currency != null, 400, "MIXED_CURRENCY", message);
+  if (currency) currencies.add(currency);
+}
+
+function assertSingleNativePracticeLedgerCurrency(
+  timeEntries: NativePracticeTimeEntry[],
+  expenses: NativePracticeExpense[],
+  message: string,
+): string | null {
+  const currencies = new Set<string>();
+  for (const entry of timeEntries) {
+    const billCurrency = practiceTimeBillAmountCurrency(entry);
+    const costCurrency = practiceTimeCostAmountCurrency(entry);
+    addRequiredNativePracticeLedgerCurrency(currencies, billCurrency, practiceTimeBillAmountCents(entry), message);
+    addRequiredNativePracticeLedgerCurrency(currencies, costCurrency, practiceTimeCostAmountCents(entry), message);
+  }
+  for (const expense of expenses) {
+    const expenseCurrency = practiceExpenseAmountCurrency(expense);
+    addRequiredNativePracticeLedgerCurrency(currencies, expenseCurrency, practiceExpenseFunctionalAmountCents(expense), message);
+  }
+  invariant(currencies.size <= 1, 400, "MIXED_CURRENCY", message);
+  return currencies.values().next().value ?? null;
+}
+
+function emptyNativePracticeProjectLedgerRollup(projectId: string): NativePracticeProjectLedgerRollup {
+  return {
+    projectId,
+    timeRevenueCents: 0,
+    timeCostCents: 0,
+    billableExpenseCents: 0,
+    directExpenseCents: 0,
+    recentTimeRevenueCents: 0,
+    recentTimeCostCents: 0,
+    recentBillableExpenseCents: 0,
+    recentDirectExpenseCents: 0,
+  };
+}
+
+function rollupNativePracticeLedgerRows(params: {
+  project: NativePracticeProject;
+  timeEntries: NativePracticeTimeEntry[];
+  expenses: NativePracticeExpense[];
+  now: Date;
+  recentWindowWeeks: number;
+}): NativePracticeProjectLedgerRollup {
+  const recent = weekWindow(params.now, params.recentWindowWeeks);
+  const rollup = emptyNativePracticeProjectLedgerRollup(params.project.id);
+  const timeEntries = postedTimeEntries(params.timeEntries).filter((entry) => entry.projectId === params.project.id);
+  const expenses = postedExpenses(params.expenses).filter((expense) => expense.projectId === params.project.id);
+
+  for (const entry of timeEntries) {
+    assertNativePracticeTimeEntryHours(entry);
+    assertNativePracticeTimeEntryCurrency(params.project, entry);
+    const revenueCents = practiceTimeBillAmountCents(entry);
+    const costCents = practiceTimeCostAmountCents(entry);
+    rollup.timeRevenueCents += revenueCents;
+    rollup.timeCostCents += costCents;
+    if (isWithinDateWindow(entry.workedOn, recent)) {
+      rollup.recentTimeRevenueCents += revenueCents;
+      rollup.recentTimeCostCents += costCents;
+    }
+  }
+
+  for (const expense of expenses) {
+    assertNativePracticeExpenseCurrency(params.project, expense);
+    const amountCents = practiceExpenseFunctionalAmountCents(expense);
+    rollup.directExpenseCents += amountCents;
+    if (expense.billable) rollup.billableExpenseCents += amountCents;
+    if (isWithinDateWindow(expense.spentOn, recent)) {
+      rollup.recentDirectExpenseCents += amountCents;
+      if (expense.billable) rollup.recentBillableExpenseCents += amountCents;
+    }
+  }
+
+  return rollup;
+}
+
+export function practiceTimeBillAmountCents(entry: NativePracticeTimeEntry): number {
+  return entry.billAmountCents ?? centsFromHours(entry.hours, entry.billRateCents);
+}
+
+export function practiceTimeCostAmountCents(entry: NativePracticeTimeEntry): number {
+  return entry.costAmountCents ?? centsFromHours(entry.hours, entry.costRateCents);
+}
+
+export function practiceExpenseFunctionalAmountCents(expense: NativePracticeExpense): number {
+  return hasPracticeExpenseFunctionalAmount(expense) ? expense.amountFunctionalCents! : expense.amountCents;
+}
+
+export function calculateNativePracticeProjectHealth(params: {
+  project: NativePracticeProject;
+  timeEntries: NativePracticeTimeEntry[];
+  expenses: NativePracticeExpense[];
+} & NativePracticeProjectHealthOptions): NativePracticeProjectHealth {
+  const now = normalizeNow(params.now);
+  const recentWindowWeeks = normalizeRecentWindowWeeks(params.recentWindowWeeks);
+  const rollup = rollupNativePracticeLedgerRows({
+    project: params.project,
+    timeEntries: params.timeEntries,
+    expenses: params.expenses,
+    now,
+    recentWindowWeeks,
+  });
+  return calculateNativePracticeProjectHealthFromRollup({
+    project: params.project,
+    rollup,
+    recentWindowWeeks,
+  });
+}
+
+export function calculateNativePracticeProjectHealthFromRollup(params: {
+  project: NativePracticeProject;
+  rollup: NativePracticeProjectLedgerRollup;
+  recentWindowWeeks?: number | null;
+}): NativePracticeProjectHealth {
+  const recentWindowWeeks = normalizeRecentWindowWeeks(params.recentWindowWeeks);
+  const currency = normalizeCurrencyCode(params.project.currency);
+  invariant(
+    currency != null,
+    400,
+    "MIXED_CURRENCY",
+    "Native practice project health requires a project currency.",
+  );
+  const usedBudgetCents = params.rollup.timeRevenueCents + params.rollup.billableExpenseCents;
+  const directCostCents = params.rollup.timeCostCents + params.rollup.directExpenseCents;
+  const remainingBudgetCents = params.project.poValueCents - usedBudgetCents;
+  const grossProfitCents = usedBudgetCents - directCostCents;
+  const grossMarginBps = usedBudgetCents > 0 ? Math.round((grossProfitCents / usedBudgetCents) * 10_000) : 0;
+  const recentUsedBudgetCents = params.rollup.recentTimeRevenueCents + params.rollup.recentBillableExpenseCents;
+  const recentDirectCostCents = params.rollup.recentTimeCostCents + params.rollup.recentDirectExpenseCents;
+
+  const exactRecentBudgetBurnPerWeekCents = recentUsedBudgetCents / recentWindowWeeks;
+  const exactRecentCostBurnPerWeekCents = recentDirectCostCents / recentWindowWeeks;
+  const recentBudgetBurnPerWeekCents = Math.round(exactRecentBudgetBurnPerWeekCents);
+  const recentCostBurnPerWeekCents = Math.round(exactRecentCostBurnPerWeekCents);
+  const hasBudgetSetup =
+    params.project.poValueCents > 0
+    && params.project.serviceBudgetCents > 0
+    && params.project.expenseBudgetCents > 0
+    && params.project.targetMarginBps != null;
+  const hasRecentBurn = exactRecentBudgetBurnPerWeekCents > 0 || exactRecentCostBurnPerWeekCents > 0;
+  const weeksToBudgetExhaustion = hasBudgetSetup && remainingBudgetCents <= 0
+    ? 0
+    : hasBudgetSetup && exactRecentBudgetBurnPerWeekCents > 0
+      ? remainingBudgetCents / exactRecentBudgetBurnPerWeekCents
+      : null;
+  const weeksToTargetMarginRisk = calculateWeeksToMarginFloor({
+    grossMarginBps,
+    grossProfitCents,
+    recentCostBurnPerWeekCents: exactRecentCostBurnPerWeekCents,
+    recentRevenueBurnPerWeekCents: exactRecentBudgetBurnPerWeekCents,
+    targetMarginBps: params.project.targetMarginBps,
+    usedBudgetCents,
+  });
+
+  return {
+    projectId: params.project.id,
+    projectCode: params.project.code,
+    projectName: params.project.name,
+    clientId: params.project.clientId,
+    clientName: params.project.clientName,
+    status: params.project.status,
+    currency,
+    budgetCents: params.project.poValueCents,
+    serviceBudgetCents: params.project.serviceBudgetCents,
+    expenseBudgetCents: params.project.expenseBudgetCents,
+    usedBudgetCents,
+    remainingBudgetCents,
+    directCostCents,
+    grossProfitCents,
+    grossMarginBps,
+    recentBudgetBurnPerWeekCents,
+    recentCostBurnPerWeekCents,
+    weeksToBudgetExhaustion,
+    weeksToTargetMarginRisk,
+    targetMarginBps: params.project.targetMarginBps,
+    hasBudgetSetup,
+    hasRecentBurn,
+  };
+}
+
+export function summarizeNativePracticeFinance(health: NativePracticeProjectHealth[]): NativePracticeFinanceSummary {
+  const active = health.filter((item) => item.status === "ACTIVE");
+  const currencies = new Set<string>();
+  for (const item of active) {
+    const currency = normalizeCurrencyCode(item.currency);
+    invariant(
+      currency != null,
+      400,
+      "MIXED_CURRENCY",
+      "Native practice finance summary requires active projects to have a currency.",
+    );
+    currencies.add(currency);
+  }
+  invariant(
+    currencies.size <= 1,
+    400,
+    "MIXED_CURRENCY",
+    "Native practice finance summary requires a single currency until conversion is supported.",
+  );
+  const currency = currencies.values().next().value ?? null;
+  const budgetCents = active.reduce((sum, item) => sum + item.budgetCents, 0);
+  const usedCents = active.reduce((sum, item) => sum + item.usedBudgetCents, 0);
+  const grossProfitCents = active.reduce((sum, item) => sum + item.grossProfitCents, 0);
+  const directCostCents = active.reduce((sum, item) => sum + item.directCostCents, 0);
+  const marginBps = usedCents > 0 ? Math.round((grossProfitCents / usedCents) * 10_000) : null;
+
+  return {
+    activeProjects: active.length,
+    currency,
+    budgetCents,
+    usedCents,
+    remainingCents: budgetCents - usedCents,
+    marginBps,
+    directCostCents,
+    grossProfitCents,
+    riskBudgetCount: active.filter((item) =>
+      item.weeksToBudgetExhaustion != null && item.weeksToBudgetExhaustion <= BUDGET_RUNWAY_ATTENTION_WEEKS
+    ).length,
+    riskMarginCount: active.filter((item) =>
+      item.hasBudgetSetup
+      && item.weeksToTargetMarginRisk != null
+      && item.weeksToTargetMarginRisk <= BUDGET_RUNWAY_ATTENTION_WEEKS
+    ).length,
+  };
+}
+
+export function nativePracticeProjectAttentionItems(health: NativePracticeProjectHealth): PracticeAttentionItem[] {
+  if (health.status !== "ACTIVE") return [];
+  const items: PracticeAttentionItem[] = [];
+
+  if (!health.hasBudgetSetup) {
+    items.push({
+      projectId: health.projectId,
+      projectName: health.projectName,
+      issue: "setup",
+      weeks: null,
+      detail: "Add PO value, service budget, expense budget, and target margin before forecasting.",
+    });
+    return items;
+  }
+
+  if (health.weeksToBudgetExhaustion != null && health.weeksToBudgetExhaustion <= BUDGET_RUNWAY_ATTENTION_WEEKS) {
+    items.push({
+      projectId: health.projectId,
+      projectName: health.projectName,
+      issue: "budget",
+      weeks: roundWeeks(health.weeksToBudgetExhaustion),
+      detail: `${centsToCurrency(health.remainingBudgetCents, health.currency)} remaining at ${centsToCurrency(health.recentBudgetBurnPerWeekCents, health.currency)} / week.`,
+    });
+  }
+
+  if (health.weeksToTargetMarginRisk != null && health.weeksToTargetMarginRisk <= BUDGET_RUNWAY_ATTENTION_WEEKS && health.targetMarginBps != null) {
+    items.push({
+      projectId: health.projectId,
+      projectName: health.projectName,
+      issue: "margin",
+      weeks: roundWeeks(health.weeksToTargetMarginRisk),
+      detail: `Current margin ${bpsToPct(health.grossMarginBps)} vs target ${bpsToPct(health.targetMarginBps)}.`,
+    });
+  }
+
+  return items;
+}
+
+export function collectNativePracticeAttention(health: NativePracticeProjectHealth[]): PracticeAttentionItem[] {
+  return health.flatMap(nativePracticeProjectAttentionItems);
+}
+
+export function calculateNativePracticeConsultantUtilization(params: {
+  consultant: NativePracticeConsultant;
+  timeEntries: NativePracticeTimeEntry[];
+  expenses: NativePracticeExpense[];
+  capacityHoursPerWeek?: number | null;
+} & NativePracticeProjectHealthOptions): NativePracticeConsultantUtilization {
+  const now = normalizeNow(params.now);
+  const recentWindowWeeks = normalizeRecentWindowWeeks(params.recentWindowWeeks);
+  const recent = weekWindow(now, recentWindowWeeks);
+  const timeEntries = postedTimeEntries(params.timeEntries).filter((entry) => entry.consultantId === params.consultant.id);
+  const expenses = postedExpenses(params.expenses).filter((expense) => expense.consultantId === params.consultant.id);
+  for (const entry of timeEntries) {
+    assertNativePracticeTimeEntryHours(entry);
+  }
+  const currency = assertSingleNativePracticeLedgerCurrency(
+    timeEntries,
+    expenses,
+    "Native practice consultant financial totals require one normalized currency.",
+  );
+  const recentHours = timeEntries
+    .filter((entry) => isWithinDateWindow(entry.workedOn, recent))
+    .reduce((sum, entry) => sum + decimalToNumber(entry.hours), 0);
+  const billedCents = timeEntries.reduce((sum, entry) => sum + practiceTimeBillAmountCents(entry), 0);
+  const costCents = timeEntries.reduce((sum, entry) => sum + practiceTimeCostAmountCents(entry), 0);
+  const expenseCents = expenses.reduce((sum, expense) => sum + practiceExpenseFunctionalAmountCents(expense), 0);
+  const capacityHoursPerWeek = params.capacityHoursPerWeek ?? 40;
+  invariant(
+    Number.isFinite(capacityHoursPerWeek) && capacityHoursPerWeek >= 0,
+    400,
+    "INVALID_INPUT",
+    "capacityHoursPerWeek must be finite and non-negative.",
+  );
+  const rawAverageWeeklyHours = recentHours / recentWindowWeeks;
+  const averageWeeklyHours = roundHours(rawAverageWeeklyHours);
+  const utilizationBps = capacityHoursPerWeek > 0 ? Math.round((rawAverageWeeklyHours / capacityHoursPerWeek) * 10_000) : 0;
+  const projectIds = [...new Set([
+    ...timeEntries.map((entry) => entry.projectId),
+    ...expenses.map((expense) => expense.projectId),
+  ])].sort();
+
+  return {
+    consultantId: params.consultant.id,
+    consultantName: params.consultant.name,
+    consultantEmail: params.consultant.email,
+    active: params.consultant.active,
+    projectIds,
+    capacityHoursPerWeek,
+    recentHours: roundHours(recentHours),
+    averageWeeklyHours,
+    utilizationBps,
+    currency,
+    billedCents,
+    costCents,
+    expenseCents,
+  };
+}
+
+function calculateContributionPreview(params: {
+  sourceType: NativePracticeContributionSourceType;
+  sourceId: string;
+  projectId: string;
+  consultantId: string | null;
+  occurredAt: Date;
+  currency: string | null;
+  marketValueCents: number;
+  paidAmountCents: number;
+  multiplier: number;
+  paymentBatchId: string | null;
+}): NativePracticeContributionPreview {
+  const currency = normalizeCurrencyCode(params.currency);
+  invariant(
+    currency === PRACTICE_LEDGER_CURRENCY,
+    400,
+    "MIXED_CURRENCY",
+    "Slicing Pie contribution previews require USD amounts until contribution currency conversion is supported.",
+  );
+  invariant(
+    Number.isInteger(params.marketValueCents) && params.marketValueCents >= 0,
+    400,
+    "INVALID_INPUT",
+    "Contribution preview market value must be a non-negative integer number of cents.",
+  );
+  invariant(
+    Number.isInteger(params.paidAmountCents) && params.paidAmountCents >= 0,
+    400,
+    "INVALID_INPUT",
+    "Contribution preview paid amount must be a non-negative integer number of cents.",
+  );
+  const paidAmountCents = Math.min(Math.max(0, params.paidAmountCents), params.marketValueCents);
+  const unpaidAmountCents = Math.max(0, params.marketValueCents - paidAmountCents);
+
+  return {
+    sourceType: params.sourceType,
+    sourceId: params.sourceId,
+    projectId: params.projectId,
+    consultantId: params.consultantId,
+    occurredAt: params.occurredAt,
+    currency,
+    marketValueCents: params.marketValueCents,
+    paidAmountCents,
+    unpaidAmountCents,
+    multiplier: params.multiplier,
+    slices: unpaidAmountCents * params.multiplier,
+    paymentBatchId: params.paymentBatchId,
+  };
+}
+
+export function previewSlicingPieContributionFromTimeEntry(entry: NativePracticeTimeEntry): NativePracticeContributionPreview {
+  invariant(entry.status === "POSTED", 400, "INVALID_STATE", "Only posted time entries can produce contribution previews.");
+  invariant(
+    entry.paymentBatchId == null || entry.paidAmountCents != null,
+    400,
+    "INVALID_INPUT",
+    "Batched time entry contribution previews require the paid amount allocation.",
+  );
+  const marketValueCents = practiceTimeCostAmountCents(entry);
+  return calculateContributionPreview({
+    sourceType: "TIME_ENTRY",
+    sourceId: entry.id,
+    projectId: entry.projectId,
+    consultantId: entry.consultantId,
+    occurredAt: entry.workedOn,
+    currency: practiceTimeCostAmountCurrency(entry),
+    marketValueCents,
+    paidAmountCents: entry.paidAmountCents ?? 0,
+    multiplier: SLICING_PIE_TIME_MULTIPLIER,
+    paymentBatchId: entry.paymentBatchId,
+  });
+}
+
+export function previewSlicingPieContributionFromExpense(
+  expense: NativePracticeExpense,
+  options: { paidAmountCents?: number | null } = {},
+): NativePracticeContributionPreview {
+  invariant(expense.status === "POSTED", 400, "INVALID_STATE", "Only posted expenses can produce contribution previews.");
+  invariant(
+    expense.consultantId != null,
+    400,
+    "INVALID_INPUT",
+    "Posted expenses must have a consultant before producing contribution previews.",
+  );
+  invariant(
+    expense.paymentBatchId == null || options.paidAmountCents != null,
+    400,
+    "INVALID_INPUT",
+    "Batched expense contribution previews require the paid amount allocation.",
+  );
+  const marketValueCents = practiceExpenseFunctionalAmountCents(expense);
+  return calculateContributionPreview({
+    sourceType: "EXPENSE",
+    sourceId: expense.id,
+    projectId: expense.projectId,
+    consultantId: expense.consultantId,
+    occurredAt: expense.spentOn,
+    currency: practiceExpenseAmountCurrency(expense) ?? expense.currency,
+    marketValueCents,
+    paidAmountCents: options.paidAmountCents ?? 0,
+    multiplier: SLICING_PIE_EXPENSE_MULTIPLIER,
+    paymentBatchId: expense.paymentBatchId,
+  });
 }
 
 export function projectRemainingCents(p: Pick<ProjectFinance, "poValueCents" | "usedCents">): number {
@@ -312,6 +1103,14 @@ export type UpdatePracticeProjectInput = {
 export type ListPracticeProjectsOptions = {
   take?: number | null;
   cursor?: string | null;
+};
+
+export type ListNativePracticeProjectHealthOptions = ListPracticeProjectsOptions & NativePracticeProjectHealthOptions;
+
+export type NativePracticeFinanceDashboard = {
+  summary: NativePracticeFinanceSummary;
+  attention: PracticeAttentionItem[];
+  projectHealth: NativePracticeProjectHealth[];
 };
 
 export type ListPracticeContributionEntriesOptions = {
@@ -534,6 +1333,272 @@ export async function getPracticeFinanceDashboard(
     summary: summarizePracticeFinance(projects),
     attention: collectAttention(projects),
     projects,
+  };
+}
+
+const NATIVE_PRACTICE_PROJECT_SELECT = {
+  id: true,
+  code: true,
+  name: true,
+  clientName: true,
+  clientId: true,
+  status: true,
+  currency: true,
+  poValueCents: true,
+  serviceBudgetCents: true,
+  expenseBudgetCents: true,
+  targetMarginBps: true,
+} satisfies Prisma.PracticeProjectSelect;
+
+function mergeNativePracticeLedgerRollups(
+  projectIds: string[],
+  timeRows: NativePracticeTimeRollupRow[],
+  expenseRows: NativePracticeExpenseRollupRow[],
+) {
+  const rollups = new Map(projectIds.map((projectId) => [
+    projectId,
+    emptyNativePracticeProjectLedgerRollup(projectId),
+  ]));
+
+  for (const row of timeRows) {
+    invariant(
+      dbIntToNumber(row.invalidHoursRows) === 0,
+      400,
+      "INVALID_INPUT",
+      "Native practice finance requires time entry hours to be finite and non-negative.",
+    );
+    invariant(
+      dbIntToNumber(row.invalidCurrencyRows) === 0,
+      400,
+      "MIXED_CURRENCY",
+      "Native practice finance requires time entry bill and cost amounts to be normalized to the project currency.",
+    );
+    const rollup = rollups.get(row.projectId) ?? emptyNativePracticeProjectLedgerRollup(row.projectId);
+    rollup.timeRevenueCents = dbIntToNumber(row.timeRevenueCents);
+    rollup.timeCostCents = dbIntToNumber(row.timeCostCents);
+    rollup.recentTimeRevenueCents = dbIntToNumber(row.recentTimeRevenueCents);
+    rollup.recentTimeCostCents = dbIntToNumber(row.recentTimeCostCents);
+    rollups.set(row.projectId, rollup);
+  }
+
+  for (const row of expenseRows) {
+    invariant(
+      dbIntToNumber(row.invalidCurrencyRows) === 0,
+      400,
+      "MIXED_CURRENCY",
+      "Native practice finance requires expenses to be normalized to the project currency.",
+    );
+    const rollup = rollups.get(row.projectId) ?? emptyNativePracticeProjectLedgerRollup(row.projectId);
+    rollup.billableExpenseCents = dbIntToNumber(row.billableExpenseCents);
+    rollup.directExpenseCents = dbIntToNumber(row.directExpenseCents);
+    rollup.recentBillableExpenseCents = dbIntToNumber(row.recentBillableExpenseCents);
+    rollup.recentDirectExpenseCents = dbIntToNumber(row.recentDirectExpenseCents);
+    rollups.set(row.projectId, rollup);
+  }
+
+  return rollups;
+}
+
+export async function listNativePracticeProjectHealth(
+  actor: AppActor,
+  workspaceId: string,
+  options: ListNativePracticeProjectHealthOptions = {},
+): Promise<NativePracticeProjectHealth[]> {
+  await requireWorkspaceMembership({ actor, workspaceId });
+  const cursor = normalizeCursor(options.cursor);
+  const now = normalizeNow(options.now);
+  const recentWindowWeeks = normalizeRecentWindowWeeks(options.recentWindowWeeks);
+  const recent = weekWindow(now, recentWindowWeeks);
+  const projects = await prisma.practiceProject.findMany({
+    where: { workspaceId },
+    select: NATIVE_PRACTICE_PROJECT_SELECT,
+    orderBy: [{ status: "asc" }, { code: "asc" }, { id: "asc" }],
+    take: normalizeTake(options.take),
+    ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
+  });
+
+  const projectIds = projects.map((project) => project.id);
+  if (projectIds.length === 0) return [];
+
+  const [timeRollups, expenseRollups] = await Promise.all([
+    prisma.$queryRaw<NativePracticeTimeRollupRow[]>(Prisma.sql`
+      SELECT
+        t."projectId",
+        COALESCE(SUM(COALESCE(t."billAmountCents"::numeric, ROUND(t."hours" * t."billRateCents"))), 0)::bigint AS "timeRevenueCents",
+        COALESCE(SUM(COALESCE(t."costAmountCents"::numeric, ROUND(t."hours" * t."costRateCents"))), 0)::bigint AS "timeCostCents",
+        COALESCE(SUM(
+          CASE WHEN t."workedOn" > ${recent.startsOn} AND t."workedOn" <= ${recent.endsOn}
+            THEN COALESCE(t."billAmountCents"::numeric, ROUND(t."hours" * t."billRateCents"))
+            ELSE 0
+          END
+        ), 0)::bigint AS "recentTimeRevenueCents",
+        COALESCE(SUM(
+          CASE WHEN t."workedOn" > ${recent.startsOn} AND t."workedOn" <= ${recent.endsOn}
+            THEN COALESCE(t."costAmountCents"::numeric, ROUND(t."hours" * t."costRateCents"))
+            ELSE 0
+          END
+        ), 0)::bigint AS "recentTimeCostCents",
+        COALESCE(SUM(
+          CASE WHEN t."hours" < 0
+            THEN 1
+            ELSE 0
+          END
+        ), 0)::bigint AS "invalidHoursRows",
+        COALESCE(SUM(
+          CASE WHEN
+            NULLIF(BTRIM(p."currency"), '') IS NULL
+            OR COALESCE(
+              CASE WHEN t."billAmountCents" IS NOT NULL
+                THEN NULLIF(BTRIM(t."functionalCurrency"), '')
+                ELSE NULL
+              END,
+              NULLIF(BTRIM(t."billCurrency"), ''),
+              NULLIF(BTRIM(t."currency"), '')
+            ) IS NULL
+            OR COALESCE(
+              CASE WHEN t."costAmountCents" IS NOT NULL
+                THEN NULLIF(BTRIM(t."functionalCurrency"), '')
+                ELSE NULL
+              END,
+              NULLIF(BTRIM(t."costCurrency"), ''),
+              NULLIF(BTRIM(t."currency"), '')
+            ) IS NULL
+            OR UPPER(COALESCE(
+              CASE WHEN t."billAmountCents" IS NOT NULL
+                THEN NULLIF(BTRIM(t."functionalCurrency"), '')
+                ELSE NULL
+              END,
+              NULLIF(BTRIM(t."billCurrency"), ''),
+              NULLIF(BTRIM(t."currency"), '')
+            )) IS DISTINCT FROM UPPER(NULLIF(BTRIM(p."currency"), ''))
+            OR UPPER(COALESCE(
+              CASE WHEN t."costAmountCents" IS NOT NULL
+                THEN NULLIF(BTRIM(t."functionalCurrency"), '')
+                ELSE NULL
+              END,
+              NULLIF(BTRIM(t."costCurrency"), ''),
+              NULLIF(BTRIM(t."currency"), '')
+            )) IS DISTINCT FROM UPPER(NULLIF(BTRIM(p."currency"), ''))
+            THEN 1
+            ELSE 0
+          END
+        ), 0)::bigint AS "invalidCurrencyRows"
+      FROM "PracticeTimeEntry" t
+      JOIN "PracticeProject" p
+        ON p."id" = t."projectId"
+        AND p."workspaceId" = t."workspaceId"
+      WHERE t."workspaceId" = ${workspaceId}
+        AND t."projectId" IN (${Prisma.join(projectIds)})
+        AND t."status" = 'POSTED'
+      GROUP BY t."projectId"
+    `),
+    prisma.$queryRaw<NativePracticeExpenseRollupRow[]>(Prisma.sql`
+      SELECT
+        e."projectId",
+        COALESCE(SUM(
+          CASE WHEN e."billable"
+            THEN (
+              CASE WHEN e."amountFunctionalCents" IS NOT NULL AND NULLIF(BTRIM(e."functionalCurrency"), '') IS NOT NULL
+                THEN e."amountFunctionalCents"
+                ELSE e."amountCents"
+              END
+            )::numeric
+            ELSE 0
+          END
+        ), 0)::bigint AS "billableExpenseCents",
+        COALESCE(SUM((
+          CASE WHEN e."amountFunctionalCents" IS NOT NULL AND NULLIF(BTRIM(e."functionalCurrency"), '') IS NOT NULL
+            THEN e."amountFunctionalCents"
+            ELSE e."amountCents"
+          END
+        )::numeric), 0)::bigint AS "directExpenseCents",
+        COALESCE(SUM(
+          CASE WHEN e."billable" AND e."spentOn" > ${recent.startsOn} AND e."spentOn" <= ${recent.endsOn}
+            THEN (
+              CASE WHEN e."amountFunctionalCents" IS NOT NULL AND NULLIF(BTRIM(e."functionalCurrency"), '') IS NOT NULL
+                THEN e."amountFunctionalCents"
+                ELSE e."amountCents"
+              END
+            )::numeric
+            ELSE 0
+          END
+        ), 0)::bigint AS "recentBillableExpenseCents",
+        COALESCE(SUM(
+          CASE WHEN e."spentOn" > ${recent.startsOn} AND e."spentOn" <= ${recent.endsOn}
+            THEN (
+              CASE WHEN e."amountFunctionalCents" IS NOT NULL AND NULLIF(BTRIM(e."functionalCurrency"), '') IS NOT NULL
+                THEN e."amountFunctionalCents"
+                ELSE e."amountCents"
+              END
+            )::numeric
+            ELSE 0
+          END
+        ), 0)::bigint AS "recentDirectExpenseCents",
+        COALESCE(SUM(
+          CASE WHEN NULLIF(BTRIM(p."currency"), '') IS NULL
+            OR COALESCE(
+              CASE WHEN e."amountFunctionalCents" IS NOT NULL AND NULLIF(BTRIM(e."functionalCurrency"), '') IS NOT NULL
+                THEN NULLIF(BTRIM(e."functionalCurrency"), '')
+                ELSE NULL
+              END,
+              NULLIF(BTRIM(e."currency"), '')
+            ) IS NULL
+            OR UPPER(COALESCE(
+              CASE WHEN e."amountFunctionalCents" IS NOT NULL AND NULLIF(BTRIM(e."functionalCurrency"), '') IS NOT NULL
+                THEN NULLIF(BTRIM(e."functionalCurrency"), '')
+                ELSE NULL
+              END,
+              NULLIF(BTRIM(e."currency"), '')
+            )) IS DISTINCT FROM UPPER(NULLIF(BTRIM(p."currency"), ''))
+            THEN 1
+            ELSE 0
+          END
+        ), 0)::bigint AS "invalidCurrencyRows"
+      FROM "PracticeExpense" e
+      JOIN "PracticeProject" p
+        ON p."id" = e."projectId"
+        AND p."workspaceId" = e."workspaceId"
+      WHERE e."workspaceId" = ${workspaceId}
+        AND e."projectId" IN (${Prisma.join(projectIds)})
+        AND e."status" = 'POSTED'
+      GROUP BY e."projectId"
+    `),
+  ]);
+
+  const rollups = mergeNativePracticeLedgerRollups(projectIds, timeRollups, expenseRollups);
+
+  return projects.map((project) => calculateNativePracticeProjectHealthFromRollup({
+    project,
+    rollup: rollups.get(project.id) ?? emptyNativePracticeProjectLedgerRollup(project.id),
+    recentWindowWeeks,
+  }));
+}
+
+export async function getNativePracticeFinanceDashboard(
+  actor: AppActor,
+  workspaceId: string,
+  options: ListNativePracticeProjectHealthOptions = {},
+): Promise<NativePracticeFinanceDashboard> {
+  const projectHealth: NativePracticeProjectHealth[] = [];
+  let cursor: string | null = null;
+  const take = MAX_PRACTICE_PROJECT_TAKE;
+
+  while (true) {
+    const page = await listNativePracticeProjectHealth(actor, workspaceId, {
+      ...options,
+      cursor,
+      take,
+    });
+    projectHealth.push(...page);
+    if (page.length < take) break;
+    cursor = page.at(-1)?.projectId ?? null;
+    if (!cursor) break;
+  }
+
+  return {
+    summary: summarizeNativePracticeFinance(projectHealth),
+    attention: collectNativePracticeAttention(projectHealth),
+    projectHealth,
   };
 }
 
