@@ -594,6 +594,8 @@ describe("importPracticeLedgerExport", () => {
     expect(result.dryRun).toBe(true);
     expect(result.counts.planned.clients).toBe(0);
     expect(result.counts.skipped.clients).toBe(1);
+    expect(result.reconciliation.source.byEntity.clients).toBe(1);
+    expect(result.reconciliation.targetBefore.missing.byEntity.clients).toBe(1);
     expect(prisma.practiceClient.upsert).not.toHaveBeenCalled();
   });
 
@@ -614,6 +616,36 @@ describe("importPracticeLedgerExport", () => {
     expect(result.counts.source.clients).toBe(1);
     expect(result.reconciliation.targetBefore.matched.byEntity.clients).toBe(1);
     expect(result.reconciliation.targetBefore.missing.byEntity.clients).toBe(0);
+  });
+
+  it("chunks target reconciliation source id lookups for large exports", async () => {
+    const prisma = prismaFixture();
+    const timeEntries = Array.from({ length: 1005 }, (_, index) => ({
+      id: `time-${index}`,
+      clientId: "client-1",
+      projectId: "project-1",
+      consultantId: "consultant-1",
+      workedOn: "2026-06-10",
+      weekEndingOn: "2026-06-12",
+      hours: 1,
+    }));
+    prisma.practiceTimeEntry.findMany.mockImplementation(async ({ where }) => (
+      where.sourceSatelliteId.in.map((sourceSatelliteId) => ({ sourceSatelliteId }))
+    ));
+
+    const result = await importPracticeLedgerExport({
+      prisma,
+      workspaceId: "ws1",
+      batch: {
+        clients: [{ id: "client-1", code: "C001", name: "Client One" }],
+        consultants: [{ id: "consultant-1", name: "Consultant One" }],
+        projects: [project({ id: "project-1", clientId: "client-1" })],
+        timeEntries,
+      },
+    });
+
+    expect(result.reconciliation.targetBefore.matched.byEntity.timeEntries).toBe(1005);
+    expect(prisma.practiceTimeEntry.findMany).toHaveBeenCalledTimes(2);
   });
 
   it("reports target reconciliation after an apply", async () => {

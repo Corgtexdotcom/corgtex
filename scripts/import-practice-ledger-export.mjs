@@ -1240,19 +1240,43 @@ const TARGET_SOURCE_DELEGATES = {
   entryReviews: "practiceEntryReview",
 };
 
-async function targetSourceReconciliation(prisma, workspaceId, plan) {
+const TARGET_SOURCE_ID_CHUNK_SIZE = 1000;
+
+function chunked(values, size) {
+  const chunks = [];
+  for (let index = 0; index < values.length; index += size) {
+    chunks.push(values.slice(index, index + size));
+  }
+  return chunks;
+}
+
+function reconciliationSourceIds(plan) {
+  return Object.fromEntries(ENTITY_ORDER.map((entity) => [
+    entity,
+    collectUnique(plan.entities[entity].valid.map((row) => row.sourceSatelliteId)),
+  ]));
+}
+
+function reconciliationSourceCounts(sourceIdsByEntity) {
+  return Object.fromEntries(ENTITY_ORDER.map((entity) => [entity, sourceIdsByEntity[entity]?.length ?? 0]));
+}
+
+async function targetSourceReconciliation(prisma, workspaceId, sourceIdsByEntity) {
   const matched = emptyEntityCounts();
   const missing = emptyEntityCounts();
 
   for (const entity of ENTITY_ORDER) {
-    const sourceSatelliteIds = collectUnique(plan.entities[entity].valid.map((row) => row.sourceSatelliteId));
+    const sourceSatelliteIds = sourceIdsByEntity[entity] ?? [];
     if (sourceSatelliteIds.length === 0) continue;
     const delegateName = TARGET_SOURCE_DELEGATES[entity];
-    const rows = await prisma[delegateName].findMany({
-      where: { workspaceId, sourceSatelliteId: { in: sourceSatelliteIds } },
-      select: { sourceSatelliteId: true },
-    });
-    const found = new Set(rows.map((row) => row.sourceSatelliteId));
+    const found = new Set();
+    for (const chunk of chunked(sourceSatelliteIds, TARGET_SOURCE_ID_CHUNK_SIZE)) {
+      const rows = await prisma[delegateName].findMany({
+        where: { workspaceId, sourceSatelliteId: { in: chunk } },
+        select: { sourceSatelliteId: true },
+      });
+      for (const row of rows) found.add(row.sourceSatelliteId);
+    }
     matched[entity] = found.size;
     missing[entity] = sourceSatelliteIds.filter((sourceSatelliteId) => !found.has(sourceSatelliteId)).length;
   }
@@ -1270,8 +1294,10 @@ async function targetSourceReconciliation(prisma, workspaceId, plan) {
 export async function importPracticeLedgerExport({ prisma, workspaceId, batch, apply = false }) {
   if (!workspaceId) throw new Error("workspaceId is required.");
   const plan = planImport(batch);
+  const sourceIdsByEntity = reconciliationSourceIds(plan);
+  const sourceIdCounts = reconciliationSourceCounts(sourceIdsByEntity);
   applyTargetUniqueConflicts(plan, await targetUniqueConflicts(prisma, workspaceId, plan));
-  const targetBefore = await targetSourceReconciliation(prisma, workspaceId, plan);
+  const targetBefore = await targetSourceReconciliation(prisma, workspaceId, sourceIdsByEntity);
   const imported = emptyEntityCounts();
   const skipped = { ...plan.counts.skipped };
 
@@ -1288,7 +1314,7 @@ export async function importPracticeLedgerExport({ prisma, workspaceId, batch, a
     }
   }
 
-  const targetAfter = apply ? await targetSourceReconciliation(prisma, workspaceId, plan) : null;
+  const targetAfter = apply ? await targetSourceReconciliation(prisma, workspaceId, sourceIdsByEntity) : null;
 
   return {
     dryRun: !apply,
@@ -1302,7 +1328,7 @@ export async function importPracticeLedgerExport({ prisma, workspaceId, batch, a
       skipped,
     },
     reconciliation: {
-      source: importTotals(plan.counts.source),
+      source: importTotals(sourceIdCounts),
       targetBefore,
       targetAfter,
     },
