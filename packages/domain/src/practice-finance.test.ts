@@ -565,6 +565,19 @@ describe("practice-finance pure derivations", () => {
     } catch (error) {
       expect(error).toMatchObject({ code: "MIXED_CURRENCY" });
     }
+
+    try {
+      calculateNativePracticeProjectHealth({
+        project: nativeProject({ currency: "USD" }),
+        timeEntries: [],
+        expenses: [
+          nativeExpense({ currency: "EUR", amountFunctionalCents: 12_345, functionalCurrency: null }),
+        ],
+      });
+      throw new Error("Expected expenses without functional currency labels to use their source currency.");
+    } catch (error) {
+      expect(error).toMatchObject({ code: "MIXED_CURRENCY" });
+    }
   });
 
   it("rejects mixed currencies in native consultant financial totals", () => {
@@ -593,7 +606,7 @@ describe("practice-finance pure derivations", () => {
         nativeTimeEntry({ hours: decimal(12), billRateCents: 20_000, costRateCents: 10_000 }),
         nativeTimeEntry({ id: "old", workedOn: new Date("2026-01-01T00:00:00.000Z"), weekEndingOn: new Date("2026-01-05T00:00:00.000Z"), hours: decimal(4) }),
       ],
-      expenses: [nativeExpense({ amountFunctionalCents: 12_345 })],
+      expenses: [nativeExpense({ amountFunctionalCents: 12_345, functionalCurrency: "USD" })],
     });
 
     expect(utilization).toMatchObject({
@@ -626,6 +639,7 @@ describe("practice-finance pure derivations", () => {
 
     expect(previewSlicingPieContributionFromExpense(nativeExpense({
       amountFunctionalCents: 12_000,
+      functionalCurrency: "USD",
       paymentBatchId: "mixed-batch",
     }))).toMatchObject({
       sourceType: "EXPENSE",
@@ -643,6 +657,16 @@ describe("practice-finance pure derivations", () => {
       amountFunctionalCents: null,
       currency: "EUR",
       functionalCurrency: "USD",
+    }))).toMatchObject({
+      currency: "EUR",
+      marketValueCents: 12_000,
+    });
+
+    expect(previewSlicingPieContributionFromExpense(nativeExpense({
+      amountCents: 12_000,
+      amountFunctionalCents: 13_500,
+      currency: "EUR",
+      functionalCurrency: null,
     }))).toMatchObject({
       currency: "EUR",
       marketValueCents: 12_000,
@@ -672,7 +696,7 @@ describe("practice-finance pure derivations", () => {
       expect(error).toMatchObject({ code: "INVALID_INPUT" });
     }
     try {
-      previewSlicingPieContributionFromExpense(nativeExpense({ amountFunctionalCents: -100 }));
+      previewSlicingPieContributionFromExpense(nativeExpense({ amountFunctionalCents: -100, functionalCurrency: "USD" }));
       throw new Error("Expected negative expense contribution value to be rejected.");
     } catch (error) {
       expect(error).toMatchObject({ code: "INVALID_INPUT" });

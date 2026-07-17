@@ -341,9 +341,13 @@ function assertNativePracticeExpenseCurrency(project: NativePracticeProject, exp
 
 function practiceExpenseAmountCurrency(expense: NativePracticeExpense): string | null {
   return firstCurrencyCode(
-    expense.amountFunctionalCents == null ? null : expense.functionalCurrency,
+    hasPracticeExpenseFunctionalAmount(expense) ? expense.functionalCurrency : null,
     expense.currency,
   );
+}
+
+function hasPracticeExpenseFunctionalAmount(expense: NativePracticeExpense): boolean {
+  return expense.amountFunctionalCents != null && firstCurrencyCode(expense.functionalCurrency) != null;
 }
 
 function roundWeeks(value: number): number {
@@ -490,7 +494,7 @@ export function practiceTimeCostAmountCents(entry: NativePracticeTimeEntry): num
 }
 
 export function practiceExpenseFunctionalAmountCents(expense: NativePracticeExpense): number {
-  return expense.amountFunctionalCents ?? expense.amountCents;
+  return hasPracticeExpenseFunctionalAmount(expense) ? expense.amountFunctionalCents! : expense.amountCents;
 }
 
 export function calculateNativePracticeProjectHealth(params: {
@@ -1328,26 +1332,46 @@ export async function listNativePracticeProjectHealth(
         e."projectId",
         COALESCE(SUM(
           CASE WHEN e."billable"
-            THEN COALESCE(e."amountFunctionalCents", e."amountCents")::numeric
+            THEN (
+              CASE WHEN e."amountFunctionalCents" IS NOT NULL AND NULLIF(BTRIM(e."functionalCurrency"), '') IS NOT NULL
+                THEN e."amountFunctionalCents"
+                ELSE e."amountCents"
+              END
+            )::numeric
             ELSE 0
           END
         ), 0)::bigint AS "billableExpenseCents",
-        COALESCE(SUM(COALESCE(e."amountFunctionalCents", e."amountCents")::numeric), 0)::bigint AS "directExpenseCents",
+        COALESCE(SUM((
+          CASE WHEN e."amountFunctionalCents" IS NOT NULL AND NULLIF(BTRIM(e."functionalCurrency"), '') IS NOT NULL
+            THEN e."amountFunctionalCents"
+            ELSE e."amountCents"
+          END
+        )::numeric), 0)::bigint AS "directExpenseCents",
         COALESCE(SUM(
           CASE WHEN e."billable" AND e."spentOn" >= ${recent.startsOn} AND e."spentOn" <= ${recent.endsOn}
-            THEN COALESCE(e."amountFunctionalCents", e."amountCents")::numeric
+            THEN (
+              CASE WHEN e."amountFunctionalCents" IS NOT NULL AND NULLIF(BTRIM(e."functionalCurrency"), '') IS NOT NULL
+                THEN e."amountFunctionalCents"
+                ELSE e."amountCents"
+              END
+            )::numeric
             ELSE 0
           END
         ), 0)::bigint AS "recentBillableExpenseCents",
         COALESCE(SUM(
           CASE WHEN e."spentOn" >= ${recent.startsOn} AND e."spentOn" <= ${recent.endsOn}
-            THEN COALESCE(e."amountFunctionalCents", e."amountCents")::numeric
+            THEN (
+              CASE WHEN e."amountFunctionalCents" IS NOT NULL AND NULLIF(BTRIM(e."functionalCurrency"), '') IS NOT NULL
+                THEN e."amountFunctionalCents"
+                ELSE e."amountCents"
+              END
+            )::numeric
             ELSE 0
           END
         ), 0)::bigint AS "recentDirectExpenseCents",
         COALESCE(SUM(
           CASE WHEN UPPER(COALESCE(
-              CASE WHEN e."amountFunctionalCents" IS NOT NULL
+              CASE WHEN e."amountFunctionalCents" IS NOT NULL AND NULLIF(BTRIM(e."functionalCurrency"), '') IS NOT NULL
                 THEN NULLIF(BTRIM(e."functionalCurrency"), '')
                 ELSE NULL
               END,
