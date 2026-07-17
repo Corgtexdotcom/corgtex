@@ -2,12 +2,15 @@ import { describe, expect, it, vi } from "vitest";
 
 import {
   assertBriefingFixturePayload,
+  assertBriefingFixtureCandidateCoverage,
   assertDashboardBriefingHtml,
   BriefingFixtureSmoke,
   briefingFixtureHealthReleaseBlocker,
   briefingFixtureTimestamps,
   cleanupFailureMessage,
+  filterBriefingFixtureCandidates,
   isSmokeOwnedBriefing,
+  isSmokeOwnedBriefingSnapshot,
   normalizeBaseUrl,
   parseSetCookie,
   smokeOwnedBriefingWhere,
@@ -74,9 +77,9 @@ describe("briefing fixture production smoke helpers", () => {
     const timestamps = briefingFixtureTimestamps(new Date("2026-04-30T12:00:00.000Z"));
 
     expect(timestamps.generatedAt.toISOString()).toBe("2026-04-30T12:00:00.000Z");
-    expect(timestamps.freshAt.toISOString()).toBe("2026-04-30T11:45:00.000Z");
+    expect(timestamps.freshAt.toISOString()).toBe("2026-04-30T11:59:59.000Z");
     expect(timestamps.staleAt.toISOString()).toBe("2026-03-16T12:00:00.000Z");
-    expect(timestamps.overdueAt.toISOString()).toBe("2026-04-30T11:00:00.000Z");
+    expect(timestamps.overdueAt.toISOString()).toBe("2025-04-30T12:00:00.000Z");
   });
 
   it("blocks before fixture writes when release metadata drifts", () => {
@@ -142,6 +145,26 @@ describe("briefing fixture production smoke helpers", () => {
       modelUsed: "production-validation-fixture",
       generatedAt: new Date("2026-04-30T12:00:00.000Z"),
     });
+    expect(isSmokeOwnedBriefingSnapshot(expected)).toBe(true);
+    expect(isSmokeOwnedBriefingSnapshot({ ...expected, modelUsed: "gpt-5" })).toBe(false);
+  });
+
+  it("isolates canonical briefing candidates to the fixture records", () => {
+    const data = fixture();
+    const candidates = [
+      { sourceType: "ACTION", sourceId: data.action.id },
+      { sourceType: "PROPOSAL", sourceId: data.proposal.id },
+      { sourceType: "BRAIN_ARTICLE", sourceId: data.article.id },
+      { sourceType: "ACTION", sourceId: "organic-action" },
+    ];
+
+    const filtered = filterBriefingFixtureCandidates(candidates, data);
+    expect(filtered).toEqual(candidates.slice(0, 3));
+    expect(assertBriefingFixtureCandidateCoverage(filtered, data)).toEqual({
+      candidateCount: 3,
+      candidateTypes: ["ACTION", "PROPOSAL", "BRAIN_ARTICLE"],
+    });
+    expect(() => assertBriefingFixtureCandidateCoverage(filtered.slice(0, 2), data)).toThrow("Canonical briefing collector did not include fixture BRAIN_ARTICLE");
   });
 
   it("creates fixture records directly with deterministic timestamps and no product write API calls", async () => {
@@ -182,9 +205,9 @@ describe("briefing fixture production smoke helpers", () => {
         workspaceId: "ws-1",
         authorUserId: "user-1",
         status: "OPEN",
-        priority: 3,
-        dueAt: new Date("2026-04-30T11:00:00.000Z"),
-        updatedAt: new Date("2026-04-30T11:45:00.000Z"),
+        priority: 1_000_000,
+        dueAt: new Date("2025-04-30T12:00:00.000Z"),
+        updatedAt: new Date("2026-04-30T11:59:59.000Z"),
       }),
     });
     expect(proposalCreate).toHaveBeenCalledWith({
@@ -193,7 +216,7 @@ describe("briefing fixture production smoke helpers", () => {
         authorUserId: "user-1",
         ownerMemberId: "member-1",
         status: "OPEN",
-        priority: 9,
+        priority: 1_000_000,
         updatedAt: new Date("2026-03-16T12:00:00.000Z"),
       }),
     });
@@ -203,7 +226,7 @@ describe("briefing fixture production smoke helpers", () => {
         slug: expect.stringMatching(/^briefing-fixture-/),
         authority: "REFERENCE",
         isPrivate: false,
-        updatedAt: new Date("2026-04-30T11:45:00.000Z"),
+        updatedAt: new Date("2026-04-30T11:59:59.000Z"),
       }),
     });
   });

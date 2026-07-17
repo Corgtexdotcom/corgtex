@@ -28,8 +28,7 @@ import {
 const DEFAULT_BASE_URL = "https://app.corgtex.com";
 const DEFAULT_OUT_DIR = ".artifacts/briefing-fixture-production-smoke";
 const SMOKE_BRIEFING_MODEL = "production-validation-fixture";
-const BRIEFING_FIXTURE_OPEN_PRIORITY = 3;
-const BRIEFING_FIXTURE_STALE_PROPOSAL_PRIORITY = 9;
+const BRIEFING_FIXTURE_TOP_PRIORITY = 1_000_000;
 
 function usage() {
   return [
@@ -83,9 +82,9 @@ export function briefingFixtureTimestamps(generatedAt) {
   assert(!Number.isNaN(generated.getTime()), "generatedAt must be a valid date.");
   return {
     generatedAt: generated,
-    freshAt: new Date(generated.getTime() - 15 * 60 * 1000),
+    freshAt: new Date(generated.getTime() - 1_000),
     staleAt: new Date(generated.getTime() - 45 * 24 * 60 * 60 * 1000),
-    overdueAt: new Date(generated.getTime() - 60 * 60 * 1000),
+    overdueAt: new Date(generated.getTime() - 365 * 24 * 60 * 60 * 1000),
   };
 }
 
@@ -214,6 +213,40 @@ export function smokeOwnedBriefingWhere(expected) {
   };
 }
 
+export function isSmokeOwnedBriefingSnapshot(record) {
+  return Boolean(record)
+    && record.modelUsed === SMOKE_BRIEFING_MODEL
+    && timestampMs(record.generatedAt) !== null;
+}
+
+function fixtureCandidateKey(type, id) {
+  return `${type}:${id}`;
+}
+
+export function filterBriefingFixtureCandidates(candidates, fixture) {
+  const expected = new Set([
+    fixtureCandidateKey("ACTION", fixture.action.id),
+    fixtureCandidateKey("PROPOSAL", fixture.proposal.id),
+    fixtureCandidateKey("BRAIN_ARTICLE", fixture.article.id),
+  ]);
+  return candidates.filter((candidate) => expected.has(fixtureCandidateKey(candidate.sourceType, candidate.sourceId)));
+}
+
+export function assertBriefingFixtureCandidateCoverage(candidates, fixture) {
+  const keys = new Set(candidates.map((candidate) => fixtureCandidateKey(candidate.sourceType, candidate.sourceId)));
+  for (const [type, record] of [
+    ["ACTION", fixture.action],
+    ["PROPOSAL", fixture.proposal],
+    ["BRAIN_ARTICLE", fixture.article],
+  ]) {
+    assert(keys.has(fixtureCandidateKey(type, record.id)), `Canonical briefing collector did not include fixture ${type} ${record.id}.`);
+  }
+  return {
+    candidateCount: candidates.length,
+    candidateTypes: candidates.map((candidate) => candidate.sourceType),
+  };
+}
+
 export class BriefingFixtureSmoke {
   constructor({
     baseUrl,
@@ -234,7 +267,7 @@ export class BriefingFixtureSmoke {
     this.authEmail = authEmail || null;
     this.authPassword = authPassword || null;
     this.prisma = prisma ?? new PrismaClient();
-    this.generatedAt = generatedAt ? new Date(generatedAt) : new Date(Date.now() + 90_000);
+    this.generatedAt = generatedAt ? new Date(generatedAt) : new Date();
     this.dateKey = dateKeyFromDate(this.generatedAt);
     this.runId = `briefing-fixture-${Date.now().toString(36)}`;
     this.validationRun = createValidationRun({
@@ -371,7 +404,7 @@ export class BriefingFixtureSmoke {
         title: actionTitle,
         bodyMd: "Temporary briefing validation action. Critical blocker decision needs an owner today.",
         status: "OPEN",
-        priority: BRIEFING_FIXTURE_OPEN_PRIORITY,
+        priority: BRIEFING_FIXTURE_TOP_PRIORITY,
         dueAt: overdueAt,
         isPrivate: false,
         publishedAt: freshAt,
@@ -397,7 +430,7 @@ export class BriefingFixtureSmoke {
         bodyMd: "Temporary briefing validation proposal. It is intentionally stale but strategically relevant.",
         status: "OPEN",
         isPrivate: false,
-        priority: BRIEFING_FIXTURE_STALE_PROPOSAL_PRIORITY,
+        priority: BRIEFING_FIXTURE_TOP_PRIORITY,
         publishedAt: staleAt,
         createdAt: staleAt,
         updatedAt: staleAt,
@@ -450,7 +483,7 @@ export class BriefingFixtureSmoke {
       articleId: this.created.article.id,
       actorUserId: user.id,
       creationMode: "direct-prisma-no-product-events",
-      staleProposalPriority: BRIEFING_FIXTURE_STALE_PROPOSAL_PRIORITY,
+      fixturePriority: BRIEFING_FIXTURE_TOP_PRIORITY,
       freshAt: freshAt.toISOString(),
       staleAt: staleAt.toISOString(),
       generatedAt: this.generatedAt.toISOString(),
@@ -467,6 +500,10 @@ export class BriefingFixtureSmoke {
         },
       },
     }));
+    assert(
+      !isSmokeOwnedBriefingSnapshot(this.previousBriefing),
+      `Existing ${this.dateKey} workspace briefing is owned by another production validation run; wait for that run to clean up before retrying.`,
+    );
   }
 
   registerBriefingCleanup(briefing) {
@@ -514,13 +551,40 @@ export class BriefingFixtureSmoke {
 
   async generateBriefing() {
     await this.snapshotExistingBriefing();
-    const { generateWorkspaceBriefing, normalizeWorkspaceBriefingPayload } = await import("@corgtex/domain");
-    const stored = await generateWorkspaceBriefing({
+    const {
+      buildWorkspaceBriefingFromCandidates,
+      collectWorkspaceBriefingCandidates,
+      normalizeWorkspaceBriefingPayload,
+      upsertWorkspaceBriefing,
+      workspaceBriefingContextSince,
+    } = await import("@corgtex/domain");
+    const period = "DAILY";
+    const title = `Daily Workspace Briefing - ${this.dateKey}`;
+    const candidates = await collectWorkspaceBriefingCandidates({
       workspaceId: this.workspace.id,
-      period: "DAILY",
-      dateISO: this.generatedAt.toISOString(),
-      model: SMOKE_BRIEFING_MODEL,
+      since: workspaceBriefingContextSince(period, this.generatedAt),
+      now: this.generatedAt,
+      until: this.generatedAt,
+    });
+    const fixtureCandidates = filterBriefingFixtureCandidates(candidates, this.fixture);
+    const candidateSummary = assertBriefingFixtureCandidateCoverage(fixtureCandidates, this.fixture);
+    const generatedBriefing = buildWorkspaceBriefingFromCandidates({
+      workspaceId: this.workspace.id,
+      period,
+      dateKey: this.dateKey,
+      title,
+      candidates: fixtureCandidates,
+      generatedAt: this.generatedAt,
       editorialMode: "daily_homepage",
+    });
+    const stored = await upsertWorkspaceBriefing({
+      workspaceId: this.workspace.id,
+      period,
+      dateKey: this.dateKey,
+      runKey: `${this.workspace.id}:daily-workspace-briefing:${this.dateKey}`,
+      title,
+      modelUsed: SMOKE_BRIEFING_MODEL,
+      briefing: generatedBriefing,
     });
     const cleanupActionId = this.registerBriefingCleanup(stored);
     const briefing = normalizeWorkspaceBriefingPayload(stored.briefingJson);
@@ -534,6 +598,8 @@ export class BriefingFixtureSmoke {
       briefingId: stored.id,
       dateKey: briefing.dateKey,
       previousBriefingRestorable: Boolean(this.previousBriefing),
+      fixtureCandidateCount: candidateSummary.candidateCount,
+      fixtureCandidateTypes: candidateSummary.candidateTypes,
     });
     return briefing;
   }

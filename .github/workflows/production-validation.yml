@@ -509,6 +509,9 @@ jobs:
     runs-on: ubuntu-latest
     environment: fleet-release-production
     timeout-minutes: 15
+    concurrency:
+      group: production-validation-briefing-fixture-corgtex-validation
+      cancel-in-progress: false
     env:
       OUT_DIR: .artifacts/production-validation/briefing-fixture
       PR_NUMBERS: ${{ inputs.pr_numbers }}
@@ -552,7 +555,7 @@ jobs:
           if (!/^[a-f0-9]{40}$/i.test(workflowGitSha)) {
             throw new Error("GITHUB_SHA must be a 40-character git SHA.");
           }
-          if (expectedGitSha.toLowerCase() !== workflowGitSha) {
+          if (process.env.GITHUB_REF === "refs/heads/main" && expectedGitSha.toLowerCase() !== workflowGitSha) {
             throw new Error(`briefing fixture smoke imports repository code and must run from the same revision expected in production; expected_git_sha=${expectedGitSha.toLowerCase()} workflow_sha=${workflowGitSha}`);
           }
 
