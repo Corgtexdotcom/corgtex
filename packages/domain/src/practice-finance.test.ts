@@ -354,6 +354,54 @@ describe("practice-finance pure derivations", () => {
     expect(utilization.recentHours).toBe(10);
   });
 
+  it("excludes lower-boundary rows from recent native windows", () => {
+    const boundaryTime = nativeTimeEntry({
+      id: "boundary-time",
+      workedOn: new Date("2026-01-01T00:00:00.000Z"),
+      weekEndingOn: new Date("2026-01-05T00:00:00.000Z"),
+      hours: decimal(4),
+      billAmountCents: 100_00,
+      costAmountCents: 40_00,
+    });
+    const insideTime = nativeTimeEntry({
+      id: "inside-time",
+      workedOn: new Date("2026-01-02T00:00:00.000Z"),
+      weekEndingOn: new Date("2026-01-05T00:00:00.000Z"),
+      hours: decimal(2),
+      billAmountCents: 200_00,
+      costAmountCents: 80_00,
+    });
+    const boundaryExpense = nativeExpense({
+      id: "boundary-expense",
+      spentOn: new Date("2026-01-01T00:00:00.000Z"),
+      amountCents: 300_00,
+    });
+    const insideExpense = nativeExpense({
+      id: "inside-expense",
+      spentOn: new Date("2026-01-02T00:00:00.000Z"),
+      amountCents: 400_00,
+    });
+
+    const health = calculateNativePracticeProjectHealth({
+      project: nativeProject(),
+      now: new Date("2026-01-29T00:00:00.000Z"),
+      recentWindowWeeks: 4,
+      timeEntries: [boundaryTime, insideTime],
+      expenses: [boundaryExpense, insideExpense],
+    });
+    const utilization = calculateNativePracticeConsultantUtilization({
+      consultant: nativeConsultant(),
+      now: new Date("2026-01-29T00:00:00.000Z"),
+      recentWindowWeeks: 4,
+      timeEntries: [boundaryTime, insideTime],
+      expenses: [],
+    });
+
+    expect(health.recentBudgetBurnPerWeekCents).toBe(150_00);
+    expect(health.recentCostBurnPerWeekCents).toBe(120_00);
+    expect(utilization.recentHours).toBe(2);
+  });
+
   it("summarizes native project health and collects margin attention", () => {
     const risky = calculateNativePracticeProjectHealth({
       project: nativeProject({ id: "risk", name: "Risky" }),
@@ -758,6 +806,40 @@ describe("practice-finance pure derivations", () => {
     }
   });
 
+  it("rejects unknown currencies in native consultant financial totals", () => {
+    try {
+      calculateNativePracticeConsultantUtilization({
+        consultant: nativeConsultant(),
+        timeEntries: [
+          nativeTimeEntry({
+            currency: " ",
+            billCurrency: " ",
+            costCurrency: " ",
+            billAmountCents: 100_00,
+            costAmountCents: 80_00,
+          }),
+        ],
+        expenses: [],
+      });
+      throw new Error("Expected unknown consultant time currencies to be rejected.");
+    } catch (error) {
+      expect(error).toMatchObject({ code: "MIXED_CURRENCY" });
+    }
+
+    try {
+      calculateNativePracticeConsultantUtilization({
+        consultant: nativeConsultant(),
+        timeEntries: [],
+        expenses: [
+          nativeExpense({ currency: " ", amountCents: 12_00 }),
+        ],
+      });
+      throw new Error("Expected unknown consultant expense currencies to be rejected.");
+    } catch (error) {
+      expect(error).toMatchObject({ code: "MIXED_CURRENCY" });
+    }
+  });
+
   it("rejects invalid native consultant capacity inputs", () => {
     for (const capacityHoursPerWeek of [-40, Number.POSITIVE_INFINITY]) {
       try {
@@ -819,6 +901,24 @@ describe("practice-finance pure derivations", () => {
       costCents: 152_000,
       expenseCents: 12_345,
     });
+  });
+
+  it("calculates native consultant utilization from unrounded weekly hours", () => {
+    const utilization = calculateNativePracticeConsultantUtilization({
+      consultant: nativeConsultant(),
+      now: new Date("2026-06-30T00:00:00.000Z"),
+      recentWindowWeeks: 4,
+      capacityHoursPerWeek: 40,
+      timeEntries: [nativeTimeEntry({
+        hours: decimal(0.1),
+        billAmountCents: 0,
+        costAmountCents: 0,
+      })],
+      expenses: [],
+    });
+
+    expect(utilization.averageWeeklyHours).toBe(0);
+    expect(utilization.utilizationBps).toBe(6);
   });
 
   it("previews Slicing Pie contribution data from native time and expense rows", () => {
@@ -945,6 +1045,15 @@ describe("practice-finance pure derivations", () => {
     try {
       previewSlicingPieContributionFromExpense(nativeExpense({ paymentBatchId: "batch-1" }));
       throw new Error("Expected batched expenses without paid allocations to be rejected.");
+    } catch (error) {
+      expect(error).toMatchObject({ code: "INVALID_INPUT" });
+    }
+  });
+
+  it("requires paid allocation data for batched time contribution previews", () => {
+    try {
+      previewSlicingPieContributionFromTimeEntry(nativeTimeEntry({ paymentBatchId: "batch-1", paidAmountCents: null }));
+      throw new Error("Expected batched time without paid allocation to be rejected.");
     } catch (error) {
       expect(error).toMatchObject({ code: "INVALID_INPUT" });
     }

@@ -386,7 +386,7 @@ function weekWindow(now: Date, weeks: number): { startsOn: Date; endsOn: Date } 
 }
 
 function isWithinDateWindow(value: Date, window: { startsOn: Date; endsOn: Date }): boolean {
-  return value >= window.startsOn && value <= window.endsOn;
+  return value > window.startsOn && value <= window.endsOn;
 }
 
 function normalizeRecentWindowWeeks(value: number | null | undefined): number {
@@ -433,6 +433,16 @@ function postedExpenses(expenses: NativePracticeExpense[]) {
   return expenses.filter((expense) => expense.status === "POSTED");
 }
 
+function addRequiredNativePracticeLedgerCurrency(
+  currencies: Set<string>,
+  currency: string | null,
+  amountCents: number,
+  message: string,
+) {
+  invariant(amountCents === 0 || currency != null, 400, "MIXED_CURRENCY", message);
+  if (currency) currencies.add(currency);
+}
+
 function assertSingleNativePracticeLedgerCurrency(
   timeEntries: NativePracticeTimeEntry[],
   expenses: NativePracticeExpense[],
@@ -442,12 +452,12 @@ function assertSingleNativePracticeLedgerCurrency(
   for (const entry of timeEntries) {
     const billCurrency = practiceTimeBillAmountCurrency(entry);
     const costCurrency = practiceTimeCostAmountCurrency(entry);
-    if (billCurrency) currencies.add(billCurrency);
-    if (costCurrency) currencies.add(costCurrency);
+    addRequiredNativePracticeLedgerCurrency(currencies, billCurrency, practiceTimeBillAmountCents(entry), message);
+    addRequiredNativePracticeLedgerCurrency(currencies, costCurrency, practiceTimeCostAmountCents(entry), message);
   }
   for (const expense of expenses) {
     const expenseCurrency = practiceExpenseAmountCurrency(expense);
-    if (expenseCurrency) currencies.add(expenseCurrency);
+    addRequiredNativePracticeLedgerCurrency(currencies, expenseCurrency, practiceExpenseFunctionalAmountCents(expense), message);
   }
   invariant(currencies.size <= 1, 400, "MIXED_CURRENCY", message);
   return currencies.values().next().value ?? null;
@@ -707,8 +717,9 @@ export function calculateNativePracticeConsultantUtilization(params: {
     "INVALID_INPUT",
     "capacityHoursPerWeek must be finite and non-negative.",
   );
-  const averageWeeklyHours = roundHours(recentHours / recentWindowWeeks);
-  const utilizationBps = capacityHoursPerWeek > 0 ? Math.round((averageWeeklyHours / capacityHoursPerWeek) * 10_000) : 0;
+  const rawAverageWeeklyHours = recentHours / recentWindowWeeks;
+  const averageWeeklyHours = roundHours(rawAverageWeeklyHours);
+  const utilizationBps = capacityHoursPerWeek > 0 ? Math.round((rawAverageWeeklyHours / capacityHoursPerWeek) * 10_000) : 0;
   const projectIds = [...new Set([
     ...timeEntries.map((entry) => entry.projectId),
     ...expenses.map((expense) => expense.projectId),
@@ -776,6 +787,12 @@ function calculateContributionPreview(params: {
 
 export function previewSlicingPieContributionFromTimeEntry(entry: NativePracticeTimeEntry): NativePracticeContributionPreview {
   invariant(entry.status === "POSTED", 400, "INVALID_STATE", "Only posted time entries can produce contribution previews.");
+  invariant(
+    entry.paymentBatchId == null || entry.paidAmountCents != null,
+    400,
+    "INVALID_INPUT",
+    "Batched time entry contribution previews require the paid amount allocation.",
+  );
   const marketValueCents = practiceTimeCostAmountCents(entry);
   return calculateContributionPreview({
     sourceType: "TIME_ENTRY",
@@ -1338,13 +1355,13 @@ export async function listNativePracticeProjectHealth(
         COALESCE(SUM(COALESCE(t."billAmountCents"::numeric, ROUND(t."hours" * t."billRateCents"))), 0)::bigint AS "timeRevenueCents",
         COALESCE(SUM(COALESCE(t."costAmountCents"::numeric, ROUND(t."hours" * t."costRateCents"))), 0)::bigint AS "timeCostCents",
         COALESCE(SUM(
-          CASE WHEN t."workedOn" >= ${recent.startsOn} AND t."workedOn" <= ${recent.endsOn}
+          CASE WHEN t."workedOn" > ${recent.startsOn} AND t."workedOn" <= ${recent.endsOn}
             THEN COALESCE(t."billAmountCents"::numeric, ROUND(t."hours" * t."billRateCents"))
             ELSE 0
           END
         ), 0)::bigint AS "recentTimeRevenueCents",
         COALESCE(SUM(
-          CASE WHEN t."workedOn" >= ${recent.startsOn} AND t."workedOn" <= ${recent.endsOn}
+          CASE WHEN t."workedOn" > ${recent.startsOn} AND t."workedOn" <= ${recent.endsOn}
             THEN COALESCE(t."costAmountCents"::numeric, ROUND(t."hours" * t."costRateCents"))
             ELSE 0
           END
@@ -1401,7 +1418,7 @@ export async function listNativePracticeProjectHealth(
           END
         )::numeric), 0)::bigint AS "directExpenseCents",
         COALESCE(SUM(
-          CASE WHEN e."billable" AND e."spentOn" >= ${recent.startsOn} AND e."spentOn" <= ${recent.endsOn}
+          CASE WHEN e."billable" AND e."spentOn" > ${recent.startsOn} AND e."spentOn" <= ${recent.endsOn}
             THEN (
               CASE WHEN e."amountFunctionalCents" IS NOT NULL AND NULLIF(BTRIM(e."functionalCurrency"), '') IS NOT NULL
                 THEN e."amountFunctionalCents"
@@ -1412,7 +1429,7 @@ export async function listNativePracticeProjectHealth(
           END
         ), 0)::bigint AS "recentBillableExpenseCents",
         COALESCE(SUM(
-          CASE WHEN e."spentOn" >= ${recent.startsOn} AND e."spentOn" <= ${recent.endsOn}
+          CASE WHEN e."spentOn" > ${recent.startsOn} AND e."spentOn" <= ${recent.endsOn}
             THEN (
               CASE WHEN e."amountFunctionalCents" IS NOT NULL AND NULLIF(BTRIM(e."functionalCurrency"), '') IS NOT NULL
                 THEN e."amountFunctionalCents"
