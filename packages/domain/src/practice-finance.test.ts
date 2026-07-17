@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const { prismaMock, requireWorkspaceMembershipMock } = vi.hoisted(() => ({
   prismaMock: {
+    $queryRaw: vi.fn(),
     crmAccount: {
       findUnique: vi.fn(),
     },
@@ -350,6 +351,26 @@ describe("practice-finance pure derivations", () => {
     expect(collectNativePracticeAttention([risky, closed]).map((item) => item.issue)).toEqual(["margin"]);
   });
 
+  it("rejects mixed active currencies before aggregating native finance summaries", () => {
+    const usd = calculateNativePracticeProjectHealth({
+      project: nativeProject({ id: "usd", currency: "USD" }),
+      timeEntries: [],
+      expenses: [],
+    });
+    const eur = calculateNativePracticeProjectHealth({
+      project: nativeProject({ id: "eur", currency: "EUR" }),
+      timeEntries: [],
+      expenses: [],
+    });
+
+    try {
+      summarizeNativePracticeFinance([usd, eur]);
+      throw new Error("Expected summarizeNativePracticeFinance to reject mixed currencies.");
+    } catch (error) {
+      expect(error).toMatchObject({ code: "MIXED_CURRENCY" });
+    }
+  });
+
   it("calculates native consultant utilization from posted time and expenses", () => {
     const utilization = calculateNativePracticeConsultantUtilization({
       consultant: nativeConsultant(),
@@ -393,6 +414,7 @@ describe("practice-finance pure derivations", () => {
 
     expect(previewSlicingPieContributionFromExpense(nativeExpense({
       amountFunctionalCents: 12_000,
+      paymentBatchId: "mixed-batch",
     }))).toMatchObject({
       sourceType: "EXPENSE",
       sourceId: "expense-1",
@@ -401,7 +423,23 @@ describe("practice-finance pure derivations", () => {
       unpaidAmountCents: 12_000,
       multiplier: SLICING_PIE_EXPENSE_MULTIPLIER,
       slices: 48_000,
+      paymentBatchId: "mixed-batch",
     });
+  });
+
+  it("rejects reversed native rows when previewing Slicing Pie contributions", () => {
+    try {
+      previewSlicingPieContributionFromTimeEntry(nativeTimeEntry({ status: "REVERSED" }));
+      throw new Error("Expected reversed time entry to be rejected.");
+    } catch (error) {
+      expect(error).toMatchObject({ code: "INVALID_STATE" });
+    }
+    try {
+      previewSlicingPieContributionFromExpense(nativeExpense({ status: "REVERSED" }));
+      throw new Error("Expected reversed expense to be rejected.");
+    } catch (error) {
+      expect(error).toMatchObject({ code: "INVALID_STATE" });
+    }
   });
 
   it("calculates contribution values and fixed Slicing Pie multipliers", () => {
@@ -507,6 +545,7 @@ describe("practice-finance I/O", () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    prismaMock.$queryRaw.mockResolvedValue([]);
     requireWorkspaceMembershipMock.mockResolvedValue({ id: "member-1", role: "ADMIN" });
     prismaMock.workspaceFeatureFlag.findUnique.mockResolvedValue({ enabled: true, config: null });
     prismaMock.member.findFirst.mockResolvedValue({ id: "member-1" });
@@ -673,12 +712,21 @@ describe("practice-finance I/O", () => {
     prismaMock.practiceProject.findMany.mockResolvedValueOnce([
       nativeProject(),
     ]);
-    prismaMock.practiceTimeEntry.findMany.mockResolvedValueOnce([
-      nativeTimeEntry(),
-    ]);
-    prismaMock.practiceExpense.findMany.mockResolvedValueOnce([
-      nativeExpense(),
-    ]);
+    prismaMock.$queryRaw
+      .mockResolvedValueOnce([{
+        projectId: "project-1",
+        timeRevenueCents: 150_000n,
+        timeCostCents: 80_000n,
+        recentTimeRevenueCents: 150_000n,
+        recentTimeCostCents: 80_000n,
+      }])
+      .mockResolvedValueOnce([{
+        projectId: "project-1",
+        billableExpenseCents: 40_000n,
+        directExpenseCents: 40_000n,
+        recentBillableExpenseCents: 40_000n,
+        recentDirectExpenseCents: 40_000n,
+      }]);
 
     const health = await listNativePracticeProjectHealth(actor, "workspace-1", {
       take: 5,
@@ -697,22 +745,9 @@ describe("practice-finance I/O", () => {
       cursor: { id: "project-0" },
       skip: 1,
     }));
-    expect(prismaMock.practiceTimeEntry.findMany).toHaveBeenCalledWith(expect.objectContaining({
-      where: {
-        workspaceId: "workspace-1",
-        projectId: { in: ["project-1"] },
-        status: "POSTED",
-      },
-      select: expect.any(Object),
-    }));
-    expect(prismaMock.practiceExpense.findMany).toHaveBeenCalledWith(expect.objectContaining({
-      where: {
-        workspaceId: "workspace-1",
-        projectId: { in: ["project-1"] },
-        status: "POSTED",
-      },
-      select: expect.any(Object),
-    }));
+    expect(prismaMock.$queryRaw).toHaveBeenCalledTimes(2);
+    expect(prismaMock.practiceTimeEntry.findMany).not.toHaveBeenCalled();
+    expect(prismaMock.practiceExpense.findMany).not.toHaveBeenCalled();
   });
 
   it("builds the native finance dashboard from project health", async () => {
@@ -727,9 +762,7 @@ describe("practice-finance I/O", () => {
     expect(dashboard.summary.activeProjects).toBe(1);
     expect(dashboard.attention).toHaveLength(1);
     expect(dashboard.attention[0]).toMatchObject({ issue: "setup" });
-    expect(prismaMock.practiceTimeEntry.findMany).toHaveBeenCalledWith(expect.objectContaining({
-      where: expect.objectContaining({ projectId: { in: ["project-1"] } }),
-    }));
+    expect(prismaMock.$queryRaw).toHaveBeenCalledTimes(2);
   });
 
   it("lists Practice Ledger contribution entries with contributor and project evidence", async () => {
