@@ -242,6 +242,7 @@ type NativePracticeTimeRollupRow = {
   timeCostCents: DbInt;
   recentTimeRevenueCents: DbInt;
   recentTimeCostCents: DbInt;
+  invalidHoursRows: DbInt;
   invalidCurrencyRows: DbInt;
 };
 
@@ -1361,6 +1362,12 @@ function mergeNativePracticeLedgerRollups(
 
   for (const row of timeRows) {
     invariant(
+      dbIntToNumber(row.invalidHoursRows) === 0,
+      400,
+      "INVALID_INPUT",
+      "Native practice finance requires time entry hours to be finite and non-negative.",
+    );
+    invariant(
       dbIntToNumber(row.invalidCurrencyRows) === 0,
       400,
       "MIXED_CURRENCY",
@@ -1431,6 +1438,12 @@ export async function listNativePracticeProjectHealth(
             ELSE 0
           END
         ), 0)::bigint AS "recentTimeCostCents",
+        COALESCE(SUM(
+          CASE WHEN t."hours" < 0
+            THEN 1
+            ELSE 0
+          END
+        ), 0)::bigint AS "invalidHoursRows",
         COALESCE(SUM(
           CASE WHEN
             NULLIF(BTRIM(p."currency"), '') IS NULL

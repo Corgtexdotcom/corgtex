@@ -1511,6 +1511,7 @@ describe("practice-finance I/O", () => {
         timeCostCents: 80_000n,
         recentTimeRevenueCents: 150_000n,
         recentTimeCostCents: 80_000n,
+        invalidHoursRows: 0n,
         invalidCurrencyRows: 0n,
       }])
       .mockResolvedValueOnce([{
@@ -1545,6 +1546,9 @@ describe("practice-finance I/O", () => {
     expect(prismaSqlText(prismaMock.$queryRaw.mock.calls[0]?.[0])).toContain(
       "NULLIF(BTRIM(p.\"currency\"), '') IS NULL",
     );
+    expect(prismaSqlText(prismaMock.$queryRaw.mock.calls[0]?.[0])).toContain(
+      "t.\"hours\" < 0",
+    );
     expect(prismaSqlText(prismaMock.$queryRaw.mock.calls[1]?.[0])).toContain(
       "NULLIF(BTRIM(p.\"currency\"), '') IS NULL",
     );
@@ -1561,6 +1565,7 @@ describe("practice-finance I/O", () => {
         timeCostCents: 80_000n,
         recentTimeRevenueCents: 150_000n,
         recentTimeCostCents: 80_000n,
+        invalidHoursRows: 0n,
         invalidCurrencyRows: 1n,
       }])
       .mockResolvedValueOnce([]);
@@ -1570,6 +1575,30 @@ describe("practice-finance I/O", () => {
       throw new Error("Expected native project health to reject mixed ledger currencies.");
     } catch (error) {
       expect(error).toMatchObject({ code: "MIXED_CURRENCY" });
+    }
+  });
+
+  it("rejects native project health rows with negative SQL time entry hours", async () => {
+    prismaMock.practiceProject.findMany.mockResolvedValueOnce([
+      nativeProject(),
+    ]);
+    prismaMock.$queryRaw
+      .mockResolvedValueOnce([{
+        projectId: "project-1",
+        timeRevenueCents: -150_000n,
+        timeCostCents: -80_000n,
+        recentTimeRevenueCents: -150_000n,
+        recentTimeCostCents: -80_000n,
+        invalidHoursRows: 1n,
+        invalidCurrencyRows: 0n,
+      }])
+      .mockResolvedValueOnce([]);
+
+    try {
+      await listNativePracticeProjectHealth(actor, "workspace-1");
+      throw new Error("Expected native project health to reject negative SQL time entry hours.");
+    } catch (error) {
+      expect(error).toMatchObject({ code: "INVALID_INPUT" });
     }
   });
 
