@@ -266,8 +266,22 @@ type ProjectFinance = Pick<
   | "currentMarginBps"
 >;
 
+function centsToCurrency(cents: number, currency = PRACTICE_LEDGER_CURRENCY) {
+  const amount = Math.round(cents / 100);
+  const normalizedCurrency = normalizeCurrencyCode(currency) ?? PRACTICE_LEDGER_CURRENCY;
+  try {
+    return new Intl.NumberFormat("en-US", {
+      currency: normalizedCurrency,
+      maximumFractionDigits: 0,
+      style: "currency",
+    }).format(amount);
+  } catch {
+    return `${normalizedCurrency} ${amount.toLocaleString("en-US")}`;
+  }
+}
+
 function centsToDollars(cents: number) {
-  return `$${Math.round(cents / 100).toLocaleString("en-US")}`;
+  return centsToCurrency(cents, PRACTICE_LEDGER_CURRENCY);
 }
 
 function bpsToPct(bps: number) {
@@ -522,9 +536,11 @@ export function calculateNativePracticeProjectHealthFromRollup(params: {
     && params.project.expenseBudgetCents > 0
     && params.project.targetMarginBps != null;
   const hasRecentBurn = recentBudgetBurnPerWeekCents > 0 || recentCostBurnPerWeekCents > 0;
-  const weeksToBudgetExhaustion = hasBudgetSetup && recentBudgetBurnPerWeekCents > 0
-    ? (remainingBudgetCents <= 0 ? 0 : roundWeeks(remainingBudgetCents / recentBudgetBurnPerWeekCents))
-    : null;
+  const weeksToBudgetExhaustion = hasBudgetSetup && remainingBudgetCents <= 0
+    ? 0
+    : hasBudgetSetup && recentBudgetBurnPerWeekCents > 0
+      ? roundWeeks(remainingBudgetCents / recentBudgetBurnPerWeekCents)
+      : null;
   const weeksToTargetMarginRisk = calculateWeeksToMarginFloor({
     grossMarginBps,
     grossProfitCents,
@@ -615,7 +631,7 @@ export function nativePracticeProjectAttentionItems(health: NativePracticeProjec
       projectName: health.projectName,
       issue: "budget",
       weeks: health.weeksToBudgetExhaustion,
-      detail: `${centsToDollars(health.remainingBudgetCents)} remaining at ${centsToDollars(health.recentBudgetBurnPerWeekCents)} / week.`,
+      detail: `${centsToCurrency(health.remainingBudgetCents, health.currency)} remaining at ${centsToCurrency(health.recentBudgetBurnPerWeekCents, health.currency)} / week.`,
     });
   }
 
@@ -748,7 +764,7 @@ export function previewSlicingPieContributionFromExpense(
     projectId: expense.projectId,
     consultantId: expense.consultantId,
     occurredAt: expense.spentOn,
-    currency: expense.functionalCurrency ?? expense.currency,
+    currency: practiceExpenseAmountCurrency(expense) ?? expense.currency,
     marketValueCents,
     paidAmountCents: options.paidAmountCents ?? 0,
     multiplier: SLICING_PIE_EXPENSE_MULTIPLIER,

@@ -409,6 +409,54 @@ describe("practice-finance pure derivations", () => {
     expect(summary.remainingCents).toBe(0);
   });
 
+  it("flags exhausted native project budgets even without recent burn", () => {
+    const overrun = calculateNativePracticeProjectHealth({
+      project: nativeProject({
+        poValueCents: 100_00,
+        serviceBudgetCents: 80_00,
+        expenseBudgetCents: 20_00,
+      }),
+      now: new Date("2026-06-30T00:00:00.000Z"),
+      timeEntries: [nativeTimeEntry({
+        workedOn: new Date("2026-01-01T00:00:00.000Z"),
+        weekEndingOn: new Date("2026-01-05T00:00:00.000Z"),
+        billAmountCents: 200_00,
+        costAmountCents: 0,
+      })],
+      expenses: [],
+    });
+
+    expect(overrun.recentBudgetBurnPerWeekCents).toBe(0);
+    expect(overrun.weeksToBudgetExhaustion).toBe(0);
+    expect(collectNativePracticeAttention([overrun]).map((item) => item.issue)).toEqual(["budget"]);
+  });
+
+  it("formats native budget attention in the project currency", () => {
+    const health = calculateNativePracticeProjectHealth({
+      project: nativeProject({
+        currency: "EUR",
+        poValueCents: 100_00,
+        serviceBudgetCents: 80_00,
+        expenseBudgetCents: 20_00,
+      }),
+      now: new Date("2026-06-30T00:00:00.000Z"),
+      recentWindowWeeks: 4,
+      timeEntries: [nativeTimeEntry({
+        currency: "EUR",
+        billCurrency: "EUR",
+        costCurrency: "EUR",
+        billAmountCents: 90_00,
+        costAmountCents: 40_00,
+      })],
+      expenses: [],
+    });
+
+    expect(nativePracticeProjectAttentionItems(health)[0]).toMatchObject({
+      issue: "budget",
+      detail: "€10 remaining at €23 / week.",
+    });
+  });
+
   it("does not count setup-incomplete projects as native margin risks", () => {
     const incomplete = calculateNativePracticeProjectHealth({
       project: nativeProject({ expenseBudgetCents: 0 }),
@@ -588,6 +636,16 @@ describe("practice-finance pure derivations", () => {
       multiplier: SLICING_PIE_EXPENSE_MULTIPLIER,
       slices: 48_000,
       paymentBatchId: "mixed-batch",
+    });
+
+    expect(previewSlicingPieContributionFromExpense(nativeExpense({
+      amountCents: 12_000,
+      amountFunctionalCents: null,
+      currency: "EUR",
+      functionalCurrency: "USD",
+    }))).toMatchObject({
+      currency: "EUR",
+      marketValueCents: 12_000,
     });
   });
 
