@@ -12,6 +12,9 @@ const { prismaMock } = vi.hoisted(() => ({
       update: vi.fn(),
       count: vi.fn(),
     },
+    adviceProcess: {
+      findMany: vi.fn(),
+    },
     member: {
       findFirst: vi.fn(),
     },
@@ -83,6 +86,7 @@ describe("action domain lifecycle", () => {
     prismaMock.workItemVersion.findUnique.mockResolvedValue(null);
     prismaMock.workspacePermalink.upsert.mockResolvedValue({});
     prismaMock.member.findFirst.mockResolvedValue({ id: "member-2" });
+    prismaMock.adviceProcess.findMany.mockResolvedValue([]);
   });
 
   it("creates form-submitted actions as private drafts by default", async () => {
@@ -184,11 +188,28 @@ describe("action domain lifecycle", () => {
   });
 
   it("combines member filters with the existing privacy filter", async () => {
-    prismaMock.action.findMany.mockResolvedValueOnce([]);
+    prismaMock.action.findMany.mockResolvedValueOnce([{ id: "action-1" }]);
     prismaMock.action.count.mockResolvedValueOnce(0);
+    prismaMock.adviceProcess.findMany.mockResolvedValueOnce([
+      {
+        subjectId: "action-1",
+        requests: [
+          { status: "ACTIVE" },
+          { status: "COMPLETED" },
+        ],
+      },
+    ]);
 
     const { listActions } = await import("./actions");
-    await listActions(actor, "workspace-1", { memberId: "member-1", circleId: "circle-1", sort: "alpha" });
+    await expect(listActions(actor, "workspace-1", { memberId: "member-1", circleId: "circle-1", sort: "alpha" })).resolves.toMatchObject({
+      items: [
+        {
+          id: "action-1",
+          inputRequestCount: 2,
+          activeInputRequestCount: 1,
+        },
+      ],
+    });
 
     expect(prismaMock.action.findMany).toHaveBeenCalledWith(expect.objectContaining({
       where: expect.objectContaining({
@@ -225,6 +246,19 @@ describe("action domain lifecycle", () => {
         { id: "desc" },
       ],
     }));
+    expect(prismaMock.adviceProcess.findMany).toHaveBeenCalledWith({
+      where: {
+        workspaceId: "workspace-1",
+        subjectType: "ACTION",
+        subjectId: { in: ["action-1"] },
+      },
+      select: {
+        subjectId: true,
+        requests: {
+          select: { status: true },
+        },
+      },
+    });
   });
 
   it("creates unchecked-private actions as open public records", async () => {

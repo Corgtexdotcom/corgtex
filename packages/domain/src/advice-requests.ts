@@ -14,6 +14,13 @@ import { AppError, invariant } from "./errors";
 
 export type AdviceSubjectType = "PROPOSAL" | "TENSION" | "ACTION";
 
+export type AdviceRequestCountSummary = {
+  adviceRequestCount: number;
+  activeAdviceRequestCount: number;
+  inputRequestCount: number;
+  activeInputRequestCount: number;
+};
+
 type AdviceSubject = {
   type: AdviceSubjectType;
   id: string;
@@ -43,6 +50,54 @@ type AdviceRequestPayload = {
 const VALID_SUBJECT_TYPES = new Set<AdviceSubjectType>(["PROPOSAL", "TENSION", "ACTION"]);
 const VALID_CHANNELS = new Set<AdviceRequestPreferredChannel>(["IN_APP", "SLACK", "EMAIL", "COPY"]);
 const ADVICE_REMINDER_JOB_TYPE = "advice.request.reminder";
+
+function emptyAdviceRequestCountSummary(): AdviceRequestCountSummary {
+  return {
+    adviceRequestCount: 0,
+    activeAdviceRequestCount: 0,
+    inputRequestCount: 0,
+    activeInputRequestCount: 0,
+  };
+}
+
+export async function loadAdviceRequestCountSummaries(
+  workspaceId: string,
+  subjectType: AdviceSubjectType,
+  subjectIds: string[],
+) {
+  const uniqueSubjectIds = uniqueStrings(subjectIds);
+  const summaries = new Map<string, AdviceRequestCountSummary>(
+    uniqueSubjectIds.map((subjectId) => [subjectId, emptyAdviceRequestCountSummary()]),
+  );
+  if (uniqueSubjectIds.length === 0) return summaries;
+
+  const processes = await prisma.adviceProcess.findMany({
+    where: {
+      workspaceId,
+      subjectType,
+      subjectId: { in: uniqueSubjectIds },
+    },
+    select: {
+      subjectId: true,
+      requests: {
+        select: { status: true },
+      },
+    },
+  });
+
+  for (const process of processes) {
+    const summary = summaries.get(process.subjectId) ?? emptyAdviceRequestCountSummary();
+    const total = process.requests.length;
+    const active = process.requests.filter((request) => request.status === "ACTIVE").length;
+    summary.adviceRequestCount += total;
+    summary.activeAdviceRequestCount += active;
+    summary.inputRequestCount += total;
+    summary.activeInputRequestCount += active;
+    summaries.set(process.subjectId, summary);
+  }
+
+  return summaries;
+}
 
 function normalizeSubjectType(subjectType: string): AdviceSubjectType {
   const normalized = subjectType.trim().toUpperCase();

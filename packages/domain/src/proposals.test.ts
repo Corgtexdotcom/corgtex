@@ -689,6 +689,15 @@ describe("listProposals", () => {
         { createdAt: "desc" },
         { id: "desc" },
       ],
+      include: expect.objectContaining({
+        adviceProcess: {
+          include: {
+            requests: {
+              select: { status: true },
+            },
+          },
+        },
+      }),
     }));
   });
 });
@@ -983,6 +992,15 @@ describe("getProposal", () => {
           { isPrivate: true, status: "DRAFT", authorUserId: "u-1" },
         ],
       },
+      include: expect.objectContaining({
+        adviceProcess: {
+          include: {
+            requests: {
+              select: { status: true },
+            },
+          },
+        },
+      }),
     }));
   });
 

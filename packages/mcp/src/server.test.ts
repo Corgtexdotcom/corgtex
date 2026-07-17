@@ -63,6 +63,7 @@ const createConversationMessageMock = vi.fn();
 const listWorkItemVersionsMock = vi.fn();
 const getWorkItemVersionMock = vi.fn();
 const requireWorkspaceMembershipMock = vi.fn();
+const loadAdviceRequestCountSummariesMock = vi.fn();
 const listDeliberationEntriesMock = vi.fn();
 const postDeliberationEntryMock = vi.fn();
 const resolveDeliberationEntryMock = vi.fn();
@@ -71,6 +72,12 @@ const getWorkspacePermanentPathForEntityMock = vi.fn();
 vi.mock("@corgtex/domain", async () => {
   const { MCP_TOOL_CAPABILITIES } = await import("../../domain/src/mcp-tool-capabilities");
   const { coerceWorkItemPriorityInput, formatWorkItemPriority } = await import("../../domain/src/work-item-priority");
+  const {
+    normalizeActionWorkItem,
+    normalizeProposalWorkItem,
+    normalizeTensionWorkItem,
+    workItemMemberDisplayName,
+  } = await import("../../domain/src/work-item-normalization");
 
   return {
   AppError: class AppError extends Error {
@@ -87,9 +94,20 @@ vi.mock("@corgtex/domain", async () => {
     { flag: "GOALS", label: "Goals", description: "Goals", defaultEnabled: true },
     { flag: "FINANCE", label: "Finance", description: "Finance", defaultEnabled: false },
   ],
+  classifyMemberIdentity: vi.fn((member: { kind?: string | null; user?: { email?: string | null; displayName?: string | null } | null }) => {
+    if (member.kind === "SYSTEM") return "SYSTEM";
+    const email = member.user?.email?.toLowerCase() ?? "";
+    const displayName = member.user?.displayName?.toLowerCase() ?? "";
+    return email.startsWith("system+") || email.startsWith("support+") || displayName === "corgtex support" ? "SYSTEM" : "HUMAN";
+  }),
   coerceWorkItemPriorityInput,
   formatWorkItemPriority,
+  normalizeActionWorkItem,
+  normalizeProposalWorkItem,
+  normalizeTensionWorkItem,
+  workItemMemberDisplayName,
   requireWorkspaceMembership: requireWorkspaceMembershipMock,
+  loadAdviceRequestCountSummaries: loadAdviceRequestCountSummariesMock,
   listProposals: listProposalsMock,
   createProposal: createProposalMock,
   updateProposal: updateProposalMock,
@@ -276,6 +294,14 @@ describe("createCorgtexMcpServer", () => {
     listGoalsMock.mockReset().mockResolvedValue([]);
     listProposalsMock.mockReset().mockResolvedValue({ items: [], total: 0 });
     listTensionsMock.mockReset().mockResolvedValue({ items: [], total: 0 });
+    loadAdviceRequestCountSummariesMock.mockReset().mockImplementation(async (_workspaceId: string, _subjectType: string, subjectIds: string[]) => new Map(
+      subjectIds.map((subjectId) => [subjectId, {
+        adviceRequestCount: 0,
+        activeAdviceRequestCount: 0,
+        inputRequestCount: 0,
+        activeInputRequestCount: 0,
+      }]),
+    ));
     getGoalMock.mockReset().mockResolvedValue({ id: "goal-1", cadence: "QUARTERLY" });
     updateActionMock.mockReset().mockResolvedValue({
       id: "action-1",
@@ -1584,6 +1610,31 @@ describe("createCorgtexMcpServer", () => {
         ownerMemberId: "member-owner",
         ownerMember: { id: "member-owner", user: { displayName: "Owner", email: "owner@example.test" } },
       } as never);
+    loadAdviceRequestCountSummariesMock
+      .mockResolvedValueOnce(new Map([["action-1", {
+        adviceRequestCount: 0,
+        activeAdviceRequestCount: 0,
+        inputRequestCount: 0,
+        activeInputRequestCount: 0,
+      }]]))
+      .mockResolvedValueOnce(new Map([["action-1", {
+        adviceRequestCount: 2,
+        activeAdviceRequestCount: 1,
+        inputRequestCount: 2,
+        activeInputRequestCount: 1,
+      }]]))
+      .mockResolvedValueOnce(new Map([["tension-1", {
+        adviceRequestCount: 0,
+        activeAdviceRequestCount: 0,
+        inputRequestCount: 0,
+        activeInputRequestCount: 0,
+      }]]))
+      .mockResolvedValueOnce(new Map([["tension-1", {
+        adviceRequestCount: 3,
+        activeAdviceRequestCount: 2,
+        inputRequestCount: 3,
+        activeInputRequestCount: 2,
+      }]]));
 
     const server = createCorgtexMcpServer({
       actor: { kind: "agent", authProvider: "bootstrap" } as any,
@@ -1667,12 +1718,16 @@ describe("createCorgtexMcpServer", () => {
       assigneeMemberId: "member-assignee",
       assigneeMemberName: "Assignee",
       assignee: "Assignee",
+      inputRequestCount: 0,
+      activeInputRequestCount: 0,
     });
     expect(JSON.parse(updateActionResponse.content[0].text)).toMatchObject({
       priorityLabel: "Urgent",
       assigneeMemberId: "member-assignee",
       assigneeMemberName: "Assignee",
       assignee: "Assignee",
+      inputRequestCount: 2,
+      activeInputRequestCount: 1,
     });
     expect(JSON.parse(createTensionResponse.content[0].text)).toMatchObject({
       priorityLabel: "Medium",
@@ -1681,12 +1736,16 @@ describe("createCorgtexMcpServer", () => {
       responsiblePerson: "Responsible",
       raisedByMemberId: "member-raiser",
       raisedByMemberName: "Raiser",
+      inputRequestCount: 0,
+      activeInputRequestCount: 0,
     });
     expect(JSON.parse(updateTensionResponse.content[0].text)).toMatchObject({
       priorityLabel: "Important",
       responsibleMemberId: "member-responsible",
       responsibleMemberName: "Responsible",
       responsiblePerson: "Responsible",
+      inputRequestCount: 3,
+      activeInputRequestCount: 2,
     });
     expect(JSON.parse(createProposalResponse.content[0].text)).toMatchObject({
       priorityLabel: "Urgent",
@@ -1735,6 +1794,95 @@ describe("createCorgtexMcpServer", () => {
       ownerMemberId: "member-default",
       ownerMemberName: "Default Owner",
       owner: "Default Owner",
+    });
+  });
+
+  it("keeps MCP get_proposal advice counts aligned with list responses", async () => {
+    const { createCorgtexMcpServer } = await import("./server");
+    const { requireScope } = await import("./auth");
+    const { prisma } = await import("@corgtex/shared");
+
+    vi.mocked(prisma.proposal.findFirst).mockResolvedValueOnce({
+      id: "proposal-1",
+      title: "Clarify ownership",
+      status: "DRAFT",
+      version: 1,
+      priority: 2,
+      ownerMemberId: "member-owner",
+      ownerMember: { id: "member-owner", user: { displayName: "Owner", email: "owner@example.test" } },
+      adviceProcess: {
+        requests: [
+          { status: "ACTIVE" },
+          { status: "RESOLVED" },
+        ],
+      },
+    } as never);
+
+    const server = createCorgtexMcpServer({
+      actor: { kind: "agent", authProvider: "bootstrap" } as any,
+      workspaceId: "ws-1",
+      authKind: "agent",
+    });
+
+    const response = await (server as any)._registeredTools.get_proposal.handler({
+      proposalId: "proposal-1",
+    });
+
+    expect(vi.mocked(requireScope)).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: "ws-1" }), "proposals:read");
+    expect(prisma.proposal.findFirst).toHaveBeenCalledWith(expect.objectContaining({
+      include: expect.objectContaining({
+        adviceProcess: {
+          include: {
+            requests: {
+              select: { status: true },
+            },
+          },
+        },
+      }),
+    }));
+    expect(JSON.parse(response.content[0].text)).toMatchObject({
+      adviceRequestCount: 2,
+      activeAdviceRequestCount: 1,
+      inputRequestCount: 2,
+      activeInputRequestCount: 1,
+    });
+  });
+
+  it("classifies MCP member kind instead of trusting stale stored kind", async () => {
+    const { createCorgtexMcpServer } = await import("./server");
+    const { requireScope } = await import("./auth");
+    const { listMembers } = await import("@corgtex/domain");
+
+    vi.mocked(listMembers).mockResolvedValueOnce([
+      {
+        id: "member-system",
+        role: "MEMBER",
+        kind: "HUMAN",
+        isActive: true,
+        joinedAt: new Date("2026-07-17T00:00:00.000Z"),
+        user: {
+          displayName: "Corgtex Support",
+          email: "support+corgtex@example.test",
+        },
+      },
+    ] as never);
+
+    const server = createCorgtexMcpServer({
+      actor: { kind: "agent", authProvider: "bootstrap" } as any,
+      workspaceId: "ws-1",
+      authKind: "agent",
+    });
+
+    const response = await (server as any)._registeredTools.list_members.handler({});
+
+    expect(vi.mocked(requireScope)).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: "ws-1" }), "members:read");
+    expect(JSON.parse(response.content[0].text)).toMatchObject({
+      members: [
+        {
+          id: "member-system",
+          kind: "SYSTEM",
+        },
+      ],
     });
   });
 

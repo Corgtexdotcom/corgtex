@@ -1,6 +1,7 @@
 import { Prisma, type ActionStatus, type KnowledgeSourceType, type ProposalStatus, type SensitivityLabel, type TensionStatus } from "@prisma/client";
 import { prisma } from "@corgtex/shared";
 import { invariant } from "./errors";
+import { normalizeActionWorkItem, normalizeProposalWorkItem, normalizeTensionWorkItem } from "./work-item-normalization";
 
 export type MeetingIntelligenceContextMode = "summary" | "insights" | "agenda";
 
@@ -56,32 +57,39 @@ type ContextTensionRecord = {
   priority: number | null;
   circleId: string | null;
   bodyMd: string | null;
+  assigneeMemberId: string | null;
+  raisedByMemberId: string | null;
   upvotes: unknown[];
   circle: { name: string } | null;
-  assigneeMember: { user: { displayName: string | null; email: string } } | null;
-  raisedByMember: { user: { displayName: string | null; email: string } } | null;
+  assigneeMember: { id: string; user: { displayName: string | null; email: string } } | null;
+  raisedByMember: { id: string; user: { displayName: string | null; email: string } } | null;
 };
 
 type ContextActionRecord = {
   id: string;
   title: string;
   status: string;
+  priority: number | null;
   circleId: string | null;
   bodyMd: string | null;
   dueAt: Date | null;
+  assigneeMemberId: string | null;
   circle: { name: string } | null;
-  assigneeMember: { user: { displayName: string | null; email: string } } | null;
+  assigneeMember: { id: string; user: { displayName: string | null; email: string } } | null;
 };
 
 type ContextProposalRecord = {
   id: string;
   title: string;
   status: string;
+  priority: number | null;
   circleId: string | null;
   summary: string | null;
   bodyMd: string;
   circle: { name: string } | null;
   author: { displayName: string | null; email: string } | null;
+  ownerMemberId: string | null;
+  ownerMember: { id: string; user: { displayName: string | null; email: string } } | null;
   tensions: Array<{ id: string; title: string; status: string }>;
   actions: Array<{ id: string; title: string; status: string }>;
 };
@@ -175,28 +183,47 @@ export type MeetingIntelligenceContext = {
     title: string;
     status: string;
     priority: number | null;
+    priorityLabel: string;
     upvotes: number;
+    upvoteCount: number | null;
     circle: string | null;
     owner: string | null;
+    ownerMemberId: string | null;
+    ownerMemberName: string | null;
+    responsibleMemberId: string | null;
+    responsibleMemberName: string | null;
     bodyMd: string | null;
   }>;
   actions: Array<{
     id: string;
     title: string;
     status: string;
+    priority: number | null;
+    priorityLabel: string;
     dueAt: string | null;
     circle: string | null;
     owner: string | null;
+    ownerMemberId: string | null;
+    ownerMemberName: string | null;
+    responsibleMemberId: string | null;
+    responsibleMemberName: string | null;
     bodyMd: string | null;
   }>;
   proposals: Array<{
     id: string;
     title: string;
     status: string;
+    priority: number | null;
+    priorityLabel: string;
     summary: string | null;
     bodyMd: string;
     circle: string | null;
     author: string | null;
+    owner: string | null;
+    ownerMemberId: string | null;
+    ownerMemberName: string | null;
+    responsibleMemberId: string | null;
+    responsibleMemberName: string | null;
     tensions: Array<{ id: string; title: string; status: string }>;
     actions: Array<{ id: string; title: string; status: string }>;
   }>;
@@ -684,6 +711,7 @@ export async function buildMeetingIntelligenceContext(params: {
       },
       include: {
         author: { select: { displayName: true, email: true } },
+        ownerMember: { include: { user: { select: { displayName: true, email: true } } } },
         circle: { select: { name: true } },
         tensions: { select: { id: true, title: true, status: true } },
         actions: { select: { id: true, title: true, status: true } },
@@ -791,36 +819,64 @@ export async function buildMeetingIntelligenceContext(params: {
       summaryMd: previousMeeting.summaryMd,
       decisionsJson: previousMeeting.decisionsJson,
     })),
-    tensions: tensions.map((tension) => ({
-      id: tension.id,
-      title: tension.title,
-      status: tension.status,
-      priority: tension.priority,
-      upvotes: tension.upvotes.length,
-      circle: tension.circle?.name ?? null,
-      owner: userLabel(tension.assigneeMember?.user) ?? userLabel(tension.raisedByMember?.user),
-      bodyMd: tension.bodyMd,
-    })),
-    actions: actions.map((action) => ({
-      id: action.id,
-      title: action.title,
-      status: action.status,
-      dueAt: action.dueAt?.toISOString() ?? null,
-      circle: action.circle?.name ?? null,
-      owner: userLabel(action.assigneeMember?.user),
-      bodyMd: action.bodyMd,
-    })),
-    proposals: proposals.map((proposal) => ({
-      id: proposal.id,
-      title: proposal.title,
-      status: proposal.status,
-      summary: proposal.summary,
-      bodyMd: proposal.bodyMd,
-      circle: proposal.circle?.name ?? null,
-      author: userLabel(proposal.author),
-      tensions: proposal.tensions,
-      actions: proposal.actions,
-    })),
+    tensions: tensions.map((tension) => {
+      const item = normalizeTensionWorkItem(tension);
+      return {
+        id: item.id,
+        title: item.title,
+        status: item.status,
+        priority: item.priority,
+        priorityLabel: item.priorityLabel,
+        upvotes: tension.upvotes.length,
+        upvoteCount: item.upvoteCount,
+        circle: tension.circle?.name ?? null,
+        owner: item.owner,
+        ownerMemberId: item.ownerMemberId,
+        ownerMemberName: item.ownerMemberName,
+        responsibleMemberId: item.responsibleMemberId,
+        responsibleMemberName: item.responsibleMemberName,
+        bodyMd: item.bodyMd,
+      };
+    }),
+    actions: actions.map((action) => {
+      const item = normalizeActionWorkItem(action);
+      return {
+        id: item.id,
+        title: item.title,
+        status: item.status,
+        priority: item.priority,
+        priorityLabel: item.priorityLabel,
+        dueAt: action.dueAt?.toISOString() ?? null,
+        circle: action.circle?.name ?? null,
+        owner: item.owner,
+        ownerMemberId: item.ownerMemberId,
+        ownerMemberName: item.ownerMemberName,
+        responsibleMemberId: item.responsibleMemberId,
+        responsibleMemberName: item.responsibleMemberName,
+        bodyMd: item.bodyMd,
+      };
+    }),
+    proposals: proposals.map((proposal) => {
+      const item = normalizeProposalWorkItem(proposal);
+      return {
+        id: item.id,
+        title: item.title,
+        status: item.status,
+        priority: item.priority,
+        priorityLabel: item.priorityLabel,
+        summary: item.summary,
+        bodyMd: item.bodyMd,
+        circle: proposal.circle?.name ?? null,
+        author: userLabel(proposal.author),
+        owner: item.owner,
+        ownerMemberId: item.ownerMemberId,
+        ownerMemberName: item.ownerMemberName,
+        responsibleMemberId: item.responsibleMemberId,
+        responsibleMemberName: item.responsibleMemberName,
+        tensions: proposal.tensions,
+        actions: proposal.actions,
+      };
+    }),
     followUps: followUps.map((followUp) => ({
       id: followUp.id,
       meetingId: followUp.meetingId,

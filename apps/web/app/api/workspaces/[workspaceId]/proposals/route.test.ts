@@ -28,6 +28,7 @@ const formatWorkItemPriority = vi.fn((priority: number | null | undefined) => {
   return "Low";
 });
 const getWorkspacePermanentPathForEntity = vi.fn(async () => null);
+const loadAdviceRequestCountSummaries = vi.fn();
 const listProposals = vi.fn();
 const prisma = {
   proposal: {
@@ -42,17 +43,45 @@ vi.mock("@/lib/auth", () => ({
   resolveRequestActor,
 }));
 
-vi.mock("@corgtex/domain", () => ({
-  coerceWorkItemPriorityInput,
-  createProposal,
-  createProposalFromTension,
-  deleteProposal,
-  formatWorkItemPriority,
-  getWorkspacePermanentPathForEntity,
-  listProposals,
-  requireWorkspaceMembership,
-  updateProposal,
-}));
+vi.mock("@corgtex/domain", async () => {
+  const {
+    normalizeActionWorkItem,
+    normalizeGoalWorkItem,
+    normalizeProposalWorkItem,
+    normalizeTensionWorkItem,
+    workItemMemberDisplayName,
+    workItemUserDisplayName,
+  } = await import("../../../../../../../packages/domain/src/work-item-normalization");
+
+  return {
+    AppError: class AppError extends Error {
+      status: number;
+      code: string;
+
+      constructor(status: number, code: string, message: string) {
+        super(message);
+        this.status = status;
+        this.code = code;
+      }
+    },
+    coerceWorkItemPriorityInput,
+    createProposal,
+    createProposalFromTension,
+    deleteProposal,
+    formatWorkItemPriority,
+    getWorkspacePermanentPathForEntity,
+    loadAdviceRequestCountSummaries,
+    listProposals,
+    normalizeActionWorkItem,
+    normalizeGoalWorkItem,
+    normalizeProposalWorkItem,
+    normalizeTensionWorkItem,
+    requireWorkspaceMembership,
+    updateProposal,
+    workItemMemberDisplayName,
+    workItemUserDisplayName,
+  };
+});
 
 vi.mock("@corgtex/shared", () => ({
   env: {
@@ -68,6 +97,30 @@ function context(workspaceId = "workspace-1") {
 afterEach(() => {
   vi.clearAllMocks();
   getWorkspacePermanentPathForEntity.mockResolvedValue(null);
+});
+
+describe("GET /api/workspaces/[workspaceId]/proposals", () => {
+  it("caps pagination and passes archive filters into proposal listing", async () => {
+    listProposals.mockResolvedValue({
+      items: [],
+      total: 0,
+      take: 100,
+      skip: 20,
+    });
+
+    const { GET } = await import("./route");
+    const response = await GET(
+      new NextRequest("http://localhost/api/workspaces/workspace-1/proposals?archiveFilter=active&take=5000&skip=20"),
+      context(),
+    );
+
+    expect(response.status).toBe(200);
+    expect(listProposals).toHaveBeenCalledWith(actor, "workspace-1", {
+      archiveFilter: "active",
+      take: 100,
+      skip: 20,
+    });
+  });
 });
 
 describe("POST /api/workspaces/[workspaceId]/proposals", () => {
@@ -163,6 +216,17 @@ describe("POST /api/workspaces/[workspaceId]/proposals", () => {
       isPrivate: false,
       ownerMemberId: "member-owner",
       priority: 3,
+    }));
+    expect(prisma.proposal.findFirst).toHaveBeenCalledWith(expect.objectContaining({
+      include: expect.objectContaining({
+        adviceProcess: {
+          include: {
+            requests: {
+              select: { status: true },
+            },
+          },
+        },
+      }),
     }));
     await expect(response.json()).resolves.toMatchObject({
       proposal: {
@@ -289,6 +353,17 @@ describe("PATCH /api/workspaces/[workspaceId]/proposals/[proposalId]", () => {
       proposalId: "proposal-1",
       ownerMemberId: "member-owner",
       priority: 1,
+    }));
+    expect(prisma.proposal.findFirst).toHaveBeenCalledWith(expect.objectContaining({
+      include: expect.objectContaining({
+        adviceProcess: {
+          include: {
+            requests: {
+              select: { status: true },
+            },
+          },
+        },
+      }),
     }));
     await expect(response.json()).resolves.toMatchObject({
       proposal: {

@@ -8,6 +8,7 @@ const {
   deleteAction,
   formatWorkItemPriority,
   getWorkspacePermanentPathForEntity,
+  loadAdviceRequestCountSummaries,
   listActions,
   prisma,
   updateAction,
@@ -37,6 +38,7 @@ const {
     return "Low";
   }),
   getWorkspacePermanentPathForEntity: vi.fn(),
+  loadAdviceRequestCountSummaries: vi.fn(),
   listActions: vi.fn(),
   prisma: {
     action: {
@@ -46,15 +48,43 @@ const {
   updateAction: vi.fn(),
 }));
 
-vi.mock("@corgtex/domain", () => ({
-  coerceWorkItemPriorityInput,
-  createAction,
-  deleteAction,
-  formatWorkItemPriority,
-  getWorkspacePermanentPathForEntity,
-  listActions,
-  updateAction,
-}));
+vi.mock("@corgtex/domain", async () => {
+  const {
+    normalizeActionWorkItem,
+    normalizeGoalWorkItem,
+    normalizeProposalWorkItem,
+    normalizeTensionWorkItem,
+    workItemMemberDisplayName,
+    workItemUserDisplayName,
+  } = await import("../../../../../../../packages/domain/src/work-item-normalization");
+
+  return {
+    AppError: class AppError extends Error {
+      status: number;
+      code: string;
+
+      constructor(status: number, code: string, message: string) {
+        super(message);
+        this.status = status;
+        this.code = code;
+      }
+    },
+    coerceWorkItemPriorityInput,
+    createAction,
+    deleteAction,
+    formatWorkItemPriority,
+    getWorkspacePermanentPathForEntity,
+    loadAdviceRequestCountSummaries,
+    listActions,
+    normalizeActionWorkItem,
+    normalizeGoalWorkItem,
+    normalizeProposalWorkItem,
+    normalizeTensionWorkItem,
+    updateAction,
+    workItemMemberDisplayName,
+    workItemUserDisplayName,
+  };
+});
 
 vi.mock("@corgtex/shared", () => ({
   env: {
@@ -122,6 +152,16 @@ describe("GET /api/workspaces/[workspaceId]/actions", () => {
           assigneeMemberId: "member-2",
           assigneeMemberName: "Assignee",
           assignee: "Assignee",
+          responsibleMemberId: "member-2",
+          responsibleMemberName: "Assignee",
+          responsiblePerson: "Assignee",
+          ownerMemberId: "member-2",
+          ownerMemberName: "Assignee",
+          owner: "Assignee",
+          adviceRequestCount: null,
+          activeAdviceRequestCount: null,
+          inputRequestCount: null,
+          activeInputRequestCount: null,
           assigneeMember: { id: "member-2", user: { displayName: "Assignee", email: "assignee@example.test" } },
         }],
         total: 1,
@@ -160,6 +200,14 @@ describe("POST /api/workspaces/[workspaceId]/actions", () => {
       assigneeMemberId: "member-2",
       assigneeMember: { id: "member-2", user: { displayName: "Assignee", email: "assignee@example.test" } },
     });
+    loadAdviceRequestCountSummaries.mockResolvedValue(new Map([
+      ["action-1", {
+        adviceRequestCount: 0,
+        activeAdviceRequestCount: 0,
+        inputRequestCount: 0,
+        activeInputRequestCount: 0,
+      }],
+    ]));
   });
 
   it("passes assignee and labeled priority into the action create backend", async () => {
@@ -192,11 +240,14 @@ describe("POST /api/workspaces/[workspaceId]/actions", () => {
         id: "action-1",
         priority: 2,
         priorityLabel: "Important",
+        inputRequestCount: 0,
+        activeInputRequestCount: 0,
         assigneeMemberId: "member-2",
         assigneeMemberName: "Assignee",
         assignee: "Assignee",
       },
     });
+    expect(loadAdviceRequestCountSummaries).toHaveBeenCalledWith("workspace-1", "ACTION", ["action-1"]);
   });
 });
 
@@ -216,6 +267,14 @@ describe("PATCH /api/workspaces/[workspaceId]/actions/[actionId]", () => {
       assigneeMemberId: "member-2",
       assigneeMember: { id: "member-2", user: { displayName: "Assignee", email: "assignee@example.test" } },
     });
+    loadAdviceRequestCountSummaries.mockResolvedValue(new Map([
+      ["action-1", {
+        adviceRequestCount: 2,
+        activeAdviceRequestCount: 1,
+        inputRequestCount: 2,
+        activeInputRequestCount: 1,
+      }],
+    ]));
   });
 
   it("passes assignee and labeled priority into the action update backend", async () => {
@@ -243,6 +302,8 @@ describe("PATCH /api/workspaces/[workspaceId]/actions/[actionId]", () => {
       action: {
         id: "action-1",
         priorityLabel: "Urgent",
+        inputRequestCount: 2,
+        activeInputRequestCount: 1,
         assigneeMemberId: "member-2",
         assigneeMemberName: "Assignee",
         assignee: "Assignee",

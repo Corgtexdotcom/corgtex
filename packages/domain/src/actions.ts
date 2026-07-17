@@ -5,6 +5,7 @@ import { appendEvents } from "./events";
 import { actorUserIdForWorkspace, requireWorkspaceMembership } from "./auth";
 import { recordAudit } from "./audit-trail";
 import { archiveFilterWhere, archiveWorkspaceArtifact, type ArchiveFilter } from "./archive";
+import { loadAdviceRequestCountSummaries } from "./advice-requests";
 import { invariant } from "./errors";
 import { humanMemberIdentityWhere } from "./member-identity";
 import { requireDraftManager } from "./draft-permissions";
@@ -164,7 +165,16 @@ export async function listActions(actor: AppActor, workspaceId: string, opts?: L
     }),
     prisma.action.count({ where }),
   ]);
-  return { items, total, take, skip };
+  const requestCountSummaries = await loadAdviceRequestCountSummaries(workspaceId, "ACTION", items.map((item) => item.id));
+  return {
+    items: items.map((item) => ({
+      ...item,
+      ...requestCountSummaries.get(item.id),
+    })),
+    total,
+    take,
+    skip,
+  };
 }
 
 export async function getAction(actor: AppActor, params: {

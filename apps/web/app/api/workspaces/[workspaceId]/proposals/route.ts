@@ -30,13 +30,27 @@ function ownerMemberIdFromBody(body: { ownerMemberId?: string | null }) {
   return body.ownerMemberId === undefined ? undefined : body.ownerMemberId;
 }
 
+const MAX_LIST_TAKE = 100;
+
+function optionalIntParam(request: NextRequest, name: string) {
+  const value = request.nextUrl.searchParams.get(name);
+  if (!value) return undefined;
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isSafeInteger(parsed) || parsed < 0) return undefined;
+  return name === "take" ? Math.min(parsed, MAX_LIST_TAKE) : parsed;
+}
+
 export async function GET(request: NextRequest, { params }: { params: Promise<{ workspaceId: string }> }) {
   try {
     const actor = await resolveRequestActor(request);
     const { workspaceId } = await params;
     await requireWorkspaceMembership({ actor, workspaceId });
     const archiveFilter = request.nextUrl.searchParams.get("archiveFilter") as ArchiveFilter | null;
-    const proposals = await listProposals(actor, workspaceId, { archiveFilter: archiveFilter ?? undefined });
+    const proposals = await listProposals(actor, workspaceId, {
+      archiveFilter: archiveFilter ?? undefined,
+      take: optionalIntParam(request, "take"),
+      skip: optionalIntParam(request, "skip"),
+    });
     return NextResponse.json({
       proposals: {
         ...proposals,

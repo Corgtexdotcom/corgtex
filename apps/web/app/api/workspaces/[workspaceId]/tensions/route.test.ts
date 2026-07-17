@@ -27,6 +27,7 @@ const formatWorkItemPriority = vi.fn((priority: number | null | undefined) => {
   return "Low";
 });
 const getWorkspacePermanentPathForEntity = vi.fn(async () => null);
+const loadAdviceRequestCountSummaries = vi.fn();
 const listTensions = vi.fn();
 const prisma = {
   tension: {
@@ -41,16 +42,44 @@ vi.mock("@/lib/auth", () => ({
   resolveRequestActor,
 }));
 
-vi.mock("@corgtex/domain", () => ({
-  coerceWorkItemPriorityInput,
-  createTension,
-  deleteTension,
-  formatWorkItemPriority,
-  getWorkspacePermanentPathForEntity,
-  listTensions,
-  requireWorkspaceMembership,
-  updateTension,
-}));
+vi.mock("@corgtex/domain", async () => {
+  const {
+    normalizeActionWorkItem,
+    normalizeGoalWorkItem,
+    normalizeProposalWorkItem,
+    normalizeTensionWorkItem,
+    workItemMemberDisplayName,
+    workItemUserDisplayName,
+  } = await import("../../../../../../../packages/domain/src/work-item-normalization");
+
+  return {
+    AppError: class AppError extends Error {
+      status: number;
+      code: string;
+
+      constructor(status: number, code: string, message: string) {
+        super(message);
+        this.status = status;
+        this.code = code;
+      }
+    },
+    coerceWorkItemPriorityInput,
+    createTension,
+    deleteTension,
+    formatWorkItemPriority,
+    getWorkspacePermanentPathForEntity,
+    loadAdviceRequestCountSummaries,
+    listTensions,
+    normalizeActionWorkItem,
+    normalizeGoalWorkItem,
+    normalizeProposalWorkItem,
+    normalizeTensionWorkItem,
+    requireWorkspaceMembership,
+    updateTension,
+    workItemMemberDisplayName,
+    workItemUserDisplayName,
+  };
+});
 
 vi.mock("@corgtex/shared", () => ({
   env: {
@@ -66,6 +95,30 @@ function context(workspaceId = "workspace-1") {
 afterEach(() => {
   vi.clearAllMocks();
   getWorkspacePermanentPathForEntity.mockResolvedValue(null);
+});
+
+describe("GET /api/workspaces/[workspaceId]/tensions", () => {
+  it("caps pagination and passes archive filters into tension listing", async () => {
+    listTensions.mockResolvedValue({
+      items: [],
+      total: 0,
+      take: 100,
+      skip: 20,
+    });
+
+    const { GET } = await import("./route");
+    const response = await GET(
+      new NextRequest("http://localhost/api/workspaces/workspace-1/tensions?archiveFilter=active&take=5000&skip=20"),
+      context(),
+    );
+
+    expect(response.status).toBe(200);
+    expect(listTensions).toHaveBeenCalledWith(actor, "workspace-1", {
+      archiveFilter: "active",
+      take: 100,
+      skip: 20,
+    });
+  });
 });
 
 describe("POST /api/workspaces/[workspaceId]/tensions", () => {
@@ -88,6 +141,14 @@ describe("POST /api/workspaces/[workspaceId]/tensions", () => {
       assigneeMember: { id: "member-responsible", user: { displayName: "Responsible", email: "responsible@example.test" } },
       raisedByMember: { id: "member-raiser", user: { displayName: "Raiser", email: "raiser@example.test" } },
     });
+    loadAdviceRequestCountSummaries.mockResolvedValueOnce(new Map([
+      ["tension-1", {
+        adviceRequestCount: 0,
+        activeAdviceRequestCount: 0,
+        inputRequestCount: 0,
+        activeInputRequestCount: 0,
+      }],
+    ]));
 
     const { POST } = await import("./route");
     const response = await POST(
@@ -116,6 +177,8 @@ describe("POST /api/workspaces/[workspaceId]/tensions", () => {
       tension: {
         id: "tension-1",
         priorityLabel: "Urgent",
+        inputRequestCount: 0,
+        activeInputRequestCount: 0,
         responsibleMemberId: "member-responsible",
         responsibleMemberName: "Responsible",
         responsiblePerson: "Responsible",
@@ -124,6 +187,7 @@ describe("POST /api/workspaces/[workspaceId]/tensions", () => {
         raisedBy: "Raiser",
       },
     });
+    expect(loadAdviceRequestCountSummaries).toHaveBeenCalledWith("workspace-1", "TENSION", ["tension-1"]);
   });
 });
 
@@ -142,6 +206,14 @@ describe("PATCH /api/workspaces/[workspaceId]/tensions/[tensionId]", () => {
       assigneeMemberId: "member-responsible",
       assigneeMember: { id: "member-responsible", user: { displayName: "Responsible", email: "responsible@example.test" } },
     });
+    loadAdviceRequestCountSummaries.mockResolvedValueOnce(new Map([
+      ["tension-1", {
+        adviceRequestCount: 3,
+        activeAdviceRequestCount: 1,
+        inputRequestCount: 3,
+        activeInputRequestCount: 1,
+      }],
+    ]));
 
     const { PATCH } = await import("./[tensionId]/route");
     const response = await PATCH(
@@ -166,6 +238,8 @@ describe("PATCH /api/workspaces/[workspaceId]/tensions/[tensionId]", () => {
       tension: {
         id: "tension-1",
         priorityLabel: "Important",
+        inputRequestCount: 3,
+        activeInputRequestCount: 1,
         responsibleMemberId: "member-responsible",
         responsibleMemberName: "Responsible",
         responsiblePerson: "Responsible",
