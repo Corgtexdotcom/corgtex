@@ -3,7 +3,7 @@ import { isWorkspaceFeatureEnabled, requireWorkspaceFeature } from "@/lib/worksp
 import { MarkdownEditor } from "@/lib/components/MarkdownEditor";
 import { MarkdownRenderer } from "@/lib/components/MarkdownRenderer";
 import { normalizeVisibleWorkItemColumns, toggleWorkItemColumnVisibility } from "@/lib/work-item-view";
-import { canManagePracticeFinanceProjects, getCrmAccount, getCrmAccountPracticeFinance, listCommunicationSuggestions, listMembers, projectRemainingCents, requireWorkspaceMembership } from "@corgtex/domain";
+import { canManagePracticeFinanceProjects, getCrmAccount, getCrmAccountPracticeFinance, listCommunicationSuggestions, listMembers, requireWorkspaceMembership } from "@corgtex/domain";
 import { getTranslations } from "next-intl/server";
 
 import {
@@ -90,8 +90,20 @@ export default async function AccountDetailPage({
     canShowPracticeFinance
       ? getCrmAccountPracticeFinance(actor, { workspaceId, accountId })
       : Promise.resolve({
-        summary: { activeProjects: 0, budgetCents: 0, usedCents: 0, remainingCents: 0, marginBps: null },
+        summary: {
+          activeProjects: 0,
+          budgetCents: 0,
+          usedCents: 0,
+          remainingCents: 0,
+          marginBps: null,
+          currency: null,
+          directCostCents: 0,
+          grossProfitCents: 0,
+          riskBudgetCount: 0,
+          riskMarginCount: 0,
+        },
         projects: [],
+        projectHealth: [],
       }),
   ]);
 
@@ -105,6 +117,7 @@ export default async function AccountDetailPage({
   const financeProjectByDealId = new Map(accountFinance.projects
     .filter((project) => project.crmDealId)
     .map((project) => [project.crmDealId as string, project]));
+  const financeProjectHealthById = new Map(accountFinance.projectHealth.map((health) => [health.projectId, health]));
   const closedWonDealsWithoutProject = account.deals.filter((deal) => deal.stage === "CLOSED_WON" && !financeProjectByDealId.has(deal.id));
   const canCreateFinanceProjects = canShowPracticeFinance && await canManagePracticeFinanceProjects(actor, workspaceId, {
     resolvedMembership: membership,
@@ -116,11 +129,21 @@ export default async function AccountDetailPage({
     member.user.displayName || member.user.email,
   ]));
 
-  const formatCurrency = (cents: number) => new Intl.NumberFormat(locale, {
-    style: "currency",
-    currency: "USD",
-    maximumFractionDigits: 0,
-  }).format(cents / 100);
+  const formatCurrency = (cents: number, currency = "USD") => {
+    const normalizedCurrency = currency.trim() || "USD";
+    try {
+      return new Intl.NumberFormat(locale, {
+        style: "currency",
+        currency: normalizedCurrency,
+        maximumFractionDigits: 0,
+      }).format(cents / 100);
+    } catch {
+      return `${normalizedCurrency} ${(cents / 100).toLocaleString(locale, { maximumFractionDigits: 0 })}`;
+    }
+  };
+  const financeRemainingLabel = accountFinance.summary.currency == null && accountFinance.summary.activeProjects > 0
+    ? "Mixed"
+    : formatCurrency(accountFinance.summary.remainingCents, accountFinance.summary.currency ?? "USD");
 
   const formatMargin = (bps?: number | null) => bps == null ? t("emptyValue") : `${(bps / 100).toFixed(1)}%`;
 
@@ -317,7 +340,7 @@ export default async function AccountDetailPage({
                 <span>{t("statFinanceProjects")}</span>
               </div>
               <div className="ws-stat-card">
-                <strong>{formatCurrency(accountFinance.summary.remainingCents)}</strong>
+                <strong>{financeRemainingLabel}</strong>
                 <span>{t("statFinanceRemaining")}</span>
               </div>
             </>
@@ -464,11 +487,11 @@ export default async function AccountDetailPage({
                     <div className="muted" style={{ fontSize: "0.85rem", marginTop: 4 }}>
                       {t("financeBridgeMeta", {
                         projects: accountFinance.projects.length,
-                        remaining: formatCurrency(accountFinance.summary.remainingCents),
+                        remaining: financeRemainingLabel,
                       })}
                     </div>
                   </div>
-                  <a href={`/workspaces/${workspaceId}/finance?tab=dashboard`} className="link-button small" style={{ marginLeft: "auto" }}>
+                  <a href={`/workspaces/${workspaceId}/finance`} className="link-button small" style={{ marginLeft: "auto" }}>
                     {t("financeOpenDashboard")}
                   </a>
                 </div>
@@ -477,11 +500,15 @@ export default async function AccountDetailPage({
                   <p className="muted" style={{ marginTop: 12 }}>{t("financeBridgeEmpty")}</p>
                 ) : (
                   <div className="stack" style={{ marginTop: 16 }}>
-                    {accountFinance.projects.map((project) => (
+                    {accountFinance.projects.map((project) => {
+                      const health = financeProjectHealthById.get(project.id);
+                      return (
                       <div key={project.id} className="item" style={{ padding: 14 }}>
                         <div className="row" style={{ gap: 8, alignItems: "flex-start" }}>
                           <div style={{ minWidth: 0, flex: 1 }}>
-                            <strong>{project.name}</strong>
+                            <strong>
+                              <a href={`/workspaces/${workspaceId}/finance/projects/${project.id}`}>{project.name}</a>
+                            </strong>
                             <div className="muted" style={{ fontSize: "0.82rem", marginTop: 4 }}>
                               {t("financeProjectCode")}: {project.code}
                               {project.crmDeal ? ` · ${t("financeLinkedDeal")}: ${project.crmDeal.title}` : ""}
@@ -491,13 +518,17 @@ export default async function AccountDetailPage({
                         </div>
                         <div className="nr-tag-group" style={{ marginTop: 12 }}>
                           {project.crmDeal && <span className="tag-sm">{t("financeDealValue")}: {formatCurrency(project.crmDeal.valueCents ?? 0)}</span>}
-                          <span className="tag-sm">{t("financePoValue")}: {formatCurrency(project.poValueCents)}</span>
-                          <span className="tag-sm">{t("financeUsedBudget")}: {formatCurrency(project.usedCents)}</span>
-                          <span className="tag-sm">{t("financeRemainingBudget")}: {formatCurrency(projectRemainingCents(project))}</span>
-                          <span className="tag-sm">{t("financeMargin")}: {formatMargin(project.currentMarginBps)}</span>
+                          <span className="tag-sm">{t("financePoValue")}: {formatCurrency(health?.budgetCents ?? project.poValueCents, health?.currency ?? project.currency)}</span>
+                          <span className="tag-sm">{t("financeUsedBudget")}: {formatCurrency(health?.usedBudgetCents ?? 0, health?.currency ?? project.currency)}</span>
+                          <span className="tag-sm">{t("financeRemainingBudget")}: {formatCurrency(health?.remainingBudgetCents ?? project.poValueCents, health?.currency ?? project.currency)}</span>
+                          <span className="tag-sm">{t("financeMargin")}: {formatMargin(health?.grossMarginBps ?? null)}</span>
+                          <a className="link-button small secondary" href={`/workspaces/${workspaceId}/finance/projects/${project.id}`}>
+                            Open project
+                          </a>
                         </div>
                       </div>
-                    ))}
+                      );
+                    })}
                   </div>
                 )}
 

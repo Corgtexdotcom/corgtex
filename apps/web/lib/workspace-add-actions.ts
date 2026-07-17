@@ -280,7 +280,7 @@ export function getWorkspaceAddActions(context: WorkspaceAddActionContext): Work
         ? [action("circle"), action("role"), action("role_assignment")]
         : [action("circle"), action("role")];
     case "finance":
-      return context.featureFlags.FINANCE ? [action("finance_project")] : [];
+      return context.featureFlags.FINANCE && context.featureFlags.PRACTICE_PROJECTS ? [action("finance_project")] : [];
     case "brain":
       return [action("upload_file"), action("article")];
     case "tools":

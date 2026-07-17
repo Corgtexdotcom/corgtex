@@ -184,9 +184,10 @@ export default async function WorkspaceAddPage({
   const meetingRecorderEnabled = Boolean(
     featureFlags.MEETING_RECORDERS && meetingRecorderConfig?.featureEnabled && meetingRecorderConfig.config.enabled,
   );
-  const canManagePracticeProjects = await canManagePracticeFinanceProjects(actor, workspaceId, {
-    resolvedMembership: membership,
-  });
+  const canManagePracticeProjects = Boolean(featureFlags.FINANCE && featureFlags.PRACTICE_PROJECTS)
+    && await canManagePracticeFinanceProjects(actor, workspaceId, {
+      resolvedMembership: membership,
+    });
 
   const returnTo = sanitizeWorkspaceReturnTo(workspaceId, search.returnTo);
   const contextCircleId = circleIdFromReturnTo(returnTo, workspaceId);

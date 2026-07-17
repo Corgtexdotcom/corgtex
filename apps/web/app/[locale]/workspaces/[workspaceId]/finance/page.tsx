@@ -1,8 +1,9 @@
 import {
   canManagePracticeContributionPayments,
   canManagePracticeFinanceProjects,
-  getPracticeFinanceDashboard,
+  getNativePracticeFinanceDashboard,
   listPracticeContributionEntries,
+  listPracticeProjects,
   listRequestedPracticeContributionPayables,
   requireWorkspaceMembership,
 } from "@corgtex/domain";
@@ -26,9 +27,11 @@ export default async function FinancePage({
   const actor = await requirePageActor();
   await requireWorkspaceFeature(workspaceId, "FINANCE");
 
-  const [practiceDashboard, slicingPieEnabled, membership, workspace] = await Promise.all([
-    getPracticeFinanceDashboard(actor, workspaceId),
+  const [practiceDashboard, projects, slicingPieEnabled, practiceProjectsEnabled, membership, workspace] = await Promise.all([
+    getNativePracticeFinanceDashboard(actor, workspaceId),
+    listAllPracticeProjects(actor, workspaceId),
     isWorkspaceFeatureEnabled(workspaceId, "SLICING_PIE"),
+    isWorkspaceFeatureEnabled(workspaceId, "PRACTICE_PROJECTS"),
     requireWorkspaceMembership({ actor, workspaceId }),
     prisma.workspace.findUnique({
       where: { id: workspaceId },
@@ -36,7 +39,7 @@ export default async function FinancePage({
     }),
   ]);
   const readOnlyDemo = workspace?.slug === "jnj-demo";
-  const canManageProjects = !readOnlyDemo && await canManagePracticeFinanceProjects(actor, workspaceId, {
+  const canManageProjects = practiceProjectsEnabled && !readOnlyDemo && await canManagePracticeFinanceProjects(actor, workspaceId, {
     resolvedMembership: membership,
   });
   const canMarkContributionPaid = !readOnlyDemo && await canManagePracticeContributionPayments(actor, workspaceId, {
@@ -53,15 +56,31 @@ export default async function FinancePage({
     <PracticeFinanceDashboard
       workspaceId={workspaceId}
       canManageProjects={canManageProjects}
+      practiceProjectsEnabled={practiceProjectsEnabled}
       canRecordContributions={!readOnlyDemo}
       canMarkContributionPaid={canMarkContributionPaid}
       slicingPieEnabled={slicingPieEnabled}
       summary={practiceDashboard.summary}
       attention={practiceDashboard.attention}
-      projects={practiceDashboard.projects}
+      projectHealth={practiceDashboard.projectHealth}
+      projects={projects}
       contributionEntries={contributionEntries}
       requestedPayables={requestedPayables.entries}
       requestedPayablesNextCursor={requestedPayables.nextCursor}
     />
   );
+}
+
+async function listAllPracticeProjects(actor: Awaited<ReturnType<typeof requirePageActor>>, workspaceId: string) {
+  const projects: Awaited<ReturnType<typeof listPracticeProjects>> = [];
+  let cursor: string | null = null;
+  const take = 200;
+
+  while (true) {
+    const page = await listPracticeProjects(actor, workspaceId, { take, cursor });
+    projects.push(...page);
+    if (page.length < take) return projects;
+    cursor = page.at(-1)?.id ?? null;
+    if (!cursor) return projects;
+  }
 }

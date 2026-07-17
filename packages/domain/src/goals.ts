@@ -9,9 +9,7 @@ import { invariant } from "./errors";
 import { requireDraftManager } from "./draft-permissions";
 import { humanMemberIdentityWhere } from "./member-identity";
 import {
-  projectBudgetRunwayWeeks,
-  projectRemainingCents,
-  projectUsedRatio,
+  listNativePracticeProjectHealthByIds,
 } from "./practice-finance";
 import type { GoalLevel, GoalCadence, GoalStatus, PracticeProjectStatus, Prisma } from "@prisma/client";
 import {
@@ -1134,31 +1132,11 @@ export async function listGoalFinanceProjectLinks(
   if (links.length === 0) return [];
 
   const projectIds = Array.from(new Set(links.map((link) => link.entityId)));
-  const projects = await prisma.practiceProject.findMany({
-    where: {
-      workspaceId: params.workspaceId,
-      id: { in: projectIds },
-    },
-    select: {
-      id: true,
-      code: true,
-      name: true,
-      clientName: true,
-      status: true,
-      poValueCents: true,
-      serviceBudgetCents: true,
-      expenseBudgetCents: true,
-      usedCents: true,
-      weeklyBurnCents: true,
-      targetMarginBps: true,
-      currentMarginBps: true,
-    },
-  });
-  const projectById = new Map(projects.map((project) => [project.id, project]));
+  const projectHealthById = await listNativePracticeProjectHealthByIds(actor, params.workspaceId, projectIds);
 
   return links.flatMap((link) => {
-    const project = projectById.get(link.entityId);
-    if (!project) return [];
+    const health = projectHealthById.get(link.entityId);
+    if (!health) return [];
     return [{
       id: link.id,
       goalId: link.goalId,
@@ -1167,21 +1145,21 @@ export async function listGoalFinanceProjectLinks(
       source: link.source,
       createdAt: link.createdAt,
       project: {
-        id: project.id,
-        code: project.code,
-        name: project.name,
-        clientName: project.clientName,
-        status: project.status,
-        poValueCents: project.poValueCents,
-        usedCents: project.usedCents,
-        remainingCents: projectRemainingCents(project),
-        serviceBudgetCents: project.serviceBudgetCents,
-        expenseBudgetCents: project.expenseBudgetCents,
-        weeklyBurnCents: project.weeklyBurnCents,
-        usedRatio: projectUsedRatio(project),
-        budgetRunwayWeeks: projectBudgetRunwayWeeks(project),
-        targetMarginBps: project.targetMarginBps,
-        currentMarginBps: project.currentMarginBps,
+        id: health.projectId,
+        code: health.projectCode,
+        name: health.projectName,
+        clientName: health.clientName,
+        status: health.status,
+        poValueCents: health.budgetCents,
+        usedCents: health.usedBudgetCents,
+        remainingCents: health.remainingBudgetCents,
+        serviceBudgetCents: health.serviceBudgetCents,
+        expenseBudgetCents: health.expenseBudgetCents,
+        weeklyBurnCents: health.recentBudgetBurnPerWeekCents,
+        usedRatio: health.budgetCents > 0 ? Math.max(health.usedBudgetCents / health.budgetCents, 0) : 0,
+        budgetRunwayWeeks: health.weeksToBudgetExhaustion,
+        targetMarginBps: health.targetMarginBps,
+        currentMarginBps: health.grossMarginBps,
       },
     }];
   });

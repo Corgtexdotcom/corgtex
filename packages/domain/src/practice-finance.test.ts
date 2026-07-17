@@ -1,8 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const { prismaMock, requireWorkspaceMembershipMock } = vi.hoisted(() => ({
-  prismaMock: {
+const { prismaMock, requireWorkspaceMembershipMock } = vi.hoisted(() => {
+  const prismaMock = {
     $queryRaw: vi.fn(),
+    $transaction: vi.fn(),
     crmAccount: {
       findUnique: vi.fn(),
     },
@@ -20,8 +21,23 @@ const { prismaMock, requireWorkspaceMembershipMock } = vi.hoisted(() => ({
       update: vi.fn(),
       updateMany: vi.fn(),
     },
-    practiceExpense: {
+    practiceClient: {
+      create: vi.fn(),
+      findFirst: vi.fn(),
       findMany: vi.fn(),
+      findUnique: vi.fn(),
+      upsert: vi.fn(),
+    },
+    practiceConsultant: {
+      create: vi.fn(),
+      findFirst: vi.fn(),
+      findMany: vi.fn(),
+      update: vi.fn(),
+    },
+    practiceExpense: {
+      create: vi.fn(),
+      findMany: vi.fn(),
+      findUnique: vi.fn(),
     },
     practiceProject: {
       create: vi.fn(),
@@ -30,7 +46,9 @@ const { prismaMock, requireWorkspaceMembershipMock } = vi.hoisted(() => ({
       update: vi.fn(),
     },
     practiceTimeEntry: {
+      create: vi.fn(),
       findMany: vi.fn(),
+      findUnique: vi.fn(),
     },
     workspaceFeatureFlag: {
       findUnique: vi.fn(),
@@ -38,9 +56,13 @@ const { prismaMock, requireWorkspaceMembershipMock } = vi.hoisted(() => ({
     user: {
       findMany: vi.fn(),
     },
-  },
-  requireWorkspaceMembershipMock: vi.fn(),
-}));
+  };
+  prismaMock.$transaction.mockImplementation(async (callback: (tx: typeof prismaMock) => unknown) => callback(prismaMock));
+  return {
+    prismaMock,
+    requireWorkspaceMembershipMock: vi.fn(),
+  };
+});
 
 vi.mock("@corgtex/shared", () => ({
   prisma: prismaMock,
@@ -61,6 +83,8 @@ import {
   canManagePracticeFinanceProjects,
   collectAttention,
   collectNativePracticeAttention,
+  createNativePracticeExpense,
+  createNativePracticeTimeEntry,
   createPracticeContributionEntry,
   createPracticeProject,
   createPracticeProjectFromWonDeal,
@@ -121,6 +145,11 @@ function prismaSqlText(value: unknown): string {
   return query.sql ?? query.text ?? query.strings?.join("?") ?? String(value);
 }
 
+function prismaSqlValues(value: unknown): string[] {
+  const query = value as { values?: readonly unknown[] };
+  return query.values?.map(String) ?? [];
+}
+
 function nativeProject(overrides: Partial<NativeProjectFixture> = {}): NativeProjectFixture {
   return {
     id: "project-1",
@@ -133,7 +162,10 @@ function nativeProject(overrides: Partial<NativeProjectFixture> = {}): NativePro
     poValueCents: 10_000_00,
     serviceBudgetCents: 8_000_00,
     expenseBudgetCents: 2_000_00,
+    usedCents: 0,
+    weeklyBurnCents: 0,
     targetMarginBps: 5000,
+    currentMarginBps: null,
     ...overrides,
   };
 }
@@ -316,6 +348,77 @@ describe("practice-finance pure derivations", () => {
       hasRecentBurn: true,
     });
     expect(health.weeksToBudgetExhaustion).toBeCloseTo(17.052, 2);
+  });
+
+  it("excludes imported ledger rows already represented by an imported project baseline", () => {
+    const health = calculateNativePracticeProjectHealth({
+      project: nativeProject({
+        sourceSatelliteId: "legacy-project-1",
+        usedCents: 250_000,
+        weeklyBurnCents: 50_000,
+        currentMarginBps: 6000,
+      }),
+      now: new Date("2026-06-30T00:00:00.000Z"),
+      timeEntries: [
+        nativeTimeEntry({
+          id: "imported-time",
+          billAmountCents: 90_000,
+          costAmountCents: 40_000,
+          sourceSatelliteId: "legacy-time-1",
+        }),
+        nativeTimeEntry({ id: "manual-time" }),
+      ],
+      expenses: [
+        nativeExpense({
+          id: "imported-expense",
+          amountCents: 25_000,
+          sourceSatelliteId: "legacy-expense-1",
+        }),
+        nativeExpense({ id: "manual-expense" }),
+      ],
+    });
+
+    expect(health).toMatchObject({
+      usedBudgetCents: 440_000,
+      remainingBudgetCents: 560_000,
+      directCostCents: 220_000,
+      grossProfitCents: 220_000,
+      grossMarginBps: 5000,
+      recentBudgetBurnPerWeekCents: 97_500,
+      recentCostBurnPerWeekCents: 50_000,
+    });
+  });
+
+  it("preserves unknown legacy margin semantics for projects with historical usage", () => {
+    const health = calculateNativePracticeProjectHealth({
+      project: nativeProject({
+        usedCents: 250_000,
+        weeklyBurnCents: 50_000,
+        currentMarginBps: null,
+      }),
+      now: new Date("2026-06-30T00:00:00.000Z"),
+      timeEntries: [],
+      expenses: [],
+    });
+
+    expect(health).toMatchObject({
+      usedBudgetCents: 250_000,
+      remainingBudgetCents: 750_000,
+      directCostCents: null,
+      grossProfitCents: null,
+      grossMarginBps: null,
+      recentBudgetBurnPerWeekCents: 50_000,
+      recentCostBurnPerWeekCents: 0,
+      weeksToTargetMarginRisk: null,
+    });
+    expect(nativePracticeProjectAttentionItems(health).some((item) => item.issue === "margin")).toBe(false);
+    expect(summarizeNativePracticeFinance([health])).toMatchObject({
+      usedCents: 250_000,
+      remainingCents: 750_000,
+      directCostCents: null,
+      grossProfitCents: null,
+      marginBps: null,
+    });
   });
 
   it("marks native project health as setup-incomplete until budget and margin inputs exist", () => {
@@ -706,7 +809,7 @@ describe("practice-finance pure derivations", () => {
     expect(collectNativePracticeAttention([steadyMargin])).toEqual([]);
   });
 
-  it("rejects mixed active currencies before aggregating native finance summaries", () => {
+  it("marks mixed active currencies without aggregating native finance money totals", () => {
     const usd = calculateNativePracticeProjectHealth({
       project: nativeProject({ id: "usd", currency: "USD" }),
       timeEntries: [],
@@ -718,12 +821,13 @@ describe("practice-finance pure derivations", () => {
       expenses: [],
     });
 
-    try {
-      summarizeNativePracticeFinance([usd, eur]);
-      throw new Error("Expected summarizeNativePracticeFinance to reject mixed currencies.");
-    } catch (error) {
-      expect(error).toMatchObject({ code: "MIXED_CURRENCY" });
-    }
+    const summary = summarizeNativePracticeFinance([usd, eur]);
+    expect(summary.activeProjects).toBe(2);
+    expect(summary.currency).toBeNull();
+    expect(summary.budgetCents).toBe(0);
+    expect(summary.usedCents).toBe(0);
+    expect(summary.remainingCents).toBe(0);
+    expect(summary.marginBps).toBeNull();
   });
 
   it("canonicalizes equivalent native project currency labels before summarizing", () => {
@@ -1368,8 +1472,73 @@ describe("practice-finance I/O", () => {
     prismaMock.practiceContributionEntry.findUnique.mockResolvedValue(null);
     prismaMock.practiceContributionEntry.groupBy.mockResolvedValue([]);
     prismaMock.practiceContributionEntry.updateMany.mockResolvedValue({ count: 0 });
+    prismaMock.practiceClient.create.mockResolvedValue({ id: "client-1" });
+    prismaMock.practiceClient.findFirst.mockResolvedValue(null);
+    prismaMock.practiceClient.findMany.mockResolvedValue([]);
+    prismaMock.practiceClient.findUnique.mockResolvedValue(null);
+    prismaMock.practiceClient.upsert.mockResolvedValue({ id: "client-1" });
+    prismaMock.practiceConsultant.create.mockResolvedValue({ id: "consultant-1" });
+    prismaMock.practiceConsultant.findFirst.mockResolvedValue(null);
+    prismaMock.practiceConsultant.findMany.mockResolvedValue([]);
+    prismaMock.practiceConsultant.update.mockResolvedValue({ id: "consultant-1" });
+    prismaMock.practiceExpense.create.mockResolvedValue({
+      id: "expense-1",
+      workspaceId: "workspace-1",
+      clientId: "client-1",
+      billingCodeId: null,
+      projectId: "project-1",
+      projectLineId: null,
+      consultantId: null,
+      sourceDocumentId: null,
+      paymentBatchId: null,
+      spentOn: new Date("2026-06-18T00:00:00.000Z"),
+      vendor: null,
+      category: "Travel",
+      businessPurpose: "Client meeting",
+      amountCents: 12_345,
+      currency: "USD",
+      amountFunctionalCents: 12_345,
+      functionalCurrency: "USD",
+      billable: true,
+      status: "POSTED",
+      sourceSatelliteId: null,
+      idempotencyKey: null,
+      createdAt: new Date("2026-06-18T00:00:00.000Z"),
+      updatedAt: new Date("2026-06-18T00:00:00.000Z"),
+    });
     prismaMock.practiceExpense.findMany.mockResolvedValue([]);
+    prismaMock.practiceExpense.findUnique.mockResolvedValue(null);
+    prismaMock.practiceTimeEntry.create.mockResolvedValue({
+      id: "time-1",
+      workspaceId: "workspace-1",
+      clientId: "client-1",
+      billingCodeId: null,
+      projectId: "project-1",
+      projectLineId: null,
+      consultantId: "consultant-1",
+      sourceDocumentId: null,
+      paymentBatchId: null,
+      workedOn: new Date("2026-06-18T00:00:00.000Z"),
+      weekEndingOn: new Date("2026-06-21T00:00:00.000Z"),
+      hours: decimal(2.5),
+      assignmentType: "CONSULTING",
+      currency: "USD",
+      billCurrency: "USD",
+      costCurrency: "USD",
+      functionalCurrency: "USD",
+      billRateCents: 12_000,
+      costRateCents: 8_000,
+      billAmountCents: 30_000,
+      costAmountCents: 20_000,
+      paidAmountCents: null,
+      status: "POSTED",
+      sourceSatelliteId: null,
+      idempotencyKey: null,
+      createdAt: new Date("2026-06-18T00:00:00.000Z"),
+      updatedAt: new Date("2026-06-18T00:00:00.000Z"),
+    });
     prismaMock.practiceTimeEntry.findMany.mockResolvedValue([]);
+    prismaMock.practiceTimeEntry.findUnique.mockResolvedValue(null);
     prismaMock.practiceContributionEntry.update.mockResolvedValue({
       id: "contribution-1",
       workspaceId: "workspace-1",
@@ -1615,6 +1784,86 @@ describe("practice-finance I/O", () => {
     expect(dashboard.attention).toHaveLength(1);
     expect(dashboard.attention[0]).toMatchObject({ issue: "setup" });
     expect(prismaMock.$queryRaw).toHaveBeenCalledTimes(2);
+  });
+
+  it("preserves existing project finance values until native ledger rows are migrated", async () => {
+    prismaMock.practiceProject.findMany.mockResolvedValueOnce([
+      nativeProject({
+        usedCents: 250_000,
+        weeklyBurnCents: 50_000,
+        currentMarginBps: 6000,
+      }),
+    ]);
+
+    const dashboard = await getNativePracticeFinanceDashboard(actor, "workspace-1", {
+      now: new Date("2026-06-30T00:00:00.000Z"),
+    });
+
+    expect(dashboard.projectHealth[0]).toMatchObject({
+      usedBudgetCents: 250_000,
+      remainingBudgetCents: 750_000,
+      directCostCents: 100_000,
+      grossProfitCents: 150_000,
+      grossMarginBps: 6000,
+      recentBudgetBurnPerWeekCents: 50_000,
+      recentCostBurnPerWeekCents: 20_000,
+    });
+    expect(dashboard.summary).toMatchObject({
+      usedCents: 250_000,
+      remainingCents: 750_000,
+      marginBps: 6000,
+    });
+  });
+
+  it("adds native ledger rows to existing project finance baselines until migration cutover", async () => {
+    prismaMock.practiceProject.findMany.mockResolvedValueOnce([
+      nativeProject({
+        usedCents: 250_000,
+        weeklyBurnCents: 50_000,
+        currentMarginBps: 6000,
+      }),
+    ]);
+    prismaMock.$queryRaw
+      .mockResolvedValueOnce([{
+        projectId: "project-1",
+        timeRevenueCents: 150_000n,
+        timeCostCents: 80_000n,
+        recentTimeRevenueCents: 150_000n,
+        recentTimeCostCents: 80_000n,
+        timeEntryCount: 1n,
+        invalidHoursRows: 0n,
+        invalidCurrencyRows: 0n,
+      }])
+      .mockResolvedValueOnce([{
+        projectId: "project-1",
+        billableExpenseCents: 40_000n,
+        directExpenseCents: 40_000n,
+        recentBillableExpenseCents: 40_000n,
+        recentDirectExpenseCents: 40_000n,
+        expenseCount: 1n,
+        invalidCurrencyRows: 0n,
+      }]);
+
+    const dashboard = await getNativePracticeFinanceDashboard(actor, "workspace-1", {
+      now: new Date("2026-06-30T00:00:00.000Z"),
+    });
+
+    expect(dashboard.projectHealth[0]).toMatchObject({
+      usedBudgetCents: 440_000,
+      remainingBudgetCents: 560_000,
+      directCostCents: 220_000,
+      grossProfitCents: 220_000,
+      grossMarginBps: 5000,
+      recentBudgetBurnPerWeekCents: 97_500,
+      recentCostBurnPerWeekCents: 50_000,
+    });
+    expect(dashboard.summary).toMatchObject({
+      usedCents: 440_000,
+      remainingCents: 560_000,
+      directCostCents: 220_000,
+      grossProfitCents: 220_000,
+      marginBps: 5000,
+    });
   });
 
   it("builds the native finance dashboard from every project health page", async () => {
@@ -1967,9 +2216,14 @@ describe("practice-finance I/O", () => {
         workspaceId: "workspace-1",
         crmAccountId: "account-1",
         crmDealId: "deal-1",
+        clientId: "client-1",
+        billingCodeId: null,
         code: "EXAMPLE-1",
         clientName: "Example",
+        currency: "USD",
         weeklyBurnCents: 5_000_00,
+        startsOn: null,
+        endsOn: null,
         sourceSatelliteId: null,
         createdAt: new Date("2026-06-18T00:00:00.000Z"),
         updatedAt: new Date("2026-06-18T00:00:00.000Z"),
@@ -1982,6 +2236,24 @@ describe("practice-finance I/O", () => {
         },
       },
     ]);
+    prismaMock.$queryRaw
+      .mockResolvedValueOnce([{
+        projectId: "project-1",
+        timeRevenueCents: 150_000n,
+        timeCostCents: 80_000n,
+        recentTimeRevenueCents: 150_000n,
+        recentTimeCostCents: 80_000n,
+        invalidHoursRows: 0n,
+        invalidCurrencyRows: 0n,
+      }])
+      .mockResolvedValueOnce([{
+        projectId: "project-1",
+        billableExpenseCents: 40_000n,
+        directExpenseCents: 40_000n,
+        recentBillableExpenseCents: 40_000n,
+        recentDirectExpenseCents: 40_000n,
+        invalidCurrencyRows: 0n,
+      }]);
 
     const result = await getCrmAccountPracticeFinance(actor, {
       workspaceId: "workspace-1",
@@ -1996,11 +2268,1196 @@ describe("practice-finance I/O", () => {
     expect(result.summary).toMatchObject({
       activeProjects: 1,
       budgetCents: 50_000_00,
-      usedCents: 15_000_00,
-      remainingCents: 35_000_00,
-      marginBps: 6200,
+      usedCents: 1_690_000,
+      remainingCents: 3_310_000,
+      marginBps: 5917,
+    });
+    expect(result.projectHealth[0]).toMatchObject({
+      projectId: "project-1",
+      usedBudgetCents: 1_690_000,
+      directCostCents: 690_000,
     });
     expect(result.projects[0]?.crmDeal?.valueCents).toBe(50_000_00);
+  });
+
+  it("creates native time entries against a workspace project and attaches client and consultant context", async () => {
+    prismaMock.practiceProject.findUnique.mockResolvedValueOnce({
+      id: "project-1",
+      workspaceId: "workspace-1",
+      crmAccountId: "account-1",
+      clientId: null,
+      billingCodeId: "billing-1",
+      code: "EXAMPLE-1",
+      clientName: "Example",
+      currency: "USD",
+      client: { id: "client-existing", crmAccountId: "account-1", name: "Example" },
+    });
+
+    await createNativePracticeTimeEntry(actor, "workspace-1", {
+      projectId: " project-1 ",
+      consultantName: " Priya Shah ",
+      consultantEmail: " PRIYA@EXAMPLE.TEST ",
+      workedOn: new Date("2026-06-18T00:00:00.000Z"),
+      hours: 2.5,
+      assignmentType: " Strategy ",
+      billRateCents: 12_000,
+      costRateCents: 8_000,
+    });
+
+    expect(prismaMock.practiceClient.findMany).toHaveBeenNthCalledWith(1, {
+      where: {
+        workspaceId: "workspace-1",
+        crmAccountId: "account-1",
+        name: { equals: "Example", mode: "insensitive" },
+      },
+      select: { id: true },
+      orderBy: [{ id: "asc" }],
+      take: 2,
+    });
+    expect(prismaMock.practiceClient.findMany).toHaveBeenNthCalledWith(2, {
+      where: { workspaceId: "workspace-1", crmAccountId: "account-1" },
+      select: { id: true },
+      orderBy: [{ id: "asc" }],
+      take: 2,
+    });
+    expect(prismaMock.practiceClient.findUnique).toHaveBeenCalledWith({
+      where: { workspaceId_code: { workspaceId: "workspace-1", code: "EXAMPLE" } },
+      select: { id: true, crmAccountId: true, name: true },
+    });
+    expect(prismaMock.practiceClient.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        workspaceId: "workspace-1",
+        crmAccountId: "account-1",
+        code: "EXAMPLE",
+        name: "Example",
+      }),
+      select: { id: true },
+    });
+    expect(prismaMock.practiceProject.update).toHaveBeenCalledWith({
+      where: { id: "project-1" },
+      data: { clientId: "client-1" },
+    });
+    expect(prismaMock.practiceConsultant.findMany).toHaveBeenCalledWith({
+      where: {
+        workspaceId: "workspace-1",
+        email: { equals: "priya@example.test", mode: "insensitive" },
+      },
+      select: { id: true, name: true, email: true },
+      orderBy: [{ id: "asc" }],
+      take: 2,
+    });
+    expect(prismaMock.practiceConsultant.findMany).toHaveBeenCalledWith({
+      where: {
+        workspaceId: "workspace-1",
+        name: { equals: "Priya Shah", mode: "insensitive" },
+      },
+      select: { id: true, name: true, email: true },
+      orderBy: [{ id: "asc" }],
+      take: 2,
+    });
+    expect(prismaMock.practiceConsultant.create).toHaveBeenCalledWith({
+      data: {
+        workspaceId: "workspace-1",
+        name: "Priya Shah",
+        email: "priya@example.test",
+        sourceSatelliteId: null,
+        active: true,
+      },
+      select: { id: true },
+    });
+    expect(prismaMock.practiceTimeEntry.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        workspaceId: "workspace-1",
+        clientId: "client-1",
+        billingCodeId: "billing-1",
+        projectId: "project-1",
+        consultantId: "consultant-1",
+        workedOn: new Date("2026-06-18T00:00:00.000Z"),
+        weekEndingOn: new Date("2026-06-21T00:00:00.000Z"),
+        assignmentType: "Strategy",
+        currency: "USD",
+        billCurrency: "USD",
+        costCurrency: "USD",
+        functionalCurrency: "USD",
+        billRateCents: 12_000,
+        costRateCents: 8_000,
+        billAmountCents: 30_000,
+        costAmountCents: 20_000,
+        status: "POSTED",
+      }),
+    });
+    const created = prismaMock.practiceTimeEntry.create.mock.calls[0]?.[0].data;
+    expect(created.hours.toString()).toBe("2.5");
+  });
+
+  it("creates native expenses with existing project client and reusable consultant", async () => {
+    prismaMock.practiceProject.findUnique.mockResolvedValueOnce({
+      id: "project-1",
+      workspaceId: "workspace-1",
+      crmAccountId: "account-1",
+      clientId: "client-existing",
+      billingCodeId: null,
+      code: "EXAMPLE-1",
+      clientName: "Example",
+      currency: "USD",
+      client: { id: "client-existing", crmAccountId: "account-1", name: "Example" },
+    });
+    prismaMock.practiceConsultant.findMany.mockResolvedValueOnce([{
+      id: "consultant-2",
+      name: "Priya Shah",
+      email: "priya@example.test",
+    }]);
+
+    await createNativePracticeExpense(actor, "workspace-1", {
+      projectId: "project-1",
+      consultantName: "Priya Shah",
+      consultantEmail: "priya@example.test",
+      spentOn: new Date("2026-06-19T00:00:00.000Z"),
+      vendor: "Airline",
+      category: "Travel",
+      businessPurpose: "Client workshop",
+      amountCents: 45_678,
+      currency: "usd",
+      billable: false,
+    });
+
+    expect(prismaMock.practiceClient.create).not.toHaveBeenCalled();
+    expect(prismaMock.practiceClient.upsert).not.toHaveBeenCalled();
+    expect(prismaMock.practiceConsultant.create).not.toHaveBeenCalled();
+    expect(prismaMock.practiceExpense.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        workspaceId: "workspace-1",
+        clientId: "client-existing",
+        projectId: "project-1",
+        consultantId: "consultant-2",
+        spentOn: new Date("2026-06-19T00:00:00.000Z"),
+        vendor: "Airline",
+        category: "Travel",
+        businessPurpose: "Client workshop",
+        amountCents: 45_678,
+        currency: "USD",
+        amountFunctionalCents: 45_678,
+        functionalCurrency: "USD",
+        billable: false,
+        status: "POSTED",
+      }),
+    });
+  });
+
+  it("resolves a new native client when a linked project client name is stale", async () => {
+    prismaMock.practiceProject.findUnique.mockResolvedValueOnce({
+      id: "project-1",
+      workspaceId: "workspace-1",
+      crmAccountId: "account-1",
+      clientId: "client-old",
+      billingCodeId: null,
+      code: "EXAMPLE-1",
+      clientName: "New Client",
+      currency: "USD",
+      client: { id: "client-old", crmAccountId: "account-1", name: "Old Client" },
+    });
+
+    await createNativePracticeExpense(actor, "workspace-1", {
+      projectId: "project-1",
+      spentOn: new Date("2026-06-19T00:00:00.000Z"),
+      category: "Travel",
+      businessPurpose: "Client workshop",
+      amountCents: 45_678,
+      currency: "usd",
+    });
+
+    expect(prismaSqlValues(prismaMock.$queryRaw.mock.calls[0]?.[0])).toContain("native-practice-client:workspace-1:crm:account-1");
+    expect(prismaMock.practiceClient.findMany).toHaveBeenCalledTimes(1);
+    expect(prismaMock.practiceClient.findMany).toHaveBeenCalledWith({
+      where: {
+        workspaceId: "workspace-1",
+        crmAccountId: "account-1",
+        name: { equals: "New Client", mode: "insensitive" },
+      },
+      select: { id: true },
+      orderBy: [{ id: "asc" }],
+      take: 2,
+    });
+    expect(prismaMock.practiceClient.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        workspaceId: "workspace-1",
+        crmAccountId: "account-1",
+        code: "NEW-CLIENT",
+        name: "New Client",
+      }),
+      select: { id: true },
+    });
+    expect(prismaMock.practiceProject.update).toHaveBeenCalledWith({
+      where: { id: "project-1" },
+      data: { clientId: "client-1" },
+    });
+    expect(prismaMock.practiceExpense.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        clientId: "client-1",
+        projectId: "project-1",
+      }),
+    });
+  });
+
+  it("reuses a name-only consultant when a later native entry includes email", async () => {
+    prismaMock.practiceProject.findUnique.mockResolvedValueOnce({
+      id: "project-1",
+      workspaceId: "workspace-1",
+      crmAccountId: "account-1",
+      clientId: "client-existing",
+      billingCodeId: "billing-1",
+      code: "EXAMPLE-1",
+      clientName: "Example",
+      currency: "USD",
+      client: { id: "client-existing", crmAccountId: "account-1", name: "Example" },
+    });
+    prismaMock.practiceConsultant.findMany
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([{
+        id: "consultant-name-only",
+        name: "Priya Shah",
+        email: null,
+      }])
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([{
+        id: "consultant-name-only",
+        name: "Priya Shah",
+        email: null,
+      }]);
+    prismaMock.practiceConsultant.update.mockResolvedValueOnce({ id: "consultant-name-only" });
+
+    await createNativePracticeTimeEntry(actor, "workspace-1", {
+      projectId: "project-1",
+      consultantName: "Priya Shah",
+      consultantEmail: "priya@example.test",
+      workedOn: new Date("2026-06-18T00:00:00.000Z"),
+      hours: 2.5,
+      billRateCents: 12_000,
+      costRateCents: 8_000,
+    });
+
+    expect(prismaMock.$transaction).toHaveBeenCalled();
+    expect(prismaMock.$queryRaw).toHaveBeenCalledTimes(2);
+    expect(prismaSqlText(prismaMock.$queryRaw.mock.calls[0]?.[0])).toContain("pg_advisory_xact_lock");
+    expect(prismaSqlText(prismaMock.$queryRaw.mock.calls[1]?.[0])).toContain("pg_advisory_xact_lock");
+    expect(prismaMock.practiceConsultant.update).toHaveBeenCalledWith({
+      where: { id: "consultant-name-only" },
+      data: { email: "priya@example.test" },
+      select: { id: true },
+    });
+    expect(prismaMock.practiceConsultant.create).not.toHaveBeenCalled();
+    expect(prismaMock.practiceTimeEntry.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        consultantId: "consultant-name-only",
+      }),
+    });
+  });
+
+  it("lets consultant email disambiguate duplicate native consultant names", async () => {
+    prismaMock.practiceProject.findUnique.mockResolvedValueOnce({
+      id: "project-1",
+      workspaceId: "workspace-1",
+      crmAccountId: "account-1",
+      clientId: "client-existing",
+      billingCodeId: "billing-1",
+      code: "EXAMPLE-1",
+      clientName: "Example",
+      currency: "USD",
+    });
+    prismaMock.practiceConsultant.findMany.mockResolvedValueOnce([{
+      id: "consultant-email-match",
+      name: "Priya Shah",
+      email: "priya@example.test",
+    }]);
+
+    await createNativePracticeTimeEntry(actor, "workspace-1", {
+      projectId: "project-1",
+      consultantName: "Priya Shah",
+      consultantEmail: "priya@example.test",
+      workedOn: new Date("2026-06-18T00:00:00.000Z"),
+      hours: 2.5,
+      billRateCents: 12_000,
+      costRateCents: 8_000,
+    });
+
+    expect(prismaMock.practiceConsultant.findMany).toHaveBeenCalledTimes(1);
+    expect(prismaMock.practiceConsultant.findMany).toHaveBeenCalledWith({
+      where: {
+        workspaceId: "workspace-1",
+        email: { equals: "priya@example.test", mode: "insensitive" },
+      },
+      select: { id: true, name: true, email: true },
+      orderBy: [{ id: "asc" }],
+      take: 2,
+    });
+    expect(prismaMock.practiceConsultant.update).not.toHaveBeenCalled();
+    expect(prismaMock.practiceConsultant.create).not.toHaveBeenCalled();
+    expect(prismaMock.practiceTimeEntry.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        consultantId: "consultant-email-match",
+      }),
+    });
+  });
+
+  it("returns an existing native time entry for duplicate manual idempotency keys", async () => {
+    const existingEntry = { id: "time-existing", workspaceId: "workspace-1" };
+    prismaMock.practiceProject.findUnique.mockResolvedValueOnce({
+      id: "project-1",
+      workspaceId: "workspace-1",
+      crmAccountId: "account-1",
+      clientId: null,
+      billingCodeId: "billing-1",
+      code: "EXAMPLE-1",
+      clientName: "Example",
+      currency: "USD",
+    });
+    prismaMock.practiceTimeEntry.findUnique.mockResolvedValueOnce(existingEntry);
+
+    const result = await createNativePracticeTimeEntry(actor, "workspace-1", {
+      projectId: "project-1",
+      consultantName: "Priya Shah",
+      workedOn: new Date("2026-06-18T00:00:00.000Z"),
+      hours: 2.5,
+      billRateCents: 12_000,
+      costRateCents: 8_000,
+      idempotencyKey: "manual-time-key",
+    });
+
+    expect(result).toBe(existingEntry);
+    expect(prismaMock.practiceClient.create).not.toHaveBeenCalled();
+    expect(prismaMock.practiceConsultant.findFirst).not.toHaveBeenCalled();
+    expect(prismaMock.practiceConsultant.findMany).not.toHaveBeenCalled();
+    expect(prismaMock.practiceTimeEntry.create).not.toHaveBeenCalled();
+  });
+
+  it("rejects ambiguous name-only consultants for native ledger submissions", async () => {
+    prismaMock.practiceProject.findUnique.mockResolvedValueOnce({
+      id: "project-1",
+      workspaceId: "workspace-1",
+      crmAccountId: "account-1",
+      clientId: "client-existing",
+      billingCodeId: "billing-1",
+      code: "EXAMPLE-1",
+      clientName: "Example",
+      currency: "USD",
+    });
+    prismaMock.practiceConsultant.findMany.mockResolvedValueOnce([{ id: "consultant-1" }, { id: "consultant-2" }]);
+
+    await expect(createNativePracticeTimeEntry(actor, "workspace-1", {
+      projectId: "project-1",
+      consultantName: "Priya Shah",
+      workedOn: new Date("2026-06-18T00:00:00.000Z"),
+      hours: 2.5,
+      billRateCents: 12_000,
+      costRateCents: 8_000,
+    })).rejects.toMatchObject({ status: 409, code: "AMBIGUOUS_CONSULTANT" });
+
+    expect(prismaMock.practiceConsultant.create).not.toHaveBeenCalled();
+    expect(prismaMock.practiceTimeEntry.create).not.toHaveBeenCalled();
+  });
+
+  it("rejects ambiguous native time consultants before provisioning an unlinked client", async () => {
+    prismaMock.practiceProject.findUnique.mockResolvedValueOnce({
+      id: "project-1",
+      workspaceId: "workspace-1",
+      crmAccountId: "account-1",
+      clientId: null,
+      billingCodeId: "billing-1",
+      code: "EXAMPLE-1",
+      clientName: "Example",
+      currency: "USD",
+    });
+    prismaMock.practiceConsultant.findMany.mockResolvedValueOnce([{ id: "consultant-1" }, { id: "consultant-2" }]);
+
+    await expect(createNativePracticeTimeEntry(actor, "workspace-1", {
+      projectId: "project-1",
+      consultantName: "Priya Shah",
+      workedOn: new Date("2026-06-18T00:00:00.000Z"),
+      hours: 2.5,
+      billRateCents: 12_000,
+      costRateCents: 8_000,
+    })).rejects.toMatchObject({ status: 409, code: "AMBIGUOUS_CONSULTANT" });
+
+    expect(prismaMock.practiceClient.findUnique).not.toHaveBeenCalled();
+    expect(prismaMock.practiceClient.create).not.toHaveBeenCalled();
+    expect(prismaMock.practiceProject.update).not.toHaveBeenCalled();
+    expect(prismaMock.practiceTimeEntry.create).not.toHaveBeenCalled();
+  });
+
+  it("rejects ambiguous native expense consultants before provisioning an unlinked client", async () => {
+    prismaMock.practiceProject.findUnique.mockResolvedValueOnce({
+      id: "project-1",
+      workspaceId: "workspace-1",
+      crmAccountId: "account-1",
+      clientId: null,
+      billingCodeId: "billing-1",
+      code: "EXAMPLE-1",
+      clientName: "Example",
+      currency: "USD",
+    });
+    prismaMock.practiceConsultant.findMany.mockResolvedValueOnce([{ id: "consultant-1" }, { id: "consultant-2" }]);
+
+    await expect(createNativePracticeExpense(actor, "workspace-1", {
+      projectId: "project-1",
+      consultantName: "Priya Shah",
+      spentOn: new Date("2026-06-19T00:00:00.000Z"),
+      category: "Travel",
+      businessPurpose: "Client workshop",
+      amountCents: 45_678,
+      currency: "USD",
+    })).rejects.toMatchObject({ status: 409, code: "AMBIGUOUS_CONSULTANT" });
+
+    expect(prismaMock.practiceClient.findUnique).not.toHaveBeenCalled();
+    expect(prismaMock.practiceClient.create).not.toHaveBeenCalled();
+    expect(prismaMock.practiceProject.update).not.toHaveBeenCalled();
+    expect(prismaMock.practiceExpense.create).not.toHaveBeenCalled();
+  });
+
+  it("rechecks consultant identity under a database lock before creating a new consultant", async () => {
+    prismaMock.practiceProject.findUnique.mockResolvedValueOnce({
+      id: "project-1",
+      workspaceId: "workspace-1",
+      crmAccountId: "account-1",
+      clientId: "client-existing",
+      billingCodeId: "billing-1",
+      code: "EXAMPLE-1",
+      clientName: "Example",
+      currency: "USD",
+      client: { id: "client-existing", crmAccountId: "account-1", name: "Example" },
+    });
+    prismaMock.practiceConsultant.findMany
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([{ id: "consultant-after-lock" }]);
+
+    await createNativePracticeTimeEntry(actor, "workspace-1", {
+      projectId: "project-1",
+      consultantName: "Priya Shah",
+      workedOn: new Date("2026-06-18T00:00:00.000Z"),
+      hours: 2.5,
+      billRateCents: 12_000,
+      costRateCents: 8_000,
+      idempotencyKey: "manual-time-key-a",
+    });
+
+    expect(prismaMock.$transaction).toHaveBeenCalled();
+    expect(prismaSqlText(prismaMock.$queryRaw.mock.calls[0]?.[0])).toContain("pg_advisory_xact_lock");
+    expect(prismaMock.practiceConsultant.create).not.toHaveBeenCalled();
+    expect(prismaMock.practiceTimeEntry.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        consultantId: "consultant-after-lock",
+        idempotencyKey: "manual-time-key-a",
+      }),
+    });
+  });
+
+  it("reuses idempotency-scoped consultants when duplicate manual creation races", async () => {
+    prismaMock.practiceProject.findUnique.mockResolvedValueOnce({
+      id: "project-1",
+      workspaceId: "workspace-1",
+      crmAccountId: "account-1",
+      clientId: "client-existing",
+      billingCodeId: "billing-1",
+      code: "EXAMPLE-1",
+      clientName: "Example",
+      currency: "USD",
+      client: { id: "client-existing", crmAccountId: "account-1", name: "Example" },
+    });
+    prismaMock.practiceConsultant.findMany.mockResolvedValueOnce([]);
+    prismaMock.practiceConsultant.findFirst
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce({ id: "consultant-race" });
+
+    await createNativePracticeTimeEntry(actor, "workspace-1", {
+      projectId: "project-1",
+      consultantName: "Priya Shah",
+      workedOn: new Date("2026-06-18T00:00:00.000Z"),
+      hours: 2.5,
+      billRateCents: 12_000,
+      costRateCents: 8_000,
+      idempotencyKey: "manual-time-key",
+    });
+
+    expect(prismaMock.practiceConsultant.findFirst).toHaveBeenCalledWith({
+      where: {
+        workspaceId: "workspace-1",
+        sourceSatelliteId: "manual-ledger-consultant:time:manual-time-key",
+      },
+      select: { id: true },
+    });
+    expect(prismaMock.$transaction).toHaveBeenCalled();
+    expect(prismaMock.practiceConsultant.create).not.toHaveBeenCalled();
+    expect(prismaMock.practiceTimeEntry.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        consultantId: "consultant-race",
+        idempotencyKey: "manual-time-key",
+      }),
+    });
+  });
+
+  it("namespaces manual consultant source ids by native ledger entry type", async () => {
+    prismaMock.practiceProject.findUnique.mockResolvedValueOnce({
+      id: "project-1",
+      workspaceId: "workspace-1",
+      crmAccountId: "account-1",
+      clientId: "client-existing",
+      billingCodeId: "billing-1",
+      code: "EXAMPLE-1",
+      clientName: "Example",
+      currency: "USD",
+      client: { id: "client-existing", crmAccountId: "account-1", name: "Example" },
+    });
+
+    await createNativePracticeExpense(actor, "workspace-1", {
+      projectId: "project-1",
+      consultantName: "Priya Shah",
+      spentOn: new Date("2026-06-19T00:00:00.000Z"),
+      category: "Travel",
+      businessPurpose: "Client workshop",
+      amountCents: 12_345,
+      currency: "usd",
+      idempotencyKey: "shared-manual-key",
+    });
+
+    expect(prismaMock.practiceConsultant.findFirst).toHaveBeenCalledWith({
+      where: {
+        workspaceId: "workspace-1",
+        sourceSatelliteId: "manual-ledger-consultant:expense:shared-manual-key",
+      },
+      select: { id: true },
+    });
+    expect(prismaMock.practiceConsultant.findFirst).not.toHaveBeenCalledWith({
+      where: {
+        workspaceId: "workspace-1",
+        sourceSatelliteId: "manual-ledger-consultant:time:shared-manual-key",
+      },
+      select: { id: true },
+    });
+    expect(prismaMock.practiceConsultant.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        sourceSatelliteId: "manual-ledger-consultant:expense:shared-manual-key",
+      }),
+      select: { id: true },
+    });
+    expect(prismaMock.practiceExpense.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        consultantId: "consultant-1",
+        idempotencyKey: "shared-manual-key",
+      }),
+    });
+  });
+
+  it("validates native expense input before creating related client or consultant records", async () => {
+    prismaMock.practiceProject.findUnique.mockResolvedValueOnce({
+      id: "project-1",
+      workspaceId: "workspace-1",
+      crmAccountId: "account-1",
+      clientId: null,
+      billingCodeId: "billing-1",
+      code: "EXAMPLE-1",
+      clientName: "Example",
+      currency: "USD",
+    });
+
+    await expect(createNativePracticeExpense(actor, "workspace-1", {
+      projectId: "project-1",
+      spentOn: new Date("2026-06-19T00:00:00.000Z"),
+      category: "Travel",
+      businessPurpose: "Client workshop",
+      amountCents: 0,
+      currency: "usd",
+    })).rejects.toMatchObject({ status: 400, code: "INVALID_INPUT" });
+
+    expect(prismaMock.practiceClient.create).not.toHaveBeenCalled();
+    expect(prismaMock.practiceConsultant.findFirst).not.toHaveBeenCalled();
+    expect(prismaMock.practiceConsultant.findMany).not.toHaveBeenCalled();
+    expect(prismaMock.practiceConsultant.create).not.toHaveBeenCalled();
+    expect(prismaMock.practiceExpense.create).not.toHaveBeenCalled();
+  });
+
+  it("rejects native expense cents outside the database range before related writes", async () => {
+    prismaMock.practiceProject.findUnique.mockResolvedValueOnce({
+      id: "project-1",
+      workspaceId: "workspace-1",
+      crmAccountId: "account-1",
+      clientId: null,
+      billingCodeId: "billing-1",
+      code: "EXAMPLE-1",
+      clientName: "Example",
+      currency: "USD",
+    });
+
+    await expect(createNativePracticeExpense(actor, "workspace-1", {
+      projectId: "project-1",
+      consultantName: "Priya Shah",
+      spentOn: new Date("2026-06-19T00:00:00.000Z"),
+      category: "Travel",
+      businessPurpose: "Client workshop",
+      amountCents: 2_147_483_648,
+      currency: "usd",
+    })).rejects.toMatchObject({ status: 400, code: "INVALID_INPUT" });
+
+    expect(prismaMock.practiceClient.create).not.toHaveBeenCalled();
+    expect(prismaMock.practiceProject.update).not.toHaveBeenCalled();
+    expect(prismaMock.practiceConsultant.findMany).not.toHaveBeenCalled();
+    expect(prismaMock.practiceConsultant.create).not.toHaveBeenCalled();
+    expect(prismaMock.practiceExpense.create).not.toHaveBeenCalled();
+  });
+
+  it("rejects native time hours that round to zero before creating related records", async () => {
+    prismaMock.practiceProject.findUnique.mockResolvedValueOnce({
+      id: "project-1",
+      workspaceId: "workspace-1",
+      crmAccountId: "account-1",
+      clientId: null,
+      billingCodeId: "billing-1",
+      code: "EXAMPLE-1",
+      clientName: "Example",
+      currency: "USD",
+    });
+
+    await expect(createNativePracticeTimeEntry(actor, "workspace-1", {
+      projectId: "project-1",
+      consultantName: "Priya Shah",
+      workedOn: new Date("2026-06-18T00:00:00.000Z"),
+      hours: 0.004,
+      billRateCents: 12_000,
+      costRateCents: 8_000,
+    })).rejects.toMatchObject({ status: 400, code: "INVALID_INPUT" });
+
+    expect(prismaMock.practiceClient.create).not.toHaveBeenCalled();
+    expect(prismaMock.practiceConsultant.findFirst).not.toHaveBeenCalled();
+    expect(prismaMock.practiceConsultant.findMany).not.toHaveBeenCalled();
+    expect(prismaMock.practiceConsultant.create).not.toHaveBeenCalled();
+    expect(prismaMock.practiceTimeEntry.create).not.toHaveBeenCalled();
+  });
+
+  it("rejects derived native time amounts outside the database range before related writes", async () => {
+    prismaMock.practiceProject.findUnique.mockResolvedValueOnce({
+      id: "project-1",
+      workspaceId: "workspace-1",
+      crmAccountId: "account-1",
+      clientId: null,
+      billingCodeId: "billing-1",
+      code: "EXAMPLE-1",
+      clientName: "Example",
+      currency: "USD",
+    });
+
+    await expect(createNativePracticeTimeEntry(actor, "workspace-1", {
+      projectId: "project-1",
+      consultantName: "Priya Shah",
+      workedOn: new Date("2026-06-18T00:00:00.000Z"),
+      hours: 2,
+      billRateCents: 2_147_483_647,
+      costRateCents: 0,
+    })).rejects.toMatchObject({ status: 400, code: "INVALID_INPUT" });
+
+    expect(prismaMock.practiceClient.findUnique).not.toHaveBeenCalled();
+    expect(prismaMock.practiceClient.create).not.toHaveBeenCalled();
+    expect(prismaMock.practiceProject.update).not.toHaveBeenCalled();
+    expect(prismaMock.practiceConsultant.findMany).not.toHaveBeenCalled();
+    expect(prismaMock.practiceConsultant.create).not.toHaveBeenCalled();
+    expect(prismaMock.practiceTimeEntry.create).not.toHaveBeenCalled();
+  });
+
+  it("creates a collision-safe native client code instead of relinking an unrelated client", async () => {
+    prismaMock.practiceProject.findUnique.mockResolvedValueOnce({
+      id: "project-1",
+      workspaceId: "workspace-1",
+      crmAccountId: "account-2",
+      clientId: null,
+      billingCodeId: null,
+      code: "PROJECT-1",
+      clientName: "Foo Bar",
+      currency: "USD",
+    });
+    prismaMock.practiceClient.findUnique.mockResolvedValueOnce({
+      id: "client-collision",
+      crmAccountId: "account-1",
+      name: "Foo & Bar",
+    });
+
+    await createNativePracticeExpense(actor, "workspace-1", {
+      projectId: "project-1",
+      spentOn: new Date("2026-06-19T00:00:00.000Z"),
+      category: "Travel",
+      businessPurpose: "Client workshop",
+      amountCents: 45_678,
+      currency: "usd",
+    });
+
+    expect(prismaMock.practiceClient.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        workspaceId: "workspace-1",
+        crmAccountId: "account-2",
+        code: "FOO-BAR-project-1",
+        name: "Foo Bar",
+      }),
+      select: { id: true },
+    });
+    expect(prismaMock.practiceProject.update).toHaveBeenCalledWith({
+      where: { id: "project-1" },
+      data: { clientId: "client-1" },
+    });
+  });
+
+  it("rejects ambiguous CRM-linked native clients before recording an entry", async () => {
+    prismaMock.practiceProject.findUnique.mockResolvedValueOnce({
+      id: "project-1",
+      workspaceId: "workspace-1",
+      crmAccountId: "account-1",
+      clientId: null,
+      billingCodeId: null,
+      code: "PROJECT-1",
+      clientName: "Example",
+      currency: "USD",
+    });
+    prismaMock.practiceClient.findMany
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([{ id: "client-1" }, { id: "client-2" }]);
+
+    await expect(createNativePracticeExpense(actor, "workspace-1", {
+      projectId: "project-1",
+      spentOn: new Date("2026-06-19T00:00:00.000Z"),
+      category: "Travel",
+      businessPurpose: "Client workshop",
+      amountCents: 45_678,
+      currency: "usd",
+    })).rejects.toMatchObject({ status: 409, code: "AMBIGUOUS_CLIENT" });
+
+    expect(prismaMock.practiceClient.create).not.toHaveBeenCalled();
+    expect(prismaMock.practiceProject.update).not.toHaveBeenCalled();
+    expect(prismaMock.practiceExpense.create).not.toHaveBeenCalled();
+  });
+
+  it("wraps native time consultant resolution and client resolution in one transaction", async () => {
+    prismaMock.practiceProject.findUnique.mockResolvedValueOnce({
+      id: "project-1",
+      workspaceId: "workspace-1",
+      crmAccountId: "account-1",
+      clientId: null,
+      billingCodeId: null,
+      code: "PROJECT-1",
+      clientName: "Example",
+      currency: "USD",
+    });
+    prismaMock.practiceClient.findMany
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([{ id: "client-1" }, { id: "client-2" }]);
+
+    await expect(createNativePracticeTimeEntry(actor, "workspace-1", {
+      projectId: "project-1",
+      consultantName: "Priya Shah",
+      workedOn: new Date("2026-06-18T00:00:00.000Z"),
+      hours: 2.5,
+      billRateCents: 12_000,
+      costRateCents: 8_000,
+    })).rejects.toMatchObject({ status: 409, code: "AMBIGUOUS_CLIENT" });
+
+    expect(prismaMock.$transaction).toHaveBeenCalledTimes(1);
+    expect(prismaMock.practiceConsultant.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        workspaceId: "workspace-1",
+        name: "Priya Shah",
+      }),
+      select: { id: true },
+    });
+    expect(prismaMock.practiceTimeEntry.create).not.toHaveBeenCalled();
+  });
+
+  it("wraps native expense consultant resolution and client resolution in one transaction", async () => {
+    prismaMock.practiceProject.findUnique.mockResolvedValueOnce({
+      id: "project-1",
+      workspaceId: "workspace-1",
+      crmAccountId: "account-1",
+      clientId: null,
+      billingCodeId: null,
+      code: "PROJECT-1",
+      clientName: "Example",
+      currency: "USD",
+    });
+    prismaMock.practiceClient.findMany
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([{ id: "client-1" }, { id: "client-2" }]);
+
+    await expect(createNativePracticeExpense(actor, "workspace-1", {
+      projectId: "project-1",
+      consultantName: "Priya Shah",
+      spentOn: new Date("2026-06-19T00:00:00.000Z"),
+      category: "Travel",
+      businessPurpose: "Client workshop",
+      amountCents: 45_678,
+      currency: "usd",
+    })).rejects.toMatchObject({ status: 409, code: "AMBIGUOUS_CLIENT" });
+
+    expect(prismaMock.$transaction).toHaveBeenCalledTimes(1);
+    expect(prismaMock.practiceConsultant.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        workspaceId: "workspace-1",
+        name: "Priya Shah",
+      }),
+      select: { id: true },
+    });
+    expect(prismaMock.practiceExpense.create).not.toHaveBeenCalled();
+  });
+
+  it("reuses an existing non-CRM native client by name before provisioning a generated code", async () => {
+    prismaMock.practiceProject.findUnique.mockResolvedValueOnce({
+      id: "project-1",
+      workspaceId: "workspace-1",
+      crmAccountId: null,
+      clientId: null,
+      billingCodeId: null,
+      code: "PROJECT-1",
+      clientName: "Acme",
+      currency: "USD",
+    });
+    prismaMock.practiceClient.findMany.mockResolvedValueOnce([{ id: "client-imported" }]);
+
+    await createNativePracticeExpense(actor, "workspace-1", {
+      projectId: "project-1",
+      spentOn: new Date("2026-06-19T00:00:00.000Z"),
+      category: "Travel",
+      businessPurpose: "Client workshop",
+      amountCents: 45_678,
+      currency: "usd",
+    });
+
+    expect(prismaMock.practiceClient.findMany).toHaveBeenCalledWith({
+      where: {
+        workspaceId: "workspace-1",
+        crmAccountId: null,
+        name: { equals: "Acme", mode: "insensitive" },
+      },
+      select: { id: true },
+      orderBy: [{ id: "asc" }],
+      take: 2,
+    });
+    expect(prismaMock.practiceClient.findUnique).not.toHaveBeenCalled();
+    expect(prismaMock.practiceClient.create).not.toHaveBeenCalled();
+    expect(prismaMock.practiceProject.update).toHaveBeenCalledWith({
+      where: { id: "project-1" },
+      data: { clientId: "client-imported" },
+    });
+    expect(prismaMock.practiceExpense.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        clientId: "client-imported",
+        projectId: "project-1",
+      }),
+    });
+  });
+
+  it("rejects ambiguous non-CRM native clients before provisioning a generated code", async () => {
+    prismaMock.practiceProject.findUnique.mockResolvedValueOnce({
+      id: "project-1",
+      workspaceId: "workspace-1",
+      crmAccountId: null,
+      clientId: null,
+      billingCodeId: null,
+      code: "PROJECT-1",
+      clientName: "Acme",
+      currency: "USD",
+    });
+    prismaMock.practiceClient.findMany.mockResolvedValueOnce([{ id: "client-1" }, { id: "client-2" }]);
+
+    await expect(createNativePracticeExpense(actor, "workspace-1", {
+      projectId: "project-1",
+      spentOn: new Date("2026-06-19T00:00:00.000Z"),
+      category: "Travel",
+      businessPurpose: "Client workshop",
+      amountCents: 45_678,
+      currency: "usd",
+    })).rejects.toMatchObject({ status: 409, code: "AMBIGUOUS_CLIENT" });
+
+    expect(prismaMock.practiceClient.findUnique).not.toHaveBeenCalled();
+    expect(prismaMock.practiceClient.create).not.toHaveBeenCalled();
+    expect(prismaMock.practiceProject.update).not.toHaveBeenCalled();
+    expect(prismaMock.practiceExpense.create).not.toHaveBeenCalled();
+  });
+
+  it("serializes concurrent first-entry client provisioning before create", async () => {
+    prismaMock.practiceProject.findUnique.mockResolvedValueOnce({
+      id: "project-1",
+      workspaceId: "workspace-1",
+      crmAccountId: "account-1",
+      clientId: null,
+      billingCodeId: null,
+      code: "PROJECT-1",
+      clientName: "Example",
+      currency: "USD",
+    });
+    prismaMock.practiceClient.findUnique.mockResolvedValueOnce({
+      id: "client-race",
+      crmAccountId: "account-1",
+      name: "Example",
+    });
+
+    await createNativePracticeExpense(actor, "workspace-1", {
+      projectId: "project-1",
+      spentOn: new Date("2026-06-19T00:00:00.000Z"),
+      category: "Travel",
+      businessPurpose: "Client workshop",
+      amountCents: 45_678,
+      currency: "usd",
+    });
+
+    expect(prismaSqlText(prismaMock.$queryRaw.mock.calls[0]?.[0])).toContain("pg_advisory_xact_lock");
+    expect(prismaSqlValues(prismaMock.$queryRaw.mock.calls[0]?.[0])).toContain("native-practice-client:workspace-1:crm:account-1");
+    expect(prismaMock.practiceClient.findUnique).toHaveBeenCalledWith({
+      where: { workspaceId_code: { workspaceId: "workspace-1", code: "EXAMPLE" } },
+      select: { id: true, crmAccountId: true, name: true },
+    });
+    expect(prismaMock.practiceClient.create).not.toHaveBeenCalled();
+    expect(prismaMock.practiceProject.update).toHaveBeenCalledWith({
+      where: { id: "project-1" },
+      data: { clientId: "client-race" },
+    });
+    expect(prismaMock.practiceExpense.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        clientId: "client-race",
+        projectId: "project-1",
+      }),
+    });
+  });
+
+  it("serializes CRM client provisioning by account before name-specific fallback", async () => {
+    prismaMock.practiceProject.findUnique.mockResolvedValueOnce({
+      id: "project-1",
+      workspaceId: "workspace-1",
+      crmAccountId: "account-1",
+      clientId: null,
+      billingCodeId: null,
+      code: "PROJECT-1",
+      clientName: "Alternate Account Name",
+      currency: "USD",
+    });
+    prismaMock.practiceClient.findMany
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([{ id: "client-account" }]);
+
+    await createNativePracticeExpense(actor, "workspace-1", {
+      projectId: "project-1",
+      spentOn: new Date("2026-06-19T00:00:00.000Z"),
+      category: "Travel",
+      businessPurpose: "Client workshop",
+      amountCents: 45_678,
+      currency: "usd",
+    });
+
+    expect(prismaSqlText(prismaMock.$queryRaw.mock.calls[0]?.[0])).toContain("pg_advisory_xact_lock");
+    expect(prismaSqlValues(prismaMock.$queryRaw.mock.calls[0]?.[0])).toEqual(["native-practice-client:workspace-1:crm:account-1"]);
+    expect(prismaMock.practiceClient.findMany).toHaveBeenNthCalledWith(1, {
+      where: {
+        workspaceId: "workspace-1",
+        crmAccountId: "account-1",
+        name: { equals: "Alternate Account Name", mode: "insensitive" },
+      },
+      select: { id: true },
+      orderBy: [{ id: "asc" }],
+      take: 2,
+    });
+    expect(prismaMock.practiceClient.findMany).toHaveBeenNthCalledWith(2, {
+      where: { workspaceId: "workspace-1", crmAccountId: "account-1" },
+      select: { id: true },
+      orderBy: [{ id: "asc" }],
+      take: 2,
+    });
+    expect(prismaMock.practiceClient.create).not.toHaveBeenCalled();
+    expect(prismaMock.practiceProject.update).toHaveBeenCalledWith({
+      where: { id: "project-1" },
+      data: { clientId: "client-account" },
+    });
+    expect(prismaMock.practiceExpense.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        clientId: "client-account",
+        projectId: "project-1",
+      }),
+    });
+  });
+
+  it("uses a collision-safe native client code when serialized base-code lookup finds another client", async () => {
+    prismaMock.practiceProject.findUnique.mockResolvedValueOnce({
+      id: "project-1234567890",
+      workspaceId: "workspace-1",
+      crmAccountId: null,
+      clientId: null,
+      billingCodeId: null,
+      code: "PROJECT-1",
+      clientName: "Foo Bar",
+      currency: "USD",
+    });
+    prismaMock.practiceClient.findUnique.mockResolvedValueOnce({
+      id: "client-collision",
+      crmAccountId: null,
+      name: "Foo & Bar",
+    });
+    prismaMock.practiceClient.create.mockResolvedValueOnce({ id: "client-fallback-race" });
+
+    await createNativePracticeExpense(actor, "workspace-1", {
+      projectId: "project-1234567890",
+      spentOn: new Date("2026-06-19T00:00:00.000Z"),
+      category: "Travel",
+      businessPurpose: "Client workshop",
+      amountCents: 45_678,
+      currency: "usd",
+    });
+
+    expect(prismaSqlText(prismaMock.$queryRaw.mock.calls[0]?.[0])).toContain("pg_advisory_xact_lock");
+    expect(prismaSqlValues(prismaMock.$queryRaw.mock.calls[0]?.[0])).toContain("native-practice-client:workspace-1:code:FOO-BAR");
+    expect(prismaMock.practiceClient.create).toHaveBeenCalledTimes(1);
+    expect(prismaMock.practiceClient.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        workspaceId: "workspace-1",
+        crmAccountId: null,
+        code: "FOO-BAR-project-1234",
+        name: "Foo Bar",
+      }),
+      select: { id: true },
+    });
+    expect(prismaMock.practiceProject.update).toHaveBeenCalledWith({
+      where: { id: "project-1234567890" },
+      data: { clientId: "client-fallback-race" },
+    });
+    expect(prismaMock.practiceExpense.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        clientId: "client-fallback-race",
+        projectId: "project-1234567890",
+      }),
+    });
+  });
+
+  it("reuses a serialized project-suffixed native client created by a concurrent submission", async () => {
+    prismaMock.practiceProject.findUnique.mockResolvedValueOnce({
+      id: "project-1234567890",
+      workspaceId: "workspace-1",
+      crmAccountId: null,
+      clientId: null,
+      billingCodeId: null,
+      code: "PROJECT-1",
+      clientName: "Foo Bar",
+      currency: "USD",
+    });
+    prismaMock.practiceClient.findUnique
+      .mockResolvedValueOnce({
+        id: "client-collision",
+        crmAccountId: null,
+        name: "Foo & Bar",
+      })
+      .mockResolvedValueOnce({
+        id: "client-suffixed",
+        crmAccountId: null,
+        name: "Foo Bar",
+      });
+
+    await createNativePracticeExpense(actor, "workspace-1", {
+      projectId: "project-1234567890",
+      spentOn: new Date("2026-06-19T00:00:00.000Z"),
+      category: "Travel",
+      businessPurpose: "Client workshop",
+      amountCents: 45_678,
+      currency: "usd",
+    });
+
+    expect(prismaSqlText(prismaMock.$queryRaw.mock.calls[0]?.[0])).toContain("pg_advisory_xact_lock");
+    expect(prismaSqlValues(prismaMock.$queryRaw.mock.calls[0]?.[0])).toContain("native-practice-client:workspace-1:code:FOO-BAR");
+    expect(prismaMock.practiceClient.findUnique).toHaveBeenNthCalledWith(2, {
+      where: { workspaceId_code: { workspaceId: "workspace-1", code: "FOO-BAR-project-1234" } },
+      select: { id: true, crmAccountId: true, name: true },
+    });
+    expect(prismaMock.practiceClient.create).not.toHaveBeenCalled();
+    expect(prismaMock.practiceProject.update).toHaveBeenCalledWith({
+      where: { id: "project-1234567890" },
+      data: { clientId: "client-suffixed" },
+    });
+    expect(prismaMock.practiceExpense.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        clientId: "client-suffixed",
+        projectId: "project-1234567890",
+      }),
+    });
+  });
+
+  it("creates a fallback native client code for client names without ASCII code characters", async () => {
+    prismaMock.practiceProject.findUnique.mockResolvedValueOnce({
+      id: "project-abc-123",
+      workspaceId: "workspace-1",
+      crmAccountId: "account-2",
+      clientId: null,
+      billingCodeId: null,
+      code: "PROJECT-1",
+      clientName: "株式会社例",
+      currency: "USD",
+    });
+
+    await createNativePracticeExpense(actor, "workspace-1", {
+      projectId: "project-abc-123",
+      spentOn: new Date("2026-06-19T00:00:00.000Z"),
+      category: "Travel",
+      businessPurpose: "Client workshop",
+      amountCents: 45_678,
+      currency: "usd",
+    });
+
+    expect(prismaSqlValues(prismaMock.$queryRaw.mock.calls[0]?.[0])).toContain("native-practice-client:workspace-1:crm:account-2");
+    expect(prismaMock.practiceClient.findUnique).toHaveBeenCalledWith({
+      where: { workspaceId_code: { workspaceId: "workspace-1", code: "CLIENT-PROJECTABC12" } },
+      select: { id: true, crmAccountId: true, name: true },
+    });
+    expect(prismaMock.practiceClient.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        workspaceId: "workspace-1",
+        crmAccountId: "account-2",
+        code: "CLIENT-PROJECTABC12",
+        name: "株式会社例",
+      }),
+      select: { id: true },
+    });
+    expect(prismaMock.practiceProject.update).toHaveBeenCalledWith({
+      where: { id: "project-abc-123" },
+      data: { clientId: "client-1" },
+    });
+  });
+
+  it("serializes non-ASCII non-CRM clients by name before project fallback code", async () => {
+    prismaMock.practiceProject.findUnique.mockResolvedValueOnce({
+      id: "project-jp-123",
+      workspaceId: "workspace-1",
+      crmAccountId: null,
+      clientId: null,
+      billingCodeId: null,
+      code: "PROJECT-1",
+      clientName: "株式会社例",
+      currency: "USD",
+    });
+    prismaMock.practiceClient.findMany.mockResolvedValueOnce([{ id: "client-shared" }]);
+
+    await createNativePracticeExpense(actor, "workspace-1", {
+      projectId: "project-jp-123",
+      spentOn: new Date("2026-06-19T00:00:00.000Z"),
+      category: "Travel",
+      businessPurpose: "Client workshop",
+      amountCents: 45_678,
+      currency: "usd",
+    });
+
+    expect(prismaSqlText(prismaMock.$queryRaw.mock.calls[0]?.[0])).toContain("pg_advisory_xact_lock");
+    expect(prismaSqlValues(prismaMock.$queryRaw.mock.calls[0]?.[0])).toContain("native-practice-client:workspace-1:name:株式会社例");
+    expect(prismaMock.practiceClient.findMany).toHaveBeenCalledWith({
+      where: {
+        workspaceId: "workspace-1",
+        crmAccountId: null,
+        name: { equals: "株式会社例", mode: "insensitive" },
+      },
+      select: { id: true },
+      orderBy: [{ id: "asc" }],
+      take: 2,
+    });
+    expect(prismaMock.practiceClient.findUnique).not.toHaveBeenCalled();
+    expect(prismaMock.practiceClient.create).not.toHaveBeenCalled();
+    expect(prismaMock.practiceProject.update).toHaveBeenCalledWith({
+      where: { id: "project-jp-123" },
+      data: { clientId: "client-shared" },
+    });
   });
 
   it("creates a manual practice project behind finance-write access", async () => {
@@ -2124,7 +3581,7 @@ describe("practice-finance I/O", () => {
     expect(projectResult.status).toBe("ON_HOLD");
     expect(prismaMock.practiceProject.findUnique).toHaveBeenCalledWith({
       where: { id: "project-1" },
-      select: { id: true, workspaceId: true },
+      select: { id: true, workspaceId: true, clientId: true, clientName: true },
     });
     expect(prismaMock.practiceProject.update).toHaveBeenCalledWith({
       where: { id: "project-1" },
@@ -2135,6 +3592,28 @@ describe("practice-finance I/O", () => {
         status: "ON_HOLD",
         poValueCents: 40_000_00,
         currentMarginBps: 5200,
+      }),
+    });
+  });
+
+  it("disconnects a stale native client link when a project client name changes", async () => {
+    prismaMock.practiceProject.findUnique.mockResolvedValueOnce({
+      id: "project-1",
+      workspaceId: "workspace-1",
+      clientId: "client-old",
+      clientName: "Old Client",
+    });
+
+    await updatePracticeProject(actor, "workspace-1", {
+      projectId: "project-1",
+      clientName: "New Client",
+    });
+
+    expect(prismaMock.practiceProject.update).toHaveBeenCalledWith({
+      where: { id: "project-1" },
+      data: expect.objectContaining({
+        clientName: "New Client",
+        client: { disconnect: true },
       }),
     });
   });
