@@ -618,6 +618,26 @@ describe("importPracticeLedgerExport", () => {
     expect(result.reconciliation.targetBefore.missing.byEntity.clients).toBe(0);
   });
 
+  it("reconciles parsed source IDs from dependency-skipped rows", async () => {
+    const prisma = prismaFixture();
+    prisma.practiceProject.findMany.mockResolvedValueOnce([{ sourceSatelliteId: "project-skipped" }]);
+
+    const result = await importPracticeLedgerExport({
+      prisma,
+      workspaceId: "ws1",
+      batch: {
+        projects: [project({ id: "project-skipped", clientId: "missing-client" })],
+      },
+    });
+
+    expect(result.counts.source.projects).toBe(1);
+    expect(result.counts.planned.projects).toBe(0);
+    expect(result.counts.skipped.projects).toBe(1);
+    expect(result.reconciliation.source.byEntity.projects).toBe(1);
+    expect(result.reconciliation.targetBefore.matched.byEntity.projects).toBe(1);
+    expect(result.reconciliation.targetBefore.missing.byEntity.projects).toBe(0);
+  });
+
   it("chunks target reconciliation source id lookups for large exports", async () => {
     const prisma = prismaFixture();
     const timeEntries = Array.from({ length: 1005 }, (_, index) => ({

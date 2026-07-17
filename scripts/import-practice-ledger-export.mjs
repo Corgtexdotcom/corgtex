@@ -683,6 +683,7 @@ export function planImport(batch) {
   portableBatchSchemaVersion(batch);
   const entities = emptyEntityBuckets();
   const sourceCounts = emptyEntityCounts();
+  const reconciliationSourceIds = Object.fromEntries(ENTITY_ORDER.map((entity) => [entity, []]));
   const available = Object.fromEntries(ENTITY_ORDER.map((entity) => [entity, new Set()]));
   const rowsByEntity = Object.fromEntries(ENTITY_ORDER.map((entity) => [entity, new Map()]));
   const seenUniqueKeys = new Set();
@@ -698,6 +699,7 @@ export function planImport(batch) {
         entities[entity].skipped.push({ reason: "invalid", record });
         continue;
       }
+      reconciliationSourceIds[entity].push(parsed.sourceSatelliteId);
       const misses = dependencyMisses(parsed, available, entity);
       if (misses.length > 0) {
         entities[entity].skipped.push({
@@ -746,6 +748,7 @@ export function planImport(batch) {
 
   return {
     entities,
+    reconciliationSourceIds,
     counts: {
       source: sourceCounts,
       planned: counts.planned,
@@ -1253,7 +1256,7 @@ function chunked(values, size) {
 function reconciliationSourceIds(plan) {
   return Object.fromEntries(ENTITY_ORDER.map((entity) => [
     entity,
-    collectUnique(plan.entities[entity].valid.map((row) => row.sourceSatelliteId)),
+    collectUnique(plan.reconciliationSourceIds?.[entity] ?? plan.entities[entity].valid.map((row) => row.sourceSatelliteId)),
   ]));
 }
 
