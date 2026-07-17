@@ -10,6 +10,7 @@ import {
   markPracticeContributionEntryPaidAction,
   updatePracticeProjectAction,
 } from "./actions";
+import { PracticeFinanceNav } from "./components";
 
 function money(cents: number, currency = "USD"): string {
   const sign = cents < 0 ? "-" : "";
@@ -310,6 +311,7 @@ export function PracticeFinanceDashboard({
   attention,
   projectHealth,
   projects,
+  projectEditRows,
   contributionEntries,
   requestedPayables,
   requestedPayablesNextCursor,
@@ -324,11 +326,12 @@ export function PracticeFinanceDashboard({
   attention: PracticeAttentionItem[];
   projectHealth: NativePracticeProjectHealth[];
   projects: PracticeProject[];
+  projectEditRows: PracticeProject[];
   contributionEntries: PracticeContributionEntryWithContext[];
   requestedPayables: PracticeContributionEntryWithContext[];
   requestedPayablesNextCursor: string | null;
 }) {
-  const projectById = new Map(projects.map((project) => [project.id, project]));
+  const projectById = new Map(projectEditRows.map((project) => [project.id, project]));
 
   return (
     <section className="stack" style={{ gap: 20 }} data-finance-surface="practice-dashboard">
@@ -343,6 +346,14 @@ export function PracticeFinanceDashboard({
           {slicingPieEnabled && (
             <a className="link-button secondary" href={`/workspaces/${workspaceId}/finance/slicing-pie`}>Slicing Pie</a>
           )}
+        </div>
+        <div style={{ marginTop: 16 }}>
+          <PracticeFinanceNav
+            workspaceId={workspaceId}
+            active="overview"
+            practiceProjectsEnabled={practiceProjectsEnabled}
+            slicingPieEnabled={slicingPieEnabled}
+          />
         </div>
       </header>
 

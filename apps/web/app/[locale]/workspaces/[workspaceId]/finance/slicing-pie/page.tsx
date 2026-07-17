@@ -3,6 +3,7 @@ import type { PracticeContributionEntryWithContext } from "@corgtex/domain";
 
 import { requirePageActor } from "@/lib/auth";
 import { requireWorkspaceFeature } from "@/lib/workspace-feature-flags";
+import { PracticeFinanceNav } from "../components";
 
 export const dynamic = "force-dynamic";
 
@@ -53,6 +54,9 @@ export default async function SlicingPiePage({
             </div>
           </div>
           <a href={`/workspaces/${workspaceId}/finance`} className="link-button secondary">Practice Ledger</a>
+        </div>
+        <div style={{ marginTop: 16 }}>
+          <PracticeFinanceNav workspaceId={workspaceId} active="slicing-pie" slicingPieEnabled />
         </div>
       </header>
 

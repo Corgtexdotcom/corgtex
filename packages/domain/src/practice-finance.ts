@@ -202,6 +202,14 @@ export type NativePracticeConsultantUtilization = {
   billedCents: number;
   costCents: number;
   expenseCents: number;
+  financialTotals: NativePracticeConsultantCurrencyTotals[];
+};
+
+export type NativePracticeConsultantCurrencyTotals = {
+  currency: string;
+  billedCents: number;
+  costCents: number;
+  expenseCents: number;
 };
 
 export type NativePracticeContributionSourceType = "TIME_ENTRY" | "EXPENSE";
@@ -505,6 +513,59 @@ function assertSingleNativePracticeLedgerCurrency(
   }
   invariant(currencies.size <= 1, 400, "MIXED_CURRENCY", message);
   return currencies.values().next().value ?? null;
+}
+
+function addNativePracticeConsultantCurrencyTotal(
+  totals: Map<string, NativePracticeConsultantCurrencyTotals>,
+  currency: string | null,
+  amountCents: number,
+  key: "billedCents" | "costCents" | "expenseCents",
+  message: string,
+) {
+  invariant(amountCents === 0 || currency != null, 400, "MIXED_CURRENCY", message);
+  if (amountCents === 0 || currency == null) return;
+  const existing = totals.get(currency) ?? {
+    currency,
+    billedCents: 0,
+    costCents: 0,
+    expenseCents: 0,
+  };
+  existing[key] += amountCents;
+  totals.set(currency, existing);
+}
+
+function nativePracticeConsultantCurrencyTotals(
+  timeEntries: NativePracticeTimeEntry[],
+  expenses: NativePracticeExpense[],
+  message: string,
+): NativePracticeConsultantCurrencyTotals[] {
+  const totals = new Map<string, NativePracticeConsultantCurrencyTotals>();
+  for (const entry of timeEntries) {
+    addNativePracticeConsultantCurrencyTotal(
+      totals,
+      practiceTimeBillAmountCurrency(entry),
+      practiceTimeBillAmountCents(entry),
+      "billedCents",
+      message,
+    );
+    addNativePracticeConsultantCurrencyTotal(
+      totals,
+      practiceTimeCostAmountCurrency(entry),
+      practiceTimeCostAmountCents(entry),
+      "costCents",
+      message,
+    );
+  }
+  for (const expense of expenses) {
+    addNativePracticeConsultantCurrencyTotal(
+      totals,
+      practiceExpenseAmountCurrency(expense),
+      practiceExpenseFunctionalAmountCents(expense),
+      "expenseCents",
+      message,
+    );
+  }
+  return [...totals.values()].sort((a, b) => a.currency.localeCompare(b.currency));
 }
 
 function emptyNativePracticeProjectLedgerRollup(projectId: string): NativePracticeProjectLedgerRollup {
@@ -821,17 +882,15 @@ export function calculateNativePracticeConsultantUtilization(params: {
   for (const entry of timeEntries) {
     assertNativePracticeTimeEntryHours(entry);
   }
-  const currency = assertSingleNativePracticeLedgerCurrency(
+  const financialTotals = nativePracticeConsultantCurrencyTotals(
     timeEntries,
     expenses,
-    "Native practice consultant financial totals require one normalized currency.",
+    "Native practice consultant financial totals require normalized currencies.",
   );
+  const singleCurrencyTotals = financialTotals.length === 1 ? financialTotals[0] : null;
   const recentHours = timeEntries
     .filter((entry) => isWithinDateWindow(entry.workedOn, recent))
     .reduce((sum, entry) => sum + decimalToNumber(entry.hours), 0);
-  const billedCents = timeEntries.reduce((sum, entry) => sum + practiceTimeBillAmountCents(entry), 0);
-  const costCents = timeEntries.reduce((sum, entry) => sum + practiceTimeCostAmountCents(entry), 0);
-  const expenseCents = expenses.reduce((sum, expense) => sum + practiceExpenseFunctionalAmountCents(expense), 0);
   const capacityHoursPerWeek = params.capacityHoursPerWeek ?? 40;
   invariant(
     Number.isFinite(capacityHoursPerWeek) && capacityHoursPerWeek >= 0,
@@ -857,10 +916,11 @@ export function calculateNativePracticeConsultantUtilization(params: {
     recentHours: roundHours(recentHours),
     averageWeeklyHours,
     utilizationBps,
-    currency,
-    billedCents,
-    costCents,
-    expenseCents,
+    currency: singleCurrencyTotals?.currency ?? null,
+    billedCents: singleCurrencyTotals?.billedCents ?? 0,
+    costCents: singleCurrencyTotals?.costCents ?? 0,
+    expenseCents: singleCurrencyTotals?.expenseCents ?? 0,
+    financialTotals,
   };
 }
 
@@ -1168,6 +1228,17 @@ export type ListPracticeProjectsOptions = {
   cursor?: string | null;
 };
 
+export type NativePracticeListPage<T> = {
+  items: T[];
+  nextCursor: string | null;
+};
+
+export type NativePracticeLedgerEntryListOptions = ListPracticeProjectsOptions & {
+  clientId?: string | null;
+  consultantId?: string | null;
+  projectId?: string | null;
+};
+
 export type ListNativePracticeProjectHealthOptions = ListPracticeProjectsOptions & NativePracticeProjectHealthOptions;
 
 export type NativePracticeFinanceDashboard = {
@@ -1199,6 +1270,126 @@ export type NativePracticeProjectDetail = {
   }>>;
   consultants: NativePracticeConsultant[];
 };
+
+export type NativePracticeProjectExportRow = {
+  project: PracticeProject;
+  health: NativePracticeProjectHealth;
+};
+
+const PRACTICE_CLIENT_LIST_SELECT = {
+  id: true,
+  workspaceId: true,
+  crmAccountId: true,
+  code: true,
+  name: true,
+  leadName: true,
+  status: true,
+  sourceSatelliteId: true,
+  createdAt: true,
+  updatedAt: true,
+  crmAccount: { select: { id: true, name: true } },
+  _count: { select: { billingCodes: true, projects: true, timeEntries: true, expenses: true } },
+} satisfies Prisma.PracticeClientSelect;
+
+const PRACTICE_CLIENT_DETAIL_INCLUDE = {
+  crmAccount: { select: { id: true, name: true } },
+  _count: { select: { billingCodes: true, projects: true, timeEntries: true, expenses: true } },
+} satisfies Prisma.PracticeClientInclude;
+
+export type NativePracticeClientListItem = Prisma.PracticeClientGetPayload<{
+  select: typeof PRACTICE_CLIENT_LIST_SELECT;
+}>;
+
+export type NativePracticeClientDetail = {
+  client: Prisma.PracticeClientGetPayload<{ include: typeof PRACTICE_CLIENT_DETAIL_INCLUDE }>;
+  projectHealth: NativePracticeProjectHealth[];
+  recentTimeEntries: NativePracticeTimeEntryWithContext[];
+  recentExpenses: NativePracticeExpenseWithContext[];
+};
+
+const PRACTICE_CONSULTANT_LIST_SELECT = {
+  id: true,
+  workspaceId: true,
+  name: true,
+  email: true,
+  homeCurrency: true,
+  active: true,
+  sourceSatelliteId: true,
+  createdAt: true,
+  updatedAt: true,
+  _count: { select: { assignments: true, timeEntries: true, expenses: true, paymentBatches: true } },
+} satisfies Prisma.PracticeConsultantSelect;
+
+export type NativePracticeConsultantListItem = Prisma.PracticeConsultantGetPayload<{
+  select: typeof PRACTICE_CONSULTANT_LIST_SELECT;
+}>;
+
+export type NativePracticeConsultantDetail = {
+  consultant: NativePracticeConsultantListItem;
+  utilization: NativePracticeConsultantUtilization;
+  projectHealth: NativePracticeProjectHealth[];
+  recentTimeEntries: NativePracticeTimeEntryWithContext[];
+  recentExpenses: NativePracticeExpenseWithContext[];
+};
+
+const PRACTICE_TIME_ENTRY_LIST_INCLUDE = {
+  client: { select: { id: true, code: true, name: true } },
+  consultant: { select: { id: true, name: true, email: true } },
+  project: { select: { id: true, code: true, name: true, clientName: true } },
+  reviews: { select: { id: true, status: true, note: true, updatedAt: true } },
+} satisfies Prisma.PracticeTimeEntryInclude;
+
+const PRACTICE_EXPENSE_LIST_INCLUDE = {
+  client: { select: { id: true, code: true, name: true } },
+  consultant: { select: { id: true, name: true, email: true } },
+  project: { select: { id: true, code: true, name: true, clientName: true } },
+  reviews: { select: { id: true, status: true, note: true, updatedAt: true } },
+} satisfies Prisma.PracticeExpenseInclude;
+
+const NATIVE_PRACTICE_TIME_ENTRY_SELECT = {
+  id: true,
+  projectId: true,
+  consultantId: true,
+  workedOn: true,
+  weekEndingOn: true,
+  hours: true,
+  currency: true,
+  billCurrency: true,
+  costCurrency: true,
+  functionalCurrency: true,
+  billRateCents: true,
+  costRateCents: true,
+  billAmountCents: true,
+  costAmountCents: true,
+  paidAmountCents: true,
+  paymentBatchId: true,
+  status: true,
+  sourceSatelliteId: true,
+} satisfies Prisma.PracticeTimeEntrySelect;
+
+const NATIVE_PRACTICE_EXPENSE_SELECT = {
+  id: true,
+  projectId: true,
+  consultantId: true,
+  spentOn: true,
+  category: true,
+  amountCents: true,
+  currency: true,
+  amountFunctionalCents: true,
+  functionalCurrency: true,
+  billable: true,
+  paymentBatchId: true,
+  status: true,
+  sourceSatelliteId: true,
+} satisfies Prisma.PracticeExpenseSelect;
+
+export type NativePracticeTimeEntryWithContext = Prisma.PracticeTimeEntryGetPayload<{
+  include: typeof PRACTICE_TIME_ENTRY_LIST_INCLUDE;
+}>;
+
+export type NativePracticeExpenseWithContext = Prisma.PracticeExpenseGetPayload<{
+  include: typeof PRACTICE_EXPENSE_LIST_INCLUDE;
+}>;
 
 export type CreateNativePracticeTimeEntryInput = {
   projectId: string;
@@ -1542,6 +1733,22 @@ export async function listPracticeProjects(
     take: normalizeTake(options.take),
     ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
   });
+}
+
+export async function listPracticeProjectsWithSelection(
+  actor: AppActor,
+  workspaceId: string,
+  options: ListPracticeProjectsOptions & { selectedProjectId?: string | null } = {},
+): Promise<PracticeProject[]> {
+  const projects = await listPracticeProjects(actor, workspaceId, options);
+  const selectedProjectId = normalizeCursor(options.selectedProjectId);
+  if (!selectedProjectId || projects.some((project) => project.id === selectedProjectId)) {
+    return projects;
+  }
+  const selectedProject = await prisma.practiceProject.findFirst({
+    where: { id: selectedProjectId, workspaceId },
+  });
+  return selectedProject ? [selectedProject, ...projects] : projects;
 }
 
 export async function getPracticeFinanceDashboard(
@@ -2013,6 +2220,33 @@ export async function listNativePracticeProjectHealthByIds(
   ]));
 }
 
+export async function listNativePracticeProjectExportRows(
+  actor: AppActor,
+  workspaceId: string,
+  options: ListNativePracticeProjectHealthOptions = {},
+): Promise<NativePracticeListPage<NativePracticeProjectExportRow>> {
+  await requireWorkspaceMembership({ actor, workspaceId });
+  const take = normalizeTake(options.take);
+  const cursor = normalizeCursor(options.cursor);
+  const rows = await prisma.practiceProject.findMany({
+    where: { workspaceId },
+    orderBy: [{ status: "asc" }, { code: "asc" }, { id: "asc" }],
+    take: take + 1,
+    ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
+  });
+  const projects = rows.slice(0, take);
+  const healthRows = await healthForNativePracticeProjects(workspaceId, projects, options);
+  const healthByProjectId = new Map(healthRows.map((health) => [health.projectId, health]));
+
+  return {
+    items: projects.map((project) => ({
+      project,
+      health: healthByProjectId.get(project.id)!,
+    })),
+    nextCursor: rows.length > take ? projects.at(-1)?.id ?? null : null,
+  };
+}
+
 export async function getNativePracticeFinanceDashboard(
   actor: AppActor,
   workspaceId: string,
@@ -2039,6 +2273,334 @@ export async function getNativePracticeFinanceDashboard(
     attention: collectNativePracticeAttention(projectHealth),
     projectHealth,
   };
+}
+
+function pagedItems<T extends { id: string }>(rows: T[], take: number): NativePracticeListPage<T> {
+  const items = rows.slice(0, take);
+  return {
+    items,
+    nextCursor: rows.length > take ? items.at(-1)?.id ?? null : null,
+  };
+}
+
+function nativeLedgerEntryWhere(
+  workspaceId: string,
+  options: NativePracticeLedgerEntryListOptions = {},
+): {
+  workspaceId: string;
+  clientId?: string;
+  consultantId?: string;
+  projectId?: string;
+} {
+  const clientId = normalizeCursor(options.clientId);
+  const consultantId = normalizeCursor(options.consultantId);
+  const projectId = normalizeCursor(options.projectId);
+  return {
+    workspaceId,
+    ...(clientId ? { clientId } : {}),
+    ...(consultantId ? { consultantId } : {}),
+    ...(projectId ? { projectId } : {}),
+  };
+}
+
+async function healthForNativePracticeProjects(
+  workspaceId: string,
+  projects: NativePracticeProject[],
+  options: NativePracticeProjectHealthOptions = {},
+) {
+  const now = normalizeNow(options.now);
+  const recentWindowWeeks = normalizeRecentWindowWeeks(options.recentWindowWeeks);
+  const rollups = await queryNativePracticeLedgerRollups(
+    workspaceId,
+    projects.map((project) => project.id),
+    weekWindow(now, recentWindowWeeks),
+  );
+  return projects.map((project) => calculateNativePracticeProjectHealthFromRollup({
+    project,
+    rollup: rollups.get(project.id) ?? emptyNativePracticeProjectLedgerRollup(project.id),
+    recentWindowWeeks,
+  }));
+}
+
+export async function listNativePracticeClients(
+  actor: AppActor,
+  workspaceId: string,
+  options: ListPracticeProjectsOptions = {},
+): Promise<NativePracticeListPage<NativePracticeClientListItem>> {
+  await requireWorkspaceMembership({ actor, workspaceId });
+  const take = normalizeTake(options.take);
+  const cursor = normalizeCursor(options.cursor);
+  const rows = await prisma.practiceClient.findMany({
+    where: { workspaceId },
+    select: PRACTICE_CLIENT_LIST_SELECT,
+    orderBy: [{ status: "asc" }, { name: "asc" }, { id: "asc" }],
+    take: take + 1,
+    ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
+  });
+  return pagedItems(rows, take);
+}
+
+async function listNativePracticeClientProjectRows(workspaceId: string, clientId: string): Promise<NativePracticeProject[]> {
+  const projects: NativePracticeProject[] = [];
+  let cursor: string | null = null;
+  const take = MAX_PRACTICE_PROJECT_TAKE;
+
+  while (true) {
+    const page: NativePracticeProject[] = await prisma.practiceProject.findMany({
+      where: { workspaceId, clientId },
+      select: NATIVE_PRACTICE_PROJECT_SELECT,
+      orderBy: [{ status: "asc" }, { code: "asc" }, { id: "asc" }],
+      take,
+      ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
+    });
+    projects.push(...page);
+    if (page.length < take) break;
+    cursor = page.at(-1)?.id ?? null;
+    if (!cursor) break;
+  }
+
+  return projects;
+}
+
+async function listNativePracticeConsultantProjectRows(workspaceId: string, consultantId: string): Promise<NativePracticeProject[]> {
+  const projects: NativePracticeProject[] = [];
+  let cursor: string | null = null;
+  const take = MAX_PRACTICE_PROJECT_TAKE;
+
+  while (true) {
+    const page: NativePracticeProject[] = await prisma.practiceProject.findMany({
+      where: {
+        workspaceId,
+        assignments: { some: { consultantId } },
+      },
+      select: NATIVE_PRACTICE_PROJECT_SELECT,
+      orderBy: [{ status: "asc" }, { code: "asc" }, { id: "asc" }],
+      take,
+      ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
+    });
+    projects.push(...page);
+    if (page.length < take) break;
+    cursor = page.at(-1)?.id ?? null;
+    if (!cursor) break;
+  }
+
+  return projects;
+}
+
+async function listNativePracticeConsultantTimeRows(workspaceId: string, consultantId: string): Promise<NativePracticeTimeEntry[]> {
+  const entries: NativePracticeTimeEntry[] = [];
+  let cursor: string | null = null;
+  const take = MAX_PRACTICE_PROJECT_TAKE;
+
+  while (true) {
+    const page: NativePracticeTimeEntry[] = await prisma.practiceTimeEntry.findMany({
+      where: {
+        workspaceId,
+        consultantId,
+        status: "POSTED",
+      },
+      select: NATIVE_PRACTICE_TIME_ENTRY_SELECT,
+      orderBy: [{ id: "asc" }],
+      take,
+      ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
+    });
+    entries.push(...page);
+    if (page.length < take) break;
+    cursor = page.at(-1)?.id ?? null;
+    if (!cursor) break;
+  }
+
+  return entries;
+}
+
+async function listNativePracticeConsultantExpenseRows(workspaceId: string, consultantId: string): Promise<NativePracticeExpense[]> {
+  const expenses: NativePracticeExpense[] = [];
+  let cursor: string | null = null;
+  const take = MAX_PRACTICE_PROJECT_TAKE;
+
+  while (true) {
+    const page: NativePracticeExpense[] = await prisma.practiceExpense.findMany({
+      where: {
+        workspaceId,
+        consultantId,
+        status: "POSTED",
+      },
+      select: NATIVE_PRACTICE_EXPENSE_SELECT,
+      orderBy: [{ id: "asc" }],
+      take,
+      ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
+    });
+    expenses.push(...page);
+    if (page.length < take) break;
+    cursor = page.at(-1)?.id ?? null;
+    if (!cursor) break;
+  }
+
+  return expenses;
+}
+
+export async function getNativePracticeClientDetail(
+  actor: AppActor,
+  workspaceId: string,
+  clientId: string,
+  options: NativePracticeProjectHealthOptions = {},
+): Promise<NativePracticeClientDetail> {
+  await requireWorkspaceMembership({ actor, workspaceId });
+  const id = normalizeCursor(clientId);
+  invariant(id, 400, "INVALID_INPUT", "Client is required.");
+  const client = await prisma.practiceClient.findUnique({
+    where: { id },
+    include: PRACTICE_CLIENT_DETAIL_INCLUDE,
+  });
+  invariant(client && client.workspaceId === workspaceId, 404, "NOT_FOUND", "Practice client not found.");
+
+  const [projects, recentTimeEntries, recentExpenses] = await Promise.all([
+    listNativePracticeClientProjectRows(workspaceId, client.id),
+    prisma.practiceTimeEntry.findMany({
+      where: { workspaceId, clientId: client.id },
+      include: PRACTICE_TIME_ENTRY_LIST_INCLUDE,
+      orderBy: [{ workedOn: "desc" }, { createdAt: "desc" }, { id: "asc" }],
+      take: 50,
+    }),
+    prisma.practiceExpense.findMany({
+      where: { workspaceId, clientId: client.id },
+      include: PRACTICE_EXPENSE_LIST_INCLUDE,
+      orderBy: [{ spentOn: "desc" }, { createdAt: "desc" }, { id: "asc" }],
+      take: 50,
+    }),
+  ]);
+
+  return {
+    client,
+    projectHealth: await healthForNativePracticeProjects(workspaceId, projects, options),
+    recentTimeEntries,
+    recentExpenses,
+  };
+}
+
+export async function listNativePracticeConsultants(
+  actor: AppActor,
+  workspaceId: string,
+  options: ListPracticeProjectsOptions = {},
+): Promise<NativePracticeListPage<NativePracticeConsultantListItem>> {
+  await requireWorkspaceMembership({ actor, workspaceId });
+  const take = normalizeTake(options.take);
+  const cursor = normalizeCursor(options.cursor);
+  const rows = await prisma.practiceConsultant.findMany({
+    where: { workspaceId },
+    select: PRACTICE_CONSULTANT_LIST_SELECT,
+    orderBy: [{ active: "desc" }, { name: "asc" }, { id: "asc" }],
+    take: take + 1,
+    ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
+  });
+  return pagedItems(rows, take);
+}
+
+export async function getNativePracticeConsultantDetail(
+  actor: AppActor,
+  workspaceId: string,
+  consultantId: string,
+  options: NativePracticeProjectHealthOptions = {},
+): Promise<NativePracticeConsultantDetail> {
+  await requireWorkspaceMembership({ actor, workspaceId });
+  const id = normalizeCursor(consultantId);
+  invariant(id, 400, "INVALID_INPUT", "Consultant is required.");
+  const consultant = await prisma.practiceConsultant.findUnique({
+    where: { id },
+    select: PRACTICE_CONSULTANT_LIST_SELECT,
+  });
+  invariant(consultant && consultant.workspaceId === workspaceId, 404, "NOT_FOUND", "Practice consultant not found.");
+
+  const now = normalizeNow(options.now);
+  const recentWindowWeeks = normalizeRecentWindowWeeks(options.recentWindowWeeks);
+  const recent = weekWindow(now, recentWindowWeeks);
+  const [projects, utilizationTimeEntries, utilizationExpenses, recentTimeEntries, recentExpenses] = await Promise.all([
+    listNativePracticeConsultantProjectRows(workspaceId, consultant.id),
+    listNativePracticeConsultantTimeRows(workspaceId, consultant.id),
+    listNativePracticeConsultantExpenseRows(workspaceId, consultant.id),
+    prisma.practiceTimeEntry.findMany({
+      where: {
+        workspaceId,
+        consultantId: consultant.id,
+        workedOn: { gt: recent.startsOn, lte: recent.endsOn },
+      },
+      include: PRACTICE_TIME_ENTRY_LIST_INCLUDE,
+      orderBy: [{ workedOn: "desc" }, { createdAt: "desc" }, { id: "asc" }],
+      take: 50,
+    }),
+    prisma.practiceExpense.findMany({
+      where: {
+        workspaceId,
+        consultantId: consultant.id,
+        spentOn: { gt: recent.startsOn, lte: recent.endsOn },
+      },
+      include: PRACTICE_EXPENSE_LIST_INCLUDE,
+      orderBy: [{ spentOn: "desc" }, { createdAt: "desc" }, { id: "asc" }],
+      take: 50,
+    }),
+  ]);
+  const timeProjectIds = utilizationTimeEntries.map((entry) => entry.projectId);
+  const expenseProjectIds = utilizationExpenses.map((entry) => entry.projectId);
+  const projectIds = Array.from(new Set([...projects.map((project) => project.id), ...timeProjectIds, ...expenseProjectIds]));
+  const assignedProjectIds = new Set(projects.map((project) => project.id));
+  const missingProjectIds = projectIds.filter((projectId) => !assignedProjectIds.has(projectId));
+  const projectRows = missingProjectIds.length === 0
+    ? projects
+    : [...projects, ...await prisma.practiceProject.findMany({
+      where: { workspaceId, id: { in: missingProjectIds } },
+      select: NATIVE_PRACTICE_PROJECT_SELECT,
+      orderBy: [{ status: "asc" }, { code: "asc" }, { id: "asc" }],
+    })];
+
+  return {
+    consultant,
+    utilization: calculateNativePracticeConsultantUtilization({
+      consultant,
+      timeEntries: utilizationTimeEntries,
+      expenses: utilizationExpenses,
+      now,
+      recentWindowWeeks,
+    }),
+    projectHealth: await healthForNativePracticeProjects(workspaceId, projectRows, { now, recentWindowWeeks }),
+    recentTimeEntries,
+    recentExpenses,
+  };
+}
+
+export async function listNativePracticeTimeEntryPage(
+  actor: AppActor,
+  workspaceId: string,
+  options: NativePracticeLedgerEntryListOptions = {},
+): Promise<NativePracticeListPage<NativePracticeTimeEntryWithContext>> {
+  await requireWorkspaceMembership({ actor, workspaceId });
+  const take = normalizeTake(options.take);
+  const cursor = normalizeCursor(options.cursor);
+  const rows: NativePracticeTimeEntryWithContext[] = await prisma.practiceTimeEntry.findMany({
+    where: nativeLedgerEntryWhere(workspaceId, options),
+    include: PRACTICE_TIME_ENTRY_LIST_INCLUDE,
+    orderBy: [{ workedOn: "desc" }, { createdAt: "desc" }, { id: "asc" }],
+    take: take + 1,
+    ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
+  });
+  return pagedItems(rows, take);
+}
+
+export async function listNativePracticeExpensePage(
+  actor: AppActor,
+  workspaceId: string,
+  options: NativePracticeLedgerEntryListOptions = {},
+): Promise<NativePracticeListPage<NativePracticeExpenseWithContext>> {
+  await requireWorkspaceMembership({ actor, workspaceId });
+  const take = normalizeTake(options.take);
+  const cursor = normalizeCursor(options.cursor);
+  const rows: NativePracticeExpenseWithContext[] = await prisma.practiceExpense.findMany({
+    where: nativeLedgerEntryWhere(workspaceId, options),
+    include: PRACTICE_EXPENSE_LIST_INCLUDE,
+    orderBy: [{ spentOn: "desc" }, { createdAt: "desc" }, { id: "asc" }],
+    take: take + 1,
+    ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
+  });
+  return pagedItems(rows, take);
 }
 
 async function requireProjectInWorkspace(workspaceId: string, projectId: string) {
