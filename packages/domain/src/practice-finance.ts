@@ -2085,8 +2085,8 @@ function nativePracticeClientMatchesProject(
   );
 }
 
-async function linkNativePracticeProjectClient(projectId: string, clientId: string) {
-  await prisma.practiceProject.update({
+async function linkNativePracticeProjectClient(db: PracticeFinanceDbClient, projectId: string, clientId: string) {
+  await db.practiceProject.update({
     where: { id: projectId },
     data: { clientId },
   });
@@ -2216,11 +2216,14 @@ async function lockNativePracticeConsultantIdentity(
   }
 }
 
-async function ensureNativePracticeClientForProject(project: Awaited<ReturnType<typeof loadNativePracticeProjectForLedgerWrite>>) {
+async function ensureNativePracticeClientForProject(
+  db: PracticeFinanceDbClient,
+  project: Awaited<ReturnType<typeof loadNativePracticeProjectForLedgerWrite>>,
+) {
   if (project.clientId) return project.clientId;
 
   if (project.crmAccountId) {
-    const namedCrmClients = await prisma.practiceClient.findMany({
+    const namedCrmClients = await db.practiceClient.findMany({
       where: {
         workspaceId: project.workspaceId,
         crmAccountId: project.crmAccountId,
@@ -2237,10 +2240,10 @@ async function ensureNativePracticeClientForProject(project: Awaited<ReturnType<
       "CRM account is linked to multiple matching practice clients; resolve duplicate clients before recording ledger entries.",
     );
     if (namedCrmClients[0]) {
-      return linkNativePracticeProjectClient(project.id, namedCrmClients[0].id);
+      return linkNativePracticeProjectClient(db, project.id, namedCrmClients[0].id);
     }
 
-    const crmClients = await prisma.practiceClient.findMany({
+    const crmClients = await db.practiceClient.findMany({
       where: { workspaceId: project.workspaceId, crmAccountId: project.crmAccountId },
       select: { id: true },
       orderBy: [{ id: "asc" }],
@@ -2253,10 +2256,10 @@ async function ensureNativePracticeClientForProject(project: Awaited<ReturnType<
       "CRM account is linked to multiple practice clients; resolve duplicate clients before recording ledger entries.",
     );
     if (crmClients[0]) {
-      return linkNativePracticeProjectClient(project.id, crmClients[0].id);
+      return linkNativePracticeProjectClient(db, project.id, crmClients[0].id);
     }
   } else {
-    const namedClients = await prisma.practiceClient.findMany({
+    const namedClients = await db.practiceClient.findMany({
       where: {
         workspaceId: project.workspaceId,
         crmAccountId: null,
@@ -2273,23 +2276,23 @@ async function ensureNativePracticeClientForProject(project: Awaited<ReturnType<
       "Client name is linked to multiple practice clients; resolve duplicate clients before recording ledger entries.",
     );
     if (namedClients[0]) {
-      return linkNativePracticeProjectClient(project.id, namedClients[0].id);
+      return linkNativePracticeProjectClient(db, project.id, namedClients[0].id);
     }
   }
 
   const baseCode = normalizeProjectCodeBase(project.clientName).slice(0, 80) || `CLIENT-${projectIdCodeSuffix(project.id)}`;
   const suffixedCode = `${baseCode.slice(0, 67)}-${project.id.slice(0, 12)}`;
-  const existingCodeClient = await prisma.practiceClient.findUnique({
+  const existingCodeClient = await db.practiceClient.findUnique({
     where: { workspaceId_code: { workspaceId: project.workspaceId, code: baseCode } },
     select: { id: true, crmAccountId: true, name: true },
   });
   if (existingCodeClient && nativePracticeClientMatchesProject(existingCodeClient, project)) {
-    return linkNativePracticeProjectClient(project.id, existingCodeClient.id);
+    return linkNativePracticeProjectClient(db, project.id, existingCodeClient.id);
   }
 
   const code = existingCodeClient ? suffixedCode : baseCode;
   try {
-    const client = await prisma.practiceClient.create({
+    const client = await db.practiceClient.create({
       data: {
         workspaceId: project.workspaceId,
         crmAccountId: project.crmAccountId,
@@ -2298,19 +2301,19 @@ async function ensureNativePracticeClientForProject(project: Awaited<ReturnType<
       },
       select: { id: true },
     });
-    return linkNativePracticeProjectClient(project.id, client.id);
+    return linkNativePracticeProjectClient(db, project.id, client.id);
   } catch (error) {
     if (!isUniqueConstraintError(error)) throw error;
-    const client = await prisma.practiceClient.findUnique({
+    const client = await db.practiceClient.findUnique({
       where: { workspaceId_code: { workspaceId: project.workspaceId, code } },
       select: { id: true, crmAccountId: true, name: true },
     });
     if (client && nativePracticeClientMatchesProject(client, project)) {
-      return linkNativePracticeProjectClient(project.id, client.id);
+      return linkNativePracticeProjectClient(db, project.id, client.id);
     }
     if (code !== suffixedCode) {
       try {
-        const fallbackClient = await prisma.practiceClient.create({
+        const fallbackClient = await db.practiceClient.create({
           data: {
             workspaceId: project.workspaceId,
             crmAccountId: project.crmAccountId,
@@ -2319,15 +2322,15 @@ async function ensureNativePracticeClientForProject(project: Awaited<ReturnType<
           },
           select: { id: true },
         });
-        return linkNativePracticeProjectClient(project.id, fallbackClient.id);
+        return linkNativePracticeProjectClient(db, project.id, fallbackClient.id);
       } catch (fallbackError) {
         if (!isUniqueConstraintError(fallbackError)) throw fallbackError;
-        const fallbackClient = await prisma.practiceClient.findUnique({
+        const fallbackClient = await db.practiceClient.findUnique({
           where: { workspaceId_code: { workspaceId: project.workspaceId, code: suffixedCode } },
           select: { id: true, crmAccountId: true, name: true },
         });
         if (fallbackClient && nativePracticeClientMatchesProject(fallbackClient, project)) {
-          return linkNativePracticeProjectClient(project.id, fallbackClient.id);
+          return linkNativePracticeProjectClient(db, project.id, fallbackClient.id);
         }
         throw fallbackError;
       }
@@ -2336,7 +2339,7 @@ async function ensureNativePracticeClientForProject(project: Awaited<ReturnType<
   }
 }
 
-async function resolveNativePracticeConsultant(params: {
+async function resolveNativePracticeConsultant(db: Prisma.TransactionClient, params: {
   workspaceId: string;
   name?: string | null;
   email?: string | null;
@@ -2351,58 +2354,56 @@ async function resolveNativePracticeConsultant(params: {
   invariant(displayName, 400, "INVALID_INPUT", "Consultant is required.");
 
   const lookup = { workspaceId: params.workspaceId, displayName, email };
-  const matches = await findNativePracticeConsultantMatches(prisma, lookup);
+  const matches = await findNativePracticeConsultantMatches(db, lookup);
   assertUnambiguousNativePracticeConsultant(matches, email);
   if (matches[0] && !nativePracticeConsultantMatchNeedsEmail(matches[0], email)) {
-    return applyNativePracticeConsultantMatch(prisma, matches[0], email);
+    return applyNativePracticeConsultantMatch(db, matches[0], email);
   }
 
   const sourceSatelliteId = manualLedgerConsultantSourceId(params.sourceKind, params.idempotencyKey);
   if (sourceSatelliteId) {
-    const sourceMatch = await prisma.practiceConsultant.findFirst({
+    const sourceMatch = await db.practiceConsultant.findFirst({
       where: { workspaceId: params.workspaceId, sourceSatelliteId },
       select: { id: true },
     });
     if (sourceMatch) return sourceMatch.id;
   }
 
-  return prisma.$transaction(async (tx) => {
-    await lockNativePracticeConsultantIdentity(tx, nativePracticeConsultantIdentityLockKeys(lookup));
+  await lockNativePracticeConsultantIdentity(db, nativePracticeConsultantIdentityLockKeys(lookup));
 
-    const lockedMatches = await findNativePracticeConsultantMatches(tx, lookup);
-    assertUnambiguousNativePracticeConsultant(lockedMatches, email);
-    if (lockedMatches[0]) return applyNativePracticeConsultantMatch(tx, lockedMatches[0], email);
+  const lockedMatches = await findNativePracticeConsultantMatches(db, lookup);
+  assertUnambiguousNativePracticeConsultant(lockedMatches, email);
+  if (lockedMatches[0]) return applyNativePracticeConsultantMatch(db, lockedMatches[0], email);
 
-    if (sourceSatelliteId) {
-      const sourceMatch = await tx.practiceConsultant.findFirst({
-        where: { workspaceId: params.workspaceId, sourceSatelliteId },
-        select: { id: true },
-      });
-      if (sourceMatch) return sourceMatch.id;
-    }
+  if (sourceSatelliteId) {
+    const sourceMatch = await db.practiceConsultant.findFirst({
+      where: { workspaceId: params.workspaceId, sourceSatelliteId },
+      select: { id: true },
+    });
+    if (sourceMatch) return sourceMatch.id;
+  }
 
-    try {
-      const created = await tx.practiceConsultant.create({
-        data: {
-          workspaceId: params.workspaceId,
-          name: displayName,
-          email,
-          sourceSatelliteId,
-          active: true,
-        },
-        select: { id: true },
-      });
-      return created.id;
-    } catch (error) {
-      if (!sourceSatelliteId || !isUniqueConstraintError(error)) throw error;
-      const created = await tx.practiceConsultant.findFirst({
-        where: { workspaceId: params.workspaceId, sourceSatelliteId },
-        select: { id: true },
-      });
-      if (created) return created.id;
-      throw error;
-    }
-  });
+  try {
+    const created = await db.practiceConsultant.create({
+      data: {
+        workspaceId: params.workspaceId,
+        name: displayName,
+        email,
+        sourceSatelliteId,
+        active: true,
+      },
+      select: { id: true },
+    });
+    return created.id;
+  } catch (error) {
+    if (!sourceSatelliteId || !isUniqueConstraintError(error)) throw error;
+    const created = await db.practiceConsultant.findFirst({
+      where: { workspaceId: params.workspaceId, sourceSatelliteId },
+      select: { id: true },
+    });
+    if (created) return created.id;
+    throw error;
+  }
 }
 
 export async function getNativePracticeProjectDetail(
@@ -2499,43 +2500,52 @@ export async function createNativePracticeTimeEntry(
     : null;
   if (existingEntry) return existingEntry;
 
-  const billAmountCents = normalizeCents(centsFromHours(hours, billRateCents), "Bill amount");
-  const costAmountCents = normalizeCents(centsFromHours(hours, costRateCents), "Cost amount");
-  const consultantId = await resolveNativePracticeConsultant({
-    workspaceId,
-    name: consultantName,
-    email: consultantEmail,
-    sourceKind: "time",
-    idempotencyKey,
-    required: true,
-  });
-  invariant(consultantId, 400, "INVALID_INPUT", "Consultant is required.");
-  const clientId = await ensureNativePracticeClientForProject(project);
-
-  const data = {
-    workspaceId,
-    clientId,
-    billingCodeId: project.billingCodeId,
-    projectId: project.id,
-    consultantId,
-    workedOn,
-    weekEndingOn: weekEndingSundayUtc(workedOn),
-    hours,
-    assignmentType,
-    currency,
-    billCurrency: currency,
-    costCurrency: currency,
-    functionalCurrency: currency,
-    billRateCents,
-    costRateCents,
-    billAmountCents,
-    costAmountCents,
-    status: "POSTED" as const,
-    idempotencyKey,
-  };
-
   try {
-    return await prisma.practiceTimeEntry.create({ data });
+    return await prisma.$transaction(async (tx) => {
+      const transactionEntry = idempotencyKey
+        ? await tx.practiceTimeEntry.findUnique({
+          where: { workspaceId_idempotencyKey: { workspaceId, idempotencyKey } },
+        })
+        : null;
+      if (transactionEntry) return transactionEntry;
+
+      const billAmountCents = normalizeCents(centsFromHours(hours, billRateCents), "Bill amount");
+      const costAmountCents = normalizeCents(centsFromHours(hours, costRateCents), "Cost amount");
+      const consultantId = await resolveNativePracticeConsultant(tx, {
+        workspaceId,
+        name: consultantName,
+        email: consultantEmail,
+        sourceKind: "time",
+        idempotencyKey,
+        required: true,
+      });
+      invariant(consultantId, 400, "INVALID_INPUT", "Consultant is required.");
+      const clientId = await ensureNativePracticeClientForProject(tx, project);
+
+      return tx.practiceTimeEntry.create({
+        data: {
+          workspaceId,
+          clientId,
+          billingCodeId: project.billingCodeId,
+          projectId: project.id,
+          consultantId,
+          workedOn,
+          weekEndingOn: weekEndingSundayUtc(workedOn),
+          hours,
+          assignmentType,
+          currency,
+          billCurrency: currency,
+          costCurrency: currency,
+          functionalCurrency: currency,
+          billRateCents,
+          costRateCents,
+          billAmountCents,
+          costAmountCents,
+          status: "POSTED",
+          idempotencyKey,
+        },
+      });
+    });
   } catch (error) {
     if (!idempotencyKey || !isUniqueConstraintError(error)) throw error;
     const created = await prisma.practiceTimeEntry.findUnique({
@@ -2569,37 +2579,46 @@ export async function createNativePracticeExpense(
     : null;
   if (existingEntry) return existingEntry;
 
-  const consultantId = await resolveNativePracticeConsultant({
-    workspaceId,
-    name: consultantName,
-    email: consultantEmail,
-    sourceKind: "expense",
-    idempotencyKey,
-    required: false,
-  });
-  const clientId = await ensureNativePracticeClientForProject(project);
-
-  const data = {
-    workspaceId,
-    clientId,
-    billingCodeId: project.billingCodeId,
-    projectId: project.id,
-    consultantId,
-    spentOn,
-    vendor,
-    category,
-    businessPurpose,
-    amountCents,
-    currency,
-    amountFunctionalCents: amountCents,
-    functionalCurrency: currency,
-    billable: input.billable ?? true,
-    status: "POSTED" as const,
-    idempotencyKey,
-  };
-
   try {
-    return await prisma.practiceExpense.create({ data });
+    return await prisma.$transaction(async (tx) => {
+      const transactionEntry = idempotencyKey
+        ? await tx.practiceExpense.findUnique({
+          where: { workspaceId_idempotencyKey: { workspaceId, idempotencyKey } },
+        })
+        : null;
+      if (transactionEntry) return transactionEntry;
+
+      const consultantId = await resolveNativePracticeConsultant(tx, {
+        workspaceId,
+        name: consultantName,
+        email: consultantEmail,
+        sourceKind: "expense",
+        idempotencyKey,
+        required: false,
+      });
+      const clientId = await ensureNativePracticeClientForProject(tx, project);
+
+      return tx.practiceExpense.create({
+        data: {
+          workspaceId,
+          clientId,
+          billingCodeId: project.billingCodeId,
+          projectId: project.id,
+          consultantId,
+          spentOn,
+          vendor,
+          category,
+          businessPurpose,
+          amountCents,
+          currency,
+          amountFunctionalCents: amountCents,
+          functionalCurrency: currency,
+          billable: input.billable ?? true,
+          status: "POSTED",
+          idempotencyKey,
+        },
+      });
+    });
   } catch (error) {
     if (!idempotencyKey || !isUniqueConstraintError(error)) throw error;
     const created = await prisma.practiceExpense.findUnique({
