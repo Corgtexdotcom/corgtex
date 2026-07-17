@@ -107,14 +107,16 @@ describe("github-incident resolved issue sync", () => {
   it("uses bounded paged gh api issue listing for resolved sync", async () => {
     const issues = Array.from({ length: 101 }, (_, index) => {
       const dedupeKey = `resolved-dedupe-${index + 1}`;
-      return issue(index + 10, `[${opsToken(dedupeKey)}] P2 web: stale ${index + 1}`, ["ops-auto-fix"], dedupeKey);
+      const labels = index < 100 ? ["ops-auto-fix", "ops-incident", "halt-agents"] : ["ops-auto-fix", "ops-incident"];
+      return issue(index + 10, `[${opsToken(dedupeKey)}] P2 web: stale ${index + 1}`, labels, dedupeKey);
     });
     const result = await runWithFakeGh(githubIncidentPath, ["--sync-resolved"], [], {
       issues,
     });
 
     expect(result.code).toBe(0);
-    expect(result.state.issues.every((item) => item.closed)).toBe(true);
+    expect(result.state.issues.slice(0, 100).every((item) => !item.closed)).toBe(true);
+    expect(result.state.issues[100].closed).toBe(true);
     const apiCalls = result.state.calls.filter((call) => call[0] === "api" && call.includes("repos/{owner}/{repo}/issues"));
     expect(apiCalls.length).toBe(2);
     expect(apiCalls[0]).toContain("page=1");
