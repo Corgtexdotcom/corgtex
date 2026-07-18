@@ -192,6 +192,9 @@ export default async function WorkspaceAddPage({
   const returnTo = sanitizeWorkspaceReturnTo(workspaceId, search.returnTo);
   const contextCircleId = circleIdFromReturnTo(returnTo, workspaceId);
   const returnUrl = new URL(returnTo, "https://app.local");
+  const returnSubpath = workspaceSubpath(returnUrl.pathname, workspaceId);
+  const isAgreementArticle = kind === "article"
+    && (returnSubpath === "/agreements" || Boolean(returnSubpath?.startsWith("/agreements/")));
   const contextAccountId = crmAccountIdFromPath(returnUrl.pathname, workspaceId);
   const contextDealStage = creatableDealStageFromSearch(search);
   const allowedActions = getWorkspaceAddActions({
@@ -271,6 +274,8 @@ export default async function WorkspaceAddPage({
       ? "Upload meeting audio"
     : kind === "upload_file"
       ? "Upload files from this device"
+    : isAgreementArticle
+      ? "Add working agreement"
     : `Add ${WORKSPACE_ADD_ACTION_DEFINITIONS[kind].label}`;
   const uploadDefaultSource = workspaceSubpath(returnUrl.pathname, workspaceId)?.startsWith("/settings")
     ? "settings-upload"
@@ -792,17 +797,36 @@ export default async function WorkspaceAddPage({
         {kind === "article" && (
           <form action={createArticleAndReturn} className="stack nr-form-section">
             {hiddenWorkspace(workspaceId)}
+            {isAgreementArticle && <input type="hidden" name="agreementCapture" value="working-agreement" />}
             <label>Title<input name="title" required /></label>
             <div className="actions-inline">
-              <label style={{ flex: 1 }}>Type<select name="type">{ARTICLE_TYPES.map((type) => <option key={type} value={type}>{type}</option>)}</select></label>
-              <label style={{ flex: 1 }}>Authority<select name="authority" defaultValue="DRAFT"><option value="DRAFT">Draft</option><option value="REFERENCE">Reference</option><option value="AUTHORITATIVE">Authoritative</option></select></label>
+              <label style={{ flex: 1 }}>
+                Type
+                <select name="type" defaultValue={isAgreementArticle ? "PROCESS" : undefined}>
+                  {ARTICLE_TYPES.map((type) => <option key={type} value={type}>{type}</option>)}
+                </select>
+              </label>
+              <label style={{ flex: 1 }}>
+                Authority
+                <select name="authority" defaultValue={isAgreementArticle ? "REFERENCE" : "DRAFT"}>
+                  <option value="DRAFT">Draft</option>
+                  <option value="REFERENCE">Reference</option>
+                  <option value="AUTHORITATIVE">Authoritative</option>
+                </select>
+              </label>
             </div>
+            {isAgreementArticle && (
+              <>
+                <label>Source<input name="agreementSource" /></label>
+                <label>Context<MarkdownEditor name="agreementContext" rows={4} /></label>
+              </>
+            )}
             <label>Body<MarkdownEditor name="bodyMd" required rows={8} /></label>
             <label style={{ display: "flex", alignItems: "center", flexDirection: "row", gap: 8 }}>
-              <input type="checkbox" name="isPrivate" defaultChecked style={{ width: "auto" }} />
+              <input type="checkbox" name="isPrivate" defaultChecked={!isAgreementArticle} style={{ width: "auto" }} />
               Private draft
             </label>
-            <div className="actions-inline"><button type="submit">Create article</button>{cancelLink(returnTo)}</div>
+            <div className="actions-inline"><button type="submit">{isAgreementArticle ? "Create working agreement" : "Create article"}</button>{cancelLink(returnTo)}</div>
           </form>
         )}
 

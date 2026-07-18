@@ -22,6 +22,18 @@ function asOptional(formData: FormData, key: string) {
   return value.length > 0 ? value : null;
 }
 
+function workingAgreementFrontmatter(formData: FormData) {
+  if (asString(formData, "agreementCapture") !== "working-agreement") return undefined;
+
+  const source = asOptional(formData, "agreementSource");
+  const context = asOptional(formData, "agreementContext");
+  const workingAgreement: Record<string, string> = {};
+  if (source) workingAgreement.source = source;
+  if (context) workingAgreement.context = context;
+
+  return { workingAgreement };
+}
+
 function refresh(workspaceId: string, slug?: string) {
   revalidatePath(`/workspaces/${workspaceId}/brain`);
   if (slug) {
@@ -42,6 +54,7 @@ export async function createArticleAction(formData: FormData) {
     type: (asString(formData, "type") || "GLOSSARY") as BrainArticleType,
     authority: (asOptional(formData, "authority") ?? "DRAFT") as BrainArticleAuthority,
     bodyMd: asString(formData, "bodyMd"),
+    frontmatterJson: workingAgreementFrontmatter(formData),
     isPrivate: formData.get("isPrivate") === "on",
   });
   refresh(workspaceId);

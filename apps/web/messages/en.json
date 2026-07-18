@@ -1072,7 +1072,9 @@
     "statConstitution": "Constitution",
     "statPolicies": "Accepted policies",
     "verified": "Verified {date}",
-    "viewGovernance": "Governance"
+    "viewGovernance": "Governance",
+    "workingAgreementContext": "Context",
+    "workingAgreementSource": "Source"
   },
   "governance": {
     "approvalPoliciesDesc": "Configure how decisions are made for proposals.",
