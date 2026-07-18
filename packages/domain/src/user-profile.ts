@@ -213,7 +213,9 @@ export async function getUserNotificationPreferences(actor: AppActor) {
     where: { userId: actor.user.id },
   });
 
-  return prefs;
+  return prefs.map((pref) => (
+    pref.channel === "BOTH" ? { ...pref, channel: "IN_APP_EMAIL" } : pref
+  ));
 }
 
 export async function updateNotificationPreference(actor: AppActor, params: { notifType: string; channel: string }) {

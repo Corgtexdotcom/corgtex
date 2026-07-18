@@ -402,18 +402,114 @@ export async function adminRemoveFromWorkspace(actor: AppActor, params: {
   });
 }
 
+const NOTIFICATION_DELIVERY_HEALTH_WINDOW_DAYS = 30;
+
+type NotificationDeliveryHealthCounts = {
+  pending: number;
+  sent: number;
+  failed: number;
+  skipped: number;
+};
+
+function emptyNotificationDeliveryHealthCounts(): NotificationDeliveryHealthCounts {
+  return {
+    pending: 0,
+    sent: 0,
+    failed: 0,
+    skipped: 0,
+  };
+}
+
+function notificationDeliveryStatusKey(status: string): keyof NotificationDeliveryHealthCounts | null {
+  if (status === "PENDING") return "pending";
+  if (status === "SENT") return "sent";
+  if (status === "FAILED") return "failed";
+  if (status === "SKIPPED") return "skipped";
+  return null;
+}
+
+function incrementNotificationDeliveryCounts(counts: NotificationDeliveryHealthCounts, status: string) {
+  const key = notificationDeliveryStatusKey(status);
+  if (key) {
+    counts[key] += 1;
+  }
+}
+
+function buildNotificationDeliveryHealth(deliveries: Array<{
+  channel: string;
+  status: string;
+  notification: { type: string };
+}>) {
+  const totals = emptyNotificationDeliveryHealthCounts();
+  const byChannel = new Map<string, { channel: string } & NotificationDeliveryHealthCounts>();
+  const byType = new Map<string, { type: string; channel: string } & NotificationDeliveryHealthCounts>();
+
+  for (const delivery of deliveries) {
+    incrementNotificationDeliveryCounts(totals, delivery.status);
+
+    let channelCounts = byChannel.get(delivery.channel);
+    if (!channelCounts) {
+      channelCounts = { channel: delivery.channel, ...emptyNotificationDeliveryHealthCounts() };
+      byChannel.set(delivery.channel, channelCounts);
+    }
+    incrementNotificationDeliveryCounts(channelCounts, delivery.status);
+
+    const type = delivery.notification.type;
+    const typeKey = JSON.stringify([type, delivery.channel]);
+    let typeCounts = byType.get(typeKey);
+    if (!typeCounts) {
+      typeCounts = { type, channel: delivery.channel, ...emptyNotificationDeliveryHealthCounts() };
+      byType.set(typeKey, typeCounts);
+    }
+    incrementNotificationDeliveryCounts(typeCounts, delivery.status);
+  }
+
+  return {
+    windowDays: NOTIFICATION_DELIVERY_HEALTH_WINDOW_DAYS,
+    totals,
+    byChannel: Array.from(byChannel.values()).sort((a, b) => a.channel.localeCompare(b.channel)),
+    byType: Array.from(byType.values()).sort((a, b) => (
+      a.type.localeCompare(b.type) || a.channel.localeCompare(b.channel)
+    )),
+  };
+}
+
 export async function getOperatorOverview(actor: AppActor) {
   requireGlobalOperator(actor);
-  const workspacesCount = await prisma.workspace.count();
-  const usersCount = await prisma.user.count();
-  const activeMembersCount = await prisma.member.count({ where: { isActive: true } });
-  
-  const lastJob = await prisma.workflowJob.findFirst({
-    where: { status: "COMPLETED" },
-    orderBy: { createdAt: "desc" },
-  });
-  const pendingJobs = await prisma.workflowJob.count({ where: { status: "PENDING" } });
-  const failedJobs = await prisma.workflowJob.count({ where: { status: "FAILED" } });
+  const deliveryWindowStart = new Date(Date.now() - NOTIFICATION_DELIVERY_HEALTH_WINDOW_DAYS * 24 * 60 * 60 * 1000);
+  const [
+    workspacesCount,
+    usersCount,
+    activeMembersCount,
+    lastJob,
+    pendingJobs,
+    failedJobs,
+    notificationDeliveries,
+  ] = await Promise.all([
+    prisma.workspace.count(),
+    prisma.user.count(),
+    prisma.member.count({ where: { isActive: true } }),
+    prisma.workflowJob.findFirst({
+      where: { status: "COMPLETED" },
+      orderBy: { createdAt: "desc" },
+    }),
+    prisma.workflowJob.count({ where: { status: "PENDING" } }),
+    prisma.workflowJob.count({ where: { status: "FAILED" } }),
+    prisma.notificationDelivery.findMany({
+      where: {
+        createdAt: { gte: deliveryWindowStart },
+      },
+      select: {
+        channel: true,
+        status: true,
+        notification: {
+          select: {
+            type: true,
+          },
+        },
+      },
+    }),
+  ]);
   
   const workerHealthy = failedJobs < 10;
   
@@ -426,7 +522,8 @@ export async function getOperatorOverview(actor: AppActor) {
       lastJobAt: lastJob?.createdAt || null,
       pendingJobs,
       failedJobs
-    }
+    },
+    notificationDeliveryHealth: buildNotificationDeliveryHealth(notificationDeliveries),
   };
 }
 

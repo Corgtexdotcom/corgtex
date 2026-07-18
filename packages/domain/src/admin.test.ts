@@ -64,6 +64,9 @@ vi.mock("@corgtex/shared", () => ({
       findMany: vi.fn().mockResolvedValue([]),
       count: vi.fn().mockResolvedValue(0),
     },
+    notificationDelivery: {
+      findMany: vi.fn().mockResolvedValue([]),
+    },
     communicationInstallation: {
       findMany: vi.fn().mockResolvedValue([]),
     },
@@ -176,6 +179,28 @@ describe("Platform Admin Tools", () => {
         return 0;
       }
     );
+    (prisma.notificationDelivery.findMany as any).mockResolvedValue([
+      {
+        channel: "EMAIL",
+        status: "PENDING",
+        notification: { type: "deliberation.mention" },
+      },
+      {
+        channel: "EMAIL",
+        status: "SENT",
+        notification: { type: "deliberation.mention" },
+      },
+      {
+        channel: "SLACK",
+        status: "FAILED",
+        notification: { type: "role-onboarding.assigned" },
+      },
+      {
+        channel: "SLACK",
+        status: "SKIPPED",
+        notification: { type: "role-onboarding.assigned" },
+      },
+    ]);
 
     const result = await admin.getOperatorOverview(dummyActor);
 
@@ -186,6 +211,63 @@ describe("Platform Admin Tools", () => {
     expect(result.worker.failedJobs).toBe(1);
     expect(result.worker.pendingJobs).toBe(2);
     expect(result.worker.isHealthy).toBe(true);
+    expect(prisma.notificationDelivery.findMany).toHaveBeenCalledWith({
+      where: {
+        createdAt: { gte: expect.any(Date) },
+      },
+      select: {
+        channel: true,
+        status: true,
+        notification: {
+          select: {
+            type: true,
+          },
+        },
+      },
+    });
+    expect(result.notificationDeliveryHealth).toMatchObject({
+      windowDays: 30,
+      totals: {
+        pending: 1,
+        sent: 1,
+        failed: 1,
+        skipped: 1,
+      },
+      byChannel: [
+        {
+          channel: "EMAIL",
+          pending: 1,
+          sent: 1,
+          failed: 0,
+          skipped: 0,
+        },
+        {
+          channel: "SLACK",
+          pending: 0,
+          sent: 0,
+          failed: 1,
+          skipped: 1,
+        },
+      ],
+      byType: [
+        {
+          type: "deliberation.mention",
+          channel: "EMAIL",
+          pending: 1,
+          sent: 1,
+          failed: 0,
+          skipped: 0,
+        },
+        {
+          type: "role-onboarding.assigned",
+          channel: "SLACK",
+          pending: 0,
+          sent: 0,
+          failed: 1,
+          skipped: 1,
+        },
+      ],
+    });
   });
 
   // ── listAllWorkspacesEnriched ────────────────────────────────────
