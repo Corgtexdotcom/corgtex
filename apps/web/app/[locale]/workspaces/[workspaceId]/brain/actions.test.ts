@@ -34,6 +34,8 @@ vi.mock("@/lib/auth", () => ({
 }));
 
 vi.mock("@corgtex/domain", () => ({
+  AGREEMENT_BRAIN_ARTICLE_AUTHORITIES: ["AUTHORITATIVE", "REFERENCE"],
+  AGREEMENT_BRAIN_ARTICLE_TYPES: ["DECISION", "PROCESS", "CULTURE", "STRATEGY"],
   createArticle,
   ingestSource,
   publishArticle,
@@ -127,6 +129,27 @@ describe("Brain article server actions", () => {
       workspaceId: "workspace-1",
       authority: "DRAFT",
       isPrivate: true,
+      ownerMemberId: "member-1",
+    }));
+  });
+
+  it("keeps tampered public working agreements visible in the Agreements list", async () => {
+    const { createArticleAction } = await import("./actions");
+    const formData = new FormData();
+    formData.set("workspaceId", "workspace-1");
+    formData.set("agreementCapture", "working-agreement");
+    formData.set("title", "Visible escalation agreement");
+    formData.set("type", "PRODUCT");
+    formData.set("authority", "DRAFT");
+    formData.set("bodyMd", "Escalations stay visible on the Agreements page.");
+
+    await createArticleAction(formData);
+
+    expect(createArticle).toHaveBeenCalledWith(actor, expect.objectContaining({
+      workspaceId: "workspace-1",
+      type: "PROCESS",
+      authority: "REFERENCE",
+      isPrivate: false,
       ownerMemberId: "member-1",
     }));
   });

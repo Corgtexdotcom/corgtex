@@ -1,6 +1,7 @@
-import type { BrainArticleType, BrainSourceType, GoalCadence, GoalLevel, GoalStatus } from "@prisma/client";
+import type { BrainArticleAuthority, BrainArticleType, BrainSourceType, GoalCadence, GoalLevel, GoalStatus } from "@prisma/client";
 import { notFound, redirect } from "next/navigation";
 import {
+  AGREEMENT_BRAIN_ARTICLE_TYPES,
   createCatalogRequest,
   createExternalDataSource,
   createWorkspaceToolLink,
@@ -98,6 +99,15 @@ const CADENCES: { id: GoalCadence; label: string }[] = [
 const GOAL_LEVELS: GoalLevel[] = ["COMPANY", "CIRCLE", "PERSONAL"];
 const GOAL_STATUSES: GoalStatus[] = ["ACTIVE", "ON_TRACK", "AT_RISK", "BEHIND", "COMPLETED", "DRAFT", "ABANDONED"];
 const ARTICLE_TYPES: BrainArticleType[] = ["PRODUCT", "ARCHITECTURE", "PROCESS", "RUNBOOK", "DECISION", "TEAM", "PERSON", "CUSTOMER", "INCIDENT", "PROJECT", "INTEGRATION", "PATTERN", "STRATEGY", "CULTURE", "GLOSSARY"];
+const AGREEMENT_ARTICLE_TYPES: BrainArticleType[] = [...AGREEMENT_BRAIN_ARTICLE_TYPES];
+const ARTICLE_AUTHORITIES: BrainArticleAuthority[] = ["DRAFT", "REFERENCE", "AUTHORITATIVE"];
+const AGREEMENT_ARTICLE_AUTHORITIES: BrainArticleAuthority[] = ["REFERENCE", "AUTHORITATIVE"];
+const ARTICLE_AUTHORITY_LABELS: Record<BrainArticleAuthority, string> = {
+  DRAFT: "Draft",
+  REFERENCE: "Reference",
+  AUTHORITATIVE: "Authoritative",
+  HISTORICAL: "Historical",
+};
 const SOURCE_TYPES: BrainSourceType[] = ["MEETING", "TICKET", "PR", "RFC", "INCIDENT", "SLACK", "CUSTOMER_FEEDBACK", "COMPETITOR", "RESEARCH", "ARTICLE", "DOC", "RUNBOOK", "EMAIL", "FILE_UPLOAD", "EXTERNAL_CONTENT"];
 
 function splitList(value: string | null) {
@@ -195,6 +205,8 @@ export default async function WorkspaceAddPage({
   const returnSubpath = workspaceSubpath(returnUrl.pathname, workspaceId);
   const isAgreementArticle = kind === "article"
     && (returnSubpath === "/agreements" || Boolean(returnSubpath?.startsWith("/agreements/")));
+  const articleTypeOptions = isAgreementArticle ? AGREEMENT_ARTICLE_TYPES : ARTICLE_TYPES;
+  const articleAuthorityOptions = isAgreementArticle ? AGREEMENT_ARTICLE_AUTHORITIES : ARTICLE_AUTHORITIES;
   const contextAccountId = crmAccountIdFromPath(returnUrl.pathname, workspaceId);
   const contextDealStage = creatableDealStageFromSearch(search);
   const allowedActions = getWorkspaceAddActions({
@@ -803,15 +815,15 @@ export default async function WorkspaceAddPage({
               <label style={{ flex: 1 }}>
                 Type
                 <select name="type" defaultValue={isAgreementArticle ? "PROCESS" : undefined}>
-                  {ARTICLE_TYPES.map((type) => <option key={type} value={type}>{type}</option>)}
+                  {articleTypeOptions.map((type) => <option key={type} value={type}>{type}</option>)}
                 </select>
               </label>
               <label style={{ flex: 1 }}>
                 Authority
                 <select name="authority" defaultValue={isAgreementArticle ? "REFERENCE" : "DRAFT"}>
-                  <option value="DRAFT">Draft</option>
-                  <option value="REFERENCE">Reference</option>
-                  <option value="AUTHORITATIVE">Authoritative</option>
+                  {articleAuthorityOptions.map((authority) => (
+                    <option key={authority} value={authority}>{ARTICLE_AUTHORITY_LABELS[authority]}</option>
+                  ))}
                 </select>
               </label>
             </div>

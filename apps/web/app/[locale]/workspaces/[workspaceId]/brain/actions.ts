@@ -5,6 +5,8 @@ import { enforceDemoGuard } from "@/lib/demo-guard";
 import type { BrainArticleAuthority, BrainArticleType, BrainSourceType } from "@prisma/client";
 import { revalidatePath } from "next/cache";
 import {
+  AGREEMENT_BRAIN_ARTICLE_AUTHORITIES,
+  AGREEMENT_BRAIN_ARTICLE_TYPES,
   createArticle,
   updateArticle,
   ingestSource,
@@ -43,6 +45,18 @@ function persistedOwnerMemberId(membership: { id: string } | null | undefined) {
   return membership?.id === "global-operator" ? null : membership?.id ?? null;
 }
 
+function workingAgreementType(formData: FormData): BrainArticleType {
+  const submitted = (asString(formData, "type") || "PROCESS") as BrainArticleType;
+  return AGREEMENT_BRAIN_ARTICLE_TYPES.some((type) => type === submitted) ? submitted : "PROCESS";
+}
+
+function workingAgreementAuthority(formData: FormData, isPrivate: boolean): BrainArticleAuthority {
+  if (isPrivate) return "DRAFT";
+
+  const submitted = (asOptional(formData, "authority") ?? "REFERENCE") as BrainArticleAuthority;
+  return AGREEMENT_BRAIN_ARTICLE_AUTHORITIES.some((authority) => authority === submitted) ? submitted : "REFERENCE";
+}
+
 function refresh(workspaceId: string, slug?: string) {
   revalidatePath(`/workspaces/${workspaceId}/brain`);
   if (slug) {
@@ -65,8 +79,10 @@ export async function createArticleAction(formData: FormData) {
     workspaceId,
     title: asString(formData, "title"),
     slug: asOptional(formData, "slug") ?? undefined,
-    type: (asString(formData, "type") || "GLOSSARY") as BrainArticleType,
-    authority: (isWorkingAgreement && isPrivate ? "DRAFT" : asOptional(formData, "authority") ?? "DRAFT") as BrainArticleAuthority,
+    type: isWorkingAgreement ? workingAgreementType(formData) : (asString(formData, "type") || "GLOSSARY") as BrainArticleType,
+    authority: isWorkingAgreement
+      ? workingAgreementAuthority(formData, isPrivate)
+      : (asOptional(formData, "authority") ?? "DRAFT") as BrainArticleAuthority,
     bodyMd: asString(formData, "bodyMd"),
     frontmatterJson: workingAgreementFrontmatter(formData),
     ownerMemberId: isWorkingAgreement ? persistedOwnerMemberId(membership) : undefined,
