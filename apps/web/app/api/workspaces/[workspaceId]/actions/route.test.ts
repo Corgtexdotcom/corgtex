@@ -138,7 +138,7 @@ describe("GET /api/workspaces/[workspaceId]/actions", () => {
     const { GET } = await import("./route");
 
     const response = await GET(
-      request("http://localhost/api/workspaces/workspace-1/actions?memberId=member-1&memberId=member-2&memberId=member-1&circleId=circle-1&circleId=&status=OPEN&sort=date&take=50&skip=10&archiveFilter=all"),
+      request("http://localhost/api/workspaces/workspace-1/actions?memberId=member-1&memberId=member-2&memberId=member-1&assigneeMemberId=member-2&assigneeMemberId=member-3&assigneeMemberId=member-2&circleId=circle-1&circleId=&status=OPEN&sort=date&take=50&skip=10&archiveFilter=all"),
       context(),
     );
 
@@ -173,6 +173,7 @@ describe("GET /api/workspaces/[workspaceId]/actions", () => {
       archiveFilter: "all",
       status: "OPEN",
       circleIds: ["circle-1"],
+      assigneeMemberIds: ["member-2", "member-3"],
       memberIds: ["member-1", "member-2"],
       sort: "date",
       take: 50,

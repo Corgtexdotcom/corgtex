@@ -740,9 +740,12 @@
   },
   "workItems": {
     "allCircles": "Todos los círculos",
+    "allAssignees": "Todas las personas asignadas",
     "allPeople": "Todas las personas",
     "allStatuses": "Todos los estados",
     "applyFilters": "Aplicar filtros",
+    "assignedTo": "Asignado a",
+    "assignedToMe": "Asignado a mí",
     "backToItem": "Volver",
     "clearFilters": "Limpiar",
     "columnSettings": "Configuración de columnas",

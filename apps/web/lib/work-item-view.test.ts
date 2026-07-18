@@ -29,9 +29,10 @@ describe("work item view helpers", () => {
       view: "kanban",
       sort: "alpha",
       circleId: "circle-1",
+      assigneeMemberId: "assignee-1",
       memberId: "mem-1",
       columns: ["OPEN", "IN_PROGRESS"],
-    })).toBe("?status=OPEN&view=kanban&sort=alpha&circleId=circle-1&memberId=mem-1&columns=OPEN%2CIN_PROGRESS");
+    })).toBe("?status=OPEN&view=kanban&sort=alpha&circleId=circle-1&assigneeMemberId=assignee-1&memberId=mem-1&columns=OPEN%2CIN_PROGRESS");
     expect(buildWorkItemQuery({
       status: "OPEN",
       view: "table",
@@ -44,9 +45,10 @@ describe("work item view helpers", () => {
       view: "table",
       sort: "date",
       circleIds: ["circle-1", "circle-2"],
+      assigneeMemberIds: ["assignee-1", "assignee-2"],
       memberIds: ["mem-1", "mem-2"],
       dates: { openedFrom: "2026-06-01" },
-    })).toBe("?status=OPEN&status=RESOLVED&view=table&sort=date&circleId=circle-1&circleId=circle-2&memberId=mem-1&memberId=mem-2&openedFrom=2026-06-01");
+    })).toBe("?status=OPEN&status=RESOLVED&view=table&sort=date&circleId=circle-1&circleId=circle-2&assigneeMemberId=assignee-1&assigneeMemberId=assignee-2&memberId=mem-1&memberId=mem-2&openedFrom=2026-06-01");
   });
 
   it("normalizes kanban column visibility from query values", () => {
@@ -71,11 +73,14 @@ describe("work item view helpers", () => {
   it("applies circle and member ids independently", () => {
     expect(resolveWorkItemFilters({
       circleId: ["circle-1", "circle-2", "circle-1", ""],
+      assigneeMemberId: ["assignee-1", "assignee-2", "assignee-1", ""],
       memberId: ["mem-1", "mem-2", "mem-1"],
       sort: "date",
     })).toEqual({
       circleId: "circle-1",
       circleIds: ["circle-1", "circle-2"],
+      assigneeMemberId: "assignee-1",
+      assigneeMemberIds: ["assignee-1", "assignee-2"],
       memberId: "mem-1",
       memberIds: ["mem-1", "mem-2"],
       sort: "date",

@@ -31,6 +31,8 @@ export type ListActionsOptions = {
   status?: ActionStatus;
   circleId?: string | null;
   circleIds?: string[] | null;
+  assigneeMemberId?: string | null;
+  assigneeMemberIds?: string[] | null;
   memberId?: string | null;
   memberIds?: string[] | null;
   createdFrom?: Date;
@@ -107,6 +109,8 @@ export async function listActions(actor: AppActor, workspaceId: string, opts?: L
   const circleIds = listFilterValues(opts?.circleIds);
   if (circleIds.length > 0) where.circleId = { in: circleIds };
   else if (opts?.circleId) where.circleId = opts.circleId;
+  const assigneeMemberIds = listFilterValues([...(opts?.assigneeMemberIds ?? []), opts?.assigneeMemberId]);
+  if (assigneeMemberIds.length > 0) where.assigneeMemberId = { in: assigneeMemberIds };
   const createdAt = dateRangeWhere(opts?.createdFrom, opts?.createdTo);
   const dueAt = nullableDateRangeWhere(opts?.dueFrom, opts?.dueTo);
   if (createdAt) where.createdAt = createdAt;
