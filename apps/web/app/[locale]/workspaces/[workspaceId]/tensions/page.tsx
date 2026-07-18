@@ -25,6 +25,8 @@ import {
   normalizeVisibleWorkItemColumns,
   normalizeWorkItemView,
   resolveWorkItemFilters,
+  endOfUtcDate,
+  startOfUtcDate,
   toggleWorkItemColumnVisibility,
 } from "@/lib/work-item-view";
 import { getTranslations } from "next-intl/server";
@@ -54,10 +56,16 @@ export default async function TensionsPage({
   const membership = await requireWorkspaceMembership({ actor, workspaceId });
   const resolvedSearch = searchParams ? await searchParams : {};
   const view = normalizeWorkItemView(resolvedSearch.view);
-  const { statusFilters, statusQuery } = resolveTensionSearch(resolvedSearch, view === "kanban" ? null : "OPEN");
+  const { statusFilters, statusQuery, dateFilters } = resolveTensionSearch(resolvedSearch, view === "kanban" ? null : "OPEN");
   const { circleIds, memberIds, sort } = resolveWorkItemFilters(resolvedSearch);
+  const listDateFilters = {
+    openedFrom: dateFilters.openedFrom ? startOfUtcDate(dateFilters.openedFrom) : undefined,
+    openedTo: dateFilters.openedTo ? endOfUtcDate(dateFilters.openedTo) : undefined,
+    closedFrom: dateFilters.closedFrom ? startOfUtcDate(dateFilters.closedFrom) : undefined,
+    closedTo: dateFilters.closedTo ? endOfUtcDate(dateFilters.closedTo) : undefined,
+  };
   const [{ items: tensions }, circles, members, activeInputRequests] = await Promise.all([
-    listTensions(actor, workspaceId, { take: 200, circleIds, memberIds, sort }),
+    listTensions(actor, workspaceId, { take: 200, circleIds, memberIds, sort, ...listDateFilters }),
     listCircles(workspaceId),
     listHumanMembers(workspaceId),
     listAdviceRequests(actor, { workspaceId, subjectType: "TENSION", status: "ACTIVE", take: 500 }),
@@ -80,6 +88,7 @@ export default async function TensionsPage({
     status: queryStatus,
     circleIds,
     memberIds,
+    dates: dateFilters,
     columns: toggleWorkItemColumnVisibility(visibleTensionColumnIds, status, tensionColumnStatuses),
   });
   const tensionColumnHideHrefs = Object.fromEntries(
@@ -91,9 +100,10 @@ export default async function TensionsPage({
       status: filter === "ALL" ? "ALL" : statusQuery,
       circleIds,
       memberIds,
+      dates: dateFilters,
       columns: filter === "ALL" ? undefined : toggleWorkItemColumnVisibility(visibleTensionColumnIds, filter, tensionColumnStatuses),
     })
-    : buildWorkItemQuery({ view, sort, circleIds, memberIds, status: filter });
+    : buildWorkItemQuery({ view, sort, circleIds, memberIds, dates: dateFilters, status: filter });
   const tensionFilterActive = (filter: TensionStatusFilter) => view === "kanban"
     ? filter === "ALL"
       ? allTensionColumnsVisible
@@ -528,13 +538,13 @@ export default async function TensionsPage({
           <WorkItemToolbar
             currentView={view}
             currentSort={sort}
-            listHref={buildWorkItemQuery({ sort, circleIds, memberIds, status: statusQuery, view: "list" })}
-            kanbanHref={buildWorkItemQuery({ circleIds, memberIds, view: "kanban" })}
-            tableHref={buildWorkItemQuery({ sort, circleIds, memberIds, status: statusQuery, view: "table" })}
+            listHref={buildWorkItemQuery({ sort, circleIds, memberIds, dates: dateFilters, status: statusQuery, view: "list" })}
+            kanbanHref={buildWorkItemQuery({ circleIds, memberIds, dates: dateFilters, view: "kanban" })}
+            tableHref={buildWorkItemQuery({ sort, circleIds, memberIds, dates: dateFilters, status: statusQuery, view: "table" })}
             sortLinks={{
-              priority: buildWorkItemQuery({ view: view === "table" ? "table" : "list", circleIds, memberIds, status: statusQuery, sort: "priority" }),
-              date: buildWorkItemQuery({ view: view === "table" ? "table" : "list", circleIds, memberIds, status: statusQuery, sort: "date" }),
-              alpha: buildWorkItemQuery({ view: view === "table" ? "table" : "list", circleIds, memberIds, status: statusQuery, sort: "alpha" }),
+              priority: buildWorkItemQuery({ view: view === "table" ? "table" : "list", circleIds, memberIds, dates: dateFilters, status: statusQuery, sort: "priority" }),
+              date: buildWorkItemQuery({ view: view === "table" ? "table" : "list", circleIds, memberIds, dates: dateFilters, status: statusQuery, sort: "date" }),
+              alpha: buildWorkItemQuery({ view: view === "table" ? "table" : "list", circleIds, memberIds, dates: dateFilters, status: statusQuery, sort: "alpha" }),
             }}
             listLabel={tWork("listView")}
             kanbanLabel={tWork("kanbanView")}
@@ -558,6 +568,12 @@ export default async function TensionsPage({
           memberIds={memberIds}
           circles={circles.map((circle) => ({ id: circle.id, label: circle.name }))}
           members={members.map((member) => ({ id: member.id, label: memberName(member) }))}
+          dates={[
+            { name: "openedFrom", label: t("filterOpenedFrom"), value: dateFilters.openedFrom },
+            { name: "openedTo", label: t("filterOpenedTo"), value: dateFilters.openedTo },
+            { name: "closedFrom", label: t("filterClosedFrom"), value: dateFilters.closedFrom },
+            { name: "closedTo", label: t("filterClosedTo"), value: dateFilters.closedTo },
+          ]}
           labels={{
             status: tWork("status"),
             allStatuses: tWork("allStatuses"),
