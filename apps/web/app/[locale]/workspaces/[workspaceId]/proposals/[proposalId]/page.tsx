@@ -151,7 +151,7 @@ export default async function ProposalDetailPage({
   const canManage = !isArchived && (actor.kind === "agent" || membership?.role === "ADMIN" || isAuthor || isOwner);
   const canEditContent = !isArchived && proposal.status === "DRAFT" ? canManage : !isArchived && proposal.status === "OPEN" && (isAuthor || isOwner);
   const canResolve = !isArchived && (actor.kind === "agent" || Boolean(membership));
-  const canRequestAdvice = !isArchived && actor.kind === "user" && proposal.status === "OPEN" && !proposal.isPrivate && (isAuthor || membership?.role === "ADMIN");
+  const canRequestAdvice = !isArchived && actor.kind === "user" && proposal.status === "OPEN" && !proposal.isPrivate && (isAuthor || isOwner || membership?.role === "ADMIN");
   const canManageEntry = (entry: (typeof deliberationEntries)[number]) => !isArchived && Boolean(
     isAdmin
       || (actorUserId && entry.authorUserId === actorUserId)
