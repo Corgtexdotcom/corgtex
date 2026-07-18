@@ -1,4 +1,7 @@
 type ReplayBlockKind = "check_in" | "update" | "tension" | "proposal_discussion" | "decision" | "planning" | "custom";
+type ReplayInsightType = "DECISION" | "TENSION" | "ACTION_ITEM" | "PROPOSAL" | "FOLLOW_UP" | "DELIBERATION_ENTRY";
+type ReplayInsightOperation = "CREATE" | "RESOLVE";
+type ReplayInsightStatus = "SUGGESTED" | "CONFIRMED";
 
 export type MeetingTranscriptReplayFixture = {
   id: string;
@@ -15,6 +18,18 @@ export type MeetingTranscriptReplayFixture = {
     kind: ReplayBlockKind;
     summaryMd: string;
     sourceQuote: string;
+  }>;
+  expectedInsights: Array<{
+    type: ReplayInsightType;
+    operation: ReplayInsightOperation;
+    status: ReplayInsightStatus;
+    title: string;
+    bodyMd: string;
+    assigneeHint: string | null;
+    confidence: number;
+    sourceQuote: string;
+    targetEntityType: string | null;
+    targetEntityId: string | null;
   }>;
   expectedSummaryMd: string;
   expectedSummaryPhrases: string[];
@@ -64,6 +79,44 @@ export const operationsTacticalReplayFixture: MeetingTranscriptReplayFixture = {
       sourceQuote: "keep notifications out of this release",
     },
   ],
+  expectedInsights: [
+    {
+      type: "ACTION_ITEM",
+      operation: "CREATE",
+      status: "SUGGESTED",
+      title: "Publish onboarding evidence-owner checklist",
+      bodyMd: "Milan will publish the onboarding checklist with evidence owners by Friday.",
+      assigneeHint: "Milan",
+      confidence: 0.91,
+      sourceQuote: "I will publish the checklist by Friday.",
+      targetEntityType: null,
+      targetEntityId: null,
+    },
+    {
+      type: "TENSION",
+      operation: "CREATE",
+      status: "SUGGESTED",
+      title: "Renewal-risk tension needs resolution notes",
+      bodyMd: "The renewal-risk tension needs resolution notes before the customer retest.",
+      assigneeHint: "Rhea",
+      confidence: 0.87,
+      sourceQuote: "The renewal-risk tension needs resolution notes before the customer retest.",
+      targetEntityType: null,
+      targetEntityId: null,
+    },
+    {
+      type: "DECISION",
+      operation: "CREATE",
+      status: "CONFIRMED",
+      title: "Keep notifications out of this release",
+      bodyMd: "Notifications remain out of this release and stay on the separate notifications track.",
+      assigneeHint: null,
+      confidence: 0.78,
+      sourceQuote: "keep notifications out of this release",
+      targetEntityType: null,
+      targetEntityId: null,
+    },
+  ],
   expectedSummaryMd: [
     "## Operations tactical",
     "- Milan will publish the onboarding checklist with evidence owners by Friday.",
@@ -109,6 +162,8 @@ export function meetingContextFromReplayFixture(fixture: MeetingTranscriptReplay
 }
 
 export function meetingRecordFromReplayFixture(fixture: MeetingTranscriptReplayFixture) {
+  const timestamp = new Date(fixture.recordedAt);
+
   return {
     id: fixture.meetingId,
     workspaceId: fixture.workspaceId,
@@ -117,13 +172,37 @@ export function meetingRecordFromReplayFixture(fixture: MeetingTranscriptReplayF
     transcript: fixture.transcript,
     summaryMd: fixture.expectedSummaryMd,
     recordedAt: new Date(fixture.recordedAt),
-    insights: fixture.expectedBlocks.map((block) => ({
-      id: `${fixture.id}-${block.sequence}`,
-      kind: block.kind,
-      title: block.title,
-      summaryMd: block.summaryMd,
-      confidence: block.kind === "decision" ? 0.9 : 0.86,
-      status: "SUGGESTED",
+    insights: fixture.expectedInsights.map((insight, index) => ({
+      id: `${fixture.id}-insight-${index + 1}`,
+      workspaceId: fixture.workspaceId,
+      meetingId: fixture.meetingId,
+      type: insight.type,
+      operation: insight.operation,
+      status: insight.status,
+      title: insight.title,
+      bodyMd: insight.bodyMd,
+      assigneeHint: insight.assigneeHint,
+      dueAt: null,
+      confidence: insight.confidence,
+      sourceQuote: insight.sourceQuote,
+      appliedEntityType: null,
+      appliedEntityId: null,
+      targetEntityType: insight.targetEntityType,
+      targetEntityId: insight.targetEntityId,
+      deliberationEntryType: null,
+      resolutionOutcome: null,
+      dedupeKey: `${fixture.id}:${insight.type}:${index + 1}`,
+      metadataJson: { replayFixtureId: fixture.id },
+      autoAppliedAt: null,
+      autoApplyError: null,
+      reviewedByUserId: null,
+      reviewedAt: null,
+      sourceRecordId: null,
+      sourceRecordedAt: timestamp,
+      supersededAt: null,
+      supersededByInsightId: null,
+      createdAt: timestamp,
+      updatedAt: timestamp,
     })),
   };
 }

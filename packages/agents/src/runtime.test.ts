@@ -203,8 +203,21 @@ describe("agent runtime", () => {
 
   it("auto-applies high-confidence meeting insights", async () => {
     const fixture = operationsTacticalReplayFixture;
-    prismaMock.meeting.findUnique.mockResolvedValue(meetingRecordFromReplayFixture(fixture));
+    const meetingRecord = meetingRecordFromReplayFixture(fixture);
+    prismaMock.meeting.findUnique.mockResolvedValue(meetingRecord);
     autoApplyMeetingInsightsMock.mockResolvedValueOnce(fixture.expectedAutoApply);
+
+    expect(meetingRecord.insights).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        workspaceId: fixture.workspaceId,
+        meetingId: fixture.meetingId,
+        type: "ACTION_ITEM",
+        operation: "CREATE",
+        bodyMd: expect.stringContaining("Milan will publish"),
+        sourceQuote: expect.stringContaining("checklist by Friday"),
+        status: "SUGGESTED",
+      }),
+    ]));
 
     const { runActionExtractionAgent } = await import(".");
     await runActionExtractionAgent({
