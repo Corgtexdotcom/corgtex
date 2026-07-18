@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { meetingContextFromReplayFixture, operationsTacticalReplayFixture } from "./meeting-transcript-replay-fixtures";
 
 const { buildMeetingIntelligenceContextMock, syncKnowledgeForSourceMock } = vi.hoisted(() => ({
   buildMeetingIntelligenceContextMock: vi.fn(),
@@ -262,6 +263,65 @@ describe("runMeetingSummaryAgent", () => {
         }),
       }),
     }));
+  });
+
+  it("replays the operations tactical transcript through block extraction and summary persistence", async () => {
+    const { defaultModelGateway } = await import("@corgtex/models");
+    const fixture = operationsTacticalReplayFixture;
+    vi.mocked(defaultModelGateway.extract).mockResolvedValueOnce({
+      output: {
+        blocks: fixture.expectedBlocks,
+      },
+      raw: "{}",
+      usage: modelUsage,
+    });
+    vi.mocked(defaultModelGateway.chat).mockResolvedValueOnce({
+      content: fixture.expectedSummaryMd,
+      usage: modelUsage,
+    });
+    buildMeetingIntelligenceContextMock.mockResolvedValueOnce(meetingContextFromReplayFixture(fixture));
+
+    const { runMeetingSummaryAgent } = await import(".");
+    await runMeetingSummaryAgent({
+      workspaceId: fixture.workspaceId,
+      triggerRef: `replay-${fixture.id}`,
+      triggerType: "EVENT",
+      meetingId: fixture.meetingId,
+    });
+
+    const extractInput = JSON.parse(vi.mocked(defaultModelGateway.extract).mock.calls.at(-1)?.[0].input ?? "{}");
+    const chatMessage = vi.mocked(defaultModelGateway.chat).mock.calls.at(-1)?.[0].messages.find((message) => message.role === "user");
+    const chatInput = JSON.parse(chatMessage?.content ?? "{}");
+    const persisted = prismaMock.meeting.updateMany.mock.calls.at(-1)?.[0]?.data;
+
+    expect(extractInput.transcript).toContain("I will publish the checklist by Friday");
+    expect(extractInput.transcript).toContain("keep notifications out of this release");
+    expect(extractInput.ingestionGuidanceMd).toContain("Use Corgtex, not Cortex");
+    expect(chatInput.meetingBlocks.blocks).toEqual(expect.arrayContaining(
+      fixture.expectedBlocks.map((block) => expect.objectContaining({
+        title: block.title,
+        kind: block.kind,
+        summaryMd: block.summaryMd,
+        sourceQuote: block.sourceQuote,
+      })),
+    ));
+    expect(persisted).toEqual(expect.objectContaining({
+      summaryMd: expect.any(String),
+      blocksJson: expect.objectContaining({
+        version: 1,
+        blocks: expect.arrayContaining(
+          fixture.expectedBlocks.map((block) => expect.objectContaining({
+            title: block.title,
+            kind: block.kind,
+            summaryMd: block.summaryMd,
+            sourceQuote: block.sourceQuote,
+          })),
+        ),
+      }),
+    }));
+    for (const phrase of fixture.expectedSummaryPhrases) {
+      expect(persisted?.summaryMd).toContain(phrase);
+    }
   });
 
   it("processes long transcripts in full-coverage chunks before meeting-summary model calls", async () => {

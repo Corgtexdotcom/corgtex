@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { meetingRecordFromReplayFixture, operationsTacticalReplayFixture } from "./meeting-transcript-replay-fixtures";
 
 const { autoApplyMeetingInsightsMock, buildMeetingIntelligenceContextMock, syncKnowledgeForSourceMock } = vi.hoisted(() => ({
   autoApplyMeetingInsightsMock: vi.fn(),
@@ -201,31 +202,38 @@ describe("agent runtime", () => {
   });
 
   it("auto-applies high-confidence meeting insights", async () => {
-    prismaMock.meeting.findUnique.mockResolvedValue({
-      id: "meeting-1",
-      workspaceId: "ws-1",
-      title: "Weekly Sync",
-      transcript: "Follow up with finance on reconciliation.",
-      summaryMd: null,
-    });
-    modelGatewayMock.extract.mockResolvedValue({
-      output: {
-        actions: [
-          {
-            title: "Follow up with finance",
-            rationale: "Meeting transcript references unresolved reconciliation work.",
-          },
-        ],
-      },
-      raw: "{\"actions\":[{\"title\":\"Follow up with finance\"}]}",
-      usage: { provider: "fake", model: "fake", inputTokens: 1, outputTokens: 1, latencyMs: 1, estimatedCostUsd: "0.000000" },
-    });
+    const fixture = operationsTacticalReplayFixture;
+    const meetingRecord = meetingRecordFromReplayFixture(fixture);
+    prismaMock.meeting.findUnique.mockResolvedValue(meetingRecord);
+    autoApplyMeetingInsightsMock.mockResolvedValueOnce(fixture.expectedAutoApply);
+
+    expect(meetingRecord.insights).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        workspaceId: fixture.workspaceId,
+        meetingId: fixture.meetingId,
+        type: "ACTION_ITEM",
+        operation: "CREATE",
+        bodyMd: expect.stringContaining("Milan will publish"),
+        dueAt: new Date("2026-07-17T17:00:00.000Z"),
+        sourceQuote: expect.stringContaining("checklist by Friday"),
+        status: "SUGGESTED",
+      }),
+      expect.objectContaining({
+        workspaceId: fixture.workspaceId,
+        meetingId: fixture.meetingId,
+        type: "ACTION_ITEM",
+        operation: "CREATE",
+        bodyMd: expect.stringContaining("Rhea owns the customer retest evidence matrix"),
+        assigneeHint: "Rhea",
+        status: "SUGGESTED",
+      }),
+    ]));
 
     const { runActionExtractionAgent } = await import(".");
     await runActionExtractionAgent({
-      workspaceId: "ws-1",
-      triggerRef: "job-2",
-      meetingId: "meeting-1",
+      workspaceId: fixture.workspaceId,
+      triggerRef: `replay-${fixture.id}`,
+      meetingId: fixture.meetingId,
     });
 
     expect(prismaMock.agentRun.create).toHaveBeenCalledWith(expect.objectContaining({
@@ -245,9 +253,17 @@ describe("agent runtime", () => {
       kind: "agent",
       label: "action-extraction",
     }), {
-      workspaceId: "ws-1",
-      meetingId: "meeting-1",
+      workspaceId: fixture.workspaceId,
+      meetingId: fixture.meetingId,
     });
+    expect(prismaMock.agentRun.update).toHaveBeenLastCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        resultJson: expect.objectContaining({
+          meetingId: fixture.meetingId,
+          ...fixture.expectedAutoApply,
+        }),
+      }),
+    }));
   });
 
   it("skips action extraction when the meeting has no transcript", async () => {
