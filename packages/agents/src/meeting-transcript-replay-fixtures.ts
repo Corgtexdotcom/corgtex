@@ -26,6 +26,7 @@ export type MeetingTranscriptReplayFixture = {
     title: string;
     bodyMd: string;
     assigneeHint: string | null;
+    dueAt: string | null;
     confidence: number;
     sourceQuote: string;
     targetEntityType: string | null;
@@ -87,8 +88,22 @@ export const operationsTacticalReplayFixture: MeetingTranscriptReplayFixture = {
       title: "Publish onboarding evidence-owner checklist",
       bodyMd: "Milan will publish the onboarding checklist with evidence owners by Friday.",
       assigneeHint: "Milan",
+      dueAt: "2026-07-17T17:00:00.000Z",
       confidence: 0.91,
       sourceQuote: "I will publish the checklist by Friday.",
+      targetEntityType: null,
+      targetEntityId: null,
+    },
+    {
+      type: "ACTION_ITEM",
+      operation: "CREATE",
+      status: "SUGGESTED",
+      title: "Complete customer retest evidence matrix",
+      bodyMd: "Rhea owns the customer retest evidence matrix after deployment.",
+      assigneeHint: "Rhea",
+      dueAt: null,
+      confidence: 0.9,
+      sourceQuote: "Rhea owns the customer retest evidence matrix after deployment.",
       targetEntityType: null,
       targetEntityId: null,
     },
@@ -99,6 +114,7 @@ export const operationsTacticalReplayFixture: MeetingTranscriptReplayFixture = {
       title: "Renewal-risk tension needs resolution notes",
       bodyMd: "The renewal-risk tension needs resolution notes before the customer retest.",
       assigneeHint: "Rhea",
+      dueAt: null,
       confidence: 0.87,
       sourceQuote: "The renewal-risk tension needs resolution notes before the customer retest.",
       targetEntityType: null,
@@ -111,6 +127,7 @@ export const operationsTacticalReplayFixture: MeetingTranscriptReplayFixture = {
       title: "Keep notifications out of this release",
       bodyMd: "Notifications remain out of this release and stay on the separate notifications track.",
       assigneeHint: null,
+      dueAt: null,
       confidence: 0.78,
       sourceQuote: "keep notifications out of this release",
       targetEntityType: null,
@@ -129,9 +146,9 @@ export const operationsTacticalReplayFixture: MeetingTranscriptReplayFixture = {
     "Notifications remain out of this release",
   ],
   expectedAutoApply: {
-    applied: 2,
+    applied: 3,
     failed: 0,
-    skipped: 1,
+    skipped: 0,
     threshold: 0.8,
   },
 };
@@ -182,7 +199,7 @@ export function meetingRecordFromReplayFixture(fixture: MeetingTranscriptReplayF
       title: insight.title,
       bodyMd: insight.bodyMd,
       assigneeHint: insight.assigneeHint,
-      dueAt: null,
+      dueAt: insight.dueAt ? new Date(insight.dueAt) : null,
       confidence: insight.confidence,
       sourceQuote: insight.sourceQuote,
       appliedEntityType: null,

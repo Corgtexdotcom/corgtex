@@ -214,7 +214,17 @@ describe("agent runtime", () => {
         type: "ACTION_ITEM",
         operation: "CREATE",
         bodyMd: expect.stringContaining("Milan will publish"),
+        dueAt: new Date("2026-07-17T17:00:00.000Z"),
         sourceQuote: expect.stringContaining("checklist by Friday"),
+        status: "SUGGESTED",
+      }),
+      expect.objectContaining({
+        workspaceId: fixture.workspaceId,
+        meetingId: fixture.meetingId,
+        type: "ACTION_ITEM",
+        operation: "CREATE",
+        bodyMd: expect.stringContaining("Rhea owns the customer retest evidence matrix"),
+        assigneeHint: "Rhea",
         status: "SUGGESTED",
       }),
     ]));
