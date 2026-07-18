@@ -1,6 +1,7 @@
-import type { BrainArticleType, BrainSourceType, GoalCadence, GoalLevel, GoalStatus } from "@prisma/client";
+import type { BrainArticleAuthority, BrainArticleType, BrainSourceType, GoalCadence, GoalLevel, GoalStatus } from "@prisma/client";
 import { notFound, redirect } from "next/navigation";
 import {
+  AGREEMENT_BRAIN_ARTICLE_TYPES,
   createCatalogRequest,
   createExternalDataSource,
   createWorkspaceToolLink,
@@ -98,6 +99,15 @@ const CADENCES: { id: GoalCadence; label: string }[] = [
 const GOAL_LEVELS: GoalLevel[] = ["COMPANY", "CIRCLE", "PERSONAL"];
 const GOAL_STATUSES: GoalStatus[] = ["ACTIVE", "ON_TRACK", "AT_RISK", "BEHIND", "COMPLETED", "DRAFT", "ABANDONED"];
 const ARTICLE_TYPES: BrainArticleType[] = ["PRODUCT", "ARCHITECTURE", "PROCESS", "RUNBOOK", "DECISION", "TEAM", "PERSON", "CUSTOMER", "INCIDENT", "PROJECT", "INTEGRATION", "PATTERN", "STRATEGY", "CULTURE", "GLOSSARY"];
+const AGREEMENT_ARTICLE_TYPES: BrainArticleType[] = [...AGREEMENT_BRAIN_ARTICLE_TYPES];
+const ARTICLE_AUTHORITIES: BrainArticleAuthority[] = ["DRAFT", "REFERENCE", "AUTHORITATIVE"];
+const AGREEMENT_ARTICLE_AUTHORITIES: BrainArticleAuthority[] = ["REFERENCE", "AUTHORITATIVE"];
+const ARTICLE_AUTHORITY_LABELS: Record<BrainArticleAuthority, string> = {
+  DRAFT: "Draft",
+  REFERENCE: "Reference",
+  AUTHORITATIVE: "Authoritative",
+  HISTORICAL: "Historical",
+};
 const SOURCE_TYPES: BrainSourceType[] = ["MEETING", "TICKET", "PR", "RFC", "INCIDENT", "SLACK", "CUSTOMER_FEEDBACK", "COMPETITOR", "RESEARCH", "ARTICLE", "DOC", "RUNBOOK", "EMAIL", "FILE_UPLOAD", "EXTERNAL_CONTENT"];
 
 function splitList(value: string | null) {
@@ -192,6 +202,11 @@ export default async function WorkspaceAddPage({
   const returnTo = sanitizeWorkspaceReturnTo(workspaceId, search.returnTo);
   const contextCircleId = circleIdFromReturnTo(returnTo, workspaceId);
   const returnUrl = new URL(returnTo, "https://app.local");
+  const returnSubpath = workspaceSubpath(returnUrl.pathname, workspaceId);
+  const isAgreementArticle = kind === "article"
+    && (returnSubpath === "/agreements" || Boolean(returnSubpath?.startsWith("/agreements/")));
+  const articleTypeOptions = isAgreementArticle ? AGREEMENT_ARTICLE_TYPES : ARTICLE_TYPES;
+  const articleAuthorityOptions = isAgreementArticle ? AGREEMENT_ARTICLE_AUTHORITIES : ARTICLE_AUTHORITIES;
   const contextAccountId = crmAccountIdFromPath(returnUrl.pathname, workspaceId);
   const contextDealStage = creatableDealStageFromSearch(search);
   const allowedActions = getWorkspaceAddActions({
@@ -271,6 +286,8 @@ export default async function WorkspaceAddPage({
       ? "Upload meeting audio"
     : kind === "upload_file"
       ? "Upload files from this device"
+    : isAgreementArticle
+      ? "Add working agreement"
     : `Add ${WORKSPACE_ADD_ACTION_DEFINITIONS[kind].label}`;
   const uploadDefaultSource = workspaceSubpath(returnUrl.pathname, workspaceId)?.startsWith("/settings")
     ? "settings-upload"
@@ -792,17 +809,38 @@ export default async function WorkspaceAddPage({
         {kind === "article" && (
           <form action={createArticleAndReturn} className="stack nr-form-section">
             {hiddenWorkspace(workspaceId)}
+            {isAgreementArticle && <input type="hidden" name="agreementCapture" value="working-agreement" />}
             <label>Title<input name="title" required /></label>
             <div className="actions-inline">
-              <label style={{ flex: 1 }}>Type<select name="type">{ARTICLE_TYPES.map((type) => <option key={type} value={type}>{type}</option>)}</select></label>
-              <label style={{ flex: 1 }}>Authority<select name="authority" defaultValue="DRAFT"><option value="DRAFT">Draft</option><option value="REFERENCE">Reference</option><option value="AUTHORITATIVE">Authoritative</option></select></label>
+              <label style={{ flex: 1 }}>
+                Type
+                <select name="type" defaultValue={isAgreementArticle ? "PROCESS" : undefined}>
+                  {articleTypeOptions.map((type) => <option key={type} value={type}>{type}</option>)}
+                </select>
+              </label>
+              <label style={{ flex: 1 }}>
+                Authority
+                <select name="authority" defaultValue={isAgreementArticle ? "REFERENCE" : "DRAFT"}>
+                  {articleAuthorityOptions.map((authority) => (
+                    <option key={authority} value={authority}>{ARTICLE_AUTHORITY_LABELS[authority]}</option>
+                  ))}
+                </select>
+              </label>
             </div>
+            {isAgreementArticle && (
+              <>
+                <label>Source<input name="agreementSource" /></label>
+                <label>Context<MarkdownEditor name="agreementContext" rows={4} /></label>
+              </>
+            )}
             <label>Body<MarkdownEditor name="bodyMd" required rows={8} /></label>
-            <label style={{ display: "flex", alignItems: "center", flexDirection: "row", gap: 8 }}>
-              <input type="checkbox" name="isPrivate" defaultChecked style={{ width: "auto" }} />
-              Private draft
-            </label>
-            <div className="actions-inline"><button type="submit">Create article</button>{cancelLink(returnTo)}</div>
+            {!isAgreementArticle && (
+              <label style={{ display: "flex", alignItems: "center", flexDirection: "row", gap: 8 }}>
+                <input type="checkbox" name="isPrivate" defaultChecked style={{ width: "auto" }} />
+                Private draft
+              </label>
+            )}
+            <div className="actions-inline"><button type="submit">{isAgreementArticle ? "Create working agreement" : "Create article"}</button>{cancelLink(returnTo)}</div>
           </form>
         )}
 

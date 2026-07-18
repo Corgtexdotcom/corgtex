@@ -74,7 +74,13 @@ describe("workspace add actions", () => {
   });
 
   it("offers proposal and Brain article creation from Agreements", () => {
-    expect(kinds({ pathname: "/workspaces/ws-1/agreements" })).toEqual(["proposal", "article"]);
+    const agreementsActions = getWorkspaceAddActions(context({ pathname: "/workspaces/ws-1/agreements" }));
+    expect(agreementsActions.map((action) => action.kind)).toEqual(["proposal", "article"]);
+    expect(agreementsActions[1]).toMatchObject({
+      kind: "article",
+      label: "Working agreement",
+      description: "Capture a working agreement with source and context.",
+    });
     expect(kinds({ pathname: "/workspaces/ws-1/agreements", isDemo: true })).toEqual([]);
   });
 
@@ -98,7 +104,12 @@ describe("workspace add actions", () => {
   });
 
   it("offers Brain upload before article creation", () => {
-    expect(kinds({ pathname: "/workspaces/ws-1/brain" })).toEqual(["upload_file", "article"]);
+    const brainActions = getWorkspaceAddActions(context({ pathname: "/workspaces/ws-1/brain" }));
+    expect(brainActions.map((action) => action.kind)).toEqual(["upload_file", "article"]);
+    expect(brainActions[1]).toMatchObject({
+      kind: "article",
+      label: "Brain article",
+    });
   });
 
   it("uses circle detail context for structure actions", () => {

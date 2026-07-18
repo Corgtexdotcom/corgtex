@@ -91,6 +91,9 @@ describe("listWorkspaceAgreements", () => {
         authority: { in: [...AGREEMENT_BRAIN_ARTICLE_AUTHORITIES] },
         type: { in: [...AGREEMENT_BRAIN_ARTICLE_TYPES] },
       },
+      select: expect.objectContaining({
+        frontmatterJson: true,
+      }),
       take: 7,
     }));
     expect(result.counts).toEqual({

@@ -156,10 +156,11 @@ export type WorkspaceAddActionContext = {
 
 const WORKSPACE_MARKER = "/workspaces/";
 
-function action(kind: WorkspaceAddActionKind): WorkspaceAddAction {
+function action(kind: WorkspaceAddActionKind, overrides: Partial<Omit<WorkspaceAddAction, "kind">> = {}): WorkspaceAddAction {
   return {
     kind,
     ...WORKSPACE_ADD_ACTION_DEFINITIONS[kind],
+    ...overrides,
   };
 }
 
@@ -264,7 +265,13 @@ export function getWorkspaceAddActions(context: WorkspaceAddActionContext): Work
     case "proposals":
       return [action("proposal")];
     case "agreements":
-      return [action("proposal"), action("article")];
+      return [
+        action("proposal"),
+        action("article", {
+          label: "Working agreement",
+          description: "Capture a working agreement with source and context.",
+        }),
+      ];
     case "goals":
       return context.featureFlags.GOALS
         ? [

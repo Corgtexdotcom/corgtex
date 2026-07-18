@@ -67,6 +67,7 @@ export async function listWorkspaceAgreements(actor: AppActor, params: {
         type: true,
         authority: true,
         bodyMd: true,
+        frontmatterJson: true,
         updatedAt: true,
         lastVerifiedAt: true,
         ownerMember: {

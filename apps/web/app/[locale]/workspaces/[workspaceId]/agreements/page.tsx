@@ -23,6 +23,23 @@ function formatEnumLabel(value: string) {
     .join(" ");
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function workingAgreementFrontmatter(value: unknown) {
+  if (!isRecord(value) || !isRecord(value.workingAgreement)) return null;
+
+  const source = typeof value.workingAgreement.source === "string"
+    ? value.workingAgreement.source.trim()
+    : "";
+  const context = typeof value.workingAgreement.context === "string"
+    ? value.workingAgreement.context.trim()
+    : "";
+
+  return source || context ? { source, context } : null;
+}
+
 function firstSearchValue(value: string | string[] | undefined) {
   return Array.isArray(value) ? value[0] : value;
 }
@@ -209,6 +226,7 @@ export default async function AgreementsPage({
               {agreements.brainArticles.map((article) => {
                 const verifiedAt = formatDate(article.lastVerifiedAt);
                 const ownerName = article.ownerMember?.user.displayName ?? article.ownerMember?.user.email ?? null;
+                const frontmatter = workingAgreementFrontmatter(article.frontmatterJson);
                 return (
                   <article key={article.id} className="nr-item agreements-item">
                     <div className="row">
@@ -222,6 +240,17 @@ export default async function AgreementsPage({
                       {verifiedAt ? ` · ${t("verified", { date: verifiedAt })}` : ""}
                       {ownerName ? ` · ${ownerName}` : ""}
                     </div>
+                    {frontmatter && (
+                      <div className="nr-item-meta" style={{ fontSize: "0.82rem", marginTop: 4 }}>
+                        {frontmatter.source && (
+                          <span><strong>{t("workingAgreementSource")}:</strong> {frontmatter.source}</span>
+                        )}
+                        {frontmatter.source && frontmatter.context ? " · " : ""}
+                        {frontmatter.context && (
+                          <span><strong>{t("workingAgreementContext")}:</strong> {frontmatter.context}</span>
+                        )}
+                      </div>
+                    )}
                     <MarkdownExcerpt markdown={article.bodyMd} maxLength={category === "working-agreements" ? 360 : 240} as="p" className="nr-excerpt" />
                   </article>
                 );

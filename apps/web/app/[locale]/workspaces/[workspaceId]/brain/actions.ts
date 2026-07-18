@@ -5,10 +5,13 @@ import { enforceDemoGuard } from "@/lib/demo-guard";
 import type { BrainArticleAuthority, BrainArticleType, BrainSourceType } from "@prisma/client";
 import { revalidatePath } from "next/cache";
 import {
+  AGREEMENT_BRAIN_ARTICLE_AUTHORITIES,
+  AGREEMENT_BRAIN_ARTICLE_TYPES,
   createArticle,
   updateArticle,
   ingestSource,
   publishArticle,
+  requireWorkspaceMembership,
   returnArticleToDraft,
 } from "@corgtex/domain";
 import { requirePageActor } from "@/lib/auth";
@@ -20,6 +23,38 @@ function asString(formData: FormData, key: string) {
 function asOptional(formData: FormData, key: string) {
   const value = asString(formData, key).trim();
   return value.length > 0 ? value : null;
+}
+
+function isWorkingAgreementCapture(formData: FormData) {
+  return asString(formData, "agreementCapture") === "working-agreement";
+}
+
+function workingAgreementFrontmatter(formData: FormData) {
+  if (!isWorkingAgreementCapture(formData)) return undefined;
+
+  const source = asOptional(formData, "agreementSource");
+  const context = asOptional(formData, "agreementContext");
+  const workingAgreement: Record<string, string> = {};
+  if (source) workingAgreement.source = source;
+  if (context) workingAgreement.context = context;
+
+  return { workingAgreement };
+}
+
+function persistedOwnerMemberId(membership: { id: string } | null | undefined) {
+  return membership?.id === "global-operator" ? null : membership?.id ?? null;
+}
+
+function workingAgreementType(formData: FormData): BrainArticleType {
+  const submitted = (asString(formData, "type") || "PROCESS") as BrainArticleType;
+  return AGREEMENT_BRAIN_ARTICLE_TYPES.some((type) => type === submitted) ? submitted : "PROCESS";
+}
+
+function workingAgreementAuthority(formData: FormData, isPrivate: boolean): BrainArticleAuthority {
+  if (isPrivate) return "DRAFT";
+
+  const submitted = (asOptional(formData, "authority") ?? "REFERENCE") as BrainArticleAuthority;
+  return AGREEMENT_BRAIN_ARTICLE_AUTHORITIES.some((authority) => authority === submitted) ? submitted : "REFERENCE";
 }
 
 function refresh(workspaceId: string, slug?: string) {
@@ -35,14 +70,23 @@ export async function createArticleAction(formData: FormData) {
 
   const actor = await requirePageActor();
   const workspaceId = asString(formData, "workspaceId");
+  const isWorkingAgreement = isWorkingAgreementCapture(formData);
+  const isPrivate = formData.get("isPrivate") === "on";
+  const membership = isWorkingAgreement
+    ? await requireWorkspaceMembership({ actor, workspaceId })
+    : null;
   await createArticle(actor, {
     workspaceId,
     title: asString(formData, "title"),
     slug: asOptional(formData, "slug") ?? undefined,
-    type: (asString(formData, "type") || "GLOSSARY") as BrainArticleType,
-    authority: (asOptional(formData, "authority") ?? "DRAFT") as BrainArticleAuthority,
+    type: isWorkingAgreement ? workingAgreementType(formData) : (asString(formData, "type") || "GLOSSARY") as BrainArticleType,
+    authority: isWorkingAgreement
+      ? workingAgreementAuthority(formData, isPrivate)
+      : (asOptional(formData, "authority") ?? "DRAFT") as BrainArticleAuthority,
     bodyMd: asString(formData, "bodyMd"),
-    isPrivate: formData.get("isPrivate") === "on",
+    frontmatterJson: workingAgreementFrontmatter(formData),
+    ownerMemberId: isWorkingAgreement ? persistedOwnerMemberId(membership) : undefined,
+    isPrivate,
   });
   refresh(workspaceId);
 }
