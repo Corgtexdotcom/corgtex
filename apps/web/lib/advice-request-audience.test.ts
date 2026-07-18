@@ -17,6 +17,15 @@ describe("canActorReplyToAdviceRequest", () => {
     }, actor)).toBe(true);
   });
 
+  it("rejects non-selected members for selected-person requests", () => {
+    expect(canActorReplyToAdviceRequest({
+      requestedByUserId: "requester",
+      audienceType: "MEMBERS",
+      targetCircleId: null,
+      recipients: [{ memberId: "member-2" }],
+    }, actor)).toBe(false);
+  });
+
   it("does not allow requesters to satisfy their own visible request", () => {
     expect(canActorReplyToAdviceRequest({
       requestedByUserId: "user-1",

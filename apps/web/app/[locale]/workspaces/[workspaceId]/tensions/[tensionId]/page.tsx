@@ -14,6 +14,7 @@ import { DeliberationComposer } from "@/lib/components/DeliberationComposer";
 import { AdviceRequestForm } from "@/lib/components/AdviceRequestForm";
 import { WorkItemConversationSurface, WorkItemRequestList } from "@/lib/components/WorkItemConversation";
 import { getDeliberationTargets } from "@/lib/deliberation-targets";
+import { canActorReplyToAdviceRequest } from "@/lib/advice-request-audience";
 import { canOpenPrivateDraft } from "@/lib/governance-open-guards";
 import { attachTensionExternalResourceAction, createProposalFromTensionAction, postTensionDeliberationAction, publishTensionAction, requestTensionInputAction, returnTensionToDraftAction, resolveTensionDeliberationAction, updateTensionAction, updateTensionDeliberationAction } from "../../actions";
 import { getFormatter, getTranslations } from "next-intl/server";
@@ -131,10 +132,10 @@ export default async function TensionDetailPage({
   const actorUserId = actor.kind === "user" ? actor.user.id : null;
   const actorMemberId = deliberationTargets.actorMemberId;
   const actorCircleIds = new Set(deliberationTargets.actorCircleIds);
-  const isParentResponsible = Boolean(
-    actorUserId && tension.authorUserId === actorUserId
-      || actorMemberId && tension.assigneeMemberId === actorMemberId,
-  );
+  const isTensionAuthor = Boolean(actorUserId && tension.authorUserId === actorUserId);
+  const isTensionAssignee = Boolean(actorMemberId && tension.assigneeMemberId === actorMemberId);
+  const isTensionRaisedBy = Boolean(actorMemberId && tension.raisedByMemberId === actorMemberId);
+  const isParentResponsible = isTensionAuthor || isTensionAssignee || isTensionRaisedBy;
   const canManageEntry = (entry: (typeof entries)[number]) => !isArchived && Boolean(
     isAdmin
       || (actorUserId && entry.authorUserId === actorUserId)
@@ -147,7 +148,7 @@ export default async function TensionDetailPage({
   const canEditContent = !isArchived && tension.status === "DRAFT" ? canManage : !isArchived && tension.status === "OPEN" && canSubmittedEditorEdit;
   const canDraftProposal = !isArchived && !tension.proposal && (canManage || !tension.isPrivate);
   const canResolve = !isArchived && !tension.isPrivate && tension.status === "OPEN";
-  const canRequestInput = !isArchived && tension.status === "OPEN" && !tension.isPrivate && (canManage || isParentResponsible);
+  const canRequestInput = !isArchived && actor.kind === "user" && tension.status === "OPEN" && !tension.isPrivate && (isAdmin || isParentResponsible);
   const memberRequestOptions = targetOptions
     .filter((option) => option.kind === "member")
     .map((option) => ({ value: option.value.slice("member:".length), label: option.name }));
@@ -199,6 +200,13 @@ export default async function TensionDetailPage({
   ].filter(Boolean).join("\n\n");
   const requestIds = new Set(inputRequests.map((request) => request.id));
   const discussionEntries = mappedEntries.filter((entry) => !entry.adviceRequestId || !requestIds.has(entry.adviceRequestId));
+  const canReplyToInputRequest = (request: (typeof inputRequests)[number]) => {
+    return canActorReplyToAdviceRequest(request, {
+      userId: actorUserId,
+      memberId: actorMemberId,
+      circleIds: actorCircleIds,
+    });
+  };
   const inputRequestCards = inputRequests.map((request) => {
     const linkedReplies = mappedEntries.filter((entry) => entry.adviceRequestId === request.id);
     return {
@@ -226,7 +234,7 @@ export default async function TensionDetailPage({
           hiddenFields={{ workspaceId, parentId: tensionId }}
         />
       ) : null,
-      replyForm: !isArchived && tension.status === "OPEN" && request.status === "ACTIVE" ? (
+      replyForm: !isArchived && tension.status === "OPEN" && request.status === "ACTIVE" && canReplyToInputRequest(request) ? (
         <DeliberationComposer
           postAction={postTensionDeliberationAction}
           hiddenFields={{ workspaceId, parentId: tensionId, adviceRequestId: request.id }}
