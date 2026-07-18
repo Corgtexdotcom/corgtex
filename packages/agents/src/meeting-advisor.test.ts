@@ -302,6 +302,7 @@ describe("runMeetingSummaryAgent", () => {
         title: block.title,
         kind: block.kind,
         summaryMd: block.summaryMd,
+        sourceQuote: block.sourceQuote,
       })),
     ));
     expect(persisted).toEqual(expect.objectContaining({
@@ -313,6 +314,7 @@ describe("runMeetingSummaryAgent", () => {
             title: block.title,
             kind: block.kind,
             summaryMd: block.summaryMd,
+            sourceQuote: block.sourceQuote,
           })),
         ),
       }),

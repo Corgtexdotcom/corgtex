@@ -79,6 +79,13 @@ export const operationsTacticalReplayFixture: MeetingTranscriptReplayFixture = {
       summaryMd: "Sam decided notifications stay out of this release and remain on the separate notifications track.",
       sourceQuote: "keep notifications out of this release",
     },
+    {
+      sequence: 4,
+      title: "Customer retest evidence matrix",
+      kind: "planning",
+      summaryMd: "Rhea owns the customer retest evidence matrix after deployment.",
+      sourceQuote: "Rhea owns the customer retest evidence matrix after deployment.",
+    },
   ],
   expectedInsights: [
     {
@@ -137,11 +144,13 @@ export const operationsTacticalReplayFixture: MeetingTranscriptReplayFixture = {
   expectedSummaryMd: [
     "## Operations tactical",
     "- Milan will publish the onboarding checklist with evidence owners by Friday.",
+    "- The renewal-risk tension needs resolution notes before the customer retest.",
     "- Rhea owns the customer retest evidence matrix after deployment.",
     "- Notifications remain out of this release and stay on the separate notifications track.",
   ].join("\n"),
   expectedSummaryPhrases: [
     "Milan will publish the onboarding checklist",
+    "renewal-risk tension needs resolution notes",
     "Rhea owns the customer retest evidence matrix",
     "Notifications remain out of this release",
   ],
