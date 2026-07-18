@@ -36,7 +36,18 @@ const { prismaMock, state } = vi.hoisted(() => {
     actions: new Map<string, { id: string; workspaceId: string; authorUserId: string; assigneeMemberId: string | null; version: number; isPrivate?: boolean }>(),
     circles: new Map<string, { id: string; workspaceId: string; archivedAt: Date | null }>(),
     roleAssignments: [] as Array<{ memberId: string; circleId: string; expiresAt: Date | null }>,
-    adviceRequests: new Map<string, { id: string; workspaceId: string; status: string; process: { subjectType: string; subjectId: string } }>(),
+    adviceRequests: new Map<string, {
+      id: string;
+      workspaceId: string;
+      status: string;
+      requestedByUserId?: string;
+      audienceType?: string;
+      targetCircleId?: string | null;
+      processId?: string;
+      recipients?: Array<{ memberId: string }>;
+      process: { subjectType: string; subjectId: string };
+      completedAt?: Date | null;
+    }>(),
     entries: [] as EntryRecord[],
     auditLogs: [] as any[],
     events: [] as any[],
@@ -159,6 +170,13 @@ const { prismaMock, state } = vi.hoisted(() => {
     },
     adviceRequest: {
       findUnique: vi.fn(async ({ where }: any) => store.adviceRequests.get(where.id) ?? null),
+      update: vi.fn(async ({ where, data }: any) => {
+        const request = store.adviceRequests.get(where.id);
+        if (!request) return null;
+        const updated = { ...request, ...data };
+        store.adviceRequests.set(where.id, updated);
+        return updated;
+      }),
     },
     deliberationEntry: {
       create: vi.fn(async ({ data }: any) => {
@@ -437,6 +455,58 @@ describe("deliberation", () => {
         entryId: entry.id,
         parentType: "PROPOSAL",
         parentId: proposalId,
+        authorUserId: "member-user",
+      }),
+    }));
+  });
+
+  it("completes an active advice request when a requested member replies", async () => {
+    state.adviceRequests.set("request-1", {
+      id: "request-1",
+      workspaceId,
+      status: "ACTIVE",
+      requestedByUserId: "admin-user",
+      audienceType: "MEMBERS",
+      targetCircleId: null,
+      processId: "process-1",
+      recipients: [{ memberId }],
+      process: {
+        subjectType: "PROPOSAL",
+        subjectId: proposalId,
+      },
+      completedAt: null,
+    });
+
+    const entry = await postDeliberationEntry(memberActor, {
+      workspaceId,
+      parentType: "PROPOSAL",
+      parentId: proposalId,
+      entryType: "REACTION",
+      bodyMd: "I think this is ready.",
+      adviceRequestId: "request-1",
+    });
+
+    expect(state.adviceRequests.get("request-1")).toMatchObject({
+      status: "COMPLETED",
+      completedAt: expect.any(Date),
+    });
+    expect(state.auditLogs).toContainEqual(expect.objectContaining({
+      action: "advice.request.completed",
+      entityType: "AdviceRequest",
+      entityId: "request-1",
+      meta: expect.objectContaining({
+        completedBy: "reply",
+        entryId: entry.id,
+      }),
+    }));
+    expect(state.events).toContainEqual(expect.objectContaining({
+      type: "advice.request.completed",
+      aggregateType: "AdviceRequest",
+      aggregateId: "request-1",
+      payload: expect.objectContaining({
+        adviceRequestId: "request-1",
+        completedBy: "reply",
+        entryId: entry.id,
         authorUserId: "member-user",
       }),
     }));

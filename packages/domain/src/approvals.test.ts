@@ -169,6 +169,32 @@ describe("recordApprovalDecision", () => {
       },
     });
   });
+
+  it("rejects proposal author approval decisions", async () => {
+    const currentFlow = {
+      id: "flow-proposal",
+      workspaceId: "ws-1",
+      subjectType: "PROPOSAL",
+      subjectId: "p-1",
+      status: "ACTIVE",
+      mode: "CONSENT",
+      quorumPercent: 0,
+      minApproverCount: 1,
+      closesAt: null,
+      decisions: [],
+      objections: [],
+    };
+    prismaMock.approvalFlow.findUnique.mockResolvedValueOnce(currentFlow);
+    prismaMock.proposal.findMany.mockResolvedValueOnce([{ id: "p-1", authorUserId: "u-1" }]);
+
+    await expect(recordApprovalDecision(
+      { kind: "user", user: { id: "u-1" } } as any,
+      { workspaceId: "ws-1", flowId: "flow-proposal", choice: "AGREE" },
+    )).rejects.toThrow(/Proposal authors cannot review their own proposal/);
+
+    expect(prismaMock.approvalDecision.upsert).not.toHaveBeenCalled();
+    expect(prismaMock.approvalFlow.update).not.toHaveBeenCalled();
+  });
 });
 
 describe("listActionableApprovalFlows", () => {
@@ -334,6 +360,39 @@ describe("listProposalDecisionStates", () => {
       openObjections: [
         expect.objectContaining({ bodyMd: "This creates risk." }),
       ],
+    });
+  });
+
+  it("does not mark proposal authors as needing to review their own proposal", async () => {
+    prismaMock.member.findMany.mockResolvedValue([{ id: "member-1" }, { id: "member-2" }]);
+    prismaMock.proposal.findMany.mockResolvedValueOnce([{ id: "proposal-authored", authorUserId: "u-1" }]);
+    prismaMock.approvalFlow.findMany.mockResolvedValue([
+      {
+        id: "flow-authored",
+        workspaceId: "ws-1",
+        subjectType: "PROPOSAL",
+        subjectId: "proposal-authored",
+        status: "ACTIVE",
+        mode: "CONSENT",
+        openedAt: new Date("2026-05-26T12:00:00.000Z"),
+        closesAt: new Date("2026-05-29T12:00:00.000Z"),
+        quorumPercent: 0,
+        minApproverCount: 1,
+        decisions: [],
+        objections: [],
+      },
+    ]);
+
+    const states = await listProposalDecisionStates(
+      { kind: "user", user: { id: "u-1" } } as any,
+      { workspaceId: "ws-1", proposalIds: ["proposal-authored"] },
+    );
+
+    expect(states.get("proposal-authored")).toMatchObject({
+      canReview: false,
+      needsReview: false,
+      currentMemberDecision: null,
+      currentUserOpenObjectionId: null,
     });
   });
 
