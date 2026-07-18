@@ -1,5 +1,11 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
-import { getUserProfile, updateMemberNewspaperCadencePreference, updateUserProfile } from "./user-profile";
+import {
+  getUserNotificationPreferences,
+  getUserProfile,
+  updateMemberNewspaperCadencePreference,
+  updateNotificationPreference,
+  updateUserProfile,
+} from "./user-profile";
 import { prisma } from "@corgtex/shared";
 
 const requireWorkspaceMembershipMock = vi.hoisted(() => vi.fn());
@@ -18,6 +24,7 @@ vi.mock("@corgtex/shared", async () => {
         update: vi.fn(),
       },
       notificationPreference: {
+        findMany: vi.fn(),
         upsert: vi.fn(),
         deleteMany: vi.fn(),
       },
@@ -157,8 +164,39 @@ describe("User Profile Domain", () => {
   });
 
   describe("updateNotificationPreference", () => {
+    it("maps legacy BOTH preferences to IN_APP_EMAIL when reading", async () => {
+      vi.mocked(prisma.notificationPreference.findMany).mockResolvedValue([
+        {
+          id: "pref-1",
+          userId: "u1",
+          notifType: "deliberation.mention",
+          channel: "BOTH",
+        },
+        {
+          id: "pref-2",
+          userId: "u1",
+          notifType: "role-onboarding.assigned",
+          channel: "SLACK",
+        },
+      ] as any);
+
+      await expect(getUserNotificationPreferences(mockActor as any)).resolves.toEqual([
+        expect.objectContaining({
+          id: "pref-1",
+          channel: "IN_APP_EMAIL",
+        }),
+        expect.objectContaining({
+          id: "pref-2",
+          channel: "SLACK",
+        }),
+      ]);
+
+      expect(prisma.notificationPreference.findMany).toHaveBeenCalledWith({
+        where: { userId: "u1" },
+      });
+    });
+
     it("deletes the override when channel is USE_DEFAULT", async () => {
-      const { updateNotificationPreference } = await import("./user-profile");
       await expect(updateNotificationPreference(mockActor as any, {
         notifType: "deliberation.mention",
         channel: "USE_DEFAULT",
@@ -181,7 +219,6 @@ describe("User Profile Domain", () => {
         channel: "IN_APP",
       } as any);
 
-      const { updateNotificationPreference } = await import("./user-profile");
       await expect(updateNotificationPreference(mockActor as any, {
         notifType: "deliberation.mention",
         channel: "IN_APP",
@@ -193,6 +230,31 @@ describe("User Profile Domain", () => {
             userId: "u1",
             notifType: "deliberation.mention",
           },
+        },
+      }));
+    });
+
+    it("stores new Slack and combined notification preference channels", async () => {
+      vi.mocked(prisma.notificationPreference.upsert).mockResolvedValue({
+        id: "pref-2",
+        userId: "u1",
+        notifType: "budget.threshold_reached",
+        channel: "EMAIL_SLACK",
+      } as any);
+
+      await expect(updateNotificationPreference(mockActor as any, {
+        notifType: "budget.threshold_reached",
+        channel: "EMAIL_SLACK",
+      })).resolves.toMatchObject({ channel: "EMAIL_SLACK" });
+
+      expect(prisma.notificationPreference.upsert).toHaveBeenCalledWith(expect.objectContaining({
+        update: {
+          channel: "EMAIL_SLACK",
+        },
+        create: {
+          userId: "u1",
+          notifType: "budget.threshold_reached",
+          channel: "EMAIL_SLACK",
         },
       }));
     });

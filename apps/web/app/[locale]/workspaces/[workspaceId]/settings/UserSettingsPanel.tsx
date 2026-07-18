@@ -5,6 +5,14 @@ import { useRouter } from "next/navigation";
 import { useLocale, useTranslations } from "next-intl";
 import { TableActionGroup } from "@/lib/components/ControlPrimitives";
 import { updateProfileAction, updateNotificationPrefAction, updateMemberNewspaperCadenceAction } from "./actions";
+import {
+  activityNotificationRows,
+  displayActivityNotificationChannel,
+  displayNotificationChannel,
+  notificationChannelOptions,
+  urgentNotificationRows,
+  type NotificationPreferenceRow,
+} from "./notification-settings-model";
 
 type MemberNewspaperCadenceChoice = "WORKSPACE_DEFAULT" | "DAILY" | "WEEKLY" | "OFF";
 
@@ -30,11 +38,13 @@ export function UserSettingsPanel({
   profile,
   sessions,
   preferences,
+  slackConnected,
 }: {
   workspaceId: string;
   profile: any;
   sessions: any[];
   preferences: any[];
+  slackConnected: boolean;
 }) {
   const router = useRouter();
   const locale = useLocale();
@@ -163,13 +173,43 @@ export function UserSettingsPanel({
     }
   };
 
-  const notifTypes = [
-    { type: "*", label: t("notifType_*") },
-    { type: "proposal.submitted", label: t("notifType_proposal_submitted") },
-    { type: "meeting.created", label: t("notifType_meeting_created") },
-    { type: "action.created", label: t("notifType_action_created") },
-    { type: "tension.created", label: t("notifType_tension_created") },
-  ];
+  const preferenceValue = (notifType: string, fallback: string, activityOnly = false) => {
+    const pref = preferences.find(p => p.notifType === notifType);
+    const displayed = activityOnly
+      ? displayActivityNotificationChannel(pref?.channel)
+      : displayNotificationChannel(pref?.channel);
+    return displayed ?? fallback;
+  };
+  const renderChannelSelect = (notifType: string, value: string, includeUseDefault: boolean, activityOnly = false) => {
+    const options = notificationChannelOptions({ includeUseDefault, slackConnected, activityOnly });
+    return (
+      <select
+        className="nr-input"
+        style={{ padding: "6px 10px", minWidth: 220 }}
+        value={value}
+        onChange={(e) => handlePrefChange(notifType, e.target.value)}
+      >
+        {options.map((option) => (
+          <option key={option.value} value={option.value} disabled={option.disabled}>
+            {option.label}
+          </option>
+        ))}
+      </select>
+    );
+  };
+  const renderPreferenceRows = (rows: NotificationPreferenceRow[]) => rows.map((row) => (
+    <tr key={row.type}>
+      <td>{row.label}</td>
+      <td style={{ width: 260 }}>
+        {renderChannelSelect(
+          row.type,
+          preferenceValue(row.type, "USE_DEFAULT", row.section === "activity"),
+          true,
+          row.section === "activity",
+        )}
+      </td>
+    </tr>
+  ));
   let memberSince = "-";
   if (profile.member) {
     memberSince = isHydrated ? formatLocalDate(profile.member.createdAt, locale) : "";
@@ -358,34 +398,28 @@ export function UserSettingsPanel({
         <div className="nested-item" style={{ padding: 0, overflow: 'hidden' }}>
           <table className="notif-pref-table">
             <tbody>
-              {notifTypes.map(nt => {
-                const pref = preferences.find(p => p.notifType === nt.type);
-                const currentVal = pref ? pref.channel : (nt.type === "*" ? "IN_APP" : "USE_DEFAULT");
-
-                return (
-                  <tr key={nt.type}>
-                    <td style={{ fontWeight: nt.type === "*" ? 600 : 400 }}>{nt.label}</td>
-                    <td style={{ width: 180 }}>
-                      <select
-                        className="nr-input"
-                        style={{ padding: "6px 10px" }}
-                        value={currentVal}
-                        onChange={(e) => handlePrefChange(nt.type, e.target.value)}
-                      >
-                        {nt.type !== "*" && <option value="USE_DEFAULT">Use Default</option>}
-                        <option value="IN_APP">{t("notifChannel_IN_APP")}</option>
-                        <option value="EMAIL">{t("notifChannel_EMAIL")}</option>
-                        <option value="BOTH">{t("notifChannel_BOTH")}</option>
-                        <option value="OFF">{t("notifChannel_OFF")}</option>
-                      </select>
-                    </td>
-                  </tr>
-                );
-              })}
+              <tr>
+                <td style={{ fontWeight: 600 }}>Default</td>
+                <td style={{ width: 260 }}>
+                  {renderChannelSelect("*", preferenceValue("*", "IN_APP"), false)}
+                </td>
+              </tr>
+              <tr>
+                <td colSpan={2} style={{ paddingTop: 18, fontWeight: 700 }}>Urgent alerts</td>
+              </tr>
+              {renderPreferenceRows(urgentNotificationRows)}
+              <tr>
+                <td colSpan={2} style={{ paddingTop: 18, fontWeight: 700 }}>Activity notifications</td>
+              </tr>
+              {renderPreferenceRows(activityNotificationRows)}
             </tbody>
           </table>
         </div>
-        <p className="text-muted mt-2 text-[0.85rem]">Slack integration coming soon.</p>
+        {!slackConnected && (
+          <p className="text-muted mt-2 text-[0.85rem]">
+            Connect Slack from Tools to enable Slack notification delivery.
+          </p>
+        )}
       </div>
 
       {/* 4. Security */}

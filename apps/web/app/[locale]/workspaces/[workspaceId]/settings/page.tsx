@@ -9,6 +9,7 @@ import {
   getAiWorkspaceSelectionState,
   listAgentConfigs,
   listAiWorkspaceToolProviders,
+  listCommunicationInstallations,
   listMemberInviteRequests,
   listMembersEnriched,
   listModuleAccessRequests,
@@ -134,6 +135,7 @@ export default async function SettingsPage({
   let userProfile: any = null;
   let userSessions: any[] = [];
   let userPrefs: any[] = [];
+  let userSlackConnected = false;
   if (tab === "user") {
     try {
       const { sha256, sessionCookieName } = await import("@corgtex/shared");
@@ -141,11 +143,18 @@ export default async function SettingsPage({
       const token = cookieStore.get(sessionCookieName())?.value;
       const tokenHash = token ? sha256(token) : undefined;
 
-      [userProfile, userSessions, userPrefs] = await Promise.all([
+      const [profileResult, sessionsResult, prefsResult, installationsResult] = await Promise.all([
         getUserProfile(actor, workspaceId),
         listUserSessions(actor, tokenHash),
         getUserNotificationPreferences(actor),
+        listCommunicationInstallations(actor, workspaceId).catch(() => []),
       ]);
+      userProfile = profileResult;
+      userSessions = sessionsResult;
+      userPrefs = prefsResult;
+      userSlackConnected = installationsResult.some((installation) => (
+        installation.provider === "SLACK" && installation.status === "ACTIVE"
+      ));
     } catch (err) {
       console.error("[SettingsPage] Failed to fetch user profile data:", err);
     }
@@ -333,6 +342,7 @@ export default async function SettingsPage({
           profile={userProfile}
           sessions={userSessions}
           preferences={userPrefs}
+          slackConnected={userSlackConnected}
         />
       )}
 
