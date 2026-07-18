@@ -114,7 +114,11 @@ describe("github-incident resolved issue sync", () => {
       issues,
     });
 
-    expect(result.code).toBe(0);
+    expect(result.code, JSON.stringify({
+      stdout: result.stdout,
+      stderr: result.stderr,
+      calls: result.state.calls,
+    }, null, 2)).toBe(0);
     expect(result.state.issues.slice(0, 100).every((item) => !item.closed)).toBe(true);
     expect(result.state.issues[100].closed).toBe(true);
     const apiCalls = result.state.calls.filter((call) => call[0] === "api" && call.includes("repos/{owner}/{repo}/issues"));
@@ -447,6 +451,10 @@ function save() {
   writeFileSync(statePath, JSON.stringify(state));
 }
 
+function output(text) {
+  writeFileSync(1, String(text) + "\\n");
+}
+
 function argValue(name) {
   const index = argv.indexOf(name);
   return index === -1 ? null : argv[index + 1];
@@ -470,7 +478,7 @@ if (argv[0] === "issue" && argv[1] === "list") {
     : state.issues.filter((issue) => !issue.closed);
   const limitedIssues = state.issueListLimit ? issues.slice(0, state.issueListLimit) : issues;
   save();
-  console.log(JSON.stringify(limitedIssues.map((issue) => ({
+  output(JSON.stringify(limitedIssues.map((issue) => ({
     number: issue.number,
     title: issue.title,
     body: issue.body,
@@ -501,7 +509,7 @@ if (argv[0] === "api" && argv.includes("repos/{owner}/{repo}/issues")) {
     }));
   const start = (page - 1) * effectivePerPage;
   save();
-  console.log(JSON.stringify(issues.slice(start, start + effectivePerPage)));
+  output(JSON.stringify(issues.slice(start, start + effectivePerPage)));
   process.exit(0);
 }
 
@@ -510,7 +518,7 @@ if (argv[0] === "issue" && argv[1] === "comment") {
   const issue = state.issues.find((item) => item.number === number);
   if (issue) issue.comments = [...(issue.comments ?? []), argValue("--body")];
   save();
-  console.log("https://github.test/comment");
+  output("https://github.test/comment");
   process.exit(0);
 }
 
@@ -519,7 +527,7 @@ if (argv[0] === "issue" && argv[1] === "create") {
   const labels = String(argValue("--label") ?? "").split(",").filter(Boolean).map((name) => ({ name }));
   state.issues.push({ number, title: argValue("--title"), labels });
   save();
-  console.log("https://github.test/issues/" + number);
+  output("https://github.test/issues/" + number);
   process.exit(0);
 }
 
@@ -532,7 +540,7 @@ if (argv[0] === "issue" && argv[1] === "close") {
     issue.closeComment = argValue("--comment");
   }
   save();
-  console.log("closed");
+  output("closed");
   process.exit(0);
 }
 
