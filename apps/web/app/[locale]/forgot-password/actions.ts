@@ -2,7 +2,10 @@
 
 import { renderPasswordResetEmail, renderPasswordResetEmailText, requestPasswordReset } from "@corgtex/domain";
 import { sendEmail } from "@corgtex/shared";
+import { logPasswordResetDiagnostic } from "@/lib/password-reset-observability";
 import type { ForgotPasswordState } from "./state";
+
+const PASSWORD_RESET_SOURCE = "forgot_password_action";
 
 export async function forgotPasswordAction(
   _previousState: ForgotPasswordState,
@@ -18,7 +21,7 @@ export async function forgotPasswordAction(
       const resetUrl = `${appUrl}/reset-password/${result.token}`;
 
       try {
-        await sendEmail({
+        const sendResult = await sendEmail({
           to: result.user.email,
           subject: "Reset your Corgtex password",
           html: renderPasswordResetEmail({
@@ -40,10 +43,28 @@ export async function forgotPasswordAction(
             },
           },
         });
+        logPasswordResetDiagnostic({
+          email,
+          outcome: sendResult.status === "SENT" ? "email_sent" : "email_skipped",
+          sendResult,
+          source: PASSWORD_RESET_SOURCE,
+          userId: result.user.id,
+        });
       } catch (emailError) {
-        // Log but don't fail — the token was created, user just won't receive the email
-        console.error("Failed to send password reset email:", emailError);
+        logPasswordResetDiagnostic({
+          email,
+          error: emailError,
+          outcome: "email_failed",
+          source: PASSWORD_RESET_SOURCE,
+          userId: result.user.id,
+        });
       }
+    } else {
+      logPasswordResetDiagnostic({
+        email,
+        outcome: "no_account",
+        source: PASSWORD_RESET_SOURCE,
+      });
     }
 
     // Always show success — prevents email enumeration
@@ -53,7 +74,12 @@ export async function forgotPasswordAction(
       success: true,
     };
   } catch (error) {
-    console.error("Forgot password action failed:", error);
+    logPasswordResetDiagnostic({
+      email,
+      error,
+      outcome: "action_failed",
+      source: PASSWORD_RESET_SOURCE,
+    });
     return {
       email,
       error: "Something went wrong. Please try again.",

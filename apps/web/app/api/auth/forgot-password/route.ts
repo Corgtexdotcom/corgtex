@@ -3,11 +3,14 @@ import { z } from "zod";
 import { renderPasswordResetEmail, renderPasswordResetEmailText, requestPasswordReset } from "@corgtex/domain";
 import { sendEmail } from "@corgtex/shared";
 import { handleRouteError, validateBody } from "@/lib/http";
+import { logPasswordResetDiagnostic } from "@/lib/password-reset-observability";
 import { rateLimitPasswordReset } from "@/lib/rate-limit-middleware";
 
 const forgotPasswordSchema = z.object({
   email: z.string().trim().min(1),
 });
+
+const PASSWORD_RESET_SOURCE = "api_auth_forgot_password";
 
 export async function POST(request: NextRequest) {
   try {
@@ -25,7 +28,7 @@ export async function POST(request: NextRequest) {
       const resetUrl = `${appUrl}/reset-password/${result.token}`;
 
       try {
-        await sendEmail({
+        const sendResult = await sendEmail({
           to: result.user.email,
           subject: "Reset your Corgtex password",
           html: renderPasswordResetEmail({
@@ -47,9 +50,28 @@ export async function POST(request: NextRequest) {
             },
           },
         });
+        logPasswordResetDiagnostic({
+          email,
+          outcome: sendResult.status === "SENT" ? "email_sent" : "email_skipped",
+          sendResult,
+          source: PASSWORD_RESET_SOURCE,
+          userId: result.user.id,
+        });
       } catch (emailError) {
-        console.error("Failed to send password reset email:", emailError);
+        logPasswordResetDiagnostic({
+          email,
+          error: emailError,
+          outcome: "email_failed",
+          source: PASSWORD_RESET_SOURCE,
+          userId: result.user.id,
+        });
       }
+    } else {
+      logPasswordResetDiagnostic({
+        email,
+        outcome: "no_account",
+        source: PASSWORD_RESET_SOURCE,
+      });
     }
 
     // Always return 200 — prevents email enumeration
