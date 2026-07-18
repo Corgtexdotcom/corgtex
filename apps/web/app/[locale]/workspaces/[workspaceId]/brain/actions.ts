@@ -9,6 +9,7 @@ import {
   updateArticle,
   ingestSource,
   publishArticle,
+  requireWorkspaceMembership,
   returnArticleToDraft,
 } from "@corgtex/domain";
 import { requirePageActor } from "@/lib/auth";
@@ -22,8 +23,12 @@ function asOptional(formData: FormData, key: string) {
   return value.length > 0 ? value : null;
 }
 
+function isWorkingAgreementCapture(formData: FormData) {
+  return asString(formData, "agreementCapture") === "working-agreement";
+}
+
 function workingAgreementFrontmatter(formData: FormData) {
-  if (asString(formData, "agreementCapture") !== "working-agreement") return undefined;
+  if (!isWorkingAgreementCapture(formData)) return undefined;
 
   const source = asOptional(formData, "agreementSource");
   const context = asOptional(formData, "agreementContext");
@@ -32,6 +37,10 @@ function workingAgreementFrontmatter(formData: FormData) {
   if (context) workingAgreement.context = context;
 
   return { workingAgreement };
+}
+
+function persistedOwnerMemberId(membership: { id: string } | null | undefined) {
+  return membership?.id === "global-operator" ? null : membership?.id ?? null;
 }
 
 function refresh(workspaceId: string, slug?: string) {
@@ -47,15 +56,21 @@ export async function createArticleAction(formData: FormData) {
 
   const actor = await requirePageActor();
   const workspaceId = asString(formData, "workspaceId");
+  const isWorkingAgreement = isWorkingAgreementCapture(formData);
+  const isPrivate = formData.get("isPrivate") === "on";
+  const membership = isWorkingAgreement
+    ? await requireWorkspaceMembership({ actor, workspaceId })
+    : null;
   await createArticle(actor, {
     workspaceId,
     title: asString(formData, "title"),
     slug: asOptional(formData, "slug") ?? undefined,
     type: (asString(formData, "type") || "GLOSSARY") as BrainArticleType,
-    authority: (asOptional(formData, "authority") ?? "DRAFT") as BrainArticleAuthority,
+    authority: (isWorkingAgreement && isPrivate ? "DRAFT" : asOptional(formData, "authority") ?? "DRAFT") as BrainArticleAuthority,
     bodyMd: asString(formData, "bodyMd"),
     frontmatterJson: workingAgreementFrontmatter(formData),
-    isPrivate: formData.get("isPrivate") === "on",
+    ownerMemberId: isWorkingAgreement ? persistedOwnerMemberId(membership) : undefined,
+    isPrivate,
   });
   refresh(workspaceId);
 }

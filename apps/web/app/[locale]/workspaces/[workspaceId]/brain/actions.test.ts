@@ -15,6 +15,13 @@ const enforceDemoGuard = vi.fn();
 const ingestSource = vi.fn();
 const publishArticle = vi.fn();
 const requirePageActor = vi.fn(async () => actor);
+const requireWorkspaceMembership = vi.fn(async () => ({
+  id: "member-1",
+  workspaceId: "workspace-1",
+  userId: "user-1",
+  role: "MEMBER",
+  isActive: true,
+}));
 const returnArticleToDraft = vi.fn();
 const updateArticle = vi.fn();
 
@@ -30,6 +37,7 @@ vi.mock("@corgtex/domain", () => ({
   createArticle,
   ingestSource,
   publishArticle,
+  requireWorkspaceMembership,
   returnArticleToDraft,
   updateArticle,
 }));
@@ -59,6 +67,7 @@ describe("Brain article server actions", () => {
 
     expect(enforceDemoGuard).toHaveBeenCalledWith("workspace-1");
     expect(requirePageActor).toHaveBeenCalled();
+    expect(requireWorkspaceMembership).toHaveBeenCalledWith({ actor, workspaceId: "workspace-1" });
     expect(createArticle).toHaveBeenCalledWith(actor, expect.objectContaining({
       workspaceId: "workspace-1",
       title: "Customer escalation ownership",
@@ -66,6 +75,7 @@ describe("Brain article server actions", () => {
       authority: "REFERENCE",
       bodyMd: "Support owns first response; product owns root-cause follow-up.",
       isPrivate: false,
+      ownerMemberId: "member-1",
       frontmatterJson: {
         workingAgreement: {
           source: "July 17 operations review",
@@ -96,5 +106,28 @@ describe("Brain article server actions", () => {
       isPrivate: true,
     }));
     expect(createArticle.mock.calls[0]?.[1]).toHaveProperty("frontmatterJson", undefined);
+    expect(createArticle.mock.calls[0]?.[1]).toHaveProperty("ownerMemberId", undefined);
+    expect(requireWorkspaceMembership).not.toHaveBeenCalled();
+  });
+
+  it("keeps tampered private working agreements as editable drafts", async () => {
+    const { createArticleAction } = await import("./actions");
+    const formData = new FormData();
+    formData.set("workspaceId", "workspace-1");
+    formData.set("agreementCapture", "working-agreement");
+    formData.set("title", "Private escalation note");
+    formData.set("type", "PROCESS");
+    formData.set("authority", "REFERENCE");
+    formData.set("bodyMd", "Draft agreement body.");
+    formData.set("isPrivate", "on");
+
+    await createArticleAction(formData);
+
+    expect(createArticle).toHaveBeenCalledWith(actor, expect.objectContaining({
+      workspaceId: "workspace-1",
+      authority: "DRAFT",
+      isPrivate: true,
+      ownerMemberId: "member-1",
+    }));
   });
 });

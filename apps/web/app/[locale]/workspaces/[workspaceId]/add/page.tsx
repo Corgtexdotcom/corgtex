@@ -822,10 +822,12 @@ export default async function WorkspaceAddPage({
               </>
             )}
             <label>Body<MarkdownEditor name="bodyMd" required rows={8} /></label>
-            <label style={{ display: "flex", alignItems: "center", flexDirection: "row", gap: 8 }}>
-              <input type="checkbox" name="isPrivate" defaultChecked={!isAgreementArticle} style={{ width: "auto" }} />
-              Private draft
-            </label>
+            {!isAgreementArticle && (
+              <label style={{ display: "flex", alignItems: "center", flexDirection: "row", gap: 8 }}>
+                <input type="checkbox" name="isPrivate" defaultChecked style={{ width: "auto" }} />
+                Private draft
+              </label>
+            )}
             <div className="actions-inline"><button type="submit">{isAgreementArticle ? "Create working agreement" : "Create article"}</button>{cancelLink(returnTo)}</div>
           </form>
         )}
