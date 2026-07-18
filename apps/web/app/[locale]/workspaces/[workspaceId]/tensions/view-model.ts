@@ -1,9 +1,17 @@
+import { normalizeDateOnly } from "@/lib/work-item-view";
+
 export const TENSION_STATUS_FILTERS = ["DRAFT", "OPEN", "RESOLVED", "ALL"] as const;
 const TENSION_VISIBLE_STATUS_FILTERS = ["DRAFT", "OPEN", "RESOLVED"] as const;
 
 export type TensionStatusFilter = (typeof TENSION_STATUS_FILTERS)[number];
 export type TensionVisibleStatusFilter = (typeof TENSION_VISIBLE_STATUS_FILTERS)[number];
 export type TensionStatusQuery = TensionStatusFilter | readonly TensionVisibleStatusFilter[] | undefined;
+export type TensionDateFilters = {
+  openedFrom?: string;
+  openedTo?: string;
+  closedFrom?: string;
+  closedTo?: string;
+};
 export type TensionStatusSearch = {
   statusFilter: TensionStatusFilter;
   statusFilters: TensionVisibleStatusFilter[];
@@ -78,7 +86,19 @@ export function resolveTensionSearch(
   search: SearchParams,
   defaultValue: TensionVisibleStatusFilter | null = "OPEN",
 ) {
-  return resolveTensionStatusSearch(search.status, defaultValue);
+  return {
+    ...resolveTensionStatusSearch(search.status, defaultValue),
+    dateFilters: resolveTensionDateFilters(search),
+  };
+}
+
+export function resolveTensionDateFilters(search: SearchParams): TensionDateFilters {
+  return {
+    openedFrom: normalizeDateOnly(search.openedFrom),
+    openedTo: normalizeDateOnly(search.openedTo),
+    closedFrom: normalizeDateOnly(search.closedFrom),
+    closedTo: normalizeDateOnly(search.closedTo),
+  };
 }
 
 export function groupTensionsByStatus<T extends { status: string; isPrivate: boolean }>(tensions: T[]) {
