@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import React, { type ReactNode } from "react";
 import { ArrowDownAZ, ArrowDownWideNarrow, ArrowUpDown, Columns3, List, Table2 } from "lucide-react";
 import type { WorkItemScope, WorkItemSort, WorkItemViewMode } from "@/lib/work-item-view";
 import { MultiSelectFilter } from "@/lib/components/MultiSelectFilter";
@@ -144,11 +144,14 @@ export function WorkItemFilterControls({
   columns,
   circleId,
   circleIds,
+  assigneeMemberId,
+  assigneeMemberIds,
   memberId,
   memberIds,
   statusOptions,
   statusValues,
   circles,
+  assigneeMembers,
   members,
   dates = [],
   clearHref,
@@ -164,11 +167,14 @@ export function WorkItemFilterControls({
   columns?: readonly string[];
   circleId?: string;
   circleIds?: readonly string[];
+  assigneeMemberId?: string;
+  assigneeMemberIds?: readonly string[];
   memberId?: string;
   memberIds?: readonly string[];
   statusOptions?: Option[];
   statusValues?: readonly string[];
   circles: Option[];
+  assigneeMembers?: Option[];
   members: Option[];
   dates?: DateFilter[];
   clearHref?: string;
@@ -178,8 +184,10 @@ export function WorkItemFilterControls({
     scope?: string;
     company?: string;
     circle: string;
+    assignee?: string;
     person: string;
     allCircles: string;
+    allAssignees?: string;
     allPeople: string;
     status?: string;
     allStatuses?: string;
@@ -191,6 +199,7 @@ export function WorkItemFilterControls({
   };
 }) {
   const selectedCircleIds = circleIds ?? (circleId ? [circleId] : []);
+  const selectedAssigneeMemberIds = assigneeMemberIds ?? (assigneeMemberId ? [assigneeMemberId] : []);
   const selectedMemberIds = memberIds ?? (memberId ? [memberId] : []);
 
   return (
@@ -231,6 +240,19 @@ export function WorkItemFilterControls({
           selectAllLabel={labels.selectAll}
           unselectAllLabel={labels.unselectAll}
           selectedCountLabel={labels.selectedCount}
+        />
+      )}
+      {assigneeMembers && assigneeMembers.length > 0 && (
+        <MultiSelectFilter
+          name="assigneeMemberId"
+          label={labels.assignee ?? "Assigned to"}
+          options={assigneeMembers.map((member) => ({ value: member.id, label: member.label }))}
+          selectedValues={selectedAssigneeMemberIds}
+          allLabel={labels.allAssignees ?? "All assignees"}
+          selectAllLabel={labels.selectAll}
+          unselectAllLabel={labels.unselectAll}
+          selectedCountLabel={labels.selectedCount}
+          collapseAllToEmpty={false}
         />
       )}
       {showMember && (

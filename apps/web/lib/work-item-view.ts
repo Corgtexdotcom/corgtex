@@ -119,6 +119,8 @@ export function buildWorkItemQuery(params: {
   sort?: WorkItemSort;
   circleId?: string;
   circleIds?: readonly string[];
+  assigneeMemberId?: string;
+  assigneeMemberIds?: readonly string[];
   memberId?: string;
   memberIds?: readonly string[];
   columns?: readonly string[];
@@ -131,6 +133,7 @@ export function buildWorkItemQuery(params: {
   if (params.scope && params.scope !== "company") query.set("scope", params.scope);
   if (params.sort && params.sort !== "priority") query.set("sort", params.sort);
   appendRepeatedParams(query, "circleId", params.circleIds ?? (params.circleId ? [params.circleId] : undefined));
+  appendRepeatedParams(query, "assigneeMemberId", params.assigneeMemberIds ?? (params.assigneeMemberId ? [params.assigneeMemberId] : undefined));
   appendRepeatedParams(query, "memberId", params.memberIds ?? (params.memberId ? [params.memberId] : undefined));
   if (params.columns && params.columns.length > 0) query.set("columns", params.columns.join(","));
   for (const [key, value] of Object.entries(params.dates ?? {})) {
@@ -142,11 +145,13 @@ export function buildWorkItemQuery(params: {
 
 export function resolveWorkItemFilters(search: Record<string, string | string[] | undefined>) {
   const circleIds = normalizeSelectedValues(search.circleId);
+  const assigneeMemberIds = normalizeSelectedValues(search.assigneeMemberId);
   const memberIds = normalizeSelectedValues(search.memberId);
   const circleId = circleIds[0];
+  const assigneeMemberId = assigneeMemberIds[0];
   const memberId = memberIds[0];
   const sort = normalizeWorkItemSort(search.sort);
-  return { circleId, circleIds, memberId, memberIds, sort };
+  return { circleId, circleIds, assigneeMemberId, assigneeMemberIds, memberId, memberIds, sort };
 }
 
 export function normalizeWorkItemFilterValues<TValue extends string>(

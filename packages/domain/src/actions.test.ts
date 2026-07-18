@@ -261,6 +261,27 @@ describe("action domain lifecycle", () => {
     });
   });
 
+  it("filters exact assignees separately from broader member involvement", async () => {
+    prismaMock.action.findMany.mockResolvedValueOnce([]);
+    prismaMock.action.count.mockResolvedValueOnce(0);
+
+    const { listActions } = await import("./actions");
+    await listActions(actor, "workspace-1", {
+      assigneeMemberIds: ["member-2", "member-2", ""],
+    });
+
+    expect(prismaMock.action.findMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({
+        workspaceId: "workspace-1",
+        assigneeMemberId: { in: ["member-2"] },
+        OR: [
+          { isPrivate: false },
+          { isPrivate: true, status: "DRAFT", authorUserId: "user-1" },
+        ],
+      }),
+    }));
+  });
+
   it("creates unchecked-private actions as open public records", async () => {
     prismaMock.action.create.mockResolvedValueOnce({
       id: "action-public",

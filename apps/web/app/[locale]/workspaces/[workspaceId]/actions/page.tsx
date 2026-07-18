@@ -57,11 +57,12 @@ export default async function ActionsPage({
     resolvedSearch.status,
     view === "kanban" ? null : "OPEN",
   );
-  const { circleIds, memberIds, sort } = resolveWorkItemFilters(resolvedSearch);
+  const { circleIds, assigneeMemberIds, memberIds, sort } = resolveWorkItemFilters(resolvedSearch);
   const [{ items: actions }, circles, members, activeInputRequests] = await Promise.all([
     listActions(actor, workspaceId, {
       take: 200,
       circleIds,
+      assigneeMemberIds,
       memberIds,
       sort,
     }),
@@ -113,6 +114,7 @@ export default async function ActionsPage({
     view: "kanban",
     status: queryStatus,
     circleIds,
+    assigneeMemberIds,
     memberIds,
     columns: toggleWorkItemColumnVisibility(visibleActionColumnIds, status, actionColumnStatuses),
   });
@@ -124,10 +126,11 @@ export default async function ActionsPage({
       view: "kanban",
       status: filter === "ALL" ? "ALL" : statusQuery,
       circleIds,
+      assigneeMemberIds,
       memberIds,
       columns: filter === "ALL" ? undefined : toggleWorkItemColumnVisibility(visibleActionColumnIds, filter, actionColumnStatuses),
     })
-    : buildWorkItemQuery({ view, sort, circleIds, memberIds, status: filter });
+    : buildWorkItemQuery({ view, sort, circleIds, assigneeMemberIds, memberIds, status: filter });
   const actionFilterActive = (filter: ActionStatusFilter) => view === "kanban"
     ? filter === "ALL"
       ? allActionColumnsVisible
@@ -135,6 +138,17 @@ export default async function ActionsPage({
     : filter === "ALL"
       ? statusFilters.length === 0
       : statusFilters.includes(filter);
+  const currentMemberId = membership?.id && membership.id !== "global-operator" ? membership.id : null;
+  const assignedToMeActive = !!currentMemberId && assigneeMemberIds.includes(currentMemberId);
+  const assignedToMeHref = buildWorkItemQuery({
+    view,
+    status: statusQuery,
+    sort: view !== "kanban" ? sort : undefined,
+    circleIds,
+    assigneeMemberIds: assignedToMeActive || !currentMemberId ? [] : [currentMemberId],
+    memberIds,
+    columns: view === "kanban" && !allActionColumnsVisible ? visibleActionColumnIds : undefined,
+  });
 
   const canManageAction = (action: { authorUserId: string }) => actor.kind === "agent"
     || membership?.role === "ADMIN"
@@ -151,6 +165,12 @@ export default async function ActionsPage({
 
   const memberName = (member: { user: { displayName: string | null; email: string } }) => member.user.displayName || member.user.email;
   const actionMembers = members.map((member) => ({ id: member.id, label: memberName(member) }));
+  const currentActorMember = currentMemberId && actor.kind === "user"
+    ? { id: currentMemberId, label: actor.user.displayName || actor.user.email }
+    : null;
+  const filterMembers = currentActorMember && !actionMembers.some((member) => member.id === currentActorMember.id)
+    ? [currentActorMember, ...actionMembers]
+    : actionMembers;
   const priorityLabels = {
     3: tWork("priorityUrgent"),
     2: tWork("priorityImportant"),
@@ -520,17 +540,25 @@ export default async function ActionsPage({
                 {t(ACTION_STATUS_META[s].labelKey)} ({groupedActions[s].length})
               </a>
             ))}
+            {currentMemberId && (
+              <a
+                href={assignedToMeHref}
+                className={`nr-filter-item ${assignedToMeActive ? "nr-filter-active" : ""}`}
+              >
+                {tWork("assignedToMe")}
+              </a>
+            )}
           </div>
           <WorkItemToolbar
             currentView={view}
             currentSort={sort}
-            listHref={buildWorkItemQuery({ sort, circleIds, memberIds, status: statusQuery, view: "list" })}
-            kanbanHref={buildWorkItemQuery({ circleIds, memberIds, view: "kanban" })}
-            tableHref={buildWorkItemQuery({ sort, circleIds, memberIds, status: statusQuery, view: "table" })}
+            listHref={buildWorkItemQuery({ sort, circleIds, assigneeMemberIds, memberIds, status: statusQuery, view: "list" })}
+            kanbanHref={buildWorkItemQuery({ circleIds, assigneeMemberIds, memberIds, view: "kanban" })}
+            tableHref={buildWorkItemQuery({ sort, circleIds, assigneeMemberIds, memberIds, status: statusQuery, view: "table" })}
             sortLinks={{
-              priority: buildWorkItemQuery({ view: view === "table" ? "table" : "list", circleIds, memberIds, status: statusQuery, sort: "priority" }),
-              date: buildWorkItemQuery({ view: view === "table" ? "table" : "list", circleIds, memberIds, status: statusQuery, sort: "date" }),
-              alpha: buildWorkItemQuery({ view: view === "table" ? "table" : "list", circleIds, memberIds, status: statusQuery, sort: "alpha" }),
+              priority: buildWorkItemQuery({ view: view === "table" ? "table" : "list", circleIds, assigneeMemberIds, memberIds, status: statusQuery, sort: "priority" }),
+              date: buildWorkItemQuery({ view: view === "table" ? "table" : "list", circleIds, assigneeMemberIds, memberIds, status: statusQuery, sort: "date" }),
+              alpha: buildWorkItemQuery({ view: view === "table" ? "table" : "list", circleIds, assigneeMemberIds, memberIds, status: statusQuery, sort: "alpha" }),
             }}
             listLabel={tWork("listView")}
             kanbanLabel={tWork("kanbanView")}
@@ -552,15 +580,19 @@ export default async function ActionsPage({
           statusOptions={ACTION_STATUS_FILTERS.map((filter) => ({ id: filter, label: ACTION_STATUS_META[filter].labelKey ? t(ACTION_STATUS_META[filter].labelKey) : filter }))}
           statusValues={statusFilters}
           circleIds={circleIds}
+          assigneeMemberIds={assigneeMemberIds}
           memberIds={memberIds}
           circles={circles.map((circle) => ({ id: circle.id, label: circle.name }))}
-          members={members.map((member) => ({ id: member.id, label: memberName(member) }))}
+          assigneeMembers={filterMembers}
+          members={filterMembers}
           labels={{
             status: tWork("status"),
             allStatuses: tWork("allStatuses"),
             circle: tWork("circle"),
+            assignee: tWork("assignedTo"),
             person: tWork("personInvolved"),
             allCircles: tWork("allCircles"),
+            allAssignees: tWork("allAssignees"),
             allPeople: tWork("allPeopleInvolved"),
             selectAll: tWork("selectAll"),
             unselectAll: tWork("unselectAll"),

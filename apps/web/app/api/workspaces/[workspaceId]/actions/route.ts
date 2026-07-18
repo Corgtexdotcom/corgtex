@@ -32,6 +32,7 @@ export const GET = withWorkspaceRoute(async (req, { actor, workspaceId }) => {
     archiveFilter: parseArchiveFilter(searchParams.get("archiveFilter")),
     status: parseActionStatus(searchParams.get("status")),
     circleIds: searchParamValues(searchParams.getAll("circleId")),
+    assigneeMemberIds: searchParamValues(searchParams.getAll("assigneeMemberId")),
     memberIds: searchParamValues(searchParams.getAll("memberId")),
     sort: normalizeWorkItemSort(searchParams.get("sort") ?? undefined),
     take: parseNonNegativeInt(searchParams.get("take")),
