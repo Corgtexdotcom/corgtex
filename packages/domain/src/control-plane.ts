@@ -51,6 +51,12 @@ const DEFAULT_RECORDER_MONTHLY_MINUTE_CAP = 6_000;
 const MEETING_RECORDER_PROVIDERS = new Set(["RECALL_AI", "MEETING_BAAS"]);
 const CONTROL_PLANE_CONTEXT_OPERATIONS = new Set(["sync_all", "sync_source", "disable_source"]);
 const CONTROL_PLANE_RELEASE_OPERATIONS = new Set(["prepare_upgrade"]);
+const CONTROL_PLANE_MEETING_RECORDER_OPERATIONS = new Set([
+  "enqueue_calendar_sync",
+  "dry_run_scan",
+  "live_smoke",
+  "enable_auto_recording_after_smoke",
+]);
 const CONTROL_PLANE_READ_SCOPE = "control-plane:read";
 const CONTROL_PLANE_CLIENTS_WRITE_SCOPE = "control-plane:clients:write";
 const CONTROL_PLANE_MIGRATIONS_WRITE_SCOPE = "control-plane:migrations:write";
@@ -105,6 +111,10 @@ const MUTATING_SUPPORT_ACTIONS = new Set([
   "tensions.return_to_draft",
   "meetings.upload",
   "meeting_series.set_recorder_url",
+  "meeting_recorders.connect_calendar",
+  "meeting_recorders.enqueue_calendar_sync",
+  "meeting_recorders.dry_run_scan",
+  "meeting_recorders.live_smoke",
   "meeting_recorders.set_auto_recording",
   "meeting_recorders.ensure_coverage",
   "runtime.retry_failed_job",
@@ -167,6 +177,10 @@ const SUPPORT_ACTION_TO_MCP_TOOL = {
   "meetings.upload": "upload_meeting",
   "meeting_recorders.readiness": "get_meeting_recorder_operations_readiness",
   "meeting_series.set_recorder_url": "set_meeting_series_recorder_url",
+  "meeting_recorders.connect_calendar": "connect_meeting_recorder_calendar",
+  "meeting_recorders.enqueue_calendar_sync": "enqueue_meeting_recorder_calendar_sync",
+  "meeting_recorders.dry_run_scan": "dry_run_meeting_recorder_calendar_scan",
+  "meeting_recorders.live_smoke": "run_meeting_recorder_live_smoke",
   "meeting_recorders.set_auto_recording": "set_meeting_recorder_auto_recording",
   "meeting_recorders.ensure_coverage": "ensure_meeting_recorder_coverage",
 } as const;
@@ -6195,7 +6209,45 @@ export async function saveControlPlaneRecorderCalendarSource(actor: AppActor, pa
   await requireControlPlaneDeploymentWriteAccess(actor, params.deploymentId);
   const deployment = await getControlPlaneDeploymentWithWorkspace(actor, params.deploymentId);
   const managedWorkspaceId = deployment.managedWorkspaceId;
-  invariant(managedWorkspaceId, 400, "MANAGED_WORKSPACE_REQUIRED", "Recorder calendar setup requires a managed workspace link.");
+  if (!managedWorkspaceId) {
+    const recorderCalendarArgs: JsonRecord = {
+      providerAccountId: params.providerAccountId,
+      accessToken: params.accessToken,
+      scopes: params.scopes ?? [],
+    };
+    if (typeof params.providerAccountEmail === "string") recorderCalendarArgs.providerAccountEmail = params.providerAccountEmail;
+    if (typeof params.displayName === "string") recorderCalendarArgs.displayName = params.displayName;
+    if (typeof params.refreshToken === "string") recorderCalendarArgs.refreshToken = params.refreshToken;
+    if (typeof params.expiresIn === "number") recorderCalendarArgs.expiresIn = params.expiresIn;
+    const oauthClientId = process.env.MICROSOFT_CLIENT_ID?.trim();
+    if (oauthClientId) recorderCalendarArgs.oauthClientId = oauthClientId;
+
+    const operation = await runCustomerSupportOperation(actor, {
+      deploymentId: params.deploymentId,
+      action: "meeting_recorders.connect_calendar",
+      scopeOverride: "control-plane:integrations:write",
+      reason,
+      arguments: recorderCalendarArgs,
+    });
+    await recordCustomerDeploymentEvent(actor, params.deploymentId, "control_plane.integration.meeting_recorder_calendar_connected", {
+      reason,
+      accessMode: "support_connector",
+      supportOperationId: operation.id,
+      provider: "MICROSOFT",
+      providerAccountEmail: params.providerAccountEmail ?? null,
+    });
+    return {
+      deploymentId: params.deploymentId,
+      managedWorkspaceId: null,
+      accessMode: "support_connector" as const,
+      supportOperation: {
+        id: operation.id,
+        action: operation.action,
+        status: operation.status,
+        resultSummary: operation.resultSummary ?? null,
+      },
+    };
+  }
 
   const source = await upsertRecorderCalendarSource({
     workspaceId: managedWorkspaceId,
@@ -6721,6 +6773,69 @@ export async function enqueueControlPlaneAgendaPreparation(actor: AppActor, para
   };
 }
 
+async function runRemoteControlPlaneMeetingRecorderOperation(actor: AppActor, params: {
+  deploymentId: string;
+  operation: "enqueue_calendar_sync" | "dry_run_scan" | "live_smoke" | "enable_auto_recording_after_smoke";
+  meetingUrl?: string | null;
+  joinAt?: Date | null;
+  provider: MeetingRecorderProvider;
+}, reason: string) {
+  let action: SupportAction;
+  let args: JsonRecord = {};
+  let eventAction: string;
+
+  if (params.operation === "enqueue_calendar_sync") {
+    action = "meeting_recorders.enqueue_calendar_sync";
+    eventAction = "control_plane.integration.meeting_recorder_calendar_sync_requested";
+  } else if (params.operation === "dry_run_scan") {
+    action = "meeting_recorders.dry_run_scan";
+    eventAction = "control_plane.integration.meeting_recorder_calendar_dry_run";
+  } else if (params.operation === "live_smoke") {
+    const meetingUrl = params.meetingUrl?.trim();
+    invariant(meetingUrl, 400, "INVALID_INPUT", "A future meeting URL is required for live smoke.");
+    invariant(params.joinAt && !Number.isNaN(params.joinAt.valueOf()), 400, "INVALID_INPUT", "A future join time is required for live smoke.");
+    action = "meeting_recorders.live_smoke";
+    args = {
+      meetingUrl,
+      joinAt: params.joinAt.toISOString(),
+      provider: params.provider,
+    };
+    eventAction = "control_plane.integration.meeting_recorder_live_smoke";
+  } else {
+    action = "meeting_recorders.set_auto_recording";
+    args = { enabled: true };
+    eventAction = "control_plane.integration.meeting_recorder_auto_recording_enabled";
+  }
+
+  const operation = await runCustomerSupportOperation(actor, {
+    deploymentId: params.deploymentId,
+    action,
+    scopeOverride: "control-plane:integrations:write",
+    reason,
+    arguments: args,
+  });
+  await recordCustomerDeploymentEvent(actor, params.deploymentId, eventAction, {
+    reason,
+    accessMode: "support_connector",
+    requestedOperation: params.operation,
+    supportOperationId: operation.id,
+    resultSummary: operation.resultSummary ?? null,
+  });
+  return {
+    deploymentId: params.deploymentId,
+    managedWorkspaceId: null,
+    accessMode: "support_connector" as const,
+    operation: params.operation,
+    supportOperation: {
+      id: operation.id,
+      action: operation.action,
+      status: operation.status,
+      error: operation.error ?? null,
+      resultSummary: operation.resultSummary ?? null,
+    },
+  };
+}
+
 export async function runControlPlaneMeetingRecorderOperation(actor: AppActor, params: {
   deploymentId: string;
   operation: "enqueue_calendar_sync" | "dry_run_scan" | "live_smoke" | "enable_auto_recording_after_smoke";
@@ -6731,14 +6846,22 @@ export async function runControlPlaneMeetingRecorderOperation(actor: AppActor, p
 }) {
   requireControlPlaneScope(actor, "control-plane:integrations:write");
   const reason = requireMutationReason(params.reason);
+  invariant(CONTROL_PLANE_MEETING_RECORDER_OPERATIONS.has(params.operation), 400, "INVALID_INPUT", "Unsupported meeting recorder operation.");
   await requireControlPlaneDeploymentWriteAccess(actor, params.deploymentId);
   const deployment = await getControlPlaneDeploymentWithWorkspace(actor, params.deploymentId);
-  const managedWorkspaceId = deployment.managedWorkspaceId;
-  invariant(managedWorkspaceId, 400, "MANAGED_WORKSPACE_REQUIRED", "Meeting recorder operations require a managed workspace link.");
-
   const provider = params.provider?.trim()
     ? normalizeMeetingRecorderProvider(params.provider, "meeting recorder smoke provider")
     : "RECALL_AI";
+  const managedWorkspaceId = deployment.managedWorkspaceId;
+  if (!managedWorkspaceId) {
+    return runRemoteControlPlaneMeetingRecorderOperation(actor, {
+      deploymentId: params.deploymentId,
+      operation: params.operation,
+      meetingUrl: params.meetingUrl,
+      joinAt: params.joinAt,
+      provider,
+    }, reason);
+  }
 
   if (params.operation === "enqueue_calendar_sync") {
     const source = await getRecorderCalendarSource(managedWorkspaceId);
@@ -9850,6 +9973,7 @@ export async function runCustomerSupportOperation(actor: AppActor, params: {
     ? { ...providedArgs, reason }
     : providedArgs;
   const inputSummary = redactObject(args);
+  const connector = await loadSupportConnector(params.deploymentId);
 
   const operation = await prisma.supportOperation.create({
     data: {
@@ -9865,8 +9989,6 @@ export async function runCustomerSupportOperation(actor: AppActor, params: {
       idempotencyKey: params.idempotencyKey?.trim() || null,
     },
   });
-
-  const connector = await loadSupportConnector(params.deploymentId);
 
   try {
     if (MUTATING_SUPPORT_ACTIONS.has(params.action)) {
