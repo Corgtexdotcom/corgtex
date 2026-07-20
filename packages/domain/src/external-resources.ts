@@ -234,9 +234,10 @@ function displayHost(host: string) {
   return host.replace(/^www\./, "");
 }
 
-function titleFromLabelOrUrl(label: string | null, input: NormalizedUrl, fallback: string) {
+function titleFromLabelOrUrl(label: string | null, input: NormalizedUrl, fallback: string, options: { usePathLabel?: boolean } = {}) {
   const cleanedLabel = cleanText(label, 160);
   if (cleanedLabel && !cleanedLabel.startsWith("http://") && !cleanedLabel.startsWith("https://")) return cleanedLabel;
+  if (options.usePathLabel === false) return fallback || displayHost(input.host);
   return lastPathLabel(input.url) || fallback || displayHost(input.host);
 }
 
@@ -265,7 +266,7 @@ const providerAdapters: ResourceProviderAdapter[] = [
         resourceType,
         category: "FILES",
         priority: 100,
-        title: titleFromLabelOrUrl(label, input, resourceType === "folder" ? "Box folder" : resourceType === "file" ? "Box file" : "Box link"),
+        title: titleFromLabelOrUrl(label, input, resourceType === "folder" ? "Box folder" : resourceType === "file" ? "Box document" : "Box link", { usePathLabel: false }),
         sharedLinkUrl: input.canonicalUrl,
         mimeType: null,
       };
