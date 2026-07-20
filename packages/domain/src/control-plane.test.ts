@@ -7408,11 +7408,11 @@ describe("control plane domain", () => {
     expect(result).toMatchObject({ id: "op-1", status: "COMPLETED" });
   });
 
-  it("routes remote recorder policy and coverage support operations through audited MCP tools", async () => {
+  it("routes remote meeting schedule and recorder support operations through audited MCP tools", async () => {
     const { runCustomerSupportOperation } = await import("./control-plane");
     prismaMock.supportOperation.create.mockResolvedValue({
       id: "op-recorder",
-      action: "meeting_recorders.set_auto_recording",
+      action: "meeting_recorders.schedule_meeting",
     });
     prismaMock.customerDeployment.findUnique.mockResolvedValue({
       id: "inst-1",
@@ -7427,6 +7427,35 @@ describe("control plane domain", () => {
       status: "COMPLETED",
     });
 
+    await runCustomerSupportOperation(operatorActor, {
+      deploymentId: "inst-1",
+      action: "meetings.schedule",
+      reason: "Production validation temporary Corgtex meeting.",
+      arguments: {
+        title: "PROD-VERIFY 2026-07-20 PR-753",
+        startsAt: "2099-07-20T06:30:00.000Z",
+        scheduledEndAt: "2099-07-20T07:00:00.000Z",
+        meetingUrl: "https://teams.microsoft.com/l/meetup-join/private",
+      },
+    });
+    await runCustomerSupportOperation(operatorActor, {
+      deploymentId: "inst-1",
+      action: "meeting_recorders.schedule_meeting",
+      reason: "Schedule recorder for validation meeting.",
+      arguments: { meetingId: "meeting-1", provider: "RECALL_AI" },
+    });
+    await runCustomerSupportOperation(operatorActor, {
+      deploymentId: "inst-1",
+      action: "meeting_recorders.cancel",
+      reason: "Cleanup validation recorder.",
+      arguments: { meetingId: "meeting-1" },
+    });
+    await runCustomerSupportOperation(operatorActor, {
+      deploymentId: "inst-1",
+      action: "meetings.archive",
+      reason: "Cleanup validation meeting.",
+      arguments: { meetingId: "meeting-1" },
+    });
     await runCustomerSupportOperation(operatorActor, {
       deploymentId: "inst-1",
       action: "meeting_recorders.set_auto_recording",
@@ -7444,6 +7473,10 @@ describe("control plane domain", () => {
       .map(([, init]) => JSON.parse(String(init?.body)).params?.name)
       .filter((name) => name !== "record_support_audit");
     expect(toolNames).toEqual([
+      "create_scheduled_meeting",
+      "schedule_meeting_recording",
+      "cancel_meeting_recording",
+      "delete_meeting",
       "set_meeting_recorder_auto_recording",
       "ensure_meeting_recorder_coverage",
     ]);

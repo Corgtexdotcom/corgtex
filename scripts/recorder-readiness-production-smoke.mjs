@@ -4,6 +4,7 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 
 import {
+  createValidationCleanupRegistry,
   createValidationRun,
   parseValidationPrNumbers,
   recordArtifact,
@@ -20,6 +21,8 @@ const DEFAULT_CONTROL_PLANE_URL = "https://ops.corgtex.com";
 const DEFAULT_OUT_DIR = ".artifacts/recorder-readiness-production-smoke";
 const DEFAULT_TARGETS = "managed-recorder-validation";
 const HARD_BLOCKER_GATE_KEYS = new Set(["control_plane", "tenant_config", "vendor", "calendar"]);
+const DEFAULT_TEMP_MEETING_LEAD_MINUTES = 120;
+const DEFAULT_TEMP_MEETING_DURATION_MINUTES = 30;
 
 function usage() {
   return [
@@ -31,9 +34,91 @@ function usage() {
     "  RECORDER_READINESS_SMOKE_DEPLOYMENTS        comma-separated deployment ids, slugs, labels, or managed workspace slugs",
     "  RECORDER_READINESS_SMOKE_EXPECTED_GIT_SHA   optional /api/health release SHA to require",
     "  RECORDER_READINESS_SMOKE_PR_NUMBERS         comma-separated PR numbers covered by this validation run",
+    "  RECORDER_READINESS_SMOKE_TEMP_MEETINGS      true to create and clean up tagged temporary Corgtex scheduled meetings when needed",
+    "  RECORDER_READINESS_SMOKE_TEMP_MEETING_URL   supported live meeting URL used only when temp meetings are enabled",
+    "  RECORDER_READINESS_SMOKE_TEMP_JOIN_AT       optional timezone-aware future ISO timestamp for temp meetings",
+    "  RECORDER_READINESS_SMOKE_PROVIDER           optional RECALL_AI or MEETING_BAAS override for temp recorder scheduling",
     "  CONTROL_PLANE_URL                           optional control-plane URL; defaults to https://ops.corgtex.com",
     "  CONTROL_PLANE_AGENT_API_KEY                 required to read inventory and readiness from the control plane",
   ].join("\n");
+}
+
+function booleanOption(value, fallback = false) {
+  if (value === undefined || value === null || value === "") return fallback;
+  return /^(1|true|yes|y|on)$/i.test(String(value).trim());
+}
+
+function parsePositiveInteger(value, fallback, label) {
+  if (value === undefined || value === null || value === "") return fallback;
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed < 1) {
+    throw new Error(`${label} must be a positive integer.`);
+  }
+  return Math.round(parsed);
+}
+
+function parseOptionalFutureDate(value, fallback, label) {
+  if (value === undefined || value === null || value === "") return fallback;
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.valueOf())) {
+    throw new Error(`${label} must be a valid ISO timestamp.`);
+  }
+  if (parsed <= new Date()) {
+    throw new Error(`${label} must be in the future.`);
+  }
+  return parsed;
+}
+
+function normalizeProvider(value) {
+  const raw = String(value ?? "").trim();
+  if (!raw) return null;
+  if (raw === "RECALL_AI" || raw === "MEETING_BAAS") return raw;
+  throw new Error("RECORDER_READINESS_SMOKE_PROVIDER must be RECALL_AI or MEETING_BAAS.");
+}
+
+function validationRunLabel(prNumbers, runId, date = new Date()) {
+  const datePart = date.toISOString().slice(0, 10);
+  const prPart = prNumbers.length > 0
+    ? `PR-${prNumbers.join("-")}`
+    : "PR-unscoped";
+  return `PROD-VERIFY ${datePart} ${prPart} ${runId}`;
+}
+
+export function normalizeTempMeetingSetup(input = {}, now = new Date()) {
+  const enabled = booleanOption(input.enabled, false);
+  if (!enabled) {
+    return {
+      enabled: false,
+      meetingUrl: "",
+      joinAt: null,
+      scheduledEndAt: null,
+      durationMinutes: null,
+      provider: null,
+    };
+  }
+  const leadMinutes = parsePositiveInteger(input.leadMinutes, DEFAULT_TEMP_MEETING_LEAD_MINUTES, "temp meeting lead minutes");
+  const durationMinutes = parsePositiveInteger(input.durationMinutes, DEFAULT_TEMP_MEETING_DURATION_MINUTES, "temp meeting duration minutes");
+  const fallbackJoinAt = new Date(now.getTime() + leadMinutes * 60_000);
+  const joinAt = parseOptionalFutureDate(input.joinAt, fallbackJoinAt, "temp meeting joinAt");
+  const scheduledEndAt = new Date(joinAt.getTime() + durationMinutes * 60_000);
+  const meetingUrl = String(input.meetingUrl ?? "").trim();
+  if (!meetingUrl) {
+    throw new Error("RECORDER_READINESS_SMOKE_TEMP_MEETING_URL is required when temp meetings are enabled.");
+  }
+  try {
+    const url = new URL(meetingUrl);
+    if (url.protocol !== "https:") throw new Error("not https");
+  } catch {
+    throw new Error("RECORDER_READINESS_SMOKE_TEMP_MEETING_URL must be a valid https URL.");
+  }
+  return {
+    enabled,
+    meetingUrl,
+    joinAt,
+    scheduledEndAt,
+    durationMinutes,
+    provider: normalizeProvider(input.provider),
+  };
 }
 
 export function normalizeBaseUrl(value) {
@@ -302,6 +387,15 @@ export function recorderReadinessValidationOutcome(recorder) {
   return { result: "pass", blocker: null, gates };
 }
 
+export function recorderReadinessCanUseTempMeetingSetup(outcome) {
+  const gates = Array.isArray(outcome?.gates) ? outcome.gates : [];
+  if (outcome?.result === "pass") return false;
+  const blockedHardGates = gates.filter((gate) => gate.status === "blocked" && HARD_BLOCKER_GATE_KEYS.has(gate.key));
+  if (blockedHardGates.some((gate) => gate.key !== "calendar")) return false;
+  return gates.some((gate) => gate.key === "calendar" && gate.status === "blocked")
+    || gates.some((gate) => gate.key === "live_vendor_proof" && gate.status !== "pass");
+}
+
 function tenantForDeployment(deployment, fallbackTarget) {
   return {
     id: deployment?.managedWorkspaceId ?? deployment?.managedWorkspace?.id ?? deployment?.id ?? null,
@@ -410,6 +504,13 @@ export class RecorderReadinessProductionSmoke {
     prNumbers = parseValidationPrNumbers(process.env.RECORDER_READINESS_SMOKE_PR_NUMBERS || process.env.PRODUCTION_VALIDATION_PR_NUMBERS || ""),
     controlPlaneUrl = process.env.CONTROL_PLANE_URL || DEFAULT_CONTROL_PLANE_URL,
     controlPlaneToken = process.env.CONTROL_PLANE_AGENT_API_KEY || null,
+    tempMeetingSetup = {
+      enabled: process.env.RECORDER_READINESS_SMOKE_TEMP_MEETINGS,
+      meetingUrl: process.env.RECORDER_READINESS_SMOKE_TEMP_MEETING_URL || process.env.PRODUCTION_VALIDATION_RECORDER_MEETING_URL,
+      joinAt: process.env.RECORDER_READINESS_SMOKE_TEMP_JOIN_AT,
+      durationMinutes: process.env.RECORDER_READINESS_SMOKE_TEMP_DURATION_MINUTES,
+      provider: process.env.RECORDER_READINESS_SMOKE_PROVIDER,
+    },
   } = {}) {
     this.baseUrl = normalizeBaseUrl(baseUrl);
     this.controlPlaneUrl = normalizeControlPlaneUrl(controlPlaneUrl);
@@ -419,6 +520,13 @@ export class RecorderReadinessProductionSmoke {
       : normalizeRecorderReadinessTargets(targets);
     this.expectedGitSha = expectedGitSha;
     this.controlPlaneToken = String(controlPlaneToken ?? "").trim();
+    this.tempMeetingSetupError = null;
+    try {
+      this.tempMeetingSetup = normalizeTempMeetingSetup(tempMeetingSetup);
+    } catch (error) {
+      this.tempMeetingSetup = { enabled: true, meetingUrl: "", joinAt: null, scheduledEndAt: null, durationMinutes: null, provider: null };
+      this.tempMeetingSetupError = error instanceof Error ? error.message : String(error);
+    }
     this.runId = `recorder-readiness-${Date.now().toString(36)}`;
     this.details = [];
     this.hardFailure = null;
@@ -432,11 +540,27 @@ export class RecorderReadinessProductionSmoke {
         script: "recorder-readiness-production-smoke",
         targets: this.targets,
         controlPlaneUrl: this.controlPlaneUrl,
+        tempMeetingSetup: {
+          enabled: Boolean(this.tempMeetingSetup.enabled),
+          hasMeetingUrl: Boolean(this.tempMeetingSetup.meetingUrl),
+          provider: this.tempMeetingSetup.provider ?? null,
+        },
       },
     });
+    this.cleanup = createValidationCleanupRegistry(this.validationRun);
   }
 
-  recordResult({ target, deployment = null, readiness = null, result, blocker = null, evidence = [] }) {
+  recordResult({
+    target,
+    deployment = null,
+    readiness = null,
+    result,
+    blocker = null,
+    evidence = [],
+    createdRecordIds = [],
+    cleanupActionIds = [],
+    temporarySetup = null,
+  }) {
     const tenant = tenantForDeployment(deployment, target);
     const intent = `Recorder readiness contract for ${tenant.label}: control-plane, tenant config, vendor, Corgtex recording schedule, scheduled meetings, and live vendor proof`;
     const resultPrNumbers = this.validationRun.prNumbers.length > 0 ? this.validationRun.prNumbers : [null];
@@ -449,6 +573,8 @@ export class RecorderReadinessProductionSmoke {
         result,
         blocker,
         evidence,
+        createdRecordIds,
+        cleanupActionIds,
       });
     }
     this.details.push({
@@ -472,6 +598,7 @@ export class RecorderReadinessProductionSmoke {
           supportConnectorStatus: deployment.supportConnectorStatus ?? null,
         }
         : null,
+      temporarySetup,
       result,
       blocker,
       readiness: readiness ? sanitizeRecorderReadinessForArtifact(readiness) : null,
@@ -529,6 +656,104 @@ export class RecorderReadinessProductionSmoke {
     return this.fetchControlPlaneTool("check_meeting_operations_readiness", { deploymentId });
   }
 
+  async runSupportOperation(deployment, action, reason, args = {}) {
+    const operation = await this.fetchControlPlaneTool("run_customer_support_operation", {
+      deploymentId: deployment.id,
+      action,
+      reason,
+      arguments: args,
+    });
+    if (operation?.status && operation.status !== "COMPLETED") {
+      throw new Error(`${action} support operation finished with ${operation.status}.`);
+    }
+    return operation;
+  }
+
+  async setupTemporaryMeeting(deployment) {
+    if (!this.tempMeetingSetup.enabled) return null;
+    const tenant = tenantForDeployment(deployment, deployment.id);
+    const label = validationRunLabel(this.validationRun.prNumbers, this.runId);
+    const setup = {
+      enabled: true,
+      label,
+      createdRecordIds: [],
+      cleanupActionIds: [],
+      supportOperationIds: [],
+    };
+    const reason = `${label}: recorder readiness temporary scheduled meeting setup.`;
+    const scheduled = await this.runSupportOperation(deployment, "meetings.schedule", reason, {
+      title: label,
+      description: "Temporary production validation meeting. Created by recorder readiness smoke; safe to archive during cleanup.",
+      startsAt: this.tempMeetingSetup.joinAt.toISOString(),
+      scheduledEndAt: this.tempMeetingSetup.scheduledEndAt.toISOString(),
+      meetingUrl: this.tempMeetingSetup.meetingUrl,
+      participantEmails: [],
+    });
+    setup.supportOperationIds.push(scheduled.id);
+    const summary = scheduled.resultSummary && typeof scheduled.resultSummary === "object"
+      ? scheduled.resultSummary
+      : {};
+    const meetingId = typeof summary.firstMeetingId === "string"
+      ? summary.firstMeetingId
+      : Array.isArray(summary.meetingIds) && typeof summary.meetingIds[0] === "string"
+        ? summary.meetingIds[0]
+        : null;
+    if (!meetingId) {
+      throw new Error("Temporary scheduled meeting operation did not return a meeting id.");
+    }
+    setup.createdRecordIds.push(meetingId);
+
+    const archiveCleanup = this.cleanup.add({
+      action: "archive-temporary-meeting",
+      target: { type: "Meeting", id: meetingId, label },
+      tenant,
+      runner: async () => {
+        const archive = await this.runSupportOperation(deployment, "meetings.archive", `${label}: archive recorder readiness temporary meeting.`, { meetingId });
+        return { message: `Archived temporary meeting through support operation ${archive.id}.` };
+      },
+    });
+    setup.cleanupActionIds.push(archiveCleanup.id);
+
+    const scheduleArgs = {
+      meetingId,
+      ...(this.tempMeetingSetup.provider ? { provider: this.tempMeetingSetup.provider } : {}),
+    };
+    const recorder = await this.runSupportOperation(deployment, "meeting_recorders.schedule_meeting", `${label}: schedule recorder for temporary meeting.`, scheduleArgs);
+    setup.supportOperationIds.push(recorder.id);
+    const recorderSummary = recorder.resultSummary && typeof recorder.resultSummary === "object"
+      ? recorder.resultSummary
+      : {};
+    const recordingStatus = recorderSummary.recording && typeof recorderSummary.recording === "object"
+      ? String(recorderSummary.recording.status ?? "")
+      : "";
+    if (recordingStatus === "FAILED") {
+      throw new Error(`Temporary recorder scheduling failed${recorderSummary.recording?.failureCode ? `: ${recorderSummary.recording.failureCode}` : "."}`);
+    }
+    if (recordingStatus) {
+      const cancelCleanup = this.cleanup.add({
+        action: "cancel-temporary-recorder",
+        target: { type: "MeetingRecording", id: meetingId, label },
+        tenant,
+        recordCreated: false,
+        runner: async () => {
+          try {
+            const cancel = await this.runSupportOperation(deployment, "meeting_recorders.cancel", `${label}: cancel recorder for temporary meeting.`, { meetingId });
+            return { message: `Cancelled temporary recorder through support operation ${cancel.id}.` };
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            if (/No active recorder is scheduled|NOT_FOUND/i.test(message)) {
+              return { message: "No active temporary recorder remained during cleanup." };
+            }
+            throw error;
+          }
+        },
+      });
+      setup.cleanupActionIds.push(cancelCleanup.id);
+    }
+
+    return setup;
+  }
+
   async run() {
     await mkdir(this.outDir, { recursive: true });
     const detailsPath = path.join(this.outDir, "recorder-readiness-production-smoke.json");
@@ -552,6 +777,10 @@ export class RecorderReadinessProductionSmoke {
         this.recordBlockedForAllTargets("CONTROL_PLANE_AGENT_API_KEY is required to read recorder readiness from the control plane.");
       }
 
+      if (!this.hardFailure && this.tempMeetingSetupError) {
+        this.recordBlockedForAllTargets(this.tempMeetingSetupError);
+      }
+
       if (!this.hardFailure && this.validationRun.results.length === 0) {
         const deployments = await this.loadDeployments();
         const resolved = resolveRecorderReadinessTargets(deployments, this.targets);
@@ -567,18 +796,38 @@ export class RecorderReadinessProductionSmoke {
           }
 
           try {
-            const readiness = await this.fetchReadinessFromControlPlane(item.deployment.id);
-            const outcome = recorderReadinessValidationOutcome(readiness.recorder);
+            let readiness = await this.fetchReadinessFromControlPlane(item.deployment.id);
+            let outcome = recorderReadinessValidationOutcome(readiness.recorder);
+            let temporarySetup = null;
+            const evidence = [
+              { type: "deployment", summary: `CustomerDeployment ${item.deployment.id}` },
+              { type: "readiness-gates", path: detailsPath, summary: `${outcome.gates.length} recorder readiness gate(s) evaluated.` },
+            ];
+
+            if (
+              outcome.result !== "pass"
+              && this.tempMeetingSetup.enabled
+              && recorderReadinessCanUseTempMeetingSetup(outcome)
+            ) {
+              temporarySetup = await this.setupTemporaryMeeting(item.deployment);
+              readiness = await this.fetchReadinessFromControlPlane(item.deployment.id);
+              outcome = recorderReadinessValidationOutcome(readiness.recorder);
+              evidence.push({
+                type: "temporary-setup",
+                summary: `Created a tagged Corgtex scheduled meeting and scheduled recorder coverage through ${temporarySetup.supportOperationIds.length} audited support operation(s); cleanup is recorded in this artifact.`,
+              });
+            }
+
             this.recordResult({
               target: item.target,
               deployment: item.deployment,
               readiness,
               result: outcome.result,
               blocker: outcome.blocker,
-              evidence: [
-                { type: "deployment", summary: `CustomerDeployment ${item.deployment.id}` },
-                { type: "readiness-gates", path: detailsPath, summary: `${outcome.gates.length} recorder readiness gate(s) evaluated.` },
-              ],
+              evidence,
+              createdRecordIds: temporarySetup?.createdRecordIds ?? [],
+              cleanupActionIds: temporarySetup?.cleanupActionIds ?? [],
+              temporarySetup,
             });
           } catch (error) {
             const blocker = error instanceof Error ? error.message : String(error);
@@ -596,6 +845,7 @@ export class RecorderReadinessProductionSmoke {
       const blocker = error instanceof Error ? error.message : String(error);
       this.recordBlockedForAllTargets(blocker, { hard: true });
     } finally {
+      await this.cleanup.runAll({ throwOnFailure: false });
       await writeFile(detailsPath, `${JSON.stringify({
         runId: this.runId,
         targets: this.targets,

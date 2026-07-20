@@ -67,6 +67,9 @@ const getRecorderCalendarSourceMock = vi.fn();
 const enqueueRecorderCalendarSyncMock = vi.fn();
 const scanRecorderCalendarSourceMock = vi.fn();
 const runMeetingRecorderSmokeMock = vi.fn();
+const createMeetingSeriesMock = vi.fn();
+const scheduleMeetingRecordingMock = vi.fn();
+const cancelMeetingRecordingMock = vi.fn();
 const getMeetingRecorderCoverageReadinessMock = vi.fn();
 const getMeetingRecorderEnterpriseReadinessMock = vi.fn();
 const requireWorkspaceMembershipMock = vi.fn();
@@ -162,6 +165,9 @@ vi.mock("@corgtex/domain", async () => {
   resendMemberAccessLink: vi.fn(),
   sendMemberSetupEmail: vi.fn(),
   createDocument: vi.fn(),
+  createMeetingSeries: createMeetingSeriesMock,
+  scheduleMeetingRecording: scheduleMeetingRecordingMock,
+  cancelMeetingRecording: cancelMeetingRecordingMock,
   listMeetings: vi.fn(),
   upsertRecorderCalendarSource: upsertRecorderCalendarSourceMock,
   getRecorderCalendarSource: getRecorderCalendarSourceMock,
@@ -504,6 +510,30 @@ describe("createCorgtexMcpServer", () => {
       failureMessage: null,
       completedAt: null,
     });
+    createMeetingSeriesMock.mockReset().mockResolvedValue({
+      series: {
+        id: "series-1",
+        meetingUrl: "https://teams.microsoft.com/l/meetup-join/private",
+      },
+      meetings: [
+        { id: "meeting-1", title: "Weekly Tactical", status: "SCHEDULED", recordedAt: new Date("2099-07-20T06:30:00.000Z") },
+      ],
+    });
+    scheduleMeetingRecordingMock.mockReset().mockResolvedValue({
+      id: "recording-1",
+      provider: "RECALL_AI",
+      status: "SCHEDULED",
+      failureCode: null,
+      externalBotId: "bot-secret",
+      joinAt: new Date("2099-07-20T06:30:00.000Z"),
+      scheduledAt: new Date("2099-07-20T06:00:00.000Z"),
+    });
+    cancelMeetingRecordingMock.mockReset().mockResolvedValue({
+      id: "recording-1",
+      provider: "RECALL_AI",
+      status: "CANCELLED",
+      endedAt: new Date("2099-07-20T06:10:00.000Z"),
+    });
     getMeetingRecorderEnterpriseReadinessMock.mockReset().mockResolvedValue({
       workspaceId: "ws-1",
       ready: true,
@@ -748,6 +778,50 @@ describe("createCorgtexMcpServer", () => {
     expect(JSON.stringify(payload)).not.toContain("ms-user-1");
   });
 
+  it("creates internal Corgtex scheduled meetings without sending calendar invites", async () => {
+    const { createCorgtexMcpServer } = await import("./server");
+    const { requireScope } = await import("./auth");
+
+    const server = createCorgtexMcpServer({
+      actor: { kind: "user", user: { id: "user-1", email: "user@example.com" } } as any,
+      workspaceId: "ws-1",
+      authKind: "oauth",
+      scopes: ["meetings:write"],
+    });
+
+    const response = await (server as any)._registeredTools.create_scheduled_meeting.handler({
+      title: "Weekly Tactical",
+      startsAt: "2099-07-20T06:30:00.000Z",
+      scheduledEndAt: "2099-07-20T07:00:00.000Z",
+      recurrenceRule: "FREQ=WEEKLY;COUNT=1",
+      meetingUrl: "https://teams.microsoft.com/l/meetup-join/private",
+      participantEmails: [" Member@Example.com "],
+    });
+    const payload = JSON.parse(response.content[0].text);
+
+    expect(vi.mocked(requireScope)).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: "ws-1" }), "meetings:write");
+    expect(createMeetingSeriesMock).toHaveBeenCalledWith(expect.objectContaining({ kind: "user" }), {
+      workspaceId: "ws-1",
+      title: "Weekly Tactical",
+      description: null,
+      startsAt: new Date("2099-07-20T06:30:00.000Z"),
+      scheduledEndAt: new Date("2099-07-20T07:00:00.000Z"),
+      recurrenceRule: "FREQ=WEEKLY;COUNT=1",
+      meetingUrl: "https://teams.microsoft.com/l/meetup-join/private",
+      participantIds: [],
+      participantEmails: [" Member@Example.com "],
+    });
+    expect(payload).toEqual({
+      seriesId: "series-1",
+      meetingIds: ["meeting-1"],
+      firstMeetingId: "meeting-1",
+      createdMeetingCount: 1,
+      hasMeetingUrl: true,
+      webUrl: "https://app.test/workspaces/ws-1/meetings",
+    });
+    expect(JSON.stringify(payload)).not.toContain("teams.microsoft.com");
+  });
+
   it("rejects recorder calendar connect before storing tokens when Microsoft refresh config is missing or mismatched", async () => {
     const { createCorgtexMcpServer } = await import("./server");
 
@@ -856,6 +930,62 @@ describe("createCorgtexMcpServer", () => {
     expect(JSON.stringify(smokePayload)).not.toContain("bot-remote");
     expect(JSON.stringify(smokePayload)).not.toContain("recording-1");
     expect(JSON.stringify(smokePayload)).not.toContain("hash-1");
+  });
+
+  it("runs support-only meeting recorder schedule and cancel without returning bot ids", async () => {
+    const { createCorgtexMcpServer } = await import("./server");
+    const { requireScope } = await import("./auth");
+
+    const server = createCorgtexMcpServer({
+      actor: { kind: "agent", authProvider: "support", credentialId: "cred-1", scopes: ["support:write"] } as any,
+      workspaceId: "ws-1",
+      authKind: "agent",
+      scopes: ["meetings:write", "support:write"],
+    });
+
+    const scheduleResponse = await (server as any)._registeredTools.schedule_meeting_recording.handler({
+      meetingId: "meeting-1",
+      provider: "RECALL_AI",
+    });
+    const cancelResponse = await (server as any)._registeredTools.cancel_meeting_recording.handler({
+      meetingId: "meeting-1",
+    });
+    const schedulePayload = JSON.parse(scheduleResponse.content[0].text);
+    const cancelPayload = JSON.parse(cancelResponse.content[0].text);
+
+    expect(vi.mocked(requireScope)).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: "ws-1" }), "meetings:write");
+    expect(vi.mocked(requireScope)).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: "ws-1" }), "support:write");
+    expect(scheduleMeetingRecordingMock).toHaveBeenCalledWith(expect.objectContaining({ authProvider: "support" }), {
+      workspaceId: "ws-1",
+      meetingId: "meeting-1",
+      provider: "RECALL_AI",
+      mode: "manual",
+    });
+    expect(cancelMeetingRecordingMock).toHaveBeenCalledWith(expect.objectContaining({ authProvider: "support" }), {
+      workspaceId: "ws-1",
+      meetingId: "meeting-1",
+    });
+    expect(schedulePayload).toMatchObject({
+      workspaceId: "ws-1",
+      meetingId: "meeting-1",
+      recording: {
+        id: "recording-1",
+        provider: "RECALL_AI",
+        status: "SCHEDULED",
+        hasExternalBot: true,
+      },
+    });
+    expect(cancelPayload).toMatchObject({
+      workspaceId: "ws-1",
+      meetingId: "meeting-1",
+      recording: {
+        id: "recording-1",
+        provider: "RECALL_AI",
+        status: "CANCELLED",
+      },
+    });
+    expect(JSON.stringify(schedulePayload)).not.toContain("bot-secret");
+    expect(JSON.stringify(cancelPayload)).not.toContain("bot-secret");
   });
 
   it("rejects remote recorder live smoke without a timezone-aware future join time", async () => {

@@ -5,7 +5,9 @@ import {
   normalizeBaseUrl,
   normalizeControlPlaneUrl,
   normalizeRecorderReadinessTargets,
+  normalizeTempMeetingSetup,
   RecorderReadinessProductionSmoke,
+  recorderReadinessCanUseTempMeetingSetup,
   recorderReadinessHealthReleaseBlocker,
   recorderReadinessValidationOutcome,
   resolveRecorderReadinessTargets,
@@ -60,6 +62,20 @@ function recorderWithGates(overrides = {}) {
       ...overrides,
     },
   };
+}
+
+function controlPlaneToolResponse(value) {
+  return new Response(JSON.stringify({
+    result: {
+      content: [{
+        type: "text",
+        text: JSON.stringify(value),
+      }],
+    },
+  }), {
+    status: 200,
+    headers: { "content-type": "application/json" },
+  });
 }
 
 describe("recorder readiness production smoke helpers", () => {
@@ -280,7 +296,7 @@ describe("recorder readiness production smoke helpers", () => {
   });
 
   it("blocks only when the Corgtex recording schedule gate is blocked", () => {
-    expect(recorderReadinessValidationOutcome(recorderWithGates({
+    const outcome = recorderReadinessValidationOutcome(recorderWithGates({
       calendar: {
         key: "calendar",
         label: "Recording schedule",
@@ -288,14 +304,17 @@ describe("recorder readiness production smoke helpers", () => {
         detail: "No upcoming Corgtex scheduled meetings are ready for recording.",
         checks: [{ key: "recording_schedule", label: "Corgtex recorder schedule", status: "blocked", detail: "Add the meeting to Corgtex before recording." }],
       },
-    }))).toMatchObject({
+    }));
+
+    expect(outcome).toMatchObject({
       result: "blocked",
       blocker: expect.stringContaining("No upcoming Corgtex scheduled meetings"),
     });
+    expect(recorderReadinessCanUseTempMeetingSetup(outcome)).toBe(true);
   });
 
   it("marks missing live vendor proof as partial, not a false pass", () => {
-    expect(recorderReadinessValidationOutcome(recorderWithGates({
+    const outcome = recorderReadinessValidationOutcome(recorderWithGates({
       liveVendorProof: {
         key: "live_vendor_proof",
         label: "Live vendor proof",
@@ -303,14 +322,17 @@ describe("recorder readiness production smoke helpers", () => {
         detail: "No recent successful recorder smoke or real recording in the last 30 days.",
         checks: [],
       },
-    }))).toMatchObject({
+    }));
+
+    expect(outcome).toMatchObject({
       result: "partial",
       blocker: expect.stringContaining("No recent successful recorder smoke"),
     });
+    expect(recorderReadinessCanUseTempMeetingSetup(outcome)).toBe(true);
   });
 
   it("blocks missing control-plane connector access explicitly", () => {
-    expect(recorderReadinessValidationOutcome(recorderWithGates({
+    const outcome = recorderReadinessValidationOutcome(recorderWithGates({
       controlPlane: {
         key: "control_plane",
         label: "Control Plane access",
@@ -318,10 +340,39 @@ describe("recorder readiness production smoke helpers", () => {
         detail: "Support connector readiness check failed.",
         checks: [{ key: "support_connector", label: "Support connector", status: "blocked", detail: "Support connector readiness check failed." }],
       },
-    }))).toMatchObject({
+    }));
+
+    expect(outcome).toMatchObject({
       result: "blocked",
       blocker: expect.stringContaining("Support connector readiness check failed"),
     });
+    expect(recorderReadinessCanUseTempMeetingSetup(outcome)).toBe(false);
+  });
+
+  it("normalizes temporary meeting setup only when explicitly enabled", () => {
+    expect(normalizeTempMeetingSetup({}, new Date("2026-07-20T20:00:00.000Z"))).toMatchObject({
+      enabled: false,
+      meetingUrl: "",
+      joinAt: null,
+      scheduledEndAt: null,
+      durationMinutes: null,
+      provider: null,
+    });
+    expect(normalizeTempMeetingSetup({
+      enabled: "true",
+      meetingUrl: "https://teams.microsoft.com/meet/12345678901234?p=abc",
+      joinAt: "2099-07-20T06:30:00.000Z",
+      durationMinutes: "45",
+      provider: "RECALL_AI",
+    })).toMatchObject({
+      enabled: true,
+      meetingUrl: "https://teams.microsoft.com/meet/12345678901234?p=abc",
+      joinAt: new Date("2099-07-20T06:30:00.000Z"),
+      scheduledEndAt: new Date("2099-07-20T07:15:00.000Z"),
+      durationMinutes: 45,
+      provider: "RECALL_AI",
+    });
+    expect(() => normalizeTempMeetingSetup({ enabled: true })).toThrow("TEMP_MEETING_URL");
   });
 
   it("strips meeting metadata from persisted readiness artifacts", () => {
@@ -381,6 +432,161 @@ describe("recorder readiness production smoke helpers", () => {
     });
 
     expect(smoke.validationRun.results.map((result) => result.prNumber)).toEqual([725, 726]);
+  });
+
+  it("can create, verify, cancel, and archive a temporary Corgtex scheduled meeting when enabled", async () => {
+    const originalFetch = global.fetch;
+    const initialReadiness = {
+      recorder: recorderWithGates({
+        calendar: {
+          key: "calendar",
+          label: "Recording schedule",
+          status: "blocked",
+          detail: "No upcoming Corgtex scheduled meetings found.",
+          checks: [{ key: "recording_schedule", label: "Corgtex recorder schedule", status: "blocked", detail: "Add the meeting to Corgtex." }],
+        },
+        liveVendorProof: {
+          key: "live_vendor_proof",
+          label: "Live vendor proof",
+          status: "blocked",
+          detail: "No recent successful recorder smoke, scheduled provider bot, or real recording in the last 30 days.",
+          checks: [],
+        },
+      }),
+    };
+    const finalReadiness = {
+      recorder: recorderWithGates({
+        meetingState: {
+          key: "meeting_state",
+          label: "Scheduled meetings",
+          status: "pass",
+          detail: "1 upcoming scheduled meeting is covered.",
+          checks: [],
+        },
+      }),
+    };
+    const calls = [];
+    global.fetch = vi.fn(async (url, init) => {
+      if (String(url) === "https://app.corgtex.com/api/health") {
+        return new Response(JSON.stringify({
+          release: {
+            gitSha: "current-sha",
+            drift: { gitSha: false, imageTag: false, version: false, details: [] },
+            configured: { gitSha: "current-sha" },
+          },
+        }), { status: 200, headers: { "content-type": "application/json" } });
+      }
+      const body = JSON.parse(String(init.body));
+      const toolName = body.params.name;
+      calls.push({ toolName, args: body.params.arguments });
+      if (toolName === "list_customers") {
+        return controlPlaneToolResponse([{
+          id: "dep-1",
+          label: "Chirone Production",
+          customerSlug: "chirone",
+          customDomain: "chirone.corgtex.com",
+          supportConnectorStatus: "connected",
+        }]);
+      }
+      if (toolName === "check_meeting_operations_readiness") {
+        const checks = calls.filter((call) => call.toolName === "check_meeting_operations_readiness").length;
+        return controlPlaneToolResponse(checks === 1 ? initialReadiness : finalReadiness);
+      }
+      if (toolName === "run_customer_support_operation") {
+        const action = body.params.arguments.action;
+        if (action === "meetings.schedule") {
+          return controlPlaneToolResponse({
+            id: "op-schedule",
+            status: "COMPLETED",
+            resultSummary: {
+              seriesId: "series-1",
+              meetingIds: ["meeting-1"],
+              firstMeetingId: "meeting-1",
+              createdMeetingCount: 1,
+              hasMeetingUrl: true,
+            },
+          });
+        }
+        if (action === "meeting_recorders.schedule_meeting") {
+          return controlPlaneToolResponse({
+            id: "op-recorder",
+            status: "COMPLETED",
+            resultSummary: {
+              meetingId: "meeting-1",
+              recording: { id: "recording-1", provider: "RECALL_AI", status: "SCHEDULED", hasExternalBot: true },
+            },
+          });
+        }
+        if (action === "meeting_recorders.cancel") {
+          return controlPlaneToolResponse({
+            id: "op-cancel",
+            status: "COMPLETED",
+            resultSummary: { recording: { id: "recording-1", status: "CANCELLED" } },
+          });
+        }
+        if (action === "meetings.archive") {
+          return controlPlaneToolResponse({
+            id: "op-archive",
+            status: "COMPLETED",
+            resultSummary: { id: "meeting-1", archived: true },
+          });
+        }
+      }
+      throw new Error(`Unexpected fetch ${toolName}`);
+    });
+
+    try {
+      const smoke = new RecorderReadinessProductionSmoke({
+        baseUrl: "https://app.corgtex.com",
+        controlPlaneUrl: "https://ops.example",
+        outDir: ".artifacts/test-recorder-temp-setup",
+        targets: ["chirone.corgtex.com"],
+        expectedGitSha: "current-sha",
+        prNumbers: [753],
+        controlPlaneToken: "token",
+        tempMeetingSetup: normalizeTempMeetingSetup({
+          enabled: true,
+          meetingUrl: "https://teams.microsoft.com/meet/12345678901234?p=abc",
+          joinAt: "2099-07-20T06:30:00.000Z",
+          provider: "RECALL_AI",
+        }),
+      });
+
+      await smoke.run();
+
+      expect(smoke.validationRun.status).toBe("pass");
+      expect(smoke.validationRun.results).toHaveLength(1);
+      expect(smoke.validationRun.results[0]).toMatchObject({
+        result: "pass",
+        createdRecordIds: ["meeting-1"],
+        cleanupActionIds: [
+          "archive-temporary-meeting:Meeting:meeting-1",
+          "cancel-temporary-recorder:MeetingRecording:meeting-1",
+        ],
+      });
+      expect(smoke.validationRun.cleanupActions).toEqual([
+        expect.objectContaining({ id: "archive-temporary-meeting:Meeting:meeting-1", status: "completed" }),
+        expect.objectContaining({ id: "cancel-temporary-recorder:MeetingRecording:meeting-1", status: "completed" }),
+      ]);
+      expect(calls.map((call) => call.toolName)).toEqual([
+        "list_customers",
+        "check_meeting_operations_readiness",
+        "run_customer_support_operation",
+        "run_customer_support_operation",
+        "check_meeting_operations_readiness",
+        "run_customer_support_operation",
+        "run_customer_support_operation",
+      ]);
+      expect(calls.filter((call) => call.toolName === "run_customer_support_operation").map((call) => call.args.action)).toEqual([
+        "meetings.schedule",
+        "meeting_recorders.schedule_meeting",
+        "meeting_recorders.cancel",
+        "meetings.archive",
+      ]);
+      expect(JSON.stringify(smoke.validationRun)).not.toContain("teams.microsoft.com");
+    } finally {
+      global.fetch = originalFetch;
+    }
   });
 
   it("fails the command after writing artifacts when release metadata drifts", async () => {

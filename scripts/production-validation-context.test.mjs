@@ -42,6 +42,7 @@ function resolve(overrides = {}) {
     prNumbersInput: "",
     baselinePrNumbers: "",
     recorderDeploymentsInput: "",
+    recorderTempMeetingsInput: "",
     smokeInputs: {},
     changedFiles: ["scripts/recorder-readiness-production-smoke.mjs"],
     ...overrides,
@@ -82,6 +83,7 @@ describe("production validation context", () => {
       briefing_fixture_smoke: "true",
       recorder_readiness_smoke: "true",
       recorder_readiness_deployments: "managed-recorder-validation",
+      recorder_readiness_temp_meetings: "false",
     });
   });
 
@@ -118,6 +120,7 @@ describe("production validation context", () => {
       prNumbersInput: "725,726",
       baselinePrNumbers: "724",
       recorderDeploymentsInput: "managed-recorder-validation,example",
+      recorderTempMeetingsInput: "true",
       clientReadinessRoutesInput: "leads,governance",
       smokeInputs: {
         crm: "false",
@@ -142,6 +145,7 @@ describe("production validation context", () => {
       briefing_fixture_smoke: "true",
       recorder_readiness_smoke: "false",
       recorder_readiness_deployments: "managed-recorder-validation,example",
+      recorder_readiness_temp_meetings: "true",
     });
   });
 
