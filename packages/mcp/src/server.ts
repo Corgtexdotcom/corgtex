@@ -337,12 +337,43 @@ function compactMeetingRecorderSmokeRun(smokeRun: any) {
   };
 }
 
+function requireMicrosoftRecorderCalendarRefreshConfig(expectedClientId?: string | null) {
+  const clientId = process.env.MICROSOFT_CLIENT_ID?.trim();
+  const clientSecret = process.env.MICROSOFT_CLIENT_SECRET?.trim();
+  if (!clientId || !clientSecret) {
+    throw new AppError(503, "MICROSOFT_NOT_CONFIGURED", "Microsoft calendar OAuth refresh is not configured for this deployment.");
+  }
+  const expected = expectedClientId?.trim();
+  if (expected && expected !== clientId) {
+    throw new AppError(503, "MICROSOFT_CLIENT_MISMATCH", "Microsoft calendar OAuth client does not match the token issuer.");
+  }
+}
+
 function parseSupportRecorderJoinAt(value: string) {
-  if (!/(?:[zZ]|[+-]\d{2}:\d{2})$/.test(value.trim())) {
+  const trimmed = value.trim();
+  const match = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2})(?:\.(\d{1,3})\d*)?)?([zZ]|[+-]\d{2}:\d{2})$/.exec(trimmed);
+  if (!match) {
     throw new AppError(400, "INVALID_INPUT", "A timezone-aware future join time is required for live smoke.");
   }
-  const parsed = new Date(value);
+  const [, year, month, day, hour, minute, second = "00", millisecond = "0", timezone] = match;
+  const parsed = new Date(trimmed);
   if (Number.isNaN(parsed.valueOf()) || parsed.getTime() <= Date.now()) {
+    throw new AppError(400, "INVALID_INPUT", "A timezone-aware future join time is required for live smoke.");
+  }
+  const offsetMinutes = /^[zZ]$/.test(timezone)
+    ? 0
+    : (timezone.startsWith("-") ? -1 : 1) * ((Number(timezone.slice(1, 3)) * 60) + Number(timezone.slice(4, 6)));
+  const localTime = new Date(parsed.getTime() + (offsetMinutes * 60 * 1000));
+  const normalizedMillisecond = Number(millisecond.padEnd(3, "0").slice(0, 3));
+  if (
+    localTime.getUTCFullYear() !== Number(year)
+    || localTime.getUTCMonth() + 1 !== Number(month)
+    || localTime.getUTCDate() !== Number(day)
+    || localTime.getUTCHours() !== Number(hour)
+    || localTime.getUTCMinutes() !== Number(minute)
+    || localTime.getUTCSeconds() !== Number(second)
+    || localTime.getUTCMilliseconds() !== normalizedMillisecond
+  ) {
     throw new AppError(400, "INVALID_INPUT", "A timezone-aware future join time is required for live smoke.");
   }
   return parsed;
@@ -3601,6 +3632,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
       refreshToken: z.string().optional(),
       expiresIn: z.number().optional(),
       scopes: z.array(z.string()).optional(),
+      oauthClientId: z.string().optional(),
     },
     async (params: {
       providerAccountId: string;
@@ -3610,9 +3642,11 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
       refreshToken?: string;
       expiresIn?: number;
       scopes?: string[];
+      oauthClientId?: string;
     }) => {
       requireScope(sessionCtx, "meetings:write");
       requireSupportCredential();
+      requireMicrosoftRecorderCalendarRefreshConfig(params.oauthClientId);
       const source = await upsertRecorderCalendarSource({
         workspaceId,
         providerAccountId: params.providerAccountId,

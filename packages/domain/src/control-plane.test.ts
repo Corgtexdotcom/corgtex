@@ -3660,6 +3660,78 @@ describe("control plane domain", () => {
     expect(JSON.stringify(prismaMock.customerDeploymentEvent.create.mock.calls)).not.toContain("returned-access-token");
   });
 
+  it("omits absent optional recorder calendar OAuth fields for remote support tools", async () => {
+    const { saveControlPlaneRecorderCalendarSource } = await import("./control-plane");
+    vi.stubEnv("MICROSOFT_CLIENT_ID", "control-plane-client-id");
+    const integrationAgent: AppActor = {
+      kind: "agent",
+      authProvider: "control-plane",
+      label: "control-plane-agent",
+      scopes: ["control-plane:read", "control-plane:integrations:write"],
+    };
+    prismaMock.customerDeployment.findUnique
+      .mockResolvedValueOnce({
+        id: "inst-1",
+        label: "Remote Customer",
+        customerAccountId: "cust-1",
+        managedWorkspaceId: null,
+        supportCredentialEnc: "encrypted-support-token",
+        managedWorkspace: null,
+      })
+      .mockResolvedValueOnce({
+        id: "inst-1",
+        label: "Remote Customer",
+        url: "https://remote.example",
+        supportMcpUrl: "https://remote.example/api/mcp",
+        supportCredentialEnc: "encrypted-support-token",
+        supportConnectorStatus: "connected",
+      });
+    prismaMock.supportOperation.create.mockResolvedValueOnce({
+      id: "op-connect",
+      action: "meeting_recorders.connect_calendar",
+    });
+    prismaMock.supportOperation.update.mockImplementationOnce(async (args: any) => ({
+      id: "op-connect",
+      action: "meeting_recorders.connect_calendar",
+      status: args.data.status,
+      error: args.data.error ?? null,
+      resultSummary: args.data.resultSummary ?? null,
+    }));
+    global.fetch = vi.fn(async (_input, init) => {
+      const body = JSON.parse(String((init as RequestInit).body));
+      if (body.params?.name === "connect_meeting_recorder_calendar") {
+        return mcpToolResult({
+          workspaceId: "remote-workspace",
+          source: {
+            id: "source-remote",
+            provider: "MICROSOFT",
+            status: "ACTIVE",
+          },
+          workflowJobId: "job-remote",
+        });
+      }
+      return mcpToolResult({ audited: true });
+    }) as any;
+
+    await saveControlPlaneRecorderCalendarSource(integrationAgent, {
+      deploymentId: "inst-1",
+      providerAccountId: "ms-user-1",
+      accessToken: "access-token-secret",
+      reason: "Customer authorized recorder calendar.",
+    });
+
+    const toolCall = vi.mocked(global.fetch).mock.calls
+      .map(([, init]) => JSON.parse(String(init?.body)))
+      .find((body) => body.params?.name === "connect_meeting_recorder_calendar");
+    expect(toolCall?.params.arguments).toEqual({
+      providerAccountId: "ms-user-1",
+      accessToken: "access-token-secret",
+      scopes: [],
+      oauthClientId: "control-plane-client-id",
+    });
+    expect(Object.values(toolCall?.params.arguments ?? {})).not.toContain(null);
+  });
+
   it("rejects remote recorder calendar connect before creating a support operation when connector credentials are missing", async () => {
     const { saveControlPlaneRecorderCalendarSource } = await import("./control-plane");
     const integrationAgent: AppActor = {

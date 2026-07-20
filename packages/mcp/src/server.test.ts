@@ -272,6 +272,9 @@ vi.mock("./auth", () => ({
 
 describe("createCorgtexMcpServer", () => {
   beforeEach(async () => {
+    vi.unstubAllEnvs();
+    vi.stubEnv("MICROSOFT_CLIENT_ID", "microsoft-client-id");
+    vi.stubEnv("MICROSOFT_CLIENT_SECRET", "microsoft-client-secret");
     createActionMock.mockReset().mockResolvedValue({
       id: "action-1",
       title: "Follow up",
@@ -745,6 +748,42 @@ describe("createCorgtexMcpServer", () => {
     expect(JSON.stringify(payload)).not.toContain("ms-user-1");
   });
 
+  it("rejects recorder calendar connect before storing tokens when Microsoft refresh config is missing or mismatched", async () => {
+    const { createCorgtexMcpServer } = await import("./server");
+
+    const server = createCorgtexMcpServer({
+      actor: { kind: "agent", authProvider: "support", credentialId: "cred-1" } as any,
+      workspaceId: "ws-1",
+      authKind: "agent",
+      scopes: ["meetings:write", "support:write"],
+    });
+
+    vi.stubEnv("MICROSOFT_CLIENT_SECRET", "");
+    await expect((server as any)._registeredTools.connect_meeting_recorder_calendar.handler({
+      providerAccountId: "ms-user-1",
+      accessToken: "access-token-secret",
+      refreshToken: "refresh-token-secret",
+      oauthClientId: "microsoft-client-id",
+    })).rejects.toMatchObject({
+      status: 503,
+      code: "MICROSOFT_NOT_CONFIGURED",
+    });
+
+    vi.stubEnv("MICROSOFT_CLIENT_SECRET", "microsoft-client-secret");
+    vi.stubEnv("MICROSOFT_CLIENT_ID", "remote-client-id");
+    await expect((server as any)._registeredTools.connect_meeting_recorder_calendar.handler({
+      providerAccountId: "ms-user-1",
+      accessToken: "access-token-secret",
+      refreshToken: "refresh-token-secret",
+      oauthClientId: "control-plane-client-id",
+    })).rejects.toMatchObject({
+      status: 503,
+      code: "MICROSOFT_CLIENT_MISMATCH",
+    });
+    expect(upsertRecorderCalendarSourceMock).not.toHaveBeenCalled();
+    expect(enqueueRecorderCalendarSyncMock).not.toHaveBeenCalled();
+  });
+
   it("runs compact support-only recorder sync, dry-run, and live-smoke operations", async () => {
     const { createCorgtexMcpServer } = await import("./server");
 
@@ -832,6 +871,13 @@ describe("createCorgtexMcpServer", () => {
     await expect((server as any)._registeredTools.run_meeting_recorder_live_smoke.handler({
       meetingUrl: "https://teams.microsoft.com/l/meetup-join/private",
       joinAt: "2099-07-20T06:30:00",
+    })).rejects.toMatchObject({
+      status: 400,
+      code: "INVALID_INPUT",
+    });
+    await expect((server as any)._registeredTools.run_meeting_recorder_live_smoke.handler({
+      meetingUrl: "https://teams.microsoft.com/l/meetup-join/private",
+      joinAt: "2099-02-31T06:30:00Z",
     })).rejects.toMatchObject({
       status: 400,
       code: "INVALID_INPUT",

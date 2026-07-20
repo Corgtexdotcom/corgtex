@@ -6210,20 +6210,24 @@ export async function saveControlPlaneRecorderCalendarSource(actor: AppActor, pa
   const deployment = await getControlPlaneDeploymentWithWorkspace(actor, params.deploymentId);
   const managedWorkspaceId = deployment.managedWorkspaceId;
   if (!managedWorkspaceId) {
+    const recorderCalendarArgs: JsonRecord = {
+      providerAccountId: params.providerAccountId,
+      accessToken: params.accessToken,
+      scopes: params.scopes ?? [],
+    };
+    if (typeof params.providerAccountEmail === "string") recorderCalendarArgs.providerAccountEmail = params.providerAccountEmail;
+    if (typeof params.displayName === "string") recorderCalendarArgs.displayName = params.displayName;
+    if (typeof params.refreshToken === "string") recorderCalendarArgs.refreshToken = params.refreshToken;
+    if (typeof params.expiresIn === "number") recorderCalendarArgs.expiresIn = params.expiresIn;
+    const oauthClientId = process.env.MICROSOFT_CLIENT_ID?.trim();
+    if (oauthClientId) recorderCalendarArgs.oauthClientId = oauthClientId;
+
     const operation = await runCustomerSupportOperation(actor, {
       deploymentId: params.deploymentId,
       action: "meeting_recorders.connect_calendar",
       scopeOverride: "control-plane:integrations:write",
       reason,
-      arguments: {
-        providerAccountId: params.providerAccountId,
-        providerAccountEmail: params.providerAccountEmail ?? null,
-        displayName: params.displayName ?? null,
-        accessToken: params.accessToken,
-        refreshToken: params.refreshToken ?? null,
-        expiresIn: params.expiresIn ?? null,
-        scopes: params.scopes ?? [],
-      },
+      arguments: recorderCalendarArgs,
     });
     await recordCustomerDeploymentEvent(actor, params.deploymentId, "control_plane.integration.meeting_recorder_calendar_connected", {
       reason,
