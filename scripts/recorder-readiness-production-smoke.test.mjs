@@ -126,6 +126,77 @@ describe("recorder readiness production smoke helpers", () => {
     ]);
   });
 
+  it("prefers an active production customer slug over an archived managed-workspace slug", () => {
+    const archivedSharedWorkspace = {
+      id: "archived-dep",
+      label: "Chirone Production (archived shared workspace)",
+      customerSlug: "chirone-shared-archived-20260607",
+      url: "https://ops.corgtex.com/archived/chirone-shared-workspace-archived-dep",
+      managedWorkspaceId: "archived-workspace",
+      managedWorkspaceSlug: "chirone",
+      managedWorkspaceName: "Chirone",
+      deploymentStatus: "SUSPENDED",
+      provisioningStatus: "archived",
+      environment: "production",
+      supportConnectorStatus: "not_configured",
+    };
+    const activeProductionDeployment = {
+      id: "active-dep",
+      label: "Chirone Production",
+      customerSlug: "chirone",
+      url: "https://deploy-chirone-production.up.railway.app",
+      customDomain: "chirone.corgtex.com",
+      managedWorkspaceId: null,
+      managedWorkspaceSlug: null,
+      deploymentStatus: "ACTIVE",
+      provisioningStatus: "provisioned",
+      environment: "production",
+      lastHealthStatus: "healthy",
+      supportConnectorStatus: "connected",
+    };
+
+    expect(resolveRecorderReadinessTargets([
+      archivedSharedWorkspace,
+      activeProductionDeployment,
+    ], ["chirone"])).toEqual([
+      { target: "chirone", deployment: activeProductionDeployment },
+    ]);
+    expect(resolveRecorderReadinessTargets([
+      activeProductionDeployment,
+      archivedSharedWorkspace,
+    ], ["Chirone Production (archived shared workspace)"])).toEqual([
+      { target: "Chirone Production (archived shared workspace)", deployment: archivedSharedWorkspace },
+    ]);
+  });
+
+  it("does not resolve account-only summaries as readiness deployments", () => {
+    const accountOnlySummary = {
+      id: "account-1",
+      label: "Alpha Account",
+      customerSlug: "alpha",
+      hasDeployment: false,
+      deploymentStatus: null,
+      provisioningStatus: "draft",
+    };
+    const archivedDeployment = {
+      id: "archived-dep",
+      label: "Alpha Archived",
+      customerSlug: "alpha",
+      hasDeployment: true,
+      deploymentStatus: "SUSPENDED",
+      provisioningStatus: "archived",
+      environment: "production",
+    };
+
+    expect(deploymentMatchesRecorderReadinessTarget(accountOnlySummary, "alpha")).toBe(false);
+    expect(resolveRecorderReadinessTargets([accountOnlySummary], ["alpha"])).toEqual([
+      { target: "alpha", deployment: null },
+    ]);
+    expect(resolveRecorderReadinessTargets([accountOnlySummary, archivedDeployment], ["alpha"])).toEqual([
+      { target: "alpha", deployment: archivedDeployment },
+    ]);
+  });
+
   it("loads deployment inventory from the configured control plane", async () => {
     const originalFetch = global.fetch;
     global.fetch = vi.fn(async (url, init) => {
