@@ -2008,12 +2008,39 @@ function providerCanSchedule(config: {
 }
 
 function recorderProofObservedAt(recording: {
+  status?: string | null;
   endedAt?: Date | null;
   startedAt?: Date | null;
   scheduledAt?: Date | null;
+  updatedAt?: Date | null;
   createdAt: Date;
 }) {
+  if (recording.status === "JOINING") {
+    return recording.endedAt ?? recording.startedAt ?? recording.updatedAt ?? recording.scheduledAt ?? recording.createdAt;
+  }
   return recording.endedAt ?? recording.startedAt ?? recording.scheduledAt ?? recording.createdAt;
+}
+
+function newestRecorderProofRecording<T extends {
+  status?: string | null;
+  endedAt?: Date | null;
+  startedAt?: Date | null;
+  scheduledAt?: Date | null;
+  updatedAt?: Date | null;
+  createdAt: Date;
+}>(recordings: T[]) {
+  return recordings.reduce<T | null>((latest, recording) => {
+    if (!latest) return recording;
+    return recorderProofObservedAt(recording) > recorderProofObservedAt(latest) ? recording : latest;
+  }, null);
+}
+
+function newestRecorderProofAt(...dates: Array<Date | null | undefined>) {
+  return dates.reduce<Date | null>((latest, date) => {
+    if (!date) return latest;
+    if (!latest || date > latest) return date;
+    return latest;
+  }, null);
 }
 
 function isRecorderAuthFailure(recording: { failureCode: string | null; failureMessage: string | null }) {
@@ -2076,12 +2103,72 @@ function compactRecorderAuthFailure(recording: {
   };
 }
 
+type RecorderCoverageReadiness = Awaited<ReturnType<typeof getMeetingRecorderCoverageReadiness>>;
+
+function recorderCoverageAlreadyCoveredCount(coverage: RecorderCoverageReadiness) {
+  return coverage.counts.blockers.already_covered ?? 0;
+}
+
+function recorderScheduleSourceCheck(params: {
+  coverage: RecorderCoverageReadiness;
+  calendarSource: Awaited<ReturnType<typeof getRecorderCalendarSource>>;
+  failedSyncJobs: number;
+}): RecorderReadinessCheck {
+  const { coverage, calendarSource, failedSyncJobs } = params;
+  const alreadyCovered = recorderCoverageAlreadyCoveredCount(coverage);
+  const internalScheduleReady = coverage.counts.eligible + alreadyCovered > 0;
+  const calendarImportReady = Boolean(calendarSource?.status === "ACTIVE" && calendarSource.lastSyncAt && !calendarSource.lastSyncError && failedSyncJobs === 0);
+  if (internalScheduleReady) {
+    return {
+      key: "recording_schedule",
+      label: "Corgtex recorder schedule",
+      ok: true,
+      detail: alreadyCovered > 0
+        ? `${alreadyCovered} upcoming Corgtex scheduled meeting(s) already have recorder coverage.`
+        : `${coverage.counts.eligible} upcoming Corgtex scheduled meeting(s) are eligible for recorder scheduling.`,
+    };
+  }
+  if (calendarImportReady) {
+    return {
+      key: "recording_schedule",
+      label: "Corgtex recorder schedule",
+      ok: true,
+      detail: "Optional calendar sync is connected and can import recorder meetings into Corgtex.",
+    };
+  }
+  if (coverage.counts.total > 0) {
+    const blocker = Object.entries(coverage.counts.blockers)
+      .filter(([key, count]) => key !== "already_covered" && count > 0)
+      .sort((left, right) => right[1] - left[1])[0];
+    return {
+      key: "recording_schedule",
+      label: "Corgtex recorder schedule",
+      ok: false,
+      detail: blocker
+        ? `${coverage.counts.total} upcoming Corgtex scheduled meeting(s) exist, but none are recordable because ${blocker[1]} are blocked by ${blocker[0]}.`
+        : "Upcoming Corgtex scheduled meetings exist, but none are ready for recorder scheduling.",
+    };
+  }
+  const calendarDetail = calendarSource?.lastSyncError
+    ?? (calendarSource
+      ? `${calendarSource.providerAccountEmail ?? calendarSource.providerAccountId} is ${calendarSource.status.toLowerCase()} and has not produced recordable meetings.`
+      : "No optional calendar sync is connected.");
+  return {
+    key: "recording_schedule",
+    label: "Corgtex recorder schedule",
+    ok: false,
+    detail: `No upcoming Corgtex scheduled meetings found. Add the meeting to Corgtex before recording; optional calendar sync is not required. ${calendarDetail}`,
+  };
+}
+
 export async function getMeetingRecorderEnterpriseReadiness(workspaceId: string) {
-  const proofSince = new Date(Date.now() - RECORDER_PROVIDER_PROOF_MAX_AGE_MS);
-  const [featureEnabled, config, calendarSource, lastSmokeRun, lastSuccessfulSmokeRun, lastSuccessfulRecording, failedRecordings] = await Promise.all([
+  const now = new Date();
+  const proofSince = new Date(now.getTime() - RECORDER_PROVIDER_PROOF_MAX_AGE_MS);
+  const [featureEnabled, config, calendarSource, coverage, lastSmokeRun, lastSuccessfulSmokeRun, providerProofRecordings, failedRecordings] = await Promise.all([
     isRecorderFeatureEnabled(workspaceId),
     getEffectiveRecorderConfig(workspaceId),
     getRecorderCalendarSource(workspaceId),
+    getMeetingRecorderCoverageReadiness(workspaceId),
     prisma.meetingRecorderSmokeRun.findFirst({
       where: { workspaceId },
       orderBy: { createdAt: "desc" },
@@ -2094,23 +2181,46 @@ export async function getMeetingRecorderEnterpriseReadiness(workspaceId: string)
       },
       orderBy: { completedAt: "desc" },
     }),
-    prisma.meetingRecording.findFirst({
+    prisma.meetingRecording.findMany({
       where: {
         workspaceId,
-        status: { in: ["COMPLETED", "RECORDING"] },
         OR: [
-          { endedAt: { gte: proofSince } },
-          { startedAt: { gte: proofSince } },
-          { scheduledAt: { gte: proofSince } },
-          { createdAt: { gte: proofSince } },
+          {
+            status: { in: ["COMPLETED", "RECORDING"] },
+            OR: [
+              { endedAt: { gte: proofSince } },
+              { startedAt: { gte: proofSince } },
+              { scheduledAt: { gte: proofSince } },
+              { createdAt: { gte: proofSince } },
+            ],
+          },
+          {
+            status: "SCHEDULED",
+            externalBotId: { not: null },
+            OR: [
+              { scheduledAt: { gte: now } },
+              { joinAt: { gte: now } },
+            ],
+          },
+          {
+            status: "JOINING",
+            externalBotId: { not: null },
+            OR: [
+              { scheduledAt: { gte: now } },
+              { joinAt: { gte: now } },
+              { startedAt: { gte: proofSince } },
+              { updatedAt: { gte: proofSince } },
+            ],
+          },
         ],
-      },
-      orderBy: { updatedAt: "desc" },
-      select: {
+	      },
+	      orderBy: { updatedAt: "desc" },
+	      select: {
         id: true,
         provider: true,
         status: true,
         scheduledAt: true,
+        joinAt: true,
         startedAt: true,
         endedAt: true,
         createdAt: true,
@@ -2134,9 +2244,12 @@ export async function getMeetingRecorderEnterpriseReadiness(workspaceId: string)
       },
     }),
   ]);
+  const lastProviderProofRecording = newestRecorderProofRecording(providerProofRecordings);
   const lastProviderAuthFailure = failedRecordings.find(isRecorderAuthFailure) ?? null;
-  const proofObservedAt = lastSuccessfulSmokeRun?.completedAt
-    ?? (lastSuccessfulRecording ? recorderProofObservedAt(lastSuccessfulRecording) : null);
+  const proofObservedAt = newestRecorderProofAt(
+    lastSuccessfulSmokeRun?.completedAt,
+    lastProviderProofRecording ? recorderProofObservedAt(lastProviderProofRecording) : null,
+  );
   const providerProofBlocked = Boolean(lastProviderAuthFailure && (!proofObservedAt || lastProviderAuthFailure.updatedAt > proofObservedAt));
   const providerProofOk = Boolean(proofObservedAt && proofObservedAt >= proofSince && !providerProofBlocked);
   const failedSyncJobs = calendarSource
@@ -2149,6 +2262,7 @@ export async function getMeetingRecorderEnterpriseReadiness(workspaceId: string)
       },
     })
     : 0;
+  const scheduleSourceCheck = recorderScheduleSourceCheck({ coverage, calendarSource, failedSyncJobs });
   const checks: RecorderReadinessCheck[] = [
     {
       key: "entitlement",
@@ -2163,23 +2277,7 @@ export async function getMeetingRecorderEnterpriseReadiness(workspaceId: string)
       detail: config.enabled ? `${config.defaultProvider} enabled.` : "Workspace recorder config is disabled.",
     },
     ...providerRuntimeChecks(config),
-    {
-      key: "calendar_source",
-      label: "Master Microsoft calendar",
-      ok: Boolean(calendarSource && calendarSource.status === "ACTIVE"),
-      detail: calendarSource
-        ? `${calendarSource.providerAccountEmail ?? calendarSource.providerAccountId} is ${calendarSource.status.toLowerCase()}.`
-        : "No workspace-scoped recorder calendar source connected.",
-    },
-    {
-      key: "worker_sync",
-      label: "Recorder calendar sync",
-      ok: Boolean(calendarSource?.lastSyncAt && !calendarSource.lastSyncError && failedSyncJobs === 0),
-      detail: calendarSource?.lastSyncError
-        ?? (calendarSource?.lastSyncAt
-          ? (failedSyncJobs > 0 ? `${failedSyncJobs} failed recorder calendar sync job(s).` : "No failed recorder calendar sync jobs.")
-          : "No successful recorder calendar sync yet."),
-    },
+    scheduleSourceCheck,
     {
       key: "provider_proof",
       label: "Recorder provider proof",
@@ -2187,8 +2285,8 @@ export async function getMeetingRecorderEnterpriseReadiness(workspaceId: string)
       detail: providerProofBlocked && lastProviderAuthFailure
         ? sanitizeRecorderFailureDetail(lastProviderAuthFailure)
         : proofObservedAt
-          ? `Recent recorder proof at ${proofObservedAt.toISOString()}.`
-          : "No recent successful recorder smoke or real recording in the last 30 days.",
+          ? `Recent recorder provider proof at ${proofObservedAt.toISOString()}.`
+          : "No recent successful recorder smoke, scheduled provider bot, or real recording in the last 30 days.",
     },
   ];
   return {
@@ -2196,9 +2294,10 @@ export async function getMeetingRecorderEnterpriseReadiness(workspaceId: string)
     ready: checks.every((check) => check.ok),
     checks,
     calendarSource,
+    coverage,
     lastSmokeRun,
     lastSuccessfulSmokeRun,
-    lastSuccessfulRecording: compactRecorderProof(lastSuccessfulRecording),
+    lastSuccessfulRecording: compactRecorderProof(lastProviderProofRecording),
     lastProviderAuthFailure: compactRecorderAuthFailure(lastProviderAuthFailure),
     config,
   };
@@ -2216,7 +2315,7 @@ function recorderServiceHealthStatus(params: {
   if (!params.featureEnabled || !params.configEnabled) return "NEEDS_SETUP" as const;
   const failed = failedRecorderChecks(params.checks);
   if (failed.length === 0) return "ACTIVE" as const;
-  if (failed.some((check) => check.key === "calendar_source")) return "DISCONNECTED" as const;
+  if (failed.some((check) => check.key === "recording_schedule")) return "NEEDS_SETUP" as const;
   if (failed.some((check) => check.key === "worker_sync" || check.key === "provider_proof")) return "UNHEALTHY" as const;
   return "UNHEALTHY" as const;
 }

@@ -438,7 +438,7 @@ export class RecorderReadinessProductionSmoke {
 
   recordResult({ target, deployment = null, readiness = null, result, blocker = null, evidence = [] }) {
     const tenant = tenantForDeployment(deployment, target);
-    const intent = `Recorder readiness contract for ${tenant.label}: control-plane, tenant config, vendor, calendar, scheduled meetings, and live vendor proof`;
+    const intent = `Recorder readiness contract for ${tenant.label}: control-plane, tenant config, vendor, Corgtex recording schedule, scheduled meetings, and live vendor proof`;
     const resultPrNumbers = this.validationRun.prNumbers.length > 0 ? this.validationRun.prNumbers : [null];
     for (const prNumber of resultPrNumbers) {
       recordValidationResult(this.validationRun, {
