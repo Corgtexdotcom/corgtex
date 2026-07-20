@@ -12,6 +12,12 @@ import { resolveWorkspaceProposalLink } from "./proposal-links";
 import { createWorkItemEvidenceLinks } from "./work-item-evidence";
 import { ensureWorkspacePermalink, workspaceEntityCanonicalPath } from "./permalinks";
 import {
+  checkWorkspaceDuplicateGuard,
+  duplicateGuardAuditMeta,
+  duplicateGuardMergeText,
+  type DuplicateGuardOptions,
+} from "./duplicate-guard";
+import {
   changedDataFields,
   pickJsonSnapshot,
   recordWorkItemVersion,
@@ -22,6 +28,21 @@ import {
 import { privacyFilter } from "./privacy";
 
 type WorkItemSort = "priority" | "date" | "alpha";
+
+type CreateTensionParams = {
+  workspaceId: string;
+  title: string;
+  bodyMd?: string | null;
+  circleId?: string | null;
+  assigneeMemberId?: string | null;
+  authorMemberId?: string | null;
+  raisedByMemberId?: string | null;
+  proposalId?: string | null;
+  isPrivate?: boolean;
+  priority?: number | null;
+  meetingId?: string | null;
+  duplicateGuard?: DuplicateGuardOptions | null;
+};
 
 export type ListTensionsOptions = {
   take?: number;
@@ -201,19 +222,21 @@ export async function listTensions(actor: AppActor, workspaceId: string, opts?: 
   };
 }
 
-export async function createTension(actor: AppActor, params: {
-  workspaceId: string;
-  title: string;
-  bodyMd?: string | null;
-  circleId?: string | null;
-  assigneeMemberId?: string | null;
-  authorMemberId?: string | null;
-  raisedByMemberId?: string | null;
-  proposalId?: string | null;
-  isPrivate?: boolean;
-  priority?: number | null;
-  meetingId?: string | null;
-}) {
+async function applyTensionDuplicateUpdate(actor: AppActor, params: CreateTensionParams, tensionId: string) {
+  const existing = await getTension(actor, { workspaceId: params.workspaceId, tensionId });
+  const mergedBody = duplicateGuardMergeText(existing.bodyMd, params.bodyMd);
+  const updateParams: Parameters<typeof updateTension>[1] = {
+    workspaceId: params.workspaceId,
+    tensionId,
+  };
+  if ((mergedBody ?? null) !== (existing.bodyMd ?? null)) updateParams.bodyMd = mergedBody;
+  if (!existing.circleId && params.circleId) updateParams.circleId = params.circleId;
+  if (!existing.assigneeMemberId && params.assigneeMemberId) updateParams.assigneeMemberId = params.assigneeMemberId;
+  if (!existing.raisedByMemberId && params.raisedByMemberId) updateParams.raisedByMemberId = params.raisedByMemberId;
+  return Object.keys(updateParams).length > 2 ? updateTension(actor, updateParams) : existing;
+}
+
+export async function createTension(actor: AppActor, params: CreateTensionParams) {
   const membership = await requireWorkspaceMembership({
     actor,
     workspaceId: params.workspaceId,
@@ -221,6 +244,26 @@ export async function createTension(actor: AppActor, params: {
 
   const title = params.title.trim();
   invariant(title.length > 0, 400, "INVALID_INPUT", "Tension title is required.");
+  const duplicateDecision = await checkWorkspaceDuplicateGuard({
+    workspaceId: params.workspaceId,
+    entityType: "Tension",
+    title,
+    body: params.bodyMd,
+    circleId: params.circleId,
+    assigneeMemberId: params.assigneeMemberId,
+    raisedByMemberId: params.raisedByMemberId,
+    proposalId: params.proposalId,
+    meetingId: params.meetingId,
+    actorUserId: actor.kind === "user" ? actor.user.id : null,
+    membershipId: membership?.id ?? null,
+    includePrivate: actor.kind === "agent" || membership?.role === "ADMIN",
+  }, params.duplicateGuard);
+  if (duplicateDecision?.resolution === "use_existing") {
+    return getTension(actor, { workspaceId: params.workspaceId, tensionId: duplicateDecision.match.entityId });
+  }
+  if (duplicateDecision?.resolution === "update_existing") {
+    return applyTensionDuplicateUpdate(actor, params, duplicateDecision.match.entityId);
+  }
   const isPrivate = params.isPrivate ?? true;
   const publishedAt = isPrivate ? null : new Date();
 
@@ -267,7 +310,7 @@ export async function createTension(actor: AppActor, params: {
         action: "tension.created",
         entityType: "Tension",
         entityId: tension.id,
-        meta: { title: tension.title },
+        meta: { title: tension.title, ...duplicateGuardAuditMeta(duplicateDecision) },
       },
     });
 

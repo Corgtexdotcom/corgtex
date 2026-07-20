@@ -172,6 +172,7 @@ export async function createTensionAction(actor: AppActor, ctx: any, args: any) 
     circleId: args.circleId,
     assigneeMemberId: args.assigneeMemberId,
     raisedByMemberId: args.raisedByMemberId,
+    duplicateGuard: { onExact: "use_existing" },
   });
   
   await appendAuditMeta("Tension", result.id, "tension.created", {
@@ -210,6 +211,7 @@ export async function createActionItemAction(actor: AppActor, ctx: any, args: an
     circleId: args.circleId,
     assigneeMemberId: args.assigneeMemberId,
     dueAt: args.dueAt ? new Date(args.dueAt) : undefined,
+    duplicateGuard: { onExact: "use_existing" },
   });
 
   await appendAuditMeta("Action", result.id, "action.created", {
@@ -267,6 +269,7 @@ export async function createProposalAction(actor: AppActor, ctx: any, args: any)
         bodyMd: typeof args.bodyMd === "string" ? args.bodyMd : "",
         circleId: typeof args.circleId === "string" ? args.circleId : null,
         relatedActionIds,
+        duplicateGuard: { onExact: "use_existing" },
         ...(hasOwnerMemberId ? { ownerMemberId } : {}),
       });
 
@@ -292,6 +295,7 @@ export async function createGoalAction(actor: AppActor, ctx: any, args: any) {
     circleId: args.circleId,
     ownerMemberId: args.ownerMemberId,
     keyResults: Array.isArray(args.keyResults) ? args.keyResults : undefined,
+    duplicateGuard: { onExact: "use_existing" },
   });
 
   await appendAuditMeta("Goal", result.id, "goal.created", {

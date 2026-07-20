@@ -16,7 +16,7 @@ import {
 import { requirePageActor } from "@/lib/auth";
 import type { GoalLevel, GoalCadence, GoalStatus } from "@prisma/client";
 import { requireWorkspaceFeature } from "@/lib/workspace-feature-flags";
-import { asOptional, asOptionalInt, asString, refresh } from "../action-utils";
+import { asOptional, asOptionalInt, asString, duplicateGuardFromFormData, refresh } from "../action-utils";
 
 type GoalKeyResultInput = {
   title: string;
@@ -76,6 +76,7 @@ export async function createGoalFormAction(formData: FormData) {
     circleId: asOptional(formData, "circleId"),
     ownerMemberId: asOptional(formData, "ownerMemberId"),
     keyResults: keyResultsFromForm(formData),
+    duplicateGuard: duplicateGuardFromFormData(formData),
   });
   refresh(workspaceId);
 }

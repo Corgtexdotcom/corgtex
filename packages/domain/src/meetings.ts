@@ -10,6 +10,11 @@ import { ensureWorkspacePermalink, workspaceEntityCanonicalPath } from "./permal
 import { invariant } from "./errors";
 import { extractSupportedMeetingUrlFromText, meetingUrlHash, normalizeMeetingUrl, normalizeRecorderMeetingUrl } from "./meeting-urls";
 import { resetMeetingTranscriptProcessingProgress } from "./meeting-transcript-processing";
+import {
+  checkWorkspaceDuplicateGuard,
+  duplicateGuardAuditMeta,
+  type DuplicateGuardOptions,
+} from "./duplicate-guard";
 
 const DEFAULT_OCCURRENCE_LOOKBACK_DAYS = 14;
 const DEFAULT_OCCURRENCE_LOOKAHEAD_DAYS = 60;
@@ -1286,7 +1291,7 @@ export async function requestMeetingIntelligenceRegeneration(actor: AppActor, pa
   });
 }
 
-export async function createMeeting(actor: AppActor, params: {
+type CreateMeetingParams = {
   workspaceId: string;
   title?: string | null;
   source: string;
@@ -1301,7 +1306,104 @@ export async function createMeeting(actor: AppActor, params: {
   participantIds?: string[];
   participantEmails?: string[];
   sourceRecordId?: string | null;
-}) {
+  duplicateGuard?: DuplicateGuardOptions | null;
+};
+
+async function applyMeetingDuplicateUpdate(
+  tx: Prisma.TransactionClient,
+  actor: AppActor,
+  params: CreateMeetingParams,
+  meetingId: string,
+  meetingUrl: string | null,
+) {
+  if (params.transcript?.trim()) {
+    return updateMeetingWithTranscriptTx(tx, actor, {
+      ...params,
+      meetingId,
+      meetingUrl,
+      transcript: params.transcript,
+    });
+  }
+
+  const existing = await tx.meeting.findFirst({
+    where: { id: meetingId, workspaceId: params.workspaceId, archivedAt: null },
+    select: {
+      id: true,
+      title: true,
+      source: true,
+      externalId: true,
+      calendarExternalId: true,
+      meetingUrl: true,
+      meetingUrlHash: true,
+      recordedAt: true,
+      scheduledEndAt: true,
+      summaryMd: true,
+      ingestionGuidanceMd: true,
+      participantIds: true,
+      participantEmails: true,
+    },
+  });
+  invariant(existing, 404, "NOT_FOUND", "Meeting not found.");
+  const summaryMd = mergeMarkdownNote(existing.summaryMd, params.summaryMd);
+  const ingestionGuidanceMd = mergeMarkdownNote(existing.ingestionGuidanceMd, params.ingestionGuidanceMd);
+  const participantIds = normalizeIds([
+    ...existing.participantIds,
+    ...(params.participantIds ?? []),
+  ]);
+  const participantEmails = normalizeEmails([
+    ...existing.participantEmails,
+    ...(params.participantEmails ?? []),
+  ]);
+  const nextMeetingUrl = meetingUrl ?? existing.meetingUrl;
+  const meeting = await tx.meeting.update({
+    where: { id: existing.id },
+    data: {
+      title: chooseMergedTitle(existing.title, params.title),
+      source: existing.source || params.source.trim(),
+      externalId: existing.externalId || workspaceScopedMeetingExternalId(params.workspaceId, params.externalId),
+      calendarExternalId: existing.calendarExternalId || params.calendarExternalId?.trim() || null,
+      meetingUrl: nextMeetingUrl,
+      meetingUrlHash: nextMeetingUrl ? meetingUrlHash(nextMeetingUrl) : existing.meetingUrlHash,
+      scheduledEndAt: existing.scheduledEndAt ?? params.scheduledEndAt ?? null,
+      summaryMd,
+      ingestionGuidanceMd,
+      participantIds,
+      participantEmails,
+    },
+  });
+
+  await tx.auditLog.create({
+    data: {
+      workspaceId: params.workspaceId,
+      actorUserId: actor.kind === "user" ? actor.user.id : null,
+      action: "meeting.updated",
+      entityType: "Meeting",
+      entityId: meeting.id,
+      meta: { reason: "duplicate_guard_update", title: meeting.title },
+    },
+  });
+
+  await appendEvents(tx, [
+    {
+      workspaceId: params.workspaceId,
+      type: "meeting.transcript-uploaded",
+      aggregateType: "Meeting",
+      aggregateId: meeting.id,
+      payload: {
+        meetingId: meeting.id,
+        title: meeting.title,
+        source: meeting.source,
+        status: meeting.status,
+        hasTranscript: Boolean(meeting.transcript),
+        hasIngestionGuidance: Boolean(meeting.ingestionGuidanceMd),
+        sourceRecordId: params.sourceRecordId ?? null,
+      },
+    },
+  ]);
+  return meeting;
+}
+
+export async function createMeeting(actor: AppActor, params: CreateMeetingParams) {
   await requireWorkspaceMembership({
     actor,
     workspaceId: params.workspaceId,
@@ -1309,8 +1411,31 @@ export async function createMeeting(actor: AppActor, params: {
 
   const source = params.source.trim();
   const meetingUrl = params.meetingUrl?.trim() ? normalizeMeetingUrl(params.meetingUrl) : null;
+  const normalizedMeetingUrlHash = meetingUrl ? meetingUrlHash(meetingUrl) : null;
+  const scopedExternalId = workspaceScopedMeetingExternalId(params.workspaceId, params.externalId);
   invariant(source.length > 0, 400, "INVALID_INPUT", "Meeting source is required.");
   invariant(!Number.isNaN(params.recordedAt.valueOf()), 400, "INVALID_INPUT", "recordedAt must be a valid date.");
+  const duplicateDecision = await checkWorkspaceDuplicateGuard({
+    workspaceId: params.workspaceId,
+    entityType: "Meeting",
+    title: params.title,
+    body: params.transcript ?? params.summaryMd,
+    content: params.transcript ?? params.summaryMd,
+    source,
+    externalId: scopedExternalId,
+    calendarExternalId: params.calendarExternalId?.trim() || null,
+    meetingUrlHash: normalizedMeetingUrlHash,
+    recordedAt: params.recordedAt,
+    participantEmails: params.participantEmails,
+  }, params.duplicateGuard);
+  if (duplicateDecision?.resolution === "use_existing") {
+    const existing = await getMeeting(params.workspaceId, duplicateDecision.match.entityId);
+    invariant(existing, 404, "NOT_FOUND", "Meeting not found.");
+    return existing;
+  }
+  if (duplicateDecision?.resolution === "update_existing") {
+    return prisma.$transaction((tx) => applyMeetingDuplicateUpdate(tx, actor, params, duplicateDecision.match.entityId, meetingUrl));
+  }
 
   return prisma.$transaction(async (tx) => {
     const meeting = await tx.meeting.create({
@@ -1351,6 +1476,7 @@ export async function createMeeting(actor: AppActor, params: {
           source: meeting.source,
           recordedAt: meeting.recordedAt.toISOString(),
           hasIngestionGuidance: Boolean(meeting.ingestionGuidanceMd),
+          ...duplicateGuardAuditMeta(duplicateDecision),
         },
       },
     });

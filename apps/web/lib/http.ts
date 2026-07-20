@@ -1,6 +1,6 @@
 import type { NextRequest } from "next/server";
 import { NextResponse } from "next/server";
-import { AppError } from "@corgtex/domain";
+import { AppError, duplicateGuardErrorPayload, isDuplicateGuardMatchError } from "@corgtex/domain";
 import { isDatabaseUnavailableError } from "@corgtex/shared";
 import { captureErrorTelemetry } from "@corgtex/shared/telemetry";
 import { z } from "zod";
@@ -111,6 +111,10 @@ function captureRouteError(error: unknown, info: RouteErrorInfo, context: RouteE
 export function handleRouteError(error: unknown, context: RouteErrorTelemetryContext = {}) {
   const info = routeErrorInfo(error);
   captureRouteError(error, info, context);
+
+  if (isDuplicateGuardMatchError(error)) {
+    return NextResponse.json(duplicateGuardErrorPayload(error), { status: info.status });
+  }
 
   if (isDatabaseUnavailableError(error)) {
     console.error("Route failed because the database is unavailable.", error);

@@ -133,6 +133,42 @@ describe("action domain lifecycle", () => {
     }));
   });
 
+  it("stops likely duplicate actions before creating a new row", async () => {
+    prismaMock.action.findMany.mockResolvedValueOnce([
+      {
+        id: "action-existing",
+        workspaceId: "workspace-1",
+        title: "Send Acme proposal",
+        bodyMd: null,
+        assigneeMemberId: "member-2",
+        dueAt: new Date("2026-07-24T09:00:00.000Z"),
+        status: "OPEN",
+        isPrivate: false,
+        archivedAt: null,
+        createdAt: new Date("2026-07-20T10:00:00.000Z"),
+        updatedAt: new Date("2026-07-20T10:05:00.000Z"),
+      },
+    ]);
+
+    const { createAction } = await import("./actions");
+    await expect(createAction(actor, {
+      workspaceId: "workspace-1",
+      title: "Send proposal to Acme",
+      assigneeMemberId: "member-2",
+      dueAt: new Date("2026-07-24T16:00:00.000Z"),
+    })).rejects.toMatchObject({
+      status: 409,
+      code: "DUPLICATE_GUARD_MATCH",
+      candidate: expect.objectContaining({
+        entityId: "action-existing",
+        matchKind: "likely",
+      }),
+    });
+
+    expect(prismaMock.$transaction).not.toHaveBeenCalled();
+    expect(prismaMock.action.create).not.toHaveBeenCalled();
+  });
+
   it("creates an action with a valid assignee member", async () => {
     prismaMock.action.create.mockResolvedValueOnce({
       id: "action-assigned",

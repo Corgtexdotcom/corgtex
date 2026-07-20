@@ -4,6 +4,11 @@ const { captureErrorTelemetry } = vi.hoisted(() => ({
   captureErrorTelemetry: vi.fn(),
 }));
 
+const { duplicateGuardErrorPayload, isDuplicateGuardMatchError } = vi.hoisted(() => ({
+  duplicateGuardErrorPayload: vi.fn(),
+  isDuplicateGuardMatchError: vi.fn(() => false),
+}));
+
 class MockAppError extends Error {
   status: number;
   code: string;
@@ -17,6 +22,8 @@ class MockAppError extends Error {
 
 vi.mock("@corgtex/domain", () => ({
   AppError: MockAppError,
+  duplicateGuardErrorPayload,
+  isDuplicateGuardMatchError,
 }));
 
 vi.mock("@corgtex/shared/telemetry", () => ({
@@ -25,6 +32,7 @@ vi.mock("@corgtex/shared/telemetry", () => ({
 
 afterEach(() => {
   vi.clearAllMocks();
+  isDuplicateGuardMatchError.mockReturnValue(false);
 });
 
 describe("handleRouteError", () => {
@@ -87,6 +95,28 @@ describe("handleRouteError", () => {
       status: 503,
       surface: "route",
       workspaceId: undefined,
+    });
+  });
+
+  it("returns structured duplicate guard confirmations", async () => {
+    const { handleRouteError } = await import("./http");
+    const error = new MockAppError(409, "DUPLICATE_GUARD_MATCH", "Duplicate.");
+    isDuplicateGuardMatchError.mockReturnValueOnce(true);
+    duplicateGuardErrorPayload.mockReturnValueOnce({
+      status: "duplicate_confirmation_required",
+      candidate: { entityId: "action-1" },
+      recommendedResolution: "update_existing",
+      allowedResolutions: ["use_existing", "update_existing", "create_new"],
+    });
+
+    const response = handleRouteError(error);
+
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toEqual({
+      status: "duplicate_confirmation_required",
+      candidate: { entityId: "action-1" },
+      recommendedResolution: "update_existing",
+      allowedResolutions: ["use_existing", "update_existing", "create_new"],
     });
   });
 });

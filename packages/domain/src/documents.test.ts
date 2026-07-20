@@ -5,6 +5,8 @@ const prismaMock = vi.hoisted(() => {
     $transaction: vi.fn(async (cb: any) => cb(mock)),
     document: {
       create: vi.fn(),
+      findFirst: vi.fn(),
+      findMany: vi.fn(),
     },
     brainSource: {
       create: vi.fn(),
@@ -55,6 +57,8 @@ describe("createDocument", () => {
       storageKey: "doc-key",
       mimeType: "text/plain",
     });
+    prismaMock.document.findFirst.mockResolvedValue(null);
+    prismaMock.document.findMany.mockResolvedValue([]);
     prismaMock.brainSource.create.mockResolvedValue({
       id: "source-1",
       sourceType: "DOC",
@@ -138,5 +142,40 @@ describe("createDocument", () => {
     expect(appendEventsMock).toHaveBeenCalledWith(prismaMock, [
       expect.objectContaining({ type: "document.created" }),
     ]);
+  });
+
+  it("uses an existing document when the duplicate guard resolution says to reuse it", async () => {
+    const existingDocument = {
+      id: "document-existing",
+      workspaceId: "workspace-1",
+      title: "Critical path",
+      source: "api",
+      storageKey: "doc-existing-key",
+      mimeType: "text/plain",
+      textContent: "The critical path runs through finance approval.",
+      archivedAt: null,
+      createdAt: new Date("2026-07-20T10:00:00.000Z"),
+      updatedAt: new Date("2026-07-20T10:05:00.000Z"),
+    };
+    prismaMock.document.findMany.mockResolvedValueOnce([existingDocument]);
+    prismaMock.document.findFirst.mockResolvedValueOnce(existingDocument);
+
+    const { createDocument } = await import("./documents");
+    await expect(createDocument({ kind: "user", user: { id: "user-1" } } as any, {
+      workspaceId: "workspace-1",
+      title: "Critical path",
+      source: "api",
+      storageKey: "doc-key",
+      mimeType: "text/plain",
+      textContent: "The critical path runs through finance approval.",
+      duplicateGuard: {
+        resolution: "use_existing",
+        targetEntityId: "document-existing",
+      },
+    })).resolves.toMatchObject({ id: "document-existing" });
+
+    expect(prismaMock.document.create).not.toHaveBeenCalled();
+    expect(prismaMock.brainSource.create).not.toHaveBeenCalled();
+    expect(assertTrialStorageCapacityMock).not.toHaveBeenCalled();
   });
 });

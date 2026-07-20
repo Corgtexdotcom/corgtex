@@ -155,6 +155,8 @@ import {
   getWorkspacePermanentPathForEntity,
   MCP_TOOL_CAPABILITIES,
   requireWorkspaceMembership,
+  duplicateGuardErrorPayload,
+  isDuplicateGuardMatchError,
 } from "@corgtex/domain";
 import type { AgentScope } from "@corgtex/domain";
 import { searchIndexedKnowledge } from "@corgtex/knowledge";
@@ -452,6 +454,26 @@ function structuredJsonResult(value: Record<string, unknown>) {
     content: [{ type: "text" as const, text: JSON.stringify(value, null, 2) }],
     structuredContent: value,
   };
+}
+
+function duplicateGuardOptionsFromParams(params: {
+  duplicateResolution?: "use_existing" | "update_existing" | "create_new";
+  duplicateTargetEntityId?: string;
+}) {
+  return params.duplicateResolution
+    ? { resolution: params.duplicateResolution, targetEntityId: params.duplicateTargetEntityId ?? null }
+    : undefined;
+}
+
+async function withDuplicateGuardMcpResponse(handler: () => Promise<ReturnType<typeof jsonResult>>) {
+  try {
+    return await handler();
+  } catch (error) {
+    if (isDuplicateGuardMatchError(error)) {
+      return structuredJsonResult(duplicateGuardErrorPayload(error));
+    }
+    throw error;
+  }
 }
 
 function agentCredentialSummary(credential: {
@@ -2285,19 +2307,24 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
       source: z.string().optional(),
       textContent: z.string(),
       metadata: z.record(z.string(), z.unknown()).optional(),
+      duplicateResolution: z.enum(["use_existing", "update_existing", "create_new"]).optional(),
+      duplicateTargetEntityId: z.string().optional(),
     },
-    async (params: { title: string; source?: string; textContent: string; metadata?: Record<string, unknown> }) => {
+    async (params: { title: string; source?: string; textContent: string; metadata?: Record<string, unknown>; duplicateResolution?: "use_existing" | "update_existing" | "create_new"; duplicateTargetEntityId?: string }) => {
       requireScope(sessionCtx, "documents:write");
-      const document = await createDocument(actor, {
-        workspaceId,
-        title: params.title,
-        source: params.source ?? "corgtex-support",
-        storageKey: `support-upload/${Date.now()}-${params.title.trim().toLowerCase().replace(/[^a-z0-9._-]+/g, "-")}`,
-        mimeType: "text/plain",
-        textContent: params.textContent,
-        metadata: params.metadata ?? { uploadedBy: "corgtex-support" },
+      return withDuplicateGuardMcpResponse(async () => {
+        const document = await createDocument(actor, {
+          workspaceId,
+          title: params.title,
+          source: params.source ?? "corgtex-support",
+          storageKey: `support-upload/${Date.now()}-${params.title.trim().toLowerCase().replace(/[^a-z0-9._-]+/g, "-")}`,
+          mimeType: "text/plain",
+          textContent: params.textContent,
+          metadata: params.metadata ?? { uploadedBy: "corgtex-support" },
+          duplicateGuard: duplicateGuardOptionsFromParams(params),
+        });
+        return jsonResult({ id: document.id, title: document.title, webUrl: webUrl(workspaceId, `/settings?tab=data-sources`) });
       });
-      return jsonResult({ id: document.id, title: document.title, webUrl: webUrl(workspaceId, `/settings?tab=data-sources`) });
     },
   );
 
@@ -2466,40 +2493,45 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
       ownerMemberId: z.string().nullable().optional().describe("Optional active member ID responsible for the proposal. Omit to default to the author; pass null for no owner."),
       priority: workItemPriorityInputSchema.optional().describe("Urgent, Important, Medium, Low, or integer priority"),
       authorMemberId: z.string().optional().describe("Optional active member ID to attribute as author when an internal/credential agent creates the proposal"),
+      duplicateResolution: z.enum(["use_existing", "update_existing", "create_new"]).optional(),
+      duplicateTargetEntityId: z.string().optional(),
     },
-    async ({ title, bodyMd, summary, ownerMemberId, priority, authorMemberId }: { title: string; bodyMd: string; summary?: string; ownerMemberId?: string | null; priority?: number | string; authorMemberId?: string }) => {
+    async (params: { title: string; bodyMd: string; summary?: string; ownerMemberId?: string | null; priority?: number | string; authorMemberId?: string; duplicateResolution?: "use_existing" | "update_existing" | "create_new"; duplicateTargetEntityId?: string }) => {
       requireScope(sessionCtx, "proposals:write");
-      const proposal = await createProposal(actor, {
-        workspaceId,
-        title,
-        bodyMd,
-        summary,
-        ...(ownerMemberId !== undefined ? { ownerMemberId } : {}),
-        priority: coerceWorkItemPriorityInput(priority),
-        authorMemberId,
-      });
-      const proposalForResponse = await loadProposalWorkItemResponse(workspaceId, proposal.id, proposal);
-      const permanent = await permanentUrl(workspaceId, "Proposal", proposal.id);
-      const item = normalizeProposalWorkItem(proposalForResponse);
-      return jsonResult({
-        id: item.id,
-        title: item.title,
-        status: item.status,
-        priority: item.priority,
-        priorityLabel: item.priorityLabel,
-        ownerMemberId: item.ownerMemberId,
-        ownerMemberName: item.ownerMemberName,
-        owner: item.owner,
-        responsibleMemberId: item.responsibleMemberId,
-        responsibleMemberName: item.responsibleMemberName,
-        responsiblePerson: item.responsiblePerson,
-        adviceRequestCount: item.adviceRequestCount,
-        activeAdviceRequestCount: item.activeAdviceRequestCount,
-        inputRequestCount: item.inputRequestCount,
-        activeInputRequestCount: item.activeInputRequestCount,
-        version: item.version,
-        webUrl: webUrl(workspaceId, `/proposals/${proposal.id}`),
-        permanentUrl: permanent,
+      return withDuplicateGuardMcpResponse(async () => {
+        const proposal = await createProposal(actor, {
+          workspaceId,
+          title: params.title,
+          bodyMd: params.bodyMd,
+          summary: params.summary,
+          ...(params.ownerMemberId !== undefined ? { ownerMemberId: params.ownerMemberId } : {}),
+          priority: coerceWorkItemPriorityInput(params.priority),
+          authorMemberId: params.authorMemberId,
+          duplicateGuard: duplicateGuardOptionsFromParams(params),
+        });
+        const proposalForResponse = await loadProposalWorkItemResponse(workspaceId, proposal.id, proposal);
+        const permanent = await permanentUrl(workspaceId, "Proposal", proposal.id);
+        const item = normalizeProposalWorkItem(proposalForResponse);
+        return jsonResult({
+          id: item.id,
+          title: item.title,
+          status: item.status,
+          priority: item.priority,
+          priorityLabel: item.priorityLabel,
+          ownerMemberId: item.ownerMemberId,
+          ownerMemberName: item.ownerMemberName,
+          owner: item.owner,
+          responsibleMemberId: item.responsibleMemberId,
+          responsibleMemberName: item.responsibleMemberName,
+          responsiblePerson: item.responsiblePerson,
+          adviceRequestCount: item.adviceRequestCount,
+          activeAdviceRequestCount: item.activeAdviceRequestCount,
+          inputRequestCount: item.inputRequestCount,
+          activeInputRequestCount: item.activeInputRequestCount,
+          version: item.version,
+          webUrl: webUrl(workspaceId, `/proposals/${proposal.id}`),
+          permanentUrl: permanent,
+        });
       });
     },
   );
@@ -2716,32 +2748,44 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
       assigneeMemberId: z.string().optional(),
       priority: workItemPriorityInputSchema.optional().describe("Urgent, Important, Medium, Low, or integer priority"),
       authorMemberId: z.string().optional().describe("Optional active member ID to attribute as author when an internal/credential agent creates the action"),
+      duplicateResolution: z.enum(["use_existing", "update_existing", "create_new"]).optional(),
+      duplicateTargetEntityId: z.string().optional(),
     },
-    async ({ title, bodyMd, assigneeMemberId, priority, authorMemberId }: { title: string; bodyMd?: string; assigneeMemberId?: string; priority?: number | string; authorMemberId?: string }) => {
+    async (params: { title: string; bodyMd?: string; assigneeMemberId?: string; priority?: number | string; authorMemberId?: string; duplicateResolution?: "use_existing" | "update_existing" | "create_new"; duplicateTargetEntityId?: string }) => {
       requireScope(sessionCtx, "actions:write");
-      const action = await createAction(actor, { workspaceId, title, bodyMd, assigneeMemberId, priority: coerceWorkItemPriorityInput(priority), authorMemberId });
-      const actionForResponse = await loadActionWorkItemResponse(workspaceId, action.id, action);
-      const permanent = await permanentUrl(workspaceId, "Action", action.id);
-      const item = normalizeActionWorkItem(actionForResponse);
-      return jsonResult({
-        id: item.id,
-        status: item.status,
-        priority: item.priority,
-        priorityLabel: item.priorityLabel,
-        assigneeMemberId: item.assigneeMemberId,
-        assigneeMemberName: item.assigneeMemberName,
-        assignee: item.assignee,
-        responsibleMemberId: item.responsibleMemberId,
-        responsibleMemberName: item.responsibleMemberName,
-        responsiblePerson: item.responsiblePerson,
-        ownerMemberId: item.ownerMemberId,
-        ownerMemberName: item.ownerMemberName,
-        owner: item.owner,
-        inputRequestCount: item.inputRequestCount,
-        activeInputRequestCount: item.activeInputRequestCount,
-        version: item.version,
-        webUrl: webUrl(workspaceId, `/actions/${action.id}`),
-        permanentUrl: permanent,
+      return withDuplicateGuardMcpResponse(async () => {
+        const action = await createAction(actor, {
+          workspaceId,
+          title: params.title,
+          bodyMd: params.bodyMd,
+          assigneeMemberId: params.assigneeMemberId,
+          priority: coerceWorkItemPriorityInput(params.priority),
+          authorMemberId: params.authorMemberId,
+          duplicateGuard: duplicateGuardOptionsFromParams(params),
+        });
+        const actionForResponse = await loadActionWorkItemResponse(workspaceId, action.id, action);
+        const permanent = await permanentUrl(workspaceId, "Action", action.id);
+        const item = normalizeActionWorkItem(actionForResponse);
+        return jsonResult({
+          id: item.id,
+          status: item.status,
+          priority: item.priority,
+          priorityLabel: item.priorityLabel,
+          assigneeMemberId: item.assigneeMemberId,
+          assigneeMemberName: item.assigneeMemberName,
+          assignee: item.assignee,
+          responsibleMemberId: item.responsibleMemberId,
+          responsibleMemberName: item.responsibleMemberName,
+          responsiblePerson: item.responsiblePerson,
+          ownerMemberId: item.ownerMemberId,
+          ownerMemberName: item.ownerMemberName,
+          owner: item.owner,
+          inputRequestCount: item.inputRequestCount,
+          activeInputRequestCount: item.activeInputRequestCount,
+          version: item.version,
+          webUrl: webUrl(workspaceId, `/actions/${action.id}`),
+          permanentUrl: permanent,
+        });
       });
     },
   );
@@ -2916,36 +2960,49 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
       raisedByMemberId: z.string().optional(),
       priority: workItemPriorityInputSchema.optional().describe("Urgent, Important, Medium, Low, or integer priority"),
       authorMemberId: z.string().optional().describe("Optional active member ID to attribute as author when an internal/credential agent creates the tension"),
+      duplicateResolution: z.enum(["use_existing", "update_existing", "create_new"]).optional(),
+      duplicateTargetEntityId: z.string().optional(),
     },
-    async ({ title, bodyMd, assigneeMemberId, raisedByMemberId, priority, authorMemberId }: { title: string; bodyMd?: string; assigneeMemberId?: string; raisedByMemberId?: string; priority?: number | string; authorMemberId?: string }) => {
+    async (params: { title: string; bodyMd?: string; assigneeMemberId?: string; raisedByMemberId?: string; priority?: number | string; authorMemberId?: string; duplicateResolution?: "use_existing" | "update_existing" | "create_new"; duplicateTargetEntityId?: string }) => {
       requireScope(sessionCtx, "tensions:write");
-      const tension = await createTension(actor, { workspaceId, title, bodyMd, assigneeMemberId, raisedByMemberId, priority: coerceWorkItemPriorityInput(priority), authorMemberId });
-      const tensionForResponse = await loadTensionWorkItemResponse(workspaceId, tension.id, tension);
-      const permanent = await permanentUrl(workspaceId, "Tension", tension.id);
-      const item = normalizeTensionWorkItem(tensionForResponse);
-      return jsonResult({
-        id: item.id,
-        status: item.status,
-        priority: item.priority,
-        priorityLabel: item.priorityLabel,
-        assigneeMemberId: item.assigneeMemberId,
-        assigneeMemberName: item.assigneeMemberName,
-        assignee: item.assignee,
-        responsibleMemberId: item.responsibleMemberId,
-        responsibleMemberName: item.responsibleMemberName,
-        responsiblePerson: item.responsiblePerson,
-        raisedByMemberId: item.raisedByMemberId,
-        raisedByMemberName: item.raisedByMemberName,
-        raisedBy: item.raisedBy,
-        ownerMemberId: item.ownerMemberId,
-        ownerMemberName: item.ownerMemberName,
-        owner: item.owner,
-        upvoteCount: item.upvoteCount,
-        inputRequestCount: item.inputRequestCount,
-        activeInputRequestCount: item.activeInputRequestCount,
-        version: item.version,
-        webUrl: webUrl(workspaceId, `/tensions/${tension.id}`),
-        permanentUrl: permanent,
+      return withDuplicateGuardMcpResponse(async () => {
+        const tension = await createTension(actor, {
+          workspaceId,
+          title: params.title,
+          bodyMd: params.bodyMd,
+          assigneeMemberId: params.assigneeMemberId,
+          raisedByMemberId: params.raisedByMemberId,
+          priority: coerceWorkItemPriorityInput(params.priority),
+          authorMemberId: params.authorMemberId,
+          duplicateGuard: duplicateGuardOptionsFromParams(params),
+        });
+        const tensionForResponse = await loadTensionWorkItemResponse(workspaceId, tension.id, tension);
+        const permanent = await permanentUrl(workspaceId, "Tension", tension.id);
+        const item = normalizeTensionWorkItem(tensionForResponse);
+        return jsonResult({
+          id: item.id,
+          status: item.status,
+          priority: item.priority,
+          priorityLabel: item.priorityLabel,
+          assigneeMemberId: item.assigneeMemberId,
+          assigneeMemberName: item.assigneeMemberName,
+          assignee: item.assignee,
+          responsibleMemberId: item.responsibleMemberId,
+          responsibleMemberName: item.responsibleMemberName,
+          responsiblePerson: item.responsiblePerson,
+          raisedByMemberId: item.raisedByMemberId,
+          raisedByMemberName: item.raisedByMemberName,
+          raisedBy: item.raisedBy,
+          ownerMemberId: item.ownerMemberId,
+          ownerMemberName: item.ownerMemberName,
+          owner: item.owner,
+          upvoteCount: item.upvoteCount,
+          inputRequestCount: item.inputRequestCount,
+          activeInputRequestCount: item.activeInputRequestCount,
+          version: item.version,
+          webUrl: webUrl(workspaceId, `/tensions/${tension.id}`),
+          permanentUrl: permanent,
+        });
       });
     },
   );
@@ -3234,6 +3291,8 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
         currentValue: z.number().nullable().optional(),
         unit: z.string().nullable().optional(),
       })).optional(),
+      duplicateResolution: z.enum(["use_existing", "update_existing", "create_new"]).optional(),
+      duplicateTargetEntityId: z.string().optional(),
     },
     async (params: {
       title: string;
@@ -3247,31 +3306,36 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
       circleId?: string;
       ownerMemberId?: string;
       keyResults?: Array<{ title: string; targetValue?: number | null; currentValue?: number | null; unit?: string | null }>;
+      duplicateResolution?: "use_existing" | "update_existing" | "create_new";
+      duplicateTargetEntityId?: string;
     }) => {
       requireScope(sessionCtx, "goals:write");
-      const goal = await createGoal(actor, {
-        workspaceId,
-        title: params.title,
-        descriptionMd: params.descriptionMd,
-        cadence: params.cadence,
-        level: params.level,
-        status: params.status,
-        targetDate: params.targetDate ? new Date(params.targetDate) : undefined,
-        startDate: params.startDate ? new Date(params.startDate) : undefined,
-        parentGoalId: params.parentGoalId,
-        circleId: params.circleId,
-        ownerMemberId: params.ownerMemberId,
-        keyResults: params.keyResults,
-      });
-      return jsonResult({
-        id: goal.id,
-        title: goal.title,
-        status: goal.status,
-        ownerMemberId: goal.ownerMemberId ?? null,
-        ownerMemberName: memberDisplayName(goal.ownerMember),
-        version: goal.version,
-        webUrl: webUrl(workspaceId, `/goals?view=tree&cadence=${goal.cadence}`),
-        permanentUrl: await permanentUrl(workspaceId, "Goal", goal.id),
+      return withDuplicateGuardMcpResponse(async () => {
+        const goal = await createGoal(actor, {
+          workspaceId,
+          title: params.title,
+          descriptionMd: params.descriptionMd,
+          cadence: params.cadence,
+          level: params.level,
+          status: params.status,
+          targetDate: params.targetDate ? new Date(params.targetDate) : undefined,
+          startDate: params.startDate ? new Date(params.startDate) : undefined,
+          parentGoalId: params.parentGoalId,
+          circleId: params.circleId,
+          ownerMemberId: params.ownerMemberId,
+          keyResults: params.keyResults,
+          duplicateGuard: duplicateGuardOptionsFromParams(params),
+        });
+        return jsonResult({
+          id: goal.id,
+          title: goal.title,
+          status: goal.status,
+          ownerMemberId: goal.ownerMemberId ?? null,
+          ownerMemberName: memberDisplayName(goal.ownerMember),
+          version: goal.version,
+          webUrl: webUrl(workspaceId, `/goals?view=tree&cadence=${goal.cadence}`),
+          permanentUrl: await permanentUrl(workspaceId, "Goal", goal.id),
+        });
       });
     },
   );
@@ -3923,6 +3987,8 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
       transcript: z.string().optional().describe("Full transcript Markdown / plain text"),
       summaryMd: z.string().optional().describe("Summary in Markdown — if omitted, the system may generate one"),
       participantIds: z.array(z.string()).optional().describe("Member IDs of attendees"),
+      duplicateResolution: z.enum(["use_existing", "update_existing", "create_new"]).optional(),
+      duplicateTargetEntityId: z.string().optional(),
     },
     async (params: {
       title?: string;
@@ -3931,25 +3997,30 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
       transcript?: string;
       summaryMd?: string;
       participantIds?: string[];
+      duplicateResolution?: "use_existing" | "update_existing" | "create_new";
+      duplicateTargetEntityId?: string;
     }) => {
       requireScope(sessionCtx, "meetings:write");
       if (!params.transcript?.trim()) {
-        const meeting = await createMeeting(actor, {
-          workspaceId,
-          title: params.title ?? null,
-          source: params.source,
-          recordedAt: new Date(params.recordedAt),
-          transcript: null,
-          summaryMd: params.summaryMd ?? null,
-          participantIds: params.participantIds ?? [],
-        });
-        return jsonResult({
-          id: meeting.id,
-          title: meeting.title,
-          status: "meeting_created",
-          recordedAt: meeting.recordedAt,
-          webUrl: webUrl(workspaceId, `/meetings/${meeting.id}`),
-          permanentUrl: await permanentUrl(workspaceId, "Meeting", meeting.id),
+        return withDuplicateGuardMcpResponse(async () => {
+          const meeting = await createMeeting(actor, {
+            workspaceId,
+            title: params.title ?? null,
+            source: params.source,
+            recordedAt: new Date(params.recordedAt),
+            transcript: null,
+            summaryMd: params.summaryMd ?? null,
+            participantIds: params.participantIds ?? [],
+            duplicateGuard: duplicateGuardOptionsFromParams(params),
+          });
+          return jsonResult({
+            id: meeting.id,
+            title: meeting.title,
+            status: "meeting_created",
+            recordedAt: meeting.recordedAt,
+            webUrl: webUrl(workspaceId, `/meetings/${meeting.id}`),
+            permanentUrl: await permanentUrl(workspaceId, "Meeting", meeting.id),
+          });
         });
       }
 

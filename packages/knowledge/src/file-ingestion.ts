@@ -4,7 +4,18 @@ import { prisma } from "@corgtex/shared";
 import type { AppActor } from "@corgtex/shared";
 import { PDFParse } from "pdf-parse";
 import { defaultStorage } from "@corgtex/storage";
-import { appendEvents, requireWorkspaceMembership, AppError, getStorageUsageSummary, isGlobalOperator } from "@corgtex/domain";
+import {
+  appendEvents,
+  checkWorkspaceDuplicateGuard,
+  duplicateGuardAuditMeta,
+  duplicateGuardContentHash,
+  duplicateGuardMergeText,
+  requireWorkspaceMembership,
+  AppError,
+  getStorageUsageSummary,
+  isGlobalOperator,
+  type DuplicateGuardOptions,
+} from "@corgtex/domain";
 import mammoth from "mammoth";
 
 function asRecord(value: Record<string, unknown> | undefined) {
@@ -14,6 +25,11 @@ function asRecord(value: Record<string, unknown> | undefined) {
 function optionalTrimmed(value: string | undefined | null) {
   const trimmed = value?.trim();
   return trimmed ? trimmed : undefined;
+}
+
+function stringFromRecord(record: Record<string, unknown>, key: string) {
+  const value = record[key];
+  return typeof value === "string" && value.trim() ? value.trim() : null;
 }
 
 function formatFileSize(bytes: number) {
@@ -60,6 +76,147 @@ function buildBrainSourceContent(params: {
     `Text extraction: ${extractionStatus}`,
     ...(guidance.length > 0 ? ["", ...guidance] : []),
   ].join("\n");
+}
+
+async function loadDocumentWithSource(workspaceId: string, documentId: string) {
+  const document = await prisma.document.findFirst({
+    where: { id: documentId, workspaceId },
+  });
+  if (!document) {
+    throw new AppError(404, "NOT_FOUND", "Document not found.");
+  }
+
+  const source = await prisma.brainSource.findFirst({
+    where: {
+      workspaceId,
+      sourceType: { in: ["DOC", "FILE_UPLOAD"] },
+      metadata: { path: ["documentId"], equals: document.id },
+    },
+  });
+  return { document, source };
+}
+
+async function updateDuplicateUploadedDocument(actor: AppActor, params: {
+  workspaceId: string;
+  documentId: string;
+  documentTitle: string;
+  source: string;
+  fileName: string;
+  mimeType: string;
+  size: number;
+  textContent: string | null;
+  brainSourceContent: string;
+  ingestionGuidanceMd?: string;
+  metadata: Record<string, unknown>;
+}) {
+  return prisma.$transaction(async (tx) => {
+    const existing = await tx.document.findFirst({
+      where: { id: params.documentId, workspaceId: params.workspaceId, archivedAt: null },
+    });
+    if (!existing) {
+      throw new AppError(404, "NOT_FOUND", "Document not found.");
+    }
+
+    const mergedText = duplicateGuardMergeText(existing.textContent, params.textContent);
+    const mergedSourceContent = mergedText ? [params.documentTitle, mergedText].join("\n\n") : params.brainSourceContent;
+    const contentHash = duplicateGuardContentHash(mergedText ?? params.brainSourceContent);
+    const document = await tx.document.update({
+      where: { id: existing.id },
+      data: {
+        title: existing.title || params.documentTitle,
+        textContent: mergedText,
+        metadata: {
+          ...(typeof existing.metadata === "object" && existing.metadata !== null && !Array.isArray(existing.metadata)
+            ? existing.metadata as Record<string, unknown>
+            : {}),
+          ...params.metadata,
+          fileName: params.fileName,
+          size: params.size,
+          ...(params.ingestionGuidanceMd ? { ingestionGuidanceMd: params.ingestionGuidanceMd } : {}),
+          ...(contentHash ? { contentHash } : {}),
+          duplicateGuardUpdatedAt: new Date().toISOString(),
+        } as Prisma.InputJsonValue,
+      },
+    });
+
+    const existingSource = await tx.brainSource.findFirst({
+      where: {
+        workspaceId: params.workspaceId,
+        sourceType: { in: ["DOC", "FILE_UPLOAD"] },
+        metadata: { path: ["documentId"], equals: document.id },
+      },
+    });
+    const source = existingSource
+      ? await tx.brainSource.update({
+        where: { id: existingSource.id },
+        data: {
+          content: mergedSourceContent,
+          title: existingSource.title || params.documentTitle,
+          channel: existingSource.channel || params.source,
+          ingestionGuidanceMd: params.ingestionGuidanceMd ?? existingSource.ingestionGuidanceMd,
+          metadata: {
+            ...(typeof existingSource.metadata === "object" && existingSource.metadata !== null && !Array.isArray(existingSource.metadata)
+              ? existingSource.metadata as Record<string, unknown>
+              : {}),
+            documentId: document.id,
+            fileName: params.fileName,
+            mimeType: params.mimeType,
+            size: params.size,
+            ...(contentHash ? { contentHash } : {}),
+            duplicateGuardUpdatedAt: new Date().toISOString(),
+          } as Prisma.InputJsonValue,
+        },
+      })
+      : await tx.brainSource.create({
+        data: {
+          workspaceId: params.workspaceId,
+          sourceType: "FILE_UPLOAD",
+          tier: 2,
+          content: mergedSourceContent,
+          title: params.documentTitle,
+          authorMemberId: null,
+          channel: params.source,
+          ingestionGuidanceMd: params.ingestionGuidanceMd ?? null,
+          fileName: params.fileName,
+          fileMimeType: params.mimeType,
+          fileSizeBytes: params.size,
+          metadata: {
+            documentId: document.id,
+            ...(contentHash ? { contentHash } : {}),
+          } as Prisma.InputJsonValue,
+        },
+      });
+
+    await tx.auditLog.create({
+      data: {
+        workspaceId: params.workspaceId,
+        actorUserId: actor.kind === "user" ? actor.user.id : null,
+        action: "document.updated",
+        entityType: "Document",
+        entityId: document.id,
+        meta: { reason: "duplicate_guard_file_update" },
+      },
+    });
+
+    await appendEvents(tx, [
+      {
+        workspaceId: params.workspaceId,
+        type: "document.updated",
+        aggregateType: "Document",
+        aggregateId: document.id,
+        payload: { documentId: document.id, title: document.title, source: document.source },
+      },
+      {
+        workspaceId: params.workspaceId,
+        type: "brain-source.created",
+        aggregateType: "BrainSource",
+        aggregateId: source.id,
+        payload: { sourceId: source.id },
+      },
+    ]);
+
+    return { document, source };
+  });
 }
 
 async function extractPdfText(fileBuffer: Buffer) {
@@ -140,6 +297,7 @@ export async function ingestFile(actor: AppActor, params: {
   documentTitle?: string;
   documentMetadata?: Record<string, unknown>;
   ingestionGuidanceMd?: string;
+  duplicateGuard?: DuplicateGuardOptions | null;
 }) {
   const membership = await requireWorkspaceMembership({
     actor,
@@ -152,6 +310,10 @@ export async function ingestFile(actor: AppActor, params: {
   const documentTitle = params.documentTitle?.trim() || fileName;
   const ingestionGuidanceMd = optionalTrimmed(params.ingestionGuidanceMd);
   const size = params.fileBuffer.byteLength;
+  const documentMetadata = asRecord(params.documentMetadata) ?? {};
+  const sourceUrl = stringFromRecord(documentMetadata, "sourceUrl")
+    ?? stringFromRecord(documentMetadata, "url")
+    ?? stringFromRecord(documentMetadata, "externalUrl");
 
   // 0. Safety check: Prevent exceeding the 10GB free tier
   const usage = await getStorageUsageSummary(actor, params.workspaceId);
@@ -159,11 +321,7 @@ export async function ingestFile(actor: AppActor, params: {
     throw new AppError(403, "STORAGE_LIMIT_EXCEEDED", `Workspace storage exceeds the boundary maximum allowance. File ingestion is frozen.`);
   }
 
-  // 1. Upload to Blob Storage
-  const storageKey = `workspaces/${params.workspaceId}/uploads/${randomUUID()}/${fileName}`;
-  await defaultStorage.put(storageKey, params.fileBuffer, { contentType: params.mimeType });
-
-  // 2. Extract Text
+  // 1. Extract text before writing the blob so duplicate stops do not create orphaned storage.
   const { textContent, supported, truncated } = await extractTextFromFileBuffer({
     fileBuffer: params.fileBuffer,
     fileName,
@@ -178,6 +336,46 @@ export async function ingestFile(actor: AppActor, params: {
     extractionSupported: supported,
     ingestionGuidanceMd,
   });
+  const contentHash = duplicateGuardContentHash(textContent ?? brainSourceContent);
+  const duplicateDecision = await checkWorkspaceDuplicateGuard({
+    workspaceId: params.workspaceId,
+    entityType: "Document",
+    title: documentTitle,
+    body: textContent ?? brainSourceContent,
+    content: textContent ?? brainSourceContent,
+    source,
+    sourceUrl,
+    contentHash,
+  }, params.duplicateGuard);
+  if (duplicateDecision?.resolution === "use_existing") {
+    return loadDocumentWithSource(params.workspaceId, duplicateDecision.match.entityId);
+  }
+  if (duplicateDecision?.resolution === "update_existing") {
+    return updateDuplicateUploadedDocument(actor, {
+      workspaceId: params.workspaceId,
+      documentId: duplicateDecision.match.entityId,
+      documentTitle,
+      source,
+      fileName,
+      mimeType: params.mimeType,
+      size,
+      textContent,
+      brainSourceContent,
+      ingestionGuidanceMd,
+      metadata: {
+        ...documentMetadata,
+        extraction: {
+          supported,
+          hasTextContent: Boolean(textContent?.trim()),
+          truncated,
+        },
+      },
+    });
+  }
+
+  // 2. Upload to Blob Storage
+  const storageKey = `workspaces/${params.workspaceId}/uploads/${randomUUID()}/${fileName}`;
+  await defaultStorage.put(storageKey, params.fileBuffer, { contentType: params.mimeType });
 
   try {
     return await prisma.$transaction(async (tx) => {
@@ -191,9 +389,10 @@ export async function ingestFile(actor: AppActor, params: {
           mimeType: params.mimeType,
           textContent,
           metadata: {
-            ...asRecord(params.documentMetadata),
+            ...documentMetadata,
             fileName,
             size,
+            ...(contentHash ? { contentHash } : {}),
             ...(ingestionGuidanceMd ? { ingestionGuidanceMd } : {}),
             extraction: {
               supported,
@@ -211,7 +410,7 @@ export async function ingestFile(actor: AppActor, params: {
           action: "document.created",
           entityType: "Document",
           entityId: document.id,
-          meta: { source, storageKey },
+          meta: { source, storageKey, ...duplicateGuardAuditMeta(duplicateDecision) },
         },
       });
 
@@ -242,6 +441,7 @@ export async function ingestFile(actor: AppActor, params: {
           fileSizeBytes: size,
           metadata: {
             documentId: document.id,
+            ...(contentHash ? { contentHash } : {}),
             extraction: {
               supported,
               hasTextContent: Boolean(textContent?.trim()),

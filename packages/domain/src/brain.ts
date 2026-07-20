@@ -9,6 +9,12 @@ import { invariant } from "./errors";
 import { persistedMemberId } from "./membership";
 import { requireDraftManager } from "./draft-permissions";
 import { ensureWorkspacePermalink, workspaceEntityCanonicalPath } from "./permalinks";
+import {
+  checkWorkspaceDuplicateGuard,
+  duplicateGuardAuditMeta,
+  duplicateGuardMergeText,
+  type DuplicateGuardOptions,
+} from "./duplicate-guard";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -58,6 +64,7 @@ export async function createArticle(actor: AppActor, params: {
   staleAfterDays?: number;
   sourceIds?: string[];
   isPrivate?: boolean;
+  duplicateGuard?: DuplicateGuardOptions | null;
 }) {
   const membership = await requireWorkspaceMembership({
     actor,
@@ -69,6 +76,40 @@ export async function createArticle(actor: AppActor, params: {
 
   const requestedSlug = slugify(params.slug?.trim() || title);
   invariant(requestedSlug.length > 0, 400, "INVALID_INPUT", "Article slug is required.");
+  const duplicateDecision = await checkWorkspaceDuplicateGuard({
+    workspaceId: params.workspaceId,
+    entityType: "BrainArticle",
+    title,
+    body: params.bodyMd,
+    slug: requestedSlug,
+    articleType: params.type,
+    sourceIds: params.sourceIds,
+    actorUserId: actor.kind === "user" ? actor.user.id : null,
+    membershipId: membership?.id ?? null,
+    includePrivate: actor.kind === "agent" || membership?.role === "ADMIN",
+  }, params.duplicateGuard);
+  if (duplicateDecision?.resolution === "use_existing") {
+    const article = await prisma.brainArticle.findFirst({
+      where: { id: duplicateDecision.match.entityId, workspaceId: params.workspaceId, archivedAt: null },
+    });
+    invariant(article, 404, "NOT_FOUND", "Article not found.");
+    return article;
+  }
+  if (duplicateDecision?.resolution === "update_existing") {
+    const article = await prisma.brainArticle.findFirst({
+      where: { id: duplicateDecision.match.entityId, workspaceId: params.workspaceId, archivedAt: null },
+      select: { slug: true, bodyMd: true, ownerMemberId: true, sourceIds: true },
+    });
+    invariant(article, 404, "NOT_FOUND", "Article not found.");
+    return updateArticle(actor, {
+      workspaceId: params.workspaceId,
+      slug: article.slug,
+      bodyMd: duplicateGuardMergeText(article.bodyMd, params.bodyMd) ?? article.bodyMd,
+      ownerMemberId: article.ownerMemberId || params.ownerMemberId || undefined,
+      sourceIds: Array.from(new Set([...(article.sourceIds ?? []), ...(params.sourceIds ?? [])])),
+      changeSummary: "Merged duplicate upload context.",
+    });
+  }
 
   const isPrivate = params.isPrivate ?? ((params.authority ?? "DRAFT") === "DRAFT");
 
@@ -108,7 +149,7 @@ export async function createArticle(actor: AppActor, params: {
         action: "brain-article.created",
         entityType: "BrainArticle",
         entityId: article.id,
-        meta: { title: article.title, slug: article.slug, type: article.type },
+        meta: { title: article.title, slug: article.slug, type: article.type, ...duplicateGuardAuditMeta(duplicateDecision) },
       },
     });
 
@@ -438,6 +479,7 @@ export async function ingestSource(actor: AppActor, params: {
   authorMemberId?: string | null;
   ingestionGuidanceMd?: string | null;
   metadata?: Prisma.InputJsonValue;
+  duplicateGuard?: DuplicateGuardOptions | null;
 }) {
   await requireWorkspaceMembership({
     actor,
@@ -446,6 +488,70 @@ export async function ingestSource(actor: AppActor, params: {
 
   invariant(params.content.trim().length > 0, 400, "INVALID_INPUT", "Source content is required.");
   invariant(params.tier >= 1 && params.tier <= 3, 400, "INVALID_INPUT", "Tier must be 1, 2, or 3.");
+  const title = params.title?.trim() || null;
+  const content = params.content.trim();
+  const duplicateDecision = await checkWorkspaceDuplicateGuard({
+    workspaceId: params.workspaceId,
+    entityType: "BrainSource",
+    title,
+    body: content,
+    content,
+    sourceType: params.sourceType,
+    source: params.channel,
+    externalId: params.externalId,
+    sourceUrl: typeof (params.metadata as Record<string, unknown> | undefined)?.sourceUrl === "string"
+      ? (params.metadata as Record<string, string>).sourceUrl
+      : null,
+  }, params.duplicateGuard);
+  if (duplicateDecision?.resolution === "use_existing") {
+    const source = await prisma.brainSource.findFirst({
+      where: { id: duplicateDecision.match.entityId, workspaceId: params.workspaceId, archivedAt: null },
+    });
+    invariant(source, 404, "NOT_FOUND", "Source not found.");
+    return source;
+  }
+  if (duplicateDecision?.resolution === "update_existing") {
+    return prisma.$transaction(async (tx) => {
+      const existing = await tx.brainSource.findFirst({
+        where: { id: duplicateDecision.match.entityId, workspaceId: params.workspaceId, archivedAt: null },
+      });
+      invariant(existing, 404, "NOT_FOUND", "Source not found.");
+      const mergedContent = duplicateGuardMergeText(existing.content, content) ?? existing.content;
+      const source = await tx.brainSource.update({
+        where: { id: existing.id },
+        data: {
+          content: mergedContent,
+          title: existing.title || title,
+          ingestionGuidanceMd: duplicateGuardMergeText(existing.ingestionGuidanceMd, params.ingestionGuidanceMd),
+          metadata: {
+            ...(typeof existing.metadata === "object" && existing.metadata !== null && !Array.isArray(existing.metadata) ? existing.metadata : {}),
+            ...(typeof params.metadata === "object" && params.metadata !== null && !Array.isArray(params.metadata) ? params.metadata : {}),
+            duplicateGuardUpdatedAt: new Date().toISOString(),
+          } as Prisma.InputJsonValue,
+        },
+      });
+      await tx.auditLog.create({
+        data: {
+          workspaceId: params.workspaceId,
+          actorUserId: actor.kind === "user" ? actor.user.id : null,
+          action: "brain-source.updated",
+          entityType: "BrainSource",
+          entityId: source.id,
+          meta: { reason: "duplicate_guard_update" },
+        },
+      });
+      await appendEvents(tx, [
+        {
+          workspaceId: params.workspaceId,
+          type: "brain-source.created",
+          aggregateType: "BrainSource",
+          aggregateId: source.id,
+          payload: { sourceId: source.id },
+        },
+      ]);
+      return source;
+    });
+  }
 
   return prisma.$transaction(async (tx) => {
     const source = await tx.brainSource.create({
@@ -453,8 +559,8 @@ export async function ingestSource(actor: AppActor, params: {
         workspaceId: params.workspaceId,
         sourceType: params.sourceType,
         tier: params.tier,
-        content: params.content.trim(),
-        title: params.title?.trim() || null,
+        content,
+        title,
         externalId: params.externalId || null,
         channel: params.channel?.trim() || null,
         authorMemberId: params.authorMemberId || null,
@@ -470,7 +576,7 @@ export async function ingestSource(actor: AppActor, params: {
         action: "brain-source.created",
         entityType: "BrainSource",
         entityId: source.id,
-        meta: { sourceType: source.sourceType, tier: source.tier, hasIngestionGuidance: Boolean(source.ingestionGuidanceMd) },
+        meta: { sourceType: source.sourceType, tier: source.tier, hasIngestionGuidance: Boolean(source.ingestionGuidanceMd), ...duplicateGuardAuditMeta(duplicateDecision) },
       },
     });
 

@@ -9,6 +9,23 @@ const IGNORED_FILE_NAMES = new Set([".ds_store"]);
 
 type UploadStatus = "ready" | "uploading" | "done" | "error";
 
+type DuplicateUploadResolution = "use_existing" | "update_existing" | "create_new";
+
+type DuplicateUploadConfirmation = {
+  status: "duplicate_confirmation_required";
+  candidate: {
+    entityType: string;
+    entityId: string;
+    title: string | null;
+    excerpt: string | null;
+    score: number;
+    matchKind: "exact" | "likely";
+    reasons: string[];
+  };
+  recommendedResolution: DuplicateUploadResolution;
+  allowedResolutions: DuplicateUploadResolution[];
+};
+
 type UploadItem = {
   id: string;
   file: File;
@@ -18,6 +35,7 @@ type UploadItem = {
   guidance: string;
   status: UploadStatus;
   error?: string;
+  duplicate?: DuplicateUploadConfirmation;
 };
 
 function uploadId() {
@@ -54,6 +72,15 @@ function errorMessage(value: unknown, fallback: string) {
     }
   }
   return fallback;
+}
+
+function duplicateConfirmation(value: unknown): DuplicateUploadConfirmation | null {
+  if (!value || typeof value !== "object") return null;
+  const payload = value as Partial<DuplicateUploadConfirmation>;
+  if (payload.status !== "duplicate_confirmation_required") return null;
+  if (!payload.candidate || typeof payload.candidate.entityId !== "string") return null;
+  if (!Array.isArray(payload.allowedResolutions)) return null;
+  return payload as DuplicateUploadConfirmation;
 }
 
 function fileRelativePath(file: File) {
@@ -153,10 +180,12 @@ export function KnowledgeFileUploader({
     setUploadItems((current) => current.filter((item) => item.id !== id));
   }
 
-  async function uploadItems() {
+  async function uploadItems(overrides: Record<string, { resolution: DuplicateUploadResolution; targetEntityId: string }> = {}) {
     if (isUploadingRef.current) return;
 
-    const uploadableIds = itemsRef.current.filter((item) => item.status !== "done").map((item) => item.id);
+    const uploadableIds = itemsRef.current
+      .filter((item) => item.status !== "done" && (!item.duplicate || overrides[item.id]))
+      .map((item) => item.id);
     if (uploadableIds.length === 0) return;
 
     isUploadingRef.current = true;
@@ -177,11 +206,16 @@ export function KnowledgeFileUploader({
           continue;
         }
 
-        updateItem(item.id, { status: "uploading", error: undefined });
+        updateItem(item.id, { status: "uploading", error: undefined, duplicate: undefined });
         const formData = new FormData();
         formData.set("file", item.file);
         formData.set("source", defaultSource);
         formData.set("title", item.title.trim() || item.displayName);
+        const duplicateOverride = overrides[item.id];
+        if (duplicateOverride) {
+          formData.set("duplicateResolution", duplicateOverride.resolution);
+          formData.set("duplicateTargetEntityId", duplicateOverride.targetEntityId);
+        }
         if (item.relativePath) {
           formData.set("metadata", JSON.stringify({ relativePath: item.relativePath }));
         }
@@ -203,6 +237,15 @@ export function KnowledgeFileUploader({
           }
 
           const data = await response.json().catch(() => null);
+          const duplicate = duplicateConfirmation(data);
+          if (duplicate) {
+            updateItem(item.id, {
+              status: "error",
+              error: "Possible duplicate",
+              duplicate,
+            });
+            continue;
+          }
           updateItem(item.id, {
             status: "error",
             error: errorMessage(data, t("uploadFilesErrorGeneric")),
@@ -224,7 +267,15 @@ export function KnowledgeFileUploader({
     }
   }
 
+  function resolveDuplicateItem(itemId: string, resolution: DuplicateUploadResolution) {
+    const item = itemsRef.current.find((current) => current.id === itemId);
+    const targetEntityId = item?.duplicate?.candidate.entityId;
+    if (!targetEntityId) return;
+    void uploadItems({ [itemId]: { resolution, targetEntityId } });
+  }
+
   const hasPendingUploads = items.some((item) => item.status !== "done");
+  const hasUploadablePendingUploads = items.some((item) => item.status !== "done" && !item.duplicate);
   const doneCount = items.filter((item) => item.status === "done").length;
   const hasCompletedUploads = doneCount > 0 && !hasPendingUploads && !isUploading;
 
@@ -342,6 +393,37 @@ export function KnowledgeFileUploader({
                       {t("uploadFilesRemove")}
                     </button>
                   </div>
+                  {item.duplicate && (
+                    <section className="panel stack" style={{ borderColor: "var(--color-warning-border, #d97706)" }}>
+                      <div>
+                        <strong>Possible duplicate</strong>
+                        <p style={{ margin: "6px 0 0", color: "var(--muted)" }}>
+                          {(item.duplicate.candidate.title || item.duplicate.candidate.entityType)} matches an active {item.duplicate.candidate.entityType} with score {Math.round(item.duplicate.candidate.score * 100)}%.
+                        </p>
+                      </div>
+                      {item.duplicate.candidate.excerpt && <p style={{ margin: 0 }}>{item.duplicate.candidate.excerpt}</p>}
+                      {item.duplicate.candidate.reasons.length > 0 && (
+                        <p style={{ margin: 0, color: "var(--muted)" }}>{item.duplicate.candidate.reasons.join(", ")}</p>
+                      )}
+                      <div className="actions-inline">
+                        {item.duplicate.allowedResolutions.map((resolution) => (
+                          <button
+                            key={resolution}
+                            type="button"
+                            className="secondary small"
+                            disabled={isUploading}
+                            onClick={() => resolveDuplicateItem(item.id, resolution)}
+                          >
+                            {resolution === "use_existing"
+                              ? "Use existing"
+                              : resolution === "update_existing"
+                                ? "Update existing"
+                                : "Create new"}
+                          </button>
+                        ))}
+                      </div>
+                    </section>
+                  )}
                   <div className="stack nr-upload-item-fields">
                     <label>
                       {t("uploadFilesFileTitle")}
@@ -370,7 +452,7 @@ export function KnowledgeFileUploader({
           )}
 
           <div className="actions-inline">
-            <button type="button" disabled={!hasPendingUploads || isUploading} onClick={uploadItems}>
+            <button type="button" disabled={!hasUploadablePendingUploads || isUploading} onClick={() => uploadItems()}>
               {isUploading ? t("uploadFilesSubmitting") : t("uploadFilesSubmit")}
             </button>
             {hasCompletedUploads && onDone && (

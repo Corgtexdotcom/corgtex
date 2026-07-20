@@ -13,6 +13,12 @@ import { humanMemberIdentityWhere } from "./member-identity";
 import { createWorkItemEvidenceLinks } from "./work-item-evidence";
 import { ensureWorkspacePermalink, workspaceEntityCanonicalPath } from "./permalinks";
 import {
+  checkWorkspaceDuplicateGuard,
+  duplicateGuardAuditMeta,
+  duplicateGuardMergeText,
+  type DuplicateGuardOptions,
+} from "./duplicate-guard";
+import {
   changedDataFields,
   pickJsonSnapshot,
   recordWorkItemVersion,
@@ -40,6 +46,7 @@ type CreateProposalParams = {
   meetingId?: string | null;
   sourceTensionId?: string | null;
   relatedActionIds?: string[] | null;
+  duplicateGuard?: DuplicateGuardOptions | null;
 };
 
 type CreateProposalFromTensionParams = Omit<CreateProposalParams, "title" | "bodyMd" | "sourceTensionId"> & {
@@ -475,6 +482,20 @@ export async function getProposal(actor: AppActor, params: {
   return proposal;
 }
 
+async function applyProposalDuplicateUpdate(actor: AppActor, params: CreateProposalParams, proposalId: string) {
+  const existing = await getProposal(actor, { workspaceId: params.workspaceId, proposalId });
+  const mergedBody = duplicateGuardMergeText(existing.bodyMd, params.bodyMd);
+  const updateParams: Parameters<typeof updateProposal>[1] = {
+    workspaceId: params.workspaceId,
+    proposalId,
+  };
+  if (mergedBody && mergedBody !== existing.bodyMd) updateParams.bodyMd = mergedBody;
+  if (!existing.summary && params.summary) updateParams.summary = params.summary;
+  if (!existing.circleId && params.circleId) updateParams.circleId = params.circleId;
+  if (!existing.ownerMemberId && params.ownerMemberId) updateParams.ownerMemberId = params.ownerMemberId;
+  return Object.keys(updateParams).length > 2 ? updateProposal(actor, updateParams) : existing;
+}
+
 export async function createProposal(actor: AppActor, params: CreateProposalParams) {
   const membership = await requireWorkspaceMembership({
     actor,
@@ -485,6 +506,25 @@ export async function createProposal(actor: AppActor, params: CreateProposalPara
   const bodyMd = params.bodyMd.trim();
   invariant(title.length > 0, 400, "INVALID_INPUT", "Proposal title is required.");
   invariant(bodyMd.length > 0, 400, "INVALID_INPUT", "Proposal body is required.");
+  const duplicateDecision = await checkWorkspaceDuplicateGuard({
+    workspaceId: params.workspaceId,
+    entityType: "Proposal",
+    title,
+    body: bodyMd,
+    circleId: params.circleId,
+    ownerMemberId: params.ownerMemberId,
+    meetingId: params.meetingId,
+    sourceIds: params.relatedActionIds,
+    actorUserId: actor.kind === "user" ? actor.user.id : null,
+    membershipId: membership?.id ?? null,
+    includePrivate: actor.kind === "agent" || membership?.role === "ADMIN",
+  }, params.duplicateGuard);
+  if (duplicateDecision?.resolution === "use_existing") {
+    return getProposal(actor, { workspaceId: params.workspaceId, proposalId: duplicateDecision.match.entityId });
+  }
+  if (duplicateDecision?.resolution === "update_existing") {
+    return applyProposalDuplicateUpdate(actor, params, duplicateDecision.match.entityId);
+  }
   const summary = params.includeAiSummary === true
     ? await generateProposalSummary({ workspaceId: params.workspaceId, title, bodyMd })
     : params.summary?.trim() || null;
@@ -560,6 +600,7 @@ export async function createProposal(actor: AppActor, params: CreateProposalPara
           title: proposal.title,
           sourceTensionId: sourceTension?.id ?? null,
           relatedActionIds,
+          ...duplicateGuardAuditMeta(duplicateDecision),
         },
       },
     });

@@ -3,6 +3,7 @@ import { defaultModelGateway } from "@corgtex/models";
 import { prisma } from "@corgtex/shared";
 import type { AppActor } from "@corgtex/shared";
 import { createMeeting, uploadMeetingTranscript } from "./meetings";
+import type { DuplicateGuardOptions } from "./duplicate-guard";
 
 type IntakeStatus = "meeting_created" | "meeting_matched" | "needs_clarification";
 
@@ -224,6 +225,7 @@ export async function intakeMeetingTranscript(actor: AppActor, params: {
   ingestionGuidanceMd?: string | null;
   participantIds?: string[] | null;
   participantEmails?: string[] | null;
+  duplicateGuard?: DuplicateGuardOptions | null;
   now?: Date;
 }): Promise<MeetingTranscriptIntakeResult> {
   const transcript = params.transcript.trim();
@@ -274,6 +276,7 @@ export async function intakeMeetingTranscript(actor: AppActor, params: {
       participantIds: params.participantIds ?? [],
       participantEmails: inferred.participantEmails,
       sourceRecordId: params.sourceRecordId ?? null,
+      duplicateGuard: params.duplicateGuard,
     });
     return {
       status: "meeting_created",

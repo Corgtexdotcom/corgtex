@@ -100,6 +100,13 @@ vi.mock("@corgtex/domain", async () => {
       this.code = code;
     }
   },
+  duplicateGuardErrorPayload: (error: any) => ({
+    status: "duplicate_confirmation_required",
+    candidate: error.candidate,
+    recommendedResolution: error.recommendedResolution,
+    allowedResolutions: error.allowedResolutions,
+  }),
+  isDuplicateGuardMatchError: (error: any) => error?.code === "DUPLICATE_GUARD_MATCH",
   CONTROL_PLANE_WORKSPACE_FEATURE_FLAGS: [
     { flag: "GOALS", label: "Goals", description: "Goals", defaultEnabled: true },
     { flag: "FINANCE", label: "Finance", description: "Finance", defaultEnabled: false },
@@ -2269,6 +2276,84 @@ describe("createCorgtexMcpServer", () => {
       ownerMemberName: "Owner",
       owner: "Owner",
     });
+  });
+
+  it("returns structured duplicate confirmation for MCP create_action and accepts each resolution", async () => {
+    const { createCorgtexMcpServer } = await import("./server");
+    const { prisma } = await import("@corgtex/shared");
+    const duplicateError = {
+      status: 409,
+      code: "DUPLICATE_GUARD_MATCH",
+      candidate: {
+        entityType: "Action",
+        entityId: "action-existing",
+        title: "Send Acme proposal",
+        excerpt: null,
+        score: 0.91,
+        matchKind: "likely",
+        reasons: ["similar title", "same assignee"],
+        createdAt: "2026-07-20T10:00:00.000Z",
+        updatedAt: "2026-07-20T10:05:00.000Z",
+      },
+      recommendedResolution: "update_existing",
+      allowedResolutions: ["use_existing", "update_existing", "create_new"],
+    };
+    createActionMock
+      .mockRejectedValueOnce(duplicateError)
+      .mockResolvedValue({
+        id: "action-existing",
+        title: "Send Acme proposal",
+        status: "OPEN",
+        version: 2,
+        priority: 2,
+        assigneeMemberId: "member-assignee",
+      });
+    vi.mocked(prisma.action.findFirst).mockResolvedValue({
+      id: "action-existing",
+      title: "Send Acme proposal",
+      status: "OPEN",
+      version: 2,
+      priority: 2,
+      assigneeMemberId: "member-assignee",
+      assigneeMember: { id: "member-assignee", user: { displayName: "Assignee", email: "assignee@example.test" } },
+    } as never);
+
+    const server = createCorgtexMcpServer({
+      actor: { kind: "agent", authProvider: "bootstrap" } as any,
+      workspaceId: "ws-1",
+      authKind: "agent",
+    });
+
+    const confirmationResponse = await (server as any)._registeredTools.create_action.handler({
+      title: "Send proposal to Acme",
+      assigneeMemberId: "member-assignee",
+    });
+
+    expect(JSON.parse(confirmationResponse.content[0].text)).toMatchObject({
+      status: "duplicate_confirmation_required",
+      candidate: expect.objectContaining({ entityId: "action-existing" }),
+      recommendedResolution: "update_existing",
+      allowedResolutions: ["use_existing", "update_existing", "create_new"],
+    });
+
+    for (const resolution of ["use_existing", "update_existing", "create_new"] as const) {
+      await (server as any)._registeredTools.create_action.handler({
+        title: "Send proposal to Acme",
+        assigneeMemberId: "member-assignee",
+        duplicateResolution: resolution,
+        duplicateTargetEntityId: "action-existing",
+      });
+    }
+
+    expect(createActionMock).toHaveBeenNthCalledWith(2, expect.objectContaining({ kind: "agent" }), expect.objectContaining({
+      duplicateGuard: { resolution: "use_existing", targetEntityId: "action-existing" },
+    }));
+    expect(createActionMock).toHaveBeenNthCalledWith(3, expect.objectContaining({ kind: "agent" }), expect.objectContaining({
+      duplicateGuard: { resolution: "update_existing", targetEntityId: "action-existing" },
+    }));
+    expect(createActionMock).toHaveBeenNthCalledWith(4, expect.objectContaining({ kind: "agent" }), expect.objectContaining({
+      duplicateGuard: { resolution: "create_new", targetEntityId: "action-existing" },
+    }));
   });
 
   it("omits ownerMemberId from MCP create_proposal input so the domain default applies", async () => {

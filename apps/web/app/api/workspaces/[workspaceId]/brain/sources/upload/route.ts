@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { AppError } from "@corgtex/domain";
+import type { DuplicateGuardOptions, DuplicateGuardResolution } from "@corgtex/domain";
 import { ingestFile } from "@corgtex/knowledge";
 import { resolveRequestActor } from "@/lib/auth";
 import { checkApiDemoGuard } from "@/lib/demo-guard";
@@ -8,6 +9,24 @@ import { handleRouteError } from "@/lib/http";
 function formString(formData: FormData, key: string) {
   const value = formData.get(key);
   return typeof value === "string" ? value.replace(/\r\n/g, "\n").trim() : "";
+}
+
+const DUPLICATE_GUARD_RESOLUTIONS: DuplicateGuardResolution[] = [
+  "use_existing",
+  "update_existing",
+  "create_new",
+];
+
+function duplicateGuardFromFormData(formData: FormData): DuplicateGuardOptions | undefined {
+  const resolution = formString(formData, "duplicateResolution");
+  if (!DUPLICATE_GUARD_RESOLUTIONS.includes(resolution as DuplicateGuardResolution)) {
+    return undefined;
+  }
+  const targetEntityId = formString(formData, "duplicateTargetEntityId");
+  return {
+    resolution: resolution as DuplicateGuardResolution,
+    targetEntityId: targetEntityId || null,
+  };
 }
 
 export async function POST(request: NextRequest, { params }: { params: Promise<{ workspaceId: string }> }) {
@@ -42,6 +61,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
       uploadSource: "brain-ui",
       documentTitle: title || originalName,
       ingestionGuidanceMd: ingestionGuidanceMd || undefined,
+      duplicateGuard: duplicateGuardFromFormData(formData),
     });
 
     return NextResponse.redirect(new URL(`/workspaces/${workspaceId}/brain/sources`, request.url), 303);

@@ -15,6 +15,7 @@ import {
   returnArticleToDraft,
 } from "@corgtex/domain";
 import { requirePageActor } from "@/lib/auth";
+import { duplicateGuardFromFormData } from "../action-utils";
 
 function asString(formData: FormData, key: string) {
   return String(formData.get(key) ?? "");
@@ -87,6 +88,7 @@ export async function createArticleAction(formData: FormData) {
     frontmatterJson: workingAgreementFrontmatter(formData),
     ownerMemberId: isWorkingAgreement ? persistedOwnerMemberId(membership) : undefined,
     isPrivate,
+    duplicateGuard: duplicateGuardFromFormData(formData),
   });
   refresh(workspaceId);
 }
@@ -149,6 +151,7 @@ export async function ingestSourceAction(formData: FormData) {
     content: asString(formData, "content"),
     title: asOptional(formData, "title"),
     channel: asOptional(formData, "channel"),
+    duplicateGuard: duplicateGuardFromFormData(formData),
   });
   refresh(workspaceId);
 }

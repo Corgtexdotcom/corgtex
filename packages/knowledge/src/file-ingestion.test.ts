@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { ingestFile } from "./file-ingestion";
 import { prisma } from "@corgtex/shared";
-import { isGlobalOperator, requireWorkspaceMembership } from "@corgtex/domain";
+import { checkWorkspaceDuplicateGuard, isGlobalOperator, requireWorkspaceMembership } from "@corgtex/domain";
 
 vi.mock("@corgtex/shared", () => ({
   prisma: {
@@ -11,12 +11,22 @@ vi.mock("@corgtex/shared", () => ({
       auditLog: { create: vi.fn() },
       eventRecord: { createMany: vi.fn() },
     })),
+    document: {
+      findFirst: vi.fn(),
+    },
+    brainSource: {
+      findFirst: vi.fn(),
+    },
   },
   logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
 }));
 
 vi.mock("@corgtex/domain", () => ({
   appendEvents: vi.fn(),
+  checkWorkspaceDuplicateGuard: vi.fn().mockResolvedValue(null),
+  duplicateGuardAuditMeta: vi.fn(() => ({})),
+  duplicateGuardContentHash: vi.fn((value?: string | null) => value?.trim() ? `hash:${value.trim()}` : null),
+  duplicateGuardMergeText: vi.fn((existing?: string | null, incoming?: string | null) => incoming?.trim() || existing || null),
   requireWorkspaceMembership: vi.fn().mockResolvedValue({ id: "mem1" }),
   isGlobalOperator: vi.fn().mockReturnValue(false),
   getStorageUsageSummary: vi.fn().mockResolvedValue({ usageBytes: 0, limitBytes: Infinity }),
@@ -40,6 +50,9 @@ describe("file-ingestion", () => {
     vi.clearAllMocks();
     vi.mocked(requireWorkspaceMembership).mockResolvedValue({ id: "mem1" } as any);
     vi.mocked(isGlobalOperator).mockReturnValue(false);
+    vi.mocked(checkWorkspaceDuplicateGuard).mockResolvedValue(null);
+    vi.mocked((prisma as any).document.findFirst).mockResolvedValue(null);
+    vi.mocked((prisma as any).brainSource.findFirst).mockResolvedValue(null);
   });
 
   const actor = { kind: "user" as const, user: { id: "usr1", email: "test@example.com", displayName: "Test User" } };
@@ -242,5 +255,50 @@ describe("file-ingestion", () => {
         }),
       }),
     );
+  });
+
+  it("returns an existing document for duplicate file uploads without storing a new blob", async () => {
+    const { defaultStorage } = await import("@corgtex/storage");
+    vi.mocked(checkWorkspaceDuplicateGuard).mockResolvedValueOnce({
+      resolution: "use_existing",
+      match: {
+        entityType: "Document",
+        entityId: "doc-existing",
+        title: "Existing Upload",
+        excerpt: "Hello text",
+        score: 1,
+        matchKind: "exact",
+        reasons: ["contentHash"],
+        createdAt: null,
+        updatedAt: null,
+        archivedAt: null,
+      },
+    });
+    vi.mocked((prisma as any).document.findFirst).mockResolvedValueOnce({
+      id: "doc-existing",
+      title: "Existing Upload",
+      textContent: "Hello text",
+    });
+    vi.mocked((prisma as any).brainSource.findFirst).mockResolvedValueOnce({
+      id: "source-existing",
+      title: "Existing Upload",
+    });
+
+    const res = await ingestFile(actor, {
+      workspaceId: "ws_1",
+      fileName: "test.txt",
+      mimeType: "text/plain",
+      fileBuffer: Buffer.from("Hello text"),
+      uploadSource: "FILE_UPLOAD",
+      duplicateGuard: {
+        resolution: "use_existing",
+        targetEntityId: "doc-existing",
+      },
+    });
+
+    expect(res.document.id).toBe("doc-existing");
+    expect(res.source?.id).toBe("source-existing");
+    expect(defaultStorage.put).not.toHaveBeenCalled();
+    expect(prisma.$transaction).not.toHaveBeenCalled();
   });
 });

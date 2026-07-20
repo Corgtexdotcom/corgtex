@@ -1,6 +1,7 @@
 import type { Prisma } from "@prisma/client";
 import { NextRequest, NextResponse } from "next/server";
 import { AppError, createDocument, listDocuments, requireWorkspaceMembership } from "@corgtex/domain";
+import type { DuplicateGuardOptions, DuplicateGuardResolution } from "@corgtex/domain";
 import type { ArchiveFilter } from "@corgtex/domain";
 import { ingestFile } from "@corgtex/knowledge";
 import { resolveRequestActor } from "@/lib/auth";
@@ -39,6 +40,22 @@ function formString(formData: FormData, key: string) {
   return typeof value === "string" ? value.replace(/\r\n/g, "\n").trim() : "";
 }
 
+const DUPLICATE_GUARD_RESOLUTIONS: DuplicateGuardResolution[] = [
+  "use_existing",
+  "update_existing",
+  "create_new",
+];
+
+function duplicateGuardFromValues(resolution: unknown, targetEntityId: unknown): DuplicateGuardOptions | undefined {
+  if (typeof resolution !== "string" || !DUPLICATE_GUARD_RESOLUTIONS.includes(resolution as DuplicateGuardResolution)) {
+    return undefined;
+  }
+  return {
+    resolution: resolution as DuplicateGuardResolution,
+    targetEntityId: typeof targetEntityId === "string" && targetEntityId.trim() ? targetEntityId.trim() : null,
+  };
+}
+
 export async function GET(request: NextRequest, { params }: { params: Promise<{ workspaceId: string }> }) {
   try {
     const { workspaceId } = await params;
@@ -74,6 +91,10 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
       const providedSource = formString(formData, "source");
       const ingestionGuidanceMd = formString(formData, "ingestionGuidanceMd");
       const parsedMetadata = parseDocumentMetadata(formData.get("metadata"));
+      const duplicateGuard = duplicateGuardFromValues(
+        formData.get("duplicateResolution"),
+        formData.get("duplicateTargetEntityId"),
+      );
 
       const buffer = Buffer.from(await file.arrayBuffer());
 
@@ -89,6 +110,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
           parsedMetadata && typeof parsedMetadata === "object" && !Array.isArray(parsedMetadata)
             ? (parsedMetadata as Record<string, unknown>)
             : undefined,
+        duplicateGuard,
       });
 
       return NextResponse.json(result.document, { status: 201 });
@@ -101,6 +123,8 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
       mimeType?: unknown;
       textContent?: unknown;
       metadata?: unknown;
+      duplicateResolution?: unknown;
+      duplicateTargetEntityId?: unknown;
     };
 
     const document = await createDocument(actor, {
@@ -114,6 +138,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
         body.metadata && typeof body.metadata === "object" && !Array.isArray(body.metadata)
           ? (body.metadata as Prisma.InputJsonValue)
           : undefined,
+      duplicateGuard: duplicateGuardFromValues(body.duplicateResolution, body.duplicateTargetEntityId),
     });
 
     return NextResponse.json(document, { status: 201 });

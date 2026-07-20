@@ -2,7 +2,7 @@
 
 import { enforceDemoGuard } from "@/lib/demo-guard";
 import { requirePageActor } from "@/lib/auth";
-import { asString, asOptional, asOptionalInt, refresh } from "../action-utils";
+import { asString, asOptional, asOptionalInt, duplicateGuardFromFormData, refresh } from "../action-utils";
 import {
   archiveProposal,
   createProposal,
@@ -54,6 +54,7 @@ export async function createProposalAction(formData: FormData) {
     isPrivate: formData.get("isPrivate") === "on",
     sourceTensionId: asOptional(formData, "sourceTensionId"),
     relatedActionIds: asStringArray(formData, "relatedActionIds"),
+    duplicateGuard: duplicateGuardFromFormData(formData),
   });
   refresh(workspaceId);
 }

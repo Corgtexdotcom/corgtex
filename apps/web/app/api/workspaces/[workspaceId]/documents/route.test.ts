@@ -124,6 +124,7 @@ describe("POST /api/workspaces/[workspaceId]/documents", () => {
         mimeType: "text/markdown",
         textContent: "# hello",
         metadata: undefined,
+        duplicateGuard: undefined,
       },
     );
     expect(handleRouteError).not.toHaveBeenCalled();
