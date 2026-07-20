@@ -549,9 +549,14 @@ export async function archiveMeetingAction(formData: FormData) {
 
   const actor = await requirePageActor();
   const workspaceId = asString(formData, "workspaceId");
+  const reason = asOptional(formData, "archiveReason");
+  if (!reason) {
+    throw new Error("Archive reason is required.");
+  }
   await deleteMeeting(actor, {
     workspaceId,
     meetingId: asString(formData, "meetingId"),
+    reason,
   });
   refresh(workspaceId);
 }
