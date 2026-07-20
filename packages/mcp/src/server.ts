@@ -55,11 +55,16 @@ import {
   getMeeting,
   createMeeting,
   ensureUpcomingScheduledMeetingRecorderCoverage,
+  enqueueRecorderCalendarSync,
+  getRecorderCalendarSource,
   getMeetingRecorderCoverageReadiness,
   getMeetingRecorderEnterpriseReadiness,
   intakeMeetingTranscript,
+  runMeetingRecorderSmoke,
+  scanRecorderCalendarSource,
   setMeetingRecorderAutoRecordingForSupport,
   setMeetingSeriesRecorderUrl,
+  upsertRecorderCalendarSource,
   deleteMeeting,
   createArticle,
   updateArticle,
@@ -290,6 +295,51 @@ function compactMeetingRecorderOperationsReadiness(recorder: any, coverage: any)
       meetings: coverage.meetings,
     },
   };
+}
+
+function compactRecorderCalendarSource(source: any) {
+  if (!source) return null;
+  return {
+    id: source.id,
+    workspaceId: source.workspaceId,
+    provider: source.provider,
+    providerAccountEmail: source.providerAccountEmail ?? null,
+    displayName: source.displayName ?? null,
+    status: source.status,
+    scopes: Array.isArray(source.scopes) ? source.scopes : [],
+    lastSyncAt: source.lastSyncAt ?? null,
+    lastSyncError: source.lastSyncError ?? null,
+    lastDryRunAt: source.lastDryRunAt ?? null,
+    lastUpcomingEventCount: source.lastUpcomingEventCount ?? null,
+    lastSchedulableEventCount: source.lastSchedulableEventCount ?? null,
+  };
+}
+
+function compactMeetingRecorderSmokeRun(smokeRun: any) {
+  return {
+    id: smokeRun.id,
+    workspaceId: smokeRun.workspaceId,
+    deploymentId: smokeRun.deploymentId ?? null,
+    provider: smokeRun.provider,
+    status: smokeRun.status,
+    joinAt: smokeRun.joinAt,
+    liveVendorCall: Boolean(smokeRun.liveVendorCall),
+    hasMeeting: Boolean(smokeRun.meetingId),
+    hasRecording: Boolean(smokeRun.recordingId),
+    failureMessage: smokeRun.failureMessage ?? null,
+    completedAt: smokeRun.completedAt ?? null,
+  };
+}
+
+function parseSupportRecorderJoinAt(value: string) {
+  if (!/(?:[zZ]|[+-]\d{2}:\d{2})$/.test(value.trim())) {
+    throw new AppError(400, "INVALID_INPUT", "A timezone-aware future join time is required for live smoke.");
+  }
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.valueOf()) || parsed.getTime() <= Date.now()) {
+    throw new AppError(400, "INVALID_INPUT", "A timezone-aware future join time is required for live smoke.");
+  }
+  return parsed;
 }
 
 function userDisplayName(user: any) {
@@ -3531,6 +3581,127 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
         getMeetingRecorderCoverageReadiness(workspaceId),
       ]);
       return jsonResult(compactMeetingRecorderOperationsReadiness(recorder, coverage));
+    },
+  );
+
+  tool(
+    "connect_meeting_recorder_calendar",
+    "Connect the workspace-scoped Microsoft recorder calendar and queue the first sync. Support connector only; tokens are stored encrypted and never returned.",
+    {
+      providerAccountId: z.string(),
+      providerAccountEmail: z.string().optional(),
+      displayName: z.string().optional(),
+      accessToken: z.string(),
+      refreshToken: z.string().optional(),
+      expiresIn: z.number().optional(),
+      scopes: z.array(z.string()).optional(),
+    },
+    async (params: {
+      providerAccountId: string;
+      providerAccountEmail?: string;
+      displayName?: string;
+      accessToken: string;
+      refreshToken?: string;
+      expiresIn?: number;
+      scopes?: string[];
+    }) => {
+      requireScope(sessionCtx, "meetings:write");
+      requireSupportCredential();
+      const source = await upsertRecorderCalendarSource({
+        workspaceId,
+        providerAccountId: params.providerAccountId,
+        providerAccountEmail: params.providerAccountEmail ?? null,
+        displayName: params.displayName ?? null,
+        accessToken: params.accessToken,
+        refreshToken: params.refreshToken ?? null,
+        expiresIn: params.expiresIn ?? null,
+        scopes: params.scopes ?? [],
+      });
+      const job = await enqueueRecorderCalendarSync({
+        workspaceId,
+        sourceId: source.id,
+        reason: "support_connector_oauth_connected",
+      });
+      return jsonResult({
+        workspaceId,
+        source: compactRecorderCalendarSource(source),
+        workflowJobId: job.id,
+      });
+    },
+  );
+
+  tool(
+    "enqueue_meeting_recorder_calendar_sync",
+    "Queue a recorder calendar sync for the connected Microsoft recorder calendar. Support connector only.",
+    {},
+    async () => {
+      requireScope(sessionCtx, "meetings:write");
+      requireSupportCredential();
+      const source = await getRecorderCalendarSource(workspaceId);
+      if (!source) {
+        throw new AppError(400, "RECORDER_CALENDAR_SOURCE_REQUIRED", "Connect a Microsoft recorder calendar before syncing.");
+      }
+      const job = await enqueueRecorderCalendarSync({
+        workspaceId,
+        sourceId: source.id,
+        reason: "support_connector",
+      });
+      return jsonResult({
+        workspaceId,
+        source: compactRecorderCalendarSource(source),
+        workflowJobId: job.id,
+      });
+    },
+  );
+
+  tool(
+    "dry_run_meeting_recorder_calendar_scan",
+    "Dry-run the connected Microsoft recorder calendar scan and return schedulable counts. Support connector only.",
+    {},
+    async () => {
+      requireScope(sessionCtx, "meetings:write");
+      requireSupportCredential();
+      const source = await getRecorderCalendarSource(workspaceId);
+      if (!source) {
+        throw new AppError(400, "RECORDER_CALENDAR_SOURCE_REQUIRED", "Connect a Microsoft recorder calendar before scanning.");
+      }
+      const scan = await scanRecorderCalendarSource({
+        workspaceId,
+        sourceId: source.id,
+      });
+      return jsonResult({
+        workspaceId,
+        source: compactRecorderCalendarSource(scan.source),
+        provider: scan.provider,
+        upcomingEventCount: scan.upcomingEventCount,
+        schedulableEventCount: scan.schedulableEventCount,
+        skippedEventCount: scan.skippedEventCount,
+      });
+    },
+  );
+
+  tool(
+    "run_meeting_recorder_live_smoke",
+    "Run a live vendor-backed recorder smoke for a future meeting URL. Support connector only; raw meeting URLs and bot IDs are not returned.",
+    {
+      meetingUrl: z.string(),
+      joinAt: z.string(),
+      provider: z.enum(["RECALL_AI", "MEETING_BAAS"]).optional(),
+    },
+    async ({ meetingUrl, joinAt, provider }: { meetingUrl: string; joinAt: string; provider?: "RECALL_AI" | "MEETING_BAAS" }) => {
+      requireScope(sessionCtx, "meetings:write");
+      requireSupportCredential();
+      const smokeRun = await runMeetingRecorderSmoke({
+        workspaceId,
+        meetingUrl,
+        joinAt: parseSupportRecorderJoinAt(joinAt),
+        provider: provider ?? "RECALL_AI",
+        liveVendorCall: true,
+      });
+      return jsonResult({
+        workspaceId,
+        smokeRun: compactMeetingRecorderSmokeRun(smokeRun),
+      });
     },
   );
 
