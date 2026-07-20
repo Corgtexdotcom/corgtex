@@ -79,13 +79,19 @@ describe("recorder readiness production smoke helpers", () => {
         customDomain: "alpha.example.com",
         remoteWorkspaceSlug: "alpha-remote",
         managedWorkspaceId: "ws-1",
+        managedWorkspaceSlug: "alpha-flat-workspace",
+        managedWorkspaceName: "Alpha Flat Workspace",
         managedWorkspace: { id: "ws-1", slug: "alpha-workspace", name: "Alpha Workspace" },
       },
     ];
 
     expect(deploymentMatchesRecorderReadinessTarget(deployments[0], "alpha-workspace")).toBe(true);
+    expect(deploymentMatchesRecorderReadinessTarget(deployments[0], "alpha-flat-workspace")).toBe(true);
+    expect(deploymentMatchesRecorderReadinessTarget(deployments[0], "Alpha Flat Workspace")).toBe(true);
     expect(deploymentMatchesRecorderReadinessTarget(deployments[0], "alpha.corgtex.com")).toBe(true);
     expect(deploymentMatchesRecorderReadinessTarget(deployments[0], "https://alpha.corgtex.com")).toBe(true);
+    expect(deploymentMatchesRecorderReadinessTarget(deployments[0], "https://alpha.corgtex.com/")).toBe(true);
+    expect(deploymentMatchesRecorderReadinessTarget(deployments[0], "alpha.example.com/")).toBe(true);
     expect(deploymentMatchesRecorderReadinessTarget(deployments[0], "alpha-remote")).toBe(true);
     expect(resolveRecorderReadinessTargets(deployments, ["Alpha", "missing"])).toEqual([
       { target: "Alpha", deployment: deployments[0] },
@@ -101,6 +107,7 @@ describe("recorder readiness production smoke helpers", () => {
         customerSlug: "alpha",
         deploymentStatus: "RETIRED",
         environment: "production",
+        primaryDeploymentId: "active-dep",
         customerAccount: { primaryDeploymentId: "active-dep" },
       },
       {
@@ -109,6 +116,7 @@ describe("recorder readiness production smoke helpers", () => {
         customerSlug: "alpha",
         deploymentStatus: "ACTIVE",
         environment: "production",
+        primaryDeploymentId: "active-dep",
         customerAccount: { primaryDeploymentId: "active-dep" },
       },
     ];
@@ -127,7 +135,7 @@ describe("recorder readiness production smoke helpers", () => {
         method: "tools/call",
         params: {
           name: "list_customers",
-          arguments: { includeAllDeployments: true },
+          arguments: { includeAllDeployments: true, uncapped: true },
         },
       });
       return new Response(JSON.stringify({

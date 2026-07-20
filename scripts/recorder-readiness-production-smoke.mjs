@@ -72,22 +72,21 @@ function comparableUrlParts(value) {
   }
 }
 
-function deploymentLabels(deployment) {
-  return [
-    deployment.id,
-    deployment.label,
-    deployment.customerSlug,
-    deployment.url,
-    deployment.customDomain,
-    deployment.remoteWorkspaceSlug,
-    deployment.remoteWorkspaceId,
-    deployment.managedWorkspaceId,
-    deployment.managedWorkspace?.id,
-    deployment.managedWorkspace?.slug,
-    deployment.managedWorkspace?.name,
-    ...comparableUrlParts(deployment.url),
-    ...comparableUrlParts(deployment.customDomain),
-  ].map(comparable).filter(Boolean);
+function fieldMatchesTarget(target, ...values) {
+  const normalizedTarget = comparable(target);
+  return values.some((value) => comparable(value) === normalizedTarget);
+}
+
+function urlFieldMatchesTarget(target, ...values) {
+  const normalizedTarget = comparable(target);
+  const targetParts = new Set(comparableUrlParts(target));
+  return values.some((value) => {
+    const valueParts = new Set([
+      comparable(value),
+      ...comparableUrlParts(value),
+    ].filter(Boolean));
+    return valueParts.has(normalizedTarget) || [...targetParts].some((part) => valueParts.has(part));
+  });
 }
 
 export function deploymentMatchesRecorderReadinessTarget(deployment, target) {
@@ -97,19 +96,20 @@ export function deploymentMatchesRecorderReadinessTarget(deployment, target) {
 export function recorderReadinessDeploymentMatchScore(deployment, target) {
   const normalizedTarget = comparable(target);
   if (!normalizedTarget) return 0;
-  if (comparable(deployment.id) === normalizedTarget) return 1_000;
-  if (comparable(deployment.managedWorkspaceId) === normalizedTarget || comparable(deployment.managedWorkspace?.id) === normalizedTarget) return 950;
-  if (comparable(deployment.managedWorkspace?.slug) === normalizedTarget) return 925;
-  if (comparable(deployment.label) === normalizedTarget) return 900;
-  if (comparable(deployment.managedWorkspace?.name) === normalizedTarget) return 875;
-  if (comparable(deployment.remoteWorkspaceId) === normalizedTarget) return 850;
-  if (comparable(deployment.remoteWorkspaceSlug) === normalizedTarget) return 825;
-  if (comparable(deployment.customDomain) === normalizedTarget || comparableUrlParts(deployment.customDomain).includes(normalizedTarget)) return 800;
-  if (comparable(deployment.url) === normalizedTarget || comparableUrlParts(deployment.url).includes(normalizedTarget)) return 775;
-  if (comparable(deployment.customerSlug) !== normalizedTarget) return 0;
+  if (fieldMatchesTarget(target, deployment.id)) return 1_000;
+  if (fieldMatchesTarget(target, deployment.managedWorkspaceId, deployment.managedWorkspace?.id)) return 950;
+  if (fieldMatchesTarget(target, deployment.managedWorkspaceSlug, deployment.managedWorkspace?.slug)) return 925;
+  if (fieldMatchesTarget(target, deployment.label)) return 900;
+  if (fieldMatchesTarget(target, deployment.managedWorkspaceName, deployment.managedWorkspace?.name)) return 875;
+  if (fieldMatchesTarget(target, deployment.remoteWorkspaceId)) return 850;
+  if (fieldMatchesTarget(target, deployment.remoteWorkspaceSlug)) return 825;
+  if (urlFieldMatchesTarget(target, deployment.customDomain)) return 800;
+  if (urlFieldMatchesTarget(target, deployment.url)) return 775;
+  if (!fieldMatchesTarget(target, deployment.customerSlug)) return 0;
 
   let score = 700;
-  if (deployment.customerAccount?.primaryDeploymentId === deployment.id) score += 200;
+  const primaryDeploymentId = deployment.primaryDeploymentId ?? deployment.customerAccount?.primaryDeploymentId ?? null;
+  if (primaryDeploymentId === deployment.id) score += 200;
   if (deployment.deploymentStatus === "ACTIVE") score += 50;
   if (comparable(deployment.environment) === "production") score += 25;
   return score;
@@ -205,8 +205,8 @@ export function recorderReadinessValidationOutcome(recorder) {
 function tenantForDeployment(deployment, fallbackTarget) {
   return {
     id: deployment?.managedWorkspaceId ?? deployment?.managedWorkspace?.id ?? deployment?.id ?? null,
-    slug: deployment?.managedWorkspace?.slug ?? deployment?.customerSlug ?? fallbackTarget,
-    label: deployment?.label ?? deployment?.managedWorkspace?.name ?? fallbackTarget,
+    slug: deployment?.managedWorkspaceSlug ?? deployment?.managedWorkspace?.slug ?? deployment?.customerSlug ?? fallbackTarget,
+    label: deployment?.label ?? deployment?.managedWorkspaceName ?? deployment?.managedWorkspace?.name ?? fallbackTarget,
   };
 }
 
@@ -362,7 +362,7 @@ export class RecorderReadinessProductionSmoke {
           customDomain: deployment.customDomain ?? null,
           remoteWorkspaceSlug: deployment.remoteWorkspaceSlug ?? null,
           managedWorkspaceId: deployment.managedWorkspaceId,
-          managedWorkspaceSlug: deployment.managedWorkspace?.slug ?? null,
+          managedWorkspaceSlug: deployment.managedWorkspaceSlug ?? deployment.managedWorkspace?.slug ?? null,
           supportConnectorStatus: deployment.supportConnectorStatus ?? null,
         }
         : null,
@@ -412,7 +412,7 @@ export class RecorderReadinessProductionSmoke {
   }
 
   async loadDeployments() {
-    const deployments = await this.fetchControlPlaneTool("list_customers", { includeAllDeployments: true });
+    const deployments = await this.fetchControlPlaneTool("list_customers", { includeAllDeployments: true, uncapped: true });
     if (!Array.isArray(deployments)) {
       throw new Error("Control Plane list_customers response did not return an array.");
     }
