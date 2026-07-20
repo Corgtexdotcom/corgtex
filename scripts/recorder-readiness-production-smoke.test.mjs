@@ -123,6 +123,13 @@ describe("recorder readiness production smoke helpers", () => {
     global.fetch = vi.fn(async (url, init) => {
       expect(String(url)).toBe("https://ops.example/api/control-plane/mcp");
       expect(init.headers.authorization).toBe("Bearer cp-token");
+      expect(JSON.parse(init.body)).toMatchObject({
+        method: "tools/call",
+        params: {
+          name: "list_customers",
+          arguments: { includeAllDeployments: true },
+        },
+      });
       return new Response(JSON.stringify({
         result: {
           content: [{

@@ -1716,6 +1716,7 @@ describe("control plane domain", () => {
       id: "inst-1",
       label: "Acme",
       url: "https://acme.test",
+      customDomain: "acme.example.com",
       customerSlug: "acme",
       customerAccountId: "cust-1",
       deploymentStatus: "ACTIVE",
@@ -1731,7 +1732,8 @@ describe("control plane domain", () => {
       railwayWorkerServiceId: "railway-worker-1",
       railwayPostgresServiceId: "railway-postgres-1",
       railwayRedisServiceId: "railway-redis-1",
-      remoteWorkspaceSlug: null,
+      remoteWorkspaceSlug: "acme-remote",
+      remoteWorkspaceId: "remote-ws-1",
       supportCredentialEnc: "encrypted-token",
       supportConnectorStatus: "connected",
       supportLastSyncError: null,
@@ -1743,6 +1745,7 @@ describe("control plane domain", () => {
       releaseImageTag: "sha-1",
       releaseVersion: "main-2026-06-01",
       managedWorkspaceId: "ws-1",
+      managedWorkspace: { id: "ws-1", slug: "acme-workspace", name: "Acme Workspace" },
       createdAt: observedAt,
       updatedAt: observedAt,
     }] as any);
@@ -1759,6 +1762,7 @@ describe("control plane domain", () => {
       label: "Acme",
       customerSlug: "acme",
       url: "https://acme.test",
+      customDomain: "acme.example.com",
       hasDeployment: true,
       cloudProvider: "RAILWAY",
       providerLabel: "Railway",
@@ -1781,6 +1785,10 @@ describe("control plane domain", () => {
       releaseImageTag: "sha-1",
       releaseVersion: "main-2026-06-01",
       managedWorkspaceId: "ws-1",
+      managedWorkspaceSlug: "acme-workspace",
+      managedWorkspaceName: "Acme Workspace",
+      remoteWorkspaceSlug: "acme-remote",
+      remoteWorkspaceId: "remote-ws-1",
       provisioningStatus: "active",
       supportOperations: [],
     }]);
@@ -1796,12 +1804,106 @@ describe("control plane domain", () => {
       },
     });
     expect(prismaMock.customerDeployment.findMany).toHaveBeenCalledWith(expect.objectContaining({
+      select: expect.objectContaining({
+        managedWorkspace: {
+          select: {
+            id: true,
+            slug: true,
+            name: true,
+          },
+        },
+      }),
+    }));
+    expect(prismaMock.customerDeployment.findMany).toHaveBeenCalledWith(expect.objectContaining({
       select: expect.not.objectContaining({
-        managedWorkspace: expect.anything(),
         fleetSnapshots: expect.anything(),
         supportOperations: expect.anything(),
       }),
     }));
+  });
+
+  it("can include secondary deployments for validation target resolution", async () => {
+    const { listControlPlaneCustomerSummaries } = await import("./control-plane");
+    const older = new Date("2026-06-01T10:00:00.000Z");
+    const newer = new Date("2026-06-02T10:00:00.000Z");
+    prismaMock.customerAccount.findMany.mockResolvedValueOnce([
+      {
+        id: "cust-1",
+        slug: "acme",
+        displayName: "Acme",
+        primaryDeploymentId: "dep-primary",
+        createdAt: older,
+        updatedAt: newer,
+      },
+    ] as any);
+    prismaMock.customerDeployment.findMany.mockResolvedValueOnce([
+      {
+        id: "dep-primary",
+        label: "Acme Primary",
+        url: "https://acme-primary.test",
+        customDomain: null,
+        customerSlug: "acme",
+        customerAccountId: "cust-1",
+        deploymentStatus: "ACTIVE",
+        cloudProvider: "RAILWAY",
+        remoteWorkspaceSlug: null,
+        remoteWorkspaceId: null,
+        supportCredentialEnc: null,
+        supportConnectorStatus: "connected",
+        supportLastSyncError: null,
+        provisioningStatus: "active",
+        lastHealthStatus: "ok",
+        lastHealthError: null,
+        lastHealthCheck: older,
+        lastReleaseCheck: older,
+        releaseImageTag: "sha-primary",
+        releaseVersion: "main-primary",
+        managedWorkspaceId: null,
+        managedWorkspace: null,
+        createdAt: older,
+        updatedAt: older,
+      },
+      {
+        id: "dep-secondary",
+        label: "Acme Secondary",
+        url: "https://acme-secondary.test",
+        customDomain: "secondary.acme.test",
+        customerSlug: "acme-secondary",
+        customerAccountId: "cust-1",
+        deploymentStatus: "ACTIVE",
+        cloudProvider: "RAILWAY",
+        remoteWorkspaceSlug: "acme-secondary-remote",
+        remoteWorkspaceId: "remote-secondary",
+        supportCredentialEnc: null,
+        supportConnectorStatus: "connected",
+        supportLastSyncError: null,
+        provisioningStatus: "active",
+        lastHealthStatus: "ok",
+        lastHealthError: null,
+        lastHealthCheck: newer,
+        lastReleaseCheck: newer,
+        releaseImageTag: "sha-secondary",
+        releaseVersion: "main-secondary",
+        managedWorkspaceId: "ws-secondary",
+        managedWorkspace: { id: "ws-secondary", slug: "secondary-workspace", name: "Secondary Workspace" },
+        createdAt: newer,
+        updatedAt: newer,
+      },
+    ] as any);
+
+    const result = await listControlPlaneCustomerSummaries(operatorActor, {
+      includeAllDeployments: true,
+      limit: 10,
+    });
+
+    expect(result.map((row) => row.id)).toEqual(["dep-secondary", "dep-primary"]);
+    expect(result[0]).toMatchObject({
+      customDomain: "secondary.acme.test",
+      managedWorkspaceSlug: "secondary-workspace",
+      managedWorkspaceName: "Secondary Workspace",
+      remoteWorkspaceSlug: "acme-secondary-remote",
+      remoteWorkspaceId: "remote-secondary",
+    });
   });
 
   it("returns a compact deployment detail overview without heavy logs", async () => {

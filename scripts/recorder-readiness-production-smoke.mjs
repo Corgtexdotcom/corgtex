@@ -412,7 +412,7 @@ export class RecorderReadinessProductionSmoke {
   }
 
   async loadDeployments() {
-    const deployments = await this.fetchControlPlaneTool("list_customers");
+    const deployments = await this.fetchControlPlaneTool("list_customers", { includeAllDeployments: true });
     if (!Array.isArray(deployments)) {
       throw new Error("Control Plane list_customers response did not return an array.");
     }

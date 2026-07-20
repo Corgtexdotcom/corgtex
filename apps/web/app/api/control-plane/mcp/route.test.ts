@@ -195,7 +195,7 @@ describe("/api/control-plane/mcp", () => {
       method: "tools/call",
       params: {
         name: "list_customers",
-        arguments: { query: "acme", health: "ok", support: "connected", limit: 42 },
+        arguments: { query: "acme", health: "ok", support: "connected", limit: 42, includeAllDeployments: true },
       },
     }) as never);
     const body = await response.json();
@@ -212,6 +212,7 @@ describe("/api/control-plane/mcp", () => {
       health: "ok",
       support: "connected",
       limit: 42,
+      includeAllDeployments: true,
     });
     expect(mocks.listControlPlaneDeployments).not.toHaveBeenCalled();
   });

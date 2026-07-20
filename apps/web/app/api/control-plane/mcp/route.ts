@@ -71,6 +71,7 @@ const tools = [
         health: { type: "string" },
         support: { type: "string" },
         limit: { type: "number" },
+        includeAllDeployments: { type: "boolean" },
       },
     },
   },
@@ -814,6 +815,7 @@ export async function POST(request: NextRequest) {
         health: argOptionalString(args, "health"),
         support: argOptionalString(args, "support"),
         limit: argNumber(args, "limit", 500),
+        includeAllDeployments: argBoolean(args, "includeAllDeployments", false),
       })));
     }
     if (name === "list_self_serve_customers") {
