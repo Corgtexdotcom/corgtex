@@ -38,9 +38,9 @@ function recorderWithGates(overrides = {}) {
       },
       calendar: {
         key: "calendar",
-        label: "Calendar connection",
+        label: "Recording schedule",
         status: "pass",
-        detail: "Active.",
+        detail: "Corgtex scheduled meetings are ready.",
         checks: [],
       },
       meetingState: {
@@ -276,6 +276,21 @@ describe("recorder readiness production smoke helpers", () => {
     }))).toMatchObject({
       result: "blocked",
       blocker: expect.stringContaining("RECALL_API_KEY is missing"),
+    });
+  });
+
+  it("blocks only when the Corgtex recording schedule gate is blocked", () => {
+    expect(recorderReadinessValidationOutcome(recorderWithGates({
+      calendar: {
+        key: "calendar",
+        label: "Recording schedule",
+        status: "blocked",
+        detail: "No upcoming Corgtex scheduled meetings are ready for recording.",
+        checks: [{ key: "recording_schedule", label: "Corgtex recorder schedule", status: "blocked", detail: "Add the meeting to Corgtex before recording." }],
+      },
+    }))).toMatchObject({
+      result: "blocked",
+      blocker: expect.stringContaining("No upcoming Corgtex scheduled meetings"),
     });
   });
 

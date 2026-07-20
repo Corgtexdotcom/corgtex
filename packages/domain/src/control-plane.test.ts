@@ -2397,6 +2397,7 @@ describe("control plane domain", () => {
     prismaMock.workspaceMeetingRecorderConfig.findMany.mockResolvedValue([{
       workspaceId: "ws-1",
       enabled: true,
+      autoRecordEnabled: true,
       defaultProvider: "RECALL_AI",
       fallbackProvider: null,
       monthlyMinuteCap: 6000,
@@ -2414,7 +2415,8 @@ describe("control plane domain", () => {
     prismaMock.meetingRecorderSmokeRun.findMany.mockResolvedValue([{
       workspaceId: "ws-1",
       status: "COMPLETED",
-      createdAt: new Date("2026-06-01T09:05:00.000Z"),
+      createdAt: new Date(Date.now() - 60 * 60 * 1000),
+      completedAt: new Date(Date.now() - 55 * 60 * 1000),
     }]);
     prismaMock.workflowJob.findMany.mockResolvedValue([]);
     prismaMock.meetingRecording.groupBy
@@ -2688,6 +2690,321 @@ describe("control plane domain", () => {
     });
   });
 
+  function managedRecorderMatrixCustomer(now: Date) {
+    return [{
+      id: "cust-1",
+      slug: "acme",
+      displayName: "Acme",
+      supportOwnerEmail: null,
+      notes: null,
+      primaryDeploymentId: "inst-1",
+      createdAt: now,
+      updatedAt: now,
+      fleetSnapshots: [],
+      deployments: [],
+      primaryDeployment: {
+        id: "inst-1",
+        label: "Acme",
+        url: "https://acme.test",
+        customerSlug: "acme",
+        supportOwnerEmail: null,
+        provisioningStatus: "active",
+        lastHealthStatus: "ok",
+        releaseImageTag: "web:latest",
+        releaseVersion: null,
+        supportConnectorStatus: "connected",
+        supportCredentialEnc: null,
+        managedWorkspaceId: "ws-1",
+        managedWorkspace: { id: "ws-1", slug: "acme", name: "Acme", _count: { members: 2, agentRuns: 0 } },
+        supportOperations: [],
+        fleetSnapshots: [],
+        _count: { supportOperations: 0, events: 0 },
+        createdAt: now,
+        updatedAt: now,
+      },
+    }] as any;
+  }
+
+  it("marks managed recorder matrix ready from an eligible Corgtex scheduled meeting without calendar sync", async () => {
+    const now = new Date("2026-06-01T10:00:00.000Z");
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+    try {
+      const { listControlPlaneRecorderMatrix } = await import("./control-plane");
+      const meetingAt = new Date("2026-06-02T16:00:00.000Z");
+      prismaMock.customerAccount.findMany.mockResolvedValue(managedRecorderMatrixCustomer(now));
+      prismaMock.customerDeployment.findMany.mockResolvedValue([]);
+      prismaMock.workspaceFeatureFlag.findMany.mockResolvedValue([{ workspaceId: "ws-1", enabled: true }]);
+      prismaMock.workspaceMeetingRecorderConfig.findMany.mockResolvedValue([{
+        workspaceId: "ws-1",
+        enabled: true,
+        autoRecordEnabled: true,
+        defaultProvider: "RECALL_AI",
+        fallbackProvider: null,
+        monthlyMinuteCap: 6000,
+        updatedAt: now,
+      }]);
+      prismaMock.workspaceRecorderCalendarSource.findMany.mockResolvedValue([]);
+	      prismaMock.meetingRecorderSmokeRun.findMany.mockResolvedValue([{
+	        workspaceId: "ws-1",
+	        status: "COMPLETED",
+	        createdAt: now,
+	        completedAt: now,
+	      }]);
+      prismaMock.meeting.findMany.mockResolvedValue([{
+        workspaceId: "ws-1",
+        recordedAt: meetingAt,
+        meetingUrl: "https://meet.google.com/abc-defg-hij",
+        series: null,
+        recordings: [],
+      }]);
+
+      const matrix = await listControlPlaneRecorderMatrix(operatorActor, { status: "ready" });
+
+      expect(matrix.items).toHaveLength(1);
+      expect(matrix.items[0]).toMatchObject({
+        deploymentId: "inst-1",
+        status: "ready",
+        readiness: {
+          ready: true,
+          detail: "Recorder readiness checks are passing.",
+        },
+        calendarSource: null,
+      });
+      expect(matrix.items[0].readiness.failedChecks).toEqual([]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("marks managed recorder matrix ready from already-covered Corgtex meetings without smoke proof", async () => {
+    const now = new Date("2026-06-01T10:00:00.000Z");
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+    try {
+      const { listControlPlaneRecorderMatrix } = await import("./control-plane");
+      const meetingAt = new Date("2026-06-01T10:05:00.000Z");
+      const meetingUrl = "https://meet.google.com/abc-defg-hij";
+      prismaMock.customerAccount.findMany.mockResolvedValue(managedRecorderMatrixCustomer(now));
+      prismaMock.customerDeployment.findMany.mockResolvedValue([]);
+      prismaMock.workspaceFeatureFlag.findMany.mockResolvedValue([{ workspaceId: "ws-1", enabled: true }]);
+      prismaMock.workspaceMeetingRecorderConfig.findMany.mockResolvedValue([{
+        workspaceId: "ws-1",
+        enabled: true,
+        autoRecordEnabled: false,
+        defaultProvider: "RECALL_AI",
+        fallbackProvider: null,
+        monthlyMinuteCap: 6000,
+        updatedAt: now,
+      }]);
+      prismaMock.workspaceRecorderCalendarSource.findMany.mockResolvedValue([]);
+      prismaMock.meetingRecorderSmokeRun.findMany.mockResolvedValue([]);
+      prismaMock.meetingRecording.findMany.mockResolvedValue([{
+        workspaceId: "ws-1",
+        status: "SCHEDULED",
+        scheduledAt: new Date("2026-06-01T09:55:00.000Z"),
+        joinAt: meetingAt,
+        startedAt: null,
+        endedAt: null,
+        createdAt: new Date("2026-06-01T09:55:00.000Z"),
+      }]);
+      prismaMock.meeting.findMany.mockResolvedValue([{
+        workspaceId: "ws-1",
+        recordedAt: meetingAt,
+        meetingUrl,
+        series: null,
+        recordings: [{
+          status: "SCHEDULED",
+          meetingUrl,
+          failureCode: null,
+        }],
+      }]);
+
+      const matrix = await listControlPlaneRecorderMatrix(operatorActor, { status: "ready" });
+
+      expect(matrix.items).toHaveLength(1);
+      expect(matrix.items[0]).toMatchObject({
+        deploymentId: "inst-1",
+        status: "ready",
+        readiness: {
+          ready: true,
+          detail: "Recorder readiness checks are passing.",
+        },
+        lastSmokeRun: null,
+      });
+      expect(matrix.items[0].readiness.failedChecks).toEqual([]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("marks managed recorder matrix ready from recent joining provider updates without startedAt", async () => {
+    const now = new Date("2026-06-01T10:00:00.000Z");
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+    try {
+      const { listControlPlaneRecorderMatrix } = await import("./control-plane");
+      const meetingAt = new Date("2026-06-01T10:30:00.000Z");
+      const meetingUrl = "https://meet.google.com/abc-defg-hij";
+      prismaMock.customerAccount.findMany.mockResolvedValue(managedRecorderMatrixCustomer(now));
+      prismaMock.customerDeployment.findMany.mockResolvedValue([]);
+      prismaMock.workspaceFeatureFlag.findMany.mockResolvedValue([{ workspaceId: "ws-1", enabled: true }]);
+      prismaMock.workspaceMeetingRecorderConfig.findMany.mockResolvedValue([{
+        workspaceId: "ws-1",
+        enabled: true,
+        autoRecordEnabled: true,
+        defaultProvider: "RECALL_AI",
+        fallbackProvider: null,
+        monthlyMinuteCap: 6000,
+        updatedAt: now,
+      }]);
+      prismaMock.workspaceRecorderCalendarSource.findMany.mockResolvedValue([]);
+      prismaMock.meetingRecorderSmokeRun.findMany.mockResolvedValue([]);
+      prismaMock.meetingRecording.findMany
+        .mockResolvedValueOnce([{
+          workspaceId: "ws-1",
+          status: "JOINING",
+          scheduledAt: new Date("2026-06-01T09:40:00.000Z"),
+          joinAt: new Date("2026-06-01T09:45:00.000Z"),
+          startedAt: null,
+          endedAt: null,
+          createdAt: new Date("2026-06-01T09:40:00.000Z"),
+          updatedAt: new Date("2026-06-01T10:02:00.000Z"),
+        }])
+        .mockResolvedValueOnce([{
+          workspaceId: "ws-1",
+          failureCode: "vendor_http_error",
+          failureMessage: "RECALL_AI returned 401: authentication_failed Invalid API token for region.",
+          updatedAt: new Date("2026-06-01T09:55:00.000Z"),
+        }]);
+      prismaMock.meeting.findMany.mockResolvedValue([{ workspaceId: "ws-1", recordedAt: meetingAt, meetingUrl, series: null, recordings: [] }]);
+
+      const matrix = await listControlPlaneRecorderMatrix(operatorActor, { status: "ready" });
+
+      expect(matrix.items).toHaveLength(1);
+      expect(matrix.items[0].readiness.failedChecks).toEqual([]);
+      expect(prismaMock.meetingRecording.findMany.mock.calls[0]?.[0]?.where.OR).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          status: "JOINING",
+          externalBotId: { not: null },
+          OR: expect.arrayContaining([
+            { updatedAt: { gte: new Date("2026-05-02T10:00:00.000Z") } },
+          ]),
+        }),
+      ]));
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not use incomplete completed smoke rows as matrix provider proof", async () => {
+    const now = new Date("2026-06-01T10:00:00.000Z");
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+    try {
+      const { listControlPlaneRecorderMatrix } = await import("./control-plane");
+      const meetingAt = new Date("2026-06-01T10:30:00.000Z");
+      const meetingUrl = "https://meet.google.com/abc-defg-hij";
+      prismaMock.customerAccount.findMany.mockResolvedValue(managedRecorderMatrixCustomer(now));
+      prismaMock.customerDeployment.findMany.mockResolvedValue([]);
+      prismaMock.workspaceFeatureFlag.findMany.mockResolvedValue([{ workspaceId: "ws-1", enabled: true }]);
+      prismaMock.workspaceMeetingRecorderConfig.findMany.mockResolvedValue([{
+        workspaceId: "ws-1",
+        enabled: true,
+        autoRecordEnabled: true,
+        defaultProvider: "RECALL_AI",
+        fallbackProvider: null,
+        monthlyMinuteCap: 6000,
+        updatedAt: now,
+      }]);
+      prismaMock.workspaceRecorderCalendarSource.findMany.mockResolvedValue([]);
+      prismaMock.meetingRecorderSmokeRun.findMany.mockResolvedValue([{
+        workspaceId: "ws-1",
+        status: "COMPLETED",
+        createdAt: now,
+        completedAt: null,
+      }]);
+      prismaMock.meetingRecording.findMany.mockResolvedValue([]);
+      prismaMock.meeting.findMany.mockResolvedValue([{ workspaceId: "ws-1", recordedAt: meetingAt, meetingUrl, series: null, recordings: [] }]);
+
+      const matrix = await listControlPlaneRecorderMatrix(operatorActor, { status: "needs_setup" });
+
+      expect(matrix.items[0].readiness.failedChecks).toEqual(expect.arrayContaining([
+        expect.objectContaining({ key: "provider_proof" }),
+      ]));
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("blocks managed recorder matrix proof when auth failure is newer than scheduled bot proof", async () => {
+    const now = new Date("2026-06-01T10:00:00.000Z");
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+    try {
+      const { listControlPlaneRecorderMatrix } = await import("./control-plane");
+      const meetingAt = new Date("2026-06-01T10:30:00.000Z");
+      const meetingUrl = "https://meet.google.com/abc-defg-hij";
+      prismaMock.customerAccount.findMany.mockResolvedValue(managedRecorderMatrixCustomer(now));
+      prismaMock.customerDeployment.findMany.mockResolvedValue([]);
+      prismaMock.workspaceFeatureFlag.findMany.mockResolvedValue([{ workspaceId: "ws-1", enabled: true }]);
+      prismaMock.workspaceMeetingRecorderConfig.findMany.mockResolvedValue([{
+        workspaceId: "ws-1",
+        enabled: true,
+        autoRecordEnabled: true,
+        defaultProvider: "RECALL_AI",
+        fallbackProvider: null,
+        monthlyMinuteCap: 6000,
+        updatedAt: now,
+      }]);
+      prismaMock.workspaceRecorderCalendarSource.findMany.mockResolvedValue([]);
+      prismaMock.meetingRecorderSmokeRun.findMany.mockResolvedValue([]);
+      prismaMock.meetingRecording.findMany
+        .mockResolvedValueOnce([{ workspaceId: "ws-1", status: "SCHEDULED", scheduledAt: new Date("2026-06-01T09:55:00.000Z"), joinAt: meetingAt, startedAt: null, endedAt: null, createdAt: new Date("2026-06-01T09:55:00.000Z") }])
+        .mockResolvedValueOnce([{ workspaceId: "ws-1", failureCode: "vendor_http_error", failureMessage: "RECALL_AI returned 401: authentication_failed Invalid API token for region.", updatedAt: new Date("2026-06-01T10:05:00.000Z") }]);
+      prismaMock.meeting.findMany.mockResolvedValue([{ workspaceId: "ws-1", recordedAt: meetingAt, meetingUrl, series: null, recordings: [{ status: "SCHEDULED", meetingUrl, failureCode: null }] }]);
+
+      const matrix = await listControlPlaneRecorderMatrix(operatorActor, { status: "needs_setup" });
+
+      expect(matrix.items[0].readiness.failedChecks).toEqual(expect.arrayContaining([
+        expect.objectContaining({ key: "provider_proof", detail: "Recall authentication failed; verify the configured API token and region." }),
+      ]));
+      expect(prismaMock.meetingRecording.findMany.mock.calls[1]?.[0]?.where).toMatchObject({
+        status: "FAILED",
+        updatedAt: { gte: new Date("2026-05-02T10:00:00.000Z") },
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps recorder matrix schedule blocked when only meetings after the first 100 are eligible", async () => {
+    const now = new Date("2026-06-01T10:00:00.000Z");
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+    try {
+      const { listControlPlaneRecorderMatrix } = await import("./control-plane");
+      prismaMock.customerAccount.findMany.mockResolvedValue(managedRecorderMatrixCustomer(now));
+      prismaMock.customerDeployment.findMany.mockResolvedValue([]);
+      prismaMock.workspaceFeatureFlag.findMany.mockResolvedValue([{ workspaceId: "ws-1", enabled: true }]);
+      prismaMock.workspaceMeetingRecorderConfig.findMany.mockResolvedValue([{ workspaceId: "ws-1", enabled: true, autoRecordEnabled: true, defaultProvider: "RECALL_AI", fallbackProvider: null, monthlyMinuteCap: 6000, updatedAt: now }]);
+      prismaMock.workspaceRecorderCalendarSource.findMany.mockResolvedValue([]);
+      prismaMock.meetingRecorderSmokeRun.findMany.mockResolvedValue([{ workspaceId: "ws-1", status: "COMPLETED", createdAt: now, completedAt: now }]);
+      prismaMock.meeting.findMany.mockResolvedValue([
+        ...Array.from({ length: 100 }, (_, index) => ({ workspaceId: "ws-1", recordedAt: new Date(now.getTime() + (index + 1) * 60 * 60 * 1000), meetingUrl: null, series: null, recordings: [] })),
+        { workspaceId: "ws-1", recordedAt: new Date(now.getTime() + 101 * 60 * 60 * 1000), meetingUrl: "https://meet.google.com/abc-defg-hij", series: null, recordings: [] },
+      ]);
+
+      const matrix = await listControlPlaneRecorderMatrix(operatorActor, { status: "needs_setup" });
+
+      expect(matrix.items[0].readiness.failedChecks).toEqual(expect.arrayContaining([
+        expect.objectContaining({ key: "recording_schedule" }),
+      ]));
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("filters recorder matrix by client and surfaces readiness failures and missing remote data", async () => {
     const { listControlPlaneRecorderMatrix } = await import("./control-plane");
     const now = new Date("2026-06-01T10:00:00.000Z");
@@ -2771,7 +3088,7 @@ describe("control plane domain", () => {
         ready: false,
       },
     });
-    expect(filtered.items[0].readiness.failedChecks.map((check) => check.key)).toContain("calendar_source");
+    expect(filtered.items[0].readiness.failedChecks.map((check) => check.key)).toContain("recording_schedule");
     expect(unfiltered.items.find((row) => row.deploymentId === "remote-1")).toMatchObject({
       status: "unavailable",
       configured: null,
@@ -3123,7 +3440,7 @@ describe("control plane domain", () => {
       .mockResolvedValueOnce({
         workspaceId: "ws-1",
         enabled: true,
-        autoRecordEnabled: true,
+        autoRecordEnabled: false,
         defaultProvider: "RECALL_AI",
         fallbackProvider: null,
         monthlyMinuteCap: 6000,
@@ -3131,7 +3448,7 @@ describe("control plane domain", () => {
       .mockResolvedValueOnce({
         workspaceId: "ws-1",
         enabled: true,
-        autoRecordEnabled: true,
+        autoRecordEnabled: false,
         defaultProvider: "RECALL_AI",
         fallbackProvider: null,
         monthlyMinuteCap: 6000,
@@ -3177,7 +3494,7 @@ describe("control plane domain", () => {
           controlPlane: { status: "pass" },
           tenantConfig: { status: "pass" },
           vendor: { status: "pass" },
-          calendar: { status: "pass" },
+          calendar: { status: "pass", label: "Recording schedule" },
           meetingState: { status: "pass" },
           liveVendorProof: { status: "pass" },
         },
@@ -3208,8 +3525,7 @@ describe("control plane domain", () => {
         { key: "public_base_url", label: "Public recorder URL", ok: true, detail: "Configured." },
         { key: "recall_api_key", label: "Recall API key", ok: true, detail: "Configured." },
         { key: "recall_webhook_secret", label: "Recall webhook secret", ok: true, detail: "Configured." },
-        { key: "calendar_source", label: "Master Microsoft calendar", ok: true, detail: "recorder@example.com is active." },
-        { key: "worker_sync", label: "Recorder calendar sync", ok: true, detail: "No failed recorder calendar sync jobs." },
+        { key: "recording_schedule", label: "Corgtex recorder schedule", ok: true, detail: "1 upcoming Corgtex scheduled meeting(s) already have recorder coverage." },
         { key: "provider_proof", label: "Recorder provider proof", ok: true, detail: "Recent recorder proof at 2026-07-20T06:00:00.000Z." },
       ],
       coverage: {
@@ -3220,14 +3536,14 @@ describe("control plane domain", () => {
         counts: {
           total: 1,
           eligible: 0,
-          blockers: { already_covered: 1 },
+          blockers: { already_covered: 1, auto_recording_off: 1 },
         },
         meetings: [{
           meetingId: "meeting-1",
           recordedAt: "2026-07-22T16:00:00.000Z",
           hasOccurrenceUrl: false,
           hasSeriesUrl: false,
-          blockerReasons: ["already_covered"],
+          blockerReasons: ["already_covered", "auto_recording_off"],
         }],
       },
       lastSmokeRun: {
@@ -3288,7 +3604,7 @@ describe("control plane domain", () => {
           counts: {
             total: 1,
             eligible: 0,
-            blockers: { already_covered: 1 },
+            blockers: { already_covered: 1, auto_recording_off: 1 },
           },
         },
       },
@@ -3297,7 +3613,7 @@ describe("control plane domain", () => {
       controlPlane: { status: "pass" },
       tenantConfig: { status: "pass" },
       vendor: { status: "pass" },
-      calendar: { status: "pass" },
+      calendar: { status: "pass", label: "Recording schedule" },
       meetingState: { status: "pass" },
       liveVendorProof: { status: "pass" },
     });

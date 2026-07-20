@@ -19,6 +19,7 @@ import {
   enqueueWorkspaceMeetingAgendaPreparation,
   getMeetingAgendaReadiness,
 } from "./meeting-facilitation";
+import { normalizeMeetingUrl, normalizeRecorderMeetingUrl } from "./meeting-urls";
 import {
   saveSlackInstallationForWorkspace,
   validateSlackPostTarget,
@@ -4064,15 +4065,21 @@ async function loadBatchedManagedRecorderState(workspaceIds: string[]) {
   if (uniqueWorkspaceIds.length === 0) {
     return {
       entitlementByWorkspaceId: new Map<string, boolean>(),
-      configByWorkspaceId: new Map<string, { enabled: boolean; defaultProvider: MeetingRecorderProvider; fallbackProvider: MeetingRecorderProvider | null; monthlyMinuteCap: number; updatedAt?: Date }>(),
+      configByWorkspaceId: new Map<string, { enabled: boolean; autoRecordEnabled: boolean; defaultProvider: MeetingRecorderProvider; fallbackProvider: MeetingRecorderProvider | null; monthlyMinuteCap: number; updatedAt?: Date }>(),
       calendarSourceByWorkspaceId: new Map<string, { providerAccountId: string; providerAccountEmail: string | null; status: string; lastSyncAt: Date | null; lastSyncError: string | null; updatedAt?: Date }>(),
-      lastSmokeRunByWorkspaceId: new Map<string, { status: string; createdAt: Date; failureMessage?: string | null }>(),
+      lastSmokeRunByWorkspaceId: new Map<string, { status: string; createdAt: Date; completedAt?: Date | null; failureMessage?: string | null }>(),
+      providerProofObservedAtByWorkspaceId: new Map<string, Date>(),
+      providerAuthFailureByWorkspaceId: new Map<string, { failureCode: string | null; failureMessage: string | null; updatedAt: Date }>(),
       usageMinutesByWorkspaceId: new Map<string, number>(),
       failureCountByWorkspaceId: new Map<string, number>(),
       failedSyncCountByWorkspaceId: new Map<string, number>(),
+      internalScheduleCountByWorkspaceId: new Map<string, { eligible: number; alreadyCovered: number }>(),
     };
   }
 
+  const now = new Date();
+  const scheduleWindowEnd = new Date(now.getTime() + CONTROL_PLANE_RECORDER_SCHEDULE_LOOKAHEAD_MS);
+  const providerProofSince = new Date(now.getTime() - CONTROL_PLANE_RECORDER_PROVIDER_PROOF_MAX_AGE_MS);
   const [
     entitlements,
     configs,
@@ -4081,6 +4088,9 @@ async function loadBatchedManagedRecorderState(workspaceIds: string[]) {
     usageRows,
     failureRows,
     failedSyncJobs,
+    providerProofRecordings,
+    authFailureRecordings,
+    upcomingMeetings,
   ] = await Promise.all([
     prisma.workspaceFeatureFlag.findMany({
       where: {
@@ -4096,6 +4106,7 @@ async function loadBatchedManagedRecorderState(workspaceIds: string[]) {
         enabled: true,
         defaultProvider: true,
         fallbackProvider: true,
+        autoRecordEnabled: true,
         monthlyMinuteCap: true,
         updatedAt: true,
       },
@@ -4119,6 +4130,7 @@ async function loadBatchedManagedRecorderState(workspaceIds: string[]) {
         workspaceId: true,
         status: true,
         createdAt: true,
+        completedAt: true,
         failureMessage: true,
       },
     }),
@@ -4150,21 +4162,121 @@ async function loadBatchedManagedRecorderState(workspaceIds: string[]) {
         updatedAt: true,
       },
     }),
+    prisma.meetingRecording.findMany({
+      where: {
+        workspaceId: { in: uniqueWorkspaceIds },
+        OR: [
+          {
+            status: { in: ["COMPLETED", "RECORDING"] },
+            OR: [
+              { endedAt: { gte: providerProofSince } },
+              { startedAt: { gte: providerProofSince } },
+              { scheduledAt: { gte: providerProofSince } },
+              { createdAt: { gte: providerProofSince } },
+            ],
+          },
+          {
+            status: "SCHEDULED",
+            externalBotId: { not: null },
+            OR: [
+              { scheduledAt: { gte: now } },
+              { joinAt: { gte: now } },
+            ],
+          },
+          {
+            status: "JOINING",
+            externalBotId: { not: null },
+            OR: [
+              { scheduledAt: { gte: now } },
+              { joinAt: { gte: now } },
+              { startedAt: { gte: providerProofSince } },
+              { updatedAt: { gte: providerProofSince } },
+            ],
+          },
+        ],
+      },
+      orderBy: { updatedAt: "desc" },
+      select: {
+        workspaceId: true,
+        status: true,
+        scheduledAt: true,
+        joinAt: true,
+        startedAt: true,
+        endedAt: true,
+        createdAt: true,
+        updatedAt: true,
+      },
+    }),
+	    prisma.meetingRecording.findMany({
+	      where: {
+	        workspaceId: { in: uniqueWorkspaceIds },
+	        status: "FAILED",
+	        updatedAt: { gte: providerProofSince },
+	      },
+	      orderBy: { updatedAt: "desc" },
+      select: {
+        workspaceId: true,
+        failureCode: true,
+        failureMessage: true,
+        updatedAt: true,
+      },
+    }),
+    prisma.meeting.findMany({
+      where: {
+        workspaceId: { in: uniqueWorkspaceIds },
+        status: "SCHEDULED",
+        archivedAt: null,
+        recordedAt: { gte: now, lte: scheduleWindowEnd },
+      },
+      orderBy: { recordedAt: "asc" },
+      select: {
+        workspaceId: true,
+        recordedAt: true,
+        meetingUrl: true,
+        series: {
+          select: {
+            meetingUrl: true,
+          },
+        },
+        recordings: {
+          where: {
+            status: { in: [...CONTROL_PLANE_RECORDER_COVERAGE_RECORDING_STATUSES] },
+          },
+          select: {
+            status: true,
+            meetingUrl: true,
+            failureCode: true,
+          },
+        },
+      },
+    }),
   ]);
 
   const entitlementByWorkspaceId = new Map(entitlements.map((flag) => [flag.workspaceId, flag.enabled]));
   const configByWorkspaceId = new Map(configs.map((config) => [config.workspaceId, config]));
   const calendarSourceByWorkspaceId = new Map(calendarSources.map((source) => [source.workspaceId, source]));
-  const lastSmokeRunByWorkspaceId = new Map<string, { status: string; createdAt: Date; failureMessage?: string | null }>();
+  const lastSmokeRunByWorkspaceId = new Map<string, { status: string; createdAt: Date; completedAt?: Date | null; failureMessage?: string | null }>();
   for (const smokeRun of smokeRuns) {
     if (!lastSmokeRunByWorkspaceId.has(smokeRun.workspaceId)) {
       lastSmokeRunByWorkspaceId.set(smokeRun.workspaceId, smokeRun);
     }
   }
+  const providerProofObservedAtByWorkspaceId = buildControlPlaneProviderProofObservedAt({
+    smokeRuns,
+    recordings: providerProofRecordings,
+    proofSince: providerProofSince,
+  });
+  const providerAuthFailureByWorkspaceId = buildControlPlaneProviderAuthFailures(authFailureRecordings);
   const usageMinutesByWorkspaceId = new Map(
     usageRows.map((row) => [row.workspaceId, Math.ceil((row._sum.durationSeconds ?? 0) / 60)]),
   );
   const failureCountByWorkspaceId = new Map(failureRows.map((row) => [row.workspaceId, row._count._all]));
+  const internalScheduleCountByWorkspaceId = buildControlPlaneInternalScheduleCounts({
+    meetings: upcomingMeetings,
+    entitlementByWorkspaceId,
+    configByWorkspaceId,
+    now,
+  });
   const failedSyncCountByWorkspaceId = new Map<string, number>();
   for (const job of failedSyncJobs) {
     if (!job.workspaceId) continue;
@@ -4178,9 +4290,12 @@ async function loadBatchedManagedRecorderState(workspaceIds: string[]) {
     configByWorkspaceId,
     calendarSourceByWorkspaceId,
     lastSmokeRunByWorkspaceId,
+    providerProofObservedAtByWorkspaceId,
+    providerAuthFailureByWorkspaceId,
     usageMinutesByWorkspaceId,
     failureCountByWorkspaceId,
     failedSyncCountByWorkspaceId,
+    internalScheduleCountByWorkspaceId,
   };
 }
 
@@ -4196,7 +4311,13 @@ function buildManagedRecorderRow(row: ControlPlaneDeploymentRow, state: BatchedM
   };
   const calendarSource = state.calendarSourceByWorkspaceId.get(row.managedWorkspaceId) ?? null;
   const lastSmokeRun = state.lastSmokeRunByWorkspaceId.get(row.managedWorkspaceId) ?? null;
+  const providerProofObservedAt = state.providerProofObservedAtByWorkspaceId.get(row.managedWorkspaceId) ?? null;
+  const providerAuthFailure = state.providerAuthFailureByWorkspaceId.get(row.managedWorkspaceId) ?? null;
+  const providerProofBlocked = Boolean(providerAuthFailure && (!providerProofObservedAt || providerAuthFailure.updatedAt > providerProofObservedAt));
   const failedSyncJobs = state.failedSyncCountByWorkspaceId.get(row.managedWorkspaceId) ?? 0;
+  const internalScheduleCount = state.internalScheduleCountByWorkspaceId.get(row.managedWorkspaceId) ?? { eligible: 0, alreadyCovered: 0 };
+  const internalScheduleReadyCount = internalScheduleCount.eligible + internalScheduleCount.alreadyCovered;
+  const calendarImportReady = Boolean(calendarSource?.status === "ACTIVE" && calendarSource.lastSyncAt && !calendarSource.lastSyncError && failedSyncJobs === 0);
   const entitlementEnabled = state.entitlementByWorkspaceId.get(row.managedWorkspaceId) ?? false;
   const checks = [
     {
@@ -4213,27 +4334,26 @@ function buildManagedRecorderRow(row: ControlPlaneDeploymentRow, state: BatchedM
     },
     ...controlPlaneRecorderRuntimeChecks(effectiveConfig),
     {
-      key: "calendar_source",
-      label: "Master Microsoft calendar",
-      ok: Boolean(calendarSource && calendarSource.status === "ACTIVE"),
-      detail: calendarSource
-        ? `${calendarSource.providerAccountEmail ?? calendarSource.providerAccountId} is ${String(calendarSource.status).toLowerCase()}.`
-        : "No workspace-scoped recorder calendar source connected.",
+      key: "recording_schedule",
+      label: "Corgtex recorder schedule",
+      ok: internalScheduleReadyCount > 0 || calendarImportReady,
+      detail: internalScheduleCount.alreadyCovered > 0
+        ? `${internalScheduleCount.alreadyCovered} upcoming Corgtex scheduled meeting(s) already have recorder coverage.`
+        : internalScheduleCount.eligible > 0
+          ? `${internalScheduleCount.eligible} upcoming Corgtex scheduled meeting(s) are eligible for recorder scheduling.`
+        : calendarImportReady
+          ? "Optional calendar sync is connected and can import recorder meetings into Corgtex."
+          : "No upcoming Corgtex scheduled meetings are ready for recording. Add the meeting to Corgtex before recording; optional calendar sync is not required.",
     },
     {
-      key: "worker_sync",
-      label: "Recorder calendar sync",
-      ok: Boolean(calendarSource?.lastSyncAt && !calendarSource.lastSyncError && failedSyncJobs === 0),
-      detail: sanitizeDiagnosticText(calendarSource?.lastSyncError
-        ?? (calendarSource?.lastSyncAt
-          ? (failedSyncJobs > 0 ? `${failedSyncJobs} failed recorder calendar sync job(s).` : "No failed recorder calendar sync jobs.")
-          : "No successful recorder calendar sync yet.")),
-    },
-    {
-      key: "last_smoke",
-      label: "Latest smoke run",
-      ok: lastSmokeRun?.status === "COMPLETED",
-      detail: lastSmokeRun ? `${lastSmokeRun.status} at ${lastSmokeRun.createdAt.toISOString()}.` : "No recorder smoke run recorded yet.",
+      key: "provider_proof",
+      label: "Recorder provider proof",
+      ok: Boolean(providerProofObservedAt && !providerProofBlocked),
+      detail: providerProofBlocked && providerAuthFailure
+        ? controlPlaneRecorderAuthFailureDetail(providerAuthFailure)
+        : providerProofObservedAt
+        ? `Recent recorder provider proof at ${providerProofObservedAt.toISOString()}.`
+        : "No recent successful recorder smoke, scheduled provider bot, or real recording in the last 30 days.",
     },
   ];
   const failedChecks = checks
@@ -4280,7 +4400,7 @@ function buildManagedRecorderRow(row: ControlPlaneDeploymentRow, state: BatchedM
     failureCount: state.failureCountByWorkspaceId.get(row.managedWorkspaceId) ?? 0,
     status,
     availability,
-    observedAt: config?.updatedAt ?? calendarSource?.updatedAt ?? lastSmokeRun?.createdAt ?? null,
+    observedAt: config?.updatedAt ?? calendarSource?.updatedAt ?? providerProofObservedAt ?? lastSmokeRun?.createdAt ?? null,
     readiness: {
       ready,
       detail: failedChecks[0]?.detail ?? "Recorder readiness checks are passing.",
@@ -6308,8 +6428,176 @@ const RECORDER_VENDOR_CHECK_KEYS = new Set([
   "meeting_baas_api_key",
   "meeting_baas_webhook_secret",
 ]);
-const RECORDER_CALENDAR_CHECK_KEYS = new Set(["calendar_source", "worker_sync"]);
+const RECORDER_SCHEDULE_CHECK_KEYS = new Set(["recording_schedule"]);
+const RECORDER_OPTIONAL_CALENDAR_CHECK_KEYS = new Set(["calendar_source", "worker_sync"]);
 const RECORDER_LIVE_VENDOR_CHECK_KEYS = new Set(["provider_proof"]);
+const CONTROL_PLANE_RECORDER_COVERED_STATUSES = new Set(["PENDING", "SCHEDULED", "JOINING", "RECORDING", "COMPLETED"]);
+const CONTROL_PLANE_RECORDER_COVERAGE_RECORDING_STATUSES = ["PENDING", "SCHEDULED", "JOINING", "RECORDING", "COMPLETED", "FAILED"] as const;
+const CONTROL_PLANE_RECORDER_AUTO_SCHEDULE_MIN_LEAD_MS = 10 * 60 * 1000;
+const CONTROL_PLANE_RECORDER_SCHEDULE_LOOKAHEAD_MS = 30 * 24 * 60 * 60 * 1000;
+const CONTROL_PLANE_RECORDER_PROVIDER_PROOF_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
+const CONTROL_PLANE_RECORDER_COVERAGE_MEETING_LIMIT = 100;
+const CONTROL_PLANE_STALE_RECORDER_FAILURE_CODE = "STALE_RECORDER";
+const CONTROL_PLANE_MEETING_URL_CHANGED_FAILURE_CODE = "MEETING_URL_CHANGED";
+const CONTROL_PLANE_DUPLICATE_RECORDER_FAILURE_CODE = "DUPLICATE_RECORDER";
+
+function effectiveControlPlaneRecorderUrl(meeting: {
+  meetingUrl?: string | null;
+  series?: { meetingUrl?: string | null } | null;
+}) {
+  return meeting.meetingUrl ?? meeting.series?.meetingUrl ?? null;
+}
+
+function controlPlaneRecordingCoversMeeting(recording: {
+  status: string;
+  meetingUrl?: string | null;
+}, meetingUrl: string | null) {
+  return Boolean(
+    recording.meetingUrl
+    && meetingUrl
+    && normalizeMeetingUrl(recording.meetingUrl) === normalizeMeetingUrl(meetingUrl)
+    && CONTROL_PLANE_RECORDER_COVERED_STATUSES.has(recording.status),
+  );
+}
+
+function controlPlaneRecordingShowsSchedulingFailure(recording: { status: string; failureCode?: string | null }) {
+  return recording.status === "FAILED"
+    && recording.failureCode !== CONTROL_PLANE_STALE_RECORDER_FAILURE_CODE
+    && recording.failureCode !== CONTROL_PLANE_MEETING_URL_CHANGED_FAILURE_CODE
+    && recording.failureCode !== CONTROL_PLANE_DUPLICATE_RECORDER_FAILURE_CODE;
+}
+
+function controlPlaneRecorderProofObservedAt(recording: {
+  status?: string | null;
+  endedAt?: Date | null;
+  startedAt?: Date | null;
+  scheduledAt?: Date | null;
+  updatedAt?: Date | null;
+  createdAt: Date;
+}) {
+  if (recording.status === "JOINING") {
+    return recording.endedAt ?? recording.startedAt ?? recording.updatedAt ?? recording.scheduledAt ?? recording.createdAt;
+  }
+  return recording.endedAt ?? recording.startedAt ?? recording.scheduledAt ?? recording.createdAt;
+}
+
+function setLatestControlPlaneProofAt(map: Map<string, Date>, workspaceId: string, observedAt: Date | null | undefined, proofSince: Date) {
+  if (!observedAt || observedAt < proofSince) return;
+  const existing = map.get(workspaceId);
+  if (!existing || observedAt > existing) {
+    map.set(workspaceId, observedAt);
+  }
+}
+
+function buildControlPlaneProviderProofObservedAt(params: {
+  smokeRuns: Array<{
+    workspaceId: string;
+    status: string;
+    completedAt?: Date | null;
+    createdAt: Date;
+  }>;
+  recordings: Array<{
+    workspaceId: string;
+    status?: string | null;
+    endedAt?: Date | null;
+    startedAt?: Date | null;
+    scheduledAt?: Date | null;
+    updatedAt?: Date | null;
+    createdAt: Date;
+  }>;
+  proofSince: Date;
+}) {
+  const proofByWorkspaceId = new Map<string, Date>();
+	  for (const smokeRun of params.smokeRuns) {
+	    if (smokeRun.status !== "COMPLETED") continue;
+	    setLatestControlPlaneProofAt(proofByWorkspaceId, smokeRun.workspaceId, smokeRun.completedAt, params.proofSince);
+	  }
+  for (const recording of params.recordings) {
+    setLatestControlPlaneProofAt(proofByWorkspaceId, recording.workspaceId, controlPlaneRecorderProofObservedAt(recording), params.proofSince);
+  }
+  return proofByWorkspaceId;
+}
+
+function controlPlaneRecorderIsAuthFailure(recording: { failureCode: string | null; failureMessage: string | null }) {
+  const text = `${recording.failureCode ?? ""}\n${recording.failureMessage ?? ""}`.toLowerCase();
+  return text.includes("authentication_failed")
+    || text.includes("invalid api token")
+    || text.includes("invalid_auth")
+    || text.includes("unauthorized")
+    || text.includes("401")
+    || text.includes("region")
+    || recording.failureCode === "configuration_error";
+}
+
+function controlPlaneRecorderAuthFailureDetail(recording: { failureCode: string | null; failureMessage: string | null }) {
+  if (recording.failureCode === "configuration_error") return "Recorder provider credential is not configured.";
+  const message = recording.failureMessage ?? recording.failureCode ?? "Recorder provider authentication failed.";
+  if (/recall/i.test(message) && /401|authentication_failed|invalid api token|region/i.test(message)) {
+    return "Recall authentication failed; verify the configured API token and region.";
+  }
+  return sanitizeDiagnosticText(message.replace(/https?:\/\/\S+/g, "[url]").slice(0, 500));
+}
+
+function buildControlPlaneProviderAuthFailures(recordings: Array<{
+  workspaceId: string;
+  failureCode: string | null;
+  failureMessage: string | null;
+  updatedAt: Date;
+}>) {
+  const failuresByWorkspaceId = new Map<string, { failureCode: string | null; failureMessage: string | null; updatedAt: Date }>();
+  for (const recording of recordings) {
+    if (!controlPlaneRecorderIsAuthFailure(recording)) continue;
+    const existing = failuresByWorkspaceId.get(recording.workspaceId);
+    if (!existing || recording.updatedAt > existing.updatedAt) {
+      failuresByWorkspaceId.set(recording.workspaceId, recording);
+    }
+  }
+  return failuresByWorkspaceId;
+}
+
+function buildControlPlaneInternalScheduleCounts(params: {
+  meetings: Array<{
+    workspaceId: string;
+    recordedAt: Date;
+    meetingUrl: string | null;
+    series: { meetingUrl: string | null } | null;
+    recordings: Array<{
+      status: string;
+      meetingUrl: string;
+      failureCode: string | null;
+    }>;
+  }>;
+  entitlementByWorkspaceId: Map<string, boolean>;
+  configByWorkspaceId: Map<string, { enabled: boolean; autoRecordEnabled: boolean; defaultProvider: MeetingRecorderProvider; fallbackProvider: MeetingRecorderProvider | null }>;
+  now: Date;
+}) {
+  const counts = new Map<string, { eligible: number; alreadyCovered: number }>();
+  const evaluatedByWorkspaceId = new Map<string, number>();
+  for (const meeting of params.meetings) {
+    const evaluated = evaluatedByWorkspaceId.get(meeting.workspaceId) ?? 0;
+    if (evaluated >= CONTROL_PLANE_RECORDER_COVERAGE_MEETING_LIMIT) continue;
+    evaluatedByWorkspaceId.set(meeting.workspaceId, evaluated + 1);
+    const config = params.configByWorkspaceId.get(meeting.workspaceId);
+    const effectiveUrl = effectiveControlPlaneRecorderUrl(meeting);
+    const recorderUrl = normalizeRecorderMeetingUrl(effectiveUrl);
+    if (!effectiveUrl || !recorderUrl?.providerSchedulable) continue;
+    const workspaceCounts = counts.get(meeting.workspaceId) ?? { eligible: 0, alreadyCovered: 0 };
+    if (meeting.recordings.some((recording) => controlPlaneRecordingCoversMeeting(recording, recorderUrl.url))) {
+      workspaceCounts.alreadyCovered += 1;
+      counts.set(meeting.workspaceId, workspaceCounts);
+      continue;
+    }
+    if (!params.entitlementByWorkspaceId.get(meeting.workspaceId) || !config?.enabled) continue;
+    if (!config.autoRecordEnabled) continue;
+    if (!controlPlaneRecorderRuntimeChecks({ defaultProvider: config.defaultProvider, fallbackProvider: null }).every((check) => check.ok)) continue;
+    if (meeting.recordedAt.getTime() - params.now.getTime() <= CONTROL_PLANE_RECORDER_AUTO_SCHEDULE_MIN_LEAD_MS) continue;
+    if (meeting.recordings.some(controlPlaneRecordingShowsSchedulingFailure)) continue;
+
+    workspaceCounts.eligible += 1;
+    counts.set(meeting.workspaceId, workspaceCounts);
+  }
+  return counts;
+}
 
 function normalizeRecorderGateCheck(check: RecorderReadinessCheck): ControlPlaneRecorderReadinessGateCheck {
   return {
@@ -6355,12 +6643,21 @@ function recorderCoverageBlockerLabel(key: string) {
     .join(" ");
 }
 
+function recorderCoverageActiveBlockerEntries(coverage: RecorderCoverageReadiness) {
+  const blockerCounts = new Map<string, number>();
+  for (const meeting of coverage.meetings) {
+    if (meeting.blockerReasons.includes("already_covered")) continue;
+    for (const reason of meeting.blockerReasons) {
+      if (reason === "already_covered") continue;
+      blockerCounts.set(reason, (blockerCounts.get(reason) ?? 0) + 1);
+    }
+  }
+  return [...blockerCounts.entries()];
+}
+
 function recorderMeetingStateGate(coverage: RecorderCoverageReadiness): ControlPlaneRecorderReadinessGate {
-  const coverageEntries = Object.entries(coverage.counts.blockers)
-    .filter(([, count]) => count > 0);
-  const alreadyCoveredCount = coverageEntries.find(([key]) => key === "already_covered")?.[1] ?? 0;
-  const blockers = coverageEntries
-    .filter(([key]) => key !== "already_covered")
+  const alreadyCoveredCount = coverage.counts.blockers.already_covered ?? 0;
+  const blockers = recorderCoverageActiveBlockerEntries(coverage)
     .map(([key, count]) => ({
       key,
       label: recorderCoverageBlockerLabel(key),
@@ -6387,7 +6684,7 @@ function recorderMeetingStateGate(coverage: RecorderCoverageReadiness): ControlP
     };
   }
 
-  if (coverage.counts.eligible === 0 && blockers.length > 0) {
+  if (coverage.counts.eligible === 0 && alreadyCoveredCount === 0 && blockers.length > 0) {
     return {
       key: "meeting_state",
       label: "Scheduled meetings",
@@ -6402,11 +6699,71 @@ function recorderMeetingStateGate(coverage: RecorderCoverageReadiness): ControlP
     label: "Scheduled meetings",
     status: blockers.length > 0 ? "warning" : "pass",
     detail: blockers.length > 0
-      ? `${coverage.counts.eligible} of ${coverage.counts.total} upcoming scheduled meeting(s) are eligible; ${blockers.length} blocker type(s) remain.`
+      ? alreadyCoveredCount > 0
+        ? `${alreadyCoveredCount} upcoming scheduled meeting(s) already have recorder coverage; ${blockers.length} blocker type(s) remain.`
+        : `${coverage.counts.eligible} of ${coverage.counts.total} upcoming scheduled meeting(s) are eligible; ${blockers.length} blocker type(s) remain.`
       : alreadyCoveredCount > 0 && coverage.counts.eligible === 0
         ? `${alreadyCoveredCount} of ${coverage.counts.total} upcoming scheduled meeting(s) already have recorder coverage.`
         : `${coverage.counts.eligible} of ${coverage.counts.total} upcoming scheduled meeting(s) are eligible for recorder coverage.`,
     checks,
+  };
+}
+
+function recorderInternalScheduleCount(coverage: RecorderCoverageReadiness) {
+  return coverage.counts.eligible + (coverage.counts.blockers.already_covered ?? 0);
+}
+
+function recorderScheduleGateFromReadiness(params: {
+  checks: RecorderReadinessCheck[];
+  coverage?: RecorderCoverageReadiness | null;
+  supportConnector?: boolean;
+}): ControlPlaneRecorderReadinessGate {
+  const scheduleChecks = params.checks.filter((check) => RECORDER_SCHEDULE_CHECK_KEYS.has(check.key));
+  if (scheduleChecks.length > 0) {
+    return recorderGateFromChecks({
+      key: "calendar",
+      label: "Recording schedule",
+      checks: scheduleChecks,
+      passDetail: "Corgtex has an internal recorder schedule or optional calendar sync source.",
+      emptyDetail: "Recorder schedule source check was not returned.",
+    });
+  }
+
+  if (params.coverage && recorderInternalScheduleCount(params.coverage) > 0) {
+    const alreadyCovered = params.coverage.counts.blockers.already_covered ?? 0;
+    return {
+      key: "calendar",
+      label: "Recording schedule",
+      status: "pass",
+      detail: alreadyCovered > 0
+        ? `${alreadyCovered} upcoming Corgtex scheduled meeting(s) already have recorder coverage.`
+        : `${params.coverage.counts.eligible} upcoming Corgtex scheduled meeting(s) are eligible for recorder scheduling.`,
+      checks: [{
+        key: "internal_schedule",
+        label: "Corgtex recorder schedule",
+        status: "pass",
+        detail: "Corgtex internal scheduled meetings are available for recorder operations.",
+      }],
+    };
+  }
+
+  const optionalCalendarGate = recorderGateFromChecks({
+    key: "calendar",
+    label: "Recording schedule",
+    checks: params.checks.filter((check) => RECORDER_OPTIONAL_CALENDAR_CHECK_KEYS.has(check.key)),
+    passDetail: "Optional calendar sync is connected and can import recorder meetings into Corgtex.",
+    emptyDetail: params.supportConnector
+      ? "Support connector readiness did not include Corgtex schedule or optional calendar sync checks."
+      : "Recorder schedule source check was not returned.",
+    emptyStatus: "blocked",
+  });
+  if (optionalCalendarGate.status === "pass") return optionalCalendarGate;
+  return {
+    ...optionalCalendarGate,
+    status: "blocked",
+    detail: optionalCalendarGate.detail.includes("calendar")
+      ? optionalCalendarGate.detail
+      : "No upcoming Corgtex scheduled meetings are ready for recording. Add the meeting to Corgtex, or optionally connect calendar sync.",
   };
 }
 
@@ -6436,13 +6793,7 @@ function buildManagedRecorderReadinessGates(
       passDetail: "Recorder vendor runtime credentials are configured.",
       emptyDetail: "Recorder vendor credential checks were not returned.",
     }),
-    calendar: recorderGateFromChecks({
-      key: "calendar",
-      label: "Calendar connection",
-      checks: readiness.checks.filter((check) => RECORDER_CALENDAR_CHECK_KEYS.has(check.key)),
-      passDetail: "Recorder calendar connection and sync checks are passing.",
-      emptyDetail: "Recorder calendar checks were not returned.",
-    }),
+    calendar: recorderScheduleGateFromReadiness({ checks: readiness.checks, coverage }),
     meetingState: recorderMeetingStateGate(coverage),
     liveVendorProof: recorderGateFromChecks({
       key: "live_vendor_proof",
@@ -6488,6 +6839,34 @@ function supportConnectorRecorderReadinessChecks(summary: JsonRecord) {
   return normalizeSupportRecorderReadinessChecks(coverageSummary.providerChecks);
 }
 
+function supportConnectorCoverageBlockerEntries(summary: JsonRecord) {
+  const meetings = Array.isArray(summary.meetings) ? summary.meetings : null;
+  if (meetings) {
+    const blockerCounts = new Map<string, number>();
+    for (const item of meetings) {
+      const meeting = jsonRecordOrNull(item);
+      const reasons = Array.isArray(meeting?.blockerReasons)
+        ? meeting.blockerReasons.filter((reason): reason is string => typeof reason === "string")
+        : [];
+      if (reasons.includes("already_covered")) continue;
+      for (const reason of reasons) {
+        if (reason === "already_covered") continue;
+        blockerCounts.set(reason, (blockerCounts.get(reason) ?? 0) + 1);
+      }
+    }
+    return [...blockerCounts.entries()];
+  }
+
+  const counts = summary.counts && typeof summary.counts === "object"
+    ? summary.counts as { blockers?: unknown }
+    : null;
+  return counts?.blockers && typeof counts.blockers === "object"
+    ? Object.entries(counts.blockers as Record<string, unknown>)
+      .filter(([key, count]) => key !== "already_covered" && typeof count === "number" && count > 0)
+      .map(([key, count]) => [key, count] as const)
+    : [];
+}
+
 function supportConnectorRecorderReadinessGates(params: {
   resultSummary?: unknown;
   errorDetail?: string | null;
@@ -6503,21 +6882,18 @@ function supportConnectorRecorderReadinessGates(params: {
     : null;
   const total = typeof counts?.total === "number" ? counts.total : null;
   const eligible = typeof counts?.eligible === "number" ? counts.eligible : null;
-  const blockerEntries = counts?.blockers && typeof counts.blockers === "object"
-    ? Object.entries(counts.blockers as Record<string, unknown>)
-      .filter(([key, count]) => key !== "already_covered" && typeof count === "number" && count > 0)
-      .map(([key, count]) => ({
-        key,
-        label: recorderCoverageBlockerLabel(key),
-        status: "blocked" as const,
-        detail: `${count} upcoming scheduled meeting(s) are blocked by ${key}.`,
-      }))
-    : [];
   const alreadyCoveredCount = counts?.blockers
     && typeof counts.blockers === "object"
     && typeof (counts.blockers as Record<string, unknown>).already_covered === "number"
     ? (counts.blockers as Record<string, number>).already_covered
     : 0;
+  const blockerEntries = supportConnectorCoverageBlockerEntries(coverageSummary)
+    .map(([key, count]) => ({
+      key,
+      label: recorderCoverageBlockerLabel(key),
+      status: "blocked" as const,
+      detail: `${count} upcoming scheduled meeting(s) are blocked by ${key}.`,
+    }));
   const coveredEntries = alreadyCoveredCount > 0
     ? [{
       key: "already_covered",
@@ -6526,11 +6902,30 @@ function supportConnectorRecorderReadinessGates(params: {
       detail: `${alreadyCoveredCount} upcoming scheduled meeting(s) already have recorder coverage.`,
     }]
     : [];
+  const scheduleChecks = readinessChecks.filter((check) => RECORDER_SCHEDULE_CHECK_KEYS.has(check.key));
+  const scheduleGate = scheduleChecks.length > 0
+    ? recorderScheduleGateFromReadiness({ checks: readinessChecks, supportConnector: true })
+    : total !== null && (eligible ?? 0) + alreadyCoveredCount > 0
+      ? {
+        key: "calendar" as const,
+        label: "Recording schedule",
+        status: "pass" as const,
+        detail: alreadyCoveredCount > 0
+          ? `${alreadyCoveredCount} upcoming Corgtex scheduled meeting(s) already have recorder coverage.`
+          : `${eligible ?? 0} upcoming Corgtex scheduled meeting(s) are eligible for recorder scheduling.`,
+        checks: [{
+          key: "internal_schedule",
+          label: "Corgtex recorder schedule",
+          status: "pass" as const,
+          detail: "Corgtex internal scheduled meetings are available for recorder operations.",
+        }],
+      }
+      : recorderScheduleGateFromReadiness({ checks: readinessChecks, supportConnector: true });
   const meetingStatus: ControlPlaneRecorderReadinessGateStatus = total === null
     ? "unknown"
     : total === 0
       ? "warning"
-      : eligible === 0 && blockerEntries.length > 0
+      : eligible === 0 && alreadyCoveredCount === 0 && blockerEntries.length > 0
         ? "blocked"
         : blockerEntries.length > 0
           ? "warning"
@@ -6568,13 +6963,7 @@ function supportConnectorRecorderReadinessGates(params: {
       passDetail: "Recorder vendor runtime credentials are configured.",
       emptyDetail: "Support connector readiness did not include vendor credential checks.",
     }),
-    calendar: recorderGateFromChecks({
-      key: "calendar",
-      label: "Calendar connection",
-      checks: readinessChecks.filter((check) => RECORDER_CALENDAR_CHECK_KEYS.has(check.key)),
-      passDetail: "Recorder calendar connection and sync checks are passing.",
-      emptyDetail: "Support connector readiness did not include calendar connection checks.",
-    }),
+    calendar: scheduleGate,
     meetingState: {
       key: "meeting_state",
       label: "Scheduled meetings",
@@ -6583,9 +6972,11 @@ function supportConnectorRecorderReadinessGates(params: {
         ? "Support connector readiness did not include scheduled meeting coverage counts."
         : total === 0
           ? "No upcoming scheduled meetings were found by the support connector."
-          : alreadyCoveredCount > 0 && (eligible ?? 0) === 0 && blockerEntries.length === 0
-            ? `${alreadyCoveredCount} of ${total} upcoming scheduled meeting(s) already have recorder coverage.`
-            : `${eligible ?? 0} of ${total} upcoming scheduled meeting(s) are eligible for recorder coverage.`,
+          : alreadyCoveredCount > 0 && blockerEntries.length > 0
+            ? `${alreadyCoveredCount} upcoming scheduled meeting(s) already have recorder coverage; ${blockerEntries.length} blocker type(s) remain.`
+            : alreadyCoveredCount > 0 && (eligible ?? 0) === 0
+              ? `${alreadyCoveredCount} of ${total} upcoming scheduled meeting(s) already have recorder coverage.`
+              : `${eligible ?? 0} of ${total} upcoming scheduled meeting(s) are eligible for recorder coverage.`,
       checks: [...coveredEntries, ...blockerEntries],
     },
     liveVendorProof: recorderGateFromChecks({
@@ -6721,11 +7112,11 @@ export async function getControlPlaneMeetingOperationsReadiness(actor: AppActor,
       };
     }
   }
-  const [agenda, recorder, coverage] = await Promise.all([
+  const [agenda, recorder] = await Promise.all([
     getMeetingAgendaReadiness(managedWorkspaceId),
     getMeetingRecorderEnterpriseReadiness(managedWorkspaceId),
-    getMeetingRecorderCoverageReadiness(managedWorkspaceId),
   ]);
+  const coverage = recorder.coverage;
   return {
     deploymentId,
     managedWorkspaceId,
