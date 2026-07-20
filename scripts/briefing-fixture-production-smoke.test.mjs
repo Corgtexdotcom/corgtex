@@ -1,3 +1,6 @@
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
 
 import {
@@ -298,5 +301,41 @@ describe("briefing fixture production smoke validation matrix", () => {
         { entry: { id: "archive:Action:action-1" } },
       ],
     })).toBe("Validation cleanup failed for restore:WorkspaceBriefing:briefing-1, archive:Action:action-1");
+  });
+
+  it("checks existing briefing ownership before creating fixture records", async () => {
+    const outDir = await mkdtemp(path.join(tmpdir(), "corgtex-briefing-fixture-"));
+    try {
+      const calls = [];
+      const smoke = new BriefingFixtureSmoke({
+        baseUrl: "https://app.corgtex.com",
+        outDir,
+        expectedGitSha: null,
+        workspaceSelector: { workspaceSlug: "corgtex-validation", explicit: true },
+        authEmail: "admin@example.com",
+        authPassword: "password",
+        prNumbers: [724],
+        prisma: { $disconnect: vi.fn() },
+        generatedAt: "2026-04-30T12:00:00.000Z",
+      });
+      smoke.verifyHealth = vi.fn(async () => calls.push("health"));
+      smoke.login = vi.fn(async () => calls.push("login"));
+      smoke.snapshotExistingBriefing = vi.fn(async () => {
+        calls.push("snapshot");
+        throw new Error("Existing 2026-04-30 workspace briefing is owned by another production validation run.");
+      });
+      smoke.createFixtureRecords = vi.fn(async () => calls.push("create-fixture"));
+
+      await expect(smoke.run()).rejects.toThrow("owned by another production validation run");
+
+      expect(calls).toEqual(["health", "login", "snapshot"]);
+      expect(smoke.createFixtureRecords).not.toHaveBeenCalled();
+      expect(smoke.validationRun.results[0]).toMatchObject({
+        result: "partial",
+        blocker: "Existing 2026-04-30 workspace briefing is owned by another production validation run.",
+      });
+    } finally {
+      await rm(outDir, { recursive: true, force: true });
+    }
   });
 });
