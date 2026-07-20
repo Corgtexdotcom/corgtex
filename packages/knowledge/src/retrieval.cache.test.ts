@@ -168,6 +168,35 @@ describe("knowledge retrieval cache", () => {
     expect(modelGatewayMock.rerank).toHaveBeenCalledTimes(2);
   });
 
+  it("keeps the Postgres candidate window broad when source types are filtered", async () => {
+    prismaMock.knowledgeChunk.findMany.mockResolvedValue([
+      {
+        id: "chunk-brain",
+        sourceType: "BRAIN_ARTICLE",
+        sourceId: "article-1",
+        sourceTitle: "Brain article",
+        chunkIndex: 0,
+        content: "Brain article content about deployment runbooks.",
+        embedding: [1, 0],
+        createdAt: new Date("2026-04-03T09:00:00.000Z"),
+      },
+    ]);
+
+    await searchIndexedKnowledge({
+      workspaceId: "ws-1",
+      query: "deployment runbooks",
+      sourceTypes: ["BRAIN_ARTICLE"],
+      limit: 3,
+    });
+
+    expect(prismaMock.knowledgeChunk.findMany).toHaveBeenNthCalledWith(1, expect.objectContaining({
+      where: expect.objectContaining({
+        sourceType: { in: ["BRAIN_ARTICLE"] },
+      }),
+      take: 500,
+    }));
+  });
+
   it("invalidates cached retrieval when a source is resynced", async () => {
     prismaMock.knowledgeChunk.findMany.mockResolvedValue([
       {
