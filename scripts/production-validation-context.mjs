@@ -147,6 +147,10 @@ function dispatchSmokeEnabled(value, eventName) {
   return normalizeOptionalText(value).toLowerCase() !== "false";
 }
 
+function booleanWorkflowInput(value) {
+  return normalizeOptionalText(value).toLowerCase() === "true";
+}
+
 function expectedGitShaForRun({ eventName, event, githubSha, expectedInput, changedFiles }) {
   const explicit = validateGitSha(expectedInput, "expected_git_sha");
   if (explicit) return explicit;
@@ -203,6 +207,7 @@ export function resolveProductionValidationContext({
   prNumbersInput,
   baselinePrNumbers,
   recorderDeploymentsInput,
+  recorderTempMeetingsInput,
   clientReadinessRoutesInput,
   smokeInputs = {},
   changedFiles = [],
@@ -243,6 +248,7 @@ export function resolveProductionValidationContext({
     briefing_fixture_smoke: boolOutput(enabled && dispatchSmokeEnabled(smokeInputs.briefingFixture, eventName)),
     recorder_readiness_smoke: boolOutput(enabled && dispatchSmokeEnabled(smokeInputs.recorderReadiness, eventName)),
     recorder_readiness_deployments: normalizeOptionalText(recorderDeploymentsInput) || DEFAULT_RECORDER_DEPLOYMENTS,
+    recorder_readiness_temp_meetings: boolOutput(enabled && eventName === "workflow_dispatch" && booleanWorkflowInput(recorderTempMeetingsInput)),
   };
 }
 
@@ -291,6 +297,7 @@ async function main() {
     prNumbersInput: process.env.PRODUCTION_VALIDATION_PR_NUMBERS_INPUT,
     baselinePrNumbers: process.env.PRODUCTION_VALIDATION_BASELINE_PR_NUMBERS,
     recorderDeploymentsInput: process.env.PRODUCTION_VALIDATION_RECORDER_DEPLOYMENTS_INPUT,
+    recorderTempMeetingsInput: process.env.PRODUCTION_VALIDATION_RECORDER_TEMP_MEETINGS_INPUT,
     clientReadinessRoutesInput: process.env.PRODUCTION_VALIDATION_CLIENT_READINESS_ROUTES_INPUT,
     smokeInputs: {
       crm: process.env.PRODUCTION_VALIDATION_CRM_SMOKE_INPUT,

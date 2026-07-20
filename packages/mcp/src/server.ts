@@ -54,6 +54,9 @@ import {
   listMeetings,
   getMeeting,
   createMeeting,
+  createMeetingSeries,
+  scheduleMeetingRecording,
+  cancelMeetingRecording,
   ensureUpcomingScheduledMeetingRecorderCoverage,
   enqueueRecorderCalendarSync,
   getRecorderCalendarSource,
@@ -3558,6 +3561,61 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
   // ===========================================================================
 
   tool(
+    "create_scheduled_meeting",
+    "Create an internal Corgtex scheduled meeting. This does not send external calendar invites.",
+    {
+      title: z.string(),
+      startsAt: z.string(),
+      scheduledEndAt: z.string().optional(),
+      description: z.string().optional(),
+      recurrenceRule: z.string().optional(),
+      meetingUrl: z.string().optional(),
+      participantIds: z.array(z.string()).optional(),
+      participantEmails: z.array(z.string()).optional(),
+    },
+    async (params: {
+      title: string;
+      startsAt: string;
+      scheduledEndAt?: string;
+      description?: string;
+      recurrenceRule?: string;
+      meetingUrl?: string;
+      participantIds?: string[];
+      participantEmails?: string[];
+    }) => {
+      requireScope(sessionCtx, "meetings:write");
+      const startsAt = new Date(params.startsAt);
+      const scheduledEndAt = params.scheduledEndAt ? new Date(params.scheduledEndAt) : null;
+      if (Number.isNaN(startsAt.valueOf())) {
+        throw new AppError(400, "INVALID_INPUT", "startsAt must be a valid ISO timestamp.");
+      }
+      if (scheduledEndAt && Number.isNaN(scheduledEndAt.valueOf())) {
+        throw new AppError(400, "INVALID_INPUT", "scheduledEndAt must be a valid ISO timestamp.");
+      }
+      const result = await createMeetingSeries(actor, {
+        workspaceId,
+        title: params.title,
+        description: params.description ?? null,
+        startsAt,
+        scheduledEndAt,
+        recurrenceRule: params.recurrenceRule ?? null,
+        meetingUrl: params.meetingUrl ?? null,
+        participantIds: params.participantIds ?? [],
+        participantEmails: params.participantEmails ?? [],
+      });
+      const meetingIds = result.meetings.map((meeting: any) => meeting.id);
+      return jsonResult({
+        seriesId: result.series.id,
+        meetingIds,
+        firstMeetingId: meetingIds[0] ?? null,
+        createdMeetingCount: meetingIds.length,
+        hasMeetingUrl: Boolean(result.series.meetingUrl),
+        webUrl: webUrl(workspaceId, `/meetings`),
+      });
+    },
+  );
+
+  tool(
     "list_meetings",
     "List meetings in the workspace with their summaries.",
     {
@@ -3765,6 +3823,61 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
         updatedFutureScheduledMeetings: result.updatedFutureScheduledMeetings,
         hasMeetingUrl: Boolean(result.series.meetingUrl),
         webUrl: webUrl(workspaceId, `/meetings`),
+      });
+    },
+  );
+
+  tool(
+    "schedule_meeting_recording",
+    "Schedule the recorder for one existing scheduled Corgtex meeting. Support connector only; raw meeting URLs and bot IDs are not returned.",
+    {
+      meetingId: z.string(),
+      provider: z.enum(["RECALL_AI", "MEETING_BAAS"]).optional(),
+    },
+    async ({ meetingId, provider }: { meetingId: string; provider?: "RECALL_AI" | "MEETING_BAAS" }) => {
+      requireScope(sessionCtx, "meetings:write");
+      requireSupportCredential();
+      const recording = await scheduleMeetingRecording(actor, {
+        workspaceId,
+        meetingId,
+        provider: provider ?? null,
+        mode: "manual",
+      });
+      return jsonResult({
+        workspaceId,
+        meetingId,
+        recording: {
+          id: recording.id,
+          provider: recording.provider,
+          status: recording.status,
+          failureCode: recording.failureCode ?? null,
+          hasExternalBot: Boolean(recording.externalBotId),
+          joinAt: recording.joinAt ?? null,
+          scheduledAt: recording.scheduledAt ?? null,
+        },
+      });
+    },
+  );
+
+  tool(
+    "cancel_meeting_recording",
+    "Cancel the active recorder for one Corgtex meeting. Support connector only; raw bot IDs are not returned.",
+    {
+      meetingId: z.string(),
+    },
+    async ({ meetingId }: { meetingId: string }) => {
+      requireScope(sessionCtx, "meetings:write");
+      requireSupportCredential();
+      const recording = await cancelMeetingRecording(actor, { workspaceId, meetingId });
+      return jsonResult({
+        workspaceId,
+        meetingId,
+        recording: {
+          id: recording.id,
+          provider: recording.provider,
+          status: recording.status,
+          endedAt: recording.endedAt ?? null,
+        },
       });
     },
   );

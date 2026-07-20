@@ -58,6 +58,11 @@ on:
         description: Comma-separated deployment ids, slugs, labels, or managed workspace slugs for recorder readiness.
         required: false
         default: managed-recorder-validation
+      recorder_readiness_temp_meetings:
+        description: Create and clean up tagged temporary Corgtex scheduled meetings when recorder readiness needs setup.
+        required: true
+        type: boolean
+        default: false
   workflow_run:
     workflows: ["CI"]
     types: [completed]
@@ -89,6 +94,7 @@ jobs:
       briefing_fixture_smoke: ${{ steps.context.outputs.briefing_fixture_smoke }}
       recorder_readiness_smoke: ${{ steps.context.outputs.recorder_readiness_smoke }}
       recorder_readiness_deployments: ${{ steps.context.outputs.recorder_readiness_deployments }}
+      recorder_readiness_temp_meetings: ${{ steps.context.outputs.recorder_readiness_temp_meetings }}
     steps:
       - uses: actions/checkout@v5
         with:
@@ -119,6 +125,7 @@ jobs:
           PRODUCTION_VALIDATION_PR_NUMBERS_INPUT: ${{ inputs.pr_numbers || '' }}
           PRODUCTION_VALIDATION_BASELINE_PR_NUMBERS: ${{ vars.PRODUCTION_VALIDATION_BASELINE_PR_NUMBERS || vars.PRODUCTION_VALIDATION_CRM_BASELINE_PR_NUMBERS || '696' }}
           PRODUCTION_VALIDATION_RECORDER_DEPLOYMENTS_INPUT: ${{ inputs.recorder_readiness_deployments || vars.PRODUCTION_VALIDATION_RECORDER_DEPLOYMENTS || 'managed-recorder-validation' }}
+          PRODUCTION_VALIDATION_RECORDER_TEMP_MEETINGS_INPUT: ${{ inputs.recorder_readiness_temp_meetings }}
           PRODUCTION_VALIDATION_CRM_SMOKE_INPUT: ${{ inputs.crm_smoke }}
           PRODUCTION_VALIDATION_TELEMETRY_RELEASE_SMOKE_INPUT: ${{ inputs.telemetry_release_smoke }}
           PRODUCTION_VALIDATION_CLIENT_READINESS_SMOKE_INPUT: ${{ inputs.client_readiness_smoke }}
@@ -147,6 +154,7 @@ jobs:
           BRIEFING_FIXTURE_SMOKE_SUMMARY: ${{ steps.context.outputs.briefing_fixture_smoke }}
           RECORDER_READINESS_SMOKE_SUMMARY: ${{ steps.context.outputs.recorder_readiness_smoke }}
           RECORDER_READINESS_DEPLOYMENTS_SUMMARY: ${{ steps.context.outputs.recorder_readiness_deployments }}
+          RECORDER_READINESS_TEMP_MEETINGS_SUMMARY: ${{ steps.context.outputs.recorder_readiness_temp_meetings }}
         run: |
           set -euo pipefail
           expected_sha="$EXPECTED_SHA_SUMMARY"
@@ -173,6 +181,7 @@ jobs:
             printf -- '- Briefing fixture smoke: %s\n' "$BRIEFING_FIXTURE_SMOKE_SUMMARY"
             printf -- '- Recorder readiness smoke: %s\n' "$RECORDER_READINESS_SMOKE_SUMMARY"
             printf -- '- Recorder readiness deployments: %s\n' "$RECORDER_READINESS_DEPLOYMENTS_SUMMARY"
+            printf -- '- Recorder readiness temp meetings: %s\n' "$RECORDER_READINESS_TEMP_MEETINGS_SUMMARY"
           } >> "$GITHUB_STEP_SUMMARY"
 
   telemetry-release-production-smoke:
@@ -1194,6 +1203,7 @@ jobs:
       OUT_DIR: .artifacts/production-validation/recorder-readiness
       PR_NUMBERS: ${{ needs.validation-context.outputs.pr_numbers }}
       DEPLOYMENTS: ${{ needs.validation-context.outputs.recorder_readiness_deployments }}
+      TEMP_MEETINGS: ${{ needs.validation-context.outputs.recorder_readiness_temp_meetings }}
       CONTROL_PLANE_URL: ${{ vars.CONTROL_PLANE_URL || 'https://ops.corgtex.com' }}
     steps:
       - uses: actions/checkout@v5
@@ -1272,6 +1282,7 @@ jobs:
             echo "base_url=$BASE_URL"
             echo "control_plane_url=$CONTROL_PLANE_URL"
             echo "deployments=$DEPLOYMENTS"
+            echo "temp_meetings=$TEMP_MEETINGS"
             echo "pr_numbers=$PR_NUMBERS"
             echo "expected_git_sha=$EXPECTED_GIT_SHA"
           } > "$OUT_DIR/workflow.log"
@@ -1327,6 +1338,9 @@ jobs:
           RECORDER_READINESS_SMOKE_DEPLOYMENTS: ${{ env.DEPLOYMENTS }}
           RECORDER_READINESS_SMOKE_PR_NUMBERS: ${{ env.PR_NUMBERS }}
           RECORDER_READINESS_SMOKE_EXPECTED_GIT_SHA: ${{ steps.validation_inputs.outputs.expected_git_sha }}
+          RECORDER_READINESS_SMOKE_TEMP_MEETINGS: ${{ env.TEMP_MEETINGS }}
+          RECORDER_READINESS_SMOKE_TEMP_MEETING_URL: ${{ secrets.PRODUCTION_VALIDATION_RECORDER_MEETING_URL }}
+          RECORDER_READINESS_SMOKE_PROVIDER: ${{ vars.PRODUCTION_VALIDATION_RECORDER_PROVIDER || 'RECALL_AI' }}
           CONTROL_PLANE_URL: ${{ env.CONTROL_PLANE_URL }}
           CONTROL_PLANE_AGENT_API_KEY: ${{ secrets.CONTROL_PLANE_AGENT_API_KEY }}
 

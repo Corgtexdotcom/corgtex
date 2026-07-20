@@ -134,7 +134,7 @@ jobs:
           package-manager-cache: false
       - run: node scripts/check-public-docs.mjs
       - run: node scripts/check-private-boundary.mjs
-      - run: npm i -g mint
+      - run: npm i -g mint@4.2.717
       - run: mint validate
         working-directory: docs
       - run: mint broken-links
