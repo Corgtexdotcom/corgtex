@@ -89,4 +89,17 @@ describe("control-plane copy", () => {
     expect(switcher).toContain("params.set(\"client\", clientId)");
     expect(switcher).toContain("params.delete(\"client\")");
   });
+
+  it("keeps recorder support-connector setup reachable from deployment details", () => {
+    const tabs = readSource("./deployments/[deploymentId]/_components/detail-client-tabs.tsx");
+
+    expect(tabs).toContain("hasRecorderSupportConnector");
+    expect(tabs).toContain("canRunRecorderOperations");
+    expect(tabs).toContain("SUPPORT_CONNECTOR_OPERATION_BLOCKED_STATUSES");
+    expect(tabs).toContain("\"not_configured\"");
+    expect(tabs).toContain("\"requires_connector\"");
+    expect(tabs).toContain("/meeting-recorders/microsoft/connect");
+    expect(tabs).toContain("disabled={!canRunRecorderOperations}");
+    expect(tabs).toContain("Support-connector deployments use the remote operations below.");
+  });
 });
