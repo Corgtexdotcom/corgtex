@@ -223,6 +223,16 @@ export function CustomerDetailClientTabs({
     : [];
   const recorderCalendarSource = recorderIntegration?.calendarSource ?? null;
   const recorderLastSmokeRun = recorderIntegration?.lastSmokeRun ?? null;
+  const hasManagedRecorderWorkspace = Boolean(customer.managedWorkspaceId);
+  const supportConnectorStatus = String(customer.supportConnectorStatus ?? "").toLowerCase();
+  const hasRecorderSupportConnector = Boolean(customer.hasSupportCredential && supportConnectorStatus === "connected");
+  const canRunRecorderOperations = hasManagedRecorderWorkspace || hasRecorderSupportConnector;
+  const recorderOperationAccessLabel = hasManagedRecorderWorkspace
+    ? "Managed workspace"
+    : hasRecorderSupportConnector
+      ? "Support connector"
+      : "Unavailable";
+  const recorderMicrosoftConnectPath = `/api/control-plane/deployments/${customer.id}/meeting-recorders/microsoft/connect`;
   const fleetSnapshots = Array.isArray(customer.fleetSnapshots) ? customer.fleetSnapshots : [];
   const latestSnapshot = (kind: string) => fleetSnapshots.find((snapshot: any) => snapshot.snapshotKind === kind) ?? null;
   const healthSnapshot = latestSnapshot("HEALTH");
@@ -1212,6 +1222,7 @@ export function CustomerDetailClientTabs({
                     { label: "Failures", value: recorderIntegration?.failures ?? 0 },
                     { label: "Auto record", value: recorderIntegration?.autoRecordEnabled ? "Enabled" : "Disabled" },
                     { label: "Calendar", value: recorderCalendarSource?.providerAccountEmail ?? recorderCalendarSource?.status ?? "Not connected" },
+                    { label: "Operation access", value: recorderOperationAccessLabel },
                   ].map((item) => (
                     <div key={item.label} className={detailInnerPanelClass}>
                       <span className="block text-[9px] font-bold uppercase tracking-wider text-muted">{item.label}</span>
@@ -1259,7 +1270,7 @@ export function CustomerDetailClientTabs({
             <div className={`${detailPanelClass} h-fit space-y-5`}>
               <div>
                 <h3 className="text-sm font-semibold text-white">Recorder Configuration</h3>
-                <p className="mt-0.5 text-[10px] text-muted">Changes are audited and require a managed workspace.</p>
+                <p className="mt-0.5 text-[10px] text-muted">Managed workspace changes are audited here. Support-connector deployments use the remote operations below.</p>
               </div>
 
               <form action={configureMeetingRecorderIntegrationAction} className="space-y-3 text-xs">
@@ -1295,13 +1306,30 @@ export function CustomerDetailClientTabs({
                 <input name="botName" defaultValue={recorderIntegration?.botName ?? ""} placeholder="Recorder bot name" className={`${controlPlaneInputClass} w-full`} />
                 <input name="entryMessage" defaultValue={recorderIntegration?.entryMessage ?? ""} placeholder="Recorder entry message" className={`${controlPlaneInputClass} w-full`} />
                 <input name="reason" required placeholder="Audit reason" className={`${controlPlaneInputClass} w-full`} />
-                <button type="submit" disabled={!customer.managedWorkspaceId} className={`${detailPrimaryButtonClass} w-full`}>
+                <button type="submit" disabled={!hasManagedRecorderWorkspace} className={`${detailPrimaryButtonClass} w-full`}>
                   Save recorder config
                 </button>
               </form>
 
               <div className="border-t border-line pt-4">
-                <h3 className="text-sm font-semibold text-white">Recorder Operations</h3>
+                <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                  <div>
+                    <h3 className="text-sm font-semibold text-white">Recorder Operations</h3>
+                    <p className="mt-0.5 text-[10px] text-muted">Available through {recorderOperationAccessLabel.toLowerCase()}.</p>
+                  </div>
+                  {canRunRecorderOperations ? (
+                    <a href={recorderMicrosoftConnectPath} className={controlPlaneButtonClass}>
+                      Connect Microsoft calendar
+                    </a>
+                  ) : (
+                    <span className={`${controlPlaneButtonClass} cursor-not-allowed opacity-50`}>
+                      Connect Microsoft calendar
+                    </span>
+                  )}
+                </div>
+                {!canRunRecorderOperations && (
+                  <DisabledActionHint>Connect a support connector or managed workspace before running recorder operations.</DisabledActionHint>
+                )}
                 <form action={runMeetingRecorderOperationAction} className="mt-3 space-y-3 text-xs">
                   <input type="hidden" name="deploymentId" value={customer.id} />
                   <input type="hidden" name="joinAtTimezoneOffsetMinutes" value={timezoneOffsetMinutes} />
@@ -1315,7 +1343,7 @@ export function CustomerDetailClientTabs({
                   <input name="meetingUrl" placeholder="Meeting URL for live smoke" className={`${controlPlaneInputClass} w-full`} />
                   <input name="joinAt" type="datetime-local" className={`${controlPlaneInputClass} w-full`} />
                   <input name="reason" required placeholder="Audit reason" className={`${controlPlaneInputClass} w-full`} />
-                  <button type="submit" disabled={!customer.managedWorkspaceId} className={`${detailPrimaryButtonClass} w-full`}>
+                  <button type="submit" disabled={!canRunRecorderOperations} className={`${detailPrimaryButtonClass} w-full`}>
                     Run recorder operation
                   </button>
                 </form>
