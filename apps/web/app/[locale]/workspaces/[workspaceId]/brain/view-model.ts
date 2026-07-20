@@ -250,13 +250,16 @@ export function buildBrainIndexState<
   meetings: TMeeting[];
   documents: TDocument[];
   searchParams: BrainSearchParams;
+  typeCounts?: BrainTypeCount[];
   now?: Date;
 }): BrainIndexState<TArticle, TMeeting, TDocument> {
   const normalized = normalizeBrainIndexSearch(params.searchParams);
 
   return {
     ...normalized,
-    typeCounts: buildBrainTypeCounts(params.articles),
+    typeCounts: params.typeCounts
+      ? params.typeCounts.filter((entry) => entry.count > 0).sort(compareBrainTypeCounts)
+      : buildBrainTypeCounts(params.articles),
     visibleArticles: filterBrainArticlesByType(params.articles, normalized.selectedType),
     typeSummaries: buildBrainTypeSummaries(params.articles),
     meetings: filterBrainRecordsByRange(params.meetings, normalized.range, "recordedAt", params.now),

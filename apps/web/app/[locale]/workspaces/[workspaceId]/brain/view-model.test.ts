@@ -107,6 +107,30 @@ describe("Brain index view model", () => {
     expect(filterBrainArticlesByType(articles, null)).toHaveLength(3);
   });
 
+  it("keeps uncapped type counts even when the article page is sparse", () => {
+    const articles = [
+      article({ id: "process-1", slug: "process-1", title: "Process 1", type: "PROCESS" }),
+    ];
+
+    const state = buildBrainIndexState({
+      articles,
+      meetings: [],
+      documents: [],
+      searchParams: {},
+      typeCounts: [
+        { type: "STRATEGY", count: 12 },
+        { type: "PROCESS", count: 1 },
+        { type: "PROJECT", count: 0 },
+      ],
+      now: new Date("2026-07-20T12:00:00.000Z"),
+    });
+
+    expect(state.typeCounts).toEqual([
+      { type: "STRATEGY", count: 12 },
+      { type: "PROCESS", count: 1 },
+    ]);
+  });
+
   it("filters raw meetings and documents by 30d, 90d, and all ranges", () => {
     const now = new Date("2026-07-20T12:00:00.000Z");
     const meetings = [

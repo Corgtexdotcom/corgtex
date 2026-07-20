@@ -14,6 +14,7 @@ import {
   buildBrainIndexState,
   canManageBrainArticle,
   getUnresolvedBrainSearchArticleRefs,
+  normalizeBrainIndexSearch,
   resolveBrainSearchResults,
 } from "./view-model";
 
@@ -33,11 +34,17 @@ export default async function BrainPage({
   const membership = await requireWorkspaceMembership({ actor, workspaceId });
   const t = await getTranslations("brain");
   const resolvedSearch = searchParams ? await searchParams : {};
-  const provisionalQuery = typeof resolvedSearch.q === "string" ? resolvedSearch.q : "";
-  const provisionalQuestion = typeof resolvedSearch.question === "string" ? resolvedSearch.question : "";
+  const normalizedSearch = normalizeBrainIndexSearch(resolvedSearch);
+  const provisionalQuery = normalizedSearch.query;
+  const provisionalQuestion = normalizedSearch.question;
 
-  const [{ items: articles }, status, searchResults, answer, allMeetings, allDocuments] = await Promise.all([
-    listArticles(actor, { workspaceId, take: 500 }),
+  const [{ items: articles }, articleTypeCounts, status, searchResults, answer, allMeetings, allDocuments] = await Promise.all([
+    listArticles(actor, {
+      workspaceId,
+      take: 500,
+      ...(normalizedSearch.selectedType ? { type: normalizedSearch.selectedType } : {}),
+    }),
+    listBrainArticleTypeCounts({ workspaceId, actor, membership }),
     getBrainStatus(actor, { workspaceId }),
     provisionalQuery.trim()
       ? searchIndexedKnowledge({ workspaceId, query: provisionalQuery, limit: 12, sourceTypes: ["BRAIN_ARTICLE"] })
@@ -64,6 +71,7 @@ export default async function BrainPage({
     meetings: allMeetings,
     documents: allDocuments,
     searchParams: resolvedSearch,
+    typeCounts: articleTypeCounts,
   });
   const resolvedSearchArticleRefs = await listSearchResultArticleRefs({
     workspaceId,
@@ -76,6 +84,10 @@ export default async function BrainPage({
 
   const filterHref = (type: string | null) => buildBrainIndexHref({ query, question, range, type });
   const rangeHref = (nextRange: "30d" | "90d" | "all") => buildBrainIndexHref({ query, question, range: nextRange, type: selectedType });
+  const articleTotal = typeCounts.reduce((total, entry) => total + entry.count, 0);
+  const selectedTotal = selectedType
+    ? (typeCounts.find((entry) => entry.type === selectedType)?.count ?? 0)
+    : articleTotal;
   const selectedCount = visibleArticles.length;
 
   return (
@@ -193,7 +205,7 @@ export default async function BrainPage({
             <div>
               <h2 className="nr-section-header">{t("fullDirectory")}</h2>
               <p className="nr-meta">
-                {t("directoryShowing", { count: selectedCount, total: articles.length })}
+                {t("directoryShowing", { count: selectedCount, total: selectedTotal })}
               </p>
             </div>
           </div>
@@ -201,7 +213,7 @@ export default async function BrainPage({
           <nav className="brain-filter-bar" aria-label={t("typeFilter")}>
             <a className={`brain-filter-chip${selectedType ? "" : " active"}`} href={filterHref(null)}>
               <span>{t("all")}</span>
-              <strong>{articles.length}</strong>
+              <strong>{articleTotal}</strong>
             </a>
             {typeCounts.map(({ type, count }) => (
               <a key={type} className={`brain-filter-chip${selectedType === type ? " active" : ""}`} href={filterHref(type)}>
@@ -384,6 +396,30 @@ function authorityTagClass(authority: string) {
   return "tag neutral";
 }
 
+async function listBrainArticleTypeCounts(params: {
+  workspaceId: string;
+  actor: AppActor;
+  membership: { id?: string | null; role?: string | null } | null | undefined;
+}) {
+  const counts = await prisma.brainArticle.groupBy({
+    by: ["type"],
+    where: {
+      AND: [
+        { workspaceId: params.workspaceId, archivedAt: null },
+        { OR: brainArticleVisibility(params.actor, params.membership) },
+      ],
+    },
+    _count: {
+      _all: true,
+    },
+  });
+
+  return counts.map((entry) => ({
+    type: entry.type,
+    count: entry._count._all,
+  }));
+}
+
 async function listSearchResultArticleRefs(params: {
   workspaceId: string;
   actor: AppActor;
@@ -397,14 +433,14 @@ async function listSearchResultArticleRefs(params: {
   return prisma.brainArticle.findMany({
     where: {
       AND: [
-        { workspaceId: params.workspaceId },
+        { workspaceId: params.workspaceId, archivedAt: null },
         {
           OR: [
             { id: { in: unresolvedRefs } },
             { slug: { in: unresolvedRefs } },
           ],
         },
-        { OR: brainSearchArticleVisibility(params.actor, params.membership) },
+        { OR: brainArticleVisibility(params.actor, params.membership) },
       ],
     },
     select: {
@@ -414,7 +450,7 @@ async function listSearchResultArticleRefs(params: {
   });
 }
 
-function brainSearchArticleVisibility(
+function brainArticleVisibility(
   actor: AppActor,
   membership: { id?: string | null; role?: string | null } | null | undefined,
 ) {

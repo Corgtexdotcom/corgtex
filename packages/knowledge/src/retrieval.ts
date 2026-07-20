@@ -28,6 +28,7 @@ export type KnowledgeSearchResult = KnowledgeCitation & {
 const SEARCH_CACHE_TTL_MS = 2 * 60 * 1000;
 const DEFAULT_SEARCH_LIMIT = 5;
 const DEFAULT_ANSWER_LIMIT = 8;
+const POSTGRES_SEARCH_WINDOW = 500;
 const DEFAULT_LEXICAL_WEIGHT = 0.35;
 const DEFAULT_SEMANTIC_WEIGHT = 0.65;
 
@@ -266,7 +267,7 @@ async function searchIndexedKnowledgePostgres(params: {
         : undefined,
     },
     orderBy: [{ createdAt: "desc" }, { chunkIndex: "asc" }],
-    take: params.sourceTypes ? 250 : 500,
+    take: POSTGRES_SEARCH_WINDOW,
     select: {
       id: true,
       sourceType: true,
