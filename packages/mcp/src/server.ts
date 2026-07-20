@@ -56,6 +56,7 @@ import {
   createMeeting,
   ensureUpcomingScheduledMeetingRecorderCoverage,
   getMeetingRecorderCoverageReadiness,
+  getMeetingRecorderEnterpriseReadiness,
   intakeMeetingTranscript,
   setMeetingRecorderAutoRecordingForSupport,
   setMeetingSeriesRecorderUrl,
@@ -219,6 +220,76 @@ function relationshipSuggestionRecord(workspaceId: string, suggestion: any) {
 
 function jsonResult(value: unknown) {
   return { content: [{ type: "text" as const, text: JSON.stringify(value, null, 2) }] };
+}
+
+function compactMeetingRecorderOperationsReadiness(recorder: any, coverage: any) {
+  const checks = Array.isArray(recorder?.checks)
+    ? recorder.checks.map((check: any) => ({
+      key: String(check.key ?? ""),
+      label: String(check.label ?? check.key ?? ""),
+      ok: Boolean(check.ok),
+      detail: String(check.detail ?? ""),
+    })).filter((check: any) => check.key && check.label)
+    : [];
+  const failedChecks = checks
+    .filter((check: any) => !check.ok)
+    .map((check: any) => ({
+      key: check.key,
+      label: check.label,
+      detail: check.detail,
+    }));
+  return {
+    workspaceId: recorder.workspaceId,
+    ready: Boolean(recorder.ready),
+    configured: Boolean(recorder.config?.enabled),
+    provider: recorder.config?.defaultProvider ?? null,
+    fallbackProvider: recorder.config?.fallbackProvider ?? null,
+    status: recorder.ready ? "ready" : "blocked",
+    detail: failedChecks[0]?.detail ?? "Recorder readiness checks are passing.",
+    checks,
+    failedChecks,
+    lastSmokeRun: recorder.lastSmokeRun
+      ? {
+        status: recorder.lastSmokeRun.status ?? null,
+        createdAt: recorder.lastSmokeRun.createdAt ?? null,
+        completedAt: recorder.lastSmokeRun.completedAt ?? null,
+      }
+      : null,
+    lastSuccessfulRecording: recorder.lastSuccessfulRecording
+      ? {
+        provider: recorder.lastSuccessfulRecording.provider ?? null,
+        status: recorder.lastSuccessfulRecording.status ?? null,
+        observedAt: recorder.lastSuccessfulRecording.observedAt ?? null,
+      }
+      : null,
+    lastProviderAuthFailure: recorder.lastProviderAuthFailure
+      ? {
+        provider: recorder.lastProviderAuthFailure.provider ?? null,
+        status: recorder.lastProviderAuthFailure.status ?? null,
+        failureCode: recorder.lastProviderAuthFailure.failureCode ?? null,
+        detail: recorder.lastProviderAuthFailure.detail ?? null,
+        updatedAt: recorder.lastProviderAuthFailure.updatedAt ?? null,
+      }
+      : null,
+    coverage: {
+      generatedAt: coverage.generatedAt,
+      window: coverage.window,
+      featureEnabled: Boolean(coverage.featureEnabled),
+      configEnabled: Boolean(coverage.configEnabled),
+      autoRecordEnabled: Boolean(coverage.autoRecordEnabled),
+      providerConfigOk: Boolean(coverage.providerConfigOk),
+      providerChecks: Array.isArray(coverage.providerChecks)
+        ? coverage.providerChecks.map((check: any) => ({
+          key: String(check.key ?? ""),
+          label: String(check.label ?? check.key ?? ""),
+          ok: Boolean(check.ok),
+          detail: String(check.detail ?? ""),
+        })).filter((check: any) => check.key && check.label)
+        : [],
+      counts: coverage.counts,
+      meetings: coverage.meetings,
+    },
+  };
 }
 
 function userDisplayName(user: any) {
@@ -3446,6 +3517,20 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
       requireScope(sessionCtx, "meetings:read");
       const readiness = await getMeetingRecorderCoverageReadiness(workspaceId);
       return jsonResult(readiness);
+    },
+  );
+
+  tool(
+    "get_meeting_recorder_operations_readiness",
+    "Read-only recorder operations readiness with tenant, vendor, calendar, coverage, and live proof checks. Does not return raw meeting URLs, bot IDs, transcripts, or secrets.",
+    {},
+    async () => {
+      requireScope(sessionCtx, "meetings:read");
+      const [recorder, coverage] = await Promise.all([
+        getMeetingRecorderEnterpriseReadiness(workspaceId),
+        getMeetingRecorderCoverageReadiness(workspaceId),
+      ]);
+      return jsonResult(compactMeetingRecorderOperationsReadiness(recorder, coverage));
     },
   );
 

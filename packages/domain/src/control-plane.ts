@@ -165,7 +165,7 @@ const SUPPORT_ACTION_TO_MCP_TOOL = {
   "meetings.list": "list_meetings",
   "meetings.get": "get_meeting",
   "meetings.upload": "upload_meeting",
-  "meeting_recorders.readiness": "get_meeting_recorder_coverage_readiness",
+  "meeting_recorders.readiness": "get_meeting_recorder_operations_readiness",
   "meeting_series.set_recorder_url": "set_meeting_series_recorder_url",
   "meeting_recorders.set_auto_recording": "set_meeting_recorder_auto_recording",
   "meeting_recorders.ensure_coverage": "ensure_meeting_recorder_coverage",
@@ -6402,6 +6402,40 @@ function buildManagedRecorderReadinessGates(
   };
 }
 
+function normalizeSupportRecorderReadinessCheck(value: unknown): RecorderReadinessCheck | null {
+  const record = jsonRecordOrNull(value);
+  if (!record || typeof record.ok !== "boolean") return null;
+  const key = typeof record.key === "string" ? record.key.trim() : "";
+  const label = typeof record.label === "string" ? record.label.trim() : key;
+  if (!key || !label) return null;
+  return {
+    key,
+    label,
+    ok: record.ok,
+    detail: typeof record.detail === "string" ? record.detail : "",
+  };
+}
+
+function normalizeSupportRecorderReadinessChecks(value: unknown): RecorderReadinessCheck[] {
+  return Array.isArray(value)
+    ? value.flatMap((item) => {
+      const check = normalizeSupportRecorderReadinessCheck(item);
+      return check ? [check] : [];
+    })
+    : [];
+}
+
+function supportConnectorRecorderCoverageSummary(summary: JsonRecord) {
+  return jsonRecordOrNull(summary.coverage) ?? summary;
+}
+
+function supportConnectorRecorderReadinessChecks(summary: JsonRecord) {
+  const checks = normalizeSupportRecorderReadinessChecks(summary.checks);
+  if (checks.length > 0) return checks;
+  const coverageSummary = supportConnectorRecorderCoverageSummary(summary);
+  return normalizeSupportRecorderReadinessChecks(coverageSummary.providerChecks);
+}
+
 function supportConnectorRecorderReadinessGates(params: {
   resultSummary?: unknown;
   errorDetail?: string | null;
@@ -6410,8 +6444,10 @@ function supportConnectorRecorderReadinessGates(params: {
   const maybeSummary = params.resultSummary && typeof params.resultSummary === "object"
     ? params.resultSummary as JsonRecord
     : {};
-  const counts = maybeSummary.counts && typeof maybeSummary.counts === "object"
-    ? maybeSummary.counts as { total?: unknown; eligible?: unknown; blockers?: unknown }
+  const readinessChecks = supportConnectorRecorderReadinessChecks(maybeSummary);
+  const coverageSummary = supportConnectorRecorderCoverageSummary(maybeSummary);
+  const counts = coverageSummary.counts && typeof coverageSummary.counts === "object"
+    ? coverageSummary.counts as { total?: unknown; eligible?: unknown; blockers?: unknown }
     : null;
   const total = typeof counts?.total === "number" ? counts.total : null;
   const eligible = typeof counts?.eligible === "number" ? counts.eligible : null;
@@ -6466,27 +6502,27 @@ function supportConnectorRecorderReadinessGates(params: {
         }]
         : [],
     },
-    tenantConfig: {
+    tenantConfig: recorderGateFromChecks({
       key: "tenant_config",
       label: "Tenant configuration",
-      status: "unknown",
-      detail: "Support connector readiness did not include tenant recorder configuration checks.",
-      checks: [],
-    },
-    vendor: {
+      checks: readinessChecks.filter((check) => RECORDER_TENANT_CONFIG_CHECK_KEYS.has(check.key)),
+      passDetail: "Recorder entitlement and workspace configuration are enabled.",
+      emptyDetail: "Support connector readiness did not include tenant recorder configuration checks.",
+    }),
+    vendor: recorderGateFromChecks({
       key: "vendor",
       label: "Vendor credentials",
-      status: "unknown",
-      detail: "Support connector readiness did not include vendor credential checks.",
-      checks: [],
-    },
-    calendar: {
+      checks: readinessChecks.filter((check) => RECORDER_VENDOR_CHECK_KEYS.has(check.key)),
+      passDetail: "Recorder vendor runtime credentials are configured.",
+      emptyDetail: "Support connector readiness did not include vendor credential checks.",
+    }),
+    calendar: recorderGateFromChecks({
       key: "calendar",
       label: "Calendar connection",
-      status: "unknown",
-      detail: "Support connector readiness did not include calendar connection checks.",
-      checks: [],
-    },
+      checks: readinessChecks.filter((check) => RECORDER_CALENDAR_CHECK_KEYS.has(check.key)),
+      passDetail: "Recorder calendar connection and sync checks are passing.",
+      emptyDetail: "Support connector readiness did not include calendar connection checks.",
+    }),
     meetingState: {
       key: "meeting_state",
       label: "Scheduled meetings",
@@ -6500,23 +6536,73 @@ function supportConnectorRecorderReadinessGates(params: {
             : `${eligible ?? 0} of ${total} upcoming scheduled meeting(s) are eligible for recorder coverage.`,
       checks: [...coveredEntries, ...blockerEntries],
     },
-    liveVendorProof: {
+    liveVendorProof: recorderGateFromChecks({
       key: "live_vendor_proof",
       label: "Live vendor proof",
-      status: "unknown",
-      detail: "Support connector readiness did not include live vendor-backed recorder proof.",
-      checks: [],
-    },
+      checks: readinessChecks.filter((check) => RECORDER_LIVE_VENDOR_CHECK_KEYS.has(check.key)),
+      passDetail: "A recent vendor-backed recorder smoke or real recording exists.",
+      emptyDetail: "Support connector readiness did not include live vendor-backed recorder proof.",
+    }),
   };
 }
 
 function compactSupportConnectorRecorderReadiness(resultSummary: unknown, errorDetail?: string | null) {
   const summary = resultSummary && typeof resultSummary === "object" ? resultSummary as JsonRecord : {};
+  const checks = supportConnectorRecorderReadinessChecks(summary);
+  const failedChecks = checks
+    .filter((check) => !check.ok)
+    .map((check) => ({
+      key: check.key,
+      label: check.label,
+      detail: sanitizeDiagnosticText(check.detail),
+    }));
+  const coverageSummary = supportConnectorRecorderCoverageSummary(summary);
+  const configured = typeof summary.configured === "boolean" ? summary.configured : null;
+  const provider = typeof summary.provider === "string" ? summary.provider : null;
+  const fallbackProvider = typeof summary.fallbackProvider === "string" ? summary.fallbackProvider : null;
+  const status = typeof summary.status === "string" ? summary.status : null;
+  const detail = typeof summary.detail === "string" ? sanitizeDiagnosticText(summary.detail) : null;
+  const lastSmokeRun = jsonRecordOrNull(summary.lastSmokeRun);
+  const lastSuccessfulRecording = jsonRecordOrNull(summary.lastSuccessfulRecording);
+  const lastProviderAuthFailure = jsonRecordOrNull(summary.lastProviderAuthFailure);
   return {
-    ...summary,
+    workspaceId: typeof summary.workspaceId === "string" ? summary.workspaceId : null,
     ready: Boolean(summary.ready) && !errorDetail,
-    status: errorDetail ? "blocked" : (summary.ready ? "ready" : "unknown"),
+    status: errorDetail ? "blocked" : (status ?? (summary.ready ? "ready" : "unknown")),
+    configured,
+    provider,
+    fallbackProvider,
+    detail: errorDetail ? sanitizeDiagnosticText(errorDetail) : (failedChecks[0]?.detail ?? detail),
+    checks,
+    failedChecks,
     gates: supportConnectorRecorderReadinessGates({ resultSummary, errorDetail }),
+    upcomingCoverage: {
+      window: coverageSummary.window ?? null,
+      counts: coverageSummary.counts ?? null,
+    },
+    lastSmokeRun: lastSmokeRun
+      ? {
+        status: typeof lastSmokeRun.status === "string" ? lastSmokeRun.status : null,
+        createdAt: lastSmokeRun.createdAt ?? null,
+        completedAt: lastSmokeRun.completedAt ?? null,
+      }
+      : null,
+    lastSuccessfulRecording: lastSuccessfulRecording
+      ? {
+        provider: typeof lastSuccessfulRecording.provider === "string" ? lastSuccessfulRecording.provider : null,
+        status: typeof lastSuccessfulRecording.status === "string" ? lastSuccessfulRecording.status : null,
+        observedAt: lastSuccessfulRecording.observedAt ?? null,
+      }
+      : null,
+    lastProviderAuthFailure: lastProviderAuthFailure
+      ? {
+        provider: typeof lastProviderAuthFailure.provider === "string" ? lastProviderAuthFailure.provider : null,
+        status: typeof lastProviderAuthFailure.status === "string" ? lastProviderAuthFailure.status : null,
+        failureCode: typeof lastProviderAuthFailure.failureCode === "string" ? lastProviderAuthFailure.failureCode : null,
+        detail: typeof lastProviderAuthFailure.detail === "string" ? sanitizeDiagnosticText(lastProviderAuthFailure.detail) : null,
+        updatedAt: lastProviderAuthFailure.updatedAt ?? null,
+      }
+      : null,
   };
 }
 
