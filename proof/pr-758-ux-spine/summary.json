@@ -1,0 +1,57 @@
+{
+  "workspace": {
+    "id": "9c03993d-1972-4418-b2bf-6e2a2d72febb",
+    "slug": "corgtex"
+  },
+  "results": [
+    {
+      "name": "actions",
+      "viewport": "desktop",
+      "status": 200,
+      "file": "/Users/janbrezina/Development /CORGTEX-ux-spine-governance/.artifacts/ux-spine/desktop-actions.png",
+      "url": "http://localhost:3000/en/workspaces/9c03993d-1972-4418-b2bf-6e2a2d72febb/actions"
+    },
+    {
+      "name": "actions",
+      "viewport": "mobile",
+      "status": 200,
+      "file": "/Users/janbrezina/Development /CORGTEX-ux-spine-governance/.artifacts/ux-spine/mobile-actions.png",
+      "url": "http://localhost:3000/en/workspaces/9c03993d-1972-4418-b2bf-6e2a2d72febb/actions"
+    },
+    {
+      "name": "goals",
+      "viewport": "desktop",
+      "status": 200,
+      "file": "/Users/janbrezina/Development /CORGTEX-ux-spine-governance/.artifacts/ux-spine/desktop-goals.png",
+      "url": "http://localhost:3000/en/workspaces/9c03993d-1972-4418-b2bf-6e2a2d72febb/goals"
+    },
+    {
+      "name": "goals",
+      "viewport": "mobile",
+      "status": 200,
+      "file": "/Users/janbrezina/Development /CORGTEX-ux-spine-governance/.artifacts/ux-spine/mobile-goals.png",
+      "url": "http://localhost:3000/en/workspaces/9c03993d-1972-4418-b2bf-6e2a2d72febb/goals"
+    },
+    {
+      "name": "finance-clients",
+      "viewport": "desktop",
+      "status": 200,
+      "file": "/Users/janbrezina/Development /CORGTEX-ux-spine-governance/.artifacts/ux-spine/desktop-finance-clients.png",
+      "url": "http://localhost:3000/en/workspaces/9c03993d-1972-4418-b2bf-6e2a2d72febb/finance/clients"
+    },
+    {
+      "name": "finance-clients",
+      "viewport": "mobile",
+      "status": 200,
+      "file": "/Users/janbrezina/Development /CORGTEX-ux-spine-governance/.artifacts/ux-spine/mobile-finance-clients.png",
+      "url": "http://localhost:3000/en/workspaces/9c03993d-1972-4418-b2bf-6e2a2d72febb/finance/clients"
+    },
+    {
+      "name": "goals-focus-visible",
+      "viewport": "desktop",
+      "status": 200,
+      "file": "/Users/janbrezina/Development /CORGTEX-ux-spine-governance/.artifacts/ux-spine/desktop-goals-focus.png",
+      "url": "http://localhost:3000/en/workspaces/9c03993d-1972-4418-b2bf-6e2a2d72febb/goals"
+    }
+  ]
+}
