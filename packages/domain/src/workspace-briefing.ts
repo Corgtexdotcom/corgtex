@@ -112,6 +112,47 @@ const WORKSPACE_BRIEFING_SOURCE_LABELS: Record<WorkspaceBriefingSourceType, stri
   TENSION: "Tension",
 };
 
+const RAW_UUID_PATTERN = /\b[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\b/giu;
+
+const EDITORIAL_DEDUPE_SOURCE_TYPES = new Set<WorkspaceBriefingSourceType>([
+  "ACTION",
+  "ADVICE_REQUEST",
+  "PROPOSAL",
+  "TENSION",
+  "GOAL",
+  "BUILD_ARTIFACT",
+]);
+
+const EDITORIAL_STOPWORDS = new Set([
+  "about",
+  "after",
+  "again",
+  "also",
+  "await",
+  "awaiting",
+  "before",
+  "being",
+  "current",
+  "from",
+  "have",
+  "include",
+  "including",
+  "into",
+  "more",
+  "needs",
+  "open",
+  "proposal",
+  "still",
+  "that",
+  "their",
+  "there",
+  "this",
+  "today",
+  "week",
+  "with",
+  "work",
+]);
+
 function dateKeyFromISO(dateISO: string) {
   return new Date(dateISO).toISOString().split("T")[0];
 }
@@ -136,6 +177,32 @@ export function workspaceBriefingSourceLabel(kind: WorkspaceBriefingSourceType |
     .filter(Boolean)
     .map((part) => `${part.charAt(0).toUpperCase()}${part.slice(1)}`)
     .join(" ");
+}
+
+function escapeRegExp(value: string) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function replaceRawSourceReferences(value: string, sourceRefs: WorkspaceBriefingSourceRef[] = []) {
+  let readable = value;
+  for (const ref of sourceRefs) {
+    RAW_UUID_PATTERN.lastIndex = 0;
+    if (!RAW_UUID_PATTERN.test(ref.id)) continue;
+    RAW_UUID_PATTERN.lastIndex = 0;
+    const sourceLabel = workspaceBriefingSourceLabel(ref.type);
+    const idPattern = escapeRegExp(ref.id);
+    readable = readable.replace(
+      new RegExp(`\\b(?:${escapeRegExp(sourceLabel)}\\s+)?${idPattern}\\b`, "giu"),
+      ref.label,
+    );
+  }
+  RAW_UUID_PATTERN.lastIndex = 0;
+  return readable
+    .replace(RAW_UUID_PATTERN, "")
+    .replace(/\s+([,.;:])/g, "$1")
+    .replace(/\b(Proposal|Action|Tension|Advice request)\s+([,.;:])/giu, "$1$2")
+    .replace(/\s{2,}/g, " ")
+    .trim();
 }
 
 function workspacePath(workspaceId: string, path: string) {
@@ -170,8 +237,12 @@ function lastSentenceBoundary(value: string) {
   return boundary;
 }
 
-function normalizeNarrativeText(value: string | null | undefined, maxLength = 1200) {
-  const compacted = compactText(value, maxLength);
+function normalizeNarrativeText(
+  value: string | null | undefined,
+  maxLength = 1200,
+  sourceRefs: WorkspaceBriefingSourceRef[] = [],
+) {
+  const compacted = compactText(value ? replaceRawSourceReferences(value, sourceRefs) : value, maxLength);
   if (!compacted) return null;
   return compacted
     .replace(/\s*(?:\.{3}|…)\s*$/u, "")
@@ -180,7 +251,7 @@ function normalizeNarrativeText(value: string | null | undefined, maxLength = 12
 }
 
 function cleanBriefingTitle(value: string | null | undefined, fallback: string) {
-  const normalized = value?.replace(/\s+/g, " ").trim();
+  const normalized = value ? replaceRawSourceReferences(value).replace(/\s+/g, " ").trim() : null;
   if (!normalized) return fallback;
   const withoutEllipsis = normalized.replace(/\s*(?:\.{3}|…)\s*$/u, "").trim();
   return withoutEllipsis || fallback;
@@ -357,6 +428,266 @@ export function rankWorkspaceBriefingCandidates(candidates: WorkspaceBriefingCan
   ));
 }
 
+function editorialTokenStem(token: string) {
+  return token
+    .replace(/ies$/u, "y")
+    .replace(/tion$/u, "t")
+    .replace(/ing$/u, "")
+    .replace(/ed$/u, "")
+    .replace(/s$/u, "");
+}
+
+function editorialTokens(value: string | null | undefined) {
+  return new Set((value ?? "")
+    .toLowerCase()
+    .replace(RAW_UUID_PATTERN, " ")
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim()
+    .split(/\s+/)
+    .map(editorialTokenStem)
+    .filter((token) => token.length >= 4 && !EDITORIAL_STOPWORDS.has(token)));
+}
+
+function editorialOverlap(left: Set<string>, right: Set<string>) {
+  if (left.size === 0 || right.size === 0) return 0;
+  let overlap = 0;
+  for (const token of left) {
+    if (right.has(token)) overlap++;
+  }
+  return overlap / Math.min(left.size, right.size);
+}
+
+function sameDay(left: Date | null | undefined, right: Date | null | undefined) {
+  if (!left || !right) return true;
+  return left.toISOString().split("T")[0] === right.toISOString().split("T")[0];
+}
+
+function statusCompatible(left: string | null | undefined, right: string | null | undefined) {
+  if (!left || !right) return true;
+  return left.trim().toUpperCase() === right.trim().toUpperCase();
+}
+
+function uniqueRefs(refs: WorkspaceBriefingSourceRef[]) {
+  const byKey = new Map<string, WorkspaceBriefingSourceRef>();
+  for (const ref of refs) {
+    byKey.set(`${ref.type}:${ref.id}`, ref);
+  }
+  return [...byKey.values()];
+}
+
+function readableScore(value: string | null | undefined) {
+  if (!value) return 0;
+  const stripped = replaceRawSourceReferences(value);
+  const tokens = editorialTokens(stripped);
+  const hasRawId = RAW_UUID_PATTERN.test(value);
+  RAW_UUID_PATTERN.lastIndex = 0;
+  return tokens.size * 10 + Math.min(120, stripped.length) - (hasRawId ? 100 : 0);
+}
+
+function chooseBetterTitle(left: string, right: string, fallback: string) {
+  const leftTitle = cleanBriefingTitle(left, fallback);
+  const rightTitle = cleanBriefingTitle(right, fallback);
+  return readableScore(rightTitle) > readableScore(leftTitle) ? rightTitle : leftTitle;
+}
+
+function textSemanticallyContains(container: string, candidate: string) {
+  const containerTokens = editorialTokens(container);
+  const candidateTokens = editorialTokens(candidate);
+  if (candidateTokens.size === 0) return true;
+  let overlap = 0;
+  for (const token of candidateTokens) {
+    if (containerTokens.has(token)) overlap++;
+  }
+  return overlap / candidateTokens.size >= 0.9;
+}
+
+function splitIncludingClause(value: string) {
+  const match = value.match(/^(.+?\bincluding\s+)(.+)$/iu);
+  if (!match) return null;
+  return {
+    prefix: match[1].trimEnd(),
+    details: match[2]
+      .replace(/[.!?]$/u, "")
+      .split(/,\s+|\s+and\s+/u)
+      .map((part) => part.replace(/^(and|or)\s+/iu, "").trim())
+      .filter(Boolean),
+  };
+}
+
+function mergeIncludingNarrative(left: string, right: string, sourceRefs: WorkspaceBriefingSourceRef[]) {
+  const leftClause = splitIncludingClause(left);
+  const rightClause = splitIncludingClause(right);
+  if (!leftClause || !rightClause) return null;
+  if (editorialOverlap(editorialTokens(leftClause.prefix), editorialTokens(rightClause.prefix)) < 0.58) return null;
+
+  const details: string[] = [];
+  for (const detail of [...leftClause.details, ...rightClause.details]) {
+    if (details.some((existing) => textSemanticallyContains(existing, detail) || textSemanticallyContains(detail, existing))) continue;
+    details.push(detail);
+  }
+  const prefix = leftClause.prefix.length <= rightClause.prefix.length ? leftClause.prefix : rightClause.prefix;
+  return normalizeNarrativeText(`${prefix} ${details.join(", ")}.`, 1200, sourceRefs);
+}
+
+function mergeNarrativeText(
+  left: string | null | undefined,
+  right: string | null | undefined,
+  sourceRefs: WorkspaceBriefingSourceRef[],
+  maxLength = 1200,
+) {
+  const normalizedLeft = normalizeNarrativeText(left, maxLength, sourceRefs);
+  const normalizedRight = normalizeNarrativeText(right, maxLength, sourceRefs);
+  if (!normalizedLeft) return normalizedRight;
+  if (!normalizedRight) return normalizedLeft;
+  if (textSemanticallyContains(normalizedLeft, normalizedRight)) return normalizedLeft;
+  if (textSemanticallyContains(normalizedRight, normalizedLeft)) return normalizedRight;
+  const includingMerge = mergeIncludingNarrative(normalizedLeft, normalizedRight, sourceRefs);
+  if (includingMerge) return includingMerge;
+
+  const [primary, secondary] = normalizedLeft.length >= normalizedRight.length
+    ? [normalizedLeft, normalizedRight]
+    : [normalizedRight, normalizedLeft];
+  return normalizeNarrativeText(`${primary} ${secondary}`, maxLength, sourceRefs);
+}
+
+function trailingNumber(value: string) {
+  return value.match(/\b(\d+)\s*$/u)?.[1] ?? null;
+}
+
+function hasConflictingTrailingNumber(left: string, right: string) {
+  const leftNumber = trailingNumber(left);
+  const rightNumber = trailingNumber(right);
+  return Boolean(leftNumber && rightNumber && leftNumber !== rightNumber);
+}
+
+function candidatesAreEditorialDuplicates(left: WorkspaceBriefingCandidate, right: WorkspaceBriefingCandidate) {
+  if (left.sourceType !== right.sourceType) return false;
+  if (!EDITORIAL_DEDUPE_SOURCE_TYPES.has(left.sourceType)) return false;
+  if (!statusCompatible(left.status, right.status)) return false;
+  if (!sameDay(left.dueAt, right.dueAt)) return false;
+  if (hasConflictingTrailingNumber(left.title, right.title)) return false;
+  if (left.sourceType === "ADVICE_REQUEST") {
+    const leftSubjectKey = dedupeSubjectKey(left);
+    const rightSubjectKey = dedupeSubjectKey(right);
+    if (!leftSubjectKey || !rightSubjectKey || leftSubjectKey !== rightSubjectKey) return false;
+  }
+
+  const leftTitleTokens = editorialTokens(left.title);
+  const rightTitleTokens = editorialTokens(right.title);
+  const leftTextTokens = editorialTokens(`${left.title} ${left.summaryMd ?? ""}`);
+  const rightTextTokens = editorialTokens(`${right.title} ${right.summaryMd ?? ""}`);
+  const titleOverlap = editorialOverlap(leftTitleTokens, rightTitleTokens);
+  const textOverlap = editorialOverlap(leftTextTokens, rightTextTokens);
+
+  return textOverlap >= 0.68 || (titleOverlap >= 0.7 && textOverlap >= 0.45);
+}
+
+function mergeCandidate(left: WorkspaceBriefingCandidate, right: WorkspaceBriefingCandidate) {
+  const sourceRefs = uniqueRefs([...left.sourceRefs, ...right.sourceRefs]);
+  const summaryMd = mergeNarrativeText(left.summaryMd, right.summaryMd, sourceRefs);
+  return {
+    ...left,
+    title: chooseBetterTitle(left.title, right.title, workspaceBriefingSourceLabel(left.sourceType)),
+    summaryMd,
+    href: left.href ?? right.href,
+    occurredAt: latestDate(left.occurredAt, right.occurredAt),
+    updatedAt: latestDate(left.updatedAt, right.updatedAt),
+    status: left.status ?? right.status,
+    priority: Math.max(left.priority ?? 0, right.priority ?? 0) || null,
+    dueAt: left.dueAt && right.dueAt
+      ? new Date(Math.min(left.dueAt.getTime(), right.dueAt.getTime()))
+      : left.dueAt ?? right.dueAt ?? null,
+    strategicScore: Math.max(left.strategicScore, right.strategicScore),
+    actionabilityScore: Math.max(left.actionabilityScore, right.actionabilityScore),
+    evidenceScore: Math.max(left.evidenceScore, right.evidenceScore),
+    sourceRefs,
+  };
+}
+
+function consolidateWorkspaceBriefingCandidates(candidates: WorkspaceBriefingCandidate[], now: Date) {
+  const groups: WorkspaceBriefingCandidate[] = [];
+  for (const candidate of rankWorkspaceBriefingCandidates(candidates, now)) {
+    const duplicateIndex = groups.findIndex((group) => candidatesAreEditorialDuplicates(group, candidate));
+    if (duplicateIndex === -1) {
+      groups.push(candidate);
+      continue;
+    }
+    groups[duplicateIndex] = mergeCandidate(groups[duplicateIndex], candidate);
+  }
+  return groups;
+}
+
+function itemsAreEditorialDuplicates(left: WorkspaceBriefingItem, right: WorkspaceBriefingItem) {
+  if (left.kind !== right.kind) return false;
+  if (!EDITORIAL_DEDUPE_SOURCE_TYPES.has(left.kind)) return false;
+  if (!statusCompatible(left.status, right.status)) return false;
+  if (hasConflictingTrailingNumber(left.title, right.title)) return false;
+  if (left.kind === "ADVICE_REQUEST") {
+    const leftSubjectKey = dedupeSubjectKey(left);
+    const rightSubjectKey = dedupeSubjectKey(right);
+    if (!leftSubjectKey || !rightSubjectKey || leftSubjectKey !== rightSubjectKey) return false;
+  }
+
+  const leftTitleTokens = editorialTokens(left.title);
+  const rightTitleTokens = editorialTokens(right.title);
+  const leftTextTokens = editorialTokens(`${left.title} ${left.summaryMd}`);
+  const rightTextTokens = editorialTokens(`${right.title} ${right.summaryMd}`);
+  const titleOverlap = editorialOverlap(leftTitleTokens, rightTitleTokens);
+  const textOverlap = editorialOverlap(leftTextTokens, rightTextTokens);
+
+  return textOverlap >= 0.68 || (titleOverlap >= 0.7 && textOverlap >= 0.45);
+}
+
+function dedupeSubjectKey(entry: {
+  href?: string | null;
+  sourceRefs?: WorkspaceBriefingSourceRef[];
+}) {
+  return entry.href ?? entry.sourceRefs?.find((ref) => ref.href)?.href ?? null;
+}
+
+function mergeBriefingItem(left: WorkspaceBriefingItem, right: WorkspaceBriefingItem) {
+  const sourceRefs = uniqueRefs([...left.sourceRefs, ...right.sourceRefs]);
+  const leftOccurredAt = new Date(left.occurredAt);
+  const rightOccurredAt = new Date(right.occurredAt);
+  const occurredAt = Number.isFinite(rightOccurredAt.getTime()) && (
+    !Number.isFinite(leftOccurredAt.getTime()) || rightOccurredAt.getTime() > leftOccurredAt.getTime()
+  )
+    ? right.occurredAt
+    : left.occurredAt;
+
+  return {
+    ...left,
+    title: chooseBetterTitle(left.title, right.title, workspaceBriefingSourceLabel(left.kind)),
+    summaryMd: mergeNarrativeText(left.summaryMd, right.summaryMd, sourceRefs) ?? left.summaryMd,
+    whyItMattersMd: readableScore(right.whyItMattersMd) > readableScore(left.whyItMattersMd) ? right.whyItMattersMd : left.whyItMattersMd,
+    sourceRefs,
+    href: left.href ?? right.href,
+    occurredAt,
+    status: left.status ?? right.status,
+    confidence: Math.max(left.confidence, right.confidence),
+    prominence: left.prominence === "lead" || right.prominence === "lead"
+      ? "lead"
+      : left.prominence === "standard" || right.prominence === "standard"
+        ? "standard"
+        : left.prominence === "compact" || right.prominence === "compact"
+          ? "compact"
+          : "reference",
+  } satisfies WorkspaceBriefingItem;
+}
+
+function consolidateWorkspaceBriefingItems(items: WorkspaceBriefingItem[]) {
+  const groups: WorkspaceBriefingItem[] = [];
+  for (const item of items) {
+    const duplicateIndex = groups.findIndex((group) => itemsAreEditorialDuplicates(group, item));
+    if (duplicateIndex === -1) {
+      groups.push(item);
+      continue;
+    }
+    groups[duplicateIndex] = mergeBriefingItem(groups[duplicateIndex], item);
+  }
+  return groups;
+}
+
 function prominenceFor(score: number, index: number): WorkspaceBriefingProminence {
   if (index === 0) return score >= 8 ? "lead" : "standard";
   if (score >= 8) return "standard";
@@ -382,7 +713,7 @@ function itemFromCandidate(candidate: WorkspaceBriefingCandidate, index: number,
   return {
     kind: candidate.sourceType,
     title: cleanBriefingTitle(candidate.title, workspaceBriefingSourceLabel(candidate.sourceType)),
-    summaryMd: normalizeNarrativeText(candidate.summaryMd, index === 0 ? 1100 : 720) ?? cleanBriefingTitle(candidate.title, workspaceBriefingSourceLabel(candidate.sourceType)),
+    summaryMd: normalizeNarrativeText(candidate.summaryMd, index === 0 ? 1100 : 720, candidate.sourceRefs) ?? cleanBriefingTitle(candidate.title, workspaceBriefingSourceLabel(candidate.sourceType)),
     whyItMattersMd: whyCandidateMatters(candidate),
     prominence: prominenceFor(score, index),
     sourceRefs: candidate.sourceRefs,
@@ -519,7 +850,7 @@ function isContinuingBriefingItem(item: WorkspaceBriefingItem, period: Workspace
 
 function sentenceFromItem(item: WorkspaceBriefingItem, maxLength = 760) {
   const title = cleanBriefingTitle(item.title, workspaceBriefingSourceLabel(item.kind));
-  const summary = normalizeNarrativeText(item.summaryMd, maxLength);
+  const summary = normalizeNarrativeText(item.summaryMd, maxLength, item.sourceRefs);
   const titleMd = `**${title}**`;
   if (!summary || summary === title) return titleMd;
   return `${titleMd}: ${summary}`;
@@ -538,7 +869,7 @@ function joinAttentionItems(items: WorkspaceBriefingItem[], period: WorkspaceBri
   const leadLabel = period === "WEEKLY" ? "Needs attention this week" : "Needs attention today";
   const alsoLabel = period === "WEEKLY" ? "Also keep watch this week on" : "Also keep watch on";
   const details = items.slice(0, 3).map((item) => {
-    const summary = normalizeNarrativeText(item.summaryMd, 260);
+    const summary = normalizeNarrativeText(item.summaryMd, 260, item.sourceRefs);
     if (!summary || summary === item.title) return cleanBriefingTitle(item.title, workspaceBriefingSourceLabel(item.kind));
     return `${cleanBriefingTitle(item.title, workspaceBriefingSourceLabel(item.kind))}: ${summary}`;
   });
@@ -577,7 +908,8 @@ function composeWorkspaceBriefingNarrative(params: {
     days: CONTEXT_WINDOW_DAYS[params.period],
     label: params.period === "WEEKLY" ? "Last 30-90 days" : "Current month context",
   });
-  const meaningfulItems = params.items.filter((item) => item.kind !== "QUIET");
+  const editorialItems = consolidateWorkspaceBriefingItems(params.items);
+  const meaningfulItems = editorialItems.filter((item) => item.kind !== "QUIET");
   const freshItems = meaningfulItems.filter((item) => isFreshBriefingItem(item, params.period, params.generatedAt));
   const hasFreshItems = freshItems.length > 0;
   const leadItem = hasFreshItems ? freshItems[0] ?? quietBriefingItem(params.generatedAt) : quietBriefingItem(params.generatedAt);
@@ -660,7 +992,8 @@ export function buildWorkspaceBriefingFromCandidates(params: {
   editorialMode?: WorkspaceBriefingEditorialMode;
 }): NormalizedWorkspaceBriefing {
   const generatedAt = params.generatedAt ?? new Date();
-  const ranked = rankWorkspaceBriefingCandidates(params.candidates, generatedAt);
+  const consolidatedCandidates = consolidateWorkspaceBriefingCandidates(params.candidates, generatedAt);
+  const ranked = rankWorkspaceBriefingCandidates(consolidatedCandidates, generatedAt);
   const selected = selectBriefingCandidates(ranked, params.period, generatedAt, params.maxItems ?? 10);
   const items = ranked.length > 0
     ? selected.map((entry, index) => itemFromCandidate(entry, index, generatedAt))
@@ -783,6 +1116,9 @@ function candidateMatchesDigestItem(candidate: WorkspaceBriefingCandidate, rawIt
   const normalizedItem = normalizeMatchText(rawItem);
   if (!normalizedItem) return false;
 
+  if (candidate.sourceId && normalizedItem.includes(normalizeMatchText(candidate.sourceId))) return true;
+  if (candidate.sourceRefs.some((ref) => normalizedItem.includes(normalizeMatchText(ref.id)))) return true;
+
   const normalizedTitle = normalizeMatchText(candidate.title);
   if (normalizedPhraseIncludes(normalizedItem, normalizedTitle)) return true;
 
@@ -812,12 +1148,33 @@ function candidateSemanticallyOverlapsDigestItem(candidate: WorkspaceBriefingCan
   return overlap >= 4 && itemCoverage >= 0.5 && candidateCoverage >= 0.35;
 }
 
+function digestItemNamesCandidateSource(rawItem: string, candidate: WorkspaceBriefingCandidate) {
+  const normalizedItem = normalizeMatchText(rawItem);
+  if (!normalizedItem) return false;
+  for (const ref of candidate.sourceRefs) {
+    const normalizedId = normalizeMatchText(ref.id);
+    if (normalizedId && normalizedItem.includes(normalizedId)) return true;
+    const normalizedLabel = normalizeMatchText(ref.label);
+    if (normalizedLabel.length >= 8 && normalizedItem.includes(normalizedLabel)) return true;
+  }
+  return false;
+}
+
+function shouldAttachSemanticSourceRefs(
+  sectionId: NewspaperEmailSectionId,
+  rawItem: string,
+  candidate: WorkspaceBriefingCandidate | null,
+) {
+  if (!candidate) return false;
+  return sectionId === "otherUpdates" || digestItemNamesCandidateSource(rawItem, candidate);
+}
+
 function candidateKey(candidate: Pick<WorkspaceBriefingCandidate, "sourceType" | "sourceId">) {
   return `${candidate.sourceType}:${candidate.sourceId}`;
 }
 
-function titleFromDigestItem(rawItem: string) {
-  const compact = normalizeNarrativeText(rawItem, 160);
+function titleFromDigestItem(rawItem: string, sourceRefs: WorkspaceBriefingSourceRef[] = []) {
+  const compact = normalizeNarrativeText(rawItem, 160, sourceRefs);
   if (!compact) return "Workspace update";
   const colonIndex = compact.indexOf(":");
   const firstSentence = compact.match(/^(.+?[.!?])(?:\s|$)/)?.[1];
@@ -892,10 +1249,12 @@ export function buildWorkspaceBriefingFromDigest(params: {
   editorialMode?: WorkspaceBriefingEditorialMode;
 }): NormalizedWorkspaceBriefing {
   const generatedAt = params.generatedAt ?? new Date();
-  const rankedCandidates = rankWorkspaceBriefingCandidates(params.candidates, generatedAt);
+  const consolidatedCandidates = consolidateWorkspaceBriefingCandidates(params.candidates, generatedAt);
+  const rankedCandidates = rankWorkspaceBriefingCandidates(consolidatedCandidates, generatedAt);
   const used = new Set<string>();
   const digestEntries = params.digest.sections.flatMap((section, sectionIndex) => (
     section.items.map((rawItem, itemIndex) => {
+      const expectedKind = sectionKind(section.id);
       const source = pickCandidateForSection(section.id, rawItem, rankedCandidates, used);
       const semanticSource = source ?? rankedCandidates.find((entry) => (
         !used.has(candidateKey(entry))
@@ -908,14 +1267,18 @@ export function buildWorkspaceBriefingFromDigest(params: {
         : semanticSource
           ? Math.max(4, scoreWorkspaceBriefingCandidate(semanticSource, generatedAt) - 0.5)
           : Math.max(4, 8 - itemIndex);
+      const attachSemanticRefs = shouldAttachSemanticSourceRefs(section.id, rawItem, semanticSource ?? null);
+      const narrativeSource = source ?? (semanticSource?.sourceType === expectedKind ? semanticSource : null);
+      const sourceRefs = source?.sourceRefs ?? (attachSemanticRefs ? semanticSource?.sourceRefs ?? [] : []);
+      const readableRawItem = replaceRawSourceReferences(rawItem, sourceRefs);
       return {
         digestIndex: sectionIndex * 100 + itemIndex,
-        kind: source?.sourceType ?? sectionKind(section.id),
-        title: source?.title ?? titleFromDigestItem(rawItem),
-        rawItem,
+        kind: narrativeSource?.sourceType ?? expectedKind,
+        title: narrativeSource?.title ?? titleFromDigestItem(readableRawItem, sourceRefs),
+        rawItem: readableRawItem,
         whyItMattersMd: scoreSource ? whyCandidateMatters(scoreSource) : "This was selected because it helps explain the current workspace picture.",
-        sourceRefs: source?.sourceRefs ?? [],
-        href: source?.href ?? null,
+        sourceRefs,
+        href: narrativeSource?.href ?? (attachSemanticRefs ? semanticSource?.href ?? null : null),
         occurredAt: scoreSource?.occurredAt ?? generatedAt,
         status: scoreSource?.status ?? null,
         confidence: scoreSource ? Math.max(0.62, Math.min(0.98, 0.6 + score / 25)) : 0.72,
@@ -953,7 +1316,7 @@ export function buildWorkspaceBriefingFromDigest(params: {
     .map((entry, itemIndex) => ({
       kind: entry.kind,
       title: cleanBriefingTitle(entry.title, workspaceBriefingSourceLabel(entry.kind)),
-      summaryMd: normalizeNarrativeText(entry.rawItem, itemIndex === 0 ? 1100 : 720) ?? cleanBriefingTitle(entry.title, workspaceBriefingSourceLabel(entry.kind)),
+      summaryMd: normalizeNarrativeText(entry.rawItem, itemIndex === 0 ? 1100 : 720, entry.sourceRefs) ?? cleanBriefingTitle(entry.title, workspaceBriefingSourceLabel(entry.kind)),
       whyItMattersMd: entry.whyItMattersMd,
       prominence: prominenceFor(entry.score, itemIndex),
       sourceRefs: entry.sourceRefs,
@@ -962,23 +1325,24 @@ export function buildWorkspaceBriefingFromDigest(params: {
       status: entry.status,
       confidence: entry.confidence,
     }) satisfies WorkspaceBriefingItem);
+  const consolidatedItems = consolidateWorkspaceBriefingItems(items);
 
-  if (items.length === 0) {
+  if (consolidatedItems.length === 0) {
     return buildWorkspaceBriefingFromCandidates({
       workspaceId: params.workspaceId,
       period: params.period,
       dateKey: params.dateKey,
-        title: params.title,
-        candidates: params.candidates,
-        generatedAt,
-        editorialMode: params.editorialMode,
-      });
+      title: params.title,
+      candidates: params.candidates,
+      generatedAt,
+      editorialMode: params.editorialMode,
+    });
   }
   const { narratedSourceRefs, ...narrative } = composeWorkspaceBriefingNarrative({
     period: params.period,
     editorialMode: params.editorialMode,
     generatedAt,
-    items,
+    items: consolidatedItems,
     fallbackIntro: params.digest.intro,
   });
 
@@ -988,7 +1352,7 @@ export function buildWorkspaceBriefingFromDigest(params: {
     period: params.period,
     dateKey: params.dateKey,
     generatedAt: generatedAt.toISOString(),
-    items,
+    items: consolidatedItems,
     sourceRefs: narratedSourceRefs,
     sourceCounts: countSources(params.candidates),
   };
@@ -1002,14 +1366,18 @@ export function normalizeWorkspaceBriefingPayload(input: unknown): NormalizedWor
     ? record.items.flatMap((item): WorkspaceBriefingItem[] => {
       if (typeof item !== "object" || item === null || Array.isArray(item)) return [];
       const entry = item as Record<string, unknown>;
-      const title = typeof entry.title === "string" && entry.title.trim() ? entry.title.trim() : null;
-      const summaryMd = typeof entry.summaryMd === "string" && entry.summaryMd.trim() ? entry.summaryMd.trim() : null;
+      const sourceRefs = normalizeSourceRefs(entry.sourceRefs);
+      const title = typeof entry.title === "string" && entry.title.trim()
+        ? replaceRawSourceReferences(entry.title.trim(), sourceRefs)
+        : null;
+      const summaryMd = typeof entry.summaryMd === "string" && entry.summaryMd.trim()
+        ? replaceRawSourceReferences(entry.summaryMd.trim(), sourceRefs)
+        : null;
       if (!title || !summaryMd) return [];
       const kind = typeof entry.kind === "string" ? entry.kind as WorkspaceBriefingSourceType : "BRAIN_ARTICLE";
       const prominence = entry.prominence === "lead" || entry.prominence === "standard" || entry.prominence === "compact" || entry.prominence === "reference"
         ? entry.prominence
         : "compact";
-      const sourceRefs = normalizeSourceRefs(entry.sourceRefs);
       return [{
         kind,
         title,
@@ -1049,15 +1417,17 @@ export function normalizeWorkspaceBriefingPayload(input: unknown): NormalizedWor
       until: typeof entry.until === "string" && entry.until.trim() ? entry.until.trim() : fallback.until,
     };
   };
-  const recordMd = (key: string, fallback: string | null) => {
-    const value = record[key];
-    return typeof value === "string" && value.trim() ? value.trim() : fallback;
-  };
   const hasRecordSourceRefs = Array.isArray(record.sourceRefs);
   const recordSourceRefs = normalizeSourceRefs(record.sourceRefs);
+  const recordMd = (key: string, fallback: string | null) => {
+    const value = record[key];
+    return typeof value === "string" && value.trim()
+      ? replaceRawSourceReferences(value.trim(), recordSourceRefs)
+      : fallback;
+  };
 
   return {
-    title: typeof record.title === "string" && record.title.trim() ? record.title.trim() : fallbackTitle,
+    title: typeof record.title === "string" && record.title.trim() ? replaceRawSourceReferences(record.title.trim(), recordSourceRefs) : fallbackTitle,
     introMd: recordMd("introMd", fallbackNarrative.introMd),
     leadMd: recordMd("leadMd", fallbackNarrative.leadMd),
     bodyMd: recordMd("bodyMd", fallbackNarrative.bodyMd),
@@ -1105,16 +1475,17 @@ export function workspaceBriefingToNewspaperDigest(input: { briefingJson: unknow
 export function renderWorkspaceBriefingMarkdown(briefing: NormalizedWorkspaceBriefing) {
   const lines = [`# ${briefing.title}`];
   const sections = [
-    briefing.introMd,
-    briefing.leadMd,
-    briefing.bodyMd,
-    briefing.attentionMd,
-    briefing.continuingContextMd,
-    briefing.closingMd,
-  ].filter((item): item is string => !!item?.trim());
+    ["Overview", briefing.introMd],
+    ["Lead Story", briefing.leadMd],
+    ["More From Today", briefing.bodyMd],
+    ["Needs Attention", briefing.attentionMd],
+    ["Continuing Context", briefing.continuingContextMd],
+    ["Editor Note", briefing.closingMd],
+  ] as const;
 
-  for (const section of sections) {
-    lines.push("", section);
+  for (const [heading, section] of sections) {
+    if (!section?.trim()) continue;
+    lines.push("", `## ${heading}`, "", section);
   }
 
   if (briefing.sourceRefs.length > 0) {

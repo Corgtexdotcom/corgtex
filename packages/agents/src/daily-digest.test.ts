@@ -572,6 +572,105 @@ describe("runDailyDigest", () => {
     }));
   });
 
+  it("uses workspace advice request subject titles instead of raw proposal IDs in digest input", async () => {
+    const proposalId = "a08b40fc-f547-452f-bb2e-9535e8d05702";
+    const cutoff = new Date("2026-04-30T12:00:00.000Z");
+    prismaMock.adviceRequest.findMany.mockImplementation(async (params: any) => {
+      if (params?.where?.audienceType === "WORKSPACE" && params.where.status === "ACTIVE") {
+        return [{
+          id: "advice-1",
+          messageMd: "Please review and consent by the end of July.",
+          status: "ACTIVE",
+          deadlineAt: new Date("2026-07-31T12:00:00.000Z"),
+          completedAt: null,
+          createdAt: new Date("2026-04-30T09:00:00.000Z"),
+          updatedAt: new Date("2026-04-30T09:00:00.000Z"),
+          process: {
+            subjectType: "PROPOSAL",
+            subjectId: proposalId,
+          },
+        }];
+      }
+      return [];
+    });
+    prismaMock.proposal.findMany.mockImplementation(async (params: any) => {
+      if (params?.where?.id?.in?.includes(proposalId)) {
+        expect(params.where).toEqual(expect.objectContaining({
+          workspaceId: "workspace-1",
+          archivedAt: null,
+          isPrivate: false,
+          status: { not: "DRAFT" },
+          updatedAt: { lte: cutoff },
+        }));
+        return [{ id: proposalId, title: "CRna Org Structure" }];
+      }
+      return [];
+    });
+
+    const { runDailyDigest } = await import("./daily-digest");
+    await runDailyDigest({
+      workspaceId: "workspace-1",
+      dateISO: cutoff.toISOString(),
+    });
+
+    const digestCall = extractMock.mock.calls.find(([request]) => request.instruction.startsWith("Generate a structured"));
+    const digestInput = digestCall?.[0].input;
+
+    expect(digestInput).toContain("Advice request awaiting input: Proposal - CRna Org Structure");
+    expect(digestInput).toContain(`Open: https://app.example.com/workspaces/workspace-1/proposals/${proposalId}`);
+    expect(digestInput).not.toContain(`Proposal ${proposalId}`);
+  });
+
+  it("does not expose private or draft proposal titles in workspace advice digest input", async () => {
+    const proposalId = "b08b40fc-f547-452f-bb2e-9535e8d05702";
+    const cutoff = new Date("2026-04-30T12:00:00.000Z");
+    prismaMock.adviceRequest.findMany.mockImplementation(async (params: any) => {
+      if (params?.where?.audienceType === "WORKSPACE" && params.where.status === "ACTIVE") {
+        return [{
+          id: "advice-private",
+          messageMd: "Please review privately before this is shared.",
+          status: "ACTIVE",
+          deadlineAt: new Date("2026-07-31T12:00:00.000Z"),
+          completedAt: null,
+          createdAt: new Date("2026-04-30T09:00:00.000Z"),
+          updatedAt: new Date("2026-04-30T09:00:00.000Z"),
+          process: {
+            subjectType: "PROPOSAL",
+            subjectId: proposalId,
+          },
+        }];
+      }
+      return [];
+    });
+    prismaMock.proposal.findMany.mockImplementation(async (params: any) => {
+      if (!params?.where?.id?.in?.includes(proposalId)) return [];
+      expect(params.where).toEqual(expect.objectContaining({
+        workspaceId: "workspace-1",
+        id: { in: [proposalId] },
+        archivedAt: null,
+        isPrivate: false,
+        status: { not: "DRAFT" },
+        updatedAt: { lte: cutoff },
+      }));
+      return [];
+    });
+
+    const { runDailyDigest } = await import("./daily-digest");
+    await runDailyDigest({
+      workspaceId: "workspace-1",
+      dateISO: cutoff.toISOString(),
+    });
+
+    const digestCall = extractMock.mock.calls.find(([request]) => request.instruction.startsWith("Generate a structured"));
+    const digestInput = digestCall?.[0].input;
+
+    expect(digestInput).toContain("Advice request awaiting input: Proposal title unavailable");
+    expect(digestInput).toContain("Please review privately before this is shared.");
+    expect(digestInput).not.toContain(`Proposal ${proposalId}`);
+    expect(digestInput).not.toContain(`Open: https://app.example.com/workspaces/workspace-1/proposals/${proposalId}`);
+    expect(digestInput).not.toContain("Private proposal title");
+  });
+
   it("bounds digest model inputs by the edition cutoff", async () => {
     const { runDailyDigest } = await import("./daily-digest");
     const cutoff = new Date("2026-04-30T12:00:00.000Z");

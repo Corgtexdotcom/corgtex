@@ -303,6 +303,8 @@ type OperatingDigestInputs = {
       subjectType: string;
       subjectId: string;
     };
+    subjectPreview: AdviceSubjectPreview | null;
+    subjectUrl: string | null;
   }>;
 };
 
@@ -562,6 +564,7 @@ function memberCircleIds(member: DigestRecipientMember, workspaceId: string) {
 async function loadAdviceSubjectPreviews(
   workspaceId: string,
   requests: PendingAdviceDigestRequest[],
+  options: { until?: Date } = {},
 ) {
   const byType = new Map<AdviceSubjectPreview["type"], Set<string>>();
   for (const request of requests) {
@@ -575,6 +578,7 @@ async function loadAdviceSubjectPreviews(
   const proposalIds = [...(byType.get("PROPOSAL") ?? [])];
   const tensionIds = [...(byType.get("TENSION") ?? [])];
   const actionIds = [...(byType.get("ACTION") ?? [])];
+  const updatedBeforeCutoff = options.until ? { lte: options.until } : undefined;
 
   const [proposals, tensions, actions] = await Promise.all([
     proposalIds.length
@@ -583,6 +587,9 @@ async function loadAdviceSubjectPreviews(
             workspaceId,
             id: { in: proposalIds },
             archivedAt: null,
+            isPrivate: false,
+            status: { not: "DRAFT" },
+            ...(updatedBeforeCutoff ? { updatedAt: updatedBeforeCutoff } : {}),
           },
           select: { id: true, title: true },
         })
@@ -594,6 +601,7 @@ async function loadAdviceSubjectPreviews(
             id: { in: tensionIds },
             archivedAt: null,
             isPrivate: false,
+            ...(updatedBeforeCutoff ? { updatedAt: updatedBeforeCutoff } : {}),
           },
           select: { id: true, title: true },
         })
@@ -605,6 +613,7 @@ async function loadAdviceSubjectPreviews(
             id: { in: actionIds },
             archivedAt: null,
             isPrivate: false,
+            ...(updatedBeforeCutoff ? { updatedAt: updatedBeforeCutoff } : {}),
           },
           select: { id: true, title: true },
         })
@@ -1051,6 +1060,27 @@ async function loadOperatingDigestInputs(params: {
     }),
   ]);
 
+  const workspaceAdviceRequests = [
+    ...activeWorkspaceAdviceRequests,
+    ...completedWorkspaceAdviceRequests,
+  ];
+  const workspaceAdviceSubjectPreviews = await loadAdviceSubjectPreviews(
+    params.workspaceId,
+    workspaceAdviceRequests as unknown as PendingAdviceDigestRequest[],
+    { until: params.until },
+  );
+  const workspaceAdviceRequestsWithSubjects = workspaceAdviceRequests.map((request) => {
+    const subjectType = validAdviceSubjectType(request.process.subjectType);
+    const subjectPreview = subjectType
+      ? workspaceAdviceSubjectPreviews.get(`${subjectType}:${request.process.subjectId}`) ?? null
+      : null;
+    return {
+      ...request,
+      subjectPreview,
+      subjectUrl: subjectPreview ? adviceSubjectUrl(params.workspaceId, subjectPreview) : null,
+    };
+  });
+
   return {
     meetings: meetings as OperatingDigestInputs["meetings"],
     proposals: proposals as OperatingDigestInputs["proposals"],
@@ -1062,10 +1092,7 @@ async function loadOperatingDigestInputs(params: {
     newMembers: newMembers as OperatingDigestInputs["newMembers"],
     brainArticles: brainArticles as OperatingDigestInputs["brainArticles"],
     documents: documents as OperatingDigestInputs["documents"],
-    workspaceAdviceRequests: [
-      ...activeWorkspaceAdviceRequests,
-      ...completedWorkspaceAdviceRequests,
-    ] as OperatingDigestInputs["workspaceAdviceRequests"],
+    workspaceAdviceRequests: workspaceAdviceRequestsWithSubjects as OperatingDigestInputs["workspaceAdviceRequests"],
   };
 }
 
@@ -1105,14 +1132,18 @@ function formatWorkspaceAdviceRequestDigestInput(requests: OperatingDigestInputs
   return requests.map((request) => {
     const subjectType = validAdviceSubjectType(request.process.subjectType);
     const subjectLabel = subjectType ? adviceSubjectLabel(subjectType) : "subject";
+    const subjectTitle = request.subjectPreview?.title
+      ? `${subjectLabel} - ${request.subjectPreview.title}`
+      : `${subjectLabel} title unavailable`;
     const statusLabel = request.status === "COMPLETED" ? "Advice request completed" : "Advice request awaiting input";
     const completed = formatAdviceDigestDate(request.completedAt);
     const deadline = formatAdviceDigestDate(request.deadlineAt);
     return [
-      `${statusLabel}: ${subjectLabel} ${request.process.subjectId}`,
+      `${statusLabel}: ${subjectTitle}`,
       `Request: ${truncateDigestText(request.messageMd)}`,
       request.status === "COMPLETED" && completed ? `Completed: ${completed}` : null,
       request.status === "ACTIVE" && deadline ? `Deadline: ${deadline}` : null,
+      request.subjectUrl ? `Open: ${request.subjectUrl}` : null,
     ].filter(Boolean).join("\n");
   }).join("\n\n");
 }

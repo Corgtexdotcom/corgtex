@@ -73,6 +73,24 @@ function latestActivityTimeBefore(until: Date, ...values: Array<Date | string | 
 
 type DisplayedEditionPeriod = "DAILY" | "WEEKLY" | null;
 
+function NewspaperSection({
+  title,
+  markdown,
+  className,
+}: {
+  title: string;
+  markdown: string | null | undefined;
+  className?: string;
+}) {
+  if (!markdown?.trim()) return null;
+  return (
+    <section className="nr-newspaper-section">
+      <h3>{title}</h3>
+      <MarkdownRenderer markdown={markdown} variant="document" className={className} allowImages={false} />
+    </section>
+  );
+}
+
 function legacyEditionNarrative(
   editionDigest: ReturnType<typeof normalizeNewspaperEditionDigest> | null,
   labels: { intro: string; closing: string },
@@ -235,25 +253,44 @@ export default async function WorkspaceDashboard({
       count: unreadNotificationsDisplayCount,
     })
     : t("notifications");
-  const dateString = format.dateTime(new Date(), {
+  const now = new Date();
+  const dateString = format.dateTime(now, {
     weekday: "long",
     year: "numeric",
     month: "long",
     day: "numeric",
   });
+  const timeString = format.dateTime(now, {
+    hour: "numeric",
+    minute: "2-digit",
+    timeZoneName: "short",
+  });
   const articleTitle = displayedBriefing?.title ?? (fallbackNarrative ? latestNewspaperEdition?.title : null) ?? t("latestWorkspaceBriefing");
   const hasArticle = !!displayedBriefing || !!fallbackNarrative || !!liveNarrative;
   const sourceRefs = displayedBriefing?.sourceRefs ?? liveNarrative?.sourceRefs ?? [];
+  const homeNavItems = [
+    { href: `/workspaces/${workspaceId}/brain`, label: t("newspaperNavBrain") },
+    { href: `/workspaces/${workspaceId}/meetings`, label: t("newspaperNavMeetings") },
+    { href: `/workspaces/${workspaceId}/proposals`, label: t("newspaperNavProposals") },
+    { href: `/workspaces/${workspaceId}/actions`, label: t("newspaperNavActions") },
+    { href: `/workspaces/${workspaceId}/tensions`, label: t("newspaperNavTensions") },
+  ];
 
   return (
     <>
-      <header className="nr-masthead">
-        <h1>{branding.primaryName}</h1>
-        <div className="nr-masthead-meta">
-          <span suppressHydrationWarning>{dateString}</span>
-          <form action={`/workspaces/${workspaceId}/brain`} method="GET" className="nr-masthead-search">
-            <span>{t("searchLabel")}</span>
+      <header className="nr-masthead nr-newspaper-masthead">
+        <div className="nr-newspaper-masthead-main">
+          <div>
+            <h1>{branding.primaryName}</h1>
+            <div className="nr-newspaper-date" suppressHydrationWarning>
+              <span>{dateString}</span>
+              <span>{timeString}</span>
+            </div>
+          </div>
+          <form action={`/workspaces/${workspaceId}/brain`} method="GET" className="nr-masthead-search nr-newspaper-search">
+            <label htmlFor="workspace-newspaper-search">{t("searchLabel")}</label>
             <input
+              id="workspace-newspaper-search"
               name="q"
               type="text"
               placeholder={t("searchPlaceholder")}
@@ -262,16 +299,24 @@ export default async function WorkspaceDashboard({
         </div>
       </header>
 
+      <nav className="nr-newspaper-home-nav" aria-label={t("newspaperHomeNavLabel")}>
+        {homeNavItems.map((item) => (
+          <Link key={item.href} href={item.href} className="nr-newspaper-nav-button">
+            {item.label}
+          </Link>
+        ))}
+      </nav>
+
       <div className="nr-newspaper-actions">
         {currentMember?.id && (
-          <Link href={`/workspaces/${workspaceId}/members/${currentMember.id}`} className="nr-link">
+          <Link href={`/workspaces/${workspaceId}/members/${currentMember.id}`} className="nr-newspaper-action-button">
             {t("viewFullProfile")}
           </Link>
         )}
-        <Link href={`/workspaces/${workspaceId}/chat`} className="nr-newspaper-assistant-pill ws-assistant-launch">
+        <Link href={`/workspaces/${workspaceId}/chat`} className="nr-newspaper-action-button nr-newspaper-assistant-pill ws-assistant-launch">
           {t("askAgent")}
         </Link>
-        <Link href={`/workspaces/${workspaceId}/notifications`} className="nr-newspaper-notification-pill">
+        <Link href={`/workspaces/${workspaceId}/notifications`} className="nr-newspaper-action-button nr-newspaper-notification-pill">
           {notificationLabel}
         </Link>
       </div>
@@ -301,22 +346,22 @@ export default async function WorkspaceDashboard({
 
         {displayedBriefing ? (
           <div className="nr-newspaper-body">
-            <MarkdownRenderer markdown={displayedBriefing.introMd} variant="document" allowImages={false} />
-            <MarkdownRenderer markdown={displayedBriefing.leadMd} variant="document" className="nr-newspaper-lead" allowImages={false} />
-            <MarkdownRenderer markdown={displayedBriefing.bodyMd} variant="document" allowImages={false} />
-            <MarkdownRenderer markdown={displayedBriefing.attentionMd} variant="document" allowImages={false} />
-            <MarkdownRenderer markdown={displayedBriefing.continuingContextMd} variant="document" allowImages={false} />
-            <MarkdownRenderer markdown={displayedBriefing.closingMd} variant="document" className="nr-newspaper-closing" allowImages={false} />
+            <NewspaperSection title={t("newspaperSectionOverview")} markdown={displayedBriefing.introMd} />
+            <NewspaperSection title={t("newspaperSectionLead")} markdown={displayedBriefing.leadMd} className="nr-newspaper-lead" />
+            <NewspaperSection title={t("newspaperSectionMore")} markdown={displayedBriefing.bodyMd} />
+            <NewspaperSection title={t("newspaperSectionAttention")} markdown={displayedBriefing.attentionMd} />
+            <NewspaperSection title={t("newspaperSectionContinuing")} markdown={displayedBriefing.continuingContextMd} />
+            <NewspaperSection title={t("newspaperSectionEditorNote")} markdown={displayedBriefing.closingMd} className="nr-newspaper-closing" />
           </div>
         ) : fallbackNarrative ? (
           <div className="nr-newspaper-body">
-            <MarkdownRenderer markdown={fallbackNarrative.introMd} variant="document" allowImages={false} />
-            <MarkdownRenderer markdown={fallbackNarrative.leadMd} variant="document" className="nr-newspaper-lead" allowImages={false} />
-            <MarkdownRenderer markdown={fallbackNarrative.bodyMd} variant="document" allowImages={false} />
-            <MarkdownRenderer markdown={fallbackNarrative.closingMd} variant="document" className="nr-newspaper-closing" allowImages={false} />
+            <NewspaperSection title={t("newspaperSectionOverview")} markdown={fallbackNarrative.introMd} />
+            <NewspaperSection title={t("newspaperSectionLead")} markdown={fallbackNarrative.leadMd} className="nr-newspaper-lead" />
+            <NewspaperSection title={t("newspaperSectionMore")} markdown={fallbackNarrative.bodyMd} />
+            <NewspaperSection title={t("newspaperSectionEditorNote")} markdown={fallbackNarrative.closingMd} className="nr-newspaper-closing" />
             {latestNewspaperEdition && (
               <p>
-                <Link href={`/workspaces/${workspaceId}/brain/${latestNewspaperEdition.slug}`} className="nr-link">
+                <Link href={`/workspaces/${workspaceId}/brain/${latestNewspaperEdition.slug}`} className="nr-newspaper-action-button nr-newspaper-inline-button">
                   {t("readFullEdition")}
                 </Link>
               </p>
@@ -324,10 +369,10 @@ export default async function WorkspaceDashboard({
           </div>
         ) : liveNarrative ? (
           <div className="nr-newspaper-body">
-            <MarkdownRenderer markdown={liveNarrative.introMd} variant="document" allowImages={false} />
-            <MarkdownRenderer markdown={liveNarrative.leadMd} variant="document" className="nr-newspaper-lead" allowImages={false} />
-            <MarkdownRenderer markdown={liveNarrative.bodyMd} variant="document" allowImages={false} />
-            <MarkdownRenderer markdown={liveNarrative.closingMd} variant="document" className="nr-newspaper-closing" allowImages={false} />
+            <NewspaperSection title={t("newspaperSectionOverview")} markdown={liveNarrative.introMd} />
+            <NewspaperSection title={t("newspaperSectionLead")} markdown={liveNarrative.leadMd} className="nr-newspaper-lead" />
+            <NewspaperSection title={t("newspaperSectionMore")} markdown={liveNarrative.bodyMd} />
+            <NewspaperSection title={t("newspaperSectionEditorNote")} markdown={liveNarrative.closingMd} className="nr-newspaper-closing" />
           </div>
         ) : (
           <div className="nr-newspaper-body">
