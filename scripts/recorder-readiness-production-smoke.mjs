@@ -102,14 +102,13 @@ export function normalizeTempMeetingSetup(input = {}, now = new Date()) {
   const joinAt = parseOptionalFutureDate(input.joinAt, fallbackJoinAt, "temp meeting joinAt");
   const scheduledEndAt = new Date(joinAt.getTime() + durationMinutes * 60_000);
   const meetingUrl = String(input.meetingUrl ?? "").trim();
-  if (!meetingUrl) {
-    throw new Error("RECORDER_READINESS_SMOKE_TEMP_MEETING_URL is required when temp meetings are enabled.");
-  }
-  try {
-    const url = new URL(meetingUrl);
-    if (url.protocol !== "https:") throw new Error("not https");
-  } catch {
-    throw new Error("RECORDER_READINESS_SMOKE_TEMP_MEETING_URL must be a valid https URL.");
+  if (meetingUrl) {
+    try {
+      const url = new URL(meetingUrl);
+      if (url.protocol !== "https:") throw new Error("not https");
+    } catch {
+      throw new Error("RECORDER_READINESS_SMOKE_TEMP_MEETING_URL must be a valid https URL.");
+    }
   }
   return {
     enabled,
@@ -671,6 +670,9 @@ export class RecorderReadinessProductionSmoke {
 
   async setupTemporaryMeeting(deployment) {
     if (!this.tempMeetingSetup.enabled) return null;
+    if (!this.tempMeetingSetup.meetingUrl) {
+      throw new Error("RECORDER_READINESS_SMOKE_TEMP_MEETING_URL is required when temporary recorder setup is needed.");
+    }
     const tenant = tenantForDeployment(deployment, deployment.id);
     const label = validationRunLabel(this.validationRun.prNumbers, this.runId);
     const setup = {
