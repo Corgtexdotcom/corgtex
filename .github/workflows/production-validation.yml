@@ -1347,3 +1347,30 @@ jobs:
           name: production-validation-recorder-readiness
           path: .artifacts/production-validation/recorder-readiness
           if-no-files-found: warn
+
+  production-validation-outcome:
+    name: Production Validation Outcome
+    needs:
+      - validation-context
+      - telemetry-release-production-smoke
+      - client-readiness-production-smoke
+      - crm-production-smoke
+      - source-intake-production-smoke
+      - work-item-parity-production-smoke
+      - briefing-fixture-production-smoke
+      - recorder-readiness-production-smoke
+    if: ${{ always() && needs.validation-context.outputs.enabled == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.validation-context.outputs.trusted_ref == 'true' && (github.event.workflow_run.head_sha || github.sha) || 'main' }}
+
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          pattern: production-validation-*
+          path: .artifacts/production-validation-collected
+
+      - name: Fail on blocked or partial validation outcomes
+        run: node scripts/production-validation-outcome-gate.mjs .artifacts/production-validation-collected

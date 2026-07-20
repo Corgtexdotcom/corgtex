@@ -550,7 +550,6 @@ export class BriefingFixtureSmoke {
   }
 
   async generateBriefing() {
-    await this.snapshotExistingBriefing();
     const {
       buildWorkspaceBriefingFromCandidates,
       collectWorkspaceBriefingCandidates,
@@ -674,6 +673,7 @@ export class BriefingFixtureSmoke {
     try {
       await this.verifyHealth();
       await this.login();
+      await this.snapshotExistingBriefing();
       await this.createFixtureRecords();
       const briefing = await this.generateBriefing();
       const payloadSummary = assertBriefingFixturePayload(briefing, this.fixture);
