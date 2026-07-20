@@ -169,6 +169,34 @@ describe("recorder readiness production smoke helpers", () => {
     ]);
   });
 
+  it("does not resolve account-only summaries as readiness deployments", () => {
+    const accountOnlySummary = {
+      id: "account-1",
+      label: "Alpha Account",
+      customerSlug: "alpha",
+      hasDeployment: false,
+      deploymentStatus: null,
+      provisioningStatus: "draft",
+    };
+    const archivedDeployment = {
+      id: "archived-dep",
+      label: "Alpha Archived",
+      customerSlug: "alpha",
+      hasDeployment: true,
+      deploymentStatus: "SUSPENDED",
+      provisioningStatus: "archived",
+      environment: "production",
+    };
+
+    expect(deploymentMatchesRecorderReadinessTarget(accountOnlySummary, "alpha")).toBe(false);
+    expect(resolveRecorderReadinessTargets([accountOnlySummary], ["alpha"])).toEqual([
+      { target: "alpha", deployment: null },
+    ]);
+    expect(resolveRecorderReadinessTargets([accountOnlySummary, archivedDeployment], ["alpha"])).toEqual([
+      { target: "alpha", deployment: archivedDeployment },
+    ]);
+  });
+
   it("loads deployment inventory from the configured control plane", async () => {
     const originalFetch = global.fetch;
     global.fetch = vi.fn(async (url, init) => {

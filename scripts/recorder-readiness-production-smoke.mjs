@@ -183,6 +183,7 @@ export function deploymentMatchesRecorderReadinessTarget(deployment, target) {
 export function recorderReadinessDeploymentMatchScore(deployment, target) {
   const normalizedTarget = comparable(target);
   if (!normalizedTarget) return 0;
+  if (deployment.hasDeployment === false) return 0;
   if (fieldMatchesTarget(target, deployment.id)) return 10_000;
   if (fieldMatchesTarget(target, deployment.managedWorkspaceId, deployment.managedWorkspace?.id)) {
     return recorderReadinessDeploymentScore(950, deployment);
