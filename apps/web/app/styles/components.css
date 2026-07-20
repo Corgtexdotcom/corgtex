@@ -3288,6 +3288,11 @@ a.meeting-agenda-item:hover {
     border-radius: inherit;
   }
 
+  .nr-card-hitbox:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 3px;
+  }
+
   .nr-card-content {
     position: relative;
     z-index: 2;

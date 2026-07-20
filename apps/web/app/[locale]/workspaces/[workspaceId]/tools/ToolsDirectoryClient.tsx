@@ -10,9 +10,11 @@ import {
   TYPE_ORDER,
   catalogItemComparator,
   connectorReadinessForItem,
+  deriveCapturedLinkDisplay,
   filterCatalogItems,
   getCatalogCardActions,
   hasCatalogFilter,
+  inferLinkLibraryType,
   splitDefaultCatalogSections,
   type CatalogCardAction,
   type AppCategory,
@@ -330,7 +332,9 @@ function normalizeUrlKey(url: string) {
 }
 
 function bestMention(mentions: ExternalResourceMention[]) {
-  return mentions.find((mention) => mention.sharedByName || mention.sourceLabel || mention.sourceText)
+  return mentions.find((mention) => mention.sourceLabel?.trim())
+    ?? mentions.find((mention) => mention.sharedByName?.trim())
+    ?? mentions.find((mention) => mention.sourceText?.trim())
     ?? mentions[0]
     ?? null;
 }
@@ -340,24 +344,6 @@ function mentionSourceLabel(mention: ExternalResourceMention | null) {
   const provider = mention.sourceProvider ? displayEnum(mention.sourceProvider) : displayEnum(mention.sourceType);
   if (mention.sourceChannelName) return `${provider} #${mention.sourceChannelName}`;
   return provider;
-}
-
-function inferLinkType(input: {
-  resourceType?: string | null;
-  mimeType?: string | null;
-  category?: string | null;
-  title?: string | null;
-  descriptionMd?: string | null;
-  url: string;
-}) {
-  const haystack = `${input.resourceType ?? ""} ${input.mimeType ?? ""} ${input.category ?? ""} ${input.title ?? ""} ${input.descriptionMd ?? ""} ${input.url}`.toLowerCase();
-  if (haystack.includes("folder") || haystack.includes("/folder/") || haystack.includes("/folders/")) return "Folder";
-  if (haystack.includes("spreadsheet") || haystack.includes("sheet")) return "Spreadsheet";
-  if (haystack.includes("presentation") || haystack.includes("slide")) return "Presentation";
-  if (haystack.includes("pdf") || haystack.includes("document") || haystack.includes("docx") || haystack.includes("file")) return "Document";
-  if (input.resourceType && input.resourceType.toLowerCase() !== "link") return displayEnum(input.resourceType);
-  if (input.category === "FILES" || input.category === "DOCUMENTS") return "Document";
-  return "Link";
 }
 
 function linkSearchText(item: LinkLibraryItem) {
@@ -457,30 +443,35 @@ export function ToolsDirectoryClient({
       const manual = manualByUrl.get(normalizeUrlKey(url)) ?? null;
       if (manual) usedManualIds.add(manual.id);
       const mention = bestMention(resource.mentions);
-      const descriptionMd = resource.summaryMd
-        ?? resource.descriptionMd
-        ?? mention?.sourceText
-        ?? manual?.descriptionMd
-        ?? manual?.previewDescription
-        ?? manual?.accessNotesMd
-        ?? null;
+      const display = deriveCapturedLinkDisplay({
+        providerKey: resource.providerKey,
+        providerLabel: providerLabel(resource.providerKey),
+        resourceType: resource.resourceType,
+        mimeType: resource.mimeType,
+        category: resource.category,
+        title: resource.title,
+        resourceTitle: resource.title,
+        resourceDescriptionMd: resource.descriptionMd,
+        summaryMd: resource.summaryMd,
+        sourceLabel: mention?.sourceLabel ?? null,
+        sourceText: mention?.sourceText ?? null,
+        manualTitle: manual?.title ?? null,
+        manualPreviewTitle: manual?.previewTitle ?? null,
+        manualDescriptionMd: manual?.descriptionMd ?? null,
+        manualPreviewDescription: manual?.previewDescription ?? null,
+        manualAccessNotesMd: manual?.accessNotesMd ?? null,
+        url,
+      });
       return {
         id: `resource-${resource.id}`,
         source: "captured",
-        title: resource.title || manual?.title || domainFor(url),
+        title: display.title,
         url,
         providerLabel: providerLabel(resource.providerKey),
         providerKey: resource.providerKey,
         categoryLabel: displayEnum(resource.category),
-        typeLabel: inferLinkType({
-          resourceType: resource.resourceType,
-          mimeType: resource.mimeType,
-          category: resource.category,
-          title: resource.title,
-          descriptionMd,
-          url,
-        }),
-        descriptionMd,
+        typeLabel: display.typeLabel,
+        descriptionMd: display.descriptionMd,
         ownerLabel: mention?.sharedByName
           ? `Shared by ${mention.sharedByName}`
           : resource.createdBy
@@ -512,7 +503,7 @@ export function ToolsDirectoryClient({
           providerLabel: domainFor(link.url),
           providerKey: "manual",
           categoryLabel: displayEnum(link.category),
-          typeLabel: inferLinkType({
+          typeLabel: inferLinkLibraryType({
             category: link.category,
             title: link.title,
             descriptionMd,
@@ -879,9 +870,21 @@ export function ToolsDirectoryClient({
   }
 
   function renderLinkLibraryCard(item: LinkLibraryItem) {
+    const sourceContext = item.source === "manual"
+      ? "Manual"
+      : item.sourceLabel === "Captured reference"
+        ? null
+        : item.sourceLabel;
+    const meta = [
+      item.ownerLabel,
+      item.mentions.length > 0 ? `${item.mentions.length} mention${item.mentions.length === 1 ? "" : "s"}` : null,
+      `Updated ${displayDate(item.updatedAt)}`,
+    ].filter(Boolean).join(" · ");
+
     return (
       <article
         key={item.id}
+        className="nr-clickable-card"
         style={{
           border: "1px solid var(--line)",
           borderRadius: 8,
@@ -892,65 +895,48 @@ export function ToolsDirectoryClient({
           minHeight: 224,
         }}
       >
-        <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "flex-start" }}>
-          <div style={{ minWidth: 0 }}>
-            <div className="actions-inline" style={{ gap: 6, marginBottom: 8 }}>
-              <span className={item.providerKey === "box" ? "tag success" : "tag info"}>{item.providerLabel}</span>
-              <span className="tag">{item.categoryLabel}</span>
-              <span className={item.source === "captured" ? "tag info" : "tag"}>{item.source === "captured" ? "Captured" : "Manual"}</span>
-              {item.hasManualShortcut && <span className="tag">Shortcut</span>}
-              {item.hasCredential && <span className="tag success">{t("credentialConfigured")}</span>}
+        <a
+          href={item.url}
+          className="nr-card-hitbox"
+          target="_blank"
+          rel="noopener noreferrer"
+          aria-label={`Open ${item.title}`}
+          draggable={false}
+        />
+        <div className="nr-card-content" style={{ display: "grid", gap: 12 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "flex-start" }}>
+            <div style={{ minWidth: 0 }}>
+              <div className="actions-inline" style={{ gap: 6, marginBottom: 8 }}>
+                <span className={item.providerKey === "box" ? "tag success" : "tag info"}>{item.providerLabel}</span>
+                <span className="tag">{item.typeLabel}</span>
+                {sourceContext && <span className="tag info">{sourceContext}</span>}
+                {item.hasManualShortcut && <span className="tag">Shortcut</span>}
+                {item.hasCredential && <span className="tag success">{t("credentialConfigured")}</span>}
+              </div>
+              <h2 style={{ fontSize: "1.08rem", margin: 0, wordBreak: "break-word" }}>
+                {item.title}
+              </h2>
+              <div className="nr-item-meta" style={{ marginTop: 4 }}>{item.host}</div>
             </div>
-            <h2 style={{ fontSize: "1.08rem", margin: 0, wordBreak: "break-word" }}>
-              {item.title}
-            </h2>
-            <div className="nr-item-meta" style={{ marginTop: 4 }}>{item.host}</div>
           </div>
-        </div>
 
-        {item.descriptionMd ? (
-          <MarkdownExcerpt markdown={item.descriptionMd} maxLength={220} as="div" className="muted" />
-        ) : (
-          <p className="muted" style={{ margin: 0, fontSize: "0.9rem" }}>No description yet.</p>
-        )}
-
-        <div
-          style={{
-            display: "grid",
-            gridTemplateColumns: "repeat(auto-fit, minmax(135px, 1fr))",
-            gap: 8,
-          }}
-        >
-          <div className="nr-item-meta" style={{ margin: 0 }}>
-            <strong style={{ color: "var(--text)" }}>Type</strong><br />
-            {item.typeLabel}
-          </div>
-          <div className="nr-item-meta" style={{ margin: 0 }}>
-            <strong style={{ color: "var(--text)" }}>Owner</strong><br />
-            {item.ownerLabel}
-          </div>
-          <div className="nr-item-meta" style={{ margin: 0 }}>
-            <strong style={{ color: "var(--text)" }}>Source</strong><br />
-            {item.sourceLabel}
-          </div>
-        </div>
-
-        <p className="nr-item-meta" style={{ margin: 0 }}>
-          {item.mentions.length > 0 ? `${item.mentions.length} mention${item.mentions.length === 1 ? "" : "s"} · ` : ""}
-          Updated {displayDate(item.updatedAt)}
-        </p>
-
-        <TableActionGroup className="nr-tools-card-actions">
-          <a className="link-button small" href={item.url} target="_blank" rel="noreferrer">Open</a>
-          {item.sourcePermalink && (
-            <a className="link-button secondary small" href={item.sourcePermalink} target="_blank" rel="noreferrer">Source</a>
+          {item.descriptionMd && (
+            <MarkdownExcerpt markdown={item.descriptionMd} maxLength={180} as="div" className="muted" />
           )}
-          {item.toolLink?.canManage && (
-            <button type="button" className="secondary small" onClick={() => startEdit(item.toolLink as ToolLink)}>
-              {t("btnEdit")}
-            </button>
-          )}
-        </TableActionGroup>
+
+          <p className="nr-item-meta" style={{ margin: 0 }}>{meta}</p>
+
+          <TableActionGroup className="nr-tools-card-actions">
+            {item.sourcePermalink && (
+              <a className="link-button secondary small" href={item.sourcePermalink} target="_blank" rel="noopener noreferrer">Source</a>
+            )}
+            {item.toolLink?.canManage && (
+              <button type="button" className="secondary small" onClick={() => startEdit(item.toolLink as ToolLink)}>
+                {t("btnEdit")}
+              </button>
+            )}
+          </TableActionGroup>
+        </div>
       </article>
     );
   }

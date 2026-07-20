@@ -7,6 +7,30 @@ export type AppIntegrationDepth = "CATALOG_ONLY" | "LAUNCHABLE" | "MCP_ACTIONABL
 type CatalogConnectorAvailability = "LIVE" | "PILOT_READY" | "ON_REQUEST" | "MANUAL_ONLY" | "RESEARCH";
 export type ToolsSurface = "LINKS" | "APPS" | "ALL";
 
+export type LinkLibraryTypeInput = {
+  resourceType?: string | null;
+  mimeType?: string | null;
+  category?: string | null;
+  title?: string | null;
+  descriptionMd?: string | null;
+  url: string;
+};
+
+export type CapturedLinkDisplayInput = LinkLibraryTypeInput & {
+  providerKey: string;
+  providerLabel: string;
+  resourceTitle?: string | null;
+  manualTitle?: string | null;
+  manualPreviewTitle?: string | null;
+  sourceLabel?: string | null;
+  sourceText?: string | null;
+  summaryMd?: string | null;
+  resourceDescriptionMd?: string | null;
+  manualDescriptionMd?: string | null;
+  manualPreviewDescription?: string | null;
+  manualAccessNotesMd?: string | null;
+};
+
 export type CatalogConnectorReadiness = {
   key: string;
   title: string;
@@ -146,6 +170,236 @@ function booleanValue(value: unknown) {
 
 function numberValue(value: unknown) {
   return typeof value === "number" && Number.isFinite(value) ? value : 999;
+}
+
+function displayEnumValue(value: string) {
+  return value.replace(/_/g, " ").toLowerCase().replace(/\b\w/g, (letter) => letter.toUpperCase());
+}
+
+function cleanDisplayText(value?: string | null, maxLength = 4000) {
+  const trimmed = value?.replace(/\s+/g, " ").trim() ?? "";
+  return trimmed ? trimmed.slice(0, maxLength) : null;
+}
+
+function normalizedDisplayText(value?: string | null) {
+  return cleanDisplayText(value)
+    ?.toLowerCase()
+    .replace(/[_-]+/g, " ")
+    .replace(/[^a-z0-9]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim() ?? "";
+}
+
+function pathSegments(url: string) {
+  try {
+    return new URL(url).pathname.split("/").filter(Boolean).map((segment) => {
+      try {
+        return decodeURIComponent(segment);
+      } catch {
+        return segment;
+      }
+    });
+  } catch {
+    return [];
+  }
+}
+
+function lastUrlSegment(url: string) {
+  return pathSegments(url).at(-1) ?? null;
+}
+
+function isUrlLike(value: string) {
+  return value.startsWith("http://") || value.startsWith("https://");
+}
+
+function isOpaqueToken(value?: string | null) {
+  const normalized = value?.trim() ?? "";
+  return /^[a-z0-9]{16,}$/i.test(normalized) || /^[a-f0-9]{12,}$/i.test(normalized);
+}
+
+function isUsefulDisplayTitle(
+  value: string | null | undefined,
+  input: CapturedLinkDisplayInput,
+  { rejectOpaqueToken = false }: { rejectOpaqueToken?: boolean } = {},
+) {
+  const title = cleanDisplayText(value, 160);
+  if (!title || isUrlLike(title)) return false;
+  const normalizedTitle = normalizedDisplayText(title);
+  if (!normalizedTitle) return false;
+  const lastSegment = lastUrlSegment(input.url);
+  if (input.providerKey === "box" && (
+    (rejectOpaqueToken && isOpaqueToken(title))
+    || normalizedTitle === normalizedDisplayText(lastSegment)
+    || /^Box (document|file|folder|link|presentation|spreadsheet)$/i.test(title)
+  )) {
+    return false;
+  }
+  return true;
+}
+
+export function inferLinkLibraryType(input: LinkLibraryTypeInput) {
+  const haystack = `${input.resourceType ?? ""} ${input.mimeType ?? ""} ${input.category ?? ""} ${input.title ?? ""} ${input.descriptionMd ?? ""} ${input.url}`.toLowerCase();
+  if (haystack.includes("folder") || haystack.includes("/folder/") || haystack.includes("/folders/")) return "Folder";
+  if (haystack.includes("spreadsheet") || haystack.includes("sheet") || haystack.includes("tracker") || haystack.includes("workbook")) return "Spreadsheet";
+  if (haystack.includes("presentation") || haystack.includes("powerpoint") || haystack.includes("slide") || haystack.includes("pptx")) return "Presentation";
+  if (haystack.includes("pdf") || haystack.includes("document") || haystack.includes("docx") || haystack.includes("file")) return "Document";
+  if (input.resourceType && input.resourceType.toLowerCase() !== "link") return displayEnumValue(input.resourceType);
+  if (input.category === "FILES" || input.category === "DOCUMENTS") return "Document";
+  return "Link";
+}
+
+function stripUrls(value: string) {
+  return value
+    .replace(/<((?:https?:\/\/)[^>|]+)(?:\|([^>]*))?>/g, (_match, _url: string, label?: string) => label ? ` ${label} ` : " ")
+    .replace(/\bhttps?:\/\/[^\s<>"']+/g, " ");
+}
+
+function firstSentence(value: string) {
+  return value.split(/(?<=[.!?])\s+/)[0]?.trim() ?? value.trim();
+}
+
+function trimTitleCandidate(value: string) {
+  return cleanDisplayText(value.replace(/^[-:;,\s]+|[-:;,\s]+$/g, ""), 96);
+}
+
+const DOCUMENT_TERM_PATTERN = "powerpoint|presentation|pptx|spreadsheet|tracker|workbook|document|docx?|pdf|file|folder|model|report|deck|slides?|sheet";
+
+function containsDocumentTerm(value: string) {
+  return new RegExp(`\\b(${DOCUMENT_TERM_PATTERN})\\b`, "i").test(value.replace(/[_-]+/g, " "));
+}
+
+function sourceTextUrlCount(sourceText?: string | null) {
+  return sourceText?.match(/<https?:\/\/[^>|]+(?:\|[^>]*)?>|\bhttps?:\/\/[^\s<>"']+/g)?.length ?? 0;
+}
+
+function hasAdjacentDocumentTermForQuote(cleaned: string, index: number, length: number) {
+  const before = cleaned.slice(0, index).replace(/[_-]+/g, " ").trim();
+  const after = cleaned.slice(index + length).replace(/[_-]+/g, " ").trim();
+  return new RegExp(`\\b(${DOCUMENT_TERM_PATTERN})\\s*[-:(]?$`, "i").test(before)
+    || new RegExp(`^[-:)]?\\s*\\b(${DOCUMENT_TERM_PATTERN})\\b`, "i").test(after);
+}
+
+function inferTitleFromSourceText(sourceText?: string | null) {
+  if (sourceTextUrlCount(sourceText) > 1) return null;
+  const cleaned = cleanDisplayText(stripUrls(sourceText ?? ""), 1200);
+  if (!cleaned) return null;
+
+  for (const match of cleaned.matchAll(/["'“”]([^"'“”]{3,96})["'“”]/g)) {
+    const quoted = trimTitleCandidate(match[1] ?? "");
+    if (
+      quoted
+      && !isUrlLike(quoted)
+      && (containsDocumentTerm(quoted) || hasAdjacentDocumentTermForQuote(cleaned, match.index ?? 0, match[0].length))
+    ) {
+      return quoted;
+    }
+  }
+
+  const thisIsMatch = cleaned.match(/^this is (?:the )?(.+?)(?:[.!?]|$)/i);
+  const thisIsCandidate = trimTitleCandidate(thisIsMatch?.[1] ?? "");
+  if (thisIsCandidate && containsDocumentTerm(thisIsCandidate)) return thisIsCandidate;
+
+  const firstClause = trimTitleCandidate(firstSentence(cleaned).split(/\b(?:includes?|contains?|covers?|has|with|for)\b/i)[0] ?? "");
+  if (!firstClause || !containsDocumentTerm(firstClause)) return null;
+  if (/^(add|open|use|please|see|review|check|look|click)\b/i.test(firstClause)) return null;
+  return firstClause;
+}
+
+function fallbackCapturedTitle(input: CapturedLinkDisplayInput, typeLabel: string) {
+  if (input.providerKey === "box") {
+    if (typeLabel === "Spreadsheet") return "Box spreadsheet";
+    if (typeLabel === "Presentation") return "Box presentation";
+    if (typeLabel === "Folder") return "Box folder";
+    if (typeLabel === "Document") return "Box document";
+    return "Box link";
+  }
+  return `${input.providerLabel} ${typeLabel.toLowerCase()}`;
+}
+
+function escapeRegExp(value: string) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function titlePrefixPattern(title: string) {
+  const tokens = cleanDisplayText(title, 160)?.split(/[\s_-]+/).filter(Boolean) ?? [];
+  if (tokens.length === 0) return null;
+  return tokens.map(escapeRegExp).join("[\\s_-]+");
+}
+
+function stripDuplicateTitlePrefix(description: string, title: string) {
+  const pattern = titlePrefixPattern(title);
+  if (!pattern) return description;
+  const match = description.match(new RegExp(`^\\s*["'“”]?${pattern}["'“”]?(?=$|[-_:;,!?\\s.])\\s*`, "i"));
+  if (!match) return description;
+  const remainder = description.slice(match[0].length).replace(/^[-:;,\s]+/, "");
+  if (!remainder) return "";
+  return remainder.replace(/^(includes?|contains?|covers?|has|with)\b/i, (match) => match[0].toUpperCase() + match.slice(1).toLowerCase());
+}
+
+function stripDuplicateTitleReferences(description: string, title: string) {
+  const normalizedTitle = normalizedDisplayText(title);
+  if (!normalizedTitle || !normalizedDisplayText(description).includes(normalizedTitle)) return description;
+  const pattern = titlePrefixPattern(title);
+  if (!pattern) return description;
+  const withoutTitle = description
+    .replace(new RegExp(`[\\s"'“”]*${pattern}[\\s"'“”]*`, "i"), " ")
+    .replace(/\s+([.,;:!?])/g, "$1")
+    .replace(/\s+/g, " ")
+    .trim();
+  return isLowInformationDescription(withoutTitle) ? withoutTitle : description;
+}
+
+function isLowInformationDescription(description: string) {
+  const normalized = normalizedDisplayText(description);
+  if (!normalized) return true;
+  if (/^(?:this is|this is the|this is a|this is an|the|a|an)? ?(?:box )?(?:spreadsheet|document|presentation|powerpoint|file|folder|link|tracker|workbook|sheet|deck|slides?)$/.test(normalized)) return true;
+  if (/^(?:shared in slack for reference|shared for reference|for reference)$/.test(normalized)) return true;
+  return false;
+}
+
+function compactDescription(rawDescription: string | null, title: string, labels: string[]) {
+  let description = cleanDisplayText(stripUrls(rawDescription ?? ""), 400);
+  if (!description) return null;
+  description = stripDuplicateTitlePrefix(description, title);
+  description = stripDuplicateTitleReferences(description, title);
+  description = cleanDisplayText(description, 220);
+  if (!description) return null;
+  if (isLowInformationDescription(description)) return null;
+
+  const normalizedDescription = normalizedDisplayText(description);
+  const duplicateLabels = [title, ...labels].map((label) => normalizedDisplayText(label)).filter(Boolean);
+  if (duplicateLabels.some((label) => label === normalizedDescription)) return null;
+  return description;
+}
+
+export function deriveCapturedLinkDisplay(input: CapturedLinkDisplayInput) {
+  const rawDescription = input.summaryMd
+    ?? input.resourceDescriptionMd
+    ?? input.sourceText
+    ?? input.manualDescriptionMd
+    ?? input.manualPreviewDescription
+    ?? input.manualAccessNotesMd
+    ?? null;
+  const titleCandidates = [
+    { value: input.sourceLabel, rejectOpaqueToken: false },
+    { value: input.manualPreviewTitle, rejectOpaqueToken: false },
+    { value: input.manualTitle, rejectOpaqueToken: false },
+    { value: input.resourceTitle, rejectOpaqueToken: true },
+    { value: inferTitleFromSourceText(input.sourceText), rejectOpaqueToken: false },
+  ];
+  const selectedTitle = titleCandidates.find((candidate) => (
+    isUsefulDisplayTitle(candidate.value, input, { rejectOpaqueToken: candidate.rejectOpaqueToken })
+  ));
+  const selectedTitleText = cleanDisplayText(selectedTitle?.value, 160);
+  const typeLabel = inferLinkLibraryType({
+    ...input,
+    title: selectedTitleText ?? input.resourceTitle ?? input.title,
+    descriptionMd: rawDescription,
+  });
+  const title = selectedTitleText ?? fallbackCapturedTitle(input, typeLabel);
+  const descriptionMd = compactDescription(rawDescription, title, [input.providerLabel, typeLabel, input.sourceLabel ?? ""]);
+
+  return { title, descriptionMd, typeLabel };
 }
 
 export function connectorReadinessForItem(item: CatalogItemForUi): CatalogConnectorReadiness | null {

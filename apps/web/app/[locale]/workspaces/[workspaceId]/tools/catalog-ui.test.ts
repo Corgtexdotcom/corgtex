@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
   connectorReadinessForItem,
+  deriveCapturedLinkDisplay,
   filterCatalogItems,
   getCatalogCardActions,
+  inferLinkLibraryType,
   normalizeCatalogQuery,
   normalizeCatalogType,
   normalizeToolsSurface,
@@ -285,5 +287,201 @@ describe("Tools catalog UI helpers", () => {
       { kind: "request", label: "Request install", requestType: "ACCESS", variant: "primary" },
       { kind: "link", label: "Details", href: "/workspaces/workspace-1/tools/finance-suite", variant: "secondary" },
     ]);
+  });
+
+  it("keeps explicit captured labels ahead of stored opaque Box titles", () => {
+    expect(deriveCapturedLinkDisplay({
+      providerKey: "box",
+      providerLabel: "Box",
+      resourceTitle: "ik1wlmvcd2v7mn82qiqgk5aeurl8qg5m",
+      resourceType: "link",
+      category: "FILES",
+      sourceLabel: "Budget model",
+      sourceText: "Use <https://app.box.com/s/ik1wlmvcd2v7mn82qiqgk5aeurl8qg5m|Budget model> for review.",
+      url: "https://app.box.com/s/ik1wlmvcd2v7mn82qiqgk5aeurl8qg5m",
+    })).toMatchObject({
+      title: "Budget model",
+      typeLabel: "Document",
+      descriptionMd: "Use Budget model for review.",
+    });
+  });
+
+  it("does not remove selected titles from normal source sentences", () => {
+    expect(deriveCapturedLinkDisplay({
+      providerKey: "box",
+      providerLabel: "Box",
+      resourceTitle: "qwertyuiopasdfghjklzxcvb",
+      resourceType: "link",
+      category: "FILES",
+      sourceLabel: "Budget model",
+      sourceText: "The Budget model includes cash forecasts.",
+      url: "https://app.box.com/s/qwertyuiopasdfghjklzxcvb",
+    })).toMatchObject({
+      title: "Budget model",
+      descriptionMd: "The Budget model includes cash forecasts.",
+    });
+  });
+
+  it("does not strip title text from the beginning of a longer word", () => {
+    expect(deriveCapturedLinkDisplay({
+      providerKey: "box",
+      providerLabel: "Box",
+      resourceTitle: "qwertyuiopasdfghjklzxcvb",
+      resourceType: "link",
+      category: "FILES",
+      sourceLabel: "Budget",
+      sourceText: "Budgeting assumptions are final.",
+      url: "https://app.box.com/s/qwertyuiopasdfghjklzxcvb",
+    })).toMatchObject({
+      title: "Budget",
+      descriptionMd: "Budgeting assumptions are final.",
+    });
+  });
+
+  it("keeps deliberate alphanumeric Box labels even when they look opaque", () => {
+    expect(deriveCapturedLinkDisplay({
+      providerKey: "box",
+      providerLabel: "Box",
+      resourceTitle: "tq2s9v8r7m6n5b4c3x2z1a0q",
+      resourceType: "link",
+      category: "FILES",
+      sourceLabel: "BudgetModel2026Final",
+      sourceText: "Use <https://app.box.com/s/tq2s9v8r7m6n5b4c3x2z1a0q|BudgetModel2026Final> for review.",
+      url: "https://app.box.com/s/tq2s9v8r7m6n5b4c3x2z1a0q",
+    })).toMatchObject({
+      title: "BudgetModel2026Final",
+      typeLabel: "Document",
+    });
+  });
+
+  it("infers type badges from selected manual titles", () => {
+    expect(deriveCapturedLinkDisplay({
+      providerKey: "box",
+      providerLabel: "Box",
+      resourceTitle: "tq2s9v8r7m6n5b4c3x2z1a0q",
+      resourceType: "link",
+      category: "FILES",
+      manualTitle: "Budget spreadsheet",
+      url: "https://app.box.com/s/tq2s9v8r7m6n5b4c3x2z1a0q",
+    })).toMatchObject({
+      title: "Budget spreadsheet",
+      typeLabel: "Spreadsheet",
+    });
+  });
+
+  it("infers document titles from useful source text and narrows duplicate descriptions", () => {
+    expect(deriveCapturedLinkDisplay({
+      providerKey: "box",
+      providerLabel: "Box",
+      resourceTitle: "xdc0lovvqzlq2yn5oubmuz7rc94ylrq3",
+      resourceType: "link",
+      category: "FILES",
+      sourceText: "V7 of the CRna org Structure PowerPoint includes the revised structure, the two paths to get to that structure, the governance model, and actions.",
+      url: "https://zinatacore.box.com/s/xdc0lovvqzlq2yn5oubmuz7rc94ylrq3",
+    })).toMatchObject({
+      title: "V7 of the CRna org Structure PowerPoint",
+      typeLabel: "Presentation",
+      descriptionMd: "Includes the revised structure, the two paths to get to that structure, the governance model, and actions.",
+    });
+  });
+
+  it("strips duplicate underscore titles without dropping the following description", () => {
+    expect(deriveCapturedLinkDisplay({
+      providerKey: "box",
+      providerLabel: "Box",
+      resourceTitle: "kz99eo5smg0vqe1pe4dzmtmaa4p2nws",
+      resourceType: "link",
+      category: "FILES",
+      sourceText: "\"CRNA_Income_Expense_Tracker\" includes revenue assumptions and cash forecast.",
+      url: "https://zinatacore.box.com/s/kz99eo5smg0vqe1pe4dzmtmaa4p2nws",
+    })).toMatchObject({
+      title: "CRNA_Income_Expense_Tracker",
+      typeLabel: "Spreadsheet",
+      descriptionMd: "Includes revenue assumptions and cash forecast.",
+    });
+  });
+
+  it("uses quoted document names from source text", () => {
+    expect(deriveCapturedLinkDisplay({
+      providerKey: "box",
+      providerLabel: "Box",
+      resourceTitle: "kz99eo5smg0vqe1pe4dzmtmaa4p2nws",
+      resourceType: "link",
+      category: "FILES",
+      sourceText: "This is the spreadsheet \"CRNA_Income_Expense_Tracker\"",
+      url: "https://zinatacore.box.com/s/kz99eo5smg0vqe1pe4dzmtmaa4p2nws",
+    })).toMatchObject({
+      title: "CRNA_Income_Expense_Tracker",
+      typeLabel: "Spreadsheet",
+      descriptionMd: null,
+    });
+  });
+
+  it("uses quoted names when the document type is adjacent to the quote", () => {
+    expect(deriveCapturedLinkDisplay({
+      providerKey: "box",
+      providerLabel: "Box",
+      resourceTitle: "abc123abc123abc123abc123",
+      resourceType: "link",
+      category: "FILES",
+      sourceText: "This is the spreadsheet \"Q3 Forecast\"",
+      url: "https://app.box.com/s/abc123abc123abc123abc123",
+    })).toMatchObject({
+      title: "Q3 Forecast",
+      typeLabel: "Spreadsheet",
+      descriptionMd: null,
+    });
+  });
+
+  it("does not use arbitrary quoted words as document titles", () => {
+    expect(deriveCapturedLinkDisplay({
+      providerKey: "box",
+      providerLabel: "Box",
+      resourceTitle: "abc123abc123abc123abc123",
+      resourceType: "link",
+      category: "FILES",
+      sourceText: "Please type \"approved\" after reviewing https://app.box.com/s/abc123abc123abc123abc123.",
+      url: "https://app.box.com/s/abc123abc123abc123abc123",
+    })).toMatchObject({
+      title: "Box document",
+      typeLabel: "Document",
+      descriptionMd: "Please type \"approved\" after reviewing",
+    });
+  });
+
+  it("does not infer one title for every URL in a multi-link source message", () => {
+    expect(deriveCapturedLinkDisplay({
+      providerKey: "box",
+      providerLabel: "Box",
+      resourceTitle: "jchwokfhewk3bqqqore19xdfxzwmf853",
+      resourceType: "link",
+      category: "FILES",
+      sourceText: "Budget model includes the forecast: https://zinatacore.box.com/s/firstboxslug. Hiring plan includes the roles: https://zinatacore.box.com/s/jchwokfhewk3bqqqore19xdfxzwmf853.",
+      url: "https://zinatacore.box.com/s/jchwokfhewk3bqqqore19xdfxzwmf853",
+    })).toMatchObject({
+      title: "Box document",
+      typeLabel: "Document",
+    });
+  });
+
+  it("falls back to readable provider and document type labels", () => {
+    expect(deriveCapturedLinkDisplay({
+      providerKey: "box",
+      providerLabel: "Box",
+      resourceTitle: "jchwokfhewk3bqqqore19xdfxzwmf853",
+      resourceType: "link",
+      category: "FILES",
+      sourceText: "Add your comments to the last tab",
+      url: "https://zinatacore.box.com/s/jchwokfhewk3bqqqore19xdfxzwmf853",
+    })).toMatchObject({
+      title: "Box document",
+      typeLabel: "Document",
+      descriptionMd: "Add your comments to the last tab",
+    });
+    expect(inferLinkLibraryType({
+      category: "FILES",
+      title: "CRNA_Income_Expense_Tracker",
+      url: "https://zinatacore.box.com/s/kz99eo5smg0vqe1pe4dzmtmaa4p2nws",
+    })).toBe("Spreadsheet");
   });
 });

@@ -166,6 +166,13 @@ describe("workspace external resources", () => {
       title: "Budget model",
       url: "https://app.box.com/s/budget",
     }));
+    expect(classifyExternalResourceUrl("https://app.box.com/s/ik1wlmvcd2v7mn82qiqgk5aeurl8qg5m")).toEqual(expect.objectContaining({
+      providerKey: "box",
+      category: "FILES",
+      priority: 100,
+      title: "Box link",
+      url: "https://app.box.com/s/ik1wlmvcd2v7mn82qiqgk5aeurl8qg5m",
+    }));
     expect(classifyExternalResourceUrl("https://example.com/report")).toEqual(expect.objectContaining({
       providerKey: "generic_url",
       category: "LINK",
