@@ -6,8 +6,17 @@ import { getTranslations } from "next-intl/server";
 import { MarkdownEditor } from "@/lib/components/MarkdownEditor";
 import { MarkdownExcerpt } from "@/lib/components/MarkdownRenderer";
 import { KnowledgeFileUploader } from "../KnowledgeFileUploader";
+import {
+  BRAIN_ARTICLE_TYPES,
+  buildBrainIndexHref,
+  buildBrainIndexState,
+  canManageBrainArticle,
+  resolveBrainSearchResults,
+} from "./view-model";
 
 export const dynamic = "force-dynamic";
+
+const CREATABLE_ARTICLE_TYPES = BRAIN_ARTICLE_TYPES.filter((type) => type !== "DIGEST");
 
 export default async function BrainPage({
   params,
@@ -21,51 +30,50 @@ export default async function BrainPage({
   const membership = await requireWorkspaceMembership({ actor, workspaceId });
   const t = await getTranslations("brain");
   const resolvedSearch = searchParams ? await searchParams : {};
-  const query = typeof resolvedSearch.q === "string" ? resolvedSearch.q : "";
-  const question = typeof resolvedSearch.question === "string" ? resolvedSearch.question : "";
-  const range = typeof resolvedSearch.range === "string" ? resolvedSearch.range : "30d";
+  const provisionalQuery = typeof resolvedSearch.q === "string" ? resolvedSearch.q : "";
+  const provisionalQuestion = typeof resolvedSearch.question === "string" ? resolvedSearch.question : "";
 
   const [{ items: articles }, status, searchResults, answer, allMeetings, allDocuments] = await Promise.all([
     listArticles(actor, { workspaceId, take: 500 }),
     getBrainStatus(actor, { workspaceId }),
-    query.trim()
-      ? searchIndexedKnowledge({ workspaceId, query, limit: 12 })
+    provisionalQuery.trim()
+      ? searchIndexedKnowledge({ workspaceId, query: provisionalQuery, limit: 12, sourceTypes: ["BRAIN_ARTICLE"] })
       : Promise.resolve([]),
-    question.trim()
-      ? answerKnowledgeQuestion({ workspaceId, question, limit: 4 })
+    provisionalQuestion.trim()
+      ? answerKnowledgeQuestion({ workspaceId, question: provisionalQuestion, limit: 4 })
       : Promise.resolve(null),
     listMeetings(workspaceId, { status: "COMPLETED" }),
     listDocuments(workspaceId),
   ]);
 
-  const cutoff = new Date();
-  if (range === "30d") cutoff.setDate(cutoff.getDate() - 30);
-  else if (range === "90d") cutoff.setDate(cutoff.getDate() - 90);
-  else cutoff.setTime(0);
+  const {
+    query,
+    question,
+    range,
+    selectedType,
+    typeCounts,
+    visibleArticles,
+    typeSummaries,
+    meetings,
+    documents,
+  } = buildBrainIndexState({
+    articles,
+    meetings: allMeetings,
+    documents: allDocuments,
+    searchParams: resolvedSearch,
+  });
+  const resolvedSearchResults = resolveBrainSearchResults(searchResults, articles);
 
-  const meetings = allMeetings.filter(m => new Date(m.recordedAt) >= cutoff);
-  const documents = allDocuments.filter(d => new Date(d.createdAt) >= cutoff);
-
-  // Group articles by type
-  const byType = new Map<string, typeof articles>();
-  for (const article of articles) {
-    const group = byType.get(article.type) ?? [];
-    group.push(article);
-    byType.set(article.type, group);
-  }
-
-  // Sort groups alphabetically
-  const sortedTypes = [...byType.entries()].sort(([a], [b]) => a.localeCompare(b));
-  const canManageArticle = (article: { ownerMemberId?: string | null }) => actor.kind === "agent"
-    || membership?.role === "ADMIN"
-    || (Boolean(article.ownerMemberId) && article.ownerMemberId === membership?.id);
+  const filterHref = (type: string | null) => buildBrainIndexHref({ query, question, range, type });
+  const rangeHref = (nextRange: "30d" | "90d" | "all") => buildBrainIndexHref({ query, question, range: nextRange, type: selectedType });
+  const selectedCount = visibleArticles.length;
 
   return (
-    <>
-      <div className="nr-masthead" style={{ textAlign: "left", marginBottom: 48 }}>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", borderBottom: "1px solid var(--text)", paddingBottom: 16 }}>
-          <h1 style={{ border: "none", padding: 0, margin: 0, fontSize: "2rem" }}>{t("title")}</h1>
-          <span style={{ fontSize: "0.85rem", color: "var(--muted)", textTransform: "uppercase", letterSpacing: "0.05em" }}>
+    <div className="brain-page">
+      <div className="nr-masthead brain-masthead">
+        <div className="brain-masthead-row">
+          <h1>{t("title")}</h1>
+          <span className="brain-masthead-meta">
             {t("stats", { articles: status.totalArticles, meetings: allMeetings.length })}
           </span>
         </div>
@@ -73,61 +81,93 @@ export default async function BrainPage({
 
       <KnowledgeFileUploader workspaceId={workspaceId} defaultSource="brain-upload" />
 
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "48px", borderBottom: "4px solid var(--line)", paddingBottom: "48px", marginBottom: "48px" }}>
-        
-        {/* Left: Search */}
-        <div>
-          <h2 className="nr-section-header" style={{ borderTop: "none" }}>{t("searchBrain")}</h2>
-          <form method="GET" style={{ marginBottom: "24px" }}>
-            <input 
-              name="q" 
-              defaultValue={query} 
-              placeholder={t("searchPlaceholder")} 
-              style={{ width: "100%", padding: "12px", fontSize: "1rem", border: "1px solid var(--line)", borderRadius: "4px" }}
+      <section className="brain-stat-strip" aria-label={t("statusTitle")}>
+        <div className="brain-stat-card">
+          <strong>{status.totalArticles}</strong>
+          <span>{t("totalArticles")}</span>
+        </div>
+        <div className="brain-stat-card">
+          <strong>{selectedCount}</strong>
+          <span>{t("visibleArticles")}</span>
+        </div>
+        <div className="brain-stat-card">
+          <strong>{typeCounts.length}</strong>
+          <span>{t("articleTypes")}</span>
+        </div>
+        <div className="brain-stat-card">
+          <strong>{status.unabsorbedSources}</strong>
+          <span>{t("pendingSources")}</span>
+        </div>
+      </section>
+
+      <section className="brain-top-grid">
+        <div className="brain-top-panel">
+          <h2 className="nr-section-header">{t("searchBrain")}</h2>
+          <form method="GET" className="brain-search-form">
+            {selectedType && <input type="hidden" name="type" value={selectedType} />}
+            {range !== "30d" && <input type="hidden" name="range" value={range} />}
+            <input
+              name="q"
+              defaultValue={query}
+              placeholder={t("searchPlaceholder")}
             />
           </form>
 
-          {searchResults.length > 0 && (
-            <div>
-              <h3 style={{ fontSize: "0.9rem", textTransform: "uppercase", color: "var(--muted)", marginBottom: "12px" }}>{t("results")}</h3>
-              {searchResults.map((result) => (
-                <a key={result.chunkId} href={`/workspaces/${workspaceId}/brain/${result.sourceId}`} className="nr-item" style={{ display: "block", textDecoration: "none" }}>
-                  <div style={{ fontWeight: 600, color: "var(--text)" }}>{result.title ?? result.sourceId}</div>
-                  <div className="nr-meta" style={{ marginTop: "4px" }}>{result.sourceType}</div>
-                  <p className="nr-excerpt" style={{ fontSize: "0.85rem", marginTop: "4px" }}>{result.snippet.slice(0, 150)}...</p>
-                </a>
-              ))}
+          {resolvedSearchResults.length > 0 && (
+            <div className="brain-search-results">
+              <h3>{t("results")}</h3>
+              {resolvedSearchResults.map((result) => {
+                const resultBody = (
+                  <>
+                    <div className="brain-search-result-title">{result.title ?? result.sourceId}</div>
+                    <div className="nr-meta">{result.sourceType}</div>
+                    <p className="nr-excerpt">{result.snippet.slice(0, 150)}...</p>
+                    {!result.articleSlug && <div className="nr-meta">{t("unlinkedSearchResult")}</div>}
+                  </>
+                );
+
+                return result.articleSlug ? (
+                  <a key={result.chunkId} href={`/workspaces/${workspaceId}/brain/${result.articleSlug}`} className="nr-item brain-search-result">
+                    {resultBody}
+                  </a>
+                ) : (
+                  <div key={result.chunkId} className="nr-item brain-search-result">
+                    {resultBody}
+                  </div>
+                );
+              })}
+              <p className="brain-coverage-note">{t("searchCoverageNote")}</p>
             </div>
           )}
         </div>
 
-        {/* Right: Ask AI */}
-        <div>
-          <h2 className="nr-section-header" style={{ borderTop: "none" }}>{t("askAgent")}</h2>
-          <form method="GET">
+        <div className="brain-top-panel">
+          <h2 className="nr-section-header">{t("askAgent")}</h2>
+          <form method="GET" className="brain-ask-form">
             {query && <input type="hidden" name="q" value={query} />}
-            <textarea 
-              name="question" 
-              defaultValue={question} 
-              placeholder={t("askPlaceholder")} 
-              rows={3} 
-              style={{ width: "100%", padding: "12px", fontSize: "1rem", border: "1px solid var(--line)", borderRadius: "4px", marginBottom: "8px" }}
+            {selectedType && <input type="hidden" name="type" value={selectedType} />}
+            {range !== "30d" && <input type="hidden" name="range" value={range} />}
+            <textarea
+              name="question"
+              defaultValue={question}
+              placeholder={t("askPlaceholder")}
+              rows={3}
             />
-            <button type="submit" style={{ padding: "8px 16px", background: "var(--accent)", color: "var(--accent-fg)", border: "none", borderRadius: "4px", cursor: "pointer" }}>{t("synthesizeAnswer")}</button>
+            <button type="submit">{t("synthesizeAnswer")}</button>
           </form>
 
           {answer && (
-            <div style={{ marginTop: "24px", padding: "16px", background: "var(--accent-soft)", borderRadius: "6px" }}>
-              <div style={{ fontWeight: 600, marginBottom: "8px" }}>{t("agentSynthesis")}</div>
-              <p style={{ lineHeight: 1.5, fontSize: "0.95rem", margin: "0 0 16px 0" }}>{answer.answer}</p>
-              
+            <div className="brain-answer">
+              <div className="brain-answer-title">{t("agentSynthesis")}</div>
+              <p>{answer.answer}</p>
+
               {answer.citations.length > 0 && (
-                <div style={{ borderTop: "1px solid var(--line)", paddingTop: "12px" }}>
-                  <div style={{ fontSize: "0.8rem", color: "var(--muted)", textTransform: "uppercase", marginBottom: "8px" }}>{t("sourcesUsed")}</div>
-                  {answer.citations.map((c, idx) => (
-                    <div key={idx} style={{ fontSize: "0.8rem", marginBottom: "8px" }}>
-                      <strong style={{ color: "var(--text)" }}>{c.title ?? c.sourceId}</strong>
-                      <span style={{ color: "var(--muted)", marginLeft: "8px" }}>{c.snippet.slice(0, 80)}...</span>
+                <div className="brain-answer-citations">
+                  <div className="brain-citation-label">{t("sourcesUsed")}</div>
+                  {answer.citations.map((citation) => (
+                    <div key={citation.chunkId} className="brain-citation">
+                      <strong>{citation.title ?? citation.sourceId}</strong>
+                      <span>{citation.snippet.slice(0, 80)}...</span>
                     </div>
                   ))}
                 </div>
@@ -135,127 +175,201 @@ export default async function BrainPage({
             </div>
           )}
         </div>
-      </div>
+      </section>
 
-      <div style={{ display: "grid", gridTemplateColumns: "3fr 1fr", gap: "48px" }}>
-        {/* Full Index Directory */}
-        <div>
-          <h2 className="nr-section-header">{t("fullDirectory")}</h2>
-          
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "32px" }}>
-            {sortedTypes.map(([type, typeArticles]) => (
-              <div key={type} className="nr-category">
-                <h3>{type}</h3>
-                <ul>
-                  {typeArticles.map((a) => {
-                    const canManage = canManageArticle(a);
-                    return (
-                    <li key={a.id} style={{ marginBottom: "12px" }}>
-                      <a href={`/workspaces/${workspaceId}/brain/${a.slug}`} style={{ fontSize: "0.95rem", fontWeight: 500 }}>
-                        {a.isPrivate && <span title={t("privateDraft")} style={{ marginRight: 6 }}>◆</span>}
-                        {a.title}
-                      </a>
-                      {a.authority === "AUTHORITATIVE" && <span style={{ fontSize: "0.6rem", padding: "1px 4px", background: "var(--accent)", color: "var(--accent-fg)", borderRadius: "2px", marginLeft: "6px", verticalAlign: "middle" }}>{t("core")}</span>}
-                      {a.authority === "DRAFT" && <span style={{ fontSize: "0.6rem", padding: "1px 4px", background: "var(--warning-soft)", color: "var(--warning)", borderRadius: "2px", marginLeft: "6px", verticalAlign: "middle" }}>{t("draft")}</span>}
-                      <MarkdownExcerpt markdown={a.bodyMd} maxLength={100} as="div" className="nr-item-meta" />
-                      {canManage && (
-                        <div className="actions-inline" style={{ marginTop: 6 }}>
-                          {a.isPrivate && a.authority === "DRAFT" && (
-                            <form action={publishArticleAction}>
-                              <input type="hidden" name="workspaceId" value={workspaceId} />
-                              <input type="hidden" name="slug" value={a.slug} />
-                              <button type="submit" className="secondary small">{t("open")}</button>
-                            </form>
-                          )}
-                          {!a.isPrivate && (
-                            <form action={returnArticleToDraftAction}>
-                              <input type="hidden" name="workspaceId" value={workspaceId} />
-                              <input type="hidden" name="slug" value={a.slug} />
-                              <button type="submit" className="secondary small">{t("returnToDraft")}</button>
-                            </form>
-                          )}
-                          {a.authority === "DRAFT" && (
-                            <a href={`/workspaces/${workspaceId}/brain/${a.slug}/edit`} className="secondary small">{t("edit")}</a>
-                          )}
-                        </div>
-                      )}
-                    </li>
-                  );})}
-                </ul>
-              </div>
-            ))}
-            {articles.length === 0 && <p className="nr-meta">{t("noArticles")}</p>}
-          </div>
-        </div>
-
-        {/* Sidebar: Raw Index */}
-        <div>
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: "16px" }}>
-            <h2 className="nr-section-header" style={{ margin: 0, flex: 1 }}>{t("rawIndex")}</h2>
-            <div style={{ display: "flex", gap: "8px", fontSize: "0.8rem" }}>
-              <a href="?range=30d" style={{ fontWeight: range === "30d" ? "bold" : "normal", textDecoration: "none" }}>30d</a>
-              <span className="nr-meta" style={{ margin: 0 }}>|</span>
-              <a href="?range=90d" style={{ fontWeight: range === "90d" ? "bold" : "normal", textDecoration: "none" }}>90d</a>
-              <span className="nr-meta" style={{ margin: 0 }}>|</span>
-              <a href="?range=all" style={{ fontWeight: range === "all" ? "bold" : "normal", textDecoration: "none" }}>{t("all")}</a>
+      <section className="brain-content-grid">
+        <div className="brain-directory">
+          <div className="brain-directory-header">
+            <div>
+              <h2 className="nr-section-header">{t("fullDirectory")}</h2>
+              <p className="nr-meta">
+                {t("directoryShowing", { count: selectedCount, total: articles.length })}
+              </p>
             </div>
           </div>
 
-          <h3 style={{ fontSize: "0.85rem", textTransform: "uppercase", letterSpacing: "0.05em", color: "var(--muted)", borderBottom: "1px solid var(--line)", paddingBottom: "4px", marginBottom: "12px" }}>
-            {t("meetings", { count: meetings.length })}
-          </h3>
-          <div style={{ marginBottom: "32px" }}>
-            {meetings.slice(0, 20).map(m => (
-              <div key={m.id} style={{ marginBottom: "12px" }}>
-                <a href={`/workspaces/${workspaceId}/meetings`} style={{ display: "block", textDecoration: "none", color: "var(--text)" }}>
-                  <div style={{ fontSize: "0.85rem", fontWeight: 600 }}>{m.title || t("untitledSourceMeeting", { source: m.source })}</div>
-                  <div className="nr-meta">{new Date(m.recordedAt).toLocaleDateString()}</div>
-                </a>
-              </div>
+          <nav className="brain-filter-bar" aria-label={t("typeFilter")}>
+            <a className={`brain-filter-chip${selectedType ? "" : " active"}`} href={filterHref(null)}>
+              <span>{t("all")}</span>
+              <strong>{articles.length}</strong>
+            </a>
+            {typeCounts.map(({ type, count }) => (
+              <a key={type} className={`brain-filter-chip${selectedType === type ? " active" : ""}`} href={filterHref(type)}>
+                <span>{type}</span>
+                <strong>{count}</strong>
+              </a>
             ))}
-            {meetings.length > 20 && <a href={`/workspaces/${workspaceId}/meetings`} className="nr-link" style={{ fontSize: "0.85rem" }}>{t("viewMore", { count: meetings.length - 20 })}</a>}
-          </div>
+          </nav>
 
-          <h3 style={{ fontSize: "0.85rem", textTransform: "uppercase", letterSpacing: "0.05em", color: "var(--muted)", borderBottom: "1px solid var(--line)", paddingBottom: "4px", marginBottom: "12px" }}>
-            {t("documents", { count: documents.length })}
-          </h3>
-          <div>
-            {documents.slice(0, 10).map(d => (
-              <div key={d.id} style={{ marginBottom: "12px", fontSize: "0.85rem" }}>
-                <div style={{ fontWeight: 600 }}>{d.title}</div>
-                <div className="nr-meta">{new Date(d.createdAt).toLocaleDateString()} · {d.source}</div>
+          {visibleArticles.length > 0 ? (
+            <div className="brain-article-list">
+              {visibleArticles.map((article) => {
+                const canManage = canManageBrainArticle(actor, membership, article);
+                const owner = article.ownerMember
+                  ? (article.ownerMember.user.displayName ?? article.ownerMember.user.email)
+                  : null;
+
+                return (
+                  <article key={article.id} className="item brain-article-row">
+                    <div className="brain-article-row-head">
+                      <div className="brain-article-title-block">
+                        <a href={`/workspaces/${workspaceId}/brain/${article.slug}`} className="brain-article-title">
+                          {article.isPrivate && <span title={t("privateDraft")} className="brain-private-marker">◆</span>}
+                          {article.title}
+                        </a>
+                        <div className="brain-article-tags">
+                          <span className="tag neutral">{article.type}</span>
+                          <span className={authorityTagClass(article.authority)}>{authorityLabel(article.authority, t)}</span>
+                        </div>
+                      </div>
+                    </div>
+
+                    <MarkdownExcerpt markdown={article.bodyMd} maxLength={140} as="div" className="brain-article-excerpt" />
+
+                    <div className="brain-article-meta">
+                      <span>{t("updatedDate", { date: new Date(article.updatedAt).toLocaleDateString() })}</span>
+                      {owner && <span>{t("ownedBy", { name: owner })}</span>}
+                      {article._count?.backlinksTo ? <span>{t("backlinksCount", { count: article._count.backlinksTo })}</span> : null}
+                      {article._count?.discussions ? <span>{t("discussionsCount", { count: article._count.discussions })}</span> : null}
+                    </div>
+
+                    {canManage && (
+                      <div className="item-actions">
+                        {article.isPrivate && article.authority === "DRAFT" && (
+                          <form action={publishArticleAction}>
+                            <input type="hidden" name="workspaceId" value={workspaceId} />
+                            <input type="hidden" name="slug" value={article.slug} />
+                            <button type="submit" className="secondary small">{t("open")}</button>
+                          </form>
+                        )}
+                        {!article.isPrivate && (
+                          <form action={returnArticleToDraftAction}>
+                            <input type="hidden" name="workspaceId" value={workspaceId} />
+                            <input type="hidden" name="slug" value={article.slug} />
+                            <button type="submit" className="secondary small">{t("returnToDraft")}</button>
+                          </form>
+                        )}
+                        {article.authority === "DRAFT" && (
+                          <a href={`/workspaces/${workspaceId}/brain/${article.slug}/edit`} className="secondary small">{t("edit")}</a>
+                        )}
+                      </div>
+                    )}
+                  </article>
+                );
+              })}
+            </div>
+          ) : (
+            <div className="brain-empty">
+              <p>{articles.length === 0 ? t("noArticles") : t("noArticlesForFilter")}</p>
+            </div>
+          )}
+        </div>
+
+        <aside className="brain-rail">
+          <section className="brain-rail-section">
+            <h2 className="nr-section-header">{t("typeSummaries")}</h2>
+            {typeSummaries.length > 0 ? (
+              <div className="brain-type-summary-list">
+                {typeSummaries.map((summary) => (
+                  <div key={summary.type} className="brain-type-summary">
+                    <div className="brain-type-summary-head">
+                      <strong>{summary.type}</strong>
+                      <span className="tag neutral">{summary.count}</span>
+                    </div>
+                    <ul>
+                      {summary.sampleArticles.map((article) => (
+                        <li key={article.id}>
+                          <a href={`/workspaces/${workspaceId}/brain/${article.slug}`}>{article.title}</a>
+                        </li>
+                      ))}
+                    </ul>
+                    {summary.remainingCount > 0 && (
+                      <a className="nr-link" href={filterHref(summary.type)}>{t("viewMore", { count: summary.remainingCount })}</a>
+                    )}
+                  </div>
+                ))}
               </div>
-            ))}
-          </div>
+            ) : (
+              <p className="nr-meta">{t("noArticles")}</p>
+            )}
+          </section>
 
-          <div style={{ marginTop: "48px", padding: "16px", background: "var(--bg-alt)", borderRadius: "6px" }}>
-            <h3 style={{ fontSize: "0.85rem", textTransform: "uppercase", letterSpacing: "0.05em", color: "var(--text)", marginBottom: "12px" }}>{t("createArticle")}</h3>
-            <form action={createArticleAction} style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
+          <section className="brain-rail-section">
+            <div className="brain-rail-heading">
+              <h2 className="nr-section-header">{t("rawIndex")}</h2>
+              <div className="brain-range-links">
+                <a href={rangeHref("30d")} className={range === "30d" ? "active" : undefined}>30d</a>
+                <a href={rangeHref("90d")} className={range === "90d" ? "active" : undefined}>90d</a>
+                <a href={rangeHref("all")} className={range === "all" ? "active" : undefined}>{t("all")}</a>
+              </div>
+            </div>
+
+            <div className="brain-raw-section">
+              <h3>{t("meetings", { count: meetings.length })}</h3>
+              <div className="brain-raw-list">
+                {meetings.slice(0, 20).map((meeting) => (
+                  <a key={meeting.id} href={`/workspaces/${workspaceId}/meetings`} className="brain-raw-item">
+                    <strong>{meeting.title || t("untitledSourceMeeting", { source: meeting.source })}</strong>
+                    <span>{new Date(meeting.recordedAt).toLocaleDateString()}</span>
+                  </a>
+                ))}
+                {meetings.length > 20 && <a href={`/workspaces/${workspaceId}/meetings`} className="nr-link">{t("viewMore", { count: meetings.length - 20 })}</a>}
+              </div>
+            </div>
+
+            <div className="brain-raw-section">
+              <h3>{t("documents", { count: documents.length })}</h3>
+              <div className="brain-raw-list">
+                {documents.slice(0, 10).map((document) => (
+                  <div key={document.id} className="brain-raw-item">
+                    <strong>{document.title}</strong>
+                    <span>{new Date(document.createdAt).toLocaleDateString()} · {document.source}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </section>
+
+          <section className="brain-create-panel">
+            <h2>{t("createArticle")}</h2>
+            <form action={createArticleAction} className="brain-create-form">
               <input type="hidden" name="workspaceId" value={workspaceId} />
-              <input name="title" required placeholder={t("articleTitle")} style={{ padding: "8px", fontSize: "0.85rem", border: "1px solid var(--line)", borderRadius: "4px" }} />
-              <div style={{ display: "flex", gap: "8px" }}>
-                <select name="type" style={{ flex: 1, padding: "8px", fontSize: "0.85rem", border: "1px solid var(--line)" }}>
-                  {["PRODUCT","ARCHITECTURE","PROCESS","RUNBOOK","DECISION","TEAM","PERSON","CUSTOMER","INCIDENT","PROJECT","INTEGRATION","PATTERN","STRATEGY","CULTURE","GLOSSARY"].map((t) => (
-                    <option key={t} value={t}>{t}</option>
+              <input name="title" required placeholder={t("articleTitle")} />
+              <div className="brain-field-grid">
+                <select name="type">
+                  {CREATABLE_ARTICLE_TYPES.map((type) => (
+                    <option key={type} value={type}>{type}</option>
                   ))}
                 </select>
-                <select name="authority" style={{ flex: 1, padding: "8px", fontSize: "0.85rem", border: "1px solid var(--line)" }}>
+                <select name="authority">
                   <option value="DRAFT">{t("authorityDraft")}</option>
                   <option value="REFERENCE">{t("authorityReference")}</option>
                   <option value="AUTHORITATIVE">{t("authorityAuthoritative")}</option>
                 </select>
               </div>
               <MarkdownEditor name="bodyMd" required placeholder={t("bodyMd")} rows={5} />
-              <label style={{ display: "flex", alignItems: "center", gap: "8px", fontWeight: "normal", cursor: "pointer", fontSize: "0.85rem" }}>
+              <label className="brain-private-toggle">
                 <input type="checkbox" name="isPrivate" defaultChecked />
                 <span>{t("privateDraftOnlyMe")}</span>
               </label>
-              <button type="submit" style={{ padding: "8px", background: "var(--text-strong)", color: "var(--bg)", border: "none", borderRadius: "4px", cursor: "pointer", fontWeight: 600 }}>{t("create")}</button>
+              <button type="submit">{t("create")}</button>
             </form>
-          </div>
-
-        </div>
-      </div>
-    </>
+          </section>
+        </aside>
+      </section>
+    </div>
   );
+}
+
+function authorityLabel(authority: string, t: Awaited<ReturnType<typeof getTranslations>>) {
+  if (authority === "AUTHORITATIVE") return t("authorityAuthoritative");
+  if (authority === "HISTORICAL") return t("authorityHistorical");
+  if (authority === "DRAFT") return t("authorityDraft");
+  return t("authorityReference");
+}
+
+function authorityTagClass(authority: string) {
+  if (authority === "DRAFT") return "tag warning";
+  if (authority === "AUTHORITATIVE") return "tag";
+  return "tag neutral";
 }

@@ -754,6 +754,206 @@ a.notification-title:hover,
   gap: 20px;
 }
 
+.brain-page { display: grid; gap: 28px; }
+.brain-masthead { margin-bottom: 0; }
+.brain-masthead-row,
+.brain-directory-header,
+.brain-rail-heading {
+  display: flex;
+  gap: 16px;
+}
+.brain-masthead-row {
+  align-items: baseline;
+  justify-content: space-between;
+  border-bottom: 1px solid var(--text);
+  padding-bottom: 16px;
+}
+.brain-masthead-meta,
+.brain-stat-card span,
+.brain-search-results h3,
+.brain-citation-label,
+.brain-raw-section h3,
+.brain-create-panel h2 {
+  font-weight: 700;
+  letter-spacing: 0;
+  line-height: 1.35;
+  text-transform: uppercase;
+}
+.brain-masthead-meta { color: var(--muted); font-size: 0.85rem; }
+.brain-stat-strip,
+.brain-top-grid,
+.brain-content-grid,
+.brain-top-panel,
+.brain-ask-form,
+.brain-create-form,
+.brain-search-results,
+.brain-answer,
+.brain-answer-citations,
+.brain-article-list,
+.brain-article-row,
+.brain-article-title-block,
+.brain-rail,
+.brain-rail-section,
+.brain-type-summary-list,
+.brain-type-summary,
+.brain-type-summary ul,
+.brain-raw-section,
+.brain-raw-list,
+.brain-raw-item,
+.brain-create-panel,
+.brain-field-grid {
+  display: grid;
+}
+.brain-stat-strip { grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; }
+.brain-stat-card,
+.brain-answer,
+.brain-empty,
+.brain-type-summary,
+.brain-create-panel {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-strong);
+}
+.brain-stat-card { padding: 14px; }
+.brain-stat-card strong { display: block; color: var(--text); font-size: 1.35rem; line-height: 1.15; }
+.brain-stat-card span { display: block; margin-top: 4px; color: var(--muted); font-size: 0.78rem; }
+.brain-top-grid,
+.brain-content-grid { align-items: start; gap: 28px; min-width: 0; }
+.brain-top-grid {
+  grid-template-columns: minmax(0, 1fr) minmax(280px, 0.86fr);
+  border-bottom: 4px solid var(--line);
+  padding-bottom: 32px;
+}
+.brain-content-grid { grid-template-columns: minmax(0, 1fr) minmax(280px, 0.38fr); }
+.brain-top-panel,
+.brain-directory,
+.brain-rail,
+.brain-rail-section { min-width: 0; }
+.brain-top-panel { gap: 14px; }
+.brain-search-form input,
+.brain-ask-form textarea,
+.brain-create-form input,
+.brain-create-form select {
+  width: 100%;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 10px 12px;
+  font-size: 0.95rem;
+}
+.brain-ask-form,
+.brain-create-form,
+.brain-search-results,
+.brain-raw-section,
+.brain-raw-list,
+.brain-type-summary,
+.brain-type-summary-list { gap: 10px; }
+.brain-ask-form textarea { resize: vertical; }
+.brain-search-results h3,
+.brain-coverage-note,
+.brain-article-excerpt,
+.brain-article-meta,
+.brain-empty p,
+.brain-range-links a,
+.brain-raw-item span { color: var(--muted); }
+.brain-search-results h3 { margin: 0; font-size: 0.78rem; }
+.brain-search-result,
+.brain-filter-chip,
+.brain-article-title,
+.brain-type-summary a,
+.brain-raw-item { text-decoration: none; }
+.brain-search-result { color: inherit; }
+.brain-search-result-title,
+.brain-answer-title,
+.brain-citation strong,
+.brain-article-title,
+.brain-type-summary-head strong,
+.brain-raw-item strong,
+.brain-create-panel h2 { color: var(--text); }
+.brain-search-result-title,
+.brain-answer-title,
+.brain-article-title { font-weight: 700; }
+.brain-search-result-title { line-height: 1.35; }
+.brain-search-result .nr-excerpt { margin: 4px 0 0; font-size: 0.85rem; }
+.brain-coverage-note { margin: 0; font-size: 0.8rem; line-height: 1.45; }
+.brain-answer { gap: 12px; border-color: var(--line); background: var(--accent-soft); padding: 16px; }
+.brain-answer p { margin: 0; color: var(--text); font-size: 0.95rem; line-height: 1.55; }
+.brain-answer-citations { gap: 8px; border-top: 1px solid var(--line); padding-top: 12px; }
+.brain-citation { display: flex; flex-wrap: wrap; gap: 6px 10px; color: var(--muted); font-size: 0.8rem; line-height: 1.4; }
+.brain-citation-label { color: var(--muted); font-size: 0.78rem; }
+.brain-directory-header { align-items: flex-end; justify-content: space-between; margin-bottom: 14px; }
+.brain-directory-header .nr-section-header { margin-bottom: 6px; }
+.brain-filter-bar { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 18px; }
+.brain-filter-chip {
+  display: inline-flex;
+  align-items: center;
+  min-height: 34px;
+  gap: 8px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface-strong);
+  color: var(--text);
+  padding: 7px 12px;
+  font-size: 0.84rem;
+  font-weight: 700;
+  line-height: 1.2;
+}
+.brain-filter-chip strong { color: var(--muted); font-size: 0.78rem; }
+.brain-filter-chip.active { border-color: var(--accent); background: var(--accent-soft); color: var(--accent); }
+.brain-filter-chip.active strong { color: var(--accent); }
+.brain-article-list { gap: 10px; }
+.brain-article-row { gap: 9px; }
+.brain-article-row-head { display: flex; justify-content: space-between; gap: 16px; }
+.brain-article-title-block { gap: 7px; min-width: 0; }
+.brain-article-title { font-size: 1rem; line-height: 1.3; overflow-wrap: anywhere; }
+.brain-article-title:hover,
+.brain-type-summary a:hover,
+.brain-range-links a.active,
+.brain-range-links a:hover { text-decoration: underline; }
+.brain-private-marker { margin-right: 6px; color: var(--muted); }
+.brain-article-tags,
+.brain-article-meta,
+.brain-range-links,
+.brain-type-summary-head,
+.brain-private-toggle { display: flex; align-items: center; }
+.brain-article-tags,
+.brain-article-meta { flex-wrap: wrap; gap: 6px; }
+.brain-article-excerpt { font-size: 0.86rem; line-height: 1.5; }
+.brain-article-meta { font-size: 0.78rem; line-height: 1.4; }
+.brain-empty { border-style: dashed; padding: 20px; }
+.brain-empty p { margin: 0; }
+.brain-rail { gap: 24px; }
+.brain-rail-section { gap: 12px; }
+.brain-rail-heading { align-items: center; justify-content: space-between; gap: 12px; }
+.brain-rail-heading .nr-section-header { margin: 0; flex: 1 1 auto; }
+.brain-range-links { gap: 8px; font-size: 0.8rem; font-weight: 700; }
+.brain-range-links a.active,
+.brain-range-links a:hover { color: var(--text); }
+.brain-type-summary { padding: 14px; }
+.brain-type-summary-head { justify-content: space-between; gap: 10px; }
+.brain-type-summary-head strong { font-size: 0.9rem; line-height: 1.3; }
+.brain-type-summary ul { gap: 6px; margin: 0; padding: 0; list-style: none; }
+.brain-type-summary a { color: var(--text); font-size: 0.84rem; line-height: 1.35; overflow-wrap: anywhere; }
+.brain-raw-section h3 { margin: 0; border-bottom: 1px solid var(--line); font-size: 0.8rem; padding-bottom: 6px; }
+.brain-raw-item { gap: 3px; color: inherit; font-size: 0.84rem; line-height: 1.35; }
+.brain-raw-item span { font-size: 0.76rem; }
+.brain-create-panel { gap: 12px; padding: 16px; }
+.brain-create-panel h2 { margin: 0; font-size: 0.9rem; }
+.brain-field-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.brain-private-toggle { gap: 8px; color: var(--text); cursor: pointer; font-size: 0.84rem; font-weight: 400; line-height: 1.35; }
+
+@media (max-width: 1000px) {
+  .brain-top-grid,
+  .brain-content-grid { grid-template-columns: minmax(0, 1fr); }
+}
+
+@media (max-width: 720px) {
+  .brain-masthead-row,
+  .brain-directory-header,
+  .brain-rail-heading { align-items: stretch; flex-direction: column; }
+  .brain-stat-strip { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .brain-field-grid { grid-template-columns: minmax(0, 1fr); }
+}
+
 .settings-disclosure-summary {
   cursor: pointer;
   display: inline-flex;
