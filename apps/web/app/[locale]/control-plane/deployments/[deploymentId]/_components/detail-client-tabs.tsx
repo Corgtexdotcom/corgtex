@@ -43,6 +43,12 @@ const detailInnerPanelClass = "rounded-md border border-line bg-surface p-3";
 const detailDangerButtonClass =
   "inline-flex min-h-8 items-center justify-center rounded-md border border-rose-500/30 bg-rose-950/10 px-3 py-1.5 text-xs font-semibold text-rose-400 transition-colors hover:bg-rose-950/20 disabled:cursor-not-allowed disabled:opacity-50";
 const detailPrimaryButtonClass = controlPlaneButtonClass;
+const SUPPORT_CONNECTOR_OPERATION_BLOCKED_STATUSES = new Set([
+  "",
+  "not_configured",
+  "requires_connector",
+  "unavailable",
+]);
 
 type NewspaperDeliveryAlert = Record<string, unknown>;
 
@@ -225,7 +231,10 @@ export function CustomerDetailClientTabs({
   const recorderLastSmokeRun = recorderIntegration?.lastSmokeRun ?? null;
   const hasManagedRecorderWorkspace = Boolean(customer.managedWorkspaceId);
   const supportConnectorStatus = String(customer.supportConnectorStatus ?? "").toLowerCase();
-  const hasRecorderSupportConnector = Boolean(customer.hasSupportCredential && supportConnectorStatus === "connected");
+  const hasRecorderSupportConnector = Boolean(
+    customer.hasSupportCredential
+      && !SUPPORT_CONNECTOR_OPERATION_BLOCKED_STATUSES.has(supportConnectorStatus),
+  );
   const canRunRecorderOperations = hasManagedRecorderWorkspace || hasRecorderSupportConnector;
   const recorderOperationAccessLabel = hasManagedRecorderWorkspace
     ? "Managed workspace"

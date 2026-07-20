@@ -95,6 +95,9 @@ describe("control-plane copy", () => {
 
     expect(tabs).toContain("hasRecorderSupportConnector");
     expect(tabs).toContain("canRunRecorderOperations");
+    expect(tabs).toContain("SUPPORT_CONNECTOR_OPERATION_BLOCKED_STATUSES");
+    expect(tabs).toContain("\"not_configured\"");
+    expect(tabs).toContain("\"requires_connector\"");
     expect(tabs).toContain("/meeting-recorders/microsoft/connect");
     expect(tabs).toContain("disabled={!canRunRecorderOperations}");
     expect(tabs).toContain("Support-connector deployments use the remote operations below.");
