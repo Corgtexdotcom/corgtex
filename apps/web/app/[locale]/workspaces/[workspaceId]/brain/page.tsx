@@ -1,5 +1,7 @@
 import { getBrainStatus, listArticles, requireWorkspaceMembership, listMeetings, listDocuments } from "@corgtex/domain";
 import { answerKnowledgeQuestion, searchIndexedKnowledge } from "@corgtex/knowledge";
+import { prisma } from "@corgtex/shared";
+import type { AppActor } from "@corgtex/shared";
 import { requirePageActor } from "@/lib/auth";
 import { createArticleAction, publishArticleAction, returnArticleToDraftAction } from "./actions";
 import { getTranslations } from "next-intl/server";
@@ -11,6 +13,7 @@ import {
   buildBrainIndexHref,
   buildBrainIndexState,
   canManageBrainArticle,
+  getUnresolvedBrainSearchArticleRefs,
   resolveBrainSearchResults,
 } from "./view-model";
 
@@ -62,7 +65,14 @@ export default async function BrainPage({
     documents: allDocuments,
     searchParams: resolvedSearch,
   });
-  const resolvedSearchResults = resolveBrainSearchResults(searchResults, articles);
+  const resolvedSearchArticleRefs = await listSearchResultArticleRefs({
+    workspaceId,
+    actor,
+    membership,
+    results: searchResults,
+    visibleArticleRefs: articles,
+  });
+  const resolvedSearchResults = resolveBrainSearchResults(searchResults, [...articles, ...resolvedSearchArticleRefs]);
 
   const filterHref = (type: string | null) => buildBrainIndexHref({ query, question, range, type });
   const rangeHref = (nextRange: "30d" | "90d" | "all") => buildBrainIndexHref({ query, question, range: nextRange, type: selectedType });
@@ -372,4 +382,49 @@ function authorityTagClass(authority: string) {
   if (authority === "DRAFT") return "tag warning";
   if (authority === "AUTHORITATIVE") return "tag";
   return "tag neutral";
+}
+
+async function listSearchResultArticleRefs(params: {
+  workspaceId: string;
+  actor: AppActor;
+  membership: { id?: string | null; role?: string | null } | null | undefined;
+  results: Array<{ sourceId: string; sourceType: string }>;
+  visibleArticleRefs: Array<{ id: string; slug: string }>;
+}) {
+  const unresolvedRefs = getUnresolvedBrainSearchArticleRefs(params.results, params.visibleArticleRefs);
+  if (unresolvedRefs.length === 0) return [];
+
+  return prisma.brainArticle.findMany({
+    where: {
+      AND: [
+        { workspaceId: params.workspaceId },
+        {
+          OR: [
+            { id: { in: unresolvedRefs } },
+            { slug: { in: unresolvedRefs } },
+          ],
+        },
+        { OR: brainSearchArticleVisibility(params.actor, params.membership) },
+      ],
+    },
+    select: {
+      id: true,
+      slug: true,
+    },
+  });
+}
+
+function brainSearchArticleVisibility(
+  actor: AppActor,
+  membership: { id?: string | null; role?: string | null } | null | undefined,
+) {
+  if (actor.kind === "agent" || membership?.role === "ADMIN") {
+    return [{ isPrivate: false }, { isPrivate: true, authority: "DRAFT" as const }];
+  }
+
+  if (actor.kind === "user" && membership?.id) {
+    return [{ isPrivate: false }, { isPrivate: true, ownerMemberId: membership.id }];
+  }
+
+  return [{ isPrivate: false }];
 }

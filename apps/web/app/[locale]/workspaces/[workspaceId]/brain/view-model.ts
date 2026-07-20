@@ -207,6 +207,23 @@ export function resolveBrainSearchResults<T extends BrainSearchResultLike>(
   }));
 }
 
+export function getUnresolvedBrainSearchArticleRefs<T extends BrainSearchResultLike>(
+  results: T[],
+  articles: Array<{ id: string; slug: string }>,
+) {
+  const articleIds = new Set(articles.map((article) => article.id));
+  const articleSlugs = new Set(articles.map((article) => article.slug));
+  const unresolvedRefs = new Set<string>();
+
+  for (const result of results) {
+    if (result.sourceType !== "BRAIN_ARTICLE") continue;
+    if (articleIds.has(result.sourceId) || articleSlugs.has(result.sourceId)) continue;
+    unresolvedRefs.add(result.sourceId);
+  }
+
+  return [...unresolvedRefs];
+}
+
 export function buildBrainIndexHref(params: {
   query?: string;
   question?: string;

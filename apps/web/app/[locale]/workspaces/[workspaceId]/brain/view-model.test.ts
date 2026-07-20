@@ -7,6 +7,7 @@ import {
   canManageBrainArticle,
   filterBrainArticlesByType,
   filterBrainRecordsByRange,
+  getUnresolvedBrainSearchArticleRefs,
   normalizeBrainArticleType,
   normalizeBrainIndexSearch,
   normalizeBrainRange,
@@ -135,19 +136,22 @@ describe("Brain index view model", () => {
   });
 
   it("resolves Brain article search source IDs to article slugs", () => {
+    const visibleArticleRefs = [
+      { id: "article-id-1", slug: "strategy-article" },
+      { id: "article-id-2", slug: "already-a-slug" },
+    ];
     const results = resolveBrainSearchResults(
       [
         { sourceId: "article-id-1", sourceType: "BRAIN_ARTICLE", chunkId: "chunk-1" },
         { sourceId: "already-a-slug", sourceType: "BRAIN_ARTICLE", chunkId: "chunk-2" },
         { sourceId: "missing", sourceType: "BRAIN_ARTICLE", chunkId: "chunk-3" },
+        { sourceId: "document-1", sourceType: "DOCUMENT", chunkId: "chunk-4" },
       ],
-      [
-        { id: "article-id-1", slug: "strategy-article" },
-        { id: "article-id-2", slug: "already-a-slug" },
-      ],
+      visibleArticleRefs,
     );
 
-    expect(results.map((result) => result.articleSlug)).toEqual(["strategy-article", "already-a-slug", null]);
+    expect(results.map((result) => result.articleSlug)).toEqual(["strategy-article", "already-a-slug", null, null]);
+    expect(getUnresolvedBrainSearchArticleRefs(results, visibleArticleRefs)).toEqual(["missing"]);
   });
 
   it("builds filter hrefs that preserve non-default URL state", () => {

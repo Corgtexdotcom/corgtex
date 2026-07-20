@@ -832,7 +832,7 @@ a.notification-title:hover,
 .brain-top-panel { gap: 14px; }
 .brain-search-form input,
 .brain-ask-form textarea,
-.brain-create-form input,
+.brain-create-form input:not([type="checkbox"]),
 .brain-create-form select {
   width: 100%;
   border: 1px solid var(--line);
