@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   deploymentMatchesRecorderReadinessTarget,
   normalizeBaseUrl,
+  normalizeControlPlaneUrl,
   normalizeRecorderReadinessTargets,
   RecorderReadinessProductionSmoke,
   recorderReadinessHealthReleaseBlocker,
@@ -64,21 +65,28 @@ function recorderWithGates(overrides = {}) {
 describe("recorder readiness production smoke helpers", () => {
   it("normalizes base URL and target lists", () => {
     expect(normalizeBaseUrl("https://app.corgtex.com/")).toBe("https://app.corgtex.com");
+    expect(normalizeControlPlaneUrl("https://ops.corgtex.com/")).toBe("https://ops.corgtex.com");
     expect(normalizeRecorderReadinessTargets("alpha, beta,alpha")).toEqual(["alpha", "beta"]);
   });
 
-  it("matches deployment targets by deployment and workspace identifiers", () => {
+  it("matches deployment targets by deployment, workspace, and URL identifiers", () => {
     const deployments = [
       {
         id: "dep-1",
         label: "Alpha",
         customerSlug: "alpha",
+        url: "https://alpha.corgtex.com",
+        customDomain: "alpha.example.com",
+        remoteWorkspaceSlug: "alpha-remote",
         managedWorkspaceId: "ws-1",
         managedWorkspace: { id: "ws-1", slug: "alpha-workspace", name: "Alpha Workspace" },
       },
     ];
 
     expect(deploymentMatchesRecorderReadinessTarget(deployments[0], "alpha-workspace")).toBe(true);
+    expect(deploymentMatchesRecorderReadinessTarget(deployments[0], "alpha.corgtex.com")).toBe(true);
+    expect(deploymentMatchesRecorderReadinessTarget(deployments[0], "https://alpha.corgtex.com")).toBe(true);
+    expect(deploymentMatchesRecorderReadinessTarget(deployments[0], "alpha-remote")).toBe(true);
     expect(resolveRecorderReadinessTargets(deployments, ["Alpha", "missing"])).toEqual([
       { target: "Alpha", deployment: deployments[0] },
       { target: "missing", deployment: null },
@@ -110,7 +118,41 @@ describe("recorder readiness production smoke helpers", () => {
     ]);
   });
 
-  it("blocks release drift before database-backed readiness", () => {
+  it("loads deployment inventory from the configured control plane", async () => {
+    const originalFetch = global.fetch;
+    global.fetch = vi.fn(async (url, init) => {
+      expect(String(url)).toBe("https://ops.example/api/control-plane/mcp");
+      expect(init.headers.authorization).toBe("Bearer cp-token");
+      return new Response(JSON.stringify({
+        result: {
+          content: [{
+            type: "text",
+            text: JSON.stringify([{ id: "dep-1", label: "Alpha", customerSlug: "alpha" }]),
+          }],
+        },
+      }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    });
+    try {
+      const smoke = new RecorderReadinessProductionSmoke({
+        baseUrl: "https://app.corgtex.com",
+        controlPlaneUrl: "https://ops.example/",
+        outDir: ".artifacts/test-recorder-inventory",
+        targets: ["alpha"],
+        controlPlaneToken: "token",
+      });
+
+      await expect(smoke.loadDeployments()).resolves.toEqual([
+        { id: "dep-1", label: "Alpha", customerSlug: "alpha" },
+      ]);
+    } finally {
+      global.fetch = originalFetch;
+    }
+  });
+
+  it("blocks release drift before control-plane readiness", () => {
     expect(recorderReadinessHealthReleaseBlocker({
       release: { gitSha: "old-sha" },
     }, "current-sha")).toContain("release.gitSha old-sha");

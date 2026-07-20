@@ -1194,6 +1194,7 @@ jobs:
       OUT_DIR: .artifacts/production-validation/recorder-readiness
       PR_NUMBERS: ${{ needs.validation-context.outputs.pr_numbers }}
       DEPLOYMENTS: ${{ needs.validation-context.outputs.recorder_readiness_deployments }}
+      CONTROL_PLANE_URL: ${{ vars.CONTROL_PLANE_URL || 'https://ops.corgtex.com' }}
     steps:
       - uses: actions/checkout@v5
         with:
@@ -1269,6 +1270,7 @@ jobs:
             echo "run_id=$GITHUB_RUN_ID"
             echo "sha=$CHECKED_OUT_GIT_SHA"
             echo "base_url=$BASE_URL"
+            echo "control_plane_url=$CONTROL_PLANE_URL"
             echo "deployments=$DEPLOYMENTS"
             echo "pr_numbers=$PR_NUMBERS"
             echo "expected_git_sha=$EXPECTED_GIT_SHA"
@@ -1279,11 +1281,10 @@ jobs:
         id: credentials
         shell: bash
         env:
-          DATABASE_URL: ${{ secrets.PRODUCTION_DATABASE_URL }}
           CONTROL_PLANE_AGENT_API_KEY: ${{ secrets.CONTROL_PLANE_AGENT_API_KEY }}
         run: |
           set -euo pipefail
-          if [ -z "$DATABASE_URL" ] || [ -z "$CONTROL_PLANE_AGENT_API_KEY" ]; then
+          if [ -z "$CONTROL_PLANE_AGENT_API_KEY" ]; then
             echo "available=false" >> "$GITHUB_OUTPUT"
           else
             echo "available=true" >> "$GITHUB_OUTPUT"
@@ -1299,9 +1300,9 @@ jobs:
             --pr-numbers="$PR_NUMBERS" \
             --method="recorder-readiness-production-smoke" \
             --intent="Configured customer recorder readiness across control-plane, tenant config, vendor, calendar, meetings, and live proof gates" \
-            --blocker="Production recorder readiness validation with database secrets must be dispatched from refs/heads/main."
+            --blocker="Production recorder readiness validation with control-plane credentials must be dispatched from refs/heads/main."
 
-      - name: Record blocked recorder readiness validation for missing database access
+      - name: Record blocked recorder readiness validation for missing control-plane access
         if: steps.trusted_ref.outputs.trusted == 'true' && steps.credentials.outputs.available != 'true'
         run: |
           node scripts/production-validation-blocked.mjs \
@@ -1311,7 +1312,7 @@ jobs:
             --pr-numbers="$PR_NUMBERS" \
             --method="recorder-readiness-production-smoke" \
             --intent="Configured customer recorder readiness across control-plane, tenant config, vendor, calendar, meetings, and live proof gates" \
-            --blocker="PRODUCTION_DATABASE_URL and CONTROL_PLANE_AGENT_API_KEY production smoke secrets are required for read-only recorder readiness."
+            --blocker="CONTROL_PLANE_AGENT_API_KEY production smoke secret is required for read-only recorder readiness."
 
       - run: npm ci
         if: steps.trusted_ref.outputs.trusted == 'true' && steps.credentials.outputs.available == 'true'
@@ -1326,8 +1327,8 @@ jobs:
           RECORDER_READINESS_SMOKE_DEPLOYMENTS: ${{ env.DEPLOYMENTS }}
           RECORDER_READINESS_SMOKE_PR_NUMBERS: ${{ env.PR_NUMBERS }}
           RECORDER_READINESS_SMOKE_EXPECTED_GIT_SHA: ${{ steps.validation_inputs.outputs.expected_git_sha }}
+          CONTROL_PLANE_URL: ${{ env.CONTROL_PLANE_URL }}
           CONTROL_PLANE_AGENT_API_KEY: ${{ secrets.CONTROL_PLANE_AGENT_API_KEY }}
-          DATABASE_URL: ${{ secrets.PRODUCTION_DATABASE_URL }}
 
       - name: Add validation report to summary
         if: always()
