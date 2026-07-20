@@ -30,11 +30,17 @@ Throw `AppError(status, code, message)` from domain logic and convert it in Next
 
 ## UI Control Consistency
 
+- Workspace app UI should start from the shared UX spine: `ControlPrimitives`, shared tables, work-item controls, workspace shell/nav, and tokenized `nr-*` classes.
+- If a page-specific exception is better for the user than the existing shared primitive, promote the stronger behavior into the shared primitive layer instead of copying the exception across pages.
+- Keep a local exception only when the PR plan explains why reuse would hurt task clarity, accessibility, responsive behavior, or performance.
 - Controls in the same family must share size, typography, spacing, and alignment.
 - Filter sets must use the shared filter toolbar pattern for search, selects, multiselects, and apply/clear actions.
 - Inline checkbox or toggle filters must use the shared checkbox filter pattern instead of relying on global `label` layout.
+- View and mode switches must use shared segmented controls.
+- Module-level navigation must use shared workspace subnav.
+- Empty states and tables must use shared primitives unless the PR plan explains a stronger user need.
 - Table row actions must use shared action groups so edit, resend, revoke, approve, reject, and similar controls align consistently.
-- Inline `fontSize`, `padding`, `width`, `minWidth`, or `alignSelf` overrides on buttons, filters, checkbox controls, or table actions are review concerns unless they map to a named design-system class.
+- Inline `fontSize`, `padding`, `width`, `minWidth`, or `alignSelf` overrides on buttons, filters, checkbox controls, segmented controls, subnavs, or table actions are review concerns unless they map to a named design-system class.
 
 ## Database Conventions
 

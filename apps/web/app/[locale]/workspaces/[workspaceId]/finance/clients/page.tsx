@@ -1,5 +1,7 @@
 import { listNativePracticeClients } from "@corgtex/domain";
 import { requirePageActor } from "@/lib/auth";
+import { DataTable, type DataTableColumn, type DataTableRow } from "@/lib/components/DataTable";
+import { WorkspaceEmptyState, WorkspacePageHeader } from "@/lib/components/ControlPrimitives";
 import { isWorkspaceFeatureEnabled, requireWorkspaceFeature } from "@/lib/workspace-feature-flags";
 import { PracticeFinanceNav, nextHref, statusLabel } from "../components";
 
@@ -23,59 +25,59 @@ export default async function PracticeClientsPage({
     isWorkspaceFeatureEnabled(workspaceId, "SLICING_PIE"),
   ]);
   const nextPageHref = nextHref(`/workspaces/${workspaceId}/finance/clients`, {}, clients.nextCursor);
+  const clientColumns: DataTableColumn[] = [
+    { id: "client", label: "Client" },
+    { id: "crmAccount", label: "CRM account" },
+    { id: "status", label: "Status" },
+    { id: "projects", label: "Projects", align: "right" },
+    { id: "time", label: "Time", align: "right" },
+    { id: "expenses", label: "Expenses", align: "right" },
+  ];
+  const clientRows: DataTableRow[] = clients.items.map((client) => ({
+    id: client.id,
+    cells: {
+      client: (
+        <>
+          <a className="nr-table-link" href={`/workspaces/${workspaceId}/finance/clients/${client.id}`}>{client.name}</a>
+          <div className="nr-item-meta nr-table-cell-meta">{client.code}</div>
+        </>
+      ),
+      crmAccount: client.crmAccount ? client.crmAccount.name : "-",
+      status: statusLabel(client.status),
+      projects: client._count.projects,
+      time: client._count.timeEntries,
+      expenses: client._count.expenses,
+    },
+  }));
 
   return (
-    <section className="stack" style={{ gap: 20 }} data-finance-surface="practice-clients">
-      <header className="nr-masthead" style={{ textAlign: "left", marginBottom: 0 }}>
-        <a className="link-button small secondary" href={`/workspaces/${workspaceId}/finance`}>Back to Practice Ledger</a>
-        <h1 style={{ marginTop: 12 }}>Practice clients</h1>
-        <div className="nr-masthead-meta">
-          <span>Native clients linked from CRM accounts, projects, time, and expenses.</span>
-        </div>
-        <div style={{ marginTop: 16 }}>
-          <PracticeFinanceNav workspaceId={workspaceId} active="clients" slicingPieEnabled={slicingPieEnabled} />
-        </div>
-      </header>
+    <section className="stack nr-workspace-surface" data-finance-surface="practice-clients">
+      <WorkspacePageHeader
+        className="nr-workspace-page-header-flush"
+        eyebrow={<a className="nr-link" href={`/workspaces/${workspaceId}/finance`}>Back to Practice Ledger</a>}
+        title="Practice clients"
+        description="Native clients linked from CRM accounts, projects, time, and expenses."
+        subnav={<PracticeFinanceNav workspaceId={workspaceId} active="clients" slicingPieEnabled={slicingPieEnabled} />}
+      />
 
-      <div className="nr-item" style={{ padding: 0 }}>
-        <div style={{ borderBottom: "1px solid var(--line)", padding: "12px 16px" }}>
+      <div className="nr-section-card">
+        <div className="nr-section-card-header">
           <strong>Clients</strong>
         </div>
-        {clients.items.length === 0 ? (
-          <p className="nr-item-meta" style={{ margin: 0, padding: 16 }}>No native Practice Ledger clients have been linked yet. Submitting time or expenses on a project will create the native client relationship.</p>
-        ) : (
-          <div className="nr-table-wrap">
-            <table className="nr-table">
-              <thead>
-                <tr>
-                  <th>Client</th>
-                  <th>CRM account</th>
-                  <th>Status</th>
-                  <th style={{ textAlign: "right" }}>Projects</th>
-                  <th style={{ textAlign: "right" }}>Time</th>
-                  <th style={{ textAlign: "right" }}>Expenses</th>
-                </tr>
-              </thead>
-              <tbody>
-                {clients.items.map((client) => (
-                  <tr key={client.id}>
-                    <td>
-                      <a href={`/workspaces/${workspaceId}/finance/clients/${client.id}`}>{client.name}</a>
-                      <div className="nr-item-meta" style={{ fontSize: 11 }}>{client.code}</div>
-                    </td>
-                    <td>{client.crmAccount ? client.crmAccount.name : "-"}</td>
-                    <td>{statusLabel(client.status)}</td>
-                    <td style={{ textAlign: "right" }}>{client._count.projects}</td>
-                    <td style={{ textAlign: "right" }}>{client._count.timeEntries}</td>
-                    <td style={{ textAlign: "right" }}>{client._count.expenses}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
+        <DataTable
+          caption="Practice clients"
+          columns={clientColumns}
+          rows={clientRows}
+          empty={
+            <WorkspaceEmptyState
+              title="No native Practice Ledger clients have been linked yet."
+              description="Submitting time or expenses on a project will create the native client relationship."
+            />
+          }
+          surfaceClassName="nr-section-card-table"
+        />
         {nextPageHref && (
-          <div style={{ borderTop: "1px solid var(--line)", padding: 12 }}>
+          <div className="nr-section-card-footer">
             <a className="link-button small secondary" href={nextPageHref}>Next clients</a>
           </div>
         )}

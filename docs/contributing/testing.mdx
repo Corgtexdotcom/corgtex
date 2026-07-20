@@ -79,6 +79,12 @@ artifacts belong under `.artifacts/` or in CI artifacts, not under
 `AGENT_E2E_PASSWORD`) — never hardcoded, never in PR descriptions. See the secrets section of
 [`AGENTS.md`](https://github.com/corgtex/corgtex/blob/main/AGENTS.md#secrets-and-credentials).
 
+For workspace UI spine changes, visual proof must show the affected shared
+patterns in context: page header hierarchy, subnav or segmented controls,
+tables or empty states, mobile layout when relevant, and keyboard focus
+visibility. The proof should demonstrate that reuse improved or preserved task
+clarity and density, not merely that screens look more alike.
+
 ## Production UI smoke
 
 Local seeded E2E credentials and production-safe smoke credentials are separate.

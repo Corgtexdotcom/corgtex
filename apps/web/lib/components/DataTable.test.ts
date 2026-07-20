@@ -14,10 +14,11 @@ describe("DataTable", () => {
       { id: "row-1", cells: { title: "First item", actions: "Edit" } },
     ];
 
-    const html = renderToStaticMarkup(createElement(DataTable, { columns, rows }));
+    const html = renderToStaticMarkup(createElement(DataTable, { columns, rows, caption: "Work items" }));
 
     expect(html).toContain("nr-workspace-table-surface");
     expect(html).toContain("nr-data-table");
+    expect(html).toContain("<caption class=\"sr-only\">Work items</caption>");
     expect(html).toContain("data-label=\"Title\"");
     expect(html).toContain("nr-table-action-cell");
   });

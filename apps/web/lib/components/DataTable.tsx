@@ -31,12 +31,14 @@ export function DataTable({
   columns,
   rows,
   empty,
+  caption,
   surfaceClassName,
   tableClassName,
 }: {
   columns: DataTableColumn[];
   rows: DataTableRow[];
   empty?: ReactNode;
+  caption?: ReactNode;
   surfaceClassName?: string;
   tableClassName?: string;
 }) {
@@ -49,6 +51,7 @@ export function DataTable({
   return (
     <div className={surfaceClasses}>
       <table className={cn("nr-table nr-data-table", tableClassName)}>
+        {caption && <caption className="sr-only">{caption}</caption>}
         <thead>
           <tr>
             {columns.map((column) => (

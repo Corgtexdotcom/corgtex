@@ -54,6 +54,12 @@ For customer-visible product changes, state how the safe public demo
 will show the feature. Update `scripts/seed-jnj-demo.mjs` when seeded
 state is needed, or explain why the feature cannot be shown safely.
 
+## UX spine decisions
+
+For workspace UI changes, name the shared primitive or tokenized class family
+used or improved. If the plan keeps a local exception, explain the concrete
+user benefit and whether it should be promoted into the shared spine later.
+
 ## Acceptance criteria
 
 GitHub-style checklist. Each item must be independently verifiable by

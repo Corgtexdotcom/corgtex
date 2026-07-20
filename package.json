@@ -83,6 +83,7 @@
     "check:unused": "node scripts/repo-cleanliness-report.mjs",
     "check:unused:knip": "knip --no-progress --no-exit-code --reporter compact",
     "check:unused:locals": "node scripts/repo-cleanliness-report.mjs --locals-only",
+    "report:ui-spine": "node scripts/ui-spine-drift-report.mjs",
     "check:public-docs": "node scripts/check-public-docs.mjs",
     "check:private-boundary": "node scripts/check-private-boundary.mjs",
     "check:migration-fixtures": "node scripts/check-data-migration-fixtures.mjs",

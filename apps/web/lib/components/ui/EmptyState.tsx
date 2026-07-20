@@ -1,4 +1,5 @@
-import { ReactNode } from "react";
+import React, { type ReactNode } from "react";
+import { WorkspaceEmptyState } from "@/lib/components/ControlPrimitives";
 
 interface EmptyStateProps {
   title: string;
@@ -10,21 +11,12 @@ interface EmptyStateProps {
 
 export function EmptyState({ title, description, icon, action, className = "" }: EmptyStateProps) {
   return (
-    <div className={`nr-item ${className}`} style={{ textAlign: "center", padding: "48px 24px" }}>
-      {icon && (
-        <div style={{ fontSize: "2rem", opacity: 0.5, marginBottom: "16px" }}>
-          {icon}
-        </div>
-      )}
-      <h3 style={{ fontSize: "1.1rem", marginBottom: "8px" }}>
-        {title}
-      </h3>
-      <p className="muted" style={{ maxWidth: "400px", margin: "0 auto 24px", lineHeight: 1.5 }}>
-        {description}
-      </p>
-      {action && (
-        <div>{action}</div>
-      )}
-    </div>
+    <WorkspaceEmptyState
+      title={title}
+      description={description}
+      action={action}
+      media={icon ? <span aria-hidden="true">{icon}</span> : undefined}
+      className={`nr-item ${className}`}
+    />
   );
 }
