@@ -30,7 +30,7 @@ const expectedDisabledRoutePaths = csvSet("CLIENT_READINESS_EXPECT_DISABLED_ROUT
 
 const includeOptionalRoutes = process.env.CLIENT_READINESS_INCLUDE_OPTIONAL_ROUTES === "true";
 
-const coreRouteCatalog = [
+export const coreRouteCatalog = [
   ["home", ""],
   ["goals", "/goals"],
   ["brain", "/brain"],
@@ -48,8 +48,9 @@ const coreRouteCatalog = [
   ["chat", "/chat"],
 ];
 
-const optionalRouteCatalog = [
+export const optionalRouteCatalog = [
   ["leads", "/leads"],
+  ["finance-clients", "/finance/clients"],
   ["agents", "/agents"],
   ["governance", "/governance"],
   ["operator", "/operator"],
