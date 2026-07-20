@@ -3,7 +3,6 @@ import {
   getMeetingParticipants,
   getMeetingTranscriptProcessingState,
   getWorkspaceArchiveRecord,
-  listMeetingRecordings,
   meetingAgendaSections,
   normalizeMeetingAgendaForDisplay,
   privacyFilter,
@@ -203,7 +202,6 @@ export default async function MeetingDetailPage({
   const participants = meeting.participantIds?.length > 0 
     ? await getMeetingParticipants(workspaceId, meeting.participantIds)
     : [];
-  const [latestRecording] = await listMeetingRecordings(workspaceId, [meeting.id]);
   const activeTab = normalizeMeetingTab(resolvedSearch.tab, hasAgendaTab ? "agenda" : "summary", hasAgendaTab);
   const meetingHref = `/workspaces/${workspaceId}/meetings/${meetingId}`;
   const processingState = await getMeetingTranscriptProcessingState(actor, { workspaceId, meetingId });
@@ -305,15 +303,6 @@ export default async function MeetingDetailPage({
           archiveReason={meeting.archiveReason}
           restoreHref={isAdmin ? `/workspaces/${workspaceId}/audit?tab=archive&archiveEntityType=Meeting` : null}
         />
-      )}
-
-      {!isArchived && latestRecording?.status === "FAILED" && (
-        <section className="ws-section" style={{ marginBottom: 32 }}>
-          <h2 className="nr-section-header">{t("recorderFailedTitle")}</h2>
-          <p className="nr-item-meta">
-            {latestRecording.provider}: {latestRecording.failureMessage ?? latestRecording.failureCode ?? t("recorderFailedFallback")}
-          </p>
-        </section>
       )}
 
       {!isArchived && !meeting.transcript && (

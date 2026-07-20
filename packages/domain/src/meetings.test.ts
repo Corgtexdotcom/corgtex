@@ -1170,7 +1170,33 @@ describe("meetings domain", () => {
     expect(prismaMock.event.createMany).toHaveBeenCalled();
   });
 
-  it("deleteMeeting archives an existing meeting", async () => {
+  it("deleteMeeting archives an existing meeting with a provided reason", async () => {
+    prismaMock.meeting.findFirst.mockResolvedValue({
+      id: "meeting-1",
+      workspaceId: "workspace-1",
+      title: "Weekly",
+      source: "zoom",
+      archivedAt: null,
+    });
+    prismaMock.meeting.update.mockResolvedValue({ id: "meeting-1", archivedAt: new Date("2026-04-25T12:00:00.000Z") });
+    prismaMock.workspaceArchiveRecord.create.mockResolvedValue({});
+
+    const { deleteMeeting } = await import("./meetings");
+    await expect(deleteMeeting(actor, {
+      workspaceId: "workspace-1",
+      meetingId: "meeting-1",
+      reason: "Canceled before it happened.",
+    })).resolves.toEqual({ id: "meeting-1" });
+    expect(prismaMock.meeting.update).toHaveBeenCalledWith(expect.objectContaining({
+      where: { id: "meeting-1" },
+      data: expect.objectContaining({
+        archivedAt: expect.any(Date),
+        archiveReason: "Canceled before it happened.",
+      }),
+    }));
+  });
+
+  it("deleteMeeting falls back to the legacy archive reason when none is provided", async () => {
     prismaMock.meeting.findFirst.mockResolvedValue({
       id: "meeting-1",
       workspaceId: "workspace-1",
@@ -1188,7 +1214,10 @@ describe("meetings domain", () => {
     })).resolves.toEqual({ id: "meeting-1" });
     expect(prismaMock.meeting.update).toHaveBeenCalledWith(expect.objectContaining({
       where: { id: "meeting-1" },
-      data: expect.objectContaining({ archivedAt: expect.any(Date) }),
+      data: expect.objectContaining({
+        archivedAt: expect.any(Date),
+        archiveReason: "Archived from meeting delete path.",
+      }),
     }));
   });
 });

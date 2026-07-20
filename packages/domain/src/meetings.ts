@@ -1399,6 +1399,7 @@ export async function createMeeting(actor: AppActor, params: {
 export async function deleteMeeting(actor: AppActor, params: {
   workspaceId: string;
   meetingId: string;
+  reason?: string | null;
 }) {
   await requireWorkspaceMembership({
     actor,
@@ -1410,7 +1411,7 @@ export async function deleteMeeting(actor: AppActor, params: {
     workspaceId: params.workspaceId,
     entityType: "Meeting",
     entityId: params.meetingId,
-    reason: "Archived from meeting delete path.",
+    reason: params.reason?.trim() || "Archived from meeting delete path.",
   });
 
   return { id: params.meetingId };

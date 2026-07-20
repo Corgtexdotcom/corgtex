@@ -13,6 +13,7 @@ import { getWorkspaceFeatureFlags } from "@/lib/workspace-feature-flags";
 import { MarkdownExcerpt } from "@/lib/components/MarkdownRenderer";
 import { TimeZoneSelect } from "@/lib/components/TimeZoneSelect";
 import { ItemActions } from "@/lib/components/ui/ItemActions";
+import { MeetingArchiveDialog } from "./MeetingArchiveDialog";
 import { MeetingTranscriptUploadForm } from "./MeetingTranscriptUploadForm";
 import { WorkItemFilterControls } from "@/lib/components/WorkItemControls";
 import {
@@ -102,6 +103,14 @@ export default async function MeetingsPage({
   const filterState = { memberIds, dates: dateValues, status: statusFilters };
   const memberName = (member: { user: { displayName: string | null; email: string } }) => member.user.displayName || member.user.email;
   const completedDisplayCount = completedMeetings.length + actionNeededMeetings.length;
+  const archiveDialogLabels = {
+    button: t("btnRemoveMeeting"),
+    title: t("removeMeetingTitle"),
+    reason: t("removeMeetingReasonLabel"),
+    reasonPlaceholder: t("removeMeetingReasonPlaceholder"),
+    submit: t("removeMeetingSubmit"),
+    cancel: tCommon("cancel"),
+  };
   const renderRecorderControls = (meeting: (typeof scheduledMeetings)[number]) => {
     const recording = filterMeetingRecordingForEvidenceState(latestRecordingByMeeting.get(meeting.id), { recorderEnabled });
     const evidenceState = meetingEvidenceStateById.get(meeting.id) ?? deriveMeetingEvidenceState({
@@ -128,15 +137,6 @@ export default async function MeetingsPage({
       <div className="row" style={{ alignItems: "flex-start", gap: 12, marginBottom: 8 }}>
         <div>
           <span className={`tag ${isWarning ? "warning" : ""}`}>{statusLabel}</span>
-          {recording?.failureMessage ? (
-            <div className="nr-item-meta" style={{ fontSize: "0.82rem", marginTop: 4 }}>
-              {recording.provider}: {recording.failureMessage}
-            </div>
-          ) : recording ? (
-            <div className="nr-item-meta" style={{ fontSize: "0.82rem", marginTop: 4 }}>
-              {recording.provider}
-            </div>
-          ) : null}
         </div>
         {recorderEnabled && evidenceState.action === "cancel_recorder" ? (
           <form action={cancelMeetingRecordingAction}>
@@ -180,6 +180,15 @@ export default async function MeetingsPage({
         }}
       />
     </details>
+  );
+  const renderArchiveDialog = (meetingId: string, className = "danger") => (
+    <MeetingArchiveDialog
+      action={archiveMeetingAction}
+      workspaceId={workspaceId}
+      meetingId={meetingId}
+      labels={archiveDialogLabels}
+      className={className}
+    />
   );
 
   return (
@@ -278,6 +287,7 @@ export default async function MeetingsPage({
                         {tCommon("btnView")}
                       </Link>
                       {renderTranscriptUploadMenu(meeting)}
+                      {renderArchiveDialog(meeting.id, "danger small")}
                     </>
                   }
                 />
@@ -300,11 +310,7 @@ export default async function MeetingsPage({
                     </Link>
                   }
                   more={
-                    <form action={archiveMeetingAction}>
-                      <input type="hidden" name="workspaceId" value={workspaceId} />
-                      <input type="hidden" name="meetingId" value={completedMeetings[0].id} />
-                      <button type="submit" className="danger">{t("btnArchiveMeeting")}</button>
-                    </form>
+                    renderArchiveDialog(completedMeetings[0].id)
                   }
                 />
               </div>
@@ -330,11 +336,7 @@ export default async function MeetingsPage({
                     </Link>
                   }
                   more={
-                    <form action={archiveMeetingAction}>
-                      <input type="hidden" name="workspaceId" value={workspaceId} />
-                      <input type="hidden" name="meetingId" value={meeting.id} />
-                      <button type="submit" className="danger">{t("btnArchive")}</button>
-                    </form>
+                    renderArchiveDialog(meeting.id)
                   }
                 />
               </div>

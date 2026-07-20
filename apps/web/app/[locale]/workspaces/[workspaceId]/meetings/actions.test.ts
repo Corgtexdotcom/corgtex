@@ -17,6 +17,7 @@ const redirect = vi.fn((url: string) => {
   throw new Error(`redirect:${url}`);
 });
 const sendManualMeetingRecorder = vi.fn();
+const deleteMeeting = vi.fn();
 const intakeMeetingTranscript = vi.fn();
 const extractTextFromFileBuffer = vi.fn();
 const requireWorkspaceMembership = vi.fn();
@@ -61,7 +62,7 @@ vi.mock("@corgtex/domain", () => ({
   applyInsight: vi.fn(),
   cancelMeetingRecording: vi.fn(),
   createMeetingSeries: vi.fn(),
-  deleteMeeting: vi.fn(),
+  deleteMeeting,
   dismissInsight: vi.fn(),
   enqueueMeetingAgendaPreparation: vi.fn(),
   importMeetingInvite: vi.fn(),
@@ -157,6 +158,34 @@ describe("meeting server actions", () => {
     }))).rejects.toThrow("redirect:/workspaces/workspace-1/meetings?recorderSent=meeting-1");
 
     expect(redirect).toHaveBeenCalledWith("/workspaces/workspace-1/meetings?recorderSent=meeting-1");
+  });
+
+  it("requires a reason before archiving a meeting from the UI", async () => {
+    const { archiveMeetingAction } = await import("./actions");
+
+    await expect(archiveMeetingAction(formData({
+      workspaceId: "workspace-1",
+      meetingId: "meeting-1",
+    }))).rejects.toThrow("Archive reason is required.");
+
+    expect(deleteMeeting).not.toHaveBeenCalled();
+  });
+
+  it("passes the archive reason when removing a meeting", async () => {
+    const { archiveMeetingAction } = await import("./actions");
+    deleteMeeting.mockResolvedValueOnce({ id: "meeting-1" });
+
+    await archiveMeetingAction(formData({
+      workspaceId: "workspace-1",
+      meetingId: "meeting-1",
+      archiveReason: " Canceled before it happened. ",
+    }));
+
+    expect(deleteMeeting).toHaveBeenCalledWith(actor, {
+      workspaceId: "workspace-1",
+      meetingId: "meeting-1",
+      reason: "Canceled before it happened.",
+    });
   });
 
   it("returns candidate selection state and stores ambiguous transcript payload", async () => {
