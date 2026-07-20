@@ -3196,18 +3196,50 @@ describe("control plane domain", () => {
     const { getControlPlaneMeetingOperationsReadiness } = await import("./control-plane");
     const remoteReadiness = {
       workspaceId: "remote-workspace",
-      counts: {
-        total: 1,
-        eligible: 0,
-        blockers: { no_url: 1 },
+      ready: true,
+      configured: true,
+      provider: "RECALL_AI",
+      fallbackProvider: null,
+      status: "ready",
+      detail: "Recorder readiness checks are passing.",
+      checks: [
+        { key: "entitlement", label: "Recorder entitlement", ok: true, detail: "MEETING_RECORDERS is enabled." },
+        { key: "recorder_config", label: "Recorder config", ok: true, detail: "RECALL_AI enabled." },
+        { key: "public_base_url", label: "Public recorder URL", ok: true, detail: "Configured." },
+        { key: "recall_api_key", label: "Recall API key", ok: true, detail: "Configured." },
+        { key: "recall_webhook_secret", label: "Recall webhook secret", ok: true, detail: "Configured." },
+        { key: "calendar_source", label: "Master Microsoft calendar", ok: true, detail: "recorder@example.com is active." },
+        { key: "worker_sync", label: "Recorder calendar sync", ok: true, detail: "No failed recorder calendar sync jobs." },
+        { key: "provider_proof", label: "Recorder provider proof", ok: true, detail: "Recent recorder proof at 2026-07-20T06:00:00.000Z." },
+      ],
+      coverage: {
+        window: {
+          from: "2026-07-20T06:00:00.000Z",
+          to: "2026-08-19T06:00:00.000Z",
+        },
+        counts: {
+          total: 1,
+          eligible: 0,
+          blockers: { already_covered: 1 },
+        },
+        meetings: [{
+          meetingId: "meeting-1",
+          recordedAt: "2026-07-22T16:00:00.000Z",
+          hasOccurrenceUrl: false,
+          hasSeriesUrl: false,
+          blockerReasons: ["already_covered"],
+        }],
       },
-      meetings: [{
-        meetingId: "meeting-1",
-        recordedAt: "2026-07-22T16:00:00.000Z",
-        hasOccurrenceUrl: false,
-        hasSeriesUrl: false,
-        blockerReasons: ["no_url"],
-      }],
+      lastSmokeRun: {
+        status: "COMPLETED",
+        createdAt: "2026-07-20T05:00:00.000Z",
+        completedAt: "2026-07-20T05:02:00.000Z",
+      },
+      lastSuccessfulRecording: {
+        provider: "RECALL_AI",
+        status: "COMPLETED",
+        observedAt: "2026-07-20T06:00:00.000Z",
+      },
     };
     prismaMock.customerDeployment.findUnique
       .mockResolvedValueOnce({
@@ -3245,15 +3277,29 @@ describe("control plane domain", () => {
       managedWorkspaceId: null,
       accessMode: "support_connector",
       agenda: null,
-      recorder: remoteReadiness,
+      recorder: {
+        workspaceId: "remote-workspace",
+        ready: true,
+        status: "ready",
+        configured: true,
+        provider: "RECALL_AI",
+        fallbackProvider: null,
+        upcomingCoverage: {
+          counts: {
+            total: 1,
+            eligible: 0,
+            blockers: { already_covered: 1 },
+          },
+        },
+      },
     });
     expect(result.recorder.gates).toMatchObject({
       controlPlane: { status: "pass" },
-      tenantConfig: { status: "unknown" },
-      vendor: { status: "unknown" },
-      calendar: { status: "unknown" },
-      meetingState: { status: "blocked" },
-      liveVendorProof: { status: "unknown" },
+      tenantConfig: { status: "pass" },
+      vendor: { status: "pass" },
+      calendar: { status: "pass" },
+      meetingState: { status: "pass" },
+      liveVendorProof: { status: "pass" },
     });
     expect(prismaMock.supportOperation.create).toHaveBeenCalledWith(expect.objectContaining({
       data: expect.objectContaining({
@@ -3262,7 +3308,7 @@ describe("control plane domain", () => {
       }),
     }));
     const body = JSON.parse(String(vi.mocked(global.fetch).mock.calls[0][1]?.body));
-    expect(body.params.name).toBe("get_meeting_recorder_coverage_readiness");
+    expect(body.params.name).toBe("get_meeting_recorder_operations_readiness");
     expect(JSON.stringify(result)).not.toContain("support-token");
     expect(JSON.stringify(result)).not.toContain("teams.microsoft.com");
   });

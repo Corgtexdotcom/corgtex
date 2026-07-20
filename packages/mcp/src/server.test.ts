@@ -62,6 +62,8 @@ const failCommunicationSuggestionMock = vi.fn();
 const createConversationMessageMock = vi.fn();
 const listWorkItemVersionsMock = vi.fn();
 const getWorkItemVersionMock = vi.fn();
+const getMeetingRecorderCoverageReadinessMock = vi.fn();
+const getMeetingRecorderEnterpriseReadinessMock = vi.fn();
 const requireWorkspaceMembershipMock = vi.fn();
 const loadAdviceRequestCountSummariesMock = vi.fn();
 const listDeliberationEntriesMock = vi.fn();
@@ -156,6 +158,8 @@ vi.mock("@corgtex/domain", async () => {
   sendMemberSetupEmail: vi.fn(),
   createDocument: vi.fn(),
   listMeetings: vi.fn(),
+  getMeetingRecorderCoverageReadiness: getMeetingRecorderCoverageReadinessMock,
+  getMeetingRecorderEnterpriseReadiness: getMeetingRecorderEnterpriseReadinessMock,
   getCurrentConstitution: vi.fn(),
   listPolicyCorpus: vi.fn(),
   listAgentRuns: vi.fn(),
@@ -448,6 +452,73 @@ describe("createCorgtexMcpServer", () => {
       role: "ADMIN",
       isActive: true,
     });
+    getMeetingRecorderEnterpriseReadinessMock.mockReset().mockResolvedValue({
+      workspaceId: "ws-1",
+      ready: true,
+      checks: [
+        { key: "entitlement", label: "Recorder entitlement", ok: true, detail: "MEETING_RECORDERS is enabled." },
+        { key: "recorder_config", label: "Recorder config", ok: true, detail: "RECALL_AI enabled." },
+        { key: "public_base_url", label: "Public recorder URL", ok: true, detail: "Configured." },
+        { key: "recall_api_key", label: "Recall API key", ok: true, detail: "Configured." },
+        { key: "recall_webhook_secret", label: "Recall webhook secret", ok: true, detail: "Configured." },
+        { key: "calendar_source", label: "Master Microsoft calendar", ok: true, detail: "recorder@example.com is active." },
+        { key: "worker_sync", label: "Recorder calendar sync", ok: true, detail: "No failed recorder calendar sync jobs." },
+        { key: "provider_proof", label: "Recorder provider proof", ok: true, detail: "Recent recorder proof at 2026-07-20T06:00:00.000Z." },
+      ],
+      config: {
+        enabled: true,
+        defaultProvider: "RECALL_AI",
+        fallbackProvider: null,
+        providerSettings: { apiKey: "should-not-return" },
+      },
+      lastSmokeRun: {
+        id: "smoke-1",
+        status: "COMPLETED",
+        createdAt: "2026-07-20T05:00:00.000Z",
+        completedAt: "2026-07-20T05:02:00.000Z",
+      },
+      lastSuccessfulRecording: {
+        id: "recording-1",
+        provider: "RECALL_AI",
+        status: "COMPLETED",
+        observedAt: "2026-07-20T06:00:00.000Z",
+      },
+      lastProviderAuthFailure: {
+        id: "failed-recording-1",
+        provider: "RECALL_AI",
+        status: "FAILED",
+        failureCode: "AUTH",
+        detail: "Old auth failure.",
+        updatedAt: "2026-07-01T00:00:00.000Z",
+      },
+    });
+    getMeetingRecorderCoverageReadinessMock.mockReset().mockResolvedValue({
+      workspaceId: "ws-1",
+      generatedAt: "2026-07-20T06:00:00.000Z",
+      window: {
+        from: "2026-07-20T06:00:00.000Z",
+        to: "2026-08-19T06:00:00.000Z",
+      },
+      featureEnabled: true,
+      configEnabled: true,
+      autoRecordEnabled: false,
+      providerConfigOk: true,
+      providerChecks: [
+        { key: "recall_api_key", label: "Recall API key", ok: true, detail: "Configured." },
+      ],
+      counts: {
+        total: 1,
+        eligible: 0,
+        blockers: { already_covered: 1 },
+      },
+      meetings: [{
+        meetingId: "meeting-1",
+        recordedAt: "2026-07-22T16:00:00.000Z",
+        hasOccurrenceUrl: false,
+        hasSeriesUrl: false,
+        blockerReasons: ["already_covered"],
+      }],
+    });
     const { prisma } = await import("@corgtex/shared");
     vi.mocked(prisma.action.findFirst).mockReset().mockResolvedValue(null as never);
     vi.mocked(prisma.proposal.findFirst).mockReset().mockResolvedValue(null as never);
@@ -515,6 +586,60 @@ describe("createCorgtexMcpServer", () => {
     });
     expect(JSON.stringify(payload)).not.toContain("token");
     expect(JSON.stringify(payload)).not.toContain("secret");
+  });
+
+  it("returns compact recorder operations readiness without raw recorder secrets", async () => {
+    const { createCorgtexMcpServer } = await import("./server");
+    const { requireScope } = await import("./auth");
+
+    const server = createCorgtexMcpServer({
+      actor: {
+        kind: "user",
+        user: { id: "user-1", email: "user@example.com", displayName: "User One" },
+      } as any,
+      workspaceId: "ws-1",
+      authKind: "oauth",
+      scopes: ["meetings:read"],
+      resource: "https://app.test/api/mcp",
+      providerKey: "cursor",
+      clientName: "Cursor",
+    });
+
+    const response = await (server as any)._registeredTools.get_meeting_recorder_operations_readiness.handler({});
+    const payload = JSON.parse(response.content[0].text);
+
+    expect(vi.mocked(requireScope)).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: "ws-1" }), "meetings:read");
+    expect(payload).toMatchObject({
+      workspaceId: "ws-1",
+      ready: true,
+      configured: true,
+      provider: "RECALL_AI",
+      fallbackProvider: null,
+      checks: expect.arrayContaining([
+        expect.objectContaining({ key: "provider_proof", ok: true }),
+      ]),
+      coverage: {
+        counts: {
+          total: 1,
+          eligible: 0,
+          blockers: { already_covered: 1 },
+        },
+      },
+      lastSmokeRun: {
+        status: "COMPLETED",
+      },
+      lastSuccessfulRecording: {
+        provider: "RECALL_AI",
+        status: "COMPLETED",
+      },
+      lastProviderAuthFailure: {
+        provider: "RECALL_AI",
+        status: "FAILED",
+        failureCode: "AUTH",
+      },
+    });
+    expect(JSON.stringify(payload)).not.toContain("should-not-return");
+    expect(JSON.stringify(payload)).not.toContain("apiKey");
   });
 
   it("includes proposal owner fields in the daily overview", async () => {
