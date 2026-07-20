@@ -23,6 +23,7 @@ const CLIENT_READINESS_ROUTE_NAMES = new Set([
   "proposals",
   "circles",
   "finance",
+  "finance-clients",
   "audit",
   "settings",
   "chat",

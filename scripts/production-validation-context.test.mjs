@@ -121,7 +121,7 @@ describe("production validation context", () => {
       baselinePrNumbers: "724",
       recorderDeploymentsInput: "managed-recorder-validation,example",
       recorderTempMeetingsInput: "true",
-      clientReadinessRoutesInput: "leads,governance",
+      clientReadinessRoutesInput: "leads,governance,finance-clients",
       smokeInputs: {
         crm: "false",
         telemetryRelease: "false",
@@ -139,7 +139,7 @@ describe("production validation context", () => {
       crm_smoke: "false",
       telemetry_release_smoke: "false",
       client_readiness_smoke: "true",
-      client_readiness_routes: "leads,governance",
+      client_readiness_routes: "leads,governance,finance-clients",
       source_intake_smoke: "true",
       work_item_parity_smoke: "false",
       briefing_fixture_smoke: "true",

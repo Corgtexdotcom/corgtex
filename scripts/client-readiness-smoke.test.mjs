@@ -5,11 +5,13 @@ import {
   activateMobileAskTab,
   activateMobileMode,
   activateMobileWorkspaceMode,
+  coreRouteCatalog,
   demoAddGuardRouteSuffix,
   isFindAccountUrl,
   isWorkspaceUrl,
   labelConsoleEntry,
   localePrefixFromUrl,
+  optionalRouteCatalog,
   resolveSelectedWorkspace,
   submitLoginForm,
   visibleLoginErrorMessage,
@@ -189,6 +191,11 @@ describe("client readiness smoke login handling", () => {
     expect(demoAddGuardRouteSuffix("/workspaces/ws-1")).toBe(
       "/add?kind=upload_file&returnTo=%2Fworkspaces%2Fws-1%2Fbrain",
     );
+  });
+
+  it("keeps Finance Clients explicit so default sweeps do not require Practice Projects", () => {
+    expect(coreRouteCatalog).not.toContainEqual(["finance-clients", "/finance/clients"]);
+    expect(optionalRouteCatalog).toContainEqual(["finance-clients", "/finance/clients"]);
   });
 });
 
