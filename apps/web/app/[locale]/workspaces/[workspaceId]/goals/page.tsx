@@ -19,6 +19,7 @@ import { isWorkspaceFeatureEnabled, requireWorkspaceFeature } from "@/lib/worksp
 import { GoalProgress } from "./GoalProgress";
 import { RecognitionCard } from "./RecognitionCard";
 import { ArchivedItemBanner } from "@/lib/components/ArchivedItemBanner";
+import { SegmentedControl, WorkspaceEmptyState, WorkspacePageHeader } from "@/lib/components/ControlPrimitives";
 import { MarkdownEditor } from "@/lib/components/MarkdownEditor";
 import { MarkdownRenderer } from "@/lib/components/MarkdownRenderer";
 import { ItemActions } from "@/lib/components/ui/ItemActions";
@@ -177,31 +178,30 @@ export default async function GoalsPage({
 
   return (
     <div className="max-w-5xl mx-auto p-6 space-y-8">
-      <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 border-b border-line pb-4">
-        <div>
-          <h1 className="text-3xl font-bold text-text">{t("title")}</h1>
-          <p className="text-muted mt-1">{t("description")}</p>
-        </div>
-
-        <div className="flex mt-2 sm:mt-0 glass-panel rounded-lg overflow-hidden border border-line p-1">
-          <a
-            href={`/workspaces/${workspaceId}/goals?view=tree&cadence=${cadence}`}
-            className={`px-4 py-1.5 text-sm font-medium rounded-md transition-colors ${
-              view === "tree" ? "bg-black text-white shadow-sm" : "text-muted hover:text-text"
-            }`}
-          >
-            {t("treeView")}
-          </a>
-          <a
-            href={`/workspaces/${workspaceId}/goals?view=slice&cadence=${cadence}`}
-            className={`px-4 py-1.5 text-sm font-medium rounded-md transition-colors ${
-              view === "slice" ? "bg-black text-white shadow-sm" : "text-muted hover:text-text"
-            }`}
-          >
-            {t("mySlice")}
-          </a>
-        </div>
-      </div>
+      <WorkspacePageHeader
+        className="nr-workspace-page-header-flush"
+        title={t("title")}
+        description={t("description")}
+        actions={
+          <SegmentedControl
+            label={t("title")}
+            items={[
+              {
+                key: "tree",
+                href: `/workspaces/${workspaceId}/goals?view=tree&cadence=${cadence}`,
+                label: t("treeView"),
+                active: view === "tree",
+              },
+              {
+                key: "slice",
+                href: `/workspaces/${workspaceId}/goals?view=slice&cadence=${cadence}`,
+                label: t("mySlice"),
+                active: view === "slice",
+              },
+            ]}
+          />
+        }
+      />
 
       {focusedGoal && (
         <section className="ws-section">
@@ -323,27 +323,23 @@ export default async function GoalsPage({
 
       {view === "tree" && (
         <div className="space-y-6">
-          <div className="flex overflow-x-auto pb-2 gap-2">
-            {CADENCES.map((item) => (
-              <a
-                key={item.id}
-                href={`/workspaces/${workspaceId}/goals?view=tree&cadence=${item.id}`}
-                className={`px-3 py-1 text-sm font-medium rounded-full whitespace-nowrap transition-colors border ${
-                  cadence === item.id
-                    ? "bg-blue-50 text-blue-700 border-blue-200"
-                    : "bg-surface-strong text-muted border-line hover:bg-surface-sunken"
-                }`}
-              >
-                {item.label}
-              </a>
-            ))}
-          </div>
+          <SegmentedControl
+            label={t("formCadence")}
+            density="compact"
+            items={CADENCES.map((item) => ({
+              key: item.id,
+              href: `/workspaces/${workspaceId}/goals?view=tree&cadence=${item.id}`,
+              label: item.label,
+              active: cadence === item.id,
+            }))}
+          />
 
           <div className="space-y-4">
             {tree.length === 0 ? (
-              <div className="p-12 text-center text-muted bg-surface-strong rounded-xl border border-dashed border-line">
-                {t("noGoalsFound", { cadence: cadence.toLowerCase().replace("_", "") })}
-              </div>
+              <WorkspaceEmptyState
+                title={t("noGoalsFound", { cadence: cadence.toLowerCase().replace("_", "") })}
+                className="bg-surface-strong rounded-xl border border-dashed border-line"
+              />
             ) : (
               tree.map((goal) => (
                 <GoalNode
@@ -372,9 +368,10 @@ export default async function GoalsPage({
             <h3 className="text-xl font-semibold mb-4 text-text">{t("myActiveGoals")}</h3>
             <div className="space-y-4">
               {mySlice.length === 0 ? (
-                <div className="p-8 text-center text-muted bg-surface-strong rounded-xl border border-dashed border-line">
-                  {t("noOwnedGoals")}
-                </div>
+                <WorkspaceEmptyState
+                  title={t("noOwnedGoals")}
+                  className="bg-surface-strong rounded-xl border border-dashed border-line"
+                />
               ) : (
                 mySlice.map((goal) => (
                   <div key={goal.id} className="bg-surface-strong border border-line rounded-lg p-5 shadow-sm">
@@ -428,9 +425,10 @@ export default async function GoalsPage({
             <h3 className="text-xl font-semibold mb-4 text-text">{t("recentRecognitions")}</h3>
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               {recognitions.length === 0 ? (
-                <div className="col-span-full p-8 text-center text-muted bg-surface-strong rounded-xl border border-dashed border-line">
-                  {t("noRecognitions")}
-                </div>
+                <WorkspaceEmptyState
+                  title={t("noRecognitions")}
+                  className="col-span-full bg-surface-strong rounded-xl border border-dashed border-line"
+                />
               ) : (
                 recognitions.map((rec) => (
                   <RecognitionCard key={rec.id} recognition={rec} />

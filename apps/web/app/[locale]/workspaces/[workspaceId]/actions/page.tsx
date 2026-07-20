@@ -22,6 +22,7 @@ import {
   resolveActionStatusSearch,
 } from "./view-model";
 import { MarkdownExcerpt } from "@/lib/components/MarkdownRenderer";
+import { WorkspacePageHeader } from "@/lib/components/ControlPrimitives";
 import { ItemActions } from "@/lib/components/ui/ItemActions";
 import { WorkItemFilterControls, WorkItemToolbar } from "@/lib/components/WorkItemControls";
 import { WorkItemKanbanBoard, type WorkItemKanbanColumn } from "@/lib/components/WorkItemKanbanBoard";
@@ -521,12 +522,7 @@ export default async function ActionsPage({
 
   return (
     <>
-      <header className="nr-masthead" style={{ textAlign: "left", marginBottom: 32 }}>
-        <h1 style={{ border: "none", padding: 0, margin: 0, fontSize: "2rem" }}>{t("pageTitle")}</h1>
-        <div className="nr-masthead-meta">
-          <span>{t("pageDescription")}</span>
-        </div>
-      </header>
+      <WorkspacePageHeader title={t("pageTitle")} description={t("pageDescription")} />
 
       <section className="ws-section">
         <div className="nr-work-board-header">

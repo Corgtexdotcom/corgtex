@@ -42,7 +42,8 @@ Homebrew; `/opt/homebrew/bin/gh` if not on `PATH`). The PR body:
 2. **States the risk tier** — `low`, `standard`, or `high`.
 3. **Summarizes what shipped** — one or two sentences, the "walkthrough."
 4. **Describes demo exposure** for customer-visible product changes. Update `scripts/seed-jnj-demo.mjs` when safe seeded data is needed, or explain why the feature cannot be shown safely in the public demo.
-5. **Links actual visual proof** in the **Visual Proof** section for any change under `apps/web/app/**`, `apps/web/components/**`, or `apps/web/lib/components/**`. Prefer Corgtex Build Artifacts: capture proof under ignored `.artifacts/`, upload it with `node scripts/upload-build-artifacts.mjs`, and paste the emitted markdown links into the PR body. Use PR attachments, CI-uploaded artifacts, or another private artifact link only when Build Artifacts is unavailable. Do not commit generated screenshots or recordings.
+5. **Explains UX spine decisions** for workspace UI changes: name the shared primitive used or improved, and explain any local exception by user benefit rather than preference.
+6. **Links actual visual proof** in the **Visual Proof** section for any change under `apps/web/app/**`, `apps/web/components/**`, or `apps/web/lib/components/**`. Prefer Corgtex Build Artifacts: capture proof under ignored `.artifacts/`, upload it with `node scripts/upload-build-artifacts.mjs`, and paste the emitted markdown links into the PR body. Use PR attachments, CI-uploaded artifacts, or another private artifact link only when Build Artifacts is unavailable. Do not commit generated screenshots or recordings.
 
 Auto-merge is set by the Executor immediately (`gh pr merge --auto --squash`) so the PR merges as soon as the Reviewer approves and required checks are green.
 

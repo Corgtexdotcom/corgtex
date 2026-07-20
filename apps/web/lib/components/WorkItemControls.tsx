@@ -2,6 +2,7 @@ import React, { type ReactNode } from "react";
 import { ArrowDownAZ, ArrowDownWideNarrow, ArrowUpDown, Columns3, List, Table2 } from "lucide-react";
 import type { WorkItemScope, WorkItemSort, WorkItemViewMode } from "@/lib/work-item-view";
 import { MultiSelectFilter } from "@/lib/components/MultiSelectFilter";
+import { SegmentedControl } from "@/lib/components/ControlPrimitives";
 
 type Option = {
   id: string;
@@ -42,19 +43,21 @@ export function WorkItemViewToggle({
   ].filter((item) => availableViews.includes(item.id) && item.href);
 
   return (
-    <div className="nr-view-toggle" aria-label={label}>
-      {viewItems.map((item) => (
-        <a
-          key={item.id}
-          href={item.href}
-          className={`nr-icon-link ${currentView === item.id ? "nr-icon-link-active" : ""}`}
-          aria-label={item.label}
-          title={item.label}
-        >
-          {item.icon}
-        </a>
-      ))}
-    </div>
+    <SegmentedControl
+      label={label}
+      density="icon"
+      showLabels="sr-only"
+      className="nr-view-toggle"
+      items={viewItems.map((item) => ({
+        key: item.id,
+        href: item.href!,
+        label: item.label,
+        icon: item.icon,
+        active: currentView === item.id,
+        ariaLabel: item.label,
+        title: item.label,
+      }))}
+    />
   );
 }
 

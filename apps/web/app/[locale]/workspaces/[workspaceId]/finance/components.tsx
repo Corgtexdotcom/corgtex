@@ -1,5 +1,6 @@
 import type { ReactNode } from "react";
 import { Prisma } from "@prisma/client";
+import { WorkspaceSubnav } from "@/lib/components/ControlPrimitives";
 
 export type PracticeFinanceSection =
   | "overview"
@@ -56,21 +57,18 @@ export function PracticeFinanceNav({
   slicingPieEnabled?: boolean;
 }) {
   return (
-    <nav style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
-      {navItems
+    <WorkspaceSubnav
+      label="Practice Ledger sections"
+      items={navItems
         .filter((item) => practiceProjectsEnabled || !nativePracticeSections.has(item.key))
         .filter((item) => item.key !== "slicing-pie" || slicingPieEnabled)
-        .map((item) => (
-          <a
-            key={item.key}
-            className={`link-button small ${item.key === active ? "" : "secondary"}`}
-            href={item.href(workspaceId)}
-            aria-current={item.key === active ? "page" : undefined}
-          >
-            {item.label}
-          </a>
-        ))}
-    </nav>
+        .map((item) => ({
+          key: item.key,
+          label: item.label,
+          href: item.href(workspaceId),
+          active: item.key === active,
+        }))}
+    />
   );
 }
 

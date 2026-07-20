@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useCallback, createContext, useContext } from "react";
+import React, { useEffect, useState, useCallback, createContext, useContext } from "react";
 
 type ToastType = "success" | "error" | "info";
 
@@ -37,7 +37,7 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
   return (
     <ToastContext.Provider value={{ addToast }}>
       {children}
-      <div className="toast-container">
+      <div className="toast-container" aria-live="polite" aria-relevant="additions">
         {toasts.map((toast) => (
           <ToastMessage key={toast.id} toast={toast} onDismiss={removeToast} />
         ))}
@@ -46,15 +46,27 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
   );
 }
 
-function ToastMessage({ toast, onDismiss }: { toast: ToastItem; onDismiss: (id: string) => void }) {
+export function ToastMessage({ toast, onDismiss }: { toast: ToastItem; onDismiss: (id: string) => void }) {
   useEffect(() => {
     const timer = setTimeout(() => onDismiss(toast.id), 4000);
     return () => clearTimeout(timer);
   }, [toast.id, onDismiss]);
 
   return (
-    <div className={`toast toast-${toast.type}`} onClick={() => onDismiss(toast.id)}>
-      {toast.message}
+    <div
+      className={`toast toast-${toast.type}`}
+      role={toast.type === "error" ? "alert" : "status"}
+      aria-live={toast.type === "error" ? "assertive" : "polite"}
+    >
+      <span>{toast.message}</span>
+      <button
+        type="button"
+        className="toast-dismiss"
+        onClick={() => onDismiss(toast.id)}
+        aria-label="Dismiss notification"
+      >
+        &times;
+      </button>
     </div>
   );
 }
