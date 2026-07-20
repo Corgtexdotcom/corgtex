@@ -385,6 +385,22 @@ describe("Tools catalog UI helpers", () => {
     });
   });
 
+  it("infers document titles from stored resource descriptions when source text is absent", () => {
+    expect(deriveCapturedLinkDisplay({
+      providerKey: "box",
+      providerLabel: "Box",
+      resourceTitle: null,
+      resourceDescriptionMd: "V7 of the CRna org Structure PowerPoint includes the revised structure, the two paths to get to that structure, the governance model, and actions.",
+      resourceType: "presentation",
+      category: "FILES",
+      url: "https://zinatacore.box.com/s/xdc0lovvqzlq2yn5oubmuz7rc94ylrq3",
+    })).toMatchObject({
+      title: "V7 of the CRna org Structure PowerPoint",
+      typeLabel: "Presentation",
+      descriptionMd: "Includes the revised structure, the two paths to get to that structure, the governance model, and actions.",
+    });
+  });
+
   it("strips duplicate underscore titles without dropping the following description", () => {
     expect(deriveCapturedLinkDisplay({
       providerKey: "box",
@@ -414,6 +430,55 @@ describe("Tools catalog UI helpers", () => {
       title: "CRNA_Income_Expense_Tracker",
       typeLabel: "Spreadsheet",
       descriptionMd: null,
+    });
+  });
+
+  it("uses quoted document names from stored resource descriptions", () => {
+    expect(deriveCapturedLinkDisplay({
+      providerKey: "box",
+      providerLabel: "Box",
+      resourceTitle: null,
+      resourceDescriptionMd: "This is the spreadsheet \"CRNA_Income_Expense_Tracker\"",
+      resourceType: "spreadsheet",
+      category: "FILES",
+      url: "https://zinatacore.box.com/s/kz99eo5smg0vqe1pe4dzzmtmaa4p2nws",
+    })).toMatchObject({
+      title: "CRNA_Income_Expense_Tracker",
+      typeLabel: "Spreadsheet",
+      descriptionMd: null,
+    });
+  });
+
+  it("checks stored resource descriptions before low-information summaries when inferring titles", () => {
+    expect(deriveCapturedLinkDisplay({
+      providerKey: "box",
+      providerLabel: "Box",
+      summaryMd: "Shared for reference",
+      resourceTitle: null,
+      resourceDescriptionMd: "This is the spreadsheet \"CRNA_Income_Expense_Tracker\"",
+      resourceType: "spreadsheet",
+      category: "FILES",
+      url: "https://zinatacore.box.com/s/kz99eo5smg0vqe1pe4dzzmtmaa4p2nws",
+    })).toMatchObject({
+      title: "CRNA_Income_Expense_Tracker",
+      typeLabel: "Spreadsheet",
+      descriptionMd: null,
+    });
+  });
+
+  it("keeps generic document subjects as descriptions instead of inferred titles", () => {
+    expect(deriveCapturedLinkDisplay({
+      providerKey: "box",
+      providerLabel: "Box",
+      resourceTitle: null,
+      resourceDescriptionMd: "This document contains the revised structure and governance model.",
+      resourceType: "document",
+      category: "FILES",
+      url: "https://zinatacore.box.com/s/xdc0lovvqzlq2yn5oubmuz7rc94ylrq3",
+    })).toMatchObject({
+      title: "Box document",
+      typeLabel: "Document",
+      descriptionMd: "This document contains the revised structure and governance model.",
     });
   });
 
