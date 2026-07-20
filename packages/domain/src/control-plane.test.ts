@@ -3557,6 +3557,12 @@ describe("control plane domain", () => {
 
   it("routes recorder calendar OAuth connect through the support connector for remote deployments", async () => {
     const { saveControlPlaneRecorderCalendarSource } = await import("./control-plane");
+    const integrationAgent: AppActor = {
+      kind: "agent",
+      authProvider: "control-plane",
+      label: "control-plane-agent",
+      scopes: ["control-plane:read", "control-plane:integrations:write"],
+    };
     prismaMock.customerDeployment.findUnique
       .mockResolvedValueOnce({
         id: "inst-1",
@@ -3604,7 +3610,7 @@ describe("control plane domain", () => {
       return mcpToolResult({ audited: true });
     }) as any;
 
-    const result = await saveControlPlaneRecorderCalendarSource(operatorActor, {
+    const result = await saveControlPlaneRecorderCalendarSource(integrationAgent, {
       deploymentId: "inst-1",
       providerAccountId: "ms-user-1",
       providerAccountEmail: "recorder@remote.test",
@@ -3654,6 +3660,42 @@ describe("control plane domain", () => {
     expect(JSON.stringify(prismaMock.customerDeploymentEvent.create.mock.calls)).not.toContain("returned-access-token");
   });
 
+  it("rejects remote recorder calendar connect before creating a support operation when connector credentials are missing", async () => {
+    const { saveControlPlaneRecorderCalendarSource } = await import("./control-plane");
+    const integrationAgent: AppActor = {
+      kind: "agent",
+      authProvider: "control-plane",
+      label: "control-plane-agent",
+      scopes: ["control-plane:read", "control-plane:integrations:write"],
+    };
+    prismaMock.customerDeployment.findUnique
+      .mockResolvedValueOnce({
+        id: "inst-1",
+        label: "Remote Customer",
+        customerAccountId: "cust-1",
+        managedWorkspaceId: null,
+        supportCredentialEnc: null,
+        managedWorkspace: null,
+      })
+      .mockResolvedValueOnce({
+        id: "inst-1",
+        label: "Remote Customer",
+        supportCredentialEnc: null,
+      });
+
+    await expect(saveControlPlaneRecorderCalendarSource(integrationAgent, {
+      deploymentId: "inst-1",
+      providerAccountId: "ms-user-1",
+      providerAccountEmail: "recorder@remote.test",
+      accessToken: "access-token-secret",
+      reason: "Customer authorized recorder calendar.",
+    })).rejects.toMatchObject({
+      status: 400,
+      code: "SUPPORT_CONNECTOR_MISSING",
+    });
+    expect(prismaMock.supportOperation.create).not.toHaveBeenCalled();
+  });
+
   it("requires a completed smoke before enabling recorder auto-recording", async () => {
     const { runControlPlaneMeetingRecorderOperation } = await import("./control-plane");
     prismaMock.customerDeployment.findUnique.mockResolvedValue({
@@ -3699,6 +3741,12 @@ describe("control plane domain", () => {
 
   it("routes support-connector recorder operations through audited remote MCP tools", async () => {
     const { runControlPlaneMeetingRecorderOperation } = await import("./control-plane");
+    const integrationAgent: AppActor = {
+      kind: "agent",
+      authProvider: "control-plane",
+      label: "control-plane-agent",
+      scopes: ["control-plane:read", "control-plane:integrations:write"],
+    };
     let operationIndex = 0;
     prismaMock.customerDeployment.findUnique.mockResolvedValue({
       id: "inst-1",
@@ -3751,17 +3799,17 @@ describe("control plane domain", () => {
     }) as any;
 
     const results = [];
-    results.push(await runControlPlaneMeetingRecorderOperation(operatorActor, {
+    results.push(await runControlPlaneMeetingRecorderOperation(integrationAgent, {
       deploymentId: "inst-1",
       operation: "enqueue_calendar_sync",
       reason: "Queue remote recorder sync.",
     }));
-    results.push(await runControlPlaneMeetingRecorderOperation(operatorActor, {
+    results.push(await runControlPlaneMeetingRecorderOperation(integrationAgent, {
       deploymentId: "inst-1",
       operation: "dry_run_scan",
       reason: "Preview remote recorder calendar.",
     }));
-    results.push(await runControlPlaneMeetingRecorderOperation(operatorActor, {
+    results.push(await runControlPlaneMeetingRecorderOperation(integrationAgent, {
       deploymentId: "inst-1",
       operation: "live_smoke",
       meetingUrl: "https://teams.microsoft.com/l/meetup-join/private",
@@ -3769,7 +3817,7 @@ describe("control plane domain", () => {
       provider: "RECALL_AI",
       reason: "Run live remote recorder smoke.",
     }));
-    results.push(await runControlPlaneMeetingRecorderOperation(operatorActor, {
+    results.push(await runControlPlaneMeetingRecorderOperation(integrationAgent, {
       deploymentId: "inst-1",
       operation: "enable_auto_recording_after_smoke",
       reason: "Enable remote auto-recording after smoke.",

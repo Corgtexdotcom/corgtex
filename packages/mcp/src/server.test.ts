@@ -757,6 +757,20 @@ describe("createCorgtexMcpServer", () => {
 
     const syncResponse = await (server as any)._registeredTools.enqueue_meeting_recorder_calendar_sync.handler({});
     const dryRunResponse = await (server as any)._registeredTools.dry_run_meeting_recorder_calendar_scan.handler({});
+    runMeetingRecorderSmokeMock.mockResolvedValueOnce({
+      id: "smoke-1",
+      workspaceId: "ws-1",
+      deploymentId: null,
+      provider: "RECALL_AI",
+      status: "FAILED",
+      joinAt: new Date("2099-07-20T06:30:00.000Z"),
+      liveVendorCall: true,
+      meetingId: "meeting-1",
+      recordingId: "recording-1",
+      meetingUrlHash: "hash-1",
+      failureMessage: "Provider echoed https://teams.microsoft.com/l/meetup-join/private for external bot bot-remote.",
+      completedAt: null,
+    });
     const smokeResponse = await (server as any)._registeredTools.run_meeting_recorder_live_smoke.handler({
       meetingUrl: "https://teams.microsoft.com/l/meetup-join/private",
       joinAt: "2099-07-20T06:30:00.000Z",
@@ -792,13 +806,15 @@ describe("createCorgtexMcpServer", () => {
     expect(smokePayload).toMatchObject({
       smokeRun: {
         id: "smoke-1",
-        status: "SCHEDULED",
+        status: "FAILED",
         provider: "RECALL_AI",
         hasMeeting: true,
         hasRecording: true,
+        failureMessage: "Meeting recorder smoke failed. Review customer runtime logs for details.",
       },
     });
     expect(JSON.stringify(smokePayload)).not.toContain("teams.microsoft.com");
+    expect(JSON.stringify(smokePayload)).not.toContain("bot-remote");
     expect(JSON.stringify(smokePayload)).not.toContain("recording-1");
     expect(JSON.stringify(smokePayload)).not.toContain("hash-1");
   });

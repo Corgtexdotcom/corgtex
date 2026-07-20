@@ -315,6 +315,12 @@ function compactRecorderCalendarSource(source: any) {
   };
 }
 
+function compactMeetingRecorderFailureMessage(value: unknown) {
+  return typeof value === "string" && value.trim()
+    ? "Meeting recorder smoke failed. Review customer runtime logs for details."
+    : null;
+}
+
 function compactMeetingRecorderSmokeRun(smokeRun: any) {
   return {
     id: smokeRun.id,
@@ -326,7 +332,7 @@ function compactMeetingRecorderSmokeRun(smokeRun: any) {
     liveVendorCall: Boolean(smokeRun.liveVendorCall),
     hasMeeting: Boolean(smokeRun.meetingId),
     hasRecording: Boolean(smokeRun.recordingId),
-    failureMessage: smokeRun.failureMessage ?? null,
+    failureMessage: compactMeetingRecorderFailureMessage(smokeRun.failureMessage),
     completedAt: smokeRun.completedAt ?? null,
   };
 }

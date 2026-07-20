@@ -6213,6 +6213,7 @@ export async function saveControlPlaneRecorderCalendarSource(actor: AppActor, pa
     const operation = await runCustomerSupportOperation(actor, {
       deploymentId: params.deploymentId,
       action: "meeting_recorders.connect_calendar",
+      scopeOverride: "control-plane:integrations:write",
       reason,
       arguments: {
         providerAccountId: params.providerAccountId,
@@ -6805,6 +6806,7 @@ async function runRemoteControlPlaneMeetingRecorderOperation(actor: AppActor, pa
   const operation = await runCustomerSupportOperation(actor, {
     deploymentId: params.deploymentId,
     action,
+    scopeOverride: "control-plane:integrations:write",
     reason,
     arguments: args,
   });
@@ -9967,6 +9969,7 @@ export async function runCustomerSupportOperation(actor: AppActor, params: {
     ? { ...providedArgs, reason }
     : providedArgs;
   const inputSummary = redactObject(args);
+  const connector = await loadSupportConnector(params.deploymentId);
 
   const operation = await prisma.supportOperation.create({
     data: {
@@ -9982,8 +9985,6 @@ export async function runCustomerSupportOperation(actor: AppActor, params: {
       idempotencyKey: params.idempotencyKey?.trim() || null,
     },
   });
-
-  const connector = await loadSupportConnector(params.deploymentId);
 
   try {
     if (MUTATING_SUPPORT_ACTIONS.has(params.action)) {
