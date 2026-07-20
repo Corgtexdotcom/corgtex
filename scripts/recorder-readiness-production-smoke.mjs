@@ -89,6 +89,93 @@ function urlFieldMatchesTarget(target, ...values) {
   });
 }
 
+function recorderReadinessDeploymentOperationalScore(deployment) {
+  let score = 0;
+  const primaryDeploymentId = deployment.primaryDeploymentId ?? deployment.customerAccount?.primaryDeploymentId ?? null;
+  if (primaryDeploymentId === deployment.id) score += 400;
+
+  switch (comparable(deployment.deploymentStatus)) {
+    case "active":
+      score += 250;
+      break;
+    case "degraded":
+      score += 75;
+      break;
+    case "bootstrapping":
+    case "provisioning":
+      score += 25;
+      break;
+    case "draft":
+      score -= 100;
+      break;
+    case "retired":
+    case "suspended":
+      score -= 700;
+      break;
+    default:
+      break;
+  }
+
+  switch (comparable(deployment.provisioningStatus)) {
+    case "active":
+    case "completed":
+    case "deployed":
+    case "provisioned":
+    case "ready":
+      score += 75;
+      break;
+    case "draft":
+      score -= 50;
+      break;
+    case "archived":
+    case "retired":
+    case "suspended":
+      score -= 700;
+      break;
+    default:
+      break;
+  }
+
+  if (comparable(deployment.environment) === "production") score += 100;
+
+  switch (comparable(deployment.lastHealthStatus)) {
+    case "healthy":
+    case "ok":
+    case "pass":
+    case "ready":
+    case "up":
+      score += 50;
+      break;
+    case "down":
+    case "error":
+    case "failed":
+    case "unhealthy":
+      score -= 100;
+      break;
+    default:
+      break;
+  }
+
+  switch (comparable(deployment.supportConnectorStatus)) {
+    case "connected":
+    case "managed":
+    case "ready":
+      score += 25;
+      break;
+    case "not_configured":
+      score -= 25;
+      break;
+    default:
+      break;
+  }
+
+  return score;
+}
+
+function recorderReadinessDeploymentScore(baseScore, deployment) {
+  return Math.max(1, baseScore + recorderReadinessDeploymentOperationalScore(deployment));
+}
+
 export function deploymentMatchesRecorderReadinessTarget(deployment, target) {
   return recorderReadinessDeploymentMatchScore(deployment, target) > 0;
 }
@@ -96,23 +183,35 @@ export function deploymentMatchesRecorderReadinessTarget(deployment, target) {
 export function recorderReadinessDeploymentMatchScore(deployment, target) {
   const normalizedTarget = comparable(target);
   if (!normalizedTarget) return 0;
-  if (fieldMatchesTarget(target, deployment.id)) return 1_000;
-  if (fieldMatchesTarget(target, deployment.managedWorkspaceId, deployment.managedWorkspace?.id)) return 950;
-  if (fieldMatchesTarget(target, deployment.managedWorkspaceSlug, deployment.managedWorkspace?.slug)) return 925;
-  if (fieldMatchesTarget(target, deployment.label)) return 900;
-  if (fieldMatchesTarget(target, deployment.managedWorkspaceName, deployment.managedWorkspace?.name)) return 875;
-  if (fieldMatchesTarget(target, deployment.remoteWorkspaceId)) return 850;
-  if (fieldMatchesTarget(target, deployment.remoteWorkspaceSlug)) return 825;
-  if (urlFieldMatchesTarget(target, deployment.customDomain)) return 800;
-  if (urlFieldMatchesTarget(target, deployment.url)) return 775;
-  if (!fieldMatchesTarget(target, deployment.customerSlug)) return 0;
-
-  let score = 700;
-  const primaryDeploymentId = deployment.primaryDeploymentId ?? deployment.customerAccount?.primaryDeploymentId ?? null;
-  if (primaryDeploymentId === deployment.id) score += 200;
-  if (deployment.deploymentStatus === "ACTIVE") score += 50;
-  if (comparable(deployment.environment) === "production") score += 25;
-  return score;
+  if (fieldMatchesTarget(target, deployment.id)) return 10_000;
+  if (fieldMatchesTarget(target, deployment.managedWorkspaceId, deployment.managedWorkspace?.id)) {
+    return recorderReadinessDeploymentScore(950, deployment);
+  }
+  if (fieldMatchesTarget(target, deployment.managedWorkspaceSlug, deployment.managedWorkspace?.slug)) {
+    return recorderReadinessDeploymentScore(925, deployment);
+  }
+  if (fieldMatchesTarget(target, deployment.label)) {
+    return recorderReadinessDeploymentScore(900, deployment);
+  }
+  if (fieldMatchesTarget(target, deployment.managedWorkspaceName, deployment.managedWorkspace?.name)) {
+    return recorderReadinessDeploymentScore(875, deployment);
+  }
+  if (fieldMatchesTarget(target, deployment.remoteWorkspaceId)) {
+    return recorderReadinessDeploymentScore(850, deployment);
+  }
+  if (fieldMatchesTarget(target, deployment.remoteWorkspaceSlug)) {
+    return recorderReadinessDeploymentScore(825, deployment);
+  }
+  if (urlFieldMatchesTarget(target, deployment.customDomain)) {
+    return recorderReadinessDeploymentScore(800, deployment);
+  }
+  if (urlFieldMatchesTarget(target, deployment.url)) {
+    return recorderReadinessDeploymentScore(775, deployment);
+  }
+  if (fieldMatchesTarget(target, deployment.customerSlug)) {
+    return recorderReadinessDeploymentScore(700, deployment);
+  }
+  return 0;
 }
 
 export function resolveRecorderReadinessTargets(deployments, targets) {
@@ -360,9 +459,15 @@ export class RecorderReadinessProductionSmoke {
           customerSlug: deployment.customerSlug,
           url: deployment.url ?? null,
           customDomain: deployment.customDomain ?? null,
+          deploymentStatus: deployment.deploymentStatus ?? null,
+          environment: deployment.environment ?? null,
+          provisioningStatus: deployment.provisioningStatus ?? null,
+          lastHealthStatus: deployment.lastHealthStatus ?? null,
           remoteWorkspaceSlug: deployment.remoteWorkspaceSlug ?? null,
           managedWorkspaceId: deployment.managedWorkspaceId,
           managedWorkspaceSlug: deployment.managedWorkspaceSlug ?? deployment.managedWorkspace?.slug ?? null,
+          managedWorkspaceName: deployment.managedWorkspaceName ?? deployment.managedWorkspace?.name ?? null,
+          supportAccessMode: deployment.supportAccessMode ?? null,
           supportConnectorStatus: deployment.supportConnectorStatus ?? null,
         }
         : null,
