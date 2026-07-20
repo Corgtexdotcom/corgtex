@@ -1,6 +1,6 @@
 import type { NextRequest } from "next/server";
 import { NextResponse } from "next/server";
-import { AppError, duplicateGuardErrorPayload, isDuplicateGuardMatchError } from "@corgtex/domain";
+import { AppError } from "@corgtex/domain";
 import { isDatabaseUnavailableError } from "@corgtex/shared";
 import { captureErrorTelemetry } from "@corgtex/shared/telemetry";
 import { z } from "zod";
@@ -18,6 +18,8 @@ type RouteErrorInfo = {
   status: number;
 };
 
+type DuplicateGuardResolution = "use_existing" | "update_existing" | "create_new";
+
 function errorResponse(status: number, code: string, message: string) {
   return NextResponse.json(
     {
@@ -28,6 +30,33 @@ function errorResponse(status: number, code: string, message: string) {
     },
     { status },
   );
+}
+
+function isDuplicateGuardResolution(value: unknown): value is DuplicateGuardResolution {
+  return value === "use_existing" || value === "update_existing" || value === "create_new";
+}
+
+function duplicateGuardPayload(error: unknown, info: RouteErrorInfo) {
+  if (info.code !== "DUPLICATE_GUARD_MATCH" || typeof error !== "object" || error === null) return null;
+  const duplicate = error as {
+    allowedResolutions?: unknown;
+    candidate?: unknown;
+    recommendedResolution?: unknown;
+  };
+  if (typeof duplicate.candidate !== "object" || duplicate.candidate === null) return null;
+  const allowedResolutions = Array.isArray(duplicate.allowedResolutions)
+    ? duplicate.allowedResolutions.filter(isDuplicateGuardResolution)
+    : [];
+  return {
+    status: "duplicate_confirmation_required" as const,
+    candidate: duplicate.candidate,
+    recommendedResolution: isDuplicateGuardResolution(duplicate.recommendedResolution)
+      ? duplicate.recommendedResolution
+      : "use_existing",
+    allowedResolutions: allowedResolutions.length > 0
+      ? allowedResolutions
+      : ["use_existing", "update_existing", "create_new"] satisfies DuplicateGuardResolution[],
+  };
 }
 
 export function serviceUnavailableResponse(
@@ -112,8 +141,9 @@ export function handleRouteError(error: unknown, context: RouteErrorTelemetryCon
   const info = routeErrorInfo(error);
   captureRouteError(error, info, context);
 
-  if (isDuplicateGuardMatchError(error)) {
-    return NextResponse.json(duplicateGuardErrorPayload(error), { status: info.status });
+  const duplicatePayload = duplicateGuardPayload(error, info);
+  if (duplicatePayload) {
+    return NextResponse.json(duplicatePayload, { status: info.status });
   }
 
   if (isDatabaseUnavailableError(error)) {
