@@ -1,4 +1,4 @@
-import type { CustomerDeploymentAccessRole, CustomerDeploymentCloudProvider, CustomerDeploymentKind, FleetSnapshotKind, MeetingRecorderProvider, MemberRole, ModuleAccessLevel as PrismaModuleAccessLevel, ModuleGrantPrincipalType as PrismaModuleGrantPrincipalType, Prisma } from "@prisma/client";
+import type { CustomerDeploymentAccessRole, CustomerDeploymentCloudProvider, CustomerDeploymentKind, CustomerDeploymentStatus, FleetSnapshotKind, MeetingRecorderProvider, MemberRole, ModuleAccessLevel as PrismaModuleAccessLevel, ModuleGrantPrincipalType as PrismaModuleGrantPrincipalType, Prisma } from "@prisma/client";
 import { decryptSecret, encryptSecret, env, prisma, toInputJson } from "@corgtex/shared";
 import type { AgentActor, AppActor } from "@corgtex/shared";
 import { AppError, invariant } from "./errors";
@@ -3009,8 +3009,13 @@ export type ControlPlaneCustomerSummary = {
   id: string;
   label: string;
   customerSlug: string | null;
+  customerAccountId: string | null;
+  primaryDeploymentId: string | null;
   url: string;
+  customDomain: string | null;
   hasDeployment: boolean;
+  deploymentStatus: CustomerDeploymentStatus | null;
+  environment: string | null;
   cloudProvider: CustomerDeploymentCloudProvider | null;
   providerLabel: string | null;
   providerProjectId: string | null;
@@ -3032,6 +3037,10 @@ export type ControlPlaneCustomerSummary = {
   releaseImageTag: string | null;
   releaseVersion: string | null;
   managedWorkspaceId: string | null;
+  managedWorkspaceSlug: string | null;
+  managedWorkspaceName: string | null;
+  remoteWorkspaceSlug: string | null;
+  remoteWorkspaceId: string | null;
   provisioningStatus: string | null;
   supportOperations: [];
 };
@@ -3040,11 +3049,14 @@ const controlPlaneCustomerSummaryDeploymentSelect = {
   id: true,
   label: true,
   url: true,
+  customDomain: true,
   customerSlug: true,
   customerAccountId: true,
   deploymentStatus: true,
+  environment: true,
   cloudProvider: true,
   remoteWorkspaceSlug: true,
+  remoteWorkspaceId: true,
   provisioningStatus: true,
   releaseImageTag: true,
   releaseVersion: true,
@@ -3077,6 +3089,13 @@ const controlPlaneCustomerSummaryDeploymentSelect = {
   storageBucketName: true,
   createdAt: true,
   updatedAt: true,
+  managedWorkspace: {
+    select: {
+      id: true,
+      slug: true,
+      name: true,
+    },
+  },
 } satisfies Prisma.CustomerDeploymentSelect;
 
 type ControlPlaneCustomerSummaryDeployment = Prisma.CustomerDeploymentGetPayload<{
@@ -3096,6 +3115,7 @@ function controlPlaneCustomerSummaryFromDeployment(params: {
     id: string;
     slug: string;
     displayName: string;
+    primaryDeploymentId: string | null;
     updatedAt: Date;
   } | null;
 }): ControlPlaneCustomerSummaryRow {
@@ -3110,8 +3130,13 @@ function controlPlaneCustomerSummaryFromDeployment(params: {
     id: deployment.id,
     label: deployment.label || params.account?.displayName || customerSlug || deployment.id,
     customerSlug,
+    customerAccountId: deployment.customerAccountId,
+    primaryDeploymentId: params.account?.primaryDeploymentId ?? null,
     url: deployment.url,
+    customDomain: deployment.customDomain,
     hasDeployment: true,
+    deploymentStatus: deployment.deploymentStatus ?? null,
+    environment: deployment.environment ?? null,
     cloudProvider: provider.cloudProvider,
     providerLabel: provider.providerLabel,
     providerProjectId: provider.providerProjectId,
@@ -3133,6 +3158,10 @@ function controlPlaneCustomerSummaryFromDeployment(params: {
     releaseImageTag: deployment.releaseImageTag,
     releaseVersion: deployment.releaseVersion,
     managedWorkspaceId: deployment.managedWorkspaceId,
+    managedWorkspaceSlug: deployment.managedWorkspace?.slug ?? null,
+    managedWorkspaceName: deployment.managedWorkspace?.name ?? null,
+    remoteWorkspaceSlug: deployment.remoteWorkspaceSlug,
+    remoteWorkspaceId: deployment.remoteWorkspaceId,
     provisioningStatus: deployment.provisioningStatus,
     supportOperations: [],
   };
@@ -3145,7 +3174,17 @@ function controlPlaneCustomerSummaryFromDeployment(params: {
     queryValues: [
       summary.label,
       summary.customerSlug,
+      summary.customerAccountId,
+      summary.primaryDeploymentId,
       summary.url,
+      summary.customDomain,
+      summary.deploymentStatus,
+      summary.environment,
+      summary.managedWorkspaceId,
+      summary.managedWorkspaceSlug,
+      summary.managedWorkspaceName,
+      summary.remoteWorkspaceSlug,
+      summary.remoteWorkspaceId,
       summary.lastHealthStatus,
       summary.lastHealthError,
       summary.releaseImageTag,
@@ -3172,8 +3211,13 @@ function controlPlaneCustomerSummaryFromAccount(account: {
     id: account.id,
     label: account.displayName,
     customerSlug: account.slug,
+    customerAccountId: account.id,
+    primaryDeploymentId: null,
     url: "",
+    customDomain: null,
     hasDeployment: false,
+    deploymentStatus: null,
+    environment: null,
     cloudProvider: null,
     providerLabel: null,
     providerProjectId: null,
@@ -3195,6 +3239,10 @@ function controlPlaneCustomerSummaryFromAccount(account: {
     releaseImageTag: null,
     releaseVersion: null,
     managedWorkspaceId: null,
+    managedWorkspaceSlug: null,
+    managedWorkspaceName: null,
+    remoteWorkspaceSlug: null,
+    remoteWorkspaceId: null,
     provisioningStatus: "draft",
     supportOperations: [],
   };
@@ -3223,9 +3271,11 @@ export async function listControlPlaneCustomerSummaries(actor: AppActor, params:
   health?: string | null;
   support?: string | null;
   limit?: number | null;
+  includeAllDeployments?: boolean | null;
+  uncapped?: boolean | null;
 } = {}): Promise<ControlPlaneCustomerSummary[]> {
   await requireControlPlaneAccess(actor);
-  const limit = boundedInteger(params.limit, 500, 1, 500);
+  const limit = params.uncapped === true ? Number.MAX_SAFE_INTEGER : boundedInteger(params.limit, 500, 1, 500);
   const filters = {
     query: params.query?.trim().toLowerCase() ?? "",
     health: params.health?.trim().toLowerCase() ?? "",
@@ -3269,15 +3319,18 @@ export async function listControlPlaneCustomerSummaries(actor: AppActor, params:
     deploymentsByAccount.set(deployment.customerAccountId, accountDeployments);
   }
 
-  const accountRows = accounts.map((account) => {
+  const accountRows = accounts.flatMap((account) => {
     const accountDeployments = deploymentsByAccount.get(account.id) ?? [];
     const deployment = accountDeployments.find((candidate) => candidate.id === account.primaryDeploymentId)
       ?? accountDeployments.find((candidate) => candidate.deploymentStatus === "ACTIVE")
       ?? accountDeployments[0]
       ?? null;
-    return deployment
-      ? controlPlaneCustomerSummaryFromDeployment({ deployment, account })
-      : controlPlaneCustomerSummaryFromAccount(account);
+    const selectedDeployments = params.includeAllDeployments
+      ? accountDeployments
+      : deployment ? [deployment] : [];
+    return selectedDeployments.length > 0
+      ? selectedDeployments.map((candidate) => controlPlaneCustomerSummaryFromDeployment({ deployment: candidate, account }))
+      : [controlPlaneCustomerSummaryFromAccount(account)];
   });
   const orphanedRows = orphanedDeployments.map((deployment) => controlPlaneCustomerSummaryFromDeployment({
     deployment,

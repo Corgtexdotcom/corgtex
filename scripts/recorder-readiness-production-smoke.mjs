@@ -16,6 +16,7 @@ import {
 } from "./lib/release-health-validation.mjs";
 
 const DEFAULT_BASE_URL = "https://app.corgtex.com";
+const DEFAULT_CONTROL_PLANE_URL = "https://ops.corgtex.com";
 const DEFAULT_OUT_DIR = ".artifacts/recorder-readiness-production-smoke";
 const DEFAULT_TARGETS = "managed-recorder-validation";
 const HARD_BLOCKER_GATE_KEYS = new Set(["control_plane", "tenant_config", "vendor", "calendar"]);
@@ -30,19 +31,17 @@ function usage() {
     "  RECORDER_READINESS_SMOKE_DEPLOYMENTS        comma-separated deployment ids, slugs, labels, or managed workspace slugs",
     "  RECORDER_READINESS_SMOKE_EXPECTED_GIT_SHA   optional /api/health release SHA to require",
     "  RECORDER_READINESS_SMOKE_PR_NUMBERS         comma-separated PR numbers covered by this validation run",
-    "  CONTROL_PLANE_AGENT_API_KEY                 required to read readiness from the deployed runtime",
-    "  DATABASE_URL                                required production database connection for target resolution",
+    "  CONTROL_PLANE_URL                           optional control-plane URL; defaults to https://ops.corgtex.com",
+    "  CONTROL_PLANE_AGENT_API_KEY                 required to read inventory and readiness from the control plane",
   ].join("\n");
-}
-
-function required(value, label) {
-  const normalized = String(value ?? "").trim();
-  if (!normalized) throw new Error(`${label} is required.`);
-  return normalized;
 }
 
 export function normalizeBaseUrl(value) {
   return String(value || DEFAULT_BASE_URL).replace(/\/$/, "");
+}
+
+export function normalizeControlPlaneUrl(value) {
+  return String(value || DEFAULT_CONTROL_PLANE_URL).replace(/\/$/, "");
 }
 
 export function normalizeRecorderReadinessTargets(value = DEFAULT_TARGETS) {
@@ -57,16 +56,37 @@ function comparable(value) {
   return String(value ?? "").trim().toLowerCase();
 }
 
-function deploymentLabels(deployment) {
-  return [
-    deployment.id,
-    deployment.label,
-    deployment.customerSlug,
-    deployment.managedWorkspaceId,
-    deployment.managedWorkspace?.id,
-    deployment.managedWorkspace?.slug,
-    deployment.managedWorkspace?.name,
-  ].map(comparable).filter(Boolean);
+function comparableUrlParts(value) {
+  const normalized = String(value ?? "").trim();
+  if (!normalized) return [];
+  try {
+    const url = new URL(normalized.includes("://") ? normalized : `https://${normalized}`);
+    return [
+      url.origin,
+      url.hostname,
+      url.hostname.replace(/\.corgtex\.com$/, ""),
+      url.href.replace(/\/$/, ""),
+    ].map(comparable).filter(Boolean);
+  } catch {
+    return [normalized.replace(/^https?:\/\//i, "").replace(/\/$/, "")].map(comparable).filter(Boolean);
+  }
+}
+
+function fieldMatchesTarget(target, ...values) {
+  const normalizedTarget = comparable(target);
+  return values.some((value) => comparable(value) === normalizedTarget);
+}
+
+function urlFieldMatchesTarget(target, ...values) {
+  const normalizedTarget = comparable(target);
+  const targetParts = new Set(comparableUrlParts(target));
+  return values.some((value) => {
+    const valueParts = new Set([
+      comparable(value),
+      ...comparableUrlParts(value),
+    ].filter(Boolean));
+    return valueParts.has(normalizedTarget) || [...targetParts].some((part) => valueParts.has(part));
+  });
 }
 
 export function deploymentMatchesRecorderReadinessTarget(deployment, target) {
@@ -76,15 +96,20 @@ export function deploymentMatchesRecorderReadinessTarget(deployment, target) {
 export function recorderReadinessDeploymentMatchScore(deployment, target) {
   const normalizedTarget = comparable(target);
   if (!normalizedTarget) return 0;
-  if (comparable(deployment.id) === normalizedTarget) return 1_000;
-  if (comparable(deployment.managedWorkspaceId) === normalizedTarget || comparable(deployment.managedWorkspace?.id) === normalizedTarget) return 950;
-  if (comparable(deployment.managedWorkspace?.slug) === normalizedTarget) return 925;
-  if (comparable(deployment.label) === normalizedTarget) return 900;
-  if (comparable(deployment.managedWorkspace?.name) === normalizedTarget) return 875;
-  if (comparable(deployment.customerSlug) !== normalizedTarget) return 0;
+  if (fieldMatchesTarget(target, deployment.id)) return 1_000;
+  if (fieldMatchesTarget(target, deployment.managedWorkspaceId, deployment.managedWorkspace?.id)) return 950;
+  if (fieldMatchesTarget(target, deployment.managedWorkspaceSlug, deployment.managedWorkspace?.slug)) return 925;
+  if (fieldMatchesTarget(target, deployment.label)) return 900;
+  if (fieldMatchesTarget(target, deployment.managedWorkspaceName, deployment.managedWorkspace?.name)) return 875;
+  if (fieldMatchesTarget(target, deployment.remoteWorkspaceId)) return 850;
+  if (fieldMatchesTarget(target, deployment.remoteWorkspaceSlug)) return 825;
+  if (urlFieldMatchesTarget(target, deployment.customDomain)) return 800;
+  if (urlFieldMatchesTarget(target, deployment.url)) return 775;
+  if (!fieldMatchesTarget(target, deployment.customerSlug)) return 0;
 
   let score = 700;
-  if (deployment.customerAccount?.primaryDeploymentId === deployment.id) score += 200;
+  const primaryDeploymentId = deployment.primaryDeploymentId ?? deployment.customerAccount?.primaryDeploymentId ?? null;
+  if (primaryDeploymentId === deployment.id) score += 200;
   if (deployment.deploymentStatus === "ACTIVE") score += 50;
   if (comparable(deployment.environment) === "production") score += 25;
   return score;
@@ -180,8 +205,8 @@ export function recorderReadinessValidationOutcome(recorder) {
 function tenantForDeployment(deployment, fallbackTarget) {
   return {
     id: deployment?.managedWorkspaceId ?? deployment?.managedWorkspace?.id ?? deployment?.id ?? null,
-    slug: deployment?.managedWorkspace?.slug ?? deployment?.customerSlug ?? fallbackTarget,
-    label: deployment?.label ?? deployment?.managedWorkspace?.name ?? fallbackTarget,
+    slug: deployment?.managedWorkspaceSlug ?? deployment?.managedWorkspace?.slug ?? deployment?.customerSlug ?? fallbackTarget,
+    label: deployment?.label ?? deployment?.managedWorkspaceName ?? deployment?.managedWorkspace?.name ?? fallbackTarget,
   };
 }
 
@@ -263,7 +288,7 @@ export function sanitizeRecorderReadinessForArtifact(readiness) {
 function textContentJson(body) {
   const text = body?.result?.content?.find?.((item) => item?.type === "text")?.text;
   if (!text) {
-    throw new Error("Control Plane readiness response did not include JSON text content.");
+    throw new Error("Control Plane response did not include JSON text content.");
   }
   return JSON.parse(text);
 }
@@ -283,9 +308,11 @@ export class RecorderReadinessProductionSmoke {
     targets = normalizeRecorderReadinessTargets(process.env.RECORDER_READINESS_SMOKE_DEPLOYMENTS),
     expectedGitSha = process.env.RECORDER_READINESS_SMOKE_EXPECTED_GIT_SHA || process.env.PRODUCTION_VALIDATION_EXPECTED_GIT_SHA || null,
     prNumbers = parseValidationPrNumbers(process.env.RECORDER_READINESS_SMOKE_PR_NUMBERS || process.env.PRODUCTION_VALIDATION_PR_NUMBERS || ""),
+    controlPlaneUrl = process.env.CONTROL_PLANE_URL || DEFAULT_CONTROL_PLANE_URL,
     controlPlaneToken = process.env.CONTROL_PLANE_AGENT_API_KEY || null,
   } = {}) {
     this.baseUrl = normalizeBaseUrl(baseUrl);
+    this.controlPlaneUrl = normalizeControlPlaneUrl(controlPlaneUrl);
     this.outDir = path.resolve(outDir);
     this.targets = Array.isArray(targets)
       ? normalizeRecorderReadinessTargets(targets.join(","))
@@ -304,6 +331,7 @@ export class RecorderReadinessProductionSmoke {
       metadata: {
         script: "recorder-readiness-production-smoke",
         targets: this.targets,
+        controlPlaneUrl: this.controlPlaneUrl,
       },
     });
   }
@@ -330,8 +358,11 @@ export class RecorderReadinessProductionSmoke {
           id: deployment.id,
           label: deployment.label,
           customerSlug: deployment.customerSlug,
+          url: deployment.url ?? null,
+          customDomain: deployment.customDomain ?? null,
+          remoteWorkspaceSlug: deployment.remoteWorkspaceSlug ?? null,
           managedWorkspaceId: deployment.managedWorkspaceId,
-          managedWorkspaceSlug: deployment.managedWorkspace?.slug ?? null,
+          managedWorkspaceSlug: deployment.managedWorkspaceSlug ?? deployment.managedWorkspace?.slug ?? null,
           supportConnectorStatus: deployment.supportConnectorStatus ?? null,
         }
         : null,
@@ -353,35 +384,8 @@ export class RecorderReadinessProductionSmoke {
     if (hard) this.hardFailure = new Error(blocker);
   }
 
-  async loadDeployments(prisma) {
-    return prisma.customerDeployment.findMany({
-      orderBy: { label: "asc" },
-      select: {
-        id: true,
-        label: true,
-        customerSlug: true,
-        managedWorkspaceId: true,
-        supportConnectorStatus: true,
-        deploymentStatus: true,
-        environment: true,
-        customerAccount: {
-          select: {
-            primaryDeploymentId: true,
-          },
-        },
-        managedWorkspace: {
-          select: {
-            id: true,
-            slug: true,
-            name: true,
-          },
-        },
-      },
-    });
-  }
-
-  async fetchReadinessFromDeployedRuntime(deploymentId) {
-    const response = await fetch(`${this.baseUrl}/api/control-plane/mcp`, {
+  async fetchControlPlaneTool(name, args = {}) {
+    const response = await fetch(`${this.controlPlaneUrl}/api/control-plane/mcp`, {
       method: "POST",
       headers: {
         authorization: `Bearer cp-${this.controlPlaneToken}`,
@@ -389,27 +393,38 @@ export class RecorderReadinessProductionSmoke {
       },
       body: JSON.stringify({
         jsonrpc: "2.0",
-        id: `${this.runId}-${deploymentId}`,
+        id: `${this.runId}-${name}`,
         method: "tools/call",
         params: {
-          name: "check_meeting_operations_readiness",
-          arguments: { deploymentId },
+          name,
+          arguments: args,
         },
       }),
     });
     if (!response.ok) {
-      throw new Error(`Control Plane readiness request returned HTTP ${response.status}.`);
+      throw new Error(`Control Plane ${name} request returned HTTP ${response.status}.`);
     }
     const body = await response.json();
     if (body.error) {
-      throw new Error(body.error.message ?? "Control Plane readiness request failed.");
+      throw new Error(body.error.message ?? `Control Plane ${name} request failed.`);
     }
     return textContentJson(body);
   }
 
+  async loadDeployments() {
+    const deployments = await this.fetchControlPlaneTool("list_customers", { includeAllDeployments: true, uncapped: true });
+    if (!Array.isArray(deployments)) {
+      throw new Error("Control Plane list_customers response did not return an array.");
+    }
+    return deployments;
+  }
+
+  async fetchReadinessFromControlPlane(deploymentId) {
+    return this.fetchControlPlaneTool("check_meeting_operations_readiness", { deploymentId });
+  }
+
   async run() {
     await mkdir(this.outDir, { recursive: true });
-    let prisma = null;
     const detailsPath = path.join(this.outDir, "recorder-readiness-production-smoke.json");
     recordArtifact(this.validationRun, {
       type: "readiness-json",
@@ -427,18 +442,12 @@ export class RecorderReadinessProductionSmoke {
         });
       }
 
-      if (!this.hardFailure && !process.env.DATABASE_URL) {
-        this.recordBlockedForAllTargets("PRODUCTION_DATABASE_URL/DATABASE_URL is required for read-only control-plane recorder readiness.");
-      }
-
       if (!this.hardFailure && !this.controlPlaneToken) {
-        this.recordBlockedForAllTargets("CONTROL_PLANE_AGENT_API_KEY is required to read recorder readiness from the deployed runtime.");
+        this.recordBlockedForAllTargets("CONTROL_PLANE_AGENT_API_KEY is required to read recorder readiness from the control plane.");
       }
 
       if (!this.hardFailure && this.validationRun.results.length === 0) {
-        const shared = await import("@corgtex/shared");
-        prisma = shared.prisma;
-        const deployments = await this.loadDeployments(prisma);
+        const deployments = await this.loadDeployments();
         const resolved = resolveRecorderReadinessTargets(deployments, this.targets);
 
         for (const item of resolved) {
@@ -446,13 +455,13 @@ export class RecorderReadinessProductionSmoke {
             this.recordResult({
               target: item.target,
               result: "blocked",
-              blocker: `No CustomerDeployment matched recorder readiness target "${item.target}".`,
+              blocker: `No control-plane deployment matched recorder readiness target "${item.target}". See the private readiness artifact for available identifiers.`,
             });
             continue;
           }
 
           try {
-            const readiness = await this.fetchReadinessFromDeployedRuntime(item.deployment.id);
+            const readiness = await this.fetchReadinessFromControlPlane(item.deployment.id);
             const outcome = recorderReadinessValidationOutcome(readiness.recorder);
             this.recordResult({
               target: item.target,
@@ -485,6 +494,7 @@ export class RecorderReadinessProductionSmoke {
         runId: this.runId,
         targets: this.targets,
         expectedGitSha: this.expectedGitSha,
+        controlPlaneUrl: this.controlPlaneUrl,
         details: this.details,
         error: this.hardFailure ? { message: this.hardFailure.message, stack: this.hardFailure.stack } : null,
       }, null, 2)}\n`);
@@ -492,9 +502,6 @@ export class RecorderReadinessProductionSmoke {
         jsonFileName: "recorder-readiness-production-smoke.matrix.json",
         markdownFileName: "recorder-readiness-production-smoke.report.md",
       });
-      if (typeof prisma?.$disconnect === "function") {
-        await prisma.$disconnect();
-      }
     }
 
     if (this.hardFailure) throw this.hardFailure;

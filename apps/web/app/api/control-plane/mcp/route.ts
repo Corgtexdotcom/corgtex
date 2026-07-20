@@ -71,6 +71,8 @@ const tools = [
         health: { type: "string" },
         support: { type: "string" },
         limit: { type: "number" },
+        includeAllDeployments: { type: "boolean" },
+        uncapped: { type: "boolean" },
       },
     },
   },
@@ -814,6 +816,8 @@ export async function POST(request: NextRequest) {
         health: argOptionalString(args, "health"),
         support: argOptionalString(args, "support"),
         limit: argNumber(args, "limit", 500),
+        includeAllDeployments: argBoolean(args, "includeAllDeployments", false),
+        uncapped: argBoolean(args, "uncapped", false),
       })));
     }
     if (name === "list_self_serve_customers") {

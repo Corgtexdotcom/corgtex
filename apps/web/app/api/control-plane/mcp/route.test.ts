@@ -183,6 +183,10 @@ describe("/api/control-plane/mcp", () => {
       lastReleaseCheck: new Date("2026-06-01T10:01:00.000Z"),
       releaseImageTag: "sha-1",
       releaseVersion: "main-2026-06-01",
+      customerAccountId: "customer-1",
+      primaryDeploymentId: "deployment-1",
+      deploymentStatus: "ACTIVE",
+      environment: "production",
       managedWorkspaceId: "ws-1",
       provisioningStatus: "active",
       supportOperations: [],
@@ -195,7 +199,7 @@ describe("/api/control-plane/mcp", () => {
       method: "tools/call",
       params: {
         name: "list_customers",
-        arguments: { query: "acme", health: "ok", support: "connected", limit: 42 },
+        arguments: { query: "acme", health: "ok", support: "connected", limit: 42, includeAllDeployments: true, uncapped: true },
       },
     }) as never);
     const body = await response.json();
@@ -212,6 +216,8 @@ describe("/api/control-plane/mcp", () => {
       health: "ok",
       support: "connected",
       limit: 42,
+      includeAllDeployments: true,
+      uncapped: true,
     });
     expect(mocks.listControlPlaneDeployments).not.toHaveBeenCalled();
   });
