@@ -72,24 +72,31 @@ async function applyDocumentDuplicateUpdate(actor: AppActor, params: CreateDocum
       },
     });
 
+    const sourceRequeueRows = mergedText ? await tx.brainSource.findMany({
+      where: {
+        workspaceId: params.workspaceId,
+        sourceType: { in: ["DOC", "FILE_UPLOAD"] },
+        metadata: { path: ["documentId"], equals: existing.id },
+      },
+      select: { id: true },
+    }) : [];
+
     if (mergedText) {
-      await tx.brainSource.updateMany({
-        where: {
-          workspaceId: params.workspaceId,
-          sourceType: { in: ["DOC", "FILE_UPLOAD"] },
-          metadata: { path: ["documentId"], equals: existing.id },
-        },
-        data: {
-          content: [updated.title, mergedText].join("\n\n"),
-          absorbedAt: null,
-          metadata: {
-            documentId: updated.id,
-            storageKey: updated.storageKey,
-            mimeType: updated.mimeType,
-            duplicateGuardUpdatedAt: new Date().toISOString(),
-          } as Prisma.InputJsonValue,
-        },
-      });
+      for (const sourceRow of sourceRequeueRows) {
+        await tx.brainSource.update({
+          where: { id: sourceRow.id },
+          data: {
+            content: [updated.title, mergedText].join("\n\n"),
+            absorbedAt: null,
+            metadata: {
+              documentId: updated.id,
+              storageKey: updated.storageKey,
+              mimeType: updated.mimeType,
+              duplicateGuardUpdatedAt: new Date().toISOString(),
+            } as Prisma.InputJsonValue,
+          },
+        });
+      }
     }
 
     await tx.auditLog.create({
@@ -111,6 +118,13 @@ async function applyDocumentDuplicateUpdate(actor: AppActor, params: CreateDocum
         aggregateId: updated.id,
         payload: { documentId: updated.id, title: updated.title, source: updated.source },
       },
+      ...sourceRequeueRows.map((sourceRow) => ({
+        workspaceId: params.workspaceId,
+        type: "brain-source.created" as const,
+        aggregateType: "BrainSource",
+        aggregateId: sourceRow.id,
+        payload: { sourceId: sourceRow.id },
+      })),
     ]);
 
     return updated;

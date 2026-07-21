@@ -278,6 +278,7 @@ describe("brain source ingestion", () => {
       sourceType: "DOC",
       tier: 1,
       title: "Policy",
+      externalId: null,
       content: "Policy text",
       ingestionGuidanceMd: null,
       metadata: {},
@@ -299,6 +300,7 @@ describe("brain source ingestion", () => {
       sourceType: "DOC",
       tier: 1,
       title: "Policy",
+      externalId: "source-external-1",
       content: "New policy detail",
       duplicateGuard: {
         resolution: "update_existing",
@@ -310,6 +312,7 @@ describe("brain source ingestion", () => {
       where: { id: "source-existing" },
       data: expect.objectContaining({
         absorbedAt: null,
+        externalId: "source-external-1",
       }),
     }));
     expect(prismaMock.brainSource.create).not.toHaveBeenCalled();

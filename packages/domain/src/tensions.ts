@@ -233,6 +233,7 @@ async function applyTensionDuplicateUpdate(actor: AppActor, params: CreateTensio
   if (!existing.circleId && params.circleId) updateParams.circleId = params.circleId;
   if (!existing.assigneeMemberId && params.assigneeMemberId) updateParams.assigneeMemberId = params.assigneeMemberId;
   if (!existing.raisedByMemberId && params.raisedByMemberId) updateParams.raisedByMemberId = params.raisedByMemberId;
+  if (!existing.proposalId && params.proposalId) updateParams.proposalId = params.proposalId;
   return Object.keys(updateParams).length > 2 ? updateTension(actor, updateParams) : existing;
 }
 
@@ -364,6 +365,7 @@ export async function updateTension(actor: AppActor, params: {
   circleId?: string | null;
   assigneeMemberId?: string | null;
   raisedByMemberId?: string | null;
+  proposalId?: string | null;
   priority?: number;
   isPrivate?: boolean;
   evidenceDocumentIds?: string[] | null;
@@ -388,6 +390,7 @@ export async function updateTension(actor: AppActor, params: {
       || params.circleId !== undefined
       || params.assigneeMemberId !== undefined
       || params.raisedByMemberId !== undefined
+      || params.proposalId !== undefined
       || params.priority !== undefined;
     if (editsContent) {
       if (tension.status === "DRAFT") {
@@ -442,10 +445,13 @@ export async function updateTension(actor: AppActor, params: {
     if (params.raisedByMemberId !== undefined) {
       data.raisedByMemberId = await resolveRaisedByMemberId(tx, params.workspaceId, params.raisedByMemberId);
     }
+    if (params.proposalId !== undefined) {
+      data.proposalId = await resolveWorkspaceProposalLink(tx, actor, membership, params.workspaceId, params.proposalId);
+    }
     if (params.priority !== undefined) data.priority = params.priority;
     if (params.isPrivate !== undefined) data.isPrivate = params.isPrivate;
 
-    const contentFields = ["title", "bodyMd", "circleId", "assigneeMemberId", "raisedByMemberId", "priority"];
+    const contentFields = ["title", "bodyMd", "circleId", "assigneeMemberId", "raisedByMemberId", "proposalId", "priority"];
     const changedFields = changedDataFields(tension as unknown as Record<string, unknown>, data)
       .filter((field) => contentFields.includes(field));
     if (changedFields.length > 0) {
@@ -463,6 +469,7 @@ export async function updateTension(actor: AppActor, params: {
           "circleId",
           "assigneeMemberId",
           "raisedByMemberId",
+          "proposalId",
           "priority",
           "status",
           "version",

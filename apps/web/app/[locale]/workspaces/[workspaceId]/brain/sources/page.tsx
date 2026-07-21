@@ -1,8 +1,9 @@
 import { duplicateGuardErrorPayload, isDuplicateGuardMatchError, listSources } from "@corgtex/domain";
 import { requirePageActor } from "@/lib/auth";
-import { ingestSourceAction, uploadBrainSourceFileAction } from "../actions";
+import { ingestSourceAction } from "../actions";
 import { getTranslations } from "next-intl/server";
 import { DuplicateGuardForm, type DuplicateGuardFormState } from "../../add/DuplicateGuardForm";
+import { BrainSourceFileUploadForm } from "./BrainSourceFileUploadForm";
 
 export const dynamic = "force-dynamic";
 
@@ -28,17 +29,6 @@ export default async function BrainSourcesPage({
     return null;
   }
 
-  async function uploadSourceFileAndReturn(_state: DuplicateGuardFormState, formData: FormData): Promise<DuplicateGuardFormState> {
-    "use server";
-    try {
-      await uploadBrainSourceFileAction(formData);
-    } catch (error) {
-      if (isDuplicateGuardMatchError(error)) return duplicateGuardErrorPayload(error);
-      throw error;
-    }
-    return null;
-  }
-
   return (
     <>
       <div className="ws-page-header">
@@ -48,18 +38,15 @@ export default async function BrainSourcesPage({
 
       <section className="ws-section stack">
         <h2>{t("ingestRawFiles")}</h2>
-        <DuplicateGuardForm action={uploadSourceFileAndReturn} encType="multipart/form-data" className="stack panel">
-          <input type="hidden" name="workspaceId" value={workspaceId} />
-          <label>
-            {t("fileToIngest")}
-            <input type="file" name="file" required />
-          </label>
-          <label>
-            {t("labelTitle")}
-            <input name="title" placeholder={t("placeholderSourceTitle")} />
-          </label>
-          <button type="submit">{t("uploadAndMap")}</button>
-        </DuplicateGuardForm>
+        <BrainSourceFileUploadForm
+          workspaceId={workspaceId}
+          labels={{
+            fileToIngest: t("fileToIngest"),
+            labelTitle: t("labelTitle"),
+            placeholderSourceTitle: t("placeholderSourceTitle"),
+            uploadAndMap: t("uploadAndMap"),
+          }}
+        />
 
         <h2>{t("ingestTextSource")}</h2>
         <DuplicateGuardForm action={ingestSourceAndReturn} className="stack panel">

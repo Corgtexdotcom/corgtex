@@ -35,6 +35,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
     const { workspaceId } = await params;
     await checkApiDemoGuard(workspaceId);
     const contentType = request.headers.get("content-type") ?? "";
+    const wantsJson = (request.headers.get("accept") ?? "").includes("application/json");
 
     if (!contentType.includes("multipart/form-data")) {
       throw new AppError(400, "INVALID_INPUT", "Must be multipart/form-data");
@@ -64,6 +65,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
       duplicateGuard: duplicateGuardFromFormData(formData),
     });
 
+    if (wantsJson) return NextResponse.json({ status: "ok" });
     return NextResponse.redirect(new URL(`/workspaces/${workspaceId}/brain/sources`, request.url), 303);
   } catch (error) {
     return handleRouteError(error);

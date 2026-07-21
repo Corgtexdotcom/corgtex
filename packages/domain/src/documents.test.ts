@@ -11,6 +11,8 @@ const prismaMock = vi.hoisted(() => {
     },
     brainSource: {
       create: vi.fn(),
+      findMany: vi.fn(),
+      update: vi.fn(),
       updateMany: vi.fn(),
     },
     auditLog: {
@@ -75,6 +77,8 @@ describe("createDocument", () => {
       sourceType: "DOC",
       tier: 2,
     });
+    prismaMock.brainSource.findMany.mockResolvedValue([]);
+    prismaMock.brainSource.update.mockResolvedValue({});
     prismaMock.brainSource.updateMany.mockResolvedValue({ count: 1 });
     prismaMock.auditLog.create.mockResolvedValue({});
     appendEventsMock.mockResolvedValue(undefined);
@@ -256,6 +260,7 @@ describe("createDocument", () => {
     };
     prismaMock.document.findMany.mockResolvedValueOnce([existingDocument]);
     prismaMock.document.findFirst.mockResolvedValueOnce(existingDocument);
+    prismaMock.brainSource.findMany.mockResolvedValueOnce([{ id: "source-doc" }, { id: "source-file" }]);
     prismaMock.document.update.mockResolvedValueOnce({
       ...existingDocument,
       textContent: "The critical path runs through finance approval.\n\n---\nAdditional duplicate upload context:\nFinance approval is still the blocker.",
@@ -276,16 +281,25 @@ describe("createDocument", () => {
       },
     });
 
-    expect(prismaMock.brainSource.updateMany).toHaveBeenCalledWith(expect.objectContaining({
+    expect(prismaMock.brainSource.findMany).toHaveBeenCalledWith(expect.objectContaining({
       where: expect.objectContaining({
         workspaceId: "workspace-1",
         sourceType: { in: ["DOC", "FILE_UPLOAD"] },
         metadata: { path: ["documentId"], equals: "document-existing" },
       }),
+      select: { id: true },
+    }));
+    expect(prismaMock.brainSource.update).toHaveBeenCalledWith(expect.objectContaining({
+      where: { id: "source-doc" },
       data: expect.objectContaining({
         absorbedAt: null,
       }),
     }));
+    expect(appendEventsMock).toHaveBeenCalledWith(prismaMock, expect.arrayContaining([
+      expect.objectContaining({ type: "document.updated", aggregateId: "document-existing" }),
+      expect.objectContaining({ type: "brain-source.created", aggregateId: "source-doc", payload: { sourceId: "source-doc" } }),
+      expect.objectContaining({ type: "brain-source.created", aggregateId: "source-file", payload: { sourceId: "source-file" } }),
+    ]));
     expect(prismaMock.document.create).not.toHaveBeenCalled();
   });
 });
