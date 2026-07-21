@@ -372,7 +372,17 @@ describe("recorder readiness production smoke helpers", () => {
       durationMinutes: 45,
       provider: "RECALL_AI",
     });
-    expect(() => normalizeTempMeetingSetup({ enabled: true })).toThrow("TEMP_MEETING_URL");
+    expect(normalizeTempMeetingSetup({
+      enabled: true,
+      joinAt: "2099-07-20T06:30:00.000Z",
+    })).toMatchObject({
+      enabled: true,
+      meetingUrl: "",
+      joinAt: new Date("2099-07-20T06:30:00.000Z"),
+      scheduledEndAt: new Date("2099-07-20T07:00:00.000Z"),
+      durationMinutes: 30,
+      provider: null,
+    });
   });
 
   it("strips meeting metadata from persisted readiness artifacts", () => {
@@ -584,6 +594,105 @@ describe("recorder readiness production smoke helpers", () => {
         "meetings.archive",
       ]);
       expect(JSON.stringify(smoke.validationRun)).not.toContain("teams.microsoft.com");
+    } finally {
+      global.fetch = originalFetch;
+    }
+  });
+
+  it("keeps read-only target proof when temp setup is enabled without a meeting URL", async () => {
+    const originalFetch = global.fetch;
+    const readyReadiness = {
+      recorder: recorderWithGates(),
+    };
+    const setupNeededReadiness = {
+      recorder: recorderWithGates({
+        calendar: {
+          key: "calendar",
+          label: "Recording schedule",
+          status: "blocked",
+          detail: "No upcoming Corgtex scheduled meetings found.",
+          checks: [{ key: "recording_schedule", label: "Corgtex recorder schedule", status: "blocked", detail: "Add the meeting to Corgtex." }],
+        },
+      }),
+    };
+    const calls = [];
+    global.fetch = vi.fn(async (url, init) => {
+      if (String(url) === "https://app.corgtex.com/api/health") {
+        return new Response(JSON.stringify({
+          release: {
+            gitSha: "current-sha",
+            drift: { gitSha: false, imageTag: false, version: false, details: [] },
+            configured: { gitSha: "current-sha" },
+          },
+        }), { status: 200, headers: { "content-type": "application/json" } });
+      }
+      const body = JSON.parse(String(init.body));
+      const toolName = body.params.name;
+      calls.push({ toolName, args: body.params.arguments });
+      if (toolName === "list_customers") {
+        return controlPlaneToolResponse([
+          {
+            id: "dep-ready",
+            label: "Ready Test Deployment",
+            customerSlug: "ready-recorder-test",
+            customDomain: "ready-recorder.example.test",
+            supportConnectorStatus: "connected",
+          },
+          {
+            id: "dep-needs-setup",
+            label: "Setup Needed Test Deployment",
+            customerSlug: "setup-recorder-test",
+            customDomain: "setup-recorder.example.test",
+            supportConnectorStatus: "connected",
+          },
+        ]);
+      }
+      if (toolName === "check_meeting_operations_readiness") {
+        return controlPlaneToolResponse(
+          body.params.arguments.deploymentId === "dep-ready"
+            ? readyReadiness
+            : setupNeededReadiness,
+        );
+      }
+      throw new Error(`Unexpected fetch ${toolName}`);
+    });
+
+    try {
+      const smoke = new RecorderReadinessProductionSmoke({
+        baseUrl: "https://app.corgtex.com",
+        controlPlaneUrl: "https://ops.example",
+        outDir: ".artifacts/test-recorder-lazy-temp-url",
+        targets: ["ready-recorder.example.test", "setup-recorder.example.test"],
+        expectedGitSha: "current-sha",
+        prNumbers: [757],
+        controlPlaneToken: "token",
+        tempMeetingSetup: normalizeTempMeetingSetup({
+          enabled: true,
+          joinAt: "2099-07-20T06:30:00.000Z",
+        }),
+      });
+
+      await smoke.run();
+
+      expect(smoke.validationRun.status).toBe("blocked");
+      expect(smoke.validationRun.results).toEqual([
+        expect.objectContaining({
+          tenant: expect.objectContaining({ label: "Ready Test Deployment" }),
+          result: "pass",
+          blocker: null,
+        }),
+        expect.objectContaining({
+          tenant: expect.objectContaining({ label: "Setup Needed Test Deployment" }),
+          result: "blocked",
+          blocker: "RECORDER_READINESS_SMOKE_TEMP_MEETING_URL is required when temporary recorder setup is needed.",
+        }),
+      ]);
+      expect(calls.map((call) => call.toolName)).toEqual([
+        "list_customers",
+        "check_meeting_operations_readiness",
+        "check_meeting_operations_readiness",
+      ]);
+      expect(calls.some((call) => call.toolName === "run_customer_support_operation")).toBe(false);
     } finally {
       global.fetch = originalFetch;
     }
