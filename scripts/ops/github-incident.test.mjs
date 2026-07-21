@@ -122,9 +122,28 @@ describe("github-incident resolved issue sync", () => {
     expect(result.state.issues.slice(0, 100).every((item) => !item.closed)).toBe(true);
     expect(result.state.issues[100].closed).toBe(true);
     const apiCalls = result.state.calls.filter((call) => call[0] === "api" && call.includes("repos/{owner}/{repo}/issues"));
-    expect(apiCalls.length).toBe(2);
-    expect(apiCalls[0]).toContain("page=1");
-    expect(apiCalls[1]).toContain("page=2");
+    const incidentCalls = apiCalls.filter((call) => call.includes("labels=ops-incident"));
+    const autoFixCalls = apiCalls.filter((call) => call.includes("labels=ops-auto-fix"));
+    expect(incidentCalls.length).toBe(2);
+    expect(autoFixCalls.length).toBe(2);
+    expect(incidentCalls[0]).toContain("page=1");
+    expect(incidentCalls[1]).toContain("page=2");
+    expect(autoFixCalls[0]).toContain("page=1");
+    expect(autoFixCalls[1]).toContain("page=2");
+  });
+
+  it("includes legacy auto-fix-only issues in resolved sync", async () => {
+    const staleDedupe = "legacy-autofix-dedupe";
+    const staleToken = opsToken(staleDedupe);
+    const result = await runWithFakeGh(githubIncidentPath, ["--sync-resolved"], [], {
+      issues: [
+        issue(117, `[${staleToken}] P2 web: legacy stale`, ["ops-auto-fix"], staleDedupe),
+      ],
+    });
+
+    expect(result.code).toBe(0);
+    expect(result.state.issues[0].closed).toBe(true);
+    expect(result.state.calls).toContainEqual(expect.arrayContaining(["api", "-f", "labels=ops-auto-fix"]));
   });
 
   it("leaves open issues untouched when resolved sync is not requested", async () => {
@@ -159,6 +178,74 @@ describe("github-incident resolved issue sync", () => {
     expect(result.state.issues).toHaveLength(1);
     expect(result.state.issues[0].comments[0]).toContain("Repeated signal");
     expect(result.state.calls).toContainEqual(expect.arrayContaining(["issue", "list", "--label", "ops-incident"]));
+    expect(result.state.calls.some((call) => call[0] === "issue" && call[1] === "create")).toBe(false);
+  });
+
+  it("dedupes legacy auto-fix incidents that lack ops-incident", async () => {
+    const dedupeKey = "legacy-builder:worker:failed";
+    const token = opsToken(dedupeKey);
+    const result = await runWithFakeGh(githubIncidentPath, [], [
+      {
+        dedupeKey,
+        severity: "P1",
+        service: "worker",
+        status: "failed",
+        summary: "Worker is failing",
+      },
+    ], {
+      issues: [
+        issue(17, `[${token}] P1 worker: Worker is failing`, ["ops-auto-fix"], dedupeKey),
+      ],
+    });
+
+    expect(result.code, result.stderr).toBe(0);
+    expect(result.state.issues).toHaveLength(1);
+    expect(result.state.issues[0].comments[0]).toContain("Repeated signal");
+    expect(labelNames(result.state.issues[0])).toEqual(expect.arrayContaining([
+      "ops-auto-fix",
+      "ops-incident",
+      "severity-p1",
+      "service-worker",
+    ]));
+    expect(result.state.calls).toContainEqual(expect.arrayContaining(["issue", "list", "--label", "ops-auto-fix"]));
+    expect(result.state.calls.some((call) => call[0] === "issue" && call[1] === "create")).toBe(false);
+  });
+
+  it("reconciles advisory issue routing labels when a blocking signal reuses the dedupe key", async () => {
+    const dedupeKey = "observation:azure_monitor:corgtex_worker_error:corgtex:tick:WORKER_TICK_ERROR:shared-release";
+    const token = opsToken(dedupeKey);
+    const result = await runWithFakeGh(githubIncidentPath, [], [
+      {
+        dedupeKey,
+        severity: "P2",
+        service: "post-deploy-observation",
+        status: "failed",
+        summary: "Production worker error",
+      },
+    ], {
+      issues: [
+        issue(18, `[${token}] P2 post-deploy-observation: Production worker error`, ["ops-advisory", "ops-incident"], dedupeKey),
+      ],
+    });
+
+    expect(result.code, result.stderr).toBe(0);
+    expect(result.state.issues).toHaveLength(1);
+    expect(labelNames(result.state.issues[0])).toEqual(expect.arrayContaining([
+      "ops-auto-fix",
+      "ops-incident",
+      "severity-p2",
+      "service-post-deploy-observation",
+    ]));
+    expect(labelNames(result.state.issues[0])).not.toContain("ops-advisory");
+    expect(result.state.calls).toContainEqual(expect.arrayContaining([
+      "issue",
+      "edit",
+      "18",
+      "--add-label",
+      "ops-auto-fix,severity-p2,service-post-deploy-observation",
+      "--remove-label",
+      "ops-advisory",
+    ]));
     expect(result.state.calls.some((call) => call[0] === "issue" && call[1] === "create")).toBe(false);
   });
 
@@ -376,6 +463,10 @@ function issue(number, title, labels = ["ops-auto-fix"], dedupeKey = null) {
   };
 }
 
+function labelNames(record) {
+  return record.labels.map((label) => label.name);
+}
+
 async function runWithFakeGh(scriptPath, args, input, options = {}) {
   const tmp = await mkdtemp(path.join(tmpdir(), "corgtex-gh-incident-"));
   const statePath = path.join(tmp, "state.json");
@@ -473,9 +564,11 @@ if (argv[0] === "issue" && argv[1] === "list") {
   }
   const search = argValue("--search");
   const token = search ? search.split(" ")[0] : null;
-  const issues = token
-    ? state.issues.filter((issue) => issue.title.includes(token))
-    : state.issues.filter((issue) => !issue.closed);
+  const label = argValue("--label");
+  const issues = state.issues
+    .filter((issue) => !issue.closed)
+    .filter((issue) => !label || issue.labels.some((item) => item.name === label))
+    .filter((issue) => !token || issue.title.includes(token));
   const limitedIssues = state.issueListLimit ? issues.slice(0, state.issueListLimit) : issues;
   save();
   output(JSON.stringify(limitedIssues.map((issue) => ({
@@ -498,8 +591,11 @@ if (argv[0] === "api" && argv.includes("repos/{owner}/{repo}/issues")) {
   const perPageArg = argv.find((arg) => arg.startsWith("per_page="));
   const perPage = perPageArg ? Number(perPageArg.split("=")[1]) : 100;
   const effectivePerPage = state.issueListLimit ?? perPage;
+  const labelsArg = argv.find((arg) => arg.startsWith("labels="));
+  const labels = labelsArg ? labelsArg.split("=")[1].split(",").filter(Boolean) : [];
   const issues = state.issues
     .filter((issue) => !issue.closed)
+    .filter((issue) => labels.length === 0 || labels.some((label) => issue.labels.some((item) => item.name === label)))
     .map((issue) => ({
       number: issue.number,
       title: issue.title,
@@ -510,6 +606,24 @@ if (argv[0] === "api" && argv.includes("repos/{owner}/{repo}/issues")) {
   const start = (page - 1) * effectivePerPage;
   save();
   output(JSON.stringify(issues.slice(start, start + effectivePerPage)));
+  process.exit(0);
+}
+
+if (argv[0] === "issue" && argv[1] === "edit") {
+  const number = Number(argv[2]);
+  const issue = state.issues.find((item) => item.number === number);
+  if (issue) {
+    const addLabels = String(argValue("--add-label") ?? "").split(",").filter(Boolean);
+    const removeLabels = new Set(String(argValue("--remove-label") ?? "").split(",").filter(Boolean));
+    issue.labels = [
+      ...issue.labels.filter((label) => !removeLabels.has(label.name)),
+      ...addLabels
+        .filter((name) => !issue.labels.some((label) => label.name === name))
+        .map((name) => ({ name })),
+    ];
+  }
+  save();
+  output("https://github.test/issues/" + number);
   process.exit(0);
 }
 
