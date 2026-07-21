@@ -208,6 +208,37 @@ describe("meeting transcript intake", () => {
     }));
   });
 
+  it("reports duplicate use-existing transcript uploads as existing meeting matches", async () => {
+    uploadMeetingTranscriptMock.mockResolvedValueOnce({
+      status: "created",
+      meeting: { id: "meeting-existing", title: "Existing meeting" },
+      candidates: [],
+    });
+    const { intakeMeetingTranscript } = await import("./meeting-transcript-intake");
+
+    await expect(intakeMeetingTranscript({
+      kind: "agent",
+      authProvider: "bootstrap",
+      label: "test-agent",
+      workspaceIds: ["workspace-1"],
+    }, {
+      workspaceId: "workspace-1",
+      title: "Existing meeting",
+      recordedAt: new Date("2026-05-17T10:00:00.000Z"),
+      source: "transcript-upload",
+      transcript: "Jan: Follow up next week.",
+      duplicateGuard: {
+        resolution: "use_existing",
+        targetEntityId: "meeting-existing",
+      },
+      now: TEST_NOW,
+    })).resolves.toMatchObject({
+      status: "meeting_matched",
+      meeting: { id: "meeting-existing" },
+      message: "Using existing meeting \"Existing meeting\". No new transcript was saved.",
+    });
+  });
+
   it("keeps source URLs out of meeting join URL matching", async () => {
     uploadMeetingTranscriptMock.mockResolvedValueOnce({
       status: "created",

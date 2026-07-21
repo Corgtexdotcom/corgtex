@@ -462,7 +462,7 @@ function duplicateGuardOptionsFromParams(params: {
 }) {
   return params.duplicateResolution
     ? { resolution: params.duplicateResolution, targetEntityId: params.duplicateTargetEntityId ?? null }
-    : undefined;
+    : {};
 }
 
 async function withDuplicateGuardMcpResponse(handler: () => Promise<ReturnType<typeof jsonResult>>) {

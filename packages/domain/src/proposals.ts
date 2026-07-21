@@ -647,6 +647,37 @@ export async function createProposalFromTension(actor: AppActor, params: CreateP
     workspaceId: params.workspaceId,
   });
 
+  let duplicateDecision: Awaited<ReturnType<typeof checkWorkspaceDuplicateGuard>> = null;
+  if (params.duplicateGuard != null) {
+    const sourceTensionForGuard = await loadVisibleSourceTension(prisma as unknown as Prisma.TransactionClient, actor, membership, params.workspaceId, params.sourceTensionId);
+    invariant(sourceTensionForGuard, 404, "NOT_FOUND", "Source tension not found.");
+    const draftForGuard = proposalDraftFromTension(sourceTensionForGuard, params);
+    duplicateDecision = await checkWorkspaceDuplicateGuard({
+      workspaceId: params.workspaceId,
+      entityType: "Proposal",
+      title: draftForGuard.title,
+      body: draftForGuard.bodyMd,
+      circleId: params.circleId ?? sourceTensionForGuard.circleId,
+      ownerMemberId: params.ownerMemberId,
+      meetingId: params.meetingId ?? sourceTensionForGuard.meetingId,
+      sourceIds: [sourceTensionForGuard.id, ...normalizeIds(params.relatedActionIds)],
+      actorUserId: actor.kind === "user" ? actor.user.id : null,
+      membershipId: membership?.id ?? null,
+      includePrivate: actor.kind === "agent" || membership?.role === "ADMIN",
+    }, params.duplicateGuard);
+    if (duplicateDecision?.resolution === "use_existing") {
+      return getProposal(actor, { workspaceId: params.workspaceId, proposalId: duplicateDecision.match.entityId });
+    }
+    if (duplicateDecision?.resolution === "update_existing") {
+      return applyProposalDuplicateUpdate(actor, {
+        ...params,
+        title: draftForGuard.title,
+        summary: draftForGuard.summary,
+        bodyMd: draftForGuard.bodyMd,
+      }, duplicateDecision.match.entityId);
+    }
+  }
+
   const isPrivate = params.isPrivate ?? true;
   const openedAt = isPrivate ? null : new Date();
   const policy = isPrivate ? null : await getApprovalPolicy(params.workspaceId, "PROPOSAL");
@@ -720,6 +751,7 @@ export async function createProposalFromTension(actor: AppActor, params: CreateP
           title: proposal.title,
           sourceTensionId: sourceTension.id,
           relatedActionIds,
+          ...duplicateGuardAuditMeta(duplicateDecision),
         },
       },
     });

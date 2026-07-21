@@ -274,6 +274,7 @@ export async function createProposalAction(actor: AppActor, ctx: any, args: any)
         bodyMd: typeof args.bodyMd === "string" ? args.bodyMd : null,
         circleId: typeof args.circleId === "string" ? args.circleId : null,
         relatedActionIds,
+        duplicateGuard: { onExact: "use_existing" },
         ...(hasOwnerMemberId ? { ownerMemberId } : {}),
       })
     : await createProposal(actor, {

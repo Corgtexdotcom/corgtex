@@ -41,7 +41,7 @@ describe("duplicate guard", () => {
       workspaceId: "workspace-1",
       entityType: "Action",
       title: "Follow up with finance",
-    });
+    }, {});
 
     expect(prismaMock.action.findMany).toHaveBeenCalledWith(expect.objectContaining({
       where: expect.objectContaining({
@@ -82,7 +82,7 @@ describe("duplicate guard", () => {
       entityType: "Action",
       title: "Sending finance updates",
       body: "Share the updated Q3 forecast.",
-    })).rejects.toMatchObject({
+    }, {})).rejects.toMatchObject({
       status: 409,
       code: "DUPLICATE_GUARD_MATCH",
       candidate: expect.objectContaining({
@@ -116,7 +116,8 @@ describe("duplicate guard", () => {
       title: "Send proposal to Acme",
       assigneeMemberId: "member-1",
       dueAt,
-    })).rejects.toMatchObject({
+      includePrivate: true,
+    }, {})).rejects.toMatchObject({
       candidate: expect.objectContaining({
         entityId: "action-2",
         matchKind: "likely",
@@ -242,7 +243,7 @@ describe("duplicate guard", () => {
       title: "Vendor transcript",
       content: "Vendor transcript content",
       externalId: "external-1",
-    })).rejects.toMatchObject({
+    }, {})).rejects.toMatchObject({
       candidate: expect.objectContaining({
         entityId: "source-active",
         archivedAt: null,
@@ -315,10 +316,41 @@ describe("duplicate guard", () => {
       title: "Incident review policy",
       body: "Incident reviews are published references.",
       includePrivate: true,
-    })).rejects.toMatchObject({
+    }, {})).rejects.toMatchObject({
       candidate: expect.objectContaining({
         entityId: "article-reference",
         status: "REFERENCE",
+      }),
+      recommendedResolution: "use_existing",
+      allowedResolutions: ["use_existing", "create_new"],
+    });
+  });
+
+  it("does not offer update-existing for submitted work items to regular non-admin callers", async () => {
+    const { checkWorkspaceDuplicateGuard } = await import("./duplicate-guard");
+    prismaMock.action.findMany.mockResolvedValueOnce([
+      {
+        id: "action-submitted",
+        title: "Send Acme proposal",
+        bodyMd: null,
+        status: "OPEN",
+        archivedAt: null,
+        createdAt: new Date("2026-07-20T10:00:00.000Z"),
+        updatedAt: new Date("2026-07-20T10:05:00.000Z"),
+      },
+    ]);
+
+    await expect(checkWorkspaceDuplicateGuard({
+      workspaceId: "workspace-1",
+      entityType: "Action",
+      title: "Send proposal to Acme",
+      actorUserId: "user-regular",
+      membershipId: "member-regular",
+      includePrivate: false,
+    }, {})).rejects.toMatchObject({
+      candidate: expect.objectContaining({
+        entityId: "action-submitted",
+        status: "OPEN",
       }),
       recommendedResolution: "use_existing",
       allowedResolutions: ["use_existing", "create_new"],

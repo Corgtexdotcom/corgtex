@@ -1122,6 +1122,78 @@ describe("createProposalFromTension", () => {
     });
   });
 
+  it("checks duplicates before creating a proposal from a tension", async () => {
+    const { createProposalFromTension } = await import("./proposals");
+    const actor = { kind: "user", user: { id: "u-1" } } as any;
+    const draftBody = [
+      "## Tension",
+      "",
+      "The current flow takes two weeks.",
+      "",
+      "## Proposal",
+      "",
+      "Describe the governance change that would reduce or resolve this tension.",
+      "",
+      "## Safe-to-try check",
+      "",
+      "- What risk does this introduce?",
+      "- How will we know it helped?",
+    ].join("\n");
+
+    vi.mocked(prisma.tension.findFirst).mockResolvedValueOnce({
+      id: "t-1",
+      workspaceId: "ws-1",
+      authorUserId: "u-1",
+      title: "Reimbursements are slow",
+      bodyMd: "The current flow takes two weeks.",
+      circleId: "circle-1",
+      meetingId: null,
+      proposalId: null,
+      priority: 2,
+      status: "OPEN",
+    } as any);
+    vi.mocked(prisma.proposal.findMany).mockResolvedValueOnce([
+      {
+        id: "p-existing",
+        workspaceId: "ws-1",
+        title: "Resolve tension: Reimbursements are slow",
+        bodyMd: draftBody,
+        summary: "Proposal drafted from tension: Reimbursements are slow",
+        status: "OPEN",
+        isPrivate: false,
+        ownerMemberId: null,
+        archivedAt: null,
+        createdAt: new Date("2026-07-20T10:00:00.000Z"),
+        updatedAt: new Date("2026-07-20T10:05:00.000Z"),
+      } as any,
+    ]);
+    vi.mocked(prisma.proposal.findFirst).mockResolvedValueOnce({
+      id: "p-existing",
+      workspaceId: "ws-1",
+      title: "Resolve tension: Reimbursements are slow",
+      bodyMd: draftBody,
+      summary: "Proposal drafted from tension: Reimbursements are slow",
+      status: "OPEN",
+      isPrivate: false,
+      ownerMemberId: null,
+      author: null,
+      ownerMember: null,
+      circle: null,
+      tensions: [],
+      actions: [],
+      adviceProcess: null,
+    } as any);
+
+    await expect(createProposalFromTension(actor, {
+      workspaceId: "ws-1",
+      sourceTensionId: "t-1",
+      duplicateGuard: { onExact: "use_existing" },
+    })).resolves.toMatchObject({ id: "p-existing" });
+
+    expect(prisma.proposal.create).not.toHaveBeenCalled();
+    expect(prisma.tension.update).not.toHaveBeenCalled();
+  });
+
   it("keeps an explicitly null proposal-from-tension owner empty", async () => {
     const { createProposalFromTension } = await import("./proposals");
     const actor = { kind: "user", user: { id: "u-1" } } as any;

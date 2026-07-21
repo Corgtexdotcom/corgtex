@@ -554,6 +554,58 @@ describe("meeting server actions", () => {
     expect(redisClient.del).toHaveBeenCalledWith("test:meeting-transcript-upload:workspace-1:token-1");
   });
 
+  it("preserves stored create-new choice through duplicate confirmation resubmission", async () => {
+    const { uploadMeetingTranscriptStateAction } = await import("./actions");
+    redisClient.get.mockResolvedValueOnce(JSON.stringify({
+      workspaceId: "workspace-1",
+      transcript: "Jan: We discussed follow-up actions.",
+      fileName: "weekly.txt",
+      title: "Weekly Review",
+      source: "transcript-upload",
+      recordedAt: "2026-07-15T09:00",
+      timeZone: "America/Los_Angeles",
+      summaryMd: null,
+      ingestionGuidanceMd: null,
+      participantIds: [],
+      participantEmails: ["jan@example.com"],
+      meetingId: null,
+      createNewMeeting: true,
+    }));
+    intakeMeetingTranscript.mockResolvedValueOnce({
+      status: "meeting_created",
+      message: "Transcript saved as meeting \"Weekly Review\". Summary and follow-up extraction are queued.",
+      meeting: { id: "meeting-new" },
+      inferred: {
+        title: "Weekly Review",
+        recordedAt: new Date("2026-07-15T16:00:00.000Z"),
+        participantEmails: ["jan@example.com"],
+        source: "transcript-upload",
+      },
+    });
+
+    const state = await uploadMeetingTranscriptStateAction({
+      status: "duplicate_confirmation_required",
+      message: "A similar item already exists.",
+      pendingTranscriptToken: "token-1",
+      retryRequiresTranscriptUpload: false,
+    }, formData({
+      workspaceId: "workspace-1",
+      pendingTranscriptToken: "token-1",
+      duplicateResolution: "create_new",
+      duplicateTargetEntityId: "meeting-existing",
+    }));
+
+    expect(state.status).toBe("success");
+    expect(intakeMeetingTranscript).toHaveBeenCalledWith(actor, expect.objectContaining({
+      meetingId: null,
+      createNewMeeting: true,
+      duplicateGuard: {
+        resolution: "create_new",
+        targetEntityId: "meeting-existing",
+      },
+    }));
+  });
+
   it("keeps clarification inline and asks for retry when Redis cannot hold the pending transcript", async () => {
     const { uploadMeetingTranscriptStateAction } = await import("./actions");
     getRedisClient.mockResolvedValueOnce(null);

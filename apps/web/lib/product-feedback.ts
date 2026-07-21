@@ -186,6 +186,7 @@ export async function createProductFeedbackAction(params: {
     bodyMd: params.bodyMd,
     priority: 1,
     isPrivate: true,
+    duplicateGuard: { resolution: "create_new" },
   });
 }
 

@@ -28,6 +28,14 @@ function slugify(input: string) {
     .slice(0, 120);
 }
 
+function metadataString(value: Prisma.InputJsonValue | undefined, key: string) {
+  const metadata = typeof value === "object" && value !== null && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+  const metadataValue = metadata?.[key];
+  return typeof metadataValue === "string" && metadataValue.trim() ? metadataValue.trim() : null;
+}
+
 export const WIKILINK_RE = /\[\[([^\]]+)\]\]/g;
 
 async function nextAvailableArticleSlug(tx: Prisma.TransactionClient, workspaceId: string, baseSlug: string) {
@@ -499,9 +507,9 @@ export async function ingestSource(actor: AppActor, params: {
     sourceType: params.sourceType,
     source: params.channel,
     externalId: params.externalId,
-    sourceUrl: typeof (params.metadata as Record<string, unknown> | undefined)?.sourceUrl === "string"
-      ? (params.metadata as Record<string, string>).sourceUrl
-      : null,
+    sourceUrl: metadataString(params.metadata, "sourceUrl")
+      ?? metadataString(params.metadata, "url")
+      ?? metadataString(params.metadata, "externalUrl"),
   }, params.duplicateGuard);
   if (duplicateDecision?.resolution === "use_existing") {
     const source = await prisma.brainSource.findFirst({

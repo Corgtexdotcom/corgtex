@@ -123,6 +123,8 @@ type PendingTranscriptPayload = {
   ingestionGuidanceMd: string | null;
   participantIds: string[];
   participantEmails: string[];
+  meetingId: string | null;
+  createNewMeeting: boolean;
 };
 
 type TranscriptUploadPayload = PendingTranscriptPayload & {
@@ -172,7 +174,9 @@ function isPendingTranscriptPayload(value: unknown): value is PendingTranscriptP
     && (typeof record.summaryMd === "string" || record.summaryMd === null)
     && (typeof record.ingestionGuidanceMd === "string" || record.ingestionGuidanceMd === null)
     && Array.isArray(record.participantIds)
-    && Array.isArray(record.participantEmails);
+    && Array.isArray(record.participantEmails)
+    && (typeof record.meetingId === "string" || record.meetingId === null || record.meetingId === undefined)
+    && (typeof record.createNewMeeting === "boolean" || record.createNewMeeting === undefined);
 }
 
 async function storePendingTranscriptPayload(payload: PendingTranscriptPayload) {
@@ -258,6 +262,8 @@ function pendingPayloadFromUpload(payload: TranscriptUploadPayload): PendingTran
     ingestionGuidanceMd: payload.ingestionGuidanceMd,
     participantIds: payload.participantIds,
     participantEmails: payload.participantEmails,
+    meetingId: payload.meetingId,
+    createNewMeeting: payload.createNewMeeting,
   };
 }
 
@@ -346,7 +352,9 @@ async function buildTranscriptUploadPayload(formData: FormData): Promise<Transcr
   }
 
   const meetingChoice = optionalFormString(formData, "meetingId");
-  const createNewMeeting = meetingChoice === CREATE_NEW_MEETING_CHOICE || optionalFormString(formData, "createNewMeeting") === "true";
+  const createNewMeeting = meetingChoice === CREATE_NEW_MEETING_CHOICE
+    || optionalFormString(formData, "createNewMeeting") === "true"
+    || (!meetingChoice && existingPayload?.createNewMeeting === true);
 
   return {
     workspaceId,
@@ -354,7 +362,7 @@ async function buildTranscriptUploadPayload(formData: FormData): Promise<Transcr
     retryRequiresTranscriptUpload,
     transcript,
     fileName,
-    meetingId: createNewMeeting ? null : meetingChoice,
+    meetingId: createNewMeeting ? null : meetingChoice ?? existingPayload?.meetingId ?? null,
     createNewMeeting,
     title: optionalFormString(formData, "title") ?? existingPayload?.title ?? null,
     source: optionalFormString(formData, "source") ?? existingPayload?.source ?? "transcript-upload",

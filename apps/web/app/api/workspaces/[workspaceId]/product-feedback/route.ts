@@ -57,6 +57,7 @@ async function uploadFeedbackScreenshot(params: {
       screenshotIndex: params.index + 1,
       size: params.file.size,
     },
+    duplicateGuard: { resolution: "create_new" },
   });
   return result.document.id;
 }

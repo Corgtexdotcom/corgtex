@@ -115,12 +115,12 @@ export class DuplicateGuardMatchError extends AppError {
   recommendedResolution: DuplicateGuardResolution;
   allowedResolutions: DuplicateGuardResolution[];
 
-  constructor(candidate: DuplicateGuardCandidate, recommendedResolution: DuplicateGuardResolution = "use_existing") {
+  constructor(candidate: DuplicateGuardCandidate, recommendedResolution: DuplicateGuardResolution = "use_existing", input?: DuplicateGuardInput) {
     super(409, "DUPLICATE_GUARD_MATCH", "A similar item already exists in this workspace.");
     this.candidate = candidate;
     this.allowedResolutions = candidate.archivedAt
       ? ["create_new"]
-      : allowsDuplicateGuardUpdate(candidate)
+      : allowsDuplicateGuardUpdate(candidate, input)
         ? ["use_existing", "update_existing", "create_new"]
         : ["use_existing", "create_new"];
     this.recommendedResolution = this.allowedResolutions.includes(recommendedResolution)
@@ -683,9 +683,19 @@ function cleanCandidate(candidate: DuplicateGuardCandidate): DuplicateGuardCandi
   };
 }
 
-function allowsDuplicateGuardUpdate(candidate: DuplicateGuardCandidate) {
+function isWorkItemCandidate(candidate: DuplicateGuardCandidate) {
+  return candidate.entityType === "Action"
+    || candidate.entityType === "Tension"
+    || candidate.entityType === "Proposal"
+    || candidate.entityType === "Goal";
+}
+
+function allowsDuplicateGuardUpdate(candidate: DuplicateGuardCandidate, input?: DuplicateGuardInput) {
   if (candidate.archivedAt) return false;
   if (candidate.entityType === "BrainArticle") return candidate.status === "DRAFT";
+  if (isWorkItemCandidate(candidate) && input && input.includePrivate !== true && candidate.status !== "DRAFT") {
+    return false;
+  }
   return true;
 }
 
@@ -711,6 +721,7 @@ async function findDuplicateGuardMatch(input: DuplicateGuardInput, options?: Dup
 }
 
 export async function checkWorkspaceDuplicateGuard(input: DuplicateGuardInput, options?: DuplicateGuardOptions | null): Promise<DuplicateGuardDecision | null> {
+  if (options == null) return null;
   const resolution = options?.resolution ?? null;
   if ((resolution === "use_existing" || resolution === "update_existing") && !options?.targetEntityId) {
     invariant(false, 400, "DUPLICATE_GUARD_TARGET_REQUIRED", "Duplicate resolution requires a target entity ID.");
@@ -728,19 +739,19 @@ export async function checkWorkspaceDuplicateGuard(input: DuplicateGuardInput, o
   if (resolution) {
     invariant(match, 400, "DUPLICATE_GUARD_TARGET_NOT_FOUND", "Duplicate target no longer matches the new item.");
     invariant(!match.archivedAt, 400, "DUPLICATE_GUARD_TARGET_ARCHIVED", "Archived duplicate targets can only be acknowledged by creating a new item.");
-    invariant(resolution !== "update_existing" || allowsDuplicateGuardUpdate(match), 400, "DUPLICATE_GUARD_TARGET_NOT_UPDATABLE", "This duplicate target cannot be updated safely.");
+    invariant(resolution !== "update_existing" || allowsDuplicateGuardUpdate(match, input), 400, "DUPLICATE_GUARD_TARGET_NOT_UPDATABLE", "This duplicate target cannot be updated safely.");
     return { resolution, match };
   }
 
   if (!match) return null;
   if (match.archivedAt) {
-    throw new DuplicateGuardMatchError(match, "create_new");
+    throw new DuplicateGuardMatchError(match, "create_new", input);
   }
   if (match.matchKind === "exact" && options?.onExact === "use_existing") {
     return { resolution: "use_existing", match };
   }
 
-  throw new DuplicateGuardMatchError(match, match.matchKind === "exact" ? "use_existing" : "update_existing");
+  throw new DuplicateGuardMatchError(match, match.matchKind === "exact" ? "use_existing" : "update_existing", input);
 }
 
 export function duplicateGuardAuditMeta(decision: DuplicateGuardDecision | null) {

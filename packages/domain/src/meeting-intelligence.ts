@@ -1082,6 +1082,7 @@ export async function applyInsight(
         assigneeMemberId: hintedMemberId,
         dueAt: insight.dueAt ?? null,
         isPrivate: false,
+        duplicateGuard: { resolution: "create_new" },
       });
       const opened = await updateAction(actor, {
         workspaceId: params.workspaceId,
@@ -1098,6 +1099,7 @@ export async function applyInsight(
         raisedByMemberId: hintedMemberId,
         meetingId: insight.meetingId,
         isPrivate: false,
+        duplicateGuard: { resolution: "create_new" },
       });
       const opened = await updateTension(actor, {
         workspaceId: params.workspaceId,

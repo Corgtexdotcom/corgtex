@@ -314,4 +314,43 @@ describe("brain source ingestion", () => {
     }));
     expect(prismaMock.brainSource.create).not.toHaveBeenCalled();
   });
+
+  it("uses url metadata when checking Brain source duplicates", async () => {
+    const existingSource = {
+      id: "source-url",
+      workspaceId: "ws-1",
+      sourceType: "DOC",
+      tier: 1,
+      title: "Vendor notes",
+      content: "Vendor notes content",
+      externalId: null,
+      metadata: { url: "https://example.com/vendor-notes" },
+      archivedAt: null,
+      createdAt: new Date("2026-07-20T10:00:00.000Z"),
+    };
+    prismaMock.brainSource.findMany
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([existingSource]);
+    prismaMock.brainSource.findFirst.mockResolvedValueOnce(existingSource);
+
+    const { ingestSource } = await import("./brain");
+    await expect(ingestSource(ownerActor, {
+      workspaceId: "ws-1",
+      sourceType: "DOC",
+      tier: 1,
+      title: "Vendor notes",
+      content: "Vendor notes content",
+      metadata: { url: "https://example.com/vendor-notes" },
+      duplicateGuard: { onExact: "use_existing" },
+    })).resolves.toMatchObject({ id: "source-url" });
+
+    expect(prismaMock.brainSource.findMany).toHaveBeenNthCalledWith(2, expect.objectContaining({
+      where: expect.objectContaining({
+        OR: expect.arrayContaining([
+          { metadata: { path: ["url"], equals: "https://example.com/vendor-notes" } },
+        ]),
+      }),
+    }));
+    expect(prismaMock.brainSource.create).not.toHaveBeenCalled();
+  });
 });
