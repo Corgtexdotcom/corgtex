@@ -82,7 +82,7 @@ describe("production validation context", () => {
       work_item_parity_smoke: "true",
       briefing_fixture_smoke: "true",
       recorder_readiness_smoke: "true",
-      recorder_readiness_deployments: "managed-recorder-validation",
+      recorder_readiness_deployments: "",
       recorder_readiness_temp_meetings: "false",
     });
   });

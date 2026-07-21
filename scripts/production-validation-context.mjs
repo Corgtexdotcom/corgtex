@@ -8,7 +8,7 @@ import { pathToFileURL } from "node:url";
 import { collectProductionValidationPrNumbers } from "./production-validation-pr-numbers.mjs";
 
 const DEFAULT_BASE_URL = "https://app.corgtex.com";
-const DEFAULT_RECORDER_DEPLOYMENTS = "managed-recorder-validation";
+const DEFAULT_RECORDER_DEPLOYMENTS = "";
 const DEFAULT_CLIENT_READINESS_ROUTES = "leads";
 const CLIENT_READINESS_ROUTE_NAMES = new Set([
   "home",

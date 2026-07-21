@@ -19,7 +19,8 @@ import {
 const DEFAULT_BASE_URL = "https://app.corgtex.com";
 const DEFAULT_CONTROL_PLANE_URL = "https://ops.corgtex.com";
 const DEFAULT_OUT_DIR = ".artifacts/recorder-readiness-production-smoke";
-const DEFAULT_TARGETS = "managed-recorder-validation";
+const DEFAULT_TARGETS = "";
+const MISSING_RECORDER_TARGETS_BLOCKER = "RECORDER_READINESS_SMOKE_DEPLOYMENTS or PRODUCTION_VALIDATION_RECORDER_DEPLOYMENTS must identify at least one recorder readiness deployment.";
 const HARD_BLOCKER_GATE_KEYS = new Set(["control_plane", "tenant_config", "vendor", "calendar"]);
 const DEFAULT_TEMP_MEETING_LEAD_MINUTES = 120;
 const DEFAULT_TEMP_MEETING_DURATION_MINUTES = 30;
@@ -129,11 +130,11 @@ export function normalizeControlPlaneUrl(value) {
 }
 
 export function normalizeRecorderReadinessTargets(value = DEFAULT_TARGETS) {
-  const targets = String(value || DEFAULT_TARGETS)
+  const targets = String(value ?? DEFAULT_TARGETS)
     .split(",")
     .map((item) => item.trim())
     .filter(Boolean);
-  return [...new Set(targets.length ? targets : DEFAULT_TARGETS.split(","))];
+  return [...new Set(targets)];
 }
 
 function comparable(value) {
@@ -781,6 +782,14 @@ export class RecorderReadinessProductionSmoke {
 
       if (!this.hardFailure && this.tempMeetingSetupError) {
         this.recordBlockedForAllTargets(this.tempMeetingSetupError);
+      }
+
+      if (!this.hardFailure && this.validationRun.results.length === 0 && this.targets.length === 0) {
+        this.recordResult({
+          target: "configured-recorder-deployments",
+          result: "blocked",
+          blocker: MISSING_RECORDER_TARGETS_BLOCKER,
+        });
       }
 
       if (!this.hardFailure && this.validationRun.results.length === 0) {
