@@ -249,6 +249,48 @@ describe("github-incident resolved issue sync", () => {
     expect(result.state.calls.some((call) => call[0] === "issue" && call[1] === "create")).toBe(false);
   });
 
+  it("preserves manual auto-fix opt-in when advisory signals repeat", async () => {
+    const dedupeKey = "observation:azure_monitor:corgtex_worker_error:corgtex:tick:WORKER_TICK_ERROR:manual-opt-in";
+    const token = opsToken(dedupeKey);
+    const result = await runWithFakeGh(githubIncidentPath, [], [
+      {
+        dedupeKey,
+        severity: "P2",
+        service: "post-deploy-observation",
+        status: "advisory",
+        summary: "Unrelated production worker error",
+      },
+    ], {
+      issues: [
+        issue(19, `[${token}] P2 post-deploy-observation: Unrelated production worker error`, [
+          "ops-advisory",
+          "ops-auto-fix",
+          "ops-incident",
+          "severity-p2",
+          "service-post-deploy-observation",
+        ], dedupeKey),
+      ],
+    });
+
+    expect(result.code, result.stderr).toBe(0);
+    expect(result.state.issues).toHaveLength(1);
+    expect(labelNames(result.state.issues[0])).toEqual(expect.arrayContaining([
+      "ops-advisory",
+      "ops-auto-fix",
+      "ops-incident",
+      "severity-p2",
+      "service-post-deploy-observation",
+    ]));
+    expect(result.state.calls).not.toContainEqual(expect.arrayContaining([
+      "issue",
+      "edit",
+      "19",
+      "--remove-label",
+      "ops-auto-fix",
+    ]));
+    expect(result.state.calls.some((call) => call[0] === "issue" && call[1] === "create")).toBe(false);
+  });
+
   it("runs resolved sync from clean health sweeps that create issues", async () => {
     const server = await startHealthServer();
     try {

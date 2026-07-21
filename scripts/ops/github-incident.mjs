@@ -367,7 +367,7 @@ function reconcileIssueLabels(issue, desiredLabels) {
   const currentLabels = issueLabelNames(issue);
   const currentSet = new Set(currentLabels);
   const desiredSet = new Set(desiredLabels);
-  const removeLabels = [...ROUTING_LABELS].filter((label) => currentSet.has(label) && !desiredSet.has(label));
+  const removeLabels = routingLabelsToRemove(currentSet, desiredSet);
   const addLabels = desiredLabels.filter((label) => !currentSet.has(label));
   const nextSet = new Set(currentLabels);
 
@@ -385,6 +385,16 @@ function reconcileIssueLabels(issue, desiredLabels) {
     nextLabels,
     changed: addLabels.length > 0 || removeLabels.length > 0,
   };
+}
+
+function routingLabelsToRemove(currentSet, desiredSet) {
+  if (desiredSet.has("ops-auto-fix")) {
+    return currentSet.has("ops-advisory") ? ["ops-advisory"] : [];
+  }
+  if (desiredSet.has("ops-advisory") && currentSet.has("ops-auto-fix") && !currentSet.has("ops-advisory")) {
+    return ["ops-auto-fix"];
+  }
+  return [];
 }
 
 function activeSearchTokens(plans) {
