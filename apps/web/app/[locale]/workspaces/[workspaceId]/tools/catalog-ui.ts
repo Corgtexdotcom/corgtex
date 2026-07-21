@@ -268,6 +268,11 @@ function containsDocumentTerm(value: string) {
   return new RegExp(`\\b(${DOCUMENT_TERM_PATTERN})\\b`, "i").test(value.replace(/[_-]+/g, " "));
 }
 
+function isGenericDocumentTitleCandidate(value: string) {
+  const normalized = normalizedDisplayText(value.replace(/[_-]+/g, " "));
+  return /^(?:this|that|these|those|the|a|an)? ?(?:box )?(?:spreadsheet|document|presentation|powerpoint|file|folder|link|tracker|workbook|sheet|deck|slides?|model|report|pdf)$/.test(normalized);
+}
+
 function sourceTextUrlCount(sourceText?: string | null) {
   return sourceText?.match(/<https?:\/\/[^>|]+(?:\|[^>]*)?>|\bhttps?:\/\/[^\s<>"']+/g)?.length ?? 0;
 }
@@ -297,11 +302,12 @@ function inferTitleFromSourceText(sourceText?: string | null) {
 
   const thisIsMatch = cleaned.match(/^this is (?:the )?(.+?)(?:[.!?]|$)/i);
   const thisIsCandidate = trimTitleCandidate(thisIsMatch?.[1] ?? "");
-  if (thisIsCandidate && containsDocumentTerm(thisIsCandidate)) return thisIsCandidate;
+  if (thisIsCandidate && containsDocumentTerm(thisIsCandidate) && !isGenericDocumentTitleCandidate(thisIsCandidate)) return thisIsCandidate;
 
   const firstClause = trimTitleCandidate(firstSentence(cleaned).split(/\b(?:includes?|contains?|covers?|has|with|for)\b/i)[0] ?? "");
   if (!firstClause || !containsDocumentTerm(firstClause)) return null;
   if (/^(add|open|use|please|see|review|check|look|click)\b/i.test(firstClause)) return null;
+  if (isGenericDocumentTitleCandidate(firstClause)) return null;
   return firstClause;
 }
 
@@ -380,12 +386,16 @@ export function deriveCapturedLinkDisplay(input: CapturedLinkDisplayInput) {
     ?? input.manualPreviewDescription
     ?? input.manualAccessNotesMd
     ?? null;
+  const inferredTitle = inferTitleFromSourceText(input.sourceText)
+    ?? inferTitleFromSourceText(input.resourceDescriptionMd)
+    ?? inferTitleFromSourceText(input.summaryMd)
+    ?? inferTitleFromSourceText(rawDescription);
   const titleCandidates = [
     { value: input.sourceLabel, rejectOpaqueToken: false },
     { value: input.manualPreviewTitle, rejectOpaqueToken: false },
     { value: input.manualTitle, rejectOpaqueToken: false },
     { value: input.resourceTitle, rejectOpaqueToken: true },
-    { value: inferTitleFromSourceText(input.sourceText), rejectOpaqueToken: false },
+    { value: inferredTitle, rejectOpaqueToken: false },
   ];
   const selectedTitle = titleCandidates.find((candidate) => (
     isUsefulDisplayTitle(candidate.value, input, { rejectOpaqueToken: candidate.rejectOpaqueToken })
