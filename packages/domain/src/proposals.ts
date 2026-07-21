@@ -506,6 +506,7 @@ async function applyProposalDuplicateUpdate(actor: AppActor, params: CreatePropo
   if (!existing.summary && params.summary) updateParams.summary = params.summary;
   if (!existing.circleId && params.circleId) updateParams.circleId = params.circleId;
   if (!existing.ownerMemberId && params.ownerMemberId) updateParams.ownerMemberId = params.ownerMemberId;
+  if (params.priority !== undefined && params.priority !== null && existing.priority !== params.priority) updateParams.priority = params.priority;
   const proposal = Object.keys(updateParams).length > 2 ? await updateProposal(actor, updateParams) : existing;
 
   if (sourceTension || relatedActionIds.length > 0) {
@@ -715,6 +716,7 @@ export async function createProposalFromTension(actor: AppActor, params: CreateP
         title: draftForGuard.title,
         summary: draftForGuard.summary,
         bodyMd: draftForGuard.bodyMd,
+        priority: params.priority ?? sourceTensionForGuard.priority ?? null,
       }, duplicateDecision.match.entityId);
     }
   }

@@ -376,6 +376,9 @@ export async function createGoal(
     if (!existing.parentGoalId && params.parentGoalId) updateParams.parentGoalId = params.parentGoalId;
     if (!existing.targetDate && params.targetDate) updateParams.targetDate = params.targetDate;
     if (!existing.startDate && params.startDate) updateParams.startDate = params.startDate;
+    if (params.cadence && existing.cadence !== params.cadence) updateParams.cadence = params.cadence;
+    if (params.level && existing.level !== params.level) updateParams.level = params.level;
+    if (params.status && existing.status !== params.status) updateParams.status = params.status;
     const updatedFields = Object.keys(updateParams).length > 3;
     if (updatedFields) await updateGoal(actor, updateParams);
     const addedKeyResults = await appendMissingDuplicateGoalKeyResults(actor, params, duplicateDecision.match.entityId, membership);

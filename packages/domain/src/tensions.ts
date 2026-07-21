@@ -234,6 +234,7 @@ async function applyTensionDuplicateUpdate(actor: AppActor, params: CreateTensio
   if (!existing.assigneeMemberId && params.assigneeMemberId) updateParams.assigneeMemberId = params.assigneeMemberId;
   if (!existing.raisedByMemberId && params.raisedByMemberId) updateParams.raisedByMemberId = params.raisedByMemberId;
   if (!existing.proposalId && params.proposalId) updateParams.proposalId = params.proposalId;
+  if (params.priority !== undefined && params.priority !== null && existing.priority !== params.priority) updateParams.priority = params.priority;
   return Object.keys(updateParams).length > 2 ? updateTension(actor, updateParams) : existing;
 }
 

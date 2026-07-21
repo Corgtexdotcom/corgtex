@@ -219,6 +219,7 @@ describe("duplicate guard", () => {
     const { checkWorkspaceDuplicateGuard } = await import("./duplicate-guard");
     prismaMock.brainSource.findMany
       .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([])
       .mockResolvedValueOnce([
         {
           id: "source-archived",
@@ -248,6 +249,15 @@ describe("duplicate guard", () => {
     expect(prismaMock.brainSource.findMany).toHaveBeenNthCalledWith(2, expect.objectContaining({
       where: {
         workspaceId: "workspace-1",
+        archivedAt: null,
+        OR: [{ externalId: "external-1" }],
+      },
+      take: 5,
+    }));
+    expect(prismaMock.brainSource.findMany).toHaveBeenNthCalledWith(3, expect.objectContaining({
+      where: {
+        workspaceId: "workspace-1",
+        archivedAt: { not: null },
         OR: [{ externalId: "external-1" }],
       },
       take: 5,
@@ -257,6 +267,7 @@ describe("duplicate guard", () => {
   it("prefers an active exact match over an archived exact match with the same score", async () => {
     const { checkWorkspaceDuplicateGuard } = await import("./duplicate-guard");
     prismaMock.brainSource.findMany
+      .mockResolvedValueOnce([])
       .mockResolvedValueOnce([
         {
           id: "source-active",
@@ -291,6 +302,13 @@ describe("duplicate guard", () => {
       }),
       allowedResolutions: ["use_existing", "update_existing", "create_new"],
     });
+    expect(prismaMock.brainSource.findMany).toHaveBeenNthCalledWith(2, expect.objectContaining({
+      where: expect.objectContaining({
+        workspaceId: "workspace-1",
+        archivedAt: null,
+        OR: [{ externalId: "external-1" }],
+      }),
+    }));
   });
 
   it("uses Brain source URL metadata for exact matches outside the latest window", async () => {
@@ -327,6 +345,7 @@ describe("duplicate guard", () => {
     expect(prismaMock.brainSource.findMany).toHaveBeenNthCalledWith(2, expect.objectContaining({
       where: expect.objectContaining({
         workspaceId: "workspace-1",
+        archivedAt: null,
         OR: expect.arrayContaining([
           { metadata: { path: ["sourceUrl"], equals: "https://example.com/vendor-notes" } },
         ]),
@@ -398,7 +417,7 @@ describe("duplicate guard", () => {
     });
   });
 
-  it("uses document metadata content hashes for exact matches", async () => {
+  it("loads active document content-hash exact matches outside the latest window", async () => {
     const { checkWorkspaceDuplicateGuard, duplicateGuardContentHash } = await import("./duplicate-guard");
     const content = "The launch plan is ready.";
     prismaMock.document.findMany
@@ -433,6 +452,7 @@ describe("duplicate guard", () => {
     expect(prismaMock.document.findMany).toHaveBeenNthCalledWith(2, expect.objectContaining({
       where: expect.objectContaining({
         workspaceId: "workspace-1",
+        archivedAt: null,
         OR: expect.arrayContaining([
           { metadata: { path: ["contentHash"], equals: duplicateGuardContentHash(content) } },
         ]),

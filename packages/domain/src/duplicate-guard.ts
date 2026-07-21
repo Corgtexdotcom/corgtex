@@ -87,6 +87,7 @@ const DEFAULT_CANDIDATE_LIMIT = 50;
 const MIN_CANDIDATE_LIMIT = 10;
 const MAX_CANDIDATE_LIMIT = 200;
 const LIKELY_MATCH_THRESHOLD = 0.78;
+const EXACT_LOOKUP_TAKE = 5;
 
 const STOP_WORDS = new Set([
   "a",
@@ -317,6 +318,25 @@ async function latestRows(entityType: DuplicateGuardEntityType, workspaceId: str
         ...(input.membershipId ? [{ isPrivate: true, ownerMemberId: input.membershipId }] : []),
       ],
     };
+
+  async function exactRows(findMany: ((args: any) => Promise<any[]>) | undefined, params: {
+    exactClauses: any[];
+    orderBy: any;
+  }) {
+    if (!findMany || params.exactClauses.length === 0) return [];
+    const activeRows = await findMany({
+      where: { workspaceId, archivedAt: null, OR: params.exactClauses },
+      orderBy: params.orderBy,
+      take: EXACT_LOOKUP_TAKE,
+    });
+    if (activeRows.length > 0) return activeRows;
+    return await findMany({
+      where: { workspaceId, archivedAt: { not: null }, OR: params.exactClauses },
+      orderBy: params.orderBy,
+      take: EXACT_LOOKUP_TAKE,
+    });
+  }
+
   switch (entityType) {
     case "Action":
       return await db.action?.findMany?.({
@@ -360,12 +380,11 @@ async function latestRows(entityType: DuplicateGuardEntityType, workspaceId: str
         inputContentHash ? { metadata: { path: ["contentHash"], equals: inputContentHash } } : null,
       ].filter(Boolean);
       if (exactClauses.length === 0) return rows;
-      const exactRows = await db.document?.findMany?.({
-        where: { workspaceId, OR: exactClauses },
+      const exact = await exactRows(db.document?.findMany?.bind(db.document), {
+        exactClauses,
         orderBy: [{ updatedAt: "desc" }, { createdAt: "desc" }],
-        take: 5,
-      }) ?? [];
-      return [...exactRows, ...rows];
+      });
+      return [...exact, ...rows];
     }
     case "BrainSource": {
       const rows = await db.brainSource?.findMany?.({
@@ -380,12 +399,11 @@ async function latestRows(entityType: DuplicateGuardEntityType, workspaceId: str
         input.sourceUrl ? { metadata: { path: ["externalUrl"], equals: input.sourceUrl } } : null,
       ].filter(Boolean);
       if (exactClauses.length === 0) return rows;
-      const exactRows = await db.brainSource?.findMany?.({
-        where: { workspaceId, OR: exactClauses },
+      const exact = await exactRows(db.brainSource?.findMany?.bind(db.brainSource), {
+        exactClauses,
         orderBy: { createdAt: "desc" },
-        take: 5,
-      }) ?? [];
-      return [...exactRows, ...rows];
+      });
+      return [...exact, ...rows];
     }
     case "BrainArticle": {
       const rows = await db.brainArticle?.findMany?.({
@@ -394,12 +412,19 @@ async function latestRows(entityType: DuplicateGuardEntityType, workspaceId: str
         take: limit,
       }) ?? [];
       if (!input.slug) return rows;
-      const exactRows = await db.brainArticle?.findMany?.({
-        where: { workspaceId, slug: input.slug, ...privateArticleVisibility },
-        orderBy: [{ updatedAt: "desc" }, { createdAt: "desc" }],
-        take: 5,
+      const orderBy = [{ updatedAt: "desc" }, { createdAt: "desc" }];
+      const activeExactRows = await db.brainArticle?.findMany?.({
+        where: { workspaceId, slug: input.slug, archivedAt: null, ...privateArticleVisibility },
+        orderBy,
+        take: EXACT_LOOKUP_TAKE,
       }) ?? [];
-      return [...exactRows, ...rows];
+      if (activeExactRows.length > 0) return [...activeExactRows, ...rows];
+      const archivedExactRows = await db.brainArticle?.findMany?.({
+        where: { workspaceId, slug: input.slug, archivedAt: { not: null }, ...privateArticleVisibility },
+        orderBy,
+        take: EXACT_LOOKUP_TAKE,
+      }) ?? [];
+      return [...archivedExactRows, ...rows];
     }
     case "Meeting": {
       const rows = await db.meeting?.findMany?.({
@@ -413,12 +438,11 @@ async function latestRows(entityType: DuplicateGuardEntityType, workspaceId: str
         input.meetingUrlHash ? { meetingUrlHash: input.meetingUrlHash } : null,
       ].filter(Boolean);
       if (exactClauses.length === 0) return rows;
-      const exactRows = await db.meeting?.findMany?.({
-        where: { workspaceId, OR: exactClauses },
+      const exact = await exactRows(db.meeting?.findMany?.bind(db.meeting), {
+        exactClauses,
         orderBy: [{ recordedAt: "desc" }, { createdAt: "desc" }],
-        take: 5,
-      }) ?? [];
-      return [...exactRows, ...rows];
+      });
+      return [...exact, ...rows];
     }
   }
 }

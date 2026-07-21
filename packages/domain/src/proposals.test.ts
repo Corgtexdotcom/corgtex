@@ -1230,10 +1230,12 @@ describe("createProposalFromTension", () => {
       title: "Resolve tension: Pricing handoff is unclear",
       bodyMd: draftBody,
       summary: "Proposal drafted from tension: Pricing handoff is unclear",
+      priority: 1,
       status: "DRAFT",
       isPrivate: true,
       ownerMemberId: null,
       archivedAt: null,
+      version: 1,
       createdAt: new Date("2026-07-20T10:00:00.000Z"),
       updatedAt: new Date("2026-07-20T10:05:00.000Z"),
     };
@@ -1261,6 +1263,12 @@ describe("createProposalFromTension", () => {
       actions: [],
       adviceProcess: null,
     } as any);
+    vi.mocked(prisma.proposal.findUnique).mockResolvedValueOnce(existingProposal as any);
+    vi.mocked(prisma.proposal.update).mockResolvedValueOnce({
+      ...existingProposal,
+      priority: 2,
+      version: 2,
+    } as any);
     vi.mocked(prisma.action.updateMany).mockResolvedValueOnce({ count: 2 } as any);
     vi.mocked(prisma.tension.update).mockResolvedValueOnce({ id: "t-1", proposalId: "p-existing" } as any);
 
@@ -1277,6 +1285,12 @@ describe("createProposalFromTension", () => {
     expect(prisma.tension.update).toHaveBeenCalledWith({
       where: { id: "t-1" },
       data: { proposalId: "p-existing" },
+    });
+    expect(prisma.proposal.update).toHaveBeenCalledWith({
+      where: { id: "p-existing" },
+      data: expect.objectContaining({
+        priority: 2,
+      }),
     });
     expect(prisma.action.updateMany).toHaveBeenCalledWith({
       where: expect.objectContaining({

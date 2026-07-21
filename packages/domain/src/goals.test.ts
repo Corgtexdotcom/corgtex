@@ -198,7 +198,18 @@ describe("Goals Domain", () => {
         .mockResolvedValueOnce(existingGoal as any)
         .mockResolvedValueOnce({
           ...existingGoal,
+          cadence: "ANNUAL",
+          level: "PERSONAL",
+          status: "ACTIVE",
+          version: 2,
+        } as any)
+        .mockResolvedValueOnce({
+          ...existingGoal,
+          cadence: "ANNUAL",
+          level: "PERSONAL",
+          status: "ACTIVE",
           progressPercent: 20,
+          version: 3,
           keyResults: [
             { title: "Close 5 customers", progressPercent: 40, sortOrder: 0 },
             { title: "Launch partner motion", progressPercent: 0, sortOrder: 1 },
@@ -208,14 +219,29 @@ describe("Goals Domain", () => {
         { title: "Close 5 customers", progressPercent: 40, sortOrder: 0 },
       ] as any);
       vi.mocked(prisma.keyResult.createMany).mockResolvedValueOnce({ count: 1 } as any);
-      vi.mocked(prisma.goal.update).mockResolvedValueOnce({
-        ...existingGoal,
-        progressPercent: 20,
-      } as any);
+      vi.mocked(prisma.goal.update)
+        .mockResolvedValueOnce({
+          ...existingGoal,
+          cadence: "ANNUAL",
+          level: "PERSONAL",
+          status: "ACTIVE",
+          version: 2,
+        } as any)
+        .mockResolvedValueOnce({
+          ...existingGoal,
+          cadence: "ANNUAL",
+          level: "PERSONAL",
+          status: "ACTIVE",
+          progressPercent: 20,
+          version: 3,
+        } as any);
 
       const result = await createGoal(actor, {
         workspaceId: "ws-1",
         title: "Grow revenue",
+        cadence: "ANNUAL",
+        level: "PERSONAL",
+        status: "ACTIVE",
         keyResults: [
           { title: "Close 5 customers", currentValue: 2, targetValue: 5 },
           { title: "Launch partner motion", currentValue: 0, targetValue: 1 },
@@ -235,10 +261,21 @@ describe("Goals Domain", () => {
       });
       expect(prisma.goal.update).toHaveBeenCalledWith({
         where: { id: "goal-existing" },
+        data: expect.objectContaining({
+          cadence: "ANNUAL",
+          level: "PERSONAL",
+          status: "ACTIVE",
+        }),
+      });
+      expect(prisma.goal.update).toHaveBeenCalledWith({
+        where: { id: "goal-existing" },
         data: { progressPercent: 20 },
       });
       expect(result).toMatchObject({
         id: "goal-existing",
+        cadence: "ANNUAL",
+        level: "PERSONAL",
+        status: "ACTIVE",
         progressPercent: 20,
       });
     });

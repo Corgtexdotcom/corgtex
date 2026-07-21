@@ -12,8 +12,9 @@ const DUPLICATE_GUARD_RESOLUTIONS: DuplicateGuardResolution[] = [
   "create_new",
 ];
 
-function duplicateGuardFromValues(resolution: unknown, targetEntityId: unknown): DuplicateGuardOptions | undefined {
+function duplicateGuardFromValues(resolution: unknown, targetEntityId: unknown, enabled?: unknown): DuplicateGuardOptions | undefined {
   if (typeof resolution !== "string" || !DUPLICATE_GUARD_RESOLUTIONS.includes(resolution as DuplicateGuardResolution)) {
+    if (enabled === true || enabled === "true") return {};
     return undefined;
   }
   return {
@@ -29,8 +30,19 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
     const membership = await requireWorkspaceMembership({ actor, workspaceId });
     
     const body = await request.json();
-    const { title, sourceType, channel, content, recordedAt, ingestionGuidanceMd, timeZone, duplicateResolution, duplicateTargetEntityId } = body;
-    const duplicateGuard = duplicateGuardFromValues(duplicateResolution, duplicateTargetEntityId);
+    const {
+      title,
+      sourceType,
+      channel,
+      content,
+      recordedAt,
+      ingestionGuidanceMd,
+      timeZone,
+      duplicateGuardEnabled,
+      duplicateResolution,
+      duplicateTargetEntityId,
+    } = body;
+    const duplicateGuard = duplicateGuardFromValues(duplicateResolution, duplicateTargetEntityId, duplicateGuardEnabled);
     
     if (!content || typeof content !== "string") {
       return NextResponse.json({ error: { message: "Content is required" } }, { status: 400 });

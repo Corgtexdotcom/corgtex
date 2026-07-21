@@ -303,6 +303,7 @@ describe("tensions domain", () => {
       assigneeMemberId: null,
       raisedByMemberId: null,
       proposalId: null,
+      priority: 1,
       isPrivate: true,
       createdAt: new Date("2026-07-20T10:00:00.000Z"),
       updatedAt: new Date("2026-07-20T10:05:00.000Z"),
@@ -322,6 +323,7 @@ describe("tensions domain", () => {
     prismaMock.tension.update.mockResolvedValueOnce({
       ...existingTension,
       proposalId: "proposal-1",
+      priority: 4,
     });
 
     const { createTension } = await import("./tensions");
@@ -330,6 +332,7 @@ describe("tensions domain", () => {
       title: "Clarify pricing handoff",
       bodyMd: "Finance needs the latest buyer context.",
       proposalId: "proposal-1",
+      priority: 4,
       duplicateGuard: {
         resolution: "update_existing",
         targetEntityId: "t-duplicate",
@@ -352,6 +355,7 @@ describe("tensions domain", () => {
       where: { id: "t-duplicate" },
       data: expect.objectContaining({
         proposalId: "proposal-1",
+        priority: 4,
       }),
     }));
     expect(prismaMock.tension.create).not.toHaveBeenCalled();

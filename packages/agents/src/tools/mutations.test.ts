@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createAction, createGoal, createProposal, createProposalFromTension } from "@corgtex/domain";
 import { prisma } from "@corgtex/shared";
-import { createActionItemAction, createGoalAction, createGoalTool, createProposalAction, createProposalTool } from "./mutations";
+import { createActionItemAction, createActionTool, createGoalAction, createGoalTool, createProposalAction, createProposalTool } from "./mutations";
 
 vi.mock("@corgtex/domain", () => ({
   AppError: class AppError extends Error {
@@ -21,6 +21,13 @@ vi.mock("@corgtex/domain", () => ({
   createProposalFromTension: vi.fn(),
   createTension: vi.fn(),
   updateTension: vi.fn(),
+  duplicateGuardErrorPayload: vi.fn((error: any) => ({
+    status: "duplicate_confirmation_required",
+    candidate: error.candidate,
+    recommendedResolution: error.recommendedResolution,
+    allowedResolutions: error.allowedResolutions,
+  })),
+  isDuplicateGuardMatchError: vi.fn((error: any) => error?.code === "DUPLICATE_GUARD_MATCH"),
 }));
 
 vi.mock("@corgtex/shared", () => ({
@@ -41,6 +48,8 @@ describe("goal mutation tool", () => {
   it("declares a create_goal model tool", () => {
     expect(createGoalTool.function.name).toBe("create_goal");
     expect(createGoalTool.function.parameters.required).toContain("title");
+    expect(createGoalTool.function.parameters.properties).toHaveProperty("duplicateResolution");
+    expect(createGoalTool.function.parameters.properties).toHaveProperty("duplicateTargetEntityId");
   });
 
   it("creates a goal through the domain layer", async () => {
@@ -67,6 +76,7 @@ describe("goal mutation tool", () => {
         title: "Transform 1,000 businesses",
         cadence: "TEN_YEAR",
         keyResults: [{ title: "Acquire first pilot", targetValue: 1, currentValue: 0 }],
+        duplicateGuard: { onExact: "use_existing" },
       }),
     );
     expect(result).toEqual({ success: true, goalId: "goal-1" });
@@ -92,6 +102,12 @@ describe("action mutation tool", () => {
       { title: "Send Acme proposal" },
     );
 
+    expect(createAction).toHaveBeenCalledWith(
+      expect.objectContaining({ kind: "agent" }),
+      expect.objectContaining({
+        duplicateGuard: { onExact: "use_existing" },
+      }),
+    );
     expect(prisma.auditLog.findFirst).toHaveBeenCalledWith(expect.objectContaining({
       where: expect.objectContaining({
         entityType: "Action",
@@ -101,6 +117,73 @@ describe("action mutation tool", () => {
       }),
     }));
     expect(prisma.auditLog.update).not.toHaveBeenCalled();
+  });
+
+  it("declares duplicate resolution fields", () => {
+    expect(createActionTool.function.parameters.properties).toHaveProperty("duplicateResolution");
+    expect(createActionTool.function.parameters.properties).toHaveProperty("duplicateTargetEntityId");
+  });
+
+  it("passes explicit duplicate resolutions into action creation", async () => {
+    vi.mocked(createAction).mockResolvedValueOnce({
+      id: "action-existing",
+      title: "Send Acme proposal",
+      status: "OPEN",
+    } as any);
+
+    await createActionItemAction(
+      { kind: "agent", authProvider: "bootstrap", workspaceIds: ["ws-1"] } as any,
+      { workspaceId: "ws-1", sessionId: "session-1" },
+      {
+        title: "Send Acme proposal",
+        duplicateResolution: "update_existing",
+        duplicateTargetEntityId: "action-existing",
+      },
+    );
+
+    expect(createAction).toHaveBeenCalledWith(
+      expect.objectContaining({ kind: "agent" }),
+      expect.objectContaining({
+        duplicateGuard: {
+          resolution: "update_existing",
+          targetEntityId: "action-existing",
+        },
+      }),
+    );
+  });
+
+  it("returns duplicate confirmation payloads without annotating create audits", async () => {
+    vi.mocked(createAction).mockRejectedValueOnce({
+      code: "DUPLICATE_GUARD_MATCH",
+      candidate: {
+        entityType: "Action",
+        entityId: "action-existing",
+        title: "Send Acme proposal",
+        excerpt: null,
+        score: 0.91,
+        matchKind: "likely",
+        reasons: ["similar title"],
+        createdAt: null,
+        updatedAt: null,
+        archivedAt: null,
+      },
+      recommendedResolution: "update_existing",
+      allowedResolutions: ["use_existing", "update_existing", "create_new"],
+    });
+
+    const result = await createActionItemAction(
+      { kind: "agent", authProvider: "bootstrap", workspaceIds: ["ws-1"] } as any,
+      { workspaceId: "ws-1", sessionId: "session-1" },
+      { title: "Send Acme proposal" },
+    );
+
+    expect(result).toMatchObject({
+      status: "duplicate_confirmation_required",
+      candidate: expect.objectContaining({ entityId: "action-existing" }),
+      recommendedResolution: "update_existing",
+      allowedResolutions: ["use_existing", "update_existing", "create_new"],
+    });
+    expect(prisma.auditLog.findFirst).not.toHaveBeenCalled();
   });
 });
 
@@ -117,6 +200,8 @@ describe("proposal mutation tool", () => {
     expect(properties).toHaveProperty("sourceTensionId");
     expect(properties).toHaveProperty("relatedActionIds");
     expect(properties).toHaveProperty("ownerMemberId");
+    expect(properties).toHaveProperty("duplicateResolution");
+    expect(properties).toHaveProperty("duplicateTargetEntityId");
     expect(properties.ownerMemberId).toMatchObject({
       type: ["string", "null"],
     });
@@ -148,6 +233,7 @@ describe("proposal mutation tool", () => {
         title: "Clarify approval policy",
         sourceTensionId: "tension-1",
         relatedActionIds: ["action-1"],
+        duplicateGuard: { onExact: "use_existing" },
       }),
     );
     expect(result).toEqual({ success: true, proposalId: "proposal-1" });
