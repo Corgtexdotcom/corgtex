@@ -16,6 +16,8 @@ const dryRun = Boolean(args["dry-run"]);
 const syncResolved = Boolean(args["sync-resolved"]);
 const syncDedupePrefixes = parseSyncDedupePrefixes(args["sync-dedupe-prefixes"]);
 const RESOLUTION_BLOCKING_LABELS = new Set(["halt-agents", "needs-replan"]);
+const INCIDENT_SCAN_LABELS = ["ops-incident", "ops-auto-fix"];
+const ROUTING_LABELS = new Set(["ops-auto-fix", "ops-advisory"]);
 
 async function main() {
   const { incidents, explicitInput } = await readIncidents();
@@ -74,11 +76,12 @@ async function readStdin() {
 }
 
 async function publishWithGitHubApi(api, plans, options = {}) {
-  const openIssues = await listOpenOpsIssuesWithApi(api);
+  const openIssues = await listOpenIncidentIssuesWithApi(api);
   for (const plan of plans) {
     await ensureLabelsWithApi(api, plan.labels);
     const existing = findExistingIssueFromList(openIssues, plan.searchToken);
     if (existing?.number) {
+      await reconcileExistingIssueLabelsWithApi(api, existing, plan);
       const comment = await githubRequest(
         api,
         `/repos/${api.owner}/${api.repo}/issues/${existing.number}/comments`,
@@ -170,12 +173,27 @@ async function githubRequest(api, path, options = {}) {
   return payload;
 }
 
-async function listOpenOpsIssuesWithApi(api) {
+async function listOpenIncidentIssuesWithApi(api) {
+  return listOpenIssuesByLabelsWithApi(api, INCIDENT_SCAN_LABELS);
+}
+
+async function listOpenIssuesByLabelsWithApi(api, labels) {
+  const issuesByNumber = new Map();
+  for (const label of labels) {
+    const issues = await listOpenIssuesByLabelWithApi(api, label);
+    for (const issue of issues) {
+      if (issue?.number) issuesByNumber.set(issue.number, issue);
+    }
+  }
+  return [...issuesByNumber.values()];
+}
+
+async function listOpenIssuesByLabelWithApi(api, label) {
   const issues = [];
   for (let page = 1; ; page += 1) {
     const batch = await githubRequest(
       api,
-      `/repos/${api.owner}/${api.repo}/issues?state=open&labels=ops-auto-fix&per_page=100&page=${page}`,
+      `/repos/${api.owner}/${api.repo}/issues?state=open&labels=${encodeURIComponent(label)}&per_page=100&page=${page}`,
     );
     issues.push(...batch);
     if (batch.length < 100) break;
@@ -213,6 +231,7 @@ function publishWithGh(plans, options = {}) {
     ensureLabels(plan.labels);
     const existing = findExistingIssue(plan.searchToken);
     if (existing?.number) {
+      reconcileExistingIssueLabelsWithGh(existing, plan);
       runGh(["issue", "comment", String(existing.number), "--body", updateBody(plan)]);
       continue;
     }
@@ -241,20 +260,23 @@ function ensureLabels(labels) {
 }
 
 function findExistingIssue(searchToken) {
-  const output = runGh([
-    "issue",
-    "list",
-    "--state",
-    "open",
-    "--label",
-    "ops-auto-fix",
-    "--search",
-    `${searchToken} in:title`,
-    "--json",
-    "number,title",
-  ]);
-  const list = JSON.parse(output || "[]");
-  return list[0] ?? null;
+  for (const label of INCIDENT_SCAN_LABELS) {
+    const output = runGh([
+      "issue",
+      "list",
+      "--state",
+      "open",
+      "--label",
+      label,
+      "--search",
+      `${searchToken} in:title`,
+      "--json",
+      "number,title,body,labels",
+    ]);
+    const existing = findExistingIssueFromList(JSON.parse(output || "[]"), searchToken);
+    if (existing) return existing;
+  }
+  return null;
 }
 
 function closeResolvedIssuesWithGh(activeTokens, dedupePrefixes) {
@@ -275,6 +297,16 @@ function closeResolvedIssuesWithGh(activeTokens, dedupePrefixes) {
 }
 
 function listOpenOpsIssuesWithGhApi() {
+  const issuesByNumber = new Map();
+  for (const label of INCIDENT_SCAN_LABELS) {
+    for (const issue of listOpenOpsIssuesWithGhApiLabel(label)) {
+      if (issue?.number) issuesByNumber.set(issue.number, issue);
+    }
+  }
+  return [...issuesByNumber.values()];
+}
+
+function listOpenOpsIssuesWithGhApiLabel(label) {
   const issues = [];
   for (let page = 1; ; page += 1) {
     const output = runGh([
@@ -285,7 +317,7 @@ function listOpenOpsIssuesWithGhApi() {
       "-f",
       "state=open",
       "-f",
-      "labels=ops-auto-fix",
+      `labels=${label}`,
       "-f",
       "per_page=100",
       "-f",
@@ -299,6 +331,70 @@ function listOpenOpsIssuesWithGhApi() {
     if (batch.length < 100) break;
   }
   return issues;
+}
+
+async function reconcileExistingIssueLabelsWithApi(api, issue, plan) {
+  const reconciliation = reconcileIssueLabels(issue, plan.labels);
+  if (!reconciliation.changed) return;
+
+  const updated = await githubRequest(
+    api,
+    `/repos/${api.owner}/${api.repo}/issues/${issue.number}`,
+    {
+      method: "PATCH",
+      body: { labels: reconciliation.nextLabels },
+    },
+  );
+  issue.labels = updated?.labels ?? reconciliation.nextLabels.map((name) => ({ name }));
+}
+
+function reconcileExistingIssueLabelsWithGh(issue, plan) {
+  const reconciliation = reconcileIssueLabels(issue, plan.labels);
+  if (!reconciliation.changed) return;
+
+  const argv = ["issue", "edit", String(issue.number)];
+  if (reconciliation.addLabels.length) {
+    argv.push("--add-label", reconciliation.addLabels.join(","));
+  }
+  if (reconciliation.removeLabels.length) {
+    argv.push("--remove-label", reconciliation.removeLabels.join(","));
+  }
+  runGh(argv);
+  issue.labels = reconciliation.nextLabels.map((name) => ({ name }));
+}
+
+function reconcileIssueLabels(issue, desiredLabels) {
+  const currentLabels = issueLabelNames(issue);
+  const currentSet = new Set(currentLabels);
+  const desiredSet = new Set(desiredLabels);
+  const removeLabels = routingLabelsToRemove(currentSet, desiredSet);
+  const addLabels = desiredLabels.filter((label) => !currentSet.has(label));
+  const nextSet = new Set(currentLabels);
+
+  for (const label of removeLabels) nextSet.delete(label);
+  for (const label of desiredLabels) nextSet.add(label);
+
+  const nextLabels = [
+    ...currentLabels.filter((label) => nextSet.has(label)),
+    ...desiredLabels.filter((label) => !currentLabels.includes(label)),
+  ];
+
+  return {
+    addLabels,
+    removeLabels,
+    nextLabels,
+    changed: addLabels.length > 0 || removeLabels.length > 0,
+  };
+}
+
+function routingLabelsToRemove(currentSet, desiredSet) {
+  if (desiredSet.has("ops-auto-fix")) {
+    return currentSet.has("ops-advisory") ? ["ops-advisory"] : [];
+  }
+  if (desiredSet.has("ops-advisory") && currentSet.has("ops-auto-fix") && !currentSet.has("ops-advisory")) {
+    return ["ops-auto-fix"];
+  }
+  return [];
 }
 
 function activeSearchTokens(plans) {
@@ -378,6 +474,7 @@ function updateBody(plan) {
 
 function labelColor(label) {
   if (label === "ops-auto-fix") return "D93F0B";
+  if (label === "ops-advisory") return "FBCA04";
   if (label === "ops-incident") return "B60205";
   if (label === "severity-p1") return "B60205";
   if (label === "severity-p2") return "D93F0B";

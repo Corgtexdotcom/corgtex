@@ -29,6 +29,7 @@ const NEUTRAL_AGENT_RUN_STATUSES = new Set([
   "SKIPPED",
   "ABORTED",
 ]);
+const NON_AUTOFIX_INCIDENT_STATUSES = new Set(["advisory"]);
 
 export function parseArgs(argv) {
   const parsed = { _: [] };
@@ -96,6 +97,9 @@ export function incidentTitle(incident) {
 }
 
 export function incidentBody(incident) {
+  const handling = incidentIsAutoFix(incident)
+    ? "Codex Builder may prepare a fix PR and enable auto-merge. Codex Reviewer must apply `.codex/review.md` before approval."
+    : "This advisory is not routed to the unattended Builder Loop unless a human adds `ops-auto-fix`.";
   const lines = [
     "## Summary",
     "",
@@ -126,19 +130,24 @@ export function incidentBody(incident) {
     "",
     "## Codex Handling",
     "",
-    "Codex Builder may prepare a fix PR and enable auto-merge. Codex Reviewer must apply `.codex/review.md` before approval.",
+    handling,
   );
 
   return `${lines.join("\n")}\n`;
 }
 
 export function incidentLabels(incident) {
+  const routingLabel = incidentIsAutoFix(incident) ? "ops-auto-fix" : "ops-advisory";
   return [
-    "ops-auto-fix",
+    routingLabel,
     "ops-incident",
     `severity-${incident.severity.toLowerCase()}`,
     `service-${labelSafe(incident.service)}`,
   ];
+}
+
+function incidentIsAutoFix(incident) {
+  return !NON_AUTOFIX_INCIDENT_STATUSES.has(String(incident?.status ?? "").trim().toLowerCase());
 }
 
 export function parseJsonEnv(env, name, fallback) {
