@@ -212,6 +212,45 @@ describe("duplicate guard", () => {
     }));
   });
 
+  it("prefers an active exact match over an archived exact match with the same score", async () => {
+    const { checkWorkspaceDuplicateGuard } = await import("./duplicate-guard");
+    prismaMock.brainSource.findMany
+      .mockResolvedValueOnce([
+        {
+          id: "source-active",
+          title: "Vendor transcript",
+          content: "Vendor transcript content",
+          externalId: "external-1",
+          archivedAt: null,
+          createdAt: new Date("2026-07-20T10:00:00.000Z"),
+        },
+      ])
+      .mockResolvedValueOnce([
+        {
+          id: "source-archived",
+          title: "Vendor transcript",
+          content: "Vendor transcript content",
+          externalId: "external-1",
+          archivedAt: new Date("2026-07-19T10:00:00.000Z"),
+          createdAt: new Date("2026-07-18T10:00:00.000Z"),
+        },
+      ]);
+
+    await expect(checkWorkspaceDuplicateGuard({
+      workspaceId: "workspace-1",
+      entityType: "BrainSource",
+      title: "Vendor transcript",
+      content: "Vendor transcript content",
+      externalId: "external-1",
+    })).rejects.toMatchObject({
+      candidate: expect.objectContaining({
+        entityId: "source-active",
+        archivedAt: null,
+      }),
+      allowedResolutions: ["use_existing", "update_existing", "create_new"],
+    });
+  });
+
   it("uses Brain source URL metadata for exact matches outside the latest window", async () => {
     const { checkWorkspaceDuplicateGuard } = await import("./duplicate-guard");
     prismaMock.brainSource.findMany

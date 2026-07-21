@@ -1366,6 +1366,8 @@ async function applyMeetingDuplicateUpdate(
       calendarExternalId: existing.calendarExternalId || params.calendarExternalId?.trim() || null,
       meetingUrl: nextMeetingUrl,
       meetingUrlHash: nextMeetingUrl ? meetingUrlHash(nextMeetingUrl) : existing.meetingUrlHash,
+      status: "COMPLETED",
+      recordedAt: params.recordedAt,
       scheduledEndAt: existing.scheduledEndAt ?? params.scheduledEndAt ?? null,
       summaryMd,
       ingestionGuidanceMd,

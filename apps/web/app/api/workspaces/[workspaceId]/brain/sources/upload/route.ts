@@ -20,7 +20,7 @@ const DUPLICATE_GUARD_RESOLUTIONS: DuplicateGuardResolution[] = [
 function duplicateGuardFromFormData(formData: FormData): DuplicateGuardOptions | undefined {
   const resolution = formString(formData, "duplicateResolution");
   if (!DUPLICATE_GUARD_RESOLUTIONS.includes(resolution as DuplicateGuardResolution)) {
-    return undefined;
+    return {};
   }
   const targetEntityId = formString(formData, "duplicateTargetEntityId");
   return {
@@ -37,7 +37,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
     const contentType = request.headers.get("content-type") ?? "";
 
     if (!contentType.includes("multipart/form-data")) {
-        throw new AppError(400, "INVALID_INPUT", "Must be multipart/form-data");
+      throw new AppError(400, "INVALID_INPUT", "Must be multipart/form-data");
     }
 
     const formData = await request.formData();

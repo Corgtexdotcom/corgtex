@@ -191,6 +191,55 @@ describe("createDocument", () => {
     expect(assertTrialStorageCapacityMock).not.toHaveBeenCalled();
   });
 
+  it("uses supplied URL and content hash metadata for document duplicate checks", async () => {
+    const existingDocument = {
+      id: "document-existing",
+      workspaceId: "workspace-1",
+      title: "Critical path",
+      source: "api",
+      storageKey: "doc-existing-key",
+      mimeType: "application/pdf",
+      textContent: null,
+      metadata: {
+        url: "https://example.com/critical-path.pdf",
+        contentHash: "hash-from-upstream",
+      },
+      archivedAt: null,
+      createdAt: new Date("2026-07-20T10:00:00.000Z"),
+      updatedAt: new Date("2026-07-20T10:05:00.000Z"),
+    };
+    prismaMock.document.findMany
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([existingDocument]);
+    prismaMock.document.findFirst.mockResolvedValueOnce(existingDocument);
+
+    const { createDocument } = await import("./documents");
+    await expect(createDocument({ kind: "user", user: { id: "user-1" } } as any, {
+      workspaceId: "workspace-1",
+      title: "Critical path",
+      source: "api",
+      storageKey: "doc-key",
+      mimeType: "application/pdf",
+      metadata: {
+        url: "https://example.com/critical-path.pdf",
+        contentHash: "hash-from-upstream",
+      },
+      duplicateGuard: {
+        onExact: "use_existing",
+      },
+    })).resolves.toMatchObject({ id: "document-existing" });
+
+    expect(prismaMock.document.findMany).toHaveBeenNthCalledWith(2, expect.objectContaining({
+      where: expect.objectContaining({
+        OR: expect.arrayContaining([
+          { metadata: { path: ["url"], equals: "https://example.com/critical-path.pdf" } },
+          { metadata: { path: ["contentHash"], equals: "hash-from-upstream" } },
+        ]),
+      }),
+    }));
+    expect(prismaMock.document.create).not.toHaveBeenCalled();
+  });
+
   it("refreshes document and file-upload Brain sources when a duplicate document is updated", async () => {
     const existingDocument = {
       id: "document-existing",
@@ -232,6 +281,9 @@ describe("createDocument", () => {
         workspaceId: "workspace-1",
         sourceType: { in: ["DOC", "FILE_UPLOAD"] },
         metadata: { path: ["documentId"], equals: "document-existing" },
+      }),
+      data: expect.objectContaining({
+        absorbedAt: null,
       }),
     }));
     expect(prismaMock.document.create).not.toHaveBeenCalled();

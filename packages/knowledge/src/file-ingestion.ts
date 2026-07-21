@@ -101,6 +101,7 @@ async function updateDuplicateUploadedDocument(actor: AppActor, params: {
   documentId: string;
   documentTitle: string;
   source: string;
+  storageKey: string;
   fileName: string;
   mimeType: string;
   size: number;
@@ -124,6 +125,8 @@ async function updateDuplicateUploadedDocument(actor: AppActor, params: {
       where: { id: existing.id },
       data: {
         title: existing.title || params.documentTitle,
+        storageKey: params.storageKey,
+        mimeType: params.mimeType,
         textContent: mergedText,
         metadata: {
           ...(typeof existing.metadata === "object" && existing.metadata !== null && !Array.isArray(existing.metadata)
@@ -132,6 +135,7 @@ async function updateDuplicateUploadedDocument(actor: AppActor, params: {
           ...params.metadata,
           fileName: params.fileName,
           size: params.size,
+          storageKey: params.storageKey,
           ...(params.ingestionGuidanceMd ? { ingestionGuidanceMd: params.ingestionGuidanceMd } : {}),
           ...(contentHash ? { contentHash } : {}),
           duplicateGuardUpdatedAt: new Date().toISOString(),
@@ -154,11 +158,17 @@ async function updateDuplicateUploadedDocument(actor: AppActor, params: {
           title: existingSource.title || params.documentTitle,
           channel: existingSource.channel || params.source,
           ingestionGuidanceMd: params.ingestionGuidanceMd ?? existingSource.ingestionGuidanceMd,
+          fileStorageKey: params.storageKey,
+          fileName: params.fileName,
+          fileMimeType: params.mimeType,
+          fileSizeBytes: params.size,
+          absorbedAt: null,
           metadata: {
             ...(typeof existingSource.metadata === "object" && existingSource.metadata !== null && !Array.isArray(existingSource.metadata)
               ? existingSource.metadata as Record<string, unknown>
               : {}),
             documentId: document.id,
+            storageKey: params.storageKey,
             fileName: params.fileName,
             mimeType: params.mimeType,
             size: params.size,
@@ -177,11 +187,13 @@ async function updateDuplicateUploadedDocument(actor: AppActor, params: {
           authorMemberId: null,
           channel: params.source,
           ingestionGuidanceMd: params.ingestionGuidanceMd ?? null,
+          fileStorageKey: params.storageKey,
           fileName: params.fileName,
           fileMimeType: params.mimeType,
           fileSizeBytes: params.size,
           metadata: {
             documentId: document.id,
+            storageKey: params.storageKey,
             ...(contentHash ? { contentHash } : {}),
           } as Prisma.InputJsonValue,
         },
@@ -351,26 +363,34 @@ export async function ingestFile(actor: AppActor, params: {
     return loadDocumentWithSource(params.workspaceId, duplicateDecision.match.entityId);
   }
   if (duplicateDecision?.resolution === "update_existing") {
-    return updateDuplicateUploadedDocument(actor, {
-      workspaceId: params.workspaceId,
-      documentId: duplicateDecision.match.entityId,
-      documentTitle,
-      source,
-      fileName,
-      mimeType: params.mimeType,
-      size,
-      textContent,
-      brainSourceContent,
-      ingestionGuidanceMd,
-      metadata: {
-        ...documentMetadata,
-        extraction: {
-          supported,
-          hasTextContent: Boolean(textContent?.trim()),
-          truncated,
+    const storageKey = `workspaces/${params.workspaceId}/uploads/${randomUUID()}/${fileName}`;
+    await defaultStorage.put(storageKey, params.fileBuffer, { contentType: params.mimeType });
+    try {
+      return await updateDuplicateUploadedDocument(actor, {
+        workspaceId: params.workspaceId,
+        documentId: duplicateDecision.match.entityId,
+        documentTitle,
+        source,
+        storageKey,
+        fileName,
+        mimeType: params.mimeType,
+        size,
+        textContent,
+        brainSourceContent,
+        ingestionGuidanceMd,
+        metadata: {
+          ...documentMetadata,
+          extraction: {
+            supported,
+            hasTextContent: Boolean(textContent?.trim()),
+            truncated,
+          },
         },
-      },
-    });
+      });
+    } catch (error) {
+      await defaultStorage.delete(storageKey).catch(() => undefined);
+      throw error;
+    }
   }
 
   // 2. Upload to Blob Storage

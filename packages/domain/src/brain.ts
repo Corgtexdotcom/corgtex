@@ -523,6 +523,7 @@ export async function ingestSource(actor: AppActor, params: {
           content: mergedContent,
           title: existing.title || title,
           ingestionGuidanceMd: duplicateGuardMergeText(existing.ingestionGuidanceMd, params.ingestionGuidanceMd),
+          absorbedAt: null,
           metadata: {
             ...(typeof existing.metadata === "object" && existing.metadata !== null && !Array.isArray(existing.metadata) ? existing.metadata : {}),
             ...(typeof params.metadata === "object" && params.metadata !== null && !Array.isArray(params.metadata) ? params.metadata : {}),

@@ -1,6 +1,6 @@
 import { duplicateGuardErrorPayload, isDuplicateGuardMatchError, listSources } from "@corgtex/domain";
 import { requirePageActor } from "@/lib/auth";
-import { ingestSourceAction } from "../actions";
+import { ingestSourceAction, uploadBrainSourceFileAction } from "../actions";
 import { getTranslations } from "next-intl/server";
 import { DuplicateGuardForm, type DuplicateGuardFormState } from "../../add/DuplicateGuardForm";
 
@@ -28,6 +28,17 @@ export default async function BrainSourcesPage({
     return null;
   }
 
+  async function uploadSourceFileAndReturn(_state: DuplicateGuardFormState, formData: FormData): Promise<DuplicateGuardFormState> {
+    "use server";
+    try {
+      await uploadBrainSourceFileAction(formData);
+    } catch (error) {
+      if (isDuplicateGuardMatchError(error)) return duplicateGuardErrorPayload(error);
+      throw error;
+    }
+    return null;
+  }
+
   return (
     <>
       <div className="ws-page-header">
@@ -37,13 +48,18 @@ export default async function BrainSourcesPage({
 
       <section className="ws-section stack">
         <h2>{t("ingestRawFiles")}</h2>
-        <form action={`/api/workspaces/${workspaceId}/brain/sources/upload`} method="post" encType="multipart/form-data" className="stack panel">
+        <DuplicateGuardForm action={uploadSourceFileAndReturn} encType="multipart/form-data" className="stack panel">
+          <input type="hidden" name="workspaceId" value={workspaceId} />
           <label>
             {t("fileToIngest")}
             <input type="file" name="file" required />
           </label>
+          <label>
+            {t("labelTitle")}
+            <input name="title" placeholder={t("placeholderSourceTitle")} />
+          </label>
           <button type="submit">{t("uploadAndMap")}</button>
-        </form>
+        </DuplicateGuardForm>
 
         <h2>{t("ingestTextSource")}</h2>
         <DuplicateGuardForm action={ingestSourceAndReturn} className="stack panel">

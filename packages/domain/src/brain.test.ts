@@ -16,6 +16,9 @@ const { prismaMock } = vi.hoisted(() => ({
     },
     brainSource: {
       create: vi.fn(),
+      findFirst: vi.fn(),
+      findMany: vi.fn(),
+      update: vi.fn(),
     },
     workspacePermalink: {
       upsert: vi.fn(),
@@ -232,6 +235,15 @@ describe("brain source ingestion", () => {
       tier: 1,
       ingestionGuidanceMd: "Highlight launch constraints.",
     });
+    prismaMock.brainSource.findFirst.mockResolvedValue(null);
+    prismaMock.brainSource.findMany.mockResolvedValue([]);
+    prismaMock.brainSource.update.mockResolvedValue({
+      id: "source-1",
+      sourceType: "DOC",
+      tier: 1,
+      content: "Policy text",
+      absorbedAt: null,
+    });
   });
 
   it("persists trimmed ingestion guidance on brain sources", async () => {
@@ -257,5 +269,49 @@ describe("brain source ingestion", () => {
         meta: expect.objectContaining({ hasIngestionGuidance: true }),
       }),
     }));
+  });
+
+  it("resets absorbed state when a duplicate Brain source is updated", async () => {
+    const existingSource = {
+      id: "source-existing",
+      workspaceId: "ws-1",
+      sourceType: "DOC",
+      tier: 1,
+      title: "Policy",
+      content: "Policy text",
+      ingestionGuidanceMd: null,
+      metadata: {},
+      archivedAt: null,
+      createdAt: new Date("2026-07-20T10:00:00.000Z"),
+      absorbedAt: new Date("2026-07-20T10:05:00.000Z"),
+    };
+    prismaMock.brainSource.findMany.mockResolvedValueOnce([existingSource]);
+    prismaMock.brainSource.findFirst.mockResolvedValueOnce(existingSource);
+    prismaMock.brainSource.update.mockResolvedValueOnce({
+      ...existingSource,
+      content: "Policy text\n\n---\nAdditional duplicate upload context:\nNew policy detail",
+      absorbedAt: null,
+    });
+
+    const { ingestSource } = await import("./brain");
+    await ingestSource(ownerActor, {
+      workspaceId: "ws-1",
+      sourceType: "DOC",
+      tier: 1,
+      title: "Policy",
+      content: "New policy detail",
+      duplicateGuard: {
+        resolution: "update_existing",
+        targetEntityId: "source-existing",
+      },
+    });
+
+    expect(prismaMock.brainSource.update).toHaveBeenCalledWith(expect.objectContaining({
+      where: { id: "source-existing" },
+      data: expect.objectContaining({
+        absorbedAt: null,
+      }),
+    }));
+    expect(prismaMock.brainSource.create).not.toHaveBeenCalled();
   });
 });

@@ -301,4 +301,90 @@ describe("file-ingestion", () => {
     expect(defaultStorage.put).not.toHaveBeenCalled();
     expect(prisma.$transaction).not.toHaveBeenCalled();
   });
+
+  it("stores and links the replacement blob when a duplicate file upload updates an existing document", async () => {
+    const { defaultStorage } = await import("@corgtex/storage");
+    vi.mocked(checkWorkspaceDuplicateGuard).mockResolvedValueOnce({
+      resolution: "update_existing",
+      match: {
+        entityType: "Document",
+        entityId: "doc-existing",
+        title: "Existing Upload",
+        excerpt: "Old text",
+        score: 0.93,
+        matchKind: "likely",
+        reasons: ["similar content"],
+        createdAt: null,
+        updatedAt: null,
+        archivedAt: null,
+      },
+    });
+
+    const existingDocument = {
+      id: "doc-existing",
+      workspaceId: "ws_1",
+      title: "Existing Upload",
+      source: "FILE_UPLOAD",
+      storageKey: "old-storage-key",
+      mimeType: "text/plain",
+      textContent: "Old text",
+      metadata: {},
+      archivedAt: null,
+    };
+    const existingSource = {
+      id: "source-existing",
+      workspaceId: "ws_1",
+      sourceType: "FILE_UPLOAD",
+      title: "Existing Upload",
+      channel: "FILE_UPLOAD",
+      ingestionGuidanceMd: null,
+      metadata: { documentId: "doc-existing" },
+    };
+    const txObj = {
+      document: {
+        findFirst: vi.fn().mockResolvedValue(existingDocument),
+        update: vi.fn().mockImplementation(async (args: any) => ({ ...existingDocument, ...args.data })),
+      },
+      brainSource: {
+        findFirst: vi.fn().mockResolvedValue(existingSource),
+        update: vi.fn().mockImplementation(async (args: any) => ({ ...existingSource, ...args.data })),
+        create: vi.fn(),
+      },
+      auditLog: { create: vi.fn() },
+    };
+    vi.mocked(prisma.$transaction).mockImplementationOnce(async (callback: any) => callback(txObj));
+
+    const res = await ingestFile(actor, {
+      workspaceId: "ws_1",
+      fileName: "test.txt",
+      mimeType: "text/plain",
+      fileBuffer: Buffer.from("New replacement text"),
+      uploadSource: "FILE_UPLOAD",
+      duplicateGuard: {
+        resolution: "update_existing",
+        targetEntityId: "doc-existing",
+      },
+    });
+
+    const replacementStorageKey = vi.mocked(defaultStorage.put).mock.calls[0]?.[0];
+    expect(replacementStorageKey).toMatch(/^workspaces\/ws_1\/uploads\/.+\/test\.txt$/);
+    expect(txObj.document.update).toHaveBeenCalledWith(expect.objectContaining({
+      where: { id: "doc-existing" },
+      data: expect.objectContaining({
+        storageKey: replacementStorageKey,
+        mimeType: "text/plain",
+      }),
+    }));
+    expect(txObj.brainSource.update).toHaveBeenCalledWith(expect.objectContaining({
+      where: { id: "source-existing" },
+      data: expect.objectContaining({
+        fileStorageKey: replacementStorageKey,
+        fileName: "test.txt",
+        fileMimeType: "text/plain",
+        absorbedAt: null,
+      }),
+    }));
+    expect(txObj.brainSource.create).not.toHaveBeenCalled();
+    expect(res.document.storageKey).toBe(replacementStorageKey);
+  });
 });

@@ -689,13 +689,24 @@ function allowsDuplicateGuardUpdate(candidate: DuplicateGuardCandidate) {
   return true;
 }
 
+function candidateTime(candidate: DuplicateGuardCandidate) {
+  const value = candidate.updatedAt ?? candidate.createdAt;
+  const time = value ? Date.parse(value) : 0;
+  return Number.isFinite(time) ? time : 0;
+}
+
 async function findDuplicateGuardMatch(input: DuplicateGuardInput, options?: DuplicateGuardOptions | null) {
   const rows = await latestRows(input.entityType, input.workspaceId, candidateLimit(options?.candidateLimit), input);
   const candidates = mapRows(input.entityType, rows);
   const matches = candidates
     .map((candidate) => scoreCandidate(input, candidate))
     .filter((candidate): candidate is DuplicateGuardCandidate => Boolean(candidate))
-    .sort((left, right) => right.score - left.score);
+    .sort((left, right) => {
+      const scoreDelta = right.score - left.score;
+      if (scoreDelta !== 0) return scoreDelta;
+      if (Boolean(left.archivedAt) !== Boolean(right.archivedAt)) return left.archivedAt ? 1 : -1;
+      return candidateTime(right) - candidateTime(left);
+    });
   return matches.map(cleanCandidate);
 }
 

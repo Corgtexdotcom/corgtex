@@ -30,6 +30,7 @@ export type DuplicateGuardFormAction = (
 type DuplicateGuardFormProps = {
   action: DuplicateGuardFormAction;
   className?: string;
+  encType?: string;
   children: ReactNode;
 };
 
@@ -74,11 +75,11 @@ export function DuplicateGuardConfirmationPanel({
   );
 }
 
-export function DuplicateGuardForm({ action, className, children }: DuplicateGuardFormProps) {
+export function DuplicateGuardForm({ action, className, encType, children }: DuplicateGuardFormProps) {
   const [state, formAction, isPending] = useActionState(action, null);
 
   return (
-    <form action={formAction} className={className}>
+    <form action={formAction} className={className} encType={encType}>
       <input type="hidden" name="duplicateGuardEnabled" value="true" />
       <DuplicateGuardConfirmationPanel state={state} isPending={isPending} />
       {children}

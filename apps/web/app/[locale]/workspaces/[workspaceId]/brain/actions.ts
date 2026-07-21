@@ -7,6 +7,7 @@ import { revalidatePath } from "next/cache";
 import {
   AGREEMENT_BRAIN_ARTICLE_AUTHORITIES,
   AGREEMENT_BRAIN_ARTICLE_TYPES,
+  AppError,
   createArticle,
   updateArticle,
   ingestSource,
@@ -14,6 +15,7 @@ import {
   requireWorkspaceMembership,
   returnArticleToDraft,
 } from "@corgtex/domain";
+import { ingestFile } from "@corgtex/knowledge";
 import { requirePageActor } from "@/lib/auth";
 import { duplicateGuardFromFormData } from "../action-utils";
 
@@ -151,6 +153,32 @@ export async function ingestSourceAction(formData: FormData) {
     content: asString(formData, "content"),
     title: asOptional(formData, "title"),
     channel: asOptional(formData, "channel"),
+    duplicateGuard: duplicateGuardFromFormData(formData),
+  });
+  refresh(workspaceId);
+}
+
+export async function uploadBrainSourceFileAction(formData: FormData) {
+  const _demoGuardWsId = formData.get("workspaceId") as string;
+  if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
+
+  const actor = await requirePageActor();
+  const workspaceId = asString(formData, "workspaceId");
+  const fileEntry = formData.get("file");
+  if (!(fileEntry instanceof File) || fileEntry.size === 0) {
+    throw new AppError(400, "INVALID_INPUT", "file is required.");
+  }
+
+  const originalName = fileEntry.name.trim();
+  const buffer = Buffer.from(await fileEntry.arrayBuffer());
+  await ingestFile(actor, {
+    workspaceId,
+    fileBuffer: buffer,
+    fileName: originalName,
+    mimeType: fileEntry.type || "application/octet-stream",
+    uploadSource: "brain-ui",
+    documentTitle: asOptional(formData, "title") ?? originalName,
+    ingestionGuidanceMd: asOptional(formData, "ingestionGuidanceMd") ?? undefined,
     duplicateGuard: duplicateGuardFromFormData(formData),
   });
   refresh(workspaceId);

@@ -37,6 +37,11 @@ function metadataObject(value: Prisma.InputJsonValue | Prisma.JsonValue | null |
   return typeof value === "object" && value !== null && !Array.isArray(value) ? value as Record<string, unknown> : {};
 }
 
+function metadataString(metadata: Record<string, unknown>, key: string) {
+  const value = metadata[key];
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
 async function getActiveDocument(workspaceId: string, documentId: string) {
   const document = await prisma.document.findFirst({
     where: { id: documentId, workspaceId, archivedAt: null },
@@ -76,6 +81,7 @@ async function applyDocumentDuplicateUpdate(actor: AppActor, params: CreateDocum
         },
         data: {
           content: [updated.title, mergedText].join("\n\n"),
+          absorbedAt: null,
           metadata: {
             documentId: updated.id,
             storageKey: updated.storageKey,
@@ -126,8 +132,10 @@ export async function createDocument(actor: AppActor, params: CreateDocumentPara
   invariant(source.length > 0, 400, "INVALID_INPUT", "Document source is required.");
   invariant(storageKey.length > 0, 400, "INVALID_INPUT", "storageKey is required.");
   const documentMetadata = metadataObject(params.metadata);
-  const sourceUrl = typeof documentMetadata.sourceUrl === "string" ? documentMetadata.sourceUrl : null;
-  const contentHash = duplicateGuardContentHash(textContent);
+  const sourceUrl = metadataString(documentMetadata, "sourceUrl")
+    ?? metadataString(documentMetadata, "url")
+    ?? metadataString(documentMetadata, "externalUrl");
+  const contentHash = metadataString(documentMetadata, "contentHash") ?? duplicateGuardContentHash(textContent);
   const duplicateDecision = await checkWorkspaceDuplicateGuard({
     workspaceId: params.workspaceId,
     entityType: "Document",
