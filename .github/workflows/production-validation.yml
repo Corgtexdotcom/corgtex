@@ -57,7 +57,7 @@ on:
       recorder_readiness_deployments:
         description: Comma-separated deployment ids, slugs, labels, or managed workspace slugs for recorder readiness.
         required: false
-        default: managed-recorder-validation
+        default: ""
       recorder_readiness_temp_meetings:
         description: Create and clean up tagged temporary Corgtex scheduled meetings when recorder readiness needs setup.
         required: true
@@ -124,7 +124,7 @@ jobs:
           PRODUCTION_VALIDATION_EXPECTED_GIT_SHA_INPUT: ${{ inputs.expected_git_sha || '' }}
           PRODUCTION_VALIDATION_PR_NUMBERS_INPUT: ${{ inputs.pr_numbers || '' }}
           PRODUCTION_VALIDATION_BASELINE_PR_NUMBERS: ${{ vars.PRODUCTION_VALIDATION_BASELINE_PR_NUMBERS || vars.PRODUCTION_VALIDATION_CRM_BASELINE_PR_NUMBERS || '696' }}
-          PRODUCTION_VALIDATION_RECORDER_DEPLOYMENTS_INPUT: ${{ inputs.recorder_readiness_deployments || vars.PRODUCTION_VALIDATION_RECORDER_DEPLOYMENTS || 'managed-recorder-validation' }}
+          PRODUCTION_VALIDATION_RECORDER_DEPLOYMENTS_INPUT: ${{ inputs.recorder_readiness_deployments || vars.PRODUCTION_VALIDATION_RECORDER_DEPLOYMENTS || '' }}
           PRODUCTION_VALIDATION_RECORDER_TEMP_MEETINGS_INPUT: ${{ inputs.recorder_readiness_temp_meetings }}
           PRODUCTION_VALIDATION_CRM_SMOKE_INPUT: ${{ inputs.crm_smoke }}
           PRODUCTION_VALIDATION_TELEMETRY_RELEASE_SMOKE_INPUT: ${{ inputs.telemetry_release_smoke }}

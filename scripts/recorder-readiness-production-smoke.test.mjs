@@ -83,6 +83,7 @@ describe("recorder readiness production smoke helpers", () => {
     expect(normalizeBaseUrl("https://app.corgtex.com/")).toBe("https://app.corgtex.com");
     expect(normalizeControlPlaneUrl("https://ops.corgtex.com/")).toBe("https://ops.corgtex.com");
     expect(normalizeRecorderReadinessTargets("alpha, beta,alpha")).toEqual(["alpha", "beta"]);
+    expect(normalizeRecorderReadinessTargets("")).toEqual([]);
   });
 
   it("matches deployment targets by deployment, workspace, and URL identifiers", () => {
@@ -442,6 +443,39 @@ describe("recorder readiness production smoke helpers", () => {
     });
 
     expect(smoke.validationRun.results.map((result) => result.prNumber)).toEqual([725, 726]);
+  });
+
+  it("blocks clearly when recorder deployments are not configured", async () => {
+    const originalFetch = global.fetch;
+    global.fetch = vi.fn(async () => new Response(JSON.stringify({
+      status: "ok",
+      release: { gitSha: "current-sha" },
+    }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    }));
+    try {
+      const smoke = new RecorderReadinessProductionSmoke({
+        baseUrl: "https://app.corgtex.com",
+        outDir: ".artifacts/test-recorder-missing-targets",
+        targets: [],
+        expectedGitSha: "current-sha",
+        prNumbers: [725],
+        controlPlaneToken: "token",
+      });
+
+      await smoke.run();
+
+      expect(smoke.validationRun.status).toBe("blocked");
+      expect(smoke.validationRun.results).toHaveLength(1);
+      expect(smoke.validationRun.results[0]).toMatchObject({
+        prNumber: 725,
+        result: "blocked",
+        blocker: "RECORDER_READINESS_SMOKE_DEPLOYMENTS or PRODUCTION_VALIDATION_RECORDER_DEPLOYMENTS must identify at least one recorder readiness deployment.",
+      });
+    } finally {
+      global.fetch = originalFetch;
+    }
   });
 
   it("can create, verify, cancel, and archive a temporary Corgtex scheduled meeting when enabled", async () => {
