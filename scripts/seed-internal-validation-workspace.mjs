@@ -1,4 +1,5 @@
 import { PrismaClient } from "@prisma/client";
+import { pathToFileURL } from "node:url";
 
 import { seedStableClient } from "./lib/client-stable-seed.mjs";
 import {
@@ -70,7 +71,7 @@ function assertValidationSeedEnvironmentPinned() {
   }
 }
 
-const validationSeedConfig = {
+export const validationSeedConfig = {
   envPrefix: "VALIDATION",
   defaultLocale: "en",
   workspace: {
@@ -87,6 +88,8 @@ const validationSeedConfig = {
     fallbackName: "there",
   },
   featureFlags: {
+    FINANCE: true,
+    PRACTICE_PROJECTS: true,
     RELATIONSHIPS: true,
     GOALS: true,
     SLICING_PIE: true,
@@ -203,6 +206,29 @@ const validationSeedConfig = {
     },
   ],
   auditAction: "internal_validation_workspace.seeded",
+};
+
+export const validationPracticeFinanceFixtures = {
+  client: {
+    code: "VAL-CLIENT",
+    name: "Validation Fixture Client",
+    leadName: "Validation Steward",
+    sourceSatelliteId: "production-validation-client",
+  },
+  project: {
+    code: "VAL-PROJECT",
+    name: "Validation Fixture Project",
+    clientName: "Validation Fixture Client",
+    currency: "USD",
+    poValueCents: 1250000,
+    serviceBudgetCents: 900000,
+    expenseBudgetCents: 150000,
+    usedCents: 420000,
+    weeklyBurnCents: 30000,
+    targetMarginBps: 2800,
+    currentMarginBps: 3100,
+    sourceSatelliteId: "production-validation-project",
+  },
 };
 
 async function upsertRelationshipFixtures() {
@@ -402,7 +428,107 @@ async function upsertRelationshipFixtures() {
   }
 }
 
-pinValidationSeedEnvironment();
-assertValidationSeedEnvironmentPinned();
-await seedStableClient(validationSeedConfig);
-await upsertRelationshipFixtures();
+export async function upsertPracticeFinanceFixturesWithClient(prisma) {
+  const { client: clientFixture, project: projectFixture } = validationPracticeFinanceFixtures;
+  const workspaceSlug = INTERNAL_VALIDATION_WORKSPACE_SLUG;
+  const workspace = await prisma.workspace.findUnique({
+    where: { slug: workspaceSlug },
+    select: { id: true, slug: true },
+  });
+  if (!workspace) throw new Error(`Workspace '${workspaceSlug}' was not seeded.`);
+
+  const account = await prisma.crmAccount.findUnique({
+    where: {
+      workspaceId_slug: {
+        workspaceId: workspace.id,
+        slug: "validation-fixture-labs",
+      },
+    },
+    select: { id: true },
+  });
+
+  const client = await prisma.practiceClient.upsert({
+    where: {
+      workspaceId_sourceSatelliteId: {
+        workspaceId: workspace.id,
+        sourceSatelliteId: clientFixture.sourceSatelliteId,
+      },
+    },
+    update: {
+      crmAccountId: account?.id ?? null,
+      code: clientFixture.code,
+      name: clientFixture.name,
+      leadName: clientFixture.leadName,
+      status: "ACTIVE",
+    },
+    create: {
+      workspaceId: workspace.id,
+      crmAccountId: account?.id ?? null,
+      code: clientFixture.code,
+      name: clientFixture.name,
+      leadName: clientFixture.leadName,
+      sourceSatelliteId: clientFixture.sourceSatelliteId,
+    },
+    select: { id: true },
+  });
+
+  const projectData = {
+    crmAccountId: account?.id ?? null,
+    clientId: client.id,
+    code: projectFixture.code,
+    name: projectFixture.name,
+    clientName: projectFixture.clientName,
+    status: "ACTIVE",
+    currency: projectFixture.currency,
+    poValueCents: projectFixture.poValueCents,
+    serviceBudgetCents: projectFixture.serviceBudgetCents,
+    expenseBudgetCents: projectFixture.expenseBudgetCents,
+    usedCents: projectFixture.usedCents,
+    weeklyBurnCents: projectFixture.weeklyBurnCents,
+    targetMarginBps: projectFixture.targetMarginBps,
+    currentMarginBps: projectFixture.currentMarginBps,
+  };
+
+  await prisma.practiceProject.upsert({
+    where: {
+      workspaceId_sourceSatelliteId: {
+        workspaceId: workspace.id,
+        sourceSatelliteId: projectFixture.sourceSatelliteId,
+      },
+    },
+    update: projectData,
+    create: {
+      workspaceId: workspace.id,
+      ...projectData,
+      sourceSatelliteId: projectFixture.sourceSatelliteId,
+    },
+  });
+
+  console.log(`Seeded internal validation Practice Ledger fixtures in '${workspace.slug}'.`);
+}
+
+async function upsertPracticeFinanceFixtures() {
+  const prisma = new PrismaClient();
+  try {
+    await upsertPracticeFinanceFixturesWithClient(prisma);
+  } finally {
+    await prisma.$disconnect();
+  }
+}
+
+export async function main() {
+  pinValidationSeedEnvironment();
+  assertValidationSeedEnvironmentPinned();
+  await seedStableClient(validationSeedConfig);
+  await upsertRelationshipFixtures();
+  await upsertPracticeFinanceFixtures();
+}
+
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  try {
+    await main();
+  } catch (error) {
+    console.error("[seed-internal-validation-workspace] Seed failed:", error instanceof Error ? error.message : String(error));
+    process.exit(1);
+  }
+}
