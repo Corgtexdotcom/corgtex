@@ -1,9 +1,25 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createMeeting, listMeetings, requireWorkspaceMembership } from "@corgtex/domain";
-import type { ArchiveFilter } from "@corgtex/domain";
+import type { ArchiveFilter, DuplicateGuardOptions, DuplicateGuardResolution } from "@corgtex/domain";
 import { resolveRequestActor } from "@/lib/auth";
 import { handleRouteError } from "@/lib/http";
 import { parseMeetingDateTimeInput } from "@/lib/meeting-timezone";
+
+const DUPLICATE_GUARD_RESOLUTIONS: DuplicateGuardResolution[] = [
+  "use_existing",
+  "update_existing",
+  "create_new",
+];
+
+function duplicateGuardFromValues(resolution: unknown, targetEntityId: unknown): DuplicateGuardOptions | undefined {
+  if (typeof resolution !== "string" || !DUPLICATE_GUARD_RESOLUTIONS.includes(resolution as DuplicateGuardResolution)) {
+    return undefined;
+  }
+  return {
+    resolution: resolution as DuplicateGuardResolution,
+    targetEntityId: typeof targetEntityId === "string" && targetEntityId.trim() ? targetEntityId.trim() : null,
+  };
+}
 
 export async function GET(request: NextRequest, { params }: { params: Promise<{ workspaceId: string }> }) {
   try {
@@ -31,6 +47,8 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
       participantIds?: unknown;
       participantEmails?: unknown;
       timeZone?: unknown;
+      duplicateResolution?: unknown;
+      duplicateTargetEntityId?: unknown;
     };
 
     const meeting = await createMeeting(actor, {
@@ -50,6 +68,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
       participantEmails: Array.isArray(body.participantEmails)
         ? body.participantEmails.map((value) => String(value))
         : [],
+      duplicateGuard: duplicateGuardFromValues(body.duplicateResolution, body.duplicateTargetEntityId),
     });
 
     return NextResponse.json(meeting, { status: 201 });

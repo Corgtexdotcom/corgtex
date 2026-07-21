@@ -7,6 +7,7 @@ const { prismaMock } = vi.hoisted(() => ({
     $executeRaw: vi.fn(),
     action: {
       create: vi.fn(),
+      findFirst: vi.fn(),
       findMany: vi.fn(),
       findUnique: vi.fn(),
       update: vi.fn(),
@@ -131,6 +132,99 @@ describe("action domain lifecycle", () => {
     expect(recordAudit).not.toHaveBeenCalledWith(expect.anything(), actor, expect.objectContaining({
       action: "action.published",
     }));
+  });
+
+  it("fills a missing proposal link when updating an existing duplicate action", async () => {
+    const existingAction = {
+      id: "action-existing",
+      workspaceId: "workspace-1",
+      authorUserId: "user-1",
+      title: "Send Acme proposal",
+      bodyMd: null,
+      assigneeMemberId: null,
+      dueAt: null,
+      proposalId: null,
+      circleId: null,
+      priority: 1,
+      status: "DRAFT",
+      isPrivate: true,
+      publishedAt: null,
+      archivedAt: null,
+      version: 1,
+      createdAt: new Date("2026-07-20T10:00:00.000Z"),
+      updatedAt: new Date("2026-07-20T10:05:00.000Z"),
+    };
+    prismaMock.action.findMany.mockResolvedValueOnce([existingAction]);
+    prismaMock.action.findFirst.mockResolvedValueOnce(existingAction);
+    prismaMock.action.findUnique.mockResolvedValueOnce(existingAction);
+    prismaMock.proposal.findFirst.mockResolvedValueOnce({ id: "proposal-1" });
+    prismaMock.action.update.mockResolvedValueOnce({
+      ...existingAction,
+      proposalId: "proposal-1",
+      priority: 5,
+      version: 2,
+    });
+
+    const { createAction } = await import("./actions");
+    await expect(createAction(actor, {
+      workspaceId: "workspace-1",
+      title: "Send Acme proposal",
+      proposalId: "proposal-1",
+      priority: 5,
+      duplicateGuard: {
+        resolution: "update_existing",
+        targetEntityId: "action-existing",
+      },
+    })).resolves.toMatchObject({
+      id: "action-existing",
+      proposalId: "proposal-1",
+    });
+
+    expect(prismaMock.action.update).toHaveBeenCalledWith(expect.objectContaining({
+      where: { id: "action-existing" },
+      data: expect.objectContaining({
+        proposalId: "proposal-1",
+        priority: 5,
+        version: expect.any(Number),
+      }),
+    }));
+  });
+
+  it("stops likely duplicate actions before creating a new row", async () => {
+    prismaMock.action.findMany.mockResolvedValueOnce([
+      {
+        id: "action-existing",
+        workspaceId: "workspace-1",
+        title: "Send Acme proposal",
+        bodyMd: null,
+        assigneeMemberId: "member-2",
+        dueAt: new Date("2026-07-24T09:00:00.000Z"),
+        status: "OPEN",
+        isPrivate: false,
+        archivedAt: null,
+        createdAt: new Date("2026-07-20T10:00:00.000Z"),
+        updatedAt: new Date("2026-07-20T10:05:00.000Z"),
+      },
+    ]);
+
+    const { createAction } = await import("./actions");
+    await expect(createAction(actor, {
+      workspaceId: "workspace-1",
+      title: "Send proposal to Acme",
+      assigneeMemberId: "member-2",
+      dueAt: new Date("2026-07-24T16:00:00.000Z"),
+      duplicateGuard: {},
+    })).rejects.toMatchObject({
+      status: 409,
+      code: "DUPLICATE_GUARD_MATCH",
+      candidate: expect.objectContaining({
+        entityId: "action-existing",
+        matchKind: "likely",
+      }),
+    });
+
+    expect(prismaMock.$transaction).not.toHaveBeenCalled();
+    expect(prismaMock.action.create).not.toHaveBeenCalled();
   });
 
   it("creates an action with a valid assignee member", async () => {

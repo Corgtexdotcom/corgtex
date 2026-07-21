@@ -1112,6 +1112,7 @@ async function createNativeWriteback(actor: AppActor, params: {
         title: requiredString(params.output.title, "Action title"),
         bodyMd: optionalString(params.output.bodyMd) ?? optionalString(params.output.body) ?? null,
         isPrivate: true,
+        duplicateGuard: { onExact: "use_existing" },
       });
       return { entityType: "Action", entityId: action.id };
     }
@@ -1121,6 +1122,7 @@ async function createNativeWriteback(actor: AppActor, params: {
         title: requiredString(params.output.title, "Tension title"),
         bodyMd: optionalString(params.output.bodyMd) ?? optionalString(params.output.body) ?? null,
         isPrivate: true,
+        duplicateGuard: { onExact: "use_existing" },
       });
       return { entityType: "Tension", entityId: tension.id };
     }
@@ -1131,6 +1133,7 @@ async function createNativeWriteback(actor: AppActor, params: {
         summary: optionalString(params.output.summary),
         bodyMd: requiredString(params.output.bodyMd ?? params.output.body, "Proposal body"),
         isPrivate: true,
+        duplicateGuard: { onExact: "use_existing" },
       });
       return { entityType: "Proposal", entityId: proposal.id };
     }
@@ -1143,6 +1146,7 @@ async function createNativeWriteback(actor: AppActor, params: {
         recordedAt: optionalDate(params.output.recordedAt) ?? new Date(),
         transcript: optionalString(params.output.transcript),
         summaryMd: optionalString(params.output.summaryMd) ?? optionalString(params.output.summary),
+        duplicateGuard: { onExact: "use_existing" },
       });
       return { entityType: "Meeting", entityId: meeting.id };
     }
@@ -1155,6 +1159,7 @@ async function createNativeWriteback(actor: AppActor, params: {
         authority: enumValue(BrainArticleAuthority, params.output.authority, "DRAFT", "Brain article authority"),
         bodyMd: requiredString(params.output.bodyMd ?? params.output.body, "Brain article body"),
         isPrivate: true,
+        duplicateGuard: { onExact: "use_existing" },
       });
       return { entityType: "BrainArticle", entityId: article.id };
     }

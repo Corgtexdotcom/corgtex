@@ -67,6 +67,7 @@ vi.mock("@corgtex/domain", () => ({
   enqueueMeetingAgendaPreparation: vi.fn(),
   importMeetingInvite: vi.fn(),
   intakeMeetingTranscript,
+  isDuplicateGuardMatchError: (error: any) => error?.code === "DUPLICATE_GUARD_MATCH",
   postDeliberationEntry: vi.fn(),
   requireWorkspaceMembership,
   requestMeetingIntelligenceRegeneration: vi.fn(),
@@ -256,6 +257,68 @@ describe("meeting server actions", () => {
     }));
     expect(JSON.stringify(captureTelemetryEvent.mock.calls)).not.toContain("Jan: We discussed follow-up actions.");
     expect(redirect).not.toHaveBeenCalled();
+  });
+
+  it("returns duplicate confirmation state and stores the pending transcript payload", async () => {
+    const { uploadMeetingTranscriptStateAction } = await import("./actions");
+    intakeMeetingTranscript.mockRejectedValueOnce({
+      status: 409,
+      code: "DUPLICATE_GUARD_MATCH",
+      message: "A similar item already exists in this workspace.",
+      candidate: {
+        entityType: "Meeting",
+        entityId: "meeting-existing",
+        title: "Weekly Review",
+        excerpt: "Jan: We discussed follow-up actions.",
+        score: 0.93,
+        matchKind: "likely",
+        reasons: ["similar content", "participant overlap"],
+        status: "COMPLETED",
+        createdAt: "2026-07-20T10:00:00.000Z",
+        updatedAt: "2026-07-20T10:05:00.000Z",
+        archivedAt: null,
+      },
+      recommendedResolution: "update_existing",
+      allowedResolutions: ["use_existing", "update_existing", "create_new"],
+    });
+
+    const state = await uploadMeetingTranscriptStateAction(initialTranscriptState, formData({
+      workspaceId: "workspace-1",
+      title: "Weekly Review",
+      source: "transcript-upload",
+      recordedAt: "2026-07-15T09:00",
+      timeZone: "America/Los_Angeles",
+      transcript: "Jan: We discussed follow-up actions.",
+      participantEmails: "jan@example.com",
+    }));
+
+    expect(state).toMatchObject({
+      status: "duplicate_confirmation_required",
+      message: "A similar item already exists in this workspace.",
+      duplicateCandidate: expect.objectContaining({ entityId: "meeting-existing" }),
+      recommendedResolution: "update_existing",
+      allowedResolutions: ["use_existing", "update_existing", "create_new"],
+      retryRequiresTranscriptUpload: false,
+    });
+    expect(state.pendingTranscriptToken).toEqual(expect.any(String));
+    expect(intakeMeetingTranscript).toHaveBeenCalledWith(actor, expect.objectContaining({
+      duplicateGuard: {},
+    }));
+    expect(redisClient.setEx).toHaveBeenCalledWith(
+      expect.stringContaining("meeting-transcript-upload:workspace-1:"),
+      1200,
+      expect.stringContaining("Jan: We discussed follow-up actions."),
+    );
+    expect(captureTelemetryEvent).toHaveBeenCalledWith(expect.objectContaining({
+      properties: expect.objectContaining({
+        kind: "duplicate_confirmation_required",
+        workspace_id: "workspace-1",
+        candidate_entity_id: "meeting-existing",
+        recommended_resolution: "update_existing",
+        pending_upload_stored: true,
+      }),
+    }));
+    expect(JSON.stringify(captureTelemetryEvent.mock.calls)).not.toContain("Jan: We discussed follow-up actions.");
   });
 
   it("uses a pending transcript token for selected meeting resubmission and clears it", async () => {
@@ -489,6 +552,58 @@ describe("meeting server actions", () => {
       participantEmails: ["jan@example.com"],
     }));
     expect(redisClient.del).toHaveBeenCalledWith("test:meeting-transcript-upload:workspace-1:token-1");
+  });
+
+  it("preserves stored create-new choice through duplicate confirmation resubmission", async () => {
+    const { uploadMeetingTranscriptStateAction } = await import("./actions");
+    redisClient.get.mockResolvedValueOnce(JSON.stringify({
+      workspaceId: "workspace-1",
+      transcript: "Jan: We discussed follow-up actions.",
+      fileName: "weekly.txt",
+      title: "Weekly Review",
+      source: "transcript-upload",
+      recordedAt: "2026-07-15T09:00",
+      timeZone: "America/Los_Angeles",
+      summaryMd: null,
+      ingestionGuidanceMd: null,
+      participantIds: [],
+      participantEmails: ["jan@example.com"],
+      meetingId: null,
+      createNewMeeting: true,
+    }));
+    intakeMeetingTranscript.mockResolvedValueOnce({
+      status: "meeting_created",
+      message: "Transcript saved as meeting \"Weekly Review\". Summary and follow-up extraction are queued.",
+      meeting: { id: "meeting-new" },
+      inferred: {
+        title: "Weekly Review",
+        recordedAt: new Date("2026-07-15T16:00:00.000Z"),
+        participantEmails: ["jan@example.com"],
+        source: "transcript-upload",
+      },
+    });
+
+    const state = await uploadMeetingTranscriptStateAction({
+      status: "duplicate_confirmation_required",
+      message: "A similar item already exists.",
+      pendingTranscriptToken: "token-1",
+      retryRequiresTranscriptUpload: false,
+    }, formData({
+      workspaceId: "workspace-1",
+      pendingTranscriptToken: "token-1",
+      duplicateResolution: "create_new",
+      duplicateTargetEntityId: "meeting-existing",
+    }));
+
+    expect(state.status).toBe("success");
+    expect(intakeMeetingTranscript).toHaveBeenCalledWith(actor, expect.objectContaining({
+      meetingId: null,
+      createNewMeeting: true,
+      duplicateGuard: {
+        resolution: "create_new",
+        targetEntityId: "meeting-existing",
+      },
+    }));
   });
 
   it("keeps clarification inline and asks for retry when Redis cannot hold the pending transcript", async () => {

@@ -228,6 +228,76 @@ describe("meetings domain", () => {
     });
   });
 
+  it("createMeeting marks summary-only duplicate updates as completed", async () => {
+    const recordedAt = new Date("2026-04-30T17:10:00.000Z");
+    const scheduledAt = new Date("2026-04-30T17:00:00.000Z");
+    prismaMock.meeting.findMany.mockResolvedValueOnce([
+      {
+        id: "scheduled-1",
+        workspaceId: "workspace-1",
+        title: "Weekly Tactical",
+        source: "internal",
+        status: "SCHEDULED",
+        recordedAt: scheduledAt,
+        participantEmails: ["jan@example.com"],
+        archivedAt: null,
+        createdAt: scheduledAt,
+        updatedAt: scheduledAt,
+      },
+    ]);
+    prismaMock.meeting.findFirst.mockResolvedValueOnce({
+      id: "scheduled-1",
+      title: "Weekly Tactical",
+      source: "internal",
+      externalId: null,
+      calendarExternalId: null,
+      meetingUrl: null,
+      meetingUrlHash: null,
+      recordedAt: scheduledAt,
+      scheduledEndAt: new Date("2026-04-30T18:00:00.000Z"),
+      summaryMd: null,
+      ingestionGuidanceMd: null,
+      participantIds: [],
+      participantEmails: ["jan@example.com"],
+    });
+    prismaMock.meeting.update.mockResolvedValueOnce({
+      id: "scheduled-1",
+      workspaceId: "workspace-1",
+      title: "Weekly Tactical",
+      source: "internal",
+      status: "COMPLETED",
+      recordedAt,
+      summaryMd: "Summary text",
+    });
+
+    const { createMeeting } = await import("./meetings");
+    await expect(createMeeting(actor, {
+      workspaceId: "workspace-1",
+      title: "Weekly Tactical",
+      source: "manual",
+      recordedAt,
+      summaryMd: "Summary text",
+      participantEmails: ["jan@example.com"],
+      duplicateGuard: {
+        resolution: "update_existing",
+        targetEntityId: "scheduled-1",
+      },
+    })).resolves.toMatchObject({
+      id: "scheduled-1",
+      status: "COMPLETED",
+    });
+
+    expect(prismaMock.meeting.update).toHaveBeenCalledWith(expect.objectContaining({
+      where: { id: "scheduled-1" },
+      data: expect.objectContaining({
+        status: "COMPLETED",
+        recordedAt,
+        summaryMd: "Summary text",
+      }),
+    }));
+    expect(prismaMock.meeting.create).not.toHaveBeenCalled();
+  });
+
   it("createMeeting rejects a missing source", async () => {
     const { createMeeting } = await import("./meetings");
     await expect(createMeeting(actor, {

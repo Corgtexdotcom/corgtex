@@ -1,15 +1,19 @@
 "use client";
 
-import { useState } from "react";
+import { useActionState, useState } from "react";
 import type { BrainSourceType } from "@prisma/client";
 import { MarkdownEditor } from "@/lib/components/MarkdownEditor";
 import { TimeZoneSelect } from "@/lib/components/TimeZoneSelect";
 import { MeetingTranscriptUploadForm } from "../meetings/MeetingTranscriptUploadForm";
+import {
+  DuplicateGuardConfirmationPanel,
+  type DuplicateGuardFormAction,
+} from "./DuplicateGuardForm";
 
 type Props = {
   workspaceId: string;
   sourceTypes: BrainSourceType[];
-  ingestAction: (formData: FormData) => void | Promise<void>;
+  ingestAction: DuplicateGuardFormAction;
   cancelHref: string;
 };
 
@@ -40,6 +44,7 @@ function SourceTypeSelect({
 
 export function PasteTextForm({ workspaceId, sourceTypes, ingestAction, cancelHref }: Props) {
   const [sourceType, setSourceType] = useState<BrainSourceType>("ARTICLE");
+  const [state, formAction, isPending] = useActionState(ingestAction, null);
 
   if (sourceType === "MEETING") {
     return (
@@ -79,7 +84,9 @@ export function PasteTextForm({ workspaceId, sourceTypes, ingestAction, cancelHr
   }
 
   return (
-    <form action={ingestAction} className="stack nr-form-section">
+    <form action={formAction} className="stack nr-form-section">
+      <input type="hidden" name="duplicateGuardEnabled" value="true" />
+      <DuplicateGuardConfirmationPanel state={state} isPending={isPending} />
       <input type="hidden" name="workspaceId" value={workspaceId} />
       <label>Title<input name="title" /></label>
       <div className="actions-inline">
@@ -89,7 +96,7 @@ export function PasteTextForm({ workspaceId, sourceTypes, ingestAction, cancelHr
       <label>Content<textarea name="content" rows={10} required /></label>
       <label>Ingestion guidance<MarkdownEditor name="ingestionGuidanceMd" rows={3} /></label>
       <div className="actions-inline">
-        <button type="submit">Ingest text</button>
+        <button type="submit" disabled={isPending}>Ingest text</button>
         <a className="button secondary" href={cancelHref}>Cancel</a>
       </div>
     </form>

@@ -29,6 +29,7 @@ export * from "./control-plane";
 export * from "./control-plane-adapters";
 export * from "./customer-lifecycle";
 export * from "./documents";
+export * from "./duplicate-guard";
 export * from "./errors";
 export * from "./events";
 export * from "./email-templates";

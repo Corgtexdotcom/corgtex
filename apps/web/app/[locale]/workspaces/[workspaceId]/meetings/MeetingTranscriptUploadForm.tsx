@@ -37,6 +37,12 @@ type Labels = {
 
 const CREATE_NEW_MEETING_CHOICE = "__create_new_meeting__";
 
+const DUPLICATE_RESOLUTION_LABELS = {
+  use_existing: "Use existing",
+  update_existing: "Update existing",
+  create_new: "Create new",
+};
+
 type Props = {
   workspaceId: string;
   className?: string;
@@ -90,6 +96,41 @@ function candidateLabel(candidate: NonNullable<MeetingTranscriptActionState["can
   return `${title} - ${recordedAt.toLocaleString()} - ${score}% match (${candidate.reason})`;
 }
 
+function DuplicateConfirmationPanel({
+  state,
+  isPending,
+}: {
+  state: MeetingTranscriptActionState;
+  isPending: boolean;
+}) {
+  if (state.status !== "duplicate_confirmation_required" || !state.duplicateCandidate) return null;
+  const candidate = state.duplicateCandidate;
+  const allowedResolutions = state.allowedResolutions ?? ["use_existing", "update_existing", "create_new"];
+
+  return (
+    <section className="panel stack" style={{ borderColor: "var(--color-warning-border, #d97706)" }}>
+      <div>
+        <strong>Possible duplicate</strong>
+        <p style={{ margin: "6px 0 0", color: "var(--muted)" }}>
+          {candidate.title || candidate.entityType} matches an active {candidate.entityType} with score {Math.round(candidate.score * 100)}%.
+        </p>
+      </div>
+      {candidate.excerpt ? <p style={{ margin: 0 }}>{candidate.excerpt}</p> : null}
+      {candidate.reasons.length > 0 ? (
+        <p style={{ margin: 0, color: "var(--muted)" }}>{candidate.reasons.join(", ")}</p>
+      ) : null}
+      <input type="hidden" name="duplicateTargetEntityId" value={candidate.entityId} />
+      <div className="actions-inline">
+        {allowedResolutions.map((resolution) => (
+          <button key={resolution} type="submit" name="duplicateResolution" value={resolution} disabled={isPending}>
+            {DUPLICATE_RESOLUTION_LABELS[resolution]}
+          </button>
+        ))}
+      </div>
+    </section>
+  );
+}
+
 export function MeetingTranscriptUploadForm({
   workspaceId,
   className = "stack panel",
@@ -126,7 +167,8 @@ export function MeetingTranscriptUploadForm({
   const showDetailFields = !requiresMeetingChoice || creatingNewMeetingFromChoice;
   const requiresRecordedAt = state.status === "needs_clarification"
     && state.requiredFields?.includes("recordedAt");
-  const mustRetryUpload = state.status === "needs_clarification" && state.retryRequiresTranscriptUpload;
+  const mustRetryUpload = (state.status === "needs_clarification" || state.status === "duplicate_confirmation_required")
+    && state.retryRequiresTranscriptUpload;
   const hasPendingTranscript = Boolean(state.pendingTranscriptToken) && !mustRetryUpload;
   const recordedAtRequired = requireRecordedAt || requiresRecordedAt;
   const showUploadFields = showDetailFields && !hasPendingTranscript;
@@ -181,8 +223,14 @@ export function MeetingTranscriptUploadForm({
           {state.message}
         </div>
       ) : null}
+      {state.status === "duplicate_confirmation_required" ? (
+        <div className="form-message" role="status">
+          {state.message}
+        </div>
+      ) : null}
 
       {beforeFields}
+      <DuplicateConfirmationPanel state={state} isPending={isPending} />
 
       {requiresMeetingChoice ? (
         <fieldset className="stack" style={{ border: "1px solid var(--line)", borderRadius: 8, padding: 12 }}>
@@ -320,7 +368,7 @@ export function MeetingTranscriptUploadForm({
 
       <div className="actions-inline">
         <button type="submit" disabled={isPending}>
-          {isPending ? "..." : state.status === "needs_clarification" ? labels.retrySubmit ?? labels.submit : labels.submit}
+          {isPending ? "..." : state.status === "needs_clarification" || state.status === "duplicate_confirmation_required" ? labels.retrySubmit ?? labels.submit : labels.submit}
         </button>
         {cancelHref ? (
           <a className="button secondary" href={cancelHref}>

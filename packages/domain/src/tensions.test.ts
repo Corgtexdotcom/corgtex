@@ -288,6 +288,79 @@ describe("tensions domain", () => {
     expect(prismaMock.tension.create).not.toHaveBeenCalled();
   });
 
+  it("preserves a linked proposal when a duplicate tension is updated", async () => {
+    const existingTension = {
+      id: "t-duplicate",
+      workspaceId: "ws-1",
+      authorUserId: "u-1",
+      title: "Clarify pricing handoff",
+      bodyMd: "Finance needs the latest buyer context.",
+      status: "DRAFT",
+      version: 1,
+      publishedAt: null,
+      archivedAt: null,
+      circleId: null,
+      assigneeMemberId: null,
+      raisedByMemberId: null,
+      proposalId: null,
+      priority: 1,
+      isPrivate: true,
+      createdAt: new Date("2026-07-20T10:00:00.000Z"),
+      updatedAt: new Date("2026-07-20T10:05:00.000Z"),
+    };
+    prismaMock.tension.findMany.mockResolvedValueOnce([existingTension]);
+    prismaMock.tension.findFirst.mockResolvedValueOnce({
+      ...existingTension,
+      author: { id: "u-1", displayName: null, email: "user@example.com" },
+      circle: null,
+      assigneeMember: null,
+      raisedByMember: null,
+      proposal: null,
+      upvotes: [],
+    });
+    prismaMock.tension.findUnique.mockResolvedValueOnce(existingTension);
+    prismaMock.proposal.findFirst.mockResolvedValueOnce({ id: "proposal-1" });
+    prismaMock.tension.update.mockResolvedValueOnce({
+      ...existingTension,
+      proposalId: "proposal-1",
+      priority: 4,
+    });
+
+    const { createTension } = await import("./tensions");
+    await createTension(actor, {
+      workspaceId: "ws-1",
+      title: "Clarify pricing handoff",
+      bodyMd: "Finance needs the latest buyer context.",
+      proposalId: "proposal-1",
+      priority: 4,
+      duplicateGuard: {
+        resolution: "update_existing",
+        targetEntityId: "t-duplicate",
+      },
+    });
+
+    expect(prismaMock.proposal.findFirst).toHaveBeenCalledWith({
+      where: {
+        id: "proposal-1",
+        workspaceId: "ws-1",
+        archivedAt: null,
+        OR: [
+          { isPrivate: false },
+          { isPrivate: true, status: "DRAFT", authorUserId: "u-1" },
+        ],
+      },
+      select: { id: true },
+    });
+    expect(prismaMock.tension.update).toHaveBeenCalledWith(expect.objectContaining({
+      where: { id: "t-duplicate" },
+      data: expect.objectContaining({
+        proposalId: "proposal-1",
+        priority: 4,
+      }),
+    }));
+    expect(prismaMock.tension.create).not.toHaveBeenCalled();
+  });
+
   it("updates a tension raised-by member", async () => {
     const { updateTension } = await import("./tensions");
 

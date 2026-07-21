@@ -3,6 +3,7 @@ import { defaultModelGateway } from "@corgtex/models";
 import { prisma } from "@corgtex/shared";
 import type { AppActor } from "@corgtex/shared";
 import { createMeeting, uploadMeetingTranscript } from "./meetings";
+import type { DuplicateGuardOptions } from "./duplicate-guard";
 
 type IntakeStatus = "meeting_created" | "meeting_matched" | "needs_clarification";
 
@@ -90,6 +91,10 @@ function recordedAtForCanonicalWrite(params: {
   return params.validatePlausibility
     ? asPlausibleRecordedAt(params.value, params.now)
     : asValidDate(params.value);
+}
+
+function existingMeetingMessage(title: string | null | undefined, inferredTitle: string | null | undefined) {
+  return `Using existing meeting "${title ?? inferredTitle ?? "Untitled meeting"}". No new transcript was saved.`;
 }
 
 function parseDateFromText(input: string) {
@@ -224,6 +229,7 @@ export async function intakeMeetingTranscript(actor: AppActor, params: {
   ingestionGuidanceMd?: string | null;
   participantIds?: string[] | null;
   participantEmails?: string[] | null;
+  duplicateGuard?: DuplicateGuardOptions | null;
   now?: Date;
 }): Promise<MeetingTranscriptIntakeResult> {
   const transcript = params.transcript.trim();
@@ -274,12 +280,16 @@ export async function intakeMeetingTranscript(actor: AppActor, params: {
       participantIds: params.participantIds ?? [],
       participantEmails: inferred.participantEmails,
       sourceRecordId: params.sourceRecordId ?? null,
+      duplicateGuard: params.duplicateGuard,
     });
+    const usedExisting = params.duplicateGuard?.resolution === "use_existing";
     return {
-      status: "meeting_created",
+      status: usedExisting ? "meeting_matched" : "meeting_created",
       meeting,
       inferred,
-      message: `Transcript saved as meeting "${meeting.title ?? inferred.title ?? "Untitled meeting"}". Summary and follow-up extraction are queued.`,
+      message: usedExisting
+        ? existingMeetingMessage(meeting.title, inferred.title)
+        : `Transcript saved as meeting "${meeting.title ?? inferred.title ?? "Untitled meeting"}". Summary and follow-up extraction are queued.`,
     };
   }
 
@@ -299,6 +309,7 @@ export async function intakeMeetingTranscript(actor: AppActor, params: {
     participantEmails: inferred.participantEmails,
     sourceRecordId: params.sourceRecordId ?? null,
     replaceTranscript: params.replaceTranscript,
+    duplicateGuard: params.duplicateGuard,
   });
 
   if (result.status === "needs_selection") {
@@ -314,11 +325,14 @@ export async function intakeMeetingTranscript(actor: AppActor, params: {
     };
   }
 
-  const status: IntakeStatus = result.status === "matched" ? "meeting_matched" : "meeting_created";
+  const usedExisting = params.duplicateGuard?.resolution === "use_existing";
+  const status: IntakeStatus = result.status === "matched" || usedExisting ? "meeting_matched" : "meeting_created";
   return {
     status,
     meeting: result.meeting,
     inferred,
-    message: `Transcript saved as meeting "${result.meeting.title ?? inferred.title ?? "Untitled meeting"}". Summary and follow-up extraction are queued.`,
+    message: usedExisting
+      ? existingMeetingMessage(result.meeting.title, inferred.title)
+      : `Transcript saved as meeting "${result.meeting.title ?? inferred.title ?? "Untitled meeting"}". Summary and follow-up extraction are queued.`,
   };
 }

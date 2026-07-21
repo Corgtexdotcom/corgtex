@@ -1,9 +1,25 @@
 import type { BrainSourceType } from "@prisma/client";
 import { NextRequest, NextResponse } from "next/server";
 import { ingestSource, listSources } from "@corgtex/domain";
-import type { ArchiveFilter } from "@corgtex/domain";
+import type { ArchiveFilter, DuplicateGuardOptions, DuplicateGuardResolution } from "@corgtex/domain";
 import { resolveRequestActor } from "@/lib/auth";
 import { handleRouteError } from "@/lib/http";
+
+const DUPLICATE_GUARD_RESOLUTIONS: DuplicateGuardResolution[] = [
+  "use_existing",
+  "update_existing",
+  "create_new",
+];
+
+function duplicateGuardFromValues(resolution: unknown, targetEntityId: unknown): DuplicateGuardOptions | undefined {
+  if (typeof resolution !== "string" || !DUPLICATE_GUARD_RESOLUTIONS.includes(resolution as DuplicateGuardResolution)) {
+    return undefined;
+  }
+  return {
+    resolution: resolution as DuplicateGuardResolution,
+    targetEntityId: typeof targetEntityId === "string" && targetEntityId.trim() ? targetEntityId.trim() : null,
+  };
+}
 
 export async function GET(request: NextRequest, { params }: { params: Promise<{ workspaceId: string }> }) {
   try {
@@ -40,6 +56,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
       authorMemberId: typeof body.authorMemberId === "string" ? body.authorMemberId : null,
       ingestionGuidanceMd: typeof body.ingestionGuidanceMd === "string" ? body.ingestionGuidanceMd : null,
       metadata: body.metadata && typeof body.metadata === "object" ? body.metadata : undefined,
+      duplicateGuard: duplicateGuardFromValues(body.duplicateResolution, body.duplicateTargetEntityId),
     });
     return NextResponse.json({ source }, { status: 201 });
   } catch (error) {

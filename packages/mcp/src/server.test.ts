@@ -1,9 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const createActionMock = vi.fn();
+const createArticleMock = vi.fn();
 const createGoalMock = vi.fn();
+const createMeetingMock = vi.fn();
 const createProposalMock = vi.fn();
 const createTensionMock = vi.fn();
+const intakeMeetingTranscriptMock = vi.fn();
 const listActionsMock = vi.fn();
 const listGoalsMock = vi.fn();
 const listProposalsMock = vi.fn();
@@ -100,6 +103,13 @@ vi.mock("@corgtex/domain", async () => {
       this.code = code;
     }
   },
+  duplicateGuardErrorPayload: (error: any) => ({
+    status: "duplicate_confirmation_required",
+    candidate: error.candidate,
+    recommendedResolution: error.recommendedResolution,
+    allowedResolutions: error.allowedResolutions,
+  }),
+  isDuplicateGuardMatchError: (error: any) => error?.code === "DUPLICATE_GUARD_MATCH",
   CONTROL_PLANE_WORKSPACE_FEATURE_FLAGS: [
     { flag: "GOALS", label: "Goals", description: "Goals", defaultEnabled: true },
     { flag: "FINANCE", label: "Finance", description: "Finance", defaultEnabled: false },
@@ -147,6 +157,8 @@ vi.mock("@corgtex/domain", async () => {
   fetchConnectedExternalMcpContext: fetchConnectedExternalMcpContextMock,
   listActions: listActionsMock,
   createAction: createActionMock,
+  createArticle: createArticleMock,
+  createMeeting: createMeetingMock,
   updateAction: updateActionMock,
   listTensions: listTensionsMock,
   createTension: createTensionMock,
@@ -168,6 +180,7 @@ vi.mock("@corgtex/domain", async () => {
   createMeetingSeries: createMeetingSeriesMock,
   scheduleMeetingRecording: scheduleMeetingRecordingMock,
   cancelMeetingRecording: cancelMeetingRecordingMock,
+  intakeMeetingTranscript: intakeMeetingTranscriptMock,
   listMeetings: vi.fn(),
   upsertRecorderCalendarSource: upsertRecorderCalendarSourceMock,
   getRecorderCalendarSource: getRecorderCalendarSourceMock,
@@ -289,6 +302,12 @@ describe("createCorgtexMcpServer", () => {
       priority: 2,
       assigneeMemberId: "member-assignee",
     });
+    createArticleMock.mockReset().mockResolvedValue({
+      id: "article-1",
+      slug: "article-1",
+      title: "Article",
+      type: "GLOSSARY",
+    });
     createGoalMock.mockReset().mockResolvedValue({
       id: "goal-1",
       title: "Transform 1,000 businesses",
@@ -312,6 +331,19 @@ describe("createCorgtexMcpServer", () => {
       priority: 1,
       assigneeMemberId: "member-responsible",
       raisedByMemberId: "member-raiser",
+    });
+    createMeetingMock.mockReset().mockResolvedValue({
+      id: "meeting-1",
+      title: "Meeting",
+      recordedAt: new Date("2026-07-20T10:00:00.000Z"),
+    });
+    intakeMeetingTranscriptMock.mockReset().mockResolvedValue({
+      status: "meeting_created",
+      meeting: {
+        id: "meeting-1",
+        title: "Meeting",
+        recordedAt: new Date("2026-07-20T10:00:00.000Z"),
+      },
     });
     listActionsMock.mockReset().mockResolvedValue({ items: [], total: 0 });
     listGoalsMock.mockReset().mockResolvedValue([]);
@@ -2269,6 +2301,209 @@ describe("createCorgtexMcpServer", () => {
       ownerMemberName: "Owner",
       owner: "Owner",
     });
+  });
+
+  it("returns structured duplicate confirmation for MCP create_action and accepts each resolution", async () => {
+    const { createCorgtexMcpServer } = await import("./server");
+    const { prisma } = await import("@corgtex/shared");
+    const duplicateError = {
+      status: 409,
+      code: "DUPLICATE_GUARD_MATCH",
+      candidate: {
+        entityType: "Action",
+        entityId: "action-existing",
+        title: "Send Acme proposal",
+        excerpt: null,
+        score: 0.91,
+        matchKind: "likely",
+        reasons: ["similar title", "same assignee"],
+        createdAt: "2026-07-20T10:00:00.000Z",
+        updatedAt: "2026-07-20T10:05:00.000Z",
+      },
+      recommendedResolution: "update_existing",
+      allowedResolutions: ["use_existing", "update_existing", "create_new"],
+    };
+    createActionMock
+      .mockRejectedValueOnce(duplicateError)
+      .mockResolvedValue({
+        id: "action-existing",
+        title: "Send Acme proposal",
+        status: "OPEN",
+        version: 2,
+        priority: 2,
+        assigneeMemberId: "member-assignee",
+      });
+    vi.mocked(prisma.action.findFirst).mockResolvedValue({
+      id: "action-existing",
+      title: "Send Acme proposal",
+      status: "OPEN",
+      version: 2,
+      priority: 2,
+      assigneeMemberId: "member-assignee",
+      assigneeMember: { id: "member-assignee", user: { displayName: "Assignee", email: "assignee@example.test" } },
+    } as never);
+
+    const server = createCorgtexMcpServer({
+      actor: { kind: "agent", authProvider: "bootstrap" } as any,
+      workspaceId: "ws-1",
+      authKind: "agent",
+    });
+
+    const confirmationResponse = await (server as any)._registeredTools.create_action.handler({
+      title: "Send proposal to Acme",
+      assigneeMemberId: "member-assignee",
+    });
+
+    expect(JSON.parse(confirmationResponse.content[0].text)).toMatchObject({
+      status: "duplicate_confirmation_required",
+      candidate: expect.objectContaining({ entityId: "action-existing" }),
+      recommendedResolution: "update_existing",
+      allowedResolutions: ["use_existing", "update_existing", "create_new"],
+    });
+
+    for (const resolution of ["use_existing", "update_existing", "create_new"] as const) {
+      await (server as any)._registeredTools.create_action.handler({
+        title: "Send proposal to Acme",
+        assigneeMemberId: "member-assignee",
+        duplicateResolution: resolution,
+        duplicateTargetEntityId: "action-existing",
+      });
+    }
+
+    expect(createActionMock).toHaveBeenNthCalledWith(2, expect.objectContaining({ kind: "agent" }), expect.objectContaining({
+      duplicateGuard: { resolution: "use_existing", targetEntityId: "action-existing" },
+    }));
+    expect(createActionMock).toHaveBeenNthCalledWith(3, expect.objectContaining({ kind: "agent" }), expect.objectContaining({
+      duplicateGuard: { resolution: "update_existing", targetEntityId: "action-existing" },
+    }));
+    expect(createActionMock).toHaveBeenNthCalledWith(4, expect.objectContaining({ kind: "agent" }), expect.objectContaining({
+      duplicateGuard: { resolution: "create_new", targetEntityId: "action-existing" },
+    }));
+  });
+
+  it("returns structured duplicate confirmation for MCP transcript uploads and accepts a retry resolution", async () => {
+    const { createCorgtexMcpServer } = await import("./server");
+    const duplicateError = {
+      status: 409,
+      code: "DUPLICATE_GUARD_MATCH",
+      candidate: {
+        entityType: "Meeting",
+        entityId: "meeting-existing",
+        title: "Weekly Review",
+        excerpt: "Transcript body",
+        score: 0.93,
+        matchKind: "likely",
+        reasons: ["similar content"],
+        status: "COMPLETED",
+        createdAt: "2026-07-20T10:00:00.000Z",
+        updatedAt: "2026-07-20T10:05:00.000Z",
+        archivedAt: null,
+      },
+      recommendedResolution: "update_existing",
+      allowedResolutions: ["use_existing", "update_existing", "create_new"],
+    };
+    intakeMeetingTranscriptMock
+      .mockRejectedValueOnce(duplicateError)
+      .mockResolvedValueOnce({
+        status: "meeting_created",
+        meeting: {
+          id: "meeting-existing",
+          title: "Weekly Review",
+          recordedAt: new Date("2026-07-20T10:00:00.000Z"),
+        },
+      });
+
+    const server = createCorgtexMcpServer({
+      actor: { kind: "agent", authProvider: "bootstrap" } as any,
+      workspaceId: "ws-1",
+      authKind: "agent",
+    });
+
+    const confirmationResponse = await (server as any)._registeredTools.upload_meeting.handler({
+      title: "Weekly Review",
+      source: "manual-upload",
+      recordedAt: "2026-07-20T10:00:00.000Z",
+      transcript: "Transcript body",
+    });
+
+    expect(JSON.parse(confirmationResponse.content[0].text)).toMatchObject({
+      status: "duplicate_confirmation_required",
+      candidate: expect.objectContaining({ entityId: "meeting-existing" }),
+      recommendedResolution: "update_existing",
+    });
+
+    await (server as any)._registeredTools.upload_meeting.handler({
+      title: "Weekly Review",
+      source: "manual-upload",
+      recordedAt: "2026-07-20T10:00:00.000Z",
+      transcript: "Transcript body",
+      duplicateResolution: "update_existing",
+      duplicateTargetEntityId: "meeting-existing",
+    });
+
+    expect(intakeMeetingTranscriptMock).toHaveBeenNthCalledWith(2, expect.objectContaining({ kind: "agent" }), expect.objectContaining({
+      duplicateGuard: { resolution: "update_existing", targetEntityId: "meeting-existing" },
+    }));
+  });
+
+  it("returns structured duplicate confirmation for MCP create_article and accepts a retry resolution", async () => {
+    const { createCorgtexMcpServer } = await import("./server");
+    const duplicateError = {
+      status: 409,
+      code: "DUPLICATE_GUARD_MATCH",
+      candidate: {
+        entityType: "BrainArticle",
+        entityId: "article-existing",
+        title: "Incident review policy",
+        excerpt: "Incident reviews are references.",
+        score: 1,
+        matchKind: "exact",
+        reasons: ["identical title and content"],
+        status: "DRAFT",
+        createdAt: "2026-07-20T10:00:00.000Z",
+        updatedAt: "2026-07-20T10:05:00.000Z",
+        archivedAt: null,
+      },
+      recommendedResolution: "use_existing",
+      allowedResolutions: ["use_existing", "update_existing", "create_new"],
+    };
+    createArticleMock
+      .mockRejectedValueOnce(duplicateError)
+      .mockResolvedValueOnce({
+        id: "article-existing",
+        slug: "incident-review-policy",
+        type: "PROCESS",
+      });
+
+    const server = createCorgtexMcpServer({
+      actor: { kind: "agent", authProvider: "bootstrap" } as any,
+      workspaceId: "ws-1",
+      authKind: "agent",
+    });
+
+    const confirmationResponse = await (server as any)._registeredTools.create_article.handler({
+      title: "Incident review policy",
+      type: "PROCESS",
+      bodyMd: "Incident reviews are references.",
+    });
+
+    expect(JSON.parse(confirmationResponse.content[0].text)).toMatchObject({
+      status: "duplicate_confirmation_required",
+      candidate: expect.objectContaining({ entityId: "article-existing" }),
+      recommendedResolution: "use_existing",
+    });
+
+    await (server as any)._registeredTools.create_article.handler({
+      title: "Incident review policy",
+      type: "PROCESS",
+      bodyMd: "Incident reviews are references.",
+      duplicateResolution: "use_existing",
+      duplicateTargetEntityId: "article-existing",
+    });
+
+    expect(createArticleMock).toHaveBeenNthCalledWith(2, expect.objectContaining({ kind: "agent" }), expect.objectContaining({
+      duplicateGuard: { resolution: "use_existing", targetEntityId: "article-existing" },
+    }));
   });
 
   it("omits ownerMemberId from MCP create_proposal input so the domain default applies", async () => {

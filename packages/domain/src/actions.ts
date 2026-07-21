@@ -13,6 +13,12 @@ import { resolveWorkspaceProposalLink } from "./proposal-links";
 import { createWorkItemEvidenceLinks } from "./work-item-evidence";
 import { ensureWorkspacePermalink, workspaceEntityCanonicalPath } from "./permalinks";
 import {
+  checkWorkspaceDuplicateGuard,
+  duplicateGuardAuditMeta,
+  duplicateGuardMergeText,
+  type DuplicateGuardOptions,
+} from "./duplicate-guard";
+import {
   changedDataFields,
   pickJsonSnapshot,
   recordWorkItemVersion,
@@ -40,6 +46,21 @@ export type ListActionsOptions = {
   dueFrom?: Date;
   dueTo?: Date;
   sort?: WorkItemSort;
+};
+
+type CreateActionParams = {
+  workspaceId: string;
+  title: string;
+  bodyMd?: string | null;
+  circleId?: string | null;
+  assigneeMemberId?: string | null;
+  authorMemberId?: string | null;
+  dueAt?: Date | null;
+  proposalId?: string | null;
+  isPrivate?: boolean;
+  priority?: number | null;
+  duplicateGuard?: DuplicateGuardOptions | null;
+  _membership?: import("@corgtex/shared").MembershipSummary | null;
 };
 
 function dateRangeWhere(from?: Date, to?: Date): Prisma.DateTimeFilter<"Action"> | undefined {
@@ -225,19 +246,23 @@ export async function getAction(actor: AppActor, params: {
   return action;
 }
 
-export async function createAction(actor: AppActor, params: {
-  workspaceId: string;
-  title: string;
-  bodyMd?: string | null;
-  circleId?: string | null;
-  assigneeMemberId?: string | null;
-  authorMemberId?: string | null;
-  dueAt?: Date | null;
-  proposalId?: string | null;
-  isPrivate?: boolean;
-  priority?: number | null;
-  _membership?: import("@corgtex/shared").MembershipSummary | null;
-}) {
+async function applyActionDuplicateUpdate(actor: AppActor, params: CreateActionParams, actionId: string) {
+  const existing = await getAction(actor, { workspaceId: params.workspaceId, actionId });
+  const mergedBody = duplicateGuardMergeText(existing.bodyMd, params.bodyMd);
+  const updateParams: Parameters<typeof updateAction>[1] = {
+    workspaceId: params.workspaceId,
+    actionId,
+  };
+  if ((mergedBody ?? null) !== (existing.bodyMd ?? null)) updateParams.bodyMd = mergedBody;
+  if (!existing.circleId && params.circleId) updateParams.circleId = params.circleId;
+  if (!existing.assigneeMemberId && params.assigneeMemberId) updateParams.assigneeMemberId = params.assigneeMemberId;
+  if (!existing.dueAt && params.dueAt) updateParams.dueAt = params.dueAt;
+  if (!existing.proposalId && params.proposalId) updateParams.proposalId = params.proposalId;
+  if (params.priority !== undefined && params.priority !== null && existing.priority !== params.priority) updateParams.priority = params.priority;
+  return Object.keys(updateParams).length > 2 ? updateAction(actor, updateParams) : existing;
+}
+
+export async function createAction(actor: AppActor, params: CreateActionParams) {
   const membership = await requireWorkspaceMembership({
     actor,
     workspaceId: params.workspaceId,
@@ -246,6 +271,25 @@ export async function createAction(actor: AppActor, params: {
 
   const title = params.title.trim();
   invariant(title.length > 0, 400, "INVALID_INPUT", "Action title is required.");
+  const duplicateDecision = await checkWorkspaceDuplicateGuard({
+    workspaceId: params.workspaceId,
+    entityType: "Action",
+    title,
+    body: params.bodyMd,
+    circleId: params.circleId,
+    assigneeMemberId: params.assigneeMemberId,
+    dueAt: params.dueAt,
+    proposalId: params.proposalId,
+    actorUserId: actor.kind === "user" ? actor.user.id : null,
+    membershipId: membership?.id ?? null,
+    includePrivate: actor.kind === "agent" || membership?.role === "ADMIN",
+  }, params.duplicateGuard);
+  if (duplicateDecision?.resolution === "use_existing") {
+    return getAction(actor, { workspaceId: params.workspaceId, actionId: duplicateDecision.match.entityId });
+  }
+  if (duplicateDecision?.resolution === "update_existing") {
+    return applyActionDuplicateUpdate(actor, params, duplicateDecision.match.entityId);
+  }
   const isPrivate = params.isPrivate ?? true;
   const publishedAt = isPrivate ? null : new Date();
 
@@ -288,7 +332,7 @@ export async function createAction(actor: AppActor, params: {
       action: "action.created",
       entityType: "Action",
       entityId: action.id,
-      meta: { title: action.title },
+      meta: { title: action.title, ...duplicateGuardAuditMeta(duplicateDecision) },
     });
 
     await appendEvents(tx, [
@@ -338,6 +382,7 @@ export async function updateAction(actor: AppActor, params: {
   circleId?: string | null;
   assigneeMemberId?: string | null;
   dueAt?: Date | null;
+  proposalId?: string | null;
   isPrivate?: boolean;
   completedVia?: string | null;
   evidenceDocumentIds?: string[] | null;
@@ -364,7 +409,8 @@ export async function updateAction(actor: AppActor, params: {
       || params.priority !== undefined
       || params.circleId !== undefined
       || params.assigneeMemberId !== undefined
-      || params.dueAt !== undefined;
+      || params.dueAt !== undefined
+      || params.proposalId !== undefined;
     if (editsContent) {
       if (action.status === "DRAFT") {
         await requireDraftManager({ actor, workspaceId: params.workspaceId, record: action, resolvedMembership: membership });
@@ -415,9 +461,12 @@ export async function updateAction(actor: AppActor, params: {
       data.assigneeMemberId = await resolveAssigneeMemberId(tx, params.workspaceId, params.assigneeMemberId);
     }
     if (params.dueAt !== undefined) data.dueAt = params.dueAt;
+    if (params.proposalId !== undefined) {
+      data.proposalId = await resolveWorkspaceProposalLink(tx, actor, membership, params.workspaceId, params.proposalId);
+    }
     if (params.isPrivate !== undefined) data.isPrivate = params.isPrivate;
 
-    const contentFields = ["title", "bodyMd", "priority", "circleId", "assigneeMemberId", "dueAt"];
+    const contentFields = ["title", "bodyMd", "priority", "circleId", "assigneeMemberId", "dueAt", "proposalId"];
     const changedFields = changedDataFields(action as unknown as Record<string, unknown>, data)
       .filter((field) => contentFields.includes(field));
     if (changedFields.length > 0) {
@@ -436,6 +485,7 @@ export async function updateAction(actor: AppActor, params: {
           "circleId",
           "assigneeMemberId",
           "dueAt",
+          "proposalId",
           "status",
           "version",
         ]),

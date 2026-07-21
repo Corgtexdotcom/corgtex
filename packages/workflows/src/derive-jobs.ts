@@ -245,7 +245,7 @@ export function deriveJobsForEvent(event: {
     }
   }
 
-  if (event.type === "document.created") {
+  if (event.type === "document.created" || event.type === "document.updated") {
     const payload = event.payload as { documentId?: string };
     if (payload.documentId && event.workspaceId) {
       jobs.push({

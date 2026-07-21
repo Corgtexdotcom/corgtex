@@ -13,6 +13,12 @@ import { humanMemberIdentityWhere } from "./member-identity";
 import { createWorkItemEvidenceLinks } from "./work-item-evidence";
 import { ensureWorkspacePermalink, workspaceEntityCanonicalPath } from "./permalinks";
 import {
+  checkWorkspaceDuplicateGuard,
+  duplicateGuardAuditMeta,
+  duplicateGuardMergeText,
+  type DuplicateGuardOptions,
+} from "./duplicate-guard";
+import {
   changedDataFields,
   pickJsonSnapshot,
   recordWorkItemVersion,
@@ -40,6 +46,7 @@ type CreateProposalParams = {
   meetingId?: string | null;
   sourceTensionId?: string | null;
   relatedActionIds?: string[] | null;
+  duplicateGuard?: DuplicateGuardOptions | null;
 };
 
 type CreateProposalFromTensionParams = Omit<CreateProposalParams, "title" | "bodyMd" | "sourceTensionId"> & {
@@ -50,6 +57,13 @@ type CreateProposalFromTensionParams = Omit<CreateProposalParams, "title" | "bod
 
 function normalizeIds(ids?: string[] | null) {
   return Array.from(new Set((ids ?? []).map((id) => id.trim()).filter(Boolean)));
+}
+
+function proposalSourceIds(params: { sourceTensionId?: string | null; relatedActionIds?: string[] | null }) {
+  return [
+    ...normalizeIds(params.sourceTensionId ? [params.sourceTensionId] : []),
+    ...normalizeIds(params.relatedActionIds),
+  ];
 }
 
 async function activateProposalApprovalFlow(tx: Prisma.TransactionClient, params: {
@@ -475,6 +489,55 @@ export async function getProposal(actor: AppActor, params: {
   return proposal;
 }
 
+async function applyProposalDuplicateUpdate(actor: AppActor, params: CreateProposalParams, proposalId: string) {
+  const membership = await requireWorkspaceMembership({
+    actor,
+    workspaceId: params.workspaceId,
+  });
+  const sourceTension = await loadVisibleSourceTension(prisma as unknown as Prisma.TransactionClient, actor, membership, params.workspaceId, params.sourceTensionId);
+  const relatedActionIds = await validateRelatedActions(prisma as unknown as Prisma.TransactionClient, actor, membership, params.workspaceId, params.relatedActionIds);
+  const existing = await getProposal(actor, { workspaceId: params.workspaceId, proposalId });
+  const mergedBody = duplicateGuardMergeText(existing.bodyMd, params.bodyMd);
+  const updateParams: Parameters<typeof updateProposal>[1] = {
+    workspaceId: params.workspaceId,
+    proposalId,
+  };
+  if (mergedBody && mergedBody !== existing.bodyMd) updateParams.bodyMd = mergedBody;
+  if (!existing.summary && params.summary) updateParams.summary = params.summary;
+  if (!existing.circleId && params.circleId) updateParams.circleId = params.circleId;
+  if (!existing.ownerMemberId && params.ownerMemberId) updateParams.ownerMemberId = params.ownerMemberId;
+  if (params.priority !== undefined && params.priority !== null && existing.priority !== params.priority) updateParams.priority = params.priority;
+  const proposal = Object.keys(updateParams).length > 2 ? await updateProposal(actor, updateParams) : existing;
+
+  if (sourceTension || relatedActionIds.length > 0) {
+    await prisma.$transaction(async (tx) => {
+      if (sourceTension) {
+        await tx.tension.update({
+          where: { id: sourceTension.id },
+          data: { proposalId },
+        });
+      }
+
+      if (relatedActionIds.length > 0) {
+        const linkedActions = await tx.action.updateMany({
+          where: {
+            id: { in: relatedActionIds },
+            workspaceId: params.workspaceId,
+            archivedAt: null,
+            proposalId: null,
+            ...privacyFilter(actor, membership),
+          },
+          data: { proposalId },
+        });
+
+        invariant(linkedActions.count === relatedActionIds.length, 409, "CONFLICT", "Related actions changed before they could be linked.");
+      }
+    });
+  }
+
+  return proposal;
+}
+
 export async function createProposal(actor: AppActor, params: CreateProposalParams) {
   const membership = await requireWorkspaceMembership({
     actor,
@@ -485,6 +548,25 @@ export async function createProposal(actor: AppActor, params: CreateProposalPara
   const bodyMd = params.bodyMd.trim();
   invariant(title.length > 0, 400, "INVALID_INPUT", "Proposal title is required.");
   invariant(bodyMd.length > 0, 400, "INVALID_INPUT", "Proposal body is required.");
+  const duplicateDecision = await checkWorkspaceDuplicateGuard({
+    workspaceId: params.workspaceId,
+    entityType: "Proposal",
+    title,
+    body: bodyMd,
+    circleId: params.circleId,
+    ownerMemberId: params.ownerMemberId,
+    meetingId: params.meetingId,
+    sourceIds: proposalSourceIds(params),
+    actorUserId: actor.kind === "user" ? actor.user.id : null,
+    membershipId: membership?.id ?? null,
+    includePrivate: actor.kind === "agent" || membership?.role === "ADMIN",
+  }, params.duplicateGuard);
+  if (duplicateDecision?.resolution === "use_existing") {
+    return getProposal(actor, { workspaceId: params.workspaceId, proposalId: duplicateDecision.match.entityId });
+  }
+  if (duplicateDecision?.resolution === "update_existing") {
+    return applyProposalDuplicateUpdate(actor, params, duplicateDecision.match.entityId);
+  }
   const summary = params.includeAiSummary === true
     ? await generateProposalSummary({ workspaceId: params.workspaceId, title, bodyMd })
     : params.summary?.trim() || null;
@@ -560,6 +642,7 @@ export async function createProposal(actor: AppActor, params: CreateProposalPara
           title: proposal.title,
           sourceTensionId: sourceTension?.id ?? null,
           relatedActionIds,
+          ...duplicateGuardAuditMeta(duplicateDecision),
         },
       },
     });
@@ -605,6 +688,38 @@ export async function createProposalFromTension(actor: AppActor, params: CreateP
     actor,
     workspaceId: params.workspaceId,
   });
+
+  let duplicateDecision: Awaited<ReturnType<typeof checkWorkspaceDuplicateGuard>> = null;
+  if (params.duplicateGuard != null) {
+    const sourceTensionForGuard = await loadVisibleSourceTension(prisma as unknown as Prisma.TransactionClient, actor, membership, params.workspaceId, params.sourceTensionId);
+    invariant(sourceTensionForGuard, 404, "NOT_FOUND", "Source tension not found.");
+    const draftForGuard = proposalDraftFromTension(sourceTensionForGuard, params);
+    duplicateDecision = await checkWorkspaceDuplicateGuard({
+      workspaceId: params.workspaceId,
+      entityType: "Proposal",
+      title: draftForGuard.title,
+      body: draftForGuard.bodyMd,
+      circleId: params.circleId ?? sourceTensionForGuard.circleId,
+      ownerMemberId: params.ownerMemberId,
+      meetingId: params.meetingId ?? sourceTensionForGuard.meetingId,
+      sourceIds: [sourceTensionForGuard.id, ...normalizeIds(params.relatedActionIds)],
+      actorUserId: actor.kind === "user" ? actor.user.id : null,
+      membershipId: membership?.id ?? null,
+      includePrivate: actor.kind === "agent" || membership?.role === "ADMIN",
+    }, params.duplicateGuard);
+    if (duplicateDecision?.resolution === "use_existing") {
+      return getProposal(actor, { workspaceId: params.workspaceId, proposalId: duplicateDecision.match.entityId });
+    }
+    if (duplicateDecision?.resolution === "update_existing") {
+      return applyProposalDuplicateUpdate(actor, {
+        ...params,
+        title: draftForGuard.title,
+        summary: draftForGuard.summary,
+        bodyMd: draftForGuard.bodyMd,
+        priority: params.priority ?? sourceTensionForGuard.priority ?? null,
+      }, duplicateDecision.match.entityId);
+    }
+  }
 
   const isPrivate = params.isPrivate ?? true;
   const openedAt = isPrivate ? null : new Date();
@@ -679,6 +794,7 @@ export async function createProposalFromTension(actor: AppActor, params: CreateP
           title: proposal.title,
           sourceTensionId: sourceTension.id,
           relatedActionIds,
+          ...duplicateGuardAuditMeta(duplicateDecision),
         },
       },
     });

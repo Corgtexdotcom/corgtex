@@ -1,7 +1,9 @@
-import { listSources } from "@corgtex/domain";
+import { duplicateGuardErrorPayload, isDuplicateGuardMatchError, listSources } from "@corgtex/domain";
 import { requirePageActor } from "@/lib/auth";
 import { ingestSourceAction } from "../actions";
 import { getTranslations } from "next-intl/server";
+import { DuplicateGuardForm, type DuplicateGuardFormState } from "../../add/DuplicateGuardForm";
+import { BrainSourceFileUploadForm } from "./BrainSourceFileUploadForm";
 
 export const dynamic = "force-dynamic";
 
@@ -16,6 +18,17 @@ export default async function BrainSourcesPage({
   const t = await getTranslations("brain");
   const { items: sources } = await listSources(actor, { workspaceId, take: 50 });
 
+  async function ingestSourceAndReturn(_state: DuplicateGuardFormState, formData: FormData): Promise<DuplicateGuardFormState> {
+    "use server";
+    try {
+      await ingestSourceAction(formData);
+    } catch (error) {
+      if (isDuplicateGuardMatchError(error)) return duplicateGuardErrorPayload(error);
+      throw error;
+    }
+    return null;
+  }
+
   return (
     <>
       <div className="ws-page-header">
@@ -25,16 +38,18 @@ export default async function BrainSourcesPage({
 
       <section className="ws-section stack">
         <h2>{t("ingestRawFiles")}</h2>
-        <form action={`/api/workspaces/${workspaceId}/brain/sources/upload`} method="post" encType="multipart/form-data" className="stack panel">
-          <label>
-            {t("fileToIngest")}
-            <input type="file" name="file" required />
-          </label>
-          <button type="submit">{t("uploadAndMap")}</button>
-        </form>
+        <BrainSourceFileUploadForm
+          workspaceId={workspaceId}
+          labels={{
+            fileToIngest: t("fileToIngest"),
+            labelTitle: t("labelTitle"),
+            placeholderSourceTitle: t("placeholderSourceTitle"),
+            uploadAndMap: t("uploadAndMap"),
+          }}
+        />
 
         <h2>{t("ingestTextSource")}</h2>
-        <form action={ingestSourceAction} className="stack panel">
+        <DuplicateGuardForm action={ingestSourceAndReturn} className="stack panel">
           <input type="hidden" name="workspaceId" value={workspaceId} />
           <label>
             {t("labelTitle")}
@@ -67,7 +82,7 @@ export default async function BrainSourcesPage({
             <textarea name="content" rows={8} required placeholder={t("placeholderSourceContent")} />
           </label>
           <button type="submit">{t("ingestSource")}</button>
-        </form>
+        </DuplicateGuardForm>
       </section>
 
       <section className="ws-section">

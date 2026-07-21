@@ -6,8 +6,10 @@ import {
   createExternalDataSource,
   createWorkspaceToolLink,
   canManagePracticeFinanceProjects,
+  duplicateGuardErrorPayload,
   getMeetingRecorderConfig,
   getMemberInvitePolicy,
+  isDuplicateGuardMatchError,
   listCrmAccounts,
   listDeals,
   ingestSource,
@@ -25,7 +27,6 @@ import { prisma } from "@corgtex/shared";
 
 import { requirePageActor } from "@/lib/auth";
 import { enforceDemoGuard } from "@/lib/demo-guard";
-import { ActionEditorForm } from "@/lib/components/ActionEditorForm";
 import { MarkdownEditor } from "@/lib/components/MarkdownEditor";
 import { TimeZoneSelect } from "@/lib/components/TimeZoneSelect";
 import { WorkItemMemberSelect, type WorkItemMemberOption } from "@/lib/components/WorkItemMemberSelect";
@@ -72,7 +73,7 @@ import {
 } from "../actions";
 import { createArticleAction } from "../brain/actions";
 import { createGoalFormAction, refreshCompanyDirectionFromBrainFormAction } from "../goals/actions";
-import { asOptional, asOptionalInt, asString, refresh } from "../action-utils";
+import { asOptional, asOptionalInt, asString, duplicateGuardFromFormData, refresh } from "../action-utils";
 import {
   CRM_ACTIVITY_TYPES,
   CRM_CREATABLE_DEAL_STAGES,
@@ -82,6 +83,8 @@ import {
 } from "../leads/view-model";
 import { createPracticeProjectAction } from "../finance/actions";
 import { MeetingTranscriptUploadForm } from "../meetings/MeetingTranscriptUploadForm";
+import { DuplicateGuardActionEditorForm } from "./DuplicateGuardActionEditorForm";
+import { DuplicateGuardForm, type DuplicateGuardFormState } from "./DuplicateGuardForm";
 import { PasteTextForm } from "./PasteTextForm";
 import { PracticeProjectAddPanel } from "./PracticeProjectAddPanel";
 
@@ -140,6 +143,11 @@ function hiddenWorkspace(workspaceId: string) {
 
 function cancelLink(returnTo: string) {
   return <a className="link-button secondary" href={returnTo}>Cancel</a>;
+}
+
+function duplicateGuardState(error: unknown): DuplicateGuardFormState {
+  if (isDuplicateGuardMatchError(error)) return duplicateGuardErrorPayload(error);
+  throw error;
 }
 
 function firstSearchValue(search: Record<string, string | string[] | undefined>, key: string) {
@@ -307,27 +315,43 @@ export default async function WorkspaceAddPage({
     priority: DEFAULT_WORK_ITEM_PRIORITY_LABELS,
   };
 
-  async function createActionAndReturn(formData: FormData) {
+  async function createActionAndReturn(_state: DuplicateGuardFormState, formData: FormData): Promise<DuplicateGuardFormState> {
     "use server";
-    await createActionAction(formData);
+    try {
+      await createActionAction(formData);
+    } catch (error) {
+      return duplicateGuardState(error);
+    }
     redirect(returnTo);
   }
 
-  async function createTensionAndReturn(formData: FormData) {
+  async function createTensionAndReturn(_state: DuplicateGuardFormState, formData: FormData): Promise<DuplicateGuardFormState> {
     "use server";
-    await createTensionAction(formData);
+    try {
+      await createTensionAction(formData);
+    } catch (error) {
+      return duplicateGuardState(error);
+    }
     redirect(returnTo);
   }
 
-  async function createProposalAndReturn(formData: FormData) {
+  async function createProposalAndReturn(_state: DuplicateGuardFormState, formData: FormData): Promise<DuplicateGuardFormState> {
     "use server";
-    await createProposalAction(formData);
+    try {
+      await createProposalAction(formData);
+    } catch (error) {
+      return duplicateGuardState(error);
+    }
     redirect(returnTo);
   }
 
-  async function createGoalAndReturn(formData: FormData) {
+  async function createGoalAndReturn(_state: DuplicateGuardFormState, formData: FormData): Promise<DuplicateGuardFormState> {
     "use server";
-    await createGoalFormAction(formData);
+    try {
+      await createGoalFormAction(formData);
+    } catch (error) {
+      return duplicateGuardState(error);
+    }
     redirect(returnTo);
   }
 
@@ -361,9 +385,13 @@ export default async function WorkspaceAddPage({
     redirect(returnTo);
   }
 
-  async function createArticleAndReturn(formData: FormData) {
+  async function createArticleAndReturn(_state: DuplicateGuardFormState, formData: FormData): Promise<DuplicateGuardFormState> {
     "use server";
-    await createArticleAction(formData);
+    try {
+      await createArticleAction(formData);
+    } catch (error) {
+      return duplicateGuardState(error);
+    }
     redirect(returnTo);
   }
 
@@ -496,7 +524,7 @@ export default async function WorkspaceAddPage({
     redirect(returnTo);
   }
 
-  async function pasteTextAndReturn(formData: FormData) {
+  async function pasteTextAndReturn(_state: DuplicateGuardFormState, formData: FormData): Promise<DuplicateGuardFormState> {
     "use server";
     const workspaceId = asString(formData, "workspaceId");
     await enforceDemoGuard(workspaceId);
@@ -504,16 +532,21 @@ export default async function WorkspaceAddPage({
     const membership = await requireWorkspaceMembership({ actor, workspaceId });
     const sourceType = asString(formData, "sourceType") as BrainSourceType;
     const content = asString(formData, "content");
-    await ingestSource(actor, {
-      workspaceId,
-      sourceType,
-      tier: 1,
-      content,
-      title: asOptional(formData, "title") ?? undefined,
-      channel: asOptional(formData, "channel") ?? undefined,
-      authorMemberId: membership?.id === "global-operator" ? null : membership?.id ?? null,
-      ingestionGuidanceMd: asOptional(formData, "ingestionGuidanceMd"),
-    });
+    try {
+      await ingestSource(actor, {
+        workspaceId,
+        sourceType,
+        tier: 1,
+        content,
+        title: asOptional(formData, "title") ?? undefined,
+        channel: asOptional(formData, "channel") ?? undefined,
+        authorMemberId: membership?.id === "global-operator" ? null : membership?.id ?? null,
+        ingestionGuidanceMd: asOptional(formData, "ingestionGuidanceMd"),
+        duplicateGuard: duplicateGuardFromFormData(formData),
+      });
+    } catch (error) {
+      return duplicateGuardState(error);
+    }
     refresh(workspaceId);
     redirect(returnTo);
   }
@@ -627,7 +660,7 @@ export default async function WorkspaceAddPage({
         )}
 
         {kind === "action" && (
-          <ActionEditorForm
+          <DuplicateGuardActionEditorForm
             action={createActionAndReturn}
             workspaceId={workspaceId}
             members={actionMembers}
@@ -642,11 +675,11 @@ export default async function WorkspaceAddPage({
                 {activeProposals.map((proposal) => <option value={proposal.id} key={proposal.id}>{proposal.title}</option>)}
               </select>
             </label>
-          </ActionEditorForm>
+          </DuplicateGuardActionEditorForm>
         )}
 
         {kind === "tension" && (
-          <form action={createTensionAndReturn} className="stack nr-form-section">
+          <DuplicateGuardForm action={createTensionAndReturn} className="stack nr-form-section">
             {hiddenWorkspace(workspaceId)}
             <label>Title<input name="title" required /></label>
             <label>Description<MarkdownEditor name="bodyMd" rows={5} /></label>
@@ -676,11 +709,11 @@ export default async function WorkspaceAddPage({
               Private inbox item
             </label>
             <div className="actions-inline"><button type="submit">Create tension</button>{cancelLink(returnTo)}</div>
-          </form>
+          </DuplicateGuardForm>
         )}
 
         {kind === "proposal" && (
-          <form action={createProposalAndReturn} className="stack nr-form-section">
+          <DuplicateGuardForm action={createProposalAndReturn} className="stack nr-form-section">
             {hiddenWorkspace(workspaceId)}
             <label>Title<input name="title" required /></label>
             <label>Summary<input name="summary" /></label>
@@ -698,11 +731,11 @@ export default async function WorkspaceAddPage({
               Private draft
             </label>
             <div className="actions-inline"><button type="submit">Create proposal</button>{cancelLink(returnTo)}</div>
-          </form>
+          </DuplicateGuardForm>
         )}
 
         {kind === "goal" && (
-          <form action={createGoalAndReturn} className="stack nr-form-section">
+          <DuplicateGuardForm action={createGoalAndReturn} className="stack nr-form-section">
             {hiddenWorkspace(workspaceId)}
             <label>Title<input name="title" required /></label>
             <label>Description<MarkdownEditor name="descriptionMd" rows={4} /></label>
@@ -732,7 +765,7 @@ export default async function WorkspaceAddPage({
               ))}
             </fieldset>
             <div className="actions-inline"><button type="submit">Create goal</button>{cancelLink(returnTo)}</div>
-          </form>
+          </DuplicateGuardForm>
         )}
 
         {kind === "generate_goals_from_brain" && (
@@ -807,7 +840,7 @@ export default async function WorkspaceAddPage({
         )}
 
         {kind === "article" && (
-          <form action={createArticleAndReturn} className="stack nr-form-section">
+          <DuplicateGuardForm action={createArticleAndReturn} className="stack nr-form-section">
             {hiddenWorkspace(workspaceId)}
             {isAgreementArticle && <input type="hidden" name="agreementCapture" value="working-agreement" />}
             <label>Title<input name="title" required /></label>
@@ -841,7 +874,7 @@ export default async function WorkspaceAddPage({
               </label>
             )}
             <div className="actions-inline"><button type="submit">{isAgreementArticle ? "Create working agreement" : "Create article"}</button>{cancelLink(returnTo)}</div>
-          </form>
+          </DuplicateGuardForm>
         )}
 
         {kind === "tool_app" && (

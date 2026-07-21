@@ -2,7 +2,7 @@
 
 import { enforceDemoGuard } from "@/lib/demo-guard";
 import { requirePageActor } from "@/lib/auth";
-import { asString, asOptional, asOptionalInt, refresh } from "../action-utils";
+import { asString, asOptional, asOptionalInt, duplicateGuardFromFormData, refresh } from "../action-utils";
 import {
   createAction,
   createAdviceRequest,
@@ -41,6 +41,7 @@ export async function createActionAction(formData: FormData) {
     assigneeMemberId: asOptional(formData, "assigneeMemberId"),
     priority: asOptionalInt(formData, "priority"),
     isPrivate: formData.has("isPrivate") ? formData.get("isPrivate") === "on" : true,
+    duplicateGuard: duplicateGuardFromFormData(formData),
   });
   refresh(workspaceId);
 }

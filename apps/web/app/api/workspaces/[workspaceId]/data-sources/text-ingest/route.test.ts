@@ -61,6 +61,7 @@ describe("POST /api/workspaces/[workspaceId]/data-sources/text-ingest", () => {
         recordedAt: "2026-06-11T14:07",
         timeZone: "America/Los_Angeles",
         ingestionGuidanceMd: "Highlight onboarding owner.",
+        duplicateGuardEnabled: true,
       }),
       { params: Promise.resolve({ workspaceId: "ws-1" }) },
     );
@@ -75,6 +76,7 @@ describe("POST /api/workspaces/[workspaceId]/data-sources/text-ingest", () => {
       source: "text-paste",
       recordedAt: new Date("2026-06-11T21:07:00.000Z"),
       ingestionGuidanceMd: "Highlight onboarding owner.",
+      duplicateGuard: {},
     });
     expect(ingestSource).not.toHaveBeenCalled();
     expect(handleRouteError).not.toHaveBeenCalled();
@@ -132,6 +134,7 @@ describe("POST /api/workspaces/[workspaceId]/data-sources/text-ingest", () => {
         channel: "handbook",
         content: "Policy text",
         ingestionGuidanceMd: "Preserve rollout notes.",
+        duplicateGuardEnabled: true,
       }),
       { params: Promise.resolve({ workspaceId: "ws-1" }) },
     );
@@ -148,6 +151,7 @@ describe("POST /api/workspaces/[workspaceId]/data-sources/text-ingest", () => {
       channel: "handbook",
       authorMemberId: "member-1",
       ingestionGuidanceMd: "Preserve rollout notes.",
+      duplicateGuard: {},
     });
     expect(intakeMeetingTranscript).not.toHaveBeenCalled();
   });

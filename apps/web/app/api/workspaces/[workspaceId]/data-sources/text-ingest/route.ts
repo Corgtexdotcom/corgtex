@@ -2,8 +2,26 @@ import { NextRequest, NextResponse } from "next/server";
 import { resolveRequestActor } from "@/lib/auth";
 import { handleRouteError } from "@/lib/http";
 import { ingestSource, intakeMeetingTranscript, requireWorkspaceMembership } from "@corgtex/domain";
+import type { DuplicateGuardOptions, DuplicateGuardResolution } from "@corgtex/domain";
 import type { BrainSourceType } from "@prisma/client";
 import { parseOptionalMeetingDateTimeInput } from "@/lib/meeting-timezone";
+
+const DUPLICATE_GUARD_RESOLUTIONS: DuplicateGuardResolution[] = [
+  "use_existing",
+  "update_existing",
+  "create_new",
+];
+
+function duplicateGuardFromValues(resolution: unknown, targetEntityId: unknown, enabled?: unknown): DuplicateGuardOptions | undefined {
+  if (typeof resolution !== "string" || !DUPLICATE_GUARD_RESOLUTIONS.includes(resolution as DuplicateGuardResolution)) {
+    if (enabled === true || enabled === "true") return {};
+    return undefined;
+  }
+  return {
+    resolution: resolution as DuplicateGuardResolution,
+    targetEntityId: typeof targetEntityId === "string" && targetEntityId.trim() ? targetEntityId.trim() : null,
+  };
+}
 
 export async function POST(request: NextRequest, { params }: { params: Promise<{ workspaceId: string }> }) {
   try {
@@ -12,7 +30,19 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
     const membership = await requireWorkspaceMembership({ actor, workspaceId });
     
     const body = await request.json();
-    const { title, sourceType, channel, content, recordedAt, ingestionGuidanceMd, timeZone } = body;
+    const {
+      title,
+      sourceType,
+      channel,
+      content,
+      recordedAt,
+      ingestionGuidanceMd,
+      timeZone,
+      duplicateGuardEnabled,
+      duplicateResolution,
+      duplicateTargetEntityId,
+    } = body;
+    const duplicateGuard = duplicateGuardFromValues(duplicateResolution, duplicateTargetEntityId, duplicateGuardEnabled);
     
     if (!content || typeof content !== "string") {
       return NextResponse.json({ error: { message: "Content is required" } }, { status: 400 });
@@ -33,6 +63,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
           "Recorded at",
         ),
         ingestionGuidanceMd: typeof ingestionGuidanceMd === "string" ? ingestionGuidanceMd : null,
+        duplicateGuard,
       });
 
       if (result.status === "needs_clarification") {
@@ -52,6 +83,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
       channel: channel ? String(channel) : undefined,
       authorMemberId,
       ingestionGuidanceMd: typeof ingestionGuidanceMd === "string" ? ingestionGuidanceMd : null,
+      duplicateGuard,
     });
 
     return NextResponse.json(source, { status: 201 });

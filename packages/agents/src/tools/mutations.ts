@@ -1,8 +1,38 @@
 import { prisma } from "@corgtex/shared";
 import type { AppActor } from "@corgtex/shared";
 import type { ModelTool } from "@corgtex/models";
-import { AppError, createTension, updateTension, createAction, updateAction, createProposal, createProposalFromTension, createGoal } from "@corgtex/domain";
+import {
+  AppError,
+  createTension,
+  updateTension,
+  createAction,
+  updateAction,
+  createProposal,
+  createProposalFromTension,
+  createGoal,
+  duplicateGuardErrorPayload,
+  isDuplicateGuardMatchError,
+} from "@corgtex/domain";
+import type { DuplicateGuardOptions, DuplicateGuardResolution } from "@corgtex/domain";
 import type { TensionStatus, ActionStatus, GoalCadence, GoalLevel, GoalStatus, Prisma } from "@prisma/client";
+
+const DUPLICATE_GUARD_RESOLUTIONS: DuplicateGuardResolution[] = [
+  "use_existing",
+  "update_existing",
+  "create_new",
+];
+
+const duplicateGuardToolProperties = {
+  duplicateResolution: {
+    type: "string",
+    enum: DUPLICATE_GUARD_RESOLUTIONS,
+    description: "Pass only after this tool returns duplicate_confirmation_required.",
+  },
+  duplicateTargetEntityId: {
+    type: "string",
+    description: "Candidate entityId returned by duplicate_confirmation_required.",
+  },
+};
 
 export const createTensionTool: ModelTool = {
   type: "function",
@@ -17,6 +47,7 @@ export const createTensionTool: ModelTool = {
         circleId: { type: "string", description: "Optional UUID of the circle this belongs to" },
         assigneeMemberId: { type: "string", description: "Optional UUID of a member assigned to resolve this" },
         raisedByMemberId: { type: "string", description: "Optional UUID of the member who raised this tension" },
+        ...duplicateGuardToolProperties,
       },
       required: ["title"],
     },
@@ -57,6 +88,7 @@ export const createActionTool: ModelTool = {
         circleId: { type: "string" },
         assigneeMemberId: { type: "string" },
         dueAt: { type: "string", description: "ISO 8601 UTC date string for when this is due" },
+        ...duplicateGuardToolProperties,
       },
       required: ["title"],
     },
@@ -105,6 +137,7 @@ export const createProposalTool: ModelTool = {
           description: "Optional UUIDs of existing action items related to implementing or following up on this proposal",
           items: { type: "string" },
         },
+        ...duplicateGuardToolProperties,
       },
       required: [],
     },
@@ -143,15 +176,27 @@ export const createGoalTool: ModelTool = {
             required: ["title"],
           },
         },
+        ...duplicateGuardToolProperties,
       },
       required: ["title"],
     },
   },
 };
 
-async function appendAuditMeta(entityType: string, entityId: string, actionName: string, metaToAdd: Prisma.InputJsonObject) {
+async function appendAuditMeta(
+  entityType: string,
+  entityId: string,
+  actionName: string,
+  metaToAdd: Prisma.InputJsonObject,
+  notBefore?: Date,
+) {
   const log = await prisma.auditLog.findFirst({
-    where: { entityType, entityId, action: actionName },
+    where: {
+      entityType,
+      entityId,
+      action: actionName,
+      ...(notBefore ? { createdAt: { gte: notBefore } } : {}),
+    },
     orderBy: { createdAt: "desc" },
   });
   if (log) {
@@ -164,20 +209,47 @@ async function appendAuditMeta(entityType: string, entityId: string, actionName:
   }
 }
 
+function duplicateGuardOptionsFromArgs(args: any): DuplicateGuardOptions {
+  const resolution = args?.duplicateResolution;
+  if (DUPLICATE_GUARD_RESOLUTIONS.includes(resolution as DuplicateGuardResolution)) {
+    return {
+      resolution: resolution as DuplicateGuardResolution,
+      targetEntityId: typeof args.duplicateTargetEntityId === "string" && args.duplicateTargetEntityId.trim()
+        ? args.duplicateTargetEntityId.trim()
+        : null,
+    };
+  }
+  return { onExact: "use_existing" };
+}
+
+function duplicateGuardToolResponse(error: unknown) {
+  if (isDuplicateGuardMatchError(error)) {
+    return duplicateGuardErrorPayload(error);
+  }
+  throw error;
+}
+
 export async function createTensionAction(actor: AppActor, ctx: any, args: any) {
-  const result = await createTension(actor, {
-    workspaceId: ctx.workspaceId,
-    title: args.title,
-    bodyMd: args.bodyMd,
-    circleId: args.circleId,
-    assigneeMemberId: args.assigneeMemberId,
-    raisedByMemberId: args.raisedByMemberId,
-  });
+  const writeStartedAt = new Date();
+  let result;
+  try {
+    result = await createTension(actor, {
+      workspaceId: ctx.workspaceId,
+      title: args.title,
+      bodyMd: args.bodyMd,
+      circleId: args.circleId,
+      assigneeMemberId: args.assigneeMemberId,
+      raisedByMemberId: args.raisedByMemberId,
+      duplicateGuard: duplicateGuardOptionsFromArgs(args),
+    });
+  } catch (error) {
+    return duplicateGuardToolResponse(error);
+  }
   
   await appendAuditMeta("Tension", result.id, "tension.created", {
     conversationSessionId: ctx.sessionId,
     toolCallInput: args,
-  });
+  }, writeStartedAt);
   
   return { success: true, tensionId: result.id };
 }
@@ -203,19 +275,26 @@ export async function updateTensionAction(actor: AppActor, ctx: any, args: any) 
 }
 
 export async function createActionItemAction(actor: AppActor, ctx: any, args: any) {
-  const result = await createAction(actor, {
-    workspaceId: ctx.workspaceId,
-    title: args.title,
-    bodyMd: args.bodyMd,
-    circleId: args.circleId,
-    assigneeMemberId: args.assigneeMemberId,
-    dueAt: args.dueAt ? new Date(args.dueAt) : undefined,
-  });
+  const writeStartedAt = new Date();
+  let result;
+  try {
+    result = await createAction(actor, {
+      workspaceId: ctx.workspaceId,
+      title: args.title,
+      bodyMd: args.bodyMd,
+      circleId: args.circleId,
+      assigneeMemberId: args.assigneeMemberId,
+      dueAt: args.dueAt ? new Date(args.dueAt) : undefined,
+      duplicateGuard: duplicateGuardOptionsFromArgs(args),
+    });
+  } catch (error) {
+    return duplicateGuardToolResponse(error);
+  }
 
   await appendAuditMeta("Action", result.id, "action.created", {
     conversationSessionId: ctx.sessionId,
     toolCallInput: args,
-  });
+  }, writeStartedAt);
 
   return { success: true, actionId: result.id };
 }
@@ -240,6 +319,7 @@ export async function updateActionItemAction(actor: AppActor, ctx: any, args: an
 }
 
 export async function createProposalAction(actor: AppActor, ctx: any, args: any) {
+  const writeStartedAt = new Date();
   const relatedActionIds = Array.isArray(args.relatedActionIds) ? args.relatedActionIds : undefined;
   const sourceTensionId = typeof args.sourceTensionId === "string" && args.sourceTensionId.trim().length > 0
     ? args.sourceTensionId
@@ -249,8 +329,10 @@ export async function createProposalAction(actor: AppActor, ctx: any, args: any)
     throw new AppError(400, "INVALID_OWNER_MEMBER_ID", "ownerMemberId must be a string, null, or omitted.");
   }
   const ownerMemberId = hasOwnerMemberId ? args.ownerMemberId as string | null : undefined;
-  const result = sourceTensionId
-    ? await createProposalFromTension(actor, {
+  let result;
+  try {
+    result = sourceTensionId
+      ? await createProposalFromTension(actor, {
         workspaceId: ctx.workspaceId,
         sourceTensionId,
         title: typeof args.title === "string" ? args.title : null,
@@ -258,46 +340,58 @@ export async function createProposalAction(actor: AppActor, ctx: any, args: any)
         bodyMd: typeof args.bodyMd === "string" ? args.bodyMd : null,
         circleId: typeof args.circleId === "string" ? args.circleId : null,
         relatedActionIds,
+        duplicateGuard: duplicateGuardOptionsFromArgs(args),
         ...(hasOwnerMemberId ? { ownerMemberId } : {}),
       })
-    : await createProposal(actor, {
+      : await createProposal(actor, {
         workspaceId: ctx.workspaceId,
         title: typeof args.title === "string" ? args.title : "",
         summary: typeof args.summary === "string" ? args.summary : null,
         bodyMd: typeof args.bodyMd === "string" ? args.bodyMd : "",
         circleId: typeof args.circleId === "string" ? args.circleId : null,
         relatedActionIds,
+        duplicateGuard: duplicateGuardOptionsFromArgs(args),
         ...(hasOwnerMemberId ? { ownerMemberId } : {}),
       });
+  } catch (error) {
+    return duplicateGuardToolResponse(error);
+  }
 
   await appendAuditMeta("Proposal", result.id, "proposal.created", {
     conversationSessionId: ctx.sessionId,
     toolCallInput: args,
-  });
+  }, writeStartedAt);
 
   return { success: true, proposalId: result.id };
 }
 
 export async function createGoalAction(actor: AppActor, ctx: any, args: any) {
-  const result = await createGoal(actor, {
-    workspaceId: ctx.workspaceId,
-    title: args.title,
-    descriptionMd: args.descriptionMd,
-    cadence: args.cadence as GoalCadence | undefined,
-    level: args.level as GoalLevel | undefined,
-    status: args.status as GoalStatus | undefined,
-    targetDate: args.targetDate ? new Date(args.targetDate) : undefined,
-    startDate: args.startDate ? new Date(args.startDate) : undefined,
-    parentGoalId: args.parentGoalId,
-    circleId: args.circleId,
-    ownerMemberId: args.ownerMemberId,
-    keyResults: Array.isArray(args.keyResults) ? args.keyResults : undefined,
-  });
+  const writeStartedAt = new Date();
+  let result;
+  try {
+    result = await createGoal(actor, {
+      workspaceId: ctx.workspaceId,
+      title: args.title,
+      descriptionMd: args.descriptionMd,
+      cadence: args.cadence as GoalCadence | undefined,
+      level: args.level as GoalLevel | undefined,
+      status: args.status as GoalStatus | undefined,
+      targetDate: args.targetDate ? new Date(args.targetDate) : undefined,
+      startDate: args.startDate ? new Date(args.startDate) : undefined,
+      parentGoalId: args.parentGoalId,
+      circleId: args.circleId,
+      ownerMemberId: args.ownerMemberId,
+      keyResults: Array.isArray(args.keyResults) ? args.keyResults : undefined,
+      duplicateGuard: duplicateGuardOptionsFromArgs(args),
+    });
+  } catch (error) {
+    return duplicateGuardToolResponse(error);
+  }
 
   await appendAuditMeta("Goal", result.id, "goal.created", {
     conversationSessionId: ctx.sessionId,
     toolCallInput: args,
-  });
+  }, writeStartedAt);
 
   return { success: true, goalId: result.id };
 }

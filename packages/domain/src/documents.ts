@@ -7,6 +7,13 @@ import { archiveFilterWhere, archiveWorkspaceArtifact, type ArchiveFilter } from
 import { invariant } from "./errors";
 import { persistedMemberId } from "./membership";
 import { assertTrialStorageCapacity } from "./trial-entitlements";
+import {
+  checkWorkspaceDuplicateGuard,
+  duplicateGuardAuditMeta,
+  duplicateGuardContentHash,
+  duplicateGuardMergeText,
+  type DuplicateGuardOptions,
+} from "./duplicate-guard";
 
 export async function listDocuments(workspaceId: string, opts?: { archiveFilter?: ArchiveFilter }) {
   return prisma.document.findMany({
@@ -15,7 +22,7 @@ export async function listDocuments(workspaceId: string, opts?: { archiveFilter?
   });
 }
 
-export async function createDocument(actor: AppActor, params: {
+type CreateDocumentParams = {
   workspaceId: string;
   title: string;
   source: string;
@@ -23,7 +30,108 @@ export async function createDocument(actor: AppActor, params: {
   mimeType?: string | null;
   textContent?: string | null;
   metadata?: Prisma.InputJsonValue;
-}) {
+  duplicateGuard?: DuplicateGuardOptions | null;
+};
+
+function metadataObject(value: Prisma.InputJsonValue | Prisma.JsonValue | null | undefined) {
+  return typeof value === "object" && value !== null && !Array.isArray(value) ? value as Record<string, unknown> : {};
+}
+
+function metadataString(metadata: Record<string, unknown>, key: string) {
+  const value = metadata[key];
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+async function getActiveDocument(workspaceId: string, documentId: string) {
+  const document = await prisma.document.findFirst({
+    where: { id: documentId, workspaceId, archivedAt: null },
+  });
+  invariant(document, 404, "NOT_FOUND", "Document not found.");
+  return document;
+}
+
+async function applyDocumentDuplicateUpdate(actor: AppActor, params: CreateDocumentParams, documentId: string) {
+  return prisma.$transaction(async (tx) => {
+    const existing = await tx.document.findFirst({
+      where: { id: documentId, workspaceId: params.workspaceId, archivedAt: null },
+    });
+    invariant(existing, 404, "NOT_FOUND", "Document not found.");
+    const mergedText = duplicateGuardMergeText(existing.textContent, params.textContent);
+    const metadata = {
+      ...metadataObject(existing.metadata),
+      ...metadataObject(params.metadata),
+      ...(params.textContent ? { contentHash: duplicateGuardContentHash(params.textContent) } : {}),
+      duplicateGuardUpdatedAt: new Date().toISOString(),
+      duplicateGuardStorageKey: params.storageKey,
+    } as Prisma.InputJsonValue;
+    const updated = await tx.document.update({
+      where: { id: existing.id },
+      data: {
+        textContent: mergedText,
+        metadata,
+      },
+    });
+
+    const sourceRequeueRows = mergedText ? await tx.brainSource.findMany({
+      where: {
+        workspaceId: params.workspaceId,
+        sourceType: { in: ["DOC", "FILE_UPLOAD"] },
+        metadata: { path: ["documentId"], equals: existing.id },
+      },
+      select: { id: true },
+    }) : [];
+
+    if (mergedText) {
+      for (const sourceRow of sourceRequeueRows) {
+        await tx.brainSource.update({
+          where: { id: sourceRow.id },
+          data: {
+            content: [updated.title, mergedText].join("\n\n"),
+            absorbedAt: null,
+            metadata: {
+              documentId: updated.id,
+              storageKey: updated.storageKey,
+              mimeType: updated.mimeType,
+              duplicateGuardUpdatedAt: new Date().toISOString(),
+            } as Prisma.InputJsonValue,
+          },
+        });
+      }
+    }
+
+    await tx.auditLog.create({
+      data: {
+        workspaceId: params.workspaceId,
+        actorUserId: actor.kind === "user" ? actor.user.id : null,
+        action: "document.updated",
+        entityType: "Document",
+        entityId: updated.id,
+        meta: { reason: "duplicate_guard_update" },
+      },
+    });
+
+    await appendEvents(tx, [
+      {
+        workspaceId: params.workspaceId,
+        type: "document.updated",
+        aggregateType: "Document",
+        aggregateId: updated.id,
+        payload: { documentId: updated.id, title: updated.title, source: updated.source },
+      },
+      ...sourceRequeueRows.map((sourceRow) => ({
+        workspaceId: params.workspaceId,
+        type: "brain-source.created" as const,
+        aggregateType: "BrainSource",
+        aggregateId: sourceRow.id,
+        payload: { sourceId: sourceRow.id },
+      })),
+    ]);
+
+    return updated;
+  });
+}
+
+export async function createDocument(actor: AppActor, params: CreateDocumentParams) {
   const membership = await requireWorkspaceMembership({
     actor,
     workspaceId: params.workspaceId,
@@ -37,7 +145,32 @@ export async function createDocument(actor: AppActor, params: {
   invariant(title.length > 0, 400, "INVALID_INPUT", "Document title is required.");
   invariant(source.length > 0, 400, "INVALID_INPUT", "Document source is required.");
   invariant(storageKey.length > 0, 400, "INVALID_INPUT", "storageKey is required.");
+  const documentMetadata = metadataObject(params.metadata);
+  const sourceUrl = metadataString(documentMetadata, "sourceUrl")
+    ?? metadataString(documentMetadata, "url")
+    ?? metadataString(documentMetadata, "externalUrl");
+  const contentHash = metadataString(documentMetadata, "contentHash") ?? duplicateGuardContentHash(textContent);
+  const duplicateDecision = await checkWorkspaceDuplicateGuard({
+    workspaceId: params.workspaceId,
+    entityType: "Document",
+    title,
+    body: textContent,
+    source,
+    sourceUrl,
+    contentHash,
+    content: textContent,
+  }, params.duplicateGuard);
+  if (duplicateDecision?.resolution === "use_existing") {
+    return getActiveDocument(params.workspaceId, duplicateDecision.match.entityId);
+  }
+  if (duplicateDecision?.resolution === "update_existing") {
+    return applyDocumentDuplicateUpdate(actor, params, duplicateDecision.match.entityId);
+  }
   const metadata = params.metadata;
+  const createMetadata = {
+    ...metadataObject(metadata),
+    ...(contentHash ? { contentHash } : {}),
+  };
   const size = metadata && typeof metadata === "object" && !Array.isArray(metadata)
     ? (metadata as Record<string, unknown>).size
     : null;
@@ -52,7 +185,7 @@ export async function createDocument(actor: AppActor, params: {
         storageKey,
         mimeType: params.mimeType?.trim() || null,
         textContent,
-        ...(params.metadata === undefined ? {} : { metadata: params.metadata }),
+        ...(params.metadata === undefined && !contentHash ? {} : { metadata: createMetadata as Prisma.InputJsonValue }),
       },
     });
 
@@ -66,6 +199,7 @@ export async function createDocument(actor: AppActor, params: {
         meta: {
           source: document.source,
           storageKey: document.storageKey,
+          ...duplicateGuardAuditMeta(duplicateDecision),
         },
       },
     });
@@ -98,6 +232,8 @@ export async function createDocument(actor: AppActor, params: {
             documentId: document.id,
             storageKey,
             mimeType: params.mimeType?.trim() || null,
+            ...(sourceUrl ? { sourceUrl } : {}),
+            ...(contentHash ? { contentHash } : {}),
           } as Prisma.InputJsonValue,
         },
       });
