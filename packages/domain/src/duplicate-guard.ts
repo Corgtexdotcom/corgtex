@@ -239,6 +239,13 @@ function readString(value: unknown) {
   return typeof value === "string" && value.trim() ? value.trim() : null;
 }
 
+function relationIds(value: unknown) {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((row: { id?: unknown }) => readString(row.id))
+    .filter((id): id is string => Boolean(id));
+}
+
 function jsonObject(value: unknown) {
   return typeof value === "object" && value !== null && !Array.isArray(value) ? value as Record<string, unknown> : {};
 }
@@ -326,6 +333,10 @@ async function latestRows(entityType: DuplicateGuardEntityType, workspaceId: str
     case "Proposal":
       return await db.proposal?.findMany?.({
         where: { workspaceId, archivedAt: null, status: { in: ["DRAFT", "OPEN"] }, ...privateWorkItemVisibility },
+        include: {
+          actions: { where: { archivedAt: null }, select: { id: true } },
+          tensions: { where: { archivedAt: null }, select: { id: true } },
+        },
         orderBy: [{ updatedAt: "desc" }, { createdAt: "desc" }],
         take: limit,
       }) ?? [];
@@ -520,6 +531,10 @@ function mapRows(entityType: DuplicateGuardEntityType, rows: any[]): LoadedCandi
           level: row.level,
           targetDate: row.targetDate,
           startDate: row.startDate,
+          sourceIds: [
+            ...relationIds(row.tensions),
+            ...relationIds(row.actions),
+          ],
         },
       });
     }

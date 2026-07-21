@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type { Prisma } from "@prisma/client";
 import { prisma } from "@corgtex/shared";
 import type { AppActor } from "@corgtex/shared";
@@ -36,6 +36,12 @@ function formatFileSize(bytes: number) {
   if (bytes < 1024) return `${bytes} bytes`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function uploadedContentHash(fileBuffer: Buffer, textContent: string | null) {
+  return textContent?.trim()
+    ? duplicateGuardContentHash(textContent)
+    : createHash("sha256").update(fileBuffer).digest("hex");
 }
 
 function buildBrainSourceContent(params: {
@@ -107,6 +113,7 @@ async function updateDuplicateUploadedDocument(actor: AppActor, params: {
   size: number;
   textContent: string | null;
   brainSourceContent: string;
+  contentHash: string | null;
   ingestionGuidanceMd?: string;
   metadata: Record<string, unknown>;
 }) {
@@ -120,7 +127,7 @@ async function updateDuplicateUploadedDocument(actor: AppActor, params: {
 
     const mergedText = duplicateGuardMergeText(existing.textContent, params.textContent);
     const mergedSourceContent = mergedText ? [params.documentTitle, mergedText].join("\n\n") : params.brainSourceContent;
-    const contentHash = duplicateGuardContentHash(mergedText ?? params.brainSourceContent);
+    const contentHash = mergedText ? duplicateGuardContentHash(mergedText) : params.contentHash;
     const document = await tx.document.update({
       where: { id: existing.id },
       data: {
@@ -348,7 +355,7 @@ export async function ingestFile(actor: AppActor, params: {
     extractionSupported: supported,
     ingestionGuidanceMd,
   });
-  const contentHash = duplicateGuardContentHash(textContent ?? brainSourceContent);
+  const contentHash = uploadedContentHash(params.fileBuffer, textContent);
   const duplicateDecision = await checkWorkspaceDuplicateGuard({
     workspaceId: params.workspaceId,
     entityType: "Document",
@@ -377,6 +384,7 @@ export async function ingestFile(actor: AppActor, params: {
         size,
         textContent,
         brainSourceContent,
+        contentHash,
         ingestionGuidanceMd,
         metadata: {
           ...documentMetadata,

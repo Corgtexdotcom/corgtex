@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
+import { createHash } from "node:crypto";
 import { ingestFile } from "./file-ingestion";
 import { prisma } from "@corgtex/shared";
 import { checkWorkspaceDuplicateGuard, isGlobalOperator, requireWorkspaceMembership } from "@corgtex/domain";
@@ -223,11 +224,12 @@ describe("file-ingestion", () => {
   });
 
   it("creates a Brain source stub for unsupported file types", async () => {
+    const fileBuffer = Buffer.from("fake image");
     await ingestFile(actor, {
       workspaceId: "ws_1",
       fileName: "diagram.png",
       mimeType: "image/png",
-      fileBuffer: Buffer.from("fake image"),
+      fileBuffer,
       uploadSource: "brain-upload",
     });
 
@@ -255,6 +257,9 @@ describe("file-ingestion", () => {
         }),
       }),
     );
+    expect(checkWorkspaceDuplicateGuard).toHaveBeenCalledWith(expect.objectContaining({
+      contentHash: createHash("sha256").update(fileBuffer).digest("hex"),
+    }), undefined);
   });
 
   it("returns an existing document for duplicate file uploads without storing a new blob", async () => {

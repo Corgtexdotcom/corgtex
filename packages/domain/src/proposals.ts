@@ -59,6 +59,13 @@ function normalizeIds(ids?: string[] | null) {
   return Array.from(new Set((ids ?? []).map((id) => id.trim()).filter(Boolean)));
 }
 
+function proposalSourceIds(params: { sourceTensionId?: string | null; relatedActionIds?: string[] | null }) {
+  return [
+    ...normalizeIds(params.sourceTensionId ? [params.sourceTensionId] : []),
+    ...normalizeIds(params.relatedActionIds),
+  ];
+}
+
 async function activateProposalApprovalFlow(tx: Prisma.TransactionClient, params: {
   actor: AppActor;
   workspaceId: string;
@@ -483,6 +490,12 @@ export async function getProposal(actor: AppActor, params: {
 }
 
 async function applyProposalDuplicateUpdate(actor: AppActor, params: CreateProposalParams, proposalId: string) {
+  const membership = await requireWorkspaceMembership({
+    actor,
+    workspaceId: params.workspaceId,
+  });
+  const sourceTension = await loadVisibleSourceTension(prisma as unknown as Prisma.TransactionClient, actor, membership, params.workspaceId, params.sourceTensionId);
+  const relatedActionIds = await validateRelatedActions(prisma as unknown as Prisma.TransactionClient, actor, membership, params.workspaceId, params.relatedActionIds);
   const existing = await getProposal(actor, { workspaceId: params.workspaceId, proposalId });
   const mergedBody = duplicateGuardMergeText(existing.bodyMd, params.bodyMd);
   const updateParams: Parameters<typeof updateProposal>[1] = {
@@ -493,7 +506,35 @@ async function applyProposalDuplicateUpdate(actor: AppActor, params: CreatePropo
   if (!existing.summary && params.summary) updateParams.summary = params.summary;
   if (!existing.circleId && params.circleId) updateParams.circleId = params.circleId;
   if (!existing.ownerMemberId && params.ownerMemberId) updateParams.ownerMemberId = params.ownerMemberId;
-  return Object.keys(updateParams).length > 2 ? updateProposal(actor, updateParams) : existing;
+  const proposal = Object.keys(updateParams).length > 2 ? await updateProposal(actor, updateParams) : existing;
+
+  if (sourceTension || relatedActionIds.length > 0) {
+    await prisma.$transaction(async (tx) => {
+      if (sourceTension) {
+        await tx.tension.update({
+          where: { id: sourceTension.id },
+          data: { proposalId },
+        });
+      }
+
+      if (relatedActionIds.length > 0) {
+        const linkedActions = await tx.action.updateMany({
+          where: {
+            id: { in: relatedActionIds },
+            workspaceId: params.workspaceId,
+            archivedAt: null,
+            proposalId: null,
+            ...privacyFilter(actor, membership),
+          },
+          data: { proposalId },
+        });
+
+        invariant(linkedActions.count === relatedActionIds.length, 409, "CONFLICT", "Related actions changed before they could be linked.");
+      }
+    });
+  }
+
+  return proposal;
 }
 
 export async function createProposal(actor: AppActor, params: CreateProposalParams) {
@@ -514,7 +555,7 @@ export async function createProposal(actor: AppActor, params: CreateProposalPara
     circleId: params.circleId,
     ownerMemberId: params.ownerMemberId,
     meetingId: params.meetingId,
-    sourceIds: params.relatedActionIds,
+    sourceIds: proposalSourceIds(params),
     actorUserId: actor.kind === "user" ? actor.user.id : null,
     membershipId: membership?.id ?? null,
     includePrivate: actor.kind === "agent" || membership?.role === "ADMIN",

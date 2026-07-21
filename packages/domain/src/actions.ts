@@ -258,6 +258,7 @@ async function applyActionDuplicateUpdate(actor: AppActor, params: CreateActionP
   if (!existing.assigneeMemberId && params.assigneeMemberId) updateParams.assigneeMemberId = params.assigneeMemberId;
   if (!existing.dueAt && params.dueAt) updateParams.dueAt = params.dueAt;
   if (!existing.proposalId && params.proposalId) updateParams.proposalId = params.proposalId;
+  if (params.priority !== undefined && params.priority !== null && existing.priority !== params.priority) updateParams.priority = params.priority;
   return Object.keys(updateParams).length > 2 ? updateAction(actor, updateParams) : existing;
 }
 

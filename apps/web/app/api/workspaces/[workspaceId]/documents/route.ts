@@ -46,8 +46,9 @@ const DUPLICATE_GUARD_RESOLUTIONS: DuplicateGuardResolution[] = [
   "create_new",
 ];
 
-function duplicateGuardFromValues(resolution: unknown, targetEntityId: unknown): DuplicateGuardOptions | undefined {
+function duplicateGuardFromValues(resolution: unknown, targetEntityId: unknown, enabled?: unknown): DuplicateGuardOptions | undefined {
   if (typeof resolution !== "string" || !DUPLICATE_GUARD_RESOLUTIONS.includes(resolution as DuplicateGuardResolution)) {
+    if (enabled === true || enabled === "true") return {};
     return undefined;
   }
   return {
@@ -94,6 +95,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
       const duplicateGuard = duplicateGuardFromValues(
         formData.get("duplicateResolution"),
         formData.get("duplicateTargetEntityId"),
+        formData.get("duplicateGuardEnabled"),
       );
 
       const buffer = Buffer.from(await file.arrayBuffer());
@@ -123,6 +125,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
       mimeType?: unknown;
       textContent?: unknown;
       metadata?: unknown;
+      duplicateGuardEnabled?: unknown;
       duplicateResolution?: unknown;
       duplicateTargetEntityId?: unknown;
     };
@@ -138,7 +141,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
         body.metadata && typeof body.metadata === "object" && !Array.isArray(body.metadata)
           ? (body.metadata as Prisma.InputJsonValue)
           : undefined,
-      duplicateGuard: duplicateGuardFromValues(body.duplicateResolution, body.duplicateTargetEntityId),
+      duplicateGuard: duplicateGuardFromValues(body.duplicateResolution, body.duplicateTargetEntityId, body.duplicateGuardEnabled),
     });
 
     return NextResponse.json(document, { status: 201 });

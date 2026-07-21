@@ -211,6 +211,7 @@ export function KnowledgeFileUploader({
         formData.set("file", item.file);
         formData.set("source", defaultSource);
         formData.set("title", item.title.trim() || item.displayName);
+        formData.set("duplicateGuardEnabled", "true");
         const duplicateOverride = overrides[item.id];
         if (duplicateOverride) {
           formData.set("duplicateResolution", duplicateOverride.resolution);

@@ -4,6 +4,9 @@ const prismaMock = vi.hoisted(() => ({
   action: {
     findMany: vi.fn(),
   },
+  proposal: {
+    findMany: vi.fn(),
+  },
   brainSource: {
     findMany: vi.fn(),
   },
@@ -23,6 +26,7 @@ describe("duplicate guard", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     prismaMock.action.findMany.mockResolvedValue([]);
+    prismaMock.proposal.findMany.mockResolvedValue([]);
     prismaMock.brainSource.findMany.mockResolvedValue([]);
     prismaMock.brainArticle.findMany.mockResolvedValue([]);
     prismaMock.document.findMany.mockResolvedValue([]);
@@ -125,6 +129,43 @@ describe("duplicate guard", () => {
       }),
       recommendedResolution: "update_existing",
     });
+  });
+
+  it("uses linked tensions and actions as proposal source-overlap context", async () => {
+    const { checkWorkspaceDuplicateGuard } = await import("./duplicate-guard");
+    prismaMock.proposal.findMany.mockResolvedValueOnce([
+      {
+        id: "proposal-1",
+        title: "Pricing handoff",
+        bodyMd: "Document the enterprise pricing handoff.",
+        status: "DRAFT",
+        archivedAt: null,
+        createdAt: new Date("2026-07-20T10:00:00.000Z"),
+        updatedAt: new Date("2026-07-20T10:05:00.000Z"),
+        actions: [{ id: "action-1" }],
+        tensions: [{ id: "tension-1" }],
+      },
+    ]);
+
+    await expect(checkWorkspaceDuplicateGuard({
+      workspaceId: "workspace-1",
+      entityType: "Proposal",
+      title: "Pricing handoff",
+      body: "Align the sales and finance handoff.",
+      sourceIds: ["tension-1", "action-1"],
+    }, {})).rejects.toMatchObject({
+      candidate: expect.objectContaining({
+        entityId: "proposal-1",
+        reasons: expect.arrayContaining(["source overlap"]),
+      }),
+    });
+
+    expect(prismaMock.proposal.findMany).toHaveBeenCalledWith(expect.objectContaining({
+      include: {
+        actions: { where: { archivedAt: null }, select: { id: true } },
+        tensions: { where: { archivedAt: null }, select: { id: true } },
+      },
+    }));
   });
 
   it("can return a create-new override decision for audit metadata", async () => {

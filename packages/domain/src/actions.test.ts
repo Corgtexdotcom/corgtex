@@ -145,6 +145,7 @@ describe("action domain lifecycle", () => {
       dueAt: null,
       proposalId: null,
       circleId: null,
+      priority: 1,
       status: "DRAFT",
       isPrivate: true,
       publishedAt: null,
@@ -160,6 +161,7 @@ describe("action domain lifecycle", () => {
     prismaMock.action.update.mockResolvedValueOnce({
       ...existingAction,
       proposalId: "proposal-1",
+      priority: 5,
       version: 2,
     });
 
@@ -168,6 +170,7 @@ describe("action domain lifecycle", () => {
       workspaceId: "workspace-1",
       title: "Send Acme proposal",
       proposalId: "proposal-1",
+      priority: 5,
       duplicateGuard: {
         resolution: "update_existing",
         targetEntityId: "action-existing",
@@ -181,6 +184,7 @@ describe("action domain lifecycle", () => {
       where: { id: "action-existing" },
       data: expect.objectContaining({
         proposalId: "proposal-1",
+        priority: 5,
         version: expect.any(Number),
       }),
     }));

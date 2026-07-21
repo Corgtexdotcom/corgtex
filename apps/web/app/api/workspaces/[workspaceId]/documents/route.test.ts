@@ -91,6 +91,32 @@ describe("POST /api/workspaces/[workspaceId]/documents", () => {
     expect(handleRouteError).not.toHaveBeenCalled();
   });
 
+  it("enables duplicate checks for opted-in browser uploads before a resolution exists", async () => {
+    resolveRequestActor.mockResolvedValue({ kind: "user", user: { id: "user-1" } });
+    ingestFile.mockResolvedValue({ document: { id: "doc-duplicate-check" } });
+
+    const { POST } = await import("./route");
+    const formData = new FormData();
+    formData.set("file", new File(["hello world"], "notes.txt", { type: "text/plain" }));
+    formData.set("duplicateGuardEnabled", "true");
+
+    const response = await POST(
+      new Request("http://localhost/api/workspaces/ws-1/documents", {
+        method: "POST",
+        body: formData,
+      }) as never,
+      { params: Promise.resolve({ workspaceId: "ws-1" }) },
+    );
+
+    expect(response.status).toBe(201);
+    expect(ingestFile).toHaveBeenCalledWith(
+      { kind: "user", user: { id: "user-1" } },
+      expect.objectContaining({
+        duplicateGuard: {},
+      }),
+    );
+  });
+
   it("preserves the existing JSON document payload contract", async () => {
     resolveRequestActor.mockResolvedValue({ kind: "user", user: { id: "user-1" } });
     createDocument.mockResolvedValue({ id: "doc-2" });
