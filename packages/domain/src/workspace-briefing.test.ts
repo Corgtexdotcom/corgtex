@@ -1692,8 +1692,268 @@ describe("workspace briefing", () => {
     const markdown = renderWorkspaceBriefingMarkdown(briefing);
 
     expect(markdown).toContain("Review the launch decision");
+    expect(markdown).toContain("## Lead Story");
     expect(markdown).toContain("## Source trail");
     expect(markdown).not.toMatch(/## Open Actions|## Meeting Briefs|## Action Items Identified/);
+  });
+
+  it("edits duplicate transcript-derived action items into one comprehensive update", async () => {
+    const { buildWorkspaceBriefingFromCandidates } = await import("./workspace-briefing");
+    const briefing = buildWorkspaceBriefingFromCandidates({
+      workspaceId: "ws-1",
+      period: "DAILY",
+      dateKey: "2026-04-30",
+      title: "Daily Workspace Briefing - 2026-04-30",
+      generatedAt: new Date("2026-04-30T12:00:00.000Z"),
+      candidates: [
+        baseCandidate({
+          sourceType: "ACTION",
+          sourceId: "action-marketing-1",
+          title: "Prepare marketing strategy proposal with pay options by July 31",
+          summaryMd: "Gordon will prepare a marketing strategy proposal by July 31, including organic and paid marketing, offline tactics, cost estimates, and his preferred engagement terms.",
+          href: "/workspaces/ws-1/actions/action-marketing-1",
+          occurredAt: new Date("2026-04-30T10:00:00.000Z"),
+          updatedAt: new Date("2026-04-30T10:00:00.000Z"),
+          status: "OPEN",
+          dueAt: new Date("2026-07-31T12:00:00.000Z"),
+          strategicScore: 4,
+          actionabilityScore: 5,
+          evidenceScore: 3,
+          sourceRefs: [{ type: "ACTION", id: "action-marketing-1", label: "Prepare marketing strategy proposal with pay options", href: "/workspaces/ws-1/actions/action-marketing-1" }],
+        }),
+        baseCandidate({
+          sourceType: "ACTION",
+          sourceId: "action-marketing-2",
+          title: "Prepare and submit marketing strategy proposal by July 31",
+          summaryMd: "Gordon will prepare and submit a marketing strategy proposal by July 31, including retainer versus hourly payment options, ballpark execution costs, and a phased approach starting with organic digital marketing.",
+          href: "/workspaces/ws-1/actions/action-marketing-2",
+          occurredAt: new Date("2026-04-30T09:30:00.000Z"),
+          updatedAt: new Date("2026-04-30T09:30:00.000Z"),
+          status: "OPEN",
+          dueAt: new Date("2026-07-31T12:00:00.000Z"),
+          strategicScore: 4,
+          actionabilityScore: 5,
+          evidenceScore: 3,
+          sourceRefs: [{ type: "ACTION", id: "action-marketing-2", label: "Prepare and submit marketing strategy proposal", href: "/workspaces/ws-1/actions/action-marketing-2" }],
+        }),
+      ],
+    });
+
+    expect(briefing.items).toHaveLength(1);
+    expect(briefing.items[0]).toEqual(expect.objectContaining({
+      kind: "ACTION",
+      sourceRefs: expect.arrayContaining([
+        expect.objectContaining({ id: "action-marketing-1" }),
+        expect.objectContaining({ id: "action-marketing-2" }),
+      ]),
+    }));
+    expect(briefing.items[0].summaryMd).toContain("offline tactics");
+    expect(briefing.items[0].summaryMd).toContain("retainer versus hourly payment options");
+    const narrative = [
+      briefing.leadMd,
+      briefing.bodyMd,
+      briefing.attentionMd,
+      briefing.continuingContextMd,
+    ].filter(Boolean).join("\n\n");
+    expect((narrative.match(/Prepare and submit marketing strategy proposal/g) ?? [])).toHaveLength(0);
+    expect((narrative.match(/marketing strategy proposal/g) ?? [])).toHaveLength(2);
+  });
+
+  it("does not collapse generic advice requests for different subjects", async () => {
+    const { buildWorkspaceBriefingFromCandidates } = await import("./workspace-briefing");
+    const briefing = buildWorkspaceBriefingFromCandidates({
+      workspaceId: "ws-1",
+      period: "DAILY",
+      dateKey: "2026-04-30",
+      title: "Daily Workspace Briefing - 2026-04-30",
+      generatedAt: new Date("2026-04-30T12:00:00.000Z"),
+      candidates: [
+        baseCandidate({
+          sourceType: "ADVICE_REQUEST",
+          sourceId: "advice-esop",
+          title: "Advice request awaiting input",
+          summaryMd: "One advice request requires review by end of July.",
+          href: "/workspaces/ws-1/proposals/proposal-esop",
+          occurredAt: new Date("2026-04-30T10:00:00.000Z"),
+          updatedAt: new Date("2026-04-30T10:00:00.000Z"),
+          status: "ACTIVE",
+          strategicScore: 3,
+          actionabilityScore: 4,
+          evidenceScore: 3,
+          sourceRefs: [{ type: "PROPOSAL", id: "proposal-esop", label: "ESOP financial model", href: "/workspaces/ws-1/proposals/proposal-esop" }],
+        }),
+        baseCandidate({
+          sourceType: "ADVICE_REQUEST",
+          sourceId: "advice-org",
+          title: "Advice request awaiting input",
+          summaryMd: "One advice request requires review by end of July.",
+          href: "/workspaces/ws-1/proposals/proposal-org",
+          occurredAt: new Date("2026-04-30T09:30:00.000Z"),
+          updatedAt: new Date("2026-04-30T09:30:00.000Z"),
+          status: "ACTIVE",
+          strategicScore: 3,
+          actionabilityScore: 4,
+          evidenceScore: 3,
+          sourceRefs: [{ type: "PROPOSAL", id: "proposal-org", label: "CRna Org Structure", href: "/workspaces/ws-1/proposals/proposal-org" }],
+        }),
+      ],
+    });
+
+    expect(briefing.items.filter((item) => item.kind === "ADVICE_REQUEST")).toHaveLength(2);
+    expect(briefing.sourceRefs).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: "proposal-esop", label: "ESOP financial model" }),
+      expect.objectContaining({ id: "proposal-org", label: "CRna Org Structure" }),
+    ]));
+  });
+
+  it("keeps distinct action verbs from turning separate work into one update", async () => {
+    const { buildWorkspaceBriefingFromCandidates } = await import("./workspace-briefing");
+    const briefing = buildWorkspaceBriefingFromCandidates({
+      workspaceId: "ws-1",
+      period: "DAILY",
+      dateKey: "2026-04-30",
+      title: "Daily Workspace Briefing - 2026-04-30",
+      generatedAt: new Date("2026-04-30T12:00:00.000Z"),
+      candidates: [
+        baseCandidate({
+          sourceType: "ACTION",
+          sourceId: "action-prepare-budget",
+          title: "Prepare budget plan",
+          summaryMd: "Prepare a budget plan draft with cost model assumptions and staffing inputs.",
+          href: "/workspaces/ws-1/actions/action-prepare-budget",
+          occurredAt: new Date("2026-04-30T10:00:00.000Z"),
+          updatedAt: new Date("2026-04-30T10:00:00.000Z"),
+          status: "OPEN",
+          dueAt: new Date("2026-07-31T12:00:00.000Z"),
+          strategicScore: 3,
+          actionabilityScore: 4,
+          evidenceScore: 3,
+          sourceRefs: [{ type: "ACTION", id: "action-prepare-budget", label: "Prepare budget plan", href: "/workspaces/ws-1/actions/action-prepare-budget" }],
+        }),
+        baseCandidate({
+          sourceType: "ACTION",
+          sourceId: "action-review-budget",
+          title: "Review budget plan",
+          summaryMd: "Review the budget plan draft for governance concerns and consent risks.",
+          href: "/workspaces/ws-1/actions/action-review-budget",
+          occurredAt: new Date("2026-04-30T09:30:00.000Z"),
+          updatedAt: new Date("2026-04-30T09:30:00.000Z"),
+          status: "OPEN",
+          dueAt: new Date("2026-07-31T12:00:00.000Z"),
+          strategicScore: 3,
+          actionabilityScore: 4,
+          evidenceScore: 3,
+          sourceRefs: [{ type: "ACTION", id: "action-review-budget", label: "Review budget plan", href: "/workspaces/ws-1/actions/action-review-budget" }],
+        }),
+      ],
+    });
+
+    const actionTitles = briefing.items.filter((item) => item.kind === "ACTION").map((item) => item.title);
+    expect(actionTitles).toEqual(expect.arrayContaining([
+      "Prepare budget plan",
+      "Review budget plan",
+    ]));
+  });
+
+  it("uses human source labels instead of raw proposal UUIDs in digest-derived prose", async () => {
+    const proposalId = "a08b40fc-f547-452f-bb2e-9535e8d05702";
+    const { buildWorkspaceBriefingFromDigest } = await import("./workspace-briefing");
+    const briefing = buildWorkspaceBriefingFromDigest({
+      workspaceId: "ws-1",
+      period: "DAILY",
+      dateKey: "2026-04-30",
+      title: "Daily Workspace Briefing - 2026-04-30",
+      generatedAt: new Date("2026-04-30T12:00:00.000Z"),
+      digest: {
+        intro: null,
+        sections: [{
+          id: "adviceRequests",
+          title: "Requests Awaiting Your Input",
+          items: [`Workspace update: Proposal ${proposalId} awaits review and consent by the end of July.`],
+        }],
+      },
+      candidates: [
+        baseCandidate({
+          sourceType: "ADVICE_REQUEST",
+          sourceId: "advice-1",
+          title: "CRna Org Structure review",
+          summaryMd: `Workspace update: Proposal ${proposalId} awaits review and consent by the end of July.`,
+          href: `/workspaces/ws-1/proposals/${proposalId}`,
+          occurredAt: new Date("2026-04-30T10:00:00.000Z"),
+          updatedAt: new Date("2026-04-30T10:00:00.000Z"),
+          status: "ACTIVE",
+          strategicScore: 3,
+          actionabilityScore: 4,
+          evidenceScore: 3,
+          sourceRefs: [{ type: "PROPOSAL", id: proposalId, label: "CRna Org Structure", href: `/workspaces/ws-1/proposals/${proposalId}` }],
+        }),
+      ],
+    });
+
+    const narrative = [
+      briefing.leadMd,
+      briefing.bodyMd,
+      briefing.attentionMd,
+      briefing.continuingContextMd,
+    ].filter(Boolean).join("\n\n");
+
+    expect(narrative).toContain("CRna Org Structure");
+    expect(narrative).not.toContain(proposalId);
+    expect(briefing.sourceRefs).toContainEqual(expect.objectContaining({
+      id: proposalId,
+      label: "CRna Org Structure",
+    }));
+  });
+
+  it("keeps source refs when a generic digest item matches a proposal semantically", async () => {
+    const proposalId = "a08b40fc-f547-452f-bb2e-9535e8d05702";
+    const { buildWorkspaceBriefingFromDigest } = await import("./workspace-briefing");
+    const briefing = buildWorkspaceBriefingFromDigest({
+      workspaceId: "ws-1",
+      period: "DAILY",
+      dateKey: "2026-04-30",
+      title: "Daily Workspace Briefing - 2026-04-30",
+      generatedAt: new Date("2026-04-30T12:00:00.000Z"),
+      digest: {
+        intro: null,
+        sections: [{
+          id: "otherUpdates",
+          title: "Workspace Narrative",
+          items: [`Workspace update: Proposal ${proposalId} awaits review and consent by the end of July.`],
+        }],
+      },
+      candidates: [
+        baseCandidate({
+          sourceType: "PROPOSAL",
+          sourceId: proposalId,
+          title: "CRna Org Structure",
+          summaryMd: `Proposal ${proposalId} awaits review and consent by the end of July.`,
+          href: `/workspaces/ws-1/proposals/${proposalId}`,
+          occurredAt: new Date("2026-04-30T10:00:00.000Z"),
+          updatedAt: new Date("2026-04-30T10:00:00.000Z"),
+          status: "OPEN",
+          strategicScore: 3,
+          actionabilityScore: 4,
+          evidenceScore: 3,
+          sourceRefs: [{ type: "PROPOSAL", id: proposalId, label: "CRna Org Structure", href: `/workspaces/ws-1/proposals/${proposalId}` }],
+        }),
+      ],
+    });
+
+    const narrative = [
+      briefing.leadMd,
+      briefing.bodyMd,
+      briefing.attentionMd,
+      briefing.continuingContextMd,
+    ].filter(Boolean).join("\n\n");
+
+    expect(narrative).toContain("CRna Org Structure");
+    expect(narrative).not.toContain(proposalId);
+    expect(briefing.sourceRefs).toContainEqual(expect.objectContaining({
+      id: proposalId,
+      label: "CRna Org Structure",
+      href: `/workspaces/ws-1/proposals/${proposalId}`,
+    }));
   });
 
   it("uses upload freshness instead of future meeting dates for ranking", async () => {
