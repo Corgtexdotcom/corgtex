@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { createGoal, createProposal, createProposalFromTension } from "@corgtex/domain";
+import { createAction, createGoal, createProposal, createProposalFromTension } from "@corgtex/domain";
 import { prisma } from "@corgtex/shared";
-import { createGoalAction, createGoalTool, createProposalAction, createProposalTool } from "./mutations";
+import { createActionItemAction, createGoalAction, createGoalTool, createProposalAction, createProposalTool } from "./mutations";
 
 vi.mock("@corgtex/domain", () => ({
   AppError: class AppError extends Error {
@@ -70,6 +70,37 @@ describe("goal mutation tool", () => {
       }),
     );
     expect(result).toEqual({ success: true, goalId: "goal-1" });
+  });
+});
+
+describe("action mutation tool", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(prisma.auditLog.findFirst).mockResolvedValue(null);
+  });
+
+  it("only annotates create audits from the current write attempt", async () => {
+    vi.mocked(createAction).mockResolvedValueOnce({
+      id: "action-existing",
+      title: "Send Acme proposal",
+      status: "OPEN",
+    } as any);
+
+    await createActionItemAction(
+      { kind: "agent", authProvider: "bootstrap", workspaceIds: ["ws-1"] } as any,
+      { workspaceId: "ws-1", sessionId: "session-1" },
+      { title: "Send Acme proposal" },
+    );
+
+    expect(prisma.auditLog.findFirst).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({
+        entityType: "Action",
+        entityId: "action-existing",
+        action: "action.created",
+        createdAt: { gte: expect.any(Date) },
+      }),
+    }));
+    expect(prisma.auditLog.update).not.toHaveBeenCalled();
   });
 });
 

@@ -149,9 +149,20 @@ export const createGoalTool: ModelTool = {
   },
 };
 
-async function appendAuditMeta(entityType: string, entityId: string, actionName: string, metaToAdd: Prisma.InputJsonObject) {
+async function appendAuditMeta(
+  entityType: string,
+  entityId: string,
+  actionName: string,
+  metaToAdd: Prisma.InputJsonObject,
+  notBefore?: Date,
+) {
   const log = await prisma.auditLog.findFirst({
-    where: { entityType, entityId, action: actionName },
+    where: {
+      entityType,
+      entityId,
+      action: actionName,
+      ...(notBefore ? { createdAt: { gte: notBefore } } : {}),
+    },
     orderBy: { createdAt: "desc" },
   });
   if (log) {
@@ -165,6 +176,7 @@ async function appendAuditMeta(entityType: string, entityId: string, actionName:
 }
 
 export async function createTensionAction(actor: AppActor, ctx: any, args: any) {
+  const writeStartedAt = new Date();
   const result = await createTension(actor, {
     workspaceId: ctx.workspaceId,
     title: args.title,
@@ -178,7 +190,7 @@ export async function createTensionAction(actor: AppActor, ctx: any, args: any) 
   await appendAuditMeta("Tension", result.id, "tension.created", {
     conversationSessionId: ctx.sessionId,
     toolCallInput: args,
-  });
+  }, writeStartedAt);
   
   return { success: true, tensionId: result.id };
 }
@@ -204,6 +216,7 @@ export async function updateTensionAction(actor: AppActor, ctx: any, args: any) 
 }
 
 export async function createActionItemAction(actor: AppActor, ctx: any, args: any) {
+  const writeStartedAt = new Date();
   const result = await createAction(actor, {
     workspaceId: ctx.workspaceId,
     title: args.title,
@@ -217,7 +230,7 @@ export async function createActionItemAction(actor: AppActor, ctx: any, args: an
   await appendAuditMeta("Action", result.id, "action.created", {
     conversationSessionId: ctx.sessionId,
     toolCallInput: args,
-  });
+  }, writeStartedAt);
 
   return { success: true, actionId: result.id };
 }
@@ -242,6 +255,7 @@ export async function updateActionItemAction(actor: AppActor, ctx: any, args: an
 }
 
 export async function createProposalAction(actor: AppActor, ctx: any, args: any) {
+  const writeStartedAt = new Date();
   const relatedActionIds = Array.isArray(args.relatedActionIds) ? args.relatedActionIds : undefined;
   const sourceTensionId = typeof args.sourceTensionId === "string" && args.sourceTensionId.trim().length > 0
     ? args.sourceTensionId
@@ -276,12 +290,13 @@ export async function createProposalAction(actor: AppActor, ctx: any, args: any)
   await appendAuditMeta("Proposal", result.id, "proposal.created", {
     conversationSessionId: ctx.sessionId,
     toolCallInput: args,
-  });
+  }, writeStartedAt);
 
   return { success: true, proposalId: result.id };
 }
 
 export async function createGoalAction(actor: AppActor, ctx: any, args: any) {
+  const writeStartedAt = new Date();
   const result = await createGoal(actor, {
     workspaceId: ctx.workspaceId,
     title: args.title,
@@ -301,7 +316,7 @@ export async function createGoalAction(actor: AppActor, ctx: any, args: any) {
   await appendAuditMeta("Goal", result.id, "goal.created", {
     conversationSessionId: ctx.sessionId,
     toolCallInput: args,
-  });
+  }, writeStartedAt);
 
   return { success: true, goalId: result.id };
 }

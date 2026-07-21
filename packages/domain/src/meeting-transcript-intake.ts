@@ -302,6 +302,7 @@ export async function intakeMeetingTranscript(actor: AppActor, params: {
     participantEmails: inferred.participantEmails,
     sourceRecordId: params.sourceRecordId ?? null,
     replaceTranscript: params.replaceTranscript,
+    duplicateGuard: params.duplicateGuard,
   });
 
   if (result.status === "needs_selection") {

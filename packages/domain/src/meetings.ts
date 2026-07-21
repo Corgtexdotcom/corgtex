@@ -1121,6 +1121,7 @@ export async function uploadMeetingTranscript(actor: AppActor, params: {
   participantEmails?: string[] | null;
   sourceRecordId?: string | null;
   replaceTranscript?: boolean;
+  duplicateGuard?: DuplicateGuardOptions | null;
 }) {
   await requireWorkspaceMembership({
     actor,
@@ -1202,6 +1203,7 @@ export async function uploadMeetingTranscript(actor: AppActor, params: {
     participantIds: params.participantIds ?? [],
     participantEmails: params.participantEmails ?? [],
     sourceRecordId: params.sourceRecordId ?? null,
+    duplicateGuard: params.duplicateGuard,
   });
 
   return { status: "created" as const, meeting, candidates: [] };

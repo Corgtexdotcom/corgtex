@@ -7,6 +7,7 @@ const { prismaMock } = vi.hoisted(() => ({
     $executeRaw: vi.fn(),
     action: {
       create: vi.fn(),
+      findFirst: vi.fn(),
       findMany: vi.fn(),
       findUnique: vi.fn(),
       update: vi.fn(),
@@ -130,6 +131,57 @@ describe("action domain lifecycle", () => {
     }));
     expect(recordAudit).not.toHaveBeenCalledWith(expect.anything(), actor, expect.objectContaining({
       action: "action.published",
+    }));
+  });
+
+  it("fills a missing proposal link when updating an existing duplicate action", async () => {
+    const existingAction = {
+      id: "action-existing",
+      workspaceId: "workspace-1",
+      authorUserId: "user-1",
+      title: "Send Acme proposal",
+      bodyMd: null,
+      assigneeMemberId: null,
+      dueAt: null,
+      proposalId: null,
+      circleId: null,
+      status: "OPEN",
+      isPrivate: false,
+      archivedAt: null,
+      version: 1,
+      createdAt: new Date("2026-07-20T10:00:00.000Z"),
+      updatedAt: new Date("2026-07-20T10:05:00.000Z"),
+    };
+    prismaMock.action.findMany.mockResolvedValueOnce([existingAction]);
+    prismaMock.action.findFirst.mockResolvedValueOnce(existingAction);
+    prismaMock.action.findUnique.mockResolvedValueOnce(existingAction);
+    prismaMock.proposal.findFirst.mockResolvedValueOnce({ id: "proposal-1" });
+    prismaMock.action.update.mockResolvedValueOnce({
+      ...existingAction,
+      proposalId: "proposal-1",
+      version: 2,
+    });
+
+    const { createAction } = await import("./actions");
+    await expect(createAction(actor, {
+      workspaceId: "workspace-1",
+      title: "Send Acme proposal",
+      proposalId: "proposal-1",
+      duplicateGuard: {
+        resolution: "update_existing",
+        targetEntityId: "action-existing",
+      },
+    })).resolves.toMatchObject({
+      id: "action-existing",
+      proposalId: "proposal-1",
+    });
+
+    expect(prismaMock.action.update).toHaveBeenCalledWith(expect.objectContaining({
+      where: { id: "action-existing" },
+      data: expect.objectContaining({
+        proposalId: "proposal-1",
+        version: expect.any(Number),
+      }),
     }));
   });
 

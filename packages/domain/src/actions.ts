@@ -257,6 +257,7 @@ async function applyActionDuplicateUpdate(actor: AppActor, params: CreateActionP
   if (!existing.circleId && params.circleId) updateParams.circleId = params.circleId;
   if (!existing.assigneeMemberId && params.assigneeMemberId) updateParams.assigneeMemberId = params.assigneeMemberId;
   if (!existing.dueAt && params.dueAt) updateParams.dueAt = params.dueAt;
+  if (!existing.proposalId && params.proposalId) updateParams.proposalId = params.proposalId;
   return Object.keys(updateParams).length > 2 ? updateAction(actor, updateParams) : existing;
 }
 
@@ -380,6 +381,7 @@ export async function updateAction(actor: AppActor, params: {
   circleId?: string | null;
   assigneeMemberId?: string | null;
   dueAt?: Date | null;
+  proposalId?: string | null;
   isPrivate?: boolean;
   completedVia?: string | null;
   evidenceDocumentIds?: string[] | null;
@@ -406,7 +408,8 @@ export async function updateAction(actor: AppActor, params: {
       || params.priority !== undefined
       || params.circleId !== undefined
       || params.assigneeMemberId !== undefined
-      || params.dueAt !== undefined;
+      || params.dueAt !== undefined
+      || params.proposalId !== undefined;
     if (editsContent) {
       if (action.status === "DRAFT") {
         await requireDraftManager({ actor, workspaceId: params.workspaceId, record: action, resolvedMembership: membership });
@@ -457,9 +460,12 @@ export async function updateAction(actor: AppActor, params: {
       data.assigneeMemberId = await resolveAssigneeMemberId(tx, params.workspaceId, params.assigneeMemberId);
     }
     if (params.dueAt !== undefined) data.dueAt = params.dueAt;
+    if (params.proposalId !== undefined) {
+      data.proposalId = await resolveWorkspaceProposalLink(tx, actor, membership, params.workspaceId, params.proposalId);
+    }
     if (params.isPrivate !== undefined) data.isPrivate = params.isPrivate;
 
-    const contentFields = ["title", "bodyMd", "priority", "circleId", "assigneeMemberId", "dueAt"];
+    const contentFields = ["title", "bodyMd", "priority", "circleId", "assigneeMemberId", "dueAt", "proposalId"];
     const changedFields = changedDataFields(action as unknown as Record<string, unknown>, data)
       .filter((field) => contentFields.includes(field));
     if (changedFields.length > 0) {
@@ -478,6 +484,7 @@ export async function updateAction(actor: AppActor, params: {
           "circleId",
           "assigneeMemberId",
           "dueAt",
+          "proposalId",
           "status",
           "version",
         ]),

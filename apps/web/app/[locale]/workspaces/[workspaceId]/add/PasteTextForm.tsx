@@ -85,6 +85,7 @@ export function PasteTextForm({ workspaceId, sourceTypes, ingestAction, cancelHr
 
   return (
     <form action={formAction} className="stack nr-form-section">
+      <input type="hidden" name="duplicateGuardEnabled" value="true" />
       <DuplicateGuardConfirmationPanel state={state} isPending={isPending} />
       <input type="hidden" name="workspaceId" value={workspaceId} />
       <label>Title<input name="title" /></label>

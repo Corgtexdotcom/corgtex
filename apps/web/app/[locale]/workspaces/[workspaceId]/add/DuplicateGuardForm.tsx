@@ -11,6 +11,7 @@ type DuplicateGuardCandidate = {
   score: number;
   matchKind: "exact" | "likely";
   reasons: string[];
+  status?: string | null;
   archivedAt?: string | null;
 };
 
@@ -78,6 +79,7 @@ export function DuplicateGuardForm({ action, className, children }: DuplicateGua
 
   return (
     <form action={formAction} className={className}>
+      <input type="hidden" name="duplicateGuardEnabled" value="true" />
       <DuplicateGuardConfirmationPanel state={state} isPending={isPending} />
       {children}
     </form>

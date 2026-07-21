@@ -7,6 +7,9 @@ const prismaMock = vi.hoisted(() => ({
   brainSource: {
     findMany: vi.fn(),
   },
+  brainArticle: {
+    findMany: vi.fn(),
+  },
   document: {
     findMany: vi.fn(),
   },
@@ -21,6 +24,7 @@ describe("duplicate guard", () => {
     vi.clearAllMocks();
     prismaMock.action.findMany.mockResolvedValue([]);
     prismaMock.brainSource.findMany.mockResolvedValue([]);
+    prismaMock.brainArticle.findMany.mockResolvedValue([]);
     prismaMock.document.findMany.mockResolvedValue([]);
   });
 
@@ -154,6 +158,21 @@ describe("duplicate guard", () => {
     });
   });
 
+  it("requires a target entity ID before mutable duplicate resolutions", async () => {
+    const { checkWorkspaceDuplicateGuard } = await import("./duplicate-guard");
+
+    await expect(checkWorkspaceDuplicateGuard({
+      workspaceId: "workspace-1",
+      entityType: "Action",
+      title: "Send Acme proposal",
+    }, { resolution: "use_existing" })).rejects.toMatchObject({
+      status: 400,
+      code: "DUPLICATE_GUARD_TARGET_REQUIRED",
+    });
+
+    expect(prismaMock.action.findMany).not.toHaveBeenCalled();
+  });
+
   it("reports exact archived external-id candidates but only allows create-new acknowledgment", async () => {
     const { checkWorkspaceDuplicateGuard } = await import("./duplicate-guard");
     prismaMock.brainSource.findMany
@@ -185,9 +204,86 @@ describe("duplicate guard", () => {
       allowedResolutions: ["create_new"],
     });
     expect(prismaMock.brainSource.findMany).toHaveBeenNthCalledWith(2, expect.objectContaining({
-      where: { workspaceId: "workspace-1", externalId: "external-1" },
+      where: {
+        workspaceId: "workspace-1",
+        OR: [{ externalId: "external-1" }],
+      },
       take: 5,
     }));
+  });
+
+  it("uses Brain source URL metadata for exact matches outside the latest window", async () => {
+    const { checkWorkspaceDuplicateGuard } = await import("./duplicate-guard");
+    prismaMock.brainSource.findMany
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([
+        {
+          id: "source-url-match",
+          title: "Vendor notes",
+          content: "Vendor notes content",
+          externalId: null,
+          metadata: { sourceUrl: "https://example.com/vendor-notes" },
+          archivedAt: null,
+          createdAt: new Date("2026-07-18T10:00:00.000Z"),
+        },
+      ]);
+
+    const decision = await checkWorkspaceDuplicateGuard({
+      workspaceId: "workspace-1",
+      entityType: "BrainSource",
+      title: "Vendor notes",
+      content: "Vendor notes content",
+      sourceUrl: "https://example.com/vendor-notes",
+    }, { onExact: "use_existing" });
+
+    expect(decision).toMatchObject({
+      resolution: "use_existing",
+      match: expect.objectContaining({
+        entityId: "source-url-match",
+        reasons: expect.arrayContaining(["sourceUrl"]),
+      }),
+    });
+    expect(prismaMock.brainSource.findMany).toHaveBeenNthCalledWith(2, expect.objectContaining({
+      where: expect.objectContaining({
+        workspaceId: "workspace-1",
+        OR: expect.arrayContaining([
+          { metadata: { path: ["sourceUrl"], equals: "https://example.com/vendor-notes" } },
+        ]),
+      }),
+      take: 5,
+    }));
+  });
+
+  it("does not offer update-existing for non-draft Brain article candidates", async () => {
+    const { checkWorkspaceDuplicateGuard } = await import("./duplicate-guard");
+    prismaMock.brainArticle.findMany.mockResolvedValueOnce([
+      {
+        id: "article-reference",
+        title: "Incident review policy",
+        bodyMd: "Incident reviews are published references.",
+        authority: "REFERENCE",
+        type: "PROCESS",
+        isPrivate: false,
+        archivedAt: null,
+        createdAt: new Date("2026-07-20T10:00:00.000Z"),
+        updatedAt: new Date("2026-07-20T10:05:00.000Z"),
+      },
+    ]);
+
+    await expect(checkWorkspaceDuplicateGuard({
+      workspaceId: "workspace-1",
+      entityType: "BrainArticle",
+      title: "Incident review policy",
+      body: "Incident reviews are published references.",
+      includePrivate: true,
+    })).rejects.toMatchObject({
+      candidate: expect.objectContaining({
+        entityId: "article-reference",
+        status: "REFERENCE",
+      }),
+      recommendedResolution: "use_existing",
+      allowedResolutions: ["use_existing", "create_new"],
+    });
   });
 
   it("uses document metadata content hashes for exact matches", async () => {

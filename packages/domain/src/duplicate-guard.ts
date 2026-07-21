@@ -29,6 +29,7 @@ export type DuplicateGuardCandidate = {
   score: number;
   matchKind: "exact" | "likely";
   reasons: string[];
+  status?: string | null;
   createdAt: string | null;
   updatedAt: string | null;
   archivedAt: string | null;
@@ -117,10 +118,14 @@ export class DuplicateGuardMatchError extends AppError {
   constructor(candidate: DuplicateGuardCandidate, recommendedResolution: DuplicateGuardResolution = "use_existing") {
     super(409, "DUPLICATE_GUARD_MATCH", "A similar item already exists in this workspace.");
     this.candidate = candidate;
-    this.recommendedResolution = recommendedResolution;
     this.allowedResolutions = candidate.archivedAt
       ? ["create_new"]
-      : ["use_existing", "update_existing", "create_new"];
+      : allowsDuplicateGuardUpdate(candidate)
+        ? ["use_existing", "update_existing", "create_new"]
+        : ["use_existing", "create_new"];
+    this.recommendedResolution = this.allowedResolutions.includes(recommendedResolution)
+      ? recommendedResolution
+      : this.allowedResolutions[0] ?? "create_new";
   }
 }
 
@@ -259,6 +264,7 @@ function toLoadedCandidate(params: {
   body?: string | null;
   content?: string | null;
   contentHash?: string | null;
+  status?: string | null;
   createdAt?: unknown;
   updatedAt?: unknown;
   archivedAt?: unknown;
@@ -274,6 +280,7 @@ function toLoadedCandidate(params: {
     score: 0,
     matchKind: "likely",
     reasons: [],
+    status: params.status ?? null,
     createdAt: iso(params.createdAt),
     updatedAt: iso(params.updatedAt),
     archivedAt: iso(params.archivedAt),
@@ -355,9 +362,15 @@ async function latestRows(entityType: DuplicateGuardEntityType, workspaceId: str
         orderBy: { createdAt: "desc" },
         take: limit,
       }) ?? [];
-      if (!input.externalId) return rows;
+      const exactClauses = [
+        input.externalId ? { externalId: input.externalId } : null,
+        input.sourceUrl ? { metadata: { path: ["sourceUrl"], equals: input.sourceUrl } } : null,
+        input.sourceUrl ? { metadata: { path: ["url"], equals: input.sourceUrl } } : null,
+        input.sourceUrl ? { metadata: { path: ["externalUrl"], equals: input.sourceUrl } } : null,
+      ].filter(Boolean);
+      if (exactClauses.length === 0) return rows;
       const exactRows = await db.brainSource?.findMany?.({
-        where: { workspaceId, externalId: input.externalId },
+        where: { workspaceId, OR: exactClauses },
         orderBy: { createdAt: "desc" },
         take: 5,
       }) ?? [];
@@ -412,6 +425,7 @@ function mapRows(entityType: DuplicateGuardEntityType, rows: any[]): LoadedCandi
         title: row.title,
         body: row.textContent,
         contentHash: readString(jsonObject(row.metadata).contentHash),
+        status: row.status ?? null,
         createdAt: row.createdAt,
         updatedAt: row.updatedAt,
         archivedAt: row.archivedAt,
@@ -430,6 +444,7 @@ function mapRows(entityType: DuplicateGuardEntityType, rows: any[]): LoadedCandi
         entityId: row.id,
         title: row.title,
         body: row.content,
+        status: row.status ?? null,
         createdAt: row.createdAt,
         archivedAt: row.archivedAt,
         exactKeys: {
@@ -447,6 +462,7 @@ function mapRows(entityType: DuplicateGuardEntityType, rows: any[]): LoadedCandi
         entityId: row.id,
         title: row.title,
         body: row.bodyMd,
+        status: row.authority ?? null,
         createdAt: row.createdAt,
         updatedAt: row.updatedAt,
         archivedAt: row.archivedAt,
@@ -466,6 +482,7 @@ function mapRows(entityType: DuplicateGuardEntityType, rows: any[]): LoadedCandi
         entityId: row.id,
         title: row.title,
         body: row.transcript ?? row.summaryMd,
+        status: row.status ?? null,
         createdAt: row.createdAt,
         updatedAt: row.updatedAt,
         archivedAt: row.archivedAt,
@@ -486,6 +503,7 @@ function mapRows(entityType: DuplicateGuardEntityType, rows: any[]): LoadedCandi
         entityId: row.id,
         title: row.title,
         body: row.bodyMd ?? row.descriptionMd ?? row.summary,
+        status: row.status ?? null,
         createdAt: row.createdAt,
         updatedAt: row.updatedAt,
         archivedAt: row.archivedAt,
@@ -610,6 +628,7 @@ function scoreCandidate(input: DuplicateGuardInput, candidate: LoadedCandidate):
       excerpt: candidate.excerpt,
       matchKind: "exact",
       reasons: exactReasons,
+      status: candidate.status,
       createdAt: candidate.createdAt,
       updatedAt: candidate.updatedAt,
       archivedAt: candidate.archivedAt,
@@ -641,6 +660,7 @@ function scoreCandidate(input: DuplicateGuardInput, candidate: LoadedCandidate):
     score,
     matchKind: "likely",
     reasons: reasons.length > 0 ? reasons : ["similar text"],
+    status: candidate.status,
     createdAt: candidate.createdAt,
     updatedAt: candidate.updatedAt,
     archivedAt: candidate.archivedAt,
@@ -656,10 +676,17 @@ function cleanCandidate(candidate: DuplicateGuardCandidate): DuplicateGuardCandi
     score: candidate.score,
     matchKind: candidate.matchKind,
     reasons: candidate.reasons,
+    status: candidate.status,
     createdAt: candidate.createdAt,
     updatedAt: candidate.updatedAt,
     archivedAt: candidate.archivedAt,
   };
+}
+
+function allowsDuplicateGuardUpdate(candidate: DuplicateGuardCandidate) {
+  if (candidate.archivedAt) return false;
+  if (candidate.entityType === "BrainArticle") return candidate.status === "DRAFT";
+  return true;
 }
 
 async function findDuplicateGuardMatch(input: DuplicateGuardInput, options?: DuplicateGuardOptions | null) {
@@ -674,6 +701,9 @@ async function findDuplicateGuardMatch(input: DuplicateGuardInput, options?: Dup
 
 export async function checkWorkspaceDuplicateGuard(input: DuplicateGuardInput, options?: DuplicateGuardOptions | null): Promise<DuplicateGuardDecision | null> {
   const resolution = options?.resolution ?? null;
+  if ((resolution === "use_existing" || resolution === "update_existing") && !options?.targetEntityId) {
+    invariant(false, 400, "DUPLICATE_GUARD_TARGET_REQUIRED", "Duplicate resolution requires a target entity ID.");
+  }
   if (resolution === "create_new") {
     const [match] = await findDuplicateGuardMatch(input, options);
     return match ? { resolution, match } : null;
@@ -687,6 +717,7 @@ export async function checkWorkspaceDuplicateGuard(input: DuplicateGuardInput, o
   if (resolution) {
     invariant(match, 400, "DUPLICATE_GUARD_TARGET_NOT_FOUND", "Duplicate target no longer matches the new item.");
     invariant(!match.archivedAt, 400, "DUPLICATE_GUARD_TARGET_ARCHIVED", "Archived duplicate targets can only be acknowledged by creating a new item.");
+    invariant(resolution !== "update_existing" || allowsDuplicateGuardUpdate(match), 400, "DUPLICATE_GUARD_TARGET_NOT_UPDATABLE", "This duplicate target cannot be updated safely.");
     return { resolution, match };
   }
 

@@ -26,8 +26,10 @@ const DUPLICATE_GUARD_RESOLUTIONS: DuplicateGuardResolution[] = [
 
 export function duplicateGuardFromFormData(formData: FormData): DuplicateGuardOptions | undefined {
   const resolution = asOptional(formData, "duplicateResolution");
+  const duplicateGuardEnabled = asString(formData, "duplicateGuardEnabled") === "true";
   if (!DUPLICATE_GUARD_RESOLUTIONS.includes(resolution as DuplicateGuardResolution)) {
-    return undefined;
+    if (!duplicateGuardEnabled) return undefined;
+    return {};
   }
   return {
     resolution: resolution as DuplicateGuardResolution,

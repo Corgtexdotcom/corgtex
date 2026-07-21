@@ -7,9 +7,11 @@ const prismaMock = vi.hoisted(() => {
       create: vi.fn(),
       findFirst: vi.fn(),
       findMany: vi.fn(),
+      update: vi.fn(),
     },
     brainSource: {
       create: vi.fn(),
+      updateMany: vi.fn(),
     },
     auditLog: {
       create: vi.fn(),
@@ -59,11 +61,21 @@ describe("createDocument", () => {
     });
     prismaMock.document.findFirst.mockResolvedValue(null);
     prismaMock.document.findMany.mockResolvedValue([]);
+    prismaMock.document.update.mockResolvedValue({
+      id: "document-1",
+      workspaceId: "workspace-1",
+      title: "Critical path",
+      source: "api",
+      storageKey: "doc-key",
+      mimeType: "text/plain",
+      textContent: "The critical path runs through finance approval.",
+    });
     prismaMock.brainSource.create.mockResolvedValue({
       id: "source-1",
       sourceType: "DOC",
       tier: 2,
     });
+    prismaMock.brainSource.updateMany.mockResolvedValue({ count: 1 });
     prismaMock.auditLog.create.mockResolvedValue({});
     appendEventsMock.mockResolvedValue(undefined);
   });
@@ -177,5 +189,51 @@ describe("createDocument", () => {
     expect(prismaMock.document.create).not.toHaveBeenCalled();
     expect(prismaMock.brainSource.create).not.toHaveBeenCalled();
     expect(assertTrialStorageCapacityMock).not.toHaveBeenCalled();
+  });
+
+  it("refreshes document and file-upload Brain sources when a duplicate document is updated", async () => {
+    const existingDocument = {
+      id: "document-existing",
+      workspaceId: "workspace-1",
+      title: "Critical path",
+      source: "api",
+      storageKey: "doc-existing-key",
+      mimeType: "text/plain",
+      textContent: "The critical path runs through finance approval.",
+      metadata: { documentId: "document-existing" },
+      archivedAt: null,
+      createdAt: new Date("2026-07-20T10:00:00.000Z"),
+      updatedAt: new Date("2026-07-20T10:05:00.000Z"),
+    };
+    prismaMock.document.findMany.mockResolvedValueOnce([existingDocument]);
+    prismaMock.document.findFirst.mockResolvedValueOnce(existingDocument);
+    prismaMock.document.update.mockResolvedValueOnce({
+      ...existingDocument,
+      textContent: "The critical path runs through finance approval.\n\n---\nAdditional duplicate upload context:\nFinance approval is still the blocker.",
+      metadata: { documentId: "document-existing", duplicateGuardUpdatedAt: "2026-07-20T10:10:00.000Z" },
+    });
+
+    const { createDocument } = await import("./documents");
+    await createDocument({ kind: "user", user: { id: "user-1" } } as any, {
+      workspaceId: "workspace-1",
+      title: "Critical path",
+      source: "api",
+      storageKey: "doc-key",
+      mimeType: "text/plain",
+      textContent: "Finance approval is still the blocker.",
+      duplicateGuard: {
+        resolution: "update_existing",
+        targetEntityId: "document-existing",
+      },
+    });
+
+    expect(prismaMock.brainSource.updateMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({
+        workspaceId: "workspace-1",
+        sourceType: { in: ["DOC", "FILE_UPLOAD"] },
+        metadata: { path: ["documentId"], equals: "document-existing" },
+      }),
+    }));
+    expect(prismaMock.document.create).not.toHaveBeenCalled();
   });
 });

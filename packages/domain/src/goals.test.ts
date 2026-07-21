@@ -169,6 +169,80 @@ describe("Goals Domain", () => {
       );
     });
 
+    it("adds missing key results when updating an existing duplicate goal", async () => {
+      const existingGoal = {
+        id: "goal-existing",
+        workspaceId: "ws-1",
+        title: "Grow revenue",
+        descriptionMd: null,
+        level: "COMPANY",
+        cadence: "QUARTERLY",
+        status: "DRAFT",
+        ownerMemberId: "member-1",
+        circleId: null,
+        parentGoalId: null,
+        targetDate: null,
+        startDate: null,
+        progressPercent: 40,
+        version: 1,
+        archivedAt: null,
+        createdAt: new Date("2026-07-20T10:00:00.000Z"),
+        updatedAt: new Date("2026-07-20T10:05:00.000Z"),
+        keyResults: [
+          { title: "Close 5 customers", progressPercent: 40, sortOrder: 0 },
+        ],
+      };
+      vi.mocked(prisma.goal.findMany).mockResolvedValueOnce([existingGoal] as any);
+      vi.mocked(prisma.goal.findUnique)
+        .mockResolvedValueOnce(existingGoal as any)
+        .mockResolvedValueOnce(existingGoal as any)
+        .mockResolvedValueOnce({
+          ...existingGoal,
+          progressPercent: 20,
+          keyResults: [
+            { title: "Close 5 customers", progressPercent: 40, sortOrder: 0 },
+            { title: "Launch partner motion", progressPercent: 0, sortOrder: 1 },
+          ],
+        } as any);
+      vi.mocked(prisma.keyResult.findMany).mockResolvedValueOnce([
+        { title: "Close 5 customers", progressPercent: 40, sortOrder: 0 },
+      ] as any);
+      vi.mocked(prisma.keyResult.createMany).mockResolvedValueOnce({ count: 1 } as any);
+      vi.mocked(prisma.goal.update).mockResolvedValueOnce({
+        ...existingGoal,
+        progressPercent: 20,
+      } as any);
+
+      const result = await createGoal(actor, {
+        workspaceId: "ws-1",
+        title: "Grow revenue",
+        keyResults: [
+          { title: "Close 5 customers", currentValue: 2, targetValue: 5 },
+          { title: "Launch partner motion", currentValue: 0, targetValue: 1 },
+        ],
+        duplicateGuard: {
+          resolution: "update_existing",
+          targetEntityId: "goal-existing",
+        },
+      });
+
+      expect(prisma.keyResult.createMany).toHaveBeenCalledWith({
+        data: [expect.objectContaining({
+          goalId: "goal-existing",
+          title: "Launch partner motion",
+          sortOrder: 1,
+        })],
+      });
+      expect(prisma.goal.update).toHaveBeenCalledWith({
+        where: { id: "goal-existing" },
+        data: { progressPercent: 20 },
+      });
+      expect(result).toMatchObject({
+        id: "goal-existing",
+        progressPercent: 20,
+      });
+    });
+
     it("rejects parent goals from another workspace", async () => {
       vi.mocked(prisma.goal.findUnique).mockResolvedValueOnce({
         id: "parent-goal",
@@ -639,6 +713,7 @@ describe("Goals Domain", () => {
         }),
       });
     });
+
   });
 
   describe("updateGoal", () => {

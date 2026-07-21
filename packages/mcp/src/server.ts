@@ -4024,25 +4024,28 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
         });
       }
 
-      const result = await intakeMeetingTranscript(actor, {
-        workspaceId,
-        title: params.title ?? null,
-        source: params.source,
-        recordedAt: new Date(params.recordedAt),
-        transcript: params.transcript,
-        summaryMd: params.summaryMd ?? null,
-        participantIds: params.participantIds ?? [],
-      });
-      if (result.status === "needs_clarification") {
-        return jsonResult(result);
-      }
-      return jsonResult({
-        id: result.meeting.id,
-        title: result.meeting.title,
-        status: result.status,
-        recordedAt: result.meeting.recordedAt,
-        webUrl: webUrl(workspaceId, `/meetings/${result.meeting.id}`),
-        permanentUrl: await permanentUrl(workspaceId, "Meeting", result.meeting.id),
+      return withDuplicateGuardMcpResponse(async () => {
+        const result = await intakeMeetingTranscript(actor, {
+          workspaceId,
+          title: params.title ?? null,
+          source: params.source,
+          recordedAt: new Date(params.recordedAt),
+          transcript: params.transcript,
+          summaryMd: params.summaryMd ?? null,
+          participantIds: params.participantIds ?? [],
+          duplicateGuard: duplicateGuardOptionsFromParams(params),
+        });
+        if (result.status === "needs_clarification") {
+          return jsonResult(result);
+        }
+        return jsonResult({
+          id: result.meeting.id,
+          title: result.meeting.title,
+          status: result.status,
+          recordedAt: result.meeting.recordedAt,
+          webUrl: webUrl(workspaceId, `/meetings/${result.meeting.id}`),
+          permanentUrl: await permanentUrl(workspaceId, "Meeting", result.meeting.id),
+        });
       });
     },
   );
@@ -4130,6 +4133,8 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
       slug: z.string().optional().describe("URL slug (auto-generated from title if omitted)"),
       authority: z.enum(BRAIN_ARTICLE_AUTHORITY).optional().describe("Defaults to DRAFT"),
       staleAfterDays: z.number().optional().describe("Days until this article is flagged stale (default 90)"),
+      duplicateResolution: z.enum(["use_existing", "update_existing", "create_new"]).optional(),
+      duplicateTargetEntityId: z.string().optional(),
     },
     async (params: {
       title: string;
@@ -4138,23 +4143,28 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
       slug?: string;
       authority?: typeof BRAIN_ARTICLE_AUTHORITY[number];
       staleAfterDays?: number;
+      duplicateResolution?: "use_existing" | "update_existing" | "create_new";
+      duplicateTargetEntityId?: string;
     }) => {
       requireScope(sessionCtx, "brain:write");
-      const article = await createArticle(actor, {
-        workspaceId,
-        title: params.title,
-        type: params.type,
-        bodyMd: params.bodyMd,
-        slug: params.slug,
-        authority: params.authority,
-        staleAfterDays: params.staleAfterDays,
-      });
-      return jsonResult({
-        id: article.id,
-        slug: article.slug,
-        type: article.type,
-        webUrl: webUrl(workspaceId, `/brain/${article.slug}`),
-        permanentUrl: await permanentUrl(workspaceId, "BrainArticle", article.id),
+      return withDuplicateGuardMcpResponse(async () => {
+        const article = await createArticle(actor, {
+          workspaceId,
+          title: params.title,
+          type: params.type,
+          bodyMd: params.bodyMd,
+          slug: params.slug,
+          authority: params.authority,
+          staleAfterDays: params.staleAfterDays,
+          duplicateGuard: duplicateGuardOptionsFromParams(params),
+        });
+        return jsonResult({
+          id: article.id,
+          slug: article.slug,
+          type: article.type,
+          webUrl: webUrl(workspaceId, `/brain/${article.slug}`),
+          permanentUrl: await permanentUrl(workspaceId, "BrainArticle", article.id),
+        });
       });
     },
   );

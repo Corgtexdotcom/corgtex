@@ -1,7 +1,8 @@
-import { listSources } from "@corgtex/domain";
+import { duplicateGuardErrorPayload, isDuplicateGuardMatchError, listSources } from "@corgtex/domain";
 import { requirePageActor } from "@/lib/auth";
 import { ingestSourceAction } from "../actions";
 import { getTranslations } from "next-intl/server";
+import { DuplicateGuardForm, type DuplicateGuardFormState } from "../../add/DuplicateGuardForm";
 
 export const dynamic = "force-dynamic";
 
@@ -15,6 +16,17 @@ export default async function BrainSourcesPage({
   const actor = await requirePageActor();
   const t = await getTranslations("brain");
   const { items: sources } = await listSources(actor, { workspaceId, take: 50 });
+
+  async function ingestSourceAndReturn(_state: DuplicateGuardFormState, formData: FormData): Promise<DuplicateGuardFormState> {
+    "use server";
+    try {
+      await ingestSourceAction(formData);
+    } catch (error) {
+      if (isDuplicateGuardMatchError(error)) return duplicateGuardErrorPayload(error);
+      throw error;
+    }
+    return null;
+  }
 
   return (
     <>
@@ -34,7 +46,7 @@ export default async function BrainSourcesPage({
         </form>
 
         <h2>{t("ingestTextSource")}</h2>
-        <form action={ingestSourceAction} className="stack panel">
+        <DuplicateGuardForm action={ingestSourceAndReturn} className="stack panel">
           <input type="hidden" name="workspaceId" value={workspaceId} />
           <label>
             {t("labelTitle")}
@@ -67,7 +79,7 @@ export default async function BrainSourcesPage({
             <textarea name="content" rows={8} required placeholder={t("placeholderSourceContent")} />
           </label>
           <button type="submit">{t("ingestSource")}</button>
-        </form>
+        </DuplicateGuardForm>
       </section>
 
       <section className="ws-section">

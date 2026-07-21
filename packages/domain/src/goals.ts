@@ -12,6 +12,7 @@ import {
   checkWorkspaceDuplicateGuard,
   duplicateGuardAuditMeta,
   duplicateGuardMergeText,
+  normalizeDuplicateGuardText,
   type DuplicateGuardOptions,
 } from "./duplicate-guard";
 import {
@@ -252,6 +253,84 @@ function normalizeKeyResults(keyResults: GoalKeyResultInput[] | undefined) {
   });
 }
 
+async function appendMissingDuplicateGoalKeyResults(
+  actor: AppActor,
+  params: CreateGoalParams,
+  goalId: string,
+  membership: MembershipSummary | null | undefined,
+) {
+  const keyResults = normalizeKeyResults(params.keyResults);
+  if (keyResults.length === 0) return false;
+
+  return prisma.$transaction(async (tx) => {
+    const goal = await assertGoalInWorkspace(tx, params.workspaceId, goalId);
+    if (goal.status === "DRAFT") {
+      await requireDraftManager({ actor, workspaceId: params.workspaceId, record: goal, resolvedMembership: membership });
+    } else {
+      invariant(["ACTIVE", "ON_TRACK", "AT_RISK", "BEHIND"].includes(goal.status), 400, "INVALID_STATE", "Only draft or active goals can be edited.");
+      const ownerUserId = goal.ownerMemberId
+        ? await resolveWorkspaceMemberUserId(tx, params.workspaceId, goal.ownerMemberId, "Goal owner must be an active member of this workspace.")
+        : null;
+      requireSubmittedWorkItemAuthor(actor, ownerUserId);
+    }
+
+    const existingKeyResults = await tx.keyResult.findMany({
+      where: { goalId },
+      select: { title: true, progressPercent: true, sortOrder: true },
+      orderBy: { sortOrder: "asc" },
+    });
+    const existingTitles = new Set(existingKeyResults.map((keyResult) => normalizeDuplicateGuardText(keyResult.title)));
+    const missingKeyResults = keyResults.filter((keyResult) => !existingTitles.has(normalizeDuplicateGuardText(keyResult.title)));
+    if (missingKeyResults.length === 0) return false;
+
+    const maxSortOrder = existingKeyResults.reduce((max, keyResult) => Math.max(max, keyResult.sortOrder ?? 0), -1);
+    await tx.keyResult.createMany({
+      data: missingKeyResults.map((keyResult, index) => ({
+        ...keyResult,
+        goalId,
+        sortOrder: maxSortOrder + index + 1,
+      })),
+    });
+
+    const progressValues = [
+      ...existingKeyResults.map((keyResult) => keyResult.progressPercent ?? 0),
+      ...missingKeyResults.map((keyResult) => keyResult.progressPercent),
+    ];
+    const progressPercent = Math.round(progressValues.reduce((total, value) => total + value, 0) / progressValues.length);
+    const updated = await tx.goal.update({
+      where: { id: goalId },
+      data: { progressPercent },
+    });
+
+    await recordAudit(tx, actor, {
+      workspaceId: params.workspaceId,
+      action: "goal.updated",
+      entityType: "Goal",
+      entityId: updated.id,
+      meta: {
+        fields: ["keyResults", "progressPercent"],
+        reason: "duplicate_guard_update",
+        addedKeyResultCount: missingKeyResults.length,
+      },
+    });
+
+    await appendEvents(tx, [
+      {
+        workspaceId: params.workspaceId,
+        type: "goal.updated",
+        aggregateType: "Goal",
+        aggregateId: updated.id,
+        payload: {
+          goalId: updated.id,
+          fields: ["keyResults", "progressPercent"],
+        },
+      },
+    ]);
+
+    return true;
+  });
+}
+
 export async function createGoal(
   actor: AppActor,
   params: CreateGoalParams
@@ -297,7 +376,12 @@ export async function createGoal(
     if (!existing.parentGoalId && params.parentGoalId) updateParams.parentGoalId = params.parentGoalId;
     if (!existing.targetDate && params.targetDate) updateParams.targetDate = params.targetDate;
     if (!existing.startDate && params.startDate) updateParams.startDate = params.startDate;
-    return Object.keys(updateParams).length > 3 ? updateGoal(actor, updateParams) : existing;
+    const updatedFields = Object.keys(updateParams).length > 3;
+    if (updatedFields) await updateGoal(actor, updateParams);
+    const addedKeyResults = await appendMissingDuplicateGoalKeyResults(actor, params, duplicateDecision.match.entityId, membership);
+    return updatedFields || addedKeyResults
+      ? getGoal(actor, { workspaceId: params.workspaceId, goalId: duplicateDecision.match.entityId, _membership: params._membership })
+      : existing;
   }
 
   return prisma.$transaction(async (tx) => {

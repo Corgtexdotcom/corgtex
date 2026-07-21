@@ -51,6 +51,7 @@ export function DuplicateGuardActionEditorForm({
 
   return (
     <form action={formAction} className="stack nr-form-section nr-action-editor-form">
+      <input type="hidden" name="duplicateGuardEnabled" value="true" />
       <DuplicateGuardConfirmationPanel state={state} isPending={isPending} />
       <input type="hidden" name="workspaceId" value={workspaceId} />
       {actionId && <input type="hidden" name="actionId" value={actionId} />}

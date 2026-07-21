@@ -22,6 +22,10 @@ import {
   scheduleMeetingRecording,
   cancelMeetingRecording,
   sendManualMeetingRecorder,
+  isDuplicateGuardMatchError,
+  type DuplicateGuardCandidate,
+  type DuplicateGuardOptions,
+  type DuplicateGuardResolution,
   type MeetingTranscriptIntakeResult,
 } from "@corgtex/domain";
 import { extractTextFromFileBuffer } from "@corgtex/knowledge";
@@ -56,12 +60,15 @@ export type MeetingTranscriptActionValues = {
 };
 
 export type MeetingTranscriptActionState = {
-  status: "idle" | "success" | "needs_clarification" | "error";
+  status: "idle" | "success" | "needs_clarification" | "duplicate_confirmation_required" | "error";
   message?: string | null;
   meetingId?: string | null;
   pendingTranscriptToken?: string | null;
   requiredFields?: Array<"recordedAt" | "meetingId">;
   candidates?: MeetingTranscriptActionCandidate[];
+  duplicateCandidate?: DuplicateGuardCandidate;
+  recommendedResolution?: DuplicateGuardResolution;
+  allowedResolutions?: DuplicateGuardResolution[];
   values?: MeetingTranscriptActionValues;
   retryRequiresTranscriptUpload?: boolean;
 };
@@ -70,6 +77,12 @@ const initialMeetingTranscriptActionState: MeetingTranscriptActionState = {
   status: "idle",
   message: null,
 };
+
+const DUPLICATE_GUARD_RESOLUTIONS: DuplicateGuardResolution[] = [
+  "use_existing",
+  "update_existing",
+  "create_new",
+];
 
 export type ManualMeetingRecordingActionState = {
   status: "idle" | "error";
@@ -245,6 +258,17 @@ function pendingPayloadFromUpload(payload: TranscriptUploadPayload): PendingTran
     ingestionGuidanceMd: payload.ingestionGuidanceMd,
     participantIds: payload.participantIds,
     participantEmails: payload.participantEmails,
+  };
+}
+
+function duplicateGuardOptionsFromTranscriptFormData(formData: FormData): DuplicateGuardOptions {
+  const resolution = optionalFormString(formData, "duplicateResolution");
+  if (!DUPLICATE_GUARD_RESOLUTIONS.includes(resolution as DuplicateGuardResolution)) {
+    return {};
+  }
+  return {
+    resolution: resolution as DuplicateGuardResolution,
+    targetEntityId: optionalFormString(formData, "duplicateTargetEntityId"),
   };
 }
 
@@ -462,6 +486,7 @@ export async function uploadMeetingTranscriptStateAction(
 ): Promise<MeetingTranscriptActionState> {
   const _demoGuardWsId = formData.get("workspaceId") as string;
   const workspaceId = asString(formData, "workspaceId");
+  let uploadPayload: TranscriptUploadPayload | null = null;
 
   try {
     if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
@@ -470,6 +495,7 @@ export async function uploadMeetingTranscriptStateAction(
     await requireWorkspaceMembership({ actor, workspaceId });
     const payload = await buildTranscriptUploadPayload(formData);
     if (!isTranscriptUploadPayload(payload)) return payload;
+    uploadPayload = payload;
 
     const result = await intakeMeetingTranscript(actor, {
       workspaceId,
@@ -484,6 +510,7 @@ export async function uploadMeetingTranscriptStateAction(
       ingestionGuidanceMd: payload.ingestionGuidanceMd,
       participantIds: payload.participantIds,
       participantEmails: payload.participantEmails,
+      duplicateGuard: duplicateGuardOptionsFromTranscriptFormData(formData),
     });
 
     if (result.status === "needs_clarification") {
@@ -530,7 +557,35 @@ export async function uploadMeetingTranscriptStateAction(
       meetingId: result.meeting.id,
     };
   } catch (error) {
-    const pendingTranscriptToken = previousState.status === "needs_clarification"
+    if (isDuplicateGuardMatchError(error) && uploadPayload) {
+      const pendingPayload = pendingPayloadFromUpload(uploadPayload);
+      const nextToken = await storePendingTranscriptPayload(pendingPayload);
+      if (nextToken) {
+        await deletePendingTranscriptPayload(workspaceId, uploadPayload.pendingTranscriptToken);
+      }
+      captureMeetingTranscriptIntakeAdvisory({
+        kind: "duplicate_confirmation_required",
+        workspace_id: workspaceId,
+        surface: "server_action",
+        candidate_entity_type: error.candidate.entityType,
+        candidate_entity_id: error.candidate.entityId,
+        recommended_resolution: error.recommendedResolution,
+        pending_upload_stored: Boolean(nextToken),
+        clarification_id: pendingTranscriptClarificationId(nextToken),
+      });
+      return {
+        status: "duplicate_confirmation_required",
+        message: error.message,
+        pendingTranscriptToken: nextToken,
+        duplicateCandidate: error.candidate,
+        recommendedResolution: error.recommendedResolution,
+        allowedResolutions: error.allowedResolutions,
+        values: actionValuesFromPayload(pendingPayload),
+        retryRequiresTranscriptUpload: !nextToken,
+      };
+    }
+
+    const pendingTranscriptToken = previousState.status === "needs_clarification" || previousState.status === "duplicate_confirmation_required"
       ? previousState.pendingTranscriptToken
       : null;
     return {

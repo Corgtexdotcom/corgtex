@@ -71,7 +71,7 @@ async function applyDocumentDuplicateUpdate(actor: AppActor, params: CreateDocum
       await tx.brainSource.updateMany({
         where: {
           workspaceId: params.workspaceId,
-          sourceType: "DOC",
+          sourceType: { in: ["DOC", "FILE_UPLOAD"] },
           metadata: { path: ["documentId"], equals: existing.id },
         },
         data: {
