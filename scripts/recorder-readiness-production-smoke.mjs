@@ -811,7 +811,24 @@ export class RecorderReadinessProductionSmoke {
               && this.tempMeetingSetup.enabled
               && recorderReadinessCanUseTempMeetingSetup(outcome)
             ) {
-              temporarySetup = await this.setupTemporaryMeeting(item.deployment);
+              try {
+                temporarySetup = await this.setupTemporaryMeeting(item.deployment);
+              } catch (error) {
+                const blocker = error instanceof Error ? error.message : String(error);
+                this.recordResult({
+                  target: item.target,
+                  deployment: item.deployment,
+                  readiness,
+                  result: "blocked",
+                  blocker,
+                  evidence: [
+                    ...evidence,
+                    { type: "runtime-error", summary: blocker },
+                  ],
+                  temporarySetup,
+                });
+                continue;
+              }
               readiness = await this.fetchReadinessFromControlPlane(item.deployment.id);
               outcome = recorderReadinessValidationOutcome(readiness.recorder);
               evidence.push({

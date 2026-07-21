@@ -687,6 +687,26 @@ describe("recorder readiness production smoke helpers", () => {
           blocker: "RECORDER_READINESS_SMOKE_TEMP_MEETING_URL is required when temporary recorder setup is needed.",
         }),
       ]);
+      expect(smoke.details[1]).toMatchObject({
+        target: "setup-recorder.example.test",
+        result: "blocked",
+        blocker: "RECORDER_READINESS_SMOKE_TEMP_MEETING_URL is required when temporary recorder setup is needed.",
+        readiness: {
+          recorder: {
+            gates: {
+              calendar: {
+                status: "blocked",
+                detail: "No upcoming Corgtex scheduled meetings found.",
+              },
+            },
+          },
+        },
+      });
+      expect(smoke.validationRun.results[1].evidence.map((item) => item.type)).toEqual([
+        "deployment",
+        "readiness-gates",
+        "runtime-error",
+      ]);
       expect(calls.map((call) => call.toolName)).toEqual([
         "list_customers",
         "check_meeting_operations_readiness",
