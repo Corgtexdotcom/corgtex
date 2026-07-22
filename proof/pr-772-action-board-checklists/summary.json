@@ -1,0 +1,29 @@
+{
+  "pr": 772,
+  "feature": "action board metadata editing and checklists",
+  "capturedAt": "2026-07-22",
+  "source": "local seeded JNJ demo workspace on a disposable database",
+  "buildArtifactsUpload": "unavailable: production Build Artifacts rejected the available local agent credential",
+  "screenshots": [
+    {
+      "file": "due-board-card-edit.png",
+      "viewport": "desktop",
+      "coverage": "board grouped by due date with compact in-card due date editing"
+    },
+    {
+      "file": "priority-board-card-edit.png",
+      "viewport": "desktop",
+      "coverage": "board grouped by priority with compact in-card priority editing and conditional checklist progress"
+    },
+    {
+      "file": "checklist-detail-desktop.png",
+      "viewport": "desktop",
+      "coverage": "action detail checklist add, rename, complete, and delete controls"
+    },
+    {
+      "file": "checklist-detail-mobile.png",
+      "viewport": "mobile",
+      "coverage": "full-page mobile action detail with uncluttered checklist rows"
+    }
+  ]
+}
