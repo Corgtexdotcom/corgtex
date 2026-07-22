@@ -4,10 +4,28 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const {
   authenticateMcpRequestMock,
   createCorgtexMcpServerMock,
+  defaultMcpScopes,
   handleRouteErrorMock,
 } = vi.hoisted(() => ({
   authenticateMcpRequestMock: vi.fn(),
   createCorgtexMcpServerMock: vi.fn(),
+  defaultMcpScopes: [
+    "workspace:read",
+    "brain:read",
+    "governance:read",
+    "context-graph:read",
+    "proposals:read",
+    "proposals:write",
+    "actions:read",
+    "actions:write",
+    "tensions:read",
+    "goals:read",
+    "members:read",
+    "meetings:read",
+    "circles:read",
+    "tools:read",
+    "conversations:write",
+  ],
   handleRouteErrorMock: vi.fn((error: unknown) => NextResponse.json({ error: String(error) }, { status: 500 })),
 }));
 
@@ -29,10 +47,11 @@ class MockMcpInsufficientScopeError extends MockAppError {
 }
 
 vi.mock("@corgtex/domain", () => ({
-  ALL_SCOPES: ["workspace:read", "brain:read"],
-  MCP_CONNECTOR_DEFAULT_SCOPES: ["workspace:read", "brain:read"],
+  ALL_SCOPES: [...defaultMcpScopes, "tools:write"],
+  MCP_CONNECTOR_DEFAULT_SCOPES: defaultMcpScopes,
   MCP_TOOL_CAPABILITIES: {
     create_action: { scopes: ["actions:write"] },
+    upsert_tool_link: { scopes: ["tools:write"] },
   },
   AppError: MockAppError,
   getMcpPublicUrl: (origin: string) => `${origin}/mcp`,
@@ -65,8 +84,9 @@ describe("MCP route OAuth discovery", () => {
       resource: "https://mcp.corgtex.com/mcp",
       authorization_servers: ["https://mcp.corgtex.com"],
       bearer_methods_supported: ["header"],
-      scopes_supported: ["workspace:read", "brain:read"],
+      scopes_supported: defaultMcpScopes,
     });
+    expect(body.scopes_supported).toEqual(expect.arrayContaining(["proposals:write", "actions:write"]));
   });
 
   it("returns path-suffixed protected-resource OAuth metadata", async () => {
@@ -76,7 +96,7 @@ describe("MCP route OAuth discovery", () => {
     }));
     await expect(mcpResponse.json()).resolves.toMatchObject({
       resource: "https://mcp.corgtex.com/mcp",
-      scopes_supported: ["workspace:read", "brain:read"],
+      scopes_supported: defaultMcpScopes,
     });
 
     const { GET: getApiMcpMetadata } = await import("../../.well-known/oauth-protected-resource/api/mcp/route");
@@ -85,7 +105,7 @@ describe("MCP route OAuth discovery", () => {
     }));
     await expect(apiResponse.json()).resolves.toMatchObject({
       resource: "https://mcp.corgtex.com/mcp",
-      scopes_supported: ["workspace:read", "brain:read"],
+      scopes_supported: defaultMcpScopes,
     });
   });
 
@@ -106,8 +126,9 @@ describe("MCP route OAuth discovery", () => {
       code_challenge_methods_supported: ["S256"],
       token_endpoint_auth_methods_supported: ["none", "client_secret_basic", "client_secret_post"],
       client_id_metadata_document_supported: true,
-      scopes_supported: ["workspace:read", "brain:read"],
+      scopes_supported: defaultMcpScopes,
     });
+    expect(body.scopes_supported).toEqual(expect.arrayContaining(["proposals:write", "actions:write"]));
   });
 
   it("returns a resource_metadata challenge before MCP transport handling when auth is missing", async () => {
@@ -125,7 +146,7 @@ describe("MCP route OAuth discovery", () => {
 
     expect(response.status).toBe(401);
     expect(response.headers.get("www-authenticate")).toBe(
-      'Bearer error="invalid_token", resource_metadata="https://mcp.corgtex.com/.well-known/oauth-protected-resource", scope="workspace:read brain:read"',
+      `Bearer error="invalid_token", resource_metadata="https://mcp.corgtex.com/.well-known/oauth-protected-resource", scope="${defaultMcpScopes.join(" ")}"`,
     );
     expect(body).toEqual({
       error: {
@@ -152,19 +173,19 @@ describe("MCP route OAuth discovery", () => {
         jsonrpc: "2.0",
         id: 1,
         method: "tools/call",
-        params: { name: "create_action", arguments: {} },
+        params: { name: "upsert_tool_link", arguments: {} },
       }),
     }));
     const body = await response.json();
 
     expect(response.status).toBe(403);
     expect(response.headers.get("www-authenticate")).toBe(
-      'Bearer error="insufficient_scope", resource_metadata="https://mcp.corgtex.com/.well-known/oauth-protected-resource", scope="workspace:read actions:write"',
+      'Bearer error="insufficient_scope", resource_metadata="https://mcp.corgtex.com/.well-known/oauth-protected-resource", scope="workspace:read tools:write"',
     );
     expect(body).toEqual({
       error: {
         code: "MCP_INSUFFICIENT_SCOPE",
-        message: "Missing required permission: actions:write",
+        message: "Missing required permission: tools:write",
       },
     });
     expect(createCorgtexMcpServerMock).not.toHaveBeenCalled();

@@ -39,14 +39,30 @@ function installSharedMock(prismaMock: Record<string, any>, envOverrides: Record
 }
 
 describe("MCP connector registry", () => {
-  it("uses baseline public defaults for new OAuth connector clients", async () => {
+  it("uses action and proposal write defaults for new OAuth connector clients", async () => {
     const prismaMock = {
       mcpOAuthClient: {
         create: vi.fn().mockResolvedValue({
           clientId: "mcp_client_test",
           name: "Corgtex",
           redirectUris: ["https://client.example/callback"],
-          scopes: ["workspace:read", "brain:read", "tools:read", "conversations:write"],
+          scopes: [
+            "workspace:read",
+            "brain:read",
+            "governance:read",
+            "context-graph:read",
+            "proposals:read",
+            "proposals:write",
+            "actions:read",
+            "actions:write",
+            "tensions:read",
+            "goals:read",
+            "members:read",
+            "meetings:read",
+            "circles:read",
+            "tools:read",
+            "conversations:write",
+          ],
           tokenEndpointAuthMethod: "none",
         }),
       },
@@ -60,17 +76,29 @@ describe("MCP connector registry", () => {
     });
 
     expect(MCP_CONNECTOR_DEFAULT_SCOPES).toContain("workspace:read");
+    expect(MCP_CONNECTOR_DEFAULT_SCOPES).toContain("proposals:write");
+    expect(MCP_CONNECTOR_DEFAULT_SCOPES).toContain("actions:write");
     expect(MCP_CONNECTOR_DEFAULT_SCOPES).toContain("tools:read");
     expect(MCP_CONNECTOR_DEFAULT_SCOPES).toContain("conversations:write");
     expect(MCP_CONNECTOR_DEFAULT_SCOPES).not.toContain("tools:write");
     expect(MCP_CONNECTOR_DEFAULT_SCOPES).not.toContain("tools:credentials:read");
     expect(MCP_CONNECTOR_DEFAULT_SCOPES).not.toContain("runtime:write");
+    expect(MCP_CONNECTOR_DEFAULT_SCOPES).not.toContain("members:write");
+    expect(MCP_CONNECTOR_DEFAULT_SCOPES).not.toContain("finance:write");
     expect(MCP_CONNECTOR_DEFAULT_SCOPES).not.toContain("support:write");
     expect(prismaMock.mcpOAuthClient.create).toHaveBeenCalledWith({
       data: expect.objectContaining({
-        scopes: expect.arrayContaining(["workspace:read", "tools:read", "conversations:write"]),
+        scopes: expect.arrayContaining([
+          "workspace:read",
+          "proposals:write",
+          "actions:write",
+          "tools:read",
+          "conversations:write",
+        ]),
       }),
     });
+    expect(result.scope).toContain("proposals:write");
+    expect(result.scope).toContain("actions:write");
     expect(result.scope).not.toContain("tools:credentials:read");
   });
 
@@ -83,22 +111,40 @@ describe("MCP connector registry", () => {
     } = await import("./mcp-connector");
 
     expect(resolveMcpClientAllowedScopes(MCP_CONNECTOR_LEGACY_DEFAULT_SCOPES)).toEqual(
-      expect.arrayContaining(["context-graph:read", "goals:read", "tools:read"]),
+      expect.arrayContaining(["context-graph:read", "proposals:write", "actions:write", "goals:read", "tools:read"]),
     );
     expect(resolveMcpClientAllowedScopes(MCP_CONNECTOR_LEGACY_DEFAULT_SCOPES)).not.toContain("tools:write");
     expect(resolveMcpClientAllowedScopes(MCP_CONNECTOR_LEGACY_DEFAULT_SCOPES)).not.toContain("runtime:write");
+    expect(resolveMcpClientAllowedScopes(MCP_CONNECTOR_LEGACY_DEFAULT_SCOPES)).not.toContain("members:write");
+    expect(resolveMcpClientAllowedScopes(MCP_CONNECTOR_LEGACY_DEFAULT_SCOPES)).not.toContain("finance:write");
     expect(resolveMcpClientAllowedScopes(MCP_CONNECTOR_LEGACY_DEFAULT_SCOPES)).not.toContain("tools:credentials:read");
     expect(resolveMcpClientAllowedScopes(["workspace:read", "brain:read"])).toEqual(["workspace:read", "brain:read"]);
   });
 
-  it("grants baseline scopes when DCR omits scope", async () => {
+  it("grants action and proposal write defaults when DCR omits scope", async () => {
     const prismaMock = {
       mcpOAuthClient: {
         create: vi.fn().mockResolvedValue({
           clientId: "mcp_client_test",
           name: "Corgtex",
           redirectUris: ["https://client.example/callback"],
-          scopes: ["workspace:read", "brain:read", "tools:read", "conversations:write"],
+          scopes: [
+            "workspace:read",
+            "brain:read",
+            "governance:read",
+            "context-graph:read",
+            "proposals:read",
+            "proposals:write",
+            "actions:read",
+            "actions:write",
+            "tensions:read",
+            "goals:read",
+            "members:read",
+            "meetings:read",
+            "circles:read",
+            "tools:read",
+            "conversations:write",
+          ],
           tokenEndpointAuthMethod: "none",
         }),
       },
@@ -113,10 +159,19 @@ describe("MCP connector registry", () => {
 
     expect(prismaMock.mcpOAuthClient.create).toHaveBeenCalledWith({
       data: expect.objectContaining({
-        scopes: expect.arrayContaining(["workspace:read", "brain:read", "tools:read", "conversations:write"]),
+        scopes: expect.arrayContaining([
+          "workspace:read",
+          "brain:read",
+          "proposals:write",
+          "actions:write",
+          "tools:read",
+          "conversations:write",
+        ]),
       }),
     });
     expect(result.scope).toContain("workspace:read");
+    expect(result.scope).toContain("proposals:write");
+    expect(result.scope).toContain("actions:write");
     expect(result.scope).toContain("tools:read");
   });
 
@@ -127,7 +182,23 @@ describe("MCP connector registry", () => {
           clientId: "mcp_client_test",
           name: "Corgtex",
           redirectUris: ["https://client.example/callback"],
-          scopes: ["workspace:read", "brain:read", "tools:read", "conversations:write"],
+          scopes: [
+            "workspace:read",
+            "brain:read",
+            "governance:read",
+            "context-graph:read",
+            "proposals:read",
+            "proposals:write",
+            "actions:read",
+            "actions:write",
+            "tensions:read",
+            "goals:read",
+            "members:read",
+            "meetings:read",
+            "circles:read",
+            "tools:read",
+            "conversations:write",
+          ],
           tokenEndpointAuthMethod: "none",
         }),
       },
@@ -143,10 +214,11 @@ describe("MCP connector registry", () => {
 
     expect(prismaMock.mcpOAuthClient.create).toHaveBeenCalledWith({
       data: expect.objectContaining({
-        scopes: expect.arrayContaining(["workspace:read", "brain:read"]),
+        scopes: expect.arrayContaining(["workspace:read", "brain:read", "proposals:write", "actions:write"]),
       }),
     });
     const persistedScopes = prismaMock.mcpOAuthClient.create.mock.calls[0][0].data.scopes;
+    expect(persistedScopes).toEqual(expect.arrayContaining(["proposals:write", "actions:write"]));
     expect(persistedScopes).not.toEqual(expect.arrayContaining(["openid", "profile", "email", "offline_access"]));
   });
 
@@ -234,7 +306,7 @@ describe("MCP connector registry", () => {
           clientId: "mcp_client_test",
           isActive: true,
           redirectUris: ["https://client.example/callback"],
-          scopes: ["workspace:read", "brain:read", "governance:read", "context-graph:read", "proposals:read", "actions:read", "tensions:read", "goals:read", "members:read", "meetings:read", "circles:read", "tools:read", "conversations:write"],
+          scopes: ["workspace:read", "brain:read", "governance:read", "context-graph:read", "proposals:read", "proposals:write", "actions:read", "actions:write", "tensions:read", "goals:read", "members:read", "meetings:read", "circles:read", "tools:read", "conversations:write"],
         }),
       },
       member: {
@@ -257,7 +329,7 @@ describe("MCP connector registry", () => {
       clientId: "mcp_client_test",
       workspaceId: "ws-1",
       redirectUri: "https://client.example/callback",
-      scopes: ["workspace:read", "actions:write"],
+      scopes: ["workspace:read", "tools:write"],
       codeChallenge: "challenge",
       codeChallengeMethod: "S256",
       resource: "https://app.test/mcp",
@@ -265,7 +337,7 @@ describe("MCP connector registry", () => {
 
     expect(createAuthorizationCodeMock).toHaveBeenCalledWith({
       data: expect.objectContaining({
-        scopes: ["workspace:read", "actions:write"],
+        scopes: ["workspace:read", "tools:write"],
       }),
     });
   });
@@ -317,7 +389,7 @@ describe("MCP connector registry", () => {
           clientId: "mcp_client_test",
           isActive: true,
           redirectUris: ["https://client.example/callback"],
-          scopes: ["workspace:read", "brain:read", "governance:read", "context-graph:read", "proposals:read", "actions:read", "tensions:read", "goals:read", "members:read", "meetings:read", "circles:read", "tools:read", "conversations:write"],
+          scopes: ["workspace:read", "brain:read", "governance:read", "context-graph:read", "proposals:read", "proposals:write", "actions:read", "actions:write", "tensions:read", "goals:read", "members:read", "meetings:read", "circles:read", "tools:read", "conversations:write"],
         }),
       },
       member: {
