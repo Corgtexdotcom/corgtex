@@ -1,14 +1,9 @@
 import type { Prisma } from "@prisma/client";
 import {
-  countUnreadNotifications,
-  getLatestWorkspaceBriefing,
-  listArticles,
-  listMeetings,
-  listMembers,
-  listNewspaperEditions,
   normalizeNewspaperEditionDigest,
   normalizeWorkspaceBriefingPayload,
   privacyFilter,
+  requireWorkspaceMembership,
 } from "@corgtex/domain";
 import { prisma, workspaceBranding } from "@corgtex/shared";
 import { requirePageActor } from "@/lib/auth";
@@ -183,34 +178,27 @@ export default async function WorkspaceDashboard({
   const actor = await requirePageActor();
   const t = await getTranslations("dashboard");
   const format = await getFormatter();
+  const membership = await requireWorkspaceMembership({ actor, workspaceId });
+  const currentMember = actor.kind === "user" && actor.user.globalRole !== "OPERATOR"
+    ? membership
+    : actor.kind === "user"
+      ? await prisma.member.findFirst({
+        where: {
+          workspaceId,
+          userId: actor.user.id,
+          isActive: true,
+        },
+        select: {
+          id: true,
+          workspaceId: true,
+          userId: true,
+          role: true,
+          isActive: true,
+        },
+      })
+      : null;
 
-  const [
-    members,
-    unreadNotificationsCount,
-    articlesResult,
-    latestDailyWorkspaceBriefing,
-    latestWeeklyWorkspaceBriefing,
-    newspaperEditions,
-    meetings,
-    chunksCount,
-    workspaceData,
-  ] = await Promise.all([
-    listMembers(workspaceId),
-    actor.kind === "user" ? countUnreadNotifications(actor.user.id, workspaceId) : Promise.resolve(0),
-    listArticles(actor, { workspaceId, take: 50 }),
-    getLatestWorkspaceBriefing({ actor, workspaceId, period: "DAILY" }),
-    getLatestWorkspaceBriefing({ actor, workspaceId, period: "WEEKLY" }),
-    listNewspaperEditions(actor, workspaceId, { take: 1 }),
-    listMeetings(workspaceId, { status: "COMPLETED" }),
-    prisma.knowledgeChunk.count({ where: { workspaceId } }),
-    prisma.workspace.findUnique({ where: { id: workspaceId }, select: { slug: true, name: true } }),
-  ]);
-
-  const branding = workspaceData
-    ? workspaceBranding(workspaceData)
-    : { primaryName: "Corgtex", secondaryLabel: "powered by Corgtex" };
-  const currentMember = actor.kind === "user" ? members.find((member) => member.userId === actor.user.id) : undefined;
-  const workItemVisibilityWhere = privacyFilter(actor, currentMember ?? null);
+  const workItemVisibilityWhere = privacyFilter(actor, membership ?? null);
   const visibleOpenActionWhere = {
     AND: [
       workItemVisibilityWhere,
@@ -244,31 +232,24 @@ export default async function WorkspaceDashboard({
       },
     ],
   } satisfies Prisma.TensionWhereInput;
-  const activeProposalAdviceRequestSubjectIds = currentMember?.id
-    ? (await prisma.adviceRequest.findMany({
-      where: {
-        workspaceId,
-        status: "ACTIVE",
-        recipients: {
-          some: { memberId: currentMember.id },
-        },
-        process: {
-          subjectType: "PROPOSAL",
-        },
-      },
-      select: {
-        process: {
-          select: { subjectId: true },
-        },
-      },
-    })).map((request) => request.process.subjectId)
-    : [];
   const personalProposalConditions: Prisma.ProposalWhereInput[] = currentMember?.id
     ? [
       { ownerMemberId: currentMember.id },
-      ...(activeProposalAdviceRequestSubjectIds.length > 0
-        ? [{ id: { in: activeProposalAdviceRequestSubjectIds } } satisfies Prisma.ProposalWhereInput]
-        : []),
+      {
+        adviceProcess: {
+          is: {
+            requests: {
+              some: {
+                workspaceId,
+                status: "ACTIVE",
+                recipients: {
+                  some: { memberId: currentMember.id },
+                },
+              },
+            },
+          },
+        },
+      },
     ]
     : [];
   const visiblePersonalOpenProposalWhere = currentMember?.id
@@ -280,26 +261,157 @@ export default async function WorkspaceDashboard({
     } satisfies Prisma.ProposalWhereInput
     : null;
   const [
+    unreadNotificationsCount,
+    articles,
+    latestDailyWorkspaceBriefing,
+    latestWeeklyWorkspaceBriefing,
+    newspaperEditions,
+    meetings,
+    chunksCount,
+    workspaceData,
+    membersCount,
     actionTotalCount,
     actionPersonalCount,
     proposalTotalCount,
     proposalPersonalCount,
     tensionTotalCount,
     tensionPersonalCount,
-  ] = await Promise.all([
+  ] = await prisma.$transaction([
+    prisma.notification.count({
+      where: {
+        workspaceId,
+        userId: actor.kind === "user" ? actor.user.id : "__agent_actor__",
+        readAt: null,
+      },
+    }),
+    prisma.brainArticle.findMany({
+      where: {
+        workspaceId,
+        archivedAt: null,
+        isPrivate: false,
+        type: { not: "DIGEST" },
+      },
+      select: {
+        id: true,
+        slug: true,
+        title: true,
+        bodyMd: true,
+        type: true,
+        isPrivate: true,
+        updatedAt: true,
+        publishedAt: true,
+        createdAt: true,
+      },
+      orderBy: { updatedAt: "desc" },
+      take: 50,
+    }),
+    prisma.workspaceBriefing.findFirst({
+      where: {
+        workspaceId,
+        status: "GENERATED",
+        period: "DAILY",
+      },
+      orderBy: { generatedAt: "desc" },
+      select: {
+        id: true,
+        workflowJobId: true,
+        period: true,
+        dateKey: true,
+        runKey: true,
+        title: true,
+        status: true,
+        modelUsed: true,
+        introMd: true,
+        bodyMd: true,
+        briefingJson: true,
+        sourceRefsJson: true,
+        sourceCounts: true,
+        generatedAt: true,
+        createdAt: true,
+        updatedAt: true,
+      },
+    }),
+    prisma.workspaceBriefing.findFirst({
+      where: {
+        workspaceId,
+        status: "GENERATED",
+        period: "WEEKLY",
+      },
+      orderBy: { generatedAt: "desc" },
+      select: {
+        id: true,
+        workflowJobId: true,
+        period: true,
+        dateKey: true,
+        runKey: true,
+        title: true,
+        status: true,
+        modelUsed: true,
+        introMd: true,
+        bodyMd: true,
+        briefingJson: true,
+        sourceRefsJson: true,
+        sourceCounts: true,
+        generatedAt: true,
+        createdAt: true,
+        updatedAt: true,
+      },
+    }),
+    prisma.newspaperEdition.findMany({
+      where: { workspaceId },
+      orderBy: { generatedAt: "desc" },
+      take: 1,
+      select: {
+        id: true,
+        workflowJobId: true,
+        cadence: true,
+        dateKey: true,
+        runKey: true,
+        title: true,
+        slug: true,
+        digestJson: true,
+        bodyMd: true,
+        sourceCounts: true,
+        generatedAt: true,
+        createdAt: true,
+        updatedAt: true,
+      },
+    }),
+    prisma.meeting.findMany({
+      where: {
+        workspaceId,
+        status: "COMPLETED",
+        archivedAt: null,
+      },
+      select: {
+        id: true,
+        title: true,
+        summaryMd: true,
+        recordedAt: true,
+        updatedAt: true,
+        createdAt: true,
+      },
+      orderBy: { recordedAt: "desc" },
+    }),
+    prisma.knowledgeChunk.count({ where: { workspaceId } }),
+    prisma.workspace.findUnique({ where: { id: workspaceId }, select: { slug: true, name: true } }),
+    prisma.member.count({ where: { workspaceId, isActive: true } }),
     prisma.action.count({ where: visibleOpenActionWhere }),
     currentMember?.id
-      ? prisma.action.count({ where: { ...visibleOpenActionWhere, assigneeMemberId: currentMember.id } })
-      : Promise.resolve(0),
+      ? prisma.action.count({ where: { AND: [visibleOpenActionWhere, { assigneeMemberId: currentMember.id }] } })
+      : prisma.action.count({ where: { id: "__no_current_member__" } }),
     prisma.proposal.count({ where: visibleOpenProposalWhere }),
     visiblePersonalOpenProposalWhere
       ? prisma.proposal.count({ where: visiblePersonalOpenProposalWhere })
-      : Promise.resolve(0),
+      : prisma.proposal.count({ where: { id: "__no_current_member__" } }),
     prisma.tension.count({ where: visibleOpenTensionWhere }),
     currentMember?.id
-      ? prisma.tension.count({ where: { ...visibleOpenTensionWhere, assigneeMemberId: currentMember.id } })
-      : Promise.resolve(0),
+      ? prisma.tension.count({ where: { AND: [visibleOpenTensionWhere, { assigneeMemberId: currentMember.id }] } })
+      : prisma.tension.count({ where: { id: "__no_current_member__" } }),
   ]);
+  const branding = workspaceData
+    ? workspaceBranding(workspaceData)
+    : { primaryName: "Corgtex", secondaryLabel: "powered by Corgtex" };
   const workAttentionCounts = getDashboardWorkAttentionCountsFromMetrics({
     currentMemberId: currentMember?.id ?? null,
     actionPersonalCount,
@@ -326,7 +438,7 @@ export default async function WorkspaceDashboard({
   });
   const liveNarrativeCandidate = liveWorkspaceNarrative({
     workspaceId,
-    articles: articlesResult.items,
+    articles,
     meetings,
     labels: {
       intro: storedGeneratedAt ? t("newspaperLiveUpdatedIntro") : t("newspaperLiveIntro"),
@@ -542,10 +654,10 @@ export default async function WorkspaceDashboard({
 
       <div className="nr-footer">
         {t("footerStats", {
-          articles: articlesResult.items.length,
+          articles: articles.length,
           meetings: meetings.length,
           chunks: chunksCount,
-          members: members.length,
+          members: membersCount,
         })}
       </div>
     </>
