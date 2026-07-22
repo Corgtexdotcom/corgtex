@@ -1,3 +1,4 @@
+import type { Prisma } from "@prisma/client";
 import {
   countUnreadNotifications,
   getLatestWorkspaceBriefing,
@@ -7,6 +8,7 @@ import {
   listNewspaperEditions,
   normalizeNewspaperEditionDigest,
   normalizeWorkspaceBriefingPayload,
+  privacyFilter,
 } from "@corgtex/domain";
 import { prisma, workspaceBranding } from "@corgtex/shared";
 import { requirePageActor } from "@/lib/auth";
@@ -18,6 +20,7 @@ import {
   capDashboardUnreadNotificationCount,
   isDashboardUnreadNotificationCountCapped,
 } from "@/lib/dashboard-briefing";
+import { getDashboardWorkAttentionCountsFromMetrics } from "@/lib/dashboard-attention";
 
 export const dynamic = "force-dynamic";
 
@@ -207,6 +210,105 @@ export default async function WorkspaceDashboard({
     ? workspaceBranding(workspaceData)
     : { primaryName: "Corgtex", secondaryLabel: "powered by Corgtex" };
   const currentMember = actor.kind === "user" ? members.find((member) => member.userId === actor.user.id) : undefined;
+  const workItemVisibilityWhere = privacyFilter(actor, currentMember ?? null);
+  const visibleOpenActionWhere = {
+    AND: [
+      workItemVisibilityWhere,
+      {
+        workspaceId,
+        archivedAt: null,
+        isPrivate: false,
+        status: { in: ["OPEN", "IN_PROGRESS"] },
+      },
+    ],
+  } satisfies Prisma.ActionWhereInput;
+  const visibleOpenProposalWhere = {
+    AND: [
+      workItemVisibilityWhere,
+      {
+        workspaceId,
+        archivedAt: null,
+        isPrivate: false,
+        status: "OPEN",
+      },
+    ],
+  } satisfies Prisma.ProposalWhereInput;
+  const visibleOpenTensionWhere = {
+    AND: [
+      workItemVisibilityWhere,
+      {
+        workspaceId,
+        archivedAt: null,
+        isPrivate: false,
+        status: "OPEN",
+      },
+    ],
+  } satisfies Prisma.TensionWhereInput;
+  const activeProposalAdviceRequestSubjectIds = currentMember?.id
+    ? (await prisma.adviceRequest.findMany({
+      where: {
+        workspaceId,
+        status: "ACTIVE",
+        recipients: {
+          some: { memberId: currentMember.id },
+        },
+        process: {
+          subjectType: "PROPOSAL",
+        },
+      },
+      select: {
+        process: {
+          select: { subjectId: true },
+        },
+      },
+    })).map((request) => request.process.subjectId)
+    : [];
+  const personalProposalConditions: Prisma.ProposalWhereInput[] = currentMember?.id
+    ? [
+      { ownerMemberId: currentMember.id },
+      ...(activeProposalAdviceRequestSubjectIds.length > 0
+        ? [{ id: { in: activeProposalAdviceRequestSubjectIds } } satisfies Prisma.ProposalWhereInput]
+        : []),
+    ]
+    : [];
+  const visiblePersonalOpenProposalWhere = currentMember?.id
+    ? {
+      AND: [
+        visibleOpenProposalWhere,
+        { OR: personalProposalConditions },
+      ],
+    } satisfies Prisma.ProposalWhereInput
+    : null;
+  const [
+    actionTotalCount,
+    actionPersonalCount,
+    proposalTotalCount,
+    proposalPersonalCount,
+    tensionTotalCount,
+    tensionPersonalCount,
+  ] = await Promise.all([
+    prisma.action.count({ where: visibleOpenActionWhere }),
+    currentMember?.id
+      ? prisma.action.count({ where: { ...visibleOpenActionWhere, assigneeMemberId: currentMember.id } })
+      : Promise.resolve(0),
+    prisma.proposal.count({ where: visibleOpenProposalWhere }),
+    visiblePersonalOpenProposalWhere
+      ? prisma.proposal.count({ where: visiblePersonalOpenProposalWhere })
+      : Promise.resolve(0),
+    prisma.tension.count({ where: visibleOpenTensionWhere }),
+    currentMember?.id
+      ? prisma.tension.count({ where: { ...visibleOpenTensionWhere, assigneeMemberId: currentMember.id } })
+      : Promise.resolve(0),
+  ]);
+  const workAttentionCounts = getDashboardWorkAttentionCountsFromMetrics({
+    currentMemberId: currentMember?.id ?? null,
+    actionPersonalCount,
+    actionTotalCount,
+    proposalPersonalCount,
+    proposalTotalCount,
+    tensionPersonalCount,
+    tensionTotalCount,
+  });
   const latestWorkspaceBriefing = [latestDailyWorkspaceBriefing, latestWeeklyWorkspaceBriefing]
     .filter((briefing): briefing is NonNullable<typeof latestDailyWorkspaceBriefing> => Boolean(briefing))
     .sort((left, right) => right.generatedAt.getTime() - left.generatedAt.getTime())[0] ?? null;
@@ -268,12 +370,22 @@ export default async function WorkspaceDashboard({
   const articleTitle = displayedBriefing?.title ?? (fallbackNarrative ? latestNewspaperEdition?.title : null) ?? t("latestWorkspaceBriefing");
   const hasArticle = !!displayedBriefing || !!fallbackNarrative || !!liveNarrative;
   const sourceRefs = displayedBriefing?.sourceRefs ?? liveNarrative?.sourceRefs ?? [];
-  const homeNavItems = [
-    { href: `/workspaces/${workspaceId}/brain`, label: t("newspaperNavBrain") },
-    { href: `/workspaces/${workspaceId}/meetings`, label: t("newspaperNavMeetings") },
-    { href: `/workspaces/${workspaceId}/proposals`, label: t("newspaperNavProposals") },
-    { href: `/workspaces/${workspaceId}/actions`, label: t("newspaperNavActions") },
-    { href: `/workspaces/${workspaceId}/tensions`, label: t("newspaperNavTensions") },
+  const attentionTiles = [
+    {
+      href: `/workspaces/${workspaceId}/actions?status=OPEN&status=IN_PROGRESS`,
+      label: t("attentionActions"),
+      counts: workAttentionCounts.actions,
+    },
+    {
+      href: `/workspaces/${workspaceId}/proposals?status=OPEN`,
+      label: t("attentionProposals"),
+      counts: workAttentionCounts.proposals,
+    },
+    {
+      href: `/workspaces/${workspaceId}/tensions?status=OPEN`,
+      label: t("attentionTensions"),
+      counts: workAttentionCounts.tensions,
+    },
   ];
 
   return (
@@ -299,27 +411,48 @@ export default async function WorkspaceDashboard({
         </div>
       </header>
 
-      <nav className="nr-newspaper-home-nav" aria-label={t("newspaperHomeNavLabel")}>
-        {homeNavItems.map((item) => (
-          <Link key={item.href} href={item.href} className="nr-newspaper-nav-button">
-            {item.label}
-          </Link>
-        ))}
-      </nav>
-
       <div className="nr-newspaper-actions">
-        {currentMember?.id && (
-          <Link href={`/workspaces/${workspaceId}/members/${currentMember.id}`} className="nr-newspaper-action-button">
-            {t("viewFullProfile")}
-          </Link>
-        )}
-        <Link href={`/workspaces/${workspaceId}/chat`} className="nr-newspaper-action-button nr-newspaper-assistant-pill ws-assistant-launch">
-          {t("askAgent")}
-        </Link>
         <Link href={`/workspaces/${workspaceId}/notifications`} className="nr-newspaper-action-button nr-newspaper-notification-pill">
           {notificationLabel}
         </Link>
       </div>
+
+      <section className="nr-home-attention-strip" aria-label={t("attentionStripLabel")}>
+        {attentionTiles.map((tile) => {
+          const hasPersonalCount = tile.counts.personalCount !== null;
+          return (
+            <Link
+              key={tile.href}
+              href={tile.href}
+              className="nr-home-attention-tile"
+              aria-label={hasPersonalCount
+                ? t("attentionTileAria", {
+                  label: tile.label,
+                  personal: tile.counts.personalCount ?? 0,
+                  total: tile.counts.totalCount,
+                })
+                : t("attentionTileTotalAria", {
+                  label: tile.label,
+                  total: tile.counts.totalCount,
+                })}
+            >
+              <span className="nr-home-attention-title">{tile.label}</span>
+              <span className={`nr-home-attention-metrics ${hasPersonalCount ? "" : "nr-home-attention-metrics-single"}`}>
+                {hasPersonalCount && (
+                  <span className="nr-home-attention-metric">
+                    <strong>{tile.counts.personalCount}</strong>
+                    <span>{t("attentionForYou")}</span>
+                  </span>
+                )}
+                <span className="nr-home-attention-metric">
+                  <strong>{tile.counts.totalCount}</strong>
+                  <span>{t("attentionTotalOpen")}</span>
+                </span>
+              </span>
+            </Link>
+          );
+        })}
+      </section>
 
       <article className="nr-newspaper-page">
         <header className="nr-newspaper-header">

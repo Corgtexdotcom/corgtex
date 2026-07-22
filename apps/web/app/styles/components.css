@@ -45,18 +45,6 @@
     grid-template-columns: var(--ws-sidebar-width) minmax(0, 1fr) var(--ws-agent-rail-width);
   }
 
-  .ws-layout:has(.nr-newspaper-page) {
-    --ws-agent-rail-width: 0px;
-    --ws-agent-rail-half-width: 0px;
-    --ws-main-content-max-width: 1120px;
-    --ws-main-content-half-max-width: 560px;
-    grid-template-columns: var(--ws-sidebar-width) minmax(0, 1fr) 0;
-  }
-
-  .ws-layout:has(.nr-newspaper-page) .ws-agent-sidebar {
-    display: none;
-  }
-
   .ws-layout:has(.nr-newspaper-page) .product-feedback-widget {
     display: none;
   }
@@ -2018,18 +2006,6 @@ a.meeting-agenda-item:hover {
     background: var(--surface);
   }
 
-  .nr-newspaper-home-nav {
-    display: flex;
-    flex-wrap: wrap;
-    justify-content: center;
-    gap: 8px;
-    max-width: 1080px;
-    margin: 0 auto 18px;
-    padding: 10px 0 0;
-    border-top: 1px solid var(--line);
-  }
-
-  .nr-newspaper-nav-button,
   .nr-newspaper-action-button {
     display: inline-flex;
     align-items: center;
@@ -2050,7 +2026,6 @@ a.meeting-agenda-item:hover {
     transition: background 0.15s, border-color 0.15s, color 0.15s;
   }
 
-  .nr-newspaper-nav-button:hover,
   .nr-newspaper-action-button:hover {
     border-color: var(--accent);
     background: var(--accent-soft);
@@ -2068,10 +2043,91 @@ a.meeting-agenda-item:hover {
     margin: 0 auto 28px;
   }
 
-  .nr-newspaper-notification-pill,
-  .nr-newspaper-assistant-pill {
+  .nr-newspaper-notification-pill {
     min-height: 36px;
     border-radius: 999px;
+  }
+
+  .nr-home-attention-strip {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 10px;
+    max-width: 1080px;
+    margin: 0 auto 28px;
+    padding-top: 14px;
+    border-top: 1px solid var(--line);
+  }
+
+  .nr-home-attention-tile {
+    display: grid;
+    gap: 10px;
+    min-width: 0;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    background: var(--surface);
+    color: var(--text);
+    padding: 12px;
+    text-decoration: none;
+    box-shadow: var(--shadow-sm);
+    transition: background 0.15s, border-color 0.15s, color 0.15s;
+  }
+
+  .nr-home-attention-tile:hover {
+    border-color: var(--accent);
+    background: var(--accent-soft);
+    color: var(--accent);
+    text-decoration: none;
+  }
+
+  .nr-home-attention-title {
+    overflow: hidden;
+    color: inherit;
+    font-size: 0.86rem;
+    font-weight: 800;
+    line-height: 1.2;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .nr-home-attention-metrics {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
+  }
+
+  .nr-home-attention-metrics-single {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .nr-home-attention-metric {
+    min-width: 0;
+  }
+
+  .nr-home-attention-metric strong,
+  .nr-home-attention-metric span {
+    display: block;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .nr-home-attention-metric strong {
+    color: var(--text);
+    font-size: 1.42rem;
+    font-weight: 800;
+    line-height: 1;
+  }
+
+  .nr-home-attention-tile:hover .nr-home-attention-metric strong {
+    color: inherit;
+  }
+
+  .nr-home-attention-metric span {
+    margin-top: 4px;
+    color: var(--muted);
+    font-size: 0.72rem;
+    font-weight: 700;
+    line-height: 1.25;
   }
 
   .nr-newspaper-inline-button {
@@ -4570,18 +4626,6 @@ a.meeting-agenda-item:hover {
     width: 100%;
   }
 
-  .nr-newspaper-home-nav {
-    justify-content: center;
-    margin-bottom: 14px;
-    overflow-x: visible;
-    flex-wrap: wrap;
-  }
-
-  .nr-newspaper-nav-button {
-    flex: 1 1 calc(50% - 8px);
-    min-width: 0;
-  }
-
   .nr-newspaper-actions {
     align-items: stretch;
     flex-direction: column;
@@ -4589,10 +4633,20 @@ a.meeting-agenda-item:hover {
   }
 
   .nr-newspaper-action-button,
-  .nr-newspaper-notification-pill,
-  .nr-newspaper-assistant-pill {
+  .nr-newspaper-notification-pill {
     justify-content: center;
     width: 100%;
+  }
+
+  .nr-home-attention-strip {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 8px;
+    margin-bottom: 22px;
+  }
+
+  .nr-home-attention-tile {
+    grid-template-columns: minmax(0, 0.8fr) minmax(0, 1.2fr);
+    align-items: center;
   }
 
   .nr-newspaper-page {
