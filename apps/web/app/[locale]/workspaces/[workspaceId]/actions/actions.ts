@@ -5,9 +5,12 @@ import { requirePageActor } from "@/lib/auth";
 import { asString, asOptional, asOptionalInt, duplicateGuardFromFormData, refresh } from "../action-utils";
 import {
   createAction,
+  createActionChecklistItem,
   createAdviceRequest,
   deleteAction,
+  deleteActionChecklistItem,
   updateAction,
+  updateActionChecklistItem,
   publishAction,
   returnActionToDraft,
   postDeliberationEntry,
@@ -39,6 +42,7 @@ export async function createActionAction(formData: FormData) {
     bodyMd: asOptional(formData, "bodyMd"),
     proposalId: asOptional(formData, "proposalId"),
     assigneeMemberId: asOptional(formData, "assigneeMemberId"),
+    dueAt: formData.has("dueAt") ? asOptionalDate(formData, "dueAt") : undefined,
     priority: asOptionalInt(formData, "priority"),
     isPrivate: formData.has("isPrivate") ? formData.get("isPrivate") === "on" : true,
     duplicateGuard: duplicateGuardFromFormData(formData),
@@ -69,6 +73,7 @@ export async function updateActionAction(formData: FormData) {
     title: asOptional(formData, "title") ?? undefined,
     bodyMd: formData.has("bodyMd") ? asOptional(formData, "bodyMd") : undefined,
     assigneeMemberId: formData.has("assigneeMemberId") ? asOptional(formData, "assigneeMemberId") : undefined,
+    dueAt: formData.has("dueAt") ? asOptionalDate(formData, "dueAt") : undefined,
     priority: formData.has("priority") ? (asOptionalInt(formData, "priority") ?? 0) : undefined,
     status: status ?? undefined,
     completedVia: asOptional(formData, "completedVia") ?? undefined,
@@ -200,6 +205,48 @@ export async function updateActionDeliberationAction(formData: FormData) {
     entryId: asString(formData, "entryId"),
     entryType: asString(formData, "entryType"),
     bodyMd: asString(formData, "bodyMd"),
+  });
+  refresh(workspaceId);
+}
+
+export async function createActionChecklistItemAction(formData: FormData) {
+  const _demoGuardWsId = formData.get("workspaceId") as string;
+  if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
+
+  const actor = await requirePageActor();
+  const workspaceId = asString(formData, "workspaceId");
+  await createActionChecklistItem(actor, {
+    workspaceId,
+    actionId: asString(formData, "actionId"),
+    title: asString(formData, "title"),
+  });
+  refresh(workspaceId);
+}
+
+export async function updateActionChecklistItemAction(formData: FormData) {
+  const _demoGuardWsId = formData.get("workspaceId") as string;
+  if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
+
+  const actor = await requirePageActor();
+  const workspaceId = asString(formData, "workspaceId");
+  await updateActionChecklistItem(actor, {
+    workspaceId,
+    checklistItemId: asString(formData, "checklistItemId"),
+    title: formData.has("title") ? asString(formData, "title") : undefined,
+    completed: formData.has("completed") ? asString(formData, "completed") === "true" : undefined,
+  });
+  refresh(workspaceId);
+}
+
+export async function deleteActionChecklistItemAction(formData: FormData) {
+  const _demoGuardWsId = formData.get("workspaceId") as string;
+  if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
+
+  const actor = await requirePageActor();
+  const workspaceId = asString(formData, "workspaceId");
+  await deleteActionChecklistItem(actor, {
+    workspaceId,
+    checklistItemId: asString(formData, "checklistItemId"),
   });
   refresh(workspaceId);
 }

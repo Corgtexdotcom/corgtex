@@ -3455,6 +3455,76 @@ a.meeting-agenda-item:hover {
     pointer-events: auto;
   }
 
+  .nr-board-group-bar {
+    margin: 4px 0 14px;
+  }
+
+  .nr-card-chip-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    align-items: center;
+    margin-top: 10px;
+  }
+
+  .nr-card-chip {
+    display: inline-flex;
+    min-height: 24px;
+    max-width: 100%;
+    align-items: center;
+    gap: 4px;
+    padding: 3px 8px;
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    background: var(--surface-strong);
+    color: var(--text);
+    font-size: 0.75rem;
+    font-weight: 700;
+    line-height: 1.2;
+    text-decoration: none;
+  }
+
+  .nr-card-chip-muted {
+    color: var(--muted);
+    font-weight: 600;
+  }
+
+  .nr-card-chip-editor {
+    position: relative;
+    max-width: 100%;
+  }
+
+  .nr-card-chip-editor[open] .nr-card-chip {
+    border-color: var(--accent);
+    color: var(--accent);
+  }
+
+  .nr-card-chip-form {
+    position: absolute;
+    top: calc(100% + 6px);
+    left: 0;
+    z-index: 20;
+    display: grid;
+    min-width: 190px;
+    gap: 8px;
+    padding: 10px;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    background: var(--surface);
+    box-shadow: var(--shadow-md);
+  }
+
+  .nr-card-chip-form label {
+    display: grid;
+    gap: 4px;
+  }
+
+  .nr-card-chip-form select,
+  .nr-card-chip-form input {
+    width: 100%;
+    min-width: 0;
+  }
+
   @supports selector(:has(*)) {
     .ws-layout:has(.nr-kanban-shell) .ws-main,
     .ws-layout:has(.nr-workspace-table-surface) .ws-main,
@@ -5198,6 +5268,122 @@ a.meeting-agenda-item:hover {
   border-radius: 8px;
   font-size: 0.88rem;
   font-weight: 500;
+}
+
+.nr-action-checklist {
+  display: grid;
+  gap: 12px;
+}
+
+.nr-action-checklist-list {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.nr-action-checklist-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 10px;
+  align-items: start;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.nr-action-checklist-row:last-child {
+  border-bottom: 0;
+}
+
+.nr-action-checklist-toggle {
+  display: inline-grid;
+  width: 24px;
+  height: 24px;
+  place-items: center;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--muted);
+  font: inherit;
+  font-size: 0.75rem;
+  cursor: pointer;
+}
+
+.nr-action-checklist-toggle-done {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.nr-action-checklist-title,
+.nr-action-checklist-title-editor {
+  min-width: 0;
+}
+
+.nr-action-checklist-title {
+  display: block;
+  padding: 3px 0;
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+
+.nr-action-checklist-title-editor > summary {
+  cursor: pointer;
+}
+
+.nr-action-checklist-title-form {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+  min-width: 0;
+}
+
+.nr-action-checklist-edit-panel {
+  display: grid;
+  gap: 8px;
+  margin-top: 8px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-strong);
+}
+
+.nr-action-checklist-title-form input {
+  width: 100%;
+  min-width: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  padding: 4px 0;
+}
+
+.nr-action-checklist-title-done {
+  color: var(--muted);
+  text-decoration: line-through;
+}
+
+.nr-action-checklist-add {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+}
+
+.nr-action-checklist-add input {
+  min-width: 0;
+}
+
+@media (max-width: 640px) {
+  .nr-action-checklist-title-form,
+  .nr-action-checklist-add {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .nr-action-checklist-edit-panel form {
+    justify-items: start;
+  }
 }
 
 .nr-list-card {

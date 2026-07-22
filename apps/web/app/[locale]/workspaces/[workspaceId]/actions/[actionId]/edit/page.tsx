@@ -82,6 +82,7 @@ export default async function ActionEditPage({
     assigneeNone: t("formAssigneeNone"),
     submit: action.status === "DRAFT" ? t("btnSaveDraft") : tCommon("save"),
     cancel: tCommon("cancel"),
+    dueDate: t("formDueDate"),
     priorityLabel: t("formPriority"),
     priority: priorityLabels,
   };
@@ -109,6 +110,7 @@ export default async function ActionEditPage({
             title={action.title}
             bodyMd={action.bodyMd}
             priority={action.priority}
+            dueAt={action.dueAt}
             assigneeMemberId={action.assigneeMemberId}
             members={actionMembers}
             labels={labels}

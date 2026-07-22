@@ -218,14 +218,33 @@ const TENSIONS = [
 ];
 
 const ACTIONS = [
-  { title: "Review Top 50 Supplier ESG Reports", status: "OPEN", assignee: "vbroadhurst" },
-  { title: "Draft TREMFYA Commercial Continuity Plan", status: "IN_PROGRESS", assignee: "jtaubert" },
-  { title: "Finalize EU budget allocation for Abiomed", status: "IN_PROGRESS", assignee: "tschmid" },
-  { title: "Approve $500M oncology R&D supplement", status: "COMPLETED", assignee: "jwolk" },
-  { title: "Schedule Board Strategic Offsite for Q2", status: "OPEN", assignee: "pfasolo" },
-  { title: "File TREMFYA EU Label Extension", status: "IN_PROGRESS", assignee: "jtaubert" },
-  { title: "Submit FY2025 ESG Targets to RCSC", status: "OPEN", assignee: "vbroadhurst" },
-  { title: "Complete Abiomed DACH Hiring Plan", status: "COMPLETED", assignee: "tschmid" }
+  {
+    title: "Review Top 50 Supplier ESG Reports",
+    status: "OPEN",
+    assignee: "vbroadhurst",
+    dueInDays: 0,
+    checklist: [
+      { title: "Confirm latest supplier files are attached", completed: true },
+      { title: "Summarize missing Scope 3 disclosures", completed: false },
+      { title: "Send RCSC readout", completed: false },
+    ],
+  },
+  {
+    title: "Draft TREMFYA Commercial Continuity Plan",
+    status: "IN_PROGRESS",
+    assignee: "jtaubert",
+    dueInDays: 1,
+    checklist: [
+      { title: "Map biosimilar exposure by region", completed: true },
+      { title: "Review continuity plan with finance", completed: false },
+    ],
+  },
+  { title: "Finalize EU budget allocation for Abiomed", status: "IN_PROGRESS", assignee: "tschmid", dueInDays: 3 },
+  { title: "Approve $500M oncology R&D supplement", status: "COMPLETED", assignee: "jwolk", dueInDays: -4 },
+  { title: "Schedule Board Strategic Offsite for Q2", status: "OPEN", assignee: "pfasolo", dueInDays: 9 },
+  { title: "File TREMFYA EU Label Extension", status: "IN_PROGRESS", assignee: "jtaubert", dueInDays: 22 },
+  { title: "Submit FY2025 ESG Targets to RCSC", status: "OPEN", assignee: "vbroadhurst", dueInDays: 5 },
+  { title: "Complete Abiomed DACH Hiring Plan", status: "COMPLETED", assignee: "tschmid", dueInDays: -2 }
 ];
 
 const PROPOSALS = [
@@ -2597,20 +2616,52 @@ async function main() {
       title: a.title,
       status: a.status,
       priority: a.priority ?? Math.max(0, ACTIONS.length - index),
+      dueAt: Number.isFinite(a.dueInDays) ? nDaysFromNow(a.dueInDays) : null,
       isPrivate: false,
       publishedAt: nDaysAgo(1),
       archivedAt: null,
       archivedByUserId: null,
       archiveReason: null,
     };
-    if (exists) {
-      await prisma.action.update({ where: { id: exists.id }, data });
-    } else {
-      await prisma.action.upsert({
+    const action = exists
+      ? await prisma.action.update({ where: { id: exists.id }, data })
+      : await prisma.action.upsert({
         where: { id: actionId },
         update: data,
         create: { id: actionId, ...data },
       });
+    if (a.checklist?.length) {
+      await prisma.actionChecklistItem.deleteMany({
+        where: {
+          workspaceId: wsId,
+          actionId: action.id,
+          id: { startsWith: `${action.id}-checklist-` },
+        },
+      });
+      for (const [itemIndex, item] of a.checklist.entries()) {
+        const checklistId = `${action.id}-checklist-${itemIndex + 1}`;
+        const completedAt = item.completed ? nDaysAgo(Math.max(0, itemIndex)) : null;
+        await prisma.actionChecklistItem.upsert({
+          where: { id: checklistId },
+          update: {
+            workspaceId: wsId,
+            actionId: action.id,
+            title: item.title,
+            sortOrder: itemIndex,
+            completedAt,
+            completedByUserId: completedAt ? adminUserId : null,
+          },
+          create: {
+            id: checklistId,
+            workspaceId: wsId,
+            actionId: action.id,
+            title: item.title,
+            sortOrder: itemIndex,
+            completedAt,
+            completedByUserId: completedAt ? adminUserId : null,
+          },
+        });
+      }
     }
   }
   

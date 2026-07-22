@@ -12,7 +12,9 @@ const actor = {
 
 const createAdviceRequest = vi.fn();
 const createAction = vi.fn();
+const createActionChecklistItem = vi.fn();
 const deleteAction = vi.fn();
+const deleteActionChecklistItem = vi.fn();
 const enforceDemoGuard = vi.fn();
 const postDeliberationEntry = vi.fn();
 const publishAction = vi.fn();
@@ -20,6 +22,7 @@ const requirePageActor = vi.fn(async () => actor);
 const resolveDeliberationEntry = vi.fn();
 const returnActionToDraft = vi.fn();
 const updateAction = vi.fn();
+const updateActionChecklistItem = vi.fn();
 const updateDeliberationEntry = vi.fn();
 
 vi.mock("@/lib/demo-guard", () => ({
@@ -33,12 +36,15 @@ vi.mock("@/lib/auth", () => ({
 vi.mock("@corgtex/domain", () => ({
   createAdviceRequest,
   createAction,
+  createActionChecklistItem,
   deleteAction,
+  deleteActionChecklistItem,
   postDeliberationEntry,
   publishAction,
   resolveDeliberationEntry,
   returnActionToDraft,
   updateAction,
+  updateActionChecklistItem,
   updateDeliberationEntry,
 }));
 
@@ -53,6 +59,7 @@ function buildCreateFormData() {
   formData.set("bodyMd", "Notes");
   formData.set("priority", "4");
   formData.set("assigneeMemberId", "member-2");
+  formData.set("dueAt", "2030-01-02");
   return formData;
 }
 
@@ -74,6 +81,7 @@ describe("action item server actions", () => {
       bodyMd: "Notes",
       priority: 4,
       assigneeMemberId: "member-2",
+      dueAt: new Date("2030-01-02"),
       proposalId: null,
       isPrivate: true,
     }));
@@ -88,6 +96,7 @@ describe("action item server actions", () => {
     formData.set("bodyMd", "Follow up with Eduardo.");
     formData.set("priority", "3");
     formData.set("assigneeMemberId", "member-3");
+    formData.set("dueAt", "2030-02-03");
 
     await updateActionAction(formData);
 
@@ -98,7 +107,59 @@ describe("action item server actions", () => {
       bodyMd: "Follow up with Eduardo.",
       priority: 3,
       assigneeMemberId: "member-3",
+      dueAt: new Date("2030-02-03"),
     }));
+  });
+
+  it("creates action checklist items", async () => {
+    const { createActionChecklistItemAction } = await import("./actions");
+    const formData = new FormData();
+    formData.set("workspaceId", "workspace-1");
+    formData.set("actionId", "action-1");
+    formData.set("title", "Confirm owner");
+
+    await createActionChecklistItemAction(formData);
+
+    expect(enforceDemoGuard).toHaveBeenCalledWith("workspace-1");
+    expect(createActionChecklistItem).toHaveBeenCalledWith(actor, {
+      workspaceId: "workspace-1",
+      actionId: "action-1",
+      title: "Confirm owner",
+    });
+  });
+
+  it("updates action checklist items", async () => {
+    const { updateActionChecklistItemAction } = await import("./actions");
+    const formData = new FormData();
+    formData.set("workspaceId", "workspace-1");
+    formData.set("checklistItemId", "checklist-1");
+    formData.set("title", "Confirm regulatory owner");
+    formData.set("completed", "true");
+
+    await updateActionChecklistItemAction(formData);
+
+    expect(enforceDemoGuard).toHaveBeenCalledWith("workspace-1");
+    expect(updateActionChecklistItem).toHaveBeenCalledWith(actor, {
+      workspaceId: "workspace-1",
+      checklistItemId: "checklist-1",
+      title: "Confirm regulatory owner",
+      completed: true,
+    });
+  });
+
+  it("deletes action checklist items", async () => {
+    const { deleteActionChecklistItemAction } = await import("./actions");
+    const formData = new FormData();
+    formData.set("workspaceId", "workspace-1");
+    formData.set("checklistItemId", "checklist-1");
+
+    await deleteActionChecklistItemAction(formData);
+
+    expect(enforceDemoGuard).toHaveBeenCalledWith("workspace-1");
+    expect(deleteActionChecklistItem).toHaveBeenCalledWith(actor, {
+      workspaceId: "workspace-1",
+      checklistItemId: "checklist-1",
+    });
   });
 
   it("honors an explicit public create control if one is later added to the form", async () => {

@@ -18,9 +18,16 @@ type DuplicateGuardActionEditorLabels = {
   assigneeNone: string;
   submit: string;
   cancel: string;
+  dueDate: string;
   priorityLabel: string;
   priority: WorkItemPriorityLabels;
 };
+
+function dateInputValue(value?: Date | string | null) {
+  if (!value) return "";
+  const date = value instanceof Date ? value : new Date(value);
+  return Number.isFinite(date.getTime()) ? date.toISOString().slice(0, 10) : "";
+}
 
 export function DuplicateGuardActionEditorForm({
   action,
@@ -29,6 +36,7 @@ export function DuplicateGuardActionEditorForm({
   title,
   bodyMd,
   priority,
+  dueAt,
   assigneeMemberId,
   members,
   labels,
@@ -41,6 +49,7 @@ export function DuplicateGuardActionEditorForm({
   title?: string;
   bodyMd?: string | null;
   priority?: number | null;
+  dueAt?: Date | string | null;
   assigneeMemberId?: string | null;
   members: WorkItemMemberOption[];
   labels: DuplicateGuardActionEditorLabels;
@@ -71,6 +80,10 @@ export function DuplicateGuardActionEditorForm({
         defaultValue={assigneeMemberId}
       />
       <WorkItemPrioritySelect label={labels.priorityLabel} defaultValue={priority ?? 1} labels={labels.priority} />
+      <label>
+        {labels.dueDate}
+        <input name="dueAt" type="date" defaultValue={dateInputValue(dueAt)} />
+      </label>
       {children}
       <div className="actions-inline">
         <button type="submit" disabled={isPending}>{labels.submit}</button>

@@ -16,6 +16,13 @@ const { prismaMock } = vi.hoisted(() => ({
     adviceProcess: {
       findMany: vi.fn(),
     },
+    actionChecklistItem: {
+      create: vi.fn(),
+      delete: vi.fn(),
+      findFirst: vi.fn(),
+      findMany: vi.fn(),
+      update: vi.fn(),
+    },
     member: {
       findFirst: vi.fn(),
     },
@@ -88,6 +95,8 @@ describe("action domain lifecycle", () => {
     prismaMock.workspacePermalink.upsert.mockResolvedValue({});
     prismaMock.member.findFirst.mockResolvedValue({ id: "member-2" });
     prismaMock.adviceProcess.findMany.mockResolvedValue([]);
+    prismaMock.actionChecklistItem.findMany.mockResolvedValue([]);
+    prismaMock.actionChecklistItem.findFirst.mockResolvedValue(null);
   });
 
   it("creates form-submitted actions as private drafts by default", async () => {
@@ -351,6 +360,46 @@ describe("action domain lifecycle", () => {
         requests: {
           select: { status: true },
         },
+      },
+    });
+  });
+
+  it("returns checklist progress only as action summary counts", async () => {
+    prismaMock.action.findMany.mockResolvedValueOnce([
+      { id: "action-1" },
+      { id: "action-2" },
+    ]);
+    prismaMock.action.count.mockResolvedValueOnce(2);
+    prismaMock.actionChecklistItem.findMany.mockResolvedValueOnce([
+      { actionId: "action-1", completedAt: new Date("2026-07-20T10:00:00.000Z") },
+      { actionId: "action-1", completedAt: null },
+      { actionId: "action-2", completedAt: null },
+    ]);
+
+    const { listActions } = await import("./actions");
+    await expect(listActions(actor, "workspace-1")).resolves.toMatchObject({
+      items: [
+        {
+          id: "action-1",
+          checklistItemCount: 2,
+          checklistCompletedCount: 1,
+        },
+        {
+          id: "action-2",
+          checklistItemCount: 1,
+          checklistCompletedCount: 0,
+        },
+      ],
+    });
+
+    expect(prismaMock.actionChecklistItem.findMany).toHaveBeenCalledWith({
+      where: {
+        workspaceId: "workspace-1",
+        actionId: { in: ["action-1", "action-2"] },
+      },
+      select: {
+        actionId: true,
+        completedAt: true,
       },
     });
   });
@@ -961,5 +1010,133 @@ describe("action domain lifecycle", () => {
       select: { id: true },
     });
     expect(prismaMock.action.create).not.toHaveBeenCalled();
+  });
+
+  it("creates checklist items after verifying action edit access", async () => {
+    prismaMock.action.findFirst.mockResolvedValueOnce({
+      id: "action-1",
+      workspaceId: "workspace-1",
+      authorUserId: "user-1",
+      status: "OPEN",
+      archivedAt: null,
+      isPrivate: false,
+      assigneeMemberId: null,
+    });
+    prismaMock.actionChecklistItem.findFirst.mockResolvedValueOnce({ sortOrder: 2 });
+    prismaMock.actionChecklistItem.create.mockResolvedValueOnce({
+      id: "checklist-1",
+      workspaceId: "workspace-1",
+      actionId: "action-1",
+      title: "Call the supplier",
+      sortOrder: 3,
+    });
+
+    const { createActionChecklistItem } = await import("./actions");
+    await expect(createActionChecklistItem(actor, {
+      workspaceId: "workspace-1",
+      actionId: "action-1",
+      title: " Call the supplier ",
+    })).resolves.toMatchObject({
+      id: "checklist-1",
+      title: "Call the supplier",
+      sortOrder: 3,
+    });
+
+    expect(prismaMock.actionChecklistItem.create).toHaveBeenCalledWith({
+      data: {
+        workspaceId: "workspace-1",
+        actionId: "action-1",
+        title: "Call the supplier",
+        sortOrder: 3,
+      },
+    });
+    expect(recordAudit).toHaveBeenCalledWith(expect.anything(), actor, expect.objectContaining({
+      action: "action.checklist_item.created",
+      entityId: "action-1",
+    }));
+    expect(appendEvents).toHaveBeenCalledWith(expect.anything(), [
+      expect.objectContaining({
+        type: "action.checklist_item.created",
+        aggregateId: "action-1",
+      }),
+    ]);
+  });
+
+  it("marks checklist items complete with the acting user", async () => {
+    prismaMock.actionChecklistItem.findFirst.mockResolvedValueOnce({
+      id: "checklist-1",
+      workspaceId: "workspace-1",
+      actionId: "action-1",
+      title: "Call the supplier",
+      completedAt: null,
+    });
+    prismaMock.action.findFirst.mockResolvedValueOnce({
+      id: "action-1",
+      workspaceId: "workspace-1",
+      authorUserId: "user-1",
+      status: "IN_PROGRESS",
+      archivedAt: null,
+      isPrivate: false,
+      assigneeMemberId: null,
+    });
+    prismaMock.actionChecklistItem.update.mockResolvedValueOnce({
+      id: "checklist-1",
+      title: "Call the supplier",
+      completedAt: new Date("2026-07-20T10:00:00.000Z"),
+    });
+
+    const { updateActionChecklistItem } = await import("./actions");
+    await expect(updateActionChecklistItem(actor, {
+      workspaceId: "workspace-1",
+      checklistItemId: "checklist-1",
+      completed: true,
+    })).resolves.toMatchObject({
+      id: "checklist-1",
+    });
+
+    expect(prismaMock.actionChecklistItem.update).toHaveBeenCalledWith({
+      where: { id: "checklist-1" },
+      data: expect.objectContaining({
+        completedAt: expect.any(Date),
+        completedBy: { connect: { id: "user-1" } },
+      }),
+    });
+    expect(recordAudit).toHaveBeenCalledWith(expect.anything(), actor, expect.objectContaining({
+      action: "action.checklist_item.updated",
+      meta: expect.objectContaining({
+        fields: ["completed"],
+      }),
+    }));
+  });
+
+  it("deletes checklist items after verifying action edit access", async () => {
+    prismaMock.actionChecklistItem.findFirst.mockResolvedValueOnce({
+      id: "checklist-1",
+      workspaceId: "workspace-1",
+      actionId: "action-1",
+      title: "Call the supplier",
+    });
+    prismaMock.action.findFirst.mockResolvedValueOnce({
+      id: "action-1",
+      workspaceId: "workspace-1",
+      authorUserId: "user-1",
+      status: "OPEN",
+      archivedAt: null,
+      isPrivate: false,
+      assigneeMemberId: null,
+    });
+    prismaMock.actionChecklistItem.delete.mockResolvedValueOnce({ id: "checklist-1" });
+
+    const { deleteActionChecklistItem } = await import("./actions");
+    await expect(deleteActionChecklistItem(actor, {
+      workspaceId: "workspace-1",
+      checklistItemId: "checklist-1",
+    })).resolves.toEqual({ id: "checklist-1" });
+
+    expect(prismaMock.actionChecklistItem.delete).toHaveBeenCalledWith({ where: { id: "checklist-1" } });
+    expect(recordAudit).toHaveBeenCalledWith(expect.anything(), actor, expect.objectContaining({
+      action: "action.checklist_item.deleted",
+      entityId: "action-1",
+    }));
   });
 });
