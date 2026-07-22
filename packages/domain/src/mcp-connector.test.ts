@@ -38,6 +38,22 @@ function installSharedMock(prismaMock: Record<string, any>, envOverrides: Record
   }));
 }
 
+const PRE_ACTION_PROPOSAL_WRITE_DEFAULT_SCOPES = [
+  "workspace:read",
+  "brain:read",
+  "governance:read",
+  "context-graph:read",
+  "proposals:read",
+  "actions:read",
+  "tensions:read",
+  "goals:read",
+  "members:read",
+  "meetings:read",
+  "circles:read",
+  "tools:read",
+  "conversations:write",
+];
+
 describe("MCP connector registry", () => {
   it("uses action and proposal write defaults for new OAuth connector clients", async () => {
     const prismaMock = {
@@ -102,7 +118,7 @@ describe("MCP connector registry", () => {
     expect(result.scope).not.toContain("tools:credentials:read");
   });
 
-  it("expands legacy default client scopes without expanding intentionally narrow clients", async () => {
+  it("expands historical default client scopes without expanding intentionally narrow clients", async () => {
     installSharedMock({});
 
     const {
@@ -118,6 +134,14 @@ describe("MCP connector registry", () => {
     expect(resolveMcpClientAllowedScopes(MCP_CONNECTOR_LEGACY_DEFAULT_SCOPES)).not.toContain("members:write");
     expect(resolveMcpClientAllowedScopes(MCP_CONNECTOR_LEGACY_DEFAULT_SCOPES)).not.toContain("finance:write");
     expect(resolveMcpClientAllowedScopes(MCP_CONNECTOR_LEGACY_DEFAULT_SCOPES)).not.toContain("tools:credentials:read");
+    expect(resolveMcpClientAllowedScopes(PRE_ACTION_PROPOSAL_WRITE_DEFAULT_SCOPES)).toEqual(
+      expect.arrayContaining(["proposals:write", "actions:write"]),
+    );
+    expect(resolveMcpClientAllowedScopes(PRE_ACTION_PROPOSAL_WRITE_DEFAULT_SCOPES)).not.toContain("tools:write");
+    expect(resolveMcpClientAllowedScopes(PRE_ACTION_PROPOSAL_WRITE_DEFAULT_SCOPES)).not.toContain("runtime:write");
+    expect(resolveMcpClientAllowedScopes(PRE_ACTION_PROPOSAL_WRITE_DEFAULT_SCOPES)).not.toContain("members:write");
+    expect(resolveMcpClientAllowedScopes(PRE_ACTION_PROPOSAL_WRITE_DEFAULT_SCOPES)).not.toContain("finance:write");
+    expect(resolveMcpClientAllowedScopes(PRE_ACTION_PROPOSAL_WRITE_DEFAULT_SCOPES)).not.toContain("tools:credentials:read");
     expect(resolveMcpClientAllowedScopes(["workspace:read", "brain:read"])).toEqual(["workspace:read", "brain:read"]);
   });
 
@@ -338,6 +362,51 @@ describe("MCP connector registry", () => {
     expect(createAuthorizationCodeMock).toHaveBeenCalledWith({
       data: expect.objectContaining({
         scopes: ["workspace:read", "tools:write"],
+      }),
+    });
+  });
+
+  it("allows pre-write default OAuth clients to reauthorize with action and proposal writes", async () => {
+    const createAuthorizationCodeMock = vi.fn().mockResolvedValue({});
+    const prismaMock = {
+      mcpOAuthClient: {
+        findUnique: vi.fn().mockResolvedValue({
+          id: "client-db-1",
+          clientId: "mcp_client_test",
+          isActive: true,
+          redirectUris: ["https://client.example/callback"],
+          scopes: PRE_ACTION_PROPOSAL_WRITE_DEFAULT_SCOPES,
+        }),
+      },
+      member: {
+        findUnique: vi.fn().mockResolvedValue({ id: "member-1", isActive: true }),
+      },
+      workspace: {
+        findUnique: vi.fn().mockResolvedValue({ id: "ws-1", slug: "corgtex" }),
+      },
+      mcpOAuthAuthorizationCode: {
+        create: createAuthorizationCodeMock,
+      },
+    };
+    installSharedMock(prismaMock);
+
+    const { issueMcpAuthorizationCode } = await import("./mcp-connector");
+    await issueMcpAuthorizationCode({
+      kind: "user",
+      user: { id: "user-1", email: "user@example.com", displayName: "User" },
+    }, {
+      clientId: "mcp_client_test",
+      workspaceId: "ws-1",
+      redirectUri: "https://client.example/callback",
+      scopes: ["workspace:read", "proposals:write", "actions:write"],
+      codeChallenge: "challenge",
+      codeChallengeMethod: "S256",
+      resource: "https://app.test/mcp",
+    });
+
+    expect(createAuthorizationCodeMock).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        scopes: ["workspace:read", "proposals:write", "actions:write"],
       }),
     });
   });
