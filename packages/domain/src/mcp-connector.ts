@@ -56,13 +56,31 @@ export const MCP_CONNECTOR_LEGACY_DEFAULT_SCOPES: AgentScope[] = [
   "conversations:write",
 ];
 
-export const MCP_CONNECTOR_DEFAULT_SCOPES: AgentScope[] = [
+const MCP_CONNECTOR_PRE_ACTION_PROPOSAL_WRITE_DEFAULT_SCOPES: AgentScope[] = [
   "workspace:read",
   "brain:read",
   "governance:read",
   "context-graph:read",
   "proposals:read",
   "actions:read",
+  "tensions:read",
+  "goals:read",
+  "members:read",
+  "meetings:read",
+  "circles:read",
+  "tools:read",
+  "conversations:write",
+];
+
+export const MCP_CONNECTOR_DEFAULT_SCOPES: AgentScope[] = [
+  "workspace:read",
+  "brain:read",
+  "governance:read",
+  "context-graph:read",
+  "proposals:read",
+  "proposals:write",
+  "actions:read",
+  "actions:write",
   "tensions:read",
   "goals:read",
   "members:read",
@@ -395,20 +413,21 @@ function validateMcpScopes(scopes: string[] | undefined): AgentScope[] {
   return normalizeMcpPermissionScopes(scopes);
 }
 
-export function resolveMcpClientAllowedScopes(scopes: string[]): AgentScope[] {
-  const normalized = normalizeMcpPermissionScopes(scopes, MCP_CONNECTOR_DEFAULT_SCOPES);
-  const legacyDefault = new Set(MCP_CONNECTOR_LEGACY_DEFAULT_SCOPES);
-  const matchesLegacyDefault = normalized.length === legacyDefault.size &&
-    normalized.every((scope) => legacyDefault.has(scope as AgentScope));
-
-  const allowed = matchesLegacyDefault ? MCP_CONNECTOR_DEFAULT_SCOPES : (normalized as AgentScope[]);
-  return allowed.filter((scope) => !MCP_USER_DELEGATION_FORBIDDEN_SCOPES.has(scope));
-}
-
 function hasSameScopeSet(left: string[], right: string[]) {
   if (left.length !== right.length) return false;
   const rightSet = new Set(right);
   return left.every((scope) => rightSet.has(scope));
+}
+
+export function resolveMcpClientAllowedScopes(scopes: string[]): AgentScope[] {
+  const normalized = normalizeMcpPermissionScopes(scopes, MCP_CONNECTOR_DEFAULT_SCOPES);
+  const matchesHistoricalDefault = [
+    MCP_CONNECTOR_LEGACY_DEFAULT_SCOPES,
+    MCP_CONNECTOR_PRE_ACTION_PROPOSAL_WRITE_DEFAULT_SCOPES,
+  ].some((defaultScopes) => hasSameScopeSet(normalized, defaultScopes));
+
+  const allowed = matchesHistoricalDefault ? MCP_CONNECTOR_DEFAULT_SCOPES : (normalized as AgentScope[]);
+  return allowed.filter((scope) => !MCP_USER_DELEGATION_FORBIDDEN_SCOPES.has(scope));
 }
 
 function requestedScopes(scopes: string[] | undefined, allowedScopes: string[]) {
