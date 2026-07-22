@@ -151,6 +151,7 @@ export function WorkItemFilterControls({
   assigneeMemberIds,
   memberId,
   memberIds,
+  group,
   statusOptions,
   statusValues,
   circles,
@@ -174,6 +175,7 @@ export function WorkItemFilterControls({
   assigneeMemberIds?: readonly string[];
   memberId?: string;
   memberIds?: readonly string[];
+  group?: string;
   statusOptions?: Option[];
   statusValues?: readonly string[];
   circles: Option[];
@@ -211,6 +213,7 @@ export function WorkItemFilterControls({
       {view && view !== "list" && <input type="hidden" name="view" value={view} />}
       {sort && sort !== "priority" && <input type="hidden" name="sort" value={sort} />}
       {columns && columns.length > 0 && <input type="hidden" name="columns" value={columns.join(",")} />}
+      {group && <input type="hidden" name="group" value={group} />}
       {statusOptions && (
         <MultiSelectFilter
           name="status"

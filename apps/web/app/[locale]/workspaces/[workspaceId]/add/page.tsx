@@ -311,6 +311,7 @@ export default async function WorkspaceAddPage({
     assigneeNone: "No assignee",
     submit: "Create action",
     cancel: "Cancel",
+    dueDate: "Due date",
     priorityLabel: "Priority",
     priority: DEFAULT_WORK_ITEM_PRIORITY_LABELS,
   };

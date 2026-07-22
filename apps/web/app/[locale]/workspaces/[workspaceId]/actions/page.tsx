@@ -35,9 +35,76 @@ import {
   resolveWorkItemFilters,
   toggleWorkItemColumnVisibility,
 } from "@/lib/work-item-view";
-import { formatWorkItemPriority, type WorkItemPriorityLabels } from "@/lib/work-item-priority";
+import { formatWorkItemPriority, normalizeWorkItemPriority, type WorkItemPriorityLabels } from "@/lib/work-item-priority";
 
 export const dynamic = "force-dynamic";
+
+type ActionBoardGroup = "status" | "due" | "priority";
+type ActionDueColumnId = "DUE_OVERDUE" | "DUE_TODAY" | "DUE_TOMORROW" | "DUE_REST_WEEK" | "DUE_NEXT_WEEK" | "DUE_FUTURE" | "DUE_NONE";
+type ActionPriorityColumnId = "PRIORITY_3" | "PRIORITY_2" | "PRIORITY_1" | "PRIORITY_0";
+
+const ACTION_BOARD_GROUPS: ActionBoardGroup[] = ["status", "due", "priority"];
+const ACTION_PRIORITY_COLUMNS: Array<{ id: ActionPriorityColumnId; priority: 0 | 1 | 2 | 3 }> = [
+  { id: "PRIORITY_3", priority: 3 },
+  { id: "PRIORITY_2", priority: 2 },
+  { id: "PRIORITY_1", priority: 1 },
+  { id: "PRIORITY_0", priority: 0 },
+];
+const ACTION_DUE_COLUMNS: ActionDueColumnId[] = ["DUE_OVERDUE", "DUE_TODAY", "DUE_TOMORROW", "DUE_REST_WEEK", "DUE_NEXT_WEEK", "DUE_FUTURE", "DUE_NONE"];
+const UTC_DAY_MS = 24 * 60 * 60 * 1000;
+
+function firstSearchValue(value: string | string[] | undefined) {
+  return Array.isArray(value) ? value[0] : value;
+}
+
+function normalizeActionBoardGroup(value: string | string[] | undefined): ActionBoardGroup {
+  const candidate = firstSearchValue(value);
+  return ACTION_BOARD_GROUPS.includes(candidate as ActionBoardGroup) ? candidate as ActionBoardGroup : "status";
+}
+
+function dateInputValue(value?: Date | string | null) {
+  if (!value) return "";
+  const date = value instanceof Date ? value : new Date(value);
+  return Number.isFinite(date.getTime()) ? date.toISOString().slice(0, 10) : "";
+}
+
+function startOfUtcDay(value: Date) {
+  return Date.UTC(value.getUTCFullYear(), value.getUTCMonth(), value.getUTCDate());
+}
+
+function utcDateInputFromMs(value: number) {
+  return new Date(value).toISOString().slice(0, 10);
+}
+
+function nextUtcMondayStart(todayMs: number) {
+  const today = new Date(todayMs);
+  const day = today.getUTCDay();
+  const daysUntilMonday = day === 0 ? 1 : 8 - day;
+  return todayMs + daysUntilMonday * UTC_DAY_MS;
+}
+
+function actionDueColumnId(dueAt: Date | string | null | undefined, now = new Date()): ActionDueColumnId {
+  if (!dueAt) return "DUE_NONE";
+  const due = dueAt instanceof Date ? dueAt : new Date(dueAt);
+  if (!Number.isFinite(due.getTime())) return "DUE_NONE";
+  const todayMs = startOfUtcDay(now);
+  const dueMs = startOfUtcDay(due);
+  if (dueMs < todayMs) return "DUE_OVERDUE";
+  if (dueMs === todayMs) return "DUE_TODAY";
+  if (dueMs === todayMs + UTC_DAY_MS) return "DUE_TOMORROW";
+  const nextWeekStart = nextUtcMondayStart(todayMs);
+  if (dueMs < nextWeekStart) return "DUE_REST_WEEK";
+  if (dueMs < nextWeekStart + 7 * UTC_DAY_MS) return "DUE_NEXT_WEEK";
+  return "DUE_FUTURE";
+}
+
+function dueColumnTargetDate(columnId: ActionDueColumnId, now = new Date()) {
+  const todayMs = startOfUtcDay(now);
+  if (columnId === "DUE_TODAY") return utcDateInputFromMs(todayMs);
+  if (columnId === "DUE_TOMORROW") return utcDateInputFromMs(todayMs + UTC_DAY_MS);
+  if (columnId === "DUE_NONE") return "";
+  return null;
+}
 
 export default async function ActionsPage({
   params,
@@ -54,6 +121,8 @@ export default async function ActionsPage({
   const membership = await requireWorkspaceMembership({ actor, workspaceId });
   const resolvedSearch = searchParams ? await searchParams : {};
   const view = normalizeWorkItemView(resolvedSearch.view);
+  const boardGroup = normalizeActionBoardGroup(resolvedSearch.group);
+  const boardGroupQuery = view === "kanban" && boardGroup !== "status" ? boardGroup : undefined;
   const { statusFilter, statusFilters, statusQuery } = resolveActionStatusSearch(
     resolvedSearch.status,
     view === "kanban" ? null : "OPEN",
@@ -117,22 +186,32 @@ export default async function ActionsPage({
     circleIds,
     assigneeMemberIds,
     memberIds,
+    group: boardGroupQuery,
     columns: toggleWorkItemColumnVisibility(visibleActionColumnIds, status, actionColumnStatuses),
   });
   const actionColumnHideHrefs = Object.fromEntries(
     actionColumnStatuses.map((status) => [status, buildActionColumnHref(status)]),
   );
-  const actionFilterHref = (filter: ActionStatusFilter) => view === "kanban"
+  const actionFilterHref = (filter: ActionStatusFilter) => view === "kanban" && boardGroup === "status"
     ? buildWorkItemQuery({
       view: "kanban",
       status: filter === "ALL" ? "ALL" : statusQuery,
       circleIds,
       assigneeMemberIds,
       memberIds,
+      group: boardGroupQuery,
       columns: filter === "ALL" ? undefined : toggleWorkItemColumnVisibility(visibleActionColumnIds, filter, actionColumnStatuses),
     })
-    : buildWorkItemQuery({ view, sort, circleIds, assigneeMemberIds, memberIds, status: filter });
-  const actionFilterActive = (filter: ActionStatusFilter) => view === "kanban"
+    : buildWorkItemQuery({
+      view,
+      sort: view !== "kanban" ? sort : undefined,
+      circleIds,
+      assigneeMemberIds,
+      memberIds,
+      status: filter,
+      group: boardGroupQuery,
+    });
+  const actionFilterActive = (filter: ActionStatusFilter) => view === "kanban" && boardGroup === "status"
     ? filter === "ALL"
       ? allActionColumnsVisible
       : visibleActionColumnIds.includes(filter)
@@ -148,7 +227,17 @@ export default async function ActionsPage({
     circleIds,
     assigneeMemberIds: assignedToMeActive || !currentMemberId ? [] : [currentMemberId],
     memberIds,
+    group: boardGroupQuery,
     columns: view === "kanban" && !allActionColumnsVisible ? visibleActionColumnIds : undefined,
+  });
+  const boardGroupHref = (group: ActionBoardGroup) => buildWorkItemQuery({
+    view: "kanban",
+    status: statusQuery,
+    circleIds,
+    assigneeMemberIds,
+    memberIds,
+    group: group === "status" ? undefined : group,
+    columns: group === "status" && !allActionColumnsVisible ? visibleActionColumnIds : undefined,
   });
 
   const canManageAction = (action: { authorUserId: string }) => actor.kind === "agent"
@@ -186,6 +275,7 @@ export default async function ActionsPage({
     assigneeNone: t("formAssigneeNone"),
     submit: t("btnCreateAction"),
     cancel: tCommon("cancel"),
+    dueDate: t("formDueDate"),
     priorityLabel: t("formPriority"),
     priority: priorityLabels,
   };
@@ -262,6 +352,41 @@ export default async function ActionsPage({
     );
   }
 
+  function renderPriorityTransition(action: ActionListItem, target: typeof ACTION_PRIORITY_COLUMNS[number], hidden = false) {
+    const key = `${hidden ? "hidden-" : ""}priority-${target.priority}`;
+    return (
+      <form
+        key={key}
+        action={updateActionAction}
+        data-work-item-transition={`${action.id}:${target.id}`}
+        className={hidden ? "nr-hidden-transition-form" : undefined}
+      >
+        <input type="hidden" name="workspaceId" value={workspaceId} />
+        <input type="hidden" name="actionId" value={action.id} />
+        <input type="hidden" name="priority" value={target.priority} />
+        <button type="submit" aria-hidden={hidden} tabIndex={hidden ? -1 : undefined}>{priorityText(target.priority)}</button>
+      </form>
+    );
+  }
+
+  function renderDueTransition(action: ActionListItem, target: ActionDueColumnId, hidden = false) {
+    const dueAt = dueColumnTargetDate(target);
+    if (dueAt === null) return null;
+    return (
+      <form
+        key={`${hidden ? "hidden-" : ""}due-${target}`}
+        action={updateActionAction}
+        data-work-item-transition={`${action.id}:${target}`}
+        className={hidden ? "nr-hidden-transition-form" : undefined}
+      >
+        <input type="hidden" name="workspaceId" value={workspaceId} />
+        <input type="hidden" name="actionId" value={action.id} />
+        <input type="hidden" name="dueAt" value={dueAt} />
+        <button type="submit" aria-hidden={hidden} tabIndex={hidden ? -1 : undefined}>{tCommon("save")}</button>
+      </form>
+    );
+  }
+
   function actionControls(action: ActionListItem) {
     const canManage = canManageAction(action);
     const canSubmittedEditorEdit = actor.kind === "user"
@@ -309,7 +434,88 @@ export default async function ActionsPage({
       </form>,
     );
 
-    return { hiddenTransitions, moreItems, primary };
+    const hiddenPriorityTransitions = ACTION_PRIORITY_COLUMNS
+      .filter((target) => normalizeWorkItemPriority(action.priority) !== target.priority)
+      .map((target) => renderPriorityTransition(action, target, true));
+    const hiddenDueTransitions: ReactNode[] = [];
+    for (const target of ACTION_DUE_COLUMNS) {
+      const transition = renderDueTransition(action, target, true);
+      if (transition) hiddenDueTransitions.push(transition);
+    }
+
+    return {
+      canEditContent,
+      hiddenTransitions: [...hiddenTransitions, ...hiddenPriorityTransitions, ...hiddenDueTransitions],
+      moreItems,
+      primary,
+    };
+  }
+
+  function renderPriorityChip(action: ActionListItem, canEditContent: boolean) {
+    const currentPriority = normalizeWorkItemPriority(action.priority);
+    if (!canEditContent) {
+      return <span className="nr-card-chip">{priorityText(currentPriority)}</span>;
+    }
+
+    return (
+      <details className="nr-card-chip-editor">
+        <summary className="nr-hide-marker nr-card-chip" title={t("quickEditPriority")}>
+          {priorityText(currentPriority)}
+        </summary>
+        <form action={updateActionAction} className="nr-card-chip-form">
+          <input type="hidden" name="workspaceId" value={workspaceId} />
+          <input type="hidden" name="actionId" value={action.id} />
+          <label>
+            <span className="nr-item-meta">{t("formPriority")}</span>
+            <select name="priority" defaultValue={String(currentPriority)}>
+              {ACTION_PRIORITY_COLUMNS.map((option) => (
+                <option key={option.id} value={option.priority}>{priorityText(option.priority)}</option>
+              ))}
+            </select>
+          </label>
+          <button type="submit" className="secondary small">{tCommon("save")}</button>
+        </form>
+      </details>
+    );
+  }
+
+  function renderDueChip(action: ActionListItem, canEditContent: boolean, dueDate: string | null) {
+    if (!canEditContent && !dueDate) return null;
+    if (!canEditContent) return <span className="nr-card-chip">{dueDate}</span>;
+
+    return (
+      <details className="nr-card-chip-editor">
+        <summary className={`nr-hide-marker nr-card-chip ${dueDate ? "" : "nr-card-chip-muted"}`} title={t("quickEditDueDate")}>
+          {dueDate ?? t("dueDateUnset")}
+        </summary>
+        <form action={updateActionAction} className="nr-card-chip-form">
+          <input type="hidden" name="workspaceId" value={workspaceId} />
+          <input type="hidden" name="actionId" value={action.id} />
+          <label>
+            <span className="nr-item-meta">{t("formDueDate")}</span>
+            <input name="dueAt" type="date" defaultValue={dateInputValue(action.dueAt)} />
+          </label>
+          <button type="submit" className="secondary small">{tCommon("save")}</button>
+        </form>
+      </details>
+    );
+  }
+
+  function renderChecklistProgress(action: ActionListItem, detailHref: string) {
+    const total = action.checklistItemCount ?? 0;
+    if (total <= 0) return null;
+    const completed = action.checklistCompletedCount ?? 0;
+    return (
+      <a
+        className="nr-card-chip"
+        href={`${detailHref}#checklist`}
+        title={t("checklistProgress", { completed, total })}
+        aria-label={t("checklistProgress", { completed, total })}
+        draggable={false}
+      >
+        {t("checklistProgressShort", { completed, total })}
+      </a>
+    );
   }
 
   function renderActionCard(action: ActionListItem, compact = false) {
@@ -321,7 +527,7 @@ export default async function ActionsPage({
     const dueDate = action.dueAt ? new Date(action.dueAt).toLocaleDateString() : null;
     const evidence = evidenceByActionId.get(action.id) ?? [];
     const activeRequestCount = activeRequestCountByActionId.get(action.id) ?? 0;
-    const { hiddenTransitions, moreItems, primary } = actionControls(action);
+    const { canEditContent, hiddenTransitions, moreItems, primary } = actionControls(action);
 
     return (
       <div className={`${compact ? "nr-kanban-card" : "nr-item nr-list-card"} nr-clickable-card`} key={action.id}>
@@ -336,21 +542,32 @@ export default async function ActionsPage({
         </div>
         <div className="nr-card-content">
           {action.bodyMd && <MarkdownExcerpt markdown={action.bodyMd} maxLength={compact ? 120 : 220} as="div" className="nr-excerpt" />}
-          <div className="nr-item-meta" style={{ marginTop: 8 }}>
-            {t("metaCreator", { name: authorName })}
-            {createdAge ? ` · ${createdAge}` : ""}
-            {assigneeName ? ` · ${t("metaAssignee", { name: assigneeName })}` : ""}
-            {` · ${priorityText(action.priority)}`}
-            {action.circle ? ` · ${action.circle.name}` : ""}
-            {dueDate ? ` · ${t("metaDue", { date: dueDate })}` : ""}
-            {action.proposal?.title ? ` · ${t("metaLinkedToProposal", { title: action.proposal.title })}` : ""}
-            {" · "}
-            {action.version > 1 ? (
-              <a href={`/workspaces/${workspaceId}/versions?entityType=ACTION&entityId=${encodeURIComponent(action.id)}`} draggable={false}>v{action.version}</a>
-            ) : (
-              <>v{action.version}</>
+          {compact ? (
+            <div className="nr-card-chip-row">
+              {assigneeName && <span className="nr-card-chip">{assigneeName}</span>}
+              {renderPriorityChip(action, canEditContent)}
+              {renderDueChip(action, canEditContent, dueDate)}
+              {renderChecklistProgress(action, detailHref)}
+              {activeRequestCount > 0 && <span className="tag warning">{t("inputRequestCount", { count: activeRequestCount })}</span>}
+            </div>
+          ) : (
+            <div className="nr-item-meta" style={{ marginTop: 8 }}>
+              {t("metaCreator", { name: authorName })}
+              {createdAge ? ` · ${createdAge}` : ""}
+              {assigneeName ? ` · ${t("metaAssignee", { name: assigneeName })}` : ""}
+              {` · ${priorityText(action.priority)}`}
+              {action.circle ? ` · ${action.circle.name}` : ""}
+              {dueDate ? ` · ${t("metaDue", { date: dueDate })}` : ""}
+              {(action.checklistItemCount ?? 0) > 0 ? ` · ${t("checklistProgressShort", { completed: action.checklistCompletedCount ?? 0, total: action.checklistItemCount ?? 0 })}` : ""}
+              {action.proposal?.title ? ` · ${t("metaLinkedToProposal", { title: action.proposal.title })}` : ""}
+              {" · "}
+              {action.version > 1 ? (
+                <a href={`/workspaces/${workspaceId}/versions?entityType=ACTION&entityId=${encodeURIComponent(action.id)}`} draggable={false}>v{action.version}</a>
+              ) : (
+                <>v{action.version}</>
+              )}
+            </div>
             )}
-          </div>
           {action.status === "COMPLETED" && action.completedVia && (
             <div className="nr-item-meta" style={{ marginTop: 10 }}>
               <strong>{tWork("completionNote")}</strong>
@@ -463,6 +680,11 @@ export default async function ActionsPage({
                 {t("metaLinkedToProposal", { title: action.proposal.title })}
               </a>
             ) : null}
+            {(action.checklistItemCount ?? 0) > 0 ? (
+              <a href={`${detailHref}#checklist`}>
+                {t("checklistProgressShort", { completed: action.checklistCompletedCount ?? 0, total: action.checklistItemCount ?? 0 })}
+              </a>
+            ) : null}
           </div>
         ),
         actions: (
@@ -502,7 +724,7 @@ export default async function ActionsPage({
     );
   }
 
-  const actionColumns: WorkItemKanbanColumn[] = (["DRAFT", "OPEN", "IN_PROGRESS", "COMPLETED"] as const).map((status: ActionColumnStatus) => ({
+  const statusActionColumns: WorkItemKanbanColumn[] = (["DRAFT", "OPEN", "IN_PROGRESS", "COMPLETED"] as const).map((status: ActionColumnStatus) => ({
     id: status,
     label: t(ACTION_STATUS_META[status].labelKey),
     count: groupedActions[status].length,
@@ -519,6 +741,58 @@ export default async function ActionsPage({
       node: renderActionCard(action, true),
     })),
   }));
+  const priorityActionColumns: WorkItemKanbanColumn[] = ACTION_PRIORITY_COLUMNS.map((column) => {
+    const items = displayActions.filter((action) => normalizeWorkItemPriority(action.priority) === column.priority);
+    return {
+      id: column.id,
+      label: priorityText(column.priority),
+      count: items.length,
+      empty: <p className="muted">{t("noActionsFound")}</p>,
+      items: items.map((action) => ({
+        id: action.id,
+        status: column.id,
+        sort: {
+          priority: action.priority,
+          date: action.dueAt ?? action.createdAt,
+          alpha: action.title,
+        },
+        node: renderActionCard(action, true),
+      })),
+    };
+  });
+  const dueColumnLabel = (column: ActionDueColumnId) => ({
+    DUE_OVERDUE: tWork("dueOverdue"),
+    DUE_TODAY: tWork("dueToday"),
+    DUE_TOMORROW: tWork("dueTomorrow"),
+    DUE_REST_WEEK: tWork("dueRestOfWeek"),
+    DUE_NEXT_WEEK: tWork("dueNextWeek"),
+    DUE_FUTURE: tWork("dueFuture"),
+    DUE_NONE: tWork("dueNoDate"),
+  })[column];
+  const dueActionColumns: WorkItemKanbanColumn[] = ACTION_DUE_COLUMNS.map((column) => {
+    const items = displayActions.filter((action) => actionDueColumnId(action.dueAt) === column);
+    return {
+      id: column,
+      label: dueColumnLabel(column),
+      count: items.length,
+      empty: <p className="muted">{t("noActionsFound")}</p>,
+      items: items.map((action) => ({
+        id: action.id,
+        status: column,
+        sort: {
+          priority: action.priority,
+          date: action.dueAt ?? action.createdAt,
+          alpha: action.title,
+        },
+        node: renderActionCard(action, true),
+      })),
+    };
+  });
+  const actionColumns = boardGroup === "priority"
+    ? priorityActionColumns
+    : boardGroup === "due"
+      ? dueActionColumns
+      : statusActionColumns;
 
   return (
     <>
@@ -549,7 +823,7 @@ export default async function ActionsPage({
             currentView={view}
             currentSort={sort}
             listHref={buildWorkItemQuery({ sort, circleIds, assigneeMemberIds, memberIds, status: statusQuery, view: "list" })}
-            kanbanHref={buildWorkItemQuery({ circleIds, assigneeMemberIds, memberIds, view: "kanban" })}
+            kanbanHref={buildWorkItemQuery({ circleIds, assigneeMemberIds, memberIds, view: "kanban", status: statusQuery, group: boardGroupQuery })}
             tableHref={buildWorkItemQuery({ sort, circleIds, assigneeMemberIds, memberIds, status: statusQuery, view: "table" })}
             sortLinks={{
               priority: buildWorkItemQuery({ view: view === "table" ? "table" : "list", circleIds, assigneeMemberIds, memberIds, status: statusQuery, sort: "priority" }),
@@ -567,12 +841,31 @@ export default async function ActionsPage({
           />
         </div>
 
+        {view === "kanban" && (
+          <div className="nr-filter-bar nr-filter-bar-wrap nr-board-group-bar" aria-label={tWork("groupBy")}>
+            {ACTION_BOARD_GROUPS.map((group) => (
+              <a
+                key={group}
+                href={boardGroupHref(group)}
+                className={`nr-filter-item ${boardGroup === group ? "nr-filter-active" : ""}`}
+              >
+                {group === "status"
+                  ? tWork("groupByStatus")
+                  : group === "due"
+                    ? tWork("groupByDue")
+                    : tWork("groupByPriority")}
+              </a>
+            ))}
+          </div>
+        )}
+
         <WorkItemFilterControls
           action={`/workspaces/${workspaceId}/actions`}
           status={statusFilter}
           view={view}
           sort={view !== "kanban" ? sort : undefined}
-          columns={view === "kanban" && !allActionColumnsVisible ? visibleActionColumnIds : undefined}
+          columns={view === "kanban" && boardGroup === "status" && !allActionColumnsVisible ? visibleActionColumnIds : undefined}
+          group={boardGroupQuery}
           statusOptions={ACTION_STATUS_FILTERS.map((filter) => ({ id: filter, label: ACTION_STATUS_META[filter].labelKey ? t(ACTION_STATUS_META[filter].labelKey) : filter }))}
           statusValues={statusFilters}
           circleIds={circleIds}
@@ -602,8 +895,8 @@ export default async function ActionsPage({
           <WorkItemKanbanBoard
             columns={actionColumns}
             storageKey={`work-items:${workspaceId}:actions`}
-            visibleColumnIds={visibleActionColumnIds}
-            hideColumnHrefs={actionColumnHideHrefs}
+            visibleColumnIds={boardGroup === "status" ? visibleActionColumnIds : undefined}
+            hideColumnHrefs={boardGroup === "status" ? actionColumnHideHrefs : undefined}
             settingsLabel={tWork("columnSettings")}
             resetLabel={tWork("resetColumns")}
             hideLabel={tWork("hideColumn")}

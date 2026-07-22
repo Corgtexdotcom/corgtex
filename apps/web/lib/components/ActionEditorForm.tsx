@@ -13,9 +13,16 @@ export type ActionEditorLabels = {
   assigneeNone: string;
   submit: string;
   cancel: string;
+  dueDate: string;
   priorityLabel: string;
   priority: WorkItemPriorityLabels;
 };
+
+function dateInputValue(value?: Date | string | null) {
+  if (!value) return "";
+  const date = value instanceof Date ? value : new Date(value);
+  return Number.isFinite(date.getTime()) ? date.toISOString().slice(0, 10) : "";
+}
 
 export function ActionEditorForm({
   action,
@@ -24,6 +31,7 @@ export function ActionEditorForm({
   title,
   bodyMd,
   priority,
+  dueAt,
   assigneeMemberId,
   members,
   labels,
@@ -36,6 +44,7 @@ export function ActionEditorForm({
   title?: string;
   bodyMd?: string | null;
   priority?: number | null;
+  dueAt?: Date | string | null;
   assigneeMemberId?: string | null;
   members: ActionEditorMemberOption[];
   labels: ActionEditorLabels;
@@ -62,6 +71,10 @@ export function ActionEditorForm({
         defaultValue={assigneeMemberId}
       />
       <WorkItemPrioritySelect label={labels.priorityLabel} defaultValue={priority ?? 1} labels={labels.priority} />
+      <label>
+        {labels.dueDate}
+        <input name="dueAt" type="date" defaultValue={dateInputValue(dueAt)} />
+      </label>
       {children}
       <div className="actions-inline">
         <button type="submit">{labels.submit}</button>

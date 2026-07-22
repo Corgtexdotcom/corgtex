@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { AppError, getAction, getWorkspaceArchiveRecord, listAdviceRequests, listDeliberationEntries, listExternalResourceAttachments, listHumanMembers, listWorkItemEvidence, listWorkItemVersions, requireWorkspaceMembership } from "@corgtex/domain";
+import { AppError, getAction, getWorkspaceArchiveRecord, listActionChecklistItems, listAdviceRequests, listDeliberationEntries, listExternalResourceAttachments, listHumanMembers, listWorkItemEvidence, listWorkItemVersions, requireWorkspaceMembership } from "@corgtex/domain";
 import { requirePageActor } from "@/lib/auth";
 import { ConfirmSubmitButton } from "@/lib/components/ConfirmSubmitButton";
 import { MarkdownRenderer } from "@/lib/components/MarkdownRenderer";
@@ -13,7 +13,7 @@ import { DeliberationThread } from "@/lib/components/DeliberationThread";
 import { WorkItemConversationSurface, WorkItemRequestList } from "@/lib/components/WorkItemConversation";
 import { getDeliberationTargets } from "@/lib/deliberation-targets";
 import { canOpenPrivateDraft } from "@/lib/governance-open-guards";
-import { attachActionExternalResourceAction, deleteActionAction, postActionDeliberationAction, publishActionAction, requestActionInputAction, resolveActionDeliberationAction, returnActionToDraftAction, updateActionAction, updateActionDeliberationAction } from "../../actions";
+import { attachActionExternalResourceAction, createActionChecklistItemAction, deleteActionAction, deleteActionChecklistItemAction, postActionDeliberationAction, publishActionAction, requestActionInputAction, resolveActionDeliberationAction, returnActionToDraftAction, updateActionAction, updateActionChecklistItemAction, updateActionDeliberationAction } from "../../actions";
 import { getFormatter, getTranslations } from "next-intl/server";
 import { formatWorkItemPriority, type WorkItemPriorityLabels } from "@/lib/work-item-priority";
 
@@ -66,7 +66,7 @@ export default async function ActionDetailPage({
     throw error;
   }
   const isArchived = Boolean(action.archivedAt);
-  const [versionHistory, evidence, externalResourceAttachments, deliberationEntries, inputRequests, archiveRecord, members] = await Promise.all([
+  const [versionHistory, evidence, checklistItems, externalResourceAttachments, deliberationEntries, inputRequests, archiveRecord, members] = await Promise.all([
     archivedSafeRead(isArchived, listWorkItemVersions(actor, { workspaceId, entityType: "ACTION", entityId: actionId }), {
       entityType: "Action" as const,
       entityId: actionId,
@@ -74,6 +74,7 @@ export default async function ActionDetailPage({
       versions: [],
     }),
     archivedSafeRead(isArchived, listWorkItemEvidence(actor, { workspaceId, entityType: "Action", entityId: actionId }), []),
+    archivedSafeRead(isArchived, listActionChecklistItems(actor, { workspaceId, actionId }), []),
     archivedSafeRead(isArchived, listExternalResourceAttachments(actor, { workspaceId, entityType: "Action", entityId: actionId }), []),
     archivedSafeRead(isArchived, listDeliberationEntries(actor, { workspaceId, parentType: "ACTION", parentId: actionId }), []),
     isArchived ? Promise.resolve([]) : listAdviceRequests(actor, { workspaceId, subjectType: "ACTION", subjectId: actionId }),
@@ -350,6 +351,78 @@ export default async function ActionDetailPage({
           )}
         </div>
       </section>
+
+      {(checklistItems.length > 0 || canEditContent) && (
+        <section className="ws-section" id="checklist" style={{ marginBottom: 48 }}>
+          <h2 className="nr-section-header">{t("sectionChecklist")}</h2>
+          <div className="nr-item nr-action-checklist">
+            {checklistItems.length > 0 ? (
+              <div className="nr-action-checklist-list">
+                {checklistItems.map((item) => (
+                  <div className="nr-action-checklist-row" key={item.id}>
+                    {canEditContent ? (
+                      <form action={updateActionChecklistItemAction}>
+                        <input type="hidden" name="workspaceId" value={workspaceId} />
+                        <input type="hidden" name="checklistItemId" value={item.id} />
+                        <input type="hidden" name="completed" value={item.completedAt ? "false" : "true"} />
+                        <button
+                          type="submit"
+                          className={`nr-action-checklist-toggle ${item.completedAt ? "nr-action-checklist-toggle-done" : ""}`}
+                          aria-label={item.completedAt ? t("checklistMarkOpen") : t("checklistMarkDone")}
+                        >
+                          {item.completedAt ? "✓" : ""}
+                        </button>
+                      </form>
+                    ) : (
+                      <span
+                        className={`nr-action-checklist-toggle ${item.completedAt ? "nr-action-checklist-toggle-done" : ""}`}
+                        aria-hidden="true"
+                      >
+                        {item.completedAt ? "✓" : ""}
+                      </span>
+                    )}
+                    {canEditContent ? (
+                      <details className="nr-action-checklist-title-editor">
+                        <summary className={`nr-hide-marker nr-action-checklist-title ${item.completedAt ? "nr-action-checklist-title-done" : ""}`}>
+                          {item.title}
+                        </summary>
+                        <div className="nr-action-checklist-edit-panel">
+                          <form action={updateActionChecklistItemAction} className="nr-action-checklist-title-form">
+                            <input type="hidden" name="workspaceId" value={workspaceId} />
+                            <input type="hidden" name="checklistItemId" value={item.id} />
+                            <input name="title" defaultValue={item.title} aria-label={t("checklistItemTitle")} />
+                            <button type="submit" className="secondary small">{tCommon("save")}</button>
+                          </form>
+                          <form action={deleteActionChecklistItemAction}>
+                            <input type="hidden" name="workspaceId" value={workspaceId} />
+                            <input type="hidden" name="checklistItemId" value={item.id} />
+                            <button type="submit" className="secondary small danger">{t("checklistDelete")}</button>
+                          </form>
+                        </div>
+                      </details>
+                    ) : (
+                      <span className={`nr-action-checklist-title ${item.completedAt ? "nr-action-checklist-title-done" : ""}`}>{item.title}</span>
+                    )}
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <p className="muted">{t("checklistEmpty")}</p>
+            )}
+            {canEditContent && (
+              <form action={createActionChecklistItemAction} className="nr-action-checklist-add">
+                <input type="hidden" name="workspaceId" value={workspaceId} />
+                <input type="hidden" name="actionId" value={action.id} />
+                <label>
+                  {t("checklistAddItem")}
+                  <input name="title" required />
+                </label>
+                <button type="submit" className="secondary small">{t("checklistAdd")}</button>
+              </form>
+            )}
+          </div>
+        </section>
+      )}
 
       <section className="ws-section" style={{ marginBottom: 48 }}>
         <h2 className="nr-section-header">Box files</h2>

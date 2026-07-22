@@ -48,6 +48,11 @@ export type ListActionsOptions = {
   sort?: WorkItemSort;
 };
 
+type ActionChecklistSummary = {
+  checklistItemCount: number;
+  checklistCompletedCount: number;
+};
+
 type CreateActionParams = {
   workspaceId: string;
   title: string;
@@ -115,6 +120,61 @@ async function resolveAssigneeMemberId(tx: Prisma.TransactionClient, workspaceId
   });
   invariant(member, 400, "INVALID_INPUT", "Action assignee must be an active human member of this workspace.");
   return member.id;
+}
+
+async function loadActionChecklistSummaries(workspaceId: string, actionIds: string[]) {
+  const summaries = new Map<string, ActionChecklistSummary>();
+  if (actionIds.length === 0) return summaries;
+
+  const items = await prisma.actionChecklistItem.findMany({
+    where: {
+      workspaceId,
+      actionId: { in: actionIds },
+    },
+    select: {
+      actionId: true,
+      completedAt: true,
+    },
+  });
+
+  for (const item of items) {
+    const current = summaries.get(item.actionId) ?? { checklistItemCount: 0, checklistCompletedCount: 0 };
+    current.checklistItemCount += 1;
+    if (item.completedAt) current.checklistCompletedCount += 1;
+    summaries.set(item.actionId, current);
+  }
+
+  return summaries;
+}
+
+async function requireEditableActionForChecklist(
+  tx: Prisma.TransactionClient,
+  actor: AppActor,
+  membership: import("@corgtex/shared").MembershipSummary | null,
+  workspaceId: string,
+  actionId: string,
+) {
+  const action = await tx.action.findFirst({
+    where: {
+      id: actionId,
+      workspaceId,
+      ...privacyFilter(actor, membership),
+      archivedAt: null,
+    },
+  });
+
+  invariant(action, 404, "NOT_FOUND", "Action not found.");
+  if (action.status === "DRAFT") {
+    await requireDraftManager({ actor, workspaceId, record: action, resolvedMembership: membership });
+  } else {
+    invariant(action.status === "OPEN" || action.status === "IN_PROGRESS", 400, "INVALID_STATE", "Only draft, open, or in-progress actions can change checklists.");
+    requireSubmittedWorkItemEditor(actor, membership, action);
+  }
+  return action;
+}
+
+function completedByUserIdForActor(actor: AppActor, workspaceId: string) {
+  return actor.kind === "user" ? actor.user.id : actorUserIdForWorkspace(actor, workspaceId);
 }
 
 export async function listActions(actor: AppActor, workspaceId: string, opts?: ListActionsOptions) {
@@ -190,11 +250,17 @@ export async function listActions(actor: AppActor, workspaceId: string, opts?: L
     }),
     prisma.action.count({ where }),
   ]);
-  const requestCountSummaries = await loadAdviceRequestCountSummaries(workspaceId, "ACTION", items.map((item) => item.id));
+  const itemIds = items.map((item) => item.id);
+  const [requestCountSummaries, checklistSummaries] = await Promise.all([
+    loadAdviceRequestCountSummaries(workspaceId, "ACTION", itemIds),
+    loadActionChecklistSummaries(workspaceId, itemIds),
+  ]);
   return {
     items: items.map((item) => ({
       ...item,
       ...requestCountSummaries.get(item.id),
+      checklistItemCount: checklistSummaries.get(item.id)?.checklistItemCount ?? 0,
+      checklistCompletedCount: checklistSummaries.get(item.id)?.checklistCompletedCount ?? 0,
     })),
     total,
     take,
@@ -244,6 +310,170 @@ export async function getAction(actor: AppActor, params: {
   });
   invariant(action, 404, "NOT_FOUND", "Action not found.");
   return action;
+}
+
+export async function listActionChecklistItems(actor: AppActor, params: {
+  workspaceId: string;
+  actionId: string;
+}) {
+  await getAction(actor, { workspaceId: params.workspaceId, actionId: params.actionId });
+  return prisma.actionChecklistItem.findMany({
+    where: {
+      workspaceId: params.workspaceId,
+      actionId: params.actionId,
+    },
+    orderBy: [
+      { sortOrder: "asc" },
+      { createdAt: "asc" },
+      { id: "asc" },
+    ],
+  });
+}
+
+export async function createActionChecklistItem(actor: AppActor, params: {
+  workspaceId: string;
+  actionId: string;
+  title: string;
+}) {
+  const membership = await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
+  const title = params.title.trim();
+  invariant(title.length > 0, 400, "INVALID_INPUT", "Checklist item title is required.");
+
+  return prisma.$transaction(async (tx) => {
+    await requireEditableActionForChecklist(tx, actor, membership, params.workspaceId, params.actionId);
+    const lastItem = await tx.actionChecklistItem.findFirst({
+      where: {
+        workspaceId: params.workspaceId,
+        actionId: params.actionId,
+      },
+      orderBy: { sortOrder: "desc" },
+      select: { sortOrder: true },
+    });
+    const item = await tx.actionChecklistItem.create({
+      data: {
+        workspaceId: params.workspaceId,
+        actionId: params.actionId,
+        title,
+        sortOrder: (lastItem?.sortOrder ?? -1) + 1,
+      },
+    });
+
+    await recordAudit(tx, actor, {
+      workspaceId: params.workspaceId,
+      action: "action.checklist_item.created",
+      entityType: "Action",
+      entityId: params.actionId,
+      meta: { checklistItemId: item.id, title },
+    });
+    await appendEvents(tx, [{
+      workspaceId: params.workspaceId,
+      type: "action.checklist_item.created",
+      aggregateType: "Action",
+      aggregateId: params.actionId,
+      payload: { actionId: params.actionId, checklistItemId: item.id },
+    }]);
+
+    return item;
+  });
+}
+
+export async function updateActionChecklistItem(actor: AppActor, params: {
+  workspaceId: string;
+  checklistItemId: string;
+  title?: string;
+  completed?: boolean;
+}) {
+  const membership = await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
+
+  return prisma.$transaction(async (tx) => {
+    const existing = await tx.actionChecklistItem.findFirst({
+      where: {
+        id: params.checklistItemId,
+        workspaceId: params.workspaceId,
+      },
+    });
+    invariant(existing, 404, "NOT_FOUND", "Checklist item not found.");
+    await requireEditableActionForChecklist(tx, actor, membership, params.workspaceId, existing.actionId);
+
+    const data: Prisma.ActionChecklistItemUpdateInput = {};
+    if (params.title !== undefined) {
+      const title = params.title.trim();
+      invariant(title.length > 0, 400, "INVALID_INPUT", "Checklist item title is required.");
+      data.title = title;
+    }
+    if (params.completed !== undefined) {
+      data.completedAt = params.completed ? new Date() : null;
+      data.completedBy = params.completed
+        ? { connect: { id: await completedByUserIdForActor(actor, params.workspaceId) } }
+        : { disconnect: true };
+    }
+
+    const updated = Object.keys(data).length > 0
+      ? await tx.actionChecklistItem.update({
+        where: { id: existing.id },
+        data,
+      })
+      : existing;
+
+    await recordAudit(tx, actor, {
+      workspaceId: params.workspaceId,
+      action: "action.checklist_item.updated",
+      entityType: "Action",
+      entityId: existing.actionId,
+      meta: {
+        checklistItemId: existing.id,
+        fields: [
+          ...(params.title !== undefined ? ["title"] : []),
+          ...(params.completed !== undefined ? ["completed"] : []),
+        ],
+      },
+    });
+    await appendEvents(tx, [{
+      workspaceId: params.workspaceId,
+      type: "action.checklist_item.updated",
+      aggregateType: "Action",
+      aggregateId: existing.actionId,
+      payload: { actionId: existing.actionId, checklistItemId: existing.id },
+    }]);
+
+    return updated;
+  });
+}
+
+export async function deleteActionChecklistItem(actor: AppActor, params: {
+  workspaceId: string;
+  checklistItemId: string;
+}) {
+  const membership = await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
+
+  return prisma.$transaction(async (tx) => {
+    const existing = await tx.actionChecklistItem.findFirst({
+      where: {
+        id: params.checklistItemId,
+        workspaceId: params.workspaceId,
+      },
+    });
+    invariant(existing, 404, "NOT_FOUND", "Checklist item not found.");
+    await requireEditableActionForChecklist(tx, actor, membership, params.workspaceId, existing.actionId);
+
+    await tx.actionChecklistItem.delete({ where: { id: existing.id } });
+    await recordAudit(tx, actor, {
+      workspaceId: params.workspaceId,
+      action: "action.checklist_item.deleted",
+      entityType: "Action",
+      entityId: existing.actionId,
+      meta: { checklistItemId: existing.id, title: existing.title },
+    });
+    await appendEvents(tx, [{
+      workspaceId: params.workspaceId,
+      type: "action.checklist_item.deleted",
+      aggregateType: "Action",
+      aggregateId: existing.actionId,
+      payload: { actionId: existing.actionId, checklistItemId: existing.id },
+    }]);
+
+    return { id: existing.id };
+  });
 }
 
 async function applyActionDuplicateUpdate(actor: AppActor, params: CreateActionParams, actionId: string) {

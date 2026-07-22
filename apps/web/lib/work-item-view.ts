@@ -124,6 +124,7 @@ export function buildWorkItemQuery(params: {
   memberId?: string;
   memberIds?: readonly string[];
   columns?: readonly string[];
+  group?: string;
   dates?: WorkItemDateValues;
 }) {
   const query = new URLSearchParams();
@@ -136,6 +137,7 @@ export function buildWorkItemQuery(params: {
   appendRepeatedParams(query, "assigneeMemberId", params.assigneeMemberIds ?? (params.assigneeMemberId ? [params.assigneeMemberId] : undefined));
   appendRepeatedParams(query, "memberId", params.memberIds ?? (params.memberId ? [params.memberId] : undefined));
   if (params.columns && params.columns.length > 0) query.set("columns", params.columns.join(","));
+  if (params.group) query.set("group", params.group);
   for (const [key, value] of Object.entries(params.dates ?? {})) {
     if (value) query.set(key, value);
   }
