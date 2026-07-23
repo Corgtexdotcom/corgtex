@@ -472,7 +472,7 @@ export async function saveSlackInstallationForWorkspace(params: {
         throw new AppError(409, "SLACK_TEAM_ALREADY_CONNECTED", "That Slack workspace is already bound to another Corgtex workspace.");
       }
 
-      await tx.workspaceIntegrationBinding.upsert({
+      const persistedBinding = await tx.workspaceIntegrationBinding.upsert({
         where: { workspaceId_provider: { workspaceId: params.workspaceId, provider: "SLACK" } },
         update: {
           externalOrgId: params.oauthResponse.enterprise?.id ?? null,
@@ -489,7 +489,11 @@ export async function saveSlackInstallationForWorkspace(params: {
           appId: params.oauthResponse.app_id ?? env.SLACK_APP_ID ?? null,
           installedByUserId: params.installedByUserId ?? null,
         },
+        select: { externalWorkspaceId: true },
       });
+      if (persistedBinding.externalWorkspaceId !== teamId) {
+        throw new AppError(409, "SLACK_WORKSPACE_ALREADY_BOUND", "This Corgtex workspace is already bound to another Slack workspace.");
+      }
 
       return tx.communicationInstallation.upsert({
         where: { provider_externalWorkspaceId: { provider: "SLACK", externalWorkspaceId: teamId } },
@@ -547,9 +551,18 @@ export async function saveSlackInstallation(actor: AppActor, params: {
 }
 
 async function slackInstallationByTeam(teamId: string) {
-  return prisma.communicationInstallation.findUnique({
+  const installation = await prisma.communicationInstallation.findUnique({
     where: { provider_externalWorkspaceId: { provider: "SLACK", externalWorkspaceId: teamId } },
   });
+  if (!installation) return null;
+
+  const binding = await prisma.workspaceIntegrationBinding.findUnique({
+    where: { workspaceId_provider: { workspaceId: installation.workspaceId, provider: "SLACK" } },
+    select: { externalWorkspaceId: true },
+  });
+  if (binding && binding.externalWorkspaceId !== teamId) return null;
+
+  return installation;
 }
 
 export async function ingestCommunicationEvent(provider: CommunicationProvider, rawEvent: Record<string, unknown>) {

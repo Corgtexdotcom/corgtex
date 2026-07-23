@@ -206,7 +206,7 @@ describe("communication Slack integration", () => {
     prismaMock.communicationMessage.upsert.mockReset();
     prismaMock.communicationInstallation.update.mockReset();
     txMock.workspaceIntegrationBinding.findUnique.mockReset().mockResolvedValue(null);
-    txMock.workspaceIntegrationBinding.upsert.mockReset().mockResolvedValue({ id: "binding-1" });
+    txMock.workspaceIntegrationBinding.upsert.mockReset().mockResolvedValue({ id: "binding-1", externalWorkspaceId: "T1" });
     txMock.communicationInstallation.findFirst.mockReset().mockResolvedValue(null);
     txMock.communicationInstallation.findUnique.mockReset().mockResolvedValue(null);
     txMock.communicationInstallation.update.mockReset();
@@ -498,6 +498,25 @@ describe("communication Slack integration", () => {
     expect(txMock.communicationInstallation.upsert).not.toHaveBeenCalled();
   });
 
+  it("rejects same-workspace Slack binding races before saving the losing team installation", async () => {
+    const { saveSlackInstallationForWorkspace } = await import("./communication");
+    txMock.workspaceIntegrationBinding.upsert.mockResolvedValueOnce({ externalWorkspaceId: "T2" });
+
+    await expect(saveSlackInstallationForWorkspace({
+      workspaceId: "workspace-1",
+      oauthResponse: {
+        ok: true,
+        team: { id: "T1", name: "Team" },
+        access_token: "xoxb-token",
+        scope: "commands",
+      } as any,
+    })).rejects.toMatchObject({
+      code: "SLACK_WORKSPACE_ALREADY_BOUND",
+    });
+
+    expect(txMock.communicationInstallation.upsert).not.toHaveBeenCalled();
+  });
+
   it("does not sanitize unrelated Slack binding database errors as tenant conflicts", async () => {
     const { saveSlackInstallationForWorkspace } = await import("./communication");
     txMock.workspaceIntegrationBinding.upsert.mockRejectedValueOnce(Object.assign(new Error("Record not found"), {
@@ -695,6 +714,38 @@ describe("communication Slack integration", () => {
         workspaceId: "workspace-1",
         status: "IGNORED",
         error: "Slack installation is not active.",
+      }),
+    }));
+    expect(txMock.workflowJob.upsert).not.toHaveBeenCalled();
+    expect(txMock.communicationInstallation.update).not.toHaveBeenCalled();
+  });
+
+  it("ignores Slack events when the team no longer matches the workspace binding", async () => {
+    const { ingestCommunicationEvent } = await import("./communication");
+    prismaMock.communicationInboundEvent.findUnique.mockResolvedValueOnce(null);
+    prismaMock.communicationInstallation.findUnique.mockResolvedValueOnce({
+      id: "install-legacy",
+      workspaceId: "workspace-1",
+      status: "ACTIVE",
+    });
+    prismaMock.workspaceIntegrationBinding.findUnique.mockResolvedValueOnce({ externalWorkspaceId: "T2" });
+    prismaMock.communicationInboundEvent.create.mockResolvedValueOnce({
+      id: "inbound-ignored",
+    });
+
+    const result = await ingestCommunicationEvent("SLACK", {
+      team_id: "T1",
+      event_id: "EvLegacy",
+      event: { type: "message" },
+    });
+
+    expect(result).toEqual({ inboundEventId: "inbound-ignored", duplicate: false, ignored: true });
+    expect(prismaMock.communicationInboundEvent.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        installationId: null,
+        workspaceId: null,
+        status: "IGNORED",
+        error: "No Corgtex Slack installation matched this event.",
       }),
     }));
     expect(txMock.workflowJob.upsert).not.toHaveBeenCalled();

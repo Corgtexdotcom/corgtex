@@ -15,8 +15,8 @@ CREATE TABLE "WorkspaceIntegrationBinding" (
 );
 
 -- Backfill one durable Slack team binding per Corgtex workspace from existing installs.
--- If a workspace has more than one historical Slack install, keep the active/latest one
--- as the normal reconnect target and let application guards reject future team moves.
+-- If a workspace has more than one historical Slack install, keep the active/latest
+-- one as the normal reconnect target and disconnect any other active Slack installs.
 INSERT INTO "WorkspaceIntegrationBinding" (
     "id",
     "workspaceId",
@@ -30,7 +30,7 @@ INSERT INTO "WorkspaceIntegrationBinding" (
     "updatedAt"
 )
 SELECT
-    md5("workspaceId" || ':SLACK:' || "externalWorkspaceId"),
+    gen_random_uuid()::text,
     "workspaceId",
     "provider",
     "externalWorkspaceId",
@@ -56,6 +56,20 @@ FROM (
 ) ranked
 WHERE ranked.rn = 1
 ON CONFLICT DO NOTHING;
+
+UPDATE "CommunicationInstallation" ci
+SET
+    "status" = 'DISCONNECTED',
+    "botTokenEnc" = NULL,
+    "disconnectedAt" = CURRENT_TIMESTAMP,
+    "lastError" = 'Disconnected during Slack tenant binding backfill because another Slack team was selected as the workspace binding.',
+    "updatedAt" = CURRENT_TIMESTAMP
+FROM "WorkspaceIntegrationBinding" binding
+WHERE ci."workspaceId" = binding."workspaceId"
+  AND ci."provider" = 'SLACK'
+  AND binding."provider" = 'SLACK'
+  AND ci."externalWorkspaceId" <> binding."externalWorkspaceId"
+  AND ci."status" = 'ACTIVE';
 
 -- CreateIndex
 CREATE UNIQUE INDEX "WorkspaceIntegrationBinding_workspaceId_provider_key" ON "WorkspaceIntegrationBinding"("workspaceId", "provider");
