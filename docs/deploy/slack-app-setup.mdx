@@ -5,6 +5,8 @@ description: "Configure the production Slack app used by Corgtex."
 
 Corgtex Slack authorization depends on the Slack app configuration and the deployed environment variables referring to the same Slack app. If these drift, Slack will reject installation before Corgtex receives the OAuth callback.
 
+Corgtex also stores a durable Slack team binding per workspace. The first successful install records the returned Slack `team.id` for that Corgtex workspace when no binding or conflicting install exists. Reconnects include Slack's `team` OAuth hint when a binding is known, and the callback rejects mismatched teams before saving tokens. A Slack team cannot be moved to another Corgtex workspace through normal OAuth.
+
 ## Production OAuth URLs
 
 For the hosted Corgtex app, configure these URLs in Slack App Management:
@@ -15,6 +17,8 @@ For the hosted Corgtex app, configure these URLs in Slack App Management:
 | Slash command request URL | `https://app.corgtex.com/api/integrations/slack/commands` |
 | Events request URL | `https://app.corgtex.com/api/integrations/slack/events` |
 | Interactivity request URL | `https://app.corgtex.com/api/integrations/slack/interactivity` |
+
+Customer-specific deployments must use the deployed origin for that customer, not a different customer tenant. For example, a Chirone runtime with `APP_URL=https://chirone.corgtex.com` must have its Slack app redirect URL configured as `https://chirone.corgtex.com/api/integrations/slack/callback`, plus matching slash command, Events API, and interactivity request URLs on the same origin.
 
 Keep the Slack app manifest in the Slack App Management dashboard or another private operational store, not in this public repository. Apply changes to the same Slack app whose Client ID is deployed as `SLACK_CLIENT_ID`.
 
@@ -27,6 +31,8 @@ The Slack Client ID in production must match the Slack app where the redirect UR
 ## Install Flow
 
 Start the install from Corgtex workspace settings with **Connect Slack**. Do not start from Slack App Management directly, because Corgtex generates a short-lived workspace-bound OAuth state cookie before sending the browser to Slack.
+
+If Slack shows the wrong workspace in the OAuth consent screen, stop the install and switch Slack workspaces before approving. If the wrong workspace is approved anyway, Corgtex redirects back with a generic Slack wrong-team status and does not save the token. Operators should confirm the target Corgtex workspace and Slack team before retrying rather than deleting or replacing bindings manually.
 
 After installation, verify the workspace settings page shows Slack as connected, then test `/corgtex Jan should follow up tomorrow`, `/corgtex brief`, an app mention such as `@Corgtex turn this into a tension`, and a message shortcut capture in Slack. Direct messages are not part of the v1 Slack surface, so do not add DM scopes or DM event subscriptions for this setup.
 

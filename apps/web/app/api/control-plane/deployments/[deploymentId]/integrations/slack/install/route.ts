@@ -33,7 +33,14 @@ export async function GET(
       return NextResponse.redirect(appRedirectUrl(request, `/control-plane/deployments/${deploymentId}?tab=tools&slack=not-configured`));
     }
 
-    const state = createSlackOAuthState(target.managedWorkspaceId);
+    const state = createSlackOAuthState(target.managedWorkspaceId, {
+      expectedTeamId: target.expectedTeamId,
+      flow: {
+        kind: "control_plane",
+        deploymentId,
+        initiatedByUserId: actor.kind === "user" ? actor.user.id : null,
+      },
+    });
     const cookieStore = await cookies();
     cookieStore.set(CONTROL_PLANE_SLACK_STATE_COOKIE, `${state.value}:${state.nonce}:${deploymentId}:${actor.kind === "user" ? actor.user.id : ""}`, {
       httpOnly: true,
@@ -49,6 +56,9 @@ export async function GET(
     authorize.searchParams.set("scope", slackOAuthScopes());
     authorize.searchParams.set("redirect_uri", redirectUri);
     authorize.searchParams.set("state", state.value);
+    if (target.expectedTeamId) {
+      authorize.searchParams.set("team", target.expectedTeamId);
+    }
 
     return NextResponse.redirect(authorize);
   } catch (error) {

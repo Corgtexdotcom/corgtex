@@ -376,6 +376,7 @@ const { prismaMock, encryptSecretMock, decryptSecretMock, memberMocks, communica
     deactivateMember: vi.fn(),
   },
   communicationMocks: {
+    getSlackExpectedTeamIdForWorkspace: vi.fn(),
     saveSlackInstallationForWorkspace: vi.fn(),
     validateSlackPostTarget: vi.fn(),
   },
@@ -410,6 +411,7 @@ vi.mock("./members", () => ({
 }));
 
 vi.mock("./communication", () => ({
+  getSlackExpectedTeamIdForWorkspace: communicationMocks.getSlackExpectedTeamIdForWorkspace,
   saveSlackInstallationForWorkspace: communicationMocks.saveSlackInstallationForWorkspace,
   validateSlackPostTarget: communicationMocks.validateSlackPostTarget,
 }));
@@ -511,6 +513,7 @@ describe("control plane domain", () => {
     prismaMock.customerDeployment.findUnique.mockResolvedValue(null);
     prismaMock.communicationInstallation.findFirst.mockResolvedValue(null);
     prismaMock.communicationInstallation.update.mockResolvedValue({ id: "slack-1" });
+    communicationMocks.getSlackExpectedTeamIdForWorkspace.mockResolvedValue(null);
     communicationMocks.saveSlackInstallationForWorkspace.mockResolvedValue({
       id: "slack-1",
       workspaceId: "ws-1",
@@ -7861,6 +7864,7 @@ describe("control plane domain", () => {
       workspaceId: "ws-1",
       oauthResponse: { ok: true, team: { id: "T1", name: "Acme Slack" }, access_token: "xoxb-token" },
       installedByUserId: "operator-1",
+      expectedTeamId: undefined,
     });
     expect(prismaMock.customerDeploymentEvent.create).toHaveBeenCalledWith(expect.objectContaining({
       data: expect.objectContaining({

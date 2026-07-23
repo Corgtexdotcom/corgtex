@@ -12,7 +12,16 @@ const {
   meetingReviewModalUpdateMock,
 } = vi.hoisted(() => {
   const tx = {
-    communicationInstallation: { update: vi.fn() },
+    communicationInstallation: {
+      findFirst: vi.fn(),
+      findUnique: vi.fn(),
+      update: vi.fn(),
+      upsert: vi.fn(),
+    },
+    workspaceIntegrationBinding: {
+      findUnique: vi.fn(),
+      upsert: vi.fn(),
+    },
     workflowJob: { upsert: vi.fn() },
   };
   const webClient = {
@@ -53,6 +62,10 @@ const {
         findFirst: vi.fn(),
         findUnique: vi.fn(),
         update: vi.fn(),
+        upsert: vi.fn(),
+      },
+      workspaceIntegrationBinding: {
+        findUnique: vi.fn(),
         upsert: vi.fn(),
       },
       communicationChannel: {
@@ -181,6 +194,8 @@ describe("communication Slack integration", () => {
     prismaMock.communicationMessage.findUnique.mockReset().mockResolvedValue(null);
     prismaMock.communicationMessage.findMany.mockReset().mockResolvedValue([]);
     prismaMock.knowledgeChunk.deleteMany.mockReset().mockResolvedValue({ count: 0 });
+    prismaMock.workspaceIntegrationBinding.findUnique.mockReset();
+    prismaMock.workspaceIntegrationBinding.upsert.mockReset();
     prismaMock.communicationInstallation.findFirst.mockReset();
     prismaMock.communicationInstallation.findUnique.mockReset();
     prismaMock.communicationChannel.upsert.mockReset();
@@ -190,6 +205,13 @@ describe("communication Slack integration", () => {
     prismaMock.user.findUnique.mockReset();
     prismaMock.communicationMessage.upsert.mockReset();
     prismaMock.communicationInstallation.update.mockReset();
+    txMock.workspaceIntegrationBinding.findUnique.mockReset().mockResolvedValue(null);
+    txMock.workspaceIntegrationBinding.upsert.mockReset().mockResolvedValue({ id: "binding-1" });
+    txMock.communicationInstallation.findFirst.mockReset().mockResolvedValue(null);
+    txMock.communicationInstallation.findUnique.mockReset().mockResolvedValue(null);
+    txMock.communicationInstallation.update.mockReset();
+    txMock.communicationInstallation.upsert.mockReset().mockResolvedValue({ id: "install-1" });
+    txMock.workflowJob.upsert.mockReset();
     slackWebClientMock.conversations.list.mockReset();
     slackWebClientMock.conversations.join.mockReset();
     slackWebClientMock.conversations.history.mockReset();
@@ -267,9 +289,50 @@ describe("communication Slack integration", () => {
     ]));
   });
 
+  it("round-trips versioned Slack OAuth state with expected team and flow metadata", async () => {
+    const { createSlackOAuthState, readSlackOAuthState } = await import("./communication");
+
+    const state = createSlackOAuthState("workspace-1", {
+      expectedTeamId: "T1",
+      flow: {
+        kind: "control_plane",
+        deploymentId: "dep-1",
+        initiatedByUserId: "operator-1",
+      },
+    });
+
+    expect(readSlackOAuthState(state.value)).toEqual({
+      version: 1,
+      workspaceId: "workspace-1",
+      nonce: "nonce",
+      expectedTeamId: "T1",
+      flow: {
+        kind: "control_plane",
+        deploymentId: "dep-1",
+        initiatedByUserId: "operator-1",
+      },
+    });
+  });
+
+  it("keeps reading legacy Slack OAuth state while callbacks roll over", async () => {
+    const { readSlackOAuthState } = await import("./communication");
+    const legacyState = Buffer.from(JSON.stringify({
+      workspaceId: "workspace-1",
+      nonce: "nonce",
+    })).toString("base64url");
+
+    expect(readSlackOAuthState(legacyState)).toEqual({
+      version: 0,
+      workspaceId: "workspace-1",
+      nonce: "nonce",
+      expectedTeamId: null,
+      flow: { kind: "workspace" },
+    });
+  });
+
   it("stores archive settings with long retention when public history is granted", async () => {
     const { saveSlackInstallation } = await import("./communication");
-    prismaMock.communicationInstallation.upsert.mockResolvedValueOnce({ id: "install-1" });
+    txMock.communicationInstallation.upsert.mockResolvedValueOnce({ id: "install-1" });
 
     await saveSlackInstallation({ kind: "system" } as any, {
       workspaceId: "workspace-1",
@@ -281,7 +344,15 @@ describe("communication Slack integration", () => {
       } as any,
     });
 
-    expect(prismaMock.communicationInstallation.upsert).toHaveBeenCalledWith(expect.objectContaining({
+    expect(txMock.workspaceIntegrationBinding.upsert).toHaveBeenCalledWith(expect.objectContaining({
+      where: { workspaceId_provider: { workspaceId: "workspace-1", provider: "SLACK" } },
+      create: expect.objectContaining({
+        workspaceId: "workspace-1",
+        provider: "SLACK",
+        externalWorkspaceId: "T1",
+      }),
+    }));
+    expect(txMock.communicationInstallation.upsert).toHaveBeenCalledWith(expect.objectContaining({
       update: expect.objectContaining({
         settings: expect.objectContaining({
           broadPublicIngestion: true,
@@ -309,7 +380,7 @@ describe("communication Slack integration", () => {
 
   it("stores Slack installations for a target workspace without workspace membership checks", async () => {
     const { saveSlackInstallationForWorkspace } = await import("./communication");
-    prismaMock.communicationInstallation.upsert.mockResolvedValueOnce({ id: "install-1" });
+    txMock.communicationInstallation.upsert.mockResolvedValueOnce({ id: "install-1" });
 
     await saveSlackInstallationForWorkspace({
       workspaceId: "workspace-1",
@@ -325,10 +396,27 @@ describe("communication Slack integration", () => {
       } as any,
     });
 
-    expect(prismaMock.communicationInstallation.upsert).toHaveBeenCalledWith(expect.objectContaining({
+    expect(txMock.workspaceIntegrationBinding.upsert).toHaveBeenCalledWith(expect.objectContaining({
+      where: { workspaceId_provider: { workspaceId: "workspace-1", provider: "SLACK" } },
+      update: expect.objectContaining({
+        externalOrgId: "E1",
+        externalTeamName: "Team",
+        appId: "A1",
+        installedByUserId: "operator-1",
+      }),
+      create: expect.objectContaining({
+        workspaceId: "workspace-1",
+        provider: "SLACK",
+        externalWorkspaceId: "T1",
+        externalOrgId: "E1",
+        externalTeamName: "Team",
+        appId: "A1",
+        installedByUserId: "operator-1",
+      }),
+    }));
+    expect(txMock.communicationInstallation.upsert).toHaveBeenCalledWith(expect.objectContaining({
       where: { provider_externalWorkspaceId: { provider: "SLACK", externalWorkspaceId: "T1" } },
       update: expect.objectContaining({
-        workspaceId: "workspace-1",
         externalOrgId: "E1",
         externalTeamName: "Team",
         appId: "A1",
@@ -346,6 +434,47 @@ describe("communication Slack integration", () => {
         installedByUserId: "operator-1",
       }),
     }));
+  });
+
+  it("rejects Slack OAuth when the selected team does not match the workspace binding", async () => {
+    const { saveSlackInstallationForWorkspace } = await import("./communication");
+    txMock.workspaceIntegrationBinding.findUnique.mockResolvedValueOnce({ externalWorkspaceId: "T1" });
+
+    await expect(saveSlackInstallationForWorkspace({
+      workspaceId: "workspace-1",
+      expectedTeamId: "T1",
+      oauthResponse: {
+        ok: true,
+        team: { id: "T2", name: "Other Team" },
+        access_token: "xoxb-token",
+        scope: "commands",
+      } as any,
+    })).rejects.toMatchObject({
+      code: "SLACK_TEAM_MISMATCH",
+    });
+
+    expect(txMock.workspaceIntegrationBinding.upsert).not.toHaveBeenCalled();
+    expect(txMock.communicationInstallation.upsert).not.toHaveBeenCalled();
+  });
+
+  it("rejects Slack OAuth when that team is already connected to another Corgtex workspace", async () => {
+    const { saveSlackInstallationForWorkspace } = await import("./communication");
+    txMock.communicationInstallation.findUnique.mockResolvedValueOnce({ workspaceId: "workspace-2" });
+
+    await expect(saveSlackInstallationForWorkspace({
+      workspaceId: "workspace-1",
+      oauthResponse: {
+        ok: true,
+        team: { id: "T1", name: "Team" },
+        access_token: "xoxb-token",
+        scope: "commands",
+      } as any,
+    })).rejects.toMatchObject({
+      code: "SLACK_TEAM_ALREADY_CONNECTED",
+    });
+
+    expect(txMock.workspaceIntegrationBinding.upsert).not.toHaveBeenCalled();
+    expect(txMock.communicationInstallation.upsert).not.toHaveBeenCalled();
   });
 
   it("resolves notification recipients from cached Slack user mappings before API lookup", async () => {

@@ -3,12 +3,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const {
   requirePageActorMock,
   createSlackOAuthStateMock,
+  getSlackOAuthInstallTargetMock,
   slackOAuthScopesMock,
   cookiesMock,
   cookieSetMock,
 } = vi.hoisted(() => ({
   requirePageActorMock: vi.fn(),
   createSlackOAuthStateMock: vi.fn(),
+  getSlackOAuthInstallTargetMock: vi.fn(),
   slackOAuthScopesMock: vi.fn(),
   cookiesMock: vi.fn(),
   cookieSetMock: vi.fn(),
@@ -55,6 +57,7 @@ vi.mock("@corgtex/domain", () => ({
     }
   },
   createSlackOAuthState: createSlackOAuthStateMock,
+  getSlackOAuthInstallTarget: getSlackOAuthInstallTargetMock,
   slackOAuthScopes: slackOAuthScopesMock,
 }));
 
@@ -63,7 +66,8 @@ beforeEach(() => {
   vi.stubEnv("APP_URL", "https://app.corgtex.com/");
   vi.stubEnv("SLACK_CLIENT_ID", "slack-client-id");
   requirePageActorMock.mockResolvedValue({ kind: "user", user: { id: "user-1" } });
-  createSlackOAuthStateMock.mockReturnValue({ value: "state-value", nonce: "nonce-value" });
+  getSlackOAuthInstallTargetMock.mockResolvedValue({ workspaceId: "workspace-1", expectedTeamId: "T1" });
+  createSlackOAuthStateMock.mockReturnValue({ value: "state-value", nonce: "nonce-value", expectedTeamId: "T1" });
   slackOAuthScopesMock.mockReturnValue("commands,chat:write");
   cookiesMock.mockResolvedValue({
     set: cookieSetMock,
@@ -89,6 +93,18 @@ describe("GET /api/integrations/slack/install", () => {
     expect(authorizeUrl.searchParams.get("scope")).toBe("commands,chat:write");
     expect(authorizeUrl.searchParams.get("state")).toBe("state-value");
     expect(authorizeUrl.searchParams.get("redirect_uri")).toBe("https://app.corgtex.com/api/integrations/slack/callback");
+    expect(authorizeUrl.searchParams.get("team")).toBe("T1");
+    expect(getSlackOAuthInstallTargetMock).toHaveBeenCalledWith(
+      { kind: "user", user: { id: "user-1" } },
+      "workspace-1",
+    );
+    expect(createSlackOAuthStateMock).toHaveBeenCalledWith("workspace-1", {
+      expectedTeamId: "T1",
+      flow: {
+        kind: "workspace",
+        initiatedByUserId: "user-1",
+      },
+    });
     expect(cookieSetMock).toHaveBeenCalledWith(
       "slack_oauth_state",
       "state-value:nonce-value",
@@ -98,6 +114,17 @@ describe("GET /api/integrations/slack/install", () => {
         sameSite: "lax",
       }),
     );
+  });
+
+  it("does not send Slack a team hint before a workspace has a binding", async () => {
+    getSlackOAuthInstallTargetMock.mockResolvedValueOnce({ workspaceId: "workspace-1", expectedTeamId: null });
+    createSlackOAuthStateMock.mockReturnValueOnce({ value: "state-value", nonce: "nonce-value", expectedTeamId: null });
+    const { GET } = await import("./route");
+
+    const response = await GET(new Request("https://preview.example.test/api/integrations/slack/install?workspaceId=workspace-1"));
+    const authorizeUrl = new URL(response.headers.get("location") ?? "");
+
+    expect(authorizeUrl.searchParams.get("team")).toBeNull();
   });
 
   it("lets Next.js handle auth redirects instead of converting them to JSON errors", async () => {

@@ -3,6 +3,7 @@ import { cookies } from "next/headers";
 import {
   exchangeSlackOAuthCode,
   getControlPlaneSlackSetupTarget,
+  isSlackTenantBindingError,
   readSlackOAuthState,
   saveControlPlaneSlackInstallation,
 } from "@corgtex/domain";
@@ -14,6 +15,15 @@ import { appRedirectUrl, rethrowNextRedirectError, slackCallbackRedirectUri } fr
 export const dynamic = "force-dynamic";
 
 const CONTROL_PLANE_SLACK_STATE_COOKIE = "control_plane_slack_oauth_state";
+
+function slackTeamId(oauthResponse: Awaited<ReturnType<typeof exchangeSlackOAuthCode>>) {
+  const teamId = oauthResponse.team?.id?.trim();
+  return teamId || null;
+}
+
+function controlPlaneSlackRedirect(request: Request, deploymentId: string, status: string) {
+  return NextResponse.redirect(appRedirectUrl(request, `/control-plane/deployments/${deploymentId}?tab=tools&slack=${status}`));
+}
 
 export async function GET(
   request: Request,
@@ -33,7 +43,7 @@ export async function GET(
     const error = url.searchParams.get("error");
 
     if (error || !code || !state || actor.kind !== "user") {
-      return NextResponse.redirect(appRedirectUrl(request, `/control-plane/deployments/${deploymentId}?tab=tools&slack=oauth-failed`));
+      return controlPlaneSlackRedirect(request, deploymentId, "oauth-failed");
     }
 
     const cookieStore = await cookies();
@@ -52,23 +62,43 @@ export async function GET(
       || !parsed
       || parsed.nonce !== savedNonce
     ) {
-      return NextResponse.redirect(appRedirectUrl(request, `/control-plane/deployments/${deploymentId}?tab=tools&slack=invalid-state`));
+      return controlPlaneSlackRedirect(request, deploymentId, "invalid-state");
     }
 
     const target = await getControlPlaneSlackSetupTarget(actor, deploymentId);
-    if (parsed.workspaceId !== target.managedWorkspaceId) {
-      return NextResponse.redirect(appRedirectUrl(request, `/control-plane/deployments/${deploymentId}?tab=tools&slack=invalid-workspace`));
+    const stateMatchesControlPlaneFlow = parsed.version === 0 || (
+      parsed.flow.kind === "control_plane"
+      && parsed.flow.deploymentId === deploymentId
+      && parsed.flow.initiatedByUserId === actor.user.id
+    );
+    if (
+      parsed.workspaceId !== target.managedWorkspaceId
+      || !stateMatchesControlPlaneFlow
+    ) {
+      return controlPlaneSlackRedirect(request, deploymentId, "invalid-state");
     }
 
     const redirectUri = slackCallbackRedirectUri(request, `/api/control-plane/deployments/${deploymentId}/integrations/slack/callback`);
     const oauthResponse = await exchangeSlackOAuthCode(code, redirectUri);
-    await saveControlPlaneSlackInstallation(actor, {
-      deploymentId,
-      oauthResponse,
-      reason: "Connected Slack through Control Plane.",
-    });
+    const expectedTeamId = parsed.expectedTeamId ?? target.expectedTeamId;
+    if (expectedTeamId && slackTeamId(oauthResponse) !== expectedTeamId) {
+      return controlPlaneSlackRedirect(request, deploymentId, "wrong-team");
+    }
+    try {
+      await saveControlPlaneSlackInstallation(actor, {
+        deploymentId,
+        oauthResponse,
+        expectedTeamId,
+        reason: "Connected Slack through Control Plane.",
+      });
+    } catch (error) {
+      if (isSlackTenantBindingError(error)) {
+        return controlPlaneSlackRedirect(request, deploymentId, "wrong-team");
+      }
+      throw error;
+    }
 
-    return NextResponse.redirect(appRedirectUrl(request, `/control-plane/deployments/${deploymentId}?tab=tools&slack=connected`));
+    return controlPlaneSlackRedirect(request, deploymentId, "connected");
   } catch (error) {
     rethrowNextRedirectError(error);
     return handleRouteError(error);
