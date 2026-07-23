@@ -477,6 +477,48 @@ describe("communication Slack integration", () => {
     expect(txMock.communicationInstallation.upsert).not.toHaveBeenCalled();
   });
 
+  it("sanitizes concurrent Slack binding uniqueness conflicts", async () => {
+    const { saveSlackInstallationForWorkspace } = await import("./communication");
+    txMock.workspaceIntegrationBinding.upsert.mockRejectedValueOnce(Object.assign(new Error("Unique constraint failed"), {
+      code: "P2002",
+    }));
+
+    await expect(saveSlackInstallationForWorkspace({
+      workspaceId: "workspace-1",
+      oauthResponse: {
+        ok: true,
+        team: { id: "T1", name: "Team" },
+        access_token: "xoxb-token",
+        scope: "commands",
+      } as any,
+    })).rejects.toMatchObject({
+      code: "SLACK_TEAM_ALREADY_CONNECTED",
+    });
+
+    expect(txMock.communicationInstallation.upsert).not.toHaveBeenCalled();
+  });
+
+  it("does not sanitize unrelated Slack binding database errors as tenant conflicts", async () => {
+    const { saveSlackInstallationForWorkspace } = await import("./communication");
+    txMock.workspaceIntegrationBinding.upsert.mockRejectedValueOnce(Object.assign(new Error("Record not found"), {
+      code: "P2025",
+    }));
+
+    await expect(saveSlackInstallationForWorkspace({
+      workspaceId: "workspace-1",
+      oauthResponse: {
+        ok: true,
+        team: { id: "T1", name: "Team" },
+        access_token: "xoxb-token",
+        scope: "commands",
+      } as any,
+    })).rejects.toMatchObject({
+      code: "P2025",
+    });
+
+    expect(txMock.communicationInstallation.upsert).not.toHaveBeenCalled();
+  });
+
   it("resolves notification recipients from cached Slack user mappings before API lookup", async () => {
     const { resolveSlackNotificationRecipient } = await import("./communication");
     prismaMock.communicationInstallation.findFirst.mockResolvedValueOnce({

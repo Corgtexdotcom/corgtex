@@ -374,6 +374,13 @@ function slackTeamIdFromOAuthResponse(oauthResponse: SlackOAuthResponse) {
   return normalizeSlackTeamId(oauthResponse.team?.id ?? null);
 }
 
+function isPrismaUniqueConstraintError(error: unknown) {
+  if (error instanceof Prisma.PrismaClientKnownRequestError) {
+    return error.code === "P2002";
+  }
+  return isRecord(error) && error.code === "P2002";
+}
+
 async function findSlackWorkspaceExpectedTeamId(client: SlackBindingPrismaClient, workspaceId: string) {
   const binding = await client.workspaceIntegrationBinding.findUnique({
     where: { workspaceId_provider: { workspaceId, provider: "SLACK" } },
@@ -435,87 +442,94 @@ export async function saveSlackInstallationForWorkspace(params: {
   const optionalScopes = grantedScopes.filter((scope) => (SLACK_BROAD_INGESTION_SCOPES as readonly string[]).includes(scope));
   const botTokenEnc = encryptSecret(String(params.oauthResponse.access_token));
 
-  return prisma.$transaction(async (tx) => {
-    const currentWorkspaceTeamId = await findSlackWorkspaceExpectedTeamId(tx, params.workspaceId);
-    const expectedTeamId = normalizeSlackTeamId(params.expectedTeamId) ?? currentWorkspaceTeamId;
+  try {
+    return await prisma.$transaction(async (tx) => {
+      const currentWorkspaceTeamId = await findSlackWorkspaceExpectedTeamId(tx, params.workspaceId);
+      const expectedTeamId = normalizeSlackTeamId(params.expectedTeamId) ?? currentWorkspaceTeamId;
 
-    if (expectedTeamId && expectedTeamId !== teamId) {
-      throw new AppError(409, "SLACK_TEAM_MISMATCH", "The selected Slack workspace does not match the Corgtex workspace binding.");
-    }
-    if (currentWorkspaceTeamId && currentWorkspaceTeamId !== teamId) {
-      throw new AppError(409, "SLACK_WORKSPACE_ALREADY_BOUND", "This Corgtex workspace is already bound to another Slack workspace.");
-    }
+      if (expectedTeamId && expectedTeamId !== teamId) {
+        throw new AppError(409, "SLACK_TEAM_MISMATCH", "The selected Slack workspace does not match the Corgtex workspace binding.");
+      }
+      if (currentWorkspaceTeamId && currentWorkspaceTeamId !== teamId) {
+        throw new AppError(409, "SLACK_WORKSPACE_ALREADY_BOUND", "This Corgtex workspace is already bound to another Slack workspace.");
+      }
 
-    const [existingTeamInstallation, existingTeamBinding] = await Promise.all([
-      tx.communicationInstallation.findUnique({
+      const [existingTeamInstallation, existingTeamBinding] = await Promise.all([
+        tx.communicationInstallation.findUnique({
+          where: { provider_externalWorkspaceId: { provider: "SLACK", externalWorkspaceId: teamId } },
+          select: { workspaceId: true },
+        }),
+        tx.workspaceIntegrationBinding.findUnique({
+          where: { provider_externalWorkspaceId: { provider: "SLACK", externalWorkspaceId: teamId } },
+          select: { workspaceId: true },
+        }),
+      ]);
+
+      if (existingTeamInstallation && existingTeamInstallation.workspaceId !== params.workspaceId) {
+        throw new AppError(409, "SLACK_TEAM_ALREADY_CONNECTED", "That Slack workspace is already connected to another Corgtex workspace.");
+      }
+      if (existingTeamBinding && existingTeamBinding.workspaceId !== params.workspaceId) {
+        throw new AppError(409, "SLACK_TEAM_ALREADY_CONNECTED", "That Slack workspace is already bound to another Corgtex workspace.");
+      }
+
+      await tx.workspaceIntegrationBinding.upsert({
+        where: { workspaceId_provider: { workspaceId: params.workspaceId, provider: "SLACK" } },
+        update: {
+          externalOrgId: params.oauthResponse.enterprise?.id ?? null,
+          externalTeamName: params.oauthResponse.team?.name ?? null,
+          appId: params.oauthResponse.app_id ?? env.SLACK_APP_ID ?? null,
+          installedByUserId: params.installedByUserId ?? null,
+        },
+        create: {
+          workspaceId: params.workspaceId,
+          provider: "SLACK",
+          externalWorkspaceId: teamId,
+          externalOrgId: params.oauthResponse.enterprise?.id ?? null,
+          externalTeamName: params.oauthResponse.team?.name ?? null,
+          appId: params.oauthResponse.app_id ?? env.SLACK_APP_ID ?? null,
+          installedByUserId: params.installedByUserId ?? null,
+        },
+      });
+
+      return tx.communicationInstallation.upsert({
         where: { provider_externalWorkspaceId: { provider: "SLACK", externalWorkspaceId: teamId } },
-        select: { workspaceId: true },
-      }),
-      tx.workspaceIntegrationBinding.findUnique({
-        where: { provider_externalWorkspaceId: { provider: "SLACK", externalWorkspaceId: teamId } },
-        select: { workspaceId: true },
-      }),
-    ]);
-
-    if (existingTeamInstallation && existingTeamInstallation.workspaceId !== params.workspaceId) {
+        update: {
+          externalOrgId: params.oauthResponse.enterprise?.id ?? null,
+          externalTeamName: params.oauthResponse.team?.name ?? null,
+          appId: params.oauthResponse.app_id ?? env.SLACK_APP_ID ?? null,
+          botUserId: params.oauthResponse.bot_user_id ?? null,
+          botTokenEnc,
+          scopes: grantedScopes,
+          optionalScopes,
+          status: "ACTIVE",
+          installedByUserId: params.installedByUserId ?? null,
+          installedAt: new Date(),
+          disconnectedAt: null,
+          lastError: null,
+          settings: slackArchiveSettings(grantedScopes),
+        },
+        create: {
+          workspaceId: params.workspaceId,
+          provider: "SLACK",
+          externalWorkspaceId: teamId,
+          externalOrgId: params.oauthResponse.enterprise?.id ?? null,
+          externalTeamName: params.oauthResponse.team?.name ?? null,
+          appId: params.oauthResponse.app_id ?? env.SLACK_APP_ID ?? null,
+          botUserId: params.oauthResponse.bot_user_id ?? null,
+          botTokenEnc,
+          scopes: grantedScopes,
+          optionalScopes,
+          installedByUserId: params.installedByUserId ?? null,
+          settings: slackArchiveSettings(grantedScopes),
+        },
+      });
+    });
+  } catch (error) {
+    if (isPrismaUniqueConstraintError(error)) {
       throw new AppError(409, "SLACK_TEAM_ALREADY_CONNECTED", "That Slack workspace is already connected to another Corgtex workspace.");
     }
-    if (existingTeamBinding && existingTeamBinding.workspaceId !== params.workspaceId) {
-      throw new AppError(409, "SLACK_TEAM_ALREADY_CONNECTED", "That Slack workspace is already bound to another Corgtex workspace.");
-    }
-
-    await tx.workspaceIntegrationBinding.upsert({
-      where: { workspaceId_provider: { workspaceId: params.workspaceId, provider: "SLACK" } },
-      update: {
-        externalOrgId: params.oauthResponse.enterprise?.id ?? null,
-        externalTeamName: params.oauthResponse.team?.name ?? null,
-        appId: params.oauthResponse.app_id ?? env.SLACK_APP_ID ?? null,
-        installedByUserId: params.installedByUserId ?? null,
-      },
-      create: {
-        workspaceId: params.workspaceId,
-        provider: "SLACK",
-        externalWorkspaceId: teamId,
-        externalOrgId: params.oauthResponse.enterprise?.id ?? null,
-        externalTeamName: params.oauthResponse.team?.name ?? null,
-        appId: params.oauthResponse.app_id ?? env.SLACK_APP_ID ?? null,
-        installedByUserId: params.installedByUserId ?? null,
-      },
-    });
-
-    return tx.communicationInstallation.upsert({
-      where: { provider_externalWorkspaceId: { provider: "SLACK", externalWorkspaceId: teamId } },
-      update: {
-        externalOrgId: params.oauthResponse.enterprise?.id ?? null,
-        externalTeamName: params.oauthResponse.team?.name ?? null,
-        appId: params.oauthResponse.app_id ?? env.SLACK_APP_ID ?? null,
-        botUserId: params.oauthResponse.bot_user_id ?? null,
-        botTokenEnc,
-        scopes: grantedScopes,
-        optionalScopes,
-        status: "ACTIVE",
-        installedByUserId: params.installedByUserId ?? null,
-        installedAt: new Date(),
-        disconnectedAt: null,
-        lastError: null,
-        settings: slackArchiveSettings(grantedScopes),
-      },
-      create: {
-        workspaceId: params.workspaceId,
-        provider: "SLACK",
-        externalWorkspaceId: teamId,
-        externalOrgId: params.oauthResponse.enterprise?.id ?? null,
-        externalTeamName: params.oauthResponse.team?.name ?? null,
-        appId: params.oauthResponse.app_id ?? env.SLACK_APP_ID ?? null,
-        botUserId: params.oauthResponse.bot_user_id ?? null,
-        botTokenEnc,
-        scopes: grantedScopes,
-        optionalScopes,
-        installedByUserId: params.installedByUserId ?? null,
-        settings: slackArchiveSettings(grantedScopes),
-      },
-    });
-  });
+    throw error;
+  }
 }
 
 export async function saveSlackInstallation(actor: AppActor, params: {
