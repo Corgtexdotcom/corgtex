@@ -380,7 +380,7 @@ export default async function ProposalDetailPage({
           <MarkdownRenderer markdown={proposal.bodyMd} variant="document" className="nr-markdown" />
 
           <section className="nr-summary-section" style={{ marginTop: 24 }}>
-            <h2 className="nr-summary-title">Box files</h2>
+            <h2 className="nr-summary-title">References</h2>
             <ExternalResourceCards attachments={externalResourceAttachments} />
             {!isArchived && (
               <ExternalResourceAttachForm
@@ -422,7 +422,7 @@ export default async function ProposalDetailPage({
                 }}
               />
               {canRequestAdvice && (
-                <details open={!adviceRequests.some((request) => request.status === "ACTIVE")}>
+                <details>
                   <summary className="work-request-action nr-hide-marker">{t("btnRequestAdvice")}</summary>
                   <AdviceRequestForm
                     action={requestProposalAdviceAction}

@@ -41,6 +41,7 @@ export function DuplicateGuardActionEditorForm({
   members,
   labels,
   cancelHref,
+  footer,
   children,
 }: {
   action: DuplicateGuardFormAction;
@@ -54,6 +55,7 @@ export function DuplicateGuardActionEditorForm({
   members: WorkItemMemberOption[];
   labels: DuplicateGuardActionEditorLabels;
   cancelHref?: string;
+  footer?: ReactNode;
   children?: ReactNode;
 }) {
   const [state, formAction, isPending] = useActionState(action, null);
@@ -85,10 +87,12 @@ export function DuplicateGuardActionEditorForm({
         <input name="dueAt" type="date" defaultValue={dateInputValue(dueAt)} />
       </label>
       {children}
-      <div className="actions-inline">
-        <button type="submit" disabled={isPending}>{labels.submit}</button>
-        {cancelHref && <a className="link-button secondary" href={cancelHref}>{labels.cancel}</a>}
-      </div>
+      {footer ?? (
+        <div className="actions-inline">
+          <button type="submit" disabled={isPending}>{labels.submit}</button>
+          {cancelHref && <a className="link-button secondary" href={cancelHref}>{labels.cancel}</a>}
+        </div>
+      )}
     </form>
   );
 }

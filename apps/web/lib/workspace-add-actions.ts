@@ -25,15 +25,15 @@ export const WORKSPACE_ADD_ACTION_DEFINITIONS = {
   },
   action: {
     label: "Action",
-    description: "Create a new action draft.",
+    description: "Create an action or save a draft.",
   },
   tension: {
     label: "Tension",
-    description: "Capture a new tension.",
+    description: "Capture a tension or save a draft.",
   },
   proposal: {
     label: "Proposal",
-    description: "Draft a governance proposal.",
+    description: "Draft or open a governance proposal.",
   },
   goal: {
     label: "Goal",
