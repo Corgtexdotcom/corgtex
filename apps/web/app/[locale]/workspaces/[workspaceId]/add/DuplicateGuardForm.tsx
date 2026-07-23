@@ -20,6 +20,7 @@ export type DuplicateGuardFormState = {
   candidate: DuplicateGuardCandidate;
   recommendedResolution: "use_existing" | "update_existing" | "create_new";
   allowedResolutions: Array<"use_existing" | "update_existing" | "create_new">;
+  submitIntent?: string | null;
 } | null;
 
 export type DuplicateGuardFormAction = (
@@ -63,6 +64,7 @@ export function DuplicateGuardConfirmationPanel({
       {candidate.reasons.length > 0 && (
         <p style={{ margin: 0, color: "var(--muted)" }}>{candidate.reasons.join(", ")}</p>
       )}
+      {confirmation.submitIntent && <input type="hidden" name="submitIntent" value={confirmation.submitIntent} />}
       <input type="hidden" name="duplicateTargetEntityId" value={candidate.entityId} />
       <div className="actions-inline">
         {confirmation.allowedResolutions.map((resolution) => (

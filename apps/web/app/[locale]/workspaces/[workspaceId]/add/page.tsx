@@ -251,8 +251,12 @@ function cancelLink(returnTo: string) {
   return <a className="link-button secondary" href={returnTo}>Cancel</a>;
 }
 
-function duplicateGuardState(error: unknown): DuplicateGuardFormState {
-  if (isDuplicateGuardMatchError(error)) return duplicateGuardErrorPayload(error);
+function duplicateGuardState(error: unknown, formData?: FormData): DuplicateGuardFormState {
+  if (isDuplicateGuardMatchError(error)) {
+    const state = duplicateGuardErrorPayload(error);
+    const submitIntent = formData ? asOptional(formData, "submitIntent") : null;
+    return submitIntent ? { ...state, submitIntent } : state;
+  }
   throw error;
 }
 
@@ -647,7 +651,7 @@ export default async function WorkspaceAddPage({
       });
       refresh(workspaceId);
     } catch (error) {
-      return duplicateGuardState(error);
+      return duplicateGuardState(error, formData);
     }
     redirect(returnTo);
   }
@@ -686,7 +690,7 @@ export default async function WorkspaceAddPage({
       });
       refresh(workspaceId);
     } catch (error) {
-      return duplicateGuardState(error);
+      return duplicateGuardState(error, formData);
     }
     redirect(returnTo);
   }
@@ -728,7 +732,7 @@ export default async function WorkspaceAddPage({
       });
       refresh(workspaceId);
     } catch (error) {
-      return duplicateGuardState(error);
+      return duplicateGuardState(error, formData);
     }
     redirect(returnTo);
   }
@@ -738,7 +742,7 @@ export default async function WorkspaceAddPage({
     try {
       await createGoalFormAction(formData);
     } catch (error) {
-      return duplicateGuardState(error);
+      return duplicateGuardState(error, formData);
     }
     redirect(returnTo);
   }
@@ -778,7 +782,7 @@ export default async function WorkspaceAddPage({
     try {
       await createArticleAction(formData);
     } catch (error) {
-      return duplicateGuardState(error);
+      return duplicateGuardState(error, formData);
     }
     redirect(returnTo);
   }
@@ -933,7 +937,7 @@ export default async function WorkspaceAddPage({
         duplicateGuard: duplicateGuardFromFormData(formData),
       });
     } catch (error) {
-      return duplicateGuardState(error);
+      return duplicateGuardState(error, formData);
     }
     refresh(workspaceId);
     redirect(returnTo);
