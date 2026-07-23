@@ -286,6 +286,8 @@ export function getWorkspaceAddActions(context: WorkspaceAddActionContext): Work
       return (segments?.length ?? 0) > 1
         ? [action("circle"), action("role"), action("role_assignment")]
         : [action("circle"), action("role")];
+    case "roles":
+      return isStructureManager(context.role) ? [action("role"), action("role_assignment")] : [];
     case "finance":
       return context.featureFlags.FINANCE && context.featureFlags.PRACTICE_PROJECTS ? [action("finance_project")] : [];
     case "brain":

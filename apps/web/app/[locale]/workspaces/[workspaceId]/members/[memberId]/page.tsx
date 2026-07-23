@@ -1,14 +1,18 @@
-import { AppError, getMemberProfile } from "@corgtex/domain";
+import { AppError, getMemberProfile, requireWorkspaceMembership } from "@corgtex/domain";
+import { prisma } from "@corgtex/shared";
 import { requirePageActor } from "@/lib/auth";
 import { notFound } from "next/navigation";
 import Link from "next/link";
 import { MemberBriefing } from "./MemberBriefing";
 import { getTranslations } from "next-intl/server";
+import { RoleDirectorySurface } from "../../roles/RoleDirectorySurface";
+import { loadRoleDirectoryData } from "../../roles/role-directory";
 
 export const dynamic = "force-dynamic";
 
 interface PageProps {
   params: Promise<{ workspaceId: string; memberId: string }>;
+  searchParams?: Promise<Record<string, string | string[] | undefined>>;
 }
 
 function getInitials(name?: string | null, email?: string) {
@@ -21,8 +25,9 @@ function getInitials(name?: string | null, email?: string) {
   return email ? email.slice(0, 2).toUpperCase() : "?";
 }
 
-export default async function MemberProfilePage({ params }: PageProps) {
+export default async function MemberProfilePage({ params, searchParams }: PageProps) {
   const { workspaceId, memberId } = await params;
+  const resolvedSearch = searchParams ? await searchParams : {};
   const actor = await requirePageActor();
   const t = await getTranslations("members");
   if (!actor || actor.kind !== "user") {
@@ -30,8 +35,12 @@ export default async function MemberProfilePage({ params }: PageProps) {
   }
 
   let data;
+  let membership;
   try {
-    data = await getMemberProfile(actor, workspaceId, memberId);
+    [data, membership] = await Promise.all([
+      getMemberProfile(actor, workspaceId, memberId),
+      requireWorkspaceMembership({ actor, workspaceId }),
+    ]);
   } catch (error) {
     if (error instanceof AppError && (error.status === 403 || error.status === 404)) {
       notFound();
@@ -39,8 +48,15 @@ export default async function MemberProfilePage({ params }: PageProps) {
     throw error;
   }
 
+  const [currentWorkspace, roleDirectoryData] = await Promise.all([
+    prisma.workspace.findUnique({ where: { id: workspaceId }, select: { slug: true } }),
+    loadRoleDirectoryData(workspaceId),
+  ]);
   const { member, meetings, proposals, authoredTensions, recentActivity } = data;
+  const isDemo = currentWorkspace?.slug === "jnj-demo";
   const isCurrentUser = member.user?.id === actor.user.id;
+  const currentMemberId = membership?.id && membership.id !== "global-operator" ? membership.id : null;
+  const canManageStructure = !isDemo && (membership?.role === "ADMIN" || membership?.role === "FACILITATOR");
   const assignedCircles = Array.from(
     member.roleAssignments.reduce((circleMap, assignment) => {
       const circle = assignment.role.circle;
@@ -57,7 +73,7 @@ export default async function MemberProfilePage({ params }: PageProps) {
   const profileLinks: { label: string; href: string }[] = [];
   if (member.user?.linkedinUrl) profileLinks.push({ label: t("linkedin"), href: member.user.linkedinUrl });
   if (member.user?.websiteUrl) profileLinks.push({ label: t("website"), href: member.user.websiteUrl });
-  const circleHref = (circleId: string) => `/workspaces/${workspaceId}/circles?view=list&circleId=${circleId}#circle-${circleId}`;
+  const circleHref = (circleId: string) => `/workspaces/${workspaceId}/circles/${circleId}`;
 
   return (
     <>
@@ -131,29 +147,17 @@ export default async function MemberProfilePage({ params }: PageProps) {
         <div style={{ flex: 2, minWidth: 300 }}>
           <section className="ws-section" style={{ marginBottom: 32 }}>
             <h2 className="nr-section-header">{t("rolesAndCircles")}</h2>
-            {member.roleAssignments.length === 0 ? (
-              <p className="muted italic">{t("noRoles")}</p>
-            ) : (
-              <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-                {member.roleAssignments.map((ra) => (
-                  <div key={ra.id} className="nr-item">
-                    <div className="nr-item-meta" style={{ marginBottom: 4 }}>
-                      <Link href={ra.role.circle?.id ? circleHref(ra.role.circle.id) : `/workspaces/${workspaceId}/circles?view=list`} style={{ color: "var(--accent)", textDecoration: "none" }}>
-                        {ra.role.circle?.name || t("noCircle")} Circle
-                      </Link>
-                    </div>
-                    <Link href={`/workspaces/${workspaceId}/roles/${ra.role.id}`} className="nr-item-title" style={{ color: "inherit", textDecoration: "none", fontWeight: 700 }}>
-                      {ra.role.name}
-                    </Link>
-                    {ra.role.purposeMd && (
-                      <div className="nr-excerpt" style={{ marginTop: 8 }}>
-                        {ra.role.purposeMd}
-                      </div>
-                    )}
-                  </div>
-                ))}
-              </div>
-            )}
+            <RoleDirectorySurface
+              workspaceId={workspaceId}
+              baseHref={`/workspaces/${workspaceId}/members/${memberId}`}
+              searchParams={resolvedSearch}
+              currentMemberId={currentMemberId}
+              currentUserId={actor.user.id}
+              canManageStructure={canManageStructure}
+              isDemo={isDemo}
+              lockedMemberId={memberId}
+              {...roleDirectoryData}
+            />
           </section>
 
           <section className="ws-section" style={{ marginBottom: 32 }}>

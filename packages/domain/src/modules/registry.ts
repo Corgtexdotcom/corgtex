@@ -228,10 +228,18 @@ export const MODULE_MANIFESTS: readonly ModuleManifest[] = [
     key: "circles",
     tier: "core",
     title: "Circles",
-    description: "Circles and roles structure.",
+    description: "Circle structure, domains, and membership map.",
     dataOwnership: "corgtex_postgres",
     nav: { href: "/circles", labelKey: "circles", icon: "circles", group: "governance" },
     scopes: ["circles:read"],
+  },
+  {
+    key: "roles",
+    tier: "core",
+    title: "Roles",
+    description: "Role directory, staffing, and holder portfolios.",
+    dataOwnership: "corgtex_postgres",
+    nav: { href: "/roles", labelKey: "roles", icon: "roles", group: "governance" },
   },
   // --- First-party: finance group ---
   {

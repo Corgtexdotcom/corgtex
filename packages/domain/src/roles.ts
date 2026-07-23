@@ -228,6 +228,7 @@ export async function createRole(actor: AppActor, params: {
 export async function updateRole(actor: AppActor, params: {
   workspaceId: string;
   roleId: string;
+  circleId?: string;
   name?: string;
   purposeMd?: string | null;
   accountabilities?: string[];
@@ -249,6 +250,23 @@ export async function updateRole(actor: AppActor, params: {
     invariant(role && role.circle.workspaceId === params.workspaceId && !role.archivedAt, 404, "NOT_FOUND", "Role not found.");
 
     const data: Record<string, unknown> = {};
+    if (params.circleId !== undefined) {
+      const circleId = params.circleId.trim();
+      invariant(circleId.length > 0, 400, "INVALID_INPUT", "Circle is required.");
+      if (circleId !== role.circleId) {
+        const targetCircle = await tx.circle.findUnique({
+          where: { id: circleId },
+          select: {
+            id: true,
+            workspaceId: true,
+            archivedAt: true,
+          },
+        });
+        invariant(targetCircle && targetCircle.workspaceId === params.workspaceId && !targetCircle.archivedAt, 404, "NOT_FOUND", "Circle not found.");
+        data.circleId = targetCircle.id;
+        data.sortOrder = await tx.role.count({ where: { circleId: targetCircle.id } });
+      }
+    }
     if (params.name !== undefined) {
       const name = params.name.trim();
       invariant(name.length > 0, 400, "INVALID_INPUT", "Role name is required.");

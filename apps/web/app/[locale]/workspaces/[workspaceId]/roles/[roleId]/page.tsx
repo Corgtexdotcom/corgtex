@@ -1,8 +1,11 @@
-import { AppError, getRole } from "@corgtex/domain";
+import { AppError, getRole, requireWorkspaceMembership } from "@corgtex/domain";
+import { prisma } from "@corgtex/shared";
 import { requirePageActor } from "@/lib/auth";
 import { notFound } from "next/navigation";
 import Link from "next/link";
 import { getTranslations } from "next-intl/server";
+import { RoleDirectorySurface } from "../RoleDirectorySurface";
+import { loadRoleDirectoryData } from "../role-directory";
 
 export const dynamic = "force-dynamic";
 
@@ -23,8 +26,12 @@ export default async function RoleDetailPage({ params }: PageProps) {
   const t = await getTranslations("roles");
 
   let role;
+  let membership;
   try {
-    role = await getRole(actor, { workspaceId, roleId });
+    [role, membership] = await Promise.all([
+      getRole(actor, { workspaceId, roleId }),
+      requireWorkspaceMembership({ actor, workspaceId }),
+    ]);
   } catch (error) {
     if (error instanceof AppError && (error.status === 403 || error.status === 404)) {
       notFound();
@@ -32,16 +39,24 @@ export default async function RoleDetailPage({ params }: PageProps) {
     throw error;
   }
 
-  const circleHref = `/workspaces/${workspaceId}/circles?view=list&circleId=${role.circle.id}#circle-${role.circle.id}`;
+  const [currentWorkspace, roleDirectoryData] = await Promise.all([
+    prisma.workspace.findUnique({ where: { id: workspaceId }, select: { slug: true } }),
+    loadRoleDirectoryData(workspaceId, { roleIds: [role.id] }),
+  ]);
+  const currentUserId = actor.kind === "user" ? actor.user.id : null;
+  const currentMemberId = membership?.id && membership.id !== "global-operator" ? membership.id : null;
+  const isDemo = currentWorkspace?.slug === "jnj-demo";
+  const canManageStructure = !isDemo && (membership?.role === "ADMIN" || membership?.role === "FACILITATOR");
+  const circleHref = `/workspaces/${workspaceId}/circles/${role.circle.id}`;
 
   return (
     <>
       <header className="nr-masthead" style={{ textAlign: "left", marginBottom: 32 }}>
         <Link
-          href={circleHref}
+          href={`/workspaces/${workspaceId}/roles`}
           style={{ textDecoration: "none", color: "var(--muted)", fontSize: "0.85rem", marginBottom: 16, display: "inline-block" }}
         >
-          {t("backToCircle", { name: role.circle.name })}
+          {t("backToRoles")}
         </Link>
         <h1 style={{ border: "none", padding: 0, margin: 0, fontSize: "2rem" }}>{role.name}</h1>
         <div className="nr-masthead-meta" style={{ marginTop: 10 }}>
@@ -51,6 +66,21 @@ export default async function RoleDetailPage({ params }: PageProps) {
           {role.coreRoleType && <span>{t("coreRoleMeta", { type: role.coreRoleType })}</span>}
         </div>
       </header>
+
+      <section className="ws-section" style={{ marginBottom: 32 }}>
+        <h2 className="nr-section-header">{t("management")}</h2>
+        <RoleDirectorySurface
+          workspaceId={workspaceId}
+          baseHref={`/workspaces/${workspaceId}/roles/${role.id}`}
+          currentMemberId={currentMemberId}
+          currentUserId={currentUserId}
+          canManageStructure={canManageStructure}
+          isDemo={isDemo}
+          showToolbar={false}
+          showFilters={false}
+          {...roleDirectoryData}
+        />
+      </section>
 
       <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 2fr) minmax(280px, 1fr)", gap: 32 }}>
         <div>

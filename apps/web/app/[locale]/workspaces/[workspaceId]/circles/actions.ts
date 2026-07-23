@@ -98,11 +98,16 @@ export async function updateRoleAction(formData: FormData) {
   await updateRole(actor, {
     workspaceId,
     roleId: asString(formData, "roleId"),
+    circleId: formData.has("circleId") ? asString(formData, "circleId") : undefined,
     name: asOptional(formData, "name") ?? undefined,
     purposeMd: formData.has("purposeMd") ? asOptional(formData, "purposeMd") : undefined,
     accountabilities: formData.has("accountabilities")
       ? asString(formData, "accountabilities").split("\n").map((v) => v.trim()).filter(Boolean)
       : undefined,
+    artifacts: formData.has("artifacts")
+      ? asString(formData, "artifacts").split("\n").map((v) => v.trim()).filter(Boolean)
+      : undefined,
+    coreRoleType: formData.has("coreRoleType") ? asOptional(formData, "coreRoleType") : undefined,
   });
   refresh(workspaceId);
 }

@@ -122,6 +122,15 @@ describe("workspace add actions", () => {
     expect(kinds({ pathname: "/workspaces/ws-1/circles/circle-1", role: "CONTRIBUTOR" })).toEqual([]);
   });
 
+  it("offers role creation and assignment from the roles surface", () => {
+    expect(kinds({ pathname: "/workspaces/ws-1/roles" })).toEqual(["role", "role_assignment"]);
+    expect(kinds({ pathname: "/workspaces/ws-1/roles", role: "FACILITATOR" })).toEqual([
+      "role",
+      "role_assignment",
+    ]);
+    expect(kinds({ pathname: "/workspaces/ws-1/roles", role: "CONTRIBUTOR" })).toEqual([]);
+  });
+
   it("respects feature flags and demo read-only state", () => {
     expect(kinds({
       pathname: "/workspaces/ws-1/goals",

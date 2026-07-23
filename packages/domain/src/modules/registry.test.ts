@@ -40,6 +40,7 @@ const EXPECTED_NAV: Array<{
   { href: "/agreements", labelKey: "agreements", icon: "agreements", group: "governance" },
   { href: "/proposals", labelKey: "proposals", icon: "proposals", group: "governance", mobilePrimaryOrder: 50 },
   { href: "/circles", labelKey: "circles", icon: "circles", group: "governance" },
+  { href: "/roles", labelKey: "roles", icon: "roles", group: "governance" },
   { href: "/finance", labelKey: "finance", icon: "finance", group: "finance", featureFlag: "FINANCE" },
   {
     href: "/agents",
