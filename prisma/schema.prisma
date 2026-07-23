@@ -662,6 +662,7 @@ model Workspace {
   agentIdentities                AgentIdentity[]
   deliberationEntries            DeliberationEntry[]
   communicationInstallations     CommunicationInstallation[]
+  integrationBindings            WorkspaceIntegrationBinding[]
   communicationExternalUsers     CommunicationExternalUser[]
   communicationChannels          CommunicationChannel[]
   communicationMessages          CommunicationMessage[]
@@ -775,6 +776,25 @@ model WorkspaceModuleAccessRequest {
   workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
 
   @@index([workspaceId, status])
+}
+
+model WorkspaceIntegrationBinding {
+  id                  String                @id @default(uuid())
+  workspaceId         String
+  provider            CommunicationProvider
+  externalWorkspaceId String
+  externalOrgId       String?
+  externalTeamName    String?
+  appId               String?
+  installedByUserId   String?
+  createdAt           DateTime              @default(now())
+  updatedAt           DateTime              @updatedAt
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@unique([workspaceId, provider])
+  @@unique([provider, externalWorkspaceId])
+  @@index([workspaceId])
 }
 
 model CommunicationInstallation {

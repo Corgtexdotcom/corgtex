@@ -21,6 +21,7 @@ import {
 } from "./meeting-facilitation";
 import { normalizeMeetingUrl, normalizeRecorderMeetingUrl } from "./meeting-urls";
 import {
+  getSlackExpectedTeamIdForWorkspace,
   saveSlackInstallationForWorkspace,
   validateSlackPostTarget,
   type SlackOAuthResponse,
@@ -6025,12 +6026,14 @@ export async function getControlPlaneSlackSetupTarget(actor: AppActor, deploymen
     managedWorkspaceId,
     deploymentLabel: deployment.label,
     workspaceName: deployment.managedWorkspace?.name ?? null,
+    expectedTeamId: await getSlackExpectedTeamIdForWorkspace(managedWorkspaceId),
   };
 }
 
 export async function saveControlPlaneSlackInstallation(actor: AppActor, params: {
   deploymentId: string;
   oauthResponse: SlackOAuthResponse;
+  expectedTeamId?: string | null;
   reason?: string | null;
 }) {
   requireControlPlaneScope(actor, "control-plane:integrations:write");
@@ -6044,6 +6047,7 @@ export async function saveControlPlaneSlackInstallation(actor: AppActor, params:
     workspaceId: managedWorkspaceId,
     oauthResponse: params.oauthResponse,
     installedByUserId: actorUserId(actor),
+    expectedTeamId: params.expectedTeamId,
   });
   await recordCustomerDeploymentEvent(actor, params.deploymentId, "control_plane.integration.slack_connected", {
     reason,

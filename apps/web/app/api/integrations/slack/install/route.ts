@@ -2,13 +2,13 @@ import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
 import { requirePageActor } from "@/lib/auth";
 import { handleRouteError } from "@/lib/http";
-import { createSlackOAuthState, slackOAuthScopes } from "@corgtex/domain";
+import { createSlackOAuthState, getSlackOAuthInstallTarget, slackOAuthScopes } from "@corgtex/domain";
 import { env } from "@corgtex/shared";
 import { appRedirectUrl, rethrowNextRedirectError, slackCallbackRedirectUri } from "../oauth";
 
 export async function GET(request: Request) {
   try {
-    await requirePageActor();
+    const actor = await requirePageActor();
     const url = new URL(request.url);
     const workspaceId = url.searchParams.get("workspaceId");
     if (!workspaceId) {
@@ -19,7 +19,14 @@ export async function GET(request: Request) {
       return NextResponse.redirect(appRedirectUrl(request, `/workspaces/${workspaceId}/tools?type=CONNECTOR&q=slack&slack=not-configured`));
     }
 
-    const state = createSlackOAuthState(workspaceId);
+    const target = await getSlackOAuthInstallTarget(actor, workspaceId);
+    const state = createSlackOAuthState(workspaceId, {
+      expectedTeamId: target.expectedTeamId,
+      flow: {
+        kind: "workspace",
+        initiatedByUserId: actor.kind === "user" ? actor.user.id : null,
+      },
+    });
     const cookieStore = await cookies();
     cookieStore.set("slack_oauth_state", `${state.value}:${state.nonce}`, {
       httpOnly: true,
@@ -35,6 +42,9 @@ export async function GET(request: Request) {
     authorize.searchParams.set("scope", slackOAuthScopes());
     authorize.searchParams.set("redirect_uri", redirectUri);
     authorize.searchParams.set("state", state.value);
+    if (target.expectedTeamId) {
+      authorize.searchParams.set("team", target.expectedTeamId);
+    }
 
     return NextResponse.redirect(authorize);
   } catch (error) {

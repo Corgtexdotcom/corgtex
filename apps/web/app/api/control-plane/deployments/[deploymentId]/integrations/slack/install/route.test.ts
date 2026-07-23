@@ -60,8 +60,8 @@ beforeEach(() => {
   vi.resetModules();
   vi.clearAllMocks();
   requirePageActorMock.mockResolvedValue({ kind: "user", user: { id: "operator-1" } });
-  getControlPlaneSlackSetupTargetMock.mockResolvedValue({ deploymentId: "dep-1", managedWorkspaceId: "ws-1" });
-  createSlackOAuthStateMock.mockReturnValue({ value: "state-value", nonce: "nonce-value" });
+  getControlPlaneSlackSetupTargetMock.mockResolvedValue({ deploymentId: "dep-1", managedWorkspaceId: "ws-1", expectedTeamId: "T1" });
+  createSlackOAuthStateMock.mockReturnValue({ value: "state-value", nonce: "nonce-value", expectedTeamId: "T1" });
   slackOAuthScopesMock.mockReturnValue("commands,chat:write");
   isDatabaseUnavailableErrorMock.mockReturnValue(false);
   cookiesMock.mockResolvedValue({ set: cookieSetMock });
@@ -91,6 +91,15 @@ describe("GET /api/control-plane/deployments/[deploymentId]/integrations/slack/i
     expect(authorizeUrl.searchParams.get("scope")).toBe("commands,chat:write");
     expect(authorizeUrl.searchParams.get("state")).toBe("state-value");
     expect(authorizeUrl.searchParams.get("redirect_uri")).toBe("https://app.corgtex.com/api/control-plane/deployments/dep-1/integrations/slack/callback");
+    expect(authorizeUrl.searchParams.get("team")).toBe("T1");
+    expect(createSlackOAuthStateMock).toHaveBeenCalledWith("ws-1", {
+      expectedTeamId: "T1",
+      flow: {
+        kind: "control_plane",
+        deploymentId: "dep-1",
+        initiatedByUserId: "operator-1",
+      },
+    });
     expect(cookieSetMock).toHaveBeenCalledWith(
       "control_plane_slack_oauth_state",
       "state-value:nonce-value:dep-1:operator-1",

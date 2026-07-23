@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const {
   requirePageActorMock,
   exchangeSlackOAuthCodeMock,
+  isSlackTenantBindingErrorMock,
   readSlackOAuthStateMock,
   saveSlackInstallationMock,
   cookiesMock,
@@ -11,6 +12,7 @@ const {
 } = vi.hoisted(() => ({
   requirePageActorMock: vi.fn(),
   exchangeSlackOAuthCodeMock: vi.fn(),
+  isSlackTenantBindingErrorMock: vi.fn(),
   readSlackOAuthStateMock: vi.fn(),
   saveSlackInstallationMock: vi.fn(),
   cookiesMock: vi.fn(),
@@ -56,6 +58,7 @@ vi.mock("@corgtex/domain", () => ({
     }
   },
   exchangeSlackOAuthCode: exchangeSlackOAuthCodeMock,
+  isSlackTenantBindingError: isSlackTenantBindingErrorMock,
   readSlackOAuthState: readSlackOAuthStateMock,
   saveSlackInstallation: saveSlackInstallationMock,
 }));
@@ -64,9 +67,16 @@ beforeEach(() => {
   vi.resetModules();
   vi.stubEnv("APP_URL", "https://app.corgtex.com/");
   requirePageActorMock.mockResolvedValue({ kind: "user", user: { id: "user-1" } });
-  readSlackOAuthStateMock.mockReturnValue({ workspaceId: "workspace-1", nonce: "nonce-value" });
+  readSlackOAuthStateMock.mockReturnValue({
+    version: 1,
+    workspaceId: "workspace-1",
+    nonce: "nonce-value",
+    expectedTeamId: "T1",
+    flow: { kind: "workspace" },
+  });
   exchangeSlackOAuthCodeMock.mockResolvedValue({ ok: true, team: { id: "T1" }, access_token: "xoxb-token" });
   saveSlackInstallationMock.mockResolvedValue({ id: "installation-1" });
+  isSlackTenantBindingErrorMock.mockReturnValue(false);
   cookieGetMock.mockReturnValue({ value: "state-value:nonce-value" });
   cookiesMock.mockResolvedValue({
     get: cookieGetMock,
@@ -96,11 +106,41 @@ describe("GET /api/integrations/slack/callback", () => {
       {
         workspaceId: "workspace-1",
         oauthResponse: { ok: true, team: { id: "T1" }, access_token: "xoxb-token" },
+        expectedTeamId: "T1",
       },
     );
     expect(cookieDeleteMock).toHaveBeenCalledWith("slack_oauth_state");
     expect(response.headers.get("location")).toBe(
       "https://app.corgtex.com/workspaces/workspace-1/tools?type=CONNECTOR&q=slack&slack=connected",
+    );
+  });
+
+  it("rejects wrong-team callbacks before saving Slack tokens", async () => {
+    exchangeSlackOAuthCodeMock.mockResolvedValueOnce({ ok: true, team: { id: "T2" }, access_token: "xoxb-token" });
+    const { GET } = await import("./route");
+
+    const response = await GET(
+      new Request("https://app.corgtex.com/api/integrations/slack/callback?code=auth-code&state=state-value"),
+    );
+
+    expect(saveSlackInstallationMock).not.toHaveBeenCalled();
+    expect(response.headers.get("location")).toBe(
+      "https://app.corgtex.com/workspaces/workspace-1/tools?type=CONNECTOR&q=slack&slack=wrong-team",
+    );
+  });
+
+  it("redirects binding conflicts without leaking tenant details", async () => {
+    const bindingError = Object.assign(new Error("bound elsewhere"), { code: "SLACK_TEAM_ALREADY_CONNECTED" });
+    saveSlackInstallationMock.mockRejectedValueOnce(bindingError);
+    isSlackTenantBindingErrorMock.mockReturnValueOnce(true);
+    const { GET } = await import("./route");
+
+    const response = await GET(
+      new Request("https://app.corgtex.com/api/integrations/slack/callback?code=auth-code&state=state-value"),
+    );
+
+    expect(response.headers.get("location")).toBe(
+      "https://app.corgtex.com/workspaces/workspace-1/tools?type=CONNECTOR&q=slack&slack=wrong-team",
     );
   });
 

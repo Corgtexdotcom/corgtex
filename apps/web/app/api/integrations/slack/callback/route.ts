@@ -2,8 +2,22 @@ import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
 import { requirePageActor } from "@/lib/auth";
 import { handleRouteError } from "@/lib/http";
-import { exchangeSlackOAuthCode, readSlackOAuthState, saveSlackInstallation } from "@corgtex/domain";
+import {
+  exchangeSlackOAuthCode,
+  isSlackTenantBindingError,
+  readSlackOAuthState,
+  saveSlackInstallation,
+} from "@corgtex/domain";
 import { appRedirectUrl, rethrowNextRedirectError, slackCallbackRedirectUri } from "../oauth";
+
+function slackTeamId(oauthResponse: Awaited<ReturnType<typeof exchangeSlackOAuthCode>>) {
+  const teamId = oauthResponse.team?.id?.trim();
+  return teamId || null;
+}
+
+function slackToolsRedirect(request: Request, workspaceId: string, status: string) {
+  return NextResponse.redirect(appRedirectUrl(request, `/workspaces/${workspaceId}/tools?type=CONNECTOR&q=slack&slack=${status}`));
+}
 
 export async function GET(request: Request) {
   try {
@@ -29,12 +43,23 @@ export async function GET(request: Request) {
 
     const redirectUri = slackCallbackRedirectUri(request);
     const oauthResponse = await exchangeSlackOAuthCode(code, redirectUri);
-    await saveSlackInstallation(actor, {
-      workspaceId: parsed.workspaceId,
-      oauthResponse,
-    });
+    if (parsed.expectedTeamId && slackTeamId(oauthResponse) !== parsed.expectedTeamId) {
+      return slackToolsRedirect(request, parsed.workspaceId, "wrong-team");
+    }
+    try {
+      await saveSlackInstallation(actor, {
+        workspaceId: parsed.workspaceId,
+        oauthResponse,
+        expectedTeamId: parsed.expectedTeamId,
+      });
+    } catch (error) {
+      if (isSlackTenantBindingError(error)) {
+        return slackToolsRedirect(request, parsed.workspaceId, "wrong-team");
+      }
+      throw error;
+    }
 
-    return NextResponse.redirect(appRedirectUrl(request, `/workspaces/${parsed.workspaceId}/tools?type=CONNECTOR&q=slack&slack=connected`));
+    return slackToolsRedirect(request, parsed.workspaceId, "connected");
   } catch (error) {
     rethrowNextRedirectError(error);
     return handleRouteError(error);
