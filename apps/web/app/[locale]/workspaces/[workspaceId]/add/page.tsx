@@ -13,6 +13,7 @@ import { notFound, redirect } from "next/navigation";
 import {
   AppError,
   AGREEMENT_BRAIN_ARTICLE_TYPES,
+  classifyExternalResourceUrl,
   createCatalogRequest,
   createAction,
   createActionChecklistItem,
@@ -149,6 +150,11 @@ type CreateRequestAddOn = {
   preferredChannel: AdviceRequestPreferredChannel | null;
 };
 
+type CreateReferenceAddOn = {
+  url: string;
+  descriptionMd: string | null;
+};
+
 function splitList(value: string | null) {
   return (value ?? "")
     .split(/[\n,]+/)
@@ -282,6 +288,18 @@ function createRequestAddOnFromForm(formData: FormData): CreateRequestAddOn | nu
   };
 }
 
+function validateCreateReferenceAddOn(formData: FormData, applyAddOns: boolean): CreateReferenceAddOn | null {
+  if (!applyAddOns) return null;
+  const url = asOptional(formData, "referenceUrl");
+  if (!url) return null;
+
+  classifyExternalResourceUrl(url);
+  return {
+    url,
+    descriptionMd: asOptional(formData, "referenceDescriptionMd"),
+  };
+}
+
 async function validateCreateRequestAddOn(actor: AppActor, params: {
   workspaceId: string;
   formData: FormData;
@@ -335,15 +353,14 @@ async function maybeAttachCreateReference(actor: AppActor, params: {
   workspaceId: string;
   entityType: "Action" | "Tension" | "Proposal";
   entityId: string;
-  formData: FormData;
+  reference: CreateReferenceAddOn | null;
 }) {
-  const url = asOptional(params.formData, "referenceUrl");
-  if (!url) return;
+  if (!params.reference) return;
 
   await upsertWorkspaceExternalResourceFromUrl(actor, {
     workspaceId: params.workspaceId,
-    url,
-    descriptionMd: asOptional(params.formData, "referenceDescriptionMd"),
+    url: params.reference.url,
+    descriptionMd: params.reference.descriptionMd,
     entityType: params.entityType,
     entityId: params.entityId,
     purpose: "reference",
@@ -779,6 +796,7 @@ export default async function WorkspaceAddPage({
       const actor = await requirePageActor();
       const intent = createIntentFromForm(formData);
       const applyAddOns = shouldApplyCreateAddOns(formData);
+      const referenceAddOn = validateCreateReferenceAddOn(formData, applyAddOns);
       const proposalId = await proposalIdForCreateIntent(workspaceId, formData, intent);
       const requestAddOn = await validateCreateRequestAddOn(actor, {
         workspaceId,
@@ -805,7 +823,7 @@ export default async function WorkspaceAddPage({
           workspaceId,
           entityType: "Action",
           entityId: visibleAction.id,
-          formData,
+          reference: referenceAddOn,
         });
         await maybeCreateActionChecklist(actor, {
           workspaceId,
@@ -836,6 +854,7 @@ export default async function WorkspaceAddPage({
       const actor = await requirePageActor();
       const intent = createIntentFromForm(formData);
       const applyAddOns = shouldApplyCreateAddOns(formData);
+      const referenceAddOn = validateCreateReferenceAddOn(formData, applyAddOns);
       const proposalId = await proposalIdForCreateIntent(workspaceId, formData, intent);
       const requestAddOn = await validateCreateRequestAddOn(actor, {
         workspaceId,
@@ -862,7 +881,7 @@ export default async function WorkspaceAddPage({
           workspaceId,
           entityType: "Tension",
           entityId: visibleTension.id,
-          formData,
+          reference: referenceAddOn,
         });
         await maybeCreateRequestFromForm(actor, {
           workspaceId,
@@ -887,6 +906,7 @@ export default async function WorkspaceAddPage({
       const actor = await requirePageActor();
       const intent = createIntentFromForm(formData);
       const applyAddOns = shouldApplyCreateAddOns(formData);
+      const referenceAddOn = validateCreateReferenceAddOn(formData, applyAddOns);
       const requestAddOn = await validateCreateRequestAddOn(actor, {
         workspaceId,
         formData,
@@ -917,7 +937,7 @@ export default async function WorkspaceAddPage({
           workspaceId,
           entityType: "Proposal",
           entityId: proposal.id,
-          formData,
+          reference: referenceAddOn,
         });
         await maybeCreateRequestFromForm(actor, {
           workspaceId,
