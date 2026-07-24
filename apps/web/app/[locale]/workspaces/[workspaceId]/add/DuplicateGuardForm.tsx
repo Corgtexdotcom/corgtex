@@ -1,6 +1,7 @@
 "use client";
 
 import React, { useActionState } from "react";
+import { useFormStatus } from "react-dom";
 import type { ReactNode } from "react";
 
 type DuplicateGuardCandidate = {
@@ -86,5 +87,22 @@ export function DuplicateGuardForm({ action, className, encType, children }: Dup
       <DuplicateGuardConfirmationPanel state={state} isPending={isPending} />
       {children}
     </form>
+  );
+}
+
+export function DuplicateGuardSubmitButton({
+  children,
+  disabled,
+  pendingLabel,
+  ...props
+}: React.ButtonHTMLAttributes<HTMLButtonElement> & {
+  pendingLabel?: ReactNode;
+}) {
+  const { pending } = useFormStatus();
+
+  return (
+    <button {...props} type="submit" disabled={disabled || pending}>
+      {pending && pendingLabel ? pendingLabel : children}
+    </button>
   );
 }

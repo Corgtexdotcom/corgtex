@@ -11,6 +11,7 @@ import type {
 import type { ReactNode } from "react";
 import { notFound, redirect } from "next/navigation";
 import {
+  AppError,
   AGREEMENT_BRAIN_ARTICLE_TYPES,
   createCatalogRequest,
   createAction,
@@ -46,6 +47,7 @@ import { prisma, type AppActor } from "@corgtex/shared";
 import { requirePageActor } from "@/lib/auth";
 import { enforceDemoGuard } from "@/lib/demo-guard";
 import { MarkdownEditor } from "@/lib/components/MarkdownEditor";
+import { MultiSelectFilter, type MultiSelectFilterOption } from "@/lib/components/MultiSelectFilter";
 import { TimeZoneSelect } from "@/lib/components/TimeZoneSelect";
 import { WorkItemMemberSelect, type WorkItemMemberOption } from "@/lib/components/WorkItemMemberSelect";
 import { WorkItemPrioritySelect } from "@/lib/components/WorkItemPrioritySelect";
@@ -100,7 +102,7 @@ import {
 import { createPracticeProjectAction } from "../finance/actions";
 import { MeetingTranscriptUploadForm } from "../meetings/MeetingTranscriptUploadForm";
 import { DuplicateGuardActionEditorForm } from "./DuplicateGuardActionEditorForm";
-import { DuplicateGuardForm, type DuplicateGuardFormState } from "./DuplicateGuardForm";
+import { DuplicateGuardForm, DuplicateGuardSubmitButton, type DuplicateGuardFormState } from "./DuplicateGuardForm";
 import { PasteTextForm } from "./PasteTextForm";
 import { PracticeProjectAddPanel } from "./PracticeProjectAddPanel";
 
@@ -134,6 +136,16 @@ const CREATE_ADD_ON_STYLE = { border: "1px solid var(--line)", borderRadius: 8, 
 
 type WorkItemCreateIntent = "draft" | "open";
 
+type CreateRequestAddOn = {
+  audienceType: AdviceRequestAudienceType;
+  memberIds: string[];
+  targetCircleId: string | null;
+  messageMd: string;
+  deadlineAt: Date | null;
+  reminderAt: Date | null;
+  preferredChannel: AdviceRequestPreferredChannel | null;
+};
+
 function splitList(value: string | null) {
   return (value ?? "")
     .split(/[\n,]+/)
@@ -148,7 +160,7 @@ function parseOptionalNumber(value: string | null) {
 }
 
 function asStringArray(formData: FormData, key: string) {
-  return formData.getAll(key).map((value) => String(value).trim()).filter(Boolean);
+  return Array.from(new Set(formData.getAll(key).map((value) => String(value).trim()).filter(Boolean)));
 }
 
 function asOptionalDate(formData: FormData, key: string) {
@@ -168,6 +180,95 @@ function requestAudienceFromForm(formData: FormData): AdviceRequestAudienceType 
 function requestChannelFromForm(formData: FormData) {
   const preferredChannel = asOptional(formData, "requestPreferredChannel") as AdviceRequestPreferredChannel | null;
   return preferredChannel && REQUEST_CHANNELS.includes(preferredChannel) ? preferredChannel : null;
+}
+
+function shouldApplyCreateAddOns(formData: FormData) {
+  return asOptional(formData, "duplicateResolution") !== "use_existing";
+}
+
+function parseCreateRequestDate(formData: FormData, key: string, label: string) {
+  const value = asOptional(formData, key);
+  if (!value) return null;
+
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    throw new AppError(400, "INVALID_INPUT", `${label} must be a valid date.`);
+  }
+  if (date.getTime() <= Date.now()) {
+    throw new AppError(400, "INVALID_INPUT", `${label} must be in the future.`);
+  }
+  return date;
+}
+
+function createRequestAddOnFromForm(formData: FormData): CreateRequestAddOn | null {
+  const messageMd = asOptional(formData, "requestMessageMd");
+  if (!messageMd) return null;
+
+  const audienceType = requestAudienceFromForm(formData);
+  const deadlineAt = parseCreateRequestDate(formData, "requestDeadlineAt", "Deadline");
+  const reminderAt = parseCreateRequestDate(formData, "requestReminderAt", "Reminder");
+  if (deadlineAt && reminderAt && reminderAt > deadlineAt) {
+    throw new AppError(400, "INVALID_INPUT", "Reminder must be before or at the deadline.");
+  }
+
+  return {
+    audienceType,
+    memberIds: audienceType === "MEMBERS" ? asStringArray(formData, "requestMemberIds") : [],
+    targetCircleId: audienceType === "CIRCLE" ? asOptional(formData, "requestTargetCircleId") : null,
+    messageMd,
+    deadlineAt,
+    reminderAt,
+    preferredChannel: requestChannelFromForm(formData),
+  };
+}
+
+async function validateCreateRequestAddOn(actor: AppActor, params: {
+  workspaceId: string;
+  formData: FormData;
+  intent: WorkItemCreateIntent;
+  applyAddOns: boolean;
+}) {
+  if (params.intent !== "open" || !params.applyAddOns) return null;
+  const request = createRequestAddOnFromForm(params.formData);
+  if (!request) return null;
+  if (actor.kind !== "user") {
+    throw new AppError(400, "INVALID_ACTOR", "Only users can request input.");
+  }
+
+  if (request.audienceType === "MEMBERS") {
+    if (request.memberIds.length === 0) {
+      throw new AppError(400, "INVALID_INPUT", "Choose at least one person to request input from.");
+    }
+    const memberCount = await prisma.member.count({
+      where: {
+        workspaceId: params.workspaceId,
+        isActive: true,
+        id: { in: request.memberIds },
+      },
+    });
+    if (memberCount !== request.memberIds.length) {
+      throw new AppError(400, "INVALID_INPUT", "Every selected recipient must be an active workspace member.");
+    }
+  }
+
+  if (request.audienceType === "CIRCLE") {
+    if (!request.targetCircleId) {
+      throw new AppError(400, "INVALID_INPUT", "Choose a circle to request input from.");
+    }
+    const circle = await prisma.circle.findFirst({
+      where: {
+        id: request.targetCircleId,
+        workspaceId: params.workspaceId,
+        archivedAt: null,
+      },
+      select: { id: true },
+    });
+    if (!circle) {
+      throw new AppError(400, "INVALID_INPUT", "Target circle must belong to this workspace.");
+    }
+  }
+
+  return request;
 }
 
 async function maybeAttachCreateReference(actor: AppActor, params: {
@@ -193,26 +294,21 @@ async function maybeCreateRequestFromForm(actor: AppActor, params: {
   workspaceId: string;
   subjectType: "ACTION" | "TENSION" | "PROPOSAL";
   subjectId: string;
-  formData: FormData;
-  intent: WorkItemCreateIntent;
+  request: CreateRequestAddOn | null;
   canSendRequest: boolean;
 }) {
-  if (params.intent !== "open" || !params.canSendRequest) return;
-  const messageMd = asOptional(params.formData, "requestMessageMd");
-  if (!messageMd) return;
-
-  const audienceType = requestAudienceFromForm(params.formData);
+  if (!params.request || !params.canSendRequest) return;
   await createAdviceRequest(actor, {
     workspaceId: params.workspaceId,
     subjectType: params.subjectType,
     subjectId: params.subjectId,
-    audienceType,
-    memberIds: audienceType === "MEMBERS" ? asStringArray(params.formData, "requestMemberIds") : [],
-    targetCircleId: audienceType === "CIRCLE" ? asOptional(params.formData, "requestTargetCircleId") : null,
-    messageMd,
-    deadlineAt: asOptionalDate(params.formData, "requestDeadlineAt"),
-    reminderAt: asOptionalDate(params.formData, "requestReminderAt"),
-    preferredChannel: requestChannelFromForm(params.formData),
+    audienceType: params.request.audienceType,
+    memberIds: params.request.memberIds,
+    targetCircleId: params.request.targetCircleId,
+    messageMd: params.request.messageMd,
+    deadlineAt: params.request.deadlineAt,
+    reminderAt: params.request.reminderAt,
+    preferredChannel: params.request.preferredChannel,
   });
 }
 
@@ -331,6 +427,11 @@ function CreateRequestFields({
   memberOptions: WorkItemMemberOption[];
   circles: Array<{ id: string; name: string }>;
 }) {
+  const requestMemberOptions: MultiSelectFilterOption[] = memberOptions.map((member) => ({
+    value: member.id,
+    label: member.label,
+  }));
+
   return (
     <>
       <label>
@@ -341,18 +442,17 @@ function CreateRequestFields({
           <option value="CIRCLE">Circle</option>
         </select>
       </label>
-      <label>
-        People
-        <select
-          name="requestMemberIds"
-          multiple
-          size={Math.min(5, Math.max(2, memberOptions.length || 1))}
-        >
-          {memberOptions.map((member) => (
-            <option key={member.id} value={member.id}>{member.label}</option>
-          ))}
-        </select>
-      </label>
+      <MultiSelectFilter
+        name="requestMemberIds"
+        label="People"
+        options={requestMemberOptions}
+        allLabel="Choose people"
+        selectAllLabel="Select all"
+        unselectAllLabel="Unselect all"
+        selectedCountLabel="{count} selected"
+        collapseAllToEmpty={false}
+        className="nr-advice-recipient-picker"
+      />
       <label>
         Circle
         <select name="requestTargetCircleId" defaultValue="">
@@ -438,8 +538,8 @@ function CreateWorkItemFooter({
 }) {
   return (
     <div className="actions-inline">
-      <button type="submit" name="submitIntent" value="draft" className="secondary">{draftLabel}</button>
-      <button type="submit" name="submitIntent" value="open">{openLabel}</button>
+      <DuplicateGuardSubmitButton name="submitIntent" value="draft" className="secondary">{draftLabel}</DuplicateGuardSubmitButton>
+      <DuplicateGuardSubmitButton name="submitIntent" value="open">{openLabel}</DuplicateGuardSubmitButton>
       {cancelLink(returnTo)}
     </div>
   );
@@ -618,6 +718,13 @@ export default async function WorkspaceAddPage({
       await enforceDemoGuard(workspaceId);
       const actor = await requirePageActor();
       const intent = createIntentFromForm(formData);
+      const applyAddOns = shouldApplyCreateAddOns(formData);
+      const requestAddOn = await validateCreateRequestAddOn(actor, {
+        workspaceId,
+        formData,
+        intent,
+        applyAddOns,
+      });
       const action = await createAction(actor, {
         workspaceId,
         title: asString(formData, "title"),
@@ -629,26 +736,27 @@ export default async function WorkspaceAddPage({
         isPrivate: intent === "draft",
         duplicateGuard: duplicateGuardFromFormData(formData),
       });
-      await maybeAttachCreateReference(actor, {
-        workspaceId,
-        entityType: "Action",
-        entityId: action.id,
-        formData,
-      });
-      await maybeCreateActionChecklist(actor, {
-        workspaceId,
-        actionId: action.id,
-        formData,
-        canEditChecklist: action.status === "DRAFT" || action.status === "OPEN" || action.status === "IN_PROGRESS",
-      });
-      await maybeCreateRequestFromForm(actor, {
-        workspaceId,
-        subjectType: "ACTION",
-        subjectId: action.id,
-        formData,
-        intent,
-        canSendRequest: (action.status === "OPEN" || action.status === "IN_PROGRESS") && !action.isPrivate,
-      });
+      if (applyAddOns) {
+        await maybeAttachCreateReference(actor, {
+          workspaceId,
+          entityType: "Action",
+          entityId: action.id,
+          formData,
+        });
+        await maybeCreateActionChecklist(actor, {
+          workspaceId,
+          actionId: action.id,
+          formData,
+          canEditChecklist: action.status === "DRAFT" || action.status === "OPEN" || action.status === "IN_PROGRESS",
+        });
+        await maybeCreateRequestFromForm(actor, {
+          workspaceId,
+          subjectType: "ACTION",
+          subjectId: action.id,
+          request: requestAddOn,
+          canSendRequest: (action.status === "OPEN" || action.status === "IN_PROGRESS") && !action.isPrivate,
+        });
+      }
       refresh(workspaceId);
     } catch (error) {
       return duplicateGuardState(error, formData);
@@ -663,6 +771,13 @@ export default async function WorkspaceAddPage({
       await enforceDemoGuard(workspaceId);
       const actor = await requirePageActor();
       const intent = createIntentFromForm(formData);
+      const applyAddOns = shouldApplyCreateAddOns(formData);
+      const requestAddOn = await validateCreateRequestAddOn(actor, {
+        workspaceId,
+        formData,
+        intent,
+        applyAddOns,
+      });
       const tension = await createTension(actor, {
         workspaceId,
         title: asString(formData, "title"),
@@ -674,20 +789,21 @@ export default async function WorkspaceAddPage({
         isPrivate: intent === "draft",
         duplicateGuard: duplicateGuardFromFormData(formData),
       });
-      await maybeAttachCreateReference(actor, {
-        workspaceId,
-        entityType: "Tension",
-        entityId: tension.id,
-        formData,
-      });
-      await maybeCreateRequestFromForm(actor, {
-        workspaceId,
-        subjectType: "TENSION",
-        subjectId: tension.id,
-        formData,
-        intent,
-        canSendRequest: tension.status === "OPEN" && !tension.isPrivate,
-      });
+      if (applyAddOns) {
+        await maybeAttachCreateReference(actor, {
+          workspaceId,
+          entityType: "Tension",
+          entityId: tension.id,
+          formData,
+        });
+        await maybeCreateRequestFromForm(actor, {
+          workspaceId,
+          subjectType: "TENSION",
+          subjectId: tension.id,
+          request: requestAddOn,
+          canSendRequest: tension.status === "OPEN" && !tension.isPrivate,
+        });
+      }
       refresh(workspaceId);
     } catch (error) {
       return duplicateGuardState(error, formData);
@@ -702,6 +818,13 @@ export default async function WorkspaceAddPage({
       await enforceDemoGuard(workspaceId);
       const actor = await requirePageActor();
       const intent = createIntentFromForm(formData);
+      const applyAddOns = shouldApplyCreateAddOns(formData);
+      const requestAddOn = await validateCreateRequestAddOn(actor, {
+        workspaceId,
+        formData,
+        intent,
+        applyAddOns,
+      });
       const ownerMemberId = formData.has("ownerMemberId") ? asOptional(formData, "ownerMemberId") : undefined;
       const proposal = await createProposal(actor, {
         workspaceId,
@@ -716,20 +839,21 @@ export default async function WorkspaceAddPage({
         relatedActionIds: asStringArray(formData, "relatedActionIds"),
         duplicateGuard: duplicateGuardFromFormData(formData),
       });
-      await maybeAttachCreateReference(actor, {
-        workspaceId,
-        entityType: "Proposal",
-        entityId: proposal.id,
-        formData,
-      });
-      await maybeCreateRequestFromForm(actor, {
-        workspaceId,
-        subjectType: "PROPOSAL",
-        subjectId: proposal.id,
-        formData,
-        intent,
-        canSendRequest: proposal.status === "OPEN",
-      });
+      if (applyAddOns) {
+        await maybeAttachCreateReference(actor, {
+          workspaceId,
+          entityType: "Proposal",
+          entityId: proposal.id,
+          formData,
+        });
+        await maybeCreateRequestFromForm(actor, {
+          workspaceId,
+          subjectType: "PROPOSAL",
+          subjectId: proposal.id,
+          request: requestAddOn,
+          canSendRequest: proposal.status === "OPEN",
+        });
+      }
       refresh(workspaceId);
     } catch (error) {
       return duplicateGuardState(error, formData);
