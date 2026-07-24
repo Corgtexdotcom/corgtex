@@ -263,6 +263,7 @@ export default async function WorkspaceDashboard({
   const [
     unreadNotificationsCount,
     articles,
+    articleTotalCount,
     latestDailyWorkspaceBriefing,
     latestWeeklyWorkspaceBriefing,
     newspaperEditions,
@@ -304,6 +305,9 @@ export default async function WorkspaceDashboard({
       },
       orderBy: { updatedAt: "desc" },
       take: 50,
+    }),
+    prisma.brainArticle.count({
+      where: { workspaceId },
     }),
     prisma.workspaceBriefing.findFirst({
       where: {
@@ -654,7 +658,7 @@ export default async function WorkspaceDashboard({
 
       <div className="nr-footer">
         {t("footerStats", {
-          articles: articles.length,
+          articles: articleTotalCount,
           meetings: meetings.length,
           chunks: chunksCount,
           members: membersCount,

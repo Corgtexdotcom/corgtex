@@ -84,11 +84,6 @@ export default async function BrainPage({
 
   const filterHref = (type: string | null) => buildBrainIndexHref({ query, question, range, type });
   const rangeHref = (nextRange: "30d" | "90d" | "all") => buildBrainIndexHref({ query, question, range: nextRange, type: selectedType });
-  const articleTotal = typeCounts.reduce((total, entry) => total + entry.count, 0);
-  const selectedTotal = selectedType
-    ? (typeCounts.find((entry) => entry.type === selectedType)?.count ?? 0)
-    : articleTotal;
-  const selectedCount = visibleArticles.length;
 
   return (
     <div className="brain-page">
@@ -107,10 +102,6 @@ export default async function BrainPage({
         <div className="brain-stat-card">
           <strong>{status.totalArticles}</strong>
           <span>{t("totalArticles")}</span>
-        </div>
-        <div className="brain-stat-card">
-          <strong>{selectedCount}</strong>
-          <span>{t("visibleArticles")}</span>
         </div>
         <div className="brain-stat-card">
           <strong>{typeCounts.length}</strong>
@@ -204,16 +195,12 @@ export default async function BrainPage({
           <div className="brain-directory-header">
             <div>
               <h2 className="nr-section-header">{t("fullDirectory")}</h2>
-              <p className="nr-meta">
-                {t("directoryShowing", { count: selectedCount, total: selectedTotal })}
-              </p>
             </div>
           </div>
 
           <nav className="brain-filter-bar" aria-label={t("typeFilter")}>
             <a className={`brain-filter-chip${selectedType ? "" : " active"}`} href={filterHref(null)}>
               <span>{t("all")}</span>
-              <strong>{articleTotal}</strong>
             </a>
             {typeCounts.map(({ type, count }) => (
               <a key={type} className={`brain-filter-chip${selectedType === type ? " active" : ""}`} href={filterHref(type)}>
