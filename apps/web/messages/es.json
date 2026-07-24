@@ -1939,25 +1939,6 @@
       "observe": "Observar",
       "operate": "Operar"
     },
-    "search": {
-      "open": "Abrir paleta de comandos",
-      "placeholder": "Buscar..."
-    },
-    "commandPalette": {
-      "placeholder": "Escribe una pagina o seccion para navegar...",
-      "emptyTitle": "Ninguna pagina coincide con tu busqueda.",
-      "emptyHint": "Prueba con \"agentes\", \"releases\" u \"ops\".",
-      "items": {
-        "dashboard": "Ver metricas de flota, despliegues y estadisticas generales.",
-        "customers": "Ir a la lista de despliegues empresariales.",
-        "selfServe": "Revisar trials cloud, billing, smoke y acceso de soporte.",
-        "agents": "Monitorear gobernanza de agentes, modelos, ejecuciones y costes.",
-        "releases": "Revisar distribucion de versiones y rollouts.",
-        "recorders": "Revisar readiness, uso, calendarios y proveedores de grabadores.",
-        "operations": "Revisar logs de soporte y eventos break-glass.",
-        "users": "Gestionar perfiles globales y membresias de clientes."
-      }
-    },
     "sections": {
       "fleet": {
         "label": "Flota",
