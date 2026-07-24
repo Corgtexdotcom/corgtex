@@ -380,7 +380,7 @@ export default async function TensionDetailPage({
       </section>
 
       <section className="ws-section" style={{ marginBottom: 48 }}>
-        <h2 className="nr-section-header">Box files</h2>
+        <h2 className="nr-section-header">References</h2>
         <ExternalResourceCards attachments={externalResourceAttachments} />
         {!isArchived && (
           <ExternalResourceAttachForm
@@ -420,7 +420,7 @@ export default async function TensionDetailPage({
             }}
           />
           {canRequestInput && (
-            <details open={!inputRequests.some((request) => request.status === "ACTIVE")}>
+            <details>
               <summary className="work-request-action nr-hide-marker">{t("btnRequestInput")}</summary>
               <AdviceRequestForm
                 action={requestTensionInputAction}

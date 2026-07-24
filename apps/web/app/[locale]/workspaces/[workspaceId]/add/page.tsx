@@ -1,15 +1,33 @@
-import type { BrainArticleAuthority, BrainArticleType, BrainSourceType, GoalCadence, GoalLevel, GoalStatus } from "@prisma/client";
+import type {
+  AdviceRequestAudienceType,
+  AdviceRequestPreferredChannel,
+  BrainArticleAuthority,
+  BrainArticleType,
+  BrainSourceType,
+  GoalCadence,
+  GoalLevel,
+  GoalStatus,
+} from "@prisma/client";
+import type { ReactNode } from "react";
 import { notFound, redirect } from "next/navigation";
 import {
+  AppError,
   AGREEMENT_BRAIN_ARTICLE_TYPES,
+  classifyExternalResourceUrl,
   createCatalogRequest,
+  createAction,
+  createActionChecklistItem,
+  createAdviceRequest,
   createExternalDataSource,
+  createProposal,
+  createTension,
   createWorkspaceToolLink,
   canManagePracticeFinanceProjects,
   duplicateGuardErrorPayload,
   getMeetingRecorderConfig,
   getMemberInvitePolicy,
   isDuplicateGuardMatchError,
+  listActions,
   listCrmAccounts,
   listDeals,
   ingestSource,
@@ -20,14 +38,20 @@ import {
   listProposals,
   listQualifications,
   listRoles,
+  listTensions,
+  publishAction,
+  publishTension,
   requireWorkspaceMembership,
+  submitProposal,
+  upsertWorkspaceExternalResourceFromUrl,
 } from "@corgtex/domain";
 import { encrypt } from "@corgtex/connectors-sql";
-import { prisma } from "@corgtex/shared";
+import { prisma, type AppActor } from "@corgtex/shared";
 
 import { requirePageActor } from "@/lib/auth";
 import { enforceDemoGuard } from "@/lib/demo-guard";
 import { MarkdownEditor } from "@/lib/components/MarkdownEditor";
+import { MultiSelectFilter, type MultiSelectFilterOption } from "@/lib/components/MultiSelectFilter";
 import { TimeZoneSelect } from "@/lib/components/TimeZoneSelect";
 import { WorkItemMemberSelect, type WorkItemMemberOption } from "@/lib/components/WorkItemMemberSelect";
 import { WorkItemPrioritySelect } from "@/lib/components/WorkItemPrioritySelect";
@@ -54,7 +78,6 @@ import {
 import {
   assignRoleAction,
   bulkInviteAction,
-  createActionAction,
   createActivityAction,
   createCircleAction,
   createCommunicationSuggestionAction,
@@ -63,9 +86,7 @@ import {
   createDealAction,
   createMeetingSeriesAction,
   createMemberAction,
-  createProposalAction,
   createRoleAction,
-  createTensionAction,
   createWebhookEndpointAction,
   importMeetingInviteAction,
   inviteMemberAction,
@@ -85,7 +106,7 @@ import {
 import { createPracticeProjectAction } from "../finance/actions";
 import { MeetingTranscriptUploadForm } from "../meetings/MeetingTranscriptUploadForm";
 import { DuplicateGuardActionEditorForm } from "./DuplicateGuardActionEditorForm";
-import { DuplicateGuardForm, type DuplicateGuardFormState } from "./DuplicateGuardForm";
+import { DuplicateGuardForm, DuplicateGuardSubmitButton, type DuplicateGuardFormState } from "./DuplicateGuardForm";
 import { PasteTextForm } from "./PasteTextForm";
 import { PracticeProjectAddPanel } from "./PracticeProjectAddPanel";
 
@@ -113,6 +134,26 @@ const ARTICLE_AUTHORITY_LABELS: Record<BrainArticleAuthority, string> = {
   HISTORICAL: "Historical",
 };
 const SOURCE_TYPES: BrainSourceType[] = ["MEETING", "TICKET", "PR", "RFC", "INCIDENT", "SLACK", "CUSTOMER_FEEDBACK", "COMPETITOR", "RESEARCH", "ARTICLE", "DOC", "RUNBOOK", "EMAIL", "FILE_UPLOAD", "EXTERNAL_CONTENT"];
+const REQUEST_AUDIENCE_TYPES: AdviceRequestAudienceType[] = ["WORKSPACE", "MEMBERS", "CIRCLE"];
+const REQUEST_CHANNELS: AdviceRequestPreferredChannel[] = ["IN_APP", "SLACK", "EMAIL", "COPY"];
+const CREATE_ADD_ON_STYLE = { border: "1px solid var(--line)", borderRadius: 8, padding: 12 } as const;
+
+type WorkItemCreateIntent = "draft" | "open";
+
+type CreateRequestAddOn = {
+  audienceType: AdviceRequestAudienceType;
+  memberIds: string[];
+  targetCircleId: string | null;
+  messageMd: string;
+  deadlineAt: Date | null;
+  reminderAt: Date | null;
+  preferredChannel: AdviceRequestPreferredChannel | null;
+};
+
+type CreateReferenceAddOn = {
+  url: string;
+  descriptionMd: string | null;
+};
 
 function splitList(value: string | null) {
   return (value ?? "")
@@ -125,6 +166,243 @@ function parseOptionalNumber(value: string | null) {
   if (!value) return null;
   const parsed = Number.parseInt(value, 10);
   return Number.isNaN(parsed) ? null : parsed;
+}
+
+function asStringArray(formData: FormData, key: string) {
+  return Array.from(new Set(formData.getAll(key).map((value) => String(value).trim()).filter(Boolean)));
+}
+
+function asOptionalDate(formData: FormData, key: string) {
+  const value = asOptional(formData, key);
+  return value ? new Date(value) : null;
+}
+
+function createIntentFromForm(formData: FormData): WorkItemCreateIntent {
+  return asString(formData, "submitIntent") === "open" ? "open" : "draft";
+}
+
+function requestAudienceFromForm(formData: FormData): AdviceRequestAudienceType {
+  const audienceType = asString(formData, "requestAudienceType") as AdviceRequestAudienceType;
+  return REQUEST_AUDIENCE_TYPES.includes(audienceType) ? audienceType : "WORKSPACE";
+}
+
+function requestChannelFromForm(formData: FormData) {
+  const preferredChannel = asOptional(formData, "requestPreferredChannel") as AdviceRequestPreferredChannel | null;
+  return preferredChannel && REQUEST_CHANNELS.includes(preferredChannel) ? preferredChannel : null;
+}
+
+function shouldApplyCreateAddOns(formData: FormData) {
+  return asOptional(formData, "duplicateResolution") !== "use_existing";
+}
+
+async function proposalIdForCreateIntent(workspaceId: string, formData: FormData, intent: WorkItemCreateIntent) {
+  const proposalId = asOptional(formData, "proposalId");
+  if (!proposalId || intent === "draft") return proposalId;
+
+  const proposal = await prisma.proposal.findFirst({
+    where: {
+      id: proposalId,
+      workspaceId,
+      archivedAt: null,
+      isPrivate: false,
+      status: "OPEN",
+    },
+    select: { id: true },
+  });
+  return proposal?.id ?? null;
+}
+
+async function proposalLinksForCreateIntent(workspaceId: string, formData: FormData, intent: WorkItemCreateIntent) {
+  const sourceTensionId = asOptional(formData, "sourceTensionId");
+  const relatedActionIds = asStringArray(formData, "relatedActionIds");
+  if (intent === "draft") return { sourceTensionId: null, relatedActionIds: [] };
+
+  const [sourceTension, relatedActions] = await Promise.all([
+    sourceTensionId
+      ? prisma.tension.findFirst({
+        where: {
+          id: sourceTensionId,
+          workspaceId,
+          archivedAt: null,
+          isPrivate: false,
+          status: "OPEN",
+          proposalId: null,
+        },
+        select: { id: true },
+      })
+      : Promise.resolve(null),
+    relatedActionIds.length > 0
+      ? prisma.action.findMany({
+        where: {
+          id: { in: relatedActionIds },
+          workspaceId,
+          archivedAt: null,
+          isPrivate: false,
+          status: { in: ["OPEN", "IN_PROGRESS"] },
+          proposalId: null,
+        },
+        select: { id: true },
+      })
+      : Promise.resolve([]),
+  ]);
+  const relatedActionIdSet = new Set(relatedActions.map((action) => action.id));
+  return {
+    sourceTensionId: sourceTension?.id ?? null,
+    relatedActionIds: relatedActionIds.filter((actionId) => relatedActionIdSet.has(actionId)),
+  };
+}
+
+function parseCreateRequestDate(formData: FormData, key: string, label: string) {
+  const value = asOptional(formData, key);
+  if (!value) return null;
+
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    throw new AppError(400, "INVALID_INPUT", `${label} must be a valid date.`);
+  }
+  if (date.getTime() <= Date.now()) {
+    throw new AppError(400, "INVALID_INPUT", `${label} must be in the future.`);
+  }
+  return date;
+}
+
+function createRequestAddOnFromForm(formData: FormData): CreateRequestAddOn | null {
+  const messageMd = asOptional(formData, "requestMessageMd");
+  if (!messageMd) return null;
+
+  const audienceType = requestAudienceFromForm(formData);
+  const deadlineAt = parseCreateRequestDate(formData, "requestDeadlineAt", "Deadline");
+  const reminderAt = parseCreateRequestDate(formData, "requestReminderAt", "Reminder");
+  if (deadlineAt && reminderAt && reminderAt > deadlineAt) {
+    throw new AppError(400, "INVALID_INPUT", "Reminder must be before or at the deadline.");
+  }
+
+  return {
+    audienceType,
+    memberIds: audienceType === "MEMBERS" ? asStringArray(formData, "requestMemberIds") : [],
+    targetCircleId: audienceType === "CIRCLE" ? asOptional(formData, "requestTargetCircleId") : null,
+    messageMd,
+    deadlineAt,
+    reminderAt,
+    preferredChannel: requestChannelFromForm(formData),
+  };
+}
+
+function validateCreateReferenceAddOn(formData: FormData, applyAddOns: boolean): CreateReferenceAddOn | null {
+  if (!applyAddOns) return null;
+  const url = asOptional(formData, "referenceUrl");
+  if (!url) return null;
+
+  classifyExternalResourceUrl(url);
+  return {
+    url,
+    descriptionMd: asOptional(formData, "referenceDescriptionMd"),
+  };
+}
+
+async function validateCreateRequestAddOn(actor: AppActor, params: {
+  workspaceId: string;
+  formData: FormData;
+  intent: WorkItemCreateIntent;
+  applyAddOns: boolean;
+}) {
+  if (params.intent !== "open" || !params.applyAddOns) return null;
+  const request = createRequestAddOnFromForm(params.formData);
+  if (!request) return null;
+  if (actor.kind !== "user") {
+    throw new AppError(400, "INVALID_ACTOR", "Only users can request input.");
+  }
+
+  if (request.audienceType === "MEMBERS") {
+    if (request.memberIds.length === 0) {
+      throw new AppError(400, "INVALID_INPUT", "Choose at least one person to request input from.");
+    }
+    const memberCount = await prisma.member.count({
+      where: {
+        workspaceId: params.workspaceId,
+        isActive: true,
+        id: { in: request.memberIds },
+      },
+    });
+    if (memberCount !== request.memberIds.length) {
+      throw new AppError(400, "INVALID_INPUT", "Every selected recipient must be an active workspace member.");
+    }
+  }
+
+  if (request.audienceType === "CIRCLE") {
+    if (!request.targetCircleId) {
+      throw new AppError(400, "INVALID_INPUT", "Choose a circle to request input from.");
+    }
+    const circle = await prisma.circle.findFirst({
+      where: {
+        id: request.targetCircleId,
+        workspaceId: params.workspaceId,
+        archivedAt: null,
+      },
+      select: { id: true },
+    });
+    if (!circle) {
+      throw new AppError(400, "INVALID_INPUT", "Target circle must belong to this workspace.");
+    }
+  }
+
+  return request;
+}
+
+async function maybeAttachCreateReference(actor: AppActor, params: {
+  workspaceId: string;
+  entityType: "Action" | "Tension" | "Proposal";
+  entityId: string;
+  reference: CreateReferenceAddOn | null;
+}) {
+  if (!params.reference) return;
+
+  await upsertWorkspaceExternalResourceFromUrl(actor, {
+    workspaceId: params.workspaceId,
+    url: params.reference.url,
+    descriptionMd: params.reference.descriptionMd,
+    entityType: params.entityType,
+    entityId: params.entityId,
+    purpose: "reference",
+  });
+}
+
+async function maybeCreateRequestFromForm(actor: AppActor, params: {
+  workspaceId: string;
+  subjectType: "ACTION" | "TENSION" | "PROPOSAL";
+  subjectId: string;
+  request: CreateRequestAddOn | null;
+  canSendRequest: boolean;
+}) {
+  if (!params.request || !params.canSendRequest) return;
+  await createAdviceRequest(actor, {
+    workspaceId: params.workspaceId,
+    subjectType: params.subjectType,
+    subjectId: params.subjectId,
+    audienceType: params.request.audienceType,
+    memberIds: params.request.memberIds,
+    targetCircleId: params.request.targetCircleId,
+    messageMd: params.request.messageMd,
+    deadlineAt: params.request.deadlineAt,
+    reminderAt: params.request.reminderAt,
+    preferredChannel: params.request.preferredChannel,
+  });
+}
+
+async function maybeCreateActionChecklist(actor: AppActor, params: {
+  workspaceId: string;
+  actionId: string;
+  formData: FormData;
+  canEditChecklist: boolean;
+}) {
+  if (!params.canEditChecklist) return;
+  for (const title of splitList(asOptional(params.formData, "checklistItems"))) {
+    await createActionChecklistItem(actor, {
+      workspaceId: params.workspaceId,
+      actionId: params.actionId,
+      title,
+    });
+  }
 }
 
 function throwIfFailed(result: unknown) {
@@ -146,8 +424,12 @@ function cancelLink(returnTo: string) {
   return <a className="link-button secondary" href={returnTo}>Cancel</a>;
 }
 
-function duplicateGuardState(error: unknown): DuplicateGuardFormState {
-  if (isDuplicateGuardMatchError(error)) return duplicateGuardErrorPayload(error);
+function duplicateGuardState(error: unknown, formData?: FormData): DuplicateGuardFormState {
+  if (isDuplicateGuardMatchError(error)) {
+    const state = duplicateGuardErrorPayload(error);
+    const submitIntent = formData ? asOptional(formData, "submitIntent") : null;
+    return submitIntent ? { ...state, submitIntent } : state;
+  }
   throw error;
 }
 
@@ -173,6 +455,175 @@ function circleIdFromReturnTo(returnTo: string, workspaceId: string) {
   } catch {
     return segments[1];
   }
+}
+
+function WorkItemAddOnSection({
+  title,
+  children,
+}: {
+  title: string;
+  children: ReactNode;
+}) {
+  return (
+    <details className="stack" style={CREATE_ADD_ON_STYLE}>
+      <summary
+        className="nr-hide-marker"
+        style={{ cursor: "pointer", display: "flex", justifyContent: "space-between", gap: 12, fontWeight: 650 }}
+      >
+        <span>{title}</span>
+        <span aria-hidden="true">+</span>
+      </summary>
+      <div className="stack" style={{ marginTop: 12 }}>
+        {children}
+      </div>
+    </details>
+  );
+}
+
+function CreateReferenceFields() {
+  return (
+    <>
+      <label>
+        Reference link
+        <input name="referenceUrl" type="url" placeholder="https://..." />
+      </label>
+      <label>
+        Description
+        <MarkdownEditor name="referenceDescriptionMd" rows={3} />
+      </label>
+    </>
+  );
+}
+
+function CreateRequestFields({
+  messageLabel,
+  memberOptions,
+  circles,
+}: {
+  messageLabel: string;
+  memberOptions: WorkItemMemberOption[];
+  circles: Array<{ id: string; name: string }>;
+}) {
+  const requestMemberOptions: MultiSelectFilterOption[] = memberOptions.map((member) => ({
+    value: member.id,
+    label: member.label,
+  }));
+
+  return (
+    <>
+      <label>
+        Audience
+        <select name="requestAudienceType" defaultValue="WORKSPACE">
+          <option value="WORKSPACE">Workspace</option>
+          <option value="MEMBERS">Selected people</option>
+          <option value="CIRCLE">Circle</option>
+        </select>
+      </label>
+      <MultiSelectFilter
+        name="requestMemberIds"
+        label="People"
+        options={requestMemberOptions}
+        allLabel="Choose people"
+        selectAllLabel="Select all"
+        unselectAllLabel="Unselect all"
+        selectedCountLabel="{count} selected"
+        collapseAllToEmpty={false}
+        className="nr-advice-recipient-picker"
+      />
+      <label>
+        Circle
+        <select name="requestTargetCircleId" defaultValue="">
+          <option value="">None</option>
+          {circles.map((circle) => <option key={circle.id} value={circle.id}>{circle.name}</option>)}
+        </select>
+      </label>
+      <label>
+        {messageLabel}
+        <MarkdownEditor name="requestMessageMd" rows={4} />
+      </label>
+      <div className="actions-inline">
+        <label style={{ flex: 1 }}>
+          Deadline
+          <input name="requestDeadlineAt" type="datetime-local" />
+        </label>
+        <label style={{ flex: 1 }}>
+          Reminder
+          <input name="requestReminderAt" type="datetime-local" />
+        </label>
+      </div>
+      <label>
+        Preferred channel
+        <select name="requestPreferredChannel" defaultValue="IN_APP">
+          <option value="IN_APP">In app</option>
+          <option value="SLACK">Slack</option>
+          <option value="EMAIL">Email</option>
+          <option value="COPY">Copy</option>
+        </select>
+      </label>
+    </>
+  );
+}
+
+function ActionChecklistCreateFields() {
+  return (
+    <label>
+      Checklist items
+      <textarea name="checklistItems" rows={4} placeholder="One item per line" />
+    </label>
+  );
+}
+
+function ProposalLinksCreateFields({
+  sourceTensions,
+  relatedActions,
+}: {
+  sourceTensions: Array<{ id: string; title: string }>;
+  relatedActions: Array<{ id: string; title: string }>;
+}) {
+  const relatedActionOptions: MultiSelectFilterOption[] = relatedActions.map((action) => ({
+    value: action.id,
+    label: action.title,
+  }));
+
+  return (
+    <>
+      <label>
+        Source tension
+        <select name="sourceTensionId" defaultValue="">
+          <option value="">None</option>
+          {sourceTensions.map((tension) => <option key={tension.id} value={tension.id}>{tension.title}</option>)}
+        </select>
+      </label>
+      <MultiSelectFilter
+        name="relatedActionIds"
+        label="Related actions"
+        options={relatedActionOptions}
+        allLabel={relatedActionOptions.length > 0 ? "Choose actions" : "No eligible actions"}
+        selectAllLabel="Select all"
+        unselectAllLabel="Unselect all"
+        selectedCountLabel="{count} selected"
+        collapseAllToEmpty={false}
+      />
+    </>
+  );
+}
+
+function CreateWorkItemFooter({
+  draftLabel,
+  openLabel,
+  returnTo,
+}: {
+  draftLabel: string;
+  openLabel: string;
+  returnTo: string;
+}) {
+  return (
+    <div className="actions-inline">
+      <DuplicateGuardSubmitButton name="submitIntent" value="draft" className="secondary">{draftLabel}</DuplicateGuardSubmitButton>
+      <DuplicateGuardSubmitButton name="submitIntent" value="open">{openLabel}</DuplicateGuardSubmitButton>
+      {cancelLink(returnTo)}
+    </div>
+  );
 }
 
 export default async function WorkspaceAddPage({
@@ -232,6 +683,7 @@ export default async function WorkspaceAddPage({
   if (!allowedActions.some((action) => action.kind === kind)) notFound();
 
   const needsProposals = kind === "action" || kind === "tension";
+  const needsProposalLinks = kind === "proposal";
   const needsMembers = kind === "action"
     || kind === "tension"
     || kind === "proposal"
@@ -240,7 +692,13 @@ export default async function WorkspaceAddPage({
     || kind === "deal"
     || kind === "crm_activity"
     || kind === "communication_suggestion";
-  const needsCircles = kind === "goal" || kind === "circle" || kind === "role" || kind === "tool_link";
+  const needsCircles = kind === "action"
+    || kind === "tension"
+    || kind === "proposal"
+    || kind === "goal"
+    || kind === "circle"
+    || kind === "role"
+    || kind === "tool_link";
   const needsRoles = kind === "role_assignment";
   const needsGoals = kind === "goal";
   const needsContacts = kind === "deal" || kind === "crm_activity" || kind === "communication_suggestion";
@@ -258,6 +716,8 @@ export default async function WorkspaceAddPage({
     dealsResult,
     approvedQualificationsResult,
     roles,
+    actionsResult,
+    tensionsResult,
   ] = await Promise.all([
     needsProposals ? listProposals(actor, workspaceId, { take: 100 }) : Promise.resolve({ items: [] }),
     needsMembers ? listHumanMembers(workspaceId) : Promise.resolve([]),
@@ -268,10 +728,17 @@ export default async function WorkspaceAddPage({
     needsDeals ? listDeals(actor, workspaceId, { take: 100, accountId: contextAccountId ?? undefined }) : Promise.resolve({ items: [] }),
     needsApprovedProspects ? listQualifications(actor, workspaceId, { status: "APPROVED" }) : Promise.resolve({ items: [] }),
     needsRoles ? listRoles(workspaceId) : Promise.resolve([]),
+    needsProposalLinks ? listActions(actor, workspaceId, { take: 100 }) : Promise.resolve({ items: [] }),
+    needsProposalLinks ? listTensions(actor, workspaceId, { take: 100 }) : Promise.resolve({ items: [] }),
   ]);
 
   const proposals = proposalsResult.items;
-  const activeProposals = proposals.filter((proposal) => proposal.status === "DRAFT" || proposal.status === "OPEN");
+  const proposalSourceTensions = tensionsResult.items.filter((tension) => (
+    tension.status === "OPEN" && !tension.isPrivate && !tension.proposalId
+  ));
+  const proposalRelatedActions = actionsResult.items.filter((action) => (
+    (action.status === "OPEN" || action.status === "IN_PROGRESS") && !action.isPrivate && !action.proposalId
+  ));
   const memberOptions: WorkItemMemberOption[] = members.map((member) => ({
     id: member.id,
     label: member.user.displayName ?? member.user.email,
@@ -327,9 +794,57 @@ export default async function WorkspaceAddPage({
   async function createActionAndReturn(_state: DuplicateGuardFormState, formData: FormData): Promise<DuplicateGuardFormState> {
     "use server";
     try {
-      await createActionAction(formData);
+      const workspaceId = asString(formData, "workspaceId");
+      await enforceDemoGuard(workspaceId);
+      const actor = await requirePageActor();
+      const intent = createIntentFromForm(formData);
+      const applyAddOns = shouldApplyCreateAddOns(formData);
+      const referenceAddOn = validateCreateReferenceAddOn(formData, applyAddOns);
+      const proposalId = await proposalIdForCreateIntent(workspaceId, formData, intent);
+      const requestAddOn = await validateCreateRequestAddOn(actor, {
+        workspaceId,
+        formData,
+        intent,
+        applyAddOns,
+      });
+      const action = await createAction(actor, {
+        workspaceId,
+        title: asString(formData, "title"),
+        bodyMd: asOptional(formData, "bodyMd"),
+        proposalId,
+        assigneeMemberId: asOptional(formData, "assigneeMemberId"),
+        dueAt: formData.has("dueAt") ? asOptionalDate(formData, "dueAt") : undefined,
+        priority: asOptionalInt(formData, "priority"),
+        isPrivate: intent === "draft",
+        duplicateGuard: duplicateGuardFromFormData(formData),
+      });
+      const visibleAction = intent === "open" && applyAddOns && action.status === "DRAFT"
+        ? await publishAction(actor, { workspaceId, actionId: action.id })
+        : action;
+      if (applyAddOns) {
+        await maybeAttachCreateReference(actor, {
+          workspaceId,
+          entityType: "Action",
+          entityId: visibleAction.id,
+          reference: referenceAddOn,
+        });
+        await maybeCreateActionChecklist(actor, {
+          workspaceId,
+          actionId: visibleAction.id,
+          formData,
+          canEditChecklist: visibleAction.status === "DRAFT" || visibleAction.status === "OPEN" || visibleAction.status === "IN_PROGRESS",
+        });
+        await maybeCreateRequestFromForm(actor, {
+          workspaceId,
+          subjectType: "ACTION",
+          subjectId: visibleAction.id,
+          request: requestAddOn,
+          canSendRequest: (visibleAction.status === "OPEN" || visibleAction.status === "IN_PROGRESS") && !visibleAction.isPrivate,
+        });
+      }
+      refresh(workspaceId);
     } catch (error) {
-      return duplicateGuardState(error);
+      return duplicateGuardState(error, formData);
     }
     redirect(returnTo);
   }
@@ -337,9 +852,51 @@ export default async function WorkspaceAddPage({
   async function createTensionAndReturn(_state: DuplicateGuardFormState, formData: FormData): Promise<DuplicateGuardFormState> {
     "use server";
     try {
-      await createTensionAction(formData);
+      const workspaceId = asString(formData, "workspaceId");
+      await enforceDemoGuard(workspaceId);
+      const actor = await requirePageActor();
+      const intent = createIntentFromForm(formData);
+      const applyAddOns = shouldApplyCreateAddOns(formData);
+      const referenceAddOn = validateCreateReferenceAddOn(formData, applyAddOns);
+      const proposalId = await proposalIdForCreateIntent(workspaceId, formData, intent);
+      const requestAddOn = await validateCreateRequestAddOn(actor, {
+        workspaceId,
+        formData,
+        intent,
+        applyAddOns,
+      });
+      const tension = await createTension(actor, {
+        workspaceId,
+        title: asString(formData, "title"),
+        bodyMd: asOptional(formData, "bodyMd"),
+        proposalId,
+        assigneeMemberId: asOptional(formData, "assigneeMemberId"),
+        raisedByMemberId: asOptional(formData, "raisedByMemberId"),
+        priority: asOptionalInt(formData, "priority"),
+        isPrivate: intent === "draft",
+        duplicateGuard: duplicateGuardFromFormData(formData),
+      });
+      const visibleTension = intent === "open" && applyAddOns && tension.status === "DRAFT"
+        ? await publishTension(actor, { workspaceId, tensionId: tension.id })
+        : tension;
+      if (applyAddOns) {
+        await maybeAttachCreateReference(actor, {
+          workspaceId,
+          entityType: "Tension",
+          entityId: visibleTension.id,
+          reference: referenceAddOn,
+        });
+        await maybeCreateRequestFromForm(actor, {
+          workspaceId,
+          subjectType: "TENSION",
+          subjectId: visibleTension.id,
+          request: requestAddOn,
+          canSendRequest: visibleTension.status === "OPEN" && !visibleTension.isPrivate,
+        });
+      }
+      refresh(workspaceId);
     } catch (error) {
-      return duplicateGuardState(error);
+      return duplicateGuardState(error, formData);
     }
     redirect(returnTo);
   }
@@ -347,9 +904,55 @@ export default async function WorkspaceAddPage({
   async function createProposalAndReturn(_state: DuplicateGuardFormState, formData: FormData): Promise<DuplicateGuardFormState> {
     "use server";
     try {
-      await createProposalAction(formData);
+      const workspaceId = asString(formData, "workspaceId");
+      await enforceDemoGuard(workspaceId);
+      const actor = await requirePageActor();
+      const intent = createIntentFromForm(formData);
+      const applyAddOns = shouldApplyCreateAddOns(formData);
+      const referenceAddOn = validateCreateReferenceAddOn(formData, applyAddOns);
+      const requestAddOn = await validateCreateRequestAddOn(actor, {
+        workspaceId,
+        formData,
+        intent,
+        applyAddOns,
+      });
+      const ownerMemberId = formData.has("ownerMemberId") ? asOptional(formData, "ownerMemberId") : undefined;
+      const proposalLinks = await proposalLinksForCreateIntent(workspaceId, formData, intent);
+      const proposal = await createProposal(actor, {
+        workspaceId,
+        title: asString(formData, "title"),
+        summary: asOptional(formData, "summary"),
+        bodyMd: asString(formData, "bodyMd"),
+        includeAiSummary: formData.get("includeAiSummary") === "on",
+        priority: asOptionalInt(formData, "priority"),
+        ...(ownerMemberId !== undefined ? { ownerMemberId } : {}),
+        isPrivate: intent === "draft",
+        sourceTensionId: proposalLinks.sourceTensionId,
+        relatedActionIds: proposalLinks.relatedActionIds,
+        duplicateGuard: duplicateGuardFromFormData(formData),
+      });
+      const proposalCanSendRequest = (intent === "open" && applyAddOns) || proposal.status === "OPEN";
+      if (intent === "open" && applyAddOns && proposal.status === "DRAFT") {
+        await submitProposal(actor, { workspaceId, proposalId: proposal.id });
+      }
+      if (applyAddOns) {
+        await maybeAttachCreateReference(actor, {
+          workspaceId,
+          entityType: "Proposal",
+          entityId: proposal.id,
+          reference: referenceAddOn,
+        });
+        await maybeCreateRequestFromForm(actor, {
+          workspaceId,
+          subjectType: "PROPOSAL",
+          subjectId: proposal.id,
+          request: requestAddOn,
+          canSendRequest: proposalCanSendRequest,
+        });
+      }
+      refresh(workspaceId);
     } catch (error) {
-      return duplicateGuardState(error);
+      return duplicateGuardState(error, formData);
     }
     redirect(returnTo);
   }
@@ -359,7 +962,7 @@ export default async function WorkspaceAddPage({
     try {
       await createGoalFormAction(formData);
     } catch (error) {
-      return duplicateGuardState(error);
+      return duplicateGuardState(error, formData);
     }
     redirect(returnTo);
   }
@@ -399,7 +1002,7 @@ export default async function WorkspaceAddPage({
     try {
       await createArticleAction(formData);
     } catch (error) {
-      return duplicateGuardState(error);
+      return duplicateGuardState(error, formData);
     }
     redirect(returnTo);
   }
@@ -554,7 +1157,7 @@ export default async function WorkspaceAddPage({
         duplicateGuard: duplicateGuardFromFormData(formData),
       });
     } catch (error) {
-      return duplicateGuardState(error);
+      return duplicateGuardState(error, formData);
     }
     refresh(workspaceId);
     redirect(returnTo);
@@ -676,14 +1279,28 @@ export default async function WorkspaceAddPage({
             labels={actionEditorLabels}
             priority={1}
             cancelHref={returnTo}
+            footer={<CreateWorkItemFooter draftLabel="Save draft" openLabel="Create action" returnTo={returnTo} />}
           >
             <label>
               Link to proposal
               <select name="proposalId" defaultValue="">
                 <option value="">None</option>
-                {activeProposals.map((proposal) => <option value={proposal.id} key={proposal.id}>{proposal.title}</option>)}
+                {proposals.map((proposal) => <option value={proposal.id} key={proposal.id}>{proposal.title}</option>)}
               </select>
             </label>
+            <WorkItemAddOnSection title="References">
+              <CreateReferenceFields />
+            </WorkItemAddOnSection>
+            <WorkItemAddOnSection title="Request input">
+              <CreateRequestFields
+                messageLabel="Input request"
+                memberOptions={memberOptions}
+                circles={circles}
+              />
+            </WorkItemAddOnSection>
+            <WorkItemAddOnSection title="Checklist">
+              <ActionChecklistCreateFields />
+            </WorkItemAddOnSection>
           </DuplicateGuardActionEditorForm>
         )}
 
@@ -710,14 +1327,20 @@ export default async function WorkspaceAddPage({
               Link to proposal
               <select name="proposalId" defaultValue="">
                 <option value="">None</option>
-                {activeProposals.map((proposal) => <option value={proposal.id} key={proposal.id}>{proposal.title}</option>)}
+                {proposals.map((proposal) => <option value={proposal.id} key={proposal.id}>{proposal.title}</option>)}
               </select>
             </label>
-            <label style={{ display: "flex", alignItems: "center", flexDirection: "row", gap: 8 }}>
-              <input type="checkbox" name="isPrivate" defaultChecked style={{ width: "auto" }} />
-              Private inbox item
-            </label>
-            <div className="actions-inline"><button type="submit">Create tension</button>{cancelLink(returnTo)}</div>
+            <WorkItemAddOnSection title="References">
+              <CreateReferenceFields />
+            </WorkItemAddOnSection>
+            <WorkItemAddOnSection title="Request input">
+              <CreateRequestFields
+                messageLabel="Input request"
+                memberOptions={memberOptions}
+                circles={circles}
+              />
+            </WorkItemAddOnSection>
+            <CreateWorkItemFooter draftLabel="Save draft" openLabel="Create tension" returnTo={returnTo} />
           </DuplicateGuardForm>
         )}
 
@@ -735,11 +1358,23 @@ export default async function WorkspaceAddPage({
               defaultValue={defaultProposalOwnerMemberId}
             />
             <WorkItemPrioritySelect label="Priority" labels={DEFAULT_WORK_ITEM_PRIORITY_LABELS} defaultValue={0} />
-            <label style={{ display: "flex", alignItems: "center", flexDirection: "row", gap: 8 }}>
-              <input type="checkbox" name="isPrivate" defaultChecked style={{ width: "auto" }} />
-              Private draft
-            </label>
-            <div className="actions-inline"><button type="submit">Create proposal</button>{cancelLink(returnTo)}</div>
+            <WorkItemAddOnSection title="Process links">
+              <ProposalLinksCreateFields
+                sourceTensions={proposalSourceTensions}
+                relatedActions={proposalRelatedActions}
+              />
+            </WorkItemAddOnSection>
+            <WorkItemAddOnSection title="References">
+              <CreateReferenceFields />
+            </WorkItemAddOnSection>
+            <WorkItemAddOnSection title="Request advice">
+              <CreateRequestFields
+                messageLabel="Advice request"
+                memberOptions={memberOptions}
+                circles={circles}
+              />
+            </WorkItemAddOnSection>
+            <CreateWorkItemFooter draftLabel="Save draft" openLabel="Open proposal" returnTo={returnTo} />
           </DuplicateGuardForm>
         )}
 

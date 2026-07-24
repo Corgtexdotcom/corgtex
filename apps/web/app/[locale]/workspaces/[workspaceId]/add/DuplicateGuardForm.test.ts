@@ -29,4 +29,27 @@ describe("DuplicateGuardConfirmationPanel", () => {
     expect(html).toContain("value=\"update_existing\"");
     expect(html).toContain("value=\"create_new\"");
   });
+
+  it("preserves a create submit intent through duplicate confirmation", () => {
+    const state: DuplicateGuardFormState = {
+      status: "duplicate_confirmation_required",
+      candidate: {
+        entityType: "Action",
+        entityId: "action-existing",
+        title: "Send Acme proposal",
+        excerpt: null,
+        score: 0.91,
+        matchKind: "likely",
+        reasons: [],
+      },
+      recommendedResolution: "create_new",
+      allowedResolutions: ["create_new"],
+      submitIntent: "open",
+    };
+
+    const html = renderToStaticMarkup(createElement(DuplicateGuardConfirmationPanel, { state, isPending: false }));
+
+    expect(html).toContain("name=\"submitIntent\"");
+    expect(html).toContain("value=\"open\"");
+  });
 });

@@ -1,6 +1,7 @@
 "use client";
 
 import React, { useActionState } from "react";
+import { useFormStatus } from "react-dom";
 import type { ReactNode } from "react";
 
 type DuplicateGuardCandidate = {
@@ -20,6 +21,7 @@ export type DuplicateGuardFormState = {
   candidate: DuplicateGuardCandidate;
   recommendedResolution: "use_existing" | "update_existing" | "create_new";
   allowedResolutions: Array<"use_existing" | "update_existing" | "create_new">;
+  submitIntent?: string | null;
 } | null;
 
 export type DuplicateGuardFormAction = (
@@ -63,6 +65,7 @@ export function DuplicateGuardConfirmationPanel({
       {candidate.reasons.length > 0 && (
         <p style={{ margin: 0, color: "var(--muted)" }}>{candidate.reasons.join(", ")}</p>
       )}
+      {confirmation.submitIntent && <input type="hidden" name="submitIntent" value={confirmation.submitIntent} />}
       <input type="hidden" name="duplicateTargetEntityId" value={candidate.entityId} />
       <div className="actions-inline">
         {confirmation.allowedResolutions.map((resolution) => (
@@ -84,5 +87,22 @@ export function DuplicateGuardForm({ action, className, encType, children }: Dup
       <DuplicateGuardConfirmationPanel state={state} isPending={isPending} />
       {children}
     </form>
+  );
+}
+
+export function DuplicateGuardSubmitButton({
+  children,
+  disabled,
+  pendingLabel,
+  ...props
+}: React.ButtonHTMLAttributes<HTMLButtonElement> & {
+  pendingLabel?: ReactNode;
+}) {
+  const { pending } = useFormStatus();
+
+  return (
+    <button {...props} type="submit" disabled={disabled || pending}>
+      {pending && pendingLabel ? pendingLabel : children}
+    </button>
   );
 }
