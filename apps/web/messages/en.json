@@ -1939,25 +1939,6 @@
       "observe": "Observe",
       "operate": "Operate"
     },
-    "search": {
-      "open": "Open command palette",
-      "placeholder": "Search..."
-    },
-    "commandPalette": {
-      "placeholder": "Type a page name or section to navigate...",
-      "emptyTitle": "No pages match your query.",
-      "emptyHint": "Try typing \"agents\", \"releases\", or \"ops\".",
-      "items": {
-        "dashboard": "View fleet metrics, deployments, and overall stats.",
-        "customers": "Jump to the list of enterprise deployments.",
-        "selfServe": "Inspect shared-cloud trials, billing, smoke, and support access.",
-        "agents": "Monitor agent governance, models, runs, and costs.",
-        "releases": "Inspect version distribution and rollouts.",
-        "recorders": "Inspect recorder readiness, usage, calendar sources, and provider state.",
-        "operations": "Review fleet support logs and break-glass events.",
-        "users": "Manage global user profiles and client memberships."
-      }
-    },
     "sections": {
       "fleet": {
         "label": "Fleet",

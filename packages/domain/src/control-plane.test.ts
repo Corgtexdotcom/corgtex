@@ -459,6 +459,10 @@ function mcpToolResult(payload: unknown) {
   };
 }
 
+function recentRecorderProofDate(offsetMs = 0) {
+  return new Date(Date.now() - 60 * 60 * 1000 + offsetMs);
+}
+
 describe("control plane domain", () => {
   beforeEach(() => {
     vi.unstubAllEnvs();
@@ -6986,7 +6990,7 @@ describe("control plane domain", () => {
       status: "ACTIVE",
       providerAccountEmail: "calendar@example.com",
       providerAccountId: "calendar-1",
-      lastSyncAt: new Date("2026-06-24T10:00:00Z"),
+      lastSyncAt: recentRecorderProofDate(),
       lastSyncError: null,
     });
     prismaMock.workflowJob.count.mockResolvedValue(0);
@@ -6994,8 +6998,8 @@ describe("control plane domain", () => {
       id: "smoke-1",
       status: "COMPLETED",
       provider: "RECALL_AI",
-      createdAt: new Date("2026-06-24T10:05:00Z"),
-      completedAt: new Date("2026-06-24T10:06:00Z"),
+      createdAt: recentRecorderProofDate(5 * 60 * 1000),
+      completedAt: recentRecorderProofDate(6 * 60 * 1000),
     });
     prismaMock.meetingRecording.count.mockResolvedValue(0);
     prismaMock.communicationInstallation.findMany.mockResolvedValue([]);
@@ -7102,14 +7106,14 @@ describe("control plane domain", () => {
       status: "ACTIVE",
       providerAccountEmail: "calendar@example.com",
       providerAccountId: "calendar-1",
-      lastSyncAt: new Date("2026-06-24T10:00:00Z"),
+      lastSyncAt: recentRecorderProofDate(),
       lastSyncError: null,
     });
     prismaMock.workflowJob.count.mockResolvedValue(0);
     prismaMock.meetingRecorderSmokeRun.findFirst.mockResolvedValue({
       status: "FAILED",
       failureCode: "insufficient_credit_balance",
-      createdAt: new Date("2026-06-24T10:05:00Z"),
+      createdAt: recentRecorderProofDate(5 * 60 * 1000),
     });
     prismaMock.meetingRecording.count.mockResolvedValue(1);
     prismaMock.communicationInstallation.findMany.mockResolvedValue([]);
@@ -7216,7 +7220,7 @@ describe("control plane domain", () => {
       status: "ACTIVE",
       providerAccountEmail: "calendar@example.com",
       providerAccountId: "calendar-1",
-      lastSyncAt: new Date("2026-06-24T10:00:00Z"),
+      lastSyncAt: recentRecorderProofDate(),
       lastSyncError: null,
     });
     prismaMock.workflowJob.count.mockResolvedValue(0);
@@ -7224,8 +7228,8 @@ describe("control plane domain", () => {
       id: "smoke-1",
       status: "COMPLETED",
       provider: "RECALL_AI",
-      createdAt: new Date("2026-06-24T10:05:00Z"),
-      completedAt: new Date("2026-06-24T10:06:00Z"),
+      createdAt: recentRecorderProofDate(5 * 60 * 1000),
+      completedAt: recentRecorderProofDate(6 * 60 * 1000),
     });
     prismaMock.meetingRecording.count.mockResolvedValue(0);
     prismaMock.communicationInstallation.findMany.mockResolvedValue([]);
@@ -7310,7 +7314,7 @@ describe("control plane domain", () => {
       status: "ACTIVE",
       providerAccountEmail: "calendar@example.com",
       providerAccountId: "calendar-1",
-      lastSyncAt: new Date("2026-06-24T10:00:00Z"),
+      lastSyncAt: recentRecorderProofDate(),
       lastSyncError: null,
     });
     prismaMock.workflowJob.count.mockResolvedValue(0);
@@ -7318,8 +7322,8 @@ describe("control plane domain", () => {
       id: "smoke-1",
       status: "COMPLETED",
       provider: "RECALL_AI",
-      createdAt: new Date("2026-06-24T10:05:00Z"),
-      completedAt: new Date("2026-06-24T10:06:00Z"),
+      createdAt: recentRecorderProofDate(5 * 60 * 1000),
+      completedAt: recentRecorderProofDate(6 * 60 * 1000),
     });
     prismaMock.meetingRecording.count.mockResolvedValue(0);
     prismaMock.communicationInstallation.findMany.mockResolvedValue([]);
