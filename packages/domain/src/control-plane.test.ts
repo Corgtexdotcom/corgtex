@@ -6990,12 +6990,13 @@ describe("control plane domain", () => {
       lastSyncError: null,
     });
     prismaMock.workflowJob.count.mockResolvedValue(0);
+    const recentRecorderProofAt = new Date(Date.now() - 60_000);
     prismaMock.meetingRecorderSmokeRun.findFirst.mockResolvedValue({
       id: "smoke-1",
       status: "COMPLETED",
       provider: "RECALL_AI",
-      createdAt: new Date("2026-06-24T10:05:00Z"),
-      completedAt: new Date("2026-06-24T10:06:00Z"),
+      createdAt: recentRecorderProofAt,
+      completedAt: recentRecorderProofAt,
     });
     prismaMock.meetingRecording.count.mockResolvedValue(0);
     prismaMock.communicationInstallation.findMany.mockResolvedValue([]);

@@ -92,6 +92,19 @@ function renderBoldMarkers(value: string) {
   return value.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
 }
 
+const RAW_URL_PATTERN = /(?:\s+(?:at|here|source):?\s+|\s*)<?https?:\/\/[^\s<>)]+>?/giu;
+
+function stripVisibleUrls(value: string) {
+  return value
+    .replace(RAW_URL_PATTERN, (match, offset: number) => (
+      value.slice(Math.max(0, offset - 2), offset) === "](" ? match : ""
+    ))
+    .replace(/[ \t]+([,.;:])/g, "$1")
+    .replace(/\(\s*\)/g, "")
+    .replace(/[ \t]{2,}/g, " ")
+    .trim();
+}
+
 function safeAbsoluteEmailHref(href: string, workspaceUrl: string) {
   try {
     const url = new URL(href, workspaceUrl);
@@ -106,7 +119,7 @@ function absoluteEmailHref(href: string, workspaceUrl: string) {
 }
 
 function renderNarrativeMarkdown(value: string, workspaceUrl: string) {
-  const withoutImages = value.replace(/!\[([^\]\n]*)\]\([^)]+\)/g, "$1");
+  const withoutImages = stripVisibleUrls(value).replace(/!\[([^\]\n]*)\]\([^)]+\)/g, "$1");
   const linkPattern = /\[([^\]\n]+)\]\((https?:\/\/[^\s)]+|\/[^\s)]*)\)/g;
   let rendered = "";
   let cursor = 0;
@@ -124,12 +137,36 @@ function renderNarrativeMarkdown(value: string, workspaceUrl: string) {
   return rendered.replace(/\r?\n/g, "<br>");
 }
 
+function orderedListItems(value: string) {
+  const lines = value
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  if (lines.length === 0) return null;
+
+  const items = lines.flatMap((line) => {
+    const match = line.match(/^\d+[.)]\s+(.+)$/u);
+    return match?.[1] ? [match[1]] : [];
+  });
+  return items.length === lines.length ? items : null;
+}
+
 function renderNarrativeParagraphs(values: Array<string | null | undefined>, workspaceUrl: string) {
+  let paragraphIndex = 0;
   return values
     .flatMap((value) => value?.split(/\n{2,}/).map((part) => part.trim()).filter(Boolean) ?? [])
-    .map((paragraph, index) => (
-      `<p style="font-size:${index === 0 ? "17px" : "15px"};line-height:1.65;margin:0 0 16px;color:#2d2a24;">${renderNarrativeMarkdown(paragraph, workspaceUrl)}</p>`
-    ))
+    .map((block) => {
+      const listItems = orderedListItems(block);
+      if (listItems) {
+        return `<ol style="margin:0 0 16px;padding:0 0 0 22px;color:#2d2a24;">${listItems
+          .map((item) => `<li style="margin:0 0 8px;padding:0;font-size:15px;line-height:1.55;color:#2d2a24;">${renderNarrativeMarkdown(item, workspaceUrl)}</li>`)
+          .join("")}</ol>`;
+      }
+
+      const fontSize = paragraphIndex === 0 ? "17px" : "15px";
+      paragraphIndex++;
+      return `<p style="font-size:${fontSize};line-height:1.65;margin:0 0 16px;color:#2d2a24;">${renderNarrativeMarkdown(block, workspaceUrl)}</p>`;
+    })
     .join("");
 }
 

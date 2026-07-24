@@ -113,6 +113,7 @@ const WORKSPACE_BRIEFING_SOURCE_LABELS: Record<WorkspaceBriefingSourceType, stri
 };
 
 const RAW_UUID_PATTERN = /\b[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\b/giu;
+const RAW_URL_PATTERN = /(?:\s+(?:at|here|source):?\s+|\s*)<?https?:\/\/[^\s<>)]+>?/giu;
 
 const EDITORIAL_DEDUPE_SOURCE_TYPES = new Set<WorkspaceBriefingSourceType>([
   "ACTION",
@@ -199,10 +200,26 @@ function replaceRawSourceReferences(value: string, sourceRefs: WorkspaceBriefing
   RAW_UUID_PATTERN.lastIndex = 0;
   return readable
     .replace(RAW_UUID_PATTERN, "")
-    .replace(/\s+([,.;:])/g, "$1")
+    .replace(/[ \t]+([,.;:])/g, "$1")
     .replace(/\b(Proposal|Action|Tension|Advice request)\s+([,.;:])/giu, "$1$2")
-    .replace(/\s{2,}/g, " ")
+    .replace(/[ \t]{2,}/g, " ")
     .trim();
+}
+
+function stripVisibleUrls(value: string) {
+  return value
+    .replace(RAW_URL_PATTERN, (match, offset: number) => (
+      value.slice(Math.max(0, offset - 2), offset) === "](" ? match : ""
+    ))
+    .replace(/[ \t]+([,.;:])/g, "$1")
+    .replace(/\(\s*\)/g, "")
+    .replace(/[ \t]{2,}/g, " ")
+    .trim();
+}
+
+function cleanNarrativeMarkdown(value: string | null | undefined, sourceRefs: WorkspaceBriefingSourceRef[] = []) {
+  if (!value) return value ?? null;
+  return stripVisibleUrls(replaceRawSourceReferences(value, sourceRefs));
 }
 
 function workspacePath(workspaceId: string, path: string) {
@@ -242,7 +259,7 @@ function normalizeNarrativeText(
   maxLength = 1200,
   sourceRefs: WorkspaceBriefingSourceRef[] = [],
 ) {
-  const compacted = compactText(value ? replaceRawSourceReferences(value, sourceRefs) : value, maxLength);
+  const compacted = compactText(cleanNarrativeMarkdown(value, sourceRefs), maxLength);
   if (!compacted) return null;
   return compacted
     .replace(/\s*(?:\.{3}|…)\s*$/u, "")
@@ -251,10 +268,32 @@ function normalizeNarrativeText(
 }
 
 function cleanBriefingTitle(value: string | null | undefined, fallback: string) {
-  const normalized = value ? replaceRawSourceReferences(value).replace(/\s+/g, " ").trim() : null;
+  const normalized = cleanNarrativeMarkdown(value)?.replace(/\s+/g, " ").trim() ?? null;
   if (!normalized) return fallback;
   const withoutEllipsis = normalized.replace(/\s*(?:\.{3}|…)\s*$/u, "").trim();
   return withoutEllipsis || fallback;
+}
+
+function markdownInlineText(value: string) {
+  return value.replace(/[\\[\]()`]/g, "\\$&");
+}
+
+function markdownHref(value: string | null | undefined) {
+  const trimmed = value?.trim();
+  if (!trimmed) return null;
+  if (!/^(?:https?:\/\/|\/)/iu.test(trimmed)) return null;
+  return trimmed.replace(/\s/g, "%20").replace(/\)/g, "%29");
+}
+
+function sourceHrefForItem(item: WorkspaceBriefingItem) {
+  return markdownHref(item.sourceRefs.find((ref) => ref.href)?.href) ?? markdownHref(item.href);
+}
+
+function titleMarkdown(item: WorkspaceBriefingItem) {
+  const title = markdownInlineText(cleanBriefingTitle(item.title, workspaceBriefingSourceLabel(item.kind)));
+  const titleMd = `**${title}**`;
+  const href = sourceHrefForItem(item);
+  return href ? `[${titleMd}](${href})` : titleMd;
 }
 
 function periodEditorialMode(period: WorkspaceBriefingPeriod): WorkspaceBriefingEditorialMode {
@@ -851,7 +890,7 @@ function isContinuingBriefingItem(item: WorkspaceBriefingItem, period: Workspace
 function sentenceFromItem(item: WorkspaceBriefingItem, maxLength = 760) {
   const title = cleanBriefingTitle(item.title, workspaceBriefingSourceLabel(item.kind));
   const summary = normalizeNarrativeText(item.summaryMd, maxLength, item.sourceRefs);
-  const titleMd = `**${title}**`;
+  const titleMd = titleMarkdown(item);
   if (!summary || summary === title) return titleMd;
   return `${titleMd}: ${summary}`;
 }
@@ -867,20 +906,17 @@ function joinNarrativeParagraphs(items: WorkspaceBriefingItem[], maxItems: numbe
 function joinAttentionItems(items: WorkspaceBriefingItem[], period: WorkspaceBriefingPeriod) {
   if (items.length === 0) return null;
   const leadLabel = period === "WEEKLY" ? "Needs attention this week" : "Needs attention today";
-  const alsoLabel = period === "WEEKLY" ? "Also keep watch this week on" : "Also keep watch on";
   const details = items.slice(0, 3).map((item) => {
     const summary = normalizeNarrativeText(item.summaryMd, 260, item.sourceRefs);
-    if (!summary || summary === item.title) return cleanBriefingTitle(item.title, workspaceBriefingSourceLabel(item.kind));
-    return `${cleanBriefingTitle(item.title, workspaceBriefingSourceLabel(item.kind))}: ${summary}`;
+    const titleMd = titleMarkdown(item);
+    if (!summary || summary === item.title) return titleMd;
+    return `${titleMd}: ${summary}`;
   });
-  if (details.length === 1) {
-    return `${leadLabel}: ${details[0]}`;
-  }
-  const [primary, ...rest] = details;
   return [
-    `${leadLabel}: ${primary}`,
-    `${alsoLabel} ${rest.join(". ")}`,
-  ].join("\n\n");
+    `${leadLabel}:`,
+    "",
+    ...details.map((detail, index) => `${index + 1}. ${detail}`),
+  ].join("\n").trim();
 }
 
 function itemKey(item: WorkspaceBriefingItem) {
@@ -1422,7 +1458,7 @@ export function normalizeWorkspaceBriefingPayload(input: unknown): NormalizedWor
   const recordMd = (key: string, fallback: string | null) => {
     const value = record[key];
     return typeof value === "string" && value.trim()
-      ? replaceRawSourceReferences(value.trim(), recordSourceRefs)
+      ? cleanNarrativeMarkdown(value.trim(), recordSourceRefs)
       : fallback;
   };
 
