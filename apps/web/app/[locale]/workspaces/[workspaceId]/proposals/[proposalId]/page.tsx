@@ -13,6 +13,7 @@ import { DeliberationThread } from "@/lib/components/DeliberationThread";
 import { DeliberationComposer } from "@/lib/components/DeliberationComposer";
 import { AdviceRequestForm } from "@/lib/components/AdviceRequestForm";
 import { WorkItemConversationSurface, WorkItemRequestList } from "@/lib/components/WorkItemConversation";
+import { WorkItemAttentionBadge, WorkItemBadge, WorkItemLifecycleBadge, WorkItemRelationshipTag } from "@/lib/components/WorkItemControls";
 import { getDeliberationTargets } from "@/lib/deliberation-targets";
 import { canActorReplyToAdviceRequest } from "@/lib/advice-request-audience";
 import { canOpenPrivateDraft } from "@/lib/governance-open-guards";
@@ -122,13 +123,20 @@ export default async function ProposalDetailPage({
     return t("ageDaysAgo", { count: days });
   };
 
-  const statusClass = (() => {
-    if (proposal.status === "DRAFT") return "info";
-    if (proposal.status === "OPEN") return "warning";
-    if (proposal.resolutionOutcome === "ADOPTED") return "success";
-    if (proposal.status === "RESOLVED") return "info";
-    return "";
-  })();
+  const proposalLifecycleStatus = proposal.archivedAt
+    ? "ARCHIVED"
+    : proposal.status === "RESOLVED" && proposal.resolutionOutcome === "ADOPTED"
+      ? "ADOPTED"
+      : proposal.status;
+  const proposalLifecycleLabel = proposal.status === "RESOLVED" && proposal.resolutionOutcome
+    ? `${t("statusResolved")} · ${proposal.resolutionOutcome.replace("_", " ")}`
+    : proposal.archivedAt
+      ? t("statusArchived")
+      : {
+        DRAFT: t("statusDraft"),
+        OPEN: t("statusOpen"),
+        RESOLVED: t("statusResolved"),
+      }[proposal.status];
 
   const authorName = proposal.author?.displayName || proposal.author?.email || t("authorUnknown");
   const memberName = (member: { user: { displayName: string | null; email: string } }) => member.user.displayName || member.user.email;
@@ -322,9 +330,7 @@ export default async function ProposalDetailPage({
           <span>·</span>
           <span>{ownerText}</span>
           <span>·</span>
-          <span className={`tag ${statusClass}`}>
-            {proposal.status === "RESOLVED" && proposal.resolutionOutcome ? `${proposal.status} · ${proposal.resolutionOutcome.replace("_", " ")}` : proposal.status}
-          </span>
+          <WorkItemLifecycleBadge status={proposalLifecycleStatus} label={proposalLifecycleLabel} />
           <span>·</span>
           <span>{priorityText}</span>
           <span>·</span>
@@ -508,16 +514,16 @@ export default async function ProposalDetailPage({
               <h3 className="nr-sidebar-title">{t("decisionTitle")}</h3>
               <p className="nr-decision-copy">{t("decisionAdvisoryBody")}</p>
               <div className="nr-decision-tags">
-                <span className="tag info">{decisionModeLabel(decisionState.mode)}</span>
+                <WorkItemBadge tone="info">{decisionModeLabel(decisionState.mode)}</WorkItemBadge>
                 {decisionState.needsReview ? (
-                  <span className="tag warning">{t("decisionTagReviewRequested")}</span>
+                  <WorkItemAttentionBadge>{t("decisionTagReviewRequested")}</WorkItemAttentionBadge>
                 ) : decisionState.currentMemberDecision || decisionState.currentUserOpenObjectionId ? (
-                  <span className="tag success">{t("decisionTagReviewed")}</span>
+                  <WorkItemAttentionBadge tone="success">{t("decisionTagReviewed")}</WorkItemAttentionBadge>
                 ) : (
-                  <span className="tag">{t("decisionTagOpen")}</span>
+                  <WorkItemAttentionBadge tone="info">{t("decisionTagOpen")}</WorkItemAttentionBadge>
                 )}
                 {decisionState.openObjections.length > 0 && (
-                  <span className="tag danger">{t("decisionTagObjectionOpen", { count: decisionState.openObjections.length })}</span>
+                  <WorkItemAttentionBadge tone="danger">{t("decisionTagObjectionOpen", { count: decisionState.openObjections.length })}</WorkItemAttentionBadge>
                 )}
               </div>
               <div className="nr-decision-counts">
@@ -536,7 +542,7 @@ export default async function ProposalDetailPage({
                     && !decisionState.currentUserOpenObjectionId
                     && decisionButton("AGREE", t("decisionMarkReviewed"), "primary small")}
                   {decisionState.currentMemberDecision && (
-                    <span className="tag success">{t("decisionMarkedReviewed")}</span>
+                    <WorkItemAttentionBadge tone="success">{t("decisionMarkedReviewed")}</WorkItemAttentionBadge>
                   )}
                   {!decisionState.currentUserOpenObjectionId && (
                     <details className="nr-decision-objection-form">
@@ -674,14 +680,14 @@ export default async function ProposalDetailPage({
               <strong>{t("aboutRelated")}</strong>
               <div className="nr-tag-group mt-2">
                 {proposal.tensions.map((tension) => (
-                  <Link key={tension.id} href={`/workspaces/${workspaceId}/tensions/${tension.id}`} className="tag info no-underline">
+                  <WorkItemRelationshipTag key={tension.id} href={`/workspaces/${workspaceId}/tensions/${tension.id}`}>
                     {t("tensionTag", { title: tension.title })}
-                  </Link>
+                  </WorkItemRelationshipTag>
                 ))}
                 {proposal.actions.map((action) => (
-                  <Link key={action.id} href={`/workspaces/${workspaceId}/actions/${action.id}`} className="tag info no-underline">
+                  <WorkItemRelationshipTag key={action.id} href={`/workspaces/${workspaceId}/actions/${action.id}`}>
                     {t("actionTag", { title: action.title })}
-                  </Link>
+                  </WorkItemRelationshipTag>
                 ))}
               </div>
             </div>

@@ -279,6 +279,11 @@ button.warning {
   color: var(--info);
 }
 
+.tag.danger {
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
 .actions-inline {
   display: flex;
   gap: 8px;

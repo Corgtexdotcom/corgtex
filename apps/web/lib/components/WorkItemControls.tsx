@@ -3,6 +3,7 @@ import { ArrowDownAZ, ArrowDownWideNarrow, ArrowUpDown, Columns3, List, Table2 }
 import type { WorkItemScope, WorkItemSort, WorkItemViewMode } from "@/lib/work-item-view";
 import { MultiSelectFilter } from "@/lib/components/MultiSelectFilter";
 import { SegmentedControl } from "@/lib/components/ControlPrimitives";
+import { cn } from "@/lib/utils";
 
 type Option = {
   id: string;
@@ -14,6 +15,130 @@ type DateFilter = {
   label: string;
   value?: string;
 };
+
+type WorkItemBadgeTone = "neutral" | "info" | "warning" | "success" | "danger" | "muted";
+type WorkItemBadgeKind = "lifecycle" | "attention" | "relationship" | "metadata";
+
+export function WorkItemBadge({
+  children,
+  tone = "neutral",
+  kind = "metadata",
+  className,
+}: {
+  children?: ReactNode;
+  tone?: WorkItemBadgeTone;
+  kind?: WorkItemBadgeKind;
+  className?: string;
+}) {
+  return (
+    <span
+      className={cn(
+        "tag",
+        tone !== "muted" && tone,
+        "nr-work-item-badge",
+        `nr-work-item-badge-${kind}`,
+        tone === "muted" && "nr-work-item-badge-muted",
+        className,
+      )}
+    >
+      {children}
+    </span>
+  );
+}
+
+export function WorkItemBadgeGroup({
+  children,
+  className,
+}: {
+  children?: ReactNode;
+  className?: string;
+}) {
+  if (!children) return null;
+  return <div className={cn("nr-work-item-badge-group", className)}>{children}</div>;
+}
+
+export function workItemLifecycleTone(status: string): WorkItemBadgeTone {
+  if (status === "DRAFT" || status === "IN_PROGRESS" || status === "RESOLVED") return "info";
+  if (status === "COMPLETED" || status === "ADOPTED") return "success";
+  if (status === "ARCHIVED") return "muted";
+  return "neutral";
+}
+
+export function WorkItemLifecycleBadge({
+  status,
+  label,
+}: {
+  status: string;
+  label: ReactNode;
+}) {
+  return (
+    <WorkItemBadge kind="lifecycle" tone={workItemLifecycleTone(status)}>
+      {label}
+    </WorkItemBadge>
+  );
+}
+
+export function WorkItemAttentionBadge({ children, tone = "warning" }: { children?: ReactNode; tone?: WorkItemBadgeTone }) {
+  return (
+    <WorkItemBadge kind="attention" tone={tone}>
+      {children}
+    </WorkItemBadge>
+  );
+}
+
+export function WorkItemRelationshipTag({
+  href,
+  children,
+}: {
+  href: string;
+  children?: ReactNode;
+}) {
+  return (
+    <a href={href} className="tag tag-sm no-underline nr-work-item-badge nr-work-item-badge-relationship" draggable={false}>
+      {children}
+    </a>
+  );
+}
+
+export function WorkItemCard({
+  compact = false,
+  href,
+  title,
+  titlePrefix,
+  ariaLabel,
+  badges,
+  body,
+  actions,
+  hiddenTransitions,
+}: {
+  compact?: boolean;
+  href: string;
+  title: ReactNode;
+  titlePrefix?: ReactNode;
+  ariaLabel: string;
+  badges?: ReactNode;
+  body?: ReactNode;
+  actions?: ReactNode;
+  hiddenTransitions?: ReactNode;
+}) {
+  return (
+    <div className={cn(compact ? "nr-kanban-card" : "nr-item nr-list-card", "nr-work-item-card nr-clickable-card")}>
+      <a href={href} className="nr-card-hitbox" aria-label={ariaLabel} draggable={false} />
+      <div className="nr-card-content nr-work-item-card-header">
+        <strong className="nr-item-title nr-work-item-card-title">
+          {titlePrefix}
+          {title}
+        </strong>
+        <WorkItemBadgeGroup className="nr-work-item-card-badges">
+          {badges}
+        </WorkItemBadgeGroup>
+      </div>
+      {body && <div className="nr-card-content nr-work-item-card-body">{body}</div>}
+      {actions}
+      {hiddenTransitions}
+    </div>
+  );
+}
 
 export function WorkItemViewToggle({
   currentView,
@@ -161,6 +286,8 @@ export function WorkItemFilterControls({
   clearHref,
   showCircle = true,
   showMember = true,
+  showStatusFilter = true,
+  summaryLabel,
   labels,
 }: {
   action: string;
@@ -185,6 +312,8 @@ export function WorkItemFilterControls({
   clearHref?: string;
   showCircle?: boolean;
   showMember?: boolean;
+  showStatusFilter?: boolean;
+  summaryLabel?: string;
   labels: {
     scope?: string;
     company?: string;
@@ -206,15 +335,27 @@ export function WorkItemFilterControls({
   const selectedCircleIds = circleIds ?? (circleId ? [circleId] : []);
   const selectedAssigneeMemberIds = assigneeMemberIds ?? (assigneeMemberId ? [assigneeMemberId] : []);
   const selectedMemberIds = memberIds ?? (memberId ? [memberId] : []);
+  const hiddenStatusValues = statusValues && statusValues.length > 0
+    ? statusValues
+    : status
+      ? [status]
+      : [];
+  const hasActiveAdvancedFilters = Boolean(
+    selectedCircleIds.length > 0
+      || selectedAssigneeMemberIds.length > 0
+      || selectedMemberIds.length > 0
+      || dates.some((date) => Boolean(date.value))
+      || Boolean(scope && scope !== "company"),
+  );
 
-  return (
+  const form = (
     <form className="nr-filter-panel" action={action}>
       {status && !statusOptions && <input type="hidden" name="status" value={status} />}
       {view && view !== "list" && <input type="hidden" name="view" value={view} />}
       {sort && sort !== "priority" && <input type="hidden" name="sort" value={sort} />}
       {columns && columns.length > 0 && <input type="hidden" name="columns" value={columns.join(",")} />}
       {group && <input type="hidden" name="group" value={group} />}
-      {statusOptions && (
+      {statusOptions && showStatusFilter && (
         <MultiSelectFilter
           name="status"
           label={labels.status ?? "Status"}
@@ -226,6 +367,9 @@ export function WorkItemFilterControls({
           selectedCountLabel={labels.selectedCount}
         />
       )}
+      {statusOptions && !showStatusFilter && hiddenStatusValues.map((value) => (
+        <input key={value} type="hidden" name="status" value={value} />
+      ))}
       {scope && (
         <label>
           <span className="nr-item-meta">{labels.scope}</span>
@@ -284,5 +428,16 @@ export function WorkItemFilterControls({
         <a className="link-button small" href={clearHref ?? action}>{labels.clear}</a>
       </div>
     </form>
+  );
+
+  if (!summaryLabel) return form;
+
+  return (
+    <details className="nr-work-item-advanced-filters" open={hasActiveAdvancedFilters}>
+      <summary className="nr-hide-marker nr-work-item-advanced-filters-summary">
+        {summaryLabel}
+      </summary>
+      {form}
+    </details>
   );
 }

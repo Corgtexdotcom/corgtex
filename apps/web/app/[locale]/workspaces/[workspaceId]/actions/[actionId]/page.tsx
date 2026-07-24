@@ -11,6 +11,7 @@ import { AdviceRequestForm } from "@/lib/components/AdviceRequestForm";
 import { DeliberationComposer } from "@/lib/components/DeliberationComposer";
 import { DeliberationThread } from "@/lib/components/DeliberationThread";
 import { WorkItemConversationSurface, WorkItemRequestList } from "@/lib/components/WorkItemConversation";
+import { WorkItemLifecycleBadge } from "@/lib/components/WorkItemControls";
 import { getDeliberationTargets } from "@/lib/deliberation-targets";
 import { canOpenPrivateDraft } from "@/lib/governance-open-guards";
 import { attachActionExternalResourceAction, createActionChecklistItemAction, deleteActionAction, deleteActionChecklistItemAction, postActionDeliberationAction, publishActionAction, requestActionInputAction, resolveActionDeliberationAction, returnActionToDraftAction, updateActionAction, updateActionChecklistItemAction, updateActionDeliberationAction } from "../../actions";
@@ -105,13 +106,6 @@ export default async function ActionDetailPage({
         : null,
   }));
 
-  const statusClass = action.status === "DRAFT"
-    ? "info"
-    : action.status === "COMPLETED"
-      ? "success"
-      : action.status === "IN_PROGRESS"
-        ? "info"
-        : "neutral";
   const statusLabel = {
     DRAFT: t("statusDraft"),
     OPEN: t("statusOpen"),
@@ -257,7 +251,7 @@ export default async function ActionDetailPage({
           {action.title}
         </h1>
         <div className="nr-masthead-meta" style={{ marginTop: 12 }}>
-          <span className={`tag ${statusClass}`}>{statusLabel}</span>
+          <WorkItemLifecycleBadge status={action.status} label={statusLabel} />
           <span>{t("metaCreator", { name: authorName })}</span>
           {assigneeName && <span>{t("metaAssignee", { name: assigneeName })}</span>}
           <span>{priorityText}</span>

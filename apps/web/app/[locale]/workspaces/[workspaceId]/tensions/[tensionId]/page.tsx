@@ -13,6 +13,7 @@ import { DeliberationThread } from "@/lib/components/DeliberationThread";
 import { DeliberationComposer } from "@/lib/components/DeliberationComposer";
 import { AdviceRequestForm } from "@/lib/components/AdviceRequestForm";
 import { WorkItemConversationSurface, WorkItemRequestList } from "@/lib/components/WorkItemConversation";
+import { WorkItemLifecycleBadge } from "@/lib/components/WorkItemControls";
 import { getDeliberationTargets } from "@/lib/deliberation-targets";
 import { canActorReplyToAdviceRequest } from "@/lib/advice-request-audience";
 import { canOpenPrivateDraft } from "@/lib/governance-open-guards";
@@ -261,9 +262,7 @@ export default async function TensionDetailPage({
           {tension.title}
         </h1>
         <div className="nr-masthead-meta" style={{ marginTop: 12 }}>
-          <span className={`tag ${tension.status === "DRAFT" ? "info" : tension.status === "OPEN" ? "warning" : "success"}`}>
-            {statusLabel(tension.status)}
-          </span>
+          <WorkItemLifecycleBadge status={tension.status} label={statusLabel(tension.status)} />
           <span>{t("detailAuthorMeta", { author: authorName })}</span>
           {raisedByName && <span>{t("detailRaisedByMeta", { name: raisedByName })}</span>}
           {responsibleName && <span>{t("detailResponsiblePersonMeta", { name: responsibleName })}</span>}

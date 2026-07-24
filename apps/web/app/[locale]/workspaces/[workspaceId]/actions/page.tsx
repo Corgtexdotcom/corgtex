@@ -24,7 +24,14 @@ import {
 import { MarkdownExcerpt } from "@/lib/components/MarkdownRenderer";
 import { WorkspacePageHeader } from "@/lib/components/ControlPrimitives";
 import { ItemActions } from "@/lib/components/ui/ItemActions";
-import { WorkItemFilterControls, WorkItemToolbar } from "@/lib/components/WorkItemControls";
+import {
+  WorkItemAttentionBadge,
+  WorkItemCard,
+  WorkItemFilterControls,
+  WorkItemLifecycleBadge,
+  WorkItemRelationshipTag,
+  WorkItemToolbar,
+} from "@/lib/components/WorkItemControls";
 import { WorkItemKanbanBoard, type WorkItemKanbanColumn } from "@/lib/components/WorkItemKanbanBoard";
 import { WorkItemResolutionDialog } from "@/lib/components/WorkItemResolutionDialog";
 import { WorkItemTable, type WorkItemTableColumn, type WorkItemTableRow } from "@/lib/components/WorkItemTable";
@@ -528,74 +535,94 @@ export default async function ActionsPage({
     const evidence = evidenceByActionId.get(action.id) ?? [];
     const activeRequestCount = activeRequestCountByActionId.get(action.id) ?? 0;
     const { canEditContent, hiddenTransitions, moreItems, primary } = actionControls(action);
+    const cardBadges: ReactNode[] = [];
+    if (!compact) {
+      cardBadges.push(
+        <WorkItemLifecycleBadge key="lifecycle" status={action.status} label={t(statusMeta.labelKey)} />,
+      );
+    }
+    if (activeRequestCount > 0) {
+      cardBadges.push(
+        <WorkItemAttentionBadge key="input-request">{t("inputRequestCount", { count: activeRequestCount })}</WorkItemAttentionBadge>,
+      );
+    }
 
     return (
-      <div className={`${compact ? "nr-kanban-card" : "nr-item nr-list-card"} nr-clickable-card`} key={action.id}>
-        <a href={detailHref} className="nr-card-hitbox" aria-label={tWork("openItem", { title: action.title })} draggable={false} />
-        <div className="row nr-card-content" style={{ alignItems: "center" }}>
-          <strong className="nr-item-title">
-            {!compact && action.status === "DRAFT" && <span title={t("statusDraft")} style={{ marginRight: 6 }}>◆</span>}
-            {action.title}
-          </strong>
-          {!compact && <span className={`tag ${statusMeta.tagClass}`}>{t(statusMeta.labelKey)}</span>}
-          {activeRequestCount > 0 && <span className="tag warning">{t("inputRequestCount", { count: activeRequestCount })}</span>}
-        </div>
-        <div className="nr-card-content">
-          {action.bodyMd && <MarkdownExcerpt markdown={action.bodyMd} maxLength={compact ? 120 : 220} as="div" className="nr-excerpt" />}
-          {compact ? (
-            <div className="nr-card-chip-row">
-              {assigneeName && <span className="nr-card-chip">{assigneeName}</span>}
-              {renderPriorityChip(action, canEditContent)}
-              {renderDueChip(action, canEditContent, dueDate)}
-              {renderChecklistProgress(action, detailHref)}
-              {activeRequestCount > 0 && <span className="tag warning">{t("inputRequestCount", { count: activeRequestCount })}</span>}
-            </div>
-          ) : (
-            <div className="nr-item-meta" style={{ marginTop: 8 }}>
-              {t("metaCreator", { name: authorName })}
-              {createdAge ? ` · ${createdAge}` : ""}
-              {assigneeName ? ` · ${t("metaAssignee", { name: assigneeName })}` : ""}
-              {` · ${priorityText(action.priority)}`}
-              {action.circle ? ` · ${action.circle.name}` : ""}
-              {dueDate ? ` · ${t("metaDue", { date: dueDate })}` : ""}
-              {(action.checklistItemCount ?? 0) > 0 ? ` · ${t("checklistProgressShort", { completed: action.checklistCompletedCount ?? 0, total: action.checklistItemCount ?? 0 })}` : ""}
-              {action.proposal?.title ? ` · ${t("metaLinkedToProposal", { title: action.proposal.title })}` : ""}
-              {" · "}
-              {action.version > 1 ? (
-                <a href={`/workspaces/${workspaceId}/versions?entityType=ACTION&entityId=${encodeURIComponent(action.id)}`} draggable={false}>v{action.version}</a>
-              ) : (
-                <>v{action.version}</>
-              )}
-            </div>
+      <WorkItemCard
+        key={action.id}
+        compact={compact}
+        href={detailHref}
+        title={action.title}
+        titlePrefix={!compact && action.status === "DRAFT" ? <span title={t("statusDraft")} style={{ marginRight: 6 }}>◆</span> : null}
+        ariaLabel={tWork("openItem", { title: action.title })}
+        badges={cardBadges.length > 0 ? cardBadges : null}
+        body={(
+          <>
+            {action.bodyMd && <MarkdownExcerpt markdown={action.bodyMd} maxLength={compact ? 120 : 220} as="div" className="nr-excerpt" />}
+            {compact ? (
+              <div className="nr-card-chip-row">
+                {assigneeName && <span className="nr-card-chip">{assigneeName}</span>}
+                {renderPriorityChip(action, canEditContent)}
+                {renderDueChip(action, canEditContent, dueDate)}
+                {renderChecklistProgress(action, detailHref)}
+              </div>
+            ) : (
+              <>
+                <div className="nr-item-meta" style={{ marginTop: 8 }}>
+                  {t("metaCreator", { name: authorName })}
+                  {createdAge ? ` · ${createdAge}` : ""}
+                  {assigneeName ? ` · ${t("metaAssignee", { name: assigneeName })}` : ""}
+                  {` · ${priorityText(action.priority)}`}
+                  {action.circle ? ` · ${action.circle.name}` : ""}
+                  {dueDate ? ` · ${t("metaDue", { date: dueDate })}` : ""}
+                  {(action.checklistItemCount ?? 0) > 0 ? ` · ${t("checklistProgressShort", { completed: action.checklistCompletedCount ?? 0, total: action.checklistItemCount ?? 0 })}` : ""}
+                  {" · "}
+                  {action.version > 1 ? (
+                    <a href={`/workspaces/${workspaceId}/versions?entityType=ACTION&entityId=${encodeURIComponent(action.id)}`} draggable={false}>v{action.version}</a>
+                  ) : (
+                    <>v{action.version}</>
+                  )}
+                </div>
+                {action.proposal?.title && (
+                  <div className="nr-tag-group">
+                    <WorkItemRelationshipTag href={`/workspaces/${workspaceId}/proposals/${action.proposal.id}`}>
+                      {t("metaLinkedToProposal", { title: action.proposal.title })}
+                    </WorkItemRelationshipTag>
+                  </div>
+                )}
+              </>
             )}
-          {action.status === "COMPLETED" && action.completedVia && (
-            <div className="nr-item-meta" style={{ marginTop: 10 }}>
-              <strong>{tWork("completionNote")}</strong>
-              <MarkdownExcerpt markdown={action.completedVia} maxLength={compact ? 120 : 220} as="div" className="nr-excerpt" />
-            </div>
-          )}
-          {evidence.length > 0 && (
-            <div className="nr-evidence-list">
-              <strong>{tWork("completionEvidence")}</strong>
-              {evidence.map((row) => (
-                <a key={row.id} href={`/workspaces/${workspaceId}/brain/sources`} draggable={false}>
-                  {row.document.title}
-                </a>
-              ))}
-            </div>
-          )}
-        </div>
-        <ItemActions
-          moreLabel={tCommon("moreActions")}
-          primary={primary}
-          more={moreItems.length > 0 ? moreItems : null}
-        />
-        {hiddenTransitions.length > 0 && (
+            {action.status === "COMPLETED" && action.completedVia && (
+              <div className="nr-item-meta" style={{ marginTop: 10 }}>
+                <strong>{tWork("completionNote")}</strong>
+                <MarkdownExcerpt markdown={action.completedVia} maxLength={compact ? 120 : 220} as="div" className="nr-excerpt" />
+              </div>
+            )}
+            {evidence.length > 0 && (
+              <div className="nr-evidence-list">
+                <strong>{tWork("completionEvidence")}</strong>
+                {evidence.map((row) => (
+                  <a key={row.id} href={`/workspaces/${workspaceId}/brain/sources`} draggable={false}>
+                    {row.document.title}
+                  </a>
+                ))}
+              </div>
+            )}
+          </>
+        )}
+        actions={(
+          <ItemActions
+            moreLabel={tCommon("moreActions")}
+            primary={primary}
+            more={moreItems.length > 0 ? moreItems : null}
+          />
+        )}
+        hiddenTransitions={hiddenTransitions.length > 0 ? (
           <div className="nr-transition-controls">
             {hiddenTransitions}
           </div>
-        )}
-      </div>
+        ) : null}
+      />
     );
   }
 
@@ -631,7 +658,7 @@ export default async function ActionsPage({
             </a>
             {activeRequestCount > 0 && (
               <div className="nr-work-item-table-meta nr-work-item-table-tags">
-                <span className="tag warning">{t("inputRequestCount", { count: activeRequestCount })}</span>
+                <WorkItemAttentionBadge>{t("inputRequestCount", { count: activeRequestCount })}</WorkItemAttentionBadge>
               </div>
             )}
             {action.bodyMd && <MarkdownExcerpt markdown={action.bodyMd} maxLength={140} as="div" className="nr-work-item-table-meta" />}
@@ -653,7 +680,7 @@ export default async function ActionsPage({
             )}
           </>
         ),
-        status: <span className={`tag ${statusMeta.tagClass}`}>{t(statusMeta.labelKey)}</span>,
+        status: <WorkItemLifecycleBadge status={action.status} label={t(statusMeta.labelKey)} />,
         owner: (
           <div className="nr-work-item-table-meta">
             <div>{t("metaCreator", { name: authorName })}</div>
@@ -676,9 +703,9 @@ export default async function ActionsPage({
               <span>v{action.version}</span>
             )}
             {action.proposal?.title ? (
-              <a href={`/workspaces/${workspaceId}/proposals/${action.proposal.id}`}>
+              <WorkItemRelationshipTag href={`/workspaces/${workspaceId}/proposals/${action.proposal.id}`}>
                 {t("metaLinkedToProposal", { title: action.proposal.title })}
-              </a>
+              </WorkItemRelationshipTag>
             ) : null}
             {(action.checklistItemCount ?? 0) > 0 ? (
               <a href={`${detailHref}#checklist`}>
@@ -868,6 +895,8 @@ export default async function ActionsPage({
           group={boardGroupQuery}
           statusOptions={ACTION_STATUS_FILTERS.map((filter) => ({ id: filter, label: ACTION_STATUS_META[filter].labelKey ? t(ACTION_STATUS_META[filter].labelKey) : filter }))}
           statusValues={statusFilters}
+          showStatusFilter={false}
+          summaryLabel={tWork("advancedFilters")}
           circleIds={circleIds}
           assigneeMemberIds={assigneeMemberIds}
           memberIds={memberIds}
