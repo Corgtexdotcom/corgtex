@@ -43,6 +43,7 @@
     "meeting-recorder:backfill-paid-access": "node scripts/backfill-paid-recorder-access.mjs",
     "member:cleanup": "tsx scripts/member-cleanup-runner.ts",
     "smoke:meeting-recorder": "node scripts/meeting-recorder-smoke.mjs",
+    "smoke:meeting-processing-spine": "node scripts/meeting-processing-spine-smoke.mjs",
     "test:e2e:agents": "npx dotenv-cli -- node scripts/e2e-agent-tests.mjs",
     "prisma:generate": "prisma generate",
     "prisma:push": "prisma db push",
