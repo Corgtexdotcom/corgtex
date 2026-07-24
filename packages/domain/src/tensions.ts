@@ -8,6 +8,7 @@ import { loadAdviceRequestCountSummaries } from "./advice-requests";
 import { invariant } from "./errors";
 import { humanMemberIdentityWhere } from "./member-identity";
 import { requireDraftManager } from "./draft-permissions";
+import { requireCollaborativeWorkItemEditor } from "./collaborative-permissions";
 import { resolveWorkspaceProposalLink } from "./proposal-links";
 import { createWorkItemEvidenceLinks } from "./work-item-evidence";
 import { ensureWorkspacePermalink, workspaceEntityCanonicalPath } from "./permalinks";
@@ -21,7 +22,6 @@ import {
   changedDataFields,
   pickJsonSnapshot,
   recordWorkItemVersion,
-  requireSubmittedWorkItemEditor,
   resolveWorkspaceMemberUserId,
 } from "./work-item-versions";
 
@@ -398,7 +398,7 @@ export async function updateTension(actor: AppActor, params: {
         await requireDraftManager({ actor, workspaceId: params.workspaceId, record: tension, resolvedMembership: membership });
       } else {
         invariant(tension.status === "OPEN", 400, "INVALID_STATE", "Only draft or open tensions can be edited.");
-        requireSubmittedWorkItemEditor(actor, membership, tension);
+        requireCollaborativeWorkItemEditor(actor, membership, tension);
       }
     }
     if (params.isPrivate !== undefined) {

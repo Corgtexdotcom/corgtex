@@ -51,11 +51,10 @@ export default async function ActionEditPage({
   const canManage = !isArchived && (actor.kind === "agent"
     || membership?.role === "ADMIN"
     || (actor.kind === "user" && action.authorUserId === actor.user.id));
-  const canSubmittedEditorEdit = actor.kind === "user"
-    && (action.authorUserId === actor.user.id || action.assigneeMemberId === membership?.id);
+  const canCollaborateOnSubmittedAction = !action.isPrivate && (actor.kind === "agent" || Boolean(membership?.isActive));
   const canEditContent = action.status === "DRAFT"
     ? canManage
-    : !isArchived && (action.status === "OPEN" || action.status === "IN_PROGRESS") && canSubmittedEditorEdit;
+    : !isArchived && (action.status === "OPEN" || action.status === "IN_PROGRESS") && canCollaborateOnSubmittedAction;
   const detailHref = `/workspaces/${workspaceId}/actions/${action.id}`;
   const members = await listHumanMembers(workspaceId);
   const actionMembers = members.map((member) => ({

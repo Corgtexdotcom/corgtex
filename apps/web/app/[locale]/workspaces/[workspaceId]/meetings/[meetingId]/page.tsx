@@ -16,6 +16,7 @@ import { getFormatter, getTranslations } from "next-intl/server";
 import { prisma } from "@corgtex/shared";
 import Link from "next/link";
 import { MarkdownExcerpt, MarkdownRenderer } from "@/lib/components/MarkdownRenderer";
+import { MarkdownEditor } from "@/lib/components/MarkdownEditor";
 import { ArchivedItemBanner } from "@/lib/components/ArchivedItemBanner";
 import { UnavailableItemStatus } from "@/lib/components/UnavailableItemStatus";
 import { DeliberationThread } from "@/lib/components/DeliberationThread";
@@ -23,7 +24,7 @@ import { DeliberationComposer } from "@/lib/components/DeliberationComposer";
 import { WorkItemConversationSurface } from "@/lib/components/WorkItemConversation";
 import { getDeliberationTargets } from "@/lib/deliberation-targets";
 import { listDeliberationEntries } from "@corgtex/domain";
-import { postMeetingDeliberationAction, resolveMeetingDeliberationAction, retryMeetingProcessingJobAction } from "../actions";
+import { postMeetingDeliberationAction, resolveMeetingDeliberationAction, retryMeetingProcessingJobAction, updateMeetingProcessedContentAction } from "../actions";
 import { MeetingTranscriptUploadForm } from "../MeetingTranscriptUploadForm";
 import MeetingIntelligence, { MeetingRegenerationPanel, type InsightTargetMetadata } from "./MeetingIntelligence";
 import {
@@ -494,6 +495,29 @@ export default async function MeetingDetailPage({
                 <p className="meeting-empty-state">{t("summaryEmpty")}</p>
               )}
             </section>
+
+            {!isArchived && (
+              <section className="ws-section" style={{ marginBottom: 32 }}>
+                <details>
+                  <summary className="nr-hide-marker" style={{ cursor: "pointer", fontWeight: 600, color: "var(--accent)" }}>
+                    {t("processedContentEdit")}
+                  </summary>
+                  <form action={updateMeetingProcessedContentAction} className="stack nr-form-section" style={{ marginTop: 12 }}>
+                    <input type="hidden" name="workspaceId" value={workspaceId} />
+                    <input type="hidden" name="meetingId" value={meetingId} />
+                    <label>
+                      {t("processedSummaryLabel")}
+                      <MarkdownEditor name="summaryMd" defaultValue={meeting.summaryMd ?? ""} rows={8} />
+                    </label>
+                    <label>
+                      {t("processedGuidanceLabel")}
+                      <MarkdownEditor name="ingestionGuidanceMd" defaultValue={meeting.ingestionGuidanceMd ?? ""} rows={4} />
+                    </label>
+                    <button type="submit" className="secondary small">{t("processedContentSave")}</button>
+                  </form>
+                </details>
+              </section>
+            )}
 
             {!isArchived && <MeetingRegenerationPanel
               workspaceId={workspaceId}

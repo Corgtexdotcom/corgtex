@@ -12,6 +12,7 @@ import {
   importMeetingInvite,
   intakeMeetingTranscript,
   requestMeetingIntelligenceRegeneration,
+  updateMeetingProcessedContent,
   requireWorkspaceMembership,
   replayWorkflowJob,
   dismissInsight,
@@ -661,6 +662,21 @@ export async function regenerateMeetingIntelligenceAction(formData: FormData) {
     workspaceId,
     meetingId: asString(formData, "meetingId"),
     guidanceMd: asString(formData, "guidanceMd"),
+  });
+  refresh(workspaceId);
+}
+
+export async function updateMeetingProcessedContentAction(formData: FormData) {
+  const _demoGuardWsId = formData.get("workspaceId") as string;
+  if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
+
+  const actor = await requirePageActor();
+  const workspaceId = asString(formData, "workspaceId");
+  await updateMeetingProcessedContent(actor, {
+    workspaceId,
+    meetingId: asString(formData, "meetingId"),
+    summaryMd: asOptional(formData, "summaryMd"),
+    ingestionGuidanceMd: asOptional(formData, "ingestionGuidanceMd"),
   });
   refresh(workspaceId);
 }

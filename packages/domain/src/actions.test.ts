@@ -767,7 +767,7 @@ describe("action domain lifecycle", () => {
     }));
   });
 
-  it("blocks unrelated members from editing an open action", async () => {
+  it("allows any active member to edit a public open action", async () => {
     requireWorkspaceMembership.mockResolvedValueOnce({
       id: "member-3",
       workspaceId: "workspace-1",
@@ -787,6 +787,15 @@ describe("action domain lifecycle", () => {
       publishedAt: new Date("2026-06-01T00:00:00.000Z"),
       archivedAt: null,
     });
+    prismaMock.action.update.mockResolvedValue({
+      id: "action-1",
+      workspaceId: "workspace-1",
+      authorUserId: "agent-user",
+      assigneeMemberId: "member-2",
+      title: "Allowed update",
+      status: "OPEN",
+      version: 2,
+    });
 
     const { updateAction } = await import("./actions");
     await expect(updateAction({
@@ -800,14 +809,23 @@ describe("action domain lifecycle", () => {
     }, {
       workspaceId: "workspace-1",
       actionId: "action-1",
-      title: "Not allowed",
-    })).rejects.toMatchObject({
-      status: 403,
-      code: "FORBIDDEN",
+      title: "Allowed update",
+    })).resolves.toMatchObject({
+      id: "action-1",
+      version: 2,
     });
 
-    expect(prismaMock.workItemVersion.create).not.toHaveBeenCalled();
-    expect(prismaMock.action.update).not.toHaveBeenCalled();
+    expect(prismaMock.workItemVersion.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        entityType: "Action",
+        entityId: "action-1",
+        changedFields: ["title"],
+      }),
+    }));
+    expect(prismaMock.action.update).toHaveBeenCalledWith(expect.objectContaining({
+      where: { id: "action-1" },
+      data: { title: "Allowed update", version: 2 },
+    }));
   });
 
   it("requires a completion note when completing an action", async () => {

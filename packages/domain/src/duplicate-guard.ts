@@ -362,7 +362,7 @@ async function latestRows(entityType: DuplicateGuardEntityType, workspaceId: str
       }) ?? [];
     case "Goal":
       return await db.goal?.findMany?.({
-        where: { workspaceId, archivedAt: null, status: { in: ["DRAFT", "ACTIVE", "ON_TRACK", "AT_RISK", "BEHIND"] } },
+        where: { workspaceId, archivedAt: null, status: { in: ["DRAFT", "ACTIVE", "ON_TRACK", "AT_RISK", "BEHIND"] }, ...privateWorkItemVisibility },
         orderBy: [{ updatedAt: "desc" }, { createdAt: "desc" }],
         take: limit,
       }) ?? [];

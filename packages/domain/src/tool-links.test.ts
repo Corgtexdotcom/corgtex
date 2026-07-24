@@ -154,10 +154,11 @@ describe("workspace tool links", () => {
     expect(JSON.stringify(recordAudit.mock.calls[0])).not.toContain("board-pass");
   });
 
-  it("reveals a credential to an active workspace member and audits without the raw secret", async () => {
+  it("reveals a credential to the creator and audits without the raw secret", async () => {
     prismaMock.workspaceToolLink.findFirst.mockResolvedValue({
       id: "tool-1",
       title: "Miro board",
+      createdByUserId: "user-1",
       credentialLabel: "Board password",
       credentialSecretEnc: "enc:board-pass",
     });
@@ -184,7 +185,54 @@ describe("workspace tool links", () => {
     expect(JSON.stringify(recordAudit.mock.calls[0])).not.toContain("board-pass");
   });
 
-  it("blocks non-creators from editing another member's tool link", async () => {
+  it("allows active members to edit another member's tool-link metadata", async () => {
+    requireWorkspaceMembership.mockResolvedValueOnce({
+      id: "member-2",
+      workspaceId: "workspace-1",
+      userId: "user-2",
+      role: "CONTRIBUTOR",
+      isActive: true,
+    });
+    prismaMock.workspaceToolLink.findFirst.mockResolvedValue({
+      id: "tool-1",
+      createdByUserId: "user-1",
+    });
+    prismaMock.workspaceToolLink.update.mockResolvedValue(toolLinkFixture({
+      title: "Changed",
+      descriptionMd: "Updated notes",
+    }));
+
+    const { updateWorkspaceToolLink } = await import("./tool-links");
+    await expect(updateWorkspaceToolLink({
+      kind: "user",
+      user: {
+        id: "user-2",
+        email: "other@example.com",
+        displayName: "Other",
+        globalRole: "USER",
+      },
+    }, {
+      workspaceId: "workspace-1",
+      toolLinkId: "tool-1",
+      title: "Changed",
+      descriptionMd: " Updated notes ",
+    })).resolves.toMatchObject({
+      title: "Changed",
+      descriptionMd: "Updated notes",
+      canManage: true,
+      canManageCredentials: false,
+    });
+
+    expect(prismaMock.workspaceToolLink.update).toHaveBeenCalledWith(expect.objectContaining({
+      where: { id: "tool-1" },
+      data: expect.objectContaining({
+        title: "Changed",
+        descriptionMd: "Updated notes",
+      }),
+    }));
+  });
+
+  it("blocks active non-managers from editing another member's credentials", async () => {
     requireWorkspaceMembership.mockResolvedValueOnce({
       id: "member-2",
       workspaceId: "workspace-1",
@@ -209,13 +257,50 @@ describe("workspace tool links", () => {
     }, {
       workspaceId: "workspace-1",
       toolLinkId: "tool-1",
-      title: "Changed",
+      credentialSecret: "new-secret",
     })).rejects.toMatchObject({
       status: 403,
       code: "FORBIDDEN",
     });
 
     expect(prismaMock.workspaceToolLink.update).not.toHaveBeenCalled();
+    expect(encryptSecretMock).not.toHaveBeenCalled();
+  });
+
+  it("blocks active non-managers from revealing another member's credential", async () => {
+    requireWorkspaceMembership.mockResolvedValueOnce({
+      id: "member-2",
+      workspaceId: "workspace-1",
+      userId: "user-2",
+      role: "CONTRIBUTOR",
+      isActive: true,
+    });
+    prismaMock.workspaceToolLink.findFirst.mockResolvedValue({
+      id: "tool-1",
+      title: "Miro board",
+      createdByUserId: "user-1",
+      credentialLabel: "Board password",
+      credentialSecretEnc: "enc:board-pass",
+    });
+
+    const { revealWorkspaceToolLinkCredential } = await import("./tool-links");
+    await expect(revealWorkspaceToolLinkCredential({
+      kind: "user",
+      user: {
+        id: "user-2",
+        email: "other@example.com",
+        displayName: "Other",
+        globalRole: "USER",
+      },
+    }, {
+      workspaceId: "workspace-1",
+      toolLinkId: "tool-1",
+    })).rejects.toMatchObject({
+      status: 403,
+      code: "FORBIDDEN",
+    });
+
+    expect(decryptSecretMock).not.toHaveBeenCalled();
   });
 
   it("allows facilitators to retag and update an existing tool link", async () => {

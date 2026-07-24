@@ -8,6 +8,7 @@ import {
   getMyGoalSlice,
   listGoalFinanceProjectLinks,
   listCompanyDirectionFromBrain,
+  postGoalUpdate,
   recomputeGoalProgress,
   returnGoalToDraft,
   updateGoal,
@@ -19,6 +20,7 @@ vi.mock("@corgtex/shared", () => ({
     goal: {
       create: vi.fn(),
       findUnique: vi.fn(),
+      findFirst: vi.fn(),
       findMany: vi.fn(),
       update: vi.fn(),
     },
@@ -74,6 +76,7 @@ vi.mock("@corgtex/shared", () => ({
 }));
 
 vi.mock("./auth", () => ({
+  actorUserIdForWorkspace: vi.fn().mockResolvedValue("user-1"),
   requireWorkspaceMembership: vi.fn().mockResolvedValue({
     id: "member-1",
     workspaceId: "ws-1",
@@ -97,8 +100,49 @@ describe("Goals Domain", () => {
     user: { id: "user-1", email: "user@example.com", displayName: "User" },
   } as any;
 
-  beforeEach(() => {
+  beforeEach(async () => {
     vi.clearAllMocks();
+    const { actorUserIdForWorkspace, requireWorkspaceMembership } = await import("./auth");
+    vi.mocked(actorUserIdForWorkspace).mockReset();
+    vi.mocked(actorUserIdForWorkspace).mockResolvedValue("user-1");
+    vi.mocked(requireWorkspaceMembership).mockReset();
+    vi.mocked(requireWorkspaceMembership).mockResolvedValue({
+      id: "member-1",
+      workspaceId: "ws-1",
+      userId: "user-1",
+      role: "MEMBER",
+      isActive: true,
+    } as any);
+    vi.mocked(prisma.goal.create).mockReset();
+    vi.mocked(prisma.goal.findUnique).mockReset();
+    vi.mocked(prisma.goal.findUnique).mockResolvedValue(null);
+    vi.mocked(prisma.goal.findFirst).mockReset();
+    vi.mocked(prisma.goal.findFirst).mockResolvedValue(null);
+    vi.mocked(prisma.goal.findMany).mockReset();
+    vi.mocked(prisma.goal.findMany).mockResolvedValue([]);
+    vi.mocked(prisma.goal.update).mockReset();
+    vi.mocked(prisma.keyResult.create).mockReset();
+    vi.mocked(prisma.keyResult.createMany).mockReset();
+    vi.mocked(prisma.keyResult.findMany).mockReset();
+    vi.mocked(prisma.keyResult.findMany).mockResolvedValue([]);
+    vi.mocked(prisma.keyResult.findUnique).mockReset();
+    vi.mocked(prisma.keyResult.update).mockReset();
+    vi.mocked(prisma.keyResult.delete).mockReset();
+    vi.mocked(prisma.goalUpdate.create).mockReset();
+    vi.mocked(prisma.goalLink.delete).mockReset();
+    vi.mocked(prisma.goalLink.findUnique).mockReset();
+    vi.mocked(prisma.goalLink.findMany).mockReset();
+    vi.mocked(prisma.goalLink.findMany).mockResolvedValue([]);
+    vi.mocked(prisma.goalLink.upsert).mockReset();
+    vi.mocked(prisma.practiceProject.findFirst).mockReset();
+    vi.mocked(prisma.practiceProject.findMany).mockReset();
+    vi.mocked(prisma.practiceProject.findMany).mockResolvedValue([]);
+    vi.mocked(prisma.brainSource.findMany).mockReset();
+    vi.mocked(prisma.brainSource.findMany).mockResolvedValue([]);
+    vi.mocked(prisma.brainArticle.findMany).mockReset();
+    vi.mocked(prisma.brainArticle.findMany).mockResolvedValue([]);
+    vi.mocked(prisma.checkIn.findMany).mockReset();
+    vi.mocked(prisma.checkIn.findMany).mockResolvedValue([]);
     vi.mocked((prisma as any).$executeRaw).mockResolvedValue({});
     vi.mocked((prisma as any).$queryRaw).mockResolvedValue([]);
     vi.mocked((prisma as any).workItemVersion.create).mockResolvedValue({});
@@ -127,9 +171,12 @@ describe("Goals Domain", () => {
       expect(prisma.goal.create).toHaveBeenCalledWith(
         expect.objectContaining({
           data: expect.objectContaining({
+            authorUserId: "user-1",
             title: "Test Goal",
             level: "COMPANY",
             status: "DRAFT",
+            isPrivate: true,
+            publishedAt: null,
           }),
         })
       );
@@ -178,6 +225,8 @@ describe("Goals Domain", () => {
         level: "COMPANY",
         cadence: "QUARTERLY",
         status: "DRAFT",
+        authorUserId: "user-1",
+        isPrivate: true,
         ownerMemberId: "member-1",
         circleId: null,
         parentGoalId: null,
@@ -193,21 +242,14 @@ describe("Goals Domain", () => {
         ],
       };
       vi.mocked(prisma.goal.findMany).mockResolvedValueOnce([existingGoal] as any);
-      vi.mocked(prisma.goal.findUnique)
-        .mockResolvedValueOnce(existingGoal as any)
+      vi.mocked(prisma.goal.findFirst)
         .mockResolvedValueOnce(existingGoal as any)
         .mockResolvedValueOnce({
           ...existingGoal,
           cadence: "ANNUAL",
           level: "PERSONAL",
           status: "ACTIVE",
-          version: 2,
-        } as any)
-        .mockResolvedValueOnce({
-          ...existingGoal,
-          cadence: "ANNUAL",
-          level: "PERSONAL",
-          status: "ACTIVE",
+          isPrivate: false,
           progressPercent: 20,
           version: 3,
           keyResults: [
@@ -215,6 +257,10 @@ describe("Goals Domain", () => {
             { title: "Launch partner motion", progressPercent: 0, sortOrder: 1 },
           ],
         } as any);
+      vi.mocked(prisma.goal.findUnique)
+        .mockResolvedValueOnce(existingGoal as any)
+        .mockResolvedValueOnce(existingGoal as any)
+        .mockResolvedValueOnce(existingGoal as any);
       vi.mocked(prisma.keyResult.findMany).mockResolvedValueOnce([
         { title: "Close 5 customers", progressPercent: 40, sortOrder: 0 },
       ] as any);
@@ -265,6 +311,7 @@ describe("Goals Domain", () => {
           cadence: "ANNUAL",
           level: "PERSONAL",
           status: "ACTIVE",
+          isPrivate: false,
         }),
       });
       expect(prisma.goal.update).toHaveBeenCalledWith({
@@ -349,6 +396,9 @@ describe("Goals Domain", () => {
         id: "goal-1",
         workspaceId: "ws-1",
         archivedAt: null,
+        authorUserId: "user-1",
+        isPrivate: false,
+        status: "ACTIVE",
       } as any);
       vi.mocked(prisma.goalLink.upsert).mockResolvedValueOnce({
         id: "link-1",
@@ -401,6 +451,9 @@ describe("Goals Domain", () => {
         id: "goal-1",
         workspaceId: "ws-1",
         archivedAt: null,
+        authorUserId: "user-1",
+        isPrivate: false,
+        status: "ACTIVE",
       } as any);
       vi.mocked(prisma.goalLink.upsert).mockResolvedValueOnce({
         id: "link-1",
@@ -501,14 +554,14 @@ describe("Goals Domain", () => {
       });
 
       expect(prisma.goalLink.findMany).toHaveBeenCalledWith(expect.objectContaining({
-        where: {
+        where: expect.objectContaining({
           goalId: { in: ["goal-1"] },
           entityType: "PracticeProject",
-          goal: {
+          goal: expect.objectContaining({
             workspaceId: "ws-1",
             archivedAt: null,
-          },
-        },
+          }),
+        }),
       }));
       expect(prisma.practiceProject.findMany).toHaveBeenCalledWith(expect.objectContaining({
         where: {
@@ -616,7 +669,13 @@ describe("Goals Domain", () => {
       vi.mocked(prisma.goalLink.findUnique).mockResolvedValueOnce({
         id: "link-1",
         entityType: "PracticeProject",
-        goal: { workspaceId: "ws-1" },
+        goal: {
+          workspaceId: "ws-1",
+          archivedAt: null,
+          authorUserId: "user-1",
+          isPrivate: false,
+          status: "ACTIVE",
+        },
       } as any);
       vi.mocked(prisma.goalLink.delete).mockResolvedValueOnce({ id: "link-1" } as any);
 
@@ -632,7 +691,13 @@ describe("Goals Domain", () => {
       vi.mocked(prisma.goalLink.findUnique).mockResolvedValueOnce({
         id: "link-1",
         entityType: "BrainSource",
-        goal: { workspaceId: "ws-1" },
+        goal: {
+          workspaceId: "ws-1",
+          archivedAt: null,
+          authorUserId: "user-1",
+          isPrivate: false,
+          status: "ACTIVE",
+        },
       } as any);
 
       await expect(deleteGoalFinanceProjectLink(actor, {
@@ -780,6 +845,7 @@ describe("Goals Domain", () => {
         parentGoalId: null,
         ownerMemberId: "member-1",
         status: "ACTIVE",
+        isPrivate: false,
       } as any);
       vi.mocked(prisma.goal.update).mockResolvedValueOnce({
         id: "goal-1",
@@ -801,18 +867,20 @@ describe("Goals Domain", () => {
 
       expect(prisma.goal.update).toHaveBeenCalledWith(expect.objectContaining({
         where: { id: "goal-1" },
-        data: { status: "ON_TRACK", progressPercent: 65 },
+        data: expect.objectContaining({ status: "ON_TRACK", progressPercent: 65, isPrivate: false }),
       }));
     });
 
-    it("returns an active goal to draft for the owner", async () => {
+    it("returns an active goal to a private draft for the author", async () => {
       vi.mocked(prisma.goal.findUnique).mockResolvedValueOnce({
         id: "goal-1",
         workspaceId: "ws-1",
         archivedAt: null,
+        authorUserId: "user-1",
         parentGoalId: null,
         ownerMemberId: "member-1",
         status: "ACTIVE",
+        isPrivate: false,
       } as any);
       vi.mocked(prisma.goal.update).mockResolvedValueOnce({
         id: "goal-1",
@@ -830,15 +898,17 @@ describe("Goals Domain", () => {
 
       expect(prisma.goal.update).toHaveBeenCalledWith(expect.objectContaining({
         where: { id: "goal-1" },
-        data: { status: "DRAFT" },
+        data: { status: "DRAFT", isPrivate: true, publishedAt: null },
       }));
     });
 
-    it("allows the owner to edit active goal content and snapshots the previous version", async () => {
+    it("allows active members to edit public active goal content and snapshots the previous version", async () => {
       vi.mocked(prisma.goal.findUnique).mockResolvedValueOnce({
         id: "goal-1",
         workspaceId: "ws-1",
         archivedAt: null,
+        authorUserId: "other-user",
+        isPrivate: false,
         title: "Old goal",
         descriptionMd: "Old description",
         level: "COMPANY",
@@ -883,6 +953,86 @@ describe("Goals Domain", () => {
       }));
     });
 
+    it("allows active members to post progress updates to public active goals", async () => {
+      const { requireWorkspaceMembership } = await import("./auth");
+      vi.mocked(requireWorkspaceMembership).mockResolvedValueOnce({
+        id: "member-2",
+        workspaceId: "ws-1",
+        userId: "user-2",
+        role: "MEMBER",
+        isActive: true,
+      } as any);
+      vi.mocked(prisma.goal.findUnique).mockResolvedValueOnce({
+        id: "goal-1",
+        workspaceId: "ws-1",
+        archivedAt: null,
+        authorUserId: "user-1",
+        isPrivate: false,
+        status: "ACTIVE",
+        parentGoalId: null,
+      } as any);
+      vi.mocked(prisma.goalUpdate.create).mockResolvedValueOnce({
+        id: "update-1",
+        goalId: "goal-1",
+        bodyMd: "Progress update",
+        newProgress: 55,
+      } as any);
+      vi.mocked(prisma.goal.update).mockResolvedValueOnce({
+        id: "goal-1",
+        progressPercent: 55,
+      } as any);
+
+      await expect(postGoalUpdate({
+        kind: "user",
+        user: { id: "user-2", email: "other@example.com", displayName: "Other" },
+      } as any, {
+        workspaceId: "ws-1",
+        goalId: "goal-1",
+        bodyMd: " Progress update ",
+        newProgress: 55,
+      })).resolves.toMatchObject({
+        id: "update-1",
+      });
+
+      expect(prisma.goalUpdate.create).toHaveBeenCalledWith({
+        data: expect.objectContaining({
+          goalId: "goal-1",
+          bodyMd: "Progress update",
+          authorMemberId: "member-2",
+          newProgress: 55,
+        }),
+      });
+      expect(prisma.goal.update).toHaveBeenCalledWith({
+        where: { id: "goal-1" },
+        data: { progressPercent: 55 },
+      });
+    });
+
+    it("rejects progress updates for completed goals", async () => {
+      vi.mocked(prisma.goal.findUnique).mockResolvedValueOnce({
+        id: "goal-1",
+        workspaceId: "ws-1",
+        archivedAt: null,
+        authorUserId: "user-1",
+        isPrivate: false,
+        status: "COMPLETED",
+        parentGoalId: null,
+      } as any);
+
+      await expect(postGoalUpdate(actor, {
+        workspaceId: "ws-1",
+        goalId: "goal-1",
+        bodyMd: "Closed goal update",
+        newProgress: 100,
+      })).rejects.toMatchObject({
+        status: 400,
+        code: "INVALID_STATE",
+      });
+
+      expect(prisma.goalUpdate.create).not.toHaveBeenCalled();
+      expect(prisma.goal.update).not.toHaveBeenCalled();
+    });
+
     it("rejects reassignment to a system identity", async () => {
       vi.mocked(prisma.goal.findUnique).mockResolvedValueOnce({
         id: "goal-1",
@@ -898,6 +1048,8 @@ describe("Goals Domain", () => {
         circleId: null,
         ownerMemberId: "member-1",
         status: "DRAFT",
+        authorUserId: "user-1",
+        isPrivate: true,
         progressPercent: 0,
         version: 1,
       } as any);
@@ -929,12 +1081,12 @@ describe("Goals Domain", () => {
       await expect(getMyGoalSlice(actor, "member-1", "ws-1")).resolves.toEqual([activeGoal]);
 
       expect(prisma.goal.findMany).toHaveBeenCalledWith(expect.objectContaining({
-        where: {
+        where: expect.objectContaining({
           workspaceId: "ws-1",
           ownerMemberId: "member-1",
           archivedAt: null,
           status: { in: ["ACTIVE", "ON_TRACK", "AT_RISK", "BEHIND"] },
-        },
+        }),
         orderBy: [
           { targetDate: "asc" },
           { updatedAt: "desc" },

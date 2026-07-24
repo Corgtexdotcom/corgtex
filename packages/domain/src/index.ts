@@ -74,6 +74,7 @@ export * from "./advice-requests";
 export * from "./impact-footprint";
 export * from "./privacy";
 export * from "./draft-permissions";
+export * from "./collaborative-permissions";
 export * from "./work-item-versions";
 export * from "./catalog";
 export * from "./connector-readiness";

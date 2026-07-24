@@ -95,6 +95,7 @@ export default async function GoalsPage({
   const t = await getTranslations("goals");
   const membership = await requireWorkspaceMembership({ actor, workspaceId });
   const canManageAnyGoal = actor.kind === "agent" || membership?.role === "ADMIN";
+  const currentUserId = actor.kind === "user" ? actor.user.id : null;
 
   const [allGoals, circles, members, financeEnabled, practiceProjectsEnabled] = await Promise.all([
     listGoals(actor, { workspaceId }),
@@ -144,6 +145,7 @@ export default async function GoalsPage({
           members={[]}
           canManageAnyGoal={false}
           membershipId={null}
+          currentUserId={null}
           financeLinksByGoalId={new Map()}
           practiceProjects={[]}
           showFinanceEvidence={false}
@@ -214,6 +216,7 @@ export default async function GoalsPage({
             members={members}
             canManageAnyGoal={canManageAnyGoal}
             membershipId={membership?.id ?? null}
+            currentUserId={currentUserId}
             financeLinksByGoalId={financeLinksByGoalId}
             practiceProjects={practiceProjects}
             showFinanceEvidence={showFinanceEvidence}
@@ -253,14 +256,6 @@ export default async function GoalsPage({
                   <select name="level" defaultValue="COMPANY">
                     {LEVELS.map((level) => (
                       <option key={level} value={level}>{level}</option>
-                    ))}
-                  </select>
-                </label>
-                <label style={{ flex: 1 }}>
-                  {t("formStatus")}
-                  <select name="status" defaultValue="DRAFT">
-                    {STATUSES.map((status) => (
-                      <option key={status} value={status}>{status}</option>
                     ))}
                   </select>
                 </label>
@@ -315,7 +310,10 @@ export default async function GoalsPage({
                   </div>
                 ))}
               </fieldset>
-              <button type="submit">{t("btnCreateGoal")}</button>
+              <div className="actions-inline">
+                <button type="submit" name="intent" value="draft" className="secondary">{t("btnSaveDraft")}</button>
+                <button type="submit" name="intent" value="open" className="primary">{t("btnOpen")}</button>
+              </div>
             </form>
           </details>
         </section>
@@ -352,6 +350,7 @@ export default async function GoalsPage({
                   members={members}
                   canManageAnyGoal={canManageAnyGoal}
                   membershipId={membership?.id ?? null}
+                  currentUserId={currentUserId}
                   financeLinksByGoalId={financeLinksByGoalId}
                   practiceProjects={practiceProjects}
                   showFinanceEvidence={showFinanceEvidence}
@@ -451,6 +450,7 @@ function GoalNode({
   members,
   canManageAnyGoal,
   membershipId,
+  currentUserId,
   financeLinksByGoalId,
   practiceProjects,
   showFinanceEvidence,
@@ -463,6 +463,7 @@ function GoalNode({
   members: any[];
   canManageAnyGoal: boolean;
   membershipId: string | null;
+  currentUserId: string | null;
   financeLinksByGoalId: Map<string, GoalFinanceProjectLink[]>;
   practiceProjects: PracticeProject[];
   showFinanceEvidence: boolean;
@@ -477,6 +478,7 @@ function GoalNode({
       members={members}
       canManageAnyGoal={canManageAnyGoal}
       membershipId={membershipId}
+      currentUserId={currentUserId}
       financeLinksByGoalId={financeLinksByGoalId}
       practiceProjects={practiceProjects}
       showFinanceEvidence={showFinanceEvidence}
@@ -493,6 +495,7 @@ function GoalNodeInner({
   members,
   canManageAnyGoal,
   membershipId,
+  currentUserId,
   financeLinksByGoalId,
   practiceProjects,
   showFinanceEvidence,
@@ -505,18 +508,23 @@ function GoalNodeInner({
   members: any[];
   canManageAnyGoal: boolean;
   membershipId: string | null;
+  currentUserId: string | null;
   financeLinksByGoalId: Map<string, GoalFinanceProjectLink[]>;
   practiceProjects: PracticeProject[];
   showFinanceEvidence: boolean;
 }) {
   const t = useTranslations("goals");
   const tCommon = useTranslations("common");
-  const canManage = canManageAnyGoal || (Boolean(goal.ownerMemberId) && goal.ownerMemberId === membershipId);
-  const canSubmittedOwnerEdit = Boolean(goal.ownerMemberId) && goal.ownerMemberId === membershipId;
+  const isAuthor = Boolean(currentUserId) && goal.authorUserId === currentUserId;
+  const canManagePrivateGoal = canManageAnyGoal || isAuthor;
+  const isActiveGoal = ["ACTIVE", "ON_TRACK", "AT_RISK", "BEHIND"].includes(goal.status);
+  const canCollaborate = !goal.isPrivate && Boolean(membershipId) && isActiveGoal;
+  const canManage = goal.status === "DRAFT" ? canManagePrivateGoal : isActiveGoal && (canManagePrivateGoal || canCollaborate);
   const canEditContent = goal.status === "DRAFT"
-    ? canManage
-    : ["ACTIVE", "ON_TRACK", "AT_RISK", "BEHIND"].includes(goal.status) && canSubmittedOwnerEdit;
-  const canReturnToDraft = ["ACTIVE", "ON_TRACK", "AT_RISK", "BEHIND"].includes(goal.status);
+    ? canManagePrivateGoal
+    : canCollaborate;
+  const canReturnToDraft = canManagePrivateGoal && isActiveGoal;
+  const workflowStatuses = canReturnToDraft ? STATUSES : STATUSES.filter((status) => status !== "DRAFT");
   return (
     <div className="border border-line rounded-lg bg-surface-strong shadow-sm mb-3" style={{ marginLeft: `${level * 1.5}rem` }}>
       <div className="p-4">
@@ -617,7 +625,7 @@ function GoalNodeInner({
                   <input type="hidden" name="workspaceId" value={workspaceId} />
                   <input type="hidden" name="goalId" value={goal.id} />
                   <select name="status" defaultValue={goal.status} style={{ width: "auto" }} aria-label={t("formStatus")}>
-                    {STATUSES.map((status) => (
+                    {workflowStatuses.map((status) => (
                       <option key={status} value={status}>{status}</option>
                     ))}
                   </select>
@@ -712,7 +720,7 @@ function GoalNodeInner({
                     </form>
                   </details>
                 )}
-                {goal.status === "DRAFT" && (
+                {canEditContent && (
                   <details>
                     <summary className="nr-hide-marker" style={{ cursor: "pointer", padding: "8px 10px", borderRadius: 8, fontSize: "0.88rem", fontWeight: 500 }}>
                       {t("addKeyResultTitle")}
@@ -730,12 +738,16 @@ function GoalNodeInner({
                     </form>
                   </details>
                 )}
-                <div className="action-menu-divider" />
-                <form action={archiveGoalFormAction}>
-                  <input type="hidden" name="workspaceId" value={workspaceId} />
-                  <input type="hidden" name="goalId" value={goal.id} />
-                  <button type="submit" className="danger">{t("btnArchiveGoal")}</button>
-                </form>
+                {canManagePrivateGoal && (
+                  <>
+                    <div className="action-menu-divider" />
+                    <form action={archiveGoalFormAction}>
+                      <input type="hidden" name="workspaceId" value={workspaceId} />
+                      <input type="hidden" name="goalId" value={goal.id} />
+                      <button type="submit" className="danger">{t("btnArchiveGoal")}</button>
+                    </form>
+                  </>
+                )}
               </>
             }
           />
@@ -756,6 +768,7 @@ function GoalNodeInner({
               members={members}
               canManageAnyGoal={canManageAnyGoal}
               membershipId={membershipId}
+              currentUserId={currentUserId}
               financeLinksByGoalId={financeLinksByGoalId}
               practiceProjects={practiceProjects}
               showFinanceEvidence={showFinanceEvidence}

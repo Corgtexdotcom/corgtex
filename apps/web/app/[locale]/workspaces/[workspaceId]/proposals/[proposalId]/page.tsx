@@ -156,8 +156,8 @@ export default async function ProposalDetailPage({
   const actorUserId = actor.kind === "user" ? actor.user.id : null;
   const actorMemberId = deliberationTargets.actorMemberId;
   const actorCircleIds = new Set(deliberationTargets.actorCircleIds);
-  const canManage = !isArchived && (actor.kind === "agent" || membership?.role === "ADMIN" || isAuthor || isOwner);
-  const canEditContent = !isArchived && proposal.status === "DRAFT" ? canManage : !isArchived && proposal.status === "OPEN" && (isAuthor || isOwner);
+  const canManage = !isArchived && (actor.kind === "agent" || membership?.role === "ADMIN" || isAuthor);
+  const canEditContent = !isArchived && (proposal.status === "DRAFT" || proposal.status === "OPEN") && canManage;
   const canResolve = !isArchived && (actor.kind === "agent" || Boolean(membership));
   const canRequestAdvice = !isArchived && actor.kind === "user" && proposal.status === "OPEN" && !proposal.isPrivate && (isAuthor || isOwner || membership?.role === "ADMIN");
   const canManageEntry = (entry: (typeof deliberationEntries)[number]) => !isArchived && Boolean(

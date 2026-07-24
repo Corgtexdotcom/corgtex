@@ -144,9 +144,8 @@ export default async function TensionDetailPage({
       || (actorMemberId && entry.targetMemberId === actorMemberId)
       || (entry.targetCircleId && actorCircleIds.has(entry.targetCircleId)),
   );
-  const canSubmittedEditorEdit = actor.kind === "user"
-    && (tension.authorUserId === actor.user.id || tension.assigneeMemberId === membership?.id);
-  const canEditContent = !isArchived && tension.status === "DRAFT" ? canManage : !isArchived && tension.status === "OPEN" && canSubmittedEditorEdit;
+  const canCollaborateOnSubmittedTension = !tension.isPrivate && (actor.kind === "agent" || Boolean(membership?.isActive));
+  const canEditContent = !isArchived && tension.status === "DRAFT" ? canManage : !isArchived && tension.status === "OPEN" && canCollaborateOnSubmittedTension;
   const canDraftProposal = !isArchived && !tension.proposal && (canManage || !tension.isPrivate);
   const canResolve = !isArchived && !tension.isPrivate && tension.status === "OPEN";
   const canRequestInput = !isArchived && actor.kind === "user" && tension.status === "OPEN" && !tension.isPrivate && (isAdmin || isParentResponsible);

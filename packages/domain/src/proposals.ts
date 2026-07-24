@@ -9,6 +9,7 @@ import { invariant } from "./errors";
 import { privacyFilter } from "./privacy";
 import { archiveFilterWhere, archiveWorkspaceArtifact, type ArchiveFilter } from "./archive";
 import { requireDraftManager } from "./draft-permissions";
+import { requireProposalContentEditor } from "./collaborative-permissions";
 import { humanMemberIdentityWhere } from "./member-identity";
 import { createWorkItemEvidenceLinks } from "./work-item-evidence";
 import { ensureWorkspacePermalink, workspaceEntityCanonicalPath } from "./permalinks";
@@ -22,7 +23,6 @@ import {
   changedDataFields,
   pickJsonSnapshot,
   recordWorkItemVersion,
-  requireSubmittedWorkItemEditor,
   resolveWorkspaceMemberUserId,
 } from "./work-item-versions";
 
@@ -859,10 +859,10 @@ export async function updateProposal(actor: AppActor, params: {
     invariant(proposal && proposal.workspaceId === params.workspaceId, 404, "NOT_FOUND", "Proposal not found.");
     invariant(!proposal.archivedAt, 400, "INVALID_STATE", "Archived proposals cannot be edited.");
     if (proposal.status === "DRAFT") {
-      await requireDraftManager({ actor, workspaceId: params.workspaceId, record: proposal, resolvedMembership: membership });
+      requireProposalContentEditor(actor, membership, proposal);
     } else {
       invariant(proposal.status === "OPEN", 400, "INVALID_STATE", "Only draft or open proposals can be edited.");
-      requireSubmittedWorkItemEditor(actor, membership, proposal);
+      requireProposalContentEditor(actor, membership, proposal);
     }
 
     const data: Record<string, unknown> = {};

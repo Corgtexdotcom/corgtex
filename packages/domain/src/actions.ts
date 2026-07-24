@@ -9,6 +9,7 @@ import { loadAdviceRequestCountSummaries } from "./advice-requests";
 import { invariant } from "./errors";
 import { humanMemberIdentityWhere } from "./member-identity";
 import { requireDraftManager } from "./draft-permissions";
+import { requireCollaborativeWorkItemEditor } from "./collaborative-permissions";
 import { resolveWorkspaceProposalLink } from "./proposal-links";
 import { createWorkItemEvidenceLinks } from "./work-item-evidence";
 import { ensureWorkspacePermalink, workspaceEntityCanonicalPath } from "./permalinks";
@@ -22,7 +23,6 @@ import {
   changedDataFields,
   pickJsonSnapshot,
   recordWorkItemVersion,
-  requireSubmittedWorkItemEditor,
   resolveWorkspaceMemberUserId,
 } from "./work-item-versions";
 
@@ -168,7 +168,7 @@ async function requireEditableActionForChecklist(
     await requireDraftManager({ actor, workspaceId, record: action, resolvedMembership: membership });
   } else {
     invariant(action.status === "OPEN" || action.status === "IN_PROGRESS", 400, "INVALID_STATE", "Only draft, open, or in-progress actions can change checklists.");
-    requireSubmittedWorkItemEditor(actor, membership, action);
+    requireCollaborativeWorkItemEditor(actor, membership, action);
   }
   return action;
 }
@@ -646,7 +646,7 @@ export async function updateAction(actor: AppActor, params: {
         await requireDraftManager({ actor, workspaceId: params.workspaceId, record: action, resolvedMembership: membership });
       } else {
         invariant(action.status === "OPEN" || action.status === "IN_PROGRESS", 400, "INVALID_STATE", "Only draft, open, or in-progress actions can be edited.");
-        requireSubmittedWorkItemEditor(actor, membership, action);
+        requireCollaborativeWorkItemEditor(actor, membership, action);
       }
     }
     if (params.isPrivate !== undefined) {
