@@ -185,7 +185,16 @@ export function normalizeNewspaperEditionDigest(edition: { digestJson: unknown }
 }
 
 function markdownListItem(value: string) {
-  return `- ${value.replace(/\r?\n/g, " ").trim()}`;
+  const lines = value
+    .split(/\r?\n/)
+    .map((line) => line.trimEnd());
+  const firstLine = lines.shift()?.trim();
+  if (!firstLine) return "-";
+  if (lines.length === 0) return `- ${firstLine}`;
+  return [
+    `- ${firstLine}`,
+    ...lines.map((line) => (line.trim() ? `  ${line}` : "")),
+  ].join("\n").trimEnd();
 }
 
 export function renderNewspaperDigestMarkdown(params: {

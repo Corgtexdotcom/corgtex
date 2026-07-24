@@ -1535,7 +1535,7 @@ Rules:
         workspaceId: params.workspaceId,
         workflowJobId: params.workflowJobId,
         agentRunId: params.agentRunId,
-        instruction: `Generate a structured ${cadenceLabel(cadence)} Newspaper evidence summary for the workspace based on the last ${lookbackDays} day(s) of Corgtex operating data. Prioritize what helps the reader understand the workspace: what changed, what decisions or blockers matter, what needs attention, and what evidence supports it. Return complete, readable item sentences with no ellipses or truncated titles. Use the arrays only as internal evidence buckets; do not write category headings inside the item text. Return concise, non-empty arrays only when the source material supports them.`,
+        instruction: `Generate a structured ${cadenceLabel(cadence)} Newspaper evidence summary for the workspace based on the last ${lookbackDays} day(s) of Corgtex operating data. Prioritize what helps the reader understand the workspace: what changed, what decisions or blockers matter, what needs attention, and what evidence supports it. Return one topic per array item so the formatter can render separate paragraphs or list rows. Return complete, readable item sentences with no ellipses, truncated titles, raw URLs, or pasted source links. Use the arrays only as internal evidence buckets; do not write category headings inside the item text. Return concise, non-empty arrays only when the source material supports them.`,
         schemaHint: `{
           intro: string | null,
           meetingBriefs: string[],

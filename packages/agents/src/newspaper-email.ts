@@ -92,6 +92,53 @@ function renderBoldMarkers(value: string) {
   return value.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
 }
 
+const RAW_URL_PATTERN = /(^|[\s(])(?:(?:at|here|source):?\s+)?<?https?:\/\/[^\s<>)]+>?\)?/giu;
+
+function isInsideMarkdownLinkDestination(value: string, offset: number) {
+  const open = value.lastIndexOf("](", offset);
+  if (open < 0) return false;
+  if (value.slice(open, offset).includes("\n")) return false;
+  const close = value.indexOf(")", open + 2);
+  return close === -1 || close >= offset;
+}
+
+function stripVisibleUrls(value: string) {
+  return value
+    .replace(RAW_URL_PATTERN, (match, _leading: string, offset: number) => {
+      const urlStart = match.search(/https?:\/\//iu);
+      if (urlStart < 0) return match;
+      if (isInsideMarkdownLinkDestination(value, offset + urlStart)) return match;
+
+      let suffix = "";
+      let removable = match;
+      const hasLeadingParen = match.slice(0, urlStart).includes("(");
+      if (removable.endsWith(")") && !hasLeadingParen) {
+        suffix = ")";
+        removable = removable.slice(0, -1);
+      }
+      while (/[,.;:!?]$/u.test(removable)) {
+        suffix = `${removable.slice(-1)}${suffix}`;
+        removable = removable.slice(0, -1);
+      }
+      return suffix;
+    })
+    .replace(/[ \t]+([,.;:])/g, "$1")
+    .replace(/\s+\)/g, ")")
+    .replace(/\(\s*\)/g, "")
+    .replace(/^\s*[.,;:!?]\s+/u, "")
+    .replace(/^\s*[.,;:!?]+\s*$/u, "")
+    .replace(/[ \t]{2,}/g, " ")
+    .trim();
+}
+
+function unescapeMarkdownText(value: string) {
+  return value.replace(/\\([\\[\]()`])/g, "$1");
+}
+
+function renderMarkdownText(value: string) {
+  return renderBoldMarkers(escapeHtml(unescapeMarkdownText(value)));
+}
+
 function safeAbsoluteEmailHref(href: string, workspaceUrl: string) {
   try {
     const url = new URL(href, workspaceUrl);
@@ -106,31 +153,66 @@ function absoluteEmailHref(href: string, workspaceUrl: string) {
 }
 
 function renderNarrativeMarkdown(value: string, workspaceUrl: string) {
-  const withoutImages = value.replace(/!\[([^\]\n]*)\]\([^)]+\)/g, "$1");
-  const linkPattern = /\[([^\]\n]+)\]\((https?:\/\/[^\s)]+|\/[^\s)]*)\)/g;
+  const withoutImages = stripVisibleUrls(value).replace(/!\[([^\]\n]*)\]\([^)]+\)/g, "$1");
+  const linkPattern = /\[((?:\\.|[^\]\\\n])*)\]\((https?:\/\/[^\s)]+|\/[^\s)]*)\)/g;
   let rendered = "";
   let cursor = 0;
   for (const match of withoutImages.matchAll(linkPattern)) {
     const index = match.index ?? 0;
-    rendered += renderBoldMarkers(escapeHtml(withoutImages.slice(cursor, index)));
+    rendered += renderMarkdownText(withoutImages.slice(cursor, index));
     const label = match[1] ?? "";
     const href = safeAbsoluteEmailHref(match[2] ?? "", workspaceUrl);
     rendered += href
-      ? `<a href="${escapeAttribute(href)}" style="color:#6750a4;text-decoration:underline;">${renderBoldMarkers(escapeHtml(label))}</a>`
-      : renderBoldMarkers(escapeHtml(match[0] ?? ""));
+      ? `<a href="${escapeAttribute(href)}" style="color:#6750a4;text-decoration:underline;">${renderMarkdownText(label)}</a>`
+      : renderMarkdownText(match[0] ?? "");
     cursor = index + (match[0]?.length ?? 0);
   }
-  rendered += renderBoldMarkers(escapeHtml(withoutImages.slice(cursor)));
+  rendered += renderMarkdownText(withoutImages.slice(cursor));
   return rendered.replace(/\r?\n/g, "<br>");
 }
 
+function orderedListItems(value: string) {
+  const lines = value
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  if (lines.length === 0) return null;
+
+  const items = lines.flatMap((line) => {
+    const match = line.match(/^\d+[.)]\s+(.+)$/u);
+    return match?.[1] ? [match[1]] : [];
+  });
+  return items.length === lines.length ? items : null;
+}
+
 function renderNarrativeParagraphs(values: Array<string | null | undefined>, workspaceUrl: string) {
-  return values
-    .flatMap((value) => value?.split(/\n{2,}/).map((part) => part.trim()).filter(Boolean) ?? [])
-    .map((paragraph, index) => (
-      `<p style="font-size:${index === 0 ? "17px" : "15px"};line-height:1.65;margin:0 0 16px;color:#2d2a24;">${renderNarrativeMarkdown(paragraph, workspaceUrl)}</p>`
-    ))
-    .join("");
+  let paragraphIndex = 0;
+  const blocks = values.flatMap((value) => value?.split(/\n{2,}/).map((part) => part.trim()).filter(Boolean) ?? []);
+  const rendered: string[] = [];
+
+  for (let index = 0; index < blocks.length; index++) {
+    const block = blocks[index] ?? "";
+    const listItems = orderedListItems(block);
+    if (listItems) {
+      const coalescedItems = [...listItems];
+      while (index + 1 < blocks.length) {
+        const nextItems = orderedListItems(blocks[index + 1] ?? "");
+        if (!nextItems) break;
+        coalescedItems.push(...nextItems);
+        index += 1;
+      }
+      rendered.push(`<ol style="margin:0 0 16px;padding:0 0 0 22px;color:#2d2a24;">${coalescedItems
+        .map((item) => `<li style="margin:0 0 8px;padding:0;font-size:15px;line-height:1.55;color:#2d2a24;">${renderNarrativeMarkdown(item, workspaceUrl)}</li>`)
+        .join("")}</ol>`);
+      continue;
+    }
+
+    const fontSize = paragraphIndex === 0 ? "17px" : "15px";
+    paragraphIndex++;
+    rendered.push(`<p style="font-size:${fontSize};line-height:1.65;margin:0 0 16px;color:#2d2a24;">${renderNarrativeMarkdown(block, workspaceUrl)}</p>`);
+  }
+
+  return rendered.join("");
 }
 
 function compactRecipientLine(value: string) {
