@@ -3676,6 +3676,7 @@ async function completeRecordingWithTranscriptArtifact(
       source: `recorder:${provider.toLowerCase()}`,
       recordedAt: recording.startedAt ?? recording.joinAt ?? recording.createdAt,
       transcript,
+      allowTranscriptAppend: true,
     });
 
     await tx.meetingRecording.update({

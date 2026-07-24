@@ -72,6 +72,28 @@ function normalizeSeriesRecorderUrl(value?: string | null) {
   return recorderUrl.url;
 }
 
+function normalizeTranscriptForCompare(value?: string | null) {
+  return (value ?? "").trim().replace(/\s+/g, " ");
+}
+
+function mergeTranscript(existing: string | null | undefined, incoming: string) {
+  const current = existing?.trim() ?? "";
+  const next = incoming.trim();
+  if (!current) return next;
+  if (!next) return current;
+
+  const normalizedCurrent = normalizeTranscriptForCompare(current);
+  const normalizedNext = normalizeTranscriptForCompare(next);
+  if (normalizedCurrent === normalizedNext || normalizedCurrent.includes(normalizedNext)) {
+    return current;
+  }
+  if (normalizedNext.includes(normalizedCurrent)) {
+    return next;
+  }
+
+  return `${current}\n\n---\nAdditional transcript upload:\n${next}`;
+}
+
 function mergeMarkdownNote(existing?: string | null, incoming?: string | null) {
   const current = existing?.trim() ?? "";
   const next = incoming?.trim() ?? "";
@@ -445,6 +467,7 @@ async function updateMeetingWithTranscriptTx(
     meetingUrl?: string | null;
     sourceRecordId?: string | null;
     replaceTranscript?: boolean;
+    allowTranscriptAppend?: boolean;
   }
 ) {
   const existing = await tx.meeting.findFirst({
@@ -466,8 +489,17 @@ async function updateMeetingWithTranscriptTx(
   });
   invariant(existing, 404, "NOT_FOUND", "Meeting not found.");
 
-  invariant(!existing.transcript, 400, "INVALID_STATE", "Meeting already has source transcript evidence. Edit the processed summary or guidance instead.");
-  const transcript = params.transcript.trim();
+  const hasExistingTranscript = Boolean(existing.transcript?.trim());
+  const trustedTranscriptAppend = params.allowTranscriptAppend === true
+    && actor.kind === "agent"
+    && params.source?.startsWith("recorder:");
+  invariant(
+    !hasExistingTranscript || (trustedTranscriptAppend && !params.replaceTranscript),
+    400,
+    "INVALID_STATE",
+    "Meeting already has source transcript evidence. Edit the processed summary or guidance instead.",
+  );
+  const transcript = params.replaceTranscript ? params.transcript.trim() : mergeTranscript(existing.transcript, params.transcript);
   const ingestionGuidanceMd = mergeMarkdownNote(existing.ingestionGuidanceMd, params.ingestionGuidanceMd);
   const participantIds = normalizeIds([
     ...existing.participantIds,
@@ -1101,6 +1133,7 @@ export async function uploadMeetingTranscript(actor: AppActor, params: {
   participantEmails?: string[] | null;
   sourceRecordId?: string | null;
   replaceTranscript?: boolean;
+  allowTranscriptAppend?: boolean;
   duplicateGuard?: DuplicateGuardOptions | null;
 }) {
   await requireWorkspaceMembership({
