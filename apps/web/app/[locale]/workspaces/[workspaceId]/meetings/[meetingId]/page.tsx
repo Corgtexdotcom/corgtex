@@ -59,6 +59,10 @@ function statusTagClass(status: string, resolutionOutcome?: string | null) {
   return "";
 }
 
+function isActiveReviewableInsight(insight: MeetingInsightSummary) {
+  return (insight.status === "SUGGESTED" || insight.status === "CONFIRMED") && !insight.supersededAt;
+}
+
 function AgendaItemView({ item, workspaceId }: { item: MeetingAgendaItem; workspaceId: string }) {
   const href = agendaItemHref(workspaceId, item);
   const body = (
@@ -205,7 +209,12 @@ export default async function MeetingDetailPage({
   const activeTab = normalizeMeetingTab(resolvedSearch.tab, hasAgendaTab ? "agenda" : "summary", hasAgendaTab);
   const meetingHref = `/workspaces/${workspaceId}/meetings/${meetingId}`;
   const processingState = await getMeetingTranscriptProcessingState(actor, { workspaceId, meetingId });
-  const processingView = buildMeetingProcessingView(processingState);
+  const meetingInsights = meeting.insights as MeetingInsightSummary[];
+  const reviewNeededCount = meetingInsights.filter(isActiveReviewableInsight).length;
+  const processingView = buildMeetingProcessingView(processingState, {
+    reviewNeededCount,
+    canViewDiagnostics: isAdmin,
+  });
   const insightTargetProposalIds = [...new Set((meeting.insights as MeetingInsightSummary[])
     .filter((insight: MeetingInsightSummary) => insight.targetEntityType === "Proposal" && insight.targetEntityId)
     .map((insight: MeetingInsightSummary) => insight.targetEntityId as string))];
@@ -238,7 +247,7 @@ export default async function MeetingDetailPage({
   ]);
   const raisedActions = meeting.raisedActions ?? [];
   const raisedEvidenceByEntity = new Map<string, MeetingInsightSummary[]>();
-  for (const insight of meeting.insights as MeetingInsightSummary[]) {
+  for (const insight of meetingInsights) {
     if (insight.status !== "APPLIED" || !insight.appliedEntityType || !insight.appliedEntityId) continue;
     if (insight.appliedEntityType !== "Proposal" && insight.appliedEntityType !== "Tension" && insight.appliedEntityType !== "Action") continue;
     const key = `${insight.appliedEntityType}:${insight.appliedEntityId}`;
@@ -331,66 +340,86 @@ export default async function MeetingDetailPage({
       )}
 
       {processingView && (
-        <section className={`meeting-processing-stepper ${processingView.overallClass}`} style={{ marginBottom: 32 }}>
-          <div className="meeting-processing-stepper-header">
-            <div>
-              <span className="meeting-processing-status-label">
-                <span className="meeting-processing-status-dot" aria-hidden="true" />
-                {t(processingView.titleKey)}
-              </span>
-              <p>
-                {processingView.activeStageLabelKey
-                  ? t("processingOverallActiveDescription", { step: t(processingView.activeStageLabelKey) })
-                  : t("processingOverallIdleDescription")}
-              </p>
-            </div>
-          </div>
-          <ol className="meeting-processing-steps">
-            {processingView.steps.map((step) => (
-              <li className={`meeting-processing-step ${step.className}`} key={step.stage}>
-                <span className="meeting-processing-step-marker" aria-hidden="true" />
-                <div>
-                  <strong>{t(step.labelKey)}</strong>
-                  <span>{t(step.statusKey)}</span>
-                  {step.chunkIndex && step.chunkCount && step.chunkCount > 1 && (
-                    <em>{t("processingSectionProgress", { current: step.chunkIndex, total: step.chunkCount })}</em>
-                  )}
-                </div>
-              </li>
-            ))}
-          </ol>
-          {isAdmin && processingView.diagnostics.length > 0 && (
-            <details className="meeting-processing-diagnostics">
-              <summary>{t("processingDiagnosticsTitle")}</summary>
-              <div className="meeting-processing-diagnostics-list">
-                {processingView.diagnostics.map((diagnostic) => (
-                  <div className="meeting-processing-diagnostic" key={diagnostic.workflowJobId}>
-                    <div className="row">
-                      <strong>{diagnostic.workflowJobType}</strong>
-                      <span className={`tag ${diagnostic.status === "FAILED" ? "warning" : "info"}`}>{diagnostic.status}</span>
-                    </div>
-                    <p className="nr-item-meta">
-                      {t("processingDiagnosticsMeta", {
-                        attempts: diagnostic.attempts,
-                        date: diagnostic.updatedAt ? format.dateTime(new Date(diagnostic.updatedAt), { dateStyle: "medium", timeStyle: "short" }) : t("processingDiagnosticsNoDate"),
-                      })}
-                    </p>
-                    {diagnostic.safeErrorMessage && (
-                      <p className="meeting-processing-diagnostic-error">{diagnostic.safeErrorMessage}</p>
-                    )}
-                    {diagnostic.retrySupported && (
-                      <form action={retryMeetingProcessingJobAction}>
-                        <input type="hidden" name="workspaceId" value={workspaceId} />
-                        <input type="hidden" name="workflowJobId" value={diagnostic.workflowJobId} />
-                        <button type="submit" className="secondary small">{t("processingRetryFailedJob")}</button>
-                      </form>
+        <details
+          className={`meeting-processing-stepper ${processingView.overallClass}`}
+          style={{ marginBottom: 32 }}
+          open={processingView.defaultExpanded ? true : undefined}
+        >
+          <summary className="meeting-processing-stepper-summary">
+            <span className="meeting-processing-status-label">
+              <span className="meeting-processing-status-dot" aria-hidden="true" />
+              {t(processingView.titleKey)}
+            </span>
+            <span className="meeting-processing-summary-separator" aria-hidden="true">·</span>
+            <span className="meeting-processing-summary-text">
+              {processingView.summaryStepLabelKey
+                ? t(processingView.summaryKey, { step: t(processingView.summaryStepLabelKey) })
+                : processingView.showReviewAction
+                  ? t(processingView.summaryKey, { count: processingView.reviewNeededCount })
+                  : t(processingView.summaryKey)}
+            </span>
+            <span className="meeting-processing-summary-separator" aria-hidden="true">·</span>
+            <span className="meeting-processing-summary-actions">
+              {processingView.showReviewAction && (
+                <>
+                  <Link href={meetingTabHref(meetingHref, "evidence")} className="meeting-processing-review-link">
+                    {t("processingReviewItems")}
+                  </Link>
+                  <span className="meeting-processing-summary-separator" aria-hidden="true">·</span>
+                </>
+              )}
+              <span className="meeting-processing-toggle-action meeting-processing-toggle-show">{t("processingShowSteps")}</span>
+              <span className="meeting-processing-toggle-action meeting-processing-toggle-hide">{t("processingHideSteps")}</span>
+            </span>
+          </summary>
+          <div className="meeting-processing-stepper-detail">
+            <ol className="meeting-processing-steps">
+              {processingView.steps.map((step) => (
+                <li className={`meeting-processing-step ${step.className}`} key={step.stage}>
+                  <span className="meeting-processing-step-marker" aria-hidden="true" />
+                  <div>
+                    <strong>{t(step.labelKey)}</strong>
+                    <span>{t(step.statusKey)}</span>
+                    {step.chunkIndex && step.chunkCount && step.chunkCount > 1 && (
+                      <em>{t("processingSectionProgress", { current: step.chunkIndex, total: step.chunkCount })}</em>
                     )}
                   </div>
-                ))}
-              </div>
-            </details>
-          )}
-        </section>
+                </li>
+              ))}
+            </ol>
+            {processingView.diagnostics.length > 0 && (
+              <details className="meeting-processing-diagnostics" open={processingView.diagnosticsExpandedByDefault ? true : undefined}>
+                <summary>{t("processingDiagnosticsTitle")}</summary>
+                <div className="meeting-processing-diagnostics-list">
+                  {processingView.diagnostics.map((diagnostic) => (
+                    <div className="meeting-processing-diagnostic" key={diagnostic.workflowJobId}>
+                      <div className="row">
+                        <strong>{diagnostic.workflowJobType}</strong>
+                        <span className={`tag ${diagnostic.status === "FAILED" ? "warning" : "info"}`}>{diagnostic.status}</span>
+                      </div>
+                      <p className="nr-item-meta">
+                        {t("processingDiagnosticsMeta", {
+                          attempts: diagnostic.attempts,
+                          date: diagnostic.updatedAt ? format.dateTime(new Date(diagnostic.updatedAt), { dateStyle: "medium", timeStyle: "short" }) : t("processingDiagnosticsNoDate"),
+                        })}
+                      </p>
+                      {diagnostic.safeErrorMessage && (
+                        <p className="meeting-processing-diagnostic-error">{diagnostic.safeErrorMessage}</p>
+                      )}
+                      {diagnostic.retrySupported && (
+                        <form action={retryMeetingProcessingJobAction}>
+                          <input type="hidden" name="workspaceId" value={workspaceId} />
+                          <input type="hidden" name="workflowJobId" value={diagnostic.workflowJobId} />
+                          <button type="submit" className="secondary small">{t("processingRetryFailedJob")}</button>
+                        </form>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              </details>
+            )}
+          </div>
+        </details>
       )}
       
       <nav className="nr-tab-bar meeting-detail-tabs" aria-label={t("meetingDetailTabsLabel")}>

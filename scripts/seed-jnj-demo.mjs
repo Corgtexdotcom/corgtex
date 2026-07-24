@@ -32,6 +32,35 @@ const nDaysAgoAtNoonUtc = (days) => {
   const d = nDaysAgo(days); d.setUTCHours(12, 0, 0, 0); return d;
 };
 
+const MEETING_PROCESSING_STAGES = [
+  "UPLOADED",
+  "SUMMARIZING",
+  "EXTRACTING_INSIGHTS",
+  "SYNCING_OUTPUTS",
+  "INDEXING_BRAIN",
+  "READY",
+];
+
+function completedMeetingProcessingStageStatuses(completedAt) {
+  const iso = completedAt.toISOString();
+  return Object.fromEntries(MEETING_PROCESSING_STAGES.map((stage) => [stage, {
+    status: "COMPLETED",
+    startedAt: iso,
+    completedAt: iso,
+    failedAt: null,
+    skippedAt: null,
+    updatedAt: iso,
+    workflowJobId: null,
+    workflowJobType: null,
+    workflowJobStatus: "COMPLETED",
+    attempts: 1,
+    chunkIndex: null,
+    chunkCount: null,
+    safeErrorCode: null,
+    safeErrorMessage: null,
+  }]));
+}
+
 // Data Definition
 const DEMO_LINKEDIN_URL = "https://www.linkedin.com/company/johnson-&-johnson/";
 const DEMO_WEBSITE_URL = "https://www.jnj.com/";
@@ -2519,6 +2548,80 @@ async function main() {
     meetingMappings[m.title] = meeting;
   }
   console.log(`✅ ${MEETINGS.length} Meetings created`);
+
+  const processingDemoMeeting = meetingMappings["Innovation & AI Working Group Kickoff"];
+  if (processingDemoMeeting) {
+    const completedAt = nDaysAgo(0);
+    const stageStatuses = completedMeetingProcessingStageStatuses(completedAt);
+    await prisma.meetingTranscriptProcessingProgress.upsert({
+      where: { meetingId: processingDemoMeeting.id },
+      update: {
+        workspaceId: wsId,
+        currentStage: "READY",
+        stageStatuses,
+        currentWorkflowJobId: `${processingDemoMeeting.id}-processing-ready`,
+        currentWorkflowJobType: "knowledge.sync.meeting",
+        currentWorkflowJobStatus: "COMPLETED",
+        attemptCount: 1,
+        safeErrorCode: null,
+        safeErrorMessage: null,
+        startedAt: completedAt,
+        completedAt,
+        failedAt: null,
+      },
+      create: {
+        workspaceId: wsId,
+        meetingId: processingDemoMeeting.id,
+        currentStage: "READY",
+        stageStatuses,
+        currentWorkflowJobId: `${processingDemoMeeting.id}-processing-ready`,
+        currentWorkflowJobType: "knowledge.sync.meeting",
+        currentWorkflowJobStatus: "COMPLETED",
+        attemptCount: 1,
+        safeErrorCode: null,
+        safeErrorMessage: null,
+        startedAt: completedAt,
+        completedAt,
+        failedAt: null,
+      },
+    });
+
+    for (const [index, type] of [
+      "agent.meeting-summary",
+      "meeting.insights.extract",
+      "agent.action-extraction",
+      "meeting.summary.post",
+      "knowledge.sync.meeting",
+    ].entries()) {
+      await prisma.workflowJob.upsert({
+        where: { dedupeKey: `${processingDemoMeeting.id}:${type}:seed-jnj-demo` },
+        update: {
+          workspaceId: wsId,
+          type,
+          payload: { meetingId: processingDemoMeeting.id, source: "seed-jnj-demo" },
+          status: "COMPLETED",
+          attempts: 1,
+          lockedAt: null,
+          lockedBy: null,
+          startedAt: completedAt,
+          completedAt,
+          error: null,
+        },
+        create: {
+          id: `${processingDemoMeeting.id}-processing-job-${index + 1}`,
+          workspaceId: wsId,
+          type,
+          payload: { meetingId: processingDemoMeeting.id, source: "seed-jnj-demo" },
+          status: "COMPLETED",
+          dedupeKey: `${processingDemoMeeting.id}:${type}:seed-jnj-demo`,
+          attempts: 1,
+          startedAt: completedAt,
+          completedAt,
+          error: null,
+        },
+      });
+    }
+  }
 
   const adminUserId = memberMappings["jduato"].userId;
   for (const insight of MEETING_INSIGHTS) {
