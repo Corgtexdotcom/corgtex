@@ -1,11 +1,13 @@
 import Link from "next/link";
 import { notFound, redirect } from "next/navigation";
 import { getTranslations } from "next-intl/server";
-import { listCircleTree, listHumanMembers, requireWorkspaceMembership } from "@corgtex/domain";
+import { listCircleTree, requireWorkspaceMembership } from "@corgtex/domain";
 import { prisma } from "@corgtex/shared";
 
 import { requirePageActor } from "@/lib/auth";
 import { ActionMenu } from "@/lib/components/ui/ActionMenu";
+import { RoleDirectorySurface } from "../../roles/RoleDirectorySurface";
+import { loadRoleDirectoryData } from "../../roles/role-directory";
 import {
   assignAgentToCircleAction,
   deleteCircleAction,
@@ -17,7 +19,6 @@ import {
   collectCircleMembers,
   countAccountabilities,
 } from "../circleGraphHelpers";
-import { RoleManagementPanel } from "./RoleManagementPanel";
 
 export const dynamic = "force-dynamic";
 
@@ -43,17 +44,20 @@ function hiddenWorkspace(workspaceId: string) {
 
 export default async function CircleDetailPage({
   params,
+  searchParams,
 }: {
   params: Promise<{ workspaceId: string; circleId: string }>;
+  searchParams?: Promise<Record<string, string | string[] | undefined>>;
 }) {
   const { workspaceId, circleId } = await params;
+  const resolvedSearch = searchParams ? await searchParams : {};
   const actor = await requirePageActor();
   const currentUserId = actor.kind === "user" ? actor.user.id : null;
   const t = await getTranslations("circles");
   const tCommon = await getTranslations("common");
   const membership = await requireWorkspaceMembership({ actor, workspaceId });
 
-  const [treeData, currentWorkspace, agentAssignments, allAgents, roleAssignableMembers] = await Promise.all([
+  const [treeData, currentWorkspace, agentAssignments, allAgents, roleDirectoryData] = await Promise.all([
     listCircleTree(workspaceId),
     prisma.workspace.findUnique({ where: { id: workspaceId }, select: { slug: true } }),
     prisma.circleAgentAssignment.findMany({
@@ -65,7 +69,7 @@ export default async function CircleDetailPage({
       where: { workspaceId, isActive: true, archivedAt: null },
       orderBy: { displayName: "asc" },
     }),
-    listHumanMembers(workspaceId),
+    loadRoleDirectoryData(workspaceId),
   ]);
 
   const circle = findCircle(treeData, circleId);
@@ -81,62 +85,7 @@ export default async function CircleDetailPage({
   const accountabilityCount = countAccountabilities(circle);
   const assignedAgentIds = new Set(agentAssignments.map((assignment) => assignment.agentIdentityId));
   const availableAgents = allAgents.filter((agent) => !assignedAgentIds.has(agent.id));
-  const roleIds = circle.roles.map((role) => role.id);
-  const [roleVersions, holderHistory, onboardingSessions] = roleIds.length > 0
-    ? await Promise.all([
-      prisma.roleVersion.findMany({
-        where: { workspaceId, roleId: { in: roleIds } },
-        orderBy: [{ roleId: "asc" }, { version: "desc" }],
-      }),
-      prisma.roleHolderHistory.findMany({
-        where: { workspaceId, roleId: { in: roleIds } },
-        include: {
-          member: {
-            include: {
-              user: {
-                select: { displayName: true, email: true },
-              },
-            },
-          },
-          agentIdentity: {
-            select: { displayName: true, memberType: true },
-          },
-        },
-        orderBy: { startedAt: "desc" },
-      }),
-      prisma.roleOnboardingSession.findMany({
-        where: { workspaceId, roleId: { in: roleIds } },
-        select: {
-          id: true,
-          roleId: true,
-          memberId: true,
-          conversationId: true,
-          status: true,
-          updatedAt: true,
-        },
-        orderBy: { updatedAt: "desc" },
-      }),
-    ])
-    : [[], [], []];
-  const roleVersionsByRole = new Map<string, typeof roleVersions>();
-  for (const version of roleVersions) {
-    const versions = roleVersionsByRole.get(version.roleId) ?? [];
-    versions.push(version);
-    roleVersionsByRole.set(version.roleId, versions);
-  }
-  const holderHistoryByRole = new Map<string, typeof holderHistory>();
-  for (const history of holderHistory) {
-    const histories = holderHistoryByRole.get(history.roleId) ?? [];
-    histories.push(history);
-    holderHistoryByRole.set(history.roleId, histories);
-  }
-  const onboardingByRoleMember = new Map<string, (typeof onboardingSessions)[number]>();
-  for (const session of onboardingSessions) {
-    const key = `${session.roleId}:${session.memberId}`;
-    if (!onboardingByRoleMember.has(key)) {
-      onboardingByRoleMember.set(key, session);
-    }
-  }
+  const currentMemberId = membership?.id && membership.id !== "global-operator" ? membership.id : null;
 
   async function archiveCircleAndReturn(formData: FormData) {
     "use server";
@@ -296,58 +245,17 @@ export default async function CircleDetailPage({
 
       <section className="ws-section" style={{ marginBottom: 32 }}>
         <h2 className="nr-section-header">{t("labelRoles", { count: circle.roles.length })}</h2>
-        {circle.roles.length === 0 ? (
-          <p className="muted">{t("noRolesInCircle")}</p>
-        ) : (
-          <RoleManagementPanel
-            workspaceId={workspaceId}
-            roles={circle.roles}
-            members={roleAssignableMembers.map((member) => ({
-              id: member.id,
-              name: member.user.displayName ?? member.user.email,
-              email: member.user.email,
-            }))}
-            canManageStructure={canManageStructure}
-            currentUserId={currentUserId}
-            roleVersionsByRole={roleVersionsByRole}
-            holderHistoryByRole={holderHistoryByRole}
-            onboardingByRoleMember={onboardingByRoleMember}
-            moreActionsLabel={tCommon("moreActions")}
-            labels={{
-              accountabilityCount: (count) => t("accountabilityCount", { count }),
-              btnAddHolder: t("btnAddHolder"),
-              btnDelete: t("btnDelete"),
-              btnEditRole: t("btnEditRole"),
-              btnReassign: t("btnReassign"),
-              btnUnassign: t("btnUnassign"),
-              confirmArchiveRole: t("confirmArchiveRole"),
-              dateRangeTo: t("dateRangeTo"),
-              definitionVersions: t("definitionVersions"),
-              formAccountabilities: t("formAccountabilities"),
-              formAccountabilitiesPlaceholder: t("formAccountabilitiesPlaceholder"),
-              formExpiresAt: t("formExpiresAt"),
-              formMember: t("formMember"),
-              formName: t("formName"),
-              formPurpose: t("formPurpose"),
-              formTransferReason: t("formTransferReason"),
-              formTransferReasonPlaceholder: t("formTransferReasonPlaceholder"),
-              holderHistory: t("holderHistory"),
-              labelAssignedTo: t("labelAssignedTo"),
-              noAccountabilities: t("noAccountabilities"),
-              noAvailableMembers: t("noAvailableMembers"),
-              onboardingStatus: (status) => t("onboardingStatus", { status }),
-              present: t("present"),
-              reassignTo: t("reassignTo"),
-              roleHistory: t("roleHistory"),
-              save: tCommon("save"),
-              selectMember: t("selectMember"),
-              temporaryActive: (date) => t("temporaryActive", { date }),
-              temporaryExpired: (date) => t("temporaryExpired", { date }),
-              unassigned: t("unassigned"),
-              unknownHolder: t("unknownHolder"),
-            }}
-          />
-        )}
+        <RoleDirectorySurface
+          workspaceId={workspaceId}
+          baseHref={`/workspaces/${workspaceId}/circles/${circle.id}`}
+          searchParams={resolvedSearch}
+          currentMemberId={currentMemberId}
+          currentUserId={currentUserId}
+          canManageStructure={canManageStructure}
+          isDemo={isDemo}
+          lockedCircleId={circle.id}
+          {...roleDirectoryData}
+        />
       </section>
 
       <section className="ws-section">

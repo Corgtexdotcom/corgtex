@@ -45,6 +45,7 @@ import {
   crmAccountIdFromPath,
   getWorkspaceAddActions,
   isWorkspaceAddActionKind,
+  roleIdFromPath,
   sanitizeWorkspaceReturnTo,
   WORKSPACE_ADD_ACTION_DEFINITIONS,
   workspaceSubpath,
@@ -210,6 +211,7 @@ export default async function WorkspaceAddPage({
   const returnTo = sanitizeWorkspaceReturnTo(workspaceId, search.returnTo);
   const contextCircleId = circleIdFromReturnTo(returnTo, workspaceId);
   const returnUrl = new URL(returnTo, "https://app.local");
+  const contextRoleId = roleIdFromPath(returnUrl.pathname, workspaceId);
   const returnSubpath = workspaceSubpath(returnUrl.pathname, workspaceId);
   const isAgreementArticle = kind === "article"
     && (returnSubpath === "/agreements" || Boolean(returnSubpath?.startsWith("/agreements/")));
@@ -285,9 +287,15 @@ export default async function WorkspaceAddPage({
   const accounts = accountsResult.items;
   const deals = dealsResult.items;
   const approvedQualifications = approvedQualificationsResult.items;
-  const roleAssignmentRoles = contextCircleId
-    ? roles.filter((role) => role.circle?.id === contextCircleId)
-    : roles;
+  const roleAssignmentRoles = contextRoleId
+    ? roles.filter((role) => role.id === contextRoleId)
+    : contextCircleId
+      ? roles.filter((role) => role.circle?.id === contextCircleId)
+      : roles;
+  const defaultRoleAssignmentRoleId = contextRoleId
+    && roleAssignmentRoles.some((role) => role.id === contextRoleId)
+    ? contextRoleId
+    : roleAssignmentRoles[0]?.id ?? "";
   const title = kind === "meeting_manual_recording"
     ? "Record meeting now"
     : kind === "meeting_audio_upload"
@@ -806,7 +814,7 @@ export default async function WorkspaceAddPage({
             {hiddenWorkspace(workspaceId)}
             <label>
               Role
-              <select name="roleId" required defaultValue={roleAssignmentRoles[0]?.id ?? ""}>
+              <select name="roleId" required defaultValue={defaultRoleAssignmentRoleId}>
                 {roleAssignmentRoles.map((role) => (
                   <option key={role.id} value={role.id}>
                     {role.name}{role.circle?.name ? ` (${role.circle.name})` : ""}

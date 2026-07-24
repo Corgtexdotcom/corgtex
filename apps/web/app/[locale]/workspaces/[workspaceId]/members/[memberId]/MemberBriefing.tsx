@@ -38,14 +38,14 @@ export function MemberBriefing({ workspaceId, memberId }: MemberBriefingProps) {
 
   return (
     <div className="rounded-xl border bg-gradient-to-br from-indigo-50/50 to-white p-6 shadow-sm overflow-hidden relative">
-      <div className="flex items-center justify-between mb-4 relative z-10">
-        <h3 className="text-lg font-semibold flex items-center gap-2">
+      <div className="flex flex-col gap-3 mb-4 relative z-10 sm:flex-row sm:items-center sm:justify-between">
+        <h3 className="text-lg font-semibold flex items-center gap-2 min-w-0">
           ✧ {t("aiBriefing")}
         </h3>
         <button
           onClick={generate}
           disabled={isPending}
-          className="actions-inline px-3 py-1.5 text-sm border rounded-md"
+          className="actions-inline justify-center px-3 py-1.5 text-sm border rounded-md w-full sm:w-auto"
         >
           {isPending ? t("generating") : (data ? t("regenerate") : t("generate"))}
         </button>
@@ -121,9 +121,6 @@ export function MemberBriefing({ workspaceId, memberId }: MemberBriefingProps) {
           </div>
         )}
       </div>
-      
-      {/* Decorative background element */}
-      <div className="absolute -top-12 -right-12 w-48 h-48 bg-indigo-500/5 blur-3xl rounded-full block pointer-events-none" />
     </div>
   );
 }

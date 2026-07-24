@@ -228,6 +228,7 @@ export async function createRole(actor: AppActor, params: {
 export async function updateRole(actor: AppActor, params: {
   workspaceId: string;
   roleId: string;
+  circleId?: string;
   name?: string;
   purposeMd?: string | null;
   accountabilities?: string[];
@@ -249,6 +250,25 @@ export async function updateRole(actor: AppActor, params: {
     invariant(role && role.circle.workspaceId === params.workspaceId && !role.archivedAt, 404, "NOT_FOUND", "Role not found.");
 
     const data: Record<string, unknown> = {};
+    let movedRole = false;
+    if (params.circleId !== undefined) {
+      const circleId = params.circleId.trim();
+      invariant(circleId.length > 0, 400, "INVALID_INPUT", "Circle is required.");
+      if (circleId !== role.circleId) {
+        const targetCircle = await tx.circle.findUnique({
+          where: { id: circleId },
+          select: {
+            id: true,
+            workspaceId: true,
+            archivedAt: true,
+          },
+        });
+        invariant(targetCircle && targetCircle.workspaceId === params.workspaceId && !targetCircle.archivedAt, 404, "NOT_FOUND", "Circle not found.");
+        data.circleId = targetCircle.id;
+        data.sortOrder = await tx.role.count({ where: { circleId: targetCircle.id } });
+        movedRole = true;
+      }
+    }
     if (params.name !== undefined) {
       const name = params.name.trim();
       invariant(name.length > 0, 400, "INVALID_INPUT", "Role name is required.");
@@ -285,6 +305,26 @@ export async function updateRole(actor: AppActor, params: {
       data,
       include: { circle: { select: { id: true, name: true } } },
     });
+
+    if (movedRole) {
+      const now = new Date();
+      await tx.roleHolderHistory.updateMany({
+        where: {
+          workspaceId: params.workspaceId,
+          roleId: role.id,
+          holderKind: "AGENT",
+          endedAt: null,
+        },
+        data: {
+          endedAt: now,
+          endedByUserId: actorUserId(actor),
+        },
+      });
+      await tx.circleAgentAssignment.updateMany({
+        where: { roleId: role.id },
+        data: { roleId: null },
+      });
+    }
 
     await tx.auditLog.create({
       data: {

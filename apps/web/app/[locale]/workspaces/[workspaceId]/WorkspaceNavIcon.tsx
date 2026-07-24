@@ -1,6 +1,7 @@
 "use client";
 
 import {
+  BadgeCheck,
   Bell,
   Brain,
   CalendarDays,
@@ -48,6 +49,7 @@ const ICONS: Record<WorkspaceNavIconName, LucideIcon> = {
   agreements: ScrollText,
   proposals: FileText,
   circles: CircleDot,
+  roles: BadgeCheck,
   finance: Landmark,
   agents: Hexagon,
   governance: Gauge,

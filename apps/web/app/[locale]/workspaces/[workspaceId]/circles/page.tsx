@@ -10,7 +10,6 @@ import {
   countAccountabilities,
   type CircleGraphCircle,
 } from "./circleGraphHelpers";
-import { RoleStaffingBoard } from "./RoleStaffingBoard";
 
 export const dynamic = "force-dynamic";
 
@@ -27,11 +26,10 @@ export default async function CirclesPage({
 }) {
   const { workspaceId } = await params;
   const { view } = await searchParams;
-  const viewMode = view === "list" || view === "staffing" ? view : "graph";
+  const viewMode = view === "list" ? view : "graph";
   const actor = await requirePageActor();
   await requireWorkspaceMembership({ actor, workspaceId });
   const t = await getTranslations("circles");
-  const tWorkItems = await getTranslations("workItems");
 
   let treeData: Awaited<ReturnType<typeof listCircleTree>>;
   let isDemo = false;
@@ -80,7 +78,6 @@ export default async function CirclesPage({
           <div style={{ display: "flex", gap: "8px" }}>
             <Link href={`/workspaces/${workspaceId}/circles?view=graph`} className="secondary small" style={{ opacity: viewMode === "graph" ? 1 : 0.6, background: viewMode === "graph" ? "var(--bg-alt)" : "transparent" }}>{t("btnGraphView")}</Link>
             <Link href={`/workspaces/${workspaceId}/circles?view=list`} className="secondary small" style={{ opacity: viewMode === "list" ? 1 : 0.6, background: viewMode === "list" ? "var(--bg-alt)" : "transparent" }}>{t("btnListView")}</Link>
-            <Link href={`/workspaces/${workspaceId}/circles?view=staffing`} className="secondary small" style={{ opacity: viewMode === "staffing" ? 1 : 0.6, background: viewMode === "staffing" ? "var(--bg-alt)" : "transparent" }}>{t("btnStaffingView")}</Link>
           </div>
         </div>
       </header>
@@ -98,7 +95,7 @@ export default async function CirclesPage({
             <CircleGraph treeData={treeData} isDemo={isDemo} />
           )}
         </section>
-      ) : viewMode === "list" ? (
+      ) : (
         <section className="ws-section">
           {circles.length === 0 ? (
             <div className="nr-item" style={{ textAlign: "center", padding: "48px 24px" }}>
@@ -112,7 +109,6 @@ export default async function CirclesPage({
               {circles.map((circle) => {
                 const members = collectCircleMembers(circle);
                 const accountabilityCount = countAccountabilities(circle);
-                const roleNames = (circle.roles ?? []).map((role) => role.name);
                 return (
                   <Link
                     key={circle.id}
@@ -146,62 +142,11 @@ export default async function CirclesPage({
                       <span className="tag neutral">{t("subcircleCount", { count: circle.childCircles?.length ?? 0 })}</span>
                     </div>
 
-                    {roleNames.length > 0 && (
-                      <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 12 }}>
-                        {roleNames.slice(0, 6).map((name) => (
-                          <span key={name} className="tag info" style={{ fontSize: "0.72rem" }}>{name}</span>
-                        ))}
-                        {roleNames.length > 6 && (
-                          <span className="tag" style={{ fontSize: "0.72rem" }}>+{roleNames.length - 6}</span>
-                        )}
-                      </div>
-                    )}
                   </Link>
                 );
               })}
             </div>
           )}
-        </section>
-      ) : (
-        <section className="ws-section">
-          <RoleStaffingBoard
-            workspaceId={workspaceId}
-            circles={treeData}
-            storageKey={`corgtex:${workspaceId}:role-staffing-board`}
-            labels={{
-              accountabilityCount: (count) => t("accountabilityCount", { count }),
-              columns: {
-                open: t("staffingOpenColumn"),
-                staffed: t("staffingStaffedColumn"),
-                shared: t("staffingSharedColumn"),
-              },
-              empty: {
-                open: t("staffingEmptyOpen"),
-                staffed: t("staffingEmptyStaffed"),
-                shared: t("staffingEmptyShared"),
-              },
-              holders: t("staffingHolders"),
-              holderCount: (count) => t("staffingHolderCount", { count }),
-              manageRole: t("staffingManageRole"),
-              noPurpose: t("noPurpose"),
-              unassigned: t("unassigned"),
-            }}
-            workItemLabels={{
-              settingsLabel: tWorkItems("columnSettings"),
-              resetLabel: tWorkItems("resetColumns"),
-              hideLabel: tWorkItems("hideColumn"),
-              moveUpLabel: tWorkItems("moveColumnLeft"),
-              moveDownLabel: tWorkItems("moveColumnRight"),
-              hideShortLabel: tWorkItems("hideColumnShort"),
-              moveUpShortLabel: tWorkItems("moveColumnLeftShort"),
-              moveDownShortLabel: tWorkItems("moveColumnRightShort"),
-              sortLabel: tWorkItems("sort"),
-              sortPriorityLabel: tWorkItems("sortPriority"),
-              sortDateLabel: tWorkItems("sortDate"),
-              sortAlphaLabel: tWorkItems("sortAlpha"),
-              dragUnavailableLabel: tWorkItems("dragUnavailable"),
-            }}
-          />
         </section>
       )}
     </>

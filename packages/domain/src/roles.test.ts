@@ -302,6 +302,112 @@ describe("roles domain", () => {
     }));
   });
 
+  it("updateRole moves a role to another workspace circle", async () => {
+    prismaMock.role.findUnique.mockResolvedValue({
+      id: "role-1",
+      circleId: "circle-1",
+      name: "Lead",
+      purposeMd: null,
+      accountabilities: [],
+      artifacts: [],
+      coreRoleType: null,
+      archivedAt: null,
+      circle: { workspaceId: "workspace-1" },
+    });
+    prismaMock.circle.findUnique.mockResolvedValue({
+      id: "circle-2",
+      workspaceId: "workspace-1",
+      archivedAt: null,
+    });
+    prismaMock.role.count.mockResolvedValue(4);
+    prismaMock.role.update.mockResolvedValue({
+      id: "role-1",
+      circleId: "circle-2",
+      name: "Lead",
+      purposeMd: null,
+      accountabilities: [],
+      artifacts: [],
+      metricsMd: null,
+      coreRoleType: null,
+      circle: { id: "circle-2", name: "Target circle" },
+    });
+
+    const { updateRole } = await import("./roles");
+    await expect(updateRole(actor, {
+      workspaceId: "workspace-1",
+      roleId: "role-1",
+      circleId: " circle-2 ",
+    })).resolves.toMatchObject({ id: "role-1", circleId: "circle-2" });
+
+    expect(prismaMock.circle.findUnique).toHaveBeenCalledWith({
+      where: { id: "circle-2" },
+      select: {
+        id: true,
+        workspaceId: true,
+        archivedAt: true,
+      },
+    });
+    expect(prismaMock.role.count).toHaveBeenCalledWith({ where: { circleId: "circle-2" } });
+    expect(prismaMock.role.update).toHaveBeenCalledWith(expect.objectContaining({
+      data: {
+        circleId: "circle-2",
+        sortOrder: 4,
+      },
+    }));
+    expect(prismaMock.roleHolderHistory.updateMany).toHaveBeenCalledWith({
+      where: {
+        workspaceId: "workspace-1",
+        roleId: "role-1",
+        holderKind: "AGENT",
+        endedAt: null,
+      },
+      data: {
+        endedAt: expect.any(Date),
+        endedByUserId: "operator-1",
+      },
+    });
+    expect(prismaMock.circleAgentAssignment.updateMany).toHaveBeenCalledWith({
+      where: { roleId: "role-1" },
+      data: { roleId: null },
+    });
+    expect(prismaMock.roleVersion.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        roleId: "role-1",
+        changeType: "updated",
+      }),
+    }));
+  });
+
+  it("updateRole rejects moving a role to a circle outside the workspace", async () => {
+    prismaMock.role.findUnique.mockResolvedValue({
+      id: "role-1",
+      circleId: "circle-1",
+      name: "Lead",
+      purposeMd: null,
+      accountabilities: [],
+      artifacts: [],
+      coreRoleType: null,
+      archivedAt: null,
+      circle: { workspaceId: "workspace-1" },
+    });
+    prismaMock.circle.findUnique.mockResolvedValue({
+      id: "circle-2",
+      workspaceId: "workspace-2",
+      archivedAt: null,
+    });
+
+    const { updateRole } = await import("./roles");
+    await expect(updateRole(actor, {
+      workspaceId: "workspace-1",
+      roleId: "role-1",
+      circleId: "circle-2",
+    })).rejects.toMatchObject({
+      status: 404,
+      code: "NOT_FOUND",
+    });
+    expect(prismaMock.role.update).not.toHaveBeenCalled();
+  });
+
   it("updateRole skips audit, events, and version snapshots when normalized fields are unchanged", async () => {
     const existingRole = {
       id: "role-1",
