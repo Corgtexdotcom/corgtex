@@ -215,7 +215,7 @@ async function proposalIdForCreateIntent(workspaceId: string, formData: FormData
 async function proposalLinksForCreateIntent(workspaceId: string, formData: FormData, intent: WorkItemCreateIntent) {
   const sourceTensionId = asOptional(formData, "sourceTensionId");
   const relatedActionIds = asStringArray(formData, "relatedActionIds");
-  if (intent === "draft") return { sourceTensionId, relatedActionIds };
+  if (intent === "draft") return { sourceTensionId: null, relatedActionIds: [] };
 
   const [sourceTension, relatedActions] = await Promise.all([
     sourceTensionId
@@ -580,6 +580,11 @@ function ProposalLinksCreateFields({
   sourceTensions: Array<{ id: string; title: string }>;
   relatedActions: Array<{ id: string; title: string }>;
 }) {
+  const relatedActionOptions: MultiSelectFilterOption[] = relatedActions.map((action) => ({
+    value: action.id,
+    label: action.title,
+  }));
+
   return (
     <>
       <label>
@@ -589,17 +594,16 @@ function ProposalLinksCreateFields({
           {sourceTensions.map((tension) => <option key={tension.id} value={tension.id}>{tension.title}</option>)}
         </select>
       </label>
-      <label>
-        Related actions
-        <select
-          name="relatedActionIds"
-          multiple
-          size={Math.min(5, Math.max(2, relatedActions.length || 1))}
-        >
-          {relatedActions.length === 0 && <option value="" disabled>No eligible actions</option>}
-          {relatedActions.map((action) => <option key={action.id} value={action.id}>{action.title}</option>)}
-        </select>
-      </label>
+      <MultiSelectFilter
+        name="relatedActionIds"
+        label="Related actions"
+        options={relatedActionOptions}
+        allLabel={relatedActionOptions.length > 0 ? "Choose actions" : "No eligible actions"}
+        selectAllLabel="Select all"
+        unselectAllLabel="Unselect all"
+        selectedCountLabel="{count} selected"
+        collapseAllToEmpty={false}
+      />
     </>
   );
 }
@@ -729,7 +733,6 @@ export default async function WorkspaceAddPage({
   ]);
 
   const proposals = proposalsResult.items;
-  const activeProposals = proposals.filter((proposal) => proposal.status === "OPEN" && !proposal.isPrivate);
   const proposalSourceTensions = tensionsResult.items.filter((tension) => (
     tension.status === "OPEN" && !tension.isPrivate && !tension.proposalId
   ));
@@ -1282,7 +1285,7 @@ export default async function WorkspaceAddPage({
               Link to proposal
               <select name="proposalId" defaultValue="">
                 <option value="">None</option>
-                {activeProposals.map((proposal) => <option value={proposal.id} key={proposal.id}>{proposal.title}</option>)}
+                {proposals.map((proposal) => <option value={proposal.id} key={proposal.id}>{proposal.title}</option>)}
               </select>
             </label>
             <WorkItemAddOnSection title="References">
@@ -1324,7 +1327,7 @@ export default async function WorkspaceAddPage({
               Link to proposal
               <select name="proposalId" defaultValue="">
                 <option value="">None</option>
-                {activeProposals.map((proposal) => <option value={proposal.id} key={proposal.id}>{proposal.title}</option>)}
+                {proposals.map((proposal) => <option value={proposal.id} key={proposal.id}>{proposal.title}</option>)}
               </select>
             </label>
             <WorkItemAddOnSection title="References">
