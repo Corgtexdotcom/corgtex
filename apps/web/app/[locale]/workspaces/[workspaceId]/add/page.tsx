@@ -38,7 +38,10 @@ import {
   listQualifications,
   listRoles,
   listTensions,
+  publishAction,
+  publishTension,
   requireWorkspaceMembership,
+  submitProposal,
   upsertWorkspaceExternalResourceFromUrl,
 } from "@corgtex/domain";
 import { encrypt } from "@corgtex/connectors-sql";
@@ -184,6 +187,63 @@ function requestChannelFromForm(formData: FormData) {
 
 function shouldApplyCreateAddOns(formData: FormData) {
   return asOptional(formData, "duplicateResolution") !== "use_existing";
+}
+
+async function proposalIdForCreateIntent(workspaceId: string, formData: FormData, intent: WorkItemCreateIntent) {
+  const proposalId = asOptional(formData, "proposalId");
+  if (!proposalId || intent === "draft") return proposalId;
+
+  const proposal = await prisma.proposal.findFirst({
+    where: {
+      id: proposalId,
+      workspaceId,
+      archivedAt: null,
+      isPrivate: false,
+      status: "OPEN",
+    },
+    select: { id: true },
+  });
+  return proposal?.id ?? null;
+}
+
+async function proposalLinksForCreateIntent(workspaceId: string, formData: FormData, intent: WorkItemCreateIntent) {
+  const sourceTensionId = asOptional(formData, "sourceTensionId");
+  const relatedActionIds = asStringArray(formData, "relatedActionIds");
+  if (intent === "draft") return { sourceTensionId, relatedActionIds };
+
+  const [sourceTension, relatedActions] = await Promise.all([
+    sourceTensionId
+      ? prisma.tension.findFirst({
+        where: {
+          id: sourceTensionId,
+          workspaceId,
+          archivedAt: null,
+          isPrivate: false,
+          status: "OPEN",
+          proposalId: null,
+        },
+        select: { id: true },
+      })
+      : Promise.resolve(null),
+    relatedActionIds.length > 0
+      ? prisma.action.findMany({
+        where: {
+          id: { in: relatedActionIds },
+          workspaceId,
+          archivedAt: null,
+          isPrivate: false,
+          status: { in: ["OPEN", "IN_PROGRESS"] },
+          proposalId: null,
+        },
+        select: { id: true },
+      })
+      : Promise.resolve([]),
+  ]);
+  const relatedActionIdSet = new Set(relatedActions.map((action) => action.id));
+  return {
+    sourceTensionId: sourceTension?.id ?? null,
+    relatedActionIds: relatedActionIds.filter((actionId) => relatedActionIdSet.has(actionId)),
+  };
 }
 
 function parseCreateRequestDate(formData: FormData, key: string, label: string) {
@@ -652,12 +712,12 @@ export default async function WorkspaceAddPage({
   ]);
 
   const proposals = proposalsResult.items;
-  const activeProposals = proposals.filter((proposal) => proposal.status === "DRAFT" || proposal.status === "OPEN");
+  const activeProposals = proposals.filter((proposal) => proposal.status === "OPEN" && !proposal.isPrivate);
   const proposalSourceTensions = tensionsResult.items.filter((tension) => (
-    (tension.status === "DRAFT" || tension.status === "OPEN") && !tension.proposalId
+    tension.status === "OPEN" && !tension.isPrivate && !tension.proposalId
   ));
   const proposalRelatedActions = actionsResult.items.filter((action) => (
-    (action.status === "DRAFT" || action.status === "OPEN" || action.status === "IN_PROGRESS") && !action.proposalId
+    (action.status === "OPEN" || action.status === "IN_PROGRESS") && !action.isPrivate && !action.proposalId
   ));
   const memberOptions: WorkItemMemberOption[] = members.map((member) => ({
     id: member.id,
@@ -719,6 +779,7 @@ export default async function WorkspaceAddPage({
       const actor = await requirePageActor();
       const intent = createIntentFromForm(formData);
       const applyAddOns = shouldApplyCreateAddOns(formData);
+      const proposalId = await proposalIdForCreateIntent(workspaceId, formData, intent);
       const requestAddOn = await validateCreateRequestAddOn(actor, {
         workspaceId,
         formData,
@@ -729,32 +790,35 @@ export default async function WorkspaceAddPage({
         workspaceId,
         title: asString(formData, "title"),
         bodyMd: asOptional(formData, "bodyMd"),
-        proposalId: asOptional(formData, "proposalId"),
+        proposalId,
         assigneeMemberId: asOptional(formData, "assigneeMemberId"),
         dueAt: formData.has("dueAt") ? asOptionalDate(formData, "dueAt") : undefined,
         priority: asOptionalInt(formData, "priority"),
         isPrivate: intent === "draft",
         duplicateGuard: duplicateGuardFromFormData(formData),
       });
+      const visibleAction = intent === "open" && applyAddOns && action.status === "DRAFT"
+        ? await publishAction(actor, { workspaceId, actionId: action.id })
+        : action;
       if (applyAddOns) {
         await maybeAttachCreateReference(actor, {
           workspaceId,
           entityType: "Action",
-          entityId: action.id,
+          entityId: visibleAction.id,
           formData,
         });
         await maybeCreateActionChecklist(actor, {
           workspaceId,
-          actionId: action.id,
+          actionId: visibleAction.id,
           formData,
-          canEditChecklist: action.status === "DRAFT" || action.status === "OPEN" || action.status === "IN_PROGRESS",
+          canEditChecklist: visibleAction.status === "DRAFT" || visibleAction.status === "OPEN" || visibleAction.status === "IN_PROGRESS",
         });
         await maybeCreateRequestFromForm(actor, {
           workspaceId,
           subjectType: "ACTION",
-          subjectId: action.id,
+          subjectId: visibleAction.id,
           request: requestAddOn,
-          canSendRequest: (action.status === "OPEN" || action.status === "IN_PROGRESS") && !action.isPrivate,
+          canSendRequest: (visibleAction.status === "OPEN" || visibleAction.status === "IN_PROGRESS") && !visibleAction.isPrivate,
         });
       }
       refresh(workspaceId);
@@ -772,6 +836,7 @@ export default async function WorkspaceAddPage({
       const actor = await requirePageActor();
       const intent = createIntentFromForm(formData);
       const applyAddOns = shouldApplyCreateAddOns(formData);
+      const proposalId = await proposalIdForCreateIntent(workspaceId, formData, intent);
       const requestAddOn = await validateCreateRequestAddOn(actor, {
         workspaceId,
         formData,
@@ -782,26 +847,29 @@ export default async function WorkspaceAddPage({
         workspaceId,
         title: asString(formData, "title"),
         bodyMd: asOptional(formData, "bodyMd"),
-        proposalId: asOptional(formData, "proposalId"),
+        proposalId,
         assigneeMemberId: asOptional(formData, "assigneeMemberId"),
         raisedByMemberId: asOptional(formData, "raisedByMemberId"),
         priority: asOptionalInt(formData, "priority"),
         isPrivate: intent === "draft",
         duplicateGuard: duplicateGuardFromFormData(formData),
       });
+      const visibleTension = intent === "open" && applyAddOns && tension.status === "DRAFT"
+        ? await publishTension(actor, { workspaceId, tensionId: tension.id })
+        : tension;
       if (applyAddOns) {
         await maybeAttachCreateReference(actor, {
           workspaceId,
           entityType: "Tension",
-          entityId: tension.id,
+          entityId: visibleTension.id,
           formData,
         });
         await maybeCreateRequestFromForm(actor, {
           workspaceId,
           subjectType: "TENSION",
-          subjectId: tension.id,
+          subjectId: visibleTension.id,
           request: requestAddOn,
-          canSendRequest: tension.status === "OPEN" && !tension.isPrivate,
+          canSendRequest: visibleTension.status === "OPEN" && !visibleTension.isPrivate,
         });
       }
       refresh(workspaceId);
@@ -826,6 +894,7 @@ export default async function WorkspaceAddPage({
         applyAddOns,
       });
       const ownerMemberId = formData.has("ownerMemberId") ? asOptional(formData, "ownerMemberId") : undefined;
+      const proposalLinks = await proposalLinksForCreateIntent(workspaceId, formData, intent);
       const proposal = await createProposal(actor, {
         workspaceId,
         title: asString(formData, "title"),
@@ -835,10 +904,14 @@ export default async function WorkspaceAddPage({
         priority: asOptionalInt(formData, "priority"),
         ...(ownerMemberId !== undefined ? { ownerMemberId } : {}),
         isPrivate: intent === "draft",
-        sourceTensionId: asOptional(formData, "sourceTensionId"),
-        relatedActionIds: asStringArray(formData, "relatedActionIds"),
+        sourceTensionId: proposalLinks.sourceTensionId,
+        relatedActionIds: proposalLinks.relatedActionIds,
         duplicateGuard: duplicateGuardFromFormData(formData),
       });
+      const proposalCanSendRequest = (intent === "open" && applyAddOns) || proposal.status === "OPEN";
+      if (intent === "open" && applyAddOns && proposal.status === "DRAFT") {
+        await submitProposal(actor, { workspaceId, proposalId: proposal.id });
+      }
       if (applyAddOns) {
         await maybeAttachCreateReference(actor, {
           workspaceId,
@@ -851,7 +924,7 @@ export default async function WorkspaceAddPage({
           subjectType: "PROPOSAL",
           subjectId: proposal.id,
           request: requestAddOn,
-          canSendRequest: proposal.status === "OPEN",
+          canSendRequest: proposalCanSendRequest,
         });
       }
       refresh(workspaceId);
