@@ -5,6 +5,7 @@ import { ItemActions } from "@/lib/components/ui/ItemActions";
 import { WorkItemFilterControls, WorkItemToolbar } from "@/lib/components/WorkItemControls";
 import { WorkItemKanbanBoard, type WorkItemKanbanColumn } from "@/lib/components/WorkItemKanbanBoard";
 import { WorkItemTable, type WorkItemTableColumn, type WorkItemTableRow } from "@/lib/components/WorkItemTable";
+import { ConfirmSubmitButton } from "../circles/ConfirmSubmitButton";
 import {
   buildWorkItemQuery,
   normalizeVisibleWorkItemColumns,
@@ -34,6 +35,7 @@ import {
 } from "./role-directory";
 import {
   assignRoleAction,
+  deleteRoleAction,
   reassignRoleAction,
   unassignRoleAction,
   updateRoleAction,
@@ -390,6 +392,34 @@ export async function RoleDirectorySurface({
     );
 
     moreItems.push(
+      <details key="edit-holder">
+        <summary className="nr-hide-marker nr-action-summary">{t("actionEditHolder")}</summary>
+        <div className="action-menu-form">
+          {activeAssignments.length === 0 && <span className="action-menu-label">{t("noActiveHolders")}</span>}
+          {activeAssignments.map((assignment) => (
+            <form key={assignment.id} action={assignRoleAction} className="action-menu-form">
+              {hiddenWorkspace(workspaceId)}
+              <input type="hidden" name="roleId" value={role.id} />
+              <input type="hidden" name="memberId" value={assignment.memberId} />
+              <span className="action-menu-label">
+                {roleMemberName(assignment.member, t("unknownHolder"))}
+              </span>
+              <label>
+                {t("formExpiresAt")}
+                <input name="expiresAt" type="date" min={formatDate(now)} defaultValue={activeAssignmentDateValue(assignment.expiresAt, now)} />
+              </label>
+              <label>
+                {t("formTransferReason")}
+                <input name="transferReason" placeholder={t("formTransferReasonPlaceholder")} defaultValue={assignment.transferReason ?? ""} />
+              </label>
+              <button type="submit" className="secondary small">{tCommon("save")}</button>
+            </form>
+          ))}
+        </div>
+      </details>,
+    );
+
+    moreItems.push(
       <details key="move-circle">
         <summary className="nr-hide-marker nr-action-summary">{t("actionMoveCircle")}</summary>
         <form action={updateRoleAction} className="action-menu-form">
@@ -438,6 +468,19 @@ export async function RoleDirectorySurface({
             <input name="coreRoleType" defaultValue={role.coreRoleType ?? ""} />
           </label>
           <button type="submit" className="secondary small">{tCommon("save")}</button>
+        </form>
+      </details>,
+    );
+
+    moreItems.push(
+      <details key="archive">
+        <summary className="nr-hide-marker nr-action-summary">{t("actionArchive")}</summary>
+        <form action={deleteRoleAction} className="action-menu-form">
+          {hiddenWorkspace(workspaceId)}
+          <input type="hidden" name="roleId" value={role.id} />
+          <ConfirmSubmitButton className="danger" message={t("confirmArchiveRole")}>
+            {t("actionArchive")}
+          </ConfirmSubmitButton>
         </form>
       </details>,
     );

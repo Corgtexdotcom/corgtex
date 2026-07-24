@@ -202,6 +202,16 @@ export function crmAccountIdFromPath(pathname: string, workspaceId: string) {
   }
 }
 
+export function roleIdFromPath(pathname: string, workspaceId: string) {
+  const segments = pathSegments(workspaceSubpath(pathname, workspaceId));
+  if (segments?.[0] !== "roles" || !segments[1]) return null;
+  try {
+    return decodeURIComponent(segments[1]);
+  } catch {
+    return segments[1];
+  }
+}
+
 function primarySegment(subpath: string | null) {
   if (subpath === null) return null;
   return subpath.split("?")[0]?.split("#")[0]?.split("/").filter(Boolean)[0] ?? "";

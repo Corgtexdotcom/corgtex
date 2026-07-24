@@ -354,6 +354,22 @@ describe("roles domain", () => {
         sortOrder: 4,
       },
     }));
+    expect(prismaMock.roleHolderHistory.updateMany).toHaveBeenCalledWith({
+      where: {
+        workspaceId: "workspace-1",
+        roleId: "role-1",
+        holderKind: "AGENT",
+        endedAt: null,
+      },
+      data: {
+        endedAt: expect.any(Date),
+        endedByUserId: "operator-1",
+      },
+    });
+    expect(prismaMock.circleAgentAssignment.updateMany).toHaveBeenCalledWith({
+      where: { roleId: "role-1" },
+      data: { roleId: null },
+    });
     expect(prismaMock.roleVersion.create).toHaveBeenCalledWith(expect.objectContaining({
       data: expect.objectContaining({
         roleId: "role-1",

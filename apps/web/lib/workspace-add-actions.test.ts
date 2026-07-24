@@ -5,6 +5,7 @@ import {
   crmAccountIdFromPath,
   getMobileCaptureActions,
   getWorkspaceAddActions,
+  roleIdFromPath,
   sanitizeWorkspaceReturnTo,
   workspaceSubpath,
   type WorkspaceAddActionContext,
@@ -38,6 +39,13 @@ describe("workspace add actions", () => {
     expect(crmAccountIdFromPath("/en/workspaces/ws-1/leads/accounts/account%202?view=pipeline", "ws-1")).toBe("account 2");
     expect(crmAccountIdFromPath("/workspaces/ws-1/leads/accounts", "ws-1")).toBeNull();
     expect(crmAccountIdFromPath("/workspaces/ws-2/leads/accounts/account-1", "ws-1")).toBeNull();
+  });
+
+  it("extracts role detail context from workspace paths", () => {
+    expect(roleIdFromPath("/workspaces/ws-1/roles/role-1", "ws-1")).toBe("role-1");
+    expect(roleIdFromPath("/en/workspaces/ws-1/roles/role%202", "ws-1")).toBe("role 2");
+    expect(roleIdFromPath("/workspaces/ws-1/roles", "ws-1")).toBeNull();
+    expect(roleIdFromPath("/workspaces/ws-2/roles/role-1", "ws-1")).toBeNull();
   });
 
   it("returns ordered meeting actions", () => {
@@ -124,6 +132,7 @@ describe("workspace add actions", () => {
 
   it("offers role creation and assignment from the roles surface", () => {
     expect(kinds({ pathname: "/workspaces/ws-1/roles" })).toEqual(["role", "role_assignment"]);
+    expect(kinds({ pathname: "/workspaces/ws-1/roles/role-1" })).toEqual(["role", "role_assignment"]);
     expect(kinds({ pathname: "/workspaces/ws-1/roles", role: "FACILITATOR" })).toEqual([
       "role",
       "role_assignment",
