@@ -1,10 +1,18 @@
 {
-  "workspaceId": "2318cd32-eae9-4f5e-8a6f-40cc02023423",
+  "workspaceId": "7081dbd2-e396-46ed-8b41-a8a62348298a",
+  "baseUrl": "http://localhost:3001",
   "screenshots": [
     "/Users/janbrezina/Development /CORGTEX-workitem-create-composer/.artifacts/workitem-create-composer/add-action.png",
     "/Users/janbrezina/Development /CORGTEX-workitem-create-composer/.artifacts/workitem-create-composer/add-tension.png",
     "/Users/janbrezina/Development /CORGTEX-workitem-create-composer/.artifacts/workitem-create-composer/add-proposal.png",
     "/Users/janbrezina/Development /CORGTEX-workitem-create-composer/.artifacts/workitem-create-composer/detail-action-context.png"
   ],
-  "createdActionId": "598b2848-cba0-4846-8a55-d274f59892b2"
+  "createdActionId": "1c1ba8d8-a2f5-49c6-901a-bc882b97879e",
+  "verified": {
+    "status": "OPEN",
+    "isPrivate": false,
+    "attachments": 1,
+    "checklistItems": 2,
+    "requests": 1
+  }
 }
