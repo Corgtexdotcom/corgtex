@@ -55,6 +55,7 @@ beforeEach(async () => {
 
 afterEach(async () => {
   vi.clearAllMocks();
+  vi.unstubAllEnvs();
   await clearRateLimits();
 });
 
@@ -138,6 +139,74 @@ describe("POST /api/auth/login", () => {
         status: 401,
         surface: "auth",
         transient: false,
+      }),
+      processPersonProfile: false,
+    });
+  });
+
+  it("returns only the configured workspace on dedicated customer deployments", async () => {
+    const expiresAt = new Date("2026-07-24T12:00:00.000Z");
+    vi.stubEnv("APP_URL", "https://customer-alpha.corgtex.test");
+    vi.stubEnv("WORKSPACE_SLUG", "customer-alpha");
+    loginUserWithPassword.mockResolvedValue({
+      token: "session-token",
+      expiresAt,
+      user: {
+        id: "operator-1",
+        email: "operator@example.com",
+        displayName: "Operator",
+        globalRole: "OPERATOR",
+      },
+    });
+    listActorWorkspaces.mockResolvedValue([
+      {
+        id: "ws-validation",
+        slug: "corgtex-validation",
+        name: "Corgtex Internal Validation",
+      },
+      {
+        id: "ws-customer-alpha",
+        slug: "customer-alpha",
+        name: "Customer Alpha",
+      },
+    ]);
+
+    const { POST } = await import("./route");
+    const response = await POST(
+      new Request("https://customer-alpha.corgtex.test/api/auth/login", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          email: "operator@example.com",
+          password: "password123",
+        }),
+      }) as never,
+    );
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({
+      user: {
+        id: "operator-1",
+        email: "operator@example.com",
+        displayName: "Operator",
+        globalRole: "OPERATOR",
+      },
+      workspaces: [
+        {
+          id: "ws-customer-alpha",
+          slug: "customer-alpha",
+          name: "Customer Alpha",
+        },
+      ],
+    });
+    expect(response.headers.get("set-cookie")).toContain("corgtex_session=session-token");
+    expect(capturePostHogEvent).toHaveBeenCalledWith({
+      event: "corgtex_auth_login_succeeded",
+      distinctId: "user:operator-1",
+      properties: expect.objectContaining({
+        workspace_count: 1,
       }),
       processPersonProfile: false,
     });

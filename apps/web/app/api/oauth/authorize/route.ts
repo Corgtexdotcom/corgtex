@@ -11,11 +11,27 @@ import {
   isAllowedOAuthRedirectUri,
   issueAuthorizationCode,
   issueMcpAuthorizationCode,
+  listActorWorkspaces,
 } from "@corgtex/domain";
+import { filterWorkspacesForDeploymentScope } from "@/lib/deployment-workspace-scope";
 import { z } from "zod";
 
 // This is the endpoint ChatGPT calls to start the OAuth flow.
 // Typically it's a GET, but we'll accept POST too for the user consent submission.
+
+type PageActor = Awaited<ReturnType<typeof requirePageActor>>;
+
+async function deploymentScopeWorkspaceError(actor: PageActor, workspaceId: string) {
+  const visibleWorkspaces = filterWorkspacesForDeploymentScope(await listActorWorkspaces(actor));
+  if (visibleWorkspaces.some((workspace) => workspace.id === workspaceId)) {
+    return null;
+  }
+
+  return NextResponse.json({
+    error: "access_denied",
+    message: "This workspace is not available on this deployment.",
+  }, { status: 403 });
+}
 
 export async function GET(request: NextRequest) {
   try {
@@ -129,6 +145,10 @@ export async function POST(request: NextRequest) {
       if (!body.workspaceId) {
         return NextResponse.json({ error: "invalid_request", message: "Workspace is required" }, { status: 400 });
       }
+      const scopedWorkspaceError = await deploymentScopeWorkspaceError(actor, body.workspaceId);
+      if (scopedWorkspaceError) {
+        return scopedWorkspaceError;
+      }
       code = await issueMcpAuthorizationCode(actor, {
         clientId: body.clientId,
         workspaceId: body.workspaceId,
@@ -141,6 +161,10 @@ export async function POST(request: NextRequest) {
     } else {
       const app = await getOAuthAppByClientId(body.clientId);
       const effectiveScopes = scopeArray.length > 0 ? scopeArray : app.scopes;
+      const scopedWorkspaceError = await deploymentScopeWorkspaceError(actor, app.workspaceId);
+      if (scopedWorkspaceError) {
+        return scopedWorkspaceError;
+      }
       code = await issueAuthorizationCode(actor, {
         clientId: body.clientId,
         workspaceId: app.workspaceId,

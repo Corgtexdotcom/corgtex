@@ -1,4 +1,5 @@
 import { requirePageActor } from "@/lib/auth";
+import { filterWorkspacesForDeploymentScope } from "@/lib/deployment-workspace-scope";
 import {
   getMcpOAuthClientByClientId,
   getOAuthAppByClientId,
@@ -161,7 +162,7 @@ export default async function OAuthAuthorizePage(props: Props) {
     return <ErrorPanel>Invalid authorization request.</ErrorPanel>;
   }
 
-  const userWorkspaces = await listActorWorkspaces(actor);
+  const userWorkspaces = filterWorkspacesForDeploymentScope(await listActorWorkspaces(actor));
   const mcpClient = await getMcpOAuthClientByClientId(clientId).catch(() => null);
 
   if (mcpClient) {

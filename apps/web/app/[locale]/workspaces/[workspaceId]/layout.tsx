@@ -2,6 +2,7 @@ import { isGlobalOperator, listActorWorkspaces, countUnreadNotifications, listCo
 import { env, workspaceBranding, prisma } from "@corgtex/shared";
 import type { Metadata } from "next";
 import { logoutAction, requirePageActor } from "@/lib/auth";
+import { filterWorkspacesForDeploymentScope } from "@/lib/deployment-workspace-scope";
 import { DemoTour } from "./DemoTour";
 import { DemoBanner } from "./DemoBanner";
 import { WorkspaceOnboardingTour } from "./WorkspaceOnboardingTour";
@@ -22,12 +23,17 @@ import type { AiWorkspaceLaunchState } from "@/lib/ai-workspace-launch";
 import { getMobileCaptureActions } from "@/lib/workspace-add-actions";
 import { getProductFeedbackTargetWorkspace } from "@/lib/product-feedback";
 import { headers } from "next/headers";
+import { redirect } from "next/navigation";
 
 export const dynamic = "force-dynamic";
 
 type Workspace = Awaited<ReturnType<typeof listActorWorkspaces>>[number];
 
 import { WORKSPACE_NAV_GROUPS as navGroups } from "@/lib/nav-config";
+
+function localizedPath(path: string, locale: string) {
+  return `/${locale}${path}`;
+}
 
 async function hasWorkspaceInitialKnowledge(workspaceId: string) {
   const [documentCount, brainSourceCount, meetingCount, knowledgeChunkCount] = await Promise.all([
@@ -87,8 +93,13 @@ export default async function WorkspaceLayout({
   const { locale, workspaceId } = await params;
   const actor = await requirePageActor();
   const userId = actor.kind === "user" ? actor.user.id : null;
-  const [workspaces, unreadCount, conversationsResult, dailyQuestions, featureFlags, membership, invitePolicy, workspaceRuntime, onboardingState, hasInitialKnowledge, googleConnection, productFeedbackTarget] = await Promise.all([
-    listActorWorkspaces(actor),
+  const workspaces = filterWorkspacesForDeploymentScope(await listActorWorkspaces(actor));
+  const current = workspaces.find((w: Workspace) => w.id === workspaceId);
+  if (!current) {
+    redirect(localizedPath(workspaces[0] ? `/workspaces/${workspaces[0].id}` : "/find-account", locale));
+  }
+
+  const [unreadCount, conversationsResult, dailyQuestions, featureFlags, membership, invitePolicy, workspaceRuntime, onboardingState, hasInitialKnowledge, googleConnection, productFeedbackTarget] = await Promise.all([
     userId ? countUnreadNotifications(userId, workspaceId) : Promise.resolve(0),
     listConversations(actor, workspaceId, { take: 30 }).catch(() => ({ items: [], total: 0, take: 30, skip: 0 })),
     userId ? listDailyCompanyUnderstandingQuestions(actor, { workspaceId, take: 3 }).catch(() => []) : Promise.resolve([]),
@@ -120,7 +131,6 @@ export default async function WorkspaceLayout({
     }).catch(() => null) : Promise.resolve(null),
     getProductFeedbackTargetWorkspace().catch(() => null),
   ]);
-  const current = workspaces.find((w: Workspace) => w.id === workspaceId);
   const conversations = conversationsResult.items;
   const capabilities = buildWorkspaceCapabilities({ featureFlags, role: membership?.role ?? null });
   const moduleAccess = await resolveWorkspaceModuleAccess({
