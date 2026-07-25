@@ -375,7 +375,7 @@ export async function createGoalAction(actor: AppActor, ctx: any, args: any) {
       descriptionMd: args.descriptionMd,
       cadence: args.cadence as GoalCadence | undefined,
       level: args.level as GoalLevel | undefined,
-      status: args.status as GoalStatus | undefined,
+      status: (args.status as GoalStatus | undefined) ?? "ACTIVE",
       targetDate: args.targetDate ? new Date(args.targetDate) : undefined,
       startDate: args.startDate ? new Date(args.startDate) : undefined,
       parentGoalId: args.parentGoalId,

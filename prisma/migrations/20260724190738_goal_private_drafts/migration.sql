@@ -3,6 +3,14 @@ ALTER TABLE "Goal" ADD COLUMN     "authorUserId" TEXT,
 ADD COLUMN     "isPrivate" BOOLEAN NOT NULL DEFAULT false,
 ADD COLUMN     "publishedAt" TIMESTAMP(3);
 
+-- Backfill legacy goal authors from the existing owner member when possible.
+UPDATE "Goal" AS g
+SET "authorUserId" = m."userId"
+FROM "Member" AS m
+WHERE g."authorUserId" IS NULL
+  AND g."ownerMemberId" = m."id"
+  AND g."workspaceId" = m."workspaceId";
+
 -- CreateIndex
 CREATE INDEX "Goal_authorUserId_idx" ON "Goal"("authorUserId");
 

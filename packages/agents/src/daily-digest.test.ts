@@ -738,6 +738,8 @@ describe("runDailyDigest", () => {
     expect(prismaMock.goal.findMany).toHaveBeenCalledWith(expect.objectContaining({
       where: expect.objectContaining({
         workspaceId: "workspace-1",
+        isPrivate: false,
+        status: { not: "DRAFT" },
         createdAt: { lte: cutoff },
         updatedAt: { lte: cutoff },
       }),

@@ -7,7 +7,8 @@ const { prismaMock, syncContextGraphForMeetingMock, upsertContextGraphObjectMock
     member: { findFirst: vi.fn() },
     goal: { findFirst: vi.fn() },
     agentIdentity: { findFirst: vi.fn() },
-    contextGraphRelationship: { findMany: vi.fn() },
+    contextGraphObject: { updateMany: vi.fn() },
+    contextGraphRelationship: { findMany: vi.fn(), updateMany: vi.fn() },
   },
   syncContextGraphForMeetingMock: vi.fn(),
   upsertContextGraphObjectMock: vi.fn(),
@@ -211,6 +212,7 @@ describe("handleContextGraphSync", () => {
       title: "Reach 100 active workspaces",
       descriptionMd: "Quarterly growth goal.",
       status: "ON_TRACK",
+      isPrivate: false,
       level: "CIRCLE",
       cadence: "QUARTERLY",
       progressPercent: 40,
@@ -224,6 +226,7 @@ describe("handleContextGraphSync", () => {
         title: "2035 vision",
         descriptionMd: "Long horizon target.",
         status: "ACTIVE",
+        isPrivate: false,
         archivedAt: null,
       },
       circle: { id: "circle-1", name: "Growth", purposeMd: "Grow usage", archivedAt: null },
@@ -362,7 +365,7 @@ describe("handleContextGraphSync", () => {
     }));
   });
 
-  it("marks draft goals as proposed graph facts", async () => {
+  it("marks public draft goals as proposed graph facts", async () => {
     const { handleContextGraphSync } = await import("./context-graph-sync");
     prismaMock.goal.findFirst.mockResolvedValueOnce({
       id: "goal-2",
@@ -370,6 +373,7 @@ describe("handleContextGraphSync", () => {
       title: "Draft idea",
       descriptionMd: null,
       status: "DRAFT",
+      isPrivate: false,
       level: "COMPANY",
       cadence: "ANNUAL",
       progressPercent: 0,
@@ -390,6 +394,94 @@ describe("handleContextGraphSync", () => {
     expect(upsertContextGraphObjectMock).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
       objectType: "Goal",
       status: "proposed",
+    }));
+    expect(upsertContextGraphRelationshipMock).not.toHaveBeenCalled();
+  });
+
+  it("archives existing graph facts for private draft goals instead of syncing them", async () => {
+    const { handleContextGraphSync } = await import("./context-graph-sync");
+    prismaMock.goal.findFirst.mockResolvedValueOnce({
+      id: "goal-private",
+      workspaceId: "ws-1",
+      title: "Private draft",
+      descriptionMd: "Should not enter shared graph.",
+      status: "DRAFT",
+      isPrivate: true,
+      level: "COMPANY",
+      cadence: "QUARTERLY",
+      progressPercent: 0,
+      archivedAt: null,
+      startDate: null,
+      targetDate: null,
+      createdAt: new Date("2026-06-01T10:00:00.000Z"),
+      updatedAt: new Date("2026-06-01T10:00:00.000Z"),
+      parentGoal: null,
+      circle: null,
+      ownerMember: null,
+    });
+    prismaMock.contextGraphObject.updateMany.mockResolvedValueOnce({ count: 1 });
+    prismaMock.contextGraphRelationship.updateMany.mockResolvedValueOnce({ count: 2 });
+
+    await handleContextGraphSync("job-1", { sourceType: "GOAL", sourceId: "goal-private" }, "ws-1");
+
+    expect(upsertContextGraphObjectMock).not.toHaveBeenCalled();
+    expect(upsertContextGraphRelationshipMock).not.toHaveBeenCalled();
+    expect(prismaMock.contextGraphObject.updateMany).toHaveBeenCalledWith({
+      where: expect.objectContaining({
+        workspaceId: "ws-1",
+        sourceEntityType: "Goal",
+        sourceEntityId: "goal-private",
+        status: { not: "archived" },
+      }),
+      data: { status: "archived" },
+    });
+    expect(prismaMock.contextGraphRelationship.updateMany).toHaveBeenCalledWith({
+      where: expect.objectContaining({
+        workspaceId: "ws-1",
+        sourceEntityType: "Goal",
+        sourceEntityId: "goal-private",
+        status: { not: "archived" },
+      }),
+      data: { status: "archived" },
+    });
+  });
+
+  it("does not upsert private draft parent goals for visible child goals", async () => {
+    const { handleContextGraphSync } = await import("./context-graph-sync");
+    prismaMock.goal.findFirst.mockResolvedValueOnce({
+      id: "goal-child",
+      workspaceId: "ws-1",
+      title: "Visible child",
+      descriptionMd: null,
+      status: "ACTIVE",
+      isPrivate: false,
+      level: "COMPANY",
+      cadence: "QUARTERLY",
+      progressPercent: 20,
+      archivedAt: null,
+      startDate: null,
+      targetDate: null,
+      createdAt: new Date("2026-06-01T10:00:00.000Z"),
+      updatedAt: new Date("2026-06-01T10:00:00.000Z"),
+      parentGoal: {
+        id: "goal-private-parent",
+        title: "Private parent",
+        descriptionMd: "Should stay private.",
+        status: "DRAFT",
+        isPrivate: true,
+        archivedAt: null,
+      },
+      circle: null,
+      ownerMember: null,
+    });
+    upsertContextGraphObjectMock.mockResolvedValueOnce({ id: "goal-child-object" });
+    prismaMock.contextGraphRelationship.findMany.mockResolvedValueOnce([]);
+
+    await handleContextGraphSync("job-1", { sourceType: "GOAL", sourceId: "goal-child" }, "ws-1");
+
+    expect(upsertContextGraphObjectMock).toHaveBeenCalledTimes(1);
+    expect(upsertContextGraphObjectMock).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+      sourceEntityId: "goal-child",
     }));
     expect(upsertContextGraphRelationshipMock).not.toHaveBeenCalled();
   });

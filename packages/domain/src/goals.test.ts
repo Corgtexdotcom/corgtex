@@ -4,7 +4,9 @@ import {
   createGoal,
   createGoalFinanceProjectLink,
   createGoalLink,
+  deleteGoal,
   deleteGoalFinanceProjectLink,
+  getGoal,
   getMyGoalSlice,
   listGoalFinanceProjectLinks,
   listCompanyDirectionFromBrain,
@@ -180,6 +182,24 @@ describe("Goals Domain", () => {
           }),
         })
       );
+    });
+
+    it("does not emit context graph events for private draft goals", async () => {
+      const { appendEvents } = await import("./events");
+      vi.mocked(prisma.goal.create).mockResolvedValueOnce({
+        id: "goal-private",
+        workspaceId: "ws-1",
+        title: "Private goal draft",
+        isPrivate: true,
+        status: "DRAFT",
+      } as any);
+
+      await createGoal(actor, {
+        workspaceId: "ws-1",
+        title: "Private goal draft",
+      });
+
+      expect(appendEvents).not.toHaveBeenCalled();
     });
 
     it("creates key results and derives initial progress", async () => {
@@ -439,6 +459,84 @@ describe("Goals Domain", () => {
           metadata: { snippet: "Expand customer onboarding" },
         }),
       }));
+    });
+  });
+
+  describe("goal privacy reads and archive", () => {
+    it("filters private child goals from focused goal reads", async () => {
+      vi.mocked(prisma.goal.findFirst).mockResolvedValueOnce({
+        id: "goal-1",
+        workspaceId: "ws-1",
+        title: "Visible goal",
+        childGoals: [],
+      } as any);
+
+      await getGoal(actor, { workspaceId: "ws-1", goalId: "goal-1" });
+
+      expect(prisma.goal.findFirst).toHaveBeenCalledWith(expect.objectContaining({
+        where: expect.objectContaining({
+          id: "goal-1",
+          workspaceId: "ws-1",
+          OR: expect.arrayContaining([
+            { isPrivate: false },
+            { isPrivate: true, status: "DRAFT", authorUserId: "user-1" },
+          ]),
+        }),
+        include: expect.objectContaining({
+          childGoals: expect.objectContaining({
+            where: expect.objectContaining({
+              archivedAt: null,
+              OR: expect.arrayContaining([
+                { isPrivate: false },
+                { isPrivate: true, status: "DRAFT", authorUserId: "user-1" },
+              ]),
+            }),
+          }),
+        }),
+      }));
+    });
+
+    it("omits invisible private parents from the personal goal slice", async () => {
+      vi.mocked(prisma.goal.findMany).mockResolvedValueOnce([
+        {
+          id: "goal-child",
+          workspaceId: "ws-1",
+          title: "Visible child",
+          parentGoal: {
+            id: "goal-private-parent",
+            title: "Private parent",
+            isPrivate: true,
+            status: "DRAFT",
+            authorUserId: "other-user",
+            parentGoal: null,
+          },
+        },
+      ] as any);
+
+      await expect(getMyGoalSlice(actor, "member-1", "ws-1")).resolves.toEqual([
+        expect.objectContaining({
+          id: "goal-child",
+          parentGoal: null,
+        }),
+      ]);
+    });
+
+    it("blocks non-authors from archiving another member's private draft goal", async () => {
+      vi.mocked(prisma.goal.findFirst).mockResolvedValueOnce({
+        id: "goal-private",
+        workspaceId: "ws-1",
+        status: "DRAFT",
+        isPrivate: true,
+        authorUserId: "other-user",
+        archivedAt: null,
+      } as any);
+
+      await expect(deleteGoal(actor, {
+        workspaceId: "ws-1",
+        goalId: "goal-private",
+      })).rejects.toMatchObject({
+        code: "FORBIDDEN",
+      });
     });
   });
 
@@ -1006,6 +1104,75 @@ describe("Goals Domain", () => {
         where: { id: "goal-1" },
         data: { progressPercent: 55 },
       });
+    });
+
+    it("blocks collaborators from turning another author's active goal back into a draft through progress updates", async () => {
+      vi.mocked(prisma.goal.findUnique).mockResolvedValueOnce({
+        id: "goal-1",
+        workspaceId: "ws-1",
+        title: "Active goal",
+        status: "ACTIVE",
+        isPrivate: false,
+        authorUserId: "other-user",
+        archivedAt: null,
+      } as any);
+
+      await expect(postGoalUpdate(actor, {
+        workspaceId: "ws-1",
+        goalId: "goal-1",
+        bodyMd: "Return to draft",
+        statusChange: "DRAFT",
+      })).rejects.toMatchObject({
+        code: "FORBIDDEN",
+      });
+      expect(prisma.goalUpdate.create).not.toHaveBeenCalled();
+      expect(prisma.goal.update).not.toHaveBeenCalled();
+    });
+
+    it("returns an authored active goal to a private draft through progress updates", async () => {
+      const { appendEvents } = await import("./events");
+      vi.mocked(prisma.goal.findUnique).mockResolvedValueOnce({
+        id: "goal-1",
+        workspaceId: "ws-1",
+        title: "Active goal",
+        status: "ACTIVE",
+        isPrivate: false,
+        authorUserId: "user-1",
+        publishedAt: new Date("2026-07-01T10:00:00.000Z"),
+        archivedAt: null,
+      } as any);
+      vi.mocked(prisma.goalUpdate.create).mockResolvedValueOnce({
+        id: "goal-update-1",
+        goalId: "goal-1",
+      } as any);
+      vi.mocked(prisma.goal.update).mockResolvedValueOnce({
+        id: "goal-1",
+      } as any);
+
+      await postGoalUpdate(actor, {
+        workspaceId: "ws-1",
+        goalId: "goal-1",
+        bodyMd: "Return to draft",
+        statusChange: "DRAFT",
+      });
+
+      expect(prisma.goal.update).toHaveBeenCalledWith({
+        where: { id: "goal-1" },
+        data: expect.objectContaining({
+          status: "DRAFT",
+          isPrivate: true,
+          publishedAt: null,
+        }),
+      });
+      expect(appendEvents).toHaveBeenCalledWith(expect.anything(), [
+        expect.objectContaining({
+          type: "goal.updated",
+          payload: expect.objectContaining({
+            goalId: "goal-1",
+            fields: expect.arrayContaining(["status", "isPrivate", "publishedAt"]),
+          }),
+        }),
+      ]);
     });
 
     it("rejects progress updates for completed goals", async () => {

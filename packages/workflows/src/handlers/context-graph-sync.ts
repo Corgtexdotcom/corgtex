@@ -26,6 +26,33 @@ function goalGraphStatus(goal: { status: string; archivedAt: Date | null }) {
   return "approved";
 }
 
+function isPrivateDraftGoal(goal: { isPrivate?: boolean | null; status: string }) {
+  return goal.isPrivate === true && goal.status === "DRAFT";
+}
+
+async function archiveGoalGraphFacts(workspaceId: string, goalId: string) {
+  await Promise.all([
+    prisma.contextGraphObject.updateMany({
+      where: {
+        workspaceId,
+        sourceEntityType: "Goal",
+        sourceEntityId: goalId,
+        status: { not: "archived" },
+      },
+      data: { status: "archived" },
+    }),
+    prisma.contextGraphRelationship.updateMany({
+      where: {
+        workspaceId,
+        sourceEntityType: "Goal",
+        sourceEntityId: goalId,
+        status: { not: "archived" },
+      },
+      data: { status: "archived" },
+    }),
+  ]);
+}
+
 function articleTypeToObjectType(type: string): ContextGraphObjectType {
   if (type === "PROCESS") return "Process";
   if (type === "DECISION") return "Decision";
@@ -464,6 +491,10 @@ export async function handleContextGraphSync(
       },
     });
     if (!goal) return;
+    if (isPrivateDraftGoal(goal)) {
+      await archiveGoalGraphFacts(workspaceId, goal.id);
+      return;
+    }
     const object = await upsertContextGraphObject(actor, {
       workspaceId,
       objectType: "Goal",
@@ -484,7 +515,7 @@ export async function handleContextGraphSync(
     });
 
     const desiredEdges = new Map<string, { sourceObjectId: string; targetObjectId: string; relationshipType: "part_of" | "owns" }>();
-    if (goal.parentGoal && !goal.parentGoal.archivedAt) {
+    if (goal.parentGoal && !goal.parentGoal.archivedAt && !isPrivateDraftGoal(goal.parentGoal)) {
       const parentObject = await upsertContextGraphObject(actor, {
         workspaceId,
         objectType: "Goal",

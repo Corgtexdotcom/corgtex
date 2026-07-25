@@ -294,6 +294,45 @@ function requireEditableGoalKeyResults(
   requireEditableGoalContent(actor, membership, goal, "Only draft or active goals can change key results.");
 }
 
+function canReadGoalRecord(
+  actor: AppActor,
+  membership: MembershipSummary | null | undefined,
+  goal: {
+    isPrivate?: boolean | null;
+    status?: GoalStatus | null;
+    authorUserId?: string | null;
+  },
+) {
+  if (actor.kind === "user" && actor.user.globalRole === "OPERATOR") return true;
+  if (goal.isPrivate !== true) return true;
+  if (goal.status !== "DRAFT") return false;
+  if (actor.kind === "agent") return true;
+  if (membership?.role === "ADMIN") return true;
+  return actor.kind === "user" && goal.authorUserId === actor.user.id;
+}
+
+type GoalParentVisibilityRecord = {
+  parentGoal?: GoalParentVisibilityRecord | null;
+  isPrivate?: boolean | null;
+  status?: GoalStatus | null;
+  authorUserId?: string | null;
+};
+
+function stripInvisibleGoalParents<T extends { parentGoal?: GoalParentVisibilityRecord | null }>(
+  actor: AppActor,
+  membership: MembershipSummary | null | undefined,
+  goal: T,
+): T {
+  if (!goal.parentGoal) return goal;
+  if (!canReadGoalRecord(actor, membership, goal.parentGoal)) {
+    return { ...goal, parentGoal: null };
+  }
+  return {
+    ...goal,
+    parentGoal: stripInvisibleGoalParents(actor, membership, goal.parentGoal),
+  };
+}
+
 async function appendMissingDuplicateGoalKeyResults(
   actor: AppActor,
   params: CreateGoalParams,
@@ -489,18 +528,20 @@ export async function createGoal(
       meta: { title: goal.title, ...duplicateGuardAuditMeta(duplicateDecision) },
     });
 
-    await appendEvents(tx, [
-      {
-        workspaceId: params.workspaceId,
-        type: "goal.created",
-        aggregateType: "Goal",
-        aggregateId: goal.id,
-        payload: {
-          goalId: goal.id,
-          title: goal.title,
+    if (!goal.isPrivate) {
+      await appendEvents(tx, [
+        {
+          workspaceId: params.workspaceId,
+          type: "goal.created",
+          aggregateType: "Goal",
+          aggregateId: goal.id,
+          payload: {
+            goalId: goal.id,
+            title: goal.title,
+          },
         },
-      },
-    ]);
+      ]);
+    }
 
     return goal;
   });
@@ -690,6 +731,27 @@ export async function deleteGoal(
     resolvedMembership: params._membership,
   });
 
+  const goal = await prisma.goal.findFirst({
+    where: {
+      id: params.goalId,
+      workspaceId: params.workspaceId,
+      ...(params.includeArchived ? {} : { archivedAt: null }),
+    },
+    select: {
+      id: true,
+      status: true,
+      archivedAt: true,
+      isPrivate: true,
+      authorUserId: true,
+    },
+  });
+  invariant(goal, 404, "NOT_FOUND", "Goal not found.");
+  if (goal.status === "DRAFT" || goal.isPrivate) {
+    requirePrivateDraftEditor(actor, membership, goal);
+  } else {
+    requireCollaborativeWorkItemEditor(actor, membership, goal);
+  }
+
   await archiveWorkspaceArtifact(actor, {
     workspaceId: params.workspaceId,
     entityType: "Goal",
@@ -728,7 +790,12 @@ export async function getGoal(
           },
         },
       },
-      childGoals: true,
+      childGoals: {
+        where: {
+          ...privacyFilter(actor, membership),
+          archivedAt: null,
+        },
+      },
       keyResults: {
         orderBy: { sortOrder: "asc" },
       },
@@ -1137,6 +1204,8 @@ export async function postGoalUpdate(
   invariant(goal && goal.workspaceId === params.workspaceId && !goal.archivedAt, 404, "NOT_FOUND", "Goal not found.");
   if (goal.status === "DRAFT") {
     requirePrivateDraftEditor(actor, membership, goal);
+  } else if (params.statusChange === "DRAFT") {
+    requirePrivateDraftEditor(actor, membership, goal);
   } else {
     invariant(EDITABLE_ACTIVE_GOAL_STATUSES.has(goal.status), 400, "INVALID_STATE", "Only draft or active goals can receive updates.");
     requireCollaborativeWorkItemEditor(actor, membership, goal);
@@ -1172,14 +1241,36 @@ export async function postGoalUpdate(
     });
 
     const updateData: any = {};
-    if (params.statusChange) updateData.status = params.statusChange;
+    if (params.statusChange) {
+      updateData.status = params.statusChange;
+      if (params.statusChange === "DRAFT") {
+        updateData.isPrivate = true;
+        updateData.publishedAt = null;
+      } else {
+        updateData.isPrivate = false;
+        updateData.publishedAt = goal.publishedAt || new Date();
+      }
+    }
     if (newProgress !== null) updateData.progressPercent = newProgress;
     
     if (Object.keys(updateData).length > 0) {
       await tx.goal.update({
-        where: { id: params.goalId },
-        data: updateData,
-      });
+          where: { id: params.goalId },
+          data: updateData,
+        });
+
+      await appendEvents(tx, [
+        {
+          workspaceId: params.workspaceId,
+          type: "goal.updated",
+          aggregateType: "Goal",
+          aggregateId: params.goalId,
+          payload: {
+            goalId: params.goalId,
+            fields: Object.keys(updateData),
+          },
+        },
+      ]);
 
       if (updateData.progressPercent !== undefined && goal.parentGoalId) {
         // Since we update progress, trigger recompute for parent independently after transaction
@@ -1541,7 +1632,7 @@ export async function getMyGoalSlice(actor: AppActor, memberId: string, workspac
     ],
   });
 
-  return myGoals;
+  return myGoals.map((goal) => stripInvisibleGoalParents(actor, membership, goal));
 }
 
 export async function createRecognition(
