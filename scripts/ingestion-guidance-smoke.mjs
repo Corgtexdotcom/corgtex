@@ -50,16 +50,32 @@ async function readJsonResponse(response) {
   }
 }
 
-async function requestJson(url, options = {}) {
+async function fetchJsonResponse(url, options = {}) {
   const response = await fetch(url, options);
   const body = await readJsonResponse(response);
+  return { response, body };
+}
 
+async function requestJson(url, options = {}) {
+  const { response, body } = await fetchJsonResponse(url, options);
   if (!response.ok) {
     const detail = typeof body === "string" ? body : JSON.stringify(body);
     throw new Error(`${options.method ?? "GET"} ${url.pathname} failed ${response.status}: ${detail}`);
   }
 
   return { response, body };
+}
+
+function assertMeetingSnapshotUnchanged(label, before, after) {
+  if (!before || !after) {
+    throw new Error(`${label} could not verify the meeting record after duplicate upload rejection`);
+  }
+  if (
+    after.transcript !== before.transcript
+    || after.ingestionGuidanceMd !== before.ingestionGuidanceMd
+  ) {
+    throw new Error(`${label} modified source transcript evidence`);
+  }
 }
 
 function eventPayloadFilter(key, value) {
@@ -449,7 +465,11 @@ async function main() {
       pass("meeting transcript upload persists trimmed ingestionGuidanceMd");
 
       const duplicateGuidance = `Add the duplicate-upload guidance for ${tag}.`;
-      const duplicateMeeting = await requestJson(new URL(`/api/workspaces/${workspaceId}/data-sources/text-ingest`, baseUrl), {
+      const beforeTextDuplicate = await prisma.meeting.findFirst({
+        where: { id: meetingId, workspaceId },
+        select: { transcript: true, ingestionGuidanceMd: true },
+      });
+      const duplicateMeeting = await fetchJsonResponse(new URL(`/api/workspaces/${workspaceId}/data-sources/text-ingest`, baseUrl), {
         method: "POST",
         headers: {
           "content-type": "application/json",
@@ -465,20 +485,19 @@ async function main() {
         }),
       });
 
-      if (duplicateMeeting.body?.status !== "meeting_matched" || duplicateMeeting.body?.meeting?.id !== meetingId) {
-        throw new Error(`duplicate MEETING text ingestion did not update the existing meeting: ${JSON.stringify(duplicateMeeting.body)}`);
+      if (
+        duplicateMeeting.response.status !== 400
+        || duplicateMeeting.body?.error?.code !== "INVALID_STATE"
+        || !duplicateMeeting.body?.error?.message?.includes("source transcript evidence")
+      ) {
+        throw new Error(`duplicate MEETING text ingestion did not reject source transcript replacement: ${JSON.stringify(duplicateMeeting.body)}`);
       }
       const afterTextDuplicate = await prisma.meeting.findFirst({
         where: { id: meetingId, workspaceId },
-        select: { transcript: true, ingestionGuidanceMd: true, aiProcessedAt: true },
+        select: { transcript: true, ingestionGuidanceMd: true },
       });
-      if (!afterTextDuplicate?.transcript?.includes(`Additional transcript upload note for ${tag}`)) {
-        throw new Error("duplicate MEETING text ingestion did not merge useful new transcript text");
-      }
-      if (!afterTextDuplicate.ingestionGuidanceMd?.includes(duplicateGuidance) || afterTextDuplicate.aiProcessedAt !== null) {
-        throw new Error("duplicate MEETING text ingestion did not merge guidance and reset AI processing state");
-      }
-      pass("duplicate MEETING text ingestion updates the existing meeting and resets processing");
+      assertMeetingSnapshotUnchanged("duplicate MEETING text ingestion", beforeTextDuplicate, afterTextDuplicate);
+      pass("duplicate MEETING text ingestion rejects source transcript replacement");
 
       const chatForm = new FormData();
       chatForm.set(
@@ -496,24 +515,26 @@ async function main() {
       chatForm.set("message", `Meeting transcript upload for ${tag}`);
       chatForm.set("title", meetingTitle);
       chatForm.set("recordedAt", recordedAt);
-      const chatDuplicate = await requestJson(new URL(`/api/workspaces/${workspaceId}/chat/attachments`, baseUrl), {
+      const chatDuplicate = await fetchJsonResponse(new URL(`/api/workspaces/${workspaceId}/chat/attachments`, baseUrl), {
         method: "POST",
         headers: {
           cookie: cookieHeader,
         },
         body: chatForm,
       });
-      if (chatDuplicate.body?.status !== "meeting_matched" || chatDuplicate.body?.meeting?.id !== meetingId) {
-        throw new Error(`chat transcript upload did not update the existing meeting: ${JSON.stringify(chatDuplicate.body)}`);
+      if (
+        chatDuplicate.response.status !== 400
+        || chatDuplicate.body?.error?.code !== "INVALID_STATE"
+        || !chatDuplicate.body?.error?.message?.includes("source transcript evidence")
+      ) {
+        throw new Error(`chat transcript duplicate upload did not reject source transcript replacement: ${JSON.stringify(chatDuplicate.body)}`);
       }
       const afterChatDuplicate = await prisma.meeting.findFirst({
         where: { id: meetingId, workspaceId },
-        select: { transcript: true },
+        select: { transcript: true, ingestionGuidanceMd: true },
       });
-      if (!afterChatDuplicate?.transcript?.includes(`Chat upload note for ${tag}`)) {
-        throw new Error("chat transcript upload did not merge useful new transcript text");
-      }
-      pass("chat transcript upload updates the existing meeting");
+      assertMeetingSnapshotUnchanged("chat transcript duplicate upload", afterTextDuplicate, afterChatDuplicate);
+      pass("chat transcript duplicate upload rejects source transcript replacement");
 
       await cleanupRegistry.runAction(meetingCleanupActionId);
       meetingId = null;
@@ -550,8 +571,8 @@ async function main() {
         evidence: [
           "non-meeting text ingestion",
           "meeting transcript upload",
-          "duplicate meeting text ingestion",
-          "chat transcript duplicate upload",
+          "duplicate meeting text ingestion rejected source transcript replacement",
+          "chat transcript duplicate upload rejected source transcript replacement",
         ],
         createdRecordIds: validationRun.createdRecords.map((record) => record.id),
         cleanupActionIds: validationRun.cleanupActions.map((entry) => entry.id),
