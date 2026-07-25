@@ -292,6 +292,8 @@ export async function runMeetingSummaryAgent(params: {
           id: meeting.id,
           workspaceId: params.workspaceId,
           summaryMd: meeting.summaryMd,
+          transcript: meeting.transcript,
+          ingestionGuidanceMd: meeting.ingestionGuidanceMd,
         },
         data: {
           summaryMd,
@@ -301,13 +303,34 @@ export async function runMeetingSummaryAgent(params: {
       if (persisted.count === 0) {
         const currentMeeting = await prisma.meeting.findUnique({
           where: { id: meeting.id },
-          select: { id: true, workspaceId: true, summaryMd: true },
+          select: {
+            id: true,
+            workspaceId: true,
+            summaryMd: true,
+            transcript: true,
+            ingestionGuidanceMd: true,
+          },
         });
         if (currentMeeting?.workspaceId === params.workspaceId && currentMeeting.summaryMd !== meeting.summaryMd) {
           return {
             resultJson: {
               skipped: true,
               reason: "summary_changed",
+              meetingId: meeting.id,
+            },
+          };
+        }
+        if (
+          currentMeeting?.workspaceId === params.workspaceId
+          && (
+            currentMeeting.transcript !== meeting.transcript
+            || currentMeeting.ingestionGuidanceMd !== meeting.ingestionGuidanceMd
+          )
+        ) {
+          return {
+            resultJson: {
+              skipped: true,
+              reason: "source_changed",
               meetingId: meeting.id,
             },
           };

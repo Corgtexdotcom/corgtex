@@ -86,6 +86,10 @@ function listFilterValues(values?: readonly (string | null | undefined)[] | null
   return [...new Set((values ?? []).map((value) => value?.trim()).filter((value): value is string => Boolean(value)))];
 }
 
+function isPrismaNotFoundError(error: unknown) {
+  return typeof error === "object" && error !== null && "code" in error && (error as { code?: string }).code === "P2025";
+}
+
 function appendActionWhereAnd(where: Prisma.ActionWhereInput, condition: Prisma.ActionWhereInput) {
   const and = Array.isArray(where.AND) ? [...where.AND] : where.AND ? [where.AND] : [];
   if (where.OR) {
@@ -724,10 +728,27 @@ export async function updateAction(actor: AppActor, params: {
     const changedUpdateFields = changedDataFields(action as unknown as Record<string, unknown>, data);
     if (changedUpdateFields.length === 0) return action;
 
-    const updated = await tx.action.update({
-      where: { id: params.actionId },
-      data,
-    });
+    const updateWhere: Record<string, unknown> = {
+      id: params.actionId,
+      workspaceId: params.workspaceId,
+      archivedAt: null,
+      status: action.status,
+    };
+    if (action.isPrivate !== undefined) updateWhere.isPrivate = action.isPrivate ?? false;
+    if (action.version !== undefined) updateWhere.version = action.version;
+
+    let updated;
+    try {
+      updated = await tx.action.update({
+        where: updateWhere as Prisma.ActionWhereUniqueInput,
+        data,
+      });
+    } catch (error) {
+      if (isPrismaNotFoundError(error)) {
+        invariant(false, 409, "CONFLICT", "Action changed while editing. Refresh and try again.");
+      }
+      throw error;
+    }
 
     const evidenceDocumentIds = params.status === "COMPLETED"
       ? await createWorkItemEvidenceLinks(tx, {

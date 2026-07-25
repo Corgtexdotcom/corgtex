@@ -76,20 +76,16 @@ function isPrismaNotFoundError(error: unknown) {
   return typeof error === "object" && error !== null && "code" in error && (error as { code?: string }).code === "P2025";
 }
 
-async function lockGoalForKeyResultMutation(
+async function lockGoalForAuthorizedMutation(
   tx: Prisma.TransactionClient,
-  actor: AppActor,
-  membership: MembershipSummary | null | undefined,
   goal: {
     id: string;
     workspaceId: string;
     archivedAt?: Date | null;
-    authorUserId?: string | null;
     isPrivate?: boolean | null;
     status: GoalStatus;
   },
 ) {
-  requireEditableGoalKeyResults(actor, membership, goal);
   try {
     await tx.goal.update({
       where: {
@@ -108,6 +104,23 @@ async function lockGoalForKeyResultMutation(
     }
     throw error;
   }
+}
+
+async function lockGoalForKeyResultMutation(
+  tx: Prisma.TransactionClient,
+  actor: AppActor,
+  membership: MembershipSummary | null | undefined,
+  goal: {
+    id: string;
+    workspaceId: string;
+    archivedAt?: Date | null;
+    authorUserId?: string | null;
+    isPrivate?: boolean | null;
+    status: GoalStatus;
+  },
+) {
+  requireEditableGoalKeyResults(actor, membership, goal);
+  await lockGoalForAuthorizedMutation(tx, goal);
 }
 
 export type CompanyDirectionEvidenceLink = {
@@ -1317,6 +1330,8 @@ export async function postGoalUpdate(
 
   const parentGoalIdsToRecompute = new Set<string>();
   const update = await prisma.$transaction(async (tx) => {
+    await lockGoalForAuthorizedMutation(tx, goal);
+
     const update = await tx.goalUpdate.create({
       data: {
         goalId: params.goalId,

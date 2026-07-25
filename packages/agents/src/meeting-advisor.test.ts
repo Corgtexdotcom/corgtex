@@ -606,6 +606,8 @@ describe("runMeetingSummaryAgent", () => {
         id: "meeting-1",
         workspaceId: "ws-1",
         summaryMd: null,
+        transcript: "We discussed project updates.",
+        ingestionGuidanceMd: "Emphasize launch risks.",
       },
     }));
     expect(result).toEqual(expect.objectContaining({ status: "COMPLETED" }));
@@ -615,6 +617,57 @@ describe("runMeetingSummaryAgent", () => {
         resultJson: expect.objectContaining({
           skipped: true,
           reason: "summary_changed",
+          meetingId: "meeting-1",
+        }),
+      }),
+    }));
+  });
+
+  it("skips persistence when transcript or guidance changes during generation", async () => {
+    const { defaultModelGateway } = await import("@corgtex/models");
+    vi.mocked(defaultModelGateway.extract).mockResolvedValueOnce({
+      output: { blocks: [{ sequence: 1, title: "Operations", kind: "update", summaryMd: "Operations were discussed." }] },
+      raw: "{}",
+      usage: modelUsage,
+    });
+    vi.mocked(defaultModelGateway.chat).mockResolvedValueOnce({
+      content: "Operations summary",
+      usage: modelUsage,
+    });
+    prismaMock.meeting.updateMany.mockResolvedValueOnce({ count: 0 });
+    prismaMock.meeting.findUnique.mockResolvedValueOnce({
+      id: "meeting-1",
+      workspaceId: "ws-1",
+      summaryMd: null,
+      transcript: "We discussed project updates and added a late transcript section.",
+      ingestionGuidanceMd: "Emphasize launch risks.",
+    });
+
+    const { runMeetingSummaryAgent } = await import(".");
+
+    const result = await runMeetingSummaryAgent({
+      workspaceId: "ws-1",
+      triggerRef: "trigger-source-changed",
+      triggerType: "EVENT",
+      meetingId: "meeting-1",
+    });
+
+    expect(prismaMock.meeting.updateMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: {
+        id: "meeting-1",
+        workspaceId: "ws-1",
+        summaryMd: null,
+        transcript: "We discussed project updates.",
+        ingestionGuidanceMd: "Emphasize launch risks.",
+      },
+    }));
+    expect(result).toEqual(expect.objectContaining({ status: "COMPLETED" }));
+    expect(prismaMock.agentRun.update).toHaveBeenLastCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        status: "COMPLETED",
+        resultJson: expect.objectContaining({
+          skipped: true,
+          reason: "source_changed",
           meetingId: "meeting-1",
         }),
       }),

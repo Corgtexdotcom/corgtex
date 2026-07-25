@@ -29,6 +29,10 @@ import { privacyFilter } from "./privacy";
 
 type WorkItemSort = "priority" | "date" | "alpha";
 
+function isPrismaNotFoundError(error: unknown) {
+  return typeof error === "object" && error !== null && "code" in error && (error as { code?: string }).code === "P2025";
+}
+
 type CreateTensionParams = {
   workspaceId: string;
   title: string;
@@ -480,10 +484,27 @@ export async function updateTension(actor: AppActor, params: {
     const changedUpdateFields = changedDataFields(tension as unknown as Record<string, unknown>, data);
     if (changedUpdateFields.length === 0) return tension;
 
-    const updated = await tx.tension.update({
-      where: { id: params.tensionId },
-      data,
-    });
+    const updateWhere: Record<string, unknown> = {
+      id: params.tensionId,
+      workspaceId: params.workspaceId,
+      archivedAt: null,
+      status: tension.status,
+    };
+    if (tension.isPrivate !== undefined) updateWhere.isPrivate = tension.isPrivate ?? false;
+    if (tension.version !== undefined) updateWhere.version = tension.version;
+
+    let updated;
+    try {
+      updated = await tx.tension.update({
+        where: updateWhere as Prisma.TensionWhereUniqueInput,
+        data,
+      });
+    } catch (error) {
+      if (isPrismaNotFoundError(error)) {
+        invariant(false, 409, "CONFLICT", "Tension changed while editing. Refresh and try again.");
+      }
+      throw error;
+    }
 
     const evidenceDocumentIds = params.status === "RESOLVED"
       ? await createWorkItemEvidenceLinks(tx, {

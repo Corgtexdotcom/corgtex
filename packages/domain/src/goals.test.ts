@@ -1225,7 +1225,12 @@ describe("Goals Domain", () => {
       } as any);
       vi.mocked(prisma.goal.update).mockResolvedValueOnce({
         id: "goal-1",
+      } as any).mockResolvedValueOnce({
+        id: "goal-1",
         progressPercent: 55,
+        status: "ACTIVE",
+        isPrivate: false,
+        archivedAt: null,
       } as any);
 
       await expect(postGoalUpdate({
@@ -1248,10 +1253,68 @@ describe("Goals Domain", () => {
           newProgress: 55,
         }),
       });
-      expect(prisma.goal.update).toHaveBeenCalledWith({
-        where: { id: "goal-1" },
+      expect(prisma.goal.update).toHaveBeenNthCalledWith(1, expect.objectContaining({
+        where: expect.objectContaining({
+          id: "goal-1",
+          workspaceId: "ws-1",
+          archivedAt: null,
+          status: "ACTIVE",
+          isPrivate: false,
+        }),
+        data: { updatedAt: expect.any(Date) },
+        select: { id: true },
+      }));
+      expect(prisma.goal.update).toHaveBeenNthCalledWith(2, {
+        where: expect.objectContaining({ id: "goal-1" }),
         data: { progressPercent: 55 },
       });
+    });
+
+    it("rejects stale progress updates if goal visibility changes before write", async () => {
+      const { requireWorkspaceMembership } = await import("./auth");
+      vi.mocked(requireWorkspaceMembership).mockResolvedValueOnce({
+        id: "member-2",
+        workspaceId: "ws-1",
+        userId: "user-2",
+        role: "MEMBER",
+        isActive: true,
+      } as any);
+      vi.mocked(prisma.goal.findUnique).mockResolvedValueOnce({
+        id: "goal-1",
+        workspaceId: "ws-1",
+        archivedAt: null,
+        authorUserId: "user-1",
+        isPrivate: false,
+        status: "ACTIVE",
+        parentGoalId: null,
+      } as any);
+      vi.mocked(prisma.goal.update).mockRejectedValueOnce({ code: "P2025" });
+
+      await expect(postGoalUpdate({
+        kind: "user",
+        user: { id: "user-2", email: "other@example.com", displayName: "Other" },
+      } as any, {
+        workspaceId: "ws-1",
+        goalId: "goal-1",
+        bodyMd: "Progress update",
+        newProgress: 55,
+      })).rejects.toMatchObject({
+        status: 409,
+        code: "CONFLICT",
+      });
+
+      expect(prisma.goal.update).toHaveBeenCalledWith(expect.objectContaining({
+        where: expect.objectContaining({
+          id: "goal-1",
+          workspaceId: "ws-1",
+          archivedAt: null,
+          status: "ACTIVE",
+          isPrivate: false,
+        }),
+        data: { updatedAt: expect.any(Date) },
+        select: { id: true },
+      }));
+      expect(prisma.goalUpdate.create).not.toHaveBeenCalled();
     });
 
     it("blocks collaborators from turning another author's active goal back into a draft through progress updates", async () => {
@@ -1304,6 +1367,8 @@ describe("Goals Domain", () => {
       } as any);
       vi.mocked(prisma.goal.update).mockResolvedValueOnce({
         id: "goal-1",
+      } as any).mockResolvedValueOnce({
+        id: "goal-1",
         status: "DRAFT",
         isPrivate: true,
         archivedAt: null,
@@ -1317,8 +1382,8 @@ describe("Goals Domain", () => {
         statusChange: "DRAFT",
       });
 
-      expect(prisma.goal.update).toHaveBeenCalledWith({
-        where: { id: "goal-1" },
+      expect(prisma.goal.update).toHaveBeenNthCalledWith(2, {
+        where: expect.objectContaining({ id: "goal-1" }),
         data: expect.objectContaining({
           status: "DRAFT",
           isPrivate: true,

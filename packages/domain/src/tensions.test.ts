@@ -352,7 +352,7 @@ describe("tensions domain", () => {
       select: { id: true },
     });
     expect(prismaMock.tension.update).toHaveBeenCalledWith(expect.objectContaining({
-      where: { id: "t-duplicate" },
+      where: expect.objectContaining({ id: "t-duplicate" }),
       data: expect.objectContaining({
         proposalId: "proposal-1",
         priority: 4,
@@ -387,7 +387,7 @@ describe("tensions domain", () => {
       }),
     }));
     expect(prismaMock.tension.update).toHaveBeenCalledWith({
-      where: { id: "t-1" },
+      where: expect.objectContaining({ id: "t-1" }),
       data: { raisedByMemberId: "raised-member-1", version: 2 },
     });
   });
@@ -432,7 +432,7 @@ describe("tensions domain", () => {
       }),
     }));
     expect(prismaMock.tension.update).toHaveBeenCalledWith({
-      where: { id: "t-1" },
+      where: expect.objectContaining({ id: "t-1" }),
       data: { assigneeMemberId: "responsible-member-1", version: 2 },
     });
   });
@@ -459,7 +459,7 @@ describe("tensions domain", () => {
 
     expect(prismaMock.member.findFirst).not.toHaveBeenCalled();
     expect(prismaMock.tension.update).toHaveBeenCalledWith({
-      where: { id: "t-1" },
+      where: expect.objectContaining({ id: "t-1" }),
       data: { raisedByMemberId: null, version: 2 },
     });
   });
@@ -524,7 +524,7 @@ describe("tensions domain", () => {
       }),
     }));
     expect(prismaMock.tension.update).toHaveBeenCalledWith({
-      where: { id: "t-open" },
+      where: expect.objectContaining({ id: "t-open" }),
       data: { title: "New title", version: 2 },
     });
   });
@@ -580,7 +580,7 @@ describe("tensions domain", () => {
       }),
     }));
     expect(prismaMock.tension.update).toHaveBeenCalledWith({
-      where: { id: "t-open" },
+      where: expect.objectContaining({ id: "t-open" }),
       data: { title: "Assigned update", version: 2 },
     });
   });
@@ -632,9 +632,56 @@ describe("tensions domain", () => {
       }),
     }));
     expect(prismaMock.tension.update).toHaveBeenCalledWith({
-      where: { id: "t-open" },
+      where: expect.objectContaining({ id: "t-open" }),
       data: { title: "Member edit", version: 2 },
     });
+  });
+
+  it("rejects stale collaborative tension edits when the tension changes before write", async () => {
+    const { requireWorkspaceMembership } = await import("./auth");
+    vi.mocked(requireWorkspaceMembership).mockResolvedValueOnce({
+      id: "mem-2",
+      workspaceId: "ws-1",
+      userId: "u-2",
+      role: "MEMBER",
+      isActive: true,
+    } as any);
+    prismaMock.tension.findUnique.mockResolvedValueOnce({
+      id: "t-open",
+      workspaceId: "ws-1",
+      authorUserId: "u-1",
+      title: "Old title",
+      status: "OPEN",
+      version: 1,
+      isPrivate: false,
+      publishedAt: new Date("2026-06-01T00:00:00.000Z"),
+      archivedAt: null,
+    });
+    prismaMock.tension.update.mockRejectedValueOnce({ code: "P2025" });
+    const { updateTension } = await import("./tensions");
+
+    await expect(updateTension({ kind: "user", user: { id: "u-2" } } as any, {
+      workspaceId: "ws-1",
+      tensionId: "t-open",
+      title: "Stale member edit",
+    })).rejects.toMatchObject({
+      status: 409,
+      code: "CONFLICT",
+    });
+
+    expect(prismaMock.tension.update).toHaveBeenCalledWith({
+      where: expect.objectContaining({
+        id: "t-open",
+        workspaceId: "ws-1",
+        archivedAt: null,
+        status: "OPEN",
+        isPrivate: false,
+        version: 1,
+      }),
+      data: { title: "Stale member edit", version: 2 },
+    });
+    expect(prismaMock.auditLog.create).not.toHaveBeenCalled();
+    expect(prismaMock.event.createMany).not.toHaveBeenCalled();
   });
 
   it("lists tensions with raised-by metadata", async () => {
@@ -782,7 +829,7 @@ describe("tensions domain", () => {
     });
 
     expect(prismaMock.tension.update).toHaveBeenCalledWith({
-      where: { id: "t-open" },
+      where: expect.objectContaining({ id: "t-open" }),
       data: expect.objectContaining({
         status: "RESOLVED",
         isPrivate: false,
@@ -1046,7 +1093,7 @@ describe("tensions domain", () => {
     });
 
     expect(prismaMock.tension.update).toHaveBeenCalledWith({
-      where: { id: "t-1" },
+      where: expect.objectContaining({ id: "t-1" }),
       data: {
         status: "DRAFT",
         isPrivate: true,
@@ -1093,7 +1140,7 @@ describe("tensions domain", () => {
     });
 
     expect(prismaMock.tension.update).toHaveBeenCalledWith({
-      where: { id: "t-1" },
+      where: expect.objectContaining({ id: "t-1" }),
       data: {
         status: "DRAFT",
         isPrivate: true,
@@ -1140,7 +1187,7 @@ describe("tensions domain", () => {
     });
 
     expect(prismaMock.tension.update).toHaveBeenCalledWith({
-      where: { id: "t-1" },
+      where: expect.objectContaining({ id: "t-1" }),
       data: expect.objectContaining({
         status: "OPEN",
         isPrivate: false,
