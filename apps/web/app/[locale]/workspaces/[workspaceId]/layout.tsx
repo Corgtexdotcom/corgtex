@@ -31,6 +31,10 @@ type Workspace = Awaited<ReturnType<typeof listActorWorkspaces>>[number];
 
 import { WORKSPACE_NAV_GROUPS as navGroups } from "@/lib/nav-config";
 
+function localizedPath(path: string, locale: string) {
+  return `/${locale}${path}`;
+}
+
 async function hasWorkspaceInitialKnowledge(workspaceId: string) {
   const [documentCount, brainSourceCount, meetingCount, knowledgeChunkCount] = await Promise.all([
     prisma.document.count({
@@ -92,7 +96,7 @@ export default async function WorkspaceLayout({
   const workspaces = filterWorkspacesForDeploymentScope(await listActorWorkspaces(actor));
   const current = workspaces.find((w: Workspace) => w.id === workspaceId);
   if (!current) {
-    redirect(workspaces[0] ? `/workspaces/${workspaces[0].id}` : "/workspaces/create");
+    redirect(localizedPath(workspaces[0] ? `/workspaces/${workspaces[0].id}` : "/find-account", locale));
   }
 
   const [unreadCount, conversationsResult, dailyQuestions, featureFlags, membership, invitePolicy, workspaceRuntime, onboardingState, hasInitialKnowledge, googleConnection, productFeedbackTarget] = await Promise.all([

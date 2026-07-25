@@ -3,7 +3,7 @@
 import { AppError, isGlobalOperator, listActorWorkspaces, loginUserWithPassword } from "@corgtex/domain";
 import { env } from "@corgtex/shared";
 import { setSessionCookie } from "@/lib/auth";
-import { filterWorkspacesForDeploymentScope } from "@/lib/deployment-workspace-scope";
+import { filterWorkspacesForDeploymentScope, hasDeploymentWorkspaceScope } from "@/lib/deployment-workspace-scope";
 import type { LoginActionState } from "./state";
 
 const LOGIN_ACTION_TIMEOUT_MS = 15_000;
@@ -100,7 +100,9 @@ export async function loginAction(
         ? "/find-account"
         : workspaces[0]
           ? `/workspaces/${workspaces[0].id}`
-          : "/workspaces/create",
+          : hasDeploymentWorkspaceScope()
+            ? "/find-account"
+            : "/workspaces/create",
       locale,
     ),
   };

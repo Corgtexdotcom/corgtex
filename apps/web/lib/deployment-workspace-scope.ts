@@ -48,6 +48,10 @@ export function deploymentWorkspaceScopeSlug() {
   return workspaceSlug;
 }
 
+export function hasDeploymentWorkspaceScope() {
+  return Boolean(deploymentWorkspaceScopeSlug());
+}
+
 export function filterWorkspacesForDeploymentScope<T extends WorkspaceWithSlug>(workspaces: T[]) {
   const scopedSlug = deploymentWorkspaceScopeSlug();
   if (!scopedSlug) {
