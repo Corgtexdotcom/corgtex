@@ -3,6 +3,7 @@
 import { AppError, isGlobalOperator, listActorWorkspaces, loginUserWithPassword } from "@corgtex/domain";
 import { env } from "@corgtex/shared";
 import { setSessionCookie } from "@/lib/auth";
+import { filterWorkspacesForDeploymentScope } from "@/lib/deployment-workspace-scope";
 import type { LoginActionState } from "./state";
 
 const LOGIN_ACTION_TIMEOUT_MS = 15_000;
@@ -79,7 +80,9 @@ export async function loginAction(
 
   let workspaces;
   try {
-    workspaces = await withLoginTimeout(listActorWorkspaces(actor), "Workspace lookup");
+    workspaces = filterWorkspacesForDeploymentScope(
+      await withLoginTimeout(listActorWorkspaces(actor), "Workspace lookup"),
+    );
   } catch (error) {
     return loginErrorState(email, messageForLoginError(error));
   }

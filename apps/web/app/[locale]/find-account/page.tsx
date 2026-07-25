@@ -3,6 +3,7 @@ import { cookies } from "next/headers";
 import { getTranslations } from "next-intl/server";
 import { listActorWorkspaces, resolveSessionActor } from "@corgtex/domain";
 import { sessionCookieName } from "@corgtex/shared";
+import { filterWorkspacesForDeploymentScope } from "@/lib/deployment-workspace-scope";
 import { FindAccountForm } from "./FindAccountForm";
 
 export const dynamic = "force-dynamic";
@@ -31,7 +32,9 @@ export default async function FindAccountPage({
   const { locale } = await params;
   const t = await getTranslations("auth");
   const actor = await optionalSessionActor();
-  const workspaces = actor ? await listActorWorkspaces(actor).catch(() => []) : [];
+  const workspaces = actor
+    ? filterWorkspacesForDeploymentScope(await listActorWorkspaces(actor).catch(() => []))
+    : [];
 
   return (
     <main className="login-shell">

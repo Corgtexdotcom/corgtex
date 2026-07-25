@@ -2,6 +2,7 @@ import { redirect } from "next/navigation";
 import { isGlobalOperator, listActorWorkspaces } from "@corgtex/domain";
 import { env } from "@corgtex/shared";
 import { requirePageActor } from "@/lib/auth";
+import { filterWorkspacesForDeploymentScope } from "@/lib/deployment-workspace-scope";
 
 export const dynamic = "force-dynamic";
 
@@ -13,7 +14,7 @@ export default async function IndexPage() {
     redirect("/control-plane");
   }
 
-  const workspaces = await listActorWorkspaces(actor);
+  const workspaces = filterWorkspacesForDeploymentScope(await listActorWorkspaces(actor));
 
   if (workspaces.length === 0) {
     redirect("/workspaces/create");
