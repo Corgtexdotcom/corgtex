@@ -335,7 +335,7 @@ export function WorkItemFilterControls({
   const selectedCircleIds = circleIds ?? (circleId ? [circleId] : []);
   const selectedAssigneeMemberIds = assigneeMemberIds ?? (assigneeMemberId ? [assigneeMemberId] : []);
   const selectedMemberIds = memberIds ?? (memberId ? [memberId] : []);
-  const hiddenStatusValues = statusValues && statusValues.length > 0
+  const hiddenStatusValues = statusValues !== undefined
     ? statusValues
     : status
       ? [status]

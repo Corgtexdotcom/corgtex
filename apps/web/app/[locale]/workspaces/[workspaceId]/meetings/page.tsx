@@ -161,14 +161,18 @@ export default async function MeetingsPage({
       </div>
     ) : null;
   };
-  const renderTranscriptUploadMenu = (meeting: (typeof scheduledMeetings)[number], className = "secondary small") => (
+  const renderTranscriptUploadMenu = (
+    meeting: (typeof scheduledMeetings)[number],
+    summaryClassName = "secondary small",
+    formClassName = "action-menu-form",
+  ) => (
     <details>
-      <summary className={`nr-hide-marker nr-action-summary ${className}`}>
+      <summary className={`nr-hide-marker nr-action-summary ${summaryClassName}`}>
         {t("uploadTranscriptForMeeting")}
       </summary>
       <MeetingTranscriptUploadForm
         workspaceId={workspaceId}
-        className="action-menu-form"
+        className={formClassName}
         hiddenFields={[
           { name: "meetingId", value: meeting.id },
           { name: "title", value: meeting.title ?? "" },
@@ -291,7 +295,7 @@ export default async function MeetingsPage({
                 <ItemActions
                   moreLabel={tCommon("moreActions")}
                   primary={
-                    renderTranscriptUploadMenu(meeting, "primary small")
+                    renderTranscriptUploadMenu(meeting, "primary small", "nr-inline-transcript-upload")
                   }
                   more={
                     <>

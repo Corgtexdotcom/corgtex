@@ -59,6 +59,26 @@ describe("WorkItemFilterControls", () => {
     expect(html).toContain("value=\"OPEN\"");
     expect(html).not.toContain(">All statuses<");
   });
+
+  it("preserves an explicit all-status selection when the status chooser is hidden", () => {
+    const html = renderToStaticMarkup(createElement(WorkItemFilterControls, {
+      action: "/workspaces/workspace-1/actions",
+      circles: [],
+      members: [],
+      status: "OPEN",
+      statusOptions: [
+        { id: "DRAFT", label: "Draft" },
+        { id: "OPEN", label: "Open" },
+      ],
+      statusValues: [],
+      showStatusFilter: false,
+      summaryLabel: "Advanced filters",
+      labels,
+    }));
+
+    expect(html).not.toContain("name=\"status\"");
+    expect(html).not.toContain("value=\"OPEN\"");
+  });
 });
 
 describe("WorkItem presentation primitives", () => {

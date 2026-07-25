@@ -5479,6 +5479,33 @@ a.meeting-agenda-item:hover {
   background: color-mix(in srgb, var(--accent) 88%, var(--text) 12%);
 }
 
+.item-actions-primary > details {
+  max-width: 100%;
+}
+
+.item-actions-primary > details > .nr-action-summary.primary {
+  width: 100%;
+}
+
+.nr-inline-transcript-upload {
+  display: grid;
+  gap: 10px;
+  width: min(520px, calc(100vw - 48px));
+  max-width: 100%;
+  margin-top: 10px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  box-shadow: var(--shadow-soft);
+}
+
+.nr-inline-transcript-upload input,
+.nr-inline-transcript-upload select,
+.nr-inline-transcript-upload textarea {
+  width: 100%;
+}
+
 .nr-action-checklist {
   display: grid;
   gap: 12px;
