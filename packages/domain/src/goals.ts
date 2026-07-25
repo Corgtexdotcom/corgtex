@@ -494,7 +494,7 @@ export async function createGoal(
     const progressPercent = keyResults.length > 0
       ? Math.round(keyResults.reduce((total, keyResult) => total + keyResult.progressPercent, 0) / keyResults.length)
       : 0;
-    const requestedStatus = params.status ?? "DRAFT";
+    const requestedStatus = params.status ?? (actor.kind === "agent" ? "ACTIVE" : "DRAFT");
     const isPrivate = params.isPrivate ?? (requestedStatus === "DRAFT");
     const status = isPrivate
       ? "DRAFT"

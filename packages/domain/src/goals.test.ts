@@ -184,6 +184,32 @@ describe("Goals Domain", () => {
       );
     });
 
+    it("defaults status-less agent-created goals to visible active goals", async () => {
+      const agentActor = { kind: "agent", authProvider: "bootstrap" } as any;
+      vi.mocked(prisma.goal.create).mockResolvedValueOnce({
+        id: "goal-agent",
+        workspaceId: "ws-1",
+        title: "Agent Goal",
+      } as any);
+
+      await createGoal(agentActor, {
+        workspaceId: "ws-1",
+        title: "Agent Goal",
+      });
+
+      expect(prisma.goal.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            authorUserId: "user-1",
+            title: "Agent Goal",
+            status: "ACTIVE",
+            isPrivate: false,
+            publishedAt: expect.any(Date),
+          }),
+        }),
+      );
+    });
+
     it("does not emit context graph events for private draft goals", async () => {
       const { appendEvents } = await import("./events");
       vi.mocked(prisma.goal.create).mockResolvedValueOnce({
