@@ -15,7 +15,7 @@ import { TimeZoneSelect } from "@/lib/components/TimeZoneSelect";
 import { ItemActions } from "@/lib/components/ui/ItemActions";
 import { MeetingArchiveDialog } from "./MeetingArchiveDialog";
 import { MeetingTranscriptUploadForm } from "./MeetingTranscriptUploadForm";
-import { WorkItemFilterControls } from "@/lib/components/WorkItemControls";
+import { WorkItemAttentionBadge, WorkItemBadge, WorkItemFilterControls } from "@/lib/components/WorkItemControls";
 import {
   DEFAULT_MEETING_DURATION_MINUTES,
   MAX_MEETING_DURATION_MINUTES,
@@ -103,6 +103,9 @@ export default async function MeetingsPage({
   const filterState = { memberIds, dates: dateValues, status: statusFilters };
   const memberName = (member: { user: { displayName: string | null; email: string } }) => member.user.displayName || member.user.email;
   const completedDisplayCount = completedMeetings.length + actionNeededMeetings.length;
+  const completedSectionTitle = actionNeededMeetings.length > 0
+    ? t("completedAndTranscriptRecovery")
+    : t("completedMeetings");
   const archiveDialogLabels = {
     button: t("btnRemoveMeeting"),
     title: t("removeMeetingTitle"),
@@ -136,7 +139,11 @@ export default async function MeetingsPage({
     return shouldRenderStatus ? (
       <div className="row" style={{ alignItems: "flex-start", gap: 12, marginBottom: 8 }}>
         <div>
-          <span className={`tag ${isWarning ? "warning" : ""}`}>{statusLabel}</span>
+          {isWarning ? (
+            <WorkItemAttentionBadge>{statusLabel}</WorkItemAttentionBadge>
+          ) : (
+            <WorkItemBadge>{statusLabel}</WorkItemBadge>
+          )}
         </div>
         {recorderEnabled && evidenceState.action === "cancel_recorder" ? (
           <form action={cancelMeetingRecordingAction}>
@@ -154,14 +161,18 @@ export default async function MeetingsPage({
       </div>
     ) : null;
   };
-  const renderTranscriptUploadMenu = (meeting: (typeof scheduledMeetings)[number]) => (
+  const renderTranscriptUploadMenu = (
+    meeting: (typeof scheduledMeetings)[number],
+    summaryClassName = "secondary small",
+    formClassName = "action-menu-form",
+  ) => (
     <details>
-      <summary className="nr-hide-marker nr-action-summary">
+      <summary className={`nr-hide-marker nr-action-summary ${summaryClassName}`}>
         {t("uploadTranscriptForMeeting")}
       </summary>
       <MeetingTranscriptUploadForm
         workspaceId={workspaceId}
-        className="action-menu-form"
+        className={formClassName}
         hiddenFields={[
           { name: "meetingId", value: meeting.id },
           { name: "title", value: meeting.title ?? "" },
@@ -240,6 +251,8 @@ export default async function MeetingsPage({
             label: status === "COMPLETED" ? t("completedMeetings") : t("scheduledMeetings"),
           }))}
           statusValues={statusFilters}
+          showStatusFilter={false}
+          summaryLabel={tWork("advancedFilters")}
           memberIds={memberIds}
           circles={[]}
           members={members.map((member) => ({ id: member.id, label: memberName(member) }))}
@@ -265,7 +278,7 @@ export default async function MeetingsPage({
           }}
         />
 
-        <h2 className="nr-section-header">{t("completedMeetings")}</h2>
+        <h2 className="nr-section-header">{completedSectionTitle}</h2>
         {completedDisplayCount === 0 && <p className="nr-meta">{t("noMeetings")}</p>}
         {completedDisplayCount > 0 && (
           <div style={{ display: "flex", flexDirection: "column", gap: "16px" }}>
@@ -282,12 +295,14 @@ export default async function MeetingsPage({
                 <ItemActions
                   moreLabel={tCommon("moreActions")}
                   primary={
+                    renderTranscriptUploadMenu(meeting, "primary small", "nr-inline-transcript-upload")
+                  }
+                  more={
                     <>
-                      <Link className="link-button small" href={`/workspaces/${workspaceId}/meetings/${meeting.id}`}>
+                      <Link href={`/workspaces/${workspaceId}/meetings/${meeting.id}`}>
                         {tCommon("btnView")}
                       </Link>
-                      {renderTranscriptUploadMenu(meeting)}
-                      {renderArchiveDialog(meeting.id, "danger small")}
+                      {renderArchiveDialog(meeting.id)}
                     </>
                   }
                 />

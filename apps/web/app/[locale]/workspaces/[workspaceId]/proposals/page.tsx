@@ -3,7 +3,14 @@ import type { ProposalDecisionState } from "@corgtex/domain";
 import type { ReactNode } from "react";
 import { requirePageActor } from "@/lib/auth";
 import { MarkdownExcerpt } from "@/lib/components/MarkdownRenderer";
-import { WorkItemFilterControls, WorkItemToolbar } from "@/lib/components/WorkItemControls";
+import {
+  WorkItemAttentionBadge,
+  WorkItemCard,
+  WorkItemFilterControls,
+  WorkItemLifecycleBadge,
+  WorkItemRelationshipTag,
+  WorkItemToolbar,
+} from "@/lib/components/WorkItemControls";
 import { WorkItemKanbanBoard, type WorkItemKanbanColumn } from "@/lib/components/WorkItemKanbanBoard";
 import { WorkItemResolutionDialog } from "@/lib/components/WorkItemResolutionDialog";
 import { WorkItemTable, type WorkItemTableColumn, type WorkItemTableRow } from "@/lib/components/WorkItemTable";
@@ -156,18 +163,34 @@ export default async function ProposalsPage({
     return t("btnResolve");
   }
 
+  function proposalLifecycleStatus(proposal: ProposalListItem) {
+    if (proposal.archivedAt) return "ARCHIVED";
+    if (proposal.status === "RESOLVED" && proposal.resolutionOutcome === "ADOPTED") return "ADOPTED";
+    return proposal.status;
+  }
+
+  function proposalLifecycleLabel(proposal: ProposalListItem) {
+    if (proposal.archivedAt) {
+      return proposalStatusLabel("ARCHIVED");
+    }
+    if (proposal.status === "RESOLVED" && proposal.resolutionOutcome) {
+      return `${proposalStatusLabel("RESOLVED")} · ${proposal.resolutionOutcome.replace("_", " ")}`;
+    }
+    return proposalStatusLabel(proposal.status as ProposalStatusFilter);
+  }
+
   function proposalDecisionTags(state: ProposalDecisionState | null) {
     if (!state) return [];
     const tags: ReactNode[] = [];
     if (state.needsReview) {
-      tags.push(<span key="review-requested" className="tag warning">{t("decisionTagReviewRequested")}</span>);
+      tags.push(<WorkItemAttentionBadge key="review-requested">{t("decisionTagReviewRequested")}</WorkItemAttentionBadge>);
     } else if (state.currentMemberDecision || state.currentUserOpenObjectionId) {
-      tags.push(<span key="reviewed" className="tag success">{t("decisionTagReviewed")}</span>);
+      tags.push(<WorkItemAttentionBadge key="reviewed" tone="success">{t("decisionTagReviewed")}</WorkItemAttentionBadge>);
     } else {
-      tags.push(<span key="decision-open" className="tag info">{t("decisionTagOpen")}</span>);
+      tags.push(<WorkItemAttentionBadge key="decision-open" tone="info">{t("decisionTagOpen")}</WorkItemAttentionBadge>);
     }
     if (state.openObjections.length > 0) {
-      tags.push(<span key="objection-open" className="tag danger">{t("decisionTagObjectionOpen", { count: state.openObjections.length })}</span>);
+      tags.push(<WorkItemAttentionBadge key="objection-open" tone="danger">{t("decisionTagObjectionOpen", { count: state.openObjections.length })}</WorkItemAttentionBadge>);
     }
     return tags;
   }
@@ -305,65 +328,70 @@ export default async function ProposalsPage({
     const { hiddenTransitions, moreItems, primaryAction } = proposalControls(proposal);
     const adviceRequestCount = activeAdviceRequestCounts.get(proposal.id) ?? 0;
     const decisionTags = proposalDecisionTags(decisionStates.get(proposal.id) ?? null);
+    const cardBadges: ReactNode[] = [];
+    if (!compact) {
+      cardBadges.push(
+        <WorkItemLifecycleBadge key="lifecycle" status={proposalLifecycleStatus(proposal)} label={proposalLifecycleLabel(proposal)} />,
+      );
+    }
+    if (adviceRequestCount > 0) {
+      cardBadges.push(
+        <WorkItemAttentionBadge key="advice-request">{t("adviceRequestedCount", { count: adviceRequestCount })}</WorkItemAttentionBadge>,
+      );
+    }
+    cardBadges.push(...decisionTags);
 
     return (
-      <div className={`${compact ? "nr-kanban-card" : "nr-item nr-list-card"} nr-clickable-card`} key={proposal.id}>
-        <a href={detailHref} className="nr-card-hitbox" aria-label={tWork("openItem", { title: proposal.title })} draggable={false} />
-        <div className="nr-list-link nr-card-content">
-          <div className="row items-center">
-            <strong className="nr-item-title">
-              {!compact && proposal.status === "DRAFT" && <span title={t("privateDraftTooltip")} className="tag info mr-1">{t("statusDraft")}</span>}
-              {proposal.title}
-            </strong>
-            {!compact && (
-              <span className={`tag ${proposal.status === "DRAFT" ? "info" : proposal.status === "OPEN" ? "warning" : proposal.resolutionOutcome === "ADOPTED" ? "success" : proposal.status === "RESOLVED" ? "info" : ""}`}>
-                {proposal.status === "RESOLVED" && proposal.resolutionOutcome ? `${proposal.status} · ${proposal.resolutionOutcome.replace("_", " ")}` : proposal.status}
-              </span>
-            )}
-            {adviceRequestCount > 0 && (
-              <span className="tag warning">{t("adviceRequestedCount", { count: adviceRequestCount })}</span>
-            )}
-            {decisionTags}
-          </div>
-          <MarkdownExcerpt markdown={proposal.summary ?? proposal.bodyMd} maxLength={compact ? 120 : 180} as="div" className="nr-excerpt" />
-          <div className="nr-item-meta mt-2">
-            {ownerText(proposal)} · {new Date(proposal.createdAt).toLocaleDateString()} · {priorityText(proposal.priority)}
-            {proposal.circle ? ` · ${proposal.circle.name}` : ""}
-            {" · "}
-            {proposal.version > 1 ? (
-              <a href={`/workspaces/${workspaceId}/versions?entityType=PROPOSAL&entityId=${encodeURIComponent(proposal.id)}`} draggable={false}>v{proposal.version}</a>
-            ) : (
-              <>v{proposal.version}</>
-            )}
-          </div>
-          {(proposal.tensions?.length > 0 || proposal.actions?.length > 0) && (
-            <div className="nr-tag-group">
-              {proposal.tensions?.map((linkedTension) => (
-                <a key={linkedTension.id} href={`/workspaces/${workspaceId}/tensions/${linkedTension.id}`} className="tag info tag-sm no-underline" draggable={false}>
-                  {t("tensionTag", { title: linkedTension.title })}
-                </a>
-              ))}
-              {proposal.actions?.map((action) => (
-                <a key={action.id} href={`/workspaces/${workspaceId}/actions/${action.id}`} className="tag info tag-sm no-underline" draggable={false}>
-                  {t("actionTag", { title: action.title })}
-                </a>
-              ))}
+      <WorkItemCard
+        key={proposal.id}
+        compact={compact}
+        href={detailHref}
+        title={proposal.title}
+        titlePrefix={!compact && proposal.status === "DRAFT" ? <span title={t("privateDraftTooltip")} style={{ marginRight: 6 }}>◆</span> : null}
+        ariaLabel={tWork("openItem", { title: proposal.title })}
+        badges={cardBadges.length > 0 ? cardBadges : null}
+        body={(
+          <>
+            <MarkdownExcerpt markdown={proposal.summary ?? proposal.bodyMd} maxLength={compact ? 120 : 180} as="div" className="nr-excerpt" />
+            <div className="nr-item-meta mt-2">
+              {ownerText(proposal)} · {new Date(proposal.createdAt).toLocaleDateString()} · {priorityText(proposal.priority)}
+              {proposal.circle ? ` · ${proposal.circle.name}` : ""}
+              {" · "}
+              {proposal.version > 1 ? (
+                <a href={`/workspaces/${workspaceId}/versions?entityType=PROPOSAL&entityId=${encodeURIComponent(proposal.id)}`} draggable={false}>v{proposal.version}</a>
+              ) : (
+                <>v{proposal.version}</>
+              )}
             </div>
-          )}
-        </div>
-        {!isDemo && (
+            {(proposal.tensions?.length > 0 || proposal.actions?.length > 0) && (
+              <div className="nr-tag-group">
+                {proposal.tensions?.map((linkedTension) => (
+                  <WorkItemRelationshipTag key={linkedTension.id} href={`/workspaces/${workspaceId}/tensions/${linkedTension.id}`}>
+                    {t("tensionTag", { title: linkedTension.title })}
+                  </WorkItemRelationshipTag>
+                ))}
+                {proposal.actions?.map((action) => (
+                  <WorkItemRelationshipTag key={action.id} href={`/workspaces/${workspaceId}/actions/${action.id}`}>
+                    {t("actionTag", { title: action.title })}
+                  </WorkItemRelationshipTag>
+                ))}
+              </div>
+            )}
+          </>
+        )}
+        actions={!isDemo ? (
           <ItemActions
             moreLabel={tCommon("moreActions")}
             primary={primaryAction}
             more={moreItems.length > 0 ? moreItems : null}
           />
-        )}
-        {!isDemo && hiddenTransitions.length > 0 && (
+        ) : null}
+        hiddenTransitions={!isDemo && hiddenTransitions.length > 0 ? (
           <div className="nr-transition-controls">
             {hiddenTransitions}
           </div>
-        )}
-      </div>
+        ) : null}
+      />
     );
   }
 
@@ -393,9 +421,7 @@ export default async function ProposalsPage({
     const { hiddenTransitions, moreItems, primaryAction } = proposalControls(proposal);
     const adviceRequestCount = activeAdviceRequestCounts.get(proposal.id) ?? 0;
     const decisionTags = proposalDecisionTags(decisionStates.get(proposal.id) ?? null);
-    const statusText = proposal.status === "RESOLVED" && proposal.resolutionOutcome
-      ? `${proposalStatusLabel("RESOLVED")} · ${proposal.resolutionOutcome.replace("_", " ")}`
-      : proposalStatusLabel(proposal.archivedAt ? "ARCHIVED" : proposal.status as ProposalColumnStatus);
+    const statusText = proposalLifecycleLabel(proposal);
 
     return {
       id: proposal.id,
@@ -409,11 +435,7 @@ export default async function ProposalsPage({
             <MarkdownExcerpt markdown={proposal.summary ?? proposal.bodyMd} maxLength={140} as="div" className="nr-work-item-table-meta" />
           </>
         ),
-        status: (
-          <span className={`tag ${proposal.status === "DRAFT" ? "info" : proposal.status === "OPEN" ? "warning" : proposal.resolutionOutcome === "ADOPTED" ? "success" : proposal.status === "RESOLVED" ? "info" : ""}`}>
-            {statusText}
-          </span>
-        ),
+        status: <WorkItemLifecycleBadge status={proposalLifecycleStatus(proposal)} label={statusText} />,
         owner: (
           <div className="nr-work-item-table-meta">
             <div>{ownerText(proposal)}</div>
@@ -431,17 +453,17 @@ export default async function ProposalsPage({
               <span>v{proposal.version}</span>
             )}
             {proposal.tensions?.map((linkedTension) => (
-              <a key={linkedTension.id} href={`/workspaces/${workspaceId}/tensions/${linkedTension.id}`} className="tag info tag-sm no-underline">
+              <WorkItemRelationshipTag key={linkedTension.id} href={`/workspaces/${workspaceId}/tensions/${linkedTension.id}`}>
                 {t("tensionTag", { title: linkedTension.title })}
-              </a>
+              </WorkItemRelationshipTag>
             ))}
             {proposal.actions?.map((action) => (
-              <a key={action.id} href={`/workspaces/${workspaceId}/actions/${action.id}`} className="tag info tag-sm no-underline">
+              <WorkItemRelationshipTag key={action.id} href={`/workspaces/${workspaceId}/actions/${action.id}`}>
                 {t("actionTag", { title: action.title })}
-              </a>
+              </WorkItemRelationshipTag>
             ))}
             {adviceRequestCount > 0 && (
-              <span className="tag warning">{t("adviceRequestedCount", { count: adviceRequestCount })}</span>
+              <WorkItemAttentionBadge>{t("adviceRequestedCount", { count: adviceRequestCount })}</WorkItemAttentionBadge>
             )}
             {decisionTags}
           </div>
@@ -547,8 +569,11 @@ export default async function ProposalsPage({
           view={view}
           sort={view !== "kanban" ? sort : undefined}
           columns={view === "kanban" && !allProposalColumnsVisible ? visibleProposalColumnIds : undefined}
+          status={statusQuery === "ALL" ? "ALL" : undefined}
           statusOptions={PROPOSAL_STATUS_FILTERS.map((filter) => ({ id: filter, label: proposalStatusLabel(filter) }))}
           statusValues={statusFilters}
+          showStatusFilter={false}
+          summaryLabel={tWork("advancedFilters")}
           circleIds={circleIds}
           memberIds={memberIds}
           circles={circles.map((circle) => ({ id: circle.id, label: circle.name }))}

@@ -14,7 +14,14 @@ import { MarkdownEditor } from "@/lib/components/MarkdownEditor";
 import { MarkdownExcerpt } from "@/lib/components/MarkdownRenderer";
 import { ItemActions } from "@/lib/components/ui/ItemActions";
 import { WorkItemMemberSelect, type WorkItemMemberOption } from "@/lib/components/WorkItemMemberSelect";
-import { WorkItemFilterControls, WorkItemToolbar } from "@/lib/components/WorkItemControls";
+import {
+  WorkItemAttentionBadge,
+  WorkItemCard,
+  WorkItemFilterControls,
+  WorkItemLifecycleBadge,
+  WorkItemRelationshipTag,
+  WorkItemToolbar,
+} from "@/lib/components/WorkItemControls";
 import { WorkItemKanbanBoard, type WorkItemKanbanColumn } from "@/lib/components/WorkItemKanbanBoard";
 import { WorkItemPrioritySelect } from "@/lib/components/WorkItemPrioritySelect";
 import { WorkItemResolutionDialog } from "@/lib/components/WorkItemResolutionDialog";
@@ -56,7 +63,7 @@ export default async function TensionsPage({
   const membership = await requireWorkspaceMembership({ actor, workspaceId });
   const resolvedSearch = searchParams ? await searchParams : {};
   const view = normalizeWorkItemView(resolvedSearch.view);
-  const { statusFilters, statusQuery, dateFilters } = resolveTensionSearch(resolvedSearch, view === "kanban" ? null : "OPEN");
+  const { statusFilter, statusFilters, statusQuery, dateFilters } = resolveTensionSearch(resolvedSearch, view === "kanban" ? null : "OPEN");
   const { circleIds, memberIds, sort } = resolveWorkItemFilters(resolvedSearch);
   const listDateFilters = {
     openedFrom: dateFilters.openedFrom ? startOfUtcDate(dateFilters.openedFrom) : undefined,
@@ -309,59 +316,67 @@ export default async function TensionsPage({
     const closedDate = tension.resolvedAt ? new Date(tension.resolvedAt).toLocaleDateString() : null;
     const inputRequestCount = activeInputRequestCounts.get(tension.id) ?? 0;
     const { hiddenTransitions, moreItems, primary } = tensionControls(tension);
+    const cardBadges: ReactNode[] = [];
+    if (!compact) {
+      cardBadges.push(
+        <WorkItemLifecycleBadge key="lifecycle" status={tension.status} label={statusLabel(tension.status)} />,
+      );
+    }
+    if (inputRequestCount > 0) {
+      cardBadges.push(
+        <WorkItemAttentionBadge key="input-request">{t("inputRequestedCount", { count: inputRequestCount })}</WorkItemAttentionBadge>,
+      );
+    }
 
     return (
-      <div className={`${compact ? "nr-kanban-card" : "nr-item nr-list-card"} nr-clickable-card`} key={tension.id}>
-        <a href={detailHref} className="nr-card-hitbox" aria-label={tWork("openItem", { title: tension.title })} draggable={false} />
-        <div className="row nr-card-content" style={{ alignItems: "center" }}>
-          <strong className="nr-item-title">
-            {tension.isPrivate && <span title={t("privateInboxTooltip")} style={{ marginRight: 6 }}>◆</span>}
-            {tension.title}
-          </strong>
-          {!compact && (
-            <span className={`tag ${tension.status === "DRAFT" ? "info" : tension.status === "OPEN" ? "neutral" : "success"}`}>
-              {statusLabel(tension.status)}
-            </span>
-          )}
-          {inputRequestCount > 0 && (
-            <span className="tag warning">{t("inputRequestedCount", { count: inputRequestCount })}</span>
-          )}
-        </div>
-        <div className="nr-card-content">
-          {tension.bodyMd && <MarkdownExcerpt markdown={tension.bodyMd} maxLength={compact ? 120 : 220} as="div" className="nr-excerpt" />}
-          <div className="nr-item-meta" style={{ marginTop: 8 }}>
-            {t("createdByMeta", { name: authorName })}
-            {raisedByName ? ` · ${t("raisedByMeta", { name: raisedByName })}` : ""}
-            {responsibleName ? ` · ${t("responsiblePersonMeta", { name: responsibleName })}` : ""}
-            {` · ${ageText(tension.createdAt)} · ${t("upvotes", { count: tension.upvotes.length })} · ${priorityText(tension.priority)}`}
-            {tension.circle ? ` · ${tension.circle.name}` : ""}
-            {openedDate ? ` · ${t("openedOnMeta", { date: openedDate })}` : ""}
-            {closedDate ? ` · ${t("closedOnMeta", { date: closedDate })}` : ""}
-            {" · "}
-            {tension.version > 1 ? (
-              <a href={`/workspaces/${workspaceId}/versions?entityType=TENSION&entityId=${encodeURIComponent(tension.id)}`} draggable={false}>v{tension.version}</a>
-            ) : (
-              <>v{tension.version}</>
-            )}
+      <WorkItemCard
+        key={tension.id}
+        compact={compact}
+        href={detailHref}
+        title={tension.title}
+        titlePrefix={tension.isPrivate ? <span title={t("privateInboxTooltip")} style={{ marginRight: 6 }}>◆</span> : null}
+        ariaLabel={tWork("openItem", { title: tension.title })}
+        badges={cardBadges.length > 0 ? cardBadges : null}
+        body={(
+          <>
+            {tension.bodyMd && <MarkdownExcerpt markdown={tension.bodyMd} maxLength={compact ? 120 : 220} as="div" className="nr-excerpt" />}
+            <div className="nr-item-meta" style={{ marginTop: 8 }}>
+              {t("createdByMeta", { name: authorName })}
+              {raisedByName ? ` · ${t("raisedByMeta", { name: raisedByName })}` : ""}
+              {responsibleName ? ` · ${t("responsiblePersonMeta", { name: responsibleName })}` : ""}
+              {` · ${ageText(tension.createdAt)} · ${t("upvotes", { count: tension.upvotes.length })} · ${priorityText(tension.priority)}`}
+              {tension.circle ? ` · ${tension.circle.name}` : ""}
+              {openedDate ? ` · ${t("openedOnMeta", { date: openedDate })}` : ""}
+              {closedDate ? ` · ${t("closedOnMeta", { date: closedDate })}` : ""}
+              {" · "}
+              {tension.version > 1 ? (
+                <a href={`/workspaces/${workspaceId}/versions?entityType=TENSION&entityId=${encodeURIComponent(tension.id)}`} draggable={false}>v{tension.version}</a>
+              ) : (
+                <>v{tension.version}</>
+              )}
+            </div>
             {tension.proposal && (
-              <>
-                {" · "}
-                <a href={`/workspaces/${workspaceId}/proposals/${tension.proposal.id}`} draggable={false}>{t("linkedProposalMeta", { title: tension.proposal.title })}</a>
-              </>
+              <div className="nr-tag-group">
+                <WorkItemRelationshipTag href={`/workspaces/${workspaceId}/proposals/${tension.proposal.id}`}>
+                  {t("linkedProposalMeta", { title: tension.proposal.title })}
+                </WorkItemRelationshipTag>
+              </div>
             )}
-          </div>
-        </div>
-        <ItemActions
-          moreLabel={tCommon("moreActions")}
-          primary={primary}
-          more={moreItems.length > 0 ? moreItems : null}
-        />
-        {hiddenTransitions.length > 0 && (
+          </>
+        )}
+        actions={(
+          <ItemActions
+            moreLabel={tCommon("moreActions")}
+            primary={primary}
+            more={moreItems.length > 0 ? moreItems : null}
+          />
+        )}
+        hiddenTransitions={hiddenTransitions.length > 0 ? (
           <div className="nr-transition-controls">
             {hiddenTransitions}
           </div>
-        )}
-      </div>
+        ) : null}
+      />
     );
   }
 
@@ -409,11 +424,7 @@ export default async function TensionsPage({
             <div className="nr-work-item-table-meta">{t("upvotes", { count: tension.upvotes.length })}</div>
           </>
         ),
-        status: (
-          <span className={`tag ${tension.status === "DRAFT" ? "info" : tension.status === "OPEN" ? "neutral" : "success"}`}>
-            {statusLabel(tension.status)}
-          </span>
-        ),
+        status: <WorkItemLifecycleBadge status={tension.status} label={statusLabel(tension.status)} />,
         owner: (
           <div className="nr-work-item-table-meta">
             <div>{t("createdByMeta", { name: authorName })}</div>
@@ -438,12 +449,12 @@ export default async function TensionsPage({
               <span>v{tension.version}</span>
             )}
             {tension.proposal && (
-              <a href={`/workspaces/${workspaceId}/proposals/${tension.proposal.id}`}>
+              <WorkItemRelationshipTag href={`/workspaces/${workspaceId}/proposals/${tension.proposal.id}`}>
                 {t("linkedProposalMeta", { title: tension.proposal.title })}
-              </a>
+              </WorkItemRelationshipTag>
             )}
             {inputRequestCount > 0 && (
-              <span className="tag warning">{t("inputRequestedCount", { count: inputRequestCount })}</span>
+              <WorkItemAttentionBadge>{t("inputRequestedCount", { count: inputRequestCount })}</WorkItemAttentionBadge>
             )}
           </div>
         ),
@@ -562,8 +573,11 @@ export default async function TensionsPage({
           view={view}
           sort={view !== "kanban" ? sort : undefined}
           columns={view === "kanban" && !allTensionColumnsVisible ? visibleTensionColumnIds : undefined}
+          status={statusFilter}
           statusOptions={TENSION_STATUS_FILTERS.map((filter) => ({ id: filter, label: statusLabel(filter) }))}
           statusValues={statusFilters}
+          showStatusFilter={false}
+          summaryLabel={tWork("advancedFilters")}
           circleIds={circleIds}
           memberIds={memberIds}
           circles={circles.map((circle) => ({ id: circle.id, label: circle.name }))}
