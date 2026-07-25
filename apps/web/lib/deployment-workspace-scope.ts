@@ -24,7 +24,7 @@ function normalizeSlug(value: string | null | undefined) {
 
 function configuredAppHostname() {
   try {
-    return new URL(env.APP_URL).hostname.toLowerCase();
+    return new URL(env.APP_URL).hostname.toLowerCase().replace(/^\[/, "").replace(/\]$/, "");
   } catch {
     return null;
   }

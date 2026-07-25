@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { findEnterpriseAccountsForEmail } from "@corgtex/domain";
+import { filterWorkspacesForDeploymentScope } from "@/lib/deployment-workspace-scope";
 import { handleRouteError, validateBody } from "@/lib/http";
 import { rateLimitAuth } from "@/lib/rate-limit-middleware";
 
@@ -15,7 +16,10 @@ export async function POST(request: NextRequest) {
   try {
     const body = await validateBody(request, discoverySchema);
     const result = await findEnterpriseAccountsForEmail(body.email);
-    return NextResponse.json(result, {
+    return NextResponse.json({
+      ...result,
+      matches: filterWorkspacesForDeploymentScope(result.matches),
+    }, {
       headers: {
         "Cache-Control": "no-store",
       },

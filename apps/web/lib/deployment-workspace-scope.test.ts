@@ -30,6 +30,14 @@ describe("deployment workspace scope", () => {
     expect(filterWorkspacesForDeploymentScope(WORKSPACES)).toEqual(WORKSPACES);
   });
 
+  it("does not filter bracketed IPv6 local development workspaces when WORKSPACE_SLUG is present", () => {
+    vi.stubEnv("APP_URL", "http://[::1]:3000");
+    vi.stubEnv("WORKSPACE_SLUG", "customer-alpha");
+
+    expect(deploymentWorkspaceScopeSlug()).toBeNull();
+    expect(filterWorkspacesForDeploymentScope(WORKSPACES)).toEqual(WORKSPACES);
+  });
+
   it("keeps only the configured workspace on dedicated customer deployments", () => {
     vi.stubEnv("APP_URL", "https://customer-alpha.corgtex.test");
     vi.stubEnv("WORKSPACE_SLUG", "customer-alpha");

@@ -2,6 +2,7 @@ import { LoginForm } from "./LoginForm";
 import { DemoButton } from "./DemoButton";
 import Link from "next/link";
 import { getTranslations } from "next-intl/server";
+import { hasDeploymentWorkspaceScope } from "@/lib/deployment-workspace-scope";
 
 function singleSearchParam(value: string | string[] | undefined) {
   return Array.isArray(value) ? value[0] ?? "" : value ?? "";
@@ -41,6 +42,7 @@ export default async function LoginPage({
   const pageError = pageErrorMessage(resolvedSearchParams.error);
   const pageSuccess = pageSuccessMessage(resolvedSearchParams.message);
   const initialEmail = singleSearchParam(resolvedSearchParams.email);
+  const showDemoLogin = !hasDeploymentWorkspaceScope();
 
   return (
     <main className="login-shell">
@@ -67,7 +69,7 @@ export default async function LoginPage({
         <Link href={findAccountHref} className="muted" style={{ display: "inline-block", fontSize: 14, marginTop: 12 }}>
           {t("findEnterpriseAccount")}
         </Link>
-        <DemoButton />
+        {showDemoLogin ? <DemoButton /> : null}
       </section>
     </main>
   );
