@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { createWorkspace, listActorWorkspaces } from "@corgtex/domain";
 import { resolveRequestActor } from "@/lib/auth";
+import { filterWorkspacesForDeploymentScope } from "@/lib/deployment-workspace-scope";
 import { handleRouteError, validateBody } from "@/lib/http";
 
 const workspaceSchema = z.object({
@@ -13,7 +14,7 @@ const workspaceSchema = z.object({
 export async function GET(request: NextRequest) {
   try {
     const actor = await resolveRequestActor(request);
-    const workspaces = await listActorWorkspaces(actor);
+    const workspaces = filterWorkspacesForDeploymentScope(await listActorWorkspaces(actor));
     return NextResponse.json({ workspaces });
   } catch (error) {
     return handleRouteError(error);

@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { z } from "zod";
 import { listActorWorkspaces, loginUserWithPassword } from "@corgtex/domain";
 import { isDatabaseUnavailableError, sessionCookieName } from "@corgtex/shared";
+import { filterWorkspacesForDeploymentScope } from "@/lib/deployment-workspace-scope";
 import { handleRouteError, serviceUnavailableResponse, validateBody } from "@/lib/http";
 import { capturePostHogEvent } from "@/lib/posthog-server";
 import { rateLimitAuth } from "@/lib/rate-limit-middleware";
@@ -64,7 +65,7 @@ export async function POST(request: NextRequest) {
       kind: "user" as const,
       user: result.user,
     };
-    const workspaces = await listActorWorkspaces(actor);
+    const workspaces = filterWorkspacesForDeploymentScope(await listActorWorkspaces(actor));
 
     const response = NextResponse.json({
       user: result.user,

@@ -193,6 +193,44 @@ describe("loginAction", () => {
     expect(setSessionCookie).toHaveBeenCalledWith("session-token", expiresAt);
   });
 
+  it("uses the configured customer workspace instead of account selection on dedicated deployments", async () => {
+    const { loginAction } = await import("./actions");
+    const { initialLoginActionState } = await import("./state");
+    const expiresAt = new Date("2026-04-03T00:00:00.000Z");
+    vi.stubEnv("APP_URL", "https://crina.corgtex.com");
+    vi.stubEnv("WORKSPACE_SLUG", "crina");
+    loginUserWithPassword.mockResolvedValue({
+      token: "session-token",
+      expiresAt,
+      user: {
+        id: "operator-1",
+        email: "operator@example.com",
+        displayName: "Operator",
+        globalRole: "OPERATOR",
+      },
+    });
+    listActorWorkspaces.mockResolvedValue([
+      {
+        id: "ws-validation",
+        slug: "corgtex-validation",
+      },
+      {
+        id: "ws-crina",
+        slug: "crina",
+      },
+    ]);
+
+    await expect(
+      loginAction(initialLoginActionState, buildFormData("operator@example.com", "password123")),
+    ).resolves.toEqual({
+      email: "operator@example.com",
+      error: null,
+      redirectTo: "/workspaces/ws-crina",
+    });
+
+    expect(setSessionCookie).toHaveBeenCalledWith("session-token", expiresAt);
+  });
+
   it("localizes the account selection redirect for Spanish users with multiple workspaces", async () => {
     const { loginAction } = await import("./actions");
     const { initialLoginActionState } = await import("./state");
