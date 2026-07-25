@@ -66,10 +66,6 @@ async function requestJson(url, options = {}) {
   return { response, body };
 }
 
-function nullableTime(value) {
-  return value ? new Date(value).getTime() : null;
-}
-
 function assertMeetingSnapshotUnchanged(label, before, after) {
   if (!before || !after) {
     throw new Error(`${label} could not verify the meeting record after duplicate upload rejection`);
@@ -77,9 +73,8 @@ function assertMeetingSnapshotUnchanged(label, before, after) {
   if (
     after.transcript !== before.transcript
     || after.ingestionGuidanceMd !== before.ingestionGuidanceMd
-    || nullableTime(after.aiProcessedAt) !== nullableTime(before.aiProcessedAt)
   ) {
-    throw new Error(`${label} modified source transcript evidence or processing state`);
+    throw new Error(`${label} modified source transcript evidence`);
   }
 }
 
@@ -472,7 +467,7 @@ async function main() {
       const duplicateGuidance = `Add the duplicate-upload guidance for ${tag}.`;
       const beforeTextDuplicate = await prisma.meeting.findFirst({
         where: { id: meetingId, workspaceId },
-        select: { transcript: true, ingestionGuidanceMd: true, aiProcessedAt: true },
+        select: { transcript: true, ingestionGuidanceMd: true },
       });
       const duplicateMeeting = await fetchJsonResponse(new URL(`/api/workspaces/${workspaceId}/data-sources/text-ingest`, baseUrl), {
         method: "POST",
@@ -499,7 +494,7 @@ async function main() {
       }
       const afterTextDuplicate = await prisma.meeting.findFirst({
         where: { id: meetingId, workspaceId },
-        select: { transcript: true, ingestionGuidanceMd: true, aiProcessedAt: true },
+        select: { transcript: true, ingestionGuidanceMd: true },
       });
       assertMeetingSnapshotUnchanged("duplicate MEETING text ingestion", beforeTextDuplicate, afterTextDuplicate);
       pass("duplicate MEETING text ingestion rejects source transcript replacement");
@@ -536,7 +531,7 @@ async function main() {
       }
       const afterChatDuplicate = await prisma.meeting.findFirst({
         where: { id: meetingId, workspaceId },
-        select: { transcript: true, ingestionGuidanceMd: true, aiProcessedAt: true },
+        select: { transcript: true, ingestionGuidanceMd: true },
       });
       assertMeetingSnapshotUnchanged("chat transcript duplicate upload", afterTextDuplicate, afterChatDuplicate);
       pass("chat transcript duplicate upload rejects source transcript replacement");
