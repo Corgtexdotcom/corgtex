@@ -1339,8 +1339,10 @@ export async function updateMeetingProcessedContent(actor: AppActor, params: {
       select: {
         id: true,
         title: true,
+        transcript: true,
         summaryMd: true,
         ingestionGuidanceMd: true,
+        aiProcessedAt: true,
         transcriptProcessingProgress: {
           select: {
             currentStage: true,
@@ -1356,6 +1358,10 @@ export async function updateMeetingProcessedContent(actor: AppActor, params: {
       && !existing.transcriptProcessingProgress.failedAt
       && existing.transcriptProcessingProgress.currentStage !== "READY";
     invariant(!processingActive, 400, "INVALID_STATE", "Processed meeting content can be edited after transcript processing finishes.");
+    const transcriptProcessingQueued = Boolean(existing.transcript)
+      && !existing.aiProcessedAt
+      && !existing.transcriptProcessingProgress;
+    invariant(!transcriptProcessingQueued, 400, "INVALID_STATE", "Processed meeting content can be edited after transcript processing starts or finishes.");
 
     if (params.expectedSummaryMd !== undefined) {
       invariant(

@@ -1376,6 +1376,46 @@ describe("meetings domain", () => {
     expect(prismaMock.event.createMany).not.toHaveBeenCalled();
   });
 
+  it("updateMeetingProcessedContent rejects transcript edits before processing starts", async () => {
+    requireWorkspaceMembershipMock.mockResolvedValueOnce({
+      id: "member-2",
+      workspaceId: "workspace-1",
+      userId: "member-2-user",
+      role: "MEMBER",
+      isActive: true,
+    });
+    prismaMock.meeting.findFirst.mockResolvedValue({
+      id: "meeting-1",
+      title: "Weekly Tactical",
+      transcript: "Jan: We need a cleaner intake path.",
+      summaryMd: null,
+      ingestionGuidanceMd: null,
+      aiProcessedAt: null,
+      transcriptProcessingProgress: null,
+    });
+
+    const { updateMeetingProcessedContent } = await import("./meetings");
+    await expect(updateMeetingProcessedContent({
+      kind: "user",
+      user: {
+        id: "member-2-user",
+        email: "member@example.com",
+        displayName: "Member",
+        globalRole: "USER",
+      },
+    }, {
+      workspaceId: "workspace-1",
+      meetingId: "meeting-1",
+      summaryMd: "Manual summary",
+    })).rejects.toMatchObject({
+      status: 400,
+      code: "INVALID_STATE",
+    });
+
+    expect(prismaMock.meeting.update).not.toHaveBeenCalled();
+    expect(prismaMock.event.createMany).not.toHaveBeenCalled();
+  });
+
   it("deleteMeeting archives an existing meeting with a provided reason", async () => {
     prismaMock.meeting.findFirst.mockResolvedValue({
       id: "meeting-1",

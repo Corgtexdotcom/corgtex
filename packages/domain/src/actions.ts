@@ -177,6 +177,38 @@ async function requireEditableActionForChecklist(
   return action;
 }
 
+async function lockEditableActionForChecklistMutation(
+  tx: Prisma.TransactionClient,
+  actor: AppActor,
+  membership: import("@corgtex/shared").MembershipSummary | null,
+  workspaceId: string,
+  actionId: string,
+) {
+  const action = await requireEditableActionForChecklist(tx, actor, membership, workspaceId, actionId);
+  const updateWhere: Record<string, unknown> = {
+    id: action.id,
+    workspaceId,
+    archivedAt: null,
+    status: action.status,
+    isPrivate: action.isPrivate ?? false,
+    version: action.version,
+  };
+
+  try {
+    await tx.action.update({
+      where: updateWhere as Prisma.ActionWhereUniqueInput,
+      data: { updatedAt: new Date() },
+    });
+  } catch (error) {
+    if (isPrismaNotFoundError(error)) {
+      invariant(false, 409, "CONFLICT", "Action changed while editing. Refresh and try again.");
+    }
+    throw error;
+  }
+
+  return action;
+}
+
 function completedByUserIdForActor(actor: AppActor, workspaceId: string) {
   return actor.kind === "user" ? actor.user.id : actorUserIdForWorkspace(actor, workspaceId);
 }
@@ -344,7 +376,7 @@ export async function createActionChecklistItem(actor: AppActor, params: {
   invariant(title.length > 0, 400, "INVALID_INPUT", "Checklist item title is required.");
 
   return prisma.$transaction(async (tx) => {
-    await requireEditableActionForChecklist(tx, actor, membership, params.workspaceId, params.actionId);
+    await lockEditableActionForChecklistMutation(tx, actor, membership, params.workspaceId, params.actionId);
     const lastItem = await tx.actionChecklistItem.findFirst({
       where: {
         workspaceId: params.workspaceId,
@@ -397,7 +429,7 @@ export async function updateActionChecklistItem(actor: AppActor, params: {
       },
     });
     invariant(existing, 404, "NOT_FOUND", "Checklist item not found.");
-    await requireEditableActionForChecklist(tx, actor, membership, params.workspaceId, existing.actionId);
+    await lockEditableActionForChecklistMutation(tx, actor, membership, params.workspaceId, existing.actionId);
 
     const data: Prisma.ActionChecklistItemUpdateInput = {};
     if (params.title !== undefined) {
@@ -458,7 +490,7 @@ export async function deleteActionChecklistItem(actor: AppActor, params: {
       },
     });
     invariant(existing, 404, "NOT_FOUND", "Checklist item not found.");
-    await requireEditableActionForChecklist(tx, actor, membership, params.workspaceId, existing.actionId);
+    await lockEditableActionForChecklistMutation(tx, actor, membership, params.workspaceId, existing.actionId);
 
     await tx.actionChecklistItem.delete({ where: { id: existing.id } });
     await recordAudit(tx, actor, {

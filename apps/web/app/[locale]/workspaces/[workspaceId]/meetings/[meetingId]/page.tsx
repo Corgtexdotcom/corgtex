@@ -216,11 +216,13 @@ export default async function MeetingDetailPage({
     reviewNeededCount,
     canViewDiagnostics: isAdmin,
   });
-  const hasProcessedContentSeed = Boolean(meeting.transcript || meeting.summaryMd || meeting.ingestionGuidanceMd);
+  const processingReadyOrFailed = Boolean(processingState
+    && (processingState.stages.some((step) => step.stage === "READY" && step.detail.status === "COMPLETED")
+      || processingState.stages.some((step) => step.detail.status === "FAILED")));
+  const hasProcessedContentSeed = Boolean(meeting.summaryMd || meeting.ingestionGuidanceMd);
   const processingFinished = hasProcessedContentSeed
-    && (!processingState
-      || processingState.stages.some((step) => step.stage === "READY" && step.detail.status === "COMPLETED")
-      || processingState.stages.some((step) => step.detail.status === "FAILED"));
+    ? (!processingState || processingReadyOrFailed)
+    : processingReadyOrFailed;
   const insightTargetProposalIds = [...new Set((meeting.insights as MeetingInsightSummary[])
     .filter((insight: MeetingInsightSummary) => insight.targetEntityType === "Proposal" && insight.targetEntityId)
     .map((insight: MeetingInsightSummary) => insight.targetEntityId as string))];

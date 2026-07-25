@@ -1090,6 +1090,7 @@ describe("action domain lifecycle", () => {
       workspaceId: "workspace-1",
       authorUserId: "user-1",
       status: "OPEN",
+      version: 1,
       archivedAt: null,
       isPrivate: false,
       assigneeMemberId: null,
@@ -1114,6 +1115,17 @@ describe("action domain lifecycle", () => {
       sortOrder: 3,
     });
 
+    expect(prismaMock.action.update).toHaveBeenCalledWith({
+      where: expect.objectContaining({
+        id: "action-1",
+        workspaceId: "workspace-1",
+        archivedAt: null,
+        status: "OPEN",
+        isPrivate: false,
+        version: 1,
+      }),
+      data: { updatedAt: expect.any(Date) },
+    });
     expect(prismaMock.actionChecklistItem.create).toHaveBeenCalledWith({
       data: {
         workspaceId: "workspace-1",
@@ -1147,6 +1159,7 @@ describe("action domain lifecycle", () => {
       workspaceId: "workspace-1",
       authorUserId: "user-1",
       status: "IN_PROGRESS",
+      version: 1,
       archivedAt: null,
       isPrivate: false,
       assigneeMemberId: null,
@@ -1166,6 +1179,17 @@ describe("action domain lifecycle", () => {
       id: "checklist-1",
     });
 
+    expect(prismaMock.action.update).toHaveBeenCalledWith({
+      where: expect.objectContaining({
+        id: "action-1",
+        workspaceId: "workspace-1",
+        archivedAt: null,
+        status: "IN_PROGRESS",
+        isPrivate: false,
+        version: 1,
+      }),
+      data: { updatedAt: expect.any(Date) },
+    });
     expect(prismaMock.actionChecklistItem.update).toHaveBeenCalledWith({
       where: { id: "checklist-1" },
       data: expect.objectContaining({
@@ -1193,6 +1217,7 @@ describe("action domain lifecycle", () => {
       workspaceId: "workspace-1",
       authorUserId: "user-1",
       status: "OPEN",
+      version: 1,
       archivedAt: null,
       isPrivate: false,
       assigneeMemberId: null,
@@ -1205,10 +1230,75 @@ describe("action domain lifecycle", () => {
       checklistItemId: "checklist-1",
     })).resolves.toEqual({ id: "checklist-1" });
 
+    expect(prismaMock.action.update).toHaveBeenCalledWith({
+      where: expect.objectContaining({
+        id: "action-1",
+        workspaceId: "workspace-1",
+        archivedAt: null,
+        status: "OPEN",
+        isPrivate: false,
+        version: 1,
+      }),
+      data: { updatedAt: expect.any(Date) },
+    });
     expect(prismaMock.actionChecklistItem.delete).toHaveBeenCalledWith({ where: { id: "checklist-1" } });
     expect(recordAudit).toHaveBeenCalledWith(expect.anything(), actor, expect.objectContaining({
       action: "action.checklist_item.deleted",
       entityId: "action-1",
     }));
+  });
+
+  it("rejects stale collaborative checklist edits when the action changes before mutation", async () => {
+    requireWorkspaceMembership.mockResolvedValueOnce({
+      id: "member-3",
+      workspaceId: "workspace-1",
+      userId: "user-3",
+      role: "MEMBER",
+      isActive: true,
+    });
+    prismaMock.action.findFirst.mockResolvedValueOnce({
+      id: "action-1",
+      workspaceId: "workspace-1",
+      authorUserId: "agent-user",
+      status: "OPEN",
+      version: 1,
+      archivedAt: null,
+      isPrivate: false,
+      assigneeMemberId: null,
+    });
+    prismaMock.action.update.mockRejectedValueOnce({ code: "P2025" });
+
+    const { createActionChecklistItem } = await import("./actions");
+    await expect(createActionChecklistItem({
+      kind: "user",
+      user: {
+        id: "user-3",
+        email: "other@example.com",
+        displayName: "Other",
+        globalRole: "USER",
+      },
+    }, {
+      workspaceId: "workspace-1",
+      actionId: "action-1",
+      title: "Call the supplier",
+    })).rejects.toMatchObject({
+      status: 409,
+      code: "CONFLICT",
+    });
+
+    expect(prismaMock.action.update).toHaveBeenCalledWith({
+      where: expect.objectContaining({
+        id: "action-1",
+        workspaceId: "workspace-1",
+        archivedAt: null,
+        status: "OPEN",
+        isPrivate: false,
+        version: 1,
+      }),
+      data: { updatedAt: expect.any(Date) },
+    });
+    expect(prismaMock.actionChecklistItem.create).not.toHaveBeenCalled();
+    expect(recordAudit).not.toHaveBeenCalled();
+    expect(appendEvents).not.toHaveBeenCalled();
   });
 });

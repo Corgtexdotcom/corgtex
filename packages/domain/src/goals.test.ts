@@ -229,6 +229,29 @@ describe("Goals Domain", () => {
       expect(appendEvents).not.toHaveBeenCalled();
     });
 
+    it("omits private draft goal titles from workspace audit metadata", async () => {
+      const { recordAudit } = await import("./audit-trail");
+      vi.mocked(prisma.goal.create).mockResolvedValueOnce({
+        id: "goal-private",
+        workspaceId: "ws-1",
+        title: "Private acquisition target",
+        isPrivate: true,
+        status: "DRAFT",
+      } as any);
+
+      await createGoal(actor, {
+        workspaceId: "ws-1",
+        title: "Private acquisition target",
+      });
+
+      expect(recordAudit).toHaveBeenCalledWith(expect.anything(), actor, expect.objectContaining({
+        action: "goal.created",
+        entityId: "goal-private",
+        meta: { isPrivate: true },
+      }));
+      expect(vi.mocked(recordAudit).mock.calls[0]?.[2].meta).not.toHaveProperty("title");
+    });
+
     it("creates key results and derives initial progress", async () => {
       vi.mocked(prisma.goal.create).mockResolvedValueOnce({
         id: "goal-1",

@@ -8,6 +8,29 @@ UPDATE "Goal"
 SET "isPrivate" = true
 WHERE "status" = 'DRAFT';
 
+-- Existing draft goals may already have context-graph rows from the old public
+-- draft flow. Archive those rows during the same privacy transition so private
+-- draft titles/descriptions are not left readable until a later graph sync.
+UPDATE "ContextGraphObject" AS cgo
+SET "status" = 'archived',
+    "updatedAt" = NOW()
+FROM "Goal" AS g
+WHERE cgo."workspaceId" = g."workspaceId"
+  AND cgo."sourceEntityType" = 'Goal'
+  AND cgo."sourceEntityId" = g."id"
+  AND g."status" = 'DRAFT'
+  AND cgo."status" <> 'archived';
+
+UPDATE "ContextGraphRelationship" AS cgr
+SET "status" = 'archived',
+    "updatedAt" = NOW()
+FROM "Goal" AS g
+WHERE cgr."workspaceId" = g."workspaceId"
+  AND cgr."sourceEntityType" = 'Goal'
+  AND cgr."sourceEntityId" = g."id"
+  AND g."status" = 'DRAFT'
+  AND cgr."status" <> 'archived';
+
 -- Backfill legacy goal authors from the existing owner member when possible.
 UPDATE "Goal" AS g
 SET "authorUserId" = m."userId"

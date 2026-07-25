@@ -591,7 +591,9 @@ export async function createGoal(
       action: "goal.created",
       entityType: "Goal",
       entityId: goal.id,
-      meta: { title: goal.title, ...duplicateGuardAuditMeta(duplicateDecision) },
+      meta: goal.isPrivate
+        ? { isPrivate: true }
+        : { title: goal.title, ...duplicateGuardAuditMeta(duplicateDecision) },
     });
 
     if (!goal.isPrivate) {
