@@ -170,10 +170,13 @@ export default async function ProposalsPage({
   }
 
   function proposalLifecycleLabel(proposal: ProposalListItem) {
+    if (proposal.archivedAt) {
+      return proposalStatusLabel("ARCHIVED");
+    }
     if (proposal.status === "RESOLVED" && proposal.resolutionOutcome) {
       return `${proposalStatusLabel("RESOLVED")} · ${proposal.resolutionOutcome.replace("_", " ")}`;
     }
-    return proposalStatusLabel(proposal.archivedAt ? "ARCHIVED" : proposal.status as ProposalStatusFilter);
+    return proposalStatusLabel(proposal.status as ProposalStatusFilter);
   }
 
   function proposalDecisionTags(state: ProposalDecisionState | null) {

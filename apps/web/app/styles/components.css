@@ -3583,28 +3583,6 @@ a.meeting-agenda-item:hover {
   .nr-work-item-badge {
     max-width: 100%;
     min-height: 24px;
-    line-height: 1.2;
-    letter-spacing: 0;
-  }
-
-  .nr-work-item-badge-lifecycle {
-    font-size: 0.74rem;
-    text-transform: uppercase;
-  }
-
-  .nr-work-item-badge-attention {
-    font-size: 0.78rem;
-  }
-
-  .nr-work-item-badge-relationship {
-    border: 1px solid var(--line);
-    background: var(--surface-strong);
-    color: var(--text);
-  }
-
-  .nr-work-item-badge-muted {
-    background: var(--surface-sunken);
-    color: var(--muted);
   }
 
   .nr-work-item-card-body {

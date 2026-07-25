@@ -128,10 +128,10 @@ export default async function ProposalDetailPage({
     : proposal.status === "RESOLVED" && proposal.resolutionOutcome === "ADOPTED"
       ? "ADOPTED"
       : proposal.status;
-  const proposalLifecycleLabel = proposal.status === "RESOLVED" && proposal.resolutionOutcome
-    ? `${t("statusResolved")} · ${proposal.resolutionOutcome.replace("_", " ")}`
-    : proposal.archivedAt
-      ? t("statusArchived")
+  const proposalLifecycleLabel = proposal.archivedAt
+    ? t("statusArchived")
+    : proposal.status === "RESOLVED" && proposal.resolutionOutcome
+      ? `${t("statusResolved")} · ${proposal.resolutionOutcome.replace("_", " ")}`
       : {
         DRAFT: t("statusDraft"),
         OPEN: t("statusOpen"),
