@@ -76,6 +76,40 @@ function isPrismaNotFoundError(error: unknown) {
   return typeof error === "object" && error !== null && "code" in error && (error as { code?: string }).code === "P2025";
 }
 
+async function lockGoalForKeyResultMutation(
+  tx: Prisma.TransactionClient,
+  actor: AppActor,
+  membership: MembershipSummary | null | undefined,
+  goal: {
+    id: string;
+    workspaceId: string;
+    archivedAt?: Date | null;
+    authorUserId?: string | null;
+    isPrivate?: boolean | null;
+    status: GoalStatus;
+  },
+) {
+  requireEditableGoalKeyResults(actor, membership, goal);
+  try {
+    await tx.goal.update({
+      where: {
+        id: goal.id,
+        workspaceId: goal.workspaceId,
+        archivedAt: null,
+        status: goal.status,
+        isPrivate: goal.isPrivate ?? false,
+      },
+      data: { updatedAt: new Date() },
+      select: { id: true },
+    });
+  } catch (error) {
+    if (isPrismaNotFoundError(error)) {
+      invariant(false, 409, "CONFLICT", "Goal changed while editing. Refresh and try again.");
+    }
+    throw error;
+  }
+}
+
 export type CompanyDirectionEvidenceLink = {
   id: string;
   entityType: string;
@@ -368,12 +402,7 @@ async function appendMissingDuplicateGoalKeyResults(
 
   return prisma.$transaction(async (tx) => {
     const goal = await assertGoalInWorkspace(tx, params.workspaceId, goalId);
-    if (goal.status === "DRAFT") {
-      requirePrivateDraftEditor(actor, membership, goal);
-    } else {
-      invariant(EDITABLE_ACTIVE_GOAL_STATUSES.has(goal.status), 400, "INVALID_STATE", "Only draft or active goals can be edited.");
-      requireCollaborativeWorkItemEditor(actor, membership, goal);
-    }
+    await lockGoalForKeyResultMutation(tx, actor, membership, goal);
 
     const existingKeyResults = await tx.keyResult.findMany({
       where: { goalId },
@@ -1126,24 +1155,26 @@ export async function addKeyResult(
   const title = params.title.trim();
   invariant(title.length > 0, 400, "INVALID_INPUT", "Key Result title is required.");
 
-  const goal = await prisma.goal.findUnique({
-    where: { id: params.goalId },
-    select: { id: true, workspaceId: true, archivedAt: true, authorUserId: true, isPrivate: true, status: true },
-  });
-  invariant(goal && goal.workspaceId === params.workspaceId && !goal.archivedAt, 404, "NOT_FOUND", "Goal not found.");
-  requireEditableGoalKeyResults(actor, membership, goal);
-
   const progressPercent = keyResultProgress(params);
 
-  const kr = await prisma.keyResult.create({
-    data: {
-      goalId: params.goalId,
-      title,
-      targetValue: params.targetValue || null,
-      currentValue: params.currentValue || 0,
-      unit: params.unit || null,
-      progressPercent,
-    },
+  const kr = await prisma.$transaction(async (tx) => {
+    const goal = await tx.goal.findUnique({
+      where: { id: params.goalId },
+      select: { id: true, workspaceId: true, archivedAt: true, authorUserId: true, isPrivate: true, status: true },
+    });
+    invariant(goal && goal.workspaceId === params.workspaceId && !goal.archivedAt, 404, "NOT_FOUND", "Goal not found.");
+    await lockGoalForKeyResultMutation(tx, actor, membership, goal);
+
+    return tx.keyResult.create({
+      data: {
+        goalId: params.goalId,
+        title,
+        targetValue: params.targetValue || null,
+        currentValue: params.currentValue || 0,
+        unit: params.unit || null,
+        progressPercent,
+      },
+    });
   });
 
   await recomputeGoalProgress(params.goalId);
@@ -1169,35 +1200,37 @@ export async function updateKeyResult(
     resolvedMembership: params._membership,
   });
 
-  const kr = await prisma.keyResult.findUnique({
-    where: { id: params.krId },
-    include: { goal: true },
-  });
-  invariant(kr && kr.goal.workspaceId === params.workspaceId && !kr.goal.archivedAt, 404, "NOT_FOUND", "Key Result not found.");
-  requireEditableGoalKeyResults(actor, membership, kr.goal);
+  const updated = await prisma.$transaction(async (tx) => {
+    const kr = await tx.keyResult.findUnique({
+      where: { id: params.krId },
+      include: { goal: true },
+    });
+    invariant(kr && kr.goal.workspaceId === params.workspaceId && !kr.goal.archivedAt, 404, "NOT_FOUND", "Key Result not found.");
+    await lockGoalForKeyResultMutation(tx, actor, membership, kr.goal);
 
-  const data: any = {};
-  if (params.title !== undefined) {
-    const title = params.title.trim();
-    invariant(title.length > 0, 400, "INVALID_INPUT", "Key Result title is required.");
-    data.title = title;
-  }
-  if (params.targetValue !== undefined) data.targetValue = params.targetValue;
-  if (params.currentValue !== undefined) data.currentValue = params.currentValue;
-  if (params.unit !== undefined) data.unit = params.unit;
+    const data: any = {};
+    if (params.title !== undefined) {
+      const title = params.title.trim();
+      invariant(title.length > 0, 400, "INVALID_INPUT", "Key Result title is required.");
+      data.title = title;
+    }
+    if (params.targetValue !== undefined) data.targetValue = params.targetValue;
+    if (params.currentValue !== undefined) data.currentValue = params.currentValue;
+    if (params.unit !== undefined) data.unit = params.unit;
 
-  const newTarget = params.targetValue !== undefined ? params.targetValue : kr.targetValue;
-  const newCurrent = params.currentValue !== undefined ? params.currentValue : kr.currentValue;
+    const newTarget = params.targetValue !== undefined ? params.targetValue : kr.targetValue;
+    const newCurrent = params.currentValue !== undefined ? params.currentValue : kr.currentValue;
 
-  data.progressPercent = keyResultProgress({
-    title: data.title ?? kr.title,
-    targetValue: newTarget,
-    currentValue: newCurrent,
-  });
+    data.progressPercent = keyResultProgress({
+      title: data.title ?? kr.title,
+      targetValue: newTarget,
+      currentValue: newCurrent,
+    });
 
-  const updated = await prisma.keyResult.update({
-    where: { id: params.krId },
-    data,
+    return tx.keyResult.update({
+      where: { id: params.krId },
+      data,
+    });
   });
 
   await recomputeGoalProgress(updated.goalId);
@@ -1219,15 +1252,18 @@ export async function deleteKeyResult(
     resolvedMembership: params._membership,
   });
 
-  const kr = await prisma.keyResult.findUnique({
-    where: { id: params.krId },
-    include: { goal: true },
-  });
-  invariant(kr && kr.goal.workspaceId === params.workspaceId && !kr.goal.archivedAt, 404, "NOT_FOUND", "Key Result not found.");
-  requireEditableGoalKeyResults(actor, membership, kr.goal);
+  const goalId = await prisma.$transaction(async (tx) => {
+    const kr = await tx.keyResult.findUnique({
+      where: { id: params.krId },
+      include: { goal: true },
+    });
+    invariant(kr && kr.goal.workspaceId === params.workspaceId && !kr.goal.archivedAt, 404, "NOT_FOUND", "Key Result not found.");
+    await lockGoalForKeyResultMutation(tx, actor, membership, kr.goal);
 
-  await prisma.keyResult.delete({ where: { id: params.krId } });
-  await recomputeGoalProgress(kr.goalId);
+    await tx.keyResult.delete({ where: { id: params.krId } });
+    return kr.goalId;
+  });
+  await recomputeGoalProgress(goalId);
 }
 
 export async function postGoalUpdate(

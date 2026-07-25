@@ -13,6 +13,7 @@ import {
   postGoalUpdate,
   recomputeGoalProgress,
   returnGoalToDraft,
+  updateKeyResult,
   updateGoal,
 } from "./goals";
 import { prisma } from "@corgtex/shared";
@@ -318,6 +319,9 @@ describe("Goals Domain", () => {
           level: "PERSONAL",
           status: "ACTIVE",
           version: 2,
+        } as any)
+        .mockResolvedValueOnce({
+          id: "goal-existing",
         } as any)
         .mockResolvedValueOnce({
           ...existingGoal,
@@ -1423,6 +1427,83 @@ describe("Goals Domain", () => {
   });
 
   describe("addKeyResult", () => {
+    it("rejects stale collaborative key result creates if the goal changes before commit", async () => {
+      const otherActor = {
+        kind: "user",
+        user: { id: "user-2", email: "other@example.com", displayName: "Other" },
+      } as any;
+      vi.mocked(prisma.goal.findUnique).mockResolvedValueOnce({
+        id: "goal-1",
+        workspaceId: "ws-1",
+        archivedAt: null,
+        authorUserId: "user-1",
+        isPrivate: false,
+        status: "ACTIVE",
+      } as any);
+      vi.mocked(prisma.goal.update).mockRejectedValueOnce({ code: "P2025" });
+
+      await expect(addKeyResult(otherActor, {
+        workspaceId: "ws-1",
+        goalId: "goal-1",
+        title: "New key result",
+      })).rejects.toMatchObject({
+        status: 409,
+        code: "CONFLICT",
+      });
+
+      expect(prisma.keyResult.create).not.toHaveBeenCalled();
+    });
+
+    it("locks the authorized goal state before updating key results", async () => {
+      vi.mocked(prisma.keyResult.findUnique).mockResolvedValueOnce({
+        id: "kr-1",
+        goalId: "goal-1",
+        title: "Old key result",
+        targetValue: 10,
+        currentValue: 2,
+        goal: {
+          id: "goal-1",
+          workspaceId: "ws-1",
+          archivedAt: null,
+          authorUserId: "other-user",
+          isPrivate: false,
+          status: "ACTIVE",
+        },
+      } as any);
+      vi.mocked(prisma.goal.update).mockResolvedValueOnce({ id: "goal-1" } as any);
+      vi.mocked(prisma.keyResult.update).mockResolvedValueOnce({
+        id: "kr-1",
+        goalId: "goal-1",
+        title: "Updated key result",
+      } as any);
+
+      await expect(updateKeyResult(actor, {
+        workspaceId: "ws-1",
+        krId: "kr-1",
+        title: "Updated key result",
+      })).resolves.toMatchObject({
+        id: "kr-1",
+        title: "Updated key result",
+      });
+
+      expect(prisma.goal.update).toHaveBeenCalledWith(expect.objectContaining({
+        where: expect.objectContaining({
+          id: "goal-1",
+          workspaceId: "ws-1",
+          archivedAt: null,
+          status: "ACTIVE",
+          isPrivate: false,
+        }),
+        data: expect.objectContaining({
+          updatedAt: expect.any(Date),
+        }),
+        select: { id: true },
+      }));
+      expect(prisma.keyResult.update).toHaveBeenCalledWith(expect.objectContaining({
+        where: { id: "kr-1" },
+      }));
+    });
+
     it("rejects key results for archived goals", async () => {
       vi.mocked(prisma.goal.findUnique).mockResolvedValueOnce({
         id: "goal-1",
