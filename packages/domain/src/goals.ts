@@ -1,12 +1,16 @@
 import { prisma } from "@corgtex/shared";
 import type { AppActor, MembershipSummary } from "@corgtex/shared";
 import { appendEvents } from "./events";
-import { requireWorkspaceMembership } from "./auth";
+import { actorUserIdForWorkspace, requireWorkspaceMembership } from "./auth";
 import { recordAudit } from "./audit-trail";
 import { archiveFilterWhere, archiveWorkspaceArtifact, type ArchiveFilter } from "./archive";
 import { ensureWorkspacePermalink, workspaceEntityCanonicalPath } from "./permalinks";
 import { invariant } from "./errors";
-import { requireDraftManager } from "./draft-permissions";
+import { privacyFilter } from "./privacy";
+import {
+  requireCollaborativeWorkItemEditor,
+  requirePrivateDraftEditor,
+} from "./collaborative-permissions";
 import { humanMemberIdentityWhere } from "./member-identity";
 import {
   checkWorkspaceDuplicateGuard,
@@ -18,12 +22,11 @@ import {
 import {
   listNativePracticeProjectHealthByIds,
 } from "./practice-finance";
-import type { GoalLevel, GoalCadence, GoalStatus, PracticeProjectStatus, Prisma } from "@prisma/client";
+import type { Goal, GoalLevel, GoalCadence, GoalStatus, PracticeProjectStatus, Prisma } from "@prisma/client";
 import {
   changedDataFields,
   pickJsonSnapshot,
   recordWorkItemVersion,
-  requireSubmittedWorkItemAuthor,
   resolveWorkspaceMemberUserId,
 } from "./work-item-versions";
 
@@ -47,6 +50,8 @@ type CreateGoalParams = {
   parentGoalId?: string | null;
   circleId?: string | null;
   ownerMemberId?: string | null;
+  authorMemberId?: string | null;
+  isPrivate?: boolean;
   keyResults?: GoalKeyResultInput[];
   duplicateGuard?: DuplicateGuardOptions | null;
   _membership?: MembershipSummary | null;
@@ -54,8 +59,69 @@ type CreateGoalParams = {
 
 const COMPANY_UNDERSTANDING_SOURCE = "company-understanding";
 const SHORT_TERM_DIRECTION_CADENCES = new Set<GoalCadence>(["WEEKLY", "MONTHLY", "QUARTERLY"]);
+const EDITABLE_ACTIVE_GOAL_STATUSES = new Set<GoalStatus>(["ACTIVE", "ON_TRACK", "AT_RISK", "BEHIND"]);
 export const GOAL_FINANCE_PROJECT_ENTITY_TYPE = "PracticeProject";
 const GOAL_FINANCE_PROJECT_SOURCE = "practice-finance";
+
+function countsTowardParentProgress(goal: Pick<Goal, "status" | "isPrivate" | "archivedAt">) {
+  return !goal.archivedAt && !(goal.isPrivate && goal.status === "DRAFT");
+}
+
+async function recomputeGoalParents(parentGoalIds: Iterable<string | null | undefined>) {
+  const uniqueParentIds = [...new Set([...parentGoalIds].filter((id): id is string => Boolean(id)))];
+  await Promise.all(uniqueParentIds.map((goalId) => recomputeGoalProgress(goalId)));
+}
+
+function isPrismaNotFoundError(error: unknown) {
+  return typeof error === "object" && error !== null && "code" in error && (error as { code?: string }).code === "P2025";
+}
+
+async function lockGoalForAuthorizedMutation(
+  tx: Prisma.TransactionClient,
+  goal: {
+    id: string;
+    workspaceId: string;
+    archivedAt?: Date | null;
+    isPrivate?: boolean | null;
+    status: GoalStatus;
+  },
+) {
+  try {
+    await tx.goal.update({
+      where: {
+        id: goal.id,
+        workspaceId: goal.workspaceId,
+        archivedAt: null,
+        status: goal.status,
+        isPrivate: goal.isPrivate ?? false,
+      },
+      data: { updatedAt: new Date() },
+      select: { id: true },
+    });
+  } catch (error) {
+    if (isPrismaNotFoundError(error)) {
+      invariant(false, 409, "CONFLICT", "Goal changed while editing. Refresh and try again.");
+    }
+    throw error;
+  }
+}
+
+async function lockGoalForKeyResultMutation(
+  tx: Prisma.TransactionClient,
+  actor: AppActor,
+  membership: MembershipSummary | null | undefined,
+  goal: {
+    id: string;
+    workspaceId: string;
+    archivedAt?: Date | null;
+    authorUserId?: string | null;
+    isPrivate?: boolean | null;
+    status: GoalStatus;
+  },
+) {
+  requireEditableGoalKeyResults(actor, membership, goal);
+  await lockGoalForAuthorizedMutation(tx, goal);
+}
 
 export type CompanyDirectionEvidenceLink = {
   id: string;
@@ -175,6 +241,9 @@ async function assertGoalInWorkspace(tx: Prisma.TransactionClient, workspaceId: 
       parentGoalId: true,
       circleId: true,
       ownerMemberId: true,
+      authorUserId: true,
+      isPrivate: true,
+      publishedAt: true,
       status: true,
       progressPercent: true,
       version: true,
@@ -186,6 +255,8 @@ async function assertGoalInWorkspace(tx: Prisma.TransactionClient, workspaceId: 
 
 async function validateGoalReferences(
   tx: Prisma.TransactionClient,
+  actor: AppActor,
+  membership: MembershipSummary | null | undefined,
   params: {
     workspaceId: string;
     currentGoalId?: string;
@@ -198,13 +269,22 @@ async function validateGoalReferences(
     invariant(params.parentGoalId !== params.currentGoalId, 400, "INVALID_INPUT", "Goal cannot be its own parent.");
     const parentGoal = await tx.goal.findUnique({
       where: { id: params.parentGoalId },
-      select: { workspaceId: true, archivedAt: true },
+      select: {
+        workspaceId: true,
+        archivedAt: true,
+        authorUserId: true,
+        isPrivate: true,
+        status: true,
+      },
     });
     invariant(
-      parentGoal && parentGoal.workspaceId === params.workspaceId && !parentGoal.archivedAt,
+      parentGoal
+        && parentGoal.workspaceId === params.workspaceId
+        && !parentGoal.archivedAt
+        && canReadGoalRecord(actor, membership, parentGoal),
       400,
       "INVALID_INPUT",
-      "Parent goal must be an active goal in the same workspace.",
+      "Parent goal must be a visible active goal in the same workspace.",
     );
   }
 
@@ -253,6 +333,77 @@ function normalizeKeyResults(keyResults: GoalKeyResultInput[] | undefined) {
   });
 }
 
+function requireEditableGoalContent(
+  actor: AppActor,
+  membership: MembershipSummary | null | undefined,
+  goal: {
+    status: GoalStatus;
+    archivedAt?: Date | null;
+    isPrivate?: boolean | null;
+    authorUserId?: string | null;
+  },
+  activeStateMessage: string,
+) {
+  if (goal.status === "DRAFT") {
+    requirePrivateDraftEditor(actor, membership, goal);
+    return;
+  }
+  invariant(EDITABLE_ACTIVE_GOAL_STATUSES.has(goal.status), 400, "INVALID_STATE", activeStateMessage);
+  requireCollaborativeWorkItemEditor(actor, membership, goal);
+}
+
+function requireEditableGoalKeyResults(
+  actor: AppActor,
+  membership: MembershipSummary | null | undefined,
+  goal: {
+    status: GoalStatus;
+    archivedAt?: Date | null;
+    isPrivate?: boolean | null;
+    authorUserId?: string | null;
+  },
+) {
+  requireEditableGoalContent(actor, membership, goal, "Only draft or active goals can change key results.");
+}
+
+function canReadGoalRecord(
+  actor: AppActor,
+  membership: MembershipSummary | null | undefined,
+  goal: {
+    isPrivate?: boolean | null;
+    status?: GoalStatus | null;
+    authorUserId?: string | null;
+  },
+) {
+  if (actor.kind === "user" && actor.user.globalRole === "OPERATOR") return true;
+  if (goal.isPrivate !== true) return true;
+  if (goal.status !== "DRAFT") return false;
+  if (actor.kind === "agent") return true;
+  if (membership?.role === "ADMIN") return true;
+  return actor.kind === "user" && goal.authorUserId === actor.user.id;
+}
+
+type GoalParentVisibilityRecord = {
+  parentGoal?: GoalParentVisibilityRecord | null;
+  isPrivate?: boolean | null;
+  status?: GoalStatus | null;
+  authorUserId?: string | null;
+};
+
+function stripInvisibleGoalParents<T extends { parentGoal?: GoalParentVisibilityRecord | null }>(
+  actor: AppActor,
+  membership: MembershipSummary | null | undefined,
+  goal: T,
+): T {
+  if (!goal.parentGoal) return goal;
+  if (!canReadGoalRecord(actor, membership, goal.parentGoal)) {
+    return { ...goal, parentGoal: null };
+  }
+  return {
+    ...goal,
+    parentGoal: stripInvisibleGoalParents(actor, membership, goal.parentGoal),
+  };
+}
+
 async function appendMissingDuplicateGoalKeyResults(
   actor: AppActor,
   params: CreateGoalParams,
@@ -264,15 +415,7 @@ async function appendMissingDuplicateGoalKeyResults(
 
   return prisma.$transaction(async (tx) => {
     const goal = await assertGoalInWorkspace(tx, params.workspaceId, goalId);
-    if (goal.status === "DRAFT") {
-      await requireDraftManager({ actor, workspaceId: params.workspaceId, record: goal, resolvedMembership: membership });
-    } else {
-      invariant(["ACTIVE", "ON_TRACK", "AT_RISK", "BEHIND"].includes(goal.status), 400, "INVALID_STATE", "Only draft or active goals can be edited.");
-      const ownerUserId = goal.ownerMemberId
-        ? await resolveWorkspaceMemberUserId(tx, params.workspaceId, goal.ownerMemberId, "Goal owner must be an active member of this workspace.")
-        : null;
-      requireSubmittedWorkItemAuthor(actor, ownerUserId);
-    }
+    await lockGoalForKeyResultMutation(tx, actor, membership, goal);
 
     const existingKeyResults = await tx.keyResult.findMany({
       where: { goalId },
@@ -388,20 +531,36 @@ export async function createGoal(
   }
 
   return prisma.$transaction(async (tx) => {
-    await validateGoalReferences(tx, params);
+    await validateGoalReferences(tx, actor, membership, params);
     const keyResults = normalizeKeyResults(params.keyResults);
     const progressPercent = keyResults.length > 0
       ? Math.round(keyResults.reduce((total, keyResult) => total + keyResult.progressPercent, 0) / keyResults.length)
       : 0;
+    const requestedStatus = params.status ?? (actor.kind === "agent" ? "ACTIVE" : "DRAFT");
+    const isPrivate = params.isPrivate ?? (requestedStatus === "DRAFT");
+    const status = isPrivate
+      ? "DRAFT"
+      : requestedStatus === "DRAFT"
+        ? "ACTIVE"
+        : requestedStatus;
+    let authorUserId = actor.kind === "user"
+      ? actor.user.id
+      : await actorUserIdForWorkspace(actor, params.workspaceId);
+    if (actor.kind === "agent" && params.authorMemberId) {
+      authorUserId = await resolveWorkspaceMemberUserId(tx, params.workspaceId, params.authorMemberId, "Goal author must be an active member of this workspace.");
+    }
 
     const goal = await tx.goal.create({
       data: {
         workspaceId: params.workspaceId,
+        authorUserId,
         title,
         descriptionMd: params.descriptionMd || null,
         level: params.level ?? "COMPANY",
         cadence: params.cadence ?? "QUARTERLY",
-        status: params.status ?? "DRAFT",
+        status,
+        isPrivate,
+        publishedAt: isPrivate ? null : new Date(),
         progressPercent,
         targetDate: params.targetDate || null,
         startDate: params.startDate || null,
@@ -432,21 +591,25 @@ export async function createGoal(
       action: "goal.created",
       entityType: "Goal",
       entityId: goal.id,
-      meta: { title: goal.title, ...duplicateGuardAuditMeta(duplicateDecision) },
+      meta: goal.isPrivate
+        ? { isPrivate: true }
+        : { title: goal.title, ...duplicateGuardAuditMeta(duplicateDecision) },
     });
 
-    await appendEvents(tx, [
-      {
-        workspaceId: params.workspaceId,
-        type: "goal.created",
-        aggregateType: "Goal",
-        aggregateId: goal.id,
-        payload: {
-          goalId: goal.id,
-          title: goal.title,
+    if (!goal.isPrivate) {
+      await appendEvents(tx, [
+        {
+          workspaceId: params.workspaceId,
+          type: "goal.created",
+          aggregateType: "Goal",
+          aggregateId: goal.id,
+          payload: {
+            goalId: goal.id,
+            title: goal.title,
+          },
         },
-      },
-    ]);
+      ]);
+    }
 
     return goal;
   });
@@ -477,9 +640,10 @@ export async function updateGoal(
     resolvedMembership: params._membership,
   });
 
-  return prisma.$transaction(async (tx) => {
+  const parentGoalIdsToRecompute = new Set<string>();
+  const updatedGoal = await prisma.$transaction(async (tx) => {
     const goal = await assertGoalInWorkspace(tx, params.workspaceId, params.goalId);
-    await validateGoalReferences(tx, {
+    await validateGoalReferences(tx, actor, membership, {
       workspaceId: params.workspaceId,
       currentGoalId: params.goalId,
       parentGoalId: params.parentGoalId,
@@ -501,22 +665,24 @@ export async function updateGoal(
 
     if (editsDraftContent) {
       if (goal.status === "DRAFT") {
-        await requireDraftManager({ actor, workspaceId: params.workspaceId, record: goal, resolvedMembership: membership });
+        requirePrivateDraftEditor(actor, membership, goal);
       } else {
-        invariant(["ACTIVE", "ON_TRACK", "AT_RISK", "BEHIND"].includes(goal.status), 400, "INVALID_STATE", "Only draft or active goals can be edited.");
-        const ownerUserId = goal.ownerMemberId
-          ? await resolveWorkspaceMemberUserId(tx, params.workspaceId, goal.ownerMemberId, "Goal owner must be an active member of this workspace.")
-          : null;
-        requireSubmittedWorkItemAuthor(actor, ownerUserId);
+        invariant(EDITABLE_ACTIVE_GOAL_STATUSES.has(goal.status), 400, "INVALID_STATE", "Only draft or active goals can be edited.");
+        requireCollaborativeWorkItemEditor(actor, membership, goal);
       }
     }
     if (changesWorkflow) {
       if (params.status === "DRAFT") {
-        invariant(["ACTIVE", "ON_TRACK", "AT_RISK", "BEHIND"].includes(goal.status), 400, "INVALID_STATE", "Only active goals can be returned to draft.");
+        invariant(EDITABLE_ACTIVE_GOAL_STATUSES.has(goal.status), 400, "INVALID_STATE", "Only active goals can be returned to draft.");
+        requirePrivateDraftEditor(actor, membership, goal);
       } else if (goal.status === "COMPLETED" || goal.status === "ABANDONED") {
         invariant(params.progressPercent === undefined && params.status === undefined, 400, "INVALID_STATE", "Completed or abandoned goals cannot be changed.");
+      } else if (goal.status === "DRAFT") {
+        requirePrivateDraftEditor(actor, membership, goal);
+      } else {
+        invariant(EDITABLE_ACTIVE_GOAL_STATUSES.has(goal.status), 400, "INVALID_STATE", "Only draft or active goals can change workflow state.");
+        requireCollaborativeWorkItemEditor(actor, membership, goal);
       }
-      await requireDraftManager({ actor, workspaceId: params.workspaceId, record: goal, resolvedMembership: membership });
     }
     if (params.title !== undefined) {
       const title = params.title.trim();
@@ -526,7 +692,16 @@ export async function updateGoal(
     if (params.descriptionMd !== undefined) data.descriptionMd = params.descriptionMd || null;
     if (params.level !== undefined) data.level = params.level;
     if (params.cadence !== undefined) data.cadence = params.cadence;
-    if (params.status !== undefined) data.status = params.status;
+    if (params.status !== undefined) {
+      data.status = params.status;
+      if (params.status === "DRAFT") {
+        data.isPrivate = true;
+        data.publishedAt = null;
+      } else {
+        data.isPrivate = false;
+        data.publishedAt = goal.publishedAt || new Date();
+      }
+    }
     if (params.progressPercent !== undefined) data.progressPercent = clampProgressPercent(params.progressPercent);
     if (params.targetDate !== undefined) data.targetDate = params.targetDate || null;
     if (params.startDate !== undefined) data.startDate = params.startDate || null;
@@ -556,6 +731,9 @@ export async function updateGoal(
           "parentGoalId",
           "circleId",
           "ownerMemberId",
+          "authorUserId",
+          "isPrivate",
+          "publishedAt",
           "status",
           "version",
         ]),
@@ -564,10 +742,33 @@ export async function updateGoal(
     const changedUpdateFields = changedDataFields(goal as unknown as Record<string, unknown>, data);
     if (changedUpdateFields.length === 0) return goal;
 
-    const updated = await tx.goal.update({
-      where: { id: params.goalId },
-      data,
-    });
+    let updated: typeof goal;
+    try {
+      updated = await tx.goal.update({
+        where: {
+          id: params.goalId,
+          workspaceId: params.workspaceId,
+          archivedAt: null,
+          status: goal.status,
+          isPrivate: goal.isPrivate,
+          version: goal.version,
+        },
+        data,
+      });
+    } catch (error) {
+      if (isPrismaNotFoundError(error)) {
+        invariant(false, 409, "CONFLICT", "Goal changed while editing. Refresh and try again.");
+      }
+      throw error;
+    }
+    if (
+      changedUpdateFields.includes("parentGoalId")
+      || changedUpdateFields.includes("progressPercent")
+      || countsTowardParentProgress(goal) !== countsTowardParentProgress(updated)
+    ) {
+      if (goal.parentGoalId) parentGoalIdsToRecompute.add(goal.parentGoalId);
+      if (updated.parentGoalId) parentGoalIdsToRecompute.add(updated.parentGoalId);
+    }
 
     await recordAudit(tx, actor, {
       workspaceId: params.workspaceId,
@@ -592,6 +793,8 @@ export async function updateGoal(
 
     return updated;
   });
+  await recomputeGoalParents(parentGoalIdsToRecompute);
+  return updatedGoal;
 }
 
 export async function returnGoalToDraft(actor: AppActor, params: {
@@ -616,11 +819,32 @@ export async function deleteGoal(
     _membership?: MembershipSummary | null;
   }
 ) {
-  await requireWorkspaceMembership({
+  const membership = await requireWorkspaceMembership({
     actor,
     workspaceId: params.workspaceId,
     resolvedMembership: params._membership,
   });
+
+  const goal = await prisma.goal.findFirst({
+    where: {
+      id: params.goalId,
+      workspaceId: params.workspaceId,
+      ...(params.includeArchived ? {} : { archivedAt: null }),
+    },
+    select: {
+      id: true,
+      status: true,
+      archivedAt: true,
+      isPrivate: true,
+      authorUserId: true,
+    },
+  });
+  invariant(goal, 404, "NOT_FOUND", "Goal not found.");
+  if (goal.status === "DRAFT" || goal.isPrivate) {
+    requirePrivateDraftEditor(actor, membership, goal);
+  } else {
+    requireCollaborativeWorkItemEditor(actor, membership, goal);
+  }
 
   await archiveWorkspaceArtifact(actor, {
     workspaceId: params.workspaceId,
@@ -639,14 +863,19 @@ export async function getGoal(
     _membership?: MembershipSummary | null;
   }
 ) {
-  await requireWorkspaceMembership({
+  const membership = await requireWorkspaceMembership({
     actor,
     workspaceId: params.workspaceId,
     resolvedMembership: params._membership,
   });
 
-  const goal = await prisma.goal.findUnique({
-    where: { id: params.goalId },
+  const goal = await prisma.goal.findFirst({
+    where: {
+      id: params.goalId,
+      workspaceId: params.workspaceId,
+      ...privacyFilter(actor, membership),
+      ...(params.includeArchived ? {} : { archivedAt: null }),
+    },
     include: {
       ownerMember: {
         include: {
@@ -655,7 +884,12 @@ export async function getGoal(
           },
         },
       },
-      childGoals: true,
+      childGoals: {
+        where: {
+          ...privacyFilter(actor, membership),
+          archivedAt: null,
+        },
+      },
       keyResults: {
         orderBy: { sortOrder: "asc" },
       },
@@ -674,7 +908,7 @@ export async function getGoal(
     },
   });
 
-  invariant(goal && goal.workspaceId === params.workspaceId && (params.includeArchived || !goal.archivedAt), 404, "NOT_FOUND", "Goal not found.");
+  invariant(goal, 404, "NOT_FOUND", "Goal not found.");
   return goal;
 }
 
@@ -694,13 +928,13 @@ export async function listGoals(
     _membership?: MembershipSummary | null;
   }
 ) {
-  await requireWorkspaceMembership({
+  const membership = await requireWorkspaceMembership({
     actor,
     workspaceId: params.workspaceId,
     resolvedMembership: params._membership,
   });
 
-  const query: any = { workspaceId: params.workspaceId, ...archiveFilterWhere(params.archiveFilter) };
+  const query: any = { workspaceId: params.workspaceId, ...privacyFilter(actor, membership), ...archiveFilterWhere(params.archiveFilter) };
   if (params.level !== undefined) query.level = params.level;
   if (params.cadence !== undefined) query.cadence = params.cadence;
   if (params.circleId !== undefined) query.circleId = params.circleId;
@@ -746,6 +980,7 @@ export async function listCompanyDirectionFromBrain(
     prisma.goal.findMany({
       where: {
         workspaceId: params.workspaceId,
+        ...privacyFilter(actor, membership),
         archivedAt: null,
         links: {
           some: {
@@ -935,25 +1170,26 @@ export async function addKeyResult(
   const title = params.title.trim();
   invariant(title.length > 0, 400, "INVALID_INPUT", "Key Result title is required.");
 
-  const goal = await prisma.goal.findUnique({
-    where: { id: params.goalId },
-    select: { id: true, workspaceId: true, archivedAt: true, ownerMemberId: true, status: true },
-  });
-  invariant(goal && goal.workspaceId === params.workspaceId && !goal.archivedAt, 404, "NOT_FOUND", "Goal not found.");
-  invariant(goal.status === "DRAFT", 400, "INVALID_STATE", "Only draft goals can be edited.");
-  await requireDraftManager({ actor, workspaceId: params.workspaceId, record: goal, resolvedMembership: membership });
-
   const progressPercent = keyResultProgress(params);
 
-  const kr = await prisma.keyResult.create({
-    data: {
-      goalId: params.goalId,
-      title,
-      targetValue: params.targetValue || null,
-      currentValue: params.currentValue || 0,
-      unit: params.unit || null,
-      progressPercent,
-    },
+  const kr = await prisma.$transaction(async (tx) => {
+    const goal = await tx.goal.findUnique({
+      where: { id: params.goalId },
+      select: { id: true, workspaceId: true, archivedAt: true, authorUserId: true, isPrivate: true, status: true },
+    });
+    invariant(goal && goal.workspaceId === params.workspaceId && !goal.archivedAt, 404, "NOT_FOUND", "Goal not found.");
+    await lockGoalForKeyResultMutation(tx, actor, membership, goal);
+
+    return tx.keyResult.create({
+      data: {
+        goalId: params.goalId,
+        title,
+        targetValue: params.targetValue || null,
+        currentValue: params.currentValue || 0,
+        unit: params.unit || null,
+        progressPercent,
+      },
+    });
   });
 
   await recomputeGoalProgress(params.goalId);
@@ -979,36 +1215,37 @@ export async function updateKeyResult(
     resolvedMembership: params._membership,
   });
 
-  const kr = await prisma.keyResult.findUnique({
-    where: { id: params.krId },
-    include: { goal: true },
-  });
-  invariant(kr && kr.goal.workspaceId === params.workspaceId && !kr.goal.archivedAt, 404, "NOT_FOUND", "Key Result not found.");
-  invariant(kr.goal.status === "DRAFT", 400, "INVALID_STATE", "Only draft goals can be edited.");
-  await requireDraftManager({ actor, workspaceId: params.workspaceId, record: kr.goal, resolvedMembership: membership });
+  const updated = await prisma.$transaction(async (tx) => {
+    const kr = await tx.keyResult.findUnique({
+      where: { id: params.krId },
+      include: { goal: true },
+    });
+    invariant(kr && kr.goal.workspaceId === params.workspaceId && !kr.goal.archivedAt, 404, "NOT_FOUND", "Key Result not found.");
+    await lockGoalForKeyResultMutation(tx, actor, membership, kr.goal);
 
-  const data: any = {};
-  if (params.title !== undefined) {
-    const title = params.title.trim();
-    invariant(title.length > 0, 400, "INVALID_INPUT", "Key Result title is required.");
-    data.title = title;
-  }
-  if (params.targetValue !== undefined) data.targetValue = params.targetValue;
-  if (params.currentValue !== undefined) data.currentValue = params.currentValue;
-  if (params.unit !== undefined) data.unit = params.unit;
+    const data: any = {};
+    if (params.title !== undefined) {
+      const title = params.title.trim();
+      invariant(title.length > 0, 400, "INVALID_INPUT", "Key Result title is required.");
+      data.title = title;
+    }
+    if (params.targetValue !== undefined) data.targetValue = params.targetValue;
+    if (params.currentValue !== undefined) data.currentValue = params.currentValue;
+    if (params.unit !== undefined) data.unit = params.unit;
 
-  const newTarget = params.targetValue !== undefined ? params.targetValue : kr.targetValue;
-  const newCurrent = params.currentValue !== undefined ? params.currentValue : kr.currentValue;
+    const newTarget = params.targetValue !== undefined ? params.targetValue : kr.targetValue;
+    const newCurrent = params.currentValue !== undefined ? params.currentValue : kr.currentValue;
 
-  data.progressPercent = keyResultProgress({
-    title: data.title ?? kr.title,
-    targetValue: newTarget,
-    currentValue: newCurrent,
-  });
+    data.progressPercent = keyResultProgress({
+      title: data.title ?? kr.title,
+      targetValue: newTarget,
+      currentValue: newCurrent,
+    });
 
-  const updated = await prisma.keyResult.update({
-    where: { id: params.krId },
-    data,
+    return tx.keyResult.update({
+      where: { id: params.krId },
+      data,
+    });
   });
 
   await recomputeGoalProgress(updated.goalId);
@@ -1030,16 +1267,18 @@ export async function deleteKeyResult(
     resolvedMembership: params._membership,
   });
 
-  const kr = await prisma.keyResult.findUnique({
-    where: { id: params.krId },
-    include: { goal: true },
-  });
-  invariant(kr && kr.goal.workspaceId === params.workspaceId && !kr.goal.archivedAt, 404, "NOT_FOUND", "Key Result not found.");
-  invariant(kr.goal.status === "DRAFT", 400, "INVALID_STATE", "Only draft goals can be edited.");
-  await requireDraftManager({ actor, workspaceId: params.workspaceId, record: kr.goal, resolvedMembership: membership });
+  const goalId = await prisma.$transaction(async (tx) => {
+    const kr = await tx.keyResult.findUnique({
+      where: { id: params.krId },
+      include: { goal: true },
+    });
+    invariant(kr && kr.goal.workspaceId === params.workspaceId && !kr.goal.archivedAt, 404, "NOT_FOUND", "Key Result not found.");
+    await lockGoalForKeyResultMutation(tx, actor, membership, kr.goal);
 
-  await prisma.keyResult.delete({ where: { id: params.krId } });
-  await recomputeGoalProgress(kr.goalId);
+    await tx.keyResult.delete({ where: { id: params.krId } });
+    return kr.goalId;
+  });
+  await recomputeGoalProgress(goalId);
 }
 
 export async function postGoalUpdate(
@@ -1064,6 +1303,14 @@ export async function postGoalUpdate(
     where: { id: params.goalId },
   });
   invariant(goal && goal.workspaceId === params.workspaceId && !goal.archivedAt, 404, "NOT_FOUND", "Goal not found.");
+  if (goal.status === "DRAFT") {
+    requirePrivateDraftEditor(actor, membership, goal);
+  } else if (params.statusChange === "DRAFT") {
+    requirePrivateDraftEditor(actor, membership, goal);
+  } else {
+    invariant(EDITABLE_ACTIVE_GOAL_STATUSES.has(goal.status), 400, "INVALID_STATE", "Only draft or active goals can receive updates.");
+    requireCollaborativeWorkItemEditor(actor, membership, goal);
+  }
   const bodyMd = params.bodyMd.trim();
   invariant(bodyMd.length > 0, 400, "INVALID_INPUT", "Goal update body is required.");
   const newProgress = params.newProgress !== undefined && params.newProgress !== null
@@ -1083,7 +1330,10 @@ export async function postGoalUpdate(
     );
   }
 
-  return prisma.$transaction(async (tx) => {
+  const parentGoalIdsToRecompute = new Set<string>();
+  const update = await prisma.$transaction(async (tx) => {
+    await lockGoalForAuthorizedMutation(tx, goal);
+
     const update = await tx.goalUpdate.create({
       data: {
         goalId: params.goalId,
@@ -1095,23 +1345,48 @@ export async function postGoalUpdate(
     });
 
     const updateData: any = {};
-    if (params.statusChange) updateData.status = params.statusChange;
+    if (params.statusChange) {
+      updateData.status = params.statusChange;
+      if (params.statusChange === "DRAFT") {
+        updateData.isPrivate = true;
+        updateData.publishedAt = null;
+      } else {
+        updateData.isPrivate = false;
+        updateData.publishedAt = goal.publishedAt || new Date();
+      }
+    }
     if (newProgress !== null) updateData.progressPercent = newProgress;
-    
+
     if (Object.keys(updateData).length > 0) {
-      await tx.goal.update({
+      const updatedGoal = await tx.goal.update({
         where: { id: params.goalId },
         data: updateData,
       });
-
-      if (updateData.progressPercent !== undefined && goal.parentGoalId) {
-        // Since we update progress, trigger recompute for parent independently after transaction
-        process.nextTick(() => recomputeGoalProgress(goal.parentGoalId!));
+      if (
+        updateData.progressPercent !== undefined
+        || countsTowardParentProgress(goal) !== countsTowardParentProgress(updatedGoal)
+      ) {
+        if (goal.parentGoalId) parentGoalIdsToRecompute.add(goal.parentGoalId);
       }
+
+      await appendEvents(tx, [
+        {
+          workspaceId: params.workspaceId,
+          type: "goal.updated",
+          aggregateType: "Goal",
+          aggregateId: params.goalId,
+          payload: {
+            goalId: params.goalId,
+            fields: Object.keys(updateData),
+          },
+        },
+      ]);
     }
 
     return update;
   });
+  await recomputeGoalParents(parentGoalIdsToRecompute);
+  return update;
 }
 
 export async function createGoalLink(
@@ -1128,7 +1403,7 @@ export async function createGoalLink(
     _membership?: MembershipSummary | null;
   }
 ) {
-  await requireWorkspaceMembership({
+  const membership = await requireWorkspaceMembership({
     actor,
     workspaceId: params.workspaceId,
     resolvedMembership: params._membership,
@@ -1138,6 +1413,7 @@ export async function createGoalLink(
     where: { id: params.goalId },
   });
   invariant(goal && goal.workspaceId === params.workspaceId && !goal.archivedAt, 404, "NOT_FOUND", "Goal not found.");
+  requireEditableGoalContent(actor, membership, goal, "Only draft or active goals can change links.");
   const confidence = clampConfidence(params.confidence) ?? 1;
   const linkedBy = params.linkedBy?.trim() || "human";
   const source = params.source?.trim() || null;
@@ -1235,7 +1511,7 @@ export async function listGoalFinanceProjectLinks(
   const goalIds = Array.from(new Set(params.goalIds.map((id) => id.trim()).filter(Boolean)));
   if (goalIds.length === 0) return [];
 
-  await requireWorkspaceMembership({
+  const membership = await requireWorkspaceMembership({
     actor,
     workspaceId: params.workspaceId,
     resolvedMembership: params._membership,
@@ -1247,6 +1523,7 @@ export async function listGoalFinanceProjectLinks(
       entityType: GOAL_FINANCE_PROJECT_ENTITY_TYPE,
       goal: {
         workspaceId: params.workspaceId,
+        ...privacyFilter(actor, membership),
         archivedAt: null,
       },
     },
@@ -1304,7 +1581,7 @@ export async function deleteGoalFinanceProjectLink(
     _membership?: MembershipSummary | null;
   },
 ) {
-  await requireWorkspaceMembership({
+  const membership = await requireWorkspaceMembership({
     actor,
     workspaceId: params.workspaceId,
     resolvedMembership: params._membership,
@@ -1317,11 +1594,13 @@ export async function deleteGoalFinanceProjectLink(
   invariant(
     link
       && link.goal.workspaceId === params.workspaceId
+      && !link.goal.archivedAt
       && link.entityType === GOAL_FINANCE_PROJECT_ENTITY_TYPE,
     404,
     "NOT_FOUND",
     "Link not found.",
   );
+  requireEditableGoalContent(actor, membership, link.goal, "Only draft or active goals can change links.");
 
   await prisma.goalLink.delete({ where: { id: params.linkId } });
 }
@@ -1334,7 +1613,7 @@ export async function deleteGoalLink(
     _membership?: MembershipSummary | null;
   }
 ) {
-  await requireWorkspaceMembership({
+  const membership = await requireWorkspaceMembership({
     actor,
     workspaceId: params.workspaceId,
     resolvedMembership: params._membership,
@@ -1344,7 +1623,8 @@ export async function deleteGoalLink(
     where: { id: params.linkId },
     include: { goal: true },
   });
-  invariant(link && link.goal.workspaceId === params.workspaceId, 404, "NOT_FOUND", "Link not found.");
+  invariant(link && link.goal.workspaceId === params.workspaceId && !link.goal.archivedAt, 404, "NOT_FOUND", "Link not found.");
+  requireEditableGoalContent(actor, membership, link.goal, "Only draft or active goals can change links.");
 
   await prisma.goalLink.delete({ where: { id: params.linkId } });
 }
@@ -1366,7 +1646,15 @@ export async function recomputeGoalProgress(goalId: string) {
     where: { id: goalId },
     include: {
       keyResults: true,
-      childGoals: true,
+      childGoals: {
+        where: {
+          archivedAt: null,
+          NOT: {
+            isPrivate: true,
+            status: "DRAFT",
+          },
+        },
+      },
     },
   });
 
@@ -1398,9 +1686,9 @@ export async function recomputeGoalProgress(goalId: string) {
 }
 
 export async function getGoalTree(actor: AppActor, workspaceId: string, opts?: { cadence?: GoalCadence }) {
-  await requireWorkspaceMembership({ actor, workspaceId });
+  const membership = await requireWorkspaceMembership({ actor, workspaceId });
   
-  const query: any = { workspaceId, archivedAt: null };
+  const query: any = { workspaceId, ...privacyFilter(actor, membership), archivedAt: null };
   if (opts?.cadence) query.cadence = opts.cadence;
   
   const allGoals = await prisma.goal.findMany({
@@ -1432,11 +1720,12 @@ export async function getGoalTree(actor: AppActor, workspaceId: string, opts?: {
 }
 
 export async function getMyGoalSlice(actor: AppActor, memberId: string, workspaceId: string) {
-  await requireWorkspaceMembership({ actor, workspaceId });
+  const membership = await requireWorkspaceMembership({ actor, workspaceId });
 
   const myGoals = await prisma.goal.findMany({
     where: {
       workspaceId,
+      ...privacyFilter(actor, membership),
       ownerMemberId: memberId,
       archivedAt: null,
       status: { in: ["ACTIVE", "ON_TRACK", "AT_RISK", "BEHIND"] },
@@ -1458,7 +1747,7 @@ export async function getMyGoalSlice(actor: AppActor, memberId: string, workspac
     ],
   });
 
-  return myGoals;
+  return myGoals.map((goal) => stripInvisibleGoalParents(actor, membership, goal));
 }
 
 export async function createRecognition(

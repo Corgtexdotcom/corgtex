@@ -396,11 +396,10 @@ export default async function ActionsPage({
 
   function actionControls(action: ActionListItem) {
     const canManage = canManageAction(action);
-    const canSubmittedEditorEdit = actor.kind === "user"
-      && (action.authorUserId === actor.user.id || action.assigneeMemberId === membership?.id);
+    const canCollaborateOnSubmittedAction = !action.isPrivate && (actor.kind === "agent" || Boolean(membership?.isActive));
     const canEditContent = action.status === "DRAFT"
       ? canManage
-      : (action.status === "OPEN" || action.status === "IN_PROGRESS") && canSubmittedEditorEdit;
+      : (action.status === "OPEN" || action.status === "IN_PROGRESS") && canCollaborateOnSubmittedAction;
     const primaryTarget: ActionColumnStatus | null = action.status === "DRAFT" && canManage
       ? "OPEN"
       : action.status === "OPEN"

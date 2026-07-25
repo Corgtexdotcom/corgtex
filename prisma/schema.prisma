@@ -1000,6 +1000,7 @@ model User {
   authoredActions               Action[]                              @relation("ActionAuthor")
   authoredTensions              Tension[]                             @relation("TensionAuthor")
   authoredProposals             Proposal[]                            @relation("ProposalAuthor")
+  authoredGoals                 Goal[]                                @relation("GoalAuthor")
   practiceContributionEntries   PracticeContributionEntry[]            @relation("PracticeContributionContributor")
   paidPracticeContributionEntries PracticeContributionEntry[]          @relation("PracticeContributionPaidBy")
   objections                    Objection[]
@@ -5216,6 +5217,7 @@ enum GoalLevel {
 model Goal {
   id               String      @id @default(uuid())
   workspaceId      String
+  authorUserId     String?
   parentGoalId     String?
   circleId         String?
   ownerMemberId    String?
@@ -5226,6 +5228,8 @@ model Goal {
   status           GoalStatus  @default(DRAFT)
   version          Int         @default(1)
   progressPercent  Int         @default(0)
+  isPrivate        Boolean     @default(false)
+  publishedAt      DateTime?
   targetDate       DateTime?
   startDate        DateTime?
   sortOrder        Int         @default(0)
@@ -5236,6 +5240,7 @@ model Goal {
   updatedAt        DateTime    @updatedAt
 
   workspace    Workspace     @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  author       User?         @relation("GoalAuthor", fields: [authorUserId], references: [id], onDelete: SetNull)
   parentGoal   Goal?         @relation("GoalTree", fields: [parentGoalId], references: [id], onDelete: SetNull)
   childGoals   Goal[]        @relation("GoalTree")
   circle       Circle?       @relation(fields: [circleId], references: [id], onDelete: SetNull)
@@ -5248,6 +5253,7 @@ model Goal {
   @@index([workspaceId, level, cadence])
   @@index([workspaceId, status])
   @@index([workspaceId, archivedAt])
+  @@index([authorUserId])
   @@index([parentGoalId])
   @@index([circleId])
   @@index([ownerMemberId])

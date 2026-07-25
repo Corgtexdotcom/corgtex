@@ -63,13 +63,21 @@ export async function createGoalFormAction(formData: FormData) {
 
   const actor = await requirePageActor();
   const workspaceId = await requireGoalsEnabled(formData);
+  const submittedIntent = asOptional(formData, "intent");
+  const statusFromForm = formData.has("status") ? asString(formData, "status") as GoalStatus : undefined;
+  const status = submittedIntent === "open"
+    ? "ACTIVE"
+    : submittedIntent === "draft"
+      ? "DRAFT"
+      : statusFromForm ?? "DRAFT";
   await createGoal(actor, {
     workspaceId,
     title: asString(formData, "title"),
     descriptionMd: asOptional(formData, "descriptionMd"),
     level: asString(formData, "level") as GoalLevel,
     cadence: asString(formData, "cadence") as GoalCadence,
-    status: (asOptional(formData, "status") as GoalStatus | null) ?? "DRAFT",
+    status,
+    isPrivate: status === "DRAFT",
     startDate: optionalDate(formData, "startDate"),
     targetDate: optionalDate(formData, "targetDate"),
     parentGoalId: asOptional(formData, "parentGoalId"),

@@ -9,6 +9,7 @@ import { loadAdviceRequestCountSummaries } from "./advice-requests";
 import { invariant } from "./errors";
 import { humanMemberIdentityWhere } from "./member-identity";
 import { requireDraftManager } from "./draft-permissions";
+import { requireCollaborativeWorkItemEditor } from "./collaborative-permissions";
 import { resolveWorkspaceProposalLink } from "./proposal-links";
 import { createWorkItemEvidenceLinks } from "./work-item-evidence";
 import { ensureWorkspacePermalink, workspaceEntityCanonicalPath } from "./permalinks";
@@ -22,7 +23,6 @@ import {
   changedDataFields,
   pickJsonSnapshot,
   recordWorkItemVersion,
-  requireSubmittedWorkItemEditor,
   resolveWorkspaceMemberUserId,
 } from "./work-item-versions";
 
@@ -84,6 +84,10 @@ function nullableDateRangeWhere(from?: Date, to?: Date): Prisma.DateTimeNullable
 
 function listFilterValues(values?: readonly (string | null | undefined)[] | null) {
   return [...new Set((values ?? []).map((value) => value?.trim()).filter((value): value is string => Boolean(value)))];
+}
+
+function isPrismaNotFoundError(error: unknown) {
+  return typeof error === "object" && error !== null && "code" in error && (error as { code?: string }).code === "P2025";
 }
 
 function appendActionWhereAnd(where: Prisma.ActionWhereInput, condition: Prisma.ActionWhereInput) {
@@ -168,8 +172,40 @@ async function requireEditableActionForChecklist(
     await requireDraftManager({ actor, workspaceId, record: action, resolvedMembership: membership });
   } else {
     invariant(action.status === "OPEN" || action.status === "IN_PROGRESS", 400, "INVALID_STATE", "Only draft, open, or in-progress actions can change checklists.");
-    requireSubmittedWorkItemEditor(actor, membership, action);
+    requireCollaborativeWorkItemEditor(actor, membership, action);
   }
+  return action;
+}
+
+async function lockEditableActionForChecklistMutation(
+  tx: Prisma.TransactionClient,
+  actor: AppActor,
+  membership: import("@corgtex/shared").MembershipSummary | null,
+  workspaceId: string,
+  actionId: string,
+) {
+  const action = await requireEditableActionForChecklist(tx, actor, membership, workspaceId, actionId);
+  const updateWhere: Record<string, unknown> = {
+    id: action.id,
+    workspaceId,
+    archivedAt: null,
+    status: action.status,
+    isPrivate: action.isPrivate ?? false,
+    version: action.version,
+  };
+
+  try {
+    await tx.action.update({
+      where: updateWhere as Prisma.ActionWhereUniqueInput,
+      data: { updatedAt: new Date() },
+    });
+  } catch (error) {
+    if (isPrismaNotFoundError(error)) {
+      invariant(false, 409, "CONFLICT", "Action changed while editing. Refresh and try again.");
+    }
+    throw error;
+  }
+
   return action;
 }
 
@@ -340,7 +376,7 @@ export async function createActionChecklistItem(actor: AppActor, params: {
   invariant(title.length > 0, 400, "INVALID_INPUT", "Checklist item title is required.");
 
   return prisma.$transaction(async (tx) => {
-    await requireEditableActionForChecklist(tx, actor, membership, params.workspaceId, params.actionId);
+    await lockEditableActionForChecklistMutation(tx, actor, membership, params.workspaceId, params.actionId);
     const lastItem = await tx.actionChecklistItem.findFirst({
       where: {
         workspaceId: params.workspaceId,
@@ -393,7 +429,7 @@ export async function updateActionChecklistItem(actor: AppActor, params: {
       },
     });
     invariant(existing, 404, "NOT_FOUND", "Checklist item not found.");
-    await requireEditableActionForChecklist(tx, actor, membership, params.workspaceId, existing.actionId);
+    await lockEditableActionForChecklistMutation(tx, actor, membership, params.workspaceId, existing.actionId);
 
     const data: Prisma.ActionChecklistItemUpdateInput = {};
     if (params.title !== undefined) {
@@ -454,7 +490,7 @@ export async function deleteActionChecklistItem(actor: AppActor, params: {
       },
     });
     invariant(existing, 404, "NOT_FOUND", "Checklist item not found.");
-    await requireEditableActionForChecklist(tx, actor, membership, params.workspaceId, existing.actionId);
+    await lockEditableActionForChecklistMutation(tx, actor, membership, params.workspaceId, existing.actionId);
 
     await tx.actionChecklistItem.delete({ where: { id: existing.id } });
     await recordAudit(tx, actor, {
@@ -646,7 +682,7 @@ export async function updateAction(actor: AppActor, params: {
         await requireDraftManager({ actor, workspaceId: params.workspaceId, record: action, resolvedMembership: membership });
       } else {
         invariant(action.status === "OPEN" || action.status === "IN_PROGRESS", 400, "INVALID_STATE", "Only draft, open, or in-progress actions can be edited.");
-        requireSubmittedWorkItemEditor(actor, membership, action);
+        requireCollaborativeWorkItemEditor(actor, membership, action);
       }
     }
     if (params.isPrivate !== undefined) {
@@ -724,10 +760,27 @@ export async function updateAction(actor: AppActor, params: {
     const changedUpdateFields = changedDataFields(action as unknown as Record<string, unknown>, data);
     if (changedUpdateFields.length === 0) return action;
 
-    const updated = await tx.action.update({
-      where: { id: params.actionId },
-      data,
-    });
+    const updateWhere: Record<string, unknown> = {
+      id: params.actionId,
+      workspaceId: params.workspaceId,
+      archivedAt: null,
+      status: action.status,
+    };
+    if (action.isPrivate !== undefined) updateWhere.isPrivate = action.isPrivate ?? false;
+    if (action.version !== undefined) updateWhere.version = action.version;
+
+    let updated;
+    try {
+      updated = await tx.action.update({
+        where: updateWhere as Prisma.ActionWhereUniqueInput,
+        data,
+      });
+    } catch (error) {
+      if (isPrismaNotFoundError(error)) {
+        invariant(false, 409, "CONFLICT", "Action changed while editing. Refresh and try again.");
+      }
+      throw error;
+    }
 
     const evidenceDocumentIds = params.status === "COMPLETED"
       ? await createWorkItemEvidenceLinks(tx, {

@@ -209,6 +209,7 @@ async function assertCanReadWorkItemVersions(
     where: {
       id: params.entityId,
       workspaceId: params.workspaceId,
+      ...privacyFilter(actor, membership),
     },
     select: { id: true, version: true },
   });

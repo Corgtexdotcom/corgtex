@@ -289,6 +289,51 @@ function jsonSnapshot(record: unknown) {
   return JSON.parse(JSON.stringify(record)) as Record<string, unknown>;
 }
 
+async function recomputeGoalProgressInTransaction(tx: Prisma.TransactionClient, goalId: string) {
+  const goal = await tx.goal.findUnique({
+    where: { id: goalId },
+    include: {
+      keyResults: true,
+      childGoals: {
+        where: {
+          archivedAt: null,
+          NOT: {
+            isPrivate: true,
+            status: "DRAFT",
+          },
+        },
+      },
+    },
+  });
+  if (!goal) return;
+
+  let computedProgress = goal.progressPercent;
+  if (goal.keyResults.length > 0) {
+    const total = goal.keyResults.reduce((acc, kr) => acc + kr.progressPercent, 0);
+    computedProgress = Math.round(total / goal.keyResults.length);
+  } else if (goal.childGoals.length > 0) {
+    const total = goal.childGoals.reduce((acc, childGoal) => acc + childGoal.progressPercent, 0);
+    computedProgress = Math.round(total / goal.childGoals.length);
+  }
+
+  if (computedProgress !== goal.progressPercent) {
+    await tx.goal.update({
+      where: { id: goalId },
+      data: { progressPercent: computedProgress },
+    });
+    if (goal.parentGoalId) {
+      await recomputeGoalProgressInTransaction(tx, goal.parentGoalId);
+    }
+  }
+}
+
+async function recomputeGoalParentProgressForArchiveTransition(tx: Prisma.TransactionClient, record: any) {
+  const parentGoalId = typeof record.parentGoalId === "string" ? record.parentGoalId : null;
+  if (parentGoalId) {
+    await recomputeGoalProgressInTransaction(tx, parentGoalId);
+  }
+}
+
 async function findRecord(tx: Prisma.TransactionClient | typeof prisma, config: ArchiveConfig, workspaceId: string, entityId: string) {
   const record = await delegate(tx, config).findFirst({
     where: config.findWhere(workspaceId, entityId),
@@ -362,6 +407,9 @@ export async function archiveWorkspaceArtifact(actor: AppActor, params: {
         ...(config.archiveData ? config.archiveData(record) : {}),
       },
     });
+    if (config.entityType === "Goal") {
+      await recomputeGoalParentProgressForArchiveTransition(tx, record);
+    }
 
     if (isWorkspacePermalinkEntityType(config.entityType)) {
       await ensureWorkspacePermalink(tx, actor, {
@@ -441,6 +489,9 @@ export async function restoreWorkspaceArtifact(actor: AppActor, params: {
         ...(config.restoreData ? config.restoreData(previousState) : {}),
       },
     });
+    if (config.entityType === "Goal") {
+      await recomputeGoalParentProgressForArchiveTransition(tx, updated);
+    }
 
     if (archiveRecord) {
       await tx.workspaceArchiveRecord.update({

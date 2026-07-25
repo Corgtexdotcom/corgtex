@@ -8,6 +8,7 @@ import { loadAdviceRequestCountSummaries } from "./advice-requests";
 import { invariant } from "./errors";
 import { humanMemberIdentityWhere } from "./member-identity";
 import { requireDraftManager } from "./draft-permissions";
+import { requireCollaborativeWorkItemEditor } from "./collaborative-permissions";
 import { resolveWorkspaceProposalLink } from "./proposal-links";
 import { createWorkItemEvidenceLinks } from "./work-item-evidence";
 import { ensureWorkspacePermalink, workspaceEntityCanonicalPath } from "./permalinks";
@@ -21,13 +22,16 @@ import {
   changedDataFields,
   pickJsonSnapshot,
   recordWorkItemVersion,
-  requireSubmittedWorkItemEditor,
   resolveWorkspaceMemberUserId,
 } from "./work-item-versions";
 
 import { privacyFilter } from "./privacy";
 
 type WorkItemSort = "priority" | "date" | "alpha";
+
+function isPrismaNotFoundError(error: unknown) {
+  return typeof error === "object" && error !== null && "code" in error && (error as { code?: string }).code === "P2025";
+}
 
 type CreateTensionParams = {
   workspaceId: string;
@@ -398,7 +402,7 @@ export async function updateTension(actor: AppActor, params: {
         await requireDraftManager({ actor, workspaceId: params.workspaceId, record: tension, resolvedMembership: membership });
       } else {
         invariant(tension.status === "OPEN", 400, "INVALID_STATE", "Only draft or open tensions can be edited.");
-        requireSubmittedWorkItemEditor(actor, membership, tension);
+        requireCollaborativeWorkItemEditor(actor, membership, tension);
       }
     }
     if (params.isPrivate !== undefined) {
@@ -480,10 +484,27 @@ export async function updateTension(actor: AppActor, params: {
     const changedUpdateFields = changedDataFields(tension as unknown as Record<string, unknown>, data);
     if (changedUpdateFields.length === 0) return tension;
 
-    const updated = await tx.tension.update({
-      where: { id: params.tensionId },
-      data,
-    });
+    const updateWhere: Record<string, unknown> = {
+      id: params.tensionId,
+      workspaceId: params.workspaceId,
+      archivedAt: null,
+      status: tension.status,
+    };
+    if (tension.isPrivate !== undefined) updateWhere.isPrivate = tension.isPrivate ?? false;
+    if (tension.version !== undefined) updateWhere.version = tension.version;
+
+    let updated;
+    try {
+      updated = await tx.tension.update({
+        where: updateWhere as Prisma.TensionWhereUniqueInput,
+        data,
+      });
+    } catch (error) {
+      if (isPrismaNotFoundError(error)) {
+        invariant(false, 409, "CONFLICT", "Tension changed while editing. Refresh and try again.");
+      }
+      throw error;
+    }
 
     const evidenceDocumentIds = params.status === "RESOLVED"
       ? await createWorkItemEvidenceLinks(tx, {

@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { AppActor } from "@corgtex/shared";
 
-const { prismaMock } = vi.hoisted(() => {
+const { prismaMock, requireWorkspaceMembershipMock } = vi.hoisted(() => {
   const prisma = {
     $transaction: vi.fn(),
     $executeRaw: vi.fn(),
@@ -55,7 +55,10 @@ const { prismaMock } = vi.hoisted(() => {
       createMany: vi.fn(),
     },
   };
-  return { prismaMock: prisma };
+  return {
+    prismaMock: prisma,
+    requireWorkspaceMembershipMock: vi.fn(),
+  };
 });
 
 vi.mock("@corgtex/shared", () => ({
@@ -64,6 +67,10 @@ vi.mock("@corgtex/shared", () => ({
   env: {
     SESSION_LAST_SEEN_WRITE_INTERVAL_MS: 5 * 60 * 1000,
   },
+}));
+
+vi.mock("./auth", () => ({
+  requireWorkspaceMembership: requireWorkspaceMembershipMock,
 }));
 
 const actor: AppActor = {
@@ -94,6 +101,13 @@ describe("meetings domain", () => {
     prismaMock.meetingSeries.update.mockResolvedValue({});
     prismaMock.meeting.updateMany.mockResolvedValue({ count: 0 });
     prismaMock.workflowJob.upsert.mockResolvedValue({ id: "job-1" });
+    requireWorkspaceMembershipMock.mockResolvedValue({
+      id: "member-1",
+      workspaceId: "workspace-1",
+      userId: "operator-1",
+      role: "ADMIN",
+      isActive: true,
+    });
   });
 
   it("listMeetings returns meetings newest first", async () => {
@@ -838,7 +852,7 @@ describe("meetings domain", () => {
     }));
   });
 
-  it("uploadMeetingTranscript updates a matching completed meeting and merges guidance", async () => {
+  it("uploadMeetingTranscript rejects appending to an existing source transcript", async () => {
     const recordedAt = new Date("2026-04-30T17:10:00.000Z");
     prismaMock.meeting.findMany.mockResolvedValue([
       {
@@ -861,15 +875,6 @@ describe("meetings domain", () => {
       participantIds: ["member-1"],
       participantEmails: ["jan@example.com"],
     });
-    prismaMock.meeting.update.mockResolvedValue({
-      id: "completed-1",
-      workspaceId: "workspace-1",
-      title: "Weekly Tactical",
-      source: "chat-transcript-upload",
-      status: "COMPLETED",
-      recordedAt,
-      transcript: "merged",
-    });
 
     const { uploadMeetingTranscript } = await import("./meetings");
     await expect(uploadMeetingTranscript(actor, {
@@ -880,23 +885,13 @@ describe("meetings domain", () => {
       transcript: "Andy: Added a new personal note.",
       participantEmails: ["andy@example.com"],
       ingestionGuidanceMd: "Extract Andy's personal note.",
-    })).resolves.toMatchObject({
-      status: "matched",
-      meeting: { id: "completed-1" },
+    })).rejects.toMatchObject({
+      status: 400,
+      code: "INVALID_STATE",
     });
 
-    expect(prismaMock.meeting.update).toHaveBeenCalledWith(expect.objectContaining({
-      where: { id: "completed-1" },
-      data: expect.objectContaining({
-        transcript: "Jan: Existing transcript.\n\n---\nAdditional transcript upload:\nAndy: Added a new personal note.",
-        summaryMd: "Existing summary",
-        ingestionGuidanceMd: "Preserve decisions.\n\nAdditional guidance:\nExtract Andy's personal note.",
-        participantIds: ["member-1"],
-        participantEmails: ["jan@example.com", "andy@example.com"],
-        aiProcessedAt: null,
-      }),
-    }));
-    expect(prismaMock.event.createMany).toHaveBeenCalled();
+    expect(prismaMock.meeting.update).not.toHaveBeenCalled();
+    expect(prismaMock.event.createMany).not.toHaveBeenCalled();
   });
 
   it("uploadMeetingTranscript does not directly match recurring meetings by URL alone", async () => {
@@ -1055,7 +1050,7 @@ describe("meetings domain", () => {
     }));
   });
 
-  it("uploadMeetingTranscript preserves an existing summary when a replacement has none", async () => {
+  it("uploadMeetingTranscript rejects replacing an existing source transcript", async () => {
     const recordedAt = new Date("2026-04-30T17:10:00.000Z");
     prismaMock.meeting.findFirst
       .mockResolvedValueOnce({ id: "completed-1" })
@@ -1068,15 +1063,6 @@ describe("meetings domain", () => {
         participantIds: [],
         participantEmails: [],
       });
-    prismaMock.meeting.update.mockResolvedValue({
-      id: "completed-1",
-      workspaceId: "workspace-1",
-      title: "Weekly Tactical",
-      source: "chat-transcript-upload",
-      status: "COMPLETED",
-      recordedAt,
-      transcript: "Replacement transcript",
-    });
 
     const { uploadMeetingTranscript } = await import("./meetings");
     await expect(uploadMeetingTranscript(actor, {
@@ -1087,18 +1073,12 @@ describe("meetings domain", () => {
       recordedAt,
       transcript: "Replacement transcript",
       replaceTranscript: true,
-    })).resolves.toMatchObject({
-      status: "matched",
-      meeting: { id: "completed-1" },
+    })).rejects.toMatchObject({
+      status: 400,
+      code: "INVALID_STATE",
     });
 
-    expect(prismaMock.meeting.update).toHaveBeenCalledWith(expect.objectContaining({
-      where: { id: "completed-1" },
-      data: expect.objectContaining({
-        transcript: "Replacement transcript",
-        summaryMd: "Existing summary",
-      }),
-    }));
+    expect(prismaMock.meeting.update).not.toHaveBeenCalled();
   });
 
   it("uploadMeetingTranscript links source records before transcript processing is queued", async () => {
@@ -1108,7 +1088,7 @@ describe("meetings domain", () => {
       .mockResolvedValueOnce({
         id: "completed-1",
         title: "Weekly Tactical",
-        transcript: "Jan: Existing transcript.",
+        transcript: null,
         summaryMd: null,
         ingestionGuidanceMd: null,
         participantIds: [],
@@ -1125,7 +1105,7 @@ describe("meetings domain", () => {
       source: "meeting-transcript:fireflies",
       status: "COMPLETED",
       recordedAt,
-      transcript: "Replacement transcript",
+      transcript: "Transcript text",
       ingestionGuidanceMd: null,
     });
 
@@ -1136,9 +1116,8 @@ describe("meetings domain", () => {
       title: "Weekly Tactical",
       source: "meeting-transcript:fireflies",
       recordedAt,
-      transcript: "Replacement transcript",
+      transcript: "Transcript text",
       sourceRecordId: "source-record-1",
-      replaceTranscript: true,
     })).resolves.toMatchObject({
       status: "matched",
       meeting: { id: "completed-1" },
@@ -1238,6 +1217,203 @@ describe("meetings domain", () => {
       },
     });
     expect(prismaMock.event.createMany).toHaveBeenCalled();
+  });
+
+  it("updateMeetingProcessedContent lets an active member edit summary and guidance", async () => {
+    requireWorkspaceMembershipMock.mockResolvedValueOnce({
+      id: "member-2",
+      workspaceId: "workspace-1",
+      userId: "member-2-user",
+      role: "MEMBER",
+      isActive: true,
+    });
+    prismaMock.meeting.findFirst.mockResolvedValue({
+      id: "meeting-1",
+      title: "Weekly Tactical",
+      summaryMd: "Old summary",
+      ingestionGuidanceMd: "Old guidance",
+      transcriptProcessingProgress: null,
+    });
+    prismaMock.meeting.update.mockResolvedValue({
+      id: "meeting-1",
+      title: "Weekly Tactical",
+      summaryMd: "New summary",
+      ingestionGuidanceMd: "New guidance",
+    });
+
+    const { updateMeetingProcessedContent } = await import("./meetings");
+    await expect(updateMeetingProcessedContent({
+      kind: "user",
+      user: {
+        id: "member-2-user",
+        email: "member@example.com",
+        displayName: "Member",
+        globalRole: "USER",
+      },
+    }, {
+      workspaceId: "workspace-1",
+      meetingId: "meeting-1",
+      summaryMd: " New summary ",
+      ingestionGuidanceMd: " New guidance ",
+    })).resolves.toMatchObject({
+      id: "meeting-1",
+      summaryMd: "New summary",
+      ingestionGuidanceMd: "New guidance",
+    });
+
+    expect(prismaMock.meeting.update).toHaveBeenCalledWith({
+      where: expect.objectContaining({
+        id: "meeting-1",
+        workspaceId: "workspace-1",
+        summaryMd: "Old summary",
+        ingestionGuidanceMd: "Old guidance",
+      }),
+      data: {
+        summaryMd: "New summary",
+        ingestionGuidanceMd: "New guidance",
+      },
+    });
+    expect(prismaMock.auditLog.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        actorUserId: "member-2-user",
+        action: "meeting.processed_content_updated",
+      }),
+    }));
+    expect(prismaMock.event.createMany).toHaveBeenCalledWith({
+      data: [
+        expect.objectContaining({
+          workspaceId: "workspace-1",
+          type: "meeting.processed-content-updated",
+          aggregateType: "Meeting",
+          aggregateId: "meeting-1",
+          payload: expect.objectContaining({
+            meetingId: "meeting-1",
+            editedSummary: true,
+          }),
+        }),
+      ],
+    });
+  });
+
+  it("updateMeetingProcessedContent rejects stale original values", async () => {
+    requireWorkspaceMembershipMock.mockResolvedValueOnce({
+      id: "member-2",
+      workspaceId: "workspace-1",
+      userId: "member-2-user",
+      role: "MEMBER",
+      isActive: true,
+    });
+    prismaMock.meeting.findFirst.mockResolvedValue({
+      id: "meeting-1",
+      title: "Weekly Tactical",
+      summaryMd: "Fresh summary",
+      ingestionGuidanceMd: "Old guidance",
+      transcriptProcessingProgress: null,
+    });
+
+    const { updateMeetingProcessedContent } = await import("./meetings");
+    await expect(updateMeetingProcessedContent({
+      kind: "user",
+      user: {
+        id: "member-2-user",
+        email: "member@example.com",
+        displayName: "Member",
+        globalRole: "USER",
+      },
+    }, {
+      workspaceId: "workspace-1",
+      meetingId: "meeting-1",
+      summaryMd: "New summary",
+      expectedSummaryMd: "Old summary",
+    })).rejects.toMatchObject({
+      status: 409,
+      code: "CONFLICT",
+    });
+
+    expect(prismaMock.meeting.update).not.toHaveBeenCalled();
+    expect(prismaMock.event.createMany).not.toHaveBeenCalled();
+  });
+
+  it("updateMeetingProcessedContent rejects edits while transcript processing is active", async () => {
+    requireWorkspaceMembershipMock.mockResolvedValueOnce({
+      id: "member-2",
+      workspaceId: "workspace-1",
+      userId: "member-2-user",
+      role: "MEMBER",
+      isActive: true,
+    });
+    prismaMock.meeting.findFirst.mockResolvedValue({
+      id: "meeting-1",
+      title: "Weekly Tactical",
+      summaryMd: "Old summary",
+      ingestionGuidanceMd: "Old guidance",
+      transcriptProcessingProgress: {
+        currentStage: "SUMMARIZING",
+        completedAt: null,
+        failedAt: null,
+      },
+    });
+
+    const { updateMeetingProcessedContent } = await import("./meetings");
+    await expect(updateMeetingProcessedContent({
+      kind: "user",
+      user: {
+        id: "member-2-user",
+        email: "member@example.com",
+        displayName: "Member",
+        globalRole: "USER",
+      },
+    }, {
+      workspaceId: "workspace-1",
+      meetingId: "meeting-1",
+      summaryMd: "Manual summary",
+    })).rejects.toMatchObject({
+      status: 400,
+      code: "INVALID_STATE",
+    });
+
+    expect(prismaMock.meeting.update).not.toHaveBeenCalled();
+    expect(prismaMock.event.createMany).not.toHaveBeenCalled();
+  });
+
+  it("updateMeetingProcessedContent rejects transcript edits before processing starts", async () => {
+    requireWorkspaceMembershipMock.mockResolvedValueOnce({
+      id: "member-2",
+      workspaceId: "workspace-1",
+      userId: "member-2-user",
+      role: "MEMBER",
+      isActive: true,
+    });
+    prismaMock.meeting.findFirst.mockResolvedValue({
+      id: "meeting-1",
+      title: "Weekly Tactical",
+      transcript: "Jan: We need a cleaner intake path.",
+      summaryMd: null,
+      ingestionGuidanceMd: null,
+      aiProcessedAt: null,
+      transcriptProcessingProgress: null,
+    });
+
+    const { updateMeetingProcessedContent } = await import("./meetings");
+    await expect(updateMeetingProcessedContent({
+      kind: "user",
+      user: {
+        id: "member-2-user",
+        email: "member@example.com",
+        displayName: "Member",
+        globalRole: "USER",
+      },
+    }, {
+      workspaceId: "workspace-1",
+      meetingId: "meeting-1",
+      summaryMd: "Manual summary",
+    })).rejects.toMatchObject({
+      status: 400,
+      code: "INVALID_STATE",
+    });
+
+    expect(prismaMock.meeting.update).not.toHaveBeenCalled();
+    expect(prismaMock.event.createMany).not.toHaveBeenCalled();
   });
 
   it("deleteMeeting archives an existing meeting with a provided reason", async () => {

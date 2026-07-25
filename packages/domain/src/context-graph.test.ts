@@ -505,6 +505,26 @@ describe("context graph domain", () => {
     expect(context.permissions.canApprove).toBe(true);
   });
 
+  it("does not return archived graph objects when selected directly", async () => {
+    prismaMock.contextGraphObject.findMany.mockResolvedValueOnce([{
+      id: "goal-graph-1",
+      workspaceId: "ws-1",
+      objectType: "Goal",
+      title: "Private draft goal",
+      status: "archived",
+      properties: {},
+    }]);
+
+    await expect(buildSelectedRegionContext(actor, {
+      workspaceId: "ws-1",
+      objectIds: ["goal-graph-1"],
+      depth: 0,
+    })).rejects.toMatchObject({ code: "NOT_FOUND" });
+
+    expect(prismaMock.contextGraphRelationship.findMany).not.toHaveBeenCalled();
+    expect(prismaMock.contextGraphEvidenceRef.findMany).not.toHaveBeenCalled();
+  });
+
   it("ranks critical-path context around blockers, owners, evidence, and gaps", async () => {
     prismaMock.contextGraphObject.findMany
       .mockResolvedValueOnce([{

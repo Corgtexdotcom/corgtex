@@ -75,6 +75,7 @@ describe("goal mutation tool", () => {
         workspaceId: "ws-1",
         title: "Transform 1,000 businesses",
         cadence: "TEN_YEAR",
+        status: "ACTIVE",
         keyResults: [{ title: "Acquire first pilot", targetValue: 1, currentValue: 0 }],
         duplicateGuard: { onExact: "use_existing" },
       }),

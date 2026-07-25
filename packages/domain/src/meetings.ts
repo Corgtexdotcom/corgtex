@@ -8,6 +8,7 @@ import { requireWorkspaceMembership } from "./auth";
 import { archiveFilterWhere, archiveWorkspaceArtifact, type ArchiveFilter } from "./archive";
 import { ensureWorkspacePermalink, workspaceEntityCanonicalPath } from "./permalinks";
 import { invariant } from "./errors";
+import { requireMeetingProcessedContentEditor } from "./collaborative-permissions";
 import { extractSupportedMeetingUrlFromText, meetingUrlHash, normalizeMeetingUrl, normalizeRecorderMeetingUrl } from "./meeting-urls";
 import { resetMeetingTranscriptProcessingProgress } from "./meeting-transcript-processing";
 import {
@@ -100,6 +101,14 @@ function mergeMarkdownNote(existing?: string | null, incoming?: string | null) {
   if (!current) return next;
   if (current.includes(next)) return current;
   return `${current}\n\nAdditional guidance:\n${next}`;
+}
+
+function normalizeProcessedContentValue(value: string | null | undefined) {
+  return value?.trim() || null;
+}
+
+function isPrismaNotFoundError(error: unknown) {
+  return typeof error === "object" && error !== null && "code" in error && (error as { code?: string }).code === "P2025";
 }
 
 function chooseMergedTitle(existing?: string | null, incoming?: string | null) {
@@ -466,6 +475,7 @@ async function updateMeetingWithTranscriptTx(
     meetingUrl?: string | null;
     sourceRecordId?: string | null;
     replaceTranscript?: boolean;
+    allowTranscriptAppend?: boolean;
   }
 ) {
   const existing = await tx.meeting.findFirst({
@@ -487,6 +497,16 @@ async function updateMeetingWithTranscriptTx(
   });
   invariant(existing, 404, "NOT_FOUND", "Meeting not found.");
 
+  const hasExistingTranscript = Boolean(existing.transcript?.trim());
+  const trustedTranscriptAppend = params.allowTranscriptAppend === true
+    && actor.kind === "agent"
+    && params.source?.startsWith("recorder:");
+  invariant(
+    !hasExistingTranscript || (trustedTranscriptAppend && !params.replaceTranscript),
+    400,
+    "INVALID_STATE",
+    "Meeting already has source transcript evidence. Edit the processed summary or guidance instead.",
+  );
   const transcript = params.replaceTranscript ? params.transcript.trim() : mergeTranscript(existing.transcript, params.transcript);
   const ingestionGuidanceMd = mergeMarkdownNote(existing.ingestionGuidanceMd, params.ingestionGuidanceMd);
   const participantIds = normalizeIds([
@@ -1121,6 +1141,7 @@ export async function uploadMeetingTranscript(actor: AppActor, params: {
   participantEmails?: string[] | null;
   sourceRecordId?: string | null;
   replaceTranscript?: boolean;
+  allowTranscriptAppend?: boolean;
   duplicateGuard?: DuplicateGuardOptions | null;
 }) {
   await requireWorkspaceMembership({
@@ -1214,10 +1235,11 @@ export async function requestMeetingIntelligenceRegeneration(actor: AppActor, pa
   meetingId: string;
   guidanceMd: string;
 }) {
-  await requireWorkspaceMembership({
+  const membership = await requireWorkspaceMembership({
     actor,
     workspaceId: params.workspaceId,
   });
+  requireMeetingProcessedContentEditor(actor, membership);
 
   const guidanceMd = params.guidanceMd.trim();
   invariant(guidanceMd.length > 0, 400, "INVALID_INPUT", "Tell the AI what is missing or should change before regenerating meeting intelligence.");
@@ -1288,6 +1310,132 @@ export async function requestMeetingIntelligenceRegeneration(actor: AppActor, pa
         },
       },
     ]);
+
+    return meeting;
+  });
+}
+
+export async function updateMeetingProcessedContent(actor: AppActor, params: {
+  workspaceId: string;
+  meetingId: string;
+  summaryMd?: string | null;
+  ingestionGuidanceMd?: string | null;
+  expectedSummaryMd?: string | null;
+  expectedIngestionGuidanceMd?: string | null;
+}) {
+  const membership = await requireWorkspaceMembership({
+    actor,
+    workspaceId: params.workspaceId,
+  });
+  requireMeetingProcessedContentEditor(actor, membership);
+
+  const editsSummary = params.summaryMd !== undefined;
+  const editsGuidance = params.ingestionGuidanceMd !== undefined;
+  invariant(editsSummary || editsGuidance, 400, "INVALID_INPUT", "Meeting summary or guidance is required.");
+
+  return prisma.$transaction(async (tx) => {
+    const existing = await tx.meeting.findFirst({
+      where: { id: params.meetingId, workspaceId: params.workspaceId, archivedAt: null },
+      select: {
+        id: true,
+        title: true,
+        transcript: true,
+        summaryMd: true,
+        ingestionGuidanceMd: true,
+        aiProcessedAt: true,
+        transcriptProcessingProgress: {
+          select: {
+            currentStage: true,
+            completedAt: true,
+            failedAt: true,
+          },
+        },
+      },
+    });
+    invariant(existing, 404, "NOT_FOUND", "Meeting not found.");
+    const processingActive = existing.transcriptProcessingProgress
+      && !existing.transcriptProcessingProgress.completedAt
+      && !existing.transcriptProcessingProgress.failedAt
+      && existing.transcriptProcessingProgress.currentStage !== "READY";
+    invariant(!processingActive, 400, "INVALID_STATE", "Processed meeting content can be edited after transcript processing finishes.");
+    const transcriptProcessingQueued = Boolean(existing.transcript)
+      && !existing.aiProcessedAt
+      && !existing.transcriptProcessingProgress;
+    invariant(!transcriptProcessingQueued, 400, "INVALID_STATE", "Processed meeting content can be edited after transcript processing starts or finishes.");
+
+    if (params.expectedSummaryMd !== undefined) {
+      invariant(
+        normalizeProcessedContentValue(params.expectedSummaryMd) === normalizeProcessedContentValue(existing.summaryMd),
+        409,
+        "CONFLICT",
+        "Meeting summary changed while editing. Refresh and try again.",
+      );
+    }
+    if (params.expectedIngestionGuidanceMd !== undefined) {
+      invariant(
+        normalizeProcessedContentValue(params.expectedIngestionGuidanceMd) === normalizeProcessedContentValue(existing.ingestionGuidanceMd),
+        409,
+        "CONFLICT",
+        "Meeting guidance changed while editing. Refresh and try again.",
+      );
+    }
+
+    const nextSummaryMd = editsSummary ? normalizeProcessedContentValue(params.summaryMd) : existing.summaryMd;
+    const nextGuidanceMd = editsGuidance ? normalizeProcessedContentValue(params.ingestionGuidanceMd) : existing.ingestionGuidanceMd;
+    const summaryChanged = editsSummary && nextSummaryMd !== existing.summaryMd;
+    const data: Prisma.MeetingUpdateInput = {};
+    if (editsSummary) data.summaryMd = nextSummaryMd;
+    if (editsGuidance) data.ingestionGuidanceMd = nextGuidanceMd;
+
+    let meeting: Awaited<ReturnType<typeof tx.meeting.update>>;
+    try {
+      meeting = await tx.meeting.update({
+        where: {
+          id: existing.id,
+          workspaceId: params.workspaceId,
+          archivedAt: null,
+          ...(editsSummary ? { summaryMd: existing.summaryMd } : {}),
+          ...(editsGuidance ? { ingestionGuidanceMd: existing.ingestionGuidanceMd } : {}),
+        },
+        data,
+      });
+    } catch (error) {
+      if (isPrismaNotFoundError(error)) {
+        invariant(false, 409, "CONFLICT", "Meeting processed content changed while editing. Refresh and try again.");
+      }
+      throw error;
+    }
+
+    await tx.auditLog.create({
+      data: {
+        workspaceId: params.workspaceId,
+        actorUserId: actor.kind === "user" ? actor.user.id : null,
+        action: "meeting.processed_content_updated",
+        entityType: "Meeting",
+        entityId: meeting.id,
+        meta: {
+          title: meeting.title,
+          editedSummary: editsSummary,
+          editedGuidance: editsGuidance,
+        },
+      },
+    });
+
+    if (summaryChanged) {
+      await appendEvents(tx, [
+        {
+          workspaceId: params.workspaceId,
+          type: "meeting.processed-content-updated",
+          aggregateType: "Meeting",
+          aggregateId: meeting.id,
+          payload: {
+            meetingId: meeting.id,
+            title: meeting.title,
+            editedSummary: true,
+          },
+        },
+      ]);
+    }
 
     return meeting;
   });

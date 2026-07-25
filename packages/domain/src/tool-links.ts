@@ -1,12 +1,16 @@
-import type { MemberRole, Prisma } from "@prisma/client";
+import type { Prisma } from "@prisma/client";
 import { decryptSecret, encryptSecret, prisma } from "@corgtex/shared";
 import type { AppActor, MembershipSummary } from "@corgtex/shared";
 import { actorUserIdForWorkspace, requireWorkspaceMembership } from "./auth";
 import { recordAudit } from "./audit-trail";
 import { archiveFilterWhere, archiveWorkspaceArtifact, type ArchiveFilter } from "./archive";
 import { AppError, invariant } from "./errors";
-
-const TOOL_LINK_MANAGER_ROLES = new Set<MemberRole>(["ADMIN", "FACILITATOR"]);
+import {
+  canEditToolLinkMetadata,
+  canManageToolLinkCredential,
+  requireToolLinkCredentialManager,
+  requireToolLinkMetadataEditor,
+} from "./collaborative-permissions";
 
 const toolLinkSelect = {
   id: true,
@@ -92,12 +96,6 @@ function normalizeSecret(value: string | null | undefined) {
   return trimmed && trimmed.length > 0 ? trimmed : null;
 }
 
-function canManageToolLink(actor: AppActor, membership: MembershipSummary | null | undefined, link: { createdByUserId: string | null }) {
-  if (actor.kind === "agent") return true;
-  if (membership && TOOL_LINK_MANAGER_ROLES.has(membership.role as MemberRole)) return true;
-  return Boolean(link.createdByUserId && link.createdByUserId === actor.user.id);
-}
-
 function serializeToolLink(
   actor: AppActor,
   membership: MembershipSummary | null | undefined,
@@ -126,7 +124,9 @@ function serializeToolLink(
       .map((tag) => tag.circle)
       .filter((circle) => !circle.archivedAt)
       .map((circle) => ({ id: circle.id, name: circle.name })),
-    canManage: canManageToolLink(actor, membership, link),
+    canManage: canEditToolLinkMetadata(actor, membership),
+    canManageCredentials: canManageToolLinkCredential(actor, membership, link),
+    canArchive: canManageToolLinkCredential(actor, membership, link),
   };
 }
 
@@ -280,7 +280,11 @@ export async function updateWorkspaceToolLink(actor: AppActor, params: {
       },
     });
     invariant(existing, 404, "NOT_FOUND", "Tool link not found.");
-    invariant(canManageToolLink(actor, membership, existing), 403, "FORBIDDEN", "Only the creator, facilitators, or admins can manage this tool link.");
+    requireToolLinkMetadataEditor(actor, membership);
+    const editsCredential = params.credentialLabel !== undefined || params.credentialSecret !== undefined;
+    if (editsCredential) {
+      requireToolLinkCredentialManager(actor, membership, existing);
+    }
 
     const data: Prisma.WorkspaceToolLinkUpdateInput = {};
     if (params.title !== undefined) data.title = normalizeTitle(params.title);
@@ -374,7 +378,7 @@ export async function revealWorkspaceToolLinkCredential(actor: AppActor, params:
   workspaceId: string;
   toolLinkId: string;
 }) {
-  await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
+  const membership = await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
 
   return prisma.$transaction(async (tx) => {
     const link = await tx.workspaceToolLink.findFirst({
@@ -386,11 +390,13 @@ export async function revealWorkspaceToolLinkCredential(actor: AppActor, params:
       select: {
         id: true,
         title: true,
+        createdByUserId: true,
         credentialLabel: true,
         credentialSecretEnc: true,
       },
     });
     invariant(link, 404, "NOT_FOUND", "Tool link not found.");
+    requireToolLinkCredentialManager(actor, membership, link);
 
     await recordAudit(tx, actor, {
       workspaceId: params.workspaceId,

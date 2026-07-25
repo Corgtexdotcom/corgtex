@@ -886,6 +886,8 @@ async function loadOperatingDigestInputs(params: {
       where: {
         workspaceId: params.workspaceId,
         archivedAt: null,
+        isPrivate: false,
+        status: { not: "DRAFT" },
         createdAt: beforeCutoff,
         updatedAt: beforeCutoff,
         OR: [

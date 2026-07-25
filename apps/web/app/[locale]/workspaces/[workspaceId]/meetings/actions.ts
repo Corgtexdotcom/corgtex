@@ -12,6 +12,7 @@ import {
   importMeetingInvite,
   intakeMeetingTranscript,
   requestMeetingIntelligenceRegeneration,
+  updateMeetingProcessedContent,
   requireWorkspaceMembership,
   replayWorkflowJob,
   dismissInsight,
@@ -109,6 +110,10 @@ function serializeFormList(value: string[] | null | undefined) {
 function optionalFormString(formData: FormData, key: string) {
   const value = asOptional(formData, key);
   return value && value.trim() ? value.trim() : null;
+}
+
+function normalizeProcessedContentFormValue(value: string | null | undefined) {
+  return value?.trim() || null;
 }
 
 type PendingTranscriptPayload = {
@@ -661,6 +666,36 @@ export async function regenerateMeetingIntelligenceAction(formData: FormData) {
     workspaceId,
     meetingId: asString(formData, "meetingId"),
     guidanceMd: asString(formData, "guidanceMd"),
+  });
+  refresh(workspaceId);
+}
+
+export async function updateMeetingProcessedContentAction(formData: FormData) {
+  const _demoGuardWsId = formData.get("workspaceId") as string;
+  if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
+
+  const actor = await requirePageActor();
+  const workspaceId = asString(formData, "workspaceId");
+  const summaryMd = normalizeProcessedContentFormValue(asOptional(formData, "summaryMd"));
+  const ingestionGuidanceMd = normalizeProcessedContentFormValue(asOptional(formData, "ingestionGuidanceMd"));
+  const expectedSummaryMd = normalizeProcessedContentFormValue(asOptional(formData, "originalSummaryMd"));
+  const expectedIngestionGuidanceMd = normalizeProcessedContentFormValue(asOptional(formData, "originalIngestionGuidanceMd"));
+  const updates: {
+    summaryMd?: string | null;
+    ingestionGuidanceMd?: string | null;
+  } = {};
+  if (summaryMd !== expectedSummaryMd) updates.summaryMd = summaryMd;
+  if (ingestionGuidanceMd !== expectedIngestionGuidanceMd) updates.ingestionGuidanceMd = ingestionGuidanceMd;
+  if (updates.summaryMd === undefined && updates.ingestionGuidanceMd === undefined) {
+    refresh(workspaceId);
+    return;
+  }
+  await updateMeetingProcessedContent(actor, {
+    workspaceId,
+    meetingId: asString(formData, "meetingId"),
+    ...updates,
+    expectedSummaryMd,
+    expectedIngestionGuidanceMd,
   });
   refresh(workspaceId);
 }

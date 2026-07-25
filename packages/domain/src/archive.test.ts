@@ -14,6 +14,12 @@ const { prismaMock, storageDeleteMock } = vi.hoisted(() => {
       update: vi.fn(),
       delete: vi.fn(),
     },
+    goal: {
+      findFirst: vi.fn(),
+      findUnique: vi.fn(),
+      update: vi.fn(),
+      delete: vi.fn(),
+    },
     approvalFlow: {
       findFirst: vi.fn(),
       update: vi.fn(),
@@ -74,6 +80,9 @@ describe("workspace archive domain", () => {
     prismaMock.approvalFlow.findFirst.mockResolvedValue(null);
     prismaMock.approvalFlow.update.mockResolvedValue({});
     prismaMock.approvalFlow.updateMany.mockResolvedValue({ count: 1 });
+    prismaMock.goal.findFirst.mockResolvedValue(null);
+    prismaMock.goal.findUnique.mockResolvedValue(null);
+    prismaMock.goal.update.mockResolvedValue({});
     prismaMock.workspaceArchiveRecord.create.mockResolvedValue({});
     prismaMock.workspaceArchiveRecord.update.mockResolvedValue({});
     prismaMock.workspacePermalink.findMany.mockResolvedValue([]);
@@ -150,6 +159,90 @@ describe("workspace archive domain", () => {
         status: "RESOLVED",
       }),
     }));
+  });
+
+  it("recomputes parent progress when goal children are archived", async () => {
+    const childGoal = {
+      id: "child-goal",
+      workspaceId: "workspace-1",
+      title: "Child goal",
+      archivedAt: null,
+      parentGoalId: "parent-goal",
+    };
+    prismaMock.goal.findFirst.mockResolvedValue(childGoal);
+    prismaMock.goal.update
+      .mockResolvedValueOnce({ ...childGoal, archivedAt: new Date("2026-04-25T12:00:00.000Z") })
+      .mockResolvedValueOnce({ id: "parent-goal", progressPercent: 20 });
+    prismaMock.goal.findUnique.mockResolvedValueOnce({
+      id: "parent-goal",
+      parentGoalId: null,
+      progressPercent: 80,
+      keyResults: [],
+      childGoals: [{ id: "remaining-child", progressPercent: 20 }],
+    });
+
+    const { archiveWorkspaceArtifact } = await import("./archive");
+    await archiveWorkspaceArtifact(actor, {
+      workspaceId: "workspace-1",
+      entityType: "Goal",
+      entityId: "child-goal",
+      reason: "completed elsewhere",
+    });
+
+    expect(prismaMock.goal.findUnique).toHaveBeenCalledWith(expect.objectContaining({
+      where: { id: "parent-goal" },
+      include: expect.objectContaining({
+        childGoals: expect.objectContaining({
+          where: expect.objectContaining({
+            archivedAt: null,
+          }),
+        }),
+      }),
+    }));
+    expect(prismaMock.goal.update).toHaveBeenNthCalledWith(2, {
+      where: { id: "parent-goal" },
+      data: { progressPercent: 20 },
+    });
+  });
+
+  it("recomputes parent progress when archived goal children are restored", async () => {
+    const childGoal = {
+      id: "child-goal",
+      workspaceId: "workspace-1",
+      title: "Child goal",
+      archivedAt: new Date("2026-04-25T12:00:00.000Z"),
+      parentGoalId: "parent-goal",
+    };
+    prismaMock.goal.findFirst.mockResolvedValue(childGoal);
+    prismaMock.workspaceArchiveRecord.findFirst.mockResolvedValue({
+      id: "archive-1",
+      previousState: { parentGoalId: "parent-goal" },
+    });
+    prismaMock.goal.update
+      .mockResolvedValueOnce({ ...childGoal, archivedAt: null })
+      .mockResolvedValueOnce({ id: "parent-goal", progressPercent: 60 });
+    prismaMock.goal.findUnique.mockResolvedValueOnce({
+      id: "parent-goal",
+      parentGoalId: null,
+      progressPercent: 20,
+      keyResults: [],
+      childGoals: [
+        { id: "remaining-child", progressPercent: 20 },
+        { id: "child-goal", progressPercent: 100 },
+      ],
+    });
+
+    const { restoreWorkspaceArtifact } = await import("./archive");
+    await restoreWorkspaceArtifact(actor, {
+      workspaceId: "workspace-1",
+      entityType: "Goal",
+      entityId: "child-goal",
+    });
+
+    expect(prismaMock.goal.update).toHaveBeenNthCalledWith(2, {
+      where: { id: "parent-goal" },
+      data: { progressPercent: 60 },
+    });
   });
 
   it("withdraws active proposal approval flows when proposals are archived", async () => {

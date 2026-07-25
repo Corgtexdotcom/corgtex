@@ -216,9 +216,8 @@ export default async function TensionsPage({
 
   function tensionControls(tension: TensionListItem) {
     const canManage = canManageTension(tension);
-    const canSubmittedEditorEdit = actor.kind === "user"
-      && (tension.authorUserId === actor.user.id || tension.assigneeMemberId === membership?.id);
-    const canEditContent = tension.status === "DRAFT" ? canManage : tension.status === "OPEN" && canSubmittedEditorEdit;
+    const canCollaborateOnSubmittedTension = !tension.isPrivate && (actor.kind === "agent" || Boolean(membership?.isActive));
+    const canEditContent = tension.status === "DRAFT" ? canManage : tension.status === "OPEN" && canCollaborateOnSubmittedTension;
     const canDraftProposal = !tension.proposal && (canManage || !tension.isPrivate);
     const primary = canManage && tension.status === "DRAFT" ? renderTensionMove(tension, "OPEN", { primary: true }) : !tension.isPrivate && tension.status === "OPEN" ? (
       <form action={upvoteTensionAction}>

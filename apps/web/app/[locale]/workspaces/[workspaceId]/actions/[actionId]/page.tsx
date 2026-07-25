@@ -139,11 +139,10 @@ export default async function ActionDetailPage({
       || (actorMemberId && entry.targetMemberId === actorMemberId)
       || (entry.targetCircleId && actorCircleIds.has(entry.targetCircleId)),
   );
-  const canSubmittedEditorEdit = actor.kind === "user"
-    && (action.authorUserId === actor.user.id || action.assigneeMemberId === membership?.id);
+  const canCollaborateOnSubmittedAction = !action.isPrivate && (actor.kind === "agent" || Boolean(membership?.isActive));
   const canEditContent = !isArchived && action.status === "DRAFT"
     ? canManage
-    : !isArchived && (action.status === "OPEN" || action.status === "IN_PROGRESS") && canSubmittedEditorEdit;
+    : !isArchived && (action.status === "OPEN" || action.status === "IN_PROGRESS") && canCollaborateOnSubmittedAction;
   const canRequestInput = !isArchived
     && (action.status === "OPEN" || action.status === "IN_PROGRESS")
     && !action.isPrivate

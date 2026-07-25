@@ -223,6 +223,7 @@ export async function intakeMeetingTranscript(actor: AppActor, params: {
   sourceRecordId?: string | null;
   batchMetadata?: Record<string, unknown> | null;
   replaceTranscript?: boolean;
+  allowTranscriptAppend?: boolean;
   createNewMeeting?: boolean;
   recordedAt?: Date | string | null;
   summaryMd?: string | null;
@@ -309,6 +310,7 @@ export async function intakeMeetingTranscript(actor: AppActor, params: {
     participantEmails: inferred.participantEmails,
     sourceRecordId: params.sourceRecordId ?? null,
     replaceTranscript: params.replaceTranscript,
+    allowTranscriptAppend: params.allowTranscriptAppend,
     duplicateGuard: params.duplicateGuard,
   });
 

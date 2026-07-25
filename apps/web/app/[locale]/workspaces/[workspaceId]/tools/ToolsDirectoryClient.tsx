@@ -56,6 +56,8 @@ type ToolLink = {
   createdBy: PersonSummary | null;
   circles: CircleOption[];
   canManage: boolean;
+  canManageCredentials: boolean;
+  canArchive: boolean;
 };
 
 type ExternalResource = {
@@ -621,6 +623,8 @@ export function ToolsDirectoryClient({
   async function submitForm(event: React.FormEvent) {
     event.preventDefault();
     setError(null);
+    const editingLink = editingId ? links.find((link) => link.id === editingId) ?? null : null;
+    const canSubmitCredentials = !editingId || Boolean(editingLink?.canManageCredentials);
 
     const payload: Record<string, unknown> = {
       title: form.title,
@@ -631,10 +635,12 @@ export function ToolsDirectoryClient({
       previewTitle: form.previewTitle,
       previewDescription: form.previewDescription,
       previewImageUrl: form.previewImageUrl,
-      credentialLabel: form.credentialLabel,
       circleIds: form.circleIds,
     };
-    if (form.credentialSecret.trim()) {
+    if (canSubmitCredentials) {
+      payload.credentialLabel = form.credentialLabel;
+    }
+    if (canSubmitCredentials && form.credentialSecret.trim()) {
       payload.credentialSecret = form.credentialSecret;
     }
 
@@ -1061,9 +1067,13 @@ export function ToolsDirectoryClient({
           {link.credentialLabel || t("credential")}
         </div>
         {secret === undefined ? (
-          <button type="button" className="secondary small" onClick={() => revealCredential(link)}>
-            {t("btnReveal")}
-          </button>
+          link.canManageCredentials ? (
+            <button type="button" className="secondary small" onClick={() => revealCredential(link)}>
+              {t("btnReveal")}
+            </button>
+          ) : (
+            <span className="muted" style={{ fontSize: "0.82rem" }}>{t("credentialConfigured")}</span>
+          )
         ) : (
           <TableActionGroup className="nr-token-copy-row">
             <input
@@ -1196,10 +1206,12 @@ export function ToolsDirectoryClient({
                       {t("btnOpen")}
                     </a>
                     {link.canManage && (
+                      <button type="button" className="secondary small" onClick={() => startEdit(link)}>
+                        {t("btnEdit")}
+                      </button>
+                    )}
+                    {link.canArchive && (
                       <>
-                        <button type="button" className="secondary small" onClick={() => startEdit(link)}>
-                          {t("btnEdit")}
-                        </button>
                         <button type="button" className="danger small" onClick={() => archiveLink(link)}>
                           {t("btnArchive")}
                         </button>
@@ -1244,10 +1256,12 @@ export function ToolsDirectoryClient({
                 {t("btnOpen")}
               </a>
               {link.canManage && (
+                <button type="button" className="secondary small" onClick={() => startEdit(link)}>
+                  {t("btnEdit")}
+                </button>
+              )}
+              {link.canArchive && (
                 <>
-                  <button type="button" className="secondary small" onClick={() => startEdit(link)}>
-                    {t("btnEdit")}
-                  </button>
                   <button type="button" className="danger small" onClick={() => archiveLink(link)}>
                     {t("btnArchive")}
                   </button>
@@ -1259,6 +1273,9 @@ export function ToolsDirectoryClient({
       </div>
     );
   }
+
+  const editingLinkForForm = editingId ? links.find((link) => link.id === editingId) ?? null : null;
+  const canEditFormCredentials = !editingId || Boolean(editingLinkForForm?.canManageCredentials);
 
   return (
     <section className="ws-section stack" style={{ gap: 28 }}>
@@ -1542,19 +1559,21 @@ export function ToolsDirectoryClient({
             {t("formPreviewDescription")}
             <input value={form.previewDescription} onChange={(event) => setField("previewDescription", event.target.value)} placeholder={t("placeholderPreviewDescription")} />
           </label>
-          <fieldset style={{ border: "1px solid var(--line)", borderRadius: 8, padding: 14 }}>
-            <legend style={{ padding: "0 6px", fontWeight: 600 }}>{t("credentialOptional")}</legend>
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))", gap: 14 }}>
-              <label>
-                {t("formCredentialLabel")}
-                <input value={form.credentialLabel} onChange={(event) => setField("credentialLabel", event.target.value)} placeholder={t("placeholderCredentialLabel")} />
-              </label>
-              <label>
-                {t("formCredentialSecret")}
-                <input type="password" value={form.credentialSecret} onChange={(event) => setField("credentialSecret", event.target.value)} placeholder={t("placeholderCredentialSecret")} />
-              </label>
-            </div>
-          </fieldset>
+          {canEditFormCredentials && (
+            <fieldset style={{ border: "1px solid var(--line)", borderRadius: 8, padding: 14 }}>
+              <legend style={{ padding: "0 6px", fontWeight: 600 }}>{t("credentialOptional")}</legend>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))", gap: 14 }}>
+                <label>
+                  {t("formCredentialLabel")}
+                  <input value={form.credentialLabel} onChange={(event) => setField("credentialLabel", event.target.value)} placeholder={t("placeholderCredentialLabel")} />
+                </label>
+                <label>
+                  {t("formCredentialSecret")}
+                  <input type="password" value={form.credentialSecret} onChange={(event) => setField("credentialSecret", event.target.value)} placeholder={t("placeholderCredentialSecret")} />
+                </label>
+              </div>
+            </fieldset>
+          )}
           <fieldset style={{ border: "1px solid var(--line)", borderRadius: 8, padding: 14 }}>
             <legend style={{ padding: "0 6px", fontWeight: 600 }}>{t("formCircles")}</legend>
             {circles.length === 0 ? (

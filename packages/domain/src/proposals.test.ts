@@ -591,7 +591,7 @@ describe("proposal owner updates", () => {
     }));
   });
 
-  it("allows the proposal owner to edit an open proposal", async () => {
+  it("blocks proposal owners from editing open proposal content when they are not the author or admin", async () => {
     const { updateProposal } = await import("./proposals");
     const { requireWorkspaceMembership } = await import("./auth");
     const actor = { kind: "user", user: { id: "u-owner" } } as any;
@@ -617,27 +617,17 @@ describe("proposal owner updates", () => {
       archivedAt: null,
       version: 1,
     } as any);
-    vi.mocked(prisma.proposal.update).mockResolvedValueOnce({
-      id: "p-open-owned",
-      title: "Owner edit",
-      version: 2,
-    } as any);
 
     await expect(updateProposal(actor, {
       workspaceId: "ws-1",
       proposalId: "p-open-owned",
       title: "Owner edit",
-    })).resolves.toMatchObject({
-      id: "p-open-owned",
-      title: "Owner edit",
+    })).rejects.toMatchObject({
+      status: 403,
+      code: "FORBIDDEN",
     });
 
-    expect(prisma.proposal.update).toHaveBeenCalledWith(expect.objectContaining({
-      data: expect.objectContaining({
-        title: "Owner edit",
-        version: 2,
-      }),
-    }));
+    expect(prisma.proposal.update).not.toHaveBeenCalled();
   });
 });
 

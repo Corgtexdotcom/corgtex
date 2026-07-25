@@ -152,9 +152,9 @@ async function resolveMeeting(workspaceId: string, entityId: string) {
   });
 }
 
-async function resolveGoal(workspaceId: string, entityId: string) {
+async function resolveGoal(actor: AppActor, membership: MembershipSummary | null, workspaceId: string, entityId: string) {
   return prisma.goal.findFirst({
-    where: { id: entityId, workspaceId },
+    where: { id: entityId, workspaceId, ...privacyFilter(actor, membership) },
     select: { id: true, archivedAt: true, cadence: true },
   });
 }
@@ -171,7 +171,7 @@ async function resolveLinkedEntity(
   if (entityType === "Proposal") return resolveProposal(actor, membership, workspaceId, entityId);
   if (entityType === "BrainArticle") return resolveArticle(actor, membership, workspaceId, entityId);
   if (entityType === "Meeting") return resolveMeeting(workspaceId, entityId);
-  return resolveGoal(workspaceId, entityId);
+  return resolveGoal(actor, membership, workspaceId, entityId);
 }
 
 export async function resolveWorkspacePermalink(actor: AppActor, params: {

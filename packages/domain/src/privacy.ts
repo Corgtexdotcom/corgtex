@@ -1,7 +1,7 @@
 import type { AppActor, MembershipSummary } from "@corgtex/shared";
 
 /**
- * Privacy filter for models with authorUserId (Action, Tension, Proposal).
+ * Privacy filter for models with authorUserId (Action, Tension, Proposal, Goal).
  * Private drafts are visible to their author, workspace admins, global operators,
  * and workspace-scoped agents. Non-draft private items remain hidden.
  */

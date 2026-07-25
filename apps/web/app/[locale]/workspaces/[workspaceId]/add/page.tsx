@@ -6,7 +6,6 @@ import type {
   BrainSourceType,
   GoalCadence,
   GoalLevel,
-  GoalStatus,
 } from "@prisma/client";
 import type { ReactNode } from "react";
 import { notFound, redirect } from "next/navigation";
@@ -122,7 +121,6 @@ const CADENCES: { id: GoalCadence; label: string }[] = [
 ];
 
 const GOAL_LEVELS: GoalLevel[] = ["COMPANY", "CIRCLE", "PERSONAL"];
-const GOAL_STATUSES: GoalStatus[] = ["ACTIVE", "ON_TRACK", "AT_RISK", "BEHIND", "COMPLETED", "DRAFT", "ABANDONED"];
 const ARTICLE_TYPES: BrainArticleType[] = ["PRODUCT", "ARCHITECTURE", "PROCESS", "RUNBOOK", "DECISION", "TEAM", "PERSON", "CUSTOMER", "INCIDENT", "PROJECT", "INTEGRATION", "PATTERN", "STRATEGY", "CULTURE", "GLOSSARY"];
 const AGREEMENT_ARTICLE_TYPES: BrainArticleType[] = [...AGREEMENT_BRAIN_ARTICLE_TYPES];
 const ARTICLE_AUTHORITIES: BrainArticleAuthority[] = ["DRAFT", "REFERENCE", "AUTHORITATIVE"];
@@ -1386,7 +1384,6 @@ export default async function WorkspaceAddPage({
             <div className="actions-inline">
               <label style={{ flex: 1 }}>Cadence<select name="cadence" defaultValue="QUARTERLY">{CADENCES.map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}</select></label>
               <label style={{ flex: 1 }}>Level<select name="level" defaultValue="COMPANY">{GOAL_LEVELS.map((level) => <option key={level} value={level}>{level}</option>)}</select></label>
-              <label style={{ flex: 1 }}>Status<select name="status" defaultValue="DRAFT">{GOAL_STATUSES.map((status) => <option key={status} value={status}>{status}</option>)}</select></label>
             </div>
             <div className="actions-inline">
               <label style={{ flex: 1 }}>Start date<input name="startDate" type="date" /></label>
@@ -1408,7 +1405,7 @@ export default async function WorkspaceAddPage({
                 </div>
               ))}
             </fieldset>
-            <div className="actions-inline"><button type="submit">Create goal</button>{cancelLink(returnTo)}</div>
+            <CreateWorkItemFooter draftLabel="Save draft" openLabel="Open goal" returnTo={returnTo} />
           </DuplicateGuardForm>
         )}
 

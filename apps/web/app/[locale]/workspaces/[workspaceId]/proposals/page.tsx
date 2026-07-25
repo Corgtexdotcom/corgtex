@@ -90,8 +90,7 @@ export default async function ProposalsPage({
       : "");
   const canManageProposal = (proposal: { authorUserId: string; ownerMemberId?: string | null }) => actor.kind === "agent"
     || membership?.role === "ADMIN"
-    || (actor.kind === "user" && proposal.authorUserId === actor.user.id)
-    || (Boolean(membership?.id) && proposal.ownerMemberId === membership?.id);
+    || (actor.kind === "user" && proposal.authorUserId === actor.user.id);
   const canResolveProposal = actor.kind === "agent" || Boolean(membership);
   const priorityLabels = {
     3: tWork("priorityUrgent"),
@@ -263,10 +262,8 @@ export default async function ProposalsPage({
   }
 
   function proposalControls(proposal: ProposalListItem) {
-    const isAuthor = actor.kind === "user" && proposal.authorUserId === actor.user.id;
-    const isOwner = Boolean(membership?.id) && proposal.ownerMemberId === membership?.id;
     const canManage = canManageProposal(proposal);
-    const canEditContent = proposal.status === "DRAFT" ? canManage : proposal.status === "OPEN" && (isAuthor || isOwner);
+    const canEditContent = (proposal.status === "DRAFT" || proposal.status === "OPEN") && canManage;
     const moreItems: ReactNode[] = [];
     const primaryMoveTarget: ProposalMoveStatus | null = canManage && proposal.status === "DRAFT"
       ? "OPEN"
