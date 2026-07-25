@@ -78,4 +78,28 @@ describe("newspaper edition rendering", () => {
       "# Daily Newspaper\n\n## Conversation Highlights\n\n- The workspace shipped a useful update.",
     );
   });
+
+  it("preserves multiline numbered lists inside saved digest markdown items", () => {
+    const digest = {
+      intro: null,
+      sections: [{
+        id: "otherUpdates" as const,
+        title: "Other Updates",
+        items: [
+          "Needs attention today:\n\n1. [**Review budget plan**](/workspaces/ws-1/actions/action-1): The plan is overdue.\n2. [**Resolve ownership**](/workspaces/ws-1/tensions/tension-1): The tension is still open.",
+        ],
+      }],
+    };
+
+    expect(renderNewspaperDigestMarkdown({ title: "Daily Newspaper", digest })).toBe([
+      "# Daily Newspaper",
+      "",
+      "## Other Updates",
+      "",
+      "- Needs attention today:",
+      "",
+      "  1. [**Review budget plan**](/workspaces/ws-1/actions/action-1): The plan is overdue.",
+      "  2. [**Resolve ownership**](/workspaces/ws-1/tensions/tension-1): The tension is still open.",
+    ].join("\n"));
+  });
 });
