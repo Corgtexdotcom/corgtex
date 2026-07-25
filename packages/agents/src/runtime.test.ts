@@ -350,7 +350,7 @@ describe("agent runtime", () => {
     });
 
     expect(prismaMock.meeting.updateMany).toHaveBeenCalledWith(expect.objectContaining({
-      where: { id: "meeting-2", workspaceId: "ws-1" },
+      where: expect.objectContaining({ id: "meeting-2", workspaceId: "ws-1", summaryMd: null }),
       data: expect.objectContaining({ summaryMd: "Concise meeting summary" }),
     }));
     expect(prismaMock.agentRun.update).toHaveBeenLastCalledWith(expect.objectContaining({

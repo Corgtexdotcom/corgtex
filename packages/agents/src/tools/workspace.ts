@@ -1,5 +1,7 @@
 import { prisma } from "@corgtex/shared";
 import type { ModelTool } from "@corgtex/models";
+import type { AppActor } from "@corgtex/shared";
+import { listGoals } from "@corgtex/domain";
 import type { TensionStatus, ActionStatus, ProposalStatus, GoalCadence, GoalLevel, GoalStatus } from "@prisma/client";
 
 export const getWorkspaceOverviewTool: ModelTool = {
@@ -199,21 +201,13 @@ export async function queryOrgStructure(workspaceId: string) {
   }));
 }
 
-export async function queryGoals(workspaceId: string, cadence?: GoalCadence, level?: GoalLevel, status?: GoalStatus) {
-  const where: any = { workspaceId, archivedAt: null };
-  if (cadence) where.cadence = cadence;
-  if (level) where.level = level;
-  if (status) where.status = status;
-
-  const goals = await prisma.goal.findMany({
-    where,
+export async function queryGoals(actor: AppActor, workspaceId: string, cadence?: GoalCadence, level?: GoalLevel, status?: GoalStatus) {
+  const goals = await listGoals(actor, {
+    workspaceId,
+    cadence,
+    level,
+    status,
     take: 20,
-    orderBy: [{ sortOrder: "asc" }, { createdAt: "desc" }],
-    include: {
-      circle: { select: { name: true } },
-      ownerMember: { include: { user: { select: { displayName: true } } } },
-      keyResults: { orderBy: { sortOrder: "asc" } },
-    },
   });
 
   return goals.map((goal) => ({

@@ -1331,9 +1331,21 @@ export async function updateMeetingProcessedContent(actor: AppActor, params: {
         title: true,
         summaryMd: true,
         ingestionGuidanceMd: true,
+        transcriptProcessingProgress: {
+          select: {
+            currentStage: true,
+            completedAt: true,
+            failedAt: true,
+          },
+        },
       },
     });
     invariant(existing, 404, "NOT_FOUND", "Meeting not found.");
+    const processingActive = existing.transcriptProcessingProgress
+      && !existing.transcriptProcessingProgress.completedAt
+      && !existing.transcriptProcessingProgress.failedAt
+      && existing.transcriptProcessingProgress.currentStage !== "READY";
+    invariant(!processingActive, 400, "INVALID_STATE", "Processed meeting content can be edited after transcript processing finishes.");
 
     const nextSummaryMd = editsSummary ? params.summaryMd?.trim() || null : existing.summaryMd;
     const summaryChanged = editsSummary && nextSummaryMd !== existing.summaryMd;

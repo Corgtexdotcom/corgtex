@@ -288,13 +288,30 @@ export async function runMeetingSummaryAgent(params: {
         applyGuidanceTermCorrections(summary.content, meeting.ingestionGuidanceMd),
       );
       const persisted = await helpers.step("persist-summary", { meetingId: meeting.id }, async () => prisma.meeting.updateMany({
-        where: { id: meeting.id, workspaceId: params.workspaceId },
+        where: {
+          id: meeting.id,
+          workspaceId: params.workspaceId,
+          summaryMd: meeting.summaryMd,
+        },
         data: {
           summaryMd,
           blocksJson: toInputJson(meetingBlocks),
         },
       }));
       if (persisted.count === 0) {
+        const currentMeeting = await prisma.meeting.findUnique({
+          where: { id: meeting.id },
+          select: { id: true, workspaceId: true, summaryMd: true },
+        });
+        if (currentMeeting?.workspaceId === params.workspaceId && currentMeeting.summaryMd !== meeting.summaryMd) {
+          return {
+            resultJson: {
+              skipped: true,
+              reason: "summary_changed",
+              meetingId: meeting.id,
+            },
+          };
+        }
         return {
           resultJson: {
             skipped: true,

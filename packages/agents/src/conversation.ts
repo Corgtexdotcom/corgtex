@@ -359,7 +359,7 @@ const TOOL_HANDLERS: Partial<Record<string, (actor: AppActor, ctx: ConversationC
   query_tensions: async (actor, ctx, args) => queryTensions(ctx.workspaceId, args.status, args.assigneeId),
   query_actions: async (actor, ctx, args) => queryActions(ctx.workspaceId, args.status, args.assigneeId),
   query_proposals: async (actor, ctx, args) => queryProposals(ctx.workspaceId, args.status),
-  query_goals: async (actor, ctx, args) => queryGoals(ctx.workspaceId, args.cadence, args.level, args.status),
+  query_goals: async (actor, ctx, args) => queryGoals(actor, ctx.workspaceId, args.cadence, args.level, args.status),
   query_org_structure: async (actor, ctx) => queryOrgStructure(ctx.workspaceId),
   create_tension: createTensionAction,
   update_tension: updateTensionAction,

@@ -211,7 +211,16 @@ export function deriveJobsForEvent(event: {
 
   if (event.type === "meeting.processed-content-updated") {
     const payload = event.payload as { meetingId?: string; editedSummary?: boolean };
-    if (payload.editedSummary !== false) {
+    if (payload.meetingId && event.workspaceId && payload.editedSummary !== false) {
+      jobs.push({
+        workspaceId: event.workspaceId,
+        eventId: event.id,
+        type: "knowledge.sync.meeting",
+        payload: {
+          meetingId: payload.meetingId,
+        },
+        dedupeKey: `${event.id}:meeting-knowledge-sync`,
+      });
       pushContextGraphSync("MEETING", payload.meetingId);
     }
   }

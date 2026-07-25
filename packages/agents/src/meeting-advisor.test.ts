@@ -127,6 +127,7 @@ describe("runMeetingSummaryAgent", () => {
       knowledge: [],
     });
     prismaMock.meeting.updateMany.mockReset().mockResolvedValue({ count: 1 });
+    prismaMock.meeting.findUnique.mockReset().mockResolvedValue(null);
 
     // Mock $transaction to execute the callback
     prismaMock.$transaction.mockReset().mockImplementation(async (fn: any) => fn(prismaMock));
@@ -250,7 +251,7 @@ describe("runMeetingSummaryAgent", () => {
       ]),
     }));
     expect(prismaMock.meeting.updateMany).toHaveBeenCalledWith(expect.objectContaining({
-      where: { id: "meeting-1", workspaceId: "ws-1" },
+      where: expect.objectContaining({ id: "meeting-1", workspaceId: "ws-1", summaryMd: null }),
       data: expect.objectContaining({
         summaryMd: expect.stringContaining("Opening check-in"),
         blocksJson: expect.objectContaining({
@@ -558,7 +559,7 @@ describe("runMeetingSummaryAgent", () => {
     });
 
     expect(prismaMock.meeting.updateMany).toHaveBeenCalledWith(expect.objectContaining({
-      where: { id: "meeting-1", workspaceId: "ws-1" },
+      where: expect.objectContaining({ id: "meeting-1", workspaceId: "ws-1", summaryMd: null }),
     }));
     expect(result).toEqual(expect.objectContaining({ status: "COMPLETED" }));
     expect(prismaMock.agentRun.update).toHaveBeenLastCalledWith(expect.objectContaining({
@@ -567,6 +568,53 @@ describe("runMeetingSummaryAgent", () => {
         resultJson: expect.objectContaining({
           skipped: true,
           reason: "missing_meeting",
+          meetingId: "meeting-1",
+        }),
+      }),
+    }));
+  });
+
+  it("skips persistence when a manual summary edit wins the race", async () => {
+    const { defaultModelGateway } = await import("@corgtex/models");
+    vi.mocked(defaultModelGateway.extract).mockResolvedValueOnce({
+      output: { blocks: [{ sequence: 1, title: "Operations", kind: "update", summaryMd: "Operations were discussed." }] },
+      raw: "{}",
+      usage: modelUsage,
+    });
+    vi.mocked(defaultModelGateway.chat).mockResolvedValueOnce({
+      content: "Operations summary",
+      usage: modelUsage,
+    });
+    prismaMock.meeting.updateMany.mockResolvedValueOnce({ count: 0 });
+    prismaMock.meeting.findUnique.mockResolvedValueOnce({
+      id: "meeting-1",
+      workspaceId: "ws-1",
+      summaryMd: "Manual operator summary",
+    });
+
+    const { runMeetingSummaryAgent } = await import(".");
+
+    const result = await runMeetingSummaryAgent({
+      workspaceId: "ws-1",
+      triggerRef: "trigger-stale",
+      triggerType: "EVENT",
+      meetingId: "meeting-1",
+    });
+
+    expect(prismaMock.meeting.updateMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: {
+        id: "meeting-1",
+        workspaceId: "ws-1",
+        summaryMd: null,
+      },
+    }));
+    expect(result).toEqual(expect.objectContaining({ status: "COMPLETED" }));
+    expect(prismaMock.agentRun.update).toHaveBeenLastCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        status: "COMPLETED",
+        resultJson: expect.objectContaining({
+          skipped: true,
+          reason: "summary_changed",
           meetingId: "meeting-1",
         }),
       }),

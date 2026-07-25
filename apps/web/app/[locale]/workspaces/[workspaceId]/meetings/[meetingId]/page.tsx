@@ -216,6 +216,9 @@ export default async function MeetingDetailPage({
     reviewNeededCount,
     canViewDiagnostics: isAdmin,
   });
+  const processingFinished = !processingState
+    || processingState.stages.some((step) => step.stage === "READY" && step.detail.status === "COMPLETED")
+    || processingState.stages.some((step) => step.detail.status === "FAILED");
   const insightTargetProposalIds = [...new Set((meeting.insights as MeetingInsightSummary[])
     .filter((insight: MeetingInsightSummary) => insight.targetEntityType === "Proposal" && insight.targetEntityId)
     .map((insight: MeetingInsightSummary) => insight.targetEntityId as string))];
@@ -496,7 +499,7 @@ export default async function MeetingDetailPage({
               )}
             </section>
 
-            {!isArchived && (
+            {!isArchived && processingFinished && (
               <section className="ws-section" style={{ marginBottom: 32 }}>
                 <details>
                   <summary className="nr-hide-marker" style={{ cursor: "pointer", fontWeight: 600, color: "var(--accent)" }}>

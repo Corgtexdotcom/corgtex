@@ -24,6 +24,7 @@ const {
   getContextMapDataMock,
   listCrmActivitiesMock,
   listExternalMcpConnectionsMock,
+  listGoalsMock,
   listWorkspaceToolLinksMock,
   loadRelevantMemoriesMock,
   searchConnectedExternalMcpContextMock,
@@ -53,6 +54,7 @@ const {
   getContextMapDataMock: vi.fn(),
   listCrmActivitiesMock: vi.fn(),
   listExternalMcpConnectionsMock: vi.fn(),
+  listGoalsMock: vi.fn(),
   listWorkspaceToolLinksMock: vi.fn(),
   loadRelevantMemoriesMock: vi.fn(),
   searchConnectedExternalMcpContextMock: vi.fn(),
@@ -126,6 +128,7 @@ vi.mock("@corgtex/domain", () => ({
   ingestConversationOnDemand: vi.fn(),
   listCrmActivities: listCrmActivitiesMock,
   listExternalMcpConnections: listExternalMcpConnectionsMock,
+  listGoals: listGoalsMock,
   listMembersEnriched: vi.fn(),
   listWorkspaceToolLinks: listWorkspaceToolLinksMock,
   loadRelevantMemories: loadRelevantMemoriesMock,
@@ -279,6 +282,22 @@ describe("processConversationTurn", () => {
     completeActivityMock.mockResolvedValue({ id: "activity-1", title: "Follow up", type: "TASK", accountId: "account-1", completedAt: new Date("2026-06-20T11:00:00.000Z") });
     createCommunicationSuggestionMock.mockResolvedValue({ id: "suggestion-1", title: "Draft follow-up", status: "SUGGESTED", accountId: "account-1" });
     listExternalMcpConnectionsMock.mockResolvedValue([]);
+    listGoalsMock.mockResolvedValue([
+      {
+        id: "goal-1",
+        title: "Launch goal",
+        descriptionMd: "Launch safely.",
+        cadence: "QUARTERLY",
+        level: "COMPANY",
+        status: "ACTIVE",
+        progressPercent: 25,
+        targetDate: null,
+        startDate: null,
+        circle: { name: "General" },
+        ownerMember: { user: { displayName: "Owner" } },
+        keyResults: [],
+      },
+    ]);
     searchConnectedExternalMcpContextMock.mockResolvedValue({ results: [], errors: [] });
     listWorkspaceToolLinksMock.mockResolvedValue([
       {
@@ -435,6 +454,52 @@ describe("processConversationTurn", () => {
 
     expect(listWorkspaceToolLinksMock).toHaveBeenCalledWith(actor, { workspaceId: "ws-1" });
     expect(result.assistantMessage).toBe("The shared tool is Miro board.");
+  });
+
+  it("executes goal query tools with the real user actor", async () => {
+    const actor = {
+      kind: "user" as const,
+      user: {
+        id: "user-1",
+        email: "user@example.com",
+        displayName: "User",
+      },
+    };
+    chatMock
+      .mockResolvedValueOnce({
+        content: "",
+        tool_calls: [
+          {
+            id: "call-1",
+            function: {
+              name: "query_goals",
+              arguments: JSON.stringify({ cadence: "QUARTERLY", level: "COMPANY", status: "ACTIVE" }),
+            },
+          },
+        ],
+      })
+      .mockResolvedValueOnce({
+        content: "The active quarterly goal is Launch goal.",
+      });
+
+    const { processConversationTurn } = await import("./conversation");
+    const result = await processConversationTurn({
+      workspaceId: "ws-1",
+      sessionId: "session-1",
+      userId: "user-1",
+      agentKey: "assistant",
+      userMessage: "What are our active quarterly company goals?",
+      actor,
+    });
+
+    expect(listGoalsMock).toHaveBeenCalledWith(actor, expect.objectContaining({
+      workspaceId: "ws-1",
+      cadence: "QUARTERLY",
+      level: "COMPANY",
+      status: "ACTIVE",
+      take: 20,
+    }));
+    expect(result.assistantMessage).toBe("The active quarterly goal is Launch goal.");
   });
 
   it("does not fall back to a bootstrap agent when no authenticated actor is provided", async () => {

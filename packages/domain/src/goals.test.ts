@@ -1000,6 +1000,54 @@ describe("Goals Domain", () => {
       }));
     });
 
+    it("recomputes parent progress when an active child goal becomes private", async () => {
+      vi.mocked(prisma.goal.findUnique)
+        .mockResolvedValueOnce({
+          id: "child-goal",
+          workspaceId: "ws-1",
+          archivedAt: null,
+          authorUserId: "user-1",
+          parentGoalId: "parent-goal",
+          ownerMemberId: "member-1",
+          status: "ACTIVE",
+          isPrivate: false,
+        } as any)
+        .mockResolvedValueOnce({
+          id: "parent-goal",
+          parentGoalId: null,
+          progressPercent: 80,
+          keyResults: [],
+          childGoals: [],
+        } as any);
+      vi.mocked(prisma.goal.update).mockResolvedValueOnce({
+        id: "child-goal",
+        workspaceId: "ws-1",
+        archivedAt: null,
+        parentGoalId: "parent-goal",
+        status: "DRAFT",
+        isPrivate: true,
+      } as any);
+
+      await expect(returnGoalToDraft(actor, {
+        workspaceId: "ws-1",
+        goalId: "child-goal",
+      })).resolves.toMatchObject({
+        id: "child-goal",
+        status: "DRAFT",
+      });
+
+      expect(prisma.goal.findUnique).toHaveBeenNthCalledWith(2, expect.objectContaining({
+        where: { id: "parent-goal" },
+        include: expect.objectContaining({
+          childGoals: expect.objectContaining({
+            where: expect.objectContaining({
+              archivedAt: null,
+            }),
+          }),
+        }),
+      }));
+    });
+
     it("allows active members to edit public active goal content and snapshots the previous version", async () => {
       vi.mocked(prisma.goal.findUnique).mockResolvedValueOnce({
         id: "goal-1",
@@ -1131,22 +1179,35 @@ describe("Goals Domain", () => {
 
     it("returns an authored active goal to a private draft through progress updates", async () => {
       const { appendEvents } = await import("./events");
-      vi.mocked(prisma.goal.findUnique).mockResolvedValueOnce({
-        id: "goal-1",
-        workspaceId: "ws-1",
-        title: "Active goal",
-        status: "ACTIVE",
-        isPrivate: false,
-        authorUserId: "user-1",
-        publishedAt: new Date("2026-07-01T10:00:00.000Z"),
-        archivedAt: null,
-      } as any);
+      vi.mocked(prisma.goal.findUnique)
+        .mockResolvedValueOnce({
+          id: "goal-1",
+          workspaceId: "ws-1",
+          title: "Active goal",
+          status: "ACTIVE",
+          isPrivate: false,
+          authorUserId: "user-1",
+          parentGoalId: "parent-goal",
+          publishedAt: new Date("2026-07-01T10:00:00.000Z"),
+          archivedAt: null,
+        } as any)
+        .mockResolvedValueOnce({
+          id: "parent-goal",
+          parentGoalId: null,
+          progressPercent: 80,
+          keyResults: [],
+          childGoals: [],
+        } as any);
       vi.mocked(prisma.goalUpdate.create).mockResolvedValueOnce({
         id: "goal-update-1",
         goalId: "goal-1",
       } as any);
       vi.mocked(prisma.goal.update).mockResolvedValueOnce({
         id: "goal-1",
+        status: "DRAFT",
+        isPrivate: true,
+        archivedAt: null,
+        parentGoalId: "parent-goal",
       } as any);
 
       await postGoalUpdate(actor, {
@@ -1173,6 +1234,9 @@ describe("Goals Domain", () => {
           }),
         }),
       ]);
+      expect(prisma.goal.findUnique).toHaveBeenNthCalledWith(2, expect.objectContaining({
+        where: { id: "parent-goal" },
+      }));
     });
 
     it("rejects progress updates for completed goals", async () => {

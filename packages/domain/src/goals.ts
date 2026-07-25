@@ -22,7 +22,7 @@ import {
 import {
   listNativePracticeProjectHealthByIds,
 } from "./practice-finance";
-import type { GoalLevel, GoalCadence, GoalStatus, PracticeProjectStatus, Prisma } from "@prisma/client";
+import type { Goal, GoalLevel, GoalCadence, GoalStatus, PracticeProjectStatus, Prisma } from "@prisma/client";
 import {
   changedDataFields,
   pickJsonSnapshot,
@@ -62,6 +62,15 @@ const SHORT_TERM_DIRECTION_CADENCES = new Set<GoalCadence>(["WEEKLY", "MONTHLY",
 const EDITABLE_ACTIVE_GOAL_STATUSES = new Set<GoalStatus>(["ACTIVE", "ON_TRACK", "AT_RISK", "BEHIND"]);
 export const GOAL_FINANCE_PROJECT_ENTITY_TYPE = "PracticeProject";
 const GOAL_FINANCE_PROJECT_SOURCE = "practice-finance";
+
+function countsTowardParentProgress(goal: Pick<Goal, "status" | "isPrivate" | "archivedAt">) {
+  return !goal.archivedAt && !(goal.isPrivate && goal.status === "DRAFT");
+}
+
+async function recomputeGoalParents(parentGoalIds: Iterable<string | null | undefined>) {
+  const uniqueParentIds = [...new Set([...parentGoalIds].filter((id): id is string => Boolean(id)))];
+  await Promise.all(uniqueParentIds.map((goalId) => recomputeGoalProgress(goalId)));
+}
 
 export type CompanyDirectionEvidenceLink = {
   id: string;
@@ -572,7 +581,8 @@ export async function updateGoal(
     resolvedMembership: params._membership,
   });
 
-  return prisma.$transaction(async (tx) => {
+  const parentGoalIdsToRecompute = new Set<string>();
+  const updatedGoal = await prisma.$transaction(async (tx) => {
     const goal = await assertGoalInWorkspace(tx, params.workspaceId, params.goalId);
     await validateGoalReferences(tx, {
       workspaceId: params.workspaceId,
@@ -677,6 +687,14 @@ export async function updateGoal(
       where: { id: params.goalId },
       data,
     });
+    if (
+      changedUpdateFields.includes("parentGoalId")
+      || changedUpdateFields.includes("progressPercent")
+      || countsTowardParentProgress(goal) !== countsTowardParentProgress(updated)
+    ) {
+      if (goal.parentGoalId) parentGoalIdsToRecompute.add(goal.parentGoalId);
+      if (updated.parentGoalId) parentGoalIdsToRecompute.add(updated.parentGoalId);
+    }
 
     await recordAudit(tx, actor, {
       workspaceId: params.workspaceId,
@@ -701,6 +719,8 @@ export async function updateGoal(
 
     return updated;
   });
+  await recomputeGoalParents(parentGoalIdsToRecompute);
+  return updatedGoal;
 }
 
 export async function returnGoalToDraft(actor: AppActor, params: {
@@ -1229,7 +1249,8 @@ export async function postGoalUpdate(
     );
   }
 
-  return prisma.$transaction(async (tx) => {
+  const parentGoalIdsToRecompute = new Set<string>();
+  const update = await prisma.$transaction(async (tx) => {
     const update = await tx.goalUpdate.create({
       data: {
         goalId: params.goalId,
@@ -1252,12 +1273,18 @@ export async function postGoalUpdate(
       }
     }
     if (newProgress !== null) updateData.progressPercent = newProgress;
-    
+
     if (Object.keys(updateData).length > 0) {
-      await tx.goal.update({
-          where: { id: params.goalId },
-          data: updateData,
-        });
+      const updatedGoal = await tx.goal.update({
+        where: { id: params.goalId },
+        data: updateData,
+      });
+      if (
+        updateData.progressPercent !== undefined
+        || countsTowardParentProgress(goal) !== countsTowardParentProgress(updatedGoal)
+      ) {
+        if (goal.parentGoalId) parentGoalIdsToRecompute.add(goal.parentGoalId);
+      }
 
       await appendEvents(tx, [
         {
@@ -1271,15 +1298,12 @@ export async function postGoalUpdate(
           },
         },
       ]);
-
-      if (updateData.progressPercent !== undefined && goal.parentGoalId) {
-        // Since we update progress, trigger recompute for parent independently after transaction
-        process.nextTick(() => recomputeGoalProgress(goal.parentGoalId!));
-      }
     }
 
     return update;
   });
+  await recomputeGoalParents(parentGoalIdsToRecompute);
+  return update;
 }
 
 export async function createGoalLink(
