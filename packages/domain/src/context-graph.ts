@@ -1795,8 +1795,9 @@ export async function buildSelectedRegionContext(actor: AppActor, params: {
       ...timeFilter,
     },
   });
-  invariant(selectedObjects.length === selectedIds.length, 404, "NOT_FOUND", "One or more selected objects were not found.");
-  for (const object of selectedObjects) {
+  const readableSelectedObjects = selectedObjects.filter((object) => isReadableStatus(object.status, params.includeStale));
+  invariant(readableSelectedObjects.length === selectedIds.length, 404, "NOT_FOUND", "One or more selected objects were not found.");
+  for (const object of readableSelectedObjects) {
     objectsById.set(object.id, object);
     objectDistanceById.set(object.id, 0);
   }

@@ -935,6 +935,38 @@ describe("Goals Domain", () => {
       expect(prisma.goal.update).not.toHaveBeenCalled();
     });
 
+    it("rejects reparenting to a private draft parent the actor cannot see", async () => {
+      vi.mocked(prisma.goal.findUnique)
+        .mockResolvedValueOnce({
+          id: "goal-1",
+          workspaceId: "ws-1",
+          archivedAt: null,
+          authorUserId: "user-1",
+          parentGoalId: null,
+          ownerMemberId: "member-1",
+          status: "ACTIVE",
+          isPrivate: false,
+        } as any)
+        .mockResolvedValueOnce({
+          id: "private-parent",
+          workspaceId: "ws-1",
+          archivedAt: null,
+          authorUserId: "user-2",
+          status: "DRAFT",
+          isPrivate: true,
+        } as any);
+
+      await expect(updateGoal(actor, {
+        workspaceId: "ws-1",
+        goalId: "goal-1",
+        parentGoalId: "private-parent",
+      })).rejects.toMatchObject({
+        code: "INVALID_INPUT",
+      });
+
+      expect(prisma.goal.update).not.toHaveBeenCalled();
+    });
+
     it("updates status and progress for an active goal", async () => {
       vi.mocked(prisma.goal.findUnique).mockResolvedValueOnce({
         id: "goal-1",

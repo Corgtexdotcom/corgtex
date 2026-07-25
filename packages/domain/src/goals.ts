@@ -204,6 +204,8 @@ async function assertGoalInWorkspace(tx: Prisma.TransactionClient, workspaceId: 
 
 async function validateGoalReferences(
   tx: Prisma.TransactionClient,
+  actor: AppActor,
+  membership: MembershipSummary | null | undefined,
   params: {
     workspaceId: string;
     currentGoalId?: string;
@@ -216,13 +218,22 @@ async function validateGoalReferences(
     invariant(params.parentGoalId !== params.currentGoalId, 400, "INVALID_INPUT", "Goal cannot be its own parent.");
     const parentGoal = await tx.goal.findUnique({
       where: { id: params.parentGoalId },
-      select: { workspaceId: true, archivedAt: true },
+      select: {
+        workspaceId: true,
+        archivedAt: true,
+        authorUserId: true,
+        isPrivate: true,
+        status: true,
+      },
     });
     invariant(
-      parentGoal && parentGoal.workspaceId === params.workspaceId && !parentGoal.archivedAt,
+      parentGoal
+        && parentGoal.workspaceId === params.workspaceId
+        && !parentGoal.archivedAt
+        && canReadGoalRecord(actor, membership, parentGoal),
       400,
       "INVALID_INPUT",
-      "Parent goal must be an active goal in the same workspace.",
+      "Parent goal must be a visible active goal in the same workspace.",
     );
   }
 
@@ -474,7 +485,7 @@ export async function createGoal(
   }
 
   return prisma.$transaction(async (tx) => {
-    await validateGoalReferences(tx, params);
+    await validateGoalReferences(tx, actor, membership, params);
     const keyResults = normalizeKeyResults(params.keyResults);
     const progressPercent = keyResults.length > 0
       ? Math.round(keyResults.reduce((total, keyResult) => total + keyResult.progressPercent, 0) / keyResults.length)
@@ -584,7 +595,7 @@ export async function updateGoal(
   const parentGoalIdsToRecompute = new Set<string>();
   const updatedGoal = await prisma.$transaction(async (tx) => {
     const goal = await assertGoalInWorkspace(tx, params.workspaceId, params.goalId);
-    await validateGoalReferences(tx, {
+    await validateGoalReferences(tx, actor, membership, {
       workspaceId: params.workspaceId,
       currentGoalId: params.goalId,
       parentGoalId: params.parentGoalId,
