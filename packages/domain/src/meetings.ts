@@ -103,6 +103,14 @@ function mergeMarkdownNote(existing?: string | null, incoming?: string | null) {
   return `${current}\n\nAdditional guidance:\n${next}`;
 }
 
+function normalizeProcessedContentValue(value: string | null | undefined) {
+  return value?.trim() || null;
+}
+
+function isPrismaNotFoundError(error: unknown) {
+  return typeof error === "object" && error !== null && "code" in error && (error as { code?: string }).code === "P2025";
+}
+
 function chooseMergedTitle(existing?: string | null, incoming?: string | null) {
   const current = existing?.trim() ?? "";
   const next = incoming?.trim() ?? "";
@@ -1312,6 +1320,8 @@ export async function updateMeetingProcessedContent(actor: AppActor, params: {
   meetingId: string;
   summaryMd?: string | null;
   ingestionGuidanceMd?: string | null;
+  expectedSummaryMd?: string | null;
+  expectedIngestionGuidanceMd?: string | null;
 }) {
   const membership = await requireWorkspaceMembership({
     actor,
@@ -1347,16 +1357,48 @@ export async function updateMeetingProcessedContent(actor: AppActor, params: {
       && existing.transcriptProcessingProgress.currentStage !== "READY";
     invariant(!processingActive, 400, "INVALID_STATE", "Processed meeting content can be edited after transcript processing finishes.");
 
-    const nextSummaryMd = editsSummary ? params.summaryMd?.trim() || null : existing.summaryMd;
+    if (params.expectedSummaryMd !== undefined) {
+      invariant(
+        normalizeProcessedContentValue(params.expectedSummaryMd) === normalizeProcessedContentValue(existing.summaryMd),
+        409,
+        "CONFLICT",
+        "Meeting summary changed while editing. Refresh and try again.",
+      );
+    }
+    if (params.expectedIngestionGuidanceMd !== undefined) {
+      invariant(
+        normalizeProcessedContentValue(params.expectedIngestionGuidanceMd) === normalizeProcessedContentValue(existing.ingestionGuidanceMd),
+        409,
+        "CONFLICT",
+        "Meeting guidance changed while editing. Refresh and try again.",
+      );
+    }
+
+    const nextSummaryMd = editsSummary ? normalizeProcessedContentValue(params.summaryMd) : existing.summaryMd;
+    const nextGuidanceMd = editsGuidance ? normalizeProcessedContentValue(params.ingestionGuidanceMd) : existing.ingestionGuidanceMd;
     const summaryChanged = editsSummary && nextSummaryMd !== existing.summaryMd;
     const data: Prisma.MeetingUpdateInput = {};
     if (editsSummary) data.summaryMd = nextSummaryMd;
-    if (editsGuidance) data.ingestionGuidanceMd = params.ingestionGuidanceMd?.trim() || null;
+    if (editsGuidance) data.ingestionGuidanceMd = nextGuidanceMd;
 
-    const meeting = await tx.meeting.update({
-      where: { id: existing.id },
-      data,
-    });
+    let meeting: Awaited<ReturnType<typeof tx.meeting.update>>;
+    try {
+      meeting = await tx.meeting.update({
+        where: {
+          id: existing.id,
+          workspaceId: params.workspaceId,
+          archivedAt: null,
+          ...(editsSummary ? { summaryMd: existing.summaryMd } : {}),
+          ...(editsGuidance ? { ingestionGuidanceMd: existing.ingestionGuidanceMd } : {}),
+        },
+        data,
+      });
+    } catch (error) {
+      if (isPrismaNotFoundError(error)) {
+        invariant(false, 409, "CONFLICT", "Meeting processed content changed while editing. Refresh and try again.");
+      }
+      throw error;
+    }
 
     await tx.auditLog.create({
       data: {

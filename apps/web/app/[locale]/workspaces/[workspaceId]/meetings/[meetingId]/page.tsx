@@ -216,9 +216,11 @@ export default async function MeetingDetailPage({
     reviewNeededCount,
     canViewDiagnostics: isAdmin,
   });
-  const processingFinished = !processingState
-    || processingState.stages.some((step) => step.stage === "READY" && step.detail.status === "COMPLETED")
-    || processingState.stages.some((step) => step.detail.status === "FAILED");
+  const hasProcessedContentSeed = Boolean(meeting.transcript || meeting.summaryMd || meeting.ingestionGuidanceMd);
+  const processingFinished = hasProcessedContentSeed
+    && (!processingState
+      || processingState.stages.some((step) => step.stage === "READY" && step.detail.status === "COMPLETED")
+      || processingState.stages.some((step) => step.detail.status === "FAILED"));
   const insightTargetProposalIds = [...new Set((meeting.insights as MeetingInsightSummary[])
     .filter((insight: MeetingInsightSummary) => insight.targetEntityType === "Proposal" && insight.targetEntityId)
     .map((insight: MeetingInsightSummary) => insight.targetEntityId as string))];
@@ -508,6 +510,8 @@ export default async function MeetingDetailPage({
                   <form action={updateMeetingProcessedContentAction} className="stack nr-form-section" style={{ marginTop: 12 }}>
                     <input type="hidden" name="workspaceId" value={workspaceId} />
                     <input type="hidden" name="meetingId" value={meetingId} />
+                    <input type="hidden" name="originalSummaryMd" value={meeting.summaryMd ?? ""} />
+                    <input type="hidden" name="originalIngestionGuidanceMd" value={meeting.ingestionGuidanceMd ?? ""} />
                     <label>
                       {t("processedSummaryLabel")}
                       <MarkdownEditor name="summaryMd" defaultValue={meeting.summaryMd ?? ""} rows={8} />

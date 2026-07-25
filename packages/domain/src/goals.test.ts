@@ -325,19 +325,25 @@ describe("Goals Domain", () => {
           sortOrder: 1,
         })],
       });
-      expect(prisma.goal.update).toHaveBeenCalledWith({
-        where: { id: "goal-existing" },
+      expect(prisma.goal.update).toHaveBeenCalledWith(expect.objectContaining({
+        where: expect.objectContaining({
+          id: "goal-existing",
+          workspaceId: "ws-1",
+          status: "DRAFT",
+          isPrivate: true,
+          version: 1,
+        }),
         data: expect.objectContaining({
           cadence: "ANNUAL",
           level: "PERSONAL",
           status: "ACTIVE",
           isPrivate: false,
         }),
-      });
-      expect(prisma.goal.update).toHaveBeenCalledWith({
-        where: { id: "goal-existing" },
+      }));
+      expect(prisma.goal.update).toHaveBeenCalledWith(expect.objectContaining({
+        where: expect.objectContaining({ id: "goal-existing" }),
         data: { progressPercent: 20 },
-      });
+      }));
       expect(result).toMatchObject({
         id: "goal-existing",
         cadence: "ANNUAL",
@@ -996,7 +1002,7 @@ describe("Goals Domain", () => {
       });
 
       expect(prisma.goal.update).toHaveBeenCalledWith(expect.objectContaining({
-        where: { id: "goal-1" },
+        where: expect.objectContaining({ id: "goal-1", workspaceId: "ws-1", status: "ACTIVE", isPrivate: false }),
         data: expect.objectContaining({ status: "ON_TRACK", progressPercent: 65, isPrivate: false }),
       }));
     });
@@ -1027,7 +1033,7 @@ describe("Goals Domain", () => {
       });
 
       expect(prisma.goal.update).toHaveBeenCalledWith(expect.objectContaining({
-        where: { id: "goal-1" },
+        where: expect.objectContaining({ id: "goal-1", workspaceId: "ws-1", status: "ACTIVE", isPrivate: false }),
         data: { status: "DRAFT", isPrivate: true, publishedAt: null },
       }));
     });
@@ -1126,9 +1132,41 @@ describe("Goals Domain", () => {
         }),
       }));
       expect(prisma.goal.update).toHaveBeenCalledWith(expect.objectContaining({
-        where: { id: "goal-1" },
+        where: expect.objectContaining({ id: "goal-1", workspaceId: "ws-1", status: "ACTIVE", isPrivate: false, version: 1 }),
         data: { title: "Updated goal", version: 2 },
       }));
+    });
+
+    it("rejects collaborative content edits if the goal changes before commit", async () => {
+      vi.mocked(prisma.goal.findUnique).mockResolvedValueOnce({
+        id: "goal-1",
+        workspaceId: "ws-1",
+        archivedAt: null,
+        authorUserId: "other-user",
+        isPrivate: false,
+        title: "Old goal",
+        descriptionMd: "Old description",
+        level: "COMPANY",
+        cadence: "QUARTERLY",
+        targetDate: null,
+        startDate: null,
+        parentGoalId: null,
+        circleId: null,
+        ownerMemberId: "member-1",
+        status: "ACTIVE",
+        progressPercent: 0,
+        version: 1,
+      } as any);
+      vi.mocked(prisma.goal.update).mockRejectedValueOnce({ code: "P2025" });
+
+      await expect(updateGoal(actor, {
+        workspaceId: "ws-1",
+        goalId: "goal-1",
+        title: "Updated after stale read",
+      })).rejects.toMatchObject({
+        status: 409,
+        code: "CONFLICT",
+      });
     });
 
     it("allows active members to post progress updates to public active goals", async () => {

@@ -72,6 +72,10 @@ async function recomputeGoalParents(parentGoalIds: Iterable<string | null | unde
   await Promise.all(uniqueParentIds.map((goalId) => recomputeGoalProgress(goalId)));
 }
 
+function isPrismaNotFoundError(error: unknown) {
+  return typeof error === "object" && error !== null && "code" in error && (error as { code?: string }).code === "P2025";
+}
+
 export type CompanyDirectionEvidenceLink = {
   id: string;
   entityType: string;
@@ -694,10 +698,25 @@ export async function updateGoal(
     const changedUpdateFields = changedDataFields(goal as unknown as Record<string, unknown>, data);
     if (changedUpdateFields.length === 0) return goal;
 
-    const updated = await tx.goal.update({
-      where: { id: params.goalId },
-      data,
-    });
+    let updated: typeof goal;
+    try {
+      updated = await tx.goal.update({
+        where: {
+          id: params.goalId,
+          workspaceId: params.workspaceId,
+          archivedAt: null,
+          status: goal.status,
+          isPrivate: goal.isPrivate,
+          version: goal.version,
+        },
+        data,
+      });
+    } catch (error) {
+      if (isPrismaNotFoundError(error)) {
+        invariant(false, 409, "CONFLICT", "Goal changed while editing. Refresh and try again.");
+      }
+      throw error;
+    }
     if (
       changedUpdateFields.includes("parentGoalId")
       || changedUpdateFields.includes("progressPercent")

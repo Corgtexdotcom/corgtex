@@ -1262,7 +1262,12 @@ describe("meetings domain", () => {
     });
 
     expect(prismaMock.meeting.update).toHaveBeenCalledWith({
-      where: { id: "meeting-1" },
+      where: expect.objectContaining({
+        id: "meeting-1",
+        workspaceId: "workspace-1",
+        summaryMd: "Old summary",
+        ingestionGuidanceMd: "Old guidance",
+      }),
       data: {
         summaryMd: "New summary",
         ingestionGuidanceMd: "New guidance",
@@ -1288,6 +1293,45 @@ describe("meetings domain", () => {
         }),
       ],
     });
+  });
+
+  it("updateMeetingProcessedContent rejects stale original values", async () => {
+    requireWorkspaceMembershipMock.mockResolvedValueOnce({
+      id: "member-2",
+      workspaceId: "workspace-1",
+      userId: "member-2-user",
+      role: "MEMBER",
+      isActive: true,
+    });
+    prismaMock.meeting.findFirst.mockResolvedValue({
+      id: "meeting-1",
+      title: "Weekly Tactical",
+      summaryMd: "Fresh summary",
+      ingestionGuidanceMd: "Old guidance",
+      transcriptProcessingProgress: null,
+    });
+
+    const { updateMeetingProcessedContent } = await import("./meetings");
+    await expect(updateMeetingProcessedContent({
+      kind: "user",
+      user: {
+        id: "member-2-user",
+        email: "member@example.com",
+        displayName: "Member",
+        globalRole: "USER",
+      },
+    }, {
+      workspaceId: "workspace-1",
+      meetingId: "meeting-1",
+      summaryMd: "New summary",
+      expectedSummaryMd: "Old summary",
+    })).rejects.toMatchObject({
+      status: 409,
+      code: "CONFLICT",
+    });
+
+    expect(prismaMock.meeting.update).not.toHaveBeenCalled();
+    expect(prismaMock.event.createMany).not.toHaveBeenCalled();
   });
 
   it("updateMeetingProcessedContent rejects edits while transcript processing is active", async () => {
