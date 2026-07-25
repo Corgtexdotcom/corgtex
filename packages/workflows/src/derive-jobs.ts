@@ -209,6 +209,13 @@ export function deriveJobsForEvent(event: {
     }
   }
 
+  if (event.type === "meeting.processed-content-updated") {
+    const payload = event.payload as { meetingId?: string; editedSummary?: boolean };
+    if (payload.editedSummary !== false) {
+      pushContextGraphSync("MEETING", payload.meetingId);
+    }
+  }
+
   if (event.type === "brain-source.created") {
     const payload = event.payload as { sourceId?: string };
     if (payload.sourceId && event.workspaceId) {

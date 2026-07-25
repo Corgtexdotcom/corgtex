@@ -1330,5 +1330,40 @@ describe("Goals Domain", () => {
         data: { progressPercent: 75 },
       }));
     });
+
+    it("excludes private draft children from parent progress aggregation", async () => {
+      vi.mocked(prisma.goal.findUnique).mockResolvedValueOnce({
+        id: "parent-goal",
+        parentGoalId: null,
+        progressPercent: 0,
+        keyResults: [],
+        childGoals: [{ progressPercent: 80, id: "public-child" }],
+      } as any);
+      vi.mocked(prisma.goal.update).mockResolvedValueOnce({
+        id: "parent-goal",
+        progressPercent: 80,
+      } as any);
+
+      await recomputeGoalProgress("parent-goal");
+
+      expect(prisma.goal.findUnique).toHaveBeenCalledWith(expect.objectContaining({
+        where: { id: "parent-goal" },
+        include: expect.objectContaining({
+          childGoals: {
+            where: {
+              archivedAt: null,
+              NOT: {
+                isPrivate: true,
+                status: "DRAFT",
+              },
+            },
+          },
+        }),
+      }));
+      expect(prisma.goal.update).toHaveBeenCalledWith(expect.objectContaining({
+        where: { id: "parent-goal" },
+        data: { progressPercent: 80 },
+      }));
+    });
   });
 });

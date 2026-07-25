@@ -1539,7 +1539,15 @@ export async function recomputeGoalProgress(goalId: string) {
     where: { id: goalId },
     include: {
       keyResults: true,
-      childGoals: true,
+      childGoals: {
+        where: {
+          archivedAt: null,
+          NOT: {
+            isPrivate: true,
+            status: "DRAFT",
+          },
+        },
+      },
     },
   });
 

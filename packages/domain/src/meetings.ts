@@ -1335,8 +1335,10 @@ export async function updateMeetingProcessedContent(actor: AppActor, params: {
     });
     invariant(existing, 404, "NOT_FOUND", "Meeting not found.");
 
+    const nextSummaryMd = editsSummary ? params.summaryMd?.trim() || null : existing.summaryMd;
+    const summaryChanged = editsSummary && nextSummaryMd !== existing.summaryMd;
     const data: Prisma.MeetingUpdateInput = {};
-    if (editsSummary) data.summaryMd = params.summaryMd?.trim() || null;
+    if (editsSummary) data.summaryMd = nextSummaryMd;
     if (editsGuidance) data.ingestionGuidanceMd = params.ingestionGuidanceMd?.trim() || null;
 
     const meeting = await tx.meeting.update({
@@ -1358,6 +1360,22 @@ export async function updateMeetingProcessedContent(actor: AppActor, params: {
         },
       },
     });
+
+    if (summaryChanged) {
+      await appendEvents(tx, [
+        {
+          workspaceId: params.workspaceId,
+          type: "meeting.processed-content-updated",
+          aggregateType: "Meeting",
+          aggregateId: meeting.id,
+          payload: {
+            meetingId: meeting.id,
+            title: meeting.title,
+            editedSummary: true,
+          },
+        },
+      ]);
+    }
 
     return meeting;
   });

@@ -58,6 +58,27 @@ afterEach(() => {
 });
 
 describe("goals server actions", () => {
+  it("keeps legacy status submissions public when no draft/open intent is provided", async () => {
+    const { createGoalFormAction } = await import("./actions");
+    const formData = new FormData();
+    formData.set("workspaceId", "workspace-1");
+    formData.set("title", "Launch customer onboarding");
+    formData.set("cadence", "QUARTERLY");
+    formData.set("level", "COMPANY");
+    formData.set("status", "ACTIVE");
+
+    await createGoalFormAction(formData);
+
+    expect(createGoal).toHaveBeenCalledWith(actor, expect.objectContaining({
+      workspaceId: "workspace-1",
+      title: "Launch customer onboarding",
+      cadence: "QUARTERLY",
+      level: "COMPANY",
+      status: "ACTIVE",
+      isPrivate: false,
+    }));
+  });
+
   it("queues company-understanding synthesis from the Brain refresh action", async () => {
     const { refreshCompanyDirectionFromBrainFormAction } = await import("./actions");
     const formData = new FormData();

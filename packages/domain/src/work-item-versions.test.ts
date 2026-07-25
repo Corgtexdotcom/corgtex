@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const { prismaMock, txMock } = vi.hoisted(() => {
   const tx = {
     tension: { findFirst: vi.fn() },
+    goal: { findFirst: vi.fn() },
     workItemVersion: { findMany: vi.fn() },
   };
   return {
@@ -35,6 +36,7 @@ describe("work item versions", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     txMock.tension.findFirst.mockResolvedValue({ id: "tension-1", version: 2 });
+    txMock.goal.findFirst.mockResolvedValue({ id: "goal-1", version: 3 });
     txMock.workItemVersion.findMany.mockResolvedValue([]);
   });
 
@@ -59,6 +61,32 @@ describe("work item versions", () => {
         workspaceId: "ws-1",
         entityType: "Tension",
         entityId: "tension-1",
+      },
+      orderBy: { version: "desc" },
+    });
+  });
+
+  it("applies goal privacy before listing historical snapshots", async () => {
+    const { listWorkItemVersions } = await import("./work-item-versions");
+
+    await listWorkItemVersions(
+      { kind: "user", user: { id: "user-1" } } as any,
+      { workspaceId: "ws-1", entityType: "GOAL", entityId: "goal-1" },
+    );
+
+    expect(txMock.goal.findFirst).toHaveBeenCalledWith({
+      where: {
+        id: "goal-1",
+        workspaceId: "ws-1",
+        isPrivate: false,
+      },
+      select: { id: true, version: true },
+    });
+    expect(txMock.workItemVersion.findMany).toHaveBeenCalledWith({
+      where: {
+        workspaceId: "ws-1",
+        entityType: "Goal",
+        entityId: "goal-1",
       },
       orderBy: { version: "desc" },
     });

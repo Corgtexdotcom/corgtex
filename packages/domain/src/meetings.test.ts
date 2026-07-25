@@ -1273,6 +1273,20 @@ describe("meetings domain", () => {
         action: "meeting.processed_content_updated",
       }),
     }));
+    expect(prismaMock.event.createMany).toHaveBeenCalledWith({
+      data: [
+        expect.objectContaining({
+          workspaceId: "workspace-1",
+          type: "meeting.processed-content-updated",
+          aggregateType: "Meeting",
+          aggregateId: "meeting-1",
+          payload: expect.objectContaining({
+            meetingId: "meeting-1",
+            editedSummary: true,
+          }),
+        }),
+      ],
+    });
   });
 
   it("deleteMeeting archives an existing meeting with a provided reason", async () => {

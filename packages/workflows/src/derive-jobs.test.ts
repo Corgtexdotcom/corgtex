@@ -161,4 +161,24 @@ describe("deriveJobsForEvent", () => {
       ]);
     }
   });
+
+  it("derives a meeting context graph sync when processed meeting summary changes", () => {
+    const jobs = deriveJobsForEvent({
+      id: "event-meeting-processed-1",
+      type: "meeting.processed-content-updated",
+      workspaceId: "ws-1",
+      payload: { meetingId: "meeting-1", editedSummary: true },
+    });
+
+    expect(jobs).toEqual([
+      {
+        workspaceId: "ws-1",
+        eventId: "event-meeting-processed-1",
+        type: "context-graph.sync",
+        payload: { sourceType: "MEETING", sourceId: "meeting-1" },
+        dedupeKey: "event-meeting-processed-1:context-graph-sync:MEETING:meeting-1",
+        dependsOnDedupeKey: undefined,
+      },
+    ]);
+  });
 });
