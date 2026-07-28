@@ -537,6 +537,7 @@ describe("Finance V2 access policy", () => {
   });
 
   it("returns a read-only readiness diagnostic without Practice Ledger revival", async () => {
+    const latestProjectUpdate = new Date("2026-07-28T11:00:00.000Z");
     prismaMock.workspaceFeatureFlag.findMany.mockResolvedValueOnce(financeFlags([
       { flag: "FINANCE_PROJECTS", enabled: true },
       { flag: "FINANCE_SLICING_PIE", enabled: true },
@@ -549,7 +550,7 @@ describe("Finance V2 access policy", () => {
       .mockResolvedValueOnce(1)
       .mockResolvedValueOnce(4)
       .mockResolvedValueOnce(2);
-    prismaMock.financeProject.findFirst.mockResolvedValueOnce({ updatedAt: new Date("2026-07-28T11:00:00.000Z") });
+    prismaMock.financeProject.findFirst.mockResolvedValueOnce({ updatedAt: latestProjectUpdate });
 
     const { getFinanceReadiness } = await import("./finance");
 
@@ -576,6 +577,25 @@ describe("Finance V2 access policy", () => {
       retiredPracticeLedger: {
         retired: true,
       },
+      latestFinanceUpdateAt: latestProjectUpdate,
+    });
+    expect(prismaMock.financeClient.count).toHaveBeenCalledWith({ where: { workspaceId: "workspace-1", status: "ACTIVE", archivedAt: null } });
+    expect(prismaMock.financeConsultant.count).toHaveBeenCalledWith({ where: { workspaceId: "workspace-1", status: "ACTIVE", archivedAt: null } });
+    expect(prismaMock.financeProject.count).toHaveBeenCalledWith({ where: { workspaceId: "workspace-1", status: { not: "ARCHIVED" }, archivedAt: null } });
+    expect(prismaMock.financeTimeEntry.count).toHaveBeenCalledWith({ where: { workspaceId: "workspace-1", status: { not: "ARCHIVED" }, archivedAt: null } });
+    expect(prismaMock.financeExpense.count).toHaveBeenCalledWith({ where: { workspaceId: "workspace-1", status: { not: "ARCHIVED" }, archivedAt: null } });
+  });
+
+  it("includes Finance flag changes in the readiness update timestamp", async () => {
+    const flagUpdate = new Date("2026-07-28T12:00:00.000Z");
+    prismaMock.workspaceFeatureFlag.findMany.mockResolvedValueOnce([
+      { flag: "FINANCE", enabled: true, config: { financeAllMemberWrite: true }, updatedAt: new Date("2026-07-28T10:00:00.000Z") },
+      { flag: "FINANCE_PROJECTS", enabled: true, config: null, updatedAt: flagUpdate },
+    ]);
+    const { getFinanceReadiness } = await import("./finance");
+
+    await expect(getFinanceReadiness(actor, "workspace-1")).resolves.toMatchObject({
+      latestFinanceUpdateAt: flagUpdate,
     });
   });
 });

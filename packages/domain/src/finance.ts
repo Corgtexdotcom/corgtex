@@ -183,6 +183,7 @@ export async function getFinanceAccessPolicy(actor: AppActor, workspaceId: strin
     canWrite,
     flags: flagState.flags,
     financeConfig: flagState.financeConfig,
+    flagUpdatedAtByFlag: flagState.updatedAtByFlag,
   };
 }
 
@@ -373,11 +374,11 @@ export async function getFinanceReadiness(actor: AppActor, workspaceId: string) 
     activePracticeCatalogRows,
     activePracticeInstallations,
   ] = await Promise.all([
-    prisma.financeClient.count({ where: { workspaceId } }),
-    prisma.financeConsultant.count({ where: { workspaceId } }),
-    prisma.financeProject.count({ where: { workspaceId } }),
-    prisma.financeTimeEntry.count({ where: { workspaceId } }),
-    prisma.financeExpense.count({ where: { workspaceId } }),
+    prisma.financeClient.count({ where: { workspaceId, status: "ACTIVE", archivedAt: null } }),
+    prisma.financeConsultant.count({ where: { workspaceId, status: "ACTIVE", archivedAt: null } }),
+    prisma.financeProject.count({ where: { workspaceId, status: { not: "ARCHIVED" }, archivedAt: null } }),
+    prisma.financeTimeEntry.count({ where: { workspaceId, status: { not: "ARCHIVED" }, archivedAt: null } }),
+    prisma.financeExpense.count({ where: { workspaceId, status: { not: "ARCHIVED" }, archivedAt: null } }),
     prisma.financeContributionEntry.count({ where: { workspaceId } }),
     prisma.financeContributionEntry.count({ where: { workspaceId, paymentChoice: "CASH", cashStatus: "REQUESTED" } }),
     prisma.financeContributionEntry.count({ where: { workspaceId, paymentChoice: "SLICING_PIE" } }),
@@ -417,6 +418,10 @@ export async function getFinanceReadiness(actor: AppActor, workspaceId: string) 
     latestExpense?.updatedAt,
     latestContribution?.updatedAt,
   ]);
+  const latestFinanceUpdateAt = latestDate([
+    latestRecordUpdateAt,
+    ...policy.flagUpdatedAtByFlag.values(),
+  ]);
 
   return {
     workspaceId,
@@ -444,7 +449,7 @@ export async function getFinanceReadiness(actor: AppActor, workspaceId: string) 
       slicingPieContributionEntries,
       capitalContributionEntries,
     },
-    latestFinanceUpdateAt: latestRecordUpdateAt,
+    latestFinanceUpdateAt,
     paymentSafety: {
       cashOnlyConfirmation: true,
       peerReviewRequired: true,
