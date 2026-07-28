@@ -144,17 +144,50 @@ describe("Finance V2 access policy", () => {
     await expect(createFinanceProject(actor, {
       workspaceId: "workspace-1",
       name: " Pilot rollout ",
-      budgetCents: 12345,
+      budgetCents: 2147483647,
       currency: "usd",
     })).resolves.toEqual({ id: "project-1" });
     expect(prismaMock.financeProject.create).toHaveBeenCalledWith({
       data: expect.objectContaining({
         workspaceId: "workspace-1",
         name: "Pilot rollout",
-        budgetCents: 12345,
+        budgetCents: 2147483647,
         currency: "USD",
         createdByUserId: "user-1",
       }),
+    });
+  });
+
+  it("rejects project budgets above the Prisma Int range", async () => {
+    prismaMock.workspaceFeatureFlag.findMany.mockResolvedValueOnce(financeFlags([
+      { flag: "FINANCE_PROJECTS", enabled: true },
+    ]));
+    const { createFinanceProject } = await import("./finance");
+
+    await expect(createFinanceProject(actor, {
+      workspaceId: "workspace-1",
+      name: "Pilot rollout",
+      budgetCents: 2147483648,
+    })).rejects.toMatchObject({ code: "INVALID_INPUT" });
+    expect(prismaMock.financeProject.create).not.toHaveBeenCalled();
+  });
+
+  it("turns duplicate project names into conflicts", async () => {
+    prismaMock.workspaceFeatureFlag.findMany.mockResolvedValueOnce(financeFlags([
+      { flag: "FINANCE_PROJECTS", enabled: true },
+    ]));
+    prismaMock.financeProject.create.mockRejectedValueOnce({
+      code: "P2002",
+      meta: { target: ["workspaceId", "name"] },
+    });
+    const { createFinanceProject } = await import("./finance");
+
+    await expect(createFinanceProject(actor, {
+      workspaceId: "workspace-1",
+      name: "Pilot rollout",
+    })).rejects.toMatchObject({
+      status: 409,
+      code: "FINANCE_PROJECT_ALREADY_EXISTS",
     });
   });
 
@@ -184,7 +217,7 @@ describe("Finance V2 access policy", () => {
       workspaceId: "workspace-1",
       type: "EXPENSE",
       paymentChoice: "CASH",
-      amountCents: 4200,
+      amountCents: 2147483647,
       currency: "usd",
     })).resolves.toEqual({ id: "entry-1" });
     expect(prismaMock.financeContributionEntry.create).toHaveBeenCalledWith({
@@ -192,9 +225,25 @@ describe("Finance V2 access policy", () => {
         submittedByUserId: "user-1",
         contributorUserId: "user-1",
         paymentChoice: "CASH",
+        amountCents: 2147483647,
         cashStatus: "REQUESTED",
       }),
     });
+  });
+
+  it("rejects contribution amounts above the Prisma Int range", async () => {
+    prismaMock.workspaceFeatureFlag.findMany.mockResolvedValueOnce(financeFlags([
+      { flag: "FINANCE_SLICING_PIE", enabled: true },
+    ]));
+    const { createFinanceContributionEntry } = await import("./finance");
+
+    await expect(createFinanceContributionEntry(actor, {
+      workspaceId: "workspace-1",
+      type: "EXPENSE",
+      paymentChoice: "CASH",
+      amountCents: 2147483648,
+    })).rejects.toMatchObject({ code: "INVALID_INPUT" });
+    expect(prismaMock.financeContributionEntry.create).not.toHaveBeenCalled();
   });
 
   it("requires an amount before creating cash payables", async () => {
@@ -208,6 +257,48 @@ describe("Finance V2 access policy", () => {
       type: "EXPENSE",
       paymentChoice: "CASH",
     })).rejects.toMatchObject({ code: "PAYABLE_AMOUNT_REQUIRED" });
+    expect(prismaMock.financeContributionEntry.create).not.toHaveBeenCalled();
+  });
+
+  it("requires positive minutes for time contributions", async () => {
+    prismaMock.workspaceFeatureFlag.findMany.mockResolvedValueOnce(financeFlags([
+      { flag: "FINANCE_SLICING_PIE", enabled: true },
+    ]));
+    const { createFinanceContributionEntry } = await import("./finance");
+
+    await expect(createFinanceContributionEntry(actor, {
+      workspaceId: "workspace-1",
+      type: "TIME",
+      paymentChoice: "SLICING_PIE",
+    })).rejects.toMatchObject({ code: "INVALID_INPUT" });
+    expect(prismaMock.financeContributionEntry.create).not.toHaveBeenCalled();
+  });
+
+  it("requires a positive amount for non-cash expense contributions", async () => {
+    prismaMock.workspaceFeatureFlag.findMany.mockResolvedValueOnce(financeFlags([
+      { flag: "FINANCE_SLICING_PIE", enabled: true },
+    ]));
+    const { createFinanceContributionEntry } = await import("./finance");
+
+    await expect(createFinanceContributionEntry(actor, {
+      workspaceId: "workspace-1",
+      type: "EXPENSE",
+      paymentChoice: "SLICING_PIE",
+    })).rejects.toMatchObject({ code: "INVALID_INPUT" });
+    expect(prismaMock.financeContributionEntry.create).not.toHaveBeenCalled();
+  });
+
+  it("requires a positive amount for capital contributions", async () => {
+    prismaMock.workspaceFeatureFlag.findMany.mockResolvedValueOnce(financeFlags([
+      { flag: "FINANCE_CAPITAL", enabled: true },
+    ]));
+    const { createFinanceContributionEntry } = await import("./finance");
+
+    await expect(createFinanceContributionEntry(actor, {
+      workspaceId: "workspace-1",
+      type: "CAPITAL",
+      paymentChoice: "CAPITAL",
+    })).rejects.toMatchObject({ code: "INVALID_INPUT" });
     expect(prismaMock.financeContributionEntry.create).not.toHaveBeenCalled();
   });
 

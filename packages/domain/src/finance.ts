@@ -28,6 +28,7 @@ const FINANCE_FLAG_KEYS = [
   ...FINANCE_SECTIONS.flatMap((section) => section.flag ? [section.flag] : []),
 ];
 
+const PRISMA_INT_MAX = 2147483647;
 const RETIRED_PRACTICE_LEDGER_APP_KEY = "practice-ledger";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -55,7 +56,16 @@ function normalizeCents(value: number | null | undefined, label: string, allowZe
   if (value == null) return null;
   invariant(Number.isInteger(value), 400, "INVALID_INPUT", `${label} must be a whole number of cents.`);
   invariant(allowZero ? value >= 0 : value > 0, 400, "INVALID_INPUT", allowZero ? `${label} cannot be negative.` : `${label} must be positive.`);
+  invariant(value <= PRISMA_INT_MAX, 400, "INVALID_INPUT", `${label} cannot exceed ${PRISMA_INT_MAX} cents.`);
   return value;
+}
+
+function isPrismaUniqueConstraintError(error: unknown, fields: string[]) {
+  if (!isRecord(error) || error.code !== "P2002") return false;
+  const meta = isRecord(error.meta) ? error.meta : null;
+  const target = meta?.target;
+  if (Array.isArray(target)) return fields.every((field) => target.includes(field));
+  return typeof target !== "string" || fields.every((field) => target.includes(field));
 }
 
 async function financeFlagState(workspaceId: string) {
@@ -205,17 +215,26 @@ export async function createFinanceProject(actor: AppActor, params: {
   const actorUserId = requireHumanActorUserId(actor);
   requireFinanceCapability(policy.flags, "FINANCE_PROJECTS");
   const clientId = await requireFinanceClientInWorkspace(params.workspaceId, params.clientId);
+  const name = normalizeName(params.name, "Project name");
+  const budgetCents = normalizeCents(params.budgetCents, "Budget", true);
 
-  return prisma.financeProject.create({
-    data: {
-      workspaceId: params.workspaceId,
-      clientId,
-      name: normalizeName(params.name, "Project name"),
-      budgetCents: normalizeCents(params.budgetCents, "Budget", true),
-      currency: normalizeCurrency(params.currency),
-      createdByUserId: actorUserId,
-    },
-  });
+  try {
+    return await prisma.financeProject.create({
+      data: {
+        workspaceId: params.workspaceId,
+        clientId,
+        name,
+        budgetCents,
+        currency: normalizeCurrency(params.currency),
+        createdByUserId: actorUserId,
+      },
+    });
+  } catch (error) {
+    if (isPrismaUniqueConstraintError(error, ["workspaceId", "name"])) {
+      throw new AppError(409, "FINANCE_PROJECT_ALREADY_EXISTS", "A Finance project with this name already exists.");
+    }
+    throw error;
+  }
 }
 
 export async function createFinanceContributionEntry(actor: AppActor, params: {
@@ -237,6 +256,8 @@ export async function createFinanceContributionEntry(actor: AppActor, params: {
   invariant(params.paymentChoice !== "CAPITAL" || params.type === "CAPITAL", 400, "INVALID_INPUT", "Capital payment choice requires a capital contribution.");
   invariant(params.minutes == null || (Number.isInteger(params.minutes) && params.minutes > 0), 400, "INVALID_INPUT", "Minutes must be a positive whole number.");
   const amountCents = normalizeCents(params.amountCents, "Amount", false);
+  invariant(params.type !== "TIME" || params.minutes != null, 400, "INVALID_INPUT", "Time contributions require positive minutes.");
+  invariant(params.paymentChoice === "CASH" || params.type === "TIME" || amountCents !== null, 400, "INVALID_INPUT", "Expense and capital contributions require a positive amount.");
 
   const [projectId, consultantId, contributorUserId] = await Promise.all([
     requireFinanceProjectInWorkspace(params.workspaceId, params.projectId),
