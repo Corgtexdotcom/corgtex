@@ -11,7 +11,9 @@ const EXPECTED = [
   { flag: "GOALS", label: "Goals", description: "Goal trees, recognition, and progress tracking.", defaultEnabled: true },
   { flag: "TOOL_LINKS", label: "Tools catalog", description: "Shared tool links, catalog approvals, and credentials.", defaultEnabled: false },
   { flag: "FINANCE", label: "Finance", description: "Spend requests, ledgers, and finance workflows.", defaultEnabled: true },
-  { flag: "SLICING_PIE", label: "Slicing Pie", description: "Internal Slicing Pie ownership calculations from Practice Ledger time and expense entries.", defaultEnabled: false },
+  { flag: "FINANCE_PROJECTS", label: "Project finance", description: "Finance sections for projects, clients, consultants, time, expenses, reports, and budget health.", defaultEnabled: false },
+  { flag: "FINANCE_SLICING_PIE", label: "Finance Slicing Pie", description: "Optional Slicing Pie contribution and ownership analysis inside native Finance.", defaultEnabled: false },
+  { flag: "SLICING_PIE", label: "Slicing Pie legacy alias", description: "Compatibility alias for Finance Slicing Pie. New customer enablement should use FINANCE_SLICING_PIE.", defaultEnabled: false },
   { flag: "BUILD_ARTIFACTS", label: "Build artifacts", description: "Workspace build artifact publishing and review.", defaultEnabled: false },
   { flag: "RELATIONSHIPS", label: "Relationships", description: "CRM, leads, and relationship workspace views.", defaultEnabled: true },
   { flag: "CONTEXT_MAPS", label: "Context maps", description: "Living company context graph maps, graph evidence, and region-scoped agent context.", defaultEnabled: false },
@@ -28,7 +30,7 @@ const EXPECTED = [
   { flag: "OPENWORK_DEFAULT", label: "OpenWork default", description: "Recommend OpenWork as the default free self-managed AI workspace.", defaultEnabled: false },
   { flag: "EXECUTION_PACKETS", label: "Execution packets", description: "Durable execution request, context packet, and result write-back plumbing.", defaultEnabled: false },
   { flag: "MANAGED_ENTERPRISE_SERVICES", label: "Managed enterprise services", description: "CORGTEX-managed service ownership, health, usage, and support escalation foundation.", defaultEnabled: false },
-  { flag: "PRACTICE_PROJECTS", label: "Practice projects", description: "Consulting project portfolio: budgets, burn, remaining, and margin tracking with an attention queue.", defaultEnabled: false },
+  { flag: "PRACTICE_PROJECTS", label: "Project finance legacy alias", description: "Compatibility alias for Project finance. New customer enablement should use FINANCE_PROJECTS.", defaultEnabled: false },
 ];
 
 describe("CONTROL_PLANE_WORKSPACE_FEATURE_FLAGS (registry-derived)", () => {

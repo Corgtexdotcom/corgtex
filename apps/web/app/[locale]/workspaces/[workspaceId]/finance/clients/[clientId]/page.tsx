@@ -1,6 +1,6 @@
 import { getNativePracticeClientDetail } from "@corgtex/domain";
 import { requirePageActor } from "@/lib/auth";
-import { isWorkspaceFeatureEnabled, requireWorkspaceFeature } from "@/lib/workspace-feature-flags";
+import { isWorkspaceFinanceCapabilityEnabled, requireWorkspaceFeature, requireWorkspaceFinanceCapability } from "@/lib/workspace-feature-flags";
 import {
   PracticeFinanceNav,
   PracticeMetric,
@@ -53,10 +53,10 @@ export default async function PracticeClientDetailPage({
   const { workspaceId, clientId } = await params;
   const actor = await requirePageActor();
   await requireWorkspaceFeature(workspaceId, "FINANCE");
-  await requireWorkspaceFeature(workspaceId, "PRACTICE_PROJECTS");
+  await requireWorkspaceFinanceCapability(workspaceId, "projects");
   const [detail, slicingPieEnabled] = await Promise.all([
     getNativePracticeClientDetail(actor, workspaceId, clientId),
-    isWorkspaceFeatureEnabled(workspaceId, "SLICING_PIE"),
+    isWorkspaceFinanceCapabilityEnabled(workspaceId, "slicingPie"),
   ]);
   const { client } = detail;
   const totalsByCurrency = groupedProjectTotals(detail.projectHealth);

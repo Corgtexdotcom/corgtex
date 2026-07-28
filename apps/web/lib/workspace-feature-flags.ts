@@ -3,6 +3,8 @@ import { notFound } from "next/navigation";
 import { prisma } from "@corgtex/shared";
 import {
   defaultWorkspaceFeatureFlags,
+  financeCapabilityEnabled,
+  type FinanceCapabilityKey,
   listWorkspaceFeatureFlagKeys,
   type ModuleAccessLevel,
   type WorkspaceFeatureFlagKey,
@@ -59,9 +61,21 @@ export async function requireWorkspaceFeature(workspaceId: string, flag: Workspa
   }
 }
 
+export async function requireWorkspaceFinanceCapability(workspaceId: string, capability: FinanceCapabilityKey) {
+  const flags = await getWorkspaceFeatureFlags(workspaceId);
+  if (!financeCapabilityEnabled(flags, capability)) {
+    notFound();
+  }
+}
+
 export async function isWorkspaceFeatureEnabled(workspaceId: string, flag: WorkspaceFeatureFlag) {
   const flags = await getWorkspaceFeatureFlags(workspaceId);
   return flags[flag];
+}
+
+export async function isWorkspaceFinanceCapabilityEnabled(workspaceId: string, capability: FinanceCapabilityKey) {
+  const flags = await getWorkspaceFeatureFlags(workspaceId);
+  return financeCapabilityEnabled(flags, capability);
 }
 
 export type WorkspaceNavCapabilityMap = Partial<Record<WorkspaceNavCapability, boolean>>;

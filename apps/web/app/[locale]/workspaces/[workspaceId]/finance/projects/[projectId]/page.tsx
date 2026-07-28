@@ -7,7 +7,7 @@ import {
 import { prisma } from "@corgtex/shared";
 import { Prisma } from "@prisma/client";
 import { requirePageActor } from "@/lib/auth";
-import { isWorkspaceFeatureEnabled, requireWorkspaceFeature } from "@/lib/workspace-feature-flags";
+import { isWorkspaceFeatureEnabled, isWorkspaceFinanceCapabilityEnabled, requireWorkspaceFeature, requireWorkspaceFinanceCapability } from "@/lib/workspace-feature-flags";
 import {
   createNativePracticeExpenseAction,
   createNativePracticeTimeEntryAction,
@@ -116,12 +116,13 @@ export default async function PracticeProjectDetailPage({
   const { workspaceId, projectId } = await params;
   const actor = await requirePageActor();
   await requireWorkspaceFeature(workspaceId, "FINANCE");
-  await requireWorkspaceFeature(workspaceId, "PRACTICE_PROJECTS");
-  const [membership, workspace, detail, relationshipsEnabled] = await Promise.all([
+  await requireWorkspaceFinanceCapability(workspaceId, "projects");
+  const [membership, workspace, detail, relationshipsEnabled, slicingPieEnabled] = await Promise.all([
     requireWorkspaceMembership({ actor, workspaceId }),
     prisma.workspace.findUnique({ where: { id: workspaceId }, select: { slug: true } }),
     getNativePracticeProjectDetail(actor, workspaceId, projectId),
     isWorkspaceFeatureEnabled(workspaceId, "RELATIONSHIPS"),
+    isWorkspaceFinanceCapabilityEnabled(workspaceId, "slicingPie"),
   ]);
   const readOnlyDemo = workspace?.slug === "jnj-demo";
   const canManageProject = !readOnlyDemo && await canManagePracticeFinanceProjects(actor, workspaceId, {
@@ -136,7 +137,7 @@ export default async function PracticeProjectDetailPage({
       <header className="nr-masthead" style={{ textAlign: "left", marginBottom: 0 }}>
         <div style={{ alignItems: "flex-start", display: "flex", gap: 16, justifyContent: "space-between", flexWrap: "wrap" }}>
           <div>
-            <a className="link-button small secondary" href={`/workspaces/${workspaceId}/finance`}>Back to Practice Ledger</a>
+            <a className="link-button small secondary" href={`/workspaces/${workspaceId}/finance/projects`}>Back to Projects</a>
             <h1 style={{ marginTop: 12 }}>{project.name}</h1>
             <div className="nr-masthead-meta">
               <span>{project.code}</span>
@@ -151,7 +152,7 @@ export default async function PracticeProjectDetailPage({
           )}
         </div>
         <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginTop: 16 }}>
-          <PracticeFinanceNav workspaceId={workspaceId} active="overview" />
+          <PracticeFinanceNav workspaceId={workspaceId} active="projects" slicingPieEnabled={slicingPieEnabled} />
           <a className="link-button small secondary" href={`/workspaces/${workspaceId}/finance/time?projectId=${encodeURIComponent(project.id)}`}>Project time</a>
           <a className="link-button small secondary" href={`/workspaces/${workspaceId}/finance/expenses?projectId=${encodeURIComponent(project.id)}`}>Project expenses</a>
           {project.clientId && (

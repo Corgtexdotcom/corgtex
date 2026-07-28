@@ -96,6 +96,7 @@ import {
   updateAgentConfig,
   getModelUsageBudget,
   updateModelUsageBudget,
+  getFinanceReadinessDiagnostic,
   listCommunicationInstallations,
   listExternalDataSources,
   enqueueExternalDataSourceSync,
@@ -2174,6 +2175,17 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
           costTier: config.costTier,
         })),
       });
+    },
+  );
+
+  tool(
+    "get_finance_readiness",
+    "Return read-only Finance readiness diagnostics: release metadata, Finance flags/config, member role posture, record counts, requested payables, latest update timestamp, all-member-write state, and peer-review policy status.",
+    {},
+    async () => {
+      requireScope(sessionCtx, "finance:read");
+      const readiness = await getFinanceReadinessDiagnostic(actor, workspaceId);
+      return jsonResult({ readiness });
     },
   );
 

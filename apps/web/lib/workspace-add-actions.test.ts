@@ -158,7 +158,7 @@ describe("workspace add actions", () => {
   });
 
   it("uses tab and view context for multi-surface pages", () => {
-    const financeFlags = { ...DEFAULT_WORKSPACE_FEATURE_FLAGS, FINANCE: true, PRACTICE_PROJECTS: true };
+    const financeFlags = { ...DEFAULT_WORKSPACE_FEATURE_FLAGS, FINANCE: true, FINANCE_PROJECTS: true };
     expect(kinds({ pathname: "/workspaces/ws-1/finance" })).toEqual([]);
     expect(kinds({ pathname: "/workspaces/ws-1/finance", featureFlags: financeFlags })).toEqual(["finance_project"]);
     expect(kinds({ pathname: "/workspaces/ws-1/finance", featureFlags: financeFlags, role: "FINANCE_STEWARD" })).toEqual(["finance_project"]);
@@ -178,6 +178,11 @@ describe("workspace add actions", () => {
     expect(kinds({ pathname: "/workspaces/ws-1/leads/pipeline" })).toEqual(["deal"]);
     expect(kinds({ pathname: "/workspaces/ws-1/leads/activity" })).toEqual(["crm_activity"]);
     expect(kinds({ pathname: "/workspaces/ws-1/leads/suggestions" })).toEqual(["communication_suggestion"]);
+  });
+
+  it("keeps the legacy Practice Projects flag compatible during Finance migration", () => {
+    const legacyFinanceFlags = { ...DEFAULT_WORKSPACE_FEATURE_FLAGS, FINANCE: true, PRACTICE_PROJECTS: true };
+    expect(kinds({ pathname: "/workspaces/ws-1/finance", featureFlags: legacyFinanceFlags })).toEqual(["finance_project"]);
   });
 
   it("narrows relationship account detail add actions by active tab", () => {

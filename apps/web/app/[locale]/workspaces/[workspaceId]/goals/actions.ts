@@ -15,7 +15,7 @@ import {
 } from "@corgtex/domain";
 import { requirePageActor } from "@/lib/auth";
 import type { GoalLevel, GoalCadence, GoalStatus } from "@prisma/client";
-import { requireWorkspaceFeature } from "@/lib/workspace-feature-flags";
+import { requireWorkspaceFeature, requireWorkspaceFinanceCapability } from "@/lib/workspace-feature-flags";
 import { asOptional, asOptionalInt, asString, duplicateGuardFromFormData, refresh } from "../action-utils";
 
 type GoalKeyResultInput = {
@@ -203,7 +203,7 @@ export async function createGoalFinanceProjectLinkFormAction(formData: FormData)
   const actor = await requirePageActor();
   const workspaceId = await requireGoalsEnabled(formData);
   await requireWorkspaceFeature(workspaceId, "FINANCE");
-  await requireWorkspaceFeature(workspaceId, "PRACTICE_PROJECTS");
+  await requireWorkspaceFinanceCapability(workspaceId, "projects");
   await createGoalFinanceProjectLink(actor, {
     workspaceId,
     goalId: asString(formData, "goalId"),
@@ -219,7 +219,7 @@ export async function deleteGoalFinanceProjectLinkFormAction(formData: FormData)
   const actor = await requirePageActor();
   const workspaceId = await requireGoalsEnabled(formData);
   await requireWorkspaceFeature(workspaceId, "FINANCE");
-  await requireWorkspaceFeature(workspaceId, "PRACTICE_PROJECTS");
+  await requireWorkspaceFinanceCapability(workspaceId, "projects");
   await deleteGoalFinanceProjectLink(actor, {
     workspaceId,
     linkId: asString(formData, "linkId"),

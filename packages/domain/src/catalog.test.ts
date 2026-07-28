@@ -812,7 +812,7 @@ describe("catalog domain", () => {
       routing: "CORGTEX_MCP",
       target: {
         appKey: "corgtex",
-        title: "Corgtex Practice Ledger",
+        title: "Corgtex Finance",
       },
       corgtexDoesNotProxyWrites: false,
     });

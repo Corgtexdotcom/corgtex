@@ -105,7 +105,7 @@ export function buildDemoWelcomeNewspaperHtml(params?: { workspaceName?: string 
                   <tr>
                     <td style="padding:16px 0;border-top:1px solid #c9c0aa;">
                       <h3 style="font-size:16px;line-height:1.3;margin:0 0 8px;text-transform:uppercase;letter-spacing:0.8px;">Business visibility</h3>
-                      <p style="font-size:15px;line-height:1.55;margin:0;">Practice Ledger finance, budget, and operating activity can live beside the work itself, helping leaders see cost, value, and progress in one operating picture.</p>
+                      <p style="font-size:15px;line-height:1.55;margin:0;">Finance, budget, and operating activity can live beside the work itself, helping leaders see cost, value, and progress in one operating picture.</p>
                     </td>
                   </tr>
                   <tr>

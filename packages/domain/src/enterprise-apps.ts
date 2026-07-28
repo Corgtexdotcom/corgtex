@@ -94,7 +94,7 @@ function assertAppKeyIsNotRetired(appKey: string) {
     !RETIRED_ENTERPRISE_APP_KEYS.has(appKey),
     410,
     "APP_RETIRED",
-    "Practice Ledger is now native Finance and cannot be installed or launched as an enterprise app.",
+    "The standalone Practice Ledger app is retired. Use native Corgtex Finance instead.",
   );
 }
 

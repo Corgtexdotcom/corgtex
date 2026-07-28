@@ -17,6 +17,7 @@ const deleteGoal = vi.fn();
 const deleteGoalFinanceProjectLink = vi.fn();
 const enforceDemoGuard = vi.fn();
 const requirePageActor = vi.fn(async () => actor);
+const requireWorkspaceFinanceCapability = vi.fn();
 const requireWorkspaceFeature = vi.fn();
 const respondToCheckIn = vi.fn();
 const returnGoalToDraft = vi.fn();
@@ -33,6 +34,7 @@ vi.mock("@/lib/auth", () => ({
 }));
 
 vi.mock("@/lib/workspace-feature-flags", () => ({
+  requireWorkspaceFinanceCapability,
   requireWorkspaceFeature,
 }));
 
@@ -136,7 +138,7 @@ describe("goals server actions", () => {
     expect(enforceDemoGuard).toHaveBeenCalledWith("workspace-1");
     expect(requireWorkspaceFeature).toHaveBeenCalledWith("workspace-1", "GOALS");
     expect(requireWorkspaceFeature).toHaveBeenCalledWith("workspace-1", "FINANCE");
-    expect(requireWorkspaceFeature).toHaveBeenCalledWith("workspace-1", "PRACTICE_PROJECTS");
+    expect(requireWorkspaceFinanceCapability).toHaveBeenCalledWith("workspace-1", "projects");
     expect(createGoalFinanceProjectLink).toHaveBeenCalledWith(actor, {
       workspaceId: "workspace-1",
       goalId: "goal-1",
@@ -154,7 +156,7 @@ describe("goals server actions", () => {
 
     expect(requireWorkspaceFeature).toHaveBeenCalledWith("workspace-1", "GOALS");
     expect(requireWorkspaceFeature).toHaveBeenCalledWith("workspace-1", "FINANCE");
-    expect(requireWorkspaceFeature).toHaveBeenCalledWith("workspace-1", "PRACTICE_PROJECTS");
+    expect(requireWorkspaceFinanceCapability).toHaveBeenCalledWith("workspace-1", "projects");
     expect(deleteGoalFinanceProjectLink).toHaveBeenCalledWith(actor, {
       workspaceId: "workspace-1",
       linkId: "link-1",

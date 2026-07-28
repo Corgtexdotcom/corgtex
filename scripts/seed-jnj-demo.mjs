@@ -3022,7 +3022,9 @@ async function main() {
   // 14. Safe showcase data for current customer-visible feature surfaces.
   await enableWorkspaceFeature(wsId, "AI_WORKSPACES");
   await enableWorkspaceFeature(wsId, "FINANCE");
+  await enableWorkspaceFeature(wsId, "FINANCE_SLICING_PIE");
   await enableWorkspaceFeature(wsId, "SLICING_PIE");
+  await enableWorkspaceFeature(wsId, "FINANCE_PROJECTS");
   await enableWorkspaceFeature(wsId, "PRACTICE_PROJECTS");
   await enableWorkspaceFeature(wsId, "RELATIONSHIPS");
   await seedShowcaseData({ wsId, memberMappings });

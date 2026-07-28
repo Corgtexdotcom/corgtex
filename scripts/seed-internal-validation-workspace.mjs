@@ -89,6 +89,8 @@ export const validationSeedConfig = {
   },
   featureFlags: {
     FINANCE: true,
+    FINANCE_PROJECTS: true,
+    FINANCE_SLICING_PIE: true,
     PRACTICE_PROJECTS: true,
     RELATIONSHIPS: true,
     GOALS: true,
@@ -504,7 +506,7 @@ export async function upsertPracticeFinanceFixturesWithClient(prisma) {
     },
   });
 
-  console.log(`Seeded internal validation Practice Ledger fixtures in '${workspace.slug}'.`);
+  console.log(`Seeded internal validation Finance fixtures in '${workspace.slug}'.`);
 }
 
 async function upsertPracticeFinanceFixtures() {

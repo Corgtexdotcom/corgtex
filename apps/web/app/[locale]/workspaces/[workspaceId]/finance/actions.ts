@@ -2,7 +2,7 @@
 
 import { enforceDemoGuard } from "@/lib/demo-guard";
 import { requirePageActor } from "@/lib/auth";
-import { requireWorkspaceFeature } from "@/lib/workspace-feature-flags";
+import { requireWorkspaceFeature, requireWorkspaceFinanceCapability } from "@/lib/workspace-feature-flags";
 import { asString, asOptional, refresh } from "../action-utils";
 import {
   createNativePracticeExpense,
@@ -53,13 +53,13 @@ async function requireFinanceActionContext(formData: FormData) {
 
 async function requirePracticeProjectsActionContext(formData: FormData) {
   const context = await requireFinanceActionContext(formData);
-  await requireWorkspaceFeature(context.workspaceId, "PRACTICE_PROJECTS");
+  await requireWorkspaceFinanceCapability(context.workspaceId, "projects");
   return context;
 }
 
 async function requireSlicingPieActionContext(formData: FormData) {
   const context = await requireFinanceActionContext(formData);
-  await requireWorkspaceFeature(context.workspaceId, "SLICING_PIE");
+  await requireWorkspaceFinanceCapability(context.workspaceId, "slicingPie");
   return context;
 }
 

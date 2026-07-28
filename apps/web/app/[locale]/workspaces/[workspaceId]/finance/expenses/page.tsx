@@ -7,7 +7,7 @@ import {
 } from "@corgtex/domain";
 import { prisma } from "@corgtex/shared";
 import { requirePageActor } from "@/lib/auth";
-import { isWorkspaceFeatureEnabled, requireWorkspaceFeature } from "@/lib/workspace-feature-flags";
+import { isWorkspaceFinanceCapabilityEnabled, requireWorkspaceFeature, requireWorkspaceFinanceCapability } from "@/lib/workspace-feature-flags";
 import { createNativePracticeExpenseAction } from "../actions";
 import {
   PracticeFinanceNav,
@@ -40,13 +40,13 @@ export default async function PracticeExpensesPage({
   const clientId = firstQueryValue(query?.clientId);
   const actor = await requirePageActor();
   await requireWorkspaceFeature(workspaceId, "FINANCE");
-  await requireWorkspaceFeature(workspaceId, "PRACTICE_PROJECTS");
+  await requireWorkspaceFinanceCapability(workspaceId, "projects");
   const [membership, workspace, page, projects, slicingPieEnabled] = await Promise.all([
     requireWorkspaceMembership({ actor, workspaceId }),
     prisma.workspace.findUnique({ where: { id: workspaceId }, select: { slug: true } }),
     listNativePracticeExpensePage(actor, workspaceId, { take: 50, cursor, projectId, consultantId, clientId }),
     listPracticeProjectsWithSelection(actor, workspaceId, { take: 200, selectedProjectId: projectId }),
-    isWorkspaceFeatureEnabled(workspaceId, "SLICING_PIE"),
+    isWorkspaceFinanceCapabilityEnabled(workspaceId, "slicingPie"),
   ]);
   const readOnlyDemo = workspace?.slug === "jnj-demo";
   const canSubmit = !readOnlyDemo && await canManagePracticeFinanceProjects(actor, workspaceId, {
@@ -62,10 +62,10 @@ export default async function PracticeExpensesPage({
   return (
     <section className="stack" style={{ gap: 20 }} data-finance-surface="practice-expenses">
       <header className="nr-masthead" style={{ textAlign: "left", marginBottom: 0 }}>
-        <a className="link-button small secondary" href={`/workspaces/${workspaceId}/finance`}>Back to Practice Ledger</a>
+        <a className="link-button small secondary" href={`/workspaces/${workspaceId}/finance`}>Back to Finance</a>
         <h1 style={{ marginTop: 12 }}>Expenses</h1>
         <div className="nr-masthead-meta">
-          <span>Submit and review native Practice Ledger expenses.</span>
+          <span>Submit and review Finance expenses.</span>
         </div>
         <div style={{ marginTop: 16 }}>
           <PracticeFinanceNav workspaceId={workspaceId} active="expenses" slicingPieEnabled={slicingPieEnabled} />

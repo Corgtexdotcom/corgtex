@@ -158,6 +158,7 @@ const SUPPORT_ACTION_TO_MCP_TOOL = {
   "model_budget.update": "update_model_budget",
   "agent_config.list": "list_agent_configs",
   "agent_config.update_policy": "update_agent_policy",
+  "finance.readiness": "get_finance_readiness",
   "newspaper.diagnostics": "get_newspaper_diagnostics",
   "documents.upload_text": "upload_document_text",
   "context_graph.import_map": "import_context_graph_map",
@@ -970,11 +971,12 @@ const CLIENT_FEATURE_POSTURES = {
     "ai-workspaces": { AI_WORKSPACES: true, MANAGED_ENTERPRISE_SERVICES: true },
     "execution-packets": true,
   },
-  // Consulting practices (e.g. Chirone) opt into the Practice Ledger project
-  // portfolio capability on top of the always-on expenses/ledger baseline.
+  // Consulting practices (e.g. Chirone) opt into the Finance project portfolio
+  // capability on top of the always-on expenses/ledger baseline.
   // Slicing Pie stays explicitly opt-in because it changes how contributions
   // are analyzed and is not appropriate for every practice.
   consulting: {
+    finance: { FINANCE_PROJECTS: true },
     "practice-ledger": { PRACTICE_PROJECTS: true },
   },
 } satisfies Record<string, ModulePostureBundle>;

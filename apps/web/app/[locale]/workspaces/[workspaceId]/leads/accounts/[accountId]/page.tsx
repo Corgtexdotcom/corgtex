@@ -1,5 +1,5 @@
 import { requirePageActor } from "@/lib/auth";
-import { isWorkspaceFeatureEnabled, requireWorkspaceFeature } from "@/lib/workspace-feature-flags";
+import { isWorkspaceFinanceCapabilityEnabled, requireWorkspaceFeature } from "@/lib/workspace-feature-flags";
 import { MarkdownEditor } from "@/lib/components/MarkdownEditor";
 import { MarkdownRenderer } from "@/lib/components/MarkdownRenderer";
 import { normalizeVisibleWorkItemColumns, toggleWorkItemColumnVisibility } from "@/lib/work-item-view";
@@ -78,11 +78,7 @@ export default async function AccountDetailPage({
     stage,
     `/workspaces/${workspaceId}/add?kind=deal&stage=${stage}&returnTo=${encodeURIComponent(pipelineReturnTo)}`,
   ]));
-  const [financeEnabled, practiceProjectsEnabled] = await Promise.all([
-    isWorkspaceFeatureEnabled(workspaceId, "FINANCE"),
-    isWorkspaceFeatureEnabled(workspaceId, "PRACTICE_PROJECTS"),
-  ]);
-  const canShowPracticeFinance = financeEnabled && practiceProjectsEnabled;
+  const canShowPracticeFinance = await isWorkspaceFinanceCapabilityEnabled(workspaceId, "projects");
   const [account, communicationSuggestionResult, members, accountFinance] = await Promise.all([
     getCrmAccount(actor, { workspaceId, accountId }),
     listCommunicationSuggestions(actor, workspaceId, { accountId, take: 100 }),

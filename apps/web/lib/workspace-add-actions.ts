@@ -1,4 +1,5 @@
 import type { MemberRole } from "@prisma/client";
+import { financeCapabilityEnabled } from "@corgtex/domain/modules";
 
 import type { WorkspaceFeatureFlagMap } from "@/lib/workspace-feature-flags";
 
@@ -57,7 +58,7 @@ export const WORKSPACE_ADD_ACTION_DEFINITIONS = {
   },
   finance_project: {
     label: "Project",
-    description: "Create a Practice Ledger project.",
+    description: "Create a Finance project.",
   },
   article: {
     label: "Brain article",
@@ -299,7 +300,7 @@ export function getWorkspaceAddActions(context: WorkspaceAddActionContext): Work
     case "roles":
       return isStructureManager(context.role) ? [action("role"), action("role_assignment")] : [];
     case "finance":
-      return context.featureFlags.FINANCE && context.featureFlags.PRACTICE_PROJECTS ? [action("finance_project")] : [];
+      return financeCapabilityEnabled(context.featureFlags, "projects") ? [action("finance_project")] : [];
     case "brain":
       return [action("upload_file"), action("article")];
     case "tools":

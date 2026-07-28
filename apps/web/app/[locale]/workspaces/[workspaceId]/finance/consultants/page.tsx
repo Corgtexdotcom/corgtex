@@ -1,6 +1,6 @@
 import { listNativePracticeConsultants } from "@corgtex/domain";
 import { requirePageActor } from "@/lib/auth";
-import { isWorkspaceFeatureEnabled, requireWorkspaceFeature } from "@/lib/workspace-feature-flags";
+import { isWorkspaceFinanceCapabilityEnabled, requireWorkspaceFeature, requireWorkspaceFinanceCapability } from "@/lib/workspace-feature-flags";
 import { PracticeFinanceNav, nextHref } from "../components";
 
 export const dynamic = "force-dynamic";
@@ -17,18 +17,18 @@ export default async function PracticeConsultantsPage({
   const cursor = Array.isArray(query?.cursor) ? query.cursor[0] : query?.cursor;
   const actor = await requirePageActor();
   await requireWorkspaceFeature(workspaceId, "FINANCE");
-  await requireWorkspaceFeature(workspaceId, "PRACTICE_PROJECTS");
+  await requireWorkspaceFinanceCapability(workspaceId, "projects");
   const [consultants, slicingPieEnabled] = await Promise.all([
     listNativePracticeConsultants(actor, workspaceId, { take: 50, cursor }),
-    isWorkspaceFeatureEnabled(workspaceId, "SLICING_PIE"),
+    isWorkspaceFinanceCapabilityEnabled(workspaceId, "slicingPie"),
   ]);
   const nextPageHref = nextHref(`/workspaces/${workspaceId}/finance/consultants`, {}, consultants.nextCursor);
 
   return (
     <section className="stack" style={{ gap: 20 }} data-finance-surface="practice-consultants">
       <header className="nr-masthead" style={{ textAlign: "left", marginBottom: 0 }}>
-        <a className="link-button small secondary" href={`/workspaces/${workspaceId}/finance`}>Back to Practice Ledger</a>
-        <h1 style={{ marginTop: 12 }}>Practice consultants</h1>
+        <a className="link-button small secondary" href={`/workspaces/${workspaceId}/finance`}>Back to Finance</a>
+        <h1 style={{ marginTop: 12 }}>Consultants</h1>
         <div className="nr-masthead-meta">
           <span>Native consultants linked to assignments, submitted time, expenses, and payment batches.</span>
         </div>

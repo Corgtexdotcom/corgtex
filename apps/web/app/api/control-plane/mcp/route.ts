@@ -429,6 +429,11 @@ const tools = [
     },
   },
   {
+    name: "get_customer_finance_readiness",
+    description: "Run the read-only customer Finance readiness diagnostic through the support connector.",
+    inputSchema: { type: "object", properties: { deploymentId: { type: "string" } }, required: ["deploymentId"] },
+  },
+  {
     name: "configure_customer_integration",
     description: "Configure an audited customer integration entitlement. V1 supports meeting_recorders.",
     inputSchema: {
@@ -661,6 +666,7 @@ const toolScopes: Record<string, string> = {
   update_customer_member_status: "control-plane:access:write",
   list_customer_feature_flags: "control-plane:read",
   set_customer_feature_flag: "control-plane:features:write",
+  get_customer_finance_readiness: "control-plane:read",
   refresh_customer_deployment_snapshot: "control-plane:support:write",
   configure_customer_integration: "control-plane:integrations:write",
   run_meeting_recorder_operation: "control-plane:integrations:write",
@@ -1062,6 +1068,15 @@ export async function POST(request: NextRequest) {
         enabled: args.enabled,
         ...(Object.prototype.hasOwnProperty.call(args, "config") ? { config: args.config } : {}),
         reason: argString(args, "reason"),
+      })));
+    }
+    if (name === "get_customer_finance_readiness") {
+      return rpcResult(id, textContent(await runCustomerSupportOperation(actor, {
+        deploymentId: argString(args, "deploymentId"),
+        action: "finance.readiness",
+        scopeOverride: "control-plane:read",
+        reason: "Read Finance readiness diagnostic.",
+        arguments: {},
       })));
     }
     if (name === "configure_customer_integration") {

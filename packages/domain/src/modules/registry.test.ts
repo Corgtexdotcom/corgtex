@@ -4,6 +4,7 @@ import { CONTROL_PLANE_WORKSPACE_FEATURE_FLAGS } from "../control-plane";
 import {
   collectFeatureFlagDefinitions,
   defaultWorkspaceFeatureFlags,
+  financeCapabilityEnabled,
   getSatelliteEmbedForModule,
   listNavModules,
   listWorkspaceFeatureFlagDefinitions,
@@ -83,6 +84,17 @@ describe("module registry feature flag parity", () => {
   });
 });
 
+describe("finance capability aliases", () => {
+  it("requires the parent Finance flag and accepts new or legacy capability flags", () => {
+    expect(financeCapabilityEnabled({ FINANCE: true, FINANCE_PROJECTS: true }, "projects")).toBe(true);
+    expect(financeCapabilityEnabled({ FINANCE: true, PRACTICE_PROJECTS: true }, "projects")).toBe(true);
+    expect(financeCapabilityEnabled({ FINANCE: true, FINANCE_SLICING_PIE: true }, "slicingPie")).toBe(true);
+    expect(financeCapabilityEnabled({ FINANCE: true, SLICING_PIE: true }, "slicingPie")).toBe(true);
+    expect(financeCapabilityEnabled({ FINANCE: false, FINANCE_PROJECTS: true }, "projects")).toBe(false);
+    expect(financeCapabilityEnabled({ FINANCE: true, FINANCE_PROJECTS: false, PRACTICE_PROJECTS: false }, "projects")).toBe(false);
+  });
+});
+
 describe("module registry nav parity", () => {
   it("reproduces today's nav items in order", () => {
     const derived = listNavModules().map((mod) => {
@@ -135,7 +147,7 @@ describe("module registry integrity", () => {
   });
 });
 
-describe("practice ledger native module", () => {
+describe("native Finance compatibility module", () => {
   it("has no satellite app identity or embed after the native finance cutover", () => {
     const ledger = MODULE_MANIFESTS.find((mod) => mod.key === "practice-ledger");
     expect(ledger?.tier).toBe("first_party");

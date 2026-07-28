@@ -32,6 +32,7 @@ const markCommunicationSuggestionSent = vi.fn();
 const provisionProspectWorkspace = vi.fn();
 const rejectQualification = vi.fn();
 const requirePageActor = vi.fn(async () => actor);
+const requireWorkspaceFinanceCapability = vi.fn();
 const requireWorkspaceFeature = vi.fn();
 const redirect = vi.fn();
 const sendSchedulingLinkEmail = vi.fn();
@@ -49,6 +50,7 @@ vi.mock("@/lib/auth", () => ({
 }));
 
 vi.mock("@/lib/workspace-feature-flags", () => ({
+  requireWorkspaceFinanceCapability,
   requireWorkspaceFeature,
 }));
 
@@ -163,5 +165,22 @@ describe("relationship server actions", () => {
     await createDealAction(buildDealFormData("NOT_A_STAGE"));
 
     expect(createDeal.mock.calls[0]?.[1]?.stage).toBeUndefined();
+  });
+
+  it("guards Finance project creation from won deals with the Finance projects capability", async () => {
+    const { createFinanceProjectFromDealAction } = await import("./actions");
+    const formData = new FormData();
+    formData.set("workspaceId", "workspace-1");
+    formData.set("dealId", "deal-1");
+    formData.set("code", "DPRJ-001");
+
+    await createFinanceProjectFromDealAction(formData);
+
+    expect(requireWorkspaceFeature).toHaveBeenCalledWith("workspace-1", "FINANCE");
+    expect(requireWorkspaceFinanceCapability).toHaveBeenCalledWith("workspace-1", "projects");
+    expect(createPracticeProjectFromWonDeal).toHaveBeenCalledWith(actor, "workspace-1", expect.objectContaining({
+      dealId: "deal-1",
+      code: "DPRJ-001",
+    }));
   });
 });

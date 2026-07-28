@@ -14,7 +14,7 @@ function renderPanel(canManagePracticeProjects: boolean) {
 }
 
 describe("PracticeProjectAddPanel", () => {
-  it("renders the Practice Ledger project form for finance writers", () => {
+  it("renders the Finance project form for finance writers", () => {
     const markup = renderPanel(true);
 
     expect(markup).toContain("<form");
@@ -28,7 +28,7 @@ describe("PracticeProjectAddPanel", () => {
   it("renders the admin/finance-steward notice instead of a form for non-writers", () => {
     const markup = renderPanel(false);
 
-    expect(markup).toContain("Only workspace admins or finance stewards can add Practice Ledger projects.");
+    expect(markup).toContain("Only workspace admins or finance stewards can add Finance projects.");
     expect(markup).toContain("href=\"/workspaces/ws-1/finance\"");
     expect(markup).not.toContain("<form");
     expect(markup).not.toContain("Create project");

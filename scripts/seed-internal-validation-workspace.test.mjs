@@ -11,14 +11,17 @@ afterEach(() => {
 });
 
 describe("internal validation workspace seed", () => {
-  it("enables the native Practice Ledger routes used by production client-readiness proof", () => {
+  it("enables the native Finance routes used by production client-readiness proof", () => {
     expect(validationSeedConfig.featureFlags).toMatchObject({
       FINANCE: true,
+      FINANCE_PROJECTS: true,
+      FINANCE_SLICING_PIE: true,
       PRACTICE_PROJECTS: true,
+      SLICING_PIE: true,
     });
   });
 
-  it("defines stable synthetic Practice Ledger fixtures for Finance Clients proof", () => {
+  it("defines stable synthetic Finance fixtures for Finance Clients proof", () => {
     expect(validationPracticeFinanceFixtures.client).toMatchObject({
       code: "VAL-CLIENT",
       name: "Validation Fixture Client",
@@ -32,7 +35,7 @@ describe("internal validation workspace seed", () => {
     expect(validationPracticeFinanceFixtures.project.poValueCents).toBeGreaterThan(0);
   });
 
-  it("upserts Practice Ledger fixtures with stable workspace-scoped source IDs", async () => {
+  it("upserts Finance fixtures with stable workspace-scoped source IDs", async () => {
     vi.spyOn(console, "log").mockImplementation(() => {});
     const prisma = {
       workspace: {

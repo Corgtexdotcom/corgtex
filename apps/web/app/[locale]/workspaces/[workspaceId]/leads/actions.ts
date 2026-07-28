@@ -2,7 +2,7 @@
 
 import { enforceDemoGuard } from "@/lib/demo-guard";
 import { requirePageActor } from "@/lib/auth";
-import { requireWorkspaceFeature } from "@/lib/workspace-feature-flags";
+import { requireWorkspaceFeature, requireWorkspaceFinanceCapability } from "@/lib/workspace-feature-flags";
 import { asString, asOptional, refresh } from "../action-utils";
 import { CRM_CREATABLE_DEAL_STAGES } from "./view-model";
 import { redirect } from "next/navigation";
@@ -124,7 +124,7 @@ export async function convertCrmAccountToClientAction(formData: FormData) {
   const financeDealId = asOptional(formData, "financeDealId");
   if (financeDealId) {
     await requireWorkspaceFeature(workspaceId, "FINANCE");
-    await requireWorkspaceFeature(workspaceId, "PRACTICE_PROJECTS");
+    await requireWorkspaceFinanceCapability(workspaceId, "projects");
     await createPracticeProjectFromWonDeal(actor, workspaceId, {
       dealId: financeDealId,
     });
@@ -221,7 +221,7 @@ export async function createFinanceProjectFromDealAction(formData: FormData) {
   const actor = await requirePageActor();
   const workspaceId = asString(formData, "workspaceId");
   await requireWorkspaceFeature(workspaceId, "FINANCE");
-  await requireWorkspaceFeature(workspaceId, "PRACTICE_PROJECTS");
+  await requireWorkspaceFinanceCapability(workspaceId, "projects");
 
   await createPracticeProjectFromWonDeal(actor, workspaceId, {
     dealId: asString(formData, "dealId"),
