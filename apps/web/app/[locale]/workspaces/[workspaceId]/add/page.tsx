@@ -21,7 +21,6 @@ import {
   createProposal,
   createTension,
   createWorkspaceToolLink,
-  canManagePracticeFinanceProjects,
   duplicateGuardErrorPayload,
   getMeetingRecorderConfig,
   getMemberInvitePolicy,
@@ -44,7 +43,6 @@ import {
   submitProposal,
   upsertWorkspaceExternalResourceFromUrl,
 } from "@corgtex/domain";
-import { financeCapabilityEnabled } from "@corgtex/domain/modules";
 import { encrypt } from "@corgtex/connectors-sql";
 import { prisma, type AppActor } from "@corgtex/shared";
 
@@ -103,12 +101,10 @@ import {
   CRM_RELATIONSHIP_OPTIONS,
   labelFromCrmCode,
 } from "../leads/view-model";
-import { createPracticeProjectAction } from "../finance/actions";
 import { MeetingTranscriptUploadForm } from "../meetings/MeetingTranscriptUploadForm";
 import { DuplicateGuardActionEditorForm } from "./DuplicateGuardActionEditorForm";
 import { DuplicateGuardForm, DuplicateGuardSubmitButton, type DuplicateGuardFormState } from "./DuplicateGuardForm";
 import { PasteTextForm } from "./PasteTextForm";
-import { PracticeProjectAddPanel } from "./PracticeProjectAddPanel";
 
 export const dynamic = "force-dynamic";
 
@@ -653,11 +649,6 @@ export default async function WorkspaceAddPage({
   const meetingRecorderEnabled = Boolean(
     featureFlags.MEETING_RECORDERS && meetingRecorderConfig?.featureEnabled && meetingRecorderConfig.config.enabled,
   );
-  const canManagePracticeProjects = financeCapabilityEnabled(featureFlags, "projects")
-    && await canManagePracticeFinanceProjects(actor, workspaceId, {
-      resolvedMembership: membership,
-    });
-
   const returnTo = sanitizeWorkspaceReturnTo(workspaceId, search.returnTo);
   const contextCircleId = circleIdFromReturnTo(returnTo, workspaceId);
   const returnUrl = new URL(returnTo, "https://app.local");
@@ -987,12 +978,6 @@ export default async function WorkspaceAddPage({
   async function assignRoleAndReturn(formData: FormData) {
     "use server";
     await assignRoleAction(formData);
-    redirect(returnTo);
-  }
-
-  async function createPracticeProjectAndReturn(formData: FormData) {
-    "use server";
-    await createPracticeProjectAction(formData);
     redirect(returnTo);
   }
 
@@ -1470,15 +1455,6 @@ export default async function WorkspaceAddPage({
               {cancelLink(returnTo)}
             </div>
           </form>
-        )}
-
-        {kind === "finance_project" && (
-          <PracticeProjectAddPanel
-            action={createPracticeProjectAndReturn}
-            canManagePracticeProjects={canManagePracticeProjects}
-            returnTo={returnTo}
-            workspaceId={workspaceId}
-          />
         )}
 
         {kind === "article" && (

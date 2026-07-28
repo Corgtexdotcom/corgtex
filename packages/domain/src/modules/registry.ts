@@ -33,9 +33,6 @@ export const WORKSPACE_FEATURE_FLAG_ORDER = [
   "GOALS",
   "TOOL_LINKS",
   "FINANCE",
-  "FINANCE_PROJECTS",
-  "FINANCE_SLICING_PIE",
-  "SLICING_PIE",
   "BUILD_ARTIFACTS",
   "RELATIONSHIPS",
   "CONTEXT_MAPS",
@@ -52,7 +49,6 @@ export const WORKSPACE_FEATURE_FLAG_ORDER = [
   "OPENWORK_DEFAULT",
   "EXECUTION_PACKETS",
   "MANAGED_ENTERPRISE_SERVICES",
-  "PRACTICE_PROJECTS",
 ] as const;
 
 /**
@@ -61,27 +57,6 @@ export const WORKSPACE_FEATURE_FLAG_ORDER = [
  * source of truth for the flag vocabulary at the type level too.
  */
 export type WorkspaceFeatureFlagKey = (typeof WORKSPACE_FEATURE_FLAG_ORDER)[number];
-
-export type FinanceCapabilityKey = "projects" | "slicingPie";
-
-export const FINANCE_PARENT_FEATURE_FLAG = "FINANCE" as const;
-export const FINANCE_PROJECTS_FEATURE_FLAG = "FINANCE_PROJECTS" as const;
-export const FINANCE_SLICING_PIE_FEATURE_FLAG = "FINANCE_SLICING_PIE" as const;
-export const LEGACY_PRACTICE_PROJECTS_FEATURE_FLAG = "PRACTICE_PROJECTS" as const;
-export const LEGACY_SLICING_PIE_FEATURE_FLAG = "SLICING_PIE" as const;
-
-export const FINANCE_CAPABILITY_FLAG_ALIASES: Record<FinanceCapabilityKey, readonly WorkspaceFeatureFlagKey[]> = {
-  projects: [FINANCE_PROJECTS_FEATURE_FLAG, LEGACY_PRACTICE_PROJECTS_FEATURE_FLAG],
-  slicingPie: [FINANCE_SLICING_PIE_FEATURE_FLAG, LEGACY_SLICING_PIE_FEATURE_FLAG],
-};
-
-export function financeCapabilityEnabled(
-  flags: Partial<Record<WorkspaceFeatureFlagKey | string, boolean>>,
-  capability: FinanceCapabilityKey,
-): boolean {
-  if (!flags[FINANCE_PARENT_FEATURE_FLAG]) return false;
-  return FINANCE_CAPABILITY_FLAG_ALIASES[capability].some((flagKey) => flags[flagKey] === true);
-}
 
 /** Canonical nav group order, mirroring `WORKSPACE_NAV_GROUPS`. */
 export const NAV_GROUP_ORDER: readonly string[] = [
@@ -269,28 +244,11 @@ export const MODULE_MANIFESTS: readonly ModuleManifest[] = [
     key: "finance",
     tier: "first_party",
     title: "Finance",
-    description: "Spend requests, ledgers, and finance workflows.",
+    description: "Clean workspace shell for future finance workflows.",
     dataOwnership: "corgtex_postgres",
-    featureFlag: flag("FINANCE", "Finance", "Spend requests, ledgers, and finance workflows.", true),
+    featureFlag: flag("FINANCE", "Finance", "Clean Finance workspace shell.", true),
     nav: { href: "/finance", labelKey: "finance", icon: "finance", group: "finance" },
     scopes: ["finance:read", "finance:write"],
-    subFlags: [
-      flag(
-        "FINANCE_PROJECTS",
-        "Project finance",
-        "Finance sections for projects, clients, consultants, time, expenses, reports, and budget health.",
-        false,
-      ),
-      flag(
-        "FINANCE_SLICING_PIE",
-        "Finance Slicing Pie",
-        "Optional Slicing Pie contribution and ownership analysis inside native Finance.",
-        false,
-      ),
-    ],
-    // Mirrors today's behavior: the tab is visible (read) to everyone while
-    // write/manage is restricted to finance stewards and admins
-    // (requireFinanceAccess in finance.ts).
     defaultAccessByRole: {
       CONTRIBUTOR: "read",
       FACILITATOR: "read",
@@ -401,31 +359,6 @@ export const MODULE_MANIFESTS: readonly ModuleManifest[] = [
     scopes: ["execution:read", "execution:write"],
   },
 
-  // --- Legacy Finance aliases. ---
-  {
-    key: "practice-ledger",
-    tier: "first_party",
-    title: "Finance compatibility aliases",
-    description:
-      "Legacy feature flags accepted while customer configs migrate to Finance capability names.",
-    dataOwnership: "corgtex_postgres",
-    // `Practice*` storage/domain names are legacy internal names for native
-    // Finance. These flags remain as compatibility aliases during migration.
-    subFlags: [
-      flag(
-        "PRACTICE_PROJECTS",
-        "Project finance legacy alias",
-        "Compatibility alias for Project finance. New customer enablement should use FINANCE_PROJECTS.",
-        false,
-      ),
-      flag(
-        "SLICING_PIE",
-        "Slicing Pie legacy alias",
-        "Compatibility alias for Finance Slicing Pie. New customer enablement should use FINANCE_SLICING_PIE.",
-        false,
-      ),
-    ],
-  },
 ];
 
 /** All module manifests, in canonical registry order. */

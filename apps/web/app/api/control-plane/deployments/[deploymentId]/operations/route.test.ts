@@ -85,38 +85,6 @@ describe("control-plane deployment operations API", () => {
     );
   });
 
-  it("accepts read-only Finance readiness support operations", async () => {
-    runCustomerSupportOperation.mockResolvedValueOnce({
-      id: "op-finance",
-      action: "finance.readiness",
-      status: "COMPLETED",
-    });
-    const { POST } = await import("./route");
-
-    const response = await POST(request({
-      action: "finance.readiness",
-      reason: "Confirm customer Finance readiness after release.",
-      arguments: {},
-    }) as never, { params: Promise.resolve({ deploymentId: "inst-1" }) });
-
-    expect(response.status).toBe(201);
-    await expect(response.json()).resolves.toMatchObject({
-      operation: {
-        id: "op-finance",
-        action: "finance.readiness",
-      },
-    });
-    expect(runCustomerSupportOperation).toHaveBeenCalledWith(
-      expect.objectContaining({ kind: "user" }),
-      {
-        deploymentId: "inst-1",
-        action: "finance.readiness",
-        reason: "Confirm customer Finance readiness after release.",
-        arguments: {},
-      },
-    );
-  });
-
   it("rejects retry-style newspaper operations", async () => {
     const { POST } = await import("./route");
 

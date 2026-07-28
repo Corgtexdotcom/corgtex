@@ -50,7 +50,6 @@ export const coreRouteCatalog = [
 
 export const optionalRouteCatalog = [
   ["leads", "/leads"],
-  ["finance-clients", "/finance/clients"],
   ["agents", "/agents"],
   ["governance", "/governance"],
   ["operator", "/operator"],

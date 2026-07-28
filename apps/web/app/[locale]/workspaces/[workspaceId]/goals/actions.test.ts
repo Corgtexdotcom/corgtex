@@ -12,12 +12,9 @@ const actor = {
 
 const addKeyResult = vi.fn();
 const createGoal = vi.fn();
-const createGoalFinanceProjectLink = vi.fn();
 const deleteGoal = vi.fn();
-const deleteGoalFinanceProjectLink = vi.fn();
 const enforceDemoGuard = vi.fn();
 const requirePageActor = vi.fn(async () => actor);
-const requireWorkspaceFinanceCapability = vi.fn();
 const requireWorkspaceFeature = vi.fn();
 const respondToCheckIn = vi.fn();
 const returnGoalToDraft = vi.fn();
@@ -34,16 +31,13 @@ vi.mock("@/lib/auth", () => ({
 }));
 
 vi.mock("@/lib/workspace-feature-flags", () => ({
-  requireWorkspaceFinanceCapability,
   requireWorkspaceFeature,
 }));
 
 vi.mock("@corgtex/domain", () => ({
   addKeyResult,
   createGoal,
-  createGoalFinanceProjectLink,
   deleteGoal,
-  deleteGoalFinanceProjectLink,
   respondToCheckIn,
   returnGoalToDraft,
   skipCompanyUnderstandingQuestion,
@@ -126,40 +120,4 @@ describe("goals server actions", () => {
     });
   });
 
-  it("links a finance project to a goal through the guarded form action", async () => {
-    const { createGoalFinanceProjectLinkFormAction } = await import("./actions");
-    const formData = new FormData();
-    formData.set("workspaceId", "workspace-1");
-    formData.set("goalId", "goal-1");
-    formData.set("projectId", "project-1");
-
-    await createGoalFinanceProjectLinkFormAction(formData);
-
-    expect(enforceDemoGuard).toHaveBeenCalledWith("workspace-1");
-    expect(requireWorkspaceFeature).toHaveBeenCalledWith("workspace-1", "GOALS");
-    expect(requireWorkspaceFeature).toHaveBeenCalledWith("workspace-1", "FINANCE");
-    expect(requireWorkspaceFinanceCapability).toHaveBeenCalledWith("workspace-1", "projects");
-    expect(createGoalFinanceProjectLink).toHaveBeenCalledWith(actor, {
-      workspaceId: "workspace-1",
-      goalId: "goal-1",
-      projectId: "project-1",
-    });
-  });
-
-  it("unlinks a finance project goal link through the guarded form action", async () => {
-    const { deleteGoalFinanceProjectLinkFormAction } = await import("./actions");
-    const formData = new FormData();
-    formData.set("workspaceId", "workspace-1");
-    formData.set("linkId", "link-1");
-
-    await deleteGoalFinanceProjectLinkFormAction(formData);
-
-    expect(requireWorkspaceFeature).toHaveBeenCalledWith("workspace-1", "GOALS");
-    expect(requireWorkspaceFeature).toHaveBeenCalledWith("workspace-1", "FINANCE");
-    expect(requireWorkspaceFinanceCapability).toHaveBeenCalledWith("workspace-1", "projects");
-    expect(deleteGoalFinanceProjectLink).toHaveBeenCalledWith(actor, {
-      workspaceId: "workspace-1",
-      linkId: "link-1",
-    });
-  });
 });

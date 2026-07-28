@@ -7,12 +7,8 @@ import {
 } from "./control-plane";
 
 /**
- * C2 byte-for-byte parity anchor. `CLIENT_FEATURE_POSTURES` was reshaped from
- * raw flag overrides into module-key bundles. This pins the expanded output of
- * `featurePostureFlags` to the intended flag/enabled list, including migration
- * aliases where a new customer-facing flag must coexist with an old config key.
- *
- * LEGACY_POSTURE_OVERRIDES is the literal pre-refactor data structure.
+ * Pins the expanded output of `featurePostureFlags` to the intended
+ * flag/enabled list.
  */
 const LEGACY_POSTURE_OVERRIDES: Record<string, Record<string, boolean>> = {
   standard: {},
@@ -40,10 +36,7 @@ const LEGACY_POSTURE_OVERRIDES: Record<string, Record<string, boolean>> = {
     EXECUTION_PACKETS: true,
     MANAGED_ENTERPRISE_SERVICES: true,
   },
-  consulting: {
-    FINANCE_PROJECTS: true,
-    PRACTICE_PROJECTS: true,
-  },
+  consulting: {},
 };
 
 function legacyPostureFlags(posture: string) {

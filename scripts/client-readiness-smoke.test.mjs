@@ -193,9 +193,9 @@ describe("client readiness smoke login handling", () => {
     );
   });
 
-  it("keeps Finance Clients explicit so default sweeps do not require Practice Projects", () => {
+  it("does not include deleted Finance subroutes in readiness sweeps", () => {
     expect(coreRouteCatalog).not.toContainEqual(["finance-clients", "/finance/clients"]);
-    expect(optionalRouteCatalog).toContainEqual(["finance-clients", "/finance/clients"]);
+    expect(optionalRouteCatalog).not.toContainEqual(["finance-clients", "/finance/clients"]);
   });
 });
 
