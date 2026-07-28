@@ -2967,6 +2967,10 @@ async function main() {
     const sliceMultiplier = contribution.paymentChoice === "SLICING_PIE"
       ? (contribution.type === "TIME" ? 2 : 4)
       : 0;
+    const defaultPaidByUserId = memberMappings["jwolk"]?.userId ?? null;
+    const paidByUserId = contribution.paymentChoice === "CASH" && contribution.paid
+      ? (defaultPaidByUserId === contributor.userId ? memberMappings["jduato"]?.userId ?? null : defaultPaidByUserId)
+      : null;
     const data = {
       workspaceId: wsId,
       projectId,
@@ -2985,7 +2989,7 @@ async function main() {
       sliceMultiplier,
       slices: amountCents * sliceMultiplier,
       paidAt: contribution.paymentChoice === "CASH" && contribution.paid ? nDaysAgoAtNoonUtc(4) : null,
-      paidByUserId: contribution.paymentChoice === "CASH" && contribution.paid ? memberMappings["jwolk"]?.userId ?? null : null,
+      paidByUserId,
     };
     await prisma.practiceContributionEntry.upsert({
       where: { id: practiceContributionIds[index] },
