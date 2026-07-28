@@ -1,8 +1,8 @@
 import {
   canManagePracticeFinanceProjects,
+  getNativePracticeFinanceDashboard,
   listNativePracticeProjectExportRows,
   requireWorkspaceMembership,
-  summarizeNativePracticeFinance,
 } from "@corgtex/domain";
 import { prisma } from "@corgtex/shared";
 import { requirePageActor } from "@/lib/auth";
@@ -43,17 +43,18 @@ export default async function FinanceProjectsPage({
   const actor = await requirePageActor();
   await requireWorkspaceFeature(workspaceId, "FINANCE");
   await requireWorkspaceFinanceCapability(workspaceId, "projects");
-  const [membership, workspace, projectPage, slicingPieEnabled] = await Promise.all([
+  const [membership, workspace, projectPage, financeDashboard, slicingPieEnabled] = await Promise.all([
     requireWorkspaceMembership({ actor, workspaceId }),
     prisma.workspace.findUnique({ where: { id: workspaceId }, select: { slug: true } }),
     listNativePracticeProjectExportRows(actor, workspaceId, { take: 50, cursor }),
+    getNativePracticeFinanceDashboard(actor, workspaceId),
     isWorkspaceFinanceCapabilityEnabled(workspaceId, "slicingPie"),
   ]);
   const readOnlyDemo = workspace?.slug === "jnj-demo";
   const canManageProjects = !readOnlyDemo && await canManagePracticeFinanceProjects(actor, workspaceId, {
     resolvedMembership: membership,
   });
-  const summary = summarizeNativePracticeFinance(projectPage.items.map((item) => item.health));
+  const summary = financeDashboard.summary;
   const nextPageHref = nextHref(`/workspaces/${workspaceId}/finance/projects`, {}, projectPage.nextCursor);
   const projectColumns: DataTableColumn[] = [
     { id: "project", label: "Project" },
@@ -108,7 +109,7 @@ export default async function FinanceProjectsPage({
 
       {canManageProjects && (
         <details>
-          <summary className="link-button small" style={{ cursor: "pointer", width: "fit-content" }}>Create project</summary>
+          <summary className="link-button small">Create project</summary>
           <PracticeProjectAddPanel
             action={createPracticeProjectAction}
             canManagePracticeProjects

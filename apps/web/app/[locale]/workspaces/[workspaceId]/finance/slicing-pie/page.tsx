@@ -2,7 +2,7 @@ import { getSlicingPieSummary } from "@corgtex/domain";
 import type { PracticeContributionEntryWithContext } from "@corgtex/domain";
 
 import { requirePageActor } from "@/lib/auth";
-import { requireWorkspaceFeature, requireWorkspaceFinanceCapability } from "@/lib/workspace-feature-flags";
+import { isWorkspaceFinanceCapabilityEnabled, requireWorkspaceFeature, requireWorkspaceFinanceCapability } from "@/lib/workspace-feature-flags";
 import { PracticeFinanceNav } from "../components";
 
 export const dynamic = "force-dynamic";
@@ -43,10 +43,13 @@ export default async function SlicingPiePage({
   const actor = await requirePageActor();
   await requireWorkspaceFeature(workspaceId, "FINANCE");
   await requireWorkspaceFinanceCapability(workspaceId, "slicingPie");
-  const summary = await getSlicingPieSummary(actor, workspaceId, {
-    sourceTake: 50,
-    sourceCursor,
-  });
+  const [summary, financeProjectsEnabled] = await Promise.all([
+    getSlicingPieSummary(actor, workspaceId, {
+      sourceTake: 50,
+      sourceCursor,
+    }),
+    isWorkspaceFinanceCapabilityEnabled(workspaceId, "projects"),
+  ]);
 
   return (
     <section className="stack" style={{ gap: 20 }} data-finance-surface="slicing-pie">
@@ -61,7 +64,12 @@ export default async function SlicingPiePage({
           <a href={`/workspaces/${workspaceId}/finance`} className="link-button secondary">Finance</a>
         </div>
         <div style={{ marginTop: 16 }}>
-          <PracticeFinanceNav workspaceId={workspaceId} active="slicing-pie" slicingPieEnabled />
+          <PracticeFinanceNav
+            workspaceId={workspaceId}
+            active="slicing-pie"
+            financeProjectsEnabled={financeProjectsEnabled}
+            slicingPieEnabled
+          />
         </div>
       </header>
 

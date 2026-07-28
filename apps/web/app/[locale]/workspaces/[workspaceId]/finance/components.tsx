@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import React, { type ReactNode } from "react";
 import { Prisma } from "@prisma/client";
 import { WorkspaceSubnav } from "@/lib/components/ControlPrimitives";
 

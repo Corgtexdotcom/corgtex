@@ -5,6 +5,7 @@ import {
   type NativePracticeProjectHealth,
 } from "@corgtex/domain";
 import type { PracticeProject, PracticeProjectStatus } from "@prisma/client";
+import { WorkspaceEmptyState } from "@/lib/components/ControlPrimitives";
 import {
   createPracticeContributionEntryAction,
   markPracticeContributionEntryPaidAction,
@@ -412,12 +413,10 @@ export function PracticeFinanceDashboard({
       )}
 
       {!financeProjectsEnabled && !slicingPieEnabled && (
-        <div className="nr-item" style={{ padding: 24 }}>
-          <strong style={{ display: "block", marginBottom: 6 }}>Finance is enabled</strong>
-          <p className="nr-item-meta" style={{ margin: 0 }}>
-            No optional Finance sections are enabled for this workspace yet.
-          </p>
-        </div>
+        <WorkspaceEmptyState
+          title="Finance is enabled"
+          description="No optional Finance sections are enabled for this workspace yet."
+        />
       )}
 
       {slicingPieEnabled && (

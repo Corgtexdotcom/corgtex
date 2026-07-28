@@ -2971,6 +2971,7 @@ async function main() {
       workspaceId: wsId,
       projectId,
       contributorUserId: contributor.userId,
+      submittedByUserId: contributor.userId,
       type: contribution.type,
       paymentChoice: contribution.paymentChoice,
       cashStatus: contribution.paymentChoice === "CASH" ? (contribution.paid ? "PAID" : "REQUESTED") : "NOT_APPLICABLE",
