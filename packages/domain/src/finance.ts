@@ -1,5 +1,6 @@
 import type { AppActor, MembershipSummary } from "@corgtex/shared";
 import { prisma } from "@corgtex/shared";
+import { requireAgentScope } from "./agent-auth";
 import { requireWorkspaceMembership } from "./auth";
 import { AppError, invariant } from "./errors";
 import { resolveSingleModuleAccess } from "./module-access";
@@ -158,6 +159,9 @@ async function resolveFinanceModuleAccess(workspaceId: string, membership: Membe
 }
 
 export async function getFinanceAccessPolicy(actor: AppActor, workspaceId: string) {
+  if (actor.kind === "agent") {
+    requireAgentScope(actor, "finance:read");
+  }
   const [membership, flagState] = await Promise.all([
     requireWorkspaceMembership({ actor, workspaceId }),
     financeFlagState(workspaceId),
@@ -254,7 +258,7 @@ export async function createFinanceContributionEntry(actor: AppActor, params: {
   const actorUserId = requireHumanActorUserId(actor);
   requireFinanceCapability(policy.flags, params.type === "CAPITAL" ? "FINANCE_CAPITAL" : "FINANCE_SLICING_PIE");
   invariant(params.paymentChoice !== "CAPITAL" || params.type === "CAPITAL", 400, "INVALID_INPUT", "Capital payment choice requires a capital contribution.");
-  invariant(params.minutes == null || (Number.isInteger(params.minutes) && params.minutes > 0), 400, "INVALID_INPUT", "Minutes must be a positive whole number.");
+  invariant(params.minutes == null || (Number.isInteger(params.minutes) && params.minutes > 0 && params.minutes <= PRISMA_INT_MAX), 400, "INVALID_INPUT", "Minutes must be a positive whole number within the Prisma Int range.");
   const amountCents = normalizeCents(params.amountCents, "Amount", false);
   invariant(params.type !== "TIME" || params.minutes != null, 400, "INVALID_INPUT", "Time contributions require positive minutes.");
   invariant(params.paymentChoice === "CASH" || params.type === "TIME" || amountCents !== null, 400, "INVALID_INPUT", "Expense and capital contributions require a positive amount.");
@@ -292,7 +296,7 @@ export async function confirmFinanceCashPayablePaid(actor: AppActor, params: {
 }) {
   const policy = await requireFinanceHumanWriteAccess(actor, params.workspaceId);
   const actorUserId = requireHumanActorUserId(actor);
-  invariant(Number.isInteger(params.expectedVersion) && params.expectedVersion > 0, 400, "INVALID_INPUT", "A payable version is required.");
+  invariant(Number.isInteger(params.expectedVersion) && params.expectedVersion > 0 && params.expectedVersion <= PRISMA_INT_MAX, 400, "INVALID_INPUT", "A payable version within the Prisma Int range is required.");
   const payable = await prisma.financeContributionEntry.findFirst({
     where: { id: params.entryId, workspaceId: params.workspaceId },
     select: {

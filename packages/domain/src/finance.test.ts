@@ -1,7 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { AppActor } from "@corgtex/shared";
 
-const { prismaMock, requireWorkspaceMembershipMock, resolveSingleModuleAccessMock } = vi.hoisted(() => ({
+const { prismaMock, requireAgentScopeMock, requireWorkspaceMembershipMock, resolveSingleModuleAccessMock } = vi.hoisted(() => ({
+  requireAgentScopeMock: vi.fn(),
   requireWorkspaceMembershipMock: vi.fn(),
   resolveSingleModuleAccessMock: vi.fn(),
   prismaMock: {
@@ -29,6 +30,10 @@ vi.mock("@corgtex/shared", () => ({
   prisma: prismaMock,
 }));
 
+vi.mock("./agent-auth", () => ({
+  requireAgentScope: requireAgentScopeMock,
+}));
+
 vi.mock("./auth", () => ({
   requireWorkspaceMembership: requireWorkspaceMembershipMock,
 }));
@@ -47,6 +52,15 @@ const actor: AppActor = {
   },
 };
 
+const scopedAgentActor = {
+  kind: "agent",
+  authProvider: "credential",
+  credentialId: "credential-1",
+  label: "Scoped agent",
+  workspaceIds: ["workspace-1"],
+  scopes: ["workspace:read"],
+} as AppActor;
+
 function financeFlags(overrides: Array<{ flag: string; enabled: boolean; config?: unknown }> = []) {
   return [
     { flag: "FINANCE", enabled: true, config: { financeAllMemberWrite: true }, updatedAt: new Date("2026-07-28T10:00:00.000Z") },
@@ -57,6 +71,7 @@ function financeFlags(overrides: Array<{ flag: string; enabled: boolean; config?
 describe("Finance V2 access policy", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    requireAgentScopeMock.mockReturnValue(undefined);
     requireWorkspaceMembershipMock.mockResolvedValue({
       id: "member-1",
       workspaceId: "workspace-1",
@@ -121,6 +136,20 @@ describe("Finance V2 access policy", () => {
       canRead: true,
       canWrite: true,
     });
+  });
+
+  it("requires the finance read scope for credential agents", async () => {
+    requireAgentScopeMock.mockImplementationOnce(() => {
+      throw Object.assign(new Error("Agent credential is missing the required scope."), {
+        status: 403,
+        code: "FORBIDDEN",
+      });
+    });
+    const { getFinanceReadiness } = await import("./finance");
+
+    await expect(getFinanceReadiness(scopedAgentActor, "workspace-1")).rejects.toMatchObject({ code: "FORBIDDEN" });
+    expect(requireAgentScopeMock).toHaveBeenCalledWith(scopedAgentActor, "finance:read");
+    expect(requireWorkspaceMembershipMock).not.toHaveBeenCalled();
   });
 
   it("gates project creation on the projects capability flag", async () => {
@@ -270,6 +299,21 @@ describe("Finance V2 access policy", () => {
       workspaceId: "workspace-1",
       type: "TIME",
       paymentChoice: "SLICING_PIE",
+    })).rejects.toMatchObject({ code: "INVALID_INPUT" });
+    expect(prismaMock.financeContributionEntry.create).not.toHaveBeenCalled();
+  });
+
+  it("rejects contribution minutes above the Prisma Int range", async () => {
+    prismaMock.workspaceFeatureFlag.findMany.mockResolvedValueOnce(financeFlags([
+      { flag: "FINANCE_SLICING_PIE", enabled: true },
+    ]));
+    const { createFinanceContributionEntry } = await import("./finance");
+
+    await expect(createFinanceContributionEntry(actor, {
+      workspaceId: "workspace-1",
+      type: "TIME",
+      paymentChoice: "SLICING_PIE",
+      minutes: 2147483648,
     })).rejects.toMatchObject({ code: "INVALID_INPUT" });
     expect(prismaMock.financeContributionEntry.create).not.toHaveBeenCalled();
   });
@@ -432,6 +476,17 @@ describe("Finance V2 access policy", () => {
       workspaceId: "workspace-1",
       entryId: "entry-1",
       expectedVersion: 0,
+    })).rejects.toMatchObject({ code: "INVALID_INPUT" });
+    expect(prismaMock.financeContributionEntry.findFirst).not.toHaveBeenCalled();
+  });
+
+  it("rejects payable versions above the Prisma Int range", async () => {
+    const { confirmFinanceCashPayablePaid } = await import("./finance");
+
+    await expect(confirmFinanceCashPayablePaid(actor, {
+      workspaceId: "workspace-1",
+      entryId: "entry-1",
+      expectedVersion: 2147483648,
     })).rejects.toMatchObject({ code: "INVALID_INPUT" });
     expect(prismaMock.financeContributionEntry.findFirst).not.toHaveBeenCalled();
   });
