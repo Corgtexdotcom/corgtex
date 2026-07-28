@@ -32,8 +32,9 @@ function sectionCount(readiness: FinanceReadiness, section: FinanceSectionKey) {
     case "expenses":
       return readiness.counts.expenses;
     case "slicing-pie":
+      return readiness.counts.slicingPieContributionEntries;
     case "capital":
-      return readiness.counts.contributionEntries;
+      return readiness.counts.capitalContributionEntries;
     default:
       return null;
   }

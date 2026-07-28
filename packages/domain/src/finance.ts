@@ -2,7 +2,8 @@ import type { AppActor, MembershipSummary } from "@corgtex/shared";
 import { prisma } from "@corgtex/shared";
 import { requireWorkspaceMembership } from "./auth";
 import { AppError, invariant } from "./errors";
-import { defaultWorkspaceFeatureFlags } from "./modules";
+import { resolveSingleModuleAccess } from "./module-access";
+import { defaultWorkspaceFeatureFlags, getModuleByKey, isAtLeast, type MemberRoleKey, type ModuleAccessLevel } from "./modules";
 
 export const FINANCE_PARENT_FLAG = "FINANCE";
 export const FINANCE_ALL_MEMBER_WRITE_CONFIG_KEY = "financeAllMemberWrite";
@@ -27,7 +28,6 @@ const FINANCE_FLAG_KEYS = [
   ...FINANCE_SECTIONS.flatMap((section) => section.flag ? [section.flag] : []),
 ];
 
-const FINANCE_WRITE_ROLES = new Set(["FINANCE_STEWARD", "ADMIN"]);
 const RETIRED_PRACTICE_LEDGER_APP_KEY = "practice-ledger";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -134,6 +134,19 @@ async function requireFinanceContributorUserInWorkspace(workspaceId: string, con
   return userId;
 }
 
+async function resolveFinanceModuleAccess(workspaceId: string, membership: MembershipSummary | null, financeEnabled: boolean): Promise<ModuleAccessLevel> {
+  if (!financeEnabled) return "none";
+  if (!membership) return "read";
+  const financeModule = getModuleByKey("finance");
+  invariant(financeModule, 500, "FINANCE_MODULE_MISSING", "Finance module manifest is missing.");
+  return resolveSingleModuleAccess({
+    workspaceId,
+    memberId: membership.id,
+    role: membership.role as MemberRoleKey,
+    module: financeModule,
+  });
+}
+
 export async function getFinanceAccessPolicy(actor: AppActor, workspaceId: string) {
   const [membership, flagState] = await Promise.all([
     requireWorkspaceMembership({ actor, workspaceId }),
@@ -142,9 +155,9 @@ export async function getFinanceAccessPolicy(actor: AppActor, workspaceId: strin
   const financeEnabled = Boolean(flagState.flags[FINANCE_PARENT_FLAG]);
   const financeAllMemberWrite = financeEnabled && financeAllMemberWriteFromConfig(flagState.financeConfig);
   const memberRole = membership?.role ?? (actor.kind === "agent" ? null : null);
-  const roleWrite = memberRole ? FINANCE_WRITE_ROLES.has(memberRole) : false;
-  const canRead = financeEnabled;
-  const canWrite = financeEnabled && (roleWrite || Boolean(membership && financeAllMemberWrite));
+  const accessLevel = await resolveFinanceModuleAccess(workspaceId, membership, financeEnabled);
+  const canRead = financeEnabled && isAtLeast(accessLevel, "read");
+  const canWrite = financeEnabled && (isAtLeast(accessLevel, "write") || Boolean(membership && financeAllMemberWrite));
 
   return {
     workspaceId,
@@ -230,6 +243,7 @@ export async function createFinanceContributionEntry(actor: AppActor, params: {
     requireFinanceConsultantInWorkspace(params.workspaceId, params.consultantId),
     requireFinanceContributorUserInWorkspace(params.workspaceId, params.contributorUserId, actorUserId),
   ]);
+  invariant(params.paymentChoice !== "CASH" || amountCents !== null, 400, "PAYABLE_AMOUNT_REQUIRED", "Cash payables require a positive amount.");
   const cashStatus = params.paymentChoice === "CASH" ? "REQUESTED" : "NOT_APPLICABLE";
   return prisma.financeContributionEntry.create({
     data: {
@@ -255,7 +269,7 @@ export async function confirmFinanceCashPayablePaid(actor: AppActor, params: {
   entryId: string;
   expectedVersion: number;
 }) {
-  await requireFinanceHumanWriteAccess(actor, params.workspaceId);
+  const policy = await requireFinanceHumanWriteAccess(actor, params.workspaceId);
   const actorUserId = requireHumanActorUserId(actor);
   invariant(Number.isInteger(params.expectedVersion) && params.expectedVersion > 0, 400, "INVALID_INPUT", "A payable version is required.");
   const payable = await prisma.financeContributionEntry.findFirst({
@@ -267,6 +281,7 @@ export async function confirmFinanceCashPayablePaid(actor: AppActor, params: {
       contributorUserId: true,
       paymentChoice: true,
       cashStatus: true,
+      type: true,
       version: true,
     },
   });
@@ -274,6 +289,7 @@ export async function confirmFinanceCashPayablePaid(actor: AppActor, params: {
   invariant(payable.paymentChoice === "CASH", 400, "PAYABLE_NOT_CASH", "Only cash payables can be confirmed as paid.");
   invariant(payable.cashStatus !== "PAID", 409, "PAYABLE_ALREADY_PAID", "This payable is already paid.");
   invariant(payable.cashStatus === "REQUESTED", 400, "PAYABLE_NOT_REQUESTED", "This payable is not awaiting payment.");
+  requireFinanceCapability(policy.flags, payable.type === "CAPITAL" ? "FINANCE_CAPITAL" : "FINANCE_SLICING_PIE");
 
   const creatorUserIds = new Set([payable.submittedByUserId, payable.contributorUserId].filter(Boolean));
   invariant(creatorUserIds.size > 0, 409, "PAYABLE_SUBMITTER_REQUIRED", "A human submitter must be recorded before payment can be confirmed.");
@@ -320,6 +336,8 @@ export async function getFinanceReadiness(actor: AppActor, workspaceId: string) 
     expenses,
     contributionEntries,
     requestedPayables,
+    slicingPieContributionEntries,
+    capitalContributionEntries,
     latestClient,
     latestConsultant,
     latestProject,
@@ -337,6 +355,8 @@ export async function getFinanceReadiness(actor: AppActor, workspaceId: string) 
     prisma.financeExpense.count({ where: { workspaceId } }),
     prisma.financeContributionEntry.count({ where: { workspaceId } }),
     prisma.financeContributionEntry.count({ where: { workspaceId, paymentChoice: "CASH", cashStatus: "REQUESTED" } }),
+    prisma.financeContributionEntry.count({ where: { workspaceId, paymentChoice: "SLICING_PIE" } }),
+    prisma.financeContributionEntry.count({ where: { workspaceId, type: "CAPITAL" } }),
     prisma.financeClient.findFirst({ where: { workspaceId }, orderBy: { updatedAt: "desc" }, select: { updatedAt: true } }),
     prisma.financeConsultant.findFirst({ where: { workspaceId }, orderBy: { updatedAt: "desc" }, select: { updatedAt: true } }),
     prisma.financeProject.findFirst({ where: { workspaceId }, orderBy: { updatedAt: "desc" }, select: { updatedAt: true } }),
@@ -396,6 +416,8 @@ export async function getFinanceReadiness(actor: AppActor, workspaceId: string) 
       expenses,
       contributionEntries,
       requestedPayables,
+      slicingPieContributionEntries,
+      capitalContributionEntries,
     },
     latestFinanceUpdateAt: latestRecordUpdateAt,
     paymentSafety: {

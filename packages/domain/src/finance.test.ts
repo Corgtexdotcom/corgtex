@@ -1,8 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { AppActor } from "@corgtex/shared";
 
-const { prismaMock, requireWorkspaceMembershipMock } = vi.hoisted(() => ({
+const { prismaMock, requireWorkspaceMembershipMock, resolveSingleModuleAccessMock } = vi.hoisted(() => ({
   requireWorkspaceMembershipMock: vi.fn(),
+  resolveSingleModuleAccessMock: vi.fn(),
   prismaMock: {
     workspaceFeatureFlag: { findMany: vi.fn() },
     member: { findUnique: vi.fn() },
@@ -32,6 +33,10 @@ vi.mock("./auth", () => ({
   requireWorkspaceMembership: requireWorkspaceMembershipMock,
 }));
 
+vi.mock("./module-access", () => ({
+  resolveSingleModuleAccess: resolveSingleModuleAccessMock,
+}));
+
 const actor: AppActor = {
   kind: "user",
   user: {
@@ -59,6 +64,7 @@ describe("Finance V2 access policy", () => {
       role: "CONTRIBUTOR",
       isActive: true,
     });
+    resolveSingleModuleAccessMock.mockResolvedValue("read");
     prismaMock.workspaceFeatureFlag.findMany.mockResolvedValue(financeFlags());
     prismaMock.financeClient.count.mockResolvedValue(0);
     prismaMock.financeConsultant.count.mockResolvedValue(0);
@@ -100,6 +106,20 @@ describe("Finance V2 access policy", () => {
       financeAllMemberWrite: false,
       canRead: true,
       canWrite: false,
+    });
+  });
+
+  it("honors approved Finance module write grants", async () => {
+    prismaMock.workspaceFeatureFlag.findMany.mockResolvedValueOnce(financeFlags([
+      { flag: "FINANCE", enabled: true, config: {} },
+    ]));
+    resolveSingleModuleAccessMock.mockResolvedValueOnce("write");
+    const { getFinanceAccessPolicy } = await import("./finance");
+
+    await expect(getFinanceAccessPolicy(actor, "workspace-1")).resolves.toMatchObject({
+      financeAllMemberWrite: false,
+      canRead: true,
+      canWrite: true,
     });
   });
 
@@ -177,6 +197,20 @@ describe("Finance V2 access policy", () => {
     });
   });
 
+  it("requires an amount before creating cash payables", async () => {
+    prismaMock.workspaceFeatureFlag.findMany.mockResolvedValueOnce(financeFlags([
+      { flag: "FINANCE_SLICING_PIE", enabled: true },
+    ]));
+    const { createFinanceContributionEntry } = await import("./finance");
+
+    await expect(createFinanceContributionEntry(actor, {
+      workspaceId: "workspace-1",
+      type: "EXPENSE",
+      paymentChoice: "CASH",
+    })).rejects.toMatchObject({ code: "PAYABLE_AMOUNT_REQUIRED" });
+    expect(prismaMock.financeContributionEntry.create).not.toHaveBeenCalled();
+  });
+
   it("rejects contributions with project or consultant ids outside the workspace", async () => {
     prismaMock.workspaceFeatureFlag.findMany.mockResolvedValueOnce(financeFlags([
       { flag: "FINANCE_SLICING_PIE", enabled: true },
@@ -214,6 +248,9 @@ describe("Finance V2 access policy", () => {
   });
 
   it("blocks self-confirmation of a cash payable", async () => {
+    prismaMock.workspaceFeatureFlag.findMany.mockResolvedValueOnce(financeFlags([
+      { flag: "FINANCE_SLICING_PIE", enabled: true },
+    ]));
     prismaMock.financeContributionEntry.findFirst.mockResolvedValueOnce({
       id: "entry-1",
       workspaceId: "workspace-1",
@@ -221,6 +258,7 @@ describe("Finance V2 access policy", () => {
       contributorUserId: "user-1",
       paymentChoice: "CASH",
       cashStatus: "REQUESTED",
+      type: "EXPENSE",
       version: 3,
     });
     const { confirmFinanceCashPayablePaid } = await import("./finance");
@@ -234,6 +272,9 @@ describe("Finance V2 access policy", () => {
   });
 
   it("blocks contribution payee confirmation even when another human submitted it", async () => {
+    prismaMock.workspaceFeatureFlag.findMany.mockResolvedValueOnce(financeFlags([
+      { flag: "FINANCE_SLICING_PIE", enabled: true },
+    ]));
     prismaMock.financeContributionEntry.findFirst.mockResolvedValueOnce({
       id: "entry-1",
       workspaceId: "workspace-1",
@@ -241,6 +282,7 @@ describe("Finance V2 access policy", () => {
       contributorUserId: "user-1",
       paymentChoice: "CASH",
       cashStatus: "REQUESTED",
+      type: "EXPENSE",
       version: 3,
     });
     const { confirmFinanceCashPayablePaid } = await import("./finance");
@@ -254,6 +296,9 @@ describe("Finance V2 access policy", () => {
   });
 
   it("lets a different human confirm a requested cash payable with stale-write protection", async () => {
+    prismaMock.workspaceFeatureFlag.findMany.mockResolvedValueOnce(financeFlags([
+      { flag: "FINANCE_SLICING_PIE", enabled: true },
+    ]));
     prismaMock.financeContributionEntry.findFirst.mockResolvedValueOnce({
       id: "entry-1",
       workspaceId: "workspace-1",
@@ -261,6 +306,7 @@ describe("Finance V2 access policy", () => {
       contributorUserId: "other-user",
       paymentChoice: "CASH",
       cashStatus: "REQUESTED",
+      type: "EXPENSE",
       version: 3,
     });
     prismaMock.financeContributionEntry.updateMany.mockResolvedValueOnce({ count: 1 });
@@ -300,6 +346,9 @@ describe("Finance V2 access policy", () => {
   });
 
   it("turns stale payable updates into conflicts", async () => {
+    prismaMock.workspaceFeatureFlag.findMany.mockResolvedValueOnce(financeFlags([
+      { flag: "FINANCE_SLICING_PIE", enabled: true },
+    ]));
     prismaMock.financeContributionEntry.findFirst.mockResolvedValueOnce({
       id: "entry-1",
       workspaceId: "workspace-1",
@@ -307,6 +356,7 @@ describe("Finance V2 access policy", () => {
       contributorUserId: "other-user",
       paymentChoice: "CASH",
       cashStatus: "REQUESTED",
+      type: "EXPENSE",
       version: 4,
     });
     prismaMock.financeContributionEntry.updateMany.mockResolvedValueOnce({ count: 0 });
@@ -319,6 +369,27 @@ describe("Finance V2 access policy", () => {
     })).rejects.toMatchObject({ code: "CONFLICT" });
   });
 
+  it("blocks payable confirmation when the child contribution capability is disabled", async () => {
+    prismaMock.financeContributionEntry.findFirst.mockResolvedValueOnce({
+      id: "entry-1",
+      workspaceId: "workspace-1",
+      submittedByUserId: "other-user",
+      contributorUserId: "other-user",
+      paymentChoice: "CASH",
+      cashStatus: "REQUESTED",
+      type: "EXPENSE",
+      version: 3,
+    });
+    const { confirmFinanceCashPayablePaid } = await import("./finance");
+
+    await expect(confirmFinanceCashPayablePaid(actor, {
+      workspaceId: "workspace-1",
+      entryId: "entry-1",
+      expectedVersion: 3,
+    })).rejects.toMatchObject({ code: "FINANCE_CAPABILITY_DISABLED" });
+    expect(prismaMock.financeContributionEntry.updateMany).not.toHaveBeenCalled();
+  });
+
   it("returns a read-only readiness diagnostic without Practice Ledger revival", async () => {
     prismaMock.workspaceFeatureFlag.findMany.mockResolvedValueOnce(financeFlags([
       { flag: "FINANCE_PROJECTS", enabled: true },
@@ -329,7 +400,9 @@ describe("Finance V2 access policy", () => {
     prismaMock.financeProject.count.mockResolvedValueOnce(5);
     prismaMock.financeContributionEntry.count
       .mockResolvedValueOnce(7)
-      .mockResolvedValueOnce(1);
+      .mockResolvedValueOnce(1)
+      .mockResolvedValueOnce(4)
+      .mockResolvedValueOnce(2);
     prismaMock.financeProject.findFirst.mockResolvedValueOnce({ updatedAt: new Date("2026-07-28T11:00:00.000Z") });
 
     const { getFinanceReadiness } = await import("./finance");
@@ -346,6 +419,8 @@ describe("Finance V2 access policy", () => {
         projects: 5,
         contributionEntries: 7,
         requestedPayables: 1,
+        slicingPieContributionEntries: 4,
+        capitalContributionEntries: 2,
       },
       paymentSafety: {
         cashOnlyConfirmation: true,
