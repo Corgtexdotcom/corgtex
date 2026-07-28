@@ -9,10 +9,10 @@ on:
         type: string
         default: latest-stable
       targets:
-        description: "default, all, railway-customers, azure-selfserve, ops, backup-app, or a comma-separated subset. Default excludes backup-app."
+        description: "default, all, railway-customers, azure-managed-customers, azure-selfserve, ops, backup-app, or a comma-separated subset. Default excludes backup-app."
         required: true
         type: string
-        default: railway-customers,azure-selfserve,ops
+        default: railway-customers,azure-managed-customers,azure-selfserve,ops
       reason:
         description: "Audited reason for the release preflight."
         required: true
@@ -44,6 +44,7 @@ jobs:
       FLEET_RELEASE_OPS_TARGET_JSON: ${{ vars.FLEET_RELEASE_OPS_TARGET_JSON }}
       FLEET_RELEASE_BACKUP_APP_TARGET_JSON: ${{ vars.FLEET_RELEASE_BACKUP_APP_TARGET_JSON }}
       FLEET_RELEASE_AZURE_TARGET_JSON: ${{ vars.FLEET_RELEASE_AZURE_TARGET_JSON }}
+      FLEET_RELEASE_AZURE_MANAGED_TARGET_JSON: ${{ vars.FLEET_RELEASE_AZURE_MANAGED_TARGET_JSON }}
       FLEET_RELEASE_STABLE_GIT_SHA: ${{ vars.FLEET_RELEASE_STABLE_GIT_SHA }}
       FLEET_RELEASE_ACR_SERVER: ${{ vars.FLEET_RELEASE_ACR_SERVER || 'acrcorgtexssstgwus3.azurecr.io' }}
       GHCR_IMPORT_USERNAME: ${{ vars.GHCR_IMPORT_USERNAME || github.actor }}

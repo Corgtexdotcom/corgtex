@@ -1,5 +1,6 @@
 export const TARGET_GROUPS = Object.freeze([
   "railway-customers",
+  "azure-managed-customers",
   "azure-selfserve",
   "ops",
   "backup-app",
@@ -7,12 +8,14 @@ export const TARGET_GROUPS = Object.freeze([
 
 export const DEFAULT_TARGET_GROUPS = Object.freeze([
   "railway-customers",
+  "azure-managed-customers",
   "azure-selfserve",
   "ops",
 ]);
 
 const GROUP_PROVIDERS = Object.freeze({
   "railway-customers": "railway",
+  "azure-managed-customers": "azure",
   "azure-selfserve": "azure",
   ops: "railway",
   "backup-app": "railway",
@@ -177,7 +180,7 @@ export function assertHealthProof(health, manifest, label = "deployment") {
 
 export function targetRing(target) {
   if (target.group === "ops" || target.group === "backup-app") return 1;
-  if (target.group === "railway-customers" || target.group === "azure-selfserve") return 2;
+  if (target.group === "railway-customers" || target.group === "azure-managed-customers" || target.group === "azure-selfserve") return 2;
   return 3;
 }
 
@@ -239,6 +242,9 @@ export function providerBoundaryErrors(target) {
   if (lowerUrl.includes("selfserve.corgtex.com") && (target.group !== "azure-selfserve" || target.provider !== "azure")) {
     errors.push("selfserve.corgtex.com targets must use azure-selfserve group and azure provider");
   }
+  if (target.group === "azure-selfserve" && !lowerUrl.includes("selfserve.corgtex.com")) {
+    errors.push("azure-selfserve targets must use the selfserve.corgtex.com runtime URL");
+  }
   if (lowerUrl.includes("app.corgtex.com") && (target.group !== "backup-app" || target.provider !== "railway")) {
     errors.push("app.corgtex.com targets must use backup-app group and railway provider");
   }
@@ -251,9 +257,16 @@ export function targetFromControlPlaneRow(row) {
   const url = row.url ?? row.runtimeUrl ?? row.supportBaseUrl;
   const lowerUrl = String(url ?? "").toLowerCase();
   const isBackupApp = lowerUrl.includes("app.corgtex.com");
-  const isAzureSelfServe = lowerUrl.includes("selfserve.corgtex.com") || cloudProvider === "AZURE";
-  const group = isBackupApp ? "backup-app" : isAzureSelfServe ? "azure-selfserve" : "railway-customers";
-  const provider = group === "azure-selfserve" ? "azure" : "railway";
+  const isAzureSelfServe = lowerUrl.includes("selfserve.corgtex.com");
+  const isAzureManagedCustomer = cloudProvider === "AZURE" && !isAzureSelfServe;
+  const group = isBackupApp
+    ? "backup-app"
+    : isAzureSelfServe
+      ? "azure-selfserve"
+      : isAzureManagedCustomer
+        ? "azure-managed-customers"
+        : "railway-customers";
+  const provider = group === "azure-selfserve" || group === "azure-managed-customers" ? "azure" : "railway";
   return {
     id: row.id ?? row.deploymentId ?? label,
     deploymentId: row.id ?? row.deploymentId ?? null,

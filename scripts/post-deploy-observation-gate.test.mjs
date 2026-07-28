@@ -401,6 +401,14 @@ describe("post-deploy observation gate", () => {
     expect(observationTargetsForRow(summary.blockingFailures[0])).toEqual(["azure-selfserve"]);
   });
 
+  it("classifies non-selfserve Azure telemetry as Azure managed customers", () => {
+    expect(observationTargetsForRow({
+      provider: "azure",
+      instance_id: "alumipres-production",
+      route: "https://alumipres.corgtex.com/api/health",
+    })).toEqual(["azure-managed-customers"]);
+  });
+
   it("matches target-specific live releases in one production observation window", () => {
     const summary = buildObservationSummary({
       manifest: {

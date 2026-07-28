@@ -62,9 +62,9 @@ describe("fleet release core", () => {
   });
 
   it("expands and validates target groups", () => {
-    expect(normalizeTargets()).toEqual(["railway-customers", "azure-selfserve", "ops"]);
-    expect(normalizeTargets("default")).toEqual(["railway-customers", "azure-selfserve", "ops"]);
-    expect(normalizeTargets("all")).toEqual(["railway-customers", "azure-selfserve", "ops", "backup-app"]);
+    expect(normalizeTargets()).toEqual(["railway-customers", "azure-managed-customers", "azure-selfserve", "ops"]);
+    expect(normalizeTargets("default")).toEqual(["railway-customers", "azure-managed-customers", "azure-selfserve", "ops"]);
+    expect(normalizeTargets("all")).toEqual(["railway-customers", "azure-managed-customers", "azure-selfserve", "ops", "backup-app"]);
     expect(normalizeTargets("ops,backup-app")).toEqual(["ops", "backup-app"]);
     expect(() => normalizeTargets("demo")).toThrow("Unknown release target");
   });
@@ -76,6 +76,12 @@ describe("fleet release core", () => {
       cloudProvider: "AZURE",
       url: "https://selfserve.corgtex.com",
     })).toMatchObject({ group: "azure-selfserve", provider: "azure" });
+    expect(targetFromControlPlaneRow({
+      id: "azure-customer-1",
+      label: "Alumipres",
+      cloudProvider: "AZURE",
+      url: "https://alumipres.corgtex.com",
+    })).toMatchObject({ group: "azure-managed-customers", provider: "azure" });
     expect(targetFromControlPlaneRow({
       id: "app-1",
       label: "Backup App",
@@ -120,5 +126,10 @@ describe("fleet release core", () => {
       provider: "railway",
       url: "https://acme.corgtex.com",
     })).toEqual([]);
+    expect(providerBoundaryErrors({
+      group: "azure-selfserve",
+      provider: "azure",
+      url: "https://alumipres.corgtex.com",
+    })).toEqual(["azure-selfserve targets must use the selfserve.corgtex.com runtime URL"]);
   });
 });

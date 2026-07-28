@@ -9,10 +9,10 @@ on:
         type: string
         default: latest-stable
       targets:
-        description: "default, all, railway-customers, azure-selfserve, ops, backup-app, or a comma-separated subset. Default excludes backup-app."
+        description: "default, all, railway-customers, azure-managed-customers, azure-selfserve, ops, backup-app, or a comma-separated subset. Default excludes backup-app."
         required: true
         type: string
-        default: railway-customers,azure-selfserve,ops
+        default: railway-customers,azure-managed-customers,azure-selfserve,ops
       reason:
         description: "Audited reason for the release."
         required: true
@@ -72,6 +72,7 @@ jobs:
       FLEET_RELEASE_OPS_TARGET_JSON: ${{ vars.FLEET_RELEASE_OPS_TARGET_JSON }}
       FLEET_RELEASE_BACKUP_APP_TARGET_JSON: ${{ vars.FLEET_RELEASE_BACKUP_APP_TARGET_JSON }}
       FLEET_RELEASE_AZURE_TARGET_JSON: ${{ vars.FLEET_RELEASE_AZURE_TARGET_JSON }}
+      FLEET_RELEASE_AZURE_MANAGED_TARGET_JSON: ${{ vars.FLEET_RELEASE_AZURE_MANAGED_TARGET_JSON }}
       FLEET_RELEASE_STABLE_GIT_SHA: ${{ vars.FLEET_RELEASE_STABLE_GIT_SHA }}
       FLEET_RELEASE_ACR_SERVER: ${{ vars.FLEET_RELEASE_ACR_SERVER || 'acrcorgtexssstgwus3.azurecr.io' }}
       FLEET_RELEASE_POST_DEPLOY_PROBES: ${{ vars.FLEET_RELEASE_POST_DEPLOY_PROBES || 'true' }}
@@ -208,7 +209,7 @@ jobs:
             --manifest-json "$MANIFEST_JSON"
 
       - name: Log in to Azure
-        if: ${{ !inputs.dry_run && (inputs.targets == 'all' || contains(inputs.targets, 'azure-selfserve')) }}
+        if: ${{ !inputs.dry_run && (inputs.targets == 'default' || inputs.targets == 'all' || contains(inputs.targets, 'azure-selfserve') || contains(inputs.targets, 'azure-managed-customers')) }}
         uses: azure/login@v2
         with:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
@@ -254,7 +255,7 @@ jobs:
           OBSERVATION_SINCE: ${{ steps.observation-window.outputs.since }}
         run: |
           mkdir -p .artifacts/post-deploy-observation-gate
-          if [[ "$TARGETS_INPUT" != "all" && "$TARGETS_INPUT" != *"azure-selfserve"* ]]; then
+          if [[ "$TARGETS_INPUT" != "all" && "$TARGETS_INPUT" != "default" && "$TARGETS_INPUT" != *"azure-selfserve"* && "$TARGETS_INPUT" != *"azure-managed-customers"* ]]; then
             unset AZURE_APPLICATIONINSIGHTS_APP_NAME
             unset AZURE_APPLICATIONINSIGHTS_RESOURCE_GROUP
           fi

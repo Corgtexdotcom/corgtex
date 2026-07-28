@@ -32,8 +32,14 @@
     "azureOpenAiBaseUrl": {
       "value": "https://replace-me.openai.azure.com/openai/v1"
     },
+    "modelProvider": {
+      "value": "azure-openai"
+    },
     "azureOpenAiAuthMode": {
       "value": "managed_identity"
+    },
+    "modelApiKeySecretName": {
+      "value": "model-api-key"
     },
     "allowAzureServicePostgresFirewall": {
       "value": false
@@ -55,6 +61,12 @@
     },
     "enableMicrosoftOauthSecrets": {
       "value": false
+    },
+    "enablePostHogSecrets": {
+      "value": false
+    },
+    "storageContainerName": {
+      "value": "selfserve-artifacts"
     }
   }
 }

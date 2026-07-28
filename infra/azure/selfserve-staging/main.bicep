@@ -39,8 +39,11 @@ param registryServer string = 'ghcr.io'
 @description('GitHub Container Registry username for the PAT stored in Key Vault.')
 param registryUsername string = 'corgtex-deploy'
 
-@description('Azure OpenAI v1 base URL, for example https://<resource>.openai.azure.com/openai/v1.')
+@description('Model gateway base URL. For Azure OpenAI, use https://<resource>.openai.azure.com/openai/v1. For OpenRouter, use https://openrouter.ai/api/v1.')
 param azureOpenAiBaseUrl string
+
+@description('Runtime model provider. Self-serve defaults to Azure OpenAI; managed-customer pilots can preserve their current provider.')
+param modelProvider string = 'azure-openai'
 
 @allowed([
   'api_key'
@@ -49,22 +52,22 @@ param azureOpenAiBaseUrl string
 @description('Azure OpenAI authentication mode. Production should use managed_identity.')
 param azureOpenAiAuthMode string = 'managed_identity'
 
-@description('Azure OpenAI deployment name for low-latency chat calls.')
+@description('Model ID for low-latency chat calls. For Azure OpenAI this is the deployment name.')
 param azureChatFastDeploymentName string = 'corgtex-chat-fast'
 
-@description('Azure OpenAI deployment name for standard chat calls.')
+@description('Model ID for standard chat calls. For Azure OpenAI this is the deployment name.')
 param azureChatStandardDeploymentName string = 'corgtex-chat-standard'
 
-@description('Azure OpenAI deployment name for quality chat calls.')
+@description('Model ID for quality chat calls. For Azure OpenAI this is the deployment name.')
 param azureChatQualityDeploymentName string = 'corgtex-chat-quality'
 
-@description('Azure OpenAI deployment name for excellent chat calls.')
+@description('Model ID for excellent chat calls. For Azure OpenAI this is the deployment name.')
 param azureChatExcellentDeploymentName string = 'corgtex-chat-excellent'
 
-@description('Azure OpenAI deployment name for conversation chat calls.')
+@description('Model ID for conversation chat calls. For Azure OpenAI this is the deployment name.')
 param azureChatConversationDeploymentName string = 'corgtex-chat-conversation'
 
-@description('Azure OpenAI deployment name for embeddings.')
+@description('Model ID for embeddings. For Azure OpenAI this is the deployment name.')
 param azureEmbeddingDeploymentName string = 'corgtex-embedding'
 
 @description('PostgreSQL administrator login name.')
@@ -115,6 +118,12 @@ param enableGoogleOauthSecrets bool = false
 
 @description('Include Microsoft OAuth Key Vault secret refs and runtime env vars.')
 param enableMicrosoftOauthSecrets bool = false
+
+@description('Include PostHog Key Vault secret refs and runtime env vars.')
+param enablePostHogSecrets bool = false
+
+@description('Blob container used by the runtime storage provider.')
+param storageContainerName string = 'selfserve-artifacts'
 
 @description('Email sender used by self-serve signup and setup flows.')
 param emailFrom string = 'Corgtex <notifications@auth.corgtex.com>'
@@ -173,6 +182,9 @@ param selfServeRegistrySyncSecretName string = 'self-serve-registry-sync-secret'
 @description('Key Vault secret name containing MODEL_PRICE_OVERRIDES_JSON.')
 param modelPriceOverridesSecretName string = 'model-price-overrides-json'
 
+@description('Key Vault secret name containing MODEL_API_KEY for non-Azure OpenAI-compatible providers.')
+param modelApiKeySecretName string = 'model-api-key'
+
 @description('Bootstrap admin email used by the migration/seed job.')
 param bootstrapAdminEmail string = 'admin+selfserve-staging@corgtex.com'
 
@@ -209,20 +221,23 @@ param microsoftClientIdSecretName string = 'microsoft-client-id'
 @description('Key Vault secret name containing MICROSOFT_CLIENT_SECRET.')
 param microsoftClientSecretName string = 'microsoft-client-secret'
 
+@description('Key Vault secret name containing POSTHOG_PROJECT_TOKEN.')
+param postHogProjectTokenSecretName string = 'posthog-project-token'
+
 var compactPrefix = replace(namePrefix, '-', '')
 var logAnalyticsWorkspaceName = 'log-${namePrefix}'
 var appInsightsName = 'appi-${namePrefix}'
 var managedIdentityName = 'id-${namePrefix}'
 var keyVaultName = 'kv-${take(namePrefix, 16)}-${take(uniqueString(resourceGroup().id), 4)}'
 var storageAccountName = take('corgtexss${uniqueString(resourceGroup().id, namePrefix)}', 24)
-var storageContainerName = 'selfserve-artifacts'
 var postgresServerName = '${namePrefix}-pg'
 var postgresDatabaseName = 'corgtex'
 var redisName = '${namePrefix}-redis'
 var containerEnvironmentName = 'cae-${namePrefix}'
 var webContainerAppName = 'ca-${namePrefix}-web'
 var workerContainerAppName = 'ca-${namePrefix}-worker'
-var migrationJobName = 'caj-${namePrefix}-migrate'
+var migrationJobNameFull = 'caj-${namePrefix}-migrate'
+var migrationJobName = length(migrationJobNameFull) <= 32 ? migrationJobNameFull : 'caj-${take(compactPrefix, 20)}-migrate'
 var storageBlobDataContributorRoleId = join([
   'ba92f5b4'
   '2d11'
@@ -252,6 +267,9 @@ var requiredSecretRefs = [
 var azureOpenAiApiKeyRef = azureOpenAiAuthMode == 'api_key' ? [
   { name: 'azure-openai-api-key', keyVaultSecretName: azureOpenAiApiKeySecretName }
 ] : []
+var modelApiKeyRef = modelProvider == 'azure-openai' ? [] : [
+  { name: 'model-api-key', keyVaultSecretName: modelApiKeySecretName }
+]
 var stripeSecretRefs = enableStripeSecrets ? [
   { name: 'stripe-secret-key', keyVaultSecretName: stripeSecretKeySecretName }
   { name: 'stripe-webhook-secret', keyVaultSecretName: stripeWebhookSecretName }
@@ -269,9 +287,12 @@ var microsoftOauthSecretRefs = enableMicrosoftOauthSecrets ? [
   { name: 'microsoft-client-id', keyVaultSecretName: microsoftClientIdSecretName }
   { name: 'microsoft-client-secret', keyVaultSecretName: microsoftClientSecretName }
 ] : []
+var postHogSecretRefs = enablePostHogSecrets ? [
+  { name: 'posthog-project-token', keyVaultSecretName: postHogProjectTokenSecretName }
+] : []
 var containerSecretRefs = concat([
   { name: 'ghcr-pat', keyVaultSecretName: ghcrPatSecretName }
-], requiredSecretRefs, azureOpenAiApiKeyRef, stripeSecretRefs, resendSecretRefs, googleOauthSecretRefs, microsoftOauthSecretRefs)
+], requiredSecretRefs, azureOpenAiApiKeyRef, modelApiKeyRef, stripeSecretRefs, resendSecretRefs, googleOauthSecretRefs, microsoftOauthSecretRefs, postHogSecretRefs)
 var migrationSecretRefs = concat(containerSecretRefs, [
   { name: 'admin-password', keyVaultSecretName: bootstrapAdminPasswordSecretName }
 ])
@@ -293,6 +314,13 @@ var microsoftOauthRuntimeEnv = enableMicrosoftOauthSecrets ? [
   { name: 'MICROSOFT_CLIENT_ID', secretRef: 'microsoft-client-id' }
   { name: 'MICROSOFT_CLIENT_SECRET', secretRef: 'microsoft-client-secret' }
 ] : []
+var postHogRuntimeEnv = enablePostHogSecrets ? [
+  { name: 'POSTHOG_ENABLED', value: 'true' }
+  { name: 'POSTHOG_PROJECT_TOKEN', secretRef: 'posthog-project-token' }
+] : []
+var modelApiKeyRuntimeEnv = modelProvider == 'azure-openai' ? [] : [
+  { name: 'MODEL_API_KEY', secretRef: 'model-api-key' }
+]
 
 var commonRuntimeEnv = concat([
   { name: 'NODE_ENV', value: 'production' }
@@ -322,7 +350,7 @@ var commonRuntimeEnv = concat([
   { name: 'AZURE_STORAGE_BLOB_ENDPOINT', value: storage.properties.primaryEndpoints.blob }
   { name: 'AZURE_CLIENT_ID', value: managedIdentity.properties.clientId }
   { name: 'AZURE_STORAGE_CLIENT_ID', value: managedIdentity.properties.clientId }
-  { name: 'MODEL_PROVIDER', value: 'azure-openai' }
+  { name: 'MODEL_PROVIDER', value: modelProvider }
   { name: 'MODEL_BASE_URL', value: azureOpenAiBaseUrl }
   { name: 'AZURE_OPENAI_AUTH_MODE', value: azureOpenAiAuthMode }
   { name: 'AZURE_OPENAI_SCOPE', value: 'https://cognitiveservices.azure.com/.default' }
@@ -346,7 +374,7 @@ var commonRuntimeEnv = concat([
   { name: 'APPLICATIONINSIGHTS_CONNECTION_STRING', value: applicationInsights.properties.ConnectionString }
 ], azureOpenAiAuthMode == 'api_key' ? [
   { name: 'AZURE_OPENAI_API_KEY', secretRef: 'azure-openai-api-key' }
-] : [], stripeRuntimeEnv, resendRuntimeEnv, googleOauthRuntimeEnv, microsoftOauthRuntimeEnv)
+] : [], modelApiKeyRuntimeEnv, stripeRuntimeEnv, resendRuntimeEnv, googleOauthRuntimeEnv, microsoftOauthRuntimeEnv, postHogRuntimeEnv)
 
 resource logAnalytics 'Microsoft.OperationalInsights/workspaces@2023-09-01' = {
   name: logAnalyticsWorkspaceName
