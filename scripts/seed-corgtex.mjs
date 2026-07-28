@@ -40,7 +40,18 @@ async function retireRenamedArticleSlug(workspaceId, fromSlug, toSlug) {
     return;
   }
 
-  await prisma.brainArticle.delete({ where: { id: oldArticle.id } });
+  await prisma.brainArticle.update({
+    where: { id: newArticle.id },
+    data: {
+      slug: `${toSlug}-retired-duplicate-${newArticle.id.slice(0, 8)}`,
+      archivedAt: new Date(),
+      archiveReason: `Retired duplicate article created during ${fromSlug} to ${toSlug} rename seed cleanup.`,
+    },
+  });
+  await prisma.brainArticle.update({
+    where: { id: oldArticle.id },
+    data: { slug: toSlug },
+  });
 }
 
 // ─── Article Definitions ───

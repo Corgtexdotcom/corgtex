@@ -1220,6 +1220,7 @@ type FinanceCapabilityReadiness = {
 type FinanceReadinessCheck = {
   key: string;
   ok: boolean;
+  required: boolean;
   detail: string;
 };
 
@@ -1381,26 +1382,31 @@ export async function getFinanceReadinessDiagnostic(
     {
       key: "finance-parent-enabled",
       ok: finance.enabled,
+      required: true,
       detail: finance.enabled ? "FINANCE is enabled." : "FINANCE is disabled.",
     },
     {
       key: "project-finance-enabled",
       ok: projects.enabled,
+      required: false,
       detail: projects.enabled ? "Project finance is enabled through a Finance capability flag or legacy alias." : "Project finance is not enabled.",
     },
     {
       key: "slicing-pie-enabled",
       ok: slicingPie.enabled,
+      required: false,
       detail: slicingPie.enabled ? "Slicing Pie is enabled through a Finance capability flag or legacy alias." : "Slicing Pie is not enabled.",
     },
     {
       key: "all-member-write",
       ok: allMemberWriteActive,
+      required: false,
       detail: allMemberWriteActive ? "Finance all-member write is active." : "Finance writes use steward/admin defaults only.",
     },
     {
       key: "peer-review-policy",
       ok: peerReviewStatus === "enforced",
+      required: true,
       detail: peerReviewStatus === "enforced"
         ? "Cash payment confirmation requires a different submitter."
         : `${requestedPayablesMissingSubmitter} requested payable(s) need submitter ownership before confirmation.`,
@@ -1443,7 +1449,7 @@ export async function getFinanceReadinessDiagnostic(
       requestedPayablesMissingSubmitter,
     },
     checks,
-    ready: checks.every((check) => check.ok),
+    ready: checks.every((check) => !check.required || check.ok),
   };
 }
 

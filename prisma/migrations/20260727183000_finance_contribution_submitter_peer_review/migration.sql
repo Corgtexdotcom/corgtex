@@ -1,13 +1,10 @@
 -- Add auditable submitter tracking for native Finance contribution entries.
--- Historical rows are conservatively backfilled from the contributor so
--- existing requested cash payables remain subject to peer review.
+-- Historical submitter identity cannot be reconstructed reliably; leave it
+-- null so existing requested cash payables stay blocked until reviewed with
+-- explicit submitter ownership.
 
 ALTER TABLE "PracticeContributionEntry"
   ADD COLUMN "submittedByUserId" TEXT;
-
-UPDATE "PracticeContributionEntry"
-SET "submittedByUserId" = "contributorUserId"
-WHERE "submittedByUserId" IS NULL;
 
 CREATE INDEX "PracticeContributionEntry_workspaceId_submittedByUserId_idx"
   ON "PracticeContributionEntry"("workspaceId", "submittedByUserId");
