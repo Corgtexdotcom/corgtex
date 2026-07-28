@@ -7,6 +7,7 @@ import {
   listNativePracticeProjectExportRows,
   listNativePracticeTimeEntryPage,
 } from "@corgtex/domain";
+import { financeCapabilityEnabled } from "@corgtex/domain/modules";
 import { getWorkspaceFeatureFlags } from "@/lib/workspace-feature-flags";
 import { withWorkspaceRoute } from "@/lib/route-handler";
 
@@ -45,10 +46,10 @@ function csv(headers: string[], rows: unknown[][]): string {
   ].join("\n");
 }
 
-async function requirePracticeLedgerExport(workspaceId: string) {
+async function requireFinanceProjectExport(workspaceId: string) {
   const flags = await getWorkspaceFeatureFlags(workspaceId);
-  if (!flags.FINANCE || !flags.PRACTICE_PROJECTS) {
-    throw new AppError(404, "NOT_FOUND", "Practice Ledger exports are not enabled for this workspace.");
+  if (!financeCapabilityEnabled(flags, "projects")) {
+    throw new AppError(404, "NOT_FOUND", "Finance exports are not enabled for this workspace.");
   }
 }
 
@@ -249,9 +250,9 @@ async function expenseCsv(actor: Parameters<typeof listNativePracticeExpensePage
 export const GET = withWorkspaceRoute(async (_req, { actor, workspaceId, params }) => {
   const kind = params.kind;
   if (!isExportKind(kind)) {
-    throw new AppError(404, "NOT_FOUND", "Unknown Practice Ledger export.");
+    throw new AppError(404, "NOT_FOUND", "Unknown Finance export.");
   }
-  await requirePracticeLedgerExport(workspaceId);
+  await requireFinanceProjectExport(workspaceId);
   const body = kind === "projects"
     ? await projectCsv(actor, workspaceId)
     : kind === "clients"
@@ -264,7 +265,7 @@ export const GET = withWorkspaceRoute(async (_req, { actor, workspaceId, params 
 
   return new NextResponse(body, {
     headers: {
-      "Content-Disposition": `attachment; filename="practice-ledger-${kind}.csv"`,
+      "Content-Disposition": `attachment; filename="finance-${kind}.csv"`,
       "Content-Type": "text/csv; charset=utf-8",
     },
   });

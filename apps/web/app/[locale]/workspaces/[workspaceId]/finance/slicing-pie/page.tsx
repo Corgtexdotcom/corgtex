@@ -2,7 +2,7 @@ import { getSlicingPieSummary } from "@corgtex/domain";
 import type { PracticeContributionEntryWithContext } from "@corgtex/domain";
 
 import { requirePageActor } from "@/lib/auth";
-import { requireWorkspaceFeature } from "@/lib/workspace-feature-flags";
+import { isWorkspaceFinanceCapabilityEnabled, requireWorkspaceFeature, requireWorkspaceFinanceCapability } from "@/lib/workspace-feature-flags";
 import { PracticeFinanceNav } from "../components";
 
 export const dynamic = "force-dynamic";
@@ -25,6 +25,11 @@ function paymentLabel(entry: PracticeContributionEntryWithContext): string {
   return entry.cashStatus === "PAID" ? "Cash paid" : "Cash requested";
 }
 
+function personLabel(person: { displayName: string | null; email: string } | null): string {
+  if (!person) return "Unassigned";
+  return person.displayName || person.email;
+}
+
 export default async function SlicingPiePage({
   params,
   searchParams,
@@ -37,11 +42,14 @@ export default async function SlicingPiePage({
   const sourceCursor = Array.isArray(query?.sourceCursor) ? query?.sourceCursor[0] : query?.sourceCursor;
   const actor = await requirePageActor();
   await requireWorkspaceFeature(workspaceId, "FINANCE");
-  await requireWorkspaceFeature(workspaceId, "SLICING_PIE");
-  const summary = await getSlicingPieSummary(actor, workspaceId, {
-    sourceTake: 50,
-    sourceCursor,
-  });
+  await requireWorkspaceFinanceCapability(workspaceId, "slicingPie");
+  const [summary, financeProjectsEnabled] = await Promise.all([
+    getSlicingPieSummary(actor, workspaceId, {
+      sourceTake: 50,
+      sourceCursor,
+    }),
+    isWorkspaceFinanceCapabilityEnabled(workspaceId, "projects"),
+  ]);
 
   return (
     <section className="stack" style={{ gap: 20 }} data-finance-surface="slicing-pie">
@@ -50,13 +58,18 @@ export default async function SlicingPiePage({
           <div>
             <h1>Slicing Pie</h1>
             <div className="nr-masthead-meta">
-              <span>Internal ownership calculation from Practice Ledger time and expense contributions.</span>
+              <span>Internal ownership calculation from Finance time and expense contributions.</span>
             </div>
           </div>
-          <a href={`/workspaces/${workspaceId}/finance`} className="link-button secondary">Practice Ledger</a>
+          <a href={`/workspaces/${workspaceId}/finance`} className="link-button secondary">Finance</a>
         </div>
         <div style={{ marginTop: 16 }}>
-          <PracticeFinanceNav workspaceId={workspaceId} active="slicing-pie" slicingPieEnabled />
+          <PracticeFinanceNav
+            workspaceId={workspaceId}
+            active="slicing-pie"
+            financeProjectsEnabled={financeProjectsEnabled}
+            slicingPieEnabled
+          />
         </div>
       </header>
 
@@ -125,6 +138,7 @@ export default async function SlicingPiePage({
                 <tr>
                   <th>Date</th>
                   <th>Contributor</th>
+                  <th>Submitted by</th>
                   <th>Project</th>
                   <th>Type</th>
                   <th style={{ textAlign: "right" }}>Value</th>
@@ -136,7 +150,8 @@ export default async function SlicingPiePage({
                 {summary.entries.map((entry) => (
                   <tr key={entry.id}>
                     <td>{dateLabel(entry.occurredAt)}</td>
-                    <td>{entry.contributor.displayName || entry.contributor.email}</td>
+                    <td>{personLabel(entry.contributor)}</td>
+                    <td>{personLabel(entry.submittedBy)}</td>
                     <td>
                       <div>{entry.project.name}</div>
                       <div className="nr-item-meta" style={{ fontSize: 11 }}>{entry.project.code}</div>

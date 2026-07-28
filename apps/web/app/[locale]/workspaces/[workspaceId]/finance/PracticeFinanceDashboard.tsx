@@ -5,6 +5,7 @@ import {
   type NativePracticeProjectHealth,
 } from "@corgtex/domain";
 import type { PracticeProject, PracticeProjectStatus } from "@prisma/client";
+import { WorkspaceEmptyState } from "@/lib/components/ControlPrimitives";
 import {
   createPracticeContributionEntryAction,
   markPracticeContributionEntryPaidAction,
@@ -70,6 +71,18 @@ function entryKindLabel(entry: PracticeContributionEntryWithContext): string {
 function paymentLabel(entry: PracticeContributionEntryWithContext): string {
   if (entry.paymentChoice === "SLICING_PIE") return `Slicing Pie (${entry.sliceMultiplier}x)`;
   return entry.cashStatus === "PAID" ? "Cash paid" : "Cash requested";
+}
+
+function personLabel(person: { displayName: string | null; email: string } | null): string {
+  if (!person) return "Unassigned";
+  return person.displayName || person.email;
+}
+
+function paymentConfirmationBlockReason(entry: PracticeContributionEntryWithContext, currentUserId: string | null): string | null {
+  if (entry.paymentChoice !== "CASH" || entry.cashStatus !== "REQUESTED") return null;
+  if (!entry.submittedByUserId) return "Needs submitter ownership before confirmation";
+  if (currentUserId && entry.submittedByUserId === currentUserId) return "Needs another contributor to confirm";
+  return null;
 }
 
 const metricStyle: React.CSSProperties = {
@@ -235,11 +248,13 @@ function RequestedPayables({
   entries,
   nextCursor,
   canMarkPaid,
+  currentUserId,
 }: {
   workspaceId: string;
   entries: PracticeContributionEntryWithContext[];
   nextCursor: string | null;
   canMarkPaid: boolean;
+  currentUserId: string | null;
 }) {
   if (entries.length === 0 && !nextCursor) return null;
 
@@ -257,6 +272,7 @@ function RequestedPayables({
               <tr>
                 <th>Date</th>
                 <th>Contributor</th>
+                <th>Submitted by</th>
                 <th>Project</th>
                 <th>Type</th>
                 <th style={{ textAlign: "right" }}>Value</th>
@@ -264,27 +280,35 @@ function RequestedPayables({
               </tr>
             </thead>
             <tbody>
-              {entries.map((entry) => (
-                <tr key={entry.id}>
-                  <td>{formatDate(entry.occurredAt)}</td>
-                  <td>{entry.contributor.displayName || entry.contributor.email}</td>
-                  <td>
-                    <div>{entry.project.name}</div>
-                    <div className="nr-item-meta" style={{ fontSize: 11 }}>{entry.project.code}</div>
-                  </td>
-                  <td>{entryKindLabel(entry)}</td>
-                  <td style={{ textAlign: "right" }}>{money(entry.amountCents)}</td>
-                  {canMarkPaid && (
+              {entries.map((entry) => {
+                const blockReason = paymentConfirmationBlockReason(entry, currentUserId);
+                return (
+                  <tr key={entry.id}>
+                    <td>{formatDate(entry.occurredAt)}</td>
+                    <td>{personLabel(entry.contributor)}</td>
+                    <td>{personLabel(entry.submittedBy)}</td>
                     <td>
-                      <form action={markPracticeContributionEntryPaidAction}>
-                        <input type="hidden" name="workspaceId" value={workspaceId} />
-                        <input type="hidden" name="entryId" value={entry.id} />
-                        <button type="submit" className="small">Mark paid</button>
-                      </form>
+                      <div>{entry.project.name}</div>
+                      <div className="nr-item-meta" style={{ fontSize: 11 }}>{entry.project.code}</div>
                     </td>
-                  )}
-                </tr>
-              ))}
+                    <td>{entryKindLabel(entry)}</td>
+                    <td style={{ textAlign: "right" }}>{money(entry.amountCents)}</td>
+                    {canMarkPaid && (
+                      <td>
+                        {blockReason ? (
+                          <span className="nr-item-meta">{blockReason}</span>
+                        ) : (
+                          <form action={markPracticeContributionEntryPaidAction}>
+                            <input type="hidden" name="workspaceId" value={workspaceId} />
+                            <input type="hidden" name="entryId" value={entry.id} />
+                            <button type="submit" className="small">Mark paid</button>
+                          </form>
+                        )}
+                      </td>
+                    )}
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         </div>
@@ -302,8 +326,9 @@ function RequestedPayables({
 
 export function PracticeFinanceDashboard({
   workspaceId,
+  currentUserId,
   canManageProjects,
-  practiceProjectsEnabled,
+  financeProjectsEnabled,
   canRecordContributions,
   canMarkContributionPaid,
   slicingPieEnabled,
@@ -317,8 +342,9 @@ export function PracticeFinanceDashboard({
   requestedPayablesNextCursor,
 }: {
   workspaceId: string;
+  currentUserId: string | null;
   canManageProjects: boolean;
-  practiceProjectsEnabled: boolean;
+  financeProjectsEnabled: boolean;
   canRecordContributions: boolean;
   canMarkContributionPaid: boolean;
   slicingPieEnabled: boolean;
@@ -338,9 +364,13 @@ export function PracticeFinanceDashboard({
       <header className="nr-masthead" style={{ textAlign: "left", marginBottom: 0 }}>
         <div style={{ alignItems: "flex-start", display: "flex", gap: 16, justifyContent: "space-between", flexWrap: "wrap" }}>
           <div>
-            <h1>Practice Ledger</h1>
+            <h1>Finance</h1>
             <div className="nr-masthead-meta">
-              <span>Project margin, budget burn, client portfolio, and alerts for the active practice.</span>
+              <span>
+                {financeProjectsEnabled
+                  ? "Projects, clients, consultants, time, expenses, reports, and optional Slicing Pie analysis."
+                  : "Finance capabilities are managed inside this tab as they are enabled for the workspace."}
+              </span>
             </div>
           </div>
           {slicingPieEnabled && (
@@ -351,34 +381,43 @@ export function PracticeFinanceDashboard({
           <PracticeFinanceNav
             workspaceId={workspaceId}
             active="overview"
-            practiceProjectsEnabled={practiceProjectsEnabled}
+            financeProjectsEnabled={financeProjectsEnabled}
             slicingPieEnabled={slicingPieEnabled}
           />
         </div>
       </header>
 
-      <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
-        <div style={metricStyle}>
-          <div style={labelStyle}>Active projects</div>
-          <div style={{ fontSize: 26, marginTop: 6 }}>{summary.activeProjects}</div>
+      {financeProjectsEnabled && (
+        <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
+          <div style={metricStyle}>
+            <div style={labelStyle}>Active projects</div>
+            <div style={{ fontSize: 26, marginTop: 6 }}>{summary.activeProjects}</div>
+          </div>
+          <div style={metricStyle}>
+            <div style={labelStyle}>Budget</div>
+            <div style={{ fontSize: 26, marginTop: 6 }}>{summaryMoney(summary, summary.budgetCents)}</div>
+          </div>
+          <div style={metricStyle}>
+            <div style={labelStyle}>Used</div>
+            <div style={{ fontSize: 26, marginTop: 6 }}>{summaryMoney(summary, summary.usedCents)}</div>
+          </div>
+          <div style={metricStyle}>
+            <div style={labelStyle}>Remaining</div>
+            <div style={{ fontSize: 26, marginTop: 6 }}>{summaryMoney(summary, summary.remainingCents)}</div>
+          </div>
+          <div style={metricStyle}>
+            <div style={labelStyle}>Margin</div>
+            <div style={{ fontSize: 26, marginTop: 6 }}>{marginPct(summary.marginBps)}</div>
+          </div>
         </div>
-        <div style={metricStyle}>
-          <div style={labelStyle}>Budget</div>
-          <div style={{ fontSize: 26, marginTop: 6 }}>{summaryMoney(summary, summary.budgetCents)}</div>
-        </div>
-        <div style={metricStyle}>
-          <div style={labelStyle}>Used</div>
-          <div style={{ fontSize: 26, marginTop: 6 }}>{summaryMoney(summary, summary.usedCents)}</div>
-        </div>
-        <div style={metricStyle}>
-          <div style={labelStyle}>Remaining</div>
-          <div style={{ fontSize: 26, marginTop: 6 }}>{summaryMoney(summary, summary.remainingCents)}</div>
-        </div>
-        <div style={metricStyle}>
-          <div style={labelStyle}>Margin</div>
-          <div style={{ fontSize: 26, marginTop: 6 }}>{marginPct(summary.marginBps)}</div>
-        </div>
-      </div>
+      )}
+
+      {!financeProjectsEnabled && !slicingPieEnabled && (
+        <WorkspaceEmptyState
+          title="Finance is enabled"
+          description="No optional Finance sections are enabled for this workspace yet."
+        />
+      )}
 
       {slicingPieEnabled && (
         <>
@@ -388,6 +427,7 @@ export function PracticeFinanceDashboard({
             entries={requestedPayables}
             nextCursor={requestedPayablesNextCursor}
             canMarkPaid={canMarkContributionPaid}
+            currentUserId={currentUserId}
           />
           <div className="nr-item" style={{ padding: 0 }}>
             <div style={{ padding: "12px 16px", borderBottom: "1px solid var(--line)" }}>
@@ -402,6 +442,7 @@ export function PracticeFinanceDashboard({
                     <tr>
                       <th>Date</th>
                       <th>Contributor</th>
+                      <th>Submitted by</th>
                       <th>Project</th>
                       <th>Type</th>
                       <th style={{ textAlign: "right" }}>Value</th>
@@ -411,33 +452,41 @@ export function PracticeFinanceDashboard({
                     </tr>
                   </thead>
                   <tbody>
-                    {contributionEntries.map((entry) => (
-                      <tr key={entry.id}>
-                        <td>{formatDate(entry.occurredAt)}</td>
-                        <td>{entry.contributor.displayName || entry.contributor.email}</td>
-                        <td>
-                          <div>{entry.project.name}</div>
-                          <div className="nr-item-meta" style={{ fontSize: 11 }}>{entry.project.code}</div>
-                        </td>
-                        <td>{entryKindLabel(entry)}</td>
-                        <td style={{ textAlign: "right" }}>{money(entry.amountCents)}</td>
-                        <td>{paymentLabel(entry)}</td>
-                        <td style={{ textAlign: "right" }}>{entry.slices.toLocaleString("en-US")}</td>
-                        {canMarkContributionPaid && (
+                    {contributionEntries.map((entry) => {
+                      const blockReason = paymentConfirmationBlockReason(entry, currentUserId);
+                      return (
+                        <tr key={entry.id}>
+                          <td>{formatDate(entry.occurredAt)}</td>
+                          <td>{personLabel(entry.contributor)}</td>
+                          <td>{personLabel(entry.submittedBy)}</td>
                           <td>
-                            {entry.paymentChoice === "CASH" && entry.cashStatus === "REQUESTED" ? (
-                              <form action={markPracticeContributionEntryPaidAction}>
-                                <input type="hidden" name="workspaceId" value={workspaceId} />
-                                <input type="hidden" name="entryId" value={entry.id} />
-                                <button type="submit" className="small">Mark paid</button>
-                              </form>
-                            ) : (
-                              <span className="nr-item-meta">-</span>
-                            )}
+                            <div>{entry.project.name}</div>
+                            <div className="nr-item-meta" style={{ fontSize: 11 }}>{entry.project.code}</div>
                           </td>
-                        )}
-                      </tr>
-                    ))}
+                          <td>{entryKindLabel(entry)}</td>
+                          <td style={{ textAlign: "right" }}>{money(entry.amountCents)}</td>
+                          <td>{paymentLabel(entry)}</td>
+                          <td style={{ textAlign: "right" }}>{entry.slices.toLocaleString("en-US")}</td>
+                          {canMarkContributionPaid && (
+                            <td>
+                              {entry.paymentChoice === "CASH" && entry.cashStatus === "REQUESTED" ? (
+                                blockReason ? (
+                                  <span className="nr-item-meta">{blockReason}</span>
+                                ) : (
+                                  <form action={markPracticeContributionEntryPaidAction}>
+                                    <input type="hidden" name="workspaceId" value={workspaceId} />
+                                    <input type="hidden" name="entryId" value={entry.id} />
+                                    <button type="submit" className="small">Mark paid</button>
+                                  </form>
+                                )
+                              ) : (
+                                <span className="nr-item-meta">-</span>
+                              )}
+                            </td>
+                          )}
+                        </tr>
+                      );
+                    })}
                   </tbody>
                 </table>
               </div>
@@ -446,6 +495,7 @@ export function PracticeFinanceDashboard({
         </>
       )}
 
+      {financeProjectsEnabled && (
       <div className="nr-item" style={{ padding: 0 }}>
         <div style={{ padding: "12px 16px", borderBottom: "1px solid var(--line)" }}>
           <strong>Attention</strong>
@@ -467,7 +517,7 @@ export function PracticeFinanceDashboard({
                 {attention.map((item, index) => (
                   <tr key={`${item.projectId}-${item.issue}-${index}`}>
                     <td>
-                      {practiceProjectsEnabled ? (
+                      {financeProjectsEnabled ? (
                         <a href={`/workspaces/${workspaceId}/finance/projects/${item.projectId}`}>{item.projectName}</a>
                       ) : (
                         item.projectName
@@ -483,7 +533,9 @@ export function PracticeFinanceDashboard({
           </div>
         )}
       </div>
+      )}
 
+      {financeProjectsEnabled && (
       <div className="nr-item" style={{ padding: 0 }}>
         <div style={{ padding: "12px 16px", borderBottom: "1px solid var(--line)" }}>
           <strong>Projects</strong>
@@ -519,7 +571,7 @@ export function PracticeFinanceDashboard({
                   <tr key={health.projectId}>
                     <td>
                       <div>
-                        {practiceProjectsEnabled ? (
+                        {financeProjectsEnabled ? (
                           <a href={`/workspaces/${workspaceId}/finance/projects/${health.projectId}`}>{health.projectName}</a>
                         ) : (
                           health.projectName
@@ -548,6 +600,7 @@ export function PracticeFinanceDashboard({
           </div>
         )}
       </div>
+      )}
     </section>
   );
 }

@@ -2967,10 +2967,15 @@ async function main() {
     const sliceMultiplier = contribution.paymentChoice === "SLICING_PIE"
       ? (contribution.type === "TIME" ? 2 : 4)
       : 0;
+    const defaultPaidByUserId = memberMappings["jwolk"]?.userId ?? null;
+    const paidByUserId = contribution.paymentChoice === "CASH" && contribution.paid
+      ? (defaultPaidByUserId === contributor.userId ? memberMappings["jduato"]?.userId ?? null : defaultPaidByUserId)
+      : null;
     const data = {
       workspaceId: wsId,
       projectId,
       contributorUserId: contributor.userId,
+      submittedByUserId: contributor.userId,
       type: contribution.type,
       paymentChoice: contribution.paymentChoice,
       cashStatus: contribution.paymentChoice === "CASH" ? (contribution.paid ? "PAID" : "REQUESTED") : "NOT_APPLICABLE",
@@ -2984,7 +2989,7 @@ async function main() {
       sliceMultiplier,
       slices: amountCents * sliceMultiplier,
       paidAt: contribution.paymentChoice === "CASH" && contribution.paid ? nDaysAgoAtNoonUtc(4) : null,
-      paidByUserId: contribution.paymentChoice === "CASH" && contribution.paid ? memberMappings["jwolk"]?.userId ?? null : null,
+      paidByUserId,
     };
     await prisma.practiceContributionEntry.upsert({
       where: { id: practiceContributionIds[index] },
@@ -3022,7 +3027,9 @@ async function main() {
   // 14. Safe showcase data for current customer-visible feature surfaces.
   await enableWorkspaceFeature(wsId, "AI_WORKSPACES");
   await enableWorkspaceFeature(wsId, "FINANCE");
+  await enableWorkspaceFeature(wsId, "FINANCE_SLICING_PIE");
   await enableWorkspaceFeature(wsId, "SLICING_PIE");
+  await enableWorkspaceFeature(wsId, "FINANCE_PROJECTS");
   await enableWorkspaceFeature(wsId, "PRACTICE_PROJECTS");
   await enableWorkspaceFeature(wsId, "RELATIONSHIPS");
   await seedShowcaseData({ wsId, memberMappings });

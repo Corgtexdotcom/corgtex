@@ -2,7 +2,7 @@ import { listNativePracticeClients } from "@corgtex/domain";
 import { requirePageActor } from "@/lib/auth";
 import { DataTable, type DataTableColumn, type DataTableRow } from "@/lib/components/DataTable";
 import { WorkspaceEmptyState, WorkspacePageHeader } from "@/lib/components/ControlPrimitives";
-import { isWorkspaceFeatureEnabled, requireWorkspaceFeature } from "@/lib/workspace-feature-flags";
+import { isWorkspaceFinanceCapabilityEnabled, requireWorkspaceFeature, requireWorkspaceFinanceCapability } from "@/lib/workspace-feature-flags";
 import { PracticeFinanceNav, nextHref, statusLabel } from "../components";
 
 export const dynamic = "force-dynamic";
@@ -19,10 +19,10 @@ export default async function PracticeClientsPage({
   const cursor = Array.isArray(query?.cursor) ? query.cursor[0] : query?.cursor;
   const actor = await requirePageActor();
   await requireWorkspaceFeature(workspaceId, "FINANCE");
-  await requireWorkspaceFeature(workspaceId, "PRACTICE_PROJECTS");
+  await requireWorkspaceFinanceCapability(workspaceId, "projects");
   const [clients, slicingPieEnabled] = await Promise.all([
     listNativePracticeClients(actor, workspaceId, { take: 50, cursor }),
-    isWorkspaceFeatureEnabled(workspaceId, "SLICING_PIE"),
+    isWorkspaceFinanceCapabilityEnabled(workspaceId, "slicingPie"),
   ]);
   const nextPageHref = nextHref(`/workspaces/${workspaceId}/finance/clients`, {}, clients.nextCursor);
   const clientColumns: DataTableColumn[] = [
@@ -54,8 +54,8 @@ export default async function PracticeClientsPage({
     <section className="stack nr-workspace-surface" data-finance-surface="practice-clients">
       <WorkspacePageHeader
         className="nr-workspace-page-header-flush"
-        eyebrow={<a className="nr-link" href={`/workspaces/${workspaceId}/finance`}>Back to Practice Ledger</a>}
-        title="Practice clients"
+        eyebrow={<a className="nr-link" href={`/workspaces/${workspaceId}/finance`}>Back to Finance</a>}
+        title="Clients"
         description="Native clients linked from CRM accounts, projects, time, and expenses."
         subnav={<PracticeFinanceNav workspaceId={workspaceId} active="clients" slicingPieEnabled={slicingPieEnabled} />}
       />
@@ -65,13 +65,13 @@ export default async function PracticeClientsPage({
           <strong>Clients</strong>
         </div>
         <DataTable
-          caption="Practice clients"
+          caption="Finance clients"
           columns={clientColumns}
           rows={clientRows}
           empty={
             <WorkspaceEmptyState
-              title="No native Practice Ledger clients have been linked yet."
-              description="Submitting time or expenses on a project will create the native client relationship."
+              title="No Finance clients have been linked yet."
+              description="Submitting time or expenses on a project will create the client relationship."
             />
           }
           surfaceClassName="nr-section-card-table"

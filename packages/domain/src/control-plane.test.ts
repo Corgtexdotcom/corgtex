@@ -903,7 +903,7 @@ describe("control plane domain", () => {
     });
   });
 
-  it("includes native Practice Ledger entities in managed-workspace migration inventory", async () => {
+  it("includes native Finance entities in managed-workspace migration inventory", async () => {
     const { runControlPlaneClientMigrationDryRun } = await import("./control-plane");
     const sourceDeployment = {
       id: "dep-source",
@@ -7416,7 +7416,7 @@ describe("control plane domain", () => {
     expect(result).toMatchObject({ id: "op-1", status: "COMPLETED" });
   });
 
-  it("routes remote meeting schedule and recorder support operations through audited MCP tools", async () => {
+  it("routes remote meeting, recorder, and Finance support operations through audited MCP tools", async () => {
     const { runCustomerSupportOperation } = await import("./control-plane");
     prismaMock.supportOperation.create.mockResolvedValue({
       id: "op-recorder",
@@ -7476,6 +7476,12 @@ describe("control plane domain", () => {
       reason: "Ensure recurring recorder coverage after policy update.",
       arguments: {},
     });
+    await runCustomerSupportOperation(operatorActor, {
+      deploymentId: "inst-1",
+      action: "finance.readiness",
+      reason: "Confirm Finance readiness.",
+      arguments: {},
+    });
 
     const toolNames = vi.mocked(fetch).mock.calls
       .map(([, init]) => JSON.parse(String(init?.body)).params?.name)
@@ -7487,6 +7493,7 @@ describe("control plane domain", () => {
       "delete_meeting",
       "set_meeting_recorder_auto_recording",
       "ensure_meeting_recorder_coverage",
+      "get_finance_readiness",
     ]);
   });
 

@@ -15,7 +15,7 @@ import {
   type GoalFinanceProjectLink,
 } from "@corgtex/domain";
 import { requirePageActor } from "@/lib/auth";
-import { isWorkspaceFeatureEnabled, requireWorkspaceFeature } from "@/lib/workspace-feature-flags";
+import { isWorkspaceFinanceCapabilityEnabled, requireWorkspaceFeature } from "@/lib/workspace-feature-flags";
 import { GoalProgress } from "./GoalProgress";
 import { RecognitionCard } from "./RecognitionCard";
 import { ArchivedItemBanner } from "@/lib/components/ArchivedItemBanner";
@@ -97,14 +97,12 @@ export default async function GoalsPage({
   const canManageAnyGoal = actor.kind === "agent" || membership?.role === "ADMIN";
   const currentUserId = actor.kind === "user" ? actor.user.id : null;
 
-  const [allGoals, circles, members, financeEnabled, practiceProjectsEnabled] = await Promise.all([
+  const [allGoals, circles, members, showFinanceEvidence] = await Promise.all([
     listGoals(actor, { workspaceId }),
     listCircles(workspaceId),
     listHumanMembers(workspaceId),
-    isWorkspaceFeatureEnabled(workspaceId, "FINANCE"),
-    isWorkspaceFeatureEnabled(workspaceId, "PRACTICE_PROJECTS"),
+    isWorkspaceFinanceCapabilityEnabled(workspaceId, "projects"),
   ]);
-  const showFinanceEvidence = financeEnabled && practiceProjectsEnabled;
   const practiceProjects = showFinanceEvidence
     ? await listPracticeProjects(actor, workspaceId, { take: 200 })
     : [];

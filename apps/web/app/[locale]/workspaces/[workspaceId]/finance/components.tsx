@@ -1,9 +1,10 @@
-import type { ReactNode } from "react";
+import React, { type ReactNode } from "react";
 import { Prisma } from "@prisma/client";
 import { WorkspaceSubnav } from "@/lib/components/ControlPrimitives";
 
 export type PracticeFinanceSection =
   | "overview"
+  | "projects"
   | "clients"
   | "consultants"
   | "time"
@@ -13,6 +14,7 @@ export type PracticeFinanceSection =
 
 const navItems: Array<{ key: PracticeFinanceSection; label: string; href: (workspaceId: string) => string }> = [
   { key: "overview", label: "Overview", href: (workspaceId) => `/workspaces/${workspaceId}/finance` },
+  { key: "projects", label: "Projects", href: (workspaceId) => `/workspaces/${workspaceId}/finance/projects` },
   { key: "clients", label: "Clients", href: (workspaceId) => `/workspaces/${workspaceId}/finance/clients` },
   { key: "consultants", label: "Consultants", href: (workspaceId) => `/workspaces/${workspaceId}/finance/consultants` },
   { key: "time", label: "Time", href: (workspaceId) => `/workspaces/${workspaceId}/finance/time` },
@@ -21,7 +23,7 @@ const navItems: Array<{ key: PracticeFinanceSection; label: string; href: (works
   { key: "slicing-pie", label: "Slicing Pie", href: (workspaceId) => `/workspaces/${workspaceId}/finance/slicing-pie` },
 ];
 
-const nativePracticeSections = new Set<PracticeFinanceSection>(["clients", "consultants", "time", "expenses", "reports"]);
+const projectFinanceSections = new Set<PracticeFinanceSection>(["projects", "clients", "consultants", "time", "expenses", "reports"]);
 
 export const metricStyle: React.CSSProperties = {
   border: "1px solid var(--line)",
@@ -48,19 +50,19 @@ export const formGridStyle: React.CSSProperties = {
 export function PracticeFinanceNav({
   workspaceId,
   active,
-  practiceProjectsEnabled = true,
+  financeProjectsEnabled = true,
   slicingPieEnabled = false,
 }: {
   workspaceId: string;
   active: PracticeFinanceSection;
-  practiceProjectsEnabled?: boolean;
+  financeProjectsEnabled?: boolean;
   slicingPieEnabled?: boolean;
 }) {
   return (
     <WorkspaceSubnav
-      label="Practice Ledger sections"
+      label="Finance sections"
       items={navItems
-        .filter((item) => practiceProjectsEnabled || !nativePracticeSections.has(item.key))
+        .filter((item) => financeProjectsEnabled || !projectFinanceSections.has(item.key))
         .filter((item) => item.key !== "slicing-pie" || slicingPieEnabled)
         .map((item) => ({
           key: item.key,

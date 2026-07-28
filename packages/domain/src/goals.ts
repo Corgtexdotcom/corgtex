@@ -1486,7 +1486,7 @@ export async function createGoalFinanceProjectLink(
     },
     select: { id: true },
   });
-  invariant(project, 404, "NOT_FOUND", "Practice project not found.");
+  invariant(project, 404, "NOT_FOUND", "Finance project not found.");
 
   return createGoalLink(actor, {
     workspaceId: params.workspaceId,

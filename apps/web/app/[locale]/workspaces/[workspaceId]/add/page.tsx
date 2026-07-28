@@ -44,6 +44,7 @@ import {
   submitProposal,
   upsertWorkspaceExternalResourceFromUrl,
 } from "@corgtex/domain";
+import { financeCapabilityEnabled } from "@corgtex/domain/modules";
 import { encrypt } from "@corgtex/connectors-sql";
 import { prisma, type AppActor } from "@corgtex/shared";
 
@@ -652,7 +653,7 @@ export default async function WorkspaceAddPage({
   const meetingRecorderEnabled = Boolean(
     featureFlags.MEETING_RECORDERS && meetingRecorderConfig?.featureEnabled && meetingRecorderConfig.config.enabled,
   );
-  const canManagePracticeProjects = Boolean(featureFlags.FINANCE && featureFlags.PRACTICE_PROJECTS)
+  const canManagePracticeProjects = financeCapabilityEnabled(featureFlags, "projects")
     && await canManagePracticeFinanceProjects(actor, workspaceId, {
       resolvedMembership: membership,
     });

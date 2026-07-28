@@ -1236,9 +1236,9 @@ export async function getAppRoutingGuidance(actor: AppActor, params: {
       routing: "CORGTEX_MCP",
       target: {
         appKey: "corgtex",
-        title: "Corgtex Practice Ledger",
+        title: "Corgtex Finance",
       },
-      guidance: "Use Corgtex native Finance / Practice Ledger for structured finance records. Do not route finance writes to the retired Practice Ledger app runtime.",
+      guidance: "Use Corgtex native Finance for structured finance records. Do not route finance writes to the retired Practice Ledger app runtime.",
       corgtexDoesNotProxyWrites: false,
     };
   }

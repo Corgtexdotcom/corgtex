@@ -20,6 +20,40 @@ function slugify(text) {
     .slice(0, 120);
 }
 
+async function retireRenamedArticleSlug(workspaceId, fromSlug, toSlug) {
+  const oldArticle = await prisma.brainArticle.findUnique({
+    where: { workspaceId_slug: { workspaceId, slug: fromSlug } },
+    select: { id: true },
+  });
+  if (!oldArticle) return;
+
+  const newArticle = await prisma.brainArticle.findUnique({
+    where: { workspaceId_slug: { workspaceId, slug: toSlug } },
+    select: { id: true },
+  });
+
+  if (!newArticle) {
+    await prisma.brainArticle.update({
+      where: { id: oldArticle.id },
+      data: { slug: toSlug },
+    });
+    return;
+  }
+
+  await prisma.brainArticle.update({
+    where: { id: newArticle.id },
+    data: {
+      slug: `${toSlug}-retired-duplicate-${newArticle.id.slice(0, 8)}`,
+      archivedAt: new Date(),
+      archiveReason: `Retired duplicate article created during ${fromSlug} to ${toSlug} rename seed cleanup.`,
+    },
+  });
+  await prisma.brainArticle.update({
+    where: { id: oldArticle.id },
+    data: { slug: toSlug },
+  });
+}
+
 // ─── Article Definitions ───
 const ARTICLES = [
   // ARCHITECTURE
@@ -39,8 +73,8 @@ const ARTICLES = [
   // PRODUCT
   { title: "Governance System", type: "PRODUCT", authority: "AUTHORITATIVE",
     body: `# Governance System\n\nBuilt on Consent-based decision-making. Circles represent domains, Roles have accountabilities, and Proposals must pass through an objection checking phase (integrated or withdrawn) before execution.` },
-  { title: "Practice Ledger", type: "PRODUCT", authority: "AUTHORITATIVE",
-    body: `# Practice Ledger\n\nPractice Ledger is the native Finance workspace surface. It tracks client projects, budget health, time contributions, expense contributions, cash payables, and optional internal Slicing Pie ownership analysis through \`PracticeProject\` and \`PracticeContributionEntry\` records.` },
+  { title: "Finance", type: "PRODUCT", authority: "AUTHORITATIVE",
+    body: `# Finance\n\nFinance is the native Corgtex workspace surface for client projects, budget health, time contributions, expense contributions, cash payables, and optional internal Slicing Pie ownership analysis through Finance records.` },
   { title: "Organization Brain", type: "PRODUCT", authority: "AUTHORITATIVE",
     body: `# Organization Brain\n\nDynamic AI knowledge base with Versioning. Submits backlinks and automatically groups organizational knowledge based on semantic relevance via AI bots.` },
   { title: "O2 Integration — Organic Organization", type: "PRODUCT", authority: "REFERENCE",
@@ -189,6 +223,7 @@ async function main() {
   console.log(`Ensured ${circleNames.length} circles exist.`);
 
   // 4. Create Brain Articles
+  await retireRenamedArticleSlug(wsId, "practice-ledger", "finance");
   let articleCount = 0;
   for (const article of ARTICLES) {
     const slug = slugify(article.title);

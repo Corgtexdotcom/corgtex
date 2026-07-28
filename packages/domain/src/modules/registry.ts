@@ -33,6 +33,8 @@ export const WORKSPACE_FEATURE_FLAG_ORDER = [
   "GOALS",
   "TOOL_LINKS",
   "FINANCE",
+  "FINANCE_PROJECTS",
+  "FINANCE_SLICING_PIE",
   "SLICING_PIE",
   "BUILD_ARTIFACTS",
   "RELATIONSHIPS",
@@ -59,6 +61,27 @@ export const WORKSPACE_FEATURE_FLAG_ORDER = [
  * source of truth for the flag vocabulary at the type level too.
  */
 export type WorkspaceFeatureFlagKey = (typeof WORKSPACE_FEATURE_FLAG_ORDER)[number];
+
+export type FinanceCapabilityKey = "projects" | "slicingPie";
+
+export const FINANCE_PARENT_FEATURE_FLAG = "FINANCE" as const;
+export const FINANCE_PROJECTS_FEATURE_FLAG = "FINANCE_PROJECTS" as const;
+export const FINANCE_SLICING_PIE_FEATURE_FLAG = "FINANCE_SLICING_PIE" as const;
+export const LEGACY_PRACTICE_PROJECTS_FEATURE_FLAG = "PRACTICE_PROJECTS" as const;
+export const LEGACY_SLICING_PIE_FEATURE_FLAG = "SLICING_PIE" as const;
+
+export const FINANCE_CAPABILITY_FLAG_ALIASES: Record<FinanceCapabilityKey, readonly WorkspaceFeatureFlagKey[]> = {
+  projects: [FINANCE_PROJECTS_FEATURE_FLAG, LEGACY_PRACTICE_PROJECTS_FEATURE_FLAG],
+  slicingPie: [FINANCE_SLICING_PIE_FEATURE_FLAG, LEGACY_SLICING_PIE_FEATURE_FLAG],
+};
+
+export function financeCapabilityEnabled(
+  flags: Partial<Record<WorkspaceFeatureFlagKey | string, boolean>>,
+  capability: FinanceCapabilityKey,
+): boolean {
+  if (!flags[FINANCE_PARENT_FEATURE_FLAG]) return false;
+  return FINANCE_CAPABILITY_FLAG_ALIASES[capability].some((flagKey) => flags[flagKey] === true);
+}
 
 /** Canonical nav group order, mirroring `WORKSPACE_NAV_GROUPS`. */
 export const NAV_GROUP_ORDER: readonly string[] = [
@@ -251,6 +274,20 @@ export const MODULE_MANIFESTS: readonly ModuleManifest[] = [
     featureFlag: flag("FINANCE", "Finance", "Spend requests, ledgers, and finance workflows.", true),
     nav: { href: "/finance", labelKey: "finance", icon: "finance", group: "finance" },
     scopes: ["finance:read", "finance:write"],
+    subFlags: [
+      flag(
+        "FINANCE_PROJECTS",
+        "Project finance",
+        "Finance sections for projects, clients, consultants, time, expenses, reports, and budget health.",
+        false,
+      ),
+      flag(
+        "FINANCE_SLICING_PIE",
+        "Finance Slicing Pie",
+        "Optional Slicing Pie contribution and ownership analysis inside native Finance.",
+        false,
+      ),
+    ],
     // Mirrors today's behavior: the tab is visible (read) to everyone while
     // write/manage is restricted to finance stewards and admins
     // (requireFinanceAccess in finance.ts).
@@ -364,27 +401,27 @@ export const MODULE_MANIFESTS: readonly ModuleManifest[] = [
     scopes: ["execution:read", "execution:write"],
   },
 
-  // --- Native first-party module. ---
+  // --- Legacy Finance aliases. ---
   {
     key: "practice-ledger",
     tier: "first_party",
-    title: "Practice Ledger",
+    title: "Finance compatibility aliases",
     description:
-      "Native consulting finance workspace for project budgets, burn, remaining budget, and margin tracking.",
+      "Legacy feature flags accepted while customer configs migrate to Finance capability names.",
     dataOwnership: "corgtex_postgres",
-    // Finance is now the native Practice Ledger surface for every workspace;
-    // this sub-flag controls optional consulting project portfolio affordances.
+    // `Practice*` storage/domain names are legacy internal names for native
+    // Finance. These flags remain as compatibility aliases during migration.
     subFlags: [
       flag(
         "PRACTICE_PROJECTS",
-        "Practice projects",
-        "Consulting project portfolio: budgets, burn, remaining, and margin tracking with an attention queue.",
+        "Project finance legacy alias",
+        "Compatibility alias for Project finance. New customer enablement should use FINANCE_PROJECTS.",
         false,
       ),
       flag(
         "SLICING_PIE",
-        "Slicing Pie",
-        "Internal Slicing Pie ownership calculations from Practice Ledger time and expense entries.",
+        "Slicing Pie legacy alias",
+        "Compatibility alias for Finance Slicing Pie. New customer enablement should use FINANCE_SLICING_PIE.",
         false,
       ),
     ],

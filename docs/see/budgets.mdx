@@ -1,14 +1,14 @@
 ---
-title: "Practice Ledger and Contributions"
+title: "Finance Contributions"
 description: "Track contribution value, cash payables, and optional internal ownership analysis."
 ---
 
-Finance in Corgtex centers on the **Practice Ledger**: a single operating record
+Finance in Corgtex centers on a single native operating record
 for project work, time, expenses, invoices, and cash payment status.
 
 ## Contribution Entries
 
-Practice Ledger contribution entries capture actual work and costs:
+Finance contribution entries capture actual work and costs:
 
 - **Time entries** record the project, contributor, date, description, hours, and internal value.
 - **Expense entries** record the project, contributor, date, description, USD amount, and receipt metadata when available.
@@ -16,14 +16,19 @@ Practice Ledger contribution entries capture actual work and costs:
 
 ## Cash Payables
 
-Cash entries stay in the Practice Ledger as requested payables until a finance
-steward or admin confirms they were paid. This keeps reimbursement workflow
-separate from ownership analysis while preserving a complete audit trail.
+Cash entries stay in Finance as requested payables until an authorized reviewer
+confirms they were paid. By default, confirmation is restricted to a finance
+steward or workspace admin. A workspace can also enable all-member Finance
+writes, which lets active contributors confirm payables without becoming admins.
+In every configuration, the person who submitted the payable cannot confirm
+their own cash payment, and entries without submitter ownership must be repaired
+before confirmation. This keeps reimbursement workflow separate from ownership
+analysis while preserving a complete audit trail.
 
 ## Optional Slicing Pie
 
 When enabled for a workspace, Slicing Pie is an internal calculation view derived
-from recorded Practice Ledger entries. It does not replace the ledger and does
+from recorded Finance entries. It does not replace the finance record and does
 not act as a legal cap table.
 
 - Unpaid work contributes slices at a fixed 2x multiplier.

@@ -13,17 +13,24 @@ import {
   type PracticeProjectStatus,
   type User,
 } from "@prisma/client";
-import { prisma } from "@corgtex/shared";
+import { prisma, resolveReleaseMetadata, type ReleaseMetadata } from "@corgtex/shared";
 import type { AppActor } from "@corgtex/shared";
 import { requireWorkspaceMembership } from "./auth";
-import { getModuleByKey, rolesWithDefaultAccess } from "./modules";
+import {
+  FINANCE_CAPABILITY_FLAG_ALIASES,
+  FINANCE_PARENT_FEATURE_FLAG,
+  defaultWorkspaceFeatureFlags,
+  getModuleByKey,
+  rolesWithDefaultAccess,
+  type WorkspaceFeatureFlagKey,
+} from "./modules";
 import { invariant } from "./errors";
 
 /**
- * Native first-party practice-finance domain. This is the cutover target for the
- * Practice Ledger satellite: budgets, usage, burn, and margin now live in
- * Corgtex Postgres (`PracticeProject`). The derivation helpers are pure so they
- * are unit-testable without a database; the thin wrappers do the I/O + access.
+ * Native first-party Finance domain. The `Practice*` Prisma models and function
+ * names are legacy internal names for the Finance records that now live in
+ * Corgtex Postgres. The derivation helpers are pure so they are unit-testable
+ * without a database; the thin wrappers do the I/O + access.
  */
 
 /** Weeks of budget runway at or below which a project needs attention. */
@@ -70,6 +77,7 @@ export type PracticeContributionEntryInput = {
 
 export type PracticeContributionEntryWithContext = PracticeContributionEntry & {
   contributor: Pick<User, "id" | "displayName" | "email">;
+  submittedBy: Pick<User, "id" | "displayName" | "email"> | null;
   paidBy: Pick<User, "id" | "displayName" | "email"> | null;
   project: Pick<PracticeProject, "id" | "code" | "name" | "clientName">;
 };
@@ -1137,24 +1145,26 @@ const PRACTICE_FINANCE_MANAGE_ROLES: MemberRole[] = (() => {
   const roles = financeModule ? rolesWithDefaultAccess(financeModule, "write") : ["FINANCE_STEWARD", "ADMIN"];
   return roles as MemberRole[];
 })();
-const FINANCE_FEATURE_FLAG = "FINANCE";
-const PRACTICE_PROJECTS_ALL_MEMBER_WRITE_CONFIG_KEY = "practiceProjectsAllMemberWrite";
+export const FINANCE_ALL_MEMBER_WRITE_CONFIG_KEY = "financeAllMemberWrite";
+export const LEGACY_PRACTICE_PROJECTS_ALL_MEMBER_WRITE_CONFIG_KEY = "practiceProjectsAllMemberWrite";
 
-function practiceProjectAllMemberWriteEnabled(config: unknown) {
+export function financeAllMemberWriteConfigEnabled(config: unknown) {
   return Boolean(
     config
       && typeof config === "object"
-      && PRACTICE_PROJECTS_ALL_MEMBER_WRITE_CONFIG_KEY in config
-      && (config as Record<string, unknown>)[PRACTICE_PROJECTS_ALL_MEMBER_WRITE_CONFIG_KEY] === true,
+      && (
+        (config as Record<string, unknown>)[FINANCE_ALL_MEMBER_WRITE_CONFIG_KEY] === true
+        || (config as Record<string, unknown>)[LEGACY_PRACTICE_PROJECTS_ALL_MEMBER_WRITE_CONFIG_KEY] === true
+      ),
   );
 }
 
-async function workspaceAllowsAllMemberPracticeProjectWrites(workspaceId: string) {
+async function workspaceAllowsAllMemberFinanceWrites(workspaceId: string) {
   const flag = await prisma.workspaceFeatureFlag.findUnique({
-    where: { workspaceId_flag: { workspaceId, flag: FINANCE_FEATURE_FLAG } },
+    where: { workspaceId_flag: { workspaceId, flag: FINANCE_PARENT_FEATURE_FLAG } },
     select: { enabled: true, config: true },
   });
-  return Boolean(flag?.enabled && practiceProjectAllMemberWriteEnabled(flag.config));
+  return Boolean(flag?.enabled && financeAllMemberWriteConfigEnabled(flag.config));
 }
 
 export async function canManagePracticeFinanceProjects(
@@ -1165,7 +1175,7 @@ export async function canManagePracticeFinanceProjects(
   if (actor.kind === "agent") return true;
   const membership = options.resolvedMembership ?? await requireWorkspaceMembership({ actor, workspaceId });
   if (membership?.role && PRACTICE_FINANCE_MANAGE_ROLES.includes(membership.role as MemberRole)) return true;
-  return workspaceAllowsAllMemberPracticeProjectWrites(workspaceId);
+  return workspaceAllowsAllMemberFinanceWrites(workspaceId);
 }
 
 export async function canManagePracticeContributionPayments(
@@ -1175,7 +1185,8 @@ export async function canManagePracticeContributionPayments(
 ) {
   if (actor.kind === "agent") return true;
   const membership = options.resolvedMembership ?? await requireWorkspaceMembership({ actor, workspaceId });
-  return Boolean(membership?.role && PRACTICE_FINANCE_MANAGE_ROLES.includes(membership.role as MemberRole));
+  if (membership?.role && PRACTICE_FINANCE_MANAGE_ROLES.includes(membership.role as MemberRole)) return true;
+  return workspaceAllowsAllMemberFinanceWrites(workspaceId);
 }
 
 async function requirePracticeFinanceWrite(actor: AppActor, workspaceId: string) {
@@ -1191,6 +1202,255 @@ async function requirePracticeFinanceWrite(actor: AppActor, workspaceId: string)
     "FORBIDDEN",
     "Insufficient permissions.",
   );
+}
+
+type FinanceReadinessFlag = {
+  flag: string;
+  enabled: boolean;
+  source: "workspace_override" | "default";
+  config: unknown;
+  updatedAt: Date | null;
+};
+
+type FinanceCapabilityReadiness = {
+  enabled: boolean;
+  aliases: FinanceReadinessFlag[];
+};
+
+type FinanceReadinessCheck = {
+  key: string;
+  ok: boolean;
+  required: boolean;
+  detail: string;
+};
+
+export type FinanceReadinessDiagnostic = {
+  workspaceId: string;
+  release: ReleaseMetadata;
+  flags: {
+    finance: FinanceReadinessFlag;
+    projects: FinanceCapabilityReadiness;
+    slicingPie: FinanceCapabilityReadiness;
+  };
+  rolePosture: {
+    activeMembers: number;
+    byRole: Partial<Record<MemberRole, number>>;
+    defaultWriteRoles: MemberRole[];
+    effectiveWriteRoles: MemberRole[];
+  };
+  allMemberWrite: {
+    active: boolean;
+    preferredConfigKey: typeof FINANCE_ALL_MEMBER_WRITE_CONFIG_KEY;
+    legacyConfigKey: typeof LEGACY_PRACTICE_PROJECTS_ALL_MEMBER_WRITE_CONFIG_KEY;
+  };
+  recordCounts: {
+    projects: number;
+    clients: number;
+    consultants: number;
+    timeEntries: number;
+    expenses: number;
+    contributionEntries: number;
+    requestedPayables: number;
+  };
+  latestFinanceUpdateAt: Date | null;
+  peerReviewPolicy: {
+    status: "enforced" | "attention";
+    submitterField: "submittedByUserId";
+    sameSubmitterConfirmation: "blocked";
+    requestedPayablesMissingSubmitter: number;
+  };
+  checks: FinanceReadinessCheck[];
+  ready: boolean;
+};
+
+function compactJsonConfig(config: unknown) {
+  return config && typeof config === "object" && !Array.isArray(config)
+    ? config
+    : null;
+}
+
+function maxDate(values: Array<Date | null | undefined>) {
+  const dates = values.filter((value): value is Date => value instanceof Date);
+  if (dates.length === 0) return null;
+  return new Date(Math.max(...dates.map((date) => date.getTime())));
+}
+
+function readinessFlagState(
+  flag: WorkspaceFeatureFlagKey,
+  defaults: Record<WorkspaceFeatureFlagKey, boolean>,
+  rowsByFlag: Map<string, { enabled: boolean; config: unknown; updatedAt: Date }>,
+): FinanceReadinessFlag {
+  const row = rowsByFlag.get(flag);
+  return {
+    flag,
+    enabled: row?.enabled ?? defaults[flag],
+    source: row ? "workspace_override" : "default",
+    config: compactJsonConfig(row?.config),
+    updatedAt: row?.updatedAt ?? null,
+  };
+}
+
+function readinessCapability(
+  aliases: readonly WorkspaceFeatureFlagKey[],
+  defaults: Record<WorkspaceFeatureFlagKey, boolean>,
+  rowsByFlag: Map<string, { enabled: boolean; config: unknown; updatedAt: Date }>,
+): FinanceCapabilityReadiness {
+  const flags = Object.fromEntries(
+    aliases.map((flag) => [flag, rowsByFlag.get(flag)?.enabled ?? defaults[flag]]),
+  ) as Partial<Record<WorkspaceFeatureFlagKey, boolean>>;
+  flags[FINANCE_PARENT_FEATURE_FLAG] = rowsByFlag.get(FINANCE_PARENT_FEATURE_FLAG)?.enabled ?? defaults[FINANCE_PARENT_FEATURE_FLAG];
+  return {
+    enabled: aliases.some((flag) => flags[flag] === true) && flags[FINANCE_PARENT_FEATURE_FLAG] === true,
+    aliases: aliases.map((flag) => readinessFlagState(flag, defaults, rowsByFlag)),
+  };
+}
+
+export async function getFinanceReadinessDiagnostic(
+  actor: AppActor,
+  workspaceId: string,
+): Promise<FinanceReadinessDiagnostic> {
+  await requireWorkspaceMembership({ actor, workspaceId });
+  const defaults = defaultWorkspaceFeatureFlags();
+  const financeFlagKeys = [
+    FINANCE_PARENT_FEATURE_FLAG,
+    ...FINANCE_CAPABILITY_FLAG_ALIASES.projects,
+    ...FINANCE_CAPABILITY_FLAG_ALIASES.slicingPie,
+  ];
+  const uniqueFinanceFlagKeys = [...new Set(financeFlagKeys)] as WorkspaceFeatureFlagKey[];
+  const [
+    flagRows,
+    roleRows,
+    projectCount,
+    clientCount,
+    consultantCount,
+    timeEntryCount,
+    expenseCount,
+    contributionEntryCount,
+    requestedPayableCount,
+    requestedPayablesMissingSubmitter,
+    latestProject,
+    latestClient,
+    latestConsultant,
+    latestTimeEntry,
+    latestExpense,
+    latestContributionEntry,
+  ] = await Promise.all([
+    prisma.workspaceFeatureFlag.findMany({
+      where: { workspaceId, flag: { in: uniqueFinanceFlagKeys } },
+      select: { flag: true, enabled: true, config: true, updatedAt: true },
+    }),
+    prisma.member.groupBy({
+      by: ["role"],
+      where: { workspaceId, isActive: true, mergedAt: null },
+      _count: { _all: true },
+    }),
+    prisma.practiceProject.count({ where: { workspaceId } }),
+    prisma.practiceClient.count({ where: { workspaceId } }),
+    prisma.practiceConsultant.count({ where: { workspaceId } }),
+    prisma.practiceTimeEntry.count({ where: { workspaceId } }),
+    prisma.practiceExpense.count({ where: { workspaceId } }),
+    prisma.practiceContributionEntry.count({ where: { workspaceId } }),
+    prisma.practiceContributionEntry.count({ where: { workspaceId, paymentChoice: "CASH", cashStatus: "REQUESTED" } }),
+    prisma.practiceContributionEntry.count({ where: { workspaceId, paymentChoice: "CASH", cashStatus: "REQUESTED", submittedByUserId: null } }),
+    prisma.practiceProject.aggregate({ where: { workspaceId }, _max: { updatedAt: true } }),
+    prisma.practiceClient.aggregate({ where: { workspaceId }, _max: { updatedAt: true } }),
+    prisma.practiceConsultant.aggregate({ where: { workspaceId }, _max: { updatedAt: true } }),
+    prisma.practiceTimeEntry.aggregate({ where: { workspaceId }, _max: { updatedAt: true } }),
+    prisma.practiceExpense.aggregate({ where: { workspaceId }, _max: { updatedAt: true } }),
+    prisma.practiceContributionEntry.aggregate({ where: { workspaceId }, _max: { updatedAt: true } }),
+  ]);
+
+  const rowsByFlag = new Map(flagRows.map((row) => [row.flag, row]));
+  const finance = readinessFlagState(FINANCE_PARENT_FEATURE_FLAG, defaults, rowsByFlag);
+  const projects = readinessCapability(FINANCE_CAPABILITY_FLAG_ALIASES.projects, defaults, rowsByFlag);
+  const slicingPie = readinessCapability(FINANCE_CAPABILITY_FLAG_ALIASES.slicingPie, defaults, rowsByFlag);
+  const allMemberWriteActive = Boolean(finance.enabled && financeAllMemberWriteConfigEnabled(finance.config));
+  const byRole = Object.fromEntries(roleRows.map((row) => [row.role, row._count._all])) as Partial<Record<MemberRole, number>>;
+  const effectiveWriteRoles = allMemberWriteActive
+    ? ["CONTRIBUTOR", "FACILITATOR", "FINANCE_STEWARD", "ADMIN"] as MemberRole[]
+    : PRACTICE_FINANCE_MANAGE_ROLES;
+  const latestFinanceUpdateAt = maxDate([
+    latestProject._max.updatedAt,
+    latestClient._max.updatedAt,
+    latestConsultant._max.updatedAt,
+    latestTimeEntry._max.updatedAt,
+    latestExpense._max.updatedAt,
+    latestContributionEntry._max.updatedAt,
+  ]);
+  const peerReviewStatus = requestedPayablesMissingSubmitter === 0 ? "enforced" : "attention";
+  const checks: FinanceReadinessCheck[] = [
+    {
+      key: "finance-parent-enabled",
+      ok: finance.enabled,
+      required: true,
+      detail: finance.enabled ? "FINANCE is enabled." : "FINANCE is disabled.",
+    },
+    {
+      key: "project-finance-enabled",
+      ok: projects.enabled,
+      required: false,
+      detail: projects.enabled ? "Project finance is enabled through a Finance capability flag or legacy alias." : "Project finance is not enabled.",
+    },
+    {
+      key: "slicing-pie-enabled",
+      ok: slicingPie.enabled,
+      required: false,
+      detail: slicingPie.enabled ? "Slicing Pie is enabled through a Finance capability flag or legacy alias." : "Slicing Pie is not enabled.",
+    },
+    {
+      key: "all-member-write",
+      ok: allMemberWriteActive,
+      required: false,
+      detail: allMemberWriteActive ? "Finance all-member write is active." : "Finance writes use steward/admin defaults only.",
+    },
+    {
+      key: "peer-review-policy",
+      ok: peerReviewStatus === "enforced",
+      required: true,
+      detail: peerReviewStatus === "enforced"
+        ? "Cash payment confirmation requires a different submitter."
+        : `${requestedPayablesMissingSubmitter} requested payable(s) need submitter ownership before confirmation.`,
+    },
+  ];
+
+  return {
+    workspaceId,
+    release: resolveReleaseMetadata(process.env, { service: "web" }),
+    flags: {
+      finance,
+      projects,
+      slicingPie,
+    },
+    rolePosture: {
+      activeMembers: roleRows.reduce((sum, row) => sum + row._count._all, 0),
+      byRole,
+      defaultWriteRoles: PRACTICE_FINANCE_MANAGE_ROLES,
+      effectiveWriteRoles,
+    },
+    allMemberWrite: {
+      active: allMemberWriteActive,
+      preferredConfigKey: FINANCE_ALL_MEMBER_WRITE_CONFIG_KEY,
+      legacyConfigKey: LEGACY_PRACTICE_PROJECTS_ALL_MEMBER_WRITE_CONFIG_KEY,
+    },
+    recordCounts: {
+      projects: projectCount,
+      clients: clientCount,
+      consultants: consultantCount,
+      timeEntries: timeEntryCount,
+      expenses: expenseCount,
+      contributionEntries: contributionEntryCount,
+      requestedPayables: requestedPayableCount,
+    },
+    latestFinanceUpdateAt,
+    peerReviewPolicy: {
+      status: peerReviewStatus,
+      submitterField: "submittedByUserId",
+      sameSubmitterConfirmation: "blocked",
+      requestedPayablesMissingSubmitter,
+    },
+    checks,
+    ready: checks.every((check) => !check.required || check.ok),
+  };
 }
 
 export type PracticeProjectInput = {
@@ -1527,7 +1787,7 @@ function normalizeCurrency(value: string | null | undefined): string {
     currency === PRACTICE_LEDGER_CURRENCY,
     400,
     "INVALID_INPUT",
-    `Practice Ledger contributions must use ${PRACTICE_LEDGER_CURRENCY} until currency conversion is supported.`,
+    `Finance contributions must use ${PRACTICE_LEDGER_CURRENCY} until currency conversion is supported.`,
   );
   return currency;
 }
@@ -1639,7 +1899,7 @@ function normalizeNativeLedgerDate(value: Date, label: string): Date {
 
 function normalizeNativeLedgerHours(value: number): Prisma.Decimal {
   invariant(Number.isFinite(value) && value > 0, 400, "INVALID_INPUT", "Hours must be greater than zero.");
-  invariant(value <= 999_999.99, 400, "INVALID_INPUT", "Hours exceed the native Practice Ledger limit.");
+  invariant(value <= 999_999.99, 400, "INVALID_INPUT", "Hours exceed the native Finance limit.");
   const hours = new Prisma.Decimal(value).toDecimalPlaces(2);
   invariant(hours.gt(0), 400, "INVALID_INPUT", "Hours must be greater than zero.");
   return hours;
@@ -1648,12 +1908,12 @@ function normalizeNativeLedgerHours(value: number): Prisma.Decimal {
 function normalizeNativeLedgerCurrency(value: string | null | undefined, projectCurrency: string): string {
   const normalizedProjectCurrency = normalizeCurrencyCode(projectCurrency);
   const normalizedInputCurrency = normalizeCurrencyCode(value) ?? normalizedProjectCurrency;
-  invariant(normalizedProjectCurrency, 400, "MIXED_CURRENCY", "Native practice ledger entries require a project currency.");
+  invariant(normalizedProjectCurrency, 400, "MIXED_CURRENCY", "Native Finance entries require a project currency.");
   invariant(
     normalizedInputCurrency === normalizedProjectCurrency,
     400,
     "MIXED_CURRENCY",
-    "Native practice ledger entries must use the project currency until conversion is supported.",
+    "Native Finance entries must use the project currency until conversion is supported.",
   );
   return normalizedProjectCurrency;
 }
@@ -2608,7 +2868,7 @@ async function requireProjectInWorkspace(workspaceId: string, projectId: string)
     where: { id: projectId.trim() },
     select: { id: true, workspaceId: true },
   });
-  invariant(project && project.workspaceId === workspaceId, 404, "NOT_FOUND", "Practice project not found.");
+  invariant(project && project.workspaceId === workspaceId, 404, "NOT_FOUND", "Finance project not found.");
   return project;
 }
 
@@ -2629,7 +2889,7 @@ async function loadNativePracticeProjectForLedgerWrite(workspaceId: string, proj
       client: { select: { id: true, crmAccountId: true, name: true } },
     },
   });
-  invariant(project && project.workspaceId === workspaceId, 404, "NOT_FOUND", "Practice project not found.");
+  invariant(project && project.workspaceId === workspaceId, 404, "NOT_FOUND", "Finance project not found.");
   normalizeNativeLedgerCurrency(null, project.currency);
   return project;
 }
@@ -3003,7 +3263,7 @@ export async function getNativePracticeProjectDetail(
       },
     },
   });
-  invariant(project && project.workspaceId === workspaceId, 404, "NOT_FOUND", "Practice project not found.");
+  invariant(project && project.workspaceId === workspaceId, 404, "NOT_FOUND", "Finance project not found.");
 
   const now = normalizeNow(options.now);
   const recentWindowWeeks = normalizeRecentWindowWeeks(options.recentWindowWeeks);
@@ -3227,6 +3487,9 @@ const CONTRIBUTION_INCLUDE = {
   contributor: {
     select: { id: true, displayName: true, email: true },
   },
+  submittedBy: {
+    select: { id: true, displayName: true, email: true },
+  },
   paidBy: {
     select: { id: true, displayName: true, email: true },
   },
@@ -3290,9 +3553,10 @@ export async function createPracticeContributionEntry(
   workspaceId: string,
   input: PracticeContributionEntryInput,
 ): Promise<PracticeContributionEntry> {
-  await requireWorkspaceMembership({ actor, workspaceId });
+  await requirePracticeFinanceWrite(actor, workspaceId);
   await requireProjectInWorkspace(workspaceId, input.projectId);
   const contributorUserId = await resolveContributionUserId(actor, workspaceId, input.contributorUserId);
+  const submittedByUserId = actor.kind === "user" ? actor.user.id : null;
   const type = normalizeContributionType(input.type);
   const paymentChoice = normalizePaymentChoice(input.paymentChoice);
   const description = normalizeRequiredText(input.description, "Description");
@@ -3326,6 +3590,7 @@ export async function createPracticeContributionEntry(
       receiptUrl: normalizeOptionalReceiptUrl(input.receiptUrl),
       sliceMultiplier,
       slices,
+      submittedByUserId,
     },
   });
 }
@@ -3335,18 +3600,39 @@ export async function markPracticeContributionEntryPaid(
   workspaceId: string,
   entryId: string,
 ): Promise<PracticeContributionEntry> {
-  await requireWorkspaceMembership({ actor, workspaceId, allowedRoles: PRACTICE_FINANCE_MANAGE_ROLES });
+  invariant(actor.kind === "user", 403, "PEER_REVIEW_REQUIRED", "Cash payments must be confirmed by a human workspace member.");
+  const membership = await requireWorkspaceMembership({ actor, workspaceId });
+  invariant(
+    await canManagePracticeContributionPayments(actor, workspaceId, { resolvedMembership: membership }),
+    403,
+    "FORBIDDEN",
+    "Insufficient permissions.",
+  );
   const id = entryId.trim();
   invariant(id, 400, "INVALID_INPUT", "Contribution entry is required.");
   const entry = await prisma.practiceContributionEntry.findUnique({
     where: { id },
-    select: { id: true, workspaceId: true, paymentChoice: true, cashStatus: true },
+    select: { id: true, workspaceId: true, paymentChoice: true, cashStatus: true, submittedByUserId: true },
   });
   invariant(entry && entry.workspaceId === workspaceId, 404, "NOT_FOUND", "Contribution entry not found.");
   invariant(entry.paymentChoice === "CASH", 400, "INVALID_STATE", "Only cash entries can be marked paid.");
   invariant(entry.cashStatus !== "PAID", 400, "INVALID_STATE", "Contribution entry is already paid.");
+  invariant(entry.submittedByUserId, 409, "PEER_REVIEW_REQUIRED", "Cash payment needs an identified submitter before confirmation.");
+  invariant(
+    entry.submittedByUserId !== actor.user.id,
+    403,
+    "PEER_REVIEW_REQUIRED",
+    "Needs another contributor to confirm payment.",
+  );
   const updated = await prisma.practiceContributionEntry.updateMany({
-    where: { id, workspaceId, paymentChoice: "CASH", cashStatus: "REQUESTED" },
+    where: {
+      id,
+      workspaceId,
+      paymentChoice: "CASH",
+      cashStatus: "REQUESTED",
+      submittedByUserId: { not: actor.user.id },
+      NOT: { submittedByUserId: null },
+    },
     data: {
       cashStatus: "PAID",
       paidAt: new Date(),
@@ -3517,7 +3803,7 @@ export async function updatePracticeProject(
     where: { id: projectId },
     select: { id: true, workspaceId: true, clientId: true, clientName: true },
   });
-  invariant(existing && existing.workspaceId === workspaceId, 404, "NOT_FOUND", "Practice project not found.");
+  invariant(existing && existing.workspaceId === workspaceId, 404, "NOT_FOUND", "Finance project not found.");
 
   const clientName = normalizeOptionalText(input.clientName, "Client name");
   const data: Prisma.PracticeProjectUpdateInput = {

@@ -73,6 +73,8 @@ const EXPECTED_DEFAULT_FLAGS = {
   GOALS: true,
   TOOL_LINKS: false,
   FINANCE: true,
+  FINANCE_PROJECTS: false,
+  FINANCE_SLICING_PIE: false,
   SLICING_PIE: false,
   BUILD_ARTIFACTS: false,
   RELATIONSHIPS: true,

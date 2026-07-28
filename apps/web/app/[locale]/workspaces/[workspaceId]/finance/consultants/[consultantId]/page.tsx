@@ -1,6 +1,6 @@
 import { getNativePracticeConsultantDetail } from "@corgtex/domain";
 import { requirePageActor } from "@/lib/auth";
-import { isWorkspaceFeatureEnabled, requireWorkspaceFeature } from "@/lib/workspace-feature-flags";
+import { isWorkspaceFinanceCapabilityEnabled, requireWorkspaceFeature, requireWorkspaceFinanceCapability } from "@/lib/workspace-feature-flags";
 import {
   PracticeFinanceNav,
   PracticeMetric,
@@ -37,10 +37,10 @@ export default async function PracticeConsultantDetailPage({
   const { workspaceId, consultantId } = await params;
   const actor = await requirePageActor();
   await requireWorkspaceFeature(workspaceId, "FINANCE");
-  await requireWorkspaceFeature(workspaceId, "PRACTICE_PROJECTS");
+  await requireWorkspaceFinanceCapability(workspaceId, "projects");
   const [detail, slicingPieEnabled] = await Promise.all([
     getNativePracticeConsultantDetail(actor, workspaceId, consultantId),
-    isWorkspaceFeatureEnabled(workspaceId, "SLICING_PIE"),
+    isWorkspaceFinanceCapabilityEnabled(workspaceId, "slicingPie"),
   ]);
   const { consultant, utilization } = detail;
 

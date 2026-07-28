@@ -150,6 +150,7 @@ describe("/api/control-plane/mcp", () => {
       "update_customer_member_status",
       "list_customer_feature_flags",
       "set_customer_feature_flag",
+      "get_customer_finance_readiness",
       "configure_customer_integration",
       "run_meeting_recorder_operation",
       "check_meeting_operations_readiness",
@@ -663,6 +664,39 @@ describe("/api/control-plane/mcp", () => {
       },
       reason: "Enable customer Slack meeting action review.",
     }));
+  });
+
+  it("routes Finance readiness through a read-only customer support operation", async () => {
+    const domain = await import("@corgtex/domain");
+    vi.mocked(domain.runCustomerSupportOperation).mockResolvedValueOnce({
+      action: "finance.readiness",
+      readiness: { ready: true },
+    } as never);
+    const { POST } = await import("./route");
+
+    const response = await POST(request({
+      jsonrpc: "2.0",
+      id: 9,
+      method: "tools/call",
+      params: {
+        name: "get_customer_finance_readiness",
+        arguments: { deploymentId: "inst-1" },
+      },
+    }) as never);
+    const body = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(JSON.parse(body.result.content[0].text)).toEqual({
+      action: "finance.readiness",
+      readiness: { ready: true },
+    });
+    expect(vi.mocked(domain.runCustomerSupportOperation)).toHaveBeenCalledWith(expect.any(Object), {
+      deploymentId: "inst-1",
+      action: "finance.readiness",
+      scopeOverride: "control-plane:read",
+      reason: "Read Finance readiness diagnostic.",
+      arguments: {},
+    });
   });
 
   it("calls verified release reconciliation with release write scope", async () => {

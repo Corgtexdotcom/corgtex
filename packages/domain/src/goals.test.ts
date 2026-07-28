@@ -741,7 +741,7 @@ describe("Goals Domain", () => {
       ]);
     });
 
-    it("uses native practice ledger health for linked finance projects", async () => {
+    it("uses native Finance health for linked finance projects", async () => {
       const createdAt = new Date("2026-07-11T09:00:00.000Z");
       vi.mocked(prisma.goalLink.findMany).mockResolvedValueOnce([
         {

@@ -1,6 +1,6 @@
 import { getNativePracticeFinanceDashboard, type NativePracticeFinanceSummary } from "@corgtex/domain";
 import { requirePageActor } from "@/lib/auth";
-import { isWorkspaceFeatureEnabled, requireWorkspaceFeature } from "@/lib/workspace-feature-flags";
+import { isWorkspaceFinanceCapabilityEnabled, requireWorkspaceFeature, requireWorkspaceFinanceCapability } from "@/lib/workspace-feature-flags";
 import { PracticeFinanceNav, PracticeMetric, marginLabel, wholeMoney } from "../components";
 
 export const dynamic = "force-dynamic";
@@ -26,19 +26,19 @@ export default async function PracticeReportsPage({
   const { workspaceId } = await params;
   const actor = await requirePageActor();
   await requireWorkspaceFeature(workspaceId, "FINANCE");
-  await requireWorkspaceFeature(workspaceId, "PRACTICE_PROJECTS");
+  await requireWorkspaceFinanceCapability(workspaceId, "projects");
   const [dashboard, slicingPieEnabled] = await Promise.all([
     getNativePracticeFinanceDashboard(actor, workspaceId),
-    isWorkspaceFeatureEnabled(workspaceId, "SLICING_PIE"),
+    isWorkspaceFinanceCapabilityEnabled(workspaceId, "slicingPie"),
   ]);
 
   return (
     <section className="stack" style={{ gap: 20 }} data-finance-surface="practice-reports">
       <header className="nr-masthead" style={{ textAlign: "left", marginBottom: 0 }}>
-        <a className="link-button small secondary" href={`/workspaces/${workspaceId}/finance`}>Back to Practice Ledger</a>
+        <a className="link-button small secondary" href={`/workspaces/${workspaceId}/finance`}>Back to Finance</a>
         <h1 style={{ marginTop: 12 }}>Reports</h1>
         <div className="nr-masthead-meta">
-          <span>Native Practice Ledger rollups and CSV exports.</span>
+          <span>Native Finance rollups and CSV exports.</span>
         </div>
         <div style={{ marginTop: 16 }}>
           <PracticeFinanceNav workspaceId={workspaceId} active="reports" slicingPieEnabled={slicingPieEnabled} />
@@ -62,7 +62,7 @@ export default async function PracticeReportsPage({
             <a
               key={item.kind}
               className="link-button secondary"
-              href={`/api/workspaces/${workspaceId}/practice-ledger/exports/${item.kind}`}
+              href={`/api/workspaces/${workspaceId}/finance/exports/${item.kind}`}
             >
               Download {item.label}
             </a>

@@ -60,7 +60,7 @@ export function PracticeProjectAddPanel({
     return (
       <div className="stack nr-form-section">
         <p className="form-message form-message-error" style={{ margin: 0 }}>
-          Only workspace admins or finance stewards can add Practice Ledger projects.
+          Only workspace admins or finance stewards can add Finance projects.
         </p>
         <div className="actions-inline"><a className="link-button secondary" href={returnTo}>Cancel</a></div>
       </div>

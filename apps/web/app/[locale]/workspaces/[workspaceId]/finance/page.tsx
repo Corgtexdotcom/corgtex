@@ -9,7 +9,7 @@ import {
 } from "@corgtex/domain";
 import { prisma } from "@corgtex/shared";
 import { requirePageActor } from "@/lib/auth";
-import { isWorkspaceFeatureEnabled, requireWorkspaceFeature } from "@/lib/workspace-feature-flags";
+import { isWorkspaceFinanceCapabilityEnabled, requireWorkspaceFeature } from "@/lib/workspace-feature-flags";
 import { PracticeFinanceDashboard } from "./PracticeFinanceDashboard";
 
 export const dynamic = "force-dynamic";
@@ -27,11 +27,11 @@ export default async function FinancePage({
   const actor = await requirePageActor();
   await requireWorkspaceFeature(workspaceId, "FINANCE");
 
-  const [practiceDashboard, projects, slicingPieEnabled, practiceProjectsEnabled, membership, workspace] = await Promise.all([
+  const [practiceDashboard, projects, slicingPieEnabled, financeProjectsEnabled, membership, workspace] = await Promise.all([
     getNativePracticeFinanceDashboard(actor, workspaceId),
     listAllPracticeProjects(actor, workspaceId),
-    isWorkspaceFeatureEnabled(workspaceId, "SLICING_PIE"),
-    isWorkspaceFeatureEnabled(workspaceId, "PRACTICE_PROJECTS"),
+    isWorkspaceFinanceCapabilityEnabled(workspaceId, "slicingPie"),
+    isWorkspaceFinanceCapabilityEnabled(workspaceId, "projects"),
     requireWorkspaceMembership({ actor, workspaceId }),
     prisma.workspace.findUnique({
       where: { id: workspaceId },
@@ -39,9 +39,10 @@ export default async function FinancePage({
     }),
   ]);
   const readOnlyDemo = workspace?.slug === "jnj-demo";
-  const canManageProjects = practiceProjectsEnabled && !readOnlyDemo && await canManagePracticeFinanceProjects(actor, workspaceId, {
+  const canWriteFinance = !readOnlyDemo && await canManagePracticeFinanceProjects(actor, workspaceId, {
     resolvedMembership: membership,
   });
+  const canManageProjects = financeProjectsEnabled && canWriteFinance;
   const projectEditRows = canManageProjects
     ? await prisma.practiceProject.findMany({
       where: {
@@ -64,9 +65,10 @@ export default async function FinancePage({
   return (
     <PracticeFinanceDashboard
       workspaceId={workspaceId}
+      currentUserId={actor.kind === "user" ? actor.user.id : null}
       canManageProjects={canManageProjects}
-      practiceProjectsEnabled={practiceProjectsEnabled}
-      canRecordContributions={!readOnlyDemo}
+      financeProjectsEnabled={financeProjectsEnabled}
+      canRecordContributions={canWriteFinance}
       canMarkContributionPaid={canMarkContributionPaid}
       slicingPieEnabled={slicingPieEnabled}
       summary={practiceDashboard.summary}

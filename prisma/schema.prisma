@@ -1001,8 +1001,9 @@ model User {
   authoredTensions              Tension[]                             @relation("TensionAuthor")
   authoredProposals             Proposal[]                            @relation("ProposalAuthor")
   authoredGoals                 Goal[]                                @relation("GoalAuthor")
-  practiceContributionEntries   PracticeContributionEntry[]            @relation("PracticeContributionContributor")
-  paidPracticeContributionEntries PracticeContributionEntry[]          @relation("PracticeContributionPaidBy")
+  practiceContributionEntries          PracticeContributionEntry[]     @relation("PracticeContributionContributor")
+  submittedPracticeContributionEntries PracticeContributionEntry[]     @relation("PracticeContributionSubmitter")
+  paidPracticeContributionEntries      PracticeContributionEntry[]     @relation("PracticeContributionPaidBy")
   objections                    Objection[]
   tensionUpvotes                TensionUpvote[]
   agentCreds                    AgentCredential[]                     @relation("AgentCredentialCreator")
@@ -2439,6 +2440,7 @@ model PracticeContributionEntry {
   receiptUrl          String?                           @db.Text
   sliceMultiplier     Int
   slices              Int
+  submittedByUserId   String?
   paidAt              DateTime?
   paidByUserId        String?
   createdAt           DateTime                          @default(now())
@@ -2447,10 +2449,12 @@ model PracticeContributionEntry {
   workspace         Workspace       @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   project           PracticeProject @relation(fields: [projectId], references: [id], onDelete: Cascade)
   contributor       User            @relation("PracticeContributionContributor", fields: [contributorUserId], references: [id], onDelete: Cascade)
+  submittedBy       User?           @relation("PracticeContributionSubmitter", fields: [submittedByUserId], references: [id], onDelete: SetNull)
   paidBy            User?           @relation("PracticeContributionPaidBy", fields: [paidByUserId], references: [id], onDelete: SetNull)
 
   @@index([workspaceId, occurredAt])
   @@index([workspaceId, contributorUserId])
+  @@index([workspaceId, submittedByUserId])
   @@index([projectId, occurredAt])
   @@index([workspaceId, paymentChoice])
   @@index([workspaceId, cashStatus])
