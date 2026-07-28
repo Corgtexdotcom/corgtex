@@ -3041,7 +3041,7 @@ async function lockNativePracticeConsultantIdentity(
   lockKeys: string[],
 ) {
   for (const lockKey of lockKeys) {
-    await tx.$queryRaw(Prisma.sql`SELECT pg_advisory_xact_lock(hashtextextended(${lockKey}, 0))`);
+    await tx.$executeRaw(Prisma.sql`SELECT pg_advisory_xact_lock(hashtextextended(${lockKey}, 0))`);
   }
 }
 
@@ -3051,7 +3051,7 @@ async function lockNativePracticeClientIdentity(
   identity: string,
 ) {
   const lockKey = `native-practice-client:${workspaceId}:${identity}`;
-  await db.$queryRaw(Prisma.sql`SELECT pg_advisory_xact_lock(hashtextextended(${lockKey}, 0))`);
+  await db.$executeRaw(Prisma.sql`SELECT pg_advisory_xact_lock(hashtextextended(${lockKey}, 0))`);
 }
 
 async function ensureNativePracticeClientForProject(

@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const { prismaMock, requireWorkspaceMembershipMock } = vi.hoisted(() => {
   const prismaMock = {
     $queryRaw: vi.fn(),
+    $executeRaw: vi.fn(),
     $transaction: vi.fn(),
     crmAccount: {
       findUnique: vi.fn(),
@@ -1549,6 +1550,7 @@ describe("practice-finance I/O", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     prismaMock.$queryRaw.mockResolvedValue([]);
+    prismaMock.$executeRaw.mockResolvedValue([]);
     requireWorkspaceMembershipMock.mockResolvedValue({ id: "member-1", role: "ADMIN" });
     prismaMock.workspaceFeatureFlag.findUnique.mockResolvedValue({ enabled: true, config: null });
     prismaMock.workspaceFeatureFlag.findMany.mockResolvedValue([]);
@@ -3173,7 +3175,7 @@ describe("practice-finance I/O", () => {
       currency: "usd",
     });
 
-    expect(prismaSqlValues(prismaMock.$queryRaw.mock.calls[0]?.[0])).toContain("native-practice-client:workspace-1:crm:account-1");
+    expect(prismaSqlValues(prismaMock.$executeRaw.mock.calls[0]?.[0])).toContain("native-practice-client:workspace-1:crm:account-1");
     expect(prismaMock.practiceClient.findMany).toHaveBeenCalledTimes(1);
     expect(prismaMock.practiceClient.findMany).toHaveBeenCalledWith({
       where: {
@@ -3244,9 +3246,9 @@ describe("practice-finance I/O", () => {
     });
 
     expect(prismaMock.$transaction).toHaveBeenCalled();
-    expect(prismaMock.$queryRaw).toHaveBeenCalledTimes(2);
-    expect(prismaSqlText(prismaMock.$queryRaw.mock.calls[0]?.[0])).toContain("pg_advisory_xact_lock");
-    expect(prismaSqlText(prismaMock.$queryRaw.mock.calls[1]?.[0])).toContain("pg_advisory_xact_lock");
+    expect(prismaMock.$executeRaw).toHaveBeenCalledTimes(2);
+    expect(prismaSqlText(prismaMock.$executeRaw.mock.calls[0]?.[0])).toContain("pg_advisory_xact_lock");
+    expect(prismaSqlText(prismaMock.$executeRaw.mock.calls[1]?.[0])).toContain("pg_advisory_xact_lock");
     expect(prismaMock.practiceConsultant.update).toHaveBeenCalledWith({
       where: { id: "consultant-name-only" },
       data: { email: "priya@example.test" },
@@ -3447,7 +3449,7 @@ describe("practice-finance I/O", () => {
     });
 
     expect(prismaMock.$transaction).toHaveBeenCalled();
-    expect(prismaSqlText(prismaMock.$queryRaw.mock.calls[0]?.[0])).toContain("pg_advisory_xact_lock");
+    expect(prismaSqlText(prismaMock.$executeRaw.mock.calls[0]?.[0])).toContain("pg_advisory_xact_lock");
     expect(prismaMock.practiceConsultant.create).not.toHaveBeenCalled();
     expect(prismaMock.practiceTimeEntry.create).toHaveBeenCalledWith({
       data: expect.objectContaining({
@@ -3908,8 +3910,8 @@ describe("practice-finance I/O", () => {
       currency: "usd",
     });
 
-    expect(prismaSqlText(prismaMock.$queryRaw.mock.calls[0]?.[0])).toContain("pg_advisory_xact_lock");
-    expect(prismaSqlValues(prismaMock.$queryRaw.mock.calls[0]?.[0])).toContain("native-practice-client:workspace-1:crm:account-1");
+    expect(prismaSqlText(prismaMock.$executeRaw.mock.calls[0]?.[0])).toContain("pg_advisory_xact_lock");
+    expect(prismaSqlValues(prismaMock.$executeRaw.mock.calls[0]?.[0])).toContain("native-practice-client:workspace-1:crm:account-1");
     expect(prismaMock.practiceClient.findUnique).toHaveBeenCalledWith({
       where: { workspaceId_code: { workspaceId: "workspace-1", code: "EXAMPLE" } },
       select: { id: true, crmAccountId: true, name: true },
@@ -3951,8 +3953,8 @@ describe("practice-finance I/O", () => {
       currency: "usd",
     });
 
-    expect(prismaSqlText(prismaMock.$queryRaw.mock.calls[0]?.[0])).toContain("pg_advisory_xact_lock");
-    expect(prismaSqlValues(prismaMock.$queryRaw.mock.calls[0]?.[0])).toEqual(["native-practice-client:workspace-1:crm:account-1"]);
+    expect(prismaSqlText(prismaMock.$executeRaw.mock.calls[0]?.[0])).toContain("pg_advisory_xact_lock");
+    expect(prismaSqlValues(prismaMock.$executeRaw.mock.calls[0]?.[0])).toEqual(["native-practice-client:workspace-1:crm:account-1"]);
     expect(prismaMock.practiceClient.findMany).toHaveBeenNthCalledWith(1, {
       where: {
         workspaceId: "workspace-1",
@@ -4009,8 +4011,8 @@ describe("practice-finance I/O", () => {
       currency: "usd",
     });
 
-    expect(prismaSqlText(prismaMock.$queryRaw.mock.calls[0]?.[0])).toContain("pg_advisory_xact_lock");
-    expect(prismaSqlValues(prismaMock.$queryRaw.mock.calls[0]?.[0])).toContain("native-practice-client:workspace-1:code:FOO-BAR");
+    expect(prismaSqlText(prismaMock.$executeRaw.mock.calls[0]?.[0])).toContain("pg_advisory_xact_lock");
+    expect(prismaSqlValues(prismaMock.$executeRaw.mock.calls[0]?.[0])).toContain("native-practice-client:workspace-1:code:FOO-BAR");
     expect(prismaMock.practiceClient.create).toHaveBeenCalledTimes(1);
     expect(prismaMock.practiceClient.create).toHaveBeenCalledWith({
       data: expect.objectContaining({
@@ -4065,8 +4067,8 @@ describe("practice-finance I/O", () => {
       currency: "usd",
     });
 
-    expect(prismaSqlText(prismaMock.$queryRaw.mock.calls[0]?.[0])).toContain("pg_advisory_xact_lock");
-    expect(prismaSqlValues(prismaMock.$queryRaw.mock.calls[0]?.[0])).toContain("native-practice-client:workspace-1:code:FOO-BAR");
+    expect(prismaSqlText(prismaMock.$executeRaw.mock.calls[0]?.[0])).toContain("pg_advisory_xact_lock");
+    expect(prismaSqlValues(prismaMock.$executeRaw.mock.calls[0]?.[0])).toContain("native-practice-client:workspace-1:code:FOO-BAR");
     expect(prismaMock.practiceClient.findUnique).toHaveBeenNthCalledWith(2, {
       where: { workspaceId_code: { workspaceId: "workspace-1", code: "FOO-BAR-project-1234" } },
       select: { id: true, crmAccountId: true, name: true },
@@ -4105,7 +4107,7 @@ describe("practice-finance I/O", () => {
       currency: "usd",
     });
 
-    expect(prismaSqlValues(prismaMock.$queryRaw.mock.calls[0]?.[0])).toContain("native-practice-client:workspace-1:crm:account-2");
+    expect(prismaSqlValues(prismaMock.$executeRaw.mock.calls[0]?.[0])).toContain("native-practice-client:workspace-1:crm:account-2");
     expect(prismaMock.practiceClient.findUnique).toHaveBeenCalledWith({
       where: { workspaceId_code: { workspaceId: "workspace-1", code: "CLIENT-PROJECTABC12" } },
       select: { id: true, crmAccountId: true, name: true },
@@ -4147,8 +4149,8 @@ describe("practice-finance I/O", () => {
       currency: "usd",
     });
 
-    expect(prismaSqlText(prismaMock.$queryRaw.mock.calls[0]?.[0])).toContain("pg_advisory_xact_lock");
-    expect(prismaSqlValues(prismaMock.$queryRaw.mock.calls[0]?.[0])).toContain("native-practice-client:workspace-1:name:株式会社例");
+    expect(prismaSqlText(prismaMock.$executeRaw.mock.calls[0]?.[0])).toContain("pg_advisory_xact_lock");
+    expect(prismaSqlValues(prismaMock.$executeRaw.mock.calls[0]?.[0])).toContain("native-practice-client:workspace-1:name:株式会社例");
     expect(prismaMock.practiceClient.findMany).toHaveBeenCalledWith({
       where: {
         workspaceId: "workspace-1",
