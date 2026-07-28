@@ -20,6 +20,29 @@ function slugify(text) {
     .slice(0, 120);
 }
 
+async function retireRenamedArticleSlug(workspaceId, fromSlug, toSlug) {
+  const oldArticle = await prisma.brainArticle.findUnique({
+    where: { workspaceId_slug: { workspaceId, slug: fromSlug } },
+    select: { id: true },
+  });
+  if (!oldArticle) return;
+
+  const newArticle = await prisma.brainArticle.findUnique({
+    where: { workspaceId_slug: { workspaceId, slug: toSlug } },
+    select: { id: true },
+  });
+
+  if (!newArticle) {
+    await prisma.brainArticle.update({
+      where: { id: oldArticle.id },
+      data: { slug: toSlug },
+    });
+    return;
+  }
+
+  await prisma.brainArticle.delete({ where: { id: oldArticle.id } });
+}
+
 // ─── Article Definitions ───
 const ARTICLES = [
   // ARCHITECTURE
@@ -189,6 +212,7 @@ async function main() {
   console.log(`Ensured ${circleNames.length} circles exist.`);
 
   // 4. Create Brain Articles
+  await retireRenamedArticleSlug(wsId, "practice-ledger", "finance");
   let articleCount = 0;
   for (const article of ARTICLES) {
     const slug = slugify(article.title);

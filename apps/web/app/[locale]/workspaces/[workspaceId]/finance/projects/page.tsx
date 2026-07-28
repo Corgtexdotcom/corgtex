@@ -2,6 +2,7 @@ import {
   canManagePracticeFinanceProjects,
   getNativePracticeFinanceDashboard,
   listNativePracticeProjectExportRows,
+  type NativePracticeFinanceSummary,
   requireWorkspaceMembership,
 } from "@corgtex/domain";
 import { prisma } from "@corgtex/shared";
@@ -28,6 +29,11 @@ function runwayLabel(weeks: number | null) {
   if (weeks == null) return "-";
   if (!Number.isFinite(weeks)) return "No current burn";
   return `${weeks.toFixed(1)} weeks`;
+}
+
+function summaryMoney(summary: NativePracticeFinanceSummary, cents: number): string {
+  if (summary.currency == null && summary.activeProjects > 0) return "Mixed";
+  return wholeMoney(cents, summary.currency ?? "USD");
 }
 
 export default async function FinanceProjectsPage({
@@ -101,8 +107,8 @@ export default async function FinanceProjectsPage({
 
       <div style={{ display: "flex", flexWrap: "wrap", gap: 12 }}>
         <PracticeMetric label="Active projects" value={summary.activeProjects.toLocaleString("en-US")} />
-        <PracticeMetric label="Budget" value={summary.currency == null ? "Mixed" : wholeMoney(summary.budgetCents, summary.currency)} />
-        <PracticeMetric label="Remaining" value={summary.currency == null ? "Mixed" : wholeMoney(summary.remainingCents, summary.currency)} />
+        <PracticeMetric label="Budget" value={summaryMoney(summary, summary.budgetCents)} />
+        <PracticeMetric label="Remaining" value={summaryMoney(summary, summary.remainingCents)} />
         <PracticeMetric label="Margin" value={marginLabel(summary.marginBps)} />
         <PracticeMetric label="Budget risks" value={summary.riskBudgetCount.toLocaleString("en-US")} />
       </div>
