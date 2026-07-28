@@ -396,6 +396,43 @@ enum AppSurface {
   FINANCE
 }
 
+enum FinanceRecordStatus {
+  ACTIVE
+  ARCHIVED
+}
+
+enum FinanceProjectStatus {
+  ACTIVE
+  PAUSED
+  COMPLETED
+  ARCHIVED
+}
+
+enum FinanceEntryStatus {
+  DRAFT
+  SUBMITTED
+  APPROVED
+  ARCHIVED
+}
+
+enum FinanceContributionType {
+  TIME
+  EXPENSE
+  CAPITAL
+}
+
+enum FinanceContributionPaymentChoice {
+  CASH
+  SLICING_PIE
+  CAPITAL
+}
+
+enum FinanceContributionCashStatus {
+  NOT_APPLICABLE
+  REQUESTED
+  PAID
+}
+
 enum BrainDiscussionTargetType {
   ARTICLE
   SECTION
@@ -674,6 +711,12 @@ model Workspace {
   catalogFavorites               CatalogFavorite[]
   catalogRequests                CatalogRequest[]
   catalogSettings                CatalogSettings?
+  financeClients                 FinanceClient[]
+  financeConsultants             FinanceConsultant[]
+  financeProjects                FinanceProject[]
+  financeTimeEntries             FinanceTimeEntry[]
+  financeExpenses                FinanceExpense[]
+  financeContributionEntries     FinanceContributionEntry[]
   appInstallations               AppInstallation[]
   appSurfaceAssignments          AppSurfaceAssignment[]
   appSessions                    AppSession[]
@@ -702,6 +745,163 @@ model WorkspaceFeatureFlag {
   workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
 
   @@unique([workspaceId, flag])
+}
+
+model FinanceClient {
+  id              String              @id @default(uuid())
+  workspaceId     String
+  name            String
+  status          FinanceRecordStatus @default(ACTIVE)
+  notesMd         String?             @db.Text
+  createdByUserId String?
+  archivedAt      DateTime?
+  createdAt       DateTime            @default(now())
+  updatedAt       DateTime            @updatedAt
+
+  workspace Workspace        @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  projects  FinanceProject[]
+
+  @@unique([workspaceId, name])
+  @@index([workspaceId, status])
+  @@index([workspaceId, updatedAt])
+}
+
+model FinanceConsultant {
+  id               String              @id @default(uuid())
+  workspaceId      String
+  name             String
+  memberId         String?
+  status           FinanceRecordStatus @default(ACTIVE)
+  defaultRateCents Int?
+  createdByUserId  String?
+  archivedAt       DateTime?
+  createdAt        DateTime            @default(now())
+  updatedAt        DateTime            @updatedAt
+
+  workspace     Workspace                  @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  member        Member?                    @relation(fields: [memberId], references: [id], onDelete: SetNull)
+  timeEntries   FinanceTimeEntry[]
+  expenses      FinanceExpense[]
+  contributions FinanceContributionEntry[]
+
+  @@unique([workspaceId, name])
+  @@index([workspaceId, status])
+  @@index([workspaceId, memberId])
+  @@index([workspaceId, updatedAt])
+}
+
+model FinanceProject {
+  id              String               @id @default(uuid())
+  workspaceId     String
+  clientId        String?
+  name            String
+  status          FinanceProjectStatus @default(ACTIVE)
+  budgetCents     Int?
+  currency        String               @default("USD") @db.VarChar(3)
+  createdByUserId String?
+  archivedAt      DateTime?
+  createdAt       DateTime             @default(now())
+  updatedAt       DateTime             @updatedAt
+
+  workspace     Workspace                  @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  client        FinanceClient?             @relation(fields: [clientId], references: [id], onDelete: SetNull)
+  timeEntries   FinanceTimeEntry[]
+  expenses      FinanceExpense[]
+  contributions FinanceContributionEntry[]
+
+  @@unique([workspaceId, name])
+  @@index([workspaceId, status])
+  @@index([workspaceId, clientId])
+  @@index([workspaceId, updatedAt])
+}
+
+model FinanceTimeEntry {
+  id               String             @id @default(uuid())
+  workspaceId      String
+  projectId        String?
+  consultantId     String?
+  occurredOn       DateTime
+  minutes          Int
+  rateCents        Int?
+  status           FinanceEntryStatus @default(SUBMITTED)
+  notesMd          String?            @db.Text
+  createdByUserId  String?
+  approvedByUserId String?
+  approvedAt       DateTime?
+  archivedAt       DateTime?
+  createdAt        DateTime           @default(now())
+  updatedAt        DateTime           @updatedAt
+
+  workspace  Workspace          @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  project    FinanceProject?    @relation(fields: [projectId], references: [id], onDelete: SetNull)
+  consultant FinanceConsultant? @relation(fields: [consultantId], references: [id], onDelete: SetNull)
+
+  @@index([workspaceId, occurredOn])
+  @@index([workspaceId, status])
+  @@index([workspaceId, projectId])
+  @@index([workspaceId, consultantId])
+  @@index([workspaceId, updatedAt])
+}
+
+model FinanceExpense {
+  id               String             @id @default(uuid())
+  workspaceId      String
+  projectId        String?
+  consultantId     String?
+  occurredOn       DateTime
+  amountCents      Int
+  currency         String             @default("USD") @db.VarChar(3)
+  status           FinanceEntryStatus @default(SUBMITTED)
+  notesMd          String?            @db.Text
+  createdByUserId  String?
+  approvedByUserId String?
+  approvedAt       DateTime?
+  archivedAt       DateTime?
+  createdAt        DateTime           @default(now())
+  updatedAt        DateTime           @updatedAt
+
+  workspace  Workspace          @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  project    FinanceProject?    @relation(fields: [projectId], references: [id], onDelete: SetNull)
+  consultant FinanceConsultant? @relation(fields: [consultantId], references: [id], onDelete: SetNull)
+
+  @@index([workspaceId, occurredOn])
+  @@index([workspaceId, status])
+  @@index([workspaceId, projectId])
+  @@index([workspaceId, consultantId])
+  @@index([workspaceId, updatedAt])
+}
+
+model FinanceContributionEntry {
+  id                String                           @id @default(uuid())
+  workspaceId       String
+  projectId         String?
+  consultantId      String?
+  contributorUserId String?
+  submittedByUserId String?
+  type              FinanceContributionType
+  paymentChoice     FinanceContributionPaymentChoice
+  cashStatus        FinanceContributionCashStatus    @default(NOT_APPLICABLE)
+  occurredAt        DateTime
+  minutes           Int?
+  amountCents       Int?
+  currency          String                           @default("USD") @db.VarChar(3)
+  descriptionMd     String?                          @db.Text
+  paidByUserId      String?
+  paidAt            DateTime?
+  version           Int                              @default(1)
+  createdAt         DateTime                         @default(now())
+  updatedAt         DateTime                         @updatedAt
+
+  workspace  Workspace          @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  project    FinanceProject?    @relation(fields: [projectId], references: [id], onDelete: SetNull)
+  consultant FinanceConsultant? @relation(fields: [consultantId], references: [id], onDelete: SetNull)
+
+  @@index([workspaceId, occurredAt])
+  @@index([workspaceId, contributorUserId])
+  @@index([workspaceId, submittedByUserId])
+  @@index([workspaceId, paymentChoice])
+  @@index([workspaceId, cashStatus])
+  @@index([workspaceId, updatedAt])
 }
 
 enum ModuleGrantPrincipalType {
@@ -1156,6 +1356,7 @@ model Member {
   newspaperDeliveries         NewspaperDelivery[]
   roleHolderHistory           RoleHolderHistory[]
   roleOnboardingSessions      RoleOnboardingSession[]
+  financeConsultantProfiles   FinanceConsultant[]
 
   @@unique([workspaceId, userId])
   @@index([workspaceId, role])

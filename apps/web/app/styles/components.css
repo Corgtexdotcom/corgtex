@@ -5414,6 +5414,12 @@ a.meeting-agenda-item:hover {
   max-width: 500px;
 }
 
+@media (max-width: 640px) {
+  .finance-empty-state {
+    padding: 8px 16px calc(var(--mobile-bottom-offset) + 24px);
+  }
+}
+
 .nr-empty-action {
   margin-top: 20px;
   display: flex;

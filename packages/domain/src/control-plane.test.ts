@@ -166,6 +166,30 @@ const { prismaMock, encryptSecretMock, decryptSecretMock, memberMocks, communica
       count: vi.fn(),
       findMany: vi.fn(),
     },
+    financeClient: {
+      count: vi.fn(),
+      findMany: vi.fn(),
+    },
+    financeConsultant: {
+      count: vi.fn(),
+      findMany: vi.fn(),
+    },
+    financeProject: {
+      count: vi.fn(),
+      findMany: vi.fn(),
+    },
+    financeTimeEntry: {
+      count: vi.fn(),
+      findMany: vi.fn(),
+    },
+    financeExpense: {
+      count: vi.fn(),
+      findMany: vi.fn(),
+    },
+    financeContributionEntry: {
+      count: vi.fn(),
+      findMany: vi.fn(),
+    },
     auditLog: {
       count: vi.fn(),
       findMany: vi.fn(),
@@ -528,6 +552,12 @@ describe("control plane domain", () => {
       "externalDataSource",
       "knowledgeChunk",
       "document",
+      "financeClient",
+      "financeConsultant",
+      "financeProject",
+      "financeTimeEntry",
+      "financeExpense",
+      "financeContributionEntry",
       "meeting",
       "meetingRecording",
       "action",
@@ -900,6 +930,14 @@ describe("control plane domain", () => {
     const updateArg = prismaMock.clientMigrationRun.update.mock.calls[0]?.[0];
     expect(updateArg.data.verificationSummary.dryRun.inventory).not.toEqual(expect.arrayContaining([
       expect.objectContaining({ entityType: expect.stringMatching(/^Practice/) }),
+    ]));
+    expect(updateArg.data.verificationSummary.dryRun.inventory).toEqual(expect.arrayContaining([
+      expect.objectContaining({ entityType: "FinanceClient" }),
+      expect.objectContaining({ entityType: "FinanceConsultant" }),
+      expect.objectContaining({ entityType: "FinanceProject" }),
+      expect.objectContaining({ entityType: "FinanceTimeEntry" }),
+      expect.objectContaining({ entityType: "FinanceExpense" }),
+      expect.objectContaining({ entityType: "FinanceContributionEntry" }),
     ]));
     expect(updateArg.data.verificationSummary.dryRun.idMapSeedCount).toBe(0);
   });
@@ -7384,6 +7422,11 @@ describe("control plane domain", () => {
       reason: "Ensure recurring recorder coverage after policy update.",
       arguments: {},
     });
+    await runCustomerSupportOperation(operatorActor, {
+      deploymentId: "inst-1",
+      action: "finance.readiness",
+      arguments: {},
+    });
     const toolNames = vi.mocked(fetch).mock.calls
       .map(([, init]) => JSON.parse(String(init?.body)).params?.name)
       .filter((name) => name !== "record_support_audit");
@@ -7394,6 +7437,7 @@ describe("control plane domain", () => {
       "delete_meeting",
       "set_meeting_recorder_auto_recording",
       "ensure_meeting_recorder_coverage",
+      "get_finance_readiness",
     ]);
   });
 

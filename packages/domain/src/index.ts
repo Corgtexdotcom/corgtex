@@ -81,6 +81,7 @@ export * from "./enterprise-apps";
 export * from "./enterprise-services";
 export * from "./enterprise-account-discovery";
 export * from "./execution-plumbing";
+export * from "./finance";
 export * from "./tool-links";
 export * from "./build-artifacts";
 export * from "./newspaper-delivery";

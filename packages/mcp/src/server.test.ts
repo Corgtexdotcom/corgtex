@@ -63,6 +63,7 @@ const createCommunicationSuggestionMock = vi.fn();
 const markCommunicationSuggestionSentMock = vi.fn();
 const failCommunicationSuggestionMock = vi.fn();
 const createConversationMessageMock = vi.fn();
+const getFinanceReadinessMock = vi.fn();
 const listWorkItemVersionsMock = vi.fn();
 const getWorkItemVersionMock = vi.fn();
 const upsertRecorderCalendarSourceMock = vi.fn();
@@ -235,6 +236,7 @@ vi.mock("@corgtex/domain", async () => {
   markCommunicationSuggestionSent: markCommunicationSuggestionSentMock,
   failCommunicationSuggestion: failCommunicationSuggestionMock,
   createConversationMessage: createConversationMessageMock,
+  getFinanceReadiness: getFinanceReadinessMock,
   listWorkItemVersions: listWorkItemVersionsMock,
   getWorkItemVersion: getWorkItemVersionMock,
   getWorkspacePermanentPathForEntity: getWorkspacePermanentPathForEntityMock,
@@ -458,6 +460,32 @@ describe("createCorgtexMcpServer", () => {
     markCommunicationSuggestionSentMock.mockReset().mockResolvedValue({ id: "suggestion-1", status: "SENT", accountId: "account-1" });
     failCommunicationSuggestionMock.mockReset().mockResolvedValue({ id: "suggestion-1", status: "FAILED", accountId: "account-1" });
     createConversationMessageMock.mockReset().mockResolvedValue({ id: "message-1" });
+    getFinanceReadinessMock.mockReset().mockResolvedValue({
+      workspaceId: "ws-1",
+      flags: [{ key: "overview", label: "Overview", enabled: true, source: "default", updatedAt: null }],
+      access: { canRead: true, canWrite: true, reason: "finance_role", financeAllMemberWrite: true },
+      counts: {
+        projects: 1,
+        clients: 1,
+        consultants: 1,
+        timeEntries: 0,
+        expenses: 0,
+        contributionEntries: 1,
+        requestedPayables: 1,
+      },
+      latestFinanceUpdateAt: "2026-07-28T00:00:00.000Z",
+      paymentSafety: {
+        cashOnlyConfirmation: true,
+        peerReviewRequired: true,
+        staleConflictProtection: true,
+      },
+      retiredPracticeLedger: {
+        retired: true,
+        activeCatalogItems: 0,
+        activeDefinitions: 0,
+        activeInstallations: 0,
+      },
+    });
     listWorkItemVersionsMock.mockReset().mockResolvedValue({
       entityType: "Tension",
       entityId: "tension-1",
@@ -1681,6 +1709,42 @@ describe("createCorgtexMcpServer", () => {
     expect(JSON.parse(response.content[0].text)).toMatchObject({
       id: "suggestion-1",
       status: "FAILED",
+    });
+  });
+
+  it("returns read-only Finance readiness through MCP", async () => {
+    const { createCorgtexMcpServer } = await import("./server");
+    const { requireScope } = await import("./auth");
+
+    const actor = {
+      kind: "user",
+      user: { id: "user-1", email: "user@example.com", displayName: "User" },
+    } as any;
+    const server = createCorgtexMcpServer({
+      actor,
+      workspaceId: "ws-1",
+      authKind: "oauth",
+      scopes: ["finance:read"],
+    });
+
+    const response = await (server as any)._registeredTools.get_finance_readiness.handler({});
+    const payload = JSON.parse(response.content[0].text);
+
+    expect(vi.mocked(requireScope)).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: "ws-1" }), "finance:read");
+    expect(getFinanceReadinessMock).toHaveBeenCalledWith(actor, "ws-1");
+    expect(payload).toMatchObject({
+      workspaceId: "ws-1",
+      access: { financeAllMemberWrite: true },
+      paymentSafety: {
+        cashOnlyConfirmation: true,
+        peerReviewRequired: true,
+        staleConflictProtection: true,
+      },
+      retiredPracticeLedger: { retired: true },
+      webUrl: "https://app.test/workspaces/ws-1/finance",
+    });
+    expect((server as any)._registeredTools.get_finance_readiness.annotations).toMatchObject({
+      readOnlyHint: true,
     });
   });
 
