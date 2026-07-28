@@ -106,6 +106,7 @@ export const MCP_TOOL_CAPABILITIES = {
   update_member: { scopes: ["members:write"] },
   deactivate_member: { scopes: ["members:write"] },
   resend_member_access_link: { scopes: ["members:write"] },
+  get_finance_readiness: { scopes: ["finance:read"] },
   list_feature_flags: { scopes: ["workspace:read"] },
   set_feature_flag: { scopes: ["workspace:write"] },
   list_meetings: { scopes: ["meetings:read"] },

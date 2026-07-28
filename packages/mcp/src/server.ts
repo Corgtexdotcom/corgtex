@@ -142,6 +142,7 @@ import {
   markCommunicationSuggestionSent,
   failCommunicationSuggestion,
   createConversationMessage,
+  getFinanceReadiness,
   listWorkItemVersions,
   getWorkItemVersion,
   AppError,
@@ -3537,6 +3538,20 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
         email: result.user.email,
         emailStatus,
         webUrl: webUrl(workspaceId, `/settings?tab=members`),
+      });
+    },
+  );
+
+  tool(
+    "get_finance_readiness",
+    "Read Finance V2 readiness for this workspace, including enabled capabilities, write policy, record counts, and Practice Ledger retirement status. Does not mutate data.",
+    {},
+    async () => {
+      requireToolCapability("get_finance_readiness");
+      const readiness = await getFinanceReadiness(actor, workspaceId);
+      return structuredJsonResult({
+        ...readiness,
+        webUrl: webUrl(workspaceId, "/finance"),
       });
     },
   );
