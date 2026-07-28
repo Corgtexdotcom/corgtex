@@ -89,8 +89,8 @@ export const SCOPE_REGISTRY = {
   "governance:read":     { label: "Read governance",            group: "governance", default: true,  delegatedDefault: true,  description: "Read the constitution, active policies, and governance scoring." },
 
   // ---- finance ----
-  "finance:read":        { label: "Read finance",               group: "finance",    default: true,  delegatedDefault: true,  description: "Read Finance project, expense, and invoice records." },
-  "finance:write":       { label: "Update finance",             group: "finance",    default: false, delegatedDefault: true,  description: "Create and update Finance records through same-role delegation." },
+  "finance:read":        { label: "Read finance",               group: "finance",    default: true,  delegatedDefault: true,  description: "Reserved read access for future Finance workflows." },
+  "finance:write":       { label: "Update finance",             group: "finance",    default: false, delegatedDefault: true,  description: "Reserved write access for future Finance workflows through same-role delegation." },
 
   // ---- support / operations ----
   "integrations:read":   { label: "Read integrations",          group: "support",    default: false, delegatedDefault: true,  description: "Inspect installed communication and OAuth integrations. Admin-only where domain rules require it." },

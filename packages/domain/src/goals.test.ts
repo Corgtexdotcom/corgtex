@@ -2,13 +2,10 @@ import { describe, expect, it, vi, beforeEach } from "vitest";
 import {
   addKeyResult,
   createGoal,
-  createGoalFinanceProjectLink,
   createGoalLink,
   deleteGoal,
-  deleteGoalFinanceProjectLink,
   getGoal,
   getMyGoalSlice,
-  listGoalFinanceProjectLinks,
   listCompanyDirectionFromBrain,
   postGoalUpdate,
   recomputeGoalProgress,
@@ -50,10 +47,6 @@ vi.mock("@corgtex/shared", () => ({
       findUnique: vi.fn(),
       findMany: vi.fn(),
       upsert: vi.fn(),
-    },
-    practiceProject: {
-      findFirst: vi.fn(),
-      findMany: vi.fn(),
     },
     brainSource: {
       findMany: vi.fn(),
@@ -137,9 +130,6 @@ describe("Goals Domain", () => {
     vi.mocked(prisma.goalLink.findMany).mockReset();
     vi.mocked(prisma.goalLink.findMany).mockResolvedValue([]);
     vi.mocked(prisma.goalLink.upsert).mockReset();
-    vi.mocked(prisma.practiceProject.findFirst).mockReset();
-    vi.mocked(prisma.practiceProject.findMany).mockReset();
-    vi.mocked(prisma.practiceProject.findMany).mockResolvedValue([]);
     vi.mocked(prisma.brainSource.findMany).mockReset();
     vi.mocked(prisma.brainSource.findMany).mockResolvedValue([]);
     vi.mocked(prisma.brainArticle.findMany).mockReset();
@@ -596,275 +586,6 @@ describe("Goals Domain", () => {
       })).rejects.toMatchObject({
         code: "FORBIDDEN",
       });
-    });
-  });
-
-  describe("createGoalFinanceProjectLink", () => {
-    it("creates a goal link to an existing same-workspace practice project", async () => {
-      vi.mocked(prisma.practiceProject.findFirst).mockResolvedValueOnce({
-        id: "project-1",
-      } as any);
-      vi.mocked(prisma.goal.findUnique).mockResolvedValueOnce({
-        id: "goal-1",
-        workspaceId: "ws-1",
-        archivedAt: null,
-        authorUserId: "user-1",
-        isPrivate: false,
-        status: "ACTIVE",
-      } as any);
-      vi.mocked(prisma.goalLink.upsert).mockResolvedValueOnce({
-        id: "link-1",
-        goalId: "goal-1",
-        entityType: "PracticeProject",
-        entityId: "project-1",
-        confidence: 1,
-        linkedBy: "human",
-        source: "practice-finance",
-      } as any);
-
-      await expect(createGoalFinanceProjectLink(actor, {
-        workspaceId: "ws-1",
-        goalId: "goal-1",
-        projectId: "project-1",
-      })).resolves.toMatchObject({
-        id: "link-1",
-        entityType: "PracticeProject",
-        entityId: "project-1",
-      });
-
-      expect(prisma.practiceProject.findFirst).toHaveBeenCalledWith({
-        where: {
-          id: "project-1",
-          workspaceId: "ws-1",
-        },
-        select: { id: true },
-      });
-      expect(prisma.goalLink.upsert).toHaveBeenCalledWith(expect.objectContaining({
-        create: expect.objectContaining({
-          entityType: "PracticeProject",
-          entityId: "project-1",
-          linkedBy: "human",
-          source: "practice-finance",
-        }),
-      }));
-    });
-
-    it("rejects practice projects outside the workspace", async () => {
-      vi.mocked(prisma.practiceProject.findFirst).mockResolvedValueOnce(null);
-
-      await expect(createGoalFinanceProjectLink(actor, {
-        workspaceId: "ws-1",
-        goalId: "goal-1",
-        projectId: "project-other",
-      })).rejects.toMatchObject({
-        code: "NOT_FOUND",
-      });
-
-      expect(prisma.goalLink.upsert).not.toHaveBeenCalled();
-    });
-  });
-
-  describe("listGoalFinanceProjectLinks", () => {
-    it("resolves same-workspace practice project evidence and derives budget fields", async () => {
-      const createdAt = new Date("2026-07-11T09:00:00.000Z");
-      vi.mocked(prisma.goalLink.findMany).mockResolvedValueOnce([
-        {
-          id: "link-1",
-          goalId: "goal-1",
-          entityId: "project-1",
-          confidence: 1,
-          source: "practice-finance",
-          createdAt,
-        },
-        {
-          id: "link-unresolved",
-          goalId: "goal-1",
-          entityId: "project-other",
-          confidence: 1,
-          source: "practice-finance",
-          createdAt,
-        },
-      ] as any);
-      vi.mocked(prisma.practiceProject.findMany).mockResolvedValueOnce([
-        {
-          id: "project-1",
-          code: "DEMO-Q3",
-          name: "Demo Q3 enablement",
-          clientName: "Demo Client",
-          clientId: "client-1",
-          status: "ACTIVE",
-          currency: "USD",
-          poValueCents: 1000000,
-          serviceBudgetCents: 600000,
-          expenseBudgetCents: 100000,
-          usedCents: 250000,
-          weeklyBurnCents: 50000,
-          targetMarginBps: 3000,
-          currentMarginBps: 2500,
-          sourceSatelliteId: null,
-        },
-      ] as any);
-
-      const result = await listGoalFinanceProjectLinks(actor, {
-        workspaceId: "ws-1",
-        goalIds: ["goal-1", "goal-1", " "],
-      });
-
-      expect(prisma.goalLink.findMany).toHaveBeenCalledWith(expect.objectContaining({
-        where: expect.objectContaining({
-          goalId: { in: ["goal-1"] },
-          entityType: "PracticeProject",
-          goal: expect.objectContaining({
-            workspaceId: "ws-1",
-            archivedAt: null,
-          }),
-        }),
-      }));
-      expect(prisma.practiceProject.findMany).toHaveBeenCalledWith(expect.objectContaining({
-        where: {
-          workspaceId: "ws-1",
-          id: { in: ["project-1", "project-other"] },
-        },
-      }));
-      expect(result).toEqual([
-        expect.objectContaining({
-          id: "link-1",
-          goalId: "goal-1",
-          entityId: "project-1",
-          project: expect.objectContaining({
-            id: "project-1",
-            remainingCents: 750000,
-            usedRatio: 0.25,
-            budgetRunwayWeeks: 15,
-          }),
-        }),
-      ]);
-    });
-
-    it("uses native Finance health for linked finance projects", async () => {
-      const createdAt = new Date("2026-07-11T09:00:00.000Z");
-      vi.mocked(prisma.goalLink.findMany).mockResolvedValueOnce([
-        {
-          id: "link-1",
-          goalId: "goal-1",
-          entityId: "project-1",
-          confidence: 1,
-          source: "practice-finance",
-          createdAt,
-        },
-      ] as any);
-      vi.mocked(prisma.practiceProject.findMany).mockResolvedValueOnce([
-        {
-          id: "project-1",
-          code: "DEMO-Q3",
-          name: "Demo Q3 enablement",
-          clientName: "Demo Client",
-          clientId: "client-1",
-          status: "ACTIVE",
-          currency: "USD",
-          poValueCents: 1000000,
-          serviceBudgetCents: 600000,
-          expenseBudgetCents: 100000,
-          usedCents: 250000,
-          weeklyBurnCents: 50000,
-          targetMarginBps: 3000,
-          currentMarginBps: 6000,
-          sourceSatelliteId: null,
-        },
-      ] as any);
-      vi.mocked((prisma as any).$queryRaw)
-        .mockResolvedValueOnce([{
-          projectId: "project-1",
-          timeRevenueCents: 150000n,
-          timeCostCents: 80000n,
-          recentTimeRevenueCents: 150000n,
-          recentTimeCostCents: 80000n,
-          invalidHoursRows: 0n,
-          invalidCurrencyRows: 0n,
-          timeEntryCount: 1n,
-        }])
-        .mockResolvedValueOnce([{
-          projectId: "project-1",
-          billableExpenseCents: 40000n,
-          directExpenseCents: 40000n,
-          recentBillableExpenseCents: 40000n,
-          recentDirectExpenseCents: 40000n,
-          invalidCurrencyRows: 0n,
-          expenseCount: 1n,
-        }]);
-
-      const result = await listGoalFinanceProjectLinks(actor, {
-        workspaceId: "ws-1",
-        goalIds: ["goal-1"],
-      });
-
-      expect(result[0]?.project).toMatchObject({
-        id: "project-1",
-        usedCents: 440000,
-        remainingCents: 560000,
-        weeklyBurnCents: 97500,
-        usedRatio: 0.44,
-        currentMarginBps: 5000,
-      });
-      expect(result[0]?.project.budgetRunwayWeeks).toBeCloseTo(5.744, 3);
-    });
-
-    it("short-circuits when no goal ids are provided", async () => {
-      await expect(listGoalFinanceProjectLinks(actor, {
-        workspaceId: "ws-1",
-        goalIds: [" "],
-      })).resolves.toEqual([]);
-
-      expect(prisma.goalLink.findMany).not.toHaveBeenCalled();
-      expect(prisma.practiceProject.findMany).not.toHaveBeenCalled();
-      expect((prisma as any).$queryRaw).not.toHaveBeenCalled();
-    });
-  });
-
-  describe("deleteGoalFinanceProjectLink", () => {
-    it("deletes only practice-project goal links in the workspace", async () => {
-      vi.mocked(prisma.goalLink.findUnique).mockResolvedValueOnce({
-        id: "link-1",
-        entityType: "PracticeProject",
-        goal: {
-          workspaceId: "ws-1",
-          archivedAt: null,
-          authorUserId: "user-1",
-          isPrivate: false,
-          status: "ACTIVE",
-        },
-      } as any);
-      vi.mocked(prisma.goalLink.delete).mockResolvedValueOnce({ id: "link-1" } as any);
-
-      await deleteGoalFinanceProjectLink(actor, {
-        workspaceId: "ws-1",
-        linkId: "link-1",
-      });
-
-      expect(prisma.goalLink.delete).toHaveBeenCalledWith({ where: { id: "link-1" } });
-    });
-
-    it("rejects non-finance goal links", async () => {
-      vi.mocked(prisma.goalLink.findUnique).mockResolvedValueOnce({
-        id: "link-1",
-        entityType: "BrainSource",
-        goal: {
-          workspaceId: "ws-1",
-          archivedAt: null,
-          authorUserId: "user-1",
-          isPrivate: false,
-          status: "ACTIVE",
-        },
-      } as any);
-
-      await expect(deleteGoalFinanceProjectLink(actor, {
-        workspaceId: "ws-1",
-        linkId: "link-1",
-      })).rejects.toMatchObject({
-        code: "NOT_FOUND",
-      });
-
-      expect(prisma.goalLink.delete).not.toHaveBeenCalled();
     });
   });
 

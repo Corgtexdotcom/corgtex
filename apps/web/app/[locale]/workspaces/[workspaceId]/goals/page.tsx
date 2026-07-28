@@ -5,17 +5,14 @@ import {
   getWorkspaceArchiveRecord,
   getGoalTree,
   getMyGoalSlice,
-  listGoalFinanceProjectLinks,
   listCircles,
   listGoals,
   listHumanMembers,
-  listPracticeProjects,
   listRecognitions,
   requireWorkspaceMembership,
-  type GoalFinanceProjectLink,
 } from "@corgtex/domain";
 import { requirePageActor } from "@/lib/auth";
-import { isWorkspaceFinanceCapabilityEnabled, requireWorkspaceFeature } from "@/lib/workspace-feature-flags";
+import { requireWorkspaceFeature } from "@/lib/workspace-feature-flags";
 import { GoalProgress } from "./GoalProgress";
 import { RecognitionCard } from "./RecognitionCard";
 import { ArchivedItemBanner } from "@/lib/components/ArchivedItemBanner";
@@ -26,13 +23,11 @@ import { ItemActions } from "@/lib/components/ui/ItemActions";
 import {
   addKeyResultFormAction,
   archiveGoalFormAction,
-  createGoalFinanceProjectLinkFormAction,
   createGoalFormAction,
-  deleteGoalFinanceProjectLinkFormAction,
   returnGoalToDraftFormAction,
   updateGoalFormAction,
 } from "./actions";
-import type { GoalCadence, GoalLevel, GoalStatus, PracticeProject } from "@prisma/client";
+import type { GoalCadence, GoalLevel, GoalStatus } from "@prisma/client";
 
 export const dynamic = "force-dynamic";
 
@@ -47,39 +42,6 @@ const CADENCES: { id: GoalCadence; label: string }[] = [
 
 const LEVELS: GoalLevel[] = ["COMPANY", "CIRCLE", "PERSONAL"];
 const STATUSES: GoalStatus[] = ["ACTIVE", "ON_TRACK", "AT_RISK", "BEHIND", "COMPLETED", "DRAFT", "ABANDONED"];
-
-function collectGoalIds(goals: any[], ids = new Set<string>()) {
-  for (const goal of goals) {
-    ids.add(goal.id);
-    if (Array.isArray(goal.childGoals)) {
-      collectGoalIds(goal.childGoals, ids);
-    }
-  }
-  return ids;
-}
-
-function groupGoalFinanceLinks(links: GoalFinanceProjectLink[]) {
-  const grouped = new Map<string, GoalFinanceProjectLink[]>();
-  for (const link of links) {
-    const current = grouped.get(link.goalId) ?? [];
-    current.push(link);
-    grouped.set(link.goalId, current);
-  }
-  return grouped;
-}
-
-function formatFinanceUsd(cents: number) {
-  const sign = cents < 0 ? "-" : "";
-  return `${sign}$${Math.abs(Math.round(cents / 100)).toLocaleString("en-US")}`;
-}
-
-function formatGoalFinancePercent(ratio: number) {
-  return `${(ratio * 100).toFixed(1)}%`;
-}
-
-function formatGoalFinanceMargin(bps: number | null) {
-  return bps == null ? "-" : `${(bps / 100).toFixed(1)}%`;
-}
 
 export default async function GoalsPage({
   params,
@@ -97,15 +59,11 @@ export default async function GoalsPage({
   const canManageAnyGoal = actor.kind === "agent" || membership?.role === "ADMIN";
   const currentUserId = actor.kind === "user" ? actor.user.id : null;
 
-  const [allGoals, circles, members, showFinanceEvidence] = await Promise.all([
+  const [allGoals, circles, members] = await Promise.all([
     listGoals(actor, { workspaceId }),
     listCircles(workspaceId),
     listHumanMembers(workspaceId),
-    isWorkspaceFinanceCapabilityEnabled(workspaceId, "projects"),
   ]);
-  const practiceProjects = showFinanceEvidence
-    ? await listPracticeProjects(actor, workspaceId, { take: 200 })
-    : [];
   const focusedGoal = goalId
     ? await getGoal(actor, { workspaceId, goalId, includeArchived: true, _membership: membership })
     : null;
@@ -144,9 +102,6 @@ export default async function GoalsPage({
           canManageAnyGoal={false}
           membershipId={null}
           currentUserId={null}
-          financeLinksByGoalId={new Map()}
-          practiceProjects={[]}
-          showFinanceEvidence={false}
         />
       </div>
     );
@@ -164,17 +119,6 @@ export default async function GoalsPage({
       recognitions = await listRecognitions(actor, { workspaceId, recipientMemberId: membership.id });
     }
   }
-
-  const visibleGoalIds = collectGoalIds(tree);
-  if (focusedGoal) visibleGoalIds.add(focusedGoal.id);
-  for (const goal of mySlice) visibleGoalIds.add(goal.id);
-  const financeLinksByGoalId = showFinanceEvidence
-    ? groupGoalFinanceLinks(await listGoalFinanceProjectLinks(actor, {
-      workspaceId,
-      goalIds: Array.from(visibleGoalIds),
-      _membership: membership,
-    }))
-    : new Map<string, GoalFinanceProjectLink[]>();
 
   return (
     <div className="max-w-5xl mx-auto p-6 space-y-8">
@@ -215,9 +159,6 @@ export default async function GoalsPage({
             canManageAnyGoal={canManageAnyGoal}
             membershipId={membership?.id ?? null}
             currentUserId={currentUserId}
-            financeLinksByGoalId={financeLinksByGoalId}
-            practiceProjects={practiceProjects}
-            showFinanceEvidence={showFinanceEvidence}
           />
         </section>
       )}
@@ -349,9 +290,6 @@ export default async function GoalsPage({
                   canManageAnyGoal={canManageAnyGoal}
                   membershipId={membership?.id ?? null}
                   currentUserId={currentUserId}
-                  financeLinksByGoalId={financeLinksByGoalId}
-                  practiceProjects={practiceProjects}
-                  showFinanceEvidence={showFinanceEvidence}
                 />
               ))
             )}
@@ -403,15 +341,6 @@ export default async function GoalsPage({
                       {goal.targetDate ? ` · ${t("target")} ${new Date(goal.targetDate).toLocaleDateString()}` : ""}
                     </div>
                     <GoalProgress percent={goal.progressPercent} />
-                    {showFinanceEvidence && (
-                      <GoalFinanceEvidence
-                        workspaceId={workspaceId}
-                        goalId={goal.id}
-                        financeLinks={financeLinksByGoalId.get(goal.id) ?? []}
-                        practiceProjects={[]}
-                        canManage={false}
-                      />
-                    )}
                   </div>
                 ))
               )}
@@ -449,9 +378,6 @@ function GoalNode({
   canManageAnyGoal,
   membershipId,
   currentUserId,
-  financeLinksByGoalId,
-  practiceProjects,
-  showFinanceEvidence,
 }: {
   workspaceId: string;
   goal: any;
@@ -462,9 +388,6 @@ function GoalNode({
   canManageAnyGoal: boolean;
   membershipId: string | null;
   currentUserId: string | null;
-  financeLinksByGoalId: Map<string, GoalFinanceProjectLink[]>;
-  practiceProjects: PracticeProject[];
-  showFinanceEvidence: boolean;
 }) {
   return (
     <GoalNodeInner
@@ -477,9 +400,6 @@ function GoalNode({
       canManageAnyGoal={canManageAnyGoal}
       membershipId={membershipId}
       currentUserId={currentUserId}
-      financeLinksByGoalId={financeLinksByGoalId}
-      practiceProjects={practiceProjects}
-      showFinanceEvidence={showFinanceEvidence}
     />
   );
 }
@@ -494,9 +414,6 @@ function GoalNodeInner({
   canManageAnyGoal,
   membershipId,
   currentUserId,
-  financeLinksByGoalId,
-  practiceProjects,
-  showFinanceEvidence,
 }: {
   workspaceId: string;
   goal: any;
@@ -507,9 +424,6 @@ function GoalNodeInner({
   canManageAnyGoal: boolean;
   membershipId: string | null;
   currentUserId: string | null;
-  financeLinksByGoalId: Map<string, GoalFinanceProjectLink[]>;
-  practiceProjects: PracticeProject[];
-  showFinanceEvidence: boolean;
 }) {
   const t = useTranslations("goals");
   const tCommon = useTranslations("common");
@@ -594,16 +508,6 @@ function GoalNodeInner({
               </div>
             ))}
           </div>
-        )}
-
-        {showFinanceEvidence && (
-          <GoalFinanceEvidence
-            workspaceId={workspaceId}
-            goalId={goal.id}
-            financeLinks={financeLinksByGoalId.get(goal.id) ?? []}
-            practiceProjects={practiceProjects}
-            canManage={canManage}
-          />
         )}
 
         {canManage && (
@@ -767,95 +671,9 @@ function GoalNodeInner({
               canManageAnyGoal={canManageAnyGoal}
               membershipId={membershipId}
               currentUserId={currentUserId}
-              financeLinksByGoalId={financeLinksByGoalId}
-              practiceProjects={practiceProjects}
-              showFinanceEvidence={showFinanceEvidence}
             />
           ))}
         </div>
-      )}
-    </div>
-  );
-}
-
-function GoalFinanceEvidence({
-  workspaceId,
-  goalId,
-  financeLinks,
-  practiceProjects,
-  canManage,
-}: {
-  workspaceId: string;
-  goalId: string;
-  financeLinks: GoalFinanceProjectLink[];
-  practiceProjects: PracticeProject[];
-  canManage: boolean;
-}) {
-  const t = useTranslations("goals");
-  const linkedProjectIds = new Set(financeLinks.map((link) => link.project.id));
-  const linkableProjects = practiceProjects.filter((project) => !linkedProjectIds.has(project.id));
-
-  if (financeLinks.length === 0 && !canManage) return null;
-
-  return (
-    <div className="mt-4 pt-3 border-t border-line-subtle space-y-3">
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
-        <h4 className="text-xs font-semibold uppercase text-muted">{t("financeEvidence")}</h4>
-        <a href={`/workspaces/${workspaceId}/finance`} className="text-xs font-medium text-accent hover:underline">
-          {t("financeOpenDashboard")}
-        </a>
-      </div>
-
-      {financeLinks.length > 0 && (
-        <div className="divide-y divide-line-subtle">
-          {financeLinks.map((link) => (
-            <div key={link.id} className="py-2 first:pt-0 last:pb-0 space-y-2">
-              <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-2">
-                <div>
-                  <div className="text-sm font-medium text-text">{link.project.name}</div>
-                  <div className="text-xs text-muted">{link.project.clientName} · {link.project.code} · {link.project.status}</div>
-                </div>
-                {canManage && (
-                  <form action={deleteGoalFinanceProjectLinkFormAction}>
-                    <input type="hidden" name="workspaceId" value={workspaceId} />
-                    <input type="hidden" name="linkId" value={link.id} />
-                    <button type="submit" className="secondary small">{t("btnUnlinkFinanceProject")}</button>
-                  </form>
-                )}
-              </div>
-              <div className="flex flex-wrap gap-2">
-                <span className="tag-sm">{t("financePoValue")}: {formatFinanceUsd(link.project.poValueCents)}</span>
-                <span className="tag-sm">{t("financeUsedBudget")}: {formatFinanceUsd(link.project.usedCents)}</span>
-                <span className="tag-sm">{t("financeRemainingBudget")}: {formatFinanceUsd(link.project.remainingCents)}</span>
-                <span className="tag-sm">{t("financeUsedPercent")}: {formatGoalFinancePercent(link.project.usedRatio)}</span>
-                <span className="tag-sm">{t("financeMargin")}: {formatGoalFinanceMargin(link.project.currentMarginBps)}</span>
-              </div>
-            </div>
-          ))}
-        </div>
-      )}
-
-      {canManage && (
-        linkableProjects.length > 0 ? (
-          <form action={createGoalFinanceProjectLinkFormAction} className="actions-inline">
-            <input type="hidden" name="workspaceId" value={workspaceId} />
-            <input type="hidden" name="goalId" value={goalId} />
-            <label className="flex-1">
-              {t("financeProject")}
-              <select name="projectId" defaultValue="" required>
-                <option value="" disabled>{t("financeSelectProject")}</option>
-                {linkableProjects.map((project) => (
-                  <option key={project.id} value={project.id}>
-                    {project.code} · {project.name}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <button type="submit" className="secondary small">{t("btnLinkFinanceProject")}</button>
-          </form>
-        ) : financeLinks.length === 0 ? (
-          <p className="text-xs text-muted">{t("financeNoProjects")}</p>
-        ) : null
       )}
     </div>
   );

@@ -306,58 +306,6 @@ const { prismaMock, encryptSecretMock, decryptSecretMock, memberMocks, communica
       count: vi.fn(),
       findMany: vi.fn(),
     },
-    practiceClient: {
-      count: vi.fn(),
-      findMany: vi.fn(),
-    },
-    practiceBillingCode: {
-      count: vi.fn(),
-      findMany: vi.fn(),
-    },
-    practiceConsultant: {
-      count: vi.fn(),
-      findMany: vi.fn(),
-    },
-    practiceProject: {
-      count: vi.fn(),
-      findMany: vi.fn(),
-    },
-    practiceProjectLine: {
-      count: vi.fn(),
-      findMany: vi.fn(),
-    },
-    practicePurchaseOrder: {
-      count: vi.fn(),
-      findMany: vi.fn(),
-    },
-    practiceProjectAssignment: {
-      count: vi.fn(),
-      findMany: vi.fn(),
-    },
-    practiceSourceDocument: {
-      count: vi.fn(),
-      findMany: vi.fn(),
-    },
-    practicePaymentBatch: {
-      count: vi.fn(),
-      findMany: vi.fn(),
-    },
-    practiceTimeEntry: {
-      count: vi.fn(),
-      findMany: vi.fn(),
-    },
-    practiceExpense: {
-      count: vi.fn(),
-      findMany: vi.fn(),
-    },
-    practiceEntryReview: {
-      count: vi.fn(),
-      findMany: vi.fn(),
-    },
-    practiceContributionEntry: {
-      count: vi.fn(),
-      findMany: vi.fn(),
-    },
     supportOperation: {
       count: vi.fn(),
       create: vi.fn(),
@@ -600,19 +548,6 @@ describe("control plane domain", () => {
       "goalLink",
       "recognition",
       "checkIn",
-      "practiceClient",
-      "practiceBillingCode",
-      "practiceConsultant",
-      "practiceProject",
-      "practiceProjectLine",
-      "practicePurchaseOrder",
-      "practiceProjectAssignment",
-      "practiceSourceDocument",
-      "practicePaymentBatch",
-      "practiceTimeEntry",
-      "practiceExpense",
-      "practiceEntryReview",
-      "practiceContributionEntry",
       "modelUsageBudget",
       "workspaceBillingProfile",
       "workspaceEnterpriseService",
@@ -930,10 +865,6 @@ describe("control plane domain", () => {
     prismaMock.customerDeployment.findUnique
       .mockResolvedValueOnce(sourceDeployment)
       .mockResolvedValueOnce(sourceDeployment);
-    prismaMock.practiceClient.count.mockResolvedValueOnce(2);
-    prismaMock.practiceClient.findMany.mockResolvedValueOnce([{ id: "practice-client-1" }, { id: "practice-client-2" }]);
-    prismaMock.practiceTimeEntry.count.mockResolvedValueOnce(1);
-    prismaMock.practiceTimeEntry.findMany.mockResolvedValueOnce([{ id: "time-entry-1" }]);
     prismaMock.clientMigrationRun.create.mockResolvedValue({
       id: "mig-1",
       customerAccountId: "acct_1",
@@ -967,33 +898,10 @@ describe("control plane domain", () => {
     });
 
     const updateArg = prismaMock.clientMigrationRun.update.mock.calls[0]?.[0];
-    expect(updateArg.data.verificationSummary.dryRun.inventory).toEqual(expect.arrayContaining([
-      { entityType: "PracticeClient", count: 2, idMapSampled: 2 },
-      { entityType: "PracticeBillingCode", count: 0, idMapSampled: 0 },
-      { entityType: "PracticeConsultant", count: 0, idMapSampled: 0 },
-      { entityType: "PracticeProject", count: 0, idMapSampled: 0 },
-      { entityType: "PracticeProjectLine", count: 0, idMapSampled: 0 },
-      { entityType: "PracticePurchaseOrder", count: 0, idMapSampled: 0 },
-      { entityType: "PracticeProjectAssignment", count: 0, idMapSampled: 0 },
-      { entityType: "PracticeSourceDocument", count: 0, idMapSampled: 0 },
-      { entityType: "PracticePaymentBatch", count: 0, idMapSampled: 0 },
-      { entityType: "PracticeTimeEntry", count: 1, idMapSampled: 1 },
-      { entityType: "PracticeExpense", count: 0, idMapSampled: 0 },
-      { entityType: "PracticeEntryReview", count: 0, idMapSampled: 0 },
+    expect(updateArg.data.verificationSummary.dryRun.inventory).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ entityType: expect.stringMatching(/^Practice/) }),
     ]));
-    expect(updateArg.data.verificationSummary.dryRun.idMapSeedCount).toBe(3);
-    expect(prismaMock.clientMigrationIdMap.upsert).toHaveBeenCalledWith(expect.objectContaining({
-      create: expect.objectContaining({
-        entityType: "PracticeClient",
-        sourceId: "practice-client-1",
-      }),
-    }));
-    expect(prismaMock.clientMigrationIdMap.upsert).toHaveBeenCalledWith(expect.objectContaining({
-      create: expect.objectContaining({
-        entityType: "PracticeTimeEntry",
-        sourceId: "time-entry-1",
-      }),
-    }));
+    expect(updateArg.data.verificationSummary.dryRun.idMapSeedCount).toBe(0);
   });
 
   it("keeps production migration dry-run disabled unless explicitly enabled", async () => {
@@ -7476,13 +7384,6 @@ describe("control plane domain", () => {
       reason: "Ensure recurring recorder coverage after policy update.",
       arguments: {},
     });
-    await runCustomerSupportOperation(operatorActor, {
-      deploymentId: "inst-1",
-      action: "finance.readiness",
-      reason: "Confirm Finance readiness.",
-      arguments: {},
-    });
-
     const toolNames = vi.mocked(fetch).mock.calls
       .map(([, init]) => JSON.parse(String(init?.body)).params?.name)
       .filter((name) => name !== "record_support_audit");
@@ -7493,7 +7394,6 @@ describe("control plane domain", () => {
       "delete_meeting",
       "set_meeting_recorder_auto_recording",
       "ensure_meeting_recorder_coverage",
-      "get_finance_readiness",
     ]);
   });
 

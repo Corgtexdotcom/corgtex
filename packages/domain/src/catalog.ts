@@ -1209,36 +1209,13 @@ export async function getAppRoutingGuidance(actor: AppActor, params: {
   const available = apps.filter((item) => !isInstalledAppStatus(item.installationStatus) && item.installationStatus !== "DISABLED");
 
   if (financeIntent(params.intent, params.recordType)) {
-    const installedFinance = installed.find((item) => item.appCategory === "FINANCE");
-    if (installedFinance) {
-      return {
-        routing: "APP_MCP",
-        target: appSummary(installedFinance),
-        guidance: "Use the installed finance app for structured expense, statement, time, budget, and margin writes. Use Corgtex MCP for company context, Brain, governance, and audit guidance.",
-        corgtexDoesNotProxyWrites: true,
-        connectionNeeded: !installedFinance.appMcpUrl,
-        nextStep: installedFinance.appMcpUrl
-          ? "Connect the app MCP in the user's agent environment and call that app for structured finance writes."
-          : "Open the app details in Tools and connect the app MCP/runtime before structured finance writes.",
-      };
-    }
-    const availableFinance = available.find((item) => item.appCategory === "FINANCE");
-    if (availableFinance) {
-      return {
-        routing: "APP_NOT_INSTALLED",
-        target: appSummary(availableFinance),
-        guidance: "A finance app is available but not installed for this workspace. Do not save structured finance records into Corgtex Brain as the canonical database.",
-        corgtexDoesNotProxyWrites: true,
-        nextStep: "Request app install, then connect the app MCP in the user's agent environment.",
-      };
-    }
     return {
       routing: "CORGTEX_MCP",
       target: {
         appKey: "corgtex",
         title: "Corgtex Finance",
       },
-      guidance: "Use Corgtex native Finance for structured finance records. Do not route finance writes to the retired Practice Ledger app runtime.",
+      guidance: "Use the native Corgtex Finance shell for Finance navigation. Do not route finance writes to the retired Practice Ledger app runtime.",
       corgtexDoesNotProxyWrites: false,
     };
   }

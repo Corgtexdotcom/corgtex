@@ -73,9 +73,6 @@ const EXPECTED_DEFAULT_FLAGS = {
   GOALS: true,
   TOOL_LINKS: false,
   FINANCE: true,
-  FINANCE_PROJECTS: false,
-  FINANCE_SLICING_PIE: false,
-  SLICING_PIE: false,
   BUILD_ARTIFACTS: false,
   RELATIONSHIPS: true,
   CONTEXT_MAPS: false,
@@ -92,7 +89,6 @@ const EXPECTED_DEFAULT_FLAGS = {
   OPENWORK_DEFAULT: false,
   EXECUTION_PACKETS: false,
   MANAGED_ENTERPRISE_SERVICES: false,
-  PRACTICE_PROJECTS: false,
 };
 
 describe("registry-derived nav and flags parity", () => {

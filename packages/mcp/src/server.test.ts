@@ -33,7 +33,6 @@ const revokeAgentCredentialMock = vi.fn();
 const listAgentConfigsMock = vi.fn();
 const getNewspaperDiagnosticsMock = vi.fn();
 const updateAgentConfigMock = vi.fn();
-const getFinanceReadinessDiagnosticMock = vi.fn();
 const getModelUsageBudgetMock = vi.fn();
 const updateModelUsageBudgetMock = vi.fn();
 const executeExternalMcpToolMock = vi.fn();
@@ -199,7 +198,6 @@ vi.mock("@corgtex/domain", async () => {
   listAgentConfigs: listAgentConfigsMock,
   getNewspaperDiagnostics: getNewspaperDiagnosticsMock,
   updateAgentConfig: updateAgentConfigMock,
-  getFinanceReadinessDiagnostic: getFinanceReadinessDiagnosticMock,
   getModelUsageBudget: getModelUsageBudgetMock,
   updateModelUsageBudget: updateModelUsageBudgetMock,
   listCommunicationInstallations: vi.fn(),
@@ -429,7 +427,6 @@ describe("createCorgtexMcpServer", () => {
       governancePolicy: null,
       updatedAt: new Date("2026-05-01T00:00:00.000Z"),
     });
-    getFinanceReadinessDiagnosticMock.mockReset().mockResolvedValue({ ready: true });
     getModelUsageBudgetMock.mockReset().mockResolvedValue(null);
     updateModelUsageBudgetMock.mockReset().mockResolvedValue({ id: "budget-1", monthlyCostCapUsd: "250.00" });
     executeExternalMcpToolMock.mockReset().mockResolvedValue({ skipped: false, result: { ok: true } });
@@ -1944,33 +1941,6 @@ describe("createCorgtexMcpServer", () => {
     expect(vi.mocked(requireScope)).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: "ws-1" }), "runtime:read");
     expect(getNewspaperDiagnosticsMock).toHaveBeenCalledWith(expect.objectContaining({ kind: "agent" }), "ws-1", { take: 5 });
     expect(body.diagnostics.sourceCounts.sevenDays.meetings).toBe(2);
-  });
-
-  it("returns Finance readiness diagnostics through a read-only Finance tool", async () => {
-    const { createCorgtexMcpServer } = await import("./server");
-    const { requireScope } = await import("./auth");
-    getFinanceReadinessDiagnosticMock.mockResolvedValueOnce({
-      ready: true,
-      allMemberWrite: { active: true },
-      peerReviewPolicy: { status: "enforced" },
-    });
-
-    const server = createCorgtexMcpServer({
-      actor: { kind: "agent", authProvider: "bootstrap" } as any,
-      workspaceId: "ws-1",
-      authKind: "agent",
-    });
-
-    const response = await (server as any)._registeredTools.get_finance_readiness.handler({});
-    const body = JSON.parse(response.content[0].text);
-
-    expect(vi.mocked(requireScope)).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: "ws-1" }), "finance:read");
-    expect(getFinanceReadinessDiagnosticMock).toHaveBeenCalledWith(expect.objectContaining({ kind: "agent" }), "ws-1");
-    expect(body.readiness).toMatchObject({
-      ready: true,
-      allMemberWrite: { active: true },
-      peerReviewPolicy: { status: "enforced" },
-    });
   });
 
   it("updates and revokes agent credentials through support-scoped tools without returning token material", async () => {

@@ -2,7 +2,7 @@
 
 import { enforceDemoGuard } from "@/lib/demo-guard";
 import { requirePageActor } from "@/lib/auth";
-import { requireWorkspaceFeature, requireWorkspaceFinanceCapability } from "@/lib/workspace-feature-flags";
+import { requireWorkspaceFeature } from "@/lib/workspace-feature-flags";
 import { asString, asOptional, refresh } from "../action-utils";
 import { CRM_CREATABLE_DEAL_STAGES } from "./view-model";
 import { redirect } from "next/navigation";
@@ -28,7 +28,6 @@ import {
   provisionProspectWorkspace,
   updateCrmAccount,
   updateCommunicationSuggestion,
-  createPracticeProjectFromWonDeal,
 } from "@corgtex/domain";
 import type { CrmDealStage } from "@prisma/client";
 
@@ -38,20 +37,6 @@ function asOptionalDate(formData: FormData, key: string) {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return null;
   return date;
-}
-
-function optionalCurrencyCents(formData: FormData, key: string) {
-  const raw = asOptional(formData, key);
-  if (!raw) return undefined;
-  const parsed = Number.parseFloat(raw);
-  return Number.isFinite(parsed) ? Math.round(parsed * 100) : undefined;
-}
-
-function optionalPercentBps(formData: FormData, key: string) {
-  const raw = asOptional(formData, key);
-  if (!raw) return undefined;
-  const parsed = Number.parseFloat(raw);
-  return Number.isFinite(parsed) ? Math.round(parsed * 100) : undefined;
 }
 
 function optionalCreatableDealStage(formData: FormData) {
@@ -120,15 +105,6 @@ export async function convertCrmAccountToClientAction(formData: FormData) {
     workspaceId,
     accountId: asString(formData, "accountId"),
   });
-
-  const financeDealId = asOptional(formData, "financeDealId");
-  if (financeDealId) {
-    await requireWorkspaceFeature(workspaceId, "FINANCE");
-    await requireWorkspaceFinanceCapability(workspaceId, "projects");
-    await createPracticeProjectFromWonDeal(actor, workspaceId, {
-      dealId: financeDealId,
-    });
-  }
 
   refresh(workspaceId);
 }
@@ -210,26 +186,6 @@ export async function updateDealAction(formData: FormData) {
     valueCents: formData.has("value") ? valueCents : undefined,
     notes: formData.has("notes") ? asOptional(formData, "notes") ?? undefined : undefined,
     ownerUserId: formData.has("ownerUserId") ? asOptional(formData, "ownerUserId") ?? null : undefined,
-  });
-  refresh(workspaceId);
-}
-
-export async function createFinanceProjectFromDealAction(formData: FormData) {
-  const _demoGuardWsId = formData.get("workspaceId") as string;
-  if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
-
-  const actor = await requirePageActor();
-  const workspaceId = asString(formData, "workspaceId");
-  await requireWorkspaceFeature(workspaceId, "FINANCE");
-  await requireWorkspaceFinanceCapability(workspaceId, "projects");
-
-  await createPracticeProjectFromWonDeal(actor, workspaceId, {
-    dealId: asString(formData, "dealId"),
-    code: asOptional(formData, "code"),
-    serviceBudgetCents: optionalCurrencyCents(formData, "serviceBudget"),
-    expenseBudgetCents: optionalCurrencyCents(formData, "expenseBudget"),
-    weeklyBurnCents: optionalCurrencyCents(formData, "weeklyBurn"),
-    targetMarginBps: optionalPercentBps(formData, "targetMargin"),
   });
   refresh(workspaceId);
 }

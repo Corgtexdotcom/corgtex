@@ -76,14 +76,14 @@ describe("ControlPrimitives", () => {
 
   it("renders workspace subnav links with active page state", () => {
     const html = renderToStaticMarkup(createElement(WorkspaceSubnav, {
-      label: "Finance sections",
+      label: "Workspace sections",
       items: [
-        { key: "overview", label: "Overview", href: "/finance" },
-        { key: "clients", label: "Clients", href: "/finance/clients", active: true },
+        { key: "overview", label: "Overview", href: "/goals" },
+        { key: "members", label: "Members", href: "/members", active: true },
       ],
     }));
 
-    expect(html).toContain("aria-label=\"Finance sections\"");
+    expect(html).toContain("aria-label=\"Workspace sections\"");
     expect(html).toContain("nr-workspace-subnav-link-active");
     expect(html).toContain("aria-current=\"page\"");
   });

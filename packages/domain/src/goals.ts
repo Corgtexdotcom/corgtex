@@ -19,10 +19,7 @@ import {
   normalizeDuplicateGuardText,
   type DuplicateGuardOptions,
 } from "./duplicate-guard";
-import {
-  listNativePracticeProjectHealthByIds,
-} from "./practice-finance";
-import type { Goal, GoalLevel, GoalCadence, GoalStatus, PracticeProjectStatus, Prisma } from "@prisma/client";
+import type { Goal, GoalLevel, GoalCadence, GoalStatus, Prisma } from "@prisma/client";
 import {
   changedDataFields,
   pickJsonSnapshot,
@@ -60,8 +57,6 @@ type CreateGoalParams = {
 const COMPANY_UNDERSTANDING_SOURCE = "company-understanding";
 const SHORT_TERM_DIRECTION_CADENCES = new Set<GoalCadence>(["WEEKLY", "MONTHLY", "QUARTERLY"]);
 const EDITABLE_ACTIVE_GOAL_STATUSES = new Set<GoalStatus>(["ACTIVE", "ON_TRACK", "AT_RISK", "BEHIND"]);
-export const GOAL_FINANCE_PROJECT_ENTITY_TYPE = "PracticeProject";
-const GOAL_FINANCE_PROJECT_SOURCE = "practice-finance";
 
 function countsTowardParentProgress(goal: Pick<Goal, "status" | "isPrivate" | "archivedAt">) {
   return !goal.archivedAt && !(goal.isPrivate && goal.status === "DRAFT");
@@ -162,34 +157,6 @@ export type CompanyDirectionFromBrain = {
   openQuestions: CompanyDirectionQuestion[];
   generatedGoalCount: number;
   evidenceLinkCount: number;
-};
-
-export type GoalFinanceProjectSummary = {
-  id: string;
-  code: string;
-  name: string;
-  clientName: string;
-  status: PracticeProjectStatus;
-  poValueCents: number;
-  usedCents: number;
-  remainingCents: number;
-  serviceBudgetCents: number;
-  expenseBudgetCents: number;
-  weeklyBurnCents: number;
-  usedRatio: number;
-  budgetRunwayWeeks: number | null;
-  targetMarginBps: number | null;
-  currentMarginBps: number | null;
-};
-
-export type GoalFinanceProjectLink = {
-  id: string;
-  goalId: string;
-  entityId: string;
-  confidence: number;
-  source: string | null;
-  createdAt: Date;
-  project: GoalFinanceProjectSummary;
 };
 
 function jsonRecord(value: Prisma.JsonValue | null | undefined) {
@@ -1462,147 +1429,6 @@ export async function createGoalLink(
 
     return link;
   });
-}
-
-export async function createGoalFinanceProjectLink(
-  actor: AppActor,
-  params: {
-    workspaceId: string;
-    goalId: string;
-    projectId: string;
-    _membership?: MembershipSummary | null;
-  },
-) {
-  const membership = await requireWorkspaceMembership({
-    actor,
-    workspaceId: params.workspaceId,
-    resolvedMembership: params._membership,
-  });
-
-  const project = await prisma.practiceProject.findFirst({
-    where: {
-      id: params.projectId,
-      workspaceId: params.workspaceId,
-    },
-    select: { id: true },
-  });
-  invariant(project, 404, "NOT_FOUND", "Finance project not found.");
-
-  return createGoalLink(actor, {
-    workspaceId: params.workspaceId,
-    goalId: params.goalId,
-    entityType: GOAL_FINANCE_PROJECT_ENTITY_TYPE,
-    entityId: params.projectId,
-    confidence: 1,
-    linkedBy: "human",
-    source: GOAL_FINANCE_PROJECT_SOURCE,
-    _membership: membership,
-  });
-}
-
-export async function listGoalFinanceProjectLinks(
-  actor: AppActor,
-  params: {
-    workspaceId: string;
-    goalIds: string[];
-    _membership?: MembershipSummary | null;
-  },
-): Promise<GoalFinanceProjectLink[]> {
-  const goalIds = Array.from(new Set(params.goalIds.map((id) => id.trim()).filter(Boolean)));
-  if (goalIds.length === 0) return [];
-
-  const membership = await requireWorkspaceMembership({
-    actor,
-    workspaceId: params.workspaceId,
-    resolvedMembership: params._membership,
-  });
-
-  const links = await prisma.goalLink.findMany({
-    where: {
-      goalId: { in: goalIds },
-      entityType: GOAL_FINANCE_PROJECT_ENTITY_TYPE,
-      goal: {
-        workspaceId: params.workspaceId,
-        ...privacyFilter(actor, membership),
-        archivedAt: null,
-      },
-    },
-    select: {
-      id: true,
-      goalId: true,
-      entityId: true,
-      confidence: true,
-      source: true,
-      createdAt: true,
-    },
-    orderBy: [{ createdAt: "asc" }, { id: "asc" }],
-  });
-  if (links.length === 0) return [];
-
-  const projectIds = Array.from(new Set(links.map((link) => link.entityId)));
-  const projectHealthById = await listNativePracticeProjectHealthByIds(actor, params.workspaceId, projectIds);
-
-  return links.flatMap((link) => {
-    const health = projectHealthById.get(link.entityId);
-    if (!health) return [];
-    return [{
-      id: link.id,
-      goalId: link.goalId,
-      entityId: link.entityId,
-      confidence: link.confidence,
-      source: link.source,
-      createdAt: link.createdAt,
-      project: {
-        id: health.projectId,
-        code: health.projectCode,
-        name: health.projectName,
-        clientName: health.clientName,
-        status: health.status,
-        poValueCents: health.budgetCents,
-        usedCents: health.usedBudgetCents,
-        remainingCents: health.remainingBudgetCents,
-        serviceBudgetCents: health.serviceBudgetCents,
-        expenseBudgetCents: health.expenseBudgetCents,
-        weeklyBurnCents: health.recentBudgetBurnPerWeekCents,
-        usedRatio: health.budgetCents > 0 ? Math.max(health.usedBudgetCents / health.budgetCents, 0) : 0,
-        budgetRunwayWeeks: health.weeksToBudgetExhaustion,
-        targetMarginBps: health.targetMarginBps,
-        currentMarginBps: health.grossMarginBps,
-      },
-    }];
-  });
-}
-
-export async function deleteGoalFinanceProjectLink(
-  actor: AppActor,
-  params: {
-    workspaceId: string;
-    linkId: string;
-    _membership?: MembershipSummary | null;
-  },
-) {
-  const membership = await requireWorkspaceMembership({
-    actor,
-    workspaceId: params.workspaceId,
-    resolvedMembership: params._membership,
-  });
-
-  const link = await prisma.goalLink.findUnique({
-    where: { id: params.linkId },
-    include: { goal: true },
-  });
-  invariant(
-    link
-      && link.goal.workspaceId === params.workspaceId
-      && !link.goal.archivedAt
-      && link.entityType === GOAL_FINANCE_PROJECT_ENTITY_TYPE,
-    404,
-    "NOT_FOUND",
-    "Link not found.",
-  );
-  requireEditableGoalContent(actor, membership, link.goal, "Only draft or active goals can change links.");
-
-  await prisma.goalLink.delete({ where: { id: params.linkId } });
 }
 
 export async function deleteGoalLink(

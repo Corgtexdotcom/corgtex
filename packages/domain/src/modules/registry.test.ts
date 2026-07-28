@@ -4,7 +4,6 @@ import { CONTROL_PLANE_WORKSPACE_FEATURE_FLAGS } from "../control-plane";
 import {
   collectFeatureFlagDefinitions,
   defaultWorkspaceFeatureFlags,
-  financeCapabilityEnabled,
   getSatelliteEmbedForModule,
   listNavModules,
   listWorkspaceFeatureFlagDefinitions,
@@ -84,17 +83,6 @@ describe("module registry feature flag parity", () => {
   });
 });
 
-describe("finance capability aliases", () => {
-  it("requires the parent Finance flag and accepts new or legacy capability flags", () => {
-    expect(financeCapabilityEnabled({ FINANCE: true, FINANCE_PROJECTS: true }, "projects")).toBe(true);
-    expect(financeCapabilityEnabled({ FINANCE: true, PRACTICE_PROJECTS: true }, "projects")).toBe(true);
-    expect(financeCapabilityEnabled({ FINANCE: true, FINANCE_SLICING_PIE: true }, "slicingPie")).toBe(true);
-    expect(financeCapabilityEnabled({ FINANCE: true, SLICING_PIE: true }, "slicingPie")).toBe(true);
-    expect(financeCapabilityEnabled({ FINANCE: false, FINANCE_PROJECTS: true }, "projects")).toBe(false);
-    expect(financeCapabilityEnabled({ FINANCE: true, FINANCE_PROJECTS: false, PRACTICE_PROJECTS: false }, "projects")).toBe(false);
-  });
-});
-
 describe("module registry nav parity", () => {
   it("reproduces today's nav items in order", () => {
     const derived = listNavModules().map((mod) => {
@@ -147,14 +135,10 @@ describe("module registry integrity", () => {
   });
 });
 
-describe("native Finance compatibility module", () => {
-  it("has no satellite app identity or embed after the native finance cutover", () => {
+describe("Finance clean-break module registry", () => {
+  it("does not expose a Practice Ledger module identity", () => {
     const ledger = MODULE_MANIFESTS.find((mod) => mod.key === "practice-ledger");
-    expect(ledger?.tier).toBe("first_party");
-    expect(ledger?.dataOwnership).toBe("corgtex_postgres");
-    expect(ledger?.satellite).toBeUndefined();
-    expect(ledger?.contract).toBeUndefined();
-    expect(ledger?.graduation).toBeUndefined();
+    expect(ledger).toBeUndefined();
 
     expect(getSatelliteEmbedForModule("finance")).toBeUndefined();
     expect(getSatelliteEmbedForModule("goals")).toBeUndefined();

@@ -46,7 +46,6 @@ const operationSchema = z.object({
     "meetings.list",
     "meetings.get",
     "meetings.upload",
-    "finance.readiness",
     "newspaper.diagnostics",
   ]),
   reason: z.string().trim().min(1).optional(),

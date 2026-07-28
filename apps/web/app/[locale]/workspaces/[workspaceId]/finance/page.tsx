@@ -1,89 +1,31 @@
-import {
-  canManagePracticeContributionPayments,
-  canManagePracticeFinanceProjects,
-  getNativePracticeFinanceDashboard,
-  listPracticeContributionEntries,
-  listPracticeProjects,
-  listRequestedPracticeContributionPayables,
-  requireWorkspaceMembership,
-} from "@corgtex/domain";
-import { prisma } from "@corgtex/shared";
+import { requireWorkspaceMembership } from "@corgtex/domain";
 import { requirePageActor } from "@/lib/auth";
-import { isWorkspaceFinanceCapabilityEnabled, requireWorkspaceFeature } from "@/lib/workspace-feature-flags";
-import { PracticeFinanceDashboard } from "./PracticeFinanceDashboard";
+import { WorkspaceEmptyState, WorkspacePageHeader } from "@/lib/components/ControlPrimitives";
+import { requireWorkspaceFeature } from "@/lib/workspace-feature-flags";
 
 export const dynamic = "force-dynamic";
 
 export default async function FinancePage({
   params,
-  searchParams,
 }: {
   params: Promise<{ workspaceId: string }>;
-  searchParams?: Promise<Record<string, string | string[] | undefined>>;
 }) {
   const { workspaceId } = await params;
-  const query = await searchParams;
-  const payablesCursor = Array.isArray(query?.payablesCursor) ? query?.payablesCursor[0] : query?.payablesCursor;
   const actor = await requirePageActor();
-  await requireWorkspaceFeature(workspaceId, "FINANCE");
 
-  const [practiceDashboard, projects, slicingPieEnabled, financeProjectsEnabled, membership, workspace] = await Promise.all([
-    getNativePracticeFinanceDashboard(actor, workspaceId),
-    listAllPracticeProjects(actor, workspaceId),
-    isWorkspaceFinanceCapabilityEnabled(workspaceId, "slicingPie"),
-    isWorkspaceFinanceCapabilityEnabled(workspaceId, "projects"),
-    requireWorkspaceMembership({ actor, workspaceId }),
-    prisma.workspace.findUnique({
-      where: { id: workspaceId },
-      select: { slug: true },
-    }),
-  ]);
-  const readOnlyDemo = workspace?.slug === "jnj-demo";
-  const canWriteFinance = !readOnlyDemo && await canManagePracticeFinanceProjects(actor, workspaceId, {
-    resolvedMembership: membership,
-  });
-  const canManageProjects = financeProjectsEnabled && canWriteFinance;
-  const projectEditRows = canManageProjects
-    ? await prisma.practiceProject.findMany({
-      where: {
-        workspaceId,
-        id: { in: practiceDashboard.projectHealth.map((project) => project.projectId) },
-      },
-      orderBy: [{ status: "asc" }, { code: "asc" }, { id: "asc" }],
-    })
-    : [];
-  const canMarkContributionPaid = !readOnlyDemo && await canManagePracticeContributionPayments(actor, workspaceId, {
-    resolvedMembership: membership,
-  });
-  const requestedPayables = slicingPieEnabled
-    ? await listRequestedPracticeContributionPayables(actor, workspaceId, { take: 50, cursor: payablesCursor })
-    : { entries: [], nextCursor: null };
-  const contributionEntries = slicingPieEnabled
-    ? await listPracticeContributionEntries(actor, workspaceId, { take: 50 })
-    : [];
+  await requireWorkspaceFeature(workspaceId, "FINANCE");
+  await requireWorkspaceMembership({ actor, workspaceId });
 
   return (
-    <PracticeFinanceDashboard
-      workspaceId={workspaceId}
-      currentUserId={actor.kind === "user" ? actor.user.id : null}
-      canManageProjects={canManageProjects}
-      financeProjectsEnabled={financeProjectsEnabled}
-      canRecordContributions={canWriteFinance}
-      canMarkContributionPaid={canMarkContributionPaid}
-      slicingPieEnabled={slicingPieEnabled}
-      summary={practiceDashboard.summary}
-      attention={practiceDashboard.attention}
-      projectHealth={practiceDashboard.projectHealth}
-      projects={projects}
-      projectEditRows={projectEditRows}
-      contributionEntries={contributionEntries}
-      requestedPayables={requestedPayables.entries}
-      requestedPayablesNextCursor={requestedPayables.nextCursor}
-    />
+    <div className="stack">
+      <WorkspacePageHeader
+        title="Finance"
+        description="A clean Finance workspace surface is available. Detailed finance workflows are not configured in this version."
+      />
+      <WorkspaceEmptyState
+        title="No finance records are active"
+        description="The legacy ledger data has been retired from the live product surface."
+      />
+    </div>
   );
-}
-
-async function listAllPracticeProjects(actor: Awaited<ReturnType<typeof requirePageActor>>, workspaceId: string) {
-  const take = 200;
-  return listPracticeProjects(actor, workspaceId, { take });
 }

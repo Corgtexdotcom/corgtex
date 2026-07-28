@@ -345,85 +345,6 @@ const SCORES = [
   { periodEnd: nDaysAgo(90), score: 78, parts: { participationPct: 82, decisionVelocityHrs: 24, policyCoverage: 72, tensionResolutionPct: 78, constitutionFreshness: 85 } },
 ];
 
-const PRACTICE_PROJECTS = [
-  {
-    code: "MEDTECH-EMEA",
-    name: "Digital Surgery EMEA rollout",
-    clientName: "MedTech Commercial",
-    status: "ACTIVE",
-    poValueCents: 420000000,
-    serviceBudgetCents: 280000000,
-    expenseBudgetCents: 65000000,
-    usedCents: 214000000,
-    weeklyBurnCents: 27000000,
-    targetMarginBps: 5800,
-    currentMarginBps: 6100,
-    sourceSatelliteId: "jnj-demo-practice-medtech-emea",
-  },
-  {
-    code: "ONC-MFG-01",
-    name: "CARVYKTI manufacturing scale-up",
-    clientName: "Innovative Medicine",
-    status: "ON_HOLD",
-    poValueCents: 520000000,
-    serviceBudgetCents: 390000000,
-    expenseBudgetCents: 85000000,
-    usedCents: 138000000,
-    weeklyBurnCents: 18000000,
-    targetMarginBps: 5200,
-    currentMarginBps: 4900,
-    sourceSatelliteId: "jnj-demo-practice-onc-mfg-01",
-  },
-  {
-    code: "ESG-SUPPLIER",
-    name: "Supplier ESG monitoring program",
-    clientName: "ESG & Sustainability",
-    status: "ACTIVE",
-    poValueCents: 175000000,
-    serviceBudgetCents: 112000000,
-    expenseBudgetCents: 24000000,
-    usedCents: 132000000,
-    weeklyBurnCents: 11500000,
-    targetMarginBps: 5400,
-    currentMarginBps: 5050,
-    sourceSatelliteId: "jnj-demo-practice-esg-supplier",
-  },
-];
-
-const PRACTICE_CONTRIBUTIONS = [
-  {
-    projectCode: "MEDTECH-EMEA",
-    memberKey: "tschmid",
-    type: "TIME",
-    paymentChoice: "SLICING_PIE",
-    description: "Program steering and EMEA rollout working sessions",
-    occurredAt: nDaysAgoAtNoonUtc(18),
-    hoursTenths: 125,
-    rateCents: 18500,
-  },
-  {
-    projectCode: "ESG-SUPPLIER",
-    memberKey: "vbroadhurst",
-    type: "EXPENSE",
-    paymentChoice: "SLICING_PIE",
-    description: "Supplier evidence review and verification travel",
-    occurredAt: nDaysAgoAtNoonUtc(12),
-    amountCents: 680000,
-    currency: "USD",
-  },
-  {
-    projectCode: "MEDTECH-EMEA",
-    memberKey: "jwolk",
-    type: "EXPENSE",
-    paymentChoice: "CASH",
-    description: "Finance review workshop expenses",
-    occurredAt: nDaysAgoAtNoonUtc(7),
-    amountCents: 240000,
-    currency: "USD",
-    paid: true,
-  },
-];
-
 const SHOWCASE_GOALS = [
   {
     title: "Ship Agent Governance v2",
@@ -451,13 +372,6 @@ const SHOWCASE_GOALS = [
     status: "ON_TRACK",
     progressPercent: 91,
     targetDate: new Date("2026-05-15"),
-  },
-];
-
-const SHOWCASE_GOAL_FINANCE_LINKS = [
-  {
-    goalTitle: "Ship Agent Governance v2",
-    projectCode: "ESG-SUPPLIER",
   },
 ];
 
@@ -758,42 +672,6 @@ async function seedShowcaseData({ wsId, memberMappings }) {
     }
   }
   console.log(`✅ ${SHOWCASE_GOALS.length} Goals refreshed`);
-
-  for (const link of SHOWCASE_GOAL_FINANCE_LINKS) {
-    const goal = await prisma.goal.findFirst({
-      where: { workspaceId: wsId, title: link.goalTitle },
-      select: { id: true },
-    });
-    const project = await prisma.practiceProject.findFirst({
-      where: { workspaceId: wsId, code: link.projectCode },
-      select: { id: true },
-    });
-    if (goal && project) {
-      await prisma.goalLink.upsert({
-        where: {
-          goalId_entityType_entityId: {
-            goalId: goal.id,
-            entityType: "PracticeProject",
-            entityId: project.id,
-          },
-        },
-        update: {
-          confidence: 1,
-          linkedBy: "demo-seed",
-          source: "practice-finance",
-        },
-        create: {
-          goalId: goal.id,
-          entityType: "PracticeProject",
-          entityId: project.id,
-          confidence: 1,
-          linkedBy: "demo-seed",
-          source: "practice-finance",
-        },
-      });
-    }
-  }
-  console.log(`✅ ${SHOWCASE_GOAL_FINANCE_LINKS.length} Goal finance links refreshed`);
 
   for (const agent of SHOWCASE_AGENTS) {
     await prisma.agentIdentity.upsert({
@@ -2913,91 +2791,6 @@ async function main() {
     });
   }
   
-  const practiceProjectIds = PRACTICE_PROJECTS.map((project) => `${wsId}-practice-project-${slugify(project.code)}`);
-  const practiceProjectIdByCode = new Map(PRACTICE_PROJECTS.map((project, index) => [project.code, practiceProjectIds[index]]));
-  await prisma.practiceProject.deleteMany({
-    where: {
-      workspaceId: wsId,
-      id: {
-        startsWith: `${wsId}-practice-project-`,
-        notIn: practiceProjectIds,
-      },
-    },
-  });
-  for (const [index, project] of PRACTICE_PROJECTS.entries()) {
-    const projectId = practiceProjectIds[index];
-    const data = {
-      workspaceId: wsId,
-      code: project.code,
-      name: project.name,
-      clientName: project.clientName,
-      status: project.status,
-      poValueCents: project.poValueCents,
-      serviceBudgetCents: project.serviceBudgetCents,
-      expenseBudgetCents: project.expenseBudgetCents,
-      usedCents: project.usedCents,
-      weeklyBurnCents: project.weeklyBurnCents,
-      targetMarginBps: project.targetMarginBps,
-      currentMarginBps: project.currentMarginBps,
-      sourceSatelliteId: project.sourceSatelliteId,
-    };
-    await prisma.practiceProject.upsert({
-      where: { id: projectId },
-      update: data,
-      create: { id: projectId, ...data },
-    });
-  }
-  const practiceContributionIds = PRACTICE_CONTRIBUTIONS.map((_, index) => `${wsId}-practice-contribution-${index + 1}`);
-  await prisma.practiceContributionEntry.deleteMany({
-    where: {
-      workspaceId: wsId,
-      id: {
-        startsWith: `${wsId}-practice-contribution-`,
-        notIn: practiceContributionIds,
-      },
-    },
-  });
-  for (const [index, contribution] of PRACTICE_CONTRIBUTIONS.entries()) {
-    const projectId = practiceProjectIdByCode.get(contribution.projectCode);
-    const contributor = memberMappings[contribution.memberKey];
-    if (!projectId || !contributor) continue;
-    const amountCents = contribution.type === "TIME"
-      ? Math.round((contribution.hoursTenths * contribution.rateCents) / 10)
-      : contribution.amountCents;
-    const sliceMultiplier = contribution.paymentChoice === "SLICING_PIE"
-      ? (contribution.type === "TIME" ? 2 : 4)
-      : 0;
-    const defaultPaidByUserId = memberMappings["jwolk"]?.userId ?? null;
-    const paidByUserId = contribution.paymentChoice === "CASH" && contribution.paid
-      ? (defaultPaidByUserId === contributor.userId ? memberMappings["jduato"]?.userId ?? null : defaultPaidByUserId)
-      : null;
-    const data = {
-      workspaceId: wsId,
-      projectId,
-      contributorUserId: contributor.userId,
-      submittedByUserId: contributor.userId,
-      type: contribution.type,
-      paymentChoice: contribution.paymentChoice,
-      cashStatus: contribution.paymentChoice === "CASH" ? (contribution.paid ? "PAID" : "REQUESTED") : "NOT_APPLICABLE",
-      description: contribution.description,
-      occurredAt: contribution.occurredAt,
-      hoursTenths: contribution.type === "TIME" ? contribution.hoursTenths : null,
-      rateCents: contribution.type === "TIME" ? contribution.rateCents : null,
-      amountCents,
-      currency: contribution.currency ?? "USD",
-      receiptUrl: null,
-      sliceMultiplier,
-      slices: amountCents * sliceMultiplier,
-      paidAt: contribution.paymentChoice === "CASH" && contribution.paid ? nDaysAgoAtNoonUtc(4) : null,
-      paidByUserId,
-    };
-    await prisma.practiceContributionEntry.upsert({
-      where: { id: practiceContributionIds[index] },
-      update: data,
-      create: { id: practiceContributionIds[index], ...data },
-    });
-  }
-
   // 13. Policy Corpus
   const policies = [
     { title: "APAC Market Expansion Authorization", pTitle: "Expand DARZALEX Subcutaneous Roll-out to APAC Markets", cId: circleMappings["innovative-medicine"] },
@@ -3027,10 +2820,6 @@ async function main() {
   // 14. Safe showcase data for current customer-visible feature surfaces.
   await enableWorkspaceFeature(wsId, "AI_WORKSPACES");
   await enableWorkspaceFeature(wsId, "FINANCE");
-  await enableWorkspaceFeature(wsId, "FINANCE_SLICING_PIE");
-  await enableWorkspaceFeature(wsId, "SLICING_PIE");
-  await enableWorkspaceFeature(wsId, "FINANCE_PROJECTS");
-  await enableWorkspaceFeature(wsId, "PRACTICE_PROJECTS");
   await enableWorkspaceFeature(wsId, "RELATIONSHIPS");
   await seedShowcaseData({ wsId, memberMappings });
   await seedCrmRelationships(wsId, memberMappings);
@@ -3053,8 +2842,6 @@ async function main() {
     crmAccounts: await prisma.crmAccount.count({ where: { workspaceId: wsId, archivedAt: null } }),
     crmContacts: await prisma.crmContact.count({ where: { workspaceId: wsId, archivedAt: null } }),
     crmDeals: await prisma.crmDeal.count({ where: { workspaceId: wsId, archivedAt: null } }),
-    practiceProjects: await prisma.practiceProject.count({ where: { workspaceId: wsId } }),
-    practiceContributions: await prisma.practiceContributionEntry.count({ where: { workspaceId: wsId } }),
   };
 
   console.log("Demo workspace refreshed:");
