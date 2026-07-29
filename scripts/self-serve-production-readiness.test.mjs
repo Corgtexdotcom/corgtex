@@ -232,6 +232,34 @@ describe("self-serve production readiness", () => {
     expect(result.stderr).toBe("");
   });
 
+  it("uses routed provider before requiring model prices for configured rollback models", () => {
+    const result = runReadiness({
+      ...STRICT_BASE_ENV,
+      ...AZURE_FOUNDRY_MODEL_ENV,
+      MODEL_CHAT_QUALITY: "deepseek/deepseek-v4-pro",
+      MODEL_CHAT_CONVERSATION: "deepseek/deepseek-v4-pro",
+      MODEL_PROVIDER: "azure-foundry",
+      MODEL_BASE_URL: "https://example.services.ai.azure.com/openai/v1",
+      AZURE_OPENAI_AUTH_MODE: "managed_identity",
+      AZURE_CLIENT_ID: "00000000-0000-4000-8000-000000000000",
+      MODEL_PROVIDER_ROUTES_JSON: JSON.stringify([
+        {
+          model: "deepseek/deepseek-v4-pro",
+          provider: "openrouter",
+          baseUrl: "https://openrouter.ai/api/v1",
+          apiKeyEnv: "OPENROUTER_ROLLBACK_KEY",
+        },
+      ]),
+      MODEL_PRICE_OVERRIDES_JSON: AZURE_FOUNDRY_PRICE_OVERRIDES_JSON,
+      OPENROUTER_ROLLBACK_KEY: "openrouter-key-placeholder",
+    }, ["--strict", "--skip-http"]);
+
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain("OK   MODEL_PROVIDER_ROUTES_JSON route for deepseek/deepseek-v4-pro has OpenRouter base URL");
+    expect(result.stdout).not.toContain("MODEL_PRICE_OVERRIDES_JSON includes azure-foundry/deepseek/deepseek-v4-pro");
+    expect(result.stderr).not.toContain("MODEL_PRICE_OVERRIDES_JSON missing price for azure-foundry/deepseek/deepseek-v4-pro");
+  });
+
   it("requires non-Azure rollback routes to include a base URL and key", () => {
     const result = runReadiness({
       ...STRICT_BASE_ENV,

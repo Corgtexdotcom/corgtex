@@ -241,6 +241,14 @@ function parseProviderRoutes() {
   });
 }
 
+function routeForModel(routes, model) {
+  return routes.find((route) => route.model === model);
+}
+
+function resolvedProviderForModel(globalProvider, routes, model) {
+  return routeForModel(routes, model)?.provider ?? globalProvider;
+}
+
 function checkEmailSenderConfiguration() {
   if (configured("EMAIL_FROM")) {
     const fromAddress = parseEmailAddress(envValue("EMAIL_FROM"));
@@ -337,9 +345,13 @@ function checkModelConfiguration(strict) {
   const provider = envValue("MODEL_PROVIDER") || "openrouter";
   if (isAzureProvider(provider)) {
     const label = providerLabel(provider);
+    const routes = parseProviderRoutes();
     checkConfigured("MODEL_BASE_URL", strict, `MODEL_BASE_URL missing for ${label}.`);
     for (const model of configuredModelNames()) {
-      requireModelPriceOverride(provider, model, strict);
+      const resolvedProvider = resolvedProviderForModel(provider, routes, model);
+      if (isAzureProvider(resolvedProvider)) {
+        requireModelPriceOverride(resolvedProvider, model, strict);
+      }
     }
     const authMode = envValue("AZURE_OPENAI_AUTH_MODE") || "api_key";
     if (authMode === "managed_identity") {

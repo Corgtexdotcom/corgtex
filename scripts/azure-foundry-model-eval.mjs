@@ -2,6 +2,7 @@
 import { DefaultAzureCredential } from "@azure/identity";
 import { readFile } from "node:fs/promises";
 import process from "node:process";
+import { pathToFileURL } from "node:url";
 
 const DEFAULT_EVAL_SET_PATH = "scripts/fixtures/azure-foundry-sanitized-eval-set.jsonl";
 const DEFAULT_TIMEOUT_MS = intEnv("AZURE_FOUNDRY_EVAL_TIMEOUT_MS", 60_000, { min: 1 });
@@ -176,13 +177,21 @@ function estimateCost(candidate, usage, text, requestBody) {
     ? usage.prompt_tokens
     : estimateMessageTokens(requestBody.messages ?? []);
   const completionTokens = Number.isFinite(usage?.completion_tokens) ? usage.completion_tokens : Math.ceil(text.length / 4);
-  const price = priceFor(candidate.provider, candidate.model);
-  if (!price) return null;
-  return {
+  const metrics = {
     inputTokens: promptTokens,
     outputTokens: completionTokens,
     estimatedInputTokens: !Number.isFinite(usage?.prompt_tokens),
     estimatedOutputTokens: !Number.isFinite(usage?.completion_tokens),
+  };
+  const price = priceFor(candidate.provider, candidate.model);
+  if (!price) {
+    return {
+      ...metrics,
+      rawProviderCostUsd: null,
+    };
+  }
+  return {
+    ...metrics,
     rawProviderCostUsd: (promptTokens * price.inputUsdPerToken + completionTokens * price.outputUsdPerToken).toFixed(6),
   };
 }
@@ -292,10 +301,7 @@ async function callCandidateWithRetries(candidate, item) {
     } catch (error) {
       errors.push(error);
       const message = error instanceof Error ? error.message : String(error);
-      const retryable = Boolean(error?.retryable)
-        || error?.name === "TimeoutError"
-        || error?.name === "AbortError"
-        || /aborted|timeout/i.test(message);
+      const retryable = isRetryableRequestError(error);
       if (!retryable || attempt >= DEFAULT_RETRIES) {
         const finalError = new Error(sanitizedErrorMessage(error, errors.length));
         finalError.category = error?.category ?? (retryable ? "timeout_or_retry_exhausted" : "request_error");
@@ -306,6 +312,15 @@ async function callCandidateWithRetries(candidate, item) {
     }
   }
   throw new Error("provider request failed");
+}
+
+function isRetryableRequestError(error) {
+  const message = error instanceof Error ? error.message : String(error);
+  return Boolean(error?.retryable)
+    || error instanceof TypeError
+    || error?.name === "TimeoutError"
+    || error?.name === "AbortError"
+    || /aborted|timeout/i.test(message);
 }
 
 function sanitizedErrorMessage(error, attempts) {
@@ -346,10 +361,35 @@ function conceptTermGroups(concept) {
   return terms.length > 0 ? [terms] : [];
 }
 
-function conceptMatches(concept, normalizedText) {
+function termOccurrenceIndexes(normalizedText, normalizedTerm) {
+  const indexes = [];
+  let start = 0;
+  while (start <= normalizedText.length) {
+    const index = normalizedText.indexOf(normalizedTerm, start);
+    if (index < 0) break;
+    indexes.push(index);
+    start = index + Math.max(1, normalizedTerm.length);
+  }
+  return indexes;
+}
+
+function isNegatedOccurrence(normalizedText, index) {
+  const prefix = normalizedText.slice(Math.max(0, index - 80), index);
+  return /(?:^|[\s([{,;:])(?:not|never|no|without|cannot|can't|cant|do not|don't|dont|does not|doesn't|doesnt|is not|isn't|isnt|are not|aren't|arent|was not|wasn't|wasnt|were not|weren't|werent|should not|shouldn't|shouldnt|must not|mustn't|mustnt|will not|won't|wont|avoid|blocked from|requires approval before|needs approval before|requires review before|needs review before)\s+(?:[\w'-]+\s+){0,5}$/.test(prefix);
+}
+
+function textContainsTerm(normalizedText, term, options = {}) {
+  const normalizedTerm = normalize(term);
+  if (!normalizedTerm) return false;
+  const indexes = termOccurrenceIndexes(normalizedText, normalizedTerm);
+  if (!options.polarityAware) return indexes.length > 0;
+  return indexes.some((index) => !isNegatedOccurrence(normalizedText, index));
+}
+
+function conceptMatches(concept, normalizedText, options = {}) {
   const groups = conceptTermGroups(concept);
   return groups.length > 0 && groups.every((group) => (
-    group.some((term) => normalizedText.includes(normalize(term)))
+    group.some((term) => textContainsTerm(normalizedText, term, options))
   ));
 }
 
@@ -368,21 +408,23 @@ function forbiddenConcepts(item) {
 function scoreItem(item, text) {
   const normalizedText = normalize(text);
   const parsedJson = item.mode === "json" ? parseJsonObject(text) : null;
+  const jsonParsed = item.mode !== "json" || Boolean(parsedJson);
   const missingKeys = item.requiredKeys?.filter((key) => !(parsedJson && Object.hasOwn(parsedJson, key))) ?? [];
   const missingConcepts = requiredConcepts(item).filter((concept) => {
     return !conceptMatches(concept, normalizedText);
   }).map(conceptLabel);
   const forbiddenMentions = forbiddenConcepts(item).filter((concept) => (
-    conceptMatches(concept, normalizedText)
+    conceptMatches(concept, normalizedText, { polarityAware: true })
   )).map(conceptLabel);
+  const schemaValid = jsonParsed && missingKeys.length === 0;
   return {
-    schemaValid: item.mode !== "json" || missingKeys.length === 0,
-    jsonParsed: item.mode !== "json" || Boolean(parsedJson),
+    schemaValid,
+    jsonParsed,
     outputLength: text.length,
     missingKeys,
     missingConcepts,
     forbiddenMentions,
-    passed: missingKeys.length === 0 && missingConcepts.length === 0 && forbiddenMentions.length === 0,
+    passed: schemaValid && missingConcepts.length === 0 && forbiddenMentions.length === 0,
   };
 }
 
@@ -440,7 +482,16 @@ async function main() {
   }, null, 2));
 }
 
-main().catch((error) => {
-  console.error(error instanceof Error ? error.message : String(error));
-  process.exit(1);
-});
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  main().catch((error) => {
+    console.error(error instanceof Error ? error.message : String(error));
+    process.exit(1);
+  });
+}
+
+export {
+  conceptMatches,
+  estimateCost,
+  isRetryableRequestError,
+  scoreItem,
+};
