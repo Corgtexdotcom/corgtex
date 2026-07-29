@@ -34,6 +34,23 @@ describe("Azure Foundry model eval helpers", () => {
     });
   });
 
+  it("estimates usage when provider token counts are negative", () => {
+    const cost = estimateCost(
+      { provider: "openai", model: "gpt-4o" },
+      { prompt_tokens: -100, completion_tokens: -5 },
+      "answer text",
+      { messages: [{ role: "user", content: "Prompt text" }] },
+    );
+
+    expect(cost).toEqual({
+      inputTokens: 3,
+      outputTokens: 3,
+      estimatedInputTokens: true,
+      estimatedOutputTokens: true,
+      rawProviderCostUsd: "0.000038",
+    });
+  });
+
   it("rejects invalid price overrides before reporting candidate cost", () => {
     process.env.MODEL_PRICE_OVERRIDES_JSON = JSON.stringify([
       { provider: "azure-foundry", model: "custom-candidate", inputUsdPerToken: -1, outputUsdPerToken: 0 },

@@ -67,6 +67,7 @@ const OPENROUTER_TITLE = "Corgtex";
 const AZURE_TOKEN_REFRESH_SKEW_MS = 60_000;
 const AZURE_FOUNDRY_SCOPE = "https://ai.azure.com/.default";
 const AZURE_OPENAI_SCOPE = "https://cognitiveservices.azure.com/.default";
+const SUPPORTED_MODEL_PROVIDERS = new Set(["openrouter", "openai", "azure-openai", "azure-foundry"]);
 
 class ExtractionParseError extends Error {
   readonly raw: string;
@@ -132,6 +133,10 @@ function parseModelProviderRoutes() {
     if (!model || !provider) {
       throw new Error(`MODEL_PROVIDER_ROUTES_JSON[${index}] requires model and provider strings.`);
     }
+    const normalizedProvider = provider.toLowerCase();
+    if (!SUPPORTED_MODEL_PROVIDERS.has(normalizedProvider)) {
+      throw new Error(`MODEL_PROVIDER_ROUTES_JSON[${index}].provider must be one of ${[...SUPPORTED_MODEL_PROVIDERS].join(", ")}.`);
+    }
     if (seenModels.has(model)) {
       throw new Error(`MODEL_PROVIDER_ROUTES_JSON contains duplicate route for ${model}.`);
     }
@@ -147,7 +152,7 @@ function parseModelProviderRoutes() {
 
     return {
       model,
-      provider: provider.toLowerCase(),
+      provider: normalizedProvider,
       baseUrl: routeBaseUrl,
       authMode,
       apiKeyEnv: routeStringField(record, "apiKeyEnv"),
@@ -173,7 +178,13 @@ function baseUrl(route?: ModelProviderRoute) {
     throw new Error(`MODEL_PROVIDER_ROUTES_JSON route for ${route.model} requires baseUrl when provider differs from MODEL_PROVIDER.`);
   }
 
-  return env.MODEL_BASE_URL?.replace(/\/+$/, "") ?? "https://api.openai.com/v1";
+  if (!env.MODEL_BASE_URL) {
+    return "https://api.openai.com/v1";
+  }
+  if (!isHttpsBaseUrl(env.MODEL_BASE_URL)) {
+    throw new Error("MODEL_BASE_URL must be an HTTPS URL.");
+  }
+  return env.MODEL_BASE_URL.replace(/\/+$/, "");
 }
 
 function optionalSecretEnv(name: string) {

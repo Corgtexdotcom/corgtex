@@ -343,15 +343,17 @@ function estimateMessageTokens(messages) {
 }
 
 function estimateCost(candidate, usage, text, requestBody) {
-  const promptTokens = Number.isFinite(usage?.prompt_tokens)
+  const hasProviderPromptTokens = Number.isFinite(usage?.prompt_tokens) && usage.prompt_tokens >= 0;
+  const hasProviderCompletionTokens = Number.isFinite(usage?.completion_tokens) && usage.completion_tokens >= 0;
+  const promptTokens = hasProviderPromptTokens
     ? usage.prompt_tokens
     : estimateMessageTokens(requestBody.messages ?? []);
-  const completionTokens = Number.isFinite(usage?.completion_tokens) ? usage.completion_tokens : Math.ceil(text.length / 4);
+  const completionTokens = hasProviderCompletionTokens ? usage.completion_tokens : Math.ceil(text.length / 4);
   const metrics = {
     inputTokens: promptTokens,
     outputTokens: completionTokens,
-    estimatedInputTokens: !Number.isFinite(usage?.prompt_tokens),
-    estimatedOutputTokens: !Number.isFinite(usage?.completion_tokens),
+    estimatedInputTokens: !hasProviderPromptTokens,
+    estimatedOutputTokens: !hasProviderCompletionTokens,
   };
   const price = priceFor(candidate.provider, candidate.model);
   if (!price) {

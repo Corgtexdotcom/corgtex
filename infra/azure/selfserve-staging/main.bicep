@@ -39,8 +39,11 @@ param registryServer string = 'ghcr.io'
 @description('GitHub Container Registry username for the PAT stored in Key Vault.')
 param registryUsername string = 'corgtex-deploy'
 
-@description('Azure OpenAI-compatible v1 base URL. For Foundry keyless auth, use https://<resource>.services.ai.azure.com/openai/v1.')
+@description('Azure OpenAI-compatible v1 base URL used by the inherited Azure OpenAI path, including unchanged embeddings.')
 param azureOpenAiBaseUrl string
+
+@description('Azure Direct Foundry OpenAI-compatible v1 base URL used for routed Foundry chat aliases when modelProvider is azure-foundry.')
+param azureFoundryBaseUrl string = ''
 
 @allowed([
   'azure-openai'
@@ -189,6 +192,9 @@ param bootstrapAdminPasswordSecretName string = 'admin-password'
 @description('Key Vault secret name containing AZURE_OPENAI_API_KEY when azureOpenAiAuthMode is api_key.')
 param azureOpenAiApiKeySecretName string = 'azure-openai-api-key'
 
+@description('Key Vault secret name containing the Azure Foundry API key when modelProvider is azure-foundry and azureOpenAiAuthMode is api_key.')
+param azureFoundryApiKeySecretName string = 'azure-foundry-api-key'
+
 @description('Key Vault secret name containing STRIPE_SECRET_KEY.')
 param stripeSecretKeySecretName string = 'stripe-secret-key'
 
@@ -245,6 +251,17 @@ var keyVaultSecretsUserRoleId = join([
   '0445c86b69e6'
 ], '-')
 var keyVaultSecretUriPrefix = '${keyVault.properties.vaultUri}secrets/'
+var usesAzureFoundryModels = modelProvider == 'azure-foundry'
+var runtimeModelProvider = usesAzureFoundryModels ? 'azure-openai' : modelProvider
+var azureFoundryRouteBaseUrl = empty(azureFoundryBaseUrl) ? azureOpenAiBaseUrl : azureFoundryBaseUrl
+var runtimeChatFastDeploymentName = usesAzureFoundryModels && azureChatFastDeploymentName == 'corgtex-chat-fast' ? 'corgtex-ds-v4-flash' : azureChatFastDeploymentName
+var runtimeChatStandardDeploymentName = usesAzureFoundryModels && azureChatStandardDeploymentName == 'corgtex-chat-standard' ? 'corgtex-ds-v4-flash' : azureChatStandardDeploymentName
+var runtimeChatQualityDeploymentName = usesAzureFoundryModels && azureChatQualityDeploymentName == 'corgtex-chat-quality' ? 'corgtex-ds-v4-pro' : azureChatQualityDeploymentName
+var runtimeChatExcellentDeploymentName = usesAzureFoundryModels && azureChatExcellentDeploymentName == 'corgtex-chat-excellent' ? 'corgtex-gpt56-luna' : azureChatExcellentDeploymentName
+var runtimeChatConversationDeploymentName = usesAzureFoundryModels && azureChatConversationDeploymentName == 'corgtex-chat-conversation' ? 'corgtex-ds-v4-pro' : azureChatConversationDeploymentName
+var azureFoundryRouteApiKeyField = azureOpenAiAuthMode == 'api_key' ? ',"apiKeyEnv":"AZURE_FOUNDRY_API_KEY"' : ''
+var azureFoundryRouteAuthFields = '"authMode":"${azureOpenAiAuthMode}","scope":"https://ai.azure.com/.default"${azureFoundryRouteApiKeyField}'
+var azureFoundryProviderRoutesJson = '[{"model":"corgtex-ds-v4-flash","provider":"azure-foundry","baseUrl":"${azureFoundryRouteBaseUrl}",${azureFoundryRouteAuthFields}},{"model":"corgtex-ds-v4-pro","provider":"azure-foundry","baseUrl":"${azureFoundryRouteBaseUrl}",${azureFoundryRouteAuthFields}},{"model":"corgtex-kimi-k25","provider":"azure-foundry","baseUrl":"${azureFoundryRouteBaseUrl}",${azureFoundryRouteAuthFields}},{"model":"corgtex-kimi-k27-code","provider":"azure-foundry","baseUrl":"${azureFoundryRouteBaseUrl}",${azureFoundryRouteAuthFields}},{"model":"corgtex-gpt56-luna","provider":"azure-foundry","baseUrl":"${azureFoundryRouteBaseUrl}",${azureFoundryRouteAuthFields}}]'
 
 var requiredSecretRefs = [
   { name: 'database-url', keyVaultSecretName: databaseUrlSecretName }
@@ -258,6 +275,9 @@ var requiredSecretRefs = [
 ]
 var azureOpenAiApiKeyRef = azureOpenAiAuthMode == 'api_key' ? [
   { name: 'azure-openai-api-key', keyVaultSecretName: azureOpenAiApiKeySecretName }
+] : []
+var azureFoundryApiKeyRef = usesAzureFoundryModels && azureOpenAiAuthMode == 'api_key' ? [
+  { name: 'azure-foundry-api-key', keyVaultSecretName: azureFoundryApiKeySecretName }
 ] : []
 var stripeSecretRefs = enableStripeSecrets ? [
   { name: 'stripe-secret-key', keyVaultSecretName: stripeSecretKeySecretName }
@@ -278,7 +298,7 @@ var microsoftOauthSecretRefs = enableMicrosoftOauthSecrets ? [
 ] : []
 var containerSecretRefs = concat([
   { name: 'ghcr-pat', keyVaultSecretName: ghcrPatSecretName }
-], requiredSecretRefs, azureOpenAiApiKeyRef, stripeSecretRefs, resendSecretRefs, googleOauthSecretRefs, microsoftOauthSecretRefs)
+], requiredSecretRefs, azureOpenAiApiKeyRef, azureFoundryApiKeyRef, stripeSecretRefs, resendSecretRefs, googleOauthSecretRefs, microsoftOauthSecretRefs)
 var migrationSecretRefs = concat(containerSecretRefs, [
   { name: 'admin-password', keyVaultSecretName: bootstrapAdminPasswordSecretName }
 ])
@@ -299,6 +319,9 @@ var googleOauthRuntimeEnv = enableGoogleOauthSecrets ? [
 var microsoftOauthRuntimeEnv = enableMicrosoftOauthSecrets ? [
   { name: 'MICROSOFT_CLIENT_ID', secretRef: 'microsoft-client-id' }
   { name: 'MICROSOFT_CLIENT_SECRET', secretRef: 'microsoft-client-secret' }
+] : []
+var azureFoundryRuntimeEnv = usesAzureFoundryModels ? [
+  { name: 'MODEL_PROVIDER_ROUTES_JSON', value: azureFoundryProviderRoutesJson }
 ] : []
 
 var commonRuntimeEnv = concat([
@@ -329,16 +352,16 @@ var commonRuntimeEnv = concat([
   { name: 'AZURE_STORAGE_BLOB_ENDPOINT', value: storage.properties.primaryEndpoints.blob }
   { name: 'AZURE_CLIENT_ID', value: managedIdentity.properties.clientId }
   { name: 'AZURE_STORAGE_CLIENT_ID', value: managedIdentity.properties.clientId }
-  { name: 'MODEL_PROVIDER', value: modelProvider }
+  { name: 'MODEL_PROVIDER', value: runtimeModelProvider }
   { name: 'MODEL_BASE_URL', value: azureOpenAiBaseUrl }
   { name: 'AZURE_OPENAI_AUTH_MODE', value: azureOpenAiAuthMode }
-  { name: 'AZURE_OPENAI_SCOPE', value: modelProvider == 'azure-foundry' ? 'https://ai.azure.com/.default' : 'https://cognitiveservices.azure.com/.default' }
-  { name: 'MODEL_CHAT_DEFAULT', value: azureChatStandardDeploymentName }
-  { name: 'MODEL_CHAT_FAST', value: azureChatFastDeploymentName }
-  { name: 'MODEL_CHAT_STANDARD', value: azureChatStandardDeploymentName }
-  { name: 'MODEL_CHAT_QUALITY', value: azureChatQualityDeploymentName }
-  { name: 'MODEL_CHAT_EXCELLENT', value: azureChatExcellentDeploymentName }
-  { name: 'MODEL_CHAT_CONVERSATION', value: azureChatConversationDeploymentName }
+  { name: 'AZURE_OPENAI_SCOPE', value: runtimeModelProvider == 'azure-foundry' ? 'https://ai.azure.com/.default' : 'https://cognitiveservices.azure.com/.default' }
+  { name: 'MODEL_CHAT_DEFAULT', value: runtimeChatStandardDeploymentName }
+  { name: 'MODEL_CHAT_FAST', value: runtimeChatFastDeploymentName }
+  { name: 'MODEL_CHAT_STANDARD', value: runtimeChatStandardDeploymentName }
+  { name: 'MODEL_CHAT_QUALITY', value: runtimeChatQualityDeploymentName }
+  { name: 'MODEL_CHAT_EXCELLENT', value: runtimeChatExcellentDeploymentName }
+  { name: 'MODEL_CHAT_CONVERSATION', value: runtimeChatConversationDeploymentName }
   { name: 'MODEL_EMBEDDING_DEFAULT', value: azureEmbeddingDeploymentName }
   { name: 'MODEL_PRICE_OVERRIDES_JSON', secretRef: 'model-price-overrides-json' }
   { name: 'EMAIL_FROM', value: emailFrom }
@@ -353,6 +376,8 @@ var commonRuntimeEnv = concat([
   { name: 'APPLICATIONINSIGHTS_CONNECTION_STRING', value: applicationInsights.properties.ConnectionString }
 ], azureOpenAiAuthMode == 'api_key' ? [
   { name: 'AZURE_OPENAI_API_KEY', secretRef: 'azure-openai-api-key' }
+] : [], azureFoundryRuntimeEnv, azureOpenAiAuthMode == 'api_key' && usesAzureFoundryModels ? [
+  { name: 'AZURE_FOUNDRY_API_KEY', secretRef: 'azure-foundry-api-key' }
 ] : [], stripeRuntimeEnv, resendRuntimeEnv, googleOauthRuntimeEnv, microsoftOauthRuntimeEnv)
 
 resource logAnalytics 'Microsoft.OperationalInsights/workspaces@2023-09-01' = {
