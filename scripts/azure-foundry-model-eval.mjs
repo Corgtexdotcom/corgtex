@@ -4,13 +4,10 @@ import { readFile } from "node:fs/promises";
 import process from "node:process";
 
 const DEFAULT_EVAL_SET_PATH = "scripts/fixtures/azure-foundry-sanitized-eval-set.jsonl";
-const DEFAULT_TIMEOUT_MS = Number.parseInt(process.env.AZURE_FOUNDRY_EVAL_TIMEOUT_MS ?? "", 10) || 60_000;
-const DEFAULT_MAX_TOKENS = Number.parseInt(process.env.AZURE_FOUNDRY_EVAL_MAX_TOKENS ?? "", 10) || 600;
-const DEFAULT_RETRIES = Math.max(0, Number.parseInt(process.env.AZURE_FOUNDRY_EVAL_RETRIES ?? "", 10) || 1);
-const DEFAULT_CONCURRENCY = Math.min(
-  4,
-  Math.max(1, Number.parseInt(process.env.AZURE_FOUNDRY_EVAL_CONCURRENCY ?? "", 10) || 2),
-);
+const DEFAULT_TIMEOUT_MS = intEnv("AZURE_FOUNDRY_EVAL_TIMEOUT_MS", 60_000, { min: 1 });
+const DEFAULT_MAX_TOKENS = intEnv("AZURE_FOUNDRY_EVAL_MAX_TOKENS", 600, { min: 1 });
+const DEFAULT_RETRIES = intEnv("AZURE_FOUNDRY_EVAL_RETRIES", 1, { min: 0 });
+const DEFAULT_CONCURRENCY = intEnv("AZURE_FOUNDRY_EVAL_CONCURRENCY", 2, { min: 1, max: 4 });
 const TOKEN_REFRESH_SKEW_MS = 60_000;
 const DEFAULT_PRICES = [
   { provider: "openrouter", model: "deepseek/deepseek-v4-flash", inputUsdPerToken: 0.0000000983, outputUsdPerToken: 0.0000001966 },
@@ -24,6 +21,16 @@ const DEFAULT_PRICES = [
 ];
 const credential = new DefaultAzureCredential();
 const accessTokenCache = new Map();
+
+function intEnv(name, fallback, options = {}) {
+  const raw = process.env[name]?.trim();
+  if (!raw) return fallback;
+  const parsed = Number.parseInt(raw, 10);
+  if (!Number.isFinite(parsed)) return fallback;
+  const min = Number.isFinite(options.min) ? options.min : parsed;
+  const max = Number.isFinite(options.max) ? options.max : parsed;
+  return Math.min(max, Math.max(min, parsed));
+}
 
 function arg(name) {
   const prefix = `--${name}=`;
@@ -63,30 +70,39 @@ function parseCandidates() {
         throw new Error(`AZURE_FOUNDRY_EVAL_CANDIDATES_JSON[${index}].${key} is required.`);
       }
     }
-    const authMode = record.authMode === "managed_identity" ? "managed_identity" : "api_key";
+    if (record.authMode !== undefined && record.authMode !== "api_key" && record.authMode !== "managed_identity") {
+      throw new Error(`AZURE_FOUNDRY_EVAL_CANDIDATES_JSON[${index}].authMode must be api_key or managed_identity.`);
+    }
+    const provider = record.provider.trim().toLowerCase();
+    const model = record.model.trim();
+    const authMode = record.authMode ?? "api_key";
     const apiKeyEnv = typeof record.apiKeyEnv === "string" && record.apiKeyEnv.trim()
       ? record.apiKeyEnv.trim()
-      : record.provider === "openrouter"
+      : provider === "openrouter"
         ? "MODEL_API_KEY"
         : "AZURE_OPENAI_API_KEY";
     return {
       label: record.label.trim(),
-      provider: record.provider.trim(),
-      model: record.model.trim(),
+      provider,
+      model,
       baseUrl: record.baseUrl.trim().replace(/\/+$/, ""),
       authMode,
       apiKeyEnv,
-      temperature: Object.hasOwn(record, "temperature") ? record.temperature : 0,
+      temperature: Object.hasOwn(record, "temperature") ? record.temperature : defaultTemperature(model),
       maxTokenParameter: typeof record.maxTokenParameter === "string" && record.maxTokenParameter.trim()
         ? record.maxTokenParameter.trim()
         : "max_tokens",
       scope: typeof record.scope === "string" && record.scope.trim()
         ? record.scope.trim()
-        : record.provider === "azure-foundry"
+        : provider === "azure-foundry"
           ? "https://ai.azure.com/.default"
           : "https://cognitiveservices.azure.com/.default",
     };
   });
+}
+
+function defaultTemperature(model) {
+  return model === "corgtex-gpt56-luna" ? undefined : 0;
 }
 
 async function readEvalSet(path) {
@@ -146,14 +162,23 @@ function priceFor(provider, model) {
   )) ?? null;
 }
 
-function estimateCost(candidate, usage, text) {
-  const promptTokens = Number.isFinite(usage?.prompt_tokens) ? usage.prompt_tokens : 0;
+function estimateMessageTokens(messages) {
+  const charCount = messages.reduce((sum, message) => sum + String(message.content ?? "").length, 0);
+  return Math.ceil(charCount / 4);
+}
+
+function estimateCost(candidate, usage, text, requestBody) {
+  const promptTokens = Number.isFinite(usage?.prompt_tokens)
+    ? usage.prompt_tokens
+    : estimateMessageTokens(requestBody.messages ?? []);
   const completionTokens = Number.isFinite(usage?.completion_tokens) ? usage.completion_tokens : Math.ceil(text.length / 4);
   const price = priceFor(candidate.provider, candidate.model);
   if (!price) return null;
   return {
     inputTokens: promptTokens,
     outputTokens: completionTokens,
+    estimatedInputTokens: !Number.isFinite(usage?.prompt_tokens),
+    estimatedOutputTokens: !Number.isFinite(usage?.completion_tokens),
     rawProviderCostUsd: (promptTokens * price.inputUsdPerToken + completionTokens * price.outputUsdPerToken).toFixed(6),
   };
 }
@@ -219,6 +244,7 @@ async function callCandidate(candidate, item) {
       },
     }
     : {};
+  const requestBody = completionRequestBody(candidate, item);
   const response = await fetch(`${candidate.baseUrl}/chat/completions`, {
     method: "POST",
     headers: {
@@ -227,7 +253,7 @@ async function callCandidate(candidate, item) {
     },
     body: JSON.stringify({
       ...providerOptions,
-      ...completionRequestBody(candidate, item),
+      ...requestBody,
     }),
     signal: AbortSignal.timeout(DEFAULT_TIMEOUT_MS),
   });
@@ -245,7 +271,7 @@ async function callCandidate(candidate, item) {
     text,
     latencyMs,
     usage: parsed.usage,
-    cost: estimateCost(candidate, parsed.usage, text),
+    cost: estimateCost(candidate, parsed.usage, text, requestBody),
   };
 }
 

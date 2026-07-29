@@ -29,6 +29,36 @@ const STRICT_BASE_ENV = {
   WORKER_HEALTH_PORT: "3001",
   WORKER_SHUTDOWN_TIMEOUT_MS: "1000",
 };
+const AZURE_OPENAI_MODEL_ENV = {
+  MODEL_CHAT_DEFAULT: "corgtex-chat-standard",
+  MODEL_CHAT_FAST: "corgtex-chat-fast",
+  MODEL_CHAT_STANDARD: "corgtex-chat-standard",
+  MODEL_CHAT_QUALITY: "corgtex-chat-quality",
+  MODEL_CHAT_EXCELLENT: "corgtex-chat-excellent",
+  MODEL_CHAT_CONVERSATION: "corgtex-chat-quality",
+  MODEL_EMBEDDING_DEFAULT: "corgtex-embedding",
+};
+const AZURE_OPENAI_PRICE_OVERRIDES_JSON = JSON.stringify([
+  { provider: "azure-openai", model: "corgtex-chat-standard", inputUsdPerToken: 0.000001, outputUsdPerToken: 0.000006 },
+  { provider: "azure-openai", model: "corgtex-chat-fast", inputUsdPerToken: 0.000001, outputUsdPerToken: 0.000006 },
+  { provider: "azure-openai", model: "corgtex-chat-quality", inputUsdPerToken: 0.000001, outputUsdPerToken: 0.000006 },
+  { provider: "azure-openai", model: "corgtex-chat-excellent", inputUsdPerToken: 0.000001, outputUsdPerToken: 0.000006 },
+  { provider: "azure-openai", model: "corgtex-embedding", inputUsdPerToken: 0.00000002, outputUsdPerToken: 0 },
+]);
+const AZURE_FOUNDRY_MODEL_ENV = {
+  MODEL_CHAT_DEFAULT: "corgtex-ds-v4-flash",
+  MODEL_CHAT_FAST: "corgtex-ds-v4-flash",
+  MODEL_CHAT_STANDARD: "corgtex-ds-v4-flash",
+  MODEL_CHAT_QUALITY: "corgtex-ds-v4-pro",
+  MODEL_CHAT_EXCELLENT: "corgtex-gpt56-luna",
+  MODEL_CHAT_CONVERSATION: "corgtex-ds-v4-pro",
+  MODEL_EMBEDDING_DEFAULT: "corgtex-ds-v4-flash",
+};
+const AZURE_FOUNDRY_PRICE_OVERRIDES_JSON = JSON.stringify([
+  { provider: "azure-foundry", model: "corgtex-ds-v4-flash", inputUsdPerToken: 0.00000019, outputUsdPerToken: 0.00000051 },
+  { provider: "azure-foundry", model: "corgtex-ds-v4-pro", inputUsdPerToken: 0.00000174, outputUsdPerToken: 0.00000348 },
+  { provider: "azure-foundry", model: "corgtex-gpt56-luna", inputUsdPerToken: 0.000001, outputUsdPerToken: 0.000006 },
+]);
 
 function runReadiness(env, args = []) {
   return spawnSync(process.execPath, [scriptPath, ...args], {
@@ -64,11 +94,12 @@ describe("self-serve production readiness", () => {
   it("accepts Azure OpenAI managed identity without MODEL_API_KEY in strict mode", () => {
     const result = runReadiness({
       ...STRICT_BASE_ENV,
+      ...AZURE_OPENAI_MODEL_ENV,
       MODEL_PROVIDER: "azure-openai",
       MODEL_BASE_URL: "https://example.openai.azure.com/openai/v1",
       AZURE_OPENAI_AUTH_MODE: "managed_identity",
       AZURE_CLIENT_ID: "00000000-0000-4000-8000-000000000000",
-      MODEL_PRICE_OVERRIDES_JSON: "[]",
+      MODEL_PRICE_OVERRIDES_JSON: AZURE_OPENAI_PRICE_OVERRIDES_JSON,
     }, ["--strict", "--skip-http"]);
 
     expect(result.status).toBe(0);
@@ -76,6 +107,7 @@ describe("self-serve production readiness", () => {
     expect(result.stdout).toContain("OK   EMAIL_FROM uses notifications@auth.corgtex.com");
     expect(result.stdout).toContain("OK   EMAIL_REPLY_TO uses support@corgtex.com");
     expect(result.stdout).toContain("OK   MODEL_BASE_URL configured");
+    expect(result.stdout).toContain("OK   MODEL_PRICE_OVERRIDES_JSON includes azure-openai/corgtex-chat-standard");
     expect(result.stdout).toContain("OK   AZURE_OPENAI_AUTH_MODE configured for managed identity");
     expect(result.stderr).toBe("");
   });
@@ -83,23 +115,18 @@ describe("self-serve production readiness", () => {
   it("accepts Azure Foundry managed identity with explicit model pricing in strict mode", () => {
     const result = runReadiness({
       ...STRICT_BASE_ENV,
+      ...AZURE_FOUNDRY_MODEL_ENV,
       MODEL_PROVIDER: "azure-foundry",
       MODEL_BASE_URL: "https://example.openai.azure.com/openai/v1",
       AZURE_OPENAI_AUTH_MODE: "managed_identity",
       AZURE_CLIENT_ID: "00000000-0000-4000-8000-000000000000",
-      MODEL_PRICE_OVERRIDES_JSON: JSON.stringify([
-        {
-          provider: "azure-foundry",
-          model: "corgtex-ds-v4-flash",
-          inputUsdPerToken: 0.00000019,
-          outputUsdPerToken: 0.00000051,
-        },
-      ]),
+      MODEL_PRICE_OVERRIDES_JSON: AZURE_FOUNDRY_PRICE_OVERRIDES_JSON,
     }, ["--strict", "--skip-http"]);
 
     expect(result.status).toBe(0);
     expect(result.stdout).toContain("OK   MODEL_BASE_URL configured");
-    expect(result.stdout).toContain("OK   MODEL_PRICE_OVERRIDES_JSON configured");
+    expect(result.stdout).toContain("OK   MODEL_PRICE_OVERRIDES_JSON valid");
+    expect(result.stdout).toContain("OK   MODEL_PRICE_OVERRIDES_JSON includes azure-foundry/corgtex-gpt56-luna");
     expect(result.stdout).toContain("OK   AZURE_OPENAI_AUTH_MODE configured for managed identity");
     expect(result.stderr).toBe("");
   });
@@ -107,6 +134,7 @@ describe("self-serve production readiness", () => {
   it("requires Azure pricing overrides in strict mode", () => {
     const result = runReadiness({
       ...STRICT_BASE_ENV,
+      ...AZURE_FOUNDRY_MODEL_ENV,
       MODEL_PROVIDER: "azure-foundry",
       MODEL_BASE_URL: "https://example.openai.azure.com/openai/v1",
       AZURE_OPENAI_AUTH_MODE: "managed_identity",
@@ -115,6 +143,36 @@ describe("self-serve production readiness", () => {
 
     expect(result.status).toBe(1);
     expect(result.stderr).toContain("MODEL_PRICE_OVERRIDES_JSON missing for Azure model pricing");
+  });
+
+  it("requires exact Azure pricing entries in strict mode", () => {
+    const result = runReadiness({
+      ...STRICT_BASE_ENV,
+      ...AZURE_FOUNDRY_MODEL_ENV,
+      MODEL_PROVIDER: "azure-foundry",
+      MODEL_BASE_URL: "https://example.openai.azure.com/openai/v1",
+      AZURE_OPENAI_AUTH_MODE: "managed_identity",
+      AZURE_CLIENT_ID: "00000000-0000-4000-8000-000000000000",
+      MODEL_PRICE_OVERRIDES_JSON: "[]",
+    }, ["--strict", "--skip-http"]);
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("MODEL_PRICE_OVERRIDES_JSON missing price for azure-foundry/corgtex-ds-v4-flash");
+  });
+
+  it("rejects malformed Azure pricing overrides in strict mode", () => {
+    const result = runReadiness({
+      ...STRICT_BASE_ENV,
+      ...AZURE_FOUNDRY_MODEL_ENV,
+      MODEL_PROVIDER: "azure-foundry",
+      MODEL_BASE_URL: "https://example.openai.azure.com/openai/v1",
+      AZURE_OPENAI_AUTH_MODE: "managed_identity",
+      AZURE_CLIENT_ID: "00000000-0000-4000-8000-000000000000",
+      MODEL_PRICE_OVERRIDES_JSON: "{not-json",
+    }, ["--strict", "--skip-http"]);
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("MODEL_PRICE_OVERRIDES_JSON must be valid JSON");
   });
 
   it("accepts an Azure Foundry per-model canary route while OpenRouter remains the global provider", () => {
@@ -146,6 +204,54 @@ describe("self-serve production readiness", () => {
     expect(result.stdout).toContain("OK   MODEL_PROVIDER_ROUTES_JSON route for corgtex-gpt56-luna has Azure Foundry base URL");
     expect(result.stdout).toContain("OK   MODEL_PROVIDER_ROUTES_JSON route for corgtex-gpt56-luna uses managed identity");
     expect(result.stderr).toBe("");
+  });
+
+  it("accepts an OpenRouter rollback route while Azure is the global provider", () => {
+    const result = runReadiness({
+      ...STRICT_BASE_ENV,
+      ...AZURE_FOUNDRY_MODEL_ENV,
+      MODEL_PROVIDER: "azure-foundry",
+      MODEL_BASE_URL: "https://example.services.ai.azure.com/openai/v1",
+      AZURE_OPENAI_AUTH_MODE: "managed_identity",
+      AZURE_CLIENT_ID: "00000000-0000-4000-8000-000000000000",
+      MODEL_PROVIDER_ROUTES_JSON: JSON.stringify([
+        {
+          model: "deepseek/deepseek-v4-pro",
+          provider: "openrouter",
+          baseUrl: "https://openrouter.ai/api/v1",
+          apiKeyEnv: "OPENROUTER_ROLLBACK_KEY",
+        },
+      ]),
+      MODEL_PRICE_OVERRIDES_JSON: AZURE_FOUNDRY_PRICE_OVERRIDES_JSON,
+      OPENROUTER_ROLLBACK_KEY: "openrouter-key-placeholder",
+    }, ["--strict", "--skip-http"]);
+
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain("OK   MODEL_PROVIDER_ROUTES_JSON route for deepseek/deepseek-v4-pro has OpenRouter base URL");
+    expect(result.stdout).toContain("OK   OPENROUTER_ROLLBACK_KEY configured");
+    expect(result.stderr).toBe("");
+  });
+
+  it("requires non-Azure rollback routes to include a base URL and key", () => {
+    const result = runReadiness({
+      ...STRICT_BASE_ENV,
+      ...AZURE_FOUNDRY_MODEL_ENV,
+      MODEL_PROVIDER: "azure-foundry",
+      MODEL_BASE_URL: "https://example.services.ai.azure.com/openai/v1",
+      AZURE_OPENAI_AUTH_MODE: "managed_identity",
+      AZURE_CLIENT_ID: "00000000-0000-4000-8000-000000000000",
+      MODEL_PROVIDER_ROUTES_JSON: JSON.stringify([
+        {
+          model: "deepseek/deepseek-v4-pro",
+          provider: "openrouter",
+        },
+      ]),
+      MODEL_PRICE_OVERRIDES_JSON: AZURE_FOUNDRY_PRICE_OVERRIDES_JSON,
+    }, ["--strict", "--skip-http"]);
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("MODEL_PROVIDER_ROUTES_JSON route for deepseek/deepseek-v4-pro requires baseUrl");
+    expect(result.stderr).toContain("MODEL_API_KEY missing for OpenRouter route deepseek/deepseek-v4-pro");
   });
 
   it("rejects malformed per-model provider routes in strict mode", () => {
