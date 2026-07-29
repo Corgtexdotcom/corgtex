@@ -138,6 +138,26 @@ describe("Finance V2 access policy", () => {
     });
   });
 
+  it("reads section capabilities from FINANCE config", async () => {
+    const { financeCapabilitiesFromConfig } = await import("./finance");
+
+    expect(financeCapabilitiesFromConfig({
+      financeCapabilities: {
+        overview: true,
+        projects: true,
+        clients: true,
+        slicingPie: true,
+        capital: false,
+      },
+    })).toMatchObject({
+      overview: true,
+      projects: true,
+      clients: true,
+      "slicing-pie": true,
+      capital: false,
+    });
+  });
+
   it("requires the finance read scope for credential agents", async () => {
     requireAgentScopeMock.mockImplementationOnce(() => {
       throw Object.assign(new Error("Agent credential is missing the required scope."), {
@@ -154,6 +174,47 @@ describe("Finance V2 access policy", () => {
 
   it("gates project creation on the projects capability flag", async () => {
     prismaMock.workspaceFeatureFlag.findMany.mockResolvedValueOnce(financeFlags());
+    const { createFinanceProject } = await import("./finance");
+
+    await expect(createFinanceProject(actor, {
+      workspaceId: "workspace-1",
+      name: "Pilot rollout",
+    })).rejects.toMatchObject({ code: "FINANCE_CAPABILITY_DISABLED" });
+    expect(prismaMock.financeProject.create).not.toHaveBeenCalled();
+  });
+
+  it("creates projects when FINANCE config enables the projects capability", async () => {
+    prismaMock.workspaceFeatureFlag.findMany.mockResolvedValueOnce(financeFlags([
+      {
+        flag: "FINANCE",
+        enabled: true,
+        config: {
+          financeAllMemberWrite: true,
+          financeCapabilities: { projects: true },
+        },
+      },
+    ]));
+    prismaMock.financeProject.create.mockResolvedValueOnce({ id: "project-1" });
+    const { createFinanceProject } = await import("./finance");
+
+    await expect(createFinanceProject(actor, {
+      workspaceId: "workspace-1",
+      name: "Pilot rollout",
+    })).resolves.toEqual({ id: "project-1" });
+  });
+
+  it("lets FINANCE config disable a standalone section flag", async () => {
+    prismaMock.workspaceFeatureFlag.findMany.mockResolvedValueOnce(financeFlags([
+      {
+        flag: "FINANCE",
+        enabled: true,
+        config: {
+          financeAllMemberWrite: true,
+          financeCapabilities: { projects: false },
+        },
+      },
+      { flag: "FINANCE_PROJECTS", enabled: true },
+    ]));
     const { createFinanceProject } = await import("./finance");
 
     await expect(createFinanceProject(actor, {
@@ -258,6 +319,28 @@ describe("Finance V2 access policy", () => {
         cashStatus: "REQUESTED",
       }),
     });
+  });
+
+  it("creates Slicing Pie cash contributions when FINANCE config enables Slicing Pie", async () => {
+    prismaMock.workspaceFeatureFlag.findMany.mockResolvedValueOnce(financeFlags([
+      {
+        flag: "FINANCE",
+        enabled: true,
+        config: {
+          financeAllMemberWrite: true,
+          financeCapabilities: { slicingPie: true },
+        },
+      },
+    ]));
+    prismaMock.financeContributionEntry.create.mockResolvedValueOnce({ id: "entry-1" });
+    const { createFinanceContributionEntry } = await import("./finance");
+
+    await expect(createFinanceContributionEntry(actor, {
+      workspaceId: "workspace-1",
+      type: "EXPENSE",
+      paymentChoice: "CASH",
+      amountCents: 5000,
+    })).resolves.toEqual({ id: "entry-1" });
   });
 
   it("rejects contribution amounts above the Prisma Int range", async () => {
@@ -539,8 +622,17 @@ describe("Finance V2 access policy", () => {
   it("returns a read-only readiness diagnostic without Practice Ledger revival", async () => {
     const latestProjectUpdate = new Date("2026-07-28T11:00:00.000Z");
     prismaMock.workspaceFeatureFlag.findMany.mockResolvedValueOnce(financeFlags([
-      { flag: "FINANCE_PROJECTS", enabled: true },
-      { flag: "FINANCE_SLICING_PIE", enabled: true },
+      {
+        flag: "FINANCE",
+        enabled: true,
+        config: {
+          financeAllMemberWrite: true,
+          financeCapabilities: {
+            projects: true,
+            slicingPie: true,
+          },
+        },
+      },
     ]));
     prismaMock.financeClient.count.mockResolvedValueOnce(2);
     prismaMock.financeConsultant.count.mockResolvedValueOnce(3);
@@ -554,7 +646,8 @@ describe("Finance V2 access policy", () => {
 
     const { getFinanceReadiness } = await import("./finance");
 
-    await expect(getFinanceReadiness(actor, "workspace-1")).resolves.toMatchObject({
+    const readiness = await getFinanceReadiness(actor, "workspace-1");
+    expect(readiness).toMatchObject({
       ready: true,
       access: {
         financeAllMemberWrite: true,
@@ -579,11 +672,39 @@ describe("Finance V2 access policy", () => {
       },
       latestFinanceUpdateAt: latestProjectUpdate,
     });
+    expect(readiness.flags).toEqual(expect.arrayContaining([
+      expect.objectContaining({ key: "projects", enabled: true }),
+      expect.objectContaining({ key: "slicing-pie", enabled: true }),
+      expect.objectContaining({ key: "capital", enabled: false }),
+    ]));
     expect(prismaMock.financeClient.count).toHaveBeenCalledWith({ where: { workspaceId: "workspace-1", status: "ACTIVE", archivedAt: null } });
     expect(prismaMock.financeConsultant.count).toHaveBeenCalledWith({ where: { workspaceId: "workspace-1", status: "ACTIVE", archivedAt: null } });
     expect(prismaMock.financeProject.count).toHaveBeenCalledWith({ where: { workspaceId: "workspace-1", status: { not: "ARCHIVED" }, archivedAt: null } });
     expect(prismaMock.financeTimeEntry.count).toHaveBeenCalledWith({ where: { workspaceId: "workspace-1", status: { not: "ARCHIVED" }, archivedAt: null } });
     expect(prismaMock.financeExpense.count).toHaveBeenCalledWith({ where: { workspaceId: "workspace-1", status: { not: "ARCHIVED" }, archivedAt: null } });
+  });
+
+  it("applies explicit overview capability config in readiness", async () => {
+    prismaMock.workspaceFeatureFlag.findMany.mockResolvedValueOnce(financeFlags([
+      {
+        flag: "FINANCE",
+        enabled: true,
+        config: {
+          financeAllMemberWrite: true,
+          financeCapabilities: {
+            overview: false,
+          },
+        },
+      },
+    ]));
+    const { getFinanceReadiness } = await import("./finance");
+
+    const readiness = await getFinanceReadiness(actor, "workspace-1");
+
+    expect(readiness.flags).toEqual(expect.arrayContaining([
+      expect.objectContaining({ key: "overview", enabled: false }),
+      expect.objectContaining({ key: "projects", enabled: false }),
+    ]));
   });
 
   it("includes Finance flag changes in the readiness update timestamp", async () => {

@@ -8,6 +8,7 @@ import { defaultWorkspaceFeatureFlags, getModuleByKey, isAtLeast, type MemberRol
 
 export const FINANCE_PARENT_FLAG = "FINANCE";
 export const FINANCE_ALL_MEMBER_WRITE_CONFIG_KEY = "financeAllMemberWrite";
+export const FINANCE_CAPABILITIES_CONFIG_KEY = "financeCapabilities";
 
 export const FINANCE_SECTIONS = [
   { key: "overview", label: "Overview", href: "/finance", flag: null },
@@ -24,6 +25,22 @@ export const FINANCE_SECTIONS = [
 export type FinanceSectionKey = typeof FINANCE_SECTIONS[number]["key"];
 export type FinanceCapabilityFlag = Exclude<typeof FINANCE_SECTIONS[number]["flag"], null>;
 
+const FINANCE_SECTION_CONFIG_KEYS: Record<FinanceSectionKey, string[]> = {
+  overview: ["overview"],
+  projects: ["projects"],
+  clients: ["clients"],
+  consultants: ["consultants"],
+  time: ["time"],
+  expenses: ["expenses"],
+  reports: ["reports"],
+  "slicing-pie": ["slicingPie", "slicing-pie"],
+  capital: ["capital"],
+};
+
+const FINANCE_SECTION_KEY_BY_FLAG = new Map<FinanceCapabilityFlag, FinanceSectionKey>(
+  FINANCE_SECTIONS.flatMap((section) => section.flag ? [[section.flag, section.key] as const] : []),
+);
+
 const FINANCE_FLAG_KEYS = [
   FINANCE_PARENT_FLAG,
   ...FINANCE_SECTIONS.flatMap((section) => section.flag ? [section.flag] : []),
@@ -38,6 +55,36 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 export function financeAllMemberWriteFromConfig(config: unknown): boolean {
   return isRecord(config) && config[FINANCE_ALL_MEMBER_WRITE_CONFIG_KEY] === true;
+}
+
+export function financeCapabilitiesFromConfig(config: unknown): Partial<Record<FinanceSectionKey, boolean>> {
+  if (!isRecord(config)) return {};
+  const rawCapabilities = config[FINANCE_CAPABILITIES_CONFIG_KEY];
+  if (!isRecord(rawCapabilities)) return {};
+
+  const capabilities: Partial<Record<FinanceSectionKey, boolean>> = {};
+  for (const section of FINANCE_SECTIONS) {
+    for (const key of FINANCE_SECTION_CONFIG_KEYS[section.key]) {
+      if (typeof rawCapabilities[key] === "boolean") {
+        capabilities[section.key] = rawCapabilities[key];
+        break;
+      }
+    }
+  }
+  return capabilities;
+}
+
+function resolveFinanceSectionCapabilities(flags: Record<string, boolean>, config: unknown): Record<FinanceSectionKey, boolean> {
+  const capabilities = financeCapabilitiesFromConfig(config);
+  const financeEnabled = Boolean(flags[FINANCE_PARENT_FLAG]);
+  const sectionCapabilities = {} as Record<FinanceSectionKey, boolean>;
+  for (const section of FINANCE_SECTIONS) {
+    const configured = capabilities[section.key];
+    sectionCapabilities[section.key] = financeEnabled && (typeof configured === "boolean"
+      ? configured
+      : section.flag ? Boolean(flags[section.flag]) : true);
+  }
+  return sectionCapabilities;
 }
 
 function normalizeCurrency(value: string | null | undefined) {
@@ -85,16 +132,13 @@ async function financeFlagState(workspaceId: string) {
     configByFlag.set(record.flag, record.config ?? null);
     updatedAtByFlag.set(record.flag, record.updatedAt ?? null);
   }
+  const financeConfig = configByFlag.get(FINANCE_PARENT_FLAG) ?? null;
   return {
     flags,
-    financeConfig: configByFlag.get(FINANCE_PARENT_FLAG) ?? null,
+    sectionCapabilities: resolveFinanceSectionCapabilities(flags, financeConfig),
+    financeConfig,
     updatedAtByFlag,
   };
-}
-
-function capabilityEnabled(flags: Record<string, boolean>, flag: FinanceCapabilityFlag | null) {
-  if (!flags[FINANCE_PARENT_FLAG]) return false;
-  return flag ? Boolean(flags[flag]) : true;
 }
 
 function requireHumanActorUserId(actor: AppActor) {
@@ -182,6 +226,7 @@ export async function getFinanceAccessPolicy(actor: AppActor, workspaceId: strin
     canRead,
     canWrite,
     flags: flagState.flags,
+    sectionCapabilities: flagState.sectionCapabilities,
     financeConfig: flagState.financeConfig,
     flagUpdatedAtByFlag: flagState.updatedAtByFlag,
   };
@@ -205,8 +250,9 @@ export async function requireFinanceHumanWriteAccess(actor: AppActor, workspaceI
   return policy as typeof policy & { member: MembershipSummary };
 }
 
-export function requireFinanceCapability(flags: Record<string, boolean>, flag: FinanceCapabilityFlag) {
-  invariant(capabilityEnabled(flags, flag), 404, "FINANCE_CAPABILITY_DISABLED", "This Finance section is not enabled for this workspace.");
+export function requireFinanceCapability(sectionCapabilities: Record<string, boolean>, flag: FinanceCapabilityFlag) {
+  const sectionKey = FINANCE_SECTION_KEY_BY_FLAG.get(flag);
+  invariant(sectionKey && sectionCapabilities[sectionKey], 404, "FINANCE_CAPABILITY_DISABLED", "This Finance section is not enabled for this workspace.");
 }
 
 export async function createFinanceProject(actor: AppActor, params: {
@@ -218,7 +264,7 @@ export async function createFinanceProject(actor: AppActor, params: {
 }) {
   const policy = await requireFinanceHumanWriteAccess(actor, params.workspaceId);
   const actorUserId = requireHumanActorUserId(actor);
-  requireFinanceCapability(policy.flags, "FINANCE_PROJECTS");
+  requireFinanceCapability(policy.sectionCapabilities, "FINANCE_PROJECTS");
   const clientId = await requireFinanceClientInWorkspace(params.workspaceId, params.clientId);
   const name = normalizeName(params.name, "Project name");
   const budgetCents = normalizeCents(params.budgetCents, "Budget", true);
@@ -257,7 +303,7 @@ export async function createFinanceContributionEntry(actor: AppActor, params: {
 }) {
   const policy = await requireFinanceHumanWriteAccess(actor, params.workspaceId);
   const actorUserId = requireHumanActorUserId(actor);
-  requireFinanceCapability(policy.flags, params.type === "CAPITAL" ? "FINANCE_CAPITAL" : "FINANCE_SLICING_PIE");
+  requireFinanceCapability(policy.sectionCapabilities, params.type === "CAPITAL" ? "FINANCE_CAPITAL" : "FINANCE_SLICING_PIE");
   invariant(params.paymentChoice !== "CAPITAL" || params.type === "CAPITAL", 400, "INVALID_INPUT", "Capital payment choice requires a capital contribution.");
   invariant(params.minutes == null || (Number.isInteger(params.minutes) && params.minutes > 0 && params.minutes <= PRISMA_INT_MAX), 400, "INVALID_INPUT", "Minutes must be a positive whole number within the Prisma Int range.");
   const amountCents = normalizeCents(params.amountCents, "Amount", false);
@@ -315,7 +361,7 @@ export async function confirmFinanceCashPayablePaid(actor: AppActor, params: {
   invariant(payable.paymentChoice === "CASH", 400, "PAYABLE_NOT_CASH", "Only cash payables can be confirmed as paid.");
   invariant(payable.cashStatus !== "PAID", 409, "PAYABLE_ALREADY_PAID", "This payable is already paid.");
   invariant(payable.cashStatus === "REQUESTED", 400, "PAYABLE_NOT_REQUESTED", "This payable is not awaiting payment.");
-  requireFinanceCapability(policy.flags, payable.type === "CAPITAL" ? "FINANCE_CAPITAL" : "FINANCE_SLICING_PIE");
+  requireFinanceCapability(policy.sectionCapabilities, payable.type === "CAPITAL" ? "FINANCE_CAPITAL" : "FINANCE_SLICING_PIE");
 
   const creatorUserIds = new Set([payable.submittedByUserId, payable.contributorUserId].filter(Boolean));
   invariant(creatorUserIds.size > 0, 409, "PAYABLE_SUBMITTER_REQUIRED", "A human submitter must be recorded before payment can be confirmed.");
@@ -430,7 +476,7 @@ export async function getFinanceReadiness(actor: AppActor, workspaceId: string) 
       key: section.key,
       label: section.label,
       flag: section.flag,
-      enabled: capabilityEnabled(policy.flags, section.flag),
+      enabled: policy.sectionCapabilities[section.key],
     })),
     access: {
       role: policy.role,
