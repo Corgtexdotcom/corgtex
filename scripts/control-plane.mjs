@@ -29,6 +29,7 @@ function usage() {
     "  CONTROL_PLANE_AGENT_API_KEY=... node scripts/control-plane.mjs record-release <deploymentId> <releaseImageTag> <reason> [releaseVersion]",
     "  CONTROL_PLANE_AGENT_API_KEY=... node scripts/control-plane.mjs set-feature <deploymentId> <flag> <enabled> <reason> [json-config]",
     "  CONTROL_PLANE_AGENT_API_KEY=... node scripts/control-plane.mjs run-support <deploymentId> <action> <reason> '<json-args>'",
+    "  CONTROL_PLANE_AGENT_API_KEY=... node scripts/control-plane.mjs record-support-audit <deploymentId> <action> <reason> '<json-audit>' [idempotencyKey]",
     "  CONTROL_PLANE_AGENT_API_KEY=... node scripts/control-plane.mjs call <toolName> '<json-args>'",
   ].join("\n"));
   process.exit(1);
@@ -191,6 +192,15 @@ try {
       action: requireValue(args[1], "action"),
       reason: requireValue(args[2], "reason"),
       arguments: parseJsonArg(args[3]),
+    }));
+  } else if (command === "record-support-audit") {
+    const audit = parseJsonArg(args[3]);
+    print(await callTool("record_customer_support_audit", {
+      ...audit,
+      deploymentId: requireValue(args[0], "deploymentId"),
+      action: requireValue(args[1], "action"),
+      reason: requireValue(args[2], "reason"),
+      idempotencyKey: args[4] || audit.idempotencyKey,
     }));
   } else if (command === "call") {
     print(await callTool(requireValue(args[0], "toolName"), parseJsonArg(args[1])));
