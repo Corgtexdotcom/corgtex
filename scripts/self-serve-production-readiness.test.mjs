@@ -256,6 +256,28 @@ describe("self-serve production readiness", () => {
     expect(result.stderr).toBe("");
   });
 
+  it("accepts MODEL_API_KEY fallback for same-provider Azure routes that inherit the global endpoint", () => {
+    const result = runReadiness({
+      ...STRICT_BASE_ENV,
+      ...AZURE_OPENAI_MODEL_ENV,
+      MODEL_PROVIDER: "azure-openai",
+      MODEL_BASE_URL: "https://example.openai.azure.com/openai/v1",
+      AZURE_OPENAI_AUTH_MODE: "api_key",
+      MODEL_API_KEY: "model-key-placeholder",
+      MODEL_PROVIDER_ROUTES_JSON: JSON.stringify([
+        {
+          model: "corgtex-chat-standard",
+          provider: "azure-openai",
+        },
+      ]),
+      MODEL_PRICE_OVERRIDES_JSON: AZURE_OPENAI_PRICE_OVERRIDES_JSON,
+    }, ["--strict", "--skip-http"]);
+
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain("OK   Azure OpenAI API key configured for route corgtex-chat-standard");
+    expect(result.stderr).toBe("");
+  });
+
   it("rejects managed-identity Azure routes to non-Azure hosts", () => {
     const result = runReadiness({
       ...STRICT_BASE_ENV,

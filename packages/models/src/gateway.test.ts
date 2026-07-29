@@ -765,6 +765,37 @@ describe("openAICompatibleModelGateway", () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
+  it("rejects plaintext per-model provider route URLs at runtime", async () => {
+    restoreEnv();
+    Object.assign(process.env, {
+      MODEL_PROVIDER: "openrouter",
+      MODEL_API_KEY: "openrouter-key",
+      MODEL_BASE_URL: "https://openrouter.ai/api/v1",
+      MODEL_PROVIDER_ROUTES_JSON: JSON.stringify([
+        {
+          model: "deepseek/deepseek-v4-pro",
+          provider: "openrouter",
+          baseUrl: "http://openrouter.ai/api/v1",
+          apiKeyEnv: "OPENROUTER_ROUTE_KEY",
+        },
+      ]),
+      OPENROUTER_ROUTE_KEY: "route-key",
+    });
+
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { openAICompatibleModelGateway } = await import("./openai-compatible-gateway");
+
+    await expect(openAICompatibleModelGateway.chat({
+      workspaceId: "ws-1",
+      taskType: "CHAT",
+      model: "deepseek/deepseek-v4-pro",
+      messages: [{ role: "user", content: "Hello" }],
+    })).rejects.toThrow("MODEL_PROVIDER_ROUTES_JSON[0].baseUrl must be an HTTPS URL");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it("requires an explicit key env when a non-Azure route changes providers", async () => {
     restoreEnv();
     Object.assign(process.env, {

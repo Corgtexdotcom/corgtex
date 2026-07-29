@@ -94,6 +94,14 @@ function routeStringField(record: Record<string, unknown>, field: string) {
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
 }
 
+function isHttpsBaseUrl(value: string) {
+  try {
+    return new URL(value).protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
 function parseModelProviderRoutes() {
   const raw = env.MODEL_PROVIDER_ROUTES_JSON;
   if (!raw) {
@@ -132,11 +140,15 @@ function parseModelProviderRoutes() {
       throw new Error(`MODEL_PROVIDER_ROUTES_JSON[${index}].authMode must be api_key or managed_identity.`);
     }
     const authMode = authModeRaw as AzureOpenAiAuthMode | undefined;
+    const routeBaseUrl = routeStringField(record, "baseUrl");
+    if (routeBaseUrl && !isHttpsBaseUrl(routeBaseUrl)) {
+      throw new Error(`MODEL_PROVIDER_ROUTES_JSON[${index}].baseUrl must be an HTTPS URL.`);
+    }
 
     return {
       model,
       provider: provider.toLowerCase(),
-      baseUrl: routeStringField(record, "baseUrl"),
+      baseUrl: routeBaseUrl,
       authMode,
       apiKeyEnv: routeStringField(record, "apiKeyEnv"),
       scope: routeStringField(record, "scope"),

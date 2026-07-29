@@ -425,8 +425,10 @@ function checkProviderRouteConfiguration(strict) {
         } else {
           warn(message);
         }
+      } else if (configured("AZURE_OPENAI_API_KEY") || configured("MODEL_API_KEY")) {
+        pass(`${label} API key configured for route ${route.model}`);
       } else {
-        checkConfigured("AZURE_OPENAI_API_KEY", strict, `AZURE_OPENAI_API_KEY missing for ${label} route ${route.model}.`);
+        checkConfigured("AZURE_OPENAI_API_KEY", strict, `AZURE_OPENAI_API_KEY or MODEL_API_KEY missing for ${label} route ${route.model}.`);
       }
       continue;
     }
