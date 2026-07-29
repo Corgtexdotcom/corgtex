@@ -182,8 +182,8 @@ jobs:
           require AZURE_OPENAI_BASE_URL
           if [[ "$MODEL_PROVIDER" == "azure-foundry" ]]; then
             require AZURE_FOUNDRY_BASE_URL
-            if [[ -n "$AZURE_FOUNDRY_BASE_URL" && ! "$AZURE_FOUNDRY_BASE_URL" =~ ^https://[A-Za-z0-9.-]+\.services\.ai\.azure\.com/openai(/.*)?$ ]]; then
-              echo "::error::azure_foundry_base_url must be an HTTPS Azure Foundry OpenAI-compatible endpoint under .services.ai.azure.com/openai."
+            if [[ -n "$AZURE_FOUNDRY_BASE_URL" && ! "$AZURE_FOUNDRY_BASE_URL" =~ ^https://[A-Za-z0-9.-]+\.services\.ai\.azure\.com/openai/v1/?$ ]]; then
+              echo "::error::azure_foundry_base_url must be an HTTPS Azure Foundry OpenAI-compatible endpoint under .services.ai.azure.com/openai/v1."
               exit 1
             fi
           fi

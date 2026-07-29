@@ -739,7 +739,7 @@ describe("Azure Foundry model eval helpers", () => {
       },
     ]);
 
-    expect(() => parseCandidates()).toThrow("baseUrl must be a trusted Azure OpenAI-compatible URL for managed identity");
+    expect(() => parseCandidates()).toThrow("baseUrl must be a trusted Azure OpenAI-compatible /openai/v1 URL for managed identity");
   });
 
   it("rejects API-key Azure evaluation candidates on non-Azure hosts", () => {
@@ -753,7 +753,25 @@ describe("Azure Foundry model eval helpers", () => {
       },
     ]);
 
-    expect(() => parseCandidates()).toThrow("baseUrl must be a trusted Azure OpenAI-compatible URL for API key");
+    expect(() => parseCandidates()).toThrow("baseUrl must be a trusted Azure OpenAI-compatible /openai/v1 URL for API key");
+  });
+
+  it.each([
+    "https://corgtex-foundry-models-wus3.services.ai.azure.com/openai",
+    "https://corgtex-foundry-models-wus3.services.ai.azure.com/openai/v2",
+    "https://corgtex-foundry-models-wus3.services.ai.azure.com/openai/v1?api-version=2026-07-29",
+  ])("rejects Azure evaluation candidates without an exact /openai/v1 base path: %s", (baseUrl) => {
+    process.env.AZURE_FOUNDRY_EVAL_CANDIDATES_JSON = JSON.stringify([
+      {
+        label: "Foundry candidate",
+        provider: "azure-foundry",
+        model: "corgtex-gpt56-luna",
+        baseUrl,
+        authMode: "api_key",
+      },
+    ]);
+
+    expect(() => parseCandidates()).toThrow("baseUrl must be a trusted Azure OpenAI-compatible /openai/v1 URL for API key");
   });
 
   it("does not treat negated forbidden phrases as forbidden mentions", () => {

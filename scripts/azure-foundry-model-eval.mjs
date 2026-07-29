@@ -55,12 +55,12 @@ function isTrustedAzureBaseUrl(provider, value) {
 
     const host = url.hostname.toLowerCase();
     const path = url.pathname.replace(/\/+$/, "");
-    const hasOpenAiPath = path === "/openai" || path.startsWith("/openai/");
+    const hasOpenAiV1BasePath = path === "/openai/v1" && !url.search && !url.hash;
     if (provider === "azure-foundry") {
-      return host.endsWith(".services.ai.azure.com") && hasOpenAiPath;
+      return host.endsWith(".services.ai.azure.com") && hasOpenAiV1BasePath;
     }
     if (provider === "azure-openai") {
-      return host.endsWith(".openai.azure.com") && hasOpenAiPath;
+      return host.endsWith(".openai.azure.com") && hasOpenAiV1BasePath;
     }
     return false;
   } catch {
@@ -130,7 +130,7 @@ function parseCandidates() {
       throw new Error(`AZURE_FOUNDRY_EVAL_CANDIDATES_JSON[${index}].authMode managed_identity is only supported for Azure candidates.`);
     }
     if (AZURE_EVAL_PROVIDERS.has(provider) && !isTrustedAzureBaseUrl(provider, record.baseUrl.trim())) {
-      throw new Error(`AZURE_FOUNDRY_EVAL_CANDIDATES_JSON[${index}].baseUrl must be a trusted Azure OpenAI-compatible URL for ${authMode === "managed_identity" ? "managed identity" : "API key"}.`);
+      throw new Error(`AZURE_FOUNDRY_EVAL_CANDIDATES_JSON[${index}].baseUrl must be a trusted Azure OpenAI-compatible /openai/v1 URL for ${authMode === "managed_identity" ? "managed identity" : "API key"}.`);
     }
     const explicitApiKeyEnv = typeof record.apiKeyEnv === "string" && record.apiKeyEnv.trim()
       ? record.apiKeyEnv.trim()

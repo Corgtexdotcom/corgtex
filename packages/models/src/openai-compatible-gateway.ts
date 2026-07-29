@@ -317,13 +317,13 @@ function isTrustedAzureBaseUrl(provider: string, value: string) {
 
   const host = url.hostname.toLowerCase();
   const path = url.pathname.replace(/\/+$/, "");
-  const hasOpenAiPath = path === "/openai" || path.startsWith("/openai/");
+  const hasOpenAiV1BasePath = path === "/openai/v1" && !url.search && !url.hash;
   if (provider === "azure-foundry") {
-    return host.endsWith(".services.ai.azure.com") && hasOpenAiPath;
+    return host.endsWith(".services.ai.azure.com") && hasOpenAiV1BasePath;
   }
 
   if (provider === "azure-openai") {
-    return host.endsWith(".openai.azure.com") && hasOpenAiPath;
+    return host.endsWith(".openai.azure.com") && hasOpenAiV1BasePath;
   }
 
   return false;
@@ -332,7 +332,7 @@ function isTrustedAzureBaseUrl(provider: string, value: string) {
 function assertTrustedAzureAuthBaseUrl(provider: string, route: ModelProviderRoute | undefined, authLabel: string) {
   const resolvedBaseUrl = baseUrl(route);
   if (!isTrustedAzureBaseUrl(provider, resolvedBaseUrl)) {
-    throw new Error(`${provider} ${authLabel} authentication requires a trusted Azure OpenAI-compatible base URL.`);
+    throw new Error(`${provider} ${authLabel} authentication requires a trusted Azure OpenAI-compatible /openai/v1 base URL.`);
   }
 }
 

@@ -587,7 +587,7 @@ describe("openAICompatibleModelGateway", () => {
       taskType: "CHAT",
       model: "corgtex-gpt56-luna",
       messages: [{ role: "user", content: "Hello" }],
-    })).rejects.toThrow("azure-foundry managed identity authentication requires a trusted Azure OpenAI-compatible base URL");
+    })).rejects.toThrow("azure-foundry managed identity authentication requires a trusted Azure OpenAI-compatible /openai/v1 base URL");
     expect(azureIdentityMock.getToken).not.toHaveBeenCalled();
     expect(fetchMock).not.toHaveBeenCalled();
   });
@@ -901,7 +901,34 @@ describe("openAICompatibleModelGateway", () => {
       workspaceId: "ws-1",
       taskType: "CHAT",
       messages: [{ role: "user", content: "Hello" }],
-    })).rejects.toThrow("azure-foundry API key authentication requires a trusted Azure OpenAI-compatible base URL");
+    })).rejects.toThrow("azure-foundry API key authentication requires a trusted Azure OpenAI-compatible /openai/v1 base URL");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    "https://corgtex-foundry.services.ai.azure.com/openai",
+    "https://corgtex-foundry.services.ai.azure.com/openai/v2",
+    "https://corgtex-foundry.services.ai.azure.com/openai/v1?api-version=2026-07-29",
+  ])("rejects Azure-compatible endpoints without an exact /openai/v1 base path: %s", async (modelBaseUrl) => {
+    restoreEnv();
+    Object.assign(process.env, {
+      MODEL_PROVIDER: "azure-foundry",
+      MODEL_BASE_URL: modelBaseUrl,
+      AZURE_OPENAI_AUTH_MODE: "api_key",
+      AZURE_OPENAI_API_KEY: "foundry-key",
+      MODEL_CHAT_DEFAULT: "corgtex-ds-v4-flash",
+    });
+
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { openAICompatibleModelGateway } = await import("./openai-compatible-gateway");
+
+    await expect(openAICompatibleModelGateway.chat({
+      workspaceId: "ws-1",
+      taskType: "CHAT",
+      messages: [{ role: "user", content: "Hello" }],
+    })).rejects.toThrow("azure-foundry API key authentication requires a trusted Azure OpenAI-compatible /openai/v1 base URL");
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
@@ -933,7 +960,7 @@ describe("openAICompatibleModelGateway", () => {
       taskType: "CHAT",
       model: "corgtex-ds-v4-flash",
       messages: [{ role: "user", content: "Hello" }],
-    })).rejects.toThrow("azure-foundry API key authentication requires a trusted Azure OpenAI-compatible base URL");
+    })).rejects.toThrow("azure-foundry API key authentication requires a trusted Azure OpenAI-compatible /openai/v1 base URL");
     expect(fetchMock).not.toHaveBeenCalled();
   });
 

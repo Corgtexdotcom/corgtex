@@ -327,7 +327,7 @@ describe("self-serve production readiness", () => {
     }, ["--strict", "--skip-http"]);
 
     expect(result.status).toBe(1);
-    expect(result.stderr).toContain("Azure Foundry managed identity route for corgtex-gpt56-luna requires a trusted Azure OpenAI-compatible base URL");
+    expect(result.stderr).toContain("Azure Foundry managed identity route for corgtex-gpt56-luna requires a trusted Azure OpenAI-compatible /openai/v1 base URL");
   });
 
   it("rejects Azure API-key routes to non-Azure hosts", () => {
@@ -348,7 +348,7 @@ describe("self-serve production readiness", () => {
     }, ["--strict", "--skip-http"]);
 
     expect(result.status).toBe(1);
-    expect(result.stderr).toContain("Azure Foundry API key route for corgtex-gpt56-luna requires a trusted Azure OpenAI-compatible base URL");
+    expect(result.stderr).toContain("Azure Foundry API key route for corgtex-gpt56-luna requires a trusted Azure OpenAI-compatible /openai/v1 base URL");
   });
 
   it("rejects global managed-identity Azure providers on non-Azure hosts", () => {
@@ -363,7 +363,7 @@ describe("self-serve production readiness", () => {
     }, ["--strict", "--skip-http"]);
 
     expect(result.status).toBe(1);
-    expect(result.stderr).toContain("Azure Foundry managed identity route for global model traffic requires a trusted Azure OpenAI-compatible base URL");
+    expect(result.stderr).toContain("Azure Foundry managed identity route for global model traffic requires a trusted Azure OpenAI-compatible /openai/v1 base URL");
   });
 
   it("rejects global Azure API-key providers on non-Azure hosts", () => {
@@ -378,7 +378,26 @@ describe("self-serve production readiness", () => {
     }, ["--strict", "--skip-http"]);
 
     expect(result.status).toBe(1);
-    expect(result.stderr).toContain("Azure Foundry API key route for global model traffic requires a trusted Azure OpenAI-compatible base URL");
+    expect(result.stderr).toContain("Azure Foundry API key route for global model traffic requires a trusted Azure OpenAI-compatible /openai/v1 base URL");
+  });
+
+  it.each([
+    "https://example.services.ai.azure.com/openai",
+    "https://example.services.ai.azure.com/openai/v2",
+    "https://example.services.ai.azure.com/openai/v1?api-version=2026-07-29",
+  ])("rejects Azure Foundry base URLs without an exact /openai/v1 base path: %s", (modelBaseUrl) => {
+    const result = runReadiness({
+      ...STRICT_BASE_ENV,
+      ...AZURE_FOUNDRY_MODEL_ENV,
+      MODEL_PROVIDER: "azure-foundry",
+      MODEL_BASE_URL: modelBaseUrl,
+      AZURE_OPENAI_AUTH_MODE: "api_key",
+      AZURE_OPENAI_API_KEY: "foundry-key-placeholder",
+      MODEL_PRICE_OVERRIDES_JSON: AZURE_FOUNDRY_PRICE_OVERRIDES_JSON,
+    }, ["--strict", "--skip-http"]);
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("Azure Foundry API key route for global model traffic requires a trusted Azure OpenAI-compatible /openai/v1 base URL");
   });
 
   it("accepts an OpenRouter rollback route while Azure is the global provider", () => {
