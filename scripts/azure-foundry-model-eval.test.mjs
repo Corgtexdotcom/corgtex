@@ -197,7 +197,7 @@ describe("Azure Foundry model eval helpers", () => {
           fields: {
             decisions: { allOf: ["Barcelona pilot", ["proceed", "approved"], ["no external announcement", "external announcement yet"]] },
             actions: { allOf: ["Mina", "vendor cap", "Friday", "Support", ["two days", "2 days"]] },
-            risks: { allOf: ["Data import", ["risk", "remains a risk"], ["duplicate company rows", "duplicate rows"]] },
+            risks: { allOf: ["Data import", ["risk", "risky", "remains a risk"], ["duplicate company rows", "duplicate rows"]] },
           },
         },
       ],
@@ -246,7 +246,7 @@ describe("Azure Foundry model eval helpers", () => {
 
     const matchedScore = scoreItem(
       item,
-      "{\"summary\":\"Barcelona pilot planning is in scope.\",\"decisions\":[\"Proceed with Barcelona pilot planning; no external announcement yet.\"],\"actions\":[\"Mina owns the vendor cap check by Friday and will include Support's two days of notice in the launch note.\"],\"risks\":[\"Data import remains risky because of duplicate company rows.\"]}",
+      "{\"summary\":\"Barcelona pilot planning is in scope.\",\"decisions\":[\"Proceed with Barcelona pilot planning; no external announcement yet.\"],\"actions\":[\"Mina owns the finance vendor cap check by Friday and will include Support's two days of notice in the launch note.\"],\"risks\":[\"Data import remains risky because of duplicate company rows.\"]}",
     );
     expect(matchedScore.schemaValid).toBe(true);
     expect(matchedScore.missingJsonMatches).toEqual([]);
