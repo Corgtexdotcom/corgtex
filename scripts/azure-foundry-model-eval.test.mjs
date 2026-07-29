@@ -562,6 +562,36 @@ describe("Azure Foundry model eval helpers", () => {
     });
   });
 
+  it("requires explicit keys for custom OpenAI-compatible evaluation origins", () => {
+    process.env.AZURE_FOUNDRY_EVAL_CANDIDATES_JSON = JSON.stringify([
+      {
+        label: "OpenAI proxy",
+        provider: "openai",
+        model: "gpt-4o",
+        baseUrl: "https://proxy.example/v1",
+      },
+    ]);
+
+    expect(() => parseCandidates()).toThrow("apiKeyEnv is required when openai uses a custom baseUrl");
+  });
+
+  it("allows custom evaluation origins with dedicated key envs", () => {
+    process.env.AZURE_FOUNDRY_EVAL_CANDIDATES_JSON = JSON.stringify([
+      {
+        label: "OpenRouter proxy",
+        provider: "openrouter",
+        model: "deepseek/deepseek-v4-flash",
+        baseUrl: "https://proxy.example/api/v1",
+        apiKeyEnv: "OPENROUTER_PROXY_KEY",
+      },
+    ]);
+
+    expect(parseCandidates()[0]).toMatchObject({
+      provider: "openrouter",
+      apiKeyEnv: "OPENROUTER_PROXY_KEY",
+    });
+  });
+
   it("defaults Azure Foundry API-key candidates to AZURE_FOUNDRY_API_KEY", () => {
     process.env.AZURE_FOUNDRY_EVAL_CANDIDATES_JSON = JSON.stringify([
       {
@@ -689,6 +719,37 @@ describe("Azure Foundry model eval helpers", () => {
   it("keeps polarity handling scoped to forbidden matching", () => {
     expect(conceptMatches(["ready to send now"], "not ready to send now")).toBe(true);
     expect(conceptMatches(["ready to send now"], "not ready to send now", { polarityAware: true })).toBe(false);
+  });
+
+  it("treats negated required facts as missing", () => {
+    const score = scoreItem({
+      mode: "json",
+      requiredKeys: ["actions"],
+      requiredJsonMatches: [
+        {
+          label: "Jordan shortlist action",
+          path: "actions",
+          fields: {
+            owner: "Jordan",
+            title: "buyer shortlist",
+          },
+        },
+      ],
+      requiredConcepts: [
+        { label: "Jordan shortlist", allOf: ["Jordan", "buyer shortlist"] },
+      ],
+    }, JSON.stringify({
+      actions: [
+        {
+          owner: "Jordan",
+          title: "Jordan will not prepare the buyer shortlist",
+        },
+      ],
+    }));
+
+    expect(score.missingJsonMatches).toEqual(["Jordan shortlist action"]);
+    expect(score.missingConcepts).toEqual(["Jordan shortlist"]);
+    expect(score.passed).toBe(false);
   });
 
   it("matches concepts on token boundaries", () => {

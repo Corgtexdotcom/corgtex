@@ -68,6 +68,23 @@ function isTrustedAzureBaseUrl(provider, value) {
   }
 }
 
+function isCanonicalDefaultKeyBaseUrl(provider, value) {
+  try {
+    const url = new URL(value);
+    const host = url.hostname.toLowerCase();
+    const path = url.pathname.replace(/\/+$/, "");
+    if (provider === "openai") {
+      return host === "api.openai.com" && (path === "/v1" || path.startsWith("/v1/"));
+    }
+    if (provider === "openrouter") {
+      return host === "openrouter.ai" && (path === "/api/v1" || path.startsWith("/api/v1/"));
+    }
+    return false;
+  } catch {
+    return false;
+  }
+}
+
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -115,9 +132,13 @@ function parseCandidates() {
     if (AZURE_EVAL_PROVIDERS.has(provider) && !isTrustedAzureBaseUrl(provider, record.baseUrl.trim())) {
       throw new Error(`AZURE_FOUNDRY_EVAL_CANDIDATES_JSON[${index}].baseUrl must be a trusted Azure OpenAI-compatible URL for ${authMode === "managed_identity" ? "managed identity" : "API key"}.`);
     }
-    const apiKeyEnv = typeof record.apiKeyEnv === "string" && record.apiKeyEnv.trim()
+    const explicitApiKeyEnv = typeof record.apiKeyEnv === "string" && record.apiKeyEnv.trim()
       ? record.apiKeyEnv.trim()
-      : defaultApiKeyEnv(provider);
+      : "";
+    if (!explicitApiKeyEnv && !AZURE_EVAL_PROVIDERS.has(provider) && !isCanonicalDefaultKeyBaseUrl(provider, record.baseUrl.trim())) {
+      throw new Error(`AZURE_FOUNDRY_EVAL_CANDIDATES_JSON[${index}].apiKeyEnv is required when ${provider} uses a custom baseUrl.`);
+    }
+    const apiKeyEnv = explicitApiKeyEnv || defaultApiKeyEnv(provider);
     return {
       label: record.label.trim(),
       provider,
@@ -300,7 +321,7 @@ function jsonMatchSatisfied(parsedJson, match) {
   const candidates = Array.isArray(value) ? value : [value];
   return candidates.some((candidate) => (
     isObjectRecord(candidate) && Object.entries(fields).every(([field, concept]) => (
-      conceptMatches(concept, normalize(jsonValueText(jsonPathValue(candidate, field))))
+      conceptMatches(concept, normalize(jsonValueText(jsonPathValue(candidate, field))), { polarityAware: true })
     ))
   ));
 }
@@ -691,7 +712,7 @@ function textSectionSatisfied(text, section, sections) {
     return false;
   }
   const normalizedContent = normalize(content);
-  return textSectionConcepts(section).every((concept) => conceptMatches(concept, normalizedContent));
+  return textSectionConcepts(section).every((concept) => conceptMatches(concept, normalizedContent, { polarityAware: true }));
 }
 
 function jsonShapeFailures(value, shape, path) {
@@ -773,7 +794,7 @@ function scoreItem(item, text) {
     !textSectionSatisfied(text, section, textSections)
   )).map(sectionLabel);
   const missingConcepts = requiredConcepts(item).filter((concept) => {
-    return !conceptMatches(concept, conceptSearchText);
+    return !conceptMatches(concept, conceptSearchText, { polarityAware: true });
   }).map(conceptLabel);
   const forbiddenMentions = forbiddenConcepts(item).filter((concept) => (
     conceptMatches(concept, conceptSearchText, { polarityAware: true })

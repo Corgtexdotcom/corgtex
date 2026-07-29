@@ -145,6 +145,9 @@ function parseModelProviderRoutes() {
       throw new Error(`MODEL_PROVIDER_ROUTES_JSON[${index}].authMode must be api_key or managed_identity.`);
     }
     const authMode = authModeRaw as AzureOpenAiAuthMode | undefined;
+    if (authMode === "managed_identity" && !isAzureProvider(normalizedProvider)) {
+      throw new Error(`MODEL_PROVIDER_ROUTES_JSON[${index}].authMode managed_identity is only supported for Azure routes.`);
+    }
     const routeBaseUrl = routeStringField(record, "baseUrl");
     if (routeBaseUrl && !isHttpsBaseUrl(routeBaseUrl)) {
       throw new Error(`MODEL_PROVIDER_ROUTES_JSON[${index}].baseUrl must be an HTTPS URL.`);

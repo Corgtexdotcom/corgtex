@@ -827,6 +827,38 @@ describe("openAICompatibleModelGateway", () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
+  it("rejects managed identity on non-Azure routed providers at runtime", async () => {
+    restoreEnv();
+    Object.assign(process.env, {
+      MODEL_PROVIDER: "openrouter",
+      MODEL_API_KEY: "openrouter-key",
+      MODEL_BASE_URL: "https://openrouter.ai/api/v1",
+      MODEL_PROVIDER_ROUTES_JSON: JSON.stringify([
+        {
+          model: "gpt-4o",
+          provider: "openai",
+          baseUrl: "https://api.openai.com/v1",
+          authMode: "managed_identity",
+          apiKeyEnv: "OPENAI_ROUTE_KEY",
+        },
+      ]),
+      OPENAI_ROUTE_KEY: "route-key",
+    });
+
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { openAICompatibleModelGateway } = await import("./openai-compatible-gateway");
+
+    await expect(openAICompatibleModelGateway.chat({
+      workspaceId: "ws-1",
+      taskType: "CHAT",
+      model: "gpt-4o",
+      messages: [{ role: "user", content: "Hello" }],
+    })).rejects.toThrow("MODEL_PROVIDER_ROUTES_JSON[0].authMode managed_identity is only supported for Azure routes");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it("rejects plaintext global provider endpoints at runtime", async () => {
     restoreEnv();
     Object.assign(process.env, {
