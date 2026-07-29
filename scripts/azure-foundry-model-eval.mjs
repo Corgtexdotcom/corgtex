@@ -107,7 +107,7 @@ function defaultTemperature(model) {
 
 async function readEvalSet(path) {
   const text = await readFile(path, "utf8");
-  return text
+  const evalSet = text
     .split("\n")
     .map((line) => line.trim())
     .filter(Boolean)
@@ -118,6 +118,10 @@ async function readEvalSet(path) {
         throw new Error(`${path}:${index + 1} is not valid JSON.`);
       }
     });
+  if (evalSet.length === 0) {
+    throw new Error(`${path} must contain at least one evaluation case.`);
+  }
+  return evalSet;
 }
 
 async function mapWithConcurrency(items, limit, mapper) {
@@ -257,8 +261,8 @@ async function callCandidate(candidate, item) {
     }),
     signal: AbortSignal.timeout(DEFAULT_TIMEOUT_MS),
   });
-  const latencyMs = Date.now() - startedAt;
   const body = await response.text();
+  const latencyMs = Date.now() - startedAt;
   if (!response.ok) {
     const error = new Error(`provider returned HTTP ${response.status}`);
     error.retryable = response.status === 429 || response.status >= 500;
@@ -329,6 +333,26 @@ function conceptTerms(concept) {
   return [];
 }
 
+function termGroupTerms(group) {
+  if (Array.isArray(group)) return group.map(String);
+  return [String(group)];
+}
+
+function conceptTermGroups(concept) {
+  if (concept && typeof concept === "object" && !Array.isArray(concept) && Array.isArray(concept.allOf)) {
+    return concept.allOf.map(termGroupTerms);
+  }
+  const terms = conceptTerms(concept);
+  return terms.length > 0 ? [terms] : [];
+}
+
+function conceptMatches(concept, normalizedText) {
+  const groups = conceptTermGroups(concept);
+  return groups.length > 0 && groups.every((group) => (
+    group.some((term) => normalizedText.includes(normalize(term)))
+  ));
+}
+
 function requiredConcepts(item) {
   if (Array.isArray(item.requiredConcepts)) return item.requiredConcepts;
   if (Array.isArray(item.mustMention)) return item.mustMention;
@@ -346,11 +370,10 @@ function scoreItem(item, text) {
   const parsedJson = item.mode === "json" ? parseJsonObject(text) : null;
   const missingKeys = item.requiredKeys?.filter((key) => !(parsedJson && Object.hasOwn(parsedJson, key))) ?? [];
   const missingConcepts = requiredConcepts(item).filter((concept) => {
-    const terms = conceptTerms(concept);
-    return terms.length === 0 || !terms.some((term) => normalizedText.includes(normalize(term)));
+    return !conceptMatches(concept, normalizedText);
   }).map(conceptLabel);
   const forbiddenMentions = forbiddenConcepts(item).filter((concept) => (
-    conceptTerms(concept).some((term) => normalizedText.includes(normalize(term)))
+    conceptMatches(concept, normalizedText)
   )).map(conceptLabel);
   return {
     schemaValid: item.mode !== "json" || missingKeys.length === 0,

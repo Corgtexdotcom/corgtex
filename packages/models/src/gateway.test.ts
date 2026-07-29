@@ -521,6 +521,68 @@ describe("openAICompatibleModelGateway", () => {
     });
   });
 
+  it("does not fall back to the global Azure key when a routed Azure key env is missing", async () => {
+    restoreEnv();
+    Object.assign(process.env, {
+      MODEL_PROVIDER: "openrouter",
+      MODEL_API_KEY: "openrouter-key",
+      MODEL_BASE_URL: "https://openrouter.ai/api/v1",
+      AZURE_OPENAI_API_KEY: "global-azure-key",
+      MODEL_PROVIDER_ROUTES_JSON: JSON.stringify([
+        {
+          model: "corgtex-ds-v4-flash",
+          provider: "azure-foundry",
+          baseUrl: "https://corgtex-foundry.services.ai.azure.com/openai/v1/",
+          authMode: "api_key",
+          apiKeyEnv: "FOUNDRY_ROUTE_KEY",
+        },
+      ]),
+    });
+
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { openAICompatibleModelGateway } = await import("./openai-compatible-gateway");
+
+    await expect(openAICompatibleModelGateway.chat({
+      workspaceId: "ws-1",
+      taskType: "CHAT",
+      model: "corgtex-ds-v4-flash",
+      messages: [{ role: "user", content: "Hello" }],
+    })).rejects.toThrow("FOUNDRY_ROUTE_KEY is required for routed Azure API key authentication");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("does not fall back to MODEL_API_KEY when a routed OpenRouter key env is missing", async () => {
+    restoreEnv();
+    Object.assign(process.env, {
+      MODEL_PROVIDER: "azure-foundry",
+      MODEL_BASE_URL: "https://corgtex-foundry.services.ai.azure.com/openai/v1",
+      MODEL_API_KEY: "global-openrouter-key",
+      MODEL_PROVIDER_ROUTES_JSON: JSON.stringify([
+        {
+          model: "deepseek/deepseek-v4-pro",
+          provider: "openrouter",
+          baseUrl: "https://openrouter.ai/api/v1",
+          apiKeyEnv: "OPENROUTER_ROUTE_KEY",
+        },
+      ]),
+    });
+
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { openAICompatibleModelGateway } = await import("./openai-compatible-gateway");
+
+    await expect(openAICompatibleModelGateway.chat({
+      workspaceId: "ws-1",
+      taskType: "CHAT",
+      model: "deepseek/deepseek-v4-pro",
+      messages: [{ role: "user", content: "Hello" }],
+    })).rejects.toThrow("OPENROUTER_ROUTE_KEY is required for routed OpenAI-compatible provider authentication");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it("keeps unrouted models on OpenRouter when a Foundry provider route exists", async () => {
     restoreEnv();
     Object.assign(process.env, {

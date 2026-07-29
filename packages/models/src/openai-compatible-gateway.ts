@@ -165,23 +165,35 @@ function optionalSecretEnv(name: string) {
 }
 
 function requireApiKey(route?: ModelProviderRoute) {
-  const routeKey = route?.apiKeyEnv ? optionalSecretEnv(route.apiKeyEnv) : undefined;
-  const key = routeKey ?? env.MODEL_API_KEY;
+  if (route?.apiKeyEnv) {
+    const routeKey = optionalSecretEnv(route.apiKeyEnv);
+    if (!routeKey) {
+      throw new Error(`${route.apiKeyEnv} is required for routed OpenAI-compatible provider authentication.`);
+    }
+    return routeKey;
+  }
+
+  const key = env.MODEL_API_KEY;
   if (!key) {
-    throw new Error(route?.apiKeyEnv
-      ? `MODEL_API_KEY or ${route.apiKeyEnv} is required for the OpenAI-compatible model provider.`
-      : "MODEL_API_KEY is required for the OpenAI-compatible model provider.");
+    throw new Error("MODEL_API_KEY is required for the OpenAI-compatible model provider.");
   }
 
   return key;
 }
 
 function requireAzureApiKey(route?: ModelProviderRoute) {
-  const routeKey = route?.apiKeyEnv ? optionalSecretEnv(route.apiKeyEnv) : undefined;
-  const key = routeKey ?? env.AZURE_OPENAI_API_KEY ?? (route ? undefined : env.MODEL_API_KEY);
+  if (route?.apiKeyEnv) {
+    const routeKey = optionalSecretEnv(route.apiKeyEnv);
+    if (!routeKey) {
+      throw new Error(`${route.apiKeyEnv} is required for routed Azure API key authentication.`);
+    }
+    return routeKey;
+  }
+
+  const key = env.AZURE_OPENAI_API_KEY ?? (route ? undefined : env.MODEL_API_KEY);
   if (!key) {
     throw new Error(route
-      ? `AZURE_OPENAI_API_KEY${route.apiKeyEnv ? ` or ${route.apiKeyEnv}` : ""} is required for Azure API key authentication.`
+      ? "AZURE_OPENAI_API_KEY is required for Azure API key authentication."
       : "AZURE_OPENAI_API_KEY or MODEL_API_KEY is required for Azure OpenAI API key authentication.");
   }
 
