@@ -161,9 +161,17 @@ function priceFor(provider, model) {
   return prices.find((price) => (
     normalize(price.provider) === normalize(provider) &&
     normalize(price.model) === normalize(model) &&
-    typeof price.inputUsdPerToken === "number" &&
-    typeof price.outputUsdPerToken === "number"
+    isUsablePriceEntry(price)
   )) ?? null;
+}
+
+function isUsablePriceEntry(price) {
+  return typeof price.inputUsdPerToken === "number" &&
+    Number.isFinite(price.inputUsdPerToken) &&
+    price.inputUsdPerToken >= 0 &&
+    typeof price.outputUsdPerToken === "number" &&
+    Number.isFinite(price.outputUsdPerToken) &&
+    price.outputUsdPerToken >= 0;
 }
 
 function parsePriceOverrides() {
