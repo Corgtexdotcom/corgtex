@@ -71,6 +71,9 @@ param azureChatQualityDeploymentName string = 'corgtex-chat-quality'
 @description('Azure OpenAI deployment name for excellent chat calls.')
 param azureChatExcellentDeploymentName string = 'corgtex-chat-excellent'
 
+@description('Whether the excellent Foundry deployment rejects custom temperature. Keep true for GPT 5.6 Luna aliases.')
+param azureChatExcellentOmitsTemperature bool = true
+
 @description('Azure OpenAI deployment name for conversation chat calls.')
 param azureChatConversationDeploymentName string = 'corgtex-chat-conversation'
 
@@ -287,6 +290,10 @@ var azureFoundryProviderRoutes = azureOpenAiAuthMode == 'api_key'
   ? azureFoundryApiKeyProviderRoutes
   : azureFoundryManagedIdentityProviderRoutes
 var azureFoundryProviderRoutesJson = string(azureFoundryProviderRoutes)
+var azureFoundryOmitTemperatureModels = azureChatExcellentOmitsTemperature ? runtimeChatExcellentDeploymentName : ''
+var azureFoundryOmitTemperatureRuntimeEnv = usesAzureFoundryModels && !empty(azureFoundryOmitTemperatureModels) ? [
+  { name: 'MODEL_OMIT_TEMPERATURE_MODELS', value: azureFoundryOmitTemperatureModels }
+] : []
 
 var requiredSecretRefs = [
   { name: 'database-url', keyVaultSecretName: databaseUrlSecretName }
@@ -345,9 +352,9 @@ var microsoftOauthRuntimeEnv = enableMicrosoftOauthSecrets ? [
   { name: 'MICROSOFT_CLIENT_ID', secretRef: 'microsoft-client-id' }
   { name: 'MICROSOFT_CLIENT_SECRET', secretRef: 'microsoft-client-secret' }
 ] : []
-var azureFoundryRuntimeEnv = usesAzureFoundryModels ? [
+var azureFoundryRuntimeEnv = usesAzureFoundryModels ? concat([
   { name: 'MODEL_PROVIDER_ROUTES_JSON', value: azureFoundryProviderRoutesJson }
-] : []
+], azureFoundryOmitTemperatureRuntimeEnv) : []
 
 var commonRuntimeEnv = concat([
   { name: 'NODE_ENV', value: 'production' }

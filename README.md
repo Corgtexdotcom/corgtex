@@ -84,6 +84,7 @@ Required environment variables for the core application (usually set in `.env` o
 - `MODEL_CHAT_CONVERSATION`: e.g., `google/gemini-2.5-flash` or a deployment alias used for interactive chat
 - `MODEL_EMBEDDING_DEFAULT`: e.g., `google/gemini-embedding-001`
 - `MODEL_PRICE_OVERRIDES_JSON`: Required for Azure deployments without built-in pricing
+- `MODEL_OMIT_TEMPERATURE_MODELS`: Optional comma-separated deployment aliases whose provider rejects `temperature`; `corgtex-gpt56-luna` is always treated this way.
 
 ## Enterprise Deployment (Configuration Repo Pattern)
 

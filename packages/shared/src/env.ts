@@ -102,6 +102,7 @@ type Env = {
   readonly MODEL_BASE_URL: string | undefined;
   readonly MODEL_PROVIDER_ROUTES_JSON: string | undefined;
   readonly MODEL_PRICE_OVERRIDES_JSON: string | undefined;
+  readonly MODEL_OMIT_TEMPERATURE_MODELS: string | undefined;
   readonly AZURE_OPENAI_AUTH_MODE: AzureOpenAiAuthMode;
   readonly AZURE_OPENAI_API_KEY: string | undefined;
   readonly AZURE_OPENAI_SCOPE: string;
@@ -236,6 +237,9 @@ export const env: Env = {
   },
   get MODEL_PRICE_OVERRIDES_JSON() {
     return optional("MODEL_PRICE_OVERRIDES_JSON");
+  },
+  get MODEL_OMIT_TEMPERATURE_MODELS() {
+    return optional("MODEL_OMIT_TEMPERATURE_MODELS");
   },
   get AZURE_OPENAI_AUTH_MODE() {
     return azureOpenAiAuthMode();

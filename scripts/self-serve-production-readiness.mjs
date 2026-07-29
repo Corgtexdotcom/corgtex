@@ -291,8 +291,13 @@ function parseProviderRoutes() {
       return [];
     }
     seenModels.add(model);
+    const normalizedProvider = route.provider.trim().toLowerCase();
     if (route.authMode !== undefined && route.authMode !== "api_key" && route.authMode !== "managed_identity") {
       fail(`MODEL_PROVIDER_ROUTES_JSON[${index}].authMode must be api_key or managed_identity.`);
+      return [];
+    }
+    if (route.authMode === "managed_identity" && !isAzureProvider(normalizedProvider)) {
+      fail(`MODEL_PROVIDER_ROUTES_JSON[${index}].authMode managed_identity is only supported for Azure routes.`);
       return [];
     }
     if (route.baseUrl !== undefined && (typeof route.baseUrl !== "string" || !route.baseUrl.trim())) {
@@ -310,7 +315,7 @@ function parseProviderRoutes() {
 
     return [{
       model,
-      provider: route.provider.trim().toLowerCase(),
+      provider: normalizedProvider,
       baseUrl: typeof route.baseUrl === "string" ? route.baseUrl.trim() : "",
       authMode: typeof route.authMode === "string" ? route.authMode : "",
       apiKeyEnv: typeof route.apiKeyEnv === "string" ? route.apiKeyEnv.trim() : "",

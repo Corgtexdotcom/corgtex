@@ -1093,6 +1093,55 @@ describe("openAICompatibleModelGateway", () => {
     });
   });
 
+  it("omits custom temperature for configured Luna deployment aliases", async () => {
+    restoreEnv();
+    Object.assign(process.env, {
+      MODEL_PROVIDER: "azure-foundry",
+      MODEL_BASE_URL: "https://corgtex-foundry.services.ai.azure.com/openai/v1",
+      AZURE_OPENAI_AUTH_MODE: "api_key",
+      AZURE_OPENAI_API_KEY: "foundry-key",
+      MODEL_CHAT_DEFAULT: "corgtex-luna-enterprise",
+      MODEL_OMIT_TEMPERATURE_MODELS: "corgtex-luna-enterprise",
+      MODEL_PRICE_OVERRIDES_JSON: JSON.stringify([
+        {
+          provider: "azure-foundry",
+          model: "corgtex-luna-enterprise",
+          inputUsdPerToken: 0.000001,
+          outputUsdPerToken: 0.000006,
+        },
+      ]),
+    });
+
+    const fetchMock = vi.fn().mockResolvedValueOnce(new Response(JSON.stringify({
+      choices: [{ message: { content: "Foundry answer" } }],
+      usage: { prompt_tokens: 1000, completion_tokens: 500 },
+    }), { status: 200 }));
+
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { openAICompatibleModelGateway } = await import("./openai-compatible-gateway");
+
+    const chat = await openAICompatibleModelGateway.chat({
+      workspaceId: "ws-1",
+      taskType: "CHAT",
+      messages: [{ role: "user", content: "Hello" }],
+    });
+
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    const body = JSON.parse(String(init.body)) as Record<string, unknown>;
+
+    expect(body).toMatchObject({
+      model: "corgtex-luna-enterprise",
+    });
+    expect(body.temperature).toBeUndefined();
+    expect(chat.usage).toMatchObject({
+      provider: "azure-foundry",
+      model: "corgtex-luna-enterprise",
+      rawProviderCostUsd: "0.004000",
+      estimatedCostUsd: "0.008000",
+    });
+  });
+
   it("blocks Azure OpenAI calls when deployment pricing is missing", async () => {
     restoreEnv();
     Object.assign(process.env, {

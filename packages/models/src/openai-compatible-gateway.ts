@@ -68,6 +68,7 @@ const AZURE_TOKEN_REFRESH_SKEW_MS = 60_000;
 const AZURE_FOUNDRY_SCOPE = "https://ai.azure.com/.default";
 const AZURE_OPENAI_SCOPE = "https://cognitiveservices.azure.com/.default";
 const SUPPORTED_MODEL_PROVIDERS = new Set(["openrouter", "openai", "azure-openai", "azure-foundry"]);
+const BUILT_IN_TEMPERATURE_UNSUPPORTED_MODELS = new Set(["corgtex-gpt56-luna"]);
 
 class ExtractionParseError extends Error {
   readonly raw: string;
@@ -437,7 +438,15 @@ function withProviderOptions(provider: string, body: Record<string, unknown>) {
 }
 
 function supportsCustomTemperature(model: string) {
-  return model !== "corgtex-gpt56-luna";
+  if (BUILT_IN_TEMPERATURE_UNSUPPORTED_MODELS.has(model)) {
+    return false;
+  }
+
+  return !(env.MODEL_OMIT_TEMPERATURE_MODELS ?? "")
+    .split(",")
+    .map((value) => value.trim())
+    .filter(Boolean)
+    .includes(model);
 }
 
 function chatCompletionBody(model: string, body: Record<string, unknown>) {

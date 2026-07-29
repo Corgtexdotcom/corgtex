@@ -268,6 +268,27 @@ describe("self-serve production readiness", () => {
     expect(result.stderr).toBe("");
   });
 
+  it("rejects managed identity on non-Azure provider routes", () => {
+    const result = runReadiness({
+      ...STRICT_BASE_ENV,
+      MODEL_PROVIDER: "openrouter",
+      MODEL_API_KEY: "openrouter-key-placeholder",
+      OPENROUTER_ROUTE_KEY: "openrouter-route-key-placeholder",
+      MODEL_PROVIDER_ROUTES_JSON: JSON.stringify([
+        {
+          model: "deepseek/deepseek-v4-pro",
+          provider: "openrouter",
+          baseUrl: "https://openrouter.ai/api/v1",
+          authMode: "managed_identity",
+          apiKeyEnv: "OPENROUTER_ROUTE_KEY",
+        },
+      ]),
+    }, ["--strict", "--skip-http"]);
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("MODEL_PROVIDER_ROUTES_JSON[0].authMode managed_identity is only supported for Azure routes");
+  });
+
   it("accepts MODEL_API_KEY fallback for same-provider Azure routes that inherit the global endpoint", () => {
     const result = runReadiness({
       ...STRICT_BASE_ENV,
