@@ -207,7 +207,8 @@ function requireAzureApiKey(route?: ModelProviderRoute) {
     throw new Error(`MODEL_PROVIDER_ROUTES_JSON route for ${route.model} requires apiKeyEnv when using Azure API key authentication with a routed endpoint.`);
   }
 
-  const key = env.AZURE_OPENAI_API_KEY ?? (route ? undefined : env.MODEL_API_KEY);
+  const usesGlobalEndpoint = !route || (route.provider === env.MODEL_PROVIDER && !route.baseUrl);
+  const key = env.AZURE_OPENAI_API_KEY ?? (usesGlobalEndpoint ? env.MODEL_API_KEY : undefined);
   if (!key) {
     throw new Error(route
       ? "AZURE_OPENAI_API_KEY is required for Azure API key authentication."
@@ -275,6 +276,39 @@ function isAzureProvider(provider = env.MODEL_PROVIDER) {
   return isAzureOpenAiProvider(provider) || provider === "azure-foundry";
 }
 
+function isTrustedAzureManagedIdentityBaseUrl(provider: string, value: string) {
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    return false;
+  }
+
+  if (url.protocol !== "https:") {
+    return false;
+  }
+
+  const host = url.hostname.toLowerCase();
+  const path = url.pathname.replace(/\/+$/, "");
+  const hasOpenAiPath = path === "/openai" || path.startsWith("/openai/");
+  if (provider === "azure-foundry") {
+    return host.endsWith(".services.ai.azure.com") && hasOpenAiPath;
+  }
+
+  if (provider === "azure-openai") {
+    return host.endsWith(".openai.azure.com") && hasOpenAiPath;
+  }
+
+  return false;
+}
+
+function assertTrustedAzureManagedIdentityBaseUrl(provider: string, route?: ModelProviderRoute) {
+  const resolvedBaseUrl = baseUrl(route);
+  if (!isTrustedAzureManagedIdentityBaseUrl(provider, resolvedBaseUrl)) {
+    throw new Error(`${provider} managed identity authentication requires a trusted Azure OpenAI-compatible base URL.`);
+  }
+}
+
 function azureCredentialClient() {
   if (!azureCredential) {
     azureCredential = new DefaultAzureCredential({
@@ -334,6 +368,7 @@ async function authHeaders(route?: ModelProviderRoute) {
   if (isAzureProvider(provider)) {
     const authMode = route?.authMode ?? env.AZURE_OPENAI_AUTH_MODE;
     if (authMode === "managed_identity") {
+      assertTrustedAzureManagedIdentityBaseUrl(provider, route);
       headers.authorization = `Bearer ${await getAzureAccessToken(azureAccessScope(route))}`;
     } else {
       headers["api-key"] = requireAzureApiKey(route);

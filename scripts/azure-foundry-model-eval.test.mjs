@@ -150,6 +150,71 @@ describe("Azure Foundry model eval helpers", () => {
     expect(nestedScore.invalidJsonShapes).toEqual([]);
   });
 
+  it("requires related JSON fields to match within the same object", () => {
+    const item = {
+      mode: "json",
+      requiredKeys: ["actions"],
+      requiredJsonShapes: {
+        actions: {
+          type: "array",
+          minItems: 1,
+          items: {
+            type: "object",
+            requiredKeys: ["title", "owner", "dueDate", "evidence"],
+            properties: {
+              title: { type: "string" },
+              owner: { type: "string" },
+              dueDate: { type: "string" },
+              evidence: { type: "string" },
+            },
+          },
+        },
+      },
+      requiredJsonMatches: [
+        {
+          label: "Jordan shortlist action",
+          path: "actions",
+          fields: {
+            owner: "Jordan",
+            title: "buyer shortlist",
+            dueDate: { anyOf: ["2026-08-03", "August 3"] },
+          },
+        },
+        {
+          label: "Priya DPA blocker action",
+          path: "actions",
+          fields: {
+            owner: "Priya",
+            title: "DPA",
+            evidence: "legal",
+          },
+        },
+      ],
+    };
+
+    const swappedScore = scoreItem(item, JSON.stringify({
+      actions: [
+        { title: "Legal DPA blocker", owner: "Jordan", dueDate: "2026-08-03", evidence: "Waiting on legal" },
+        { title: "Buyer shortlist", owner: "Priya", dueDate: "2026-08-03", evidence: "Notes" },
+      ],
+    }));
+    expect(swappedScore.schemaValid).toBe(true);
+    expect(swappedScore.missingJsonMatches).toEqual([
+      "Jordan shortlist action",
+      "Priya DPA blocker action",
+    ]);
+    expect(swappedScore.passed).toBe(false);
+
+    const matchedScore = scoreItem(item, JSON.stringify({
+      actions: [
+        { title: "Prepare buyer shortlist", owner: "Jordan", dueDate: "2026-08-03", evidence: "Jordan will prepare the buyer shortlist" },
+        { title: "DPA approval blocker", owner: "Priya", dueDate: "", evidence: "Waiting on legal to approve the DPA" },
+      ],
+    }));
+    expect(matchedScore.missingJsonMatches).toEqual([]);
+    expect(matchedScore.passed).toBe(true);
+  });
+
   it("defaults OpenAI evaluation candidates to MODEL_API_KEY", () => {
     process.env.AZURE_FOUNDRY_EVAL_CANDIDATES_JSON = JSON.stringify([
       {
@@ -191,6 +256,20 @@ describe("Azure Foundry model eval helpers", () => {
     ]);
 
     expect(() => parseCandidates()).toThrow("authMode managed_identity is only supported for Azure candidates");
+  });
+
+  it("rejects managed identity Azure evaluation candidates on non-Azure hosts", () => {
+    process.env.AZURE_FOUNDRY_EVAL_CANDIDATES_JSON = JSON.stringify([
+      {
+        label: "Foundry candidate",
+        provider: "azure-foundry",
+        model: "corgtex-gpt56-luna",
+        baseUrl: "https://attacker.example/openai/v1",
+        authMode: "managed_identity",
+      },
+    ]);
+
+    expect(() => parseCandidates()).toThrow("baseUrl must be a trusted Azure OpenAI-compatible URL for managed identity");
   });
 
   it("does not treat negated forbidden phrases as forbidden mentions", () => {

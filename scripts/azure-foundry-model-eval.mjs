@@ -58,6 +58,28 @@ function isHttpsBaseUrl(value) {
   }
 }
 
+function isTrustedAzureManagedIdentityBaseUrl(provider, value) {
+  try {
+    const url = new URL(value);
+    if (url.protocol !== "https:") {
+      return false;
+    }
+
+    const host = url.hostname.toLowerCase();
+    const path = url.pathname.replace(/\/+$/, "");
+    const hasOpenAiPath = path === "/openai" || path.startsWith("/openai/");
+    if (provider === "azure-foundry") {
+      return host.endsWith(".services.ai.azure.com") && hasOpenAiPath;
+    }
+    if (provider === "azure-openai") {
+      return host.endsWith(".openai.azure.com") && hasOpenAiPath;
+    }
+    return false;
+  } catch {
+    return false;
+  }
+}
+
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -101,6 +123,9 @@ function parseCandidates() {
     const authMode = record.authMode ?? "api_key";
     if (authMode === "managed_identity" && !AZURE_EVAL_PROVIDERS.has(provider)) {
       throw new Error(`AZURE_FOUNDRY_EVAL_CANDIDATES_JSON[${index}].authMode managed_identity is only supported for Azure candidates.`);
+    }
+    if (authMode === "managed_identity" && !isTrustedAzureManagedIdentityBaseUrl(provider, record.baseUrl.trim())) {
+      throw new Error(`AZURE_FOUNDRY_EVAL_CANDIDATES_JSON[${index}].baseUrl must be a trusted Azure OpenAI-compatible URL for managed identity.`);
     }
     const apiKeyEnv = typeof record.apiKeyEnv === "string" && record.apiKeyEnv.trim()
       ? record.apiKeyEnv.trim()
@@ -214,6 +239,56 @@ function requiredJsonShapes(item) {
   return item.requiredJsonShapes && typeof item.requiredJsonShapes === "object" && !Array.isArray(item.requiredJsonShapes)
     ? item.requiredJsonShapes
     : {};
+}
+
+function requiredJsonMatches(item) {
+  return Array.isArray(item.requiredJsonMatches) ? item.requiredJsonMatches : [];
+}
+
+function isObjectRecord(value) {
+  return value && typeof value === "object" && !Array.isArray(value);
+}
+
+function jsonPathValue(value, path) {
+  if (!path) {
+    return value;
+  }
+
+  return path.split(".").reduce((current, segment) => {
+    if (!isObjectRecord(current)) {
+      return undefined;
+    }
+    return Object.hasOwn(current, segment) ? current[segment] : undefined;
+  }, value);
+}
+
+function jsonMatchLabel(match) {
+  return String(match?.label ?? match?.path ?? "json match");
+}
+
+function jsonMatchFields(match) {
+  const fields = match?.fields;
+  return fields && typeof fields === "object" && !Array.isArray(fields) ? fields : {};
+}
+
+function jsonMatchSatisfied(parsedJson, match) {
+  if (!parsedJson || !isObjectRecord(match)) {
+    return false;
+  }
+
+  const path = typeof match.path === "string" ? match.path.trim() : "";
+  const fields = jsonMatchFields(match);
+  if (!path || Object.keys(fields).length === 0) {
+    return false;
+  }
+
+  const value = jsonPathValue(parsedJson, path);
+  const candidates = Array.isArray(value) ? value : [value];
+  return candidates.some((candidate) => (
+    isObjectRecord(candidate) && Object.entries(fields).every(([field, concept]) => (
+      conceptMatches(concept, normalize(jsonValueText(jsonPathValue(candidate, field))))
+    ))
+  ));
 }
 
 function priceFor(provider, model) {
@@ -600,6 +675,9 @@ function scoreItem(item, text) {
       ? jsonShapeFailures(parsedJson[key], shape, key)
       : []
   ));
+  const missingJsonMatches = requiredJsonMatches(item).filter((match) => (
+    !jsonMatchSatisfied(parsedJson, match)
+  )).map(jsonMatchLabel);
   const missingConcepts = requiredConcepts(item).filter((concept) => {
     return !conceptMatches(concept, conceptSearchText);
   }).map(conceptLabel);
@@ -614,9 +692,10 @@ function scoreItem(item, text) {
     missingKeys,
     incorrectJsonValues,
     invalidJsonShapes,
+    missingJsonMatches,
     missingConcepts,
     forbiddenMentions,
-    passed: schemaValid && incorrectJsonValues.length === 0 && missingConcepts.length === 0 && forbiddenMentions.length === 0,
+    passed: schemaValid && incorrectJsonValues.length === 0 && missingJsonMatches.length === 0 && missingConcepts.length === 0 && forbiddenMentions.length === 0,
   };
 }
 

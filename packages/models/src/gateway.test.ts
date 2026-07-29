@@ -561,6 +561,37 @@ describe("openAICompatibleModelGateway", () => {
     expect(azureIdentityMock.getToken).toHaveBeenCalledWith("api://custom-foundry-scope/.default");
   });
 
+  it("rejects managed identity routes to non-Azure endpoints before acquiring a token", async () => {
+    restoreEnv();
+    Object.assign(process.env, {
+      MODEL_PROVIDER: "openrouter",
+      MODEL_API_KEY: "openrouter-key",
+      MODEL_BASE_URL: "https://openrouter.ai/api/v1",
+      MODEL_PROVIDER_ROUTES_JSON: JSON.stringify([
+        {
+          model: "corgtex-gpt56-luna",
+          provider: "azure-foundry",
+          baseUrl: "https://attacker.example/v1",
+          authMode: "managed_identity",
+        },
+      ]),
+    });
+
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { openAICompatibleModelGateway } = await import("./openai-compatible-gateway");
+
+    await expect(openAICompatibleModelGateway.chat({
+      workspaceId: "ws-1",
+      taskType: "CHAT",
+      model: "corgtex-gpt56-luna",
+      messages: [{ role: "user", content: "Hello" }],
+    })).rejects.toThrow("azure-foundry managed identity authentication requires a trusted Azure OpenAI-compatible base URL");
+    expect(azureIdentityMock.getToken).not.toHaveBeenCalled();
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it("does not fall back to the global Azure key when a routed Azure key env is missing", async () => {
     restoreEnv();
     Object.assign(process.env, {
@@ -622,6 +653,50 @@ describe("openAICompatibleModelGateway", () => {
       messages: [{ role: "user", content: "Hello" }],
     })).rejects.toThrow("MODEL_PROVIDER_ROUTES_JSON route for corgtex-gpt56-luna requires apiKeyEnv when using Azure API key authentication with a routed endpoint");
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("preserves MODEL_API_KEY fallback for same-provider Azure routes that inherit the global endpoint", async () => {
+    restoreEnv();
+    Object.assign(process.env, {
+      MODEL_PROVIDER: "azure-openai",
+      MODEL_BASE_URL: "https://global-openai.openai.azure.com/openai/v1",
+      AZURE_OPENAI_AUTH_MODE: "api_key",
+      AZURE_OPENAI_API_KEY: "",
+      MODEL_API_KEY: "model-key",
+      MODEL_PROVIDER_ROUTES_JSON: JSON.stringify([
+        {
+          model: "corgtex-ds-v4-flash",
+          provider: "azure-openai",
+        },
+      ]),
+    });
+
+    const fetchMock = vi.fn().mockResolvedValueOnce(new Response(JSON.stringify({
+      choices: [{ message: { content: "Inherited route answer" } }],
+      usage: { prompt_tokens: 1000, completion_tokens: 500 },
+    }), { status: 200 }));
+
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { openAICompatibleModelGateway } = await import("./openai-compatible-gateway");
+
+    const chat = await openAICompatibleModelGateway.chat({
+      workspaceId: "ws-1",
+      taskType: "CHAT",
+      model: "corgtex-ds-v4-flash",
+      messages: [{ role: "user", content: "Hello" }],
+    });
+
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe("https://global-openai.openai.azure.com/openai/v1/chat/completions");
+    expect(init.headers).toMatchObject({
+      "api-key": "model-key",
+      "content-type": "application/json",
+    });
+    expect(chat.usage).toMatchObject({
+      provider: "azure-openai",
+      model: "corgtex-ds-v4-flash",
+    });
   });
 
   it("does not fall back to MODEL_API_KEY when a routed OpenRouter key env is missing", async () => {

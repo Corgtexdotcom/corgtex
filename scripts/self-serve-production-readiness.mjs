@@ -210,6 +210,43 @@ function isHttpsBaseUrl(value) {
   }
 }
 
+function isTrustedAzureManagedIdentityBaseUrl(provider, value) {
+  try {
+    const url = new URL(value);
+    if (url.protocol !== "https:") {
+      return false;
+    }
+
+    const host = url.hostname.toLowerCase();
+    const path = url.pathname.replace(/\/+$/, "");
+    const hasOpenAiPath = path === "/openai" || path.startsWith("/openai/");
+    if (provider === "azure-foundry") {
+      return host.endsWith(".services.ai.azure.com") && hasOpenAiPath;
+    }
+    if (provider === "azure-openai") {
+      return host.endsWith(".openai.azure.com") && hasOpenAiPath;
+    }
+    return false;
+  } catch {
+    return false;
+  }
+}
+
+function checkTrustedAzureManagedIdentityBaseUrl(provider, model, value, strict) {
+  const label = providerLabel(provider);
+  if (value && isTrustedAzureManagedIdentityBaseUrl(provider, value)) {
+    pass(`${label} managed identity route for ${model} uses a trusted Azure base URL`);
+    return;
+  }
+
+  const message = `${label} managed identity route for ${model} requires a trusted Azure OpenAI-compatible base URL.`;
+  if (strict) {
+    fail(message);
+  } else {
+    warn(message);
+  }
+}
+
 function parseProviderRoutes() {
   if (!configured("MODEL_PROVIDER_ROUTES_JSON")) {
     return [];
@@ -359,6 +396,12 @@ function checkProviderRouteConfiguration(strict) {
       requireKnownModelPrice(route.provider, route.model, strict);
       const authMode = route.authMode || envValue("AZURE_OPENAI_AUTH_MODE") || "api_key";
       if (authMode === "managed_identity") {
+        checkTrustedAzureManagedIdentityBaseUrl(
+          route.provider,
+          route.model,
+          route.baseUrl || (route.provider === globalProvider ? envValue("MODEL_BASE_URL") : ""),
+          strict,
+        );
         pass(`MODEL_PROVIDER_ROUTES_JSON route for ${route.model} uses managed identity`);
         if (configured("AZURE_CLIENT_ID")) {
           pass("AZURE_CLIENT_ID configured");
@@ -432,6 +475,7 @@ function checkModelConfiguration(strict) {
     }
     const authMode = envValue("AZURE_OPENAI_AUTH_MODE") || "api_key";
     if (authMode === "managed_identity") {
+      checkTrustedAzureManagedIdentityBaseUrl(provider, "global model traffic", envValue("MODEL_BASE_URL"), strict);
       pass("AZURE_OPENAI_AUTH_MODE configured for managed identity");
       if (configured("AZURE_CLIENT_ID")) {
         pass("AZURE_CLIENT_ID configured");

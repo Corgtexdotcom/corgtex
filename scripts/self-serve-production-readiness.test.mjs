@@ -123,7 +123,7 @@ describe("self-serve production readiness", () => {
       ...STRICT_BASE_ENV,
       ...AZURE_FOUNDRY_MODEL_ENV,
       MODEL_PROVIDER: "azure-foundry",
-      MODEL_BASE_URL: "https://example.openai.azure.com/openai/v1",
+      MODEL_BASE_URL: "https://example.services.ai.azure.com/openai/v1",
       AZURE_OPENAI_AUTH_MODE: "managed_identity",
       AZURE_CLIENT_ID: "00000000-0000-4000-8000-000000000000",
       MODEL_PRICE_OVERRIDES_JSON: AZURE_FOUNDRY_PRICE_OVERRIDES_JSON,
@@ -142,7 +142,7 @@ describe("self-serve production readiness", () => {
       ...STRICT_BASE_ENV,
       ...AZURE_FOUNDRY_MODEL_ENV,
       MODEL_PROVIDER: "azure-foundry",
-      MODEL_BASE_URL: "https://example.openai.azure.com/openai/v1",
+      MODEL_BASE_URL: "https://example.services.ai.azure.com/openai/v1",
       AZURE_OPENAI_AUTH_MODE: "managed_identity",
       AZURE_CLIENT_ID: "00000000-0000-4000-8000-000000000000",
     }, ["--strict", "--skip-http"]);
@@ -158,7 +158,7 @@ describe("self-serve production readiness", () => {
       ...STRICT_BASE_ENV,
       ...CUSTOM_AZURE_FOUNDRY_MODEL_ENV,
       MODEL_PROVIDER: "azure-foundry",
-      MODEL_BASE_URL: "https://example.openai.azure.com/openai/v1",
+      MODEL_BASE_URL: "https://example.services.ai.azure.com/openai/v1",
       AZURE_OPENAI_AUTH_MODE: "managed_identity",
       AZURE_CLIENT_ID: "00000000-0000-4000-8000-000000000000",
     }, ["--strict", "--skip-http"]);
@@ -172,7 +172,7 @@ describe("self-serve production readiness", () => {
       ...STRICT_BASE_ENV,
       ...CUSTOM_AZURE_FOUNDRY_MODEL_ENV,
       MODEL_PROVIDER: "azure-foundry",
-      MODEL_BASE_URL: "https://example.openai.azure.com/openai/v1",
+      MODEL_BASE_URL: "https://example.services.ai.azure.com/openai/v1",
       AZURE_OPENAI_AUTH_MODE: "managed_identity",
       AZURE_CLIENT_ID: "00000000-0000-4000-8000-000000000000",
       MODEL_PRICE_OVERRIDES_JSON: "[]",
@@ -187,7 +187,7 @@ describe("self-serve production readiness", () => {
       ...STRICT_BASE_ENV,
       ...AZURE_FOUNDRY_MODEL_ENV,
       MODEL_PROVIDER: "azure-foundry",
-      MODEL_BASE_URL: "https://example.openai.azure.com/openai/v1",
+      MODEL_BASE_URL: "https://example.services.ai.azure.com/openai/v1",
       AZURE_OPENAI_AUTH_MODE: "managed_identity",
       AZURE_CLIENT_ID: "00000000-0000-4000-8000-000000000000",
       MODEL_PRICE_OVERRIDES_JSON: "{not-json",
@@ -254,6 +254,40 @@ describe("self-serve production readiness", () => {
     expect(result.stdout).toContain("OK   MODEL_PROVIDER_ROUTES_JSON route for corgtex-gpt56-luna has Azure Foundry base URL");
     expect(result.stdout).toContain("OK   MODEL_PROVIDER_ROUTES_JSON route for corgtex-gpt56-luna uses managed identity");
     expect(result.stderr).toBe("");
+  });
+
+  it("rejects managed-identity Azure routes to non-Azure hosts", () => {
+    const result = runReadiness({
+      ...STRICT_BASE_ENV,
+      MODEL_PROVIDER: "openrouter",
+      MODEL_API_KEY: "openrouter-key-placeholder",
+      MODEL_PROVIDER_ROUTES_JSON: JSON.stringify([
+        {
+          model: "corgtex-gpt56-luna",
+          provider: "azure-foundry",
+          baseUrl: "https://attacker.example/openai/v1",
+          authMode: "managed_identity",
+        },
+      ]),
+    }, ["--strict", "--skip-http"]);
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("Azure Foundry managed identity route for corgtex-gpt56-luna requires a trusted Azure OpenAI-compatible base URL");
+  });
+
+  it("rejects global managed-identity Azure providers on non-Azure hosts", () => {
+    const result = runReadiness({
+      ...STRICT_BASE_ENV,
+      ...AZURE_FOUNDRY_MODEL_ENV,
+      MODEL_PROVIDER: "azure-foundry",
+      MODEL_BASE_URL: "https://attacker.example/openai/v1",
+      AZURE_OPENAI_AUTH_MODE: "managed_identity",
+      AZURE_CLIENT_ID: "00000000-0000-4000-8000-000000000000",
+      MODEL_PRICE_OVERRIDES_JSON: AZURE_FOUNDRY_PRICE_OVERRIDES_JSON,
+    }, ["--strict", "--skip-http"]);
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("Azure Foundry managed identity route for global model traffic requires a trusted Azure OpenAI-compatible base URL");
   });
 
   it("accepts an OpenRouter rollback route while Azure is the global provider", () => {
