@@ -12,6 +12,7 @@ const DEFAULT_TIMEOUT_MS = intEnv("AZURE_FOUNDRY_EVAL_TIMEOUT_MS", 60_000, { min
 const DEFAULT_MAX_TOKENS = intEnv("AZURE_FOUNDRY_EVAL_MAX_TOKENS", 600, { min: 1 });
 const DEFAULT_RETRIES = intEnv("AZURE_FOUNDRY_EVAL_RETRIES", 1, { min: 0 });
 const DEFAULT_CONCURRENCY = intEnv("AZURE_FOUNDRY_EVAL_CONCURRENCY", 2, { min: 1, max: 4 });
+const EVAL_PASS_POLICIES = new Set(["all", "any"]);
 const TOKEN_REFRESH_SKEW_MS = 60_000;
 const SUPPORTED_EVAL_PROVIDERS = new Set(["openrouter", "openai", "azure-openai", "azure-foundry"]);
 const AZURE_EVAL_PROVIDERS = new Set(["azure-openai", "azure-foundry"]);
@@ -116,9 +117,7 @@ function parseCandidates() {
     }
     const apiKeyEnv = typeof record.apiKeyEnv === "string" && record.apiKeyEnv.trim()
       ? record.apiKeyEnv.trim()
-      : AZURE_EVAL_PROVIDERS.has(provider)
-        ? "AZURE_OPENAI_API_KEY"
-        : "MODEL_API_KEY";
+      : defaultApiKeyEnv(provider);
     return {
       label: record.label.trim(),
       provider,
@@ -139,8 +138,32 @@ function parseCandidates() {
   });
 }
 
+function defaultApiKeyEnv(provider) {
+  if (provider === "azure-foundry") return "AZURE_FOUNDRY_API_KEY";
+  if (provider === "azure-openai") return "AZURE_OPENAI_API_KEY";
+  return "MODEL_API_KEY";
+}
+
 function defaultTemperature(model) {
   return model === "corgtex-gpt56-luna" ? undefined : 0;
+}
+
+function evalPassPolicy() {
+  const raw = process.env.AZURE_FOUNDRY_EVAL_PASS_POLICY?.trim().toLowerCase() || "all";
+  if (!EVAL_PASS_POLICIES.has(raw)) {
+    throw new Error(`AZURE_FOUNDRY_EVAL_PASS_POLICY must be one of ${[...EVAL_PASS_POLICIES].join(", ")}.`);
+  }
+  return raw;
+}
+
+function evaluationPasses(results, policy = "all") {
+  if (!Array.isArray(results) || results.length === 0) {
+    return false;
+  }
+  if (policy === "any") {
+    return results.some((result) => result?.passed === true);
+  }
+  return results.every((result) => result?.passed === true);
 }
 
 async function readEvalSet(path) {
@@ -230,6 +253,10 @@ function requiredJsonShapes(item) {
 
 function requiredJsonMatches(item) {
   return Array.isArray(item.requiredJsonMatches) ? item.requiredJsonMatches : [];
+}
+
+function requiredTextSections(item) {
+  return Array.isArray(item.requiredTextSections) ? item.requiredTextSections : [];
 }
 
 function isObjectRecord(value) {
@@ -593,6 +620,80 @@ function forbiddenConcepts(item) {
   return [];
 }
 
+function sectionLabel(section) {
+  return String(section?.label ?? section?.heading ?? "text section");
+}
+
+function sectionHeadingTerms(section) {
+  const heading = section?.heading ?? section?.label;
+  if (typeof heading === "string") return [heading];
+  if (Array.isArray(heading)) return heading.map(String);
+  if (heading && typeof heading === "object" && Array.isArray(heading.anyOf)) {
+    return heading.anyOf.map(String);
+  }
+  return [];
+}
+
+function stripHeadingMarkup(line) {
+  return String(line ?? "")
+    .replace(/^\s{0,3}(?:#{1,6}\s+|[-*+]\s+|\d+[.)]\s+)/, "")
+    .replace(/\*\*/g, "")
+    .trim();
+}
+
+function isSectionHeadingLine(line, section) {
+  const normalizedLine = normalize(stripHeadingMarkup(line));
+  return sectionHeadingTerms(section).some((term) => {
+    const normalizedTerm = normalize(term);
+    return normalizedTerm && (
+      normalizedLine === normalizedTerm ||
+      normalizedLine.startsWith(`${normalizedTerm}:`) ||
+      normalizedLine.startsWith(`${normalizedTerm} -`)
+    );
+  });
+}
+
+function inlineSectionContent(line) {
+  const stripped = stripHeadingMarkup(line);
+  const colonIndex = stripped.indexOf(":");
+  return colonIndex >= 0 ? stripped.slice(colonIndex + 1).trim() : "";
+}
+
+function textSectionContent(text, section, sections) {
+  const lines = String(text ?? "").split(/\r?\n/);
+  const startIndex = lines.findIndex((line) => isSectionHeadingLine(line, section));
+  if (startIndex < 0) {
+    return null;
+  }
+
+  const content = [];
+  const inlineContent = inlineSectionContent(lines[startIndex]);
+  if (inlineContent) {
+    content.push(inlineContent);
+  }
+
+  for (let index = startIndex + 1; index < lines.length; index += 1) {
+    if (sections.some((candidateSection) => isSectionHeadingLine(lines[index], candidateSection))) {
+      break;
+    }
+    content.push(lines[index]);
+  }
+  return content.join("\n").trim();
+}
+
+function textSectionConcepts(section) {
+  return Array.isArray(section?.concepts) ? section.concepts : [];
+}
+
+function textSectionSatisfied(text, section, sections) {
+  const content = textSectionContent(text, section, sections);
+  if (content === null) {
+    return false;
+  }
+  const normalizedContent = normalize(content);
+  return textSectionConcepts(section).every((concept) => conceptMatches(concept, normalizedContent));
+}
+
 function jsonShapeFailures(value, shape, path) {
   if (!shape || typeof shape !== "object" || Array.isArray(shape)) {
     return [];
@@ -667,6 +768,10 @@ function scoreItem(item, text) {
   const missingJsonMatches = requiredJsonMatches(item).filter((match) => (
     !jsonMatchSatisfied(parsedJson, match)
   )).map(jsonMatchLabel);
+  const textSections = requiredTextSections(item);
+  const missingTextSections = textSections.filter((section) => (
+    !textSectionSatisfied(text, section, textSections)
+  )).map(sectionLabel);
   const missingConcepts = requiredConcepts(item).filter((concept) => {
     return !conceptMatches(concept, conceptSearchText);
   }).map(conceptLabel);
@@ -682,9 +787,10 @@ function scoreItem(item, text) {
     incorrectJsonValues,
     invalidJsonShapes,
     missingJsonMatches,
+    missingTextSections,
     missingConcepts,
     forbiddenMentions,
-    passed: schemaValid && incorrectJsonValues.length === 0 && missingJsonMatches.length === 0 && missingConcepts.length === 0 && forbiddenMentions.length === 0,
+    passed: schemaValid && incorrectJsonValues.length === 0 && missingJsonMatches.length === 0 && missingTextSections.length === 0 && missingConcepts.length === 0 && forbiddenMentions.length === 0,
   };
 }
 
@@ -692,6 +798,7 @@ async function main() {
   const evalSetPath = arg("eval-set") ?? DEFAULT_EVAL_SET_PATH;
   const evalSet = await readEvalSet(evalSetPath);
   const candidates = parseCandidates();
+  const passPolicy = evalPassPolicy();
   parsePriceOverrides();
   const results = [];
 
@@ -730,7 +837,7 @@ async function main() {
     });
   }
 
-  console.log(JSON.stringify({
+  const report = {
     generatedAt: new Date().toISOString(),
     evalSet: evalSetPath,
     caseCount: evalSet.length,
@@ -739,9 +846,15 @@ async function main() {
       maxTokens: DEFAULT_MAX_TOKENS,
       concurrency: DEFAULT_CONCURRENCY,
       retries: DEFAULT_RETRIES,
+      passPolicy,
     },
     results,
-  }, null, 2));
+  };
+
+  console.log(JSON.stringify(report, null, 2));
+  if (!evaluationPasses(results, passPolicy)) {
+    process.exitCode = 1;
+  }
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
@@ -755,6 +868,7 @@ export {
   callCandidateWithRetries,
   conceptMatches,
   estimateCost,
+  evaluationPasses,
   isRetryableRequestError,
   parseCandidates,
   scoreItem,

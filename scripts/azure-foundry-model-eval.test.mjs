@@ -4,6 +4,7 @@ import {
   callCandidateWithRetries,
   conceptMatches,
   estimateCost,
+  evaluationPasses,
   isRetryableRequestError,
   parseCandidates,
   scoreItem,
@@ -11,6 +12,7 @@ import {
 
 afterEach(() => {
   delete process.env.AZURE_FOUNDRY_EVAL_CANDIDATES_JSON;
+  delete process.env.AZURE_FOUNDRY_EVAL_PASS_POLICY;
   delete process.env.MODEL_API_KEY;
   delete process.env.MODEL_PRICE_OVERRIDES_JSON;
   vi.unstubAllGlobals();
@@ -437,6 +439,113 @@ describe("Azure Foundry model eval helpers", () => {
     expect(matchedScore.passed).toBe(true);
   });
 
+  it("requires text outputs to include named sections with matching content", () => {
+    const item = {
+      mode: "text",
+      requiredTextSections: [
+        {
+          label: "decisions section",
+          heading: "decisions",
+          concepts: ["onboarding checklist"],
+        },
+        {
+          label: "actions section",
+          heading: "actions",
+          concepts: ["Niko", "tomorrow"],
+        },
+        {
+          label: "risks section",
+          heading: "risks",
+          concepts: [{ label: "Slack missing scope", allOf: ["Slack ingestion", "missing scope"] }],
+        },
+      ],
+      requiredConcepts: [
+        "onboarding checklist",
+        "Niko",
+        "tomorrow",
+        { label: "Slack missing scope risk", allOf: ["Slack ingestion", "missing scope"] },
+      ],
+    };
+
+    const unstructuredScore = scoreItem(
+      item,
+      "The governance circle accepted the onboarding checklist update; Niko will publish it tomorrow; Slack ingestion failed because of a missing scope.",
+    );
+    expect(unstructuredScore.missingConcepts).toEqual([]);
+    expect(unstructuredScore.missingTextSections).toEqual([
+      "decisions section",
+      "actions section",
+      "risks section",
+    ]);
+    expect(unstructuredScore.passed).toBe(false);
+
+    const misplacedScore = scoreItem(
+      item,
+      "Decisions:\n- The governance circle accepted the onboarding checklist update.\nActions:\n- Niko will publish the checklist tomorrow.\nRisks:\n- No risks mentioned.",
+    );
+    expect(misplacedScore.missingTextSections).toEqual(["risks section"]);
+    expect(misplacedScore.passed).toBe(false);
+
+    const matchedScore = scoreItem(
+      item,
+      "Decisions: The governance circle accepted the onboarding checklist update.\nActions:\n- Niko will publish the checklist tomorrow.\nRisks:\n- Slack ingestion failed for one private channel due to missing scope.",
+    );
+    expect(matchedScore.missingTextSections).toEqual([]);
+    expect(matchedScore.passed).toBe(true);
+  });
+
+  it("requires Slack triage to include a usable proposed reply", () => {
+    const item = {
+      mode: "json",
+      requiredKeys: ["replyNeeded", "proposedReply", "unsafeToSend"],
+      requiredJsonValues: { replyNeeded: true, unsafeToSend: true },
+      requiredJsonShapes: {
+        proposedReply: { type: "string" },
+      },
+      requiredJsonMatches: [
+        {
+          label: "usable proposed reply",
+          path: "",
+          fields: {
+            proposedReply: {
+              allOf: [
+                ["not send", "cannot send", "do not send"],
+                "unreconciled cost numbers",
+                "account owner",
+                ["approval", "approved"],
+              ],
+            },
+          },
+        },
+      ],
+      requiredConcepts: [
+        { label: "approval needed", allOf: [["approval", "approved"], "account owner"] },
+        { label: "cost numbers risk", allOf: ["cost numbers", "unreconciled"] },
+        { label: "unsafe to send", anyOf: ["not send", "cannot send", "do not send"] },
+      ],
+    };
+
+    const nullReplyScore = scoreItem(item, JSON.stringify({
+      replyNeeded: true,
+      proposedReply: null,
+      unsafeToSend: true,
+      notes: "Do not send: unreconciled cost numbers need account owner approval",
+    }));
+    expect(nullReplyScore.schemaValid).toBe(false);
+    expect(nullReplyScore.invalidJsonShapes).toEqual(["proposedReply must be a string"]);
+    expect(nullReplyScore.missingJsonMatches).toEqual(["usable proposed reply"]);
+    expect(nullReplyScore.passed).toBe(false);
+
+    const matchedScore = scoreItem(item, JSON.stringify({
+      replyNeeded: true,
+      proposedReply: "Do not send the plan yet. The unreconciled cost numbers need account owner approval before sharing with the customer.",
+      unsafeToSend: true,
+    }));
+    expect(matchedScore.schemaValid).toBe(true);
+    expect(matchedScore.missingJsonMatches).toEqual([]);
+    expect(matchedScore.passed).toBe(true);
+  });
+
   it("defaults OpenAI evaluation candidates to MODEL_API_KEY", () => {
     process.env.AZURE_FOUNDRY_EVAL_CANDIDATES_JSON = JSON.stringify([
       {
@@ -451,6 +560,45 @@ describe("Azure Foundry model eval helpers", () => {
       provider: "openai",
       apiKeyEnv: "MODEL_API_KEY",
     });
+  });
+
+  it("defaults Azure Foundry API-key candidates to AZURE_FOUNDRY_API_KEY", () => {
+    process.env.AZURE_FOUNDRY_EVAL_CANDIDATES_JSON = JSON.stringify([
+      {
+        label: "Foundry candidate",
+        provider: "azure-foundry",
+        model: "corgtex-gpt56-luna",
+        baseUrl: "https://corgtex-foundry-models-wus3.services.ai.azure.com/openai/v1",
+      },
+    ]);
+
+    expect(parseCandidates()[0]).toMatchObject({
+      provider: "azure-foundry",
+      apiKeyEnv: "AZURE_FOUNDRY_API_KEY",
+    });
+  });
+
+  it("defaults Azure OpenAI API-key candidates to AZURE_OPENAI_API_KEY", () => {
+    process.env.AZURE_FOUNDRY_EVAL_CANDIDATES_JSON = JSON.stringify([
+      {
+        label: "Azure OpenAI rollback",
+        provider: "azure-openai",
+        model: "corgtex-chat-quality",
+        baseUrl: "https://oai-corgtex-ss-prod.openai.azure.com/openai/v1",
+      },
+    ]);
+
+    expect(parseCandidates()[0]).toMatchObject({
+      provider: "azure-openai",
+      apiKeyEnv: "AZURE_OPENAI_API_KEY",
+    });
+  });
+
+  it("evaluates candidate pass policy", () => {
+    expect(evaluationPasses([{ passed: true }, { passed: true }], "all")).toBe(true);
+    expect(evaluationPasses([{ passed: true }, { passed: false }], "all")).toBe(false);
+    expect(evaluationPasses([{ passed: true }, { passed: false }], "any")).toBe(true);
+    expect(evaluationPasses([{ passed: false }, { passed: false }], "any")).toBe(false);
   });
 
   it("rejects non-HTTPS evaluation candidate base URLs", () => {

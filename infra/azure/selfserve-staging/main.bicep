@@ -268,14 +268,24 @@ var azureFoundryRouteModels = union([
   runtimeChatExcellentDeploymentName
   runtimeChatConversationDeploymentName
 ], [])
-var azureFoundryProviderRoutes = [for modelName in azureFoundryRouteModels: {
+var azureFoundryManagedIdentityProviderRoutes = [for modelName in azureFoundryRouteModels: {
   model: modelName
   provider: 'azure-foundry'
   baseUrl: azureFoundryRouteBaseUrl
-  authMode: azureOpenAiAuthMode
+  authMode: 'managed_identity'
   scope: 'https://ai.azure.com/.default'
-  apiKeyEnv: azureOpenAiAuthMode == 'api_key' ? 'AZURE_FOUNDRY_API_KEY' : null
 }]
+var azureFoundryApiKeyProviderRoutes = [for modelName in azureFoundryRouteModels: {
+  model: modelName
+  provider: 'azure-foundry'
+  baseUrl: azureFoundryRouteBaseUrl
+  authMode: 'api_key'
+  scope: 'https://ai.azure.com/.default'
+  apiKeyEnv: 'AZURE_FOUNDRY_API_KEY'
+}]
+var azureFoundryProviderRoutes = azureOpenAiAuthMode == 'api_key'
+  ? azureFoundryApiKeyProviderRoutes
+  : azureFoundryManagedIdentityProviderRoutes
 var azureFoundryProviderRoutesJson = string(azureFoundryProviderRoutes)
 
 var requiredSecretRefs = [
