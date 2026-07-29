@@ -22,6 +22,7 @@ const mocks = vi.hoisted(() => ({
   getControlPlaneSlackSetupTarget: vi.fn(),
   getControlPlaneMeetingOperationsReadiness: vi.fn(),
   enqueueControlPlaneAgendaPreparation: vi.fn(),
+  recordCustomerSupportAudit: vi.fn(),
 }));
 vi.mock("@corgtex/domain", () => ({
   approveReviewGatedProcurementTrial: mocks.approveReviewGatedProcurementTrial,
@@ -42,6 +43,7 @@ vi.mock("@corgtex/domain", () => ({
   createSelfServeSupportSession: mocks.createSelfServeSupportSession,
   listControlPlaneFeatureFlags: vi.fn(), listControlPlaneReleaseRolloutJobs: vi.fn(),
   probeControlPlaneDeploymentHealth: vi.fn(),
+  recordCustomerSupportAudit: mocks.recordCustomerSupportAudit,
   recordVerifiedControlPlaneRelease: vi.fn(),
   rejectReviewGatedProcurementTrial: mocks.rejectReviewGatedProcurementTrial,
   requireControlPlaneAccess: mocks.requireControlPlaneAccess,
@@ -90,6 +92,7 @@ describe("/api/control-plane/mcp", () => {
     mocks.getControlPlaneSlackSetupTarget.mockResolvedValue({ deploymentId: "dep-slack", managedWorkspaceId: "ws-slack" });
     mocks.getControlPlaneMeetingOperationsReadiness.mockResolvedValue({ deploymentId: "inst-1", agenda: { status: "ready" }, recorder: { status: "ready" } });
     mocks.enqueueControlPlaneAgendaPreparation.mockResolvedValue({ deploymentId: "inst-1", workflowJobId: "job-1" });
+    mocks.recordCustomerSupportAudit.mockResolvedValue({ id: "op-audit", status: "COMPLETED" });
   });
 
   afterEach(() => {
@@ -165,6 +168,7 @@ describe("/api/control-plane/mcp", () => {
       "deploy_latest_release_bulk",
       "get_rollout_status",
       "run_customer_support_operation",
+      "record_customer_support_audit",
     ]);
   });
 
@@ -702,6 +706,60 @@ describe("/api/control-plane/mcp", () => {
       releaseVersion: "main-2026-05-20",
       reason: "Verified live health.",
     });
+  });
+
+  it("routes standalone support audit closeouts through the support write scope", async () => {
+    const supportActor = { kind: "agent", authProvider: "control-plane", label: "control-plane-agent", scopes: ["control-plane:read", "control-plane:support:write"] };
+    mocks.resolveControlPlaneRequestActor.mockResolvedValueOnce(supportActor);
+    const domain = await import("@corgtex/domain");
+    const { POST } = await import("./route");
+
+    const response = await POST(request({
+      jsonrpc: "2.0",
+      id: 13,
+      method: "tools/call",
+      params: {
+        name: "record_customer_support_audit",
+        arguments: {
+          deploymentId: "inst-1",
+          action: "finance_v2.closeout",
+          reason: "Record sanitized customer closeout evidence.",
+          summary: "Finance V2 closeout was verified without customer data.",
+          outcome: "completed",
+        },
+      },
+    }) as never);
+
+    expect(response.status).toBe(200);
+    expect(mocks.requireControlPlaneScope).toHaveBeenCalledWith(expect.objectContaining({ kind: "agent" }), "control-plane:support:write");
+    expect(vi.mocked(domain.recordCustomerSupportAudit)).toHaveBeenCalledWith(expect.any(Object), expect.objectContaining({
+      deploymentId: "inst-1",
+      action: "finance_v2.closeout",
+      reason: "Record sanitized customer closeout evidence.",
+      summary: "Finance V2 closeout was verified without customer data.",
+      outcome: "completed",
+    }));
+
+    mocks.recordCustomerSupportAudit.mockClear();
+    mocks.resolveControlPlaneRequestActor.mockResolvedValueOnce(supportActor);
+    const badResponse = await POST(request({
+      jsonrpc: "2.0",
+      id: 14,
+      method: "tools/call",
+      params: {
+        name: "record_customer_support_audit",
+        arguments: {
+          deploymentId: "inst-1",
+          action: "finance_v2.closeout",
+          reason: "Record sanitized customer closeout evidence.",
+          summary: "Finance V2 closeout was verified without customer data.",
+          outcome: false,
+        },
+      },
+    }) as never);
+
+    expect(badResponse.status).toBe(400);
+    expect(vi.mocked(domain.recordCustomerSupportAudit)).not.toHaveBeenCalled();
   });
 
   it("rejects integration configuration without explicit boolean toggles", async () => {

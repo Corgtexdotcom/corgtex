@@ -201,6 +201,17 @@ export type SupportAction = keyof typeof SUPPORT_ACTION_TO_MCP_TOOL;
 type JsonRecord = Record<string, unknown>;
 
 const RECORDER_CREDIT_FAILURE_PATTERN = /insufficient[_ -]?credit[_ -]?balance|credit[_ -]?balance|insufficient[_ -]?balance/i;
+const SUPPORT_AUDIT_ACTION_PATTERN = /^[a-z0-9][a-z0-9._:-]{0,119}$/;
+const SUPPORT_AUDIT_OUTCOME_PATTERN = /^[a-z][a-z0-9_-]{0,79}$/;
+const SUPPORT_AUDIT_MAX_OBJECT_KEYS = 20;
+const SUPPORT_AUDIT_MAX_ARRAY_LENGTH = 20;
+const SUPPORT_AUDIT_MAX_DEPTH = 4;
+const SUPPORT_AUDIT_MAX_STRING_LENGTH = 500;
+const SUPPORT_AUDIT_MAX_REASON_LENGTH = 1000;
+const SUPPORT_AUDIT_MAX_TOTAL_VALUES = 500;
+const SUPPORT_AUDIT_MAX_IDEMPOTENCY_KEY_LENGTH = 200;
+const SUPPORT_AUDIT_SECRET_VALUE_PATTERN = /\b(authorization:\s*bearer|bearer\s+[A-Za-z0-9._~+/=-]{8,}|api[_ -]?key\s*[:=]|secret\s*[:=]|password\s*[:=]|token\s*[:=])/i;
+const SUPPORT_AUDIT_RESERVED_ACTIONS = new Set(["record_support_audit", "run_customer_support_operation"]);
 
 /**
  * Derived from the Module Manifest registry (`@corgtex/domain/modules`) - the
@@ -525,9 +536,23 @@ export function requireControlPlaneScope(actor: AppActor, scope: string) {
   invariant(hasControlPlaneScope(actor, scope), 403, "CONTROL_PLANE_SCOPE_REQUIRED", `Control Plane scope required: ${scope}.`);
 }
 
-function redactValue(key: string, value: unknown): unknown {
+function compactPolicyKey(key: string) {
+  return key.toLowerCase().replace(/[^a-z0-9]/g, "");
+}
+
+function isSecretLikeKey(key: string) {
   const normalizedKey = key.toLowerCase();
-  const isSecretLikeKey = /token|secret|password|authorization|bearer|connectionstring/.test(normalizedKey)
+  const compactKey = compactPolicyKey(key);
+  return /token|secret|password|authorization|bearer|connectionstring/.test(normalizedKey)
+    || compactKey === "connectionstring"
+    || compactKey.includes("apikey")
+    || compactKey.includes("privatekey")
+    || compactKey.includes("accesskey")
+    || compactKey.includes("clientkey")
+    || compactKey.includes("signingkey")
+    || compactKey.includes("webhookkey")
+    || compactKey === "credential"
+    || compactKey === "credentials"
     || normalizedKey === "supportcredential"
     || normalizedKey.includes("meetingurl")
     || normalizedKey === "meeting_url"
@@ -536,7 +561,10 @@ function redactValue(key: string, value: unknown): unknown {
     || normalizedKey === "botid"
     || normalizedKey === "bot_id"
     || (normalizedKey.includes("credential") && /(enc|hash|secret|token|password|value)$/.test(normalizedKey));
-  if (isSecretLikeKey) {
+}
+
+function redactValue(key: string, value: unknown): unknown {
+  if (isSecretLikeKey(key)) {
     return "[redacted]";
   }
   if (typeof value === "string" && value.length > 500) {
@@ -555,6 +583,115 @@ export function redactObject(value: JsonRecord): JsonRecord {
   return Object.fromEntries(
     Object.entries(value).map(([key, entry]) => [key, redactValue(key, entry)]),
   );
+}
+
+function isPrismaUniqueConstraintError(error: unknown) {
+  return Boolean(error && typeof error === "object" && (error as { code?: unknown }).code === "P2002");
+}
+
+function stableJsonValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(stableJsonValue);
+  if (value && typeof value === "object") {
+    const record = value as JsonRecord;
+    return Object.fromEntries(
+      Object.keys(record)
+        .sort()
+        .map((key) => [key, stableJsonValue(record[key])]),
+    );
+  }
+  return value;
+}
+
+function stableJson(value: unknown) {
+  return JSON.stringify(stableJsonValue(value ?? null));
+}
+
+function normalizeSupportAuditIdempotencyKey(value: string | null | undefined) {
+  const normalized = value?.trim() || null;
+  invariant(!normalized || normalized.length <= SUPPORT_AUDIT_MAX_IDEMPOTENCY_KEY_LENGTH, 400, "INVALID_INPUT", `Support audit idempotency key must be ${SUPPORT_AUDIT_MAX_IDEMPOTENCY_KEY_LENGTH} characters or fewer.`);
+  invariant(!normalized || !SUPPORT_AUDIT_SECRET_VALUE_PATTERN.test(normalized), 400, "INVALID_INPUT", "Support audit idempotency key must not contain credentials, secrets, tokens, passwords, or bearer authorization values.");
+  return normalized;
+}
+
+function normalizeSupportAuditAction(action: string | null | undefined) {
+  const normalized = action?.trim();
+  invariant(normalized, 400, "INVALID_INPUT", "Support audit action is required.");
+  invariant(SUPPORT_AUDIT_ACTION_PATTERN.test(normalized), 400, "INVALID_INPUT", "Support audit action must be lowercase and use only letters, numbers, dots, underscores, hyphens, or colons.");
+  invariant(!SUPPORT_AUDIT_RESERVED_ACTIONS.has(normalized), 400, "INVALID_INPUT", "Support audit action must describe the customer support event, not an MCP tool name.");
+  return normalized;
+}
+
+function normalizeSupportAuditOutcome(outcome: string | null | undefined) {
+  const normalized = outcome?.trim() || "completed";
+  invariant(SUPPORT_AUDIT_OUTCOME_PATTERN.test(normalized), 400, "INVALID_INPUT", "Support audit outcome must be lowercase and use only letters, numbers, underscores, or hyphens.");
+  return normalized;
+}
+
+function normalizeSupportAuditSummary(summary: string | null | undefined) {
+  const normalized = summary?.trim();
+  invariant(normalized, 400, "INVALID_INPUT", "Support audit summary is required.");
+  invariant(normalized.length <= 1000, 400, "INVALID_INPUT", "Support audit summary must be 1000 characters or fewer.");
+  invariant(!SUPPORT_AUDIT_SECRET_VALUE_PATTERN.test(normalized), 400, "INVALID_INPUT", "Support audit summary must not contain credentials, secrets, tokens, passwords, or bearer authorization values.");
+  return normalized;
+}
+
+function assertSupportAuditEvidenceKey(key: string) {
+  invariant(/^[A-Za-z0-9_.:-]{1,80}$/.test(key), 400, "INVALID_INPUT", "Support audit evidence keys must be 1-80 characters and use letters, numbers, dots, underscores, hyphens, or colons.");
+  const compactKey = compactPolicyKey(key);
+  invariant(!compactKey.includes("transcript") && !compactKey.includes("customerdata") && !/raw(logs?|payloads?|body|content)/.test(compactKey), 400, "INVALID_INPUT", "Support audit evidence must be summarized, not raw logs, raw payloads, transcripts, or customer data.");
+}
+
+function sanitizeSupportAuditEvidenceValue(value: unknown, path: string, depth: number, budget: { values: number }): unknown {
+  budget.values += 1;
+  invariant(budget.values <= SUPPORT_AUDIT_MAX_TOTAL_VALUES, 400, "INVALID_INPUT", "Support audit evidence is too large.");
+  invariant(depth <= SUPPORT_AUDIT_MAX_DEPTH, 400, "INVALID_INPUT", "Support audit evidence is too deeply nested.");
+  if (value === null || typeof value === "boolean") return value;
+  if (typeof value === "number") {
+    invariant(Number.isFinite(value), 400, "INVALID_INPUT", `Support audit evidence ${path} must be a finite number.`);
+    return value;
+  }
+  if (typeof value === "string") {
+    invariant(value.length <= SUPPORT_AUDIT_MAX_STRING_LENGTH, 400, "INVALID_INPUT", `Support audit evidence ${path} must be ${SUPPORT_AUDIT_MAX_STRING_LENGTH} characters or fewer.`);
+    invariant(!SUPPORT_AUDIT_SECRET_VALUE_PATTERN.test(value), 400, "INVALID_INPUT", "Support audit evidence strings must not contain credentials, secrets, tokens, passwords, or bearer authorization values.");
+    return value;
+  }
+  if (Array.isArray(value)) {
+    invariant(value.length <= SUPPORT_AUDIT_MAX_ARRAY_LENGTH, 400, "INVALID_INPUT", "Support audit evidence arrays must contain 20 items or fewer.");
+    return value.map((item, index) => sanitizeSupportAuditEvidenceValue(item, `${path}[${index}]`, depth + 1, budget));
+  }
+  if (value && typeof value === "object") {
+    const entries = Object.entries(value as JsonRecord);
+    invariant(entries.length <= SUPPORT_AUDIT_MAX_OBJECT_KEYS, 400, "INVALID_INPUT", "Support audit evidence objects must contain 20 keys or fewer.");
+    return Object.fromEntries(entries.map(([key, entry]) => {
+      assertSupportAuditEvidenceKey(key);
+      if (isSecretLikeKey(key) || compactPolicyKey(key).includes("credential")) {
+        return [key, "[redacted]"];
+      }
+      return [key, sanitizeSupportAuditEvidenceValue(entry, `${path}.${key}`, depth + 1, budget)];
+    }));
+  }
+  throw new AppError(400, "INVALID_INPUT", `Unsupported support audit evidence value at ${path}.`);
+}
+
+function sanitizeSupportAuditEvidence(value: unknown) {
+  if (value === undefined || value === null) return {};
+  invariant(value && typeof value === "object" && !Array.isArray(value), 400, "INVALID_INPUT", "Support audit evidence must be an object.");
+  return sanitizeSupportAuditEvidenceValue(value, "evidence", 0, { values: 0 }) as JsonRecord;
+}
+
+function normalizeSupportAuditInput(params: {
+  action?: string | null;
+  outcome?: string | null;
+  summary?: string | null;
+  evidence?: unknown;
+}) {
+  return {
+    schemaVersion: 1,
+    action: normalizeSupportAuditAction(params.action),
+    outcome: normalizeSupportAuditOutcome(params.outcome),
+    summary: normalizeSupportAuditSummary(params.summary),
+    evidence: sanitizeSupportAuditEvidence(params.evidence),
+  };
 }
 
 function normalizeReason(reason: string | null | undefined, action: string) {
@@ -751,6 +888,54 @@ function supportMcpErrorMessage(value: unknown) {
     : null;
 }
 
+function mcpToolMarkedErrorMessage(value: unknown) {
+  const record = jsonRecord(value);
+  if (record?.isError !== true) return null;
+  const content = Array.isArray(record.content) ? record.content : [];
+  const text = content
+    .map((item) => jsonRecord(item)?.text)
+    .find((entry): entry is string => typeof entry === "string" && entry.trim().length > 0);
+  return sanitizeSupportAuditFailureMessage(text ?? "Remote MCP tool returned an error.");
+}
+
+function sanitizeSupportAuditFailureMessage(value: string | null | undefined) {
+  const diagnostic = sanitizeDiagnosticText(value).slice(0, 1000);
+  const compact = compactPolicyKey(diagnostic);
+  if (SUPPORT_AUDIT_SECRET_VALUE_PATTERN.test(diagnostic) || compact.includes("transcript") || compact.includes("customerdata") || /raw(logs?|payloads?|body|content)/.test(compact)) {
+    return "Remote support audit failed with redacted detail.";
+  }
+  return diagnostic;
+}
+
+function requireRemoteSupportAuditAcknowledgement(params: {
+  raw: unknown;
+  summarized: unknown;
+  operationId: string;
+}): { id: string; operationId: string } {
+  const markedError = mcpToolMarkedErrorMessage(params.raw);
+  if (markedError) {
+    throw new AppError(502, "REMOTE_SUPPORT_OPERATION_FAILED", markedError);
+  }
+  const remoteError = supportMcpErrorMessage(params.summarized);
+  if (remoteError) {
+    throw new AppError(502, "REMOTE_SUPPORT_OPERATION_FAILED", remoteError);
+  }
+  const acknowledgement = jsonRecord(params.summarized);
+  invariant(
+    acknowledgement
+      && typeof acknowledgement.id === "string"
+      && acknowledgement.id.trim().length > 0
+      && acknowledgement.operationId === params.operationId,
+    502,
+    "REMOTE_SUPPORT_OPERATION_FAILED",
+    "Remote support audit did not return a valid audit acknowledgement.",
+  );
+  return {
+    id: acknowledgement.id.trim(),
+    operationId: params.operationId,
+  };
+}
+
 async function callMcpTool(params: {
   mcpUrl: string;
   bearerToken: string;
@@ -806,6 +991,8 @@ async function loadSupportConnector(deploymentId: string) {
       supportMcpUrl: true,
       supportCredentialEnc: true,
       supportConnectorStatus: true,
+      remoteWorkspaceId: true,
+      managedWorkspaceId: true,
     },
   });
   invariant(deployment, 404, "NOT_FOUND", "Customer deployment not found.");
@@ -10452,6 +10639,174 @@ export async function runCustomerSupportOperation(actor: AppActor, params: {
     });
     throw error;
   }
+}
+
+async function findSupportAuditByIdempotencyKey(params: {
+  idempotencyKey: string;
+  deploymentId: string;
+  operationAction: string;
+  reason: string;
+  inputSummary: JsonRecord;
+}) {
+  const existing = await prisma.supportOperation.findUnique({
+    where: { idempotencyKey: params.idempotencyKey },
+  });
+  if (!existing) return null;
+  invariant(
+    existing.deploymentId === params.deploymentId && existing.action === params.operationAction,
+    409,
+    "IDEMPOTENCY_KEY_CONFLICT",
+    "Idempotency key was already used for a different support operation.",
+  );
+  invariant(
+    existing.reason === params.reason && stableJson(existing.inputSummary ?? null) === stableJson(params.inputSummary),
+    409,
+    "IDEMPOTENCY_KEY_CONFLICT",
+    "Idempotency key was already used for different support audit evidence.",
+  );
+  if (existing.status === "COMPLETED") {
+    return {
+      ...existing,
+      idempotentReplay: true,
+    };
+  }
+  invariant(
+    false,
+    409,
+    existing.status === "FAILED" ? "IDEMPOTENCY_KEY_NOT_REPLAYABLE" : "IDEMPOTENCY_KEY_IN_PROGRESS",
+    existing.status === "FAILED"
+      ? "Idempotency key belongs to a failed support audit; reconcile the existing operation before retrying with a new key."
+      : "Idempotency key is already in use by an in-progress support audit.",
+  );
+}
+
+function supportAuditRemoteWorkspaceId(
+  deployment: { remoteWorkspaceId?: string | null },
+  requestedRemoteWorkspaceId: string | null | undefined,
+) {
+  const expected = deployment.remoteWorkspaceId?.trim() || null;
+  const requested = requestedRemoteWorkspaceId?.trim() || null;
+  invariant(!requested || requested === expected, 400, "INVALID_INPUT", "Remote workspace id must match the selected deployment.");
+  return expected;
+}
+
+export async function recordCustomerSupportAudit(actor: AppActor, params: {
+  deploymentId: string;
+  action: string;
+  reason?: string | null;
+  summary?: string | null;
+  outcome?: string | null;
+  evidence?: unknown;
+  remoteWorkspaceId?: string | null;
+  idempotencyKey?: string | null;
+}) {
+  requireControlPlaneScope(actor, "control-plane:support:write");
+  if (!isControlPlaneAgent(actor)) {
+    await requireControlPlaneDeploymentWriteAccess(actor, params.deploymentId);
+  }
+  const reason = requireMutationReason(params.reason);
+  invariant(reason.length <= SUPPORT_AUDIT_MAX_REASON_LENGTH, 400, "INVALID_INPUT", "Support audit reason must be 1000 characters or fewer.");
+  invariant(!SUPPORT_AUDIT_SECRET_VALUE_PATTERN.test(reason), 400, "INVALID_INPUT", "Support audit reason must not contain credentials, secrets, tokens, passwords, or bearer authorization values.");
+  const audit = normalizeSupportAuditInput(params);
+  const operationAction = `support.audit.${audit.action}`;
+  const idempotencyKey = normalizeSupportAuditIdempotencyKey(params.idempotencyKey);
+  const deployment = await prisma.customerDeployment.findUnique({ where: { id: params.deploymentId } });
+  invariant(deployment, 404, "NOT_FOUND", "Customer deployment not found.");
+  const remoteWorkspaceId = supportAuditRemoteWorkspaceId(deployment, params.remoteWorkspaceId);
+  const workspaceId = deployment.managedWorkspaceId ?? null;
+  const inputSummary = {
+    ...audit,
+    remoteWorkspaceId,
+  };
+
+  let operation: Awaited<ReturnType<typeof prisma.supportOperation.create>> | null = null;
+  if (idempotencyKey) {
+    const existing = await findSupportAuditByIdempotencyKey({
+      idempotencyKey,
+      deploymentId: params.deploymentId,
+      operationAction,
+      reason,
+      inputSummary,
+    });
+    if (existing) return existing;
+  }
+
+  const connector = await loadSupportConnector(params.deploymentId);
+
+  try {
+    operation = await prisma.supportOperation.create({
+      data: {
+        deploymentId: params.deploymentId,
+        workspaceId,
+        actorUserId: actorUserId(actor),
+        actorLabel: SUPPORT_ACTOR_LABEL,
+        action: operationAction,
+        reason,
+        status: "RUNNING",
+        startedAt: new Date(),
+        inputSummary: inputSummary as Prisma.InputJsonObject,
+        idempotencyKey,
+      },
+    });
+  } catch (error) {
+    if (!idempotencyKey || !isPrismaUniqueConstraintError(error)) throw error;
+    const existing = await findSupportAuditByIdempotencyKey({
+      idempotencyKey,
+      deploymentId: params.deploymentId,
+      operationAction,
+      reason,
+      inputSummary,
+    });
+    if (existing) return existing;
+    throw error;
+  }
+  invariant(operation, 500, "SUPPORT_OPERATION_NOT_CREATED", "Support audit operation was not created.");
+
+  let remoteAudit: unknown;
+  let summarized: unknown;
+  let remoteAcknowledgement: { id: string; operationId: string };
+  try {
+    remoteAudit = await callMcpTool({
+      mcpUrl: connector.mcpUrl,
+      bearerToken: connector.bearerToken,
+      toolName: "record_support_audit",
+      arguments: {
+        action: operationAction,
+        reason,
+        operationId: operation.id,
+        phase: "completed",
+        result: audit,
+      },
+    });
+    summarized = summarizeMcpResponse(remoteAudit);
+    remoteAcknowledgement = requireRemoteSupportAuditAcknowledgement({ raw: remoteAudit, summarized, operationId: operation.id });
+  } catch (error) {
+    const message = sanitizeSupportAuditFailureMessage(error instanceof Error ? error.message : "Support audit recording failed.");
+    await prisma.supportOperation.update({
+      where: { id: operation.id },
+      data: {
+        status: "FAILED",
+        completedAt: new Date(),
+        error: message,
+      },
+    });
+    if (error instanceof AppError) throw new AppError(error.status, error.code, message);
+    throw new AppError(502, "REMOTE_SUPPORT_OPERATION_FAILED", message);
+  }
+  const resultSummary = {
+    ...audit,
+    remoteAudit: remoteAcknowledgement,
+    recorded: true,
+  };
+
+  return prisma.supportOperation.update({
+    where: { id: operation.id },
+    data: {
+      status: "COMPLETED",
+      completedAt: new Date(),
+      resultSummary: resultSummary as Prisma.InputJsonObject,
+    },
+  });
 }
 
 export async function recordBreakGlassSupportNote(actor: AppActor, params: {

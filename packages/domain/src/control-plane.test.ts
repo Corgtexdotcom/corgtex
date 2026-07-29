@@ -333,6 +333,7 @@ const { prismaMock, encryptSecretMock, decryptSecretMock, memberMocks, communica
     supportOperation: {
       count: vi.fn(),
       create: vi.fn(),
+      findUnique: vi.fn(),
       findMany: vi.fn(),
       update: vi.fn(),
     },
@@ -419,16 +420,31 @@ const POST_DEPLOY_REQUIRED_READ_SCOPES = [
   "brain:read",
 ];
 
-function mcpToolResult(payload: unknown) {
+function mcpToolResult(payload: unknown, isError = false) {
   return {
     ok: true,
     status: 200,
     json: async () => ({
       result: {
+        ...(isError ? { isError: true } : {}),
         content: [{ type: "text", text: JSON.stringify(payload) }],
       },
     }),
   };
+}
+
+const SUPPORT_AUDIT_PARAMS = {
+  action: "finance_v2.closeout",
+  reason: "Record sanitized Finance V2 closeout.",
+  summary: "Finance V2 closeout verified with sanitized evidence.",
+};
+
+function supportAuditDeployment(overrides: Record<string, unknown> = {}) {
+  return { id: "inst-1", label: "Acme", url: "https://customer.test", supportMcpUrl: "https://customer.test/api/mcp", supportCredentialEnc: "encrypted-token", supportConnectorStatus: "connected", managedWorkspaceId: null, remoteWorkspaceId: null, ...overrides };
+}
+
+function supportAuditInputSummary(overrides: Record<string, unknown> = {}) {
+  return { schemaVersion: 1, action: SUPPORT_AUDIT_PARAMS.action, outcome: "completed", summary: SUPPORT_AUDIT_PARAMS.summary, evidence: {}, remoteWorkspaceId: null, ...overrides };
 }
 
 function recentRecorderProofDate(offsetMs = 0) {
@@ -466,6 +482,7 @@ describe("control plane domain", () => {
     prismaMock.modelUsage.findMany.mockResolvedValue([]);
     prismaMock.modelUsageBudget.findUnique.mockResolvedValue(null);
     prismaMock.supportOperation.findMany.mockResolvedValue([]);
+    prismaMock.supportOperation.findUnique.mockResolvedValue(null);
     prismaMock.fleetHealthSnapshot.findFirst.mockResolvedValue(null);
     prismaMock.customerDeploymentEvent.findFirst.mockResolvedValue(null);
     prismaMock.selfServeSmokeRun.findFirst.mockResolvedValue(null);
@@ -7311,6 +7328,353 @@ describe("control plane domain", () => {
         snapshotKind: "SUPPORT_READY",
         status: "failed",
         error: "brain_context:REMOTE_AUTH_OR_SCOPE",
+      }),
+    }));
+  });
+
+  it("requires control-plane support write scope for standalone customer support audits", async () => {
+    const { recordCustomerSupportAudit } = await import("./control-plane");
+    const readOnlyAgent: AppActor = {
+      kind: "agent",
+      authProvider: "control-plane",
+      label: "control-plane-agent",
+      scopes: ["control-plane:read"],
+    };
+
+    await expect(recordCustomerSupportAudit(readOnlyAgent, {
+      deploymentId: "inst-1",
+      action: "finance_v2.closeout",
+      reason: "Record sanitized closeout.",
+      summary: "Finance closeout verified.",
+    })).rejects.toMatchObject({
+      status: 403,
+      code: "CONTROL_PLANE_SCOPE_REQUIRED",
+    });
+    prismaMock.customerDeploymentAccess.findUnique.mockResolvedValueOnce({ role: "SUPPORT_VIEWER", isActive: true });
+    await expect(recordCustomerSupportAudit(userActor, { deploymentId: "inst-1", ...SUPPORT_AUDIT_PARAMS })).rejects.toMatchObject({ status: 403, code: "CONTROL_PLANE_WRITE_ACCESS_REQUIRED" });
+    expect(prismaMock.customerDeployment.findUnique).not.toHaveBeenCalled();
+  });
+
+  it("validates standalone support audit action and sanitized evidence schema", async () => {
+    const { recordCustomerSupportAudit } = await import("./control-plane");
+
+    await expect(recordCustomerSupportAudit(operatorActor, {
+      deploymentId: "inst-1",
+      action: "Finance V2 Closeout",
+      reason: "Record sanitized closeout.",
+      summary: "Finance closeout verified.",
+    })).rejects.toMatchObject({
+      status: 400,
+      code: "INVALID_INPUT",
+    });
+
+    await expect(recordCustomerSupportAudit(operatorActor, {
+      deploymentId: "inst-1",
+      ...SUPPORT_AUDIT_PARAMS,
+      evidence: { rawLogs: "Do not accept raw logs in support audit evidence." },
+    })).rejects.toMatchObject({
+      status: 400,
+      code: "INVALID_INPUT",
+    });
+
+    await expect(recordCustomerSupportAudit(operatorActor, {
+      deploymentId: "inst-1",
+      ...SUPPORT_AUDIT_PARAMS,
+      evidence: { raw_log: "Do not accept raw logs in support audit evidence." },
+    })).rejects.toMatchObject({
+      status: 400,
+      code: "INVALID_INPUT",
+    });
+
+    await expect(recordCustomerSupportAudit(operatorActor, {
+      deploymentId: "inst-1",
+      ...SUPPORT_AUDIT_PARAMS,
+      evidence: { transcriptText: "Do not accept transcript evidence." },
+    })).rejects.toMatchObject({
+      status: 400,
+      code: "INVALID_INPUT",
+    });
+    await expect(recordCustomerSupportAudit(operatorActor, { deploymentId: "inst-1", ...SUPPORT_AUDIT_PARAMS, evidence: { detail: "Authorization: Bearer fixture-token-value" } })).rejects.toMatchObject({ status: 400, code: "INVALID_INPUT" });
+    await expect(recordCustomerSupportAudit(operatorActor, { deploymentId: "inst-1", ...SUPPORT_AUDIT_PARAMS, summary: "Authorization: Bearer fixture-token-value" })).rejects.toMatchObject({ status: 400, code: "INVALID_INPUT" });
+    await expect(recordCustomerSupportAudit(operatorActor, { deploymentId: "inst-1", ...SUPPORT_AUDIT_PARAMS, reason: "token=fixture-token-value" })).rejects.toMatchObject({ status: 400, code: "INVALID_INPUT" });
+
+    await expect(recordCustomerSupportAudit(operatorActor, {
+      deploymentId: "inst-1",
+      action: "record_support_audit",
+      reason: "Record sanitized closeout.",
+      summary: "Finance closeout verified.",
+    })).rejects.toMatchObject({
+      status: 400,
+      code: "INVALID_INPUT",
+    });
+
+    await expect(recordCustomerSupportAudit(operatorActor, {
+      deploymentId: "inst-1",
+      ...SUPPORT_AUDIT_PARAMS,
+      idempotencyKey: "x".repeat(201),
+    })).rejects.toMatchObject({
+      status: 400,
+      code: "INVALID_INPUT",
+    });
+    await expect(recordCustomerSupportAudit(operatorActor, {
+      deploymentId: "inst-1",
+      ...SUPPORT_AUDIT_PARAMS,
+      idempotencyKey: "Authorization: Bearer fixture-token-value",
+    })).rejects.toMatchObject({
+      status: 400,
+      code: "INVALID_INPUT",
+    });
+    await expect(recordCustomerSupportAudit(operatorActor, { deploymentId: "inst-1", ...SUPPORT_AUDIT_PARAMS, reason: "x".repeat(1001) })).rejects.toMatchObject({ status: 400, code: "INVALID_INPUT" });
+
+    await expect(recordCustomerSupportAudit(operatorActor, {
+      deploymentId: "inst-1",
+      ...SUPPORT_AUDIT_PARAMS,
+      evidence: {
+        aggregate: Array.from({ length: 20 }, () => Array.from({ length: 20 }, () => ["summarized"])),
+      },
+    })).rejects.toMatchObject({
+      status: 400,
+      code: "INVALID_INPUT",
+    });
+
+    prismaMock.customerDeployment.findUnique.mockResolvedValueOnce(supportAuditDeployment({ remoteWorkspaceId: "remote-ws-1" }));
+    await expect(recordCustomerSupportAudit(operatorActor, {
+      deploymentId: "inst-1",
+      ...SUPPORT_AUDIT_PARAMS,
+      remoteWorkspaceId: "stale-remote-ws",
+    })).rejects.toMatchObject({
+      status: 400,
+      code: "INVALID_INPUT",
+    });
+    expect(prismaMock.supportOperation.create).not.toHaveBeenCalled();
+  });
+
+  it("keeps direct record_support_audit out of the generic support runner", async () => {
+    const { runCustomerSupportOperation } = await import("./control-plane");
+
+    await expect(runCustomerSupportOperation(operatorActor, {
+      deploymentId: "inst-1",
+      action: "record_support_audit" as never,
+      reason: "Attempt passthrough.",
+      arguments: {},
+    })).rejects.toMatchObject({
+      status: 400,
+      code: "INVALID_INPUT",
+    });
+    expect(global.fetch).not.toHaveBeenCalled();
+  });
+
+  it("records a standalone customer support audit and redacts central evidence", async () => {
+    const { recordCustomerSupportAudit } = await import("./control-plane");
+    const supportWriteOnlyAgent: AppActor = {
+      kind: "agent",
+      authProvider: "control-plane",
+      label: "control-plane-agent",
+      scopes: ["control-plane:support:write"],
+    };
+    prismaMock.customerDeployment.findUnique.mockResolvedValue(supportAuditDeployment({
+      managedWorkspaceId: "ws-1",
+      remoteWorkspaceId: "remote-ws-1",
+    }));
+    prismaMock.supportOperation.create.mockResolvedValueOnce({
+      id: "op-audit",
+      deploymentId: "inst-1",
+      action: "support.audit.finance_v2.closeout",
+      status: "RUNNING",
+      idempotencyKey: "closeout-key",
+    });
+    prismaMock.supportOperation.update.mockImplementationOnce(async (args: any) => ({
+      id: args.where.id,
+      deploymentId: "inst-1",
+      action: "support.audit.finance_v2.closeout",
+      status: args.data.status,
+      resultSummary: args.data.resultSummary,
+    }));
+    global.fetch = vi.fn(async (_input, init) => {
+      const body = JSON.parse(String((init as RequestInit).body));
+      expect(body.params).toEqual({
+        name: "record_support_audit",
+        arguments: {
+          action: "support.audit.finance_v2.closeout",
+          reason: SUPPORT_AUDIT_PARAMS.reason,
+          operationId: "op-audit",
+          phase: "completed",
+          result: {
+            schemaVersion: 1,
+            action: SUPPORT_AUDIT_PARAMS.action,
+            outcome: "completed",
+            summary: SUPPORT_AUDIT_PARAMS.summary,
+            evidence: {
+              releaseSha: "f17a07b1c11e27f56abaedd48ded860309084063", apiKey: "[redacted]",
+              credentials: "[redacted]", awsCredentials: "[redacted]",
+              nested: [{ private_key: "[redacted]" }],
+              nestedArray: [["completed", "sanitized"]], supportCredential: "[redacted]",
+            },
+          },
+        },
+      });
+      return mcpToolResult({ id: "remote-audit", operationId: "op-audit", bearerToken: "fixture-value" });
+    }) as any;
+
+    const result = await recordCustomerSupportAudit(supportWriteOnlyAgent, {
+      deploymentId: "inst-1",
+      ...SUPPORT_AUDIT_PARAMS,
+      outcome: "completed",
+      evidence: {
+        releaseSha: "f17a07b1c11e27f56abaedd48ded860309084063", apiKey: "fixture-value",
+        credentials: "fixture-value", awsCredentials: "fixture-value",
+        nested: [{ private_key: "fixture-value" }],
+        nestedArray: [["completed", "sanitized"]], supportCredential: "fixture-value",
+      },
+      remoteWorkspaceId: "remote-ws-1",
+      idempotencyKey: "closeout-key",
+    });
+
+    expect(decryptSecretMock).toHaveBeenCalledWith("encrypted-token");
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(prismaMock.supportOperation.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        action: "support.audit.finance_v2.closeout",
+        reason: SUPPORT_AUDIT_PARAMS.reason,
+        status: "RUNNING",
+        workspaceId: "ws-1",
+        idempotencyKey: "closeout-key",
+        inputSummary: expect.objectContaining({
+          remoteWorkspaceId: "remote-ws-1",
+          evidence: {
+            releaseSha: "f17a07b1c11e27f56abaedd48ded860309084063", apiKey: "[redacted]",
+            credentials: "[redacted]", awsCredentials: "[redacted]",
+            nested: [{ private_key: "[redacted]" }],
+            nestedArray: [["completed", "sanitized"]], supportCredential: "[redacted]",
+          },
+        }),
+      }),
+    }));
+    expect(prismaMock.supportOperation.update).toHaveBeenCalledWith(expect.objectContaining({
+      where: { id: "op-audit" },
+      data: expect.objectContaining({
+        status: "COMPLETED",
+        resultSummary: expect.objectContaining({
+          remoteAudit: {
+            id: "remote-audit",
+            operationId: "op-audit",
+          },
+        }),
+      }),
+    }));
+    expect(result).toMatchObject({ id: "op-audit", status: "COMPLETED" });
+  });
+
+  it("returns existing standalone support audit operations by idempotency key", async () => {
+    const { recordCustomerSupportAudit } = await import("./control-plane");
+    prismaMock.customerDeployment.findUnique.mockResolvedValue(supportAuditDeployment({ supportCredential: null, supportConnectorStatus: "disconnected" }));
+    prismaMock.supportOperation.findUnique.mockResolvedValueOnce({
+      id: "op-existing",
+      deploymentId: "inst-1",
+      action: "support.audit.finance_v2.closeout",
+      reason: SUPPORT_AUDIT_PARAMS.reason,
+      status: "COMPLETED",
+      inputSummary: supportAuditInputSummary(),
+      idempotencyKey: "closeout-key",
+    });
+
+    const result = await recordCustomerSupportAudit(operatorActor, {
+      deploymentId: "inst-1",
+      ...SUPPORT_AUDIT_PARAMS,
+      idempotencyKey: "closeout-key",
+    });
+
+    expect(result).toMatchObject({
+      id: "op-existing",
+      idempotentReplay: true,
+    });
+    expect(prismaMock.supportOperation.create).not.toHaveBeenCalled();
+    expect(decryptSecretMock).not.toHaveBeenCalled();
+    expect(global.fetch).not.toHaveBeenCalled();
+  });
+
+  it("rejects idempotency replays with changed standalone support audit payloads", async () => {
+    const { recordCustomerSupportAudit } = await import("./control-plane");
+    prismaMock.customerDeployment.findUnique.mockResolvedValue(supportAuditDeployment());
+    prismaMock.supportOperation.findUnique.mockResolvedValueOnce({
+      id: "op-existing",
+      deploymentId: "inst-1",
+      action: "support.audit.finance_v2.closeout",
+      reason: SUPPORT_AUDIT_PARAMS.reason,
+      status: "COMPLETED",
+      inputSummary: supportAuditInputSummary({
+        summary: "Earlier closeout evidence.",
+      }),
+      idempotencyKey: "closeout-key",
+    });
+
+    await expect(recordCustomerSupportAudit(operatorActor, {
+      deploymentId: "inst-1",
+      ...SUPPORT_AUDIT_PARAMS,
+      idempotencyKey: "closeout-key",
+    })).rejects.toMatchObject({
+      status: 409,
+      code: "IDEMPOTENCY_KEY_CONFLICT",
+    });
+    expect(prismaMock.supportOperation.create).not.toHaveBeenCalled();
+    expect(global.fetch).not.toHaveBeenCalled();
+  });
+
+  it("does not replay failed standalone support audits by idempotency key", async () => {
+    const { recordCustomerSupportAudit } = await import("./control-plane");
+    const inputSummary = supportAuditInputSummary();
+    prismaMock.customerDeployment.findUnique.mockResolvedValue(supportAuditDeployment());
+    prismaMock.supportOperation.findUnique.mockResolvedValueOnce({
+      id: "op-audit",
+      deploymentId: "inst-1",
+      action: "support.audit.finance_v2.closeout",
+      reason: SUPPORT_AUDIT_PARAMS.reason,
+      status: "FAILED",
+      inputSummary,
+      idempotencyKey: "closeout-key",
+    });
+
+    await expect(recordCustomerSupportAudit(operatorActor, {
+      deploymentId: "inst-1",
+      ...SUPPORT_AUDIT_PARAMS,
+      idempotencyKey: "closeout-key",
+    })).rejects.toMatchObject({
+      status: 409,
+      code: "IDEMPOTENCY_KEY_NOT_REPLAYABLE",
+    });
+
+    expect(prismaMock.supportOperation.create).not.toHaveBeenCalled();
+    expect(global.fetch).not.toHaveBeenCalled();
+  });
+
+  it("stores failed central evidence when remote support audit recording fails", async () => {
+    const { recordCustomerSupportAudit } = await import("./control-plane");
+    prismaMock.customerDeployment.findUnique.mockResolvedValue(supportAuditDeployment());
+    prismaMock.supportOperation.create.mockResolvedValueOnce({
+      id: "op-audit",
+      deploymentId: "inst-1",
+      action: "support.audit.finance_v2.closeout",
+      status: "RUNNING",
+    });
+    prismaMock.supportOperation.update.mockResolvedValueOnce({
+      id: "op-audit",
+      status: "FAILED",
+    });
+    global.fetch = vi.fn(async () => mcpToolResult("Customer audit write failed. Authorization: Bearer fixture-token-value", true)) as any;
+
+    await expect(recordCustomerSupportAudit(operatorActor, {
+      deploymentId: "inst-1",
+      ...SUPPORT_AUDIT_PARAMS,
+    })).rejects.toMatchObject({
+      status: 502,
+      code: "REMOTE_SUPPORT_OPERATION_FAILED",
+    });
+
+    expect(prismaMock.supportOperation.update).toHaveBeenCalledWith(expect.objectContaining({
+      where: { id: "op-audit" },
+      data: expect.objectContaining({
+        status: "FAILED",
+        error: "Remote support audit failed with redacted detail.",
       }),
     }));
   });
