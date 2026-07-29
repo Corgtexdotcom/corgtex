@@ -54,6 +54,12 @@ const AZURE_FOUNDRY_MODEL_ENV = {
   MODEL_CHAT_CONVERSATION: "corgtex-ds-v4-pro",
   MODEL_EMBEDDING_DEFAULT: "corgtex-ds-v4-flash",
 };
+const CUSTOM_AZURE_FOUNDRY_MODEL_ENV = {
+  ...AZURE_FOUNDRY_MODEL_ENV,
+  MODEL_CHAT_DEFAULT: "custom-foundry-deployment",
+  MODEL_CHAT_FAST: "custom-foundry-deployment",
+  MODEL_CHAT_STANDARD: "custom-foundry-deployment",
+};
 const AZURE_FOUNDRY_PRICE_OVERRIDES_JSON = JSON.stringify([
   { provider: "azure-foundry", model: "corgtex-ds-v4-flash", inputUsdPerToken: 0.00000019, outputUsdPerToken: 0.00000051 },
   { provider: "azure-foundry", model: "corgtex-ds-v4-pro", inputUsdPerToken: 0.00000174, outputUsdPerToken: 0.00000348 },
@@ -131,7 +137,7 @@ describe("self-serve production readiness", () => {
     expect(result.stderr).toBe("");
   });
 
-  it("requires Azure pricing overrides in strict mode", () => {
+  it("accepts built-in Azure Foundry pricing in strict mode without override JSON", () => {
     const result = runReadiness({
       ...STRICT_BASE_ENV,
       ...AZURE_FOUNDRY_MODEL_ENV,
@@ -141,14 +147,30 @@ describe("self-serve production readiness", () => {
       AZURE_CLIENT_ID: "00000000-0000-4000-8000-000000000000",
     }, ["--strict", "--skip-http"]);
 
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain("OK   built-in price catalog includes azure-foundry/corgtex-ds-v4-flash");
+    expect(result.stdout).toContain("OK   built-in price catalog includes azure-foundry/corgtex-gpt56-luna");
+    expect(result.stderr).toBe("");
+  });
+
+  it("requires price overrides for custom Azure deployments in strict mode", () => {
+    const result = runReadiness({
+      ...STRICT_BASE_ENV,
+      ...CUSTOM_AZURE_FOUNDRY_MODEL_ENV,
+      MODEL_PROVIDER: "azure-foundry",
+      MODEL_BASE_URL: "https://example.openai.azure.com/openai/v1",
+      AZURE_OPENAI_AUTH_MODE: "managed_identity",
+      AZURE_CLIENT_ID: "00000000-0000-4000-8000-000000000000",
+    }, ["--strict", "--skip-http"]);
+
     expect(result.status).toBe(1);
-    expect(result.stderr).toContain("MODEL_PRICE_OVERRIDES_JSON missing for Azure model pricing");
+    expect(result.stderr).toContain("MODEL_PRICE_OVERRIDES_JSON missing price for azure-foundry/custom-foundry-deployment");
   });
 
   it("requires exact Azure pricing entries in strict mode", () => {
     const result = runReadiness({
       ...STRICT_BASE_ENV,
-      ...AZURE_FOUNDRY_MODEL_ENV,
+      ...CUSTOM_AZURE_FOUNDRY_MODEL_ENV,
       MODEL_PROVIDER: "azure-foundry",
       MODEL_BASE_URL: "https://example.openai.azure.com/openai/v1",
       AZURE_OPENAI_AUTH_MODE: "managed_identity",
@@ -157,7 +179,7 @@ describe("self-serve production readiness", () => {
     }, ["--strict", "--skip-http"]);
 
     expect(result.status).toBe(1);
-    expect(result.stderr).toContain("MODEL_PRICE_OVERRIDES_JSON missing price for azure-foundry/corgtex-ds-v4-flash");
+    expect(result.stderr).toContain("MODEL_PRICE_OVERRIDES_JSON missing price for azure-foundry/custom-foundry-deployment");
   });
 
   it("rejects malformed Azure pricing overrides in strict mode", () => {
@@ -260,6 +282,25 @@ describe("self-serve production readiness", () => {
     expect(result.stderr).not.toContain("MODEL_PRICE_OVERRIDES_JSON missing price for azure-foundry/deepseek/deepseek-v4-pro");
   });
 
+  it("rejects malformed per-model route base URLs", () => {
+    const result = runReadiness({
+      ...STRICT_BASE_ENV,
+      MODEL_PROVIDER: "openrouter",
+      MODEL_API_KEY: "openrouter-key-placeholder",
+      MODEL_PROVIDER_ROUTES_JSON: JSON.stringify([
+        {
+          model: "corgtex-gpt56-luna",
+          provider: "azure-foundry",
+          baseUrl: "ftp://example.services.ai.azure.com/openai/v1",
+          authMode: "managed_identity",
+        },
+      ]),
+    }, ["--strict", "--skip-http"]);
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("MODEL_PROVIDER_ROUTES_JSON[0].baseUrl must be an HTTP(S) URL");
+  });
+
   it("requires non-Azure rollback routes to include a base URL and key", () => {
     const result = runReadiness({
       ...STRICT_BASE_ENV,
@@ -279,7 +320,7 @@ describe("self-serve production readiness", () => {
 
     expect(result.status).toBe(1);
     expect(result.stderr).toContain("MODEL_PROVIDER_ROUTES_JSON route for deepseek/deepseek-v4-pro requires baseUrl");
-    expect(result.stderr).toContain("MODEL_API_KEY missing for OpenRouter route deepseek/deepseek-v4-pro");
+    expect(result.stderr).toContain("OpenRouter route for deepseek/deepseek-v4-pro requires apiKeyEnv when provider differs from MODEL_PROVIDER");
   });
 
   it("rejects malformed per-model provider routes in strict mode", () => {

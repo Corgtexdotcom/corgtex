@@ -10,6 +10,8 @@ const DEFAULT_MAX_TOKENS = intEnv("AZURE_FOUNDRY_EVAL_MAX_TOKENS", 600, { min: 1
 const DEFAULT_RETRIES = intEnv("AZURE_FOUNDRY_EVAL_RETRIES", 1, { min: 0 });
 const DEFAULT_CONCURRENCY = intEnv("AZURE_FOUNDRY_EVAL_CONCURRENCY", 2, { min: 1, max: 4 });
 const TOKEN_REFRESH_SKEW_MS = 60_000;
+const SUPPORTED_EVAL_PROVIDERS = new Set(["openrouter", "openai", "azure-openai", "azure-foundry"]);
+const AZURE_EVAL_PROVIDERS = new Set(["azure-openai", "azure-foundry"]);
 const DEFAULT_PRICES = [
   { provider: "openrouter", model: "deepseek/deepseek-v4-flash", inputUsdPerToken: 0.0000000983, outputUsdPerToken: 0.0000001966 },
   { provider: "openrouter", model: "deepseek/deepseek-v4-pro", inputUsdPerToken: 0.000000435, outputUsdPerToken: 0.00000087 },
@@ -75,13 +77,19 @@ function parseCandidates() {
       throw new Error(`AZURE_FOUNDRY_EVAL_CANDIDATES_JSON[${index}].authMode must be api_key or managed_identity.`);
     }
     const provider = record.provider.trim().toLowerCase();
+    if (!SUPPORTED_EVAL_PROVIDERS.has(provider)) {
+      throw new Error(`AZURE_FOUNDRY_EVAL_CANDIDATES_JSON[${index}].provider must be one of ${[...SUPPORTED_EVAL_PROVIDERS].join(", ")}.`);
+    }
     const model = record.model.trim();
     const authMode = record.authMode ?? "api_key";
+    if (authMode === "managed_identity" && !AZURE_EVAL_PROVIDERS.has(provider)) {
+      throw new Error(`AZURE_FOUNDRY_EVAL_CANDIDATES_JSON[${index}].authMode managed_identity is only supported for Azure candidates.`);
+    }
     const apiKeyEnv = typeof record.apiKeyEnv === "string" && record.apiKeyEnv.trim()
       ? record.apiKeyEnv.trim()
-      : provider === "openrouter"
-        ? "MODEL_API_KEY"
-        : "AZURE_OPENAI_API_KEY";
+      : AZURE_EVAL_PROVIDERS.has(provider)
+        ? "AZURE_OPENAI_API_KEY"
+        : "MODEL_API_KEY";
     return {
       label: record.label.trim(),
       provider,
@@ -141,18 +149,10 @@ async function mapWithConcurrency(items, limit, mapper) {
 
 function parseJsonObject(text) {
   try {
-    const parsed = JSON.parse(text);
+    const parsed = JSON.parse(text.trim());
     return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : null;
   } catch {
-    const start = text.indexOf("{");
-    const end = text.lastIndexOf("}");
-    if (start < 0 || end <= start) return null;
-    try {
-      const parsed = JSON.parse(text.slice(start, end + 1));
-      return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : null;
-    } catch {
-      return null;
-    }
+    return null;
   }
 }
 
@@ -233,6 +233,9 @@ function estimateCost(candidate, usage, text, requestBody) {
 
 async function authHeaders(candidate) {
   if (candidate.authMode === "managed_identity") {
+    if (!AZURE_EVAL_PROVIDERS.has(candidate.provider)) {
+      throw new Error(`managed_identity authMode is only supported for Azure candidates (${candidate.label}).`);
+    }
     const cachedToken = accessTokenCache.get(candidate.scope);
     if (cachedToken && cachedToken.expiresOnTimestamp > Date.now() + TOKEN_REFRESH_SKEW_MS) {
       return { authorization: `Bearer ${cachedToken.token}` };
@@ -324,12 +327,15 @@ async function callCandidate(candidate, item) {
 }
 
 async function callCandidateWithRetries(candidate, item) {
+  const operationStartedAt = Date.now();
   const errors = [];
   for (let attempt = 0; attempt <= DEFAULT_RETRIES; attempt += 1) {
     try {
       const response = await callCandidate(candidate, item);
       return {
         ...response,
+        latencyMs: Date.now() - operationStartedAt,
+        finalAttemptLatencyMs: response.latencyMs,
         attempts: attempt + 1,
         retryCount: attempt,
       };
@@ -341,6 +347,7 @@ async function callCandidateWithRetries(candidate, item) {
         const finalError = new Error(sanitizedErrorMessage(error, errors.length));
         finalError.category = error?.category ?? (retryable ? "timeout_or_retry_exhausted" : "request_error");
         finalError.attempts = errors.length;
+        finalError.latencyMs = Date.now() - operationStartedAt;
         throw finalError;
       }
       await delay(250 * 2 ** attempt);
@@ -500,6 +507,7 @@ async function main() {
           error: error instanceof Error ? error.message : String(error),
           errorCategory: error?.category ?? "request_error",
           attempts: Number.isFinite(error?.attempts) ? error.attempts : undefined,
+          latencyMs: Number.isFinite(error?.latencyMs) ? error.latencyMs : undefined,
         };
       }
     });
@@ -534,8 +542,10 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
 }
 
 export {
+  callCandidateWithRetries,
   conceptMatches,
   estimateCost,
   isRetryableRequestError,
+  parseCandidates,
   scoreItem,
 };

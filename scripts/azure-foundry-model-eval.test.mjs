@@ -1,14 +1,19 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
+  callCandidateWithRetries,
   conceptMatches,
   estimateCost,
   isRetryableRequestError,
+  parseCandidates,
   scoreItem,
 } from "./azure-foundry-model-eval.mjs";
 
 afterEach(() => {
+  delete process.env.AZURE_FOUNDRY_EVAL_CANDIDATES_JSON;
+  delete process.env.MODEL_API_KEY;
   delete process.env.MODEL_PRICE_OVERRIDES_JSON;
+  vi.unstubAllGlobals();
 });
 
 describe("Azure Foundry model eval helpers", () => {
@@ -50,6 +55,47 @@ describe("Azure Foundry model eval helpers", () => {
     expect(score.passed).toBe(false);
   });
 
+  it("requires standalone JSON before a JSON-mode case can pass", () => {
+    const score = scoreItem(
+      { mode: "json", requiredKeys: ["summary"] },
+      "Here is the object: {\"summary\":\"Structured answer\"}",
+    );
+
+    expect(score.jsonParsed).toBe(false);
+    expect(score.schemaValid).toBe(false);
+    expect(score.passed).toBe(false);
+  });
+
+  it("defaults OpenAI evaluation candidates to MODEL_API_KEY", () => {
+    process.env.AZURE_FOUNDRY_EVAL_CANDIDATES_JSON = JSON.stringify([
+      {
+        label: "OpenAI rollback",
+        provider: "openai",
+        model: "gpt-4o",
+        baseUrl: "https://api.openai.com/v1",
+      },
+    ]);
+
+    expect(parseCandidates()[0]).toMatchObject({
+      provider: "openai",
+      apiKeyEnv: "MODEL_API_KEY",
+    });
+  });
+
+  it("rejects managed identity for non-Azure evaluation candidates", () => {
+    process.env.AZURE_FOUNDRY_EVAL_CANDIDATES_JSON = JSON.stringify([
+      {
+        label: "OpenRouter rollback",
+        provider: "openrouter",
+        model: "deepseek/deepseek-v4-flash",
+        baseUrl: "https://openrouter.ai/api/v1",
+        authMode: "managed_identity",
+      },
+    ]);
+
+    expect(() => parseCandidates()).toThrow("authMode managed_identity is only supported for Azure candidates");
+  });
+
   it("does not treat negated forbidden phrases as forbidden mentions", () => {
     const score = scoreItem({
       mode: "text",
@@ -87,5 +133,38 @@ describe("Azure Foundry model eval helpers", () => {
 
   it("retries transient fetch network failures", () => {
     expect(isRetryableRequestError(new TypeError("fetch failed"))).toBe(true);
+  });
+
+  it("includes retry time in reported evaluation latency", async () => {
+    process.env.MODEL_API_KEY = "model-key";
+    const fetchMock = vi.fn()
+      .mockRejectedValueOnce(new TypeError("fetch failed"))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        choices: [{ message: { content: "retry succeeded" } }],
+        usage: { prompt_tokens: 2, completion_tokens: 3 },
+      }), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await callCandidateWithRetries({
+      label: "OpenAI rollback",
+      provider: "openai",
+      model: "gpt-4o",
+      baseUrl: "https://api.openai.test/v1",
+      authMode: "api_key",
+      apiKeyEnv: "MODEL_API_KEY",
+      maxTokenParameter: "max_tokens",
+      scope: "https://cognitiveservices.azure.com/.default",
+      temperature: 0,
+    }, {
+      id: "retry-case",
+      flow: "retry behavior",
+      prompt: "Retry once.",
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(result.attempts).toBe(2);
+    expect(result.retryCount).toBe(1);
+    expect(result.latencyMs).toBeGreaterThanOrEqual(200);
+    expect(result.finalAttemptLatencyMs).toBeLessThanOrEqual(result.latencyMs);
   });
 });

@@ -623,6 +623,35 @@ describe("openAICompatibleModelGateway", () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
+  it("requires an explicit key env when a non-Azure route changes providers", async () => {
+    restoreEnv();
+    Object.assign(process.env, {
+      MODEL_PROVIDER: "openrouter",
+      MODEL_API_KEY: "openrouter-key",
+      MODEL_BASE_URL: "https://openrouter.ai/api/v1",
+      MODEL_PROVIDER_ROUTES_JSON: JSON.stringify([
+        {
+          model: "gpt-4o",
+          provider: "openai",
+          baseUrl: "https://api.openai.com/v1",
+        },
+      ]),
+    });
+
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { openAICompatibleModelGateway } = await import("./openai-compatible-gateway");
+
+    await expect(openAICompatibleModelGateway.chat({
+      workspaceId: "ws-1",
+      taskType: "CHAT",
+      model: "gpt-4o",
+      messages: [{ role: "user", content: "Hello" }],
+    })).rejects.toThrow("MODEL_PROVIDER_ROUTES_JSON route for gpt-4o requires apiKeyEnv when provider differs from MODEL_PROVIDER");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it("keeps unrouted models on OpenRouter when a Foundry provider route exists", async () => {
     restoreEnv();
     Object.assign(process.env, {

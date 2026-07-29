@@ -32,6 +32,18 @@ const REQUIRED_EMAIL_REPLY_TO_ADDRESS = "support@corgtex.com";
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const SUPPORTED_MODEL_PROVIDERS = new Set(["openrouter", "openai", "azure-openai", "azure-foundry"]);
 const AZURE_MODEL_PROVIDERS = new Set(["azure-openai", "azure-foundry"]);
+const BUILT_IN_MODEL_PRICE_KEYS = new Set([
+  "azure-foundry/corgtex-ds-v4-flash",
+  "azure-foundry/corgtex-ds-v4-pro",
+  "azure-foundry/corgtex-kimi-k25",
+  "azure-foundry/corgtex-kimi-k27-code",
+  "azure-foundry/corgtex-gpt56-luna",
+  "azure-openai/corgtex-ds-v4-flash",
+  "azure-openai/corgtex-ds-v4-pro",
+  "azure-openai/corgtex-kimi-k25",
+  "azure-openai/corgtex-kimi-k27-code",
+  "azure-openai/corgtex-gpt56-luna",
+]);
 const MODEL_DEFAULTS = {
   MODEL_CHAT_DEFAULT: "deepseek/deepseek-v4-flash",
   MODEL_CHAT_FAST: "deepseek/deepseek-v4-flash",
@@ -102,6 +114,14 @@ function isAzureProvider(provider) {
   return AZURE_MODEL_PROVIDERS.has(provider);
 }
 
+function priceKey(provider, model) {
+  return `${provider.trim().toLowerCase()}/${model.trim().toLowerCase()}`;
+}
+
+function hasBuiltInModelPrice(provider, model) {
+  return BUILT_IN_MODEL_PRICE_KEYS.has(priceKey(provider, model));
+}
+
 function modelNameFromEnv(name) {
   return envValue(name) || MODEL_DEFAULTS[name] || "";
 }
@@ -166,25 +186,27 @@ function parseModelPriceOverrides() {
   return parsedModelPriceOverrides;
 }
 
-function requireModelPriceOverride(provider, model, strict) {
-  if (!configured("MODEL_PRICE_OVERRIDES_JSON")) {
-    if (strict) {
-      fail("MODEL_PRICE_OVERRIDES_JSON missing for Azure model pricing.");
-    } else {
-      warn("MODEL_PRICE_OVERRIDES_JSON missing for Azure model pricing.");
-    }
-    return;
-  }
-
-  const prices = parseModelPriceOverrides();
+function requireKnownModelPrice(provider, model, strict) {
+  const prices = configured("MODEL_PRICE_OVERRIDES_JSON") ? parseModelPriceOverrides() : [];
   const normalizedModel = model.trim().toLowerCase();
   const hasPrice = prices.some((price) => price.provider === provider && price.model === normalizedModel);
   if (hasPrice) {
     pass(`MODEL_PRICE_OVERRIDES_JSON includes ${provider}/${model}`);
+  } else if (hasBuiltInModelPrice(provider, model)) {
+    pass(`built-in price catalog includes ${provider}/${model}`);
   } else if (strict) {
     fail(`MODEL_PRICE_OVERRIDES_JSON missing price for ${provider}/${model}.`);
   } else {
     warn(`MODEL_PRICE_OVERRIDES_JSON missing price for ${provider}/${model}.`);
+  }
+}
+
+function isHttpBaseUrl(value) {
+  try {
+    const url = new URL(value);
+    return url.protocol === "https:" || url.protocol === "http:";
+  } catch {
+    return false;
   }
 }
 
@@ -223,6 +245,10 @@ function parseProviderRoutes() {
     }
     if (route.baseUrl !== undefined && (typeof route.baseUrl !== "string" || !route.baseUrl.trim())) {
       fail(`MODEL_PROVIDER_ROUTES_JSON[${index}].baseUrl must be a non-empty string when set.`);
+      return [];
+    }
+    if (typeof route.baseUrl === "string" && route.baseUrl.trim() && !isHttpBaseUrl(route.baseUrl.trim())) {
+      fail(`MODEL_PROVIDER_ROUTES_JSON[${index}].baseUrl must be an HTTP(S) URL.`);
       return [];
     }
     if (route.apiKeyEnv !== undefined && (typeof route.apiKeyEnv !== "string" || !route.apiKeyEnv.trim())) {
@@ -308,7 +334,7 @@ function checkProviderRouteConfiguration(strict) {
     }
 
     if (isAzureProvider(route.provider)) {
-      requireModelPriceOverride(route.provider, route.model, strict);
+      requireKnownModelPrice(route.provider, route.model, strict);
       const authMode = route.authMode || envValue("AZURE_OPENAI_AUTH_MODE") || "api_key";
       if (authMode === "managed_identity") {
         pass(`MODEL_PROVIDER_ROUTES_JSON route for ${route.model} uses managed identity`);
@@ -335,6 +361,12 @@ function checkProviderRouteConfiguration(strict) {
 
     if (route.apiKeyEnv) {
       checkConfigured(route.apiKeyEnv, strict, `${route.apiKeyEnv} missing for ${label} route ${route.model}.`);
+    } else if (route.provider !== globalProvider) {
+      if (strict) {
+        fail(`${label} route for ${route.model} requires apiKeyEnv when provider differs from MODEL_PROVIDER.`);
+      } else {
+        warn(`${label} route for ${route.model} requires apiKeyEnv when provider differs from MODEL_PROVIDER.`);
+      }
     } else {
       checkConfigured("MODEL_API_KEY", strict, `MODEL_API_KEY missing for ${label} route ${route.model}.`);
     }
@@ -360,7 +392,7 @@ function checkModelConfiguration(strict) {
     for (const model of configuredModelNames()) {
       const resolvedProvider = resolvedProviderForModel(provider, routes, model);
       if (isAzureProvider(resolvedProvider)) {
-        requireModelPriceOverride(resolvedProvider, model, strict);
+        requireKnownModelPrice(resolvedProvider, model, strict);
       }
     }
     const authMode = envValue("AZURE_OPENAI_AUTH_MODE") || "api_key";
