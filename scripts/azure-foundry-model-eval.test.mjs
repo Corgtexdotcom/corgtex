@@ -75,6 +75,17 @@ describe("Azure Foundry model eval helpers", () => {
     expect(cost.rawProviderCostUsd).toBe("0.000065");
   });
 
+  it("includes production OpenRouter rollback prices in cost estimates", () => {
+    const cost = estimateCost(
+      { provider: "openrouter", model: "qwen/qwen3-32b" },
+      { prompt_tokens: 10, completion_tokens: 4 },
+      "answer",
+      { messages: [{ role: "user", content: "Prompt" }] },
+    );
+
+    expect(cost.rawProviderCostUsd).toBe("0.000002");
+  });
+
   it("requires parsed JSON before a JSON-mode case can pass", () => {
     const score = scoreItem({ mode: "json", requiredConcepts: ["ready"] }, "ready");
 
@@ -262,6 +273,64 @@ describe("Azure Foundry model eval helpers", () => {
     expect(matchedScore.passed).toBe(true);
   });
 
+  it("requires CRM extraction concepts in their target fields", () => {
+    const item = {
+      mode: "json",
+      requiredKeys: ["company", "contact", "need", "timeline", "followUp"],
+      requiredJsonShapes: {
+        company: { type: "string" },
+        contact: { type: "string" },
+        need: { type: "string" },
+        timeline: { type: "string" },
+        followUp: { type: "string" },
+      },
+      requiredJsonMatches: [
+        {
+          label: "CRM extracted fields",
+          path: "",
+          fields: {
+            company: "RidgeWorks",
+            contact: "Elena",
+            need: { allOf: ["governed AI workspace", "45 operators", "procurement approval"] },
+            timeline: { anyOf: ["September pilot", "September"] },
+            followUp: { allOf: ["security docs", "pricing overview"] },
+          },
+        },
+      ],
+      requiredConcepts: [
+        "RidgeWorks",
+        "Elena",
+        "45 operators",
+        "procurement approval",
+        "September pilot",
+        "security docs",
+        "pricing overview",
+      ],
+    };
+
+    const concentratedScore = scoreItem(item, JSON.stringify({
+      company: "RidgeWorks Elena governed AI workspace 45 operators procurement approval September pilot security docs pricing overview",
+      contact: null,
+      need: null,
+      timeline: null,
+      followUp: null,
+    }));
+    expect(concentratedScore.schemaValid).toBe(false);
+    expect(concentratedScore.missingJsonMatches).toEqual(["CRM extracted fields"]);
+    expect(concentratedScore.passed).toBe(false);
+
+    const matchedScore = scoreItem(item, JSON.stringify({
+      company: "RidgeWorks",
+      contact: "Elena",
+      need: "Governed AI workspace for 45 operators requiring procurement approval",
+      timeline: "September pilot",
+      followUp: "Send security docs and a short pricing overview",
+    }));
+    expect(matchedScore.schemaValid).toBe(true);
+    expect(matchedScore.missingJsonMatches).toEqual([]);
+    expect(matchedScore.passed).toBe(true);
+  });
+
   it("defaults OpenAI evaluation candidates to MODEL_API_KEY", () => {
     process.env.AZURE_FOUNDRY_EVAL_CANDIDATES_JSON = JSON.stringify([
       {
@@ -317,6 +386,20 @@ describe("Azure Foundry model eval helpers", () => {
     ]);
 
     expect(() => parseCandidates()).toThrow("baseUrl must be a trusted Azure OpenAI-compatible URL for managed identity");
+  });
+
+  it("rejects API-key Azure evaluation candidates on non-Azure hosts", () => {
+    process.env.AZURE_FOUNDRY_EVAL_CANDIDATES_JSON = JSON.stringify([
+      {
+        label: "Foundry candidate",
+        provider: "azure-foundry",
+        model: "corgtex-gpt56-luna",
+        baseUrl: "https://attacker.example/openai/v1",
+        authMode: "api_key",
+      },
+    ]);
+
+    expect(() => parseCandidates()).toThrow("baseUrl must be a trusted Azure OpenAI-compatible URL for API key");
   });
 
   it("does not treat negated forbidden phrases as forbidden mentions", () => {

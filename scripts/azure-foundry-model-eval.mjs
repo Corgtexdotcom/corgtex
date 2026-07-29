@@ -1,9 +1,12 @@
 #!/usr/bin/env node
 import { DefaultAzureCredential } from "@azure/identity";
+import { createRequire } from "node:module";
 import { readFile } from "node:fs/promises";
 import process from "node:process";
 import { pathToFileURL } from "node:url";
 
+const require = createRequire(import.meta.url);
+const PRODUCTION_MODEL_PRICES = require("../packages/models/src/model-prices.json");
 const DEFAULT_EVAL_SET_PATH = "scripts/fixtures/azure-foundry-sanitized-eval-set.jsonl";
 const DEFAULT_TIMEOUT_MS = intEnv("AZURE_FOUNDRY_EVAL_TIMEOUT_MS", 60_000, { min: 1 });
 const DEFAULT_MAX_TOKENS = intEnv("AZURE_FOUNDRY_EVAL_MAX_TOKENS", 600, { min: 1 });
@@ -12,22 +15,6 @@ const DEFAULT_CONCURRENCY = intEnv("AZURE_FOUNDRY_EVAL_CONCURRENCY", 2, { min: 1
 const TOKEN_REFRESH_SKEW_MS = 60_000;
 const SUPPORTED_EVAL_PROVIDERS = new Set(["openrouter", "openai", "azure-openai", "azure-foundry"]);
 const AZURE_EVAL_PROVIDERS = new Set(["azure-openai", "azure-foundry"]);
-const DEFAULT_PRICES = [
-  { provider: "openrouter", model: "deepseek/deepseek-v4-flash", inputUsdPerToken: 0.0000000983, outputUsdPerToken: 0.0000001966 },
-  { provider: "openrouter", model: "deepseek/deepseek-v4-pro", inputUsdPerToken: 0.000000435, outputUsdPerToken: 0.00000087 },
-  { provider: "openrouter", model: "deepseek/deepseek-r1-0528", inputUsdPerToken: 0.0000005, outputUsdPerToken: 0.00000215 },
-  { provider: "openai", model: "gpt-4o", inputUsdPerToken: 0.0000025, outputUsdPerToken: 0.00001 },
-  { provider: "azure-foundry", model: "corgtex-ds-v4-flash", inputUsdPerToken: 0.00000019, outputUsdPerToken: 0.00000051 },
-  { provider: "azure-foundry", model: "corgtex-ds-v4-pro", inputUsdPerToken: 0.00000174, outputUsdPerToken: 0.00000348 },
-  { provider: "azure-foundry", model: "corgtex-kimi-k25", inputUsdPerToken: 0.0000006, outputUsdPerToken: 0.000003 },
-  { provider: "azure-foundry", model: "corgtex-kimi-k27-code", inputUsdPerToken: 0.00000095, outputUsdPerToken: 0.000004 },
-  { provider: "azure-foundry", model: "corgtex-gpt56-luna", inputUsdPerToken: 0.000001, outputUsdPerToken: 0.000006 },
-  { provider: "azure-openai", model: "corgtex-ds-v4-flash", inputUsdPerToken: 0.00000019, outputUsdPerToken: 0.00000051 },
-  { provider: "azure-openai", model: "corgtex-ds-v4-pro", inputUsdPerToken: 0.00000174, outputUsdPerToken: 0.00000348 },
-  { provider: "azure-openai", model: "corgtex-kimi-k25", inputUsdPerToken: 0.0000006, outputUsdPerToken: 0.000003 },
-  { provider: "azure-openai", model: "corgtex-kimi-k27-code", inputUsdPerToken: 0.00000095, outputUsdPerToken: 0.000004 },
-  { provider: "azure-openai", model: "corgtex-gpt56-luna", inputUsdPerToken: 0.000001, outputUsdPerToken: 0.000006 },
-];
 const credential = new DefaultAzureCredential();
 const accessTokenCache = new Map();
 
@@ -58,7 +45,7 @@ function isHttpsBaseUrl(value) {
   }
 }
 
-function isTrustedAzureManagedIdentityBaseUrl(provider, value) {
+function isTrustedAzureBaseUrl(provider, value) {
   try {
     const url = new URL(value);
     if (url.protocol !== "https:") {
@@ -124,8 +111,8 @@ function parseCandidates() {
     if (authMode === "managed_identity" && !AZURE_EVAL_PROVIDERS.has(provider)) {
       throw new Error(`AZURE_FOUNDRY_EVAL_CANDIDATES_JSON[${index}].authMode managed_identity is only supported for Azure candidates.`);
     }
-    if (authMode === "managed_identity" && !isTrustedAzureManagedIdentityBaseUrl(provider, record.baseUrl.trim())) {
-      throw new Error(`AZURE_FOUNDRY_EVAL_CANDIDATES_JSON[${index}].baseUrl must be a trusted Azure OpenAI-compatible URL for managed identity.`);
+    if (AZURE_EVAL_PROVIDERS.has(provider) && !isTrustedAzureBaseUrl(provider, record.baseUrl.trim())) {
+      throw new Error(`AZURE_FOUNDRY_EVAL_CANDIDATES_JSON[${index}].baseUrl must be a trusted Azure OpenAI-compatible URL for ${authMode === "managed_identity" ? "managed identity" : "API key"}.`);
     }
     const apiKeyEnv = typeof record.apiKeyEnv === "string" && record.apiKeyEnv.trim()
       ? record.apiKeyEnv.trim()
@@ -278,11 +265,11 @@ function jsonMatchSatisfied(parsedJson, match) {
 
   const path = typeof match.path === "string" ? match.path.trim() : "";
   const fields = jsonMatchFields(match);
-  if (!path || Object.keys(fields).length === 0) {
+  if (Object.keys(fields).length === 0) {
     return false;
   }
 
-  const value = jsonPathValue(parsedJson, path);
+  const value = path ? jsonPathValue(parsedJson, path) : parsedJson;
   const candidates = Array.isArray(value) ? value : [value];
   return candidates.some((candidate) => (
     isObjectRecord(candidate) && Object.entries(fields).every(([field, concept]) => (
@@ -292,7 +279,7 @@ function jsonMatchSatisfied(parsedJson, match) {
 }
 
 function priceFor(provider, model) {
-  const prices = [...parsePriceOverrides(), ...DEFAULT_PRICES];
+  const prices = [...parsePriceOverrides(), ...PRODUCTION_MODEL_PRICES];
   return prices.find((price) => (
     normalize(price.provider) === normalize(provider) &&
     normalize(price.model) === normalize(model) &&
