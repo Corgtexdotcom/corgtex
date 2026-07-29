@@ -396,6 +396,12 @@ function checkProviderRouteConfiguration(strict) {
       } else {
         warn(`${label} route for ${route.model} requires apiKeyEnv when provider differs from MODEL_PROVIDER.`);
       }
+    } else if (route.baseUrl) {
+      if (strict) {
+        fail(`${label} route for ${route.model} requires apiKeyEnv when overriding baseUrl.`);
+      } else {
+        warn(`${label} route for ${route.model} requires apiKeyEnv when overriding baseUrl.`);
+      }
     } else {
       checkConfigured("MODEL_API_KEY", strict, `MODEL_API_KEY missing for ${label} route ${route.model}.`);
     }

@@ -50,6 +50,14 @@ function normalize(value) {
   return String(value ?? "").trim().toLowerCase();
 }
 
+function isHttpsBaseUrl(value) {
+  try {
+    return new URL(value).protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -85,6 +93,9 @@ function parseCandidates() {
     const provider = record.provider.trim().toLowerCase();
     if (!SUPPORTED_EVAL_PROVIDERS.has(provider)) {
       throw new Error(`AZURE_FOUNDRY_EVAL_CANDIDATES_JSON[${index}].provider must be one of ${[...SUPPORTED_EVAL_PROVIDERS].join(", ")}.`);
+    }
+    if (!isHttpsBaseUrl(record.baseUrl.trim())) {
+      throw new Error(`AZURE_FOUNDRY_EVAL_CANDIDATES_JSON[${index}].baseUrl must be an HTTPS URL.`);
     }
     const model = record.model.trim();
     const authMode = record.authMode ?? "api_key";

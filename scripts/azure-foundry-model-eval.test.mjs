@@ -120,6 +120,12 @@ describe("Azure Foundry model eval helpers", () => {
           items: {
             type: "object",
             requiredKeys: ["title", "owner", "dueDate", "evidence"],
+            properties: {
+              title: { type: "string" },
+              owner: { type: "string" },
+              dueDate: { type: "string" },
+              evidence: { type: "string" },
+            },
           },
         },
       },
@@ -129,6 +135,15 @@ describe("Azure Foundry model eval helpers", () => {
     expect(scalarScore.schemaValid).toBe(false);
     expect(scalarScore.invalidJsonShapes).toEqual(["actions must be an array"]);
     expect(scalarScore.passed).toBe(false);
+
+    const wrongFieldTypeScore = scoreItem(item, "{\"actions\":[{\"title\":[\"Buyer shortlist\"],\"owner\":42,\"dueDate\":\"2026-08-03\",\"evidence\":{\"source\":\"Notes\"}}]}");
+    expect(wrongFieldTypeScore.schemaValid).toBe(false);
+    expect(wrongFieldTypeScore.invalidJsonShapes).toEqual([
+      "actions[0].title must be a string",
+      "actions[0].owner must be a string",
+      "actions[0].evidence must be a string",
+    ]);
+    expect(wrongFieldTypeScore.passed).toBe(false);
 
     const nestedScore = scoreItem(item, "{\"actions\":[{\"title\":\"Buyer shortlist\",\"owner\":\"Jordan\",\"dueDate\":\"2026-08-03\",\"evidence\":\"Notes\"}]}");
     expect(nestedScore.schemaValid).toBe(true);
@@ -149,6 +164,19 @@ describe("Azure Foundry model eval helpers", () => {
       provider: "openai",
       apiKeyEnv: "MODEL_API_KEY",
     });
+  });
+
+  it("rejects non-HTTPS evaluation candidate base URLs", () => {
+    process.env.AZURE_FOUNDRY_EVAL_CANDIDATES_JSON = JSON.stringify([
+      {
+        label: "OpenAI rollback",
+        provider: "openai",
+        model: "gpt-4o",
+        baseUrl: "http://api.openai.test/v1",
+      },
+    ]);
+
+    expect(() => parseCandidates()).toThrow("AZURE_FOUNDRY_EVAL_CANDIDATES_JSON[0].baseUrl must be an HTTPS URL");
   });
 
   it("rejects managed identity for non-Azure evaluation candidates", () => {

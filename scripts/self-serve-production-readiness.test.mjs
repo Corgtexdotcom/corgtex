@@ -416,6 +416,25 @@ describe("self-serve production readiness", () => {
     expect(result.stderr).toContain("OpenRouter route for deepseek/deepseek-v4-pro requires apiKeyEnv when provider differs from MODEL_PROVIDER");
   });
 
+  it("requires explicit key envs for same-provider endpoint override routes", () => {
+    const result = runReadiness({
+      ...STRICT_BASE_ENV,
+      MODEL_PROVIDER: "openrouter",
+      MODEL_API_KEY: "openrouter-key-placeholder",
+      MODEL_BASE_URL: "https://openrouter.ai/api/v1",
+      MODEL_PROVIDER_ROUTES_JSON: JSON.stringify([
+        {
+          model: "deepseek/deepseek-v4-pro",
+          provider: "openrouter",
+          baseUrl: "https://alternate-openrouter.example.test/v1",
+        },
+      ]),
+    }, ["--strict", "--skip-http"]);
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("OpenRouter route for deepseek/deepseek-v4-pro requires apiKeyEnv when overriding baseUrl");
+  });
+
   it("rejects malformed per-model provider routes in strict mode", () => {
     const result = runReadiness({
       ...STRICT_BASE_ENV,

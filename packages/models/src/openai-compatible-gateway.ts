@@ -182,6 +182,10 @@ function requireApiKey(route?: ModelProviderRoute) {
     throw new Error(`MODEL_PROVIDER_ROUTES_JSON route for ${route.model} requires apiKeyEnv when provider differs from MODEL_PROVIDER.`);
   }
 
+  if (route?.baseUrl) {
+    throw new Error(`MODEL_PROVIDER_ROUTES_JSON route for ${route.model} requires apiKeyEnv when overriding baseUrl.`);
+  }
+
   const key = env.MODEL_API_KEY;
   if (!key) {
     throw new Error("MODEL_API_KEY is required for the OpenAI-compatible model provider.");
