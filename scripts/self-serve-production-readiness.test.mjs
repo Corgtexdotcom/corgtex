@@ -197,6 +197,20 @@ describe("self-serve production readiness", () => {
     expect(result.stderr).toContain("MODEL_PRICE_OVERRIDES_JSON must be valid JSON");
   });
 
+  it("rejects malformed Azure global base URLs in strict mode", () => {
+    const result = runReadiness({
+      ...STRICT_BASE_ENV,
+      ...AZURE_FOUNDRY_MODEL_ENV,
+      MODEL_PROVIDER: "azure-foundry",
+      MODEL_BASE_URL: "not-a-url",
+      AZURE_OPENAI_AUTH_MODE: "managed_identity",
+      AZURE_CLIENT_ID: "00000000-0000-4000-8000-000000000000",
+    }, ["--strict", "--skip-http"]);
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("MODEL_BASE_URL must be an HTTP(S) URL for Azure Foundry");
+  });
+
   it("accepts an Azure Foundry per-model canary route while OpenRouter remains the global provider", () => {
     const result = runReadiness({
       ...STRICT_BASE_ENV,
@@ -299,6 +313,52 @@ describe("self-serve production readiness", () => {
 
     expect(result.status).toBe(1);
     expect(result.stderr).toContain("MODEL_PROVIDER_ROUTES_JSON[0].baseUrl must be an HTTP(S) URL");
+  });
+
+  it("rejects duplicate per-model routes", () => {
+    const result = runReadiness({
+      ...STRICT_BASE_ENV,
+      MODEL_PROVIDER: "openrouter",
+      MODEL_API_KEY: "openrouter-key-placeholder",
+      MODEL_PROVIDER_ROUTES_JSON: JSON.stringify([
+        {
+          model: "corgtex-gpt56-luna",
+          provider: "azure-foundry",
+          baseUrl: "https://example.services.ai.azure.com/openai/v1",
+          authMode: "managed_identity",
+        },
+        {
+          model: "corgtex-gpt56-luna",
+          provider: "openrouter",
+          baseUrl: "https://openrouter.ai/api/v1",
+        },
+      ]),
+    }, ["--strict", "--skip-http"]);
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("MODEL_PROVIDER_ROUTES_JSON contains duplicate route for corgtex-gpt56-luna");
+  });
+
+  it("requires explicit key envs for Azure API-key routed endpoints", () => {
+    const result = runReadiness({
+      ...STRICT_BASE_ENV,
+      ...AZURE_FOUNDRY_MODEL_ENV,
+      MODEL_PROVIDER: "azure-openai",
+      MODEL_BASE_URL: "https://global-openai.openai.azure.com/openai/v1",
+      AZURE_OPENAI_AUTH_MODE: "api_key",
+      AZURE_OPENAI_API_KEY: "global-azure-key-placeholder",
+      MODEL_PROVIDER_ROUTES_JSON: JSON.stringify([
+        {
+          model: "corgtex-gpt56-luna",
+          provider: "azure-foundry",
+          baseUrl: "https://example.services.ai.azure.com/openai/v1",
+          authMode: "api_key",
+        },
+      ]),
+    }, ["--strict", "--skip-http"]);
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("Azure Foundry route for corgtex-gpt56-luna requires apiKeyEnv when using Azure API key authentication with a routed endpoint");
   });
 
   it("requires non-Azure rollback routes to include a base URL and key", () => {

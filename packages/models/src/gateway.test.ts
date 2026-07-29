@@ -593,6 +593,37 @@ describe("openAICompatibleModelGateway", () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
+  it("requires an explicit key env when an Azure API-key route targets a routed endpoint", async () => {
+    restoreEnv();
+    Object.assign(process.env, {
+      MODEL_PROVIDER: "azure-openai",
+      MODEL_BASE_URL: "https://global-openai.openai.azure.com/openai/v1",
+      AZURE_OPENAI_AUTH_MODE: "api_key",
+      AZURE_OPENAI_API_KEY: "global-azure-key",
+      MODEL_PROVIDER_ROUTES_JSON: JSON.stringify([
+        {
+          model: "corgtex-gpt56-luna",
+          provider: "azure-foundry",
+          baseUrl: "https://corgtex-foundry.services.ai.azure.com/openai/v1/",
+          authMode: "api_key",
+        },
+      ]),
+    });
+
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { openAICompatibleModelGateway } = await import("./openai-compatible-gateway");
+
+    await expect(openAICompatibleModelGateway.chat({
+      workspaceId: "ws-1",
+      taskType: "CHAT",
+      model: "corgtex-gpt56-luna",
+      messages: [{ role: "user", content: "Hello" }],
+    })).rejects.toThrow("MODEL_PROVIDER_ROUTES_JSON route for corgtex-gpt56-luna requires apiKeyEnv when using Azure API key authentication with a routed endpoint");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it("does not fall back to MODEL_API_KEY when a routed OpenRouter key env is missing", async () => {
     restoreEnv();
     Object.assign(process.env, {
@@ -620,6 +651,42 @@ describe("openAICompatibleModelGateway", () => {
       model: "deepseek/deepseek-v4-pro",
       messages: [{ role: "user", content: "Hello" }],
     })).rejects.toThrow("OPENROUTER_ROUTE_KEY is required for routed OpenAI-compatible provider authentication");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("rejects duplicate per-model provider routes", async () => {
+    restoreEnv();
+    Object.assign(process.env, {
+      MODEL_PROVIDER: "openrouter",
+      MODEL_API_KEY: "openrouter-key",
+      MODEL_BASE_URL: "https://openrouter.ai/api/v1",
+      MODEL_PROVIDER_ROUTES_JSON: JSON.stringify([
+        {
+          model: "gpt-4o",
+          provider: "openai",
+          baseUrl: "https://api.openai.com/v1",
+          apiKeyEnv: "OPENAI_ROUTE_KEY",
+        },
+        {
+          model: "gpt-4o",
+          provider: "openrouter",
+          baseUrl: "https://openrouter.ai/api/v1",
+        },
+      ]),
+      OPENAI_ROUTE_KEY: "openai-key",
+    });
+
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { openAICompatibleModelGateway } = await import("./openai-compatible-gateway");
+
+    await expect(openAICompatibleModelGateway.chat({
+      workspaceId: "ws-1",
+      taskType: "CHAT",
+      model: "gpt-4o",
+      messages: [{ role: "user", content: "Hello" }],
+    })).rejects.toThrow("MODEL_PROVIDER_ROUTES_JSON contains duplicate route for gpt-4o");
     expect(fetchMock).not.toHaveBeenCalled();
   });
 

@@ -111,6 +111,7 @@ function parseModelProviderRoutes() {
     throw new Error("MODEL_PROVIDER_ROUTES_JSON must be an array.");
   }
 
+  const seenModels = new Set<string>();
   return parsed.map((entry, index): ModelProviderRoute => {
     if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
       throw new Error(`MODEL_PROVIDER_ROUTES_JSON[${index}] must be an object.`);
@@ -123,6 +124,10 @@ function parseModelProviderRoutes() {
     if (!model || !provider) {
       throw new Error(`MODEL_PROVIDER_ROUTES_JSON[${index}] requires model and provider strings.`);
     }
+    if (seenModels.has(model)) {
+      throw new Error(`MODEL_PROVIDER_ROUTES_JSON contains duplicate route for ${model}.`);
+    }
+    seenModels.add(model);
     if (authModeRaw && authModeRaw !== "api_key" && authModeRaw !== "managed_identity") {
       throw new Error(`MODEL_PROVIDER_ROUTES_JSON[${index}].authMode must be api_key or managed_identity.`);
     }
@@ -192,6 +197,10 @@ function requireAzureApiKey(route?: ModelProviderRoute) {
       throw new Error(`${route.apiKeyEnv} is required for routed Azure API key authentication.`);
     }
     return routeKey;
+  }
+
+  if (route && (route.provider !== env.MODEL_PROVIDER || route.baseUrl)) {
+    throw new Error(`MODEL_PROVIDER_ROUTES_JSON route for ${route.model} requires apiKeyEnv when using Azure API key authentication with a routed endpoint.`);
   }
 
   const key = env.AZURE_OPENAI_API_KEY ?? (route ? undefined : env.MODEL_API_KEY);

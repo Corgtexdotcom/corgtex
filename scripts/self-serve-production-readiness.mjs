@@ -228,6 +228,7 @@ function parseProviderRoutes() {
     return [];
   }
 
+  const seenModels = new Set();
   return parsed.flatMap((entry, index) => {
     if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
       fail(`MODEL_PROVIDER_ROUTES_JSON[${index}] must be an object.`);
@@ -239,6 +240,12 @@ function parseProviderRoutes() {
       fail(`MODEL_PROVIDER_ROUTES_JSON[${index}] requires model and provider strings.`);
       return [];
     }
+    const model = route.model.trim();
+    if (seenModels.has(model)) {
+      fail(`MODEL_PROVIDER_ROUTES_JSON contains duplicate route for ${model}.`);
+      return [];
+    }
+    seenModels.add(model);
     if (route.authMode !== undefined && route.authMode !== "api_key" && route.authMode !== "managed_identity") {
       fail(`MODEL_PROVIDER_ROUTES_JSON[${index}].authMode must be api_key or managed_identity.`);
       return [];
@@ -257,7 +264,7 @@ function parseProviderRoutes() {
     }
 
     return [{
-      model: route.model.trim(),
+      model,
       provider: route.provider.trim().toLowerCase(),
       baseUrl: typeof route.baseUrl === "string" ? route.baseUrl.trim() : "",
       authMode: typeof route.authMode === "string" ? route.authMode : "",
@@ -292,6 +299,21 @@ function checkEmailSenderConfiguration() {
     } else {
       fail(`EMAIL_REPLY_TO must use ${REQUIRED_EMAIL_REPLY_TO_ADDRESS}; got ${replyToAddress || "empty"}`);
     }
+  }
+}
+
+function checkHttpBaseUrlEnv(name, label, strict) {
+  if (!configured(name)) {
+    checkConfigured(name, strict, `${name} missing for ${label}.`);
+    return;
+  }
+
+  if (isHttpBaseUrl(envValue(name))) {
+    pass(`${name} configured`);
+  } else if (strict) {
+    fail(`${name} must be an HTTP(S) URL for ${label}.`);
+  } else {
+    warn(`${name} must be an HTTP(S) URL for ${label}.`);
   }
 }
 
@@ -353,6 +375,13 @@ function checkProviderRouteConfiguration(strict) {
 
       if (route.apiKeyEnv) {
         checkConfigured(route.apiKeyEnv, strict, `${route.apiKeyEnv} missing for ${label} route ${route.model}.`);
+      } else if (route.provider !== globalProvider || route.baseUrl) {
+        const message = `${label} route for ${route.model} requires apiKeyEnv when using Azure API key authentication with a routed endpoint.`;
+        if (strict) {
+          fail(message);
+        } else {
+          warn(message);
+        }
       } else {
         checkConfigured("AZURE_OPENAI_API_KEY", strict, `AZURE_OPENAI_API_KEY missing for ${label} route ${route.model}.`);
       }
@@ -388,7 +417,7 @@ function checkModelConfiguration(strict) {
   if (isAzureProvider(provider)) {
     const label = providerLabel(provider);
     const routes = parseProviderRoutes();
-    checkConfigured("MODEL_BASE_URL", strict, `MODEL_BASE_URL missing for ${label}.`);
+    checkHttpBaseUrlEnv("MODEL_BASE_URL", label, strict);
     for (const model of configuredModelNames()) {
       const resolvedProvider = resolvedProviderForModel(provider, routes, model);
       if (isAzureProvider(resolvedProvider)) {

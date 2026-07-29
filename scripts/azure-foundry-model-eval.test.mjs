@@ -47,6 +47,17 @@ describe("Azure Foundry model eval helpers", () => {
     )).toThrow("MODEL_PRICE_OVERRIDES_JSON[0].inputUsdPerToken must be a finite non-negative number");
   });
 
+  it("includes known OpenAI rollback prices in cost estimates", () => {
+    const cost = estimateCost(
+      { provider: "openai", model: "gpt-4o" },
+      { prompt_tokens: 10, completion_tokens: 4 },
+      "answer",
+      { messages: [{ role: "user", content: "Prompt" }] },
+    );
+
+    expect(cost.rawProviderCostUsd).toBe("0.000065");
+  });
+
   it("requires parsed JSON before a JSON-mode case can pass", () => {
     const score = scoreItem({ mode: "json", requiredConcepts: ["ready"] }, "ready");
 
@@ -63,6 +74,38 @@ describe("Azure Foundry model eval helpers", () => {
 
     expect(score.jsonParsed).toBe(false);
     expect(score.schemaValid).toBe(false);
+    expect(score.passed).toBe(false);
+  });
+
+  it("scores JSON concepts from parsed values, not field names", () => {
+    const score = scoreItem(
+      {
+        mode: "json",
+        requiredKeys: ["unsafeToSend"],
+        requiredConcepts: ["unsafe"],
+      },
+      "{\"unsafeToSend\":false,\"proposedReply\":\"Needs approval before sending.\"}",
+    );
+
+    expect(score.schemaValid).toBe(true);
+    expect(score.missingConcepts).toEqual(["unsafe"]);
+    expect(score.passed).toBe(false);
+  });
+
+  it("enforces required JSON values", () => {
+    const score = scoreItem(
+      {
+        mode: "json",
+        requiredKeys: ["replyNeeded", "unsafeToSend"],
+        requiredJsonValues: {
+          replyNeeded: true,
+          unsafeToSend: true,
+        },
+      },
+      "{\"replyNeeded\":true,\"unsafeToSend\":false}",
+    );
+
+    expect(score.incorrectJsonValues).toEqual(["unsafeToSend"]);
     expect(score.passed).toBe(false);
   });
 
@@ -166,5 +209,44 @@ describe("Azure Foundry model eval helpers", () => {
     expect(result.retryCount).toBe(1);
     expect(result.latencyMs).toBeGreaterThanOrEqual(200);
     expect(result.finalAttemptLatencyMs).toBeLessThanOrEqual(result.latencyMs);
+  });
+
+  it("normalizes multipart candidate responses before scoring", async () => {
+    process.env.MODEL_API_KEY = "model-key";
+    const fetchMock = vi.fn().mockResolvedValueOnce(new Response(JSON.stringify({
+      choices: [{
+        message: {
+          content: [
+            { type: "text", text: "{\"summary\":" },
+            { type: "text", text: "\"Structured answer\"}" },
+          ],
+        },
+      }],
+      usage: { prompt_tokens: 2, completion_tokens: 3 },
+    }), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await callCandidateWithRetries({
+      label: "OpenAI rollback",
+      provider: "openai",
+      model: "gpt-4o",
+      baseUrl: "https://api.openai.test/v1",
+      authMode: "api_key",
+      apiKeyEnv: "MODEL_API_KEY",
+      maxTokenParameter: "max_tokens",
+      scope: "https://cognitiveservices.azure.com/.default",
+      temperature: 0,
+    }, {
+      id: "multipart-case",
+      flow: "multipart response",
+      prompt: "Return JSON.",
+    });
+
+    expect(result.text).toBe("{\"summary\":\n\"Structured answer\"}");
+    expect(scoreItem({
+      mode: "json",
+      requiredKeys: ["summary"],
+      requiredConcepts: ["Structured"],
+    }, result.text).passed).toBe(true);
   });
 });

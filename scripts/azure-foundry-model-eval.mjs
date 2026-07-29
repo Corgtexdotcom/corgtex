@@ -16,11 +16,17 @@ const DEFAULT_PRICES = [
   { provider: "openrouter", model: "deepseek/deepseek-v4-flash", inputUsdPerToken: 0.0000000983, outputUsdPerToken: 0.0000001966 },
   { provider: "openrouter", model: "deepseek/deepseek-v4-pro", inputUsdPerToken: 0.000000435, outputUsdPerToken: 0.00000087 },
   { provider: "openrouter", model: "deepseek/deepseek-r1-0528", inputUsdPerToken: 0.0000005, outputUsdPerToken: 0.00000215 },
+  { provider: "openai", model: "gpt-4o", inputUsdPerToken: 0.0000025, outputUsdPerToken: 0.00001 },
   { provider: "azure-foundry", model: "corgtex-ds-v4-flash", inputUsdPerToken: 0.00000019, outputUsdPerToken: 0.00000051 },
   { provider: "azure-foundry", model: "corgtex-ds-v4-pro", inputUsdPerToken: 0.00000174, outputUsdPerToken: 0.00000348 },
   { provider: "azure-foundry", model: "corgtex-kimi-k25", inputUsdPerToken: 0.0000006, outputUsdPerToken: 0.000003 },
   { provider: "azure-foundry", model: "corgtex-kimi-k27-code", inputUsdPerToken: 0.00000095, outputUsdPerToken: 0.000004 },
   { provider: "azure-foundry", model: "corgtex-gpt56-luna", inputUsdPerToken: 0.000001, outputUsdPerToken: 0.000006 },
+  { provider: "azure-openai", model: "corgtex-ds-v4-flash", inputUsdPerToken: 0.00000019, outputUsdPerToken: 0.00000051 },
+  { provider: "azure-openai", model: "corgtex-ds-v4-pro", inputUsdPerToken: 0.00000174, outputUsdPerToken: 0.00000348 },
+  { provider: "azure-openai", model: "corgtex-kimi-k25", inputUsdPerToken: 0.0000006, outputUsdPerToken: 0.000003 },
+  { provider: "azure-openai", model: "corgtex-kimi-k27-code", inputUsdPerToken: 0.00000095, outputUsdPerToken: 0.000004 },
+  { provider: "azure-openai", model: "corgtex-gpt56-luna", inputUsdPerToken: 0.000001, outputUsdPerToken: 0.000006 },
 ];
 const credential = new DefaultAzureCredential();
 const accessTokenCache = new Map();
@@ -154,6 +160,43 @@ function parseJsonObject(text) {
   } catch {
     return null;
   }
+}
+
+function normalizeMessageContent(content) {
+  if (typeof content === "string") {
+    return content;
+  }
+
+  if (!Array.isArray(content)) {
+    return "";
+  }
+
+  return content
+    .map((part) => typeof part?.text === "string" ? part.text : "")
+    .filter(Boolean)
+    .join("\n");
+}
+
+function jsonValueText(value) {
+  if (value === null || value === undefined) {
+    return "";
+  }
+
+  if (Array.isArray(value)) {
+    return value.map(jsonValueText).filter(Boolean).join(" ");
+  }
+
+  if (typeof value === "object") {
+    return Object.values(value).map(jsonValueText).filter(Boolean).join(" ");
+  }
+
+  return String(value);
+}
+
+function requiredJsonValues(item) {
+  return item.requiredJsonValues && typeof item.requiredJsonValues === "object" && !Array.isArray(item.requiredJsonValues)
+    ? item.requiredJsonValues
+    : {};
 }
 
 function priceFor(provider, model) {
@@ -317,7 +360,7 @@ async function callCandidate(candidate, item) {
     throw error;
   }
   const parsed = JSON.parse(body);
-  const text = parsed.choices?.[0]?.message?.content ?? "";
+  const text = normalizeMessageContent(parsed.choices?.[0]?.message?.content);
   return {
     text,
     latencyMs,
@@ -459,12 +502,18 @@ function scoreItem(item, text) {
   const normalizedText = normalize(text);
   const parsedJson = item.mode === "json" ? parseJsonObject(text) : null;
   const jsonParsed = item.mode !== "json" || Boolean(parsedJson);
+  const conceptSearchText = item.mode === "json" && parsedJson
+    ? normalize(jsonValueText(parsedJson))
+    : normalizedText;
   const missingKeys = item.requiredKeys?.filter((key) => !(parsedJson && Object.hasOwn(parsedJson, key))) ?? [];
+  const incorrectJsonValues = Object.entries(requiredJsonValues(item)).filter(([key, expected]) => {
+    return !(parsedJson && Object.is(parsedJson[key], expected));
+  }).map(([key]) => key);
   const missingConcepts = requiredConcepts(item).filter((concept) => {
-    return !conceptMatches(concept, normalizedText);
+    return !conceptMatches(concept, conceptSearchText);
   }).map(conceptLabel);
   const forbiddenMentions = forbiddenConcepts(item).filter((concept) => (
-    conceptMatches(concept, normalizedText, { polarityAware: true })
+    conceptMatches(concept, conceptSearchText, { polarityAware: true })
   )).map(conceptLabel);
   const schemaValid = jsonParsed && missingKeys.length === 0;
   return {
@@ -472,9 +521,10 @@ function scoreItem(item, text) {
     jsonParsed,
     outputLength: text.length,
     missingKeys,
+    incorrectJsonValues,
     missingConcepts,
     forbiddenMentions,
-    passed: schemaValid && missingConcepts.length === 0 && forbiddenMentions.length === 0,
+    passed: schemaValid && incorrectJsonValues.length === 0 && missingConcepts.length === 0 && forbiddenMentions.length === 0,
   };
 }
 
