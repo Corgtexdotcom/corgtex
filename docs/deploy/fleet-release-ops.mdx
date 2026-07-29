@@ -28,6 +28,7 @@ Configure these values on the `fleet-release-production` environment. Store secr
 | `FLEET_RELEASE_OPS_TARGET_JSON` | Variable | Dedicated Ops target. |
 | `FLEET_RELEASE_BACKUP_APP_TARGET_JSON` | Variable | Backup app target. |
 | `FLEET_RELEASE_AZURE_TARGET_JSON` | Variable | Azure self-serve target. |
+| `FLEET_RELEASE_AZURE_MANAGED_TARGET_JSON` | Variable | Azure managed customer targets. Leave unset only when control-plane discovery is intentionally used. |
 | `FLEET_RELEASE_ACR_SERVER` | Variable, optional | Azure Container Registry server. Defaults to the production self-serve registry. |
 | `FLEET_RELEASE_PREFLIGHT_MAX_SECONDS` | Variable, optional | Dry-run preflight timing gate. Defaults to `30`. |
 | `GHCR_IMPORT_USERNAME` | Variable, optional | GHCR username for Azure imports. Defaults to the GitHub Actions actor. |
@@ -59,6 +60,21 @@ Azure self-serve targets must include:
 - `azure.acrName`
 - `azure.webAppName`
 - `azure.workerAppName`
+
+Azure managed customer targets must include:
+
+- `id`
+- `label`
+- `url`
+- `group: "azure-managed-customers"`
+- `provider: "azure"`
+- `deploymentId` when control-plane verified release recording is required
+- `azure.resourceGroup`
+- `azure.acrName`
+- `azure.webAppName`
+- `azure.workerAppName`
+
+Do not put managed customer URLs in `azure-selfserve`. The self-serve group is reserved for `selfserve.corgtex.com` and runs self-serve-specific provider readiness checks.
 
 ## Operator Checklist
 

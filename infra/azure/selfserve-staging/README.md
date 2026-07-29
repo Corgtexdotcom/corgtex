@@ -12,6 +12,8 @@ This folder defines the staging Azure resource shape for the future self-serve r
 - User-assigned managed identity for Container Apps.
 - Log Analytics and workspace-based Application Insights.
 
+For managed customer pilots that reuse this template, pass a customer-specific `namePrefix`, `appUrl`, `bootstrapAdminEmail`, and `storageContainerName`. Also pass the customer runtime's existing `modelProvider`, `azureOpenAiBaseUrl`/model base URL, and model IDs; the parameter name is historical, but non-Azure providers such as OpenRouter can use it as the generic `MODEL_BASE_URL`. Do not reuse the default `selfserve-artifacts` container name for a dedicated customer environment.
+
 The default deployment mode creates backing resources only:
 
 ```bash
@@ -112,6 +114,7 @@ The template references these Key Vault secret names by default when `deployCont
 - `self-serve-registry-sync-secret`
 - `model-price-overrides-json`
 - `admin-password`
+- `model-api-key` when `modelProvider` is not `azure-openai`
 
 These provider secrets are optional and are referenced only when their corresponding workflow input or Bicep parameter is enabled:
 
@@ -124,8 +127,11 @@ These provider secrets are optional and are referenced only when their correspon
 - `google-client-secret`
 - `microsoft-client-id`
 - `microsoft-client-secret`
+- `posthog-project-token`
 
-If `azureOpenAiAuthMode=api_key`, also create `azure-openai-api-key`. Production should prefer `managed_identity`.
+If `azureOpenAiAuthMode=api_key`, also create `azure-openai-api-key`. Production should prefer `managed_identity` for Azure OpenAI. Managed-customer migrations that currently use OpenRouter should set `modelProvider=openrouter`, `azureOpenAiBaseUrl=https://openrouter.ai/api/v1`, and create `model-api-key` from the existing runtime secret instead of changing model providers during the infrastructure migration.
+
+If the source runtime already has PostHog enabled, set `enablePostHogSecrets=true` and copy the source `POSTHOG_PROJECT_TOKEN` into `posthog-project-token` so Azure keeps the same telemetry coverage.
 
 Keep `enable_resend_secrets=false` for smoke-only signup testing unless a real Resend staging key and inbound webhook signing secret are available. With Resend unset, the app records the smoke setup URL through `SMOKE_EMAIL_CAPTURE_SECRET` without attempting external mail delivery.
 

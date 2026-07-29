@@ -24,6 +24,7 @@ const DEFAULT_RAILWAY_GRAPHQL_ENDPOINT = "https://backboard.railway.com/graphql/
 const DEFAULT_RAILWAY_LOG_LIMIT = 100;
 const TARGET_GROUPS = Object.freeze([
   "railway-customers",
+  "azure-managed-customers",
   "azure-selfserve",
   "ops",
   "backup-app",
@@ -35,6 +36,7 @@ const RAILWAY_TARGET_GROUPS = Object.freeze([
 ]);
 const DEFAULT_TARGET_GROUPS = Object.freeze([
   "railway-customers",
+  "azure-managed-customers",
   "azure-selfserve",
   "ops",
 ]);
@@ -475,7 +477,7 @@ export function rowMatchesTargets(row, selectedTargets) {
 
 function rowMatchesUnknownTargetProvider(row, selectedTargets) {
   const provider = safeText(row.provider)?.toLowerCase();
-  if (provider === "azure") return selectedTargets.has("azure-selfserve");
+  if (provider === "azure") return selectedTargets.has("azure-managed-customers") || selectedTargets.has("azure-selfserve");
   if (provider === "railway") {
     return ["railway-customers", "ops", "backup-app"].some((target) => selectedTargets.has(target));
   }
@@ -492,8 +494,14 @@ export function observationTargetsForRow(row) {
   ].filter(Boolean).join(" ").toLowerCase();
   const targets = new Set();
 
-  if (provider === "azure" || text.includes("azure-selfserve") || text.includes("selfserve") || text.includes("ca-corgtex-ss")) {
+  if (text.includes("azure-selfserve") || text.includes("selfserve") || text.includes("ca-corgtex-ss")) {
     targets.add("azure-selfserve");
+  }
+  if (text.includes("azure-managed-customers")) {
+    targets.add("azure-managed-customers");
+  }
+  if (provider === "azure" && !targets.has("azure-selfserve")) {
+    targets.add("azure-managed-customers");
   }
 
   if (text.includes("railway-customers")) {
@@ -799,7 +807,7 @@ function requiredObservationSourceGroupsForTargets(targets) {
   const selectedTargets = normalizeObservationTargets(targets);
   const targetList = selectedTargets ? [...selectedTargets] : TARGET_GROUPS;
   const groups = [];
-  if (targetList.includes("azure-selfserve")) {
+  if (targetList.includes("azure-selfserve") || targetList.includes("azure-managed-customers")) {
     groups.push({ label: "azure_monitor", sources: ["azure_monitor"] });
   }
   for (const target of targetList.filter((target) => RAILWAY_TARGET_GROUPS.includes(target))) {

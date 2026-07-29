@@ -53,6 +53,24 @@ function azureTargetJson(overrides = {}) {
   }]);
 }
 
+function azureManagedTargetJson(overrides = {}) {
+  return JSON.stringify([{
+    id: "alumipres-azure",
+    deploymentId: "dep-alumipres-azure",
+    label: "Alumipres Azure",
+    url: "https://alumipres.corgtex.com",
+    group: "azure-managed-customers",
+    provider: "azure",
+    azure: {
+      resourceGroup: "rg-corgtex-alumipres-production-wus3",
+      acrName: "acrcorgtexalumipresprodwus3",
+      webAppName: "ca-corgtex-alumipres-prod-web",
+      workerAppName: "ca-corgtex-alumipres-prod-worker",
+    },
+    ...overrides,
+  }]);
+}
+
 function azureProviderStatus(overrides = {}) {
   return {
     deploymentId: "dep-azure",
@@ -659,6 +677,7 @@ describe("fleet release runner", () => {
         FLEET_RELEASE_OPS_TARGET_JSON: targetJson(),
         FLEET_RELEASE_BACKUP_APP_TARGET_JSON: targetJson({ id: "backup", label: "Backup App", group: "backup-app", url: "https://app.corgtex.com" }),
         FLEET_RELEASE_AZURE_TARGET_JSON: azureTargetJson(),
+        FLEET_RELEASE_AZURE_MANAGED_TARGET_JSON: azureManagedTargetJson(),
         CONTROL_PLANE_AGENT_API_KEY: "control-plane-key",
         RAILWAY_API_TOKEN: "railway-token",
         GHCR_IMPORT_USERNAME: "github-user",
@@ -676,6 +695,7 @@ describe("fleet release runner", () => {
       "railway-customers",
       "ops",
       "azure-selfserve",
+      "azure-managed-customers",
     ]);
     expect(result.targets.some((target) => target.group === "backup-app")).toBe(false);
   });
@@ -963,6 +983,84 @@ describe("fleet release runner", () => {
     expect(result.blockers).toEqual([]);
     expect(result.targets).toHaveLength(1);
     expect(result.targets[0]).toMatchObject({ group: "azure-selfserve", provider: "azure" });
+  });
+
+  it("requires Azure managed target inventory unless control-plane discovery is configured", async () => {
+    await expect(runFleetRelease([
+      "validate-config",
+      "--release",
+      SHA,
+      "--targets",
+      "azure-managed-customers",
+      "--dry-run",
+    ], {
+      env: {},
+      runCommand: vi.fn(),
+    })).rejects.toThrow("FLEET_RELEASE_AZURE_MANAGED_TARGET_JSON or CONTROL_PLANE_AGENT_API_KEY");
+  });
+
+  it("preflights Azure managed customers without Railway credentials", async () => {
+    const result = await runFleetRelease([
+      "deploy",
+      "--release",
+      SHA,
+      "--targets",
+      "azure-managed-customers",
+      "--dry-run",
+      "--fail-on-blockers",
+      "--reason",
+      "Validate Azure managed customer release plan.",
+    ], {
+      env: {
+        FLEET_RELEASE_AZURE_MANAGED_TARGET_JSON: azureManagedTargetJson(),
+        CONTROL_PLANE_AGENT_API_KEY: "control-plane-key",
+        GHCR_IMPORT_USERNAME: "github-user",
+        GITHUB_TOKEN: "github-token",
+        AZURE_CLIENT_ID: "azure-client",
+        AZURE_TENANT_ID: "azure-tenant",
+        AZURE_SUBSCRIPTION_ID: "azure-subscription",
+      },
+      runCommand: vi.fn(),
+      fetchImpl: vi.fn(),
+      sleep: vi.fn(),
+    });
+
+    expect(result.blockers).toEqual([]);
+    expect(result.targets).toHaveLength(1);
+    expect(result.targets[0]).toMatchObject({ group: "azure-managed-customers", provider: "azure" });
+  });
+
+  it("does not default Azure managed customers to the self-serve resource names", async () => {
+    await expect(runFleetRelease([
+      "deploy",
+      "--release",
+      SHA,
+      "--targets",
+      "azure-managed-customers",
+      "--dry-run",
+      "--fail-on-blockers",
+      "--reason",
+      "Validate Azure managed customer release plan.",
+    ], {
+      env: {
+        FLEET_RELEASE_AZURE_MANAGED_TARGET_JSON: azureManagedTargetJson({
+          azure: {
+            resourceGroup: "rg-customer",
+            webAppName: "web-app",
+            workerAppName: "worker-app",
+          },
+        }),
+        CONTROL_PLANE_AGENT_API_KEY: "control-plane-key",
+        GHCR_IMPORT_USERNAME: "github-user",
+        GITHUB_TOKEN: "github-token",
+        AZURE_CLIENT_ID: "azure-client",
+        AZURE_TENANT_ID: "azure-tenant",
+        AZURE_SUBSCRIPTION_ID: "azure-subscription",
+      },
+      runCommand: vi.fn(),
+      fetchImpl: vi.fn(),
+      sleep: vi.fn(),
+    })).rejects.toThrow("Azure ACR name is missing");
   });
 
   it("can make dry-run preflight blockers fatal before image build", async () => {
@@ -1588,6 +1686,82 @@ describe("fleet release runner", () => {
       providerStatusReleaseImageTag: "sha-old",
       providerStatusReleaseDrift: "Release drift: expected sha-old",
     });
+  });
+
+  it("runs managed-customer proof for Azure managed customer deploys", async () => {
+    const toolCalls = [];
+    const runCommand = vi.fn((command, args) => {
+      if (command === "az" && args[0] === "containerapp" && args[1] === "show") {
+        return { stdout: `${args[3]}-revision\n`, stderr: "" };
+      }
+      return { stdout: "", stderr: "" };
+    });
+    const fetchImpl = vi.fn(async (url, options = {}) => {
+      const href = String(url);
+      if (href.includes("/api/control-plane/mcp")) {
+        const body = JSON.parse(options.body);
+        toolCalls.push(body.params.name);
+        if (body.params.name === "run_post_deploy_probe") {
+          return controlPlaneResult({
+            deploymentId: "dep-alumipres-azure",
+            status: "ok",
+            reads: [{ key: "actions", label: "Actions", status: "ok", count: 1 }],
+            recorder: { status: "ok", provider: "RECALL_AI" },
+            supportAudit: { status: "completed" },
+          });
+        }
+        if (body.params.name === "refresh_fleet_snapshots") {
+          return controlPlaneResult({
+            results: [
+              { snapshotKind: "CONTEXT", status: "ok", error: null },
+              { snapshotKind: "INTEGRATION", status: "ok", error: null },
+            ],
+          });
+        }
+        if (body.params.name === "record_verified_release") {
+          return controlPlaneResult({ recorded: true });
+        }
+      }
+      return healthResponse();
+    });
+
+    const result = await runFleetRelease([
+      "deploy",
+      "--release",
+      SHA,
+      "--targets",
+      "azure-managed-customers",
+      "--reason",
+      "Deploy Azure managed customer release.",
+    ], {
+      env: {
+        FLEET_RELEASE_AZURE_MANAGED_TARGET_JSON: azureManagedTargetJson(),
+        AZURE_CLIENT_ID: "azure-client",
+        AZURE_TENANT_ID: "azure-tenant",
+        AZURE_SUBSCRIPTION_ID: "azure-subscription",
+        GITHUB_ACTOR: "github-user",
+        GITHUB_TOKEN: "github-token",
+        CONTROL_PLANE_AGENT_API_KEY: "control-plane-token",
+        APPLICATIONINSIGHTS_CONNECTION_STRING: "InstrumentationKey=00000000-0000-0000-0000-000000000000",
+      },
+      runCommand,
+      fetchImpl,
+      sleep: vi.fn(),
+    });
+
+    expect(result.results[0].status).toBe("succeeded");
+    const updateCalls = runCommand.mock.calls.filter(([command, args]) => (
+      command === "az" && args[0] === "containerapp" && args[1] === "update"
+    ));
+    expect(updateCalls).toHaveLength(2);
+    expect(updateCalls[0][1]).toContain(`acrcorgtexalumipresprodwus3.azurecr.io/corgtex/web:sha-${SHA}`);
+    expect(updateCalls[1][1]).toContain(`acrcorgtexalumipresprodwus3.azurecr.io/corgtex/worker:sha-${SHA}`);
+    expect(toolCalls).toEqual([
+      "run_post_deploy_probe",
+      "refresh_fleet_snapshots",
+      "record_verified_release",
+    ]);
+    expect(result.results[0].result.providerReadiness).toEqual({ status: "skipped", reason: "not_azure_selfserve" });
   });
 
   it("redacts fleet Azure observability secrets when command fallback errors render argv", async () => {

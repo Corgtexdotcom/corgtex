@@ -34,6 +34,8 @@ const DEFAULT_AZURE = {
   webAppName: "ca-corgtex-ss-prod-web",
   workerAppName: "ca-corgtex-ss-prod-worker",
 };
+const AZURE_TARGET_GROUPS = new Set(["azure-selfserve", "azure-managed-customers"]);
+const RAILWAY_TARGET_GROUPS = new Set(["railway-customers", "ops", "backup-app"]);
 
 export async function runFleetRelease(argv = process.argv.slice(2), deps = {}) {
   const args = parseKeyValueArgs(argv);
@@ -80,7 +82,7 @@ export async function runFleetRelease(argv = process.argv.slice(2), deps = {}) {
     throw new Error("A release reason is required.");
   }
 
-  const allTargets = await discoverTargets(deps);
+  const allTargets = await discoverTargets(deps, selectedGroups);
   const targets = filterTargetsByGroups(allTargets, selectedGroups);
   if (targets.length === 0) {
     throw new Error(`No release targets matched: ${selectedGroups.join(", ")}`);
@@ -199,6 +201,7 @@ function validateReleaseEnvironment(args, env) {
   validateConfiguredTargetJson("FLEET_RELEASE_OPS_TARGET_JSON", env.FLEET_RELEASE_OPS_TARGET_JSON, invalid);
   validateConfiguredTargetJson("FLEET_RELEASE_BACKUP_APP_TARGET_JSON", env.FLEET_RELEASE_BACKUP_APP_TARGET_JSON, invalid);
   validateConfiguredTargetJson("FLEET_RELEASE_AZURE_TARGET_JSON", env.FLEET_RELEASE_AZURE_TARGET_JSON, invalid);
+  validateConfiguredTargetJson("FLEET_RELEASE_AZURE_MANAGED_TARGET_JSON", env.FLEET_RELEASE_AZURE_MANAGED_TARGET_JSON, invalid);
   if (env.CORGTEX_AUTO_SEED_JNJ_DEMO?.trim()) {
     invalid.push({
       name: "CORGTEX_AUTO_SEED_JNJ_DEMO",
@@ -227,17 +230,21 @@ function validateReleaseEnvironment(args, env) {
   if (selectedGroups.includes("azure-selfserve") && !env.FLEET_RELEASE_AZURE_TARGET_JSON?.trim()) {
     missing.push("FLEET_RELEASE_AZURE_TARGET_JSON");
   }
+  if (selectedGroups.includes("azure-managed-customers") && !env.FLEET_RELEASE_AZURE_MANAGED_TARGET_JSON?.trim() && !env.CONTROL_PLANE_AGENT_API_KEY?.trim()) {
+    missing.push("FLEET_RELEASE_AZURE_MANAGED_TARGET_JSON or CONTROL_PLANE_AGENT_API_KEY");
+  }
 
   if (!dryRun) {
     if (!env.CONTROL_PLANE_AGENT_API_KEY?.trim()) missing.push("CONTROL_PLANE_AGENT_API_KEY");
-    const includesRailwayTarget = selectedGroups.some((group) => group !== "azure-selfserve");
+    const includesRailwayTarget = selectedGroups.some((group) => RAILWAY_TARGET_GROUPS.has(group));
+    const includesAzureTarget = selectedGroups.some((group) => AZURE_TARGET_GROUPS.has(group));
     if (includesRailwayTarget && !env.RAILWAY_API_TOKEN?.trim()) {
       missing.push("RAILWAY_API_TOKEN");
     }
     if (includesRailwayTarget && !env.GHCR_IMPORT_TOKEN?.trim() && !env.GITHUB_TOKEN?.trim()) {
       missing.push("GHCR_IMPORT_TOKEN or GITHUB_TOKEN");
     }
-    if (selectedGroups.includes("azure-selfserve")) {
+    if (includesAzureTarget) {
       if (!env.AZURE_CLIENT_ID?.trim()) missing.push("AZURE_CLIENT_ID");
       if (!env.AZURE_TENANT_ID?.trim()) missing.push("AZURE_TENANT_ID");
       if (!env.AZURE_SUBSCRIPTION_ID?.trim()) missing.push("AZURE_SUBSCRIPTION_ID");
@@ -295,7 +302,8 @@ function optionalBoolean(name, env) {
 }
 
 function requireProductionObservability(selectedGroups, env, missing, invalid) {
-  const includesRailwayTarget = selectedGroups.some((group) => group !== "azure-selfserve");
+  const includesRailwayTarget = selectedGroups.some((group) => RAILWAY_TARGET_GROUPS.has(group));
+  const includesAzureTarget = selectedGroups.some((group) => AZURE_TARGET_GROUPS.has(group));
   if (includesRailwayTarget) {
     const postHogEnabled = optionalBoolean("POSTHOG_ENABLED", env);
     if (!optionalText(env.POSTHOG_ENABLED)) {
@@ -318,7 +326,7 @@ function requireProductionObservability(selectedGroups, env, missing, invalid) {
     }
   }
 
-  if (selectedGroups.includes("azure-selfserve") && !env.APPLICATIONINSIGHTS_CONNECTION_STRING?.trim()) {
+  if (includesAzureTarget && !env.APPLICATIONINSIGHTS_CONNECTION_STRING?.trim()) {
     missing.push("APPLICATIONINSIGHTS_CONNECTION_STRING");
   }
 }
@@ -351,16 +359,30 @@ async function resolveLatestStableSha(deps) {
   throw new Error("latest-stable could not be resolved. Set FLEET_RELEASE_STABLE_GIT_SHA to a canary-proven release SHA, or pass --release <full-sha> explicitly.");
 }
 
-async function discoverTargets(deps) {
+async function discoverTargets(deps, selectedGroups = []) {
   const env = deps.env ?? process.env;
   const configured = parseTargetJson(env.FLEET_RELEASE_TARGETS_JSON);
-  const discovered = configured.length > 0 ? configured : await discoverControlPlaneTargets(deps);
+  const discovered = configured.length > 0
+    ? configured
+    : shouldDiscoverControlPlaneTargets(env, selectedGroups)
+      ? await discoverControlPlaneTargets(deps)
+      : [];
   const extras = [
     ...parseTargetJson(env.FLEET_RELEASE_OPS_TARGET_JSON).map((target) => ({ ...target, group: "ops" })),
     ...parseTargetJson(env.FLEET_RELEASE_BACKUP_APP_TARGET_JSON).map((target) => ({ ...target, group: "backup-app" })),
     ...parseTargetJson(env.FLEET_RELEASE_AZURE_TARGET_JSON).map((target) => ({ ...target, group: "azure-selfserve", provider: "azure" })),
+    ...parseTargetJson(env.FLEET_RELEASE_AZURE_MANAGED_TARGET_JSON).map((target) => ({ ...target, group: "azure-managed-customers", provider: "azure" })),
   ];
   return dedupeTargets([...discovered, ...extras].map(normalizeTarget));
+}
+
+function shouldDiscoverControlPlaneTargets(env, selectedGroups) {
+  if (!env.CONTROL_PLANE_AGENT_API_KEY?.trim()) return false;
+  return (
+    selectedGroups.includes("railway-customers") && !env.FLEET_RELEASE_TARGETS_JSON?.trim()
+  ) || (
+    selectedGroups.includes("azure-managed-customers") && !env.FLEET_RELEASE_AZURE_MANAGED_TARGET_JSON?.trim()
+  );
 }
 
 function parseTargetJson(raw) {
@@ -381,15 +403,16 @@ async function discoverControlPlaneTargets(deps) {
 
 function normalizeTarget(target) {
   const hasDeploymentId = Object.prototype.hasOwnProperty.call(target, "deploymentId");
+  const group = target.group;
   const normalized = {
     id: target.id ?? target.deploymentId ?? target.label,
     deploymentId: hasDeploymentId ? target.deploymentId : target.id ?? null,
     label: target.label ?? target.id ?? target.deploymentId,
     url: target.url,
-    group: target.group,
-    provider: target.provider ?? (target.group === "azure-selfserve" ? "azure" : "railway"),
+    group,
+    provider: target.provider ?? (AZURE_TARGET_GROUPS.has(group) ? "azure" : "railway"),
     railway: target.railway ?? {},
-    azure: { ...DEFAULT_AZURE, ...(target.azure ?? {}) },
+    azure: { ...(group === "azure-selfserve" ? DEFAULT_AZURE : {}), ...(target.azure ?? {}) },
   };
   if (normalized.provider === "azure") {
     normalized.azure.acrServer ??= `${normalized.azure.acrName}.azurecr.io`;
@@ -440,7 +463,12 @@ function preflightTarget(target, env, options = {}) {
       }
     }
   } else if (target.provider === "azure") {
-    if (!target.deploymentId) blockers.push("Azure deploymentId is missing for provider readiness checks");
+    if (target.group === "azure-selfserve" && !target.deploymentId) {
+      blockers.push("Azure deploymentId is missing for provider readiness checks");
+    }
+    if (target.group === "azure-managed-customers" && target.deploymentId && !env.CONTROL_PLANE_AGENT_API_KEY) {
+      blockers.push("CONTROL_PLANE_AGENT_API_KEY is missing for managed Azure inventory recording");
+    }
     if (requireObservability && !optionalText(env.APPLICATIONINSIGHTS_CONNECTION_STRING)) {
       blockers.push("APPLICATIONINSIGHTS_CONNECTION_STRING is missing for Azure observability");
     }
@@ -812,6 +840,9 @@ async function deployAzureTarget(target, manifest, deps) {
   const token = env.GHCR_IMPORT_TOKEN || env.GITHUB_TOKEN;
   const webSource = manifest.ghcrWebImage.replace(/^ghcr\.io\//, "");
   const workerSource = manifest.ghcrWorkerImage.replace(/^ghcr\.io\//, "");
+  const acrServer = target.azure.acrServer || `${target.azure.acrName}.azurecr.io`;
+  const webImage = `${acrServer}/corgtex/web:${manifest.imageTag}`;
+  const workerImage = `${acrServer}/corgtex/worker:${manifest.imageTag}`;
   for (const [source, image] of [[webSource, `corgtex/web:${manifest.imageTag}`], [workerSource, `corgtex/worker:${manifest.imageTag}`]]) {
     runCommand("az", [
       "acr",
@@ -829,8 +860,8 @@ async function deployAzureTarget(target, manifest, deps) {
       "--force",
     ], deps);
   }
-  updateAzureContainerApp(target.azure.webAppName, manifest.acrWebImage, target, manifest, deps);
-  updateAzureContainerApp(target.azure.workerAppName, manifest.acrWorkerImage, target, manifest, deps);
+  updateAzureContainerApp(target.azure.webAppName, webImage, target, manifest, deps);
+  updateAzureContainerApp(target.azure.workerAppName, workerImage, target, manifest, deps);
   return {
     webRevision: showAzureRevision(target.azure.webAppName, target, deps),
     workerRevision: showAzureRevision(target.azure.workerAppName, target, deps),
