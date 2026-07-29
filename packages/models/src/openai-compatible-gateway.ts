@@ -299,7 +299,7 @@ function isAzureProvider(provider = env.MODEL_PROVIDER) {
   return isAzureOpenAiProvider(provider) || provider === "azure-foundry";
 }
 
-function isTrustedAzureManagedIdentityBaseUrl(provider: string, value: string) {
+function isTrustedAzureBaseUrl(provider: string, value: string) {
   let url: URL;
   try {
     url = new URL(value);
@@ -325,11 +325,19 @@ function isTrustedAzureManagedIdentityBaseUrl(provider: string, value: string) {
   return false;
 }
 
-function assertTrustedAzureManagedIdentityBaseUrl(provider: string, route?: ModelProviderRoute) {
+function assertTrustedAzureAuthBaseUrl(provider: string, route: ModelProviderRoute | undefined, authLabel: string) {
   const resolvedBaseUrl = baseUrl(route);
-  if (!isTrustedAzureManagedIdentityBaseUrl(provider, resolvedBaseUrl)) {
-    throw new Error(`${provider} managed identity authentication requires a trusted Azure OpenAI-compatible base URL.`);
+  if (!isTrustedAzureBaseUrl(provider, resolvedBaseUrl)) {
+    throw new Error(`${provider} ${authLabel} authentication requires a trusted Azure OpenAI-compatible base URL.`);
   }
+}
+
+function assertTrustedAzureManagedIdentityBaseUrl(provider: string, route?: ModelProviderRoute) {
+  assertTrustedAzureAuthBaseUrl(provider, route, "managed identity");
+}
+
+function assertTrustedAzureApiKeyBaseUrl(provider: string, route?: ModelProviderRoute) {
+  assertTrustedAzureAuthBaseUrl(provider, route, "API key");
 }
 
 function azureCredentialClient() {
@@ -394,6 +402,7 @@ async function authHeaders(route?: ModelProviderRoute) {
       assertTrustedAzureManagedIdentityBaseUrl(provider, route);
       headers.authorization = `Bearer ${await getAzureAccessToken(azureAccessScope(route))}`;
     } else {
+      assertTrustedAzureApiKeyBaseUrl(provider, route);
       headers["api-key"] = requireAzureApiKey(route);
     }
     return headers;

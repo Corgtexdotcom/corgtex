@@ -167,6 +167,36 @@ describe("Azure Foundry model eval helpers", () => {
     expect(nestedScore.invalidJsonShapes).toEqual([]);
   });
 
+  it("rejects null placeholders for structured meeting summary sections", () => {
+    const item = {
+      mode: "json",
+      requiredKeys: ["summary", "decisions", "actions", "risks"],
+      requiredJsonShapes: {
+        summary: { type: "string" },
+        decisions: { type: "array", minItems: 1 },
+        actions: { type: "array", minItems: 1 },
+        risks: { type: "array", minItems: 1 },
+      },
+      requiredConcepts: [
+        { label: "Barcelona pilot", anyOf: ["Barcelona pilot"] },
+        { label: "duplicate company rows", anyOf: ["duplicate company rows"] },
+      ],
+    };
+
+    const score = scoreItem(
+      item,
+      "{\"summary\":\"Barcelona pilot has duplicate company rows.\",\"decisions\":null,\"actions\":null,\"risks\":null}",
+    );
+
+    expect(score.schemaValid).toBe(false);
+    expect(score.invalidJsonShapes).toEqual([
+      "decisions must be an array",
+      "actions must be an array",
+      "risks must be an array",
+    ]);
+    expect(score.passed).toBe(false);
+  });
+
   it("requires related JSON fields to match within the same object", () => {
     const item = {
       mode: "json",

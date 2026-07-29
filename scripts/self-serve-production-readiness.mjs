@@ -210,7 +210,7 @@ function isHttpsBaseUrl(value) {
   }
 }
 
-function isTrustedAzureManagedIdentityBaseUrl(provider, value) {
+function isTrustedAzureBaseUrl(provider, value) {
   try {
     const url = new URL(value);
     if (url.protocol !== "https:") {
@@ -232,19 +232,27 @@ function isTrustedAzureManagedIdentityBaseUrl(provider, value) {
   }
 }
 
-function checkTrustedAzureManagedIdentityBaseUrl(provider, model, value, strict) {
+function checkTrustedAzureAuthBaseUrl(provider, model, value, strict, authLabel) {
   const label = providerLabel(provider);
-  if (value && isTrustedAzureManagedIdentityBaseUrl(provider, value)) {
-    pass(`${label} managed identity route for ${model} uses a trusted Azure base URL`);
+  if (value && isTrustedAzureBaseUrl(provider, value)) {
+    pass(`${label} ${authLabel} route for ${model} uses a trusted Azure base URL`);
     return;
   }
 
-  const message = `${label} managed identity route for ${model} requires a trusted Azure OpenAI-compatible base URL.`;
+  const message = `${label} ${authLabel} route for ${model} requires a trusted Azure OpenAI-compatible base URL.`;
   if (strict) {
     fail(message);
   } else {
     warn(message);
   }
+}
+
+function checkTrustedAzureManagedIdentityBaseUrl(provider, model, value, strict) {
+  checkTrustedAzureAuthBaseUrl(provider, model, value, strict, "managed identity");
+}
+
+function checkTrustedAzureApiKeyBaseUrl(provider, model, value, strict) {
+  checkTrustedAzureAuthBaseUrl(provider, model, value, strict, "API key");
 }
 
 function parseProviderRoutes() {
@@ -354,6 +362,20 @@ function checkHttpBaseUrlEnv(name, label, strict) {
   }
 }
 
+function checkOptionalHttpBaseUrlEnv(name, label, strict) {
+  if (!configured(name)) {
+    return;
+  }
+
+  if (isHttpsBaseUrl(envValue(name))) {
+    pass(`${name} configured`);
+  } else if (strict) {
+    fail(`${name} must be an HTTPS URL for ${label}.`);
+  } else {
+    warn(`${name} must be an HTTPS URL for ${label}.`);
+  }
+}
+
 async function checkEndpoint(baseUrl, path, predicate, label) {
   try {
     const response = await fetch(new URL(path, baseUrl));
@@ -416,6 +438,10 @@ function checkProviderRouteConfiguration(strict) {
         continue;
       }
 
+      const routeBaseUrl = route.baseUrl || (route.provider === globalProvider ? envValue("MODEL_BASE_URL") : "");
+      if (routeBaseUrl) {
+        checkTrustedAzureApiKeyBaseUrl(route.provider, route.model, routeBaseUrl, strict);
+      }
       if (route.apiKeyEnv) {
         checkConfigured(route.apiKeyEnv, strict, `${route.apiKeyEnv} missing for ${label} route ${route.model}.`);
       } else if (route.provider !== globalProvider || route.baseUrl) {
@@ -465,8 +491,8 @@ function checkModelConfiguration(strict) {
     return;
   }
 
+  const label = providerLabel(provider);
   if (isAzureProvider(provider)) {
-    const label = providerLabel(provider);
     const routes = parseProviderRoutes();
     checkHttpBaseUrlEnv("MODEL_BASE_URL", label, strict);
     for (const model of configuredModelNames()) {
@@ -490,6 +516,7 @@ function checkModelConfiguration(strict) {
       fail("AZURE_OPENAI_AUTH_MODE must be api_key or managed_identity.");
       return;
     }
+    checkTrustedAzureApiKeyBaseUrl(provider, "global model traffic", envValue("MODEL_BASE_URL"), strict);
     if (configured("AZURE_OPENAI_API_KEY") || configured("MODEL_API_KEY")) {
       pass(`${label} API key configured`);
     } else {
@@ -498,6 +525,7 @@ function checkModelConfiguration(strict) {
     return;
   }
 
+  checkOptionalHttpBaseUrlEnv("MODEL_BASE_URL", label, strict);
   checkConfigured("MODEL_API_KEY", strict, "MODEL_API_KEY missing for OpenAI-compatible model provider.");
 }
 

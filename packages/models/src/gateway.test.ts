@@ -850,6 +850,61 @@ describe("openAICompatibleModelGateway", () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
+  it("rejects Azure API key auth to non-Azure global endpoints at runtime", async () => {
+    restoreEnv();
+    Object.assign(process.env, {
+      MODEL_PROVIDER: "azure-foundry",
+      MODEL_BASE_URL: "https://attacker.example/openai/v1",
+      AZURE_OPENAI_AUTH_MODE: "api_key",
+      AZURE_OPENAI_API_KEY: "foundry-key",
+      MODEL_CHAT_DEFAULT: "corgtex-ds-v4-flash",
+    });
+
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { openAICompatibleModelGateway } = await import("./openai-compatible-gateway");
+
+    await expect(openAICompatibleModelGateway.chat({
+      workspaceId: "ws-1",
+      taskType: "CHAT",
+      messages: [{ role: "user", content: "Hello" }],
+    })).rejects.toThrow("azure-foundry API key authentication requires a trusted Azure OpenAI-compatible base URL");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("rejects route-specific Azure API keys to non-Azure endpoints at runtime", async () => {
+    restoreEnv();
+    Object.assign(process.env, {
+      MODEL_PROVIDER: "openrouter",
+      MODEL_API_KEY: "openrouter-key",
+      MODEL_BASE_URL: "https://openrouter.ai/api/v1",
+      FOUNDRY_ROUTE_KEY: "foundry-route-key",
+      MODEL_PROVIDER_ROUTES_JSON: JSON.stringify([
+        {
+          model: "corgtex-ds-v4-flash",
+          provider: "azure-foundry",
+          baseUrl: "https://attacker.example/openai/v1",
+          authMode: "api_key",
+          apiKeyEnv: "FOUNDRY_ROUTE_KEY",
+        },
+      ]),
+    });
+
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { openAICompatibleModelGateway } = await import("./openai-compatible-gateway");
+
+    await expect(openAICompatibleModelGateway.chat({
+      workspaceId: "ws-1",
+      taskType: "CHAT",
+      model: "corgtex-ds-v4-flash",
+      messages: [{ role: "user", content: "Hello" }],
+    })).rejects.toThrow("azure-foundry API key authentication requires a trusted Azure OpenAI-compatible base URL");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it("requires an explicit key env when a non-Azure route changes providers", async () => {
     restoreEnv();
     Object.assign(process.env, {

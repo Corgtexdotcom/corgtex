@@ -253,15 +253,30 @@ var keyVaultSecretsUserRoleId = join([
 var keyVaultSecretUriPrefix = '${keyVault.properties.vaultUri}secrets/'
 var usesAzureFoundryModels = modelProvider == 'azure-foundry'
 var runtimeModelProvider = usesAzureFoundryModels ? 'azure-openai' : modelProvider
-var azureFoundryRouteBaseUrl = empty(azureFoundryBaseUrl) ? azureOpenAiBaseUrl : azureFoundryBaseUrl
+var azureFoundryRouteBaseUrl = usesAzureFoundryModels
+  ? (!empty(azureFoundryBaseUrl) ? azureFoundryBaseUrl : fail('azureFoundryBaseUrl is required when modelProvider is azure-foundry.'))
+  : azureOpenAiBaseUrl
 var runtimeChatFastDeploymentName = usesAzureFoundryModels && azureChatFastDeploymentName == 'corgtex-chat-fast' ? 'corgtex-ds-v4-flash' : azureChatFastDeploymentName
 var runtimeChatStandardDeploymentName = usesAzureFoundryModels && azureChatStandardDeploymentName == 'corgtex-chat-standard' ? 'corgtex-ds-v4-flash' : azureChatStandardDeploymentName
 var runtimeChatQualityDeploymentName = usesAzureFoundryModels && azureChatQualityDeploymentName == 'corgtex-chat-quality' ? 'corgtex-ds-v4-pro' : azureChatQualityDeploymentName
 var runtimeChatExcellentDeploymentName = usesAzureFoundryModels && azureChatExcellentDeploymentName == 'corgtex-chat-excellent' ? 'corgtex-gpt56-luna' : azureChatExcellentDeploymentName
 var runtimeChatConversationDeploymentName = usesAzureFoundryModels && azureChatConversationDeploymentName == 'corgtex-chat-conversation' ? 'corgtex-ds-v4-pro' : azureChatConversationDeploymentName
-var azureFoundryRouteApiKeyField = azureOpenAiAuthMode == 'api_key' ? ',"apiKeyEnv":"AZURE_FOUNDRY_API_KEY"' : ''
-var azureFoundryRouteAuthFields = '"authMode":"${azureOpenAiAuthMode}","scope":"https://ai.azure.com/.default"${azureFoundryRouteApiKeyField}'
-var azureFoundryProviderRoutesJson = '[{"model":"corgtex-ds-v4-flash","provider":"azure-foundry","baseUrl":"${azureFoundryRouteBaseUrl}",${azureFoundryRouteAuthFields}},{"model":"corgtex-ds-v4-pro","provider":"azure-foundry","baseUrl":"${azureFoundryRouteBaseUrl}",${azureFoundryRouteAuthFields}},{"model":"corgtex-kimi-k25","provider":"azure-foundry","baseUrl":"${azureFoundryRouteBaseUrl}",${azureFoundryRouteAuthFields}},{"model":"corgtex-kimi-k27-code","provider":"azure-foundry","baseUrl":"${azureFoundryRouteBaseUrl}",${azureFoundryRouteAuthFields}},{"model":"corgtex-gpt56-luna","provider":"azure-foundry","baseUrl":"${azureFoundryRouteBaseUrl}",${azureFoundryRouteAuthFields}}]'
+var azureFoundryRouteModels = union([
+  runtimeChatFastDeploymentName
+  runtimeChatStandardDeploymentName
+  runtimeChatQualityDeploymentName
+  runtimeChatExcellentDeploymentName
+  runtimeChatConversationDeploymentName
+], [])
+var azureFoundryProviderRoutes = [for modelName in azureFoundryRouteModels: {
+  model: modelName
+  provider: 'azure-foundry'
+  baseUrl: azureFoundryRouteBaseUrl
+  authMode: azureOpenAiAuthMode
+  scope: 'https://ai.azure.com/.default'
+  apiKeyEnv: azureOpenAiAuthMode == 'api_key' ? 'AZURE_FOUNDRY_API_KEY' : null
+}]
+var azureFoundryProviderRoutesJson = string(azureFoundryProviderRoutes)
 
 var requiredSecretRefs = [
   { name: 'database-url', keyVaultSecretName: databaseUrlSecretName }
