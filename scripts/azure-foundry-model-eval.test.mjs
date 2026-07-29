@@ -331,6 +331,112 @@ describe("Azure Foundry model eval helpers", () => {
     expect(matchedScore.passed).toBe(true);
   });
 
+  it("requires proposal drafts to include objections to test", () => {
+    const item = {
+      mode: "text",
+      requiredConcepts: [
+        { label: "internal-only scope", anyOf: ["internal workspace only", "internal workspace"] },
+        { label: "drafting only", anyOf: ["draft emails", "draft email", "drafts emails"] },
+        { label: "cannot send", anyOf: ["cannot send", "not send", "must not send", "no sending"] },
+        {
+          label: "objections-to-test section",
+          allOf: [
+            ["objections to test", "test objections", "objection", "objections", "concerns to test", "risks to test"],
+            ["cannot send", "not send", "must not send", "no sending", "approval"],
+          ],
+        },
+        { label: "review date", anyOf: ["2026-08-15", "August 15"] },
+        { label: "sample size", anyOf: ["ten sampled drafts", "10 sampled drafts", "ten drafts", "10 drafts"] },
+      ],
+    };
+
+    const summaryOnlyScore = scoreItem(
+      item,
+      "Intent: enable CRM follow-up assistance. Scope: internal workspace only. The assistant may draft emails but cannot send. Review on 2026-08-15 after ten sampled drafts.",
+    );
+    expect(summaryOnlyScore.missingConcepts).toEqual(["objections-to-test section"]);
+    expect(summaryOnlyScore.passed).toBe(false);
+
+    const matchedScore = scoreItem(
+      item,
+      "Intent: enable CRM follow-up assistance. Scope: internal workspace only. The assistant may draft emails but cannot send. Objections to test: whether approval controls are enough before any draft leaves the workspace. Review on 2026-08-15 after ten sampled drafts.",
+    );
+    expect(matchedScore.missingConcepts).toEqual([]);
+    expect(matchedScore.passed).toBe(true);
+  });
+
+  it("requires Brain open questions and confidence to be usable fields", () => {
+    const item = {
+      mode: "json",
+      requiredKeys: ["companyFacts", "openQuestions", "confidence"],
+      requiredJsonShapes: {
+        companyFacts: { type: "array", minItems: 1, items: { type: "string" } },
+        openQuestions: { type: "array", minItems: 1, items: { type: "string" } },
+        confidence: { type: "string" },
+      },
+      requiredJsonMatches: [
+        {
+          label: "Brain structured fields",
+          path: "",
+          fields: {
+            companyFacts: {
+              allOf: [
+                ["two plants", "2 plants"],
+                "Ohio",
+                ["medical-device", "medical device"],
+                ["lead time variance", "lead-time variance"],
+                "Mexico warehouse",
+                ["not approved", "unapproved"],
+              ],
+            },
+            openQuestions: {
+              allOf: [
+                ["lead time variance", "lead-time variance"],
+                ["measure", "metric", "target"],
+              ],
+            },
+            confidence: "medium",
+          },
+        },
+      ],
+      requiredConcepts: [
+        { label: "two Ohio plants", allOf: [["two plants", "2 plants"], "Ohio"] },
+        { label: "medical-device customers", anyOf: ["medical-device", "medical device"] },
+        { label: "lead-time variance", anyOf: ["lead time variance", "lead-time variance"] },
+        { label: "Mexico warehouse unapproved", allOf: ["Mexico warehouse", ["not approved", "unapproved"]] },
+      ],
+    };
+
+    const placeholderScore = scoreItem(item, JSON.stringify({
+      companyFacts: [
+        "Northstar Components runs two plants in Ohio, serves medical-device manufacturers, has a lead-time variance priority, and has a Mexico warehouse that is not approved.",
+      ],
+      openQuestions: null,
+      confidence: null,
+    }));
+    expect(placeholderScore.schemaValid).toBe(false);
+    expect(placeholderScore.invalidJsonShapes).toEqual([
+      "openQuestions must be an array",
+      "confidence must be a string",
+    ]);
+    expect(placeholderScore.missingJsonMatches).toEqual(["Brain structured fields"]);
+    expect(placeholderScore.passed).toBe(false);
+
+    const matchedScore = scoreItem(item, JSON.stringify({
+      companyFacts: [
+        "Northstar Components runs two plants in Ohio.",
+        "It serves medical-device manufacturers.",
+        "Its 2026 priority is reducing lead-time variance.",
+        "The Mexico warehouse is not approved.",
+      ],
+      openQuestions: ["What metric will measure lead-time variance reduction?"],
+      confidence: "medium",
+    }));
+    expect(matchedScore.schemaValid).toBe(true);
+    expect(matchedScore.missingJsonMatches).toEqual([]);
+    expect(matchedScore.passed).toBe(true);
+  });
+
   it("defaults OpenAI evaluation candidates to MODEL_API_KEY", () => {
     process.env.AZURE_FOUNDRY_EVAL_CANDIDATES_JSON = JSON.stringify([
       {
