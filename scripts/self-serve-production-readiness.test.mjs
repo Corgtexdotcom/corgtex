@@ -133,8 +133,25 @@ describe("self-serve production readiness", () => {
     expect(result.stdout).toContain("OK   MODEL_BASE_URL configured");
     expect(result.stdout).toContain("OK   MODEL_PRICE_OVERRIDES_JSON valid");
     expect(result.stdout).toContain("OK   MODEL_PRICE_OVERRIDES_JSON includes azure-foundry/corgtex-gpt56-luna");
+    expect(result.stdout).toContain("OK   Azure Foundry managed identity scope for global model traffic uses https://ai.azure.com/.default");
     expect(result.stdout).toContain("OK   AZURE_OPENAI_AUTH_MODE configured for managed identity");
     expect(result.stderr).toBe("");
+  });
+
+  it("rejects Azure Foundry managed identity with an Azure OpenAI scope", () => {
+    const result = runReadiness({
+      ...STRICT_BASE_ENV,
+      ...AZURE_FOUNDRY_MODEL_ENV,
+      MODEL_PROVIDER: "azure-foundry",
+      MODEL_BASE_URL: "https://example.services.ai.azure.com/openai/v1",
+      AZURE_OPENAI_AUTH_MODE: "managed_identity",
+      AZURE_OPENAI_SCOPE: "https://cognitiveservices.azure.com/.default",
+      AZURE_CLIENT_ID: "00000000-0000-4000-8000-000000000000",
+      MODEL_PRICE_OVERRIDES_JSON: AZURE_FOUNDRY_PRICE_OVERRIDES_JSON,
+    }, ["--strict", "--skip-http"]);
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("Azure Foundry managed identity scope for global model traffic must be https://ai.azure.com/.default");
   });
 
   it("accepts built-in Azure Foundry pricing in strict mode without override JSON", () => {
@@ -328,6 +345,27 @@ describe("self-serve production readiness", () => {
 
     expect(result.status).toBe(1);
     expect(result.stderr).toContain("Azure Foundry managed identity route for corgtex-gpt56-luna requires a trusted Azure OpenAI-compatible /openai/v1 base URL");
+  });
+
+  it("rejects managed-identity Azure routes with the wrong audience scope", () => {
+    const result = runReadiness({
+      ...STRICT_BASE_ENV,
+      MODEL_PROVIDER: "openrouter",
+      MODEL_API_KEY: "openrouter-key-placeholder",
+      AZURE_CLIENT_ID: "00000000-0000-4000-8000-000000000000",
+      MODEL_PROVIDER_ROUTES_JSON: JSON.stringify([
+        {
+          model: "corgtex-gpt56-luna",
+          provider: "azure-foundry",
+          baseUrl: "https://example.services.ai.azure.com/openai/v1",
+          authMode: "managed_identity",
+          scope: "https://cognitiveservices.azure.com/.default",
+        },
+      ]),
+    }, ["--strict", "--skip-http"]);
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("Azure Foundry managed identity scope for corgtex-gpt56-luna must be https://ai.azure.com/.default");
   });
 
   it("rejects Azure API-key routes to non-Azure hosts", () => {

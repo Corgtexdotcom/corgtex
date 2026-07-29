@@ -151,10 +151,10 @@ describe("Azure Foundry model eval helpers", () => {
             type: "object",
             requiredKeys: ["title", "owner", "dueDate", "evidence"],
             properties: {
-              title: { type: "string" },
-              owner: { type: "string" },
-              dueDate: { type: "string" },
-              evidence: { type: "string" },
+              title: { type: "string", minLength: 1 },
+              owner: { type: "string", minLength: 1 },
+              dueDate: { type: "string", minLength: 1 },
+              evidence: { type: "string", minLength: 1 },
             },
           },
         },
@@ -175,6 +175,13 @@ describe("Azure Foundry model eval helpers", () => {
     ]);
     expect(wrongFieldTypeScore.passed).toBe(false);
 
+    const emptyEvidenceScore = scoreItem(item, "{\"actions\":[{\"title\":\"Buyer shortlist\",\"owner\":\"Jordan\",\"dueDate\":\"2026-08-03\",\"evidence\":\"\"}]}");
+    expect(emptyEvidenceScore.schemaValid).toBe(false);
+    expect(emptyEvidenceScore.invalidJsonShapes).toEqual([
+      "actions[0].evidence must contain at least 1 non-whitespace character",
+    ]);
+    expect(emptyEvidenceScore.passed).toBe(false);
+
     const nestedScore = scoreItem(item, "{\"actions\":[{\"title\":\"Buyer shortlist\",\"owner\":\"Jordan\",\"dueDate\":\"2026-08-03\",\"evidence\":\"Notes\"}]}");
     expect(nestedScore.schemaValid).toBe(true);
     expect(nestedScore.invalidJsonShapes).toEqual([]);
@@ -185,10 +192,10 @@ describe("Azure Foundry model eval helpers", () => {
       mode: "json",
       requiredKeys: ["summary", "decisions", "actions", "risks"],
       requiredJsonShapes: {
-        summary: { type: "string" },
-        decisions: { type: "array", minItems: 1, items: { type: "string" } },
-        actions: { type: "array", minItems: 1, items: { type: "string" } },
-        risks: { type: "array", minItems: 1, items: { type: "string" } },
+        summary: { type: "string", minLength: 1 },
+        decisions: { type: "array", minItems: 1, items: { type: "string", minLength: 1 } },
+        actions: { type: "array", minItems: 1, items: { type: "string", minLength: 1 } },
+        risks: { type: "array", minItems: 1, items: { type: "string", minLength: 1 } },
       },
       requiredJsonMatches: [
         {
@@ -235,6 +242,16 @@ describe("Azure Foundry model eval helpers", () => {
     expect(placeholderScore.missingJsonMatches).toEqual(["meeting summary structured sections"]);
     expect(placeholderScore.passed).toBe(false);
 
+    const emptySummaryScore = scoreItem(
+      item,
+      "{\"summary\":\"\",\"decisions\":[\"Proceed with Barcelona pilot planning; no external announcement yet.\"],\"actions\":[\"Mina owns the finance vendor cap check by Friday and will include Support's two days of notice in the launch note.\"],\"risks\":[\"Data import remains risky because of duplicate company rows.\"]}",
+    );
+    expect(emptySummaryScore.schemaValid).toBe(false);
+    expect(emptySummaryScore.invalidJsonShapes).toEqual([
+      "summary must contain at least 1 non-whitespace character",
+    ]);
+    expect(emptySummaryScore.passed).toBe(false);
+
     const summaryOnlyScore = scoreItem(
       item,
       "{\"summary\":\"The Barcelona pilot can proceed if finance confirms the vendor cap by Friday. No external announcement yet. Mina owns the vendor cap and Support needs two days of notice. Data import remains a risk because of duplicate company rows.\",\"decisions\":[\"General decision\"],\"actions\":[\"General action\"],\"risks\":[\"General risk\"]}",
@@ -265,10 +282,10 @@ describe("Azure Foundry model eval helpers", () => {
             type: "object",
             requiredKeys: ["title", "owner", "dueDate", "evidence"],
             properties: {
-              title: { type: "string" },
-              owner: { type: "string" },
-              dueDate: { type: "string" },
-              evidence: { type: "string" },
+              title: { type: "string", minLength: 1 },
+              owner: { type: "string", minLength: 1 },
+              dueDate: { type: "string", minLength: 1 },
+              evidence: { type: "string", minLength: 1 },
             },
           },
         },
@@ -311,7 +328,7 @@ describe("Azure Foundry model eval helpers", () => {
     const matchedScore = scoreItem(item, JSON.stringify({
       actions: [
         { title: "Prepare buyer shortlist", owner: "Jordan", dueDate: "2026-08-03", evidence: "Jordan will prepare the buyer shortlist" },
-        { title: "DPA approval blocker", owner: "Priya", dueDate: "", evidence: "Waiting on legal to approve the DPA" },
+        { title: "DPA approval blocker", owner: "Priya", dueDate: "Pending legal approval", evidence: "Waiting on legal to approve the DPA" },
       ],
     }));
     expect(matchedScore.missingJsonMatches).toEqual([]);

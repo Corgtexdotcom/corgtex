@@ -125,7 +125,12 @@ These provider secrets are optional and are referenced only when their correspon
 - `microsoft-client-id`
 - `microsoft-client-secret`
 
-If `azureOpenAiAuthMode=api_key`, also create `azure-openai-api-key`. Production should prefer `managed_identity`.
+If `azureOpenAiAuthMode=api_key`, also create these model API-key secrets:
+
+- `azure-openai-api-key`
+- `azure-foundry-api-key` when `modelProvider=azure-foundry` and Azure Foundry API-key auth is selected.
+
+Production should prefer `managed_identity`.
 
 Keep `enable_resend_secrets=false` for smoke-only signup testing unless a real Resend staging key and inbound webhook signing secret are available. With Resend unset, the app records the smoke setup URL through `SMOKE_EMAIL_CAPTURE_SECRET` without attempting external mail delivery.
 

@@ -748,6 +748,13 @@ function jsonShapeFailures(value, shape, path) {
     }
   }
 
+  if (typeof value === "string" && Number.isFinite(shape.minLength)) {
+    const minimumLength = Math.max(0, Math.trunc(shape.minLength));
+    if (value.trim().length < minimumLength) {
+      failures.push(`${path} must contain at least ${minimumLength} non-whitespace character${minimumLength === 1 ? "" : "s"}`);
+    }
+  }
+
   if (Array.isArray(value)) {
     if (Number.isFinite(shape.minItems) && value.length < shape.minItems) {
       failures.push(`${path} must contain at least ${shape.minItems} item${shape.minItems === 1 ? "" : "s"}`);

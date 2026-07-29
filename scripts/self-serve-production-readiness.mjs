@@ -32,6 +32,8 @@ const REQUIRED_EMAIL_REPLY_TO_ADDRESS = "support@corgtex.com";
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const SUPPORTED_MODEL_PROVIDERS = new Set(["openrouter", "openai", "azure-openai", "azure-foundry"]);
 const AZURE_MODEL_PROVIDERS = new Set(["azure-openai", "azure-foundry"]);
+const AZURE_OPENAI_SCOPE = "https://cognitiveservices.azure.com/.default";
+const AZURE_FOUNDRY_SCOPE = "https://ai.azure.com/.default";
 const BUILT_IN_MODEL_PRICE_KEYS = new Set([
   "azure-foundry/corgtex-ds-v4-flash",
   "azure-foundry/corgtex-ds-v4-pro",
@@ -112,6 +114,27 @@ function providerLabel(provider) {
 
 function isAzureProvider(provider) {
   return AZURE_MODEL_PROVIDERS.has(provider);
+}
+
+function defaultAzureManagedIdentityScope(provider) {
+  return provider === "azure-foundry" ? AZURE_FOUNDRY_SCOPE : AZURE_OPENAI_SCOPE;
+}
+
+function checkAzureManagedIdentityScope(provider, model, configuredScope, strict) {
+  const label = providerLabel(provider);
+  const expectedScope = defaultAzureManagedIdentityScope(provider);
+  const effectiveScope = configuredScope || expectedScope;
+  if (effectiveScope === expectedScope) {
+    pass(`${label} managed identity scope for ${model} uses ${expectedScope}`);
+    return;
+  }
+
+  const message = `${label} managed identity scope for ${model} must be ${expectedScope}.`;
+  if (strict) {
+    fail(message);
+  } else {
+    warn(message);
+  }
 }
 
 function priceKey(provider, model) {
@@ -312,6 +335,10 @@ function parseProviderRoutes() {
       fail(`MODEL_PROVIDER_ROUTES_JSON[${index}].apiKeyEnv must be a non-empty string when set.`);
       return [];
     }
+    if (route.scope !== undefined && (typeof route.scope !== "string" || !route.scope.trim())) {
+      fail(`MODEL_PROVIDER_ROUTES_JSON[${index}].scope must be a non-empty string when set.`);
+      return [];
+    }
 
     return [{
       model,
@@ -423,12 +450,14 @@ function checkProviderRouteConfiguration(strict) {
       requireKnownModelPrice(route.provider, route.model, strict);
       const authMode = route.authMode || envValue("AZURE_OPENAI_AUTH_MODE") || "api_key";
       if (authMode === "managed_identity") {
+        const routeScope = route.scope || (route.provider === globalProvider ? envValue("AZURE_OPENAI_SCOPE") : "");
         checkTrustedAzureManagedIdentityBaseUrl(
           route.provider,
           route.model,
           route.baseUrl || (route.provider === globalProvider ? envValue("MODEL_BASE_URL") : ""),
           strict,
         );
+        checkAzureManagedIdentityScope(route.provider, route.model, routeScope, strict);
         pass(`MODEL_PROVIDER_ROUTES_JSON route for ${route.model} uses managed identity`);
         if (configured("AZURE_CLIENT_ID")) {
           pass("AZURE_CLIENT_ID configured");
@@ -509,6 +538,7 @@ function checkModelConfiguration(strict) {
     const authMode = envValue("AZURE_OPENAI_AUTH_MODE") || "api_key";
     if (authMode === "managed_identity") {
       checkTrustedAzureManagedIdentityBaseUrl(provider, "global model traffic", envValue("MODEL_BASE_URL"), strict);
+      checkAzureManagedIdentityScope(provider, "global model traffic", envValue("AZURE_OPENAI_SCOPE"), strict);
       pass("AZURE_OPENAI_AUTH_MODE configured for managed identity");
       if (configured("AZURE_CLIENT_ID")) {
         pass("AZURE_CLIENT_ID configured");
