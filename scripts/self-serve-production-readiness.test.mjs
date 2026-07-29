@@ -208,7 +208,21 @@ describe("self-serve production readiness", () => {
     }, ["--strict", "--skip-http"]);
 
     expect(result.status).toBe(1);
-    expect(result.stderr).toContain("MODEL_BASE_URL must be an HTTP(S) URL for Azure Foundry");
+    expect(result.stderr).toContain("MODEL_BASE_URL must be an HTTPS URL for Azure Foundry");
+  });
+
+  it("rejects plaintext Azure global base URLs in strict mode", () => {
+    const result = runReadiness({
+      ...STRICT_BASE_ENV,
+      ...AZURE_FOUNDRY_MODEL_ENV,
+      MODEL_PROVIDER: "azure-foundry",
+      MODEL_BASE_URL: "http://example.openai.azure.com/openai/v1",
+      AZURE_OPENAI_AUTH_MODE: "managed_identity",
+      AZURE_CLIENT_ID: "00000000-0000-4000-8000-000000000000",
+    }, ["--strict", "--skip-http"]);
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("MODEL_BASE_URL must be an HTTPS URL for Azure Foundry");
   });
 
   it("accepts an Azure Foundry per-model canary route while OpenRouter remains the global provider", () => {
@@ -312,7 +326,26 @@ describe("self-serve production readiness", () => {
     }, ["--strict", "--skip-http"]);
 
     expect(result.status).toBe(1);
-    expect(result.stderr).toContain("MODEL_PROVIDER_ROUTES_JSON[0].baseUrl must be an HTTP(S) URL");
+    expect(result.stderr).toContain("MODEL_PROVIDER_ROUTES_JSON[0].baseUrl must be an HTTPS URL");
+  });
+
+  it("rejects plaintext per-model route base URLs", () => {
+    const result = runReadiness({
+      ...STRICT_BASE_ENV,
+      MODEL_PROVIDER: "openrouter",
+      MODEL_API_KEY: "openrouter-key-placeholder",
+      MODEL_PROVIDER_ROUTES_JSON: JSON.stringify([
+        {
+          model: "corgtex-gpt56-luna",
+          provider: "azure-foundry",
+          baseUrl: "http://example.services.ai.azure.com/openai/v1",
+          authMode: "managed_identity",
+        },
+      ]),
+    }, ["--strict", "--skip-http"]);
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("MODEL_PROVIDER_ROUTES_JSON[0].baseUrl must be an HTTPS URL");
   });
 
   it("rejects duplicate per-model routes", () => {

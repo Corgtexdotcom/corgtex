@@ -201,10 +201,10 @@ function requireKnownModelPrice(provider, model, strict) {
   }
 }
 
-function isHttpBaseUrl(value) {
+function isHttpsBaseUrl(value) {
   try {
     const url = new URL(value);
-    return url.protocol === "https:" || url.protocol === "http:";
+    return url.protocol === "https:";
   } catch {
     return false;
   }
@@ -254,8 +254,8 @@ function parseProviderRoutes() {
       fail(`MODEL_PROVIDER_ROUTES_JSON[${index}].baseUrl must be a non-empty string when set.`);
       return [];
     }
-    if (typeof route.baseUrl === "string" && route.baseUrl.trim() && !isHttpBaseUrl(route.baseUrl.trim())) {
-      fail(`MODEL_PROVIDER_ROUTES_JSON[${index}].baseUrl must be an HTTP(S) URL.`);
+    if (typeof route.baseUrl === "string" && route.baseUrl.trim() && !isHttpsBaseUrl(route.baseUrl.trim())) {
+      fail(`MODEL_PROVIDER_ROUTES_JSON[${index}].baseUrl must be an HTTPS URL.`);
       return [];
     }
     if (route.apiKeyEnv !== undefined && (typeof route.apiKeyEnv !== "string" || !route.apiKeyEnv.trim())) {
@@ -308,12 +308,12 @@ function checkHttpBaseUrlEnv(name, label, strict) {
     return;
   }
 
-  if (isHttpBaseUrl(envValue(name))) {
+  if (isHttpsBaseUrl(envValue(name))) {
     pass(`${name} configured`);
   } else if (strict) {
-    fail(`${name} must be an HTTP(S) URL for ${label}.`);
+    fail(`${name} must be an HTTPS URL for ${label}.`);
   } else {
-    warn(`${name} must be an HTTP(S) URL for ${label}.`);
+    warn(`${name} must be an HTTPS URL for ${label}.`);
   }
 }
 

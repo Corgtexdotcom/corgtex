@@ -199,6 +199,12 @@ function requiredJsonValues(item) {
     : {};
 }
 
+function requiredJsonShapes(item) {
+  return item.requiredJsonShapes && typeof item.requiredJsonShapes === "object" && !Array.isArray(item.requiredJsonShapes)
+    ? item.requiredJsonShapes
+    : {};
+}
+
 function priceFor(provider, model) {
   const prices = [...parsePriceOverrides(), ...DEFAULT_PRICES];
   return prices.find((price) => (
@@ -452,10 +458,24 @@ function termOccurrenceIndexes(normalizedText, normalizedTerm) {
   while (start <= normalizedText.length) {
     const index = normalizedText.indexOf(normalizedTerm, start);
     if (index < 0) break;
-    indexes.push(index);
+    if (hasTermBoundaries(normalizedText, normalizedTerm, index)) {
+      indexes.push(index);
+    }
     start = index + Math.max(1, normalizedTerm.length);
   }
   return indexes;
+}
+
+function isTokenChar(char) {
+  return typeof char === "string" && /[a-z0-9]/.test(char);
+}
+
+function hasTermBoundaries(normalizedText, normalizedTerm, index) {
+  const first = normalizedTerm[0];
+  const last = normalizedTerm[normalizedTerm.length - 1];
+  const before = normalizedText[index - 1];
+  const after = normalizedText[index + normalizedTerm.length];
+  return (!isTokenChar(first) || !isTokenChar(before)) && (!isTokenChar(last) || !isTokenChar(after));
 }
 
 function isNegatedOccurrence(normalizedText, index) {
@@ -498,6 +518,61 @@ function forbiddenConcepts(item) {
   return [];
 }
 
+function jsonShapeFailures(value, shape, path) {
+  if (!shape || typeof shape !== "object" || Array.isArray(shape)) {
+    return [];
+  }
+
+  const failures = [];
+  if (typeof shape.type === "string") {
+    if (shape.type === "array" && !Array.isArray(value)) {
+      return [`${path} must be an array`];
+    }
+    if (shape.type === "object" && (!value || typeof value !== "object" || Array.isArray(value))) {
+      return [`${path} must be an object`];
+    }
+    if (shape.type === "string" && typeof value !== "string") {
+      return [`${path} must be a string`];
+    }
+    if (shape.type === "number" && (typeof value !== "number" || !Number.isFinite(value))) {
+      return [`${path} must be a number`];
+    }
+    if (shape.type === "boolean" && typeof value !== "boolean") {
+      return [`${path} must be a boolean`];
+    }
+  }
+
+  if (Array.isArray(value)) {
+    if (Number.isFinite(shape.minItems) && value.length < shape.minItems) {
+      failures.push(`${path} must contain at least ${shape.minItems} item${shape.minItems === 1 ? "" : "s"}`);
+    }
+    if (shape.items) {
+      value.forEach((item, index) => {
+        failures.push(...jsonShapeFailures(item, shape.items, `${path}[${index}]`));
+      });
+    }
+  }
+
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    const requiredKeys = Array.isArray(shape.requiredKeys) ? shape.requiredKeys.map(String) : [];
+    for (const key of requiredKeys) {
+      if (!Object.hasOwn(value, key)) {
+        failures.push(`${path}.${key} is required`);
+      }
+    }
+    const properties = shape.properties && typeof shape.properties === "object" && !Array.isArray(shape.properties)
+      ? shape.properties
+      : {};
+    for (const [key, childShape] of Object.entries(properties)) {
+      if (Object.hasOwn(value, key)) {
+        failures.push(...jsonShapeFailures(value[key], childShape, `${path}.${key}`));
+      }
+    }
+  }
+
+  return failures;
+}
+
 function scoreItem(item, text) {
   const normalizedText = normalize(text);
   const parsedJson = item.mode === "json" ? parseJsonObject(text) : null;
@@ -509,19 +584,25 @@ function scoreItem(item, text) {
   const incorrectJsonValues = Object.entries(requiredJsonValues(item)).filter(([key, expected]) => {
     return !(parsedJson && Object.is(parsedJson[key], expected));
   }).map(([key]) => key);
+  const invalidJsonShapes = Object.entries(requiredJsonShapes(item)).flatMap(([key, shape]) => (
+    parsedJson && Object.hasOwn(parsedJson, key)
+      ? jsonShapeFailures(parsedJson[key], shape, key)
+      : []
+  ));
   const missingConcepts = requiredConcepts(item).filter((concept) => {
     return !conceptMatches(concept, conceptSearchText);
   }).map(conceptLabel);
   const forbiddenMentions = forbiddenConcepts(item).filter((concept) => (
     conceptMatches(concept, conceptSearchText, { polarityAware: true })
   )).map(conceptLabel);
-  const schemaValid = jsonParsed && missingKeys.length === 0;
+  const schemaValid = jsonParsed && missingKeys.length === 0 && invalidJsonShapes.length === 0;
   return {
     schemaValid,
     jsonParsed,
     outputLength: text.length,
     missingKeys,
     incorrectJsonValues,
+    invalidJsonShapes,
     missingConcepts,
     forbiddenMentions,
     passed: schemaValid && incorrectJsonValues.length === 0 && missingConcepts.length === 0 && forbiddenMentions.length === 0,

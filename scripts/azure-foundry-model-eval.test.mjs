@@ -109,6 +109,32 @@ describe("Azure Foundry model eval helpers", () => {
     expect(score.passed).toBe(false);
   });
 
+  it("rejects scalar placeholders for required JSON arrays", () => {
+    const item = {
+      mode: "json",
+      requiredKeys: ["actions"],
+      requiredJsonShapes: {
+        actions: {
+          type: "array",
+          minItems: 1,
+          items: {
+            type: "object",
+            requiredKeys: ["title", "owner", "dueDate", "evidence"],
+          },
+        },
+      },
+    };
+
+    const scalarScore = scoreItem(item, "{\"actions\":\"Jordan buyer shortlist 2026-08-03\"}");
+    expect(scalarScore.schemaValid).toBe(false);
+    expect(scalarScore.invalidJsonShapes).toEqual(["actions must be an array"]);
+    expect(scalarScore.passed).toBe(false);
+
+    const nestedScore = scoreItem(item, "{\"actions\":[{\"title\":\"Buyer shortlist\",\"owner\":\"Jordan\",\"dueDate\":\"2026-08-03\",\"evidence\":\"Notes\"}]}");
+    expect(nestedScore.schemaValid).toBe(true);
+    expect(nestedScore.invalidJsonShapes).toEqual([]);
+  });
+
   it("defaults OpenAI evaluation candidates to MODEL_API_KEY", () => {
     process.env.AZURE_FOUNDRY_EVAL_CANDIDATES_JSON = JSON.stringify([
       {
@@ -172,6 +198,12 @@ describe("Azure Foundry model eval helpers", () => {
   it("keeps polarity handling scoped to forbidden matching", () => {
     expect(conceptMatches(["ready to send now"], "not ready to send now")).toBe(true);
     expect(conceptMatches(["ready to send now"], "not ready to send now", { polarityAware: true })).toBe(false);
+  });
+
+  it("matches concepts on token boundaries", () => {
+    expect(conceptMatches(["45"], "RidgeWorks has 145 operators")).toBe(false);
+    expect(conceptMatches(["45 operators"], "RidgeWorks has 145 operators")).toBe(false);
+    expect(conceptMatches(["45 operators"], "RidgeWorks has 45 operators")).toBe(true);
   });
 
   it("retries transient fetch network failures", () => {
