@@ -100,6 +100,7 @@ type Env = {
   readonly MODEL_PROVIDER: string;
   readonly MODEL_API_KEY: string | undefined;
   readonly MODEL_BASE_URL: string | undefined;
+  readonly MODEL_PROVIDER_ROUTES_JSON: string | undefined;
   readonly MODEL_PRICE_OVERRIDES_JSON: string | undefined;
   readonly AZURE_OPENAI_AUTH_MODE: AzureOpenAiAuthMode;
   readonly AZURE_OPENAI_API_KEY: string | undefined;
@@ -230,6 +231,9 @@ export const env: Env = {
   get MODEL_BASE_URL() {
     return optional("MODEL_BASE_URL") ?? "https://openrouter.ai/api/v1";
   },
+  get MODEL_PROVIDER_ROUTES_JSON() {
+    return optional("MODEL_PROVIDER_ROUTES_JSON");
+  },
   get MODEL_PRICE_OVERRIDES_JSON() {
     return optional("MODEL_PRICE_OVERRIDES_JSON");
   },
@@ -240,7 +244,11 @@ export const env: Env = {
     return optional("AZURE_OPENAI_API_KEY");
   },
   get AZURE_OPENAI_SCOPE() {
-    return optional("AZURE_OPENAI_SCOPE") ?? "https://cognitiveservices.azure.com/.default";
+    return optional("AZURE_OPENAI_SCOPE") ?? (
+      env.MODEL_PROVIDER === "azure-foundry"
+        ? "https://ai.azure.com/.default"
+        : "https://cognitiveservices.azure.com/.default"
+    );
   },
   get AZURE_CLIENT_ID() {
     return optional("AZURE_CLIENT_ID");

@@ -68,6 +68,7 @@ describe("self-serve production readiness", () => {
       MODEL_BASE_URL: "https://example.openai.azure.com/openai/v1",
       AZURE_OPENAI_AUTH_MODE: "managed_identity",
       AZURE_CLIENT_ID: "00000000-0000-4000-8000-000000000000",
+      MODEL_PRICE_OVERRIDES_JSON: "[]",
     }, ["--strict", "--skip-http"]);
 
     expect(result.status).toBe(0);
@@ -77,6 +78,87 @@ describe("self-serve production readiness", () => {
     expect(result.stdout).toContain("OK   MODEL_BASE_URL configured");
     expect(result.stdout).toContain("OK   AZURE_OPENAI_AUTH_MODE configured for managed identity");
     expect(result.stderr).toBe("");
+  });
+
+  it("accepts Azure Foundry managed identity with explicit model pricing in strict mode", () => {
+    const result = runReadiness({
+      ...STRICT_BASE_ENV,
+      MODEL_PROVIDER: "azure-foundry",
+      MODEL_BASE_URL: "https://example.openai.azure.com/openai/v1",
+      AZURE_OPENAI_AUTH_MODE: "managed_identity",
+      AZURE_CLIENT_ID: "00000000-0000-4000-8000-000000000000",
+      MODEL_PRICE_OVERRIDES_JSON: JSON.stringify([
+        {
+          provider: "azure-foundry",
+          model: "corgtex-ds-v4-flash",
+          inputUsdPerToken: 0.00000019,
+          outputUsdPerToken: 0.00000051,
+        },
+      ]),
+    }, ["--strict", "--skip-http"]);
+
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain("OK   MODEL_BASE_URL configured");
+    expect(result.stdout).toContain("OK   MODEL_PRICE_OVERRIDES_JSON configured");
+    expect(result.stdout).toContain("OK   AZURE_OPENAI_AUTH_MODE configured for managed identity");
+    expect(result.stderr).toBe("");
+  });
+
+  it("requires Azure pricing overrides in strict mode", () => {
+    const result = runReadiness({
+      ...STRICT_BASE_ENV,
+      MODEL_PROVIDER: "azure-foundry",
+      MODEL_BASE_URL: "https://example.openai.azure.com/openai/v1",
+      AZURE_OPENAI_AUTH_MODE: "managed_identity",
+      AZURE_CLIENT_ID: "00000000-0000-4000-8000-000000000000",
+    }, ["--strict", "--skip-http"]);
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("MODEL_PRICE_OVERRIDES_JSON missing for Azure model pricing");
+  });
+
+  it("accepts an Azure Foundry per-model canary route while OpenRouter remains the global provider", () => {
+    const result = runReadiness({
+      ...STRICT_BASE_ENV,
+      MODEL_PROVIDER: "openrouter",
+      MODEL_API_KEY: "openrouter-key-placeholder",
+      MODEL_PROVIDER_ROUTES_JSON: JSON.stringify([
+        {
+          model: "corgtex-gpt56-luna",
+          provider: "azure-foundry",
+          baseUrl: "https://example.services.ai.azure.com/openai/v1",
+          authMode: "managed_identity",
+        },
+      ]),
+      MODEL_PRICE_OVERRIDES_JSON: JSON.stringify([
+        {
+          provider: "azure-foundry",
+          model: "corgtex-gpt56-luna",
+          inputUsdPerToken: 0.000001,
+          outputUsdPerToken: 0.000006,
+        },
+      ]),
+    }, ["--strict", "--skip-http"]);
+
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain("OK   MODEL_API_KEY configured");
+    expect(result.stdout).toContain("OK   MODEL_PROVIDER_ROUTES_JSON valid");
+    expect(result.stdout).toContain("OK   MODEL_PROVIDER_ROUTES_JSON route for corgtex-gpt56-luna has Azure Foundry base URL");
+    expect(result.stdout).toContain("OK   MODEL_PROVIDER_ROUTES_JSON route for corgtex-gpt56-luna uses managed identity");
+    expect(result.stderr).toBe("");
+  });
+
+  it("rejects malformed per-model provider routes in strict mode", () => {
+    const result = runReadiness({
+      ...STRICT_BASE_ENV,
+      MODEL_PROVIDER: "openrouter",
+      MODEL_API_KEY: "openrouter-key-placeholder",
+      MODEL_PROVIDER_ROUTES_JSON: "{\"model\":\"corgtex-gpt56-luna\"}",
+      MODEL_PRICE_OVERRIDES_JSON: "[]",
+    }, ["--strict", "--skip-http"]);
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("MODEL_PROVIDER_ROUTES_JSON must be an array");
   });
 
   it("requires MODEL_API_KEY for OpenAI-compatible providers in strict mode", () => {

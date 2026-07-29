@@ -1,0 +1,397 @@
+#!/usr/bin/env node
+import { DefaultAzureCredential } from "@azure/identity";
+import { readFile } from "node:fs/promises";
+import process from "node:process";
+
+const DEFAULT_EVAL_SET_PATH = "scripts/fixtures/azure-foundry-sanitized-eval-set.jsonl";
+const DEFAULT_TIMEOUT_MS = Number.parseInt(process.env.AZURE_FOUNDRY_EVAL_TIMEOUT_MS ?? "", 10) || 60_000;
+const DEFAULT_MAX_TOKENS = Number.parseInt(process.env.AZURE_FOUNDRY_EVAL_MAX_TOKENS ?? "", 10) || 600;
+const DEFAULT_RETRIES = Math.max(0, Number.parseInt(process.env.AZURE_FOUNDRY_EVAL_RETRIES ?? "", 10) || 1);
+const DEFAULT_CONCURRENCY = Math.min(
+  4,
+  Math.max(1, Number.parseInt(process.env.AZURE_FOUNDRY_EVAL_CONCURRENCY ?? "", 10) || 2),
+);
+const TOKEN_REFRESH_SKEW_MS = 60_000;
+const DEFAULT_PRICES = [
+  { provider: "openrouter", model: "deepseek/deepseek-v4-flash", inputUsdPerToken: 0.0000000983, outputUsdPerToken: 0.0000001966 },
+  { provider: "openrouter", model: "deepseek/deepseek-v4-pro", inputUsdPerToken: 0.000000435, outputUsdPerToken: 0.00000087 },
+  { provider: "openrouter", model: "deepseek/deepseek-r1-0528", inputUsdPerToken: 0.0000005, outputUsdPerToken: 0.00000215 },
+  { provider: "azure-foundry", model: "corgtex-ds-v4-flash", inputUsdPerToken: 0.00000019, outputUsdPerToken: 0.00000051 },
+  { provider: "azure-foundry", model: "corgtex-ds-v4-pro", inputUsdPerToken: 0.00000174, outputUsdPerToken: 0.00000348 },
+  { provider: "azure-foundry", model: "corgtex-kimi-k25", inputUsdPerToken: 0.0000006, outputUsdPerToken: 0.000003 },
+  { provider: "azure-foundry", model: "corgtex-kimi-k27-code", inputUsdPerToken: 0.00000095, outputUsdPerToken: 0.000004 },
+  { provider: "azure-foundry", model: "corgtex-gpt56-luna", inputUsdPerToken: 0.000001, outputUsdPerToken: 0.000006 },
+];
+const credential = new DefaultAzureCredential();
+const accessTokenCache = new Map();
+
+function arg(name) {
+  const prefix = `--${name}=`;
+  return process.argv.find((value) => value.startsWith(prefix))?.slice(prefix.length);
+}
+
+function normalize(value) {
+  return String(value ?? "").trim().toLowerCase();
+}
+
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function parseJsonEnv(name, fallback) {
+  const raw = process.env[name]?.trim();
+  if (!raw) return fallback;
+  try {
+    return JSON.parse(raw);
+  } catch {
+    throw new Error(`${name} must be valid JSON.`);
+  }
+}
+
+function parseCandidates() {
+  const candidates = parseJsonEnv("AZURE_FOUNDRY_EVAL_CANDIDATES_JSON", []);
+  if (!Array.isArray(candidates) || candidates.length === 0) {
+    throw new Error("AZURE_FOUNDRY_EVAL_CANDIDATES_JSON must contain at least one candidate.");
+  }
+  return candidates.map((candidate, index) => {
+    if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) {
+      throw new Error(`AZURE_FOUNDRY_EVAL_CANDIDATES_JSON[${index}] must be an object.`);
+    }
+    const record = candidate;
+    for (const key of ["label", "provider", "model", "baseUrl"]) {
+      if (typeof record[key] !== "string" || !record[key].trim()) {
+        throw new Error(`AZURE_FOUNDRY_EVAL_CANDIDATES_JSON[${index}].${key} is required.`);
+      }
+    }
+    const authMode = record.authMode === "managed_identity" ? "managed_identity" : "api_key";
+    const apiKeyEnv = typeof record.apiKeyEnv === "string" && record.apiKeyEnv.trim()
+      ? record.apiKeyEnv.trim()
+      : record.provider === "openrouter"
+        ? "MODEL_API_KEY"
+        : "AZURE_OPENAI_API_KEY";
+    return {
+      label: record.label.trim(),
+      provider: record.provider.trim(),
+      model: record.model.trim(),
+      baseUrl: record.baseUrl.trim().replace(/\/+$/, ""),
+      authMode,
+      apiKeyEnv,
+      temperature: Object.hasOwn(record, "temperature") ? record.temperature : 0,
+      maxTokenParameter: typeof record.maxTokenParameter === "string" && record.maxTokenParameter.trim()
+        ? record.maxTokenParameter.trim()
+        : "max_tokens",
+      scope: typeof record.scope === "string" && record.scope.trim()
+        ? record.scope.trim()
+        : record.provider === "azure-foundry"
+          ? "https://ai.azure.com/.default"
+          : "https://cognitiveservices.azure.com/.default",
+    };
+  });
+}
+
+async function readEvalSet(path) {
+  const text = await readFile(path, "utf8");
+  return text
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line, index) => {
+      try {
+        return JSON.parse(line);
+      } catch {
+        throw new Error(`${path}:${index + 1} is not valid JSON.`);
+      }
+    });
+}
+
+async function mapWithConcurrency(items, limit, mapper) {
+  const results = new Array(items.length);
+  let nextIndex = 0;
+  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (nextIndex < items.length) {
+      const index = nextIndex;
+      nextIndex += 1;
+      results[index] = await mapper(items[index], index);
+    }
+  });
+  await Promise.all(workers);
+  return results;
+}
+
+function parseJsonObject(text) {
+  try {
+    const parsed = JSON.parse(text);
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : null;
+  } catch {
+    const start = text.indexOf("{");
+    const end = text.lastIndexOf("}");
+    if (start < 0 || end <= start) return null;
+    try {
+      const parsed = JSON.parse(text.slice(start, end + 1));
+      return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : null;
+    } catch {
+      return null;
+    }
+  }
+}
+
+function priceFor(provider, model) {
+  const overrides = parseJsonEnv("MODEL_PRICE_OVERRIDES_JSON", []);
+  const prices = Array.isArray(overrides) ? [...overrides, ...DEFAULT_PRICES] : DEFAULT_PRICES;
+  return prices.find((price) => (
+    normalize(price.provider) === normalize(provider) &&
+    normalize(price.model) === normalize(model) &&
+    typeof price.inputUsdPerToken === "number" &&
+    typeof price.outputUsdPerToken === "number"
+  )) ?? null;
+}
+
+function estimateCost(candidate, usage, text) {
+  const promptTokens = Number.isFinite(usage?.prompt_tokens) ? usage.prompt_tokens : 0;
+  const completionTokens = Number.isFinite(usage?.completion_tokens) ? usage.completion_tokens : Math.ceil(text.length / 4);
+  const price = priceFor(candidate.provider, candidate.model);
+  if (!price) return null;
+  return {
+    inputTokens: promptTokens,
+    outputTokens: completionTokens,
+    rawProviderCostUsd: (promptTokens * price.inputUsdPerToken + completionTokens * price.outputUsdPerToken).toFixed(6),
+  };
+}
+
+async function authHeaders(candidate) {
+  if (candidate.authMode === "managed_identity") {
+    const cachedToken = accessTokenCache.get(candidate.scope);
+    if (cachedToken && cachedToken.expiresOnTimestamp > Date.now() + TOKEN_REFRESH_SKEW_MS) {
+      return { authorization: `Bearer ${cachedToken.token}` };
+    }
+    const token = await credential.getToken(candidate.scope);
+    if (!token?.token) throw new Error(`Failed to acquire managed identity token for ${candidate.label}.`);
+    accessTokenCache.set(candidate.scope, token);
+    return { authorization: `Bearer ${token.token}` };
+  }
+  const key = process.env[candidate.apiKeyEnv]?.trim();
+  if (!key) throw new Error(`${candidate.apiKeyEnv} is required for ${candidate.label}.`);
+  if (candidate.provider === "azure-foundry" || candidate.provider === "azure-openai") {
+    return { "api-key": key };
+  }
+  return { authorization: `Bearer ${key}` };
+}
+
+function systemPromptFor(item) {
+  const base = "Use only facts present in the prompt. Do not invent approvals, dates, customer commitments, or sent messages.";
+  if (item.mode !== "json") {
+    return `${base} Follow the requested sections and wording constraints.`;
+  }
+  const keys = Array.isArray(item.requiredKeys) && item.requiredKeys.length > 0
+    ? ` The response must be one valid JSON object with these top-level keys: ${item.requiredKeys.join(", ")}.`
+    : " The response must be one valid JSON object.";
+  return `${base}${keys} Do not wrap JSON in Markdown.`;
+}
+
+function completionRequestBody(candidate, item) {
+  const body = {
+    model: candidate.model,
+    messages: [
+      { role: "system", content: systemPromptFor(item) },
+      { role: "user", content: item.prompt },
+    ],
+  };
+  if (Number.isFinite(candidate.temperature)) {
+    body.temperature = candidate.temperature;
+  }
+  if (candidate.maxTokenParameter !== "none") {
+    body[candidate.maxTokenParameter] = Number.isFinite(item.maxTokens) ? item.maxTokens : DEFAULT_MAX_TOKENS;
+  }
+  if (item.mode === "json") {
+    body.response_format = { type: "json_object" };
+  }
+  return body;
+}
+
+async function callCandidate(candidate, item) {
+  const startedAt = Date.now();
+  const providerOptions = candidate.provider === "openrouter"
+    ? {
+      provider: {
+        allow_fallbacks: true,
+        data_collection: "deny",
+        require_parameters: true,
+      },
+    }
+    : {};
+  const response = await fetch(`${candidate.baseUrl}/chat/completions`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      ...await authHeaders(candidate),
+    },
+    body: JSON.stringify({
+      ...providerOptions,
+      ...completionRequestBody(candidate, item),
+    }),
+    signal: AbortSignal.timeout(DEFAULT_TIMEOUT_MS),
+  });
+  const latencyMs = Date.now() - startedAt;
+  const body = await response.text();
+  if (!response.ok) {
+    const error = new Error(`provider returned HTTP ${response.status}`);
+    error.retryable = response.status === 429 || response.status >= 500;
+    error.category = response.status === 429 ? "rate_limit" : response.status >= 500 ? "server_error" : "http_error";
+    throw error;
+  }
+  const parsed = JSON.parse(body);
+  const text = parsed.choices?.[0]?.message?.content ?? "";
+  return {
+    text,
+    latencyMs,
+    usage: parsed.usage,
+    cost: estimateCost(candidate, parsed.usage, text),
+  };
+}
+
+async function callCandidateWithRetries(candidate, item) {
+  const errors = [];
+  for (let attempt = 0; attempt <= DEFAULT_RETRIES; attempt += 1) {
+    try {
+      const response = await callCandidate(candidate, item);
+      return {
+        ...response,
+        attempts: attempt + 1,
+        retryCount: attempt,
+      };
+    } catch (error) {
+      errors.push(error);
+      const message = error instanceof Error ? error.message : String(error);
+      const retryable = Boolean(error?.retryable)
+        || error?.name === "TimeoutError"
+        || error?.name === "AbortError"
+        || /aborted|timeout/i.test(message);
+      if (!retryable || attempt >= DEFAULT_RETRIES) {
+        const finalError = new Error(sanitizedErrorMessage(error, errors.length));
+        finalError.category = error?.category ?? (retryable ? "timeout_or_retry_exhausted" : "request_error");
+        finalError.attempts = errors.length;
+        throw finalError;
+      }
+      await delay(250 * 2 ** attempt);
+    }
+  }
+  throw new Error("provider request failed");
+}
+
+function sanitizedErrorMessage(error, attempts) {
+  const message = error instanceof Error ? error.message : String(error);
+  const suffix = `after ${attempts} attempt${attempts === 1 ? "" : "s"}`;
+  if (/HTTP \d+/.test(message)) return `${message} ${suffix}`;
+  if (/aborted|timeout/i.test(message)) return `request timed out ${suffix}`;
+  if (/required for/.test(message)) return message;
+  return `provider request failed ${suffix}`;
+}
+
+function conceptLabel(concept) {
+  if (typeof concept === "string") return concept;
+  if (Array.isArray(concept)) return String(concept[0] ?? "");
+  if (concept && typeof concept === "object") return String(concept.label ?? concept.anyOf?.[0] ?? "");
+  return "";
+}
+
+function conceptTerms(concept) {
+  if (typeof concept === "string") return [concept];
+  if (Array.isArray(concept)) return concept.map(String);
+  if (concept && typeof concept === "object" && Array.isArray(concept.anyOf)) {
+    return concept.anyOf.map(String);
+  }
+  return [];
+}
+
+function requiredConcepts(item) {
+  if (Array.isArray(item.requiredConcepts)) return item.requiredConcepts;
+  if (Array.isArray(item.mustMention)) return item.mustMention;
+  return [];
+}
+
+function forbiddenConcepts(item) {
+  if (Array.isArray(item.forbiddenConcepts)) return item.forbiddenConcepts;
+  if (Array.isArray(item.mustNotMention)) return item.mustNotMention;
+  return [];
+}
+
+function scoreItem(item, text) {
+  const normalizedText = normalize(text);
+  const parsedJson = item.mode === "json" ? parseJsonObject(text) : null;
+  const missingKeys = item.requiredKeys?.filter((key) => !(parsedJson && Object.hasOwn(parsedJson, key))) ?? [];
+  const missingConcepts = requiredConcepts(item).filter((concept) => {
+    const terms = conceptTerms(concept);
+    return terms.length === 0 || !terms.some((term) => normalizedText.includes(normalize(term)));
+  }).map(conceptLabel);
+  const forbiddenMentions = forbiddenConcepts(item).filter((concept) => (
+    conceptTerms(concept).some((term) => normalizedText.includes(normalize(term)))
+  )).map(conceptLabel);
+  return {
+    schemaValid: item.mode !== "json" || missingKeys.length === 0,
+    jsonParsed: item.mode !== "json" || Boolean(parsedJson),
+    outputLength: text.length,
+    missingKeys,
+    missingConcepts,
+    forbiddenMentions,
+    passed: missingKeys.length === 0 && missingConcepts.length === 0 && forbiddenMentions.length === 0,
+  };
+}
+
+async function main() {
+  const evalSetPath = arg("eval-set") ?? DEFAULT_EVAL_SET_PATH;
+  const evalSet = await readEvalSet(evalSetPath);
+  const candidates = parseCandidates();
+  const results = [];
+
+  for (const candidate of candidates) {
+    const candidateResults = await mapWithConcurrency(evalSet, DEFAULT_CONCURRENCY, async (item) => {
+      try {
+        const response = await callCandidateWithRetries(candidate, item);
+        return {
+          id: item.id,
+          flow: item.flow,
+          ok: true,
+          latencyMs: response.latencyMs,
+          attempts: response.attempts,
+          retryCount: response.retryCount,
+          cost: response.cost,
+          score: scoreItem(item, response.text),
+        };
+      } catch (error) {
+        return {
+          id: item.id,
+          flow: item.flow,
+          ok: false,
+          error: error instanceof Error ? error.message : String(error),
+          errorCategory: error?.category ?? "request_error",
+          attempts: Number.isFinite(error?.attempts) ? error.attempts : undefined,
+        };
+      }
+    });
+    results.push({
+      label: candidate.label,
+      provider: candidate.provider,
+      model: candidate.model,
+      passed: candidateResults.every((result) => result.ok && result.score?.passed),
+      cases: candidateResults,
+    });
+  }
+
+  console.log(JSON.stringify({
+    generatedAt: new Date().toISOString(),
+    evalSet: evalSetPath,
+    caseCount: evalSet.length,
+    settings: {
+      timeoutMs: DEFAULT_TIMEOUT_MS,
+      maxTokens: DEFAULT_MAX_TOKENS,
+      concurrency: DEFAULT_CONCURRENCY,
+      retries: DEFAULT_RETRIES,
+    },
+    results,
+  }, null, 2));
+}
+
+main().catch((error) => {
+  console.error(error instanceof Error ? error.message : String(error));
+  process.exit(1);
+});

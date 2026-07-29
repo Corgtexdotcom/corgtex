@@ -26,6 +26,16 @@ const MODEL_PRICES: ModelPrice[] = [
   { provider: "openrouter", model: "google/gemini-embedding-001", inputUsdPerToken: 0.00000015, outputUsdPerToken: 0 },
   { provider: "openai", model: "gpt-4o", inputUsdPerToken: 0.0000025, outputUsdPerToken: 0.00001 },
   { provider: "openai", model: "text-embedding-3-small", inputUsdPerToken: 0.00000002, outputUsdPerToken: 0 },
+  { provider: "azure-foundry", model: "corgtex-ds-v4-flash", inputUsdPerToken: 0.00000019, outputUsdPerToken: 0.00000051 },
+  { provider: "azure-foundry", model: "corgtex-ds-v4-pro", inputUsdPerToken: 0.00000174, outputUsdPerToken: 0.00000348 },
+  { provider: "azure-foundry", model: "corgtex-kimi-k25", inputUsdPerToken: 0.0000006, outputUsdPerToken: 0.000003 },
+  { provider: "azure-foundry", model: "corgtex-kimi-k27-code", inputUsdPerToken: 0.00000095, outputUsdPerToken: 0.000004 },
+  { provider: "azure-foundry", model: "corgtex-gpt56-luna", inputUsdPerToken: 0.000001, outputUsdPerToken: 0.000006 },
+  { provider: "azure-openai", model: "corgtex-ds-v4-flash", inputUsdPerToken: 0.00000019, outputUsdPerToken: 0.00000051 },
+  { provider: "azure-openai", model: "corgtex-ds-v4-pro", inputUsdPerToken: 0.00000174, outputUsdPerToken: 0.00000348 },
+  { provider: "azure-openai", model: "corgtex-kimi-k25", inputUsdPerToken: 0.0000006, outputUsdPerToken: 0.000003 },
+  { provider: "azure-openai", model: "corgtex-kimi-k27-code", inputUsdPerToken: 0.00000095, outputUsdPerToken: 0.000004 },
+  { provider: "azure-openai", model: "corgtex-gpt56-luna", inputUsdPerToken: 0.000001, outputUsdPerToken: 0.000006 },
 ];
 
 function parseModelPriceOverrides() {

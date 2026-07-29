@@ -77,6 +77,58 @@ function checkConfigured(name, strict, message) {
   }
 }
 
+function parseProviderRoutes() {
+  if (!configured("MODEL_PROVIDER_ROUTES_JSON")) {
+    return [];
+  }
+
+  let parsed;
+  try {
+    parsed = JSON.parse(envValue("MODEL_PROVIDER_ROUTES_JSON"));
+  } catch {
+    fail("MODEL_PROVIDER_ROUTES_JSON must be valid JSON.");
+    return [];
+  }
+
+  if (!Array.isArray(parsed)) {
+    fail("MODEL_PROVIDER_ROUTES_JSON must be an array.");
+    return [];
+  }
+
+  return parsed.flatMap((entry, index) => {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+      fail(`MODEL_PROVIDER_ROUTES_JSON[${index}] must be an object.`);
+      return [];
+    }
+
+    const route = entry;
+    if (typeof route.model !== "string" || !route.model.trim() || typeof route.provider !== "string" || !route.provider.trim()) {
+      fail(`MODEL_PROVIDER_ROUTES_JSON[${index}] requires model and provider strings.`);
+      return [];
+    }
+    if (route.authMode !== undefined && route.authMode !== "api_key" && route.authMode !== "managed_identity") {
+      fail(`MODEL_PROVIDER_ROUTES_JSON[${index}].authMode must be api_key or managed_identity.`);
+      return [];
+    }
+    if (route.baseUrl !== undefined && (typeof route.baseUrl !== "string" || !route.baseUrl.trim())) {
+      fail(`MODEL_PROVIDER_ROUTES_JSON[${index}].baseUrl must be a non-empty string when set.`);
+      return [];
+    }
+    if (route.apiKeyEnv !== undefined && (typeof route.apiKeyEnv !== "string" || !route.apiKeyEnv.trim())) {
+      fail(`MODEL_PROVIDER_ROUTES_JSON[${index}].apiKeyEnv must be a non-empty string when set.`);
+      return [];
+    }
+
+    return [{
+      model: route.model.trim(),
+      provider: route.provider.trim().toLowerCase(),
+      baseUrl: typeof route.baseUrl === "string" ? route.baseUrl.trim() : "",
+      authMode: typeof route.authMode === "string" ? route.authMode : "",
+      apiKeyEnv: typeof route.apiKeyEnv === "string" ? route.apiKeyEnv.trim() : "",
+    }];
+  });
+}
+
 function checkEmailSenderConfiguration() {
   if (configured("EMAIL_FROM")) {
     const fromAddress = parseEmailAddress(envValue("EMAIL_FROM"));
@@ -111,17 +163,69 @@ async function checkEndpoint(baseUrl, path, predicate, label) {
   }
 }
 
+function checkProviderRouteConfiguration(strict) {
+  const routes = parseProviderRoutes();
+  if (routes.length === 0) {
+    return;
+  }
+
+  pass("MODEL_PROVIDER_ROUTES_JSON valid");
+
+  const globalProvider = envValue("MODEL_PROVIDER") || "openrouter";
+  const azureRoutes = routes.filter((route) => route.provider === "azure-openai" || route.provider === "azure-foundry");
+  if (azureRoutes.length === 0) {
+    return;
+  }
+
+  checkConfigured("MODEL_PRICE_OVERRIDES_JSON", strict, "MODEL_PRICE_OVERRIDES_JSON missing for Azure provider routes.");
+
+  for (const route of azureRoutes) {
+    const label = route.provider === "azure-foundry" ? "Azure Foundry" : "Azure OpenAI";
+    if (route.baseUrl || (route.provider === globalProvider && configured("MODEL_BASE_URL"))) {
+      pass(`MODEL_PROVIDER_ROUTES_JSON route for ${route.model} has ${label} base URL`);
+    } else if (strict) {
+      fail(`MODEL_PROVIDER_ROUTES_JSON route for ${route.model} requires baseUrl.`);
+    } else {
+      warn(`MODEL_PROVIDER_ROUTES_JSON route for ${route.model} requires baseUrl.`);
+    }
+
+    const authMode = route.authMode || envValue("AZURE_OPENAI_AUTH_MODE") || "api_key";
+    if (authMode === "managed_identity") {
+      pass(`MODEL_PROVIDER_ROUTES_JSON route for ${route.model} uses managed identity`);
+      if (configured("AZURE_CLIENT_ID")) {
+        pass("AZURE_CLIENT_ID configured");
+      } else {
+        warn(`${label} route for ${route.model} will rely on system-assigned managed identity.`);
+      }
+      continue;
+    }
+
+    if (authMode !== "api_key") {
+      fail(`MODEL_PROVIDER_ROUTES_JSON route for ${route.model} authMode must be api_key or managed_identity.`);
+      continue;
+    }
+
+    if (route.apiKeyEnv) {
+      checkConfigured(route.apiKeyEnv, strict, `${route.apiKeyEnv} missing for ${label} route ${route.model}.`);
+    } else {
+      checkConfigured("AZURE_OPENAI_API_KEY", strict, `AZURE_OPENAI_API_KEY missing for ${label} route ${route.model}.`);
+    }
+  }
+}
+
 function checkModelConfiguration(strict) {
   const provider = envValue("MODEL_PROVIDER") || "openrouter";
-  if (provider === "azure-openai") {
-    checkConfigured("MODEL_BASE_URL", strict, "MODEL_BASE_URL missing for Azure OpenAI.");
+  if (provider === "azure-openai" || provider === "azure-foundry") {
+    const label = provider === "azure-foundry" ? "Azure Foundry" : "Azure OpenAI";
+    checkConfigured("MODEL_BASE_URL", strict, `MODEL_BASE_URL missing for ${label}.`);
+    checkConfigured("MODEL_PRICE_OVERRIDES_JSON", strict, "MODEL_PRICE_OVERRIDES_JSON missing for Azure model pricing.");
     const authMode = envValue("AZURE_OPENAI_AUTH_MODE") || "api_key";
     if (authMode === "managed_identity") {
       pass("AZURE_OPENAI_AUTH_MODE configured for managed identity");
       if (configured("AZURE_CLIENT_ID")) {
         pass("AZURE_CLIENT_ID configured");
       } else {
-        warn("AZURE_CLIENT_ID missing; Azure OpenAI will rely on system-assigned managed identity.");
+        warn(`AZURE_CLIENT_ID missing; ${label} will rely on system-assigned managed identity.`);
       }
       return;
     }
@@ -130,9 +234,9 @@ function checkModelConfiguration(strict) {
       return;
     }
     if (configured("AZURE_OPENAI_API_KEY") || configured("MODEL_API_KEY")) {
-      pass("Azure OpenAI API key configured");
+      pass(`${label} API key configured`);
     } else {
-      checkConfigured("AZURE_OPENAI_API_KEY", strict, "AZURE_OPENAI_API_KEY or MODEL_API_KEY missing for Azure OpenAI API key auth.");
+      checkConfigured("AZURE_OPENAI_API_KEY", strict, `AZURE_OPENAI_API_KEY or MODEL_API_KEY missing for ${label} API key auth.`);
     }
     return;
   }
@@ -167,6 +271,7 @@ async function main() {
 
   checkEmailSenderConfiguration();
   checkModelConfiguration(strict);
+  checkProviderRouteConfiguration(strict);
 
   if (skipHttp) {
     pass("HTTP readiness checks skipped by request");

@@ -49,11 +49,24 @@ type AudioTranscriptionApiResponse = {
   text?: string;
 };
 
+type AzureOpenAiAuthMode = "api_key" | "managed_identity";
+
+type ModelProviderRoute = {
+  model: string;
+  provider: string;
+  baseUrl?: string;
+  authMode?: AzureOpenAiAuthMode;
+  apiKeyEnv?: string;
+  scope?: string;
+};
+
 const REQUEST_TIMEOUT_MS = env.MODEL_REQUEST_TIMEOUT_MS;
 const STREAM_TIMEOUT_MS = 120_000;
 const MAX_REQUEST_RETRIES = 2;
 const OPENROUTER_TITLE = "Corgtex";
 const AZURE_TOKEN_REFRESH_SKEW_MS = 60_000;
+const AZURE_FOUNDRY_SCOPE = "https://ai.azure.com/.default";
+const AZURE_OPENAI_SCOPE = "https://cognitiveservices.azure.com/.default";
 
 class ExtractionParseError extends Error {
   readonly raw: string;
@@ -71,27 +84,105 @@ class ExtractionParseError extends Error {
 }
 
 let azureCredential: DefaultAzureCredential | null = null;
-let azureAccessTokenCache: {
+const azureAccessTokenCache = new Map<string, {
   token: string;
   expiresOnTimestamp: number;
-} | null = null;
+}>();
 
-function baseUrl() {
+function routeStringField(record: Record<string, unknown>, field: string) {
+  const value = record[field];
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+function parseModelProviderRoutes() {
+  const raw = env.MODEL_PROVIDER_ROUTES_JSON;
+  if (!raw) {
+    return [];
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new Error("MODEL_PROVIDER_ROUTES_JSON must be valid JSON.");
+  }
+
+  if (!Array.isArray(parsed)) {
+    throw new Error("MODEL_PROVIDER_ROUTES_JSON must be an array.");
+  }
+
+  return parsed.map((entry, index): ModelProviderRoute => {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+      throw new Error(`MODEL_PROVIDER_ROUTES_JSON[${index}] must be an object.`);
+    }
+
+    const record = entry as Record<string, unknown>;
+    const model = routeStringField(record, "model");
+    const provider = routeStringField(record, "provider");
+    const authModeRaw = routeStringField(record, "authMode");
+    if (!model || !provider) {
+      throw new Error(`MODEL_PROVIDER_ROUTES_JSON[${index}] requires model and provider strings.`);
+    }
+    if (authModeRaw && authModeRaw !== "api_key" && authModeRaw !== "managed_identity") {
+      throw new Error(`MODEL_PROVIDER_ROUTES_JSON[${index}].authMode must be api_key or managed_identity.`);
+    }
+    const authMode = authModeRaw as AzureOpenAiAuthMode | undefined;
+
+    return {
+      model,
+      provider: provider.toLowerCase(),
+      baseUrl: routeStringField(record, "baseUrl"),
+      authMode,
+      apiKeyEnv: routeStringField(record, "apiKeyEnv"),
+      scope: routeStringField(record, "scope"),
+    };
+  });
+}
+
+function providerRouteForModel(model: string) {
+  return parseModelProviderRoutes().find((route) => route.model === model);
+}
+
+function providerForRoute(route?: ModelProviderRoute) {
+  return route?.provider ?? env.MODEL_PROVIDER;
+}
+
+function baseUrl(route?: ModelProviderRoute) {
+  if (route?.baseUrl) {
+    return route.baseUrl.replace(/\/+$/, "");
+  }
+
+  if (route && route.provider !== env.MODEL_PROVIDER) {
+    throw new Error(`MODEL_PROVIDER_ROUTES_JSON route for ${route.model} requires baseUrl when provider differs from MODEL_PROVIDER.`);
+  }
+
   return env.MODEL_BASE_URL?.replace(/\/+$/, "") ?? "https://api.openai.com/v1";
 }
 
-function requireApiKey() {
-  if (!env.MODEL_API_KEY) {
-    throw new Error("MODEL_API_KEY is required for the OpenAI-compatible model provider.");
-  }
-
-  return env.MODEL_API_KEY;
+function optionalSecretEnv(name: string) {
+  const value = process.env[name]?.trim();
+  return value && value.length > 0 ? value : undefined;
 }
 
-function requireAzureApiKey() {
-  const key = env.AZURE_OPENAI_API_KEY ?? env.MODEL_API_KEY;
+function requireApiKey(route?: ModelProviderRoute) {
+  const routeKey = route?.apiKeyEnv ? optionalSecretEnv(route.apiKeyEnv) : undefined;
+  const key = routeKey ?? env.MODEL_API_KEY;
   if (!key) {
-    throw new Error("AZURE_OPENAI_API_KEY or MODEL_API_KEY is required for Azure OpenAI API key authentication.");
+    throw new Error(route?.apiKeyEnv
+      ? `MODEL_API_KEY or ${route.apiKeyEnv} is required for the OpenAI-compatible model provider.`
+      : "MODEL_API_KEY is required for the OpenAI-compatible model provider.");
+  }
+
+  return key;
+}
+
+function requireAzureApiKey(route?: ModelProviderRoute) {
+  const routeKey = route?.apiKeyEnv ? optionalSecretEnv(route.apiKeyEnv) : undefined;
+  const key = routeKey ?? env.AZURE_OPENAI_API_KEY ?? (route ? undefined : env.MODEL_API_KEY);
+  if (!key) {
+    throw new Error(route
+      ? `AZURE_OPENAI_API_KEY${route.apiKeyEnv ? ` or ${route.apiKeyEnv}` : ""} is required for Azure API key authentication.`
+      : "AZURE_OPENAI_API_KEY or MODEL_API_KEY is required for Azure OpenAI API key authentication.");
   }
 
   return key;
@@ -130,7 +221,7 @@ function costFields(provider: string, model: string, inputTokens: number, output
 }
 
 function requiresKnownModelPrice(provider: string) {
-  return provider === "azure-openai";
+  return provider === "azure-openai" || provider === "azure-foundry";
 }
 
 function assertKnownModelPrice(provider: string, model: string) {
@@ -143,12 +234,16 @@ function assertKnownModelPrice(provider: string, model: string) {
   }
 }
 
-function isOpenRouterProvider() {
-  return env.MODEL_PROVIDER === "openrouter";
+function isOpenRouterProvider(provider = env.MODEL_PROVIDER) {
+  return provider === "openrouter";
 }
 
-function isAzureOpenAiProvider() {
-  return env.MODEL_PROVIDER === "azure-openai";
+function isAzureOpenAiProvider(provider = env.MODEL_PROVIDER) {
+  return provider === "azure-openai";
+}
+
+function isAzureProvider(provider = env.MODEL_PROVIDER) {
+  return isAzureOpenAiProvider(provider) || provider === "azure-foundry";
 }
 
 function azureCredentialClient() {
@@ -160,49 +255,60 @@ function azureCredentialClient() {
   return azureCredential;
 }
 
-async function getAzureAccessToken() {
+function defaultAzureScope(provider: string) {
+  return provider === "azure-foundry" ? AZURE_FOUNDRY_SCOPE : AZURE_OPENAI_SCOPE;
+}
+
+function azureAccessScope(route?: ModelProviderRoute) {
+  return route?.scope ?? (route ? defaultAzureScope(route.provider) : env.AZURE_OPENAI_SCOPE);
+}
+
+async function getAzureAccessToken(scope: string) {
+  const cached = azureAccessTokenCache.get(scope);
   if (
-    azureAccessTokenCache &&
-    azureAccessTokenCache.expiresOnTimestamp - AZURE_TOKEN_REFRESH_SKEW_MS > Date.now()
+    cached &&
+    cached.expiresOnTimestamp - AZURE_TOKEN_REFRESH_SKEW_MS > Date.now()
   ) {
-    return azureAccessTokenCache.token;
+    return cached.token;
   }
 
-  const token = await azureCredentialClient().getToken(env.AZURE_OPENAI_SCOPE);
+  const token = await azureCredentialClient().getToken(scope);
   if (!token?.token || !token.expiresOnTimestamp) {
     throw new Error("Failed to acquire Azure OpenAI managed identity token.");
   }
 
-  azureAccessTokenCache = {
+  azureAccessTokenCache.set(scope, {
     token: token.token,
     expiresOnTimestamp: token.expiresOnTimestamp,
-  };
+  });
   return token.token;
 }
 
-async function requestHeaders() {
+async function requestHeaders(route?: ModelProviderRoute) {
   return {
     "content-type": "application/json",
-    ...await authHeaders(),
+    ...await authHeaders(route),
   };
 }
 
-async function authHeaders() {
+async function authHeaders(route?: ModelProviderRoute) {
+  const provider = providerForRoute(route);
   const headers: Record<string, string> = {
   };
 
-  if (isAzureOpenAiProvider()) {
-    if (env.AZURE_OPENAI_AUTH_MODE === "managed_identity") {
-      headers.authorization = `Bearer ${await getAzureAccessToken()}`;
+  if (isAzureProvider(provider)) {
+    const authMode = route?.authMode ?? env.AZURE_OPENAI_AUTH_MODE;
+    if (authMode === "managed_identity") {
+      headers.authorization = `Bearer ${await getAzureAccessToken(azureAccessScope(route))}`;
     } else {
-      headers["api-key"] = requireAzureApiKey();
+      headers["api-key"] = requireAzureApiKey(route);
     }
     return headers;
   }
 
-  headers.authorization = `Bearer ${requireApiKey()}`;
+  headers.authorization = `Bearer ${requireApiKey(route)}`;
 
-  if (isOpenRouterProvider()) {
+  if (isOpenRouterProvider(provider)) {
     headers["HTTP-Referer"] = env.APP_URL;
     headers["X-Title"] = OPENROUTER_TITLE;
   }
@@ -210,8 +316,8 @@ async function authHeaders() {
   return headers;
 }
 
-function withProviderOptions(body: Record<string, unknown>) {
-  if (!isOpenRouterProvider()) {
+function withProviderOptions(provider: string, body: Record<string, unknown>) {
+  if (!isOpenRouterProvider(provider)) {
     return body;
   }
 
@@ -223,6 +329,19 @@ function withProviderOptions(body: Record<string, unknown>) {
       require_parameters: true,
     },
   };
+}
+
+function supportsCustomTemperature(model: string) {
+  return model !== "corgtex-gpt56-luna";
+}
+
+function chatCompletionBody(model: string, body: Record<string, unknown>) {
+  if (supportsCustomTemperature(model)) {
+    return body;
+  }
+
+  const { temperature: _temperature, ...withoutTemperature } = body;
+  return withoutTemperature;
 }
 
 function retryDelayMs(attempt: number) {
@@ -249,15 +368,16 @@ async function sleep(ms: number) {
   await new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function postJson<TResponse>(path: string, body: Record<string, unknown>) {
-  const payload = JSON.stringify(withProviderOptions(body));
+async function postJson<TResponse>(path: string, body: Record<string, unknown>, route?: ModelProviderRoute) {
+  const provider = providerForRoute(route);
+  const payload = JSON.stringify(withProviderOptions(provider, body));
   let lastError: unknown = null;
 
   for (let attempt = 0; attempt <= MAX_REQUEST_RETRIES; attempt += 1) {
     try {
-      const response = await fetch(`${baseUrl()}${path}`, {
+      const response = await fetch(`${baseUrl(route)}${path}`, {
         method: "POST",
-        headers: await requestHeaders(),
+        headers: await requestHeaders(route),
         body: payload,
         signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
       });
@@ -401,20 +521,22 @@ async function completeChat(
 ) {
   const startedAt = Date.now();
   const model = modelOverride ?? request.model ?? env.MODEL_CHAT_DEFAULT;
-  assertKnownModelPrice(env.MODEL_PROVIDER, model);
+  const route = providerRouteForModel(model);
+  const provider = providerForRoute(route);
+  assertKnownModelPrice(provider, model);
   await assertWorkspaceModelBudget(request.workspaceId);
   await assertCatalogModelBudget({
     workspaceId: request.workspaceId,
     ...usageContext(request),
   });
-  const response = await postJson<ChatCompletionApiResponse>("/chat/completions", {
+  const response = await postJson<ChatCompletionApiResponse>("/chat/completions", chatCompletionBody(model, {
     model,
     temperature: 0.2,
     messages: request.messages,
     ...(request.tools && request.tools.length > 0 ? { tools: request.tools } : {}),
     ...(request.tool_choice ? { tool_choice: request.tool_choice } : {}),
     ...(bodyExtras ?? {}),
-  });
+  }), route);
   const latencyMs = Date.now() - startedAt;
   const content = normalizeContent(response.choices?.[0]?.message?.content);
   const tool_calls = response.choices?.[0]?.message?.tool_calls;
@@ -425,13 +547,13 @@ async function completeChat(
     workflowJobId: request.workflowJobId,
     agentRunId: request.agentRunId,
     ...usageContext(request),
-    provider: env.MODEL_PROVIDER,
+    provider,
     model,
     taskType,
     inputTokens,
     outputTokens,
     latencyMs,
-    ...costFields(env.MODEL_PROVIDER, model, inputTokens, outputTokens),
+    ...costFields(provider, model, inputTokens, outputTokens),
   });
 
   return { content, tool_calls, usage };
@@ -445,12 +567,15 @@ async function* completeChatStream(
 ): AsyncGenerator<string, import("./contracts").ChatCompletionResponse> {
   const startedAt = Date.now();
   const model = modelOverride ?? request.model ?? env.MODEL_CHAT_DEFAULT;
+  const route = providerRouteForModel(model);
+  const provider = providerForRoute(route);
+  assertKnownModelPrice(provider, model);
   await assertWorkspaceModelBudget(request.workspaceId);
   await assertCatalogModelBudget({
     workspaceId: request.workspaceId,
     ...usageContext(request),
   });
-  const payload = JSON.stringify(withProviderOptions({
+  const payload = JSON.stringify(withProviderOptions(provider, chatCompletionBody(model, {
     model,
     temperature: 0.2,
     messages: request.messages,
@@ -459,16 +584,16 @@ async function* completeChatStream(
     ...(request.tools && request.tools.length > 0 ? { tools: request.tools } : {}),
     ...(request.tool_choice ? { tool_choice: request.tool_choice } : {}),
     ...(bodyExtras ?? {}),
-  }));
+  })));
 
   let response: Response | null = null;
   let lastError: unknown = null;
 
   for (let attempt = 0; attempt <= MAX_REQUEST_RETRIES; attempt += 1) {
     try {
-      response = await fetch(`${baseUrl()}/chat/completions`, {
+      response = await fetch(`${baseUrl(route)}/chat/completions`, {
         method: "POST",
-        headers: await requestHeaders(),
+        headers: await requestHeaders(route),
         body: payload,
         signal: AbortSignal.timeout(STREAM_TIMEOUT_MS),
       });
@@ -557,13 +682,13 @@ async function* completeChatStream(
     workflowJobId: request.workflowJobId,
     agentRunId: request.agentRunId,
     ...usageContext(request),
-    provider: env.MODEL_PROVIDER,
+    provider,
     model,
     taskType,
     inputTokens,
     outputTokens,
     latencyMs,
-    ...costFields(env.MODEL_PROVIDER, model, inputTokens, outputTokens),
+    ...costFields(provider, model, inputTokens, outputTokens),
   });
 
   return { content, tool_calls: finalTools.length > 0 ? finalTools : undefined, usage };
@@ -605,7 +730,9 @@ async function embedTexts(request: EmbeddingRequest) {
   const startedAt = Date.now();
   const inputs = Array.isArray(request.input) ? request.input : [request.input];
   const model = request.model ?? env.MODEL_EMBEDDING_DEFAULT;
-  assertKnownModelPrice(env.MODEL_PROVIDER, model);
+  const route = providerRouteForModel(model);
+  const provider = providerForRoute(route);
+  assertKnownModelPrice(provider, model);
   await assertWorkspaceModelBudget(request.workspaceId);
   await assertCatalogModelBudget({
     workspaceId: request.workspaceId,
@@ -614,12 +741,13 @@ async function embedTexts(request: EmbeddingRequest) {
   const response = await postJson<EmbeddingApiResponse>("/embeddings", {
     model,
     input: inputs,
-  });
+  }, route);
   const latencyMs = Date.now() - startedAt;
   const embeddings = (response.data ?? []).map((entry) => entry.embedding ?? []);
   const inputTokens = response.usage?.prompt_tokens ?? inputs.reduce((sum, value) => sum + value.length, 0);
 
   return {
+    provider,
     model,
     embeddings,
     inputTokens,
@@ -633,7 +761,9 @@ async function transcribeAudioFile(request: AudioTranscriptionRequest) {
   if (!model) {
     throw new Error("MODEL_TRANSCRIPTION_DEFAULT is required for audio transcription.");
   }
-  assertKnownModelPrice(env.MODEL_PROVIDER, model);
+  const route = providerRouteForModel(model);
+  const provider = providerForRoute(route);
+  assertKnownModelPrice(provider, model);
   await assertWorkspaceModelBudget(request.workspaceId);
   await assertCatalogModelBudget({
     workspaceId: request.workspaceId,
@@ -657,9 +787,9 @@ async function transcribeAudioFile(request: AudioTranscriptionRequest) {
   let lastError: unknown = null;
   for (let attempt = 0; attempt <= MAX_REQUEST_RETRIES; attempt += 1) {
     try {
-      const response = await fetch(`${baseUrl()}/audio/transcriptions`, {
+      const response = await fetch(`${baseUrl(route)}/audio/transcriptions`, {
         method: "POST",
-        headers: await authHeaders(),
+        headers: await authHeaders(route),
         body: form,
         signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
       });
@@ -686,13 +816,13 @@ async function transcribeAudioFile(request: AudioTranscriptionRequest) {
         workflowJobId: request.workflowJobId,
         agentRunId: request.agentRunId,
         ...usageContext(request),
-        provider: env.MODEL_PROVIDER,
+        provider,
         model,
         taskType: "TRANSCRIPTION",
         inputTokens: 0,
         outputTokens: Math.ceil(text.length / 4),
         latencyMs,
-        ...costFields(env.MODEL_PROVIDER, model, 0, Math.ceil(text.length / 4)),
+        ...costFields(provider, model, 0, Math.ceil(text.length / 4)),
       });
 
       return { text, usage };
@@ -773,13 +903,13 @@ export const openAICompatibleModelGateway: ModelGateway = {
       workflowJobId: request.workflowJobId,
       agentRunId: request.agentRunId,
       ...usageContext(request),
-      provider: env.MODEL_PROVIDER,
+      provider: embedded.provider,
       model: embedded.model,
       taskType: "EMBEDDING",
       inputTokens: embedded.inputTokens,
       outputTokens: 0,
       latencyMs: embedded.latencyMs,
-      ...costFields(env.MODEL_PROVIDER, embedded.model, embedded.inputTokens, 0),
+      ...costFields(embedded.provider, embedded.model, embedded.inputTokens, 0),
     });
 
     return {
@@ -811,13 +941,13 @@ export const openAICompatibleModelGateway: ModelGateway = {
       workflowJobId: request.workflowJobId,
       agentRunId: request.agentRunId,
       ...usageContext(request),
-      provider: env.MODEL_PROVIDER,
+      provider: embedded.provider,
       model: embedded.model,
       taskType: "RERANK",
       inputTokens: embedded.inputTokens,
       outputTokens: 0,
       latencyMs: embedded.latencyMs,
-      ...costFields(env.MODEL_PROVIDER, embedded.model, embedded.inputTokens, 0),
+      ...costFields(embedded.provider, embedded.model, embedded.inputTokens, 0),
     });
 
     return {

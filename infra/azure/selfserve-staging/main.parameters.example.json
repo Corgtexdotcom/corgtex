@@ -32,6 +32,9 @@
     "azureOpenAiBaseUrl": {
       "value": "https://replace-me.openai.azure.com/openai/v1"
     },
+    "modelProvider": {
+      "value": "azure-openai"
+    },
     "azureOpenAiAuthMode": {
       "value": "managed_identity"
     },

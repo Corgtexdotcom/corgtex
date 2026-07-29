@@ -74,11 +74,16 @@ Required environment variables for the core application (usually set in `.env` o
 | `INTERCOM_MESSENGER_SECRET` | Optional server-only Intercom Messenger JWT secret used to sign logged-in app users. Never expose this in browser code. |
 
 **Model Provider Settings (Optional but recommended):**
-- `MODEL_PROVIDER`: Set to `openrouter` or `openai`
-- `MODEL_API_KEY`: Your API key
-- `MODEL_CHAT_DEFAULT`: e.g., `qwen/qwen3-32b`
-- `MODEL_CHAT_CONVERSATION`: e.g., `google/gemini-2.5-flash` (used for interactive chat)
+- `MODEL_PROVIDER`: Set to `openrouter`, `openai`, `azure-openai`, or `azure-foundry`
+- `MODEL_API_KEY`: Your API key for OpenAI-compatible non-Azure providers
+- `MODEL_BASE_URL`: OpenAI-compatible v1 base URL. For Azure Foundry keyless auth, use `https://<resource>.services.ai.azure.com/openai/v1`
+- `MODEL_PROVIDER_ROUTES_JSON`: Optional exact model-to-provider route map for canaries, for example `[{"model":"corgtex-gpt56-luna","provider":"azure-foundry","baseUrl":"https://<resource>.services.ai.azure.com/openai/v1","authMode":"managed_identity","scope":"https://ai.azure.com/.default"}]`
+- `AZURE_OPENAI_AUTH_MODE`: `managed_identity` or `api_key` for `azure-openai` and `azure-foundry`
+- `AZURE_OPENAI_API_KEY`: Azure API key when API key auth is approved
+- `MODEL_CHAT_DEFAULT`: e.g., `qwen/qwen3-32b` or a deployment alias
+- `MODEL_CHAT_CONVERSATION`: e.g., `google/gemini-2.5-flash` or a deployment alias used for interactive chat
 - `MODEL_EMBEDDING_DEFAULT`: e.g., `google/gemini-embedding-001`
+- `MODEL_PRICE_OVERRIDES_JSON`: Required for Azure deployments without built-in pricing
 
 ## Enterprise Deployment (Configuration Repo Pattern)
 

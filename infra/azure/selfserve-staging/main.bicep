@@ -39,8 +39,15 @@ param registryServer string = 'ghcr.io'
 @description('GitHub Container Registry username for the PAT stored in Key Vault.')
 param registryUsername string = 'corgtex-deploy'
 
-@description('Azure OpenAI v1 base URL, for example https://<resource>.openai.azure.com/openai/v1.')
+@description('Azure OpenAI-compatible v1 base URL. For Foundry keyless auth, use https://<resource>.services.ai.azure.com/openai/v1.')
 param azureOpenAiBaseUrl string
+
+@allowed([
+  'azure-openai'
+  'azure-foundry'
+])
+@description('Model provider label for usage routing. Use azure-foundry only for Direct from Azure Foundry deployments.')
+param modelProvider string = 'azure-openai'
 
 @allowed([
   'api_key'
@@ -322,10 +329,10 @@ var commonRuntimeEnv = concat([
   { name: 'AZURE_STORAGE_BLOB_ENDPOINT', value: storage.properties.primaryEndpoints.blob }
   { name: 'AZURE_CLIENT_ID', value: managedIdentity.properties.clientId }
   { name: 'AZURE_STORAGE_CLIENT_ID', value: managedIdentity.properties.clientId }
-  { name: 'MODEL_PROVIDER', value: 'azure-openai' }
+  { name: 'MODEL_PROVIDER', value: modelProvider }
   { name: 'MODEL_BASE_URL', value: azureOpenAiBaseUrl }
   { name: 'AZURE_OPENAI_AUTH_MODE', value: azureOpenAiAuthMode }
-  { name: 'AZURE_OPENAI_SCOPE', value: 'https://cognitiveservices.azure.com/.default' }
+  { name: 'AZURE_OPENAI_SCOPE', value: modelProvider == 'azure-foundry' ? 'https://ai.azure.com/.default' : 'https://cognitiveservices.azure.com/.default' }
   { name: 'MODEL_CHAT_DEFAULT', value: azureChatStandardDeploymentName }
   { name: 'MODEL_CHAT_FAST', value: azureChatFastDeploymentName }
   { name: 'MODEL_CHAT_STANDARD', value: azureChatStandardDeploymentName }
