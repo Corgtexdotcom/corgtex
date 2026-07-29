@@ -616,7 +616,7 @@ function isNegatedOccurrence(normalizedText, index) {
     return true;
   }
 
-  const match = prefix.match(/(?:^|[\s([{,;:])(?:not|never|without|cannot|can't|cant|do not|don't|dont|does not|doesn't|doesnt|is not|isn't|isnt|are not|aren't|arent|was not|wasn't|wasnt|were not|weren't|werent|should not|shouldn't|shouldnt|must not|mustn't|mustnt|will not|won't|wont|avoid|blocked from)\s+((?:[\w'-]+\s+){0,4})$/);
+  const match = prefix.match(/(?:^|[\s([{,;:])(?:not|never|without|cannot|can't|cant|do not|don't|dont|does not|doesn't|doesnt|did not|didn't|didnt|is not|isn't|isnt|are not|aren't|arent|was not|wasn't|wasnt|were not|weren't|werent|should not|shouldn't|shouldnt|must not|mustn't|mustnt|will not|won't|wont|could not|couldn't|couldnt|avoid|blocked from|failed to|fails to|failure to|unable to|is unable to|isn't able to|isnt able to|was unable to|wasn't able to|wasnt able to)\s+((?:[\w'-]+\s+){0,4})$/);
   if (!match) return false;
 
   const bridgeWords = match[1].trim().split(/\s+/).filter(Boolean);

@@ -379,17 +379,34 @@ describe("Azure Foundry model eval helpers", () => {
   it("requires proposal drafts to include objections to test", () => {
     const item = {
       mode: "text",
+      requiredTextSections: [
+        {
+          label: "substantive objections to test",
+          heading: {
+            anyOf: [
+              "objections to test",
+              "test objections",
+              "objection",
+              "objections",
+              "concerns to test",
+              "risks to test",
+            ],
+          },
+          concepts: [
+            {
+              label: "substantive objection",
+              allOf: [
+                ["approval controls", "approval", "review"],
+                ["before any draft leaves", "before sending", "send"],
+              ],
+            },
+          ],
+        },
+      ],
       requiredConcepts: [
         { label: "internal-only scope", anyOf: ["internal workspace only", "internal workspace"] },
         { label: "drafting only", anyOf: ["draft emails", "draft email", "drafts emails"] },
         { label: "cannot send", anyOf: ["cannot send", "not send", "must not send", "no sending"] },
-        {
-          label: "objections-to-test section",
-          allOf: [
-            ["objections to test", "test objections", "objection", "objections", "concerns to test", "risks to test"],
-            ["cannot send", "not send", "must not send", "no sending", "approval"],
-          ],
-        },
         { label: "review date", anyOf: ["2026-08-15", "August 15"] },
         { label: "sample size", anyOf: ["ten sampled drafts", "10 sampled drafts", "ten drafts", "10 drafts"] },
       ],
@@ -399,14 +416,24 @@ describe("Azure Foundry model eval helpers", () => {
       item,
       "Intent: enable CRM follow-up assistance. Scope: internal workspace only. The assistant may draft emails but cannot send. Review on 2026-08-15 after ten sampled drafts.",
     );
-    expect(summaryOnlyScore.missingConcepts).toEqual(["objections-to-test section"]);
+    expect(summaryOnlyScore.missingConcepts).toEqual([]);
+    expect(summaryOnlyScore.missingTextSections).toEqual(["substantive objections to test"]);
     expect(summaryOnlyScore.passed).toBe(false);
+
+    const emptyObjectionsScore = scoreItem(
+      item,
+      "Intent: enable CRM follow-up assistance.\nScope: internal workspace only. The assistant may draft emails but cannot send.\nObjections to test: none.\nReview on 2026-08-15 after ten sampled drafts.",
+    );
+    expect(emptyObjectionsScore.missingConcepts).toEqual([]);
+    expect(emptyObjectionsScore.missingTextSections).toEqual(["substantive objections to test"]);
+    expect(emptyObjectionsScore.passed).toBe(false);
 
     const matchedScore = scoreItem(
       item,
-      "Intent: enable CRM follow-up assistance. Scope: internal workspace only. The assistant may draft emails but cannot send. Objections to test: whether approval controls are enough before any draft leaves the workspace. Review on 2026-08-15 after ten sampled drafts.",
+      "Intent: enable CRM follow-up assistance.\nScope: internal workspace only. The assistant may draft emails but cannot send.\nObjections to test: whether approval controls are enough before any draft leaves the workspace.\nReview on 2026-08-15 after ten sampled drafts.",
     );
     expect(matchedScore.missingConcepts).toEqual([]);
+    expect(matchedScore.missingTextSections).toEqual([]);
     expect(matchedScore.passed).toBe(true);
   });
 
@@ -756,6 +783,37 @@ describe("Azure Foundry model eval helpers", () => {
     }, "No blockers remain and it is ready to send now.");
 
     expect(score.forbiddenMentions).toEqual(["ready to send now"]);
+    expect(score.passed).toBe(false);
+  });
+
+  it("treats failed-to required facts as missing", () => {
+    const score = scoreItem({
+      mode: "json",
+      requiredKeys: ["actions"],
+      requiredJsonMatches: [
+        {
+          label: "Jordan shortlist action",
+          path: "actions",
+          fields: {
+            owner: "Jordan",
+            title: "buyer shortlist",
+          },
+        },
+      ],
+      requiredConcepts: [
+        { label: "Jordan shortlist", allOf: ["Jordan", "buyer shortlist"] },
+      ],
+    }, JSON.stringify({
+      actions: [
+        {
+          owner: "Jordan",
+          title: "Jordan failed to prepare the buyer shortlist",
+        },
+      ],
+    }));
+
+    expect(score.missingJsonMatches).toEqual(["Jordan shortlist action"]);
+    expect(score.missingConcepts).toEqual(["Jordan shortlist"]);
     expect(score.passed).toBe(false);
   });
 
