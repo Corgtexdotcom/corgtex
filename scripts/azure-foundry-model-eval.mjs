@@ -306,6 +306,10 @@ function jsonMatchFields(match) {
   return fields && typeof fields === "object" && !Array.isArray(fields) ? fields : {};
 }
 
+function jsonMatchConcept(match) {
+  return isObjectRecord(match) && Object.hasOwn(match, "concept") ? match.concept : undefined;
+}
+
 function jsonMatchSatisfied(parsedJson, match) {
   if (!parsedJson || !isObjectRecord(match)) {
     return false;
@@ -313,11 +317,16 @@ function jsonMatchSatisfied(parsedJson, match) {
 
   const path = typeof match.path === "string" ? match.path.trim() : "";
   const fields = jsonMatchFields(match);
+  const concept = jsonMatchConcept(match);
+  const value = path ? jsonPathValue(parsedJson, path) : parsedJson;
+  if (concept !== undefined) {
+    return conceptMatches(concept, normalize(jsonValueText(value)), { polarityAware: true });
+  }
+
   if (Object.keys(fields).length === 0) {
     return false;
   }
 
-  const value = path ? jsonPathValue(parsedJson, path) : parsedJson;
   const candidates = Array.isArray(value) ? value : [value];
   return candidates.some((candidate) => (
     isObjectRecord(candidate) && Object.entries(fields).every(([field, concept]) => (

@@ -186,12 +186,25 @@ describe("Azure Foundry model eval helpers", () => {
       requiredKeys: ["summary", "decisions", "actions", "risks"],
       requiredJsonShapes: {
         summary: { type: "string" },
-        decisions: { type: "array", minItems: 1 },
-        actions: { type: "array", minItems: 1 },
-        risks: { type: "array", minItems: 1 },
+        decisions: { type: "array", minItems: 1, items: { type: "string" } },
+        actions: { type: "array", minItems: 1, items: { type: "string" } },
+        risks: { type: "array", minItems: 1, items: { type: "string" } },
       },
+      requiredJsonMatches: [
+        {
+          label: "meeting summary structured sections",
+          path: "",
+          fields: {
+            decisions: { allOf: ["Barcelona pilot", ["proceed", "approved"], ["no external announcement", "external announcement yet"]] },
+            actions: { allOf: ["Mina", "vendor cap", "Friday", "Support", ["two days", "2 days"]] },
+            risks: { allOf: ["Data import", ["risk", "remains a risk"], ["duplicate company rows", "duplicate rows"]] },
+          },
+        },
+      ],
       requiredConcepts: [
         { label: "Barcelona pilot", anyOf: ["Barcelona pilot"] },
+        { label: "finance deadline", allOf: ["finance", "vendor cap", "Friday"] },
+        { label: "Support notice", allOf: ["Support", ["two days", "2 days"]] },
         { label: "duplicate company rows", anyOf: ["duplicate company rows"] },
       ],
     };
@@ -208,6 +221,36 @@ describe("Azure Foundry model eval helpers", () => {
       "risks must be an array",
     ]);
     expect(score.passed).toBe(false);
+
+    const placeholderScore = scoreItem(
+      item,
+      "{\"summary\":\"Barcelona pilot, Mina, vendor cap by Friday, Data import risk, duplicate company rows.\",\"decisions\":[null],\"actions\":[null],\"risks\":[null]}",
+    );
+    expect(placeholderScore.schemaValid).toBe(false);
+    expect(placeholderScore.invalidJsonShapes).toEqual([
+      "decisions[0] must be a string",
+      "actions[0] must be a string",
+      "risks[0] must be a string",
+    ]);
+    expect(placeholderScore.missingJsonMatches).toEqual(["meeting summary structured sections"]);
+    expect(placeholderScore.passed).toBe(false);
+
+    const summaryOnlyScore = scoreItem(
+      item,
+      "{\"summary\":\"The Barcelona pilot can proceed if finance confirms the vendor cap by Friday. No external announcement yet. Mina owns the vendor cap and Support needs two days of notice. Data import remains a risk because of duplicate company rows.\",\"decisions\":[\"General decision\"],\"actions\":[\"General action\"],\"risks\":[\"General risk\"]}",
+    );
+    expect(summaryOnlyScore.schemaValid).toBe(true);
+    expect(summaryOnlyScore.missingConcepts).toEqual([]);
+    expect(summaryOnlyScore.missingJsonMatches).toEqual(["meeting summary structured sections"]);
+    expect(summaryOnlyScore.passed).toBe(false);
+
+    const matchedScore = scoreItem(
+      item,
+      "{\"summary\":\"Barcelona pilot planning is in scope.\",\"decisions\":[\"Proceed with Barcelona pilot planning; no external announcement yet.\"],\"actions\":[\"Mina owns the vendor cap check by Friday and will include Support's two days of notice in the launch note.\"],\"risks\":[\"Data import remains risky because of duplicate company rows.\"]}",
+    );
+    expect(matchedScore.schemaValid).toBe(true);
+    expect(matchedScore.missingJsonMatches).toEqual([]);
+    expect(matchedScore.passed).toBe(true);
   });
 
   it("requires related JSON fields to match within the same object", () => {
