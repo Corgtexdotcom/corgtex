@@ -272,7 +272,13 @@ function defaultAzureScope(provider: string) {
 }
 
 function azureAccessScope(route?: ModelProviderRoute) {
-  return route?.scope ?? (route ? defaultAzureScope(route.provider) : env.AZURE_OPENAI_SCOPE);
+  if (route?.scope) {
+    return route.scope;
+  }
+  if (!route || route.provider === env.MODEL_PROVIDER) {
+    return env.AZURE_OPENAI_SCOPE;
+  }
+  return defaultAzureScope(route.provider);
 }
 
 async function getAzureAccessToken(scope: string) {

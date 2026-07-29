@@ -305,6 +305,17 @@ describe("self-serve production readiness", () => {
     expect(result.stderr).toContain("MODEL_API_KEY missing for OpenAI-compatible model provider");
   });
 
+  it("rejects unsupported global model providers in strict mode", () => {
+    const result = runReadiness({
+      ...STRICT_BASE_ENV,
+      MODEL_PROVIDER: "azuer-foundry",
+      MODEL_API_KEY: "model-key-placeholder",
+    }, ["--strict", "--skip-http"]);
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("MODEL_PROVIDER must be one of openrouter, openai, azure-openai, azure-foundry");
+  });
+
   it("rejects old app email sender domains in strict mode", () => {
     for (const emailFrom of [
       "Corgtex <onboarding@corgtex.com>",

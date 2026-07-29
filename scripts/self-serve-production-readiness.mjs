@@ -343,6 +343,16 @@ function checkProviderRouteConfiguration(strict) {
 
 function checkModelConfiguration(strict) {
   const provider = envValue("MODEL_PROVIDER") || "openrouter";
+  if (provider === "fake") {
+    warn("MODEL_PROVIDER is fake; do not use this for production launch.");
+    return;
+  }
+
+  if (!SUPPORTED_MODEL_PROVIDERS.has(provider)) {
+    fail(`MODEL_PROVIDER must be one of ${[...SUPPORTED_MODEL_PROVIDERS].join(", ")}.`);
+    return;
+  }
+
   if (isAzureProvider(provider)) {
     const label = providerLabel(provider);
     const routes = parseProviderRoutes();
@@ -372,11 +382,6 @@ function checkModelConfiguration(strict) {
     } else {
       checkConfigured("AZURE_OPENAI_API_KEY", strict, `AZURE_OPENAI_API_KEY or MODEL_API_KEY missing for ${label} API key auth.`);
     }
-    return;
-  }
-
-  if (provider === "fake") {
-    warn("MODEL_PROVIDER is fake; do not use this for production launch.");
     return;
   }
 

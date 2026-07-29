@@ -521,6 +521,46 @@ describe("openAICompatibleModelGateway", () => {
     });
   });
 
+  it("inherits the configured Azure scope for same-provider routes without a route scope", async () => {
+    restoreEnv();
+    Object.assign(process.env, {
+      MODEL_PROVIDER: "azure-foundry",
+      MODEL_BASE_URL: "https://global-foundry.services.ai.azure.com/openai/v1",
+      AZURE_OPENAI_AUTH_MODE: "managed_identity",
+      AZURE_OPENAI_SCOPE: "api://custom-foundry-scope/.default",
+      MODEL_PROVIDER_ROUTES_JSON: JSON.stringify([
+        {
+          model: "corgtex-gpt56-luna",
+          provider: "azure-foundry",
+          baseUrl: "https://corgtex-foundry.services.ai.azure.com/openai/v1/",
+          authMode: "managed_identity",
+        },
+      ]),
+    });
+    azureIdentityMock.getToken.mockResolvedValueOnce({
+      token: "same-provider-token",
+      expiresOnTimestamp: Date.now() + 60 * 60 * 1000,
+    });
+
+    const fetchMock = vi.fn().mockResolvedValueOnce(new Response(JSON.stringify({
+      choices: [{ message: { content: "Routed Foundry answer" } }],
+      usage: { prompt_tokens: 1000, completion_tokens: 500 },
+    }), { status: 200 }));
+
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { openAICompatibleModelGateway } = await import("./openai-compatible-gateway");
+
+    await openAICompatibleModelGateway.chat({
+      workspaceId: "ws-1",
+      taskType: "CHAT",
+      model: "corgtex-gpt56-luna",
+      messages: [{ role: "user", content: "Hello" }],
+    });
+
+    expect(azureIdentityMock.getToken).toHaveBeenCalledWith("api://custom-foundry-scope/.default");
+  });
+
   it("does not fall back to the global Azure key when a routed Azure key env is missing", async () => {
     restoreEnv();
     Object.assign(process.env, {

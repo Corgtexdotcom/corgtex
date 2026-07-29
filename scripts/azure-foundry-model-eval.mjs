@@ -157,14 +157,41 @@ function parseJsonObject(text) {
 }
 
 function priceFor(provider, model) {
-  const overrides = parseJsonEnv("MODEL_PRICE_OVERRIDES_JSON", []);
-  const prices = Array.isArray(overrides) ? [...overrides, ...DEFAULT_PRICES] : DEFAULT_PRICES;
+  const prices = [...parsePriceOverrides(), ...DEFAULT_PRICES];
   return prices.find((price) => (
     normalize(price.provider) === normalize(provider) &&
     normalize(price.model) === normalize(model) &&
     typeof price.inputUsdPerToken === "number" &&
     typeof price.outputUsdPerToken === "number"
   )) ?? null;
+}
+
+function parsePriceOverrides() {
+  const overrides = parseJsonEnv("MODEL_PRICE_OVERRIDES_JSON", []);
+  if (!Array.isArray(overrides)) {
+    throw new Error("MODEL_PRICE_OVERRIDES_JSON must be an array.");
+  }
+
+  return overrides.map((entry, index) => {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+      throw new Error(`MODEL_PRICE_OVERRIDES_JSON[${index}] must be an object.`);
+    }
+    if (typeof entry.provider !== "string" || !entry.provider.trim() || typeof entry.model !== "string" || !entry.model.trim()) {
+      throw new Error(`MODEL_PRICE_OVERRIDES_JSON[${index}] requires provider and model strings.`);
+    }
+    if (typeof entry.inputUsdPerToken !== "number" || !Number.isFinite(entry.inputUsdPerToken) || entry.inputUsdPerToken < 0) {
+      throw new Error(`MODEL_PRICE_OVERRIDES_JSON[${index}].inputUsdPerToken must be a finite non-negative number.`);
+    }
+    if (typeof entry.outputUsdPerToken !== "number" || !Number.isFinite(entry.outputUsdPerToken) || entry.outputUsdPerToken < 0) {
+      throw new Error(`MODEL_PRICE_OVERRIDES_JSON[${index}].outputUsdPerToken must be a finite non-negative number.`);
+    }
+    return {
+      provider: entry.provider.trim(),
+      model: entry.model.trim(),
+      inputUsdPerToken: entry.inputUsdPerToken,
+      outputUsdPerToken: entry.outputUsdPerToken,
+    };
+  });
 }
 
 function estimateMessageTokens(messages) {
@@ -375,7 +402,15 @@ function termOccurrenceIndexes(normalizedText, normalizedTerm) {
 
 function isNegatedOccurrence(normalizedText, index) {
   const prefix = normalizedText.slice(Math.max(0, index - 80), index);
-  return /(?:^|[\s([{,;:])(?:not|never|no|without|cannot|can't|cant|do not|don't|dont|does not|doesn't|doesnt|is not|isn't|isnt|are not|aren't|arent|was not|wasn't|wasnt|were not|weren't|werent|should not|shouldn't|shouldnt|must not|mustn't|mustnt|will not|won't|wont|avoid|blocked from|requires approval before|needs approval before|requires review before|needs review before)\s+(?:[\w'-]+\s+){0,5}$/.test(prefix);
+  if (/(?:^|[\s([{,;:])(?:requires|needs) (?:approval|review) before\s+$/.test(prefix)) {
+    return true;
+  }
+
+  const match = prefix.match(/(?:^|[\s([{,;:])(?:not|never|without|cannot|can't|cant|do not|don't|dont|does not|doesn't|doesnt|is not|isn't|isnt|are not|aren't|arent|was not|wasn't|wasnt|were not|weren't|werent|should not|shouldn't|shouldnt|must not|mustn't|mustnt|will not|won't|wont|avoid|blocked from)\s+((?:[\w'-]+\s+){0,4})$/);
+  if (!match) return false;
+
+  const bridgeWords = match[1].trim().split(/\s+/).filter(Boolean);
+  return !bridgeWords.some((word) => ["and", "but", "or", "then"].includes(word));
 }
 
 function textContainsTerm(normalizedText, term, options = {}) {
@@ -432,6 +467,7 @@ async function main() {
   const evalSetPath = arg("eval-set") ?? DEFAULT_EVAL_SET_PATH;
   const evalSet = await readEvalSet(evalSetPath);
   const candidates = parseCandidates();
+  parsePriceOverrides();
   const results = [];
 
   for (const candidate of candidates) {

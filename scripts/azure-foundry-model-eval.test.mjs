@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 
 import {
   conceptMatches,
@@ -6,6 +6,10 @@ import {
   isRetryableRequestError,
   scoreItem,
 } from "./azure-foundry-model-eval.mjs";
+
+afterEach(() => {
+  delete process.env.MODEL_PRICE_OVERRIDES_JSON;
+});
 
 describe("Azure Foundry model eval helpers", () => {
   it("preserves token metrics when candidate pricing is unavailable", () => {
@@ -23,6 +27,19 @@ describe("Azure Foundry model eval helpers", () => {
       estimatedOutputTokens: false,
       rawProviderCostUsd: null,
     });
+  });
+
+  it("rejects invalid price overrides before reporting candidate cost", () => {
+    process.env.MODEL_PRICE_OVERRIDES_JSON = JSON.stringify([
+      { provider: "azure-foundry", model: "custom-candidate", inputUsdPerToken: -1, outputUsdPerToken: 0 },
+    ]);
+
+    expect(() => estimateCost(
+      { provider: "azure-foundry", model: "custom-candidate" },
+      { prompt_tokens: 2, completion_tokens: 3 },
+      "answer",
+      { messages: [{ role: "user", content: "Prompt" }] },
+    )).toThrow("MODEL_PRICE_OVERRIDES_JSON[0].inputUsdPerToken must be a finite non-negative number");
   });
 
   it("requires parsed JSON before a JSON-mode case can pass", () => {
@@ -48,6 +65,16 @@ describe("Azure Foundry model eval helpers", () => {
       mode: "text",
       forbiddenConcepts: ["ready to send now"],
     }, "The message is ready to send now.");
+
+    expect(score.forbiddenMentions).toEqual(["ready to send now"]);
+    expect(score.passed).toBe(false);
+  });
+
+  it("does not let a separate no-claim negate a forbidden assertion", () => {
+    const score = scoreItem({
+      mode: "text",
+      forbiddenConcepts: ["ready to send now"],
+    }, "No blockers remain and it is ready to send now.");
 
     expect(score.forbiddenMentions).toEqual(["ready to send now"]);
     expect(score.passed).toBe(false);
