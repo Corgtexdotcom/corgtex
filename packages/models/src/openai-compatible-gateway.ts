@@ -607,7 +607,9 @@ async function postJson<TResponse>(path: string, body: Record<string, unknown>, 
           throw error;
         }
 
-        return response.json() as Promise<TResponse>;
+        const parsed = await response.json() as TResponse;
+        throwIfAborted(fetchSignal.signal);
+        return parsed;
       } finally {
         fetchSignal.cleanup();
       }
