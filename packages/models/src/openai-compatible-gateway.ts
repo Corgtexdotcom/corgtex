@@ -500,13 +500,16 @@ function isRetryableRequestError(error: unknown) {
   return error.name === "AbortError" || error.name === "TimeoutError" || error instanceof TypeError;
 }
 
-function abortedError() {
+function abortedError(signal?: AbortSignal) {
+  if (signal?.reason instanceof Error) {
+    return signal.reason;
+  }
   return new DOMException("The operation was aborted.", "AbortError");
 }
 
 function throwIfAborted(signal?: AbortSignal) {
   if (signal?.aborted) {
-    throw abortedError();
+    throw abortedError(signal);
   }
 }
 
@@ -520,18 +523,25 @@ function timeoutSignal(parentSignal: AbortSignal | undefined, timeoutMs: number)
   }
 
   const controller = new AbortController();
-  const abort = () => controller.abort();
-  parentSignal.addEventListener("abort", abort, { once: true });
-  timerSignal.addEventListener("abort", abort, { once: true });
-  if (parentSignal.aborted || timerSignal.aborted) {
-    abort();
+  const abortFromParent = () => {
+    if (!controller.signal.aborted) controller.abort(parentSignal.reason);
+  };
+  const abortFromTimer = () => {
+    if (!controller.signal.aborted) controller.abort(timerSignal.reason);
+  };
+  parentSignal.addEventListener("abort", abortFromParent, { once: true });
+  timerSignal.addEventListener("abort", abortFromTimer, { once: true });
+  if (parentSignal.aborted) {
+    abortFromParent();
+  } else if (timerSignal.aborted) {
+    abortFromTimer();
   }
 
   return {
     signal: controller.signal,
     cleanup() {
-      parentSignal.removeEventListener("abort", abort);
-      timerSignal.removeEventListener("abort", abort);
+      parentSignal.removeEventListener("abort", abortFromParent);
+      timerSignal.removeEventListener("abort", abortFromTimer);
     },
   };
 }
@@ -558,7 +568,7 @@ async function sleep(ms: number, signal?: AbortSignal) {
       if (settled) return;
       settled = true;
       cleanup();
-      reject(abortedError());
+      reject(abortedError(signal));
     };
     timeout = setTimeout(finish, ms);
     signal?.addEventListener("abort", abort, { once: true });
@@ -813,7 +823,6 @@ async function* completeChatStream(
       if (!response.ok) {
         const errorText = await response.text();
         const error = new Error(`OpenAI-compatible request failed (${response.status}): ${errorText}`);
-        fetchSignal.cleanup();
         if (attempt < MAX_REQUEST_RETRIES && isRetryableStatus(response.status)) {
           lastError = error;
           await sleep(retryDelayMs(attempt), request.signal);
@@ -924,10 +933,13 @@ async function* completeChatStream(
       }
     }
   } finally {
-    streamSignalCleanup();
-    if (!streamCompleted && !usageRecorded) {
-      await reader.cancel().catch(() => undefined);
-      await finalizeUsage();
+    try {
+      if (!streamCompleted && !usageRecorded) {
+        await reader.cancel().catch(() => undefined);
+        await finalizeUsage();
+      }
+    } finally {
+      streamSignalCleanup();
     }
   }
   
