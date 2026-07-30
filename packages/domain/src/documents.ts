@@ -1,4 +1,4 @@
-import type { Prisma } from "@prisma/client";
+import type { KnowledgeAccessDomain, Prisma } from "@prisma/client";
 import { prisma } from "@corgtex/shared";
 import type { AppActor } from "@corgtex/shared";
 import { appendEvents } from "./events";
@@ -14,10 +14,22 @@ import {
   duplicateGuardMergeText,
   type DuplicateGuardOptions,
 } from "./duplicate-guard";
+import { resolveKnowledgeAccessDomains } from "./brain-access";
 
-export async function listDocuments(workspaceId: string, opts?: { archiveFilter?: ArchiveFilter }) {
+export async function listDocuments(workspaceId: string, opts?: {
+  actor?: AppActor;
+  archiveFilter?: ArchiveFilter;
+}) {
+  const accessDomains: KnowledgeAccessDomain[] = opts?.actor
+    ? await resolveKnowledgeAccessDomains(opts.actor, workspaceId)
+    : ["WORKSPACE"];
+
   return prisma.document.findMany({
-    where: { workspaceId, ...archiveFilterWhere(opts?.archiveFilter) },
+    where: {
+      workspaceId,
+      accessDomain: { in: accessDomains },
+      ...archiveFilterWhere(opts?.archiveFilter),
+    },
     orderBy: { createdAt: "desc" },
   });
 }

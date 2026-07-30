@@ -24,6 +24,7 @@ const prismaMock = vi.hoisted(() => {
 const requireWorkspaceMembershipMock = vi.hoisted(() => vi.fn());
 const appendEventsMock = vi.hoisted(() => vi.fn());
 const assertTrialStorageCapacityMock = vi.hoisted(() => vi.fn());
+const resolveKnowledgeAccessDomainsMock = vi.hoisted(() => vi.fn());
 
 vi.mock("@corgtex/shared", () => ({
   prisma: prismaMock,
@@ -41,6 +42,79 @@ vi.mock("./events", () => ({
 vi.mock("./trial-entitlements", () => ({
   assertTrialStorageCapacity: assertTrialStorageCapacityMock,
 }));
+
+vi.mock("./brain-access", () => ({
+  resolveKnowledgeAccessDomains: resolveKnowledgeAccessDomainsMock,
+}));
+
+describe("listDocuments", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    prismaMock.document.findMany.mockResolvedValue([]);
+    resolveKnowledgeAccessDomainsMock.mockResolvedValue(["WORKSPACE"]);
+  });
+
+  it("limits callers without an actor to workspace documents", async () => {
+    const { listDocuments } = await import("./documents");
+
+    await listDocuments("workspace-1");
+
+    expect(resolveKnowledgeAccessDomainsMock).not.toHaveBeenCalled();
+    expect(prismaMock.document.findMany).toHaveBeenCalledWith({
+      where: {
+        workspaceId: "workspace-1",
+        accessDomain: { in: ["WORKSPACE"] },
+        archivedAt: null,
+      },
+      orderBy: { createdAt: "desc" },
+    });
+  });
+
+  it("uses the actor's resolved knowledge access domains", async () => {
+    const { listDocuments } = await import("./documents");
+    const actor = { kind: "user", user: { id: "finance-reader" } } as any;
+    resolveKnowledgeAccessDomainsMock.mockResolvedValueOnce(["WORKSPACE", "FINANCE"]);
+
+    await listDocuments("workspace-1", { actor });
+
+    expect(resolveKnowledgeAccessDomainsMock).toHaveBeenCalledWith(actor, "workspace-1");
+    expect(prismaMock.document.findMany).toHaveBeenCalledWith({
+      where: {
+        workspaceId: "workspace-1",
+        accessDomain: { in: ["WORKSPACE", "FINANCE"] },
+        archivedAt: null,
+      },
+      orderBy: { createdAt: "desc" },
+    });
+  });
+
+  it("does not query documents when access resolution fails", async () => {
+    const { listDocuments } = await import("./documents");
+    const error = new Error("Access denied");
+    resolveKnowledgeAccessDomainsMock.mockRejectedValueOnce(error);
+
+    await expect(listDocuments("workspace-1", {
+      actor: { kind: "user", user: { id: "blocked-user" } } as any,
+    })).rejects.toBe(error);
+
+    expect(prismaMock.document.findMany).not.toHaveBeenCalled();
+  });
+
+  it("preserves archived filtering alongside access domains", async () => {
+    const { listDocuments } = await import("./documents");
+
+    await listDocuments("workspace-1", { archiveFilter: "archived" });
+
+    expect(prismaMock.document.findMany).toHaveBeenCalledWith({
+      where: {
+        workspaceId: "workspace-1",
+        accessDomain: { in: ["WORKSPACE"] },
+        archivedAt: { not: null },
+      },
+      orderBy: { createdAt: "desc" },
+    });
+  });
+});
 
 describe("createDocument", () => {
   beforeEach(() => {
