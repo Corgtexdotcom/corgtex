@@ -68,7 +68,11 @@ const AZURE_TOKEN_REFRESH_SKEW_MS = 60_000;
 const AZURE_FOUNDRY_SCOPE = "https://ai.azure.com/.default";
 const AZURE_OPENAI_SCOPE = "https://cognitiveservices.azure.com/.default";
 const SUPPORTED_MODEL_PROVIDERS = new Set(["openrouter", "openai", "azure-openai", "azure-foundry"]);
-const BUILT_IN_TEMPERATURE_UNSUPPORTED_MODELS = new Set(["corgtex-gpt56-luna"]);
+const BUILT_IN_TEMPERATURE_UNSUPPORTED_MODELS = new Set([
+  "corgtex-gpt56-luna",
+  "corgtex-gpt56-terra",
+  "corgtex-gpt56-sol",
+]);
 
 class ExtractionParseError extends Error {
   readonly raw: string;
