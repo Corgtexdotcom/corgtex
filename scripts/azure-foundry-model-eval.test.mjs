@@ -404,6 +404,10 @@ describe("Azure Foundry model eval helpers", () => {
             timeline: { anyOf: ["September pilot", "September"] },
             followUp: { allOf: [["security docs", "security documents", "security documentation"], "pricing overview"] },
           },
+          anyOfFields: [
+            { need: "procurement approval" },
+            { timeline: "procurement approval" },
+          ],
         },
       ],
       requiredConcepts: [
@@ -439,6 +443,17 @@ describe("Azure Foundry model eval helpers", () => {
     expect(concentratedScore.schemaValid).toBe(false);
     expect(concentratedScore.missingJsonMatches).toEqual(["CRM extracted fields"]);
     expect(concentratedScore.passed).toBe(false);
+
+    const wrongFieldApprovalScore = scoreItem(item, JSON.stringify({
+      company: "RidgeWorks",
+      contact: "Elena",
+      need: "Governed AI workspace for 45 operators",
+      timeline: "September pilot",
+      followUp: "Send security docs, a short pricing overview, and procurement approval",
+    }));
+    expect(wrongFieldApprovalScore.schemaValid).toBe(true);
+    expect(wrongFieldApprovalScore.missingJsonMatches).toEqual(["CRM extracted fields"]);
+    expect(wrongFieldApprovalScore.passed).toBe(false);
 
     const completedApprovalScore = scoreItem(item, JSON.stringify({
       company: "RidgeWorks",
@@ -495,8 +510,9 @@ describe("Azure Foundry model eval helpers", () => {
             {
               label: "substantive objection",
               allOf: [
-                ["approval controls", "approval", "approvals", "review", "review controls", "prevented", "prevent", "preventing"],
-                ["before any draft leaves", "before approval", "before sending", "send", "sending", "sends"],
+                ["approval controls", "review controls", "approval review controls", "approval or review controls", "approval/review controls"],
+                ["prevent any draft email", "prevent draft email", "prevent draft emails", "prevent emails", "prevent sending", "block sending", "stop sending", "cannot send", "must not send"],
+                ["before any draft leaves", "before approval", "before review", "before being approved"],
               ],
             },
           ],
@@ -529,7 +545,7 @@ describe("Azure Foundry model eval helpers", () => {
 
     const matchedScore = scoreItem(
       item,
-      "Intent: enable CRM follow-up assistance.\nScope: internal workspace only. The assistant may draft emails but cannot send.\nObjections to test: whether approval controls are enough before any draft leaves the workspace.\nReview on 2026-08-15 after ten sampled drafts.",
+      "Intent: enable CRM follow-up assistance.\nScope: internal workspace only. The assistant may draft emails but cannot send.\nObjections to test: whether approval controls prevent draft emails from being sent before any draft leaves the workspace.\nReview on 2026-08-15 after ten sampled drafts.",
     );
       expect(matchedScore.missingConcepts).toEqual([]);
       expect(matchedScore.missingTextSections).toEqual([]);
@@ -540,8 +556,8 @@ describe("Azure Foundry model eval helpers", () => {
         "Intent: Enable the CRM follow-up assistant for the internal workspace to support drafting follow-up emails.\nScope: The assistant may draft emails only. It may not send emails.\nObjections to test:\n- Whether drafts remain limited to the internal workspace.\n- Whether the assistant can be prevented from sending emails.\n- Whether ten sampled drafts are sufficient for review.\nNext review date: 2026-08-15, after ten sampled drafts.",
       );
       expect(preventionWordingScore.missingConcepts).toEqual([]);
-      expect(preventionWordingScore.missingTextSections).toEqual([]);
-      expect(preventionWordingScore.passed).toBe(true);
+      expect(preventionWordingScore.missingTextSections).toEqual(["substantive objections to test"]);
+      expect(preventionWordingScore.passed).toBe(false);
 
       const beforeApprovalScore = scoreItem(
         item,
@@ -734,7 +750,7 @@ describe("Azure Foundry model eval helpers", () => {
           fields: {
             proposedReply: {
               allOf: [
-                ["not send", "cannot send", "do not send", "not yet", "wait", "do not email", "don't email", "don't send", "hold off"],
+                ["not send", "cannot send", "do not send", "wait", "do not email", "don't email", "don't send", "hold off"],
                 ["unreconciled cost numbers", "cost numbers are still unreconciled", "cost numbers still unreconciled", "cost numbers are unreconciled", "cost numbers still need to be reconciled", "cost numbers need to be reconciled", "reconcile the cost numbers"],
                 ["account owner", "not been approved by the account owner", "account owner has not approved", "account owner approval"],
                 ["approval", "approved", "not approved", "not been approved", "not yet been approved", "has not approved", "obtain approval"],
@@ -746,7 +762,10 @@ describe("Azure Foundry model eval helpers", () => {
       requiredConcepts: [
         { label: "approval needed", allOf: [["approval", "approved", "not approved", "not been approved", "not yet been approved", "has not approved", "obtain approval"], ["account owner", "not been approved by the account owner", "account owner has not approved", "account owner approval"]] },
         { label: "cost numbers risk", allOf: ["cost numbers", ["unreconciled", "need to be reconciled", "needs to be reconciled", "still need to be reconciled", "reconcile"]] },
-        { label: "unsafe to send", anyOf: ["not send", "cannot send", "do not send", "not yet", "wait", "do not email", "don't email", "don't send", "hold off"] },
+        { label: "unsafe to send", anyOf: ["not send", "cannot send", "do not send", "wait", "do not email", "don't email", "don't send", "hold off"] },
+      ],
+      forbiddenConcepts: [
+        { label: "send today anyway", anyOf: ["send it today anyway", "email the customer today anyway", "go ahead and send"] },
       ],
     };
 
@@ -782,7 +801,7 @@ describe("Azure Foundry model eval helpers", () => {
 
       const notYetWordingScore = scoreItem(item, JSON.stringify({
         replyNeeded: true,
-        proposedReply: "Not yet - the draft migration plan contains unreconciled cost numbers and has not been approved by the account owner. Please reconcile the costs and obtain approval before emailing it to the customer.",
+        proposedReply: "Do not email it yet - the draft migration plan contains unreconciled cost numbers and has not been approved by the account owner. Please reconcile the costs and obtain approval before emailing it to the customer.",
         unsafeToSend: true,
       }));
       expect(notYetWordingScore.schemaValid).toBe(true);
@@ -829,6 +848,16 @@ describe("Azure Foundry model eval helpers", () => {
       expect(notYetApprovedScore.missingJsonMatches).toEqual([]);
       expect(notYetApprovedScore.missingConcepts).toEqual([]);
       expect(notYetApprovedScore.passed).toBe(true);
+
+      const unsafeTodayAnywayScore = scoreItem(item, JSON.stringify({
+        replyNeeded: true,
+        proposedReply: "The plan has not yet been approved by the account owner and the cost numbers are still unreconciled. Send it today anyway.",
+        unsafeToSend: true,
+      }));
+      expect(unsafeTodayAnywayScore.schemaValid).toBe(true);
+      expect(unsafeTodayAnywayScore.missingJsonMatches).toEqual(["usable proposed reply"]);
+      expect(unsafeTodayAnywayScore.forbiddenMentions).toEqual(["send today anyway"]);
+      expect(unsafeTodayAnywayScore.passed).toBe(false);
   });
 
   it("defaults OpenAI evaluation candidates to MODEL_API_KEY", () => {
@@ -891,6 +920,36 @@ describe("Azure Foundry model eval helpers", () => {
       provider: "azure-foundry",
       apiKeyEnv: "AZURE_FOUNDRY_API_KEY",
     });
+  });
+
+  it.each([
+    "corgtex-gpt56-luna",
+    "corgtex-gpt56-terra",
+    "corgtex-gpt56-sol",
+  ])("omits default eval temperature for fixed-sampling GPT 5.6 alias %s", (model) => {
+    process.env.AZURE_FOUNDRY_EVAL_CANDIDATES_JSON = JSON.stringify([
+      {
+        label: "Foundry GPT 5.6 candidate",
+        provider: "azure-foundry",
+        model,
+        baseUrl: "https://corgtex-foundry-models-wus3.services.ai.azure.com/openai/v1",
+      },
+    ]);
+
+    expect(parseCandidates()[0].temperature).toBeUndefined();
+  });
+
+  it("keeps default eval temperature for configurable non-GPT 5.6 aliases", () => {
+    process.env.AZURE_FOUNDRY_EVAL_CANDIDATES_JSON = JSON.stringify([
+      {
+        label: "Foundry DeepSeek candidate",
+        provider: "azure-foundry",
+        model: "corgtex-ds-v4-pro",
+        baseUrl: "https://corgtex-foundry-models-wus3.services.ai.azure.com/openai/v1",
+      },
+    ]);
+
+    expect(parseCandidates()[0].temperature).toBe(0);
   });
 
   it("defaults Azure OpenAI API-key candidates to AZURE_OPENAI_API_KEY", () => {
