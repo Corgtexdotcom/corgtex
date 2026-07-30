@@ -15,6 +15,7 @@ export * from "./agent-config";
 export * from "./agent-authority-summary";
 export * from "./agreements";
 export * from "./brain";
+export * from "./brain-access";
 export * from "./audit-trail";
 export * from "./archive";
 export * from "./agent-memory";
