@@ -264,6 +264,30 @@ export function requireFinanceCapability(sectionCapabilities: Record<string, boo
   invariant(sectionKey && sectionCapabilities[sectionKey], 404, "FINANCE_CAPABILITY_DISABLED", "This Finance section is not enabled for this workspace.");
 }
 
+function requireFinanceReportImportCapability<T extends {
+  reportImportsEnabled: boolean;
+  sectionCapabilities: Record<FinanceSectionKey, boolean>;
+}>(policy: T) {
+  requireFinanceCapability(policy.sectionCapabilities, "FINANCE_REPORTS");
+  invariant(
+    policy.reportImportsEnabled,
+    404,
+    "FINANCE_REPORT_IMPORTS_DISABLED",
+    "Finance report imports are not enabled for this workspace.",
+  );
+  return policy;
+}
+
+export async function requireFinanceReportImportReadAccess(actor: AppActor, workspaceId: string) {
+  const policy = await requireFinanceReadAccess(actor, workspaceId);
+  return requireFinanceReportImportCapability(policy);
+}
+
+export async function requireFinanceReportImportHumanWriteAccess(actor: AppActor, workspaceId: string) {
+  const policy = await requireFinanceHumanWriteAccess(actor, workspaceId);
+  return requireFinanceReportImportCapability(policy);
+}
+
 export async function createFinanceProject(actor: AppActor, params: {
   workspaceId: string;
   name: string;
