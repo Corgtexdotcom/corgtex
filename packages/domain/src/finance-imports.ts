@@ -26,9 +26,9 @@ export type FinanceImportCurrencyResolution =
   };
 
 export function normalizeFinanceImportCurrency(value: string, label = "Currency") {
-  const currency = value.trim().toUpperCase();
-  invariant(/^[A-Z]{3}$/.test(currency), 400, "INVALID_INPUT", `${label} must be a three-letter code.`);
-  return currency;
+  const currency = value.trim();
+  invariant(/^[A-Za-z]{3}$/.test(currency), 400, "INVALID_INPUT", `${label} must be a three-letter code.`);
+  return currency.toUpperCase();
 }
 
 function optionalCurrency(value: string | null | undefined, label: string) {
@@ -40,6 +40,11 @@ export function resolveFinanceImportCurrency(params: {
   reportCurrency?: string | null;
   workspaceCurrencies?: readonly (string | null | undefined)[];
 }): FinanceImportCurrencyResolution {
+  const workspaceCurrencies = new Set(
+    (params.workspaceCurrencies ?? [])
+      .filter((currency): currency is string => Boolean(currency?.trim()))
+      .map((currency) => normalizeFinanceImportCurrency(currency, "Workspace currency")),
+  );
   const userConfirmedCurrency = optionalCurrency(params.userConfirmedCurrency, "Confirmed currency");
   if (userConfirmedCurrency) {
     return {
@@ -60,11 +65,6 @@ export function resolveFinanceImportCurrency(params: {
     };
   }
 
-  const workspaceCurrencies = new Set(
-    (params.workspaceCurrencies ?? [])
-      .filter((currency): currency is string => Boolean(currency?.trim()))
-      .map((currency) => normalizeFinanceImportCurrency(currency, "Workspace currency")),
-  );
   if (workspaceCurrencies.size === 1) {
     return {
       state: "RESOLVED",

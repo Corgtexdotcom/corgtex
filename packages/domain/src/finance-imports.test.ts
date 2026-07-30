@@ -14,6 +14,8 @@ describe("Finance import safety primitives", () => {
     expect(normalizeFinanceImportCurrency(" eur ")).toBe("EUR");
     expect(() => normalizeFinanceImportCurrency("")).toThrow("three-letter code");
     expect(() => normalizeFinanceImportCurrency("US$")).toThrow("three-letter code");
+    expect(() => normalizeFinanceImportCurrency("ßd")).toThrow("three-letter code");
+    expect(() => normalizeFinanceImportCurrency("uſd")).toThrow("three-letter code");
   });
 
   it("prioritizes human confirmation, report evidence, then one workspace currency", () => {
@@ -54,6 +56,7 @@ describe("Finance import safety primitives", () => {
 
   it("rejects malformed non-empty workspace currencies", () => {
     expect(() => resolveFinanceImportCurrency({
+      userConfirmedCurrency: "EUR",
       workspaceCurrencies: ["USD", "US"],
     })).toThrow("Workspace currency must be a three-letter code");
   });
