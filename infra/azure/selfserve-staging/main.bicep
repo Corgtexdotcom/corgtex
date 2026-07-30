@@ -198,12 +198,6 @@ param azureOpenAiApiKeySecretName string = 'azure-openai-api-key'
 @description('Key Vault secret name containing the Azure Foundry API key when modelProvider is azure-foundry and azureOpenAiAuthMode is api_key.')
 param azureFoundryApiKeySecretName string = 'azure-foundry-api-key'
 
-@description('OpenRouter OpenAI-compatible v1 base URL for existing agent model override rollback routes while Foundry chat aliases are enabled.')
-param openRouterRouteBaseUrl string = 'https://openrouter.ai/api/v1'
-
-@description('Key Vault secret name containing the OpenRouter API key used only for existing agent model override rollback routes.')
-param openRouterRouteApiKeySecretName string = 'openrouter-api-key'
-
 @description('Key Vault secret name containing STRIPE_SECRET_KEY.')
 param stripeSecretKeySecretName string = 'stripe-secret-key'
 
@@ -292,20 +286,9 @@ var azureFoundryApiKeyProviderRoutes = [for modelName in azureFoundryRouteModels
   scope: 'https://ai.azure.com/.default'
   apiKeyEnv: 'AZURE_FOUNDRY_API_KEY'
 }]
-var openRouterAgentOverrideModels = [
-  'google/gemini-2.5-flash-lite'
-  'qwen/qwen3-32b'
-  'google/gemini-2.5-flash'
-]
-var openRouterAgentOverrideProviderRoutes = [for modelName in openRouterAgentOverrideModels: {
-  model: modelName
-  provider: 'openrouter'
-  baseUrl: openRouterRouteBaseUrl
-  apiKeyEnv: 'OPENROUTER_ROUTE_API_KEY'
-}]
 var azureFoundryProviderRoutes = azureOpenAiAuthMode == 'api_key'
-  ? concat(azureFoundryApiKeyProviderRoutes, openRouterAgentOverrideProviderRoutes)
-  : concat(azureFoundryManagedIdentityProviderRoutes, openRouterAgentOverrideProviderRoutes)
+  ? azureFoundryApiKeyProviderRoutes
+  : azureFoundryManagedIdentityProviderRoutes
 var azureFoundryProviderRoutesJson = string(azureFoundryProviderRoutes)
 var azureFoundryOmitTemperatureModels = azureChatExcellentOmitsTemperature ? runtimeChatExcellentDeploymentName : ''
 var azureFoundryOmitTemperatureRuntimeEnv = usesAzureFoundryModels && !empty(azureFoundryOmitTemperatureModels) ? [
@@ -328,9 +311,6 @@ var azureOpenAiApiKeyRef = azureOpenAiAuthMode == 'api_key' ? [
 var azureFoundryApiKeyRef = usesAzureFoundryModels && azureOpenAiAuthMode == 'api_key' ? [
   { name: 'azure-foundry-api-key', keyVaultSecretName: azureFoundryApiKeySecretName }
 ] : []
-var openRouterRouteApiKeyRef = usesAzureFoundryModels ? [
-  { name: 'openrouter-route-api-key', keyVaultSecretName: openRouterRouteApiKeySecretName }
-] : []
 var stripeSecretRefs = enableStripeSecrets ? [
   { name: 'stripe-secret-key', keyVaultSecretName: stripeSecretKeySecretName }
   { name: 'stripe-webhook-secret', keyVaultSecretName: stripeWebhookSecretName }
@@ -350,7 +330,7 @@ var microsoftOauthSecretRefs = enableMicrosoftOauthSecrets ? [
 ] : []
 var containerSecretRefs = concat([
   { name: 'ghcr-pat', keyVaultSecretName: ghcrPatSecretName }
-], requiredSecretRefs, azureOpenAiApiKeyRef, azureFoundryApiKeyRef, openRouterRouteApiKeyRef, stripeSecretRefs, resendSecretRefs, googleOauthSecretRefs, microsoftOauthSecretRefs)
+], requiredSecretRefs, azureOpenAiApiKeyRef, azureFoundryApiKeyRef, stripeSecretRefs, resendSecretRefs, googleOauthSecretRefs, microsoftOauthSecretRefs)
 var migrationSecretRefs = concat(containerSecretRefs, [
   { name: 'admin-password', keyVaultSecretName: bootstrapAdminPasswordSecretName }
 ])
@@ -374,7 +354,6 @@ var microsoftOauthRuntimeEnv = enableMicrosoftOauthSecrets ? [
 ] : []
 var azureFoundryRuntimeEnv = usesAzureFoundryModels ? concat([
   { name: 'MODEL_PROVIDER_ROUTES_JSON', value: azureFoundryProviderRoutesJson }
-  { name: 'OPENROUTER_ROUTE_API_KEY', secretRef: 'openrouter-route-api-key' }
 ], azureFoundryOmitTemperatureRuntimeEnv) : []
 
 var commonRuntimeEnv = concat([
