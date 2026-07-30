@@ -5,6 +5,7 @@ import type { AppActor } from "@corgtex/shared";
 import { appendEvents } from "./events";
 import { requireWorkspaceMembership } from "./auth";
 import { archiveFilterWhere, archiveWorkspaceArtifact, type ArchiveFilter } from "./archive";
+import { resolveKnowledgeAccessDomains } from "./brain-access";
 import { invariant } from "./errors";
 import { persistedMemberId } from "./membership";
 import { requireDraftManager } from "./draft-permissions";
@@ -611,16 +612,14 @@ export async function listSources(actor: AppActor, params: {
   skip?: number;
   archiveFilter?: ArchiveFilter;
 }) {
-  await requireWorkspaceMembership({
-    actor,
-    workspaceId: params.workspaceId,
-  });
+  const accessDomains = await resolveKnowledgeAccessDomains(actor, params.workspaceId);
 
   const take = params.take ?? 50;
   const skip = params.skip ?? 0;
 
   const where: Prisma.BrainSourceWhereInput = {
     workspaceId: params.workspaceId,
+    accessDomain: { in: accessDomains },
     ...archiveFilterWhere(params.archiveFilter),
   };
 
