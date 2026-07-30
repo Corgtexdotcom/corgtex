@@ -40,11 +40,15 @@ const BUILT_IN_MODEL_PRICE_KEYS = new Set([
   "azure-foundry/corgtex-kimi-k25",
   "azure-foundry/corgtex-kimi-k27-code",
   "azure-foundry/corgtex-gpt56-luna",
+  "azure-foundry/corgtex-gpt56-terra",
+  "azure-foundry/corgtex-gpt56-sol",
   "azure-openai/corgtex-ds-v4-flash",
   "azure-openai/corgtex-ds-v4-pro",
   "azure-openai/corgtex-kimi-k25",
   "azure-openai/corgtex-kimi-k27-code",
   "azure-openai/corgtex-gpt56-luna",
+  "azure-openai/corgtex-gpt56-terra",
+  "azure-openai/corgtex-gpt56-sol",
 ]);
 const MODEL_DEFAULTS = {
   MODEL_CHAT_DEFAULT: "deepseek/deepseek-v4-flash",

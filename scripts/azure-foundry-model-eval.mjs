@@ -13,6 +13,11 @@ const DEFAULT_MAX_TOKENS = intEnv("AZURE_FOUNDRY_EVAL_MAX_TOKENS", 600, { min: 1
 const DEFAULT_RETRIES = intEnv("AZURE_FOUNDRY_EVAL_RETRIES", 1, { min: 0 });
 const DEFAULT_CONCURRENCY = intEnv("AZURE_FOUNDRY_EVAL_CONCURRENCY", 2, { min: 1, max: 4 });
 const EVAL_PASS_POLICIES = new Set(["all", "any"]);
+const GPT_56_ALIASES_WITH_FIXED_SAMPLING = new Set([
+  "corgtex-gpt56-luna",
+  "corgtex-gpt56-terra",
+  "corgtex-gpt56-sol",
+]);
 const TOKEN_REFRESH_SKEW_MS = 60_000;
 const SUPPORTED_EVAL_PROVIDERS = new Set(["openrouter", "openai", "azure-openai", "azure-foundry"]);
 const AZURE_EVAL_PROVIDERS = new Set(["azure-openai", "azure-foundry"]);
@@ -35,7 +40,12 @@ function arg(name) {
 }
 
 function normalize(value) {
-  return String(value ?? "").trim().toLowerCase();
+  return String(value ?? "")
+    .replace(/[\u2018\u2019]/g, "'")
+    .replace(/[\u201c\u201d]/g, '"')
+    .replace(/[\u2013\u2014]/g, "-")
+    .trim()
+    .toLowerCase();
 }
 
 function isHttpsBaseUrl(value) {
@@ -173,7 +183,7 @@ function defaultApiKeyEnv(provider) {
 }
 
 function defaultTemperature(model) {
-  return model === "corgtex-gpt56-luna" ? undefined : 0;
+  return GPT_56_ALIASES_WITH_FIXED_SAMPLING.has(model) ? undefined : 0;
 }
 
 function evalPassPolicy() {
@@ -313,6 +323,13 @@ function jsonMatchFields(match) {
   return fields && typeof fields === "object" && !Array.isArray(fields) ? fields : {};
 }
 
+function jsonMatchAnyOfFields(match) {
+  const fieldSets = match?.anyOfFields;
+  return Array.isArray(fieldSets)
+    ? fieldSets.filter((fieldSet) => fieldSet && typeof fieldSet === "object" && !Array.isArray(fieldSet))
+    : [];
+}
+
 function jsonMatchConcept(match) {
   return isObjectRecord(match) && Object.hasOwn(match, "concept") ? match.concept : undefined;
 }
@@ -324,22 +341,31 @@ function jsonMatchSatisfied(parsedJson, match) {
 
   const path = typeof match.path === "string" ? match.path.trim() : "";
   const fields = jsonMatchFields(match);
+  const anyOfFields = jsonMatchAnyOfFields(match);
   const concept = jsonMatchConcept(match);
   const value = path ? jsonPathValue(parsedJson, path) : parsedJson;
   if (concept !== undefined) {
     return conceptMatches(concept, normalize(jsonValueText(value)), { polarityAware: true });
   }
 
-  if (Object.keys(fields).length === 0) {
+  if (Object.keys(fields).length === 0 && anyOfFields.length === 0) {
     return false;
   }
 
   const candidates = Array.isArray(value) ? value : [value];
-  return candidates.some((candidate) => (
+  const fieldsSatisfied = Object.keys(fields).length === 0 || candidates.some((candidate) => (
     isObjectRecord(candidate) && Object.entries(fields).every(([field, concept]) => (
       conceptMatches(concept, normalize(jsonValueText(jsonPathValue(candidate, field))), { polarityAware: true })
     ))
   ));
+  const anyOfFieldsSatisfied = anyOfFields.length === 0 || candidates.some((candidate) => (
+    isObjectRecord(candidate) && anyOfFields.some((fieldSet) => (
+      Object.entries(fieldSet).every(([field, concept]) => (
+        conceptMatches(concept, normalize(jsonValueText(jsonPathValue(candidate, field))), { polarityAware: true })
+      ))
+    ))
+  ));
+  return fieldsSatisfied && anyOfFieldsSatisfied;
 }
 
 function priceFor(provider, model) {
