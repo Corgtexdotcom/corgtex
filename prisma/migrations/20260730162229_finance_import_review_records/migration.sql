@@ -133,6 +133,9 @@ CREATE UNIQUE INDEX "FinanceImportCandidate_id_workspaceId_key" ON "FinanceImpor
 CREATE UNIQUE INDEX "FinanceImportCandidate_batchId_sourceKey_key" ON "FinanceImportCandidate"("batchId", "sourceKey");
 
 -- CreateIndex
+CREATE UNIQUE INDEX "FinanceReportFact_id_workspaceId_key" ON "FinanceReportFact"("id", "workspaceId");
+
+-- CreateIndex
 CREATE UNIQUE INDEX "AgentRun_id_workspaceId_key" ON "AgentRun"("id", "workspaceId");
 
 -- CreateIndex
@@ -161,3 +164,6 @@ ALTER TABLE "FinanceImportBatch" ADD CONSTRAINT "FinanceImportBatch_agentRunId_w
 
 -- AddForeignKey
 ALTER TABLE "FinanceImportCandidate" ADD CONSTRAINT "FinanceImportCandidate_batchId_workspaceId_fkey" FOREIGN KEY ("batchId", "workspaceId") REFERENCES "FinanceImportBatch"("id", "workspaceId") ON DELETE CASCADE ON UPDATE CASCADE;
+
+-- AddForeignKey
+ALTER TABLE "FinanceImportCandidate" ADD CONSTRAINT "FinanceImportCandidate_currentFactId_workspaceId_fkey" FOREIGN KEY ("currentFactId", "workspaceId") REFERENCES "FinanceReportFact"("id", "workspaceId") ON DELETE RESTRICT ON UPDATE CASCADE;

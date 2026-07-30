@@ -1028,8 +1028,10 @@ model FinanceReportFact {
   createdAt         DateTime              @default(now())
   updatedAt         DateTime              @updatedAt
 
-  report FinanceReport @relation(fields: [reportId, workspaceId], references: [id, workspaceId], onDelete: Cascade)
+  report           FinanceReport             @relation(fields: [reportId, workspaceId], references: [id, workspaceId], onDelete: Cascade)
+  importCandidates FinanceImportCandidate[]
 
+  @@unique([id, workspaceId])
   @@unique([workspaceId, semanticKey])
   @@index([workspaceId, reportId])
   @@index([workspaceId, periodStart, periodEnd])
@@ -1128,7 +1130,8 @@ model FinanceImportCandidate {
   createdAt               DateTime                          @default(now())
   updatedAt               DateTime                          @updatedAt
 
-  batch FinanceImportBatch @relation(fields: [batchId, workspaceId], references: [id, workspaceId], onDelete: Cascade)
+  batch       FinanceImportBatch @relation(fields: [batchId, workspaceId], references: [id, workspaceId], onDelete: Cascade)
+  currentFact FinanceReportFact? @relation(fields: [currentFactId, workspaceId], references: [id, workspaceId], onDelete: Restrict)
 
   @@unique([id, workspaceId])
   @@unique([batchId, sourceKey])
