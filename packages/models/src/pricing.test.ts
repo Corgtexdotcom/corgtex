@@ -77,4 +77,27 @@ describe("model pricing", () => {
       estimatedCostUsd: "0.000900",
     });
   });
+
+  it("keeps Azure Direct Foundry deployment alias pricing explicit", () => {
+    expect(getModelPrice("azure-foundry", "corgtex-ds-v4-flash")).toMatchObject({
+      inputUsdPerToken: 0.00000019,
+      outputUsdPerToken: 0.00000051,
+    });
+    expect(getModelPrice("azure-foundry", "corgtex-ds-v4-pro")).toMatchObject({
+      inputUsdPerToken: 0.00000174,
+      outputUsdPerToken: 0.00000348,
+    });
+    expect(getModelPrice("azure-foundry", "corgtex-kimi-k25")).toMatchObject({
+      inputUsdPerToken: 0.0000006,
+      outputUsdPerToken: 0.000003,
+    });
+    expect(getModelPrice("azure-foundry", "corgtex-kimi-k27-code")).toMatchObject({
+      inputUsdPerToken: 0.00000095,
+      outputUsdPerToken: 0.000004,
+    });
+    expect(getModelPrice("azure-foundry", "corgtex-gpt56-luna")).toMatchObject({
+      inputUsdPerToken: 0.000001,
+      outputUsdPerToken: 0.000006,
+    });
+  });
 });

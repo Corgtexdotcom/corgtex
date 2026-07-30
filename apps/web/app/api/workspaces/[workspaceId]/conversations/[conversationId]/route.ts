@@ -41,6 +41,32 @@ function keepAliveTimeout() {
   };
 }
 
+type StreamCancellation = {
+  readonly cancelled: boolean;
+  cancel: () => void;
+  promise: Promise<{ type: "cancelled" }>;
+};
+
+function streamCancellation(): StreamCancellation {
+  let cancelled = false;
+  let resolveCancelled: (value: { type: "cancelled" }) => void = () => {};
+  const promise = new Promise<{ type: "cancelled" }>((resolve) => {
+    resolveCancelled = resolve;
+  });
+
+  return {
+    get cancelled() {
+      return cancelled;
+    },
+    cancel() {
+      if (cancelled) return;
+      cancelled = true;
+      resolveCancelled({ type: "cancelled" });
+    },
+    promise,
+  };
+}
+
 function enqueueKeepAlive(controller: ReadableStreamDefaultController<Uint8Array>, encoder: TextEncoder) {
   controller.enqueue(encodeStreamPayload(encoder, { keepAlive: true }));
 }
@@ -64,6 +90,7 @@ async function nextConversationStreamResult(
   iterator: AsyncGenerator<string, ConversationStreamResult>,
   controller: ReadableStreamDefaultController<Uint8Array>,
   encoder: TextEncoder,
+  cancellation: StreamCancellation,
 ): Promise<IteratorResult<string, ConversationStreamResult>> {
   const nextChunk = iterator.next();
 
@@ -72,9 +99,17 @@ async function nextConversationStreamResult(
     const result = await Promise.race([
       nextChunk.then((chunk) => ({ type: "chunk" as const, chunk })),
       timeout.promise,
+      cancellation.promise,
     ]).finally(() => timeout.cancel());
 
+    if (result.type === "cancelled") {
+      return { done: true, value: undefined as unknown as ConversationStreamResult };
+    }
+
     if (result.type === "keepalive") {
+      if (cancellation.cancelled) {
+        return { done: true, value: undefined as unknown as ConversationStreamResult };
+      }
       enqueueKeepAlive(controller, encoder);
       continue;
     }
@@ -132,6 +167,7 @@ export async function POST(
     const conversation = await getConversation(actor, workspaceId, conversationId);
     const userId = actor.kind === "user" ? actor.user.id : "";
 
+    const modelAbortController = new AbortController();
     const iterator = processConversationTurnStream({
       workspaceId,
       sessionId: conversationId,
@@ -141,26 +177,37 @@ export async function POST(
       systemPrompt: conversation.systemPrompt,
       actor,
       pageContext,
+      signal: modelAbortController.signal,
     });
 
     const encoder = new TextEncoder();
+    const cancellation = streamCancellation();
     const stream = new ReadableStream({
       async start(controller) {
         try {
+          if (cancellation.cancelled) return;
           enqueueKeepAlive(controller, encoder);
           let finalResult: ConversationStreamResult | undefined;
           let streamedAssistantMessage = "";
 
           while (true) {
-            const { done, value } = await nextConversationStreamResult(iterator, controller, encoder);
+            const { done, value } = await nextConversationStreamResult(iterator, controller, encoder, cancellation);
+            if (cancellation.cancelled) {
+              return;
+            }
             if (done) {
               finalResult = value;
               break;
             }
             if (value) {
               streamedAssistantMessage += value;
+              if (cancellation.cancelled) return;
               controller.enqueue(encodeStreamPayload(encoder, { text: value }));
             }
+          }
+
+          if (cancellation.cancelled) {
+            return;
           }
 
           const assistantMessage = resolvedAssistantMessage(finalResult, streamedAssistantMessage);
@@ -168,6 +215,7 @@ export async function POST(
             const missingText = unstreamedAssistantText(streamedAssistantMessage, assistantMessage);
             if (missingText) {
               streamedAssistantMessage += missingText;
+              if (cancellation.cancelled) return;
               controller.enqueue(encodeStreamPayload(encoder, { text: missingText }));
             }
 
@@ -193,6 +241,7 @@ export async function POST(
                     },
                     { role: "user", content: userMessage },
                   ],
+                  signal: modelAbortController.signal,
                 });
                 const generatedTopic = titleResponse.content.trim().slice(0, 80);
                 if (generatedTopic) {
@@ -201,6 +250,7 @@ export async function POST(
                     conversationId,
                     topic: generatedTopic,
                   });
+                  if (cancellation.cancelled) return;
                   controller.enqueue(encodeStreamPayload(encoder, { topic: generatedTopic }));
                 }
               } catch {
@@ -209,14 +259,30 @@ export async function POST(
             }
 
             if (finalResult.contextUsed.mapGraphChanged) {
+              if (cancellation.cancelled) return;
               controller.enqueue(encodeStreamPayload(encoder, { refreshCurrentRoute: true }));
             }
           }
 
+          if (cancellation.cancelled) return;
           controller.enqueue(encoder.encode("data: [DONE]\n\n"));
           controller.close();
         } catch (error) {
-          controller.error(error);
+          if (!cancellation.cancelled) {
+            controller.error(error);
+          }
+        }
+      },
+      async cancel() {
+        cancellation.cancel();
+        modelAbortController.abort();
+        try {
+          await iterator.return?.({
+            assistantMessage: "",
+            contextUsed: {},
+          });
+        } catch {
+          // Client disconnect cleanup is best-effort.
         }
       },
     });

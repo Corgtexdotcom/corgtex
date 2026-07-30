@@ -4,6 +4,7 @@ import { requirePageActor } from "@/lib/auth";
 import { enforceDemoGuard } from "@/lib/demo-guard";
 import { updateAgentConfig, updateAgentIdentity, submitAgentFeedback } from "@corgtex/domain";
 import { revalidatePath } from "next/cache";
+import { assertAgentModelOverrideAllowed } from "./model-override-options";
 
 
 export async function toggleAgentAction(workspaceId: string, agentKey: string, enabled: boolean) {
@@ -14,6 +15,7 @@ export async function toggleAgentAction(workspaceId: string, agentKey: string, e
 
 export async function updateAgentModelAction(workspaceId: string, agentKey: string, modelOverride: string | null) {
   const actor = await requirePageActor();
+  assertAgentModelOverrideAllowed(modelOverride);
   await updateAgentConfig(actor, { workspaceId, agentKey, modelOverride });
   revalidatePath(`/workspaces/${workspaceId}/agents`);
 }

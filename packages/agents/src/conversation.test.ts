@@ -1055,6 +1055,81 @@ describe("processConversationTurn", () => {
     expect(chatStreamMock).toHaveBeenCalled();
   });
 
+  it("closes the first model stream when the conversation stream is canceled", async () => {
+    const actor = testUserActor();
+    let firstModelStreamClosed = false;
+
+    async function* cancellableModelStream() {
+      try {
+        yield "Partial answer";
+      } finally {
+        firstModelStreamClosed = true;
+      }
+    }
+
+    chatStreamMock.mockReturnValueOnce(cancellableModelStream());
+
+    const { processConversationTurnStream } = await import("./conversation");
+    const stream = processConversationTurnStream({
+      workspaceId: "ws-1",
+      sessionId: "session-1",
+      userId: "user-1",
+      agentKey: "assistant",
+      userMessage: "Summarize the workspace.",
+      actor,
+    });
+
+    await expect(stream.next()).resolves.toMatchObject({
+      done: false,
+      value: "Partial answer",
+    });
+
+    await stream.return({
+      assistantMessage: "",
+      contextUsed: {},
+    });
+
+    expect(firstModelStreamClosed).toBe(true);
+  });
+
+  it("does not store agent memory after stream cancellation", async () => {
+    const actor = testUserActor();
+    const controller = new AbortController();
+    const cancellationError = new Error("client cancelled");
+    conversationTurnFindManyMock.mockResolvedValueOnce([{
+      sequenceNumber: 5,
+      userMessage: "Earlier context",
+      assistantMessage: "Earlier response",
+    }]);
+
+    async function* canceledModelStream() {
+      yield "Partial answer";
+      controller.abort(cancellationError);
+      throw cancellationError;
+    }
+
+    chatStreamMock.mockReturnValueOnce(canceledModelStream());
+
+    const { processConversationTurnStream } = await import("./conversation");
+    const stream = processConversationTurnStream({
+      workspaceId: "ws-1",
+      sessionId: "session-1",
+      userId: "user-1",
+      agentKey: "assistant",
+      userMessage: "Summarize the workspace.",
+      actor,
+      signal: controller.signal,
+    });
+
+    await expect(stream.next()).resolves.toMatchObject({
+      done: false,
+      value: "Partial answer",
+    });
+
+    await expect(stream.next()).rejects.toThrow("client cancelled");
+    expect(storeAgentMemoryMock).not.toHaveBeenCalled();
+  });
+
   it("answers explicit CRM due-work tool commands without invoking the model", async () => {
     const actor = testUserActor();
 
@@ -1276,6 +1351,92 @@ describe("processConversationTurn", () => {
       accountId: "account-1",
       type: "TASK",
       completion: "open",
+    }));
+  });
+
+  it("closes the follow-up model stream when the conversation stream is canceled after tools", async () => {
+    const actor = testUserActor();
+    let followupModelStreamClosed = false;
+
+    async function* cancellableFollowupStream() {
+      try {
+        yield "Follow-up answer";
+      } finally {
+        followupModelStreamClosed = true;
+      }
+    }
+
+    chatStreamMock
+      .mockReturnValueOnce(streamResponse([], {
+        content: "",
+        tool_calls: [{
+          id: "call-1",
+          function: {
+            name: "list_due_relationship_work",
+            arguments: JSON.stringify({ accountId: "account-1", take: 5 }),
+          },
+        }],
+      }))
+      .mockReturnValueOnce(cancellableFollowupStream());
+
+    const { processConversationTurnStream } = await import("./conversation");
+    const stream = processConversationTurnStream({
+      workspaceId: "ws-1",
+      sessionId: "session-1",
+      userId: "user-1",
+      agentKey: "assistant",
+      userMessage: "Use list_due_relationship_work for selected account account-1.",
+      actor,
+      pageContext: crmPageContext(),
+    });
+
+    await expect(stream.next()).resolves.toMatchObject({
+      done: false,
+      value: "Follow-up answer",
+    });
+
+    await stream.return({
+      assistantMessage: "",
+      contextUsed: {},
+    });
+
+    expect(followupModelStreamClosed).toBe(true);
+  });
+
+  it("passes the abort signal to first and follow-up model streams", async () => {
+    const actor = testUserActor();
+    const controller = new AbortController();
+    chatStreamMock
+      .mockReturnValueOnce(streamResponse([], {
+        content: "",
+        tool_calls: [{
+          id: "call-1",
+          function: {
+            name: "list_due_relationship_work",
+            arguments: JSON.stringify({ accountId: "account-1", take: 5 }),
+          },
+        }],
+      }))
+      .mockReturnValueOnce(streamResponse(["Follow-up answer"], { content: "Follow-up answer" }));
+
+    const { processConversationTurnStream } = await import("./conversation");
+    const { result } = await collectConversationStream(processConversationTurnStream({
+      workspaceId: "ws-1",
+      sessionId: "session-1",
+      userId: "user-1",
+      agentKey: "assistant",
+      userMessage: "Use list_due_relationship_work for selected account account-1.",
+      actor,
+      pageContext: crmPageContext(),
+      signal: controller.signal,
+    }));
+
+    expect(result.assistantMessage).toContain("Follow-up answer");
+    expect(chatStreamMock).toHaveBeenNthCalledWith(1, expect.objectContaining({
+      signal: controller.signal,
+    }));
+    expect(chatStreamMock).toHaveBeenNthCalledWith(2, expect.objectContaining({
+      signal: controller.signal,
     }));
   });
 

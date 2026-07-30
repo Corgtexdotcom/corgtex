@@ -10,6 +10,7 @@ import {
   type NewspaperWeekday,
 } from "@corgtex/domain";
 import { revalidatePath } from "next/cache";
+import { assertAgentModelOverrideAllowed } from "../../agents/model-override-options";
 
 export async function toggleAgentAction(workspaceId: string, agentKey: string, enabled: boolean) {
   const actor = await requirePageActor();
@@ -19,6 +20,7 @@ export async function toggleAgentAction(workspaceId: string, agentKey: string, e
 
 export async function updateAgentModelAction(workspaceId: string, agentKey: string, modelOverride: string | null) {
   const actor = await requirePageActor();
+  assertAgentModelOverrideAllowed(modelOverride);
   await updateAgentConfig(actor, { workspaceId, agentKey, modelOverride });
   revalidatePath(`/workspaces/${workspaceId}/settings/agents`);
 }

@@ -58,11 +58,15 @@ describe("env", () => {
     delete process.env.MODEL_CHAT_EXCELLENT;
     delete process.env.MODEL_CHAT_CONVERSATION;
     delete process.env.MODEL_EMBEDDING_DEFAULT;
+    delete process.env.MODEL_PROVIDER_ROUTES_JSON;
+    delete process.env.MODEL_OMIT_TEMPERATURE_MODELS;
 
     const { env } = await import("./env");
 
     expect(env.MODEL_PROVIDER).toBe("openrouter");
     expect(env.MODEL_BASE_URL).toBe("https://openrouter.ai/api/v1");
+    expect(env.MODEL_PROVIDER_ROUTES_JSON).toBeUndefined();
+    expect(env.MODEL_OMIT_TEMPERATURE_MODELS).toBeUndefined();
     expect(env.MODEL_CHAT_DEFAULT).toBe("deepseek/deepseek-v4-flash");
     expect(env.MODEL_CHAT_FAST).toBe("deepseek/deepseek-v4-flash");
     expect(env.MODEL_CHAT_STANDARD).toBe("deepseek/deepseek-v4-flash");
@@ -87,6 +91,20 @@ describe("env", () => {
     expect(env.AZURE_OPENAI_AUTH_MODE).toBe("managed_identity");
     expect(env.AZURE_OPENAI_SCOPE).toBe("https://example.azure.test/.default");
     expect(env.AZURE_CLIENT_ID).toBe("client-id");
+  });
+
+  it("exposes optional per-model provider route configuration", async () => {
+    restoreEnv();
+    Object.assign(process.env, {
+      NODE_ENV: "development",
+      MODEL_PROVIDER_ROUTES_JSON: "[{\"model\":\"corgtex-gpt56-luna\",\"provider\":\"azure-foundry\"}]",
+      MODEL_OMIT_TEMPERATURE_MODELS: "corgtex-luna-enterprise",
+    });
+
+    const { env } = await import("./env");
+
+    expect(env.MODEL_PROVIDER_ROUTES_JSON).toBe("[{\"model\":\"corgtex-gpt56-luna\",\"provider\":\"azure-foundry\"}]");
+    expect(env.MODEL_OMIT_TEMPERATURE_MODELS).toBe("corgtex-luna-enterprise");
   });
 
   it("rejects unsupported Azure OpenAI auth modes", async () => {

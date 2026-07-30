@@ -1,5 +1,6 @@
 import { AgentConnectionManager } from "../settings/AgentConnectionManager";
 import { AgentModelOverride } from "./AgentModelOverride";
+import { agentModelOverrideOptions } from "./model-override-options";
 import { listAgentCredentials, listAgentConfigs, DEFAULT_SCOPES, SCOPE_REGISTRY } from "@corgtex/domain";
 import type { AppActor } from "@corgtex/shared";
 import { getTranslations } from "next-intl/server";
@@ -17,6 +18,7 @@ export async function AccessControlTab({
     listAgentCredentials(actor, workspaceId),
     listAgentConfigs(actor, workspaceId),
   ]);
+  const modelOverrideOptions = agentModelOverrideOptions();
   const t = await getTranslations("agents");
 
   return (
@@ -34,7 +36,7 @@ export async function AccessControlTab({
                 <div style={{ fontWeight: 600 }}>{agent.label}</div>
                 <div className="nr-item-meta" style={{ fontSize: "0.85rem" }}>{agent.description}</div>
               </div>
-              <AgentModelOverride workspaceId={workspaceId} agent={agent} />
+              <AgentModelOverride workspaceId={workspaceId} agent={agent} modelOverrideOptions={modelOverrideOptions} />
             </div>
           ))}
         </div>

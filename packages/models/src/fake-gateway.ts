@@ -33,6 +33,46 @@ function usageContext(request: {
   };
 }
 
+function abortedError(signal?: AbortSignal) {
+  if (signal?.reason instanceof Error) {
+    return signal.reason;
+  }
+  return new DOMException("The operation was aborted.", "AbortError");
+}
+
+function throwIfAborted(signal?: AbortSignal) {
+  if (signal?.aborted) {
+    throw abortedError(signal);
+  }
+}
+
+async function delay(ms: number, signal?: AbortSignal) {
+  throwIfAborted(signal);
+  await new Promise<void>((resolve, reject) => {
+    let timeout: ReturnType<typeof setTimeout> | null = null;
+    const cleanup = () => {
+      signal?.removeEventListener("abort", abort);
+      if (timeout) {
+        clearTimeout(timeout);
+        timeout = null;
+      }
+    };
+    const abort = () => {
+      cleanup();
+      reject(abortedError(signal));
+    };
+    timeout = setTimeout(() => {
+      cleanup();
+      resolve();
+    }, ms);
+    signal?.addEventListener("abort", abort, { once: true });
+    if (signal?.aborted) {
+      abort();
+    }
+  });
+  throwIfAborted(signal);
+}
+
 function fakeEmbeddingVector(input: string, size = 16) {
   const vector = Array.from({ length: size }, () => 0);
   const normalized = input.trim().toLowerCase();
@@ -74,11 +114,13 @@ async function recordUsage(input: ModelUsageInput) {
 export const fakeModelGateway: ModelGateway = {
   async chat(request: ChatCompletionRequest) {
     const startedAt = Date.now();
+    throwIfAborted(request.signal);
     await assertWorkspaceModelBudget(request.workspaceId);
     await assertCatalogModelBudget({
       workspaceId: request.workspaceId,
       ...usageContext(request),
     });
+    throwIfAborted(request.signal);
     const content = groundedResponse(request)
       ?? `FAKE_MODEL_RESPONSE\n\n${request.messages.map((message) => `${message.role}: ${message.content}`).join("\n\n")}`;
     const latencyMs = Date.now() - startedAt;
@@ -103,8 +145,9 @@ export const fakeModelGateway: ModelGateway = {
     const response = await this.chat(request);
     const words = response.content.split(" ");
     for (const word of words) {
+      throwIfAborted(request.signal);
       yield word + " ";
-      await new Promise(r => setTimeout(r, 10)); // tiny mock delay
+      await delay(10, request.signal);
     }
     return response;
   },

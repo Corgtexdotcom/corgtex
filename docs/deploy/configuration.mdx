@@ -47,10 +47,16 @@ By default, the platform relies on external Large Language Models to power the O
 
 | Variable | Description |
 |---|---|
-| `MODEL_PROVIDER` | Defines which LLM gateway to use. Valid options: `openrouter`, `openai`. |
-| `MODEL_API_KEY` | Your API key for the chosen provider. |
+| `MODEL_PROVIDER` | Defines which LLM gateway to use. Valid options: `openrouter`, `openai`, `azure-openai`, `azure-foundry`. |
+| `MODEL_API_KEY` | Your API key for OpenAI-compatible non-Azure providers. |
+| `MODEL_BASE_URL` | OpenAI-compatible v1 base URL. For Azure Foundry keyless auth, use the Azure AI Services `/openai/v1` endpoint. |
+| `MODEL_PROVIDER_ROUTES_JSON` | Optional exact model-to-provider route map for canaries and rollback routes. |
+| `AZURE_OPENAI_AUTH_MODE` | `api_key` or `managed_identity` for Azure OpenAI-compatible providers. |
+| `AZURE_OPENAI_API_KEY` | Azure API key when API key authentication is approved. |
 | `MODEL_CHAT_DEFAULT` | The specific model string to use for conversational features (e.g., `google/gemma-4-31b-it`). |
 | `MODEL_EMBEDDING_DEFAULT` | The specific model string to use for vector embeddings (e.g., `text-embedding-3-small`). |
+| `MODEL_PRICE_OVERRIDES_JSON` | Required for Azure deployments without built-in pricing. |
+| `MODEL_OMIT_TEMPERATURE_MODELS` | Optional comma-separated deployment aliases whose provider rejects `temperature`; `corgtex-gpt56-luna` is always treated this way. |
 | `KNOWLEDGE_SEARCH_PROVIDER` | Retrieval backend for indexed Brain chunks. Defaults to `postgres`; set to `azure` or `dual_compare` after Azure Search is configured and backfilled. |
 | `AZURE_SEARCH_ENDPOINT` | Azure AI Search service endpoint, for example `https://example.search.windows.net`. Required for Azure retrieval. |
 | `AZURE_SEARCH_INDEX_NAME` | Per-deployment Azure Search index name for Corgtex knowledge chunks. |
