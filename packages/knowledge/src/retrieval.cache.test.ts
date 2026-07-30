@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const { prismaMock, modelGatewayMock } = vi.hoisted(() => {
   const knowledgeChunkMock = {
@@ -75,6 +75,10 @@ describe("knowledge retrieval cache", () => {
     modelGatewayMock.embed.mockClear();
     modelGatewayMock.rerank.mockClear();
     modelGatewayMock.chat.mockClear();
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
   });
 
   it("reuses cached search results for repeated queries", async () => {
@@ -372,12 +376,15 @@ describe("knowledge retrieval cache", () => {
     });
   });
 
-  it("falls back to Postgres retrieval when Azure Search is enabled but unavailable", async () => {
+  it("falls back to domain-filtered Postgres retrieval when a query-only Azure index is not upgraded", async () => {
     process.env.KNOWLEDGE_SEARCH_PROVIDER = "azure";
     process.env.AZURE_SEARCH_ENDPOINT = "https://corgtex-search.search.windows.net";
     process.env.AZURE_SEARCH_INDEX_NAME = "client-knowledge";
     process.env.AZURE_SEARCH_QUERY_KEY = "query-key";
-    process.env.AZURE_SEARCH_VECTOR_DIMENSIONS = "1536";
+    process.env.AZURE_SEARCH_VECTOR_DIMENSIONS = "2";
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({
+      error: { message: "Invalid expression: Could not find a property named 'accessDomain'." },
+    }), { status: 400 })));
 
     prismaMock.knowledgeChunk.findMany.mockResolvedValue([
       {
@@ -407,6 +414,7 @@ describe("knowledge retrieval cache", () => {
     expect(prismaMock.knowledgeChunk.findMany.mock.calls[0]?.[0]).toMatchObject({
       where: { accessDomain: { in: ["FINANCE"] } },
     });
+    expect(fetch).toHaveBeenCalledTimes(1);
     expect(modelGatewayMock.embed).toHaveBeenCalledTimes(2);
     expect(modelGatewayMock.rerank).toHaveBeenCalledTimes(1);
   });

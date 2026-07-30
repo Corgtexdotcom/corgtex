@@ -5,14 +5,16 @@ import {
   mapKnowledgeChunkToAzureDocument,
   normalizeKnowledgeAccessDomains,
   searchAzureKnowledge,
+  syncAzureKnowledgeSource,
   uploadAzureKnowledgeDocuments,
 } from "./azure-search";
 
 const ORIGINAL_ENV = { ...process.env };
+let indexSequence = 0;
 
 function configureAzureSearchEnv() {
   process.env.AZURE_SEARCH_ENDPOINT = "https://corgtex-search.search.windows.net/";
-  process.env.AZURE_SEARCH_INDEX_NAME = "client-knowledge";
+  process.env.AZURE_SEARCH_INDEX_NAME = `client-knowledge-${indexSequence++}`;
   process.env.AZURE_SEARCH_AUTH_MODE = "api_key";
   process.env.AZURE_SEARCH_ADMIN_KEY = "admin-key";
   process.env.AZURE_SEARCH_QUERY_KEY = "query-key";
@@ -79,7 +81,9 @@ describe("Azure knowledge search adapter", () => {
 
   it("uploads documents with mergeOrUpload actions using the admin key", async () => {
     const fetchMock = vi.mocked(fetch);
-    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({ value: [{ key: "chunk-1", status: true, statusCode: 201 }] }), { status: 200 }));
+    fetchMock
+      .mockResolvedValueOnce(new Response(JSON.stringify({ name: process.env.AZURE_SEARCH_INDEX_NAME }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ value: [{ key: "chunk-1", status: true, statusCode: 201 }] }), { status: 200 }));
 
     await uploadAzureKnowledgeDocuments([
       mapKnowledgeChunkToAzureDocument({
@@ -98,8 +102,9 @@ describe("Azure knowledge search adapter", () => {
       }),
     ]);
 
-    const [url, init] = fetchMock.mock.calls[0];
-    expect(String(url)).toContain("/indexes('client-knowledge')/docs/search.index?api-version=2026-04-01");
+    expect(String(fetchMock.mock.calls[0]?.[0])).toContain(`/indexes('${process.env.AZURE_SEARCH_INDEX_NAME}')?api-version=2026-04-01`);
+    const [url, init] = fetchMock.mock.calls[1];
+    expect(String(url)).toContain(`/indexes('${process.env.AZURE_SEARCH_INDEX_NAME}')/docs/search.index?api-version=2026-04-01`);
     expect((init?.headers as Record<string, string>)["api-key"]).toBe("admin-key");
     expect(JSON.parse(String(init?.body))).toMatchObject({
       value: [
@@ -113,18 +118,20 @@ describe("Azure knowledge search adapter", () => {
 
   it("queries Azure Search with workspace filters, semantic ranking, and vector search", async () => {
     const fetchMock = vi.mocked(fetch);
-    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({
-      value: [{
-        "@search.score": 1.2,
-        "@search.rerankerScore": 2.5,
-        id: "chunk-1",
-        sourceType: "SLACK",
-        sourceId: "message-1",
-        sourceTitle: "Slack thread",
-        chunkIndex: 0,
-        content: "Jan mentioned the name.",
-      }],
-    }), { status: 200 }));
+    fetchMock
+      .mockResolvedValueOnce(new Response(JSON.stringify({ name: process.env.AZURE_SEARCH_INDEX_NAME }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        value: [{
+          "@search.score": 1.2,
+          "@search.rerankerScore": 2.5,
+          id: "chunk-1",
+          sourceType: "SLACK",
+          sourceId: "message-1",
+          sourceTitle: "Slack thread",
+          chunkIndex: 0,
+          content: "Jan mentioned the name.",
+        }],
+      }), { status: 200 }));
 
     const results = await searchAzureKnowledge({
       workspaceId: "ws-1",
@@ -142,7 +149,7 @@ describe("Azure knowledge search adapter", () => {
       sourceId: "message-1",
       score: 2.5,
     });
-    const [, init] = fetchMock.mock.calls[0];
+    const [, init] = fetchMock.mock.calls[1];
     expect((init?.headers as Record<string, string>)["api-key"]).toBe("query-key");
     const body = JSON.parse(String(init?.body));
     expect(body).toMatchObject({
@@ -171,7 +178,7 @@ describe("Azure knowledge search adapter", () => {
       accessDomains: ["FINANCE"],
     });
 
-    const [, init] = vi.mocked(fetch).mock.calls[0];
+    const [, init] = vi.mocked(fetch).mock.calls[1];
     const body = JSON.parse(String(init?.body));
     expect(body.filter).toContain("search.in(accessDomain, 'FINANCE')");
     expect(body.filter).not.toContain("accessDomain eq null");
@@ -198,8 +205,45 @@ describe("Azure knowledge search adapter", () => {
     await createOrUpdateAzureKnowledgeIndex();
 
     const [url, init] = fetchMock.mock.calls[0];
-    expect(String(url)).toContain("/indexes('client-knowledge')?api-version=2026-04-01");
+    expect(String(url)).toContain(`/indexes('${process.env.AZURE_SEARCH_INDEX_NAME}')?api-version=2026-04-01`);
     expect(init?.method).toBe("PUT");
     expect((init?.headers as Record<string, string>)["api-key"]).toBe("admin-key");
+  });
+
+  it("upgrades the index before a source sync deletes prior documents", async () => {
+    const fetchMock = vi.mocked(fetch);
+    fetchMock
+      .mockResolvedValueOnce(new Response(JSON.stringify({ name: process.env.AZURE_SEARCH_INDEX_NAME }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ value: [{ id: "old-chunk" }] }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ value: [{ key: "old-chunk", status: true }] }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ value: [] }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ value: [{ key: "new-chunk", status: true }] }), { status: 200 }));
+
+    await syncAzureKnowledgeSource({
+      workspaceId: "ws-1",
+      sourceType: "DOCUMENT",
+      sourceId: "report-1",
+      chunks: [{
+        id: "new-chunk",
+        workspaceId: "ws-1",
+        sourceType: "DOCUMENT",
+        accessDomain: "FINANCE",
+        sourceId: "report-1",
+        sourceTitle: "Finance report",
+        chunkIndex: 0,
+        content: "Revenue actuals",
+        embedding: [1, 0],
+        metadata: {},
+        sensitivity: "CONFIDENTIAL",
+      }],
+    });
+
+    expect(String(fetchMock.mock.calls[0]?.[0])).toContain(`/indexes('${process.env.AZURE_SEARCH_INDEX_NAME}')?`);
+    expect(String(fetchMock.mock.calls[1]?.[0])).toContain("/docs/search?");
+    expect(String(fetchMock.mock.calls[2]?.[0])).toContain("/docs/search.index?");
+    expect(String(fetchMock.mock.calls[4]?.[0])).toContain("/docs/search.index?");
+    expect(JSON.parse(String(fetchMock.mock.calls[4]?.[1]?.body))).toMatchObject({
+      value: [expect.objectContaining({ id: "new-chunk", accessDomain: "FINANCE" })],
+    });
   });
 });
