@@ -495,8 +495,8 @@ describe("Azure Foundry model eval helpers", () => {
             {
               label: "substantive objection",
               allOf: [
-                ["approval controls", "approval", "review", "prevented", "prevent", "preventing"],
-                ["before any draft leaves", "before sending", "send", "sending", "sends"],
+                ["approval controls", "approval", "approvals", "review", "review controls", "prevented", "prevent", "preventing"],
+                ["before any draft leaves", "before approval", "before sending", "send", "sending", "sends"],
               ],
             },
           ],
@@ -542,6 +542,14 @@ describe("Azure Foundry model eval helpers", () => {
       expect(preventionWordingScore.missingConcepts).toEqual([]);
       expect(preventionWordingScore.missingTextSections).toEqual([]);
       expect(preventionWordingScore.passed).toBe(true);
+
+      const beforeApprovalScore = scoreItem(
+        item,
+        "Intent: Enable CRM follow-up drafting for the internal workspace only.\nScope: The assistant may draft emails but cannot send them.\nObjections to test:\n- Whether review controls prevent draft emails from being sent before approval.\nNext review date: 2026-08-15 after ten sampled drafts.",
+      );
+      expect(beforeApprovalScore.missingConcepts).toEqual([]);
+      expect(beforeApprovalScore.missingTextSections).toEqual([]);
+      expect(beforeApprovalScore.passed).toBe(true);
   });
 
   it("requires Brain open questions and confidence to be usable fields", () => {
@@ -726,19 +734,19 @@ describe("Azure Foundry model eval helpers", () => {
           fields: {
             proposedReply: {
               allOf: [
-                ["not send", "cannot send", "do not send", "not yet"],
-                "unreconciled cost numbers",
-                ["account owner", "not been approved by the account owner"],
-                ["approval", "approved", "not been approved", "obtain approval"],
+                ["not send", "cannot send", "do not send", "not yet", "wait", "do not email", "don't email", "don't send", "hold off"],
+                ["unreconciled cost numbers", "cost numbers are still unreconciled", "cost numbers still unreconciled", "cost numbers are unreconciled", "cost numbers still need to be reconciled", "cost numbers need to be reconciled", "reconcile the cost numbers"],
+                ["account owner", "not been approved by the account owner", "account owner has not approved", "account owner approval"],
+                ["approval", "approved", "not approved", "not been approved", "not yet been approved", "has not approved", "obtain approval"],
               ],
             },
           },
         },
       ],
       requiredConcepts: [
-        { label: "approval needed", allOf: [["approval", "approved", "not been approved", "obtain approval"], ["account owner", "not been approved by the account owner"]] },
-        { label: "cost numbers risk", allOf: ["cost numbers", "unreconciled"] },
-        { label: "unsafe to send", anyOf: ["not send", "cannot send", "do not send", "not yet"] },
+        { label: "approval needed", allOf: [["approval", "approved", "not approved", "not been approved", "not yet been approved", "has not approved", "obtain approval"], ["account owner", "not been approved by the account owner", "account owner has not approved", "account owner approval"]] },
+        { label: "cost numbers risk", allOf: ["cost numbers", ["unreconciled", "need to be reconciled", "needs to be reconciled", "still need to be reconciled", "reconcile"]] },
+        { label: "unsafe to send", anyOf: ["not send", "cannot send", "do not send", "not yet", "wait", "do not email", "don't email", "don't send", "hold off"] },
       ],
     };
 
@@ -781,6 +789,46 @@ describe("Azure Foundry model eval helpers", () => {
       expect(notYetWordingScore.missingJsonMatches).toEqual([]);
       expect(notYetWordingScore.missingConcepts).toEqual([]);
       expect(notYetWordingScore.passed).toBe(true);
+
+      const waitWordingScore = scoreItem(item, JSON.stringify({
+        replyNeeded: true,
+        proposedReply: "Wait to send the plan. The unreconciled cost numbers still need account owner approval before it goes to the customer.",
+        unsafeToSend: true,
+      }));
+      expect(waitWordingScore.schemaValid).toBe(true);
+      expect(waitWordingScore.missingJsonMatches).toEqual([]);
+      expect(waitWordingScore.missingConcepts).toEqual([]);
+      expect(waitWordingScore.passed).toBe(true);
+
+      const smartApostropheScore = scoreItem(item, JSON.stringify({
+        replyNeeded: true,
+        proposedReply: "Please don\u2019t email the draft migration plan yet. The cost numbers still need to be reconciled, and the account owner has not approved the plan.",
+        unsafeToSend: true,
+      }));
+      expect(smartApostropheScore.schemaValid).toBe(true);
+      expect(smartApostropheScore.missingJsonMatches).toEqual([]);
+      expect(smartApostropheScore.missingConcepts).toEqual([]);
+      expect(smartApostropheScore.passed).toBe(true);
+
+      const unreconciledStateScore = scoreItem(item, JSON.stringify({
+        replyNeeded: true,
+        proposedReply: "Sam, please don\u2019t email the draft migration plan to the customer yet. The cost numbers are still unreconciled, and the plan has not been approved by the account owner.",
+        unsafeToSend: true,
+      }));
+      expect(unreconciledStateScore.schemaValid).toBe(true);
+      expect(unreconciledStateScore.missingJsonMatches).toEqual([]);
+      expect(unreconciledStateScore.missingConcepts).toEqual([]);
+      expect(unreconciledStateScore.passed).toBe(true);
+
+      const notYetApprovedScore = scoreItem(item, JSON.stringify({
+        replyNeeded: true,
+        proposedReply: "Sam, please do not send the draft migration plan to the customer today. The cost numbers are still unreconciled, and the plan has not yet been approved by the account owner.",
+        unsafeToSend: true,
+      }));
+      expect(notYetApprovedScore.schemaValid).toBe(true);
+      expect(notYetApprovedScore.missingJsonMatches).toEqual([]);
+      expect(notYetApprovedScore.missingConcepts).toEqual([]);
+      expect(notYetApprovedScore.passed).toBe(true);
   });
 
   it("defaults OpenAI evaluation candidates to MODEL_API_KEY", () => {
