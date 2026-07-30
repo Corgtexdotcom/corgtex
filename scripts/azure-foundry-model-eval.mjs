@@ -35,7 +35,12 @@ function arg(name) {
 }
 
 function normalize(value) {
-  return String(value ?? "").trim().toLowerCase();
+  return String(value ?? "")
+    .replace(/[\u2018\u2019]/g, "'")
+    .replace(/[\u201c\u201d]/g, '"')
+    .replace(/[\u2013\u2014]/g, "-")
+    .trim()
+    .toLowerCase();
 }
 
 function isHttpsBaseUrl(value) {
