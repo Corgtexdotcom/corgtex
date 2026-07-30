@@ -158,6 +158,22 @@ describe("Finance V2 access policy", () => {
     });
   });
 
+  it("keeps report imports off unless the parent Finance config explicitly enables them", async () => {
+    const { financeReportImportsEnabledFromConfig } = await import("./finance");
+
+    expect(financeReportImportsEnabledFromConfig(null)).toBe(false);
+    expect(financeReportImportsEnabledFromConfig({ financeCapabilities: {} })).toBe(false);
+    expect(financeReportImportsEnabledFromConfig({
+      financeCapabilities: { reportImports: false },
+    })).toBe(false);
+    expect(financeReportImportsEnabledFromConfig({
+      financeCapabilities: { reportImports: "true" },
+    })).toBe(false);
+    expect(financeReportImportsEnabledFromConfig({
+      financeCapabilities: { reportImports: true },
+    })).toBe(true);
+  });
+
   it("requires the finance read scope for credential agents", async () => {
     requireAgentScopeMock.mockImplementationOnce(() => {
       throw Object.assign(new Error("Agent credential is missing the required scope."), {
@@ -630,6 +646,7 @@ describe("Finance V2 access policy", () => {
           financeCapabilities: {
             projects: true,
             slicingPie: true,
+            reportImports: true,
           },
         },
       },
@@ -652,6 +669,9 @@ describe("Finance V2 access policy", () => {
       access: {
         financeAllMemberWrite: true,
         canWrite: true,
+      },
+      capabilities: {
+        reportImports: true,
       },
       counts: {
         clients: 2,

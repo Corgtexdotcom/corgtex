@@ -9,6 +9,7 @@ import { defaultWorkspaceFeatureFlags, getModuleByKey, isAtLeast, type MemberRol
 export const FINANCE_PARENT_FLAG = "FINANCE";
 export const FINANCE_ALL_MEMBER_WRITE_CONFIG_KEY = "financeAllMemberWrite";
 export const FINANCE_CAPABILITIES_CONFIG_KEY = "financeCapabilities";
+export const FINANCE_REPORT_IMPORT_CAPABILITY_KEY = "reportImports";
 
 export const FINANCE_SECTIONS = [
   { key: "overview", label: "Overview", href: "/finance", flag: null },
@@ -74,6 +75,12 @@ export function financeCapabilitiesFromConfig(config: unknown): Partial<Record<F
   return capabilities;
 }
 
+export function financeReportImportsEnabledFromConfig(config: unknown): boolean {
+  if (!isRecord(config)) return false;
+  const rawCapabilities = config[FINANCE_CAPABILITIES_CONFIG_KEY];
+  return isRecord(rawCapabilities) && rawCapabilities[FINANCE_REPORT_IMPORT_CAPABILITY_KEY] === true;
+}
+
 function resolveFinanceSectionCapabilities(flags: Record<string, boolean>, config: unknown): Record<FinanceSectionKey, boolean> {
   const capabilities = financeCapabilitiesFromConfig(config);
   const financeEnabled = Boolean(flags[FINANCE_PARENT_FLAG]);
@@ -136,6 +143,7 @@ async function financeFlagState(workspaceId: string) {
   return {
     flags,
     sectionCapabilities: resolveFinanceSectionCapabilities(flags, financeConfig),
+    reportImportsEnabled: financeReportImportsEnabledFromConfig(financeConfig),
     financeConfig,
     updatedAtByFlag,
   };
@@ -221,6 +229,7 @@ export async function getFinanceAccessPolicy(actor: AppActor, workspaceId: strin
     workspaceId,
     financeEnabled,
     financeAllMemberWrite,
+    reportImportsEnabled: flagState.reportImportsEnabled,
     member: membership,
     role: memberRole,
     canRead,
@@ -483,6 +492,9 @@ export async function getFinanceReadiness(actor: AppActor, workspaceId: string) 
       canRead: policy.canRead,
       canWrite: policy.canWrite,
       financeAllMemberWrite: policy.financeAllMemberWrite,
+    },
+    capabilities: {
+      reportImports: policy.reportImportsEnabled,
     },
     counts: {
       clients,

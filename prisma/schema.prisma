@@ -415,6 +415,40 @@ enum FinanceEntryStatus {
   ARCHIVED
 }
 
+enum FinanceReportType {
+  PROFIT_AND_LOSS
+  BALANCE_SHEET
+  CASH_FLOW
+  TRIAL_BALANCE
+  OTHER
+}
+
+enum FinanceAccountingBasis {
+  CASH
+  ACCRUAL
+  UNSPECIFIED
+}
+
+enum FinanceReportCadence {
+  DAILY
+  WEEKLY
+  MONTHLY
+  QUARTERLY
+  ANNUAL
+  CUSTOM
+}
+
+enum FinanceReportStatus {
+  ACTIVE
+  SUPERSEDED
+  ARCHIVED
+}
+
+enum FinanceReportFactKind {
+  LEAF
+  DERIVED
+}
+
 enum FinanceContributionType {
   TIME
   EXPENSE
@@ -717,6 +751,7 @@ model Workspace {
   financeTimeEntries             FinanceTimeEntry[]
   financeExpenses                FinanceExpense[]
   financeContributionEntries     FinanceContributionEntry[]
+  financeReports                 FinanceReport[]
   appInstallations               AppInstallation[]
   appSurfaceAssignments          AppSurfaceAssignment[]
   appSessions                    AppSession[]
@@ -902,6 +937,57 @@ model FinanceContributionEntry {
   @@index([workspaceId, paymentChoice])
   @@index([workspaceId, cashStatus])
   @@index([workspaceId, updatedAt])
+}
+
+model FinanceReport {
+  id            String                 @id @default(uuid())
+  workspaceId   String
+  reportType    FinanceReportType
+  basis         FinanceAccountingBasis
+  cadence       FinanceReportCadence
+  currency      String                 @db.VarChar(3)
+  periodStart   DateTime               @db.Date
+  periodEnd     DateTime               @db.Date
+  asOfDate      DateTime?              @db.Date
+  title         String                 @db.VarChar(200)
+  status        FinanceReportStatus    @default(ACTIVE)
+  sourceBatchId String                 @unique
+  version       Int                    @default(1)
+  createdAt     DateTime               @default(now())
+  updatedAt     DateTime               @updatedAt
+
+  workspace Workspace           @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  facts     FinanceReportFact[]
+
+  @@index([workspaceId, status])
+  @@index([workspaceId, periodEnd])
+  @@unique([id, workspaceId])
+}
+
+model FinanceReportFact {
+  id                String                @id @default(uuid())
+  workspaceId       String
+  reportId          String
+  accountPath       String[]
+  kind              FinanceReportFactKind
+  periodStart       DateTime              @db.Date
+  periodEnd         DateTime              @db.Date
+  amountCents       Int
+  dimensions        Json?
+  semanticKey       String                @db.VarChar(64)
+  sourceBatchId     String
+  sourceCandidateId String                @unique
+  appliedByUserId   String
+  version           Int                   @default(1)
+  createdAt         DateTime              @default(now())
+  updatedAt         DateTime              @updatedAt
+
+  report FinanceReport @relation(fields: [reportId, workspaceId], references: [id, workspaceId], onDelete: Cascade)
+
+  @@unique([workspaceId, semanticKey])
+  @@index([workspaceId, reportId])
+  @@index([workspaceId, periodStart, periodEnd])
+  @@index([sourceBatchId])
 }
 
 enum ModuleGrantPrincipalType {
