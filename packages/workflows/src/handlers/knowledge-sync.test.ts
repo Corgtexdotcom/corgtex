@@ -25,6 +25,9 @@ const {
     communicationChannel: {
       findUnique: vi.fn(),
     },
+    document: {
+      findUnique: vi.fn(),
+    },
     knowledgeChunk: {
       deleteMany: vi.fn(),
     },
@@ -83,6 +86,37 @@ function slackMessage(overrides: Record<string, unknown> = {}) {
     ...overrides,
   };
 }
+
+describe("handleDocumentKnowledgeSync", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    prismaMock.document.findUnique.mockResolvedValue({
+      id: "document-1",
+      workspaceId: "workspace-1",
+      title: "Synthetic finance report",
+      source: "UPLOAD",
+      mimeType: "application/pdf",
+      storageKey: "synthetic/report.pdf",
+      textContent: "Synthetic reported actuals",
+      accessDomain: "FINANCE",
+    });
+    syncKnowledgeForSourceMock.mockResolvedValue(undefined);
+  });
+
+  it("propagates the document access domain into chunk indexing", async () => {
+    const { handleDocumentKnowledgeSync } = await import("./knowledge-sync");
+
+    await handleDocumentKnowledgeSync("job-1", { documentId: "document-1" }, "workspace-1");
+
+    expect(syncKnowledgeForSourceMock).toHaveBeenCalledWith(expect.objectContaining({
+      workspaceId: "workspace-1",
+      sourceType: "DOCUMENT",
+      accessDomain: "FINANCE",
+      sourceId: "document-1",
+      workflowJobId: "job-1",
+    }));
+  });
+});
 
 describe("handleSlackMessageKnowledgeSync", () => {
   beforeEach(() => {
