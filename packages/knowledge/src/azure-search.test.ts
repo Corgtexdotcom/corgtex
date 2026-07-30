@@ -3,6 +3,7 @@ import {
   buildAzureKnowledgeIndexDefinition,
   createOrUpdateAzureKnowledgeIndex,
   mapKnowledgeChunkToAzureDocument,
+  normalizeKnowledgeAccessDomains,
   searchAzureKnowledge,
   uploadAzureKnowledgeDocuments,
 } from "./azure-search";
@@ -36,6 +37,7 @@ describe("Azure knowledge search adapter", () => {
     expect(definition.fields).toEqual(expect.arrayContaining([
       expect.objectContaining({ name: "id", key: true }),
       expect.objectContaining({ name: "workspaceId", filterable: true }),
+      expect.objectContaining({ name: "accessDomain", filterable: true, facetable: true }),
       expect.objectContaining({ name: "contentVector", dimensions: 2, vectorSearchProfile: "knowledge-vector-profile" }),
     ]));
     expect(definition.semantic.defaultConfiguration).toBe("knowledge-semantic");
@@ -51,6 +53,7 @@ describe("Azure knowledge search adapter", () => {
       id: "chunk-1",
       workspaceId: "ws-1",
       sourceType: "MEETING",
+      accessDomain: "FINANCE",
       sourceId: "meeting-1",
       sourceTitle: "Weekly sync",
       chunkIndex: 2,
@@ -65,6 +68,7 @@ describe("Azure knowledge search adapter", () => {
       id: "chunk-1",
       workspaceId: "ws-1",
       sourceType: "MEETING",
+      accessDomain: "FINANCE",
       sourceId: "meeting-1",
       chunkIndex: 2,
       contentVector: [0.1, 0.2],
@@ -82,6 +86,7 @@ describe("Azure knowledge search adapter", () => {
         id: "chunk-1",
         workspaceId: "ws-1",
         sourceType: "DOCUMENT",
+        accessDomain: "WORKSPACE",
         sourceId: "doc-1",
         sourceTitle: "Policy",
         chunkIndex: 0,
@@ -128,6 +133,7 @@ describe("Azure knowledge search adapter", () => {
       limit: 4,
       sourceTypes: ["SLACK"],
       maxSensitivity: "INTERNAL",
+      accessDomains: ["FINANCE", "WORKSPACE", "FINANCE"],
     });
 
     expect(results[0]).toMatchObject({
@@ -146,6 +152,8 @@ describe("Azure knowledge search adapter", () => {
       vectorFilterMode: "preFilter",
     });
     expect(body.filter).toContain("workspaceId eq 'ws-1'");
+    expect(body.filter).toContain("search.in(accessDomain, 'FINANCE,WORKSPACE')");
+    expect(body.filter).toContain("or accessDomain eq null");
     expect(body.filter).toContain("search.in(sourceType, 'SLACK')");
     expect(body.filter).toContain("search.in(sensitivity, 'PUBLIC,INTERNAL')");
     expect(body.vectorQueries[0]).toMatchObject({
@@ -153,6 +161,34 @@ describe("Azure knowledge search adapter", () => {
       fields: "contentVector",
       k: 50,
     });
+  });
+
+  it("does not treat legacy domain-less documents as Finance-only knowledge", async () => {
+    await searchAzureKnowledge({
+      workspaceId: "ws-1",
+      query: "finance",
+      queryEmbedding: [0.3, 0.4],
+      accessDomains: ["FINANCE"],
+    });
+
+    const [, init] = vi.mocked(fetch).mock.calls[0];
+    const body = JSON.parse(String(init?.body));
+    expect(body.filter).toContain("search.in(accessDomain, 'FINANCE')");
+    expect(body.filter).not.toContain("accessDomain eq null");
+  });
+
+  it("normalizes legacy and explicit access-domain sets without widening empty access", async () => {
+    expect(normalizeKnowledgeAccessDomains()).toEqual(["WORKSPACE"]);
+    expect(normalizeKnowledgeAccessDomains(["WORKSPACE", "FINANCE", "WORKSPACE"])).toEqual(["FINANCE", "WORKSPACE"]);
+    expect(normalizeKnowledgeAccessDomains([])).toEqual([]);
+
+    await expect(searchAzureKnowledge({
+      workspaceId: "ws-1",
+      query: "finance",
+      queryEmbedding: [0.3, 0.4],
+      accessDomains: [],
+    })).resolves.toEqual([]);
+    expect(fetch).not.toHaveBeenCalled();
   });
 
   it("creates or updates the configured index using the admin key", async () => {

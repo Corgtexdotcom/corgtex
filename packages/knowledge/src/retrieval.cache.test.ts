@@ -104,8 +104,48 @@ describe("knowledge retrieval cache", () => {
 
     expect(first).toEqual(second);
     expect(prismaMock.knowledgeChunk.findMany).toHaveBeenCalledTimes(2);
+    expect(prismaMock.knowledgeChunk.findMany.mock.calls[0]?.[0]).toMatchObject({
+      where: { accessDomain: { in: ["WORKSPACE"] } },
+    });
     expect(modelGatewayMock.embed).toHaveBeenCalledTimes(1);
     expect(modelGatewayMock.rerank).toHaveBeenCalledTimes(1);
+  });
+
+  it("partitions search caches by the normalized access-domain set", async () => {
+    prismaMock.knowledgeChunk.findMany.mockResolvedValue([
+      {
+        id: "chunk-domain",
+        sourceType: "DOCUMENT",
+        sourceId: "doc-domain",
+        sourceTitle: "Policy",
+        chunkIndex: 0,
+        content: "Finance policy for approvals.",
+        embedding: [1, 0],
+      },
+    ]);
+
+    await searchIndexedKnowledge({
+      workspaceId: "ws-1",
+      query: "finance policy",
+      accessDomains: ["WORKSPACE"],
+    });
+    await searchIndexedKnowledge({
+      workspaceId: "ws-1",
+      query: "finance policy",
+      accessDomains: ["WORKSPACE", "FINANCE", "WORKSPACE"],
+    });
+    await searchIndexedKnowledge({
+      workspaceId: "ws-1",
+      query: "finance policy",
+      accessDomains: ["FINANCE", "WORKSPACE"],
+    });
+
+    expect(prismaMock.knowledgeChunk.findMany).toHaveBeenCalledTimes(4);
+    expect(prismaMock.knowledgeChunk.findMany.mock.calls[2]?.[0]).toMatchObject({
+      where: { accessDomain: { in: ["FINANCE", "WORKSPACE"] } },
+    });
+    expect(modelGatewayMock.embed).toHaveBeenCalledTimes(2);
+    expect(modelGatewayMock.rerank).toHaveBeenCalledTimes(2);
   });
 
   it("reuses cached grounded answers for repeated questions", async () => {
@@ -137,6 +177,55 @@ describe("knowledge retrieval cache", () => {
     expect(modelGatewayMock.chat).toHaveBeenCalledTimes(1);
     expect(modelGatewayMock.embed).toHaveBeenCalledTimes(1);
     expect(modelGatewayMock.rerank).toHaveBeenCalledTimes(1);
+  });
+
+  it("partitions grounded-answer caches by access domain", async () => {
+    prismaMock.knowledgeChunk.findMany.mockResolvedValue([
+      {
+        id: "chunk-answer-domain",
+        sourceType: "DOCUMENT",
+        sourceId: "doc-answer-domain",
+        sourceTitle: "Finance policy",
+        chunkIndex: 0,
+        content: "Finance approvals require a steward review.",
+        embedding: [1, 0],
+      },
+    ]);
+
+    await answerKnowledgeQuestion({
+      workspaceId: "ws-1",
+      question: "Who reviews finance approvals?",
+      accessDomains: ["WORKSPACE"],
+    });
+    await answerKnowledgeQuestion({
+      workspaceId: "ws-1",
+      question: "Who reviews finance approvals?",
+      accessDomains: ["WORKSPACE", "FINANCE"],
+    });
+
+    expect(modelGatewayMock.chat).toHaveBeenCalledTimes(2);
+    expect(modelGatewayMock.embed).toHaveBeenCalledTimes(2);
+    expect(modelGatewayMock.rerank).toHaveBeenCalledTimes(2);
+  });
+
+  it("returns no results or citations for an explicitly empty domain set", async () => {
+    await expect(searchIndexedKnowledge({
+      workspaceId: "ws-1",
+      query: "finance",
+      accessDomains: [],
+    })).resolves.toEqual([]);
+    await expect(answerKnowledgeQuestion({
+      workspaceId: "ws-1",
+      question: "finance",
+      accessDomains: [],
+    })).resolves.toEqual({
+      answer: "I could not find relevant indexed knowledge for that question.",
+      citations: [],
+    });
+
+    expect(prismaMock.knowledgeChunk.findMany).not.toHaveBeenCalled();
+    expect(modelGatewayMock.embed).not.toHaveBeenCalled();
+    expect(modelGatewayMock.chat).not.toHaveBeenCalled();
   });
 
   it("does not alias the default answer limit with an explicit smaller limit", async () => {
@@ -307,12 +396,16 @@ describe("knowledge retrieval cache", () => {
       workspaceId: "ws-1",
       query: "travel policy",
       limit: 2,
+      accessDomains: ["FINANCE"],
     });
 
     expect(results[0]).toMatchObject({
       chunkId: "chunk-5",
       sourceType: "DOCUMENT",
       sourceId: "doc-5",
+    });
+    expect(prismaMock.knowledgeChunk.findMany.mock.calls[0]?.[0]).toMatchObject({
+      where: { accessDomain: { in: ["FINANCE"] } },
     });
     expect(modelGatewayMock.embed).toHaveBeenCalledTimes(2);
     expect(modelGatewayMock.rerank).toHaveBeenCalledTimes(1);

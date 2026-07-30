@@ -1,5 +1,5 @@
 import { DefaultAzureCredential } from "@azure/identity";
-import type { KnowledgeSourceType } from "@prisma/client";
+import type { KnowledgeAccessDomain, KnowledgeSourceType } from "@prisma/client";
 import { env, logger } from "@corgtex/shared";
 import type { SensitivityLabel } from "./sensitivity";
 
@@ -7,6 +7,7 @@ export type AzureKnowledgeDocument = {
   id: string;
   workspaceId: string;
   sourceType: KnowledgeSourceType;
+  accessDomain: KnowledgeAccessDomain;
   sourceId: string;
   sourceTitle: string | null;
   chunkIndex: number;
@@ -21,6 +22,7 @@ export type AzureKnowledgeChunkInput = {
   id: string;
   workspaceId: string;
   sourceType: KnowledgeSourceType;
+  accessDomain: KnowledgeAccessDomain;
   sourceId: string;
   sourceTitle: string | null;
   chunkIndex: number;
@@ -188,13 +190,27 @@ function searchIn(field: string, values: string[]) {
   return `search.in(${field}, ${odataString(values.join(","))})`;
 }
 
+export function normalizeKnowledgeAccessDomains(accessDomains?: KnowledgeAccessDomain[]) {
+  if (accessDomains === undefined) {
+    return ["WORKSPACE"] satisfies KnowledgeAccessDomain[];
+  }
+  return [...new Set(accessDomains)].sort();
+}
+
 function buildFilter(params: {
   workspaceId: string;
+  accessDomains?: KnowledgeAccessDomain[];
   sourceTypes?: KnowledgeSourceType[];
   maxSensitivity?: SensitivityLabel;
   sourceId?: string;
 }) {
   const clauses = [`workspaceId eq ${odataString(params.workspaceId)}`];
+  if (params.accessDomains?.length) {
+    const accessDomainFilter = searchIn("accessDomain", params.accessDomains);
+    clauses.push(params.accessDomains.includes("WORKSPACE")
+      ? `(${accessDomainFilter} or accessDomain eq null)`
+      : accessDomainFilter);
+  }
   if (params.sourceTypes?.length) {
     clauses.push(searchIn("sourceType", params.sourceTypes));
   }
@@ -231,6 +247,7 @@ export function buildAzureKnowledgeIndexDefinition(indexName = getIndexName()) {
       { name: "id", type: "Edm.String", key: true, filterable: true },
       { name: "workspaceId", type: "Edm.String", filterable: true, facetable: true },
       { name: "sourceType", type: "Edm.String", filterable: true, facetable: true },
+      { name: "accessDomain", type: "Edm.String", filterable: true, facetable: true },
       { name: "sourceId", type: "Edm.String", filterable: true },
       { name: "sourceTitle", type: "Edm.String", searchable: true, retrievable: true },
       { name: "chunkIndex", type: "Edm.Int32", filterable: true, sortable: true },
@@ -301,6 +318,7 @@ export function mapKnowledgeChunkToAzureDocument(chunk: AzureKnowledgeChunkInput
     id: chunk.id,
     workspaceId: chunk.workspaceId,
     sourceType: chunk.sourceType,
+    accessDomain: chunk.accessDomain,
     sourceId: chunk.sourceId,
     sourceTitle: chunk.sourceTitle,
     chunkIndex: chunk.chunkIndex,
@@ -432,7 +450,12 @@ export async function searchAzureKnowledge(params: {
   limit?: number;
   sourceTypes?: KnowledgeSourceType[];
   maxSensitivity?: SensitivityLabel;
+  accessDomains?: KnowledgeAccessDomain[];
 }) {
+  const accessDomains = normalizeKnowledgeAccessDomains(params.accessDomains);
+  if (accessDomains.length === 0) {
+    return [] as AzureKnowledgeSearchResult[];
+  }
   requireAzureSearchConfig("query");
   ensureVectorDimensions(params.queryEmbedding, "query");
 
@@ -451,6 +474,7 @@ export async function searchAzureKnowledge(params: {
         vectorFilterMode: "preFilter",
         filter: buildFilter({
           workspaceId: params.workspaceId,
+          accessDomains,
           sourceTypes: params.sourceTypes,
           maxSensitivity: params.maxSensitivity,
         }),

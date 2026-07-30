@@ -155,6 +155,7 @@ export async function syncKnowledgeForSource(params: {
       id: row.id,
       workspaceId: row.workspaceId,
       sourceType: row.sourceType,
+      accessDomain: row.accessDomain,
       sourceId: row.sourceId,
       sourceTitle: row.sourceTitle,
       chunkIndex: row.chunkIndex,

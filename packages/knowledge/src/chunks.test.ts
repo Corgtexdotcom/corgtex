@@ -3,6 +3,10 @@ import { getWorkspaceIndexingHealth, reindexWorkspace, syncKnowledgeForSource } 
 import { prisma } from "@corgtex/shared";
 import { defaultModelGateway } from "@corgtex/models";
 
+const { syncAzureKnowledgeSourceMock } = vi.hoisted(() => ({
+  syncAzureKnowledgeSourceMock: vi.fn().mockResolvedValue({ skipped: true, deleted: 0, uploaded: 0 }),
+}));
+
 vi.mock("@corgtex/shared", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@corgtex/shared")>();
   return {
@@ -29,6 +33,14 @@ vi.mock("@corgtex/models", () => ({
 vi.mock("./retrieval", () => ({
   invalidateKnowledgeCache: vi.fn().mockResolvedValue(undefined),
 }));
+
+vi.mock("./azure-search", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./azure-search")>();
+  return {
+    ...actual,
+    syncAzureKnowledgeSource: syncAzureKnowledgeSourceMock,
+  };
+});
 
 describe("Workspace Indexing Health", () => {
   beforeEach(() => {
@@ -142,6 +154,9 @@ describe("syncKnowledgeForSource", () => {
         }),
       ],
     });
+    expect(syncAzureKnowledgeSourceMock).toHaveBeenCalledWith(expect.objectContaining({
+      chunks: [expect.objectContaining({ sourceId: "report-1", accessDomain: "FINANCE" })],
+    }));
   });
 });
 

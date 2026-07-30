@@ -1,8 +1,8 @@
-import type { KnowledgeSourceType, Prisma } from "@prisma/client";
+import type { KnowledgeAccessDomain, KnowledgeSourceType, Prisma } from "@prisma/client";
 import { getCacheJson, getCacheVersion, incrementCacheVersion, prisma, cosineSimilarity, logger, setCacheJson } from "@corgtex/shared";
 import { defaultModelGateway } from "@corgtex/models";
 import type { SensitivityLabel } from "./sensitivity";
-import { getKnowledgeSearchProvider, isAzureKnowledgeSearchConfigured, searchAzureKnowledge } from "./azure-search";
+import { getKnowledgeSearchProvider, isAzureKnowledgeSearchConfigured, normalizeKnowledgeAccessDomains, searchAzureKnowledge } from "./azure-search";
 
 const sensitivityOrder: SensitivityLabel[] = ["PUBLIC", "INTERNAL", "CONFIDENTIAL", "PII"];
 
@@ -83,6 +83,7 @@ function searchCacheKey(params: {
   limit?: number;
   sourceTypes?: KnowledgeSourceType[];
   maxSensitivity?: SensitivityLabel;
+  accessDomains: KnowledgeAccessDomain[];
   provider?: string;
   indexName?: string;
 }) {
@@ -96,6 +97,7 @@ function searchCacheKey(params: {
     String(params.limit ?? DEFAULT_SEARCH_LIMIT),
     [...(params.sourceTypes ?? [])].sort().join(","),
     params.maxSensitivity ?? "PUBLIC",
+    params.accessDomains.join(","),
   ].join("::");
 }
 
@@ -104,6 +106,7 @@ function answerCacheKey(params: {
   cacheVersion: string;
   question: string;
   limit?: number;
+  accessDomains: KnowledgeAccessDomain[];
   provider?: string;
   indexName?: string;
 }) {
@@ -115,6 +118,7 @@ function answerCacheKey(params: {
     params.cacheVersion,
     params.question.trim().toLowerCase(),
     String(params.limit ?? DEFAULT_ANSWER_LIMIT),
+    params.accessDomains.join(","),
   ].join("::");
 }
 
@@ -142,11 +146,16 @@ export async function searchIndexedKnowledge(params: {
   limit?: number;
   sourceTypes?: KnowledgeSourceType[];
   maxSensitivity?: SensitivityLabel;
+  accessDomains?: KnowledgeAccessDomain[];
   workflowJobId?: string;
   agentRunId?: string;
 }) {
   const query = params.query.trim();
   if (!query) {
+    return [] as KnowledgeSearchResult[];
+  }
+  const accessDomains = normalizeKnowledgeAccessDomains(params.accessDomains);
+  if (accessDomains.length === 0) {
     return [] as KnowledgeSearchResult[];
   }
 
@@ -163,6 +172,7 @@ export async function searchIndexedKnowledge(params: {
     limit: params.limit,
     sourceTypes: params.sourceTypes,
     maxSensitivity: params.maxSensitivity,
+    accessDomains,
     provider: effectiveProvider,
     indexName: effectiveProvider === "postgres" ? undefined : process.env.AZURE_SEARCH_INDEX_NAME,
   });
@@ -174,6 +184,7 @@ export async function searchIndexedKnowledge(params: {
   const results = await executeKnowledgeSearch({
     ...params,
     query,
+    accessDomains,
     provider: effectiveProvider,
     configuredProvider,
   });
@@ -188,6 +199,7 @@ async function executeKnowledgeSearch(params: {
   limit?: number;
   sourceTypes?: KnowledgeSourceType[];
   maxSensitivity?: SensitivityLabel;
+  accessDomains: KnowledgeAccessDomain[];
   workflowJobId?: string;
   agentRunId?: string;
   provider: "postgres" | "azure" | "dual_compare";
@@ -211,6 +223,7 @@ async function executeKnowledgeSearch(params: {
       limit: params.limit,
       sourceTypes: params.sourceTypes,
       maxSensitivity: params.maxSensitivity,
+      accessDomains: params.accessDomains,
     });
 
     if (params.provider === "dual_compare") {
@@ -225,6 +238,7 @@ async function executeKnowledgeSearch(params: {
       workspaceId: params.workspaceId,
       configuredProvider: params.configuredProvider,
       sourceTypes: params.sourceTypes,
+      accessDomains: params.accessDomains,
       error: error instanceof Error ? error.message : String(error),
     });
     return searchIndexedKnowledgePostgres(params);
@@ -232,7 +246,7 @@ async function executeKnowledgeSearch(params: {
 }
 
 function logDualCompare(
-  params: { workspaceId: string; sourceTypes?: KnowledgeSourceType[] },
+  params: { workspaceId: string; sourceTypes?: KnowledgeSourceType[]; accessDomains: KnowledgeAccessDomain[] },
   azureResults: KnowledgeSearchResult[],
   postgresResults: KnowledgeSearchResult[],
 ) {
@@ -241,6 +255,7 @@ function logDualCompare(
   logger.info("Knowledge search dual compare", {
     workspaceId: params.workspaceId,
     sourceTypes: params.sourceTypes,
+    accessDomains: params.accessDomains,
     azureHitCount: azureResults.length,
     postgresHitCount: postgresResults.length,
     overlap,
@@ -253,6 +268,7 @@ async function searchIndexedKnowledgePostgres(params: {
   limit?: number;
   sourceTypes?: KnowledgeSourceType[];
   maxSensitivity?: SensitivityLabel;
+  accessDomains: KnowledgeAccessDomain[];
   workflowJobId?: string;
   agentRunId?: string;
 }, queryEmbeddingOverride?: number[]) {
@@ -261,6 +277,7 @@ async function searchIndexedKnowledgePostgres(params: {
   const chunks = await prisma.knowledgeChunk.findMany({
     where: {
       workspaceId: params.workspaceId,
+      accessDomain: { in: params.accessDomains },
       sourceType: params.sourceTypes?.length ? { in: params.sourceTypes } : undefined,
       sensitivity: params.maxSensitivity
         ? { in: levelsUpTo(params.maxSensitivity) }
@@ -297,11 +314,16 @@ async function searchIndexedKnowledgePostgres(params: {
 
   // Load embeddings only for the top lexical candidates
   const chunkEmbeddings = await prisma.knowledgeChunk.findMany({
-    where: { id: { in: lexicalCandidates.map((c) => c.chunk.id) } },
+    where: {
+      id: { in: lexicalCandidates.map((c) => c.chunk.id) },
+      workspaceId: params.workspaceId,
+      accessDomain: { in: params.accessDomains },
+    },
     select: { id: true, embedding: true },
   });
 
   const embeddingMap = new Map(chunkEmbeddings.map((c) => [c.id, c.embedding]));
+  const authorizedLexicalCandidates = lexicalCandidates.filter((candidate) => embeddingMap.has(candidate.chunk.id));
   const queryEmbedding = queryEmbeddingOverride
     ? { embeddings: [queryEmbeddingOverride] }
     : await defaultModelGateway.embed({
@@ -311,7 +333,7 @@ async function searchIndexedKnowledgePostgres(params: {
       input: query,
     });
 
-  const scored = lexicalCandidates
+  const scored = authorizedLexicalCandidates
     .map(({ chunk, lexical }) => {
       const embedding = embeddingMap.get(chunk.id) ?? null;
       const semantic = cosineSimilarity(queryEmbedding.embeddings[0] ?? [], asEmbedding(embedding));
@@ -359,14 +381,23 @@ export async function answerKnowledgeQuestion(params: {
   workspaceId: string;
   question: string;
   limit?: number;
+  accessDomains?: KnowledgeAccessDomain[];
   workflowJobId?: string;
   agentRunId?: string;
 }) {
+  const accessDomains = normalizeKnowledgeAccessDomains(params.accessDomains);
+  if (accessDomains.length === 0) {
+    return {
+      answer: "I could not find relevant indexed knowledge for that question.",
+      citations: [] as KnowledgeCitation[],
+    };
+  }
   const cacheVersion = await knowledgeCacheVersion(params.workspaceId);
   const provider = getKnowledgeSearchProvider();
   const effectiveProvider = provider === "postgres" || isAzureKnowledgeSearchConfigured("query") ? provider : "postgres";
   const cacheKey = answerCacheKey({
     ...params,
+    accessDomains,
     cacheVersion,
     provider: effectiveProvider,
     indexName: effectiveProvider === "postgres" ? undefined : process.env.AZURE_SEARCH_INDEX_NAME,
@@ -383,6 +414,7 @@ export async function answerKnowledgeQuestion(params: {
     workspaceId: params.workspaceId,
     query: params.question,
     limit: params.limit ?? DEFAULT_ANSWER_LIMIT,
+    accessDomains,
     workflowJobId: params.workflowJobId,
     agentRunId: params.agentRunId,
   });
