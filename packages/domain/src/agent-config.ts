@@ -1,4 +1,4 @@
-import { prisma, toInputJson } from "@corgtex/shared";
+import { env, prisma, toInputJson } from "@corgtex/shared";
 import type { AppActor } from "@corgtex/shared";
 import { requireWorkspaceMembership } from "./auth";
 import { AGENT_REGISTRY, type RegisteredAgentKey } from "./agent-registry";
@@ -53,6 +53,51 @@ const DEFAULT_SLACK_AGENT_CONFIG = {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isAzureDirectProvider() {
+  return env.MODEL_PROVIDER === "azure-openai" || env.MODEL_PROVIDER === "azure-foundry";
+}
+
+function configuredProviderRouteModels() {
+  const raw = env.MODEL_PROVIDER_ROUTES_JSON;
+  if (!raw) {
+    return new Set<string>();
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new AppError(500, "CONFIGURATION_ERROR", "MODEL_PROVIDER_ROUTES_JSON must be valid JSON.");
+  }
+
+  if (!Array.isArray(parsed)) {
+    throw new AppError(500, "CONFIGURATION_ERROR", "MODEL_PROVIDER_ROUTES_JSON must be an array.");
+  }
+
+  return new Set(parsed.flatMap((entry) => {
+    if (!isRecord(entry)) {
+      return [];
+    }
+    const model = entry.model;
+    return typeof model === "string" && model.trim() ? [model.trim()] : [];
+  }));
+}
+
+function assertAgentModelOverrideSupported(modelOverride: string | null | undefined) {
+  if (
+    modelOverride
+    && isAzureDirectProvider()
+    && modelOverride.includes("/")
+    && !configuredProviderRouteModels().has(modelOverride)
+  ) {
+    throw new AppError(
+      400,
+      "INVALID_INPUT",
+      `Model override ${modelOverride} is not configured for direct Azure routing. Clear the override or add an explicit MODEL_PROVIDER_ROUTES_JSON route before enabling Azure model traffic.`,
+    );
+  }
 }
 
 export function normalizeNewspaperCadence(value: unknown, fallback: NewspaperCadence = DEFAULT_NEWSPAPER_CADENCE): NewspaperCadence {
@@ -295,6 +340,8 @@ export async function updateAgentConfig(
   if (params.enabled === false && !meta.canDisable) {
     throw new AppError(400, "INVALID_INPUT", `Agent ${params.agentKey} cannot be disabled.`);
   }
+
+  assertAgentModelOverrideSupported(params.modelOverride);
 
   const configJson = params.configJson === undefined
     ? undefined

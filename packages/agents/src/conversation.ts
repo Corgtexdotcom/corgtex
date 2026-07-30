@@ -817,6 +817,18 @@ async function closeAsyncIterator<T, TReturn>(iterator: AsyncIterator<T, TReturn
   }
 }
 
+function throwIfConversationCanceled(ctx: ConversationContext, error?: unknown) {
+  if (!ctx.signal?.aborted) return;
+  const reason = ctx.signal.reason;
+  if (reason instanceof Error) {
+    throw reason;
+  }
+  if (error instanceof Error) {
+    throw error;
+  }
+  throw new Error("Conversation stream canceled.");
+}
+
 export async function processConversationTurn(ctx: ConversationContext): Promise<{
   assistantMessage: string;
   contextUsed: ConversationContextUsed;
@@ -991,6 +1003,7 @@ export async function processConversationTurn(ctx: ConversationContext): Promise
     tools,
     signal: ctx.signal,
   });
+  throwIfConversationCanceled(ctx);
 
   const initialMessage = response.content;
   let finalMessage = initialMessage;
@@ -1047,6 +1060,7 @@ export async function processConversationTurn(ctx: ConversationContext): Promise
         tools,
         signal: ctx.signal,
       });
+      throwIfConversationCanceled(ctx);
 
       followupMessage = followup.content;
       finalMessage = followupMessage;
@@ -1061,6 +1075,7 @@ export async function processConversationTurn(ctx: ConversationContext): Promise
     finalMessage = appendCrmPendingNotices(finalMessage, pendingCrmOperations);
   }
   finalMessage = ensureAssistantMessage(finalMessage, ctx, executedToolResults, failedToolResults, toolExecutionAttempted);
+  throwIfConversationCanceled(ctx);
 
   // Store observation as memory if the conversation reveals something useful
   if (turnCount > 0 && turnCount % 5 === 0) {
@@ -1257,13 +1272,16 @@ export async function* processConversationTurnStream(ctx: ConversationContext): 
       yield value;
       finalMessage += value;
     }
-  } catch {
+  } catch (error) {
     firstResult = null;
+    throwIfConversationCanceled(ctx, error);
   } finally {
     if (!firstStreamDone) {
       await closeAsyncIterator(iterator);
     }
   }
+
+  throwIfConversationCanceled(ctx);
 
   if (firstResult?.tool_calls && firstResult.tool_calls.length > 0) {
     toolExecutionAttempted = true;
@@ -1326,8 +1344,9 @@ export async function* processConversationTurnStream(ctx: ConversationContext): 
           finalMessage += value;
           followupMessage += value;
         }
-      } catch {
+      } catch (error) {
         followupStreamFailed = true;
+        throwIfConversationCanceled(ctx, error);
       } finally {
         if (!followupStreamDone) {
           await closeAsyncIterator(followupIterator);
@@ -1355,12 +1374,14 @@ export async function* processConversationTurnStream(ctx: ConversationContext): 
   }
 
   const ensuredFinalMessage = ensureAssistantMessage(finalMessage, ctx, executedToolResults, failedToolResults, toolExecutionAttempted);
+  throwIfConversationCanceled(ctx);
   const fallbackAppendix = pendingNoticeAppendix(finalMessage, ensuredFinalMessage);
   if (fallbackAppendix) {
     yield fallbackAppendix;
     finalMessage = ensuredFinalMessage;
   }
 
+  throwIfConversationCanceled(ctx);
   if (turnCount > 0 && turnCount % 5 === 0) {
     try {
       await storeAgentMemory({

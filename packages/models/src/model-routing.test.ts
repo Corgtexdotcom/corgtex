@@ -50,7 +50,7 @@ describe("resolveModel", () => {
     expect(resolveModel("quality", "deepseek/deepseek-v4-pro")).toBe("deepseek/deepseek-v4-pro");
   });
 
-  it("migrates unrouted provider-scoped overrides to the Azure tier alias", async () => {
+  it("rejects unrouted provider-scoped overrides under direct Azure routing", async () => {
     restoreEnv();
     Object.assign(process.env, {
       MODEL_PROVIDER: "azure-foundry",
@@ -67,7 +67,8 @@ describe("resolveModel", () => {
 
     const { resolveModel } = await import("./model-routing");
 
-    expect(resolveModel("quality", "qwen/qwen3-32b")).toBe("corgtex-ds-v4-pro");
+    expect(() => resolveModel("quality", "qwen/qwen3-32b"))
+      .toThrow("Model override qwen/qwen3-32b is not configured for direct Azure routing");
   });
 
   it("keeps provider-scoped overrides when an explicit provider route exists", async () => {

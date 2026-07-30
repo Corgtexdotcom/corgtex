@@ -6,6 +6,7 @@
   "dependencies": {
     "@corgtex/domain": "0.1.0",
     "@corgtex/knowledge": "0.1.0",
+    "@corgtex/models": "0.1.0",
     "@corgtex/shared": "0.1.0",
     "@corgtex/storage": "0.1.0",
     "html2canvas": "^1.4.1",

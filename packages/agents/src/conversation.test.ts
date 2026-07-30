@@ -1092,6 +1092,44 @@ describe("processConversationTurn", () => {
     expect(firstModelStreamClosed).toBe(true);
   });
 
+  it("does not store agent memory after stream cancellation", async () => {
+    const actor = testUserActor();
+    const controller = new AbortController();
+    const cancellationError = new Error("client cancelled");
+    conversationTurnFindManyMock.mockResolvedValueOnce([{
+      sequenceNumber: 5,
+      userMessage: "Earlier context",
+      assistantMessage: "Earlier response",
+    }]);
+
+    async function* canceledModelStream() {
+      yield "Partial answer";
+      controller.abort(cancellationError);
+      throw cancellationError;
+    }
+
+    chatStreamMock.mockReturnValueOnce(canceledModelStream());
+
+    const { processConversationTurnStream } = await import("./conversation");
+    const stream = processConversationTurnStream({
+      workspaceId: "ws-1",
+      sessionId: "session-1",
+      userId: "user-1",
+      agentKey: "assistant",
+      userMessage: "Summarize the workspace.",
+      actor,
+      signal: controller.signal,
+    });
+
+    await expect(stream.next()).resolves.toMatchObject({
+      done: false,
+      value: "Partial answer",
+    });
+
+    await expect(stream.next()).rejects.toThrow("client cancelled");
+    expect(storeAgentMemoryMock).not.toHaveBeenCalled();
+  });
+
   it("answers explicit CRM due-work tool commands without invoking the model", async () => {
     const actor = testUserActor();
 

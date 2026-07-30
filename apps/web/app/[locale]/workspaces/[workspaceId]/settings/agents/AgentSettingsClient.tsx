@@ -8,6 +8,7 @@ import {
  updateCompanyUnderstandingGoalApplyModeAction,
 } from"./actions";
 import type { AgentConfigSummary, CompanyUnderstandingGoalApplyMode, NewspaperWeekday } from"@corgtex/domain";
+import type { AgentModelOverrideOption } from "../../agents/model-override-options";
 import { useTranslations } from "next-intl";
 
 type NewspaperCadence = "DAILY" | "WEEKLY" | "OFF";
@@ -29,7 +30,15 @@ function newspaperTimeZoneValue(value: unknown) {
  return typeof value ==="string" && value.trim().length > 0 ? value : "UTC";
 }
 
-export function AgentSettingsClient({ workspaceId, agents }: { workspaceId: string, agents: AgentConfigSummary[] }) {
+export function AgentSettingsClient({
+ workspaceId,
+ agents,
+ modelOverrideOptions,
+}: {
+ workspaceId: string,
+ agents: AgentConfigSummary[],
+ modelOverrideOptions: AgentModelOverrideOption[],
+}) {
  const [isPending, startTransition] = useTransition();
  const t = useTranslations("settings");
 
@@ -73,6 +82,10 @@ export function AgentSettingsClient({ workspaceId, agents }: { workspaceId: stri
  <div className="bg-surface-strong border border-line rounded-xl overflow-hidden shadow-sm">
  <ul className="divide-y divide-line">
  {agents.map((agent) => (
+ (() => {
+ const hasUnsupportedOverride = Boolean(agent.modelOverride)
+ && !modelOverrideOptions.some((option) => option.value === agent.modelOverride);
+ return (
  <li key={agent.agentKey} className="p-6 transition-colors hover:bg-surface-sunken/50">
  <div className="flex flex-col lg:flex-row lg:items-start justify-between gap-6">
  
@@ -138,10 +151,12 @@ export function AgentSettingsClient({ workspaceId, agents }: { workspaceId: stri
  className="text-sm border border-line rounded-md bg-surface-strong text-text py-1.5 px-3 disabled:opacity-50"
  >
  <option value="default">{t("lblDefault")} ({agent.defaultModelTier})</option>
-                <option value="google/gemini-2.5-flash-lite">{t("optFast")} (Gemini 2.5 Flash Lite)</option>
- <option value="qwen/qwen3-32b">{t("optDefault")} (Qwen 3 32B)</option>
- <option value="meta-llama/llama-4-scout">{t("optStandard")} (Llama 4 Scout)</option>
- <option value="google/gemini-2.5-flash">{t("optQuality")} (Gemini 2.5 Flash)</option>
+ {hasUnsupportedOverride && agent.modelOverride ? (
+ <option value={agent.modelOverride} disabled>{t("optUnsupported", { model: agent.modelOverride })}</option>
+ ) : null}
+ {modelOverrideOptions.map((option) => (
+ <option key={option.value} value={option.value}>{t(option.settingsLabelKey)}</option>
+ ))}
  </select>
  </div>
 
@@ -228,7 +243,9 @@ export function AgentSettingsClient({ workspaceId, agents }: { workspaceId: stri
 
  </div>
  </li>
-))}
+ );
+ })()
+ ))}
  </ul>
  </div>
  </div>

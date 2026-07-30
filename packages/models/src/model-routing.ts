@@ -20,6 +20,10 @@ function isProviderScopedModel(model: string) {
   return model.includes("/");
 }
 
+function unsupportedAzureOverrideMessage(model: string) {
+  return `Model override ${model} is not configured for direct Azure routing. Clear the override or add an explicit MODEL_PROVIDER_ROUTES_JSON route before enabling Azure model traffic.`;
+}
+
 function configuredProviderRouteModels() {
   const raw = env.MODEL_PROVIDER_ROUTES_JSON;
   if (!raw) {
@@ -46,19 +50,24 @@ function configuredProviderRouteModels() {
   }));
 }
 
+export function assertSupportedModelOverride(override?: string | null) {
+  if (
+    override
+    && isAzureDirectProvider()
+    && isProviderScopedModel(override)
+    && !configuredProviderRouteModels().has(override)
+  ) {
+    throw new Error(unsupportedAzureOverrideMessage(override));
+  }
+}
+
 export function resolveModel(tier: ModelTier, override?: string | null): string {
   const fallbackModel = tierModel(tier);
   if (!override) {
     return fallbackModel;
   }
 
-  if (
-    isAzureDirectProvider()
-    && isProviderScopedModel(override)
-    && !configuredProviderRouteModels().has(override)
-  ) {
-    return fallbackModel;
-  }
+  assertSupportedModelOverride(override);
 
   return override;
 }

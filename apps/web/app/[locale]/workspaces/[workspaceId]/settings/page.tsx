@@ -28,6 +28,7 @@ import { requestManagedEnterpriseServiceAction } from "../actions";
 import { requestModuleAccessAction, decideModuleAccessRequestAction } from "./actions";
 import { MembersTable } from "./MembersTable";
 import { AgentSettingsClient } from "./agents/AgentSettingsClient";
+import { agentModelOverrideOptions } from "../agents/model-override-options";
 import { SsoConfigManager } from "./SsoConfigManager";
 import { UserSettingsPanel } from "./UserSettingsPanel";
 import { OnboardingRestartButton } from "./OnboardingRestartButton";
@@ -405,7 +406,11 @@ export default async function SettingsPage({
       {tab === "agents" && (
         <div className="stack" style={{ gap: 24 }}>
           <AgentBudgetManager workspaceId={workspaceId} budget={agentBudget} />
-          <AgentSettingsClient workspaceId={workspaceId} agents={agents} />
+          <AgentSettingsClient
+            workspaceId={workspaceId}
+            agents={agents}
+            modelOverrideOptions={agentModelOverrideOptions()}
+          />
         </div>
       )}
 

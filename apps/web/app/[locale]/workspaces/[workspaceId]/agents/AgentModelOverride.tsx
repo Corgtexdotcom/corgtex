@@ -3,11 +3,22 @@
 import { useTransition } from "react";
 import { updateAgentModelAction } from "./actions";
 import type { AgentConfigSummary } from "@corgtex/domain";
+import type { AgentModelOverrideOption } from "./model-override-options";
 import { useTranslations } from "next-intl";
 
-export function AgentModelOverride({ workspaceId, agent }: { workspaceId: string, agent: AgentConfigSummary }) {
+export function AgentModelOverride({
+  workspaceId,
+  agent,
+  modelOverrideOptions,
+}: {
+  workspaceId: string,
+  agent: AgentConfigSummary,
+  modelOverrideOptions: AgentModelOverrideOption[],
+}) {
   const [isPending, startTransition] = useTransition();
   const t = useTranslations("agents");
+  const hasUnsupportedOverride = Boolean(agent.modelOverride)
+    && !modelOverrideOptions.some((option) => option.value === agent.modelOverride);
 
   const handleModelChange = (modelOverride: string) => {
     startTransition(() => {
@@ -24,10 +35,12 @@ export function AgentModelOverride({ workspaceId, agent }: { workspaceId: string
       style={{ minWidth: 200, padding: "8px 12px" }}
     >
       <option value="default">{t("modelDefault", { tier: agent.defaultModelTier })}</option>
-      <option value="google/gemini-2.5-flash-lite">{t("modelFast")}</option>
-      <option value="qwen/qwen3-32b">{t("modelDefaultTier")}</option>
-      <option value="meta-llama/llama-4-scout">{t("modelStandard")}</option>
-      <option value="google/gemini-2.5-flash">{t("modelQuality")}</option>
+      {hasUnsupportedOverride && agent.modelOverride ? (
+        <option value={agent.modelOverride} disabled>{t("modelUnsupported", { model: agent.modelOverride })}</option>
+      ) : null}
+      {modelOverrideOptions.map((option) => (
+        <option key={option.value} value={option.value}>{t(option.labelKey)}</option>
+      ))}
     </select>
   );
 }
