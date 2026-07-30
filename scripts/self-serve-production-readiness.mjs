@@ -227,7 +227,7 @@ function requireKnownModelPrice(provider, model, strict) {
 function isHttpsBaseUrl(value) {
   try {
     const url = new URL(value);
-    return url.protocol === "https:" && !url.search && !url.hash;
+    return url.protocol === "https:" && !url.username && !url.password && !url.port && !url.search && !url.hash;
   } catch {
     return false;
   }
@@ -237,6 +237,9 @@ function isTrustedAzureBaseUrl(provider, value) {
   try {
     const url = new URL(value);
     if (url.protocol !== "https:") {
+      return false;
+    }
+    if (url.username || url.password || url.port) {
       return false;
     }
 
@@ -328,7 +331,7 @@ function parseProviderRoutes() {
       return [];
     }
     if (typeof route.baseUrl === "string" && route.baseUrl.trim() && !isHttpsBaseUrl(route.baseUrl.trim())) {
-      fail(`MODEL_PROVIDER_ROUTES_JSON[${index}].baseUrl must be an HTTPS URL without query or fragment.`);
+      fail(`MODEL_PROVIDER_ROUTES_JSON[${index}].baseUrl must be an HTTPS URL without query or fragment, credentials, or non-default port.`);
       return [];
     }
     if (route.apiKeyEnv !== undefined && (typeof route.apiKeyEnv !== "string" || !route.apiKeyEnv.trim())) {
@@ -388,9 +391,9 @@ function checkHttpBaseUrlEnv(name, label, strict) {
   if (isHttpsBaseUrl(envValue(name))) {
     pass(`${name} configured`);
   } else if (strict) {
-    fail(`${name} must be an HTTPS URL for ${label}; query strings and fragments are not allowed.`);
+    fail(`${name} must be an HTTPS URL for ${label}; query strings, fragments, credentials, and non-default ports are not allowed.`);
   } else {
-    warn(`${name} must be an HTTPS URL for ${label}; query strings and fragments are not allowed.`);
+    warn(`${name} must be an HTTPS URL for ${label}; query strings, fragments, credentials, and non-default ports are not allowed.`);
   }
 }
 
@@ -402,9 +405,9 @@ function checkOptionalHttpBaseUrlEnv(name, label, strict) {
   if (isHttpsBaseUrl(envValue(name))) {
     pass(`${name} configured`);
   } else if (strict) {
-    fail(`${name} must be an HTTPS URL for ${label}; query strings and fragments are not allowed.`);
+    fail(`${name} must be an HTTPS URL for ${label}; query strings, fragments, credentials, and non-default ports are not allowed.`);
   } else {
-    warn(`${name} must be an HTTPS URL for ${label}; query strings and fragments are not allowed.`);
+    warn(`${name} must be an HTTPS URL for ${label}; query strings, fragments, credentials, and non-default ports are not allowed.`);
   }
 }
 

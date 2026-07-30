@@ -306,6 +306,7 @@ describe("Azure Foundry model eval helpers", () => {
           fields: {
             owner: "Priya",
             title: "DPA",
+            dueDate: { anyOf: ["unknown", "no due date", "not provided", "no date"] },
             evidence: "legal",
           },
         },
@@ -325,10 +326,20 @@ describe("Azure Foundry model eval helpers", () => {
     ]);
     expect(swappedScore.passed).toBe(false);
 
+    const inventedDateScore = scoreItem(item, JSON.stringify({
+      actions: [
+        { title: "Prepare buyer shortlist", owner: "Jordan", dueDate: "2026-08-03", evidence: "Jordan will prepare the buyer shortlist" },
+        { title: "DPA approval blocker", owner: "Priya", dueDate: "2026-08-04", evidence: "Waiting on legal to approve the DPA" },
+      ],
+    }));
+    expect(inventedDateScore.schemaValid).toBe(true);
+    expect(inventedDateScore.missingJsonMatches).toEqual(["Priya DPA blocker action"]);
+    expect(inventedDateScore.passed).toBe(false);
+
     const matchedScore = scoreItem(item, JSON.stringify({
       actions: [
         { title: "Prepare buyer shortlist", owner: "Jordan", dueDate: "2026-08-03", evidence: "Jordan will prepare the buyer shortlist" },
-        { title: "DPA approval blocker", owner: "Priya", dueDate: "Pending legal approval", evidence: "Waiting on legal to approve the DPA" },
+        { title: "DPA approval blocker", owner: "Priya", dueDate: "unknown", evidence: "Waiting on legal to approve the DPA" },
       ],
     }));
     expect(matchedScore.missingJsonMatches).toEqual([]);
@@ -353,7 +364,7 @@ describe("Azure Foundry model eval helpers", () => {
           fields: {
             company: "RidgeWorks",
             contact: "Elena",
-            need: { allOf: ["governed AI workspace", "45 operators", "procurement approval"] },
+            need: { allOf: ["governed AI workspace", "45 operators", "procurement approval", ["need", "requires", "requiring", "before", "pending", "awaiting"]] },
             timeline: { anyOf: ["September pilot", "September"] },
             followUp: { allOf: ["security docs", "pricing overview"] },
           },
@@ -368,6 +379,18 @@ describe("Azure Foundry model eval helpers", () => {
         "security docs",
         "pricing overview",
       ],
+      forbiddenConcepts: [
+        {
+          label: "procurement approval completed",
+          anyOf: [
+            "procurement approval received",
+            "procurement approval obtained",
+            "approval received",
+            "approval obtained",
+            "procurement approved",
+          ],
+        },
+      ],
     };
 
     const concentratedScore = scoreItem(item, JSON.stringify({
@@ -380,6 +403,18 @@ describe("Azure Foundry model eval helpers", () => {
     expect(concentratedScore.schemaValid).toBe(false);
     expect(concentratedScore.missingJsonMatches).toEqual(["CRM extracted fields"]);
     expect(concentratedScore.passed).toBe(false);
+
+    const completedApprovalScore = scoreItem(item, JSON.stringify({
+      company: "RidgeWorks",
+      contact: "Elena",
+      need: "Governed AI workspace for 45 operators; procurement approval received",
+      timeline: "September pilot",
+      followUp: "Send security docs and a short pricing overview",
+    }));
+    expect(completedApprovalScore.schemaValid).toBe(true);
+    expect(completedApprovalScore.missingJsonMatches).toEqual(["CRM extracted fields"]);
+    expect(completedApprovalScore.forbiddenMentions).toEqual(["procurement approval completed"]);
+    expect(completedApprovalScore.passed).toBe(false);
 
     const matchedScore = scoreItem(item, JSON.stringify({
       company: "RidgeWorks",
@@ -461,7 +496,7 @@ describe("Azure Foundry model eval helpers", () => {
       requiredJsonShapes: {
         companyFacts: { type: "array", minItems: 1, items: { type: "string" } },
         openQuestions: { type: "array", minItems: 1, items: { type: "string" } },
-        confidence: { type: "string" },
+        confidence: { type: "string", enum: ["low", "medium", "high"] },
       },
       requiredJsonMatches: [
         {
@@ -510,6 +545,22 @@ describe("Azure Foundry model eval helpers", () => {
     ]);
     expect(placeholderScore.missingJsonMatches).toEqual(["Brain structured fields"]);
     expect(placeholderScore.passed).toBe(false);
+
+    const invalidConfidenceScore = scoreItem(item, JSON.stringify({
+      companyFacts: [
+        "Northstar Components runs two plants in Ohio.",
+        "It serves medical-device manufacturers.",
+        "Its 2026 priority is reducing lead-time variance.",
+        "The Mexico warehouse is not approved.",
+      ],
+      openQuestions: ["What metric will measure lead-time variance reduction?"],
+      confidence: "medium-high",
+    }));
+    expect(invalidConfidenceScore.schemaValid).toBe(false);
+    expect(invalidConfidenceScore.invalidJsonShapes).toEqual([
+      "confidence must be one of low, medium, high",
+    ]);
+    expect(invalidConfidenceScore.passed).toBe(false);
 
     const matchedScore = scoreItem(item, JSON.stringify({
       companyFacts: [
@@ -631,6 +682,16 @@ describe("Azure Foundry model eval helpers", () => {
     expect(matchedScore.schemaValid).toBe(true);
     expect(matchedScore.missingJsonMatches).toEqual([]);
     expect(matchedScore.passed).toBe(true);
+
+    const causalNegationScore = scoreItem(item, JSON.stringify({
+      replyNeeded: true,
+      proposedReply: "Do not send because the unreconciled cost numbers need account owner approval.",
+      unsafeToSend: true,
+    }));
+    expect(causalNegationScore.schemaValid).toBe(true);
+    expect(causalNegationScore.missingJsonMatches).toEqual([]);
+    expect(causalNegationScore.missingConcepts).toEqual([]);
+    expect(causalNegationScore.passed).toBe(true);
   });
 
   it("defaults OpenAI evaluation candidates to MODEL_API_KEY", () => {
@@ -734,6 +795,8 @@ describe("Azure Foundry model eval helpers", () => {
   it.each([
     "https://api.openai.com/v1?api-version=bad",
     "https://api.openai.com/v1#fragment",
+    "https://user:pass@api.openai.com/v1",
+    "https://api.openai.com:444/v1",
   ])("rejects query or fragment components in evaluation candidate base URLs: %s", (baseUrl) => {
     process.env.AZURE_FOUNDRY_EVAL_CANDIDATES_JSON = JSON.stringify([
       {
@@ -793,6 +856,8 @@ describe("Azure Foundry model eval helpers", () => {
     "https://corgtex-foundry-models-wus3.services.ai.azure.com/openai",
     "https://corgtex-foundry-models-wus3.services.ai.azure.com/openai/v2",
     "https://corgtex-foundry-models-wus3.services.ai.azure.com/openai/v1?api-version=2026-07-29",
+    "https://user:pass@corgtex-foundry-models-wus3.services.ai.azure.com/openai/v1",
+    "https://corgtex-foundry-models-wus3.services.ai.azure.com:444/openai/v1",
   ])("rejects Azure evaluation candidates without an exact /openai/v1 base path: %s", (baseUrl) => {
     process.env.AZURE_FOUNDRY_EVAL_CANDIDATES_JSON = JSON.stringify([
       {
@@ -804,7 +869,7 @@ describe("Azure Foundry model eval helpers", () => {
       },
     ]);
 
-    const expectedError = baseUrl.includes("?")
+    const expectedError = baseUrl.includes("?") || baseUrl.includes("@") || baseUrl.includes(":444")
       ? "AZURE_FOUNDRY_EVAL_CANDIDATES_JSON[0].baseUrl must be an HTTPS URL without query or fragment"
       : "baseUrl must be a trusted Azure OpenAI-compatible /openai/v1 URL for API key";
     expect(() => parseCandidates()).toThrow(expectedError);

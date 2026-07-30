@@ -267,7 +267,7 @@ describe("self-serve production readiness", () => {
 
     expect(result.status).toBe(1);
     expect(result.stderr).toContain("MODEL_BASE_URL must be an HTTPS URL for OpenRouter");
-    expect(result.stderr).toContain("query strings and fragments are not allowed");
+    expect(result.stderr).toContain("query strings, fragments, credentials, and non-default ports are not allowed");
   });
 
   it("accepts an Azure Foundry per-model canary route while OpenRouter remains the global provider", () => {
@@ -439,6 +439,8 @@ describe("self-serve production readiness", () => {
     "https://example.services.ai.azure.com/openai",
     "https://example.services.ai.azure.com/openai/v2",
     "https://example.services.ai.azure.com/openai/v1?api-version=2026-07-29",
+    "https://user:pass@example.services.ai.azure.com/openai/v1",
+    "https://example.services.ai.azure.com:444/openai/v1",
   ])("rejects Azure Foundry base URLs without an exact /openai/v1 base path: %s", (modelBaseUrl) => {
     const result = runReadiness({
       ...STRICT_BASE_ENV,
@@ -549,6 +551,8 @@ describe("self-serve production readiness", () => {
   it.each([
     "https://openrouter.ai/api/v1?api-version=bad",
     "https://openrouter.ai/api/v1#fragment",
+    "https://user:pass@openrouter.ai/api/v1",
+    "https://openrouter.ai:444/api/v1",
   ])("rejects query or fragment components in provider route URLs: %s", (routeBaseUrl) => {
     const result = runReadiness({
       ...STRICT_BASE_ENV,

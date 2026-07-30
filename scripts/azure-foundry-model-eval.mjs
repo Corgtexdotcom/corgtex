@@ -41,7 +41,7 @@ function normalize(value) {
 function isHttpsBaseUrl(value) {
   try {
     const url = new URL(value);
-    return url.protocol === "https:" && !url.search && !url.hash;
+    return url.protocol === "https:" && !url.username && !url.password && !url.port && !url.search && !url.hash;
   } catch {
     return false;
   }
@@ -51,6 +51,9 @@ function isTrustedAzureBaseUrl(provider, value) {
   try {
     const url = new URL(value);
     if (url.protocol !== "https:") {
+      return false;
+    }
+    if (url.username || url.password || url.port) {
       return false;
     }
 
@@ -72,6 +75,9 @@ function isTrustedAzureBaseUrl(provider, value) {
 function isCanonicalDefaultKeyBaseUrl(provider, value) {
   try {
     const url = new URL(value);
+    if (url.username || url.password || url.port || url.search || url.hash) {
+      return false;
+    }
     const host = url.hostname.toLowerCase();
     const path = url.pathname.replace(/\/+$/, "");
     if (provider === "openai") {
@@ -123,7 +129,7 @@ function parseCandidates() {
       throw new Error(`AZURE_FOUNDRY_EVAL_CANDIDATES_JSON[${index}].provider must be one of ${[...SUPPORTED_EVAL_PROVIDERS].join(", ")}.`);
     }
     if (!isHttpsBaseUrl(record.baseUrl.trim())) {
-      throw new Error(`AZURE_FOUNDRY_EVAL_CANDIDATES_JSON[${index}].baseUrl must be an HTTPS URL without query or fragment.`);
+      throw new Error(`AZURE_FOUNDRY_EVAL_CANDIDATES_JSON[${index}].baseUrl must be an HTTPS URL without query or fragment, credentials, or non-default port.`);
     }
     const model = record.model.trim();
     const authMode = record.authMode ?? "api_key";
@@ -621,7 +627,21 @@ function isNegatedOccurrence(normalizedText, index) {
   if (!match) return false;
 
   const bridgeWords = match[1].trim().split(/\s+/).filter(Boolean);
-  return !bridgeWords.some((word) => ["and", "but", "or", "then"].includes(word));
+  return !bridgeWords.some((word) => [
+    "and",
+    "as",
+    "because",
+    "but",
+    "if",
+    "or",
+    "since",
+    "then",
+    "though",
+    "unless",
+    "until",
+    "whereas",
+    "while",
+  ].includes(word));
 }
 
 function textContainsTerm(normalizedText, term, options = {}) {
@@ -754,6 +774,10 @@ function jsonShapeFailures(value, shape, path) {
     if (value.trim().length < minimumLength) {
       failures.push(`${path} must contain at least ${minimumLength} non-whitespace character${minimumLength === 1 ? "" : "s"}`);
     }
+  }
+
+  if (Array.isArray(shape.enum) && !shape.enum.includes(value)) {
+    failures.push(`${path} must be one of ${shape.enum.map(String).join(", ")}`);
   }
 
   if (Array.isArray(value)) {

@@ -99,7 +99,7 @@ function routeStringField(record: Record<string, unknown>, field: string) {
 function isHttpsBaseUrl(value: string) {
   try {
     const url = new URL(value);
-    return url.protocol === "https:" && !url.search && !url.hash;
+    return url.protocol === "https:" && !url.username && !url.password && !url.port && !url.search && !url.hash;
   } catch {
     return false;
   }
@@ -152,7 +152,7 @@ function parseModelProviderRoutes() {
     }
     const routeBaseUrl = routeStringField(record, "baseUrl");
     if (routeBaseUrl && !isHttpsBaseUrl(routeBaseUrl)) {
-      throw new Error(`MODEL_PROVIDER_ROUTES_JSON[${index}].baseUrl must be an HTTPS URL without query or fragment.`);
+      throw new Error(`MODEL_PROVIDER_ROUTES_JSON[${index}].baseUrl must be an HTTPS URL without query or fragment, credentials, or non-default port.`);
     }
 
     return {
@@ -187,7 +187,7 @@ function baseUrl(route?: ModelProviderRoute) {
     return "https://api.openai.com/v1";
   }
   if (!isHttpsBaseUrl(env.MODEL_BASE_URL)) {
-    throw new Error("MODEL_BASE_URL must be an HTTPS URL without query or fragment.");
+    throw new Error("MODEL_BASE_URL must be an HTTPS URL without query or fragment, credentials, or non-default port.");
   }
   return env.MODEL_BASE_URL.replace(/\/+$/, "");
 }
@@ -282,8 +282,18 @@ function estimateTextTokens(value: string) {
   return Math.ceil(value.length / 4);
 }
 
-function estimateChatInputTokens(messages: Array<{ content: string }>) {
-  return messages.reduce((sum, message) => sum + estimateTextTokens(message.content), 0);
+function estimateSerializedTokens(value: unknown) {
+  if (value === undefined || value === null) {
+    return 0;
+  }
+  const serialized = typeof value === "string" ? value : JSON.stringify(value);
+  return serialized ? estimateTextTokens(serialized) : 0;
+}
+
+function estimateChatOutputTokens(content: string, toolCalls?: unknown[]) {
+  const compactToolCalls = toolCalls?.filter(Boolean);
+  return estimateTextTokens(content) +
+    estimateSerializedTokens(compactToolCalls && compactToolCalls.length > 0 ? compactToolCalls : undefined);
 }
 
 function requiresKnownModelPrice(provider: string) {
@@ -321,6 +331,9 @@ function isTrustedAzureBaseUrl(provider: string, value: string) {
   }
 
   if (url.protocol !== "https:") {
+    return false;
+  }
+  if (url.username || url.password || url.port) {
     return false;
   }
 
@@ -652,19 +665,20 @@ async function completeChat(
     workspaceId: request.workspaceId,
     ...usageContext(request),
   });
-  const response = await postJson<ChatCompletionApiResponse>("/chat/completions", chatCompletionBody(model, {
+  const body = chatCompletionBody(model, {
     model,
     temperature: 0.2,
     messages: request.messages,
     ...(request.tools && request.tools.length > 0 ? { tools: request.tools } : {}),
     ...(request.tool_choice ? { tool_choice: request.tool_choice } : {}),
     ...(bodyExtras ?? {}),
-  }), route);
+  });
+  const response = await postJson<ChatCompletionApiResponse>("/chat/completions", body, route);
   const latencyMs = Date.now() - startedAt;
   const content = normalizeContent(response.choices?.[0]?.message?.content);
   const tool_calls = response.choices?.[0]?.message?.tool_calls;
-  const inputTokens = response.usage?.prompt_tokens ?? estimateChatInputTokens(request.messages);
-  const outputTokens = response.usage?.completion_tokens ?? estimateTextTokens(content);
+  const inputTokens = response.usage?.prompt_tokens ?? estimateSerializedTokens(withProviderOptions(provider, body));
+  const outputTokens = response.usage?.completion_tokens ?? estimateChatOutputTokens(content, tool_calls);
   const usage = await recordUsage({
     workspaceId: request.workspaceId,
     workflowJobId: request.workflowJobId,
@@ -760,8 +774,8 @@ async function* completeChatStream(
     }
 
     const latencyMs = Date.now() - startedAt;
-    const inputTokens = usageDetailsObj?.prompt_tokens ?? estimateChatInputTokens(request.messages);
-    const outputTokens = usageDetailsObj?.completion_tokens ?? estimateTextTokens(content);
+    const inputTokens = usageDetailsObj?.prompt_tokens ?? estimateTextTokens(payload);
+    const outputTokens = usageDetailsObj?.completion_tokens ?? estimateChatOutputTokens(content, tool_calls);
     usage = await recordUsage({
       workspaceId: request.workspaceId,
       workflowJobId: request.workflowJobId,

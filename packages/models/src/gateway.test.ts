@@ -919,6 +919,8 @@ describe("openAICompatibleModelGateway", () => {
   it.each([
     "https://api.openai.com/v1?api-version=bad",
     "https://api.openai.com/v1#fragment",
+    "https://user:pass@api.openai.com/v1",
+    "https://api.openai.com:444/v1",
   ])("rejects query or fragment components in global provider endpoints at runtime: %s", async (modelBaseUrl) => {
     restoreEnv();
     Object.assign(process.env, {
@@ -968,6 +970,8 @@ describe("openAICompatibleModelGateway", () => {
     "https://corgtex-foundry.services.ai.azure.com/openai",
     "https://corgtex-foundry.services.ai.azure.com/openai/v2",
     "https://corgtex-foundry.services.ai.azure.com/openai/v1?api-version=2026-07-29",
+    "https://user:pass@corgtex-foundry.services.ai.azure.com/openai/v1",
+    "https://corgtex-foundry.services.ai.azure.com:444/openai/v1",
   ])("rejects Azure-compatible endpoints without an exact /openai/v1 base path: %s", async (modelBaseUrl) => {
     restoreEnv();
     Object.assign(process.env, {
@@ -983,7 +987,7 @@ describe("openAICompatibleModelGateway", () => {
 
     const { openAICompatibleModelGateway } = await import("./openai-compatible-gateway");
 
-    const expectedError = modelBaseUrl.includes("?")
+    const expectedError = modelBaseUrl.includes("?") || modelBaseUrl.includes("@") || modelBaseUrl.includes(":444")
       ? "MODEL_BASE_URL must be an HTTPS URL without query or fragment"
       : "azure-foundry API key authentication requires a trusted Azure OpenAI-compatible /openai/v1 base URL";
 
@@ -1394,14 +1398,123 @@ describe("openAICompatibleModelGateway", () => {
     });
 
     expect(cancelMock).toHaveBeenCalledTimes(1);
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    const expectedInputTokens = Math.ceil(String(init.body).length / 4);
+    const expectedOutputTokens = Math.ceil("Foundry".length / 4);
+    const expectedRawCostUsd = (
+      expectedInputTokens * 0.0000006 +
+      expectedOutputTokens * 0.000003
+    ).toFixed(6);
+    const expectedEstimatedCostUsd = (
+      (expectedInputTokens * 0.0000006 + expectedOutputTokens * 0.000003) * 2
+    ).toFixed(6);
     expect(vi.mocked(usageModule.recordModelUsage).mock.calls.at(-1)?.[0]).toMatchObject({
       provider: "azure-foundry",
       model: "corgtex-kimi-k25",
-      inputTokens: 1000,
-      outputTokens: 2,
-      rawProviderCostUsd: "0.000606",
-      estimatedCostUsd: "0.001212",
+      inputTokens: expectedInputTokens,
+      outputTokens: expectedOutputTokens,
+      rawProviderCostUsd: expectedRawCostUsd,
+      estimatedCostUsd: expectedEstimatedCostUsd,
     });
+  });
+
+  it("includes tool schemas and streamed tool-call arguments in early-close usage estimates", async () => {
+    restoreEnv();
+    Object.assign(process.env, {
+      MODEL_PROVIDER: "openrouter",
+      MODEL_API_KEY: "openrouter-key",
+      MODEL_BASE_URL: "https://openrouter.ai/api/v1",
+      MODEL_PROVIDER_ROUTES_JSON: JSON.stringify([
+        {
+          model: "corgtex-kimi-k25",
+          provider: "azure-foundry",
+          baseUrl: "https://corgtex-foundry.services.ai.azure.com/openai/v1",
+          authMode: "api_key",
+          apiKeyEnv: "AZURE_FOUNDRY_ROUTE_KEY",
+        },
+      ]),
+      AZURE_FOUNDRY_ROUTE_KEY: "foundry-key",
+    });
+
+    const usageModule = await import("./usage");
+    vi.mocked(usageModule.recordModelUsage).mockClear();
+
+    const encoder = new TextEncoder();
+    const cancelMock = vi.fn();
+    const streamedArguments = "z".repeat(4_000);
+    const toolDelta = JSON.stringify({
+      choices: [{
+        delta: {
+          tool_calls: [{
+            index: 0,
+            id: "call_lookup",
+            function: {
+              name: "lookup_customer",
+              arguments: streamedArguments,
+            },
+          }],
+        },
+      }],
+    });
+    const contentDelta = JSON.stringify({ choices: [{ delta: { content: "Foundry" } }] });
+    const streamBody = new ReadableStream({
+      start(controller) {
+        controller.enqueue(encoder.encode(`data: ${toolDelta}\n\ndata: ${contentDelta}\n\n`));
+      },
+      cancel: cancelMock,
+    });
+    const fetchMock = vi.fn().mockResolvedValueOnce(new Response(streamBody, { status: 200 }));
+
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { openAICompatibleModelGateway } = await import("./openai-compatible-gateway");
+    const stream = openAICompatibleModelGateway.chatStream({
+      workspaceId: "ws-1",
+      taskType: "CHAT",
+      model: "corgtex-kimi-k25",
+      messages: [{ role: "user", content: "short prompt" }],
+      tools: [{
+        type: "function",
+        function: {
+          name: "lookup_customer",
+          description: "y".repeat(4_000),
+          parameters: {
+            type: "object",
+            properties: {
+              query: { type: "string" },
+            },
+            required: ["query"],
+          },
+        },
+      }],
+    });
+
+    const first = await stream.next();
+    expect(first.value).toBe("Foundry");
+
+    await stream.return({
+      content: "",
+      usage: {
+        provider: "azure-foundry",
+        model: "corgtex-kimi-k25",
+        inputTokens: 0,
+        outputTokens: 0,
+        latencyMs: 0,
+        estimatedCostUsd: "0.000000",
+        rawProviderCostUsd: "0.000000",
+        billableCostUsd: "0.000000",
+      },
+    });
+
+    expect(cancelMock).toHaveBeenCalledTimes(1);
+    const recordedUsage = vi.mocked(usageModule.recordModelUsage).mock.calls.at(-1)?.[0];
+    expect(recordedUsage).toMatchObject({
+      provider: "azure-foundry",
+      model: "corgtex-kimi-k25",
+    });
+    expect(recordedUsage?.inputTokens).toBeGreaterThan(1000);
+    expect(recordedUsage?.outputTokens).toBeGreaterThan(1000);
+    expect(Number(recordedUsage?.rawProviderCostUsd)).toBeGreaterThan(0.003);
   });
 
   it("recovers fenced extraction JSON without a repair pass", async () => {
