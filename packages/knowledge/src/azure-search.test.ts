@@ -3,15 +3,18 @@ import {
   buildAzureKnowledgeIndexDefinition,
   createOrUpdateAzureKnowledgeIndex,
   mapKnowledgeChunkToAzureDocument,
+  normalizeKnowledgeAccessDomains,
   searchAzureKnowledge,
+  syncAzureKnowledgeSource,
   uploadAzureKnowledgeDocuments,
 } from "./azure-search";
 
 const ORIGINAL_ENV = { ...process.env };
+let indexSequence = 0;
 
 function configureAzureSearchEnv() {
   process.env.AZURE_SEARCH_ENDPOINT = "https://corgtex-search.search.windows.net/";
-  process.env.AZURE_SEARCH_INDEX_NAME = "client-knowledge";
+  process.env.AZURE_SEARCH_INDEX_NAME = `client-knowledge-${indexSequence++}`;
   process.env.AZURE_SEARCH_AUTH_MODE = "api_key";
   process.env.AZURE_SEARCH_ADMIN_KEY = "admin-key";
   process.env.AZURE_SEARCH_QUERY_KEY = "query-key";
@@ -36,6 +39,7 @@ describe("Azure knowledge search adapter", () => {
     expect(definition.fields).toEqual(expect.arrayContaining([
       expect.objectContaining({ name: "id", key: true }),
       expect.objectContaining({ name: "workspaceId", filterable: true }),
+      expect.objectContaining({ name: "accessDomain", filterable: true, facetable: true }),
       expect.objectContaining({ name: "contentVector", dimensions: 2, vectorSearchProfile: "knowledge-vector-profile" }),
     ]));
     expect(definition.semantic.defaultConfiguration).toBe("knowledge-semantic");
@@ -51,6 +55,7 @@ describe("Azure knowledge search adapter", () => {
       id: "chunk-1",
       workspaceId: "ws-1",
       sourceType: "MEETING",
+      accessDomain: "FINANCE",
       sourceId: "meeting-1",
       sourceTitle: "Weekly sync",
       chunkIndex: 2,
@@ -65,6 +70,7 @@ describe("Azure knowledge search adapter", () => {
       id: "chunk-1",
       workspaceId: "ws-1",
       sourceType: "MEETING",
+      accessDomain: "FINANCE",
       sourceId: "meeting-1",
       chunkIndex: 2,
       contentVector: [0.1, 0.2],
@@ -82,6 +88,7 @@ describe("Azure knowledge search adapter", () => {
         id: "chunk-1",
         workspaceId: "ws-1",
         sourceType: "DOCUMENT",
+        accessDomain: "WORKSPACE",
         sourceId: "doc-1",
         sourceTitle: "Policy",
         chunkIndex: 0,
@@ -94,7 +101,7 @@ describe("Azure knowledge search adapter", () => {
     ]);
 
     const [url, init] = fetchMock.mock.calls[0];
-    expect(String(url)).toContain("/indexes('client-knowledge')/docs/search.index?api-version=2026-04-01");
+    expect(String(url)).toContain(`/indexes('${process.env.AZURE_SEARCH_INDEX_NAME}')/docs/search.index?api-version=2026-04-01`);
     expect((init?.headers as Record<string, string>)["api-key"]).toBe("admin-key");
     expect(JSON.parse(String(init?.body))).toMatchObject({
       value: [
@@ -128,6 +135,7 @@ describe("Azure knowledge search adapter", () => {
       limit: 4,
       sourceTypes: ["SLACK"],
       maxSensitivity: "INTERNAL",
+      accessDomains: ["FINANCE", "WORKSPACE", "FINANCE"],
     });
 
     expect(results[0]).toMatchObject({
@@ -146,6 +154,8 @@ describe("Azure knowledge search adapter", () => {
       vectorFilterMode: "preFilter",
     });
     expect(body.filter).toContain("workspaceId eq 'ws-1'");
+    expect(body.filter).toContain("search.in(accessDomain, 'FINANCE,WORKSPACE')");
+    expect(body.filter).not.toContain("accessDomain eq null");
     expect(body.filter).toContain("search.in(sourceType, 'SLACK')");
     expect(body.filter).toContain("search.in(sensitivity, 'PUBLIC,INTERNAL')");
     expect(body.vectorQueries[0]).toMatchObject({
@@ -153,6 +163,35 @@ describe("Azure knowledge search adapter", () => {
       fields: "contentVector",
       k: 50,
     });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not treat legacy domain-less documents as Finance-only knowledge", async () => {
+    await searchAzureKnowledge({
+      workspaceId: "ws-1",
+      query: "finance",
+      queryEmbedding: [0.3, 0.4],
+      accessDomains: ["FINANCE"],
+    });
+
+    const [, init] = vi.mocked(fetch).mock.calls[0];
+    const body = JSON.parse(String(init?.body));
+    expect(body.filter).toContain("search.in(accessDomain, 'FINANCE')");
+    expect(body.filter).not.toContain("accessDomain eq null");
+  });
+
+  it("normalizes legacy and explicit access-domain sets without widening empty access", async () => {
+    expect(normalizeKnowledgeAccessDomains()).toEqual(["WORKSPACE"]);
+    expect(normalizeKnowledgeAccessDomains(["WORKSPACE", "FINANCE", "WORKSPACE"])).toEqual(["FINANCE", "WORKSPACE"]);
+    expect(normalizeKnowledgeAccessDomains([])).toEqual([]);
+
+    await expect(searchAzureKnowledge({
+      workspaceId: "ws-1",
+      query: "finance",
+      queryEmbedding: [0.3, 0.4],
+      accessDomains: [],
+    })).resolves.toEqual([]);
+    expect(fetch).not.toHaveBeenCalled();
   });
 
   it("creates or updates the configured index using the admin key", async () => {
@@ -162,8 +201,63 @@ describe("Azure knowledge search adapter", () => {
     await createOrUpdateAzureKnowledgeIndex();
 
     const [url, init] = fetchMock.mock.calls[0];
-    expect(String(url)).toContain("/indexes('client-knowledge')?api-version=2026-04-01");
+    expect(String(url)).toContain(`/indexes('${process.env.AZURE_SEARCH_INDEX_NAME}')?api-version=2026-04-01`);
     expect(init?.method).toBe("PUT");
     expect((init?.headers as Record<string, string>)["api-key"]).toBe("admin-key");
+  });
+
+  it("probes the domain field before a source sync deletes prior documents", async () => {
+    const fetchMock = vi.mocked(fetch);
+    fetchMock
+      .mockResolvedValueOnce(new Response(JSON.stringify({ value: [] }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ value: [{ id: "old-chunk" }] }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ value: [{ key: "old-chunk", status: true }] }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ value: [] }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ value: [{ key: "new-chunk", status: true }] }), { status: 200 }));
+
+    await syncAzureKnowledgeSource({
+      workspaceId: "ws-1",
+      sourceType: "DOCUMENT",
+      sourceId: "report-1",
+      chunks: [{
+        id: "new-chunk",
+        workspaceId: "ws-1",
+        sourceType: "DOCUMENT",
+        accessDomain: "FINANCE",
+        sourceId: "report-1",
+        sourceTitle: "Finance report",
+        chunkIndex: 0,
+        content: "Revenue actuals",
+        embedding: [1, 0],
+        metadata: {},
+        sensitivity: "CONFIDENTIAL",
+      }],
+    });
+
+    expect(String(fetchMock.mock.calls[0]?.[0])).toContain("/docs/search?");
+    expect(JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body))).toMatchObject({
+      filter: "accessDomain eq '__corgtex_schema_probe__'",
+    });
+    expect(String(fetchMock.mock.calls[1]?.[0])).toContain("/docs/search?");
+    expect(String(fetchMock.mock.calls[2]?.[0])).toContain("/docs/search.index?");
+    expect(String(fetchMock.mock.calls[4]?.[0])).toContain("/docs/search.index?");
+    expect(JSON.parse(String(fetchMock.mock.calls[4]?.[1]?.body))).toMatchObject({
+      value: [expect.objectContaining({ id: "new-chunk", accessDomain: "FINANCE" })],
+    });
+  });
+
+  it("does not delete a source when the domain field probe fails", async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(new Response(JSON.stringify({
+      error: { message: "Could not find a property named 'accessDomain'." },
+    }), { status: 400 }));
+
+    await expect(syncAzureKnowledgeSource({
+      workspaceId: "ws-1",
+      sourceType: "DOCUMENT",
+      sourceId: "report-1",
+      chunks: [],
+    })).rejects.toThrow("Could not find a property named 'accessDomain'");
+
+    expect(fetch).toHaveBeenCalledTimes(1);
   });
 });
