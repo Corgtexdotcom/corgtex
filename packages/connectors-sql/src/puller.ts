@@ -56,6 +56,7 @@ export async function syncExternalDataSource(sourceId: string) {
           const chunksCreated = await syncKnowledgeForSource({
             workspaceId: source.workspaceId,
             sourceType: "EXTERNAL_DATABASE",
+            accessDomain: "WORKSPACE",
             sourceId: identityId,
             sourceTitle: `${table} row ${pk}`,
             content,

@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import type { KnowledgeSourceType } from "@prisma/client";
+import type { KnowledgeAccessDomain, KnowledgeSourceType } from "@prisma/client";
 import { prisma } from "@corgtex/shared";
 import { defaultModelGateway } from "@corgtex/models";
 import { invalidateKnowledgeCache } from "./retrieval";
@@ -76,6 +76,7 @@ export function chunkText(input: string, maxLength = 1200, overlapSize = 150) {
 export async function syncKnowledgeForSource(params: {
   workspaceId: string;
   sourceType: KnowledgeSourceType;
+  accessDomain: KnowledgeAccessDomain;
   sourceId: string;
   sourceTitle?: string | null;
   content: string;
@@ -117,6 +118,7 @@ export async function syncKnowledgeForSource(params: {
       id: randomUUID(),
       workspaceId: params.workspaceId,
       sourceType: params.sourceType,
+      accessDomain: params.accessDomain,
       sourceId: params.sourceId,
       sourceTitle: params.sourceTitle?.trim() || null,
       chunkIndex: index,
@@ -210,6 +212,7 @@ export async function syncBrainArticleKnowledge(params: {
   return syncKnowledgeForSource({
     workspaceId: params.workspaceId,
     sourceType: "BRAIN_ARTICLE",
+    accessDomain: "WORKSPACE",
     sourceId: article.id,
     sourceTitle: article.title,
     content: article.bodyMd,
@@ -299,7 +302,7 @@ export async function reindexWorkspace(workspaceId: string) {
     }),
     prisma.document.findMany({
       where: { workspaceId, textContent: { not: null }, archivedAt: null },
-      select: { id: true, title: true, textContent: true, source: true, mimeType: true, storageKey: true },
+      select: { id: true, title: true, textContent: true, source: true, mimeType: true, storageKey: true, accessDomain: true },
     }),
   ]);
 
@@ -330,6 +333,7 @@ export async function reindexWorkspace(workspaceId: string) {
       await syncKnowledgeForSource({
         workspaceId,
         sourceType: "BRAIN_ARTICLE",
+        accessDomain: "WORKSPACE",
         sourceId: article.id,
         sourceTitle: article.title,
         content: article.bodyMd,
@@ -351,6 +355,7 @@ export async function reindexWorkspace(workspaceId: string) {
       await syncKnowledgeForSource({
         workspaceId,
         sourceType: "DOCUMENT",
+        accessDomain: doc.accessDomain,
         sourceId: doc.id,
         sourceTitle: doc.title,
         content: [doc.title, doc.textContent].filter(Boolean).join("\n\n"),

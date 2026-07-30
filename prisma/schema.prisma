@@ -3516,6 +3516,7 @@ model KnowledgeChunk {
   id              String                       @id @default(uuid())
   workspaceId     String
   sourceType      KnowledgeSourceType
+  accessDomain    KnowledgeAccessDomain        @default(WORKSPACE)
   sourceId        String
   sourceTitle     String?
   chunkIndex      Int                          @default(0)
@@ -3531,6 +3532,7 @@ model KnowledgeChunk {
   workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
 
   @@index([workspaceId, sourceType, sourceId])
+  @@index([workspaceId, accessDomain, sourceType, sourceId])
 }
 
 model ContextGraphObject {

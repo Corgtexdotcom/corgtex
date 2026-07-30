@@ -223,6 +223,7 @@ describe("knowledge retrieval cache", () => {
     await syncKnowledgeForSource({
       workspaceId: "ws-1",
       sourceType: "DOCUMENT",
+      accessDomain: "WORKSPACE",
       sourceId: "doc-2",
       sourceTitle: "Updated policy",
       content: "New policy language with clarified approval steps.",
@@ -257,6 +258,7 @@ describe("knowledge retrieval cache", () => {
     await syncKnowledgeForSource({
       workspaceId: "ws-1",
       sourceType: "DOCUMENT",
+      accessDomain: "WORKSPACE",
       sourceId: "doc-3",
       sourceTitle: "Policy",
       content: "Chunk me",
