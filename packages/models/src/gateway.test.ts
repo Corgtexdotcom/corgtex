@@ -1235,6 +1235,52 @@ describe("openAICompatibleModelGateway", () => {
     });
   });
 
+  it("omits custom temperature for deployed Azure Foundry GPT 5.6 Sol and Terra aliases", async () => {
+    const expectedRawCostByModel = new Map([
+      ["corgtex-gpt56-terra", "0.010000"],
+      ["corgtex-gpt56-sol", "0.020000"],
+    ]);
+
+    for (const model of expectedRawCostByModel.keys()) {
+      restoreEnv();
+      vi.resetModules();
+      Object.assign(process.env, {
+        MODEL_PROVIDER: "azure-foundry",
+        MODEL_BASE_URL: "https://corgtex-foundry.services.ai.azure.com/openai/v1",
+        AZURE_OPENAI_AUTH_MODE: "api_key",
+        AZURE_OPENAI_API_KEY: "foundry-key",
+        MODEL_CHAT_DEFAULT: model,
+      });
+
+      const fetchMock = vi.fn().mockResolvedValueOnce(new Response(JSON.stringify({
+        choices: [{ message: { content: "Foundry answer" } }],
+        usage: { prompt_tokens: 1000, completion_tokens: 500 },
+      }), { status: 200 }));
+
+      vi.stubGlobal("fetch", fetchMock);
+
+      const { openAICompatibleModelGateway } = await import("./openai-compatible-gateway");
+
+      const chat = await openAICompatibleModelGateway.chat({
+        workspaceId: "ws-1",
+        taskType: "CHAT",
+        messages: [{ role: "user", content: "Hello" }],
+      });
+
+      const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+      const body = JSON.parse(String(init.body)) as Record<string, unknown>;
+
+      expect(body).toMatchObject({ model });
+      expect(body.temperature).toBeUndefined();
+      expect(chat.usage).toMatchObject({
+        provider: "azure-foundry",
+        model,
+        rawProviderCostUsd: expectedRawCostByModel.get(model),
+      });
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("omits custom temperature for configured Luna deployment aliases", async () => {
     restoreEnv();
     Object.assign(process.env, {

@@ -158,6 +158,8 @@ describe("self-serve production readiness", () => {
     const result = runReadiness({
       ...STRICT_BASE_ENV,
       ...AZURE_FOUNDRY_MODEL_ENV,
+      MODEL_CHAT_EXCELLENT: "corgtex-gpt56-terra",
+      MODEL_CHAT_CONVERSATION: "corgtex-gpt56-sol",
       MODEL_PROVIDER: "azure-foundry",
       MODEL_BASE_URL: "https://example.services.ai.azure.com/openai/v1",
       AZURE_OPENAI_AUTH_MODE: "managed_identity",
@@ -166,7 +168,8 @@ describe("self-serve production readiness", () => {
 
     expect(result.status).toBe(0);
     expect(result.stdout).toContain("OK   built-in price catalog includes azure-foundry/corgtex-ds-v4-flash");
-    expect(result.stdout).toContain("OK   built-in price catalog includes azure-foundry/corgtex-gpt56-luna");
+    expect(result.stdout).toContain("OK   built-in price catalog includes azure-foundry/corgtex-gpt56-terra");
+    expect(result.stdout).toContain("OK   built-in price catalog includes azure-foundry/corgtex-gpt56-sol");
     expect(result.stderr).toBe("");
   });
 

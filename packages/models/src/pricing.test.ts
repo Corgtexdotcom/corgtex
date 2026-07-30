@@ -99,5 +99,13 @@ describe("model pricing", () => {
       inputUsdPerToken: 0.000001,
       outputUsdPerToken: 0.000006,
     });
+    expect(getModelPrice("azure-foundry", "corgtex-gpt56-terra")).toMatchObject({
+      inputUsdPerToken: 0.0000025,
+      outputUsdPerToken: 0.000015,
+    });
+    expect(getModelPrice("azure-foundry", "corgtex-gpt56-sol")).toMatchObject({
+      inputUsdPerToken: 0.000005,
+      outputUsdPerToken: 0.00003,
+    });
   });
 });
