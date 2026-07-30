@@ -174,6 +174,120 @@ describe("Finance V2 access policy", () => {
     })).toBe(true);
   });
 
+  it("requires both Finance Reports and report imports for import reads", async () => {
+    const { requireFinanceReportImportReadAccess } = await import("./finance");
+
+    prismaMock.workspaceFeatureFlag.findMany.mockResolvedValueOnce(financeFlags([
+      {
+        flag: "FINANCE",
+        enabled: true,
+        config: {
+          financeCapabilities: {
+            reports: false,
+            reportImports: true,
+          },
+        },
+      },
+    ]));
+    await expect(requireFinanceReportImportReadAccess(actor, "workspace-1")).rejects.toMatchObject({
+      code: "FINANCE_CAPABILITY_DISABLED",
+    });
+
+    prismaMock.workspaceFeatureFlag.findMany.mockResolvedValueOnce(financeFlags([
+      {
+        flag: "FINANCE",
+        enabled: true,
+        config: {
+          financeCapabilities: {
+            reports: true,
+          },
+        },
+      },
+    ]));
+    await expect(requireFinanceReportImportReadAccess(actor, "workspace-1")).rejects.toMatchObject({
+      code: "FINANCE_REPORT_IMPORTS_DISABLED",
+    });
+
+    prismaMock.workspaceFeatureFlag.findMany.mockResolvedValueOnce(financeFlags([
+      {
+        flag: "FINANCE",
+        enabled: true,
+        config: {
+          financeCapabilities: {
+            reports: true,
+            reportImports: true,
+          },
+        },
+      },
+    ]));
+    await expect(requireFinanceReportImportReadAccess(actor, "workspace-1")).resolves.toMatchObject({
+      canRead: true,
+      reportImportsEnabled: true,
+      sectionCapabilities: {
+        reports: true,
+      },
+    });
+  });
+
+  it("reuses Finance human-write access for import mutations", async () => {
+    const { requireFinanceReportImportHumanWriteAccess } = await import("./finance");
+    const importConfig = financeFlags([
+      {
+        flag: "FINANCE",
+        enabled: true,
+        config: {
+          financeAllMemberWrite: false,
+          financeCapabilities: {
+            reports: true,
+            reportImports: true,
+          },
+        },
+      },
+    ]);
+
+    prismaMock.workspaceFeatureFlag.findMany.mockResolvedValueOnce(importConfig);
+    await expect(requireFinanceReportImportHumanWriteAccess(actor, "workspace-1")).rejects.toMatchObject({
+      code: "FORBIDDEN",
+    });
+
+    prismaMock.workspaceFeatureFlag.findMany.mockResolvedValueOnce(importConfig);
+    resolveSingleModuleAccessMock.mockResolvedValueOnce("write");
+    await expect(requireFinanceReportImportHumanWriteAccess(actor, "workspace-1")).resolves.toMatchObject({
+      canWrite: true,
+      reportImportsEnabled: true,
+    });
+  });
+
+  it("lets scoped agents read imports but never pass the human-write guard", async () => {
+    const {
+      requireFinanceReportImportHumanWriteAccess,
+      requireFinanceReportImportReadAccess,
+    } = await import("./finance");
+    prismaMock.workspaceFeatureFlag.findMany.mockResolvedValue(financeFlags([
+      {
+        flag: "FINANCE",
+        enabled: true,
+        config: {
+          financeAllMemberWrite: true,
+          financeCapabilities: {
+            reports: true,
+            reportImports: true,
+          },
+        },
+      },
+    ]));
+    resolveSingleModuleAccessMock.mockResolvedValue("write");
+
+    await expect(requireFinanceReportImportReadAccess(scopedAgentActor, "workspace-1")).resolves.toMatchObject({
+      canRead: true,
+      reportImportsEnabled: true,
+    });
+    expect(requireAgentScopeMock).toHaveBeenCalledWith(scopedAgentActor, "finance:read");
+    await expect(requireFinanceReportImportHumanWriteAccess(scopedAgentActor, "workspace-1")).rejects.toMatchObject({
+      code: "HUMAN_REVIEW_REQUIRED",
+    });
+  });
+
   it("requires the finance read scope for credential agents", async () => {
     requireAgentScopeMock.mockImplementationOnce(() => {
       throw Object.assign(new Error("Agent credential is missing the required scope."), {
