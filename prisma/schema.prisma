@@ -561,6 +561,11 @@ enum AgentRunStatus {
   CANCELLED
 }
 
+enum KnowledgeAccessDomain {
+  WORKSPACE
+  FINANCE
+}
+
 enum AgentTriggerType {
   EVENT
   SCHEDULE
@@ -2867,19 +2872,20 @@ model MeetingRecorderSmokeRun {
 }
 
 model Document {
-  id               String    @id @default(uuid())
+  id               String                @id @default(uuid())
   workspaceId      String
+  accessDomain     KnowledgeAccessDomain @default(WORKSPACE)
   title            String
   source           String
   mimeType         String?
   storageKey       String
-  textContent      String?   @db.Text
+  textContent      String?               @db.Text
   metadata         Json?
   archivedAt       DateTime?
   archivedByUserId String?
   archiveReason    String?
-  createdAt        DateTime  @default(now())
-  updatedAt        DateTime  @updatedAt
+  createdAt        DateTime              @default(now())
+  updatedAt        DateTime              @updatedAt
 
   workspace        Workspace          @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   workItemEvidence WorkItemEvidence[]
@@ -2888,6 +2894,7 @@ model Document {
   @@unique([id, workspaceId])
   @@index([workspaceId, source])
   @@index([workspaceId, archivedAt])
+  @@index([workspaceId, accessDomain, archivedAt])
 }
 
 model WorkItemEvidence {
@@ -4031,8 +4038,9 @@ model BrainArticleVersion {
 }
 
 model BrainSource {
-  id                  String          @id @default(uuid())
+  id                  String                @id @default(uuid())
   workspaceId         String
+  accessDomain        KnowledgeAccessDomain @default(WORKSPACE)
   sourceType          BrainSourceType
   tier                Int
   externalId          String?
@@ -4061,6 +4069,8 @@ model BrainSource {
   @@index([workspaceId, sourceType])
   @@index([workspaceId, absorbedAt])
   @@index([workspaceId, archivedAt])
+  @@index([workspaceId, accessDomain, archivedAt])
+  @@index([workspaceId, accessDomain, absorbedAt])
 }
 
 model BrainBacklink {
