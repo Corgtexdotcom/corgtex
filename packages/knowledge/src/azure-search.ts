@@ -63,10 +63,6 @@ const DEFAULT_VECTOR_ALGORITHM = "knowledge-hnsw";
 const MAX_INDEX_BATCH_SIZE = 1000;
 
 let azureCredential: DefaultAzureCredential | null = null;
-let azureKnowledgeIndexReadiness: {
-  key: string;
-  promise: Promise<void>;
-} | null = null;
 
 function getEndpoint() {
   return env.AZURE_SEARCH_ENDPOINT?.replace(/\/+$/, "");
@@ -210,10 +206,7 @@ function buildFilter(params: {
 }) {
   const clauses = [`workspaceId eq ${odataString(params.workspaceId)}`];
   if (params.accessDomains?.length) {
-    const accessDomainFilter = searchIn("accessDomain", params.accessDomains);
-    clauses.push(params.accessDomains.includes("WORKSPACE")
-      ? `(${accessDomainFilter} or accessDomain eq null)`
-      : accessDomainFilter);
+    clauses.push(searchIn("accessDomain", params.accessDomains));
   }
   if (params.sourceTypes?.length) {
     clauses.push(searchIn("sourceType", params.sourceTypes));
@@ -316,25 +309,6 @@ export async function createOrUpdateAzureKnowledgeIndex() {
   );
 }
 
-async function ensureAzureKnowledgeIndexReady() {
-  const { endpoint, indexName, apiVersion } = requireAzureSearchConfig("admin");
-  const key = `${endpoint}::${indexName}::${apiVersion}`;
-  if (azureKnowledgeIndexReadiness?.key === key) {
-    return azureKnowledgeIndexReadiness.promise;
-  }
-
-  const promise = createOrUpdateAzureKnowledgeIndex()
-    .then(() => undefined)
-    .catch((error) => {
-      if (azureKnowledgeIndexReadiness?.key === key) {
-        azureKnowledgeIndexReadiness = null;
-      }
-      throw error;
-    });
-  azureKnowledgeIndexReadiness = { key, promise };
-  return promise;
-}
-
 export function mapKnowledgeChunkToAzureDocument(chunk: AzureKnowledgeChunkInput): AzureKnowledgeDocument {
   ensureVectorDimensions(chunk.embedding, chunk.id);
   return {
@@ -358,7 +332,6 @@ export async function uploadAzureKnowledgeDocuments(documents: AzureKnowledgeDoc
     return { uploaded: 0 };
   }
   requireAzureSearchConfig("admin");
-  await ensureAzureKnowledgeIndexReady();
 
   let uploaded = 0;
   for (let index = 0; index < documents.length; index += MAX_INDEX_BATCH_SIZE) {
@@ -412,6 +385,22 @@ async function listAzureKnowledgeDocumentIds(params: {
   return response.value?.map((entry) => entry.id).filter(Boolean) ?? [];
 }
 
+async function requireAzureKnowledgeAccessDomainField() {
+  await azureSearchRequest(
+    indexPath("/docs/search"),
+    {
+      method: "POST",
+      body: JSON.stringify({
+        search: "*",
+        select: "id",
+        top: 1,
+        filter: "accessDomain eq '__corgtex_schema_probe__'",
+      }),
+    },
+    "query",
+  );
+}
+
 export async function deleteAzureKnowledgeSourceDocuments(params: {
   workspaceId: string;
   sourceType: KnowledgeSourceType;
@@ -457,10 +446,10 @@ export async function syncAzureKnowledgeSource(params: {
     return { skipped: true, deleted: 0, uploaded: 0 };
   }
 
-  // Upgrade the additive index contract before deleting the prior source copy.
-  // This keeps a rejected domain-bearing upload from turning a source sync into
-  // destructive data loss.
-  await ensureAzureKnowledgeIndexReady();
+  // Verify the additive field through the data plane before deleting anything.
+  // Index upgrades stay in the controlled setup/backfill path, so query-only
+  // managed identities never need index-management permission.
+  await requireAzureKnowledgeAccessDomainField();
   const deleted = await deleteAzureKnowledgeSourceDocuments({
     workspaceId: params.workspaceId,
     sourceType: params.sourceType,
@@ -486,9 +475,6 @@ export async function searchAzureKnowledge(params: {
   }
   requireAzureSearchConfig("query");
   ensureVectorDimensions(params.queryEmbedding, "query");
-  if (isAzureKnowledgeSearchConfigured("admin")) {
-    await ensureAzureKnowledgeIndexReady();
-  }
 
   const limit = Math.max(1, Math.min(params.limit ?? 5, 50));
   const response = await azureSearchRequest<{ value?: Array<Record<string, unknown>> }>(

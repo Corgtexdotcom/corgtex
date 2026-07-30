@@ -113,6 +113,8 @@ async function backfill(args: Args) {
     return;
   }
 
+  await createOrUpdateAzureKnowledgeIndex();
+
   if (args.deleteStale) {
     const groups = new Map<string, AzureKnowledgeChunkInput[]>();
     for (const chunk of chunks) {
