@@ -752,7 +752,6 @@ model Workspace {
   financeExpenses                FinanceExpense[]
   financeContributionEntries     FinanceContributionEntry[]
   financeReports                 FinanceReport[]
-  financeReportFacts             FinanceReportFact[]
   appInstallations               AppInstallation[]
   appSurfaceAssignments          AppSurfaceAssignment[]
   appSessions                    AppSession[]
@@ -962,6 +961,7 @@ model FinanceReport {
 
   @@index([workspaceId, status])
   @@index([workspaceId, periodEnd])
+  @@unique([id, workspaceId])
 }
 
 model FinanceReportFact {
@@ -982,8 +982,7 @@ model FinanceReportFact {
   createdAt         DateTime              @default(now())
   updatedAt         DateTime              @updatedAt
 
-  workspace Workspace     @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-  report    FinanceReport @relation(fields: [reportId], references: [id], onDelete: Cascade)
+  report FinanceReport @relation(fields: [reportId, workspaceId], references: [id, workspaceId], onDelete: Cascade)
 
   @@unique([workspaceId, semanticKey])
   @@index([workspaceId, reportId])

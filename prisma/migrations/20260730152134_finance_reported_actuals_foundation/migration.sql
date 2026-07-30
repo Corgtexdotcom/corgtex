@@ -60,6 +60,9 @@ CREATE TABLE "FinanceReportFact" (
 CREATE UNIQUE INDEX "FinanceReport_sourceBatchId_key" ON "FinanceReport"("sourceBatchId");
 
 -- CreateIndex
+CREATE UNIQUE INDEX "FinanceReport_id_workspaceId_key" ON "FinanceReport"("id", "workspaceId");
+
+-- CreateIndex
 CREATE INDEX "FinanceReport_workspaceId_status_idx" ON "FinanceReport"("workspaceId", "status");
 
 -- CreateIndex
@@ -84,7 +87,4 @@ CREATE UNIQUE INDEX "FinanceReportFact_workspaceId_semanticKey_key" ON "FinanceR
 ALTER TABLE "FinanceReport" ADD CONSTRAINT "FinanceReport_workspaceId_fkey" FOREIGN KEY ("workspaceId") REFERENCES "Workspace"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 
 -- AddForeignKey
-ALTER TABLE "FinanceReportFact" ADD CONSTRAINT "FinanceReportFact_workspaceId_fkey" FOREIGN KEY ("workspaceId") REFERENCES "Workspace"("id") ON DELETE CASCADE ON UPDATE CASCADE;
-
--- AddForeignKey
-ALTER TABLE "FinanceReportFact" ADD CONSTRAINT "FinanceReportFact_reportId_fkey" FOREIGN KEY ("reportId") REFERENCES "FinanceReport"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+ALTER TABLE "FinanceReportFact" ADD CONSTRAINT "FinanceReportFact_reportId_workspaceId_fkey" FOREIGN KEY ("reportId", "workspaceId") REFERENCES "FinanceReport"("id", "workspaceId") ON DELETE CASCADE ON UPDATE CASCADE;
