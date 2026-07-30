@@ -211,6 +211,54 @@ describe("openAICompatibleModelGateway", () => {
     });
   });
 
+  it("keeps the non-stream request signal active while decoding JSON", async () => {
+    restoreEnv();
+    Object.assign(process.env, {
+      MODEL_PROVIDER: "openai",
+      MODEL_API_KEY: "test-key",
+      MODEL_BASE_URL: "https://api.openai.com/v1",
+      MODEL_CHAT_DEFAULT: "gpt-test",
+    });
+
+    const controller = new AbortController();
+    let providerSignal: AbortSignal | undefined;
+    let jsonStarted = false;
+    const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {
+      providerSignal = init?.signal as AbortSignal | undefined;
+      return {
+        ok: true,
+        json: () => {
+          jsonStarted = true;
+          return new Promise((resolve, reject) => {
+            providerSignal?.addEventListener("abort", () => {
+              reject(new DOMException("The operation was aborted.", "AbortError"));
+            }, { once: true });
+          });
+        },
+      } as Response;
+    });
+
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { openAICompatibleModelGateway } = await import("./openai-compatible-gateway");
+
+    const request = openAICompatibleModelGateway.chat({
+      workspaceId: "ws-1",
+      taskType: "CHAT",
+      messages: [{ role: "user", content: "Hello" }],
+      signal: controller.signal,
+    });
+
+    await vi.waitFor(() => {
+      expect(providerSignal).toBeDefined();
+      expect(jsonStarted).toBe(true);
+    });
+    controller.abort();
+
+    await expect(request).rejects.toMatchObject({ name: "AbortError" });
+    expect(providerSignal?.aborted).toBe(true);
+  });
+
   it("sends audio transcription requests as multipart form data", async () => {
     restoreEnv();
     Object.assign(process.env, {
