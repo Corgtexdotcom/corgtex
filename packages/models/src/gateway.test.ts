@@ -796,6 +796,40 @@ describe("openAICompatibleModelGateway", () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
+  it.each([
+    "https://api.openai.com/v1?api-version=bad",
+    "https://api.openai.com/v1#fragment",
+  ])("rejects query or fragment components in per-model provider route URLs: %s", async (routeBaseUrl) => {
+    restoreEnv();
+    Object.assign(process.env, {
+      MODEL_PROVIDER: "openrouter",
+      MODEL_API_KEY: "openrouter-key",
+      MODEL_BASE_URL: "https://openrouter.ai/api/v1",
+      MODEL_PROVIDER_ROUTES_JSON: JSON.stringify([
+        {
+          model: "gpt-4o",
+          provider: "openai",
+          baseUrl: routeBaseUrl,
+          apiKeyEnv: "OPENAI_ROUTE_KEY",
+        },
+      ]),
+      OPENAI_ROUTE_KEY: "route-key",
+    });
+
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { openAICompatibleModelGateway } = await import("./openai-compatible-gateway");
+
+    await expect(openAICompatibleModelGateway.chat({
+      workspaceId: "ws-1",
+      taskType: "CHAT",
+      model: "gpt-4o",
+      messages: [{ role: "user", content: "Hello" }],
+    })).rejects.toThrow("MODEL_PROVIDER_ROUTES_JSON[0].baseUrl must be an HTTPS URL without query or fragment");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it("rejects unsupported routed providers at runtime", async () => {
     restoreEnv();
     Object.assign(process.env, {
@@ -882,6 +916,31 @@ describe("openAICompatibleModelGateway", () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
+  it.each([
+    "https://api.openai.com/v1?api-version=bad",
+    "https://api.openai.com/v1#fragment",
+  ])("rejects query or fragment components in global provider endpoints at runtime: %s", async (modelBaseUrl) => {
+    restoreEnv();
+    Object.assign(process.env, {
+      MODEL_PROVIDER: "openai",
+      MODEL_API_KEY: "openai-key",
+      MODEL_BASE_URL: modelBaseUrl,
+      MODEL_CHAT_DEFAULT: "gpt-4o",
+    });
+
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { openAICompatibleModelGateway } = await import("./openai-compatible-gateway");
+
+    await expect(openAICompatibleModelGateway.chat({
+      workspaceId: "ws-1",
+      taskType: "CHAT",
+      messages: [{ role: "user", content: "Hello" }],
+    })).rejects.toThrow("MODEL_BASE_URL must be an HTTPS URL without query or fragment");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it("rejects Azure API key auth to non-Azure global endpoints at runtime", async () => {
     restoreEnv();
     Object.assign(process.env, {
@@ -924,11 +983,15 @@ describe("openAICompatibleModelGateway", () => {
 
     const { openAICompatibleModelGateway } = await import("./openai-compatible-gateway");
 
+    const expectedError = modelBaseUrl.includes("?")
+      ? "MODEL_BASE_URL must be an HTTPS URL without query or fragment"
+      : "azure-foundry API key authentication requires a trusted Azure OpenAI-compatible /openai/v1 base URL";
+
     await expect(openAICompatibleModelGateway.chat({
       workspaceId: "ws-1",
       taskType: "CHAT",
       messages: [{ role: "user", content: "Hello" }],
-    })).rejects.toThrow("azure-foundry API key authentication requires a trusted Azure OpenAI-compatible /openai/v1 base URL");
+    })).rejects.toThrow(expectedError);
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
@@ -1268,6 +1331,75 @@ describe("openAICompatibleModelGateway", () => {
       model: "corgtex-kimi-k25",
       rawProviderCostUsd: "0.002100",
       estimatedCostUsd: "0.004200",
+    });
+  });
+
+  it("records estimated Azure Foundry streaming usage when the consumer closes early", async () => {
+    restoreEnv();
+    Object.assign(process.env, {
+      MODEL_PROVIDER: "openrouter",
+      MODEL_API_KEY: "openrouter-key",
+      MODEL_BASE_URL: "https://openrouter.ai/api/v1",
+      MODEL_PROVIDER_ROUTES_JSON: JSON.stringify([
+        {
+          model: "corgtex-kimi-k25",
+          provider: "azure-foundry",
+          baseUrl: "https://corgtex-foundry.services.ai.azure.com/openai/v1",
+          authMode: "api_key",
+          apiKeyEnv: "AZURE_FOUNDRY_ROUTE_KEY",
+        },
+      ]),
+      AZURE_FOUNDRY_ROUTE_KEY: "foundry-key",
+    });
+
+    const usageModule = await import("./usage");
+    vi.mocked(usageModule.recordModelUsage).mockClear();
+
+    const encoder = new TextEncoder();
+    const cancelMock = vi.fn();
+    const streamBody = new ReadableStream({
+      start(controller) {
+        controller.enqueue(encoder.encode("data: {\"choices\":[{\"delta\":{\"content\":\"Foundry\"}}]}\n\n"));
+      },
+      cancel: cancelMock,
+    });
+    const fetchMock = vi.fn().mockResolvedValueOnce(new Response(streamBody, { status: 200 }));
+
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { openAICompatibleModelGateway } = await import("./openai-compatible-gateway");
+    const stream = openAICompatibleModelGateway.chatStream({
+      workspaceId: "ws-1",
+      taskType: "CHAT",
+      model: "corgtex-kimi-k25",
+      messages: [{ role: "user", content: "Hello" }],
+    });
+
+    const first = await stream.next();
+    expect(first.value).toBe("Foundry");
+
+    await stream.return({
+      content: "",
+      usage: {
+        provider: "azure-foundry",
+        model: "corgtex-kimi-k25",
+        inputTokens: 0,
+        outputTokens: 0,
+        latencyMs: 0,
+        estimatedCostUsd: "0.000000",
+        rawProviderCostUsd: "0.000000",
+        billableCostUsd: "0.000000",
+      },
+    });
+
+    expect(cancelMock).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(usageModule.recordModelUsage).mock.calls.at(-1)?.[0]).toMatchObject({
+      provider: "azure-foundry",
+      model: "corgtex-kimi-k25",
+      inputTokens: 5,
+      outputTokens: 2,
+      rawProviderCostUsd: "0.000009",
+      estimatedCostUsd: "0.000018",
     });
   });
 

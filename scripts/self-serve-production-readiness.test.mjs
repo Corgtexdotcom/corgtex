@@ -254,6 +254,22 @@ describe("self-serve production readiness", () => {
     expect(result.stderr).toContain("MODEL_BASE_URL must be an HTTPS URL for OpenRouter");
   });
 
+  it.each([
+    "https://openrouter.ai/api/v1?api-version=bad",
+    "https://openrouter.ai/api/v1#fragment",
+  ])("rejects query or fragment components in non-Azure global base URLs: %s", (modelBaseUrl) => {
+    const result = runReadiness({
+      ...STRICT_BASE_ENV,
+      MODEL_PROVIDER: "openrouter",
+      MODEL_API_KEY: "openrouter-key-placeholder",
+      MODEL_BASE_URL: modelBaseUrl,
+    }, ["--strict", "--skip-http"]);
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("MODEL_BASE_URL must be an HTTPS URL for OpenRouter");
+    expect(result.stderr).toContain("query strings and fragments are not allowed");
+  });
+
   it("accepts an Azure Foundry per-model canary route while OpenRouter remains the global provider", () => {
     const result = runReadiness({
       ...STRICT_BASE_ENV,
@@ -528,6 +544,29 @@ describe("self-serve production readiness", () => {
 
     expect(result.status).toBe(1);
     expect(result.stderr).toContain("MODEL_PROVIDER_ROUTES_JSON[0].baseUrl must be an HTTPS URL");
+  });
+
+  it.each([
+    "https://openrouter.ai/api/v1?api-version=bad",
+    "https://openrouter.ai/api/v1#fragment",
+  ])("rejects query or fragment components in provider route URLs: %s", (routeBaseUrl) => {
+    const result = runReadiness({
+      ...STRICT_BASE_ENV,
+      MODEL_PROVIDER: "openrouter",
+      MODEL_API_KEY: "openrouter-key-placeholder",
+      MODEL_PROVIDER_ROUTES_JSON: JSON.stringify([
+        {
+          model: "deepseek/deepseek-v4-pro",
+          provider: "openrouter",
+          baseUrl: routeBaseUrl,
+          apiKeyEnv: "OPENROUTER_ROUTE_KEY",
+        },
+      ]),
+      OPENROUTER_ROUTE_KEY: "route-key-placeholder",
+    }, ["--strict", "--skip-http"]);
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("MODEL_PROVIDER_ROUTES_JSON[0].baseUrl must be an HTTPS URL without query or fragment");
   });
 
   it("rejects duplicate per-model routes", () => {

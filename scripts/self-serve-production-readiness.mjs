@@ -227,7 +227,7 @@ function requireKnownModelPrice(provider, model, strict) {
 function isHttpsBaseUrl(value) {
   try {
     const url = new URL(value);
-    return url.protocol === "https:";
+    return url.protocol === "https:" && !url.search && !url.hash;
   } catch {
     return false;
   }
@@ -328,7 +328,7 @@ function parseProviderRoutes() {
       return [];
     }
     if (typeof route.baseUrl === "string" && route.baseUrl.trim() && !isHttpsBaseUrl(route.baseUrl.trim())) {
-      fail(`MODEL_PROVIDER_ROUTES_JSON[${index}].baseUrl must be an HTTPS URL.`);
+      fail(`MODEL_PROVIDER_ROUTES_JSON[${index}].baseUrl must be an HTTPS URL without query or fragment.`);
       return [];
     }
     if (route.apiKeyEnv !== undefined && (typeof route.apiKeyEnv !== "string" || !route.apiKeyEnv.trim())) {
@@ -388,9 +388,9 @@ function checkHttpBaseUrlEnv(name, label, strict) {
   if (isHttpsBaseUrl(envValue(name))) {
     pass(`${name} configured`);
   } else if (strict) {
-    fail(`${name} must be an HTTPS URL for ${label}.`);
+    fail(`${name} must be an HTTPS URL for ${label}; query strings and fragments are not allowed.`);
   } else {
-    warn(`${name} must be an HTTPS URL for ${label}.`);
+    warn(`${name} must be an HTTPS URL for ${label}; query strings and fragments are not allowed.`);
   }
 }
 
@@ -402,9 +402,9 @@ function checkOptionalHttpBaseUrlEnv(name, label, strict) {
   if (isHttpsBaseUrl(envValue(name))) {
     pass(`${name} configured`);
   } else if (strict) {
-    fail(`${name} must be an HTTPS URL for ${label}.`);
+    fail(`${name} must be an HTTPS URL for ${label}; query strings and fragments are not allowed.`);
   } else {
-    warn(`${name} must be an HTTPS URL for ${label}.`);
+    warn(`${name} must be an HTTPS URL for ${label}; query strings and fragments are not allowed.`);
   }
 }
 

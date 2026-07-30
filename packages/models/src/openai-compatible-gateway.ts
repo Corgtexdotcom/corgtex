@@ -98,7 +98,8 @@ function routeStringField(record: Record<string, unknown>, field: string) {
 
 function isHttpsBaseUrl(value: string) {
   try {
-    return new URL(value).protocol === "https:";
+    const url = new URL(value);
+    return url.protocol === "https:" && !url.search && !url.hash;
   } catch {
     return false;
   }
@@ -151,7 +152,7 @@ function parseModelProviderRoutes() {
     }
     const routeBaseUrl = routeStringField(record, "baseUrl");
     if (routeBaseUrl && !isHttpsBaseUrl(routeBaseUrl)) {
-      throw new Error(`MODEL_PROVIDER_ROUTES_JSON[${index}].baseUrl must be an HTTPS URL.`);
+      throw new Error(`MODEL_PROVIDER_ROUTES_JSON[${index}].baseUrl must be an HTTPS URL without query or fragment.`);
     }
 
     return {
@@ -186,7 +187,7 @@ function baseUrl(route?: ModelProviderRoute) {
     return "https://api.openai.com/v1";
   }
   if (!isHttpsBaseUrl(env.MODEL_BASE_URL)) {
-    throw new Error("MODEL_BASE_URL must be an HTTPS URL.");
+    throw new Error("MODEL_BASE_URL must be an HTTPS URL without query or fragment.");
   }
   return env.MODEL_BASE_URL.replace(/\/+$/, "");
 }
@@ -741,71 +742,94 @@ async function* completeChatStream(
   let tool_calls: any[] = [];
   let usageDetailsObj: any = null;
   let buffer = "";
+  let streamCompleted = false;
+  let usage: UsageDetails | undefined;
+  let usageRecorded = false;
 
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
+  async function finalizeUsage() {
+    if (usageRecorded && usage) {
+      return usage;
+    }
 
-    buffer += decoder.decode(value, { stream: true });
-    let newlineIndex: number;
-    while ((newlineIndex = buffer.indexOf("\n")) >= 0) {
-      const line = buffer.slice(0, newlineIndex).trim();
-      buffer = buffer.slice(newlineIndex + 1);
+    const latencyMs = Date.now() - startedAt;
+    const inputTokens = usageDetailsObj?.prompt_tokens ?? request.messages.reduce((sum, message) => sum + message.content.length, 0);
+    const outputTokens = usageDetailsObj?.completion_tokens ?? Math.ceil(content.length / 4);
+    usage = await recordUsage({
+      workspaceId: request.workspaceId,
+      workflowJobId: request.workflowJobId,
+      agentRunId: request.agentRunId,
+      ...usageContext(request),
+      provider,
+      model,
+      taskType,
+      inputTokens,
+      outputTokens,
+      latencyMs,
+      ...costFields(provider, model, inputTokens, outputTokens),
+    });
+    usageRecorded = true;
+    return usage;
+  }
 
-      if (line.startsWith("data: ") && line !== "data: [DONE]") {
-        try {
-          const data = JSON.parse(line.slice(6));
-          const delta = data.choices?.[0]?.delta;
-          
-          if (delta?.content) {
-            content += delta.content;
-            yield delta.content;
-          }
-          
-          if (delta?.tool_calls) {
-            for (const tool of delta.tool_calls) {
-              const index = tool.index;
-              if (tool_calls[index]) {
-                tool_calls[index].function.arguments += tool.function?.arguments || "";
-              } else {
-                tool_calls[index] = {
-                  id: tool.id,
-                  type: "function",
-                  function: {
-                    name: tool.function?.name || "",
-                    arguments: tool.function?.arguments || "",
-                  }
-                };
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) {
+        streamCompleted = true;
+        break;
+      }
+
+      buffer += decoder.decode(value, { stream: true });
+      let newlineIndex: number;
+      while ((newlineIndex = buffer.indexOf("\n")) >= 0) {
+        const line = buffer.slice(0, newlineIndex).trim();
+        buffer = buffer.slice(newlineIndex + 1);
+
+        if (line.startsWith("data: ") && line !== "data: [DONE]") {
+          try {
+            const data = JSON.parse(line.slice(6));
+            const delta = data.choices?.[0]?.delta;
+
+            if (delta?.content) {
+              content += delta.content;
+              yield delta.content;
+            }
+
+            if (delta?.tool_calls) {
+              for (const tool of delta.tool_calls) {
+                const index = tool.index;
+                if (tool_calls[index]) {
+                  tool_calls[index].function.arguments += tool.function?.arguments || "";
+                } else {
+                  tool_calls[index] = {
+                    id: tool.id,
+                    type: "function",
+                    function: {
+                      name: tool.function?.name || "",
+                      arguments: tool.function?.arguments || "",
+                    }
+                  };
+                }
               }
             }
+            if (data.usage) usageDetailsObj = data.usage;
+          } catch (e) {
+            // ignore
           }
-          if (data.usage) usageDetailsObj = data.usage;
-        } catch (e) {
-          // ignore
         }
       }
+    }
+  } finally {
+    if (!streamCompleted && !usageRecorded) {
+      await reader.cancel().catch(() => undefined);
+      await finalizeUsage();
     }
   }
   
   const finalTools: import("./contracts").ToolCall[] = tool_calls.filter(Boolean);
-  const latencyMs = Date.now() - startedAt;
-  const inputTokens = usageDetailsObj?.prompt_tokens ?? request.messages.reduce((sum, message) => sum + message.content.length, 0);
-  const outputTokens = usageDetailsObj?.completion_tokens ?? Math.ceil(content.length / 4);
-  const usage = await recordUsage({
-    workspaceId: request.workspaceId,
-    workflowJobId: request.workflowJobId,
-    agentRunId: request.agentRunId,
-    ...usageContext(request),
-    provider,
-    model,
-    taskType,
-    inputTokens,
-    outputTokens,
-    latencyMs,
-    ...costFields(provider, model, inputTokens, outputTokens),
-  });
+  const finalUsage = await finalizeUsage();
 
-  return { content, tool_calls: finalTools.length > 0 ? finalTools : undefined, usage };
+  return { content, tool_calls: finalTools.length > 0 ? finalTools : undefined, usage: finalUsage };
 }
 
 async function repairExtractionObject(request: ExtractionRequest, raw: string) {

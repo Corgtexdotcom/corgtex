@@ -731,6 +731,22 @@ describe("Azure Foundry model eval helpers", () => {
     expect(() => parseCandidates()).toThrow("AZURE_FOUNDRY_EVAL_CANDIDATES_JSON[0].baseUrl must be an HTTPS URL");
   });
 
+  it.each([
+    "https://api.openai.com/v1?api-version=bad",
+    "https://api.openai.com/v1#fragment",
+  ])("rejects query or fragment components in evaluation candidate base URLs: %s", (baseUrl) => {
+    process.env.AZURE_FOUNDRY_EVAL_CANDIDATES_JSON = JSON.stringify([
+      {
+        label: "OpenAI rollback",
+        provider: "openai",
+        model: "gpt-4o",
+        baseUrl,
+      },
+    ]);
+
+    expect(() => parseCandidates()).toThrow("AZURE_FOUNDRY_EVAL_CANDIDATES_JSON[0].baseUrl must be an HTTPS URL without query or fragment");
+  });
+
   it("rejects managed identity for non-Azure evaluation candidates", () => {
     process.env.AZURE_FOUNDRY_EVAL_CANDIDATES_JSON = JSON.stringify([
       {
@@ -788,7 +804,10 @@ describe("Azure Foundry model eval helpers", () => {
       },
     ]);
 
-    expect(() => parseCandidates()).toThrow("baseUrl must be a trusted Azure OpenAI-compatible /openai/v1 URL for API key");
+    const expectedError = baseUrl.includes("?")
+      ? "AZURE_FOUNDRY_EVAL_CANDIDATES_JSON[0].baseUrl must be an HTTPS URL without query or fragment"
+      : "baseUrl must be a trusted Azure OpenAI-compatible /openai/v1 URL for API key";
+    expect(() => parseCandidates()).toThrow(expectedError);
   });
 
   it("does not treat negated forbidden phrases as forbidden mentions", () => {
