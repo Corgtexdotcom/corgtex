@@ -202,7 +202,14 @@ describe("Azure Foundry model eval helpers", () => {
           label: "meeting summary structured sections",
           path: "",
           fields: {
-            decisions: { allOf: ["Barcelona pilot", ["proceed", "approved"], ["no external announcement", "external announcement yet"]] },
+            decisions: {
+              allOf: [
+                "Barcelona pilot",
+                ["proceed", "approved"],
+                ["only if finance", "if finance", "finance confirms", "finance confirmation", "vendor cap"],
+                ["no external announcement", "external announcement yet"],
+              ],
+            },
             actions: { allOf: ["Mina", "vendor cap", "Friday", "Support", ["two days", "2 days"]] },
             risks: { allOf: ["Data import", ["risk", "risky", "remains a risk"], ["duplicate company rows", "duplicate rows"]] },
           },
@@ -213,6 +220,9 @@ describe("Azure Foundry model eval helpers", () => {
         { label: "finance deadline", allOf: ["finance", "vendor cap", "Friday"] },
         { label: "Support notice", allOf: ["Support", ["two days", "2 days"]] },
         { label: "duplicate company rows", anyOf: ["duplicate company rows"] },
+      ],
+      forbiddenConcepts: [
+        { label: "unconditional pilot approval", anyOf: ["unconditionally", "without finance confirmation", "regardless of finance", "no finance condition"] },
       ],
     };
 
@@ -261,9 +271,18 @@ describe("Azure Foundry model eval helpers", () => {
     expect(summaryOnlyScore.missingJsonMatches).toEqual(["meeting summary structured sections"]);
     expect(summaryOnlyScore.passed).toBe(false);
 
+    const unconditionalDecisionScore = scoreItem(
+      item,
+      "{\"summary\":\"Barcelona pilot planning is in scope.\",\"decisions\":[\"Proceed with Barcelona pilot planning unconditionally; no external announcement yet.\"],\"actions\":[\"Mina owns the finance vendor cap check by Friday and will include Support's two days of notice in the launch note.\"],\"risks\":[\"Data import remains risky because of duplicate company rows.\"]}",
+    );
+    expect(unconditionalDecisionScore.schemaValid).toBe(true);
+    expect(unconditionalDecisionScore.missingJsonMatches).toEqual(["meeting summary structured sections"]);
+    expect(unconditionalDecisionScore.forbiddenMentions).toEqual(["unconditional pilot approval"]);
+    expect(unconditionalDecisionScore.passed).toBe(false);
+
     const matchedScore = scoreItem(
       item,
-      "{\"summary\":\"Barcelona pilot planning is in scope.\",\"decisions\":[\"Proceed with Barcelona pilot planning; no external announcement yet.\"],\"actions\":[\"Mina owns the finance vendor cap check by Friday and will include Support's two days of notice in the launch note.\"],\"risks\":[\"Data import remains risky because of duplicate company rows.\"]}",
+      "{\"summary\":\"Barcelona pilot planning is in scope.\",\"decisions\":[\"Proceed with Barcelona pilot planning only if finance confirms the vendor cap; no external announcement yet.\"],\"actions\":[\"Mina owns the finance vendor cap check by Friday and will include Support's two days of notice in the launch note.\"],\"risks\":[\"Data import remains risky because of duplicate company rows.\"]}",
     );
     expect(matchedScore.schemaValid).toBe(true);
     expect(matchedScore.missingJsonMatches).toEqual([]);

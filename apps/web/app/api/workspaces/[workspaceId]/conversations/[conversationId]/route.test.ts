@@ -178,6 +178,41 @@ describe("POST /api/workspaces/[workspaceId]/conversations/[conversationId]", ()
     clearTimeoutSpy.mockRestore();
   });
 
+  it("closes the conversation stream iterator when the response body is canceled", async () => {
+    const returnMock = vi.fn().mockResolvedValue({
+      done: true,
+      value: {
+        assistantMessage: "",
+        contextUsed: {},
+      },
+    });
+    const iterator = {
+      next: vi.fn(() => new Promise<IteratorResult<string, any>>(() => {})),
+      return: returnMock,
+      [Symbol.asyncIterator]() {
+        return this;
+      },
+    };
+
+    processConversationTurnStream.mockReturnValue(iterator as never);
+
+    const { POST } = await import("./route");
+    const response = await POST(request() as never, routeParams());
+    const reader = response.body!.getReader();
+
+    const first = await reader.read();
+    expect(first.done).toBe(false);
+    expect(decodeChunk(first.value)).toContain("\"keepAlive\":true");
+
+    await reader.cancel();
+
+    expect(returnMock).toHaveBeenCalledWith({
+      assistantMessage: "",
+      contextUsed: {},
+    });
+    expect(addConversationTurn).not.toHaveBeenCalled();
+  });
+
   it("streams final assistant text when the generator returns without chunks", async () => {
     async function* finalOnlyConversationStream() {
       return {

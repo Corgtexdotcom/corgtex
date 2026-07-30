@@ -808,6 +808,14 @@ async function executeConversationToolCall({
   };
 }
 
+async function closeAsyncIterator<T, TReturn>(iterator: AsyncIterator<T, TReturn>) {
+  if (typeof iterator.return !== "function") return;
+  try {
+    await iterator.return(undefined as TReturn);
+  } catch {
+  }
+}
+
 export async function processConversationTurn(ctx: ConversationContext): Promise<{
   assistantMessage: string;
   contextUsed: ConversationContextUsed;
@@ -1233,10 +1241,12 @@ export async function* processConversationTurnStream(ctx: ConversationContext): 
   })[Symbol.asyncIterator]();
 
   let firstResult: import("@corgtex/models").ChatCompletionResponse | null = null;
+  let firstStreamDone = false;
   try {
     while (true) {
       const { done, value } = await iterator.next();
       if (done) {
+        firstStreamDone = true;
         firstResult = value;
         break;
       }
@@ -1245,6 +1255,10 @@ export async function* processConversationTurnStream(ctx: ConversationContext): 
     }
   } catch {
     firstResult = null;
+  } finally {
+    if (!firstStreamDone) {
+      await closeAsyncIterator(iterator);
+    }
   }
 
   if (firstResult?.tool_calls && firstResult.tool_calls.length > 0) {
@@ -1295,10 +1309,12 @@ export async function* processConversationTurnStream(ctx: ConversationContext): 
         tools,
       })[Symbol.asyncIterator]();
 
+      let followupStreamDone = false;
       try {
         while (true) {
           const { done, value } = await followupIterator.next();
           if (done) {
+            followupStreamDone = true;
             break;
           }
           yield value;
@@ -1307,6 +1323,10 @@ export async function* processConversationTurnStream(ctx: ConversationContext): 
         }
       } catch {
         followupStreamFailed = true;
+      } finally {
+        if (!followupStreamDone) {
+          await closeAsyncIterator(followupIterator);
+        }
       }
     }
     if (!followupMessage.trim() || followupStreamFailed) {
