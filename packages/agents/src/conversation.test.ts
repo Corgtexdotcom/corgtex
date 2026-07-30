@@ -1365,6 +1365,43 @@ describe("processConversationTurn", () => {
     expect(followupModelStreamClosed).toBe(true);
   });
 
+  it("passes the abort signal to first and follow-up model streams", async () => {
+    const actor = testUserActor();
+    const controller = new AbortController();
+    chatStreamMock
+      .mockReturnValueOnce(streamResponse([], {
+        content: "",
+        tool_calls: [{
+          id: "call-1",
+          function: {
+            name: "list_due_relationship_work",
+            arguments: JSON.stringify({ accountId: "account-1", take: 5 }),
+          },
+        }],
+      }))
+      .mockReturnValueOnce(streamResponse(["Follow-up answer"], { content: "Follow-up answer" }));
+
+    const { processConversationTurnStream } = await import("./conversation");
+    const { result } = await collectConversationStream(processConversationTurnStream({
+      workspaceId: "ws-1",
+      sessionId: "session-1",
+      userId: "user-1",
+      agentKey: "assistant",
+      userMessage: "Use list_due_relationship_work for selected account account-1.",
+      actor,
+      pageContext: crmPageContext(),
+      signal: controller.signal,
+    }));
+
+    expect(result.assistantMessage).toContain("Follow-up answer");
+    expect(chatStreamMock).toHaveBeenNthCalledWith(1, expect.objectContaining({
+      signal: controller.signal,
+    }));
+    expect(chatStreamMock).toHaveBeenNthCalledWith(2, expect.objectContaining({
+      signal: controller.signal,
+    }));
+  });
+
   it("streams a CRM due-work fallback when the follow-up model stream fails", async () => {
     const actor = testUserActor();
     chatStreamMock

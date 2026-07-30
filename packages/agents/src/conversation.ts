@@ -166,6 +166,7 @@ type ConversationContext = {
   systemPrompt?: string | null;
   actor?: AppActor;
   pageContext?: ConversationPageContext | null;
+  signal?: AbortSignal;
 };
 
 type ConversationContextUsed = {
@@ -988,6 +989,7 @@ export async function processConversationTurn(ctx: ConversationContext): Promise
     taskType: "AGENT",
     messages,
     tools,
+    signal: ctx.signal,
   });
 
   const initialMessage = response.content;
@@ -1043,6 +1045,7 @@ export async function processConversationTurn(ctx: ConversationContext): Promise
         taskType: "AGENT",
         messages,
         tools,
+        signal: ctx.signal,
       });
 
       followupMessage = followup.content;
@@ -1238,6 +1241,7 @@ export async function* processConversationTurnStream(ctx: ConversationContext): 
     taskType: "AGENT",
     messages,
     tools,
+    signal: ctx.signal,
   })[Symbol.asyncIterator]();
 
   let firstResult: import("@corgtex/models").ChatCompletionResponse | null = null;
@@ -1307,6 +1311,7 @@ export async function* processConversationTurnStream(ctx: ConversationContext): 
         taskType: "AGENT",
         messages,
         tools,
+        signal: ctx.signal,
       })[Symbol.asyncIterator]();
 
       let followupStreamDone = false;

@@ -1615,4 +1615,50 @@ describe("openAICompatibleModelGateway", () => {
       repairedRaw: "Still not JSON",
     });
   });
+
+  it("aborts a pending streaming provider read when the request signal aborts", async () => {
+    restoreEnv();
+    Object.assign(process.env, {
+      MODEL_PROVIDER: "openrouter",
+      MODEL_API_KEY: "test-key",
+      MODEL_BASE_URL: "https://openrouter.ai/api/v1",
+      APP_URL: "https://corgtex.example.test",
+      MODEL_CHAT_DEFAULT: "qwen/qwen3-32b",
+    });
+
+    let providerSignal: AbortSignal | undefined;
+    const fetchMock = vi.fn().mockImplementation((_url: string, init: RequestInit) => {
+      providerSignal = init.signal as AbortSignal;
+      return Promise.resolve(new Response(new ReadableStream({
+        start(controller) {
+          providerSignal?.addEventListener("abort", () => {
+            controller.error(new DOMException("The operation was aborted.", "AbortError"));
+          }, { once: true });
+        },
+      }), { status: 200 }));
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { openAICompatibleModelGateway } = await import("./openai-compatible-gateway");
+    const controller = new AbortController();
+    const stream = openAICompatibleModelGateway.chatStream({
+      workspaceId: "ws-1",
+      taskType: "AGENT",
+      messages: [{ role: "user", content: "Hello" }],
+      signal: controller.signal,
+    });
+
+    const pendingRead = stream.next();
+    await vi.waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(providerSignal).toBeInstanceOf(AbortSignal);
+    });
+
+    expect(providerSignal?.aborted).toBe(false);
+    controller.abort();
+
+    await expect(pendingRead).rejects.toMatchObject({ name: "AbortError" });
+    expect(providerSignal?.aborted).toBe(true);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
 });

@@ -210,6 +210,9 @@ describe("POST /api/workspaces/[workspaceId]/conversations/[conversationId]", ()
       assistantMessage: "",
       contextUsed: {},
     });
+    const conversationContext = processConversationTurnStream.mock.calls[0]?.[0] as { signal?: AbortSignal } | undefined;
+    expect(conversationContext?.signal).toBeInstanceOf(AbortSignal);
+    expect(conversationContext?.signal?.aborted).toBe(true);
     expect(addConversationTurn).not.toHaveBeenCalled();
   });
 

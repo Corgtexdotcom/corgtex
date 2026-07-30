@@ -50,6 +50,7 @@ export type ChatCompletionRequest = {
   messages: ChatMessage[];
   tools?: ModelTool[];
   tool_choice?: "auto" | "none" | { type: "function", function: { name: string } };
+  signal?: AbortSignal;
   workflowJobId?: string;
   agentRunId?: string;
   catalogItemId?: string;

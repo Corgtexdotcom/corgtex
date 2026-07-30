@@ -500,43 +500,114 @@ function isRetryableRequestError(error: unknown) {
   return error.name === "AbortError" || error.name === "TimeoutError" || error instanceof TypeError;
 }
 
-async function sleep(ms: number) {
-  await new Promise((resolve) => setTimeout(resolve, ms));
+function abortedError() {
+  return new DOMException("The operation was aborted.", "AbortError");
 }
 
-async function postJson<TResponse>(path: string, body: Record<string, unknown>, route?: ModelProviderRoute) {
+function throwIfAborted(signal?: AbortSignal) {
+  if (signal?.aborted) {
+    throw abortedError();
+  }
+}
+
+function timeoutSignal(parentSignal: AbortSignal | undefined, timeoutMs: number) {
+  const timerSignal = AbortSignal.timeout(timeoutMs);
+  if (!parentSignal) {
+    return {
+      signal: timerSignal,
+      cleanup() {},
+    };
+  }
+
+  const controller = new AbortController();
+  const abort = () => controller.abort();
+  parentSignal.addEventListener("abort", abort, { once: true });
+  timerSignal.addEventListener("abort", abort, { once: true });
+  if (parentSignal.aborted || timerSignal.aborted) {
+    abort();
+  }
+
+  return {
+    signal: controller.signal,
+    cleanup() {
+      parentSignal.removeEventListener("abort", abort);
+      timerSignal.removeEventListener("abort", abort);
+    },
+  };
+}
+
+async function sleep(ms: number, signal?: AbortSignal) {
+  throwIfAborted(signal);
+  await new Promise<void>((resolve, reject) => {
+    let settled = false;
+    let timeout: ReturnType<typeof setTimeout> | null = null;
+    const cleanup = () => {
+      signal?.removeEventListener("abort", abort);
+      if (timeout) {
+        clearTimeout(timeout);
+        timeout = null;
+      }
+    };
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolve();
+    };
+    const abort = () => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(abortedError());
+    };
+    timeout = setTimeout(finish, ms);
+    signal?.addEventListener("abort", abort, { once: true });
+    if (signal?.aborted) {
+      abort();
+    }
+  });
+  throwIfAborted(signal);
+}
+
+async function postJson<TResponse>(path: string, body: Record<string, unknown>, route?: ModelProviderRoute, signal?: AbortSignal) {
   const provider = providerForRoute(route);
   const payload = JSON.stringify(withProviderOptions(provider, body));
   let lastError: unknown = null;
 
   for (let attempt = 0; attempt <= MAX_REQUEST_RETRIES; attempt += 1) {
     try {
-      const response = await fetch(`${baseUrl(route)}${path}`, {
-        method: "POST",
-        headers: await requestHeaders(route),
-        body: payload,
-        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
-      });
+      throwIfAborted(signal);
+      const fetchSignal = timeoutSignal(signal, REQUEST_TIMEOUT_MS);
+      try {
+        const response = await fetch(`${baseUrl(route)}${path}`, {
+          method: "POST",
+          headers: await requestHeaders(route),
+          body: payload,
+          signal: fetchSignal.signal,
+        });
 
-      if (!response.ok) {
-        const errorText = await response.text();
-        const error = new Error(`OpenAI-compatible request failed (${response.status}): ${errorText}`);
-        if (attempt < MAX_REQUEST_RETRIES && isRetryableStatus(response.status)) {
-          lastError = error;
-          await sleep(retryDelayMs(attempt));
-          continue;
+        if (!response.ok) {
+          const errorText = await response.text();
+          const error = new Error(`OpenAI-compatible request failed (${response.status}): ${errorText}`);
+          if (attempt < MAX_REQUEST_RETRIES && isRetryableStatus(response.status)) {
+            lastError = error;
+            await sleep(retryDelayMs(attempt), signal);
+            continue;
+          }
+          throw error;
         }
-        throw error;
-      }
 
-      return response.json() as Promise<TResponse>;
+        return response.json() as Promise<TResponse>;
+      } finally {
+        fetchSignal.cleanup();
+      }
     } catch (error) {
-      if (attempt >= MAX_REQUEST_RETRIES || !isRetryableRequestError(error)) {
+      if (signal?.aborted || attempt >= MAX_REQUEST_RETRIES || !isRetryableRequestError(error)) {
         throw error;
       }
 
       lastError = error;
-      await sleep(retryDelayMs(attempt));
+      await sleep(retryDelayMs(attempt), signal);
     }
   }
 
@@ -673,7 +744,7 @@ async function completeChat(
     ...(request.tool_choice ? { tool_choice: request.tool_choice } : {}),
     ...(bodyExtras ?? {}),
   });
-  const response = await postJson<ChatCompletionApiResponse>("/chat/completions", body, route);
+  const response = await postJson<ChatCompletionApiResponse>("/chat/completions", body, route, request.signal);
   const latencyMs = Date.now() - startedAt;
   const content = normalizeContent(response.choices?.[0]?.message?.content);
   const tool_calls = response.choices?.[0]?.message?.tool_calls;
@@ -725,33 +796,44 @@ async function* completeChatStream(
 
   let response: Response | null = null;
   let lastError: unknown = null;
+  let streamSignalCleanup = () => {};
 
   for (let attempt = 0; attempt <= MAX_REQUEST_RETRIES; attempt += 1) {
+    let keepSignalForStream = false;
+    const fetchSignal = timeoutSignal(request.signal, STREAM_TIMEOUT_MS);
     try {
+      throwIfAborted(request.signal);
       response = await fetch(`${baseUrl(route)}/chat/completions`, {
         method: "POST",
         headers: await requestHeaders(route),
         body: payload,
-        signal: AbortSignal.timeout(STREAM_TIMEOUT_MS),
+        signal: fetchSignal.signal,
       });
 
       if (!response.ok) {
         const errorText = await response.text();
         const error = new Error(`OpenAI-compatible request failed (${response.status}): ${errorText}`);
+        fetchSignal.cleanup();
         if (attempt < MAX_REQUEST_RETRIES && isRetryableStatus(response.status)) {
           lastError = error;
-          await sleep(retryDelayMs(attempt));
+          await sleep(retryDelayMs(attempt), request.signal);
           continue;
         }
         throw error;
       }
+      keepSignalForStream = true;
+      streamSignalCleanup = fetchSignal.cleanup;
       break;
     } catch (error) {
-      if (attempt >= MAX_REQUEST_RETRIES || !isRetryableRequestError(error)) {
+      if (request.signal?.aborted || attempt >= MAX_REQUEST_RETRIES || !isRetryableRequestError(error)) {
         throw error;
       }
       lastError = error;
-      await sleep(retryDelayMs(attempt));
+      await sleep(retryDelayMs(attempt), request.signal);
+    } finally {
+      if (!keepSignalForStream) {
+        fetchSignal.cleanup();
+      }
     }
   }
 
@@ -842,6 +924,7 @@ async function* completeChatStream(
       }
     }
   } finally {
+    streamSignalCleanup();
     if (!streamCompleted && !usageRecorded) {
       await reader.cancel().catch(() => undefined);
       await finalizeUsage();

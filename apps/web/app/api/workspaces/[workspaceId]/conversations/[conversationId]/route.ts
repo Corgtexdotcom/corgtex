@@ -167,6 +167,7 @@ export async function POST(
     const conversation = await getConversation(actor, workspaceId, conversationId);
     const userId = actor.kind === "user" ? actor.user.id : "";
 
+    const modelAbortController = new AbortController();
     const iterator = processConversationTurnStream({
       workspaceId,
       sessionId: conversationId,
@@ -176,6 +177,7 @@ export async function POST(
       systemPrompt: conversation.systemPrompt,
       actor,
       pageContext,
+      signal: modelAbortController.signal,
     });
 
     const encoder = new TextEncoder();
@@ -239,6 +241,7 @@ export async function POST(
                     },
                     { role: "user", content: userMessage },
                   ],
+                  signal: modelAbortController.signal,
                 });
                 const generatedTopic = titleResponse.content.trim().slice(0, 80);
                 if (generatedTopic) {
@@ -272,6 +275,7 @@ export async function POST(
       },
       async cancel() {
         cancellation.cancel();
+        modelAbortController.abort();
         try {
           await iterator.return?.({
             assistantMessage: "",
