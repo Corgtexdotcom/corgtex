@@ -1368,11 +1368,12 @@ describe("openAICompatibleModelGateway", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     const { openAICompatibleModelGateway } = await import("./openai-compatible-gateway");
+    const longPrompt = "x".repeat(4_000);
     const stream = openAICompatibleModelGateway.chatStream({
       workspaceId: "ws-1",
       taskType: "CHAT",
       model: "corgtex-kimi-k25",
-      messages: [{ role: "user", content: "Hello" }],
+      messages: [{ role: "user", content: longPrompt }],
     });
 
     const first = await stream.next();
@@ -1396,10 +1397,10 @@ describe("openAICompatibleModelGateway", () => {
     expect(vi.mocked(usageModule.recordModelUsage).mock.calls.at(-1)?.[0]).toMatchObject({
       provider: "azure-foundry",
       model: "corgtex-kimi-k25",
-      inputTokens: 5,
+      inputTokens: 1000,
       outputTokens: 2,
-      rawProviderCostUsd: "0.000009",
-      estimatedCostUsd: "0.000018",
+      rawProviderCostUsd: "0.000606",
+      estimatedCostUsd: "0.001212",
     });
   });
 

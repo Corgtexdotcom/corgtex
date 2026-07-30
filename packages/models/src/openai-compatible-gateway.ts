@@ -278,6 +278,14 @@ function costFields(provider: string, model: string, inputTokens: number, output
   }) ?? {};
 }
 
+function estimateTextTokens(value: string) {
+  return Math.ceil(value.length / 4);
+}
+
+function estimateChatInputTokens(messages: Array<{ content: string }>) {
+  return messages.reduce((sum, message) => sum + estimateTextTokens(message.content), 0);
+}
+
 function requiresKnownModelPrice(provider: string) {
   return provider === "azure-openai" || provider === "azure-foundry";
 }
@@ -655,8 +663,8 @@ async function completeChat(
   const latencyMs = Date.now() - startedAt;
   const content = normalizeContent(response.choices?.[0]?.message?.content);
   const tool_calls = response.choices?.[0]?.message?.tool_calls;
-  const inputTokens = response.usage?.prompt_tokens ?? request.messages.reduce((sum, message) => sum + message.content.length, 0);
-  const outputTokens = response.usage?.completion_tokens ?? Math.ceil(content.length / 4);
+  const inputTokens = response.usage?.prompt_tokens ?? estimateChatInputTokens(request.messages);
+  const outputTokens = response.usage?.completion_tokens ?? estimateTextTokens(content);
   const usage = await recordUsage({
     workspaceId: request.workspaceId,
     workflowJobId: request.workflowJobId,
@@ -752,8 +760,8 @@ async function* completeChatStream(
     }
 
     const latencyMs = Date.now() - startedAt;
-    const inputTokens = usageDetailsObj?.prompt_tokens ?? request.messages.reduce((sum, message) => sum + message.content.length, 0);
-    const outputTokens = usageDetailsObj?.completion_tokens ?? Math.ceil(content.length / 4);
+    const inputTokens = usageDetailsObj?.prompt_tokens ?? estimateChatInputTokens(request.messages);
+    const outputTokens = usageDetailsObj?.completion_tokens ?? estimateTextTokens(content);
     usage = await recordUsage({
       workspaceId: request.workspaceId,
       workflowJobId: request.workflowJobId,
