@@ -16,13 +16,10 @@ import {
 } from "./duplicate-guard";
 import { resolveKnowledgeAccessDomains } from "./brain-access";
 
-export async function listDocuments(workspaceId: string, opts?: {
-  actor?: AppActor;
+export async function listDocuments(actor: AppActor, workspaceId: string, opts?: {
   archiveFilter?: ArchiveFilter;
 }) {
-  const accessDomains: KnowledgeAccessDomain[] = opts?.actor
-    ? await resolveKnowledgeAccessDomains(opts.actor, workspaceId)
-    : ["WORKSPACE"];
+  const accessDomains: KnowledgeAccessDomain[] = await resolveKnowledgeAccessDomains(actor, workspaceId);
 
   return prisma.document.findMany({
     where: {
