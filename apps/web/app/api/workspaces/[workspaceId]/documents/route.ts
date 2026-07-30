@@ -63,7 +63,7 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
     const actor = await resolveRequestActor(request);
     await requireWorkspaceMembership({ actor, workspaceId });
     const archiveFilter = request.nextUrl.searchParams.get("archiveFilter") as ArchiveFilter | null;
-    const documents = await listDocuments(workspaceId, { archiveFilter: archiveFilter ?? undefined });
+    const documents = await listDocuments(actor, workspaceId, { archiveFilter: archiveFilter ?? undefined });
     return NextResponse.json({ documents });
   } catch (error) {
     return handleRouteError(error);

@@ -53,7 +53,7 @@ export default async function BrainPage({
       ? answerKnowledgeQuestion({ workspaceId, question: provisionalQuestion, limit: 4 })
       : Promise.resolve(null),
     listMeetings(workspaceId, { status: "COMPLETED" }),
-    listDocuments(workspaceId),
+    listDocuments(actor, workspaceId),
   ]);
 
   const {
