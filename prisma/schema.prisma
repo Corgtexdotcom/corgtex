@@ -494,6 +494,23 @@ enum FinanceImportCandidateReviewState {
   APPLIED
 }
 
+enum FinanceImportApplicationTargetType {
+  REPORT_FACT
+}
+
+enum FinanceImportApplicationOutcome {
+  CREATED
+  UPDATED
+  UNCHANGED
+  SKIPPED
+}
+
+enum FinanceImportProfileStatus {
+  ACTIVE
+  SUPERSEDED
+  RETIRED
+}
+
 enum FinanceContributionType {
   TIME
   EXPENSE
@@ -798,6 +815,8 @@ model Workspace {
   financeContributionEntries     FinanceContributionEntry[]
   financeReports                 FinanceReport[]
   financeImportBatches           FinanceImportBatch[]
+  financeImportApplications      FinanceImportApplication[]
+  financeImportProfiles          FinanceImportProfile[]
   appInstallations               AppInstallation[]
   appSurfaceAssignments          AppSurfaceAssignment[]
   appSessions                    AppSession[]
@@ -1002,12 +1021,14 @@ model FinanceReport {
   createdAt     DateTime               @default(now())
   updatedAt     DateTime               @updatedAt
 
-  workspace Workspace           @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-  facts     FinanceReportFact[]
+  workspace   Workspace           @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  sourceBatch FinanceImportBatch  @relation(fields: [sourceBatchId, workspaceId], references: [id, workspaceId], onDelete: Restrict)
+  facts       FinanceReportFact[]
 
   @@index([workspaceId, status])
   @@index([workspaceId, periodEnd])
   @@unique([id, workspaceId])
+  @@unique([sourceBatchId, workspaceId])
 }
 
 model FinanceReportFact {
@@ -1028,8 +1049,9 @@ model FinanceReportFact {
   createdAt         DateTime              @default(now())
   updatedAt         DateTime              @updatedAt
 
-  report           FinanceReport             @relation(fields: [reportId, workspaceId], references: [id, workspaceId], onDelete: Cascade)
-  importCandidates FinanceImportCandidate[]
+  report             FinanceReport              @relation(fields: [reportId, workspaceId], references: [id, workspaceId], onDelete: Cascade)
+  importCandidates   FinanceImportCandidate[]
+  importApplications FinanceImportApplication[]
 
   @@unique([id, workspaceId])
   @@unique([workspaceId, semanticKey])
@@ -1090,6 +1112,9 @@ model FinanceImportBatch {
   workflowJob WorkflowJob?             @relation(fields: [workflowJobId, workspaceId], references: [id, workspaceId], onDelete: Restrict)
   agentRun    AgentRun?                @relation(fields: [agentRunId, workspaceId], references: [id, workspaceId], onDelete: Restrict)
   candidates  FinanceImportCandidate[]
+  report      FinanceReport?
+  applications FinanceImportApplication[]
+  approvedProfiles FinanceImportProfile[]
 
   @@unique([id, workspaceId])
   @@unique([workspaceId, fileHash])
@@ -1130,13 +1155,76 @@ model FinanceImportCandidate {
   createdAt               DateTime                          @default(now())
   updatedAt               DateTime                          @updatedAt
 
-  batch       FinanceImportBatch @relation(fields: [batchId, workspaceId], references: [id, workspaceId], onDelete: Cascade)
-  currentFact FinanceReportFact? @relation(fields: [currentFactId, workspaceId], references: [id, workspaceId], onDelete: Restrict)
+  batch       FinanceImportBatch        @relation(fields: [batchId, workspaceId], references: [id, workspaceId], onDelete: Cascade)
+  currentFact FinanceReportFact?        @relation(fields: [currentFactId, workspaceId], references: [id, workspaceId], onDelete: Restrict)
+  application FinanceImportApplication?
 
   @@unique([id, workspaceId])
+  @@unique([id, batchId, workspaceId])
   @@unique([batchId, sourceKey])
   @@index([workspaceId, batchId, reviewState])
   @@index([workspaceId, semanticKey])
+}
+
+model FinanceImportApplication {
+  id               String                             @id @default(uuid())
+  workspaceId      String
+  batchId          String
+  candidateId      String                             @unique
+  idempotencyKey   String                             @db.VarChar(64)
+  targetType       FinanceImportApplicationTargetType
+  targetFactId     String?
+  beforeValueJson  Json?
+  afterValueJson   Json?
+  beforeValueHash  String?                            @db.VarChar(64)
+  afterValueHash   String?                            @db.VarChar(64)
+  outcome          FinanceImportApplicationOutcome
+  appliedByUserId  String
+  appliedAt        DateTime                           @default(now())
+
+  workspace  Workspace              @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  batch      FinanceImportBatch     @relation(fields: [batchId, workspaceId], references: [id, workspaceId], onDelete: Restrict)
+  candidate  FinanceImportCandidate @relation(fields: [candidateId, batchId, workspaceId], references: [id, batchId, workspaceId], onDelete: Restrict)
+  targetFact FinanceReportFact?     @relation(fields: [targetFactId, workspaceId], references: [id, workspaceId], onDelete: Restrict)
+
+  @@unique([id, workspaceId])
+  @@unique([candidateId, workspaceId])
+  @@unique([candidateId, batchId, workspaceId])
+  @@unique([workspaceId, idempotencyKey])
+  @@index([workspaceId, batchId, appliedAt])
+}
+
+model FinanceImportProfile {
+  id                   String                     @id @default(uuid())
+  workspaceId          String
+  sourceFingerprint    String                     @db.VarChar(64)
+  layoutFingerprint    String                     @db.VarChar(64)
+  reportType           FinanceReportType
+  basis                FinanceAccountingBasis
+  cadence              FinanceReportCadence
+  approvedAliasesJson  Json
+  hierarchyMappingJson Json
+  periodMappingJson    Json
+  approvedFromBatchId  String
+  approvedByUserId     String
+  approvedAt           DateTime
+  lastSuccessfulUseAt  DateTime?
+  successfulUseCount   Int                        @default(0)
+  version              Int                        @default(1)
+  status               FinanceImportProfileStatus @default(ACTIVE)
+  supersedesProfileId  String?
+  createdAt            DateTime                   @default(now())
+  updatedAt            DateTime                   @updatedAt
+
+  workspace         Workspace             @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  approvedFromBatch FinanceImportBatch    @relation(fields: [approvedFromBatchId, workspaceId], references: [id, workspaceId], onDelete: Restrict)
+  supersedes        FinanceImportProfile? @relation("FinanceImportProfileVersions", fields: [supersedesProfileId, workspaceId], references: [id, workspaceId], onDelete: Restrict)
+  supersededBy      FinanceImportProfile[] @relation("FinanceImportProfileVersions")
+
+  @@unique([id, workspaceId])
+  @@unique([workspaceId, sourceFingerprint, layoutFingerprint, version])
+  @@unique([workspaceId, supersedesProfileId])
+  @@index([workspaceId, status, lastSuccessfulUseAt])
 }
 
 enum ModuleGrantPrincipalType {
