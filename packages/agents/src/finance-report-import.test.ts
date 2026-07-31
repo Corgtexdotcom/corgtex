@@ -55,6 +55,7 @@ describe("Finance report import proposal contract", () => {
     ["unproven currency", () => ({ ...proposal(), report: { ...proposal().report, currency: { state: "EXPLICIT", code: "EUR", evidence: [] } } })],
     ["invented unresolved evidence", () => ({ ...proposal(), report: { ...proposal().report, currency: { state: "UNRESOLVED", code: null, evidence: [proposal().candidates[0].sourceLocation] } } })],
     ["exception without reason", () => withCandidate({ exceptionCodes: ["OTHER"] })],
+    ["duplicate source", () => ({ ...proposal(), candidates: [proposal().candidates[0], proposal().candidates[0]] })],
   ])("rejects unsafe output: %s", (_label, makeInvalid) => {
     expect(financeReportImportProposalV1Schema.safeParse(makeInvalid()).success).toBe(false);
   });
@@ -70,6 +71,7 @@ describe("interpretFinanceReport", () => {
     expect(request).toMatchObject({ model: "quality-test", workspaceId: "workspace-synthetic", agentRunId: "run-synthetic", workflowJobId: "job-synthetic" });
     expect(request).not.toHaveProperty("tools");
     expect(request.instruction).toContain("never default to USD");
+    expect(request.instruction).toContain("source ISO code token");
     expect(request.instruction).toContain("Profile hints are non-authoritative");
     expect(JSON.parse(request.input).approvedProfileHints).toEqual([expect.objectContaining({ version: 3 })]);
   });
@@ -106,9 +108,9 @@ describe("interpretFinanceReport", () => {
   });
   it("retries fabricated candidate and currency evidence instead of inferring USD", async () => {
     const fabricated = proposal();
-    fabricated.candidates[0].sourceLocation.row = 99;
+    fabricated.candidates[0].sourceLocation.evidence = "Consulting revenue";
     fabricated.report.currency = { state: "EXPLICIT", code: "USD", evidence: [
-      { page: null, sheet: "June", row: 99, column: 4, evidence: "USD" }] };
+      proposal().candidates[0].sourceLocation] };
     const model = gateway([fabricated, proposal()]);
     const result = await interpretFinanceReport({ ...params, gateway: model.model });
     expect(result.report.currency).toEqual({ state: "UNRESOLVED", code: null, evidence: [] });

@@ -7,8 +7,7 @@ const POSTGRES_INT_MIN = -2_147_483_648, POSTGRES_INT_MAX = 2_147_483_647;
 const bounded = (maximum: number) => z.string().trim().min(1).max(maximum);
 const isoDate = z.string().regex(/^\d{4}-\d{2}-\d{2}$/).refine((value) => {
   const parsed = new Date(`${value}T00:00:00.000Z`);
-  return Number(value.slice(0, 4)) >= 1_000 && !Number.isNaN(parsed.valueOf())
-    && parsed.toISOString().slice(0, 10) === value;
+  return Number(value.slice(0, 4)) >= 1_000 && !Number.isNaN(parsed.valueOf()) && parsed.toISOString().slice(0, 10) === value;
 }, "Expected a valid ISO calendar date.");
 const sourceLocationSchema = z.object({
   page: z.number().int().positive().max(100_000).nullable(),
@@ -17,9 +16,8 @@ const sourceLocationSchema = z.object({
   column: z.number().int().positive().max(100_000).nullable(),
   evidence: bounded(1_000),
 }).strict().superRefine((value, context) => {
-  if (value.page === null && (value.sheet === null || value.row === null)) {
-    context.addIssue({ code: "custom", message: "Source evidence requires a page or sheet and row." });
-  }
+  if (value.page === null && (value.sheet === null || value.row === null)) context.addIssue({ code: "custom",
+    message: "Source evidence requires a page or sheet and row." });
   if (value.column !== null && value.row === null) context.addIssue({ code: "custom", path: ["column"],
     message: "A source column requires a row." });
 });
@@ -51,16 +49,11 @@ const candidateSchema = z.object({
   exceptionCodes: z.array(exceptionCode).max(8),
   reviewReasons: z.array(bounded(500)).max(8),
 }).strict().superRefine((value, context) => {
-  if (value.periodStart > value.periodEnd) context.addIssue({ code: "custom", path: ["periodEnd"],
-    message: "Candidate period is reversed." });
-  if (value.mappingStatus === "MAPPED" && value.proposedAccountPath.length === 0) context.addIssue({ code: "custom",
-    path: ["proposedAccountPath"], message: "Mapped rows require a hierarchy." });
-  if (value.mappingStatus === "UNMAPPED" && value.proposedAccountPath.length > 0) context.addIssue({ code: "custom",
-    path: ["proposedAccountPath"], message: "Unmapped rows cannot claim a hierarchy." });
-  if (value.reviewStatus !== "VERIFIED" && value.reviewReasons.length === 0) context.addIssue({ code: "custom",
-    path: ["reviewReasons"], message: "Review exceptions require a reason." });
-  if (value.exceptionCodes.length > 0 && value.reviewReasons.length === 0) context.addIssue({ code: "custom",
-    path: ["reviewReasons"], message: "Every exception requires a visible reason." });
+  if (value.periodStart > value.periodEnd) context.addIssue({ code: "custom", path: ["periodEnd"], message: "Candidate period is reversed." });
+  if (value.mappingStatus === "MAPPED" && value.proposedAccountPath.length === 0) context.addIssue({ code: "custom", path: ["proposedAccountPath"], message: "Mapped rows require a hierarchy." });
+  if (value.mappingStatus === "UNMAPPED" && value.proposedAccountPath.length > 0) context.addIssue({ code: "custom", path: ["proposedAccountPath"], message: "Unmapped rows cannot claim a hierarchy." });
+  if (value.reviewStatus !== "VERIFIED" && value.reviewReasons.length === 0) context.addIssue({ code: "custom", path: ["reviewReasons"], message: "Review exceptions require a reason." });
+  if (value.exceptionCodes.length > 0 && value.reviewReasons.length === 0) context.addIssue({ code: "custom", path: ["reviewReasons"], message: "Every exception requires a visible reason." });
 });
 export const financeReportImportProposalV1Schema = z.object({
   contractVersion: z.literal(FINANCE_REPORT_IMPORT_CONTRACT_VERSION),
@@ -74,23 +67,20 @@ export const financeReportImportProposalV1Schema = z.object({
     asOfDate: isoDate.nullable(),
     currency: currencySchema,
   }).strict().superRefine((value, context) => {
-    if (value.periodStart > value.periodEnd) context.addIssue({ code: "custom", path: ["periodEnd"],
-      message: "Report period is reversed." });
-    if (value.asOfDate && (value.asOfDate < value.periodStart || value.asOfDate > value.periodEnd)) context.addIssue({
-      code: "custom", path: ["asOfDate"], message: "As-of date is outside the report period." });
+    if (value.periodStart > value.periodEnd) context.addIssue({ code: "custom", path: ["periodEnd"], message: "Report period is reversed." });
+    if (value.asOfDate && (value.asOfDate < value.periodStart || value.asOfDate > value.periodEnd)) context.addIssue({ code: "custom", path: ["asOfDate"], message: "As-of date is outside the report period." });
   }),
   summary: bounded(2_000),
   candidates: z.array(candidateSchema).min(1).max(1_000),
 }).strict().superRefine((value, context) => {
+  const sourceKeys = new Set<string>();
   value.candidates.forEach((candidate, index) => {
-    if (candidate.periodStart < value.report.periodStart) {
-      context.addIssue({ code: "custom", path: ["candidates", index, "periodStart"],
-        message: "Candidate period starts before the report period." });
-    }
-    if (candidate.periodEnd > value.report.periodEnd) {
-      context.addIssue({ code: "custom", path: ["candidates", index, "periodEnd"],
-        message: "Candidate period ends after the report period." });
-    }
+    const location = candidate.sourceLocation;
+    const sourceKey = JSON.stringify(location.page === null ? [location.sheet, location.row, location.column] : [location.page, location.evidence]);
+    if (sourceKeys.has(sourceKey)) context.addIssue({ code: "custom", path: ["candidates", index, "sourceLocation"], message: "Candidate source location is duplicated." });
+    sourceKeys.add(sourceKey);
+    if (candidate.periodStart < value.report.periodStart) context.addIssue({ code: "custom", path: ["candidates", index, "periodStart"], message: "Candidate period starts before the report period." });
+    if (candidate.periodEnd > value.report.periodEnd) context.addIssue({ code: "custom", path: ["candidates", index, "periodEnd"], message: "Candidate period ends after the report period." });
   });
 });
 const profileHintSchema = z.object({
@@ -114,9 +104,10 @@ Finance Reported Actuals proposal. Infer type, basis, cadence, dates, hierarchy,
 and source-located currency evidence without a vendor picker. Return proposals only; never create transactions,
 apply Finance records, or claim human approval. Profile hints are non-authoritative and every mapping must be
 revalidated. If currency is not explicit, return UNRESOLVED/null and never default to USD. Uncertain mappings must
-be AMBIGUOUS or UNMAPPED with visible exceptions. Return strict contract v1 with no unknown fields.${retryPaths.length
+be AMBIGUOUS or UNMAPPED with visible exceptions. Only a source ISO code token proves explicit currency; otherwise
+return UNRESOLVED. Return strict contract v1 with no unknown fields.${retryPaths.length
   ? ` The previous response failed validation at ${retryPaths.join(", ")}; rebuild it.` : ""}`;
-const locationHint = "{page:positive-int|null,sheet:string|null,row:positive-int|null,column:positive-int|null,evidence:exact-source-text}";
+const locationHint = "{page:positive-int|null,sheet:string|null,row:positive-int|null,column:positive-int|null,evidence:page-excerpt-or-exact-cell-text}";
 const schemaHint = `Strict contract v1 JSON; no additional fields. {contractVersion:1,report:{title:string,
 reportType:PROFIT_AND_LOSS|BALANCE_SHEET|CASH_FLOW|TRIAL_BALANCE|OTHER,basis:CASH|ACCRUAL|UNSPECIFIED,
 cadence:DAILY|WEEKLY|MONTHLY|QUARTERLY|ANNUAL|CUSTOM,periodStart:YYYY-MM-DD,periodEnd:YYYY-MM-DD,
@@ -127,31 +118,36 @@ amountCents:integer[-2147483648..2147483647],mappingStatus:MAPPED|AMBIGUOUS|UNMA
 reviewStatus:VERIFIED|WARNING|BLOCKER,exceptionCodes:(LOW_CONFIDENCE|AMBIGUOUS_MAPPING|UNMAPPED_ACCOUNT|OTHER)[],reviewReasons:string[]}]}`;
 const issuePaths = (error: z.ZodError) => [...new Set(error.issues.map((issue) => issue.path.join(".") || "root"))].slice(0, 12);
 type SourceLocation = z.infer<typeof sourceLocationSchema>;
-function evidenceRecords(extractedEvidence: string) {
-  return extractedEvidence.split("\n").flatMap((line) => {
+function evidenceIndex(extractedEvidence: string) {
+  const index = new Map<string, string[]>();
+  const add = (key: string, values: string[]) => { const existing = index.get(key); if (existing) existing.push(...values); else index.set(key, [...values]); };
+  for (const line of extractedEvidence.split("\n")) {
     try {
       const parsed: unknown = JSON.parse(line);
-      return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? [parsed as Record<string, unknown>] : [];
-    } catch { return []; }
-  });
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) continue;
+      const record = parsed as Record<string, unknown>;
+      const values = [record.text, record.value, record.displayValue, record.formula].filter((value): value is string => typeof value === "string");
+      if (typeof record.page === "number") add(`p:${record.page}`, values);
+      if (typeof record.sheet === "string" && typeof record.row === "number") {
+        add(`r:${JSON.stringify([record.sheet, record.row])}`, values);
+        if (typeof record.column === "number") add(`c:${JSON.stringify([record.sheet, record.row, record.column])}`, values);
+      }
+    } catch { continue; }
+  }
+  return index;
 }
-function locationMatches(records: Record<string, unknown>[], location: SourceLocation) {
-  return records.some((record) => {
-    const identityMatches = location.page !== null
-      ? record.page === location.page
-      : record.sheet === location.sheet && record.row === location.row
-        && (location.column === null || record.column === location.column);
-    const sourceText = [record.text, record.value, record.displayValue, record.formula]
-      .filter((value): value is string => typeof value === "string").join("\n");
-    return identityMatches && sourceText.includes(location.evidence);
-  });
+function locationMatches(index: Map<string, string[]>, location: SourceLocation) {
+  const key = location.page !== null ? `p:${location.page}` : location.column === null ? `r:${JSON.stringify([location.sheet, location.row])}` : `c:${JSON.stringify([location.sheet, location.row, location.column])}`;
+  return (index.get(key) ?? []).some((value) => location.page !== null ? value.includes(location.evidence) : value === location.evidence);
 }
 function unmatchedEvidencePaths(proposal: FinanceReportImportProposalV1, extractedEvidence: string) {
-  const records = evidenceRecords(extractedEvidence);
-  const paths = proposal.candidates.flatMap((candidate, index) =>
-    locationMatches(records, candidate.sourceLocation) ? [] : [`candidates.${index}.sourceLocation`]);
-  const currency = proposal.report.currency.evidence.flatMap((location, index) => locationMatches(records, location)
-    ? [] : [`report.currency.evidence.${index}`]);
+  const index = evidenceIndex(extractedEvidence);
+  const paths = proposal.candidates.flatMap((candidate, candidateIndex) =>
+    locationMatches(index, candidate.sourceLocation) ? [] : [`candidates.${candidateIndex}.sourceLocation`]);
+  const code = proposal.report.currency.code;
+  const currency = proposal.report.currency.evidence.flatMap((location, locationIndex) =>
+    locationMatches(index, location) && (!code || new RegExp(`(^|[^A-Z])${code}([^A-Z]|$)`, "i").test(location.evidence))
+      ? [] : [`report.currency.evidence.${locationIndex}`]);
   return [...paths, ...currency].slice(0, 12);
 }
 function forceVisibleExceptions(proposal: FinanceReportImportProposalV1) {
