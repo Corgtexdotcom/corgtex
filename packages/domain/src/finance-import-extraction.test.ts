@@ -211,6 +211,18 @@ describe("Finance report import extraction lifecycle", () => {
     expect(prismaMock.brainSource.update).not.toHaveBeenCalled();
   });
 
+  it("rejects a non-allowlisted terminal failure code before opening a transaction", async () => {
+    const { failFinanceReportImportExtraction } = await import("./finance-import-extraction");
+    await expect(failFinanceReportImportExtraction({
+      workspaceId: "workspace-1",
+      batchId: "batch-1",
+      workflowJobId: "job-1",
+      expectedVersion: 2,
+      failureCode: "UNSAFE_PROVIDER_DETAIL" as never,
+    })).rejects.toMatchObject({ code: "INVALID_INPUT" });
+    expect(prismaMock.$transaction).not.toHaveBeenCalled();
+  });
+
   it("idempotently skips the same terminal failure and rejects a stale owner", async () => {
     const { failFinanceReportImportExtraction } = await import("./finance-import-extraction");
     setBatch({ ...uploaded, stage: "FAILED", workflowJobId: "job-1", version: 3 });

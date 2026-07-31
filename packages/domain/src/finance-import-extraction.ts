@@ -231,6 +231,12 @@ export async function failFinanceReportImportExtraction(params: {
   expectedVersion: number;
   failureCode: FinanceReportExtractionFailureCode;
 }) {
+  invariant(
+    Object.hasOwn(SAFE_EXTRACTION_FAILURES, params.failureCode),
+    400,
+    "INVALID_INPUT",
+    "Extraction failure code is invalid.",
+  );
   return prisma.$transaction(async (tx) => {
     const batch = await loadLockedBatch(tx, params.workspaceId, params.batchId);
     if (batch.stage === "FAILED" && batch.workflowJobId === params.workflowJobId) {
