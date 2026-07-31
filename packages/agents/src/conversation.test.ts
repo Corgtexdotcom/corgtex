@@ -27,6 +27,7 @@ const {
   listGoalsMock,
   listWorkspaceToolLinksMock,
   loadRelevantMemoriesMock,
+  resolveKnowledgeAccessDomainsMock,
   searchConnectedExternalMcpContextMock,
   storeAgentMemoryMock,
   workspaceFeatureFlagFindManyMock,
@@ -57,6 +58,7 @@ const {
   listGoalsMock: vi.fn(),
   listWorkspaceToolLinksMock: vi.fn(),
   loadRelevantMemoriesMock: vi.fn(),
+  resolveKnowledgeAccessDomainsMock: vi.fn(),
   searchConnectedExternalMcpContextMock: vi.fn(),
   storeAgentMemoryMock: vi.fn(),
   workspaceFeatureFlagFindManyMock: vi.fn(),
@@ -133,6 +135,7 @@ vi.mock("@corgtex/domain", () => ({
   listWorkspaceToolLinks: listWorkspaceToolLinksMock,
   loadRelevantMemories: loadRelevantMemoriesMock,
   refreshOAuthTokenIfNeeded: vi.fn(),
+  resolveKnowledgeAccessDomains: resolveKnowledgeAccessDomainsMock,
   revealWorkspaceToolLinkCredential: vi.fn(),
   searchConnectedExternalMcpContext: searchConnectedExternalMcpContextMock,
   storeAgentMemory: storeAgentMemoryMock,
@@ -185,6 +188,7 @@ describe("processConversationTurn", () => {
     vi.mocked(searchIndexedKnowledge).mockReset().mockResolvedValue([]);
     checkBudgetMock.mockResolvedValue({ allowed: true, usedPct: 0, usedUsd: 0, capUsd: 5 });
     conversationTurnFindManyMock.mockResolvedValue([]);
+    resolveKnowledgeAccessDomainsMock.mockResolvedValue(["WORKSPACE"]);
     conversationPendingOperationStore.length = 0;
     conversationPendingOperationFindUniqueMock.mockImplementation(({ where }: any) => {
       if (where?.id) {
@@ -682,10 +686,55 @@ describe("processConversationTurn", () => {
       messages: expect.arrayContaining([
         expect.objectContaining({
           role: "system",
-          content: expect.stringContaining("Knowledge retrieval already searched indexed workspace knowledge"),
+          content: expect.stringContaining("Knowledge retrieval already searched accessible indexed Brain knowledge"),
         }),
       ]),
     }));
+  });
+
+  it("passes authenticated actor Finance domains into conversation retrieval", async () => {
+    const actor = testUserActor();
+    resolveKnowledgeAccessDomainsMock.mockResolvedValueOnce(["WORKSPACE", "FINANCE"]);
+    chatMock.mockResolvedValueOnce({ content: "Revenue increased." });
+
+    const { processConversationTurn } = await import("./conversation");
+    await processConversationTurn({
+      workspaceId: "ws-1",
+      sessionId: "session-1",
+      userId: "user-1",
+      agentKey: "assistant",
+      userMessage: "What did the finance report say about revenue?",
+      actor,
+    });
+
+    expect(resolveKnowledgeAccessDomainsMock).toHaveBeenCalledWith(actor, "ws-1");
+    expect(searchIndexedKnowledge).toHaveBeenCalledWith(expect.objectContaining({
+      workspaceId: "ws-1",
+      accessDomains: ["WORKSPACE", "FINANCE"],
+      sourceTypes: ["BRAIN_ARTICLE", "DOCUMENT", "MEETING"],
+    }));
+  });
+
+  it("does not search when conversation actor authorization fails", async () => {
+    const actor = testUserActor();
+    resolveKnowledgeAccessDomainsMock.mockRejectedValueOnce(new Error("FORBIDDEN"));
+    chatMock.mockResolvedValueOnce({ content: "I could not verify that." });
+
+    const { processConversationTurn } = await import("./conversation");
+    const result = await processConversationTurn({
+      workspaceId: "ws-1",
+      sessionId: "session-1",
+      userId: "user-1",
+      agentKey: "assistant",
+      userMessage: "What did the finance report say?",
+      actor,
+    });
+
+    expect(searchIndexedKnowledge).not.toHaveBeenCalled();
+    expect(result.contextUsed.knowledgeSearch).toMatchObject({
+      hitCount: 0,
+      error: "FORBIDDEN",
+    });
   });
 
   it("routes Slack follow-up retrieval to indexed Slack knowledge", async () => {
