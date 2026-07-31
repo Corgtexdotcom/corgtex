@@ -23,12 +23,12 @@ function renderPdf(objects: Buffer[]) {
   return Buffer.concat(chunks);
 }
 
-function pdf(...pages: PdfPage[]) {
+function pdfWithFont(font: string, pages: PdfPage[]) {
   const pageIds = pages.map((_, index) => 4 + (index * 2));
   const objects: Buffer[] = [
     Buffer.from("<< /Type /Catalog /Pages 2 0 R >>"),
     Buffer.from(`<< /Type /Pages /Kids [${pageIds.map((id) => `${id} 0 R`).join(" ")}] /Count ${pages.length} >>`),
-    Buffer.from("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>"),
+    Buffer.from(`<< /Type /Font /Subtype /Type1 /BaseFont /${font} >>`),
   ];
   for (const [index, page] of pages.entries()) {
     const value = typeof page === "object" && page !== null && "text" in page ? page.text : page;
@@ -57,8 +57,12 @@ function pdf(...pages: PdfPage[]) {
   return renderPdf(objects);
 }
 
-function cidFontPdf(encoding = "90ms-RKSJ-H") {
-  const content = Buffer.from("BT /F1 12 Tf 72 720 Td <93FA> Tj ET");
+function pdf(...pages: PdfPage[]) {
+  return pdfWithFont("Helvetica", pages);
+}
+
+function cidFontPdf(encoding = "90ms-RKSJ-H", content = "BT /F1 12 Tf 72 720 Td <93FA> Tj ET") {
+  const contentBytes = Buffer.from(content);
   return renderPdf([
     Buffer.from("<< /Type /Catalog /Pages 2 0 R >>"),
     Buffer.from("<< /Type /Pages /Kids [6 0 R] /Count 1 >>"),
@@ -67,22 +71,52 @@ function cidFontPdf(encoding = "90ms-RKSJ-H") {
     Buffer.from("<< /Type /FontDescriptor /FontName /HeiseiKakuGo-W5 /Flags 4 /FontBBox [0 -200 1000 900] /ItalicAngle 0 /Ascent 880 /Descent -120 /CapHeight 700 /StemV 80 >>"),
     Buffer.from("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 1000 1000] /Resources << /Font << /F1 3 0 R >> >> /Contents 7 0 R >>"),
     Buffer.concat([
-      Buffer.from(`<< /Length ${content.length} >>\nstream\n`),
-      content,
+      Buffer.from(`<< /Length ${contentBytes.length} >>\nstream\n`),
+      contentBytes,
       Buffer.from("\nendstream"),
     ]),
   ]);
 }
 
-function formPdf() {
+function formPdf(mode: "static" | "javascript" | "password" | "calculation" | "invalidPage" | "invalidRect" | "unsupported" = "static") {
+  const textFlags = mode === "password" ? " /Ff 8192" : "";
+  const actions = mode === "javascript"
+    ? " /AA << /K << /S /JavaScript /JS (event.value = 1) >> >>"
+    : "";
+  const fieldType = mode === "unsupported" ? "/FT /Btn /Ff 65536" : `/FT /Tx${textFlags}`;
+  const pageRef = mode === "invalidPage" ? "99 0 R" : "4 0 R";
+  const rectEnd = mode === "invalidRect" ? "1".padEnd(310, "0") : "200";
+  const calculation = mode === "calculation" ? " /CO [7 0 R]" : "";
+  const annots = mode === "invalidPage" ? "8 0 R 9 0 R 11 0 R 12 0 R 13 0 R" : "7 0 R 8 0 R 9 0 R 11 0 R 12 0 R 13 0 R";
   return renderPdf([
     Buffer.from("<< /Type /Catalog /Pages 2 0 R /AcroForm 6 0 R >>"),
     Buffer.from("<< /Type /Pages /Kids [4 0 R] /Count 1 >>"),
     Buffer.from("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>"),
-    Buffer.from("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 1000 1000] /Resources << /Font << /F1 3 0 R >> >> /Contents 5 0 R /Annots [7 0 R] >>"),
+    Buffer.from(`<< /Type /Page /Parent 2 0 R /MediaBox [0 0 1000 1000] /Resources << /Font << /F1 3 0 R >> >> /Contents 5 0 R /Annots [${annots}] >>`),
     Buffer.from("<< /Length 0 >>\nstream\n\nendstream"),
-    Buffer.from("<< /Fields [7 0 R] /NeedAppearances true >>"),
-    Buffer.from("<< /Type /Annot /Subtype /Widget /FT /Tx /T (Revenue) /V (123.45) /Rect [72 700 200 720] /P 4 0 R >>"),
+    Buffer.from(`<< /Fields [7 0 R 8 0 R 9 0 R 10 0 R 13 0 R] /NeedAppearances true${calculation} >>`),
+    Buffer.from(`<< /Type /Annot /Subtype /Widget ${fieldType} /T (Revenue) /V (123.45) /Rect [72 700 ${rectEnd} 720] /P ${pageRef}${actions} >>`),
+    Buffer.from("<< /Type /Annot /Subtype /Widget /FT /Btn /T (Audited) /V /Yes /AS /Yes /Rect [72 650 90 668] /P 4 0 R >>"),
+    Buffer.from("<< /Type /Annot /Subtype /Widget /FT /Ch /Ff 131072 /T (Basis) /V (Accrual) /Opt [(Cash) (Accrual)] /Rect [72 600 200 620] /P 4 0 R >>"),
+    Buffer.from("<< /FT /Btn /Ff 32768 /T (Status) /V /Approved /Kids [11 0 R 12 0 R] >>"),
+    Buffer.from("<< /Type /Annot /Subtype /Widget /Parent 10 0 R /AS /Approved /AP << /N << /Approved 14 0 R /Off 14 0 R >> >> /Rect [72 550 90 568] /P 4 0 R >>"),
+    Buffer.from("<< /Type /Annot /Subtype /Widget /Parent 10 0 R /AS /Off /AP << /N << /Rejected 14 0 R /Off 14 0 R >> >> /Rect [100 550 118 568] /P 4 0 R >>"),
+    Buffer.from("<< /Type /Annot /Subtype /Widget /FT /Tx /T (Hidden) /V (ignore) /F 2 /Rect [72 500 200 520] /P 4 0 R >>"),
+    Buffer.from("<< /Length 0 >>\nstream\n\nendstream"),
+  ]);
+}
+
+function xfaPdf() {
+  const xml = `<?xml version="1.0"?><xdp:xdp xmlns:xdp="http://ns.adobe.com/xdp/">`
+    + `<template xmlns="http://www.xfa.org/schema/xfa-template/3.3"><subform name="root" mergeMode="matchTemplate">`
+    + `<pageSet><pageArea><contentArea x="0pt" w="456pt" h="789pt"/><medium stock="default" short="456pt" long="789pt"/></pageArea></pageSet>`
+    + `<subform name="report"><draw w="100pt" h="20pt"><value><text>Revenue 123.45</text></value></draw></subform>`
+    + `</subform></template><xfa:datasets xmlns:xfa="http://www.xfa.org/schema/xfa-data/1.0/"><xfa:data/></xfa:datasets></xdp:xdp>`;
+  return renderPdf([
+    Buffer.from("<< /Type /Catalog /Pages 2 0 R /NeedsRendering true /AcroForm 3 0 R >>"),
+    Buffer.from("<< /Type /Pages /Kids [] /Count 0 >>"),
+    Buffer.from("<< /XFA 4 0 R >>"),
+    Buffer.from(`<< /Length ${Buffer.byteLength(xml)} >>\nstream\n${xml}\nendstream`),
   ]);
 }
 
@@ -115,14 +149,69 @@ describe("extractFinanceReportFile", () => {
     expect(result.pages?.[0]?.text).toBe("日");
   });
 
-  pdfIt("fails structured forms and native vertical writing closed", async () => {
-    for (const input of [formPdf(), cidFontPdf("90ms-RKSJ-V")]) {
-      await expect(extractFinanceReportFile({
-        fileBuffer: input,
-        fileName: "structured.pdf",
-        mimeType: "application/pdf",
-      })).rejects.toMatchObject({ code: "UNSUPPORTED_PDF_FEATURE" });
-    }
+  pdfIt("extracts static AcroForm fields and excludes hidden fields", async () => {
+    const result = await extractFinanceReportFile({
+      fileBuffer: formPdf(),
+      fileName: "form.pdf",
+      mimeType: "application/pdf",
+    });
+    expect(result.pages?.[0]?.fields).toEqual([
+      { name: "Revenue", type: "text", value: "123.45", rect: [72, 700, 200, 720] },
+      { name: "Audited", type: "checkbox", value: "Yes", rect: [72, 650, 90, 668] },
+      { name: "Basis", type: "combobox", value: "Accrual", rect: [72, 600, 200, 620] },
+      { name: "Status", type: "radiobutton", value: "Approved", rect: [72, 550, 90, 568] },
+    ]);
+  });
+
+  pdfIt.each(["javascript", "password", "calculation", "unsupported"] as const)("rejects unsafe %s AcroForm behavior", async (mode) => {
+    await expect(extractFinanceReportFile({
+      fileBuffer: formPdf(mode),
+      fileName: "unsafe-form.pdf",
+      mimeType: "application/pdf",
+    })).rejects.toMatchObject({ code: "UNSUPPORTED_PDF_FEATURE" });
+  });
+
+  pdfIt.each(["invalidPage", "invalidRect"] as const)("rejects malformed %s AcroForm evidence", async (mode) => {
+    await expect(extractFinanceReportFile({
+      fileBuffer: formPdf(mode),
+      fileName: "invalid-form.pdf",
+      mimeType: "application/pdf",
+    })).rejects.toMatchObject({ code: "MALFORMED_FILE" });
+  });
+
+  pdfIt("extracts pure XFA page text within the same child boundary", async () => {
+    await expect(extractFinanceReportFile({
+      fileBuffer: xfaPdf(),
+      fileName: "xfa-report.pdf",
+      mimeType: "application/pdf",
+    })).resolves.toMatchObject({ pages: [{ page: 1, text: "Revenue 123.45" }] });
+  });
+
+  pdfIt.each([formPdf(), xfaPdf()])("applies the cumulative text limit to structured evidence", async (fileBuffer) => {
+    await expect(extractFinanceReportFile({
+      fileBuffer,
+      fileName: "structured.pdf",
+      mimeType: "application/pdf",
+      limits: { maxTextChars: 1 },
+    })).rejects.toMatchObject({ code: "EXTRACTION_LIMIT_EXCEEDED" });
+  });
+
+  pdfIt("uses the vertical CID advance axis to separate columns", async () => {
+    const result = await extractFinanceReportFile({
+      fileBuffer: cidFontPdf("90ms-RKSJ-V", "BT /F1 12 Tf 72 720 Td <93FA> Tj ET BT /F1 12 Tf 200 720 Td <93FA> Tj ET"),
+      fileName: "vertical-cid.pdf",
+      mimeType: "application/pdf",
+    });
+    expect(result.pages?.[0]?.text).toBe("日\n日");
+  });
+
+  pdfIt("loads packaged standard fonts without system font fallback", async () => {
+    const result = await extractFinanceReportFile({
+      fileBuffer: pdfWithFont("Symbol", ["Margin"]),
+      fileName: "symbol.pdf",
+      mimeType: "application/pdf",
+    });
+    expect(result.pages?.[0]?.text).toBe("Μαργιν");
   });
 
   pdfIt("contains decompression with a kernel data limit", async () => {

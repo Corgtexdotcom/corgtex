@@ -18,7 +18,14 @@ export type FinanceFileExtractionErrorCode =
   | "EXTRACTION_LIMIT_EXCEEDED";
 export type FinanceExtractedCell = { row: number; column: number; type: FinanceExtractedCellType; value: string };
 export type FinanceExtractedSheet = { name: string; rowCount: number; columnCount: number; cells: FinanceExtractedCell[] };
-export type FinanceFileExtraction = { fileHash: string; fileSizeBytes: number; format: FinanceFileFormat; mimeType: string; pages?: Array<{ page: number; text: string }>; sheets?: FinanceExtractedSheet[] };
+export type FinanceExtractedPdfField = {
+  name: string;
+  type: string;
+  value: string | number | boolean | string[];
+  rect?: [number, number, number, number];
+};
+export type FinanceExtractedPdfPage = { page: number; text: string; fields?: FinanceExtractedPdfField[] };
+export type FinanceFileExtraction = { fileHash: string; fileSizeBytes: number; format: FinanceFileFormat; mimeType: string; pages?: FinanceExtractedPdfPage[]; sheets?: FinanceExtractedSheet[] };
 export type FinanceFileExtractionLimits = {
   maxFileBytes: number; maxPages: number; maxRows: number; maxCells: number; maxTextChars: number;
 };
@@ -70,7 +77,7 @@ const PDF_PROCESS_MAX_DATA_KIB = 256 * 1024;
 const PDF_PROCESS_SOURCE = String.raw`
 const fail = (code) => { const error = new Error(code); error.code = code; throw error; };
 (async () => {
-  const [moduleUrl, cMapUrl, maxPagesValue, maxTextCharsValue] = process.argv.slice(1);
+  const [moduleUrl, cMapUrl, standardFontDataUrl, maxPagesValue, maxTextCharsValue] = process.argv.slice(1);
   const maxPages = Number(maxPagesValue);
   const maxTextChars = Number(maxTextCharsValue);
   const chunks = [];
@@ -85,6 +92,7 @@ const fail = (code) => { const error = new Error(code); error.code = code; throw
     cMapUrl,
     enableXfa: true,
     isEvalSupported: false,
+    standardFontDataUrl,
     stopAtErrors: true,
     useSystemFonts: false,
     verbosity: VerbosityLevel.ERRORS,
@@ -93,49 +101,109 @@ const fail = (code) => { const error = new Error(code); error.code = code; throw
     const document = await task.promise;
     if (document.numPages === 0) fail("EMPTY_EXTRACTION");
     if (document.numPages > maxPages) fail("EXTRACTION_LIMIT_EXCEEDED");
-    if (document.isPureXfa || await document.getFieldObjects()) fail("UNSUPPORTED_PDF_FEATURE");
+    const fieldObjects = await document.getFieldObjects();
+    if (fieldObjects && (await document.hasJSActions()
+      || (await document.getCalculationOrderIds())?.length)) fail("UNSUPPORTED_PDF_FEATURE");
     const pages = [];
     let textChars = 0;
+    const fieldsByPage = Array.from({ length: document.numPages }, () => []);
+    const radioKeysByPage = Array.from({ length: document.numPages }, () => new Set());
+    for (const [fallbackName, widgets] of Object.entries(fieldObjects || {}).sort(([a], [b]) => a.localeCompare(b))) {
+      for (const widget of widgets) {
+        if (widget.password || (widget.actions && Object.keys(widget.actions).length)) fail("UNSUPPORTED_PDF_FEATURE");
+        if (widget.hidden) continue;
+        const allowedTypes = new Set(["text", "combobox", "listbox", "checkbox", "radiobutton"]);
+        if (!allowedTypes.has(widget.type)) {
+          if (widget.value === undefined || widget.value === null || widget.value === "") continue;
+          fail("UNSUPPORTED_PDF_FEATURE");
+        }
+        if (!Number.isInteger(widget.page) || widget.page < 0 || widget.page >= document.numPages) fail("MALFORMED_FILE");
+        const name = typeof widget.name === "string" && widget.name ? widget.name : fallbackName;
+        const value = widget.value;
+        if (!(typeof value === "string" || typeof value === "boolean"
+          || (typeof value === "number" && Number.isFinite(value))
+          || (Array.isArray(value) && value.every((entry) => typeof entry === "string")))) {
+          fail("UNSUPPORTED_PDF_FEATURE");
+        }
+        let rect;
+        if (widget.rect !== undefined && widget.rect !== null) {
+          if (!Array.isArray(widget.rect) || widget.rect.length !== 4
+            || !widget.rect.every(Number.isFinite)) fail("MALFORMED_FILE");
+          rect = widget.rect;
+        }
+        const radioKey = JSON.stringify([name, value]);
+        if (widget.type === "radiobutton" && radioKeysByPage[widget.page].has(radioKey)) continue;
+        if (widget.type === "radiobutton") radioKeysByPage[widget.page].add(radioKey);
+        textChars += name.length + JSON.stringify(value).length;
+        if (textChars > maxTextChars) fail("EXTRACTION_LIMIT_EXCEEDED");
+        fieldsByPage[widget.page].push({ name, type: widget.type, value, ...(rect ? { rect } : {}) });
+      }
+    }
+    for (const fields of fieldsByPage) {
+      fields.sort((a, b) => (b.rect?.[1] ?? 0) - (a.rect?.[1] ?? 0)
+        || (a.rect?.[0] ?? 0) - (b.rect?.[0] ?? 0)
+        || a.name.localeCompare(b.name)
+        || JSON.stringify(a.value).localeCompare(JSON.stringify(b.value)));
+    }
     for (let pageNumber = 1; pageNumber <= document.numPages; pageNumber += 1) {
       const page = await document.getPage(pageNumber);
-      const reader = page.streamTextContent().getReader();
       let text = "";
       let previous;
+      const verticalFonts = new Set();
       const append = (value) => {
         textChars += value.length;
         if (textChars > maxTextChars) fail("EXTRACTION_LIMIT_EXCEEDED");
         text += value;
       };
-      try {
-        while (true) {
-          const chunk = await reader.read();
-          if (chunk.done) break;
-          if (Object.values(chunk.value.styles).some((style) => style.vertical)) fail("UNSUPPORTED_PDF_FEATURE");
-          for (const item of chunk.value.items) {
-            if (!("str" in item)) continue;
-            const [a, b, , , x, y] = item.transform;
-            const scale = Math.hypot(a, b) || 1;
-            const ux = a / scale;
-            const uy = b / scale;
-            if (previous) {
-              const dx = x - previous.x;
-              const dy = y - previous.y;
-              const cross = Math.abs((-uy * dx) + (ux * dy));
-              const alignment = (previous.ux * ux) + (previous.uy * uy);
-              if ((alignment < 0.98 || cross > 4.6) && !text.endsWith("\n")) append("\n");
-              else if (Math.abs((ux * dx) + (uy * dy)) > 7) append("\t");
-            }
+      const consume = (content) => {
+        for (const [fontName, style] of Object.entries(content.styles || {})) {
+          if (style.vertical) verticalFonts.add(fontName);
+        }
+        for (const item of content.items) {
+          if (!("str" in item)) continue;
+          if (!Array.isArray(item.transform)) {
+            if (text && !text.endsWith("\n")) append("\n");
             append(item.str);
-            if (item.hasEOL && !text.endsWith("\n")) append("\n");
-            previous = item.hasEOL ? undefined : {
-              x: x + (ux * item.width),
-              y: y + (uy * item.width),
-              ux,
-              uy,
-            };
+            continue;
+          }
+          const [a, b, c, d, x, y] = item.transform;
+          const vertical = verticalFonts.has(item.fontName);
+          const axisX = vertical ? -c : a;
+          const axisY = vertical ? -d : b;
+          const scale = Math.hypot(axisX, axisY) || 1;
+          const ux = axisX / scale;
+          const uy = axisY / scale;
+          if (previous) {
+            const dx = x - previous.x;
+            const dy = y - previous.y;
+            const cross = Math.abs((-uy * dx) + (ux * dy));
+            const alignment = (previous.ux * ux) + (previous.uy * uy);
+            if ((alignment < 0.98 || cross > 4.6) && !text.endsWith("\n")) append("\n");
+            else if (Math.abs((ux * dx) + (uy * dy)) > 7) append("\t");
+          }
+          append(item.str);
+          if (item.hasEOL && !text.endsWith("\n")) append("\n");
+          const advance = vertical ? item.height : item.width;
+          previous = item.hasEOL ? undefined : {
+            x: x + (ux * advance),
+            y: y + (uy * advance),
+            ux,
+            uy,
+          };
+        }
+      };
+      try {
+        if (document.isPureXfa) {
+          consume(await page.getTextContent());
+        } else {
+          const reader = page.streamTextContent().getReader();
+          while (true) {
+            const chunk = await reader.read();
+            if (chunk.done) break;
+            consume(chunk.value);
           }
         }
-        if (!text.trim()) {
+        if (!document.isPureXfa && !text.trim() && fieldsByPage[pageNumber - 1].length === 0) {
           const operators = await page.getOperatorList();
           if (operators.fnArray.some((operator) => imageOps.has(operator))) {
             fail("SCANNED_PDF_UNSUPPORTED");
@@ -144,9 +212,10 @@ const fail = (code) => { const error = new Error(code); error.code = code; throw
       } finally {
         page.cleanup();
       }
-      pages.push({ page: pageNumber, text });
+      const fields = fieldsByPage[pageNumber - 1];
+      pages.push({ page: pageNumber, text, ...(fields.length ? { fields } : {}) });
     }
-    if (!pages.some((page) => page.text.trim())) fail("EMPTY_EXTRACTION");
+    if (!pages.some((page) => page.text.trim() || page.fields?.length)) fail("EMPTY_EXTRACTION");
     return pages;
   } finally {
     await task.destroy();
@@ -168,7 +237,10 @@ function extractPdf(buffer: Buffer, limits: FinanceFileExtractionLimits) {
   const cMapUrl = resolveModule("pdfjs-dist/cmaps/LICENSE")
     .replaceAll("\\", "/")
     .replace(/LICENSE$/, "");
-  return new Promise<Array<{ page: number; text: string }>>((resolve, reject) => {
+  const standardFontDataUrl = resolveModule("pdfjs-dist/standard_fonts/LICENSE_FOXIT")
+    .replaceAll("\\", "/")
+    .replace(/LICENSE_FOXIT$/, "");
+  return new Promise<FinanceExtractedPdfPage[]>((resolve, reject) => {
     const nodeArgs = [
       "--max-old-space-size=128",
       "--max-semi-space-size=16",
@@ -177,6 +249,7 @@ function extractPdf(buffer: Buffer, limits: FinanceFileExtractionLimits) {
       PDF_PROCESS_SOURCE,
       moduleUrl,
       cMapUrl,
+      standardFontDataUrl,
       String(limits.maxPages),
       String(limits.maxTextChars),
     ];
@@ -231,7 +304,7 @@ function extractPdf(buffer: Buffer, limits: FinanceFileExtractionLimits) {
       try {
         const message = JSON.parse(Buffer.concat(output).toString("utf8")) as {
           ok?: boolean;
-          pages?: Array<{ page: number; text: string }>;
+          pages?: FinanceExtractedPdfPage[];
           code?: FinanceFileExtractionErrorCode;
         };
         const safeCodes = new Set<FinanceFileExtractionErrorCode>([
