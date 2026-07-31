@@ -112,12 +112,13 @@ implementation code.
 
 1. Fetch the latest main branch and create a new task branch from it: `git fetch origin && git checkout -b <type>/<short-slug> origin/main` (e.g. `feat/optimistic-finance`, `fix/login-crash`). Do not reuse an existing branch/PR unless the human explicitly says this plan continues that exact branch/PR.
 2. Copy [.agents/plan-template.md](.agents/plan-template.md) into the draft PR body. For local checks before a PR exists, copy it to `.agents/plans/<branch>.md`; that directory is ignored and must not be committed.
-3. Fill every section, including **Risk tier** (`low`, `standard`, or `high`). The **Files to touch** section is a hard allowlist — the Executor cannot modify files outside it without first updating the PR body plan.
+3. Fill every section, including **Risk tier** (`low`, `standard`, `high`, or `critical`). The **Files to touch** section is a hard allowlist — the Executor cannot modify files outside it without first updating the PR body plan.
 4. Pick the smallest honest risk tier:
    - `low`: docs, copy, styles, or tightly scoped non-security changes. Cap: ≤ 1200 non-doc LOC and ≤ 50 files.
    - `standard`: normal product or domain work. Cap: ≤ 800 non-doc LOC and ≤ 25 files.
-   - `high`: auth, permissions, migrations, deploy, workflows, security-sensitive logic, or broad shared behavior. Cap: ≤ 400 non-doc LOC and ≤ 15 files.
-5. If the plan touches forbidden paths (`deploy/**`, `.github/workflows/**`, `prisma/migrations/**`, `packages/domain/src/auth*.ts`, `apps/web/lib/auth.ts`), state the justification in the plan and note that the PR will need the `forbidden-path-approved` label.
+   - `high`: normal workflow or broad shared behavior that remains reviewable as one coherent change and does not affect a critical category. Cap: ≤ 700 non-doc LOC and ≤ 15 files.
+   - `critical`: auth, permissions, cross-tenant isolation, migrations, deploy, or agent-pipeline policy. Cap: ≤ 400 non-doc LOC and ≤ 15 files.
+5. If the plan touches forbidden paths (`deploy/**`, `.github/workflows/**`, `prisma/migrations/**`, `packages/domain/src/auth*.ts`, `apps/web/lib/auth.ts`), state the justification in the plan and note that the PR will need the `forbidden-path-approved` label. Forbidden paths and agent-pipeline policy files are always evaluated against the 400-line critical cap.
 6. Push the branch and open a **draft** PR whose body is the completed public-safe plan. Do not commit local plan files. Do not mark ready-for-review.
 
 Stop there. Hand off to the Executor.

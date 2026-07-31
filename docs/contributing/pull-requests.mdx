@@ -39,7 +39,7 @@ The Executor opens the PR using `gh pr create` (installed via
 Homebrew; `/opt/homebrew/bin/gh` if not on `PATH`). The PR body:
 
 1. **Contains the full plan contract.**
-2. **States the risk tier** — `low`, `standard`, or `high`.
+2. **States the risk tier** — `low`, `standard`, `high`, or `critical`.
 3. **Summarizes what shipped** — one or two sentences, the "walkthrough."
 4. **Describes demo exposure** for customer-visible product changes. Update `scripts/seed-jnj-demo.mjs` when safe seeded data is needed, or explain why the feature cannot be shown safely in the public demo.
 5. **Explains UX spine decisions** for workspace UI changes: name the shared primitive used or improved, and explain any local exception by user benefit rather than preference.
@@ -59,7 +59,7 @@ Every PR must pass:
 - `plan-present` — PR body contains the plan contract.
 - `scope-check` — changed files ⊆ plan allowlist and policy checks pass.
 - `gitleaks` — no secrets in the diff.
-- `diff-size` — risk-tier caps: `low` ≤ 1200 non-doc LOC / 50 files, `standard` ≤ 800 / 25, `high` ≤ 400 / 15.
+- `diff-size` — risk-tier caps: `low` ≤ 1200 non-doc LOC / 50 files, `standard` ≤ 800 / 25, `high` ≤ 700 / 15, `critical` ≤ 400 / 15. Forbidden paths and agent-pipeline policy files always use the critical cap.
 
 All of these are required by branch protection on `main`. The Reviewer
 cannot merge a PR whose required checks are red.
