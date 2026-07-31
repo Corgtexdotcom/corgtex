@@ -110,9 +110,9 @@ async function main() {
     disableFontFace: true,
     isEvalSupported: false,
     maxImageSize: ${PDF_MAX_IMAGE_PIXELS},
-    stopAtErrors: true,
-    useSystemFonts: false,
-    verbosity: 0,
+    stopAtErrors: false,
+    useSystemFonts: true,
+    verbosity: 1,
   });
   let document;
   try {
@@ -211,6 +211,7 @@ async function extractPdf(buffer: Buffer, limits: FinanceFileExtractionLimits) {
     const stdoutChunks: Buffer[] = [];
     let stdoutBytes = 0;
     let stderrBytes = 0;
+    let stderr = "";
     let failure: FinanceFileExtractionErrorCode | undefined;
     const terminate = (code: FinanceFileExtractionErrorCode) => {
       failure ??= code;
@@ -224,6 +225,7 @@ async function extractPdf(buffer: Buffer, limits: FinanceFileExtractionLimits) {
     });
     child.stderr.on("data", (chunk: Buffer) => {
       stderrBytes += chunk.length;
+      stderr += chunk.toString("utf8");
       if (stderrBytes > PDF_MAX_STDERR_BYTES) terminate("EXTRACTION_LIMIT_EXCEEDED");
     });
     child.on("error", () => {
@@ -232,6 +234,8 @@ async function extractPdf(buffer: Buffer, limits: FinanceFileExtractionLimits) {
     child.on("close", (code, signal) => {
       clearTimeout(timer);
       if (failure) return reject(new FinanceFileExtractionError(failure));
+      if (stderr) return reject(new FinanceFileExtractionError(/Image exceeded maximum allowed size|heap out of memory/i.test(stderr)
+        ? "EXTRACTION_LIMIT_EXCEEDED" : "MALFORMED_FILE"));
       if (signal) return reject(new FinanceFileExtractionError("EXTRACTION_LIMIT_EXCEEDED"));
       if (code !== 0) return reject(new FinanceFileExtractionError("EXTRACTION_FAILED"));
       try {
@@ -350,7 +354,8 @@ export async function extractFinanceReportFile(params: {
   const limits = { ...DEFAULT_LIMITS };
   for (const key of Object.keys(DEFAULT_LIMITS) as Array<keyof FinanceFileExtractionLimits>) {
     const override = params.limits?.[key];
-    if (override !== undefined && Number.isSafeInteger(override) && override >= 0) limits[key] = override;
+    if (override !== undefined && Number.isSafeInteger(override) && override >= 0
+      && (key !== "maxPdfParseMs" || override <= 2_147_483_647)) limits[key] = override;
   }
   if (params.fileBuffer.length === 0) fail("EMPTY_FILE");
   if (params.fileBuffer.length > limits.maxFileBytes) fail("FILE_TOO_LARGE");

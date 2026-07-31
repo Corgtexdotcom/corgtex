@@ -161,7 +161,7 @@ describe("extractFinanceReportFile", () => {
         maxPdfItems: -1,
         maxPdfOutputBytes: Number.POSITIVE_INFINITY,
         maxPdfPages: Number.NaN,
-        maxPdfParseMs: 1.5,
+        maxPdfParseMs: 2_147_483_648,
       },
     })).resolves.toMatchObject({ format: "PDF" });
   });
@@ -183,7 +183,7 @@ describe("extractFinanceReportFile", () => {
     [createTextPdf([{ text: "Text" }]), { maxPdfParseMs: 1 }, "EXTRACTION_LIMIT_EXCEEDED"],
     [createImagePdf(), {}, "UNSUPPORTED_FILE_TYPE"],
     [createImagePdf(" "), {}, "UNSUPPORTED_FILE_TYPE"],
-    [createImagePdf(undefined, 2_001), {}, "EMPTY_EXTRACTION"],
+    [createImagePdf("Text", 2_001), {}, "EXTRACTION_LIMIT_EXCEEDED"],
     [createTextPdf([{ text: "Text", mediaBox: `0 0 ${"1".padEnd(307, "0")} 792` }]), {}, "MALFORMED_FILE"],
   ])("rejects an incomplete or over-limit PDF as one safe failure", async (fileBuffer, limits, code) => {
     await expect(extractFinanceReportFile({
