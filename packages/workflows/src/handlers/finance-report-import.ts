@@ -1,31 +1,24 @@
 import { createHash } from "node:crypto";
-import {
-  claimFinanceReportImportExtraction, completeFinanceReportImportExtraction,
-  failFinanceReportImportExtraction, type FinanceReportExtractionFailureCode,
-} from "@corgtex/domain";
-import {
-  extractFinanceReportFile, FinanceFileExtractionError, type FinanceFileExtraction,
-} from "@corgtex/knowledge";
+import { claimFinanceReportImportExtraction, completeFinanceReportImportExtraction,
+  failFinanceReportImportExtraction, type FinanceReportExtractionFailureCode } from "@corgtex/domain";
+import { extractFinanceReportFile, FinanceFileExtractionError,
+  type FinanceFileExtraction } from "@corgtex/knowledge";
 import { defaultStorage, type StorageProvider } from "@corgtex/storage";
 
 export const FINANCE_REPORT_IMPORT_EXTRACTION_JOB_TYPE = "finance-report-import.extract";
 export const FINANCE_REPORT_IMPORT_STORAGE_READ_TIMEOUT_MS = 2 * 60 * 1_000;
 const MAX_EXTRACTED_TEXT_CHARS = 2_000_000;
 type ExtractionStorage = Pick<StorageProvider, "get">;
-type ExtractionJob = {
-  workspaceId: string; batchId: string; workflowJobId: string; attempts: number;
-  isFinalAttempt: boolean; storage?: ExtractionStorage; extract?: typeof extractFinanceReportFile;
-};
+type ExtractionJob = { workspaceId: string; batchId: string; workflowJobId: string;
+  attempts: number; isFinalAttempt: boolean; storage?: ExtractionStorage; extract?: typeof extractFinanceReportFile };
 
 async function readStoredReport(storage: ExtractionStorage, storageKey: string) {
   let timeout: ReturnType<typeof setTimeout> | undefined;
+  const expired = new Promise<never>((_, reject) => {
+    timeout = setTimeout(() => reject(new Error("Finance report source read timed out.")), FINANCE_REPORT_IMPORT_STORAGE_READ_TIMEOUT_MS);
+  });
   try {
-    return await Promise.race([
-      storage.get(storageKey),
-      new Promise<never>((_, reject) => {
-        timeout = setTimeout(() => reject(new Error("Finance report source read timed out.")), FINANCE_REPORT_IMPORT_STORAGE_READ_TIMEOUT_MS);
-      }),
-    ]);
+    return await Promise.race([storage.get(storageKey), expired]);
   } finally {
     if (timeout) clearTimeout(timeout);
   }
@@ -37,7 +30,9 @@ function extractedText(extraction: FinanceFileExtraction) {
   const append = (value: unknown) => {
     const line = JSON.stringify(value);
     chars += line.length + Number(lines.length > 0);
-    if (chars > MAX_EXTRACTED_TEXT_CHARS) throw new FinanceFileExtractionError("EXTRACTION_LIMIT_EXCEEDED");
+    if (chars > MAX_EXTRACTED_TEXT_CHARS) {
+      throw new FinanceFileExtractionError("EXTRACTION_LIMIT_EXCEEDED");
+    }
     lines.push(line);
   };
   for (const page of extraction.pages ?? []) append(page);
@@ -58,10 +53,8 @@ function extractionCounts(extraction: FinanceFileExtraction) {
 }
 
 export async function runFinanceReportImportExtractionJob(params: ExtractionJob) {
-  const claim = await claimFinanceReportImportExtraction({
-    workspaceId: params.workspaceId, batchId: params.batchId,
-    workflowJobId: params.workflowJobId, retryCount: params.attempts,
-  });
+  const identity = { workspaceId: params.workspaceId, batchId: params.batchId, workflowJobId: params.workflowJobId };
+  const claim = await claimFinanceReportImportExtraction({ ...identity, retryCount: params.attempts });
   if (claim.skipped) return claim;
   try {
     const stored = await readStoredReport(params.storage ?? defaultStorage, claim.storageKey);
@@ -73,9 +66,7 @@ export async function runFinanceReportImportExtractionJob(params: ExtractionJob)
     const extraction = await (params.extract ?? extractFinanceReportFile)({
       fileBuffer: stored.data, fileName: claim.fileName, mimeType: claim.mimeType,
     });
-    return completeFinanceReportImportExtraction({
-      workspaceId: params.workspaceId, batchId: params.batchId,
-      workflowJobId: params.workflowJobId, expectedVersion: claim.version,
+    return completeFinanceReportImportExtraction({ ...identity, expectedVersion: claim.version,
       extraction: {
         fileHash: extraction.fileHash, fileSizeBytes: extraction.fileSizeBytes,
         mimeType: extraction.mimeType, format: extraction.format,
@@ -87,10 +78,7 @@ export async function runFinanceReportImportExtractionJob(params: ExtractionJob)
     const failureCode: FinanceReportExtractionFailureCode | null = deterministic
       ? error.code : params.isFinalAttempt ? "FINANCE_REPORT_EXTRACTION_FAILED" : null;
     if (failureCode) {
-      await failFinanceReportImportExtraction({
-        workspaceId: params.workspaceId, batchId: params.batchId,
-        workflowJobId: params.workflowJobId, expectedVersion: claim.version, failureCode,
-      });
+      await failFinanceReportImportExtraction({ ...identity, expectedVersion: claim.version, failureCode });
       if (deterministic) return { failed: true as const, failureCode };
     }
     throw error;

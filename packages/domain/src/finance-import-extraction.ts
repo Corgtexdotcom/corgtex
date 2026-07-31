@@ -231,27 +231,19 @@ export async function failFinanceReportImportExtraction(params: {
   invariant(Object.hasOwn(SAFE_EXTRACTION_FAILURES, params.failureCode), 400, "INVALID_INPUT", "Extraction failure code is invalid.");
   return prisma.$transaction(async (tx) => {
     const batch = await loadLockedBatch(tx, params.workspaceId, params.batchId);
-    if (batch.stage === "FAILED" && batch.workflowJobId === params.workflowJobId) {
-      return { skipped: true as const, batchId: batch.id, version: batch.version };
-    }
-    invariant(
-      batch.stage === "EXTRACTING" && batch.workflowJobId === params.workflowJobId && batch.version === params.expectedVersion,
-      409, "FINANCE_REPORT_EXTRACTION_CONFLICT",
-      "The Finance report extraction changed. Please retry.",
-    );
+    const owned = batch.workflowJobId === params.workflowJobId;
+    if (batch.stage === "FAILED" && owned) return { skipped: true as const, batchId: batch.id, version: batch.version };
+    invariant(batch.stage === "EXTRACTING" && owned && batch.version === params.expectedVersion,
+      409, "FINANCE_REPORT_EXTRACTION_CONFLICT", "The Finance report extraction changed. Please retry.");
     const result = await tx.financeImportBatch.updateMany({
       where: { id: batch.id, workspaceId: batch.workspaceId, version: batch.version, stage: "EXTRACTING", workflowJobId: params.workflowJobId },
-      data: {
-        stage: "FAILED",
-        safeErrorCode: params.failureCode,
-        safeErrorMessage: SAFE_EXTRACTION_FAILURES[params.failureCode],
-        version: { increment: 1 },
-      },
+      data: { stage: "FAILED", safeErrorCode: params.failureCode,
+        safeErrorMessage: SAFE_EXTRACTION_FAILURES[params.failureCode], version: { increment: 1 } },
     });
     invariant(result.count === 1, 409, "FINANCE_REPORT_EXTRACTION_CONFLICT", "The Finance report extraction changed. Please retry.");
     await tx.auditLog.create({ data: {
-      workspaceId: batch.workspaceId, action: "finance-report-import.extraction-failed",
-      entityType: "FinanceImportBatch", entityId: batch.id, meta: { failureCode: params.failureCode },
+      workspaceId: batch.workspaceId, action: "finance-report-import.extraction-failed", entityType: "FinanceImportBatch",
+      entityId: batch.id, meta: { failureCode: params.failureCode },
     } });
     return { skipped: false as const, batchId: batch.id, version: batch.version + 1 };
   });

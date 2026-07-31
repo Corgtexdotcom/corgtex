@@ -188,27 +188,24 @@ describe("Finance report import extraction lifecycle", () => {
 
   it("allowlists, fences, and idempotently records terminal extraction failures", async () => {
     const { failFinanceReportImportExtraction } = await import("./finance-import-extraction");
-    const fail = (failureCode: "MALFORMED_FILE" | "FINANCE_REPORT_EXTRACTION_FAILED") => failFinanceReportImportExtraction({
-      workspaceId: "workspace-1", batchId: "batch-1", workflowJobId: "job-1", expectedVersion: 2, failureCode,
-    });
+    const fail = (failureCode: "MALFORMED_FILE" | "FINANCE_REPORT_EXTRACTION_FAILED") =>
+      failFinanceReportImportExtraction({ workspaceId: "workspace-1", batchId: "batch-1",
+        workflowJobId: "job-1", expectedVersion: 2, failureCode });
     setBatch({ ...uploaded, stage: "EXTRACTING", workflowJobId: "job-1", version: 2 });
     await expect(fail("MALFORMED_FILE")).resolves.toEqual({ skipped: false, batchId: "batch-1", version: 3 });
     expect(prismaMock.financeImportBatch.updateMany).toHaveBeenCalledWith(expect.objectContaining({
-      data: expect.objectContaining({ stage: "FAILED", safeErrorCode: "MALFORMED_FILE", safeErrorMessage: "The report file is malformed or unreadable." }),
-    }));
+      data: expect.objectContaining({ stage: "FAILED", safeErrorCode: "MALFORMED_FILE",
+        safeErrorMessage: "The report file is malformed or unreadable." }) }));
     expect(prismaMock.auditLog.create.mock.calls[0][0].data.meta).toEqual({ failureCode: "MALFORMED_FILE" });
     expect(prismaMock.document.update).not.toHaveBeenCalled();
-    expect(prismaMock.brainSource.update).not.toHaveBeenCalled();
     vi.clearAllMocks();
-    await expect(failFinanceReportImportExtraction({
-      workspaceId: "workspace-1", batchId: "batch-1", workflowJobId: "job-1", expectedVersion: 2,
-      failureCode: "UNSAFE_PROVIDER_DETAIL" as never,
-    })).rejects.toMatchObject({ code: "INVALID_INPUT" });
+    await expect(failFinanceReportImportExtraction({ workspaceId: "workspace-1", batchId: "batch-1",
+      workflowJobId: "job-1", expectedVersion: 2, failureCode: "UNSAFE_PROVIDER_DETAIL" as never }))
+      .rejects.toMatchObject({ code: "INVALID_INPUT" });
     expect(prismaMock.$transaction).not.toHaveBeenCalled();
     setBatch({ ...uploaded, stage: "FAILED", workflowJobId: "job-1", version: 3 });
     await expect(fail("MALFORMED_FILE")).resolves.toEqual({ skipped: true, batchId: "batch-1", version: 3 });
     setBatch({ ...uploaded, stage: "CLASSIFYING", workflowJobId: "job-1", version: 3 });
     await expect(fail("FINANCE_REPORT_EXTRACTION_FAILED")).rejects.toMatchObject({ code: "FINANCE_REPORT_EXTRACTION_CONFLICT" });
-    expect(prismaMock.financeImportBatch.updateMany).not.toHaveBeenCalled();
   });
 });

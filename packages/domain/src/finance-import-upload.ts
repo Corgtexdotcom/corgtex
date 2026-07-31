@@ -11,10 +11,11 @@ import { lockAndAssertTrialStorageCapacity } from "./trial-entitlements";
 export const FINANCE_REPORT_IMPORT_MAX_FILE_BYTES = 25 * 1024 * 1024;
 const STORAGE_PENDING = "FINANCE_REPORT_STORAGE_PENDING";
 const STORAGE_UNAVAILABLE = "FINANCE_REPORT_STORAGE_UNAVAILABLE";
-const RESUMABLE_FAILURE_CODES = [STORAGE_PENDING, STORAGE_UNAVAILABLE, "FINANCE_REPORT_EXTRACTION_FAILED"] as const;
+const TERMINAL_JOB_STATUSES = ["FAILED", "COMPLETED"] as const;
 
 type FinanceImportStorage = Pick<StorageProvider, "put">;
 type FinanceFileFormat = "CSV" | "PDF" | "XLSX";
+type RecoverableExtractionJob = { id: string };
 
 const FILE_TYPES: Record<FinanceFileFormat, { extension: string; mimeType: string }> = {
   CSV: { extension: "csv", mimeType: "text/csv" },
@@ -43,8 +44,22 @@ function fileEnvelope(fileName: string, mimeType: string) {
   return { format: byName, mimeType: FILE_TYPES[byName].mimeType, originalFilename };
 }
 
-function resumable(batch: FinanceImportBatch) {
-  return batch.stage === "FAILED" && RESUMABLE_FAILURE_CODES.some((code) => code === batch.safeErrorCode);
+function resumable(batch: FinanceImportBatch, job: RecoverableExtractionJob | null) {
+  const storageFailure = batch.stage === "FAILED"
+    && (batch.safeErrorCode === STORAGE_PENDING || batch.safeErrorCode === STORAGE_UNAVAILABLE);
+  if (storageFailure) return !batch.workflowJobId || batch.workflowJobId === job?.id;
+  if (!job || (batch.workflowJobId && batch.workflowJobId !== job.id)) return false;
+  return batch.stage === "UPLOADED" || batch.stage === "EXTRACTING"
+    || (batch.stage === "FAILED" && batch.safeErrorCode === "FINANCE_REPORT_EXTRACTION_FAILED");
+}
+
+async function recoverableExtractionJob(batch: FinanceImportBatch) {
+  if (!["UPLOADED", "EXTRACTING", "FAILED"].includes(batch.stage)) return null;
+  const job = await prisma.workflowJob.findUnique({ where: {
+    dedupeKey: `finance-report-import:${batch.workspaceId}:${batch.id}:extract:v1`,
+  }, select: { id: true, status: true } });
+  if (!job || !TERMINAL_JOB_STATUSES.some((status) => status === job.status)) return null;
+  return resumable(batch, { id: job.id }) ? { id: job.id } : null;
 }
 
 function formatForMimeType(mimeType: string) {
@@ -116,25 +131,35 @@ async function reserveUpload(actor: Extract<AppActor, { kind: "user" }>, params:
 
 async function markStorageUnavailable(batch: FinanceImportBatch) {
   await prisma.financeImportBatch.updateMany({
-    where: { id: batch.id, workspaceId: batch.workspaceId, stage: "FAILED", safeErrorCode: { in: [...RESUMABLE_FAILURE_CODES] } },
-    data: { safeErrorCode: STORAGE_UNAVAILABLE, safeErrorMessage: "The report could not be stored. Please try again.", version: { increment: 1 } },
+    where: { id: batch.id, workspaceId: batch.workspaceId, version: batch.version, stage: batch.stage, workflowJobId: batch.workflowJobId },
+    data: { stage: "FAILED", safeErrorCode: STORAGE_UNAVAILABLE, safeErrorMessage: "The report could not be stored. Please try again.", version: { increment: 1 } },
   }).catch(() => undefined);
 }
 
-async function finalizeUpload(batch: FinanceImportBatch, actorUserId: string, format: FinanceFileFormat) {
+async function finalizeUpload(batch: FinanceImportBatch, actorUserId: string, format: FinanceFileFormat,
+  initialRecoveryJob: RecoverableExtractionJob | null) {
   let current = batch;
+  let recoveryJob = initialRecoveryJob;
   for (let attempt = 0; attempt < 3; attempt += 1) {
-    if (current.stage === "UPLOADED" && !current.safeErrorCode) return current;
-    invariant(resumable(current), 409, "FINANCE_REPORT_UPLOAD_CONFLICT", "The report upload changed. Refresh and try again.");
+    if (current.stage === "UPLOADED" && !current.safeErrorCode && !recoveryJob) return current;
+    invariant(resumable(current, recoveryJob), 409, "FINANCE_REPORT_UPLOAD_CONFLICT", "The report upload changed. Refresh and try again.");
     const updated = await prisma.$transaction(async (tx) => {
-      const result = await tx.financeImportBatch.updateMany({
-        where: { id: current.id, workspaceId: current.workspaceId, version: current.version, stage: "FAILED", safeErrorCode: { in: [...RESUMABLE_FAILURE_CODES] } },
+      const where: Prisma.FinanceImportBatchWhereInput = recoveryJob
+        ? { id: current.id, workspaceId: current.workspaceId, version: current.version,
+            stage: current.stage, workflowJobId: current.workflowJobId }
+        : { id: current.id, workspaceId: current.workspaceId, version: current.version,
+            stage: "FAILED", safeErrorCode: { in: [STORAGE_PENDING, STORAGE_UNAVAILABLE] } };
+      const result = await tx.financeImportBatch.updateMany({ where,
         data: { stage: "UPLOADED", workflowJobId: null, retryCount: 0, safeErrorCode: null, safeErrorMessage: null, version: { increment: 1 } },
       });
       if (result.count !== 1) return null;
-      if (current.workflowJobId) {
+      if (recoveryJob) {
         const job = await tx.workflowJob.updateMany({
-          where: { id: current.workflowJobId, workspaceId: current.workspaceId, status: "FAILED" },
+          where: {
+            id: recoveryJob.id,
+            workspaceId: current.workspaceId,
+            status: { in: [...TERMINAL_JOB_STATUSES] },
+          },
           data: { status: "PENDING", attempts: 0, runAfter: new Date(), lockedAt: null, lockedBy: null, startedAt: null, completedAt: null, error: null },
         });
         invariant(job.count === 1, 409, "FINANCE_REPORT_UPLOAD_CONFLICT", "The report extraction retry changed. Refresh and try again.");
@@ -164,6 +189,7 @@ async function finalizeUpload(batch: FinanceImportBatch, actorUserId: string, fo
     const winner = await prisma.financeImportBatch.findUnique({ where: { id_workspaceId: { id: current.id, workspaceId: current.workspaceId } } });
     invariant(winner, 409, "FINANCE_REPORT_UPLOAD_CONFLICT", "The report upload is no longer available.");
     current = winner;
+    recoveryJob = await recoverableExtractionJob(current);
   }
   throw new AppError(409, "FINANCE_REPORT_UPLOAD_CONFLICT", "The report upload changed. Refresh and try again.");
 }
@@ -183,12 +209,15 @@ export async function createFinanceReportImportUpload(actor: AppActor, params: {
   const file = fileEnvelope(params.fileName, params.mimeType);
   const fileHash = createHash("sha256").update(snapshot).digest("hex");
   const existing = await prisma.financeImportBatch.findUnique({ where: { workspaceId_fileHash: { workspaceId: params.workspaceId, fileHash } } });
-  if (existing && !resumable(existing)) return { batch: existing, reused: true };
+  const existingRecoveryJob = existing ? await recoverableExtractionJob(existing) : null;
+  if (existing && !resumable(existing, existingRecoveryJob)) return { batch: existing, reused: true };
   const reservation = existing ? { batch: existing, created: false } : await reserveUpload(actor, {
     workspaceId: params.workspaceId, fileHash, fileSizeBytes: snapshot.byteLength,
     originalFilename: file.originalFilename, mimeType: file.mimeType, format: file.format,
   });
-  if (!resumable(reservation.batch)) return { batch: reservation.batch, reused: true };
+  const recoveryJob = existing ? existingRecoveryJob
+    : reservation.created ? null : await recoverableExtractionJob(reservation.batch);
+  if (!resumable(reservation.batch, recoveryJob)) return { batch: reservation.batch, reused: true };
   const storage = params.storage ?? defaultStorage;
   const storageKey = storageKeyFor(params.workspaceId, fileHash, reservation.batch.mimeType);
   try {
@@ -204,7 +233,8 @@ export async function createFinanceReportImportUpload(actor: AppActor, params: {
     throw new AppError(503, STORAGE_UNAVAILABLE, "The report could not be stored. Please try again.");
   }
   try {
-    const batch = await finalizeUpload(reservation.batch, actor.user.id, formatForMimeType(reservation.batch.mimeType));
+    const batch = await finalizeUpload(reservation.batch, actor.user.id,
+      formatForMimeType(reservation.batch.mimeType), recoveryJob);
     return { batch, reused: !reservation.created };
   } catch (error) {
     if (error instanceof AppError) throw error;
