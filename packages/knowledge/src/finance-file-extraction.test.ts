@@ -91,19 +91,21 @@ function formPdf(multiSelect = false, scanned = false, choiceValue = "A", choice
     Buffer.from("<< /Type /Catalog /Pages 2 0 R /AcroForm 6 0 R >>"),
     Buffer.from("<< /Type /Pages /Kids [4 0 R] /Count 1 >>"),
     Buffer.from("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>"),
-    Buffer.from("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 1000 1000] /Resources << /Font << /F1 3 0 R >> >> /Contents 5 0 R /Annots [7 0 R 8 0 R 9 0 R 10 0 R 11 0 R 12 0 R 13 0 R 14 0 R 15 0 R] >>"),
+    Buffer.from("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 1000 1000] /Resources << /Font << /F1 3 0 R >> >> /Contents 5 0 R /Annots [7 0 R 8 0 R 9 0 R 10 0 R 11 0 R 12 0 R 13 0 R 14 0 R 15 0 R 17 0 R 18 0 R] >>"),
     Buffer.from(`<< /Length ${pageContent.length} >>\nstream\n${pageContent}\nendstream`),
-    Buffer.from("<< /Fields [7 0 R 8 0 R 9 0 R 10 0 R 11 0 R 12 0 R 13 0 R 14 0 R 15 0 R] /NeedAppearances true >>"),
+    Buffer.from("<< /Fields [7 0 R 8 0 R 9 0 R 10 0 R 11 0 R 12 0 R 13 0 R 14 0 R 15 0 R 17 0 R 18 0 R] /NeedAppearances true >>"),
     Buffer.from("<< /Type /Annot /Subtype /Widget /FT /Tx /T (Revenue) /V (123.45) /Rect [72 700 200 720] /P 4 0 R /AA << /K << /S /JavaScript /JS (app.alert\\(secret\\)) >> >> >>"),
     Buffer.from("<< /Type /Annot /Subtype /Widget /FT /Tx /T (Revenue) /V (123.45) /Rect [72 670 200 690] /P 4 0 R >>"),
     Buffer.from(`<< /Type /Annot /Subtype /Widget /FT /Ch ${choiceFlags} /T (Basis) ${choice} /Opt [[(C) (Cash Basis)] [(A) (Accrual Basis)]] /Rect [72 640 200 660] /P 4 0 R >>`),
-    Buffer.from("<< /Type /Annot /Subtype /Widget /FT /Btn /T (Approved) /V /Yes /AS /Yes /Rect [72 610 90 628] /P 4 0 R >>"),
+    Buffer.from("<< /Type /Annot /Subtype /Widget /FT /Btn /T (Approved) /V /Yes /AS /Yes /AP << /N << /Yes 16 0 R /Off 16 0 R >> >> /Rect [72 610 90 628] /P 4 0 R >>"),
     Buffer.from("<< /Type /Annot /Subtype /Widget /FT /Btn /Ff 32768 /T (Scenario) /V /Base /AS /Base /AP << /N << /Base 16 0 R /Off 16 0 R >> >> /Rect [72 580 90 598] /P 4 0 R >>"),
     Buffer.from("<< /Type /Annot /Subtype /Widget /FT /Tx /T (HiddenValue) /V (ignore) /F 2 /Rect [72 550 200 570] /P 4 0 R >>"),
     Buffer.from("<< /Type /Annot /Subtype /Widget /FT /Btn /Ff 65536 /T (RunAction) /Rect [72 520 200 540] /P 4 0 R /A << /S /JavaScript /JS (app.alert\\(ignore\\)) >> >>"),
     Buffer.from("<< /Type /Annot /Subtype /Widget /FT /Sig /T (Signature) /Rect [72 490 200 510] /P 4 0 R >>"),
     Buffer.from("<< /Type /Annot /Subtype /Widget /FT /Tx /Ff 8192 /T (Password) /V (ignore-password) /Rect [72 460 200 480] /P 4 0 R >>"),
     Buffer.from("<< /Type /XObject /Subtype /Form /BBox [0 0 10 10] /Length 0 >>\nstream\n\nendstream"),
+    Buffer.from("<< /Type /Annot /Subtype /Widget /FT /Tx /T (OffPageValue) /V (ignore-off-page) /Rect [2000 2000 2100 2020] /P 4 0 R >>"),
+    Buffer.from("<< /Type /Annot /Subtype /Widget /FT /Btn /T (Declined) /V /Off /AS /Off /AP << /N << /Yes 16 0 R /Off 16 0 R >> >> /Rect [72 430 90 448] /P 4 0 R >>"),
   ]);
 }
 
@@ -140,23 +142,13 @@ function pagedRadioFormPdf() {
   ]);
 }
 
-function xfaPdf(values: string[], controlValue?: string, richText = false, firstPresence = "", layout = "tb") {
-  const draws = values.map((value, index) => `<subform name="line${index}"${layout === "position" ? ` y="${index === 0 ? 40 : 0}pt"` : ""}>
-    ${index === 0 || layout === "position" ? "" : '<breakBefore targetType="pageArea" startNew="1"/>'}
-    <draw ${index === 0 && firstPresence ? `presence="${firstPresence}" ` : ""}w="300pt" h="20pt"><value>${richText
-    ? `<exData contentType="text/html"><body xmlns="http://www.w3.org/1999/xhtml"><p>${value}</p></body></exData>`
-    : `<text>${value}</text>`}</value></draw>
-  </subform>`)
-    .join("");
-  const control = controlValue
-    ? `<field name="amount" w="100pt" h="20pt"><ui><textEdit/></ui><value><text>${controlValue}</text></value></field>`
-    : "";
+function xfaPdf() {
   const xml = `<?xml version="1.0"?>
 <xdp:xdp xmlns:xdp="http://ns.adobe.com/xdp/">
   <template xmlns="http://www.xfa.org/schema/xfa-template/3.3">
-    <subform name="root" mergeMode="matchTemplate" layout="${layout}">
+    <subform name="root" mergeMode="matchTemplate" layout="tb">
       <pageSet><pageArea><contentArea x="0pt" w="456pt" h="789pt"/><medium short="456pt" long="789pt"/></pageArea></pageSet>
-      ${draws}${control}
+      <draw w="300pt" h="20pt"><value><text>Revenue</text></value></draw>
     </subform>
   </template>
   <xfa:datasets xmlns:xfa="http://www.xfa.org/schema/xfa-data/1.0/"><xfa:data/></xfa:datasets>
@@ -266,53 +258,10 @@ describe("extractFinanceReportFile", () => {
     })).rejects.toMatchObject({ code: "UNSUPPORTED_PDF_FEATURE" });
   });
 
-  pdfIt("extracts pure XFA text in page order and enforces the shared character limit", async () => {
-    const input = xfaPdf(["Revenue", "123.45"]);
-    const result = await extractFinanceReportFile({
-      fileBuffer: input,
-      fileName: "xfa.pdf",
-      mimeType: "application/pdf",
-    });
-    expect(result.pages).toEqual([
-      { page: 1, text: "Revenue" },
-      { page: 2, text: "123.45" },
-    ]);
+  pdfIt("fails pure XFA closed for its dedicated dependent phase", async () => {
     await expect(extractFinanceReportFile({
-      fileBuffer: input,
+      fileBuffer: xfaPdf(),
       fileName: "xfa.pdf",
-      mimeType: "application/pdf",
-      limits: { maxTextChars: 5 },
-    })).rejects.toMatchObject({ code: "EXTRACTION_LIMIT_EXCEEDED" });
-  });
-
-  pdfIt("preserves inline rich-text XFA runs on one visual line", async () => {
-    const result = await extractFinanceReportFile({
-      fileBuffer: xfaPdf(["Revenue <span style=\"font-weight: bold\">123</span>"], undefined, true),
-      fileName: "xfa-rich-text.pdf",
-      mimeType: "application/pdf",
-    });
-    expect(result.pages).toEqual([{ page: 1, text: "Revenue 123" }]);
-  });
-
-  pdfIt("skips invisible XFA text and reads positioned layouts visually", async () => {
-    const visible = await extractFinanceReportFile({
-      fileBuffer: xfaPdf(["SECRET", "Revenue"], undefined, false, "invisible"),
-      fileName: "xfa-invisible.pdf",
-      mimeType: "application/pdf",
-    });
-    expect(visible.pages).toEqual([{ page: 1, text: "" }, { page: 2, text: "Revenue" }]);
-    const positioned = await extractFinanceReportFile({
-      fileBuffer: xfaPdf(["SECOND", "FIRST"], undefined, false, "", "position"),
-      fileName: "xfa-positioned.pdf",
-      mimeType: "application/pdf",
-    });
-    expect(positioned.pages).toEqual([{ page: 1, text: "FIRST\nSECOND" }]);
-  });
-
-  pdfIt("fails pure XFA controls closed instead of omitting their values", async () => {
-    await expect(extractFinanceReportFile({
-      fileBuffer: xfaPdf(["Revenue"], "123.45"),
-      fileName: "xfa-control.pdf",
       mimeType: "application/pdf",
     })).rejects.toMatchObject({ code: "UNSUPPORTED_PDF_FEATURE" });
   });
@@ -436,7 +385,6 @@ describe("extractFinanceReportFile", () => {
       [pdf("Revenue"), "report.pdf", "application/pdf", { maxTextChars: 1 }, "EXTRACTION_LIMIT_EXCEEDED"],
       [pdf(), "report.pdf", "application/pdf", {}, "EMPTY_EXTRACTION"],
       [pdf(""), "report.pdf", "application/pdf", {}, "EMPTY_EXTRACTION"],
-      [xfaPdf([]), "report.pdf", "application/pdf", {}, "EMPTY_EXTRACTION"],
       [Buffer.from("%PDF-broken"), "report.pdf", "application/pdf", {}, "MALFORMED_FILE"],
     ] : [[pdf("Revenue"), "report.pdf", "application/pdf", {}, "EXTRACTION_LIMIT_EXCEEDED"]]) as FailureCase[]),
     [Buffer.from([0xff]), "report.csv", "text/csv", {}, "MALFORMED_FILE"],

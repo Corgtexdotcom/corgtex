@@ -93,6 +93,7 @@ const fail = (code) => { const error = new Error(code); error.code = code; throw
     const document = await task.promise;
     if (document.numPages === 0) fail("EMPTY_EXTRACTION");
     if (document.numPages > maxPages) fail("EXTRACTION_LIMIT_EXCEEDED");
+    if (document.isPureXfa) fail("UNSUPPORTED_PDF_FEATURE");
     const fieldLinesByPage = Array.from({ length: document.numPages }, () => new Map());
     const fieldObjects = await document.getFieldObjects();
     if (fieldObjects) {
@@ -113,7 +114,7 @@ const fail = (code) => { const error = new Error(code); error.code = code; throw
           const rawValues = (Array.isArray(field.value) ? field.value : [field.value])
             .filter((value) => typeof value === "string" || typeof value === "number" || typeof value === "boolean")
             .map(String);
-          if (field.type === "radiobutton") {
+          if (field.type === "checkbox" || field.type === "radiobutton") {
             const widgetExports = (Array.isArray(field.exportValues) ? field.exportValues : [field.exportValues])
               .filter((value) => typeof value === "string" || typeof value === "number" || typeof value === "boolean")
               .map(String);
@@ -152,47 +153,6 @@ const fail = (code) => { const error = new Error(code); error.code = code; throw
         text += value;
       };
       try {
-        const hasXfaControls = (node) => {
-          if (!node) return false;
-          if (["button", "input", "select", "textarea"].includes(node.name)) return true;
-          if (Array.isArray(node.attributes?.class) && node.attributes.class.includes("xfaField")) return true;
-          return Array.isArray(node.children) && node.children.some(hasXfaControls);
-        };
-        const consumeXfa = (root) => {
-          const blockNodes = new Set(["address", "article", "aside", "blockquote", "div", "dl", "dt", "dd", "figcaption", "figure", "footer", "h1", "h2", "h3", "h4", "h5", "h6", "header", "li", "main", "nav", "ol", "p", "pre", "section", "table", "tbody", "td", "tfoot", "th", "thead", "tr", "ul"]);
-          let pendingBreak = false;
-          const walk = (node) => {
-            if (!node || ["input", "option", "select", "textarea"].includes(node.name)) return;
-            const style = node.attributes?.style;
-            if (style?.visibility === "hidden" || style?.display === "none") return;
-            if (node.name === "br" || node.name === "hr") {
-              pendingBreak = true;
-              return;
-            }
-            const startLength = text.length;
-            const value = node.name === "#text"
-              ? node.value
-              : node.attributes?.textContent || node.value;
-            if (value) {
-              if (pendingBreak && text && !text.endsWith("\n")) append("\n");
-              append(String(value));
-              pendingBreak = false;
-            }
-            if (Array.isArray(node.children)) {
-              const children = [...node.children];
-              if (children.length > 1 && children.every((child) => child.attributes?.style?.position === "absolute")) {
-                const coordinate = (child, key) => Number.parseFloat(child.attributes.style[key]) || 0;
-                children.sort((left, right) => (
-                  coordinate(left, "top") - coordinate(right, "top")
-                  || coordinate(left, "left") - coordinate(right, "left")
-                ));
-              }
-              for (const child of children) walk(child);
-            }
-            if (blockNodes.has(node.name) && text.length > startLength) pendingBreak = true;
-          };
-          walk(root);
-        };
         const consume = (content) => {
           for (const [fontName, style] of Object.entries(content.styles)) {
             if (style.vertical) verticalFonts.add(fontName);
@@ -226,17 +186,11 @@ const fail = (code) => { const error = new Error(code); error.code = code; throw
             };
           }
         };
-        if (document.isPureXfa) {
-          const xfa = await page.getXfa();
-          if (hasXfaControls(xfa)) fail("UNSUPPORTED_PDF_FEATURE");
-          consumeXfa(xfa);
-        } else {
-          const reader = page.streamTextContent().getReader();
-          while (true) {
-            const chunk = await reader.read();
-            if (chunk.done) break;
-            consume(chunk.value);
-          }
+        const reader = page.streamTextContent().getReader();
+        while (true) {
+          const chunk = await reader.read();
+          if (chunk.done) break;
+          consume(chunk.value);
         }
         if (!text.trim()) {
           const operators = await page.getOperatorList();
@@ -246,7 +200,14 @@ const fail = (code) => { const error = new Error(code); error.code = code; throw
         }
         const pageFieldLines = fieldLinesByPage[pageNumber - 1];
         if (pageFieldLines.size > 0) {
+          const [pageLeft, pageBottom, pageRight, pageTop] = page.view;
           const visibleFieldIds = new Set((await page.getAnnotations({ intent: "display" }))
+            .filter((annotation) => {
+              if (!Array.isArray(annotation.rect) || annotation.rect.length !== 4) return false;
+              const [left, bottom, right, top] = annotation.rect;
+              return right > left && top > bottom
+                && right > pageLeft && left < pageRight && top > pageBottom && bottom < pageTop;
+            })
             .map((annotation) => String(annotation.id ?? "")));
           for (const [fieldLine, fieldIds] of pageFieldLines) {
             if (![...fieldIds].some((fieldId) => visibleFieldIds.has(fieldId))) continue;
