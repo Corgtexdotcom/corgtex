@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { AppError, requireWorkspaceMembership } from "@corgtex/domain";
+import { AppError, resolveKnowledgeAccessDomains } from "@corgtex/domain";
 import { answerKnowledgeQuestion } from "@corgtex/knowledge";
 import { resolveRequestActor } from "@/lib/auth";
 import { handleRouteError } from "@/lib/http";
@@ -15,11 +15,13 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
       throw new AppError(400, "INVALID_INPUT", "Question is required.");
     }
 
-    await requireWorkspaceMembership({ actor, workspaceId });
+    const accessDomains = await resolveKnowledgeAccessDomains(actor, workspaceId);
     const result = await answerKnowledgeQuestion({
       workspaceId,
       question,
       limit,
+      accessDomains,
+      sourceTypes: ["BRAIN_ARTICLE", "DOCUMENT", "MEETING"],
     });
     return NextResponse.json(result);
   } catch (error) {

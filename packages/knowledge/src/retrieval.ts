@@ -106,6 +106,7 @@ function answerCacheKey(params: {
   cacheVersion: string;
   question: string;
   limit?: number;
+  sourceTypes?: KnowledgeSourceType[];
   accessDomains: KnowledgeAccessDomain[];
   provider?: string;
   indexName?: string;
@@ -118,6 +119,7 @@ function answerCacheKey(params: {
     params.cacheVersion,
     params.question.trim().toLowerCase(),
     String(params.limit ?? DEFAULT_ANSWER_LIMIT),
+    [...(params.sourceTypes ?? [])].sort().join(","),
     params.accessDomains.join(","),
   ].join("::");
 }
@@ -274,11 +276,14 @@ async function searchIndexedKnowledgePostgres(params: {
 }, queryEmbeddingOverride?: number[]) {
   const query = params.query;
 
-  const chunks = await prisma.knowledgeChunk.findMany({
+  const sourceTypeWindows = params.sourceTypes?.length
+    ? [...new Set(params.sourceTypes)]
+    : [undefined];
+  const chunkWindows = await Promise.all(sourceTypeWindows.map((sourceType) => prisma.knowledgeChunk.findMany({
     where: {
       workspaceId: params.workspaceId,
       accessDomain: { in: params.accessDomains },
-      sourceType: params.sourceTypes?.length ? { in: params.sourceTypes } : undefined,
+      sourceType,
       sensitivity: params.maxSensitivity
         ? { in: levelsUpTo(params.maxSensitivity) }
         : undefined,
@@ -292,8 +297,12 @@ async function searchIndexedKnowledgePostgres(params: {
       sourceTitle: true,
       chunkIndex: true,
       content: true,
+      createdAt: true,
     },
-  });
+  })));
+  const chunks = chunkWindows.flat().sort((left, right) =>
+    (right.createdAt?.getTime() ?? 0) - (left.createdAt?.getTime() ?? 0)
+    || left.chunkIndex - right.chunkIndex);
 
   if (chunks.length === 0) {
     return [] as KnowledgeSearchResult[];
@@ -381,6 +390,7 @@ export async function answerKnowledgeQuestion(params: {
   workspaceId: string;
   question: string;
   limit?: number;
+  sourceTypes?: KnowledgeSourceType[];
   accessDomains?: KnowledgeAccessDomain[];
   workflowJobId?: string;
   agentRunId?: string;
@@ -414,6 +424,7 @@ export async function answerKnowledgeQuestion(params: {
     workspaceId: params.workspaceId,
     query: params.question,
     limit: params.limit ?? DEFAULT_ANSWER_LIMIT,
+    sourceTypes: params.sourceTypes,
     accessDomains,
     workflowJobId: params.workflowJobId,
     agentRunId: params.agentRunId,
