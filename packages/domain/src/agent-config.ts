@@ -357,7 +357,7 @@ export async function updateAgentConfig(
     create: {
       workspaceId: params.workspaceId,
       agentKey: params.agentKey,
-      enabled: params.enabled ?? true,
+      enabled: params.enabled ?? ("defaultEnabled" in meta ? meta.defaultEnabled : true),
       modelOverride: params.modelOverride ?? null,
       governancePolicy: params.governancePolicy ?? null,
       configJson: configJson ?? {},

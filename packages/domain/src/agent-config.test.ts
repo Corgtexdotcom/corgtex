@@ -39,6 +39,25 @@ describe("agent-config", () => {
   });
 
   describe("updateAgentConfig", () => {
+    it("preserves a default-disabled agent when creating a partial config row", async () => {
+      const { prisma } = await import("@corgtex/shared");
+      const { updateAgentConfig } = await import("./agent-config");
+      vi.mocked(prisma.workspaceAgentConfig.upsert).mockResolvedValue({} as any);
+
+      await updateAgentConfig(
+        { kind: "user", user: { id: "u-1" } } as any,
+        {
+          workspaceId: "ws-1",
+          agentKey: "finance-report-import",
+          modelOverride: "quality-test",
+        },
+      );
+
+      expect(prisma.workspaceAgentConfig.upsert).toHaveBeenCalledWith(expect.objectContaining({
+        create: expect.objectContaining({ enabled: false, modelOverride: "quality-test" }),
+      }));
+    });
+
     it("updates agent config with governance policy", async () => {
       const { prisma } = await import("@corgtex/shared");
       const { updateAgentConfig } = await import("./agent-config");

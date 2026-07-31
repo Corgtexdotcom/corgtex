@@ -44,6 +44,16 @@ describe("Finance report import proposal contract", () => {
   });
 
   it.each([
+    ["BUDGET_VS_ACTUAL", "ACCRUAL"],
+    ["GENERAL_LEDGER", "MIXED"],
+  ] as const)("accepts advertised %s and %s classifications", (reportType, basis) => {
+    const value = proposal();
+    value.report.reportType = reportType;
+    value.report.basis = basis;
+    expect(financeReportImportProposalV1Schema.safeParse(value).success).toBe(true);
+  });
+
+  it.each([
     ["unknown fields", () => ({ ...proposal(), providerDetail: "blocked" })],
     ["invalid date", () => ({ ...proposal(), report: { ...proposal().report, periodEnd: "2026-02-30" } })],
     ["unsupported early year", () => ({ ...proposal(), report: { ...proposal().report, periodStart: "0999-01-01" } })],
@@ -151,6 +161,18 @@ describe("interpretFinanceReport", () => {
       extractedEvidence: `${params.extractedEvidence}\n{"sheet":"June","row":1,"column":2,"value":"EUR"}`,
     })).resolves.toMatchObject({ report: { currency: { state: "EXPLICIT", code: "EUR" } } });
     expect(model.extract).toHaveBeenCalledOnce();
+  });
+
+  it("does not treat extraction metadata as source evidence", async () => {
+    const metadataClaim = proposal();
+    metadataClaim.candidates[0].sourceLocation.evidence = "TEXT";
+    const model = gateway([metadataClaim, proposal()]);
+    await expect(interpretFinanceReport({ ...params, gateway: model.model,
+      extractedEvidence:
+        "{\"sheet\":\"June\",\"row\":2,\"column\":3,\"type\":\"TEXT\",\"value\":\"Consulting revenue | 1250.00\"}",
+    })).resolves.toMatchObject({ contractVersion: 1 });
+    expect(model.extract).toHaveBeenCalledTimes(2);
+    expect(model.extract.mock.calls[1]?.[0].instruction).toContain("candidates.0.sourceLocation");
   });
 
   it("sanitizes terminal invalid output while preserving transient retries", async () => {

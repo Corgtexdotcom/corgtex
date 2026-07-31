@@ -37,6 +37,11 @@ const currencySchema = z.object({
     || (!explicit && (value.code !== null || value.evidence.length > 0))) {
     context.addIssue({ code: "custom", message: "Currency state, code, and evidence do not agree." });
   }
+  if (explicit && value.code && !value.evidence.some((location) =>
+    location.evidence.toUpperCase().includes(value.code!))) {
+    context.addIssue({ code: "custom", path: ["evidence"],
+      message: "Explicit currency evidence must name the proposed currency code." });
+  }
 });
 const hierarchy = z.array(bounded(160)).min(1).max(12);
 const proposedHierarchy = z.array(bounded(160)).max(12);
@@ -77,8 +82,9 @@ export const financeReportImportProposalV1Schema = z.object({
   contractVersion: z.literal(FINANCE_REPORT_IMPORT_CONTRACT_VERSION),
   report: z.object({
     title: bounded(200),
-    reportType: z.enum(["PROFIT_AND_LOSS", "BALANCE_SHEET", "CASH_FLOW", "TRIAL_BALANCE", "OTHER"]),
-    basis: z.enum(["CASH", "ACCRUAL", "UNSPECIFIED"]),
+    reportType: z.enum(["PROFIT_AND_LOSS", "BALANCE_SHEET", "CASH_FLOW", "TRIAL_BALANCE",
+      "BUDGET_VS_ACTUAL", "GENERAL_LEDGER", "OTHER"]),
+    basis: z.enum(["CASH", "ACCRUAL", "MIXED", "UNSPECIFIED"]),
     cadence: z.enum(["DAILY", "WEEKLY", "MONTHLY", "QUARTERLY", "ANNUAL", "CUSTOM"]),
     periodStart: isoDate,
     periodEnd: isoDate,
@@ -163,33 +169,52 @@ const schemaHint = `Strict contract v1 JSON with no additional fields:
 }`;
 const issuePaths = (error: z.ZodError) => [...new Set(error.issues.map((issue) => issue.path.join(".") || "root"))].slice(0, 12);
 type SourceLocation = z.infer<typeof sourceLocationSchema>;
-function evidenceRecords(extractedEvidence: string) {
-  return extractedEvidence.split("\n").flatMap((line) => {
+type EvidenceIndex = Map<string, string[]>;
+const evidenceKey = (...parts: Array<string | number>) => JSON.stringify(parts);
+function appendEvidence(index: EvidenceIndex, key: string, record: Record<string, unknown>) {
+  const sourceText = ["text", "value", "displayValue", "formula"].flatMap((field) =>
+    typeof record[field] === "string" ? [record[field] as string] : []);
+  if (sourceText.length === 0) return;
+  const existing = index.get(key);
+  if (existing) existing.push(...sourceText);
+  else index.set(key, sourceText);
+}
+function buildEvidenceIndex(extractedEvidence: string) {
+  const index: EvidenceIndex = new Map();
+  for (const line of extractedEvidence.split("\n")) {
     try {
       const parsed: unknown = JSON.parse(line);
-      return parsed && typeof parsed === "object" && !Array.isArray(parsed)
-        ? [parsed as Record<string, unknown>] : [];
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) continue;
+      const record = parsed as Record<string, unknown>;
+      if (typeof record.page === "number") {
+        appendEvidence(index, evidenceKey("page", record.page), record);
+      }
+      if (typeof record.sheet === "string" && typeof record.row === "number") {
+        appendEvidence(index, evidenceKey("row", record.sheet, record.row), record);
+        if (typeof record.column === "number") {
+          appendEvidence(index, evidenceKey("cell", record.sheet, record.row, record.column), record);
+        }
+      }
     } catch {
-      return [];
+      continue;
     }
-  });
+  }
+  return index;
 }
-function locationMatches(records: Record<string, unknown>[], location: SourceLocation) {
-  return records.some((record) => {
-    const identityMatches = location.page !== null
-      ? record.page === location.page
-      : record.sheet === location.sheet && record.row === location.row
-        && (location.column === null || record.column === location.column);
-    const sourceText = Object.values(record).filter((value): value is string => typeof value === "string").join("\n");
-    return identityMatches && sourceText.includes(location.evidence);
-  });
+function locationMatches(index: EvidenceIndex, location: SourceLocation) {
+  const key = location.page !== null
+    ? evidenceKey("page", location.page)
+    : location.column === null
+      ? evidenceKey("row", location.sheet!, location.row!)
+      : evidenceKey("cell", location.sheet!, location.row!, location.column);
+  return index.get(key)?.some((sourceText) => sourceText.includes(location.evidence)) ?? false;
 }
 function unmatchedEvidencePaths(proposal: FinanceReportImportProposalV1, extractedEvidence: string) {
-  const records = evidenceRecords(extractedEvidence);
-  const paths = proposal.candidates.flatMap((candidate, index) =>
-    locationMatches(records, candidate.sourceLocation) ? [] : [`candidates.${index}.sourceLocation`]);
-  return [...paths, ...proposal.report.currency.evidence.flatMap((location, index) =>
-    locationMatches(records, location) ? [] : [`report.currency.evidence.${index}`])].slice(0, 12);
+  const evidenceIndex = buildEvidenceIndex(extractedEvidence);
+  const paths = proposal.candidates.flatMap((candidate, candidateIndex) =>
+    locationMatches(evidenceIndex, candidate.sourceLocation) ? [] : [`candidates.${candidateIndex}.sourceLocation`]);
+  return [...paths, ...proposal.report.currency.evidence.flatMap((location, currencyIndex) =>
+    locationMatches(evidenceIndex, location) ? [] : [`report.currency.evidence.${currencyIndex}`])].slice(0, 12);
 }
 function forceVisibleExceptions(proposal: FinanceReportImportProposalV1) {
   return { ...proposal, candidates: proposal.candidates.map((candidate) => {
