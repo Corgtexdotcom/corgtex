@@ -123,7 +123,9 @@ const fail = (code) => { const error = new Error(code); error.code = code; throw
           const values = ["combobox", "listbox"].includes(field.type) && Array.isArray(field.items)
             ? rawValues.map((value) => {
               const item = field.items.find((candidate) => String(candidate?.exportValue ?? "") === value);
-              return typeof item?.displayValue === "string" ? item.displayValue : value;
+              if (typeof item?.displayValue === "string") return item.displayValue;
+              if (field.type === "combobox" && field.editable) return value;
+              fail("UNSUPPORTED_PDF_FEATURE");
             }).filter((value) => value.trim())
             : rawValues.filter((value) => value.trim());
           if (values.length === 0) continue;
@@ -157,17 +159,41 @@ const fail = (code) => { const error = new Error(code); error.code = code; throw
           if (Array.isArray(node.attributes?.class) && node.attributes.class.includes("xfaField")) return true;
           return Array.isArray(node.children) && node.children.some(hasXfaControls);
         };
-        const consume = (content, isXfa = false) => {
+        const consumeXfa = (root) => {
+          const blockNodes = new Set([
+            "address", "article", "aside", "blockquote", "div", "dl", "dt", "dd", "figcaption", "figure",
+            "footer", "h1", "h2", "h3", "h4", "h5", "h6", "header", "li", "main", "nav", "ol", "p",
+            "pre", "section", "table", "tbody", "td", "tfoot", "th", "thead", "tr", "ul",
+          ]);
+          let pendingBreak = false;
+          const walk = (node) => {
+            if (!node || ["input", "option", "select", "textarea"].includes(node.name)) return;
+            if (node.name === "br" || node.name === "hr") {
+              pendingBreak = true;
+              return;
+            }
+            const startLength = text.length;
+            const value = node.name === "#text"
+              ? node.value
+              : node.attributes?.textContent || node.value;
+            if (value) {
+              if (pendingBreak && text && !text.endsWith("\n")) append("\n");
+              append(String(value));
+              pendingBreak = false;
+            }
+            if (Array.isArray(node.children)) {
+              for (const child of node.children) walk(child);
+            }
+            if (blockNodes.has(node.name) && text.length > startLength) pendingBreak = true;
+          };
+          walk(root);
+        };
+        const consume = (content) => {
           for (const [fontName, style] of Object.entries(content.styles)) {
             if (style.vertical) verticalFonts.add(fontName);
           }
           for (const item of content.items) {
             if (!("str" in item)) continue;
-            if (isXfa) {
-              if (item.str && text && !text.endsWith("\n")) append("\n");
-              append(item.str);
-              continue;
-            }
             const [a, b, c, d, x, y] = item.transform;
             const vertical = verticalFonts.has(item.fontName);
             const axisX = vertical ? -c : a;
@@ -196,8 +222,9 @@ const fail = (code) => { const error = new Error(code); error.code = code; throw
           }
         };
         if (document.isPureXfa) {
-          if (hasXfaControls(await page.getXfa())) fail("UNSUPPORTED_PDF_FEATURE");
-          consume(await page.getTextContent(), true);
+          const xfa = await page.getXfa();
+          if (hasXfaControls(xfa)) fail("UNSUPPORTED_PDF_FEATURE");
+          consumeXfa(xfa);
         } else {
           const reader = page.streamTextContent().getReader();
           while (true) {

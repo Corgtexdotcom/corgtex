@@ -80,10 +80,10 @@ function cidFontPdf(
   ]);
 }
 
-function formPdf(multiSelect = false, scanned = false) {
+function formPdf(multiSelect = false, scanned = false, choiceValue = "A") {
   const choice = multiSelect
     ? "/Ff 2097152 /V [(Cash) (Accrual)]"
-    : "/V (A)";
+    : `/V (${choiceValue})`;
   const pageContent = scanned
     ? "q BI /W 1 /H 1 /BPC 1 /CS /DeviceGray ID \x00 EI Q"
     : "";
@@ -140,10 +140,12 @@ function pagedRadioFormPdf() {
   ]);
 }
 
-function xfaPdf(values: string[], controlValue?: string) {
+function xfaPdf(values: string[], controlValue?: string, richText = false) {
   const draws = values.map((value, index) => `<subform name="line${index}">
     ${index === 0 ? "" : '<breakBefore targetType="pageArea" startNew="1"/>'}
-    <draw w="300pt" h="20pt"><value><text>${value}</text></value></draw>
+    <draw w="300pt" h="20pt"><value>${richText
+    ? `<exData contentType="text/html"><body xmlns="http://www.w3.org/1999/xhtml"><p>${value}</p></body></exData>`
+    : `<text>${value}</text>`}</value></draw>
   </subform>`)
     .join("");
   const control = controlValue
@@ -251,6 +253,14 @@ describe("extractFinanceReportFile", () => {
     })).rejects.toMatchObject({ code: "UNSUPPORTED_PDF_FEATURE" });
   });
 
+  pdfIt("fails a non-editable choice whose value is absent from its visible options", async () => {
+    await expect(extractFinanceReportFile({
+      fileBuffer: formPdf(false, false, "INTERNAL"),
+      fileName: "unmatched-choice.pdf",
+      mimeType: "application/pdf",
+    })).rejects.toMatchObject({ code: "UNSUPPORTED_PDF_FEATURE" });
+  });
+
   pdfIt("extracts pure XFA text in page order and enforces the shared character limit", async () => {
     const input = xfaPdf(["Revenue", "123.45"]);
     const result = await extractFinanceReportFile({
@@ -268,6 +278,15 @@ describe("extractFinanceReportFile", () => {
       mimeType: "application/pdf",
       limits: { maxTextChars: 5 },
     })).rejects.toMatchObject({ code: "EXTRACTION_LIMIT_EXCEEDED" });
+  });
+
+  pdfIt("preserves inline rich-text XFA runs on one visual line", async () => {
+    const result = await extractFinanceReportFile({
+      fileBuffer: xfaPdf(["Revenue <span style=\"font-weight: bold\">123</span>"], undefined, true),
+      fileName: "xfa-rich-text.pdf",
+      mimeType: "application/pdf",
+    });
+    expect(result.pages).toEqual([{ page: 1, text: "Revenue 123" }]);
   });
 
   pdfIt("fails pure XFA controls closed instead of omitting their values", async () => {
