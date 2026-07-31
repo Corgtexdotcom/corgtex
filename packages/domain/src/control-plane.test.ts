@@ -4807,7 +4807,7 @@ describe("control plane domain", () => {
     }));
   });
 
-  it("returns expanded managed AI governance status with deterministic risks and redacted policies", async () => {
+  it("returns expanded managed AI governance status with registry defaults, deterministic risks, and redacted policies", async () => {
     const { getControlPlaneAiGovernanceStatus } = await import("./control-plane");
     prismaMock.customerDeployment.findUnique.mockResolvedValueOnce({
       id: "inst-1",
@@ -4967,6 +4967,7 @@ describe("control plane domain", () => {
       modelOverride: "openai/gpt-test",
       hasGovernancePolicy: true,
     });
+    expect(status.agents.configs.find((config) => config.agentKey === "finance-report-import")?.enabled).toBe(false);
     expect(status.riskFindings.map((finding) => finding.key)).toEqual(expect.arrayContaining([
       "agent-governance-disabled",
       "model-budget-missing",
