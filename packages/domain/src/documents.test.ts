@@ -24,6 +24,7 @@ const prismaMock = vi.hoisted(() => {
 const requireWorkspaceMembershipMock = vi.hoisted(() => vi.fn());
 const appendEventsMock = vi.hoisted(() => vi.fn());
 const assertTrialStorageCapacityMock = vi.hoisted(() => vi.fn());
+const lockAndAssertTrialStorageCapacityMock = vi.hoisted(() => vi.fn());
 const resolveKnowledgeAccessDomainsMock = vi.hoisted(() => vi.fn());
 
 vi.mock("@corgtex/shared", () => ({
@@ -41,6 +42,7 @@ vi.mock("./events", () => ({
 
 vi.mock("./trial-entitlements", () => ({
   assertTrialStorageCapacity: assertTrialStorageCapacityMock,
+  lockAndAssertTrialStorageCapacity: lockAndAssertTrialStorageCapacityMock,
 }));
 
 vi.mock("./brain-access", () => ({
@@ -114,6 +116,7 @@ describe("createDocument", () => {
       isActive: true,
     });
     assertTrialStorageCapacityMock.mockResolvedValue(undefined);
+    lockAndAssertTrialStorageCapacityMock.mockResolvedValue(undefined);
     prismaMock.document.create.mockResolvedValue({
       id: "document-1",
       workspaceId: "workspace-1",
@@ -175,6 +178,27 @@ describe("createDocument", () => {
         payload: { sourceId: "source-1" },
       }),
     ]));
+  });
+
+  it("rechecks trial capacity under the transaction lock before creating a sized document", async () => {
+    const { createDocument } = await import("./documents");
+
+    await createDocument({ kind: "user", user: { id: "user-1" } } as any, {
+      workspaceId: "workspace-1",
+      title: "Sized document",
+      source: "api",
+      storageKey: "sized-key",
+      metadata: { size: 42 },
+    });
+
+    expect(assertTrialStorageCapacityMock).toHaveBeenCalledWith("workspace-1", 42);
+    expect(lockAndAssertTrialStorageCapacityMock).toHaveBeenCalledWith(
+      prismaMock,
+      "workspace-1",
+      42,
+    );
+    expect(lockAndAssertTrialStorageCapacityMock.mock.invocationCallOrder[0])
+      .toBeLessThan(prismaMock.document.create.mock.invocationCallOrder[0]);
   });
 
   it("does not persist the synthetic global-operator membership as a Brain source author", async () => {
@@ -254,6 +278,7 @@ describe("createDocument", () => {
     expect(prismaMock.document.create).not.toHaveBeenCalled();
     expect(prismaMock.brainSource.create).not.toHaveBeenCalled();
     expect(assertTrialStorageCapacityMock).not.toHaveBeenCalled();
+    expect(lockAndAssertTrialStorageCapacityMock).not.toHaveBeenCalled();
   });
 
   it("uses supplied URL and content hash metadata for document duplicate checks", async () => {
@@ -362,5 +387,45 @@ describe("createDocument", () => {
       expect.objectContaining({ type: "brain-source.created", aggregateId: "source-file", payload: { sourceId: "source-file" } }),
     ]));
     expect(prismaMock.document.create).not.toHaveBeenCalled();
+  });
+
+  it("locks before replacing a duplicate document's counted size", async () => {
+    const existingDocument = {
+      id: "document-existing",
+      workspaceId: "workspace-1",
+      title: "Sized document",
+      source: "api",
+      storageKey: "old-key",
+      mimeType: "application/pdf",
+      textContent: null,
+      metadata: { size: 10 },
+      archivedAt: null,
+    };
+    prismaMock.document.findMany.mockResolvedValueOnce([existingDocument]);
+    prismaMock.document.findFirst.mockResolvedValueOnce(existingDocument);
+    prismaMock.document.update.mockResolvedValueOnce(existingDocument);
+
+    const { createDocument } = await import("./documents");
+    await createDocument({ kind: "user", user: { id: "user-1" } } as any, {
+      workspaceId: "workspace-1",
+      title: "Sized document",
+      source: "api",
+      storageKey: "new-key",
+      mimeType: "application/pdf",
+      metadata: { size: 15 },
+      duplicateGuard: {
+        resolution: "update_existing",
+        targetEntityId: "document-existing",
+      },
+    });
+
+    expect(lockAndAssertTrialStorageCapacityMock).toHaveBeenCalledWith(
+      prismaMock,
+      "workspace-1",
+      15,
+      { replacingDocumentId: "document-existing" },
+    );
+    expect(lockAndAssertTrialStorageCapacityMock.mock.invocationCallOrder[0])
+      .toBeLessThan(prismaMock.document.update.mock.invocationCallOrder[0]);
   });
 });

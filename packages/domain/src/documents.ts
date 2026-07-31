@@ -6,7 +6,10 @@ import { requireWorkspaceMembership } from "./auth";
 import { archiveFilterWhere, archiveWorkspaceArtifact, type ArchiveFilter } from "./archive";
 import { invariant } from "./errors";
 import { persistedMemberId } from "./membership";
-import { assertTrialStorageCapacity } from "./trial-entitlements";
+import {
+  assertTrialStorageCapacity,
+  lockAndAssertTrialStorageCapacity,
+} from "./trial-entitlements";
 import {
   checkWorkspaceDuplicateGuard,
   duplicateGuardAuditMeta,
@@ -51,6 +54,11 @@ function metadataString(metadata: Record<string, unknown>, key: string) {
   return typeof value === "string" && value.trim() ? value.trim() : null;
 }
 
+function metadataSize(value: Prisma.InputJsonValue | Prisma.JsonValue | null | undefined) {
+  const size = metadataObject(value).size;
+  return typeof size === "number" && Number.isFinite(size) && size > 0 ? size : 0;
+}
+
 async function getActiveDocument(workspaceId: string, documentId: string) {
   const document = await prisma.document.findFirst({
     where: { id: documentId, workspaceId, archivedAt: null },
@@ -73,6 +81,12 @@ async function applyDocumentDuplicateUpdate(actor: AppActor, params: CreateDocum
       duplicateGuardUpdatedAt: new Date().toISOString(),
       duplicateGuardStorageKey: params.storageKey,
     } as Prisma.InputJsonValue;
+    const incomingSize = metadataSize(params.metadata);
+    if (incomingSize > 0) {
+      await lockAndAssertTrialStorageCapacity(tx, params.workspaceId, incomingSize, {
+        replacingDocumentId: existing.id,
+      });
+    }
     const updated = await tx.document.update({
       where: { id: existing.id },
       data: {
@@ -180,12 +194,11 @@ export async function createDocument(actor: AppActor, params: CreateDocumentPara
     ...metadataObject(metadata),
     ...(contentHash ? { contentHash } : {}),
   };
-  const size = metadata && typeof metadata === "object" && !Array.isArray(metadata)
-    ? (metadata as Record<string, unknown>).size
-    : null;
-  await assertTrialStorageCapacity(params.workspaceId, typeof size === "number" ? size : 0);
+  const size = metadataSize(metadata);
+  await assertTrialStorageCapacity(params.workspaceId, size);
 
   return prisma.$transaction(async (tx) => {
+    await lockAndAssertTrialStorageCapacity(tx, params.workspaceId, size);
     const document = await tx.document.create({
       data: {
         workspaceId: params.workspaceId,

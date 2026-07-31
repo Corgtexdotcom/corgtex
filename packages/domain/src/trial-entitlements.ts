@@ -229,6 +229,48 @@ export async function assertTrialStorageCapacity(workspaceId: string, bytesToAdd
   invariant(currentBytes + bytesToAdd <= limitBytes, 403, "TRIAL_STORAGE_LIMIT_EXCEEDED", "Trial storage limit exceeded.");
 }
 
+export async function lockAndAssertTrialStorageCapacity(
+  tx: Prisma.TransactionClient,
+  workspaceId: string,
+  incomingBytes: number,
+  options?: { replacingDocumentId?: string },
+) {
+  if (!Number.isFinite(incomingBytes) || incomingBytes <= 0) return;
+
+  const trial = await tx.procurementTrial.findUnique({
+    where: { workspaceId },
+    select: {
+      id: true,
+      workspaceId: true,
+      agentCredentialId: true,
+      status: true,
+      trialExpiresAt: true,
+      memberLimit: true,
+      storageLimitMb: true,
+      mcpDailyCallLimit: true,
+    },
+  });
+  if (!trial) return;
+  assertActiveTrial(trial);
+
+  const lockKey = `trial-storage-capacity:${workspaceId}`;
+  await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${lockKey}, 0))`;
+
+  const documents = await tx.document.findMany({
+    where: { workspaceId },
+    select: { id: true, metadata: true },
+  });
+  const currentBytes = documents.reduce((sum, document) => {
+    if (document.id === options?.replacingDocumentId) return sum;
+    const metadata = document.metadata;
+    if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) return sum;
+    const size = (metadata as Record<string, unknown>).size;
+    return typeof size === "number" && Number.isFinite(size) ? sum + size : sum;
+  }, 0);
+  const limitBytes = trial.storageLimitMb * 1024 * 1024;
+  invariant(currentBytes + incomingBytes <= limitBytes, 403, "TRIAL_STORAGE_LIMIT_EXCEEDED", "Trial storage limit exceeded.");
+}
+
 export async function suspendProcurementTrial(actor: AppActor, params: {
   trialId: string;
   reason: string;
