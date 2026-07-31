@@ -42,6 +42,12 @@ function procurementTrialDelegate() {
   return (prisma as typeof prisma & { procurementTrial?: typeof prisma.procurementTrial }).procurementTrial;
 }
 
+function documentStorageBytes(metadata: Prisma.JsonValue | null) {
+  if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) return 0;
+  const size = (metadata as Record<string, unknown>).size;
+  return typeof size === "number" && Number.isFinite(size) && size > 0 ? size : 0;
+}
+
 export async function applyTrialFeatureFlags(tx: Prisma.TransactionClient, workspaceId: string) {
   await tx.workspaceFeatureFlag.createMany({
     data: TRIAL_ENABLED_FEATURE_FLAGS.map(([flag, enabled]) => ({
@@ -213,18 +219,63 @@ export async function assertTrialStorageCapacity(workspaceId: string, bytesToAdd
     },
   });
   if (!trial) return;
+  if (trial.status === TRIAL_STATUS_CONVERTED) return;
   assertActiveTrial(trial);
 
   const documents = await prisma.document.findMany({
     where: { workspaceId },
     select: { metadata: true },
   });
+  const currentBytes = documents.reduce(
+    (sum, document) => sum + documentStorageBytes(document.metadata),
+    0,
+  );
+  const limitBytes = trial.storageLimitMb * 1024 * 1024;
+  invariant(currentBytes + bytesToAdd <= limitBytes, 403, "TRIAL_STORAGE_LIMIT_EXCEEDED", "Trial storage limit exceeded.");
+}
+
+export async function lockAndAssertTrialStorageCapacity(
+  tx: Prisma.TransactionClient,
+  workspaceId: string,
+  incomingBytes: number,
+  options?: { replacingDocumentId?: string },
+) {
+  if (!Number.isFinite(incomingBytes) || incomingBytes <= 0) return;
+
+  const trial = await tx.procurementTrial.findUnique({
+    where: { workspaceId },
+    select: {
+      id: true,
+      workspaceId: true,
+      agentCredentialId: true,
+      status: true,
+      trialExpiresAt: true,
+      memberLimit: true,
+      storageLimitMb: true,
+      mcpDailyCallLimit: true,
+    },
+  });
+  if (!trial) return;
+  if (trial.status === TRIAL_STATUS_CONVERTED) return;
+  assertActiveTrial(trial);
+
+  const lockKey = `trial-storage-capacity:${workspaceId}`;
+  await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${lockKey}, 0))`;
+
+  const documents = await tx.document.findMany({
+    where: { workspaceId },
+    select: { id: true, metadata: true },
+  });
+  let replacedBytes = 0;
   const currentBytes = documents.reduce((sum, document) => {
-    const metadata = document.metadata;
-    if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) return sum;
-    const size = (metadata as Record<string, unknown>).size;
-    return typeof size === "number" && Number.isFinite(size) ? sum + size : sum;
+    const size = documentStorageBytes(document.metadata);
+    if (document.id === options?.replacingDocumentId) replacedBytes = size;
+    return sum + size;
   }, 0);
+  const bytesToAdd = options?.replacingDocumentId
+    ? Math.max(0, incomingBytes - replacedBytes)
+    : incomingBytes;
+  if (bytesToAdd <= 0) return;
   const limitBytes = trial.storageLimitMb * 1024 * 1024;
   invariant(currentBytes + bytesToAdd <= limitBytes, 403, "TRIAL_STORAGE_LIMIT_EXCEEDED", "Trial storage limit exceeded.");
 }

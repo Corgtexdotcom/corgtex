@@ -10,6 +10,8 @@ import {
   duplicateGuardAuditMeta,
   duplicateGuardContentHash,
   duplicateGuardMergeText,
+  assertTrialStorageCapacity,
+  lockAndAssertTrialStorageCapacity,
   requireWorkspaceMembership,
   AppError,
   getStorageUsageSummary,
@@ -30,6 +32,12 @@ function optionalTrimmed(value: string | undefined | null) {
 function stringFromRecord(record: Record<string, unknown>, key: string) {
   const value = record[key];
   return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+function sizeFromMetadata(metadata: unknown) {
+  if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) return 0;
+  const size = (metadata as Record<string, unknown>).size;
+  return typeof size === "number" && Number.isFinite(size) && size > 0 ? size : 0;
 }
 
 function formatFileSize(bytes: number) {
@@ -125,6 +133,9 @@ async function updateDuplicateUploadedDocument(actor: AppActor, params: {
       throw new AppError(404, "NOT_FOUND", "Document not found.");
     }
 
+    await lockAndAssertTrialStorageCapacity(tx, params.workspaceId, params.size, {
+      replacingDocumentId: existing.id,
+    });
     const mergedText = duplicateGuardMergeText(existing.textContent, params.textContent);
     const mergedSourceContent = mergedText ? [params.documentTitle, mergedText].join("\n\n") : params.brainSourceContent;
     const contentHash = mergedText ? duplicateGuardContentHash(mergedText) : params.contentHash;
@@ -370,6 +381,21 @@ export async function ingestFile(actor: AppActor, params: {
     return loadDocumentWithSource(params.workspaceId, duplicateDecision.match.entityId);
   }
   if (duplicateDecision?.resolution === "update_existing") {
+    const existing = await prisma.document.findFirst({
+      where: {
+        id: duplicateDecision.match.entityId,
+        workspaceId: params.workspaceId,
+        archivedAt: null,
+      },
+      select: { metadata: true },
+    });
+    if (!existing) {
+      throw new AppError(404, "NOT_FOUND", "Document not found.");
+    }
+    await assertTrialStorageCapacity(
+      params.workspaceId,
+      Math.max(0, size - sizeFromMetadata(existing.metadata)),
+    );
     const storageKey = `workspaces/${params.workspaceId}/uploads/${randomUUID()}/${fileName}`;
     await defaultStorage.put(storageKey, params.fileBuffer, { contentType: params.mimeType });
     try {
@@ -401,12 +427,15 @@ export async function ingestFile(actor: AppActor, params: {
     }
   }
 
+  await assertTrialStorageCapacity(params.workspaceId, size);
+
   // 2. Upload to Blob Storage
   const storageKey = `workspaces/${params.workspaceId}/uploads/${randomUUID()}/${fileName}`;
   await defaultStorage.put(storageKey, params.fileBuffer, { contentType: params.mimeType });
 
   try {
     return await prisma.$transaction(async (tx) => {
+      await lockAndAssertTrialStorageCapacity(tx, params.workspaceId, size);
       // 3. Create Document mapping
       const document = await tx.document.create({
         data: {
