@@ -78,7 +78,10 @@ function cidFontPdf(encoding = "90ms-RKSJ-H", content = "BT /F1 12 Tf 72 720 Td 
   ]);
 }
 
-function formPdf(mode: "static" | "javascript" | "password" | "calculation" | "invalidPage" | "invalidRect" | "unsupported" = "static") {
+type FormMode = "static" | "javascript" | "password" | "calculation" | "invalidPage"
+  | "invalidRect" | "unsupported" | "blankChoice" | "multiselect" | "radioSecond" | "scanned";
+
+function formPdf(mode: FormMode = "static") {
   const textFlags = mode === "password" ? " /Ff 8192" : "";
   const actions = mode === "javascript"
     ? " /AA << /K << /S /JavaScript /JS (event.value = 1) >> >>"
@@ -88,29 +91,44 @@ function formPdf(mode: "static" | "javascript" | "password" | "calculation" | "i
   const rectEnd = mode === "invalidRect" ? "1".padEnd(310, "0") : "200";
   const calculation = mode === "calculation" ? " /CO [7 0 R]" : "";
   const annots = mode === "invalidPage" ? "8 0 R 9 0 R 11 0 R 12 0 R 13 0 R" : "7 0 R 8 0 R 9 0 R 11 0 R 12 0 R 13 0 R";
-  return renderPdf([
+  const scanned = mode === "scanned";
+  const choice = mode === "blankChoice"
+    ? "<< /Type /Annot /Subtype /Widget /FT /Ch /Ff 131072 /T (Basis) /Opt [(Cash) (Accrual)] /Rect [72 600 200 620] /P 4 0 R >>"
+    : mode === "multiselect"
+      ? "<< /Type /Annot /Subtype /Widget /FT /Ch /Ff 2097152 /T (Basis) /V [(Cash) (Accrual)] /I [0 1] /Opt [(Cash) (Accrual)] /Rect [72 600 200 620] /P 4 0 R >>"
+      : "<< /Type /Annot /Subtype /Widget /FT /Ch /Ff 131072 /T (Basis) /V (Accrual) /Opt [(Cash) (Accrual)] /Rect [72 600 200 620] /P 4 0 R >>";
+  const selectedRadio = mode === "radioSecond" ? "Rejected" : "Approved";
+  const objects = [
     Buffer.from("<< /Type /Catalog /Pages 2 0 R /AcroForm 6 0 R >>"),
     Buffer.from("<< /Type /Pages /Kids [4 0 R] /Count 1 >>"),
     Buffer.from("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>"),
-    Buffer.from(`<< /Type /Page /Parent 2 0 R /MediaBox [0 0 1000 1000] /Resources << /Font << /F1 3 0 R >> >> /Contents 5 0 R /Annots [${annots}] >>`),
-    Buffer.from("<< /Length 0 >>\nstream\n\nendstream"),
+    Buffer.from(`<< /Type /Page /Parent 2 0 R /MediaBox [0 0 1000 1000] /Resources << /Font << /F1 3 0 R >>${scanned ? " /XObject << /Im1 15 0 R >>" : ""} >> /Contents 5 0 R /Annots [${annots}] >>`),
+    Buffer.from(scanned ? "<< /Length 26 >>\nstream\nq 1 0 0 1 0 0 cm /Im1 Do Q\nendstream" : "<< /Length 0 >>\nstream\n\nendstream"),
     Buffer.from(`<< /Fields [7 0 R 8 0 R 9 0 R 10 0 R 13 0 R] /NeedAppearances true${calculation} >>`),
     Buffer.from(`<< /Type /Annot /Subtype /Widget ${fieldType} /T (Revenue) /V (123.45) /Rect [72 700 ${rectEnd} 720] /P ${pageRef}${actions} >>`),
     Buffer.from("<< /Type /Annot /Subtype /Widget /FT /Btn /T (Audited) /V /Yes /AS /Yes /Rect [72 650 90 668] /P 4 0 R >>"),
-    Buffer.from("<< /Type /Annot /Subtype /Widget /FT /Ch /Ff 131072 /T (Basis) /V (Accrual) /Opt [(Cash) (Accrual)] /Rect [72 600 200 620] /P 4 0 R >>"),
-    Buffer.from("<< /FT /Btn /Ff 32768 /T (Status) /V /Approved /Kids [11 0 R 12 0 R] >>"),
-    Buffer.from("<< /Type /Annot /Subtype /Widget /Parent 10 0 R /AS /Approved /AP << /N << /Approved 14 0 R /Off 14 0 R >> >> /Rect [72 550 90 568] /P 4 0 R >>"),
-    Buffer.from("<< /Type /Annot /Subtype /Widget /Parent 10 0 R /AS /Off /AP << /N << /Rejected 14 0 R /Off 14 0 R >> >> /Rect [100 550 118 568] /P 4 0 R >>"),
+    Buffer.from(choice),
+    Buffer.from(`<< /FT /Btn /Ff 32768 /T (Status) /V /${selectedRadio} /Kids [11 0 R 12 0 R] >>`),
+    Buffer.from(`<< /Type /Annot /Subtype /Widget /Parent 10 0 R /AS /${selectedRadio === "Approved" ? "Approved" : "Off"} /AP << /N << /Approved 14 0 R /Off 14 0 R >> >> /Rect [72 550 90 568] /P 4 0 R >>`),
+    Buffer.from(`<< /Type /Annot /Subtype /Widget /Parent 10 0 R /AS /${selectedRadio === "Rejected" ? "Rejected" : "Off"} /AP << /N << /Rejected 14 0 R /Off 14 0 R >> >> /Rect [100 550 118 568] /P 4 0 R >>`),
     Buffer.from("<< /Type /Annot /Subtype /Widget /FT /Tx /T (Hidden) /V (ignore) /F 2 /Rect [72 500 200 520] /P 4 0 R >>"),
     Buffer.from("<< /Length 0 >>\nstream\n\nendstream"),
-  ]);
+  ];
+  if (scanned) {
+    objects.push(Buffer.from("<< /Type /XObject /Subtype /Image /Width 1 /Height 1 /ColorSpace /DeviceGray /BitsPerComponent 1 /Length 1 >>\nstream\n\0\nendstream"));
+  }
+  return renderPdf(objects);
 }
 
-function xfaPdf() {
+function xfaPdf(field = false) {
+  const report = field
+    ? `<subform name="report"><draw w="100pt" h="20pt"><value><text>Revenue</text></value></draw>`
+      + `<field name="Revenue" y="20pt" w="100pt" h="20pt"><ui><textEdit/></ui><value><text>123.45</text></value></field></subform>`
+    : `<subform name="report"><draw w="100pt" h="20pt"><value><text>Revenue 123.45</text></value></draw></subform>`;
   const xml = `<?xml version="1.0"?><xdp:xdp xmlns:xdp="http://ns.adobe.com/xdp/">`
     + `<template xmlns="http://www.xfa.org/schema/xfa-template/3.3"><subform name="root" mergeMode="matchTemplate">`
     + `<pageSet><pageArea><contentArea x="0pt" w="456pt" h="789pt"/><medium stock="default" short="456pt" long="789pt"/></pageArea></pageSet>`
-    + `<subform name="report"><draw w="100pt" h="20pt"><value><text>Revenue 123.45</text></value></draw></subform>`
+    + report
     + `</subform></template><xfa:datasets xmlns:xfa="http://www.xfa.org/schema/xfa-data/1.0/"><xfa:data/></xfa:datasets></xdp:xdp>`;
   return renderPdf([
     Buffer.from("<< /Type /Catalog /Pages 2 0 R /NeedsRendering true /AcroForm 3 0 R >>"),
@@ -163,6 +181,25 @@ describe("extractFinanceReportFile", () => {
     ]);
   });
 
+  pdfIt("omits blank choices and locates the selected radio widget", async () => {
+    const blank = await extractFinanceReportFile({ fileBuffer: formPdf("blankChoice"), fileName: "blank.pdf", mimeType: "application/pdf" });
+    const radio = await extractFinanceReportFile({ fileBuffer: formPdf("radioSecond"), fileName: "radio.pdf", mimeType: "application/pdf" });
+    expect(blank.pages?.[0]?.fields?.some((field) => field.name === "Basis")).toBe(false);
+    expect(radio.pages?.[0]?.fields?.find((field) => field.name === "Status")).toEqual({
+      name: "Status", type: "radiobutton", value: "Rejected", rect: [100, 550, 118, 568],
+    });
+  });
+
+  pdfIt("rejects truncated multi-select choices and scanned form overlays", async () => {
+    for (const [input, code] of [
+      [formPdf("multiselect"), "UNSUPPORTED_PDF_FEATURE"],
+      [formPdf("scanned"), "SCANNED_PDF_UNSUPPORTED"],
+    ] as const) {
+      await expect(extractFinanceReportFile({ fileBuffer: input, fileName: "partial.pdf", mimeType: "application/pdf" }))
+        .rejects.toMatchObject({ code });
+    }
+  });
+
   pdfIt.each(["javascript", "password", "calculation", "unsupported"] as const)("rejects unsafe %s AcroForm behavior", async (mode) => {
     await expect(extractFinanceReportFile({
       fileBuffer: formPdf(mode),
@@ -185,6 +222,14 @@ describe("extractFinanceReportFile", () => {
       fileName: "xfa-report.pdf",
       mimeType: "application/pdf",
     })).resolves.toMatchObject({ pages: [{ page: 1, text: "Revenue 123.45" }] });
+  });
+
+  pdfIt("fails field-bearing pure XFA closed instead of omitting control values", async () => {
+    await expect(extractFinanceReportFile({
+      fileBuffer: xfaPdf(true),
+      fileName: "xfa-field.pdf",
+      mimeType: "application/pdf",
+    })).rejects.toMatchObject({ code: "UNSUPPORTED_PDF_FEATURE" });
   });
 
   pdfIt.each([formPdf(), xfaPdf()])("applies the cumulative text limit to structured evidence", async (fileBuffer) => {

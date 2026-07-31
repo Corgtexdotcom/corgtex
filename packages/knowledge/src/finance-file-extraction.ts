@@ -107,12 +107,12 @@ const fail = (code) => { const error = new Error(code); error.code = code; throw
     const pages = [];
     let textChars = 0;
     const fieldsByPage = Array.from({ length: document.numPages }, () => []);
-    const radioKeysByPage = Array.from({ length: document.numPages }, () => new Set());
+    const radioKeys = new Set();
+    const allowedTypes = new Set(["text", "combobox", "listbox", "checkbox", "radiobutton"]);
     for (const [fallbackName, widgets] of Object.entries(fieldObjects || {}).sort(([a], [b]) => a.localeCompare(b))) {
       for (const widget of widgets) {
         if (widget.password || (widget.actions && Object.keys(widget.actions).length)) fail("UNSUPPORTED_PDF_FEATURE");
         if (widget.hidden) continue;
-        const allowedTypes = new Set(["text", "combobox", "listbox", "checkbox", "radiobutton"]);
         if (!allowedTypes.has(widget.type)) {
           if (widget.value === undefined || widget.value === null || widget.value === "") continue;
           fail("UNSUPPORTED_PDF_FEATURE");
@@ -120,6 +120,16 @@ const fail = (code) => { const error = new Error(code); error.code = code; throw
         if (!Number.isInteger(widget.page) || widget.page < 0 || widget.page >= document.numPages) fail("MALFORMED_FILE");
         const name = typeof widget.name === "string" && widget.name ? widget.name : fallbackName;
         const value = widget.value;
+        if ((widget.type === "combobox" || widget.type === "listbox")
+          && (value === undefined || value === null || value === "")) continue;
+        if (widget.type === "listbox" && widget.multipleSelection && widget.numItems > 1) {
+          fail("UNSUPPORTED_PDF_FEATURE");
+        }
+        if (widget.type === "radiobutton") {
+          if (value === undefined || value === null || value === "" || value === "Off") continue;
+          if (typeof widget.exportValues !== "string") fail("UNSUPPORTED_PDF_FEATURE");
+          if (widget.exportValues !== value) continue;
+        }
         if (!(typeof value === "string" || typeof value === "boolean"
           || (typeof value === "number" && Number.isFinite(value))
           || (Array.isArray(value) && value.every((entry) => typeof entry === "string")))) {
@@ -132,8 +142,8 @@ const fail = (code) => { const error = new Error(code); error.code = code; throw
           rect = widget.rect;
         }
         const radioKey = JSON.stringify([name, value]);
-        if (widget.type === "radiobutton" && radioKeysByPage[widget.page].has(radioKey)) continue;
-        if (widget.type === "radiobutton") radioKeysByPage[widget.page].add(radioKey);
+        if (widget.type === "radiobutton" && radioKeys.has(radioKey)) continue;
+        if (widget.type === "radiobutton") radioKeys.add(radioKey);
         textChars += name.length + JSON.stringify(value).length;
         if (textChars > maxTextChars) fail("EXTRACTION_LIMIT_EXCEEDED");
         fieldsByPage[widget.page].push({ name, type: widget.type, value, ...(rect ? { rect } : {}) });
@@ -194,6 +204,15 @@ const fail = (code) => { const error = new Error(code); error.code = code; throw
       };
       try {
         if (document.isPureXfa) {
+          const stack = [await page.getXfa()];
+          while (stack.length) {
+            const node = stack.pop();
+            if (!node || typeof node !== "object") continue;
+            if (node.name === "input" || node.name === "textarea" || node.name === "select") {
+              fail("UNSUPPORTED_PDF_FEATURE");
+            }
+            if (Array.isArray(node.children)) stack.push(...node.children);
+          }
           consume(await page.getTextContent());
         } else {
           const reader = page.streamTextContent().getReader();
@@ -203,7 +222,7 @@ const fail = (code) => { const error = new Error(code); error.code = code; throw
             consume(chunk.value);
           }
         }
-        if (!document.isPureXfa && !text.trim() && fieldsByPage[pageNumber - 1].length === 0) {
+        if (!document.isPureXfa && !text.trim()) {
           const operators = await page.getOperatorList();
           if (operators.fnArray.some((operator) => imageOps.has(operator))) {
             fail("SCANNED_PDF_UNSUPPORTED");
