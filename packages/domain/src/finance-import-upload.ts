@@ -11,12 +11,7 @@ import { lockAndAssertTrialStorageCapacity } from "./trial-entitlements";
 export const FINANCE_REPORT_IMPORT_MAX_FILE_BYTES = 25 * 1024 * 1024;
 const STORAGE_PENDING = "FINANCE_REPORT_STORAGE_PENDING";
 const STORAGE_UNAVAILABLE = "FINANCE_REPORT_STORAGE_UNAVAILABLE";
-const EXTRACTION_RUNTIME_FAILED = "FINANCE_REPORT_EXTRACTION_FAILED";
-const RESUMABLE_FAILURE_CODES = [
-  STORAGE_PENDING,
-  STORAGE_UNAVAILABLE,
-  EXTRACTION_RUNTIME_FAILED,
-] as const;
+const RESUMABLE_FAILURE_CODES = [STORAGE_PENDING, STORAGE_UNAVAILABLE, "FINANCE_REPORT_EXTRACTION_FAILED"] as const;
 
 type FinanceImportStorage = Pick<StorageProvider, "put">;
 type FinanceFileFormat = "CSV" | "PDF" | "XLSX";
@@ -49,8 +44,7 @@ function fileEnvelope(fileName: string, mimeType: string) {
 }
 
 function resumable(batch: FinanceImportBatch) {
-  return batch.stage === "FAILED"
-    && RESUMABLE_FAILURE_CODES.some((code) => code === batch.safeErrorCode);
+  return batch.stage === "FAILED" && RESUMABLE_FAILURE_CODES.some((code) => code === batch.safeErrorCode);
 }
 
 function formatForMimeType(mimeType: string) {
@@ -122,12 +116,7 @@ async function reserveUpload(actor: Extract<AppActor, { kind: "user" }>, params:
 
 async function markStorageUnavailable(batch: FinanceImportBatch) {
   await prisma.financeImportBatch.updateMany({
-    where: {
-      id: batch.id,
-      workspaceId: batch.workspaceId,
-      stage: "FAILED",
-      safeErrorCode: { in: [...RESUMABLE_FAILURE_CODES] },
-    },
+    where: { id: batch.id, workspaceId: batch.workspaceId, stage: "FAILED", safeErrorCode: { in: [...RESUMABLE_FAILURE_CODES] } },
     data: { safeErrorCode: STORAGE_UNAVAILABLE, safeErrorMessage: "The report could not be stored. Please try again.", version: { increment: 1 } },
   }).catch(() => undefined);
 }
@@ -139,23 +128,17 @@ async function finalizeUpload(batch: FinanceImportBatch, actorUserId: string, fo
     invariant(resumable(current), 409, "FINANCE_REPORT_UPLOAD_CONFLICT", "The report upload changed. Refresh and try again.");
     const updated = await prisma.$transaction(async (tx) => {
       const result = await tx.financeImportBatch.updateMany({
-        where: {
-          id: current.id,
-          workspaceId: current.workspaceId,
-          version: current.version,
-          stage: "FAILED",
-          safeErrorCode: { in: [...RESUMABLE_FAILURE_CODES] },
-        },
-        data: {
-          stage: "UPLOADED",
-          workflowJobId: null,
-          retryCount: 0,
-          safeErrorCode: null,
-          safeErrorMessage: null,
-          version: { increment: 1 },
-        },
+        where: { id: current.id, workspaceId: current.workspaceId, version: current.version, stage: "FAILED", safeErrorCode: { in: [...RESUMABLE_FAILURE_CODES] } },
+        data: { stage: "UPLOADED", workflowJobId: null, retryCount: 0, safeErrorCode: null, safeErrorMessage: null, version: { increment: 1 } },
       });
       if (result.count !== 1) return null;
+      if (current.workflowJobId) {
+        const job = await tx.workflowJob.updateMany({
+          where: { id: current.workflowJobId, workspaceId: current.workspaceId, status: "FAILED" },
+          data: { status: "PENDING", attempts: 0, runAfter: new Date(), lockedAt: null, lockedBy: null, startedAt: null, completedAt: null, error: null },
+        });
+        invariant(job.count === 1, 409, "FINANCE_REPORT_UPLOAD_CONFLICT", "The report extraction retry changed. Refresh and try again.");
+      }
       await appendEvents(tx, [{
         workspaceId: current.workspaceId,
         type: "finance-report-import.uploaded",
@@ -170,9 +153,7 @@ async function finalizeUpload(batch: FinanceImportBatch, actorUserId: string, fo
       } });
       const finalized: FinanceImportBatch = {
         ...current,
-        stage: "UPLOADED",
-        workflowJobId: null,
-        retryCount: 0,
+        stage: "UPLOADED", workflowJobId: null, retryCount: 0,
         safeErrorCode: null,
         safeErrorMessage: null,
         version: current.version + 1,

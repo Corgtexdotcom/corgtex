@@ -49,7 +49,10 @@ const SAFE_MESSAGES: Record<FinanceFileExtractionErrorCode, string> = {
   EXTRACTION_LIMIT_EXCEEDED: "The report exceeds the supported extraction limits.",
 };
 export class FinanceFileExtractionError extends Error {
-  constructor(public readonly code: FinanceFileExtractionErrorCode) {
+  constructor(
+    public readonly code: FinanceFileExtractionErrorCode,
+    public readonly retryable = false,
+  ) {
     super(SAFE_MESSAGES[code]);
     this.name = "FinanceFileExtractionError";
   }
@@ -335,15 +338,13 @@ function runExtractionProcess<T>(params: {
         output.push(chunk);
       }
     });
-    child.on("error", (error: NodeJS.ErrnoException) => {
-      const resourceErrors = new Set(["EAGAIN", "EMFILE", "ENFILE", "ENOMEM"]);
-      const code = error.code && resourceErrors.has(error.code) ? "EXTRACTION_LIMIT_EXCEEDED" : "MALFORMED_FILE";
-      finish(() => reject(new FinanceFileExtractionError(code)));
+    child.on("error", () => {
+      finish(() => reject(new FinanceFileExtractionError("EXTRACTION_LIMIT_EXCEEDED", true)));
     });
     child.on("close", (code, signal) => {
       if (settled) return;
       if (code !== 0 || signal) {
-        finish(() => reject(new FinanceFileExtractionError("EXTRACTION_LIMIT_EXCEEDED")), false);
+        finish(() => reject(new FinanceFileExtractionError("EXTRACTION_LIMIT_EXCEEDED", true)), false);
         return;
       }
       try {

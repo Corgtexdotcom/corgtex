@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { deflateSync } from "node:zlib";
 import { describe, expect, it } from "vitest";
 import * as XLSX from "xlsx";
-import { extractFinanceReportFile } from "./finance-file-extraction";
+import { extractFinanceReportFile, FinanceFileExtractionError } from "./finance-file-extraction";
 
 type PdfPage =
   | string
@@ -149,6 +149,14 @@ function xlsx(options: {
 const pdfIt = it.runIf(process.platform === "linux");
 const xlsxIt = it.runIf(process.platform === "linux");
 describe("extractFinanceReportFile", () => {
+  it("preserves retryable infrastructure classification with a safe message", () => {
+    expect(new FinanceFileExtractionError("EXTRACTION_LIMIT_EXCEEDED", true)).toMatchObject({
+      code: "EXTRACTION_LIMIT_EXCEEDED",
+      retryable: true,
+      message: "The report exceeds the supported extraction limits.",
+    });
+  });
+
   pdfIt("extracts ordered PDF pages while retaining genuine blank pages", async () => {
     const input = pdf("Revenue|100.00", "");
     const result = await extractFinanceReportFile({ fileBuffer: input, fileName: "actuals.pdf", mimeType: "application/pdf" });

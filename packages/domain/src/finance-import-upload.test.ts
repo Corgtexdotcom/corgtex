@@ -15,6 +15,7 @@ const { prismaMock, storageMock, accessMock, capacityMock, createBatchMock } = v
     document: { create: vi.fn() },
     brainSource: { create: vi.fn() },
     financeImportBatch: { findUnique: vi.fn(), updateMany: vi.fn() },
+    workflowJob: { updateMany: vi.fn() },
     event: { createMany: vi.fn() },
     auditLog: { create: vi.fn() },
   },
@@ -58,6 +59,7 @@ describe("Finance report import upload persistence", () => {
     prismaMock.$transaction.mockImplementation((callback) => callback(prismaMock));
     prismaMock.financeImportBatch.findUnique.mockResolvedValue(null);
     prismaMock.financeImportBatch.updateMany.mockResolvedValue({ count: 1 });
+    prismaMock.workflowJob.updateMany.mockResolvedValue({ count: 1 });
     prismaMock.event.createMany.mockResolvedValue({ count: 1 });
     prismaMock.document.create.mockResolvedValue({});
     prismaMock.brainSource.create.mockResolvedValue({});
@@ -135,30 +137,21 @@ describe("Finance report import upload persistence", () => {
 
   it("requeues the same batch after a terminal extraction runtime failure", async () => {
     const failed = {
-      ...reserved,
-      stage: "FAILED",
-      safeErrorCode: "FINANCE_REPORT_EXTRACTION_FAILED",
+      ...reserved, stage: "FAILED", safeErrorCode: "FINANCE_REPORT_EXTRACTION_FAILED",
       safeErrorMessage: "The report could not be extracted safely. Please retry.",
-      workflowJobId: "job-previous",
-      retryCount: 5,
-      version: 4,
+      workflowJobId: "job-previous", retryCount: 5, version: 4,
     };
     prismaMock.financeImportBatch.findUnique.mockResolvedValue(failed);
-    await expect(upload()).resolves.toMatchObject({
-      reused: true,
-      batch: {
-        id: "batch-1",
-        stage: "UPLOADED",
-        workflowJobId: null,
-        retryCount: 0,
-        version: 5,
-      },
-    });
+    await expect(upload()).resolves.toMatchObject({ reused: true, batch: {
+      id: "batch-1", stage: "UPLOADED", workflowJobId: null, retryCount: 0, version: 5,
+    } });
     expect(prismaMock.financeImportBatch.updateMany).toHaveBeenCalledWith(expect.objectContaining({
-      where: expect.objectContaining({
-        safeErrorCode: { in: expect.arrayContaining(["FINANCE_REPORT_EXTRACTION_FAILED"]) },
-      }),
+      where: expect.objectContaining({ safeErrorCode: { in: expect.arrayContaining(["FINANCE_REPORT_EXTRACTION_FAILED"]) } }),
       data: expect.objectContaining({ workflowJobId: null, retryCount: 0 }),
+    }));
+    expect(prismaMock.workflowJob.updateMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: { id: "job-previous", workspaceId: "workspace-1", status: "FAILED" },
+      data: expect.objectContaining({ status: "PENDING", attempts: 0, completedAt: null, error: null }),
     }));
     expect(prismaMock.event.createMany).toHaveBeenCalledOnce();
     expect(createBatchMock).not.toHaveBeenCalled();
