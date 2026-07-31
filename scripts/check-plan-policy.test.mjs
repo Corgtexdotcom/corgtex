@@ -21,6 +21,7 @@ describe("check-plan size policy", () => {
     "packages/domain/src/auth.ts",
     "scripts/check-plan.mjs",
     "AGENTS.md",
+    ".github/pull_request_template.md",
     "docs/contributing/pull-requests.mdx",
   ])("forces the critical cap for protected path %s", (file) => {
     expect(sizePolicyForFiles("high", [file])).toEqual({

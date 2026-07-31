@@ -32,7 +32,7 @@ Replace this section with exactly one list item whose value is `low`,
 
 - `low` — docs, copy, styles, or tightly scoped non-security changes.
 - `standard` — normal product or domain work.
-- `high` — normal workflow, security-sensitive, or broad shared behavior that remains reviewable as one coherent change.
+- `high` — normal workflow or broad shared behavior that remains reviewable as one coherent change and does not affect a critical category.
 - `critical` — auth, permissions, cross-tenant isolation, migrations, deploy, or agent-pipeline policy.
 
 ## Out of scope

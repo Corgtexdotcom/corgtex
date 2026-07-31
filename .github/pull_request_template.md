@@ -8,7 +8,7 @@
 
 ## Risk tier
 
-- [low | standard | high]
+- [low | standard | high | critical]
 
 ## Out of scope
 

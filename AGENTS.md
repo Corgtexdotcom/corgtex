@@ -116,7 +116,7 @@ implementation code.
 4. Pick the smallest honest risk tier:
    - `low`: docs, copy, styles, or tightly scoped non-security changes. Cap: ≤ 1200 non-doc LOC and ≤ 50 files.
    - `standard`: normal product or domain work. Cap: ≤ 800 non-doc LOC and ≤ 25 files.
-   - `high`: normal workflow, security-sensitive, or broad shared behavior that remains reviewable as one coherent change. Cap: ≤ 700 non-doc LOC and ≤ 15 files.
+   - `high`: normal workflow or broad shared behavior that remains reviewable as one coherent change and does not affect a critical category. Cap: ≤ 700 non-doc LOC and ≤ 15 files.
    - `critical`: auth, permissions, cross-tenant isolation, migrations, deploy, or agent-pipeline policy. Cap: ≤ 400 non-doc LOC and ≤ 15 files.
 5. If the plan touches forbidden paths (`deploy/**`, `.github/workflows/**`, `prisma/migrations/**`, `packages/domain/src/auth*.ts`, `apps/web/lib/auth.ts`), state the justification in the plan and note that the PR will need the `forbidden-path-approved` label. Forbidden paths and agent-pipeline policy files are always evaluated against the 400-line critical cap.
 6. Push the branch and open a **draft** PR whose body is the completed public-safe plan. Do not commit local plan files. Do not mark ready-for-review.
