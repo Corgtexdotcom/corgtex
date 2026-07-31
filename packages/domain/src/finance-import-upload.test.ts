@@ -15,6 +15,7 @@ const { prismaMock, storageMock, accessMock, capacityMock, createBatchMock } = v
     document: { create: vi.fn() },
     brainSource: { create: vi.fn() },
     financeImportBatch: { findUnique: vi.fn(), updateMany: vi.fn() },
+    workflowJob: { findUnique: vi.fn(), updateMany: vi.fn() },
     event: { createMany: vi.fn() },
     auditLog: { create: vi.fn() },
   },
@@ -36,7 +37,8 @@ const reserved = {
   id: "batch-1", workspaceId: "workspace-1", uploadedByUserId: "user-1",
   stage: "FAILED", safeErrorCode: "FINANCE_REPORT_STORAGE_PENDING",
   safeErrorMessage: "The report upload is being stored.", fileHash,
-  mimeType: "text/csv", originalFilename: "report.csv", fileSizeBytes: fileBuffer.length, version: 1,
+  mimeType: "text/csv", originalFilename: "report.csv", fileSizeBytes: fileBuffer.length,
+  workflowJobId: null, retryCount: 0, version: 1,
 };
 const uploaded = { ...reserved, stage: "UPLOADED", safeErrorCode: null, safeErrorMessage: null, version: 2 };
 
@@ -57,6 +59,8 @@ describe("Finance report import upload persistence", () => {
     prismaMock.$transaction.mockImplementation((callback) => callback(prismaMock));
     prismaMock.financeImportBatch.findUnique.mockResolvedValue(null);
     prismaMock.financeImportBatch.updateMany.mockResolvedValue({ count: 1 });
+    prismaMock.workflowJob.findUnique.mockResolvedValue(null);
+    prismaMock.workflowJob.updateMany.mockResolvedValue({ count: 1 });
     prismaMock.event.createMany.mockResolvedValue({ count: 1 });
     prismaMock.document.create.mockResolvedValue({});
     prismaMock.brainSource.create.mockResolvedValue({});
@@ -132,6 +136,30 @@ describe("Finance report import upload persistence", () => {
     expect(prismaMock.auditLog.create.mock.calls[0][0].data.meta.format).toBe("CSV");
   });
 
+  it.each([
+    ["FAILED", "job-previous", "job-previous", "COMPLETED", 4],
+    ["UPLOADED", null, "job-claim", "FAILED", 2],
+    ["EXTRACTING", "job-claim", "job-claim", "FAILED", 3],
+  ] as const)("atomically recovers a %s batch with a terminal extraction job", async (stage, workflowJobId, jobId, status, version) => {
+    const batch = { ...reserved, stage, workflowJobId, version, retryCount: 5,
+      safeErrorCode: stage === "FAILED" ? "FINANCE_REPORT_EXTRACTION_FAILED" : null };
+    prismaMock.financeImportBatch.findUnique.mockResolvedValue(batch);
+    prismaMock.workflowJob.findUnique.mockResolvedValue({ id: jobId, status });
+    await expect(upload()).resolves.toMatchObject({ reused: true, batch: {
+      stage: "UPLOADED", workflowJobId: null, retryCount: 0, version: version + 1,
+    } });
+    expect(prismaMock.financeImportBatch.updateMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({ stage, workflowJobId, version }),
+      data: expect.objectContaining({ workflowJobId: null, retryCount: 0 }),
+    }));
+    expect(prismaMock.workflowJob.updateMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: { id: jobId, workspaceId: "workspace-1", status: { in: ["FAILED", "COMPLETED"] } },
+      data: expect.objectContaining({ status: "PENDING", attempts: 0, completedAt: null, error: null }),
+    }));
+    expect(prismaMock.event.createMany).toHaveBeenCalledOnce();
+    expect(createBatchMock).not.toHaveBeenCalled();
+  });
+
   it("converges on the winner found under the exact-file lock", async () => {
     prismaMock.financeImportBatch.findUnique.mockResolvedValueOnce(null).mockResolvedValueOnce(uploaded);
     await expect(upload()).resolves.toEqual({ batch: uploaded, reused: true });
@@ -139,6 +167,17 @@ describe("Finance report import upload persistence", () => {
     expect(capacityMock).not.toHaveBeenCalled();
     expect(createBatchMock).not.toHaveBeenCalled();
     expect(storageMock.put).not.toHaveBeenCalled();
+  });
+
+  it("keeps a terminal extraction job recoverable when restorage fails", async () => {
+    prismaMock.financeImportBatch.findUnique.mockResolvedValueOnce(uploaded).mockResolvedValueOnce(null);
+    prismaMock.workflowJob.findUnique.mockResolvedValue({ id: "job-claim", status: "COMPLETED" });
+    storageMock.put.mockRejectedValueOnce(new Error("provider details"));
+    await expect(upload()).rejects.toMatchObject({ code: "FINANCE_REPORT_STORAGE_UNAVAILABLE" });
+    expect(prismaMock.financeImportBatch.updateMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({ stage: "UPLOADED", workflowJobId: null, version: 2 }),
+      data: expect.objectContaining({ stage: "FAILED", safeErrorCode: "FINANCE_REPORT_STORAGE_UNAVAILABLE" }),
+    }));
   });
 
   it("keeps durable ownership and retry state when storage is unavailable", async () => {
