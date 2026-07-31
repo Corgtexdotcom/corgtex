@@ -41,6 +41,16 @@ describe("extractFinanceReportFile", () => {
     expect(result.sheets?.[0]?.cells[0]?.value).toBe(value);
   });
 
+  it("uses the same CRLF, LF, and CR record boundaries as the preflight", async () => {
+    const result = await extractFinanceReportFile({
+      fileBuffer: Buffer.from("Account,Amount\r\nRevenue,100\nCosts,40\rMargin,60"),
+      fileName: "actuals.csv",
+      mimeType: "text/csv",
+    });
+    expect(result.sheets[0]).toMatchObject({ rowCount: 4, columnCount: 2 });
+    expect(result.sheets[0]?.cells).toContainEqual({ row: 4, column: 1, type: "TEXT", value: "Margin" });
+  });
+
   it.each([
     [Buffer.alloc(0), "report.csv", "text/csv", {}, "EMPTY_FILE"],
     [Buffer.from("a,b\n1"), "report.csv", "text/csv", {}, "MALFORMED_FILE"],

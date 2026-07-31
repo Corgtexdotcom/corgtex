@@ -111,6 +111,7 @@ async function extractCsv(buffer: Buffer, limits: FinanceFileExtractionLimits) {
   const parser = input.pipe(parse({
     bom: true,
     relax_column_count: false,
+    record_delimiter: ["\r\n", "\n", "\r"],
     max_record_size: Math.max(1, (limits.maxTextChars * 3) + (limits.maxCells * 3) + 4),
   }));
   const cells: FinanceExtractedCell[] = [];
@@ -148,14 +149,14 @@ export async function extractFinanceReportFile(params: {
   mimeType: string;
   limits?: Partial<FinanceFileExtractionLimits>;
 }): Promise<FinanceFileExtraction> {
-  const fileBuffer = Buffer.from(params.fileBuffer);
   const limits = { ...DEFAULT_LIMITS };
   for (const key of Object.keys(DEFAULT_LIMITS) as Array<keyof FinanceFileExtractionLimits>) {
     const override = params.limits?.[key];
     if (override !== undefined && Number.isSafeInteger(override) && override >= 0) limits[key] = override;
   }
-  if (fileBuffer.length === 0) fail("EMPTY_FILE");
-  if (fileBuffer.length > limits.maxFileBytes) fail("FILE_TOO_LARGE");
+  if (params.fileBuffer.length === 0) fail("EMPTY_FILE");
+  if (params.fileBuffer.length > limits.maxFileBytes) fail("FILE_TOO_LARGE");
+  const fileBuffer = Buffer.from(params.fileBuffer);
   const format = detectFormat(params.fileName, params.mimeType);
   const base = {
     fileHash: createHash("sha256").update(fileBuffer).digest("hex"),
