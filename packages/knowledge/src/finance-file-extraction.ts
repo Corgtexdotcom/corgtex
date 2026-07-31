@@ -67,7 +67,7 @@ const PDF_PROCESS_MAX_OUTPUT_BYTES = 16 * 1024 * 1024;
 const PDF_PROCESS_SOURCE = String.raw`
 const fail = (code) => { const error = new Error(code); error.code = code; throw error; };
 (async () => {
-  const [moduleUrl, maxPagesValue, maxTextCharsValue] = process.argv.slice(1);
+  const [moduleUrl, cMapUrl, maxPagesValue, maxTextCharsValue] = process.argv.slice(1);
   const maxPages = Number(maxPagesValue);
   const maxTextChars = Number(maxTextCharsValue);
   const chunks = [];
@@ -78,6 +78,8 @@ const fail = (code) => { const error = new Error(code); error.code = code; throw
     .map(([, value]) => value));
   const task = getDocument({
     data: new Uint8Array(Buffer.concat(chunks)),
+    cMapPacked: true,
+    cMapUrl,
     isEvalSupported: false,
     stopAtErrors: true,
     useSystemFonts: false,
@@ -152,9 +154,13 @@ const fail = (code) => { const error = new Error(code); error.code = code; throw
 );
 `;
 function extractPdf(buffer: Buffer, limits: FinanceFileExtractionLimits) {
+  const resolveModule = createRequire(import.meta.url).resolve;
   const moduleUrl = pathToFileURL(
-    createRequire(import.meta.url).resolve("pdfjs-dist/legacy/build/pdf.mjs"),
+    resolveModule("pdfjs-dist/legacy/build/pdf.mjs"),
   ).href;
+  const cMapUrl = resolveModule("pdfjs-dist/cmaps/LICENSE")
+    .replaceAll("\\", "/")
+    .replace(/LICENSE$/, "");
   return new Promise<Array<{ page: number; text: string }>>((resolve, reject) => {
     const child = spawn(process.execPath, [
       "--max-old-space-size=128",
@@ -163,6 +169,7 @@ function extractPdf(buffer: Buffer, limits: FinanceFileExtractionLimits) {
       "-e",
       PDF_PROCESS_SOURCE,
       moduleUrl,
+      cMapUrl,
       String(limits.maxPages),
       String(limits.maxTextChars),
     ], {
@@ -176,16 +183,17 @@ function extractPdf(buffer: Buffer, limits: FinanceFileExtractionLimits) {
       if (settled) return;
       settled = true;
       clearTimeout(timeout);
-      child.removeAllListeners();
-      child.stdout.removeAllListeners();
-      child.stdin.removeAllListeners();
-      if (kill && !child.killed) child.kill("SIGKILL");
+      if (kill) {
+        child.stdin.destroy();
+        if (!child.killed) child.kill("SIGKILL");
+      }
       callback();
     };
     const timeout = setTimeout(() => {
       finish(() => reject(new FinanceFileExtractionError("EXTRACTION_LIMIT_EXCEEDED")));
     }, PDF_PROCESS_TIMEOUT_MS);
     child.stdout.on("data", (chunk: Buffer) => {
+      if (settled) return;
       outputBytes += chunk.length;
       if (outputBytes > PDF_PROCESS_MAX_OUTPUT_BYTES) {
         finish(() => reject(new FinanceFileExtractionError("EXTRACTION_LIMIT_EXCEEDED")));
@@ -193,8 +201,12 @@ function extractPdf(buffer: Buffer, limits: FinanceFileExtractionLimits) {
         output.push(chunk);
       }
     });
-    child.on("error", () => {
-      finish(() => reject(new FinanceFileExtractionError("MALFORMED_FILE")));
+    child.on("error", (error: NodeJS.ErrnoException) => {
+      const resourceErrors = new Set(["EAGAIN", "EMFILE", "ENFILE", "ENOMEM"]);
+      const code = error.code && resourceErrors.has(error.code)
+        ? "EXTRACTION_LIMIT_EXCEEDED"
+        : "MALFORMED_FILE";
+      finish(() => reject(new FinanceFileExtractionError(code)));
     });
     child.on("close", (code, signal) => {
       if (settled) return;

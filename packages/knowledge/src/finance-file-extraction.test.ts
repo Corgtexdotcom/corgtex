@@ -9,6 +9,19 @@ type PdfPage =
   | { text: string; rotate?: 90 | 270; vertical?: boolean }
   | { compressedText: string };
 
+function renderPdf(objects: Buffer[]) {
+  const chunks: Uint8Array[] = [Buffer.from("%PDF-1.4\n")];
+  const offsets: number[] = [];
+  for (const [index, object] of objects.entries()) {
+    offsets.push(chunks.reduce((total, chunk) => total + chunk.length, 0));
+    chunks.push(Buffer.from(`${index + 1} 0 obj\n`), object, Buffer.from("\nendobj\n"));
+  }
+  const xref = chunks.reduce((total, chunk) => total + chunk.length, 0);
+  const size = objects.length + 1;
+  chunks.push(Buffer.from(`xref\n0 ${size}\n0000000000 65535 f \n${offsets.map((offset) => `${String(offset).padStart(10, "0")} 00000 n `).join("\n")}\ntrailer\n<< /Size ${size} /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF`));
+  return Buffer.concat(chunks);
+}
+
 function pdf(...pages: PdfPage[]) {
   const pageIds = pages.map((_, index) => 4 + (index * 2));
   const objects: Buffer[] = [
@@ -40,16 +53,24 @@ function pdf(...pages: PdfPage[]) {
       ]),
     );
   }
-  const chunks: Uint8Array[] = [Buffer.from("%PDF-1.4\n")];
-  const offsets: number[] = [];
-  for (const [index, object] of objects.entries()) {
-    offsets.push(chunks.reduce((total, chunk) => total + chunk.length, 0));
-    chunks.push(Buffer.from(`${index + 1} 0 obj\n`), object, Buffer.from("\nendobj\n"));
-  }
-  const xref = chunks.reduce((total, chunk) => total + chunk.length, 0);
-  const size = objects.length + 1;
-  chunks.push(Buffer.from(`xref\n0 ${size}\n0000000000 65535 f \n${offsets.map((offset) => `${String(offset).padStart(10, "0")} 00000 n `).join("\n")}\ntrailer\n<< /Size ${size} /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF`));
-  return Buffer.concat(chunks);
+  return renderPdf(objects);
+}
+
+function cidFontPdf() {
+  const content = Buffer.from("BT /F1 12 Tf 72 720 Td <93FA> Tj ET");
+  return renderPdf([
+    Buffer.from("<< /Type /Catalog /Pages 2 0 R >>"),
+    Buffer.from("<< /Type /Pages /Kids [6 0 R] /Count 1 >>"),
+    Buffer.from("<< /Type /Font /Subtype /Type0 /BaseFont /HeiseiKakuGo-W5 /Encoding /90ms-RKSJ-H /DescendantFonts [4 0 R] >>"),
+    Buffer.from("<< /Type /Font /Subtype /CIDFontType2 /BaseFont /HeiseiKakuGo-W5 /CIDSystemInfo << /Registry (Adobe) /Ordering (Japan1) /Supplement 6 >> /FontDescriptor 5 0 R /CIDToGIDMap /Identity /DW 1000 >>"),
+    Buffer.from("<< /Type /FontDescriptor /FontName /HeiseiKakuGo-W5 /Flags 4 /FontBBox [0 -200 1000 900] /ItalicAngle 0 /Ascent 880 /Descent -120 /CapHeight 700 /StemV 80 >>"),
+    Buffer.from("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 1000 1000] /Resources << /Font << /F1 3 0 R >> >> /Contents 7 0 R >>"),
+    Buffer.concat([
+      Buffer.from(`<< /Length ${content.length} >>\nstream\n`),
+      content,
+      Buffer.from("\nendstream"),
+    ]),
+  ]);
 }
 
 describe("extractFinanceReportFile", () => {
@@ -69,6 +90,15 @@ describe("extractFinanceReportFile", () => {
     const textRotated = await extractFinanceReportFile({ fileBuffer: pdf({ text: "Revenue|100.00", vertical: true }), fileName: "vertical.pdf", mimeType: "application/pdf" });
     expect(pageRotated.pages?.[0]?.text).not.toContain("\n");
     expect(textRotated.pages?.[0]?.text).not.toContain("\n");
+  });
+
+  it("loads packaged predefined CMaps for valid CID-font text", async () => {
+    const result = await extractFinanceReportFile({
+      fileBuffer: cidFontPdf(),
+      fileName: "cjk-actuals.pdf",
+      mimeType: "application/pdf",
+    });
+    expect(result.pages?.[0]?.text).toBe("日");
   });
 
   it("rejects image-only pages and highly compressed over-limit text without partial output", async () => {
