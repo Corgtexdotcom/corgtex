@@ -77,7 +77,8 @@ describe("Finance report import proposal contract", () => {
       exceptionCodes: ["OTHER"] }] })],
     ["duplicate candidates", () => {
       const value = proposal();
-      value.candidates.push({ ...value.candidates[0], proposedAccountPath: ["Revenue", "Alternate"] });
+      value.candidates.push({ ...value.candidates[0], proposedAccountPath: ["Revenue", "Alternate"],
+        sourceAccountPath: ["Different"], rowKind: "DERIVED", amountCents: 999 });
       return value;
     }],
   ])("rejects unsafe output: %s", (_label, makeInvalid) => {
@@ -198,6 +199,7 @@ describe("interpretFinanceReport", () => {
     ["U.S. Dollars", "USD"],
     ["Euros", "EUR"],
     [" USD ", "USD"],
+    ["All amounts in USD", "USD"],
   ])("accepts unambiguous currency name evidence: %s", async (evidence, code) => {
     const output = proposal();
     output.report.currency = { state: "EXPLICIT", code, evidence: [{

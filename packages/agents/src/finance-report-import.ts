@@ -23,9 +23,10 @@ const CURRENCY_NAME_ALIASES: Record<string, string[]> = {
 const bounded = (maximum: number) => z.string().trim().min(1).max(maximum);
 const sourceIdentifier = (maximum: number) => z.string().min(1).max(maximum)
   .refine((value) => value.trim().length > 0, "Expected a non-blank source identifier.");
-const currencyCodesNamed = (evidence: string) => {
+const currencyCodesNamed = (evidence: string, proposedCode: string) => {
   const normalized = ` ${evidence.toUpperCase().replace(/[^A-Z0-9]+/g, " ").trim()} `;
-  const codes = new Set(normalized.trim().split(/\s+/).filter((token) => ISO_CURRENCY_CODES.has(token)));
+  const codes = new Set((evidence.match(/\b[A-Z]{3}\b/g) ?? []).filter((token) => ISO_CURRENCY_CODES.has(token)));
+  if (normalized.includes(` ${proposedCode} `)) codes.add(proposedCode);
   for (const [code, aliases] of Object.entries(CURRENCY_NAME_ALIASES)) {
     if (aliases.some((name) => normalized.includes(` ${name} `))) codes.add(code);
   }
@@ -63,7 +64,8 @@ const currencySchema = z.object({
     || (!explicit && (value.code !== null || value.evidence.length > 0))) {
     context.addIssue({ code: "custom", message: "Currency state, code, and evidence do not agree." });
   }
-  const namedCurrencies = new Set(value.evidence.flatMap((location) => [...currencyCodesNamed(location.evidence)]));
+  const namedCurrencies = new Set(value.evidence.flatMap((location) =>
+    [...currencyCodesNamed(location.evidence, value.code ?? "")]));
   if (explicit && value.code && (namedCurrencies.size !== 1 || !namedCurrencies.has(value.code))) {
     context.addIssue({ code: "custom", path: ["evidence"],
       message: "Explicit currency evidence must name one unambiguous proposed currency." });
@@ -136,9 +138,10 @@ export const financeReportImportProposalV1Schema = z.object({
       context.addIssue({ code: "custom", path: ["candidates", index, "periodEnd"],
         message: "Candidate period ends after the report period." });
     }
-    const identity = JSON.stringify([candidate.sourceLocation.page, candidate.sourceLocation.sheet,
-      candidate.sourceLocation.row, candidate.sourceLocation.column, candidate.sourceAccountPath,
-      candidate.rowKind, candidate.periodStart, candidate.periodEnd, candidate.amountCents]);
+    const sourceIdentity = candidate.sourceLocation.page !== null
+      ? ["PDF", candidate.sourceLocation.page, candidate.sourceLocation.evidence]
+      : ["SHEET", candidate.sourceLocation.sheet, candidate.sourceLocation.row, candidate.sourceLocation.column];
+    const identity = JSON.stringify([...sourceIdentity, candidate.periodStart, candidate.periodEnd]);
     if (candidateIdentities.has(identity)) {
       context.addIssue({ code: "custom", path: ["candidates", index],
         message: "Duplicate proposal candidate." });
