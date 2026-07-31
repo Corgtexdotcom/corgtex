@@ -48,6 +48,8 @@ describe("Finance report import proposal contract", () => {
     ["as-of outside period", () => ({ ...proposal(), report: { ...proposal().report, asOfDate: "2026-07-01" } })],
     ["reversed candidate period", () => ({ ...proposal(), candidates: [{ ...proposal().candidates[0],
       periodStart: "2026-07-01" }] })],
+    ["candidate outside report period", () => ({ ...proposal(), candidates: [{ ...proposal().candidates[0],
+      periodStart: "2026-05-01" }] })],
     ["fractional cents", () => ({ ...proposal(), candidates: [{ ...proposal().candidates[0], amountCents: 12.5 }] })],
     ["overflow cents", () => ({ ...proposal(), candidates: [{ ...proposal().candidates[0], amountCents: 2_147_483_648 }] })],
     ["empty mapped hierarchy", () => ({ ...proposal(), candidates: [{ ...proposal().candidates[0], proposedAccountPath: [] }] })],

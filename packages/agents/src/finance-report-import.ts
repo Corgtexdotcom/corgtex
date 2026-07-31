@@ -92,7 +92,14 @@ export const financeReportImportProposalV1Schema = z.object({
   }),
   summary: bounded(2_000),
   candidates: z.array(candidateSchema).min(1).max(1_000),
-}).strict();
+}).strict().superRefine((value, context) => {
+  value.candidates.forEach((candidate, index) => {
+    if (candidate.periodStart < value.report.periodStart || candidate.periodEnd > value.report.periodEnd) {
+      context.addIssue({ code: "custom", path: ["candidates", index, "periodEnd"],
+        message: "Candidate period is outside the report period." });
+    }
+  });
+});
 
 const profileHintSchema = z.object({
   profileId: bounded(100), version: z.number().int().positive(), layoutFingerprint: bounded(256),
