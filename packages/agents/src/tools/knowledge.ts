@@ -1,11 +1,20 @@
+import type { KnowledgeAccessDomain, KnowledgeSourceType } from "@prisma/client";
+import { resolveKnowledgeAccessDomains } from "@corgtex/domain";
 import type { ModelTool } from "@corgtex/models";
+import type { AppActor } from "@corgtex/shared";
 import { searchIndexedKnowledge } from "@corgtex/knowledge";
+
+export const INTERACTIVE_KNOWLEDGE_SOURCE_TYPES = [
+  "BRAIN_ARTICLE",
+  "DOCUMENT",
+  "MEETING",
+] satisfies KnowledgeSourceType[];
 
 export const searchBrainTool: ModelTool = {
   type: "function",
   function: {
     name: "search_brain",
-    description: "Search the Brain (vector database) for knowledge across documents, policies, meetings, and operational entities (tensions, actions, etc.). Use this for semantic search and finding context about specific topics.",
+    description: "Search accessible indexed Brain articles, documents, and meetings. Use this for semantic search and finding context about specific topics.",
     parameters: {
       type: "object",
       properties: {
@@ -17,12 +26,25 @@ export const searchBrainTool: ModelTool = {
   },
 };
 
-export async function searchBrain(workspaceId: string, query: string, limit: number = 5) {
+export async function resolveInteractiveKnowledgeAccessDomains(
+  actor: AppActor | undefined,
+  workspaceId: string,
+): Promise<KnowledgeAccessDomain[]> {
+  if (!actor) {
+    return ["WORKSPACE"];
+  }
+  return resolveKnowledgeAccessDomains(actor, workspaceId);
+}
+
+export async function searchBrain(actor: AppActor, workspaceId: string, query: string, limit: number = 5) {
   const safeLimit = Math.min(limit || 5, 10);
+  const accessDomains = await resolveInteractiveKnowledgeAccessDomains(actor, workspaceId);
   const chunks = await searchIndexedKnowledge({
     workspaceId,
     query,
     limit: safeLimit,
+    sourceTypes: INTERACTIVE_KNOWLEDGE_SOURCE_TYPES,
+    accessDomains,
   });
 
   return chunks.map(c => ({

@@ -7,7 +7,12 @@ import type { ChatMessage } from "@corgtex/models";
 import { checkCalendarAvailabilityTool, scheduleMeetingTool, checkCalendarAvailability, scheduleMeeting } from "./tools/calendar";
 import { createCorgtexScheduledMeetingTool, uploadMeetingTranscriptTool, createCorgtexScheduledMeeting, uploadMeetingTranscriptFromTool } from "./tools/meetings";
 import { getWorkspaceOverviewTool, queryTensionsTool, queryActionsTool, queryProposalsTool, queryGoalsTool, queryOrgStructureTool, getWorkspaceOverview, queryTensions, queryActions, queryProposals, queryGoals, queryOrgStructure } from "./tools/workspace";
-import { searchBrainTool, searchBrain } from "./tools/knowledge";
+import {
+  INTERACTIVE_KNOWLEDGE_SOURCE_TYPES,
+  resolveInteractiveKnowledgeAccessDomains,
+  searchBrainTool,
+  searchBrain,
+} from "./tools/knowledge";
 import { createTensionTool, updateTensionTool, createActionTool, updateActionTool, createProposalTool, createGoalTool, createTensionAction, updateTensionAction, createActionItemAction, updateActionItemAction, createProposalAction, createGoalAction } from "./tools/mutations";
 import { saveToBrainTool, saveToBrainAction } from "./tools/brain-save";
 import {
@@ -308,14 +313,19 @@ async function loadKnowledgeForConversation(params: {
 
   const sourceTypes = userMentionsSlack(params.ctx.userMessage)
     ? (["SLACK"] as KnowledgeSourceType[])
-    : undefined;
+    : INTERACTIVE_KNOWLEDGE_SOURCE_TYPES;
 
   try {
+    const accessDomains = await resolveInteractiveKnowledgeAccessDomains(
+      params.ctx.actor,
+      params.ctx.workspaceId,
+    );
     const results = await searchIndexedKnowledge({
       workspaceId: params.ctx.workspaceId,
       query,
       limit: params.limit,
       sourceTypes,
+      accessDomains,
     });
     return {
       results: Array.isArray(results) ? results : [],
@@ -340,7 +350,7 @@ async function loadKnowledgeForConversation(params: {
 
 function knowledgeSearchInstruction(search: ConversationContextUsed["knowledgeSearch"]) {
   if (!search) return null;
-  const sourceLabel = search.sourceTypes?.includes("SLACK") ? "indexed public Slack knowledge" : "indexed workspace knowledge";
+  const sourceLabel = search.sourceTypes?.includes("SLACK") ? "indexed public Slack knowledge" : "accessible indexed Brain knowledge";
   if (search.error) {
     return `Knowledge retrieval attempted against ${sourceLabel}, but it failed. Do not claim that you checked or searched that source unless you call a tool successfully in this turn. Error: ${search.error}`;
   }
@@ -355,7 +365,7 @@ const TOOL_HANDLERS: Partial<Record<string, (actor: AppActor, ctx: ConversationC
   schedule_meeting: async (actor, ctx, args) => scheduleMeeting(ctx.userId, ctx.workspaceId, args.title, args.description, args.startTime, args.endTime, args.attendeeEmails),
   create_corgtex_scheduled_meeting: async (actor, ctx, args) => createCorgtexScheduledMeeting(actor, ctx.workspaceId, args),
   upload_meeting_transcript: async (actor, ctx, args) => uploadMeetingTranscriptFromTool(actor, ctx.workspaceId, args),
-  search_brain: async (actor, ctx, args) => searchBrain(ctx.workspaceId, args.query, args.limit),
+  search_brain: async (actor, ctx, args) => searchBrain(actor, ctx.workspaceId, args.query, args.limit),
   get_workspace_overview: async (actor, ctx) => getWorkspaceOverview(ctx.workspaceId),
   query_tensions: async (actor, ctx, args) => queryTensions(ctx.workspaceId, args.status, args.assigneeId),
   query_actions: async (actor, ctx, args) => queryActions(ctx.workspaceId, args.status, args.assigneeId),
