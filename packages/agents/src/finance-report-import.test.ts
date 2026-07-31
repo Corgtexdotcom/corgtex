@@ -63,6 +63,8 @@ describe("Finance report import proposal contract", () => {
     ["empty mapped hierarchy", () => ({ ...proposal(), candidates: [{ ...proposal().candidates[0], proposedAccountPath: [] }] })],
     ["missing location", () => ({ ...proposal(), candidates: [{ ...proposal().candidates[0],
       sourceLocation: { page: null, sheet: null, row: null, column: null, evidence: "Unlocated" } }] })],
+    ["mixed source coordinates", () => ({ ...proposal(), candidates: [{ ...proposal().candidates[0],
+      sourceLocation: { page: 1, sheet: "June", row: 2, column: 3, evidence: "Unlocated" } }] })],
     ["unproven currency", () => ({ ...proposal(), report: { ...proposal().report,
       currency: { state: "EXPLICIT", code: "EUR", evidence: [] } } })],
     ["invented unresolved evidence", () => ({ ...proposal(), report: { ...proposal().report,
@@ -95,6 +97,29 @@ describe("interpretFinanceReport", () => {
     expect(request.instruction).toContain("Profile hints are non-authoritative");
     expect(request.instruction).toContain("budget-versus-actual");
     expect(JSON.parse(request.input).approvedProfileHints).toEqual([expect.objectContaining({ version: 3 })]);
+  });
+
+  it("preserves worksheet identifiers verbatim during evidence matching", async () => {
+    const output = proposal();
+    output.candidates[0].sourceLocation.sheet = " June ";
+    const model = gateway([output]);
+    const result = await interpretFinanceReport({ ...params, gateway: model.model,
+      extractedEvidence:
+        "{\"sheet\":\" June \",\"row\":2,\"column\":3,\"value\":\"Consulting revenue | 1250.00\"}",
+    });
+    expect(result.candidates[0].sourceLocation.sheet).toBe(" June ");
+    expect(model.extract).toHaveBeenCalledOnce();
+  });
+
+  it("allows a bounded excerpt from PDF page text", async () => {
+    const output = proposal();
+    output.candidates[0].sourceLocation = {
+      page: 2, sheet: null, row: null, column: null, evidence: "Consulting revenue | 1250.00",
+    };
+    const model = gateway([output]);
+    await expect(interpretFinanceReport({ ...params, gateway: model.model,
+      extractedEvidence: "{\"page\":2,\"text\":\"Revenue\\nConsulting revenue | 1250.00\\nTotal\"}",
+    })).resolves.toMatchObject({ contractVersion: 1 });
   });
 
   it.each([
@@ -191,6 +216,44 @@ describe("interpretFinanceReport", () => {
     })).resolves.toMatchObject({ contractVersion: 1 });
     expect(model.extract).toHaveBeenCalledTimes(2);
     expect(model.extract.mock.calls[1]?.[0].instruction).toContain("candidates.0.sourceLocation");
+  });
+
+  it("requires exact spreadsheet cell evidence instead of accepting fragments", async () => {
+    const fragmentClaim = proposal();
+    fragmentClaim.candidates[0].sourceLocation.evidence = "1250";
+    const model = gateway([fragmentClaim, proposal()]);
+    await expect(interpretFinanceReport({ ...params, gateway: model.model,
+      extractedEvidence:
+        "{\"sheet\":\"June\",\"row\":2,\"column\":3,\"value\":\"Consulting revenue | 1250.00\"}",
+    })).resolves.toMatchObject({ contractVersion: 1 });
+    expect(model.extract).toHaveBeenCalledTimes(2);
+  });
+
+  it("rejects profile hints that exceed aggregate mapping or character budgets", async () => {
+    const model = gateway([proposal()]);
+    const mappings = Array.from({ length: 500 }, (_, index) => ({
+      sourceLabel: `${index}-${"x".repeat(490)}`,
+      accountPath: ["Revenue"],
+    }));
+    await expect(interpretFinanceReport({ ...params, gateway: model.model, approvedProfileHints: [{
+      profileId: "oversized-profile", version: 1, layoutFingerprint: "oversized-layout",
+      approvedMappings: mappings,
+    }] })).rejects.toMatchObject({
+      issues: [expect.objectContaining({ path: ["approvedProfileHints"] })],
+    });
+
+    const tooManyMappings = Array.from({ length: 5 }, (_, profileIndex) => ({
+      profileId: `profile-${profileIndex}`, version: 1, layoutFingerprint: `layout-${profileIndex}`,
+      approvedMappings: Array.from({ length: 401 }, (_, mappingIndex) => ({
+        sourceLabel: `Label ${mappingIndex}`, accountPath: ["Revenue"],
+      })),
+    }));
+    await expect(interpretFinanceReport({ ...params, gateway: model.model,
+      approvedProfileHints: tooManyMappings,
+    })).rejects.toMatchObject({
+      issues: [expect.objectContaining({ path: ["approvedProfileHints"] })],
+    });
+    expect(model.extract).not.toHaveBeenCalled();
   });
 
   it("sanitizes terminal invalid output while preserving transient retries", async () => {

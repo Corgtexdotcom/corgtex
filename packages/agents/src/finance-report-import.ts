@@ -6,6 +6,8 @@ export const FINANCE_REPORT_IMPORT_CONTRACT_VERSION = 1 as const;
 export const FINANCE_REPORT_IMPORT_LOW_CONFIDENCE = 0.85;
 const POSTGRES_INT_MIN = -2_147_483_648;
 const POSTGRES_INT_MAX = 2_147_483_647;
+const MAX_PROFILE_HINT_MAPPINGS = 2_000;
+const MAX_PROFILE_HINT_CHARS = 200_000;
 const CURRENCY_NAME_ALIASES: Record<string, string[]> = {
   USD: ["US DOLLAR", "US DOLLARS", "U S DOLLAR", "U S DOLLARS",
     "UNITED STATES DOLLAR", "UNITED STATES DOLLARS"],
@@ -18,6 +20,8 @@ const CURRENCY_NAME_ALIASES: Record<string, string[]> = {
   CHF: ["SWISS FRANC", "SWISS FRANCS"],
 };
 const bounded = (maximum: number) => z.string().trim().min(1).max(maximum);
+const sourceIdentifier = (maximum: number) => z.string().min(1).max(maximum)
+  .refine((value) => value.trim().length > 0, "Expected a non-blank source identifier.");
 const currencyEvidenceNamesCode = (evidence: string, code: string) => {
   const normalized = ` ${evidence.toUpperCase().replace(/[^A-Z0-9]+/g, " ").trim()} `;
   return [code, ...(CURRENCY_NAME_ALIASES[code] ?? [])]
@@ -31,12 +35,14 @@ const isoDate = z.string().regex(/^\d{4}-\d{2}-\d{2}$/).refine((value) => {
 }, "Expected a valid ISO calendar date.");
 const sourceLocationSchema = z.object({
   page: z.number().int().positive().max(100_000).nullable(),
-  sheet: bounded(200).nullable(),
+  sheet: sourceIdentifier(200).nullable(),
   row: z.number().int().positive().max(1_000_000).nullable(),
   column: z.number().int().positive().max(100_000).nullable(),
   evidence: bounded(1_000),
 }).strict().superRefine((value, context) => {
-  if (value.page === null && (value.sheet === null || value.row === null)) {
+  if (value.page !== null && (value.sheet !== null || value.row !== null || value.column !== null)) {
+    context.addIssue({ code: "custom", message: "PDF and spreadsheet source coordinates cannot be mixed." });
+  } else if (value.page === null && (value.sheet === null || value.row === null)) {
     context.addIssue({ code: "custom", message: "Source evidence requires a page or sheet and row." });
   }
   if (value.column !== null && value.row === null) {
@@ -145,7 +151,14 @@ const profileHintSchema = z.object({
 const inputSchema = z.object({
   fileName: bounded(255), mimeType: bounded(200), extractedEvidence: z.string().min(1).max(2_000_000),
   approvedProfileHints: z.array(profileHintSchema).max(20),
-}).strict();
+}).strict().superRefine((value, context) => {
+  const mappingCount = value.approvedProfileHints.reduce((count, hint) => count + hint.approvedMappings.length, 0);
+  if (mappingCount > MAX_PROFILE_HINT_MAPPINGS
+    || JSON.stringify(value.approvedProfileHints).length > MAX_PROFILE_HINT_CHARS) {
+    context.addIssue({ code: "custom", path: ["approvedProfileHints"],
+      message: "Approved profile hints exceed the aggregate request budget." });
+  }
+});
 export type FinanceReportImportProposalV1 = z.infer<typeof financeReportImportProposalV1Schema>;
 export type FinanceReportImportProfileHint = z.infer<typeof profileHintSchema>;
 type ExtractionGateway = Pick<ModelGateway, "extract">;
@@ -233,7 +246,8 @@ function locationMatches(index: EvidenceIndex, location: SourceLocation) {
     : location.column === null
       ? evidenceKey("row", location.sheet!, location.row!)
       : evidenceKey("cell", location.sheet!, location.row!, location.column);
-  return index.get(key)?.some((sourceText) => sourceText.includes(location.evidence)) ?? false;
+  return index.get(key)?.some((sourceText) => location.page !== null
+    ? sourceText.includes(location.evidence) : sourceText === location.evidence) ?? false;
 }
 function unmatchedEvidencePaths(proposal: FinanceReportImportProposalV1, extractedEvidence: string) {
   const evidenceIndex = buildEvidenceIndex(extractedEvidence);
