@@ -183,7 +183,7 @@ describe("knowledge retrieval cache", () => {
     expect(modelGatewayMock.rerank).toHaveBeenCalledTimes(1);
   });
 
-  it("partitions grounded-answer caches by access domain", async () => {
+  it("partitions grounded-answer caches by access domain and source type", async () => {
     prismaMock.knowledgeChunk.findMany.mockResolvedValue([
       {
         id: "chunk-answer-domain",
@@ -206,10 +206,16 @@ describe("knowledge retrieval cache", () => {
       question: "Who reviews finance approvals?",
       accessDomains: ["WORKSPACE", "FINANCE"],
     });
+    await answerKnowledgeQuestion({
+      workspaceId: "ws-1",
+      question: "Who reviews finance approvals?",
+      accessDomains: ["WORKSPACE", "FINANCE"],
+      sourceTypes: ["DOCUMENT"],
+    });
 
-    expect(modelGatewayMock.chat).toHaveBeenCalledTimes(2);
-    expect(modelGatewayMock.embed).toHaveBeenCalledTimes(2);
-    expect(modelGatewayMock.rerank).toHaveBeenCalledTimes(2);
+    expect(modelGatewayMock.chat).toHaveBeenCalledTimes(3);
+    expect(modelGatewayMock.embed).toHaveBeenCalledTimes(3);
+    expect(modelGatewayMock.rerank).toHaveBeenCalledTimes(3);
   });
 
   it("returns no results or citations for an explicitly empty domain set", async () => {
@@ -261,7 +267,7 @@ describe("knowledge retrieval cache", () => {
     expect(modelGatewayMock.rerank).toHaveBeenCalledTimes(2);
   });
 
-  it("keeps the Postgres candidate window broad when source types are filtered", async () => {
+  it("keeps a 500-chunk Postgres candidate window per requested source type", async () => {
     prismaMock.knowledgeChunk.findMany.mockResolvedValue([
       {
         id: "chunk-brain",
@@ -278,16 +284,15 @@ describe("knowledge retrieval cache", () => {
     await searchIndexedKnowledge({
       workspaceId: "ws-1",
       query: "deployment runbooks",
-      sourceTypes: ["BRAIN_ARTICLE"],
+      sourceTypes: ["BRAIN_ARTICLE", "DOCUMENT", "MEETING"],
       limit: 3,
     });
 
-    expect(prismaMock.knowledgeChunk.findMany).toHaveBeenNthCalledWith(1, expect.objectContaining({
-      where: expect.objectContaining({
-        sourceType: { in: ["BRAIN_ARTICLE"] },
-      }),
-      take: 500,
-    }));
+    expect(prismaMock.knowledgeChunk.findMany.mock.calls.slice(0, 3).map(([query]) => query))
+      .toEqual(["BRAIN_ARTICLE", "DOCUMENT", "MEETING"].map((sourceType) => expect.objectContaining({
+        where: expect.objectContaining({ sourceType }),
+        take: 500,
+      })));
   });
 
   it("invalidates cached retrieval when a source is resynced", async () => {

@@ -73,6 +73,7 @@ describe("GET /api/gpt/v1/search", () => {
       query: "forecast",
       limit: 7,
       accessDomains: ["WORKSPACE", "FINANCE"],
+      sourceTypes: ["BRAIN_ARTICLE", "DOCUMENT", "MEETING"],
     });
   });
 

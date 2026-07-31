@@ -1,11 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const {
-  handleRouteError,
-  resolveKnowledgeAccessDomains,
-  resolveRequestActor,
-  searchIndexedKnowledge,
-} = vi.hoisted(() => ({
+const { handleRouteError, resolveKnowledgeAccessDomains, resolveRequestActor, searchIndexedKnowledge } = vi.hoisted(() => ({
   handleRouteError: vi.fn(),
   resolveKnowledgeAccessDomains: vi.fn(),
   resolveRequestActor: vi.fn(),
@@ -13,40 +8,18 @@ const {
 }));
 
 class MockAppError extends Error {
-  constructor(
-    readonly status: number,
-    readonly code: string,
-    message: string,
-  ) {
+  constructor(readonly status: number, readonly code: string, message: string) {
     super(message);
   }
 }
 
-vi.mock("@corgtex/domain", () => ({
-  AppError: MockAppError,
-  resolveKnowledgeAccessDomains,
-}));
+vi.mock("@corgtex/domain", () => ({ AppError: MockAppError, resolveKnowledgeAccessDomains }));
+vi.mock("@corgtex/knowledge", () => ({ searchIndexedKnowledge }));
+vi.mock("@/lib/auth", () => ({ resolveRequestActor }));
+vi.mock("@/lib/http", () => ({ handleRouteError }));
 
-vi.mock("@corgtex/knowledge", () => ({
-  searchIndexedKnowledge,
-}));
-
-vi.mock("@/lib/auth", () => ({
-  resolveRequestActor,
-}));
-
-vi.mock("@/lib/http", () => ({
-  handleRouteError,
-}));
-
-const actor = {
-  kind: "user",
-  user: { id: "user-1" },
-};
-
-function context() {
-  return { params: Promise.resolve({ workspaceId: "workspace-1" }) };
-}
+const actor = { kind: "user", user: { id: "user-1" } };
+const context = () => ({ params: Promise.resolve({ workspaceId: "workspace-1" }) });
 
 describe("GET /api/workspaces/[workspaceId]/brain/search", () => {
   beforeEach(() => {
@@ -61,7 +34,7 @@ describe("GET /api/workspaces/[workspaceId]/brain/search", () => {
     });
   });
 
-  it("passes Finance-authorized actor domains to all-source Brain search", async () => {
+  it("passes Finance-authorized actor domains to privacy-safe Brain search", async () => {
     resolveKnowledgeAccessDomains.mockResolvedValueOnce(["WORKSPACE", "FINANCE"]);
     const { GET } = await import("./route");
 
@@ -77,6 +50,7 @@ describe("GET /api/workspaces/[workspaceId]/brain/search", () => {
       query: "forecast",
       limit: 12,
       accessDomains: ["WORKSPACE", "FINANCE"],
+      sourceTypes: ["BRAIN_ARTICLE", "DOCUMENT", "MEETING"],
     });
   });
 

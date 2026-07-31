@@ -22,6 +22,7 @@ export async function GET(request: NextRequest) {
       query,
       limit,
       accessDomains,
+      sourceTypes: ["BRAIN_ARTICLE", "DOCUMENT", "MEETING"],
     });
 
     return NextResponse.json({ items: results });

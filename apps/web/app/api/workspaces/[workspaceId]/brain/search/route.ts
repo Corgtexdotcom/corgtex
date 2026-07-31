@@ -21,6 +21,7 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
       query,
       limit,
       accessDomains,
+      sourceTypes: ["BRAIN_ARTICLE", "DOCUMENT", "MEETING"],
     });
     return NextResponse.json({ results });
   } catch (error) {

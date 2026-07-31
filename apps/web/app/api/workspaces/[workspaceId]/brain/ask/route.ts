@@ -21,6 +21,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
       question,
       limit,
       accessDomains,
+      sourceTypes: ["BRAIN_ARTICLE", "DOCUMENT", "MEETING"],
     });
     return NextResponse.json(result);
   } catch (error) {

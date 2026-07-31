@@ -1,11 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const {
-  answerKnowledgeQuestion,
-  handleRouteError,
-  resolveKnowledgeAccessDomains,
-  resolveRequestActor,
-} = vi.hoisted(() => ({
+const { answerKnowledgeQuestion, handleRouteError, resolveKnowledgeAccessDomains, resolveRequestActor } = vi.hoisted(() => ({
   answerKnowledgeQuestion: vi.fn(),
   handleRouteError: vi.fn(),
   resolveKnowledgeAccessDomains: vi.fn(),
@@ -13,40 +8,18 @@ const {
 }));
 
 class MockAppError extends Error {
-  constructor(
-    readonly status: number,
-    readonly code: string,
-    message: string,
-  ) {
+  constructor(readonly status: number, readonly code: string, message: string) {
     super(message);
   }
 }
 
-vi.mock("@corgtex/domain", () => ({
-  AppError: MockAppError,
-  resolveKnowledgeAccessDomains,
-}));
+vi.mock("@corgtex/domain", () => ({ AppError: MockAppError, resolveKnowledgeAccessDomains }));
+vi.mock("@corgtex/knowledge", () => ({ answerKnowledgeQuestion }));
+vi.mock("@/lib/auth", () => ({ resolveRequestActor }));
+vi.mock("@/lib/http", () => ({ handleRouteError }));
 
-vi.mock("@corgtex/knowledge", () => ({
-  answerKnowledgeQuestion,
-}));
-
-vi.mock("@/lib/auth", () => ({
-  resolveRequestActor,
-}));
-
-vi.mock("@/lib/http", () => ({
-  handleRouteError,
-}));
-
-const actor = {
-  kind: "user",
-  user: { id: "user-1" },
-};
-
-function context() {
-  return { params: Promise.resolve({ workspaceId: "workspace-1" }) };
-}
+const actor = { kind: "user", user: { id: "user-1" } };
+const context = () => ({ params: Promise.resolve({ workspaceId: "workspace-1" }) });
 
 function request(body: Record<string, unknown>) {
   return new Request("http://localhost/api/workspaces/workspace-1/brain/ask", {
@@ -85,6 +58,7 @@ describe("POST /api/workspaces/[workspaceId]/brain/ask", () => {
       question: "What changed in the forecast?",
       limit: 6,
       accessDomains: ["WORKSPACE", "FINANCE"],
+      sourceTypes: ["BRAIN_ARTICLE", "DOCUMENT", "MEETING"],
     });
   });
 

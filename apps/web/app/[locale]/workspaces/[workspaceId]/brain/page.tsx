@@ -32,12 +32,14 @@ export default async function BrainPage({
   const { workspaceId } = await params;
   const actor = await requirePageActor();
   const membership = await requireWorkspaceMembership({ actor, workspaceId });
-  const accessDomains = await resolveKnowledgeAccessDomains(actor, workspaceId);
   const t = await getTranslations("brain");
   const resolvedSearch = searchParams ? await searchParams : {};
   const normalizedSearch = normalizeBrainIndexSearch(resolvedSearch);
   const provisionalQuery = normalizedSearch.query;
   const provisionalQuestion = normalizedSearch.question;
+  const accessDomains = provisionalQuery.trim() || provisionalQuestion.trim()
+    ? await resolveKnowledgeAccessDomains(actor, workspaceId)
+    : [];
 
   const [{ items: articles }, articleTypeCounts, status, searchResults, answer, allMeetings, allDocuments] = await Promise.all([
     listArticles(actor, {
@@ -48,10 +50,10 @@ export default async function BrainPage({
     listBrainArticleTypeCounts({ workspaceId, actor, membership }),
     getBrainStatus(actor, { workspaceId }),
     provisionalQuery.trim()
-      ? searchIndexedKnowledge({ workspaceId, query: provisionalQuery, limit: 12, accessDomains })
+      ? searchIndexedKnowledge({ workspaceId, query: provisionalQuery, limit: 12, accessDomains, sourceTypes: ["BRAIN_ARTICLE", "DOCUMENT", "MEETING"] })
       : Promise.resolve([]),
     provisionalQuestion.trim()
-      ? answerKnowledgeQuestion({ workspaceId, question: provisionalQuestion, limit: 4, accessDomains })
+      ? answerKnowledgeQuestion({ workspaceId, question: provisionalQuestion, limit: 4, accessDomains, sourceTypes: ["BRAIN_ARTICLE", "DOCUMENT", "MEETING"] })
       : Promise.resolve(null),
     listMeetings(workspaceId, { status: "COMPLETED" }),
     listDocuments(actor, workspaceId),
