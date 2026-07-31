@@ -21,6 +21,7 @@ describe("check-plan size policy", () => {
     "packages/domain/src/auth.ts",
     "scripts/check-plan.mjs",
     "AGENTS.md",
+    ".codex/ops/reviewer.md",
     ".github/pull_request_template.md",
     "docs/contributing/pull-requests.mdx",
   ])("forces the critical cap for protected path %s", (file) => {

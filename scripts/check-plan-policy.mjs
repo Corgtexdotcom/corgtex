@@ -17,6 +17,7 @@ const PIPELINE_POLICY_PATHS = [
   /^AGENTS\.md$/,
   /^\.agents\/plan-template\.md$/,
   /^\.codex\/review\.md$/,
+  /^\.codex\/ops\/.*\.md$/,
   /^\.github\/pull_request_template\.md$/,
   /^docs\/contributing\/agent-pipeline\.mdx$/,
   /^docs\/contributing\/pull-requests\.mdx$/,
