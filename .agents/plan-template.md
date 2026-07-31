@@ -28,11 +28,12 @@ concrete user-visible outcome or a concrete engineering invariant.
 ## Risk tier
 
 Replace this section with exactly one list item whose value is `low`,
-`standard`, or `high`. Guidance:
+`standard`, `high`, or `critical`. Guidance:
 
 - `low` — docs, copy, styles, or tightly scoped non-security changes.
 - `standard` — normal product or domain work.
-- `high` — auth, permissions, migrations, deploy, workflows, security-sensitive logic, or broad shared behavior.
+- `high` — normal workflow, security-sensitive, or broad shared behavior that remains reviewable as one coherent change.
+- `critical` — auth, permissions, cross-tenant isolation, migrations, deploy, or agent-pipeline policy.
 
 ## Out of scope
 

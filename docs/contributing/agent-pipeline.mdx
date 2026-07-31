@@ -78,10 +78,10 @@ Executor re-enters the fix loop).
 Mechanical, CI-enforced:
 
 - **File allowlist:** changed files ⊆ plan's "Files to touch".
-- **Risk tiers:** `low` is ≤ 1200 non-doc LOC and ≤ 50 files; `standard` is ≤ 800 non-doc LOC and ≤ 25 files; `high` is ≤ 400 non-doc LOC and ≤ 15 files.
+- **Risk tiers:** `low` is ≤ 1200 non-doc LOC and ≤ 50 files; `standard` is ≤ 800 non-doc LOC and ≤ 25 files; `high` is ≤ 700 non-doc LOC and ≤ 15 files; `critical` is ≤ 400 non-doc LOC and ≤ 15 files.
 - **Size override:** use `large-change-approved` only when the PR exceeds the selected risk-tier cap, with justification in the plan.
 - **Forbidden paths:** `deploy/**`, `.github/workflows/**`, `prisma/migrations/**`, `packages/domain/src/auth*.ts`, `apps/web/lib/auth.ts`. Require `forbidden-path-approved` label plus justification.
-- **Forbidden-path risk:** forbidden-path changes are evaluated against the high-risk cap unless `large-change-approved` is present.
+- **Critical-cap enforcement:** forbidden-path and agent-pipeline policy changes are evaluated against the critical cap unless `large-change-approved` is present. Use the critical tier for auth, permissions, cross-tenant isolation, migrations, and deploy work even when no forbidden-path pattern matches.
 
 ## Rollback
 

@@ -33,8 +33,9 @@ Reject on **any** of these:
 5. **Diff exceeds risk-tier caps** without the `large-change-approved` label:
    - `low`: > 1200 non-doc LOC or > 50 files.
    - `standard`: > 800 non-doc LOC or > 25 files.
-   - `high`: > 400 non-doc LOC or > 15 files.
-   - Forbidden-path changes use the high-risk cap unless `large-change-approved` is present.
+   - `high`: > 700 non-doc LOC or > 15 files.
+   - `critical`: > 400 non-doc LOC or > 15 files.
+   - Forbidden-path and agent-pipeline policy changes use the critical cap unless `large-change-approved` is present.
 6. **Secrets** — gitleaks red, or any `.env` / `.env.*` file added / modified, or hardcoded credentials in the diff.
    Also reject if the PR-body plan itself contains private keys, API tokens, passwords, raw credentials, secret values, or customer-private facts.
 7. **Forbidden commands / patterns** in the diff:
