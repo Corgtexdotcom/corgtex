@@ -193,10 +193,14 @@ export async function assertTrialMemberCapacity(workspaceId: string) {
   invariant(activeMembers < trial.memberLimit, 403, "TRIAL_MEMBER_LIMIT_EXCEEDED", "Trial member limit exceeded.");
 }
 
-export async function assertTrialStorageCapacity(workspaceId: string, bytesToAdd: number) {
+export async function assertTrialStorageCapacity(
+  workspaceId: string,
+  bytesToAdd: number,
+  db: Pick<Prisma.TransactionClient, "document" | "procurementTrial"> = prisma,
+) {
   if (!Number.isFinite(bytesToAdd) || bytesToAdd <= 0) return;
 
-  const trials = procurementTrialDelegate();
+  const trials = db.procurementTrial;
   if (!trials) return;
 
   const trial = await trials.findUnique({
@@ -215,7 +219,7 @@ export async function assertTrialStorageCapacity(workspaceId: string, bytesToAdd
   if (!trial) return;
   assertActiveTrial(trial);
 
-  const documents = await prisma.document.findMany({
+  const documents = await db.document.findMany({
     where: { workspaceId },
     select: { metadata: true },
   });

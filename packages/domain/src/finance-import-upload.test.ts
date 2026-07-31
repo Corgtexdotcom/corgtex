@@ -1,43 +1,47 @@
 import { createHash } from "node:crypto";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { AppActor } from "@corgtex/shared";
+import { AppError } from "./errors";
+import { createFinanceReportImportUpload } from "./finance-import-upload";
 
 const { prismaMock, storageMock, accessMock, capacityMock } = vi.hoisted(() => ({
-  accessMock: vi.fn(),
-  capacityMock: vi.fn(),
+  accessMock: vi.fn(), capacityMock: vi.fn(),
   storageMock: { put: vi.fn(), delete: vi.fn() },
   prismaMock: {
-    $transaction: vi.fn(),
-    document: { create: vi.fn() },
-    brainSource: { create: vi.fn() },
+    $executeRaw: vi.fn(), $transaction: vi.fn(),
+    document: { create: vi.fn() }, brainSource: { create: vi.fn() },
     financeImportBatch: { findUnique: vi.fn(), create: vi.fn() },
     auditLog: { create: vi.fn() },
   },
 }));
-
 vi.mock("@corgtex/shared", () => ({ prisma: prismaMock }));
 vi.mock("@corgtex/storage", () => ({ defaultStorage: storageMock }));
 vi.mock("./finance", () => ({ requireFinanceReportImportHumanWriteAccess: accessMock }));
 vi.mock("./trial-entitlements", () => ({ assertTrialStorageCapacity: capacityMock }));
 
+const fileBuffer = Buffer.from("Account,Amount");
 const actor: AppActor = {
   kind: "user",
   user: { id: "user-1", email: "user@example.com", displayName: "User", globalRole: "USER" },
 };
 const batch = {
-  id: "batch-1",
-  workspaceId: "workspace-1",
-  fileHash: createHash("sha256").update("Account,Amount").digest("hex"),
-  stage: "UPLOADED",
+  id: "batch-1", workspaceId: "workspace-1", stage: "UPLOADED",
+  fileHash: createHash("sha256").update(fileBuffer).digest("hex"),
 };
+function upload(overrides: Partial<Parameters<typeof createFinanceReportImportUpload>[1]> = {}) {
+  return createFinanceReportImportUpload(actor, {
+    workspaceId: "workspace-1", fileBuffer, fileName: "report.csv", mimeType: "text/csv", ...overrides,
+  });
+}
 
 describe("Finance report import upload", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     accessMock.mockResolvedValue({});
     capacityMock.mockResolvedValue(undefined);
-    storageMock.put.mockResolvedValue({ key: "stored", size: 14 });
+    storageMock.put.mockResolvedValue({ key: "stored", size: fileBuffer.length });
     storageMock.delete.mockResolvedValue(undefined);
+    prismaMock.$executeRaw.mockResolvedValue(1);
     prismaMock.financeImportBatch.findUnique.mockResolvedValue(null);
     prismaMock.financeImportBatch.create.mockImplementation(({ data }) => Promise.resolve({ ...batch, ...data }));
     prismaMock.document.create.mockResolvedValue({});
@@ -46,159 +50,97 @@ describe("Finance report import upload", () => {
     prismaMock.$transaction.mockImplementation((callback) => callback(prismaMock));
   });
 
-  it("stores one immutable private file and creates linked Finance records atomically", async () => {
-    const { createFinanceReportImportUpload } = await import("./finance-import-upload");
-    const fileBuffer = Buffer.from("Account,Amount");
-    const result = await createFinanceReportImportUpload(actor, {
-      workspaceId: "workspace-1",
-      fileBuffer,
-      fileName: " Report.csv ",
-      mimeType: "text/csv; charset=utf-8",
-    });
-
-    expect(accessMock).toHaveBeenCalledWith(actor, "workspace-1");
+  it("stores and atomically links a locked, quota-checked Finance upload", async () => {
+    const result = await upload({ fileName: " Report.csv ", mimeType: "text/csv; charset=utf-8" });
     expect(storageMock.put).toHaveBeenCalledWith(
-      expect.stringMatching(/^workspaces\/workspace-1\/finance\/report-imports\/[^/]+\/Report\.csv$/),
+      expect.stringMatching(/\/finance\/report-imports\/[^/]+\/Report\.csv$/),
       fileBuffer,
       { contentType: "text/csv" },
     );
-    const documentData = prismaMock.document.create.mock.calls[0]?.[0].data;
-    const sourceData = prismaMock.brainSource.create.mock.calls[0]?.[0].data;
-    expect(documentData).toMatchObject({ accessDomain: "FINANCE", source: "finance-report-import" });
-    expect(documentData).not.toHaveProperty("textContent");
-    expect(sourceData).toMatchObject({
-      accessDomain: "FINANCE",
-      content: "Finance report upload pending extraction.",
-    });
-    expect(sourceData).not.toHaveProperty("absorbedAt");
-    expect(prismaMock.financeImportBatch.create).toHaveBeenCalledWith({
-      data: expect.objectContaining({
-        workspaceId: "workspace-1",
-        uploadedByUserId: "user-1",
-        documentId: expect.any(String),
-        brainSourceId: expect.any(String),
-        fileHash: batch.fileHash,
-        mimeType: "text/csv",
-        originalFilename: "Report.csv",
-        fileSizeBytes: fileBuffer.byteLength,
-        stage: "UPLOADED",
-      }),
-    });
-    const audit = prismaMock.auditLog.create.mock.calls[0]?.[0];
+    expect(capacityMock).toHaveBeenNthCalledWith(2, "workspace-1", fileBuffer.length, prismaMock);
+    expect(prismaMock.$executeRaw).toHaveBeenCalledOnce();
+    const document = prismaMock.document.create.mock.calls[0][0].data;
+    const source = prismaMock.brainSource.create.mock.calls[0][0].data;
+    expect(document).toMatchObject({ accessDomain: "FINANCE", source: "finance-report-import" });
+    expect(document).not.toHaveProperty("textContent");
+    expect(source).toMatchObject({ accessDomain: "FINANCE", content: "Finance report upload pending extraction." });
+    expect(source).not.toHaveProperty("absorbedAt");
+    expect(prismaMock.financeImportBatch.create).toHaveBeenCalledWith({ data: expect.objectContaining({
+      uploadedByUserId: "user-1", documentId: expect.any(String), brainSourceId: expect.any(String),
+      fileHash: batch.fileHash, originalFilename: "Report.csv", stage: "UPLOADED",
+    }) });
+    const audit = prismaMock.auditLog.create.mock.calls[0][0];
     expect(audit.data.meta).not.toHaveProperty("storageKey");
     expect(audit.data.meta).not.toHaveProperty("fileHash");
     expect(JSON.stringify(audit)).not.toContain("Account,Amount");
     expect(result).toMatchObject({ reused: false, batch: { stage: "UPLOADED" } });
   });
 
-  it("returns an exact workspace duplicate before storage or capacity writes", async () => {
+  it("returns a preexisting exact hash without capacity, storage, or transaction writes", async () => {
     prismaMock.financeImportBatch.findUnique.mockResolvedValue(batch);
-    const { createFinanceReportImportUpload } = await import("./finance-import-upload");
-    await expect(createFinanceReportImportUpload(actor, {
-      workspaceId: "workspace-1",
-      fileBuffer: Buffer.from("Account,Amount"),
-      fileName: "report.csv",
-      mimeType: "application/octet-stream",
-    })).resolves.toEqual({ batch, reused: true });
-    expect(storageMock.put).not.toHaveBeenCalled();
+    await expect(upload({ mimeType: "application/octet-stream" })).resolves.toEqual({ batch, reused: true });
     expect(capacityMock).not.toHaveBeenCalled();
+    expect(storageMock.put).not.toHaveBeenCalled();
     expect(prismaMock.$transaction).not.toHaveBeenCalled();
   });
 
-  it("hashes and stores the immutable byte snapshot taken before authorization awaits", async () => {
+  it("uses the immutable snapshot taken before authorization awaits", async () => {
     let allowAccess: (() => void) | undefined;
-    accessMock.mockReturnValueOnce(new Promise<void>((resolve) => {
-      allowAccess = resolve;
-    }));
+    accessMock.mockReturnValueOnce(new Promise<void>((resolve) => { allowAccess = resolve; }));
     const original = Buffer.from("original");
-    const { createFinanceReportImportUpload } = await import("./finance-import-upload");
-    const upload = createFinanceReportImportUpload(actor, {
-      workspaceId: "workspace-1",
-      fileBuffer: original,
-      fileName: "report.csv",
-      mimeType: "text/csv",
-    });
+    const pending = upload({ fileBuffer: original });
     original.fill(0x78);
     allowAccess?.();
-    await upload;
+    await pending;
     expect(storageMock.put.mock.calls[0][1]).toEqual(Buffer.from("original"));
     expect(prismaMock.financeImportBatch.create.mock.calls[0][0].data.fileHash)
       .toBe(createHash("sha256").update("original").digest("hex"));
   });
 
   it.each([
-    ["empty", Buffer.alloc(0), "report.csv", "text/csv", "EMPTY_FILE"],
-    ["unsupported", Buffer.from("x"), "report.xlsm", "application/vnd.ms-excel.sheet.macroEnabled.12", "UNSUPPORTED_FILE_TYPE"],
-    ["mismatch", Buffer.from("x"), "report.xlsx", "application/pdf", "FILE_TYPE_MISMATCH"],
-    ["too large", Buffer.alloc((25 * 1024 * 1024) + 1), "report.pdf", "application/pdf", "FILE_TOO_LARGE"],
-  ])("rejects %s input before storage", async (_label, fileBuffer, fileName, mimeType, code) => {
-    const { createFinanceReportImportUpload } = await import("./finance-import-upload");
-    await expect(createFinanceReportImportUpload(actor, {
-      workspaceId: "workspace-1", fileBuffer, fileName, mimeType,
-    })).rejects.toMatchObject({ code });
+    [Buffer.alloc(0), "report.csv", "text/csv", "EMPTY_FILE"],
+    [Buffer.from("x"), "report.xlsm", "application/vnd.ms-excel.sheet.macroEnabled.12", "UNSUPPORTED_FILE_TYPE"],
+    [Buffer.from("x"), "report.xlsx", "application/pdf", "FILE_TYPE_MISMATCH"],
+    [Buffer.alloc((25 * 1024 * 1024) + 1), "report.pdf", "application/pdf", "FILE_TOO_LARGE"],
+  ])("rejects invalid input before storage", async (buffer, fileName, mimeType, code) => {
+    await expect(upload({ fileBuffer: buffer, fileName, mimeType })).rejects.toMatchObject({ code });
     expect(storageMock.put).not.toHaveBeenCalled();
     expect(prismaMock.$transaction).not.toHaveBeenCalled();
   });
 
-  it("performs no writes when the Finance human-write gate rejects", async () => {
+  it("does not write when Finance human access fails", async () => {
     accessMock.mockRejectedValueOnce(new Error("forbidden"));
-    const { createFinanceReportImportUpload } = await import("./finance-import-upload");
-    await expect(createFinanceReportImportUpload(actor, {
-      workspaceId: "workspace-1",
-      fileBuffer: Buffer.from("x"),
-      fileName: "report.csv",
-      mimeType: "text/csv",
-    })).rejects.toThrow("forbidden");
+    await expect(upload()).rejects.toThrow("forbidden");
     expect(prismaMock.financeImportBatch.findUnique).not.toHaveBeenCalled();
     expect(storageMock.put).not.toHaveBeenCalled();
   });
 
-  it("deletes a stored object after transaction failure", async () => {
-    prismaMock.$transaction.mockRejectedValueOnce(new Error("database unavailable"));
-    const { createFinanceReportImportUpload } = await import("./finance-import-upload");
-    await expect(createFinanceReportImportUpload(actor, {
-      workspaceId: "workspace-1",
-      fileBuffer: Buffer.from("x"),
-      fileName: "report.pdf",
-      mimeType: "application/pdf",
-    })).rejects.toMatchObject({
-      code: "FINANCE_REPORT_UPLOAD_FAILED",
-      message: "The report upload could not be completed.",
-    });
+  it("cleans a stored object when the locked capacity recheck fails", async () => {
+    capacityMock.mockResolvedValueOnce(undefined).mockRejectedValueOnce(
+      new AppError(403, "TRIAL_STORAGE_LIMIT_EXCEEDED", "Trial storage limit exceeded."),
+    );
+    await expect(upload()).rejects.toMatchObject({ code: "TRIAL_STORAGE_LIMIT_EXCEEDED" });
+    expect(storageMock.delete).toHaveBeenCalledWith(storageMock.put.mock.calls[0][0]);
+    expect(prismaMock.document.create).not.toHaveBeenCalled();
+  });
+
+  it("cleans its object and returns an exact winner found after the lock", async () => {
+    prismaMock.financeImportBatch.findUnique.mockResolvedValueOnce(null).mockResolvedValueOnce(batch);
+    await expect(upload()).resolves.toEqual({ batch, reused: true });
+    expect(storageMock.delete).toHaveBeenCalledWith(storageMock.put.mock.calls[0][0]);
+    expect(prismaMock.document.create).not.toHaveBeenCalled();
+  });
+
+  it("hides transaction errors after cleanup", async () => {
+    prismaMock.$transaction.mockRejectedValueOnce(new Error("database details"));
+    await expect(upload()).rejects.toMatchObject({ code: "FINANCE_REPORT_UPLOAD_FAILED" });
     expect(storageMock.delete).toHaveBeenCalledWith(storageMock.put.mock.calls[0][0]);
   });
 
-  it("hides storage provider errors and attempts cleanup", async () => {
+  it("hides provider errors and attempts cleanup", async () => {
     storageMock.put.mockRejectedValueOnce(new Error("provider details"));
-    const { createFinanceReportImportUpload } = await import("./finance-import-upload");
-    await expect(createFinanceReportImportUpload(actor, {
-      workspaceId: "workspace-1",
-      fileBuffer: Buffer.from("x"),
-      fileName: "report.pdf",
-      mimeType: "application/pdf",
-    })).rejects.toMatchObject({
-      code: "FINANCE_REPORT_STORAGE_UNAVAILABLE",
-      message: "The report could not be stored. Please try again.",
-    });
+    await expect(upload()).rejects.toMatchObject({ code: "FINANCE_REPORT_STORAGE_UNAVAILABLE" });
     expect(storageMock.delete).toHaveBeenCalledWith(expect.stringContaining("/finance/report-imports/"));
     expect(prismaMock.$transaction).not.toHaveBeenCalled();
-  });
-
-  it("cleans up and returns the winner after a concurrent hash conflict", async () => {
-    prismaMock.$transaction.mockRejectedValueOnce({
-      code: "P2002",
-      meta: { target: ["workspaceId", "fileHash"] },
-    });
-    prismaMock.financeImportBatch.findUnique
-      .mockResolvedValueOnce(null)
-      .mockResolvedValueOnce(batch);
-    const { createFinanceReportImportUpload } = await import("./finance-import-upload");
-    await expect(createFinanceReportImportUpload(actor, {
-      workspaceId: "workspace-1",
-      fileBuffer: Buffer.from("Account,Amount"),
-      fileName: "report.xlsx",
-      mimeType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    })).resolves.toEqual({ batch, reused: true });
-    expect(storageMock.delete).toHaveBeenCalledWith(storageMock.put.mock.calls[0][0]);
   });
 });

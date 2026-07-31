@@ -9,6 +9,10 @@ const { prismaMock, storageDeleteMock } = vi.hoisted(() => {
       update: vi.fn(),
       delete: vi.fn(),
     },
+    brainSource: { findFirst: vi.fn(), delete: vi.fn() },
+    document: { findFirst: vi.fn(), delete: vi.fn() },
+    financeImportBatch: { findFirst: vi.fn() },
+    knowledgeChunk: { deleteMany: vi.fn() },
     proposal: {
       findFirst: vi.fn(),
       update: vi.fn(),
@@ -88,6 +92,8 @@ describe("workspace archive domain", () => {
     prismaMock.workspacePermalink.findMany.mockResolvedValue([]);
     prismaMock.workspacePermalink.upsert.mockResolvedValue({});
     prismaMock.workItemVersion.deleteMany.mockResolvedValue({ count: 0 });
+    prismaMock.financeImportBatch.findFirst.mockResolvedValue(null);
+    prismaMock.knowledgeChunk.deleteMany.mockResolvedValue({ count: 0 });
   });
 
   it("archives artifacts with metadata and an audit record", async () => {
@@ -307,6 +313,34 @@ describe("workspace archive domain", () => {
       },
     });
     expect(prismaMock.action.delete).toHaveBeenCalledWith({ where: { id: "action-1" } });
+  });
+
+  it.each([
+    ["BrainSource", "brainSource", { fileStorageKey: "private-source" }],
+    ["Document", "document", { storageKey: "private-source" }],
+  ] as const)("blocks purging a linked Finance import %s before deleting storage", async (entityType, delegate, storage) => {
+    prismaMock[delegate].findFirst.mockResolvedValue({
+      id: "source-1",
+      workspaceId: "workspace-1",
+      archivedAt: new Date("2026-07-31T12:00:00.000Z"),
+      ...storage,
+    });
+    prismaMock.workspaceArchiveRecord.findFirst.mockResolvedValue({ id: "archive-1" });
+    prismaMock.financeImportBatch.findFirst.mockResolvedValue({ id: "batch-1" });
+    const { purgeWorkspaceArtifact } = await import("./archive");
+    await expect(purgeWorkspaceArtifact(actor, {
+      workspaceId: "workspace-1", entityType, entityId: "source-1", reason: "cleanup",
+    })).rejects.toMatchObject({ code: "FINANCE_IMPORT_SOURCE_LINKED" });
+    expect(prismaMock.financeImportBatch.findFirst).toHaveBeenCalledWith({
+      where: {
+        workspaceId: "workspace-1",
+        OR: [{ documentId: "source-1" }, { brainSourceId: "source-1" }],
+      },
+      select: { id: true },
+    });
+    expect(storageDeleteMock).not.toHaveBeenCalled();
+    expect(prismaMock.knowledgeChunk.deleteMany).not.toHaveBeenCalled();
+    expect(prismaMock[delegate].delete).not.toHaveBeenCalled();
   });
 
   it("lists active archive records by default", async () => {

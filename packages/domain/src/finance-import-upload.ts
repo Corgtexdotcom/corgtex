@@ -66,16 +66,16 @@ export async function createFinanceReportImportUpload(actor: AppActor, params: {
   mimeType: string;
   storage?: FinanceImportStorage;
 }): Promise<{ batch: FinanceImportBatch; reused: boolean }> {
-  const snapshot = Buffer.from(params.fileBuffer);
-  await requireFinanceReportImportHumanWriteAccess(actor, params.workspaceId);
-  invariant(actor.kind === "user", 403, "FORBIDDEN", "A human Finance writer is required.");
-  invariant(snapshot.byteLength > 0, 400, "EMPTY_FILE", "The report file is empty.");
   invariant(
-    snapshot.byteLength <= FINANCE_REPORT_IMPORT_MAX_FILE_BYTES,
+    params.fileBuffer.byteLength <= FINANCE_REPORT_IMPORT_MAX_FILE_BYTES,
     413,
     "FILE_TOO_LARGE",
     "The report file exceeds the supported size limit.",
   );
+  const snapshot = Buffer.from(params.fileBuffer);
+  await requireFinanceReportImportHumanWriteAccess(actor, params.workspaceId);
+  invariant(actor.kind === "user", 403, "FORBIDDEN", "A human Finance writer is required.");
+  invariant(snapshot.byteLength > 0, 400, "EMPTY_FILE", "The report file is empty.");
   const file = financeFileEnvelope(params.fileName, params.mimeType);
   const fileHash = createHash("sha256").update(snapshot).digest("hex");
   const duplicate = await existingBatch(params.workspaceId, fileHash);
@@ -95,7 +95,15 @@ export async function createFinanceReportImportUpload(actor: AppActor, params: {
   }
 
   try {
-    const batch = await prisma.$transaction(async (tx) => {
+    const result = await prisma.$transaction(async (tx) => {
+      await tx.$executeRaw`
+        SELECT pg_advisory_xact_lock(hashtextextended(${`storage_capacity:${params.workspaceId}`}, 0))
+      `;
+      const winner = await tx.financeImportBatch.findUnique({
+        where: { workspaceId_fileHash: { workspaceId: params.workspaceId, fileHash } },
+      });
+      if (winner) return { batch: winner, reused: true };
+      await assertTrialStorageCapacity(params.workspaceId, snapshot.byteLength, tx);
       await tx.document.create({
         data: {
           id: documentId,
@@ -168,15 +176,17 @@ export async function createFinanceReportImportUpload(actor: AppActor, params: {
           },
         },
       });
-      return created;
+      return { batch: created, reused: false };
     });
-    return { batch, reused: false };
+    if (result.reused) await storage.delete(storageKey).catch(() => undefined);
+    return result;
   } catch (error) {
     await storage.delete(storageKey).catch(() => undefined);
     if (workspaceHashConflict(error)) {
       const winner = await existingBatch(params.workspaceId, fileHash);
       if (winner) return { batch: winner, reused: true };
     }
+    if (error instanceof AppError) throw error;
     throw new AppError(500, "FINANCE_REPORT_UPLOAD_FAILED", "The report upload could not be completed.");
   }
 }

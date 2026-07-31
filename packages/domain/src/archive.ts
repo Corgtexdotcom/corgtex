@@ -70,6 +70,14 @@ const WORK_ITEM_ARCHIVE_ENTITY_TYPES = new Set<ArchiveEntityType>([
   "Tension",
 ]);
 
+async function preventFinanceImportSourcePurge(tx: Prisma.TransactionClient, record: any) {
+  const linked = await tx.financeImportBatch.findFirst({
+    where: { workspaceId: record.workspaceId, OR: [{ documentId: record.id }, { brainSourceId: record.id }] },
+    select: { id: true },
+  });
+  invariant(!linked, 409, "FINANCE_IMPORT_SOURCE_LINKED", "A Finance import source cannot be purged while its batch exists.");
+}
+
 const ENTITY_CONFIGS: Record<ArchiveEntityType, ArchiveConfig> = {
   Action: {
     entityType: "Action",
@@ -105,6 +113,7 @@ const ENTITY_CONFIGS: Record<ArchiveEntityType, ArchiveConfig> = {
     delegate: "brainSource",
     findWhere: directWorkspace,
     label: titleOrName,
+    canPurge: preventFinanceImportSourcePurge,
     beforePurge: async (tx, record) => {
       await tx.knowledgeChunk.deleteMany({
         where: {
@@ -147,6 +156,7 @@ const ENTITY_CONFIGS: Record<ArchiveEntityType, ArchiveConfig> = {
     findWhere: directWorkspace,
     label: titleOrName,
     archiveAllowedRoles: ["ADMIN"],
+    canPurge: preventFinanceImportSourcePurge,
     beforePurge: async (_tx, record) => {
       if (record.storageKey) {
         await defaultStorage.delete(record.storageKey).catch(() => undefined);
