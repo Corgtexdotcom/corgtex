@@ -1,8 +1,7 @@
 import { createHash } from "node:crypto";
 import { Readable } from "node:stream";
 import { CsvError, parse } from "csv-parse";
-import { getDocument, OPS, VerbosityLevel } from "pdfjs-dist/legacy/build/pdf.mjs";
-export type FinanceFileFormat = "PDF" | "CSV";
+export type FinanceFileFormat = "CSV";
 export type FinanceExtractedCellType = "TEXT";
 export type FinanceFileExtractionErrorCode =
   | "EMPTY_FILE"
@@ -11,17 +10,15 @@ export type FinanceFileExtractionErrorCode =
   | "FILE_TYPE_MISMATCH"
   | "MALFORMED_FILE"
   | "EMPTY_EXTRACTION"
-  | "SCANNED_PDF_UNSUPPORTED"
   | "EXTRACTION_LIMIT_EXCEEDED";
 export type FinanceExtractedCell = { row: number; column: number; type: FinanceExtractedCellType; value: string };
 export type FinanceExtractedSheet = { name: string; rowCount: number; columnCount: number; cells: FinanceExtractedCell[] };
-export type FinanceFileExtraction = { fileHash: string; fileSizeBytes: number; format: FinanceFileFormat; mimeType: string; pages?: Array<{ page: number; text: string }>; sheets?: FinanceExtractedSheet[] };
+export type FinanceFileExtraction = { fileHash: string; fileSizeBytes: number; format: FinanceFileFormat; mimeType: string; sheets: FinanceExtractedSheet[] };
 export type FinanceFileExtractionLimits = {
-  maxFileBytes: number; maxPages: number; maxRows: number; maxCells: number; maxTextChars: number;
+  maxFileBytes: number; maxRows: number; maxCells: number; maxTextChars: number;
 };
 const DEFAULT_LIMITS: FinanceFileExtractionLimits = {
   maxFileBytes: 25 * 1024 * 1024,
-  maxPages: 250,
   maxRows: 20_000,
   maxCells: 250_000,
   maxTextChars: 2_000_000,
@@ -29,11 +26,10 @@ const DEFAULT_LIMITS: FinanceFileExtractionLimits = {
 const SAFE_MESSAGES: Record<FinanceFileExtractionErrorCode, string> = {
   EMPTY_FILE: "The report file is empty.",
   FILE_TOO_LARGE: "The report file exceeds the supported size limit.",
-  UNSUPPORTED_FILE_TYPE: "Only PDF and CSV finance reports are supported.",
+  UNSUPPORTED_FILE_TYPE: "Only CSV finance reports are supported.",
   FILE_TYPE_MISMATCH: "The report filename and content type do not match.",
   MALFORMED_FILE: "The report file is malformed or unreadable.",
   EMPTY_EXTRACTION: "The report contains no extractable data.",
-  SCANNED_PDF_UNSUPPORTED: "Image-only or scanned PDFs are not supported yet.",
   EXTRACTION_LIMIT_EXCEEDED: "The report exceeds the supported extraction limits.",
 };
 export class FinanceFileExtractionError extends Error {
@@ -49,8 +45,8 @@ function detectFormat(fileName: string, mimeType: string): FinanceFileFormat {
   const name = fileName.trim().toLowerCase();
   const mime = mimeType.split(";")[0]?.trim().toLowerCase();
   const genericMime = !mime || mime === "application/octet-stream";
-  const byName = name.endsWith(".pdf") ? "PDF" : name.endsWith(".csv") ? "CSV" : undefined;
-  const byMime = mime === "application/pdf" ? "PDF" : mime === "text/csv" || mime === "application/csv"
+  const byName = name.endsWith(".csv") ? "CSV" : undefined;
+  const byMime = mime === "text/csv" || mime === "application/csv"
     || ((mime === "text/plain" || mime === "application/vnd.ms-excel") && byName === "CSV")
     ? "CSV"
     : undefined;
@@ -59,59 +55,6 @@ function detectFormat(fileName: string, mimeType: string): FinanceFileFormat {
   const format = byName ?? byMime;
   if (!format) fail("UNSUPPORTED_FILE_TYPE");
   return format;
-}
-async function extractPdf(buffer: Buffer, limits: FinanceFileExtractionLimits) {
-  const task = getDocument({ data: new Uint8Array(buffer), verbosity: VerbosityLevel.ERRORS });
-  try {
-    const document = await task.promise;
-    if (document.numPages === 0) fail("EMPTY_EXTRACTION");
-    if (document.numPages > limits.maxPages) fail("EXTRACTION_LIMIT_EXCEEDED");
-    const pages: Array<{ page: number; text: string }> = [];
-    let textChars = 0;
-    for (let pageNumber = 1; pageNumber <= document.numPages; pageNumber += 1) {
-      const page = await document.getPage(pageNumber);
-      const reader = page.streamTextContent().getReader();
-      let text = "";
-      let lastX: number | undefined;
-      let lastY: number | undefined;
-      const append = (value: string) => {
-        textChars += value.length;
-        if (textChars > limits.maxTextChars) fail("EXTRACTION_LIMIT_EXCEEDED");
-        text += value;
-      };
-      try {
-        while (true) {
-          const chunk = await reader.read();
-          if (chunk.done) break;
-          for (const item of chunk.value.items) {
-            if (!("str" in item)) continue;
-            const [x, y] = [item.transform[4], item.transform[5]];
-            if (lastY !== undefined && Math.abs(lastY - y) > 4.6 && !text.endsWith("\n")) append("\n");
-            if (lastX !== undefined && lastY !== undefined && Math.abs(lastY - y) < 4.6 && Math.abs(lastX - x) > 7) append("\t");
-            append(item.str);
-            if (item.hasEOL && !text.endsWith("\n")) append("\n");
-            lastX = x + item.width;
-            lastY = y;
-          }
-        }
-        if (!text.trim()) {
-          const operators = await page.getOperatorList();
-          if (operators.fnArray.some((operator) =>
-            operator === OPS.paintImageMaskXObject
-            || operator === OPS.paintImageXObject
-            || operator === OPS.paintInlineImageXObject
-          )) fail("SCANNED_PDF_UNSUPPORTED");
-        }
-      } finally {
-        page.cleanup();
-      }
-      pages.push({ page: pageNumber, text });
-    }
-    if (!pages.some((page) => page.text.trim())) fail("EMPTY_EXTRACTION");
-    return pages;
-  } finally {
-    await task.destroy();
-  }
 }
 function assertCsvStructureLimits(text: string, limits: FinanceFileExtractionLimits) {
   let inQuotes = false;
@@ -205,24 +148,23 @@ export async function extractFinanceReportFile(params: {
   mimeType: string;
   limits?: Partial<FinanceFileExtractionLimits>;
 }): Promise<FinanceFileExtraction> {
+  const fileBuffer = Buffer.from(params.fileBuffer);
   const limits = { ...DEFAULT_LIMITS };
   for (const key of Object.keys(DEFAULT_LIMITS) as Array<keyof FinanceFileExtractionLimits>) {
     const override = params.limits?.[key];
     if (override !== undefined && Number.isSafeInteger(override) && override >= 0) limits[key] = override;
   }
-  if (params.fileBuffer.length === 0) fail("EMPTY_FILE");
-  if (params.fileBuffer.length > limits.maxFileBytes) fail("FILE_TOO_LARGE");
+  if (fileBuffer.length === 0) fail("EMPTY_FILE");
+  if (fileBuffer.length > limits.maxFileBytes) fail("FILE_TOO_LARGE");
   const format = detectFormat(params.fileName, params.mimeType);
-  if (format === "PDF" && !params.fileBuffer.subarray(0, 1024).includes(Buffer.from("%PDF-"))) fail("MALFORMED_FILE");
   const base = {
-    fileHash: createHash("sha256").update(params.fileBuffer).digest("hex"),
-    fileSizeBytes: params.fileBuffer.length,
+    fileHash: createHash("sha256").update(fileBuffer).digest("hex"),
+    fileSizeBytes: fileBuffer.length,
     format,
-    mimeType: format === "PDF" ? "application/pdf" : "text/csv",
+    mimeType: "text/csv",
   };
   try {
-    if (format === "PDF") return { ...base, pages: await extractPdf(params.fileBuffer, limits) };
-    return { ...base, sheets: await extractCsv(params.fileBuffer, limits) };
+    return { ...base, sheets: await extractCsv(fileBuffer, limits) };
   } catch (error) {
     if (error instanceof FinanceFileExtractionError) throw error;
     fail("MALFORMED_FILE");

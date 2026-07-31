@@ -2,53 +2,7 @@ import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { extractFinanceReportFile } from "./finance-file-extraction";
 
-type PdfPage = string | null | { text: string; rotate: 90 | 270 };
-
-function pdf(...pages: PdfPage[]) {
-  const pageIds = pages.map((_, index) => 4 + (index * 2));
-  const objects = [
-    "<< /Type /Catalog /Pages 2 0 R >>",
-    `<< /Type /Pages /Kids [${pageIds.map((id) => `${id} 0 R`).join(" ")}] /Count ${pages.length} >>`,
-    "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
-    ...pages.flatMap((page, index) => {
-      const text = typeof page === "object" && page !== null ? page.text : page;
-      const rotate = typeof page === "object" && page !== null ? `/Rotate ${page.rotate} ` : "";
-      const parts = text?.split("|").map((part) => part.replace(/[()\\]/g, "\\$&"));
-      const stream = text === null
-        ? "q BI /W 1 /H 1 /BPC 1 /CS /DeviceGray ID \x00 EI Q"
-        : `BT /F1 12 Tf 72 720 Td (${parts?.[0]}) Tj${parts?.[1] === undefined ? "" : ` 144 0 Td (${parts[1]}) Tj`} ET`;
-      return [
-        `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> ${rotate}/Contents ${pageIds[index] + 1} 0 R >>`,
-        `<< /Length ${Buffer.byteLength(stream)} >>\nstream\n${stream}\nendstream`,
-      ];
-    }),
-  ];
-  let body = "%PDF-1.4\n";
-  const offsets = objects.map((object, index) => {
-    const offset = Buffer.byteLength(body);
-    body += `${index + 1} 0 obj\n${object}\nendobj\n`;
-    return offset;
-  });
-  const xref = Buffer.byteLength(body);
-  const size = objects.length + 1;
-  body += `xref\n0 ${size}\n0000000000 65535 f \n${offsets.map((offset) => `${String(offset).padStart(10, "0")} 00000 n `).join("\n")}\n`;
-  return Buffer.from(`${body}trailer\n<< /Size ${size} /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF`);
-}
-
 describe("extractFinanceReportFile", () => {
-  it("streams PDF pages without trimming and rejects partial scans or excess pages", async () => {
-    const result = await extractFinanceReportFile({ fileBuffer: pdf("Revenue|100.00"), fileName: "report.pdf", mimeType: "application/pdf" });
-    expect(result).toMatchObject({ format: "PDF", mimeType: "application/pdf", pages: [{ page: 1, text: "Revenue 100.00" }] });
-    expect((await extractFinanceReportFile({ fileBuffer: pdf("Revenue", ""), fileName: "blank.pdf", mimeType: "application/pdf" })).pages?.[1]?.text).toBe("");
-    await expect(extractFinanceReportFile({ fileBuffer: pdf("Revenue", null), fileName: "mixed.pdf", mimeType: "application/pdf" })).rejects.toMatchObject({ code: "SCANNED_PDF_UNSUPPORTED" });
-    await expect(extractFinanceReportFile({ fileBuffer: pdf("one", "two"), fileName: "long.pdf", mimeType: "application/pdf", limits: { maxPages: 1 } })).rejects.toMatchObject({ code: "EXTRACTION_LIMIT_EXCEEDED" });
-  });
-
-  it("preserves text-space line layout on rotated PDF pages", async () => {
-    const result = await extractFinanceReportFile({ fileBuffer: pdf({ text: "Revenue|100.00", rotate: 90 }), fileName: "rotated.pdf", mimeType: "application/pdf" });
-    expect(result.pages?.[0]?.text).toBe("Revenue 100.00");
-  });
-
   it("preserves CSV source locations, quoting, whitespace, empty cells, and exact text", async () => {
     const input = Buffer.from('\uFEFFAccount,Amount,Note\r\n"Sales, Online",001.20,"two\nlines"\r\nCosts,"  ",');
     const result = await extractFinanceReportFile({ fileBuffer: input, fileName: "actuals.csv", mimeType: "text/csv" });
@@ -59,6 +13,19 @@ describe("extractFinanceReportFile", () => {
       { row: 2, column: 2, type: "TEXT", value: "001.20" },
       { row: 2, column: 3, type: "TEXT", value: "two\nlines" },
       { row: 3, column: 2, type: "TEXT", value: "  " },
+    ]));
+  });
+
+  it("hashes, validates, and parses one immutable byte snapshot", async () => {
+    const input = Buffer.from("Account,Amount\nRevenue,100");
+    const hash = createHash("sha256").update(input).digest("hex");
+    const extraction = extractFinanceReportFile({ fileBuffer: input, fileName: "actuals.csv", mimeType: "text/csv" });
+    input.fill(0x2c);
+    const result = await extraction;
+    expect(result.fileHash).toBe(hash);
+    expect(result.sheets[0]?.cells).toEqual(expect.arrayContaining([
+      { row: 2, column: 1, type: "TEXT", value: "Revenue" },
+      { row: 2, column: 2, type: "TEXT", value: "100" },
     ]));
   });
 
@@ -85,14 +52,12 @@ describe("extractFinanceReportFile", () => {
     [Buffer.from("a\n".repeat(20_001)), "report.csv", "text/csv", { maxRows: undefined }, "EXTRACTION_LIMIT_EXCEEDED"],
     [Buffer.from("a\n".repeat(20_001)), "report.csv", "text/csv", { maxRows: Number.NaN }, "EXTRACTION_LIMIT_EXCEEDED"],
     [Buffer.from("a\n".repeat(20_001)), "report.csv", "text/csv", { maxRows: Number.POSITIVE_INFINITY }, "EXTRACTION_LIMIT_EXCEEDED"],
+    [Buffer.from("a\n".repeat(20_001)), "report.csv", "text/csv", { maxRows: 20_000.5 }, "EXTRACTION_LIMIT_EXCEEDED"],
     [Buffer.from("a\n".repeat(20_001)), "report.csv", "text/csv", { maxRows: -1 }, "EXTRACTION_LIMIT_EXCEEDED"],
     [Buffer.from("a,b"), "report.csv", "text/csv", { maxCells: 1 }, "EXTRACTION_LIMIT_EXCEEDED"],
     [Buffer.from(",".repeat(250_000)), "report.csv", "text/csv", {}, "EXTRACTION_LIMIT_EXCEEDED"],
     [Buffer.from("ab"), "report.csv", "text/csv", { maxTextChars: 1 }, "EXTRACTION_LIMIT_EXCEEDED"],
-    [pdf("Revenue"), "report.pdf", "application/pdf", { maxTextChars: 1 }, "EXTRACTION_LIMIT_EXCEEDED"],
-    [pdf(), "report.pdf", "application/pdf", {}, "EMPTY_EXTRACTION"],
-    [pdf(""), "report.pdf", "application/pdf", {}, "EMPTY_EXTRACTION"],
-    [Buffer.from("%PDF-broken"), "report.pdf", "application/pdf", {}, "MALFORMED_FILE"],
+    [Buffer.from("%PDF-1.4"), "report.pdf", "application/pdf", {}, "UNSUPPORTED_FILE_TYPE"],
     [Buffer.from([0xff]), "report.csv", "text/csv", {}, "MALFORMED_FILE"],
   ])("fails the whole extraction with a safe code", async (fileBuffer, fileName, mimeType, limits, code) => {
     await expect(extractFinanceReportFile({ fileBuffer, fileName, mimeType, limits })).rejects.toMatchObject({ code });
