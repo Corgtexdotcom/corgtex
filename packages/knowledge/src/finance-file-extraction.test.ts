@@ -8,6 +8,7 @@ type PdfPage =
   | null
   | { text: string; rotate?: 90 | 270; vertical?: boolean }
   | { compressedText: string };
+type FailureCase = [Buffer, string, string, Parameters<typeof extractFinanceReportFile>[0]["limits"], string];
 
 function renderPdf(objects: Buffer[]) {
   const chunks: Uint8Array[] = [Buffer.from("%PDF-1.4\n")];
@@ -85,8 +86,9 @@ function formPdf() {
   ]);
 }
 
+const pdfIt = it.runIf(process.platform === "linux");
 describe("extractFinanceReportFile", () => {
-  it("extracts ordered PDF pages while retaining genuine blank pages", async () => {
+  pdfIt("extracts ordered PDF pages while retaining genuine blank pages", async () => {
     const input = pdf("Revenue|100.00", "");
     const result = await extractFinanceReportFile({ fileBuffer: input, fileName: "actuals.pdf", mimeType: "application/pdf" });
     expect(result).toMatchObject({
@@ -97,14 +99,14 @@ describe("extractFinanceReportFile", () => {
     });
   });
 
-  it("preserves same-line layout for page and text-matrix rotation", async () => {
+  pdfIt("preserves same-line layout for page and text-matrix rotation", async () => {
     const pageRotated = await extractFinanceReportFile({ fileBuffer: pdf({ text: "Revenue|100.00", rotate: 90 }), fileName: "rotated.pdf", mimeType: "application/pdf" });
     const textRotated = await extractFinanceReportFile({ fileBuffer: pdf({ text: "Revenue|100.00", vertical: true }), fileName: "vertical.pdf", mimeType: "application/pdf" });
     expect(pageRotated.pages?.[0]?.text).not.toContain("\n");
     expect(textRotated.pages?.[0]?.text).not.toContain("\n");
   });
 
-  it("loads packaged predefined CMaps for valid CID-font text", async () => {
+  pdfIt("loads packaged predefined CMaps for valid CID-font text", async () => {
     const result = await extractFinanceReportFile({
       fileBuffer: cidFontPdf(),
       fileName: "cjk-actuals.pdf",
@@ -113,7 +115,7 @@ describe("extractFinanceReportFile", () => {
     expect(result.pages?.[0]?.text).toBe("日");
   });
 
-  it("fails structured forms and native vertical writing closed", async () => {
+  pdfIt("fails structured forms and native vertical writing closed", async () => {
     for (const input of [formPdf(), cidFontPdf("90ms-RKSJ-V")]) {
       await expect(extractFinanceReportFile({
         fileBuffer: input,
@@ -123,7 +125,7 @@ describe("extractFinanceReportFile", () => {
     }
   });
 
-  it.runIf(process.platform === "linux")("contains decompression with a kernel data limit", async () => {
+  pdfIt("contains decompression with a kernel data limit", async () => {
     await expect(extractFinanceReportFile({
       fileBuffer: pdf({ compressedText: "A".repeat(128 * 1024 * 1024) }),
       fileName: "decompression-bomb.pdf",
@@ -132,7 +134,7 @@ describe("extractFinanceReportFile", () => {
     })).rejects.toMatchObject({ code: "EXTRACTION_LIMIT_EXCEEDED" });
   });
 
-  it("rejects image-only pages and highly compressed over-limit text without partial output", async () => {
+  pdfIt("rejects image-only pages and highly compressed over-limit text without partial output", async () => {
     await expect(extractFinanceReportFile({ fileBuffer: pdf("Revenue", null), fileName: "scan.pdf", mimeType: "application/pdf" })).rejects.toMatchObject({ code: "SCANNED_PDF_UNSUPPORTED" });
     await expect(extractFinanceReportFile({
       fileBuffer: pdf({ compressedText: "A".repeat(4_000_000) }),
@@ -206,11 +208,13 @@ describe("extractFinanceReportFile", () => {
     [Buffer.from("a,b"), "report.csv", "text/csv", { maxCells: 1 }, "EXTRACTION_LIMIT_EXCEEDED"],
     [Buffer.from(",".repeat(250_000)), "report.csv", "text/csv", {}, "EXTRACTION_LIMIT_EXCEEDED"],
     [Buffer.from("ab"), "report.csv", "text/csv", { maxTextChars: 1 }, "EXTRACTION_LIMIT_EXCEEDED"],
-    [pdf("Revenue"), "report.pdf", "application/pdf", { maxPages: 0 }, "EXTRACTION_LIMIT_EXCEEDED"],
-    [pdf("Revenue"), "report.pdf", "application/pdf", { maxTextChars: 1 }, "EXTRACTION_LIMIT_EXCEEDED"],
-    [pdf(), "report.pdf", "application/pdf", {}, "EMPTY_EXTRACTION"],
-    [pdf(""), "report.pdf", "application/pdf", {}, "EMPTY_EXTRACTION"],
-    [Buffer.from("%PDF-broken"), "report.pdf", "application/pdf", {}, "MALFORMED_FILE"],
+    ...((process.platform === "linux" ? [
+      [pdf("Revenue"), "report.pdf", "application/pdf", { maxPages: 0 }, "EXTRACTION_LIMIT_EXCEEDED"],
+      [pdf("Revenue"), "report.pdf", "application/pdf", { maxTextChars: 1 }, "EXTRACTION_LIMIT_EXCEEDED"],
+      [pdf(), "report.pdf", "application/pdf", {}, "EMPTY_EXTRACTION"],
+      [pdf(""), "report.pdf", "application/pdf", {}, "EMPTY_EXTRACTION"],
+      [Buffer.from("%PDF-broken"), "report.pdf", "application/pdf", {}, "MALFORMED_FILE"],
+    ] : [[pdf("Revenue"), "report.pdf", "application/pdf", {}, "EXTRACTION_LIMIT_EXCEEDED"]]) as FailureCase[]),
     [Buffer.from([0xff]), "report.csv", "text/csv", {}, "MALFORMED_FILE"],
   ])("fails the whole extraction with a safe code", async (fileBuffer, fileName, mimeType, limits, code) => {
     await expect(extractFinanceReportFile({ fileBuffer, fileName, mimeType, limits })).rejects.toMatchObject({ code });

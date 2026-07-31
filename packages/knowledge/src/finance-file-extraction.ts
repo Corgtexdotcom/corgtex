@@ -160,6 +160,7 @@ const fail = (code) => { const error = new Error(code); error.code = code; throw
 );
 `;
 function extractPdf(buffer: Buffer, limits: FinanceFileExtractionLimits) {
+  if (process.platform !== "linux") fail("EXTRACTION_LIMIT_EXCEEDED");
   const resolveModule = createRequire(import.meta.url).resolve;
   const moduleUrl = pathToFileURL(
     resolveModule("pdfjs-dist/legacy/build/pdf.mjs"),
@@ -179,21 +180,16 @@ function extractPdf(buffer: Buffer, limits: FinanceFileExtractionLimits) {
       String(limits.maxPages),
       String(limits.maxTextChars),
     ];
-    const child = process.platform === "linux"
-      ? spawn("/bin/sh", [
-        "-c",
-        `ulimit -d ${PDF_PROCESS_MAX_DATA_KIB} || exit 70; exec "$@"`,
-        "finance-pdf",
-        process.execPath,
-        ...nodeArgs,
-      ], {
-        stdio: ["pipe", "pipe", "ignore"],
-        windowsHide: true,
-      })
-      : spawn(process.execPath, nodeArgs, {
-        stdio: ["pipe", "pipe", "ignore"],
-        windowsHide: true,
-      });
+    const child = spawn("/bin/sh", [
+      "-c",
+      `ulimit -d ${PDF_PROCESS_MAX_DATA_KIB} || exit 70; exec "$@"`,
+      "finance-pdf",
+      process.execPath,
+      ...nodeArgs,
+    ], {
+      stdio: ["pipe", "pipe", "ignore"],
+      windowsHide: true,
+    });
     const output: Buffer[] = [];
     let outputBytes = 0;
     let settled = false;
