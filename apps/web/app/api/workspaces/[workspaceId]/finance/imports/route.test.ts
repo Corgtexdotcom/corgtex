@@ -106,6 +106,25 @@ describe("POST /api/workspaces/[workspaceId]/finance/imports", () => {
     expect(createUpload).not.toHaveBeenCalled();
   });
 
+  it("accepts case-insensitive multipart media types and maps malformed bodies to 400", async () => {
+    const { POST } = await import("./route");
+    const formData = new FormData();
+    formData.set("file", new File(["Account,Amount"], "report.csv", { type: "text/csv" }));
+    const mixedCase = request(formData);
+    mixedCase.headers.set(
+      "content-type",
+      mixedCase.headers.get("content-type")!.replace("multipart/form-data", "Multipart/Form-Data"),
+    );
+    expect((await POST(mixedCase, context())).status).toBe(201);
+
+    const malformed = new NextRequest("http://localhost/api/workspaces/workspace-1/finance/imports", {
+      method: "POST",
+      headers: { "content-type": "multipart/form-data; boundary=missing" },
+      body: "truncated",
+    });
+    expect((await POST(malformed, context())).status).toBe(400);
+  });
+
   it("authenticates before parsing private report bytes", async () => {
     resolveActor.mockRejectedValueOnce(new MockAppError(401, "UNAUTHORIZED", "Sign in required."));
     const formData = vi.fn();
@@ -121,20 +140,31 @@ describe("POST /api/workspaces/[workspaceId]/finance/imports", () => {
     expect(createUpload).not.toHaveBeenCalled();
   });
 
-  it("rejects an oversized File before reading its bytes", async () => {
-    const oversized = new File(["x"], "report.csv", { type: "text/csv" });
-    Object.defineProperty(oversized, "size", { value: (25 * 1024 * 1024) + 1 });
-    const arrayBuffer = vi.spyOn(oversized, "arrayBuffer");
+  it("bounds the multipart request and rejects an oversized File before reading its bytes", async () => {
+    const oversized = new File([new Uint8Array((25 * 1024 * 1024) + 1)], "report.csv", { type: "text/csv" });
+    const arrayBuffer = vi.spyOn(File.prototype, "arrayBuffer");
     const formData = new FormData();
     formData.set("file", oversized);
-    const requestWithForm = {
-      headers: new Headers({ "content-type": "multipart/form-data; boundary=test" }),
-      formData: vi.fn().mockResolvedValue(formData),
-    } as unknown as NextRequest;
     const { POST } = await import("./route");
-    const response = await POST(requestWithForm, context());
-    expect(response.status).toBe(413);
+    expect((await POST(request(formData), context())).status).toBe(413);
     expect(arrayBuffer).not.toHaveBeenCalled();
+
+    const boundary = "bounded-proof";
+    const prefix = new TextEncoder().encode(
+      `--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="report.csv"\r\nContent-Type: text/csv\r\n\r\n`,
+    );
+    let chunks = 0;
+    const bounded = new NextRequest("http://localhost/api/workspaces/workspace-1/finance/imports", {
+      method: "POST",
+      headers: { "content-type": `multipart/form-data; boundary=${boundary}` },
+      body: new ReadableStream({
+        pull(controller) {
+          controller.enqueue(chunks++ === 0 ? prefix : new Uint8Array(1024 * 1024));
+        },
+      }),
+      duplex: "half",
+    } as unknown as ConstructorParameters<typeof NextRequest>[1]);
+    expect((await POST(bounded, context())).status).toBe(413);
     expect(createUpload).not.toHaveBeenCalled();
   });
 });
