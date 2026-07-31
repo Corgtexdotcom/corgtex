@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { Readable } from "node:stream";
-import { parse } from "csv-parse";
+import { CsvError, parse } from "csv-parse";
 import { PDFParse } from "pdf-parse";
 export type FinanceFileFormat = "PDF" | "CSV";
 export type FinanceExtractedCellType = "TEXT";
@@ -94,6 +94,7 @@ async function extractCsv(buffer: Buffer, limits: FinanceFileExtractionLimits) {
   const parser = input.pipe(parse({
     bom: true,
     relax_column_count: false,
+    max_record_size: limits.maxTextChars,
   }));
   const cells: FinanceExtractedCell[] = [];
   let rowCount = 0;
@@ -114,6 +115,9 @@ async function extractCsv(buffer: Buffer, limits: FinanceFileExtractionLimits) {
         cells.push({ row: rowCount, column: columnIndex + 1, type: "TEXT", value });
       });
     }
+  } catch (error) {
+    if (error instanceof CsvError && error.code === "CSV_MAX_RECORD_SIZE") fail("EXTRACTION_LIMIT_EXCEEDED");
+    throw error;
   } finally {
     input.destroy();
     parser.destroy();
