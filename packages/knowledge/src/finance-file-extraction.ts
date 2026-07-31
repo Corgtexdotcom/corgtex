@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { Readable } from "node:stream";
 import { CsvError, parse } from "csv-parse";
-import { PDFParse } from "pdf-parse";
+import { getDocument, VerbosityLevel } from "pdfjs-dist/legacy/build/pdf.mjs";
 export type FinanceFileFormat = "PDF" | "CSV";
 export type FinanceExtractedCellType = "TEXT";
 export type FinanceFileExtractionErrorCode =
@@ -49,44 +49,110 @@ function detectFormat(fileName: string, mimeType: string): FinanceFileFormat {
   const name = fileName.trim().toLowerCase();
   const mime = mimeType.split(";")[0]?.trim().toLowerCase();
   const genericMime = !mime || mime === "application/octet-stream";
-  const byName = name.endsWith(".pdf") ? "PDF"
-    : name.endsWith(".csv") ? "CSV"
-      : undefined;
-  const byMime = mime === "application/pdf" ? "PDF"
-    : mime === "text/csv" || mime === "application/csv" || ((mime === "text/plain" || mime === "application/vnd.ms-excel") && byName === "CSV") ? "CSV"
-      : undefined;
+  const byName = name.endsWith(".pdf") ? "PDF" : name.endsWith(".csv") ? "CSV" : undefined;
+  const byMime = mime === "application/pdf" ? "PDF" : mime === "text/csv" || mime === "application/csv"
+    || ((mime === "text/plain" || mime === "application/vnd.ms-excel") && byName === "CSV")
+    ? "CSV"
+    : undefined;
   if (/\.[^./]+$/.test(name) && !byName) fail("UNSUPPORTED_FILE_TYPE");
   if (byName && !genericMime && byName !== byMime) fail("FILE_TYPE_MISMATCH");
   const format = byName ?? byMime;
   if (!format) fail("UNSUPPORTED_FILE_TYPE");
   return format;
 }
-function assertSignature(buffer: Buffer, format: FinanceFileFormat) {
-  if (format === "PDF" && !buffer.subarray(0, 1024).includes(Buffer.from("%PDF-"))) {
-    fail("MALFORMED_FILE");
-  }
-}
 async function extractPdf(buffer: Buffer, limits: FinanceFileExtractionLimits) {
-  const parser = new PDFParse({ data: buffer });
+  const task = getDocument({ data: new Uint8Array(buffer), verbosity: VerbosityLevel.ERRORS });
   try {
-    const result = await parser.getText();
-    if (result.total > limits.maxPages) fail("EXTRACTION_LIMIT_EXCEEDED");
-    const pages = result.pages.map(({ num, text }) => ({ page: num, text: text.trim() }));
-    const textLength = pages.reduce((total, page) => total + page.text.length, 0);
-    if (textLength > limits.maxTextChars) fail("EXTRACTION_LIMIT_EXCEEDED");
-    if (!pages.some((page) => page.text)) fail("SCANNED_PDF_UNSUPPORTED");
+    const document = await task.promise;
+    if (document.numPages > limits.maxPages) fail("EXTRACTION_LIMIT_EXCEEDED");
+    const pages: Array<{ page: number; text: string }> = [];
+    let textChars = 0;
+    for (let pageNumber = 1; pageNumber <= document.numPages; pageNumber += 1) {
+      const page = await document.getPage(pageNumber);
+      const viewport = page.getViewport({ scale: 1 });
+      const reader = page.streamTextContent().getReader();
+      let text = "";
+      let lastX: number | undefined;
+      let lastY: number | undefined;
+      const append = (value: string) => {
+        textChars += value.length;
+        if (textChars > limits.maxTextChars) fail("EXTRACTION_LIMIT_EXCEEDED");
+        text += value;
+      };
+      try {
+        while (true) {
+          const chunk = await reader.read();
+          if (chunk.done) break;
+          for (const item of chunk.value.items) {
+            if (!("str" in item)) continue;
+            const [x, y] = viewport.convertToViewportPoint(item.transform[4], item.transform[5]);
+            if (lastY !== undefined && Math.abs(lastY - y) > 4.6 && !text.endsWith("\n")) append("\n");
+            if (lastX !== undefined && lastY !== undefined && Math.abs(lastY - y) < 4.6 && Math.abs(lastX - x) > 7) append("\t");
+            append(item.str);
+            if (item.hasEOL && !text.endsWith("\n")) append("\n");
+            lastX = x + item.width;
+            lastY = y;
+          }
+        }
+      } finally {
+        page.cleanup();
+      }
+      if (!text.trim()) fail("SCANNED_PDF_UNSUPPORTED");
+      pages.push({ page: pageNumber, text });
+    }
     return pages;
   } finally {
-    await parser.destroy();
+    await task.destroy();
+  }
+}
+function assertCsvStructureLimits(text: string, limits: FinanceFileExtractionLimits) {
+  let inQuotes = false;
+  let atFieldStart = true;
+  let rowCells = 1;
+  let rows = 0;
+  let cells = 0;
+  let endedRecord = false;
+  for (let index = text.charCodeAt(0) === 0xfeff ? 1 : 0; index < text.length; index += 1) {
+    const character = text[index];
+    if (inQuotes) {
+      if (character === "\"" && text[index + 1] === "\"") index += 1;
+      else if (character === "\"") inQuotes = false;
+      endedRecord = false;
+      continue;
+    }
+    if (character === "\"" && atFieldStart) {
+      inQuotes = true;
+      endedRecord = false;
+    } else if (character === ",") {
+      rowCells += 1;
+      atFieldStart = true;
+      endedRecord = false;
+      if (cells + rowCells > limits.maxCells) fail("EXTRACTION_LIMIT_EXCEEDED");
+    } else if (character === "\n" || character === "\r") {
+      if (character === "\r" && text[index + 1] === "\n") index += 1;
+      rows += 1;
+      cells += rowCells;
+      if (rows > limits.maxRows || cells > limits.maxCells) fail("EXTRACTION_LIMIT_EXCEEDED");
+      rowCells = 1;
+      atFieldStart = true;
+      endedRecord = true;
+    } else {
+      atFieldStart = false;
+      endedRecord = false;
+    }
+  }
+  if (!endedRecord && (rows + 1 > limits.maxRows || cells + rowCells > limits.maxCells)) {
+    fail("EXTRACTION_LIMIT_EXCEEDED");
   }
 }
 async function extractCsv(buffer: Buffer, limits: FinanceFileExtractionLimits) {
   const text = new TextDecoder("utf-8", { fatal: true }).decode(buffer);
   if (text.includes("\0")) fail("MALFORMED_FILE");
+  assertCsvStructureLimits(text, limits);
 
   function* chunks() {
-    for (let offset = 0; offset < text.length; offset += 65_536) {
-      yield text.slice(offset, offset + 65_536);
+    for (let offset = 0; offset < buffer.length; offset += 65_536) {
+      yield buffer.subarray(offset, offset + 65_536);
     }
   }
 
@@ -94,7 +160,7 @@ async function extractCsv(buffer: Buffer, limits: FinanceFileExtractionLimits) {
   const parser = input.pipe(parse({
     bom: true,
     relax_column_count: false,
-    max_record_size: limits.maxTextChars,
+    max_record_size: Math.max(1, (limits.maxTextChars * 2) + (limits.maxCells * 3)),
   }));
   const cells: FinanceExtractedCell[] = [];
   let rowCount = 0;
@@ -109,7 +175,7 @@ async function extractCsv(buffer: Buffer, limits: FinanceFileExtractionLimits) {
       columnCount = Math.max(columnCount, row.length);
       if (rowCount > limits.maxRows || cellsSeen > limits.maxCells) fail("EXTRACTION_LIMIT_EXCEEDED");
       row.forEach((value, columnIndex) => {
-        if (!value.trim()) return;
+        if (value === "") return;
         textChars += value.length;
         if (textChars > limits.maxTextChars) fail("EXTRACTION_LIMIT_EXCEEDED");
         cells.push({ row: rowCount, column: columnIndex + 1, type: "TEXT", value });
@@ -138,13 +204,12 @@ export async function extractFinanceReportFile(params: {
   if (params.fileBuffer.length === 0) fail("EMPTY_FILE");
   if (params.fileBuffer.length > limits.maxFileBytes) fail("FILE_TOO_LARGE");
   const format = detectFormat(params.fileName, params.mimeType);
-  assertSignature(params.fileBuffer, format);
+  if (format === "PDF" && !params.fileBuffer.subarray(0, 1024).includes(Buffer.from("%PDF-"))) fail("MALFORMED_FILE");
   const base = {
     fileHash: createHash("sha256").update(params.fileBuffer).digest("hex"),
     fileSizeBytes: params.fileBuffer.length,
     format,
-    mimeType: format === "PDF" ? "application/pdf"
-      : "text/csv",
+    mimeType: format === "PDF" ? "application/pdf" : "text/csv",
   };
   try {
     if (format === "PDF") return { ...base, pages: await extractPdf(params.fileBuffer, limits) };
