@@ -9,5 +9,10 @@ describe("AGENT_REGISTRY", () => {
     expect(AGENT_REGISTRY["action-extraction"].defaultModelTier).toBe("quality");
     expect(AGENT_REGISTRY["inbox-triage"].defaultModelTier).toBe("fast");
     expect(AGENT_REGISTRY["daily-digest"].defaultModelTier).toBe("excellent");
+    expect(AGENT_REGISTRY["finance-report-import"]).toMatchObject({
+      defaultEnabled: false,
+      defaultModelTier: "quality",
+      outputs: ["validated editable Finance report proposal"],
+    });
   });
 });

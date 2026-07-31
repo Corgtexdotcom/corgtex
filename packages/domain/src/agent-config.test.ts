@@ -167,6 +167,18 @@ describe("agent-config", () => {
   });
 
   describe("listAgentConfigs", () => {
+    it("keeps default-disabled agents off across config and runtime checks", async () => {
+      const { prisma } = await import("@corgtex/shared");
+      const { isAgentEnabled, listAgentConfigs } = await import("./agent-config");
+      vi.mocked(prisma.workspaceAgentConfig.findMany).mockResolvedValue([]);
+      vi.mocked(prisma.workspaceAgentConfig.findUnique).mockResolvedValue(null);
+      const configs = await listAgentConfigs({ kind: "user", user: { id: "u-1" } } as any, "ws-1");
+      expect(configs.find((config) => config.agentKey === "finance-report-import")?.enabled).toBe(false);
+      expect(configs.find((config) => config.agentKey === "inbox-triage")?.enabled).toBe(true);
+      await expect(isAgentEnabled("ws-1", "finance-report-import")).resolves.toBe(false);
+      await expect(isAgentEnabled("ws-1", "inbox-triage")).resolves.toBe(true);
+    });
+
     it("defaults company-understanding goal generation to automatic apply mode", async () => {
       const { prisma } = await import("@corgtex/shared");
       const { listAgentConfigs } = await import("./agent-config");
