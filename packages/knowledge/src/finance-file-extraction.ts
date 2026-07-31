@@ -159,11 +159,7 @@ const fail = (code) => { const error = new Error(code); error.code = code; throw
           return Array.isArray(node.children) && node.children.some(hasXfaControls);
         };
         const consumeXfa = (root) => {
-          const blockNodes = new Set([
-            "address", "article", "aside", "blockquote", "div", "dl", "dt", "dd", "figcaption", "figure",
-            "footer", "h1", "h2", "h3", "h4", "h5", "h6", "header", "li", "main", "nav", "ol", "p",
-            "pre", "section", "table", "tbody", "td", "tfoot", "th", "thead", "tr", "ul",
-          ]);
+          const blockNodes = new Set(["address", "article", "aside", "blockquote", "div", "dl", "dt", "dd", "figcaption", "figure", "footer", "h1", "h2", "h3", "h4", "h5", "h6", "header", "li", "main", "nav", "ol", "p", "pre", "section", "table", "tbody", "td", "tfoot", "th", "thead", "tr", "ul"]);
           let pendingBreak = false;
           const walk = (node) => {
             if (!node || ["input", "option", "select", "textarea"].includes(node.name)) return;
