@@ -79,7 +79,7 @@ function cidFontPdf(encoding = "90ms-RKSJ-H", content = "BT /F1 12 Tf 72 720 Td 
 }
 
 type FormMode = "static" | "javascript" | "password" | "calculation" | "invalidPage"
-  | "invalidRect" | "unsupported" | "blankChoice" | "multiselect" | "radioSecond" | "scanned";
+  | "invalidRect" | "blankInvalidRect" | "unsupported" | "blankChoice" | "multiselect" | "radioSecond" | "scanned";
 
 function formPdf(mode: FormMode = "static") {
   const textFlags = mode === "password" ? " /Ff 8192" : "";
@@ -89,11 +89,12 @@ function formPdf(mode: FormMode = "static") {
   const fieldType = mode === "unsupported" ? "/FT /Btn /Ff 65536" : `/FT /Tx${textFlags}`;
   const pageRef = mode === "invalidPage" ? "99 0 R" : "4 0 R";
   const rectEnd = mode === "invalidRect" ? "1".padEnd(310, "0") : "200";
+  const choiceRectEnd = mode === "blankInvalidRect" ? "1".padEnd(310, "0") : "200";
   const calculation = mode === "calculation" ? " /CO [7 0 R]" : "";
   const annots = mode === "invalidPage" ? "8 0 R 9 0 R 11 0 R 12 0 R 13 0 R" : "7 0 R 8 0 R 9 0 R 11 0 R 12 0 R 13 0 R";
   const scanned = mode === "scanned";
-  const choice = mode === "blankChoice"
-    ? "<< /Type /Annot /Subtype /Widget /FT /Ch /Ff 131072 /T (Basis) /Opt [(Cash) (Accrual)] /Rect [72 600 200 620] /P 4 0 R >>"
+  const choice = mode === "blankChoice" || mode === "blankInvalidRect"
+    ? `<< /Type /Annot /Subtype /Widget /FT /Ch /Ff 131072 /T (Basis) /Opt [(Cash) (Accrual)] /Rect [72 600 ${choiceRectEnd} 620] /P 4 0 R >>`
     : mode === "multiselect"
       ? "<< /Type /Annot /Subtype /Widget /FT /Ch /Ff 2097152 /T (Basis) /V [(Cash) (Accrual)] /I [0 1] /Opt [(Cash) (Accrual)] /Rect [72 600 200 620] /P 4 0 R >>"
       : "<< /Type /Annot /Subtype /Widget /FT /Ch /Ff 131072 /T (Basis) /V (Accrual) /Opt [(Cash) (Accrual)] /Rect [72 600 200 620] /P 4 0 R >>";
@@ -208,7 +209,7 @@ describe("extractFinanceReportFile", () => {
     })).rejects.toMatchObject({ code: "UNSUPPORTED_PDF_FEATURE" });
   });
 
-  pdfIt.each(["invalidPage", "invalidRect"] as const)("rejects malformed %s AcroForm evidence", async (mode) => {
+  pdfIt.each(["invalidPage", "invalidRect", "blankInvalidRect"] as const)("rejects malformed %s AcroForm evidence", async (mode) => {
     await expect(extractFinanceReportFile({
       fileBuffer: formPdf(mode),
       fileName: "invalid-form.pdf",

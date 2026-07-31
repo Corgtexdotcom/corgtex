@@ -120,11 +120,18 @@ const fail = (code) => { const error = new Error(code); error.code = code; throw
         if (!Number.isInteger(widget.page) || widget.page < 0 || widget.page >= document.numPages) fail("MALFORMED_FILE");
         const name = typeof widget.name === "string" && widget.name ? widget.name : fallbackName;
         const value = widget.value;
-        if ((widget.type === "combobox" || widget.type === "listbox")
-          && (value === undefined || value === null || value === "")) continue;
+        let rect;
+        if (widget.rect !== undefined && widget.rect !== null) {
+          if (!Array.isArray(widget.rect) || widget.rect.length !== 4
+            || !widget.rect.every(Number.isFinite)) fail("MALFORMED_FILE");
+          rect = widget.rect;
+        }
         if (widget.type === "listbox" && widget.multipleSelection && widget.numItems > 1) {
           fail("UNSUPPORTED_PDF_FEATURE");
         }
+        const blankChoice = (widget.type === "combobox" || widget.type === "listbox")
+          && (value === undefined || value === null || value === "");
+        if (blankChoice) continue;
         if (widget.type === "radiobutton") {
           if (value === undefined || value === null || value === "" || value === "Off") continue;
           if (typeof widget.exportValues !== "string") fail("UNSUPPORTED_PDF_FEATURE");
@@ -134,12 +141,6 @@ const fail = (code) => { const error = new Error(code); error.code = code; throw
           || (typeof value === "number" && Number.isFinite(value))
           || (Array.isArray(value) && value.every((entry) => typeof entry === "string")))) {
           fail("UNSUPPORTED_PDF_FEATURE");
-        }
-        let rect;
-        if (widget.rect !== undefined && widget.rect !== null) {
-          if (!Array.isArray(widget.rect) || widget.rect.length !== 4
-            || !widget.rect.every(Number.isFinite)) fail("MALFORMED_FILE");
-          rect = widget.rect;
         }
         const radioKey = JSON.stringify([name, value]);
         if (widget.type === "radiobutton" && radioKeys.has(radioKey)) continue;
