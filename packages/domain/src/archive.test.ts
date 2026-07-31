@@ -60,6 +60,7 @@ const { prismaMock, storageDeleteMock } = vi.hoisted(() => {
     financeImportBatch: {
       findFirst: vi.fn(),
     },
+    $queryRaw: vi.fn(),
   };
   return { prismaMock: prisma, storageDeleteMock: vi.fn() };
 });
@@ -106,6 +107,7 @@ describe("workspace archive domain", () => {
     prismaMock.workItemVersion.deleteMany.mockResolvedValue({ count: 0 });
     prismaMock.knowledgeChunk.deleteMany.mockResolvedValue({ count: 0 });
     prismaMock.financeImportBatch.findFirst.mockResolvedValue(null);
+    prismaMock.$queryRaw.mockResolvedValue([{ pg_advisory_xact_lock: null }]);
     storageDeleteMock.mockResolvedValue(undefined);
   });
 
@@ -365,6 +367,7 @@ describe("workspace archive domain", () => {
       where: { workspaceId: "workspace-1", [linkField]: record.id },
       select: { id: true },
     });
+    expect(prismaMock.$queryRaw).toHaveBeenCalled();
     expect(prismaMock.knowledgeChunk.deleteMany).not.toHaveBeenCalled();
     expect(storageDeleteMock).not.toHaveBeenCalled();
     expect(delegate.delete).not.toHaveBeenCalled();
@@ -408,6 +411,27 @@ describe("workspace archive domain", () => {
     expect(prismaMock.knowledgeChunk.deleteMany).toHaveBeenCalled();
     expect(storageDeleteMock).toHaveBeenCalledWith("private/unlinked");
     expect(prismaMock.brainSource.delete).toHaveBeenCalledWith({ where: { id: source.id } });
+  });
+
+  it("leaves private storage intact when the database purge fails", async () => {
+    const source = {
+      id: "source-1",
+      workspaceId: "workspace-1",
+      title: "Unlinked",
+      archivedAt: new Date(),
+      fileStorageKey: "private/unlinked",
+    };
+    prismaMock.brainSource.findFirst.mockResolvedValue(source);
+    prismaMock.workspaceArchiveRecord.findFirst.mockResolvedValue({ id: "archive-1" });
+    prismaMock.brainSource.delete.mockRejectedValue(new Error("database failure"));
+    const { purgeWorkspaceArtifact } = await import("./archive");
+    await expect(purgeWorkspaceArtifact(actor, {
+      workspaceId: "workspace-1",
+      entityType: "BrainSource",
+      entityId: source.id,
+      reason: "synthetic cleanup",
+    })).rejects.toThrow("database failure");
+    expect(storageDeleteMock).not.toHaveBeenCalled();
   });
 
   it("lists active archive records by default", async () => {
