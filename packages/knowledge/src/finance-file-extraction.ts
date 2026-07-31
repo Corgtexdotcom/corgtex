@@ -91,7 +91,10 @@ const PDF_WORKER_SOURCE = String.raw`
 const limits = JSON.parse(process.env.CORGTEX_FINANCE_PDF_LIMITS || "{}");
 class ControlledError extends Error { constructor(code) { super(code); this.code = code; } }
 const stop = (code) => { throw new ControlledError(code); };
-const round = (value) => Math.round(value * 1000) / 1000;
+const round = (value) => {
+  if (!Number.isFinite(value)) stop("MALFORMED_FILE");
+  return Math.round(value * 1000) / 1000;
+};
 async function main() {
   const chunks = [];
   for await (const chunk of process.stdin) chunks.push(chunk);
@@ -194,7 +197,7 @@ async function extractPdf(buffer: Buffer, limits: FinanceFileExtractionLimits) {
       },
       stdio: ["pipe", "pipe", "pipe"] as const,
     });
-    let stdout = "";
+    const stdoutChunks: Buffer[] = [];
     let stdoutBytes = 0;
     let stderrBytes = 0;
     let failure: FinanceFileExtractionErrorCode | undefined;
@@ -206,7 +209,7 @@ async function extractPdf(buffer: Buffer, limits: FinanceFileExtractionLimits) {
     child.stdout.on("data", (chunk: Buffer) => {
       stdoutBytes += chunk.length;
       if (stdoutBytes > limits.maxPdfOutputBytes) terminate("EXTRACTION_LIMIT_EXCEEDED");
-      else stdout += chunk.toString("utf8");
+      else stdoutChunks.push(Buffer.from(chunk));
     });
     child.stderr.on("data", (chunk: Buffer) => {
       stderrBytes += chunk.length;
@@ -221,6 +224,7 @@ async function extractPdf(buffer: Buffer, limits: FinanceFileExtractionLimits) {
       if (signal) return reject(new FinanceFileExtractionError("EXTRACTION_LIMIT_EXCEEDED"));
       if (code !== 0) return reject(new FinanceFileExtractionError("EXTRACTION_FAILED"));
       try {
+        const stdout = Buffer.concat(stdoutChunks, stdoutBytes).toString("utf8");
         const result = JSON.parse(stdout) as { ok?: boolean; code?: string; sheets?: FinanceExtractedSheet[] };
         if (result.ok === false && [
           "EMPTY_EXTRACTION", "EXTRACTION_LIMIT_EXCEEDED", "MALFORMED_FILE", "UNSUPPORTED_FILE_TYPE",

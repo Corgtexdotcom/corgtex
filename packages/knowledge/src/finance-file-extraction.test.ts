@@ -145,6 +145,17 @@ describe("extractFinanceReportFile", () => {
     await expect(extraction).resolves.toMatchObject({ fileHash: hash, sheets: [{ cells: [expect.objectContaining({ value: "Margin" })] }] });
   });
 
+  it("preserves multibyte PDF text across child stdout chunks", async () => {
+    const result = await extractFinanceReportFile({
+      fileBuffer: createTextPdf(Array.from({ length: 300 }, () => ({ text: "é".repeat(100) }))),
+      fileName: "large.pdf",
+      mimeType: "application/pdf",
+    });
+    const value = result.sheets.flatMap((sheet) => sheet.cells).map((cell) => cell.value).join("");
+    expect(Buffer.byteLength(value, "utf8")).toBeGreaterThan(65_536);
+    expect(value).not.toContain("\uFFFD");
+  });
+
   it("retains secure PDF defaults for invalid partial limit overrides", async () => {
     await expect(extractFinanceReportFile({
       fileBuffer: createTextPdf([{ text: "Operating income" }]),
