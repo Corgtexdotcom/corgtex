@@ -149,6 +149,16 @@ export const AGENT_REGISTRY = {
     inputs: ["contact email"],
     outputs: ["company description", "industry", "headquarters"],
   },
+  "finance-report-import": {
+    label: "Finance Report Import",
+    description: "Interprets extracted financial reports into editable proposals for human review.",
+    category: "finance",
+    canDisable: true,
+    defaultModelTier: "quality" as const,
+    costTier: "high" as const,
+    inputs: ["extracted report evidence", "approved profile hints"],
+    outputs: ["validated editable Finance report proposal"],
+  },
 } as const;
 
 export type RegisteredAgentKey = keyof typeof AGENT_REGISTRY;
