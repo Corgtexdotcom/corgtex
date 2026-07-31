@@ -904,6 +904,7 @@ export async function getBrainStatus(actor: AppActor, params: {
     actor,
     workspaceId: params.workspaceId,
   });
+  const accessDomains = await resolveKnowledgeAccessDomains(actor, params.workspaceId);
 
   const [
     articles,
@@ -932,7 +933,11 @@ export async function getBrainStatus(actor: AppActor, params: {
       },
     }),
     prisma.brainSource.count({
-      where: { workspaceId: params.workspaceId, absorbedAt: null },
+      where: {
+        workspaceId: params.workspaceId,
+        accessDomain: { in: accessDomains },
+        absorbedAt: null,
+      },
     }),
     prisma.brainDiscussionThread.count({
       where: {
