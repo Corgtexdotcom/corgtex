@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { deflateSync } from "node:zlib";
 import { describe, expect, it } from "vitest";
+import * as XLSX from "xlsx";
 import { extractFinanceReportFile } from "./finance-file-extraction";
 
 type PdfPage =
@@ -105,7 +106,48 @@ function xfaPdf() {
   ]);
 }
 
+function xlsx(options: {
+  comment?: boolean; drawing?: boolean; empty?: boolean; externalFormula?: boolean;
+  hiddenColumn?: boolean; hiddenRow?: boolean; hiddenSheet?: boolean; macro?: boolean;
+  missingFormulaResult?: boolean;
+} = {}) {
+  const workbook = XLSX.utils.book_new();
+  const sheet = options.empty ? XLSX.utils.aoa_to_sheet([]) : {
+    "!ref": "A1:E4",
+    "!merges": [{ s: { r: 3, c: 0 }, e: { r: 3, c: 1 } }],
+    A1: { t: "s", v: "Revenue", r: "<r><t>Revenue</t></r>" },
+    B1: { t: "n", v: 1234.5, z: "$#,##0.00" },
+    C1: { t: "b", v: true },
+    D1: { t: "n", v: 46023, z: "yyyy-mm-dd" },
+    E1: { t: "e", v: 7 },
+    A2: { t: "s", v: "Total" },
+    B2: { t: "n", v: 1234.5, f: "SUM(B1:B1)" },
+    ...(options.externalFormula ? { A3: { t: "n", v: 1, f: "[outside.xlsx]Actuals!A1" } } : {}),
+    ...(options.missingFormulaResult ? { A3: { t: "n", f: "SUM(B1:B1)" } } : {}),
+    A4: { t: "s", v: "Merged" },
+    B4: { t: "s", v: "Merged slave must not be evidence" },
+  } satisfies XLSX.WorkSheet;
+  if (options.comment && sheet.A1) sheet.A1.c = [{ a: "Reviewer", t: "private note" }];
+  if (options.hiddenRow) sheet["!rows"] = [{ hidden: true }];
+  if (options.hiddenColumn) sheet["!cols"] = [{ hidden: true }];
+  XLSX.utils.book_append_sheet(workbook, sheet, "Actuals");
+  XLSX.utils.book_append_sheet(workbook, XLSX.utils.aoa_to_sheet(options.empty ? [] : [["Source"]]), "Evidence");
+  if (options.hiddenSheet) workbook.Workbook = { Sheets: [{ Hidden: 0 }, { Hidden: 1 }] };
+  let buffer = Buffer.from(XLSX.write(workbook, {
+    type: "buffer",
+    bookType: options.macro ? "xlsm" : "xlsx",
+    compression: true,
+  }));
+  if (options.drawing) {
+    const archive = XLSX.CFB.read(buffer, { type: "buffer" });
+    XLSX.CFB.utils.cfb_add(archive, "xl/drawings/drawing1.xml", Buffer.from("<xdr:wsDr/>"));
+    buffer = Buffer.from(XLSX.CFB.write(archive, { type: "buffer", fileType: "zip", compression: true }));
+  }
+  return buffer;
+}
+
 const pdfIt = it.runIf(process.platform === "linux");
+const xlsxIt = it.runIf(process.platform === "linux");
 describe("extractFinanceReportFile", () => {
   pdfIt("extracts ordered PDF pages while retaining genuine blank pages", async () => {
     const input = pdf("Revenue|100.00", "");
@@ -170,6 +212,74 @@ describe("extractFinanceReportFile", () => {
     })).rejects.toMatchObject({ code: "EXTRACTION_LIMIT_EXCEEDED" });
   });
 
+  xlsxIt("extracts typed visible cells, formulas, formatting, merges, and workbook order", async () => {
+    const input = xlsx();
+    const result = await extractFinanceReportFile({
+      fileBuffer: input,
+      fileName: "actuals.xlsx",
+      mimeType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    });
+    expect(result).toMatchObject({
+      fileHash: createHash("sha256").update(input).digest("hex"),
+      format: "XLSX",
+      mimeType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    });
+    expect(result.sheets).toEqual([
+      {
+        name: "Actuals",
+        rowCount: 4,
+        columnCount: 5,
+        cells: [
+          { row: 1, column: 1, type: "TEXT", value: "Revenue" },
+          { row: 1, column: 2, type: "NUMBER", value: "1234.5", displayValue: "$1,234.50" },
+          { row: 1, column: 3, type: "BOOLEAN", value: "true", displayValue: "TRUE" },
+          { row: 1, column: 4, type: "DATE", value: "2026-01-01T00:00:00.000Z", displayValue: "2026-01-01" },
+          { row: 1, column: 5, type: "ERROR", value: "#DIV/0!" },
+          { row: 2, column: 1, type: "TEXT", value: "Total" },
+          { row: 2, column: 2, type: "FORMULA", value: "1234.5", formula: "SUM(B1:B1)", resultType: "NUMBER" },
+          { row: 4, column: 1, type: "TEXT", value: "Merged" },
+        ],
+      },
+      {
+        name: "Evidence",
+        rowCount: 1,
+        columnCount: 1,
+        cells: [{ row: 1, column: 1, type: "TEXT", value: "Source" }],
+      },
+    ]);
+  });
+
+  xlsxIt.each([
+    ["hidden sheet", xlsx({ hiddenSheet: true })],
+    ["hidden row", xlsx({ hiddenRow: true })],
+    ["hidden column", xlsx({ hiddenColumn: true })],
+    ["comment", xlsx({ comment: true })],
+    ["drawing", xlsx({ drawing: true })],
+    ["macro payload", xlsx({ macro: true })],
+    ["external formula", xlsx({ externalFormula: true })],
+    ["formula without a cached result", xlsx({ missingFormulaResult: true })],
+  ])("fails the whole workbook closed for an unsupported %s", async (_label, fileBuffer) => {
+    await expect(extractFinanceReportFile({
+      fileBuffer,
+      fileName: "unsupported.xlsx",
+      mimeType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    })).rejects.toMatchObject({ code: "UNSUPPORTED_XLSX_FEATURE" });
+  });
+
+  xlsxIt.each([
+    ["sheet limit", { maxSheets: 1 }],
+    ["aggregate row limit", { maxRows: 4 }],
+    ["cell limit", { maxCells: 1 }],
+    ["text limit", { maxTextChars: 1 }],
+  ])("enforces the XLSX %s without partial output", async (_label, limits) => {
+    await expect(extractFinanceReportFile({
+      fileBuffer: xlsx(),
+      fileName: "limited.xlsx",
+      mimeType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      limits,
+    })).rejects.toMatchObject({ code: "EXTRACTION_LIMIT_EXCEEDED" });
+  });
+
   it("preserves CSV source locations, quoting, whitespace, empty cells, and exact text", async () => {
     const input = Buffer.from('\uFEFFAccount,Amount,Note\r\n"Sales, Online",001.20,"two\nlines"\r\nCosts,"  ",');
     const result = await extractFinanceReportFile({ fileBuffer: input, fileName: "actuals.csv", mimeType: "text/csv" });
@@ -223,7 +333,9 @@ describe("extractFinanceReportFile", () => {
     [Buffer.from("a,b\n1"), "report.csv", "text/csv", {}, "MALFORMED_FILE"],
     [Buffer.from("a"), "report.csv", "application/pdf", {}, "FILE_TYPE_MISMATCH"],
     [Buffer.from("a"), "report.txt", "text/plain", {}, "UNSUPPORTED_FILE_TYPE"],
-    [Buffer.from("PK"), "report.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", {}, "UNSUPPORTED_FILE_TYPE"],
+    [Buffer.from("PK"), "report.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", {}, "MALFORMED_FILE"],
+    [xlsx(), "report.xlsm", "application/vnd.ms-excel.sheet.macroEnabled.12", {}, "UNSUPPORTED_FILE_TYPE"],
+    [xlsx(), "report.xlsx", "application/pdf", {}, "FILE_TYPE_MISMATCH"],
     [Buffer.from(",\n,"), "report.csv", "text/csv", {}, "EMPTY_EXTRACTION"],
     [Buffer.from("a,b"), "report.csv", "text/csv", { maxFileBytes: 1 }, "FILE_TOO_LARGE"],
     [Buffer.from("a\n".repeat(20_001)), "report.csv", "text/csv", { maxRows: undefined }, "EXTRACTION_LIMIT_EXCEEDED"],
@@ -235,6 +347,8 @@ describe("extractFinanceReportFile", () => {
     [Buffer.from(",".repeat(250_000)), "report.csv", "text/csv", {}, "EXTRACTION_LIMIT_EXCEEDED"],
     [Buffer.from("ab"), "report.csv", "text/csv", { maxTextChars: 1 }, "EXTRACTION_LIMIT_EXCEEDED"],
     ...((process.platform === "linux" ? [
+      [Buffer.from("PK\u0003\u0004broken"), "report.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", {}, "MALFORMED_FILE"],
+      [xlsx({ empty: true }), "report.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", {}, "EMPTY_EXTRACTION"],
       [pdf("Revenue"), "report.pdf", "application/pdf", { maxPages: 0 }, "EXTRACTION_LIMIT_EXCEEDED"],
       [pdf("Revenue"), "report.pdf", "application/pdf", { maxTextChars: 1 }, "EXTRACTION_LIMIT_EXCEEDED"],
       [pdf(), "report.pdf", "application/pdf", {}, "EMPTY_EXTRACTION"],
