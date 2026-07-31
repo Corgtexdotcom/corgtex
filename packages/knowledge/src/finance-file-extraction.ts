@@ -93,7 +93,7 @@ const fail = (code) => { const error = new Error(code); error.code = code; throw
     const document = await task.promise;
     if (document.numPages === 0) fail("EMPTY_EXTRACTION");
     if (document.numPages > maxPages) fail("EXTRACTION_LIMIT_EXCEEDED");
-    const fieldLinesByPage = Array.from({ length: document.numPages }, () => new Set());
+    const fieldLinesByPage = Array.from({ length: document.numPages }, () => new Map());
     const fieldObjects = await document.getFieldObjects();
     if (fieldObjects) {
       const supportedTypes = new Set(["checkbox", "combobox", "listbox", "radiobutton", "text"]);
@@ -110,15 +110,24 @@ const fail = (code) => { const error = new Error(code); error.code = code; throw
         for (const field of orderedFields) {
           if (!supportedTypes.has(field.type) || field.hidden || field.password) continue;
           if (field.multipleSelection && field.numItems > 1) fail("UNSUPPORTED_PDF_FEATURE");
-          const values = (Array.isArray(field.value) ? field.value : [field.value])
+          const rawValues = (Array.isArray(field.value) ? field.value : [field.value])
             .filter((value) => typeof value === "string" || typeof value === "number" || typeof value === "boolean")
-            .map(String)
-            .filter((value) => value.trim());
+            .map(String);
+          const values = ["combobox", "listbox"].includes(field.type) && Array.isArray(field.items)
+            ? rawValues.map((value) => {
+              const item = field.items.find((candidate) => String(candidate?.exportValue ?? "") === value);
+              return typeof item?.displayValue === "string" ? item.displayValue : value;
+            }).filter((value) => value.trim())
+            : rawValues.filter((value) => value.trim());
           if (values.length === 0) continue;
-          if (!name.trim() || !Number.isInteger(field.page) || field.page < 0 || field.page >= document.numPages) {
+          const fieldId = String(field.id ?? "");
+          if (!name.trim() || !fieldId || !Number.isInteger(field.page) || field.page < 0 || field.page >= document.numPages) {
             fail("UNSUPPORTED_PDF_FEATURE");
           }
-          fieldLinesByPage[field.page].add("[AcroForm]\t" + JSON.stringify([name, ...values]));
+          const line = "[AcroForm]\t" + JSON.stringify([name, ...values]);
+          const fieldIds = fieldLinesByPage[field.page].get(line) ?? new Set();
+          fieldIds.add(fieldId);
+          fieldLinesByPage[field.page].set(line, fieldIds);
         }
       }
     }
@@ -137,7 +146,8 @@ const fail = (code) => { const error = new Error(code); error.code = code; throw
       try {
         const hasXfaControls = (node) => {
           if (!node) return false;
-          if (["input", "select", "textarea"].includes(node.name)) return true;
+          if (["button", "input", "select", "textarea"].includes(node.name)) return true;
+          if (Array.isArray(node.attributes?.class) && node.attributes.class.includes("xfaField")) return true;
           return Array.isArray(node.children) && node.children.some(hasXfaControls);
         };
         const consume = (content, isXfa = false) => {
@@ -153,8 +163,8 @@ const fail = (code) => { const error = new Error(code); error.code = code; throw
             }
             const [a, b, c, d, x, y] = item.transform;
             const vertical = verticalFonts.has(item.fontName);
-            const axisX = vertical ? c : a;
-            const axisY = vertical ? d : b;
+            const axisX = vertical ? -c : a;
+            const axisY = vertical ? -d : b;
             const scale = Math.hypot(axisX, axisY) || 1;
             const ux = axisX / scale;
             const uy = axisY / scale;
@@ -189,14 +199,20 @@ const fail = (code) => { const error = new Error(code); error.code = code; throw
             consume(chunk.value);
           }
         }
-        for (const fieldLine of fieldLinesByPage[pageNumber - 1]) {
-          if (text && !text.endsWith("\n")) append("\n");
-          append(fieldLine);
-        }
         if (!text.trim()) {
           const operators = await page.getOperatorList();
           if (operators.fnArray.some((operator) => imageOps.has(operator))) {
             fail("SCANNED_PDF_UNSUPPORTED");
+          }
+        }
+        const pageFieldLines = fieldLinesByPage[pageNumber - 1];
+        if (pageFieldLines.size > 0) {
+          const visibleFieldIds = new Set((await page.getAnnotations({ intent: "display" }))
+            .map((annotation) => String(annotation.id ?? "")));
+          for (const [fieldLine, fieldIds] of pageFieldLines) {
+            if (![...fieldIds].some((fieldId) => visibleFieldIds.has(fieldId))) continue;
+            if (text && !text.endsWith("\n")) append("\n");
+            append(fieldLine);
           }
         }
       } finally {
