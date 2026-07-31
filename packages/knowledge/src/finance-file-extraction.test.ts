@@ -80,7 +80,7 @@ function cidFontPdf(
   ]);
 }
 
-function formPdf(multiSelect = false, scanned = false, choiceValue = "A") {
+function formPdf(multiSelect = false, scanned = false, choiceValue = "A", choiceFlags = "") {
   const choice = multiSelect
     ? "/Ff 2097152 /V [(Cash) (Accrual)]"
     : `/V (${choiceValue})`;
@@ -96,7 +96,7 @@ function formPdf(multiSelect = false, scanned = false, choiceValue = "A") {
     Buffer.from("<< /Fields [7 0 R 8 0 R 9 0 R 10 0 R 11 0 R 12 0 R 13 0 R 14 0 R 15 0 R] /NeedAppearances true >>"),
     Buffer.from("<< /Type /Annot /Subtype /Widget /FT /Tx /T (Revenue) /V (123.45) /Rect [72 700 200 720] /P 4 0 R /AA << /K << /S /JavaScript /JS (app.alert\\(secret\\)) >> >> >>"),
     Buffer.from("<< /Type /Annot /Subtype /Widget /FT /Tx /T (Revenue) /V (123.45) /Rect [72 670 200 690] /P 4 0 R >>"),
-    Buffer.from(`<< /Type /Annot /Subtype /Widget /FT /Ch /T (Basis) ${choice} /Opt [[(C) (Cash Basis)] [(A) (Accrual Basis)]] /Rect [72 640 200 660] /P 4 0 R >>`),
+    Buffer.from(`<< /Type /Annot /Subtype /Widget /FT /Ch ${choiceFlags} /T (Basis) ${choice} /Opt [[(C) (Cash Basis)] [(A) (Accrual Basis)]] /Rect [72 640 200 660] /P 4 0 R >>`),
     Buffer.from("<< /Type /Annot /Subtype /Widget /FT /Btn /T (Approved) /V /Yes /AS /Yes /Rect [72 610 90 628] /P 4 0 R >>"),
     Buffer.from("<< /Type /Annot /Subtype /Widget /FT /Btn /Ff 32768 /T (Scenario) /V /Base /AS /Base /AP << /N << /Base 16 0 R /Off 16 0 R >> >> /Rect [72 580 90 598] /P 4 0 R >>"),
     Buffer.from("<< /Type /Annot /Subtype /Widget /FT /Tx /T (HiddenValue) /V (ignore) /F 2 /Rect [72 550 200 570] /P 4 0 R >>"),
@@ -140,10 +140,10 @@ function pagedRadioFormPdf() {
   ]);
 }
 
-function xfaPdf(values: string[], controlValue?: string, richText = false) {
-  const draws = values.map((value, index) => `<subform name="line${index}">
-    ${index === 0 ? "" : '<breakBefore targetType="pageArea" startNew="1"/>'}
-    <draw w="300pt" h="20pt"><value>${richText
+function xfaPdf(values: string[], controlValue?: string, richText = false, firstPresence = "", layout = "tb") {
+  const draws = values.map((value, index) => `<subform name="line${index}"${layout === "position" ? ` y="${index === 0 ? 40 : 0}pt"` : ""}>
+    ${index === 0 || layout === "position" ? "" : '<breakBefore targetType="pageArea" startNew="1"/>'}
+    <draw ${index === 0 && firstPresence ? `presence="${firstPresence}" ` : ""}w="300pt" h="20pt"><value>${richText
     ? `<exData contentType="text/html"><body xmlns="http://www.w3.org/1999/xhtml"><p>${value}</p></body></exData>`
     : `<text>${value}</text>`}</value></draw>
   </subform>`)
@@ -154,7 +154,7 @@ function xfaPdf(values: string[], controlValue?: string, richText = false) {
   const xml = `<?xml version="1.0"?>
 <xdp:xdp xmlns:xdp="http://ns.adobe.com/xdp/">
   <template xmlns="http://www.xfa.org/schema/xfa-template/3.3">
-    <subform name="root" mergeMode="matchTemplate" layout="tb">
+    <subform name="root" mergeMode="matchTemplate" layout="${layout}">
       <pageSet><pageArea><contentArea x="0pt" w="456pt" h="789pt"/><medium short="456pt" long="789pt"/></pageArea></pageSet>
       ${draws}${control}
     </subform>
@@ -259,6 +259,11 @@ describe("extractFinanceReportFile", () => {
       fileName: "unmatched-choice.pdf",
       mimeType: "application/pdf",
     })).rejects.toMatchObject({ code: "UNSUPPORTED_PDF_FEATURE" });
+    await expect(extractFinanceReportFile({
+      fileBuffer: formPdf(false, false, "INTERNAL", "/Ff 131072"),
+      fileName: "unmatched-combobox.pdf",
+      mimeType: "application/pdf",
+    })).rejects.toMatchObject({ code: "UNSUPPORTED_PDF_FEATURE" });
   });
 
   pdfIt("extracts pure XFA text in page order and enforces the shared character limit", async () => {
@@ -287,6 +292,21 @@ describe("extractFinanceReportFile", () => {
       mimeType: "application/pdf",
     });
     expect(result.pages).toEqual([{ page: 1, text: "Revenue 123" }]);
+  });
+
+  pdfIt("skips invisible XFA text and reads positioned layouts visually", async () => {
+    const visible = await extractFinanceReportFile({
+      fileBuffer: xfaPdf(["SECRET", "Revenue"], undefined, false, "invisible"),
+      fileName: "xfa-invisible.pdf",
+      mimeType: "application/pdf",
+    });
+    expect(visible.pages).toEqual([{ page: 1, text: "" }, { page: 2, text: "Revenue" }]);
+    const positioned = await extractFinanceReportFile({
+      fileBuffer: xfaPdf(["SECOND", "FIRST"], undefined, false, "", "position"),
+      fileName: "xfa-positioned.pdf",
+      mimeType: "application/pdf",
+    });
+    expect(positioned.pages).toEqual([{ page: 1, text: "FIRST\nSECOND" }]);
   });
 
   pdfIt("fails pure XFA controls closed instead of omitting their values", async () => {

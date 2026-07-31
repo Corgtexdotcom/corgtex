@@ -124,7 +124,6 @@ const fail = (code) => { const error = new Error(code); error.code = code; throw
             ? rawValues.map((value) => {
               const item = field.items.find((candidate) => String(candidate?.exportValue ?? "") === value);
               if (typeof item?.displayValue === "string") return item.displayValue;
-              if (field.type === "combobox" && field.editable) return value;
               fail("UNSUPPORTED_PDF_FEATURE");
             }).filter((value) => value.trim())
             : rawValues.filter((value) => value.trim());
@@ -168,6 +167,8 @@ const fail = (code) => { const error = new Error(code); error.code = code; throw
           let pendingBreak = false;
           const walk = (node) => {
             if (!node || ["input", "option", "select", "textarea"].includes(node.name)) return;
+            const style = node.attributes?.style;
+            if (style?.visibility === "hidden" || style?.display === "none") return;
             if (node.name === "br" || node.name === "hr") {
               pendingBreak = true;
               return;
@@ -182,7 +183,15 @@ const fail = (code) => { const error = new Error(code); error.code = code; throw
               pendingBreak = false;
             }
             if (Array.isArray(node.children)) {
-              for (const child of node.children) walk(child);
+              const children = [...node.children];
+              if (children.length > 1 && children.every((child) => child.attributes?.style?.position === "absolute")) {
+                const coordinate = (child, key) => Number.parseFloat(child.attributes.style[key]) || 0;
+                children.sort((left, right) => (
+                  coordinate(left, "top") - coordinate(right, "top")
+                  || coordinate(left, "left") - coordinate(right, "left")
+                ));
+              }
+              for (const child of children) walk(child);
             }
             if (blockNodes.has(node.name) && text.length > startLength) pendingBreak = true;
           };
