@@ -113,6 +113,13 @@ const fail = (code) => { const error = new Error(code); error.code = code; throw
           const rawValues = (Array.isArray(field.value) ? field.value : [field.value])
             .filter((value) => typeof value === "string" || typeof value === "number" || typeof value === "boolean")
             .map(String);
+          if (field.type === "radiobutton") {
+            const widgetExports = (Array.isArray(field.exportValues) ? field.exportValues : [field.exportValues])
+              .filter((value) => typeof value === "string" || typeof value === "number" || typeof value === "boolean")
+              .map(String);
+            if (widgetExports.length === 0) fail("UNSUPPORTED_PDF_FEATURE");
+            if (!rawValues.some((value) => widgetExports.includes(value))) continue;
+          }
           const values = ["combobox", "listbox"].includes(field.type) && Array.isArray(field.items)
             ? rawValues.map((value) => {
               const item = field.items.find((candidate) => String(candidate?.exportValue ?? "") === value);

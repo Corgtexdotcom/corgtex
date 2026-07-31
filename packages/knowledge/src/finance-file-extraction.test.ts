@@ -98,11 +98,12 @@ function formPdf(multiSelect = false, scanned = false) {
     Buffer.from("<< /Type /Annot /Subtype /Widget /FT /Tx /T (Revenue) /V (123.45) /Rect [72 670 200 690] /P 4 0 R >>"),
     Buffer.from(`<< /Type /Annot /Subtype /Widget /FT /Ch /T (Basis) ${choice} /Opt [[(C) (Cash Basis)] [(A) (Accrual Basis)]] /Rect [72 640 200 660] /P 4 0 R >>`),
     Buffer.from("<< /Type /Annot /Subtype /Widget /FT /Btn /T (Approved) /V /Yes /AS /Yes /Rect [72 610 90 628] /P 4 0 R >>"),
-    Buffer.from("<< /Type /Annot /Subtype /Widget /FT /Btn /Ff 32768 /T (Scenario) /V /Base /AS /Base /Rect [72 580 90 598] /P 4 0 R >>"),
+    Buffer.from("<< /Type /Annot /Subtype /Widget /FT /Btn /Ff 32768 /T (Scenario) /V /Base /AS /Base /AP << /N << /Base 16 0 R /Off 16 0 R >> >> /Rect [72 580 90 598] /P 4 0 R >>"),
     Buffer.from("<< /Type /Annot /Subtype /Widget /FT /Tx /T (HiddenValue) /V (ignore) /F 2 /Rect [72 550 200 570] /P 4 0 R >>"),
     Buffer.from("<< /Type /Annot /Subtype /Widget /FT /Btn /Ff 65536 /T (RunAction) /Rect [72 520 200 540] /P 4 0 R /A << /S /JavaScript /JS (app.alert\\(ignore\\)) >> >>"),
     Buffer.from("<< /Type /Annot /Subtype /Widget /FT /Sig /T (Signature) /Rect [72 490 200 510] /P 4 0 R >>"),
     Buffer.from("<< /Type /Annot /Subtype /Widget /FT /Tx /Ff 8192 /T (Password) /V (ignore-password) /Rect [72 460 200 480] /P 4 0 R >>"),
+    Buffer.from("<< /Type /XObject /Subtype /Form /BBox [0 0 10 10] /Length 0 >>\nstream\n\nendstream"),
   ]);
 }
 
@@ -118,6 +119,24 @@ function pagedFormPdf() {
     Buffer.from("<< /Fields [9 0 R 10 0 R] >>"),
     Buffer.from("<< /Type /Annot /Subtype /Widget /FT /Tx /T (PageOne) /V (One) /Rect [72 700 200 720] /P 4 0 R >>"),
     Buffer.from("<< /Type /Annot /Subtype /Widget /FT /Tx /T (PageTwo) /V (Two) /Rect [72 700 200 720] /P 6 0 R >>"),
+  ]);
+}
+
+function pagedRadioFormPdf() {
+  const appearance = Buffer.from("<< /Type /XObject /Subtype /Form /BBox [0 0 10 10] /Length 0 >>\nstream\n\nendstream");
+  return renderPdf([
+    Buffer.from("<< /Type /Catalog /Pages 2 0 R /AcroForm 8 0 R >>"),
+    Buffer.from("<< /Type /Pages /Kids [4 0 R 6 0 R] /Count 2 >>"),
+    Buffer.from("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>"),
+    Buffer.from("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 1000 1000] /Contents 5 0 R /Annots [10 0 R] >>"),
+    Buffer.from("<< /Length 0 >>\nstream\n\nendstream"),
+    Buffer.from("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 1000 1000] /Contents 7 0 R /Annots [11 0 R] >>"),
+    Buffer.from("<< /Length 0 >>\nstream\n\nendstream"),
+    Buffer.from("<< /Fields [9 0 R] >>"),
+    Buffer.from("<< /FT /Btn /Ff 32768 /T (Scenario) /V /A /Kids [10 0 R 11 0 R] >>"),
+    Buffer.from("<< /Type /Annot /Subtype /Widget /Parent 9 0 R /AS /A /AP << /N << /A 12 0 R /Off 12 0 R >> >> /Rect [72 700 90 718] /P 4 0 R >>"),
+    Buffer.from("<< /Type /Annot /Subtype /Widget /Parent 9 0 R /AS /Off /AP << /N << /C 12 0 R /Off 12 0 R >> >> /Rect [72 700 90 718] /P 6 0 R >>"),
+    appearance,
   ]);
 }
 
@@ -209,6 +228,18 @@ describe("extractFinanceReportFile", () => {
     expect(result.pages).toEqual([
       { page: 1, text: '[AcroForm]\t["PageOne","One"]' },
       { page: 2, text: '[AcroForm]\t["PageTwo","Two"]' },
+    ]);
+  });
+
+  pdfIt("attaches a radio-group value only to its selected widget page", async () => {
+    const result = await extractFinanceReportFile({
+      fileBuffer: pagedRadioFormPdf(),
+      fileName: "paged-radio.pdf",
+      mimeType: "application/pdf",
+    });
+    expect(result.pages).toEqual([
+      { page: 1, text: '[AcroForm]\t["Scenario","A"]' },
+      { page: 2, text: "" },
     ]);
   });
 
