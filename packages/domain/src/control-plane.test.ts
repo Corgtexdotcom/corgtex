@@ -4948,6 +4948,7 @@ describe("control plane domain", () => {
       modelOverride: "openai/gpt-test",
       hasGovernancePolicy: true,
     });
+    expect(status.agents.configs.find((config) => config.agentKey === "finance-report-import")?.enabled).toBe(false);
     expect(status.riskFindings.map((finding) => finding.key)).toEqual(expect.arrayContaining([
       "agent-governance-disabled",
       "model-budget-missing",

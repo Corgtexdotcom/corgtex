@@ -8091,7 +8091,7 @@ export async function getControlPlaneAiGovernanceStatus(actor: AppActor, deploym
       canDisable: meta.canDisable,
       costTier: meta.costTier,
       defaultModelTier: meta.defaultModelTier,
-      enabled: override?.enabled ?? true,
+      enabled: override?.enabled ?? ("defaultEnabled" in meta ? meta.defaultEnabled : true),
       modelOverride: override?.modelOverride ?? null,
       hasGovernancePolicy: Boolean(override?.governancePolicy?.trim()),
       updatedAt: override?.updatedAt ?? null,

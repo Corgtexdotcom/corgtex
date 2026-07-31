@@ -8,6 +8,7 @@ const POSTGRES_INT_MIN = -2_147_483_648;
 const POSTGRES_INT_MAX = 2_147_483_647;
 const MAX_PROFILE_HINT_MAPPINGS = 2_000;
 const MAX_PROFILE_HINT_CHARS = 200_000;
+const ISO_CURRENCY_CODES = new Set(Intl.supportedValuesOf("currency"));
 const CURRENCY_NAME_ALIASES: Record<string, string[]> = {
   USD: ["US DOLLAR", "US DOLLARS", "U S DOLLAR", "U S DOLLARS",
     "UNITED STATES DOLLAR", "UNITED STATES DOLLARS"],
@@ -22,10 +23,13 @@ const CURRENCY_NAME_ALIASES: Record<string, string[]> = {
 const bounded = (maximum: number) => z.string().trim().min(1).max(maximum);
 const sourceIdentifier = (maximum: number) => z.string().min(1).max(maximum)
   .refine((value) => value.trim().length > 0, "Expected a non-blank source identifier.");
-const currencyEvidenceNamesCode = (evidence: string, code: string) => {
+const currencyCodesNamed = (evidence: string) => {
   const normalized = ` ${evidence.toUpperCase().replace(/[^A-Z0-9]+/g, " ").trim()} `;
-  return [code, ...(CURRENCY_NAME_ALIASES[code] ?? [])]
-    .some((name) => normalized.includes(` ${name} `));
+  const codes = new Set(normalized.trim().split(/\s+/).filter((token) => ISO_CURRENCY_CODES.has(token)));
+  for (const [code, aliases] of Object.entries(CURRENCY_NAME_ALIASES)) {
+    if (aliases.some((name) => normalized.includes(` ${name} `))) codes.add(code);
+  }
+  return codes;
 };
 const isoDate = z.string().regex(/^\d{4}-\d{2}-\d{2}$/).refine((value) => {
   const parsed = new Date(`${value}T00:00:00.000Z`);
@@ -38,7 +42,7 @@ const sourceLocationSchema = z.object({
   sheet: sourceIdentifier(200).nullable(),
   row: z.number().int().positive().max(1_000_000).nullable(),
   column: z.number().int().positive().max(100_000).nullable(),
-  evidence: bounded(1_000),
+  evidence: sourceIdentifier(1_000),
 }).strict().superRefine((value, context) => {
   if (value.page !== null && (value.sheet !== null || value.row !== null || value.column !== null)) {
     context.addIssue({ code: "custom", message: "PDF and spreadsheet source coordinates cannot be mixed." });
@@ -59,10 +63,10 @@ const currencySchema = z.object({
     || (!explicit && (value.code !== null || value.evidence.length > 0))) {
     context.addIssue({ code: "custom", message: "Currency state, code, and evidence do not agree." });
   }
-  if (explicit && value.code && !value.evidence.some((location) =>
-    currencyEvidenceNamesCode(location.evidence, value.code!))) {
+  const namedCurrencies = new Set(value.evidence.flatMap((location) => [...currencyCodesNamed(location.evidence)]));
+  if (explicit && value.code && (namedCurrencies.size !== 1 || !namedCurrencies.has(value.code))) {
     context.addIssue({ code: "custom", path: ["evidence"],
-      message: "Explicit currency evidence must name the proposed currency." });
+      message: "Explicit currency evidence must name one unambiguous proposed currency." });
   }
 });
 const hierarchy = z.array(bounded(160)).min(1).max(12);
@@ -134,8 +138,7 @@ export const financeReportImportProposalV1Schema = z.object({
     }
     const identity = JSON.stringify([candidate.sourceLocation.page, candidate.sourceLocation.sheet,
       candidate.sourceLocation.row, candidate.sourceLocation.column, candidate.sourceAccountPath,
-      candidate.proposedAccountPath, candidate.rowKind, candidate.periodStart, candidate.periodEnd,
-      candidate.amountCents]);
+      candidate.rowKind, candidate.periodStart, candidate.periodEnd, candidate.amountCents]);
     if (candidateIdentities.has(identity)) {
       context.addIssue({ code: "custom", path: ["candidates", index],
         message: "Duplicate proposal candidate." });

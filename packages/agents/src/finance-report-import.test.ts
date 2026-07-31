@@ -67,13 +67,17 @@ describe("Finance report import proposal contract", () => {
       sourceLocation: { page: 1, sheet: "June", row: 2, column: 3, evidence: "Unlocated" } }] })],
     ["unproven currency", () => ({ ...proposal(), report: { ...proposal().report,
       currency: { state: "EXPLICIT", code: "EUR", evidence: [] } } })],
+    ["ambiguous currency evidence", () => ({ ...proposal(), report: { ...proposal().report,
+      currency: { state: "EXPLICIT", code: "USD", evidence: [{
+        ...proposal().candidates[0].sourceLocation, evidence: "USD / EUR",
+      }] } } })],
     ["invented unresolved evidence", () => ({ ...proposal(), report: { ...proposal().report,
       currency: { state: "UNRESOLVED", code: null, evidence: [proposal().candidates[0].sourceLocation] } } })],
     ["exception without reason", () => ({ ...proposal(), candidates: [{ ...proposal().candidates[0],
       exceptionCodes: ["OTHER"] }] })],
     ["duplicate candidates", () => {
       const value = proposal();
-      value.candidates.push({ ...value.candidates[0] });
+      value.candidates.push({ ...value.candidates[0], proposedAccountPath: ["Revenue", "Alternate"] });
       return value;
     }],
   ])("rejects unsafe output: %s", (_label, makeInvalid) => {
@@ -193,6 +197,7 @@ describe("interpretFinanceReport", () => {
   it.each([
     ["U.S. Dollars", "USD"],
     ["Euros", "EUR"],
+    [" USD ", "USD"],
   ])("accepts unambiguous currency name evidence: %s", async (evidence, code) => {
     const output = proposal();
     output.report.currency = { state: "EXPLICIT", code, evidence: [{
@@ -203,7 +208,9 @@ describe("interpretFinanceReport", () => {
       extractedEvidence: `${params.extractedEvidence}\n${JSON.stringify({
         sheet: "June", row: 1, column: 2, value: evidence,
       })}`,
-    })).resolves.toMatchObject({ report: { currency: { state: "EXPLICIT", code } } });
+    })).resolves.toMatchObject({ report: { currency: {
+      state: "EXPLICIT", code, evidence: [expect.objectContaining({ evidence })],
+    } } });
   });
 
   it("does not treat extraction metadata as source evidence", async () => {
