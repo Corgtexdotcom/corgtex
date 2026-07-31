@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { Readable } from "node:stream";
 import { CsvError, parse } from "csv-parse";
-import { getDocument, VerbosityLevel } from "pdfjs-dist/legacy/build/pdf.mjs";
+import { getDocument, OPS, VerbosityLevel } from "pdfjs-dist/legacy/build/pdf.mjs";
 export type FinanceFileFormat = "PDF" | "CSV";
 export type FinanceExtractedCellType = "TEXT";
 export type FinanceFileExtractionErrorCode =
@@ -64,12 +64,12 @@ async function extractPdf(buffer: Buffer, limits: FinanceFileExtractionLimits) {
   const task = getDocument({ data: new Uint8Array(buffer), verbosity: VerbosityLevel.ERRORS });
   try {
     const document = await task.promise;
+    if (document.numPages === 0) fail("EMPTY_EXTRACTION");
     if (document.numPages > limits.maxPages) fail("EXTRACTION_LIMIT_EXCEEDED");
     const pages: Array<{ page: number; text: string }> = [];
     let textChars = 0;
     for (let pageNumber = 1; pageNumber <= document.numPages; pageNumber += 1) {
       const page = await document.getPage(pageNumber);
-      const viewport = page.getViewport({ scale: 1 });
       const reader = page.streamTextContent().getReader();
       let text = "";
       let lastX: number | undefined;
@@ -85,7 +85,7 @@ async function extractPdf(buffer: Buffer, limits: FinanceFileExtractionLimits) {
           if (chunk.done) break;
           for (const item of chunk.value.items) {
             if (!("str" in item)) continue;
-            const [x, y] = viewport.convertToViewportPoint(item.transform[4], item.transform[5]);
+            const [x, y] = [item.transform[4], item.transform[5]];
             if (lastY !== undefined && Math.abs(lastY - y) > 4.6 && !text.endsWith("\n")) append("\n");
             if (lastX !== undefined && lastY !== undefined && Math.abs(lastY - y) < 4.6 && Math.abs(lastX - x) > 7) append("\t");
             append(item.str);
@@ -94,12 +94,20 @@ async function extractPdf(buffer: Buffer, limits: FinanceFileExtractionLimits) {
             lastY = y;
           }
         }
+        if (!text.trim()) {
+          const operators = await page.getOperatorList();
+          if (operators.fnArray.some((operator) =>
+            operator === OPS.paintImageMaskXObject
+            || operator === OPS.paintImageXObject
+            || operator === OPS.paintInlineImageXObject
+          )) fail("SCANNED_PDF_UNSUPPORTED");
+        }
       } finally {
         page.cleanup();
       }
-      if (!text.trim()) fail("SCANNED_PDF_UNSUPPORTED");
       pages.push({ page: pageNumber, text });
     }
+    if (!pages.some((page) => page.text.trim())) fail("EMPTY_EXTRACTION");
     return pages;
   } finally {
     await task.destroy();
@@ -160,7 +168,7 @@ async function extractCsv(buffer: Buffer, limits: FinanceFileExtractionLimits) {
   const parser = input.pipe(parse({
     bom: true,
     relax_column_count: false,
-    max_record_size: Math.max(1, (limits.maxTextChars * 2) + (limits.maxCells * 3)),
+    max_record_size: Math.max(1, (limits.maxTextChars * 3) + (limits.maxCells * 3) + 4),
   }));
   const cells: FinanceExtractedCell[] = [];
   let rowCount = 0;
@@ -199,7 +207,8 @@ export async function extractFinanceReportFile(params: {
 }): Promise<FinanceFileExtraction> {
   const limits = { ...DEFAULT_LIMITS };
   for (const key of Object.keys(DEFAULT_LIMITS) as Array<keyof FinanceFileExtractionLimits>) {
-    limits[key] = params.limits?.[key] ?? limits[key];
+    const override = params.limits?.[key];
+    if (override !== undefined && Number.isSafeInteger(override) && override >= 0) limits[key] = override;
   }
   if (params.fileBuffer.length === 0) fail("EMPTY_FILE");
   if (params.fileBuffer.length > limits.maxFileBytes) fail("FILE_TOO_LARGE");
