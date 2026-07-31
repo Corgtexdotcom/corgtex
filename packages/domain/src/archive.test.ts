@@ -44,6 +44,23 @@ const { prismaMock, storageDeleteMock } = vi.hoisted(() => {
     workItemVersion: {
       deleteMany: vi.fn(),
     },
+    knowledgeChunk: {
+      deleteMany: vi.fn(),
+    },
+    document: {
+      findFirst: vi.fn(),
+      update: vi.fn(),
+      delete: vi.fn(),
+    },
+    brainSource: {
+      findFirst: vi.fn(),
+      update: vi.fn(),
+      delete: vi.fn(),
+    },
+    financeImportBatch: {
+      findFirst: vi.fn(),
+    },
+    $executeRaw: vi.fn(),
   };
   return { prismaMock: prisma, storageDeleteMock: vi.fn() };
 });
@@ -88,6 +105,10 @@ describe("workspace archive domain", () => {
     prismaMock.workspacePermalink.findMany.mockResolvedValue([]);
     prismaMock.workspacePermalink.upsert.mockResolvedValue({});
     prismaMock.workItemVersion.deleteMany.mockResolvedValue({ count: 0 });
+    prismaMock.knowledgeChunk.deleteMany.mockResolvedValue({ count: 0 });
+    prismaMock.financeImportBatch.findFirst.mockResolvedValue(null);
+    prismaMock.$executeRaw.mockResolvedValue(1);
+    storageDeleteMock.mockResolvedValue(undefined);
   });
 
   it("archives artifacts with metadata and an audit record", async () => {
@@ -307,6 +328,110 @@ describe("workspace archive domain", () => {
       },
     });
     expect(prismaMock.action.delete).toHaveBeenCalledWith({ where: { id: "action-1" } });
+  });
+
+  it.each([
+    ["Document", "document", "documentId"],
+    ["BrainSource", "brainSource", "brainSourceId"],
+  ] as const)("blocks generic archive and purge for linked %s records", async (entityType, delegateName, linkField) => {
+    const delegate = prismaMock[delegateName];
+    const record = {
+      id: `${delegateName}-1`,
+      workspaceId: "workspace-1",
+      title: "Synthetic report",
+      archivedAt: null,
+      storageKey: "private/report",
+      fileStorageKey: "private/report",
+    };
+    delegate.findFirst.mockResolvedValue(record);
+    prismaMock.financeImportBatch.findFirst.mockResolvedValue({ id: "batch-1" });
+
+    const { archiveWorkspaceArtifact, purgeWorkspaceArtifact } = await import("./archive");
+    await expect(archiveWorkspaceArtifact(actor, {
+      workspaceId: "workspace-1",
+      entityType,
+      entityId: record.id,
+    })).rejects.toMatchObject({ code: "FINANCE_IMPORT_ARTIFACT_MANAGED" });
+    expect(delegate.update).not.toHaveBeenCalled();
+
+    delegate.findFirst.mockResolvedValue({ ...record, archivedAt: new Date() });
+    prismaMock.workspaceArchiveRecord.findFirst.mockResolvedValue({ id: "archive-1" });
+    await expect(purgeWorkspaceArtifact(actor, {
+      workspaceId: "workspace-1",
+      entityType,
+      entityId: record.id,
+      reason: "synthetic cleanup",
+    })).rejects.toMatchObject({ code: "FINANCE_IMPORT_ARTIFACT_MANAGED" });
+
+    expect(prismaMock.financeImportBatch.findFirst).toHaveBeenCalledWith({
+      where: { workspaceId: "workspace-1", [linkField]: record.id },
+      select: { id: true },
+    });
+    expect(prismaMock.$executeRaw).toHaveBeenCalled();
+    expect(prismaMock.knowledgeChunk.deleteMany).not.toHaveBeenCalled();
+    expect(storageDeleteMock).not.toHaveBeenCalled();
+    expect(delegate.delete).not.toHaveBeenCalled();
+  });
+
+  it("retains generic lifecycle behavior for unlinked knowledge artifacts", async () => {
+    const document = {
+      id: "document-1",
+      workspaceId: "workspace-1",
+      title: "Unlinked",
+      archivedAt: null,
+      storageKey: "private/unlinked",
+    };
+    prismaMock.document.findFirst.mockResolvedValue(document);
+    prismaMock.document.update.mockResolvedValue({ ...document, archivedAt: new Date() });
+    const { archiveWorkspaceArtifact, purgeWorkspaceArtifact } = await import("./archive");
+    await expect(archiveWorkspaceArtifact(actor, {
+      workspaceId: "workspace-1",
+      entityType: "Document",
+      entityId: document.id,
+    })).resolves.toMatchObject({ id: document.id });
+
+    const source = {
+      id: "source-1",
+      workspaceId: "workspace-1",
+      title: "Unlinked",
+      archivedAt: new Date(),
+      fileStorageKey: "private/unlinked",
+    };
+    prismaMock.brainSource.findFirst.mockResolvedValue(source);
+    prismaMock.brainSource.delete.mockResolvedValue(source);
+    prismaMock.workspaceArchiveRecord.findFirst.mockResolvedValue({ id: "archive-1" });
+    await expect(purgeWorkspaceArtifact(actor, {
+      workspaceId: "workspace-1",
+      entityType: "BrainSource",
+      entityId: source.id,
+      reason: "synthetic cleanup",
+    })).resolves.toEqual({ id: source.id });
+
+    expect(prismaMock.document.update).toHaveBeenCalled();
+    expect(prismaMock.knowledgeChunk.deleteMany).toHaveBeenCalled();
+    expect(storageDeleteMock).toHaveBeenCalledWith("private/unlinked");
+    expect(prismaMock.brainSource.delete).toHaveBeenCalledWith({ where: { id: source.id } });
+  });
+
+  it("leaves private storage intact when the database purge fails", async () => {
+    const source = {
+      id: "source-1",
+      workspaceId: "workspace-1",
+      title: "Unlinked",
+      archivedAt: new Date(),
+      fileStorageKey: "private/unlinked",
+    };
+    prismaMock.brainSource.findFirst.mockResolvedValue(source);
+    prismaMock.workspaceArchiveRecord.findFirst.mockResolvedValue({ id: "archive-1" });
+    prismaMock.brainSource.delete.mockRejectedValue(new Error("database failure"));
+    const { purgeWorkspaceArtifact } = await import("./archive");
+    await expect(purgeWorkspaceArtifact(actor, {
+      workspaceId: "workspace-1",
+      entityType: "BrainSource",
+      entityId: source.id,
+      reason: "synthetic cleanup",
+    })).rejects.toThrow("database failure");
+    expect(storageDeleteMock).not.toHaveBeenCalled();
   });
 
   it("lists active archive records by default", async () => {

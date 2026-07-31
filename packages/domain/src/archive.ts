@@ -6,6 +6,7 @@ import { requireWorkspaceMembership } from "./auth";
 import { invariant } from "./errors";
 import { defaultStorage } from "@corgtex/storage";
 import { withdrawActiveApprovalFlowForSubject } from "./approvals";
+import { lockFinanceImportArtifactOwnership } from "./finance-import-artifact-ownership";
 import {
   ensureWorkspacePermalink,
   isWorkspacePermalinkEntityType,
@@ -59,7 +60,42 @@ type ArchiveConfig = {
   }) => Promise<void>;
   canPurge?: (tx: Prisma.TransactionClient, record: any) => Promise<void>;
   beforePurge?: (tx: Prisma.TransactionClient, record: any) => Promise<void>;
+  afterPurge?: (record: any) => Promise<void>;
 };
+
+async function requireFinanceImportArtifactUnlinked(
+  tx: Prisma.TransactionClient,
+  record: { id: string; workspaceId: string },
+  field: "documentId" | "brainSourceId",
+) {
+  await lockFinanceImportArtifactOwnership(tx, {
+    workspaceId: record.workspaceId,
+    kind: field === "documentId" ? "DOCUMENT" : "BRAIN_SOURCE",
+    id: record.id,
+  });
+  const link = field === "documentId" ? { documentId: record.id } : { brainSourceId: record.id };
+  const batch = await tx.financeImportBatch.findFirst({
+    where: { workspaceId: record.workspaceId, ...link },
+    select: { id: true },
+  });
+  invariant(
+    !batch,
+    409,
+    "FINANCE_IMPORT_ARTIFACT_MANAGED",
+    "Finance report import artifacts must be managed from Finance.",
+  );
+}
+
+function financeImportArtifactGuards(field: "documentId" | "brainSourceId") {
+  return {
+    canArchive: async ({ tx, record }: Parameters<NonNullable<ArchiveConfig["canArchive"]>>[0]) => {
+      await requireFinanceImportArtifactUnlinked(tx, record, field);
+    },
+    canPurge: async (tx: Prisma.TransactionClient, record: any) => {
+      await requireFinanceImportArtifactUnlinked(tx, record, field);
+    },
+  };
+}
 
 const directWorkspace = (workspaceId: string, id: string) => ({ id, workspaceId });
 const titleOrName = (record: any) => record.title ?? record.name ?? record.label ?? record.slug ?? record.email ?? record.id ?? null;
@@ -105,6 +141,7 @@ const ENTITY_CONFIGS: Record<ArchiveEntityType, ArchiveConfig> = {
     delegate: "brainSource",
     findWhere: directWorkspace,
     label: titleOrName,
+    ...financeImportArtifactGuards("brainSourceId"),
     beforePurge: async (tx, record) => {
       await tx.knowledgeChunk.deleteMany({
         where: {
@@ -112,9 +149,9 @@ const ENTITY_CONFIGS: Record<ArchiveEntityType, ArchiveConfig> = {
           sourceId: record.id,
         },
       });
-      if (record.fileStorageKey) {
-        await defaultStorage.delete(record.fileStorageKey).catch(() => undefined);
-      }
+    },
+    afterPurge: async (record) => {
+      if (record.fileStorageKey) await defaultStorage.delete(record.fileStorageKey).catch(() => undefined);
     },
   },
   Circle: {
@@ -147,10 +184,9 @@ const ENTITY_CONFIGS: Record<ArchiveEntityType, ArchiveConfig> = {
     findWhere: directWorkspace,
     label: titleOrName,
     archiveAllowedRoles: ["ADMIN"],
-    beforePurge: async (_tx, record) => {
-      if (record.storageKey) {
-        await defaultStorage.delete(record.storageKey).catch(() => undefined);
-      }
+    ...financeImportArtifactGuards("documentId"),
+    afterPurge: async (record) => {
+      if (record.storageKey) await defaultStorage.delete(record.storageKey).catch(() => undefined);
     },
   },
   ExpertiseTag: {
@@ -529,7 +565,7 @@ export async function purgeWorkspaceArtifact(actor: AppActor, params: {
   const reason = params.reason.trim();
   invariant(reason.length > 0, 400, "INVALID_INPUT", "Purge reason is required.");
 
-  return prisma.$transaction(async (tx) => {
+  const purged = await prisma.$transaction(async (tx) => {
     const record = await findRecord(tx, config, params.workspaceId, params.entityId);
     invariant(record.archivedAt, 400, "INVALID_STATE", "Archive the artifact before purging it.");
     const archiveRecord = await activeArchiveRecord(tx, params.workspaceId, config.entityType, record.id);
@@ -575,8 +611,10 @@ export async function purgeWorkspaceArtifact(actor: AppActor, params: {
       },
     });
 
-    return { id: record.id };
+    return { result: { id: record.id }, record };
   });
+  await config.afterPurge?.(purged.record);
+  return purged.result;
 }
 
 export async function listArchivedWorkspaceArtifacts(actor: AppActor, params: {
