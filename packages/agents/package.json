@@ -7,8 +7,7 @@
     "@corgtex/domain": "0.1.0",
     "@corgtex/knowledge": "0.1.0",
     "@corgtex/models": "0.1.0",
-    "@corgtex/shared": "0.1.0",
-    "zod": "^4.4.3"
+    "@corgtex/shared": "0.1.0"
   },
   "exports": {
     ".": "./src/index.ts"
