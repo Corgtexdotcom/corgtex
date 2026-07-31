@@ -61,6 +61,35 @@ type ArchiveConfig = {
   beforePurge?: (tx: Prisma.TransactionClient, record: any) => Promise<void>;
 };
 
+async function requireFinanceImportArtifactUnlinked(
+  tx: Prisma.TransactionClient,
+  record: { id: string; workspaceId: string },
+  field: "documentId" | "brainSourceId",
+) {
+  const link = field === "documentId" ? { documentId: record.id } : { brainSourceId: record.id };
+  const batch = await tx.financeImportBatch.findFirst({
+    where: { workspaceId: record.workspaceId, ...link },
+    select: { id: true },
+  });
+  invariant(
+    !batch,
+    409,
+    "FINANCE_IMPORT_ARTIFACT_MANAGED",
+    "Finance report import artifacts must be managed from Finance.",
+  );
+}
+
+function financeImportArtifactGuards(field: "documentId" | "brainSourceId") {
+  return {
+    canArchive: async ({ tx, record }: Parameters<NonNullable<ArchiveConfig["canArchive"]>>[0]) => {
+      await requireFinanceImportArtifactUnlinked(tx, record, field);
+    },
+    canPurge: async (tx: Prisma.TransactionClient, record: any) => {
+      await requireFinanceImportArtifactUnlinked(tx, record, field);
+    },
+  };
+}
+
 const directWorkspace = (workspaceId: string, id: string) => ({ id, workspaceId });
 const titleOrName = (record: any) => record.title ?? record.name ?? record.label ?? record.slug ?? record.email ?? record.id ?? null;
 const WORK_ITEM_ARCHIVE_ENTITY_TYPES = new Set<ArchiveEntityType>([
@@ -105,6 +134,7 @@ const ENTITY_CONFIGS: Record<ArchiveEntityType, ArchiveConfig> = {
     delegate: "brainSource",
     findWhere: directWorkspace,
     label: titleOrName,
+    ...financeImportArtifactGuards("brainSourceId"),
     beforePurge: async (tx, record) => {
       await tx.knowledgeChunk.deleteMany({
         where: {
@@ -147,6 +177,7 @@ const ENTITY_CONFIGS: Record<ArchiveEntityType, ArchiveConfig> = {
     findWhere: directWorkspace,
     label: titleOrName,
     archiveAllowedRoles: ["ADMIN"],
+    ...financeImportArtifactGuards("documentId"),
     beforePurge: async (_tx, record) => {
       if (record.storageKey) {
         await defaultStorage.delete(record.storageKey).catch(() => undefined);
