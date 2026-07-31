@@ -4788,7 +4788,26 @@ describe("control plane domain", () => {
     });
   });
 
-  it("returns expanded managed AI governance status with deterministic risks and redacted policies", async () => {
+  it("keeps default-disabled agents off through managed policy updates", async () => {
+    const { updateControlPlaneAgentPolicy } = await import("./control-plane");
+    prismaMock.customerDeployment.findUnique.mockResolvedValueOnce({
+      id: "inst-1", label: "Synthetic", customerAccountId: "cust-1", managedWorkspaceId: "ws-1",
+      managedWorkspace: { id: "ws-1", slug: "synthetic", name: "Synthetic", _count: {} },
+      supportCredentialEnc: null, supportConnectorStatus: "not_configured", supportLastSyncAt: null, remoteWorkspaceId: null,
+    });
+    prismaMock.workspaceAgentConfig.upsert.mockResolvedValueOnce({ id: "config-1", agentKey: "finance-report-import",
+      enabled: false, modelOverride: "quality-test", governancePolicy: null, updatedAt: new Date("2026-06-01T00:00:00.000Z") });
+
+    await updateControlPlaneAgentPolicy(operatorActor, { deploymentId: "inst-1", agentKey: "finance-report-import",
+      modelOverride: "quality-test", reason: "Use the approved quality route." });
+
+    expect(prismaMock.workspaceAgentConfig.upsert).toHaveBeenCalledWith(expect.objectContaining({
+      create: expect.objectContaining({ agentKey: "finance-report-import", enabled: false, modelOverride: "quality-test" }),
+      update: { modelOverride: "quality-test" },
+    }));
+  });
+
+  it("returns expanded managed AI governance status with registry defaults, deterministic risks, and redacted policies", async () => {
     const { getControlPlaneAiGovernanceStatus } = await import("./control-plane");
     prismaMock.customerDeployment.findUnique.mockResolvedValueOnce({
       id: "inst-1",
@@ -4948,6 +4967,7 @@ describe("control plane domain", () => {
       modelOverride: "openai/gpt-test",
       hasGovernancePolicy: true,
     });
+    expect(status.agents.configs.find((config) => config.agentKey === "finance-report-import")?.enabled).toBe(false);
     expect(status.riskFindings.map((finding) => finding.key)).toEqual(expect.arrayContaining([
       "agent-governance-disabled",
       "model-budget-missing",

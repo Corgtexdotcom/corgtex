@@ -309,7 +309,7 @@ export async function listAgentConfigs(actor: AppActor, workspaceId: string): Pr
       defaultModelTier: meta.defaultModelTier,
       inputs: meta.inputs,
       outputs: meta.outputs,
-      enabled: override ? override.enabled : true,
+      enabled: override?.enabled ?? ("defaultEnabled" in meta ? meta.defaultEnabled : true),
       modelOverride: override?.modelOverride ?? null,
       governancePolicy: override?.governancePolicy ?? null,
       configJson,
@@ -357,7 +357,7 @@ export async function updateAgentConfig(
     create: {
       workspaceId: params.workspaceId,
       agentKey: params.agentKey,
-      enabled: params.enabled ?? true,
+      enabled: params.enabled ?? ("defaultEnabled" in meta ? meta.defaultEnabled : true),
       modelOverride: params.modelOverride ?? null,
       governancePolicy: params.governancePolicy ?? null,
       configJson: configJson ?? {},
@@ -588,7 +588,7 @@ export async function isAgentEnabled(workspaceId: string, agentKey: string): Pro
     select: { enabled: true },
   });
 
-  return config?.enabled ?? true;
+  return config?.enabled ?? (meta && "defaultEnabled" in meta ? meta.defaultEnabled : true);
 }
 
 export async function getAgentModelOverride(workspaceId: string, agentKey: string): Promise<string | null> {

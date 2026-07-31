@@ -8091,7 +8091,7 @@ export async function getControlPlaneAiGovernanceStatus(actor: AppActor, deploym
       canDisable: meta.canDisable,
       costTier: meta.costTier,
       defaultModelTier: meta.defaultModelTier,
-      enabled: override?.enabled ?? true,
+      enabled: override?.enabled ?? ("defaultEnabled" in meta ? meta.defaultEnabled : true),
       modelOverride: override?.modelOverride ?? null,
       hasGovernancePolicy: Boolean(override?.governancePolicy?.trim()),
       updatedAt: override?.updatedAt ?? null,
@@ -8467,7 +8467,8 @@ export async function updateControlPlaneAgentPolicy(actor: AppActor, params: {
 }) {
   const reason = requireMutationReason(params.reason);
   const agentKey = params.agentKey.trim();
-  invariant(Boolean(AGENT_REGISTRY[agentKey as keyof typeof AGENT_REGISTRY]), 400, "INVALID_INPUT", "Unknown agent.");
+  const meta = AGENT_REGISTRY[agentKey as keyof typeof AGENT_REGISTRY];
+  invariant(Boolean(meta), 400, "INVALID_INPUT", "Unknown agent.");
   invariant(params.governancePolicy !== undefined || params.modelOverride !== undefined, 400, "INVALID_INPUT", "No agent policy changes were provided.");
   const governancePolicy = params.governancePolicy === undefined ? undefined : params.governancePolicy?.trim() || null;
   const modelOverride = params.modelOverride === undefined ? undefined : params.modelOverride?.trim() || null;
@@ -8504,7 +8505,7 @@ export async function updateControlPlaneAgentPolicy(actor: AppActor, params: {
     create: {
       workspaceId: deployment.managedWorkspaceId,
       agentKey,
-      enabled: true,
+      enabled: "defaultEnabled" in meta ? meta.defaultEnabled : true,
       modelOverride: modelOverride ?? null,
       governancePolicy: governancePolicy ?? null,
       configJson: {},
