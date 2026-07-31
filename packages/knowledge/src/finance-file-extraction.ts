@@ -137,9 +137,9 @@ function assertXlsxSheetLimits(buffer: Buffer, limits: FinanceFileExtractionLimi
     const xml = strFromU8(bytes);
     let lastRow = 0;
     let lastColumn = 0;
-    for (const match of xml.matchAll(/(?:<dimension\b[^>]*\bref="[^":]*:)?\$?([A-Z]+)\$?(\d+)"|<c\b[^>]*\br="\$?([A-Z]+)\$?(\d+)"/gi)) {
-      lastColumn = Math.max(lastColumn, xlsxColumnNumber(match[1] ?? match[3]));
-      lastRow = Math.max(lastRow, Number(match[2] ?? match[4]));
+    for (const match of xml.matchAll(/<dimension\b[^>]*\bref="\$?([A-Z]+)\$?(\d+)(?::\$?([A-Z]+)\$?(\d+))?"|<c\b[^>]*\br="\$?([A-Z]+)\$?(\d+)"/gi)) {
+      lastColumn = Math.max(lastColumn, xlsxColumnNumber(match[3] ?? match[1] ?? match[5]));
+      lastRow = Math.max(lastRow, Number(match[4] ?? match[2] ?? match[6]));
     }
     rows += lastRow;
     cells += lastRow * lastColumn;
