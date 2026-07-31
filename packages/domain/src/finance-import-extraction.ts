@@ -6,6 +6,21 @@ import { lockFinanceImportArtifactLinkTargets } from "./finance-import-artifact-
 const MAX_EXTRACTED_TEXT_CHARS = 2_000_000;
 const FORMAT_MIME_TYPES = { CSV: "text/csv", PDF: "application/pdf", XLSX: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" } as const;
 const COMPLETED_EXTRACTION_STAGES = new Set(["CLASSIFYING", "MAPPING", "RECONCILING", "READY_FOR_REVIEW", "APPLYING", "APPLIED", "NEEDS_INPUT", "PARTIALLY_APPLIED"]);
+const SAFE_EXTRACTION_FAILURES = {
+  EMPTY_FILE: "The report file is empty.",
+  FILE_TOO_LARGE: "The report file exceeds the supported size limit.",
+  UNSUPPORTED_FILE_TYPE: "Only PDF, CSV, and XLSX finance reports are supported.",
+  FILE_TYPE_MISMATCH: "The report filename and content type do not match.",
+  MALFORMED_FILE: "The report file is malformed or unreadable.",
+  EMPTY_EXTRACTION: "The report contains no extractable data.",
+  SCANNED_PDF_UNSUPPORTED: "Image-only or scanned PDFs are not supported yet.",
+  UNSUPPORTED_PDF_FEATURE: "This PDF uses a structure that cannot be extracted safely.",
+  UNSUPPORTED_XLSX_FEATURE: "This workbook uses a structure that cannot be extracted safely.",
+  EXTRACTION_LIMIT_EXCEEDED: "The report exceeds the supported extraction limits.",
+  FINANCE_REPORT_EXTRACTION_FAILED: "The report could not be extracted safely. Please retry.",
+} as const;
+
+export type FinanceReportExtractionFailureCode = keyof typeof SAFE_EXTRACTION_FAILURES;
 
 type LockedBatch = FinanceImportBatch & {
   document: {
@@ -204,6 +219,53 @@ export async function completeFinanceReportImportExtraction(params: {
       entityType: "FinanceImportBatch",
       entityId: batch.id,
       meta: { format: params.extraction.format, mimeType: batch.mimeType, fileSizeBytes: batch.fileSizeBytes },
+    } });
+    return { skipped: false as const, batchId: batch.id, version: batch.version + 1 };
+  });
+}
+
+export async function failFinanceReportImportExtraction(params: {
+  workspaceId: string;
+  batchId: string;
+  workflowJobId: string;
+  expectedVersion: number;
+  failureCode: FinanceReportExtractionFailureCode;
+}) {
+  return prisma.$transaction(async (tx) => {
+    const batch = await loadLockedBatch(tx, params.workspaceId, params.batchId);
+    if (batch.stage === "FAILED" && batch.workflowJobId === params.workflowJobId) {
+      return { skipped: true as const, batchId: batch.id, version: batch.version };
+    }
+    invariant(
+      batch.stage === "EXTRACTING"
+        && batch.workflowJobId === params.workflowJobId
+        && batch.version === params.expectedVersion,
+      409,
+      "FINANCE_REPORT_EXTRACTION_CONFLICT",
+      "The Finance report extraction changed. Please retry.",
+    );
+    const result = await tx.financeImportBatch.updateMany({
+      where: {
+        id: batch.id,
+        workspaceId: batch.workspaceId,
+        version: batch.version,
+        stage: "EXTRACTING",
+        workflowJobId: params.workflowJobId,
+      },
+      data: {
+        stage: "FAILED",
+        safeErrorCode: params.failureCode,
+        safeErrorMessage: SAFE_EXTRACTION_FAILURES[params.failureCode],
+        version: { increment: 1 },
+      },
+    });
+    invariant(result.count === 1, 409, "FINANCE_REPORT_EXTRACTION_CONFLICT", "The Finance report extraction changed. Please retry.");
+    await tx.auditLog.create({ data: {
+      workspaceId: batch.workspaceId,
+      action: "finance-report-import.extraction-failed",
+      entityType: "FinanceImportBatch",
+      entityId: batch.id,
+      meta: { failureCode: params.failureCode },
     } });
     return { skipped: false as const, batchId: batch.id, version: batch.version + 1 };
   });

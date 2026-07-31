@@ -30,6 +30,7 @@ const {
   markMeetingTranscriptProcessingReadyMock,
   createNotificationIntentMock,
   deliverNotificationDeliveryMock,
+  runFinanceReportImportExtractionJobMock,
 } = vi.hoisted(() => ({
   prismaMock: {
     $transaction: vi.fn(),
@@ -99,6 +100,7 @@ const {
   markMeetingTranscriptProcessingReadyMock: vi.fn(),
   createNotificationIntentMock: vi.fn(),
   deliverNotificationDeliveryMock: vi.fn(),
+  runFinanceReportImportExtractionJobMock: vi.fn(),
 }));
 
 vi.mock("@corgtex/shared", () => ({
@@ -109,6 +111,11 @@ vi.mock("@corgtex/shared", () => ({
 
 vi.mock("./handlers/agent-dispatch", () => ({
   runAgentWorkflowJob: runAgentWorkflowJobMock,
+}));
+
+vi.mock("./handlers/finance-report-import", () => ({
+  FINANCE_REPORT_IMPORT_EXTRACTION_JOB_TYPE: "finance-report-import.extract",
+  runFinanceReportImportExtractionJob: runFinanceReportImportExtractionJobMock,
 }));
 
 vi.mock("@corgtex/agents", () => ({
@@ -245,6 +252,7 @@ describe("runPendingJobs", () => {
     markMeetingTranscriptProcessingReadyMock.mockReset().mockResolvedValue(undefined);
     deliverNotificationDeliveryMock.mockReset().mockResolvedValue({ status: "SENT" });
     createNotificationIntentMock.mockReset().mockResolvedValue({ count: 1 });
+    runFinanceReportImportExtractionJobMock.mockReset().mockResolvedValue({ skipped: false });
     getNewspaperLocalDatePartsMock.mockReset().mockReturnValue({
       dateKey: "2026-04-29",
       weekday: "WEDNESDAY",
@@ -291,6 +299,33 @@ describe("runPendingJobs", () => {
         lockedBy: null,
       }),
     });
+  });
+
+  it("dispatches only a well-formed Finance report extraction job", async () => {
+    txMock.$queryRaw.mockResolvedValueOnce([{
+      id: "job-1", workspaceId: "ws-1", type: "finance-report-import.extract",
+      payload: { batchId: "batch-1" }, attempts: 5,
+    }]);
+    await expect(runPendingJobs("worker-1", 1)).resolves.toBe(1);
+    expect(runFinanceReportImportExtractionJobMock).toHaveBeenCalledWith({
+      workspaceId: "ws-1", batchId: "batch-1", workflowJobId: "job-1",
+      attempts: 5, isFinalAttempt: true,
+    });
+    expect(prismaMock.workflowJob.update).toHaveBeenCalledWith(expect.objectContaining({
+      where: { id: "job-1" }, data: expect.objectContaining({ status: "COMPLETED" }),
+    }));
+
+    vi.clearAllMocks();
+    prismaMock.workflowJob.update.mockResolvedValue({ id: "job-2" });
+    txMock.$queryRaw.mockResolvedValueOnce([{
+      id: "job-2", workspaceId: "ws-1", type: "finance-report-import.extract",
+      payload: null, attempts: 1,
+    }]);
+    await expect(runPendingJobs("worker-1", 1)).resolves.toBe(1);
+    expect(runFinanceReportImportExtractionJobMock).not.toHaveBeenCalled();
+    expect(prismaMock.workflowJob.update).toHaveBeenCalledWith(expect.objectContaining({
+      where: { id: "job-2" }, data: expect.objectContaining({ status: "PENDING" }),
+    }));
   });
 
   it("records meeting transcript progress around completed meeting jobs", async () => {

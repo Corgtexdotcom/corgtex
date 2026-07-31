@@ -185,4 +185,44 @@ describe("Finance report import extraction lifecycle", () => {
     expect(prismaMock.document.update).not.toHaveBeenCalled();
     expect(prismaMock.brainSource.update).not.toHaveBeenCalled();
   });
+
+  it("records only allowlisted terminal extraction failure details", async () => {
+    const active = { ...uploaded, stage: "EXTRACTING", workflowJobId: "job-1", version: 2 };
+    setBatch(active);
+    const { failFinanceReportImportExtraction } = await import("./finance-import-extraction");
+    await expect(failFinanceReportImportExtraction({
+      workspaceId: "workspace-1",
+      batchId: "batch-1",
+      workflowJobId: "job-1",
+      expectedVersion: 2,
+      failureCode: "MALFORMED_FILE",
+    })).resolves.toEqual({ skipped: false, batchId: "batch-1", version: 3 });
+    expect(prismaMock.financeImportBatch.updateMany).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        stage: "FAILED",
+        safeErrorCode: "MALFORMED_FILE",
+        safeErrorMessage: "The report file is malformed or unreadable.",
+      }),
+    }));
+    expect(prismaMock.auditLog.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ meta: { failureCode: "MALFORMED_FILE" } }),
+    }));
+    expect(prismaMock.document.update).not.toHaveBeenCalled();
+    expect(prismaMock.brainSource.update).not.toHaveBeenCalled();
+  });
+
+  it("idempotently skips the same terminal failure and rejects a stale owner", async () => {
+    const { failFinanceReportImportExtraction } = await import("./finance-import-extraction");
+    setBatch({ ...uploaded, stage: "FAILED", workflowJobId: "job-1", version: 3 });
+    await expect(failFinanceReportImportExtraction({
+      workspaceId: "workspace-1", batchId: "batch-1", workflowJobId: "job-1",
+      expectedVersion: 2, failureCode: "MALFORMED_FILE",
+    })).resolves.toEqual({ skipped: true, batchId: "batch-1", version: 3 });
+    setBatch({ ...uploaded, stage: "CLASSIFYING", workflowJobId: "job-1", version: 3 });
+    await expect(failFinanceReportImportExtraction({
+      workspaceId: "workspace-1", batchId: "batch-1", workflowJobId: "job-1",
+      expectedVersion: 2, failureCode: "FINANCE_REPORT_EXTRACTION_FAILED",
+    })).rejects.toMatchObject({ code: "FINANCE_REPORT_EXTRACTION_CONFLICT" });
+    expect(prismaMock.financeImportBatch.updateMany).not.toHaveBeenCalled();
+  });
 });
