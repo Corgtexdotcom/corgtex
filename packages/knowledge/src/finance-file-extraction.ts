@@ -94,14 +94,14 @@ const fail = (code) => { const error = new Error(code); error.code = code; throw
     const document = await task.promise;
     if (document.numPages === 0) fail("EMPTY_EXTRACTION");
     if (document.numPages > maxPages) fail("EXTRACTION_LIMIT_EXCEEDED");
-    const fieldObjects = await document.getFieldObjects();
-    if (document.isPureXfa || fieldObjects) fail("UNSUPPORTED_PDF_FEATURE");
+    if (document.isPureXfa || await document.getFieldObjects()) fail("UNSUPPORTED_PDF_FEATURE");
     const pages = [];
     let textChars = 0;
     for (let pageNumber = 1; pageNumber <= document.numPages; pageNumber += 1) {
       const page = await document.getPage(pageNumber);
       let text = "";
       let previous;
+      let sawVerticalText = false;
       const verticalFonts = new Set();
       const append = (value) => {
         textChars += value.length;
@@ -121,6 +121,7 @@ const fail = (code) => { const error = new Error(code); error.code = code; throw
           }
           const [a, b, c, d, x, y] = item.transform;
           const vertical = verticalFonts.has(item.fontName);
+          if (vertical) sawVerticalText = true;
           const axisX = vertical ? -c : a;
           const axisY = vertical ? -d : b;
           const scale = Math.hypot(axisX, axisY) || 1;
@@ -136,7 +137,9 @@ const fail = (code) => { const error = new Error(code); error.code = code; throw
           }
           append(item.str);
           if (item.hasEOL && !text.endsWith("\n")) append("\n");
-          const advance = vertical ? item.height : item.width;
+          const advance = vertical
+            ? item.height * (scale / (Math.hypot(a, b) || 1))
+            : item.width;
           previous = item.hasEOL ? undefined : {
             x: x + (ux * advance),
             y: y + (uy * advance),
@@ -152,10 +155,15 @@ const fail = (code) => { const error = new Error(code); error.code = code; throw
           if (chunk.done) break;
           consume(chunk.value);
         }
-        if (!text.trim()) {
+        if (sawVerticalText || !text.trim()) {
           const operators = await page.getOperatorList();
           if (operators.fnArray.some((operator) => imageOps.has(operator))) {
             fail("SCANNED_PDF_UNSUPPORTED");
+          }
+          if (sawVerticalText && operators.fnArray.some((operator, index) =>
+            operator === OPS.setTextRenderingMode
+            && (Number(operators.argsArray[index]?.[0]) & 3) === 3)) {
+            fail("UNSUPPORTED_PDF_FEATURE");
           }
         }
       } finally {

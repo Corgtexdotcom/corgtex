@@ -99,8 +99,9 @@ function xfaPdf() {
   return renderPdf([
     Buffer.from("<< /Type /Catalog /Pages 2 0 R /NeedsRendering true /AcroForm 3 0 R >>"),
     Buffer.from("<< /Type /Pages /Kids [] /Count 0 >>"),
-    Buffer.from("<< /XFA 4 0 R >>"),
+    Buffer.from("<< /XFA 4 0 R /Fields [5 0 R] /SigFlags 1 >>"),
     Buffer.from(`<< /Length ${Buffer.byteLength(xml)} >>\nstream\n${xml}\nendstream`),
+    Buffer.from("<< /FT /Sig /Rect [0 0 0 0] /Parent 99 0 R >>"),
   ]);
 }
 
@@ -148,6 +149,29 @@ describe("extractFinanceReportFile", () => {
       mimeType: "application/pdf",
     });
     expect(result.pages?.[0]?.text).toBe("日\n日");
+  });
+
+  pdfIt("scales vertical advances on the same matrix axis", async () => {
+    const result = await extractFinanceReportFile({
+      fileBuffer: cidFontPdf(
+        "90ms-RKSJ-V",
+        "BT /F1 12 Tf 2 0 0 1 72 720 Tm <93FA> Tj ET BT /F1 12 Tf 2 0 0 1 72 708 Tm <93FA> Tj ET",
+      ),
+      fileName: "vertical-scaled.pdf",
+      mimeType: "application/pdf",
+    });
+    expect(result.pages?.[0]?.text).toBe("日日");
+  });
+
+  pdfIt.each([
+    ["BT /F1 12 Tf 3 Tr 72 720 Td <93FA> Tj ET", "UNSUPPORTED_PDF_FEATURE"],
+    ["BT /F1 12 Tf 72 720 Td <93FA> Tj ET q BI /W 1 /H 1 /BPC 1 /CS /DeviceGray ID \u0000 EI Q", "SCANNED_PDF_UNSUPPORTED"],
+  ] as const)("rejects incomplete vertical evidence", async (content, code) => {
+    await expect(extractFinanceReportFile({
+      fileBuffer: cidFontPdf("90ms-RKSJ-V", content),
+      fileName: "vertical-unsafe.pdf",
+      mimeType: "application/pdf",
+    })).rejects.toMatchObject({ code });
   });
 
   pdfIt("loads packaged standard fonts without system font fallback", async () => {
