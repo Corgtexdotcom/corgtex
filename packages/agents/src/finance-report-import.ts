@@ -9,7 +9,9 @@ const POSTGRES_INT_MAX = 2_147_483_647;
 const bounded = (maximum: number) => z.string().trim().min(1).max(maximum);
 const isoDate = z.string().regex(/^\d{4}-\d{2}-\d{2}$/).refine((value) => {
   const parsed = new Date(`${value}T00:00:00.000Z`);
-  return !Number.isNaN(parsed.valueOf()) && parsed.toISOString().slice(0, 10) === value;
+  return Number(value.slice(0, 4)) >= 1_000
+    && !Number.isNaN(parsed.valueOf())
+    && parsed.toISOString().slice(0, 10) === value;
 }, "Expected a valid ISO calendar date.");
 const sourceLocationSchema = z.object({
   page: z.number().int().positive().max(100_000).nullable(),
@@ -128,8 +130,63 @@ apply Finance records, or claim human approval. Profile hints are non-authoritat
 revalidated. If currency is not explicit, return UNRESOLVED/null and never default to USD. Uncertain mappings must
 be AMBIGUOUS or UNMAPPED with visible exceptions. Return strict contract v1 with no unknown fields.${retryPaths.length
   ? ` The previous response failed validation at ${retryPaths.join(", ")}; rebuild it.` : ""}`;
-const schemaHint = "Contract v1: {contractVersion:1, report:{title,reportType,basis,cadence,periodStart,periodEnd,asOfDate,currency:{state,code,evidence}}, summary, candidates:[{sourceLocation,sourceLabel,sourceAccountPath,proposedAccountPath,rowKind,periodStart,periodEnd,amountCents,mappingStatus,confidence,reviewStatus,exceptionCodes,reviewReasons}]}";
+const schemaHint = `Strict contract v1 JSON with no additional fields:
+{
+  "contractVersion": 1,
+  "report": {
+    "title": "string",
+    "reportType": "PROFIT_AND_LOSS|BALANCE_SHEET|CASH_FLOW|TRIAL_BALANCE|BUDGET_VS_ACTUAL|GENERAL_LEDGER|OTHER",
+    "basis": "CASH|ACCRUAL|MIXED|UNSPECIFIED",
+    "cadence": "DAILY|WEEKLY|MONTHLY|QUARTERLY|ANNUAL|CUSTOM",
+    "periodStart": "YYYY-MM-DD", "periodEnd": "YYYY-MM-DD", "asOfDate": "YYYY-MM-DD|null",
+    "currency": {
+      "state": "EXPLICIT|UNRESOLVED", "code": "three uppercase letters|null",
+      "evidence": [{ "page": "positive integer|null", "sheet": "string|null",
+        "row": "positive integer|null", "column": "positive integer|null", "evidence": "exact source text" }]
+    }
+  },
+  "summary": "string",
+  "candidates": [{
+    "sourceLocation": { "page": "positive integer|null", "sheet": "string|null",
+      "row": "positive integer|null", "column": "positive integer|null", "evidence": "exact source text" },
+    "sourceLabel": "string", "sourceAccountPath": ["string"], "proposedAccountPath": ["string"],
+    "rowKind": "LEAF|DERIVED", "periodStart": "YYYY-MM-DD", "periodEnd": "YYYY-MM-DD",
+    "amountCents": "PostgreSQL Int", "mappingStatus": "MAPPED|AMBIGUOUS|UNMAPPED",
+    "confidence": "number 0..1", "reviewStatus": "VERIFIED|WARNING|BLOCKER",
+    "exceptionCodes": ["LOW_CONFIDENCE|AMBIGUOUS_MAPPING|UNMAPPED_ACCOUNT|OTHER"],
+    "reviewReasons": ["string"]
+  }]
+}`;
 const issuePaths = (error: z.ZodError) => [...new Set(error.issues.map((issue) => issue.path.join(".") || "root"))].slice(0, 12);
+type SourceLocation = z.infer<typeof sourceLocationSchema>;
+function evidenceRecords(extractedEvidence: string) {
+  return extractedEvidence.split("\n").flatMap((line) => {
+    try {
+      const parsed: unknown = JSON.parse(line);
+      return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+        ? [parsed as Record<string, unknown>] : [];
+    } catch {
+      return [];
+    }
+  });
+}
+function locationMatches(records: Record<string, unknown>[], location: SourceLocation) {
+  return records.some((record) => {
+    const identityMatches = location.page !== null
+      ? record.page === location.page
+      : record.sheet === location.sheet && record.row === location.row
+        && (location.column === null || record.column === location.column);
+    const sourceText = Object.values(record).filter((value): value is string => typeof value === "string").join("\n");
+    return identityMatches && sourceText.includes(location.evidence);
+  });
+}
+function unmatchedEvidencePaths(proposal: FinanceReportImportProposalV1, extractedEvidence: string) {
+  const records = evidenceRecords(extractedEvidence);
+  const paths = proposal.candidates.flatMap((candidate, index) =>
+    locationMatches(records, candidate.sourceLocation) ? [] : [`candidates.${index}.sourceLocation`]);
+  return [...paths, ...proposal.report.currency.evidence.flatMap((location, index) =>
+    locationMatches(records, location) ? [] : [`report.currency.evidence.${index}`])].slice(0, 12);
+}
 function forceVisibleExceptions(proposal: FinanceReportImportProposalV1) {
   return { ...proposal, candidates: proposal.candidates.map((candidate) => {
     const codes = new Set(candidate.exceptionCodes);
@@ -164,8 +221,12 @@ export async function interpretFinanceReport(params: {
       agentRunId: params.agentRunId, model, instruction: instruction(paths), schemaHint, input: JSON.stringify(input) };
     try {
       const parsed = financeReportImportProposalV1Schema.safeParse((await gateway.extract(request)).output);
-      if (parsed.success) return forceVisibleExceptions(parsed.data);
-      paths = issuePaths(parsed.error);
+      if (parsed.success) {
+        paths = unmatchedEvidencePaths(parsed.data, input.extractedEvidence);
+        if (paths.length === 0) return forceVisibleExceptions(parsed.data);
+      } else {
+        paths = issuePaths(parsed.error);
+      }
     } catch (error) {
       if (!(error instanceof Error) || error.name !== "ExtractionParseError") throw error;
       paths = ["root"];

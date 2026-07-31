@@ -33,7 +33,8 @@ function gateway(outputs: unknown[]) {
 }
 const params = { workspaceId: "workspace-synthetic", agentRunId: "run-synthetic",
   workflowJobId: "job-synthetic", model: "quality-test", fileName: "synthetic.csv",
-  mimeType: "text/csv", extractedEvidence: "{\"sheet\":\"June\",\"row\":2,\"value\":\"1250.00\"}" };
+  mimeType: "text/csv", extractedEvidence:
+    "{\"sheet\":\"June\",\"row\":2,\"column\":3,\"value\":\"Consulting revenue | 1250.00\"}" };
 
 describe("Finance report import proposal contract", () => {
   it("accepts a strict proposal while leaving missing currency unresolved", () => {
@@ -45,6 +46,7 @@ describe("Finance report import proposal contract", () => {
   it.each([
     ["unknown fields", () => ({ ...proposal(), providerDetail: "blocked" })],
     ["invalid date", () => ({ ...proposal(), report: { ...proposal().report, periodEnd: "2026-02-30" } })],
+    ["unsupported early year", () => ({ ...proposal(), report: { ...proposal().report, periodStart: "0999-01-01" } })],
     ["as-of outside period", () => ({ ...proposal(), report: { ...proposal().report, asOfDate: "2026-07-01" } })],
     ["reversed candidate period", () => ({ ...proposal(), candidates: [{ ...proposal().candidates[0],
       periodStart: "2026-07-01" }] })],
@@ -104,6 +106,32 @@ describe("interpretFinanceReport", () => {
     expect(model.extract).toHaveBeenCalledTimes(2);
     expect(model.extract.mock.calls[1]?.[0].instruction).toContain("failed validation");
     expect(model.extract.mock.calls[1]?.[0].instruction).not.toContain("private-output");
+  });
+
+  it("retries fabricated candidate and currency evidence instead of inferring USD", async () => {
+    const fabricated = proposal();
+    fabricated.candidates[0].sourceLocation.row = 99;
+    fabricated.report.currency = { state: "EXPLICIT", code: "USD", evidence: [{
+      page: null, sheet: "June", row: 99, column: 4, evidence: "USD",
+    }] };
+    const model = gateway([fabricated, proposal()]);
+    const result = await interpretFinanceReport({ ...params, gateway: model.model });
+    expect(result.report.currency).toEqual({ state: "UNRESOLVED", code: null, evidence: [] });
+    expect(model.extract).toHaveBeenCalledTimes(2);
+    expect(model.extract.mock.calls[1]?.[0].instruction).toContain("candidates.0.sourceLocation");
+    expect(model.extract.mock.calls[1]?.[0].instruction).toContain("report.currency.evidence.0");
+  });
+
+  it("accepts explicit currency only when its exact source evidence is present", async () => {
+    const output = proposal();
+    output.report.currency = { state: "EXPLICIT", code: "EUR", evidence: [{
+      page: null, sheet: "June", row: 1, column: 2, evidence: "EUR",
+    }] };
+    const model = gateway([output]);
+    await expect(interpretFinanceReport({ ...params, gateway: model.model,
+      extractedEvidence: `${params.extractedEvidence}\n{"sheet":"June","row":1,"column":2,"value":"EUR"}`,
+    })).resolves.toMatchObject({ report: { currency: { state: "EXPLICIT", code: "EUR" } } });
+    expect(model.extract).toHaveBeenCalledOnce();
   });
 
   it("sanitizes terminal invalid output while preserving transient retries", async () => {

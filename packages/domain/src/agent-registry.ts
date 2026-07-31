@@ -154,6 +154,7 @@ export const AGENT_REGISTRY = {
     description: "Interprets extracted financial reports into editable proposals for human review.",
     category: "finance",
     canDisable: true,
+    defaultEnabled: false,
     defaultModelTier: "quality" as const,
     costTier: "high" as const,
     inputs: ["extracted report evidence", "approved profile hints"],
