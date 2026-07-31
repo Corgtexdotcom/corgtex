@@ -22,6 +22,7 @@ export type FinanceExtractedPdfField = {
   name: string;
   type: string;
   value: string | number | boolean | string[];
+  exportValue?: string;
   rect?: [number, number, number, number];
 };
 export type FinanceExtractedPdfPage = { page: number; text: string; fields?: FinanceExtractedPdfField[] };
@@ -119,12 +120,16 @@ const fail = (code) => { const error = new Error(code); error.code = code; throw
         }
         if (!Number.isInteger(widget.page) || widget.page < 0 || widget.page >= document.numPages) fail("MALFORMED_FILE");
         const name = typeof widget.name === "string" && widget.name ? widget.name : fallbackName;
-        const value = widget.value;
+        let value = widget.value;
+        let exportValue;
         let rect;
         if (widget.rect !== undefined && widget.rect !== null) {
           if (!Array.isArray(widget.rect) || widget.rect.length !== 4
             || !widget.rect.every(Number.isFinite)) fail("MALFORMED_FILE");
           rect = widget.rect;
+          const view = (await document.getPage(widget.page + 1)).view;
+          if (rect[2] <= rect[0] || rect[3] <= rect[1]
+            || rect[2] <= view[0] || rect[0] >= view[2] || rect[3] <= view[1] || rect[1] >= view[3]) fail("MALFORMED_FILE");
         }
         if (widget.type === "listbox" && widget.multipleSelection && widget.numItems > 1) {
           fail("UNSUPPORTED_PDF_FEATURE");
@@ -132,6 +137,15 @@ const fail = (code) => { const error = new Error(code); error.code = code; throw
         const blankChoice = (widget.type === "combobox" || widget.type === "listbox")
           && (value === undefined || value === null || value === "");
         if (blankChoice) continue;
+        if ((widget.type === "combobox" || widget.type === "listbox") && typeof value !== "string") fail("UNSUPPORTED_PDF_FEATURE");
+        if (widget.type === "text" && value === "") continue;
+        if ((widget.type === "combobox" || widget.type === "listbox") && Array.isArray(widget.items)) {
+          const item = widget.items.find((candidate) => candidate.exportValue === value);
+          if (item && typeof item.displayValue === "string" && item.displayValue !== value) {
+            exportValue = value;
+            value = item.displayValue;
+          }
+        }
         if (widget.type === "radiobutton") {
           if (value === undefined || value === null || value === "" || value === "Off") continue;
           if (typeof widget.exportValues !== "string") fail("UNSUPPORTED_PDF_FEATURE");
@@ -145,19 +159,21 @@ const fail = (code) => { const error = new Error(code); error.code = code; throw
         const radioKey = JSON.stringify([name, value]);
         if (widget.type === "radiobutton" && radioKeys.has(radioKey)) continue;
         if (widget.type === "radiobutton") radioKeys.add(radioKey);
-        textChars += name.length + JSON.stringify(value).length;
+        textChars += name.length + JSON.stringify(value).length + (exportValue?.length || 0);
         if (textChars > maxTextChars) fail("EXTRACTION_LIMIT_EXCEEDED");
-        fieldsByPage[widget.page].push({ name, type: widget.type, value, ...(rect ? { rect } : {}) });
+        fieldsByPage[widget.page].push({ name, type: widget.type, value, ...(exportValue ? { exportValue } : {}), ...(rect ? { rect } : {}) });
       }
-    }
-    for (const fields of fieldsByPage) {
-      fields.sort((a, b) => (b.rect?.[1] ?? 0) - (a.rect?.[1] ?? 0)
-        || (a.rect?.[0] ?? 0) - (b.rect?.[0] ?? 0)
-        || a.name.localeCompare(b.name)
-        || JSON.stringify(a.value).localeCompare(JSON.stringify(b.value)));
     }
     for (let pageNumber = 1; pageNumber <= document.numPages; pageNumber += 1) {
       const page = await document.getPage(pageNumber);
+      const viewport = page.getViewport({ scale: 1 });
+      const fields = fieldsByPage[pageNumber - 1];
+      const position = (field) => field.rect
+        ? viewport.convertToViewportRectangle(field.rect)
+        : [Infinity, Infinity, Infinity, Infinity];
+      fields.sort((a, b) => Math.min(position(a)[1], position(a)[3]) - Math.min(position(b)[1], position(b)[3])
+        || Math.min(position(a)[0], position(a)[2]) - Math.min(position(b)[0], position(b)[2])
+        || a.name.localeCompare(b.name));
       let text = "";
       let previous;
       const verticalFonts = new Set();
@@ -209,6 +225,10 @@ const fail = (code) => { const error = new Error(code); error.code = code; throw
           while (stack.length) {
             const node = stack.pop();
             if (!node || typeof node !== "object") continue;
+            if (node.name === "img") fail("SCANNED_PDF_UNSUPPORTED");
+            if (node.attributes?.style?.visibility === "hidden" || node.attributes?.style?.display === "none") {
+              fail("UNSUPPORTED_PDF_FEATURE");
+            }
             if (node.name === "input" || node.name === "textarea" || node.name === "select") {
               fail("UNSUPPORTED_PDF_FEATURE");
             }
@@ -232,7 +252,6 @@ const fail = (code) => { const error = new Error(code); error.code = code; throw
       } finally {
         page.cleanup();
       }
-      const fields = fieldsByPage[pageNumber - 1];
       pages.push({ page: pageNumber, text, ...(fields.length ? { fields } : {}) });
     }
     if (!pages.some((page) => page.text.trim() || page.fields?.length)) fail("EMPTY_EXTRACTION");

@@ -79,7 +79,8 @@ function cidFontPdf(encoding = "90ms-RKSJ-H", content = "BT /F1 12 Tf 72 720 Td 
 }
 
 type FormMode = "static" | "javascript" | "password" | "calculation" | "invalidPage"
-  | "invalidRect" | "blankInvalidRect" | "unsupported" | "blankChoice" | "multiselect" | "radioSecond" | "scanned";
+  | "invalidRect" | "blankInvalidRect" | "offPage" | "unsupported" | "blankChoice"
+  | "emptyText" | "multiselect" | "radioSecond" | "rotated" | "scanned";
 
 function formPdf(mode: FormMode = "static") {
   const textFlags = mode === "password" ? " /Ff 8192" : "";
@@ -90,6 +91,8 @@ function formPdf(mode: FormMode = "static") {
   const pageRef = mode === "invalidPage" ? "99 0 R" : "4 0 R";
   const rectEnd = mode === "invalidRect" ? "1".padEnd(310, "0") : "200";
   const choiceRectEnd = mode === "blankInvalidRect" ? "1".padEnd(310, "0") : "200";
+  const textRect = mode === "offPage" ? "1200 700 1400 720" : `72 700 ${rectEnd} 720`;
+  const textValue = mode === "emptyText" ? "" : "123.45";
   const calculation = mode === "calculation" ? " /CO [7 0 R]" : "";
   const annots = mode === "invalidPage" ? "8 0 R 9 0 R 11 0 R 12 0 R 13 0 R" : "7 0 R 8 0 R 9 0 R 11 0 R 12 0 R 13 0 R";
   const scanned = mode === "scanned";
@@ -97,16 +100,16 @@ function formPdf(mode: FormMode = "static") {
     ? `<< /Type /Annot /Subtype /Widget /FT /Ch /Ff 131072 /T (Basis) /Opt [(Cash) (Accrual)] /Rect [72 600 ${choiceRectEnd} 620] /P 4 0 R >>`
     : mode === "multiselect"
       ? "<< /Type /Annot /Subtype /Widget /FT /Ch /Ff 2097152 /T (Basis) /V [(Cash) (Accrual)] /I [0 1] /Opt [(Cash) (Accrual)] /Rect [72 600 200 620] /P 4 0 R >>"
-      : "<< /Type /Annot /Subtype /Widget /FT /Ch /Ff 131072 /T (Basis) /V (Accrual) /Opt [(Cash) (Accrual)] /Rect [72 600 200 620] /P 4 0 R >>";
+      : "<< /Type /Annot /Subtype /Widget /FT /Ch /Ff 131072 /T (Basis) /V (A) /Opt [[(C) (Cash basis)] [(A) (Accrual basis)]] /Rect [72 600 200 620] /P 4 0 R >>";
   const selectedRadio = mode === "radioSecond" ? "Rejected" : "Approved";
   const objects = [
     Buffer.from("<< /Type /Catalog /Pages 2 0 R /AcroForm 6 0 R >>"),
     Buffer.from("<< /Type /Pages /Kids [4 0 R] /Count 1 >>"),
     Buffer.from("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>"),
-    Buffer.from(`<< /Type /Page /Parent 2 0 R /MediaBox [0 0 1000 1000] /Resources << /Font << /F1 3 0 R >>${scanned ? " /XObject << /Im1 15 0 R >>" : ""} >> /Contents 5 0 R /Annots [${annots}] >>`),
+    Buffer.from(`<< /Type /Page /Parent 2 0 R /MediaBox [0 0 1000 1000] ${mode === "rotated" ? "/Rotate 90 " : ""}/Resources << /Font << /F1 3 0 R >>${scanned ? " /XObject << /Im1 15 0 R >>" : ""} >> /Contents 5 0 R /Annots [${annots}] >>`),
     Buffer.from(scanned ? "<< /Length 26 >>\nstream\nq 1 0 0 1 0 0 cm /Im1 Do Q\nendstream" : "<< /Length 0 >>\nstream\n\nendstream"),
     Buffer.from(`<< /Fields [7 0 R 8 0 R 9 0 R 10 0 R 13 0 R] /NeedAppearances true${calculation} >>`),
-    Buffer.from(`<< /Type /Annot /Subtype /Widget ${fieldType} /T (Revenue) /V (123.45) /Rect [72 700 ${rectEnd} 720] /P ${pageRef}${actions} >>`),
+    Buffer.from(`<< /Type /Annot /Subtype /Widget ${fieldType} /T (Revenue) /V (${textValue}) /Rect [${textRect}] /P ${pageRef}${actions} >>`),
     Buffer.from("<< /Type /Annot /Subtype /Widget /FT /Btn /T (Audited) /V /Yes /AS /Yes /Rect [72 650 90 668] /P 4 0 R >>"),
     Buffer.from(choice),
     Buffer.from(`<< /FT /Btn /Ff 32768 /T (Status) /V /${selectedRadio} /Kids [11 0 R 12 0 R] >>`),
@@ -121,10 +124,14 @@ function formPdf(mode: FormMode = "static") {
   return renderPdf(objects);
 }
 
-function xfaPdf(field = false) {
-  const report = field
+function xfaPdf(mode: "static" | "field" | "invisible" | "image" = "static") {
+  const report = mode === "field"
     ? `<subform name="report"><draw w="100pt" h="20pt"><value><text>Revenue</text></value></draw>`
       + `<field name="Revenue" y="20pt" w="100pt" h="20pt"><ui><textEdit/></ui><value><text>123.45</text></value></field></subform>`
+    : mode === "invisible"
+      ? `<subform name="report"><draw presence="invisible" w="100pt" h="20pt"><value><text>999.99</text></value></draw></subform>`
+      : mode === "image"
+        ? `<subform name="report"><draw w="100pt" h="20pt"><value><image contentType="image/png" transferEncoding="base64">iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=</image></value></draw></subform>`
     : `<subform name="report"><draw w="100pt" h="20pt"><value><text>Revenue 123.45</text></value></draw></subform>`;
   const xml = `<?xml version="1.0"?><xdp:xdp xmlns:xdp="http://ns.adobe.com/xdp/">`
     + `<template xmlns="http://www.xfa.org/schema/xfa-template/3.3"><subform name="root" mergeMode="matchTemplate">`
@@ -177,15 +184,17 @@ describe("extractFinanceReportFile", () => {
     expect(result.pages?.[0]?.fields).toEqual([
       { name: "Revenue", type: "text", value: "123.45", rect: [72, 700, 200, 720] },
       { name: "Audited", type: "checkbox", value: "Yes", rect: [72, 650, 90, 668] },
-      { name: "Basis", type: "combobox", value: "Accrual", rect: [72, 600, 200, 620] },
+      { name: "Basis", type: "combobox", value: "Accrual basis", exportValue: "A", rect: [72, 600, 200, 620] },
       { name: "Status", type: "radiobutton", value: "Approved", rect: [72, 550, 90, 568] },
     ]);
   });
 
   pdfIt("omits blank choices and locates the selected radio widget", async () => {
     const blank = await extractFinanceReportFile({ fileBuffer: formPdf("blankChoice"), fileName: "blank.pdf", mimeType: "application/pdf" });
+    const empty = await extractFinanceReportFile({ fileBuffer: formPdf("emptyText"), fileName: "empty.pdf", mimeType: "application/pdf" });
     const radio = await extractFinanceReportFile({ fileBuffer: formPdf("radioSecond"), fileName: "radio.pdf", mimeType: "application/pdf" });
     expect(blank.pages?.[0]?.fields?.some((field) => field.name === "Basis")).toBe(false);
+    expect(empty.pages?.[0]?.fields?.some((field) => field.name === "Revenue")).toBe(false);
     expect(radio.pages?.[0]?.fields?.find((field) => field.name === "Status")).toEqual({
       name: "Status", type: "radiobutton", value: "Rejected", rect: [100, 550, 118, 568],
     });
@@ -209,7 +218,7 @@ describe("extractFinanceReportFile", () => {
     })).rejects.toMatchObject({ code: "UNSUPPORTED_PDF_FEATURE" });
   });
 
-  pdfIt.each(["invalidPage", "invalidRect", "blankInvalidRect"] as const)("rejects malformed %s AcroForm evidence", async (mode) => {
+  pdfIt.each(["invalidPage", "invalidRect", "blankInvalidRect", "offPage"] as const)("rejects malformed %s AcroForm evidence", async (mode) => {
     await expect(extractFinanceReportFile({
       fileBuffer: formPdf(mode),
       fileName: "invalid-form.pdf",
@@ -227,10 +236,23 @@ describe("extractFinanceReportFile", () => {
 
   pdfIt("fails field-bearing pure XFA closed instead of omitting control values", async () => {
     await expect(extractFinanceReportFile({
-      fileBuffer: xfaPdf(true),
+      fileBuffer: xfaPdf("field"),
       fileName: "xfa-field.pdf",
       mimeType: "application/pdf",
     })).rejects.toMatchObject({ code: "UNSUPPORTED_PDF_FEATURE" });
+  });
+
+  pdfIt.each([
+    [xfaPdf("invisible"), "UNSUPPORTED_PDF_FEATURE"],
+    [xfaPdf("image"), "SCANNED_PDF_UNSUPPORTED"],
+  ] as const)("rejects incomplete or invisible XFA evidence", async (fileBuffer, code) => {
+    await expect(extractFinanceReportFile({ fileBuffer, fileName: "xfa-unsafe.pdf", mimeType: "application/pdf" }))
+      .rejects.toMatchObject({ code });
+  });
+
+  pdfIt("orders form fields in the rotated page viewport", async () => {
+    const result = await extractFinanceReportFile({ fileBuffer: formPdf("rotated"), fileName: "rotated-form.pdf", mimeType: "application/pdf" });
+    expect(result.pages?.[0]?.fields?.map((field) => field.name)).toEqual(["Status", "Basis", "Audited", "Revenue"]);
   });
 
   pdfIt.each([formPdf(), xfaPdf()])("applies the cumulative text limit to structured evidence", async (fileBuffer) => {
