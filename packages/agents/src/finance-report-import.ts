@@ -96,9 +96,13 @@ export const financeReportImportProposalV1Schema = z.object({
   candidates: z.array(candidateSchema).min(1).max(1_000),
 }).strict().superRefine((value, context) => {
   value.candidates.forEach((candidate, index) => {
-    if (candidate.periodStart < value.report.periodStart || candidate.periodEnd > value.report.periodEnd) {
+    if (candidate.periodStart < value.report.periodStart) {
+      context.addIssue({ code: "custom", path: ["candidates", index, "periodStart"],
+        message: "Candidate period starts before the report period." });
+    }
+    if (candidate.periodEnd > value.report.periodEnd) {
       context.addIssue({ code: "custom", path: ["candidates", index, "periodEnd"],
-        message: "Candidate period is outside the report period." });
+        message: "Candidate period ends after the report period." });
     }
   });
 });
@@ -200,7 +204,7 @@ function forceVisibleExceptions(proposal: FinanceReportImportProposalV1) {
     if (candidate.mappingStatus === "UNMAPPED") {
       codes.add("UNMAPPED_ACCOUNT"); reasons.push("No account mapping is proposed.");
     }
-    const needsReview = codes.size > 0;
+    const needsReview = codes.size > 0 || reasons.length > 0;
     return { ...candidate, reviewStatus: candidate.reviewStatus === "VERIFIED" && needsReview ? "WARNING" as const
       : candidate.reviewStatus, exceptionCodes: [...codes], reviewReasons: [...new Set(reasons)].slice(0, 8) };
   }) };

@@ -108,6 +108,25 @@ describe("interpretFinanceReport", () => {
     expect(model.extract.mock.calls[1]?.[0].instruction).not.toContain("private-output");
   });
 
+  it("points report-window retries at the offending start field", async () => {
+    const outside = proposal();
+    outside.candidates[0].periodStart = "2026-05-01";
+    const model = gateway([outside, proposal()]);
+    await expect(interpretFinanceReport({ ...params, gateway: model.model })).resolves.toMatchObject({
+      contractVersion: 1,
+    });
+    expect(model.extract.mock.calls[1]?.[0].instruction).toContain("candidates.0.periodStart");
+  });
+
+  it("forces a model-supplied review reason out of verified state", async () => {
+    const output = proposal();
+    output.candidates[0].reviewReasons = ["The source label needs human review."];
+    const model = gateway([output]);
+    await expect(interpretFinanceReport({ ...params, gateway: model.model })).resolves.toMatchObject({
+      candidates: [{ reviewStatus: "WARNING" }],
+    });
+  });
+
   it("retries fabricated candidate and currency evidence instead of inferring USD", async () => {
     const fabricated = proposal();
     fabricated.candidates[0].sourceLocation.row = 99;
