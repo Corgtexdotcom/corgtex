@@ -140,6 +140,24 @@ export function deriveJobsForEvent(event: {
     }
   }
 
+  if (event.type === "finance-report-import.uploaded") {
+    const batchId = readPayloadString(event.payload, "batchId");
+    if (
+      event.workspaceId
+      && batchId
+      && event.aggregateType === "FinanceImportBatch"
+      && event.aggregateId === batchId
+    ) {
+      jobs.push({
+        workspaceId: event.workspaceId,
+        eventId: event.id,
+        type: "finance-report-import.extract",
+        payload: { batchId },
+        dedupeKey: `finance-report-import:${event.workspaceId}:${batchId}:extract:v1`,
+      });
+    }
+  }
+
   if (event.type === "meeting.created" || event.type === "meeting.transcript-uploaded") {
     const payload = event.payload as { meetingId?: string; status?: string; hasTranscript?: boolean };
     const shouldRunMeetingAgents = payload.status !== "SCHEDULED" && payload.hasTranscript !== false;

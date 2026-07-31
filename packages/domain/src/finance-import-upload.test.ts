@@ -15,6 +15,7 @@ const { prismaMock, storageMock, accessMock, capacityMock, createBatchMock } = v
     document: { create: vi.fn() },
     brainSource: { create: vi.fn() },
     financeImportBatch: { findUnique: vi.fn(), updateMany: vi.fn() },
+    event: { createMany: vi.fn() },
     auditLog: { create: vi.fn() },
   },
 }));
@@ -56,6 +57,7 @@ describe("Finance report import upload persistence", () => {
     prismaMock.$transaction.mockImplementation((callback) => callback(prismaMock));
     prismaMock.financeImportBatch.findUnique.mockResolvedValue(null);
     prismaMock.financeImportBatch.updateMany.mockResolvedValue({ count: 1 });
+    prismaMock.event.createMany.mockResolvedValue({ count: 1 });
     prismaMock.document.create.mockResolvedValue({});
     prismaMock.brainSource.create.mockResolvedValue({});
     prismaMock.auditLog.create.mockResolvedValue({});
@@ -88,6 +90,15 @@ describe("Finance report import upload persistence", () => {
     expect(audit.data.meta).toEqual({ format: "CSV", mimeType: "text/csv", fileSizeBytes: fileBuffer.length });
     expect(JSON.stringify(audit)).not.toContain(fileHash);
     expect(JSON.stringify(audit)).not.toContain("Board report");
+    expect(prismaMock.event.createMany).toHaveBeenCalledWith({ data: [{
+      workspaceId: "workspace-1",
+      type: "finance-report-import.uploaded",
+      aggregateType: "FinanceImportBatch",
+      aggregateId: "batch-1",
+      payload: { batchId: "batch-1" },
+    }] });
+    expect(JSON.stringify(prismaMock.event.createMany.mock.calls)).not.toContain(fileHash);
+    expect(JSON.stringify(prismaMock.event.createMany.mock.calls)).not.toContain("Board report");
     expect(result).toEqual({ batch: uploaded, reused: false });
   });
 
@@ -97,6 +108,7 @@ describe("Finance report import upload persistence", () => {
     expect(capacityMock).not.toHaveBeenCalled();
     expect(prismaMock.$transaction).not.toHaveBeenCalled();
     expect(storageMock.put).not.toHaveBeenCalled();
+    expect(prismaMock.event.createMany).not.toHaveBeenCalled();
   });
 
   it.each([
@@ -141,6 +153,7 @@ describe("Finance report import upload persistence", () => {
       data: expect.objectContaining({ safeErrorCode: "FINANCE_REPORT_STORAGE_UNAVAILABLE" }),
     }));
     expect(JSON.stringify(prismaMock.financeImportBatch.updateMany.mock.calls)).not.toContain("provider details");
+    expect(prismaMock.event.createMany).not.toHaveBeenCalled();
   });
 
   it("returns a concurrent winner when this retry's storage call fails", async () => {
@@ -154,6 +167,18 @@ describe("Finance report import upload persistence", () => {
     await expect(upload()).rejects.toMatchObject({ code: "FINANCE_REPORT_UPLOAD_FAILED" });
     expect(createBatchMock).toHaveBeenCalledOnce();
     expect(storageMock.put).toHaveBeenCalledOnce();
+    expect(prismaMock.event.createMany).not.toHaveBeenCalled();
+  });
+
+  it("does not append a second event when a concurrent finalizer wins", async () => {
+    prismaMock.financeImportBatch.findUnique
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce(uploaded);
+    prismaMock.financeImportBatch.updateMany.mockResolvedValueOnce({ count: 0 });
+    await expect(upload()).resolves.toEqual({ batch: uploaded, reused: false });
+    expect(storageMock.put).toHaveBeenCalledOnce();
+    expect(prismaMock.event.createMany).not.toHaveBeenCalled();
   });
 
   it("uses the immutable snapshot taken before authorization awaits", async () => {

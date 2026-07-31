@@ -3,6 +3,7 @@ import type { FinanceImportBatch, Prisma } from "@prisma/client";
 import { prisma, type AppActor } from "@corgtex/shared";
 import { defaultStorage, type StorageProvider } from "@corgtex/storage";
 import { AppError, invariant } from "./errors";
+import { appendEvents } from "./events";
 import { requireFinanceReportImportHumanWriteAccess } from "./finance";
 import { createFinanceImportBatchWithArtifactOwnership } from "./finance-import-artifact-ownership";
 import { lockAndAssertTrialStorageCapacity } from "./trial-entitlements";
@@ -130,6 +131,13 @@ async function finalizeUpload(batch: FinanceImportBatch, actorUserId: string, fo
         data: { stage: "UPLOADED", safeErrorCode: null, safeErrorMessage: null, version: { increment: 1 } },
       });
       if (result.count !== 1) return null;
+      await appendEvents(tx, [{
+        workspaceId: current.workspaceId,
+        type: "finance-report-import.uploaded",
+        aggregateType: "FinanceImportBatch",
+        aggregateId: current.id,
+        payload: { batchId: current.id },
+      }]);
       await tx.auditLog.create({ data: {
         workspaceId: current.workspaceId, actorUserId, action: "finance-report-import.uploaded",
         entityType: "FinanceImportBatch", entityId: current.id,
