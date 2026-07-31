@@ -21,6 +21,12 @@ const { prismaMock } = vi.hoisted(() => ({
       findMany: vi.fn(),
       update: vi.fn(),
     },
+    brainDiscussionThread: {
+      count: vi.fn(),
+    },
+    brainBacklink: {
+      findMany: vi.fn(),
+    },
     workspacePermalink: {
       upsert: vi.fn(),
     },
@@ -218,6 +224,57 @@ describe("Brain article draft lifecycle", () => {
         ownerMemberId: null,
       }),
     });
+  });
+});
+
+describe("Brain status access domains", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    requireWorkspaceMembership.mockResolvedValue({
+      id: "mem-1",
+      workspaceId: "ws-1",
+      userId: "user-1",
+      role: "MEMBER",
+      isActive: true,
+    });
+    prismaMock.brainArticle.findMany.mockResolvedValue([]);
+    prismaMock.brainArticle.count.mockResolvedValue(0);
+    prismaMock.brainSource.count.mockResolvedValue(2);
+    prismaMock.brainDiscussionThread.count.mockResolvedValue(0);
+    prismaMock.brainBacklink.findMany.mockResolvedValue([]);
+  });
+
+  it.each([
+    [["WORKSPACE"], 2],
+    [["WORKSPACE", "FINANCE"], 3],
+  ])("scopes unabsorbed source counts to %j", async (domains, count) => {
+    resolveKnowledgeAccessDomains.mockResolvedValue(domains);
+    prismaMock.brainSource.count.mockResolvedValue(count);
+    const { getBrainStatus } = await import("./brain");
+
+    await expect(getBrainStatus(ownerActor, { workspaceId: "ws-1" }))
+      .resolves.toMatchObject({ unabsorbedSources: count });
+
+    expect(resolveKnowledgeAccessDomains).toHaveBeenCalledWith(ownerActor, "ws-1");
+    expect(prismaMock.brainSource.count).toHaveBeenCalledWith({
+      where: {
+        workspaceId: "ws-1",
+        accessDomain: { in: domains },
+        absorbedAt: null,
+      },
+    });
+  });
+
+  it("fails closed before status queries when access resolution fails", async () => {
+    const error = new Error("access denied");
+    resolveKnowledgeAccessDomains.mockRejectedValue(error);
+    const { getBrainStatus } = await import("./brain");
+
+    await expect(getBrainStatus(ownerActor, { workspaceId: "ws-1" }))
+      .rejects.toBe(error);
+
+    expect(prismaMock.brainSource.count).not.toHaveBeenCalled();
+    expect(prismaMock.brainArticle.findMany).not.toHaveBeenCalled();
   });
 });
 
