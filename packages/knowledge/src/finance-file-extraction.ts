@@ -49,6 +49,7 @@ const DEFAULT_LIMITS: FinanceFileExtractionLimits = {
   maxPdfParseMs: 15_000,
 };
 const PDF_MAX_HEAP_MB = 96;
+const PDF_MAX_IMAGE_PIXELS = 4_000_000;
 const PDF_MAX_STDERR_BYTES = 8_192;
 const SAFE_MESSAGES: Record<FinanceFileExtractionErrorCode, string> = {
   EMPTY_FILE: "The report file is empty.",
@@ -107,6 +108,7 @@ async function main() {
     data,
     disableFontFace: true,
     isEvalSupported: false,
+    maxImageSize: ${PDF_MAX_IMAGE_PIXELS},
     stopAtErrors: true,
     useSystemFonts: false,
     verbosity: 0,
@@ -135,16 +137,24 @@ async function main() {
             stop("EXTRACTION_LIMIT_EXCEEDED");
           }
           const transform = Util.transform(viewport.transform, item.transform).map(round);
+          const width = Math.abs(item.width * viewport.scale * viewport.userUnit);
+          const height = Math.abs(item.height * viewport.scale * viewport.userUnit);
+          const xLength = Math.hypot(transform[0], transform[1]) || 1;
+          const yLength = Math.hypot(transform[2], transform[3]) || 1;
+          const xVector = [transform[0] / xLength * width, transform[1] / xLength * width];
+          const yVector = [transform[2] / yLength * height, transform[3] / yLength * height];
+          const xOffsets = [0, xVector[0], yVector[0], xVector[0] + yVector[0]];
+          const yOffsets = [0, xVector[1], yVector[1], xVector[1] + yVector[1]];
           cells.push({
             row: cells.length + 1,
             column: 1,
             type: "TEXT",
             value: item.str,
             layout: {
-              x: transform[4],
-              y: transform[5],
-              width: round(item.width),
-              height: round(item.height),
+              x: round(transform[4] + Math.min(...xOffsets)),
+              y: round(transform[5] + Math.min(...yOffsets)),
+              width: round(Math.max(...xOffsets) - Math.min(...xOffsets)),
+              height: round(Math.max(...yOffsets) - Math.min(...yOffsets)),
               transform,
             },
           });
