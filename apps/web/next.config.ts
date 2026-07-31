@@ -37,7 +37,7 @@ const nextConfig: NextConfig = {
     "@corgtex/knowledge",
     "@corgtex/agents",
   ],
-  serverExternalPackages: ["pdf-parse", "mammoth"],
+  serverExternalPackages: ["pdf-parse", "pdfjs-dist", "mammoth"],
 };
 
 export default withSentryConfig(analyzer(withNextIntl(nextConfig)), {

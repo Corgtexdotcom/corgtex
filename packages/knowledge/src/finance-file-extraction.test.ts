@@ -1,6 +1,74 @@
 import { createHash } from "node:crypto";
+import { deflateSync } from "node:zlib";
 import { describe, expect, it } from "vitest";
 import { extractFinanceReportFile } from "./finance-file-extraction";
+
+function assemblePdf(objects: Buffer[]) {
+  const chunks = [Buffer.from("%PDF-1.7\n")];
+  const offsets = [0];
+  let offset = chunks[0]?.length ?? 0;
+  objects.forEach((object, index) => {
+    offsets.push(offset);
+    const wrapped = Buffer.concat([
+      Buffer.from(`${index + 1} 0 obj\n`), object, Buffer.from("\nendobj\n"),
+    ]);
+    chunks.push(wrapped);
+    offset += wrapped.length;
+  });
+  const xrefOffset = offset;
+  const xref = offsets.slice(1).map((entry) => `${String(entry).padStart(10, "0")} 00000 n \n`).join("");
+  chunks.push(Buffer.from(
+    `xref\n0 ${objects.length + 1}\n0000000000 65535 f \n${xref}`
+    + `trailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\nstartxref\n${xrefOffset}\n%%EOF\n`,
+  ));
+  return Buffer.concat(chunks);
+}
+
+function createTextPdf(pages: Array<{ text?: string; rotation?: number }>) {
+  const fontId = 3 + (pages.length * 2);
+  const pageIds = pages.map((_, index) => 3 + (index * 2));
+  const objects = [
+    Buffer.from("<< /Type /Catalog /Pages 2 0 R >>"),
+    Buffer.from(`<< /Type /Pages /Kids [${pageIds.map((id) => `${id} 0 R`).join(" ")}] /Count ${pages.length} >>`),
+  ];
+  pages.forEach((page, index) => {
+    const streamId = 4 + (index * 2);
+    const content = page.text === undefined ? "" : `BT /F1 12 Tf 50 700 Td (${page.text}) Tj ET`;
+    objects.push(Buffer.from(
+      `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792]`
+      + ` /Resources << /Font << /F1 ${fontId} 0 R >> >>`
+      + ` /Contents ${streamId} 0 R${page.rotation ? ` /Rotate ${page.rotation}` : ""} >>`,
+    ));
+    objects.push(Buffer.from(`<< /Length ${Buffer.byteLength(content)} >>\nstream\n${content}\nendstream`));
+  });
+  objects.push(Buffer.from("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>"));
+  return assemblePdf(objects);
+}
+
+function createImagePdf(text?: string) {
+  const content = `q 10 0 0 10 0 0 cm /Im0 Do Q${text ? `\nBT /F1 12 Tf 20 80 Td (${text}) Tj ET` : ""}`;
+  return assemblePdf([
+    Buffer.from("<< /Type /Catalog /Pages 2 0 R >>"),
+    Buffer.from("<< /Type /Pages /Kids [3 0 R] /Count 1 >>"),
+    Buffer.from("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] /Resources << /XObject << /Im0 5 0 R >> /Font << /F1 6 0 R >> >> /Contents 4 0 R >>"),
+    Buffer.from(`<< /Length ${Buffer.byteLength(content)} >>\nstream\n${content}\nendstream`),
+    Buffer.from("<< /Type /XObject /Subtype /Image /Width 1 /Height 1 /ColorSpace /DeviceGray /BitsPerComponent 8 /Filter /ASCIIHexDecode /Length 3 >>\nstream\n00>\nendstream"),
+    Buffer.from("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>"),
+  ]);
+}
+
+function createCompressedTokenPdf(textBytes: number) {
+  const content = deflateSync(Buffer.concat([
+    Buffer.from("BT /F1 12 Tf 50 700 Td ("), Buffer.alloc(textBytes, 0x61), Buffer.from(") Tj ET"),
+  ]));
+  return assemblePdf([
+    Buffer.from("<< /Type /Catalog /Pages 2 0 R >>"),
+    Buffer.from("<< /Type /Pages /Kids [3 0 R] /Count 1 >>"),
+    Buffer.from("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>"),
+    Buffer.concat([Buffer.from(`<< /Filter /FlateDecode /Length ${content.length} >>\nstream\n`), content, Buffer.from("\nendstream")]),
+    Buffer.from("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>"),
+  ]);
+}
 
 describe("extractFinanceReportFile", () => {
   it("preserves CSV source locations, quoting, whitespace, empty cells, and exact text", async () => {
@@ -51,6 +119,82 @@ describe("extractFinanceReportFile", () => {
     expect(result.sheets[0]?.cells).toContainEqual({ row: 4, column: 1, type: "TEXT", value: "Margin" });
   });
 
+  it("extracts machine-readable PDF text, source pages, layout, rotation, and exact bytes", async () => {
+    const input = createTextPdf([{ text: "Revenue" }, {}, { text: "Costs", rotation: 90 }]);
+    const result = await extractFinanceReportFile({ fileBuffer: input, fileName: "actuals.pdf", mimeType: "application/pdf" });
+    expect(result).toMatchObject({
+      fileHash: createHash("sha256").update(input).digest("hex"),
+      fileSizeBytes: input.length,
+      format: "PDF",
+      mimeType: "application/pdf",
+    });
+    expect(result.sheets.map(({ name, rowCount, columnCount, page }) => ({ name, rowCount, columnCount, page }))).toEqual([
+      { name: "Page 1", rowCount: 1, columnCount: 1, page: { width: 612, height: 792, rotation: 0 } },
+      { name: "Page 2", rowCount: 0, columnCount: 0, page: { width: 612, height: 792, rotation: 0 } },
+      { name: "Page 3", rowCount: 1, columnCount: 1, page: { width: 792, height: 612, rotation: 90 } },
+    ]);
+    expect(result.sheets[0]?.cells[0]).toMatchObject({ row: 1, column: 1, type: "TEXT", value: "Revenue" });
+    expect(result.sheets[2]?.cells[0]?.layout?.transform).toHaveLength(6);
+  });
+
+  it("hashes and parses an immutable PDF byte snapshot", async () => {
+    const input = createTextPdf([{ text: "Margin" }]);
+    const hash = createHash("sha256").update(input).digest("hex");
+    const extraction = extractFinanceReportFile({ fileBuffer: input, fileName: "actuals.pdf", mimeType: "application/pdf" });
+    input.fill(0x20);
+    await expect(extraction).resolves.toMatchObject({ fileHash: hash, sheets: [{ cells: [expect.objectContaining({ value: "Margin" })] }] });
+  });
+
+  it("retains secure PDF defaults for invalid partial limit overrides", async () => {
+    await expect(extractFinanceReportFile({
+      fileBuffer: createTextPdf([{ text: "Operating income" }]),
+      fileName: "actuals.pdf",
+      mimeType: "application/pdf",
+      limits: {
+        maxPdfItems: -1,
+        maxPdfOutputBytes: Number.POSITIVE_INFINITY,
+        maxPdfPages: Number.NaN,
+        maxPdfParseMs: 1.5,
+      },
+    })).resolves.toMatchObject({ format: "PDF" });
+  });
+
+  it("accepts machine-readable text on a page that also contains an image", async () => {
+    await expect(extractFinanceReportFile({
+      fileBuffer: createImagePdf("Net income"),
+      fileName: "actuals.pdf",
+      mimeType: "application/pdf",
+    })).resolves.toMatchObject({ sheets: [{ cells: [expect.objectContaining({ value: "Net income" })] }] });
+  });
+
+  it.each([
+    [createTextPdf([]), {}, "EMPTY_EXTRACTION"],
+    [createTextPdf([{ text: "One" }, { text: "Two" }]), { maxPdfPages: 1 }, "EXTRACTION_LIMIT_EXCEEDED"],
+    [createTextPdf([{ text: "Long" }]), { maxTextChars: 3 }, "EXTRACTION_LIMIT_EXCEEDED"],
+    [createTextPdf([{ text: "Text" }]), { maxPdfItems: 0 }, "EXTRACTION_LIMIT_EXCEEDED"],
+    [createTextPdf([{ text: "Text" }]), { maxPdfOutputBytes: 16 }, "EXTRACTION_LIMIT_EXCEEDED"],
+    [createTextPdf([{ text: "Text" }]), { maxPdfParseMs: 1 }, "EXTRACTION_LIMIT_EXCEEDED"],
+    [createImagePdf(), {}, "UNSUPPORTED_FILE_TYPE"],
+  ])("rejects an incomplete or over-limit PDF as one safe failure", async (fileBuffer, limits, code) => {
+    await expect(extractFinanceReportFile({
+      fileBuffer,
+      fileName: "actuals.pdf",
+      mimeType: "application/pdf",
+      limits,
+    })).rejects.toMatchObject({ code });
+  });
+
+  it("contains a compressed expanded token inside the bounded parser process", async () => {
+    const input = createCompressedTokenPdf(70 * 1024 * 1024);
+    expect(input.length).toBeLessThan(100_000);
+    await expect(extractFinanceReportFile({
+      fileBuffer: input,
+      fileName: "actuals.pdf",
+      mimeType: "application/pdf",
+      limits: { maxPdfParseMs: 10_000 },
+    })).rejects.toMatchObject({ code: "EXTRACTION_LIMIT_EXCEEDED" });
+  }, 20_000);
+
   it.each([
     [Buffer.alloc(0), "report.csv", "text/csv", {}, "EMPTY_FILE"],
     [Buffer.from("a,b\n1"), "report.csv", "text/csv", {}, "MALFORMED_FILE"],
@@ -67,7 +211,9 @@ describe("extractFinanceReportFile", () => {
     [Buffer.from("a,b"), "report.csv", "text/csv", { maxCells: 1 }, "EXTRACTION_LIMIT_EXCEEDED"],
     [Buffer.from(",".repeat(250_000)), "report.csv", "text/csv", {}, "EXTRACTION_LIMIT_EXCEEDED"],
     [Buffer.from("ab"), "report.csv", "text/csv", { maxTextChars: 1 }, "EXTRACTION_LIMIT_EXCEEDED"],
-    [Buffer.from("%PDF-1.4"), "report.pdf", "application/pdf", {}, "UNSUPPORTED_FILE_TYPE"],
+    [Buffer.from("%PDF-1.4"), "report.pdf", "application/pdf", {}, "MALFORMED_FILE"],
+    [Buffer.from("not a pdf"), "report.pdf", "application/pdf", {}, "FILE_TYPE_MISMATCH"],
+    [createTextPdf([{ text: "Text" }]), "report.pdf", "text/csv", {}, "FILE_TYPE_MISMATCH"],
     [Buffer.from([0xff]), "report.csv", "text/csv", {}, "MALFORMED_FILE"],
   ])("fails the whole extraction with a safe code", async (fileBuffer, fileName, mimeType, limits, code) => {
     await expect(extractFinanceReportFile({ fileBuffer, fileName, mimeType, limits })).rejects.toMatchObject({ code });
