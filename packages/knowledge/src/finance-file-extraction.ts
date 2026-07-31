@@ -70,7 +70,7 @@ const PDF_PROCESS_MAX_DATA_KIB = 256 * 1024;
 const PDF_PROCESS_SOURCE = String.raw`
 const fail = (code) => { const error = new Error(code); error.code = code; throw error; };
 (async () => {
-  const [moduleUrl, cMapUrl, maxPagesValue, maxTextCharsValue] = process.argv.slice(1);
+  const [moduleUrl, cMapUrl, standardFontDataUrl, maxPagesValue, maxTextCharsValue] = process.argv.slice(1);
   const maxPages = Number(maxPagesValue);
   const maxTextChars = Number(maxTextCharsValue);
   const chunks = [];
@@ -85,6 +85,7 @@ const fail = (code) => { const error = new Error(code); error.code = code; throw
     cMapUrl,
     enableXfa: true,
     isEvalSupported: false,
+    standardFontDataUrl,
     stopAtErrors: true,
     useSystemFonts: false,
     verbosity: VerbosityLevel.ERRORS,
@@ -93,126 +94,54 @@ const fail = (code) => { const error = new Error(code); error.code = code; throw
     const document = await task.promise;
     if (document.numPages === 0) fail("EMPTY_EXTRACTION");
     if (document.numPages > maxPages) fail("EXTRACTION_LIMIT_EXCEEDED");
-    if (document.isPureXfa) fail("UNSUPPORTED_PDF_FEATURE");
-    const fieldLinesByPage = Array.from({ length: document.numPages }, () => new Map());
-    const fieldObjects = await document.getFieldObjects();
-    if (fieldObjects) {
-      const supportedTypes = new Set(["checkbox", "combobox", "listbox", "radiobutton", "text"]);
-      const entries = Object.entries(fieldObjects)
-        .sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0);
-      for (const [name, fields] of entries) {
-        const orderedFields = [...fields].sort((left, right) => {
-          const pageOrder = (left.page ?? Number.MAX_SAFE_INTEGER) - (right.page ?? Number.MAX_SAFE_INTEGER);
-          if (pageOrder !== 0) return pageOrder;
-          const leftId = String(left.id ?? "");
-          const rightId = String(right.id ?? "");
-          return leftId < rightId ? -1 : leftId > rightId ? 1 : 0;
-        });
-        for (const field of orderedFields) {
-          if (!supportedTypes.has(field.type) || field.hidden || field.password) continue;
-          if (field.multipleSelection && field.numItems > 1) fail("UNSUPPORTED_PDF_FEATURE");
-          const rawValues = (Array.isArray(field.value) ? field.value : [field.value])
-            .filter((value) => typeof value === "string" || typeof value === "number" || typeof value === "boolean")
-            .map(String);
-          if (field.type === "checkbox" || field.type === "radiobutton") {
-            const widgetExports = (Array.isArray(field.exportValues) ? field.exportValues : [field.exportValues])
-              .filter((value) => typeof value === "string" || typeof value === "number" || typeof value === "boolean")
-              .map(String);
-            if (widgetExports.length === 0) fail("UNSUPPORTED_PDF_FEATURE");
-            if (!rawValues.some((value) => widgetExports.includes(value))) continue;
-          }
-          const values = ["combobox", "listbox"].includes(field.type) && Array.isArray(field.items)
-            ? rawValues.map((value) => {
-              const item = field.items.find((candidate) => String(candidate?.exportValue ?? "") === value);
-              if (typeof item?.displayValue === "string") return item.displayValue;
-              fail("UNSUPPORTED_PDF_FEATURE");
-            }).filter((value) => value.trim())
-            : rawValues.filter((value) => value.trim());
-          if (values.length === 0) continue;
-          const fieldId = String(field.id ?? "");
-          if (!name.trim() || !fieldId || !Number.isInteger(field.page) || field.page < 0 || field.page >= document.numPages) {
-            fail("UNSUPPORTED_PDF_FEATURE");
-          }
-          const line = "[AcroForm]\t" + JSON.stringify([name, ...values]);
-          const fieldIds = fieldLinesByPage[field.page].get(line) ?? new Set();
-          fieldIds.add(fieldId);
-          fieldLinesByPage[field.page].set(line, fieldIds);
-        }
-      }
-    }
+    if (document.isPureXfa || await document.getFieldObjects()) fail("UNSUPPORTED_PDF_FEATURE");
     const pages = [];
     let textChars = 0;
     for (let pageNumber = 1; pageNumber <= document.numPages; pageNumber += 1) {
       const page = await document.getPage(pageNumber);
+      const reader = page.streamTextContent().getReader();
       let text = "";
       let previous;
-      const verticalFonts = new Set();
       const append = (value) => {
         textChars += value.length;
         if (textChars > maxTextChars) fail("EXTRACTION_LIMIT_EXCEEDED");
         text += value;
       };
       try {
-        const consume = (content) => {
-          for (const [fontName, style] of Object.entries(content.styles)) {
-            if (style.vertical) verticalFonts.add(fontName);
+        while (true) {
+          const chunk = await reader.read();
+          if (chunk.done) break;
+          if (Object.values(chunk.value.styles).some((style) => style.vertical)) {
+            fail("UNSUPPORTED_PDF_FEATURE");
           }
-          for (const item of content.items) {
+          for (const item of chunk.value.items) {
             if (!("str" in item)) continue;
-            const [a, b, c, d, x, y] = item.transform;
-            const vertical = verticalFonts.has(item.fontName);
-            const axisX = vertical ? -c : a;
-            const axisY = vertical ? -d : b;
-            const scale = Math.hypot(axisX, axisY) || 1;
-            const ux = axisX / scale;
-            const uy = axisY / scale;
+            const [a, b, , , x, y] = item.transform;
+            const scale = Math.hypot(a, b) || 1;
+            const ux = a / scale;
+            const uy = b / scale;
             if (previous) {
               const dx = x - previous.x;
               const dy = y - previous.y;
               const cross = Math.abs((-uy * dx) + (ux * dy));
               const alignment = (previous.ux * ux) + (previous.uy * uy);
-              if ((previous.vertical !== vertical || alignment < 0.98 || cross > 4.6) && !text.endsWith("\n")) append("\n");
+              if ((alignment < 0.98 || cross > 4.6) && !text.endsWith("\n")) append("\n");
               else if (Math.abs((ux * dx) + (uy * dy)) > 7) append("\t");
             }
             append(item.str);
             if (item.hasEOL && !text.endsWith("\n")) append("\n");
-            const advance = vertical ? item.height : item.width;
             previous = item.hasEOL ? undefined : {
-              x: x + (ux * advance),
-              y: y + (uy * advance),
+              x: x + (ux * item.width),
+              y: y + (uy * item.width),
               ux,
               uy,
-              vertical,
             };
           }
-        };
-        const reader = page.streamTextContent().getReader();
-        while (true) {
-          const chunk = await reader.read();
-          if (chunk.done) break;
-          consume(chunk.value);
         }
         if (!text.trim()) {
           const operators = await page.getOperatorList();
           if (operators.fnArray.some((operator) => imageOps.has(operator))) {
             fail("SCANNED_PDF_UNSUPPORTED");
-          }
-        }
-        const pageFieldLines = fieldLinesByPage[pageNumber - 1];
-        if (pageFieldLines.size > 0) {
-          const [pageLeft, pageBottom, pageRight, pageTop] = page.view;
-          const visibleFieldIds = new Set((await page.getAnnotations({ intent: "display" }))
-            .filter((annotation) => {
-              if (!Array.isArray(annotation.rect) || annotation.rect.length !== 4) return false;
-              const [left, bottom, right, top] = annotation.rect;
-              return right > left && top > bottom
-                && right > pageLeft && left < pageRight && top > pageBottom && bottom < pageTop;
-            })
-            .map((annotation) => String(annotation.id ?? "")));
-          for (const [fieldLine, fieldIds] of pageFieldLines) {
-            if (![...fieldIds].some((fieldId) => visibleFieldIds.has(fieldId))) continue;
-            if (text && !text.endsWith("\n")) append("\n");
-            append(fieldLine);
           }
         }
       } finally {
@@ -242,6 +171,9 @@ function extractPdf(buffer: Buffer, limits: FinanceFileExtractionLimits) {
   const cMapUrl = resolveModule("pdfjs-dist/cmaps/LICENSE")
     .replaceAll("\\", "/")
     .replace(/LICENSE$/, "");
+  const standardFontDataUrl = resolveModule("pdfjs-dist/standard_fonts/LICENSE_FOXIT")
+    .replaceAll("\\", "/")
+    .replace(/LICENSE_FOXIT$/, "");
   return new Promise<Array<{ page: number; text: string }>>((resolve, reject) => {
     const nodeArgs = [
       "--max-old-space-size=128",
@@ -251,6 +183,7 @@ function extractPdf(buffer: Buffer, limits: FinanceFileExtractionLimits) {
       PDF_PROCESS_SOURCE,
       moduleUrl,
       cMapUrl,
+      standardFontDataUrl,
       String(limits.maxPages),
       String(limits.maxTextChars),
     ];
