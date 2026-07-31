@@ -4,6 +4,8 @@ import { invariant } from "./errors";
 import { lockFinanceImportArtifactLinkTargets } from "./finance-import-artifact-ownership";
 
 const MAX_EXTRACTED_TEXT_CHARS = 2_000_000;
+const FORMAT_MIME_TYPES = { CSV: "text/csv", PDF: "application/pdf", XLSX: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" } as const;
+const COMPLETED_EXTRACTION_STAGES = new Set(["CLASSIFYING", "MAPPING", "RECONCILING", "READY_FOR_REVIEW", "APPLYING", "APPLIED", "NEEDS_INPUT", "PARTIALLY_APPLIED"]);
 
 type LockedBatch = FinanceImportBatch & {
   document: {
@@ -84,7 +86,8 @@ export async function claimFinanceReportImportExtraction(params: {
       "FINANCE_REPORT_EXTRACTION_CONFLICT",
       "Another worker owns this Finance report extraction.",
     );
-    if (batch.stage === "EXTRACTING" && params.retryCount <= batch.retryCount) {
+    invariant(batch.stage !== "EXTRACTING" || params.retryCount >= batch.retryCount, 409, "FINANCE_REPORT_EXTRACTION_CONFLICT", "A newer Finance report extraction attempt owns this batch.");
+    if (batch.stage === "EXTRACTING" && params.retryCount === batch.retryCount) {
       return {
         skipped: false as const,
         batchId: batch.id,
@@ -143,7 +146,7 @@ export async function completeFinanceReportImportExtraction(params: {
 }) {
   return prisma.$transaction(async (tx) => {
     const batch = await loadLockedBatch(tx, params.workspaceId, params.batchId);
-    if (batch.stage !== "EXTRACTING" && batch.workflowJobId === params.workflowJobId) {
+    if (COMPLETED_EXTRACTION_STAGES.has(batch.stage) && batch.workflowJobId === params.workflowJobId) {
       return { skipped: true as const, batchId: batch.id, version: batch.version };
     }
     invariant(
@@ -157,14 +160,15 @@ export async function completeFinanceReportImportExtraction(params: {
     invariant(
       params.extraction.fileHash === batch.fileHash
         && params.extraction.fileSizeBytes === batch.fileSizeBytes
-        && params.extraction.mimeType === batch.mimeType,
+        && params.extraction.mimeType === batch.mimeType
+        && FORMAT_MIME_TYPES[params.extraction.format] === batch.mimeType,
       409,
       "FINANCE_REPORT_FILE_CHANGED",
       "The stored report no longer matches the uploaded file.",
     );
-    const text = params.extraction.text.trim();
+    const text = params.extraction.text;
     invariant(
-      text.length > 0 && text.length <= MAX_EXTRACTED_TEXT_CHARS,
+      text.trim().length > 0 && text.length <= MAX_EXTRACTED_TEXT_CHARS,
       422,
       "EXTRACTION_LIMIT_EXCEEDED",
       "The report exceeds the supported extraction limits.",

@@ -48,7 +48,6 @@ const uploaded = {
     metadata: { financeImportBatchId: "batch-1" },
   },
 };
-
 function setBatch(
   batch: { documentId: string; brainSourceId: string } & Record<string, unknown> = uploaded,
 ) {
@@ -56,7 +55,6 @@ function setBatch(
     .mockResolvedValueOnce({ documentId: batch.documentId, brainSourceId: batch.brainSourceId })
     .mockResolvedValueOnce(batch);
 }
-
 describe("Finance report import extraction lifecycle", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -90,19 +88,20 @@ describe("Finance report import extraction lifecycle", () => {
     }));
   });
 
-  it("resumes the same job but rejects a different owner", async () => {
-    const active = { ...uploaded, stage: "EXTRACTING", workflowJobId: "job-1", retryCount: 1, version: 2 };
+  it("resumes the same attempt but rejects stale retries and a different owner", async () => {
+    const active = { ...uploaded, stage: "EXTRACTING", workflowJobId: "job-1", retryCount: 2, version: 2 };
     setBatch(active);
     const { claimFinanceReportImportExtraction } = await import("./finance-import-extraction");
     await expect(claimFinanceReportImportExtraction({
-      workspaceId: "workspace-1", batchId: "batch-1", workflowJobId: "job-1", retryCount: 1,
+      workspaceId: "workspace-1", batchId: "batch-1", workflowJobId: "job-1", retryCount: 2,
     })).resolves.toMatchObject({ skipped: false, version: 2 });
     expect(prismaMock.financeImportBatch.updateMany).not.toHaveBeenCalled();
-
-    setBatch(active);
-    await expect(claimFinanceReportImportExtraction({
-      workspaceId: "workspace-1", batchId: "batch-1", workflowJobId: "job-2", retryCount: 2,
-    })).rejects.toMatchObject({ code: "FINANCE_REPORT_EXTRACTION_CONFLICT" });
+    for (const [workflowJobId, retryCount] of [["job-1", 1], ["job-2", 2]] as const) {
+      setBatch(active);
+      await expect(claimFinanceReportImportExtraction({
+        workspaceId: "workspace-1", batchId: "batch-1", workflowJobId, retryCount,
+      })).rejects.toMatchObject({ code: "FINANCE_REPORT_EXTRACTION_CONFLICT" });
+    }
   });
 
   it("persists exact extracted content in both Finance artifacts and advances only to classification", async () => {
@@ -119,7 +118,7 @@ describe("Finance report import extraction lifecycle", () => {
         fileSizeBytes: 12,
         mimeType: "text/csv",
         format: "CSV",
-        text: "Account,Amount\nRevenue,100",
+        text: " Account,Amount\nRevenue,100 ",
         metadata: { sheetCount: 1 },
       },
     })).resolves.toEqual({ skipped: false, batchId: "batch-1", version: 3 });
@@ -127,15 +126,14 @@ describe("Finance report import extraction lifecycle", () => {
       data: expect.objectContaining({ stage: "CLASSIFYING" }),
     }));
     expect(prismaMock.document.update).toHaveBeenCalledWith(expect.objectContaining({
-      data: expect.objectContaining({ textContent: "Account,Amount\nRevenue,100" }),
+      data: expect.objectContaining({ textContent: " Account,Amount\nRevenue,100 " }),
     }));
     expect(prismaMock.brainSource.update).toHaveBeenCalledWith(expect.objectContaining({
-      data: expect.objectContaining({ content: "Account,Amount\nRevenue,100" }),
+      data: expect.objectContaining({ content: " Account,Amount\nRevenue,100 " }),
     }));
     expect(prismaMock.auditLog.create).toHaveBeenCalledWith(expect.objectContaining({
       data: expect.objectContaining({ action: "finance-report-import.extracted" }),
     }));
-
     vi.clearAllMocks();
     prismaMock.$transaction.mockImplementation((callback) => callback(prismaMock));
     prismaMock.$executeRaw.mockResolvedValue(1);
@@ -159,15 +157,16 @@ describe("Finance report import extraction lifecycle", () => {
     expect(prismaMock.financeImportBatch.updateMany).not.toHaveBeenCalled();
     expect(prismaMock.document.update).not.toHaveBeenCalled();
   });
-
   it("rejects stale versions and changed file identity before artifact writes", async () => {
     const active = { ...uploaded, stage: "EXTRACTING", workflowJobId: "job-1", version: 2 };
     const { completeFinanceReportImportExtraction } = await import("./finance-import-extraction");
     for (const params of [
-      { expectedVersion: 1, fileHash: "a".repeat(64) },
-      { expectedVersion: 2, fileHash: "b".repeat(64) },
-    ]) {
-      setBatch(active);
+      { batch: active, expectedVersion: 1, fileHash: "a".repeat(64), format: "CSV", code: "FINANCE_REPORT_EXTRACTION_CONFLICT" },
+      { batch: active, expectedVersion: 2, fileHash: "b".repeat(64), format: "CSV", code: "FINANCE_REPORT_FILE_CHANGED" },
+      { batch: active, expectedVersion: 2, fileHash: "a".repeat(64), format: "PDF", code: "FINANCE_REPORT_FILE_CHANGED" },
+      { batch: { ...active, stage: "FAILED" }, expectedVersion: 2, fileHash: "a".repeat(64), format: "CSV", code: "FINANCE_REPORT_EXTRACTION_CONFLICT" },
+    ] as const) {
+      setBatch(params.batch);
       await expect(completeFinanceReportImportExtraction({
         workspaceId: "workspace-1",
         batchId: "batch-1",
@@ -177,16 +176,13 @@ describe("Finance report import extraction lifecycle", () => {
           fileHash: params.fileHash,
           fileSizeBytes: 12,
           mimeType: "text/csv",
-          format: "CSV",
+          format: params.format,
           text: "Revenue,100",
           metadata: {},
         },
-      })).rejects.toMatchObject({
-        code: params.expectedVersion === 1 ? "FINANCE_REPORT_EXTRACTION_CONFLICT" : "FINANCE_REPORT_FILE_CHANGED",
-      });
+      })).rejects.toMatchObject({ code: params.code });
     }
     expect(prismaMock.document.update).not.toHaveBeenCalled();
     expect(prismaMock.brainSource.update).not.toHaveBeenCalled();
   });
-
 });
