@@ -14,6 +14,7 @@ export type FinanceFileExtractionErrorCode =
   | "MALFORMED_FILE"
   | "EMPTY_EXTRACTION"
   | "SCANNED_PDF_UNSUPPORTED"
+  | "UNSUPPORTED_PDF_FEATURE"
   | "EXTRACTION_LIMIT_EXCEEDED";
 export type FinanceExtractedCell = { row: number; column: number; type: FinanceExtractedCellType; value: string };
 export type FinanceExtractedSheet = { name: string; rowCount: number; columnCount: number; cells: FinanceExtractedCell[] };
@@ -36,6 +37,7 @@ const SAFE_MESSAGES: Record<FinanceFileExtractionErrorCode, string> = {
   MALFORMED_FILE: "The report file is malformed or unreadable.",
   EMPTY_EXTRACTION: "The report contains no extractable data.",
   SCANNED_PDF_UNSUPPORTED: "Image-only or scanned PDFs are not supported yet.",
+  UNSUPPORTED_PDF_FEATURE: "This PDF uses a structured or vertical text mode that is not supported yet.",
   EXTRACTION_LIMIT_EXCEEDED: "The report exceeds the supported extraction limits.",
 };
 export class FinanceFileExtractionError extends Error {
@@ -64,6 +66,7 @@ function detectFormat(fileName: string, mimeType: string): FinanceFileFormat {
 }
 const PDF_PROCESS_TIMEOUT_MS = 30_000;
 const PDF_PROCESS_MAX_OUTPUT_BYTES = 16 * 1024 * 1024;
+const PDF_PROCESS_MAX_DATA_KIB = 256 * 1024;
 const PDF_PROCESS_SOURCE = String.raw`
 const fail = (code) => { const error = new Error(code); error.code = code; throw error; };
 (async () => {
@@ -80,6 +83,7 @@ const fail = (code) => { const error = new Error(code); error.code = code; throw
     data: new Uint8Array(Buffer.concat(chunks)),
     cMapPacked: true,
     cMapUrl,
+    enableXfa: true,
     isEvalSupported: false,
     stopAtErrors: true,
     useSystemFonts: false,
@@ -89,6 +93,7 @@ const fail = (code) => { const error = new Error(code); error.code = code; throw
     const document = await task.promise;
     if (document.numPages === 0) fail("EMPTY_EXTRACTION");
     if (document.numPages > maxPages) fail("EXTRACTION_LIMIT_EXCEEDED");
+    if (document.isPureXfa || await document.getFieldObjects()) fail("UNSUPPORTED_PDF_FEATURE");
     const pages = [];
     let textChars = 0;
     for (let pageNumber = 1; pageNumber <= document.numPages; pageNumber += 1) {
@@ -105,6 +110,7 @@ const fail = (code) => { const error = new Error(code); error.code = code; throw
         while (true) {
           const chunk = await reader.read();
           if (chunk.done) break;
+          if (Object.values(chunk.value.styles).some((style) => style.vertical)) fail("UNSUPPORTED_PDF_FEATURE");
           for (const item of chunk.value.items) {
             if (!("str" in item)) continue;
             const [a, b, , , x, y] = item.transform;
@@ -148,7 +154,7 @@ const fail = (code) => { const error = new Error(code); error.code = code; throw
 })().then(
   (pages) => process.stdout.write(JSON.stringify({ ok: true, pages })),
   (error) => {
-    const known = new Set(["EMPTY_EXTRACTION", "SCANNED_PDF_UNSUPPORTED", "EXTRACTION_LIMIT_EXCEEDED"]);
+    const known = new Set(["EMPTY_EXTRACTION", "SCANNED_PDF_UNSUPPORTED", "UNSUPPORTED_PDF_FEATURE", "EXTRACTION_LIMIT_EXCEEDED"]);
     process.stdout.write(JSON.stringify({ ok: false, code: known.has(error?.code) ? error.code : "MALFORMED_FILE" }));
   },
 );
@@ -162,7 +168,7 @@ function extractPdf(buffer: Buffer, limits: FinanceFileExtractionLimits) {
     .replaceAll("\\", "/")
     .replace(/LICENSE$/, "");
   return new Promise<Array<{ page: number; text: string }>>((resolve, reject) => {
-    const child = spawn(process.execPath, [
+    const nodeArgs = [
       "--max-old-space-size=128",
       "--max-semi-space-size=16",
       "--stack-size=4096",
@@ -172,10 +178,22 @@ function extractPdf(buffer: Buffer, limits: FinanceFileExtractionLimits) {
       cMapUrl,
       String(limits.maxPages),
       String(limits.maxTextChars),
-    ], {
-      stdio: ["pipe", "pipe", "ignore"],
-      windowsHide: true,
-    });
+    ];
+    const child = process.platform === "linux"
+      ? spawn("/bin/sh", [
+        "-c",
+        `ulimit -d ${PDF_PROCESS_MAX_DATA_KIB} || exit 70; exec "$@"`,
+        "finance-pdf",
+        process.execPath,
+        ...nodeArgs,
+      ], {
+        stdio: ["pipe", "pipe", "ignore"],
+        windowsHide: true,
+      })
+      : spawn(process.execPath, nodeArgs, {
+        stdio: ["pipe", "pipe", "ignore"],
+        windowsHide: true,
+      });
     const output: Buffer[] = [];
     let outputBytes = 0;
     let settled = false;
@@ -223,6 +241,7 @@ function extractPdf(buffer: Buffer, limits: FinanceFileExtractionLimits) {
         const safeCodes = new Set<FinanceFileExtractionErrorCode>([
           "EMPTY_EXTRACTION",
           "SCANNED_PDF_UNSUPPORTED",
+          "UNSUPPORTED_PDF_FEATURE",
           "EXTRACTION_LIMIT_EXCEEDED",
           "MALFORMED_FILE",
         ]);

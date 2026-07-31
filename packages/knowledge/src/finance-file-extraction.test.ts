@@ -56,12 +56,12 @@ function pdf(...pages: PdfPage[]) {
   return renderPdf(objects);
 }
 
-function cidFontPdf() {
+function cidFontPdf(encoding = "90ms-RKSJ-H") {
   const content = Buffer.from("BT /F1 12 Tf 72 720 Td <93FA> Tj ET");
   return renderPdf([
     Buffer.from("<< /Type /Catalog /Pages 2 0 R >>"),
     Buffer.from("<< /Type /Pages /Kids [6 0 R] /Count 1 >>"),
-    Buffer.from("<< /Type /Font /Subtype /Type0 /BaseFont /HeiseiKakuGo-W5 /Encoding /90ms-RKSJ-H /DescendantFonts [4 0 R] >>"),
+    Buffer.from(`<< /Type /Font /Subtype /Type0 /BaseFont /HeiseiKakuGo-W5 /Encoding /${encoding} /DescendantFonts [4 0 R] >>`),
     Buffer.from("<< /Type /Font /Subtype /CIDFontType2 /BaseFont /HeiseiKakuGo-W5 /CIDSystemInfo << /Registry (Adobe) /Ordering (Japan1) /Supplement 6 >> /FontDescriptor 5 0 R /CIDToGIDMap /Identity /DW 1000 >>"),
     Buffer.from("<< /Type /FontDescriptor /FontName /HeiseiKakuGo-W5 /Flags 4 /FontBBox [0 -200 1000 900] /ItalicAngle 0 /Ascent 880 /Descent -120 /CapHeight 700 /StemV 80 >>"),
     Buffer.from("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 1000 1000] /Resources << /Font << /F1 3 0 R >> >> /Contents 7 0 R >>"),
@@ -70,6 +70,18 @@ function cidFontPdf() {
       content,
       Buffer.from("\nendstream"),
     ]),
+  ]);
+}
+
+function formPdf() {
+  return renderPdf([
+    Buffer.from("<< /Type /Catalog /Pages 2 0 R /AcroForm 6 0 R >>"),
+    Buffer.from("<< /Type /Pages /Kids [4 0 R] /Count 1 >>"),
+    Buffer.from("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>"),
+    Buffer.from("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 1000 1000] /Resources << /Font << /F1 3 0 R >> >> /Contents 5 0 R /Annots [7 0 R] >>"),
+    Buffer.from("<< /Length 0 >>\nstream\n\nendstream"),
+    Buffer.from("<< /Fields [7 0 R] /NeedAppearances true >>"),
+    Buffer.from("<< /Type /Annot /Subtype /Widget /FT /Tx /T (Revenue) /V (123.45) /Rect [72 700 200 720] /P 4 0 R >>"),
   ]);
 }
 
@@ -99,6 +111,25 @@ describe("extractFinanceReportFile", () => {
       mimeType: "application/pdf",
     });
     expect(result.pages?.[0]?.text).toBe("日");
+  });
+
+  it("fails structured forms and native vertical writing closed", async () => {
+    for (const input of [formPdf(), cidFontPdf("90ms-RKSJ-V")]) {
+      await expect(extractFinanceReportFile({
+        fileBuffer: input,
+        fileName: "structured.pdf",
+        mimeType: "application/pdf",
+      })).rejects.toMatchObject({ code: "UNSUPPORTED_PDF_FEATURE" });
+    }
+  });
+
+  it.runIf(process.platform === "linux")("contains decompression with a kernel data limit", async () => {
+    await expect(extractFinanceReportFile({
+      fileBuffer: pdf({ compressedText: "A".repeat(128 * 1024 * 1024) }),
+      fileName: "decompression-bomb.pdf",
+      mimeType: "application/pdf",
+      limits: { maxTextChars: 256 * 1024 * 1024 },
+    })).rejects.toMatchObject({ code: "EXTRACTION_LIMIT_EXCEEDED" });
   });
 
   it("rejects image-only pages and highly compressed over-limit text without partial output", async () => {
