@@ -238,6 +238,13 @@ describe("interpretFinanceReport", () => {
     expect(model.extract).toHaveBeenCalledTimes(2);
   });
 
+  it("retries a source-bound amount mismatch", async () => {
+    const mismatch = proposal(); mismatch.candidates[0].amountCents = 999;
+    const model = gateway([mismatch, proposal()]);
+    await expect(interpretFinanceReport({ ...params, gateway: model.model })).resolves.toMatchObject({ contractVersion: 1 });
+    expect(model.extract.mock.calls[1]?.[0].instruction).toContain("candidates.0.amountCents");
+  });
+
   it("rejects profile hints that exceed aggregate mapping or character budgets", async () => {
     const model = gateway([proposal()]);
     const mappings = Array.from({ length: 500 }, (_, index) => ({

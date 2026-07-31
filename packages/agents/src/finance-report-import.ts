@@ -255,10 +255,21 @@ function locationMatches(index: EvidenceIndex, location: SourceLocation) {
   return index.get(key)?.some((sourceText) => location.page !== null
     ? sourceText.includes(location.evidence) : sourceText === location.evidence) ?? false;
 }
+function evidenceAmountsCents(evidence: string) {
+  return (evidence.match(/[-(]?\d[\d,.]*\)?/g) ?? []).flatMap((token) => {
+    const value = Number(token.replace(/[(),]/g, "")); const rawCents = value * 100;
+    const cents = Math.round(rawCents) * (token.startsWith("(") ? -1 : 1);
+    return Number.isFinite(value) && Number.isSafeInteger(cents) && Math.abs(rawCents - Math.round(rawCents)) < 1e-6
+      ? [cents] : [];
+  });
+}
 function unmatchedEvidencePaths(proposal: FinanceReportImportProposalV1, extractedEvidence: string) {
   const evidenceIndex = buildEvidenceIndex(extractedEvidence);
-  const paths = proposal.candidates.flatMap((candidate, candidateIndex) =>
-    locationMatches(evidenceIndex, candidate.sourceLocation) ? [] : [`candidates.${candidateIndex}.sourceLocation`]);
+  const paths = proposal.candidates.flatMap((candidate, candidateIndex) => [
+    ...(locationMatches(evidenceIndex, candidate.sourceLocation) ? [] : [`candidates.${candidateIndex}.sourceLocation`]),
+    ...(evidenceAmountsCents(candidate.sourceLocation.evidence).includes(candidate.amountCents)
+      ? [] : [`candidates.${candidateIndex}.amountCents`]),
+  ]);
   return [...paths, ...proposal.report.currency.evidence.flatMap((location, currencyIndex) =>
     locationMatches(evidenceIndex, location) ? [] : [`report.currency.evidence.${currencyIndex}`])].slice(0, 12);
 }
