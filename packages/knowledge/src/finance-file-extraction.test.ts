@@ -20,7 +20,7 @@ function assemblePdf(objects: Buffer[]) {
   return Buffer.concat(chunks);
 }
 
-function createTextPdf(pages: Array<{ text?: string; rotation?: number; userUnit?: number; mediaBox?: string }>) {
+function createTextPdf(pages: Array<{ text?: string; rotation?: number; userUnit?: number; mediaBox?: string }>, font = "Helvetica") {
   const fontId = 3 + (pages.length * 2);
   const pageIds = pages.map((_, index) => 3 + (index * 2));
   const objects = [Buffer.from("<< /Type /Catalog /Pages 2 0 R >>"),
@@ -35,18 +35,20 @@ function createTextPdf(pages: Array<{ text?: string; rotation?: number; userUnit
     ));
     objects.push(Buffer.from(`<< /Length ${Buffer.byteLength(content)} >>\nstream\n${content}\nendstream`));
   });
-  objects.push(Buffer.from("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>"));
+  objects.push(Buffer.from(`<< /Type /Font /Subtype /Type1 /BaseFont /${font} >>`));
   return assemblePdf(objects);
 }
 
-function createImagePdf(text?: string, size = 1) {
-  const content = `q 10 0 0 10 0 0 cm /Im0 Do Q${text ? `\nBT /F1 12 Tf 20 80 Td (${text}) Tj ET` : ""}`;
+function createImagePdf(text?: string, size = 1, count = 1) {
+  const names = Array.from({ length: count }, (_, index) => `Im${index}`);
+  const content = names.map((name) => `q 10 0 0 10 0 0 cm /${name} Do Q`).join("\n") + (text ? `\nBT /F1 12 Tf 20 80 Td (${text}) Tj ET` : "");
+  const pixels = deflateSync(Buffer.alloc(size * size));
   return assemblePdf([
     Buffer.from("<< /Type /Catalog /Pages 2 0 R >>"),
     Buffer.from("<< /Type /Pages /Kids [3 0 R] /Count 1 >>"),
-    Buffer.from("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] /Resources << /XObject << /Im0 5 0 R >> /Font << /F1 6 0 R >> >> /Contents 4 0 R >>"),
+    Buffer.from(`<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] /Resources << /XObject << ${names.map((name, index) => `/${name} ${index + 5} 0 R`).join(" ")} >> /Font << /F1 ${count + 5} 0 R >> >> /Contents 4 0 R >>`),
     Buffer.from(`<< /Length ${Buffer.byteLength(content)} >>\nstream\n${content}\nendstream`),
-    Buffer.from(`<< /Type /XObject /Subtype /Image /Width ${size} /Height ${size} /ColorSpace /DeviceGray /BitsPerComponent 8 /Filter /ASCIIHexDecode /Length 3 >>\nstream\n00>\nendstream`),
+    ...names.map(() => Buffer.concat([Buffer.from(`<< /Type /XObject /Subtype /Image /Width ${size} /Height ${size} /ColorSpace /DeviceGray /BitsPerComponent 8 /Filter /FlateDecode /Length ${pixels.length} >>\nstream\n`), pixels, Buffer.from("\nendstream")])),
     Buffer.from("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>"),
   ]);
 }
@@ -154,7 +156,7 @@ describe("extractFinanceReportFile", () => {
 
   it("retains secure PDF defaults for invalid partial limit overrides", async () => {
     await expect(extractFinanceReportFile({
-      fileBuffer: createTextPdf([{ text: "Operating income" }]),
+      fileBuffer: createTextPdf([{ text: "Operating income" }], "Symbol"),
       fileName: "actuals.pdf",
       mimeType: "application/pdf",
       limits: {
@@ -184,6 +186,7 @@ describe("extractFinanceReportFile", () => {
     [createImagePdf(), {}, "UNSUPPORTED_FILE_TYPE"],
     [createImagePdf(" "), {}, "UNSUPPORTED_FILE_TYPE"],
     [createImagePdf("Text", 2_001), {}, "EXTRACTION_LIMIT_EXCEEDED"],
+    [createImagePdf("Text", 1_000, 40), {}, "EXTRACTION_LIMIT_EXCEEDED"],
     [createTextPdf([{ text: "Text", mediaBox: `0 0 ${"1".padEnd(307, "0")} 792` }]), {}, "MALFORMED_FILE"],
   ])("rejects an incomplete or over-limit PDF as one safe failure", async (fileBuffer, limits, code) => {
     await expect(extractFinanceReportFile({

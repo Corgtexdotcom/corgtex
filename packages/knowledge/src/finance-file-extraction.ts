@@ -97,11 +97,13 @@ const round = (value) => {
   if (!Number.isFinite(rounded)) stop("MALFORMED_FILE");
   return rounded;
 };
+const rssTimer = setInterval(() => { if (process.memoryUsage.rss() > 192 * 1024 * 1024) process.exit(86); }, 10); rssTimer.unref();
 async function main() {
   const chunks = [];
   for await (const chunk of process.stdin) chunks.push(chunk);
   const data = new Uint8Array(Buffer.concat(chunks));
   const { getDocument, OPS, Util } = await import("pdfjs-dist/legacy/build/pdf.mjs");
+  const standardFontDataUrl = decodeURIComponent(new URL("../../standard_fonts/", import.meta.resolve("pdfjs-dist/legacy/build/pdf.mjs")).pathname);
   const imageOps = new Set(Object.entries(OPS)
     .filter(([name]) => /^paint.*image/i.test(name))
     .map(([, value]) => value));
@@ -110,8 +112,9 @@ async function main() {
     disableFontFace: true,
     isEvalSupported: false,
     maxImageSize: ${PDF_MAX_IMAGE_PIXELS},
+    standardFontDataUrl,
     stopAtErrors: false,
-    useSystemFonts: true,
+    useSystemFonts: false,
     verbosity: 1,
   });
   let document;
@@ -237,6 +240,7 @@ async function extractPdf(buffer: Buffer, limits: FinanceFileExtractionLimits) {
       if (stderr) return reject(new FinanceFileExtractionError(/Image exceeded maximum allowed size|heap out of memory/i.test(stderr)
         ? "EXTRACTION_LIMIT_EXCEEDED" : "MALFORMED_FILE"));
       if (signal) return reject(new FinanceFileExtractionError("EXTRACTION_LIMIT_EXCEEDED"));
+      if (code === 86) return reject(new FinanceFileExtractionError("EXTRACTION_LIMIT_EXCEEDED"));
       if (code !== 0) return reject(new FinanceFileExtractionError("EXTRACTION_FAILED"));
       try {
         const stdout = Buffer.concat(stdoutChunks, stdoutBytes).toString("utf8");
