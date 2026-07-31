@@ -6,7 +6,23 @@ export const FINANCE_REPORT_IMPORT_CONTRACT_VERSION = 1 as const;
 export const FINANCE_REPORT_IMPORT_LOW_CONFIDENCE = 0.85;
 const POSTGRES_INT_MIN = -2_147_483_648;
 const POSTGRES_INT_MAX = 2_147_483_647;
+const CURRENCY_NAME_ALIASES: Record<string, string[]> = {
+  USD: ["US DOLLAR", "US DOLLARS", "U S DOLLAR", "U S DOLLARS",
+    "UNITED STATES DOLLAR", "UNITED STATES DOLLARS"],
+  EUR: ["EURO", "EUROS"],
+  GBP: ["BRITISH POUND", "BRITISH POUNDS", "POUND STERLING", "POUNDS STERLING", "STERLING"],
+  CAD: ["CANADIAN DOLLAR", "CANADIAN DOLLARS"],
+  AUD: ["AUSTRALIAN DOLLAR", "AUSTRALIAN DOLLARS"],
+  NZD: ["NEW ZEALAND DOLLAR", "NEW ZEALAND DOLLARS"],
+  JPY: ["JAPANESE YEN", "YEN"],
+  CHF: ["SWISS FRANC", "SWISS FRANCS"],
+};
 const bounded = (maximum: number) => z.string().trim().min(1).max(maximum);
+const currencyEvidenceNamesCode = (evidence: string, code: string) => {
+  const normalized = ` ${evidence.toUpperCase().replace(/[^A-Z0-9]+/g, " ").trim()} `;
+  return [code, ...(CURRENCY_NAME_ALIASES[code] ?? [])]
+    .some((name) => normalized.includes(` ${name} `));
+};
 const isoDate = z.string().regex(/^\d{4}-\d{2}-\d{2}$/).refine((value) => {
   const parsed = new Date(`${value}T00:00:00.000Z`);
   return Number(value.slice(0, 4)) >= 1_000
@@ -38,9 +54,9 @@ const currencySchema = z.object({
     context.addIssue({ code: "custom", message: "Currency state, code, and evidence do not agree." });
   }
   if (explicit && value.code && !value.evidence.some((location) =>
-    location.evidence.toUpperCase().includes(value.code!))) {
+    currencyEvidenceNamesCode(location.evidence, value.code!))) {
     context.addIssue({ code: "custom", path: ["evidence"],
-      message: "Explicit currency evidence must name the proposed currency code." });
+      message: "Explicit currency evidence must name the proposed currency." });
   }
 });
 const hierarchy = z.array(bounded(160)).min(1).max(12);
@@ -82,9 +98,8 @@ export const financeReportImportProposalV1Schema = z.object({
   contractVersion: z.literal(FINANCE_REPORT_IMPORT_CONTRACT_VERSION),
   report: z.object({
     title: bounded(200),
-    reportType: z.enum(["PROFIT_AND_LOSS", "BALANCE_SHEET", "CASH_FLOW", "TRIAL_BALANCE",
-      "BUDGET_VS_ACTUAL", "GENERAL_LEDGER", "OTHER"]),
-    basis: z.enum(["CASH", "ACCRUAL", "MIXED", "UNSPECIFIED"]),
+    reportType: z.enum(["PROFIT_AND_LOSS", "BALANCE_SHEET", "CASH_FLOW", "TRIAL_BALANCE", "OTHER"]),
+    basis: z.enum(["CASH", "ACCRUAL", "UNSPECIFIED"]),
     cadence: z.enum(["DAILY", "WEEKLY", "MONTHLY", "QUARTERLY", "ANNUAL", "CUSTOM"]),
     periodStart: isoDate,
     periodEnd: isoDate,
@@ -101,6 +116,7 @@ export const financeReportImportProposalV1Schema = z.object({
   summary: bounded(2_000),
   candidates: z.array(candidateSchema).min(1).max(1_000),
 }).strict().superRefine((value, context) => {
+  const candidateIdentities = new Set<string>();
   value.candidates.forEach((candidate, index) => {
     if (candidate.periodStart < value.report.periodStart) {
       context.addIssue({ code: "custom", path: ["candidates", index, "periodStart"],
@@ -110,6 +126,15 @@ export const financeReportImportProposalV1Schema = z.object({
       context.addIssue({ code: "custom", path: ["candidates", index, "periodEnd"],
         message: "Candidate period ends after the report period." });
     }
+    const identity = JSON.stringify([candidate.sourceLocation.page, candidate.sourceLocation.sheet,
+      candidate.sourceLocation.row, candidate.sourceLocation.column, candidate.sourceAccountPath,
+      candidate.proposedAccountPath, candidate.rowKind, candidate.periodStart, candidate.periodEnd,
+      candidate.amountCents]);
+    if (candidateIdentities.has(identity)) {
+      context.addIssue({ code: "custom", path: ["candidates", index],
+        message: "Duplicate proposal candidate." });
+    }
+    candidateIdentities.add(identity);
   });
 });
 
@@ -138,15 +163,16 @@ Finance Reported Actuals proposal. Infer type, basis, cadence, dates, hierarchy,
 and source-located currency evidence without a vendor picker. Return proposals only; never create transactions,
 apply Finance records, or claim human approval. Profile hints are non-authoritative and every mapping must be
 revalidated. If currency is not explicit, return UNRESOLVED/null and never default to USD. Uncertain mappings must
-be AMBIGUOUS or UNMAPPED with visible exceptions. Return strict contract v1 with no unknown fields.${retryPaths.length
+be AMBIGUOUS or UNMAPPED with visible exceptions. Classify budget-versus-actual or general-ledger layouts as OTHER,
+and a mixed accounting basis as UNSPECIFIED. Return strict contract v1 with no unknown fields.${retryPaths.length
   ? ` The previous response failed validation at ${retryPaths.join(", ")}; rebuild it.` : ""}`;
 const schemaHint = `Strict contract v1 JSON with no additional fields:
 {
   "contractVersion": 1,
   "report": {
     "title": "string",
-    "reportType": "PROFIT_AND_LOSS|BALANCE_SHEET|CASH_FLOW|TRIAL_BALANCE|BUDGET_VS_ACTUAL|GENERAL_LEDGER|OTHER",
-    "basis": "CASH|ACCRUAL|MIXED|UNSPECIFIED",
+    "reportType": "PROFIT_AND_LOSS|BALANCE_SHEET|CASH_FLOW|TRIAL_BALANCE|OTHER",
+    "basis": "CASH|ACCRUAL|UNSPECIFIED",
     "cadence": "DAILY|WEEKLY|MONTHLY|QUARTERLY|ANNUAL|CUSTOM",
     "periodStart": "YYYY-MM-DD", "periodEnd": "YYYY-MM-DD", "asOfDate": "YYYY-MM-DD|null",
     "currency": {

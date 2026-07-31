@@ -44,17 +44,13 @@ describe("Finance report import proposal contract", () => {
   });
 
   it.each([
-    ["BUDGET_VS_ACTUAL", "ACCRUAL"],
-    ["GENERAL_LEDGER", "MIXED"],
-  ] as const)("accepts advertised %s and %s classifications", (reportType, basis) => {
-    const value = proposal();
-    value.report.reportType = reportType;
-    value.report.basis = basis;
-    expect(financeReportImportProposalV1Schema.safeParse(value).success).toBe(true);
-  });
-
-  it.each([
     ["unknown fields", () => ({ ...proposal(), providerDetail: "blocked" })],
+    ["unstorable specialized report type", () => ({ ...proposal(), report: {
+      ...proposal().report, reportType: "BUDGET_VS_ACTUAL",
+    } })],
+    ["unstorable mixed basis", () => ({ ...proposal(), report: {
+      ...proposal().report, basis: "MIXED",
+    } })],
     ["invalid date", () => ({ ...proposal(), report: { ...proposal().report, periodEnd: "2026-02-30" } })],
     ["unsupported early year", () => ({ ...proposal(), report: { ...proposal().report, periodStart: "0999-01-01" } })],
     ["as-of outside period", () => ({ ...proposal(), report: { ...proposal().report, asOfDate: "2026-07-01" } })],
@@ -73,6 +69,11 @@ describe("Finance report import proposal contract", () => {
       currency: { state: "UNRESOLVED", code: null, evidence: [proposal().candidates[0].sourceLocation] } } })],
     ["exception without reason", () => ({ ...proposal(), candidates: [{ ...proposal().candidates[0],
       exceptionCodes: ["OTHER"] }] })],
+    ["duplicate candidates", () => {
+      const value = proposal();
+      value.candidates.push({ ...value.candidates[0] });
+      return value;
+    }],
   ])("rejects unsafe output: %s", (_label, makeInvalid) => {
     expect(financeReportImportProposalV1Schema.safeParse(makeInvalid()).success).toBe(false);
   });
@@ -92,6 +93,7 @@ describe("interpretFinanceReport", () => {
     expect(request).not.toHaveProperty("tools");
     expect(request.instruction).toContain("never default to USD");
     expect(request.instruction).toContain("Profile hints are non-authoritative");
+    expect(request.instruction).toContain("budget-versus-actual");
     expect(JSON.parse(request.input).approvedProfileHints).toEqual([expect.objectContaining({ version: 3 })]);
   });
 
@@ -161,6 +163,22 @@ describe("interpretFinanceReport", () => {
       extractedEvidence: `${params.extractedEvidence}\n{"sheet":"June","row":1,"column":2,"value":"EUR"}`,
     })).resolves.toMatchObject({ report: { currency: { state: "EXPLICIT", code: "EUR" } } });
     expect(model.extract).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    ["U.S. Dollars", "USD"],
+    ["Euros", "EUR"],
+  ])("accepts unambiguous currency name evidence: %s", async (evidence, code) => {
+    const output = proposal();
+    output.report.currency = { state: "EXPLICIT", code, evidence: [{
+      page: null, sheet: "June", row: 1, column: 2, evidence,
+    }] };
+    const model = gateway([output]);
+    await expect(interpretFinanceReport({ ...params, gateway: model.model,
+      extractedEvidence: `${params.extractedEvidence}\n${JSON.stringify({
+        sheet: "June", row: 1, column: 2, value: evidence,
+      })}`,
+    })).resolves.toMatchObject({ report: { currency: { state: "EXPLICIT", code } } });
   });
 
   it("does not treat extraction metadata as source evidence", async () => {
