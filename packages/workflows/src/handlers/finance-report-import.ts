@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import {
   claimFinanceReportImportExtraction,
   completeFinanceReportImportExtraction,
@@ -12,10 +13,33 @@ import {
 import { defaultStorage, type StorageProvider } from "@corgtex/storage";
 
 export const FINANCE_REPORT_IMPORT_EXTRACTION_JOB_TYPE = "finance-report-import.extract";
+export const FINANCE_REPORT_IMPORT_STORAGE_READ_TIMEOUT_MS = 2 * 60 * 1_000;
 const MAX_EXTRACTED_TEXT_CHARS = 2_000_000;
 
 type ExtractionStorage = Pick<StorageProvider, "get">;
 type Extractor = typeof extractFinanceReportFile;
+
+async function readStoredReport(storage: ExtractionStorage, storageKey: string) {
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      storage.get(storageKey),
+      new Promise<never>((_, reject) => {
+        timeout = setTimeout(
+          () => reject(new Error("Finance report source read timed out.")),
+          FINANCE_REPORT_IMPORT_STORAGE_READ_TIMEOUT_MS,
+        );
+      }),
+    ]);
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
+}
+
+function storedFileIdentityMatches(data: Buffer, fileHash: string, fileSizeBytes: number) {
+  return data.byteLength === fileSizeBytes
+    && createHash("sha256").update(data).digest("hex") === fileHash;
+}
 
 function extractedText(extraction: FinanceFileExtraction) {
   const lines: string[] = [];
@@ -62,8 +86,11 @@ export async function runFinanceReportImportExtractionJob(params: {
   });
   if (claim.skipped) return claim;
   try {
-    const stored = await (params.storage ?? defaultStorage).get(claim.storageKey);
+    const stored = await readStoredReport(params.storage ?? defaultStorage, claim.storageKey);
     if (!stored) throw new Error("Finance report source is unavailable.");
+    if (!storedFileIdentityMatches(stored.data, claim.fileHash, claim.fileSizeBytes)) {
+      throw new Error("Finance report source identity changed.");
+    }
     const extraction = await (params.extract ?? extractFinanceReportFile)({
       fileBuffer: stored.data,
       fileName: claim.fileName,

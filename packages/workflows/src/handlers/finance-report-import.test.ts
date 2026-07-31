@@ -1,4 +1,5 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { createHash } from "node:crypto";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const { claimMock, completeMock, failMock, extractMock, storageMock } = vi.hoisted(() => ({
   claimMock: vi.fn(),
@@ -23,13 +24,15 @@ vi.mock("@corgtex/knowledge", () => {
 });
 vi.mock("@corgtex/storage", () => ({ defaultStorage: storageMock }));
 
+const storedData = Buffer.from("Account,Amount");
+const storedHash = createHash("sha256").update(storedData).digest("hex");
 const claim = {
   skipped: false,
   batchId: "batch-1",
   version: 2,
   storageKey: "private/report.csv",
-  fileHash: "a".repeat(64),
-  fileSizeBytes: 12,
+  fileHash: storedHash,
+  fileSizeBytes: storedData.byteLength,
   fileName: "synthetic.csv",
   mimeType: "text/csv",
 };
@@ -45,9 +48,9 @@ describe("Finance report extraction workflow handler", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     claimMock.mockResolvedValue(claim);
-    storageMock.get.mockResolvedValue({ data: Buffer.from("Account,Amount"), contentType: "text/csv" });
+    storageMock.get.mockResolvedValue({ data: storedData, contentType: "text/csv" });
     extractMock.mockResolvedValue({
-      fileHash: "a".repeat(64), fileSizeBytes: 12, format: "CSV", mimeType: "text/csv",
+      fileHash: storedHash, fileSizeBytes: storedData.byteLength, format: "CSV", mimeType: "text/csv",
       sheets: [{ name: "CSV", rowCount: 1, columnCount: 2, cells: [
         { row: 1, column: 1, type: "TEXT", value: "Account" },
         { row: 1, column: 2, type: "TEXT", value: "Amount" },
@@ -55,6 +58,10 @@ describe("Finance report extraction workflow handler", () => {
     });
     completeMock.mockResolvedValue({ skipped: false, batchId: "batch-1", version: 3 });
     failMock.mockResolvedValue({ skipped: false, batchId: "batch-1", version: 3 });
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
   });
 
   it("reads, extracts, and completes the exact claimed report", async () => {
@@ -108,6 +115,35 @@ describe("Finance report extraction workflow handler", () => {
       .rejects.toThrow("source is unavailable");
     expect(failMock).toHaveBeenCalledWith(expect.objectContaining({
       expectedVersion: 2, failureCode: "FINANCE_REPORT_EXTRACTION_FAILED",
+    }));
+  });
+
+  it("times out a stalled storage read before the workflow lease expires", async () => {
+    vi.useFakeTimers();
+    storageMock.get.mockReturnValueOnce(new Promise(() => undefined));
+    const {
+      FINANCE_REPORT_IMPORT_STORAGE_READ_TIMEOUT_MS,
+      runFinanceReportImportExtractionJob,
+    } = await import("./finance-report-import");
+    const pending = runFinanceReportImportExtractionJob(job);
+    const rejection = expect(pending).rejects.toThrow("source read timed out");
+    await vi.advanceTimersByTimeAsync(FINANCE_REPORT_IMPORT_STORAGE_READ_TIMEOUT_MS);
+    await rejection;
+    expect(extractMock).not.toHaveBeenCalled();
+    expect(failMock).not.toHaveBeenCalled();
+  });
+
+  it("retries a stored-byte identity mismatch and sanitizes the final attempt", async () => {
+    storageMock.get.mockResolvedValue({ data: Buffer.from("corrupted"), contentType: "text/csv" });
+    const { runFinanceReportImportExtractionJob } = await import("./finance-report-import");
+    await expect(runFinanceReportImportExtractionJob(job)).rejects.toThrow("source identity changed");
+    expect(extractMock).not.toHaveBeenCalled();
+    expect(failMock).not.toHaveBeenCalled();
+    await expect(runFinanceReportImportExtractionJob({ ...job, attempts: 5, isFinalAttempt: true }))
+      .rejects.toThrow("source identity changed");
+    expect(failMock).toHaveBeenCalledWith(expect.objectContaining({
+      expectedVersion: 2,
+      failureCode: "FINANCE_REPORT_EXTRACTION_FAILED",
     }));
   });
 });

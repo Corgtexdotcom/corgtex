@@ -36,7 +36,8 @@ const reserved = {
   id: "batch-1", workspaceId: "workspace-1", uploadedByUserId: "user-1",
   stage: "FAILED", safeErrorCode: "FINANCE_REPORT_STORAGE_PENDING",
   safeErrorMessage: "The report upload is being stored.", fileHash,
-  mimeType: "text/csv", originalFilename: "report.csv", fileSizeBytes: fileBuffer.length, version: 1,
+  mimeType: "text/csv", originalFilename: "report.csv", fileSizeBytes: fileBuffer.length,
+  workflowJobId: null, retryCount: 0, version: 1,
 };
 const uploaded = { ...reserved, stage: "UPLOADED", safeErrorCode: null, safeErrorMessage: null, version: 2 };
 
@@ -130,6 +131,37 @@ describe("Finance report import upload persistence", () => {
     expect(capacityMock).not.toHaveBeenCalled();
     expect(storageMock.put.mock.calls[0][0]).toContain(`/${fileHash}/source.csv`);
     expect(prismaMock.auditLog.create.mock.calls[0][0].data.meta.format).toBe("CSV");
+  });
+
+  it("requeues the same batch after a terminal extraction runtime failure", async () => {
+    const failed = {
+      ...reserved,
+      stage: "FAILED",
+      safeErrorCode: "FINANCE_REPORT_EXTRACTION_FAILED",
+      safeErrorMessage: "The report could not be extracted safely. Please retry.",
+      workflowJobId: "job-previous",
+      retryCount: 5,
+      version: 4,
+    };
+    prismaMock.financeImportBatch.findUnique.mockResolvedValue(failed);
+    await expect(upload()).resolves.toMatchObject({
+      reused: true,
+      batch: {
+        id: "batch-1",
+        stage: "UPLOADED",
+        workflowJobId: null,
+        retryCount: 0,
+        version: 5,
+      },
+    });
+    expect(prismaMock.financeImportBatch.updateMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({
+        safeErrorCode: { in: expect.arrayContaining(["FINANCE_REPORT_EXTRACTION_FAILED"]) },
+      }),
+      data: expect.objectContaining({ workflowJobId: null, retryCount: 0 }),
+    }));
+    expect(prismaMock.event.createMany).toHaveBeenCalledOnce();
+    expect(createBatchMock).not.toHaveBeenCalled();
   });
 
   it("converges on the winner found under the exact-file lock", async () => {
