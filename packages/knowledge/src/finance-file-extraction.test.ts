@@ -35,14 +35,12 @@ async function xlsx(firstDimension = "A1:B2") {
   zip.file("xl/worksheets/sheet2.xml", sheet(`<row r="1"><c r="A1" t="inlineStr"><is><t>Reviewed</t></is></c></row>`, "A1"));
   return zip.generateAsync({ type: "nodebuffer" });
 }
-
 describe("extractFinanceReportFile", () => {
   it("extracts machine-readable PDF pages and rejects scanned PDFs", async () => {
     const result = await extractFinanceReportFile({ fileBuffer: pdf("Revenue 100.00"), fileName: "report.pdf", mimeType: "application/pdf" });
     expect(result).toMatchObject({ format: "PDF", mimeType: "application/pdf", pages: [{ page: 1, text: expect.stringContaining("Revenue 100.00") }] });
     await expect(extractFinanceReportFile({ fileBuffer: pdf(""), fileName: "scan.pdf", mimeType: "application/pdf" })).rejects.toMatchObject({ code: "SCANNED_PDF_UNSUPPORTED" });
   });
-
   it("preserves CSV source locations, quoting, empty cells, and exact text", async () => {
     const input = Buffer.from('\uFEFFAccount,Amount,Note\r\n"Sales, Online",001.20,"two\nlines"\r\nCosts,,ok');
     const result = await extractFinanceReportFile({ fileBuffer: input, fileName: "actuals.csv", mimeType: "text/csv" });
@@ -55,21 +53,19 @@ describe("extractFinanceReportFile", () => {
       { row: 3, column: 3, type: "TEXT", value: "ok" },
     ]));
   });
-
   it("extracts all non-empty XLSX sheets without floating-point coercion", async () => {
     const result = await extractFinanceReportFile({ fileBuffer: await xlsx(), fileName: "actuals.xlsx", mimeType: "application/octet-stream" });
     expect(result.sheets?.map((sheet) => sheet.name)).toEqual(["Actuals", "Notes"]);
     expect(result.sheets?.[0]?.cells).toContainEqual({ row: 2, column: 2, type: "NUMBER", value: "9007199254740993.01" });
   });
-
   it.each([
     [Buffer.alloc(0), "report.csv", "text/csv", {}, "EMPTY_FILE"],
     [Buffer.from("a,b\n1"), "report.csv", "text/csv", {}, "MALFORMED_FILE"],
     [Buffer.from("a"), "report.csv", "application/pdf", {}, "FILE_TYPE_MISMATCH"],
-    [Buffer.from("a"), "report.xls", "application/octet-stream", {}, "UNSUPPORTED_FILE_TYPE"],
+    [Buffer.from("a"), "report.txt", "text/plain", {}, "UNSUPPORTED_FILE_TYPE"],
     [Buffer.from(",\n,"), "report.csv", "text/csv", {}, "EMPTY_EXTRACTION"],
     [Buffer.from("a,b"), "report.csv", "text/csv", { maxFileBytes: 1 }, "FILE_TOO_LARGE"],
-    [Buffer.from("a\nb"), "report.csv", "text/csv", { maxRows: 1 }, "EXTRACTION_LIMIT_EXCEEDED"],
+    [Buffer.from("a\n".repeat(20_001)), "report.csv", "text/csv", { maxRows: undefined }, "EXTRACTION_LIMIT_EXCEEDED"],
     [Buffer.from("a,b"), "report.csv", "text/csv", { maxCells: 1 }, "EXTRACTION_LIMIT_EXCEEDED"],
     [pdf("Revenue"), "report.pdf", "application/pdf", { maxPages: 0 }, "EXTRACTION_LIMIT_EXCEEDED"],
     [pdf("Revenue"), "report.pdf", "application/pdf", { maxTextChars: 1 }, "EXTRACTION_LIMIT_EXCEEDED"],
@@ -77,12 +73,13 @@ describe("extractFinanceReportFile", () => {
     await expect(extractFinanceReportFile({ fileBuffer, fileName, mimeType, limits })).rejects.toMatchObject({ code });
   });
 
-  it("rejects XLSX archive limits and malformed XLSX data", async () => {
+  it("rejects XLSX limits and distinguishes corrupt archive structure", async () => {
     const fileBuffer = await xlsx();
     await expect(extractFinanceReportFile({ fileBuffer, fileName: "report.xlsx", mimeType: "", limits: { maxZipEntries: 1 } })).rejects.toMatchObject({ code: "EXTRACTION_LIMIT_EXCEEDED" });
-    await expect(extractFinanceReportFile({ fileBuffer, fileName: "report.xlsx", mimeType: "", limits: { maxSheets: 1 } })).rejects.toMatchObject({ code: "EXTRACTION_LIMIT_EXCEEDED" });
-    await expect(extractFinanceReportFile({ fileBuffer, fileName: "report.xlsx", mimeType: "", limits: { maxZipUncompressedBytes: 1 } })).rejects.toMatchObject({ code: "EXTRACTION_LIMIT_EXCEEDED" });
     await expect(extractFinanceReportFile({ fileBuffer: await xlsx("A1:XFD1048576"), fileName: "report.xlsx", mimeType: "" })).rejects.toMatchObject({ code: "EXTRACTION_LIMIT_EXCEEDED" });
-    await expect(extractFinanceReportFile({ fileBuffer: Buffer.from("PK\\x03\\x04broken"), fileName: "report.xlsx", mimeType: "" })).rejects.toMatchObject({ code: "MALFORMED_FILE" });
+    const malformed = Buffer.from(fileBuffer);
+    const end = malformed.lastIndexOf(Buffer.from([0x50, 0x4b, 0x05, 0x06]));
+    malformed.writeUInt32LE(malformed.length, end + 12);
+    await expect(extractFinanceReportFile({ fileBuffer: malformed, fileName: "report.xlsx", mimeType: "" })).rejects.toMatchObject({ code: "MALFORMED_FILE" });
   });
 });

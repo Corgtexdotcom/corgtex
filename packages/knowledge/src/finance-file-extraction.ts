@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
-import { parse } from "csv-parse/sync";
+import { Readable } from "node:stream";
+import { parse } from "csv-parse";
 import { strFromU8, unzipSync } from "fflate";
 import { PDFParse } from "pdf-parse";
 import readXlsxFile from "read-excel-file/node";
@@ -14,35 +15,12 @@ export type FinanceFileExtractionErrorCode =
   | "EMPTY_EXTRACTION"
   | "SCANNED_PDF_UNSUPPORTED"
   | "EXTRACTION_LIMIT_EXCEEDED";
-export type FinanceExtractedCell = {
-  row: number;
-  column: number;
-  type: FinanceExtractedCellType;
-  value: string;
-};
-export type FinanceExtractedSheet = {
-  name: string;
-  rowCount: number;
-  columnCount: number;
-  cells: FinanceExtractedCell[];
-};
-export type FinanceFileExtraction = {
-  fileHash: string;
-  fileSizeBytes: number;
-  format: FinanceFileFormat;
-  mimeType: string;
-  pages?: Array<{ page: number; text: string }>;
-  sheets?: FinanceExtractedSheet[];
-};
+export type FinanceExtractedCell = { row: number; column: number; type: FinanceExtractedCellType; value: string };
+export type FinanceExtractedSheet = { name: string; rowCount: number; columnCount: number; cells: FinanceExtractedCell[] };
+export type FinanceFileExtraction = { fileHash: string; fileSizeBytes: number; format: FinanceFileFormat; mimeType: string; pages?: Array<{ page: number; text: string }>; sheets?: FinanceExtractedSheet[] };
 export type FinanceFileExtractionLimits = {
-  maxFileBytes: number;
-  maxPages: number;
-  maxSheets: number;
-  maxRows: number;
-  maxCells: number;
-  maxTextChars: number;
-  maxZipEntries: number;
-  maxZipUncompressedBytes: number;
+  maxFileBytes: number; maxPages: number; maxSheets: number; maxRows: number; maxCells: number;
+  maxTextChars: number; maxZipEntries: number; maxZipUncompressedBytes: number;
 };
 const DEFAULT_LIMITS: FinanceFileExtractionLimits = {
   maxFileBytes: 25 * 1024 * 1024,
@@ -79,12 +57,11 @@ function detectFormat(fileName: string, mimeType: string): FinanceFileFormat {
   const genericMime = !mime || mime === "application/octet-stream";
   const byName = name.endsWith(".pdf") ? "PDF"
     : name.endsWith(".csv") ? "CSV"
-      : name.endsWith(".xlsx") ? "XLSX"
-        : undefined;
+      : name.endsWith(".xlsx") ? "XLSX" : undefined;
   const byMime = mime === "application/pdf" ? "PDF"
-    : mime === "text/csv" || mime === "application/csv" || mime === "text/plain" || mime === "application/vnd.ms-excel" ? "CSV"
-      : mime === "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" || mime === "application/zip" ? "XLSX"
-        : undefined;
+    : mime === "text/csv" || mime === "application/csv" || ((mime === "text/plain" || mime === "application/vnd.ms-excel") && byName === "CSV") ? "CSV"
+      : mime === "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" || mime === "application/zip" ? "XLSX" : undefined;
+  if (/\.[^./]+$/.test(name) && !byName) fail("UNSUPPORTED_FILE_TYPE");
   if (byName && !genericMime && byName !== byMime) fail("FILE_TYPE_MISMATCH");
   const format = byName ?? byMime;
   if (!format) fail("UNSUPPORTED_FILE_TYPE");
@@ -94,9 +71,7 @@ function assertSignature(buffer: Buffer, format: FinanceFileFormat) {
   if (format === "PDF" && !buffer.subarray(0, 1024).includes(Buffer.from("%PDF-"))) {
     fail("MALFORMED_FILE");
   }
-  if (format === "XLSX" && (buffer.length < 4 || buffer.readUInt32LE(0) !== 0x04034b50)) {
-    fail("MALFORMED_FILE");
-  }
+  if (format === "XLSX" && (buffer.length < 4 || buffer.readUInt32LE(0) !== 0x04034b50)) fail("MALFORMED_FILE");
 }
 function assertXlsxArchiveLimits(buffer: Buffer, limits: FinanceFileExtractionLimits) {
   const first = Math.max(0, buffer.length - 65_557);
@@ -112,7 +87,8 @@ function assertXlsxArchiveLimits(buffer: Buffer, limits: FinanceFileExtractionLi
   const centralSize = buffer.readUInt32LE(end + 12);
   let offset = buffer.readUInt32LE(end + 16);
   if (entries === 0xffff || centralSize === 0xffffffff || offset === 0xffffffff) fail("EXTRACTION_LIMIT_EXCEEDED");
-  if (entries > limits.maxZipEntries || offset + centralSize > end) fail("EXTRACTION_LIMIT_EXCEEDED");
+  if (offset + centralSize > end) fail("MALFORMED_FILE");
+  if (entries > limits.maxZipEntries) fail("EXTRACTION_LIMIT_EXCEEDED");
   let uncompressed = 0;
   for (let index = 0; index < entries; index += 1) {
     if (offset + 46 > end || buffer.readUInt32LE(offset) !== 0x02014b50) fail("MALFORMED_FILE");
@@ -125,9 +101,6 @@ function assertXlsxArchiveLimits(buffer: Buffer, limits: FinanceFileExtractionLi
   }
   if (offset !== end) fail("MALFORMED_FILE");
 }
-function xlsxColumnNumber(letters: string) {
-  return [...letters.toUpperCase()].reduce((number, letter) => (number * 26) + letter.charCodeAt(0) - 64, 0);
-}
 function assertXlsxSheetLimits(buffer: Buffer, limits: FinanceFileExtractionLimits) {
   const files = unzipSync(buffer, { filter: ({ name }) => /^xl\/worksheets\/[^/]+\.xml$/i.test(name) });
   if (Object.keys(files).length > limits.maxSheets) fail("EXTRACTION_LIMIT_EXCEEDED");
@@ -138,7 +111,8 @@ function assertXlsxSheetLimits(buffer: Buffer, limits: FinanceFileExtractionLimi
     let lastRow = 0;
     let lastColumn = 0;
     for (const match of xml.matchAll(/<dimension\b[^>]*\bref="\$?([A-Z]+)\$?(\d+)(?::\$?([A-Z]+)\$?(\d+))?"|<c\b[^>]*\br="\$?([A-Z]+)\$?(\d+)"/gi)) {
-      lastColumn = Math.max(lastColumn, xlsxColumnNumber(match[3] ?? match[1] ?? match[5]));
+      const letters = match[3] ?? match[1] ?? match[5];
+      lastColumn = Math.max(lastColumn, [...letters].reduce((n, letter) => (n * 26) + letter.charCodeAt(0) - 64, 0));
       lastRow = Math.max(lastRow, Number(match[4] ?? match[2] ?? match[6]));
     }
     rows += lastRow;
@@ -148,10 +122,7 @@ function assertXlsxSheetLimits(buffer: Buffer, limits: FinanceFileExtractionLimi
 }
 type ExactNumber = { exactNumber: string };
 type RawCell = string | ExactNumber | boolean | Date | typeof Date | null;
-function normalizeSheets(
-  sheets: Array<{ sheet: string; data: RawCell[][] }>,
-  limits: FinanceFileExtractionLimits,
-) {
+function normalizeSheets(sheets: Array<{ sheet: string; data: RawCell[][] }>, limits: FinanceFileExtractionLimits) {
   if (sheets.length > limits.maxSheets) fail("EXTRACTION_LIMIT_EXCEEDED");
   let rows = 0;
   let cellsSeen = 0;
@@ -166,16 +137,10 @@ function normalizeSheets(
       cellsSeen += row.length;
       if (cellsSeen > limits.maxCells) fail("EXTRACTION_LIMIT_EXCEEDED");
       row.forEach((raw, columnIndex) => {
-        if (raw === null) return;
-        if (typeof raw === "string" && !raw.trim()) return;
+        if (raw === null || (typeof raw === "string" && !raw.trim())) return;
         if (typeof raw === "function") fail("MALFORMED_FILE");
-        const type = typeof raw === "object"
-          ? raw instanceof Date ? "DATE" : "NUMBER"
-          : typeof raw === "boolean" ? "BOOLEAN" : "TEXT";
-        const value = raw instanceof Date ? raw.toISOString()
-          : typeof raw === "object" ? raw.exactNumber
-            : typeof raw === "boolean" ? raw ? "TRUE" : "FALSE"
-              : raw;
+        const type = typeof raw === "object" ? raw instanceof Date ? "DATE" : "NUMBER" : typeof raw === "boolean" ? "BOOLEAN" : "TEXT";
+        const value = raw instanceof Date ? raw.toISOString() : typeof raw === "object" ? raw.exactNumber : typeof raw === "boolean" ? raw ? "TRUE" : "FALSE" : raw;
         textChars += value.length;
         if (textChars > limits.maxTextChars) fail("EXTRACTION_LIMIT_EXCEEDED");
         cells.push({ row: rowIndex + 1, column: columnIndex + 1, type, value });
@@ -200,14 +165,58 @@ async function extractPdf(buffer: Buffer, limits: FinanceFileExtractionLimits) {
     await parser.destroy();
   }
 }
+async function extractCsv(buffer: Buffer, limits: FinanceFileExtractionLimits) {
+  const text = new TextDecoder("utf-8", { fatal: true }).decode(buffer);
+  if (text.includes("\0")) fail("MALFORMED_FILE");
 
+  function* chunks() {
+    for (let offset = 0; offset < text.length; offset += 65_536) {
+      yield text.slice(offset, offset + 65_536);
+    }
+  }
+
+  const input = Readable.from(chunks());
+  const parser = input.pipe(parse({
+    bom: true,
+    relax_column_count: false,
+    max_record_size: limits.maxTextChars,
+  }));
+  const cells: FinanceExtractedCell[] = [];
+  let rowCount = 0;
+  let columnCount = 0;
+  let cellsSeen = 0;
+  let textChars = 0;
+  try {
+    for await (const record of parser) {
+      const row = record as string[];
+      rowCount += 1;
+      cellsSeen += row.length;
+      columnCount = Math.max(columnCount, row.length);
+      if (rowCount > limits.maxRows || cellsSeen > limits.maxCells) fail("EXTRACTION_LIMIT_EXCEEDED");
+      row.forEach((value, columnIndex) => {
+        if (!value.trim()) return;
+        textChars += value.length;
+        if (textChars > limits.maxTextChars) fail("EXTRACTION_LIMIT_EXCEEDED");
+        cells.push({ row: rowCount, column: columnIndex + 1, type: "TEXT", value });
+      });
+    }
+  } finally {
+    input.destroy();
+    parser.destroy();
+  }
+  if (cells.length === 0) fail("EMPTY_EXTRACTION");
+  return [{ name: "CSV", rowCount, columnCount, cells }];
+}
 export async function extractFinanceReportFile(params: {
   fileBuffer: Buffer;
   fileName: string;
   mimeType: string;
   limits?: Partial<FinanceFileExtractionLimits>;
 }): Promise<FinanceFileExtraction> {
-  const limits = { ...DEFAULT_LIMITS, ...params.limits };
+  const limits = { ...DEFAULT_LIMITS };
+  for (const key of Object.keys(DEFAULT_LIMITS) as Array<keyof FinanceFileExtractionLimits>) {
+    limits[key] = params.limits?.[key] ?? limits[key];
+  }
   if (params.fileBuffer.length === 0) fail("EMPTY_FILE");
   if (params.fileBuffer.length > limits.maxFileBytes) fail("FILE_TOO_LARGE");
   const format = detectFormat(params.fileName, params.mimeType);
@@ -222,12 +231,7 @@ export async function extractFinanceReportFile(params: {
   };
   try {
     if (format === "PDF") return { ...base, pages: await extractPdf(params.fileBuffer, limits) };
-    if (format === "CSV") {
-      const text = new TextDecoder("utf-8", { fatal: true }).decode(params.fileBuffer);
-      if (text.includes("\0")) fail("MALFORMED_FILE");
-      const data = parse(text, { bom: true, relax_column_count: false }) as string[][];
-      return { ...base, sheets: normalizeSheets([{ sheet: "CSV", data }], limits) };
-    }
+    if (format === "CSV") return { ...base, sheets: await extractCsv(params.fileBuffer, limits) };
     assertXlsxArchiveLimits(params.fileBuffer, limits);
     assertXlsxSheetLimits(params.fileBuffer, limits);
     const sheets = await readXlsxFile<ExactNumber>(params.fileBuffer, {
