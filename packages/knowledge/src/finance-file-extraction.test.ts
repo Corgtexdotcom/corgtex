@@ -20,7 +20,7 @@ function assemblePdf(objects: Buffer[]) {
   return Buffer.concat(chunks);
 }
 
-function createTextPdf(pages: Array<{ text?: string; rotation?: number; userUnit?: number }>) {
+function createTextPdf(pages: Array<{ text?: string; rotation?: number; userUnit?: number; mediaBox?: string }>) {
   const fontId = 3 + (pages.length * 2);
   const pageIds = pages.map((_, index) => 3 + (index * 2));
   const objects = [Buffer.from("<< /Type /Catalog /Pages 2 0 R >>"),
@@ -29,7 +29,7 @@ function createTextPdf(pages: Array<{ text?: string; rotation?: number; userUnit
     const streamId = 4 + (index * 2);
     const content = page.text === undefined ? "" : `BT /F1 12 Tf 50 700 Td (${page.text}) Tj ET`;
     objects.push(Buffer.from(
-      `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792]`
+      `<< /Type /Page /Parent 2 0 R /MediaBox [${page.mediaBox ?? "0 0 612 792"}]`
       + ` /Resources << /Font << /F1 ${fontId} 0 R >> >>`
       + ` /Contents ${streamId} 0 R${page.rotation ? ` /Rotate ${page.rotation}` : ""}${page.userUnit ? ` /UserUnit ${page.userUnit}` : ""} >>`,
     ));
@@ -182,7 +182,9 @@ describe("extractFinanceReportFile", () => {
     [createTextPdf([{ text: "Text" }]), { maxPdfOutputBytes: 16 }, "EXTRACTION_LIMIT_EXCEEDED"],
     [createTextPdf([{ text: "Text" }]), { maxPdfParseMs: 1 }, "EXTRACTION_LIMIT_EXCEEDED"],
     [createImagePdf(), {}, "UNSUPPORTED_FILE_TYPE"],
+    [createImagePdf(" "), {}, "UNSUPPORTED_FILE_TYPE"],
     [createImagePdf(undefined, 2_001), {}, "EMPTY_EXTRACTION"],
+    [createTextPdf([{ text: "Text", mediaBox: `0 0 ${"1".padEnd(307, "0")} 792` }]), {}, "MALFORMED_FILE"],
   ])("rejects an incomplete or over-limit PDF as one safe failure", async (fileBuffer, limits, code) => {
     await expect(extractFinanceReportFile({
       fileBuffer,

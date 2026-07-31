@@ -93,8 +93,9 @@ const limits = JSON.parse(process.env.CORGTEX_FINANCE_PDF_LIMITS || "{}");
 class ControlledError extends Error { constructor(code) { super(code); this.code = code; } }
 const stop = (code) => { throw new ControlledError(code); };
 const round = (value) => {
-  if (!Number.isFinite(value)) stop("MALFORMED_FILE");
-  return Math.round(value * 1000) / 1000;
+  const rounded = Math.round(value * 1000) / 1000;
+  if (!Number.isFinite(rounded)) stop("MALFORMED_FILE");
+  return rounded;
 };
 async function main() {
   const chunks = [];
@@ -130,7 +131,7 @@ async function main() {
         const content = await page.getTextContent();
         const cells = [];
         for (const item of content.items) {
-          if (!("str" in item) || item.str === "") continue;
+          if (!("str" in item) || item.str.trim() === "") continue;
           itemCount += 1;
           textChars += item.str.length;
           if (itemCount > limits.maxPdfItems || textChars > limits.maxTextChars) {
