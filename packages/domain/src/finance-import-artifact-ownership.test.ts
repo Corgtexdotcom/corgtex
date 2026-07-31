@@ -3,12 +3,15 @@ import type { Prisma } from "@prisma/client";
 
 function transactionClient() {
   return {
-    $queryRaw: vi.fn().mockResolvedValue([{ pg_advisory_xact_lock: null }]),
+    $executeRaw: vi.fn().mockResolvedValue(1),
     document: {
       findUnique: vi.fn().mockResolvedValue({ accessDomain: "FINANCE", archivedAt: null }),
     },
     brainSource: {
       findUnique: vi.fn().mockResolvedValue({ accessDomain: "FINANCE", archivedAt: null }),
+    },
+    financeImportBatch: {
+      create: vi.fn().mockImplementation(({ data }) => Promise.resolve({ id: "batch-1", ...data })),
     },
   };
 }
@@ -23,11 +26,11 @@ describe("Finance import artifact ownership", () => {
       brainSourceId: "source-1",
     });
 
-    expect(tx.$queryRaw.mock.calls.map((call) => call[1])).toEqual([
+    expect(tx.$executeRaw.mock.calls.map((call) => call[1])).toEqual([
       "finance-import-artifact:workspace-1:BRAIN_SOURCE:source-1",
       "finance-import-artifact:workspace-1:DOCUMENT:document-1",
     ]);
-    expect(Math.max(...tx.$queryRaw.mock.invocationCallOrder))
+    expect(Math.max(...tx.$executeRaw.mock.invocationCallOrder))
       .toBeLessThan(tx.document.findUnique.mock.invocationCallOrder[0]);
     expect(tx.document.findUnique).toHaveBeenCalledWith({
       where: { id_workspaceId: { id: "document-1", workspaceId: "workspace-1" } },
@@ -44,6 +47,34 @@ describe("Finance import artifact ownership", () => {
       documentId: "document-1",
       brainSourceId: "source-1",
     })).rejects.toMatchObject({ code: "FINANCE_IMPORT_ARTIFACT_UNAVAILABLE" });
-    expect(tx.$queryRaw).toHaveBeenCalledTimes(2);
+    expect(tx.$executeRaw).toHaveBeenCalledTimes(2);
+  });
+
+  it("creates a batch only after locking and validating both linked artifacts", async () => {
+    const tx = transactionClient();
+    const { createFinanceImportBatchWithArtifactOwnership } = await import("./finance-import-artifact-ownership");
+    await createFinanceImportBatchWithArtifactOwnership(tx as unknown as Prisma.TransactionClient, {
+      workspaceId: "workspace-1",
+      uploadedByUserId: "user-1",
+      documentId: "document-1",
+      brainSourceId: "source-1",
+      fileHash: "a".repeat(64),
+      mimeType: "text/csv",
+      originalFilename: "synthetic.csv",
+      fileSizeBytes: 10,
+    });
+
+    expect(Math.max(
+      ...tx.$executeRaw.mock.invocationCallOrder,
+      ...tx.document.findUnique.mock.invocationCallOrder,
+      ...tx.brainSource.findUnique.mock.invocationCallOrder,
+    )).toBeLessThan(tx.financeImportBatch.create.mock.invocationCallOrder[0]);
+    expect(tx.financeImportBatch.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        workspaceId: "workspace-1",
+        documentId: "document-1",
+        brainSourceId: "source-1",
+      }),
+    });
   });
 });

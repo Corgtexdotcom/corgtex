@@ -18,7 +18,7 @@ export async function lockFinanceImportArtifactOwnership(
   artifact: FinanceImportArtifact,
 ) {
   const lockKey = ownershipLockKey(artifact);
-  await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtextextended(${lockKey}, 0))`;
+  await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${lockKey}, 0))`;
 }
 
 export async function lockFinanceImportArtifactLinkTargets(
@@ -56,4 +56,27 @@ export async function lockFinanceImportArtifactLinkTargets(
     "FINANCE_IMPORT_ARTIFACT_UNAVAILABLE",
     "The Finance report Brain source is no longer available.",
   );
+}
+
+type FinanceImportBatchLinkData = Prisma.FinanceImportBatchUncheckedCreateInput & {
+  documentId: string;
+  brainSourceId: string;
+};
+
+export async function createFinanceImportBatchWithArtifactOwnership(
+  tx: Prisma.TransactionClient,
+  data: FinanceImportBatchLinkData,
+) {
+  invariant(
+    data.documentId && data.brainSourceId,
+    400,
+    "INVALID_INPUT",
+    "Finance report document and Brain source links are required.",
+  );
+  await lockFinanceImportArtifactLinkTargets(tx, {
+    workspaceId: data.workspaceId,
+    documentId: data.documentId,
+    brainSourceId: data.brainSourceId,
+  });
+  return tx.financeImportBatch.create({ data });
 }

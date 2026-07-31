@@ -60,7 +60,7 @@ const { prismaMock, storageDeleteMock } = vi.hoisted(() => {
     financeImportBatch: {
       findFirst: vi.fn(),
     },
-    $queryRaw: vi.fn(),
+    $executeRaw: vi.fn(),
   };
   return { prismaMock: prisma, storageDeleteMock: vi.fn() };
 });
@@ -107,7 +107,7 @@ describe("workspace archive domain", () => {
     prismaMock.workItemVersion.deleteMany.mockResolvedValue({ count: 0 });
     prismaMock.knowledgeChunk.deleteMany.mockResolvedValue({ count: 0 });
     prismaMock.financeImportBatch.findFirst.mockResolvedValue(null);
-    prismaMock.$queryRaw.mockResolvedValue([{ pg_advisory_xact_lock: null }]);
+    prismaMock.$executeRaw.mockResolvedValue(1);
     storageDeleteMock.mockResolvedValue(undefined);
   });
 
@@ -367,7 +367,7 @@ describe("workspace archive domain", () => {
       where: { workspaceId: "workspace-1", [linkField]: record.id },
       select: { id: true },
     });
-    expect(prismaMock.$queryRaw).toHaveBeenCalled();
+    expect(prismaMock.$executeRaw).toHaveBeenCalled();
     expect(prismaMock.knowledgeChunk.deleteMany).not.toHaveBeenCalled();
     expect(storageDeleteMock).not.toHaveBeenCalled();
     expect(delegate.delete).not.toHaveBeenCalled();
