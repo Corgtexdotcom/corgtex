@@ -99,71 +99,49 @@ const fail = (code) => { const error = new Error(code); error.code = code; throw
     let textChars = 0;
     for (let pageNumber = 1; pageNumber <= document.numPages; pageNumber += 1) {
       const page = await document.getPage(pageNumber);
+      const reader = page.streamTextContent().getReader();
       let text = "";
       let previous;
-      let sawVerticalText = false;
-      const verticalFonts = new Set();
       const append = (value) => {
         textChars += value.length;
         if (textChars > maxTextChars) fail("EXTRACTION_LIMIT_EXCEEDED");
         text += value;
       };
-      const consume = (content) => {
-        for (const [fontName, style] of Object.entries(content.styles || {})) {
-          if (style.vertical) verticalFonts.add(fontName);
-        }
-        for (const item of content.items) {
-          if (!("str" in item)) continue;
-          if (!Array.isArray(item.transform)) {
-            if (text && !text.endsWith("\n")) append("\n");
-            append(item.str);
-            continue;
-          }
-          const [a, b, c, d, x, y] = item.transform;
-          const vertical = verticalFonts.has(item.fontName);
-          if (vertical) sawVerticalText = true;
-          const axisX = vertical ? -c : a;
-          const axisY = vertical ? -d : b;
-          const scale = Math.hypot(axisX, axisY) || 1;
-          const ux = axisX / scale;
-          const uy = axisY / scale;
-          if (previous) {
-            const dx = x - previous.x;
-            const dy = y - previous.y;
-            const cross = Math.abs((-uy * dx) + (ux * dy));
-            const alignment = (previous.ux * ux) + (previous.uy * uy);
-            if ((alignment < 0.98 || cross > 4.6) && !text.endsWith("\n")) append("\n");
-            else if (Math.abs((ux * dx) + (uy * dy)) > 7) append("\t");
-          }
-          append(item.str);
-          if (item.hasEOL && !text.endsWith("\n")) append("\n");
-          const advance = vertical
-            ? item.height * (scale / (Math.hypot(a, b) || 1))
-            : item.width;
-          previous = item.hasEOL ? undefined : {
-            x: x + (ux * advance),
-            y: y + (uy * advance),
-            ux,
-            uy,
-          };
-        }
-      };
       try {
-        const reader = page.streamTextContent().getReader();
         while (true) {
           const chunk = await reader.read();
           if (chunk.done) break;
-          consume(chunk.value);
+          if (Object.values(chunk.value.styles).some((style) => style.vertical)) {
+            fail("UNSUPPORTED_PDF_FEATURE");
+          }
+          for (const item of chunk.value.items) {
+            if (!("str" in item)) continue;
+            const [a, b, , , x, y] = item.transform;
+            const scale = Math.hypot(a, b) || 1;
+            const ux = a / scale;
+            const uy = b / scale;
+            if (previous) {
+              const dx = x - previous.x;
+              const dy = y - previous.y;
+              const cross = Math.abs((-uy * dx) + (ux * dy));
+              const alignment = (previous.ux * ux) + (previous.uy * uy);
+              if ((alignment < 0.98 || cross > 4.6) && !text.endsWith("\n")) append("\n");
+              else if (Math.abs((ux * dx) + (uy * dy)) > 7) append("\t");
+            }
+            append(item.str);
+            if (item.hasEOL && !text.endsWith("\n")) append("\n");
+            previous = item.hasEOL ? undefined : {
+              x: x + (ux * item.width),
+              y: y + (uy * item.width),
+              ux,
+              uy,
+            };
+          }
         }
-        if (sawVerticalText || !text.trim()) {
+        if (!text.trim()) {
           const operators = await page.getOperatorList();
           if (operators.fnArray.some((operator) => imageOps.has(operator))) {
             fail("SCANNED_PDF_UNSUPPORTED");
-          }
-          if (sawVerticalText && operators.fnArray.some((operator, index) =>
-            operator === OPS.setTextRenderingMode
-            && (Number(operators.argsArray[index]?.[0]) & 3) === 3)) {
-            fail("UNSUPPORTED_PDF_FEATURE");
           }
         }
       } finally {

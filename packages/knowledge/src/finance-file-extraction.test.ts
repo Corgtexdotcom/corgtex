@@ -61,8 +61,8 @@ function pdf(...pages: PdfPage[]) {
   return pdfWithFont("Helvetica", pages);
 }
 
-function cidFontPdf(encoding = "90ms-RKSJ-H", content = "BT /F1 12 Tf 72 720 Td <93FA> Tj ET") {
-  const contentBytes = Buffer.from(content);
+function cidFontPdf(encoding = "90ms-RKSJ-H") {
+  const content = Buffer.from("BT /F1 12 Tf 72 720 Td <93FA> Tj ET");
   return renderPdf([
     Buffer.from("<< /Type /Catalog /Pages 2 0 R >>"),
     Buffer.from("<< /Type /Pages /Kids [6 0 R] /Count 1 >>"),
@@ -71,8 +71,8 @@ function cidFontPdf(encoding = "90ms-RKSJ-H", content = "BT /F1 12 Tf 72 720 Td 
     Buffer.from("<< /Type /FontDescriptor /FontName /HeiseiKakuGo-W5 /Flags 4 /FontBBox [0 -200 1000 900] /ItalicAngle 0 /Ascent 880 /Descent -120 /CapHeight 700 /StemV 80 >>"),
     Buffer.from("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 1000 1000] /Resources << /Font << /F1 3 0 R >> >> /Contents 7 0 R >>"),
     Buffer.concat([
-      Buffer.from(`<< /Length ${contentBytes.length} >>\nstream\n`),
-      contentBytes,
+      Buffer.from(`<< /Length ${content.length} >>\nstream\n`),
+      content,
       Buffer.from("\nendstream"),
     ]),
   ]);
@@ -134,44 +134,12 @@ describe("extractFinanceReportFile", () => {
     expect(result.pages?.[0]?.text).toBe("日");
   });
 
-  pdfIt.each([formPdf(), xfaPdf()])("fails AcroForm and pure XFA documents closed", async (fileBuffer) => {
+  pdfIt.each([formPdf(), xfaPdf(), cidFontPdf("90ms-RKSJ-V")])("fails structured forms and native vertical writing closed", async (fileBuffer) => {
     await expect(extractFinanceReportFile({
       fileBuffer,
       fileName: "structured.pdf",
       mimeType: "application/pdf",
     })).rejects.toMatchObject({ code: "UNSUPPORTED_PDF_FEATURE" });
-  });
-
-  pdfIt("uses the vertical CID advance axis to separate columns", async () => {
-    const result = await extractFinanceReportFile({
-      fileBuffer: cidFontPdf("90ms-RKSJ-V", "BT /F1 12 Tf 72 720 Td <93FA> Tj ET BT /F1 12 Tf 200 720 Td <93FA> Tj ET"),
-      fileName: "vertical-cid.pdf",
-      mimeType: "application/pdf",
-    });
-    expect(result.pages?.[0]?.text).toBe("日\n日");
-  });
-
-  pdfIt("scales vertical advances on the same matrix axis", async () => {
-    const result = await extractFinanceReportFile({
-      fileBuffer: cidFontPdf(
-        "90ms-RKSJ-V",
-        "BT /F1 12 Tf 2 0 0 1 72 720 Tm <93FA> Tj ET BT /F1 12 Tf 2 0 0 1 72 708 Tm <93FA> Tj ET",
-      ),
-      fileName: "vertical-scaled.pdf",
-      mimeType: "application/pdf",
-    });
-    expect(result.pages?.[0]?.text).toBe("日日");
-  });
-
-  pdfIt.each([
-    ["BT /F1 12 Tf 3 Tr 72 720 Td <93FA> Tj ET", "UNSUPPORTED_PDF_FEATURE"],
-    ["BT /F1 12 Tf 72 720 Td <93FA> Tj ET q BI /W 1 /H 1 /BPC 1 /CS /DeviceGray ID \u0000 EI Q", "SCANNED_PDF_UNSUPPORTED"],
-  ] as const)("rejects incomplete vertical evidence", async (content, code) => {
-    await expect(extractFinanceReportFile({
-      fileBuffer: cidFontPdf("90ms-RKSJ-V", content),
-      fileName: "vertical-unsafe.pdf",
-      mimeType: "application/pdf",
-    })).rejects.toMatchObject({ code });
   });
 
   pdfIt("loads packaged standard fonts without system font fallback", async () => {
