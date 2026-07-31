@@ -1,6 +1,5 @@
 import { createHash } from "node:crypto";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-
 const { claimMock, completeMock, failMock, extractMock, storageMock } = vi.hoisted(() => ({
   claimMock: vi.fn(), completeMock: vi.fn(), failMock: vi.fn(), extractMock: vi.fn(),
   storageMock: { get: vi.fn() },
@@ -17,19 +16,16 @@ vi.mock("@corgtex/knowledge", () => {
   return { extractFinanceReportFile: extractMock, FinanceFileExtractionError: MockExtractionError };
 });
 vi.mock("@corgtex/storage", () => ({ defaultStorage: storageMock }));
-
 const storedData = Buffer.from("Account,Amount"), storedHash = createHash("sha256").update(storedData).digest("hex");
 const claim = {
-  skipped: false, batchId: "batch-1", version: 2, storageKey: "private/report.csv",
-  fileHash: storedHash, fileSizeBytes: storedData.byteLength,
-  fileName: "synthetic.csv", mimeType: "text/csv",
+  skipped: false, batchId: "batch-1", version: 2, storageKey: "private/report.csv", fileHash: storedHash,
+  fileSizeBytes: storedData.byteLength, fileName: "synthetic.csv", mimeType: "text/csv",
 };
 const job = { workspaceId: "workspace-1", batchId: "batch-1", workflowJobId: "job-1", attempts: 1, isFinalAttempt: false };
 async function run(overrides = {}) {
   const { runFinanceReportImportExtractionJob } = await import("./finance-report-import");
   return runFinanceReportImportExtractionJob({ ...job, ...overrides });
 }
-
 describe("Finance report extraction workflow handler", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -38,8 +34,7 @@ describe("Finance report extraction workflow handler", () => {
     extractMock.mockResolvedValue({
       fileHash: storedHash, fileSizeBytes: storedData.byteLength, format: "CSV", mimeType: "text/csv",
       sheets: [{ name: "CSV", rowCount: 1, columnCount: 2, cells: [
-        { row: 1, column: 1, type: "TEXT", value: "Account" },
-        { row: 1, column: 2, type: "TEXT", value: "Amount" },
+        { row: 1, column: 1, type: "TEXT", value: "Account" }, { row: 1, column: 2, type: "TEXT", value: "Amount" },
       ] }],
     });
     completeMock.mockResolvedValue({ skipped: false, batchId: "batch-1", version: 3 });
@@ -50,13 +45,10 @@ describe("Finance report extraction workflow handler", () => {
     await expect(run({ extract: actual.extractFinanceReportFile })).resolves.toMatchObject({ version: 3 });
     expect(storageMock.get).toHaveBeenCalledWith("private/report.csv");
     expect(completeMock).toHaveBeenCalledWith(expect.objectContaining({
-      expectedVersion: 2,
-      extraction: expect.objectContaining({
-        fileHash: storedHash, format: "CSV",
+      expectedVersion: 2, extraction: expect.objectContaining({ fileHash: storedHash, format: "CSV",
         text: expect.stringContaining('"sheet":"CSV","row":1,"column":1'),
         metadata: { pageCount: 0, sheetCount: 1, rowCount: 1, cellCount: 2 },
-      }),
-    }));
+      }), }));
     expect(failMock).not.toHaveBeenCalled();
   });
 
