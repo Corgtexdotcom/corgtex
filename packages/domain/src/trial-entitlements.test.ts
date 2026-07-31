@@ -19,6 +19,44 @@ vi.mock("@corgtex/shared", () => ({
   checkRateLimit: vi.fn(),
 }));
 
+function storageTrial(status = "ACTIVE") {
+  return {
+    id: "trial-1",
+    workspaceId: "workspace-1",
+    agentCredentialId: null,
+    status,
+    trialExpiresAt: new Date(Date.now() + 60_000),
+    memberLimit: 5,
+    storageLimitMb: 1,
+    mcpDailyCallLimit: 100,
+  };
+}
+
+function storageTx(
+  documents: Array<{ id: string; metadata: { size: number } }>,
+  trial: ReturnType<typeof storageTrial> | null = storageTrial(),
+  order?: string[],
+) {
+  return {
+    procurementTrial: {
+      findUnique: vi.fn(async () => {
+        order?.push("trial");
+        return trial;
+      }),
+    },
+    $executeRaw: vi.fn(async () => {
+      order?.push("lock");
+      return 1;
+    }),
+    document: {
+      findMany: vi.fn(async () => {
+        order?.push("usage");
+        return documents;
+      }),
+    },
+  };
+}
+
 describe("trial entitlements", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -59,40 +97,11 @@ describe("trial entitlements", () => {
 
   it("uses the caller transaction and locks before calculating trial storage usage", async () => {
     const order: string[] = [];
-    const tx = {
-      procurementTrial: {
-        findUnique: vi.fn(async () => {
-          order.push("trial");
-          return {
-            id: "trial-1",
-            workspaceId: "workspace-1",
-            agentCredentialId: null,
-            status: "ACTIVE",
-            trialExpiresAt: new Date(Date.now() + 60_000),
-            memberLimit: 5,
-            storageLimitMb: 1,
-            mcpDailyCallLimit: 100,
-          };
-        }),
-      },
-      $executeRaw: vi.fn(async () => {
-        order.push("lock");
-        return 1;
-      }),
-      document: {
-        findMany: vi.fn(async () => {
-          order.push("usage");
-          return [{ id: "document-1", metadata: { size: 512 * 1024 } }];
-        }),
-      },
-    };
+    const tx = storageTx([{ id: "document-1", metadata: { size: 512 * 1024 } }], storageTrial(), order);
     const { lockAndAssertTrialStorageCapacity } = await import("./trial-entitlements");
 
-    await expect(lockAndAssertTrialStorageCapacity(
-      tx as any,
-      "workspace-1",
-      512 * 1024,
-    )).resolves.toBeUndefined();
+    await expect(lockAndAssertTrialStorageCapacity(tx as any, "workspace-1", 512 * 1024))
+      .resolves.toBeUndefined();
 
     expect(order).toEqual(["trial", "lock", "usage"]);
     expect(prismaMock.procurementTrial.findUnique).not.toHaveBeenCalled();
@@ -100,57 +109,18 @@ describe("trial entitlements", () => {
   });
 
   it("rejects storage above the exact trial limit", async () => {
-    const tx = {
-      procurementTrial: {
-        findUnique: vi.fn().mockResolvedValue({
-          id: "trial-1",
-          workspaceId: "workspace-1",
-          agentCredentialId: null,
-          status: "ACTIVE",
-          trialExpiresAt: new Date(Date.now() + 60_000),
-          memberLimit: 5,
-          storageLimitMb: 1,
-          mcpDailyCallLimit: 100,
-        }),
-      },
-      $executeRaw: vi.fn().mockResolvedValue(1),
-      document: {
-        findMany: vi.fn().mockResolvedValue([
-          { id: "document-1", metadata: { size: 512 * 1024 } },
-        ]),
-      },
-    };
+    const tx = storageTx([{ id: "document-1", metadata: { size: 512 * 1024 } }]);
     const { lockAndAssertTrialStorageCapacity } = await import("./trial-entitlements");
 
-    await expect(lockAndAssertTrialStorageCapacity(
-      tx as any,
-      "workspace-1",
-      512 * 1024 + 1,
-    )).rejects.toMatchObject({ code: "TRIAL_STORAGE_LIMIT_EXCEEDED" });
+    await expect(lockAndAssertTrialStorageCapacity(tx as any, "workspace-1", 512 * 1024 + 1))
+      .rejects.toMatchObject({ code: "TRIAL_STORAGE_LIMIT_EXCEEDED" });
   });
 
   it("counts only the replacement document's net size change", async () => {
-    const tx = {
-      procurementTrial: {
-        findUnique: vi.fn().mockResolvedValue({
-          id: "trial-1",
-          workspaceId: "workspace-1",
-          agentCredentialId: null,
-          status: "ACTIVE",
-          trialExpiresAt: new Date(Date.now() + 60_000),
-          memberLimit: 5,
-          storageLimitMb: 1,
-          mcpDailyCallLimit: 100,
-        }),
-      },
-      $executeRaw: vi.fn().mockResolvedValue(1),
-      document: {
-        findMany: vi.fn().mockResolvedValue([
-          { id: "document-replaced", metadata: { size: 512 * 1024 } },
-          { id: "document-other", metadata: { size: 256 * 1024 } },
-        ]),
-      },
-    };
+    const tx = storageTx([
+      { id: "document-replaced", metadata: { size: 512 * 1024 } },
+      { id: "document-other", metadata: { size: 256 * 1024 } },
+    ]);
     const { lockAndAssertTrialStorageCapacity } = await import("./trial-entitlements");
 
     await expect(lockAndAssertTrialStorageCapacity(
@@ -161,16 +131,47 @@ describe("trial entitlements", () => {
     )).resolves.toBeUndefined();
   });
 
+  it("allows a replacement that shrinks an already over-limit workspace", async () => {
+    const tx = storageTx([
+      { id: "document-replaced", metadata: { size: 768 * 1024 } },
+      { id: "document-other", metadata: { size: 512 * 1024 } },
+    ]);
+    const { lockAndAssertTrialStorageCapacity } = await import("./trial-entitlements");
+
+    await expect(lockAndAssertTrialStorageCapacity(
+      tx as any,
+      "workspace-1",
+      512 * 1024,
+      { replacingDocumentId: "document-replaced" },
+    )).resolves.toBeUndefined();
+
+    expect(tx.$executeRaw).toHaveBeenCalledOnce();
+    expect(tx.document.findMany).toHaveBeenCalledOnce();
+  });
+
+  it("does not enforce trial storage after a workspace converts", async () => {
+    const convertedTrial = storageTrial("CONVERTED");
+    prismaMock.procurementTrial.findUnique.mockResolvedValueOnce(convertedTrial);
+    const tx = storageTx([], convertedTrial);
+    const {
+      assertTrialStorageCapacity,
+      lockAndAssertTrialStorageCapacity,
+    } = await import("./trial-entitlements");
+
+    await expect(assertTrialStorageCapacity("workspace-paid", 100)).resolves.toBeUndefined();
+    await expect(lockAndAssertTrialStorageCapacity(
+      tx as any,
+      "workspace-paid",
+      100,
+    )).resolves.toBeUndefined();
+
+    expect(prismaMock.document.findMany).not.toHaveBeenCalled();
+    expect(tx.$executeRaw).not.toHaveBeenCalled();
+    expect(tx.document.findMany).not.toHaveBeenCalled();
+  });
+
   it("does not lock or calculate usage for non-trial workspaces", async () => {
-    const tx = {
-      procurementTrial: {
-        findUnique: vi.fn().mockResolvedValue(null),
-      },
-      $executeRaw: vi.fn(),
-      document: {
-        findMany: vi.fn(),
-      },
-    };
+    const tx = storageTx([], null);
     const { lockAndAssertTrialStorageCapacity } = await import("./trial-entitlements");
 
     await expect(lockAndAssertTrialStorageCapacity(
