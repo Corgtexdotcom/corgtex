@@ -2,10 +2,8 @@ import { describe, expect, it } from "vitest";
 import { validateFinanceReportEvidenceSourcesV1,
   type FinanceReportEvidenceCellType, type FinanceReportEvidenceSource } from "./finance-report-evidence";
 const jsonl = (...records: unknown[]) => records.map((record) => JSON.stringify(record)).join("\n");
-const pdfSource = (line: string, text: string, lineIndex = 0, page = 1) => {
-  const start = line.indexOf(text);
-  return { kind: "PDF", page, lineIndex, line, start, end: start + text.length, text } as const;
-};
+const pdfSource = (line: string, text: string, lineIndex = 0, page = 1) =>
+  ({ kind: "PDF", page, lineIndex, line, start: line.indexOf(text), end: line.indexOf(text) + text.length, text } as const);
 const cellSource = (evidence: string, extra: Record<string, unknown> = {}) =>
   ({ kind: "CELL", sheet: "Report", row: 1, column: 1, evidence, ...extra } as const);
 const validate = (format: "PDF" | "CSV" | "XLSX", extractedEvidence: string, claims: unknown[]) =>
@@ -14,8 +12,7 @@ const code = (result: ReturnType<typeof validate>) => result.facts[0]?.kind === 
   ? result.facts[0].code : undefined;
 const astral = String.fromCodePoint(0x1f600);
 // @ts-expect-error cell spans must provide start, end, and text atomically.
-const invalidTypedCellSource: FinanceReportEvidenceSource = { kind: "CELL", sheet: "Report", row: 1, column: 1, evidence: "10", start: 0 };
-void invalidTypedCellSource;
+const invalidTypedCellSource: FinanceReportEvidenceSource = { kind: "CELL", sheet: "Report", row: 1, column: 1, evidence: "10", start: 0 }; void invalidTypedCellSource;
 describe("validateFinanceReportEvidenceSourcesV1", () => {
   it("binds repeated PDF lines and multiple non-overlapping UTF-16 spans", () => {
     const line = `Revenue ${astral} 100 200`;
@@ -77,10 +74,7 @@ describe("validateFinanceReportEvidenceSourcesV1", () => {
       { kind: "SOURCE", cell: { type: "FORMULA", resultType: "NUMBER" } },
     ]);
     const formulaCell = good.facts[1]?.kind === "SOURCE" ? good.facts[1].cell : undefined;
-    if (formulaCell?.type === "FORMULA") {
-      const resultType: Exclude<FinanceReportEvidenceCellType, "FORMULA"> = formulaCell.resultType;
-      expect(resultType).toBe("NUMBER");
-    }
+    if (formulaCell?.type === "FORMULA") { const resultType: Exclude<FinanceReportEvidenceCellType, "FORMULA"> = formulaCell.resultType; expect(resultType).toBe("NUMBER"); }
     const textFacts = ["1234", "$123"].map((evidence) => validate("XLSX", extracted,
       [{ id: evidence, role: "TEXT", source: cellSource(evidence) }]).facts[0]);
     expect(textFacts.map((fact) => fact?.kind === "SOURCE" && fact.sourceKey)).toEqual([
@@ -111,20 +105,26 @@ describe("validateFinanceReportEvidenceSourcesV1", () => {
       jsonl({ page: 2, text: "10" }),
       jsonl(validCell, { sheet: "CSV", rowCount: 1, columnCount: 1 }),
       jsonl({ sheet: "CSV", rowCount: 1, columnCount: 1 }, validCell, validCell),
+      jsonl({ sheet: "CSV", rowCount: 1, columnCount: 2 }, { ...validCell, column: 2 }, validCell),
+      jsonl({ sheet: "CSV", rowCount: 1, columnCount: 1 }, { ...validCell, value: "" }),
       jsonl({ sheet: "Report", rowCount: 1, columnCount: 1 }, { ...validCell, sheet: "Report" }),
       jsonl({ sheet: "CSV", rowCount: 1, columnCount: 1 },
         { ...validCell, type: "FORMULA", formula: "1+1" }),
     ];
     expect(code(validate("PDF", malformed[0]!, [{ id: "a", role: "TEXT", source: pdfSource("10", "10") }]))).toBe("MALFORMED_EVIDENCE");
-    for (const evidence of malformed.slice(1, 4)) {
-      expect(code(validate("PDF", evidence, [{ id: "a", role: "TEXT", source: pdfSource("10", "10") }]))).toBe("MALFORMED_EVIDENCE");
-    }
-    for (const evidence of malformed.slice(4)) {
-      expect(code(validate("CSV", evidence, [{ id: "a", role: "AMOUNT", source: cellSource("10") }]))).toBe("MALFORMED_EVIDENCE");
-    }
+    for (const evidence of malformed.slice(1, 4)) expect(code(validate("PDF", evidence,
+      [{ id: "a", role: "TEXT", source: pdfSource("10", "10") }]))).toBe("MALFORMED_EVIDENCE");
+    for (const evidence of malformed.slice(4)) expect(code(validate("CSV", evidence,
+      [{ id: "a", role: "AMOUNT", source: cellSource("10") }]))).toBe("MALFORMED_EVIDENCE");
     expect(code(validate("XLSX", jsonl({ sheet: "Report", rowCount: 2, columnCount: 1 },
       { sheet: "Report", row: 1, column: 1, type: "NUMBER", value: "10" }),
     [{ id: "a", role: "AMOUNT", source: cellSource("10") }]))).toBe("MALFORMED_EVIDENCE");
+    const impossibleScalars = [{ type: "NUMBER", value: "not-a-number" }, { type: "BOOLEAN", value: "TRUE" },
+      { type: "DATE", value: "2026-13-01" }, { type: "NUMBER", value: "10", displayValue: "10" },
+      { type: "FORMULA", value: "NaN", formula: "1/0", resultType: "NUMBER" }];
+    for (const cell of impossibleScalars) expect(code(validate("XLSX", jsonl({ sheet: "Report", rowCount: 1, columnCount: 1 },
+      { sheet: "Report", row: 1, column: 1, ...cell }),
+    [{ id: "a", role: "AMOUNT", source: cellSource(cell.value) }]))).toBe("MALFORMED_EVIDENCE");
     expect(code(validate("PDF", "x".repeat(2_000_001),
       [{ id: "a", role: "TEXT", source: pdfSource("x", "x") }]))).toBe("LIMIT_EXCEEDED");
     expect(code(validate("PDF", jsonl({ page: 1, text: "\n".repeat(250_000) }),

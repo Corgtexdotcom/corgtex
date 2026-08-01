@@ -5,15 +5,12 @@ type CellValues = { rawValue: string; displayValue?: string };
 export type FinanceReportEvidenceCellFact =
   | (CellValues & { type: "FORMULA"; resultType: NonFormulaCellType })
   | (CellValues & { type: NonFormulaCellType; resultType?: never });
-const CELL_TYPES = new Set<FinanceReportEvidenceCellType>(
-  ["BOOLEAN", "DATE", "ERROR", "FORMULA", "NUMBER", "TEXT"]);
+const CELL_TYPES = new Set<FinanceReportEvidenceCellType>(["BOOLEAN", "DATE", "ERROR", "FORMULA", "NUMBER", "TEXT"]);
 const MAX_TEXT = 2_000_000;
 export type FinanceReportEvidenceFormat = "PDF" | "CSV" | "XLSX";
 export type FinanceReportEvidenceRole = "TEXT" | "AMOUNT" | "ISO_CODE";
-type FinanceReportEvidenceCellSource = { kind: "CELL"; sheet: string; row: number; column: number;
-  evidence: string } & (
-  | { start?: never; end?: never; text?: never }
-  | { start: number; end: number; text: string });
+type FinanceReportEvidenceCellSource = { kind: "CELL"; sheet: string; row: number; column: number; evidence: string } &
+  ({ start?: never; end?: never; text?: never } | { start: number; end: number; text: string });
 export type FinanceReportEvidenceSource =
   | { kind: "PDF"; page: number; lineIndex: number; line: string; start: number; end: number; text: string }
   | FinanceReportEvidenceCellSource;
@@ -25,24 +22,19 @@ export type FinanceReportEvidenceBlockerCode = "INVALID_INPUT" | "LIMIT_EXCEEDED
 export type FinanceReportEvidenceSourceFact = { kind: "SOURCE"; claimId: string;
   role: FinanceReportEvidenceRole; sourceKey: string; source: FinanceReportEvidenceSource;
   selectedText: string; cell?: FinanceReportEvidenceCellFact };
-export type FinanceReportEvidenceSourceResultV1 = {
-  version: typeof FINANCE_REPORT_EVIDENCE_SOURCE_VERSION;
-  facts: Array<FinanceReportEvidenceSourceFact
-    | { kind: "BLOCKER"; code: FinanceReportEvidenceBlockerCode; claimId?: string }>;
-};
+export type FinanceReportEvidenceSourceResultV1 = { version: typeof FINANCE_REPORT_EVIDENCE_SOURCE_VERSION;
+  facts: Array<FinanceReportEvidenceSourceFact |
+    { kind: "BLOCKER"; code: FinanceReportEvidenceBlockerCode; claimId?: string }> };
 type Cell = { value: string; displayValue?: string } & (
   | { type: "FORMULA"; resultType: NonFormulaCellType }
   | { type: NonFormulaCellType; resultType?: never });
 type Index = { pages: Map<number, string[]>; cells: Map<string, Cell> };
 type Bound = { fact: FinanceReportEvidenceSourceFact; coordinateKey: string;
   start: number; end: number; wholeAmount: boolean; evidence: string };
-class EvidenceError extends Error {
-  constructor(public readonly code: FinanceReportEvidenceBlockerCode, public readonly claimId?: string) {
-    super(code); }
-}
+class EvidenceError extends Error { constructor(public readonly code: FinanceReportEvidenceBlockerCode,
+  public readonly claimId?: string) { super(code); } }
 function fail(code: FinanceReportEvidenceBlockerCode, claimId?: string): never { throw new EvidenceError(code, claimId); }
-const isRecord = (value: unknown): value is Record<string, unknown> =>
-  Boolean(value) && typeof value === "object" && !Array.isArray(value);
+const isRecord = (value: unknown): value is Record<string, unknown> => Boolean(value) && typeof value === "object" && !Array.isArray(value);
 function exactKeys(value: Record<string, unknown>, allowed: string[], required = allowed,
   code: FinanceReportEvidenceBlockerCode = "MALFORMED_EVIDENCE") {
   if (!required.every((key) => key in value) || Object.keys(value).some((key) => !allowed.includes(key))) fail(code);
@@ -58,15 +50,18 @@ function string(value: unknown, max: number, allowEmpty = false,
   return value;
 }
 const cellKey = (sheet: string, row: number, column: number) => JSON.stringify(["CELL", sheet, row, column]);
+function validScalar(type: NonFormulaCellType, value: string) { return type === "NUMBER"
+  ? Number.isFinite(Number(value)) && String(Number(value)) === value
+    : type === "BOOLEAN" ? value === "true" || value === "false"
+      : type !== "DATE" || (Number.isFinite(Date.parse(value)) && new Date(value).toISOString() === value); }
 function buildIndex(format: FinanceReportEvidenceFormat, jsonl: string): Index {
-  if (!jsonl) fail("INVALID_INPUT");
-  if (jsonl.length > MAX_TEXT) fail("LIMIT_EXCEEDED");
   const records = jsonl.split("\n");
-  if (records.length > 250_000) fail("LIMIT_EXCEEDED");
+  if (!jsonl) fail("INVALID_INPUT");
+  if (jsonl.length > MAX_TEXT || records.length > 250_000) fail("LIMIT_EXCEEDED");
   const index: Index = { pages: new Map(), cells: new Map() };
   const sheets = new Map<string, { rows: number; columns: number; observedRows: number; observedColumns: number }>();
-  let totalRows = 0;
-  let totalPdfLines = 0;
+  let totalRows = 0, totalPdfLines = 0, previousRow = 0, previousColumn = 0;
+  let activeSheet: string | undefined;
   for (const line of records) {
     let value: unknown;
     try { value = JSON.parse(line); } catch { fail("MALFORMED_EVIDENCE"); }
@@ -91,6 +86,7 @@ function buildIndex(format: FinanceReportEvidenceFormat, jsonl: string): Index {
       if (sheets.has(sheet) || (format === "CSV" && (sheet !== "CSV" || sheets.size > 0))) fail("MALFORMED_EVIDENCE");
       if (sheets.size >= 100 || totalRows > 20_000) fail("LIMIT_EXCEEDED");
       sheets.set(sheet, { rows, columns, observedRows: 0, observedColumns: 0 });
+      activeSheet = sheet; previousRow = previousColumn = 0;
       continue;
     }
     exactKeys(value, ["sheet", "row", "column", "type", "value", "displayValue", "formula", "resultType"],
@@ -103,6 +99,8 @@ function buildIndex(format: FinanceReportEvidenceFormat, jsonl: string): Index {
     const type = rawType as FinanceReportEvidenceCellType;
     const cellValue = string(value.value, MAX_TEXT, true);
     if (!bounds || row > bounds.rows || column > bounds.columns || !CELL_TYPES.has(type)) fail("MALFORMED_EVIDENCE");
+    if (sheet !== activeSheet || row < previousRow || (row === previousRow && column <= previousColumn)) fail("MALFORMED_EVIDENCE");
+    previousRow = row; previousColumn = column;
     bounds.observedRows = Math.max(bounds.observedRows, row);
     bounds.observedColumns = Math.max(bounds.observedColumns, column);
     const formula = value.formula;
@@ -111,9 +109,11 @@ function buildIndex(format: FinanceReportEvidenceFormat, jsonl: string): Index {
       && typeof resultType === "string" && CELL_TYPES.has(resultType as FinanceReportEvidenceCellType)
       && resultType !== "FORMULA")
       : formula !== undefined || resultType !== undefined) fail("MALFORMED_EVIDENCE");
-    if (format === "CSV" && (type !== "TEXT" || value.displayValue !== undefined)) fail("MALFORMED_EVIDENCE");
+    if (!validScalar(type === "FORMULA" ? resultType as NonFormulaCellType : type, cellValue)) fail("MALFORMED_EVIDENCE");
+    if (format === "CSV" && (type !== "TEXT" || value.displayValue !== undefined || !cellValue)) fail("MALFORMED_EVIDENCE");
     const displayValue = value.displayValue === undefined ? undefined
       : string(value.displayValue, MAX_TEXT, true);
+    if (displayValue === cellValue) fail("MALFORMED_EVIDENCE");
     const key = cellKey(sheet, row, column);
     if (index.cells.has(key)) fail("MALFORMED_EVIDENCE");
     if (index.cells.size >= 250_000) fail("LIMIT_EXCEEDED");
