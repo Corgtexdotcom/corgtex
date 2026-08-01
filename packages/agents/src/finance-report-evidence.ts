@@ -217,7 +217,7 @@ export function validateFinanceReportEvidenceSourcesV1(input: unknown): FinanceR
     exactKeys(input, ["format", "extractedEvidence", "claims"], undefined, "INVALID_INPUT");
     if (!new Set(["PDF", "CSV", "XLSX"]).has(input.format as string)
       || typeof input.extractedEvidence !== "string" || !Array.isArray(input.claims)
-      || input.claims.length === 0 || input.claims.length > 1_000 || JSON.stringify(input.claims).length > MAX_TEXT) fail("INVALID_INPUT");
+      || input.claims.length === 0 || input.claims.length > 1_000 || JSON.stringify(input.claims).length > MAX_TEXT * 2) fail("INVALID_INPUT");
     const format = input.format as FinanceReportEvidenceFormat;
     const index = buildIndex(format, input.extractedEvidence);
     const ids = new Set<string>();
