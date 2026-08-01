@@ -105,12 +105,12 @@ function buildIndex(format: FinanceReportEvidenceFormat, jsonl: string): Index {
     bounds.observedColumns = Math.max(bounds.observedColumns, column);
     const formula = value.formula;
     const resultType = value.resultType;
-    if (type === "FORMULA" ? !(typeof formula === "string" && formula.length > 0
+    if (type === "FORMULA" ? !(typeof formula === "string" && formula.length > 0 && !/\[[^\]]+\][^!]*!/.test(formula)
       && typeof resultType === "string" && CELL_TYPES.has(resultType as FinanceReportEvidenceCellType)
       && resultType !== "FORMULA")
       : formula !== undefined || resultType !== undefined) fail("MALFORMED_EVIDENCE");
     if (!validScalar(type === "FORMULA" ? resultType as NonFormulaCellType : type, cellValue)) fail("MALFORMED_EVIDENCE");
-    if (format === "CSV" && (type !== "TEXT" || value.displayValue !== undefined || !cellValue)) fail("MALFORMED_EVIDENCE");
+    if (format === "CSV" && (type !== "TEXT" || value.displayValue !== undefined || !cellValue || cellValue.includes("\0"))) fail("MALFORMED_EVIDENCE");
     const displayValue = value.displayValue === undefined ? undefined
       : string(value.displayValue, MAX_TEXT, true);
     if (displayValue === cellValue) fail("MALFORMED_EVIDENCE");
@@ -152,9 +152,9 @@ function parseClaim(value: unknown): FinanceReportEvidenceClaim {
     return { id, role: value.role as FinanceReportEvidenceRole, source: { kind: "PDF",
       page: integer(source.page, 1, 250, "INVALID_INPUT"),
       lineIndex: integer(source.lineIndex, 0, 250_000, "INVALID_INPUT"),
-      line: string(source.line, 50_000, true, "INVALID_INPUT"),
-      start: integer(source.start, 0, 50_000, "INVALID_INPUT"),
-      end: integer(source.end, 1, 50_000, "INVALID_INPUT"),
+      line: string(source.line, MAX_TEXT, true, "INVALID_INPUT"),
+      start: integer(source.start, 0, MAX_TEXT, "INVALID_INPUT"),
+      end: integer(source.end, 1, MAX_TEXT, "INVALID_INPUT"),
       text: string(source.text, 50_000, false, "INVALID_INPUT") } };
   }
   if (source.kind !== "CELL") fail("INVALID_INPUT");
@@ -166,9 +166,9 @@ function parseClaim(value: unknown): FinanceReportEvidenceClaim {
     sheet: string(source.sheet, 200, false, "INVALID_INPUT"),
     row: integer(source.row, 1, 20_000, "INVALID_INPUT"),
     column: integer(source.column, 1, 250_000, "INVALID_INPUT"),
-    evidence: string(source.evidence, 50_000, true, "INVALID_INPUT"),
-    ...(source.start === undefined ? {} : { start: integer(source.start, 0, 50_000, "INVALID_INPUT"),
-      end: integer(source.end, 1, 50_000, "INVALID_INPUT"),
+    evidence: string(source.evidence, MAX_TEXT, true, "INVALID_INPUT"),
+    ...(source.start === undefined ? {} : { start: integer(source.start, 0, MAX_TEXT, "INVALID_INPUT"),
+      end: integer(source.end, 1, MAX_TEXT, "INVALID_INPUT"),
       text: string(source.text, 50_000, false, "INVALID_INPUT") }) } as FinanceReportEvidenceCellSource };
 }
 function bind(index: Index, format: FinanceReportEvidenceFormat, claim: FinanceReportEvidenceClaim): Bound {
@@ -217,7 +217,7 @@ export function validateFinanceReportEvidenceSourcesV1(input: unknown): FinanceR
     exactKeys(input, ["format", "extractedEvidence", "claims"], undefined, "INVALID_INPUT");
     if (!new Set(["PDF", "CSV", "XLSX"]).has(input.format as string)
       || typeof input.extractedEvidence !== "string" || !Array.isArray(input.claims)
-      || input.claims.length === 0 || input.claims.length > 1_000) fail("INVALID_INPUT");
+      || input.claims.length === 0 || input.claims.length > 1_000 || JSON.stringify(input.claims).length > MAX_TEXT) fail("INVALID_INPUT");
     const format = input.format as FinanceReportEvidenceFormat;
     const index = buildIndex(format, input.extractedEvidence);
     const ids = new Set<string>();

@@ -15,7 +15,7 @@ const astral = String.fromCodePoint(0x1f600);
 const invalidTypedCellSource: FinanceReportEvidenceSource = { kind: "CELL", sheet: "Report", row: 1, column: 1, evidence: "10", start: 0 }; void invalidTypedCellSource;
 describe("validateFinanceReportEvidenceSourcesV1", () => {
   it("binds repeated PDF lines and multiple non-overlapping UTF-16 spans", () => {
-    const line = `Revenue ${astral} 100 200`;
+    const line = `${"x".repeat(50_001)} Revenue ${astral} 100 200`;
     const extracted = jsonl({ page: 1, text: `Header\n\n${line}\n${line}` });
     const result = validate("PDF", extracted, [
       { id: "current", role: "AMOUNT", source: pdfSource(line, "100", 2) },
@@ -24,7 +24,7 @@ describe("validateFinanceReportEvidenceSourcesV1", () => {
     ]);
     expect(result.facts.map((fact) => fact.kind)).toEqual(["SOURCE", "SOURCE", "SOURCE"]);
     expect(result.facts.map((fact) => fact.kind === "SOURCE" && fact.sourceKey)).toEqual([
-      '["PDF",1,2,11,14]', '["PDF",1,2,15,18]', '["PDF",1,3,8,10]',
+      '["PDF",1,2,50013,50016]', '["PDF",1,2,50017,50020]', '["PDF",1,3,50010,50012]',
     ]);
   });
   it("blocks missing, overlapping, duplicate, blank, and unsafe UTF-16 PDF claims", () => {
@@ -49,13 +49,13 @@ describe("validateFinanceReportEvidenceSourcesV1", () => {
     );
     const result = validate("CSV", extracted, [
       { id: "amount", role: "AMOUNT", source: cellSource("1,234.50", { sheet: "CSV" }) },
-      { id: "iso", role: "ISO_CODE", source: cellSource("Currency USD",
-        { sheet: "CSV", column: 2, start: 9, end: 12, text: "USD" }) },
+      { id: "iso", role: "ISO_CODE", source: cellSource("Currency USD", { sheet: "CSV", column: 2, start: 9, end: 12, text: "USD" }) },
+      { id: "long", role: "TEXT", source: cellSource("x".repeat(50_001), { sheet: "CSV", column: 3, start: 50_000, end: 50_001, text: "x" }) },
     ]);
     expect(result.facts).toMatchObject([
       { kind: "SOURCE", selectedText: "1,234.50", cell: { type: "TEXT", rawValue: "1,234.50" } },
-      { kind: "SOURCE", sourceKey: '["CELL","CSV",1,2,"RAW",9,12]', selectedText: "USD",
-        cell: { rawValue: "Currency USD" } },
+      { kind: "SOURCE", sourceKey: '["CELL","CSV",1,2,"RAW",9,12]', selectedText: "USD", cell: { rawValue: "Currency USD" } },
+      { kind: "SOURCE", sourceKey: '["CELL","CSV",1,3,"RAW",50000,50001]', selectedText: "x" },
     ]);
   });
   it("uses only raw XLSX numbers or numeric formula results for amount roles", () => {
@@ -106,7 +106,7 @@ describe("validateFinanceReportEvidenceSourcesV1", () => {
       jsonl(validCell, { sheet: "CSV", rowCount: 1, columnCount: 1 }),
       jsonl({ sheet: "CSV", rowCount: 1, columnCount: 1 }, validCell, validCell),
       jsonl({ sheet: "CSV", rowCount: 1, columnCount: 2 }, { ...validCell, column: 2 }, validCell),
-      jsonl({ sheet: "CSV", rowCount: 1, columnCount: 1 }, { ...validCell, value: "" }),
+      jsonl({ sheet: "CSV", rowCount: 1, columnCount: 1 }, { ...validCell, value: "" }), jsonl({ sheet: "CSV", rowCount: 1, columnCount: 1 }, { ...validCell, value: "\0" }),
       jsonl({ sheet: "Report", rowCount: 1, columnCount: 1 }, { ...validCell, sheet: "Report" }),
       jsonl({ sheet: "CSV", rowCount: 1, columnCount: 1 },
         { ...validCell, type: "FORMULA", formula: "1+1" }),
@@ -121,7 +121,7 @@ describe("validateFinanceReportEvidenceSourcesV1", () => {
     [{ id: "a", role: "AMOUNT", source: cellSource("10") }]))).toBe("MALFORMED_EVIDENCE");
     const impossibleScalars = [{ type: "NUMBER", value: "not-a-number" }, { type: "BOOLEAN", value: "TRUE" },
       { type: "DATE", value: "2026-13-01" }, { type: "NUMBER", value: "10", displayValue: "10" },
-      { type: "FORMULA", value: "NaN", formula: "1/0", resultType: "NUMBER" }];
+      { type: "FORMULA", value: "NaN", formula: "1/0", resultType: "NUMBER" }, { type: "FORMULA", value: "10", formula: "[Book2.xlsx]Sheet1!A1", resultType: "NUMBER" }];
     for (const cell of impossibleScalars) expect(code(validate("XLSX", jsonl({ sheet: "Report", rowCount: 1, columnCount: 1 },
       { sheet: "Report", row: 1, column: 1, ...cell }),
     [{ id: "a", role: "AMOUNT", source: cellSource(cell.value) }]))).toBe("MALFORMED_EVIDENCE");
