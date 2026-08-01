@@ -1,10 +1,10 @@
 export const FINANCE_REPORT_EVIDENCE_SOURCE_VERSION = 1 as const;
 export type FinanceReportEvidenceCellType = "BOOLEAN" | "DATE" | "ERROR" | "FORMULA" | "NUMBER" | "TEXT";
 type NonFormulaCellType = Exclude<FinanceReportEvidenceCellType, "FORMULA">;
-type CellValues = { rawValue: string; displayValue?: string };
+type CellValues = { rawValue: string; displayValue?: string }; type NoDisplayCellValues = { rawValue: string; displayValue?: never }; type BooleanCellValues = { rawValue: "true"; displayValue: "TRUE" } | { rawValue: "false"; displayValue: "FALSE" };
 export type FinanceReportEvidenceCellFact =
-  | (CellValues & { type: "FORMULA"; resultType: NonFormulaCellType })
-  | (CellValues & { type: NonFormulaCellType; resultType?: never }); type FinanceReportEvidenceAmountCellFact = CellValues & ({ type: "TEXT" | "NUMBER"; resultType?: never } | { type: "FORMULA"; resultType: "NUMBER" });
+  | (BooleanCellValues & ({ type: "BOOLEAN"; resultType?: never } | { type: "FORMULA"; resultType: "BOOLEAN" }))
+  | (NoDisplayCellValues & ({ type: "ERROR" | "TEXT"; resultType?: never } | { type: "FORMULA"; resultType: "ERROR" | "TEXT" })) | (CellValues & ({ type: "DATE" | "NUMBER"; resultType?: never } | { type: "FORMULA"; resultType: "DATE" | "NUMBER" })); type FinanceReportEvidenceAmountCellFact = (NoDisplayCellValues & { type: "TEXT"; resultType?: never }) | (CellValues & ({ type: "NUMBER"; resultType?: never } | { type: "FORMULA"; resultType: "NUMBER" }));
 const CELL_TYPES = new Set<FinanceReportEvidenceCellType>(["BOOLEAN", "DATE", "ERROR", "FORMULA", "NUMBER", "TEXT"]);
 const MAX_TEXT = 2_000_000;
 export type FinanceReportEvidenceFormat = "PDF" | "CSV" | "XLSX";
@@ -196,11 +196,11 @@ function bind(index: Index, format: FinanceReportEvidenceFormat, claim: FinanceR
   const sourceKey = wholeAmount ? coordinateKey
     : JSON.stringify(["CELL", source.sheet, source.row, source.column,
       source.evidence === cell.value ? "RAW" : "DISPLAY", selected.start, selected.end]);
-  const cellFact: FinanceReportEvidenceCellFact = cell.type === "FORMULA"
+  const cellFact = (cell.type === "FORMULA"
     ? { type: cell.type, resultType: cell.resultType, rawValue: cell.value,
       ...(cell.displayValue === undefined ? {} : { displayValue: cell.displayValue }) }
     : { type: cell.type, rawValue: cell.value,
-      ...(cell.displayValue === undefined ? {} : { displayValue: cell.displayValue }) };
+      ...(cell.displayValue === undefined ? {} : { displayValue: cell.displayValue }) }) as FinanceReportEvidenceCellFact;
   const fact: FinanceReportEvidenceSourceFact = wholeAmount ? { kind: "SOURCE", claimId: claim.id, role: "AMOUNT", sourceKey, source: source as FinanceReportEvidenceWholeCellSource, selectedText: selected.text, cell: cellFact as FinanceReportEvidenceAmountCellFact }
     : { kind: "SOURCE", claimId: claim.id, role: claim.role as Exclude<FinanceReportEvidenceRole, "AMOUNT">, sourceKey, source, selectedText: selected.text, cell: cellFact };
   return { fact, coordinateKey, start: selected.start, end: selected.end, wholeAmount,

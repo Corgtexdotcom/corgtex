@@ -70,14 +70,14 @@ describe("validateFinanceReportEvidenceSourcesV1", () => {
     );
     const good = validate("XLSX", extracted, [
       { id: "raw", role: "AMOUNT", source: cellSource("1234") },
-      { id: "formula", role: "AMOUNT", source: cellSource("20", { column: 2 }) },
+      { id: "formula", role: "AMOUNT", source: cellSource("20", { column: 2 }) }, { id: "boolean", role: "TEXT", source: cellSource("true", { column: 4 }) }, { id: "error", role: "TEXT", source: cellSource("#SPILL!", { column: 250_001 }) },
     ]);
     expect(good.facts).toMatchObject([
       { kind: "SOURCE", selectedText: "1234", cell: { rawValue: "1234", displayValue: "$123" } },
-      { kind: "SOURCE", cell: { type: "FORMULA", resultType: "NUMBER" } },
+      { kind: "SOURCE", cell: { type: "FORMULA", resultType: "NUMBER" } }, { kind: "SOURCE", cell: { type: "BOOLEAN", displayValue: "TRUE" } }, { kind: "SOURCE", cell: { type: "ERROR", rawValue: "#SPILL!" } },
     ]);
     const formulaFact = good.kind === "SUCCESS" ? good.facts[1] : undefined;
-    if (formulaFact?.cell?.type === "FORMULA" && formulaFact.role === "AMOUNT" && formulaFact.source.kind === "CELL") { const resultType: "NUMBER" = formulaFact.cell.resultType; const start: undefined = formulaFact.source.start; expect([resultType, start]).toEqual(["NUMBER", undefined]); }
+    if (formulaFact?.cell?.type === "FORMULA" && formulaFact.role === "AMOUNT" && formulaFact.source.kind === "CELL") { const resultType: "NUMBER" = formulaFact.cell.resultType; const start: undefined = formulaFact.source.start; expect([resultType, start]).toEqual(["NUMBER", undefined]); } const booleanFact = good.kind === "SUCCESS" ? good.facts[2] : undefined; if (booleanFact?.cell?.type === "BOOLEAN") { const displayValue: "TRUE" | "FALSE" = booleanFact.cell.displayValue; expect(displayValue).toBe("TRUE"); } const errorFact = good.kind === "SUCCESS" ? good.facts[3] : undefined; if (errorFact?.cell?.type === "ERROR") { const displayValue: undefined = errorFact.cell.displayValue; expect(displayValue).toBeUndefined(); }
     const textFacts = ["1234", "$123"].map((evidence) => validate("XLSX", extracted,
       [{ id: evidence, role: "TEXT", source: cellSource(evidence) }]).facts[0]);
     expect(textFacts.map((fact) => fact?.kind === "SOURCE" && fact.sourceKey)).toEqual([
