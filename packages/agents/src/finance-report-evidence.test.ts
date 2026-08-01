@@ -81,6 +81,9 @@ describe("Finance report evidence validator v1", () => {
     ["thousands suffix", "$1.2M", 120], ["unit suffix", "1,250k", 125_000],
     ["million suffix", "$1 million", 100], ["billion suffix", "2 billion", 200], ["bn suffix", "3 bn", 300], ["mm suffix", "4 mm", 400],
     ["cent symbol", "50¢", 5_000], ["cent word", "50 cents", 5_000],
+    ["prefix cent", "¢50", 5_000], ["prefix percent", "%19.99", 1_999], ["prefix per-mille", "‰2", 200],
+    ["compact date", "20260101", 2_026_010_100], ["identifier", "GL-100", 10_000], ["trailing identifier", "100-GL", 10_000],
+    ["decimal identifier", "INV-19.99", 1_999],
     ["fractional cents", "1.2345", 123], ["separator ambiguity", "1,23,4", 123_400],
     ["overflow", "21,474,836.48", 0], ["repeated amount", "10.00 10.00", 1_000],
     ["multiple values", "Actual 10.00 Budget 20.00", 1_000],
@@ -103,7 +106,7 @@ describe("Finance report evidence validator v1", () => {
   });
 
   it("rejects true mixed or malformed currency and never defaults unresolved evidence", () => {
-    for (const shown of ["USD / EUR", "Amounts in USD; prior year in EUR"]) {
+    for (const shown of ["USD / EUR", "Amounts in USD; prior year in EUR", "Currency: USD and EUR", "Currency: USD, EUR"]) {
       blocker(validate("PDF", pdf(shown), [currencyClaim(pdfSource(shown))]), "MULTI_CURRENCY");
     }
     for (const shown of ["Currency: ZZZ", "Currency: usd"]) {
@@ -111,6 +114,8 @@ describe("Finance report evidence validator v1", () => {
     }
     const unresolved = validate("PDF", pdf("Denomination unavailable"), [currencyClaim(pdfSource("Denomination unavailable"))]);
     expect(unresolved.facts.at(-1)).toMatchObject({ kind: "CURRENCY", state: "UNRESOLVED", code: null });
+    const ordinaryAll = validate("PDF", pdf("Amounts included in ALL departments"), [currencyClaim(pdfSource("Amounts included in ALL departments"))]);
+    expect(ordinaryAll.facts.at(-1)).toMatchObject({ kind: "CURRENCY", state: "UNRESOLVED", code: null });
   });
 
   it("indexes once by exact identifiers and rejects duplicate, ambiguous, or overlapping claims", () => {

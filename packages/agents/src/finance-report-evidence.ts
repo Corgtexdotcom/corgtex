@@ -141,8 +141,8 @@ function bind(index: Index, format: FinanceReportEvidenceFormat, claimSource: Fi
     rawNumber: format === "XLSX", cell };
 }
 
-const UNSAFE_AMOUNT = /(?:\d[\d.,']*\s*(?:[%‰¢]|(?:k|m|b|bn|mm|million|billion)\b|cents?\b)|\d(?:[.,]\d+)?[eE][+\-−]?\d+|\d\s*[-/:]\s*\d)/iu;
-const MONEY = /(?<![\p{L}\p{N}.,'])\(?[+\-−]?\s*\p{Sc}?\s*\d(?:[\d.,']*\d)?\s*[\-−]?\)?(?![\p{L}\p{N}.,'])/gu;
+const UNSAFE_AMOUNT = /(?:[%‰¢]\s*\d|(?:19|20)\d{2}(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])|\d[\d.,']*\s*(?:[%‰¢]|(?:k|m|b|bn|mm|million|billion)\b|cents?\b)|\d(?:[.,]\d+)?[eE][+\-−]?\d+|\d\s*[-/:]\s*\d)/iu;
+const MONEY = /(?<![\p{L}\p{N}.,'\-−])\(?[+\-−]?\s*\p{Sc}?\s*\d(?:[\d.,']*\d)?\s*[\-−]?\)?(?![\p{L}\p{N}.,'\-−])/gu;
 function tokenCents(token: string, rawNumber: boolean) {
   const trimmed = token.trim();
   if (rawNumber && !/^[+-]?\d+(?:\.\d+)?$/.test(trimmed)) return null;
@@ -178,15 +178,17 @@ function currencyFact(evidence: string, claimId: string): FinanceReportEvidenceF
   for (const match of words) {
     const before = evidence.slice(Math.max(0, match.index! - 24), match.index);
     const after = evidence.slice(match.index! + 3, match.index! + 27);
-    if (trim === match[0] || /(?:currency|ccy|in)\s*[:=-]?\s*$/i.test(before)
+    if (trim === match[0] || /(?:currency|ccy)\s*[:=-]?\s*$/i.test(before)
+      || (match[0] !== "ALL" && /\bin\s*[:=-]?\s*$/i.test(before))
       || /\/\s*$/.test(before) || /^\s*\//.test(after)) contextual.add(match[0]);
   }
+  const named = new Set(words.map((match) => match[0]).filter((code) => code !== "ALL" || contextual.has(code)));
   const stated = [...evidence.matchAll(/\b(?:currency|ccy|in)\s*[:=-]?\s*([A-Za-z]{2,4})\b/gi)].map((match) => match[1]!);
   const slash = evidence.match(/\b([A-Z]{3})\s*\/\s*([A-Z]{3})\b/);
   if (stated.some((code) => code !== code.toUpperCase() || !ISO_CODES.has(code))
     || (slash && (!ISO_CODES.has(slash[1]!) || !ISO_CODES.has(slash[2]!)))
     || (/^[A-Za-z]{2,4}$/.test(trim) && (!/^[A-Z]{3}$/.test(trim) || !ISO_CODES.has(trim)))) fail("INVALID_CURRENCY", claimId);
-  if (contextual.size > 1) fail("MULTI_CURRENCY", claimId);
+  if (contextual.size > 1 || (contextual.size === 1 && named.size > 1)) fail("MULTI_CURRENCY", claimId);
   const code = contextual.values().next().value as string | undefined;
   return code ? { kind: "CURRENCY", claimId, state: "EXPLICIT", code, registryVersion: ISO_4217_REGISTRY_VERSION }
     : { kind: "CURRENCY", claimId, state: "UNRESOLVED", code: null, registryVersion: ISO_4217_REGISTRY_VERSION };
