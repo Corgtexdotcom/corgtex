@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { validateFinanceReportEvidenceSourcesV1,
-  type FinanceReportEvidenceCellType, type FinanceReportEvidenceClaim, type FinanceReportEvidenceSource } from "./finance-report-evidence";
+  type FinanceReportEvidenceCellType, type FinanceReportEvidenceClaim, type FinanceReportEvidenceSource, type FinanceReportEvidenceSourceFact } from "./finance-report-evidence";
 const jsonl = (...records: unknown[]) => records.map((record) => JSON.stringify(record)).join("\n");
 const longSheet = " ".repeat(201);
 const pdfSource = (line: string, text: string, lineIndex = 0, page = 1) =>
@@ -10,7 +10,7 @@ const cellSource = (evidence: string, extra: Record<string, unknown> = {}) =>
 const validate = (format: "PDF" | "CSV" | "XLSX", extractedEvidence: string, claims: unknown[]) =>
   validateFinanceReportEvidenceSourcesV1({ format, extractedEvidence, claims });
 const code = (result: ReturnType<typeof validate>) => result.facts[0]?.kind === "BLOCKER"
-  ? result.facts[0].code : undefined;
+  ? result.facts[0].code : undefined; const claimId = (result: ReturnType<typeof validate>) => result.facts[0]?.kind === "BLOCKER" ? result.facts[0].claimId : undefined;
 const astral = String.fromCodePoint(0x1f600);
 // @ts-expect-error cell spans must provide start, end, and text atomically.
 const invalidTypedCellSource: FinanceReportEvidenceSource = { kind: "CELL", sheet: "Report", row: 1, column: 1, evidence: "10", start: 0 }; void invalidTypedCellSource;
@@ -41,7 +41,7 @@ describe("validateFinanceReportEvidenceSourcesV1", () => {
       [[{ id: "a", role: "TEXT", source: { ...pdfSource(line, "100"), lineIndex: 1, line: "" } }], "INVALID_INPUT"],
       [[{ id: "a", role: "TEXT", source: { ...pdfSource(line, "100"), page: 2 } }], "SOURCE_NOT_FOUND"],
     ];
-    for (const [claims, expected] of cases) expect(code(validate("PDF", extracted, claims))).toBe(expected);
+    for (const [claims, expected] of cases) expect(code(validate("PDF", extracted, claims))).toBe(expected); expect(claimId(validate("PDF", extracted, [{ ...base, id: "a", source: pdfSource(line, "200") }, { ...base, id: "b", source: { ...pdfSource(line, "100"), end: 8, text: "100 2" } }, { ...base, id: "c", source: { ...pdfSource(line, "100"), start: 4, end: 5, text: "0" } }]))).toBe("b");
   });
   it("binds exact CSV amount cells and text subspans", () => {
     const extracted = jsonl(
@@ -138,9 +138,9 @@ describe("validateFinanceReportEvidenceSourcesV1", () => {
     const claims = [{ id: "amount", role: "AMOUNT", source: pdfSource("Revenue 10", "10") }];
     const first = validate("PDF", extracted, claims);
     expect(validate("PDF", extracted, claims)).toEqual(first);
-    expect(Object.keys(first.facts[0] ?? {})).not.toEqual(expect.arrayContaining([
+    if (first.kind === "BLOCKER") expect(first.facts).toHaveLength(1); else { const sources: FinanceReportEvidenceSourceFact[] = first.facts; expect(Object.keys(sources[0] ?? {})).not.toEqual(expect.arrayContaining([
       "amountCents", "currency", "proposal", "transaction", "persistence",
-    ]));
+    ])); }
     expect(code(validateFinanceReportEvidenceSourcesV1({ format: "PDF", extractedEvidence: extracted,
       claims, extra: true }))).toBe("INVALID_INPUT"); expect(code(validate("PDF", extracted, new Array(1)))).toBe("INVALID_INPUT");
     expect(code(validate("PDF", extracted, [{ ...claims[0], source: { ...claims[0]!.source, extra: true } }]))).toBe("INVALID_INPUT");

@@ -22,9 +22,9 @@ export type FinanceReportEvidenceBlockerCode = "INVALID_INPUT" | "LIMIT_EXCEEDED
 type FinanceReportEvidenceSourceFactBase = { kind: "SOURCE"; claimId: string; role: FinanceReportEvidenceRole; sourceKey: string; selectedText: string };
 export type FinanceReportEvidenceSourceFact = (FinanceReportEvidenceSourceFactBase & { source: FinanceReportEvidencePdfSource; cell?: never })
   | (FinanceReportEvidenceSourceFactBase & { source: FinanceReportEvidenceCellSource; cell: FinanceReportEvidenceCellFact });
-export type FinanceReportEvidenceSourceResultV1 = { version: typeof FINANCE_REPORT_EVIDENCE_SOURCE_VERSION;
-  facts: Array<FinanceReportEvidenceSourceFact |
-    { kind: "BLOCKER"; code: FinanceReportEvidenceBlockerCode; claimId?: string }> };
+type FinanceReportEvidenceBlockerFact = { kind: "BLOCKER"; code: FinanceReportEvidenceBlockerCode; claimId?: string };
+export type FinanceReportEvidenceSourceResultV1 = { version: typeof FINANCE_REPORT_EVIDENCE_SOURCE_VERSION; kind: "SUCCESS"; facts: FinanceReportEvidenceSourceFact[] }
+  | { version: typeof FINANCE_REPORT_EVIDENCE_SOURCE_VERSION; kind: "BLOCKER"; facts: [FinanceReportEvidenceBlockerFact] };
 type Cell = { value: string; displayValue?: string } & (
   | { type: "FORMULA"; resultType: NonFormulaCellType }
   | { type: NonFormulaCellType; resultType?: never });
@@ -234,14 +234,14 @@ export function validateFinanceReportEvidenceSourcesV1(input: unknown): FinanceR
       if (different) fail("OVERLAPPING_SOURCE", different.fact.claimId);
       const sorted = [...items].sort((a, b) => a.start - b.start || a.end - b.end
         || a.fact.claimId.localeCompare(b.fact.claimId));
-      for (let index = 1; index < sorted.length; index += 1) {
-        if (sorted[index]!.start < sorted[index - 1]!.end) fail("OVERLAPPING_SOURCE", sorted[index]!.fact.claimId);
-      }
+      const conflict = sorted.some((item, index) => index > 0 && item.start < sorted[index - 1]!.end) ? items.find((item, index) => items.some((previous, previousIndex) => previousIndex < index
+        && previous.start < item.end && item.start < previous.end)) : undefined;
+      if (conflict) fail("OVERLAPPING_SOURCE", conflict.fact.claimId);
     }
-    return { version: FINANCE_REPORT_EVIDENCE_SOURCE_VERSION, facts: bound.map((item) => item.fact) };
+    return { version: FINANCE_REPORT_EVIDENCE_SOURCE_VERSION, kind: "SUCCESS", facts: bound.map((item) => item.fact) };
   } catch (error) {
     const blocker = error instanceof EvidenceError ? error : new EvidenceError("INVALID_INPUT");
-    return { version: FINANCE_REPORT_EVIDENCE_SOURCE_VERSION,
+    return { version: FINANCE_REPORT_EVIDENCE_SOURCE_VERSION, kind: "BLOCKER",
       facts: [{ kind: "BLOCKER", code: blocker.code, ...(blocker.claimId ? { claimId: blocker.claimId } : {}) }] };
   }
 }
