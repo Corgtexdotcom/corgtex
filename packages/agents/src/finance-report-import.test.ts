@@ -5,30 +5,31 @@ import {
   proposeFinanceReportImportV1,
 } from "./finance-report-import";
 
-const lines = ["Profit and Loss", "Accrual", "Monthly", "January 2026", "February 2026", "Revenue", "1.23", "2.34", "USD", "Figures in thousands"];
-const roles = ["TEXT", "TEXT", "TEXT", "TEXT", "TEXT", "TEXT", "AMOUNT", "AMOUNT", "ISO_CODE", "TEXT"] as const;
-const claimIds = ["type", "basis", "cadence", "jan", "feb", "revenue", "jan-amount", "feb-amount", "currency", "scale"];
+const lines = ["Profit and Loss", "Accrual", "Monthly", "January 2026", "February 2026", "Revenue", "1.23", "2.34", "USD", "Figures in thousands", "Decimal separator dot"];
+const roles = ["TEXT", "TEXT", "TEXT", "TEXT", "TEXT", "TEXT", "AMOUNT", "AMOUNT", "ISO_CODE", "TEXT", "TEXT"] as const;
+const claimIds = ["type", "basis", "cadence", "jan", "feb", "revenue", "jan-amount", "feb-amount", "currency", "scale", "decimal"];
 
-function source(format: "PDF" | "XLSX" = "PDF") {
+function source(format: "PDF" | "XLSX" = "PDF", amounts: readonly [string, string] = ["1.23", "2.34"]) {
+  const reportLines = [...lines]; [reportLines[6], reportLines[7]] = amounts;
   if (format === "PDF") return {
     format,
-    extractedEvidence: JSON.stringify({ page: 1, text: lines.join("\n") }),
-    claims: lines.map((line, lineIndex) => ({ id: claimIds[lineIndex], role: roles[lineIndex], source: { kind: "PDF", page: 1, lineIndex, line, start: 0, end: line.length, text: line } })),
+    extractedEvidence: JSON.stringify({ page: 1, text: reportLines.join("\n") }),
+    claims: reportLines.map((line, lineIndex) => ({ id: claimIds[lineIndex], role: roles[lineIndex], source: { kind: "PDF", page: 1, lineIndex, line, start: 0, end: line.length, text: line } })),
   } as const;
-  const records = [{ sheet: "Report", rowCount: lines.length, columnCount: 1 }, ...lines.map((value, index) => ({ sheet: "Report", row: index + 1, column: 1, type: roles[index] === "AMOUNT" ? "NUMBER" : "TEXT", value }))];
+  const records = [{ sheet: "Report", rowCount: reportLines.length, columnCount: 1 }, ...reportLines.map((value, index) => ({ sheet: "Report", row: index + 1, column: 1, type: roles[index] === "AMOUNT" ? "NUMBER" : "TEXT", value }))];
   return {
     format,
     extractedEvidence: records.map((record) => JSON.stringify(record)).join("\n"),
-    claims: lines.map((value, index) => ({ id: claimIds[index], role: roles[index], source: { kind: "CELL", sheet: "Report", row: index + 1, column: 1, evidence: value } })),
+    claims: reportLines.map((value, index) => ({ id: claimIds[index], role: roles[index], source: { kind: "CELL", sheet: "Report", row: index + 1, column: 1, evidence: value } })),
   } as const;
 }
 
-function proposal(format: "PDF" | "XLSX" = "PDF") {
-  const report = source(format);
+function proposal(format: "PDF" | "XLSX" = "PDF", amounts: readonly [string, string] = ["1.23", "2.34"]) {
+  const report = source(format, amounts);
   return {
     version: 1,
     classification: { reportType: "PROFIT_AND_LOSS", basis: "ACCRUAL", cadence: "MONTHLY", reportTypeEvidenceClaimIds: ["type"], basisEvidenceClaimIds: ["basis"], cadenceEvidenceClaimIds: ["cadence"], confidence: 0.98 },
-    numericFormat: { status: "RESOLVED", version: 1, decimalSeparator: "DOT", groupingSeparator: "NONE", amountScale: 1_000, evidenceClaimIds: ["scale"], confidence: 0.95 },
+    numericFormat: { status: "RESOLVED", version: 1, decimalSeparator: "DOT", groupingSeparator: "NONE", amountScale: 1_000, decimalSeparatorEvidenceClaimIds: [], groupingSeparatorEvidenceClaimIds: [], amountScaleEvidenceClaimIds: ["scale"], confidence: 0.95 },
     currency: { explicitCode: "USD", evidenceClaimId: "currency", confidence: 1 },
     periods: [
       { id: "2026-01", label: "January 2026", periodStart: "2026-01-01", periodEnd: "2026-01-31", evidenceClaimIds: ["jan"], confidence: 1 },
@@ -53,8 +54,8 @@ function model(...responses: Array<unknown | Error>) {
   return { extract, gateway: { extract } as unknown as ModelGateway };
 }
 
-async function run(output: unknown, options: { format?: "PDF" | "XLSX"; currencies?: string[]; second?: unknown } = {}) {
-  const report = source(options.format);
+async function run(output: unknown, options: { format?: "PDF" | "XLSX"; currencies?: string[]; second?: unknown; amounts?: readonly [string, string] } = {}) {
+  const report = source(options.format, options.amounts);
   const mocked = model(output, options.second ?? output);
   const result = await proposeFinanceReportImportV1({ workspaceId: "workspace-1", format: report.format, extractedEvidence: report.extractedEvidence, workspaceCurrencyCodes: options.currencies ?? [], gateway: mocked.gateway });
   return { result, extract: mocked.extract };
@@ -129,6 +130,15 @@ describe("proposeFinanceReportImportV1", () => {
     const { result } = await run(output);
     expect(result).toMatchObject({ kind: "SUCCESS", proposal: { mappings: [{ amountCents: null }, { amountCents: null }] } });
     if (result.kind === "SUCCESS") expect(result.proposal.exceptions).toEqual(expect.arrayContaining([expect.objectContaining({ code: "REPORT_TYPE_UNRESOLVED", severity: "BLOCKER" }), expect.objectContaining({ code: "BASIS_UNRESOLVED", severity: "BLOCKER" }), expect.objectContaining({ code: "CADENCE_UNRESOLVED", severity: "BLOCKER" }), expect.objectContaining({ code: "NUMERIC_FORMAT_UNRESOLVED", severity: "BLOCKER" }), expect.objectContaining({ code: "SEMANTIC_PROPOSAL_UNCERTAIN", severity: "BLOCKER" })]));
+  });
+
+  it("downgrades separator ambiguity unless exact field-specific evidence rules it out", async () => {
+    const amounts = ["1.234", "2.345"] as const;
+    const ambiguous = proposal("PDF", amounts);
+    const unresolved = await run(ambiguous, { amounts });
+    expect(unresolved.result).toMatchObject({ kind: "SUCCESS", proposal: { numericFormat: { status: "UNRESOLVED" }, mappings: [{ amountCents: null }, { amountCents: null }], exceptions: [expect.objectContaining({ code: "NUMERIC_FORMAT_UNRESOLVED", severity: "BLOCKER" })] } });
+    const evidenced = { ...ambiguous, numericFormat: { ...ambiguous.numericFormat, decimalSeparatorEvidenceClaimIds: ["decimal"] } };
+    expect((await run(evidenced, { amounts })).result).toMatchObject({ kind: "SUCCESS", proposal: { numericFormat: { status: "RESOLVED" }, mappings: [{ amountCents: 123_400 }, { amountCents: 234_500 }] } });
   });
 
   it("rejects explicit currency without matching exact ISO evidence", async () => {

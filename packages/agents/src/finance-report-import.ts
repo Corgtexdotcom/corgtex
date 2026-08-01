@@ -27,7 +27,7 @@ const classification = z.strictObject({
   reportTypeEvidenceClaimIds: optionalClaimIds, basisEvidenceClaimIds: optionalClaimIds, cadenceEvidenceClaimIds: optionalClaimIds, confidence,
 });
 const numericFormat = z.discriminatedUnion("status", [
-  z.strictObject({ status: z.literal("RESOLVED"), version: z.literal(1), decimalSeparator: z.enum(["DOT", "COMMA", "NONE"]), groupingSeparator: z.enum(["COMMA", "DOT", "APOSTROPHE", "SPACE", "NBSP", "NARROW_NBSP", "NONE"]), amountScale: z.union([z.literal(1), z.literal(100), z.literal(1_000), z.literal(1_000_000), z.literal(1_000_000_000)]), evidenceClaimIds: claimIds, confidence: confidence.positive() }),
+  z.strictObject({ status: z.literal("RESOLVED"), version: z.literal(1), decimalSeparator: z.enum(["DOT", "COMMA", "NONE"]), groupingSeparator: z.enum(["COMMA", "DOT", "APOSTROPHE", "SPACE", "NBSP", "NARROW_NBSP", "NONE"]), amountScale: z.union([z.literal(1), z.literal(100), z.literal(1_000), z.literal(1_000_000), z.literal(1_000_000_000)]), decimalSeparatorEvidenceClaimIds: optionalClaimIds, groupingSeparatorEvidenceClaimIds: optionalClaimIds, amountScaleEvidenceClaimIds: claimIds, confidence: confidence.positive() }),
   z.strictObject({ status: z.literal("UNRESOLVED"), version: z.literal(1), decimalSeparator: z.null(), groupingSeparator: z.null(), amountScale: z.null(), evidenceClaimIds: z.array(id).max(50), confidence }),
 ]);
 
@@ -54,7 +54,7 @@ export type FinanceReportImportProposalInputV1 = { workspaceId: string; format: 
 
 const ISO_CODES = new Set(FINANCE_REPORT_ISO_4217_CODES);
 const SCHEMA_HINT = JSON.stringify(z.toJSONSchema(financeReportModelProposalSchemaV1));
-const INSTRUCTION = "Infer semantics from PDF, CSV, or XLSX extracted evidence without a vendor picker. Return an editable proposal only; never invent transactions or facts. Cite every semantic field and amount with exact report sources. Do not calculate cents. Use UNRESOLVED numeric format and null cadence when evidence is ambiguous; never choose values only to complete the schema. Set currency only when an exact ISO code appears in the report; otherwise use null. Surface ambiguity as exceptions and never guess or default to USD.";
+const INSTRUCTION = "Infer semantics from PDF, CSV, or XLSX extracted evidence without a vendor picker. Return an editable proposal only; never invent transactions or facts. Cite every semantic field and amount with exact report sources. Do not calculate cents. Resolve scale only with exact field-specific report evidence. Cite field-specific separator evidence when amount lexemes do not uniquely determine their roles. Use UNRESOLVED numeric format and null cadence when evidence is ambiguous; never choose values only to complete the schema. Set currency only when an exact ISO code appears in the report; otherwise use null. Surface ambiguity as exceptions and never guess or default to USD.";
 const duplicate = (values: string[]) => new Set(values).size !== values.length;
 const validDate = (value: string) => { const parsed = new Date(`${value}T00:00:00.000Z`); return Number(value.slice(0, 4)) >= 1_000 && !Number.isNaN(parsed.valueOf()) && parsed.toISOString().slice(0, 10) === value; };
 type BoundFact = { kind: "TEXT" | "AMOUNT" | "ISO_CODE"; source: FinanceReportEvidenceSourceFact; amountCents?: number; code?: string };
@@ -65,11 +65,22 @@ function bindProposal(raw: unknown, input: FinanceReportImportProposalInputV1, w
   const proposal = parsed.data;
   const sourceInput = { format: input.format, extractedEvidence: input.extractedEvidence, claims: proposal.evidenceClaims };
   let facts: Map<string, BoundFact>;
+  let numericAmbiguous = false;
   if (proposal.numericFormat.status === "RESOLVED") {
-    const { version, decimalSeparator, groupingSeparator, amountScale } = proposal.numericFormat;
+    const { version, decimalSeparator, groupingSeparator, amountScale, decimalSeparatorEvidenceClaimIds, groupingSeparatorEvidenceClaimIds } = proposal.numericFormat;
     const values = validateFinanceReportValueEvidenceV1({ sourceInput, numericFormat: { version, decimalSeparator, groupingSeparator, amountScale } });
     if (values.kind === "BLOCKER") return { feedback: `evidence:${values.facts[0].code}:${values.facts[0].claimId ?? ""}` };
     facts = new Map(values.facts.map((fact) => [fact.source.claimId, fact]));
+    const selectedAmounts = values.facts.flatMap((fact) => fact.kind === "AMOUNT" ? [fact.amountCents] : []);
+    const alternatives = [...(decimalSeparator === "DOT" ? [{ decimalSeparator: "NONE", groupingSeparator: "DOT" } as const] : decimalSeparator === "COMMA" ? [{ decimalSeparator: "NONE", groupingSeparator: "COMMA" } as const] : []), ...(groupingSeparator === "DOT" ? [{ decimalSeparator: "DOT", groupingSeparator: "NONE" } as const] : groupingSeparator === "COMMA" ? [{ decimalSeparator: "COMMA", groupingSeparator: "NONE" } as const] : [])];
+    numericAmbiguous = alternatives.some((alternative) => {
+      const alternate = validateFinanceReportValueEvidenceV1({ sourceInput, numericFormat: { version, ...alternative, amountScale } });
+      if (alternate.kind === "BLOCKER") return false;
+      const alternateAmounts = alternate.facts.flatMap((fact) => fact.kind === "AMOUNT" ? [fact.amountCents] : []);
+      const differs = alternateAmounts.some((amount, index) => amount !== selectedAmounts[index]);
+      const evidenced = (alternative.decimalSeparator !== decimalSeparator && decimalSeparatorEvidenceClaimIds.length > 0) || (alternative.groupingSeparator !== groupingSeparator && groupingSeparatorEvidenceClaimIds.length > 0);
+      return differs && !evidenced;
+    });
   } else {
     const sources = validateFinanceReportEvidenceSourcesV1(sourceInput);
     if (sources.kind === "BLOCKER") return { feedback: `evidence:${sources.facts[0].code}:${sources.facts[0].claimId ?? ""}` };
@@ -80,12 +91,13 @@ function bindProposal(raw: unknown, input: FinanceReportImportProposalInputV1, w
   const periods = new Map(proposal.periods.map((period) => [period.id, period]));
   const nodes = new Map(proposal.hierarchy.map((node) => [node.id, node]));
   if (duplicate(proposal.periods.map(({ id }) => id)) || duplicate(proposal.hierarchy.map(({ id }) => id)) || duplicate(proposal.mappings.map(({ id }) => id)) || duplicate(proposal.mappings.map(({ amountClaimId }) => amountClaimId))) return { feedback: "references:duplicate_semantic_id" };
-  if ((proposal.classification.reportType !== "OTHER" && proposal.classification.reportTypeEvidenceClaimIds.length === 0) || (proposal.classification.basis !== "UNSPECIFIED" && proposal.classification.basisEvidenceClaimIds.length === 0) || !textRefs(proposal.classification.reportTypeEvidenceClaimIds) || !textRefs(proposal.classification.basisEvidenceClaimIds) || (proposal.classification.cadence !== null && proposal.classification.cadenceEvidenceClaimIds.length === 0) || !textRefs(proposal.classification.cadenceEvidenceClaimIds) || !textRefs(proposal.numericFormat.evidenceClaimIds) || proposal.periods.some((period) => !textRefs(period.evidenceClaimIds) || !validDate(period.periodStart) || !validDate(period.periodEnd) || period.periodStart > period.periodEnd) || proposal.hierarchy.some((node) => !textRefs(node.evidenceClaimIds) || (node.parentId !== null && !nodes.has(node.parentId))) || proposal.exceptions.some((exception) => !idsValid(exception.evidenceClaimIds))) return { feedback: "references:invalid_semantic_evidence" };
+  const numericEvidenceIds = proposal.numericFormat.status === "RESOLVED" ? [...proposal.numericFormat.decimalSeparatorEvidenceClaimIds, ...proposal.numericFormat.groupingSeparatorEvidenceClaimIds, ...proposal.numericFormat.amountScaleEvidenceClaimIds] : proposal.numericFormat.evidenceClaimIds;
+  if ((proposal.classification.reportType !== "OTHER" && proposal.classification.reportTypeEvidenceClaimIds.length === 0) || (proposal.classification.basis !== "UNSPECIFIED" && proposal.classification.basisEvidenceClaimIds.length === 0) || !textRefs(proposal.classification.reportTypeEvidenceClaimIds) || !textRefs(proposal.classification.basisEvidenceClaimIds) || (proposal.classification.cadence !== null && proposal.classification.cadenceEvidenceClaimIds.length === 0) || !textRefs(proposal.classification.cadenceEvidenceClaimIds) || !textRefs(numericEvidenceIds) || proposal.periods.some((period) => !textRefs(period.evidenceClaimIds) || !validDate(period.periodStart) || !validDate(period.periodEnd) || period.periodStart > period.periodEnd) || proposal.hierarchy.some((node) => !textRefs(node.evidenceClaimIds) || (node.parentId !== null && !nodes.has(node.parentId))) || proposal.exceptions.some((exception) => !idsValid(exception.evidenceClaimIds))) return { feedback: "references:invalid_semantic_evidence" };
   const paths = new Map<string, string>();
   for (const node of proposal.hierarchy) { const seen = new Set<string>(), labels: string[] = []; let current: typeof node | undefined = node; while (current) { if (seen.has(current.id)) return { feedback: "references:hierarchy_cycle" }; seen.add(current.id); labels.unshift(current.label); current = current.parentId ? nodes.get(current.parentId) : undefined; } paths.set(node.id, JSON.stringify(labels)); }
   const mappings: FinanceReportImportProposalV1["mappings"] = [];
   const targets = new Set<string>();
-  for (const mapping of proposal.mappings) { const fact = facts.get(mapping.amountClaimId), period = periods.get(mapping.periodId), path = paths.get(mapping.hierarchyId); if (fact?.kind !== "AMOUNT" || !period || !path) return { feedback: "references:invalid_mapping" }; const target = JSON.stringify([period.periodStart, period.periodEnd, path]); if (targets.has(target)) return { feedback: "references:duplicate_mapping_target" }; targets.add(target); mappings.push({ ...mapping, amountCents: fact.amountCents ?? null, sourceKey: fact.source.sourceKey }); }
+  for (const mapping of proposal.mappings) { const fact = facts.get(mapping.amountClaimId), period = periods.get(mapping.periodId), path = paths.get(mapping.hierarchyId); if (fact?.kind !== "AMOUNT" || !period || !path) return { feedback: "references:invalid_mapping" }; const target = JSON.stringify([period.periodStart, period.periodEnd, path]); if (targets.has(target)) return { feedback: "references:duplicate_mapping_target" }; targets.add(target); mappings.push({ ...mapping, amountCents: numericAmbiguous ? null : fact.amountCents ?? null, sourceKey: fact.source.sourceKey }); }
   const explicit = proposal.currency.explicitCode;
   const currencyFact = proposal.currency.evidenceClaimId ? facts.get(proposal.currency.evidenceClaimId) : undefined;
   if ((explicit === null) !== (proposal.currency.evidenceClaimId === null) || (explicit !== null && (currencyFact?.kind !== "ISO_CODE" || currencyFact.code !== explicit))) return { feedback: "currency:unverified_explicit_code" };
@@ -95,10 +107,11 @@ function bindProposal(raw: unknown, input: FinanceReportImportProposalInputV1, w
   if (proposal.classification.reportType === "OTHER") addBlocker("REPORT_TYPE_UNRESOLVED", "Confirm the report type before approval.");
   if (proposal.classification.basis === "UNSPECIFIED") addBlocker("BASIS_UNRESOLVED", "Confirm the accounting basis before approval.");
   if (proposal.classification.cadence === null) addBlocker("CADENCE_UNRESOLVED", "Confirm the reporting cadence before approval.");
-  if (proposal.numericFormat.status === "UNRESOLVED") addBlocker("NUMERIC_FORMAT_UNRESOLVED", "Confirm the numeric format and scale before calculating amounts.");
+  const boundNumericFormat = numericAmbiguous ? { status: "UNRESOLVED" as const, version: 1 as const, decimalSeparator: null, groupingSeparator: null, amountScale: null, evidenceClaimIds: [...new Set(numericEvidenceIds)], confidence: proposal.numericFormat.confidence } : proposal.numericFormat;
+  if (boundNumericFormat.status === "UNRESOLVED") addBlocker("NUMERIC_FORMAT_UNRESOLVED", "Confirm the numeric format and scale before calculating amounts.");
   if (proposal.classification.confidence === 0 || proposal.periods.some(({ confidence }) => confidence === 0) || proposal.hierarchy.some(({ confidence }) => confidence === 0) || proposal.mappings.some(({ confidence }) => confidence === 0)) addBlocker("SEMANTIC_PROPOSAL_UNCERTAIN", "Review zero-confidence report semantics before approval.");
   if (code === null) addBlocker("CURRENCY_UNRESOLVED", "Choose the report currency before approval.");
-  return { proposal: { ...proposal, currency: { state: code ? "RESOLVED" : "UNRESOLVED", code, source: explicit ? "DOCUMENT" : code ? "WORKSPACE_SINGLE_CURRENCY" : null, evidenceClaimId: proposal.currency.evidenceClaimId, confidence: proposal.currency.confidence }, mappings, exceptions } };
+  return { proposal: { ...proposal, numericFormat: boundNumericFormat, currency: { state: code ? "RESOLVED" : "UNRESOLVED", code, source: explicit ? "DOCUMENT" : code ? "WORKSPACE_SINGLE_CURRENCY" : null, evidenceClaimId: proposal.currency.evidenceClaimId, confidence: proposal.currency.confidence }, mappings, exceptions } };
 }
 
 export async function proposeFinanceReportImportV1(input: FinanceReportImportProposalInputV1): Promise<FinanceReportImportProposalResultV1> {
