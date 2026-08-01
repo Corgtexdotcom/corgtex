@@ -35,7 +35,7 @@ class EvidenceError extends Error { constructor(public readonly code: FinanceRep
 function fail(code: FinanceReportEvidenceBlockerCode, claimId?: string): never { throw new EvidenceError(code, claimId); }
 const isRecord = (value: unknown): value is Record<string, unknown> => Boolean(value) && typeof value === "object" && !Array.isArray(value);
 function exactKeys(value: Record<string, unknown>, allowed: string[], required = allowed, code: FinanceReportEvidenceBlockerCode = "MALFORMED_EVIDENCE") {
-  if (!required.every((key) => Object.hasOwn(value, key)) || Object.keys(value).some((key) => !allowed.includes(key)) || Object.values(Object.getOwnPropertyDescriptors(value)).some((descriptor) => !("value" in descriptor))) fail(code);
+  if (!required.every((key) => Object.hasOwn(value, key)) || Reflect.ownKeys(value).some((key) => typeof key !== "string" || !allowed.includes(key)) || Object.values(Object.getOwnPropertyDescriptors(value)).some((descriptor) => !("value" in descriptor))) fail(code);
 }
 function integer(value: unknown, min: number, max: number,
   code: FinanceReportEvidenceBlockerCode = "MALFORMED_EVIDENCE") {
@@ -212,10 +212,10 @@ export function validateFinanceReportEvidenceSourcesV1(input: unknown): FinanceR
     exactKeys(input, ["format", "extractedEvidence", "claims"], undefined, "INVALID_INPUT");
     if (!new Set(["PDF", "CSV", "XLSX"]).has(input.format as string)
       || typeof input.extractedEvidence !== "string" || !Array.isArray(input.claims)
-      || input.claims.length === 0 || input.claims.length > 1_000 || Object.keys(input.claims).length !== input.claims.length || Object.keys(input.claims).some((key, index) => key !== String(index))) fail("INVALID_INPUT");
-    const format = input.format as FinanceReportEvidenceFormat;
+      || input.claims.length === 0 || input.claims.length > 1_000 || Reflect.ownKeys(input.claims).length !== input.claims.length + 1 || Reflect.ownKeys(input.claims).some((key, index, keys) => key !== (index < keys.length - 1 ? String(index) : "length"))) fail("INVALID_INPUT");
+    const format = input.format as FinanceReportEvidenceFormat, rawClaims = input.claims;
     const index = buildIndex(format, input.extractedEvidence);
-    const budget = { total: 0 }, claims = input.claims.map((rawClaim) => parseClaim(rawClaim, budget));
+    const budget = { total: 0 }, claims = Array.from({ length: rawClaims.length }, (_, index) => parseClaim(rawClaims[index], budget));
     const ids = new Set<string>();
     const groups = new Map<string, Bound[]>();
     const bound = claims.map((claim) => {
