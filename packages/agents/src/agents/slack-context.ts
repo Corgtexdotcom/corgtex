@@ -497,10 +497,11 @@ export async function runSlackProactiveScan(params: {
       await sendSlackMessage(params.installationId, {
         channel: candidate.externalChannelId,
         threadTs,
+        text: "This looks unanswered.",
       }, [{
         type: "section",
         text: { type: "mrkdwn", text: "This looks unanswered. Should someone take it? I'll wait 24 hours before creating a Corgtex action if it still looks unresolved." },
-      }], "This looks unanswered.");
+      }]);
     } catch (error) {
       if (await markSlackInstallationReauthRequired({ ...params, error })) {
         return { skipped: true, reason: "slack_reauth_required" };
@@ -680,10 +681,11 @@ export async function runSlackProactiveScan(params: {
       await sendSlackMessage(params.installationId, {
         channel: candidate.externalChannelId,
         threadTs: threadTsForMessage(candidate),
+        text: `Created Corgtex action: ${parsed.title}`,
       }, [{
         type: "section",
         text: { type: "mrkdwn", text: `I created a Corgtex action because this still looked unresolved after 24 hours: <${item.webUrl}|${parsed.title}>.` },
-      }], `Created Corgtex action: ${parsed.title}`);
+      }]);
     } catch (error) {
       if (await markSlackInstallationReauthRequired({ ...params, error })) {
         return { skipped: true, reason: "slack_reauth_required" };
@@ -778,10 +780,11 @@ export async function runSlackProactiveScan(params: {
       await sendSlackMessage(params.installationId, {
         channel: source.externalChannelId,
         threadTs: threadTsForMessage(source),
+        text: `Corgtex action still not completed: ${action.title}`,
       }, [{
         type: "section",
         text: { type: "mrkdwn", text: `This Corgtex action still is not completed after 72 hours: *${action.title}*.` },
-      }], `Corgtex action still not completed: ${action.title}`);
+      }]);
     } catch (error) {
       if (await markSlackInstallationReauthRequired({ ...params, error })) {
         return { skipped: true, reason: "slack_reauth_required" };
