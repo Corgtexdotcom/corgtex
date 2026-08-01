@@ -4,7 +4,7 @@ type NonFormulaCellType = Exclude<FinanceReportEvidenceCellType, "FORMULA">;
 type CellValues = { rawValue: string; displayValue?: string };
 export type FinanceReportEvidenceCellFact =
   | (CellValues & { type: "FORMULA"; resultType: NonFormulaCellType })
-  | (CellValues & { type: NonFormulaCellType; resultType?: never });
+  | (CellValues & { type: NonFormulaCellType; resultType?: never }); type FinanceReportEvidenceAmountCellFact = CellValues & ({ type: "TEXT" | "NUMBER"; resultType?: never } | { type: "FORMULA"; resultType: "NUMBER" });
 const CELL_TYPES = new Set<FinanceReportEvidenceCellType>(["BOOLEAN", "DATE", "ERROR", "FORMULA", "NUMBER", "TEXT"]);
 const MAX_TEXT = 2_000_000;
 export type FinanceReportEvidenceFormat = "PDF" | "CSV" | "XLSX";
@@ -20,8 +20,8 @@ export type FinanceReportEvidenceBlockerCode = "INVALID_INPUT" | "LIMIT_EXCEEDED
   | "MALFORMED_EVIDENCE" | "SOURCE_NOT_FOUND" | "DUPLICATE_CLAIM"
   | "OVERLAPPING_SOURCE" | "UNSAFE_CELL";
 type FinanceReportEvidenceSourceFactBase = { kind: "SOURCE"; claimId: string; role: FinanceReportEvidenceRole; sourceKey: string; selectedText: string };
-export type FinanceReportEvidenceSourceFact = (FinanceReportEvidenceSourceFactBase & { source: FinanceReportEvidencePdfSource; cell?: never })
-  | (FinanceReportEvidenceSourceFactBase & { source: FinanceReportEvidenceCellSource; cell: FinanceReportEvidenceCellFact });
+export type FinanceReportEvidenceSourceFact = (FinanceReportEvidenceSourceFactBase & { source: FinanceReportEvidencePdfSource; cell?: never }) | (FinanceReportEvidenceSourceFactBase & { role: "AMOUNT"; source: FinanceReportEvidenceWholeCellSource; cell: FinanceReportEvidenceAmountCellFact })
+  | (FinanceReportEvidenceSourceFactBase & { role: Exclude<FinanceReportEvidenceRole, "AMOUNT">; source: FinanceReportEvidenceCellSource; cell: FinanceReportEvidenceCellFact });
 type FinanceReportEvidenceBlockerFact = { kind: "BLOCKER"; code: FinanceReportEvidenceBlockerCode; claimId?: string };
 export type FinanceReportEvidenceSourceResultV1 = { version: typeof FINANCE_REPORT_EVIDENCE_SOURCE_VERSION; kind: "SUCCESS"; facts: FinanceReportEvidenceSourceFact[] }
   | { version: typeof FINANCE_REPORT_EVIDENCE_SOURCE_VERSION; kind: "BLOCKER"; facts: [FinanceReportEvidenceBlockerFact] };
@@ -201,9 +201,9 @@ function bind(index: Index, format: FinanceReportEvidenceFormat, claim: FinanceR
       ...(cell.displayValue === undefined ? {} : { displayValue: cell.displayValue }) }
     : { type: cell.type, rawValue: cell.value,
       ...(cell.displayValue === undefined ? {} : { displayValue: cell.displayValue }) };
-  return { fact: { kind: "SOURCE", claimId: claim.id, role: claim.role, sourceKey,
-    source, selectedText: selected.text, cell: cellFact },
-    coordinateKey, start: selected.start, end: selected.end, wholeAmount,
+  const fact: FinanceReportEvidenceSourceFact = wholeAmount ? { kind: "SOURCE", claimId: claim.id, role: "AMOUNT", sourceKey, source: source as FinanceReportEvidenceWholeCellSource, selectedText: selected.text, cell: cellFact as FinanceReportEvidenceAmountCellFact }
+    : { kind: "SOURCE", claimId: claim.id, role: claim.role as Exclude<FinanceReportEvidenceRole, "AMOUNT">, sourceKey, source, selectedText: selected.text, cell: cellFact };
+  return { fact, coordinateKey, start: selected.start, end: selected.end, wholeAmount,
     evidence: wholeAmount ? cell.value : source.evidence };
 }
 export function validateFinanceReportEvidenceSourcesV1(input: unknown): FinanceReportEvidenceSourceResultV1 {

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { validateFinanceReportEvidenceSourcesV1,
-  type FinanceReportEvidenceCellType, type FinanceReportEvidenceClaim, type FinanceReportEvidenceSource, type FinanceReportEvidenceSourceFact } from "./finance-report-evidence";
+  type FinanceReportEvidenceClaim, type FinanceReportEvidenceSource, type FinanceReportEvidenceSourceFact } from "./finance-report-evidence";
 const jsonl = (...records: unknown[]) => records.map((record) => JSON.stringify(record)).join("\n");
 const longSheet = " ".repeat(201);
 const pdfSource = (line: string, text: string, lineIndex = 0, page = 1) =>
@@ -76,8 +76,8 @@ describe("validateFinanceReportEvidenceSourcesV1", () => {
       { kind: "SOURCE", selectedText: "1234", cell: { rawValue: "1234", displayValue: "$123" } },
       { kind: "SOURCE", cell: { type: "FORMULA", resultType: "NUMBER" } },
     ]);
-    const formulaCell = good.facts[1]?.kind === "SOURCE" ? good.facts[1].cell : undefined;
-    if (formulaCell?.type === "FORMULA") { const resultType: Exclude<FinanceReportEvidenceCellType, "FORMULA"> = formulaCell.resultType; expect(resultType).toBe("NUMBER"); }
+    const formulaFact = good.kind === "SUCCESS" ? good.facts[1] : undefined;
+    if (formulaFact?.cell?.type === "FORMULA" && formulaFact.role === "AMOUNT" && formulaFact.source.kind === "CELL") { const resultType: "NUMBER" = formulaFact.cell.resultType; const start: undefined = formulaFact.source.start; expect([resultType, start]).toEqual(["NUMBER", undefined]); }
     const textFacts = ["1234", "$123"].map((evidence) => validate("XLSX", extracted,
       [{ id: evidence, role: "TEXT", source: cellSource(evidence) }]).facts[0]);
     expect(textFacts.map((fact) => fact?.kind === "SOURCE" && fact.sourceKey)).toEqual([
