@@ -1,4 +1,4 @@
-export const FINANCE_REPORT_EVIDENCE_SOURCE_VERSION = 1 as const;
+import { types as nodeTypes } from "node:util"; export const FINANCE_REPORT_EVIDENCE_SOURCE_VERSION = 1 as const;
 export type FinanceReportEvidenceCellType = "BOOLEAN" | "DATE" | "ERROR" | "FORMULA" | "NUMBER" | "TEXT";
 type NonFormulaCellType = Exclude<FinanceReportEvidenceCellType, "FORMULA">;
 type CellValues = { rawValue: string; displayValue?: string }; type NoDisplayCellValues = { rawValue: string; displayValue?: never }; type BooleanCellValues = { rawValue: "true"; displayValue: "TRUE" } | { rawValue: "false"; displayValue: "FALSE" };
@@ -33,7 +33,7 @@ type Bound = { fact: FinanceReportEvidenceSourceFact; coordinateKey: string;
   start: number; end: number; wholeAmount: boolean; evidence: string };
 class EvidenceError extends Error { constructor(public readonly code: FinanceReportEvidenceBlockerCode, public readonly claimId?: string) { super(code); } }
 function fail(code: FinanceReportEvidenceBlockerCode, claimId?: string): never { throw new EvidenceError(code, claimId); }
-const isRecord = (value: unknown): value is Record<string, unknown> => Boolean(value) && typeof value === "object" && !Array.isArray(value) && [Object.prototype, null].includes(Object.getPrototypeOf(value));
+const isRecord = (value: unknown): value is Record<string, unknown> => Boolean(value) && typeof value === "object" && !Array.isArray(value) && !nodeTypes.isProxy(value) && [Object.prototype, null].includes(Object.getPrototypeOf(value));
 function exactKeys(value: Record<string, unknown>, allowed: string[], required = allowed, code: FinanceReportEvidenceBlockerCode = "MALFORMED_EVIDENCE") {
   const descriptors = Object.getOwnPropertyDescriptors(value); if (!required.every((key) => Object.hasOwn(descriptors, key)) || Reflect.ownKeys(descriptors).some((key) => typeof key !== "string" || !allowed.includes(key)) || Object.values(descriptors).some((descriptor) => !("value" in descriptor))) fail(code); return Object.fromEntries(Object.entries(descriptors).map(([key, descriptor]) => [key, descriptor.value]));
 }
@@ -211,7 +211,7 @@ export function validateFinanceReportEvidenceSourcesV1(input: unknown): FinanceR
     if (!isRecord(input)) fail("INVALID_INPUT");
     const cleanInput = exactKeys(input, ["format", "extractedEvidence", "claims"], undefined, "INVALID_INPUT"), suppliedClaims = cleanInput.claims, claimDescriptors: Record<string, PropertyDescriptor> = Array.isArray(suppliedClaims) ? Object.getOwnPropertyDescriptors(suppliedClaims) : {}, claimKeys = Reflect.ownKeys(claimDescriptors), claimLength = claimDescriptors.length?.value;
     if (!new Set(["PDF", "CSV", "XLSX"]).has(cleanInput.format as string)
-      || typeof cleanInput.extractedEvidence !== "string" || !Array.isArray(suppliedClaims)
+      || typeof cleanInput.extractedEvidence !== "string" || !Array.isArray(suppliedClaims) || nodeTypes.isProxy(suppliedClaims)
       || !Number.isSafeInteger(claimLength) || claimLength < 1 || claimLength > 1_000 || claimKeys.length !== claimLength + 1 || claimKeys.some((key, index) => key !== (index < claimKeys.length - 1 ? String(index) : "length")) || Object.values(claimDescriptors).some((descriptor) => !("value" in descriptor))) fail("INVALID_INPUT");
     const format = cleanInput.format as FinanceReportEvidenceFormat, rawClaims = Array.from({ length: claimLength }, (_, index) => claimDescriptors[String(index)]!.value);
     const index = buildIndex(format, cleanInput.extractedEvidence);
