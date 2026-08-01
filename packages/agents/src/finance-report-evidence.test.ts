@@ -108,7 +108,7 @@ describe("validateFinanceReportEvidenceSourcesV1", () => {
       jsonl(validCell, { sheet: "CSV", rowCount: 1, columnCount: 1 }),
       jsonl({ sheet: "CSV", rowCount: 1, columnCount: 1 }, validCell, validCell),
       jsonl({ sheet: "CSV", rowCount: 1, columnCount: 2 }, { ...validCell, column: 2 }, validCell),
-      jsonl({ sheet: "CSV", rowCount: 1, columnCount: 1 }, { ...validCell, value: "" }), jsonl({ sheet: "CSV", rowCount: 1, columnCount: 1 }, { ...validCell, value: "\0" }),
+      jsonl({ sheet: "CSV", rowCount: 1, columnCount: 1 }, { ...validCell, value: "" }), jsonl({ sheet: "CSV", rowCount: 1, columnCount: 1 }, { ...validCell, value: "\0" }), jsonl({ sheet: "CSV", rowCount: 20_000, columnCount: 250_000 }, validCell),
       jsonl({ sheet: "Report", rowCount: 1, columnCount: 1 }, { ...validCell, sheet: "Report" }),
       jsonl({ sheet: "CSV", rowCount: 1, columnCount: 1 },
         { ...validCell, type: "FORMULA", formula: "1+1" }),

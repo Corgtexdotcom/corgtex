@@ -82,7 +82,7 @@ function buildIndex(format: FinanceReportEvidenceFormat, jsonl: string): Index {
       const rows = integer(value.rowCount, 0, 20_000);
       const columns = integer(value.columnCount, 0, format === "XLSX" ? Number.MAX_SAFE_INTEGER : 250_000);
       totalRows += rows;
-      if (sheets.has(sheet) || (format === "CSV" && (sheet !== "CSV" || sheets.size > 0))) fail("MALFORMED_EVIDENCE");
+      if (sheets.has(sheet) || (format === "CSV" && (sheet !== "CSV" || sheets.size > 0 || rows * columns > 250_000))) fail("MALFORMED_EVIDENCE");
       if (sheets.size >= 100 || totalRows > 20_000) fail("LIMIT_EXCEEDED");
       sheets.set(sheet, { rows, columns, observedRows: 0, observedColumns: 0 });
       activeSheet = sheet; previousRow = previousColumn = 0;
