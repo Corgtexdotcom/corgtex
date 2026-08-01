@@ -106,15 +106,15 @@ describe("validateFinanceReportEvidenceSourcesV1", () => {
   });
 
   it("fails closed on malformed extractor JSONL and bounded input", () => {
-    const validCell = { sheet: "Report", row: 1, column: 1, type: "TEXT", value: "10" };
+    const validCell = { sheet: "CSV", row: 1, column: 1, type: "TEXT", value: "10" };
     const malformed = [
       "not-json",
       jsonl({ page: 1, text: "10", extra: true }),
       jsonl({ page: 1, text: "10" }, { page: 1, text: "20" }),
-      jsonl(validCell, { sheet: "Report", rowCount: 1, columnCount: 1 }),
-      jsonl({ sheet: "Report", rowCount: 1, columnCount: 1 }, validCell, validCell),
-      jsonl({ sheet: "Report", rowCount: 1, columnCount: 1 }, validCell),
-      jsonl({ sheet: "Report", rowCount: 1, columnCount: 1 },
+      jsonl(validCell, { sheet: "CSV", rowCount: 1, columnCount: 1 }),
+      jsonl({ sheet: "CSV", rowCount: 1, columnCount: 1 }, validCell, validCell),
+      jsonl({ sheet: "Report", rowCount: 1, columnCount: 1 }, { ...validCell, sheet: "Report" }),
+      jsonl({ sheet: "CSV", rowCount: 1, columnCount: 1 },
         { ...validCell, type: "FORMULA", formula: "1+1" }),
     ];
     expect(code(validate("PDF", malformed[0]!, [{ id: "a", role: "TEXT", source: pdfSource("10", "10") }]))).toBe("MALFORMED_EVIDENCE");
