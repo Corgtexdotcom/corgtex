@@ -111,7 +111,7 @@ function buildIndex(format: FinanceReportEvidenceFormat, jsonl: string): Index {
     if (format === "CSV" && (type !== "TEXT" || value.displayValue !== undefined || !cellValue || cellValue.includes("\0") || !/^(?:[^\uD800-\uDFFF]|[\uD800-\uDBFF][\uDC00-\uDFFF])*$/.test(cellValue))) fail("MALFORMED_EVIDENCE");
     const displayValue = value.displayValue === undefined ? undefined
       : string(value.displayValue, MAX_TEXT, true);
-    if (displayValue === cellValue || ((type === "BOOLEAN" || (type === "FORMULA" && resultType === "BOOLEAN")) ? displayValue !== (cellValue === "true" ? "TRUE" : "FALSE") : displayValue !== undefined && (type === "TEXT" || (type === "FORMULA" && resultType === "TEXT") || (type === "ERROR" ? cellValue !== "" : type === "FORMULA" && resultType === "ERROR")))) fail("MALFORMED_EVIDENCE");
+    if (displayValue === cellValue || ((type === "BOOLEAN" || (type === "FORMULA" && resultType === "BOOLEAN")) ? displayValue !== (cellValue === "true" ? "TRUE" : "FALSE") : displayValue !== undefined && (type === "TEXT" || (type === "FORMULA" && resultType === "TEXT") || (type === "ERROR" ? cellValue !== "" || ERROR_VALUES.has(displayValue as ErrorToken) : type === "FORMULA" && resultType === "ERROR")))) fail("MALFORMED_EVIDENCE");
     const key = cellKey(sheet, row, column); if (index.cells.has(key)) fail("MALFORMED_EVIDENCE");
     if (index.cells.size >= 250_000) fail("LIMIT_EXCEEDED");
     index.cells.set(key, type === "FORMULA"
