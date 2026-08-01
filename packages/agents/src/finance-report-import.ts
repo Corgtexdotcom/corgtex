@@ -273,7 +273,7 @@ function evidenceAmountScale(index: EvidenceIndex) {
 }
 function parseMoneyToken(token: string) {
   const negative = token.startsWith("-") || token.startsWith("(") || token.endsWith("-");
-  let value = token.replace(/[()\s\u00a0]/g, "").replace(/^[+-]/, "").replace(/-$/, "");
+  let value = token.replace(/\p{Sc}/gu, "").replace(/[()\s\u00a0]/g, "").replace(/^[+-]/, "").replace(/-$/, "");
   const comma = value.lastIndexOf(","); const dot = value.lastIndexOf(".");
   if (comma >= 0 && dot >= 0) {
     const decimal = comma > dot ? "," : ".";
@@ -288,8 +288,8 @@ function parseMoneyToken(token: string) {
 }
 function evidenceAmountsCents(evidence: string) {
   const withoutDates = evidence.replace(/\b\d{4}-\d{2}-\d{2}(?:T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})?)?/g, " ");
-  const tokens = withoutDates.match(/[+-]?\(?(?:\d{1,3}(?:[ ,.\u00a0]\d{3})+(?:[.,]\d{1,2})?|\d+(?:[.,]\d{1,2})?)\)?-?/g) ?? [];
-  return tokens.flatMap((token) => { const cents = parseMoneyToken(token); return cents === null ? [] : [cents]; });
+  return [...withoutDates.matchAll(/[+-]?\(?\s*\p{Sc}?\s*(?:\d{1,3}(?:[ ,.\u00a0]\d{3})+(?:[.,]\d{1,2})?|\d+(?:[.,]\d{1,2})?)\)?-?/gu)]
+    .flatMap((match) => { const cents = parseMoneyToken(match[0]); return /^\s*%/.test(withoutDates.slice((match.index ?? 0) + match[0].length)) || cents === null ? [] : [cents]; });
 }
 function unmatchedEvidencePaths(proposal: FinanceReportImportProposalV1, extractedEvidence: string) {
   const evidenceIndex = buildEvidenceIndex(extractedEvidence);

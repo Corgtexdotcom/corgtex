@@ -263,19 +263,19 @@ describe("interpretFinanceReport", () => {
       extractedEvidence: "{\"sheet\":\"June\",\"row\":2,\"column\":1,\"value\":\"Consulting revenue\"}\n"
         + "{\"sheet\":\"June\",\"row\":2,\"column\":3,\"value\":\"1.250,00\"}",
     })).resolves.toMatchObject({ candidates: [{ amountCents: 125_000 }] });
-
-    const trailing = proposal(); trailing.candidates[0].sourceLocation.evidence = "1,250.00-"; trailing.candidates[0].amountCents = -125_000;
-    await expect(interpretFinanceReport({ ...params, gateway: gateway([trailing]).model,
-      extractedEvidence: `${params.extractedEvidence.replace("1250.00", "1,250.00-")}`,
-    })).resolves.toMatchObject({ candidates: [{ amountCents: -125_000 }] });
-
-    const date = proposal(); date.candidates[0].sourceLocation.evidence = "2026-01-01T00:00:00.000Z"; date.candidates[0].amountCents = 202_600;
-    await expect(interpretFinanceReport({ ...params, gateway: gateway([date, date]).model,
-      extractedEvidence: "{\"sheet\":\"June\",\"row\":2,\"column\":1,\"value\":\"Consulting revenue\"}\n"
-        + "{\"sheet\":\"June\",\"row\":2,\"column\":3,\"value\":\"2026-01-01T00:00:00.000Z\"}",
-    })).rejects.toBeInstanceOf(FinanceReportImportAgentError);
+    for (const evidence of ["1,250.00-", "($1,250.00)"]) {
+      const negative = proposal(); negative.candidates[0].sourceLocation.evidence = evidence; negative.candidates[0].amountCents = -125_000;
+      await expect(interpretFinanceReport({ ...params, gateway: gateway([negative]).model,
+        extractedEvidence: params.extractedEvidence.replace("1250.00", evidence),
+      })).resolves.toMatchObject({ candidates: [{ amountCents: -125_000 }] });
+    }
+    for (const [evidence, amount] of [["2026-01-01T00:00:00.000Z", 202_600], ["12.5%", 1_250]] as const) {
+      const nonMoney = proposal(); nonMoney.candidates[0].sourceLocation.evidence = evidence; nonMoney.candidates[0].amountCents = amount;
+      await expect(interpretFinanceReport({ ...params, gateway: gateway([nonMoney, nonMoney]).model,
+        extractedEvidence: params.extractedEvidence.replace("1250.00", evidence),
+      })).rejects.toBeInstanceOf(FinanceReportImportAgentError);
+    }
   });
-
   it("uses calculated values and applies a deterministic report scale", async () => {
     const formula = proposal(); formula.candidates[0].sourceLocation.evidence = "SUM(B1:B1)+999"; formula.candidates[0].amountCents = 99_900;
     await expect(interpretFinanceReport({ ...params, gateway: gateway([formula, formula]).model,
