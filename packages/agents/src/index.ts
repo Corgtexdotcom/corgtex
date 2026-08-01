@@ -5,4 +5,5 @@ export * from "./conversation";
 export * from "./page-context";
 export * from "./runtime";
 export * from "./daily-digest";
+export * from "./finance-report-evidence";
 export * from "./agents";
