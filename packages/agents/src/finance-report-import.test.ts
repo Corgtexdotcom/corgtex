@@ -28,7 +28,7 @@ function proposal(format: "PDF" | "XLSX" = "PDF") {
   return {
     version: 1,
     classification: { reportType: "PROFIT_AND_LOSS", basis: "ACCRUAL", cadence: "MONTHLY", reportTypeEvidenceClaimIds: ["type"], basisEvidenceClaimIds: ["basis"], cadenceEvidenceClaimIds: ["cadence"], confidence: 0.98 },
-    numericFormat: { version: 1, decimalSeparator: "DOT", groupingSeparator: "NONE", amountScale: 1_000, evidenceClaimIds: ["scale"], confidence: 0.95 },
+    numericFormat: { status: "RESOLVED", version: 1, decimalSeparator: "DOT", groupingSeparator: "NONE", amountScale: 1_000, evidenceClaimIds: ["scale"], confidence: 0.95 },
     currency: { explicitCode: "USD", evidenceClaimId: "currency", confidence: 1 },
     periods: [
       { id: "2026-01", label: "January 2026", periodStart: "2026-01-01", periodEnd: "2026-01-31", evidenceClaimIds: ["jan"], confidence: 1 },
@@ -74,7 +74,7 @@ describe("proposeFinanceReportImportV1", () => {
 
   it("binds XLSX cells and resolves only the single workspace currency when the report is silent", async () => {
     const output = { ...proposal("XLSX"), currency: { explicitCode: null, evidenceClaimId: null, confidence: 0.8 } };
-    const { result } = await run(output, { format: "XLSX", currencies: ["EUR", "EUR"] });
+    const { result } = await run(output, { format: "XLSX", currencies: [" eur ", "EUR"] });
     expect(result).toMatchObject({ kind: "SUCCESS", proposal: { currency: { state: "RESOLVED", code: "EUR", source: "WORKSPACE_SINGLE_CURRENCY" } } });
     if (result.kind === "SUCCESS") expect(result.proposal.mappings[0]).toMatchObject({ amountCents: 123_000, sourceKey: expect.any(String) });
   });
@@ -117,8 +117,18 @@ describe("proposeFinanceReportImportV1", () => {
     oldDate.periods[0]!.periodStart = "0999-01-01";
     expect((await run(oldDate)).result).toMatchObject({ kind: "FAILURE", code: "INVALID_MODEL_OUTPUT" });
     const duplicateTarget = proposal();
-    duplicateTarget.mappings[1]!.periodId = "2026-01";
+    duplicateTarget.periods[1]!.periodStart = "2026-01-01";
+    duplicateTarget.periods[1]!.periodEnd = "2026-01-31";
     expect((await run(duplicateTarget)).result).toMatchObject({ kind: "FAILURE", code: "INVALID_MODEL_OUTPUT" });
+  });
+
+  it("returns structural input exceptions without computing guessed cents", async () => {
+    const base = proposal();
+    expect(financeReportModelProposalSchemaV1.safeParse({ ...base, numericFormat: { ...base.numericFormat, confidence: 0 } }).success).toBe(false);
+    const output = { ...base, classification: { ...base.classification, cadence: null, cadenceEvidenceClaimIds: [] }, numericFormat: { status: "UNRESOLVED", version: 1, decimalSeparator: null, groupingSeparator: null, amountScale: null, evidenceClaimIds: [], confidence: 0 }, mappings: base.mappings.map((mapping, index) => ({ ...mapping, confidence: index === 0 ? 0 : mapping.confidence })) };
+    const { result } = await run(output);
+    expect(result).toMatchObject({ kind: "SUCCESS", proposal: { mappings: [{ amountCents: null }, { amountCents: null }] } });
+    if (result.kind === "SUCCESS") expect(result.proposal.exceptions).toEqual(expect.arrayContaining([expect.objectContaining({ code: "CADENCE_UNRESOLVED", severity: "BLOCKER" }), expect.objectContaining({ code: "NUMERIC_FORMAT_UNRESOLVED", severity: "BLOCKER" }), expect.objectContaining({ code: "SEMANTIC_PROPOSAL_UNCERTAIN", severity: "BLOCKER" })]));
   });
 
   it("rejects explicit currency without matching exact ISO evidence", async () => {
