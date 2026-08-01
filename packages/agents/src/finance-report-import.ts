@@ -23,10 +23,14 @@ const CURRENCY_NAME_ALIASES: Record<string, string[]> = {
 const bounded = (maximum: number) => z.string().trim().min(1).max(maximum);
 const sourceIdentifier = (maximum: number) => z.string().min(1).max(maximum)
   .refine((value) => value.trim().length > 0, "Expected a non-blank source identifier.");
-const currencyCodesNamed = (evidence: string, proposedCode: string) => {
+const currencyCodesNamed = (evidence: string) => {
   const normalized = ` ${evidence.toUpperCase().replace(/[^A-Z0-9]+/g, " ").trim()} `;
-  const codes = new Set((evidence.match(/\b[A-Z]{3}\b/g) ?? []).filter((token) => ISO_CURRENCY_CODES.has(token)));
-  if (normalized.includes(` ${proposedCode} `)) codes.add(proposedCode);
+  const tokens = normalized.trim().split(/\s+/); const currencyIndex = tokens.indexOf("CURRENCY");
+  const amountsInIndex = tokens.findIndex((token, index) =>
+    token === "IN" && ["AMOUNT", "AMOUNTS"].includes(tokens[index - 1] ?? ""));
+  const scoped = currencyIndex >= 0 ? tokens.slice(currencyIndex + 1) : amountsInIndex >= 0
+    ? tokens.slice(amountsInIndex + 1) : tokens.filter((token) => token in CURRENCY_NAME_ALIASES);
+  const codes = new Set(scoped.filter((token) => ISO_CURRENCY_CODES.has(token)));
   for (const [code, aliases] of Object.entries(CURRENCY_NAME_ALIASES)) {
     if (aliases.some((name) => normalized.includes(` ${name} `))) codes.add(code);
   }
@@ -65,7 +69,7 @@ const currencySchema = z.object({
     context.addIssue({ code: "custom", message: "Currency state, code, and evidence do not agree." });
   }
   const namedCurrencies = new Set(value.evidence.flatMap((location) =>
-    [...currencyCodesNamed(location.evidence, value.code ?? "")]));
+    [...currencyCodesNamed(location.evidence)]));
   if (explicit && value.code && (namedCurrencies.size !== 1 || !namedCurrencies.has(value.code))) {
     context.addIssue({ code: "custom", path: ["evidence"],
       message: "Explicit currency evidence must name one unambiguous proposed currency." });
@@ -116,6 +120,7 @@ export const financeReportImportProposalV1Schema = z.object({
     periodStart: isoDate,
     periodEnd: isoDate,
     asOfDate: isoDate.nullable(),
+    amountScale: z.enum(["UNITS", "THOUSANDS", "MILLIONS"]),
     currency: currencySchema,
   }).strict().superRefine((value, context) => {
     if (value.periodStart > value.periodEnd) {
@@ -177,7 +182,7 @@ export class FinanceReportImportAgentError extends Error {
 }
 
 const instruction = (retryPaths: string[]) => `Interpret deterministic PDF/CSV/XLSX evidence as an editable
-Finance Reported Actuals proposal. Infer type, basis, cadence, dates, hierarchy, leaf/derived rows, integer cents,
+Finance Reported Actuals proposal. Infer type, basis, cadence, dates, amount scale, hierarchy, leaf/derived rows, integer cents,
 and source-located currency evidence without a vendor picker. Return proposals only; never create transactions,
 apply Finance records, or claim human approval. Profile hints are non-authoritative and every mapping must be
 revalidated. If currency is not explicit, return UNRESOLVED/null and never default to USD. Uncertain mappings must
@@ -193,6 +198,7 @@ const schemaHint = `Strict contract v1 JSON with no additional fields:
     "basis": "CASH|ACCRUAL|UNSPECIFIED",
     "cadence": "DAILY|WEEKLY|MONTHLY|QUARTERLY|ANNUAL|CUSTOM",
     "periodStart": "YYYY-MM-DD", "periodEnd": "YYYY-MM-DD", "asOfDate": "YYYY-MM-DD|null",
+    "amountScale": "UNITS|THOUSANDS|MILLIONS",
     "currency": {
       "state": "EXPLICIT|UNRESOLVED", "code": "three uppercase letters|null",
       "evidence": [{ "page": "positive integer|null", "sheet": "string|null",
@@ -216,7 +222,7 @@ type SourceLocation = z.infer<typeof sourceLocationSchema>;
 type EvidenceIndex = Map<string, string[]>;
 const evidenceKey = (...parts: Array<string | number>) => JSON.stringify(parts);
 function appendEvidence(index: EvidenceIndex, key: string, record: Record<string, unknown>) {
-  const sourceText = ["text", "value", "displayValue", "formula"].flatMap((field) =>
+  const sourceText = ["text", "value", "displayValue"].flatMap((field) =>
     typeof record[field] === "string" ? [record[field] as string] : []);
   if (sourceText.length === 0) return;
   const existing = index.get(key);
@@ -259,9 +265,15 @@ function labelMatches(index: EvidenceIndex, location: SourceLocation, label: str
   return index.get(key)?.some((sourceText) => location.page !== null
     ? sourceText.includes(label) : sourceText.trim() === label) ?? false;
 }
+function evidenceAmountScale(index: EvidenceIndex) {
+  const text = [...index.values()].flat().join(" ").toUpperCase();
+  const scales = [["THOUSANDS", /\bIN\s+THOUSANDS?\b/], ["MILLIONS", /\bIN\s+MILLIONS?\b/]]
+    .flatMap(([scale, pattern]) => (pattern as RegExp).test(text) ? [scale as "THOUSANDS" | "MILLIONS"] : []);
+  return scales.length === 0 ? "UNITS" as const : scales.length === 1 ? scales[0]! : null;
+}
 function parseMoneyToken(token: string) {
-  const negative = token.startsWith("-") || token.startsWith("(");
-  let value = token.replace(/[()\s\u00a0]/g, "").replace(/^[+-]/, "");
+  const negative = token.startsWith("-") || token.startsWith("(") || token.endsWith("-");
+  let value = token.replace(/[()\s\u00a0]/g, "").replace(/^[+-]/, "").replace(/-$/, "");
   const comma = value.lastIndexOf(","); const dot = value.lastIndexOf(".");
   if (comma >= 0 && dot >= 0) {
     const decimal = comma > dot ? "," : ".";
@@ -275,20 +287,25 @@ function parseMoneyToken(token: string) {
     && Math.abs(rawCents - Math.round(rawCents)) < 1e-6 ? cents : null;
 }
 function evidenceAmountsCents(evidence: string) {
-  const withoutDates = evidence.replace(/\b\d{4}[-/]\d{1,2}[-/]\d{1,2}\b/g, " ");
-  const tokens = withoutDates.match(/[+-]?\(?(?:\d{1,3}(?:[ ,.\u00a0]\d{3})+(?:[.,]\d{1,2})?|\d+(?:[.,]\d{1,2})?)\)?/g) ?? [];
+  const withoutDates = evidence.replace(/\b\d{4}-\d{2}-\d{2}(?:T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})?)?/g, " ");
+  const tokens = withoutDates.match(/[+-]?\(?(?:\d{1,3}(?:[ ,.\u00a0]\d{3})+(?:[.,]\d{1,2})?|\d+(?:[.,]\d{1,2})?)\)?-?/g) ?? [];
   return tokens.flatMap((token) => { const cents = parseMoneyToken(token); return cents === null ? [] : [cents]; });
 }
 function unmatchedEvidencePaths(proposal: FinanceReportImportProposalV1, extractedEvidence: string) {
   const evidenceIndex = buildEvidenceIndex(extractedEvidence);
+  const detectedScale = evidenceAmountScale(evidenceIndex);
+  const scale = detectedScale === proposal.report.amountScale
+    ? ({ UNITS: 1, THOUSANDS: 1_000, MILLIONS: 1_000_000 } as const)[detectedScale] : null;
   const paths = proposal.candidates.flatMap((candidate, candidateIndex) => [
     ...(locationMatches(evidenceIndex, candidate.sourceLocation) ? [] : [`candidates.${candidateIndex}.sourceLocation`]),
     ...(labelMatches(evidenceIndex, candidate.sourceLocation, candidate.sourceLabel)
       ? [] : [`candidates.${candidateIndex}.sourceLabel`]),
-    ...(evidenceAmountsCents(candidate.sourceLocation.evidence).includes(candidate.amountCents)
+    ...(scale !== null && evidenceAmountsCents(candidate.sourceLocation.evidence)
+      .some((amount) => amount * scale === candidate.amountCents)
       ? [] : [`candidates.${candidateIndex}.amountCents`]),
   ]);
-  return [...paths, ...proposal.report.currency.evidence.flatMap((location, currencyIndex) =>
+  return [...(scale === null ? ["report.amountScale"] : []), ...paths,
+    ...proposal.report.currency.evidence.flatMap((location, currencyIndex) =>
     locationMatches(evidenceIndex, location) ? [] : [`report.currency.evidence.${currencyIndex}`])].slice(0, 12);
 }
 function forceVisibleExceptions(proposal: FinanceReportImportProposalV1) {

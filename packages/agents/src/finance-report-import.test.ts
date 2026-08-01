@@ -1,23 +1,20 @@
 import type { ModelGateway } from "@corgtex/models";
 import { describe, expect, it, vi } from "vitest";
-import { FinanceReportImportAgentError, financeReportImportProposalV1Schema,
-  interpretFinanceReport, type FinanceReportImportProposalV1 } from "./finance-report-import";
+import { FinanceReportImportAgentError, financeReportImportProposalV1Schema, interpretFinanceReport, type FinanceReportImportProposalV1 } from "./finance-report-import";
 
 function proposal(): FinanceReportImportProposalV1 {
   return {
     contractVersion: 1,
-    report: { title: "Synthetic monthly actuals", reportType: "PROFIT_AND_LOSS", basis: "ACCRUAL",
-      cadence: "MONTHLY", periodStart: "2026-06-01", periodEnd: "2026-06-30", asOfDate: null,
+    report: { title: "Synthetic monthly actuals", reportType: "PROFIT_AND_LOSS", basis: "ACCRUAL", cadence: "MONTHLY",
+      periodStart: "2026-06-01", periodEnd: "2026-06-30", asOfDate: null, amountScale: "UNITS",
       currency: { state: "UNRESOLVED", code: null, evidence: [] } },
     summary: "Synthetic monthly reported actuals proposal.",
     candidates: [{
-      sourceLocation: { page: null, sheet: "June", row: 2, column: 3,
-        evidence: "1250.00" },
-      sourceLabel: "Consulting revenue", sourceAccountPath: ["Revenue", "Consulting"],
-      proposedAccountPath: ["Revenue", "Consulting"], rowKind: "LEAF",
-      periodStart: "2026-06-01", periodEnd: "2026-06-30", amountCents: 125_000,
-      mappingStatus: "MAPPED", confidence: 0.98, reviewStatus: "VERIFIED",
-      exceptionCodes: [], reviewReasons: [],
+      sourceLocation: { page: null, sheet: "June", row: 2, column: 3, evidence: "1250.00" },
+      sourceLabel: "Consulting revenue", sourceAccountPath: ["Revenue", "Consulting"], proposedAccountPath: ["Revenue", "Consulting"],
+      rowKind: "LEAF", periodStart: "2026-06-01",
+      periodEnd: "2026-06-30", amountCents: 125_000, mappingStatus: "MAPPED", confidence: 0.98,
+      reviewStatus: "VERIFIED", exceptionCodes: [], reviewReasons: [],
     }],
   };
 }
@@ -26,22 +23,21 @@ function gateway(outputs: unknown[]) {
   const extract = vi.fn();
   for (const output of outputs) {
     if (output instanceof Error) extract.mockRejectedValueOnce(output);
-    else extract.mockResolvedValueOnce({ output, raw: JSON.stringify(output),
-      usage: { provider: "synthetic", model: "quality-test", inputTokens: 10, outputTokens: 20 } });
+    else extract.mockResolvedValueOnce({ output, raw: JSON.stringify(output), usage:
+      { provider: "synthetic", model: "quality-test", inputTokens: 10, outputTokens: 20 } });
   }
   return { model: { extract } as unknown as Pick<ModelGateway, "extract">, extract };
 }
-const params = { workspaceId: "workspace-synthetic", agentRunId: "run-synthetic",
-  workflowJobId: "job-synthetic", model: "quality-test", fileName: "synthetic.csv",
-  mimeType: "text/csv", extractedEvidence:
-    "{\"sheet\":\"June\",\"row\":2,\"column\":1,\"value\":\"Consulting revenue\"}\n"
-    + "{\"sheet\":\"June\",\"row\":2,\"column\":3,\"value\":\"1250.00\"}" };
+const params = { workspaceId: "workspace-synthetic", agentRunId: "run-synthetic", workflowJobId: "job-synthetic",
+  model: "quality-test", fileName: "synthetic.csv", mimeType: "text/csv", extractedEvidence:
+  "{\"sheet\":\"June\",\"row\":2,\"column\":1,\"value\":\"Consulting revenue\"}\n"
+  + "{\"sheet\":\"June\",\"row\":2,\"column\":3,\"value\":\"1250.00\"}" };
 
 describe("Finance report import proposal contract", () => {
   it("accepts a strict proposal while leaving missing currency unresolved", () => {
     const result = financeReportImportProposalV1Schema.parse(proposal());
     expect(result.report.currency).toEqual({ state: "UNRESOLVED", code: null, evidence: [] });
-    expect(JSON.stringify(result)).not.toContain("USD");
+    expect(result.report.amountScale).toBe("UNITS"); expect(JSON.stringify(result)).not.toContain("USD");
   });
 
   it.each([
@@ -70,8 +66,10 @@ describe("Finance report import proposal contract", () => {
       currency: { state: "EXPLICIT", code: "EUR", evidence: [] } } })],
     ["ambiguous currency evidence", () => ({ ...proposal(), report: { ...proposal().report,
       currency: { state: "EXPLICIT", code: "USD", evidence: [{
-        ...proposal().candidates[0].sourceLocation, evidence: "USD / EUR",
+        ...proposal().candidates[0].sourceLocation, evidence: "usd / eur",
       }] } } })],
+    ["ordinary ISO-shaped word", () => ({ ...proposal(), report: { ...proposal().report, currency: { state: "EXPLICIT",
+      code: "ALL", evidence: [{ ...proposal().candidates[0].sourceLocation, evidence: "ALL" }] } } })],
     ["non-ISO currency code", () => ({ ...proposal(), report: { ...proposal().report,
       currency: { state: "EXPLICIT", code: "ZZZ", evidence: [{
         ...proposal().candidates[0].sourceLocation, evidence: "ZZZ",
@@ -266,11 +264,30 @@ describe("interpretFinanceReport", () => {
         + "{\"sheet\":\"June\",\"row\":2,\"column\":3,\"value\":\"1.250,00\"}",
     })).resolves.toMatchObject({ candidates: [{ amountCents: 125_000 }] });
 
-    const date = proposal(); date.candidates[0].sourceLocation.evidence = "2026-01-01"; date.candidates[0].amountCents = 202_600;
+    const trailing = proposal(); trailing.candidates[0].sourceLocation.evidence = "1,250.00-"; trailing.candidates[0].amountCents = -125_000;
+    await expect(interpretFinanceReport({ ...params, gateway: gateway([trailing]).model,
+      extractedEvidence: `${params.extractedEvidence.replace("1250.00", "1,250.00-")}`,
+    })).resolves.toMatchObject({ candidates: [{ amountCents: -125_000 }] });
+
+    const date = proposal(); date.candidates[0].sourceLocation.evidence = "2026-01-01T00:00:00.000Z"; date.candidates[0].amountCents = 202_600;
     await expect(interpretFinanceReport({ ...params, gateway: gateway([date, date]).model,
       extractedEvidence: "{\"sheet\":\"June\",\"row\":2,\"column\":1,\"value\":\"Consulting revenue\"}\n"
-        + "{\"sheet\":\"June\",\"row\":2,\"column\":3,\"value\":\"2026-01-01\"}",
+        + "{\"sheet\":\"June\",\"row\":2,\"column\":3,\"value\":\"2026-01-01T00:00:00.000Z\"}",
     })).rejects.toBeInstanceOf(FinanceReportImportAgentError);
+  });
+
+  it("uses calculated values and applies a deterministic report scale", async () => {
+    const formula = proposal(); formula.candidates[0].sourceLocation.evidence = "SUM(B1:B1)+999"; formula.candidates[0].amountCents = 99_900;
+    await expect(interpretFinanceReport({ ...params, gateway: gateway([formula, formula]).model,
+      extractedEvidence: `${params.extractedEvidence.slice(0, params.extractedEvidence.lastIndexOf("\n"))}\n{"sheet":"June","row":2,"column":3,"value":"1250.00","formula":"SUM(B1:B1)+999"}`,
+    })).rejects.toBeInstanceOf(FinanceReportImportAgentError);
+
+    const scaled = proposal(); scaled.report.amountScale = "THOUSANDS"; scaled.candidates[0].amountCents = 125_000_000;
+    const understated = structuredClone(scaled); understated.candidates[0].amountCents = 125_000; const scaleModel = gateway([understated, scaled]);
+    await expect(interpretFinanceReport({ ...params, gateway: scaleModel.model,
+      extractedEvidence: `${params.extractedEvidence}\n{"sheet":"June","row":1,"column":1,"value":"Amounts in thousands"}`,
+    })).resolves.toMatchObject({ report: { amountScale: "THOUSANDS" }, candidates: [{ amountCents: 125_000_000 }] });
+    expect(scaleModel.extract).toHaveBeenCalledTimes(2);
   });
 
   it("rejects profile hints that exceed aggregate mapping or character budgets", async () => {
