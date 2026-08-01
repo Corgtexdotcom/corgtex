@@ -1,7 +1,6 @@
 import { AGENT_REGISTRY } from "@corgtex/domain";
 import { defaultModelGateway, resolveModel, type ExtractionRequest, type ModelGateway } from "@corgtex/models";
 import { z } from "zod";
-
 export const FINANCE_REPORT_IMPORT_CONTRACT_VERSION = 1 as const;
 export const FINANCE_REPORT_IMPORT_LOW_CONFIDENCE = 0.85;
 const POSTGRES_INT_MIN = -2_147_483_648;
@@ -86,6 +85,7 @@ const candidateSchema = z.object({
   rowKind: z.enum(["LEAF", "DERIVED"]),
   periodStart: isoDate,
   periodEnd: isoDate,
+  periodEvidence: sourceLocationSchema,
   amountCents: z.number().int().min(POSTGRES_INT_MIN).max(POSTGRES_INT_MAX),
   mappingStatus: z.enum(["MAPPED", "AMBIGUOUS", "UNMAPPED"]),
   confidence: z.number().min(0).max(1),
@@ -109,7 +109,6 @@ const candidateSchema = z.object({
     context.addIssue({ code: "custom", path: ["reviewReasons"], message: "Every exception requires a visible reason." });
   }
 });
-
 export const financeReportImportProposalV1Schema = z.object({
   contractVersion: z.literal(FINANCE_REPORT_IMPORT_CONTRACT_VERSION),
   report: z.object({
@@ -153,7 +152,6 @@ export const financeReportImportProposalV1Schema = z.object({
     candidateIdentities.add(identity);
   });
 });
-
 const profileHintSchema = z.object({
   profileId: bounded(100), version: z.number().int().positive(), layoutFingerprint: bounded(256),
   approvedMappings: z.array(z.object({ sourceLabel: bounded(500), accountPath: hierarchy }).strict()).max(500),
@@ -172,7 +170,6 @@ const inputSchema = z.object({
 export type FinanceReportImportProposalV1 = z.infer<typeof financeReportImportProposalV1Schema>;
 export type FinanceReportImportProfileHint = z.infer<typeof profileHintSchema>;
 type ExtractionGateway = Pick<ModelGateway, "extract">;
-
 export class FinanceReportImportAgentError extends Error {
   readonly code = "FINANCE_REPORT_IMPORT_AGENT_INVALID_OUTPUT";
   constructor() {
@@ -180,10 +177,9 @@ export class FinanceReportImportAgentError extends Error {
     this.name = "FinanceReportImportAgentError";
   }
 }
-
 const instruction = (retryPaths: string[]) => `Interpret deterministic PDF/CSV/XLSX evidence as an editable
 Finance Reported Actuals proposal. Infer type, basis, cadence, dates, amount scale, hierarchy, leaf/derived rows, integer cents,
-and source-located currency evidence without a vendor picker. Return proposals only; never create transactions,
+and source-located period and currency evidence without a vendor picker. Return proposals only; never create transactions,
 apply Finance records, or claim human approval. Profile hints are non-authoritative and every mapping must be
 revalidated. If currency is not explicit, return UNRESOLVED/null and never default to USD. Uncertain mappings must
 be AMBIGUOUS or UNMAPPED with visible exceptions. Classify budget-versus-actual or general-ledger layouts as OTHER,
@@ -210,7 +206,7 @@ const schemaHint = `Strict contract v1 JSON with no additional fields:
     "sourceLocation": { "page": "positive integer|null", "sheet": "string|null",
       "row": "positive integer|null", "column": "positive integer|null", "evidence": "exact source text" },
     "sourceLabel": "string", "sourceAccountPath": ["string"], "proposedAccountPath": ["string"],
-    "rowKind": "LEAF|DERIVED", "periodStart": "YYYY-MM-DD", "periodEnd": "YYYY-MM-DD",
+    "rowKind": "LEAF|DERIVED", "periodStart": "YYYY-MM-DD", "periodEnd": "YYYY-MM-DD", "periodEvidence": "source location",
     "amountCents": "PostgreSQL Int", "mappingStatus": "MAPPED|AMBIGUOUS|UNMAPPED",
     "confidence": "number 0..1", "reviewStatus": "VERIFIED|WARNING|BLOCKER",
     "exceptionCodes": ["LOW_CONFIDENCE|AMBIGUOUS_MAPPING|UNMAPPED_ACCOUNT|OTHER"],
@@ -261,15 +257,31 @@ function locationMatches(index: EvidenceIndex, location: SourceLocation) {
     ? sourceText.includes(location.evidence) : sourceText === location.evidence) ?? false;
 }
 function labelMatches(index: EvidenceIndex, location: SourceLocation, label: string) {
-  const key = location.page !== null ? evidenceKey("page", location.page) : evidenceKey("row", location.sheet!, location.row!);
-  return index.get(key)?.some((sourceText) => location.page !== null
-    ? sourceText.includes(label) : sourceText.trim() === label) ?? false;
+  return location.page !== null ? location.evidence.includes(label)
+    : index.get(evidenceKey("row", location.sheet!, location.row!))?.some((text) => text.trim() === label) ?? false;
 }
 function evidenceAmountScale(index: EvidenceIndex) {
-  const text = [...index.values()].flat().join(" ").toUpperCase();
+  const texts = [...index.values()].flat().filter((text) => /\b(?:AMOUNTS?|VALUES?|CURRENCY)\b|\p{Sc}/iu.test(text) || currencyCodesNamed(text).size > 0);
   const scales = [["THOUSANDS", /\bIN\s+THOUSANDS?\b/], ["MILLIONS", /\bIN\s+MILLIONS?\b/]]
-    .flatMap(([scale, pattern]) => (pattern as RegExp).test(text) ? [scale as "THOUSANDS" | "MILLIONS"] : []);
+    .flatMap(([scale, pattern]) => texts.some((text) => (pattern as RegExp).test(text.toUpperCase())) ? [scale as "THOUSANDS" | "MILLIONS"] : []);
   return scales.length === 0 ? "UNITS" as const : scales.length === 1 ? scales[0]! : null;
+}
+function periodTextMatches(evidence: string, start: string, end: string, cadence: FinanceReportImportProposalV1["report"]["cadence"]) {
+  const text = evidence.toUpperCase(); const date = new Date(`${start}T00:00:00.000Z`);
+  if (text.includes(start) && (start === end || text.includes(end))) return true;
+  const year = date.getUTCFullYear(); const month = date.getUTCMonth(); const monthEnd = new Date(Date.UTC(year, month + 1, 0)).toISOString().slice(0, 10);
+  const name = new Intl.DateTimeFormat("en", { month: "long", timeZone: "UTC" }).format(date).toUpperCase();
+  if (cadence === "MONTHLY" && start.endsWith("-01") && end === monthEnd) {
+    return new RegExp(`\\b(?:${name}|${name.slice(0, 3)})\\b\\s*[-/]?\\s*${year}\\b|\\b${year}[-/]${String(month + 1).padStart(2, "0")}\\b`).test(text);
+  }
+  const quarter = Math.floor(month / 3) + 1;
+  if (cadence === "QUARTERLY" && month % 3 === 0 && start.endsWith("-01") && end === new Date(Date.UTC(year, month + 3, 0)).toISOString().slice(0, 10)) return new RegExp(`\\bQ${quarter}\\s*${year}\\b`).test(text);
+  return cadence === "ANNUAL" && start === `${year}-01-01` && end === `${year}-12-31` ? new RegExp(`\\b${year}\\b`).test(text) : false;
+}
+function periodEvidenceMatches(index: EvidenceIndex, candidate: FinanceReportImportProposalV1["candidates"][number], cadence: FinanceReportImportProposalV1["report"]["cadence"]) {
+  const period = candidate.periodEvidence; const source = candidate.sourceLocation;
+  const related = source.page !== null ? period.page !== null : period.page === null && period.sheet === source.sheet && period.column !== null && period.column === source.column;
+  return related && locationMatches(index, period) && periodTextMatches(period.evidence, candidate.periodStart, candidate.periodEnd, cadence);
 }
 function parseMoneyToken(token: string) {
   const negative = token.startsWith("-") || token.startsWith("(") || token.endsWith("-");
@@ -287,7 +299,7 @@ function parseMoneyToken(token: string) {
     && Math.abs(rawCents - Math.round(rawCents)) < 1e-6 ? cents : null;
 }
 function evidenceAmountsCents(evidence: string) {
-  const withoutDates = evidence.replace(/\b\d{4}-\d{2}-\d{2}(?:T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})?)?/g, " ");
+  const withoutDates = evidence.replace(/\b\d{4}-\d{2}-\d{2}(?:T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})?)?/g, " ").replace(/\b\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b/g, " ");
   return [...withoutDates.matchAll(/[+-]?\(?\s*\p{Sc}?\s*(?:\d{1,3}(?:[ ,.\u00a0]\d{3})+(?:[.,]\d{1,2})?|\d+(?:[.,]\d{1,2})?)\)?-?/gu)]
     .flatMap((match) => { const cents = parseMoneyToken(match[0]); return /^\s*%/.test(withoutDates.slice((match.index ?? 0) + match[0].length)) || cents === null ? [] : [cents]; });
 }
@@ -300,6 +312,7 @@ function unmatchedEvidencePaths(proposal: FinanceReportImportProposalV1, extract
     ...(locationMatches(evidenceIndex, candidate.sourceLocation) ? [] : [`candidates.${candidateIndex}.sourceLocation`]),
     ...(labelMatches(evidenceIndex, candidate.sourceLocation, candidate.sourceLabel)
       ? [] : [`candidates.${candidateIndex}.sourceLabel`]),
+    ...(periodEvidenceMatches(evidenceIndex, candidate, proposal.report.cadence) ? [] : [`candidates.${candidateIndex}.periodEvidence`]),
     ...(scale !== null && evidenceAmountsCents(candidate.sourceLocation.evidence)
       .some((amount) => amount * scale === candidate.amountCents)
       ? [] : [`candidates.${candidateIndex}.amountCents`]),
@@ -326,7 +339,6 @@ function forceVisibleExceptions(proposal: FinanceReportImportProposalV1) {
       : candidate.reviewStatus, exceptionCodes: [...codes], reviewReasons: [...new Set(reasons)].slice(0, 8) };
   }) };
 }
-
 export async function interpretFinanceReport(params: {
   workspaceId: string; workflowJobId?: string; agentRunId?: string; model?: string;
   fileName: string; mimeType: string; extractedEvidence: string;

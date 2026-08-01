@@ -1,7 +1,6 @@
 import type { ModelGateway } from "@corgtex/models";
 import { describe, expect, it, vi } from "vitest";
 import { FinanceReportImportAgentError, financeReportImportProposalV1Schema, interpretFinanceReport, type FinanceReportImportProposalV1 } from "./finance-report-import";
-
 function proposal(): FinanceReportImportProposalV1 {
   return {
     contractVersion: 1,
@@ -13,12 +12,12 @@ function proposal(): FinanceReportImportProposalV1 {
       sourceLocation: { page: null, sheet: "June", row: 2, column: 3, evidence: "1250.00" },
       sourceLabel: "Consulting revenue", sourceAccountPath: ["Revenue", "Consulting"], proposedAccountPath: ["Revenue", "Consulting"],
       rowKind: "LEAF", periodStart: "2026-06-01",
-      periodEnd: "2026-06-30", amountCents: 125_000, mappingStatus: "MAPPED", confidence: 0.98,
+      periodEnd: "2026-06-30", periodEvidence: { page: null, sheet: "June", row: 1, column: 3, evidence: "Jun 2026" },
+      amountCents: 125_000, mappingStatus: "MAPPED", confidence: 0.98,
       reviewStatus: "VERIFIED", exceptionCodes: [], reviewReasons: [],
     }],
   };
 }
-
 function gateway(outputs: unknown[]) {
   const extract = vi.fn();
   for (const output of outputs) {
@@ -30,16 +29,15 @@ function gateway(outputs: unknown[]) {
 }
 const params = { workspaceId: "workspace-synthetic", agentRunId: "run-synthetic", workflowJobId: "job-synthetic",
   model: "quality-test", fileName: "synthetic.csv", mimeType: "text/csv", extractedEvidence:
-  "{\"sheet\":\"June\",\"row\":2,\"column\":1,\"value\":\"Consulting revenue\"}\n"
+  "{\"sheet\":\"June\",\"row\":1,\"column\":3,\"value\":\"Jun 2026\"}\n"
+  + "{\"sheet\":\"June\",\"row\":2,\"column\":1,\"value\":\"Consulting revenue\"}\n"
   + "{\"sheet\":\"June\",\"row\":2,\"column\":3,\"value\":\"1250.00\"}" };
-
 describe("Finance report import proposal contract", () => {
   it("accepts a strict proposal while leaving missing currency unresolved", () => {
     const result = financeReportImportProposalV1Schema.parse(proposal());
     expect(result.report.currency).toEqual({ state: "UNRESOLVED", code: null, evidence: [] });
     expect(result.report.amountScale).toBe("UNITS"); expect(JSON.stringify(result)).not.toContain("USD");
   });
-
   it.each([
     ["unknown fields", () => ({ ...proposal(), providerDetail: "blocked" })],
     ["unstorable specialized report type", () => ({ ...proposal(), report: {
@@ -89,7 +87,6 @@ describe("Finance report import proposal contract", () => {
     expect(financeReportImportProposalV1Schema.safeParse(makeInvalid()).success).toBe(false);
   });
 });
-
 describe("interpretFinanceReport", () => {
   it("uses structured extraction and treats approved profiles only as hints", async () => {
     const model = gateway([proposal()]);
@@ -107,31 +104,35 @@ describe("interpretFinanceReport", () => {
     expect(request.instruction).toContain("budget-versus-actual");
     expect(JSON.parse(request.input).approvedProfileHints).toEqual([expect.objectContaining({ version: 3 })]);
   });
-
   it("preserves worksheet identifiers verbatim during evidence matching", async () => {
     const output = proposal();
     output.candidates[0].sourceLocation.sheet = " June ";
+    output.candidates[0].periodEvidence.sheet = " June ";
     const model = gateway([output]);
     const result = await interpretFinanceReport({ ...params, gateway: model.model,
       extractedEvidence:
-        "{\"sheet\":\" June \",\"row\":2,\"column\":1,\"value\":\"Consulting revenue\"}\n"
+        "{\"sheet\":\" June \",\"row\":1,\"column\":3,\"value\":\"Jun 2026\"}\n"
+        + "{\"sheet\":\" June \",\"row\":2,\"column\":1,\"value\":\"Consulting revenue\"}\n"
         + "{\"sheet\":\" June \",\"row\":2,\"column\":3,\"value\":\"1250.00\"}",
     });
     expect(result.candidates[0].sourceLocation.sheet).toBe(" June ");
     expect(model.extract).toHaveBeenCalledOnce();
   });
-
   it("allows a bounded excerpt from PDF page text", async () => {
     const output = proposal();
     output.candidates[0].sourceLocation = {
       page: 2, sheet: null, row: null, column: null, evidence: "Consulting revenue | 1250.00",
     };
-    const model = gateway([output]);
+    output.candidates[0].periodEvidence = {
+      page: 2, sheet: null, row: null, column: null, evidence: "June 2026",
+    };
+    const wrong = structuredClone(output); wrong.candidates[0].sourceLabel = "Expenses";
+    const model = gateway([wrong, output]);
     await expect(interpretFinanceReport({ ...params, gateway: model.model,
-      extractedEvidence: "{\"page\":2,\"text\":\"Revenue\\nConsulting revenue | 1250.00\\nTotal\"}",
+      extractedEvidence: "{\"page\":2,\"text\":\"June 2026\\nConsulting revenue | 1250.00\\nExpenses | 200.00\"}",
     })).resolves.toMatchObject({ contractVersion: 1 });
+    expect(model.extract).toHaveBeenCalledTimes(2);
   });
-
   it.each([
     ["low confidence", { confidence: 0.6 }, "LOW_CONFIDENCE"],
     ["ambiguous", { mappingStatus: "AMBIGUOUS" }, "AMBIGUOUS_MAPPING"],
@@ -144,7 +145,6 @@ describe("interpretFinanceReport", () => {
     expect(result.candidates[0]).toMatchObject({ reviewStatus: "WARNING",
       exceptionCodes: expect.arrayContaining([exceptionCode]), reviewReasons: [expect.any(String)] });
   });
-
   it("retries strict validation once without trusting a profile hint", async () => {
     const model = gateway([{ ...proposal(), unknownProviderField: "private-output" }, proposal()]);
     await expect(interpretFinanceReport({ ...params, gateway: model.model, approvedProfileHints: [{
@@ -154,7 +154,6 @@ describe("interpretFinanceReport", () => {
     expect(model.extract.mock.calls[1]?.[0].instruction).toContain("failed validation");
     expect(model.extract.mock.calls[1]?.[0].instruction).not.toContain("private-output");
   });
-
   it("points report-window retries at the offending start field", async () => {
     const outside = proposal();
     outside.candidates[0].periodStart = "2026-05-01";
@@ -164,7 +163,6 @@ describe("interpretFinanceReport", () => {
     });
     expect(model.extract.mock.calls[1]?.[0].instruction).toContain("candidates.0.periodStart");
   });
-
   it("forces a model-supplied review reason out of verified state", async () => {
     const output = proposal();
     output.candidates[0].reviewReasons = ["The source label needs human review."];
@@ -173,7 +171,6 @@ describe("interpretFinanceReport", () => {
       candidates: [{ reviewStatus: "WARNING" }],
     });
   });
-
   it("retries fabricated candidate and currency evidence instead of inferring USD", async () => {
     const fabricated = proposal();
     fabricated.candidates[0].sourceLocation.row = 99;
@@ -187,7 +184,6 @@ describe("interpretFinanceReport", () => {
     expect(model.extract.mock.calls[1]?.[0].instruction).toContain("candidates.0.sourceLocation");
     expect(model.extract.mock.calls[1]?.[0].instruction).toContain("report.currency.evidence.0");
   });
-
   it("accepts explicit currency only when its exact source evidence is present", async () => {
     const output = proposal();
     output.report.currency = { state: "EXPLICIT", code: "EUR", evidence: [{
@@ -199,7 +195,6 @@ describe("interpretFinanceReport", () => {
     })).resolves.toMatchObject({ report: { currency: { state: "EXPLICIT", code: "EUR" } } });
     expect(model.extract).toHaveBeenCalledOnce();
   });
-
   it.each([
     ["U.S. Dollars", "USD"],
     ["Euros", "EUR"],
@@ -219,49 +214,42 @@ describe("interpretFinanceReport", () => {
       state: "EXPLICIT", code, evidence: [expect.objectContaining({ evidence })],
     } } });
   });
-
   it("does not treat extraction metadata as source evidence", async () => {
     const metadataClaim = proposal();
     metadataClaim.candidates[0].sourceLocation.evidence = "TEXT";
     const model = gateway([metadataClaim, proposal()]);
     await expect(interpretFinanceReport({ ...params, gateway: model.model,
-      extractedEvidence:
-        "{\"sheet\":\"June\",\"row\":2,\"column\":1,\"value\":\"Consulting revenue\"}\n"
-        + "{\"sheet\":\"June\",\"row\":2,\"column\":3,\"type\":\"TEXT\",\"value\":\"1250.00\"}",
+      extractedEvidence: params.extractedEvidence.replace("\"value\":\"1250.00\"", "\"type\":\"TEXT\",\"value\":\"1250.00\""),
     })).resolves.toMatchObject({ contractVersion: 1 });
     expect(model.extract).toHaveBeenCalledTimes(2);
     expect(model.extract.mock.calls[1]?.[0].instruction).toContain("candidates.0.sourceLocation");
   });
-
   it("requires exact spreadsheet cell evidence instead of accepting fragments", async () => {
     const fragmentClaim = proposal();
     fragmentClaim.candidates[0].sourceLocation.evidence = "1250";
     const model = gateway([fragmentClaim, proposal()]);
     await expect(interpretFinanceReport({ ...params, gateway: model.model,
-      extractedEvidence:
-        "{\"sheet\":\"June\",\"row\":2,\"column\":1,\"value\":\"Consulting revenue\"}\n"
-        + "{\"sheet\":\"June\",\"row\":2,\"column\":3,\"value\":\"1250.00\"}",
+      extractedEvidence: params.extractedEvidence,
     })).resolves.toMatchObject({ contractVersion: 1 });
     expect(model.extract).toHaveBeenCalledTimes(2);
   });
-
   it("retries a source-bound amount mismatch", async () => {
     const mismatch = proposal(); mismatch.candidates[0].amountCents = 999;
     const model = gateway([mismatch, proposal()]);
     await expect(interpretFinanceReport({ ...params, gateway: model.model })).resolves.toMatchObject({ contractVersion: 1 });
     expect(model.extract.mock.calls[1]?.[0].instruction).toContain("candidates.0.amountCents");
-
     const wrongLabel = proposal(); wrongLabel.candidates[0].sourceLabel = "Invented account";
     const labelModel = gateway([wrongLabel, proposal()]);
     await expect(interpretFinanceReport({ ...params, gateway: labelModel.model })).resolves.toMatchObject({ contractVersion: 1 });
     expect(labelModel.extract.mock.calls[1]?.[0].instruction).toContain("candidates.0.sourceLabel");
+    const shifted = proposal(); shifted.report.periodStart = "2026-05-01"; shifted.candidates[0].periodStart = "2026-05-01"; shifted.candidates[0].periodEnd = "2026-05-31";
+    const periodModel = gateway([shifted, proposal()]);
+    await expect(interpretFinanceReport({ ...params, gateway: periodModel.model })).resolves.toMatchObject({ contractVersion: 1 }); expect(periodModel.extract.mock.calls[1]?.[0].instruction).toContain("candidates.0.periodEvidence");
   });
-
   it("parses international money without treating ISO dates as amounts", async () => {
     const european = proposal(); european.candidates[0].sourceLocation.evidence = "1.250,00";
     await expect(interpretFinanceReport({ ...params, gateway: gateway([european]).model,
-      extractedEvidence: "{\"sheet\":\"June\",\"row\":2,\"column\":1,\"value\":\"Consulting revenue\"}\n"
-        + "{\"sheet\":\"June\",\"row\":2,\"column\":3,\"value\":\"1.250,00\"}",
+      extractedEvidence: params.extractedEvidence.replace("1250.00", "1.250,00"),
     })).resolves.toMatchObject({ candidates: [{ amountCents: 125_000 }] });
     for (const evidence of ["1,250.00-", "($1,250.00)"]) {
       const negative = proposal(); negative.candidates[0].sourceLocation.evidence = evidence; negative.candidates[0].amountCents = -125_000;
@@ -269,7 +257,7 @@ describe("interpretFinanceReport", () => {
         extractedEvidence: params.extractedEvidence.replace("1250.00", evidence),
       })).resolves.toMatchObject({ candidates: [{ amountCents: -125_000 }] });
     }
-    for (const [evidence, amount] of [["2026-01-01T00:00:00.000Z", 202_600], ["12.5%", 1_250]] as const) {
+    for (const [evidence, amount] of [["2026-01-01T00:00:00.000Z", 202_600], ["1/1/2026", 100], ["12.5%", 1_250]] as const) {
       const nonMoney = proposal(); nonMoney.candidates[0].sourceLocation.evidence = evidence; nonMoney.candidates[0].amountCents = amount;
       await expect(interpretFinanceReport({ ...params, gateway: gateway([nonMoney, nonMoney]).model,
         extractedEvidence: params.extractedEvidence.replace("1250.00", evidence),
@@ -281,15 +269,18 @@ describe("interpretFinanceReport", () => {
     await expect(interpretFinanceReport({ ...params, gateway: gateway([formula, formula]).model,
       extractedEvidence: `${params.extractedEvidence.slice(0, params.extractedEvidence.lastIndexOf("\n"))}\n{"sheet":"June","row":2,"column":3,"value":"1250.00","formula":"SUM(B1:B1)+999"}`,
     })).rejects.toBeInstanceOf(FinanceReportImportAgentError);
-
     const scaled = proposal(); scaled.report.amountScale = "THOUSANDS"; scaled.candidates[0].amountCents = 125_000_000;
     const understated = structuredClone(scaled); understated.candidates[0].amountCents = 125_000; const scaleModel = gateway([understated, scaled]);
     await expect(interpretFinanceReport({ ...params, gateway: scaleModel.model,
       extractedEvidence: `${params.extractedEvidence}\n{"sheet":"June","row":1,"column":1,"value":"Amounts in thousands"}`,
     })).resolves.toMatchObject({ report: { amountScale: "THOUSANDS" }, candidates: [{ amountCents: 125_000_000 }] });
     expect(scaleModel.extract).toHaveBeenCalledTimes(2);
+    const contextModel = gateway([scaled, proposal()]);
+    await expect(interpretFinanceReport({ ...params, gateway: contextModel.model,
+      extractedEvidence: `${params.extractedEvidence}\n{"sheet":"June","row":3,"column":1,"value":"Employees in thousands"}`,
+    })).resolves.toMatchObject({ report: { amountScale: "UNITS" }, candidates: [{ amountCents: 125_000 }] });
+    expect(contextModel.extract).toHaveBeenCalledTimes(2);
   });
-
   it("rejects profile hints that exceed aggregate mapping or character budgets", async () => {
     const model = gateway([proposal()]);
     const mappings = Array.from({ length: 500 }, (_, index) => ({
@@ -302,7 +293,6 @@ describe("interpretFinanceReport", () => {
     }] })).rejects.toMatchObject({
       issues: [expect.objectContaining({ path: ["approvedProfileHints"] })],
     });
-
     const tooManyMappings = Array.from({ length: 5 }, (_, profileIndex) => ({
       profileId: `profile-${profileIndex}`, version: 1, layoutFingerprint: `layout-${profileIndex}`,
       approvedMappings: Array.from({ length: 401 }, (_, mappingIndex) => ({
@@ -316,7 +306,6 @@ describe("interpretFinanceReport", () => {
     });
     expect(model.extract).not.toHaveBeenCalled();
   });
-
   it("sanitizes terminal invalid output while preserving transient retries", async () => {
     const parseError = Object.assign(new Error("raw provider content"),
       { name: "ExtractionParseError", raw: "private-output" });
@@ -327,7 +316,6 @@ describe("interpretFinanceReport", () => {
       message: "The financial report could not be interpreted safely. Please retry." });
     expect(JSON.stringify(caught)).not.toContain("private-output");
     expect(invalidModel.extract).toHaveBeenCalledTimes(2);
-
     const transient = new Error("temporarily unavailable");
     const transientModel = gateway([transient]);
     await expect(interpretFinanceReport({ ...params, gateway: transientModel.model })).rejects.toBe(transient);
