@@ -212,7 +212,7 @@ export function validateFinanceReportEvidenceSourcesV1(input: unknown): FinanceR
     exactKeys(input, ["format", "extractedEvidence", "claims"], undefined, "INVALID_INPUT");
     if (!new Set(["PDF", "CSV", "XLSX"]).has(input.format as string)
       || typeof input.extractedEvidence !== "string" || !Array.isArray(input.claims)
-      || input.claims.length === 0 || input.claims.length > 1_000 || Object.keys(input.claims).length !== input.claims.length) fail("INVALID_INPUT");
+      || input.claims.length === 0 || input.claims.length > 1_000 || Object.keys(input.claims).length !== input.claims.length || Object.keys(input.claims).some((key, index) => key !== String(index))) fail("INVALID_INPUT");
     const format = input.format as FinanceReportEvidenceFormat;
     const index = buildIndex(format, input.extractedEvidence);
     const budget = { total: 0 }, claims = input.claims.map((rawClaim) => parseClaim(rawClaim, budget));
