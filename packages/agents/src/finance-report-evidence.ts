@@ -33,7 +33,7 @@ type Bound = { fact: FinanceReportEvidenceSourceFact; coordinateKey: string;
   start: number; end: number; wholeAmount: boolean; evidence: string };
 class EvidenceError extends Error { constructor(public readonly code: FinanceReportEvidenceBlockerCode, public readonly claimId?: string) { super(code); } }
 function fail(code: FinanceReportEvidenceBlockerCode, claimId?: string): never { throw new EvidenceError(code, claimId); }
-const isRecord = (value: unknown): value is Record<string, unknown> => Boolean(value) && typeof value === "object" && !Array.isArray(value);
+const isRecord = (value: unknown): value is Record<string, unknown> => Boolean(value) && typeof value === "object" && !Array.isArray(value) && [Object.prototype, null].includes(Object.getPrototypeOf(value));
 function exactKeys(value: Record<string, unknown>, allowed: string[], required = allowed, code: FinanceReportEvidenceBlockerCode = "MALFORMED_EVIDENCE") {
   if (!required.every((key) => Object.hasOwn(value, key)) || Reflect.ownKeys(value).some((key) => typeof key !== "string" || !allowed.includes(key)) || Object.values(Object.getOwnPropertyDescriptors(value)).some((descriptor) => !("value" in descriptor))) fail(code);
 }
