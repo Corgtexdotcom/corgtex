@@ -78,15 +78,24 @@ describe("Finance report evidence validator v1", () => {
 
   it.each([
     ["scientific fraction", "1e-7", 100], ["scientific overflow", "1e+21", 100],
+    ["spaced scientific", "1e 3", 300], ["spaced signed scientific", "1e+ 3", 300],
+    ["NBSP scientific", "1e+ 3", 300],
     ["percent", "Gross margin 19.99%", 1_999], ["per-mille", "Loss 2‰", 200],
+    ["percent word", "Gross margin 19.99 percent", 1_999], ["per cent words", "Margin 19.99 per cent", 1_999],
+    ["per mille words", "Loss 2 per mille", 200], ["basis points", "Change 25 bps", 2_500],
     ["date fragment", "2026-01-01", 202_600], ["compound", "100/200", 10_000], ["colon compound", "12:30", 1_200],
+    ["fiscal year", "FY 2026", 202_600], ["month year", "January 2026", 202_600],
+    ["quarter year", "Q1 2026", 202_600], ["year fiscal", "2026 fiscal year", 202_600],
     ["thousands suffix", "$1.2M", 120], ["unit suffix", "1,250k", 125_000],
     ["million suffix", "$1 million", 100], ["billion suffix", "2 billion", 200], ["bn suffix", "3 bn", 300], ["mm suffix", "4 mm", 400],
+    ["crore suffix", "1 crore", 100], ["lakh suffix", "2 lakh", 200], ["lac suffix", "3 lacs", 300],
     ["cent symbol", "50¢", 5_000], ["cent word", "50 cents", 5_000],
     ["prefix cent", "¢50", 5_000], ["prefix percent", "%19.99", 1_999], ["prefix per-mille", "‰2", 200],
     ["compact date", "20260101", 2_026_010_100], ["identifier", "GL-100", 10_000], ["trailing identifier", "100-GL", 10_000],
     ["decimal identifier", "INV-19.99", 1_999],
     ["typographic identifier", "GL–100", 10_000], ["typographic decimal identifier", "INV‐19.99", 1_999],
+    ["underscore identifier", "GL_100", 10_000], ["slash identifier", "INV/19.99", 1_999],
+    ["colon identifier", "PO:100", 10_000], ["hash identifier", "GL#100", 10_000],
     ["zero decimal ambiguity", "0.125", 12_500], ["zero comma ambiguity", "0,125", 12_500],
     ["thousand word", "1 thousand", 100], ["trillion word", "2 trillion", 200], ["tn suffix", "3 tn", 300], ["mn suffix", "5 mn", 500],
     ["bounded long token", "1".repeat(50_000), 0],
@@ -112,16 +121,32 @@ describe("Finance report evidence validator v1", () => {
   });
 
   it("rejects true mixed or malformed currency and never defaults unresolved evidence", () => {
-    for (const shown of ["USD / EUR", "Amounts in USD; prior year in EUR", "Currency: USD and EUR", "Currency: USD, EUR"]) {
+    for (const shown of ["USD / EUR", "USD and EUR", "USD, EUR", "USD & EUR",
+      "Amounts in USD; prior year in EUR", "Currency: USD and EUR", "Currency: USD, EUR"]) {
       blocker(validate("PDF", pdf(shown), [currencyClaim(pdfSource(shown))]), "MULTI_CURRENCY");
     }
-    for (const shown of ["Currency: ZZZ", "Currency: usd", "Currency: USD and ZZZ", "Currency: USD and eur"]) {
+    for (const shown of ["Currency: ZZZ", "Currency: usd", "Currency: USD and ZZZ", "Currency: USD and eur",
+      "USD and ZZZ", "Amounts in ZZZ", "Currency: US1", "Currency: U", "Currency: USDXX", "CCY=12"]) {
       blocker(validate("CSV", cells("CSV", [{ type: "TEXT", value: shown }]), [currencyClaim(cellSource("CSV", shown))]), "INVALID_CURRENCY");
     }
     const unresolved = validate("PDF", pdf("Denomination unavailable"), [currencyClaim(pdfSource("Denomination unavailable"))]);
     expect(unresolved.facts.at(-1)).toMatchObject({ kind: "CURRENCY", state: "UNRESOLVED", code: null });
     const ordinaryAll = validate("PDF", pdf("Amounts included in ALL departments"), [currencyClaim(pdfSource("Amounts included in ALL departments"))]);
     expect(ordinaryAll.facts.at(-1)).toMatchObject({ kind: "CURRENCY", state: "UNRESOLVED", code: null });
+    for (const shown of ["Currency unavailable", "CCY: not specified"]) {
+      expect(validate("PDF", pdf(shown), [currencyClaim(pdfSource(shown))]).facts.at(-1))
+        .toMatchObject({ kind: "CURRENCY", state: "UNRESOLVED", code: null });
+    }
+  });
+
+  it("limits currency lists to the actual contextual clause", () => {
+    for (const shown of ["Amounts in USD, reported in the notes", "Currency: USD and tax excluded",
+      "Currency: USD and VAT excluded"]) {
+      expect(validate("PDF", pdf(shown), [currencyClaim(pdfSource(shown))]).facts.at(-1))
+        .toMatchObject({ kind: "CURRENCY", state: "EXPLICIT", code: "USD" });
+    }
+    expect(validate("PDF", pdf("Narrative reported in PDF"), [currencyClaim(pdfSource("Narrative reported in PDF"))]).facts.at(-1))
+      .toMatchObject({ kind: "CURRENCY", state: "UNRESOLVED", code: null });
   });
 
   it("indexes once by exact identifiers and rejects duplicate, ambiguous, or overlapping claims", () => {

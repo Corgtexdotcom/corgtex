@@ -141,7 +141,9 @@ function bind(index: Index, format: FinanceReportEvidenceFormat, claimSource: Fi
     rawNumber: format === "XLSX", cell };
 }
 
-const UNSAFE_AMOUNT = /(?:[%‰¢]\s*\d|(?:19|20)\d{2}(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])|\d[\d.,']{0,64}\s*(?:[%‰¢]|(?:k|m|b|bn|mm|mn|tn|thousands?|millions?|billions?|trillions?)\b|cents?\b)|\d(?:[.,]\d+)?[eE][+\-−]?\d+|\d\s*[-/:]\s*\d)/iu;
+const UNSAFE_AMOUNT = /(?:[%‰¢]\s*\d|(?:19|20)\d{2}(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])|\d[\d.,']{0,64}\s*(?:[%‰¢]|(?:k|m|b|bn|mm|mn|tn|hundreds?|thousands?|millions?|billions?|trillions?|quadrillions?|lakhs?|lacs?|crores?)\b|(?:pct|percent|per\s*cent|per\s*mille|basis\s*points?|bps)\b|cents?\b)|\b(?:pct|percent|per\s*cent|per\s*mille)\s+\d|\d(?:[.,]\d+)?\s*[eE]\s*[+\-−]?\s*\d+|\d\s*[-/:]\s*\d)/iu;
+const DATE_CONTEXT_AMOUNT = /\b(?:(?:FY|fiscal(?:\s+year)?|year|Q[1-4]|jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\s*(?:19|20)\d{2}|(?:19|20)\d{2}\s*(?:FY|fiscal(?:\s+year)?|year|Q[1-4]))\b/iu;
+const IDENTIFIER_AMOUNT = /[\p{L}\p{N}]{1,64}[_/#:]\s*\d/iu;
 const MONEY = /(?<![\p{L}\p{N}.,'\p{Pd}−])\(?[+\-−]?\s*\p{Sc}?\s*\d(?:[\d.,' \u00a0\u202f]*\d)?\s*[\-−]?\)?(?![\p{L}\p{N}'\p{Pd}−]|[.,][\p{L}\p{N}])/gu;
 function tokenCents(token: string, rawNumber: boolean) {
   const trimmed = token.trim();
@@ -167,7 +169,7 @@ function tokenCents(token: string, rawNumber: boolean) {
   return cents < BigInt(INT_MIN) || cents > BigInt(INT_MAX) ? null : Number(cents);
 }
 function amountMatches(evidence: string, expected: number, rawNumber: boolean) {
-  if (UNSAFE_AMOUNT.test(evidence)) return false;
+  if (UNSAFE_AMOUNT.test(evidence) || DATE_CONTEXT_AMOUNT.test(evidence) || IDENTIFIER_AMOUNT.test(evidence)) return false;
   const tokens = evidence.match(MONEY) ?? [];
   const values = tokens.map((token) => tokenCents(token, rawNumber));
   return values.length === 1 && values[0] === expected;
@@ -175,23 +177,41 @@ function amountMatches(evidence: string, expected: number, rawNumber: boolean) {
 
 function currencyFact(evidence: string, claimId: string): FinanceReportEvidenceFact {
   const trim = evidence.trim(); const contextual = new Set<string>();
-  const words = [...evidence.matchAll(/\b[A-Z]{3}\b/g)].filter((match) => ISO_CODES.has(match[0]));
-  for (const match of words) {
-    const before = evidence.slice(Math.max(0, match.index! - 24), match.index);
-    const after = evidence.slice(match.index! + 3, match.index! + 27);
-    if (trim === match[0] || /(?:currency|ccy)\s*[:=-]?\s*$/i.test(before)
-      || (match[0] !== "ALL" && /\bin\s*[:=-]?\s*$/i.test(before))
-      || /\/\s*$/.test(before) || /^\s*\//.test(after)) contextual.add(match[0]);
+  const add = (raw: string, explicit: boolean) => {
+    const possible = /^[A-Z0-9]{1,8}$/.test(raw) || ISO_CODES.has(raw.toUpperCase());
+    if (!explicit && !possible) return false;
+    if (!/^[A-Z]{3}$/.test(raw) || !ISO_CODES.has(raw)) fail("INVALID_CURRENCY", claimId);
+    contextual.add(raw);
+    return true;
+  };
+  const unresolvedLabel = /\b(?:currency|ccy)\s*[:=-]?\s*(?:n\/a|unknown|unavailable|unspecified|none|not\s+(?:stated|specified|available))\b/i.test(evidence);
+  const stated = unresolvedLabel ? null : /\b(?:currency|ccy)\s*[:=-]?\s*([^\s,;&/]+)/i.exec(evidence);
+  if (stated) {
+    add(stated[1]!, true);
+    let rest = evidence.slice(stated.index + stated[0].length);
+    while (true) {
+      const next = /^\s*(?:[,;&/]|\band\b)\s*([^\s,;&/]+)/i.exec(rest);
+      if (!next) break;
+      const tail = rest.slice(next[0].length);
+      const known = ISO_CODES.has(next[1]!.toUpperCase());
+      const listContinues = !tail.trim() || /^\s*(?:[,;&/]|\band\b)/i.test(tail);
+      if (!known && !(/^[A-Z0-9]{1,8}$/.test(next[1]!) && listContinues)) break;
+      add(next[1]!, true);
+      rest = rest.slice(next[0].length);
+    }
   }
-  const named = new Set(words.map((match) => match[0]).filter((code) => code !== "ALL" || contextual.has(code)));
-  const stated = [...evidence.matchAll(/\b(?:currency|ccy|in)\s*[:=-]?\s*([A-Za-z]{2,4})\b/gi)].map((match) => match[1]!);
-  const listed = contextual.size === 0 ? [] : [...evidence.matchAll(/(?:[,&;/]|\band\b)\s*([A-Za-z]{2,4})\b/gi)].map((match) => match[1]!);
-  const slash = evidence.match(/\b([A-Z]{3})\s*\/\s*([A-Z]{3})\b/);
-  if (stated.some((code) => code !== code.toUpperCase() || !ISO_CODES.has(code))
-    || listed.some((code) => code !== code.toUpperCase() || !ISO_CODES.has(code))
-    || (slash && (!ISO_CODES.has(slash[1]!) || !ISO_CODES.has(slash[2]!)))
-    || (/^[A-Za-z]{2,4}$/.test(trim) && (!/^[A-Z]{3}$/.test(trim) || !ISO_CODES.has(trim)))) fail("INVALID_CURRENCY", claimId);
-  if (contextual.size > 1 || (contextual.size === 1 && named.size > 1)) fail("MULTI_CURRENCY", claimId);
+  for (const match of evidence.matchAll(/\b(?:amounts?|figures?|values?)\s+in\b\s*[:=-]?\s*([A-Za-z0-9]{1,8})\b/gi)) {
+    if (match[1] !== "ALL") add(match[1]!, true);
+  }
+  for (const match of evidence.matchAll(/\bin\b\s*[:=-]?\s*([A-Za-z0-9]{1,8})\b/gi)) {
+    if (match[1] !== "ALL" && ISO_CODES.has(match[1]!.toUpperCase())) add(match[1]!, true);
+  }
+  if (/^[A-Za-z0-9]{1,8}(?:\s*(?:,|&|;|\/|\band\b)\s*[A-Za-z0-9]{1,8})+$/i.test(trim)) {
+    for (const item of trim.split(/\s*(?:,|&|;|\/|\band\b)\s*/i)) add(item, true);
+  } else if (/^[A-Za-z0-9]{1,8}$/.test(trim)) {
+    add(trim, true);
+  }
+  if (contextual.size > 1) fail("MULTI_CURRENCY", claimId);
   const code = contextual.values().next().value as string | undefined;
   return code ? { kind: "CURRENCY", claimId, state: "EXPLICIT", code, registryVersion: ISO_4217_REGISTRY_VERSION }
     : { kind: "CURRENCY", claimId, state: "UNRESOLVED", code: null, registryVersion: ISO_4217_REGISTRY_VERSION };
