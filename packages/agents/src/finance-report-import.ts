@@ -2,23 +2,18 @@ import { AGENT_REGISTRY } from "@corgtex/domain";
 import type { FinanceFileFormat } from "@corgtex/knowledge";
 import { defaultModelGateway, resolveModel, type ExtractionRequest, type ModelGateway } from "@corgtex/models";
 import { z } from "zod";
-
 export const FINANCE_REPORT_IMPORT_CONTRACT_VERSION = 1 as const;
-const INT_MIN = -2_147_483_648;
-const INT_MAX = 2_147_483_647;
+const [INT_MIN, INT_MAX] = [-2_147_483_648, 2_147_483_647];
 const ISO_CODES = new Set(Intl.supportedValuesOf("currency"));
-const exact = (max: number) => z.string().min(1).max(max)
-  .refine((value) => value.trim().length > 0, "Expected non-blank text.");
+const exact = (max: number) => z.string().min(1).max(max).refine((value) => value.trim().length > 0, "Expected non-blank text.");
 const isoDate = z.string().regex(/^\d{4}-\d{2}-\d{2}$/).refine((value) => {
   const date = new Date(`${value}T00:00:00.000Z`);
   return Number(value.slice(0, 4)) >= 1_000 && !Number.isNaN(date.valueOf())
     && date.toISOString().slice(0, 10) === value;
 }, "Expected a supported ISO calendar date.");
-const pdfSource = z.object({ kind: z.literal("PDF"), page: z.number().int().positive().max(250),
-  evidence: exact(50_000) }).strict();
-const cellSource = z.object({ kind: z.literal("CELL"), sheet: exact(200),
-  row: z.number().int().positive().max(20_000), column: z.number().int().positive().max(250_000),
-  evidence: exact(50_000) }).strict();
+const pdfSource = z.object({ kind: z.literal("PDF"), page: z.number().int().positive().max(250), evidence: exact(50_000) }).strict();
+const cellSource = z.object({ kind: z.literal("CELL"), sheet: exact(200), row: z.number().int().positive().max(20_000),
+  column: z.number().int().positive().max(250_000), evidence: exact(50_000) }).strict();
 const sourceSchema = z.discriminatedUnion("kind", [pdfSource, cellSource]);
 const hierarchy = z.array(exact(160)).min(1).max(12);
 const candidateSchema = z.object({
@@ -28,8 +23,8 @@ const candidateSchema = z.object({
   amountCents: z.number().int().min(INT_MIN).max(INT_MAX),
   mappingStatus: z.enum(["MAPPED", "AMBIGUOUS", "UNMAPPED"]), confidence: z.number().min(0).max(1),
   reviewStatus: z.enum(["VERIFIED", "WARNING"]),
-  exceptionCodes: z.array(z.enum(["LOW_CONFIDENCE", "AMBIGUOUS_MAPPING", "UNMAPPED_ACCOUNT",
-    "DERIVED_ROW", "OTHER"])).max(8), reviewReasons: z.array(exact(500)).max(8),
+  exceptionCodes: z.array(z.enum(["LOW_CONFIDENCE", "AMBIGUOUS_MAPPING", "UNMAPPED_ACCOUNT", "DERIVED_ROW", "OTHER"])).max(8),
+  reviewReasons: z.array(exact(500)).max(8),
 }).strict().superRefine((value, context) => {
   if (value.periodStart > value.periodEnd) context.addIssue({ code: "custom", path: ["periodEnd"], message: "Reversed period." });
   if ((value.mappingStatus === "MAPPED" && value.proposedAccountPath.length === 0)
@@ -64,12 +59,10 @@ export const financeReportImportProposalV1Schema = z.object({
   if (candidate.periodEnd > value.report.periodEnd) context.addIssue({ code: "custom",
     path: ["candidates", index, "periodEnd"], message: "Candidate ends outside report period." });
 }));
-const profileSchema = z.object({ profileId: exact(100), version: z.number().int().positive(),
-  layoutFingerprint: exact(256), approvedMappings: z.array(z.object({ sourceLabel: exact(500),
-    accountPath: hierarchy }).strict()).max(500) }).strict();
-const inputSchema = z.object({ format: z.enum(["PDF", "CSV", "XLSX"]),
-  extractedEvidence: z.string().min(1).max(2_000_000), approvedProfileHints: z.array(profileSchema).max(20),
-}).strict().superRefine((value, context) => {
+const profileSchema = z.object({ profileId: exact(100), version: z.number().int().positive(), layoutFingerprint: exact(256),
+  approvedMappings: z.array(z.object({ sourceLabel: exact(500), accountPath: hierarchy }).strict()).max(500) }).strict();
+const inputSchema = z.object({ format: z.enum(["PDF", "CSV", "XLSX"]), extractedEvidence: z.string().min(1).max(2_000_000),
+  approvedProfileHints: z.array(profileSchema).max(20) }).strict().superRefine((value, context) => {
   const count = value.approvedProfileHints.reduce((sum, hint) => sum + hint.approvedMappings.length, 0);
   if (count > 2_000 || JSON.stringify(value.approvedProfileHints).length > 200_000) context.addIssue({
     code: "custom", path: ["approvedProfileHints"], message: "Profile hint budget exceeded." });
@@ -77,9 +70,8 @@ const inputSchema = z.object({ format: z.enum(["PDF", "CSV", "XLSX"]),
 export type FinanceReportImportProposalV1 = z.infer<typeof financeReportImportProposalV1Schema>;
 export type FinanceReportImportProfileHint = z.infer<typeof profileSchema>;
 type Source = z.infer<typeof sourceSchema>;
-type SourceIndex = { pages: Map<number, string>; cells: Map<string, Set<string>> };
-type Claim = { key: string; start: number; end: number };
-
+type Claim = { key: string; start: number; end: number; cellMode?: 0 | 1 | 2 };
+type SourceIndex = { pages: Map<number, Map<string, Claim | null>>; cells: Map<string, Map<string, 0 | 1 | 2>> };
 export class FinanceReportImportAgentError extends Error {
   readonly code = "FINANCE_REPORT_IMPORT_AGENT_INVALID_OUTPUT";
   constructor() {
@@ -87,7 +79,6 @@ export class FinanceReportImportAgentError extends Error {
     this.name = "FinanceReportImportAgentError";
   }
 }
-
 function fail(): never { throw new FinanceReportImportAgentError(); }
 const cellKey = (sheet: string, row: number, column: number) => JSON.stringify([sheet, row, column]);
 export function buildFinanceReportSourceIndex(format: FinanceFileFormat, evidence: string): SourceIndex {
@@ -101,17 +92,25 @@ export function buildFinanceReportSourceIndex(format: FinanceFileFormat, evidenc
     if (format === "PDF") {
       if (!Number.isInteger(value.page) || (value.page as number) <= 0 || typeof value.text !== "string"
         || index.pages.has(value.page as number)) fail();
-      index.pages.set(value.page as number, value.text);
+      const occurrences = new Map<string, Claim | null>(); let start = 0;
+      for (const text of value.text.split("\n")) {
+        if (text) occurrences.set(text, occurrences.has(text) ? null : { key: `PDF:${value.page}`, start, end: start + text.length });
+        start += text.length + 1;
+      }
+      index.pages.set(value.page as number, occurrences);
     } else if (typeof value.sheet === "string" && Number.isInteger(value.rowCount)
       && Number.isInteger(value.columnCount) && value.row === undefined) {
       continue;
     } else {
       if (typeof value.sheet !== "string" || !value.sheet.trim() || !Number.isInteger(value.row)
         || (value.row as number) <= 0 || !Number.isInteger(value.column) || (value.column as number) <= 0) fail();
-      const texts = [value.value, value.displayValue].filter((item): item is string => typeof item === "string");
+      const result = value.type === "FORMULA" ? value.resultType : value.type;
+      if (!["BOOLEAN", "DATE", "ERROR", "NUMBER", "TEXT"].includes(result as string) || (format === "CSV" && value.type !== "TEXT")) fail();
+      const monetary = result === "NUMBER"; const texts = new Map<string, 0 | 1 | 2>();
+      if (typeof value.value === "string") texts.set(value.value, format === "CSV" ? 1 : monetary ? 2 : 0);
+      if (typeof value.displayValue === "string") texts.set(value.displayValue, monetary ? 1 : 0);
       const key = cellKey(value.sheet, value.row as number, value.column as number);
-      if (texts.length === 0 || index.cells.has(key)) fail();
-      index.cells.set(key, new Set(texts));
+      if (texts.size === 0 || index.cells.has(key)) fail(); index.cells.set(key, texts);
     }
   }
   if ((format === "PDF" ? index.pages.size : index.cells.size) === 0) fail();
@@ -121,31 +120,28 @@ function bind(index: SourceIndex, source: Source, format: FinanceFileFormat): Cl
   if ((format === "PDF") !== (source.kind === "PDF")) return null;
   if (source.kind === "CELL") {
     const key = cellKey(source.sheet, source.row, source.column);
-    return index.cells.get(key)?.has(source.evidence) ? { key: `CELL:${key}`, start: 0, end: 1 } : null;
+    const cellMode = index.cells.get(key)?.get(source.evidence);
+    return cellMode === undefined ? null : { key: `CELL:${key}`, start: 0, end: 1, cellMode };
   }
-  const text = index.pages.get(source.page);
-  const start = text?.indexOf(source.evidence) ?? -1;
-  return start >= 0 && text!.lastIndexOf(source.evidence) === start
-    ? { key: `PDF:${source.page}`, start, end: start + source.evidence.length } : null;
+  return index.pages.get(source.page)?.get(source.evidence) ?? null;
 }
-function tokenCents(token: string) {
+function tokenCents(token: string, rawNumber = false) {
   const negative = token.includes("(") || token.trimStart().startsWith("-");
-  const raw = token.replace(/[()+'\s-]/g, "");
+  const raw = token.replace(/[()+'\s\p{Sc}-]/gu, "");
   const comma = raw.lastIndexOf(","); const dot = raw.lastIndexOf("."); const separator = Math.max(comma, dot);
   const tail = separator < 0 ? 0 : raw.length - separator - 1;
-  if (separator >= 0 && tail > 2 && !(tail === 3 && /^\d{1,3}(?:[.,]\d{3})+$/.test(raw))) return null;
+  if (separator >= 0 && tail > 2 && (rawNumber || tail !== 3 || !/^\d{1,3}(?:[.,]\d{3})+$/.test(raw))) return null;
   const decimal = separator >= 0 && tail <= 2 ? separator : -1;
-  let normalized = "";
-  for (const [index, char] of [...raw].entries()) {
-    if (/\d/.test(char)) normalized += char;
-    else if (index === decimal) normalized += ".";
-  }
-  const cents = Number(normalized) * 100 * (negative ? -1 : 1);
-  return Number.isSafeInteger(cents) && cents >= INT_MIN && cents <= INT_MAX ? cents : null;
+  const whole = raw.slice(0, decimal < 0 ? raw.length : decimal).replace(/[.,']/g, "");
+  const fraction = decimal < 0 ? "" : raw.slice(decimal + 1);
+  if (!/^\d{1,8}$/.test(whole) || !/^\d{0,2}$/.test(fraction)) return null;
+  const magnitude = (BigInt(whole) * 100n) + BigInt(fraction.padEnd(2, "0") || "0");
+  const cents = negative ? -magnitude : magnitude;
+  return cents >= BigInt(INT_MIN) && cents <= BigInt(INT_MAX) ? Number(cents) : null;
 }
-function amountMatches(evidence: string, amountCents: number) {
-  const tokens = evidence.match(/(?<![\d.,'])\(?[-+]?\p{Sc}?\s*(?:\d{1,3}(?:[.,']\d{3})+|\d+)(?:[.,]\d+)?\)?(?![\d.,'])/gu) ?? [];
-  return tokens.map(tokenCents).filter((value) => value === amountCents).length === 1;
+function amountMatches(evidence: string, amountCents: number, rawNumber = false) {
+  const tokens = evidence.match(/(?<![\d.,'])\(?[-+]?\p{Sc}?\s*(?:\d{1,3}(?:[.,']\d{3})+|\d+)(?:[.,]\d+)?(?:e[-+]?\d+)?\)?(?![\d.,'])/giu) ?? [];
+  return tokens.map((token) => tokenCents(token, rawNumber)).filter((value) => value === amountCents).length === 1;
 }
 function currencyMatches(evidence: string, code: string) {
   const codes = (evidence.match(/\b[A-Z]{3}\b/g) ?? []).filter((token) => ISO_CODES.has(token));
@@ -155,7 +151,8 @@ function validateEvidence(proposal: FinanceReportImportProposalV1, index: Source
   const claims: Claim[] = [];
   for (const candidate of proposal.candidates) {
     const claim = bind(index, candidate.source, format);
-    if (!claim || !amountMatches(candidate.source.evidence, candidate.amountCents)) return false;
+    if (!claim || claim.cellMode === 0
+      || !amountMatches(candidate.source.evidence, candidate.amountCents, claim.cellMode === 2)) return false;
     claims.push(claim);
   }
   if (proposal.report.currency.state === "EXPLICIT") {
@@ -180,9 +177,8 @@ function visibleExceptions(proposal: FinanceReportImportProposalV1) {
       exceptionCodes: [...codes], reviewReasons: [...new Set(reasons)].slice(0, 8) };
   }) };
 }
-const schemaHint = `Strict JSON only: {contractVersion:1,report:{title:string,reportType:PROFIT_AND_LOSS|BALANCE_SHEET|CASH_FLOW|TRIAL_BALANCE|OTHER,basis:CASH|ACCRUAL|UNSPECIFIED,cadence:DAILY|WEEKLY|MONTHLY|QUARTERLY|ANNUAL|CUSTOM,periodStart:YYYY-MM-DD,periodEnd:YYYY-MM-DD,asOfDate:YYYY-MM-DD|null,currency:{state:EXPLICIT,code:uppercase ISO-4217,source:Source}|{state:UNRESOLVED,code:null,source:null}},summary:string,candidates:[{target:REPORTED_ACTUAL,editable:true,source:Source,sourceLabel:string,sourceAccountPath:string[],proposedAccountPath:string[],rowKind:LEAF|DERIVED,periodStart:YYYY-MM-DD,periodEnd:YYYY-MM-DD,amountCents:integer,mappingStatus:MAPPED|AMBIGUOUS|UNMAPPED,confidence:0..1,reviewStatus:VERIFIED|WARNING,exceptionCodes:(LOW_CONFIDENCE|AMBIGUOUS_MAPPING|UNMAPPED_ACCOUNT|DERIVED_ROW|OTHER)[],reviewReasons:string[]}]}. Source is exactly {kind:PDF,page:integer,evidence:exact substring} or {kind:CELL,sheet:exact string,row:integer,column:integer,evidence:exact cell string}. No other fields.`;
+const schemaHint = `Strict JSON only: {contractVersion:1,report:{title:string,reportType:PROFIT_AND_LOSS|BALANCE_SHEET|CASH_FLOW|TRIAL_BALANCE|OTHER,basis:CASH|ACCRUAL|UNSPECIFIED,cadence:DAILY|WEEKLY|MONTHLY|QUARTERLY|ANNUAL|CUSTOM,periodStart:YYYY-MM-DD,periodEnd:YYYY-MM-DD,asOfDate:YYYY-MM-DD|null,currency:{state:EXPLICIT,code:uppercase ISO-4217,source:Source}|{state:UNRESOLVED,code:null,source:null}},summary:string,candidates:[{target:REPORTED_ACTUAL,editable:true,source:Source,sourceLabel:string,sourceAccountPath:string[],proposedAccountPath:string[],rowKind:LEAF|DERIVED,periodStart:YYYY-MM-DD,periodEnd:YYYY-MM-DD,amountCents:integer,mappingStatus:MAPPED|AMBIGUOUS|UNMAPPED,confidence:0..1,reviewStatus:VERIFIED|WARNING,exceptionCodes:(LOW_CONFIDENCE|AMBIGUOUS_MAPPING|UNMAPPED_ACCOUNT|DERIVED_ROW|OTHER)[],reviewReasons:string[]}]}. Source is exactly {kind:PDF,page:integer,evidence:exact non-empty page line} or {kind:CELL,sheet:exact string,row:integer,column:integer,evidence:exact cell string}. No other fields.`;
 const instruction = (paths: string[]) => `Infer report semantics from deterministic PDF/CSV/XLSX JSONL without a vendor picker. Return editable native Finance Reported Actuals proposals only; never transactions, tools, writes, approval, or application. Preserve source strings exactly. Profile hints are non-authoritative and require fresh validation. Use UNRESOLVED currency unless an uppercase ISO token is explicit in source; never default to USD. Ambiguous, unmapped, low-confidence, and derived rows need visible warnings. Structural uncertainty is invalid.${paths.length ? ` Previous output failed at: ${paths.join(", ")}. Rebuild it.` : ""}`;
-
 export async function interpretFinanceReport(params: { workspaceId: string; workflowJobId?: string; agentRunId?: string;
   model?: string; format: FinanceFileFormat; extractedEvidence: string;
   approvedProfileHints?: FinanceReportImportProfileHint[]; gateway?: Pick<ModelGateway, "extract">;
