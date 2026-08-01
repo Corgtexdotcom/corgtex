@@ -25,6 +25,8 @@ export type FinanceReportEvidenceSourceFact = (FinanceReportEvidenceSourceFactBa
 type FinanceReportEvidenceBlockerFact = { kind: "BLOCKER"; code: FinanceReportEvidenceBlockerCode; claimId?: string };
 export type FinanceReportEvidenceSourceResultV1 = { version: typeof FINANCE_REPORT_EVIDENCE_SOURCE_VERSION; kind: "SUCCESS"; facts: FinanceReportEvidenceSourceFact[] }
   | { version: typeof FINANCE_REPORT_EVIDENCE_SOURCE_VERSION; kind: "BLOCKER"; facts: [FinanceReportEvidenceBlockerFact] };
+export type FinanceReportEvidenceStructureResultV1 = { version: typeof FINANCE_REPORT_EVIDENCE_SOURCE_VERSION; kind: "SUCCESS" }
+  | { version: typeof FINANCE_REPORT_EVIDENCE_SOURCE_VERSION; kind: "BLOCKER"; facts: [FinanceReportEvidenceBlockerFact] };
 type Cell = { value: string; displayValue?: string } & (
   | { type: "FORMULA"; resultType: NonFormulaCellType }
   | { type: NonFormulaCellType; resultType?: never });
@@ -239,6 +241,20 @@ export function validateFinanceReportEvidenceSourcesV1(input: unknown): FinanceR
       if (conflict) fail("OVERLAPPING_SOURCE", conflict.fact.claimId);
     }
     return { version: FINANCE_REPORT_EVIDENCE_SOURCE_VERSION, kind: "SUCCESS", facts: bound.map((item) => item.fact) };
+  } catch (error) {
+    const blocker = error instanceof EvidenceError ? error : new EvidenceError("INVALID_INPUT");
+    return { version: FINANCE_REPORT_EVIDENCE_SOURCE_VERSION, kind: "BLOCKER",
+      facts: [{ kind: "BLOCKER", code: blocker.code, ...(blocker.claimId ? { claimId: blocker.claimId } : {}) }] };
+  }
+}
+export function validateFinanceReportEvidenceStructureV1(input: unknown): FinanceReportEvidenceStructureResultV1 {
+  try {
+    if (!isRecord(input)) fail("INVALID_INPUT");
+    const clean = exactKeys(input, ["format", "extractedEvidence"], undefined, "INVALID_INPUT");
+    if (!new Set(["PDF", "CSV", "XLSX"]).has(clean.format as string)
+      || typeof clean.extractedEvidence !== "string") fail("INVALID_INPUT");
+    buildIndex(clean.format as FinanceReportEvidenceFormat, clean.extractedEvidence);
+    return { version: FINANCE_REPORT_EVIDENCE_SOURCE_VERSION, kind: "SUCCESS" };
   } catch (error) {
     const blocker = error instanceof EvidenceError ? error : new EvidenceError("INVALID_INPUT");
     return { version: FINANCE_REPORT_EVIDENCE_SOURCE_VERSION, kind: "BLOCKER",

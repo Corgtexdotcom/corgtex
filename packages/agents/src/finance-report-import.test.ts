@@ -125,10 +125,10 @@ describe("proposeFinanceReportImportV1", () => {
   it("returns structural input exceptions without computing guessed cents", async () => {
     const base = proposal();
     expect(financeReportModelProposalSchemaV1.safeParse({ ...base, numericFormat: { ...base.numericFormat, confidence: 0 } }).success).toBe(false);
-    const output = { ...base, classification: { ...base.classification, cadence: null, cadenceEvidenceClaimIds: [] }, numericFormat: { status: "UNRESOLVED", version: 1, decimalSeparator: null, groupingSeparator: null, amountScale: null, evidenceClaimIds: [], confidence: 0 }, mappings: base.mappings.map((mapping, index) => ({ ...mapping, confidence: index === 0 ? 0 : mapping.confidence })) };
+    const output = { ...base, classification: { ...base.classification, reportType: "OTHER", basis: "UNSPECIFIED", cadence: null, reportTypeEvidenceClaimIds: [], basisEvidenceClaimIds: [], cadenceEvidenceClaimIds: [] }, numericFormat: { status: "UNRESOLVED", version: 1, decimalSeparator: null, groupingSeparator: null, amountScale: null, evidenceClaimIds: [], confidence: 0 }, mappings: base.mappings.map((mapping, index) => ({ ...mapping, confidence: index === 0 ? 0 : mapping.confidence })) };
     const { result } = await run(output);
     expect(result).toMatchObject({ kind: "SUCCESS", proposal: { mappings: [{ amountCents: null }, { amountCents: null }] } });
-    if (result.kind === "SUCCESS") expect(result.proposal.exceptions).toEqual(expect.arrayContaining([expect.objectContaining({ code: "CADENCE_UNRESOLVED", severity: "BLOCKER" }), expect.objectContaining({ code: "NUMERIC_FORMAT_UNRESOLVED", severity: "BLOCKER" }), expect.objectContaining({ code: "SEMANTIC_PROPOSAL_UNCERTAIN", severity: "BLOCKER" })]));
+    if (result.kind === "SUCCESS") expect(result.proposal.exceptions).toEqual(expect.arrayContaining([expect.objectContaining({ code: "REPORT_TYPE_UNRESOLVED", severity: "BLOCKER" }), expect.objectContaining({ code: "BASIS_UNRESOLVED", severity: "BLOCKER" }), expect.objectContaining({ code: "CADENCE_UNRESOLVED", severity: "BLOCKER" }), expect.objectContaining({ code: "NUMERIC_FORMAT_UNRESOLVED", severity: "BLOCKER" }), expect.objectContaining({ code: "SEMANTIC_PROPOSAL_UNCERTAIN", severity: "BLOCKER" })]));
   });
 
   it("rejects explicit currency without matching exact ISO evidence", async () => {
@@ -144,6 +144,7 @@ describe("proposeFinanceReportImportV1", () => {
     expect(provider.extract).toHaveBeenCalledTimes(1);
     const unused = model(proposal());
     await expect(proposeFinanceReportImportV1({ workspaceId: "workspace-1", format: report.format, extractedEvidence: report.extractedEvidence, workspaceCurrencyCodes: ["ZZZ"], gateway: unused.gateway })).resolves.toEqual({ version: 1, kind: "FAILURE", attempts: 0, code: "INVALID_INPUT" });
+    await expect(proposeFinanceReportImportV1({ workspaceId: "workspace-1", format: "PDF", extractedEvidence: "not-json", workspaceCurrencyCodes: [], gateway: unused.gateway })).resolves.toEqual({ version: 1, kind: "FAILURE", attempts: 0, code: "INVALID_INPUT" });
     expect(unused.extract).not.toHaveBeenCalled();
   });
 });

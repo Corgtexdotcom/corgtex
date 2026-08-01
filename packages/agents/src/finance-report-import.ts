@@ -1,7 +1,7 @@
 import { defaultModelGateway, type ModelGateway } from "@corgtex/models";
 import { normalizeFinanceImportCurrency, resolveFinanceImportCurrency } from "@corgtex/domain";
 import { z } from "zod";
-import { validateFinanceReportEvidenceSourcesV1, type FinanceReportEvidenceFormat, type FinanceReportEvidenceSourceFact } from "./finance-report-evidence";
+import { validateFinanceReportEvidenceSourcesV1, validateFinanceReportEvidenceStructureV1, type FinanceReportEvidenceFormat, type FinanceReportEvidenceSourceFact } from "./finance-report-evidence";
 import {
   FINANCE_REPORT_ISO_4217_CODES,
   validateFinanceReportValueEvidenceV1,
@@ -12,6 +12,7 @@ const id = z.string().min(1).max(100);
 const text = z.string().min(1).max(500);
 const confidence = z.number().min(0).max(1);
 const claimIds = z.array(id).min(1).max(50);
+const optionalClaimIds = z.array(id).max(50);
 const pdfSource = z.strictObject({ kind: z.literal("PDF"), page: z.number().int().min(1).max(250), lineIndex: z.number().int().nonnegative(), line: z.string(), start: z.number().int().nonnegative(), end: z.number().int().positive(), text: z.string().min(1) });
 const wholeCellSource = z.strictObject({ kind: z.literal("CELL"), sheet: z.string(), row: z.number().int().positive(), column: z.number().int().positive(), evidence: z.string() });
 const cellSource = wholeCellSource.extend({ start: z.number().int().nonnegative().optional(), end: z.number().int().positive().optional(), text: z.string().min(1).optional() });
@@ -23,7 +24,7 @@ const classification = z.strictObject({
   reportType: z.enum(["PROFIT_AND_LOSS", "BALANCE_SHEET", "CASH_FLOW", "TRIAL_BALANCE", "OTHER"]),
   basis: z.enum(["CASH", "ACCRUAL", "UNSPECIFIED"]),
   cadence: z.enum(["DAILY", "WEEKLY", "MONTHLY", "QUARTERLY", "ANNUAL", "CUSTOM"]).nullable(),
-  reportTypeEvidenceClaimIds: claimIds, basisEvidenceClaimIds: claimIds, cadenceEvidenceClaimIds: z.array(id).max(50), confidence,
+  reportTypeEvidenceClaimIds: optionalClaimIds, basisEvidenceClaimIds: optionalClaimIds, cadenceEvidenceClaimIds: optionalClaimIds, confidence,
 });
 const numericFormat = z.discriminatedUnion("status", [
   z.strictObject({ status: z.literal("RESOLVED"), version: z.literal(1), decimalSeparator: z.enum(["DOT", "COMMA", "NONE"]), groupingSeparator: z.enum(["COMMA", "DOT", "APOSTROPHE", "SPACE", "NBSP", "NARROW_NBSP", "NONE"]), amountScale: z.union([z.literal(1), z.literal(100), z.literal(1_000), z.literal(1_000_000), z.literal(1_000_000_000)]), evidenceClaimIds: claimIds, confidence: confidence.positive() }),
@@ -79,7 +80,7 @@ function bindProposal(raw: unknown, input: FinanceReportImportProposalInputV1, w
   const periods = new Map(proposal.periods.map((period) => [period.id, period]));
   const nodes = new Map(proposal.hierarchy.map((node) => [node.id, node]));
   if (duplicate(proposal.periods.map(({ id }) => id)) || duplicate(proposal.hierarchy.map(({ id }) => id)) || duplicate(proposal.mappings.map(({ id }) => id)) || duplicate(proposal.mappings.map(({ amountClaimId }) => amountClaimId))) return { feedback: "references:duplicate_semantic_id" };
-  if (!textRefs(proposal.classification.reportTypeEvidenceClaimIds) || !textRefs(proposal.classification.basisEvidenceClaimIds) || (proposal.classification.cadence !== null && proposal.classification.cadenceEvidenceClaimIds.length === 0) || !textRefs(proposal.classification.cadenceEvidenceClaimIds) || !textRefs(proposal.numericFormat.evidenceClaimIds) || proposal.periods.some((period) => !textRefs(period.evidenceClaimIds) || !validDate(period.periodStart) || !validDate(period.periodEnd) || period.periodStart > period.periodEnd) || proposal.hierarchy.some((node) => !textRefs(node.evidenceClaimIds) || (node.parentId !== null && !nodes.has(node.parentId))) || proposal.exceptions.some((exception) => !idsValid(exception.evidenceClaimIds))) return { feedback: "references:invalid_semantic_evidence" };
+  if ((proposal.classification.reportType !== "OTHER" && proposal.classification.reportTypeEvidenceClaimIds.length === 0) || (proposal.classification.basis !== "UNSPECIFIED" && proposal.classification.basisEvidenceClaimIds.length === 0) || !textRefs(proposal.classification.reportTypeEvidenceClaimIds) || !textRefs(proposal.classification.basisEvidenceClaimIds) || (proposal.classification.cadence !== null && proposal.classification.cadenceEvidenceClaimIds.length === 0) || !textRefs(proposal.classification.cadenceEvidenceClaimIds) || !textRefs(proposal.numericFormat.evidenceClaimIds) || proposal.periods.some((period) => !textRefs(period.evidenceClaimIds) || !validDate(period.periodStart) || !validDate(period.periodEnd) || period.periodStart > period.periodEnd) || proposal.hierarchy.some((node) => !textRefs(node.evidenceClaimIds) || (node.parentId !== null && !nodes.has(node.parentId))) || proposal.exceptions.some((exception) => !idsValid(exception.evidenceClaimIds))) return { feedback: "references:invalid_semantic_evidence" };
   const paths = new Map<string, string>();
   for (const node of proposal.hierarchy) { const seen = new Set<string>(), labels: string[] = []; let current: typeof node | undefined = node; while (current) { if (seen.has(current.id)) return { feedback: "references:hierarchy_cycle" }; seen.add(current.id); labels.unshift(current.label); current = current.parentId ? nodes.get(current.parentId) : undefined; } paths.set(node.id, JSON.stringify(labels)); }
   const mappings: FinanceReportImportProposalV1["mappings"] = [];
@@ -102,6 +103,7 @@ function bindProposal(raw: unknown, input: FinanceReportImportProposalInputV1, w
 
 export async function proposeFinanceReportImportV1(input: FinanceReportImportProposalInputV1): Promise<FinanceReportImportProposalResultV1> {
   if (!input.workspaceId?.trim() || !new Set(["PDF", "CSV", "XLSX"]).has(input.format) || !input.extractedEvidence || input.extractedEvidence.length > 2_000_000 || !Array.isArray(input.workspaceCurrencyCodes) || input.workspaceCurrencyCodes.some((code) => typeof code !== "string")) return { version: 1, kind: "FAILURE", attempts: 0, code: "INVALID_INPUT" };
+  if (validateFinanceReportEvidenceStructureV1({ format: input.format, extractedEvidence: input.extractedEvidence }).kind === "BLOCKER") return { version: 1, kind: "FAILURE", attempts: 0, code: "INVALID_INPUT" };
   let workspaceCurrency: string | null;
   try { const normalized = input.workspaceCurrencyCodes.filter((code) => code.trim()).map((code) => normalizeFinanceImportCurrency(code)); if (normalized.some((code) => !ISO_CODES.has(code))) throw new Error("INVALID_INPUT"); const resolution = resolveFinanceImportCurrency({ workspaceCurrencies: normalized }); workspaceCurrency = resolution.state === "RESOLVED" ? resolution.currency : null; } catch { return { version: 1, kind: "FAILURE", attempts: 0, code: "INVALID_INPUT" }; }
   const gateway = input.gateway ?? defaultModelGateway;
