@@ -60,10 +60,10 @@ describe("validateFinanceReportEvidenceSourcesV1", () => {
   });
   it("uses only raw XLSX numbers or numeric formula results for amount roles", () => {
     const extracted = jsonl(
-      { sheet: "Report", rowCount: 1, columnCount: 3 },
+      { sheet: "Report", rowCount: 1, columnCount: 4 },
       { sheet: "Report", row: 1, column: 1, type: "NUMBER", value: "1234", displayValue: "$123" },
       { sheet: "Report", row: 1, column: 2, type: "FORMULA", value: "20", displayValue: "$20", formula: "A1/2", resultType: "NUMBER" },
-      { sheet: "Report", row: 1, column: 3, type: "TEXT", value: "30" },
+      { sheet: "Report", row: 1, column: 3, type: "TEXT", value: "30" }, { sheet: "Report", row: 1, column: 4, type: "ERROR", value: "#DIV/0!" },
     );
     const good = validate("XLSX", extracted, [
       { id: "raw", role: "AMOUNT", source: cellSource("1234") },
@@ -120,15 +120,15 @@ describe("validateFinanceReportEvidenceSourcesV1", () => {
       { sheet: "Report", row: 1, column: 1, type: "NUMBER", value: "10" }),
     [{ id: "a", role: "AMOUNT", source: cellSource("10") }]))).toBe("MALFORMED_EVIDENCE");
     const impossibleScalars = [{ type: "NUMBER", value: "not-a-number" }, { type: "BOOLEAN", value: "TRUE" },
-      { type: "DATE", value: "2026-13-01" }, { type: "NUMBER", value: "10", displayValue: "10" },
+      { type: "DATE", value: "2026-13-01" }, { type: "ERROR", value: "not-an-error" }, { type: "NUMBER", value: "10", displayValue: "10" },
       { type: "FORMULA", value: "NaN", formula: "1/0", resultType: "NUMBER" }, { type: "FORMULA", value: "10", formula: "[Book2.xlsx]Sheet1!A1", resultType: "NUMBER" }];
     for (const cell of impossibleScalars) expect(code(validate("XLSX", jsonl({ sheet: "Report", rowCount: 1, columnCount: 1 },
       { sheet: "Report", row: 1, column: 1, ...cell }),
     [{ id: "a", role: "AMOUNT", source: cellSource(cell.value) }]))).toBe("MALFORMED_EVIDENCE");
     expect(code(validate("PDF", "x".repeat(2_000_001),
       [{ id: "a", role: "TEXT", source: pdfSource("x", "x") }]))).toBe("LIMIT_EXCEEDED");
-    expect(code(validate("PDF", jsonl({ page: 1, text: "\n".repeat(250_000) }),
-      [{ id: "a", role: "TEXT", source: pdfSource("x", "x") }]))).toBe("LIMIT_EXCEEDED");
+    expect(validate("PDF", jsonl({ page: 1, text: `x${"\n".repeat(250_000)}` }),
+      [{ id: "a", role: "TEXT", source: pdfSource("x", "x") }]).facts[0]?.kind).toBe("SOURCE");
   });
   it("returns deterministic source-only facts and validates the closed input shape", () => {
     const extracted = jsonl({ page: 1, text: "Revenue 10" });
