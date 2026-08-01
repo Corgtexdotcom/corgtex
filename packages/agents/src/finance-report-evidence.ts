@@ -4,7 +4,7 @@ type NonFormulaCellType = Exclude<FinanceReportEvidenceCellType, "FORMULA">;
 type CellValues = { rawValue: string; displayValue?: string }; type NoDisplayCellValues = { rawValue: string; displayValue?: never }; type BooleanCellValues = { rawValue: "true"; displayValue: "TRUE" } | { rawValue: "false"; displayValue: "FALSE" }; type ErrorCellValues = NoDisplayCellValues | { rawValue: ""; displayValue: string };
 export type FinanceReportEvidenceCellFact =
   | (BooleanCellValues & ({ type: "BOOLEAN"; resultType?: never } | { type: "FORMULA"; resultType: "BOOLEAN" }))
-  | (NoDisplayCellValues & ({ type: "TEXT"; resultType?: never } | { type: "FORMULA"; resultType: "TEXT" })) | (ErrorCellValues & ({ type: "ERROR"; resultType?: never } | { type: "FORMULA"; resultType: "ERROR" })) | (CellValues & ({ type: "DATE" | "NUMBER"; resultType?: never } | { type: "FORMULA"; resultType: "DATE" | "NUMBER" })); type FinanceReportEvidenceAmountCellFact = (NoDisplayCellValues & { type: "TEXT"; resultType?: never }) | (CellValues & ({ type: "NUMBER"; resultType?: never } | { type: "FORMULA"; resultType: "NUMBER" }));
+  | (NoDisplayCellValues & ({ type: "TEXT"; resultType?: never } | { type: "FORMULA"; resultType: "TEXT" | "ERROR" })) | (ErrorCellValues & { type: "ERROR"; resultType?: never }) | (CellValues & ({ type: "DATE" | "NUMBER"; resultType?: never } | { type: "FORMULA"; resultType: "DATE" | "NUMBER" })); type FinanceReportEvidenceAmountCellFact = (NoDisplayCellValues & { type: "TEXT"; resultType?: never }) | (CellValues & ({ type: "NUMBER"; resultType?: never } | { type: "FORMULA"; resultType: "NUMBER" }));
 const CELL_TYPES = new Set<FinanceReportEvidenceCellType>(["BOOLEAN", "DATE", "ERROR", "FORMULA", "NUMBER", "TEXT"]);
 const MAX_TEXT = 2_000_000;
 export type FinanceReportEvidenceFormat = "PDF" | "CSV" | "XLSX";
@@ -111,7 +111,7 @@ function buildIndex(format: FinanceReportEvidenceFormat, jsonl: string): Index {
     if (format === "CSV" && (type !== "TEXT" || value.displayValue !== undefined || !cellValue || cellValue.includes("\0") || !/^(?:[^\uD800-\uDFFF]|[\uD800-\uDBFF][\uDC00-\uDFFF])*$/.test(cellValue))) fail("MALFORMED_EVIDENCE");
     const displayValue = value.displayValue === undefined ? undefined
       : string(value.displayValue, MAX_TEXT, true);
-    if (displayValue === cellValue || ((type === "BOOLEAN" || (type === "FORMULA" && resultType === "BOOLEAN")) ? displayValue !== (cellValue === "true" ? "TRUE" : "FALSE") : displayValue !== undefined && (type === "TEXT" || (type === "FORMULA" && resultType === "TEXT") || (cellValue !== "" && (type === "ERROR" || (type === "FORMULA" && resultType === "ERROR")))))) fail("MALFORMED_EVIDENCE");
+    if (displayValue === cellValue || ((type === "BOOLEAN" || (type === "FORMULA" && resultType === "BOOLEAN")) ? displayValue !== (cellValue === "true" ? "TRUE" : "FALSE") : displayValue !== undefined && (type === "TEXT" || (type === "FORMULA" && resultType === "TEXT") || (type === "ERROR" ? cellValue !== "" : type === "FORMULA" && resultType === "ERROR")))) fail("MALFORMED_EVIDENCE");
     const key = cellKey(sheet, row, column); if (index.cells.has(key)) fail("MALFORMED_EVIDENCE");
     if (index.cells.size >= 250_000) fail("LIMIT_EXCEEDED");
     index.cells.set(key, type === "FORMULA"
