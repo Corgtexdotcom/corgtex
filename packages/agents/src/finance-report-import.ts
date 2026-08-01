@@ -22,7 +22,7 @@ const classification = z.strictObject({
   reportType: z.enum(["PROFIT_AND_LOSS", "BALANCE_SHEET", "CASH_FLOW", "TRIAL_BALANCE", "OTHER"]),
   basis: z.enum(["CASH", "ACCRUAL", "UNSPECIFIED"]),
   cadence: z.enum(["DAILY", "WEEKLY", "MONTHLY", "QUARTERLY", "ANNUAL", "CUSTOM"]),
-  evidenceClaimIds: claimIds, confidence,
+  reportTypeEvidenceClaimIds: claimIds, basisEvidenceClaimIds: claimIds, cadenceEvidenceClaimIds: claimIds, confidence,
 });
 const numericFormat = z.strictObject({ version: z.literal(1), decimalSeparator: z.enum(["DOT", "COMMA", "NONE"]), groupingSeparator: z.enum(["COMMA", "DOT", "APOSTROPHE", "SPACE", "NBSP", "NARROW_NBSP", "NONE"]), amountScale: z.union([z.literal(1), z.literal(100), z.literal(1_000), z.literal(1_000_000), z.literal(1_000_000_000)]), evidenceClaimIds: claimIds, confidence });
 
@@ -51,7 +51,7 @@ const ISO_CODES = new Set(FINANCE_REPORT_ISO_4217_CODES);
 const SCHEMA_HINT = JSON.stringify(z.toJSONSchema(financeReportModelProposalSchemaV1));
 const INSTRUCTION = "Infer semantics from PDF, CSV, or XLSX extracted evidence without a vendor picker. Return an editable proposal only; never invent transactions or facts. Cite every semantic field and amount with exact report sources. Propose numeric format and scale, but do not calculate cents. Set currency only when an exact ISO code appears in the report; otherwise use null. Surface ambiguity as exceptions and never guess or default to USD.";
 const duplicate = (values: string[]) => new Set(values).size !== values.length;
-const validDate = (value: string) => { const parsed = new Date(`${value}T00:00:00.000Z`); return !Number.isNaN(parsed.valueOf()) && parsed.toISOString().slice(0, 10) === value; };
+const validDate = (value: string) => { const parsed = new Date(`${value}T00:00:00.000Z`); return Number(value.slice(0, 4)) >= 1_000 && !Number.isNaN(parsed.valueOf()) && parsed.toISOString().slice(0, 10) === value; };
 
 function bindProposal(raw: unknown, input: FinanceReportImportProposalInputV1, workspaceCurrencies: string[]): { proposal?: FinanceReportImportProposalV1; feedback?: string } {
   const parsed = financeReportModelProposalSchemaV1.safeParse(raw);
@@ -65,8 +65,8 @@ function bindProposal(raw: unknown, input: FinanceReportImportProposalInputV1, w
   const idsValid = (ids: string[]) => ids.every((claimId) => facts.has(claimId));
   const periods = new Map(proposal.periods.map((period) => [period.id, period]));
   const nodes = new Map(proposal.hierarchy.map((node) => [node.id, node]));
-  if (duplicate(proposal.periods.map(({ id }) => id)) || duplicate(proposal.hierarchy.map(({ id }) => id)) || duplicate(proposal.mappings.map(({ id }) => id)) || duplicate(proposal.mappings.map(({ amountClaimId }) => amountClaimId))) return { feedback: "references:duplicate_semantic_id" };
-  if (!textRefs(proposal.classification.evidenceClaimIds) || !textRefs(proposal.numericFormat.evidenceClaimIds) || proposal.periods.some((period) => !textRefs(period.evidenceClaimIds) || !validDate(period.periodStart) || !validDate(period.periodEnd) || period.periodStart > period.periodEnd) || proposal.hierarchy.some((node) => !textRefs(node.evidenceClaimIds) || (node.parentId !== null && !nodes.has(node.parentId))) || proposal.exceptions.some((exception) => !idsValid(exception.evidenceClaimIds))) return { feedback: "references:invalid_semantic_evidence" };
+  if (duplicate(proposal.periods.map(({ id }) => id)) || duplicate(proposal.hierarchy.map(({ id }) => id)) || duplicate(proposal.mappings.map(({ id }) => id)) || duplicate(proposal.mappings.map(({ amountClaimId }) => amountClaimId)) || duplicate(proposal.mappings.map(({ periodId, hierarchyId }) => JSON.stringify([periodId, hierarchyId])))) return { feedback: "references:duplicate_semantic_id" };
+  if (!textRefs(proposal.classification.reportTypeEvidenceClaimIds) || !textRefs(proposal.classification.basisEvidenceClaimIds) || !textRefs(proposal.classification.cadenceEvidenceClaimIds) || !textRefs(proposal.numericFormat.evidenceClaimIds) || proposal.periods.some((period) => !textRefs(period.evidenceClaimIds) || !validDate(period.periodStart) || !validDate(period.periodEnd) || period.periodStart > period.periodEnd) || proposal.hierarchy.some((node) => !textRefs(node.evidenceClaimIds) || (node.parentId !== null && !nodes.has(node.parentId))) || proposal.exceptions.some((exception) => !idsValid(exception.evidenceClaimIds))) return { feedback: "references:invalid_semantic_evidence" };
   for (const node of proposal.hierarchy) { const seen = new Set<string>(); let current: typeof node | undefined = node; while (current?.parentId) { if (seen.has(current.id)) return { feedback: "references:hierarchy_cycle" }; seen.add(current.id); current = nodes.get(current.parentId); } }
   const mappings: FinanceReportImportProposalV1["mappings"] = [];
   for (const mapping of proposal.mappings) { const fact = facts.get(mapping.amountClaimId); if (fact?.kind !== "AMOUNT" || !periods.has(mapping.periodId) || !nodes.has(mapping.hierarchyId)) return { feedback: "references:invalid_mapping" }; mappings.push({ ...mapping, amountCents: fact.amountCents, sourceKey: fact.source.sourceKey }); }

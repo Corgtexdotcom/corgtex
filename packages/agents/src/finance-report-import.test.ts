@@ -27,7 +27,7 @@ function proposal(format: "PDF" | "XLSX" = "PDF") {
   const report = source(format);
   return {
     version: 1,
-    classification: { reportType: "PROFIT_AND_LOSS", basis: "ACCRUAL", cadence: "MONTHLY", evidenceClaimIds: ["type", "basis", "cadence"], confidence: 0.98 },
+    classification: { reportType: "PROFIT_AND_LOSS", basis: "ACCRUAL", cadence: "MONTHLY", reportTypeEvidenceClaimIds: ["type"], basisEvidenceClaimIds: ["basis"], cadenceEvidenceClaimIds: ["cadence"], confidence: 0.98 },
     numericFormat: { version: 1, decimalSeparator: "DOT", groupingSeparator: "NONE", amountScale: 1_000, evidenceClaimIds: ["scale"], confidence: 0.95 },
     currency: { explicitCode: "USD", evidenceClaimId: "currency", confidence: 1 },
     periods: [
@@ -107,6 +107,18 @@ describe("proposeFinanceReportImportV1", () => {
     const failed = await run(invalid);
     expect(failed.result).toEqual({ version: 1, kind: "FAILURE", attempts: 2, code: "INVALID_MODEL_OUTPUT" });
     expect(failed.extract).toHaveBeenCalledTimes(2);
+  });
+
+  it("rejects unsupported classification evidence, dates, and duplicate semantic targets", async () => {
+    const unsupportedBasis = proposal();
+    unsupportedBasis.classification.basisEvidenceClaimIds = ["jan-amount"];
+    expect((await run(unsupportedBasis)).result).toMatchObject({ kind: "FAILURE", code: "INVALID_MODEL_OUTPUT" });
+    const oldDate = proposal();
+    oldDate.periods[0]!.periodStart = "0999-01-01";
+    expect((await run(oldDate)).result).toMatchObject({ kind: "FAILURE", code: "INVALID_MODEL_OUTPUT" });
+    const duplicateTarget = proposal();
+    duplicateTarget.mappings[1]!.periodId = "2026-01";
+    expect((await run(duplicateTarget)).result).toMatchObject({ kind: "FAILURE", code: "INVALID_MODEL_OUTPUT" });
   });
 
   it("rejects explicit currency without matching exact ISO evidence", async () => {
