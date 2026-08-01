@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { validateFinanceReportEvidenceSourcesV1,
-  type FinanceReportEvidenceCellType } from "./finance-report-evidence";
-
+  type FinanceReportEvidenceCellType, type FinanceReportEvidenceSource } from "./finance-report-evidence";
 const jsonl = (...records: unknown[]) => records.map((record) => JSON.stringify(record)).join("\n");
 const pdfSource = (line: string, text: string, lineIndex = 0, page = 1) => {
   const start = line.indexOf(text);
@@ -14,7 +13,9 @@ const validate = (format: "PDF" | "CSV" | "XLSX", extractedEvidence: string, cla
 const code = (result: ReturnType<typeof validate>) => result.facts[0]?.kind === "BLOCKER"
   ? result.facts[0].code : undefined;
 const astral = String.fromCodePoint(0x1f600);
-
+// @ts-expect-error cell spans must provide start, end, and text atomically.
+const invalidTypedCellSource: FinanceReportEvidenceSource = { kind: "CELL", sheet: "Report", row: 1, column: 1, evidence: "10", start: 0 };
+void invalidTypedCellSource;
 describe("validateFinanceReportEvidenceSourcesV1", () => {
   it("binds repeated PDF lines and multiple non-overlapping UTF-16 spans", () => {
     const line = `Revenue ${astral} 100 200`;
@@ -29,7 +30,6 @@ describe("validateFinanceReportEvidenceSourcesV1", () => {
       '["PDF",1,2,11,14]', '["PDF",1,2,15,18]', '["PDF",1,3,8,10]',
     ]);
   });
-
   it("blocks missing, overlapping, duplicate, blank, and unsafe UTF-16 PDF claims", () => {
     const line = `${astral} 100 200`;
     const extracted = jsonl({ page: 1, text: `${line}\n\n${line}` });
@@ -43,7 +43,6 @@ describe("validateFinanceReportEvidenceSourcesV1", () => {
     ];
     for (const [claims, expected] of cases) expect(code(validate("PDF", extracted, claims))).toBe(expected);
   });
-
   it("binds exact CSV amount cells and text subspans", () => {
     const extracted = jsonl(
       { sheet: "CSV", rowCount: 1, columnCount: 3 },
@@ -62,7 +61,6 @@ describe("validateFinanceReportEvidenceSourcesV1", () => {
         cell: { rawValue: "Currency USD" } },
     ]);
   });
-
   it("uses only raw XLSX numbers or numeric formula results for amount roles", () => {
     const extracted = jsonl(
       { sheet: "Report", rowCount: 1, columnCount: 3 },
@@ -93,24 +91,24 @@ describe("validateFinanceReportEvidenceSourcesV1", () => {
     expect(code(validate("XLSX", extracted,
       [{ id: "text", role: "AMOUNT", source: cellSource("30", { column: 3 }) }]))).toBe("UNSAFE_CELL");
   });
-
   it("blocks incompatible whole-cell reuse and mixed source formats", () => {
     const extracted = jsonl({ sheet: "CSV", rowCount: 1, columnCount: 1 },
       { sheet: "CSV", row: 1, column: 1, type: "TEXT", value: "USD 10" });
-    expect(code(validate("CSV", extracted, [
-      { id: "amount", role: "AMOUNT", source: cellSource("USD 10", { sheet: "CSV" }) },
+    expect(validate("CSV", extracted, [
       { id: "iso", role: "ISO_CODE", source: cellSource("USD 10", { sheet: "CSV", start: 0, end: 3, text: "USD" }) },
-    ]))).toBe("OVERLAPPING_SOURCE");
+      { id: "value", role: "TEXT", source: cellSource("USD 10", { sheet: "CSV", start: 4, end: 6, text: "10" }) },
+      { id: "amount", role: "AMOUNT", source: cellSource("USD 10", { sheet: "CSV" }) },
+    ]).facts[0]).toMatchObject({ kind: "BLOCKER", code: "OVERLAPPING_SOURCE", claimId: "amount" });
     expect(code(validate("CSV", extracted,
       [{ id: "pdf", role: "TEXT", source: pdfSource("USD 10", "USD") }]))).toBe("SOURCE_NOT_FOUND");
   });
-
   it("fails closed on malformed extractor JSONL and bounded input", () => {
     const validCell = { sheet: "CSV", row: 1, column: 1, type: "TEXT", value: "10" };
     const malformed = [
       "not-json",
       jsonl({ page: 1, text: "10", extra: true }),
       jsonl({ page: 1, text: "10" }, { page: 1, text: "20" }),
+      jsonl({ page: 2, text: "10" }),
       jsonl(validCell, { sheet: "CSV", rowCount: 1, columnCount: 1 }),
       jsonl({ sheet: "CSV", rowCount: 1, columnCount: 1 }, validCell, validCell),
       jsonl({ sheet: "Report", rowCount: 1, columnCount: 1 }, { ...validCell, sheet: "Report" }),
@@ -118,18 +116,20 @@ describe("validateFinanceReportEvidenceSourcesV1", () => {
         { ...validCell, type: "FORMULA", formula: "1+1" }),
     ];
     expect(code(validate("PDF", malformed[0]!, [{ id: "a", role: "TEXT", source: pdfSource("10", "10") }]))).toBe("MALFORMED_EVIDENCE");
-    for (const evidence of malformed.slice(1, 3)) {
+    for (const evidence of malformed.slice(1, 4)) {
       expect(code(validate("PDF", evidence, [{ id: "a", role: "TEXT", source: pdfSource("10", "10") }]))).toBe("MALFORMED_EVIDENCE");
     }
-    for (const evidence of malformed.slice(3)) {
+    for (const evidence of malformed.slice(4)) {
       expect(code(validate("CSV", evidence, [{ id: "a", role: "AMOUNT", source: cellSource("10") }]))).toBe("MALFORMED_EVIDENCE");
     }
+    expect(code(validate("XLSX", jsonl({ sheet: "Report", rowCount: 2, columnCount: 1 },
+      { sheet: "Report", row: 1, column: 1, type: "NUMBER", value: "10" }),
+    [{ id: "a", role: "AMOUNT", source: cellSource("10") }]))).toBe("MALFORMED_EVIDENCE");
     expect(code(validate("PDF", "x".repeat(2_000_001),
       [{ id: "a", role: "TEXT", source: pdfSource("x", "x") }]))).toBe("LIMIT_EXCEEDED");
     expect(code(validate("PDF", jsonl({ page: 1, text: "\n".repeat(250_000) }),
       [{ id: "a", role: "TEXT", source: pdfSource("x", "x") }]))).toBe("LIMIT_EXCEEDED");
   });
-
   it("returns deterministic source-only facts and validates the closed input shape", () => {
     const extracted = jsonl({ page: 1, text: "Revenue 10" });
     const claims = [{ id: "amount", role: "AMOUNT", source: pdfSource("Revenue 10", "10") }];

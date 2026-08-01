@@ -1,21 +1,22 @@
 export const FINANCE_REPORT_EVIDENCE_SOURCE_VERSION = 1 as const;
-
 export type FinanceReportEvidenceCellType = "BOOLEAN" | "DATE" | "ERROR" | "FORMULA" | "NUMBER" | "TEXT";
 type NonFormulaCellType = Exclude<FinanceReportEvidenceCellType, "FORMULA">;
 type CellValues = { rawValue: string; displayValue?: string };
 export type FinanceReportEvidenceCellFact =
   | (CellValues & { type: "FORMULA"; resultType: NonFormulaCellType })
   | (CellValues & { type: NonFormulaCellType; resultType?: never });
-const CELL_TYPES = new Set<FinanceReportEvidenceCellType>([
-  "BOOLEAN", "DATE", "ERROR", "FORMULA", "NUMBER", "TEXT",
-]);
+const CELL_TYPES = new Set<FinanceReportEvidenceCellType>(
+  ["BOOLEAN", "DATE", "ERROR", "FORMULA", "NUMBER", "TEXT"]);
 const MAX_TEXT = 2_000_000;
 export type FinanceReportEvidenceFormat = "PDF" | "CSV" | "XLSX";
 export type FinanceReportEvidenceRole = "TEXT" | "AMOUNT" | "ISO_CODE";
+type FinanceReportEvidenceCellSource = { kind: "CELL"; sheet: string; row: number; column: number;
+  evidence: string } & (
+  | { start?: never; end?: never; text?: never }
+  | { start: number; end: number; text: string });
 export type FinanceReportEvidenceSource =
   | { kind: "PDF"; page: number; lineIndex: number; line: string; start: number; end: number; text: string }
-  | { kind: "CELL"; sheet: string; row: number; column: number; evidence: string;
-    start?: number; end?: number; text?: string };
+  | FinanceReportEvidenceCellSource;
 export type FinanceReportEvidenceClaim = { id: string; role: FinanceReportEvidenceRole;
   source: FinanceReportEvidenceSource };
 export type FinanceReportEvidenceBlockerCode = "INVALID_INPUT" | "LIMIT_EXCEEDED"
@@ -29,7 +30,6 @@ export type FinanceReportEvidenceSourceResultV1 = {
   facts: Array<FinanceReportEvidenceSourceFact
     | { kind: "BLOCKER"; code: FinanceReportEvidenceBlockerCode; claimId?: string }>;
 };
-
 type Cell = { value: string; displayValue?: string } & (
   | { type: "FORMULA"; resultType: NonFormulaCellType }
   | { type: NonFormulaCellType; resultType?: never });
@@ -38,12 +38,9 @@ type Bound = { fact: FinanceReportEvidenceSourceFact; coordinateKey: string;
   start: number; end: number; wholeAmount: boolean; evidence: string };
 class EvidenceError extends Error {
   constructor(public readonly code: FinanceReportEvidenceBlockerCode, public readonly claimId?: string) {
-    super(code);
-  }
+    super(code); }
 }
-function fail(code: FinanceReportEvidenceBlockerCode, claimId?: string): never {
-  throw new EvidenceError(code, claimId);
-}
+function fail(code: FinanceReportEvidenceBlockerCode, claimId?: string): never { throw new EvidenceError(code, claimId); }
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   Boolean(value) && typeof value === "object" && !Array.isArray(value);
 function exactKeys(value: Record<string, unknown>, allowed: string[], required = allowed,
@@ -61,14 +58,13 @@ function string(value: unknown, max: number, allowEmpty = false,
   return value;
 }
 const cellKey = (sheet: string, row: number, column: number) => JSON.stringify(["CELL", sheet, row, column]);
-
 function buildIndex(format: FinanceReportEvidenceFormat, jsonl: string): Index {
   if (!jsonl) fail("INVALID_INPUT");
   if (jsonl.length > MAX_TEXT) fail("LIMIT_EXCEEDED");
   const records = jsonl.split("\n");
   if (records.length > 250_000) fail("LIMIT_EXCEEDED");
   const index: Index = { pages: new Map(), cells: new Map() };
-  const sheets = new Map<string, { rows: number; columns: number }>();
+  const sheets = new Map<string, { rows: number; columns: number; observedRows: number; observedColumns: number }>();
   let totalRows = 0;
   let totalPdfLines = 0;
   for (const line of records) {
@@ -79,7 +75,7 @@ function buildIndex(format: FinanceReportEvidenceFormat, jsonl: string): Index {
       exactKeys(value, ["page", "text"]);
       const page = integer(value.page, 1, 250);
       const text = string(value.text, MAX_TEXT, true);
-      if (index.pages.has(page)) fail("MALFORMED_EVIDENCE");
+      if (page !== index.pages.size + 1) fail("MALFORMED_EVIDENCE");
       const pageLines = text.split("\n");
       totalPdfLines += pageLines.length;
       if (totalPdfLines > 250_000) fail("LIMIT_EXCEEDED");
@@ -94,7 +90,7 @@ function buildIndex(format: FinanceReportEvidenceFormat, jsonl: string): Index {
       totalRows += rows;
       if (sheets.has(sheet) || (format === "CSV" && (sheet !== "CSV" || sheets.size > 0))) fail("MALFORMED_EVIDENCE");
       if (sheets.size >= 100 || totalRows > 20_000) fail("LIMIT_EXCEEDED");
-      sheets.set(sheet, { rows, columns });
+      sheets.set(sheet, { rows, columns, observedRows: 0, observedColumns: 0 });
       continue;
     }
     exactKeys(value, ["sheet", "row", "column", "type", "value", "displayValue", "formula", "resultType"],
@@ -107,6 +103,8 @@ function buildIndex(format: FinanceReportEvidenceFormat, jsonl: string): Index {
     const type = rawType as FinanceReportEvidenceCellType;
     const cellValue = string(value.value, MAX_TEXT, true);
     if (!bounds || row > bounds.rows || column > bounds.columns || !CELL_TYPES.has(type)) fail("MALFORMED_EVIDENCE");
+    bounds.observedRows = Math.max(bounds.observedRows, row);
+    bounds.observedColumns = Math.max(bounds.observedColumns, column);
     const formula = value.formula;
     const resultType = value.resultType;
     if (type === "FORMULA" ? !(typeof formula === "string" && formula.length > 0
@@ -123,11 +121,12 @@ function buildIndex(format: FinanceReportEvidenceFormat, jsonl: string): Index {
       ? { type, resultType: resultType as NonFormulaCellType, value: cellValue, displayValue }
       : { type: type as NonFormulaCellType, value: cellValue, displayValue });
   }
+  if (format === "XLSX" && [...sheets.values()].some((sheet) => sheet.rows !== sheet.observedRows
+    || sheet.columns !== sheet.observedColumns)) fail("MALFORMED_EVIDENCE");
   if (format === "PDF" ? ![...index.pages.values()].some((lines) => lines.some((line) => line.trim()))
     : index.cells.size === 0) fail("MALFORMED_EVIDENCE");
   return index;
 }
-
 function splitsSurrogate(value: string, offset: number) {
   if (offset <= 0 || offset >= value.length) return false;
   const before = value.charCodeAt(offset - 1);
@@ -170,9 +169,8 @@ function parseClaim(value: unknown): FinanceReportEvidenceClaim {
     evidence: string(source.evidence, 50_000, true, "INVALID_INPUT"),
     ...(source.start === undefined ? {} : { start: integer(source.start, 0, 50_000, "INVALID_INPUT"),
       end: integer(source.end, 1, 50_000, "INVALID_INPUT"),
-      text: string(source.text, 50_000, false, "INVALID_INPUT") }) } };
+      text: string(source.text, 50_000, false, "INVALID_INPUT") }) } as FinanceReportEvidenceCellSource };
 }
-
 function bind(index: Index, format: FinanceReportEvidenceFormat, claim: FinanceReportEvidenceClaim): Bound {
   const source = claim.source;
   if (source.kind === "PDF") {
@@ -213,7 +211,6 @@ function bind(index: Index, format: FinanceReportEvidenceFormat, claim: FinanceR
     coordinateKey, start: selected.start, end: selected.end, wholeAmount,
     evidence: wholeAmount ? cell.value : source.evidence };
 }
-
 export function validateFinanceReportEvidenceSourcesV1(input: unknown): FinanceReportEvidenceSourceResultV1 {
   try {
     if (!isRecord(input)) fail("INVALID_INPUT");
@@ -235,8 +232,11 @@ export function validateFinanceReportEvidenceSourcesV1(input: unknown): FinanceR
       return item;
     });
     for (const items of groups.values()) {
-      if (items.some((item) => item.wholeAmount) && items.length > 1) fail("OVERLAPPING_SOURCE", items[1]?.fact.claimId);
-      if (new Set(items.map((item) => item.evidence)).size > 1) fail("OVERLAPPING_SOURCE", items[1]?.fact.claimId);
+      const wholeIndex = items.findIndex((item) => item.wholeAmount);
+      if (wholeIndex >= 0 && items.length > 1) fail("OVERLAPPING_SOURCE",
+        items[wholeIndex === 0 ? 1 : wholeIndex]?.fact.claimId);
+      const different = items.find((item) => item.evidence !== items[0]?.evidence);
+      if (different) fail("OVERLAPPING_SOURCE", different.fact.claimId);
       const sorted = [...items].sort((a, b) => a.start - b.start || a.end - b.end
         || a.fact.claimId.localeCompare(b.fact.claimId));
       for (let index = 1; index < sorted.length; index += 1) {
