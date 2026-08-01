@@ -48,7 +48,7 @@ function string(value: unknown, max: number, allowEmpty = false,
   if (budget && (budget.total += value.length) > MAX_TEXT * 2) fail(code);
   return value;
 }
-function sheetName(value: unknown, code: FinanceReportEvidenceBlockerCode = "MALFORMED_EVIDENCE", budget?: { total: number }) { const result = string(value, MAX_TEXT, true, code, budget); if (!result) fail(code); return result; }
+function sheetName(value: unknown, code: FinanceReportEvidenceBlockerCode = "MALFORMED_EVIDENCE", budget?: { total: number }) { return string(value, MAX_TEXT, true, code, budget); }
 const cellKey = (sheet: string, row: number, column: number) => JSON.stringify(["CELL", sheet, row, column]);
 function validScalar(type: NonFormulaCellType, value: string) { return type === "NUMBER"
   ? Number.isFinite(Number(value)) && String(Number(value)) === value
