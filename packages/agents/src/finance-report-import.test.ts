@@ -139,6 +139,9 @@ describe("proposeFinanceReportImportV1", () => {
     expect(unresolved.result).toMatchObject({ kind: "SUCCESS", proposal: { numericFormat: { status: "UNRESOLVED" }, mappings: [{ amountCents: null }, { amountCents: null }], exceptions: [expect.objectContaining({ code: "NUMERIC_FORMAT_UNRESOLVED", severity: "BLOCKER" })] } });
     const evidenced = { ...ambiguous, numericFormat: { ...ambiguous.numericFormat, decimalSeparatorEvidenceClaimIds: ["decimal"] } };
     expect((await run(evidenced, { amounts })).result).toMatchObject({ kind: "SUCCESS", proposal: { numericFormat: { status: "RESOLVED" }, mappings: [{ amountCents: 123_400 }, { amountCents: 234_500 }] } });
+    const mixedAmounts = ["1.234", "2,345"] as const;
+    const mixed = proposal("PDF", mixedAmounts); mixed.numericFormat.groupingSeparator = "COMMA";
+    expect((await run(mixed, { amounts: mixedAmounts })).result).toMatchObject({ kind: "SUCCESS", proposal: { numericFormat: { status: "UNRESOLVED" }, mappings: [{ amountCents: null }, { amountCents: null }] } });
   });
 
   it("rejects explicit currency without matching exact ISO evidence", async () => {
