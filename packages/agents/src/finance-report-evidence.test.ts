@@ -5,7 +5,7 @@ const jsonl = (...records: unknown[]) => records.map((record) => JSON.stringify(
 const pdfSource = (line: string, text: string, lineIndex = 0, page = 1) =>
   ({ kind: "PDF", page, lineIndex, line, start: line.indexOf(text), end: line.indexOf(text) + text.length, text } as const);
 const cellSource = (evidence: string, extra: Record<string, unknown> = {}) =>
-  ({ kind: "CELL", sheet: "Report", row: 1, column: 1, evidence, ...extra } as const);
+  ({ kind: "CELL", sheet: " ", row: 1, column: 1, evidence, ...extra } as const);
 const validate = (format: "PDF" | "CSV" | "XLSX", extractedEvidence: string, claims: unknown[]) =>
   validateFinanceReportEvidenceSourcesV1({ format, extractedEvidence, claims });
 const code = (result: ReturnType<typeof validate>) => result.facts[0]?.kind === "BLOCKER"
@@ -62,10 +62,10 @@ describe("validateFinanceReportEvidenceSourcesV1", () => {
   });
   it("uses only raw XLSX numbers or numeric formula results for amount roles", () => {
     const extracted = jsonl(
-      { sheet: "Report", rowCount: 1, columnCount: 250_001 },
-      { sheet: "Report", row: 1, column: 1, type: "NUMBER", value: "1234", displayValue: "$123" },
-      { sheet: "Report", row: 1, column: 2, type: "FORMULA", value: "20", displayValue: "$20", formula: "A1/2", resultType: "NUMBER" },
-      { sheet: "Report", row: 1, column: 3, type: "TEXT", value: "30" }, { sheet: "Report", row: 1, column: 250_001, type: "ERROR", value: "#DIV/0!" },
+      { sheet: " ", rowCount: 1, columnCount: 250_001 },
+      { sheet: " ", row: 1, column: 1, type: "NUMBER", value: "1234", displayValue: "$123" },
+      { sheet: " ", row: 1, column: 2, type: "FORMULA", value: "20", displayValue: "$20", formula: "A1/2", resultType: "NUMBER" },
+      { sheet: " ", row: 1, column: 3, type: "TEXT", value: "30" }, { sheet: " ", row: 1, column: 250_001, type: "ERROR", value: "#DIV/0!" },
     );
     const good = validate("XLSX", extracted, [
       { id: "raw", role: "AMOUNT", source: cellSource("1234") },
@@ -80,7 +80,7 @@ describe("validateFinanceReportEvidenceSourcesV1", () => {
     const textFacts = ["1234", "$123"].map((evidence) => validate("XLSX", extracted,
       [{ id: evidence, role: "TEXT", source: cellSource(evidence) }]).facts[0]);
     expect(textFacts.map((fact) => fact?.kind === "SOURCE" && fact.sourceKey)).toEqual([
-      '["CELL","Report",1,1,"RAW",0,4]', '["CELL","Report",1,1,"DISPLAY",0,4]',
+      '["CELL"," ",1,1,"RAW",0,4]', '["CELL"," ",1,1,"DISPLAY",0,4]',
     ]);
     expect(code(validate("XLSX", extracted,
       [{ id: "display", role: "AMOUNT", source: cellSource("$123") }]))).toBe("SOURCE_NOT_FOUND");

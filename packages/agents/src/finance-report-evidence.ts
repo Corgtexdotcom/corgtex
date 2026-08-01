@@ -48,6 +48,7 @@ function string(value: unknown, max: number, allowEmpty = false,
   if (budget && (budget.total += value.length) > MAX_TEXT * 2) fail(code);
   return value;
 }
+function sheetName(value: unknown, code: FinanceReportEvidenceBlockerCode = "MALFORMED_EVIDENCE", budget?: { total: number }) { const result = string(value, 200, true, code, budget); if (!result) fail(code); return result; }
 const cellKey = (sheet: string, row: number, column: number) => JSON.stringify(["CELL", sheet, row, column]);
 function validScalar(type: NonFormulaCellType, value: string) { return type === "NUMBER"
   ? Number.isFinite(Number(value)) && String(Number(value)) === value
@@ -77,7 +78,7 @@ function buildIndex(format: FinanceReportEvidenceFormat, jsonl: string): Index {
     }
     if (!("row" in value)) {
       exactKeys(value, ["sheet", "rowCount", "columnCount"]);
-      const sheet = string(value.sheet, 200);
+      const sheet = sheetName(value.sheet);
       const rows = integer(value.rowCount, 0, 20_000);
       const columns = integer(value.columnCount, 0, format === "XLSX" ? Number.MAX_SAFE_INTEGER : 250_000);
       totalRows += rows;
@@ -89,7 +90,7 @@ function buildIndex(format: FinanceReportEvidenceFormat, jsonl: string): Index {
     }
     exactKeys(value, ["sheet", "row", "column", "type", "value", "displayValue", "formula", "resultType"],
       ["sheet", "row", "column", "type", "value"]);
-    const sheet = string(value.sheet, 200);
+    const sheet = sheetName(value.sheet);
     const bounds = sheets.get(sheet);
     const row = integer(value.row, 1, 20_000);
     const column = integer(value.column, 1, format === "XLSX" ? Number.MAX_SAFE_INTEGER : 250_000);
@@ -125,8 +126,7 @@ function buildIndex(format: FinanceReportEvidenceFormat, jsonl: string): Index {
 }
 function splitsSurrogate(value: string, offset: number) {
   if (offset <= 0 || offset >= value.length) return false;
-  const before = value.charCodeAt(offset - 1);
-  const after = value.charCodeAt(offset);
+  const before = value.charCodeAt(offset - 1); const after = value.charCodeAt(offset);
   return before >= 0xd800 && before <= 0xdbff && after >= 0xdc00 && after <= 0xdfff;
 }
 function span(value: string, start: unknown, end: unknown, selected: unknown, claimId: string) {
@@ -159,7 +159,7 @@ function parseClaim(value: unknown, budget: { total: number }): FinanceReportEvi
   const optional = [source.start, source.end, source.text];
   if ((optional.some((item) => item !== undefined) && optional.some((item) => item === undefined)) || (value.role === "AMOUNT" && source.start !== undefined)) fail("INVALID_INPUT", id);
   return { id, role: value.role as FinanceReportEvidenceRole, source: { kind: "CELL",
-    sheet: string(source.sheet, 200, false, "INVALID_INPUT", budget),
+    sheet: sheetName(source.sheet, "INVALID_INPUT", budget),
     row: integer(source.row, 1, 20_000, "INVALID_INPUT"),
     column: integer(source.column, 1, Number.MAX_SAFE_INTEGER, "INVALID_INPUT"),
     evidence: string(source.evidence, MAX_TEXT, true, "INVALID_INPUT", budget),
