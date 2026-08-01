@@ -105,9 +105,9 @@ describe("validateFinanceReportEvidenceSourcesV1", () => {
       "not-json",
       jsonl({ page: 1, text: "10", extra: true }),
       jsonl({ page: 1, text: "10" }, { page: 1, text: "20" }),
-      jsonl({ page: 2, text: "10" }), '{"page":2,"page":1,"text":"10"}',
+      jsonl({ page: 2, text: "10" }), '{"page":2,"page":1,"text":"10"}', jsonl({ text: "10", page: 1 }),
       jsonl(validCell, { sheet: "CSV", rowCount: 1, columnCount: 1 }),
-      jsonl({ sheet: "CSV", rowCount: 1, columnCount: 1 }, validCell, validCell),
+      jsonl({ sheet: "CSV", rowCount: 1, columnCount: 1 }, validCell, validCell), jsonl({ sheet: "CSV", rowCount: 1, columnCount: 1 }, { row: 1, sheet: "CSV", column: 1, type: "TEXT", value: "10" }),
       jsonl({ sheet: "CSV", rowCount: 1, columnCount: 2 }, { ...validCell, column: 2 }, validCell),
       jsonl({ sheet: "CSV", rowCount: 1, columnCount: 1 }, { ...validCell, value: "" }), jsonl({ sheet: "CSV", rowCount: 1, columnCount: 1 }, { ...validCell, value: "\0" }), jsonl({ sheet: "CSV", rowCount: 1, columnCount: 1 }, { ...validCell, value: "\ud800" }), jsonl({ sheet: "CSV", rowCount: 20_000, columnCount: 250_000 }, validCell),
       jsonl({ sheet: "Report", rowCount: 1, columnCount: 1 }, { ...validCell, sheet: "Report" }),
@@ -115,9 +115,9 @@ describe("validateFinanceReportEvidenceSourcesV1", () => {
         { ...validCell, type: "FORMULA", formula: "1+1" }),
     ];
     expect(code(validate("PDF", malformed[0]!, [{ id: "a", role: "TEXT", source: pdfSource("10", "10") }]))).toBe("MALFORMED_EVIDENCE");
-    for (const evidence of malformed.slice(1, 5)) expect(code(validate("PDF", evidence,
+    for (const evidence of malformed.slice(1, 6)) expect(code(validate("PDF", evidence,
       [{ id: "a", role: "TEXT", source: pdfSource("10", "10") }]))).toBe("MALFORMED_EVIDENCE");
-    for (const evidence of malformed.slice(5)) expect(code(validate("CSV", evidence,
+    for (const evidence of malformed.slice(6)) expect(code(validate("CSV", evidence,
       [{ id: "a", role: "AMOUNT", source: cellSource("10") }]))).toBe("MALFORMED_EVIDENCE");
     for (const evidence of [jsonl({ sheet: "Report", rowCount: 2, columnCount: 1 }, { sheet: "Report", row: 1, column: 1, type: "NUMBER", value: "10" }),
       jsonl({ sheet: "Report", rowCount: 1, columnCount: 4_294_967_296 }, { sheet: "Report", row: 1, column: 4_294_967_296, type: "NUMBER", value: "10" })]) expect(code(validate("XLSX", evidence,

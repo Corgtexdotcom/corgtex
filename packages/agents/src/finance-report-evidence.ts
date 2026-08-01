@@ -34,8 +34,8 @@ type Bound = { fact: FinanceReportEvidenceSourceFact; coordinateKey: string;
 class EvidenceError extends Error { constructor(public readonly code: FinanceReportEvidenceBlockerCode, public readonly claimId?: string) { super(code); } }
 function fail(code: FinanceReportEvidenceBlockerCode, claimId?: string): never { throw new EvidenceError(code, claimId); }
 const isRecord = (value: unknown): value is Record<string, unknown> => Boolean(value) && typeof value === "object" && !Array.isArray(value) && !nodeTypes.isProxy(value) && [Object.prototype, null].includes(Object.getPrototypeOf(value));
-function exactKeys(value: Record<string, unknown>, allowed: string[], required = allowed, code: FinanceReportEvidenceBlockerCode = "MALFORMED_EVIDENCE") {
-  const descriptors = Object.getOwnPropertyDescriptors(value); if (!required.every((key) => Object.hasOwn(descriptors, key)) || Reflect.ownKeys(descriptors).some((key) => typeof key !== "string" || !allowed.includes(key)) || Object.values(descriptors).some((descriptor) => !("value" in descriptor))) fail(code); return Object.fromEntries(Object.entries(descriptors).map(([key, descriptor]) => [key, descriptor.value]));
+function exactKeys(value: Record<string, unknown>, allowed: string[], required = allowed, code: FinanceReportEvidenceBlockerCode = "MALFORMED_EVIDENCE", ordered = false) {
+  const descriptors = Object.getOwnPropertyDescriptors(value), keys = Reflect.ownKeys(descriptors); if (!required.every((key) => Object.hasOwn(descriptors, key)) || keys.some((key) => typeof key !== "string" || !allowed.includes(key)) || (ordered && keys.some((key, index) => key !== allowed.filter((item) => Object.hasOwn(descriptors, item))[index])) || Object.values(descriptors).some((descriptor) => !("value" in descriptor))) fail(code); return Object.fromEntries(Object.entries(descriptors).map(([key, descriptor]) => [key, descriptor.value]));
 }
 function integer(value: unknown, min: number, max: number,
   code: FinanceReportEvidenceBlockerCode = "MALFORMED_EVIDENCE") {
@@ -69,7 +69,7 @@ function buildIndex(format: FinanceReportEvidenceFormat, jsonl: string): Index {
     try { value = JSON.parse(line); if (JSON.stringify(value) !== line) fail("MALFORMED_EVIDENCE"); } catch { fail("MALFORMED_EVIDENCE"); }
     if (!isRecord(value)) fail("MALFORMED_EVIDENCE");
     if (format === "PDF") {
-      exactKeys(value, ["page", "text"]);
+      exactKeys(value, ["page", "text"], undefined, "MALFORMED_EVIDENCE", true);
       const page = integer(value.page, 1, 250);
       const text = string(value.text, MAX_TEXT, true);
       if (page !== index.pages.size + 1) fail("MALFORMED_EVIDENCE");
@@ -77,7 +77,7 @@ function buildIndex(format: FinanceReportEvidenceFormat, jsonl: string): Index {
       continue;
     }
     if (!("row" in value)) {
-      exactKeys(value, ["sheet", "rowCount", "columnCount"]);
+      exactKeys(value, ["sheet", "rowCount", "columnCount"], undefined, "MALFORMED_EVIDENCE", true);
       const sheet = sheetName(value.sheet);
       const rows = integer(value.rowCount, 0, 20_000);
       const columns = integer(value.columnCount, 0, format === "XLSX" ? 4_294_967_295 : 250_000);
@@ -89,7 +89,7 @@ function buildIndex(format: FinanceReportEvidenceFormat, jsonl: string): Index {
       continue;
     }
     exactKeys(value, ["sheet", "row", "column", "type", "value", "displayValue", "formula", "resultType"],
-      ["sheet", "row", "column", "type", "value"]);
+      ["sheet", "row", "column", "type", "value"], "MALFORMED_EVIDENCE", true);
     const sheet = sheetName(value.sheet);
     const bounds = sheets.get(sheet);
     const row = integer(value.row, 1, 20_000);
