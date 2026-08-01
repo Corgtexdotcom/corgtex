@@ -73,6 +73,18 @@ describe("validateFinanceReportValueEvidenceV1", () => {
     expect(result).toMatchObject({ kind: "SUCCESS", facts: [{ kind: "AMOUNT", amountCents: 123_450, lexemeFormat: "XLSX_CANONICAL" }] });
   });
 
+  it("evaluates source-validated XLSX canonical exponents with exact scale arithmetic", () => {
+    const scaled = { ...DEFAULT_FORMAT, amountScale: 1_000_000_000 } as const;
+    expect(amount("1e-7", scaled, "XLSX").amountCents).toBe(10_000);
+    expect(blocker(input("1e-7", DEFAULT_FORMAT, "XLSX")).code).toBe("FRACTIONAL_CENTS");
+    const records = [{ sheet: "S", rowCount: 1, columnCount: 1 },
+      { sheet: "S", row: 1, column: 1, type: "FORMULA", value: "-1.25e-7", formula: "A1*2", resultType: "NUMBER" }];
+    const source = { format: "XLSX", extractedEvidence: records.map((record) => JSON.stringify(record)).join("\n"),
+      claims: [{ id: "formula-exp", role: "AMOUNT", source: { kind: "CELL", sheet: "S", row: 1, column: 1, evidence: "-1.25e-7" } }] };
+    expect(validateFinanceReportValueEvidenceV1({ sourceInput: source, numericFormat: scaled }))
+      .toMatchObject({ kind: "SUCCESS", facts: [{ kind: "AMOUNT", amountCents: -12_500, lexemeFormat: "XLSX_CANONICAL" }] });
+  });
+
   it.each([
     ["DOT", "COMMA", "1,234,567.89", 123_456_789],
     ["COMMA", "DOT", "1.234.567,89", 123_456_789],

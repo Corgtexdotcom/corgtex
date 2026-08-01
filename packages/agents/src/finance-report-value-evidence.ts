@@ -92,8 +92,25 @@ function trimBoundary(value: string) {
   return value.replace(BOUNDARY_SPACE, "");
 }
 
-function parseAmount(selectedText: string, parsed: ReturnType<typeof parseFormat>, claimId: string) {
+function parseCanonicalExponent(selectedText: string, parsed: ReturnType<typeof parseFormat>, claimId: string) {
+  const match = /^(-?)(\d)(?:\.(\d+))?e([+-]\d+)$/.exec(selectedText);
+  if (!match) fail("INVALID_AMOUNT", claimId);
+  const fraction = match[3] ?? "";
+  const exponent = Number(match[4]);
+  if (!Number.isInteger(exponent) || Math.abs(exponent) > 400) fail("INVALID_AMOUNT", claimId);
+  const power = exponent - fraction.length;
+  let numerator = BigInt(match[2]! + fraction) * BigInt(parsed.format.amountScale) * 100n;
+  const denominator = power < 0 ? 10n ** BigInt(-power) : 1n;
+  if (power > 0) numerator *= 10n ** BigInt(power);
+  if (numerator % denominator !== 0n) fail("FRACTIONAL_CENTS", claimId);
+  const signed = (match[1] ? -1n : 1n) * (numerator / denominator);
+  if (signed < INT_MIN || signed > INT_MAX) fail("AMOUNT_OUT_OF_RANGE", claimId);
+  return Number(signed);
+}
+
+function parseAmount(selectedText: string, parsed: ReturnType<typeof parseFormat>, claimId: string, xlsxCanonical = false) {
   if (selectedText.length > 128) fail("LIMIT_EXCEEDED", claimId);
+  if (xlsxCanonical && selectedText.includes("e")) return parseCanonicalExponent(selectedText, parsed, claimId);
   if (/[A-Za-z%‰‱¢]/u.test(selectedText)) fail("UNSUPPORTED_PRESENTATION", claimId);
   let token = trimBoundary(selectedText);
   let negative = false;
@@ -145,7 +162,7 @@ function parseFact(fact: FinanceReportEvidenceSourceFact, parsed: ReturnType<typ
     && (fact.cell.type === "NUMBER" || (fact.cell.type === "FORMULA" && fact.cell.resultType === "NUMBER"));
   const lexemeFormat = xlsxCanonical ? "XLSX_CANONICAL" : "REPORT";
   const amountFormat = xlsxCanonical ? { ...parsed, decimal: ".", grouping: "" } : parsed;
-  return { kind: "AMOUNT", source: fact, amountCents: parseAmount(fact.selectedText, amountFormat, fact.claimId),
+  return { kind: "AMOUNT", source: fact, amountCents: parseAmount(fact.selectedText, amountFormat, fact.claimId, xlsxCanonical),
     numericFormat: { ...parsed.format }, lexemeFormat };
 }
 
