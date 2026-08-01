@@ -80,7 +80,7 @@ function buildIndex(format: FinanceReportEvidenceFormat, jsonl: string): Index {
       exactKeys(value, ["sheet", "rowCount", "columnCount"]);
       const sheet = sheetName(value.sheet);
       const rows = integer(value.rowCount, 0, 20_000);
-      const columns = integer(value.columnCount, 0, format === "XLSX" ? Number.MAX_SAFE_INTEGER : 250_000);
+      const columns = integer(value.columnCount, 0, format === "XLSX" ? 4_294_967_295 : 250_000);
       totalRows += rows;
       if (sheets.has(sheet) || (format === "CSV" && (sheet !== "CSV" || sheets.size > 0 || rows * columns > 250_000))) fail("MALFORMED_EVIDENCE");
       if (sheets.size >= 100 || totalRows > 20_000) fail("LIMIT_EXCEEDED");
@@ -93,7 +93,7 @@ function buildIndex(format: FinanceReportEvidenceFormat, jsonl: string): Index {
     const sheet = sheetName(value.sheet);
     const bounds = sheets.get(sheet);
     const row = integer(value.row, 1, 20_000);
-    const column = integer(value.column, 1, format === "XLSX" ? Number.MAX_SAFE_INTEGER : 250_000);
+    const column = integer(value.column, 1, format === "XLSX" ? 4_294_967_295 : 250_000);
     const rawType = string(value.type, 20);
     const type = rawType as FinanceReportEvidenceCellType;
     const cellValue = string(value.value, MAX_TEXT, true);
@@ -111,7 +111,7 @@ function buildIndex(format: FinanceReportEvidenceFormat, jsonl: string): Index {
     if (format === "CSV" && (type !== "TEXT" || value.displayValue !== undefined || !cellValue || cellValue.includes("\0"))) fail("MALFORMED_EVIDENCE");
     const displayValue = value.displayValue === undefined ? undefined
       : string(value.displayValue, MAX_TEXT, true);
-    if (displayValue === cellValue || (displayValue !== undefined && (type === "ERROR" || type === "TEXT" || (type === "FORMULA" && (resultType === "ERROR" || resultType === "TEXT"))))) fail("MALFORMED_EVIDENCE");
+    if (displayValue === cellValue || (displayValue !== undefined && (type === "ERROR" || type === "TEXT" || (type === "FORMULA" && (resultType === "ERROR" || resultType === "TEXT")) || ((type === "BOOLEAN" || (type === "FORMULA" && resultType === "BOOLEAN")) && displayValue !== (cellValue === "true" ? "TRUE" : "FALSE"))))) fail("MALFORMED_EVIDENCE");
     const key = cellKey(sheet, row, column); if (index.cells.has(key)) fail("MALFORMED_EVIDENCE");
     if (index.cells.size >= 250_000) fail("LIMIT_EXCEEDED");
     index.cells.set(key, type === "FORMULA"
@@ -160,7 +160,7 @@ function parseClaim(value: unknown, budget: { total: number }): FinanceReportEvi
   return { id, role: value.role as FinanceReportEvidenceRole, source: { kind: "CELL",
     sheet: sheetName(source.sheet, "INVALID_INPUT", budget),
     row: integer(source.row, 1, 20_000, "INVALID_INPUT"),
-    column: integer(source.column, 1, Number.MAX_SAFE_INTEGER, "INVALID_INPUT"),
+    column: integer(source.column, 1, 4_294_967_295, "INVALID_INPUT"),
     evidence: string(source.evidence, MAX_TEXT, true, "INVALID_INPUT", budget),
     ...(source.start === undefined ? {} : { start: integer(source.start, 0, MAX_TEXT, "INVALID_INPUT"),
       end: integer(source.end, 1, MAX_TEXT, "INVALID_INPUT"),
@@ -212,7 +212,7 @@ export function validateFinanceReportEvidenceSourcesV1(input: unknown): FinanceR
     exactKeys(input, ["format", "extractedEvidence", "claims"], undefined, "INVALID_INPUT");
     if (!new Set(["PDF", "CSV", "XLSX"]).has(input.format as string)
       || typeof input.extractedEvidence !== "string" || !Array.isArray(input.claims)
-      || input.claims.length === 0 || input.claims.length > 1_000) fail("INVALID_INPUT");
+      || input.claims.length === 0 || input.claims.length > 1_000 || Object.keys(input.claims).length !== input.claims.length) fail("INVALID_INPUT");
     const format = input.format as FinanceReportEvidenceFormat;
     const index = buildIndex(format, input.extractedEvidence);
     const budget = { total: 0 }, claims = input.claims.map((rawClaim) => parseClaim(rawClaim, budget));

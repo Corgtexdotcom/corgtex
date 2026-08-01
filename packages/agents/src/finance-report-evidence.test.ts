@@ -66,7 +66,7 @@ describe("validateFinanceReportEvidenceSourcesV1", () => {
       { sheet: longSheet, rowCount: 1, columnCount: 250_001 },
       { sheet: longSheet, row: 1, column: 1, type: "NUMBER", value: "1234", displayValue: "$123" },
       { sheet: longSheet, row: 1, column: 2, type: "FORMULA", value: "20", displayValue: "$20", formula: "A1/2", resultType: "NUMBER" },
-      { sheet: longSheet, row: 1, column: 3, type: "TEXT", value: "30" }, { sheet: longSheet, row: 1, column: 250_001, type: "ERROR", value: "#DIV/0!" },
+      { sheet: longSheet, row: 1, column: 3, type: "TEXT", value: "30" }, { sheet: longSheet, row: 1, column: 4, type: "BOOLEAN", value: "true", displayValue: "TRUE" }, { sheet: longSheet, row: 1, column: 250_001, type: "ERROR", value: "#DIV/0!" },
     );
     const good = validate("XLSX", extracted, [
       { id: "raw", role: "AMOUNT", source: cellSource("1234") },
@@ -119,12 +119,12 @@ describe("validateFinanceReportEvidenceSourcesV1", () => {
       [{ id: "a", role: "TEXT", source: pdfSource("10", "10") }]))).toBe("MALFORMED_EVIDENCE");
     for (const evidence of malformed.slice(4)) expect(code(validate("CSV", evidence,
       [{ id: "a", role: "AMOUNT", source: cellSource("10") }]))).toBe("MALFORMED_EVIDENCE");
-    expect(code(validate("XLSX", jsonl({ sheet: "Report", rowCount: 2, columnCount: 1 },
-      { sheet: "Report", row: 1, column: 1, type: "NUMBER", value: "10" }),
-    [{ id: "a", role: "AMOUNT", source: cellSource("10") }]))).toBe("MALFORMED_EVIDENCE");
+    for (const evidence of [jsonl({ sheet: "Report", rowCount: 2, columnCount: 1 }, { sheet: "Report", row: 1, column: 1, type: "NUMBER", value: "10" }),
+      jsonl({ sheet: "Report", rowCount: 1, columnCount: 4_294_967_296 }, { sheet: "Report", row: 1, column: 4_294_967_296, type: "NUMBER", value: "10" })]) expect(code(validate("XLSX", evidence,
+        [{ id: "a", role: "AMOUNT", source: cellSource("10") }]))).toBe("MALFORMED_EVIDENCE");
     const impossibleScalars = [{ type: "NUMBER", value: "not-a-number" }, { type: "BOOLEAN", value: "TRUE" },
       { type: "DATE", value: "2026-13-01" }, { type: "ERROR", value: "not-an-error" }, { type: "ERROR", value: "#DIV/0!", displayValue: "fabricated" }, { type: "TEXT", value: "text", displayValue: "fabricated" },
-      { type: "NUMBER", value: "10", displayValue: "10" }, { type: "FORMULA", value: "text", displayValue: "fabricated", formula: "A1", resultType: "TEXT" }, { type: "FORMULA", value: "NaN", formula: "1/0", resultType: "NUMBER" }, { type: "FORMULA", value: "10", formula: "[Book2.xlsx]Sheet1!A1", resultType: "NUMBER" }];
+      { type: "NUMBER", value: "10", displayValue: "10" }, { type: "BOOLEAN", value: "true", displayValue: "fabricated" }, { type: "FORMULA", value: "true", displayValue: "fabricated", formula: "A1", resultType: "BOOLEAN" }, { type: "FORMULA", value: "text", displayValue: "fabricated", formula: "A1", resultType: "TEXT" }, { type: "FORMULA", value: "NaN", formula: "1/0", resultType: "NUMBER" }, { type: "FORMULA", value: "10", formula: "[Book2.xlsx]Sheet1!A1", resultType: "NUMBER" }];
     for (const cell of impossibleScalars) expect(code(validate("XLSX", jsonl({ sheet: "Report", rowCount: 1, columnCount: 1 },
       { sheet: "Report", row: 1, column: 1, ...cell }),
     [{ id: "a", role: "AMOUNT", source: cellSource(cell.value) }]))).toBe("MALFORMED_EVIDENCE");
@@ -142,7 +142,7 @@ describe("validateFinanceReportEvidenceSourcesV1", () => {
       "amountCents", "currency", "proposal", "transaction", "persistence",
     ]));
     expect(code(validateFinanceReportEvidenceSourcesV1({ format: "PDF", extractedEvidence: extracted,
-      claims, extra: true }))).toBe("INVALID_INPUT");
+      claims, extra: true }))).toBe("INVALID_INPUT"); expect(code(validate("PDF", extracted, new Array(1)))).toBe("INVALID_INPUT");
     expect(code(validate("PDF", extracted, [{ ...claims[0], source: { ...claims[0]!.source, extra: true } }]))).toBe("INVALID_INPUT");
     expect(code(validate("PDF", extracted, Array.from({ length: 1_001 }, (_, index) =>
       ({ id: String(index), role: "TEXT", source: pdfSource("Revenue 10", "10") }))))).toBe("INVALID_INPUT");
