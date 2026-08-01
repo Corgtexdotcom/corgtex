@@ -141,25 +141,26 @@ function bind(index: Index, format: FinanceReportEvidenceFormat, claimSource: Fi
     rawNumber: format === "XLSX", cell };
 }
 
-const UNSAFE_AMOUNT = /(?:[%‰¢]\s*\d|(?:19|20)\d{2}(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])|\d[\d.,']*\s*(?:[%‰¢]|(?:k|m|b|bn|mm|million|billion)\b|cents?\b)|\d(?:[.,]\d+)?[eE][+\-−]?\d+|\d\s*[-/:]\s*\d)/iu;
-const MONEY = /(?<![\p{L}\p{N}.,'\-−])\(?[+\-−]?\s*\p{Sc}?\s*\d(?:[\d.,']*\d)?\s*[\-−]?\)?(?![\p{L}\p{N}.,'\-−])/gu;
+const UNSAFE_AMOUNT = /(?:[%‰¢]\s*\d|(?:19|20)\d{2}(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])|\d[\d.,']{0,64}\s*(?:[%‰¢]|(?:k|m|b|bn|mm|mn|tn|thousands?|millions?|billions?|trillions?)\b|cents?\b)|\d(?:[.,]\d+)?[eE][+\-−]?\d+|\d\s*[-/:]\s*\d)/iu;
+const MONEY = /(?<![\p{L}\p{N}.,'\p{Pd}−])\(?[+\-−]?\s*\p{Sc}?\s*\d(?:[\d.,' \u00a0\u202f]*\d)?\s*[\-−]?\)?(?![\p{L}\p{N}'\p{Pd}−]|[.,][\p{L}\p{N}])/gu;
 function tokenCents(token: string, rawNumber: boolean) {
   const trimmed = token.trim();
   if (rawNumber && !/^[+-]?\d+(?:\.\d+)?$/.test(trimmed)) return null;
-  const match = trimmed.match(/^(\()?([+\-−])?\s*\p{Sc}?\s*(\d[\d.,']*)\s*([\-−])?(\))?$/u);
+  const match = trimmed.match(/^(\()?([+\-−])?\s*\p{Sc}?\s*(\d[\d.,' \u00a0\u202f]*)\s*([\-−])?(\))?$/u);
   if (!match || Boolean(match[1]) !== Boolean(match[5])) return null;
   const negatives = Number(Boolean(match[1])) + Number(match[2] === "-" || match[2] === "−") + Number(Boolean(match[4]));
   if (negatives > 1 || (match[2] === "+" && (match[1] || match[4]))) return null;
-  const core = match[3]!; const comma = core.lastIndexOf(","); const dot = core.lastIndexOf(".");
+  const core = match[3]!.replace(/[\u00a0\u202f]/g, " "); const comma = core.lastIndexOf(","); const dot = core.lastIndexOf(".");
   const separator = Math.max(comma, dot); const tail = separator < 0 ? 0 : core.length - separator - 1;
   const count = [...core].filter((char) => char === "," || char === ".").length;
   const decimal = rawNumber ? dot : comma >= 0 && dot >= 0 ? separator : count === 1 && tail <= 2 ? separator : -1;
   if (rawNumber && (comma >= 0 || (dot >= 0 && tail > 2))) return null;
   const whole = core.slice(0, decimal < 0 ? core.length : decimal); const fraction = decimal < 0 ? "" : core.slice(decimal + 1);
   const marks = [...new Set([...whole].filter((char) => !/\d/.test(char)))];
-  if (marks.length > 1 || (marks.length === 1 && !whole.split(marks[0]!).every((part, index) => /^\d+$/.test(part)
+  if ((marks.length === 1 && whole.startsWith(`0${marks[0]}`)) || marks.length > 1
+    || (marks.length === 1 && !whole.split(marks[0]!).every((part, index) => /^\d+$/.test(part)
     && (index === 0 ? part.length >= 1 && part.length <= 3 : part.length === 3)))) return null;
-  const digits = whole.replace(/[.,']/g, "");
+  const digits = whole.replace(/[.,' ]/g, "");
   if (!/^\d{1,10}$/.test(digits) || !/^\d{0,2}$/.test(fraction)) return null;
   const magnitude = (BigInt(digits) * 100n) + BigInt(fraction.padEnd(2, "0") || "0");
   const cents = negatives === 1 ? -magnitude : magnitude;
@@ -184,8 +185,10 @@ function currencyFact(evidence: string, claimId: string): FinanceReportEvidenceF
   }
   const named = new Set(words.map((match) => match[0]).filter((code) => code !== "ALL" || contextual.has(code)));
   const stated = [...evidence.matchAll(/\b(?:currency|ccy|in)\s*[:=-]?\s*([A-Za-z]{2,4})\b/gi)].map((match) => match[1]!);
+  const listed = contextual.size === 0 ? [] : [...evidence.matchAll(/(?:[,&;/]|\band\b)\s*([A-Za-z]{2,4})\b/gi)].map((match) => match[1]!);
   const slash = evidence.match(/\b([A-Z]{3})\s*\/\s*([A-Z]{3})\b/);
   if (stated.some((code) => code !== code.toUpperCase() || !ISO_CODES.has(code))
+    || listed.some((code) => code !== code.toUpperCase() || !ISO_CODES.has(code))
     || (slash && (!ISO_CODES.has(slash[1]!) || !ISO_CODES.has(slash[2]!)))
     || (/^[A-Za-z]{2,4}$/.test(trim) && (!/^[A-Z]{3}$/.test(trim) || !ISO_CODES.has(trim)))) fail("INVALID_CURRENCY", claimId);
   if (contextual.size > 1 || (contextual.size === 1 && named.size > 1)) fail("MULTI_CURRENCY", claimId);
