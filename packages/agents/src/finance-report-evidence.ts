@@ -12,14 +12,14 @@ export type FinanceReportEvidenceRole = "TEXT" | "AMOUNT" | "ISO_CODE";
 type FinanceReportEvidencePdfSource = { kind: "PDF"; page: number; lineIndex: number; line: string; start: number; end: number; text: string };
 type FinanceReportEvidenceCellSource = { kind: "CELL"; sheet: string; row: number; column: number; evidence: string } &
   ({ start?: never; end?: never; text?: never } | { start: number; end: number; text: string });
+type FinanceReportEvidenceWholeCellSource = FinanceReportEvidenceCellSource & { start?: never; end?: never; text?: never };
 export type FinanceReportEvidenceSource = FinanceReportEvidencePdfSource | FinanceReportEvidenceCellSource;
-export type FinanceReportEvidenceClaim = { id: string; role: FinanceReportEvidenceRole;
-  source: FinanceReportEvidenceSource };
+export type FinanceReportEvidenceClaim = { id: string; role: "AMOUNT"; source: FinanceReportEvidencePdfSource | FinanceReportEvidenceWholeCellSource }
+  | { id: string; role: Exclude<FinanceReportEvidenceRole, "AMOUNT">; source: FinanceReportEvidenceSource };
 export type FinanceReportEvidenceBlockerCode = "INVALID_INPUT" | "LIMIT_EXCEEDED"
   | "MALFORMED_EVIDENCE" | "SOURCE_NOT_FOUND" | "DUPLICATE_CLAIM"
   | "OVERLAPPING_SOURCE" | "UNSAFE_CELL";
-type FinanceReportEvidenceSourceFactBase = { kind: "SOURCE"; claimId: string;
-  role: FinanceReportEvidenceRole; sourceKey: string; selectedText: string };
+type FinanceReportEvidenceSourceFactBase = { kind: "SOURCE"; claimId: string; role: FinanceReportEvidenceRole; sourceKey: string; selectedText: string };
 export type FinanceReportEvidenceSourceFact = (FinanceReportEvidenceSourceFactBase & { source: FinanceReportEvidencePdfSource; cell?: never })
   | (FinanceReportEvidenceSourceFactBase & { source: FinanceReportEvidenceCellSource; cell: FinanceReportEvidenceCellFact });
 export type FinanceReportEvidenceSourceResultV1 = { version: typeof FINANCE_REPORT_EVIDENCE_SOURCE_VERSION;
@@ -31,12 +31,10 @@ type Cell = { value: string; displayValue?: string } & (
 type Index = { pages: Map<number, string[]>; cells: Map<string, Cell> };
 type Bound = { fact: FinanceReportEvidenceSourceFact; coordinateKey: string;
   start: number; end: number; wholeAmount: boolean; evidence: string };
-class EvidenceError extends Error { constructor(public readonly code: FinanceReportEvidenceBlockerCode,
-  public readonly claimId?: string) { super(code); } }
+class EvidenceError extends Error { constructor(public readonly code: FinanceReportEvidenceBlockerCode, public readonly claimId?: string) { super(code); } }
 function fail(code: FinanceReportEvidenceBlockerCode, claimId?: string): never { throw new EvidenceError(code, claimId); }
 const isRecord = (value: unknown): value is Record<string, unknown> => Boolean(value) && typeof value === "object" && !Array.isArray(value);
-function exactKeys(value: Record<string, unknown>, allowed: string[], required = allowed,
-  code: FinanceReportEvidenceBlockerCode = "MALFORMED_EVIDENCE") {
+function exactKeys(value: Record<string, unknown>, allowed: string[], required = allowed, code: FinanceReportEvidenceBlockerCode = "MALFORMED_EVIDENCE") {
   if (!required.every((key) => key in value) || Object.keys(value).some((key) => !allowed.includes(key))) fail(code);
 }
 function integer(value: unknown, min: number, max: number,
@@ -112,7 +110,7 @@ function buildIndex(format: FinanceReportEvidenceFormat, jsonl: string): Index {
     if (format === "CSV" && (type !== "TEXT" || value.displayValue !== undefined || !cellValue || cellValue.includes("\0"))) fail("MALFORMED_EVIDENCE");
     const displayValue = value.displayValue === undefined ? undefined
       : string(value.displayValue, MAX_TEXT, true);
-    if (displayValue === cellValue) fail("MALFORMED_EVIDENCE");
+    if (displayValue === cellValue || (displayValue !== undefined && (type === "ERROR" || type === "TEXT" || (type === "FORMULA" && (resultType === "ERROR" || resultType === "TEXT"))))) fail("MALFORMED_EVIDENCE");
     const key = cellKey(sheet, row, column); if (index.cells.has(key)) fail("MALFORMED_EVIDENCE");
     if (index.cells.size >= 250_000) fail("LIMIT_EXCEEDED");
     index.cells.set(key, type === "FORMULA"
@@ -153,13 +151,13 @@ function parseClaim(value: unknown, budget: { total: number }): FinanceReportEvi
       line: string(source.line, MAX_TEXT, true, "INVALID_INPUT", budget),
       start: integer(source.start, 0, MAX_TEXT, "INVALID_INPUT"),
       end: integer(source.end, 1, MAX_TEXT, "INVALID_INPUT"),
-      text: string(source.text, 50_000, false, "INVALID_INPUT", budget) } };
+      text: string(source.text, 50_000, false, "INVALID_INPUT", budget) } } as FinanceReportEvidenceClaim;
   }
   if (source.kind !== "CELL") fail("INVALID_INPUT");
   exactKeys(source, ["kind", "sheet", "row", "column", "evidence", "start", "end", "text"],
     ["kind", "sheet", "row", "column", "evidence"], "INVALID_INPUT");
   const optional = [source.start, source.end, source.text];
-  if (optional.some((item) => item !== undefined) && optional.some((item) => item === undefined)) fail("INVALID_INPUT", id);
+  if ((optional.some((item) => item !== undefined) && optional.some((item) => item === undefined)) || (value.role === "AMOUNT" && source.start !== undefined)) fail("INVALID_INPUT", id);
   return { id, role: value.role as FinanceReportEvidenceRole, source: { kind: "CELL",
     sheet: string(source.sheet, 200, false, "INVALID_INPUT", budget),
     row: integer(source.row, 1, 20_000, "INVALID_INPUT"),
@@ -167,7 +165,7 @@ function parseClaim(value: unknown, budget: { total: number }): FinanceReportEvi
     evidence: string(source.evidence, MAX_TEXT, true, "INVALID_INPUT", budget),
     ...(source.start === undefined ? {} : { start: integer(source.start, 0, MAX_TEXT, "INVALID_INPUT"),
       end: integer(source.end, 1, MAX_TEXT, "INVALID_INPUT"),
-      text: string(source.text, 50_000, false, "INVALID_INPUT", budget) }) } as FinanceReportEvidenceCellSource };
+      text: string(source.text, 50_000, false, "INVALID_INPUT", budget) }) } as FinanceReportEvidenceCellSource } as FinanceReportEvidenceClaim;
 }
 function bind(index: Index, format: FinanceReportEvidenceFormat, claim: FinanceReportEvidenceClaim): Bound {
   const source = claim.source;
