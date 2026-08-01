@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { validateFinanceReportEvidenceSourcesV1 } from "./finance-report-evidence";
+import { validateFinanceReportEvidenceSourcesV1,
+  type FinanceReportEvidenceCellType } from "./finance-report-evidence";
 
 const jsonl = (...records: unknown[]) => records.map((record) => JSON.stringify(record)).join("\n");
 const pdfSource = (line: string, text: string, lineIndex = 0, page = 1) => {
@@ -76,6 +77,11 @@ describe("validateFinanceReportEvidenceSourcesV1", () => {
       { kind: "SOURCE", selectedText: "1234.5", cell: { rawValue: "1234.5", displayValue: "$1,234.50" } },
       { kind: "SOURCE", cell: { type: "FORMULA", resultType: "NUMBER" } },
     ]);
+    const formulaCell = good.facts[1]?.kind === "SOURCE" ? good.facts[1].cell : undefined;
+    if (formulaCell?.type === "FORMULA") {
+      const resultType: Exclude<FinanceReportEvidenceCellType, "FORMULA"> = formulaCell.resultType;
+      expect(resultType).toBe("NUMBER");
+    }
     expect(code(validate("XLSX", extracted,
       [{ id: "display", role: "AMOUNT", source: cellSource("$1,234.50") }]))).toBe("SOURCE_NOT_FOUND");
     expect(code(validate("XLSX", extracted,
