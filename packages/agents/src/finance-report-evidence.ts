@@ -45,8 +45,9 @@ function integer(value: unknown, min: number, max: number,
   return value as number;
 }
 function string(value: unknown, max: number, allowEmpty = false,
-  code: FinanceReportEvidenceBlockerCode = "MALFORMED_EVIDENCE") {
+  code: FinanceReportEvidenceBlockerCode = "MALFORMED_EVIDENCE", budget?: { total: number }) {
   if (typeof value !== "string" || value.length > max || (!allowEmpty && !value.trim())) fail(code);
+  if (budget && (budget.total += value.length) > MAX_TEXT * 2) fail(code);
   return value;
 }
 const cellKey = (sheet: string, row: number, column: number) => JSON.stringify(["CELL", sheet, row, column]);
@@ -73,15 +74,14 @@ function buildIndex(format: FinanceReportEvidenceFormat, jsonl: string): Index {
       const page = integer(value.page, 1, 250);
       const text = string(value.text, MAX_TEXT, true);
       if (page !== index.pages.size + 1) fail("MALFORMED_EVIDENCE");
-      const pageLines = text.split("\n");
-      index.pages.set(page, pageLines);
+      const pageLines = text.split("\n"); index.pages.set(page, pageLines);
       continue;
     }
     if (!("row" in value)) {
       exactKeys(value, ["sheet", "rowCount", "columnCount"]);
       const sheet = string(value.sheet, 200);
       const rows = integer(value.rowCount, 0, 20_000);
-      const columns = integer(value.columnCount, 0, 250_000);
+      const columns = integer(value.columnCount, 0, format === "XLSX" ? Number.MAX_SAFE_INTEGER : 250_000);
       totalRows += rows;
       if (sheets.has(sheet) || (format === "CSV" && (sheet !== "CSV" || sheets.size > 0))) fail("MALFORMED_EVIDENCE");
       if (sheets.size >= 100 || totalRows > 20_000) fail("LIMIT_EXCEEDED");
@@ -94,7 +94,7 @@ function buildIndex(format: FinanceReportEvidenceFormat, jsonl: string): Index {
     const sheet = string(value.sheet, 200);
     const bounds = sheets.get(sheet);
     const row = integer(value.row, 1, 20_000);
-    const column = integer(value.column, 1, 250_000);
+    const column = integer(value.column, 1, format === "XLSX" ? Number.MAX_SAFE_INTEGER : 250_000);
     const rawType = string(value.type, 20);
     const type = rawType as FinanceReportEvidenceCellType;
     const cellValue = string(value.value, MAX_TEXT, true);
@@ -103,8 +103,7 @@ function buildIndex(format: FinanceReportEvidenceFormat, jsonl: string): Index {
     previousRow = row; previousColumn = column;
     bounds.observedRows = Math.max(bounds.observedRows, row);
     bounds.observedColumns = Math.max(bounds.observedColumns, column);
-    const formula = value.formula;
-    const resultType = value.resultType;
+    const formula = value.formula; const resultType = value.resultType;
     if (type === "FORMULA" ? !(typeof formula === "string" && formula.length > 0 && !/\[[^\]]+\][^!]*!/.test(formula)
       && typeof resultType === "string" && CELL_TYPES.has(resultType as FinanceReportEvidenceCellType)
       && resultType !== "FORMULA")
@@ -114,8 +113,7 @@ function buildIndex(format: FinanceReportEvidenceFormat, jsonl: string): Index {
     const displayValue = value.displayValue === undefined ? undefined
       : string(value.displayValue, MAX_TEXT, true);
     if (displayValue === cellValue) fail("MALFORMED_EVIDENCE");
-    const key = cellKey(sheet, row, column);
-    if (index.cells.has(key)) fail("MALFORMED_EVIDENCE");
+    const key = cellKey(sheet, row, column); if (index.cells.has(key)) fail("MALFORMED_EVIDENCE");
     if (index.cells.size >= 250_000) fail("LIMIT_EXCEEDED");
     index.cells.set(key, type === "FORMULA"
       ? { type, resultType: resultType as NonFormulaCellType, value: cellValue, displayValue }
@@ -141,21 +139,21 @@ function span(value: string, start: unknown, end: unknown, selected: unknown, cl
     || value.slice(from, to) !== text) fail("SOURCE_NOT_FOUND", claimId);
   return { start: from, end: to, text };
 }
-function parseClaim(value: unknown): FinanceReportEvidenceClaim {
+function parseClaim(value: unknown, budget: { total: number }): FinanceReportEvidenceClaim {
   if (!isRecord(value)) fail("INVALID_INPUT");
   exactKeys(value, ["id", "role", "source"], undefined, "INVALID_INPUT");
-  const id = string(value.id, 100, false, "INVALID_INPUT");
+  const id = string(value.id, 100, false, "INVALID_INPUT", budget);
   if (!new Set(["TEXT", "AMOUNT", "ISO_CODE"]).has(value.role as string) || !isRecord(value.source)) fail("INVALID_INPUT");
   const source = value.source;
   if (source.kind === "PDF") {
     exactKeys(source, ["kind", "page", "lineIndex", "line", "start", "end", "text"], undefined, "INVALID_INPUT");
     return { id, role: value.role as FinanceReportEvidenceRole, source: { kind: "PDF",
       page: integer(source.page, 1, 250, "INVALID_INPUT"),
-      lineIndex: integer(source.lineIndex, 0, 250_000, "INVALID_INPUT"),
-      line: string(source.line, MAX_TEXT, true, "INVALID_INPUT"),
+      lineIndex: integer(source.lineIndex, 0, MAX_TEXT, "INVALID_INPUT"),
+      line: string(source.line, MAX_TEXT, true, "INVALID_INPUT", budget),
       start: integer(source.start, 0, MAX_TEXT, "INVALID_INPUT"),
       end: integer(source.end, 1, MAX_TEXT, "INVALID_INPUT"),
-      text: string(source.text, 50_000, false, "INVALID_INPUT") } };
+      text: string(source.text, 50_000, false, "INVALID_INPUT", budget) } };
   }
   if (source.kind !== "CELL") fail("INVALID_INPUT");
   exactKeys(source, ["kind", "sheet", "row", "column", "evidence", "start", "end", "text"],
@@ -163,13 +161,13 @@ function parseClaim(value: unknown): FinanceReportEvidenceClaim {
   const optional = [source.start, source.end, source.text];
   if (optional.some((item) => item !== undefined) && optional.some((item) => item === undefined)) fail("INVALID_INPUT", id);
   return { id, role: value.role as FinanceReportEvidenceRole, source: { kind: "CELL",
-    sheet: string(source.sheet, 200, false, "INVALID_INPUT"),
+    sheet: string(source.sheet, 200, false, "INVALID_INPUT", budget),
     row: integer(source.row, 1, 20_000, "INVALID_INPUT"),
-    column: integer(source.column, 1, 250_000, "INVALID_INPUT"),
-    evidence: string(source.evidence, MAX_TEXT, true, "INVALID_INPUT"),
+    column: integer(source.column, 1, Number.MAX_SAFE_INTEGER, "INVALID_INPUT"),
+    evidence: string(source.evidence, MAX_TEXT, true, "INVALID_INPUT", budget),
     ...(source.start === undefined ? {} : { start: integer(source.start, 0, MAX_TEXT, "INVALID_INPUT"),
       end: integer(source.end, 1, MAX_TEXT, "INVALID_INPUT"),
-      text: string(source.text, 50_000, false, "INVALID_INPUT") }) } as FinanceReportEvidenceCellSource };
+      text: string(source.text, 50_000, false, "INVALID_INPUT", budget) }) } as FinanceReportEvidenceCellSource };
 }
 function bind(index: Index, format: FinanceReportEvidenceFormat, claim: FinanceReportEvidenceClaim): Bound {
   const source = claim.source;
@@ -217,13 +215,13 @@ export function validateFinanceReportEvidenceSourcesV1(input: unknown): FinanceR
     exactKeys(input, ["format", "extractedEvidence", "claims"], undefined, "INVALID_INPUT");
     if (!new Set(["PDF", "CSV", "XLSX"]).has(input.format as string)
       || typeof input.extractedEvidence !== "string" || !Array.isArray(input.claims)
-      || input.claims.length === 0 || input.claims.length > 1_000 || JSON.stringify(input.claims).length > MAX_TEXT * 2) fail("INVALID_INPUT");
+      || input.claims.length === 0 || input.claims.length > 1_000) fail("INVALID_INPUT");
     const format = input.format as FinanceReportEvidenceFormat;
     const index = buildIndex(format, input.extractedEvidence);
+    const budget = { total: 0 }, claims = input.claims.map((rawClaim) => parseClaim(rawClaim, budget));
     const ids = new Set<string>();
     const groups = new Map<string, Bound[]>();
-    const bound = input.claims.map((rawClaim) => {
-      const claim = parseClaim(rawClaim);
+    const bound = claims.map((claim) => {
       if (ids.has(claim.id)) fail("DUPLICATE_CLAIM", claim.id);
       ids.add(claim.id);
       const item = bind(index, format, claim);

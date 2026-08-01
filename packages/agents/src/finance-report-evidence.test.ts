@@ -60,10 +60,10 @@ describe("validateFinanceReportEvidenceSourcesV1", () => {
   });
   it("uses only raw XLSX numbers or numeric formula results for amount roles", () => {
     const extracted = jsonl(
-      { sheet: "Report", rowCount: 1, columnCount: 4 },
+      { sheet: "Report", rowCount: 1, columnCount: 250_001 },
       { sheet: "Report", row: 1, column: 1, type: "NUMBER", value: "1234", displayValue: "$123" },
       { sheet: "Report", row: 1, column: 2, type: "FORMULA", value: "20", displayValue: "$20", formula: "A1/2", resultType: "NUMBER" },
-      { sheet: "Report", row: 1, column: 3, type: "TEXT", value: "30" }, { sheet: "Report", row: 1, column: 4, type: "ERROR", value: "#DIV/0!" },
+      { sheet: "Report", row: 1, column: 3, type: "TEXT", value: "30" }, { sheet: "Report", row: 1, column: 250_001, type: "ERROR", value: "#DIV/0!" },
     );
     const good = validate("XLSX", extracted, [
       { id: "raw", role: "AMOUNT", source: cellSource("1234") },
@@ -127,8 +127,8 @@ describe("validateFinanceReportEvidenceSourcesV1", () => {
     [{ id: "a", role: "AMOUNT", source: cellSource(cell.value) }]))).toBe("MALFORMED_EVIDENCE");
     expect(code(validate("PDF", "x".repeat(2_000_001),
       [{ id: "a", role: "TEXT", source: pdfSource("x", "x") }]))).toBe("LIMIT_EXCEEDED");
-    expect(validate("PDF", jsonl({ page: 1, text: `x${"\n".repeat(250_000)}` }),
-      [{ id: "a", role: "TEXT", source: pdfSource("x", "x") }]).facts[0]?.kind).toBe("SOURCE");
+    expect(validate("PDF", jsonl({ page: 1, text: `${"\n".repeat(250_001)}target` }),
+      [{ id: "a", role: "TEXT", source: pdfSource("target", "target", 250_001) }]).facts[0]?.kind).toBe("SOURCE");
   });
   it("returns deterministic source-only facts and validates the closed input shape", () => {
     const extracted = jsonl({ page: 1, text: "Revenue 10" });
@@ -143,5 +143,7 @@ describe("validateFinanceReportEvidenceSourcesV1", () => {
     expect(code(validate("PDF", extracted, [{ ...claims[0], source: { ...claims[0]!.source, extra: true } }]))).toBe("INVALID_INPUT");
     expect(code(validate("PDF", extracted, Array.from({ length: 1_001 }, (_, index) =>
       ({ id: String(index), role: "TEXT", source: pdfSource("Revenue 10", "10") }))))).toBe("INVALID_INPUT");
+    const sharedLine = "x".repeat(2_000_000);
+    expect(code(validate("PDF", extracted, Array.from({ length: 3 }, (_, index) => ({ id: String(index), role: "TEXT", source: pdfSource(sharedLine, "x") }))))).toBe("INVALID_INPUT");
   });
 });
