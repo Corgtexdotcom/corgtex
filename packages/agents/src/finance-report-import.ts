@@ -56,7 +56,7 @@ const sourceLocationSchema = z.object({
 });
 const currencySchema = z.object({
   state: z.enum(["EXPLICIT", "UNRESOLVED"]),
-  code: z.string().regex(/^[A-Z]{3}$/).nullable(),
+  code: z.string().regex(/^[A-Z]{3}$/).refine((code) => ISO_CURRENCY_CODES.has(code)).nullable(),
   evidence: z.array(sourceLocationSchema).max(5),
 }).strict().superRefine((value, context) => {
   const explicit = value.state === "EXPLICIT";
@@ -138,10 +138,9 @@ export const financeReportImportProposalV1Schema = z.object({
       context.addIssue({ code: "custom", path: ["candidates", index, "periodEnd"],
         message: "Candidate period ends after the report period." });
     }
-    const sourceIdentity = candidate.sourceLocation.page !== null
-      ? ["PDF", candidate.sourceLocation.page, candidate.sourceLocation.evidence]
-      : ["SHEET", candidate.sourceLocation.sheet, candidate.sourceLocation.row, candidate.sourceLocation.column];
-    const identity = JSON.stringify([...sourceIdentity, candidate.periodStart, candidate.periodEnd]);
+    const identity = JSON.stringify(candidate.sourceLocation.page !== null
+      ? ["PDF", candidate.sourceLocation.page, candidate.sourceLabel, candidate.amountCents]
+      : ["SHEET", candidate.sourceLocation.sheet, candidate.sourceLocation.row, candidate.sourceLocation.column]);
     if (candidateIdentities.has(identity)) {
       context.addIssue({ code: "custom", path: ["candidates", index],
         message: "Duplicate proposal candidate." });
@@ -255,18 +254,37 @@ function locationMatches(index: EvidenceIndex, location: SourceLocation) {
   return index.get(key)?.some((sourceText) => location.page !== null
     ? sourceText.includes(location.evidence) : sourceText === location.evidence) ?? false;
 }
+function labelMatches(index: EvidenceIndex, location: SourceLocation, label: string) {
+  const key = location.page !== null ? evidenceKey("page", location.page) : evidenceKey("row", location.sheet!, location.row!);
+  return index.get(key)?.some((sourceText) => location.page !== null
+    ? sourceText.includes(label) : sourceText.trim() === label) ?? false;
+}
+function parseMoneyToken(token: string) {
+  const negative = token.startsWith("-") || token.startsWith("(");
+  let value = token.replace(/[()\s\u00a0]/g, "").replace(/^[+-]/, "");
+  const comma = value.lastIndexOf(","); const dot = value.lastIndexOf(".");
+  if (comma >= 0 && dot >= 0) {
+    const decimal = comma > dot ? "," : ".";
+    value = value.replace(decimal === "," ? /\./g : /,/g, "").replace(decimal, ".");
+  } else if (comma >= 0 || dot >= 0) {
+    const separator = comma >= 0 ? "," : "."; const parts = value.split(separator);
+    value = parts.at(-1)!.length <= 2 ? `${parts.slice(0, -1).join("")}.${parts.at(-1)}` : parts.join("");
+  }
+  const rawCents = Number(value) * 100; const cents = Math.round(rawCents) * (negative ? -1 : 1);
+  return /^\d+(?:\.\d{1,2})?$/.test(value) && Number.isSafeInteger(cents)
+    && Math.abs(rawCents - Math.round(rawCents)) < 1e-6 ? cents : null;
+}
 function evidenceAmountsCents(evidence: string) {
-  return (evidence.match(/[-(]?\d[\d,.]*\)?/g) ?? []).flatMap((token) => {
-    const value = Number(token.replace(/[(),]/g, "")); const rawCents = value * 100;
-    const cents = Math.round(rawCents) * (token.startsWith("(") ? -1 : 1);
-    return Number.isFinite(value) && Number.isSafeInteger(cents) && Math.abs(rawCents - Math.round(rawCents)) < 1e-6
-      ? [cents] : [];
-  });
+  const withoutDates = evidence.replace(/\b\d{4}[-/]\d{1,2}[-/]\d{1,2}\b/g, " ");
+  const tokens = withoutDates.match(/[+-]?\(?(?:\d{1,3}(?:[ ,.\u00a0]\d{3})+(?:[.,]\d{1,2})?|\d+(?:[.,]\d{1,2})?)\)?/g) ?? [];
+  return tokens.flatMap((token) => { const cents = parseMoneyToken(token); return cents === null ? [] : [cents]; });
 }
 function unmatchedEvidencePaths(proposal: FinanceReportImportProposalV1, extractedEvidence: string) {
   const evidenceIndex = buildEvidenceIndex(extractedEvidence);
   const paths = proposal.candidates.flatMap((candidate, candidateIndex) => [
     ...(locationMatches(evidenceIndex, candidate.sourceLocation) ? [] : [`candidates.${candidateIndex}.sourceLocation`]),
+    ...(labelMatches(evidenceIndex, candidate.sourceLocation, candidate.sourceLabel)
+      ? [] : [`candidates.${candidateIndex}.sourceLabel`]),
     ...(evidenceAmountsCents(candidate.sourceLocation.evidence).includes(candidate.amountCents)
       ? [] : [`candidates.${candidateIndex}.amountCents`]),
   ]);

@@ -12,7 +12,7 @@ function proposal(): FinanceReportImportProposalV1 {
     summary: "Synthetic monthly reported actuals proposal.",
     candidates: [{
       sourceLocation: { page: null, sheet: "June", row: 2, column: 3,
-        evidence: "Consulting revenue | 1250.00" },
+        evidence: "1250.00" },
       sourceLabel: "Consulting revenue", sourceAccountPath: ["Revenue", "Consulting"],
       proposedAccountPath: ["Revenue", "Consulting"], rowKind: "LEAF",
       periodStart: "2026-06-01", periodEnd: "2026-06-30", amountCents: 125_000,
@@ -34,7 +34,8 @@ function gateway(outputs: unknown[]) {
 const params = { workspaceId: "workspace-synthetic", agentRunId: "run-synthetic",
   workflowJobId: "job-synthetic", model: "quality-test", fileName: "synthetic.csv",
   mimeType: "text/csv", extractedEvidence:
-    "{\"sheet\":\"June\",\"row\":2,\"column\":3,\"value\":\"Consulting revenue | 1250.00\"}" };
+    "{\"sheet\":\"June\",\"row\":2,\"column\":1,\"value\":\"Consulting revenue\"}\n"
+    + "{\"sheet\":\"June\",\"row\":2,\"column\":3,\"value\":\"1250.00\"}" };
 
 describe("Finance report import proposal contract", () => {
   it("accepts a strict proposal while leaving missing currency unresolved", () => {
@@ -71,6 +72,10 @@ describe("Finance report import proposal contract", () => {
       currency: { state: "EXPLICIT", code: "USD", evidence: [{
         ...proposal().candidates[0].sourceLocation, evidence: "USD / EUR",
       }] } } })],
+    ["non-ISO currency code", () => ({ ...proposal(), report: { ...proposal().report,
+      currency: { state: "EXPLICIT", code: "ZZZ", evidence: [{
+        ...proposal().candidates[0].sourceLocation, evidence: "ZZZ",
+      }] } } })],
     ["invented unresolved evidence", () => ({ ...proposal(), report: { ...proposal().report,
       currency: { state: "UNRESOLVED", code: null, evidence: [proposal().candidates[0].sourceLocation] } } })],
     ["exception without reason", () => ({ ...proposal(), candidates: [{ ...proposal().candidates[0],
@@ -78,7 +83,8 @@ describe("Finance report import proposal contract", () => {
     ["duplicate candidates", () => {
       const value = proposal();
       value.candidates.push({ ...value.candidates[0], proposedAccountPath: ["Revenue", "Alternate"],
-        sourceAccountPath: ["Different"], rowKind: "DERIVED", amountCents: 999 });
+        sourceAccountPath: ["Different"], rowKind: "DERIVED", amountCents: 999,
+        periodStart: "2026-06-02", periodEnd: "2026-06-29" });
       return value;
     }],
   ])("rejects unsafe output: %s", (_label, makeInvalid) => {
@@ -110,7 +116,8 @@ describe("interpretFinanceReport", () => {
     const model = gateway([output]);
     const result = await interpretFinanceReport({ ...params, gateway: model.model,
       extractedEvidence:
-        "{\"sheet\":\" June \",\"row\":2,\"column\":3,\"value\":\"Consulting revenue | 1250.00\"}",
+        "{\"sheet\":\" June \",\"row\":2,\"column\":1,\"value\":\"Consulting revenue\"}\n"
+        + "{\"sheet\":\" June \",\"row\":2,\"column\":3,\"value\":\"1250.00\"}",
     });
     expect(result.candidates[0].sourceLocation.sheet).toBe(" June ");
     expect(model.extract).toHaveBeenCalledOnce();
@@ -221,7 +228,8 @@ describe("interpretFinanceReport", () => {
     const model = gateway([metadataClaim, proposal()]);
     await expect(interpretFinanceReport({ ...params, gateway: model.model,
       extractedEvidence:
-        "{\"sheet\":\"June\",\"row\":2,\"column\":3,\"type\":\"TEXT\",\"value\":\"Consulting revenue | 1250.00\"}",
+        "{\"sheet\":\"June\",\"row\":2,\"column\":1,\"value\":\"Consulting revenue\"}\n"
+        + "{\"sheet\":\"June\",\"row\":2,\"column\":3,\"type\":\"TEXT\",\"value\":\"1250.00\"}",
     })).resolves.toMatchObject({ contractVersion: 1 });
     expect(model.extract).toHaveBeenCalledTimes(2);
     expect(model.extract.mock.calls[1]?.[0].instruction).toContain("candidates.0.sourceLocation");
@@ -233,7 +241,8 @@ describe("interpretFinanceReport", () => {
     const model = gateway([fragmentClaim, proposal()]);
     await expect(interpretFinanceReport({ ...params, gateway: model.model,
       extractedEvidence:
-        "{\"sheet\":\"June\",\"row\":2,\"column\":3,\"value\":\"Consulting revenue | 1250.00\"}",
+        "{\"sheet\":\"June\",\"row\":2,\"column\":1,\"value\":\"Consulting revenue\"}\n"
+        + "{\"sheet\":\"June\",\"row\":2,\"column\":3,\"value\":\"1250.00\"}",
     })).resolves.toMatchObject({ contractVersion: 1 });
     expect(model.extract).toHaveBeenCalledTimes(2);
   });
@@ -243,6 +252,25 @@ describe("interpretFinanceReport", () => {
     const model = gateway([mismatch, proposal()]);
     await expect(interpretFinanceReport({ ...params, gateway: model.model })).resolves.toMatchObject({ contractVersion: 1 });
     expect(model.extract.mock.calls[1]?.[0].instruction).toContain("candidates.0.amountCents");
+
+    const wrongLabel = proposal(); wrongLabel.candidates[0].sourceLabel = "Invented account";
+    const labelModel = gateway([wrongLabel, proposal()]);
+    await expect(interpretFinanceReport({ ...params, gateway: labelModel.model })).resolves.toMatchObject({ contractVersion: 1 });
+    expect(labelModel.extract.mock.calls[1]?.[0].instruction).toContain("candidates.0.sourceLabel");
+  });
+
+  it("parses international money without treating ISO dates as amounts", async () => {
+    const european = proposal(); european.candidates[0].sourceLocation.evidence = "1.250,00";
+    await expect(interpretFinanceReport({ ...params, gateway: gateway([european]).model,
+      extractedEvidence: "{\"sheet\":\"June\",\"row\":2,\"column\":1,\"value\":\"Consulting revenue\"}\n"
+        + "{\"sheet\":\"June\",\"row\":2,\"column\":3,\"value\":\"1.250,00\"}",
+    })).resolves.toMatchObject({ candidates: [{ amountCents: 125_000 }] });
+
+    const date = proposal(); date.candidates[0].sourceLocation.evidence = "2026-01-01"; date.candidates[0].amountCents = 202_600;
+    await expect(interpretFinanceReport({ ...params, gateway: gateway([date, date]).model,
+      extractedEvidence: "{\"sheet\":\"June\",\"row\":2,\"column\":1,\"value\":\"Consulting revenue\"}\n"
+        + "{\"sheet\":\"June\",\"row\":2,\"column\":3,\"value\":\"2026-01-01\"}",
+    })).rejects.toBeInstanceOf(FinanceReportImportAgentError);
   });
 
   it("rejects profile hints that exceed aggregate mapping or character budgets", async () => {
