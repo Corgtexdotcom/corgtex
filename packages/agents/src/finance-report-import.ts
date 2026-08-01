@@ -280,7 +280,7 @@ function periodTextMatches(evidence: string, start: string, end: string, cadence
 }
 function periodEvidenceMatches(index: EvidenceIndex, candidate: FinanceReportImportProposalV1["candidates"][number], cadence: FinanceReportImportProposalV1["report"]["cadence"]) {
   const period = candidate.periodEvidence; const source = candidate.sourceLocation;
-  const related = source.page !== null ? period.page !== null : period.page === null && period.sheet === source.sheet && period.column !== null && period.column === source.column;
+  const related = source.page !== null ? period.page === source.page : period.page === null && period.sheet === source.sheet && period.column !== null && period.column === source.column;
   return related && locationMatches(index, period) && periodTextMatches(period.evidence, candidate.periodStart, candidate.periodEnd, cadence);
 }
 function parseMoneyToken(token: string) {
