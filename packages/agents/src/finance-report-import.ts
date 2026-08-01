@@ -75,7 +75,7 @@ function bindProposal(raw: unknown, input: FinanceReportImportProposalInputV1, w
   if ((explicit === null) !== (proposal.currency.evidenceClaimId === null) || (explicit !== null && (currencyFact?.kind !== "ISO_CODE" || currencyFact.code !== explicit))) return { feedback: "currency:unverified_explicit_code" };
   const code = explicit ?? (workspaceCurrencies.length === 1 ? workspaceCurrencies[0]! : null);
   const exceptions: ProposalException[] = [...proposal.exceptions];
-  const addBlocker = (code: string, message: string) => { if (!exceptions.some((item) => item.code === code)) exceptions.push({ code, severity: "BLOCKER", message, evidenceClaimIds: [] }); };
+  const addBlocker = (code: string, message: string) => { const blocker = { code, severity: "BLOCKER" as const, message, evidenceClaimIds: [] }; const index = exceptions.findIndex((item) => item.code === code); if (index < 0) exceptions.push(blocker); else exceptions[index] = blocker; };
   if (proposal.classification.reportType === "OTHER") addBlocker("REPORT_TYPE_UNRESOLVED", "Confirm the report type before approval.");
   if (proposal.classification.basis === "UNSPECIFIED") addBlocker("BASIS_UNRESOLVED", "Confirm the accounting basis before approval.");
   if (code === null) addBlocker("CURRENCY_UNRESOLVED", "Choose the report currency before approval.");

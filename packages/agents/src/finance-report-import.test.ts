@@ -81,10 +81,11 @@ describe("proposeFinanceReportImportV1", () => {
 
   it.each([[[]], [["EUR", "USD"]]] as const)("keeps zero or multiple workspace currencies unresolved", async (currencies) => {
     const base = proposal();
-    const output = { ...base, currency: { explicitCode: null, evidenceClaimId: null, confidence: 0.5 }, classification: { ...base.classification, reportType: "OTHER", basis: "UNSPECIFIED" } };
+    const output = { ...base, currency: { explicitCode: null, evidenceClaimId: null, confidence: 0.5 }, classification: { ...base.classification, reportType: "OTHER", basis: "UNSPECIFIED" }, exceptions: [{ code: "CURRENCY_UNRESOLVED", severity: "WARNING", message: "Model warning", evidenceClaimIds: [] }] };
     const { result } = await run(output, { currencies: [...currencies] });
     expect(result).toMatchObject({ kind: "SUCCESS", proposal: { currency: { state: "UNRESOLVED", code: null, source: null } } });
     if (result.kind === "SUCCESS") expect(result.proposal.exceptions.map(({ code }) => code)).toEqual(expect.arrayContaining(["REPORT_TYPE_UNRESOLVED", "BASIS_UNRESOLVED", "CURRENCY_UNRESOLVED"]));
+    if (result.kind === "SUCCESS") expect(result.proposal.exceptions.find(({ code }) => code === "CURRENCY_UNRESOLVED")?.severity).toBe("BLOCKER");
   });
 
   it("uses one bounded repair for extra model arithmetic, then returns deterministic cents", async () => {
