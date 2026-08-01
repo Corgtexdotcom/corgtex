@@ -51,6 +51,7 @@ describe("Finance report evidence validator v1", () => {
     ["1.250,00", 125_000], ["($1,250.00)", -125_000], ["−$1,250.00", -125_000],
     ["$1,250.00-", -125_000], ["$1,250", 125_000], ["€1.250", 125_000],
     ["Revenue was $100.", 10_000], ["Revenue was $100, excluding tax", 10_000],
+    ["Revenue 100 USD", 10_000],
     ["€1 250,00", 125_000], ["€1 250,00", 125_000], ["€1 250,00", 125_000],
   ] as const)("binds complete exact amount lexeme %s", (shown, cents) => {
     for (const format of ["PDF", "CSV"] as const) expect(amountResult(format, shown, cents).facts.at(-1)).toMatchObject({ kind: "AMOUNT", amountCents: cents });
@@ -81,14 +82,17 @@ describe("Finance report evidence validator v1", () => {
     ["spaced scientific", "1e 3", 300], ["spaced signed scientific", "1e+ 3", 300],
     ["NBSP scientific", "1e+ 3", 300],
     ["percent", "Gross margin 19.99%", 1_999], ["per-mille", "Loss 2‰", 200],
-    ["percent word", "Gross margin 19.99 percent", 1_999], ["per cent words", "Margin 19.99 per cent", 1_999],
+    ["percent word", "Gross margin 19.99 percent", 1_999], ["percentage word", "Margin 19.99 percentage", 1_999],
+    ["per cent words", "Margin 19.99 per cent", 1_999],
     ["per mille words", "Loss 2 per mille", 200], ["basis points", "Change 25 bps", 2_500],
     ["date fragment", "2026-01-01", 202_600], ["compound", "100/200", 10_000], ["colon compound", "12:30", 1_200],
     ["fiscal year", "FY 2026", 202_600], ["month year", "January 2026", 202_600],
     ["quarter year", "Q1 2026", 202_600], ["year fiscal", "2026 fiscal year", 202_600],
+    ["year-to-date", "YTD 2026", 202_600], ["as-of year", "As of 2026", 202_600],
     ["thousands suffix", "$1.2M", 120], ["unit suffix", "1,250k", 125_000],
     ["million suffix", "$1 million", 100], ["billion suffix", "2 billion", 200], ["bn suffix", "3 bn", 300], ["mm suffix", "4 mm", 400],
     ["crore suffix", "1 crore", 100], ["lakh suffix", "2 lakh", 200], ["lac suffix", "3 lacs", 300],
+    ["unknown magnitude word", "1 quintillion", 100],
     ["cent symbol", "50¢", 5_000], ["cent word", "50 cents", 5_000],
     ["prefix cent", "¢50", 5_000], ["prefix percent", "%19.99", 1_999], ["prefix per-mille", "‰2", 200],
     ["compact date", "20260101", 2_026_010_100], ["identifier", "GL-100", 10_000], ["trailing identifier", "100-GL", 10_000],
@@ -96,6 +100,8 @@ describe("Finance report evidence validator v1", () => {
     ["typographic identifier", "GL–100", 10_000], ["typographic decimal identifier", "INV‐19.99", 1_999],
     ["underscore identifier", "GL_100", 10_000], ["slash identifier", "INV/19.99", 1_999],
     ["colon identifier", "PO:100", 10_000], ["hash identifier", "GL#100", 10_000],
+    ["dot identifier", "GL.100", 10_000], ["at identifier", "INV@19.99", 1_999],
+    ["backslash identifier", "GL\\100", 10_000], ["reverse underscore identifier", "100_GL", 10_000],
     ["zero decimal ambiguity", "0.125", 12_500], ["zero comma ambiguity", "0,125", 12_500],
     ["thousand word", "1 thousand", 100], ["trillion word", "2 trillion", 200], ["tn suffix", "3 tn", 300], ["mn suffix", "5 mn", 500],
     ["bounded long token", "1".repeat(50_000), 0],
@@ -121,19 +127,19 @@ describe("Finance report evidence validator v1", () => {
   });
 
   it("rejects true mixed or malformed currency and never defaults unresolved evidence", () => {
-    for (const shown of ["USD / EUR", "USD and EUR", "USD, EUR", "USD & EUR",
-      "Amounts in USD; prior year in EUR", "Currency: USD and EUR", "Currency: USD, EUR"]) {
+    for (const shown of ["USD / EUR", "USD and EUR", "USD or EUR", "USD, EUR", "USD & EUR", "USD + EUR", "USD | EUR",
+      "Amounts in USD; prior year in EUR", "Currency: USD and EUR", "Currency: USD, EUR", "Currencies: USD or EUR"]) {
       blocker(validate("PDF", pdf(shown), [currencyClaim(pdfSource(shown))]), "MULTI_CURRENCY");
     }
     for (const shown of ["Currency: ZZZ", "Currency: usd", "Currency: USD and ZZZ", "Currency: USD and eur",
-      "USD and ZZZ", "Amounts in ZZZ", "Currency: US1", "Currency: U", "Currency: USDXX", "CCY=12"]) {
+      "USD and ZZZ", "Amounts in ZZZ", "Currency: US1", "Currencies: US1", "Currency: U", "Currency: USDXX", "CCY=12"]) {
       blocker(validate("CSV", cells("CSV", [{ type: "TEXT", value: shown }]), [currencyClaim(cellSource("CSV", shown))]), "INVALID_CURRENCY");
     }
     const unresolved = validate("PDF", pdf("Denomination unavailable"), [currencyClaim(pdfSource("Denomination unavailable"))]);
     expect(unresolved.facts.at(-1)).toMatchObject({ kind: "CURRENCY", state: "UNRESOLVED", code: null });
     const ordinaryAll = validate("PDF", pdf("Amounts included in ALL departments"), [currencyClaim(pdfSource("Amounts included in ALL departments"))]);
     expect(ordinaryAll.facts.at(-1)).toMatchObject({ kind: "CURRENCY", state: "UNRESOLVED", code: null });
-    for (const shown of ["Currency unavailable", "CCY: not specified"]) {
+    for (const shown of ["Currency unavailable", "Currencies unavailable", "CCY: not specified"]) {
       expect(validate("PDF", pdf(shown), [currencyClaim(pdfSource(shown))]).facts.at(-1))
         .toMatchObject({ kind: "CURRENCY", state: "UNRESOLVED", code: null });
     }
@@ -141,7 +147,7 @@ describe("Finance report evidence validator v1", () => {
 
   it("limits currency lists to the actual contextual clause", () => {
     for (const shown of ["Amounts in USD, reported in the notes", "Currency: USD and tax excluded",
-      "Currency: USD and VAT excluded"]) {
+      "Currency: USD and VAT excluded", "Currencies: USD and VAT excluded"]) {
       expect(validate("PDF", pdf(shown), [currencyClaim(pdfSource(shown))]).facts.at(-1))
         .toMatchObject({ kind: "CURRENCY", state: "EXPLICIT", code: "USD" });
     }

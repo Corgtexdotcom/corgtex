@@ -142,8 +142,9 @@ function bind(index: Index, format: FinanceReportEvidenceFormat, claimSource: Fi
 }
 
 const UNSAFE_AMOUNT = /(?:[%‰¢]\s*\d|(?:19|20)\d{2}(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])|\d[\d.,']{0,64}\s*(?:[%‰¢]|(?:k|m|b|bn|mm|mn|tn|hundreds?|thousands?|millions?|billions?|trillions?|quadrillions?|lakhs?|lacs?|crores?)\b|(?:pct|percent|per\s*cent|per\s*mille|basis\s*points?|bps)\b|cents?\b)|\b(?:pct|percent|per\s*cent|per\s*mille)\s+\d|\d(?:[.,]\d+)?\s*[eE]\s*[+\-−]?\s*\d+|\d\s*[-/:]\s*\d)/iu;
-const DATE_CONTEXT_AMOUNT = /\b(?:(?:FY|fiscal(?:\s+year)?|year|Q[1-4]|jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\s*(?:19|20)\d{2}|(?:19|20)\d{2}\s*(?:FY|fiscal(?:\s+year)?|year|Q[1-4]))\b/iu;
-const IDENTIFIER_AMOUNT = /[\p{L}\p{N}]{1,64}[_/#:]\s*\d/iu;
+const DATE_CONTEXT_AMOUNT = /\b(?:(?:FY|YTD|year[\s-]*to[\s-]*date|as\s+of|period|calendar\s+year|fiscal(?:\s+year)?|year|Q[1-4]|jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\s*(?:19|20)\d{2}|(?:19|20)\d{2}\s*(?:FY|YTD|fiscal(?:\s+year)?|year|Q[1-4]))\b/iu;
+const IDENTIFIER_AMOUNT = /(?:\p{L}[\p{L}\p{N}]{0,63}[._/#:@\\]\s*\d|\d(?:[.,]\d+)?\s*[._/#:@\\]\p{L}[\p{L}\p{N}]{0,63})/iu;
+const TRAILING_AMOUNT_WORD = /\d(?:[\d.,' \u00a0\u202f]{0,64}\d)?[ \u00a0\u202f]+(\p{L}+)\b/gu;
 const MONEY = /(?<![\p{L}\p{N}.,'\p{Pd}−])\(?[+\-−]?\s*\p{Sc}?\s*\d(?:[\d.,' \u00a0\u202f]*\d)?\s*[\-−]?\)?(?![\p{L}\p{N}'\p{Pd}−]|[.,][\p{L}\p{N}])/gu;
 function tokenCents(token: string, rawNumber: boolean) {
   const trimmed = token.trim();
@@ -170,6 +171,9 @@ function tokenCents(token: string, rawNumber: boolean) {
 }
 function amountMatches(evidence: string, expected: number, rawNumber: boolean) {
   if (UNSAFE_AMOUNT.test(evidence) || DATE_CONTEXT_AMOUNT.test(evidence) || IDENTIFIER_AMOUNT.test(evidence)) return false;
+  for (const match of evidence.matchAll(TRAILING_AMOUNT_WORD)) {
+    if (match[1] !== match[1]!.toUpperCase() || !ISO_CODES.has(match[1]!)) return false;
+  }
   const tokens = evidence.match(MONEY) ?? [];
   const values = tokens.map((token) => tokenCents(token, rawNumber));
   return values.length === 1 && values[0] === expected;
@@ -184,17 +188,17 @@ function currencyFact(evidence: string, claimId: string): FinanceReportEvidenceF
     contextual.add(raw);
     return true;
   };
-  const unresolvedLabel = /\b(?:currency|ccy)\s*[:=-]?\s*(?:n\/a|unknown|unavailable|unspecified|none|not\s+(?:stated|specified|available))\b/i.test(evidence);
-  const stated = unresolvedLabel ? null : /\b(?:currency|ccy)\s*[:=-]?\s*([^\s,;&/]+)/i.exec(evidence);
+  const unresolvedLabel = /\b(?:currenc(?:y|ies)|ccy)\s*[:=-]?\s*(?:n\/a|unknown|unavailable|unspecified|none|not\s+(?:stated|specified|available))\b/i.test(evidence);
+  const stated = unresolvedLabel ? null : /\b(?:currenc(?:y|ies)|ccy)\s*[:=-]?\s*([^\s,;&/+|]+)/i.exec(evidence);
   if (stated) {
     add(stated[1]!, true);
     let rest = evidence.slice(stated.index + stated[0].length);
     while (true) {
-      const next = /^\s*(?:[,;&/]|\band\b)\s*([^\s,;&/]+)/i.exec(rest);
+      const next = /^\s*(?:[,;&/+|]|\b(?:and|or)\b)\s*([^\s,;&/+|]+)/i.exec(rest);
       if (!next) break;
       const tail = rest.slice(next[0].length);
       const known = ISO_CODES.has(next[1]!.toUpperCase());
-      const listContinues = !tail.trim() || /^\s*(?:[,;&/]|\band\b)/i.test(tail);
+      const listContinues = !tail.trim() || /^\s*(?:[,;&/+|]|\b(?:and|or)\b)/i.test(tail);
       if (!known && !(/^[A-Z0-9]{1,8}$/.test(next[1]!) && listContinues)) break;
       add(next[1]!, true);
       rest = rest.slice(next[0].length);
@@ -206,8 +210,8 @@ function currencyFact(evidence: string, claimId: string): FinanceReportEvidenceF
   for (const match of evidence.matchAll(/\bin\b\s*[:=-]?\s*([A-Za-z0-9]{1,8})\b/gi)) {
     if (match[1] !== "ALL" && ISO_CODES.has(match[1]!.toUpperCase())) add(match[1]!, true);
   }
-  if (/^[A-Za-z0-9]{1,8}(?:\s*(?:,|&|;|\/|\band\b)\s*[A-Za-z0-9]{1,8})+$/i.test(trim)) {
-    for (const item of trim.split(/\s*(?:,|&|;|\/|\band\b)\s*/i)) add(item, true);
+  if (/^[A-Za-z0-9]{1,8}(?:\s*(?:,|&|;|\/|\+|\||\b(?:and|or)\b)\s*[A-Za-z0-9]{1,8})+$/i.test(trim)) {
+    for (const item of trim.split(/\s*(?:,|&|;|\/|\+|\||\b(?:and|or)\b)\s*/i)) add(item, true);
   } else if (/^[A-Za-z0-9]{1,8}$/.test(trim)) {
     add(trim, true);
   }
