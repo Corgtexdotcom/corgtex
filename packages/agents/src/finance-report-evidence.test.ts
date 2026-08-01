@@ -2,10 +2,11 @@ import { describe, expect, it } from "vitest";
 import { validateFinanceReportEvidenceSourcesV1,
   type FinanceReportEvidenceCellType, type FinanceReportEvidenceClaim, type FinanceReportEvidenceSource } from "./finance-report-evidence";
 const jsonl = (...records: unknown[]) => records.map((record) => JSON.stringify(record)).join("\n");
+const longSheet = " ".repeat(201);
 const pdfSource = (line: string, text: string, lineIndex = 0, page = 1) =>
   ({ kind: "PDF", page, lineIndex, line, start: line.indexOf(text), end: line.indexOf(text) + text.length, text } as const);
 const cellSource = (evidence: string, extra: Record<string, unknown> = {}) =>
-  ({ kind: "CELL", sheet: " ", row: 1, column: 1, evidence, ...extra } as const);
+  ({ kind: "CELL", sheet: longSheet, row: 1, column: 1, evidence, ...extra } as const);
 const validate = (format: "PDF" | "CSV" | "XLSX", extractedEvidence: string, claims: unknown[]) =>
   validateFinanceReportEvidenceSourcesV1({ format, extractedEvidence, claims });
 const code = (result: ReturnType<typeof validate>) => result.facts[0]?.kind === "BLOCKER"
@@ -22,11 +23,11 @@ describe("validateFinanceReportEvidenceSourcesV1", () => {
     const result = validate("PDF", extracted, [
       { id: "current", role: "AMOUNT", source: pdfSource(line, "100", 2) },
       { id: "prior", role: "AMOUNT", source: pdfSource(line, "200", 2) },
-      { id: "repeat", role: "TEXT", source: pdfSource(line, astral, 3) },
+      { id: "repeat", role: "TEXT", source: pdfSource(line, line, 3) },
     ]);
     expect(result.facts.map((fact) => fact.kind)).toEqual(["SOURCE", "SOURCE", "SOURCE"]);
     expect(result.facts.map((fact) => fact.kind === "SOURCE" && fact.sourceKey)).toEqual([
-      '["PDF",1,2,50013,50016]', '["PDF",1,2,50017,50020]', '["PDF",1,3,50010,50012]',
+      '["PDF",1,2,50013,50016]', '["PDF",1,2,50017,50020]', '["PDF",1,3,0,50020]',
     ]);
   });
   it("blocks missing, overlapping, duplicate, blank, and unsafe UTF-16 PDF claims", () => {
@@ -52,20 +53,20 @@ describe("validateFinanceReportEvidenceSourcesV1", () => {
     const result = validate("CSV", extracted, [
       { id: "amount", role: "AMOUNT", source: cellSource("1,234.50", { sheet: "CSV" }) },
       { id: "iso", role: "ISO_CODE", source: cellSource("Currency USD", { sheet: "CSV", column: 2, start: 9, end: 12, text: "USD" }) },
-      { id: "long", role: "TEXT", source: cellSource("x".repeat(50_001), { sheet: "CSV", column: 3, start: 50_000, end: 50_001, text: "x" }) },
+      { id: "long", role: "TEXT", source: cellSource("x".repeat(50_001), { sheet: "CSV", column: 3 }) },
     ]);
     expect(result.facts).toMatchObject([
       { kind: "SOURCE", selectedText: "1,234.50", cell: { type: "TEXT", rawValue: "1,234.50" } },
       { kind: "SOURCE", sourceKey: '["CELL","CSV",1,2,"RAW",9,12]', selectedText: "USD", cell: { rawValue: "Currency USD" } },
-      { kind: "SOURCE", sourceKey: '["CELL","CSV",1,3,"RAW",50000,50001]', selectedText: "x" },
+      { kind: "SOURCE", sourceKey: '["CELL","CSV",1,3,"RAW",0,50001]' },
     ]);
   });
   it("uses only raw XLSX numbers or numeric formula results for amount roles", () => {
     const extracted = jsonl(
-      { sheet: " ", rowCount: 1, columnCount: 250_001 },
-      { sheet: " ", row: 1, column: 1, type: "NUMBER", value: "1234", displayValue: "$123" },
-      { sheet: " ", row: 1, column: 2, type: "FORMULA", value: "20", displayValue: "$20", formula: "A1/2", resultType: "NUMBER" },
-      { sheet: " ", row: 1, column: 3, type: "TEXT", value: "30" }, { sheet: " ", row: 1, column: 250_001, type: "ERROR", value: "#DIV/0!" },
+      { sheet: longSheet, rowCount: 1, columnCount: 250_001 },
+      { sheet: longSheet, row: 1, column: 1, type: "NUMBER", value: "1234", displayValue: "$123" },
+      { sheet: longSheet, row: 1, column: 2, type: "FORMULA", value: "20", displayValue: "$20", formula: "A1/2", resultType: "NUMBER" },
+      { sheet: longSheet, row: 1, column: 3, type: "TEXT", value: "30" }, { sheet: longSheet, row: 1, column: 250_001, type: "ERROR", value: "#DIV/0!" },
     );
     const good = validate("XLSX", extracted, [
       { id: "raw", role: "AMOUNT", source: cellSource("1234") },
@@ -80,7 +81,7 @@ describe("validateFinanceReportEvidenceSourcesV1", () => {
     const textFacts = ["1234", "$123"].map((evidence) => validate("XLSX", extracted,
       [{ id: evidence, role: "TEXT", source: cellSource(evidence) }]).facts[0]);
     expect(textFacts.map((fact) => fact?.kind === "SOURCE" && fact.sourceKey)).toEqual([
-      '["CELL"," ",1,1,"RAW",0,4]', '["CELL"," ",1,1,"DISPLAY",0,4]',
+      JSON.stringify(["CELL", longSheet, 1, 1, "RAW", 0, 4]), JSON.stringify(["CELL", longSheet, 1, 1, "DISPLAY", 0, 4]),
     ]);
     expect(code(validate("XLSX", extracted,
       [{ id: "display", role: "AMOUNT", source: cellSource("$123") }]))).toBe("SOURCE_NOT_FOUND");

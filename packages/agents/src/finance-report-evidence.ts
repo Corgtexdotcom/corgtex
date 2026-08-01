@@ -48,7 +48,7 @@ function string(value: unknown, max: number, allowEmpty = false,
   if (budget && (budget.total += value.length) > MAX_TEXT * 2) fail(code);
   return value;
 }
-function sheetName(value: unknown, code: FinanceReportEvidenceBlockerCode = "MALFORMED_EVIDENCE", budget?: { total: number }) { const result = string(value, 200, true, code, budget); if (!result) fail(code); return result; }
+function sheetName(value: unknown, code: FinanceReportEvidenceBlockerCode = "MALFORMED_EVIDENCE", budget?: { total: number }) { const result = string(value, MAX_TEXT, true, code, budget); if (!result) fail(code); return result; }
 const cellKey = (sheet: string, row: number, column: number) => JSON.stringify(["CELL", sheet, row, column]);
 function validScalar(type: NonFormulaCellType, value: string) { return type === "NUMBER"
   ? Number.isFinite(Number(value)) && String(Number(value)) === value
@@ -130,9 +130,8 @@ function splitsSurrogate(value: string, offset: number) {
   return before >= 0xd800 && before <= 0xdbff && after >= 0xdc00 && after <= 0xdfff;
 }
 function span(value: string, start: unknown, end: unknown, selected: unknown, claimId: string) {
-  const from = integer(start, 0, value.length, "INVALID_INPUT");
-  const to = integer(end, 1, value.length, "INVALID_INPUT");
-  const text = string(selected, 50_000, false, "INVALID_INPUT");
+  const from = integer(start, 0, value.length, "INVALID_INPUT"); const to = integer(end, 1, value.length, "INVALID_INPUT");
+  const text = string(selected, MAX_TEXT, false, "INVALID_INPUT");
   if (from >= to || splitsSurrogate(value, from) || splitsSurrogate(value, to)
     || value.slice(from, to) !== text) fail("SOURCE_NOT_FOUND", claimId);
   return { start: from, end: to, text };
@@ -151,7 +150,7 @@ function parseClaim(value: unknown, budget: { total: number }): FinanceReportEvi
       line: string(source.line, MAX_TEXT, true, "INVALID_INPUT", budget),
       start: integer(source.start, 0, MAX_TEXT, "INVALID_INPUT"),
       end: integer(source.end, 1, MAX_TEXT, "INVALID_INPUT"),
-      text: string(source.text, 50_000, false, "INVALID_INPUT", budget) } } as FinanceReportEvidenceClaim;
+      text: string(source.text, MAX_TEXT, false, "INVALID_INPUT", budget) } } as FinanceReportEvidenceClaim;
   }
   if (source.kind !== "CELL") fail("INVALID_INPUT");
   exactKeys(source, ["kind", "sheet", "row", "column", "evidence", "start", "end", "text"],
@@ -165,7 +164,7 @@ function parseClaim(value: unknown, budget: { total: number }): FinanceReportEvi
     evidence: string(source.evidence, MAX_TEXT, true, "INVALID_INPUT", budget),
     ...(source.start === undefined ? {} : { start: integer(source.start, 0, MAX_TEXT, "INVALID_INPUT"),
       end: integer(source.end, 1, MAX_TEXT, "INVALID_INPUT"),
-      text: string(source.text, 50_000, false, "INVALID_INPUT", budget) }) } as FinanceReportEvidenceCellSource } as FinanceReportEvidenceClaim;
+      text: string(source.text, MAX_TEXT, false, "INVALID_INPUT", budget) }) } as FinanceReportEvidenceCellSource } as FinanceReportEvidenceClaim;
 }
 function bind(index: Index, format: FinanceReportEvidenceFormat, claim: FinanceReportEvidenceClaim): Bound {
   const source = claim.source;
