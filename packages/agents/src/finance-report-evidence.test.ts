@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { validateFinanceReportEvidenceSourcesV1,
+import { validateFinanceReportEvidenceSourcesV1, validateFinanceReportEvidenceStructureV1,
   type FinanceReportEvidenceClaim, type FinanceReportEvidenceSource, type FinanceReportEvidenceSourceFact, type FinanceReportEvidenceUnmappedErrorDisplay } from "./finance-report-evidence";
 const jsonl = (...records: unknown[]) => records.map((record) => JSON.stringify(record)).join("\n");
 const longSheet = " ".repeat(201);
@@ -114,6 +114,8 @@ describe("validateFinanceReportEvidenceSourcesV1", () => {
       jsonl({ sheet: "CSV", rowCount: 1, columnCount: 1 },
         { ...validCell, type: "FORMULA", formula: "1+1" }),
     ];
+    expect(validateFinanceReportEvidenceStructureV1({ format: "PDF", extractedEvidence: jsonl({ page: 1, text: "10" }) })).toEqual({ version: 1, kind: "SUCCESS" });
+    expect(validateFinanceReportEvidenceStructureV1({ format: "PDF", extractedEvidence: malformed[0] })).toMatchObject({ kind: "BLOCKER", facts: [{ code: "MALFORMED_EVIDENCE" }] });
     expect(code(validate("PDF", malformed[0]!, [{ id: "a", role: "TEXT", source: pdfSource("10", "10") }]))).toBe("MALFORMED_EVIDENCE");
     for (const evidence of malformed.slice(1, 6)) expect(code(validate("PDF", evidence,
       [{ id: "a", role: "TEXT", source: pdfSource("10", "10") }]))).toBe("MALFORMED_EVIDENCE");
