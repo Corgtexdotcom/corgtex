@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { validateFinanceReportEvidenceSourcesV1,
-  type FinanceReportEvidenceClaim, type FinanceReportEvidenceSource, type FinanceReportEvidenceSourceFact } from "./finance-report-evidence";
+  type FinanceReportEvidenceClaim, type FinanceReportEvidenceSource, type FinanceReportEvidenceSourceFact, type FinanceReportEvidenceUnmappedErrorDisplay } from "./finance-report-evidence";
 const jsonl = (...records: unknown[]) => records.map((record) => JSON.stringify(record)).join("\n");
 const longSheet = " ".repeat(201);
 const pdfSource = (line: string, text: string, lineIndex = 0, page = 1) =>
@@ -77,7 +77,7 @@ describe("validateFinanceReportEvidenceSourcesV1", () => {
       { kind: "SOURCE", cell: { type: "FORMULA", resultType: "NUMBER" } }, { kind: "SOURCE", cell: { type: "BOOLEAN", displayValue: "TRUE" } }, { kind: "SOURCE", cell: { type: "ERROR", rawValue: "", displayValue: "#SPILL!" } }, { kind: "SOURCE", source: { sheet: "" }, selectedText: "40" },
     ]);
     const formulaFact = good.kind === "SUCCESS" ? good.facts[1] : undefined;
-    if (formulaFact?.cell?.type === "FORMULA" && formulaFact.role === "AMOUNT" && formulaFact.source.kind === "CELL") { const resultType: "NUMBER" = formulaFact.cell.resultType; const start: undefined = formulaFact.source.start; expect([resultType, start]).toEqual(["NUMBER", undefined]); } const booleanFact = good.kind === "SUCCESS" ? good.facts[2] : undefined; if (booleanFact?.cell?.type === "BOOLEAN") { const displayValue: "TRUE" | "FALSE" = booleanFact.cell.displayValue; expect(displayValue).toBe("TRUE"); } const errorFact = good.kind === "SUCCESS" ? good.facts[3] : undefined; if (errorFact?.cell?.type === "ERROR") { const displayValue: string | undefined = errorFact.cell.displayValue; expect(displayValue).toBe("#SPILL!"); }
+    if (formulaFact?.cell?.type === "FORMULA" && formulaFact.role === "AMOUNT" && formulaFact.source.kind === "CELL") { const resultType: "NUMBER" = formulaFact.cell.resultType; const start: undefined = formulaFact.source.start; expect([resultType, start]).toEqual(["NUMBER", undefined]); } const booleanFact = good.kind === "SUCCESS" ? good.facts[2] : undefined; if (booleanFact?.cell?.type === "BOOLEAN") { const displayValue: "TRUE" | "FALSE" = booleanFact.cell.displayValue; expect(displayValue).toBe("TRUE"); } const errorFact = good.kind === "SUCCESS" ? good.facts[3] : undefined; if (errorFact?.cell?.type === "ERROR" && errorFact.cell.rawValue === "") { const displayValue: FinanceReportEvidenceUnmappedErrorDisplay = errorFact.cell.displayValue; expect(displayValue).toBe("#SPILL!"); }
     const textFacts = ["1234", "$123"].map((evidence) => validate("XLSX", extracted,
       [{ id: evidence, role: "TEXT", source: cellSource(evidence) }]).facts[0]);
     expect(textFacts.map((fact) => fact?.kind === "SOURCE" && fact.sourceKey)).toEqual([
