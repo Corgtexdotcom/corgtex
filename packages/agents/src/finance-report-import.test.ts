@@ -10,7 +10,9 @@ function evidence(format: FinanceFileFormat, amount = "1,250.00", currency = "US
   return [
     { sheet: name, rowCount: 2, columnCount: 2 },
     { sheet: name, row: 1, column: 1, type: "TEXT", value: currency },
-    { sheet: name, row: 2, column: 2, type: "NUMBER", value: amount },
+    { sheet: name, row: 2, column: 2, type: "NUMBER",
+      value: format === "XLSX" ? (amount.includes("(") ? "-1250" : "1250") : amount,
+      ...(format === "XLSX" ? { displayValue: amount } : {}) },
   ].map((value) => JSON.stringify(value)).join("\n");
 }
 function proposal(format: FinanceFileFormat = "CSV", amount = "1,250.00") {
@@ -61,6 +63,12 @@ describe("Finance report import v1", () => {
     await invalid(value, format);
   });
 
+  it.each(["PDF", "CSV", "XLSX"] as const)("binds currency-decorated negative %s evidence", async (format) => {
+    const value = proposal(format, "($1,250.00)"); value.candidates[0].amountCents = -125_000;
+    await expect(interpretFinanceReport({ ...params, format, extractedEvidence: evidence(format, "($1,250.00)"),
+      gateway: gateway([value]).gateway })).resolves.toHaveProperty("candidates.0.amountCents", -125_000);
+  });
+
   it.each([
     ["unknown field", (value: any) => { value.trace = "private"; }],
     ["invalid classification", (value: any) => { value.report.reportType = "BUDGET"; }],
@@ -101,13 +109,13 @@ describe("Finance report import v1", () => {
   });
 
   it("binds one uppercase ISO currency token and never derives it from a profile", async () => {
-    for (const text of ["USD", "ALL AMOUNTS IN USD"]) {
+    for (const text of ["USD", "Amounts in USD"]) {
       const value = proposal(); value.report.currency = { state: "EXPLICIT", code: "USD",
         source: { kind: "CELL", sheet: "CSV", row: 1, column: 1, evidence: text } };
       await expect(interpretFinanceReport({ ...params, format: "CSV", extractedEvidence: evidence("CSV", "1,250.00", text),
         gateway: gateway([value]).gateway })).resolves.toMatchObject({ report: { currency: { code: "USD" } } });
     }
-    for (const text of ["usd", "USD / EUR"]) {
+    for (const text of ["usd", "USD / EUR", "USD EUR", "USD (EUR)"]) {
       const value = proposal(); value.report.currency = { state: "EXPLICIT", code: "USD",
         source: { kind: "CELL", sheet: "CSV", row: 1, column: 1, evidence: text } };
       await invalid(value, "CSV", evidence("CSV", "1,250.00", text));

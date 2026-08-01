@@ -144,13 +144,12 @@ function tokenCents(token: string) {
   return Number.isSafeInteger(cents) && cents >= INT_MIN && cents <= INT_MAX ? cents : null;
 }
 function amountMatches(evidence: string, amountCents: number) {
-  const tokens = evidence.match(/(?<![\d.,'])\(?[-+]?(?:\d{1,3}(?:[.,']\d{3})+|\d+)(?:[.,]\d+)?\)?(?![\d.,'])/g) ?? [];
+  const tokens = evidence.match(/(?<![\d.,'])\(?[-+]?\p{Sc}?\s*(?:\d{1,3}(?:[.,']\d{3})+|\d+)(?:[.,]\d+)?\)?(?![\d.,'])/gu) ?? [];
   return tokens.map(tokenCents).filter((value) => value === amountCents).length === 1;
 }
 function currencyMatches(evidence: string, code: string) {
-  const separator = "(?:/|,|;|\\b(?:or|and)\\b)";
-  return ISO_CODES.has(code) && (evidence.match(new RegExp(`\\b${code}\\b`, "g")) ?? []).length === 1
-    && !new RegExp(`\\b${code}\\b\\s*${separator}\\s*[A-Z]{3}\\b|\\b[A-Z]{3}\\b\\s*${separator}\\s*\\b${code}\\b`).test(evidence);
+  const codes = (evidence.match(/\b[A-Z]{3}\b/g) ?? []).filter((token) => ISO_CODES.has(token));
+  return ISO_CODES.has(code) && codes.length === 1 && codes[0] === code;
 }
 function validateEvidence(proposal: FinanceReportImportProposalV1, index: SourceIndex, format: FinanceFileFormat) {
   const claims: Claim[] = [];
