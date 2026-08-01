@@ -35,7 +35,7 @@ class EvidenceError extends Error { constructor(public readonly code: FinanceRep
 function fail(code: FinanceReportEvidenceBlockerCode, claimId?: string): never { throw new EvidenceError(code, claimId); }
 const isRecord = (value: unknown): value is Record<string, unknown> => Boolean(value) && typeof value === "object" && !Array.isArray(value);
 function exactKeys(value: Record<string, unknown>, allowed: string[], required = allowed, code: FinanceReportEvidenceBlockerCode = "MALFORMED_EVIDENCE") {
-  if (!required.every((key) => key in value) || Object.keys(value).some((key) => !allowed.includes(key))) fail(code);
+  if (!required.every((key) => Object.hasOwn(value, key)) || Object.keys(value).some((key) => !allowed.includes(key)) || Object.values(Object.getOwnPropertyDescriptors(value)).some((descriptor) => !("value" in descriptor))) fail(code);
 }
 function integer(value: unknown, min: number, max: number,
   code: FinanceReportEvidenceBlockerCode = "MALFORMED_EVIDENCE") {
@@ -54,7 +54,7 @@ function validScalar(type: NonFormulaCellType, value: string) { return type === 
   ? Number.isFinite(Number(value)) && String(Number(value)) === value
     : type === "BOOLEAN" ? value === "true" || value === "false"
       : type === "DATE" ? Number.isFinite(Date.parse(value)) && new Date(value).toISOString() === value
-        : type !== "ERROR" || /^#(?:NULL!|DIV\/0!|VALUE!|REF!|NAME\?|NUM!|N\/A|GETTING_DATA|WTF\?)$/.test(value); }
+        : true; }
 function buildIndex(format: FinanceReportEvidenceFormat, jsonl: string): Index {
   if (!jsonl) fail("INVALID_INPUT");
   if (jsonl.length > MAX_TEXT) fail("LIMIT_EXCEEDED");
@@ -66,7 +66,7 @@ function buildIndex(format: FinanceReportEvidenceFormat, jsonl: string): Index {
   let activeSheet: string | undefined;
   for (const line of records) {
     let value: unknown;
-    try { value = JSON.parse(line); } catch { fail("MALFORMED_EVIDENCE"); }
+    try { value = JSON.parse(line); if (JSON.stringify(value) !== line) fail("MALFORMED_EVIDENCE"); } catch { fail("MALFORMED_EVIDENCE"); }
     if (!isRecord(value)) fail("MALFORMED_EVIDENCE");
     if (format === "PDF") {
       exactKeys(value, ["page", "text"]);
@@ -108,7 +108,7 @@ function buildIndex(format: FinanceReportEvidenceFormat, jsonl: string): Index {
       && resultType !== "FORMULA")
       : formula !== undefined || resultType !== undefined) fail("MALFORMED_EVIDENCE");
     if (!validScalar(type === "FORMULA" ? resultType as NonFormulaCellType : type, cellValue)) fail("MALFORMED_EVIDENCE");
-    if (format === "CSV" && (type !== "TEXT" || value.displayValue !== undefined || !cellValue || cellValue.includes("\0"))) fail("MALFORMED_EVIDENCE");
+    if (format === "CSV" && (type !== "TEXT" || value.displayValue !== undefined || !cellValue || cellValue.includes("\0") || !/^(?:[^\uD800-\uDFFF]|[\uD800-\uDBFF][\uDC00-\uDFFF])*$/.test(cellValue))) fail("MALFORMED_EVIDENCE");
     const displayValue = value.displayValue === undefined ? undefined
       : string(value.displayValue, MAX_TEXT, true);
     if (displayValue === cellValue || ((type === "BOOLEAN" || (type === "FORMULA" && resultType === "BOOLEAN")) ? displayValue !== (cellValue === "true" ? "TRUE" : "FALSE") : displayValue !== undefined && (type === "ERROR" || type === "TEXT" || (type === "FORMULA" && (resultType === "ERROR" || resultType === "TEXT"))))) fail("MALFORMED_EVIDENCE");

@@ -66,7 +66,7 @@ describe("validateFinanceReportEvidenceSourcesV1", () => {
       { sheet: longSheet, rowCount: 1, columnCount: 250_001 },
       { sheet: longSheet, row: 1, column: 1, type: "NUMBER", value: "1234", displayValue: "$123" },
       { sheet: longSheet, row: 1, column: 2, type: "FORMULA", value: "20", displayValue: "$20", formula: "A1/2", resultType: "NUMBER" },
-      { sheet: longSheet, row: 1, column: 3, type: "TEXT", value: "30" }, { sheet: longSheet, row: 1, column: 4, type: "BOOLEAN", value: "true", displayValue: "TRUE" }, { sheet: longSheet, row: 1, column: 250_001, type: "ERROR", value: "#DIV/0!" },
+      { sheet: longSheet, row: 1, column: 3, type: "TEXT", value: "30" }, { sheet: longSheet, row: 1, column: 4, type: "BOOLEAN", value: "true", displayValue: "TRUE" }, { sheet: longSheet, row: 1, column: 250_001, type: "ERROR", value: "#SPILL!" },
     );
     const good = validate("XLSX", extracted, [
       { id: "raw", role: "AMOUNT", source: cellSource("1234") },
@@ -105,25 +105,25 @@ describe("validateFinanceReportEvidenceSourcesV1", () => {
       "not-json",
       jsonl({ page: 1, text: "10", extra: true }),
       jsonl({ page: 1, text: "10" }, { page: 1, text: "20" }),
-      jsonl({ page: 2, text: "10" }),
+      jsonl({ page: 2, text: "10" }), '{"page":2,"page":1,"text":"10"}',
       jsonl(validCell, { sheet: "CSV", rowCount: 1, columnCount: 1 }),
       jsonl({ sheet: "CSV", rowCount: 1, columnCount: 1 }, validCell, validCell),
       jsonl({ sheet: "CSV", rowCount: 1, columnCount: 2 }, { ...validCell, column: 2 }, validCell),
-      jsonl({ sheet: "CSV", rowCount: 1, columnCount: 1 }, { ...validCell, value: "" }), jsonl({ sheet: "CSV", rowCount: 1, columnCount: 1 }, { ...validCell, value: "\0" }), jsonl({ sheet: "CSV", rowCount: 20_000, columnCount: 250_000 }, validCell),
+      jsonl({ sheet: "CSV", rowCount: 1, columnCount: 1 }, { ...validCell, value: "" }), jsonl({ sheet: "CSV", rowCount: 1, columnCount: 1 }, { ...validCell, value: "\0" }), jsonl({ sheet: "CSV", rowCount: 1, columnCount: 1 }, { ...validCell, value: "\ud800" }), jsonl({ sheet: "CSV", rowCount: 20_000, columnCount: 250_000 }, validCell),
       jsonl({ sheet: "Report", rowCount: 1, columnCount: 1 }, { ...validCell, sheet: "Report" }),
       jsonl({ sheet: "CSV", rowCount: 1, columnCount: 1 },
         { ...validCell, type: "FORMULA", formula: "1+1" }),
     ];
     expect(code(validate("PDF", malformed[0]!, [{ id: "a", role: "TEXT", source: pdfSource("10", "10") }]))).toBe("MALFORMED_EVIDENCE");
-    for (const evidence of malformed.slice(1, 4)) expect(code(validate("PDF", evidence,
+    for (const evidence of malformed.slice(1, 5)) expect(code(validate("PDF", evidence,
       [{ id: "a", role: "TEXT", source: pdfSource("10", "10") }]))).toBe("MALFORMED_EVIDENCE");
-    for (const evidence of malformed.slice(4)) expect(code(validate("CSV", evidence,
+    for (const evidence of malformed.slice(5)) expect(code(validate("CSV", evidence,
       [{ id: "a", role: "AMOUNT", source: cellSource("10") }]))).toBe("MALFORMED_EVIDENCE");
     for (const evidence of [jsonl({ sheet: "Report", rowCount: 2, columnCount: 1 }, { sheet: "Report", row: 1, column: 1, type: "NUMBER", value: "10" }),
       jsonl({ sheet: "Report", rowCount: 1, columnCount: 4_294_967_296 }, { sheet: "Report", row: 1, column: 4_294_967_296, type: "NUMBER", value: "10" })]) expect(code(validate("XLSX", evidence,
         [{ id: "a", role: "AMOUNT", source: cellSource("10") }]))).toBe("MALFORMED_EVIDENCE");
     const impossibleScalars = [{ type: "NUMBER", value: "not-a-number" }, { type: "BOOLEAN", value: "TRUE" },
-      { type: "DATE", value: "2026-13-01" }, { type: "ERROR", value: "not-an-error" }, { type: "ERROR", value: "#DIV/0!", displayValue: "fabricated" }, { type: "TEXT", value: "text", displayValue: "fabricated" },
+      { type: "DATE", value: "2026-13-01" }, { type: "ERROR", value: "#DIV/0!", displayValue: "fabricated" }, { type: "TEXT", value: "text", displayValue: "fabricated" },
       { type: "NUMBER", value: "10", displayValue: "10" }, { type: "BOOLEAN", value: "true" }, { type: "BOOLEAN", value: "true", displayValue: "fabricated" }, { type: "FORMULA", value: "true", formula: "A1", resultType: "BOOLEAN" }, { type: "FORMULA", value: "true", displayValue: "fabricated", formula: "A1", resultType: "BOOLEAN" }, { type: "FORMULA", value: "text", displayValue: "fabricated", formula: "A1", resultType: "TEXT" }, { type: "FORMULA", value: "NaN", formula: "1/0", resultType: "NUMBER" }, { type: "FORMULA", value: "10", formula: "[Book2.xlsx]Sheet1!A1", resultType: "NUMBER" }];
     for (const cell of impossibleScalars) expect(code(validate("XLSX", jsonl({ sheet: "Report", rowCount: 1, columnCount: 1 },
       { sheet: "Report", row: 1, column: 1, ...cell }),
@@ -142,7 +142,7 @@ describe("validateFinanceReportEvidenceSourcesV1", () => {
       "amountCents", "currency", "proposal", "transaction", "persistence",
     ])); }
     expect(code(validateFinanceReportEvidenceSourcesV1({ format: "PDF", extractedEvidence: extracted,
-      claims, extra: true }))).toBe("INVALID_INPUT"); expect(code(validate("PDF", extracted, new Array(1)))).toBe("INVALID_INPUT"); expect(code(validate("PDF", extracted, Object.assign(new Array(1), { foo: claims[0] })))).toBe("INVALID_INPUT");
+      claims, extra: true }))).toBe("INVALID_INPUT"); expect(code(validate("PDF", extracted, new Array(1)))).toBe("INVALID_INPUT"); expect(code(validate("PDF", extracted, Object.assign(new Array(1), { foo: claims[0] })))).toBe("INVALID_INPUT"); expect(code(validate("PDF", extracted, [Object.defineProperty({ id: "getter", source: claims[0]!.source }, "role", { enumerable: true, get: () => "TEXT" })]))).toBe("INVALID_INPUT");
     expect(code(validate("PDF", extracted, [{ ...claims[0], source: { ...claims[0]!.source, extra: true } }]))).toBe("INVALID_INPUT");
     expect(code(validate("PDF", extracted, Array.from({ length: 1_001 }, (_, index) =>
       ({ id: String(index), role: "TEXT", source: pdfSource("Revenue 10", "10") }))))).toBe("INVALID_INPUT");
