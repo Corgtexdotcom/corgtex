@@ -46,18 +46,19 @@ describe("validateFinanceReportEvidenceSourcesV1", () => {
 
   it("binds exact CSV amount cells and text subspans", () => {
     const extracted = jsonl(
-      { sheet: "Report", rowCount: 1, columnCount: 2 },
-      { sheet: "Report", row: 1, column: 1, type: "TEXT", value: "1,234.50" },
-      { sheet: "Report", row: 1, column: 2, type: "TEXT", value: "Currency USD" },
+      { sheet: "CSV", rowCount: 1, columnCount: 3 },
+      { sheet: "CSV", row: 1, column: 1, type: "TEXT", value: "1,234.50" },
+      { sheet: "CSV", row: 1, column: 2, type: "TEXT", value: "Currency USD" },
+      { sheet: "CSV", row: 1, column: 3, type: "TEXT", value: "x".repeat(50_001) },
     );
     const result = validate("CSV", extracted, [
-      { id: "amount", role: "AMOUNT", source: cellSource("1,234.50") },
+      { id: "amount", role: "AMOUNT", source: cellSource("1,234.50", { sheet: "CSV" }) },
       { id: "iso", role: "ISO_CODE", source: cellSource("Currency USD",
-        { column: 2, start: 9, end: 12, text: "USD" }) },
+        { sheet: "CSV", column: 2, start: 9, end: 12, text: "USD" }) },
     ]);
     expect(result.facts).toMatchObject([
       { kind: "SOURCE", selectedText: "1,234.50", cell: { type: "TEXT", rawValue: "1,234.50" } },
-      { kind: "SOURCE", sourceKey: '["CELL","Report",1,2,9,12]', selectedText: "USD",
+      { kind: "SOURCE", sourceKey: '["CELL","CSV",1,2,"RAW",9,12]', selectedText: "USD",
         cell: { rawValue: "Currency USD" } },
     ]);
   });
@@ -65,16 +66,16 @@ describe("validateFinanceReportEvidenceSourcesV1", () => {
   it("uses only raw XLSX numbers or numeric formula results for amount roles", () => {
     const extracted = jsonl(
       { sheet: "Report", rowCount: 1, columnCount: 3 },
-      { sheet: "Report", row: 1, column: 1, type: "NUMBER", value: "1234.5", displayValue: "$1,234.50" },
+      { sheet: "Report", row: 1, column: 1, type: "NUMBER", value: "1234", displayValue: "$123" },
       { sheet: "Report", row: 1, column: 2, type: "FORMULA", value: "20", displayValue: "$20", formula: "A1/2", resultType: "NUMBER" },
       { sheet: "Report", row: 1, column: 3, type: "TEXT", value: "30" },
     );
     const good = validate("XLSX", extracted, [
-      { id: "raw", role: "AMOUNT", source: cellSource("1234.5") },
+      { id: "raw", role: "AMOUNT", source: cellSource("1234") },
       { id: "formula", role: "AMOUNT", source: cellSource("20", { column: 2 }) },
     ]);
     expect(good.facts).toMatchObject([
-      { kind: "SOURCE", selectedText: "1234.5", cell: { rawValue: "1234.5", displayValue: "$1,234.50" } },
+      { kind: "SOURCE", selectedText: "1234", cell: { rawValue: "1234", displayValue: "$123" } },
       { kind: "SOURCE", cell: { type: "FORMULA", resultType: "NUMBER" } },
     ]);
     const formulaCell = good.facts[1]?.kind === "SOURCE" ? good.facts[1].cell : undefined;
@@ -82,18 +83,23 @@ describe("validateFinanceReportEvidenceSourcesV1", () => {
       const resultType: Exclude<FinanceReportEvidenceCellType, "FORMULA"> = formulaCell.resultType;
       expect(resultType).toBe("NUMBER");
     }
+    const textFacts = ["1234", "$123"].map((evidence) => validate("XLSX", extracted,
+      [{ id: evidence, role: "TEXT", source: cellSource(evidence) }]).facts[0]);
+    expect(textFacts.map((fact) => fact?.kind === "SOURCE" && fact.sourceKey)).toEqual([
+      '["CELL","Report",1,1,"RAW",0,4]', '["CELL","Report",1,1,"DISPLAY",0,4]',
+    ]);
     expect(code(validate("XLSX", extracted,
-      [{ id: "display", role: "AMOUNT", source: cellSource("$1,234.50") }]))).toBe("SOURCE_NOT_FOUND");
+      [{ id: "display", role: "AMOUNT", source: cellSource("$123") }]))).toBe("SOURCE_NOT_FOUND");
     expect(code(validate("XLSX", extracted,
       [{ id: "text", role: "AMOUNT", source: cellSource("30", { column: 3 }) }]))).toBe("UNSAFE_CELL");
   });
 
   it("blocks incompatible whole-cell reuse and mixed source formats", () => {
-    const extracted = jsonl({ sheet: "Report", rowCount: 1, columnCount: 1 },
-      { sheet: "Report", row: 1, column: 1, type: "TEXT", value: "USD 10" });
+    const extracted = jsonl({ sheet: "CSV", rowCount: 1, columnCount: 1 },
+      { sheet: "CSV", row: 1, column: 1, type: "TEXT", value: "USD 10" });
     expect(code(validate("CSV", extracted, [
-      { id: "amount", role: "AMOUNT", source: cellSource("USD 10") },
-      { id: "iso", role: "ISO_CODE", source: cellSource("USD 10", { start: 0, end: 3, text: "USD" }) },
+      { id: "amount", role: "AMOUNT", source: cellSource("USD 10", { sheet: "CSV" }) },
+      { id: "iso", role: "ISO_CODE", source: cellSource("USD 10", { sheet: "CSV", start: 0, end: 3, text: "USD" }) },
     ]))).toBe("OVERLAPPING_SOURCE");
     expect(code(validate("CSV", extracted,
       [{ id: "pdf", role: "TEXT", source: pdfSource("USD 10", "USD") }]))).toBe("SOURCE_NOT_FOUND");
@@ -107,6 +113,7 @@ describe("validateFinanceReportEvidenceSourcesV1", () => {
       jsonl({ page: 1, text: "10" }, { page: 1, text: "20" }),
       jsonl(validCell, { sheet: "Report", rowCount: 1, columnCount: 1 }),
       jsonl({ sheet: "Report", rowCount: 1, columnCount: 1 }, validCell, validCell),
+      jsonl({ sheet: "Report", rowCount: 1, columnCount: 1 }, validCell),
       jsonl({ sheet: "Report", rowCount: 1, columnCount: 1 },
         { ...validCell, type: "FORMULA", formula: "1+1" }),
     ];

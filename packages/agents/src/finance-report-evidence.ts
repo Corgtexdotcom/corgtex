@@ -92,7 +92,7 @@ function buildIndex(format: FinanceReportEvidenceFormat, jsonl: string): Index {
       const rows = integer(value.rowCount, 0, 20_000);
       const columns = integer(value.columnCount, 0, 250_000);
       totalRows += rows;
-      if (sheets.has(sheet)) fail("MALFORMED_EVIDENCE");
+      if (sheets.has(sheet) || (format === "CSV" && (sheet !== "CSV" || sheets.size > 0))) fail("MALFORMED_EVIDENCE");
       if (sheets.size >= 100 || totalRows > 20_000) fail("LIMIT_EXCEEDED");
       sheets.set(sheet, { rows, columns });
       continue;
@@ -105,7 +105,7 @@ function buildIndex(format: FinanceReportEvidenceFormat, jsonl: string): Index {
     const column = integer(value.column, 1, 250_000);
     const rawType = string(value.type, 20);
     const type = rawType as FinanceReportEvidenceCellType;
-    const cellValue = string(value.value, 50_000, true);
+    const cellValue = string(value.value, MAX_TEXT, true);
     if (!bounds || row > bounds.rows || column > bounds.columns || !CELL_TYPES.has(type)) fail("MALFORMED_EVIDENCE");
     const formula = value.formula;
     const resultType = value.resultType;
@@ -115,7 +115,7 @@ function buildIndex(format: FinanceReportEvidenceFormat, jsonl: string): Index {
       : formula !== undefined || resultType !== undefined) fail("MALFORMED_EVIDENCE");
     if (format === "CSV" && (type !== "TEXT" || value.displayValue !== undefined)) fail("MALFORMED_EVIDENCE");
     const displayValue = value.displayValue === undefined ? undefined
-      : string(value.displayValue, 50_000, true);
+      : string(value.displayValue, MAX_TEXT, true);
     const key = cellKey(sheet, row, column);
     if (index.cells.has(key)) fail("MALFORMED_EVIDENCE");
     if (index.cells.size >= 250_000) fail("LIMIT_EXCEEDED");
@@ -201,7 +201,8 @@ function bind(index: Index, format: FinanceReportEvidenceFormat, claim: FinanceR
       ? span(source.evidence, 0, source.evidence.length, source.evidence, claim.id)
       : span(source.evidence, source.start, source.end, source.text, claim.id);
   const sourceKey = wholeAmount ? coordinateKey
-    : JSON.stringify(["CELL", source.sheet, source.row, source.column, selected.start, selected.end]);
+    : JSON.stringify(["CELL", source.sheet, source.row, source.column,
+      source.evidence === cell.value ? "RAW" : "DISPLAY", selected.start, selected.end]);
   const cellFact: FinanceReportEvidenceCellFact = cell.type === "FORMULA"
     ? { type: cell.type, resultType: cell.resultType, rawValue: cell.value,
       ...(cell.displayValue === undefined ? {} : { displayValue: cell.displayValue }) }
