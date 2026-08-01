@@ -169,12 +169,12 @@ function parseFact(fact: FinanceReportEvidenceSourceFact, parsed: ReturnType<typ
 export function validateFinanceReportValueEvidenceV1(input: unknown): FinanceReportValueEvidenceResultV1 {
   try {
     const raw = exactObject(input, ["sourceInput", "numericFormat"], "INVALID_INPUT");
-    const parsed = parseFormat(raw.numericFormat);
     const sourceResult = validateFinanceReportEvidenceSourcesV1(raw.sourceInput);
     if (sourceResult.kind === "BLOCKER") {
       const blocker = sourceResult.facts[0];
       return { version: FINANCE_REPORT_VALUE_EVIDENCE_VERSION, kind: "BLOCKER", facts: [{ ...blocker }] };
     }
+    const parsed = parseFormat(raw.numericFormat);
     return { version: FINANCE_REPORT_VALUE_EVIDENCE_VERSION, kind: "SUCCESS",
       facts: sourceResult.facts.map((fact) => parseFact(fact, parsed)) };
   } catch (error) {

@@ -159,6 +159,7 @@ describe("validateFinanceReportValueEvidenceV1", () => {
 
   it("preserves R1a blockers and successful fact order", () => {
     expect(blocker({ sourceInput: {}, numericFormat: DEFAULT_FORMAT }).code).toBe("INVALID_INPUT");
+    expect(blocker({ sourceInput: {}, numericFormat: { ...DEFAULT_FORMAT, amountScale: 10 } }).code).toBe("INVALID_INPUT");
     const lines = ["Revenue", "1.00", "USD"];
     const claims = lines.map((text, lineIndex) => ({ id: `c-${lineIndex}`, role: ["TEXT", "AMOUNT", "ISO_CODE"][lineIndex],
       source: { kind: "PDF", page: 1, lineIndex, line: text, start: 0, end: text.length, text } }));
