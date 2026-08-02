@@ -30,7 +30,7 @@ function candidateState(decision: FinanceImportReconciliationDecision, now: Date
   return decision.reviewState === "BLOCKED" ? "BLOCKED" : ["ADD", "UPDATE"].includes(decision.action) && historical(decision.candidate.periodEnd, now) ? "WARNING" : decision.reviewState;
 }
 async function reconcile(tx: Prisma.TransactionClient, identity: Omit<Parameters<typeof reconcileFinanceImportCandidates>[0], "candidates" | "currentFacts">,
-  rows: FinanceImportCandidate[]) {
+  rows: Parameters<typeof reconcileFinanceImportCandidates>[0]["candidates"]) {
   const keys = reconcileFinanceImportCandidates({ ...identity, candidates: rows, currentFacts: [] }).decisions.flatMap(({ semanticKey }) => semanticKey ? [semanticKey] : []);
   const facts = await tx.financeReportFact.findMany({ where: { workspaceId: identity.workspaceId, semanticKey: { in: keys } }, select: { id: true, semanticKey: true, kind: true, amountCents: true } });
   return reconcileFinanceImportCandidates({ ...identity, candidates: rows, currentFacts: facts });
@@ -62,7 +62,7 @@ function reviewable(batch: { stage: string; version: number }, expectedVersion: 
   validVersion(expectedVersion);
   invariant(batch.stage === "READY_FOR_REVIEW" && batch.version === expectedVersion, 409, "FINANCE_REPORT_REVIEW_CONFLICT", "The Finance report import changed. Refresh and try again.");
 }
-function candidateVersions(candidates: FinanceImportCandidate[], supplied: Version[]) {
+function candidateVersions(candidates: Array<Pick<FinanceImportCandidate, "id" | "version">>, supplied: Version[]) {
   const versions = new Map(supplied.map(({ id, expectedVersion }) => [id, expectedVersion]));
   invariant(versions.size === supplied.length && supplied.every(({ expectedVersion }) => (validVersion(expectedVersion), true)),
     400, "INVALID_INPUT", "Candidate versions must be unique and incrementable.");
@@ -83,7 +83,7 @@ export async function editFinanceReportImportCandidate(actor: AppActor, params: 
     400, "INVALID_INPUT", "At least one editable proposal field is required.");
   return prisma.$transaction(async (tx) => {
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`finance-report-review:${params.workspaceId}:${params.batchId}`}, 0))`;
-    const batch = await tx.financeImportBatch.findUnique({ where: { id_workspaceId: { id: params.batchId, workspaceId: params.workspaceId } }, include: { candidates: true } });
+    const batch = await tx.financeImportBatch.findUnique({ where: { id_workspaceId: { id: params.batchId, workspaceId: params.workspaceId } }, select: { id: true, workspaceId: true, uploadedByUserId: true, stage: true, reportType: true, basis: true, resolvedCurrency: true, interpretationJson: true, blockerCount: true, version: true, candidates: { select: { id: true, workspaceId: true, batchId: true, sourceKey: true, proposedAccountPath: true, factKind: true, periodStart: true, periodEnd: true, amountCents: true, dimensions: true, action: true, reviewState: true, semanticKey: true, currentFactId: true, currentAmountCents: true, explanationMd: true, editedByUserId: true, approvedByUserId: true, approvedAt: true, version: true } } } });
     invariant(batch, 404, "FINANCE_REPORT_IMPORT_NOT_FOUND", "The Finance report import was not found.");
     reviewable(batch, params.expectedVersion);
     const target = batch.candidates.find(({ id }) => id === params.candidateId);
@@ -130,7 +130,7 @@ export async function reviewFinanceReportImport(actor: AppActor, params: { works
   invariant(actor.kind === "user", 403, "HUMAN_REVIEW_REQUIRED", "A human Finance writer is required.");
   return prisma.$transaction(async (tx) => {
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`finance-report-review:${params.workspaceId}:${params.batchId}`}, 0))`;
-    const batch = await tx.financeImportBatch.findUnique({ where: { id_workspaceId: { id: params.batchId, workspaceId: params.workspaceId } }, include: { candidates: true } });
+    const batch = await tx.financeImportBatch.findUnique({ where: { id_workspaceId: { id: params.batchId, workspaceId: params.workspaceId } }, select: { id: true, workspaceId: true, uploadedByUserId: true, stage: true, reportType: true, basis: true, resolvedCurrency: true, interpretationJson: true, blockerCount: true, version: true, candidates: { select: { id: true, workspaceId: true, batchId: true, sourceKey: true, proposedAccountPath: true, factKind: true, periodStart: true, periodEnd: true, amountCents: true, dimensions: true, action: true, reviewState: true, semanticKey: true, currentFactId: true, currentAmountCents: true, explanationMd: true, editedByUserId: true, approvedByUserId: true, approvedAt: true, version: true } } } });
     invariant(batch, 404, "FINANCE_REPORT_IMPORT_NOT_FOUND", "The Finance report import was not found.");
     reviewable(batch, params.expectedVersion);
     const bulk = params.mode === "APPROVE_VERIFIED" || params.mode === "APPROVE_ALL";
