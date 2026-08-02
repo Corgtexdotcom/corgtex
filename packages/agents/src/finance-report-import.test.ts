@@ -184,7 +184,8 @@ describe("runFinanceReportImportAgentV1", () => {
       workflowJobId: "job-1", attempts: 1, isFinalAttempt: false });
     expect(lifecycle.execute.mock.calls[0][0].triggerRef).toBe("job-1:attempt:1");
     expect(lifecycle.persist.mock.calls[0][0]).toMatchObject({ agentRunId: "run-1", expectedVersion: 4, interpretation: { exceptions: [{ code: "SOURCE_WARNING" }] },
-      candidates: [{ amountCents: 123_000, sourceKey: expect.stringMatching(/^[a-f0-9]{64}$/) }, { amountCents: 234_000 }] });
+      candidates: [{ amountCents: 123_000, sourceKey: expect.stringMatching(/^[a-f0-9]{64}$/),
+        proposalJson: expect.objectContaining({ numericFormat: expect.objectContaining({ amountScale: 1_000 }) }) }, { amountCents: 234_000 }] });
     expect(JSON.stringify(recorded)).not.toMatch(/Profit and Loss|123000|jan-revenue/);
     const currencyOnly = { ...proposal(), currency: { explicitCode: null, evidenceClaimId: null, confidence: 0.5 } };
     lifecycle.extract.mockResolvedValue({ output: currencyOnly, raw: "private", usage: {} });

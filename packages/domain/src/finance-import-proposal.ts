@@ -4,7 +4,7 @@ import { invariant } from "./errors";
 import { lockFinanceImportArtifactLinkTargets } from "./finance-import-artifact-ownership";
 import { parseFinanceImportInterpretationV1 } from "./finance-import-interpretation";
 import { reconcileFinanceImportCandidates } from "./finance-import-reconciliation";
-import { normalizeFinanceImportAmountCents, normalizeFinanceImportCurrency, validateFinanceImportReportingWindow } from "./finance-imports";
+import { normalizeFinanceImportAmountCents, normalizeFinanceImportIsoCurrency, validateFinanceImportReportingWindow } from "./finance-imports";
 const FORMAT_BY_MIME = { "text/csv": "CSV", "application/pdf": "PDF", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": "XLSX" } as const;
 const FINISHED = new Set(["RECONCILING", "READY_FOR_REVIEW", "NEEDS_INPUT", "APPLYING", "APPLIED", "PARTIALLY_APPLIED", "FAILED", "CANCELLED"]);
 const SAFE_FAILURES = {
@@ -73,7 +73,7 @@ export async function persistFinanceReportImportProposal(params: { workspaceId: 
     && params.blocker?.code === "CURRENCY_UNRESOLVED";
   invariant((needsInput && (candidates.length === 0 || currencyOnlyBlocker)) || (!needsInput && candidates.length > 0),
     400, "INVALID_FINANCE_IMPORT_PROPOSAL", "Only currency-only blockers may retain exact candidate proposals.");
-  const resolvedCurrency = params.currency.state === "RESOLVED" ? normalizeFinanceImportCurrency(params.currency.code ?? "") : null;
+  const resolvedCurrency = params.currency.state === "RESOLVED" ? normalizeFinanceImportIsoCurrency(params.currency.code ?? "") : null;
   invariant((params.currency.state === "UNRESOLVED" && params.currency.code === null && params.currency.source === null)
     || (params.currency.state === "RESOLVED" && resolvedCurrency !== null && params.currency.source !== null), 400, "INVALID_FINANCE_IMPORT_PROPOSAL", "Currency state is inconsistent.");
   return prisma.$transaction(async (tx) => {
@@ -94,17 +94,18 @@ export async function persistFinanceReportImportProposal(params: { workspaceId: 
           currentFactId: decision.currentFactId, currentAmountCents: decision.currentAmountCents, explanationMd: decision.explanationMd }; }) });
     } else if (candidates.length) await tx.financeImportCandidate.createMany({ data: candidates });
     const nextVersion = params.expectedVersion + 1, stage = needsInput ? "NEEDS_INPUT" as const : "READY_FOR_REVIEW" as const;
+    const blockerCount = needsInput ? params.blockerCount : counts.conflictCount;
     const updated = await tx.financeImportBatch.updateMany({ where: { id: params.batchId, workspaceId: params.workspaceId, version: params.expectedVersion,
       stage: "MAPPING", workflowJobId: params.workflowJobId, agentRunId: params.agentRunId }, data: { stage, interpretationJson: interpretation as unknown as Prisma.InputJsonObject,
       reportType: interpretation.classification.reportType, basis: interpretation.classification.basis, cadence: interpretation.classification.cadence,
       periodStart: window.periodStart, periodEnd: window.periodEnd, currencyState: params.currency.state, resolvedCurrency,
-      currencyResolutionSource: params.currency.source, warningCount: params.warningCount, blockerCount: needsInput ? params.blockerCount : counts.conflictCount, ...counts,
+      currencyResolutionSource: params.currency.source, warningCount: params.warningCount, blockerCount, ...counts,
       safeErrorCode: params.blocker?.code ?? null, safeErrorMessage: params.blocker?.message ?? null, version: { increment: 1 } } });
     invariant(updated.count === 1, 409, "FINANCE_REPORT_PROPOSAL_CONFLICT", "The Finance report import changed. Please retry.");
     await tx.event.create({ data: { workspaceId: params.workspaceId, type: "finance-report-import.proposed", aggregateType: "FinanceImportBatch",
-      aggregateId: params.batchId, payload: { batchId: params.batchId, version: nextVersion, stage, candidateCount: candidates.length } } });
+      aggregateId: params.batchId, payload: { batchId: params.batchId, version: nextVersion, stage, candidateCount: candidates.length, blockerCount, ...counts } } });
     await tx.auditLog.create({ data: { workspaceId: params.workspaceId, action: "finance-report-import.proposed", entityType: "FinanceImportBatch",
-      entityId: params.batchId, meta: { stage, candidateCount: candidates.length, warningCount: params.warningCount, blockerCount: params.blockerCount } } });
+      entityId: params.batchId, meta: { stage, candidateCount: candidates.length, warningCount: params.warningCount, blockerCount, ...counts } } });
     return { batchId: params.batchId, version: nextVersion, stage, candidateCount: candidates.length };
   });
 }

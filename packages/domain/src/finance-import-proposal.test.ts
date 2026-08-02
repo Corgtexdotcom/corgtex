@@ -54,6 +54,14 @@ describe("Finance import proposal persistence", () => {
       semanticKey: expect.stringMatching(/^[a-f0-9]{64}$/), amountCents: 10_000, periodStart: new Date("2026-01-01T00:00:00.000Z") });
     expect(prismaMock.financeImportBatch.updateMany).toHaveBeenCalledWith(expect.objectContaining({ where: expect.objectContaining({ version: 4, agentRunId: "run-1" }),
       data: expect.objectContaining({ stage: "READY_FOR_REVIEW", resolvedCurrency: "EUR", interpretationJson: interpretation, addCount: 1 }) }));
+    expect(prismaMock.auditLog.create).toHaveBeenLastCalledWith(expect.objectContaining({ data: expect.objectContaining({
+      meta: expect.objectContaining({ blockerCount: 0, addCount: 1, conflictCount: 0 }) }) }));
+    const conflict = { ...candidate, sourceKey: "b".repeat(64), amountCents: 20_000 };
+    await persistFinanceReportImportProposal({ workspaceId: "ws-1", batchId: "batch-1", workflowJobId: "job-1", agentRunId: "run-1",
+      expectedVersion: 4, interpretation, currency: { state: "RESOLVED", code: "EUR", source: "WORKSPACE_SINGLE_CURRENCY" },
+      periodStart: "2026-01-01", periodEnd: "2026-01-31", candidates: [candidate, conflict], warningCount: 0, blockerCount: 0 });
+    expect(prismaMock.auditLog.create).toHaveBeenLastCalledWith(expect.objectContaining({ data: expect.objectContaining({
+      meta: expect.objectContaining({ blockerCount: 2, conflictCount: 2 }) }) }));
   });
   it("retains currency-only candidates but creates none for structural blockers, then records failures safely", async () => {
     const { persistFinanceReportImportProposal, failFinanceReportImportProposal } = await import("./finance-import-proposal");

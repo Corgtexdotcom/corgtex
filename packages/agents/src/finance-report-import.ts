@@ -164,7 +164,10 @@ function candidateDrafts(proposal: FinanceReportImportProposalV1) {
     return { sourceKey: createHash("sha256").update(mapping.sourceKey).digest("hex"), sourceLocation: source, sourceLabel: accountPath.at(-1)!,
       sourcePath: accountPath, proposedAccountPath: accountPath, factKind: mapping.factKind, periodStart: period.periodStart, periodEnd: period.periodEnd,
       amountCents: mapping.amountCents!, extractionJson: { claimId: claim.id, sourceKey: mapping.sourceKey, source },
-      proposalJson: { version: 1, mappingId: mapping.id, periodId: mapping.periodId, hierarchyId: mapping.hierarchyId, confidence: mapping.confidence },
+      proposalJson: { version: 1, mappingId: mapping.id, periodId: mapping.periodId, hierarchyId: mapping.hierarchyId, confidence: mapping.confidence,
+        numericFormat: proposal.numericFormat.status === "RESOLVED" ? { version: proposal.numericFormat.version,
+          decimalSeparator: proposal.numericFormat.decimalSeparator, groupingSeparator: proposal.numericFormat.groupingSeparator,
+          amountScale: proposal.numericFormat.amountScale } : null },
       confidenceBps: Math.round(mapping.confidence * 10_000), evidenceMd: location };
   });
 }

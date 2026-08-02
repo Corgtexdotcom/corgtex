@@ -15,13 +15,15 @@ import { buildFinanceReportFactSemanticKey, reconcileFinanceImportCandidates, re
 
 const actor: AppActor = { kind: "user", user: { id: "writer-1", email: "writer@example.com", displayName: "Writer", globalRole: "USER" } };
 const start = new Date("2026-01-01T00:00:00.000Z"), end = new Date("2026-01-31T00:00:00.000Z");
-const base = { proposedAccountPath: ["Revenue"], factKind: "LEAF" as const, periodStart: start, periodEnd: end, amountCents: 10_000, dimensions: null };
+const storedNumericFormat = { version: 1, decimalSeparator: "DOT", groupingSeparator: "NONE", amountScale: 1_000 } as const;
+const base = { proposedAccountPath: ["Revenue"], factKind: "LEAF" as const, periodStart: start, periodEnd: end, amountCents: 10_000,
+  dimensions: null, proposalJson: { numericFormat: storedNumericFormat } };
 const candidate = (sourceKey: string, overrides = {}) => ({ id: `candidate-${sourceKey}`, version: 1, sourceKey, ...base, ...overrides });
 const identity = { workspaceId: "workspace-1", reportType: "PROFIT_AND_LOSS" as const, basis: "ACCRUAL" as const, currency: "EUR" };
 const textClaim = (id: string) => ({ id, role: "TEXT" as const, source: { kind: "CELL" as const, sheet: "Report", row: 1, column: 1, evidence: id } });
 const interpretation = { version: 1, classification: { reportType: "PROFIT_AND_LOSS", basis: "ACCRUAL", cadence: "MONTHLY",
   reportTypeEvidenceClaimIds: ["type"], basisEvidenceClaimIds: ["basis"], cadenceEvidenceClaimIds: ["cadence"], confidence: 1 },
-numericFormat: { status: "RESOLVED", version: 1, decimalSeparator: "DOT", groupingSeparator: "NONE", amountScale: 1_000,
+numericFormat: { status: "RESOLVED", ...storedNumericFormat,
   decimalSeparatorEvidenceClaimIds: [], groupingSeparatorEvidenceClaimIds: [], amountScaleEvidenceClaimIds: ["scale"], confidence: 1 },
 evidenceClaims: ["type", "basis", "cadence", "scale"].map(textClaim), exceptions: [] };
 
@@ -45,6 +47,8 @@ describe("Finance report reconciliation", () => {
       dimensions: { region: "EU", channel: { direct: true, rank: 1 } }, ...change }));
     expect(new Set([key, ...variants])).toHaveLength(5);
     expect(key).toMatch(/^[a-f0-9]{64}$/);
+    expect(() => buildFinanceReportFactSemanticKey({ ...identity, currency: "ZZZ", accountPath: ["Revenue"], periodStart: start, periodEnd: end }))
+      .toThrow("ISO 4217");
   });
 
   it("classifies exact add, restatement, unchanged, duplicate, conflict, derived, and invalid identities", () => {
@@ -68,8 +72,8 @@ describe("Finance report reconciliation", () => {
   });
 
   it("reruns every candidate under human access, exact versions, currency, and scale without canonical writes", async () => {
-    const row = candidate("a"), batch = { id: "batch-1", workspaceId: "workspace-1", version: 5, stage: "NEEDS_INPUT", reportType: "PROFIT_AND_LOSS",
-      basis: "ACCRUAL", interpretationJson: interpretation, candidates: [row] };
+    const row = candidate("a"), batch = { id: "batch-1", workspaceId: "workspace-1", version: 5, stage: "NEEDS_INPUT", reportType: "BALANCE_SHEET",
+      basis: "CASH", interpretationJson: interpretation, candidates: [row] };
     mocks.prisma.financeImportBatch.findUnique.mockResolvedValue(batch);
     await expect(rerunFinanceReportImportReconciliation(actor, { workspaceId: "workspace-1", batchId: "batch-1", expectedVersion: 5,
       candidateVersions: [{ id: row.id, expectedVersion: 1 }], confirmedCurrency: " eur ", confirmedAmountScale: 1_000 }))
@@ -79,6 +83,8 @@ describe("Finance report reconciliation", () => {
       data: expect.objectContaining({ action: "ADD", reviewState: "PROPOSED", approvedByUserId: null, version: { increment: 1 } }) }));
     expect(mocks.prisma.financeImportBatch.updateMany).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ resolvedCurrency: "EUR",
       currencyResolutionSource: "USER_CONFIRMED", currencyConfirmedByUserId: "writer-1", stage: "READY_FOR_REVIEW", addCount: 1 }) }));
+    expect(mocks.prisma.financeImportBatch.updateMany).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({
+      reportType: "PROFIT_AND_LOSS", basis: "ACCRUAL", cadence: "MONTHLY" }) }));
     expect([mocks.prisma.financeReport.create, mocks.prisma.financeReport.update, mocks.prisma.financeReportFact.create,
       mocks.prisma.financeReportFact.update, mocks.prisma.financeImportApplication.create, mocks.prisma.financeTransaction.create]
       .every((write) => write.mock.calls.length === 0)).toBe(true);
@@ -98,8 +104,18 @@ describe("Finance report reconciliation", () => {
     await expect(run({}, { expectedVersion: 4 })).rejects.toMatchObject({ code: "FINANCE_REPORT_RECONCILIATION_CONFLICT" });
     await expect(run({}, { candidateVersions: [{ id: row.id, expectedVersion: 2 }] })).rejects.toMatchObject({ code: "FINANCE_REPORT_RECONCILIATION_CONFLICT" });
     await expect(run({}, { confirmedAmountScale: 1 })).rejects.toMatchObject({ code: "FINANCE_REPORT_CLARIFICATION_REQUIRED" });
+    await expect(run({ candidates: [candidate("a", { proposalJson: { numericFormat: { ...storedNumericFormat, groupingSeparator: "COMMA" } } })] }))
+      .rejects.toMatchObject({ code: "FINANCE_REPORT_CLARIFICATION_REQUIRED" });
     await expect(run({}, { confirmedCurrency: "" })).rejects.toMatchObject({ code: "INVALID_INPUT" });
     expect(mocks.prisma.financeImportCandidate.updateMany).not.toHaveBeenCalled();
+  });
+
+  it("rejects a shape-valid non-ISO confirmation before starting a write transaction", async () => {
+    await expect(rerunFinanceReportImportReconciliation(actor, { workspaceId: "workspace-1", batchId: "batch-1", expectedVersion: 5,
+      candidateVersions: [], confirmedCurrency: "ZZZ", confirmedAmountScale: 1_000 })).rejects.toMatchObject({ code: "INVALID_INPUT" });
+    expect(mocks.prisma.$transaction).not.toHaveBeenCalled();
+    expect(mocks.prisma.financeImportCandidate.updateMany).not.toHaveBeenCalled();
+    expect(mocks.prisma.financeImportBatch.updateMany).not.toHaveBeenCalled();
   });
 
   it("stops the transaction before the batch transition when a candidate version loses the race", async () => {

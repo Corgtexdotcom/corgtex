@@ -5,10 +5,10 @@ import type { FinanceAccountingBasis, FinanceImportCandidateAction, FinanceImpor
 import { invariant } from "./errors";
 import { requireFinanceReportImportHumanWriteAccess } from "./finance";
 import { parseFinanceImportInterpretationV1 } from "./finance-import-interpretation";
-import { normalizeFinanceImportCurrency } from "./finance-imports";
+import { normalizeFinanceImportIsoCurrency } from "./finance-imports";
 
 type Candidate = { id?: string; sourceKey: string; version?: number; proposedAccountPath: string[]; factKind: "LEAF" | "DERIVED";
-  periodStart: Date; periodEnd: Date; amountCents: number; dimensions?: Prisma.JsonValue | null };
+  periodStart: Date; periodEnd: Date; amountCents: number; dimensions?: Prisma.JsonValue | null; proposalJson?: unknown };
 type CurrentFact = { id: string; semanticKey: string; kind: "LEAF" | "DERIVED"; amountCents: number };
 export type FinanceImportReconciliationDecision = { candidate: Candidate; semanticKey: string | null; action: FinanceImportCandidateAction;
   reviewState: FinanceImportCandidateReviewState; currentFactId: string | null; currentAmountCents: number | null; explanationMd: string | null };
@@ -33,7 +33,7 @@ function dateOnly(value: Date) {
 export function buildFinanceReportFactSemanticKey(params: { workspaceId: string; reportType: FinanceReportType;
   basis: FinanceAccountingBasis; currency: string; accountPath: string[]; periodStart: Date; periodEnd: Date; dimensions?: Prisma.JsonValue | null }) {
   const identity = ["finance-report-fact/v1", params.workspaceId.trim(), params.reportType, params.basis,
-    normalizeFinanceImportCurrency(params.currency), normalizedPath(params.accountPath), dateOnly(params.periodStart), dateOnly(params.periodEnd),
+    normalizeFinanceImportIsoCurrency(params.currency), normalizedPath(params.accountPath), dateOnly(params.periodStart), dateOnly(params.periodEnd),
     canonicalJson(params.dimensions ?? null)];
   invariant(identity[1], 400, "INVALID_FINANCE_IMPORT_IDENTITY", "Finance report workspace is required.");
   return createHash("sha256").update(JSON.stringify(identity)).digest("hex");
@@ -83,7 +83,7 @@ export async function rerunFinanceReportImportReconciliation(actor: AppActor, pa
   expectedVersion: number; candidateVersions: Array<{ id: string; expectedVersion: number }>; confirmedCurrency: string; confirmedAmountScale: number }) {
   await requireFinanceReportImportHumanWriteAccess(actor, params.workspaceId);
   invariant(actor.kind === "user", 403, "HUMAN_REVIEW_REQUIRED", "A human Finance writer is required.");
-  const currency = normalizeFinanceImportCurrency(params.confirmedCurrency);
+  const currency = normalizeFinanceImportIsoCurrency(params.confirmedCurrency, "Confirmed currency");
   return prisma.$transaction(async (tx) => {
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`finance-report-import:${params.workspaceId}:${params.batchId}`}, 0))`;
     const batch = await tx.financeImportBatch.findUnique({ where: { id_workspaceId: { id: params.batchId, workspaceId: params.workspaceId } }, include: { candidates: true } });
@@ -91,14 +91,20 @@ export async function rerunFinanceReportImportReconciliation(actor: AppActor, pa
     invariant(batch.version === params.expectedVersion && ["RECONCILING", "READY_FOR_REVIEW", "NEEDS_INPUT"].includes(batch.stage),
       409, "FINANCE_REPORT_RECONCILIATION_CONFLICT", "The Finance report import changed. Refresh and try again.");
     const interpretation = parseFinanceImportInterpretationV1(batch.interpretationJson);
-    invariant(interpretation.numericFormat.status === "RESOLVED" && interpretation.numericFormat.amountScale === params.confirmedAmountScale
-      && !interpretation.exceptions.some(({ severity }) => severity === "BLOCKER") && batch.reportType && batch.basis && batch.candidates.length > 0,
+    const numericFormat = interpretation.numericFormat.status === "RESOLVED" ? { version: interpretation.numericFormat.version,
+      decimalSeparator: interpretation.numericFormat.decimalSeparator, groupingSeparator: interpretation.numericFormat.groupingSeparator,
+      amountScale: interpretation.numericFormat.amountScale } : null;
+    invariant(numericFormat && numericFormat.amountScale === params.confirmedAmountScale
+      && !interpretation.exceptions.some(({ severity }) => severity === "BLOCKER") && batch.candidates.length > 0
+      && batch.candidates.every(({ proposalJson }) => proposalJson && typeof proposalJson === "object" && !Array.isArray(proposalJson)
+        && canonicalJson((proposalJson as Record<string, Prisma.JsonValue>).numericFormat ?? null) === canonicalJson(numericFormat)),
     409, "FINANCE_REPORT_CLARIFICATION_REQUIRED", "Resolve the report structure, numeric format, scale, and candidate amounts before reconciliation.");
     const versions = new Map(params.candidateVersions.map(({ id, expectedVersion }) => [id, expectedVersion]));
     invariant(params.candidateVersions.length === batch.candidates.length && versions.size === batch.candidates.length
       && batch.candidates.every(({ id, version }) => versions.get(id) === version),
       409, "FINANCE_REPORT_RECONCILIATION_CONFLICT", "A Finance report candidate changed. Refresh and try again.");
-    const identity = { workspaceId: batch.workspaceId, reportType: batch.reportType!, basis: batch.basis!, currency };
+    const identity = { workspaceId: batch.workspaceId, reportType: interpretation.classification.reportType,
+      basis: interpretation.classification.basis, currency };
     const preliminary = reconcileFinanceImportCandidates({ ...identity, candidates: batch.candidates, currentFacts: [] });
     const keys = preliminary.decisions.flatMap(({ semanticKey }) => semanticKey ? [semanticKey] : []);
     const currentFacts = await tx.financeReportFact.findMany({ where: { workspaceId: batch.workspaceId, semanticKey: { in: keys } },
@@ -113,6 +119,7 @@ export async function rerunFinanceReportImportReconciliation(actor: AppActor, pa
     }
     const updated = await tx.financeImportBatch.updateMany({ where: { id: batch.id, workspaceId: batch.workspaceId, version: batch.version }, data: {
       stage: "READY_FOR_REVIEW", currencyState: "RESOLVED", resolvedCurrency: currency, currencyResolutionSource: "USER_CONFIRMED",
+      reportType: identity.reportType, basis: identity.basis, cadence: interpretation.classification.cadence,
       currencyConfirmedByUserId: actor.user.id, currencyConfirmedAt: new Date(), ...result.counts, blockerCount: result.counts.conflictCount,
       approvedByUserId: null, approvedAt: null, safeErrorCode: null, safeErrorMessage: null, version: { increment: 1 } } });
     invariant(updated.count === 1, 409, "FINANCE_REPORT_RECONCILIATION_CONFLICT", "The Finance report import changed. Refresh and try again.");
