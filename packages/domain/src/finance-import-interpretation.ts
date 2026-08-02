@@ -16,12 +16,20 @@ const boundedEvidenceText = z.string().max(2_000_000);
 const selectedEvidenceText = z.string().min(1).max(2_000_000).refine((value) => value.trim().length > 0, "Evidence text is required.");
 const splitsSurrogate = (value: string, offset: number) => offset > 0 && offset < value.length
   && /[\uD800-\uDBFF]/.test(value[offset - 1]!) && /[\uDC00-\uDFFF]/.test(value[offset]!);
-
-function isBoundedPlainJson(value: unknown, state = { nodes: 0, seen: new Set<object>() }): boolean {
-  if (++state.nodes > 50_000) return false;
-  if (value === null || typeof value === "string" || typeof value === "boolean") return true;
-  if (typeof value === "number") return Number.isFinite(value);
-  if (typeof value !== "object" || nodeTypes.isProxy(value)) return false;
+const jsonStringChars = (value: string) => {
+  let chars = 2;
+  for (let index = 0; index < value.length; index++) {
+    const code = value.charCodeAt(index);
+    if (code === 0 || (code >= 0xd800 && code <= 0xdbff && !(value.charCodeAt(index + 1) >= 0xdc00 && value.charCodeAt(index + 1) <= 0xdfff)) || (code >= 0xdc00 && code <= 0xdfff && !(value.charCodeAt(index - 1) >= 0xd800 && value.charCodeAt(index - 1) <= 0xdbff))) return Infinity;
+    chars += code === 34 || code === 92 ? 2 : code < 32 ? 6 : 1;
+  }
+  return chars;
+};
+function isBoundedPlainJson(value: unknown, state = { nodes: 0, chars: 0, seen: new Set<object>() }): boolean {
+  if (++state.nodes > 50_000 || state.chars > MAX_INTERPRETATION_JSON_CHARS) return false;
+  const primitiveChars = value === null ? 4 : typeof value === "string" ? jsonStringChars(value) : typeof value === "boolean" ? (value ? 4 : 5) : typeof value === "number" && Number.isFinite(value) ? String(value).length : null;
+  if (primitiveChars !== null) return (state.chars += primitiveChars) <= MAX_INTERPRETATION_JSON_CHARS;
+  if (value === null || typeof value !== "object" || nodeTypes.isProxy(value)) return false;
   const prototype = Object.getPrototypeOf(value);
   if (state.seen.has(value) || (!Array.isArray(value) && prototype !== Object.prototype && prototype !== null)) return false;
   if (Array.isArray(value) && prototype !== Array.prototype) return false;
@@ -31,15 +39,14 @@ function isBoundedPlainJson(value: unknown, state = { nodes: 0, seen: new Set<ob
   if (Array.isArray(value)) {
     const length = descriptors.length;
     const indices = keys.filter((key) => key !== "length");
-    if (!length || !("value" in length) || length.value > 50_000 || indices.length !== length.value) return false;
+    if (!length || !("value" in length) || length.value > 50_000 || indices.length !== length.value || (state.chars += length.value + 2) > MAX_INTERPRETATION_JSON_CHARS) return false;
     return indices.every((key, index) => typeof key === "string" && key === String(index)
       && descriptors[key]!.enumerable && "value" in descriptors[key]!
       && isBoundedPlainJson(descriptors[key]!.value, state));
   }
-  return keys.every((key) => typeof key === "string" && descriptors[key]!.enumerable
-    && "value" in descriptors[key]! && isBoundedPlainJson(descriptors[key]!.value, state));
+  return (state.chars += 2) <= MAX_INTERPRETATION_JSON_CHARS && keys.every((key) => typeof key === "string" && descriptors[key]!.enumerable
+    && "value" in descriptors[key]! && (state.chars += jsonStringChars(key) + 2) <= MAX_INTERPRETATION_JSON_CHARS && isBoundedPlainJson(descriptors[key]!.value, state));
 }
-
 const pdfSourceSchema = z.strictObject({
   kind: z.literal("PDF"),
   page: z.number().int().min(1).max(250),
@@ -159,13 +166,13 @@ export const financeImportInterpretationSchemaV1 = z.strictObject({
     ? [...value.numericFormat.decimalSeparatorEvidenceClaimIds, ...value.numericFormat.groupingSeparatorEvidenceClaimIds, ...value.numericFormat.amountScaleEvidenceClaimIds]
     : value.numericFormat.evidenceClaimIds;
   const exceptionIds = value.exceptions.flatMap(({ evidenceClaimIds }) => evidenceClaimIds);
-  const blockerCodes = new Set(value.exceptions.filter(({ severity }) => severity === "BLOCKER").map(({ code }) => code));
+  const exceptionSeverities = new Map(value.exceptions.map(({ code, severity }) => [code, severity]));
   const requiredBlockers = [
     [value.classification.reportType === "OTHER", "REPORT_TYPE_UNRESOLVED"], [value.classification.basis === "UNSPECIFIED", "BASIS_UNRESOLVED"],
     [value.classification.cadence === null, "CADENCE_UNRESOLVED"], [value.numericFormat.status === "UNRESOLVED", "NUMERIC_FORMAT_UNRESOLVED"],
     [value.classification.confidence === 0, "SEMANTIC_PROPOSAL_UNCERTAIN"],
   ] as const;
-  for (const [required, code] of requiredBlockers) if (required && !blockerCodes.has(code)) context.addIssue({ code: "custom", path: ["exceptions"], message: `${code} blocker is required.` });
+  for (const [required, code] of requiredBlockers) if (required !== exceptionSeverities.has(code) || (required && exceptionSeverities.get(code) !== "BLOCKER")) context.addIssue({ code: "custom", path: ["exceptions"], message: `${code} blocker must match interpretation state.` });
   const textIds = new Set([...classificationIds, ...numericIds]);
   const referencedIds = new Set([...textIds, ...exceptionIds]);
   const claims = new Map(value.evidenceClaims.map((claim) => [claim.id, claim]));
@@ -177,9 +184,6 @@ export const financeImportInterpretationSchemaV1 = z.strictObject({
   }
   if (value.evidenceClaims.some(({ id }) => !referencedIds.has(id))) {
     context.addIssue({ code: "custom", path: ["evidenceClaims"], message: "Unused evidence claims are not durable interpretation state." });
-  }
-  if (JSON.stringify(value).length > MAX_INTERPRETATION_JSON_CHARS) {
-    context.addIssue({ code: "custom", message: "Finance report interpretation exceeds the storage limit." });
   }
 });
 

@@ -93,6 +93,8 @@ describe("Finance import interpretation state", () => {
     { ...resolved, evidenceClaims: resolved.evidenceClaims.map((claim, index) => index === 0 ? { ...claim, source: { kind: "PDF", page: 1, lineIndex: 0, line: String.fromCharCode(0xd83d, 0xde00), start: 0, end: 1, text: String.fromCharCode(0xd83d) } } : claim) },
     { ...resolved, evidenceClaims: resolved.evidenceClaims.map((claim, index) => index === 0 ? { ...claim, source: { ...claim.source, evidence: "abc", start: 0, end: 99, text: "abc" } } : claim) },
     { ...resolved, evidenceClaims: resolved.evidenceClaims.map((claim, index) => index === 0 ? { ...claim, source: { ...claim.source, evidence: " " } } : claim) },
+    { ...resolved, evidenceClaims: resolved.evidenceClaims.map((claim) => ({ ...claim, source: { ...claim.source, evidence: `${claim.id}\u0000` } })) }, { ...resolved, evidenceClaims: resolved.evidenceClaims.map((claim) => ({ ...claim, source: { ...claim.source, evidence: String.fromCharCode(0xd800) } })) },
+    { ...resolved, evidenceClaims: resolved.evidenceClaims.map((claim) => ({ ...claim, source: { ...claim.source, evidence: "x".repeat(800_000) } })) }, { ...resolved, exceptions: [...resolved.exceptions, blocker("REPORT_TYPE_UNRESOLVED")] },
     { ...unresolved, exceptions: [] },
   ])("fails closed on invalid or expanded state %#", async (value) => {
     const { parseFinanceImportInterpretationV1 } = await import("./finance-import-interpretation");
