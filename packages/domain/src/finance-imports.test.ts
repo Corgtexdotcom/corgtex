@@ -3,6 +3,7 @@ import {
   buildFinanceImportApplicationIdempotencyKey,
   normalizeFinanceImportAmountCents,
   normalizeFinanceImportCurrency,
+  normalizeFinanceImportIsoCurrency,
   resolveFinanceImportCurrency,
   validateFinanceImportReportingWindow,
 } from "./finance-imports";
@@ -16,6 +17,8 @@ describe("Finance import safety primitives", () => {
     expect(() => normalizeFinanceImportCurrency("US$")).toThrow("three-letter code");
     expect(() => normalizeFinanceImportCurrency("ßd")).toThrow("three-letter code");
     expect(() => normalizeFinanceImportCurrency("uſd")).toThrow("three-letter code");
+    expect(normalizeFinanceImportIsoCurrency(" eur ")).toBe("EUR");
+    expect(() => normalizeFinanceImportIsoCurrency("ZZZ")).toThrow("ISO 4217");
   });
 
   it("prioritizes human confirmation, report evidence, then one workspace currency", () => {
