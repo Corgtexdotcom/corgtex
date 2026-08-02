@@ -25,8 +25,8 @@ const jsonStringChars = (value: string) => {
   }
   return chars;
 };
-function isBoundedPlainJson(value: unknown, state = { nodes: 0, chars: 0, seen: new Set<object>() }): boolean {
-  if (++state.nodes > 50_000 || state.chars > MAX_INTERPRETATION_JSON_CHARS) return false;
+function isBoundedPlainJson(value: unknown, state = { nodes: 0, chars: 0, seen: new Set<object>() }, depth = 0): boolean {
+  if (++state.nodes > 50_000 || depth > 100 || state.chars > MAX_INTERPRETATION_JSON_CHARS) return false;
   const primitiveChars = value === null ? 4 : typeof value === "string" ? jsonStringChars(value) : typeof value === "boolean" ? (value ? 4 : 5) : typeof value === "number" && Number.isFinite(value) ? String(value).length : null;
   if (primitiveChars !== null) return (state.chars += primitiveChars) <= MAX_INTERPRETATION_JSON_CHARS;
   if (value === null || typeof value !== "object" || nodeTypes.isProxy(value)) return false;
@@ -42,10 +42,10 @@ function isBoundedPlainJson(value: unknown, state = { nodes: 0, chars: 0, seen: 
     if (!length || !("value" in length) || length.value > 50_000 || indices.length !== length.value || (state.chars += length.value + 2) > MAX_INTERPRETATION_JSON_CHARS) return false;
     return indices.every((key, index) => typeof key === "string" && key === String(index)
       && descriptors[key]!.enumerable && "value" in descriptors[key]!
-      && isBoundedPlainJson(descriptors[key]!.value, state));
+      && isBoundedPlainJson(descriptors[key]!.value, state, depth + 1));
   }
-  return (state.chars += 2) <= MAX_INTERPRETATION_JSON_CHARS && keys.every((key) => typeof key === "string" && descriptors[key]!.enumerable
-    && "value" in descriptors[key]! && (state.chars += jsonStringChars(key) + 2) <= MAX_INTERPRETATION_JSON_CHARS && isBoundedPlainJson(descriptors[key]!.value, state));
+  return keys.length <= 50_000 && (state.chars += 2) <= MAX_INTERPRETATION_JSON_CHARS && keys.every((key) => typeof key === "string" && descriptors[key]!.enumerable
+    && "value" in descriptors[key]! && (state.chars += jsonStringChars(key) + 2) <= MAX_INTERPRETATION_JSON_CHARS && isBoundedPlainJson(descriptors[key]!.value, state, depth + 1));
 }
 const pdfSourceSchema = z.strictObject({
   kind: z.literal("PDF"),
@@ -202,7 +202,7 @@ export async function updateFinanceImportInterpretationV1(params: {
   expectedVersion: number;
   interpretation: unknown;
 }) {
-  const validId = (value: unknown) => typeof value === "string" && value.length <= 100 && value.trim() === value && value.length > 0;
+  const validId = (value: unknown) => typeof value === "string" && value.length <= 100 && value.trim() === value && value.length > 0 && Number.isFinite(jsonStringChars(value));
   invariant(validId(params.workspaceId), 400, "INVALID_INPUT", "Workspace is required.");
   invariant(validId(params.batchId), 400, "INVALID_INPUT", "Finance import batch is required.");
   invariant(Number.isInteger(params.expectedVersion) && params.expectedVersion > 0 && params.expectedVersion < PRISMA_INT_MAX, 400, "INVALID_INPUT", "An incrementable Finance import version is required.");

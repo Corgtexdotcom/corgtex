@@ -95,6 +95,7 @@ describe("Finance import interpretation state", () => {
     { ...resolved, evidenceClaims: resolved.evidenceClaims.map((claim, index) => index === 0 ? { ...claim, source: { ...claim.source, evidence: " " } } : claim) },
     { ...resolved, evidenceClaims: resolved.evidenceClaims.map((claim) => ({ ...claim, source: { ...claim.source, evidence: `${claim.id}\u0000` } })) }, { ...resolved, evidenceClaims: resolved.evidenceClaims.map((claim) => ({ ...claim, source: { ...claim.source, evidence: String.fromCharCode(0xd800) } })) },
     { ...resolved, evidenceClaims: resolved.evidenceClaims.map((claim) => ({ ...claim, source: { ...claim.source, evidence: "x".repeat(800_000) } })) }, { ...resolved, exceptions: [...resolved.exceptions, blocker("REPORT_TYPE_UNRESOLVED")] },
+    { ...resolved, nested: Array.from({ length: 200 }).reduce<Record<string, unknown>>((nested) => ({ nested }), {}) },
     { ...unresolved, exceptions: [] },
   ])("fails closed on invalid or expanded state %#", async (value) => {
     const { parseFinanceImportInterpretationV1 } = await import("./finance-import-interpretation");
@@ -145,10 +146,9 @@ describe("Finance import interpretation state", () => {
   });
 
   it.each([
-    { workspaceId: "", batchId: "batch-1", expectedVersion: 1 },
-    { workspaceId: "workspace-1", batchId: "", expectedVersion: 1 },
-    { workspaceId: " workspace-1", batchId: "batch-1", expectedVersion: 1 },
-    { workspaceId: "workspace-1", batchId: "batch-1 ", expectedVersion: 1 },
+    { workspaceId: "", batchId: "batch-1", expectedVersion: 1 }, { workspaceId: "workspace-1", batchId: "", expectedVersion: 1 },
+    { workspaceId: " workspace-1", batchId: "batch-1", expectedVersion: 1 }, { workspaceId: "workspace-1", batchId: "batch-1 ", expectedVersion: 1 },
+    { workspaceId: "workspace-1\u0000", batchId: "batch-1", expectedVersion: 1 },
     { workspaceId: "workspace-1", batchId: "batch-1", expectedVersion: 0 },
     { workspaceId: "workspace-1", batchId: "batch-1", expectedVersion: 2_147_483_647 },
   ])("rejects invalid write identity/version before touching storage %#", async (params) => {
