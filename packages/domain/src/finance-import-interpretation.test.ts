@@ -88,6 +88,9 @@ describe("Finance import interpretation state", () => {
     { ...resolved, evidenceClaims: resolved.evidenceClaims.map((claim, index) => index === 0 ? { ...claim, role: "AMOUNT" } : claim) },
     { ...resolved, evidenceClaims: resolved.evidenceClaims.map((claim, index) => index === 0 ? { ...claim, id: "basis" } : claim) },
     { ...resolved, evidenceClaims: resolved.evidenceClaims.map((claim, index) => index === 0 ? { ...claim, source: { ...claim.source, start: 0, end: 3, text: "wrong" } } : claim) },
+    { ...resolved, evidenceClaims: resolved.evidenceClaims.map((claim, index) => index === 0 ? { ...claim, source: { kind: "PDF", page: 1, lineIndex: 0, line: "abc", start: 0, end: 99, text: "abc" } } : claim) },
+    { ...resolved, evidenceClaims: resolved.evidenceClaims.map((claim, index) => index === 0 ? { ...claim, source: { ...claim.source, evidence: "abc", start: 0, end: 99, text: "abc" } } : claim) },
+    { ...resolved, evidenceClaims: resolved.evidenceClaims.map((claim, index) => index === 0 ? { ...claim, source: { ...claim.source, evidence: " " } } : claim) },
   ])("fails closed on invalid or expanded state %#", async (value) => {
     const { parseFinanceImportInterpretationV1 } = await import("./finance-import-interpretation");
     expect(() => parseFinanceImportInterpretationV1(value)).toThrow(expect.objectContaining({
