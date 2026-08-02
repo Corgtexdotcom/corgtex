@@ -4050,7 +4050,46 @@ async function terminalizeRecordingWithLock(
       },
     });
     return true;
-  });
+  }, { timeout: 120000 });
+}
+
+async function terminalizeStaleRecordingWithLock(
+  recording: { id: string; workspaceId: string; meetingId: string; provider: string; status: string }
+) {
+  return await prisma.$transaction(async (tx) => {
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`${recording.workspaceId}:${recording.meetingId}:${recording.provider}:transcript`}, 0))`;
+    const current = await tx.meetingRecording.findUnique({
+      where: { id: recording.id },
+      select: { transcriptProcessedAt: true, status: true },
+    });
+    if (!current || current.transcriptProcessedAt || current.status !== recording.status) {
+      return false;
+    }
+
+    await tx.meetingRecording.update({
+      where: { id: recording.id },
+      data: {
+        status: "FAILED",
+        activeDedupeKey: null,
+        failureCode: "STALE_RECORDER",
+        failureMessage: "Recorder did not complete before the reconciliation timeout.",
+        endedAt: new Date(),
+      },
+    });
+
+    await tx.meetingRecorderSmokeRun.updateMany({
+      where: {
+        recordingId: recording.id,
+        status: { in: ["PENDING", "SCHEDULED"] },
+      },
+      data: {
+        status: "FAILED",
+        failureMessage: "Recorder did not complete before the reconciliation timeout.",
+        completedAt: new Date(),
+      },
+    });
+    return true;
+  }, { timeout: 120000 });
 }
 
 async function recoverRecallTranscripts(workspaceId: string) {
@@ -4278,27 +4317,7 @@ export async function reconcileMeetingRecorders(workspaceId: string) {
         });
       }
     }
-    await prisma.meetingRecording.update({
-      where: { id: recording.id },
-      data: {
-        status: "FAILED",
-        activeDedupeKey: null,
-        failureCode: "STALE_RECORDER",
-        failureMessage: "Recorder did not complete before the reconciliation timeout.",
-        endedAt: new Date(),
-      },
-    });
-    await prisma.meetingRecorderSmokeRun.updateMany({
-      where: {
-        recordingId: recording.id,
-        status: { in: ["PENDING", "SCHEDULED"] },
-      },
-      data: {
-        status: "FAILED",
-        failureMessage: "Recorder did not complete before the reconciliation timeout.",
-        completedAt: new Date(),
-      },
-    });
+    await terminalizeStaleRecordingWithLock(recording);
     staleFailed += 1;
     recorderLog("warn", "reconcile_stale_failed", {
       workspaceId,
