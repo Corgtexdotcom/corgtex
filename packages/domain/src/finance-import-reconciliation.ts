@@ -32,6 +32,7 @@ function dateOnly(value: Date) {
 
 export function buildFinanceReportFactSemanticKey(params: { workspaceId: string; reportType: FinanceReportType;
   basis: FinanceAccountingBasis; currency: string; accountPath: string[]; periodStart: Date; periodEnd: Date; dimensions?: Prisma.JsonValue | null }) {
+  invariant(params.periodStart <= params.periodEnd, 400, "INVALID_FINANCE_IMPORT_IDENTITY", "Finance report period is reversed.");
   const identity = ["finance-report-fact/v1", params.workspaceId.trim(), params.reportType, params.basis,
     normalizeFinanceImportIsoCurrency(params.currency), normalizedPath(params.accountPath), dateOnly(params.periodStart), dateOnly(params.periodEnd),
     canonicalJson(params.dimensions ?? null)];
@@ -91,8 +92,8 @@ export async function rerunFinanceReportImportReconciliation(actor: AppActor, pa
     invariant(batch.version === params.expectedVersion && ["RECONCILING", "READY_FOR_REVIEW", "NEEDS_INPUT"].includes(batch.stage),
       409, "FINANCE_REPORT_RECONCILIATION_CONFLICT", "The Finance report import changed. Refresh and try again.");
     const interpretation = parseFinanceImportInterpretationV1(batch.interpretationJson);
-    const numericFormat = interpretation.numericFormat.status === "RESOLVED" ? { version: interpretation.numericFormat.version,
-      decimalSeparator: interpretation.numericFormat.decimalSeparator, groupingSeparator: interpretation.numericFormat.groupingSeparator,
+    const numericFormat = interpretation.numericFormat.status === "RESOLVED" ? { version: interpretation.numericFormat.version, decimalSeparator: interpretation.numericFormat.decimalSeparator,
+      groupingSeparator: interpretation.numericFormat.groupingSeparator,
       amountScale: interpretation.numericFormat.amountScale } : null;
     invariant(numericFormat && numericFormat.amountScale === params.confirmedAmountScale
       && !interpretation.exceptions.some(({ severity }) => severity === "BLOCKER") && batch.candidates.length > 0
@@ -105,6 +106,7 @@ export async function rerunFinanceReportImportReconciliation(actor: AppActor, pa
       409, "FINANCE_REPORT_RECONCILIATION_CONFLICT", "A Finance report candidate changed. Refresh and try again.");
     const identity = { workspaceId: batch.workspaceId, reportType: interpretation.classification.reportType,
       basis: interpretation.classification.basis, currency };
+    const reportingDates = batch.candidates.flatMap(({ periodStart, periodEnd }) => [periodStart, periodEnd]).map((date) => date.valueOf());
     const preliminary = reconcileFinanceImportCandidates({ ...identity, candidates: batch.candidates, currentFacts: [] });
     const keys = preliminary.decisions.flatMap(({ semanticKey }) => semanticKey ? [semanticKey] : []);
     const currentFacts = await tx.financeReportFact.findMany({ where: { workspaceId: batch.workspaceId, semanticKey: { in: keys } },
@@ -120,6 +122,8 @@ export async function rerunFinanceReportImportReconciliation(actor: AppActor, pa
     const updated = await tx.financeImportBatch.updateMany({ where: { id: batch.id, workspaceId: batch.workspaceId, version: batch.version }, data: {
       stage: "READY_FOR_REVIEW", currencyState: "RESOLVED", resolvedCurrency: currency, currencyResolutionSource: "USER_CONFIRMED",
       reportType: identity.reportType, basis: identity.basis, cadence: interpretation.classification.cadence,
+      periodStart: new Date(Math.min(...reportingDates)), periodEnd: new Date(Math.max(...reportingDates)),
+      warningCount: interpretation.exceptions.filter(({ severity }) => severity === "WARNING").length,
       currencyConfirmedByUserId: actor.user.id, currencyConfirmedAt: new Date(), ...result.counts, blockerCount: result.counts.conflictCount,
       approvedByUserId: null, approvedAt: null, safeErrorCode: null, safeErrorMessage: null, version: { increment: 1 } } });
     invariant(updated.count === 1, 409, "FINANCE_REPORT_RECONCILIATION_CONFLICT", "The Finance report import changed. Refresh and try again.");

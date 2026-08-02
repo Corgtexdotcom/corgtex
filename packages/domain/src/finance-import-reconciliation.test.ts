@@ -49,6 +49,7 @@ describe("Finance report reconciliation", () => {
     expect(key).toMatch(/^[a-f0-9]{64}$/);
     expect(() => buildFinanceReportFactSemanticKey({ ...identity, currency: "ZZZ", accountPath: ["Revenue"], periodStart: start, periodEnd: end }))
       .toThrow("ISO 4217");
+    expect(() => buildFinanceReportFactSemanticKey({ ...identity, accountPath: ["Revenue"], periodStart: end, periodEnd: start })).toThrow("reversed");
   });
 
   it("classifies exact add, restatement, unchanged, duplicate, conflict, derived, and invalid identities", () => {
@@ -59,21 +60,22 @@ describe("Finance report reconciliation", () => {
     const keys = [update, unchanged].map((item) => buildFinanceReportFactSemanticKey({ ...identity, accountPath: item.proposedAccountPath,
       periodStart: item.periodStart, periodEnd: item.periodEnd, dimensions: item.dimensions }));
     const result = reconcileFinanceImportCandidates({ ...identity, candidates: [candidate("a"), update, unchanged, duplicateB, duplicateA, conflictA,
-      conflictB, candidate("h", { factKind: "DERIVED" }), candidate("i", { proposedAccountPath: [" "] })], currentFacts: [
+      conflictB, candidate("h", { factKind: "DERIVED" }), candidate("i", { proposedAccountPath: [" "] }), candidate("j", { periodStart: end, periodEnd: start })], currentFacts: [
       { id: "fact-update", semanticKey: keys[0]!, kind: "LEAF", amountCents: 50 },
       { id: "fact-same", semanticKey: keys[1]!, kind: "LEAF", amountCents: -2147483648 },
     ] });
     const actions = Object.fromEntries(result.decisions.map(({ candidate: item, action }) => [item.sourceKey, action]));
-    expect(actions).toEqual({ a: "ADD", b: "UPDATE", c: "UNCHANGED", d: "ADD", e: "DUPLICATE", f: "CONFLICT", g: "CONFLICT", h: "SKIP", i: "CONFLICT" });
-    expect(result.counts).toEqual({ addCount: 2, updateCount: 1, unchangedCount: 1, duplicateCount: 1, conflictCount: 3, skippedCount: 1 });
+    expect(actions).toEqual({ a: "ADD", b: "UPDATE", c: "UNCHANGED", d: "ADD", e: "DUPLICATE", f: "CONFLICT", g: "CONFLICT", h: "SKIP", i: "CONFLICT", j: "CONFLICT" });
+    expect(result.counts).toEqual({ addCount: 2, updateCount: 1, unchangedCount: 1, duplicateCount: 1, conflictCount: 4, skippedCount: 1 });
     expect(result.decisions.find(({ candidate: item }) => item.sourceKey === "b")).toMatchObject({ currentFactId: "fact-update", currentAmountCents: 50,
       reviewState: "PROPOSED", explanationMd: "Restatement from 50 to 2147483647 cents." });
     expect(result.decisions.filter(({ action }) => action === "CONFLICT").every(({ reviewState }) => reviewState === "BLOCKED")).toBe(true);
   });
 
   it("reruns every candidate under human access, exact versions, currency, and scale without canonical writes", async () => {
-    const row = candidate("a"), batch = { id: "batch-1", workspaceId: "workspace-1", version: 5, stage: "NEEDS_INPUT", reportType: "BALANCE_SHEET",
-      basis: "CASH", interpretationJson: interpretation, candidates: [row] };
+    const row = candidate("a", { periodStart: new Date("2025-12-01T00:00:00.000Z"), periodEnd: new Date("2026-02-28T00:00:00.000Z") });
+    const batch = { id: "batch-1", workspaceId: "workspace-1", version: 5, stage: "NEEDS_INPUT", reportType: "BALANCE_SHEET", basis: "CASH",
+      interpretationJson: { ...interpretation, exceptions: [{ code: "REVIEW_NOTE", severity: "WARNING", message: "Review.", evidenceClaimIds: ["type"] }] }, candidates: [row] };
     mocks.prisma.financeImportBatch.findUnique.mockResolvedValue(batch);
     await expect(rerunFinanceReportImportReconciliation(actor, { workspaceId: "workspace-1", batchId: "batch-1", expectedVersion: 5,
       candidateVersions: [{ id: row.id, expectedVersion: 1 }], confirmedCurrency: " eur ", confirmedAmountScale: 1_000 }))
@@ -84,7 +86,8 @@ describe("Finance report reconciliation", () => {
     expect(mocks.prisma.financeImportBatch.updateMany).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ resolvedCurrency: "EUR",
       currencyResolutionSource: "USER_CONFIRMED", currencyConfirmedByUserId: "writer-1", stage: "READY_FOR_REVIEW", addCount: 1 }) }));
     expect(mocks.prisma.financeImportBatch.updateMany).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({
-      reportType: "PROFIT_AND_LOSS", basis: "ACCRUAL", cadence: "MONTHLY" }) }));
+      reportType: "PROFIT_AND_LOSS", basis: "ACCRUAL", cadence: "MONTHLY", warningCount: 1,
+      periodStart: new Date("2025-12-01T00:00:00.000Z"), periodEnd: new Date("2026-02-28T00:00:00.000Z") }) }));
     expect([mocks.prisma.financeReport.create, mocks.prisma.financeReport.update, mocks.prisma.financeReportFact.create,
       mocks.prisma.financeReportFact.update, mocks.prisma.financeImportApplication.create, mocks.prisma.financeTransaction.create]
       .every((write) => write.mock.calls.length === 0)).toBe(true);
