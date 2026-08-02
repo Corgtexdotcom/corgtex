@@ -99,17 +99,17 @@ export async function editFinanceReportImportCandidate(actor: AppActor, params: 
     const rows = batch.candidates.filter(({ reviewState }) => reviewState !== "REJECTED").map((candidate) => candidate.id === edited.id ? edited : candidate);
     const identity = { workspaceId: batch.workspaceId, reportType: batch.reportType, basis: batch.basis, currency: batch.resolvedCurrency };
     const result = await reconcile(tx, identity, rows);
-    const now = new Date(); let warningCount = 0; const rejectedCount = batch.candidates.filter(({ reviewState }) => reviewState === "REJECTED").length;
-    for (const decision of result.decisions) {
-      const prior = batch.candidates.find(({ id }) => id === decision.candidate.id)!;
-      const state = candidateState(decision, now);
-      if (state === "WARNING") warningCount += 1;
-      const updated = await tx.financeImportCandidate.updateMany({ where: { id: prior.id, workspaceId: batch.workspaceId, batchId: batch.id, version: prior.version }, data: {
-        ...(prior.id === edited.id ? { proposedAccountPath: edited.proposedAccountPath, amountCents: edited.amountCents, periodStart: edited.periodStart,
-          periodEnd: edited.periodEnd, editedByUserId: actor.user.id, editedAt: now } : {}), semanticKey: decision.semanticKey, action: decision.action,
-        reviewState: state, currentFactId: decision.currentFactId, currentAmountCents: decision.currentAmountCents, explanationMd: decision.explanationMd,
-        approvedByUserId: null, approvedAt: null, version: { increment: 1 } } });
-      invariant(updated.count === 1, 409, "FINANCE_REPORT_REVIEW_CONFLICT", "A Finance report candidate changed. Refresh and try again.");
+    const now = new Date(); const warningCount = result.decisions.filter((decision) => candidateState(decision, now) === "WARNING").length; const rejectedCount = batch.candidates.filter(({ reviewState }) => reviewState === "REJECTED").length;
+    const editedDecision = result.decisions.find(({ candidate }) => candidate.id === edited.id)!; const affectedKeys = new Set([target.semanticKey, editedDecision.semanticKey]);
+    const affected = result.decisions.filter((decision) => decision.candidate.id === edited.id || (decision.semanticKey && affectedKeys.has(decision.semanticKey)));
+    const signature = (decision: FinanceImportReconciliationDecision) => JSON.stringify([decision.candidate.id === edited.id ? edited.id : null, decision.semanticKey, decision.action, candidateState(decision, now), decision.currentFactId, decision.currentAmountCents, decision.explanationMd]);
+    for (const key of new Set(affected.map(signature))) {
+      const decisions = affected.filter((decision) => signature(decision) === key); const decision = decisions[0]!; const state = candidateState(decision, now);
+      const priors = decisions.map(({ candidate }) => batch.candidates.find(({ id }) => id === candidate.id)!);
+      const updated = await tx.financeImportCandidate.updateMany({ where: { workspaceId: batch.workspaceId, batchId: batch.id, OR: priors.map(({ id, version }) => ({ id, version })) }, data: {
+        ...(decision.candidate.id === edited.id ? { proposedAccountPath: edited.proposedAccountPath, amountCents: edited.amountCents, periodStart: edited.periodStart, periodEnd: edited.periodEnd, editedByUserId: actor.user.id, editedAt: now } : {}),
+        semanticKey: decision.semanticKey, action: decision.action, reviewState: state, currentFactId: decision.currentFactId, currentAmountCents: decision.currentAmountCents, explanationMd: decision.explanationMd, approvedByUserId: null, approvedAt: null, version: { increment: 1 } } });
+      invariant(updated.count === priors.length, 409, "FINANCE_REPORT_REVIEW_CONFLICT", "A Finance report candidate changed. Refresh and try again.");
     }
     const baseWarnings = reportWarnings(batch.interpretationJson).filter(({ code }) => !code.startsWith("HISTORICAL_")).length;
     const reportingDates = rows.flatMap(({ periodStart, periodEnd }) => [periodStart.valueOf(), periodEnd.valueOf()]);
@@ -146,7 +146,7 @@ export async function reviewFinanceReportImport(actor: AppActor, params: { works
     }
     invariant(scope.every(({ reviewState }) => reviewState !== "APPLIED"), 409, "FINANCE_REPORT_REVIEW_BLOCKED", "Applied candidates cannot be reviewed again.");
     invariant(bulk || scope.every(({ reviewState }) => reviewState !== "REJECTED"), 409, "FINANCE_REPORT_REVIEW_BLOCKED", "Rejected candidates cannot be reviewed again.");
-    const targets = scope.filter((candidate) => candidate.reviewState !== "REJECTED" && (params.mode !== "APPROVE_VERIFIED"
+    const targets = scope.filter((candidate) => candidate.reviewState !== "REJECTED" && (!bulk || candidate.reviewState !== "APPROVED") && (params.mode !== "APPROVE_VERIFIED"
       || (!warning(candidate, now) && !["APPROVED", "BLOCKED"].includes(candidate.reviewState))));
     invariant(params.mode === "REJECT" || targets.every(({ reviewState }) => reviewState !== "BLOCKED"), 409, "FINANCE_REPORT_REVIEW_BLOCKED", "Structural blockers cannot be approved.");
     invariant(["REJECT", "APPROVE_VERIFIED"].includes(params.mode) || params.acceptWarnings === true || (batch.warningCount === 0 && targets.every((candidate) => !warning(candidate, now))),
