@@ -4000,7 +4000,7 @@ function transcriptRecoveryIsPending(error: unknown) {
     return error.code === "RECORDER_TRANSCRIPT_NOT_READY";
   }
   if (error instanceof ProviderRequestError) {
-    return error.status === 404 || error.status === 409 || error.status === 425;
+    return error.status === 404 || RETRYABLE_VENDOR_STATUSES.has(error.status);
   }
   return false;
 }
@@ -4039,6 +4039,26 @@ async function recoverRecallTranscripts(workspaceId: string) {
         continue;
       }
 
+      const expectedEnd = recordingExpectedEnd(recording);
+      if (now.getTime() - expectedEnd.getTime() >= 24 * 60 * 60 * 1000) {
+        await prisma.meetingRecording.update({
+          where: { id: recording.id },
+          data: {
+            status: "FAILED",
+            failureCode: "RECORDER_TRANSCRIPT_RECOVERY_EXPIRED",
+            failureMessage: "Transcript recovery expired after 24 hours.",
+            transcriptProcessedAt: new Date(),
+          },
+        });
+        recorderLog("warn", "reconcile_recall_transcript_expired", {
+          workspaceId,
+          meetingId: recording.meetingId,
+          recordingId: recording.id,
+          provider: recording.provider,
+        });
+        continue;
+      }
+
       try {
         const current = await findRecoverableRecallRecording(recording.id);
         if (!current || current.transcriptProcessedAt || !current.externalBotId) {
@@ -4051,14 +4071,17 @@ async function recoverRecallTranscripts(workspaceId: string) {
             continue;
           }
         } catch (error) {
-          recorderLog("warn", "recall_bot_status_fetch_failed", {
-            workspaceId,
-            meetingId: recording.meetingId,
-            recordingId: recording.id,
-            provider: recording.provider,
-            failureCode: providerFailureCode(error),
-          });
-          continue;
+          if (transcriptRecoveryIsPending(error)) {
+            recorderLog("warn", "recall_bot_status_fetch_failed", {
+              workspaceId,
+              meetingId: recording.meetingId,
+              recordingId: recording.id,
+              provider: recording.provider,
+              failureCode: providerFailureCode(error),
+            });
+            continue;
+          }
+          throw error;
         }
         const artifact = await fetchRecallTranscriptArtifact({ externalBotId: current.externalBotId });
         const latest = await findRecoverableRecallRecording(recording.id);
@@ -4090,6 +4113,15 @@ async function recoverRecallTranscripts(workspaceId: string) {
           });
           continue;
         }
+        await prisma.meetingRecording.update({
+          where: { id: recording.id },
+          data: {
+            status: "FAILED",
+            failureCode: "RECORDER_TRANSCRIPT_FETCH_FAILED",
+            failureMessage: "Non-retryable transcript fetch error.",
+            transcriptProcessedAt: new Date(),
+          },
+        });
         recorderLog("warn", "reconcile_recall_transcript_failed", {
           workspaceId,
           meetingId: recording.meetingId,
@@ -4190,7 +4222,6 @@ export async function reconcileMeetingRecorders(workspaceId: string) {
           provider: recording.provider,
           failureCode: providerFailureCode(error),
         });
-        continue;
       }
     }
     await prisma.meetingRecording.update({
@@ -4201,6 +4232,17 @@ export async function reconcileMeetingRecorders(workspaceId: string) {
         failureCode: "STALE_RECORDER",
         failureMessage: "Recorder did not complete before the reconciliation timeout.",
         endedAt: new Date(),
+      },
+    });
+    await prisma.meetingRecorderSmokeRun.updateMany({
+      where: {
+        recordingId: recording.id,
+        status: { in: ["PENDING", "SCHEDULED"] },
+      },
+      data: {
+        status: "FAILED",
+        failureMessage: "Recorder did not complete before the reconciliation timeout.",
+        completedAt: new Date(),
       },
     });
     staleFailed += 1;

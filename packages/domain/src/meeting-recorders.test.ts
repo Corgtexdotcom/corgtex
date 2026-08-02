@@ -146,6 +146,8 @@ function resetMockTree(value: unknown) {
 
 describe("meeting recorder domain", () => {
   beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-05-05T01:00:00.000Z"));
     resetMockTree(prismaMock);
     fetchMock.mockReset();
     global.fetch = fetchMock as unknown as typeof fetch;
@@ -604,6 +606,8 @@ describe("meeting recorder domain", () => {
         status: 200,
         json: async () => ({ value: [] }),
       });
+
+    vi.setSystemTime(new Date("2026-05-05T16:00:00.000Z"));
 
     await expect(syncRecorderCalendarSource({
       workspaceId: "workspace-1",
@@ -3999,6 +4003,161 @@ describe("meeting recorder domain", () => {
         status: "FAILED",
         failureMessage: "Provider transcript was empty.",
         completedAt: expect.any(Date),
+      }),
+    });
+  });
+  it("terminalizes successfully cancelled stale recordings and their smoke runs", async () => {
+    const { reconcileMeetingRecorders } = await import("./meeting-recorders");
+    const recording = {
+      id: "recording-1",
+      workspaceId: "workspace-1",
+      meetingId: "meeting-1",
+      provider: "RECALL_AI",
+      externalBotId: "recall-bot-1",
+      status: "RECORDING",
+      createdAt: new Date(Date.now() - 10 * 60 * 60 * 1000),
+      joinAt: new Date(Date.now() - 10 * 60 * 60 * 1000),
+      meeting: {
+        recordedAt: new Date(Date.now() - 10 * 60 * 60 * 1000),
+        scheduledEndAt: new Date(Date.now() - 9 * 60 * 60 * 1000),
+      },
+    };
+    prismaMock.meetingRecording.findMany.mockResolvedValueOnce([]).mockResolvedValueOnce([]).mockResolvedValueOnce([recording]);
+    prismaMock.meetingRecording.findUnique.mockResolvedValue({ transcriptProcessedAt: null, status: "RECORDING" });
+    fetchMock.mockResolvedValue(new Response("{}", { status: 200 }));
+
+    await reconcileMeetingRecorders("workspace-1");
+
+    expect(prismaMock.meetingRecording.update).toHaveBeenCalledWith({
+      where: { id: "recording-1" },
+      data: expect.objectContaining({
+        status: "FAILED",
+        failureCode: "STALE_RECORDER",
+        activeDedupeKey: null,
+      }),
+    });
+    expect(prismaMock.meetingRecorderSmokeRun.updateMany).toHaveBeenCalledWith({
+      where: expect.objectContaining({ recordingId: "recording-1" }),
+      data: expect.objectContaining({ status: "FAILED" }),
+    });
+  });
+
+  it("terminalizes failed cancellation stale recordings without retry", async () => {
+    const { reconcileMeetingRecorders } = await import("./meeting-recorders");
+    const recording = {
+      id: "recording-1",
+      workspaceId: "workspace-1",
+      meetingId: "meeting-1",
+      provider: "RECALL_AI",
+      externalBotId: "recall-bot-1",
+      status: "RECORDING",
+      createdAt: new Date(Date.now() - 10 * 60 * 60 * 1000),
+      joinAt: new Date(Date.now() - 10 * 60 * 60 * 1000),
+      meeting: {
+        recordedAt: new Date(Date.now() - 10 * 60 * 60 * 1000),
+        scheduledEndAt: new Date(Date.now() - 9 * 60 * 60 * 1000),
+      },
+    };
+    prismaMock.meetingRecording.findMany.mockResolvedValueOnce([]).mockResolvedValueOnce([]).mockResolvedValueOnce([recording]);
+    prismaMock.meetingRecording.findUnique.mockResolvedValue({ transcriptProcessedAt: null, status: "RECORDING" });
+    fetchMock.mockResolvedValue(new Response("Internal Server Error", { status: 500 }));
+
+    await reconcileMeetingRecorders("workspace-1");
+
+    expect(prismaMock.meetingRecording.update).toHaveBeenCalledWith({
+      where: { id: "recording-1" },
+      data: expect.objectContaining({
+        status: "FAILED",
+        failureCode: "STALE_RECORDER",
+      }),
+    });
+  });
+
+  it("retries transcript fetch for retryable errors inside 24h", async () => {
+    const { reconcileMeetingRecorders } = await import("./meeting-recorders");
+    const recording = {
+      id: "recording-1",
+      workspaceId: "workspace-1",
+      meetingId: "meeting-1",
+      provider: "RECALL_AI",
+      externalBotId: "recall-bot-1",
+      status: "COMPLETED",
+      createdAt: new Date(Date.now() - 2 * 60 * 60 * 1000),
+      joinAt: new Date(Date.now() - 2 * 60 * 60 * 1000),
+      meeting: {
+        recordedAt: new Date(Date.now() - 2 * 60 * 60 * 1000),
+        scheduledEndAt: new Date(Date.now() - 1 * 60 * 60 * 1000),
+      },
+    };
+    prismaMock.meetingRecording.findMany.mockResolvedValueOnce([recording]).mockResolvedValueOnce([]).mockResolvedValueOnce([]);
+    prismaMock.meetingRecording.findUnique.mockResolvedValue({ ...recording, transcriptProcessedAt: null });
+    fetchMock.mockResolvedValue(new Response("Not Found", { status: 404 }));
+
+    await reconcileMeetingRecorders("workspace-1");
+
+    expect(prismaMock.meetingRecording.update).not.toHaveBeenCalled();
+  });
+
+  it("marks transcript fetch as permanently failed for non-retryable errors", async () => {
+    const { reconcileMeetingRecorders } = await import("./meeting-recorders");
+    const recording = {
+      id: "recording-1",
+      workspaceId: "workspace-1",
+      meetingId: "meeting-1",
+      provider: "RECALL_AI",
+      externalBotId: "recall-bot-1",
+      status: "COMPLETED",
+      createdAt: new Date(Date.now() - 2 * 60 * 60 * 1000),
+      joinAt: new Date(Date.now() - 2 * 60 * 60 * 1000),
+      meeting: {
+        recordedAt: new Date(Date.now() - 2 * 60 * 60 * 1000),
+        scheduledEndAt: new Date(Date.now() - 1 * 60 * 60 * 1000),
+      },
+    };
+    prismaMock.meetingRecording.findMany.mockResolvedValueOnce([recording]).mockResolvedValueOnce([]).mockResolvedValueOnce([]);
+    prismaMock.meetingRecording.findUnique.mockResolvedValue({ ...recording, transcriptProcessedAt: null, status: "COMPLETED" });
+    fetchMock.mockResolvedValue(new Response("Forbidden", { status: 403 }));
+
+    await reconcileMeetingRecorders("workspace-1");
+
+    expect(prismaMock.meetingRecording.update).toHaveBeenCalledWith({
+      where: { id: "recording-1" },
+      data: expect.objectContaining({
+        status: "FAILED",
+        failureCode: "RECORDER_TRANSCRIPT_FETCH_FAILED",
+        transcriptProcessedAt: expect.any(Date),
+      }),
+    });
+  });
+
+  it("terminalizes expired transcript recovery without provider call", async () => {
+    const { reconcileMeetingRecorders } = await import("./meeting-recorders");
+    const recording = {
+      id: "recording-1",
+      workspaceId: "workspace-1",
+      meetingId: "meeting-1",
+      provider: "RECALL_AI",
+      externalBotId: "recall-bot-1",
+      status: "COMPLETED",
+      createdAt: new Date(Date.now() - 26 * 60 * 60 * 1000),
+      joinAt: new Date(Date.now() - 26 * 60 * 60 * 1000),
+      meeting: {
+        recordedAt: new Date(Date.now() - 26 * 60 * 60 * 1000),
+        scheduledEndAt: new Date(Date.now() - 25 * 60 * 60 * 1000),
+      },
+    };
+    prismaMock.meetingRecording.findMany.mockResolvedValueOnce([recording]).mockResolvedValueOnce([]).mockResolvedValueOnce([]);
+    prismaMock.meetingRecording.findUnique.mockResolvedValue({ ...recording, transcriptProcessedAt: null, status: "COMPLETED" });
+
+    await reconcileMeetingRecorders("workspace-1");
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(prismaMock.meetingRecording.update).toHaveBeenCalledWith({
+      where: { id: "recording-1" },
+      data: expect.objectContaining({
+        status: "FAILED",
+        failureCode: "RECORDER_TRANSCRIPT_RECOVERY_EXPIRED",
+        transcriptProcessedAt: expect.any(Date),
       }),
     });
   });
