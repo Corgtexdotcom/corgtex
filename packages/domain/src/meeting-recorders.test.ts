@@ -4423,11 +4423,12 @@ describe("meeting recorder domain", () => {
       return { transcriptProcessedAt: new Date(), status: "COMPLETED" };
     });
 
-    await reconcileMeetingRecorders("workspace-1");
+    const result = await reconcileMeetingRecorders("workspace-1");
     
     // Update should not be called because the post-lock read saw transcriptProcessedAt
     expect(prismaMock.meetingRecording.update).not.toHaveBeenCalled();
     expect(prismaMock.meetingRecorderSmokeRun.updateMany).not.toHaveBeenCalled();
+    expect(result).toMatchObject({ staleFailed: 0 });
   });
 
   it("atomic rollback/retry behavior: failing second write aborts transaction", async () => {

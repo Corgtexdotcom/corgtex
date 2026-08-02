@@ -4317,16 +4317,18 @@ export async function reconcileMeetingRecorders(workspaceId: string) {
         });
       }
     }
-    await terminalizeStaleRecordingWithLock(recording);
-    staleFailed += 1;
-    recorderLog("warn", "reconcile_stale_failed", {
-      workspaceId,
-      meetingId: recording.meetingId,
-      recordingId: recording.id,
-      provider: recording.provider,
-      previousStatus: recording.status,
-      failureCode: "stale_recorder",
-    });
+    const success = await terminalizeStaleRecordingWithLock(recording);
+    if (success) {
+      staleFailed += 1;
+      recorderLog("warn", "reconcile_stale_failed", {
+        workspaceId,
+        meetingId: recording.meetingId,
+        recordingId: recording.id,
+        provider: recording.provider,
+        previousStatus: recording.status,
+        failureCode: "stale_recorder",
+      });
+    }
   }
   const coverage = await ensureUpcomingScheduledMeetingRecorderCoverage(workspaceId);
   await prisma.meetingRecorderProviderEvent.updateMany({
