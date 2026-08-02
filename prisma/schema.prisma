@@ -1093,6 +1093,7 @@ model FinanceImportBatch {
   currencyResolutionSource  FinanceImportCurrencySource?
   currencyConfirmedByUserId String?
   currencyConfirmedAt       DateTime?
+  interpretationJson        Json?
   addCount                  Int                         @default(0)
   updateCount               Int                         @default(0)
   unchangedCount            Int                         @default(0)
