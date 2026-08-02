@@ -142,7 +142,7 @@ export async function reviewFinanceReportImport(actor: AppActor, params: { works
     const now = new Date();
     if (params.mode === "APPROVE_ALL") {
       invariant(batch.blockerCount === 0 && !batch.candidates.some(({ reviewState }) => reviewState === "BLOCKED"), 409, "FINANCE_REPORT_REVIEW_BLOCKED", "Structural blockers cannot be approved.");
-      invariant((batch.warningCount === 0 && !batch.candidates.some((candidate) => warning(candidate, now))) || params.acceptWarnings === true,
+      invariant((reportWarnings(batch.interpretationJson).every(({ code }) => HISTORICAL_POLICY_CODES.has(code)) && !batch.candidates.some((candidate) => warning(candidate, now))) || params.acceptWarnings === true,
         409, "FINANCE_REPORT_WARNING_ACCEPTANCE_REQUIRED", "Explicitly accept report warnings before approving everything.");
     }
     invariant(scope.every(({ reviewState }) => reviewState !== "APPLIED"), 409, "FINANCE_REPORT_REVIEW_BLOCKED", "Applied candidates cannot be reviewed again.");
@@ -150,7 +150,7 @@ export async function reviewFinanceReportImport(actor: AppActor, params: { works
     const targets = scope.filter((candidate) => candidate.reviewState !== "REJECTED" && (!bulk || candidate.reviewState !== "APPROVED" || (candidate.action === "UPDATE" && historical(candidate.periodEnd, now) && (!candidate.approvedByUserId || candidate.approvedByUserId === (candidate.editedByUserId ?? batch.uploadedByUserId)))) && (params.mode !== "APPROVE_VERIFIED"
       || (!warning(candidate, now) && !["APPROVED", "BLOCKED"].includes(candidate.reviewState))));
     invariant(params.mode === "REJECT" || targets.every(({ reviewState }) => reviewState !== "BLOCKED"), 409, "FINANCE_REPORT_REVIEW_BLOCKED", "Structural blockers cannot be approved.");
-    invariant(["REJECT", "APPROVE_VERIFIED"].includes(params.mode) || params.acceptWarnings === true || (batch.warningCount === 0 && targets.every((candidate) => !warning(candidate, now))),
+    invariant(["REJECT", "APPROVE_VERIFIED"].includes(params.mode) || params.acceptWarnings === true || (reportWarnings(batch.interpretationJson).every(({ code }) => HISTORICAL_POLICY_CODES.has(code)) && targets.every((candidate) => !warning(candidate, now))),
       409, "FINANCE_REPORT_WARNING_ACCEPTANCE_REQUIRED", "Explicitly accept warnings before approval.");
     for (const candidate of targets) if (params.mode !== "REJECT" && candidate.action === "UPDATE" && historical(candidate.periodEnd, now)) {
       invariant(actor.user.id !== (candidate.editedByUserId ?? batch.uploadedByUserId), 409, "FINANCE_REPORT_PEER_CONFIRMATION_REQUIRED", "A different Finance writer must confirm this historical update.");
