@@ -6,7 +6,7 @@ const mocks = vi.hoisted(() => ({
   prisma: { $transaction: vi.fn(), $executeRaw: vi.fn(), financeImportBatch: { findUnique: vi.fn(), updateMany: vi.fn() },
     financeReport: { create: vi.fn(), update: vi.fn() }, financeReportFact: { findMany: vi.fn(), create: vi.fn(), update: vi.fn() },
     financeImportApplication: { create: vi.fn() }, financeTransaction: { create: vi.fn() }, financeImportCandidate: { updateMany: vi.fn() },
-    event: { create: vi.fn() }, auditLog: { create: vi.fn() } },
+    event: { create: vi.fn(), findFirst: vi.fn() }, auditLog: { create: vi.fn() } },
 }));
 vi.mock("@corgtex/shared", () => ({ prisma: mocks.prisma }));
 vi.mock("./finance", () => ({ requireFinanceReportImportHumanWriteAccess: mocks.access }));
@@ -32,7 +32,7 @@ describe("Finance report reconciliation", () => {
     vi.clearAllMocks(); mocks.access.mockResolvedValue({}); mocks.prisma.$transaction.mockImplementation((work) => work(mocks.prisma));
     mocks.prisma.$executeRaw.mockResolvedValue(1); mocks.prisma.financeImportBatch.updateMany.mockResolvedValue({ count: 1 });
     mocks.prisma.financeImportCandidate.updateMany.mockResolvedValue({ count: 1 }); mocks.prisma.financeReportFact.findMany.mockResolvedValue([]);
-    mocks.prisma.event.create.mockResolvedValue({}); mocks.prisma.auditLog.create.mockResolvedValue({});
+    mocks.prisma.event.create.mockResolvedValue({}); mocks.prisma.event.findFirst.mockResolvedValue(null); mocks.prisma.auditLog.create.mockResolvedValue({});
   });
 
   it("builds stable normalized keys without collapsing real identity differences", () => {
@@ -111,6 +111,11 @@ describe("Finance report reconciliation", () => {
       .rejects.toMatchObject({ code: "FINANCE_REPORT_CLARIFICATION_REQUIRED" });
     await expect(run({}, { confirmedCurrency: "" })).rejects.toMatchObject({ code: "INVALID_INPUT" });
     expect(mocks.prisma.financeImportCandidate.updateMany).not.toHaveBeenCalled();
+    const legacy = { stage: "RECONCILING", candidates: [candidate("a", { proposalJson: { version: 1 } })] };
+    mocks.prisma.event.findFirst.mockResolvedValue({ payload: { version: 5, stage: "RECONCILING", candidateCount: 1 } });
+    await expect(run(legacy)).resolves.toMatchObject({ stage: "READY_FOR_REVIEW" });
+    mocks.prisma.event.findFirst.mockResolvedValue({ payload: { version: 4, stage: "RECONCILING", candidateCount: 1 } });
+    await expect(run(legacy)).rejects.toMatchObject({ code: "FINANCE_REPORT_CLARIFICATION_REQUIRED" });
   });
 
   it("rejects a shape-valid non-ISO confirmation before starting a write transaction", async () => {

@@ -91,6 +91,11 @@ export async function rerunFinanceReportImportReconciliation(actor: AppActor, pa
     invariant(batch, 404, "FINANCE_REPORT_IMPORT_NOT_FOUND", "The Finance report import was not found.");
     invariant(batch.version === params.expectedVersion && ["RECONCILING", "READY_FOR_REVIEW", "NEEDS_INPUT"].includes(batch.stage),
       409, "FINANCE_REPORT_RECONCILIATION_CONFLICT", "The Finance report import changed. Refresh and try again.");
+    const proposalEvent = await tx.event.findFirst({ where: { workspaceId: batch.workspaceId, type: "finance-report-import.proposed",
+      aggregateType: "FinanceImportBatch", aggregateId: batch.id }, orderBy: { createdAt: "desc" }, select: { payload: true } });
+    const payload = proposalEvent?.payload;
+    const legacySnapshot = batch.stage === "RECONCILING" && payload !== null && payload !== undefined && typeof payload === "object" && !Array.isArray(payload)
+      && payload.version === batch.version && payload.stage === "RECONCILING" && payload.candidateCount === batch.candidates.length;
     const interpretation = parseFinanceImportInterpretationV1(batch.interpretationJson);
     const numericFormat = interpretation.numericFormat.status === "RESOLVED" ? { version: interpretation.numericFormat.version, decimalSeparator: interpretation.numericFormat.decimalSeparator,
       groupingSeparator: interpretation.numericFormat.groupingSeparator,
@@ -98,7 +103,7 @@ export async function rerunFinanceReportImportReconciliation(actor: AppActor, pa
     invariant(numericFormat && numericFormat.amountScale === params.confirmedAmountScale
       && !interpretation.exceptions.some(({ severity }) => severity === "BLOCKER") && batch.candidates.length > 0
       && batch.candidates.every(({ proposalJson }) => proposalJson && typeof proposalJson === "object" && !Array.isArray(proposalJson)
-        && canonicalJson((proposalJson as Record<string, Prisma.JsonValue>).numericFormat ?? null) === canonicalJson(numericFormat)),
+        && ("numericFormat" in proposalJson ? canonicalJson((proposalJson as Record<string, Prisma.JsonValue>).numericFormat ?? null) === canonicalJson(numericFormat) : legacySnapshot)),
     409, "FINANCE_REPORT_CLARIFICATION_REQUIRED", "Resolve the report structure, numeric format, scale, and candidate amounts before reconciliation.");
     const versions = new Map(params.candidateVersions.map(({ id, expectedVersion }) => [id, expectedVersion]));
     invariant(params.candidateVersions.length === batch.candidates.length && versions.size === batch.candidates.length
