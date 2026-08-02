@@ -84,6 +84,7 @@ export * from "./enterprise-account-discovery";
 export * from "./execution-plumbing";
 export * from "./finance";
 export * from "./finance-import-extraction";
+export * from "./finance-import-interpretation";
 export * from "./finance-imports";
 export * from "./finance-import-upload";
 export * from "./tool-links";
