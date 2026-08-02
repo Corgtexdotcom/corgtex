@@ -1,3 +1,4 @@
+import { types as nodeTypes } from "node:util";
 import type { Prisma } from "@prisma/client";
 import { prisma } from "@corgtex/shared";
 import { z } from "zod";
@@ -13,6 +14,29 @@ const requiredEvidenceIds = z.array(boundedId).min(1).max(50).refine(unique, "Ev
 const confidence = z.number().min(0).max(1);
 const boundedEvidenceText = z.string().max(2_000_000);
 const selectedEvidenceText = z.string().min(1).max(2_000_000);
+
+function isBoundedPlainJson(value: unknown, state = { nodes: 0, seen: new Set<object>() }): boolean {
+  if (++state.nodes > 50_000) return false;
+  if (value === null || typeof value === "string" || typeof value === "boolean") return true;
+  if (typeof value === "number") return Number.isFinite(value);
+  if (typeof value !== "object" || nodeTypes.isProxy(value)) return false;
+  const prototype = Object.getPrototypeOf(value);
+  if (state.seen.has(value) || (!Array.isArray(value) && prototype !== Object.prototype && prototype !== null)) return false;
+  if (Array.isArray(value) && prototype !== Array.prototype) return false;
+  state.seen.add(value);
+  const descriptors = Object.getOwnPropertyDescriptors(value);
+  const keys = Reflect.ownKeys(descriptors);
+  if (Array.isArray(value)) {
+    const length = descriptors.length;
+    const indices = keys.filter((key) => key !== "length");
+    if (!length || !("value" in length) || length.value > 50_000 || indices.length !== length.value) return false;
+    return indices.every((key, index) => typeof key === "string" && key === String(index)
+      && descriptors[key]!.enumerable && "value" in descriptors[key]!
+      && isBoundedPlainJson(descriptors[key]!.value, state));
+  }
+  return keys.every((key) => typeof key === "string" && descriptors[key]!.enumerable
+    && "value" in descriptors[key]! && isBoundedPlainJson(descriptors[key]!.value, state));
+}
 
 const pdfSourceSchema = z.strictObject({
   kind: z.literal("PDF"),
@@ -151,6 +175,7 @@ export const financeImportInterpretationSchemaV1 = z.strictObject({
 export type FinanceImportInterpretationV1 = z.infer<typeof financeImportInterpretationSchemaV1>;
 
 export function parseFinanceImportInterpretationV1(value: unknown): FinanceImportInterpretationV1 {
+  invariant(isBoundedPlainJson(value), 400, "INVALID_FINANCE_IMPORT_INTERPRETATION", "Finance report interpretation is invalid.");
   const parsed = financeImportInterpretationSchemaV1.safeParse(value);
   invariant(parsed.success, 400, "INVALID_FINANCE_IMPORT_INTERPRETATION", "Finance report interpretation is invalid.");
   return parsed.data;

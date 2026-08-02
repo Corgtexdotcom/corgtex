@@ -95,6 +95,33 @@ describe("Finance import interpretation state", () => {
     }));
   });
 
+  it("rejects adversarial and non-JSON shapes without executing input code", async () => {
+    const { parseFinanceImportInterpretationV1 } = await import("./finance-import-interpretation");
+    let getterCalled = false;
+    const accessor = { ...unresolved } as Record<string, unknown>;
+    Object.defineProperty(accessor, "version", { enumerable: true, get: () => { getterCalled = true; return 1; } });
+    let proxyTrapped = false;
+    const proxy = new Proxy(unresolved, { get: (target, key, receiver) => {
+      proxyTrapped = true;
+      return Reflect.get(target, key, receiver);
+    } });
+    const hidden = { ...unresolved } as Record<string, unknown>;
+    Object.defineProperty(hidden, "currency", { value: "USD" });
+    const symbolKey = { ...unresolved, [Symbol("currency")]: "USD" };
+    const cyclic = { ...unresolved } as Record<string, unknown>;
+    cyclic.self = cyclic;
+    const sparse = { ...unresolved, exceptions: new Array(1) };
+    const explicitUndefined = structuredClone(resolved) as { evidenceClaims: Array<{ source: Record<string, unknown> }> };
+    explicitUndefined.evidenceClaims[0]!.source.start = undefined;
+    for (const value of [accessor, proxy, hidden, symbolKey, cyclic, sparse, explicitUndefined]) {
+      expect(() => parseFinanceImportInterpretationV1(value)).toThrow(expect.objectContaining({
+        code: "INVALID_FINANCE_IMPORT_INTERPRETATION",
+      }));
+    }
+    expect(getterCalled).toBe(false);
+    expect(proxyTrapped).toBe(false);
+  });
+
   it("persists only validated JSON under the workspace, batch, and expected version", async () => {
     const { updateFinanceImportInterpretationV1 } = await import("./finance-import-interpretation");
     await expect(updateFinanceImportInterpretationV1({
