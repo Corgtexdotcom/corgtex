@@ -13,13 +13,16 @@ import {
   groupTargetsByRing,
   normalizeGitSha,
   normalizeReleaseInput,
+  normalizeTargetGroup,
   normalizeTargets,
   parseBoolean,
   parseKeyValueArgs,
   parseManifestJson,
   parsePositiveInteger,
   providerBoundaryErrors,
+  targetEligibilityErrors,
   targetFromControlPlaneRow,
+  targetSelectionDeprecations,
   TERMINAL_RAILWAY_FAILURES,
 } from "./fleet-release-core.mjs";
 import { notifyFleetReleaseFailure } from "./fleet-release-alerts.mjs";
@@ -70,7 +73,8 @@ export async function runFleetRelease(argv = process.argv.slice(2), deps = {}) {
   const env = deps.env ?? process.env;
   validateRuntimeObservabilityEnvironment(env);
   const manifest = await resolveManifest(args, deps);
-  const selectedGroups = normalizeTargets(args.targets ?? env.FLEET_RELEASE_TARGETS);
+  const targetSelection = args.targets ?? env.FLEET_RELEASE_TARGETS ?? "default";
+  const selectedGroups = normalizeTargets(targetSelection);
   const dryRun = parseBoolean(args.dryRun ?? env.FLEET_RELEASE_DRY_RUN, false);
   const failOnBlockers = parseBoolean(args.failOnBlockers ?? env.FLEET_RELEASE_FAIL_ON_BLOCKERS, false);
   const forceAfterFailure = parseBoolean(args.forceAfterFailure ?? env.FLEET_RELEASE_FORCE_AFTER_FAILURE, false);
@@ -81,17 +85,29 @@ export async function runFleetRelease(argv = process.argv.slice(2), deps = {}) {
   }
 
   const allTargets = await discoverTargets(deps);
-  const targets = filterTargetsByGroups(allTargets, selectedGroups);
+  const broadSelection = ["", "default", "all"].includes(String(targetSelection).trim().toLowerCase())
+    || [normalizeTargets("default"), normalizeTargets("all")]
+      .some((groups) => groups.length === selectedGroups.length && groups.every((group) => selectedGroups.includes(group)));
+  const targets = filterTargetsByGroups(allTargets, selectedGroups, { excludeIneligible: broadSelection });
   if (targets.length === 0) {
     throw new Error(`No release targets matched: ${selectedGroups.join(", ")}`);
   }
+
+  const providers = new Set(targets.map((target) => target.provider));
+  emitGithubOutput("uses_azure", providers.has("azure"), deps);
+  emitGithubOutput("uses_railway", providers.has("railway"), deps);
 
   const preflight = targets.map((target) => ({
     target,
     blockers: preflightTarget(target, deps.env ?? process.env, { requireObservability: !dryRun }),
   }));
   const blockers = preflight.filter((item) => item.blockers.length > 0);
-  const plan = formatReleasePlan({ manifest, targets, dryRun, concurrency });
+  const planTargets = preflight.map(({ target, blockers: targetBlockers }) => ({ ...target, blockers: targetBlockers }));
+  const deprecations = [
+    ...targetSelectionDeprecations(targetSelection),
+    ...targets.flatMap((target) => target.deprecations ?? []),
+  ];
+  const plan = formatReleasePlan({ manifest, targets: planTargets, dryRun, concurrency, deprecations: [...new Set(deprecations)] });
   console.log(JSON.stringify({ stage: "plan", plan, blockers: blockers.map(publicBlocker) }, null, 2));
   if (dryRun) {
     if (failOnBlockers && blockers.length > 0) {
@@ -215,7 +231,7 @@ function validateReleaseEnvironment(args, env) {
   validateOptionalBoolean("POSTHOG_CAPTURE_KILL_SWITCH", env, invalid);
   validateOptionalBoolean("POSTHOG_CAPTURE_DEBUG", env, invalid);
 
-  if (selectedGroups.includes("railway-customers") && !env.FLEET_RELEASE_TARGETS_JSON?.trim() && !env.CONTROL_PLANE_AGENT_API_KEY?.trim()) {
+  if (selectedGroups.includes("managed-customers") && !env.FLEET_RELEASE_TARGETS_JSON?.trim() && !env.CONTROL_PLANE_AGENT_API_KEY?.trim()) {
     missing.push("FLEET_RELEASE_TARGETS_JSON or CONTROL_PLANE_AGENT_API_KEY");
   }
   if (selectedGroups.includes("ops") && !env.FLEET_RELEASE_OPS_TARGET_JSON?.trim()) {
@@ -224,20 +240,24 @@ function validateReleaseEnvironment(args, env) {
   if (selectedGroups.includes("backup-app") && !env.FLEET_RELEASE_BACKUP_APP_TARGET_JSON?.trim()) {
     missing.push("FLEET_RELEASE_BACKUP_APP_TARGET_JSON");
   }
-  if (selectedGroups.includes("azure-selfserve") && !env.FLEET_RELEASE_AZURE_TARGET_JSON?.trim()) {
+  if (selectedGroups.includes("selfserve") && !env.FLEET_RELEASE_AZURE_TARGET_JSON?.trim()) {
     missing.push("FLEET_RELEASE_AZURE_TARGET_JSON");
   }
 
   if (!dryRun) {
     if (!env.CONTROL_PLANE_AGENT_API_KEY?.trim()) missing.push("CONTROL_PLANE_AGENT_API_KEY");
-    const includesRailwayTarget = selectedGroups.some((group) => group !== "azure-selfserve");
+    const selectedProviders = new Set(configuredTargets(env).map(normalizeTarget)
+      .filter((target) => selectedGroups.includes(target.group))
+      .map((target) => target.provider));
+    const includesRailwayTarget = selectedProviders.has("railway");
+    const includesAzureTarget = selectedProviders.has("azure");
     if (includesRailwayTarget && !env.RAILWAY_API_TOKEN?.trim()) {
       missing.push("RAILWAY_API_TOKEN");
     }
     if (includesRailwayTarget && !env.GHCR_IMPORT_TOKEN?.trim() && !env.GITHUB_TOKEN?.trim()) {
       missing.push("GHCR_IMPORT_TOKEN or GITHUB_TOKEN");
     }
-    if (selectedGroups.includes("azure-selfserve")) {
+    if (includesAzureTarget) {
       if (!env.AZURE_CLIENT_ID?.trim()) missing.push("AZURE_CLIENT_ID");
       if (!env.AZURE_TENANT_ID?.trim()) missing.push("AZURE_TENANT_ID");
       if (!env.AZURE_SUBSCRIPTION_ID?.trim()) missing.push("AZURE_SUBSCRIPTION_ID");
@@ -245,7 +265,7 @@ function validateReleaseEnvironment(args, env) {
         missing.push("GHCR_IMPORT_TOKEN or GITHUB_TOKEN");
       }
     }
-    requireProductionObservability(selectedGroups, env, missing, invalid);
+    requireProductionObservability(selectedProviders, env, missing, invalid);
   }
 
   return {
@@ -264,6 +284,14 @@ function validateConfiguredTargetJson(name, raw, invalid) {
     const parsed = parseTargetJson(raw);
     if (parsed.length === 0) {
       invalid.push({ name, reason: "must contain at least one target" });
+    }
+    for (const target of parsed) {
+      const provider = String(target.provider ?? "").trim().toLowerCase();
+      if (!provider) {
+        invalid.push({ name, reason: `${target.label ?? target.id ?? "target"} must explicitly declare provider` });
+      } else if (!["azure", "railway"].includes(provider)) {
+        invalid.push({ name, reason: `${target.label ?? target.id ?? "target"} has unsupported provider ${provider}` });
+      }
     }
   } catch (error) {
     invalid.push({
@@ -294,8 +322,8 @@ function optionalBoolean(name, env) {
   }
 }
 
-function requireProductionObservability(selectedGroups, env, missing, invalid) {
-  const includesRailwayTarget = selectedGroups.some((group) => group !== "azure-selfserve");
+function requireProductionObservability(selectedProviders, env, missing, invalid) {
+  const includesRailwayTarget = selectedProviders.has("railway");
   if (includesRailwayTarget) {
     const postHogEnabled = optionalBoolean("POSTHOG_ENABLED", env);
     if (!optionalText(env.POSTHOG_ENABLED)) {
@@ -318,7 +346,7 @@ function requireProductionObservability(selectedGroups, env, missing, invalid) {
     }
   }
 
-  if (selectedGroups.includes("azure-selfserve") && !env.APPLICATIONINSIGHTS_CONNECTION_STRING?.trim()) {
+  if (selectedProviders.has("azure") && !env.APPLICATIONINSIGHTS_CONNECTION_STRING?.trim()) {
     missing.push("APPLICATIONINSIGHTS_CONNECTION_STRING");
   }
 }
@@ -355,12 +383,16 @@ async function discoverTargets(deps) {
   const env = deps.env ?? process.env;
   const configured = parseTargetJson(env.FLEET_RELEASE_TARGETS_JSON);
   const discovered = configured.length > 0 ? configured : await discoverControlPlaneTargets(deps);
-  const extras = [
+  return dedupeTargets([...discovered, ...configuredTargets(env)].map(normalizeTarget));
+}
+
+function configuredTargets(env) {
+  return [
+    ...parseTargetJson(env.FLEET_RELEASE_TARGETS_JSON),
     ...parseTargetJson(env.FLEET_RELEASE_OPS_TARGET_JSON).map((target) => ({ ...target, group: "ops" })),
     ...parseTargetJson(env.FLEET_RELEASE_BACKUP_APP_TARGET_JSON).map((target) => ({ ...target, group: "backup-app" })),
-    ...parseTargetJson(env.FLEET_RELEASE_AZURE_TARGET_JSON).map((target) => ({ ...target, group: "azure-selfserve", provider: "azure" })),
+    ...parseTargetJson(env.FLEET_RELEASE_AZURE_TARGET_JSON).map((target) => ({ ...target, group: "selfserve" })),
   ];
-  return dedupeTargets([...discovered, ...extras].map(normalizeTarget));
 }
 
 function parseTargetJson(raw) {
@@ -381,17 +413,26 @@ async function discoverControlPlaneTargets(deps) {
 
 function normalizeTarget(target) {
   const hasDeploymentId = Object.prototype.hasOwnProperty.call(target, "deploymentId");
+  const originalGroup = target.workload ?? target.group;
+  const group = normalizeTargetGroup(originalGroup);
+  const provider = String(target.provider ?? "").trim().toLowerCase() || null;
   const normalized = {
     id: target.id ?? target.deploymentId ?? target.label,
     deploymentId: hasDeploymentId ? target.deploymentId : target.id ?? null,
     label: target.label ?? target.id ?? target.deploymentId,
     url: target.url,
-    group: target.group,
-    provider: target.provider ?? (target.group === "azure-selfserve" ? "azure" : "railway"),
+    group,
+    workload: group,
+    ring: target.ring,
+    provider,
+    deploymentStatus: target.deploymentStatus ?? null,
+    provisioningStatus: target.provisioningStatus ?? null,
+    releaseEligible: target.releaseEligible !== false,
+    deprecations: target.deprecations ?? (group !== originalGroup ? [`${originalGroup} workload alias normalized to ${group}`] : []),
     railway: target.railway ?? {},
-    azure: { ...DEFAULT_AZURE, ...(target.azure ?? {}) },
+    azure: { ...(group === "selfserve" && provider === "azure" ? DEFAULT_AZURE : {}), ...(target.azure ?? {}) },
   };
-  if (normalized.provider === "azure") {
+  if (normalized.provider === "azure" && normalized.azure.acrName) {
     normalized.azure.acrServer ??= `${normalized.azure.acrName}.azurecr.io`;
   }
   return normalized;
@@ -410,7 +451,7 @@ function dedupeTargets(targets) {
 }
 
 function preflightTarget(target, env, options = {}) {
-  const blockers = [...providerBoundaryErrors(target)];
+  const blockers = [...providerBoundaryErrors(target), ...targetEligibilityErrors(target)];
   const requireObservability = options.requireObservability === true;
   if (!target.url) blockers.push("runtime URL is missing");
   if (target.deploymentId && !env.CONTROL_PLANE_AGENT_API_KEY) {
@@ -440,7 +481,8 @@ function preflightTarget(target, env, options = {}) {
       }
     }
   } else if (target.provider === "azure") {
-    if (!target.deploymentId) blockers.push("Azure deploymentId is missing for provider readiness checks");
+    if (target.group !== "selfserve") blockers.push("Managed Azure targets are non-mutable until the generic Azure executor is implemented in PR3");
+    if (target.group === "selfserve" && !target.deploymentId) blockers.push("Azure deploymentId is missing for provider readiness checks");
     if (requireObservability && !optionalText(env.APPLICATIONINSIGHTS_CONNECTION_STRING)) {
       blockers.push("APPLICATIONINSIGHTS_CONNECTION_STRING is missing for Azure observability");
     }
@@ -487,7 +529,7 @@ async function deployTarget(target, manifest, reason, deps) {
     : await deployRailwayTarget(target, manifest, deps);
   const health = await pollHealth(target.url, manifest, deps);
   assertHealthProof(health, manifest, target.label);
-  const usesAzureProviderReadiness = target.group === "azure-selfserve";
+  const usesAzureProviderReadiness = target.group === "selfserve" && target.provider === "azure";
   let verifiedRelease = null;
   if (target.deploymentId && usesAzureProviderReadiness) {
     verifiedRelease = await recordVerifiedRelease(target, manifest, reason, deps);
@@ -520,7 +562,7 @@ async function recordVerifiedRelease(target, manifest, reason, deps) {
 }
 
 async function runProviderReadiness(target, manifest, deps, proof = {}) {
-  if (target.group !== "azure-selfserve") {
+  if (target.group !== "selfserve" || target.provider !== "azure") {
     return { status: "skipped", reason: "not_azure_selfserve" };
   }
   const providerStatus = await callControlPlaneTool("get_azure_provider_status", {
@@ -634,7 +676,7 @@ async function deployRailwayTarget(target, manifest, deps) {
       environmentId: target.railway.environmentId,
       serviceId: service.serviceId,
       variables: releaseVariables(manifest, deps.env ?? process.env, {
-        includePostHogInstanceId: target.group !== "railway-customers",
+        includePostHogInstanceId: target.group !== "managed-customers",
       }),
     }, deps);
   }

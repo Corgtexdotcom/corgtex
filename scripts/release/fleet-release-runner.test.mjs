@@ -41,7 +41,7 @@ function azureTargetJson(overrides = {}) {
     deploymentId: "dep-azure",
     label: "Azure Self-Serve",
     url: "https://selfserve.corgtex.com",
-    group: "azure-selfserve",
+    group: "selfserve",
     provider: "azure",
     azure: {
       resourceGroup: "rg-1",
@@ -673,9 +673,9 @@ describe("fleet release runner", () => {
     });
 
     expect(result.targets.map((target) => target.group)).toEqual([
-      "railway-customers",
+      "managed-customers",
       "ops",
-      "azure-selfserve",
+      "selfserve",
     ]);
     expect(result.targets.some((target) => target.group === "backup-app")).toBe(false);
   });
@@ -897,8 +897,8 @@ describe("fleet release runner", () => {
     })).rejects.toThrow("GHCR import token is missing for Railway image pull");
   });
 
-  it("blocks mismatched provider and URL combinations before mutation", async () => {
-    await expect(runFleetRelease([
+  it("does not infer provider from workload or URL", async () => {
+    const result = await runFleetRelease([
       "deploy",
       "--release",
       SHA,
@@ -930,10 +930,14 @@ describe("fleet release runner", () => {
       runCommand: vi.fn(),
       fetchImpl: vi.fn(),
       sleep: vi.fn(),
-    })).rejects.toThrow("requires provider azure");
+    });
+
+    expect(result.blockers).toEqual([]);
+    expect(result.targets[0]).toMatchObject({ group: "selfserve", provider: "railway" });
   });
 
   it("preflights Azure self-serve without Railway credentials", async () => {
+    const outputs = {};
     const result = await runFleetRelease([
       "deploy",
       "--release",
@@ -958,11 +962,79 @@ describe("fleet release runner", () => {
       runCommand: vi.fn(),
       fetchImpl: vi.fn(),
       sleep: vi.fn(),
+      emitGithubOutput: (key, value) => { outputs[key] = value; },
     });
 
     expect(result.blockers).toEqual([]);
     expect(result.targets).toHaveLength(1);
-    expect(result.targets[0]).toMatchObject({ group: "azure-selfserve", provider: "azure" });
+    expect(result.targets[0]).toMatchObject({ group: "selfserve", provider: "azure" });
+    expect(outputs).toMatchObject({ uses_azure: true, uses_railway: false });
+  });
+
+  it("validates mixed-provider credentials against each target", async () => {
+    await expect(runFleetRelease([
+      "deploy", "--release", SHA, "--targets", "managed-customers,selfserve",
+      "--dry-run", "--fail-on-blockers", "--reason", "Validate mixed providers.",
+    ], {
+      env: {
+        FLEET_RELEASE_TARGETS_JSON: targetJson({ id: "customer", label: "Railway Customer", group: "managed-customers" }),
+        FLEET_RELEASE_AZURE_TARGET_JSON: azureTargetJson(),
+        CONTROL_PLANE_AGENT_API_KEY: "control-plane-key",
+        GITHUB_TOKEN: "github-token",
+        AZURE_TENANT_ID: "azure-tenant",
+        AZURE_SUBSCRIPTION_ID: "azure-subscription",
+      },
+      runCommand: vi.fn(),
+      fetchImpl: vi.fn(),
+      sleep: vi.fn(),
+    })).rejects.toThrow(/Railway Customer: RAILWAY_API_TOKEN is missing.*Azure Self-Serve: AZURE_CLIENT_ID is missing/);
+  });
+
+  it("keeps managed Azure targets non-mutable until PR3", async () => {
+    await expect(runFleetRelease([
+      "deploy", "--release", SHA, "--targets", "managed-customers",
+      "--dry-run", "--fail-on-blockers", "--reason", "Validate managed Azure.",
+    ], {
+      env: {
+        FLEET_RELEASE_TARGETS_JSON: azureTargetJson({ group: "managed-customers", label: "Managed Azure" }),
+        CONTROL_PLANE_AGENT_API_KEY: "control-plane-key",
+        GITHUB_TOKEN: "github-token",
+        AZURE_CLIENT_ID: "azure-client",
+        AZURE_TENANT_ID: "azure-tenant",
+        AZURE_SUBSCRIPTION_ID: "azure-subscription",
+      },
+      runCommand: vi.fn(),
+      fetchImpl: vi.fn(),
+      sleep: vi.fn(),
+    })).rejects.toThrow("non-mutable until the generic Azure executor is implemented in PR3");
+  });
+
+  it("excludes retired targets broadly and blocks explicit mutation", async () => {
+    const env = {
+      FLEET_RELEASE_TARGETS_JSON: targetJson({ id: "retired", group: "managed-customers", deploymentStatus: "RETIRED" }),
+      FLEET_RELEASE_OPS_TARGET_JSON: targetJson(),
+      RAILWAY_API_TOKEN: "railway-token",
+      GITHUB_TOKEN: "github-token",
+    };
+    const broad = await runFleetRelease([
+      "deploy", "--release", SHA, "--targets", "managed-customers,selfserve,ops,backup-app", "--dry-run", "--reason", "Validate broad selection.",
+    ], { env, runCommand: vi.fn(), fetchImpl: vi.fn(), sleep: vi.fn() });
+    expect(broad.targets.map((target) => target.id)).toEqual(["ops"]);
+
+    await expect(runFleetRelease([
+      "deploy", "--release", SHA, "--targets", "managed-customers",
+      "--dry-run", "--fail-on-blockers", "--reason", "Validate explicit selection.",
+    ], { env, runCommand: vi.fn(), fetchImpl: vi.fn(), sleep: vi.fn() }))
+      .rejects.toThrow("Target lifecycle status RETIRED is not release-eligible");
+  });
+
+  it("rejects transition inventory that omits provider", async () => {
+    await expect(runFleetRelease([
+      "validate-config", "--release", SHA, "--targets", "selfserve", "--dry-run",
+    ], {
+      env: { FLEET_RELEASE_AZURE_TARGET_JSON: azureTargetJson({ provider: undefined }) },
+      runCommand: vi.fn(),
+    })).rejects.toThrow("must explicitly declare provider");
   });
 
   it("can make dry-run preflight blockers fatal before image build", async () => {
@@ -1386,7 +1458,7 @@ describe("fleet release runner", () => {
       runCommand: vi.fn(),
       fetchImpl,
       sleep: vi.fn(),
-    })).rejects.toThrow("Ring 1 failed");
+    })).rejects.toThrow("Ring 3 failed");
 
     expect(toolCalls).toEqual(["run_post_deploy_probe"]);
     expect(slackPayloads[0].text).toContain("Customer A");
@@ -1445,7 +1517,7 @@ describe("fleet release runner", () => {
       runCommand: vi.fn(),
       fetchImpl,
       sleep: vi.fn(),
-    })).rejects.toThrow("Ring 1 failed");
+    })).rejects.toThrow("Ring 3 failed");
 
     const createRequest = githubRequests.find((request) => request.method === "POST");
     expect(createRequest.body.title).toContain("P1 fleet-release");

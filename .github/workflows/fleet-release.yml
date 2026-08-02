@@ -9,10 +9,10 @@ on:
         type: string
         default: latest-stable
       targets:
-        description: "default, all, railway-customers, azure-selfserve, ops, backup-app, or a comma-separated subset. Default excludes backup-app."
+        description: "default, all, managed-customers, selfserve, ops, backup-app, or legacy aliases. Default excludes backup-app."
         required: true
         type: string
-        default: railway-customers,azure-selfserve,ops
+        default: managed-customers,selfserve,ops
       reason:
         description: "Audited reason for the release."
         required: true
@@ -128,6 +128,7 @@ jobs:
 
       - name: Preflight fleet release
         if: ${{ !inputs.dry_run }}
+        id: preflight
         env:
           MANIFEST_JSON: ${{ steps.manifest.outputs.manifest_json }}
           TARGETS_INPUT: ${{ inputs.targets }}
@@ -208,7 +209,7 @@ jobs:
             --manifest-json "$MANIFEST_JSON"
 
       - name: Log in to Azure
-        if: ${{ !inputs.dry_run && (inputs.targets == 'all' || contains(inputs.targets, 'azure-selfserve')) }}
+        if: ${{ !inputs.dry_run && steps.preflight.outputs.uses_azure == 'true' }}
         uses: azure/login@v2
         with:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
@@ -252,9 +253,10 @@ jobs:
           OBSERVATION_REQUIRE_SOURCE: "true"
           OBSERVATION_WINDOW_MINUTES: ${{ vars.OBSERVATION_WINDOW_MINUTES || '20' }}
           OBSERVATION_SINCE: ${{ steps.observation-window.outputs.since }}
+          USES_AZURE: ${{ steps.preflight.outputs.uses_azure }}
         run: |
           mkdir -p .artifacts/post-deploy-observation-gate
-          if [[ "$TARGETS_INPUT" != "all" && "$TARGETS_INPUT" != *"azure-selfserve"* ]]; then
+          if [[ "$USES_AZURE" != "true" ]]; then
             unset AZURE_APPLICATIONINSIGHTS_APP_NAME
             unset AZURE_APPLICATIONINSIGHTS_RESOURCE_GROUP
           fi

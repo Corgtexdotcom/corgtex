@@ -1,22 +1,23 @@
 export const TARGET_GROUPS = Object.freeze([
-  "railway-customers",
-  "azure-selfserve",
+  "managed-customers",
+  "selfserve",
   "ops",
   "backup-app",
 ]);
 
 export const DEFAULT_TARGET_GROUPS = Object.freeze([
-  "railway-customers",
-  "azure-selfserve",
+  "managed-customers",
+  "selfserve",
   "ops",
 ]);
 
-const GROUP_PROVIDERS = Object.freeze({
-  "railway-customers": "railway",
-  "azure-selfserve": "azure",
-  ops: "railway",
-  "backup-app": "railway",
+const TARGET_GROUP_ALIASES = Object.freeze({
+  "railway-customers": "managed-customers",
+  "azure-selfserve": "selfserve",
 });
+
+const SUPPORTED_PROVIDERS = new Set(["azure", "railway"]);
+const INELIGIBLE_STATUSES = new Set(["RETIRED", "SUSPENDED"]);
 
 export const TERMINAL_RAILWAY_FAILURES = new Set([
   "CRASHED",
@@ -89,12 +90,24 @@ export function normalizeTargets(value = "default") {
   const raw = String(value || "default").trim();
   if (!raw || raw === "default") return [...DEFAULT_TARGET_GROUPS];
   if (raw === "all") return [...TARGET_GROUPS];
-  const selected = raw.split(",").map((part) => part.trim()).filter(Boolean);
+  const selected = raw.split(",").map((part) => normalizeTargetGroup(part)).filter(Boolean);
   const invalid = selected.filter((target) => !TARGET_GROUPS.includes(target));
   if (invalid.length > 0) {
     throw new Error(`Unknown release target group(s): ${invalid.join(", ")}. Allowed: default, all, ${TARGET_GROUPS.join(", ")}`);
   }
   return [...new Set(selected)];
+}
+
+export function normalizeTargetGroup(value) {
+  const group = String(value ?? "").trim().toLowerCase();
+  return TARGET_GROUP_ALIASES[group] ?? group;
+}
+
+export function targetSelectionDeprecations(value) {
+  const selected = String(value ?? "").split(",").map((part) => part.trim()).filter(Boolean);
+  return selected
+    .filter((group) => TARGET_GROUP_ALIASES[group])
+    .map((group) => `${group} is deprecated; use ${TARGET_GROUP_ALIASES[group]} and declare provider per target`);
 }
 
 export function buildReleaseManifest({
@@ -176,9 +189,9 @@ export function assertHealthProof(health, manifest, label = "deployment") {
 }
 
 export function targetRing(target) {
-  if (target.group === "ops" || target.group === "backup-app") return 1;
-  if (target.group === "railway-customers" || target.group === "azure-selfserve") return 2;
-  return 3;
+  const explicit = Number(target.ring);
+  if (Number.isInteger(explicit) && explicit > 0) return explicit;
+  return target.group === "ops" ? 3 : 2;
 }
 
 export function groupTargetsByRing(targets) {
@@ -194,7 +207,7 @@ export function groupTargetsByRing(targets) {
     .map(([ring, ringTargets]) => ({ ring, targets: ringTargets }));
 }
 
-export function formatReleasePlan({ manifest, targets, dryRun, concurrency }) {
+export function formatReleasePlan({ manifest, targets, dryRun, concurrency, deprecations = [] }) {
   return {
     dryRun,
     concurrency,
@@ -204,24 +217,23 @@ export function formatReleasePlan({ manifest, targets, dryRun, concurrency }) {
       imageTag: manifest.imageTag,
       stabilityStatus: manifest.stabilityStatus,
     },
+    deprecations,
     rings: groupTargetsByRing(targets).map(({ ring, targets: ringTargets }) => ({
       ring,
       targets: ringTargets.map((target) => ({
         id: target.id,
         label: target.label,
         group: target.group,
+        workload: target.workload ?? target.group,
         provider: target.provider,
-        expectedProvider: expectedProviderForGroup(target.group),
         criticality: targetCriticality(target),
         backupOnly: target.group === "backup-app",
         url: target.url,
+        resourceTarget: providerResourceTarget(target),
+        blockers: target.blockers ?? [],
       })),
     })),
   };
-}
-
-export function expectedProviderForGroup(group) {
-  return GROUP_PROVIDERS[group] ?? null;
 }
 
 export function targetCriticality(target) {
@@ -230,17 +242,14 @@ export function targetCriticality(target) {
 
 export function providerBoundaryErrors(target) {
   const errors = [];
-  const expectedProvider = expectedProviderForGroup(target.group);
-  if (expectedProvider && target.provider !== expectedProvider) {
-    errors.push(`Target group ${target.group} requires provider ${expectedProvider}, got ${target.provider || "missing"}`);
+  if (!SUPPORTED_PROVIDERS.has(target.provider)) {
+    errors.push(`Target provider must explicitly be azure or railway, got ${target.provider || "missing"}`);
   }
-
-  const lowerUrl = String(target.url ?? "").toLowerCase();
-  if (lowerUrl.includes("selfserve.corgtex.com") && (target.group !== "azure-selfserve" || target.provider !== "azure")) {
-    errors.push("selfserve.corgtex.com targets must use azure-selfserve group and azure provider");
+  if (target.group === "ops" && targetRing(target) !== 3) {
+    errors.push("Ops targets must remain in final release ring 3");
   }
-  if (lowerUrl.includes("app.corgtex.com") && (target.group !== "backup-app" || target.provider !== "railway")) {
-    errors.push("app.corgtex.com targets must use backup-app group and railway provider");
+  if (target.group !== "ops" && targetRing(target) >= 3) {
+    errors.push("Only Ops targets may use the final release ring");
   }
   return errors;
 }
@@ -249,18 +258,18 @@ export function targetFromControlPlaneRow(row) {
   const cloudProvider = String(row.cloudProvider ?? row.provider?.cloudProvider ?? row.provider ?? "").toUpperCase();
   const label = row.label ?? row.customerName ?? row.name ?? row.customerSlug ?? row.id;
   const url = row.url ?? row.runtimeUrl ?? row.supportBaseUrl;
-  const lowerUrl = String(url ?? "").toLowerCase();
-  const isBackupApp = lowerUrl.includes("app.corgtex.com");
-  const isAzureSelfServe = lowerUrl.includes("selfserve.corgtex.com") || cloudProvider === "AZURE";
-  const group = isBackupApp ? "backup-app" : isAzureSelfServe ? "azure-selfserve" : "railway-customers";
-  const provider = group === "azure-selfserve" ? "azure" : "railway";
+  const provider = cloudProvider === "AZURE" ? "azure" : cloudProvider === "RAILWAY" ? "railway" : null;
   return {
     id: row.id ?? row.deploymentId ?? label,
     deploymentId: row.id ?? row.deploymentId ?? null,
     label,
     url,
-    group,
+    group: "managed-customers",
+    workload: "managed-customers",
     provider,
+    deploymentStatus: row.deploymentStatus ?? null,
+    provisioningStatus: row.provisioningStatus ?? null,
+    releaseEligible: row.releaseEligible !== false,
     railway: {
       projectId: row.railwayProjectId ?? row.providerProjectId ?? null,
       environmentId: row.railwayEnvironmentId ?? row.providerEnvironmentId ?? null,
@@ -275,7 +284,40 @@ export function targetFromControlPlaneRow(row) {
   };
 }
 
-export function filterTargetsByGroups(targets, groups) {
+export function filterTargetsByGroups(targets, groups, options = {}) {
   const selected = new Set(groups);
-  return targets.filter((target) => selected.has(target.group));
+  const excludeIneligible = options.excludeIneligible === true;
+  return targets.filter((target) => selected.has(target.group)
+    && (!excludeIneligible || targetEligibilityErrors(target).length === 0));
+}
+
+export function targetEligibilityErrors(target) {
+  const statuses = [target.deploymentStatus, target.provisioningStatus, target.status]
+    .map((value) => String(value ?? "").trim().toUpperCase())
+    .filter(Boolean);
+  const errors = statuses
+    .filter((status) => INELIGIBLE_STATUSES.has(status))
+    .map((status) => `Target lifecycle status ${status} is not release-eligible`);
+  if (target.releaseEligible === false) errors.push("Target explicitly sets releaseEligible=false");
+  return [...new Set(errors)];
+}
+
+function providerResourceTarget(target) {
+  if (target.provider === "azure") {
+    return {
+      resourceGroup: target.azure?.resourceGroup ?? null,
+      acrName: target.azure?.acrName ?? null,
+      webAppName: target.azure?.webAppName ?? null,
+      workerAppName: target.azure?.workerAppName ?? null,
+    };
+  }
+  if (target.provider === "railway") {
+    return {
+      projectId: target.railway?.projectId ?? null,
+      environmentId: target.railway?.environmentId ?? null,
+      webServiceId: target.railway?.webServiceId ?? null,
+      workerServiceId: target.railway?.workerServiceId ?? null,
+    };
+  }
+  return null;
 }

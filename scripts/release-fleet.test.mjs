@@ -8,7 +8,7 @@ describe("release fleet command", () => {
   it("defaults to latest-stable and primary target groups", () => {
     expect(buildWorkflowInputs(["--reason", "Ship latest stable."])).toMatchObject({
       release: "latest-stable",
-      targets: "railway-customers,azure-selfserve,ops",
+      targets: "managed-customers,selfserve,ops",
       reason: "Ship latest stable.",
       dryRun: false,
       concurrency: 2,
@@ -44,7 +44,7 @@ describe("release fleet command", () => {
       "Plan full release.",
       "--no-watch",
     ])).toMatchObject({
-      targets: "railway-customers,azure-selfserve,ops,backup-app",
+      targets: "managed-customers,selfserve,ops,backup-app",
     });
   });
 
