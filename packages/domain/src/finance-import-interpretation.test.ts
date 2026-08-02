@@ -11,6 +11,7 @@ const textClaim = (id: string) => ({
   role: "TEXT" as const,
   source: { kind: "CELL" as const, sheet: "Report", row: 1, column: 1, evidence: id },
 });
+const blocker = (code: string) => ({ code, severity: "BLOCKER" as const, message: "Review required.", evidenceClaimIds: [] });
 
 const resolved = {
   version: 1,
@@ -59,7 +60,7 @@ const unresolved = {
     confidence: 0.25,
   },
   evidenceClaims: [textClaim("ambiguous-format")],
-  exceptions: [{ code: "NUMERIC_FORMAT_UNRESOLVED", severity: "BLOCKER", message: "Confirm the numeric format.", evidenceClaimIds: ["ambiguous-format"] }],
+  exceptions: ["REPORT_TYPE_UNRESOLVED", "BASIS_UNRESOLVED", "CADENCE_UNRESOLVED", "NUMERIC_FORMAT_UNRESOLVED", "SEMANTIC_PROPOSAL_UNCERTAIN"].map(blocker),
 } as const;
 
 describe("Finance import interpretation state", () => {
@@ -91,6 +92,7 @@ describe("Finance import interpretation state", () => {
     { ...resolved, evidenceClaims: resolved.evidenceClaims.map((claim, index) => index === 0 ? { ...claim, source: { kind: "PDF", page: 1, lineIndex: 0, line: "abc", start: 0, end: 99, text: "abc" } } : claim) },
     { ...resolved, evidenceClaims: resolved.evidenceClaims.map((claim, index) => index === 0 ? { ...claim, source: { ...claim.source, evidence: "abc", start: 0, end: 99, text: "abc" } } : claim) },
     { ...resolved, evidenceClaims: resolved.evidenceClaims.map((claim, index) => index === 0 ? { ...claim, source: { ...claim.source, evidence: " " } } : claim) },
+    { ...unresolved, exceptions: [] },
   ])("fails closed on invalid or expanded state %#", async (value) => {
     const { parseFinanceImportInterpretationV1 } = await import("./finance-import-interpretation");
     expect(() => parseFinanceImportInterpretationV1(value)).toThrow(expect.objectContaining({

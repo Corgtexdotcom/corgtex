@@ -155,6 +155,13 @@ export const financeImportInterpretationSchemaV1 = z.strictObject({
     ? [...value.numericFormat.decimalSeparatorEvidenceClaimIds, ...value.numericFormat.groupingSeparatorEvidenceClaimIds, ...value.numericFormat.amountScaleEvidenceClaimIds]
     : value.numericFormat.evidenceClaimIds;
   const exceptionIds = value.exceptions.flatMap(({ evidenceClaimIds }) => evidenceClaimIds);
+  const blockerCodes = new Set(value.exceptions.filter(({ severity }) => severity === "BLOCKER").map(({ code }) => code));
+  const requiredBlockers = [
+    [value.classification.reportType === "OTHER", "REPORT_TYPE_UNRESOLVED"], [value.classification.basis === "UNSPECIFIED", "BASIS_UNRESOLVED"],
+    [value.classification.cadence === null, "CADENCE_UNRESOLVED"], [value.numericFormat.status === "UNRESOLVED", "NUMERIC_FORMAT_UNRESOLVED"],
+    [value.classification.confidence === 0, "SEMANTIC_PROPOSAL_UNCERTAIN"],
+  ] as const;
+  for (const [required, code] of requiredBlockers) if (required && !blockerCodes.has(code)) context.addIssue({ code: "custom", path: ["exceptions"], message: `${code} blocker is required.` });
   const textIds = new Set([...classificationIds, ...numericIds]);
   const referencedIds = new Set([...textIds, ...exceptionIds]);
   const claims = new Map(value.evidenceClaims.map((claim) => [claim.id, claim]));
