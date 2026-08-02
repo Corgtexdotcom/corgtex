@@ -14,6 +14,8 @@ const requiredEvidenceIds = z.array(boundedId).min(1).max(50).refine(unique, "Ev
 const confidence = z.number().min(0).max(1);
 const boundedEvidenceText = z.string().max(2_000_000);
 const selectedEvidenceText = z.string().min(1).max(2_000_000).refine((value) => value.trim().length > 0, "Evidence text is required.");
+const splitsSurrogate = (value: string, offset: number) => offset > 0 && offset < value.length
+  && /[\uD800-\uDBFF]/.test(value[offset - 1]!) && /[\uDC00-\uDFFF]/.test(value[offset]!);
 
 function isBoundedPlainJson(value: unknown, state = { nodes: 0, seen: new Set<object>() }): boolean {
   if (++state.nodes > 50_000) return false;
@@ -47,7 +49,8 @@ const pdfSourceSchema = z.strictObject({
   end: z.number().int().positive(),
   text: selectedEvidenceText,
 }).superRefine((source, context) => {
-  if (source.start >= source.end || source.end > source.line.length || source.line.slice(source.start, source.end) !== source.text) {
+  if (source.start >= source.end || source.end > source.line.length || splitsSurrogate(source.line, source.start)
+    || splitsSurrogate(source.line, source.end) || source.line.slice(source.start, source.end) !== source.text) {
     context.addIssue({ code: "custom", path: ["text"], message: "PDF evidence span is inconsistent." });
   }
 });
@@ -66,7 +69,8 @@ const cellSourceSchema = z.strictObject({
   if (span.some((value) => value !== undefined) && span.some((value) => value === undefined)) {
     context.addIssue({ code: "custom", path: ["text"], message: "Cell evidence span must be complete." });
   } else if (source.start !== undefined && source.end !== undefined && source.text !== undefined
-    && (source.start >= source.end || source.end > source.evidence.length || source.evidence.slice(source.start, source.end) !== source.text)) {
+    && (source.start >= source.end || source.end > source.evidence.length || splitsSurrogate(source.evidence, source.start)
+      || splitsSurrogate(source.evidence, source.end) || source.evidence.slice(source.start, source.end) !== source.text)) {
     context.addIssue({ code: "custom", path: ["text"], message: "Cell evidence span is inconsistent." });
   }
 });

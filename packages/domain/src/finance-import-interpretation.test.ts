@@ -90,6 +90,7 @@ describe("Finance import interpretation state", () => {
     { ...resolved, evidenceClaims: resolved.evidenceClaims.map((claim, index) => index === 0 ? { ...claim, id: "basis" } : claim) },
     { ...resolved, evidenceClaims: resolved.evidenceClaims.map((claim, index) => index === 0 ? { ...claim, source: { ...claim.source, start: 0, end: 3, text: "wrong" } } : claim) },
     { ...resolved, evidenceClaims: resolved.evidenceClaims.map((claim, index) => index === 0 ? { ...claim, source: { kind: "PDF", page: 1, lineIndex: 0, line: "abc", start: 0, end: 99, text: "abc" } } : claim) },
+    { ...resolved, evidenceClaims: resolved.evidenceClaims.map((claim, index) => index === 0 ? { ...claim, source: { kind: "PDF", page: 1, lineIndex: 0, line: String.fromCharCode(0xd83d, 0xde00), start: 0, end: 1, text: String.fromCharCode(0xd83d) } } : claim) },
     { ...resolved, evidenceClaims: resolved.evidenceClaims.map((claim, index) => index === 0 ? { ...claim, source: { ...claim.source, evidence: "abc", start: 0, end: 99, text: "abc" } } : claim) },
     { ...resolved, evidenceClaims: resolved.evidenceClaims.map((claim, index) => index === 0 ? { ...claim, source: { ...claim.source, evidence: " " } } : claim) },
     { ...unresolved, exceptions: [] },
