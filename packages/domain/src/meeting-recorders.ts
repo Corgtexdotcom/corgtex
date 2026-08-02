@@ -4005,6 +4005,47 @@ function transcriptRecoveryIsPending(error: unknown) {
   return false;
 }
 
+async function terminalizeRecordingWithLock(
+  recording: { id: string; workspaceId: string; meetingId: string; provider: string },
+  failureCode: string,
+  failureMessage: string,
+) {
+  return await prisma.$transaction(async (tx) => {
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`${recording.workspaceId}:${recording.meetingId}:${recording.provider}:transcript`}, 0))`;
+    const current = await tx.meetingRecording.findUnique({
+      where: { id: recording.id },
+      select: { transcriptProcessedAt: true, status: true },
+    });
+    if (!current || current.transcriptProcessedAt || current.status !== "COMPLETED") {
+      return false;
+    }
+
+    await tx.meetingRecording.update({
+      where: { id: recording.id },
+      data: {
+        status: "FAILED",
+        activeDedupeKey: null,
+        failureCode,
+        failureMessage,
+        transcriptProcessedAt: new Date(),
+      },
+    });
+
+    await tx.meetingRecorderSmokeRun.updateMany({
+      where: {
+        recordingId: recording.id,
+        status: { in: ["PENDING", "SCHEDULED"] },
+      },
+      data: {
+        status: "FAILED",
+        failureMessage,
+        completedAt: new Date(),
+      },
+    });
+    return true;
+  });
+}
+
 async function recoverRecallTranscripts(workspaceId: string) {
   const now = new Date();
   const recordings = await prisma.meetingRecording.findMany({
@@ -4041,21 +4082,19 @@ async function recoverRecallTranscripts(workspaceId: string) {
 
       const expectedEnd = recordingExpectedEnd(recording);
       if (now.getTime() - expectedEnd.getTime() >= 24 * 60 * 60 * 1000) {
-        await prisma.meetingRecording.update({
-          where: { id: recording.id },
-          data: {
-            status: "FAILED",
-            failureCode: "RECORDER_TRANSCRIPT_RECOVERY_EXPIRED",
-            failureMessage: "Transcript recovery expired after 24 hours.",
-            transcriptProcessedAt: new Date(),
-          },
-        });
-        recorderLog("warn", "reconcile_recall_transcript_expired", {
-          workspaceId,
-          meetingId: recording.meetingId,
-          recordingId: recording.id,
-          provider: recording.provider,
-        });
+        const terminalized = await terminalizeRecordingWithLock(
+          recording,
+          "RECORDER_TRANSCRIPT_RECOVERY_EXPIRED",
+          "Transcript recovery expired after 24 hours.",
+        );
+        if (terminalized) {
+          recorderLog("warn", "reconcile_recall_transcript_expired", {
+            workspaceId,
+            meetingId: recording.meetingId,
+            recordingId: recording.id,
+            provider: recording.provider,
+          });
+        }
         continue;
       }
 
@@ -4113,15 +4152,23 @@ async function recoverRecallTranscripts(workspaceId: string) {
           });
           continue;
         }
-        await prisma.meetingRecording.update({
-          where: { id: recording.id },
-          data: {
-            status: "FAILED",
-            failureCode: "RECORDER_TRANSCRIPT_FETCH_FAILED",
-            failureMessage: "Non-retryable transcript fetch error.",
-            transcriptProcessedAt: new Date(),
-          },
-        });
+        if (error instanceof ProviderRequestError) {
+          const terminalized = await terminalizeRecordingWithLock(
+            recording,
+            "RECORDER_TRANSCRIPT_FETCH_FAILED",
+            "Non-retryable transcript fetch error.",
+          );
+          if (terminalized) {
+            recorderLog("warn", "reconcile_recall_transcript_failed", {
+              workspaceId,
+              meetingId: recording.meetingId,
+              recordingId: recording.id,
+              provider: recording.provider,
+              failureCode: providerFailureCode(error),
+            });
+          }
+          continue;
+        }
         recorderLog("warn", "reconcile_recall_transcript_failed", {
           workspaceId,
           meetingId: recording.meetingId,

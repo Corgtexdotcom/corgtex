@@ -4120,13 +4120,22 @@ describe("meeting recorder domain", () => {
 
     await reconcileMeetingRecorders("workspace-1");
 
+    expect(prismaMock.$executeRaw).toHaveBeenCalledWith(
+      expect.arrayContaining([expect.stringContaining("pg_advisory_xact_lock")]),
+      expect.any(String)
+    );
     expect(prismaMock.meetingRecording.update).toHaveBeenCalledWith({
       where: { id: "recording-1" },
       data: expect.objectContaining({
         status: "FAILED",
+        activeDedupeKey: null,
         failureCode: "RECORDER_TRANSCRIPT_FETCH_FAILED",
         transcriptProcessedAt: expect.any(Date),
       }),
+    });
+    expect(prismaMock.meetingRecorderSmokeRun.updateMany).toHaveBeenCalledWith({
+      where: expect.objectContaining({ recordingId: "recording-1" }),
+      data: expect.objectContaining({ status: "FAILED" }),
     });
   });
 
@@ -4152,13 +4161,119 @@ describe("meeting recorder domain", () => {
     await reconcileMeetingRecorders("workspace-1");
 
     expect(fetchMock).not.toHaveBeenCalled();
+    expect(prismaMock.$executeRaw).toHaveBeenCalledWith(
+      expect.arrayContaining([expect.stringContaining("pg_advisory_xact_lock")]),
+      expect.any(String)
+    );
     expect(prismaMock.meetingRecording.update).toHaveBeenCalledWith({
       where: { id: "recording-1" },
       data: expect.objectContaining({
         status: "FAILED",
+        activeDedupeKey: null,
         failureCode: "RECORDER_TRANSCRIPT_RECOVERY_EXPIRED",
         transcriptProcessedAt: expect.any(Date),
       }),
     });
+    expect(prismaMock.meetingRecorderSmokeRun.updateMany).toHaveBeenCalledWith({
+      where: expect.objectContaining({ recordingId: "recording-1" }),
+      data: expect.objectContaining({ status: "FAILED" }),
+    });
+  });
+
+  it("protects expiry terminalization against late successful webhook races", async () => {
+    const { reconcileMeetingRecorders } = await import("./meeting-recorders");
+    const recording = {
+      id: "recording-1",
+      workspaceId: "workspace-1",
+      meetingId: "meeting-1",
+      provider: "RECALL_AI",
+      externalBotId: "recall-bot-1",
+      status: "COMPLETED",
+      createdAt: new Date(Date.now() - 26 * 60 * 60 * 1000),
+      joinAt: new Date(Date.now() - 26 * 60 * 60 * 1000),
+      meeting: {
+        recordedAt: new Date(Date.now() - 26 * 60 * 60 * 1000),
+        scheduledEndAt: new Date(Date.now() - 25 * 60 * 60 * 1000),
+      },
+    };
+    prismaMock.meetingRecording.findMany.mockResolvedValueOnce([recording]).mockResolvedValueOnce([]).mockResolvedValueOnce([]);
+    prismaMock.meetingRecording.findUnique.mockResolvedValue({ ...recording, transcriptProcessedAt: new Date(), status: "COMPLETED" });
+
+    await reconcileMeetingRecorders("workspace-1");
+
+    expect(prismaMock.$executeRaw).toHaveBeenCalledWith(
+      expect.arrayContaining([expect.stringContaining("pg_advisory_xact_lock")]),
+      expect.any(String)
+    );
+    expect(prismaMock.meetingRecording.update).not.toHaveBeenCalled();
+    expect(prismaMock.meetingRecorderSmokeRun.updateMany).not.toHaveBeenCalled();
+  });
+
+  it("protects permanent failure terminalization against late successful webhook races", async () => {
+    const { reconcileMeetingRecorders } = await import("./meeting-recorders");
+    const recording = {
+      id: "recording-1",
+      workspaceId: "workspace-1",
+      meetingId: "meeting-1",
+      provider: "RECALL_AI",
+      externalBotId: "recall-bot-1",
+      status: "COMPLETED",
+      createdAt: new Date(Date.now() - 2 * 60 * 60 * 1000),
+      joinAt: new Date(Date.now() - 2 * 60 * 60 * 1000),
+      meeting: {
+        recordedAt: new Date(Date.now() - 2 * 60 * 60 * 1000),
+        scheduledEndAt: new Date(Date.now() - 1 * 60 * 60 * 1000),
+      },
+    };
+    prismaMock.meetingRecording.findMany.mockResolvedValueOnce([recording]).mockResolvedValueOnce([]).mockResolvedValueOnce([]);
+    prismaMock.meetingRecording.findUnique
+      .mockResolvedValueOnce({ ...recording, transcriptProcessedAt: null, status: "COMPLETED" })
+      .mockResolvedValueOnce({ ...recording, transcriptProcessedAt: new Date(), status: "COMPLETED" });
+    fetchMock.mockResolvedValue(new Response("Forbidden", { status: 403 }));
+
+    await reconcileMeetingRecorders("workspace-1");
+
+    expect(prismaMock.$executeRaw).toHaveBeenCalledWith(
+      expect.arrayContaining([expect.stringContaining("pg_advisory_xact_lock")]),
+      expect.any(String)
+    );
+    expect(prismaMock.meetingRecording.update).not.toHaveBeenCalled();
+    expect(prismaMock.meetingRecorderSmokeRun.updateMany).not.toHaveBeenCalled();
+  });
+
+  it("leaves transient transport failures recoverable", async () => {
+    const { reconcileMeetingRecorders } = await import("./meeting-recorders");
+    const recording = {
+      id: "recording-1",
+      workspaceId: "workspace-1",
+      meetingId: "meeting-1",
+      provider: "RECALL_AI",
+      externalBotId: "recall-bot-1",
+      status: "COMPLETED",
+      createdAt: new Date(Date.now() - 2 * 60 * 60 * 1000),
+      joinAt: new Date(Date.now() - 2 * 60 * 60 * 1000),
+      meeting: {
+        recordedAt: new Date(Date.now() - 2 * 60 * 60 * 1000),
+        scheduledEndAt: new Date(Date.now() - 1 * 60 * 60 * 1000),
+      },
+    };
+    prismaMock.meetingRecording.findMany.mockResolvedValueOnce([recording]).mockResolvedValueOnce([]).mockResolvedValueOnce([]);
+    prismaMock.meetingRecording.findUnique.mockResolvedValue({ ...recording, transcriptProcessedAt: null, status: "COMPLETED" });
+    fetchMock.mockRejectedValue(new TypeError("fetch failed"));
+
+    await reconcileMeetingRecorders("workspace-1");
+
+    expect(prismaMock.meetingRecording.update).not.toHaveBeenCalled();
+  });
+
+  it("does not retry terminalized recordings in subsequent reconciliations", async () => {
+    const { reconcileMeetingRecorders } = await import("./meeting-recorders");
+    await reconcileMeetingRecorders("workspace-1");
+    
+    expect(prismaMock.meetingRecording.findMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({
+        transcriptProcessedAt: null,
+      })
+    }));
   });
 });
