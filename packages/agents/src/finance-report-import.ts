@@ -1,6 +1,9 @@
+import { createHash } from "node:crypto";
 import { defaultModelGateway, type ModelGateway } from "@corgtex/models";
-import { normalizeFinanceImportCurrency, resolveFinanceImportCurrency } from "@corgtex/domain";
+import { AppError, claimFinanceReportImportProposal, failFinanceReportImportProposal, normalizeFinanceImportCurrency,
+  persistFinanceReportImportProposal, resolveFinanceImportCurrency } from "@corgtex/domain";
 import { z } from "zod";
+import { executeAgentRun } from "./runtime";
 import { validateFinanceReportEvidenceSourcesV1, validateFinanceReportEvidenceStructureV1, type FinanceReportEvidenceFormat, type FinanceReportEvidenceSourceFact } from "./finance-report-evidence";
 import {
   FINANCE_REPORT_ISO_4217_CODES,
@@ -131,4 +134,81 @@ export async function proposeFinanceReportImportV1(input: FinanceReportImportPro
     feedback = bound.feedback;
   }
   return { version: 1, kind: "FAILURE", attempts: 2, code: "INVALID_MODEL_OUTPUT" };
+}
+
+const RESERVED_INTERPRETATION_BLOCKERS = new Set(["REPORT_TYPE_UNRESOLVED", "BASIS_UNRESOLVED", "CADENCE_UNRESOLVED", "NUMERIC_FORMAT_UNRESOLVED", "SEMANTIC_PROPOSAL_UNCERTAIN"]);
+function durableInterpretation(proposal: FinanceReportImportProposalV1) {
+  const baseIds = new Set([...proposal.classification.reportTypeEvidenceClaimIds, ...proposal.classification.basisEvidenceClaimIds,
+    ...proposal.classification.cadenceEvidenceClaimIds, ...(proposal.numericFormat.status === "RESOLVED"
+      ? [...proposal.numericFormat.decimalSeparatorEvidenceClaimIds, ...proposal.numericFormat.groupingSeparatorEvidenceClaimIds, ...proposal.numericFormat.amountScaleEvidenceClaimIds]
+      : proposal.numericFormat.evidenceClaimIds)]);
+  const required = new Set([...(proposal.classification.reportType === "OTHER" ? ["REPORT_TYPE_UNRESOLVED"] : []),
+    ...(proposal.classification.basis === "UNSPECIFIED" ? ["BASIS_UNRESOLVED"] : []), ...(proposal.classification.cadence === null ? ["CADENCE_UNRESOLVED"] : []),
+    ...(proposal.numericFormat.status === "UNRESOLVED" ? ["NUMERIC_FORMAT_UNRESOLVED"] : []), ...(proposal.classification.confidence === 0 ? ["SEMANTIC_PROPOSAL_UNCERTAIN"] : [])]);
+  const codes = new Set<string>();
+  const exceptions = proposal.exceptions.filter((exception) => exception.code !== "CURRENCY_UNRESOLVED"
+    && (!RESERVED_INTERPRETATION_BLOCKERS.has(exception.code) || required.has(exception.code))
+    && !codes.has(exception.code) && Boolean(codes.add(exception.code)));
+  for (const exception of exceptions) for (const id of exception.evidenceClaimIds) baseIds.add(id);
+  return { version: 1 as const, classification: proposal.classification, numericFormat: proposal.numericFormat,
+    evidenceClaims: proposal.evidenceClaims.filter(({ id }) => baseIds.has(id)), exceptions };
+}
+function candidateDrafts(proposal: FinanceReportImportProposalV1) {
+  const claims = new Map(proposal.evidenceClaims.map((claim) => [claim.id, claim]));
+  const periods = new Map(proposal.periods.map((period) => [period.id, period]));
+  const nodes = new Map(proposal.hierarchy.map((node) => [node.id, node]));
+  const path = (id: string) => { const labels: string[] = []; let node = nodes.get(id); while (node) { labels.unshift(node.label); node = node.parentId ? nodes.get(node.parentId) : undefined; } return labels; };
+  return proposal.mappings.map((mapping) => {
+    const claim = claims.get(mapping.amountClaimId)!, period = periods.get(mapping.periodId)!, accountPath = path(mapping.hierarchyId);
+    const source = claim.source, location = source.kind === "PDF" ? `PDF page ${source.page}, line ${source.lineIndex + 1}` : `${source.sheet} R${source.row}C${source.column}`;
+    return { sourceKey: createHash("sha256").update(mapping.sourceKey).digest("hex"), sourceLocation: source, sourceLabel: accountPath.at(-1)!,
+      sourcePath: accountPath, proposedAccountPath: accountPath, factKind: mapping.factKind, periodStart: period.periodStart, periodEnd: period.periodEnd,
+      amountCents: mapping.amountCents!, extractionJson: { claimId: claim.id, sourceKey: mapping.sourceKey, source },
+      proposalJson: { version: 1, mappingId: mapping.id, periodId: mapping.periodId, hierarchyId: mapping.hierarchyId, confidence: mapping.confidence },
+      confidenceBps: Math.round(mapping.confidence * 10_000), evidenceMd: location };
+  });
+}
+
+export async function runFinanceReportImportAgentV1(params: { workspaceId: string; batchId: string; expectedVersion: number;
+  workflowJobId: string; attempts: number; isFinalAttempt: boolean }) {
+  let claim: Awaited<ReturnType<typeof claimFinanceReportImportProposal>> | undefined;
+  let runId: string | undefined;
+  let providerFailure = false;
+  try {
+    const run = await executeAgentRun({ agentKey: "finance-report-import", workspaceId: params.workspaceId, triggerType: "EVENT",
+      triggerRef: `${params.workflowJobId}:attempt:${params.attempts}`, goal: "Interpret exact Finance report evidence into blocked editable candidates for deterministic reconciliation.",
+      payload: { batchId: params.batchId, workflowJobId: params.workflowJobId }, plan: ["claim-import", "propose-semantics", "persist-blocked-candidates"],
+      buildContext: async (_helpers, currentRunId) => { runId = currentRunId; claim = await claimFinanceReportImportProposal({ ...params, agentRunId: currentRunId });
+        return { batchId: params.batchId, skipped: claim.skipped, version: claim.version, ...(!claim.skipped ? { format: claim.format } : {}) }; },
+      execute: async (_context, _helpers, currentRunId, model) => {
+        if (!claim || claim.skipped) return { resultJson: { batchId: params.batchId, skipped: true } };
+        const result = await proposeFinanceReportImportV1({ workspaceId: params.workspaceId, format: claim.format,
+          extractedEvidence: claim.extractedEvidence, workspaceCurrencyCodes: claim.workspaceCurrencyCodes, model,
+          workflowJobId: params.workflowJobId, agentRunId: currentRunId });
+        if (result.kind === "FAILURE") {
+          if (result.code === "PROVIDER_ERROR") { providerFailure = true; throw new Error("Finance report interpretation provider failed."); }
+          const failed = await failFinanceReportImportProposal({ ...params, agentRunId: currentRunId, expectedVersion: claim.version, failureCode: result.code });
+          return { resultJson: { batchId: params.batchId, kind: "FAILURE", failureCode: failed.failureCode, attempts: result.attempts } };
+        }
+        const blockers = result.proposal.exceptions.filter(({ severity }) => severity === "BLOCKER");
+        const needsInput = blockers.length > 0 || result.proposal.mappings.some(({ amountCents }) => amountCents === null);
+        const periods = result.proposal.periods.map(({ periodStart, periodEnd }) => [periodStart, periodEnd]).flat().sort();
+        const stored = await persistFinanceReportImportProposal({ ...params, agentRunId: currentRunId, expectedVersion: claim.version,
+          interpretation: durableInterpretation(result.proposal), currency: result.proposal.currency, periodStart: periods[0]!, periodEnd: periods.at(-1)!,
+          candidates: needsInput ? [] : candidateDrafts(result.proposal), warningCount: result.proposal.exceptions.filter(({ severity }) => severity === "WARNING").length,
+          blockerCount: needsInput ? Math.max(1, blockers.length) : 0, ...(blockers[0] ? { blocker: { code: blockers[0].code, message: blockers[0].message } } : {}) });
+        return { resultJson: { batchId: params.batchId, kind: "SUCCESS", attempts: result.attempts, stage: stored.stage, candidateCount: stored.candidateCount } };
+      } });
+    if ("skipped" in run && run.skipped) {
+      if (!params.isFinalAttempt) throw new Error("Finance report agent runtime policy deferred the run.");
+      return failFinanceReportImportProposal({ ...params, expectedVersion: params.expectedVersion, failureCode: "AGENT_UNAVAILABLE" });
+    }
+    return run;
+  } catch (error) {
+    if (providerFailure && params.isFinalAttempt && claim && !claim.skipped && runId) await failFinanceReportImportProposal({ ...params, agentRunId: runId,
+      expectedVersion: claim.version, failureCode: "PROVIDER_ERROR" });
+    if (error instanceof AppError && ["INVALID_INPUT", "INVALID_FINANCE_IMPORT_INTERPRETATION", "INVALID_FINANCE_IMPORT_PROPOSAL"].includes(error.code)
+      && claim && !claim.skipped && runId) return failFinanceReportImportProposal({ ...params, agentRunId: runId, expectedVersion: claim.version, failureCode: "INVALID_MODEL_OUTPUT" });
+    throw error;
+  }
 }

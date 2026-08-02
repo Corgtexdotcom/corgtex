@@ -4,8 +4,10 @@ import { claimFinanceReportImportExtraction, completeFinanceReportImportExtracti
 import { extractFinanceReportFile, FinanceFileExtractionError,
   type FinanceFileExtraction } from "@corgtex/knowledge";
 import { defaultStorage, type StorageProvider } from "@corgtex/storage";
+import { runFinanceReportImportAgentV1 } from "@corgtex/agents";
 
 export const FINANCE_REPORT_IMPORT_EXTRACTION_JOB_TYPE = "finance-report-import.extract";
+export const FINANCE_REPORT_IMPORT_PROPOSAL_JOB_TYPE = "finance-report-import.interpret";
 export const FINANCE_REPORT_IMPORT_STORAGE_READ_TIMEOUT_MS = 2 * 60 * 1_000;
 const MAX_EXTRACTED_TEXT_CHARS = 2_000_000;
 type ExtractionStorage = Pick<StorageProvider, "get">;
@@ -83,4 +85,9 @@ export async function runFinanceReportImportExtractionJob(params: ExtractionJob)
     }
     throw error;
   }
+}
+
+export async function runFinanceReportImportProposalJob(params: { workspaceId: string; batchId: string; expectedVersion: number;
+  workflowJobId: string; attempts: number; isFinalAttempt: boolean }) {
+  return runFinanceReportImportAgentV1(params);
 }

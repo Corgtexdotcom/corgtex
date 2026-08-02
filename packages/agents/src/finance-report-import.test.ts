@@ -1,8 +1,15 @@
 import type { ModelGateway } from "@corgtex/models";
+import { AppError } from "@corgtex/domain";
 import { describe, expect, it, vi } from "vitest";
+const lifecycle = vi.hoisted(() => ({ claim: vi.fn(), persist: vi.fn(), fail: vi.fn(), execute: vi.fn(), extract: vi.fn() }));
+vi.mock("@corgtex/domain", async (load) => ({ ...await load<typeof import("@corgtex/domain")>(), claimFinanceReportImportProposal: lifecycle.claim,
+  persistFinanceReportImportProposal: lifecycle.persist, failFinanceReportImportProposal: lifecycle.fail }));
+vi.mock("@corgtex/models", async (load) => ({ ...await load<typeof import("@corgtex/models")>(), defaultModelGateway: { extract: lifecycle.extract } }));
+vi.mock("./runtime", () => ({ executeAgentRun: lifecycle.execute }));
 import {
   financeReportModelProposalSchemaV1,
   proposeFinanceReportImportV1,
+  runFinanceReportImportAgentV1,
 } from "./finance-report-import";
 
 const lines = ["Profit and Loss", "Accrual", "Monthly", "January 2026", "February 2026", "Revenue", "1.23", "2.34", "USD", "Figures in thousands", "Decimal separator dot"];
@@ -159,5 +166,46 @@ describe("proposeFinanceReportImportV1", () => {
     await expect(proposeFinanceReportImportV1({ workspaceId: "workspace-1", format: report.format, extractedEvidence: report.extractedEvidence, workspaceCurrencyCodes: ["ZZZ"], gateway: unused.gateway })).resolves.toEqual({ version: 1, kind: "FAILURE", attempts: 0, code: "INVALID_INPUT" });
     await expect(proposeFinanceReportImportV1({ workspaceId: "workspace-1", format: "PDF", extractedEvidence: "not-json", workspaceCurrencyCodes: [], gateway: unused.gateway })).resolves.toEqual({ version: 1, kind: "FAILURE", attempts: 0, code: "INVALID_INPUT" });
     expect(unused.extract).not.toHaveBeenCalled();
+  });
+});
+
+describe("runFinanceReportImportAgentV1", () => {
+  it("links a sanitized AgentRun and persists only exact blocked candidates", async () => {
+    vi.clearAllMocks(); const report = source(); lifecycle.claim.mockResolvedValue({ skipped: false, batchId: "batch-1", version: 4,
+      format: report.format, extractedEvidence: report.extractedEvidence, workspaceCurrencyCodes: [] });
+    const output = { ...proposal(), exceptions: [{ code: "SOURCE_WARNING", severity: "WARNING", message: "Review source.", evidenceClaimIds: ["jan-amount"] }] };
+    lifecycle.extract.mockResolvedValue({ output, raw: "private", usage: {} });
+    lifecycle.persist.mockResolvedValue({ batchId: "batch-1", version: 5, stage: "RECONCILING", candidateCount: 2 });
+    let recorded: unknown;
+    lifecycle.execute.mockImplementation(async (config) => { const context = await config.buildContext({}, "run-1");
+      const outcome = await config.execute(context, {}, "run-1", "quality-model"); recorded = { payload: config.payload, context, result: outcome.resultJson };
+      return { id: "run-1", status: "COMPLETED", resultJson: outcome.resultJson }; });
+    await runFinanceReportImportAgentV1({ workspaceId: "workspace-1", batchId: "batch-1", expectedVersion: 3,
+      workflowJobId: "job-1", attempts: 1, isFinalAttempt: false });
+    expect(lifecycle.execute.mock.calls[0][0].triggerRef).toBe("job-1:attempt:1");
+    expect(lifecycle.persist.mock.calls[0][0]).toMatchObject({ agentRunId: "run-1", expectedVersion: 4, interpretation: { exceptions: [{ code: "SOURCE_WARNING" }] },
+      candidates: [{ amountCents: 123_000, sourceKey: expect.stringMatching(/^[a-f0-9]{64}$/) }, { amountCents: 234_000 }] });
+    expect(JSON.stringify(recorded)).not.toMatch(/Profit and Loss|123000|jan-revenue/);
+    lifecycle.persist.mockRejectedValue(new AppError(400, "INVALID_FINANCE_IMPORT_PROPOSAL", "invalid")); lifecycle.fail.mockResolvedValue({ stage: "FAILED" });
+    await expect(runFinanceReportImportAgentV1({ workspaceId: "workspace-1", batchId: "batch-1", expectedVersion: 3,
+      workflowJobId: "job-1", attempts: 2, isFinalAttempt: false })).resolves.toMatchObject({ stage: "FAILED" });
+    expect(lifecycle.fail).toHaveBeenLastCalledWith(expect.objectContaining({ failureCode: "INVALID_MODEL_OUTPUT" }));
+  });
+
+  it("defers policy/provider failures and records bounded final states", async () => {
+    vi.clearAllMocks(); lifecycle.execute.mockResolvedValue({ skipped: true, reason: "concurrency_limit" });
+    await expect(runFinanceReportImportAgentV1({ workspaceId: "workspace-1", batchId: "batch-1", expectedVersion: 3,
+      workflowJobId: "job-1", attempts: 1, isFinalAttempt: false })).rejects.toThrow("policy deferred");
+    expect(lifecycle.fail).not.toHaveBeenCalled();
+    lifecycle.fail.mockResolvedValue({ stage: "NEEDS_INPUT", failureCode: "AGENT_UNAVAILABLE" });
+    await expect(runFinanceReportImportAgentV1({ workspaceId: "workspace-1", batchId: "batch-1", expectedVersion: 3,
+      workflowJobId: "job-1", attempts: 5, isFinalAttempt: true })).resolves.toMatchObject({ stage: "NEEDS_INPUT" });
+    expect(lifecycle.fail).toHaveBeenCalledWith(expect.objectContaining({ failureCode: "AGENT_UNAVAILABLE" }));
+    lifecycle.execute.mockImplementation(async (config) => config.execute(await config.buildContext({}, "run-2"), {}, "run-2", "quality-model"));
+    lifecycle.claim.mockResolvedValue({ skipped: false, version: 4, format: source().format, extractedEvidence: source().extractedEvidence, workspaceCurrencyCodes: [] });
+    lifecycle.extract.mockRejectedValue(new Error("private provider detail")); lifecycle.fail.mockResolvedValue({ stage: "FAILED", failureCode: "PROVIDER_ERROR" });
+    await expect(runFinanceReportImportAgentV1({ workspaceId: "workspace-1", batchId: "batch-1", expectedVersion: 3,
+      workflowJobId: "job-2", attempts: 5, isFinalAttempt: true })).rejects.toThrow("provider failed");
+    expect(lifecycle.fail).toHaveBeenLastCalledWith(expect.objectContaining({ failureCode: "PROVIDER_ERROR", agentRunId: "run-2" }));
   });
 });

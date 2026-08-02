@@ -37,6 +37,12 @@ function readPayloadString(payload: unknown, key: string) {
   return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
 }
 
+function readPayloadPositiveInteger(payload: unknown, key: string) {
+  if (!isObjectRecord(payload)) return null;
+  const value = payload[key];
+  return Number.isSafeInteger(value) && Number(value) > 0 ? Number(value) : null;
+}
+
 function isReplayEvent(payload: unknown) {
   if (!isObjectRecord(payload)) {
     return false;
@@ -155,6 +161,15 @@ export function deriveJobsForEvent(event: {
         payload: { batchId },
         dedupeKey: `finance-report-import:${event.workspaceId}:${batchId}:extract:v1`,
       });
+    }
+  }
+
+  if (event.type === "finance-report-import.extracted") {
+    const batchId = readPayloadString(event.payload, "batchId");
+    const expectedVersion = readPayloadPositiveInteger(event.payload, "expectedVersion");
+    if (event.workspaceId && batchId && expectedVersion && event.aggregateType === "FinanceImportBatch" && event.aggregateId === batchId) {
+      jobs.push({ workspaceId: event.workspaceId, eventId: event.id, type: "finance-report-import.interpret",
+        payload: { batchId, expectedVersion }, dedupeKey: `finance-report-import:${event.workspaceId}:${batchId}:interpret:v1` });
     }
   }
 

@@ -7,6 +7,7 @@ const { prismaMock } = vi.hoisted(() => ({
     financeImportBatch: { findUnique: vi.fn(), updateMany: vi.fn() },
     document: { findUnique: vi.fn(), update: vi.fn() },
     brainSource: { findUnique: vi.fn(), update: vi.fn() },
+    event: { create: vi.fn() },
     auditLog: { create: vi.fn() },
   },
 }));
@@ -134,6 +135,10 @@ describe("Finance report import extraction lifecycle", () => {
     expect(prismaMock.auditLog.create).toHaveBeenCalledWith(expect.objectContaining({
       data: expect.objectContaining({ action: "finance-report-import.extracted" }),
     }));
+    expect(prismaMock.event.create).toHaveBeenCalledWith({ data: { workspaceId: "workspace-1",
+      type: "finance-report-import.extracted", aggregateType: "FinanceImportBatch", aggregateId: "batch-1",
+      payload: { batchId: "batch-1", expectedVersion: 3 } } });
+    expect(JSON.stringify(prismaMock.event.create.mock.calls)).not.toMatch(/synthetic|aaaa|Account|Revenue/);
     vi.clearAllMocks();
     prismaMock.$transaction.mockImplementation((callback) => callback(prismaMock));
     prismaMock.$executeRaw.mockResolvedValue(1);

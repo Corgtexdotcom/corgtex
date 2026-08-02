@@ -143,6 +143,17 @@ describe("deriveJobsForEvent", () => {
     expect(deriveJobsForEvent({ ...base, payload: {} })).toEqual([]);
   });
 
+  it("derives one versioned interpretation job only from an exact extraction event", () => {
+    const event = { id: "event-finance-extracted", type: "finance-report-import.extracted", workspaceId: "workspace-1",
+      aggregateType: "FinanceImportBatch", aggregateId: "batch-1", payload: { batchId: "batch-1", expectedVersion: 3 } };
+    expect(deriveJobsForEvent(event)).toEqual([{ workspaceId: "workspace-1", eventId: "event-finance-extracted",
+      type: "finance-report-import.interpret", payload: { batchId: "batch-1", expectedVersion: 3 },
+      dedupeKey: "finance-report-import:workspace-1:batch-1:interpret:v1" }]);
+    expect(deriveJobsForEvent({ ...event, id: "replay" })[0]?.dedupeKey).toContain(":interpret:v1");
+    expect(deriveJobsForEvent({ ...event, payload: { batchId: "batch-1", expectedVersion: 0 } })).toEqual([]);
+    expect(deriveJobsForEvent({ ...event, aggregateId: "batch-2" })).toEqual([]);
+  });
+
   it("runs company understanding after brain source absorption", () => {
     const jobs = deriveJobsForEvent({
       id: "event-brain-source",

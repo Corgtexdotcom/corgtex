@@ -1,8 +1,9 @@
 import { createHash } from "node:crypto";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 const mocks = vi.hoisted(() => ({
-  claim: vi.fn(), complete: vi.fn(), fail: vi.fn(), extract: vi.fn(), storage: { get: vi.fn() },
+  claim: vi.fn(), complete: vi.fn(), fail: vi.fn(), extract: vi.fn(), propose: vi.fn(), storage: { get: vi.fn() },
 }));
+vi.mock("@corgtex/agents", () => ({ runFinanceReportImportAgentV1: mocks.propose }));
 vi.mock("@corgtex/domain", () => ({
   claimFinanceReportImportExtraction: mocks.claim,
   completeFinanceReportImportExtraction: mocks.complete,
@@ -76,5 +77,13 @@ describe("Finance report extraction workflow handler", () => {
     await vi.advanceTimersByTimeAsync(FINANCE_REPORT_IMPORT_STORAGE_READ_TIMEOUT_MS);
     await pending;
     vi.useRealTimers();
+  });
+  it("delegates interpretation with the exact workflow attempt", async () => {
+    mocks.propose.mockResolvedValue({ id: "run-1" });
+    const { runFinanceReportImportProposalJob } = await import("./finance-report-import");
+    await runFinanceReportImportProposalJob({ workspaceId: "workspace-1", batchId: "batch-1", expectedVersion: 3,
+      workflowJobId: "job-2", attempts: 2, isFinalAttempt: false });
+    expect(mocks.propose).toHaveBeenCalledWith({ workspaceId: "workspace-1", batchId: "batch-1", expectedVersion: 3,
+      workflowJobId: "job-2", attempts: 2, isFinalAttempt: false });
   });
 });

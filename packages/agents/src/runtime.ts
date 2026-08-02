@@ -1,6 +1,5 @@
 import type { AgentRunStatus, AgentTriggerType } from "@prisma/client";
 import { Prisma } from "@prisma/client";
-import type { AgentKey } from "@corgtex/domain";
 import { env, prisma, toInputJson } from "@corgtex/shared";
 import { resolveModel } from "@corgtex/models";
 import { isAgentEnabled, getAgentModelOverride, AGENT_REGISTRY, type RegisteredAgentKey } from "@corgtex/domain";
@@ -20,7 +19,7 @@ export type AgentHelpers = {
 };
 
 export type AgentRunParams<TPayload extends Record<string, unknown>, TContext extends Record<string, unknown>> = {
-  agentKey: AgentKey;
+  agentKey: RegisteredAgentKey;
   workspaceId: string;
   triggerType: AgentTriggerType;
   triggerRef: string;
@@ -91,7 +90,7 @@ async function currentAgentRunCount(workspaceId: string) {
   });
 }
 
-async function findExistingRun(agentKey: AgentKey, workspaceId: string, triggerType: AgentTriggerType, triggerRef: string) {
+async function findExistingRun(agentKey: RegisteredAgentKey, workspaceId: string, triggerType: AgentTriggerType, triggerRef: string) {
   return prisma.agentRun.findFirst({
     where: {
       workspaceId,
@@ -357,7 +356,6 @@ export async function executeAgentRun<TPayload extends Record<string, unknown>, 
     throw error;
   }
 }
-
 
 
 
