@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { AppError, requireWorkspaceMembership } from "@corgtex/domain";
+import { AppError, resolveKnowledgeAccessDomains } from "@corgtex/domain";
 import { searchIndexedKnowledge } from "@corgtex/knowledge";
 import { resolveRequestActor } from "@/lib/auth";
 import { handleRouteError } from "@/lib/http";
@@ -15,12 +15,13 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
       throw new AppError(400, "INVALID_INPUT", "Search query is required.");
     }
 
-    await requireWorkspaceMembership({ actor, workspaceId });
+    const accessDomains = await resolveKnowledgeAccessDomains(actor, workspaceId);
     const results = await searchIndexedKnowledge({
       workspaceId,
       query,
       limit,
-      sourceTypes: ["BRAIN_ARTICLE"],
+      accessDomains,
+      sourceTypes: ["BRAIN_ARTICLE", "DOCUMENT", "MEETING"],
     });
     return NextResponse.json({ results });
   } catch (error) {

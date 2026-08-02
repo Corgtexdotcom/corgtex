@@ -56,6 +56,28 @@ afterEach(() => {
   vi.clearAllMocks();
 });
 
+describe("GET /api/workspaces/[workspaceId]/documents", () => {
+  it("passes the resolved actor and archive filter to document listing", async () => {
+    const actor = { kind: "user", user: { id: "user-1" } };
+    resolveRequestActor.mockResolvedValue(actor);
+    requireWorkspaceMembership.mockResolvedValue({ id: "member-1" });
+    listDocuments.mockResolvedValue([{ id: "doc-1" }]);
+
+    const { GET } = await import("./route");
+    const { NextRequest } = await import("next/server");
+    const response = await GET(
+      new NextRequest("http://localhost/api/workspaces/ws-1/documents?archiveFilter=archived"),
+      { params: Promise.resolve({ workspaceId: "ws-1" }) },
+    );
+
+    expect(response.status).toBe(200);
+    expect(requireWorkspaceMembership).toHaveBeenCalledWith({ actor, workspaceId: "ws-1" });
+    expect(listDocuments).toHaveBeenCalledWith(actor, "ws-1", { archiveFilter: "archived" });
+    expect(await response.json()).toEqual({ documents: [{ id: "doc-1" }] });
+    expect(handleRouteError).not.toHaveBeenCalled();
+  });
+});
+
 describe("POST /api/workspaces/[workspaceId]/documents", () => {
   it("accepts multipart uploads from the chat composer", async () => {
     resolveRequestActor.mockResolvedValue({ kind: "user", user: { id: "user-1" } });

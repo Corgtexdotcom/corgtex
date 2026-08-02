@@ -3,6 +3,10 @@ import { getWorkspaceIndexingHealth, reindexWorkspace, syncKnowledgeForSource } 
 import { prisma } from "@corgtex/shared";
 import { defaultModelGateway } from "@corgtex/models";
 
+const { syncAzureKnowledgeSourceMock } = vi.hoisted(() => ({
+  syncAzureKnowledgeSourceMock: vi.fn().mockResolvedValue({ skipped: true, deleted: 0, uploaded: 0 }),
+}));
+
 vi.mock("@corgtex/shared", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@corgtex/shared")>();
   return {
@@ -29,6 +33,14 @@ vi.mock("@corgtex/models", () => ({
 vi.mock("./retrieval", () => ({
   invalidateKnowledgeCache: vi.fn().mockResolvedValue(undefined),
 }));
+
+vi.mock("./azure-search", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./azure-search")>();
+  return {
+    ...actual,
+    syncAzureKnowledgeSource: syncAzureKnowledgeSourceMock,
+  };
+});
 
 describe("Workspace Indexing Health", () => {
   beforeEach(() => {
@@ -112,6 +124,7 @@ describe("syncKnowledgeForSource", () => {
     await expect(syncKnowledgeForSource({
       workspaceId: "ws_1",
       sourceType: "EXTERNAL_CONTENT",
+      accessDomain: "WORKSPACE",
       sourceId: "source-1",
       sourceTitle: "Box source",
       content: "Box source content",
@@ -119,6 +132,31 @@ describe("syncKnowledgeForSource", () => {
 
     expect(prisma.knowledgeChunk.deleteMany).not.toHaveBeenCalled();
     expect(prisma.knowledgeChunk.createMany).not.toHaveBeenCalled();
+  });
+
+  it("persists the caller's explicit access domain on every chunk", async () => {
+    await syncKnowledgeForSource({
+      workspaceId: "ws_1",
+      sourceType: "DOCUMENT",
+      accessDomain: "FINANCE",
+      sourceId: "report-1",
+      sourceTitle: "Synthetic finance report",
+      content: "Synthetic reported actuals",
+    });
+
+    expect(prisma.knowledgeChunk.createMany).toHaveBeenCalledWith({
+      data: [
+        expect.objectContaining({
+          workspaceId: "ws_1",
+          sourceType: "DOCUMENT",
+          accessDomain: "FINANCE",
+          sourceId: "report-1",
+        }),
+      ],
+    });
+    expect(syncAzureKnowledgeSourceMock).toHaveBeenCalledWith(expect.objectContaining({
+      chunks: [expect.objectContaining({ sourceId: "report-1", accessDomain: "FINANCE" })],
+    }));
   });
 });
 
@@ -137,7 +175,7 @@ describe("Workspace Reindex", () => {
       { id: "a2", title: "Article 2", bodyMd: "Body 2", slug: "a-2", type: "PROCESS", authority: "DRAFT" } as any,
     ]);
     vi.mocked(prisma.document.findMany).mockResolvedValue([
-      { id: "d1", title: "Doc 1", textContent: "Text 1", source: "API", mimeType: "text/plain", storageKey: "d1.txt" } as any,
+      { id: "d1", title: "Doc 1", textContent: "Text 1", source: "API", mimeType: "text/plain", storageKey: "d1.txt", accessDomain: "FINANCE" } as any,
     ]);
 
     // a1 is chunked, a2 and d1 are not
@@ -156,6 +194,9 @@ describe("Workspace Reindex", () => {
     expect(result.reindexedArticles).toBe(1);
     expect(result.reindexedDocuments).toBe(1);
     expect(result.errors).toHaveLength(0);
+    expect(prisma.knowledgeChunk.createMany).toHaveBeenCalledWith({
+      data: [expect.objectContaining({ sourceId: "d1", accessDomain: "FINANCE" })],
+    });
 
     const chunkModule = await import("./chunks");
     expect(chunkModule.reindexWorkspace).toBeDefined(); // Just to make sure we imported properly
@@ -178,6 +219,7 @@ describe("Azure Search indexing guard", () => {
     await expect(syncKnowledgeForSource({
       workspaceId: "ws_1",
       sourceType: "DOCUMENT",
+      accessDomain: "WORKSPACE",
       sourceId: "doc-1",
       sourceTitle: "Document",
       content: "",

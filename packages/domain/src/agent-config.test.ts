@@ -14,6 +14,14 @@ const { prismaMock } = vi.hoisted(() => ({
 }));
 
 vi.mock("@corgtex/shared", () => ({
+  env: {
+    get MODEL_PROVIDER() {
+      return process.env.MODEL_PROVIDER ?? "openrouter";
+    },
+    get MODEL_PROVIDER_ROUTES_JSON() {
+      return process.env.MODEL_PROVIDER_ROUTES_JSON;
+    },
+  },
   prisma: prismaMock,
   toInputJson: (value: unknown) => JSON.parse(JSON.stringify(value ?? null)),
 }));
@@ -25,6 +33,8 @@ vi.mock("./auth", () => ({
 describe("agent-config", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    delete process.env.MODEL_PROVIDER;
+    delete process.env.MODEL_PROVIDER_ROUTES_JSON;
     prismaMock.modelUsageBudget.findMany.mockResolvedValue([]);
   });
 
@@ -95,9 +105,81 @@ describe("agent-config", () => {
         proactiveConfidenceThreshold: 1,
       });
     });
+
+    it("rejects unrouted provider-scoped model overrides for direct Azure providers", async () => {
+      process.env.MODEL_PROVIDER = "azure-foundry";
+      process.env.MODEL_PROVIDER_ROUTES_JSON = JSON.stringify([
+        {
+          model: "corgtex-ds-v4-pro",
+          provider: "azure-foundry",
+          baseUrl: "https://corgtex-foundry-models-wus3.services.ai.azure.com/openai/v1",
+          authMode: "managed_identity",
+        },
+      ]);
+
+      const { prisma } = await import("@corgtex/shared");
+      const { updateAgentConfig } = await import("./agent-config");
+
+      await expect(updateAgentConfig(
+        { kind: "user", user: { id: "u-1" } } as any,
+        {
+          workspaceId: "ws-1",
+          agentKey: "slack-agent",
+          modelOverride: "qwen/qwen3-32b",
+        },
+      )).rejects.toMatchObject({
+        status: 400,
+        code: "INVALID_INPUT",
+      });
+      expect(prisma.workspaceAgentConfig.upsert).not.toHaveBeenCalled();
+    });
+
+    it("allows explicitly routed provider-scoped model overrides for direct Azure providers", async () => {
+      process.env.MODEL_PROVIDER = "azure-openai";
+      process.env.MODEL_PROVIDER_ROUTES_JSON = JSON.stringify([
+        {
+          model: "qwen/qwen3-32b",
+          provider: "openrouter",
+          baseUrl: "https://openrouter.ai/api/v1",
+          apiKeyEnv: "OPENROUTER_ROUTE_API_KEY",
+        },
+      ]);
+
+      const { prisma } = await import("@corgtex/shared");
+      const { updateAgentConfig } = await import("./agent-config");
+
+      vi.mocked(prisma.workspaceAgentConfig.upsert).mockResolvedValue({} as any);
+
+      await updateAgentConfig(
+        { kind: "user", user: { id: "u-1" } } as any,
+        {
+          workspaceId: "ws-1",
+          agentKey: "slack-agent",
+          modelOverride: "qwen/qwen3-32b",
+        },
+      );
+
+      expect(prisma.workspaceAgentConfig.upsert).toHaveBeenCalledWith(expect.objectContaining({
+        create: expect.objectContaining({ modelOverride: "qwen/qwen3-32b" }),
+        update: expect.objectContaining({ modelOverride: "qwen/qwen3-32b" }),
+      }));
+    });
   });
 
   describe("listAgentConfigs", () => {
+    it("keeps default-disabled agents off across config and runtime checks", async () => {
+      const { isAgentEnabled, listAgentConfigs, updateAgentConfig } = await import("./agent-config");
+      prismaMock.workspaceAgentConfig.findMany.mockResolvedValue([]); prismaMock.workspaceAgentConfig.findUnique.mockResolvedValue(null);
+      const configs = await listAgentConfigs({ kind: "user", user: { id: "u-1" } } as any, "ws-1");
+      expect(configs.find((config) => config.agentKey === "finance-report-import")?.enabled).toBe(false);
+      expect(configs.find((config) => config.agentKey === "inbox-triage")?.enabled).toBe(true);
+      await expect(isAgentEnabled("ws-1", "finance-report-import")).resolves.toBe(false);
+      await expect(isAgentEnabled("ws-1", "inbox-triage")).resolves.toBe(true);
+      prismaMock.workspaceAgentConfig.upsert.mockResolvedValue({} as any);
+      await updateAgentConfig({ kind: "user", user: { id: "u-1" } } as any, { workspaceId: "ws-1", agentKey: "finance-report-import", modelOverride: "quality-test" });
+      expect(prismaMock.workspaceAgentConfig.upsert).toHaveBeenCalledWith(expect.objectContaining({ create: expect.objectContaining({ enabled: false }) }));
+    });
+
     it("defaults company-understanding goal generation to automatic apply mode", async () => {
       const { prisma } = await import("@corgtex/shared");
       const { listAgentConfigs } = await import("./agent-config");

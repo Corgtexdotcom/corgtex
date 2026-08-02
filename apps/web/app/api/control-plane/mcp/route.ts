@@ -29,6 +29,7 @@ import {
   listControlPlaneReleaseRolloutJobs,
   listSelfServeCustomerRegistry,
   probeControlPlaneDeploymentHealth,
+  recordCustomerSupportAudit,
   recordVerifiedControlPlaneRelease,
   rejectReviewGatedProcurementTrial,
   requireControlPlaneAccess,
@@ -626,6 +627,24 @@ const tools = [
       required: ["deploymentId", "action"],
     },
   },
+  {
+    name: "record_customer_support_audit",
+    description: "Record a standalone sanitized customer support closeout audit through the configured support connector.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        deploymentId: { type: "string" },
+        action: { type: "string" },
+        reason: { type: "string" },
+        summary: { type: "string" },
+        outcome: { type: "string" },
+        evidence: { type: "object" },
+        remoteWorkspaceId: { type: "string" },
+        idempotencyKey: { type: "string" },
+      },
+      required: ["deploymentId", "action", "reason", "summary"],
+    },
+  },
 ];
 
 const toolScopes: Record<string, string> = {
@@ -676,6 +695,7 @@ const toolScopes: Record<string, string> = {
   deploy_latest_release_bulk: "control-plane:releases:write",
   get_rollout_status: "control-plane:read",
   run_customer_support_operation: "control-plane:support:write",
+  record_customer_support_audit: "control-plane:support:write",
 };
 
 function rpcResult(id: unknown, result: unknown) {
@@ -706,8 +726,19 @@ function argString(args: Record<string, unknown>, key: string) {
   return typeof value === "string" ? value : "";
 }
 
+function inputError(message: string) {
+  const error = new Error(message) as Error & { status: number; code: string };
+  error.status = 400;
+  error.code = "INVALID_INPUT";
+  return error;
+}
+
 function argOptionalString(args: Record<string, unknown>, key: string) {
-  const value = argString(args, key).trim();
+  if (!Object.prototype.hasOwnProperty.call(args, key) || args[key] == null) return null;
+  if (typeof args[key] !== "string") {
+    throw inputError(`${key} must be a string.`);
+  }
+  const value = args[key].trim();
   return value.length > 0 ? value : null;
 }
 
@@ -1199,6 +1230,19 @@ export async function POST(request: NextRequest) {
         action: argString(args, "action") as SupportAction,
         reason: typeof args.reason === "string" ? args.reason : null,
         arguments: objectArgs(args.arguments),
+      });
+      return rpcResult(id, textContent(operation));
+    }
+    if (name === "record_customer_support_audit") {
+      const operation = await recordCustomerSupportAudit(actor, {
+        deploymentId: argString(args, "deploymentId"),
+        action: argString(args, "action"),
+        reason: argString(args, "reason"),
+        summary: argString(args, "summary"),
+        outcome: argOptionalString(args, "outcome"),
+        evidence: Object.prototype.hasOwnProperty.call(args, "evidence") ? args.evidence : undefined,
+        remoteWorkspaceId: argOptionalString(args, "remoteWorkspaceId"),
+        idempotencyKey: argOptionalString(args, "idempotencyKey"),
       });
       return rpcResult(id, textContent(operation));
     }

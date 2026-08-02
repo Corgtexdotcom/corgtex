@@ -107,6 +107,42 @@ describe("deriveJobsForEvent", () => {
     expect(jobs[2]?.type).toBe("knowledge.sync.event");
   });
 
+  it("derives one batch-stable Finance report extraction job", () => {
+    const event = {
+      id: "event-finance-upload",
+      type: "finance-report-import.uploaded",
+      workspaceId: "workspace-1",
+      aggregateType: "FinanceImportBatch",
+      aggregateId: "batch-1",
+      payload: { batchId: "batch-1" },
+    };
+
+    expect(deriveJobsForEvent(event)).toEqual([{
+      workspaceId: "workspace-1",
+      eventId: "event-finance-upload",
+      type: "finance-report-import.extract",
+      payload: { batchId: "batch-1" },
+      dedupeKey: "finance-report-import:workspace-1:batch-1:extract:v1",
+    }]);
+    expect(deriveJobsForEvent({ ...event, id: "replayed-event" })[0]?.dedupeKey)
+      .toBe("finance-report-import:workspace-1:batch-1:extract:v1");
+  });
+
+  it("ignores malformed Finance report upload events", () => {
+    const base = {
+      id: "event-finance-upload",
+      type: "finance-report-import.uploaded",
+      workspaceId: "workspace-1",
+      aggregateType: "FinanceImportBatch",
+      aggregateId: "batch-1",
+      payload: { batchId: "batch-1" },
+    };
+    expect(deriveJobsForEvent({ ...base, workspaceId: null })).toEqual([]);
+    expect(deriveJobsForEvent({ ...base, aggregateType: "Document" })).toEqual([]);
+    expect(deriveJobsForEvent({ ...base, aggregateId: "batch-2" })).toEqual([]);
+    expect(deriveJobsForEvent({ ...base, payload: {} })).toEqual([]);
+  });
+
   it("runs company understanding after brain source absorption", () => {
     const jobs = deriveJobsForEvent({
       id: "event-brain-source",

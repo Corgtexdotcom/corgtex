@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { AppError, requireWorkspaceMembership } from "@corgtex/domain";
+import { AppError, resolveKnowledgeAccessDomains } from "@corgtex/domain";
 import { prisma } from "@corgtex/shared";
 import { defaultStorage } from "@corgtex/storage";
 import { resolveRequestActor } from "@/lib/auth";
@@ -12,13 +12,13 @@ export async function GET(
   try {
     const actor = await resolveRequestActor(request);
     const { workspaceId, sourceId } = await params;
-
-    await requireWorkspaceMembership({ actor, workspaceId });
+    const accessDomains = await resolveKnowledgeAccessDomains(actor, workspaceId);
 
     const source = await prisma.brainSource.findFirst({
       where: {
         id: sourceId,
         workspaceId,
+        accessDomain: { in: accessDomains },
       },
       select: {
         fileStorageKey: true,
@@ -30,7 +30,7 @@ export async function GET(
     }
 
     const downloadUrl = await defaultStorage.getSignedUrl(source.fileStorageKey, 3600);
-    
+
     return NextResponse.redirect(downloadUrl, 302);
   } catch (error) {
     return handleRouteError(error);

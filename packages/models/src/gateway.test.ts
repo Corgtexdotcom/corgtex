@@ -211,6 +211,54 @@ describe("openAICompatibleModelGateway", () => {
     });
   });
 
+  it("keeps the non-stream request signal active while decoding JSON", async () => {
+    restoreEnv();
+    Object.assign(process.env, {
+      MODEL_PROVIDER: "openai",
+      MODEL_API_KEY: "test-key",
+      MODEL_BASE_URL: "https://api.openai.com/v1",
+      MODEL_CHAT_DEFAULT: "gpt-test",
+    });
+
+    const controller = new AbortController();
+    let providerSignal: AbortSignal | undefined;
+    let jsonStarted = false;
+    const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {
+      providerSignal = init?.signal as AbortSignal | undefined;
+      return {
+        ok: true,
+        json: () => {
+          jsonStarted = true;
+          return new Promise((resolve, reject) => {
+            providerSignal?.addEventListener("abort", () => {
+              reject(new DOMException("The operation was aborted.", "AbortError"));
+            }, { once: true });
+          });
+        },
+      } as Response;
+    });
+
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { openAICompatibleModelGateway } = await import("./openai-compatible-gateway");
+
+    const request = openAICompatibleModelGateway.chat({
+      workspaceId: "ws-1",
+      taskType: "CHAT",
+      messages: [{ role: "user", content: "Hello" }],
+      signal: controller.signal,
+    });
+
+    await vi.waitFor(() => {
+      expect(providerSignal).toBeDefined();
+      expect(jsonStarted).toBe(true);
+    });
+    controller.abort();
+
+    await expect(request).rejects.toMatchObject({ name: "AbortError" });
+    expect(providerSignal?.aborted).toBe(true);
+  });
+
   it("sends audio transcription requests as multipart form data", async () => {
     restoreEnv();
     Object.assign(process.env, {
@@ -369,6 +417,919 @@ describe("openAICompatibleModelGateway", () => {
     });
   });
 
+  it("sends Azure Foundry API key headers through the OpenAI-compatible v1 endpoint", async () => {
+    restoreEnv();
+    Object.assign(process.env, {
+      MODEL_PROVIDER: "azure-foundry",
+      MODEL_BASE_URL: "https://corgtex-foundry.services.ai.azure.com/openai/v1/",
+      AZURE_OPENAI_AUTH_MODE: "api_key",
+      AZURE_OPENAI_API_KEY: "foundry-key",
+      MODEL_CHAT_DEFAULT: "corgtex-ds-v4-flash",
+    });
+
+    const fetchMock = vi.fn().mockResolvedValueOnce(new Response(JSON.stringify({
+      choices: [{ message: { content: "Foundry answer" } }],
+      usage: { prompt_tokens: 1000, completion_tokens: 500 },
+    }), { status: 200 }));
+
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { openAICompatibleModelGateway } = await import("./openai-compatible-gateway");
+
+    const chat = await openAICompatibleModelGateway.chat({
+      workspaceId: "ws-1",
+      taskType: "CHAT",
+      messages: [{ role: "user", content: "Hello" }],
+    });
+
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    const body = JSON.parse(String(init.body)) as Record<string, unknown>;
+
+    expect(url).toBe("https://corgtex-foundry.services.ai.azure.com/openai/v1/chat/completions");
+    expect(init.headers).toMatchObject({
+      "api-key": "foundry-key",
+      "content-type": "application/json",
+    });
+    expect(init.headers).not.toMatchObject({
+      authorization: expect.any(String),
+      "HTTP-Referer": expect.any(String),
+      "X-Title": expect.any(String),
+    });
+    expect(body).toMatchObject({
+      model: "corgtex-ds-v4-flash",
+    });
+    expect(body.provider).toBeUndefined();
+    expect(chat.usage).toMatchObject({
+      provider: "azure-foundry",
+      model: "corgtex-ds-v4-flash",
+      rawProviderCostUsd: "0.000445",
+      estimatedCostUsd: "0.000890",
+    });
+  });
+
+  it("uses the Foundry Entra scope by default for Azure Foundry managed identity", async () => {
+    restoreEnv();
+    Object.assign(process.env, {
+      MODEL_PROVIDER: "azure-foundry",
+      MODEL_BASE_URL: "https://corgtex-foundry.services.ai.azure.com/openai/v1",
+      AZURE_OPENAI_AUTH_MODE: "managed_identity",
+      MODEL_CHAT_DEFAULT: "corgtex-kimi-k25",
+    });
+    azureIdentityMock.getToken.mockResolvedValueOnce({
+      token: "foundry-entra-token",
+      expiresOnTimestamp: Date.now() + 60 * 60 * 1000,
+    });
+
+    const fetchMock = vi.fn().mockResolvedValueOnce(new Response(JSON.stringify({
+      choices: [{ message: { content: "Foundry answer" } }],
+      usage: { prompt_tokens: 10, completion_tokens: 4 },
+    }), { status: 200 }));
+
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { openAICompatibleModelGateway } = await import("./openai-compatible-gateway");
+
+    await openAICompatibleModelGateway.chat({
+      workspaceId: "ws-1",
+      taskType: "CHAT",
+      messages: [{ role: "user", content: "Hello" }],
+    });
+
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+
+    expect(azureIdentityMock.getToken).toHaveBeenCalledWith("https://ai.azure.com/.default");
+    expect(init.headers).toMatchObject({
+      authorization: "Bearer foundry-entra-token",
+      "content-type": "application/json",
+    });
+  });
+
+  it("routes a configured model alias to Azure Foundry while the global provider remains OpenRouter", async () => {
+    restoreEnv();
+    Object.assign(process.env, {
+      MODEL_PROVIDER: "openrouter",
+      MODEL_API_KEY: "openrouter-key",
+      MODEL_BASE_URL: "https://openrouter.ai/api/v1",
+      APP_URL: "https://corgtex.example.test",
+      MODEL_PROVIDER_ROUTES_JSON: JSON.stringify([
+        {
+          model: "corgtex-gpt56-luna",
+          provider: "azure-foundry",
+          baseUrl: "https://corgtex-foundry.services.ai.azure.com/openai/v1/",
+          authMode: "managed_identity",
+          scope: "https://ai.azure.com/.default",
+        },
+      ]),
+    });
+    azureIdentityMock.getToken.mockResolvedValueOnce({
+      token: "foundry-route-token",
+      expiresOnTimestamp: Date.now() + 60 * 60 * 1000,
+    });
+
+    const fetchMock = vi.fn().mockResolvedValueOnce(new Response(JSON.stringify({
+      choices: [{ message: { content: "Routed Foundry answer" } }],
+      usage: { prompt_tokens: 1000, completion_tokens: 500 },
+    }), { status: 200 }));
+
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { openAICompatibleModelGateway } = await import("./openai-compatible-gateway");
+
+    const chat = await openAICompatibleModelGateway.chat({
+      workspaceId: "ws-1",
+      taskType: "CHAT",
+      model: "corgtex-gpt56-luna",
+      messages: [{ role: "user", content: "Hello" }],
+    });
+
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    const body = JSON.parse(String(init.body)) as Record<string, unknown>;
+
+    expect(url).toBe("https://corgtex-foundry.services.ai.azure.com/openai/v1/chat/completions");
+    expect(azureIdentityMock.getToken).toHaveBeenCalledWith("https://ai.azure.com/.default");
+    expect(init.headers).toMatchObject({
+      authorization: "Bearer foundry-route-token",
+      "content-type": "application/json",
+    });
+    expect(init.headers).not.toMatchObject({
+      "api-key": expect.any(String),
+      "HTTP-Referer": expect.any(String),
+      "X-Title": expect.any(String),
+    });
+    expect(body).toMatchObject({
+      model: "corgtex-gpt56-luna",
+    });
+    expect(body.temperature).toBeUndefined();
+    expect(body.provider).toBeUndefined();
+    expect(chat.usage).toMatchObject({
+      provider: "azure-foundry",
+      model: "corgtex-gpt56-luna",
+      rawProviderCostUsd: "0.004000",
+      estimatedCostUsd: "0.008000",
+    });
+  });
+
+  it("inherits the configured Azure scope for same-provider routes without a route scope", async () => {
+    restoreEnv();
+    Object.assign(process.env, {
+      MODEL_PROVIDER: "azure-foundry",
+      MODEL_BASE_URL: "https://global-foundry.services.ai.azure.com/openai/v1",
+      AZURE_OPENAI_AUTH_MODE: "managed_identity",
+      AZURE_OPENAI_SCOPE: "api://custom-foundry-scope/.default",
+      MODEL_PROVIDER_ROUTES_JSON: JSON.stringify([
+        {
+          model: "corgtex-gpt56-luna",
+          provider: "azure-foundry",
+          baseUrl: "https://corgtex-foundry.services.ai.azure.com/openai/v1/",
+          authMode: "managed_identity",
+        },
+      ]),
+    });
+    azureIdentityMock.getToken.mockResolvedValueOnce({
+      token: "same-provider-token",
+      expiresOnTimestamp: Date.now() + 60 * 60 * 1000,
+    });
+
+    const fetchMock = vi.fn().mockResolvedValueOnce(new Response(JSON.stringify({
+      choices: [{ message: { content: "Routed Foundry answer" } }],
+      usage: { prompt_tokens: 1000, completion_tokens: 500 },
+    }), { status: 200 }));
+
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { openAICompatibleModelGateway } = await import("./openai-compatible-gateway");
+
+    await openAICompatibleModelGateway.chat({
+      workspaceId: "ws-1",
+      taskType: "CHAT",
+      model: "corgtex-gpt56-luna",
+      messages: [{ role: "user", content: "Hello" }],
+    });
+
+    expect(azureIdentityMock.getToken).toHaveBeenCalledWith("api://custom-foundry-scope/.default");
+  });
+
+  it("rejects managed identity routes to non-Azure endpoints before acquiring a token", async () => {
+    restoreEnv();
+    Object.assign(process.env, {
+      MODEL_PROVIDER: "openrouter",
+      MODEL_API_KEY: "openrouter-key",
+      MODEL_BASE_URL: "https://openrouter.ai/api/v1",
+      MODEL_PROVIDER_ROUTES_JSON: JSON.stringify([
+        {
+          model: "corgtex-gpt56-luna",
+          provider: "azure-foundry",
+          baseUrl: "https://attacker.example/v1",
+          authMode: "managed_identity",
+        },
+      ]),
+    });
+
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { openAICompatibleModelGateway } = await import("./openai-compatible-gateway");
+
+    await expect(openAICompatibleModelGateway.chat({
+      workspaceId: "ws-1",
+      taskType: "CHAT",
+      model: "corgtex-gpt56-luna",
+      messages: [{ role: "user", content: "Hello" }],
+    })).rejects.toThrow("azure-foundry managed identity authentication requires a trusted Azure OpenAI-compatible /openai/v1 base URL");
+    expect(azureIdentityMock.getToken).not.toHaveBeenCalled();
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("does not fall back to the global Azure key when a routed Azure key env is missing", async () => {
+    restoreEnv();
+    Object.assign(process.env, {
+      MODEL_PROVIDER: "openrouter",
+      MODEL_API_KEY: "openrouter-key",
+      MODEL_BASE_URL: "https://openrouter.ai/api/v1",
+      AZURE_OPENAI_API_KEY: "global-azure-key",
+      MODEL_PROVIDER_ROUTES_JSON: JSON.stringify([
+        {
+          model: "corgtex-ds-v4-flash",
+          provider: "azure-foundry",
+          baseUrl: "https://corgtex-foundry.services.ai.azure.com/openai/v1/",
+          authMode: "api_key",
+          apiKeyEnv: "FOUNDRY_ROUTE_KEY",
+        },
+      ]),
+    });
+
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { openAICompatibleModelGateway } = await import("./openai-compatible-gateway");
+
+    await expect(openAICompatibleModelGateway.chat({
+      workspaceId: "ws-1",
+      taskType: "CHAT",
+      model: "corgtex-ds-v4-flash",
+      messages: [{ role: "user", content: "Hello" }],
+    })).rejects.toThrow("FOUNDRY_ROUTE_KEY is required for routed Azure API key authentication");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("requires an explicit key env when an Azure API-key route targets a routed endpoint", async () => {
+    restoreEnv();
+    Object.assign(process.env, {
+      MODEL_PROVIDER: "azure-openai",
+      MODEL_BASE_URL: "https://global-openai.openai.azure.com/openai/v1",
+      AZURE_OPENAI_AUTH_MODE: "api_key",
+      AZURE_OPENAI_API_KEY: "global-azure-key",
+      MODEL_PROVIDER_ROUTES_JSON: JSON.stringify([
+        {
+          model: "corgtex-gpt56-luna",
+          provider: "azure-foundry",
+          baseUrl: "https://corgtex-foundry.services.ai.azure.com/openai/v1/",
+          authMode: "api_key",
+        },
+      ]),
+    });
+
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { openAICompatibleModelGateway } = await import("./openai-compatible-gateway");
+
+    await expect(openAICompatibleModelGateway.chat({
+      workspaceId: "ws-1",
+      taskType: "CHAT",
+      model: "corgtex-gpt56-luna",
+      messages: [{ role: "user", content: "Hello" }],
+    })).rejects.toThrow("MODEL_PROVIDER_ROUTES_JSON route for corgtex-gpt56-luna requires apiKeyEnv when using Azure API key authentication with a routed endpoint");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("preserves MODEL_API_KEY fallback for same-provider Azure routes that inherit the global endpoint", async () => {
+    restoreEnv();
+    Object.assign(process.env, {
+      MODEL_PROVIDER: "azure-openai",
+      MODEL_BASE_URL: "https://global-openai.openai.azure.com/openai/v1",
+      AZURE_OPENAI_AUTH_MODE: "api_key",
+      AZURE_OPENAI_API_KEY: "",
+      MODEL_API_KEY: "model-key",
+      MODEL_PROVIDER_ROUTES_JSON: JSON.stringify([
+        {
+          model: "corgtex-ds-v4-flash",
+          provider: "azure-openai",
+        },
+      ]),
+    });
+
+    const fetchMock = vi.fn().mockResolvedValueOnce(new Response(JSON.stringify({
+      choices: [{ message: { content: "Inherited route answer" } }],
+      usage: { prompt_tokens: 1000, completion_tokens: 500 },
+    }), { status: 200 }));
+
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { openAICompatibleModelGateway } = await import("./openai-compatible-gateway");
+
+    const chat = await openAICompatibleModelGateway.chat({
+      workspaceId: "ws-1",
+      taskType: "CHAT",
+      model: "corgtex-ds-v4-flash",
+      messages: [{ role: "user", content: "Hello" }],
+    });
+
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe("https://global-openai.openai.azure.com/openai/v1/chat/completions");
+    expect(init.headers).toMatchObject({
+      "api-key": "model-key",
+      "content-type": "application/json",
+    });
+    expect(chat.usage).toMatchObject({
+      provider: "azure-openai",
+      model: "corgtex-ds-v4-flash",
+    });
+  });
+
+  it("does not fall back to MODEL_API_KEY when a routed OpenRouter key env is missing", async () => {
+    restoreEnv();
+    Object.assign(process.env, {
+      MODEL_PROVIDER: "azure-foundry",
+      MODEL_BASE_URL: "https://corgtex-foundry.services.ai.azure.com/openai/v1",
+      MODEL_API_KEY: "global-openrouter-key",
+      MODEL_PROVIDER_ROUTES_JSON: JSON.stringify([
+        {
+          model: "deepseek/deepseek-v4-pro",
+          provider: "openrouter",
+          baseUrl: "https://openrouter.ai/api/v1",
+          apiKeyEnv: "OPENROUTER_ROUTE_KEY",
+        },
+      ]),
+    });
+
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { openAICompatibleModelGateway } = await import("./openai-compatible-gateway");
+
+    await expect(openAICompatibleModelGateway.chat({
+      workspaceId: "ws-1",
+      taskType: "CHAT",
+      model: "deepseek/deepseek-v4-pro",
+      messages: [{ role: "user", content: "Hello" }],
+    })).rejects.toThrow("OPENROUTER_ROUTE_KEY is required for routed OpenAI-compatible provider authentication");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("rejects duplicate per-model provider routes", async () => {
+    restoreEnv();
+    Object.assign(process.env, {
+      MODEL_PROVIDER: "openrouter",
+      MODEL_API_KEY: "openrouter-key",
+      MODEL_BASE_URL: "https://openrouter.ai/api/v1",
+      MODEL_PROVIDER_ROUTES_JSON: JSON.stringify([
+        {
+          model: "gpt-4o",
+          provider: "openai",
+          baseUrl: "https://api.openai.com/v1",
+          apiKeyEnv: "OPENAI_ROUTE_KEY",
+        },
+        {
+          model: "gpt-4o",
+          provider: "openrouter",
+          baseUrl: "https://openrouter.ai/api/v1",
+        },
+      ]),
+      OPENAI_ROUTE_KEY: "openai-key",
+    });
+
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { openAICompatibleModelGateway } = await import("./openai-compatible-gateway");
+
+    await expect(openAICompatibleModelGateway.chat({
+      workspaceId: "ws-1",
+      taskType: "CHAT",
+      model: "gpt-4o",
+      messages: [{ role: "user", content: "Hello" }],
+    })).rejects.toThrow("MODEL_PROVIDER_ROUTES_JSON contains duplicate route for gpt-4o");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("rejects plaintext per-model provider route URLs at runtime", async () => {
+    restoreEnv();
+    Object.assign(process.env, {
+      MODEL_PROVIDER: "openrouter",
+      MODEL_API_KEY: "openrouter-key",
+      MODEL_BASE_URL: "https://openrouter.ai/api/v1",
+      MODEL_PROVIDER_ROUTES_JSON: JSON.stringify([
+        {
+          model: "deepseek/deepseek-v4-pro",
+          provider: "openrouter",
+          baseUrl: "http://openrouter.ai/api/v1",
+          apiKeyEnv: "OPENROUTER_ROUTE_KEY",
+        },
+      ]),
+      OPENROUTER_ROUTE_KEY: "route-key",
+    });
+
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { openAICompatibleModelGateway } = await import("./openai-compatible-gateway");
+
+    await expect(openAICompatibleModelGateway.chat({
+      workspaceId: "ws-1",
+      taskType: "CHAT",
+      model: "deepseek/deepseek-v4-pro",
+      messages: [{ role: "user", content: "Hello" }],
+    })).rejects.toThrow("MODEL_PROVIDER_ROUTES_JSON[0].baseUrl must be an HTTPS URL");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    "https://api.openai.com/v1?api-version=bad",
+    "https://api.openai.com/v1#fragment",
+  ])("rejects query or fragment components in per-model provider route URLs: %s", async (routeBaseUrl) => {
+    restoreEnv();
+    Object.assign(process.env, {
+      MODEL_PROVIDER: "openrouter",
+      MODEL_API_KEY: "openrouter-key",
+      MODEL_BASE_URL: "https://openrouter.ai/api/v1",
+      MODEL_PROVIDER_ROUTES_JSON: JSON.stringify([
+        {
+          model: "gpt-4o",
+          provider: "openai",
+          baseUrl: routeBaseUrl,
+          apiKeyEnv: "OPENAI_ROUTE_KEY",
+        },
+      ]),
+      OPENAI_ROUTE_KEY: "route-key",
+    });
+
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { openAICompatibleModelGateway } = await import("./openai-compatible-gateway");
+
+    await expect(openAICompatibleModelGateway.chat({
+      workspaceId: "ws-1",
+      taskType: "CHAT",
+      model: "gpt-4o",
+      messages: [{ role: "user", content: "Hello" }],
+    })).rejects.toThrow("MODEL_PROVIDER_ROUTES_JSON[0].baseUrl must be an HTTPS URL without query or fragment");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("rejects unsupported routed providers at runtime", async () => {
+    restoreEnv();
+    Object.assign(process.env, {
+      MODEL_PROVIDER: "openrouter",
+      MODEL_API_KEY: "openrouter-key",
+      MODEL_BASE_URL: "https://openrouter.ai/api/v1",
+      MODEL_PROVIDER_ROUTES_JSON: JSON.stringify([
+        {
+          model: "deepseek/deepseek-v4-pro",
+          provider: "opneai",
+          baseUrl: "https://api.openai.com/v1",
+          apiKeyEnv: "MISSPELLED_PROVIDER_KEY",
+        },
+      ]),
+      MISSPELLED_PROVIDER_KEY: "route-key",
+    });
+
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { openAICompatibleModelGateway } = await import("./openai-compatible-gateway");
+
+    await expect(openAICompatibleModelGateway.chat({
+      workspaceId: "ws-1",
+      taskType: "CHAT",
+      model: "deepseek/deepseek-v4-pro",
+      messages: [{ role: "user", content: "Hello" }],
+    })).rejects.toThrow("MODEL_PROVIDER_ROUTES_JSON[0].provider must be one of openrouter, openai, azure-openai, azure-foundry");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("rejects managed identity on non-Azure routed providers at runtime", async () => {
+    restoreEnv();
+    Object.assign(process.env, {
+      MODEL_PROVIDER: "openrouter",
+      MODEL_API_KEY: "openrouter-key",
+      MODEL_BASE_URL: "https://openrouter.ai/api/v1",
+      MODEL_PROVIDER_ROUTES_JSON: JSON.stringify([
+        {
+          model: "gpt-4o",
+          provider: "openai",
+          baseUrl: "https://api.openai.com/v1",
+          authMode: "managed_identity",
+          apiKeyEnv: "OPENAI_ROUTE_KEY",
+        },
+      ]),
+      OPENAI_ROUTE_KEY: "route-key",
+    });
+
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { openAICompatibleModelGateway } = await import("./openai-compatible-gateway");
+
+    await expect(openAICompatibleModelGateway.chat({
+      workspaceId: "ws-1",
+      taskType: "CHAT",
+      model: "gpt-4o",
+      messages: [{ role: "user", content: "Hello" }],
+    })).rejects.toThrow("MODEL_PROVIDER_ROUTES_JSON[0].authMode managed_identity is only supported for Azure routes");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("rejects plaintext global provider endpoints at runtime", async () => {
+    restoreEnv();
+    Object.assign(process.env, {
+      MODEL_PROVIDER: "azure-foundry",
+      MODEL_BASE_URL: "http://corgtex-foundry.services.ai.azure.com/openai/v1",
+      AZURE_OPENAI_AUTH_MODE: "api_key",
+      AZURE_OPENAI_API_KEY: "foundry-key",
+      MODEL_CHAT_DEFAULT: "corgtex-ds-v4-flash",
+    });
+
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { openAICompatibleModelGateway } = await import("./openai-compatible-gateway");
+
+    await expect(openAICompatibleModelGateway.chat({
+      workspaceId: "ws-1",
+      taskType: "CHAT",
+      messages: [{ role: "user", content: "Hello" }],
+    })).rejects.toThrow("MODEL_BASE_URL must be an HTTPS URL");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    "https://api.openai.com/v1?api-version=bad",
+    "https://api.openai.com/v1#fragment",
+    "https://user:pass@api.openai.com/v1",
+    "https://api.openai.com:444/v1",
+  ])("rejects query or fragment components in global provider endpoints at runtime: %s", async (modelBaseUrl) => {
+    restoreEnv();
+    Object.assign(process.env, {
+      MODEL_PROVIDER: "openai",
+      MODEL_API_KEY: "openai-key",
+      MODEL_BASE_URL: modelBaseUrl,
+      MODEL_CHAT_DEFAULT: "gpt-4o",
+    });
+
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { openAICompatibleModelGateway } = await import("./openai-compatible-gateway");
+
+    await expect(openAICompatibleModelGateway.chat({
+      workspaceId: "ws-1",
+      taskType: "CHAT",
+      messages: [{ role: "user", content: "Hello" }],
+    })).rejects.toThrow("MODEL_BASE_URL must be an HTTPS URL without query or fragment");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("rejects Azure API key auth to non-Azure global endpoints at runtime", async () => {
+    restoreEnv();
+    Object.assign(process.env, {
+      MODEL_PROVIDER: "azure-foundry",
+      MODEL_BASE_URL: "https://attacker.example/openai/v1",
+      AZURE_OPENAI_AUTH_MODE: "api_key",
+      AZURE_OPENAI_API_KEY: "foundry-key",
+      MODEL_CHAT_DEFAULT: "corgtex-ds-v4-flash",
+    });
+
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { openAICompatibleModelGateway } = await import("./openai-compatible-gateway");
+
+    await expect(openAICompatibleModelGateway.chat({
+      workspaceId: "ws-1",
+      taskType: "CHAT",
+      messages: [{ role: "user", content: "Hello" }],
+    })).rejects.toThrow("azure-foundry API key authentication requires a trusted Azure OpenAI-compatible /openai/v1 base URL");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    "https://corgtex-foundry.services.ai.azure.com/openai",
+    "https://corgtex-foundry.services.ai.azure.com/openai/v2",
+    "https://corgtex-foundry.services.ai.azure.com/openai/v1?api-version=2026-07-29",
+    "https://user:pass@corgtex-foundry.services.ai.azure.com/openai/v1",
+    "https://corgtex-foundry.services.ai.azure.com:444/openai/v1",
+  ])("rejects Azure-compatible endpoints without an exact /openai/v1 base path: %s", async (modelBaseUrl) => {
+    restoreEnv();
+    Object.assign(process.env, {
+      MODEL_PROVIDER: "azure-foundry",
+      MODEL_BASE_URL: modelBaseUrl,
+      AZURE_OPENAI_AUTH_MODE: "api_key",
+      AZURE_OPENAI_API_KEY: "foundry-key",
+      MODEL_CHAT_DEFAULT: "corgtex-ds-v4-flash",
+    });
+
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { openAICompatibleModelGateway } = await import("./openai-compatible-gateway");
+
+    const expectedError = modelBaseUrl.includes("?") || modelBaseUrl.includes("@") || modelBaseUrl.includes(":444")
+      ? "MODEL_BASE_URL must be an HTTPS URL without query or fragment"
+      : "azure-foundry API key authentication requires a trusted Azure OpenAI-compatible /openai/v1 base URL";
+
+    await expect(openAICompatibleModelGateway.chat({
+      workspaceId: "ws-1",
+      taskType: "CHAT",
+      messages: [{ role: "user", content: "Hello" }],
+    })).rejects.toThrow(expectedError);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("rejects route-specific Azure API keys to non-Azure endpoints at runtime", async () => {
+    restoreEnv();
+    Object.assign(process.env, {
+      MODEL_PROVIDER: "openrouter",
+      MODEL_API_KEY: "openrouter-key",
+      MODEL_BASE_URL: "https://openrouter.ai/api/v1",
+      FOUNDRY_ROUTE_KEY: "foundry-route-key",
+      MODEL_PROVIDER_ROUTES_JSON: JSON.stringify([
+        {
+          model: "corgtex-ds-v4-flash",
+          provider: "azure-foundry",
+          baseUrl: "https://attacker.example/openai/v1",
+          authMode: "api_key",
+          apiKeyEnv: "FOUNDRY_ROUTE_KEY",
+        },
+      ]),
+    });
+
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { openAICompatibleModelGateway } = await import("./openai-compatible-gateway");
+
+    await expect(openAICompatibleModelGateway.chat({
+      workspaceId: "ws-1",
+      taskType: "CHAT",
+      model: "corgtex-ds-v4-flash",
+      messages: [{ role: "user", content: "Hello" }],
+    })).rejects.toThrow("azure-foundry API key authentication requires a trusted Azure OpenAI-compatible /openai/v1 base URL");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("requires an explicit key env when a non-Azure route changes providers", async () => {
+    restoreEnv();
+    Object.assign(process.env, {
+      MODEL_PROVIDER: "openrouter",
+      MODEL_API_KEY: "openrouter-key",
+      MODEL_BASE_URL: "https://openrouter.ai/api/v1",
+      MODEL_PROVIDER_ROUTES_JSON: JSON.stringify([
+        {
+          model: "gpt-4o",
+          provider: "openai",
+          baseUrl: "https://api.openai.com/v1",
+        },
+      ]),
+    });
+
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { openAICompatibleModelGateway } = await import("./openai-compatible-gateway");
+
+    await expect(openAICompatibleModelGateway.chat({
+      workspaceId: "ws-1",
+      taskType: "CHAT",
+      model: "gpt-4o",
+      messages: [{ role: "user", content: "Hello" }],
+    })).rejects.toThrow("MODEL_PROVIDER_ROUTES_JSON route for gpt-4o requires apiKeyEnv when provider differs from MODEL_PROVIDER");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("requires an explicit key env when a non-Azure route overrides the endpoint", async () => {
+    restoreEnv();
+    Object.assign(process.env, {
+      MODEL_PROVIDER: "openrouter",
+      MODEL_API_KEY: "openrouter-key",
+      MODEL_BASE_URL: "https://openrouter.ai/api/v1",
+      MODEL_PROVIDER_ROUTES_JSON: JSON.stringify([
+        {
+          model: "deepseek/deepseek-v4-pro",
+          provider: "openrouter",
+          baseUrl: "https://alternate-openrouter.example.test/v1",
+        },
+      ]),
+    });
+
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { openAICompatibleModelGateway } = await import("./openai-compatible-gateway");
+
+    await expect(openAICompatibleModelGateway.chat({
+      workspaceId: "ws-1",
+      taskType: "CHAT",
+      model: "deepseek/deepseek-v4-pro",
+      messages: [{ role: "user", content: "Hello" }],
+    })).rejects.toThrow("MODEL_PROVIDER_ROUTES_JSON route for deepseek/deepseek-v4-pro requires apiKeyEnv when overriding baseUrl");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("keeps unrouted models on OpenRouter when a Foundry provider route exists", async () => {
+    restoreEnv();
+    Object.assign(process.env, {
+      MODEL_PROVIDER: "openrouter",
+      MODEL_API_KEY: "openrouter-key",
+      MODEL_BASE_URL: "https://openrouter.ai/api/v1",
+      APP_URL: "https://corgtex.example.test",
+      MODEL_CHAT_DEFAULT: "deepseek/deepseek-v4-flash",
+      MODEL_PROVIDER_ROUTES_JSON: JSON.stringify([
+        {
+          model: "corgtex-gpt56-luna",
+          provider: "azure-foundry",
+          baseUrl: "https://corgtex-foundry.services.ai.azure.com/openai/v1",
+          authMode: "managed_identity",
+        },
+      ]),
+    });
+
+    const fetchMock = vi.fn().mockResolvedValueOnce(new Response(JSON.stringify({
+      choices: [{ message: { content: "OpenRouter answer" } }],
+      usage: { prompt_tokens: 10, completion_tokens: 4 },
+    }), { status: 200 }));
+
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { openAICompatibleModelGateway } = await import("./openai-compatible-gateway");
+
+    const chat = await openAICompatibleModelGateway.chat({
+      workspaceId: "ws-1",
+      taskType: "CHAT",
+      messages: [{ role: "user", content: "Hello" }],
+    });
+
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    const body = JSON.parse(String(init.body)) as Record<string, unknown>;
+
+    expect(url).toBe("https://openrouter.ai/api/v1/chat/completions");
+    expect(init.headers).toMatchObject({
+      authorization: "Bearer openrouter-key",
+      "content-type": "application/json",
+      "HTTP-Referer": "https://corgtex.example.test",
+      "X-Title": "Corgtex",
+    });
+    expect(body).toMatchObject({
+      model: "deepseek/deepseek-v4-flash",
+      provider: {
+        allow_fallbacks: true,
+        data_collection: "deny",
+        require_parameters: true,
+      },
+    });
+    expect(azureIdentityMock.getToken).not.toHaveBeenCalled();
+    expect(chat.usage).toMatchObject({
+      provider: "openrouter",
+      model: "deepseek/deepseek-v4-flash",
+    });
+  });
+
+  it("omits custom temperature for the Azure Foundry GPT 5.6 Luna fallback alias", async () => {
+    restoreEnv();
+    Object.assign(process.env, {
+      MODEL_PROVIDER: "azure-foundry",
+      MODEL_BASE_URL: "https://corgtex-foundry.services.ai.azure.com/openai/v1",
+      AZURE_OPENAI_AUTH_MODE: "api_key",
+      AZURE_OPENAI_API_KEY: "foundry-key",
+      MODEL_CHAT_DEFAULT: "corgtex-gpt56-luna",
+    });
+
+    const fetchMock = vi.fn().mockResolvedValueOnce(new Response(JSON.stringify({
+      choices: [{ message: { content: "Foundry answer" } }],
+      usage: { prompt_tokens: 1000, completion_tokens: 500 },
+    }), { status: 200 }));
+
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { openAICompatibleModelGateway } = await import("./openai-compatible-gateway");
+
+    const chat = await openAICompatibleModelGateway.chat({
+      workspaceId: "ws-1",
+      taskType: "CHAT",
+      messages: [{ role: "user", content: "Hello" }],
+    });
+
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    const body = JSON.parse(String(init.body)) as Record<string, unknown>;
+
+    expect(body).toMatchObject({
+      model: "corgtex-gpt56-luna",
+    });
+    expect(body.temperature).toBeUndefined();
+    expect(chat.usage).toMatchObject({
+      provider: "azure-foundry",
+      model: "corgtex-gpt56-luna",
+      rawProviderCostUsd: "0.004000",
+      estimatedCostUsd: "0.008000",
+    });
+  });
+
+  it("omits custom temperature for deployed Azure Foundry GPT 5.6 Sol and Terra aliases", async () => {
+    const expectedRawCostByModel = new Map([
+      ["corgtex-gpt56-terra", "0.010000"],
+      ["corgtex-gpt56-sol", "0.020000"],
+    ]);
+
+    for (const model of expectedRawCostByModel.keys()) {
+      restoreEnv();
+      vi.resetModules();
+      Object.assign(process.env, {
+        MODEL_PROVIDER: "azure-foundry",
+        MODEL_BASE_URL: "https://corgtex-foundry.services.ai.azure.com/openai/v1",
+        AZURE_OPENAI_AUTH_MODE: "api_key",
+        AZURE_OPENAI_API_KEY: "foundry-key",
+        MODEL_CHAT_DEFAULT: model,
+      });
+
+      const fetchMock = vi.fn().mockResolvedValueOnce(new Response(JSON.stringify({
+        choices: [{ message: { content: "Foundry answer" } }],
+        usage: { prompt_tokens: 1000, completion_tokens: 500 },
+      }), { status: 200 }));
+
+      vi.stubGlobal("fetch", fetchMock);
+
+      const { openAICompatibleModelGateway } = await import("./openai-compatible-gateway");
+
+      const chat = await openAICompatibleModelGateway.chat({
+        workspaceId: "ws-1",
+        taskType: "CHAT",
+        messages: [{ role: "user", content: "Hello" }],
+      });
+
+      const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+      const body = JSON.parse(String(init.body)) as Record<string, unknown>;
+
+      expect(body).toMatchObject({ model });
+      expect(body.temperature).toBeUndefined();
+      expect(chat.usage).toMatchObject({
+        provider: "azure-foundry",
+        model,
+        rawProviderCostUsd: expectedRawCostByModel.get(model),
+      });
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("omits custom temperature for configured Luna deployment aliases", async () => {
+    restoreEnv();
+    Object.assign(process.env, {
+      MODEL_PROVIDER: "azure-foundry",
+      MODEL_BASE_URL: "https://corgtex-foundry.services.ai.azure.com/openai/v1",
+      AZURE_OPENAI_AUTH_MODE: "api_key",
+      AZURE_OPENAI_API_KEY: "foundry-key",
+      MODEL_CHAT_DEFAULT: "corgtex-luna-enterprise",
+      MODEL_OMIT_TEMPERATURE_MODELS: "corgtex-luna-enterprise",
+      MODEL_PRICE_OVERRIDES_JSON: JSON.stringify([
+        {
+          provider: "azure-foundry",
+          model: "corgtex-luna-enterprise",
+          inputUsdPerToken: 0.000001,
+          outputUsdPerToken: 0.000006,
+        },
+      ]),
+    });
+
+    const fetchMock = vi.fn().mockResolvedValueOnce(new Response(JSON.stringify({
+      choices: [{ message: { content: "Foundry answer" } }],
+      usage: { prompt_tokens: 1000, completion_tokens: 500 },
+    }), { status: 200 }));
+
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { openAICompatibleModelGateway } = await import("./openai-compatible-gateway");
+
+    const chat = await openAICompatibleModelGateway.chat({
+      workspaceId: "ws-1",
+      taskType: "CHAT",
+      messages: [{ role: "user", content: "Hello" }],
+    });
+
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    const body = JSON.parse(String(init.body)) as Record<string, unknown>;
+
+    expect(body).toMatchObject({
+      model: "corgtex-luna-enterprise",
+    });
+    expect(body.temperature).toBeUndefined();
+    expect(chat.usage).toMatchObject({
+      provider: "azure-foundry",
+      model: "corgtex-luna-enterprise",
+      rawProviderCostUsd: "0.004000",
+      estimatedCostUsd: "0.008000",
+    });
+  });
+
   it("blocks Azure OpenAI calls when deployment pricing is missing", async () => {
     restoreEnv();
     Object.assign(process.env, {
@@ -390,6 +1351,264 @@ describe("openAICompatibleModelGateway", () => {
       messages: [{ role: "user", content: "Hello" }],
     })).rejects.toThrow("Missing model price for azure-openai/unpriced-deployment");
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("blocks Azure Foundry streams before the provider call when deployment pricing is missing", async () => {
+    restoreEnv();
+    Object.assign(process.env, {
+      MODEL_PROVIDER: "azure-foundry",
+      MODEL_BASE_URL: "https://corgtex-foundry.services.ai.azure.com/openai/v1",
+      AZURE_OPENAI_AUTH_MODE: "api_key",
+      AZURE_OPENAI_API_KEY: "foundry-key",
+      MODEL_CHAT_DEFAULT: "unpriced-foundry-deployment",
+    });
+
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { openAICompatibleModelGateway } = await import("./openai-compatible-gateway");
+    const stream = openAICompatibleModelGateway.chatStream({
+      workspaceId: "ws-1",
+      taskType: "CHAT",
+      messages: [{ role: "user", content: "Hello" }],
+    });
+
+    await expect(stream.next()).rejects.toThrow("Missing model price for azure-foundry/unpriced-foundry-deployment");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("records priced Azure Foundry streaming usage from stream usage chunks", async () => {
+    restoreEnv();
+    Object.assign(process.env, {
+      MODEL_PROVIDER: "azure-foundry",
+      MODEL_BASE_URL: "https://corgtex-foundry.services.ai.azure.com/openai/v1",
+      AZURE_OPENAI_AUTH_MODE: "api_key",
+      AZURE_OPENAI_API_KEY: "foundry-key",
+      MODEL_CHAT_DEFAULT: "corgtex-kimi-k25",
+    });
+
+    const encoder = new TextEncoder();
+    const streamBody = new ReadableStream({
+      start(controller) {
+        controller.enqueue(encoder.encode("data: {\"choices\":[{\"delta\":{\"content\":\"Foundry\"}}]}\n\n"));
+        controller.enqueue(encoder.encode("data: {\"choices\":[{\"delta\":{\"content\":\" stream\"}}],\"usage\":{\"prompt_tokens\":1000,\"completion_tokens\":500}}\n\n"));
+        controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+        controller.close();
+      },
+    });
+    const fetchMock = vi.fn().mockResolvedValueOnce(new Response(streamBody, { status: 200 }));
+
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { openAICompatibleModelGateway } = await import("./openai-compatible-gateway");
+    const chunks: string[] = [];
+    const stream = openAICompatibleModelGateway.chatStream({
+      workspaceId: "ws-1",
+      taskType: "CHAT",
+      messages: [{ role: "user", content: "Hello" }],
+    });
+
+    let next = await stream.next();
+    while (!next.done) {
+      chunks.push(next.value);
+      next = await stream.next();
+    }
+
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    const body = JSON.parse(String(init.body)) as Record<string, unknown>;
+
+    expect(chunks.join("")).toBe("Foundry stream");
+    expect(url).toBe("https://corgtex-foundry.services.ai.azure.com/openai/v1/chat/completions");
+    expect(body).toMatchObject({
+      model: "corgtex-kimi-k25",
+      stream: true,
+      stream_options: { include_usage: true },
+    });
+    expect(next.value.usage).toMatchObject({
+      provider: "azure-foundry",
+      model: "corgtex-kimi-k25",
+      rawProviderCostUsd: "0.002100",
+      estimatedCostUsd: "0.004200",
+    });
+  });
+
+  it("records estimated Azure Foundry streaming usage when the consumer closes early", async () => {
+    restoreEnv();
+    Object.assign(process.env, {
+      MODEL_PROVIDER: "openrouter",
+      MODEL_API_KEY: "openrouter-key",
+      MODEL_BASE_URL: "https://openrouter.ai/api/v1",
+      MODEL_PROVIDER_ROUTES_JSON: JSON.stringify([
+        {
+          model: "corgtex-kimi-k25",
+          provider: "azure-foundry",
+          baseUrl: "https://corgtex-foundry.services.ai.azure.com/openai/v1",
+          authMode: "api_key",
+          apiKeyEnv: "AZURE_FOUNDRY_ROUTE_KEY",
+        },
+      ]),
+      AZURE_FOUNDRY_ROUTE_KEY: "foundry-key",
+    });
+
+    const usageModule = await import("./usage");
+    vi.mocked(usageModule.recordModelUsage).mockClear();
+
+    const encoder = new TextEncoder();
+    const cancelMock = vi.fn();
+    const streamBody = new ReadableStream({
+      start(controller) {
+        controller.enqueue(encoder.encode("data: {\"choices\":[{\"delta\":{\"content\":\"Foundry\"}}]}\n\n"));
+      },
+      cancel: cancelMock,
+    });
+    const fetchMock = vi.fn().mockResolvedValueOnce(new Response(streamBody, { status: 200 }));
+
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { openAICompatibleModelGateway } = await import("./openai-compatible-gateway");
+    const longPrompt = "x".repeat(4_000);
+    const stream = openAICompatibleModelGateway.chatStream({
+      workspaceId: "ws-1",
+      taskType: "CHAT",
+      model: "corgtex-kimi-k25",
+      messages: [{ role: "user", content: longPrompt }],
+    });
+
+    const first = await stream.next();
+    expect(first.value).toBe("Foundry");
+
+    await stream.return({
+      content: "",
+      usage: {
+        provider: "azure-foundry",
+        model: "corgtex-kimi-k25",
+        inputTokens: 0,
+        outputTokens: 0,
+        latencyMs: 0,
+        estimatedCostUsd: "0.000000",
+        rawProviderCostUsd: "0.000000",
+        billableCostUsd: "0.000000",
+      },
+    });
+
+    expect(cancelMock).toHaveBeenCalledTimes(1);
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    const expectedInputTokens = Math.ceil(String(init.body).length / 4);
+    const expectedOutputTokens = Math.ceil("Foundry".length / 4);
+    const expectedRawCostUsd = (
+      expectedInputTokens * 0.0000006 +
+      expectedOutputTokens * 0.000003
+    ).toFixed(6);
+    const expectedEstimatedCostUsd = (
+      (expectedInputTokens * 0.0000006 + expectedOutputTokens * 0.000003) * 2
+    ).toFixed(6);
+    expect(vi.mocked(usageModule.recordModelUsage).mock.calls.at(-1)?.[0]).toMatchObject({
+      provider: "azure-foundry",
+      model: "corgtex-kimi-k25",
+      inputTokens: expectedInputTokens,
+      outputTokens: expectedOutputTokens,
+      rawProviderCostUsd: expectedRawCostUsd,
+      estimatedCostUsd: expectedEstimatedCostUsd,
+    });
+  });
+
+  it("includes tool schemas and streamed tool-call arguments in early-close usage estimates", async () => {
+    restoreEnv();
+    Object.assign(process.env, {
+      MODEL_PROVIDER: "openrouter",
+      MODEL_API_KEY: "openrouter-key",
+      MODEL_BASE_URL: "https://openrouter.ai/api/v1",
+      MODEL_PROVIDER_ROUTES_JSON: JSON.stringify([
+        {
+          model: "corgtex-kimi-k25",
+          provider: "azure-foundry",
+          baseUrl: "https://corgtex-foundry.services.ai.azure.com/openai/v1",
+          authMode: "api_key",
+          apiKeyEnv: "AZURE_FOUNDRY_ROUTE_KEY",
+        },
+      ]),
+      AZURE_FOUNDRY_ROUTE_KEY: "foundry-key",
+    });
+
+    const usageModule = await import("./usage");
+    vi.mocked(usageModule.recordModelUsage).mockClear();
+
+    const encoder = new TextEncoder();
+    const cancelMock = vi.fn();
+    const streamedArguments = "z".repeat(4_000);
+    const toolDelta = JSON.stringify({
+      choices: [{
+        delta: {
+          tool_calls: [{
+            index: 0,
+            id: "call_lookup",
+            function: {
+              name: "lookup_customer",
+              arguments: streamedArguments,
+            },
+          }],
+        },
+      }],
+    });
+    const contentDelta = JSON.stringify({ choices: [{ delta: { content: "Foundry" } }] });
+    const streamBody = new ReadableStream({
+      start(controller) {
+        controller.enqueue(encoder.encode(`data: ${toolDelta}\n\ndata: ${contentDelta}\n\n`));
+      },
+      cancel: cancelMock,
+    });
+    const fetchMock = vi.fn().mockResolvedValueOnce(new Response(streamBody, { status: 200 }));
+
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { openAICompatibleModelGateway } = await import("./openai-compatible-gateway");
+    const stream = openAICompatibleModelGateway.chatStream({
+      workspaceId: "ws-1",
+      taskType: "CHAT",
+      model: "corgtex-kimi-k25",
+      messages: [{ role: "user", content: "short prompt" }],
+      tools: [{
+        type: "function",
+        function: {
+          name: "lookup_customer",
+          description: "y".repeat(4_000),
+          parameters: {
+            type: "object",
+            properties: {
+              query: { type: "string" },
+            },
+            required: ["query"],
+          },
+        },
+      }],
+    });
+
+    const first = await stream.next();
+    expect(first.value).toBe("Foundry");
+
+    await stream.return({
+      content: "",
+      usage: {
+        provider: "azure-foundry",
+        model: "corgtex-kimi-k25",
+        inputTokens: 0,
+        outputTokens: 0,
+        latencyMs: 0,
+        estimatedCostUsd: "0.000000",
+        rawProviderCostUsd: "0.000000",
+        billableCostUsd: "0.000000",
+      },
+    });
+
+    expect(cancelMock).toHaveBeenCalledTimes(1);
+    const recordedUsage = vi.mocked(usageModule.recordModelUsage).mock.calls.at(-1)?.[0];
+    expect(recordedUsage).toMatchObject({
+      provider: "azure-foundry",
+      model: "corgtex-kimi-k25",
+    });
+    expect(recordedUsage?.inputTokens).toBeGreaterThan(1000);
+    expect(recordedUsage?.outputTokens).toBeGreaterThan(1000);
+    expect(Number(recordedUsage?.rawProviderCostUsd)).toBeGreaterThan(0.003);
   });
 
   it("recovers fenced extraction JSON without a repair pass", async () => {
@@ -489,5 +1708,51 @@ describe("openAICompatibleModelGateway", () => {
       raw: "Summary: Structured answer",
       repairedRaw: "Still not JSON",
     });
+  });
+
+  it("aborts a pending streaming provider read when the request signal aborts", async () => {
+    restoreEnv();
+    Object.assign(process.env, {
+      MODEL_PROVIDER: "openrouter",
+      MODEL_API_KEY: "test-key",
+      MODEL_BASE_URL: "https://openrouter.ai/api/v1",
+      APP_URL: "https://corgtex.example.test",
+      MODEL_CHAT_DEFAULT: "qwen/qwen3-32b",
+    });
+
+    let providerSignal: AbortSignal | undefined;
+    const fetchMock = vi.fn().mockImplementation((_url: string, init: RequestInit) => {
+      providerSignal = init.signal as AbortSignal;
+      return Promise.resolve(new Response(new ReadableStream({
+        start(controller) {
+          providerSignal?.addEventListener("abort", () => {
+            controller.error(new DOMException("The operation was aborted.", "AbortError"));
+          }, { once: true });
+        },
+      }), { status: 200 }));
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { openAICompatibleModelGateway } = await import("./openai-compatible-gateway");
+    const controller = new AbortController();
+    const stream = openAICompatibleModelGateway.chatStream({
+      workspaceId: "ws-1",
+      taskType: "AGENT",
+      messages: [{ role: "user", content: "Hello" }],
+      signal: controller.signal,
+    });
+
+    const pendingRead = stream.next();
+    await vi.waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(providerSignal).toBeInstanceOf(AbortSignal);
+    });
+
+    expect(providerSignal?.aborted).toBe(false);
+    controller.abort();
+
+    await expect(pendingRead).rejects.toMatchObject({ name: "AbortError" });
+    expect(providerSignal?.aborted).toBe(true);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 });

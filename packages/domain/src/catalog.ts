@@ -514,7 +514,8 @@ async function ensureDerivedCatalogItems(workspaceId: string) {
         descriptionMd: meta.description,
         url: `/workspaces/${workspaceId}/agents?tab=registry`,
         category: meta.category.toUpperCase(),
-        status: config?.enabled === false ? "DISABLED" as const : "PUBLISHED" as const,
+        status: (config?.enabled ?? ("defaultEnabled" in meta ? meta.defaultEnabled : true))
+          ? "PUBLISHED" as const : "DISABLED" as const,
         accessMode: "ADMIN_ONLY" as const,
         requestedScopes: ["agents:read"],
         featured: meta.costTier === "free" || meta.costTier === "low",

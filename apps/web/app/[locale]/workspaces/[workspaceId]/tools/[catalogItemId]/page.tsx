@@ -380,7 +380,7 @@ export default async function CatalogItemPage({
         where: { workspaceId },
         orderBy: { createdAt: "desc" },
       }).catch(() => []),
-      listDocuments(workspaceId).catch(() => []),
+      listDocuments(actor, workspaceId).catch(() => []),
     ]);
     setupPanel = <DataSourcesConnectorPanel workspaceId={workspaceId} dataSources={dataSources} documents={documents} />;
   } else if (item.sourceType === "MANUAL" && item.sourceId === "webhooks") {

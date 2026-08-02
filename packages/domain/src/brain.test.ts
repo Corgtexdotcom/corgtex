@@ -15,10 +15,17 @@ const { prismaMock } = vi.hoisted(() => ({
       findFirst: vi.fn(),
     },
     brainSource: {
+      count: vi.fn(),
       create: vi.fn(),
       findFirst: vi.fn(),
       findMany: vi.fn(),
       update: vi.fn(),
+    },
+    brainDiscussionThread: {
+      count: vi.fn(),
+    },
+    brainBacklink: {
+      findMany: vi.fn(),
     },
     workspacePermalink: {
       upsert: vi.fn(),
@@ -34,6 +41,7 @@ const { prismaMock } = vi.hoisted(() => ({
 
 const requireWorkspaceMembership = vi.fn();
 const appendEvents = vi.fn();
+const resolveKnowledgeAccessDomains = vi.fn();
 
 vi.mock("@corgtex/shared", () => ({
   prisma: prismaMock,
@@ -46,6 +54,10 @@ vi.mock("./auth", () => ({
 
 vi.mock("./events", () => ({
   appendEvents,
+}));
+
+vi.mock("./brain-access", () => ({
+  resolveKnowledgeAccessDomains,
 }));
 
 const ownerActor = {
@@ -215,6 +227,57 @@ describe("Brain article draft lifecycle", () => {
   });
 });
 
+describe("Brain status access domains", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    requireWorkspaceMembership.mockResolvedValue({
+      id: "mem-1",
+      workspaceId: "ws-1",
+      userId: "user-1",
+      role: "MEMBER",
+      isActive: true,
+    });
+    prismaMock.brainArticle.findMany.mockResolvedValue([]);
+    prismaMock.brainArticle.count.mockResolvedValue(0);
+    prismaMock.brainSource.count.mockResolvedValue(2);
+    prismaMock.brainDiscussionThread.count.mockResolvedValue(0);
+    prismaMock.brainBacklink.findMany.mockResolvedValue([]);
+  });
+
+  it.each([
+    [["WORKSPACE"], 2],
+    [["WORKSPACE", "FINANCE"], 3],
+  ])("scopes unabsorbed source counts to %j", async (domains, count) => {
+    resolveKnowledgeAccessDomains.mockResolvedValue(domains);
+    prismaMock.brainSource.count.mockResolvedValue(count);
+    const { getBrainStatus } = await import("./brain");
+
+    await expect(getBrainStatus(ownerActor, { workspaceId: "ws-1" }))
+      .resolves.toMatchObject({ unabsorbedSources: count });
+
+    expect(resolveKnowledgeAccessDomains).toHaveBeenCalledWith(ownerActor, "ws-1");
+    expect(prismaMock.brainSource.count).toHaveBeenCalledWith({
+      where: {
+        workspaceId: "ws-1",
+        accessDomain: { in: domains },
+        absorbedAt: null,
+      },
+    });
+  });
+
+  it("fails closed before status queries when access resolution fails", async () => {
+    const error = new Error("access denied");
+    resolveKnowledgeAccessDomains.mockRejectedValue(error);
+    const { getBrainStatus } = await import("./brain");
+
+    await expect(getBrainStatus(ownerActor, { workspaceId: "ws-1" }))
+      .rejects.toBe(error);
+
+    expect(prismaMock.brainSource.count).not.toHaveBeenCalled();
+    expect(prismaMock.brainArticle.findMany).not.toHaveBeenCalled();
+  });
+});
+
 describe("brain source ingestion", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -237,6 +300,7 @@ describe("brain source ingestion", () => {
     });
     prismaMock.brainSource.findFirst.mockResolvedValue(null);
     prismaMock.brainSource.findMany.mockResolvedValue([]);
+    prismaMock.brainSource.count.mockResolvedValue(0);
     prismaMock.brainSource.update.mockResolvedValue({
       id: "source-1",
       sourceType: "DOC",
@@ -244,6 +308,74 @@ describe("brain source ingestion", () => {
       content: "Policy text",
       absorbedAt: null,
     });
+    resolveKnowledgeAccessDomains.mockResolvedValue(["WORKSPACE"]);
+  });
+
+  it("filters workspace-only source items and totals through the shared access policy", async () => {
+    const { listSources } = await import("./brain");
+
+    await expect(listSources(ownerActor, {
+      workspaceId: "ws-1",
+    })).resolves.toEqual({
+      items: [],
+      total: 0,
+      take: 50,
+      skip: 0,
+    });
+
+    expect(resolveKnowledgeAccessDomains).toHaveBeenCalledWith(ownerActor, "ws-1");
+    const where = {
+      workspaceId: "ws-1",
+      accessDomain: { in: ["WORKSPACE"] },
+      archivedAt: null,
+    };
+    expect(prismaMock.brainSource.findMany).toHaveBeenCalledWith(expect.objectContaining({ where }));
+    expect(prismaMock.brainSource.count).toHaveBeenCalledWith({ where });
+  });
+
+  it("preserves source filters and pagination for Finance-authorized domains", async () => {
+    resolveKnowledgeAccessDomains.mockResolvedValue(["WORKSPACE", "FINANCE"]);
+    prismaMock.brainSource.count.mockResolvedValue(7);
+
+    const { listSources } = await import("./brain");
+    await expect(listSources(ownerActor, {
+      workspaceId: "ws-1",
+      absorbed: true,
+      archiveFilter: "archived",
+      take: 12,
+      skip: 4,
+    })).resolves.toEqual({
+      items: [],
+      total: 7,
+      take: 12,
+      skip: 4,
+    });
+
+    const where = {
+      workspaceId: "ws-1",
+      accessDomain: { in: ["WORKSPACE", "FINANCE"] },
+      archivedAt: { not: null },
+      absorbedAt: { not: null },
+    };
+    expect(prismaMock.brainSource.findMany).toHaveBeenCalledWith(expect.objectContaining({
+      where,
+      orderBy: { createdAt: "desc" },
+      take: 12,
+      skip: 4,
+    }));
+    expect(prismaMock.brainSource.count).toHaveBeenCalledWith({ where });
+  });
+
+  it("does not query sources when access-domain resolution fails", async () => {
+    const error = new Error("access denied");
+    resolveKnowledgeAccessDomains.mockRejectedValue(error);
+
+    const { listSources } = await import("./brain");
+    await expect(listSources(ownerActor, { workspaceId: "ws-1" }))
+      .rejects.toBe(error);
+
+    expect(prismaMock.brainSource.findMany).not.toHaveBeenCalled();
+    expect(prismaMock.brainSource.count).not.toHaveBeenCalled();
   });
 
   it("persists trimmed ingestion guidance on brain sources", async () => {

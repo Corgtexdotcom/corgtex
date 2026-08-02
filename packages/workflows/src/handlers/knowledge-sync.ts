@@ -35,6 +35,7 @@ export async function handleKnowledgeSync(jobId: string, payload: { proposalId?:
   await syncKnowledgeForSource({
     workspaceId,
     sourceType: "PROPOSAL",
+    accessDomain: "WORKSPACE",
     sourceId: proposal.id,
     sourceTitle: proposal.title,
     content: [proposal.title, proposal.summary, proposal.bodyMd].filter(Boolean).join("\n\n"),
@@ -73,6 +74,7 @@ export async function handleMeetingKnowledgeSync(jobId: string, payload: { meeti
   await syncKnowledgeForSource({
     workspaceId,
     sourceType: "MEETING",
+    accessDomain: "WORKSPACE",
     sourceId: meeting.id,
     sourceTitle: meeting.title,
     content: [meeting.title, meeting.summaryMd, meeting.transcript].filter(Boolean).join("\n\n"),
@@ -102,6 +104,7 @@ export async function handleDocumentKnowledgeSync(jobId: string, payload: { docu
       mimeType: true,
       storageKey: true,
       textContent: true,
+      accessDomain: true,
     },
   });
 
@@ -112,6 +115,7 @@ export async function handleDocumentKnowledgeSync(jobId: string, payload: { docu
   await syncKnowledgeForSource({
     workspaceId,
     sourceType: "DOCUMENT",
+    accessDomain: document.accessDomain,
     sourceId: document.id,
     sourceTitle: document.title,
     content: [document.title, document.textContent].filter(Boolean).join("\n\n"),
@@ -135,6 +139,7 @@ export async function handleExternalResourceKnowledgeSync(jobId: string, payload
   }
   await syncKnowledgeForSource({
     ...input,
+    accessDomain: "WORKSPACE",
     metadata: {
       ...input.metadata,
       workflowJobId: jobId,
@@ -152,7 +157,10 @@ export async function handleExternalContentKnowledgeSync(jobId: string, payload:
     workspaceId,
     sourceId: payload.sourceId,
     workflowJobId: jobId,
-    syncKnowledge: (input) => syncKnowledgeForSource(input),
+    syncKnowledge: (input) => syncKnowledgeForSource({
+      ...input,
+      accessDomain: "WORKSPACE",
+    }),
   });
 }
 
@@ -189,6 +197,7 @@ export async function handleEventKnowledgeSync(jobId: string, payload: { eventId
   await syncKnowledgeForSource({
     workspaceId,
     sourceType: "EVENT",
+    accessDomain: "WORKSPACE",
     sourceId: event.id,
     sourceTitle: title,
     content,
@@ -229,6 +238,7 @@ export async function handleTensionKnowledgeSync(jobId: string, payload: { tensi
   await syncKnowledgeForSource({
     workspaceId,
     sourceType: "TENSION",
+    accessDomain: "WORKSPACE",
     sourceId: tension.id,
     sourceTitle: tension.title,
     content,
@@ -258,6 +268,7 @@ export async function handleActionKnowledgeSync(jobId: string, payload: { action
   await syncKnowledgeForSource({
     workspaceId,
     sourceType: "ACTION",
+    accessDomain: "WORKSPACE",
     sourceId: action.id,
     sourceTitle: action.title,
     content,
@@ -283,6 +294,7 @@ export async function handleCircleKnowledgeSync(jobId: string, payload: { circle
   await syncKnowledgeForSource({
     workspaceId,
     sourceType: "CIRCLE",
+    accessDomain: "WORKSPACE",
     sourceId: circle.id,
     sourceTitle: circle.name,
     content,
@@ -310,6 +322,7 @@ export async function handleRoleKnowledgeSync(jobId: string, payload: { roleId?:
   await syncKnowledgeForSource({
     workspaceId,
     sourceType: "ROLE",
+    accessDomain: "WORKSPACE",
     sourceId: role.id,
     sourceTitle: role.name,
     content,
@@ -363,6 +376,7 @@ export async function handleSlackMessageKnowledgeSync(jobId: string, payload: { 
   await syncKnowledgeForSource({
     workspaceId,
     sourceType: "SLACK",
+    accessDomain: "WORKSPACE",
     sourceId: message.id,
     sourceTitle: `Slack ${channelLabel}`,
     content,
@@ -412,6 +426,7 @@ export async function handleCalendarSync(jobId: string, payload: { connectionId?
       await syncKnowledgeForSource({
         workspaceId,
         sourceType: "MEETING",
+        accessDomain: "WORKSPACE",
         sourceId,
         sourceTitle: event.title,
         content: [event.title, event.description].filter(Boolean).join("\n\n"),
@@ -488,6 +503,7 @@ export async function handleOAuthDocumentsSync(jobId: string, payload: { connect
       await syncKnowledgeForSource({
         workspaceId,
         sourceType: "DOCUMENT",
+        accessDomain: "WORKSPACE",
         sourceId: `oauth-doc-${connection.id}-${document.provider.toLowerCase()}-${documentSourceKey}`,
         sourceTitle: document.name,
         content: [document.name, document.contentText].filter(Boolean).join("\n\n"),
@@ -537,6 +553,7 @@ export async function handleOAuthEmailSync(jobId: string, payload: { connectionI
       await syncKnowledgeForSource({
         workspaceId,
         sourceType: "DOCUMENT",
+        accessDomain: "WORKSPACE",
         sourceId: `oauth-email-${connection.id}-${message.provider.toLowerCase()}-${message.id}`,
         sourceTitle: `Email: ${message.subject}`,
         content: [message.subject, message.from ? `From: ${message.from}` : null, message.snippet].filter(Boolean).join("\n\n"),

@@ -7,6 +7,10 @@ import {
   listExternalMcpConnections,
   searchConnectedExternalMcpContext,
 } from "@corgtex/domain";
+import {
+  INTERACTIVE_KNOWLEDGE_SOURCE_TYPES,
+  resolveInteractiveKnowledgeAccessDomains,
+} from "./knowledge";
 
 type ToolContext = {
   workspaceId: string;
@@ -102,10 +106,13 @@ export async function searchConnectedContextAction(actor: AppActor, ctx: ToolCon
   const corgtexResults = [];
 
   if (args.includeCorgtex !== false) {
+    const accessDomains = await resolveInteractiveKnowledgeAccessDomains(actor, ctx.workspaceId);
     const results = await searchIndexedKnowledge({
       workspaceId: ctx.workspaceId,
       query: args.query,
       limit,
+      sourceTypes: INTERACTIVE_KNOWLEDGE_SOURCE_TYPES,
+      accessDomains,
     });
     corgtexResults.push(...results.map((result) => ({
       id: `corgtex:${result.chunkId}`,

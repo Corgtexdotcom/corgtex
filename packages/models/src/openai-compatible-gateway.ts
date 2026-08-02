@@ -49,11 +49,30 @@ type AudioTranscriptionApiResponse = {
   text?: string;
 };
 
+type AzureOpenAiAuthMode = "api_key" | "managed_identity";
+
+type ModelProviderRoute = {
+  model: string;
+  provider: string;
+  baseUrl?: string;
+  authMode?: AzureOpenAiAuthMode;
+  apiKeyEnv?: string;
+  scope?: string;
+};
+
 const REQUEST_TIMEOUT_MS = env.MODEL_REQUEST_TIMEOUT_MS;
 const STREAM_TIMEOUT_MS = 120_000;
 const MAX_REQUEST_RETRIES = 2;
 const OPENROUTER_TITLE = "Corgtex";
 const AZURE_TOKEN_REFRESH_SKEW_MS = 60_000;
+const AZURE_FOUNDRY_SCOPE = "https://ai.azure.com/.default";
+const AZURE_OPENAI_SCOPE = "https://cognitiveservices.azure.com/.default";
+const SUPPORTED_MODEL_PROVIDERS = new Set(["openrouter", "openai", "azure-openai", "azure-foundry"]);
+const BUILT_IN_TEMPERATURE_UNSUPPORTED_MODELS = new Set([
+  "corgtex-gpt56-luna",
+  "corgtex-gpt56-terra",
+  "corgtex-gpt56-sol",
+]);
 
 class ExtractionParseError extends Error {
   readonly raw: string;
@@ -71,27 +90,161 @@ class ExtractionParseError extends Error {
 }
 
 let azureCredential: DefaultAzureCredential | null = null;
-let azureAccessTokenCache: {
+const azureAccessTokenCache = new Map<string, {
   token: string;
   expiresOnTimestamp: number;
-} | null = null;
+}>();
 
-function baseUrl() {
-  return env.MODEL_BASE_URL?.replace(/\/+$/, "") ?? "https://api.openai.com/v1";
+function routeStringField(record: Record<string, unknown>, field: string) {
+  const value = record[field];
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
 }
 
-function requireApiKey() {
-  if (!env.MODEL_API_KEY) {
+function isHttpsBaseUrl(value: string) {
+  try {
+    const url = new URL(value);
+    return url.protocol === "https:" && !url.username && !url.password && !url.port && !url.search && !url.hash;
+  } catch {
+    return false;
+  }
+}
+
+function parseModelProviderRoutes() {
+  const raw = env.MODEL_PROVIDER_ROUTES_JSON;
+  if (!raw) {
+    return [];
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new Error("MODEL_PROVIDER_ROUTES_JSON must be valid JSON.");
+  }
+
+  if (!Array.isArray(parsed)) {
+    throw new Error("MODEL_PROVIDER_ROUTES_JSON must be an array.");
+  }
+
+  const seenModels = new Set<string>();
+  return parsed.map((entry, index): ModelProviderRoute => {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+      throw new Error(`MODEL_PROVIDER_ROUTES_JSON[${index}] must be an object.`);
+    }
+
+    const record = entry as Record<string, unknown>;
+    const model = routeStringField(record, "model");
+    const provider = routeStringField(record, "provider");
+    const authModeRaw = routeStringField(record, "authMode");
+    if (!model || !provider) {
+      throw new Error(`MODEL_PROVIDER_ROUTES_JSON[${index}] requires model and provider strings.`);
+    }
+    const normalizedProvider = provider.toLowerCase();
+    if (!SUPPORTED_MODEL_PROVIDERS.has(normalizedProvider)) {
+      throw new Error(`MODEL_PROVIDER_ROUTES_JSON[${index}].provider must be one of ${[...SUPPORTED_MODEL_PROVIDERS].join(", ")}.`);
+    }
+    if (seenModels.has(model)) {
+      throw new Error(`MODEL_PROVIDER_ROUTES_JSON contains duplicate route for ${model}.`);
+    }
+    seenModels.add(model);
+    if (authModeRaw && authModeRaw !== "api_key" && authModeRaw !== "managed_identity") {
+      throw new Error(`MODEL_PROVIDER_ROUTES_JSON[${index}].authMode must be api_key or managed_identity.`);
+    }
+    const authMode = authModeRaw as AzureOpenAiAuthMode | undefined;
+    if (authMode === "managed_identity" && !isAzureProvider(normalizedProvider)) {
+      throw new Error(`MODEL_PROVIDER_ROUTES_JSON[${index}].authMode managed_identity is only supported for Azure routes.`);
+    }
+    const routeBaseUrl = routeStringField(record, "baseUrl");
+    if (routeBaseUrl && !isHttpsBaseUrl(routeBaseUrl)) {
+      throw new Error(`MODEL_PROVIDER_ROUTES_JSON[${index}].baseUrl must be an HTTPS URL without query or fragment, credentials, or non-default port.`);
+    }
+
+    return {
+      model,
+      provider: normalizedProvider,
+      baseUrl: routeBaseUrl,
+      authMode,
+      apiKeyEnv: routeStringField(record, "apiKeyEnv"),
+      scope: routeStringField(record, "scope"),
+    };
+  });
+}
+
+function providerRouteForModel(model: string) {
+  return parseModelProviderRoutes().find((route) => route.model === model);
+}
+
+function providerForRoute(route?: ModelProviderRoute) {
+  return route?.provider ?? env.MODEL_PROVIDER;
+}
+
+function baseUrl(route?: ModelProviderRoute) {
+  if (route?.baseUrl) {
+    return route.baseUrl.replace(/\/+$/, "");
+  }
+
+  if (route && route.provider !== env.MODEL_PROVIDER) {
+    throw new Error(`MODEL_PROVIDER_ROUTES_JSON route for ${route.model} requires baseUrl when provider differs from MODEL_PROVIDER.`);
+  }
+
+  if (!env.MODEL_BASE_URL) {
+    return "https://api.openai.com/v1";
+  }
+  if (!isHttpsBaseUrl(env.MODEL_BASE_URL)) {
+    throw new Error("MODEL_BASE_URL must be an HTTPS URL without query or fragment, credentials, or non-default port.");
+  }
+  return env.MODEL_BASE_URL.replace(/\/+$/, "");
+}
+
+function optionalSecretEnv(name: string) {
+  const value = process.env[name]?.trim();
+  return value && value.length > 0 ? value : undefined;
+}
+
+function requireApiKey(route?: ModelProviderRoute) {
+  if (route?.apiKeyEnv) {
+    const routeKey = optionalSecretEnv(route.apiKeyEnv);
+    if (!routeKey) {
+      throw new Error(`${route.apiKeyEnv} is required for routed OpenAI-compatible provider authentication.`);
+    }
+    return routeKey;
+  }
+
+  if (route && route.provider !== env.MODEL_PROVIDER) {
+    throw new Error(`MODEL_PROVIDER_ROUTES_JSON route for ${route.model} requires apiKeyEnv when provider differs from MODEL_PROVIDER.`);
+  }
+
+  if (route?.baseUrl) {
+    throw new Error(`MODEL_PROVIDER_ROUTES_JSON route for ${route.model} requires apiKeyEnv when overriding baseUrl.`);
+  }
+
+  const key = env.MODEL_API_KEY;
+  if (!key) {
     throw new Error("MODEL_API_KEY is required for the OpenAI-compatible model provider.");
   }
 
-  return env.MODEL_API_KEY;
+  return key;
 }
 
-function requireAzureApiKey() {
-  const key = env.AZURE_OPENAI_API_KEY ?? env.MODEL_API_KEY;
+function requireAzureApiKey(route?: ModelProviderRoute) {
+  if (route?.apiKeyEnv) {
+    const routeKey = optionalSecretEnv(route.apiKeyEnv);
+    if (!routeKey) {
+      throw new Error(`${route.apiKeyEnv} is required for routed Azure API key authentication.`);
+    }
+    return routeKey;
+  }
+
+  if (route && (route.provider !== env.MODEL_PROVIDER || route.baseUrl)) {
+    throw new Error(`MODEL_PROVIDER_ROUTES_JSON route for ${route.model} requires apiKeyEnv when using Azure API key authentication with a routed endpoint.`);
+  }
+
+  const usesGlobalEndpoint = !route || (route.provider === env.MODEL_PROVIDER && !route.baseUrl);
+  const key = env.AZURE_OPENAI_API_KEY ?? (usesGlobalEndpoint ? env.MODEL_API_KEY : undefined);
   if (!key) {
-    throw new Error("AZURE_OPENAI_API_KEY or MODEL_API_KEY is required for Azure OpenAI API key authentication.");
+    throw new Error(route
+      ? "AZURE_OPENAI_API_KEY is required for Azure API key authentication."
+      : "AZURE_OPENAI_API_KEY or MODEL_API_KEY is required for Azure OpenAI API key authentication.");
   }
 
   return key;
@@ -129,8 +282,26 @@ function costFields(provider: string, model: string, inputTokens: number, output
   }) ?? {};
 }
 
+function estimateTextTokens(value: string) {
+  return Math.ceil(value.length / 4);
+}
+
+function estimateSerializedTokens(value: unknown) {
+  if (value === undefined || value === null) {
+    return 0;
+  }
+  const serialized = typeof value === "string" ? value : JSON.stringify(value);
+  return serialized ? estimateTextTokens(serialized) : 0;
+}
+
+function estimateChatOutputTokens(content: string, toolCalls?: unknown[]) {
+  const compactToolCalls = toolCalls?.filter(Boolean);
+  return estimateTextTokens(content) +
+    estimateSerializedTokens(compactToolCalls && compactToolCalls.length > 0 ? compactToolCalls : undefined);
+}
+
 function requiresKnownModelPrice(provider: string) {
-  return provider === "azure-openai";
+  return provider === "azure-openai" || provider === "azure-foundry";
 }
 
 function assertKnownModelPrice(provider: string, model: string) {
@@ -143,12 +314,60 @@ function assertKnownModelPrice(provider: string, model: string) {
   }
 }
 
-function isOpenRouterProvider() {
-  return env.MODEL_PROVIDER === "openrouter";
+function isOpenRouterProvider(provider = env.MODEL_PROVIDER) {
+  return provider === "openrouter";
 }
 
-function isAzureOpenAiProvider() {
-  return env.MODEL_PROVIDER === "azure-openai";
+function isAzureOpenAiProvider(provider = env.MODEL_PROVIDER) {
+  return provider === "azure-openai";
+}
+
+function isAzureProvider(provider = env.MODEL_PROVIDER) {
+  return isAzureOpenAiProvider(provider) || provider === "azure-foundry";
+}
+
+function isTrustedAzureBaseUrl(provider: string, value: string) {
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    return false;
+  }
+
+  if (url.protocol !== "https:") {
+    return false;
+  }
+  if (url.username || url.password || url.port) {
+    return false;
+  }
+
+  const host = url.hostname.toLowerCase();
+  const path = url.pathname.replace(/\/+$/, "");
+  const hasOpenAiV1BasePath = path === "/openai/v1" && !url.search && !url.hash;
+  if (provider === "azure-foundry") {
+    return host.endsWith(".services.ai.azure.com") && hasOpenAiV1BasePath;
+  }
+
+  if (provider === "azure-openai") {
+    return host.endsWith(".openai.azure.com") && hasOpenAiV1BasePath;
+  }
+
+  return false;
+}
+
+function assertTrustedAzureAuthBaseUrl(provider: string, route: ModelProviderRoute | undefined, authLabel: string) {
+  const resolvedBaseUrl = baseUrl(route);
+  if (!isTrustedAzureBaseUrl(provider, resolvedBaseUrl)) {
+    throw new Error(`${provider} ${authLabel} authentication requires a trusted Azure OpenAI-compatible /openai/v1 base URL.`);
+  }
+}
+
+function assertTrustedAzureManagedIdentityBaseUrl(provider: string, route?: ModelProviderRoute) {
+  assertTrustedAzureAuthBaseUrl(provider, route, "managed identity");
+}
+
+function assertTrustedAzureApiKeyBaseUrl(provider: string, route?: ModelProviderRoute) {
+  assertTrustedAzureAuthBaseUrl(provider, route, "API key");
 }
 
 function azureCredentialClient() {
@@ -160,49 +379,68 @@ function azureCredentialClient() {
   return azureCredential;
 }
 
-async function getAzureAccessToken() {
+function defaultAzureScope(provider: string) {
+  return provider === "azure-foundry" ? AZURE_FOUNDRY_SCOPE : AZURE_OPENAI_SCOPE;
+}
+
+function azureAccessScope(route?: ModelProviderRoute) {
+  if (route?.scope) {
+    return route.scope;
+  }
+  if (!route || route.provider === env.MODEL_PROVIDER) {
+    return env.AZURE_OPENAI_SCOPE;
+  }
+  return defaultAzureScope(route.provider);
+}
+
+async function getAzureAccessToken(scope: string) {
+  const cached = azureAccessTokenCache.get(scope);
   if (
-    azureAccessTokenCache &&
-    azureAccessTokenCache.expiresOnTimestamp - AZURE_TOKEN_REFRESH_SKEW_MS > Date.now()
+    cached &&
+    cached.expiresOnTimestamp - AZURE_TOKEN_REFRESH_SKEW_MS > Date.now()
   ) {
-    return azureAccessTokenCache.token;
+    return cached.token;
   }
 
-  const token = await azureCredentialClient().getToken(env.AZURE_OPENAI_SCOPE);
+  const token = await azureCredentialClient().getToken(scope);
   if (!token?.token || !token.expiresOnTimestamp) {
     throw new Error("Failed to acquire Azure OpenAI managed identity token.");
   }
 
-  azureAccessTokenCache = {
+  azureAccessTokenCache.set(scope, {
     token: token.token,
     expiresOnTimestamp: token.expiresOnTimestamp,
-  };
+  });
   return token.token;
 }
 
-async function requestHeaders() {
+async function requestHeaders(route?: ModelProviderRoute) {
   return {
     "content-type": "application/json",
-    ...await authHeaders(),
+    ...await authHeaders(route),
   };
 }
 
-async function authHeaders() {
+async function authHeaders(route?: ModelProviderRoute) {
+  const provider = providerForRoute(route);
   const headers: Record<string, string> = {
   };
 
-  if (isAzureOpenAiProvider()) {
-    if (env.AZURE_OPENAI_AUTH_MODE === "managed_identity") {
-      headers.authorization = `Bearer ${await getAzureAccessToken()}`;
+  if (isAzureProvider(provider)) {
+    const authMode = route?.authMode ?? env.AZURE_OPENAI_AUTH_MODE;
+    if (authMode === "managed_identity") {
+      assertTrustedAzureManagedIdentityBaseUrl(provider, route);
+      headers.authorization = `Bearer ${await getAzureAccessToken(azureAccessScope(route))}`;
     } else {
-      headers["api-key"] = requireAzureApiKey();
+      assertTrustedAzureApiKeyBaseUrl(provider, route);
+      headers["api-key"] = requireAzureApiKey(route);
     }
     return headers;
   }
 
-  headers.authorization = `Bearer ${requireApiKey()}`;
+  headers.authorization = `Bearer ${requireApiKey(route)}`;
 
-  if (isOpenRouterProvider()) {
+  if (isOpenRouterProvider(provider)) {
     headers["HTTP-Referer"] = env.APP_URL;
     headers["X-Title"] = OPENROUTER_TITLE;
   }
@@ -210,8 +448,8 @@ async function authHeaders() {
   return headers;
 }
 
-function withProviderOptions(body: Record<string, unknown>) {
-  if (!isOpenRouterProvider()) {
+function withProviderOptions(provider: string, body: Record<string, unknown>) {
+  if (!isOpenRouterProvider(provider)) {
     return body;
   }
 
@@ -223,6 +461,27 @@ function withProviderOptions(body: Record<string, unknown>) {
       require_parameters: true,
     },
   };
+}
+
+function supportsCustomTemperature(model: string) {
+  if (BUILT_IN_TEMPERATURE_UNSUPPORTED_MODELS.has(model)) {
+    return false;
+  }
+
+  return !(env.MODEL_OMIT_TEMPERATURE_MODELS ?? "")
+    .split(",")
+    .map((value) => value.trim())
+    .filter(Boolean)
+    .includes(model);
+}
+
+function chatCompletionBody(model: string, body: Record<string, unknown>) {
+  if (supportsCustomTemperature(model)) {
+    return body;
+  }
+
+  const { temperature: _temperature, ...withoutTemperature } = body;
+  return withoutTemperature;
 }
 
 function retryDelayMs(attempt: number) {
@@ -245,42 +504,126 @@ function isRetryableRequestError(error: unknown) {
   return error.name === "AbortError" || error.name === "TimeoutError" || error instanceof TypeError;
 }
 
-async function sleep(ms: number) {
-  await new Promise((resolve) => setTimeout(resolve, ms));
+function abortedError(signal?: AbortSignal) {
+  if (signal?.reason instanceof Error) {
+    return signal.reason;
+  }
+  return new DOMException("The operation was aborted.", "AbortError");
 }
 
-async function postJson<TResponse>(path: string, body: Record<string, unknown>) {
-  const payload = JSON.stringify(withProviderOptions(body));
+function throwIfAborted(signal?: AbortSignal) {
+  if (signal?.aborted) {
+    throw abortedError(signal);
+  }
+}
+
+function timeoutSignal(parentSignal: AbortSignal | undefined, timeoutMs: number) {
+  const timerSignal = AbortSignal.timeout(timeoutMs);
+  if (!parentSignal) {
+    return {
+      signal: timerSignal,
+      cleanup() {},
+    };
+  }
+
+  const controller = new AbortController();
+  const abortFromParent = () => {
+    if (!controller.signal.aborted) controller.abort(parentSignal.reason);
+  };
+  const abortFromTimer = () => {
+    if (!controller.signal.aborted) controller.abort(timerSignal.reason);
+  };
+  parentSignal.addEventListener("abort", abortFromParent, { once: true });
+  timerSignal.addEventListener("abort", abortFromTimer, { once: true });
+  if (parentSignal.aborted) {
+    abortFromParent();
+  } else if (timerSignal.aborted) {
+    abortFromTimer();
+  }
+
+  return {
+    signal: controller.signal,
+    cleanup() {
+      parentSignal.removeEventListener("abort", abortFromParent);
+      timerSignal.removeEventListener("abort", abortFromTimer);
+    },
+  };
+}
+
+async function sleep(ms: number, signal?: AbortSignal) {
+  throwIfAborted(signal);
+  await new Promise<void>((resolve, reject) => {
+    let settled = false;
+    let timeout: ReturnType<typeof setTimeout> | null = null;
+    const cleanup = () => {
+      signal?.removeEventListener("abort", abort);
+      if (timeout) {
+        clearTimeout(timeout);
+        timeout = null;
+      }
+    };
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolve();
+    };
+    const abort = () => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(abortedError(signal));
+    };
+    timeout = setTimeout(finish, ms);
+    signal?.addEventListener("abort", abort, { once: true });
+    if (signal?.aborted) {
+      abort();
+    }
+  });
+  throwIfAborted(signal);
+}
+
+async function postJson<TResponse>(path: string, body: Record<string, unknown>, route?: ModelProviderRoute, signal?: AbortSignal) {
+  const provider = providerForRoute(route);
+  const payload = JSON.stringify(withProviderOptions(provider, body));
   let lastError: unknown = null;
 
   for (let attempt = 0; attempt <= MAX_REQUEST_RETRIES; attempt += 1) {
     try {
-      const response = await fetch(`${baseUrl()}${path}`, {
-        method: "POST",
-        headers: await requestHeaders(),
-        body: payload,
-        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
-      });
+      throwIfAborted(signal);
+      const fetchSignal = timeoutSignal(signal, REQUEST_TIMEOUT_MS);
+      try {
+        const response = await fetch(`${baseUrl(route)}${path}`, {
+          method: "POST",
+          headers: await requestHeaders(route),
+          body: payload,
+          signal: fetchSignal.signal,
+        });
 
-      if (!response.ok) {
-        const errorText = await response.text();
-        const error = new Error(`OpenAI-compatible request failed (${response.status}): ${errorText}`);
-        if (attempt < MAX_REQUEST_RETRIES && isRetryableStatus(response.status)) {
-          lastError = error;
-          await sleep(retryDelayMs(attempt));
-          continue;
+        if (!response.ok) {
+          const errorText = await response.text();
+          const error = new Error(`OpenAI-compatible request failed (${response.status}): ${errorText}`);
+          if (attempt < MAX_REQUEST_RETRIES && isRetryableStatus(response.status)) {
+            lastError = error;
+            await sleep(retryDelayMs(attempt), signal);
+            continue;
+          }
+          throw error;
         }
-        throw error;
-      }
 
-      return response.json() as Promise<TResponse>;
+        const parsed = await response.json() as TResponse;
+        throwIfAborted(fetchSignal.signal);
+        return parsed;
+      } finally {
+        fetchSignal.cleanup();
+      }
     } catch (error) {
-      if (attempt >= MAX_REQUEST_RETRIES || !isRetryableRequestError(error)) {
+      if (signal?.aborted || attempt >= MAX_REQUEST_RETRIES || !isRetryableRequestError(error)) {
         throw error;
       }
 
       lastError = error;
-      await sleep(retryDelayMs(attempt));
+      await sleep(retryDelayMs(attempt), signal);
     }
   }
 
@@ -401,13 +744,15 @@ async function completeChat(
 ) {
   const startedAt = Date.now();
   const model = modelOverride ?? request.model ?? env.MODEL_CHAT_DEFAULT;
-  assertKnownModelPrice(env.MODEL_PROVIDER, model);
+  const route = providerRouteForModel(model);
+  const provider = providerForRoute(route);
+  assertKnownModelPrice(provider, model);
   await assertWorkspaceModelBudget(request.workspaceId);
   await assertCatalogModelBudget({
     workspaceId: request.workspaceId,
     ...usageContext(request),
   });
-  const response = await postJson<ChatCompletionApiResponse>("/chat/completions", {
+  const body = chatCompletionBody(model, {
     model,
     temperature: 0.2,
     messages: request.messages,
@@ -415,23 +760,24 @@ async function completeChat(
     ...(request.tool_choice ? { tool_choice: request.tool_choice } : {}),
     ...(bodyExtras ?? {}),
   });
+  const response = await postJson<ChatCompletionApiResponse>("/chat/completions", body, route, request.signal);
   const latencyMs = Date.now() - startedAt;
   const content = normalizeContent(response.choices?.[0]?.message?.content);
   const tool_calls = response.choices?.[0]?.message?.tool_calls;
-  const inputTokens = response.usage?.prompt_tokens ?? request.messages.reduce((sum, message) => sum + message.content.length, 0);
-  const outputTokens = response.usage?.completion_tokens ?? Math.ceil(content.length / 4);
+  const inputTokens = response.usage?.prompt_tokens ?? estimateSerializedTokens(withProviderOptions(provider, body));
+  const outputTokens = response.usage?.completion_tokens ?? estimateChatOutputTokens(content, tool_calls);
   const usage = await recordUsage({
     workspaceId: request.workspaceId,
     workflowJobId: request.workflowJobId,
     agentRunId: request.agentRunId,
     ...usageContext(request),
-    provider: env.MODEL_PROVIDER,
+    provider,
     model,
     taskType,
     inputTokens,
     outputTokens,
     latencyMs,
-    ...costFields(env.MODEL_PROVIDER, model, inputTokens, outputTokens),
+    ...costFields(provider, model, inputTokens, outputTokens),
   });
 
   return { content, tool_calls, usage };
@@ -445,12 +791,15 @@ async function* completeChatStream(
 ): AsyncGenerator<string, import("./contracts").ChatCompletionResponse> {
   const startedAt = Date.now();
   const model = modelOverride ?? request.model ?? env.MODEL_CHAT_DEFAULT;
+  const route = providerRouteForModel(model);
+  const provider = providerForRoute(route);
+  assertKnownModelPrice(provider, model);
   await assertWorkspaceModelBudget(request.workspaceId);
   await assertCatalogModelBudget({
     workspaceId: request.workspaceId,
     ...usageContext(request),
   });
-  const payload = JSON.stringify(withProviderOptions({
+  const payload = JSON.stringify(withProviderOptions(provider, chatCompletionBody(model, {
     model,
     temperature: 0.2,
     messages: request.messages,
@@ -459,18 +808,22 @@ async function* completeChatStream(
     ...(request.tools && request.tools.length > 0 ? { tools: request.tools } : {}),
     ...(request.tool_choice ? { tool_choice: request.tool_choice } : {}),
     ...(bodyExtras ?? {}),
-  }));
+  })));
 
   let response: Response | null = null;
   let lastError: unknown = null;
+  let streamSignalCleanup = () => {};
 
   for (let attempt = 0; attempt <= MAX_REQUEST_RETRIES; attempt += 1) {
+    let keepSignalForStream = false;
+    const fetchSignal = timeoutSignal(request.signal, STREAM_TIMEOUT_MS);
     try {
-      response = await fetch(`${baseUrl()}/chat/completions`, {
+      throwIfAborted(request.signal);
+      response = await fetch(`${baseUrl(route)}/chat/completions`, {
         method: "POST",
-        headers: await requestHeaders(),
+        headers: await requestHeaders(route),
         body: payload,
-        signal: AbortSignal.timeout(STREAM_TIMEOUT_MS),
+        signal: fetchSignal.signal,
       });
 
       if (!response.ok) {
@@ -478,18 +831,24 @@ async function* completeChatStream(
         const error = new Error(`OpenAI-compatible request failed (${response.status}): ${errorText}`);
         if (attempt < MAX_REQUEST_RETRIES && isRetryableStatus(response.status)) {
           lastError = error;
-          await sleep(retryDelayMs(attempt));
+          await sleep(retryDelayMs(attempt), request.signal);
           continue;
         }
         throw error;
       }
+      keepSignalForStream = true;
+      streamSignalCleanup = fetchSignal.cleanup;
       break;
     } catch (error) {
-      if (attempt >= MAX_REQUEST_RETRIES || !isRetryableRequestError(error)) {
+      if (request.signal?.aborted || attempt >= MAX_REQUEST_RETRIES || !isRetryableRequestError(error)) {
         throw error;
       }
       lastError = error;
-      await sleep(retryDelayMs(attempt));
+      await sleep(retryDelayMs(attempt), request.signal);
+    } finally {
+      if (!keepSignalForStream) {
+        fetchSignal.cleanup();
+      }
     }
   }
 
@@ -502,71 +861,98 @@ async function* completeChatStream(
   let tool_calls: any[] = [];
   let usageDetailsObj: any = null;
   let buffer = "";
+  let streamCompleted = false;
+  let usage: UsageDetails | undefined;
+  let usageRecorded = false;
 
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
+  async function finalizeUsage() {
+    if (usageRecorded && usage) {
+      return usage;
+    }
 
-    buffer += decoder.decode(value, { stream: true });
-    let newlineIndex: number;
-    while ((newlineIndex = buffer.indexOf("\n")) >= 0) {
-      const line = buffer.slice(0, newlineIndex).trim();
-      buffer = buffer.slice(newlineIndex + 1);
+    const latencyMs = Date.now() - startedAt;
+    const inputTokens = usageDetailsObj?.prompt_tokens ?? estimateTextTokens(payload);
+    const outputTokens = usageDetailsObj?.completion_tokens ?? estimateChatOutputTokens(content, tool_calls);
+    usage = await recordUsage({
+      workspaceId: request.workspaceId,
+      workflowJobId: request.workflowJobId,
+      agentRunId: request.agentRunId,
+      ...usageContext(request),
+      provider,
+      model,
+      taskType,
+      inputTokens,
+      outputTokens,
+      latencyMs,
+      ...costFields(provider, model, inputTokens, outputTokens),
+    });
+    usageRecorded = true;
+    return usage;
+  }
 
-      if (line.startsWith("data: ") && line !== "data: [DONE]") {
-        try {
-          const data = JSON.parse(line.slice(6));
-          const delta = data.choices?.[0]?.delta;
-          
-          if (delta?.content) {
-            content += delta.content;
-            yield delta.content;
-          }
-          
-          if (delta?.tool_calls) {
-            for (const tool of delta.tool_calls) {
-              const index = tool.index;
-              if (tool_calls[index]) {
-                tool_calls[index].function.arguments += tool.function?.arguments || "";
-              } else {
-                tool_calls[index] = {
-                  id: tool.id,
-                  type: "function",
-                  function: {
-                    name: tool.function?.name || "",
-                    arguments: tool.function?.arguments || "",
-                  }
-                };
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) {
+        streamCompleted = true;
+        break;
+      }
+
+      buffer += decoder.decode(value, { stream: true });
+      let newlineIndex: number;
+      while ((newlineIndex = buffer.indexOf("\n")) >= 0) {
+        const line = buffer.slice(0, newlineIndex).trim();
+        buffer = buffer.slice(newlineIndex + 1);
+
+        if (line.startsWith("data: ") && line !== "data: [DONE]") {
+          try {
+            const data = JSON.parse(line.slice(6));
+            const delta = data.choices?.[0]?.delta;
+
+            if (delta?.content) {
+              content += delta.content;
+              yield delta.content;
+            }
+
+            if (delta?.tool_calls) {
+              for (const tool of delta.tool_calls) {
+                const index = tool.index;
+                if (tool_calls[index]) {
+                  tool_calls[index].function.arguments += tool.function?.arguments || "";
+                } else {
+                  tool_calls[index] = {
+                    id: tool.id,
+                    type: "function",
+                    function: {
+                      name: tool.function?.name || "",
+                      arguments: tool.function?.arguments || "",
+                    }
+                  };
+                }
               }
             }
+            if (data.usage) usageDetailsObj = data.usage;
+          } catch (e) {
+            // ignore
           }
-          if (data.usage) usageDetailsObj = data.usage;
-        } catch (e) {
-          // ignore
         }
       }
+    }
+  } finally {
+    try {
+      if (!streamCompleted && !usageRecorded) {
+        await reader.cancel().catch(() => undefined);
+        await finalizeUsage();
+      }
+    } finally {
+      streamSignalCleanup();
     }
   }
   
   const finalTools: import("./contracts").ToolCall[] = tool_calls.filter(Boolean);
-  const latencyMs = Date.now() - startedAt;
-  const inputTokens = usageDetailsObj?.prompt_tokens ?? request.messages.reduce((sum, message) => sum + message.content.length, 0);
-  const outputTokens = usageDetailsObj?.completion_tokens ?? Math.ceil(content.length / 4);
-  const usage = await recordUsage({
-    workspaceId: request.workspaceId,
-    workflowJobId: request.workflowJobId,
-    agentRunId: request.agentRunId,
-    ...usageContext(request),
-    provider: env.MODEL_PROVIDER,
-    model,
-    taskType,
-    inputTokens,
-    outputTokens,
-    latencyMs,
-    ...costFields(env.MODEL_PROVIDER, model, inputTokens, outputTokens),
-  });
+  const finalUsage = await finalizeUsage();
 
-  return { content, tool_calls: finalTools.length > 0 ? finalTools : undefined, usage };
+  return { content, tool_calls: finalTools.length > 0 ? finalTools : undefined, usage: finalUsage };
 }
 
 async function repairExtractionObject(request: ExtractionRequest, raw: string) {
@@ -605,7 +991,9 @@ async function embedTexts(request: EmbeddingRequest) {
   const startedAt = Date.now();
   const inputs = Array.isArray(request.input) ? request.input : [request.input];
   const model = request.model ?? env.MODEL_EMBEDDING_DEFAULT;
-  assertKnownModelPrice(env.MODEL_PROVIDER, model);
+  const route = providerRouteForModel(model);
+  const provider = providerForRoute(route);
+  assertKnownModelPrice(provider, model);
   await assertWorkspaceModelBudget(request.workspaceId);
   await assertCatalogModelBudget({
     workspaceId: request.workspaceId,
@@ -614,12 +1002,13 @@ async function embedTexts(request: EmbeddingRequest) {
   const response = await postJson<EmbeddingApiResponse>("/embeddings", {
     model,
     input: inputs,
-  });
+  }, route);
   const latencyMs = Date.now() - startedAt;
   const embeddings = (response.data ?? []).map((entry) => entry.embedding ?? []);
   const inputTokens = response.usage?.prompt_tokens ?? inputs.reduce((sum, value) => sum + value.length, 0);
 
   return {
+    provider,
     model,
     embeddings,
     inputTokens,
@@ -633,7 +1022,9 @@ async function transcribeAudioFile(request: AudioTranscriptionRequest) {
   if (!model) {
     throw new Error("MODEL_TRANSCRIPTION_DEFAULT is required for audio transcription.");
   }
-  assertKnownModelPrice(env.MODEL_PROVIDER, model);
+  const route = providerRouteForModel(model);
+  const provider = providerForRoute(route);
+  assertKnownModelPrice(provider, model);
   await assertWorkspaceModelBudget(request.workspaceId);
   await assertCatalogModelBudget({
     workspaceId: request.workspaceId,
@@ -657,9 +1048,9 @@ async function transcribeAudioFile(request: AudioTranscriptionRequest) {
   let lastError: unknown = null;
   for (let attempt = 0; attempt <= MAX_REQUEST_RETRIES; attempt += 1) {
     try {
-      const response = await fetch(`${baseUrl()}/audio/transcriptions`, {
+      const response = await fetch(`${baseUrl(route)}/audio/transcriptions`, {
         method: "POST",
-        headers: await authHeaders(),
+        headers: await authHeaders(route),
         body: form,
         signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
       });
@@ -686,13 +1077,13 @@ async function transcribeAudioFile(request: AudioTranscriptionRequest) {
         workflowJobId: request.workflowJobId,
         agentRunId: request.agentRunId,
         ...usageContext(request),
-        provider: env.MODEL_PROVIDER,
+        provider,
         model,
         taskType: "TRANSCRIPTION",
         inputTokens: 0,
         outputTokens: Math.ceil(text.length / 4),
         latencyMs,
-        ...costFields(env.MODEL_PROVIDER, model, 0, Math.ceil(text.length / 4)),
+        ...costFields(provider, model, 0, Math.ceil(text.length / 4)),
       });
 
       return { text, usage };
@@ -773,13 +1164,13 @@ export const openAICompatibleModelGateway: ModelGateway = {
       workflowJobId: request.workflowJobId,
       agentRunId: request.agentRunId,
       ...usageContext(request),
-      provider: env.MODEL_PROVIDER,
+      provider: embedded.provider,
       model: embedded.model,
       taskType: "EMBEDDING",
       inputTokens: embedded.inputTokens,
       outputTokens: 0,
       latencyMs: embedded.latencyMs,
-      ...costFields(env.MODEL_PROVIDER, embedded.model, embedded.inputTokens, 0),
+      ...costFields(embedded.provider, embedded.model, embedded.inputTokens, 0),
     });
 
     return {
@@ -811,13 +1202,13 @@ export const openAICompatibleModelGateway: ModelGateway = {
       workflowJobId: request.workflowJobId,
       agentRunId: request.agentRunId,
       ...usageContext(request),
-      provider: env.MODEL_PROVIDER,
+      provider: embedded.provider,
       model: embedded.model,
       taskType: "RERANK",
       inputTokens: embedded.inputTokens,
       outputTokens: 0,
       latencyMs: embedded.latencyMs,
-      ...costFields(env.MODEL_PROVIDER, embedded.model, embedded.inputTokens, 0),
+      ...costFields(embedded.provider, embedded.model, embedded.inputTokens, 0),
     });
 
     return {

@@ -415,6 +415,102 @@ enum FinanceEntryStatus {
   ARCHIVED
 }
 
+enum FinanceReportType {
+  PROFIT_AND_LOSS
+  BALANCE_SHEET
+  CASH_FLOW
+  TRIAL_BALANCE
+  OTHER
+}
+
+enum FinanceAccountingBasis {
+  CASH
+  ACCRUAL
+  UNSPECIFIED
+}
+
+enum FinanceReportCadence {
+  DAILY
+  WEEKLY
+  MONTHLY
+  QUARTERLY
+  ANNUAL
+  CUSTOM
+}
+
+enum FinanceReportStatus {
+  ACTIVE
+  SUPERSEDED
+  ARCHIVED
+}
+
+enum FinanceReportFactKind {
+  LEAF
+  DERIVED
+}
+
+enum FinanceImportStage {
+  UPLOADED
+  CLASSIFYING
+  EXTRACTING
+  MAPPING
+  RECONCILING
+  READY_FOR_REVIEW
+  APPLYING
+  APPLIED
+  NEEDS_INPUT
+  PARTIALLY_APPLIED
+  FAILED
+  CANCELLED
+}
+
+enum FinanceImportCurrencyState {
+  UNRESOLVED
+  RESOLVED
+}
+
+enum FinanceImportCurrencySource {
+  DOCUMENT
+  WORKSPACE_SINGLE_CURRENCY
+  USER_CONFIRMED
+}
+
+enum FinanceImportCandidateAction {
+  ADD
+  UPDATE
+  UNCHANGED
+  DUPLICATE
+  CONFLICT
+  SKIP
+}
+
+enum FinanceImportCandidateReviewState {
+  PROPOSED
+  VERIFIED
+  WARNING
+  BLOCKED
+  APPROVED
+  REJECTED
+  APPLIED
+}
+
+enum FinanceImportApplicationTargetType {
+  REPORT_FACT
+}
+
+enum FinanceImportApplicationOutcome {
+  CREATED
+  UPDATED
+  UNCHANGED
+  SKIPPED
+}
+
+enum FinanceImportProfileStatus {
+  ACTIVE
+  SUPERSEDED
+  RETIRED
+}
+
 enum FinanceContributionType {
   TIME
   EXPENSE
@@ -463,6 +559,11 @@ enum AgentRunStatus {
   COMPLETED
   FAILED
   CANCELLED
+}
+
+enum KnowledgeAccessDomain {
+  WORKSPACE
+  FINANCE
 }
 
 enum AgentTriggerType {
@@ -717,6 +818,10 @@ model Workspace {
   financeTimeEntries             FinanceTimeEntry[]
   financeExpenses                FinanceExpense[]
   financeContributionEntries     FinanceContributionEntry[]
+  financeReports                 FinanceReport[]
+  financeImportBatches           FinanceImportBatch[]
+  financeImportApplications      FinanceImportApplication[]
+  financeImportProfiles          FinanceImportProfile[]
   appInstallations               AppInstallation[]
   appSurfaceAssignments          AppSurfaceAssignment[]
   appSessions                    AppSession[]
@@ -902,6 +1007,229 @@ model FinanceContributionEntry {
   @@index([workspaceId, paymentChoice])
   @@index([workspaceId, cashStatus])
   @@index([workspaceId, updatedAt])
+}
+
+model FinanceReport {
+  id            String                 @id @default(uuid())
+  workspaceId   String
+  reportType    FinanceReportType
+  basis         FinanceAccountingBasis
+  cadence       FinanceReportCadence
+  currency      String                 @db.VarChar(3)
+  periodStart   DateTime               @db.Date
+  periodEnd     DateTime               @db.Date
+  asOfDate      DateTime?              @db.Date
+  title         String                 @db.VarChar(200)
+  status        FinanceReportStatus    @default(ACTIVE)
+  sourceBatchId String                 @unique
+  version       Int                    @default(1)
+  createdAt     DateTime               @default(now())
+  updatedAt     DateTime               @updatedAt
+
+  workspace   Workspace           @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  sourceBatch FinanceImportBatch  @relation(fields: [sourceBatchId, workspaceId], references: [id, workspaceId], onDelete: Restrict)
+  facts       FinanceReportFact[]
+
+  @@index([workspaceId, status])
+  @@index([workspaceId, periodEnd])
+  @@unique([id, workspaceId])
+  @@unique([sourceBatchId, workspaceId])
+}
+
+model FinanceReportFact {
+  id                String                @id @default(uuid())
+  workspaceId       String
+  reportId          String
+  accountPath       String[]
+  kind              FinanceReportFactKind
+  periodStart       DateTime              @db.Date
+  periodEnd         DateTime              @db.Date
+  amountCents       Int
+  dimensions        Json?
+  semanticKey       String                @db.VarChar(64)
+  sourceBatchId     String
+  sourceCandidateId String                @unique
+  appliedByUserId   String
+  version           Int                   @default(1)
+  createdAt         DateTime              @default(now())
+  updatedAt         DateTime              @updatedAt
+
+  report             FinanceReport              @relation(fields: [reportId, workspaceId], references: [id, workspaceId], onDelete: Cascade)
+  importCandidates   FinanceImportCandidate[]
+  importApplications FinanceImportApplication[]
+
+  @@unique([id, workspaceId])
+  @@unique([workspaceId, semanticKey])
+  @@index([workspaceId, reportId])
+  @@index([workspaceId, periodStart, periodEnd])
+  @@index([sourceBatchId])
+}
+
+model FinanceImportBatch {
+  id                        String                      @id @default(uuid())
+  workspaceId               String
+  uploadedByUserId          String
+  documentId                String?                     @unique
+  brainSourceId             String?                     @unique
+  workflowJobId             String?
+  agentRunId                String?
+  fileHash                  String                      @db.VarChar(64)
+  mimeType                  String                      @db.VarChar(127)
+  originalFilename          String                      @db.VarChar(255)
+  fileSizeBytes             Int
+  stage                     FinanceImportStage          @default(UPLOADED)
+  safeErrorCode             String?                     @db.VarChar(64)
+  safeErrorMessage          String?                     @db.Text
+  retryCount                Int                         @default(0)
+  reportType                FinanceReportType?
+  basis                     FinanceAccountingBasis?
+  cadence                   FinanceReportCadence?
+  periodStart               DateTime?                   @db.Date
+  periodEnd                 DateTime?                   @db.Date
+  asOfDate                  DateTime?                   @db.Date
+  title                     String?                     @db.VarChar(200)
+  currencyState             FinanceImportCurrencyState  @default(UNRESOLVED)
+  resolvedCurrency          String?                     @db.VarChar(3)
+  currencyResolutionSource  FinanceImportCurrencySource?
+  currencyConfirmedByUserId String?
+  currencyConfirmedAt       DateTime?
+  addCount                  Int                         @default(0)
+  updateCount               Int                         @default(0)
+  unchangedCount            Int                         @default(0)
+  duplicateCount            Int                         @default(0)
+  conflictCount             Int                         @default(0)
+  skippedCount              Int                         @default(0)
+  warningCount              Int                         @default(0)
+  blockerCount              Int                         @default(0)
+  rejectedCount             Int                         @default(0)
+  appliedCount              Int                         @default(0)
+  approvedByUserId          String?
+  approvedAt                DateTime?
+  appliedByUserId           String?
+  appliedAt                 DateTime?
+  version                   Int                         @default(1)
+  createdAt                 DateTime                    @default(now())
+  updatedAt                 DateTime                    @updatedAt
+
+  workspace   Workspace                @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  document    Document?                @relation(fields: [documentId, workspaceId], references: [id, workspaceId], onDelete: Restrict)
+  brainSource BrainSource?             @relation(fields: [brainSourceId, workspaceId], references: [id, workspaceId], onDelete: Restrict)
+  workflowJob WorkflowJob?             @relation(fields: [workflowJobId, workspaceId], references: [id, workspaceId], onDelete: Restrict)
+  agentRun    AgentRun?                @relation(fields: [agentRunId, workspaceId], references: [id, workspaceId], onDelete: Restrict)
+  candidates  FinanceImportCandidate[]
+  report      FinanceReport?
+  applications FinanceImportApplication[]
+  approvedProfiles FinanceImportProfile[]
+
+  @@unique([id, workspaceId])
+  @@unique([workspaceId, fileHash])
+  @@index([workspaceId, stage, createdAt])
+  @@index([workflowJobId])
+  @@index([agentRunId])
+}
+
+model FinanceImportCandidate {
+  id                      String                            @id @default(uuid())
+  workspaceId             String
+  batchId                 String
+  sourceKey               String                            @db.VarChar(64)
+  sourceLocation          Json
+  sourceLabel             String                            @db.VarChar(500)
+  sourcePath              String[]
+  proposedAccountPath     String[]
+  factKind                FinanceReportFactKind
+  periodStart             DateTime                          @db.Date
+  periodEnd               DateTime                          @db.Date
+  amountCents             Int
+  dimensions              Json?
+  extractionJson          Json
+  proposalJson            Json
+  action                  FinanceImportCandidateAction
+  reviewState             FinanceImportCandidateReviewState @default(PROPOSED)
+  semanticKey             String?                           @db.VarChar(64)
+  currentFactId           String?
+  currentAmountCents      Int?
+  confidenceBps           Int
+  evidenceMd              String                            @db.Text
+  explanationMd           String?                           @db.Text
+  editedByUserId          String?
+  editedAt                DateTime?
+  approvedByUserId        String?
+  approvedAt              DateTime?
+  version                 Int                               @default(1)
+  createdAt               DateTime                          @default(now())
+  updatedAt               DateTime                          @updatedAt
+
+  batch       FinanceImportBatch        @relation(fields: [batchId, workspaceId], references: [id, workspaceId], onDelete: Cascade)
+  currentFact FinanceReportFact?        @relation(fields: [currentFactId, workspaceId], references: [id, workspaceId], onDelete: Restrict)
+  application FinanceImportApplication?
+
+  @@unique([id, workspaceId])
+  @@unique([id, batchId, workspaceId])
+  @@unique([batchId, sourceKey])
+  @@index([workspaceId, batchId, reviewState])
+  @@index([workspaceId, semanticKey])
+}
+
+model FinanceImportApplication {
+  id               String                             @id @default(uuid())
+  workspaceId      String
+  batchId          String
+  candidateId      String                             @unique
+  idempotencyKey   String                             @db.VarChar(64)
+  targetType       FinanceImportApplicationTargetType
+  targetFactId     String?
+  beforeValueJson  Json?
+  afterValueJson   Json?
+  beforeValueHash  String?                            @db.VarChar(64)
+  afterValueHash   String?                            @db.VarChar(64)
+  outcome          FinanceImportApplicationOutcome
+  appliedByUserId  String
+  appliedAt        DateTime                           @default(now())
+
+  workspace  Workspace              @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  batch      FinanceImportBatch     @relation(fields: [batchId, workspaceId], references: [id, workspaceId], onDelete: Restrict)
+  candidate  FinanceImportCandidate @relation(fields: [candidateId, batchId, workspaceId], references: [id, batchId, workspaceId], onDelete: Restrict)
+  targetFact FinanceReportFact?     @relation(fields: [targetFactId, workspaceId], references: [id, workspaceId], onDelete: Restrict)
+
+  @@unique([id, workspaceId])
+  @@unique([candidateId, workspaceId])
+  @@unique([candidateId, batchId, workspaceId])
+  @@unique([workspaceId, idempotencyKey])
+  @@index([workspaceId, batchId, appliedAt])
+}
+
+model FinanceImportProfile {
+  id                   String                     @id @default(uuid())
+  workspaceId          String
+  sourceFingerprint    String                     @db.VarChar(64)
+  layoutFingerprint    String                     @db.VarChar(64)
+  reportType           FinanceReportType
+  basis                FinanceAccountingBasis
+  cadence              FinanceReportCadence
+  approvedAliasesJson  Json
+  hierarchyMappingJson Json
+  periodMappingJson    Json
+  approvedFromBatchId  String
+  approvedByUserId     String
+  approvedAt           DateTime
+  lastSuccessfulUseAt  DateTime?
+  successfulUseCount   Int                        @default(0)
+  version              Int                        @default(1)
+  status               FinanceImportProfileStatus @default(ACTIVE)
+  supersedesProfileId  String?
+  createdAt            DateTime                   @default(now())
+  updatedAt            DateTime                   @updatedAt
+
+  workspace         Workspace             @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  approvedFromBatch FinanceImportBatch    @relation(fields: [approvedFromBatchId, workspaceId], references: [id, workspaceId], onDelete: Restrict)
+  supersedes        FinanceImportProfile? @relation("FinanceImportProfileVersions", fields: [supersedesProfileId, workspaceId], references: [id, workspaceId], onDelete: Restrict)
+  supersededBy      FinanceImportProfile[] @relation("FinanceImportProfileVersions")
+
+  @@unique([id, workspaceId])
+  @@unique([workspaceId, sourceFingerprint, layoutFingerprint, version])
+  @@unique([workspaceId, supersedesProfileId])
+  @@index([workspaceId, status, lastSuccessfulUseAt])
 }
 
 enum ModuleGrantPrincipalType {
@@ -2544,25 +2872,29 @@ model MeetingRecorderSmokeRun {
 }
 
 model Document {
-  id               String    @id @default(uuid())
+  id               String                @id @default(uuid())
   workspaceId      String
+  accessDomain     KnowledgeAccessDomain @default(WORKSPACE)
   title            String
   source           String
   mimeType         String?
   storageKey       String
-  textContent      String?   @db.Text
+  textContent      String?               @db.Text
   metadata         Json?
   archivedAt       DateTime?
   archivedByUserId String?
   archiveReason    String?
-  createdAt        DateTime  @default(now())
-  updatedAt        DateTime  @updatedAt
+  createdAt        DateTime              @default(now())
+  updatedAt        DateTime              @updatedAt
 
   workspace        Workspace          @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   workItemEvidence WorkItemEvidence[]
+  financeImportBatches FinanceImportBatch[]
 
+  @@unique([id, workspaceId])
   @@index([workspaceId, source])
   @@index([workspaceId, archivedAt])
+  @@index([workspaceId, accessDomain, archivedAt])
 }
 
 model WorkItemEvidence {
@@ -3065,7 +3397,9 @@ model WorkflowJob {
   newspaperEditions     NewspaperEdition[]
   newspaperDeliveries   NewspaperDelivery[]
   newspaperTrackedLinks NewspaperTrackedLink[]
+  financeImportBatches  FinanceImportBatch[]
 
+  @@unique([id, workspaceId])
   @@index([status, runAfter, createdAt])
   @@index([dependsOnJobId])
 }
@@ -3182,6 +3516,7 @@ model KnowledgeChunk {
   id              String                       @id @default(uuid())
   workspaceId     String
   sourceType      KnowledgeSourceType
+  accessDomain    KnowledgeAccessDomain        @default(WORKSPACE)
   sourceId        String
   sourceTitle     String?
   chunkIndex      Int                          @default(0)
@@ -3197,6 +3532,7 @@ model KnowledgeChunk {
   workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
 
   @@index([workspaceId, sourceType, sourceId])
+  @@index([workspaceId, accessDomain, sourceType, sourceId])
 }
 
 model ContextGraphObject {
@@ -3428,7 +3764,9 @@ model AgentRun {
   toolCalls         AgentToolCall[]
   modelUsage        ModelUsage[]
   conversationTurns ConversationTurn[]
+  financeImportBatches FinanceImportBatch[]
 
+  @@unique([id, workspaceId])
   @@index([workspaceId, agentKey, createdAt])
   @@index([workspaceId, status])
 }
@@ -3702,8 +4040,9 @@ model BrainArticleVersion {
 }
 
 model BrainSource {
-  id                  String          @id @default(uuid())
+  id                  String                @id @default(uuid())
   workspaceId         String
+  accessDomain        KnowledgeAccessDomain @default(WORKSPACE)
   sourceType          BrainSourceType
   tier                Int
   externalId          String?
@@ -3726,10 +4065,14 @@ model BrainSource {
   workspace     Workspace      @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   authorMember  Member?        @relation(fields: [authorMemberId], references: [id], onDelete: SetNull)
   buildArtifact BuildArtifact?
+  financeImportBatches FinanceImportBatch[]
 
+  @@unique([id, workspaceId])
   @@index([workspaceId, sourceType])
   @@index([workspaceId, absorbedAt])
   @@index([workspaceId, archivedAt])
+  @@index([workspaceId, accessDomain, archivedAt])
+  @@index([workspaceId, accessDomain, absorbedAt])
 }
 
 model BrainBacklink {

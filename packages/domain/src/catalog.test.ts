@@ -96,6 +96,7 @@ vi.mock("./agent-registry", () => ({
       description: "Turns workspace goals into plans.",
       category: "operations",
       costTier: "low",
+      defaultEnabled: false,
     },
   },
 }));
@@ -323,6 +324,17 @@ describe("catalog domain", () => {
     const result = await listCatalogItems(actor, "workspace-1");
 
     expect(result.items.map((item) => item.title)).toEqual(["Miro board"]);
+  });
+
+  it("derives registry agents with their safe default enabled state", async () => {
+    const { listCatalogItems } = await import("./catalog");
+    await listCatalogItems(actor, "workspace-1");
+    expect(prismaMock.catalogItem.upsert).toHaveBeenCalledWith(expect.objectContaining({
+      where: { workspaceId_sourceType_sourceId: { workspaceId: "workspace-1",
+        sourceType: "AGENT_CONFIG", sourceId: "planning-agent" } },
+      create: expect.objectContaining({ status: "DISABLED" }),
+      update: expect.objectContaining({ status: "DISABLED" }),
+    }));
   });
 
   it("derives AI workspace catalog cards from the provider registry when enabled", async () => {

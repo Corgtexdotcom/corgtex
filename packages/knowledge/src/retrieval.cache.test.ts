@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const { prismaMock, modelGatewayMock } = vi.hoisted(() => {
   const knowledgeChunkMock = {
@@ -77,6 +77,10 @@ describe("knowledge retrieval cache", () => {
     modelGatewayMock.chat.mockClear();
   });
 
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
   it("reuses cached search results for repeated queries", async () => {
     prismaMock.knowledgeChunk.findMany.mockResolvedValue([
       {
@@ -104,8 +108,48 @@ describe("knowledge retrieval cache", () => {
 
     expect(first).toEqual(second);
     expect(prismaMock.knowledgeChunk.findMany).toHaveBeenCalledTimes(2);
+    expect(prismaMock.knowledgeChunk.findMany.mock.calls[0]?.[0]).toMatchObject({
+      where: { accessDomain: { in: ["WORKSPACE"] } },
+    });
     expect(modelGatewayMock.embed).toHaveBeenCalledTimes(1);
     expect(modelGatewayMock.rerank).toHaveBeenCalledTimes(1);
+  });
+
+  it("partitions search caches by the normalized access-domain set", async () => {
+    prismaMock.knowledgeChunk.findMany.mockResolvedValue([
+      {
+        id: "chunk-domain",
+        sourceType: "DOCUMENT",
+        sourceId: "doc-domain",
+        sourceTitle: "Policy",
+        chunkIndex: 0,
+        content: "Finance policy for approvals.",
+        embedding: [1, 0],
+      },
+    ]);
+
+    await searchIndexedKnowledge({
+      workspaceId: "ws-1",
+      query: "finance policy",
+      accessDomains: ["WORKSPACE"],
+    });
+    await searchIndexedKnowledge({
+      workspaceId: "ws-1",
+      query: "finance policy",
+      accessDomains: ["WORKSPACE", "FINANCE", "WORKSPACE"],
+    });
+    await searchIndexedKnowledge({
+      workspaceId: "ws-1",
+      query: "finance policy",
+      accessDomains: ["FINANCE", "WORKSPACE"],
+    });
+
+    expect(prismaMock.knowledgeChunk.findMany).toHaveBeenCalledTimes(4);
+    expect(prismaMock.knowledgeChunk.findMany.mock.calls[2]?.[0]).toMatchObject({
+      where: { accessDomain: { in: ["FINANCE", "WORKSPACE"] } },
+    });
+    expect(modelGatewayMock.embed).toHaveBeenCalledTimes(2);
+    expect(modelGatewayMock.rerank).toHaveBeenCalledTimes(2);
   });
 
   it("reuses cached grounded answers for repeated questions", async () => {
@@ -139,6 +183,61 @@ describe("knowledge retrieval cache", () => {
     expect(modelGatewayMock.rerank).toHaveBeenCalledTimes(1);
   });
 
+  it("partitions grounded-answer caches by access domain and source type", async () => {
+    prismaMock.knowledgeChunk.findMany.mockResolvedValue([
+      {
+        id: "chunk-answer-domain",
+        sourceType: "DOCUMENT",
+        sourceId: "doc-answer-domain",
+        sourceTitle: "Finance policy",
+        chunkIndex: 0,
+        content: "Finance approvals require a steward review.",
+        embedding: [1, 0],
+      },
+    ]);
+
+    await answerKnowledgeQuestion({
+      workspaceId: "ws-1",
+      question: "Who reviews finance approvals?",
+      accessDomains: ["WORKSPACE"],
+    });
+    await answerKnowledgeQuestion({
+      workspaceId: "ws-1",
+      question: "Who reviews finance approvals?",
+      accessDomains: ["WORKSPACE", "FINANCE"],
+    });
+    await answerKnowledgeQuestion({
+      workspaceId: "ws-1",
+      question: "Who reviews finance approvals?",
+      accessDomains: ["WORKSPACE", "FINANCE"],
+      sourceTypes: ["DOCUMENT"],
+    });
+
+    expect(modelGatewayMock.chat).toHaveBeenCalledTimes(3);
+    expect(modelGatewayMock.embed).toHaveBeenCalledTimes(3);
+    expect(modelGatewayMock.rerank).toHaveBeenCalledTimes(3);
+  });
+
+  it("returns no results or citations for an explicitly empty domain set", async () => {
+    await expect(searchIndexedKnowledge({
+      workspaceId: "ws-1",
+      query: "finance",
+      accessDomains: [],
+    })).resolves.toEqual([]);
+    await expect(answerKnowledgeQuestion({
+      workspaceId: "ws-1",
+      question: "finance",
+      accessDomains: [],
+    })).resolves.toEqual({
+      answer: "I could not find relevant indexed knowledge for that question.",
+      citations: [],
+    });
+
+    expect(prismaMock.knowledgeChunk.findMany).not.toHaveBeenCalled();
+    expect(modelGatewayMock.embed).not.toHaveBeenCalled();
+    expect(modelGatewayMock.chat).not.toHaveBeenCalled();
+  });
+
   it("does not alias the default answer limit with an explicit smaller limit", async () => {
     prismaMock.knowledgeChunk.findMany.mockResolvedValue([
       {
@@ -168,7 +267,7 @@ describe("knowledge retrieval cache", () => {
     expect(modelGatewayMock.rerank).toHaveBeenCalledTimes(2);
   });
 
-  it("keeps the Postgres candidate window broad when source types are filtered", async () => {
+  it("keeps a 500-chunk Postgres candidate window per requested source type", async () => {
     prismaMock.knowledgeChunk.findMany.mockResolvedValue([
       {
         id: "chunk-brain",
@@ -185,16 +284,15 @@ describe("knowledge retrieval cache", () => {
     await searchIndexedKnowledge({
       workspaceId: "ws-1",
       query: "deployment runbooks",
-      sourceTypes: ["BRAIN_ARTICLE"],
+      sourceTypes: ["BRAIN_ARTICLE", "DOCUMENT", "MEETING"],
       limit: 3,
     });
 
-    expect(prismaMock.knowledgeChunk.findMany).toHaveBeenNthCalledWith(1, expect.objectContaining({
-      where: expect.objectContaining({
-        sourceType: { in: ["BRAIN_ARTICLE"] },
-      }),
-      take: 500,
-    }));
+    expect(prismaMock.knowledgeChunk.findMany.mock.calls.slice(0, 3).map(([query]) => query))
+      .toEqual(["BRAIN_ARTICLE", "DOCUMENT", "MEETING"].map((sourceType) => expect.objectContaining({
+        where: expect.objectContaining({ sourceType }),
+        take: 500,
+      })));
   });
 
   it("invalidates cached retrieval when a source is resynced", async () => {
@@ -223,6 +321,7 @@ describe("knowledge retrieval cache", () => {
     await syncKnowledgeForSource({
       workspaceId: "ws-1",
       sourceType: "DOCUMENT",
+      accessDomain: "WORKSPACE",
       sourceId: "doc-2",
       sourceTitle: "Updated policy",
       content: "New policy language with clarified approval steps.",
@@ -257,6 +356,7 @@ describe("knowledge retrieval cache", () => {
     await syncKnowledgeForSource({
       workspaceId: "ws-1",
       sourceType: "DOCUMENT",
+      accessDomain: "WORKSPACE",
       sourceId: "doc-3",
       sourceTitle: "Policy",
       content: "Chunk me",
@@ -281,12 +381,15 @@ describe("knowledge retrieval cache", () => {
     });
   });
 
-  it("falls back to Postgres retrieval when Azure Search is enabled but unavailable", async () => {
+  it("falls back to domain-filtered Postgres retrieval when a query-only Azure index is not upgraded", async () => {
     process.env.KNOWLEDGE_SEARCH_PROVIDER = "azure";
     process.env.AZURE_SEARCH_ENDPOINT = "https://corgtex-search.search.windows.net";
     process.env.AZURE_SEARCH_INDEX_NAME = "client-knowledge";
     process.env.AZURE_SEARCH_QUERY_KEY = "query-key";
-    process.env.AZURE_SEARCH_VECTOR_DIMENSIONS = "1536";
+    process.env.AZURE_SEARCH_VECTOR_DIMENSIONS = "2";
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({
+      error: { message: "Invalid expression: Could not find a property named 'accessDomain'." },
+    }), { status: 400 })));
 
     prismaMock.knowledgeChunk.findMany.mockResolvedValue([
       {
@@ -305,6 +408,7 @@ describe("knowledge retrieval cache", () => {
       workspaceId: "ws-1",
       query: "travel policy",
       limit: 2,
+      accessDomains: ["FINANCE"],
     });
 
     expect(results[0]).toMatchObject({
@@ -312,6 +416,10 @@ describe("knowledge retrieval cache", () => {
       sourceType: "DOCUMENT",
       sourceId: "doc-5",
     });
+    expect(prismaMock.knowledgeChunk.findMany.mock.calls[0]?.[0]).toMatchObject({
+      where: { accessDomain: { in: ["FINANCE"] } },
+    });
+    expect(fetch).toHaveBeenCalledTimes(1);
     expect(modelGatewayMock.embed).toHaveBeenCalledTimes(2);
     expect(modelGatewayMock.rerank).toHaveBeenCalledTimes(1);
   });

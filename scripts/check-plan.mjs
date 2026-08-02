@@ -14,6 +14,10 @@
 import { execSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
+import {
+  FORBIDDEN_UNLABELED_PATHS,
+  sizePolicyForFiles,
+} from "./check-plan-policy.mjs";
 
 const args = Object.fromEntries(
   process.argv.slice(2).flatMap((a) => {
@@ -30,18 +34,6 @@ if (!["present", "scope", "size", "policy"].includes(mode)) {
 
 const DOCS_EXTENSIONS = new Set([".md", ".mdx"]);
 const LOCAL_PLAN_DIR = path.join(".agents", "plans");
-const FORBIDDEN_UNLABELED_PATHS = [
-  /^deploy\//,
-  /^\.github\/workflows\//,
-  /^prisma\/migrations\//,
-  /^packages\/domain\/src\/auth.*\.ts$/,
-  /^apps\/web\/lib\/auth\.ts$/,
-];
-const RISK_CAPS = {
-  low: { codeLoc: 1200, files: 50 },
-  standard: { codeLoc: 800, files: 25 },
-  high: { codeLoc: 400, files: 15 },
-};
 const UI_PATHS = [
   /^apps\/web\/app\//,
   /^apps\/web\/components\//,
@@ -159,7 +151,7 @@ function parseAllowlist(planText) {
 function parseRiskTier(planText) {
   const lines = planText.split("\n");
   for (const line of lines) {
-    const inline = line.match(/risk tier\s*[:—-]\s*`?(low|standard|high)`?/i);
+    const inline = line.match(/risk tier\s*[:—-]\s*`?(low|standard|high|critical)`?/i);
     if (inline) return inline[1].toLowerCase();
   }
 
@@ -171,7 +163,7 @@ function parseRiskTier(planText) {
     }
     if (inSection && /^#{1,3}\s+\S/.test(line)) break;
     if (!inSection) continue;
-    const value = line.match(/^\s*(?:[-*]\s+)?`?(low|standard|high)`?\s*$/i);
+    const value = line.match(/^\s*(?:[-*]\s+)?`?(low|standard|high|critical)`?\s*$/i);
     if (value) return value[1].toLowerCase();
   }
 
@@ -351,7 +343,7 @@ if (mode === "present") {
   const planText = readPlanText(branch);
   assertPlanHasNoCredentialMaterial(planText);
   if (!parseRiskTier(planText)) {
-    fail("plan contract is missing a valid risk tier of low, standard, or high");
+    fail("plan contract is missing a valid risk tier of low, standard, high, or critical");
   }
   const allowlist = parseAllowlist(planText);
   if (!allowlist || allowlist.length === 0) {
@@ -402,13 +394,9 @@ if (mode === "size") {
   assertPlanHasNoCredentialMaterial(planText);
   const riskTier = parseRiskTier(planText);
   if (!riskTier) {
-    fail("plan contract is missing a valid risk tier of low, standard, or high");
+    fail("plan contract is missing a valid risk tier of low, standard, high, or critical");
   }
-  const forbidden = files.filter((f) =>
-    FORBIDDEN_UNLABELED_PATHS.some((re) => re.test(f)),
-  );
-  const effectiveRiskTier = forbidden.length > 0 ? "high" : riskTier;
-  const caps = RISK_CAPS[effectiveRiskTier];
+  const { effectiveRiskTier, caps } = sizePolicyForFiles(riskTier, files);
 
   if (files.length > caps.files) {
     fail(
@@ -455,7 +443,7 @@ if (mode === "policy") {
   assertPlanHasNoCredentialMaterial(planText);
   const riskTier = parseRiskTier(planText);
   if (!riskTier) {
-    fail("plan contract is missing a valid risk tier of low, standard, or high");
+    fail("plan contract is missing a valid risk tier of low, standard, high, or critical");
   }
 
   const envFiles = files.filter(isEnvFile);

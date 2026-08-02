@@ -74,6 +74,19 @@ on:
         options:
           - managed_identity
           - api_key
+      model_provider:
+        description: "Model routing provider for staging. Use azure-foundry only with a Direct Azure Foundry base URL."
+        required: true
+        type: choice
+        default: azure-openai
+        options:
+          - azure-openai
+          - azure-foundry
+      azure_foundry_base_url:
+        description: "Azure Direct Foundry OpenAI-compatible v1 base URL; required when model_provider=azure-foundry."
+        required: false
+        type: string
+        default: ""
       allow_azure_service_postgres_firewall:
         description: "Allow Azure services through the Postgres firewall."
         required: true
@@ -128,6 +141,8 @@ jobs:
       SITE_URL: ${{ inputs.site_url }}
       CONTROL_PLANE_URL: ${{ inputs.control_plane_url }}
       AZURE_OPENAI_AUTH_MODE: ${{ inputs.azure_openai_auth_mode }}
+      MODEL_PROVIDER: ${{ inputs.model_provider }}
+      AZURE_FOUNDRY_BASE_URL: ${{ inputs.azure_foundry_base_url || vars.AZURE_SELFSERVE_STAGING_FOUNDRY_BASE_URL }}
       ALLOW_AZURE_SERVICE_POSTGRES_FIREWALL: ${{ inputs.allow_azure_service_postgres_firewall }}
       ENABLE_STRIPE_SECRETS: ${{ inputs.enable_stripe_secrets }}
       ENABLE_RESEND_SECRETS: ${{ inputs.enable_resend_secrets }}
@@ -165,6 +180,49 @@ jobs:
           require AZURE_SUBSCRIPTION_ID
           require POSTGRES_ADMIN_PASSWORD
           require AZURE_OPENAI_BASE_URL
+          validate_azure_base_url() {
+            local name="$1"
+            local provider="$2"
+            local value="$3"
+            node - "$name" "$provider" "$value" <<'NODE'
+          const [name, provider, value] = process.argv.slice(2);
+
+          let url;
+          try {
+            url = new URL(value);
+          } catch {
+            console.error(`::error::${name} must be a valid HTTPS Azure OpenAI-compatible /openai/v1 endpoint.`);
+            process.exit(1);
+          }
+
+          const host = url.hostname.toLowerCase();
+          const path = url.pathname.replace(/\/+$/, "");
+          const expectedHostSuffix = provider === "azure-foundry"
+            ? ".services.ai.azure.com"
+            : ".openai.azure.com";
+          const valid = url.protocol === "https:"
+            && !url.username
+            && !url.password
+            && !url.port
+            && !url.search
+            && !url.hash
+            && path === "/openai/v1"
+            && host.endsWith(expectedHostSuffix);
+
+          if (!valid) {
+            console.error(`::error::${name} must be an HTTPS Azure OpenAI-compatible endpoint under ${expectedHostSuffix}/openai/v1 without credentials, custom ports, query, or fragment.`);
+            process.exit(1);
+          }
+          NODE
+          }
+
+          validate_azure_base_url AZURE_OPENAI_BASE_URL azure-openai "$AZURE_OPENAI_BASE_URL"
+          if [[ "$MODEL_PROVIDER" == "azure-foundry" ]]; then
+            require AZURE_FOUNDRY_BASE_URL
+            if [[ -n "$AZURE_FOUNDRY_BASE_URL" ]]; then
+              validate_azure_base_url AZURE_FOUNDRY_BASE_URL azure-foundry "$AZURE_FOUNDRY_BASE_URL"
+            fi
+          fi
 
           if [[ "$OPERATION" == "deploy" && "$DEPLOY_CONTAINER_APPS" == "true" ]]; then
             require NEXT_SERVER_ACTIONS_ENCRYPTION_KEY
@@ -292,6 +350,8 @@ jobs:
             "releaseGitSha=$release_git_sha"
             "registryUsername=$REGISTRY_USERNAME"
             "azureOpenAiBaseUrl=$AZURE_OPENAI_BASE_URL"
+            "azureFoundryBaseUrl=$AZURE_FOUNDRY_BASE_URL"
+            "modelProvider=$MODEL_PROVIDER"
             "azureOpenAiAuthMode=$AZURE_OPENAI_AUTH_MODE"
             "allowAzureServicePostgresFirewall=$ALLOW_AZURE_SERVICE_POSTGRES_FIREWALL"
             "smokeEmailCaptureAllowedDomains=$SMOKE_EMAIL_CAPTURE_ALLOWED_DOMAINS"
@@ -325,6 +385,8 @@ jobs:
             "releaseGitSha=$release_git_sha"
             "registryUsername=$REGISTRY_USERNAME"
             "azureOpenAiBaseUrl=$AZURE_OPENAI_BASE_URL"
+            "azureFoundryBaseUrl=$AZURE_FOUNDRY_BASE_URL"
+            "modelProvider=$MODEL_PROVIDER"
             "azureOpenAiAuthMode=$AZURE_OPENAI_AUTH_MODE"
             "allowAzureServicePostgresFirewall=$ALLOW_AZURE_SERVICE_POSTGRES_FIREWALL"
             "smokeEmailCaptureAllowedDomains=$SMOKE_EMAIL_CAPTURE_ALLOWED_DOMAINS"

@@ -7,7 +7,12 @@ import type { ChatMessage } from "@corgtex/models";
 import { checkCalendarAvailabilityTool, scheduleMeetingTool, checkCalendarAvailability, scheduleMeeting } from "./tools/calendar";
 import { createCorgtexScheduledMeetingTool, uploadMeetingTranscriptTool, createCorgtexScheduledMeeting, uploadMeetingTranscriptFromTool } from "./tools/meetings";
 import { getWorkspaceOverviewTool, queryTensionsTool, queryActionsTool, queryProposalsTool, queryGoalsTool, queryOrgStructureTool, getWorkspaceOverview, queryTensions, queryActions, queryProposals, queryGoals, queryOrgStructure } from "./tools/workspace";
-import { searchBrainTool, searchBrain } from "./tools/knowledge";
+import {
+  INTERACTIVE_KNOWLEDGE_SOURCE_TYPES,
+  resolveInteractiveKnowledgeAccessDomains,
+  searchBrainTool,
+  searchBrain,
+} from "./tools/knowledge";
 import { createTensionTool, updateTensionTool, createActionTool, updateActionTool, createProposalTool, createGoalTool, createTensionAction, updateTensionAction, createActionItemAction, updateActionItemAction, createProposalAction, createGoalAction } from "./tools/mutations";
 import { saveToBrainTool, saveToBrainAction } from "./tools/brain-save";
 import {
@@ -166,6 +171,7 @@ type ConversationContext = {
   systemPrompt?: string | null;
   actor?: AppActor;
   pageContext?: ConversationPageContext | null;
+  signal?: AbortSignal;
 };
 
 type ConversationContextUsed = {
@@ -307,14 +313,19 @@ async function loadKnowledgeForConversation(params: {
 
   const sourceTypes = userMentionsSlack(params.ctx.userMessage)
     ? (["SLACK"] as KnowledgeSourceType[])
-    : undefined;
+    : INTERACTIVE_KNOWLEDGE_SOURCE_TYPES;
 
   try {
+    const accessDomains = await resolveInteractiveKnowledgeAccessDomains(
+      params.ctx.actor,
+      params.ctx.workspaceId,
+    );
     const results = await searchIndexedKnowledge({
       workspaceId: params.ctx.workspaceId,
       query,
       limit: params.limit,
       sourceTypes,
+      accessDomains,
     });
     return {
       results: Array.isArray(results) ? results : [],
@@ -339,7 +350,7 @@ async function loadKnowledgeForConversation(params: {
 
 function knowledgeSearchInstruction(search: ConversationContextUsed["knowledgeSearch"]) {
   if (!search) return null;
-  const sourceLabel = search.sourceTypes?.includes("SLACK") ? "indexed public Slack knowledge" : "indexed workspace knowledge";
+  const sourceLabel = search.sourceTypes?.includes("SLACK") ? "indexed public Slack knowledge" : "accessible indexed Brain knowledge";
   if (search.error) {
     return `Knowledge retrieval attempted against ${sourceLabel}, but it failed. Do not claim that you checked or searched that source unless you call a tool successfully in this turn. Error: ${search.error}`;
   }
@@ -354,7 +365,7 @@ const TOOL_HANDLERS: Partial<Record<string, (actor: AppActor, ctx: ConversationC
   schedule_meeting: async (actor, ctx, args) => scheduleMeeting(ctx.userId, ctx.workspaceId, args.title, args.description, args.startTime, args.endTime, args.attendeeEmails),
   create_corgtex_scheduled_meeting: async (actor, ctx, args) => createCorgtexScheduledMeeting(actor, ctx.workspaceId, args),
   upload_meeting_transcript: async (actor, ctx, args) => uploadMeetingTranscriptFromTool(actor, ctx.workspaceId, args),
-  search_brain: async (actor, ctx, args) => searchBrain(ctx.workspaceId, args.query, args.limit),
+  search_brain: async (actor, ctx, args) => searchBrain(actor, ctx.workspaceId, args.query, args.limit),
   get_workspace_overview: async (actor, ctx) => getWorkspaceOverview(ctx.workspaceId),
   query_tensions: async (actor, ctx, args) => queryTensions(ctx.workspaceId, args.status, args.assigneeId),
   query_actions: async (actor, ctx, args) => queryActions(ctx.workspaceId, args.status, args.assigneeId),
@@ -808,6 +819,26 @@ async function executeConversationToolCall({
   };
 }
 
+async function closeAsyncIterator<T, TReturn>(iterator: AsyncIterator<T, TReturn>) {
+  if (typeof iterator.return !== "function") return;
+  try {
+    await iterator.return(undefined as TReturn);
+  } catch {
+  }
+}
+
+function throwIfConversationCanceled(ctx: ConversationContext, error?: unknown) {
+  if (!ctx.signal?.aborted) return;
+  const reason = ctx.signal.reason;
+  if (reason instanceof Error) {
+    throw reason;
+  }
+  if (error instanceof Error) {
+    throw error;
+  }
+  throw new Error("Conversation stream canceled.");
+}
+
 export async function processConversationTurn(ctx: ConversationContext): Promise<{
   assistantMessage: string;
   contextUsed: ConversationContextUsed;
@@ -980,7 +1011,9 @@ export async function processConversationTurn(ctx: ConversationContext): Promise
     taskType: "AGENT",
     messages,
     tools,
+    signal: ctx.signal,
   });
+  throwIfConversationCanceled(ctx);
 
   const initialMessage = response.content;
   let finalMessage = initialMessage;
@@ -1035,7 +1068,9 @@ export async function processConversationTurn(ctx: ConversationContext): Promise
         taskType: "AGENT",
         messages,
         tools,
+        signal: ctx.signal,
       });
+      throwIfConversationCanceled(ctx);
 
       followupMessage = followup.content;
       finalMessage = followupMessage;
@@ -1050,6 +1085,7 @@ export async function processConversationTurn(ctx: ConversationContext): Promise
     finalMessage = appendCrmPendingNotices(finalMessage, pendingCrmOperations);
   }
   finalMessage = ensureAssistantMessage(finalMessage, ctx, executedToolResults, failedToolResults, toolExecutionAttempted);
+  throwIfConversationCanceled(ctx);
 
   // Store observation as memory if the conversation reveals something useful
   if (turnCount > 0 && turnCount % 5 === 0) {
@@ -1230,22 +1266,32 @@ export async function* processConversationTurnStream(ctx: ConversationContext): 
     taskType: "AGENT",
     messages,
     tools,
+    signal: ctx.signal,
   })[Symbol.asyncIterator]();
 
   let firstResult: import("@corgtex/models").ChatCompletionResponse | null = null;
+  let firstStreamDone = false;
   try {
     while (true) {
       const { done, value } = await iterator.next();
       if (done) {
+        firstStreamDone = true;
         firstResult = value;
         break;
       }
       yield value;
       finalMessage += value;
     }
-  } catch {
+  } catch (error) {
     firstResult = null;
+    throwIfConversationCanceled(ctx, error);
+  } finally {
+    if (!firstStreamDone) {
+      await closeAsyncIterator(iterator);
+    }
   }
+
+  throwIfConversationCanceled(ctx);
 
   if (firstResult?.tool_calls && firstResult.tool_calls.length > 0) {
     toolExecutionAttempted = true;
@@ -1293,20 +1339,28 @@ export async function* processConversationTurnStream(ctx: ConversationContext): 
         taskType: "AGENT",
         messages,
         tools,
+        signal: ctx.signal,
       })[Symbol.asyncIterator]();
 
+      let followupStreamDone = false;
       try {
         while (true) {
           const { done, value } = await followupIterator.next();
           if (done) {
+            followupStreamDone = true;
             break;
           }
           yield value;
           finalMessage += value;
           followupMessage += value;
         }
-      } catch {
+      } catch (error) {
         followupStreamFailed = true;
+        throwIfConversationCanceled(ctx, error);
+      } finally {
+        if (!followupStreamDone) {
+          await closeAsyncIterator(followupIterator);
+        }
       }
     }
     if (!followupMessage.trim() || followupStreamFailed) {
@@ -1330,12 +1384,14 @@ export async function* processConversationTurnStream(ctx: ConversationContext): 
   }
 
   const ensuredFinalMessage = ensureAssistantMessage(finalMessage, ctx, executedToolResults, failedToolResults, toolExecutionAttempted);
+  throwIfConversationCanceled(ctx);
   const fallbackAppendix = pendingNoticeAppendix(finalMessage, ensuredFinalMessage);
   if (fallbackAppendix) {
     yield fallbackAppendix;
     finalMessage = ensuredFinalMessage;
   }
 
+  throwIfConversationCanceled(ctx);
   if (turnCount > 0 && turnCount % 5 === 0) {
     try {
       await storeAgentMemory({

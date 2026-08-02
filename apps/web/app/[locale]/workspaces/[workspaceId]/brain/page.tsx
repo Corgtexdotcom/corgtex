@@ -1,4 +1,4 @@
-import { getBrainStatus, listArticles, requireWorkspaceMembership, listMeetings, listDocuments } from "@corgtex/domain";
+import { getBrainStatus, listArticles, requireWorkspaceMembership, listMeetings, listDocuments, resolveKnowledgeAccessDomains } from "@corgtex/domain";
 import { answerKnowledgeQuestion, searchIndexedKnowledge } from "@corgtex/knowledge";
 import { prisma } from "@corgtex/shared";
 import type { AppActor } from "@corgtex/shared";
@@ -37,6 +37,9 @@ export default async function BrainPage({
   const normalizedSearch = normalizeBrainIndexSearch(resolvedSearch);
   const provisionalQuery = normalizedSearch.query;
   const provisionalQuestion = normalizedSearch.question;
+  const accessDomains = provisionalQuery.trim() || provisionalQuestion.trim()
+    ? await resolveKnowledgeAccessDomains(actor, workspaceId)
+    : [];
 
   const [{ items: articles }, articleTypeCounts, status, searchResults, answer, allMeetings, allDocuments] = await Promise.all([
     listArticles(actor, {
@@ -47,13 +50,13 @@ export default async function BrainPage({
     listBrainArticleTypeCounts({ workspaceId, actor, membership }),
     getBrainStatus(actor, { workspaceId }),
     provisionalQuery.trim()
-      ? searchIndexedKnowledge({ workspaceId, query: provisionalQuery, limit: 12, sourceTypes: ["BRAIN_ARTICLE"] })
+      ? searchIndexedKnowledge({ workspaceId, query: provisionalQuery, limit: 12, accessDomains, sourceTypes: ["BRAIN_ARTICLE", "DOCUMENT", "MEETING"] })
       : Promise.resolve([]),
     provisionalQuestion.trim()
-      ? answerKnowledgeQuestion({ workspaceId, question: provisionalQuestion, limit: 4 })
+      ? answerKnowledgeQuestion({ workspaceId, question: provisionalQuestion, limit: 4, accessDomains, sourceTypes: ["BRAIN_ARTICLE", "DOCUMENT", "MEETING"] })
       : Promise.resolve(null),
     listMeetings(workspaceId, { status: "COMPLETED" }),
-    listDocuments(workspaceId),
+    listDocuments(actor, workspaceId),
   ]);
 
   const {

@@ -2,7 +2,13 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { createHash } from "node:crypto";
 import { ingestFile } from "./file-ingestion";
 import { prisma } from "@corgtex/shared";
-import { checkWorkspaceDuplicateGuard, isGlobalOperator, requireWorkspaceMembership } from "@corgtex/domain";
+import {
+  assertTrialStorageCapacity,
+  checkWorkspaceDuplicateGuard,
+  isGlobalOperator,
+  lockAndAssertTrialStorageCapacity,
+  requireWorkspaceMembership,
+} from "@corgtex/domain";
 
 vi.mock("@corgtex/shared", () => ({
   prisma: {
@@ -28,6 +34,8 @@ vi.mock("@corgtex/domain", () => ({
   duplicateGuardAuditMeta: vi.fn(() => ({})),
   duplicateGuardContentHash: vi.fn((value?: string | null) => value?.trim() ? `hash:${value.trim()}` : null),
   duplicateGuardMergeText: vi.fn((existing?: string | null, incoming?: string | null) => incoming?.trim() || existing || null),
+  assertTrialStorageCapacity: vi.fn().mockResolvedValue(undefined),
+  lockAndAssertTrialStorageCapacity: vi.fn().mockResolvedValue(undefined),
   requireWorkspaceMembership: vi.fn().mockResolvedValue({ id: "mem1" }),
   isGlobalOperator: vi.fn().mockReturnValue(false),
   getStorageUsageSummary: vi.fn().mockResolvedValue({ usageBytes: 0, limitBytes: Infinity }),
@@ -52,6 +60,8 @@ describe("file-ingestion", () => {
     vi.mocked(requireWorkspaceMembership).mockResolvedValue({ id: "mem1" } as any);
     vi.mocked(isGlobalOperator).mockReturnValue(false);
     vi.mocked(checkWorkspaceDuplicateGuard).mockResolvedValue(null);
+    vi.mocked(assertTrialStorageCapacity).mockResolvedValue(undefined);
+    vi.mocked(lockAndAssertTrialStorageCapacity).mockResolvedValue(undefined);
     vi.mocked((prisma as any).document.findFirst).mockResolvedValue(null);
     vi.mocked((prisma as any).brainSource.findFirst).mockResolvedValue(null);
   });
@@ -59,6 +69,7 @@ describe("file-ingestion", () => {
   const actor = { kind: "user" as const, user: { id: "usr1", email: "test@example.com", displayName: "Test User" } };
 
   it("extracts text from plain text files", async () => {
+    const { defaultStorage } = await import("@corgtex/storage");
     const res = await ingestFile(actor, {
       workspaceId: "ws_1",
       fileName: "test.txt",
@@ -84,6 +95,16 @@ describe("file-ingestion", () => {
         })
       })
     );
+    expect(assertTrialStorageCapacity).toHaveBeenCalledWith("ws_1", Buffer.byteLength("Hello text"));
+    expect(vi.mocked(assertTrialStorageCapacity).mock.invocationCallOrder[0])
+      .toBeLessThan(vi.mocked(defaultStorage.put).mock.invocationCallOrder[0]);
+    expect(lockAndAssertTrialStorageCapacity).toHaveBeenCalledWith(
+      txObj,
+      "ws_1",
+      Buffer.byteLength("Hello text"),
+    );
+    expect(vi.mocked(lockAndAssertTrialStorageCapacity).mock.invocationCallOrder.at(-1))
+      .toBeLessThan(txObj.document.create.mock.invocationCallOrder[0]);
   });
 
   it("stores upload guidance on documents and brain sources", async () => {
@@ -305,6 +326,8 @@ describe("file-ingestion", () => {
     expect(res.source?.id).toBe("source-existing");
     expect(defaultStorage.put).not.toHaveBeenCalled();
     expect(prisma.$transaction).not.toHaveBeenCalled();
+    expect(assertTrialStorageCapacity).not.toHaveBeenCalled();
+    expect(lockAndAssertTrialStorageCapacity).not.toHaveBeenCalled();
   });
 
   it("stores and links the replacement blob when a duplicate file upload updates an existing document", async () => {
@@ -336,6 +359,7 @@ describe("file-ingestion", () => {
       metadata: {},
       archivedAt: null,
     };
+    vi.mocked((prisma as any).document.findFirst).mockResolvedValueOnce(existingDocument);
     const existingSource = {
       id: "source-existing",
       workspaceId: "ws_1",
@@ -391,5 +415,39 @@ describe("file-ingestion", () => {
     }));
     expect(txObj.brainSource.create).not.toHaveBeenCalled();
     expect(res.document.storageKey).toBe(replacementStorageKey);
+    expect(assertTrialStorageCapacity).toHaveBeenCalledWith(
+      "ws_1",
+      Buffer.byteLength("New replacement text"),
+    );
+    expect(lockAndAssertTrialStorageCapacity).toHaveBeenCalledWith(
+      txObj,
+      "ws_1",
+      Buffer.byteLength("New replacement text"),
+      { replacingDocumentId: "doc-existing" },
+    );
+    expect(vi.mocked(lockAndAssertTrialStorageCapacity).mock.invocationCallOrder[0])
+      .toBeLessThan(txObj.document.update.mock.invocationCallOrder[0]);
+  });
+
+  it("cleans the new blob when the locked trial capacity check rejects", async () => {
+    const { defaultStorage } = await import("@corgtex/storage");
+    vi.mocked(lockAndAssertTrialStorageCapacity).mockRejectedValueOnce(
+      new Error("Trial storage limit exceeded."),
+    );
+
+    await expect(ingestFile(actor, {
+      workspaceId: "ws_1",
+      fileName: "over-limit.txt",
+      mimeType: "text/plain",
+      fileBuffer: Buffer.from("Capacity race loser"),
+      uploadSource: "FILE_UPLOAD",
+    })).rejects.toThrow("Trial storage limit exceeded.");
+
+    const storageKey = vi.mocked(defaultStorage.put).mock.calls[0]?.[0];
+    expect(assertTrialStorageCapacity).toHaveBeenCalledWith(
+      "ws_1",
+      Buffer.byteLength("Capacity race loser"),
+    );
+    expect(defaultStorage.delete).toHaveBeenCalledWith(storageKey);
   });
 });
