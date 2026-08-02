@@ -178,11 +178,7 @@ describe("meeting recorder domain", () => {
     prismaMock.meeting.findMany.mockResolvedValue([]);
     prismaMock.meetingRecording.findFirst.mockResolvedValue(null);
     prismaMock.meetingRecording.findMany.mockResolvedValue([]);
-    prismaMock.meetingRecording.findUnique.mockImplementation(async ({ where }: any) => ({
-      id: where?.id || "unknown",
-      transcriptProcessedAt: null,
-      status: "RECORDING",
-    }));
+    prismaMock.meetingRecording.findUnique.mockResolvedValue(null);
     prismaMock.meetingRecording.create.mockResolvedValue({
       id: "recording-1",
       workspaceId: "workspace-1",
@@ -2208,6 +2204,7 @@ describe("meeting recorder domain", () => {
         status: "PENDING",
       });
       fetchMock.mockResolvedValue({ ok: true, status: 200, text: async () => JSON.stringify({ id: "recall-bot-replacement" }) });
+      prismaMock.meetingRecording.findUnique.mockResolvedValue({ transcriptProcessedAt: null, status: "PENDING" } as any);
 
       await expect(reconcileMeetingRecorders("workspace-1")).resolves.toMatchObject({
         staleFailed: 1,
@@ -2248,6 +2245,7 @@ describe("meeting recorder domain", () => {
         },
       }]);
     prismaMock.meetingRecording.update.mockResolvedValue({ id: "recording-stale", status: "FAILED" });
+    prismaMock.meetingRecording.findUnique.mockResolvedValue({ transcriptProcessedAt: null, status: "SCHEDULED" } as any);
     prismaMock.meetingRecorderProviderEvent.updateMany.mockResolvedValue({ count: 2 });
 
     await expect(reconcileMeetingRecorders("workspace-1")).resolves.toMatchObject({ staleFailed: 1, recoveredTranscripts: 0 });
@@ -2388,6 +2386,7 @@ describe("meeting recorder domain", () => {
         }]);
       fetchMock.mockResolvedValue(new Response("", { status: 200 }));
       prismaMock.meetingRecording.update.mockResolvedValue({ id: "recording-stale-provider", status: "FAILED" });
+      prismaMock.meetingRecording.findUnique.mockResolvedValue({ transcriptProcessedAt: null, status: "RECORDING" } as any);
       prismaMock.meetingRecorderProviderEvent.updateMany.mockResolvedValue({ count: 0 });
 
       await expect(reconcileMeetingRecorders("workspace-1")).resolves.toMatchObject({
@@ -2436,6 +2435,7 @@ describe("meeting recorder domain", () => {
         }]);
       fetchMock.mockResolvedValue(new Response("", { status: 200 }));
       prismaMock.meetingRecording.update.mockResolvedValue({ id: "recording-rescheduled-stale", status: "FAILED" });
+      prismaMock.meetingRecording.findUnique.mockResolvedValue({ transcriptProcessedAt: null, status: "SCHEDULED" } as any);
       prismaMock.meetingRecorderProviderEvent.updateMany.mockResolvedValue({ count: 0 });
 
       await expect(reconcileMeetingRecorders("workspace-1")).resolves.toMatchObject({
@@ -2520,6 +2520,7 @@ describe("meeting recorder domain", () => {
         }]);
       fetchMock.mockResolvedValue(new Response("missing", { status: 404 }));
       prismaMock.meetingRecording.update.mockResolvedValue({ id: "recording-baas-stale", status: "FAILED" });
+      prismaMock.meetingRecording.findUnique.mockResolvedValue({ transcriptProcessedAt: null, status: "SCHEDULED" } as any);
       prismaMock.meetingRecorderProviderEvent.updateMany.mockResolvedValue({ count: 0 });
 
       await expect(reconcileMeetingRecorders("workspace-1")).resolves.toMatchObject({
@@ -4401,35 +4402,10 @@ describe("meeting recorder domain", () => {
     const { reconcileMeetingRecorders } = await import("./meeting-recorders");
     
     // Setup stale recording
-    let mockDb = [
-      {
-        id: "race-stale",
-        workspaceId: "workspace-1",
-        meetingId: "meeting-race",
-        provider: "MEETING_BAAS",
-        externalBotId: "bot-race",
-        status: "RECORDING",
-        activeDedupeKey: "dedupe-1",
-        createdAt: new Date(Date.now() - 10 * 60 * 60 * 1000),
-        joinAt: new Date(Date.now() - 10 * 60 * 60 * 1000),
-        transcriptProcessedAt: null,
-        meeting: {
-          recordedAt: new Date(Date.now() - 10 * 60 * 60 * 1000),
-          scheduledEndAt: new Date(Date.now() - 9 * 60 * 60 * 1000),
-        },
-      }
-    ];
-
+    let mockDb = [{ id: "race-stale", workspaceId: "workspace-1", meetingId: "meeting-race", provider: "MEETING_BAAS", externalBotId: "bot-race", status: "RECORDING", activeDedupeKey: "dedupe-1", createdAt: new Date(Date.now() - 36000000), joinAt: new Date(Date.now() - 36000000), transcriptProcessedAt: null, meeting: { recordedAt: new Date(Date.now() - 36000000), scheduledEndAt: new Date(Date.now() - 32400000) } }];
     prismaMock.meetingRecording.findMany.mockImplementation(async () => mockDb);
-
-    // Simulate webhook arriving during lock wait
-    prismaMock.meetingRecording.findUnique.mockImplementation(async () => {
-      return { transcriptProcessedAt: new Date(), status: "COMPLETED" };
-    });
-
+    prismaMock.meetingRecording.findUnique.mockImplementation(async () => ({ transcriptProcessedAt: new Date(), status: "COMPLETED" }));
     const result = await reconcileMeetingRecorders("workspace-1");
-    
-    // Update should not be called because the post-lock read saw transcriptProcessedAt
     expect(prismaMock.meetingRecording.update).not.toHaveBeenCalled();
     expect(prismaMock.meetingRecorderSmokeRun.updateMany).not.toHaveBeenCalled();
     expect(result).toMatchObject({ staleFailed: 0 });
@@ -4437,37 +4413,10 @@ describe("meeting recorder domain", () => {
 
   it("stale-vs-webhook race: terminalization lock proceeds if status transitions from SCHEDULED to RECORDING", async () => {
     const { reconcileMeetingRecorders } = await import("./meeting-recorders");
-    
-    // Setup stale recording initially as SCHEDULED
-    let mockDb = [
-      {
-        id: "race-transition",
-        workspaceId: "workspace-1",
-        meetingId: "meeting-race-transition",
-        provider: "MEETING_BAAS",
-        externalBotId: "bot-race-transition",
-        status: "SCHEDULED",
-        activeDedupeKey: "dedupe-1",
-        createdAt: new Date(Date.now() - 10 * 60 * 60 * 1000),
-        joinAt: new Date(Date.now() - 10 * 60 * 60 * 1000),
-        transcriptProcessedAt: null,
-        meeting: {
-          recordedAt: new Date(Date.now() - 10 * 60 * 60 * 1000),
-          scheduledEndAt: new Date(Date.now() - 9 * 60 * 60 * 1000),
-        },
-      }
-    ];
-
+    let mockDb = [{ id: "race-transition", workspaceId: "workspace-1", meetingId: "meeting-race-transition", provider: "MEETING_BAAS", externalBotId: "bot-race-transition", status: "SCHEDULED", activeDedupeKey: "dedupe-1", createdAt: new Date(Date.now() - 36000000), joinAt: new Date(Date.now() - 36000000), transcriptProcessedAt: null, meeting: { recordedAt: new Date(Date.now() - 36000000), scheduledEndAt: new Date(Date.now() - 32400000) } }];
     prismaMock.meetingRecording.findMany.mockImplementation(async () => mockDb);
-
-    // Simulate status transitioning to RECORDING during lock wait
-    prismaMock.meetingRecording.findUnique.mockImplementation(async () => {
-      return { transcriptProcessedAt: null, status: "RECORDING" };
-    });
-
+    prismaMock.meetingRecording.findUnique.mockImplementation(async () => ({ transcriptProcessedAt: null, status: "RECORDING" }));
     const result = await reconcileMeetingRecorders("workspace-1");
-    
-    // Update should be called because the post-lock read saw an active status
     expect(prismaMock.meetingRecording.update).toHaveBeenCalled();
     expect(prismaMock.meetingRecorderSmokeRun.updateMany).toHaveBeenCalled();
     expect(result).toMatchObject({ staleFailed: 1 });
@@ -4475,62 +4424,20 @@ describe("meeting recorder domain", () => {
 
   it("atomic rollback/retry behavior: failing second write aborts transaction", async () => {
     const { reconcileMeetingRecorders } = await import("./meeting-recorders");
-    
-    let mockDb = [
-      {
-        id: "atomic-stale",
-        workspaceId: "workspace-1",
-        meetingId: "meeting-atomic",
-        provider: "MEETING_BAAS",
-        externalBotId: "bot-atomic",
-        status: "RECORDING",
-        activeDedupeKey: "dedupe-1",
-        createdAt: new Date(Date.now() - 10 * 60 * 60 * 1000),
-        joinAt: new Date(Date.now() - 10 * 60 * 60 * 1000),
-        transcriptProcessedAt: null,
-        meeting: {
-          recordedAt: new Date(Date.now() - 10 * 60 * 60 * 1000),
-          scheduledEndAt: new Date(Date.now() - 9 * 60 * 60 * 1000),
-        },
-      }
-    ];
-
+    let mockDb = [{ id: "atomic-stale", workspaceId: "workspace-1", meetingId: "meeting-atomic", provider: "MEETING_BAAS", externalBotId: "bot-atomic", status: "RECORDING", activeDedupeKey: "dedupe-1", createdAt: new Date(Date.now() - 36000000), joinAt: new Date(Date.now() - 36000000), transcriptProcessedAt: null, meeting: { recordedAt: new Date(Date.now() - 36000000), scheduledEndAt: new Date(Date.now() - 32400000) } }];
     prismaMock.meetingRecording.findMany.mockImplementation(async () => mockDb);
     prismaMock.meetingRecording.findUnique.mockImplementation(async () => mockDb[0]);
-    
-    // Simulate Prisma transaction executing with a failure in the second write
     prismaMock.$transaction.mockImplementation(async (callback) => {
       prismaMock.meetingRecorderSmokeRun.updateMany.mockRejectedValueOnce(new Error("Atomic failure"));
       await expect(callback(prismaMock as any)).rejects.toThrow("Atomic failure");
     });
-
     await reconcileMeetingRecorders("workspace-1");
-    
-    // Transaction callback was attempted and rejected
     expect(prismaMock.$transaction).toHaveBeenCalled();
   });
 
   it("lock-wait timeout: transaction uses 120-second timeout", async () => {
     const { reconcileMeetingRecorders } = await import("./meeting-recorders");
-    
-    let mockDb = [
-      {
-        id: "timeout-stale",
-        workspaceId: "workspace-1",
-        meetingId: "meeting-timeout",
-        provider: "MEETING_BAAS",
-        externalBotId: "bot-timeout",
-        status: "RECORDING",
-        activeDedupeKey: "dedupe-1",
-        createdAt: new Date(Date.now() - 10 * 60 * 60 * 1000),
-        joinAt: new Date(Date.now() - 10 * 60 * 60 * 1000),
-        transcriptProcessedAt: null,
-        meeting: {
-          recordedAt: new Date(Date.now() - 10 * 60 * 60 * 1000),
-          scheduledEndAt: new Date(Date.now() - 9 * 60 * 60 * 1000),
-        },
-      }
-    ];
+    let mockDb = [{ id: "timeout-stale", workspaceId: "workspace-1", meetingId: "meeting-timeout", provider: "MEETING_BAAS", externalBotId: "bot-timeout", status: "RECORDING", activeDedupeKey: "dedupe-1", createdAt: new Date(Date.now() - 36000000), joinAt: new Date(Date.now() - 36000000), transcriptProcessedAt: null, meeting: { recordedAt: new Date(Date.now() - 36000000), scheduledEndAt: new Date(Date.now() - 32400000) } }];
 
     prismaMock.meetingRecording.findMany.mockImplementation(async () => mockDb);
     prismaMock.meetingRecording.findUnique.mockImplementation(async () => mockDb[0]);
