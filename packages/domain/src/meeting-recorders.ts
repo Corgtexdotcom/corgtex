@@ -4062,7 +4062,7 @@ async function terminalizeStaleRecordingWithLock(
       where: { id: recording.id },
       select: { transcriptProcessedAt: true, status: true },
     });
-    if (!current || current.transcriptProcessedAt || current.status !== recording.status) {
+    if (!current || current.transcriptProcessedAt || !ACTIVE_RECORDING_STATUSES.includes(current.status as any)) {
       return false;
     }
 

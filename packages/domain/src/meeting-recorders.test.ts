@@ -178,7 +178,11 @@ describe("meeting recorder domain", () => {
     prismaMock.meeting.findMany.mockResolvedValue([]);
     prismaMock.meetingRecording.findFirst.mockResolvedValue(null);
     prismaMock.meetingRecording.findMany.mockResolvedValue([]);
-    prismaMock.meetingRecording.findUnique.mockResolvedValue(null);
+    prismaMock.meetingRecording.findUnique.mockImplementation(async ({ where }: any) => ({
+      id: where?.id || "unknown",
+      transcriptProcessedAt: null,
+      status: "RECORDING",
+    }));
     prismaMock.meetingRecording.create.mockResolvedValue({
       id: "recording-1",
       workspaceId: "workspace-1",
@@ -4429,6 +4433,44 @@ describe("meeting recorder domain", () => {
     expect(prismaMock.meetingRecording.update).not.toHaveBeenCalled();
     expect(prismaMock.meetingRecorderSmokeRun.updateMany).not.toHaveBeenCalled();
     expect(result).toMatchObject({ staleFailed: 0 });
+  });
+
+  it("stale-vs-webhook race: terminalization lock proceeds if status transitions from SCHEDULED to RECORDING", async () => {
+    const { reconcileMeetingRecorders } = await import("./meeting-recorders");
+    
+    // Setup stale recording initially as SCHEDULED
+    let mockDb = [
+      {
+        id: "race-transition",
+        workspaceId: "workspace-1",
+        meetingId: "meeting-race-transition",
+        provider: "MEETING_BAAS",
+        externalBotId: "bot-race-transition",
+        status: "SCHEDULED",
+        activeDedupeKey: "dedupe-1",
+        createdAt: new Date(Date.now() - 10 * 60 * 60 * 1000),
+        joinAt: new Date(Date.now() - 10 * 60 * 60 * 1000),
+        transcriptProcessedAt: null,
+        meeting: {
+          recordedAt: new Date(Date.now() - 10 * 60 * 60 * 1000),
+          scheduledEndAt: new Date(Date.now() - 9 * 60 * 60 * 1000),
+        },
+      }
+    ];
+
+    prismaMock.meetingRecording.findMany.mockImplementation(async () => mockDb);
+
+    // Simulate status transitioning to RECORDING during lock wait
+    prismaMock.meetingRecording.findUnique.mockImplementation(async () => {
+      return { transcriptProcessedAt: null, status: "RECORDING" };
+    });
+
+    const result = await reconcileMeetingRecorders("workspace-1");
+    
+    // Update should be called because the post-lock read saw an active status
+    expect(prismaMock.meetingRecording.update).toHaveBeenCalled();
+    expect(prismaMock.meetingRecorderSmokeRun.updateMany).toHaveBeenCalled();
+    expect(result).toMatchObject({ staleFailed: 1 });
   });
 
   it("atomic rollback/retry behavior: failing second write aborts transaction", async () => {
