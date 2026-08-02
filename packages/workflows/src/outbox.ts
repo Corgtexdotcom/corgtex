@@ -4,7 +4,8 @@ import { deriveJobsForEvent } from "./derive-jobs";
 import { deriveNotificationsForEvent } from "./derive-notifications";
 import { recordWorkflowJobProcessedMetric } from "./job-metrics";
 import { handleKnowledgeSync, handleMeetingKnowledgeSync, handleDocumentKnowledgeSync, handleExternalResourceKnowledgeSync, handleExternalContentKnowledgeSync, handleEventKnowledgeSync, handleTensionKnowledgeSync, handleActionKnowledgeSync, handleCircleKnowledgeSync, handleRoleKnowledgeSync, handleSlackMessageKnowledgeSync, handleCalendarSync, handleOAuthDocumentsSync, handleOAuthEmailSync, handleContextGraphSync, handleContextGraphStalenessSweep, handleContextGraphReconcile } from "./handlers";
-import { FINANCE_REPORT_IMPORT_EXTRACTION_JOB_TYPE, handleGovernanceScoring, runFinanceReportImportExtractionJob } from "./handlers";
+import { FINANCE_REPORT_IMPORT_EXTRACTION_JOB_TYPE, FINANCE_REPORT_IMPORT_PROPOSAL_JOB_TYPE, handleGovernanceScoring,
+  runFinanceReportImportExtractionJob, runFinanceReportImportProposalJob } from "./handlers";
 import { runAgentWorkflowJob } from "./handlers";
 import { syncBrainArticleKnowledge } from "@corgtex/knowledge";
 
@@ -594,6 +595,15 @@ async function handleJob(job: ClaimedJob) {
       attempts: job.attempts,
       isFinalAttempt: job.attempts >= MAX_ATTEMPTS,
     });
+  }
+
+  if (job.type === FINANCE_REPORT_IMPORT_PROPOSAL_JOB_TYPE) {
+    if (!job.workspaceId || !isRecord(job.payload) || typeof job.payload.batchId !== "string" || !job.payload.batchId.trim()
+      || !Number.isSafeInteger(job.payload.expectedVersion) || Number(job.payload.expectedVersion) < 1) {
+      throw new Error("Finance report interpretation job payload is invalid.");
+    }
+    return runFinanceReportImportProposalJob({ workspaceId: job.workspaceId, batchId: job.payload.batchId,
+      expectedVersion: Number(job.payload.expectedVersion), workflowJobId: job.id, attempts: job.attempts, isFinalAttempt: job.attempts >= MAX_ATTEMPTS });
   }
 
   if (job.type === CONTROL_PLANE_FLEET_SNAPSHOT_JOB_TYPE) {

@@ -31,6 +31,7 @@ const {
   createNotificationIntentMock,
   deliverNotificationDeliveryMock,
   runFinanceReportImportExtractionJobMock,
+  runFinanceReportImportProposalJobMock,
 } = vi.hoisted(() => ({
   prismaMock: {
     $transaction: vi.fn(),
@@ -101,6 +102,7 @@ const {
   createNotificationIntentMock: vi.fn(),
   deliverNotificationDeliveryMock: vi.fn(),
   runFinanceReportImportExtractionJobMock: vi.fn(),
+  runFinanceReportImportProposalJobMock: vi.fn(),
 }));
 
 vi.mock("@corgtex/shared", () => ({
@@ -115,7 +117,9 @@ vi.mock("./handlers/agent-dispatch", () => ({
 
 vi.mock("./handlers/finance-report-import", () => ({
   FINANCE_REPORT_IMPORT_EXTRACTION_JOB_TYPE: "finance-report-import.extract",
+  FINANCE_REPORT_IMPORT_PROPOSAL_JOB_TYPE: "finance-report-import.interpret",
   runFinanceReportImportExtractionJob: runFinanceReportImportExtractionJobMock,
+  runFinanceReportImportProposalJob: runFinanceReportImportProposalJobMock,
 }));
 
 vi.mock("@corgtex/agents", () => ({
@@ -317,6 +321,18 @@ describe("runPendingJobs", () => {
     expect(runFinanceReportImportExtractionJobMock).not.toHaveBeenCalled();
     expect(prismaMock.workflowJob.update).toHaveBeenCalledWith(expect.objectContaining({ where: { id: "job-2" },
       data: expect.objectContaining({ status: "PENDING" }) }));
+  });
+
+  it("dispatches only a well-formed Finance report interpretation job", async () => {
+    txMock.$queryRaw.mockResolvedValueOnce([{ id: "job-1", workspaceId: "ws-1", type: "finance-report-import.interpret",
+      payload: { batchId: "batch-1", expectedVersion: 3 }, attempts: 5 }]);
+    await expect(runPendingJobs("worker-1", 1)).resolves.toBe(1);
+    expect(runFinanceReportImportProposalJobMock).toHaveBeenCalledWith({ workspaceId: "ws-1", batchId: "batch-1",
+      expectedVersion: 3, workflowJobId: "job-1", attempts: 5, isFinalAttempt: true });
+    vi.clearAllMocks(); prismaMock.workflowJob.update.mockResolvedValue({ id: "job-2" });
+    txMock.$queryRaw.mockResolvedValueOnce([{ id: "job-2", workspaceId: "ws-1", type: "finance-report-import.interpret", payload: { batchId: "batch-1" }, attempts: 1 }]);
+    await expect(runPendingJobs("worker-1", 1)).resolves.toBe(1);
+    expect(runFinanceReportImportProposalJobMock).not.toHaveBeenCalled();
   });
 
   it("records meeting transcript progress around completed meeting jobs", async () => {
