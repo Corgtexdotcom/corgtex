@@ -3,6 +3,7 @@ import {
   AppError,
   createFinanceReportImportUpload,
   FINANCE_REPORT_IMPORT_MAX_FILE_BYTES,
+  listFinanceReportImports,
 } from "@corgtex/domain";
 import { resolveRequestActor } from "@/lib/auth";
 import { checkApiDemoGuard } from "@/lib/demo-guard";
@@ -10,6 +11,17 @@ import { handleRouteError } from "@/lib/http";
 
 type RouteContext = { params: Promise<{ workspaceId: string }> };
 const MAX_MULTIPART_ENVELOPE_BYTES = FINANCE_REPORT_IMPORT_MAX_FILE_BYTES + (64 * 1024);
+
+export async function GET(request: NextRequest, { params }: RouteContext) {
+  let workspaceId: string | undefined;
+  try {
+    const actor = await resolveRequestActor(request);
+    ({ workspaceId } = await params);
+    return NextResponse.json({ batches: await listFinanceReportImports(actor, workspaceId) });
+  } catch (error) {
+    return handleRouteError(error, { request, surface: "finance_report_import", workspaceId });
+  }
+}
 
 function invalidMultipart() {
   return new AppError(400, "INVALID_INPUT", "The multipart report upload is invalid.");
