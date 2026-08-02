@@ -30,6 +30,12 @@ function canonicalJson(value: Prisma.JsonValue): string {
 function hashJson(value: Prisma.JsonValue) { return createHash("sha256").update(canonicalJson(value)).digest("hex"); }
 function date(value: Date) { return value.toISOString().slice(0, 10); }
 function historical(periodEnd: Date, now: Date) { const cutoff = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate())); cutoff.setUTCMonth(cutoff.getUTCMonth() - FINANCE_IMPORT_HISTORICAL_MONTHS); return periodEnd < cutoff; }
+async function retrySerializableConflict<T>(operation: () => Promise<T>) {
+  try { return await operation(); } catch (error) {
+    if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2034") return operation();
+    throw error;
+  }
+}
 function proposal(candidate: Candidate): Prisma.InputJsonObject {
   return { action: candidate.action, semanticKey: candidate.semanticKey, accountPath: candidate.proposedAccountPath, kind: candidate.factKind,
     periodStart: date(candidate.periodStart), periodEnd: date(candidate.periodEnd), amountCents: candidate.amountCents,
@@ -57,7 +63,7 @@ export async function applyFinanceReportImport(actor: AppActor, params: { worksp
   invariant(supplied.size === params.candidateVersions.length && supplied.size > 0 && supplied.size <= 1_000 && params.candidateVersions.every(({ id }) => id.length > 0 && id.length <= 100),
     400, "INVALID_INPUT", "Candidate versions must be unique and bounded.");
   try {
-    return await prisma.$transaction(async (tx) => {
+    return await retrySerializableConflict(() => prisma.$transaction(async (tx) => {
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`finance-report-review:${params.workspaceId}:${params.batchId}`}, 0))`;
       const batch = await tx.financeImportBatch.findUnique({ where: { id_workspaceId: { id: params.batchId, workspaceId: params.workspaceId } },
         select: { id: true, workspaceId: true, uploadedByUserId: true, stage: true, reportType: true, basis: true, cadence: true, resolvedCurrency: true, periodStart: true,
@@ -163,7 +169,7 @@ export async function applyFinanceReportImport(actor: AppActor, params: { worksp
       await tx.auditLog.create({ data: { workspaceId: batch.workspaceId, actorUserId: actor.user.id, action: "finance-report-import.applied",
         entityType: "FinanceImportBatch", entityId: batch.id, meta: { version: batch.version + 1, stage, appliedNow: receipts.length, appliedCount } } });
       return { batchId: batch.id, version: batch.version + 1, stage, appliedCount, appliedNow: receipts.length, noOp: false, receipts };
-    }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+    }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable }));
   } catch (error) {
     if (error instanceof Prisma.PrismaClientKnownRequestError && ["P2002", "P2034"].includes(error.code)) {
       throw new AppError(409, "FINANCE_REPORT_APPLICATION_CONFLICT", "The Finance report application changed. Refresh and try again.");
