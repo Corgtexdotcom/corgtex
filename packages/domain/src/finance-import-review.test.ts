@@ -44,7 +44,10 @@ describe("Finance import review", () => {
   });
 
   it("edits and rereconciles exact versions while clearing approvals and creating no canonical records", async () => {
-    mocks.prisma.financeImportBatch.findUnique.mockResolvedValue(batch([candidate("candidate-1", { approvedByUserId: "writer-2", approvedAt: new Date() })]));
+    mocks.prisma.financeImportBatch.findUnique.mockResolvedValue(batch([candidate("candidate-1", { approvedByUserId: "writer-2", approvedAt: new Date() }),
+      candidate("rejected", { amountCents: 999, action: "CONFLICT", reviewState: "REJECTED" })]));
+    await expect(editFinanceReportImportCandidate(actor, { workspaceId: "workspace-1", batchId: "batch-1", candidateId: "candidate-1",
+      expectedVersion: 4, expectedCandidateVersion: 1, proposedAccountPath: ["Revenue\0"] })).rejects.toMatchObject({ code: "INVALID_INPUT" });
     await expect(editFinanceReportImportCandidate(actor, { workspaceId: "workspace-1", batchId: "batch-1", candidateId: "candidate-1",
       expectedVersion: 4, expectedCandidateVersion: 1, proposedAccountPath: [" Revenue ", "Sales"], amountCents: 200 })).resolves.toMatchObject({ version: 5, candidateVersion: 2 });
     expect(mocks.write).toHaveBeenCalledWith(actor, "workspace-1");
@@ -58,16 +61,22 @@ describe("Finance import review", () => {
 
   it("enforces stale versions, warning acceptance, structural blockers, and both bulk paths", async () => {
     const clean = candidate("clean", { periodStart: new Date("2026-07-01Z"), periodEnd: new Date("2026-07-31Z") });
+    const clean2 = candidate("clean-2", { periodStart: new Date("2026-06-01Z"), periodEnd: new Date("2026-06-30Z") });
     const warned = candidate("warned"); const blocked = candidate("blocked", { action: "CONFLICT", reviewState: "BLOCKED" });
-    mocks.prisma.financeImportBatch.findUnique.mockResolvedValue(batch([clean, warned, blocked], { blockerCount: 1 }));
-    const input = { workspaceId: "workspace-1", batchId: "batch-1", expectedVersion: 4, candidateVersions: versions([clean, warned, blocked]) };
-    await expect(reviewFinanceReportImport(actor, { ...input, mode: "APPROVE_VERIFIED" })).resolves.toMatchObject({ reviewedCount: 1, complete: false });
+    mocks.prisma.financeImportBatch.findUnique.mockResolvedValue(batch([clean, clean2, warned, blocked], { blockerCount: 1 }));
+    const input = { workspaceId: "workspace-1", batchId: "batch-1", expectedVersion: 4, candidateVersions: versions([clean, clean2, warned, blocked]) };
+    mocks.prisma.financeImportCandidate.updateMany.mockResolvedValueOnce({ count: 2 });
+    await expect(reviewFinanceReportImport(actor, { ...input, mode: "APPROVE_VERIFIED" })).resolves.toMatchObject({ reviewedCount: 2, complete: false });
+    expect(mocks.prisma.financeImportCandidate.updateMany).toHaveBeenCalledTimes(1);
     await expect(reviewFinanceReportImport(actor, { ...input, mode: "APPROVE_ALL", acceptWarnings: true })).rejects.toMatchObject({ code: "FINANCE_REPORT_REVIEW_BLOCKED" });
     mocks.prisma.financeImportBatch.findUnique.mockResolvedValue(batch([clean, warned], { warningCount: 1 }));
+    await expect(reviewFinanceReportImport(actor, { ...input, candidateVersions: versions([clean, warned]), mode: "APPROVE_VERIFIED" }))
+      .resolves.toMatchObject({ reviewedCount: 1, complete: false });
     await expect(reviewFinanceReportImport(actor, { ...input, candidateId: clean.id, candidateVersions: versions([clean]), mode: "APPROVE" }))
       .rejects.toMatchObject({ code: "FINANCE_REPORT_WARNING_ACCEPTANCE_REQUIRED" });
     await expect(reviewFinanceReportImport(actor, { ...input, candidateVersions: versions([clean, warned]), mode: "APPROVE_ALL" }))
       .rejects.toMatchObject({ code: "FINANCE_REPORT_WARNING_ACCEPTANCE_REQUIRED" });
+    mocks.prisma.financeImportCandidate.updateMany.mockResolvedValueOnce({ count: 2 });
     await expect(reviewFinanceReportImport(actor, { ...input, candidateVersions: versions([clean, warned]), mode: "APPROVE_ALL", acceptWarnings: true }))
       .resolves.toMatchObject({ reviewedCount: 2, complete: true });
     mocks.prisma.financeImportBatch.findUnique.mockResolvedValue(batch([clean], { version: 5 }));
@@ -82,7 +91,7 @@ describe("Finance import review", () => {
       candidateVersions: versions([update]), mode: "APPROVE" as const, acceptWarnings: true };
     await expect(reviewFinanceReportImport(actor, input)).rejects.toMatchObject({ code: "FINANCE_REPORT_PEER_CONFIRMATION_REQUIRED" });
     await expect(reviewFinanceReportImport(peer, input)).resolves.toMatchObject({ reviewedCount: 1, complete: true });
-    expect(mocks.prisma.financeImportCandidate.updateMany).toHaveBeenLastCalledWith(expect.objectContaining({ where: expect.objectContaining({ version: 1 }),
+    expect(mocks.prisma.financeImportCandidate.updateMany).toHaveBeenLastCalledWith(expect.objectContaining({ where: expect.objectContaining({ OR: [{ id: update.id, version: 1 }] }),
       data: expect.objectContaining({ reviewState: "APPROVED", approvedByUserId: "writer-2", version: { increment: 1 } }) }));
     await expect(reviewFinanceReportImport(peer, { ...input, candidateVersions: [{ id: update.id, expectedVersion: 2 }] }))
       .rejects.toMatchObject({ code: "FINANCE_REPORT_REVIEW_CONFLICT" });
