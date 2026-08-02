@@ -260,7 +260,8 @@ describe("Slack context jobs", () => {
     expect(sendSlackMessageMock).toHaveBeenCalledWith("install-1", {
       channel: "C1",
       threadTs: "1714320000.000100",
-    }, expect.any(Array), "This looks unanswered.");
+      text: "This looks unanswered.",
+    }, expect.any(Array));
     expect(sendSlackMessageMock.mock.calls[0][2][0].text.text).toContain("I'll wait 24 hours");
     expect(prismaMock.communicationEntityLink.create).toHaveBeenCalledWith(expect.objectContaining({
       data: expect.objectContaining({
@@ -337,6 +338,7 @@ describe("Slack context jobs", () => {
         disconnectedAt: expect.any(Date),
       }),
     });
+    expect(prismaMock.communicationInstallation.updateMany).toHaveBeenCalledTimes(1);
     expect(prismaMock.communicationEntityLink.create).not.toHaveBeenCalled();
   });
 
@@ -432,7 +434,8 @@ describe("Slack context jobs", () => {
     expect(sendSlackMessageMock).toHaveBeenCalledWith("install-1", {
       channel: "C1",
       threadTs: "1714320000.000100",
-    }, expect.any(Array), "Created Corgtex action: Confirm availability");
+      text: "Created Corgtex action: Confirm availability",
+    }, expect.any(Array));
     expect(sendSlackMessageMock.mock.calls[0][2][0].text.text).toContain("still looked unresolved after 24 hours");
   });
 
@@ -552,7 +555,8 @@ describe("Slack context jobs", () => {
     expect(sendSlackMessageMock).toHaveBeenCalledWith("install-1", {
       channel: "C1",
       threadTs: "1714320000.000100",
-    }, expect.any(Array), "Corgtex action still not completed: Confirm availability");
+      text: "Corgtex action still not completed: Confirm availability",
+    }, expect.any(Array));
     expect(prismaMock.communicationEntityLink.create).toHaveBeenCalledWith(expect.objectContaining({
       data: expect.objectContaining({
         action: "proactive_action_followup",
