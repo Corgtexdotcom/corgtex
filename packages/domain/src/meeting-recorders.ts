@@ -4014,9 +4014,16 @@ async function terminalizeRecordingWithLock(
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`${recording.workspaceId}:${recording.meetingId}:${recording.provider}:transcript`}, 0))`;
     const current = await tx.meetingRecording.findUnique({
       where: { id: recording.id },
-      select: { transcriptProcessedAt: true, status: true },
+      select: { transcriptProcessedAt: true, status: true, failureCode: true },
     });
-    if (!current || current.transcriptProcessedAt || current.status !== "COMPLETED") {
+    if (!current || current.transcriptProcessedAt) {
+      return false;
+    }
+
+    const isRecoverableStatus = (RECOVERABLE_RECALL_RECORDING_STATUSES as string[]).includes(current.status);
+    const isStaleFailed = current.status === "FAILED" && current.failureCode === "STALE_RECORDER";
+
+    if (!isRecoverableStatus && !isStaleFailed) {
       return false;
     }
 

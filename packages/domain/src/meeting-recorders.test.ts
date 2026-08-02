@@ -4266,14 +4266,130 @@ describe("meeting recorder domain", () => {
     expect(prismaMock.meetingRecording.update).not.toHaveBeenCalled();
   });
 
-  it("does not retry terminalized recordings in subsequent reconciliations", async () => {
+  it("does not retry terminalized recordings in subsequent reconciliations using a stateful two-pass mock", async () => {
     const { reconcileMeetingRecorders } = await import("./meeting-recorders");
+    
+    let mockDb = [
+      {
+        id: "recording-stale",
+        workspaceId: "workspace-1",
+        meetingId: "meeting-stale",
+        provider: "MEETING_BAAS",
+        externalBotId: "bot-stale",
+        status: "RECORDING",
+        activeDedupeKey: "dedupe-1",
+        createdAt: new Date(Date.now() - 10 * 60 * 60 * 1000),
+        joinAt: new Date(Date.now() - 10 * 60 * 60 * 1000),
+        transcriptProcessedAt: null,
+        meeting: {
+          recordedAt: new Date(Date.now() - 10 * 60 * 60 * 1000),
+          scheduledEndAt: new Date(Date.now() - 9 * 60 * 60 * 1000),
+        },
+      },
+      {
+        id: "recording-expired",
+        workspaceId: "workspace-1",
+        meetingId: "meeting-expired",
+        provider: "RECALL_AI",
+        externalBotId: "bot-expired",
+        status: "COMPLETED",
+        activeDedupeKey: null,
+        createdAt: new Date(Date.now() - 26 * 60 * 60 * 1000),
+        joinAt: new Date(Date.now() - 26 * 60 * 60 * 1000),
+        transcriptProcessedAt: null,
+        meeting: {
+          recordedAt: new Date(Date.now() - 26 * 60 * 60 * 1000),
+          scheduledEndAt: new Date(Date.now() - 25 * 60 * 60 * 1000),
+        },
+      },
+      {
+        id: "recording-permanent",
+        workspaceId: "workspace-1",
+        meetingId: "meeting-permanent",
+        provider: "RECALL_AI",
+        externalBotId: "bot-permanent",
+        status: "COMPLETED",
+        activeDedupeKey: null,
+        createdAt: new Date(Date.now() - 2 * 60 * 60 * 1000),
+        joinAt: new Date(Date.now() - 2 * 60 * 60 * 1000),
+        transcriptProcessedAt: null,
+        meeting: {
+          recordedAt: new Date(Date.now() - 2 * 60 * 60 * 1000),
+          scheduledEndAt: new Date(Date.now() - 1 * 60 * 60 * 1000),
+        },
+      }
+    ];
+
+    prismaMock.meetingRecording.findMany.mockImplementation(async (query: any) => {
+      return mockDb.filter((r) => {
+        if (query.where?.transcriptProcessedAt === null) {
+          if (r.transcriptProcessedAt !== null || r.provider !== "RECALL_AI") return false;
+          if (query.where.OR) {
+            const match = query.where.OR.some((cond: any) => {
+              if (cond.status?.in && cond.status.in.includes(r.status)) return true;
+              if (cond.status === "FAILED" && cond.failureCode === "STALE_RECORDER") {
+                return r.status === "FAILED" && (r as any).failureCode === "STALE_RECORDER";
+              }
+              return false;
+            });
+            if (!match) return false;
+          }
+          return true;
+        }
+        if (query.where?.status?.in) {
+          if (!query.where.status.in.includes(r.status)) return false;
+          return true;
+        }
+        return false;
+      });
+    });
+
+    prismaMock.meetingRecording.findUnique.mockImplementation(async (args: any) => {
+      return mockDb.find(r => r.id === args.where.id) || null;
+    });
+
+    prismaMock.meetingRecording.update.mockImplementation(async (args: any) => {
+      const idx = mockDb.findIndex(r => r.id === args.where.id);
+      if (idx !== -1) {
+        mockDb[idx] = { ...mockDb[idx], ...args.data };
+      }
+      return mockDb[idx];
+    });
+
+    // Mock permanent failure fetch
+    fetchMock.mockImplementation((url) => {
+      if (typeof url === 'string' && url.includes("bot-permanent")) {
+        return Promise.resolve(new Response("Forbidden", { status: 403 }));
+      }
+      return Promise.resolve(new Response("{}", { status: 200 }));
+    });
+
+    // Pass 1: should terminalize all three
     await reconcileMeetingRecorders("workspace-1");
     
-    expect(prismaMock.meetingRecording.findMany).toHaveBeenCalledWith(expect.objectContaining({
-      where: expect.objectContaining({
-        transcriptProcessedAt: null,
-      })
+    expect(prismaMock.meetingRecording.update).toHaveBeenCalledWith(expect.objectContaining({
+      where: { id: "recording-stale" },
+      data: expect.objectContaining({ status: "FAILED", failureCode: "STALE_RECORDER" })
     }));
+    
+    expect(prismaMock.meetingRecording.update).toHaveBeenCalledWith(expect.objectContaining({
+      where: { id: "recording-expired" },
+      data: expect.objectContaining({ status: "FAILED", failureCode: "RECORDER_TRANSCRIPT_RECOVERY_EXPIRED" })
+    }));
+
+    expect(prismaMock.meetingRecording.update).toHaveBeenCalledWith(expect.objectContaining({
+      where: { id: "recording-permanent" },
+      data: expect.objectContaining({ status: "FAILED", failureCode: "RECORDER_TRANSCRIPT_FETCH_FAILED" })
+    }));
+
+    // Reset mocks for pass 2 to prove they aren't called again
+    vi.clearAllMocks();
+
+    // Pass 2: should do nothing because they are terminalized
+    await reconcileMeetingRecorders("workspace-1");
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(prismaMock.$executeRaw).not.toHaveBeenCalled();
+    expect(prismaMock.meetingRecording.update).not.toHaveBeenCalled();
   });
 });
