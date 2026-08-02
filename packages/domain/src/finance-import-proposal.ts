@@ -3,6 +3,7 @@ import { prisma } from "@corgtex/shared";
 import { invariant } from "./errors";
 import { lockFinanceImportArtifactLinkTargets } from "./finance-import-artifact-ownership";
 import { parseFinanceImportInterpretationV1 } from "./finance-import-interpretation";
+import { reconcileFinanceImportCandidates } from "./finance-import-reconciliation";
 import { normalizeFinanceImportAmountCents, normalizeFinanceImportCurrency, validateFinanceImportReportingWindow } from "./finance-imports";
 const FORMAT_BY_MIME = { "text/csv": "CSV", "application/pdf": "PDF", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": "XLSX" } as const;
 const FINISHED = new Set(["RECONCILING", "READY_FOR_REVIEW", "NEEDS_INPUT", "APPLYING", "APPLIED", "PARTIALLY_APPLIED", "FAILED", "CANCELLED"]);
@@ -68,18 +69,36 @@ export async function persistFinanceReportImportProposal(params: { workspaceId: 
   });
   const needsInput = params.blockerCount > 0;
   invariant([params.warningCount, params.blockerCount].every((count) => Number.isInteger(count) && count >= 0 && count <= 200), 400, "INVALID_FINANCE_IMPORT_PROPOSAL", "Proposal counts are invalid.");
-  invariant((needsInput && candidates.length === 0) || (!needsInput && candidates.length > 0), 400, "INVALID_FINANCE_IMPORT_PROPOSAL", "Blocked proposals cannot create candidates.");
+  const currencyOnlyBlocker = needsInput && params.blockerCount === 1 && params.currency.state === "UNRESOLVED"
+    && params.blocker?.code === "CURRENCY_UNRESOLVED";
+  invariant((needsInput && (candidates.length === 0 || currencyOnlyBlocker)) || (!needsInput && candidates.length > 0),
+    400, "INVALID_FINANCE_IMPORT_PROPOSAL", "Only currency-only blockers may retain exact candidate proposals.");
   const resolvedCurrency = params.currency.state === "RESOLVED" ? normalizeFinanceImportCurrency(params.currency.code ?? "") : null;
   invariant((params.currency.state === "UNRESOLVED" && params.currency.code === null && params.currency.source === null)
     || (params.currency.state === "RESOLVED" && resolvedCurrency !== null && params.currency.source !== null), 400, "INVALID_FINANCE_IMPORT_PROPOSAL", "Currency state is inconsistent.");
   return prisma.$transaction(async (tx) => {
-    if (candidates.length) await tx.financeImportCandidate.createMany({ data: candidates });
-    const nextVersion = params.expectedVersion + 1, stage = needsInput ? "NEEDS_INPUT" as const : "RECONCILING" as const;
+    const emptyCounts = { addCount: 0, updateCount: 0, unchangedCount: 0, duplicateCount: 0, conflictCount: 0, skippedCount: 0 };
+    let counts = emptyCounts;
+    if (candidates.length && !needsInput) {
+      const identity = { workspaceId: params.workspaceId, reportType: interpretation.classification.reportType,
+        basis: interpretation.classification.basis, currency: resolvedCurrency! };
+      const preliminary = reconcileFinanceImportCandidates({ ...identity, candidates, currentFacts: [] });
+      const currentFacts = await tx.financeReportFact.findMany({ where: { workspaceId: params.workspaceId,
+        semanticKey: { in: preliminary.decisions.flatMap(({ semanticKey }) => semanticKey ? [semanticKey] : []) } },
+      select: { id: true, semanticKey: true, kind: true, amountCents: true } });
+      const reconciled = reconcileFinanceImportCandidates({ ...identity, candidates, currentFacts });
+      counts = reconciled.counts;
+      const bySource = new Map(reconciled.decisions.map((decision) => [decision.candidate.sourceKey, decision]));
+      await tx.financeImportCandidate.createMany({ data: candidates.map((candidate) => { const decision = bySource.get(candidate.sourceKey)!;
+        return { ...candidate, semanticKey: decision.semanticKey, action: decision.action, reviewState: decision.reviewState,
+          currentFactId: decision.currentFactId, currentAmountCents: decision.currentAmountCents, explanationMd: decision.explanationMd }; }) });
+    } else if (candidates.length) await tx.financeImportCandidate.createMany({ data: candidates });
+    const nextVersion = params.expectedVersion + 1, stage = needsInput ? "NEEDS_INPUT" as const : "READY_FOR_REVIEW" as const;
     const updated = await tx.financeImportBatch.updateMany({ where: { id: params.batchId, workspaceId: params.workspaceId, version: params.expectedVersion,
       stage: "MAPPING", workflowJobId: params.workflowJobId, agentRunId: params.agentRunId }, data: { stage, interpretationJson: interpretation as unknown as Prisma.InputJsonObject,
       reportType: interpretation.classification.reportType, basis: interpretation.classification.basis, cadence: interpretation.classification.cadence,
       periodStart: window.periodStart, periodEnd: window.periodEnd, currencyState: params.currency.state, resolvedCurrency,
-      currencyResolutionSource: params.currency.source, warningCount: params.warningCount, blockerCount: params.blockerCount,
+      currencyResolutionSource: params.currency.source, warningCount: params.warningCount, blockerCount: needsInput ? params.blockerCount : counts.conflictCount, ...counts,
       safeErrorCode: params.blocker?.code ?? null, safeErrorMessage: params.blocker?.message ?? null, version: { increment: 1 } } });
     invariant(updated.count === 1, 409, "FINANCE_REPORT_PROPOSAL_CONFLICT", "The Finance report import changed. Please retry.");
     await tx.event.create({ data: { workspaceId: params.workspaceId, type: "finance-report-import.proposed", aggregateType: "FinanceImportBatch",

@@ -191,11 +191,13 @@ export async function runFinanceReportImportAgentV1(params: { workspaceId: strin
           return { resultJson: { batchId: params.batchId, kind: "FAILURE", failureCode: failed.failureCode, attempts: result.attempts } };
         }
         const blockers = result.proposal.exceptions.filter(({ severity }) => severity === "BLOCKER");
-        const needsInput = blockers.length > 0 || result.proposal.mappings.some(({ amountCents }) => amountCents === null);
+        const nullAmounts = result.proposal.mappings.some(({ amountCents }) => amountCents === null);
+        const needsInput = blockers.length > 0 || nullAmounts;
+        const currencyOnly = !nullAmounts && blockers.length === 1 && blockers[0]?.code === "CURRENCY_UNRESOLVED";
         const periods = result.proposal.periods.map(({ periodStart, periodEnd }) => [periodStart, periodEnd]).flat().sort();
         const stored = await persistFinanceReportImportProposal({ ...params, agentRunId: currentRunId, expectedVersion: claim.version,
           interpretation: durableInterpretation(result.proposal), currency: result.proposal.currency, periodStart: periods[0]!, periodEnd: periods.at(-1)!,
-          candidates: needsInput ? [] : candidateDrafts(result.proposal), warningCount: result.proposal.exceptions.filter(({ severity }) => severity === "WARNING").length,
+          candidates: !needsInput || currencyOnly ? candidateDrafts(result.proposal) : [], warningCount: result.proposal.exceptions.filter(({ severity }) => severity === "WARNING").length,
           blockerCount: needsInput ? Math.max(1, blockers.length) : 0, ...(blockers[0] ? { blocker: { code: blockers[0].code, message: blockers[0].message } } : {}) });
         return { resultJson: { batchId: params.batchId, kind: "SUCCESS", attempts: result.attempts, stage: stored.stage, candidateCount: stored.candidateCount } };
       } });
