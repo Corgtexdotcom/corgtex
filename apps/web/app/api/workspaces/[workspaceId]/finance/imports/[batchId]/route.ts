@@ -4,7 +4,6 @@ import { z } from "zod";
 import { resolveRequestActor } from "@/lib/auth";
 import { checkApiDemoGuard } from "@/lib/demo-guard";
 import { handleRouteError, validateBody } from "@/lib/http";
-
 type Context = { params: Promise<{ workspaceId: string; batchId: string }> };
 const version = z.number().int().positive().max(2_147_483_646);
 const candidateVersion = z.strictObject({ id: z.string().min(1).max(100), expectedVersion: version });
@@ -13,7 +12,6 @@ const edit = z.strictObject({ operation: z.literal("EDIT"), candidateId: z.strin
   periodStart: z.string().optional(), periodEnd: z.string().optional() });
 const review = z.strictObject({ operation: z.enum(["APPROVE", "REJECT", "APPROVE_VERIFIED", "APPROVE_ALL"]), candidateId: z.string().min(1).max(100).optional(),
   expectedVersion: version, candidateVersions: z.array(candidateVersion).min(1).max(1_000), acceptWarnings: z.boolean().optional() });
-
 export async function GET(request: NextRequest, { params }: Context) {
   let workspaceId: string | undefined;
   try {
@@ -21,7 +19,6 @@ export async function GET(request: NextRequest, { params }: Context) {
     return NextResponse.json({ batch: await getFinanceReportImport(actor, route) });
   } catch (error) { return handleRouteError(error, { request, surface: "finance_report_import", workspaceId }); }
 }
-
 export async function PATCH(request: NextRequest, { params }: Context) {
   let workspaceId: string | undefined;
   try {

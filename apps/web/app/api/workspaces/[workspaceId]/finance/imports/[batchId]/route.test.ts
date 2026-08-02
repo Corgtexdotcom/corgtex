@@ -1,7 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { ZodType } from "zod";
-
 const mocks = vi.hoisted(() => ({ detail: vi.fn(), edit: vi.fn(), review: vi.fn(), actor: vi.fn(), demo: vi.fn(), error: vi.fn((value) => NextResponse.json({ error: value.code }, { status: value.status ?? 500 })) }));
 class MockAppError extends Error { constructor(public status: number, public code: string, message: string) { super(message); } }
 vi.mock("@corgtex/domain", () => ({ AppError: MockAppError, getFinanceReportImport: mocks.detail, editFinanceReportImportCandidate: mocks.edit, reviewFinanceReportImport: mocks.review }));
@@ -14,7 +13,6 @@ vi.mock("@/lib/http", () => ({ handleRouteError: mocks.error, validateBody: asyn
 const actor = { kind: "user", user: { id: "writer-1" } };
 const context = { params: Promise.resolve({ workspaceId: "workspace-1", batchId: "batch-1" }) };
 const request = (body: unknown) => new NextRequest("http://localhost/api/workspaces/workspace-1/finance/imports/batch-1", { method: "PATCH", body: JSON.stringify(body) });
-
 describe("Finance import detail route", () => {
   beforeEach(() => { vi.clearAllMocks(); mocks.actor.mockResolvedValue(actor); mocks.detail.mockResolvedValue({ id: "batch-1" }); mocks.edit.mockResolvedValue({ version: 2 }); mocks.review.mockResolvedValue({ version: 3 }); });
   it("returns the reader-authorized batch detail", async () => {
