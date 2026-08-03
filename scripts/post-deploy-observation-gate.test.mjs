@@ -357,6 +357,12 @@ describe("post-deploy observation gate", () => {
     expect(summary.blockingFailures[0].instance_id).toBe("railway-runtime-without-target-metadata");
   });
 
+  it("keeps selfserve observation matching provider-qualified", () => {
+    expect([...normalizeObservationTargets("railway-selfserve")]).toEqual(["railway-selfserve"]);
+    expect(observationTargetsForRow({ provider: "railway", surface: "selfserve" })).toEqual(["railway-selfserve"]);
+    expect(observationTargetsForRow({ surface: "selfserve" })).toEqual(["azure-selfserve", "railway-selfserve"]);
+  });
+
   it("does not block Azure-only gates on unknown Railway target rows", () => {
     const summary = buildObservationSummary({
       manifest,
@@ -714,6 +720,32 @@ describe("post-deploy observation gate", () => {
 
     expect(summary.status).toBe("passed");
     expect(fetchImpl).toHaveBeenCalledTimes(2);
+  });
+
+  it("observes Railway selfserve without requiring Azure Monitor", async () => {
+    const fetchImpl = vi.fn(async (_url, init) => {
+      const body = JSON.parse(init.body);
+      if (body.query.includes("LatestDeployment")) {
+        return new Response(JSON.stringify({ data: { deployments: { edges: [{ node: { id: "selfserve-deployment", status: "SUCCESS" } }] } } }), { status: 200 });
+      }
+      return new Response(JSON.stringify({ data: { httpLogs: [] } }), { status: 200 });
+    });
+    const summary = await runObservationGate({
+      manifest,
+      since: new Date("2026-07-16T05:52:00.000Z"),
+      targets: "railway-selfserve",
+      env: {
+        RAILWAY_API_TOKEN: "railway-token",
+        OBSERVATION_REQUIRE_SOURCE: "true",
+        FLEET_RELEASE_AZURE_TARGET_JSON: JSON.stringify([{ id: "selfserve", provider: "railway", railway: { environmentId: "environment-selfserve", webServiceId: "web-selfserve" } }]),
+      },
+      deps: { fetchImpl, onSourceNote: vi.fn() },
+    });
+    expect(summary.status).toBe("passed");
+    expect(summary.missingRequiredSources).toEqual([]);
+    expect(summary.sourceChecks).toEqual(expect.arrayContaining([
+      expect.objectContaining({ source: "railway", group: "railway-selfserve", targetCount: 1 }),
+    ]));
   });
 
   it("reports missing Railway coverage for every selected Railway target group", async () => {

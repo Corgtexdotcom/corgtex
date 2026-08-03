@@ -28,8 +28,10 @@ const TARGET_GROUPS = Object.freeze([
   "ops",
   "backup-app",
 ]);
+const SELECTABLE_TARGET_GROUPS = Object.freeze([...TARGET_GROUPS, "railway-selfserve"]);
 const RAILWAY_TARGET_GROUPS = Object.freeze([
   "railway-customers",
+  "railway-selfserve",
   "ops",
   "backup-app",
 ]);
@@ -477,7 +479,7 @@ function rowMatchesUnknownTargetProvider(row, selectedTargets) {
   const provider = safeText(row.provider)?.toLowerCase();
   if (provider === "azure") return selectedTargets.has("azure-selfserve");
   if (provider === "railway") {
-    return ["railway-customers", "ops", "backup-app"].some((target) => selectedTargets.has(target));
+    return RAILWAY_TARGET_GROUPS.some((target) => selectedTargets.has(target));
   }
   return true;
 }
@@ -492,9 +494,11 @@ export function observationTargetsForRow(row) {
   ].filter(Boolean).join(" ").toLowerCase();
   const targets = new Set();
 
-  if (provider === "azure" || text.includes("azure-selfserve") || text.includes("selfserve") || text.includes("ca-corgtex-ss")) {
+  const isSelfserve = text.includes("azure-selfserve") || text.includes("selfserve") || text.includes("ca-corgtex-ss");
+  if (provider === "azure" || (isSelfserve && provider !== "railway")) {
     targets.add("azure-selfserve");
   }
+  if (isSelfserve && provider !== "azure") targets.add("railway-selfserve");
 
   if (text.includes("railway-customers")) {
     targets.add("railway-customers");
@@ -519,7 +523,7 @@ export function normalizeObservationTargets(value) {
 
   const selected = raw.split(",")
     .map((part) => part.trim())
-    .filter((part) => TARGET_GROUPS.includes(part));
+    .filter((part) => SELECTABLE_TARGET_GROUPS.includes(part));
   return selected.length > 0 ? new Set(selected) : null;
 }
 
@@ -846,6 +850,21 @@ function railwayTargetsFromEnv(env, targets) {
           id: safeText(target.id ?? target.deploymentId ?? target.label),
           label: safeText(target.label ?? target.id),
           group: "railway-customers",
+          projectId: safeText(target.railway.projectId),
+          environmentId: safeText(target.railway.environmentId),
+          webServiceId: safeText(target.railway.webServiceId),
+        });
+      }
+    }
+  }
+
+  if (targetList.includes("railway-selfserve")) {
+    for (const target of parseJsonArray(env.FLEET_RELEASE_AZURE_TARGET_JSON)) {
+      if (target?.provider === "railway" && target?.railway?.webServiceId && target?.railway?.environmentId) {
+        entries.push({
+          id: safeText(target.id ?? target.deploymentId ?? target.label),
+          label: safeText(target.label ?? target.id),
+          group: "railway-selfserve",
           projectId: safeText(target.railway.projectId),
           environmentId: safeText(target.railway.environmentId),
           webServiceId: safeText(target.railway.webServiceId),
