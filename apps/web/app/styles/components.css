@@ -6098,35 +6098,15 @@ a.meeting-agenda-item:hover {
   gap: 12px;
 }
 
-.finance-import-heading > div,
-.finance-import-detail-heading > div,
-.finance-import-batch-main,
-.finance-import-upload-row > span:first-child {
+.finance-import-heading > div, .finance-import-detail-heading > div,
+.finance-import-batch-main, .finance-import-upload-row > span:first-child {
   min-width: 0;
-}
-
-.finance-import-heading h2,
-.finance-import-section-title h3,
-.finance-import-detail-heading h3,
-.finance-import-clarification h4 {
-  margin: 0;
-}
-
-.finance-import-heading p,
-.finance-import-detail-heading p,
-.finance-import-clarification p {
-  margin: 5px 0 0;
 }
 
 .finance-import-dropzone {
   display: grid;
   justify-items: center;
   gap: 8px;
-  padding: 28px;
-  border: 1px dashed var(--line);
-  border-radius: 10px;
-  background: var(--bg-alt);
-  text-align: center;
 }
 
 .finance-import-dropzone span,
@@ -6159,10 +6139,6 @@ a.meeting-agenda-item:hover {
 .finance-import-upload-row {
   padding: 10px 0;
   border-bottom: 1px solid var(--line);
-}
-
-.finance-import-upload-row:last-child {
-  border-bottom: 0;
 }
 
 .finance-import-upload-row strong,
@@ -6375,9 +6351,5 @@ a.meeting-agenda-item:hover {
 
   .finance-import-processing ol {
     grid-template-columns: minmax(0, 1fr);
-  }
-
-  .finance-import-dropzone {
-    padding: 20px 14px;
   }
 }

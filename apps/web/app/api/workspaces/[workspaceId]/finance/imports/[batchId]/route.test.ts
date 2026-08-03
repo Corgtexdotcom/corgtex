@@ -41,6 +41,10 @@ describe("Finance import detail route", () => {
       candidateVersions: [{ id: " candidate-1 ", expectedVersion: 2 }], confirmedCurrency: " eur ", confirmedAmountScale: 1_000 };
     const response = await PATCH(request({ ...body, workspaceId: "other", extra: true }), context);
     expect(response.status).toBe(400); expect(mocks.clarify).not.toHaveBeenCalled();
+    mocks.detail.mockResolvedValueOnce({ stage: "READY_FOR_REVIEW", safeErrorCode: null, currencyState: "RESOLVED", version: 3, clarification: { canConfirm: false } });
+    expect((await PATCH(request(body), context)).status).toBe(409); expect(mocks.clarify).not.toHaveBeenCalled();
+    mocks.detail.mockResolvedValueOnce({ stage: "NEEDS_INPUT", safeErrorCode: "CURRENCY_UNRESOLVED", currencyState: "UNRESOLVED", version: 3,
+      clarification: { canConfirm: true } });
     const accepted = await PATCH(request(body), context); expect(await accepted.json()).toEqual({ clarification: { batchId: "batch-1", version: 4, stage: "READY_FOR_REVIEW" } });
     expect(mocks.clarify).toHaveBeenCalledWith(actor, { workspaceId: "workspace-1", batchId: "batch-1",
       expectedVersion: 3, candidateVersions: [{ id: "candidate-1", expectedVersion: 2 }], confirmedCurrency: "eur", confirmedAmountScale: 1_000 });

@@ -41,10 +41,13 @@ export type FinanceImportDetail = FinanceImportBatchSummary & {
 const PROCESSING_STAGES = ["UPLOADED", "EXTRACTING", "CLASSIFYING", "MAPPING", "RECONCILING", "READY_FOR_REVIEW"] as const;
 const STAGE_LABELS = ["Received", "Extracting file", "Understanding report", "Mapping values", "Reconciling changes", "Ready for review"];
 const ACTIVE_STAGES = new Set<FinanceImportStage>(["UPLOADED", "EXTRACTING", "CLASSIFYING", "MAPPING", "RECONCILING", "APPLYING"]);
+const EXTRACTION_FAILURE_CODES = new Set(["EMPTY_FILE", "FILE_TOO_LARGE", "UNSUPPORTED_FILE_TYPE", "FILE_TYPE_MISMATCH", "MALFORMED_FILE",
+  "EMPTY_EXTRACTION", "SCANNED_PDF_UNSUPPORTED", "UNSUPPORTED_PDF_FEATURE", "UNSUPPORTED_XLSX_FEATURE", "EXTRACTION_LIMIT_EXCEEDED", "FINANCE_REPORT_EXTRACTION_FAILED"]);
+const EXACT_FILE_RETRY_CODES = new Set(["FINANCE_REPORT_STORAGE_PENDING", "FINANCE_REPORT_STORAGE_UNAVAILABLE", "FINANCE_REPORT_EXTRACTION_FAILED"]);
 
 function failureIndex(code: string | null) {
   if (code?.includes("STORAGE")) return 0;
-  if (code?.includes("EXTRACTION") || code?.includes("PDF") || code?.includes("XLSX")) return 1;
+  if (code && EXTRACTION_FAILURE_CODES.has(code)) return 1;
   if (code?.includes("AGENT") || code?.includes("MODEL") || code?.includes("PROVIDER")) return 2;
   return 3;
 }
@@ -79,6 +82,10 @@ export function supportsFinanceReportFile(fileName: string) {
 
 export function financeImportNeedsPolling(batches: FinanceImportBatchSummary[]) {
   return batches.some((batch) => ACTIVE_STAGES.has(batch.stage));
+}
+
+export function financeImportCanRetryExactFile(code: string | null) {
+  return code !== null && EXACT_FILE_RETRY_CODES.has(code);
 }
 
 export function amountScaleLabel(scale: FinanceImportDetail["clarification"]["numericFormat"]["amountScale"]) {

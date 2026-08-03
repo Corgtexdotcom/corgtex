@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   amountScaleLabel,
   buildFinanceImportView,
+  financeImportCanRetryExactFile,
   financeImportNeedsPolling,
   numericFormatLabel,
   supportsFinanceReportFile,
@@ -35,6 +36,9 @@ describe("Finance report import view", () => {
     const extraction = buildFinanceImportView(summary("FAILED", { safeErrorCode: "FINANCE_REPORT_EXTRACTION_FAILED" }));
     expect(extraction).toMatchObject({ title: "Processing needs attention", className: "failed", defaultExpanded: true });
     expect(extraction.steps[1]).toMatchObject({ label: "Extracting file", status: "failed" });
+    expect(buildFinanceImportView(summary("FAILED", { safeErrorCode: "MALFORMED_FILE" })).steps[1]?.status).toBe("failed");
+    expect(financeImportCanRetryExactFile("FINANCE_REPORT_STORAGE_UNAVAILABLE")).toBe(true);
+    expect(financeImportCanRetryExactFile("MALFORMED_FILE")).toBe(false);
   });
 
   it("accepts only the three supported report file extensions", () => {

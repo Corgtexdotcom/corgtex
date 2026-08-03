@@ -41,6 +41,11 @@ export async function PATCH(request: NextRequest, { params }: Context) {
   try {
     const actor = await resolveRequestActor(request); const route = await params; workspaceId = route.workspaceId; await checkApiDemoGuard(workspaceId);
     const body = await validateBody(request, z.union([edit, review, clarification]));
+    if (body.operation === "CLARIFY") {
+      const current = await getFinanceReportImport(actor, route);
+      if (current.stage !== "NEEDS_INPUT" || current.safeErrorCode !== "CURRENCY_UNRESOLVED" || current.currencyState !== "UNRESOLVED"
+        || !current.clarification.canConfirm || current.version !== body.expectedVersion) throw new AppError(409, "FINANCE_REPORT_CLARIFICATION_REQUIRED", "Refresh the currency clarification and try again.");
+    }
     const result = body.operation === "EDIT"
       ? await editFinanceReportImportCandidate(actor, { ...route, ...body })
       : body.operation === "CLARIFY"
