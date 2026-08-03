@@ -3415,21 +3415,45 @@ export async function processMeetingRecorderWebhook(provider: MeetingRecorderPro
   }
 
   let recording = await findRecordingForWebhook(provider, event);
-  const providerEvent = await prisma.meetingRecorderProviderEvent.upsert({
-    where: { dedupeKey },
-    update: {},
-    create: {
-      workspaceId: recording?.workspaceId ?? event.workspaceId,
-      recordingId: recording?.id ?? event.recordingId,
-      provider,
-      externalEventId: event.eventId,
-      externalBotId: event.externalBotId,
-      eventType: event.eventType,
-      dedupeKey,
-      payload: redactProviderArtifactUrls(payload),
-      redactedAt: new Date(),
-    },
-  });
+
+  let providerEvent: { id: string };
+  if (provider === "RECALL_AI" && event.eventType === "transcript.done" && recording) {
+    const r = recording;
+    providerEvent = await prisma.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`${r.workspaceId}:${r.meetingId}:${provider}:transcript`}, 0))`;
+      return tx.meetingRecorderProviderEvent.upsert({
+        where: { dedupeKey },
+        update: { createdAt: new Date() },
+        create: {
+          workspaceId: r.workspaceId,
+          recordingId: r.id,
+          provider,
+          externalEventId: event.eventId,
+          externalBotId: event.externalBotId,
+          eventType: event.eventType,
+          dedupeKey,
+          payload: redactProviderArtifactUrls(payload),
+          redactedAt: new Date(),
+        },
+      });
+    }, { timeout: 120_000 });
+  } else {
+    providerEvent = await prisma.meetingRecorderProviderEvent.upsert({
+      where: { dedupeKey },
+      update: {},
+      create: {
+        workspaceId: recording?.workspaceId ?? event.workspaceId,
+        recordingId: recording?.id ?? event.recordingId,
+        provider,
+        externalEventId: event.eventId,
+        externalBotId: event.externalBotId,
+        eventType: event.eventType,
+        dedupeKey,
+        payload: redactProviderArtifactUrls(payload),
+        redactedAt: new Date(),
+      },
+    });
+  }
 
   if (!recording) {
     await prisma.meetingRecorderProviderEvent.update({
@@ -4025,6 +4049,7 @@ async function terminalizeRecordingWithLock(
         recordingId: recording.id,
         eventType: "transcript.done",
         processedAt: null,
+        createdAt: { gte: new Date(Date.now() - 5 * 60 * 1000) },
       },
       select: { id: true },
     });
@@ -4140,20 +4165,6 @@ async function recoverRecallTranscripts(workspaceId: string) {
 
       const expectedEnd = recordingExpectedEnd(recording);
       if (now.getTime() - expectedEnd.getTime() >= 24 * 60 * 60 * 1000) {
-        if (ACTIVE_RECORDING_STATUSES.includes(recording.status as any) && recording.externalBotId) {
-          try {
-            await cancelRecallBot(recording.externalBotId, { status: recording.status as any });
-          } catch (error) {
-            recorderLog("warn", "recall_bot_cancellation_failed", {
-              workspaceId,
-              meetingId: recording.meetingId,
-              recordingId: recording.id,
-              provider: recording.provider,
-              failureCode: providerFailureCode(error),
-            });
-          }
-        }
-        
         const terminalized = await terminalizeRecordingWithLock(
           recording,
           "RECORDER_TRANSCRIPT_RECOVERY_EXPIRED",
