@@ -80,8 +80,7 @@ describe("Finance report application", () => {
       outcome: receipt.outcome, targetFactId: receipt.targetFactId } }); mocks.prisma.financeImportBatch.findUnique.mockResolvedValue(batch([applied, pending], { stage: "PARTIALLY_APPLIED", version: 5, appliedCount: 1 }));
     await expect(applyFinanceReportImport(actor, input([add]))).resolves.toMatchObject({ noOp: true, appliedNow: 0, appliedCount: 1 });
     expect(mocks.prisma.financeReport.upsert).toHaveBeenCalledTimes(1); expect(mocks.prisma.financeReportFact.create).toHaveBeenCalledTimes(1);
-    mocks.prisma.financeImportApplication.count.mockResolvedValue(2); await expect(applyFinanceReportImport(actor, input([pending], 5))).resolves.toMatchObject({ stage: "APPLIED", appliedNow: 1, appliedCount: 2 });
-    expect(mocks.prisma.financeReport.upsert).toHaveBeenCalledTimes(2); expect(mocks.prisma.financeReportFact.create).toHaveBeenCalledTimes(2);
+    mocks.prisma.financeImportApplication.count.mockResolvedValue(2); await expect(applyFinanceReportImport(actor, input([pending], 5))).resolves.toMatchObject({ stage: "APPLIED", appliedNow: 1, appliedCount: 2 }); expect(mocks.prisma.financeReport.upsert).toHaveBeenCalledTimes(2); expect(mocks.prisma.financeReportFact.create).toHaveBeenCalledTimes(2);
   });
   it("rolls back the wave when the optimistic current-fact write loses", async () => {
     const update = candidate("update", { action: "UPDATE", currentFactId: "fact-u", currentAmountCents: 50 });
