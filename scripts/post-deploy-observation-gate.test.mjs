@@ -776,10 +776,10 @@ describe("post-deploy observation gate", () => {
     expect(fetchImpl).toHaveBeenCalledTimes(4);
   });
 
-  it("fails closed when an explicit promotion snapshot is missing or malformed", async () => {
+  it("fails closed when an explicit promotion snapshot is missing, malformed, or incomplete", async () => {
     await expect(runObservationGate({ manifest, since: new Date(), targets: "railway-customers", env: { RAILWAY_API_TOKEN: "railway-token", FLEET_RELEASE_TARGETS_FILE: "/missing/fleet-targets.json", OBSERVATION_REQUIRE_SOURCE: "true" } })).rejects.toThrow();
     const targetFile = join(mkdtempSync(join(tmpdir(), "fleet-observation-invalid-")), "targets.json");
-    for (const contents of ["{", "{}"]) { writeFileSync(targetFile, contents); await expect(runObservationGate({ manifest, since: new Date(), targets: "railway-customers", env: { RAILWAY_API_TOKEN: "railway-token", FLEET_RELEASE_TARGETS_FILE: targetFile, OBSERVATION_REQUIRE_SOURCE: "true" } })).rejects.toThrow(); }
+    for (const contents of ["{", "{}", "[]", JSON.stringify([{ id: "customer", provider: "railway", workload: "managed-customers", railway: { webServiceId: "web" } }])]) { writeFileSync(targetFile, contents); await expect(runObservationGate({ manifest, since: new Date(), targets: "railway-customers", env: { RAILWAY_API_TOKEN: "railway-token", FLEET_RELEASE_TARGETS_FILE: targetFile, OBSERVATION_REQUIRE_SOURCE: "true" } })).rejects.toThrow(); }
   });
 
   it("reports missing Railway coverage for every selected Railway target group", async () => {

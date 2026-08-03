@@ -848,12 +848,14 @@ function railwayTargetsFromEnv(env, targets) {
   if (snapshotPath) {
     const snapshot = JSON.parse(readFileSync(snapshotPath, "utf8"));
     if (!Array.isArray(snapshot)) throw new Error("FLEET_RELEASE_TARGETS_FILE must contain a JSON array.");
+    const missingGroups = new Set(targetList.filter((target) => RAILWAY_TARGET_GROUPS.includes(target)));
     for (const target of snapshot) {
       const workload = safeText(target?.workload ?? target?.group);
       const group = workload === "selfserve" || workload === "azure-selfserve"
         ? "railway-selfserve"
         : workload === "ops" || workload === "backup-app" ? workload : "railway-customers";
-      if (target?.provider === "railway" && targetList.includes(group) && target?.railway?.webServiceId && target?.railway?.environmentId) {
+      if (target?.provider === "railway" && targetList.includes(group)) {
+        if (!target?.railway?.webServiceId || !target?.railway?.environmentId) throw new Error(`FLEET_RELEASE_TARGETS_FILE has incomplete Railway metadata for ${safeText(target.id ?? target.label) ?? group}.`);
         entries.push({
           id: safeText(target.id ?? target.deploymentId ?? target.label),
           label: safeText(target.label ?? target.id),
@@ -862,8 +864,10 @@ function railwayTargetsFromEnv(env, targets) {
           environmentId: safeText(target.railway.environmentId),
           webServiceId: safeText(target.railway.webServiceId),
         });
+        missingGroups.delete(group);
       }
     }
+    if (missingGroups.size > 0) throw new Error(`FLEET_RELEASE_TARGETS_FILE has no complete Railway targets for ${[...missingGroups].join(", ")}.`);
     return entries;
   }
 
