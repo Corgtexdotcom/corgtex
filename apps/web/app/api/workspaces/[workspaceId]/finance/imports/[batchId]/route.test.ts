@@ -47,6 +47,7 @@ describe("Finance import detail route", () => {
       { expectedVersion: 1, candidateVersions: [] },
       { expectedVersion: 1, candidateVersions: [{ id: " ", expectedVersion: 1 }] },
       { expectedVersion: 1, candidateVersions: [{ id: "candidate-1", expectedVersion: 2_147_483_647 }] },
+      { expectedVersion: 1, candidateVersions: [{ id: "candidate-1", expectedVersion: 1 }, { id: " candidate-1 ", expectedVersion: 1 }] },
       { expectedVersion: 1, candidateVersions: [{ id: "candidate-1", expectedVersion: 1 }], workspaceId: "other" },
       { expectedVersion: 1, candidateVersions: Array.from({ length: 1_001 }, (_, index) => ({ id: `candidate-${index}`, expectedVersion: 1 })) },
     ];

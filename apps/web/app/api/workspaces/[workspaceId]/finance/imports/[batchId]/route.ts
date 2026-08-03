@@ -13,7 +13,9 @@ const edit = z.strictObject({ operation: z.literal("EDIT"), candidateId: z.strin
 const review = z.strictObject({ operation: z.enum(["APPROVE", "REJECT", "APPROVE_VERIFIED", "APPROVE_ALL"]), candidateId: z.string().min(1).max(100).optional(),
   expectedVersion: version, candidateVersions: z.array(candidateVersion).min(1).max(1_000), acceptWarnings: z.boolean().optional() });
 const application = z.strictObject({ expectedVersion: version, candidateVersions: z.array(z.strictObject({
-  id: z.string().trim().min(1).max(100), expectedVersion: version })).min(1).max(1_000) });
+  id: z.string().trim().min(1).max(100), expectedVersion: version })).min(1).max(1_000) })
+  .refine(({ candidateVersions }) => new Set(candidateVersions.map(({ id }) => id)).size === candidateVersions.length,
+    { path: ["candidateVersions"], message: "Candidate IDs must be unique." });
 export async function GET(request: NextRequest, { params }: Context) {
   let workspaceId: string | undefined;
   try {
