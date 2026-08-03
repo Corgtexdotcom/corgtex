@@ -9,15 +9,22 @@ import { normalizeFinanceImportAmountCents, parseFinanceImportDate } from "./fin
 export const FINANCE_IMPORT_HISTORICAL_MONTHS = 12;
 const MAX_VERSION = 2_147_483_647, HISTORICAL_POLICY_CODES = new Set(["HISTORICAL_ADDITION", "HISTORICAL_UPDATE"]);
 const COUNT_KEY = { ADD: "addCount", UPDATE: "updateCount", UNCHANGED: "unchangedCount", DUPLICATE: "duplicateCount", CONFLICT: "conflictCount", SKIP: "skippedCount" } as const;
+const SUMMARY_SELECT = { id: true, originalFilename: true, stage: true, reportType: true, basis: true, cadence: true,
+  periodStart: true, periodEnd: true, currencyState: true, resolvedCurrency: true, safeErrorCode: true, safeErrorMessage: true,
+  addCount: true, updateCount: true, unchangedCount: true, duplicateCount: true, conflictCount: true,
+  warningCount: true, blockerCount: true, rejectedCount: true, appliedCount: true, version: true, createdAt: true, updatedAt: true } satisfies Prisma.FinanceImportBatchSelect;
 type Version = { id: string; expectedVersion: number };
 type ReviewMode = "APPROVE" | "REJECT" | "APPROVE_VERIFIED" | "APPROVE_ALL";
 function validVersion(value: number) {
   invariant(Number.isInteger(value) && value > 0 && value < MAX_VERSION, 400, "INVALID_INPUT", "An incrementable Finance import version is required.");
 }
-function historical(periodEnd: Date, now: Date) {
+function historicalCutoff(now: Date) {
   const cutoff = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
   cutoff.setUTCMonth(cutoff.getUTCMonth() - FINANCE_IMPORT_HISTORICAL_MONTHS);
-  return periodEnd < cutoff;
+  return cutoff;
+}
+function historical(periodEnd: Date, now: Date) {
+  return periodEnd < historicalCutoff(now);
 }
 function warning(candidate: Pick<FinanceImportCandidate, "action" | "periodEnd" | "reviewState">, now: Date) {
   return !["REJECTED", "APPLIED"].includes(candidate.reviewState) && (candidate.reviewState === "WARNING" || (["ADD", "UPDATE"].includes(candidate.action) && historical(candidate.periodEnd, now)));
@@ -27,6 +34,21 @@ function present<T extends Pick<FinanceImportCandidate, "action" | "periodEnd" |
   return { ...candidate, historicalWarning, peerConfirmationRequired: historicalWarning && candidate.action === "UPDATE" };
 }
 function reportWarnings(value: Prisma.JsonValue | null) { return value ? parseFinanceImportInterpretationV1(value).exceptions.filter(({ severity }) => severity === "WARNING") : []; }
+async function summaryWarningCounts(workspaceId: string, batchIds: string[], now: Date) {
+  if (batchIds.length === 0) return new Map<string, number>();
+  const cutoff = historicalCutoff(now);
+  const counts = await prisma.$queryRaw<Array<{ id: string; count: number }>>(Prisma.sql`
+    SELECT batch.id,
+      ((SELECT count(*)::int FROM jsonb_array_elements(COALESCE(batch."interpretationJson"->'exceptions', '[]'::jsonb)) exception
+        WHERE exception->>'severity' = 'WARNING' AND exception->>'code' NOT IN ('HISTORICAL_ADDITION', 'HISTORICAL_UPDATE'))
+      + (SELECT count(*)::int FROM "FinanceImportCandidate" candidate
+        WHERE candidate."workspaceId" = ${workspaceId} AND candidate."batchId" = batch.id
+          AND candidate."reviewState" NOT IN ('REJECTED', 'APPLIED')
+          AND (candidate."reviewState" = 'WARNING' OR (candidate.action IN ('ADD', 'UPDATE') AND candidate."periodEnd" < ${cutoff}))))::int AS count
+    FROM "FinanceImportBatch" batch
+    WHERE batch."workspaceId" = ${workspaceId} AND batch.id IN (${Prisma.join(batchIds)})`);
+  return new Map(counts.map(({ id, count }) => [id, count]));
+}
 function candidateState(decision: FinanceImportReconciliationDecision, now: Date): FinanceImportCandidateReviewState {
   return decision.reviewState === "BLOCKED" ? "BLOCKED" : ["ADD", "UPDATE"].includes(decision.action) && historical(decision.candidate.periodEnd, now) ? "WARNING" : decision.reviewState;
 }
@@ -43,15 +65,16 @@ async function reconcile(tx: Prisma.TransactionClient, identity: Omit<Parameters
 }
 export async function listFinanceReportImports(actor: AppActor, workspaceId: string, now = new Date()) {
   await requireFinanceReportImportReadAccess(actor, workspaceId);
-  const batches = await prisma.financeImportBatch.findMany({ where: { workspaceId }, orderBy: { createdAt: "desc" }, take: 100, select: { id: true,
-    originalFilename: true, stage: true, reportType: true, basis: true, cadence: true, periodStart: true, periodEnd: true,
-    currencyState: true, resolvedCurrency: true, safeErrorCode: true, safeErrorMessage: true,
-    addCount: true, updateCount: true, unchangedCount: true, duplicateCount: true, conflictCount: true,
-    warningCount: true, blockerCount: true, rejectedCount: true, appliedCount: true, version: true, createdAt: true, updatedAt: true,
-    candidates: { select: { action: true, periodEnd: true, reviewState: true } } } });
-  const reportCounts = batches.length ? await prisma.$queryRaw<Array<{ id: string; count: number }>>(Prisma.sql`SELECT batch.id, count(*)::int AS count FROM "FinanceImportBatch" batch CROSS JOIN LATERAL jsonb_array_elements(COALESCE(batch."interpretationJson"->'exceptions', '[]'::jsonb)) exception WHERE batch."workspaceId" = ${workspaceId} AND batch.id IN (${Prisma.join(batches.map(({ id }) => id))}) AND exception->>'severity' = 'WARNING' AND exception->>'code' NOT IN ('HISTORICAL_ADDITION', 'HISTORICAL_UPDATE') GROUP BY batch.id`) : [];
-  const reportWarningsByBatch = new Map(reportCounts.map(({ id, count }) => [id, count])); return batches.map(({ candidates, ...batch }) => ({ ...batch, warningCount: (reportWarningsByBatch.get(batch.id) ?? 0)
-    + candidates.filter((candidate) => warning(candidate, now)).length }));
+  const batches = await prisma.financeImportBatch.findMany({ where: { workspaceId }, orderBy: { createdAt: "desc" }, take: 100, select: SUMMARY_SELECT });
+  const warningCounts = await summaryWarningCounts(workspaceId, batches.map(({ id }) => id), now);
+  return batches.map((batch) => ({ ...batch, warningCount: warningCounts.get(batch.id) ?? 0 }));
+}
+export async function getFinanceReportImportSummary(actor: AppActor, params: { workspaceId: string; batchId: string }, now = new Date()) {
+  await requireFinanceReportImportReadAccess(actor, params.workspaceId);
+  const batch = await prisma.financeImportBatch.findUnique({ where: { id_workspaceId: { id: params.batchId, workspaceId: params.workspaceId } }, select: SUMMARY_SELECT });
+  invariant(batch, 404, "FINANCE_REPORT_IMPORT_NOT_FOUND", "The Finance report import was not found.");
+  const warningCounts = await summaryWarningCounts(params.workspaceId, [batch.id], now);
+  return { ...batch, warningCount: warningCounts.get(batch.id) ?? 0 };
 }
 export async function getFinanceReportImport(actor: AppActor, params: { workspaceId: string; batchId: string }, now = new Date()) {
   await requireFinanceReportImportReadAccess(actor, params.workspaceId);

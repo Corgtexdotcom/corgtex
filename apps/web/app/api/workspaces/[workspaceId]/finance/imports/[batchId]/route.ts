@@ -1,5 +1,5 @@
 import { NextResponse, type NextRequest } from "next/server";
-import { AppError, applyFinanceReportImport, editFinanceReportImportCandidate, getFinanceReportImport, rerunFinanceReportImportReconciliation, reviewFinanceReportImport } from "@corgtex/domain";
+import { AppError, applyFinanceReportImport, editFinanceReportImportCandidate, getFinanceReportImport, getFinanceReportImportSummary, rerunFinanceReportImportReconciliation, reviewFinanceReportImport } from "@corgtex/domain";
 import { z } from "zod";
 import { resolveRequestActor } from "@/lib/auth";
 import { checkApiDemoGuard } from "@/lib/demo-guard";
@@ -25,7 +25,11 @@ export async function GET(request: NextRequest, { params }: Context) {
   let workspaceId: string | undefined;
   try {
     const actor = await resolveRequestActor(request); const route = await params; workspaceId = route.workspaceId;
-    return NextResponse.json({ batch: await getFinanceReportImport(actor, route) });
+    const view = request.nextUrl.searchParams.get("view");
+    if (view !== null && view !== "summary") throw new AppError(400, "INVALID_INPUT", "The Finance import view is invalid.");
+    return NextResponse.json({ batch: view === "summary"
+      ? await getFinanceReportImportSummary(actor, route)
+      : await getFinanceReportImport(actor, route) });
   } catch (error) { return handleRouteError(error, { request, surface: "finance_report_import", workspaceId }); }
 }
 export async function POST(request: NextRequest, { params }: Context) {

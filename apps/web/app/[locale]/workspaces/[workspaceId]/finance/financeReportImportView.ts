@@ -68,7 +68,7 @@ export function buildFinanceImportView(batch: Pick<FinanceImportBatchSummary, "s
   const copy = batch.stage === "NEEDS_INPUT" ? ["Input needed", "Confirm the report settings before reconciliation can continue.", "needs-input"]
     : batch.stage === "FAILED" ? ["Processing needs attention", "The report stopped safely. Review the message and retry the exact file when supported.", "failed"]
       : batch.stage === "CANCELLED" ? ["Import cancelled", "No Reported Actuals were changed.", "cancelled"]
-        : batch.stage === "PARTIALLY_APPLIED" ? ["Exceptions remain", `${batch.blockerCount} item${batch.blockerCount === 1 ? "" : "s"} still need review.`, "needs-input"]
+        : batch.stage === "PARTIALLY_APPLIED" ? ["Exceptions remain", "Some proposed changes still need review.", "needs-input"]
           : batch.stage === "APPLIED" ? ["Import complete", "Verified Reported Actuals were applied with an audit receipt.", "complete"]
             : batch.stage === "READY_FOR_REVIEW" ? ["Ready for review", `${changeCount} proposed change${changeCount === 1 ? "" : "s"} are ready.`, "complete"]
               : ["Processing report", "Completed stages stay quiet while the current stage remains visible.", "processing"];

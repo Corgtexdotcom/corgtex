@@ -1,9 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { ZodType } from "zod";
-const mocks = vi.hoisted(() => ({ detail: vi.fn(), edit: vi.fn(), review: vi.fn(), clarify: vi.fn(), apply: vi.fn(), actor: vi.fn(), demo: vi.fn(), error: vi.fn((value) => NextResponse.json({ error: value.code }, { status: value.status ?? 500 })) }));
+const mocks = vi.hoisted(() => ({ detail: vi.fn(), summary: vi.fn(), edit: vi.fn(), review: vi.fn(), clarify: vi.fn(), apply: vi.fn(), actor: vi.fn(), demo: vi.fn(), error: vi.fn((value) => NextResponse.json({ error: value.code }, { status: value.status ?? 500 })) }));
 class MockAppError extends Error { constructor(public status: number, public code: string, message: string) { super(message); } }
-vi.mock("@corgtex/domain", () => ({ AppError: MockAppError, applyFinanceReportImport: mocks.apply, getFinanceReportImport: mocks.detail,
+vi.mock("@corgtex/domain", () => ({ AppError: MockAppError, applyFinanceReportImport: mocks.apply, getFinanceReportImport: mocks.detail, getFinanceReportImportSummary: mocks.summary,
   editFinanceReportImportCandidate: mocks.edit, rerunFinanceReportImportReconciliation: mocks.clarify, reviewFinanceReportImport: mocks.review }));
 vi.mock("@/lib/auth", () => ({ resolveRequestActor: mocks.actor }));
 vi.mock("@/lib/demo-guard", () => ({ checkApiDemoGuard: mocks.demo }));
@@ -15,13 +15,17 @@ const actor = { kind: "user", user: { id: "writer-1" } };
 const context = { params: Promise.resolve({ workspaceId: "workspace-1", batchId: "batch-1" }) };
 const request = (body: unknown, method = "PATCH") => new NextRequest("http://localhost/api/workspaces/workspace-1/finance/imports/batch-1", { method, body: JSON.stringify(body) });
 describe("Finance import detail route", () => {
-  beforeEach(() => { vi.clearAllMocks(); mocks.actor.mockResolvedValue(actor); mocks.detail.mockResolvedValue({ id: "batch-1" }); mocks.edit.mockResolvedValue({ version: 2 }); mocks.review.mockResolvedValue({ version: 3 });
+  beforeEach(() => { vi.clearAllMocks(); mocks.actor.mockResolvedValue(actor); mocks.detail.mockResolvedValue({ id: "batch-1" }); mocks.summary.mockResolvedValue({ id: "batch-1", stage: "EXTRACTING" }); mocks.edit.mockResolvedValue({ version: 2 }); mocks.review.mockResolvedValue({ version: 3 });
     mocks.clarify.mockResolvedValue({ batchId: "batch-1", version: 4, stage: "READY_FOR_REVIEW" });
     mocks.apply.mockResolvedValue({ batchId: "batch-1", version: 4, stage: "APPLIED", appliedCount: 1, appliedNow: 1, noOp: false,
       receipts: [{ candidateId: "candidate-1", id: "receipt-1", outcome: "CREATED", targetFactId: "fact-1", idempotencyKey: "key-1" }] }); });
   it("returns the reader-authorized batch detail", async () => {
     const { GET } = await import("./route"); const response = await GET(new NextRequest("http://localhost/api"), context);
     expect(await response.json()).toEqual({ batch: { id: "batch-1" } }); expect(mocks.detail).toHaveBeenCalledWith(actor, { workspaceId: "workspace-1", batchId: "batch-1" });
+    const summary = await GET(new NextRequest("http://localhost/api?view=summary"), context);
+    expect(await summary.json()).toEqual({ batch: { id: "batch-1", stage: "EXTRACTING" } });
+    expect(mocks.summary).toHaveBeenCalledWith(actor, { workspaceId: "workspace-1", batchId: "batch-1" });
+    expect((await GET(new NextRequest("http://localhost/api?view=raw"), context)).status).toBe(400);
   });
   it("validates and dispatches edits and both bulk choices behind the demo guard", async () => {
     const { PATCH } = await import("./route");

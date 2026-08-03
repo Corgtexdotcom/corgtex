@@ -32,6 +32,8 @@ describe("Finance report import view", () => {
     const input = buildFinanceImportView(summary("NEEDS_INPUT", { blockerCount: 1 }));
     expect(input).toMatchObject({ title: "Input needed", defaultExpanded: true, polling: false });
     expect(input.steps.at(-2)?.status).toBe("failed");
+    expect(buildFinanceImportView(summary("PARTIALLY_APPLIED", { blockerCount: 0 })))
+      .toMatchObject({ title: "Exceptions remain", summary: "Some proposed changes still need review." });
 
     const extraction = buildFinanceImportView(summary("FAILED", { safeErrorCode: "FINANCE_REPORT_EXTRACTION_FAILED" }));
     expect(extraction).toMatchObject({ title: "Processing needs attention", className: "failed", defaultExpanded: true });
