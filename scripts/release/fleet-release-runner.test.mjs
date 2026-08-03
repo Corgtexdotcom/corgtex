@@ -689,19 +689,14 @@ describe("fleet release runner", () => {
 
   it("revalidates frozen targets with bounded concurrency before mutation", async () => {
     const targetFile = join(mkdtempSync(join(tmpdir(), "fleet-snapshot-")), "targets.json"), runCommand = vi.fn(), outputs = {}, snapshots = Array.from({ length: 9 }, (_, index) => JSON.parse(targetJson({ id: `target-${index}`, deploymentId: `dep-${index}`, label: `Target ${index}`, group: "managed-customers", url: `https://target-${index}.corgtex.com` }))[0]);
-    let active = 0, peak = 0;
-    writeFileSync(targetFile, JSON.stringify(snapshots));
-    const broad = await runFleetRelease(["deploy", "--release", SHA, "--dry-run", "--reason", "Revalidate fleet."], {
+    let active = 0, peak = 0; writeFileSync(targetFile, JSON.stringify(snapshots)); const broad = await runFleetRelease(["deploy", "--release", SHA, "--dry-run", "--reason", "Revalidate fleet."], {
       env: { FLEET_RELEASE_TARGETS_FILE: targetFile, CONTROL_PLANE_AGENT_API_KEY: "control-plane-key" }, runCommand, sleep: vi.fn(), emitGithubOutput: (key, value) => { outputs[key] = value; },
       fetchImpl: vi.fn(async (_url, init) => { active += 1; peak = Math.max(peak, active); await new Promise((resolve) => setTimeout(resolve, 2)); active -= 1; const deploymentId = JSON.parse(init.body).params.arguments.deploymentId; return controlPlaneResult({ cloudProvider: "RAILWAY", railwayProjectId: "project-1", railwayEnvironmentId: "env-1", railwayWebServiceId: "web-1", railwayWorkerServiceId: "worker-1", deploymentStatus: deploymentId === "dep-0" ? "RETIRED" : "ACTIVE" }); }),
-    });
-    expect({ peak, ids: broad.targets.map((target) => target.id), ...outputs }).toMatchObject({ peak: 8, ids: snapshots.slice(1).map((target) => target.id), uses_azure: false, observation_targets: "railway-customers" });
-    const currentAzure = { cloudProvider: "AZURE", providerResourceGroup: "rg-1", providerWebServiceId: "web-app", providerWorkerServiceId: "worker-app", provisioningStatus: "active" }, env = { FLEET_RELEASE_TARGETS_FILE: targetFile, CONTROL_PLANE_AGENT_API_KEY: "control-plane-key", AZURE_CLIENT_ID: "azure-client", AZURE_TENANT_ID: "azure-tenant", AZURE_SUBSCRIPTION_ID: "azure-subscription", GITHUB_TOKEN: "github-token", ...azureObservabilityEnv };
-    writeFileSync(targetFile, azureTargetJson({ deploymentStatus: "ACTIVE" }));
-    await expect(runFleetRelease(["deploy", "--release", SHA, "--targets", "selfserve", "--reason", "Reject identity drift."], { env, runCommand, fetchImpl: vi.fn(async () => controlPlaneResult({ ...currentAzure, providerWebServiceId: "replacement-web" })), sleep: vi.fn() })).rejects.toThrow("provider or resource identity changed");
-    writeFileSync(targetFile, azureTargetJson({ deploymentStatus: "ACTIVE" }));
-    await expect(runFleetRelease(["deploy", "--release", SHA, "--targets", "selfserve", "--reason", "Reject lifecycle drift."], { env, runCommand, fetchImpl: vi.fn(async () => controlPlaneResult({ ...currentAzure, deploymentStatus: "RETIRED" })), sleep: vi.fn() })).rejects.toThrow("Target lifecycle status RETIRED is not release-eligible");
-    expect(runCommand).not.toHaveBeenCalled();
+    }); expect({ peak, ids: broad.targets.map((target) => target.id), ...outputs }).toMatchObject({ peak: 8, ids: snapshots.slice(1).map((target) => target.id), uses_azure: false, observation_targets: "railway-customers" });
+    const currentAzure = { cloudProvider: "AZURE", providerResourceGroup: "rg-1", providerWebServiceId: "web-app", providerWorkerServiceId: "worker-app", provisioningStatus: "active" }, env = { FLEET_RELEASE_TARGETS_FILE: targetFile, CONTROL_PLANE_AGENT_API_KEY: "control-plane-key", AZURE_CLIENT_ID: "azure-client", AZURE_TENANT_ID: "azure-tenant", AZURE_SUBSCRIPTION_ID: "azure-subscription", GITHUB_TOKEN: "github-token", ...azureObservabilityEnv }, lifecycleFetch = vi.fn().mockResolvedValueOnce(controlPlaneResult({ ...currentAzure, deploymentStatus: "ACTIVE" })).mockResolvedValueOnce(controlPlaneResult({ ...currentAzure, deploymentStatus: "RETIRED" }));
+    writeFileSync(targetFile, azureTargetJson({ deploymentStatus: "ACTIVE" })); await expect(runFleetRelease(["deploy", "--release", SHA, "--targets", "selfserve", "--reason", "Reject identity drift."], { env, runCommand, fetchImpl: vi.fn(async () => controlPlaneResult({ ...currentAzure, providerWebServiceId: "replacement-web" })), sleep: vi.fn() })).rejects.toThrow("provider or resource identity changed");
+    writeFileSync(targetFile, azureTargetJson({ deploymentStatus: "ACTIVE" })); await expect(runFleetRelease(["deploy", "--release", SHA, "--targets", "selfserve", "--reason", "Reject lifecycle drift."], { env, runCommand, fetchImpl: lifecycleFetch, sleep: vi.fn() })).rejects.toThrow("Ring 2 failed");
+    expect(lifecycleFetch).toHaveBeenCalledTimes(2); expect(runCommand).not.toHaveBeenCalled();
   });
 
   it("fails preflight before mutation when provider credentials are missing", async () => {
@@ -962,10 +957,8 @@ describe("fleet release runner", () => {
       emitGithubOutput: (key, value) => { outputs[key] = value; },
     });
 
-    expect(result.results[0].status).toBe("succeeded");
-    expect(outputs).toMatchObject({ uses_azure: false, uses_railway: true, observation_targets: "railway-selfserve" });
-    expect(toolCalls).toEqual(["record_verified_release", "list_self_serve_customers"]);
-    expect(result.results[0].result.providerReadiness).toMatchObject({ status: "ok", provider: "railway" });
+    expect(result.results[0].status).toBe("succeeded"); expect(outputs).toMatchObject({ uses_azure: false, uses_railway: true, observation_targets: "railway-selfserve" });
+    expect(toolCalls).toEqual(["record_verified_release", "list_self_serve_customers"]); expect(result.results[0].result.providerReadiness).toMatchObject({ status: "ok", provider: "railway" });
   });
 
   it("preflights Azure self-serve without Railway credentials", async () => {
@@ -999,8 +992,7 @@ describe("fleet release runner", () => {
 
     expect(result.blockers).toEqual([]);
     expect(result.targets).toHaveLength(1);
-    expect(result.targets[0]).toMatchObject({ group: "selfserve", provider: "azure" });
-    expect(outputs).toMatchObject({ uses_azure: true, uses_railway: false, observation_targets: "azure-selfserve" });
+    expect(result.targets[0]).toMatchObject({ group: "selfserve", provider: "azure" }); expect(outputs).toMatchObject({ uses_azure: true, uses_railway: false, observation_targets: "azure-selfserve" });
   });
 
   it.each([
@@ -1022,7 +1014,7 @@ describe("fleet release runner", () => {
   });
 
   it("discovers active replacements, deduplicates self-serve, and blocks retired mutation", async () => {
-    const rows = [{ id: "retired", environment: "production", cloudProvider: "RAILWAY", deploymentStatus: "RETIRED" }, { id: "active", environment: "production", cloudProvider: "RAILWAY", deploymentStatus: "ACTIVE" }, { id: "backup", environment: "production", deploymentKind: "INTERNAL", cloudProvider: "RAILWAY", deploymentStatus: "ACTIVE" }, { id: "shared", environment: "production", deploymentKind: "SHARED_WORKSPACE", cloudProvider: "RAILWAY", deploymentStatus: "ACTIVE" }, { id: "dep-azure", environment: "production", cloudProvider: "AZURE", deploymentStatus: "SUSPENDED" }, { id: "staging", environment: "staging", cloudProvider: "RAILWAY", deploymentStatus: "ACTIVE" }];
+    const rows = [{ id: "retired", environment: "production", cloudProvider: "RAILWAY", deploymentStatus: "RETIRED" }, { id: "active", environment: "production", cloudProvider: "RAILWAY", deploymentStatus: "ACTIVE" }, { id: "backup", environment: "production", deploymentKind: "INTERNAL", cloudProvider: "RAILWAY", deploymentStatus: "ACTIVE" }, { id: "shared", environment: "production", deploymentKind: "SHARED_WORKSPACE", cloudProvider: "RAILWAY", deploymentStatus: "ACTIVE" }, { id: "self-hosted", environment: "production", cloudProvider: "SELF_HOSTED", deploymentStatus: "ACTIVE" }, { id: "dep-azure", environment: "production", cloudProvider: "AZURE", deploymentStatus: "SUSPENDED" }, { id: "staging", environment: "staging", cloudProvider: "RAILWAY", deploymentStatus: "ACTIVE" }];
     const env = { FLEET_RELEASE_AZURE_TARGET_JSON: azureTargetJson(), FLEET_RELEASE_OPS_TARGET_JSON: targetJson(), CONTROL_PLANE_AGENT_API_KEY: "control-plane-key", RAILWAY_API_TOKEN: "railway-token", GITHUB_TOKEN: "github-token", ...railwayObservabilityEnv };
     const deps = { env, runCommand: vi.fn(), fetchImpl: vi.fn(async () => controlPlaneResult(rows)), sleep: vi.fn() };
     const broad = await runFleetRelease(["deploy", "--release", SHA, "--targets", "managed-customers,selfserve,ops", "--dry-run", "--reason", "Validate broad selection."], deps);
@@ -1633,6 +1625,7 @@ describe("fleet release runner", () => {
       expect(args).toContain("posthog-token=posthog-project-token");
     }
     expect(updateCalls).toHaveLength(2);
+    expect(updateCalls.map(([, args]) => args[args.indexOf("--image") + 1])).toEqual([`acr1.azurecr.io/corgtex/web:sha-${SHA}`, `acr1.azurecr.io/corgtex/worker:sha-${SHA}`]);
     for (const [, args] of updateCalls) {
       expect(args).toContain("CORGTEX_STARTUP_MODE=migrate-and-web");
       expect(args).toContain("CORGTEX_AUTO_SEED_JNJ_DEMO=false");

@@ -248,6 +248,7 @@ jobs:
         env:
           MANIFEST_JSON: ${{ steps.manifest.outputs.manifest_json }}
           TARGETS_INPUT: ${{ steps.promotion.outputs.observation_targets }}
+          FLEET_RELEASE_TARGETS_FILE: ${{ runner.temp }}/fleet-release-selected-targets.json
           AZURE_APPLICATIONINSIGHTS_APP_NAME: ${{ vars.AZURE_APPLICATIONINSIGHTS_APP_NAME || 'appi-corgtex-ss-prod' }}
           AZURE_APPLICATIONINSIGHTS_RESOURCE_GROUP: ${{ vars.AZURE_APPLICATIONINSIGHTS_RESOURCE_GROUP || 'rg-corgtex-selfserve-production-wus3' }}
           POSTHOG_PROJECT_ID: ${{ vars.POSTHOG_PROJECT_ID }}

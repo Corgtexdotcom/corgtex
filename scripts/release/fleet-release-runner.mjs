@@ -119,7 +119,7 @@ export async function runFleetRelease(argv = process.argv.slice(2), deps = {}) {
       console.log(JSON.stringify({ stage: "ring-started", ring: ring.ring, targetCount: ring.targets.length }));
       const ringResults = await runWithConcurrency(ring.targets, concurrency, async (target) => {
         try {
-          const result = await deployTarget(target, manifest, reason, deps);
+          const result = await deployTarget(env.FLEET_RELEASE_TARGETS_FILE ? await revalidateSnapshotTarget(target, deps, true) : target, manifest, reason, deps);
           return { target, status: "succeeded", result };
         } catch (error) {
           return { target, status: "failed", error: error instanceof Error ? error.message : String(error) };
@@ -400,10 +400,10 @@ async function discoverControlPlaneTargets(deps) {
   if (!Array.isArray(rows)) {
     throw new Error("Control-plane list_customers did not return an array.");
   }
-  return rows.filter((row) => String(row.environment ?? "").trim().toLowerCase() === "production" && row.deploymentKind !== "SHARED_WORKSPACE").map(targetFromControlPlaneRow);
+  return rows.filter((row) => String(row.environment ?? "").trim().toLowerCase() === "production" && row.deploymentKind !== "SHARED_WORKSPACE" && ["AZURE", "RAILWAY"].includes(row.cloudProvider)).map(targetFromControlPlaneRow);
 }
 
-async function revalidateSnapshotTarget(target, deps) { if (!target.deploymentId) return target; const current = await callControlPlaneTool("get_customer_deployment_status", { deploymentId: target.deploymentId }, deps), currentTarget = normalizeTarget(targetFromControlPlaneRow(current)); if (mutationIdentity(target) !== mutationIdentity(currentTarget)) throw new Error(`${target.label} authoritative provider or resource identity changed after preflight`); return { ...target, deploymentStatus: current.deploymentStatus, provisioningStatus: current.provisioningStatus, releaseEligible: current.releaseEligible ?? target.releaseEligible }; }
+async function revalidateSnapshotTarget(target, deps, requireEligible = false) { if (!target.deploymentId) return target; const current = await callControlPlaneTool("get_customer_deployment_status", { deploymentId: target.deploymentId }, deps), currentTarget = normalizeTarget(targetFromControlPlaneRow(current)); if (mutationIdentity(target) !== mutationIdentity(currentTarget)) throw new Error(`${target.label} authoritative provider or resource identity changed after preflight`); const revalidated = { ...target, deploymentStatus: current.deploymentStatus, provisioningStatus: current.provisioningStatus, releaseEligible: current.releaseEligible ?? target.releaseEligible }, errors = requireEligible ? targetEligibilityErrors(revalidated) : []; if (errors.length) throw new Error(`${target.label}: ${errors.join("; ")}`); return revalidated; }
 function mutationIdentity(target) { const resource = target.provider === "azure" ? [target.azure?.resourceGroup, target.azure?.webAppName, target.azure?.workerAppName] : [target.railway?.projectId, target.railway?.environmentId, target.railway?.webServiceId, target.railway?.workerServiceId]; return JSON.stringify([target.provider, ...resource]); }
 
 function normalizeTarget(target) {
@@ -428,7 +428,7 @@ function normalizeTarget(target) {
     azure: { ...(group === "selfserve" && provider === "azure" ? DEFAULT_AZURE : {}), ...(target.azure ?? {}) },
   };
   if (normalized.provider === "azure" && normalized.azure.acrName) {
-    normalized.azure.acrServer ??= `${normalized.azure.acrName}.azurecr.io`;
+    normalized.azure.acrServer = target.azure?.acrServer ?? `${normalized.azure.acrName}.azurecr.io`;
   }
   return normalized;
 }
@@ -520,7 +520,7 @@ export function checkReleaseImages(manifest, deps) {
 
 async function deployTarget(target, manifest, reason, deps) {
   const providerResult = target.provider === "azure"
-    ? await deployAzureTarget(target, manifest, deps)
+    ? await deployAzureTarget(target, { ...manifest, acrWebImage: `${target.azure.acrServer}/corgtex/web:${manifest.imageTag}`, acrWorkerImage: `${target.azure.acrServer}/corgtex/worker:${manifest.imageTag}` }, deps)
     : await deployRailwayTarget(target, manifest, deps);
   const health = await pollHealth(target.url, manifest, deps);
   assertHealthProof(health, manifest, target.label);
