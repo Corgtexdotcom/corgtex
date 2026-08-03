@@ -244,7 +244,7 @@ jobs:
             --force-after-failure "$FORCE_AFTER_FAILURE_INPUT"
 
       - name: Run post-deploy observation gate
-        if: ${{ !inputs.dry_run }}
+        if: ${{ !inputs.dry_run && steps.promotion.outputs.observation_targets != '' }}
         env:
           MANIFEST_JSON: ${{ steps.manifest.outputs.manifest_json }}
           TARGETS_INPUT: ${{ steps.promotion.outputs.observation_targets }}

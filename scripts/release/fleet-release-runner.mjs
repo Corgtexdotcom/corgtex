@@ -73,8 +73,7 @@ export async function runFleetRelease(argv = process.argv.slice(2), deps = {}) {
   const env = deps.env ?? process.env;
   validateRuntimeObservabilityEnvironment(env);
   const manifest = await resolveManifest(args, deps);
-  const targetSelection = args.targets ?? env.FLEET_RELEASE_TARGETS ?? "default";
-  const selectedGroups = normalizeTargets(targetSelection);
+  const targetSelection = args.targets ?? env.FLEET_RELEASE_TARGETS ?? "default"; const selectedGroups = normalizeTargets(targetSelection);
   const dryRun = parseBoolean(args.dryRun ?? env.FLEET_RELEASE_DRY_RUN, false);
   const failOnBlockers = parseBoolean(args.failOnBlockers ?? env.FLEET_RELEASE_FAIL_ON_BLOCKERS, false);
   const forceAfterFailure = parseBoolean(args.forceAfterFailure ?? env.FLEET_RELEASE_FORCE_AFTER_FAILURE, false);
@@ -239,8 +238,7 @@ async function validateReleaseEnvironment(args, env, deps = {}) {
 
   if (!dryRun) {
     if (!env.CONTROL_PLANE_AGENT_API_KEY?.trim()) missing.push("CONTROL_PLANE_AGENT_API_KEY");
-    const providerInventory = selectedGroups.includes("managed-customers") && !env.FLEET_RELEASE_TARGETS_JSON?.trim() && env.CONTROL_PLANE_AGENT_API_KEY?.trim() ? await discoverTargets({ ...deps, env }) : configuredTargets(env).map(normalizeTarget);
-    const selectedProviders = new Set(providerInventory.filter((target) => selectedGroups.includes(target.group) && targetEligibilityErrors(target).length === 0).map((target) => target.provider));
+    const providerInventory = selectedGroups.includes("managed-customers") && !env.FLEET_RELEASE_TARGETS_JSON?.trim() && env.CONTROL_PLANE_AGENT_API_KEY?.trim() ? await discoverTargets({ ...deps, env }) : configuredTargets(env).map(normalizeTarget); const selectedProviders = new Set(providerInventory.filter((target) => selectedGroups.includes(target.group) && targetEligibilityErrors(target).length === 0).map((target) => target.provider));
     const includesRailwayTarget = selectedProviders.has("railway");
     const includesAzureTarget = selectedProviders.has("azure");
     if (includesRailwayTarget && !env.RAILWAY_API_TOKEN?.trim()) {

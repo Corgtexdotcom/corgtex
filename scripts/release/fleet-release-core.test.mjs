@@ -118,10 +118,10 @@ describe("fleet release core", () => {
 
   it("excludes ineligible targets only for broad selections", () => {
     const active = { id: "active", group: "managed-customers", provider: "railway" };
-    const retired = { id: "retired", group: "managed-customers", provider: "railway", deploymentStatus: "RETIRED" }, draft = { id: "draft", group: "managed-customers", provider: "railway", deploymentStatus: "DRAFT" };
+    const retired = { id: "retired", group: "managed-customers", provider: "railway", deploymentStatus: "RETIRED" }, draft = { id: "draft", group: "managed-customers", provider: "railway", deploymentStatus: "DRAFT" }, cutoverSource = { id: "source", group: "managed-customers", provider: "railway", deploymentStatus: "ACTIVE", provisioningStatus: "read_only_pending_finalize" };
     const optedOut = { id: "opted-out", group: "managed-customers", provider: "azure", releaseEligible: false };
-    expect(filterTargetsByGroups([active, retired, draft, optedOut], ["managed-customers"], { excludeIneligible: true })).toEqual([active]);
-    expect(filterTargetsByGroups([active, retired, draft], ["managed-customers"])).toEqual([active, retired, draft]);
-    expect(targetEligibilityErrors(optedOut)).toEqual(["Target explicitly sets releaseEligible=false"]);
+    expect(filterTargetsByGroups([active, retired, draft, cutoverSource, optedOut], ["managed-customers"], { excludeIneligible: true })).toEqual([active]);
+    expect(filterTargetsByGroups([active, retired, draft, cutoverSource], ["managed-customers"])).toEqual([active, retired, draft, cutoverSource]);
+    expect(targetEligibilityErrors(optedOut)).toEqual(["Target explicitly sets releaseEligible=false"]); expect(targetEligibilityErrors(cutoverSource)).toEqual(["Target lifecycle status READ_ONLY_PENDING_FINALIZE is not release-eligible"]);
   });
 });
