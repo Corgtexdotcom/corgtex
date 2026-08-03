@@ -4310,20 +4310,9 @@ describe("meeting recorder domain", () => {
     // Pass 1: should terminalize all three
     await reconcileMeetingRecorders("workspace-1");
     
-    expect(prismaMock.meetingRecording.update).toHaveBeenCalledWith(expect.objectContaining({
-      where: { id: "recording-stale" },
-      data: expect.objectContaining({ status: "FAILED", failureCode: "STALE_RECORDER" })
-    }));
-    
-    expect(prismaMock.meetingRecording.update).toHaveBeenCalledWith(expect.objectContaining({
-      where: { id: "recording-expired" },
-      data: expect.objectContaining({ status: "FAILED", failureCode: "RECORDER_TRANSCRIPT_RECOVERY_EXPIRED" })
-    }));
-
-    expect(prismaMock.meetingRecording.update).toHaveBeenCalledWith(expect.objectContaining({
-      where: { id: "recording-permanent" },
-      data: expect.objectContaining({ status: "FAILED", failureCode: "RECORDER_TRANSCRIPT_FETCH_FAILED" })
-    }));
+    expect(prismaMock.meetingRecording.update).toHaveBeenCalledWith(expect.objectContaining({ where: { id: "recording-stale" }, data: expect.objectContaining({ status: "FAILED", failureCode: "STALE_RECORDER" }) }));
+    expect(prismaMock.meetingRecording.update).toHaveBeenCalledWith(expect.objectContaining({ where: { id: "recording-expired" }, data: expect.objectContaining({ status: "FAILED", failureCode: "RECORDER_TRANSCRIPT_RECOVERY_EXPIRED" }) }));
+    expect(prismaMock.meetingRecording.update).toHaveBeenCalledWith(expect.objectContaining({ where: { id: "recording-permanent" }, data: expect.objectContaining({ status: "FAILED", failureCode: "RECORDER_TRANSCRIPT_FETCH_FAILED" }) }));
 
     // Reset mocks for pass 2 to prove they aren't called again
     vi.clearAllMocks();
@@ -4395,10 +4384,7 @@ describe("meeting recorder domain", () => {
     prismaMock.meetingRecording.findUnique.mockImplementation(async () => mockDb[0]);
     await reconcileMeetingRecorders("workspace-1");
     expect(fetchMock).not.toHaveBeenCalled();
-    expect(prismaMock.meetingRecording.update).toHaveBeenCalledWith(expect.objectContaining({
-      where: { id: "active-expired" },
-      data: expect.objectContaining({ status: "FAILED", failureCode: "RECORDER_TRANSCRIPT_RECOVERY_EXPIRED" })
-    }));
+    expect(prismaMock.meetingRecording.update).toHaveBeenCalledWith(expect.objectContaining({ where: { id: "active-expired" }, data: expect.objectContaining({ status: "FAILED", failureCode: "RECORDER_TRANSCRIPT_RECOVERY_EXPIRED" }) }));
   });
 
   it("skips terminalization if there is a fresh webhook claim, but proceeds if it is abandoned", async () => {
@@ -4418,10 +4404,7 @@ describe("meeting recorder domain", () => {
     
     freshWebhook = false;
     await reconcileMeetingRecorders("workspace-1");
-    expect(prismaMock.meetingRecording.update).toHaveBeenCalledWith(expect.objectContaining({
-      where: { id: "claim-race" },
-      data: expect.objectContaining({ status: "FAILED", failureCode: "RECORDER_TRANSCRIPT_RECOVERY_EXPIRED" })
-    }));
+    expect(prismaMock.meetingRecording.update).toHaveBeenCalledWith(expect.objectContaining({ where: { id: "claim-race" }, data: expect.objectContaining({ status: "FAILED", failureCode: "RECORDER_TRANSCRIPT_RECOVERY_EXPIRED" }) }));
   });
 
   it("allows a late transcript webhook to supersede an expired recovery terminalization", async () => {
@@ -4444,8 +4427,13 @@ describe("meeting recorder domain", () => {
     const msgId = "msg_1", timestamp = "1770000000", signature = createHmac("sha256", Buffer.from("recall-secret")).update(`${msgId}.${timestamp}.${payload}`).digest("base64");
     prismaMock.meetingRecorderProviderEvent.findUnique.mockResolvedValue(null); prismaMock.meetingRecorderProviderEvent.upsert.mockResolvedValue({ id: "e" } as any); prismaMock.meetingRecorderProviderEvent.update.mockResolvedValue({ id: "e" } as any); fetchMock.mockResolvedValue(new Response(JSON.stringify([{ speaker: "A", start: 0, text: "Content" }]), { status: 200 })); prismaMock.meetingRecording.update.mockResolvedValue(mockDb[0] as any); prismaMock.meeting.findFirst.mockResolvedValue({ id: "meeting-1", participantIds: [], participantEmails: [], title: "W", transcript: null, summaryMd: null, ingestionGuidanceMd: null } as any); prismaMock.meeting.update.mockResolvedValue({ id: "meeting-1", recordedAt: new Date() } as any);
     await expect(processMeetingRecorderWebhook("RECALL_AI", { rawBody: payload, headers: { "svix-id": msgId, "svix-timestamp": timestamp, "svix-signature": `v1,${signature}` } })).resolves.toMatchObject({ processed: true, duplicate: false, recordingId: "rec-late" });
-    expect(prismaMock.meetingRecording.update).toHaveBeenCalledWith(expect.objectContaining({ where: { id: "rec-late" }, data: expect.objectContaining({ status: "COMPLETED", failureCode: null }) }));
-    expect(prismaMock.meetingRecorderSmokeRun.updateMany).toHaveBeenCalledWith({ where: { recordingId: "rec-late", status: { in: ["PENDING", "SCHEDULED", "FAILED"] } }, data: expect.objectContaining({ status: "COMPLETED", completedAt: expect.any(Date) }) });
+    expect(prismaMock.meetingRecording.update).toHaveBeenCalledWith(expect.objectContaining({ where: { id: "rec-late" }, data: expect.objectContaining({ status: "COMPLETED", failureCode: null, failureMessage: null }) }));
+    expect(prismaMock.meetingRecorderSmokeRun.updateMany).toHaveBeenCalledWith({ where: { recordingId: "rec-late", status: { in: ["PENDING", "SCHEDULED", "FAILED"] } }, data: expect.objectContaining({ status: "COMPLETED", failureMessage: null, completedAt: expect.any(Date) }) });
+    const p2 = JSON.stringify({ id: "e2", event: "transcript.done", data: { bot: { id: "b2", metadata: { workspaceId: "workspace-1", meetingId: "meeting-1", recordingId: "rec-late" } }, transcript: { id: "t2", data: { download_url: "x" } } } });
+    const s2 = createHmac("sha256", Buffer.from("recall-secret")).update(`m2.17.${p2}`).digest("base64");
+    fetchMock.mockResolvedValue(new Response(JSON.stringify([]), { status: 200 })); prismaMock.meetingRecording.update.mockClear(); prismaMock.meetingRecording.update.mockResolvedValue(mockDb[0] as any);
+    await expect(processMeetingRecorderWebhook("RECALL_AI", { rawBody: p2, headers: { "svix-id": "m2", "svix-timestamp": "17", "svix-signature": `v1,${s2}` } })).resolves.toMatchObject({ processed: true, duplicate: false, recordingId: "rec-late" });
+    expect(prismaMock.meetingRecording.update).toHaveBeenCalledWith(expect.objectContaining({ where: { id: "rec-late" }, data: expect.objectContaining({ status: "FAILED", failureCode: "RECORDER_TRANSCRIPT_RECOVERY_EXPIRED", failureMessage: "expired" }) }));
   });
 });
 

@@ -3623,6 +3623,7 @@ async function completeRecordingWithTranscriptArtifact(
         provider: true,
         joinAt: true,
         failureCode: true,
+        failureMessage: true,
         transcriptProcessedAt: true,
         meeting: {
           select: {
@@ -3631,8 +3632,7 @@ async function completeRecordingWithTranscriptArtifact(
         },
       },
     });
-    const isLateRecoveryOverride = transcript.trim().length > 0
-      && current?.transcriptProcessedAt !== null
+    const isLateRecoveryOverride = current?.transcriptProcessedAt !== null
       && (current?.failureCode === "RECORDER_TRANSCRIPT_RECOVERY_EXPIRED" || current?.failureCode === "RECORDER_TRANSCRIPT_FETCH_FAILED");
     if (!current || (current.transcriptProcessedAt && !isLateRecoveryOverride)) {
       return false;
@@ -3692,6 +3692,17 @@ async function completeRecordingWithTranscriptArtifact(
     }
 
     if (transcript.trim().length === 0) {
+      if (isLateRecoveryOverride) {
+        await tx.meetingRecording.update({
+          where: { id: recording.id },
+          data: {
+            status: "FAILED",
+            failureCode: current.failureCode,
+            failureMessage: current.failureMessage,
+          },
+        });
+        return false;
+      }
       await markRecordingTranscriptEmpty(provider, recording, artifact, tx);
       return false;
     }
@@ -3725,6 +3736,7 @@ async function completeRecordingWithTranscriptArtifact(
       data: {
         status: "COMPLETED",
         completedAt: new Date(),
+        failureMessage: null,
       },
     });
     return true;
