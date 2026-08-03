@@ -858,6 +858,7 @@ function railwayTargetsFromEnv(env, targets) {
         ? "railway-selfserve"
         : workload === "ops" || workload === "backup-app" ? workload : null;
       if (!group) throw new Error(`FLEET_RELEASE_TARGETS_FILE has an invalid workload for ${safeText(target.id ?? target.label) ?? "target"}.`);
+      if (provider === "azure" && group !== "railway-selfserve") throw new Error(`FLEET_RELEASE_TARGETS_FILE has an unsupported Azure workload for ${safeText(target.id ?? target.label) ?? "target"}.`);
       const observationGroup = provider === "azure" ? (group === "railway-selfserve" ? "azure-selfserve" : null) : group;
       if (provider === "azure" && targetList.includes(observationGroup)) {
         const azure = [target.azure?.resourceGroup, target.azure?.acrName, target.azure?.webAppName, target.azure?.workerAppName].map(safeText);
