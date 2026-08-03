@@ -3527,9 +3527,18 @@ async function applyWebhookState(recording: MeetingRecording, event: ProviderWeb
     return recording;
   }
 
+  const isLateRecoveryOverride = event.eventType === "transcript.done" && recording.transcriptProcessedAt !== null &&
+    (recording.failureCode === "RECORDER_TRANSCRIPT_RECOVERY_EXPIRED" || recording.failureCode === "RECORDER_TRANSCRIPT_FETCH_FAILED");
+
   const data: Prisma.MeetingRecordingUpdateInput = {};
   if (event.externalBotId && !recording.externalBotId) data.externalBotId = event.externalBotId;
-  if (event.status) data.status = event.status;
+
+  if (event.status) {
+    if (!isLateRecoveryOverride) {
+      data.status = event.status;
+    }
+  }
+
   if (event.status && !ACTIVE_RECORDING_STATUSES.includes(event.status)) data.activeDedupeKey = null;
   if (event.startedAt) data.startedAt = event.startedAt;
   if (event.endedAt) data.endedAt = event.endedAt;
