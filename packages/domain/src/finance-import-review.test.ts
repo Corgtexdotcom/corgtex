@@ -99,6 +99,7 @@ describe("Finance import review", () => {
     await expect(editFinanceReportImportCandidate(actor, { workspaceId: "workspace-1", batchId: "batch-1", candidateId: clean.id,
       expectedVersion: 4, expectedCandidateVersion: 1, amountCents: 200 })).resolves.toMatchObject({ version: 5 });
     expect(mocks.prisma.financeImportCandidate.updateMany).toHaveBeenLastCalledWith(expect.objectContaining({ where: expect.objectContaining({ OR: [{ id: clean.id, version: 1 }] }), data: expect.objectContaining({ action: "CONFLICT" }) }));
+    expect(mocks.prisma.financeImportBatch.updateMany).toHaveBeenLastCalledWith(expect.objectContaining({ data: expect.objectContaining({ addCount: 1, conflictCount: 1, blockerCount: 1 }) }));
     mocks.prisma.financeImportBatch.findUnique.mockResolvedValue(batch([applied, clean], { stage: "PARTIALLY_APPLIED" }));
     await expect(reviewFinanceReportImport(actor, { workspaceId: "workspace-1", batchId: "batch-1", expectedVersion: 4, mode: "APPROVE_ALL",
       candidateVersions: versions([clean]), acceptWarnings: true })).resolves.toMatchObject({ reviewedCount: 1, complete: true });

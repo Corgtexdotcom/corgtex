@@ -57,6 +57,7 @@ describe("Finance report application", () => {
       sourceBatchId: "batch-1", sourceCandidateId: "add", appliedByUserId: "writer-1" }) }));
     expect(mocks.prisma.financeReport.upsert).toHaveBeenCalledWith(expect.objectContaining({ create: expect.objectContaining({ title: "synthetic.csv" }) })); expect(mocks.prisma.financeImportApplication.create).toHaveBeenCalledTimes(3); expect(mocks.prisma.financeTransaction.create).not.toHaveBeenCalled(); expect(mocks.prisma.$transaction).toHaveBeenCalledWith(expect.any(Function), expect.objectContaining({ timeout: 120_000 }));
     expect(mocks.prisma.financeImportBatch.updateMany).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ stage: "APPLIED", appliedCount: 3, appliedByUserId: "writer-1" }) }));
+    const orphan = candidate("orphan", { action: "DUPLICATE" }); mocks.prisma.financeImportBatch.findUnique.mockResolvedValue(batch([orphan])); mocks.prisma.financeReportFact.findUnique.mockResolvedValue(null); await expect(applyFinanceReportImport(actor, input([orphan]))).resolves.toMatchObject({ receipts: [{ outcome: "SKIPPED", targetFactId: null }] });
   });
   it("restates with optimistic versions and records unchanged before/after receipts", async () => {
     const update = candidate("update", { action: "UPDATE", currentFactId: "fact-u", currentAmountCents: 50 });
@@ -79,6 +80,8 @@ describe("Finance report application", () => {
       outcome: receipt.outcome, targetFactId: receipt.targetFactId } }); mocks.prisma.financeImportBatch.findUnique.mockResolvedValue(batch([applied, pending], { stage: "PARTIALLY_APPLIED", version: 5, appliedCount: 1 }));
     await expect(applyFinanceReportImport(actor, input([add]))).resolves.toMatchObject({ noOp: true, appliedNow: 0, appliedCount: 1 });
     expect(mocks.prisma.financeReport.upsert).toHaveBeenCalledTimes(1); expect(mocks.prisma.financeReportFact.create).toHaveBeenCalledTimes(1);
+    mocks.prisma.financeImportApplication.count.mockResolvedValue(2); await expect(applyFinanceReportImport(actor, input([pending], 5))).resolves.toMatchObject({ stage: "APPLIED", appliedNow: 1, appliedCount: 2 });
+    expect(mocks.prisma.financeReport.upsert).toHaveBeenCalledTimes(2); expect(mocks.prisma.financeReportFact.create).toHaveBeenCalledTimes(2);
   });
   it("rolls back the wave when the optimistic current-fact write loses", async () => {
     const update = candidate("update", { action: "UPDATE", currentFactId: "fact-u", currentAmountCents: 50 });

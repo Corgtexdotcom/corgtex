@@ -77,9 +77,12 @@ export async function applyFinanceReportImport(actor: AppActor, params: { worksp
       const selected = candidates.filter(({ id }) => supplied.has(id));
       invariant(selected.length === supplied.size, 400, "INVALID_INPUT", "Every candidate version must belong to this Finance report import.");
       const existing = selected.filter(({ application }) => application);
-      for (const candidate of existing) invariant(candidate.reviewState === "APPLIED"
-        && candidate.application!.idempotencyKey === applicationKey(batch.workspaceId, batch.id, candidate, supplied.get(candidate.id)!),
-      409, "FINANCE_REPORT_APPLICATION_CONFLICT", "The Finance report application changed. Refresh and try again.");
+      for (const candidate of existing) {
+        const appliedVersion = candidate.version - 1; const requestedVersion = supplied.get(candidate.id)!;
+        invariant(candidate.reviewState === "APPLIED" && appliedVersion > 0 && [appliedVersion, candidate.version].includes(requestedVersion)
+          && candidate.application!.idempotencyKey === applicationKey(batch.workspaceId, batch.id, candidate, appliedVersion),
+        409, "FINANCE_REPORT_APPLICATION_CONFLICT", "The Finance report application changed. Refresh and try again.");
+      }
       if (batch.stage === "APPLIED") {
         invariant(selected.length === 0 || existing.length === selected.length, 409, "FINANCE_REPORT_APPLICATION_CONFLICT", "The completed application does not match this request.");
         return { batchId: batch.id, version: batch.version, stage: batch.stage, appliedCount: batch.appliedCount,
@@ -146,8 +149,9 @@ export async function applyFinanceReportImport(actor: AppActor, params: { worksp
           invariant(candidate.semanticKey, 409, "FINANCE_REPORT_APPLICATION_BLOCKED", "The approved duplicate identity is invalid.");
           const target = await tx.financeReportFact.findUnique({ where: { workspaceId_semanticKey: { workspaceId: batch.workspaceId,
             semanticKey: candidate.semanticKey } }, select: factSelect });
-          invariant(target && target.amountCents === candidate.amountCents, 409, "FINANCE_REPORT_APPLICATION_CONFLICT", "The duplicate target changed. Refresh and reconcile again.");
-          targetFactId = target.id; before = factSnapshot(target); after = before; outcome = "SKIPPED";
+          if (target) { invariant(target.amountCents === candidate.amountCents, 409, "FINANCE_REPORT_APPLICATION_CONFLICT", "The duplicate target changed. Refresh and reconcile again.");
+            targetFactId = target.id; before = factSnapshot(target); after = before; }
+          outcome = "SKIPPED";
         } else { invariant(candidate.action === "SKIP", 409, "FINANCE_REPORT_APPLICATION_BLOCKED", "The candidate action cannot be applied."); outcome = "SKIPPED"; }
         const key = applicationKey(batch.workspaceId, batch.id, candidate, candidate.version);
         const receipt = await tx.financeImportApplication.create({ data: { workspaceId: batch.workspaceId, batchId: batch.id, candidateId: candidate.id,

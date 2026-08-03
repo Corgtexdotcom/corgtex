@@ -123,7 +123,7 @@ export async function editFinanceReportImportCandidate(actor: AppActor, params: 
     const reportingDates = batch.candidates.filter(({ reviewState }) => reviewState !== "REJECTED").map((candidate) => candidate.id === edited.id ? edited : candidate)
       .flatMap(({ periodStart, periodEnd }) => [periodStart.valueOf(), periodEnd.valueOf()]);
     const updated = await tx.financeImportBatch.updateMany({ where: { id: batch.id, workspaceId: batch.workspaceId, version: batch.version }, data: {
-      ...counts, warningCount: reportWarningCount, blockerCount: result.counts.conflictCount, rejectedCount,
+      ...counts, warningCount: reportWarningCount, blockerCount: counts.conflictCount, rejectedCount,
       periodStart: new Date(Math.min(...reportingDates)), periodEnd: new Date(Math.max(...reportingDates)),
       approvedByUserId: null, approvedAt: null, version: { increment: 1 } } });
     invariant(updated.count === 1, 409, "FINANCE_REPORT_REVIEW_CONFLICT", "The Finance report import changed. Refresh and try again.");
@@ -194,8 +194,8 @@ export async function reviewFinanceReportImport(actor: AppActor, params: { works
     }
     const states = batch.candidates.map((candidate) => targetIds.has(candidate.id) ? (params.mode === "REJECT" ? "REJECTED" : "APPROVED")
       : reconciledStates.get(candidate.id) ?? candidate.reviewState);
-    const blockerCount = reconciled?.counts.conflictCount ?? batch.blockerCount;
     const reconciledCounts = reconciled ? withAppliedCounts(reconciled, batch.candidates) : null;
+    const blockerCount = reconciledCounts?.conflictCount ?? batch.blockerCount;
     const complete = states.every((state) => ["APPROVED", "REJECTED", "VERIFIED", "APPLIED"].includes(state)) && blockerCount === 0 && !batch.candidates.some((candidate) => !targetIds.has(candidate.id) && candidate.reviewState === "APPROVED" && warning(candidate, now) && ((candidate.action === "UPDATE" && (!candidate.approvedByUserId || candidate.approvedByUserId === (candidate.editedByUserId ?? batch.uploadedByUserId))) || ((!candidate.approvedAt || !historical(candidate.periodEnd, candidate.approvedAt)) && (params.mode === "APPROVE_VERIFIED" || params.acceptWarnings !== true))))
       && (warningCount === 0 || (params.mode !== "APPROVE_VERIFIED" && params.acceptWarnings === true));
     const rejectedCount = states.filter((state) => state === "REJECTED").length;

@@ -40,6 +40,8 @@ describe("Finance report application database contract", () => {
       prisma.financeContributionEntry.count({ where: { workspaceId: workspace.id } }),
     ])).resolves.toEqual([0, 0, 0]);
     await expect(applyFinanceReportImport(actor, request)).resolves.toMatchObject({ stage: "APPLIED", appliedCount: 1, appliedNow: 0, noOp: true });
+    const refreshed = await prisma.financeImportBatch.findUniqueOrThrow({ where: { id: batch.id }, include: { candidates: true } });
+    await expect(applyFinanceReportImport(actor, { ...request, expectedVersion: refreshed.version, candidateVersions: [{ id: candidate.id, expectedVersion: refreshed.candidates[0]!.version }] })).resolves.toMatchObject({ stage: "APPLIED", appliedNow: 0, noOp: true });
     await expect(prisma.financeReportFact.count({ where: { workspaceId: workspace.id } })).resolves.toBe(1);
     await expect(prisma.financeImportApplication.count({ where: { workspaceId: workspace.id } })).resolves.toBe(1);
   });
