@@ -850,12 +850,15 @@ function railwayTargetsFromEnv(env, targets) {
     if (!Array.isArray(snapshot)) throw new Error("FLEET_RELEASE_TARGETS_FILE must contain a JSON array.");
     const missingGroups = new Set(targetList.filter((target) => RAILWAY_TARGET_GROUPS.includes(target)));
     for (const target of snapshot) {
+      if (!target || typeof target !== "object" || Array.isArray(target)) throw new Error("FLEET_RELEASE_TARGETS_FILE entries must be target objects.");
+      const provider = safeText(target.provider)?.toLowerCase();
+      if (!provider || !["azure", "railway"].includes(provider)) throw new Error(`FLEET_RELEASE_TARGETS_FILE has an unsupported provider for ${safeText(target.id ?? target.label) ?? "target"}.`);
       const workload = safeText(target?.workload ?? target?.group);
       const group = workload === "managed-customers" || workload === "railway-customers" ? "railway-customers" : workload === "selfserve" || workload === "azure-selfserve"
         ? "railway-selfserve"
         : workload === "ops" || workload === "backup-app" ? workload : null;
-      if (target?.provider === "railway" && !group) throw new Error(`FLEET_RELEASE_TARGETS_FILE has an invalid Railway workload for ${safeText(target.id ?? target.label) ?? "target"}.`);
-      if (target?.provider === "railway" && targetList.includes(group)) {
+      if (provider === "railway" && !group) throw new Error(`FLEET_RELEASE_TARGETS_FILE has an invalid Railway workload for ${safeText(target.id ?? target.label) ?? "target"}.`);
+      if (provider === "railway" && targetList.includes(group)) {
         const environmentId = safeText(target?.railway?.environmentId), webServiceId = safeText(target?.railway?.webServiceId);
         if (!webServiceId || !environmentId) throw new Error(`FLEET_RELEASE_TARGETS_FILE has incomplete Railway metadata for ${safeText(target.id ?? target.label) ?? group}.`);
         entries.push({
