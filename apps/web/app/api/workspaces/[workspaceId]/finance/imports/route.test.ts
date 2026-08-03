@@ -1,13 +1,14 @@
 import { NextRequest, NextResponse } from "next/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const { createUpload, demoGuard, handleRouteError, resolveActor } = vi.hoisted(() => ({
+const { createUpload, demoGuard, handleRouteError, listImports, resolveActor } = vi.hoisted(() => ({
   createUpload: vi.fn(),
   demoGuard: vi.fn(),
   handleRouteError: vi.fn((error: { status?: number; code?: string; message?: string }) => NextResponse.json({
     error: { code: error.code, message: error.message },
   }, { status: error.status ?? 500 })),
   resolveActor: vi.fn(),
+  listImports: vi.fn(),
 }));
 
 class MockAppError extends Error {
@@ -20,6 +21,7 @@ vi.mock("@corgtex/domain", () => ({
   AppError: MockAppError,
   createFinanceReportImportUpload: createUpload,
   FINANCE_REPORT_IMPORT_MAX_FILE_BYTES: 25 * 1024 * 1024,
+  listFinanceReportImports: listImports,
 }));
 vi.mock("@/lib/auth", () => ({ resolveRequestActor: resolveActor }));
 vi.mock("@/lib/demo-guard", () => ({ checkApiDemoGuard: demoGuard }));
@@ -52,6 +54,14 @@ describe("POST /api/workspaces/[workspaceId]/finance/imports", () => {
     resolveActor.mockResolvedValue(actor);
     demoGuard.mockResolvedValue(undefined);
     createUpload.mockResolvedValue({ batch, reused: false });
+    listImports.mockResolvedValue([{ id: "batch-1", version: 2 }]);
+  });
+
+  it("lists only the reader-authorized domain result", async () => {
+    const { GET } = await import("./route");
+    const response = await GET(new NextRequest("http://localhost/api/workspaces/workspace-1/finance/imports"), context());
+    expect(await response.json()).toEqual({ batches: [{ id: "batch-1", version: 2 }] });
+    expect(listImports).toHaveBeenCalledWith(actor, "workspace-1");
   });
 
   it("stores one supported file and returns only sanitized batch status", async () => {
