@@ -1,4 +1,7 @@
 import { execFileSync } from "node:child_process";
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { describe, expect, it, vi } from "vitest";
@@ -746,6 +749,39 @@ describe("post-deploy observation gate", () => {
     expect(summary.sourceChecks).toEqual(expect.arrayContaining([
       expect.objectContaining({ source: "railway", group: "railway-selfserve", targetCount: 1 }),
     ]));
+  });
+
+  it("observes the exact provider-qualified targets from the promotion snapshot", async () => {
+    const targetFile = join(mkdtempSync(join(tmpdir(), "fleet-observation-")), "targets.json");
+    writeFileSync(targetFile, JSON.stringify([
+      { id: "customer", label: "Customer", workload: "managed-customers", provider: "railway", railway: { environmentId: "environment-customer", webServiceId: "web-customer" } },
+      { id: "selfserve", label: "Self-Serve", workload: "selfserve", provider: "railway", railway: { environmentId: "environment-selfserve", webServiceId: "web-selfserve" } },
+      { id: "azure", label: "Azure", workload: "selfserve", provider: "azure", azure: { webAppName: "web-azure" } },
+    ]));
+    const fetchImpl = vi.fn(async (_url, init) => new Response(JSON.stringify(JSON.parse(init.body).query.includes("LatestDeployment")
+      ? { data: { deployments: { edges: [{ node: { id: "deployment", status: "SUCCESS" } }] } } }
+      : { data: { httpLogs: [] } }), { status: 200 }));
+    const summary = await runObservationGate({
+      manifest,
+      since: new Date("2026-07-16T05:52:00.000Z"),
+      targets: "railway-customers,railway-selfserve",
+      env: { RAILWAY_API_TOKEN: "railway-token", FLEET_RELEASE_TARGETS_FILE: targetFile, OBSERVATION_REQUIRE_SOURCE: "true" },
+      deps: { fetchImpl, onSourceNote: vi.fn() },
+    });
+    expect(summary.status).toBe("passed");
+    expect(summary.sourceChecks).toEqual(expect.arrayContaining([
+      expect.objectContaining({ source: "railway", group: "railway-customers", targetCount: 1 }),
+      expect.objectContaining({ source: "railway", group: "railway-selfserve", targetCount: 1 }),
+    ]));
+    expect(fetchImpl).toHaveBeenCalledTimes(4);
+  });
+
+  it("fails closed when an explicit promotion snapshot is missing, malformed, or incomplete", async () => {
+    await expect(runObservationGate({ manifest, since: new Date(), targets: "railway-customers", env: { RAILWAY_API_TOKEN: "railway-token", FLEET_RELEASE_TARGETS_FILE: "/missing/fleet-targets.json", OBSERVATION_REQUIRE_SOURCE: "true" } })).rejects.toThrow();
+    const targetFile = join(mkdtempSync(join(tmpdir(), "fleet-observation-invalid-")), "targets.json");
+    for (const contents of ["{", "{}", "[]", "[null]", JSON.stringify([{ id: "customer", provider: "unknown", workload: "managed-customers" }]), JSON.stringify([{ id: "customer", provider: "railway", group: "managed-customers", railway: { environmentId: "env", webServiceId: "web" } }]), JSON.stringify([{ id: "azure", provider: "azure" }]), JSON.stringify([{ id: "customer", provider: "railway", workload: "managed-customers", railway: { webServiceId: "web" } }]), JSON.stringify([{ id: "customer", provider: "railway", workload: "managed-customers", railway: { environmentId: " ", webServiceId: "web" } }]), JSON.stringify([{ id: "customer", provider: "railway", workload: "unknown", railway: { environmentId: "env", webServiceId: "web" } }])]) { writeFileSync(targetFile, contents); await expect(runObservationGate({ manifest, since: new Date(), targets: "railway-customers", env: { RAILWAY_API_TOKEN: "railway-token", FLEET_RELEASE_TARGETS_FILE: targetFile, OBSERVATION_REQUIRE_SOURCE: "true" } })).rejects.toThrow(); }
+    for (const contents of ["[]", JSON.stringify([{ id: "azure", provider: "azure", workload: "selfserve", azure: { webAppName: "web" } }]), JSON.stringify([{ id: "azure", provider: "azure", workload: "selfserve", azure: { resourceGroup: "rg", acrName: "acr", webAppName: "web", workerAppName: "worker" } }, { id: "managed", provider: "azure", workload: "managed-customers" }])]) { writeFileSync(targetFile, contents); await expect(runObservationGate({ manifest, since: new Date(), targets: "azure-selfserve", env: { FLEET_RELEASE_TARGETS_FILE: targetFile, OBSERVATION_REQUIRE_SOURCE: "true" } })).rejects.toThrow(); }
+    writeFileSync(targetFile, JSON.stringify([{ id: "azure", provider: "azure", workload: "selfserve", azure: { resourceGroup: "rg", acrName: "acr", webAppName: "web", workerAppName: "worker" } }])); await expect(runObservationGate({ manifest, since: new Date(), targets: "azure-selfserve", env: { FLEET_RELEASE_TARGETS_FILE: targetFile, OBSERVATION_REQUIRE_SOURCE: "true" }, deps: { onSourceNote: vi.fn() } })).resolves.toBeDefined();
   });
 
   it("reports missing Railway coverage for every selected Railway target group", async () => {
