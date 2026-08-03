@@ -3649,6 +3649,7 @@ async function completeRecordingWithTranscriptArtifact(
         meeting: {
           select: {
             workspaceId: true,
+            transcript: true,
           },
         },
       },
@@ -3730,14 +3731,18 @@ async function completeRecordingWithTranscriptArtifact(
     }
 
     const actor = systemRecorderActor(recording.workspaceId);
-    await intakeMeetingTranscript(actor, {
-      workspaceId: recording.workspaceId,
-      meetingId: recording.meetingId,
-      source: `recorder:${provider.toLowerCase()}`,
-      recordedAt: recording.startedAt ?? recording.joinAt ?? recording.createdAt,
-      transcript,
-      allowTranscriptAppend: true,
-    });
+    const normalizedTranscript = transcript.trim().replace(/\s+/g, " ");
+    const intakeAlreadyCommitted = (current.meeting?.transcript ?? "").trim().replace(/\s+/g, " ").includes(normalizedTranscript);
+    if (!intakeAlreadyCommitted) {
+      await intakeMeetingTranscript(actor, {
+        workspaceId: recording.workspaceId,
+        meetingId: recording.meetingId,
+        source: `recorder:${provider.toLowerCase()}`,
+        recordedAt: recording.startedAt ?? recording.joinAt ?? recording.createdAt,
+        transcript,
+        allowTranscriptAppend: true,
+      });
+    }
 
     await tx.meetingRecording.update({
       where: { id: recording.id },
@@ -4084,7 +4089,7 @@ async function terminalizeRecordingWithLock(
       return false;
     }
 
-    const inFlightWebhook = await tx.meetingRecorderProviderEvent.findFirst({
+    const inFlightWebhook = failureCode === "RECORDER_TRANSCRIPT_RECOVERY_EXPIRED" ? null : await tx.meetingRecorderProviderEvent.findFirst({
       where: {
         recordingId: recording.id,
         eventType: "transcript.done",
