@@ -2,7 +2,7 @@ import type { AppActor } from "@corgtex/shared";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 const mocks = vi.hoisted(() => ({
   read: vi.fn(), write: vi.fn(), prisma: { $transaction: vi.fn(), $executeRaw: vi.fn(), $queryRaw: vi.fn(), financeImportBatch: { findMany: vi.fn(), findUnique: vi.fn(), updateMany: vi.fn() },
-    financeImportCandidate: { updateMany: vi.fn() }, financeReportFact: { findMany: vi.fn(), create: vi.fn(), update: vi.fn() }, financeReport: { create: vi.fn() },
+    financeImportCandidate: { updateMany: vi.fn() }, financeReportFact: { findMany: vi.fn(), create: vi.fn(), update: vi.fn() }, financeReport: { create: vi.fn(), updateMany: vi.fn() },
     financeImportApplication: { create: vi.fn() }, financeTransaction: { create: vi.fn() }, auditLog: { create: vi.fn() } },
 }));
 vi.mock("@corgtex/shared", () => ({ prisma: mocks.prisma }));
@@ -29,7 +29,7 @@ const versions = (rows: ReturnType<typeof candidate>[]) => rows.map(({ id, versi
 describe("Finance import review", () => {
   beforeEach(() => { vi.clearAllMocks(); mocks.prisma.$transaction.mockImplementation((work) => work(mocks.prisma)); mocks.prisma.$executeRaw.mockResolvedValue(1); mocks.prisma.$queryRaw.mockResolvedValue([]);
     mocks.prisma.financeImportBatch.updateMany.mockResolvedValue({ count: 1 }); mocks.prisma.financeImportCandidate.updateMany.mockResolvedValue({ count: 1 });
-    mocks.prisma.financeReportFact.findMany.mockResolvedValue([]); mocks.prisma.auditLog.create.mockResolvedValue({}); });
+    mocks.prisma.financeReportFact.findMany.mockResolvedValue([]); mocks.prisma.financeReport.updateMany.mockResolvedValue({ count: 1 }); mocks.prisma.auditLog.create.mockResolvedValue({}); });
   it("lists and decorates only reader-authorized workspace batches", async () => {
     const reportWarning = { code: "HISTORICAL_DATA_QUALITY", severity: "WARNING", message: "Review the source.", evidenceClaimIds: ["type"] };
     mocks.prisma.financeImportBatch.findMany.mockResolvedValue([batch([], { warningCount: 1, candidates: [candidate()] })]); mocks.prisma.$queryRaw.mockResolvedValue([{ id: "batch-1", count: 1 }]);
@@ -114,6 +114,6 @@ describe("Finance import review", () => {
     const rejected = candidate("reject", { reviewState: "REJECTED" }); mocks.prisma.financeImportBatch.findUnique.mockResolvedValue(batch([rejected]));
     await expect(reviewFinanceReportImport(actor, { ...input, mode: "APPROVE", candidateVersions: versions([rejected]) })).rejects.toMatchObject({ code: "FINANCE_REPORT_REVIEW_BLOCKED" });
     await expect(reviewFinanceReportImport(actor, { ...input, mode: "APPROVE_ALL", candidateVersions: versions([rejected]) })).resolves.toMatchObject({ reviewedCount: 0, complete: true });
-    const applied = candidate("applied", { reviewState: "APPLIED" }); mocks.prisma.financeImportBatch.findUnique.mockResolvedValue(batch([applied, row], { stage: "PARTIALLY_APPLIED" })); await reviewFinanceReportImport(actor, { ...input, mode: "REJECT", candidateVersions: versions([row]) }); expect(mocks.prisma.financeImportBatch.updateMany).toHaveBeenLastCalledWith(expect.objectContaining({ data: expect.objectContaining({ stage: "APPLIED" }) }));
+    const applied = candidate("applied", { reviewState: "APPLIED" }); mocks.prisma.financeImportBatch.findUnique.mockResolvedValue(batch([applied, row], { stage: "PARTIALLY_APPLIED" })); await reviewFinanceReportImport(actor, { ...input, mode: "REJECT", candidateVersions: versions([row]) }); expect(mocks.prisma.financeImportBatch.updateMany).toHaveBeenLastCalledWith(expect.objectContaining({ data: expect.objectContaining({ stage: "APPLIED" }) })); expect(mocks.prisma.financeReport.updateMany).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ periodStart: applied.periodStart, periodEnd: applied.periodEnd }) }));
   });
 });

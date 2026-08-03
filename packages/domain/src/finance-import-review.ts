@@ -199,9 +199,11 @@ export async function reviewFinanceReportImport(actor: AppActor, params: { works
     const complete = states.every((state) => ["APPROVED", "REJECTED", "VERIFIED", "APPLIED"].includes(state)) && blockerCount === 0 && !batch.candidates.some((candidate) => !targetIds.has(candidate.id) && candidate.reviewState === "APPROVED" && warning(candidate, now) && ((candidate.action === "UPDATE" && (!candidate.approvedByUserId || candidate.approvedByUserId === (candidate.editedByUserId ?? batch.uploadedByUserId))) || ((!candidate.approvedAt || !historical(candidate.periodEnd, candidate.approvedAt)) && (params.mode === "APPROVE_VERIFIED" || params.acceptWarnings !== true))))
       && (warningCount === 0 || (params.mode !== "APPROVE_VERIFIED" && params.acceptWarnings === true));
     const rejectedCount = states.filter((state) => state === "REJECTED").length;
+    const finalized = states.every((state) => ["APPLIED", "REJECTED"].includes(state));
+    if (batch.stage === "PARTIALLY_APPLIED" && finalized) invariant((await tx.financeReport.updateMany({ where: { sourceBatchId: batch.id, workspaceId: batch.workspaceId }, data: { ...reportingWindow, version: { increment: 1 } } })).count === 1, 409, "FINANCE_REPORT_REVIEW_CONFLICT", "The applied Finance report changed. Refresh and try again.");
     const updated = await tx.financeImportBatch.updateMany({ where: { id: batch.id, workspaceId: batch.workspaceId, version: batch.version }, data: {
       ...(reconciledCounts ? { ...reconciledCounts, warningCount: reportWarnings(batch.interpretationJson).length, blockerCount, ...reportingWindow } : {}), rejectedCount,
-      ...(states.every((state) => ["APPLIED", "REJECTED"].includes(state)) ? { stage: "APPLIED" as const, appliedByUserId: actor.user.id, appliedAt: now } : {}),
+      ...(finalized ? { stage: "APPLIED" as const, appliedByUserId: actor.user.id, appliedAt: now } : {}),
       approvedByUserId: complete ? actor.user.id : null, approvedAt: complete ? now : null, version: { increment: 1 } } });
     invariant(updated.count === 1, 409, "FINANCE_REPORT_REVIEW_CONFLICT", "The Finance report import changed. Refresh and try again.");
     await tx.auditLog.create({ data: { workspaceId: batch.workspaceId, actorUserId: actor.user.id, action: `finance-report-import.review.${params.mode.toLowerCase()}`,
