@@ -32,9 +32,16 @@ async function responseMessage(response: Response, fallback: string) {
   return typeof body?.error === "string" ? body.error : body?.error?.message ?? fallback;
 }
 
+async function requestFinanceImportDetail(workspaceId: string, batchId: string) {
+  const response = await fetch(`/api/workspaces/${workspaceId}/finance/imports/${batchId}`, { cache: "no-store" });
+  if (!response.ok) throw new Error(await responseMessage(response, "Import details could not be loaded."));
+  return (await response.json() as { batch: FinanceImportDetail }).batch;
+}
+
 export function FinanceReportImportPanel({ workspaceId, canWrite }: { workspaceId: string; canWrite: boolean }) {
   const inputRef = useRef<HTMLInputElement>(null);
-  const detailRequestRef = useRef(0);
+  const detailRequestRef = useRef(new Map<string, number>());
+  const pinnedBatchesRef = useRef(new Map<string, FinanceImportBatchSummary>());
   const [batches, setBatches] = useState<FinanceImportBatchSummary[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [detail, setDetail] = useState<FinanceImportDetail | null>(null);
@@ -45,14 +52,17 @@ export function FinanceReportImportPanel({ workspaceId, canWrite }: { workspaceI
   const [currency, setCurrency] = useState("");
   const [clarifying, setClarifying] = useState(false);
   const selectedVersion = batches.find(({ id }) => id === selectedId)?.version;
+  const selectedIdRef = useRef(selectedId); selectedIdRef.current = selectedId;
 
   const loadBatches = useCallback(async () => {
     try {
       const response = await fetch(`/api/workspaces/${workspaceId}/finance/imports`, { cache: "no-store" });
       if (!response.ok) throw new Error(await responseMessage(response, "Import history could not be loaded."));
       const body = await response.json() as { batches: FinanceImportBatchSummary[] };
-      setBatches(body.batches);
-      setSelectedId((current) => current && body.batches.some(({ id }) => id === current) ? current : body.batches[0]?.id ?? null);
+      body.batches.forEach(({ id }) => pinnedBatchesRef.current.delete(id));
+      const merged = [...pinnedBatchesRef.current.values(), ...body.batches];
+      setBatches(merged);
+      setSelectedId((current) => current && merged.some(({ id }) => id === current) ? current : merged[0]?.id ?? null);
       setListError(null);
     } catch (error) {
       setListError(error instanceof Error ? error.message : "Import history could not be loaded.");
@@ -62,17 +72,21 @@ export function FinanceReportImportPanel({ workspaceId, canWrite }: { workspaceI
   }, [workspaceId]);
 
   const loadDetail = useCallback(async (batchId: string) => {
-    const requestId = ++detailRequestRef.current;
+    const requestId = (detailRequestRef.current.get(batchId) ?? 0) + 1; detailRequestRef.current.set(batchId, requestId);
     try {
-      const response = await fetch(`/api/workspaces/${workspaceId}/finance/imports/${batchId}`, { cache: "no-store" });
-      if (!response.ok) throw new Error(await responseMessage(response, "Import details could not be loaded."));
-      const body = await response.json() as { batch: FinanceImportDetail };
-      if (requestId !== detailRequestRef.current) return;
-      setDetail(body.batch);
-      setCurrency(body.batch.resolvedCurrency ?? "");
+      const batch = await requestFinanceImportDetail(workspaceId, batchId);
+      if (requestId !== detailRequestRef.current.get(batchId)) return;
+      if (pinnedBatchesRef.current.has(batch.id)) {
+        if (financeImportNeedsPolling([batch])) pinnedBatchesRef.current.set(batch.id, batch);
+        else pinnedBatchesRef.current.delete(batch.id);
+        setBatches((current) => current.map((row) => row.id === batch.id ? batch : row));
+      }
+      if (selectedIdRef.current !== batchId) return;
+      setDetail(batch);
+      setCurrency(batch.resolvedCurrency ?? "");
       setDetailError(null);
     } catch (error) {
-      if (requestId !== detailRequestRef.current) return;
+      if (requestId !== detailRequestRef.current.get(batchId) || selectedIdRef.current !== batchId) return;
       setDetail(null);
       setDetailError(error instanceof Error ? error.message : "Import details could not be loaded.");
     }
@@ -86,13 +100,14 @@ export function FinanceReportImportPanel({ workspaceId, canWrite }: { workspaceI
   }, [loadDetail, selectedId, selectedVersion]);
   useEffect(() => {
     if (!financeImportNeedsPolling(batches)) return;
-    const timer = window.setInterval(() => void loadBatches(), 4_000);
+    const timer = window.setInterval(() => { void loadBatches(); pinnedBatchesRef.current.forEach(({ id }) => void loadDetail(id)); }, 4_000);
     return () => window.clearInterval(timer);
-  }, [batches, loadBatches]);
+  }, [batches, loadBatches, loadDetail]);
 
   const selected = useMemo(() => batches.find(({ id }) => id === selectedId) ?? null, [batches, selectedId]);
   const selectedDetail = detail?.id === selectedId ? detail : null;
   const processingView = selected ? buildFinanceImportView(selected) : null;
+  const agentUnavailable = selected?.safeErrorCode === "FINANCE_REPORT_AGENT_UNAVAILABLE";
 
   async function uploadFiles(files: File[]) {
     if (!canWrite || files.length === 0) return;
@@ -110,7 +125,16 @@ export function FinanceReportImportPanel({ workspaceId, canWrite }: { workspaceI
         const body = await response.json() as { batch: { id: string }; reused: boolean };
         setUploads((current) => current.map((row) => row.id === item.id ? { ...row, status: "uploaded",
           message: body.reused ? "Existing exact-file import resumed or reopened." : "Queued as an independent report." } : row));
-        setSelectedId(body.batch.id);
+        try {
+          const uploadedDetail = await requestFinanceImportDetail(workspaceId, body.batch.id);
+          detailRequestRef.current.set(uploadedDetail.id, (detailRequestRef.current.get(uploadedDetail.id) ?? 0) + 1);
+          if (financeImportNeedsPolling([uploadedDetail])) pinnedBatchesRef.current.set(uploadedDetail.id, uploadedDetail);
+          else pinnedBatchesRef.current.delete(uploadedDetail.id);
+          setBatches((current) => [uploadedDetail, ...current.filter(({ id }) => id !== uploadedDetail.id)]);
+          selectedIdRef.current = uploadedDetail.id; setSelectedId(uploadedDetail.id); setDetail(uploadedDetail); setCurrency(uploadedDetail.resolvedCurrency ?? "");
+        } catch (error) {
+          setSelectedId(body.batch.id); setDetailError(error instanceof Error ? error.message : "Import details could not be loaded.");
+        }
       } catch (error) {
         setUploads((current) => current.map((row) => row.id === item.id ? { ...row, status: "failed",
           message: error instanceof Error ? error.message : "The report could not be uploaded." } : row));
@@ -205,8 +229,10 @@ export function FinanceReportImportPanel({ workspaceId, canWrite }: { workspaceI
               <div className="finance-import-format"><span>Detected numeric format</span><strong>{numericFormatLabel(selectedDetail.clarification.numericFormat)}</strong></div>
               <button type="submit" className="primary" disabled={clarifying}>{clarifying ? "Confirming…" : "Confirm and reconcile"}</button>
             </form>}
-            {selected.stage === "NEEDS_INPUT" && (!selectedDetail?.clarification.canConfirm || !canWrite) && <div className="finance-import-notice warning"><strong>{canWrite ? "Structural blocker" : "Finance write access required"}</strong>
-              <span>{canWrite ? "The numeric format, scale, or source structure could not be proven. This cannot be overridden; upload a corrected report or wait for a safe retry." : "A Finance writer must resolve this report."}</span></div>}
+            {selected.stage === "NEEDS_INPUT" && (!selectedDetail?.clarification.canConfirm || !canWrite) && <div className="finance-import-notice warning"><strong>{!canWrite ? "Finance write access required" : agentUnavailable ? "Import agent unavailable" : "Structural blocker"}</strong>
+              <span>{!canWrite ? "A Finance writer must resolve this report." : agentUnavailable
+                ? selected.safeErrorMessage ?? "Ask a workspace administrator to enable the Finance report import agent."
+                : "The numeric format, scale, or source structure could not be proven. This cannot be overridden; upload a corrected report."}</span></div>}
             {selected.stage === "READY_FOR_REVIEW" && <div className="finance-import-notice"><strong>Proposal ready</strong><span>Review and application stay separate from processing. The changes-first review surface is delivered in R9.</span></div>}
           </>}
         </div>
