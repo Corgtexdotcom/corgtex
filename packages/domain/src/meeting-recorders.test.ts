@@ -4253,26 +4253,11 @@ describe("meeting recorder domain", () => {
 
   it("leaves transient transport failures recoverable", async () => {
     const { reconcileMeetingRecorders } = await import("./meeting-recorders");
-    const recording = {
-      id: "recording-1",
-      workspaceId: "workspace-1",
-      meetingId: "meeting-1",
-      provider: "RECALL_AI",
-      externalBotId: "recall-bot-1",
-      status: "COMPLETED",
-      createdAt: new Date(Date.now() - 2 * 60 * 60 * 1000),
-      joinAt: new Date(Date.now() - 2 * 60 * 60 * 1000),
-      meeting: {
-        recordedAt: new Date(Date.now() - 2 * 60 * 60 * 1000),
-        scheduledEndAt: new Date(Date.now() - 1 * 60 * 60 * 1000),
-      },
-    };
+    const recording = { id: "recording-1", workspaceId: "workspace-1", meetingId: "meeting-1", provider: "RECALL_AI", externalBotId: "recall-bot-1", status: "COMPLETED", createdAt: new Date(Date.now() - 2 * 60 * 60 * 1000), joinAt: new Date(Date.now() - 2 * 60 * 60 * 1000), meeting: { recordedAt: new Date(Date.now() - 2 * 60 * 60 * 1000), scheduledEndAt: new Date(Date.now() - 1 * 60 * 60 * 1000) } };
     prismaMock.meetingRecording.findMany.mockResolvedValueOnce([recording]).mockResolvedValueOnce([]).mockResolvedValueOnce([]);
-    prismaMock.meetingRecording.findUnique.mockResolvedValue({ ...recording, transcriptProcessedAt: null, status: "COMPLETED" });
+    prismaMock.meetingRecording.findUnique.mockResolvedValue({ ...recording, transcriptProcessedAt: null, status: "COMPLETED" } as any);
     fetchMock.mockRejectedValue(new TypeError("fetch failed"));
-
     await reconcileMeetingRecorders("workspace-1");
-
     expect(prismaMock.meetingRecording.update).not.toHaveBeenCalled();
   });
 
@@ -4284,20 +4269,9 @@ describe("meeting recorder domain", () => {
       { id: "recording-expired", workspaceId: "workspace-1", meetingId: "meeting-expired", provider: "RECALL_AI", externalBotId: "bot-expired", status: "COMPLETED", activeDedupeKey: null, createdAt: new Date(Date.now() - 93600000), joinAt: new Date(Date.now() - 93600000), transcriptProcessedAt: null, meeting: { recordedAt: new Date(Date.now() - 93600000), scheduledEndAt: new Date(Date.now() - 90000000) } },
       { id: "recording-permanent", workspaceId: "workspace-1", meetingId: "meeting-permanent", provider: "RECALL_AI", externalBotId: "bot-permanent", status: "COMPLETED", activeDedupeKey: null, createdAt: new Date(Date.now() - 7200000), joinAt: new Date(Date.now() - 7200000), transcriptProcessedAt: null, meeting: { recordedAt: new Date(Date.now() - 7200000), scheduledEndAt: new Date(Date.now() - 3600000) } }
     ];
-
     prismaMock.meetingRecording.findMany.mockImplementation(async (q: any) => mockDb.filter((r) => q.where?.transcriptProcessedAt === null ? (r.transcriptProcessedAt === null && r.provider === "RECALL_AI" && (!q.where.OR || q.where.OR.some((c: any) => c.status?.in?.includes(r.status) || (c.status === "FAILED" && c.failureCode === "STALE_RECORDER" && r.status === "FAILED" && (r as any).failureCode === "STALE_RECORDER")))) : (q.where?.status?.in ? q.where.status.in.includes(r.status) : false)));
-
-    prismaMock.meetingRecording.findUnique.mockImplementation(async (args: any) => {
-      return mockDb.find(r => r.id === args.where.id) || null;
-    });
-
-    prismaMock.meetingRecording.update.mockImplementation(async (args: any) => {
-      const idx = mockDb.findIndex(r => r.id === args.where.id);
-      if (idx !== -1) {
-        mockDb[idx] = { ...mockDb[idx], ...args.data };
-      }
-      return mockDb[idx];
-    });
+    prismaMock.meetingRecording.findUnique.mockImplementation(async (args: any) => mockDb.find(r => r.id === args.where.id) || null);
+    prismaMock.meetingRecording.update.mockImplementation(async (args: any) => { const idx = mockDb.findIndex(r => r.id === args.where.id); if (idx !== -1) mockDb[idx] = { ...mockDb[idx], ...args.data }; return mockDb[idx]; });
 
     // Mock permanent failure fetch
     fetchMock.mockImplementation((url) => {
@@ -4421,5 +4395,19 @@ describe("meeting recorder domain", () => {
     prismaMock.meetingRecorderProviderEvent.findUnique.mockResolvedValue(null); prismaMock.meetingRecorderProviderEvent.upsert.mockResolvedValue({ id: "e-fail" } as any); prismaMock.meetingRecorderProviderEvent.update.mockResolvedValue({ id: "e-fail" } as any); fetchMock.mockRejectedValue(new TypeError("fetch failed"));
     await expect(processMeetingRecorderWebhook("RECALL_AI", { rawBody: payload, headers: { "svix-id": msgId, "svix-timestamp": timestamp, "svix-signature": `v1,${signature}` } })).rejects.toThrow("fetch failed");
     expect(mockDb[0].status).toBe("FAILED"); expect(mockDb[0].failureCode).toBe("RECORDER_TRANSCRIPT_RECOVERY_EXPIRED");
+  });
+
+  it("STALE_RECORDER local failure preserves status against delayed bot.done and revives smoke on transcript.done", async () => {
+    const { processMeetingRecorderWebhook } = await import("./meeting-recorders");
+    let mockDb = [{ id: "rec-stale", workspaceId: "workspace-1", meetingId: "meeting-1", provider: "RECALL_AI", externalBotId: "bot-stale", status: "FAILED", activeDedupeKey: "dedupe-1", createdAt: new Date(1), joinAt: new Date(1), transcriptProcessedAt: null as any, failureCode: "STALE_RECORDER", failureMessage: "timeout", meeting: { recordedAt: new Date(1), scheduledEndAt: new Date(1), workspaceId: "workspace-1" } }];
+    prismaMock.meetingRecording.findUnique.mockImplementation(async () => mockDb[0]); prismaMock.meetingRecording.findFirst.mockImplementation(async (args: any) => args?.where?.id?.not ? null : mockDb[0] as any); prismaMock.meetingRecording.update.mockImplementation(async ({ data }: any) => { mockDb[0] = { ...mockDb[0], ...data }; return mockDb[0] as any; });
+    const payload1 = JSON.stringify({ id: "evt1", event: "bot.done", data: { bot: { id: "bot-stale", status: "done", metadata: { workspaceId: "workspace-1", meetingId: "meeting-1", recordingId: "rec-stale" } } } });
+    prismaMock.meetingRecorderProviderEvent.findUnique.mockResolvedValue(null); prismaMock.meetingRecorderProviderEvent.upsert.mockResolvedValue({ id: "e1" } as any); prismaMock.meetingRecorderProviderEvent.update.mockResolvedValue({ id: "e1" } as any);
+    await processMeetingRecorderWebhook("RECALL_AI", { rawBody: payload1, headers: { "svix-id": "1", "svix-timestamp": "1", "svix-signature": `v1,${(await import("crypto")).createHmac("sha256", Buffer.from("recall-secret")).update(`1.1.${payload1}`).digest("base64")}` } });
+    expect(mockDb[0].status).toBe("FAILED");
+    prismaMock.$transaction.mockImplementation(async (cb) => cb(prismaMock as any)); prismaMock.meetingRecorderSmokeRun.updateMany.mockClear(); prismaMock.meetingRecorderSmokeRun.updateMany.mockResolvedValue({ count: 1 }); prismaMock.meeting.findFirst.mockResolvedValue({ id: "meeting-1", participantIds: [], participantEmails: [], title: "W", transcript: null, summaryMd: null, ingestionGuidanceMd: null } as any); prismaMock.meeting.update.mockResolvedValue({ id: "meeting-1", recordedAt: new Date() } as any); fetchMock.mockResolvedValue(new Response(JSON.stringify([{ speaker: "A", start: 0, text: "Content" }]), { status: 200 }));
+    const payload2 = JSON.stringify({ id: "evt2", event: "transcript.done", data: { bot: { id: "bot-stale", metadata: { workspaceId: "workspace-1", meetingId: "meeting-1", recordingId: "rec-stale" } }, transcript: { id: "t2", data: { download_url: "url" } } } });
+    await processMeetingRecorderWebhook("RECALL_AI", { rawBody: payload2, headers: { "svix-id": "2", "svix-timestamp": "2", "svix-signature": `v1,${(await import("crypto")).createHmac("sha256", Buffer.from("recall-secret")).update(`2.2.${payload2}`).digest("base64")}` } });
+    expect(prismaMock.meetingRecorderSmokeRun.updateMany).toHaveBeenCalledWith({ where: { recordingId: "rec-stale", status: { in: ["PENDING", "SCHEDULED", "FAILED"] } }, data: expect.objectContaining({ status: "COMPLETED", failureMessage: null }) });
   });
 });

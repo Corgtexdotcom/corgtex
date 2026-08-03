@@ -3527,14 +3527,15 @@ async function applyWebhookState(recording: MeetingRecording, event: ProviderWeb
     return recording;
   }
 
-  const isLateRecoveryOverride = event.eventType === "transcript.done" && recording.transcriptProcessedAt !== null &&
-    (recording.failureCode === "RECORDER_TRANSCRIPT_RECOVERY_EXPIRED" || recording.failureCode === "RECORDER_TRANSCRIPT_FETCH_FAILED");
+  const isLocalTerminalState = (recording.transcriptProcessedAt !== null &&
+    (recording.failureCode === "RECORDER_TRANSCRIPT_RECOVERY_EXPIRED" || recording.failureCode === "RECORDER_TRANSCRIPT_FETCH_FAILED")) ||
+    recording.failureCode === "STALE_RECORDER";
 
   const data: Prisma.MeetingRecordingUpdateInput = {};
   if (event.externalBotId && !recording.externalBotId) data.externalBotId = event.externalBotId;
 
   if (event.status) {
-    if (!isLateRecoveryOverride) {
+    if (!isLocalTerminalState) {
       data.status = event.status;
     }
   }
@@ -3641,8 +3642,9 @@ async function completeRecordingWithTranscriptArtifact(
         },
       },
     });
-    const isLateRecoveryOverride = current?.transcriptProcessedAt !== null
-      && (current?.failureCode === "RECORDER_TRANSCRIPT_RECOVERY_EXPIRED" || current?.failureCode === "RECORDER_TRANSCRIPT_FETCH_FAILED");
+    const isLateRecoveryOverride = (current?.transcriptProcessedAt !== null
+      && (current?.failureCode === "RECORDER_TRANSCRIPT_RECOVERY_EXPIRED" || current?.failureCode === "RECORDER_TRANSCRIPT_FETCH_FAILED")) ||
+      current?.failureCode === "STALE_RECORDER";
     if (!current || (current.transcriptProcessedAt && !isLateRecoveryOverride)) {
       return false;
     }
@@ -3763,8 +3765,9 @@ async function completeRecordingWithTranscriptArtifact(
 }
 
 async function ingestProviderTranscript(provider: MeetingRecorderProvider, recording: MeetingRecording, event: ProviderWebhookEvent) {
-  const isLateRecoveryOverride = recording.transcriptProcessedAt !== null
-    && (recording.failureCode === "RECORDER_TRANSCRIPT_RECOVERY_EXPIRED" || recording.failureCode === "RECORDER_TRANSCRIPT_FETCH_FAILED");
+  const isLateRecoveryOverride = (recording.transcriptProcessedAt !== null
+    && (recording.failureCode === "RECORDER_TRANSCRIPT_RECOVERY_EXPIRED" || recording.failureCode === "RECORDER_TRANSCRIPT_FETCH_FAILED")) ||
+    recording.failureCode === "STALE_RECORDER";
   if ((recording.transcriptProcessedAt !== null && !isLateRecoveryOverride) || recording.failureCode === DUPLICATE_RECORDER_FAILURE_CODE) {
     return;
   }
