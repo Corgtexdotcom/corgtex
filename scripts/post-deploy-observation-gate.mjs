@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+import { readFileSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
@@ -842,6 +843,27 @@ function railwayTargetsFromEnv(env, targets) {
   const selectedTargets = normalizeObservationTargets(targets);
   const targetList = selectedTargets ? [...selectedTargets] : TARGET_GROUPS;
   const entries = [];
+  const snapshotPath = safeText(env.FLEET_RELEASE_TARGETS_FILE);
+
+  if (snapshotPath) {
+    for (const target of parseJsonArray(readFileSync(snapshotPath, "utf8"))) {
+      const workload = safeText(target?.workload ?? target?.group);
+      const group = workload === "selfserve" || workload === "azure-selfserve"
+        ? "railway-selfserve"
+        : workload === "ops" || workload === "backup-app" ? workload : "railway-customers";
+      if (target?.provider === "railway" && targetList.includes(group) && target?.railway?.webServiceId && target?.railway?.environmentId) {
+        entries.push({
+          id: safeText(target.id ?? target.deploymentId ?? target.label),
+          label: safeText(target.label ?? target.id),
+          group,
+          projectId: safeText(target.railway.projectId),
+          environmentId: safeText(target.railway.environmentId),
+          webServiceId: safeText(target.railway.webServiceId),
+        });
+      }
+    }
+    return entries;
+  }
 
   if (targetList.includes("railway-customers")) {
     for (const target of parseJsonArray(env.FLEET_RELEASE_TARGETS_JSON)) {
