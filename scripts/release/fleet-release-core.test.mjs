@@ -98,7 +98,7 @@ describe("fleet release core", () => {
     }, manifest)).toEqual(["release.imageTag=old"]);
   });
 
-  it.each(["https://crina.corgtex.com", "https://selfserve.corgtex.com"])(
+  it.each(["https://customer-a.example.test", "https://selfserve.corgtex.com"])(
     "accepts canonical Azure public URLs for %s",
     (origin) => {
       expect(azureRuntimeContractErrors(origin, publicUrlEntries(origin))).toEqual([]);
@@ -106,13 +106,13 @@ describe("fleet release core", () => {
   );
 
   it("rejects origin-only, missing, cross-customer, and secret-backed Azure public URLs", () => {
-    const origin = "https://crina.corgtex.com";
+    const origin = "https://customer-a.example.test";
     expect(azureRuntimeContractErrors(origin, publicUrlEntries(origin, { MCP_PUBLIC_URL: origin }))).toContain(
       `MCP_PUBLIC_URL=${origin}; expected ${origin}/mcp`,
     );
     expect(azureRuntimeContractErrors(origin, publicUrlEntries(origin).filter(({ name }) => name !== "APP_URL"))).toContain("APP_URL is missing");
-    expect(azureRuntimeContractErrors(origin, publicUrlEntries(origin, { NEXT_PUBLIC_APP_URL: "https://other.corgtex.com" }))).toContain(
-      "NEXT_PUBLIC_APP_URL=https://other.corgtex.com; expected https://crina.corgtex.com",
+    expect(azureRuntimeContractErrors(origin, publicUrlEntries(origin, { NEXT_PUBLIC_APP_URL: "https://customer-b.example.test" }))).toContain(
+      "NEXT_PUBLIC_APP_URL=https://customer-b.example.test; expected https://customer-a.example.test",
     );
     const secretBacked = publicUrlEntries(origin).map((entry) => (
       entry.name === "MEETING_RECORDER_PUBLIC_BASE_URL" ? { ...entry, value: null, secretRef: "public-url" } : entry
@@ -121,7 +121,7 @@ describe("fleet release core", () => {
   });
 
   it("requires public MCP OAuth metadata and challenges to agree", () => {
-    const origin = "https://crina.corgtex.com";
+    const origin = "https://customer-a.example.test";
     expect(mcpOAuthProofErrors(origin, oauthProof(origin))).toEqual([]);
     expect(mcpOAuthProofErrors(origin, oauthProof(origin, {
       protectedResource: {
