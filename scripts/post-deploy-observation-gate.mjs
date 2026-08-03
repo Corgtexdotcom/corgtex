@@ -851,18 +851,20 @@ function railwayTargetsFromEnv(env, targets) {
     const missingGroups = new Set(targetList.filter((target) => RAILWAY_TARGET_GROUPS.includes(target)));
     for (const target of snapshot) {
       const workload = safeText(target?.workload ?? target?.group);
-      const group = workload === "selfserve" || workload === "azure-selfserve"
+      const group = workload === "managed-customers" || workload === "railway-customers" ? "railway-customers" : workload === "selfserve" || workload === "azure-selfserve"
         ? "railway-selfserve"
-        : workload === "ops" || workload === "backup-app" ? workload : "railway-customers";
+        : workload === "ops" || workload === "backup-app" ? workload : null;
+      if (target?.provider === "railway" && !group) throw new Error(`FLEET_RELEASE_TARGETS_FILE has an invalid Railway workload for ${safeText(target.id ?? target.label) ?? "target"}.`);
       if (target?.provider === "railway" && targetList.includes(group)) {
-        if (!target?.railway?.webServiceId || !target?.railway?.environmentId) throw new Error(`FLEET_RELEASE_TARGETS_FILE has incomplete Railway metadata for ${safeText(target.id ?? target.label) ?? group}.`);
+        const environmentId = safeText(target?.railway?.environmentId), webServiceId = safeText(target?.railway?.webServiceId);
+        if (!webServiceId || !environmentId) throw new Error(`FLEET_RELEASE_TARGETS_FILE has incomplete Railway metadata for ${safeText(target.id ?? target.label) ?? group}.`);
         entries.push({
           id: safeText(target.id ?? target.deploymentId ?? target.label),
           label: safeText(target.label ?? target.id),
           group,
           projectId: safeText(target.railway.projectId),
-          environmentId: safeText(target.railway.environmentId),
-          webServiceId: safeText(target.railway.webServiceId),
+          environmentId,
+          webServiceId,
         });
         missingGroups.delete(group);
       }
