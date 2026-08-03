@@ -85,6 +85,7 @@ describe("fleet release core", () => {
       cloudProvider: "RAILWAY",
       url: "https://selfserve.corgtex.com",
     })).toMatchObject({ group: "managed-customers", provider: "railway" });
+    expect(targetFromControlPlaneRow({ id: "backup", deploymentKind: "INTERNAL", cloudProvider: "RAILWAY" })).toMatchObject({ group: "backup-app", provider: "railway" });
   });
 
   it("formats progressive rings without UI-specific behavior", () => {

@@ -291,11 +291,8 @@ function validateConfiguredTargetJson(name, raw, invalid) {
     }
     for (const target of parsed) {
       const provider = String(target.provider ?? "").trim().toLowerCase();
-      if (!provider) {
-        invalid.push({ name, reason: `${target.label ?? target.id ?? "target"} must explicitly declare provider` });
-      } else if (!["azure", "railway"].includes(provider)) {
-        invalid.push({ name, reason: `${target.label ?? target.id ?? "target"} has unsupported provider ${provider}` });
-      }
+      if (!provider) invalid.push({ name, reason: `${target.label ?? target.id ?? "target"} must explicitly declare provider` });
+      else if (!["azure", "railway"].includes(provider)) invalid.push({ name, reason: `${target.label ?? target.id ?? "target"} has unsupported provider ${provider}` });
     }
   } catch (error) {
     invalid.push({
@@ -385,18 +382,19 @@ async function resolveLatestStableSha(deps) {
 
 async function discoverTargets(deps) {
   const env = deps.env ?? process.env;
-  const configured = parseTargetJson(env.FLEET_RELEASE_TARGETS_FILE && existsSync(env.FLEET_RELEASE_TARGETS_FILE) ? readFileSync(env.FLEET_RELEASE_TARGETS_FILE, "utf8") : env.FLEET_RELEASE_TARGETS_JSON);
+  const snapshot = env.FLEET_RELEASE_TARGETS_FILE && existsSync(env.FLEET_RELEASE_TARGETS_FILE);
+  const configured = parseTargetJson(snapshot ? readFileSync(env.FLEET_RELEASE_TARGETS_FILE, "utf8") : env.FLEET_RELEASE_TARGETS_JSON);
+  if (snapshot) return dedupeTargets((await Promise.all(configured.map(async (target) => {
+    if (!target.deploymentId) return target;
+    const current = await callControlPlaneTool("get_customer_deployment_status", { deploymentId: target.deploymentId }, deps);
+    return { ...target, deploymentStatus: current.deploymentStatus, provisioningStatus: current.provisioningStatus, releaseEligible: current.releaseEligible ?? target.releaseEligible };
+  }))).map(normalizeTarget));
   const discovered = configured.length > 0 ? [] : await discoverControlPlaneTargets(deps);
   const ineligibleDiscoveredIds = new Set((configured.length > 0 ? [] : discovered).filter((target) => targetEligibilityErrors(target).length > 0).map((target) => target.deploymentId ?? target.id));
   return dedupeTargets([...configured, ...configuredTargets(env).filter((target) => !ineligibleDiscoveredIds.has(target.deploymentId ?? target.id)), ...discovered].map(normalizeTarget));
 }
 
-function configuredTargets(env) { return [
-    ...parseTargetJson(env.FLEET_RELEASE_TARGETS_JSON),
-    ...parseTargetJson(env.FLEET_RELEASE_OPS_TARGET_JSON).map((target) => ({ ...target, group: "ops" })),
-    ...parseTargetJson(env.FLEET_RELEASE_BACKUP_APP_TARGET_JSON).map((target) => ({ ...target, group: "backup-app" })),
-    ...parseTargetJson(env.FLEET_RELEASE_AZURE_TARGET_JSON).map((target) => ({ ...target, group: "selfserve" })),
-  ]; }
+function configuredTargets(env) { return [...parseTargetJson(env.FLEET_RELEASE_TARGETS_JSON), ...parseTargetJson(env.FLEET_RELEASE_OPS_TARGET_JSON).map((target) => ({ ...target, group: "ops" })), ...parseTargetJson(env.FLEET_RELEASE_BACKUP_APP_TARGET_JSON).map((target) => ({ ...target, group: "backup-app" })), ...parseTargetJson(env.FLEET_RELEASE_AZURE_TARGET_JSON).map((target) => ({ ...target, group: "selfserve" }))]; }
 
 function parseTargetJson(raw) {
   if (!raw?.trim()) return [];
@@ -457,6 +455,7 @@ function preflightTarget(target, env, options = {}) {
   const blockers = [...providerBoundaryErrors(target), ...targetEligibilityErrors(target)];
   const requireObservability = options.requireObservability === true;
   if (!target.url) blockers.push("runtime URL is missing");
+  if (target.group === "selfserve" && !target.deploymentId) blockers.push("Self-serve deploymentId is missing for readiness checks");
   if (target.deploymentId && !env.CONTROL_PLANE_AGENT_API_KEY) {
     blockers.push("CONTROL_PLANE_AGENT_API_KEY is missing for verified inventory recording");
   }
@@ -485,7 +484,6 @@ function preflightTarget(target, env, options = {}) {
     }
   } else if (target.provider === "azure") {
     if (target.group !== "selfserve") blockers.push("Managed Azure targets are non-mutable until the generic Azure executor is implemented in PR3");
-    if (target.group === "selfserve" && !target.deploymentId) blockers.push("Azure deploymentId is missing for provider readiness checks");
     if (requireObservability && !optionalText(env.APPLICATIONINSIGHTS_CONNECTION_STRING)) {
       blockers.push("APPLICATIONINSIGHTS_CONNECTION_STRING is missing for Azure observability");
     }
@@ -532,24 +530,24 @@ async function deployTarget(target, manifest, reason, deps) {
     : await deployRailwayTarget(target, manifest, deps);
   const health = await pollHealth(target.url, manifest, deps);
   assertHealthProof(health, manifest, target.label);
-  const usesAzureProviderReadiness = target.group === "selfserve" && target.provider === "azure";
+  const usesSelfServeReadiness = target.group === "selfserve";
   let verifiedRelease = null;
-  if (target.deploymentId && usesAzureProviderReadiness) {
+  if (target.deploymentId && usesSelfServeReadiness) {
     verifiedRelease = await recordVerifiedRelease(target, manifest, reason, deps);
   }
   const providerReadiness = await runProviderReadiness(target, manifest, deps, {
     health,
     verifiedRelease,
   });
-  const postDeployProbe = usesAzureProviderReadiness
-    ? { status: "skipped", reason: "azure_provider_readiness" }
+  const postDeployProbe = usesSelfServeReadiness
+    ? { status: "skipped", reason: "selfserve_provider_readiness" }
     : await runPostDeployProbe(target, manifest, reason, deps, callControlPlaneTool);
-  const postDeploySnapshots = usesAzureProviderReadiness
-    ? { status: "skipped", reason: "azure_provider_readiness" }
+  const postDeploySnapshots = usesSelfServeReadiness
+    ? { status: "skipped", reason: "selfserve_provider_readiness" }
     : target.deploymentId
       ? await refreshPostDeploySnapshots(target, reason, deps)
       : { status: "skipped", reason: "deployment_id_missing" };
-  if (target.deploymentId && !usesAzureProviderReadiness) {
+  if (target.deploymentId && !usesSelfServeReadiness) {
     verifiedRelease = await recordVerifiedRelease(target, manifest, reason, deps);
   }
   return { providerResult, release: health.release, providerReadiness, postDeployProbe, postDeploySnapshots, verifiedRelease };
@@ -565,15 +563,18 @@ async function recordVerifiedRelease(target, manifest, reason, deps) {
 }
 
 async function runProviderReadiness(target, manifest, deps, proof = {}) {
-  if (target.group !== "selfserve" || target.provider !== "azure") {
-    return { status: "skipped", reason: "not_azure_selfserve" };
+  if (target.group !== "selfserve") {
+    return { status: "skipped", reason: "not_selfserve" };
   }
-  const providerStatus = await callControlPlaneTool("get_azure_provider_status", {
-    deploymentId: target.deploymentId,
-  }, deps);
+  const providerStatus = target.provider === "azure" ? await callControlPlaneTool("get_azure_provider_status", { deploymentId: target.deploymentId }, deps) : null;
   const registry = await callControlPlaneTool("list_self_serve_customers", {
     take: 25,
   }, deps);
+  const registryUnavailable = !Array.isArray(registry?.items) || !registry?.summary || typeof registry.summary !== "object";
+  if (target.provider !== "azure") {
+    if (registryUnavailable) throw new Error(`${target.label} self-serve readiness failed: selfServeRegistry=unavailable`);
+    return { status: "ok", provider: target.provider, deploymentId: target.deploymentId, registrySummary: registry.summary };
+  }
 
   const blockers = [];
   if (providerStatus?.provider?.cloudProvider !== "AZURE") {
@@ -593,7 +594,7 @@ async function runProviderReadiness(target, manifest, deps, proof = {}) {
   if (!releaseProof.ok && providerStatus?.release?.releaseDrift) {
     blockers.push("releaseDrift=open");
   }
-  if (!Array.isArray(registry?.items) || !registry?.summary || typeof registry.summary !== "object") {
+  if (registryUnavailable) {
     blockers.push("selfServeRegistry=unavailable");
   }
   if (blockers.length > 0) {

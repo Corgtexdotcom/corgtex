@@ -98,15 +98,9 @@ export function normalizeTargets(value = "default") {
   return [...new Set(selected)];
 }
 
-export function normalizeTargetGroup(value) {
-  const group = String(value ?? "").trim().toLowerCase();
-  return TARGET_GROUP_ALIASES[group] ?? group;
-}
+export function normalizeTargetGroup(value) { const group = String(value ?? "").trim().toLowerCase(); return TARGET_GROUP_ALIASES[group] ?? group; }
 
-export function targetSelectionDeprecations(value) {
-  const selected = String(value ?? "").split(",").map((part) => part.trim()).filter(Boolean);
-  return selected.filter((group) => TARGET_GROUP_ALIASES[group]).map((group) => `${group} is deprecated; use ${TARGET_GROUP_ALIASES[group]} and declare provider per target`);
-}
+export function targetSelectionDeprecations(value) { const selected = String(value ?? "").split(",").map((part) => part.trim()).filter(Boolean); return selected.filter((group) => TARGET_GROUP_ALIASES[group]).map((group) => `${group} is deprecated; use ${TARGET_GROUP_ALIASES[group]} and declare provider per target`); }
 
 export function buildReleaseManifest({
   gitSha,
@@ -257,13 +251,14 @@ export function targetFromControlPlaneRow(row) {
   const label = row.label ?? row.customerName ?? row.name ?? row.customerSlug ?? row.id;
   const url = row.url ?? row.runtimeUrl ?? row.supportBaseUrl;
   const provider = cloudProvider === "AZURE" ? "azure" : cloudProvider === "RAILWAY" ? "railway" : null;
+  const workload = normalizeTargetGroup(row.workload ?? (row.deploymentKind === "INTERNAL" ? "backup-app" : "managed-customers"));
   return {
     id: row.id ?? row.deploymentId ?? label,
     deploymentId: row.id ?? row.deploymentId ?? null,
     label,
     url,
-    group: "managed-customers",
-    workload: "managed-customers",
+    group: workload,
+    workload,
     provider,
     deploymentStatus: row.deploymentStatus ?? null,
     provisioningStatus: row.provisioningStatus ?? null,
@@ -284,33 +279,18 @@ export function targetFromControlPlaneRow(row) {
 
 export function filterTargetsByGroups(targets, groups, options = {}) {
   const selected = new Set(groups);
-  const excludeIneligible = options.excludeIneligible === true;
-  return targets.filter((target) => selected.has(target.group)
-    && (!excludeIneligible || targetEligibilityErrors(target).length === 0));
+  return targets.filter((target) => selected.has(target.group) && (options.excludeIneligible !== true || targetEligibilityErrors(target).length === 0));
 }
 
 export function targetEligibilityErrors(target) {
-  const statuses = [target.deploymentStatus, target.provisioningStatus, target.status]
-    .map((value) => String(value ?? "").trim().toUpperCase())
-    .filter(Boolean);
-  const errors = statuses
-    .filter((status) => INELIGIBLE_STATUSES.has(status))
-    .map((status) => `Target lifecycle status ${status} is not release-eligible`);
+  const statuses = [target.deploymentStatus, target.provisioningStatus, target.status].map((value) => String(value ?? "").trim().toUpperCase()).filter(Boolean);
+  const errors = statuses.filter((status) => INELIGIBLE_STATUSES.has(status)).map((status) => `Target lifecycle status ${status} is not release-eligible`);
   if (target.releaseEligible === false) errors.push("Target explicitly sets releaseEligible=false");
   return [...new Set(errors)];
 }
 
 function providerResourceTarget(target) {
-  if (target.provider === "azure") {
-    return { resourceGroup: target.azure?.resourceGroup ?? null, acrName: target.azure?.acrName ?? null, webAppName: target.azure?.webAppName ?? null, workerAppName: target.azure?.workerAppName ?? null };
-  }
-  if (target.provider === "railway") {
-    return {
-      projectId: target.railway?.projectId ?? null,
-      environmentId: target.railway?.environmentId ?? null,
-      webServiceId: target.railway?.webServiceId ?? null,
-      workerServiceId: target.railway?.workerServiceId ?? null,
-    };
-  }
+  if (target.provider === "azure") return { resourceGroup: target.azure?.resourceGroup ?? null, acrName: target.azure?.acrName ?? null, webAppName: target.azure?.webAppName ?? null, workerAppName: target.azure?.workerAppName ?? null };
+  if (target.provider === "railway") return { projectId: target.railway?.projectId ?? null, environmentId: target.railway?.environmentId ?? null, webServiceId: target.railway?.webServiceId ?? null, workerServiceId: target.railway?.workerServiceId ?? null };
   return null;
 }
