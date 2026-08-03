@@ -604,6 +604,7 @@ describe("fleet release runner", () => {
   });
 
   it("prints a dry-run plan without mutating providers", async () => {
+    const outputs = {};
     const runCommand = vi.fn();
     const fetchImpl = vi.fn();
 
@@ -624,15 +625,18 @@ describe("fleet release runner", () => {
       runCommand,
       fetchImpl,
       sleep: vi.fn(),
+      emitGithubOutput: (key, value) => { outputs[key] = value; },
     });
 
     expect(result.dryRun).toBe(true);
     expect(runCommand).not.toHaveBeenCalled();
     expect(fetchImpl).not.toHaveBeenCalled();
     expect(result.targets).toHaveLength(1);
+    expect(outputs).toMatchObject({ uses_azure: false, uses_railway: true, observation_targets: "ops" });
   });
 
   it("defaults dry-run plans to primary targets and excludes backup app", async () => {
+    const outputs = {};
     const result = await runFleetRelease([
       "deploy",
       "--release",
@@ -670,6 +674,7 @@ describe("fleet release runner", () => {
       runCommand: vi.fn(),
       fetchImpl: vi.fn(),
       sleep: vi.fn(),
+      emitGithubOutput: (key, value) => { outputs[key] = value; },
     });
 
     expect(result.targets.map((target) => target.group)).toEqual([
@@ -678,6 +683,7 @@ describe("fleet release runner", () => {
       "selfserve",
     ]);
     expect(result.targets.some((target) => target.group === "backup-app")).toBe(false);
+    expect(outputs.observation_targets).toBe("railway-customers,azure-selfserve,ops");
   });
 
   it("fails preflight before mutation when provider credentials are missing", async () => {
@@ -968,7 +974,20 @@ describe("fleet release runner", () => {
     expect(result.blockers).toEqual([]);
     expect(result.targets).toHaveLength(1);
     expect(result.targets[0]).toMatchObject({ group: "selfserve", provider: "azure" });
-    expect(outputs).toMatchObject({ uses_azure: true, uses_railway: false });
+    expect(outputs).toMatchObject({ uses_azure: true, uses_railway: false, observation_targets: "azure-selfserve" });
+  });
+
+  it.each([
+    ["Railway", [{ id: "railway", cloudProvider: "RAILWAY" }], /RAILWAY_API_TOKEN/],
+    ["Azure", [{ id: "azure", cloudProvider: "AZURE" }], /AZURE_CLIENT_ID/],
+    ["mixed", [{ id: "railway", cloudProvider: "RAILWAY" }, { id: "azure", cloudProvider: "AZURE" }], /RAILWAY_API_TOKEN.*AZURE_CLIENT_ID/],
+  ])("validates credentials for discovered %s inventory", async (_label, rows, expected) => {
+    await expect(runFleetRelease([
+      "validate-config", "--release", SHA, "--targets", "managed-customers", "--dry-run", "false",
+    ], {
+      env: { CONTROL_PLANE_AGENT_API_KEY: "control-plane-key", GITHUB_TOKEN: "github-token", POSTHOG_ENABLED: "true", POSTHOG_PROJECT_TOKEN: "posthog-token", APPLICATIONINSIGHTS_CONNECTION_STRING: "InstrumentationKey=review" },
+      fetchImpl: vi.fn(async () => controlPlaneResult(rows)),
+    })).rejects.toThrow(expected);
   });
 
   it("validates mixed-provider credentials against each target", async () => {

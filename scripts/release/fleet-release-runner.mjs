@@ -42,7 +42,7 @@ export async function runFleetRelease(argv = process.argv.slice(2), deps = {}) {
   const args = parseKeyValueArgs(argv);
   const command = args._[0] ?? "deploy";
   if (command === "validate-config") {
-    const validation = validateReleaseEnvironment(args, deps.env ?? process.env);
+    const validation = await validateReleaseEnvironment(args, deps.env ?? process.env, deps);
     console.log(JSON.stringify({ stage: "config-validation", ...validation }, null, 2));
     if (!validation.ok) {
       throw new Error(formatConfigValidationFailure(validation));
@@ -96,6 +96,7 @@ export async function runFleetRelease(argv = process.argv.slice(2), deps = {}) {
   const providers = new Set(targets.map((target) => target.provider));
   emitGithubOutput("uses_azure", providers.has("azure"), deps);
   emitGithubOutput("uses_railway", providers.has("railway"), deps);
+  emitGithubOutput("observation_targets", observationTargetsFor(targets).join(","), deps);
 
   const preflight = targets.map((target) => ({
     target,
@@ -188,7 +189,7 @@ async function resolveManifest(args, deps) {
   });
 }
 
-function validateReleaseEnvironment(args, env) {
+async function validateReleaseEnvironment(args, env, deps = {}) {
   const release = normalizeReleaseInput(args.release ?? env.FLEET_RELEASE_INPUT ?? "latest-stable");
   const selectedGroups = normalizeTargets(args.targets ?? env.FLEET_RELEASE_TARGETS);
   const dryRun = parseBoolean(args.dryRun ?? env.FLEET_RELEASE_DRY_RUN, false);
@@ -246,7 +247,11 @@ function validateReleaseEnvironment(args, env) {
 
   if (!dryRun) {
     if (!env.CONTROL_PLANE_AGENT_API_KEY?.trim()) missing.push("CONTROL_PLANE_AGENT_API_KEY");
-    const selectedProviders = new Set(configuredTargets(env).map(normalizeTarget)
+    const providerInventory = selectedGroups.includes("managed-customers") && !env.FLEET_RELEASE_TARGETS_JSON?.trim()
+      && env.CONTROL_PLANE_AGENT_API_KEY?.trim()
+      ? await discoverTargets({ ...deps, env })
+      : configuredTargets(env).map(normalizeTarget);
+    const selectedProviders = new Set(providerInventory
       .filter((target) => selectedGroups.includes(target.group))
       .map((target) => target.provider));
     const includesRailwayTarget = selectedProviders.has("railway");
@@ -276,6 +281,15 @@ function validateReleaseEnvironment(args, env) {
     missing: [...new Set(missing)],
     invalid,
   };
+}
+
+function observationTargetsFor(targets) {
+  const selected = new Set(targets.map((target) => target.provider === "azure"
+    ? "azure-selfserve"
+    : target.provider === "railway" ? (["ops", "backup-app"].includes(target.group) ? target.group : "railway-customers") : null)
+    .filter(Boolean));
+  return ["railway-customers", "azure-selfserve", "ops", "backup-app"]
+    .filter((target) => selected.has(target));
 }
 
 function validateConfiguredTargetJson(name, raw, invalid) {

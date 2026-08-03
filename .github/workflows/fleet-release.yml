@@ -244,7 +244,7 @@ jobs:
         if: ${{ !inputs.dry_run }}
         env:
           MANIFEST_JSON: ${{ steps.manifest.outputs.manifest_json }}
-          TARGETS_INPUT: ${{ inputs.targets }}
+          TARGETS_INPUT: ${{ steps.preflight.outputs.observation_targets }}
           AZURE_APPLICATIONINSIGHTS_APP_NAME: ${{ vars.AZURE_APPLICATIONINSIGHTS_APP_NAME || 'appi-corgtex-ss-prod' }}
           AZURE_APPLICATIONINSIGHTS_RESOURCE_GROUP: ${{ vars.AZURE_APPLICATIONINSIGHTS_RESOURCE_GROUP || 'rg-corgtex-selfserve-production-wus3' }}
           POSTHOG_PROJECT_ID: ${{ vars.POSTHOG_PROJECT_ID }}
