@@ -5,6 +5,7 @@ import {
 } from "@corgtex/domain";
 import { WorkspaceEmptyState, WorkspacePageHeader, WorkspaceSubnav } from "@/lib/components/ControlPrimitives";
 import { FinanceReportImportPanel } from "./FinanceReportImportPanel";
+import { financeImportCanWrite } from "./financeReportImportView";
 
 type FinanceReadiness = Awaited<ReturnType<typeof getFinanceReadiness>>;
 
@@ -45,10 +46,12 @@ export function FinanceWorkspaceView({
   workspaceId,
   sectionKey,
   readiness,
+  demoReadOnly = false,
 }: {
   workspaceId: string;
   sectionKey: FinanceSectionKey;
   readiness: FinanceReadiness;
+  demoReadOnly?: boolean;
 }) {
   const activeSection = FINANCE_SECTIONS.find((section) => section.key === sectionKey) ?? FINANCE_SECTIONS[0];
   const readinessByKey = new Map(readiness.flags.map((section) => [section.key, section]));
@@ -56,6 +59,7 @@ export function FinanceWorkspaceView({
   const enabled = Boolean(activeReadiness?.enabled);
   const count = sectionCount(readiness, activeSection.key);
   const showReportImports = activeSection.key === "reports" && enabled && readiness.capabilities.reportImports;
+  const canWrite = financeImportCanWrite(readiness.access.canWrite, demoReadOnly);
 
   return (
     <div className="stack">
@@ -64,7 +68,7 @@ export function FinanceWorkspaceView({
         description="Native Finance V2 runs inside Corgtex and uses workspace-scoped Finance records."
         meta={(
           <>
-            <span className="status-chip">{readiness.access.canWrite ? "Write access" : "Read access"}</span>
+            <span className="status-chip">{demoReadOnly ? "Read-only demo" : canWrite ? "Write access" : "Read access"}</span>
             {readiness.access.financeAllMemberWrite && <span className="status-chip">All-member write</span>}
             {showReportImports && <span className="status-chip">Report imports enabled</span>}
             <span className="status-chip">{readiness.retiredPracticeLedger.retired ? "Standalone ledger retired" : "Ledger review needed"}</span>
@@ -103,7 +107,7 @@ export function FinanceWorkspaceView({
       </div>
 
       {showReportImports ? (
-        <FinanceReportImportPanel workspaceId={workspaceId} canWrite={readiness.access.canWrite} />
+        <FinanceReportImportPanel workspaceId={workspaceId} canWrite={canWrite} />
       ) : (
         <WorkspaceEmptyState
           className="finance-empty-state"

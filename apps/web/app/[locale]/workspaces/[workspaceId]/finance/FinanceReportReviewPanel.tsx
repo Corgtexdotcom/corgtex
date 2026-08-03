@@ -1,10 +1,12 @@
 "use client";
 
 import { type FormEvent, useMemo, useState } from "react";
+import { Dialog } from "@/lib/components/Dialog";
 import {
-  financeDerivedTotal,
   financeImportCandidateVersions,
+  financeImportReviewAmounts,
   financeImportVisibleCandidates,
+  formatFinanceAccountPathInput,
   parseFinanceAccountPath,
   parseFinanceAmountInput,
   type FinanceImportCandidateDetail,
@@ -33,9 +35,7 @@ function label(value: string) {
 
 function CandidateRow({ candidate, detail, canWrite, busy, onPatch }: { candidate: FinanceImportCandidateDetail; detail: FinanceImportDetail;
   canWrite: boolean; busy: boolean; onPatch: (body: object, fallback: string) => Promise<void> }) {
-  const derived = financeDerivedTotal(candidate, detail.candidates);
-  const proposed = derived ?? candidate.amountCents;
-  const difference = candidate.currentAmountCents === null ? null : proposed - candidate.currentAmountCents;
+  const { current, proposed, difference, derived } = financeImportReviewAmounts(candidate, detail.candidates);
   const immutable = ["REJECTED", "APPLIED"].includes(candidate.reviewState);
   const canEdit = canWrite && candidate.factKind === "LEAF" && !immutable && detail.stage !== "APPLIED";
   const canReview = canWrite && !immutable && detail.stage !== "APPLIED";
@@ -61,14 +61,14 @@ function CandidateRow({ candidate, detail, canWrite, busy, onPatch }: { candidat
   }
 
   return <article className={`finance-import-review-row ${candidate.reviewState.toLowerCase()}`}>
-    <div className="finance-import-review-main">
-      <div className="finance-import-account" style={{ paddingInlineStart: `${Math.max(0, candidate.proposedAccountPath.length - 1) * 14}px` }}>
+      <div className="finance-import-review-main">
+      <div className={`finance-import-account finance-import-depth-${Math.min(6, Math.max(0, candidate.proposedAccountPath.length - 1))}`}>
         <small>{candidate.sourceLabel}</small><strong>{candidate.proposedAccountPath.at(-1) ?? candidate.sourceLabel}</strong>
         <span>{candidate.proposedAccountPath.join(" / ")}</span>
       </div>
-      <div><small>Current</small><strong>{money(candidate.currentAmountCents, detail.resolvedCurrency)}</strong></div>
-      <div><small>{candidate.factKind === "DERIVED" ? "Recalculated" : "Proposed"}</small><strong>{money(proposed, detail.resolvedCurrency)}</strong></div>
-      <div><small>Change</small><strong>{money(difference, detail.resolvedCurrency)}</strong></div>
+      <div><small>{derived ? "Reported total" : "Current"}</small><strong>{money(current, detail.resolvedCurrency)}</strong></div>
+      <div><small>{derived ? "Recalculated" : "Proposed"}</small><strong>{money(proposed, detail.resolvedCurrency)}</strong></div>
+      <div className={derived && difference !== null && difference !== 0 ? "finance-import-derived-mismatch" : undefined}><small>{derived ? "Variance" : "Change"}</small><strong>{money(difference, detail.resolvedCurrency)}</strong></div>
       <div className="finance-import-row-status"><span className={`status-chip ${["WARNING", "BLOCKED"].includes(candidate.reviewState) ? "warning" : ""}`}>{label(candidate.reviewState)}</span><small>{label(candidate.action)}</small></div>
     </div>
     <details className="finance-import-evidence">
@@ -85,7 +85,7 @@ function CandidateRow({ candidate, detail, canWrite, busy, onPatch }: { candidat
       </div>
     </details>
     {canEdit && <form className="finance-import-inline-edit" key={`${candidate.id}:${candidate.version}`} onSubmit={(event) => { void edit(event); }}>
-      <label><span>Account path</span><input name="path" defaultValue={candidate.proposedAccountPath.join(" / ")} /></label>
+      <label><span>Account path</span><input name="path" defaultValue={formatFinanceAccountPathInput(candidate.proposedAccountPath)} /><small>Use / between levels and \/ for a slash in a name.</small></label>
       <label><span>Amount</span><input name="amount" inputMode="decimal" defaultValue={(candidate.amountCents / 100).toFixed(2)} /></label>
       <label><span>From</span><input name="periodStart" type="date" defaultValue={candidate.periodStart.slice(0, 10)} /></label>
       <label><span>To</span><input name="periodEnd" type="date" defaultValue={candidate.periodEnd.slice(0, 10)} /></label>
@@ -158,6 +158,8 @@ export function FinanceReportReviewPanel({ workspaceId, canWrite, detail, onChan
       <a className="ghost small" href={`/workspaces/${workspaceId}/brain/sources`}>View in Brain</a>
       <span>{detail.title ?? detail.originalFilename} · {date(detail.periodStart)} – {date(detail.periodEnd)} · {detail.resolvedCurrency}</span>
     </div>
+    {detail.warnings.length > 0 && <div className="finance-import-report-warnings" role="status"><strong>Report warnings</strong><ul>{detail.warnings.map((warning, index) =>
+      <li key={`${warning.code}:${index}`}><span>{warning.message}</span>{warning.evidenceClaimIds.length > 0 && <small>Evidence: {warning.evidenceClaimIds.join(", ")}</small>}</li>)}</ul></div>}
     {error && <p className="finance-import-error" role="alert">{error}</p>}
     <div className="finance-import-review-list">{visible.map((candidate) => <CandidateRow key={candidate.id} candidate={candidate} detail={detail}
       canWrite={canWrite} busy={busy} onPatch={patch} />)}</div>
@@ -167,12 +169,13 @@ export function FinanceReportReviewPanel({ workspaceId, canWrite, detail, onChan
       <button type="button" className="secondary" disabled={busy || blockers || reviewVersions.length === 0} onClick={() => setConfirmAll(true)}>Approve everything as proposed</button>
       {approvedCount > 0 && <button type="button" className="ghost" disabled={busy} onClick={() => { void applyApproved(); }}>Apply approved versions ({approvedCount})</button>}
     </div> : <div className="finance-import-notice"><strong>{detail.stage === "APPLIED" ? "Application complete" : "Read-only review"}</strong><span>{detail.stage === "APPLIED" ? "Receipts remain available with each row." : "Finance write access is required to edit, approve, or apply proposals."}</span></div>}
-    {confirmAll && <div className="finance-import-confirm-all" role="dialog" aria-label="Confirm all proposals">
-      <strong>Approve every non-blocked proposal?</strong><p>This includes {detail.addCount} new and {detail.updateCount} updated value(s){warnings ? `, with ${detail.warningCount} warning(s)` : ""}.</p>
-      {warnings && <label><input type="checkbox" checked={acceptWarnings} onChange={(event) => setAcceptWarnings(event.target.checked)} /> I reviewed and accept the included warnings.</label>}
-      <div><button type="button" className="primary" disabled={busy || (warnings && !acceptWarnings)} onClick={() => { void approveAll(); }}>Confirm approval</button>
-        <button type="button" className="ghost" disabled={busy} onClick={() => setConfirmAll(false)}>Cancel</button></div>
-    </div>}
+    <Dialog open={confirmAll} onClose={() => setConfirmAll(false)} title="Approve every non-blocked proposal?">
+      <div className="finance-import-confirm-all"><p>This includes {detail.addCount} new and {detail.updateCount} updated value(s){warnings ? `, with ${detail.warningCount} warning(s)` : ""}.</p>
+        {detail.warnings.length > 0 && <ul>{detail.warnings.map((warning, index) => <li key={`${warning.code}:dialog:${index}`}>{warning.message}</li>)}</ul>}
+        {warnings && <label><input type="checkbox" checked={acceptWarnings} onChange={(event) => setAcceptWarnings(event.target.checked)} /> I reviewed and accept the included warnings.</label>}
+        <div><button type="button" className="primary" disabled={busy || (warnings && !acceptWarnings)} onClick={() => { void approveAll(); }}>Confirm approval</button>
+          <button type="button" className="ghost" disabled={busy} onClick={() => setConfirmAll(false)}>Cancel</button></div></div>
+    </Dialog>
     <details className="finance-import-history"><summary>Import history and audit receipt</summary><p>Uploaded by {detail.uploadedByUserId} on {date(detail.createdAt)}. Last updated {date(detail.updatedAt)}.</p>
       <p>Agent run {detail.agentRunId ?? "—"} · Workflow job {detail.workflowJobId ?? "—"} · Currency {detail.currencyResolutionSource ? label(detail.currencyResolutionSource) : "unresolved"}.</p>
       <p>Applied {detail.appliedAt ? `${date(detail.appliedAt)} by ${detail.appliedByUserId}` : "not yet"}. {detail.rejectedCount} rejected; {detail.appliedCount} applied.</p></details>

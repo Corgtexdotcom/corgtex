@@ -4,10 +4,13 @@ import {
   buildFinanceImportView,
   financeDerivedTotal,
   financeImportCanRetryExactFile,
+  financeImportCanWrite,
   financeImportCandidateVersions,
   financeImportNeedsFullDetail,
   financeImportNeedsPolling,
+  financeImportReviewAmounts,
   financeImportVisibleCandidates,
+  formatFinanceAccountPathInput,
   numericFormatLabel,
   parseFinanceAccountPath,
   parseFinanceAmountInput,
@@ -90,7 +93,15 @@ describe("Finance report import view", () => {
     expect(parseFinanceAmountInput("12.345")).toBeNull();
     expect(parseFinanceAmountInput("21474836.48")).toBeNull();
     expect(parseFinanceAccountPath(" Gross contribution / Product revenue ")).toEqual(["Gross contribution", "Product revenue"]);
+    expect(parseFinanceAccountPath("Revenue \\/ domestic / Product")).toEqual(["Revenue / domestic", "Product"]);
+    expect(formatFinanceAccountPathInput(["Revenue / domestic", "Back\\slash"])).toBe("Revenue \\/ domestic / Back\\\\slash");
     expect(parseFinanceAccountPath(" / ")).toBeNull();
+  });
+
+  it("keeps the public demo read-only even when its seeded member can write Finance", () => {
+    expect(financeImportCanWrite(true, true)).toBe(false);
+    expect(financeImportCanWrite(true, false)).toBe(true);
+    expect(financeImportCanWrite(false, false)).toBe(false);
   });
 
   it("recalculates derived totals from non-rejected descendant leaves", () => {
@@ -100,6 +111,9 @@ describe("Finance report import view", () => {
       row("rejected", { amountCents: 999, reviewState: "REJECTED", proposedAccountPath: ["Gross contribution", "Other"] })];
     expect(financeDerivedTotal(derived, rows)).toBe(175_000);
     expect(financeDerivedTotal(rows[1]!, rows)).toBeNull();
+    expect(financeImportReviewAmounts(derived, rows)).toMatchObject({ current: 100, proposed: 175_000, difference: 174_900, derived: true });
+    expect(financeImportReviewAmounts(row("new", { action: "ADD", amountCents: 250, currentAmountCents: null }), []))
+      .toMatchObject({ current: null, proposed: 250, difference: 250, derived: false });
   });
 });
 

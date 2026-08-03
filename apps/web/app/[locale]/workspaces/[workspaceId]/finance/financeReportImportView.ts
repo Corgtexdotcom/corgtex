@@ -145,6 +145,10 @@ export function financeImportCandidateVersions(candidates: FinanceImportCandidat
     .map(({ id, version }) => ({ id, expectedVersion: version }));
 }
 
+export function financeImportCanWrite(canWrite: boolean, demoReadOnly: boolean) {
+  return canWrite && !demoReadOnly;
+}
+
 export function financeImportVisibleCandidates(candidates: FinanceImportCandidateDetail[], showAll: boolean) {
   return [...candidates].filter((candidate) => showAll || candidate.factKind === "DERIVED"
     || ["ADD", "UPDATE", "CONFLICT"].includes(candidate.action) || ["WARNING", "BLOCKED", "APPROVED"].includes(candidate.reviewState))
@@ -161,8 +165,29 @@ export function parseFinanceAmountInput(value: string) {
 }
 
 export function parseFinanceAccountPath(value: string) {
-  const path = value.split("/").map((part) => part.trim()).filter(Boolean);
-  return path.length > 0 && path.length <= 100 && path.every((part) => part.length <= 500) ? path : null;
+  const path: string[] = [];
+  let part = "";
+  let escaped = false;
+  for (const character of value) {
+    if (escaped) {
+      part += character;
+      escaped = false;
+    } else if (character === "\\") {
+      escaped = true;
+    } else if (character === "/") {
+      path.push(part.trim());
+      part = "";
+    } else {
+      part += character;
+    }
+  }
+  if (escaped) return null;
+  path.push(part.trim());
+  return path.length > 0 && path.length <= 100 && path.every((component) => component.length > 0 && component.length <= 500) ? path : null;
+}
+
+export function formatFinanceAccountPathInput(path: string[]) {
+  return path.map((part) => part.replaceAll("\\", "\\\\").replaceAll("/", "\\/")).join(" / ");
 }
 
 export function financeDerivedTotal(candidate: FinanceImportCandidateDetail, candidates: FinanceImportCandidateDetail[]) {
@@ -174,6 +199,17 @@ export function financeDerivedTotal(candidate: FinanceImportCandidateDetail, can
   if (descendants.length === 0) return null;
   const total = descendants.reduce((sum, row) => sum + BigInt(row.amountCents), 0n);
   return total >= -2_147_483_648n && total <= 2_147_483_647n ? Number(total) : null;
+}
+
+export function financeImportReviewAmounts(candidate: FinanceImportCandidateDetail, candidates: FinanceImportCandidateDetail[]) {
+  const derived = candidate.factKind === "DERIVED";
+  const recalculated = financeDerivedTotal(candidate, candidates);
+  const current = derived ? candidate.amountCents : candidate.currentAmountCents;
+  const proposed = derived ? recalculated : candidate.amountCents;
+  const difference = derived ? (recalculated === null ? null : recalculated - candidate.amountCents)
+    : candidate.action === "ADD" ? candidate.amountCents
+      : candidate.currentAmountCents === null ? null : candidate.amountCents - candidate.currentAmountCents;
+  return { current, proposed, difference, derived };
 }
 
 export function amountScaleLabel(scale: FinanceImportDetail["clarification"]["numericFormat"]["amountScale"]) {
