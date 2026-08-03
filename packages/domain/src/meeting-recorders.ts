@@ -3421,7 +3421,7 @@ export async function processMeetingRecorderWebhook(provider: MeetingRecorderPro
     const r = recording;
     providerEvent = await prisma.$transaction(async (tx) => {
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`${r.workspaceId}:${r.meetingId}:${provider}:transcript`}, 0))`;
-      return tx.meetingRecorderProviderEvent.upsert({
+      const upserted = await tx.meetingRecorderProviderEvent.upsert({
         where: { dedupeKey },
         update: { receivedAt: new Date() },
         create: {
@@ -3436,6 +3436,9 @@ export async function processMeetingRecorderWebhook(provider: MeetingRecorderPro
           redactedAt: new Date(),
         },
       });
+      const refreshed = await tx.meetingRecording.findUnique({ where: { id: r.id } });
+      if (refreshed) recording = refreshed;
+      return upserted;
     }, { timeout: 120_000 });
   } else {
     providerEvent = await prisma.meetingRecorderProviderEvent.upsert({
@@ -3544,8 +3547,8 @@ async function applyWebhookState(recording: MeetingRecording, event: ProviderWeb
   if (event.startedAt) data.startedAt = event.startedAt;
   if (event.endedAt) data.endedAt = event.endedAt;
   if (event.durationSeconds !== null) data.durationSeconds = Math.max(0, Math.round(event.durationSeconds));
-  if (event.failureCode) data.failureCode = event.failureCode;
-  if (event.failureMessage) data.failureMessage = event.failureMessage;
+  if (event.failureCode && !isLocalTerminalState) data.failureCode = event.failureCode;
+  if (event.failureMessage && !isLocalTerminalState) data.failureMessage = event.failureMessage;
   if (Object.keys(data).length === 0) return recording;
   return prisma.meetingRecording.update({
     where: { id: recording.id },
