@@ -846,7 +846,9 @@ function railwayTargetsFromEnv(env, targets) {
   const snapshotPath = safeText(env.FLEET_RELEASE_TARGETS_FILE);
 
   if (snapshotPath) {
-    for (const target of parseJsonArray(readFileSync(snapshotPath, "utf8"))) {
+    const snapshot = JSON.parse(readFileSync(snapshotPath, "utf8"));
+    if (!Array.isArray(snapshot)) throw new Error("FLEET_RELEASE_TARGETS_FILE must contain a JSON array.");
+    for (const target of snapshot) {
       const workload = safeText(target?.workload ?? target?.group);
       const group = workload === "selfserve" || workload === "azure-selfserve"
         ? "railway-selfserve"
