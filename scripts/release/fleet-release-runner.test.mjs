@@ -986,7 +986,7 @@ describe("fleet release runner", () => {
   ])("validates credentials for discovered %s inventory", async (_label, rows, expected) => {
     await expect(runFleetRelease(["validate-config", "--release", SHA, "--targets", "managed-customers", "--dry-run", "false"], {
       env: { CONTROL_PLANE_AGENT_API_KEY: "control-plane-key", GITHUB_TOKEN: "github-token", POSTHOG_ENABLED: "true", POSTHOG_PROJECT_TOKEN: "posthog-token", APPLICATIONINSIGHTS_CONNECTION_STRING: "InstrumentationKey=review" },
-      fetchImpl: vi.fn(async () => controlPlaneResult(rows)),
+      fetchImpl: vi.fn(async (_url, init) => { expect(JSON.parse(init.body).params.arguments).toEqual({ includeAllDeployments: true }); return controlPlaneResult(rows); }),
     })).rejects.toThrow(expected);
   });
 
@@ -1028,22 +1028,22 @@ describe("fleet release runner", () => {
     })).rejects.toThrow("non-mutable until the generic Azure executor is implemented in PR3");
   });
 
-  it("excludes retired providers broadly and blocks explicit mutation", async () => {
-    const env = { FLEET_RELEASE_TARGETS_JSON: azureTargetJson({ id: "retired", group: "managed-customers", deploymentStatus: "RETIRED" }),
+  it("discovers active replacements, deduplicates self-serve, and blocks retired mutation", async () => {
+    const rows = [{ id: "retired", cloudProvider: "RAILWAY", deploymentStatus: "RETIRED" }, { id: "active", cloudProvider: "RAILWAY", deploymentStatus: "ACTIVE" }, { id: "dep-azure", cloudProvider: "AZURE", deploymentStatus: "ACTIVE" }];
+    const env = { FLEET_RELEASE_AZURE_TARGET_JSON: azureTargetJson(),
       FLEET_RELEASE_OPS_TARGET_JSON: targetJson(),
       CONTROL_PLANE_AGENT_API_KEY: "control-plane-key", RAILWAY_API_TOKEN: "railway-token",
       GITHUB_TOKEN: "github-token", ...railwayObservabilityEnv,
     };
-    await expect(runFleetRelease(["validate-config", "--release", SHA, "--targets", "all"], { env: { ...env, FLEET_RELEASE_AZURE_TARGET_JSON: azureTargetJson({ deploymentStatus: "RETIRED" }), FLEET_RELEASE_BACKUP_APP_TARGET_JSON: targetJson({ id: "backup", group: "backup-app" }) } })).resolves.toMatchObject({ ok: true });
     const broad = await runFleetRelease([
-      "deploy", "--release", SHA, "--targets", "managed-customers,selfserve,ops,backup-app", "--dry-run", "--reason", "Validate broad selection.",
-    ], { env, runCommand: vi.fn(), fetchImpl: vi.fn(), sleep: vi.fn() });
-    expect(broad.targets.map((target) => target.id)).toEqual(["ops"]);
+      "deploy", "--release", SHA, "--targets", "managed-customers,selfserve,ops", "--dry-run", "--reason", "Validate broad selection.",
+    ], { env, runCommand: vi.fn(), fetchImpl: vi.fn(async () => controlPlaneResult(rows)), sleep: vi.fn() });
+    expect(broad.targets.map((target) => [target.id, target.group])).toEqual([["ops", "ops"], ["azure", "selfserve"], ["active", "managed-customers"]]);
 
     await expect(runFleetRelease([
       "deploy", "--release", SHA, "--targets", "managed-customers",
       "--dry-run", "--fail-on-blockers", "--reason", "Validate explicit selection.",
-    ], { env, runCommand: vi.fn(), fetchImpl: vi.fn(), sleep: vi.fn() }))
+    ], { env, runCommand: vi.fn(), fetchImpl: vi.fn(async () => controlPlaneResult(rows)), sleep: vi.fn() }))
       .rejects.toThrow("Target lifecycle status RETIRED is not release-eligible");
   });
 

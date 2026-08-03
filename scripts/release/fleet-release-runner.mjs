@@ -104,10 +104,7 @@ export async function runFleetRelease(argv = process.argv.slice(2), deps = {}) {
   }));
   const blockers = preflight.filter((item) => item.blockers.length > 0);
   const planTargets = preflight.map(({ target, blockers: targetBlockers }) => ({ ...target, blockers: targetBlockers }));
-  const deprecations = [
-    ...targetSelectionDeprecations(targetSelection),
-    ...targets.flatMap((target) => target.deprecations ?? []),
-  ];
+  const deprecations = [...targetSelectionDeprecations(targetSelection), ...targets.flatMap((target) => target.deprecations ?? [])];
   const plan = formatReleasePlan({ manifest, targets: planTargets, dryRun, concurrency, deprecations: [...new Set(deprecations)] });
   console.log(JSON.stringify({ stage: "plan", plan, blockers: blockers.map(publicBlocker) }, null, 2));
   if (dryRun) {
@@ -397,7 +394,7 @@ async function discoverTargets(deps) {
   const env = deps.env ?? process.env;
   const configured = parseTargetJson(env.FLEET_RELEASE_TARGETS_JSON);
   const discovered = configured.length > 0 ? configured : await discoverControlPlaneTargets(deps);
-  return dedupeTargets([...discovered, ...configuredTargets(env)].map(normalizeTarget));
+  return dedupeTargets([...configuredTargets(env), ...discovered].map(normalizeTarget));
 }
 
 function configuredTargets(env) {
@@ -418,7 +415,7 @@ function parseTargetJson(raw) {
 async function discoverControlPlaneTargets(deps) {
   const env = deps.env ?? process.env;
   if (!env.CONTROL_PLANE_AGENT_API_KEY) return [];
-  const rows = await callControlPlaneTool("list_customers", {}, deps);
+  const rows = await callControlPlaneTool("list_customers", { includeAllDeployments: true }, deps);
   if (!Array.isArray(rows)) {
     throw new Error("Control-plane list_customers did not return an array.");
   }
@@ -456,7 +453,7 @@ function dedupeTargets(targets) {
   const seen = new Set();
   const deduped = [];
   for (const target of targets) {
-    const key = `${target.group}:${target.id ?? target.deploymentId ?? target.url}`;
+    const key = target.deploymentId ? `deployment:${target.deploymentId}` : `${target.group}:${target.id ?? target.url}`;
     if (seen.has(key)) continue;
     seen.add(key);
     deduped.push(target);
