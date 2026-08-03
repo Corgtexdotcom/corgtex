@@ -3631,7 +3631,10 @@ async function completeRecordingWithTranscriptArtifact(
         },
       },
     });
-    if (!current || current.transcriptProcessedAt) {
+    const isLateRecoveryOverride = transcript.trim().length > 0
+      && current?.transcriptProcessedAt !== null
+      && (current?.failureCode === "RECORDER_TRANSCRIPT_RECOVERY_EXPIRED" || current?.failureCode === "RECORDER_TRANSCRIPT_FETCH_FAILED");
+    if (!current || (current.transcriptProcessedAt && !isLateRecoveryOverride)) {
       return false;
     }
     if (current.failureCode === DUPLICATE_RECORDER_FAILURE_CODE) {
@@ -3717,7 +3720,7 @@ async function completeRecordingWithTranscriptArtifact(
     await tx.meetingRecorderSmokeRun.updateMany({
       where: {
         recordingId: recording.id,
-        status: { in: ["PENDING", "SCHEDULED"] },
+        status: { in: isLateRecoveryOverride ? ["PENDING", "SCHEDULED", "FAILED"] : ["PENDING", "SCHEDULED"] },
       },
       data: {
         status: "COMPLETED",
@@ -3739,7 +3742,9 @@ async function completeRecordingWithTranscriptArtifact(
 }
 
 async function ingestProviderTranscript(provider: MeetingRecorderProvider, recording: MeetingRecording, event: ProviderWebhookEvent) {
-  if (recording.transcriptProcessedAt || recording.failureCode === DUPLICATE_RECORDER_FAILURE_CODE) {
+  const isLateRecoveryOverride = recording.transcriptProcessedAt !== null
+    && (recording.failureCode === "RECORDER_TRANSCRIPT_RECOVERY_EXPIRED" || recording.failureCode === "RECORDER_TRANSCRIPT_FETCH_FAILED");
+  if ((recording.transcriptProcessedAt !== null && !isLateRecoveryOverride) || recording.failureCode === DUPLICATE_RECORDER_FAILURE_CODE) {
     return;
   }
   const artifact = provider === "RECALL_AI"
