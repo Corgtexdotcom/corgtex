@@ -2,11 +2,13 @@ import { describe, expect, it } from "vitest";
 
 import {
   assertHealthProof,
+  azureRuntimeContractErrors,
   buildReleaseManifest,
   filterTargetsByGroups,
   formatReleasePlan,
   healthProofErrors,
   imageTagForSha,
+  mcpOAuthProofErrors,
   normalizeReleaseInput,
   normalizeTargets,
   providerBoundaryErrors,
@@ -16,6 +18,40 @@ import {
 } from "./fleet-release-core.mjs";
 
 const SHA = "c9077ff031e8e672923c84d52eeef862368f3493";
+
+function publicUrlEntries(origin, overrides = {}) {
+  return Object.entries({
+    APP_URL: origin,
+    NEXT_PUBLIC_APP_URL: origin,
+    MEETING_RECORDER_PUBLIC_BASE_URL: origin,
+    MCP_PUBLIC_URL: `${origin}/mcp`,
+    ...overrides,
+  }).map(([name, value]) => ({ name, value, secretRef: null }));
+}
+
+function oauthProof(origin, overrides = {}) {
+  const scopes = ["workspace:read", "proposals:write", "actions:write"];
+  return {
+    protectedResource: {
+      resource: `${origin}/mcp`,
+      authorization_servers: [origin],
+      scopes_supported: scopes,
+    },
+    authorizationServer: {
+      issuer: origin,
+      authorization_endpoint: `${origin}/api/oauth/authorize`,
+      token_endpoint: `${origin}/api/oauth/token`,
+      registration_endpoint: `${origin}/api/oauth/register`,
+      scopes_supported: scopes,
+    },
+    challenges: ["/mcp", "/api/mcp"].map((path) => ({
+      path,
+      status: 401,
+      header: `Bearer resource_metadata="${origin}/.well-known/oauth-protected-resource", scope="${scopes.join(" ")}"`,
+    })),
+    ...overrides,
+  };
+}
 
 describe("fleet release core", () => {
   it("normalizes release input without treating latest as raw main", () => {
@@ -60,6 +96,46 @@ describe("fleet release core", () => {
       ...healthy,
       release: { imageTag: "old", gitSha: manifest.gitSha },
     }, manifest)).toEqual(["release.imageTag=old"]);
+  });
+
+  it.each(["https://crina.corgtex.com", "https://selfserve.corgtex.com"])(
+    "accepts canonical Azure public URLs for %s",
+    (origin) => {
+      expect(azureRuntimeContractErrors(origin, publicUrlEntries(origin))).toEqual([]);
+    },
+  );
+
+  it("rejects origin-only, missing, cross-customer, and secret-backed Azure public URLs", () => {
+    const origin = "https://crina.corgtex.com";
+    expect(azureRuntimeContractErrors(origin, publicUrlEntries(origin, { MCP_PUBLIC_URL: origin }))).toContain(
+      `MCP_PUBLIC_URL=${origin}; expected ${origin}/mcp`,
+    );
+    expect(azureRuntimeContractErrors(origin, publicUrlEntries(origin).filter(({ name }) => name !== "APP_URL"))).toContain("APP_URL is missing");
+    expect(azureRuntimeContractErrors(origin, publicUrlEntries(origin, { NEXT_PUBLIC_APP_URL: "https://other.corgtex.com" }))).toContain(
+      "NEXT_PUBLIC_APP_URL=https://other.corgtex.com; expected https://crina.corgtex.com",
+    );
+    const secretBacked = publicUrlEntries(origin).map((entry) => (
+      entry.name === "MEETING_RECORDER_PUBLIC_BASE_URL" ? { ...entry, value: null, secretRef: "public-url" } : entry
+    ));
+    expect(azureRuntimeContractErrors(origin, secretBacked)).toContain("MEETING_RECORDER_PUBLIC_BASE_URL must not be secret-backed");
+  });
+
+  it("requires public MCP OAuth metadata and challenges to agree", () => {
+    const origin = "https://crina.corgtex.com";
+    expect(mcpOAuthProofErrors(origin, oauthProof(origin))).toEqual([]);
+    expect(mcpOAuthProofErrors(origin, oauthProof(origin, {
+      protectedResource: {
+        ...oauthProof(origin).protectedResource,
+        resource: origin,
+        scopes_supported: ["workspace:read"],
+      },
+    }))).toEqual(expect.arrayContaining([
+      `resource=${origin}; expected ${origin}/mcp`,
+      "protected-resource and authorization-server scopes do not agree",
+      "protected-resource scope actions:write is missing",
+      "protected-resource scope proposals:write is missing",
+      "/mcp challenge scopes do not agree with protected-resource metadata",
+    ]));
   });
 
   it("expands and validates target groups", () => {

@@ -107,6 +107,12 @@ These variables configure the remote MCP connector used by ChatGPT, Claude, Curs
 | `MCP_DEFAULT_INSTANCE_SLUG` | Optional instance slug for this deployment. If omitted, Corgtex uses `WORKSPACE_SLUG` or infers `crina` from a Crina host name. |
 | `MCP_INSTANCE_REGISTRY` | Optional JSON array of registered connector instances. Each entry supports `slug`, `displayName`, `baseUrl`, `workspaceIds`, `workspaceSlugs`, and `status`. Unknown workspaces are rejected when a registry is configured. |
 
+### Azure public URL release contract
+
+Fleet releases derive a canonical origin from each Azure target URL. Before any ACR import or Container App update, both the web and worker apps must expose `APP_URL`, `NEXT_PUBLIC_APP_URL`, and `MEETING_RECORDER_PUBLIC_BASE_URL` as that exact origin and `MCP_PUBLIC_URL` as `${origin}/mcp`. Missing values, secret references, origin-only MCP URLs, and URLs for another customer block the release instead of being normalized.
+
+After the Azure update, the release runner repeats the runtime check and verifies the public OAuth protected-resource metadata, authorization-server issuer and endpoints, default scopes, and unauthenticated challenges on `/mcp` and `/api/mcp`. A mismatch blocks verified-release recording.
+
 ## Google Workspace Integration
 
 These variables enable Google Calendar sync and selected-file Google Drive ingestion.

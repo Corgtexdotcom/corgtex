@@ -7,6 +7,8 @@ import { pathToFileURL } from "node:url";
 
 import {
   assertHealthProof,
+  AZURE_PUBLIC_URL_VARIABLES,
+  azureRuntimeContractErrors,
   buildReleaseManifest,
   filterTargetsByGroups,
   formatReleasePlan,
@@ -15,6 +17,7 @@ import {
   normalizeReleaseInput,
   normalizeTargetGroup,
   normalizeTargets,
+  mcpOAuthProofErrors,
   parseBoolean,
   parseKeyValueArgs,
   parseManifestJson,
@@ -519,6 +522,9 @@ async function deployTarget(target, manifest, reason, deps) {
     : await deployRailwayTarget(target, manifest, deps);
   const health = await pollHealth(target.url, manifest, deps);
   assertHealthProof(health, manifest, target.label);
+  const oauthProof = target.provider === "azure"
+    ? await verifyAzurePublicContracts(target, deps)
+    : { status: "skipped", reason: "not_azure" };
   const usesSelfServeReadiness = target.group === "selfserve";
   let verifiedRelease = null;
   if (target.deploymentId && usesSelfServeReadiness) {
@@ -539,7 +545,7 @@ async function deployTarget(target, manifest, reason, deps) {
   if (target.deploymentId && !usesSelfServeReadiness) {
     verifiedRelease = await recordVerifiedRelease(target, manifest, reason, deps);
   }
-  return { providerResult, release: health.release, providerReadiness, postDeployProbe, postDeploySnapshots, verifiedRelease };
+  return { providerResult, release: health.release, oauthProof, providerReadiness, postDeployProbe, postDeploySnapshots, verifiedRelease };
 }
 
 async function recordVerifiedRelease(target, manifest, reason, deps) {
@@ -842,6 +848,7 @@ export async function latestRailwayStatus(target, deployment, deps) {
 }
 
 async function deployAzureTarget(target, manifest, deps) {
+  assertAzureRuntimeContract(target, deps, "preflight");
   const env = deps.env ?? process.env;
   const username = env.GHCR_IMPORT_USERNAME || env.GITHUB_ACTOR;
   const token = env.GHCR_IMPORT_TOKEN || env.GITHUB_TOKEN;
@@ -870,6 +877,67 @@ async function deployAzureTarget(target, manifest, deps) {
     webRevision: showAzureRevision(target.azure.webAppName, target, deps),
     workerRevision: showAzureRevision(target.azure.workerAppName, target, deps),
   };
+}
+
+function assertAzureRuntimeContract(target, deps, stage) {
+  const query = `properties.template.containers[0].env[?${AZURE_PUBLIC_URL_VARIABLES.map((name) => `name=='${name}'`).join(" || ")}]`;
+  const failures = [];
+  for (const [role, name] of [["web", target.azure.webAppName], ["worker", target.azure.workerAppName]]) {
+    const result = runCommand("az", [
+      "containerapp",
+      "show",
+      "--name",
+      name,
+      "--resource-group",
+      target.azure.resourceGroup,
+      "--query",
+      query,
+      "-o",
+      "json",
+    ], deps);
+    let entries;
+    try {
+      entries = JSON.parse(result.stdout);
+    } catch {
+      throw new Error(`${target.label} Azure runtime ${stage} could not parse ${role} public URL variables`);
+    }
+    const errors = azureRuntimeContractErrors(target.url, entries);
+    if (errors.length > 0) failures.push(`${role}: ${errors.join("; ")}`);
+  }
+  if (failures.length > 0) {
+    throw new Error(`${target.label} Azure runtime ${stage} failed: ${failures.join(" | ")}`);
+  }
+}
+
+async function verifyAzurePublicContracts(target, deps) {
+  assertAzureRuntimeContract(target, deps, "postflight");
+  const fetchImpl = deps.fetchImpl ?? fetch;
+  const protectedResource = await fetchPublicJson(new URL("/.well-known/oauth-protected-resource", target.url), fetchImpl);
+  const authorizationServer = await fetchPublicJson(new URL("/.well-known/oauth-authorization-server", target.url), fetchImpl);
+  const challenges = [];
+  for (const path of ["/mcp", "/api/mcp"]) {
+    const response = await fetchImpl(new URL(path, target.url), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: "fleet-release-oauth-proof",
+        method: "initialize",
+        params: { protocolVersion: "2025-03-26", capabilities: {}, clientInfo: { name: "fleet-release", version: "1" } },
+      }),
+    });
+    challenges.push({ path, status: response.status, header: response.headers.get("www-authenticate") });
+  }
+  const errors = mcpOAuthProofErrors(target.url, { protectedResource, authorizationServer, challenges });
+  if (errors.length > 0) throw new Error(`${target.label} public MCP OAuth postflight failed: ${errors.join("; ")}`);
+  return { status: "ok", resource: protectedResource.resource, challenges: challenges.map(({ path, status }) => ({ path, status })) };
+}
+
+async function fetchPublicJson(url, fetchImpl) {
+  const response = await fetchImpl(url, { headers: { "cache-control": "no-cache" } });
+  const body = await response.json().catch(() => null);
+  if (!response.ok || !body) throw new Error(`${url} public metadata returned ${response.status}`);
+  return body;
 }
 
 function updateAzureContainerApp(name, image, target, manifest, deps) {
@@ -917,11 +985,15 @@ function showAzureRevision(name, target, deps) {
     "--resource-group",
     target.azure.resourceGroup,
     "--query",
-    "properties.latestRevisionName",
+    "{latest:properties.latestRevisionName,ready:properties.latestReadyRevisionName}",
     "-o",
-    "tsv",
+    "json",
   ], deps);
-  return result.stdout.trim();
+  const revision = JSON.parse(result.stdout);
+  if (!revision.latest || revision.latest !== revision.ready) {
+    throw new Error(`${target.label} Azure ${name} latest revision is not ready`);
+  }
+  return revision.latest;
 }
 
 async function pollHealth(url, manifest, deps) {
