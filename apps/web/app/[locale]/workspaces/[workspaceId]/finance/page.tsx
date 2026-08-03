@@ -1,5 +1,5 @@
 import { getFinanceReadiness } from "@corgtex/domain";
-import { prisma } from "@corgtex/shared";
+import { prisma, workspaceBranding } from "@corgtex/shared";
 import { requirePageActor } from "@/lib/auth";
 import { requireWorkspaceFeature } from "@/lib/workspace-feature-flags";
 import { FinanceWorkspaceView } from "./FinanceWorkspaceView";
@@ -17,8 +17,8 @@ export default async function FinancePage({
   await requireWorkspaceFeature(workspaceId, "FINANCE");
   const [readiness, workspace] = await Promise.all([
     getFinanceReadiness(actor, workspaceId),
-    prisma.workspace.findUnique({ where: { id: workspaceId }, select: { slug: true } }),
+    prisma.workspace.findUnique({ where: { id: workspaceId }, select: { slug: true, name: true } }),
   ]);
 
-  return <FinanceWorkspaceView workspaceId={workspaceId} sectionKey="overview" readiness={readiness} demoReadOnly={workspace?.slug === "jnj-demo"} />;
+  return <FinanceWorkspaceView workspaceId={workspaceId} sectionKey="overview" readiness={readiness} demoReadOnly={workspace ? workspaceBranding(workspace).isDemo : false} />;
 }
