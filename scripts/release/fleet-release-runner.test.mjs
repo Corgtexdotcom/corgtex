@@ -904,6 +904,7 @@ describe("fleet release runner", () => {
   });
 
   it("does not infer provider from workload or URL", async () => {
+    const outputs = {};
     const result = await runFleetRelease([
       "deploy",
       "--release",
@@ -936,10 +937,11 @@ describe("fleet release runner", () => {
       runCommand: vi.fn(),
       fetchImpl: vi.fn(),
       sleep: vi.fn(),
+      emitGithubOutput: (key, value) => { outputs[key] = value; },
     });
 
     expect(result.blockers).toEqual([]);
-    expect(result.targets[0]).toMatchObject({ group: "selfserve", provider: "railway" });
+    expect(outputs).toMatchObject({ uses_azure: false, uses_railway: true, observation_targets: "railway-selfserve" });
   });
 
   it("preflights Azure self-serve without Railway credentials", async () => {
@@ -982,9 +984,7 @@ describe("fleet release runner", () => {
     ["Azure", [{ id: "azure", cloudProvider: "AZURE" }], /AZURE_CLIENT_ID/],
     ["mixed", [{ id: "railway", cloudProvider: "RAILWAY" }, { id: "azure", cloudProvider: "AZURE" }], /RAILWAY_API_TOKEN.*AZURE_CLIENT_ID/],
   ])("validates credentials for discovered %s inventory", async (_label, rows, expected) => {
-    await expect(runFleetRelease([
-      "validate-config", "--release", SHA, "--targets", "managed-customers", "--dry-run", "false",
-    ], {
+    await expect(runFleetRelease(["validate-config", "--release", SHA, "--targets", "managed-customers", "--dry-run", "false"], {
       env: { CONTROL_PLANE_AGENT_API_KEY: "control-plane-key", GITHUB_TOKEN: "github-token", POSTHOG_ENABLED: "true", POSTHOG_PROJECT_TOKEN: "posthog-token", APPLICATIONINSIGHTS_CONNECTION_STRING: "InstrumentationKey=review" },
       fetchImpl: vi.fn(async () => controlPlaneResult(rows)),
     })).rejects.toThrow(expected);
@@ -1028,13 +1028,13 @@ describe("fleet release runner", () => {
     })).rejects.toThrow("non-mutable until the generic Azure executor is implemented in PR3");
   });
 
-  it("excludes retired targets broadly and blocks explicit mutation", async () => {
-    const env = {
-      FLEET_RELEASE_TARGETS_JSON: targetJson({ id: "retired", group: "managed-customers", deploymentStatus: "RETIRED" }),
+  it("excludes retired providers broadly and blocks explicit mutation", async () => {
+    const env = { FLEET_RELEASE_TARGETS_JSON: azureTargetJson({ id: "retired", group: "managed-customers", deploymentStatus: "RETIRED" }),
       FLEET_RELEASE_OPS_TARGET_JSON: targetJson(),
-      RAILWAY_API_TOKEN: "railway-token",
-      GITHUB_TOKEN: "github-token",
+      CONTROL_PLANE_AGENT_API_KEY: "control-plane-key", RAILWAY_API_TOKEN: "railway-token",
+      GITHUB_TOKEN: "github-token", ...railwayObservabilityEnv,
     };
+    await expect(runFleetRelease(["validate-config", "--release", SHA, "--targets", "all"], { env: { ...env, FLEET_RELEASE_AZURE_TARGET_JSON: azureTargetJson({ deploymentStatus: "RETIRED" }), FLEET_RELEASE_BACKUP_APP_TARGET_JSON: targetJson({ id: "backup", group: "backup-app" }) } })).resolves.toMatchObject({ ok: true });
     const broad = await runFleetRelease([
       "deploy", "--release", SHA, "--targets", "managed-customers,selfserve,ops,backup-app", "--dry-run", "--reason", "Validate broad selection.",
     ], { env, runCommand: vi.fn(), fetchImpl: vi.fn(), sleep: vi.fn() });

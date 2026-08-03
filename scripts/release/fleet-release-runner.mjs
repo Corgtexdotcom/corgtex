@@ -252,7 +252,7 @@ async function validateReleaseEnvironment(args, env, deps = {}) {
       ? await discoverTargets({ ...deps, env })
       : configuredTargets(env).map(normalizeTarget);
     const selectedProviders = new Set(providerInventory
-      .filter((target) => selectedGroups.includes(target.group))
+      .filter((target) => selectedGroups.includes(target.group) && targetEligibilityErrors(target).length === 0)
       .map((target) => target.provider));
     const includesRailwayTarget = selectedProviders.has("railway");
     const includesAzureTarget = selectedProviders.has("azure");
@@ -286,9 +286,9 @@ async function validateReleaseEnvironment(args, env, deps = {}) {
 function observationTargetsFor(targets) {
   const selected = new Set(targets.map((target) => target.provider === "azure"
     ? "azure-selfserve"
-    : target.provider === "railway" ? (["ops", "backup-app"].includes(target.group) ? target.group : "railway-customers") : null)
+    : target.provider === "railway" ? (target.group === "selfserve" ? "railway-selfserve" : (["ops", "backup-app"].includes(target.group) ? target.group : "railway-customers")) : null)
     .filter(Boolean));
-  return ["railway-customers", "azure-selfserve", "ops", "backup-app"]
+  return ["railway-customers", "railway-selfserve", "azure-selfserve", "ops", "backup-app"]
     .filter((target) => selected.has(target));
 }
 
