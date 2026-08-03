@@ -1689,6 +1689,7 @@ describe("control plane domain", () => {
       customDomain: "acme.example.com",
         customerSlug: "acme",
         customerAccountId: "cust-1",
+        deploymentKind: "REMOTE_MANAGED",
         deploymentStatus: "ACTIVE",
         environment: "production",
         cloudProvider: "RAILWAY",
@@ -1737,6 +1738,7 @@ describe("control plane domain", () => {
       url: "https://acme.test",
       customDomain: "acme.example.com",
       hasDeployment: true,
+      deploymentKind: "REMOTE_MANAGED",
       deploymentStatus: "ACTIVE",
       environment: "production",
       cloudProvider: "RAILWAY",
@@ -1780,6 +1782,7 @@ describe("control plane domain", () => {
     });
     expect(prismaMock.customerDeployment.findMany).toHaveBeenCalledWith(expect.objectContaining({
       select: expect.objectContaining({
+        deploymentKind: true,
         managedWorkspace: {
           select: {
             id: true,
@@ -1795,6 +1798,28 @@ describe("control plane domain", () => {
         supportOperations: expect.anything(),
       }),
     }));
+  });
+
+  it("returns a null deployment kind for account-only inventory rows", async () => {
+    const { listControlPlaneCustomerSummaries } = await import("./control-plane");
+    const observedAt = new Date("2026-06-01T10:00:00.000Z");
+    prismaMock.customerAccount.findMany.mockResolvedValueOnce([{
+      id: "cust-pending",
+      slug: "pending",
+      displayName: "Pending",
+      primaryDeploymentId: null,
+      createdAt: observedAt,
+      updatedAt: observedAt,
+    }] as any);
+    prismaMock.customerDeployment.findMany.mockResolvedValueOnce([]);
+
+    const result = await listControlPlaneCustomerSummaries(operatorActor);
+
+    expect(result).toEqual([expect.objectContaining({
+      id: "cust-pending",
+      hasDeployment: false,
+      deploymentKind: null,
+    })]);
   });
 
   it("can include secondary deployments for validation target resolution", async () => {

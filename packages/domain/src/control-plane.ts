@@ -3213,6 +3213,7 @@ export type ControlPlaneCustomerSummary = {
   url: string;
   customDomain: string | null;
   hasDeployment: boolean;
+  deploymentKind: CustomerDeploymentKind | null;
   deploymentStatus: CustomerDeploymentStatus | null;
   environment: string | null;
   cloudProvider: CustomerDeploymentCloudProvider | null;
@@ -3251,6 +3252,7 @@ const controlPlaneCustomerSummaryDeploymentSelect = {
   customDomain: true,
   customerSlug: true,
   customerAccountId: true,
+  deploymentKind: true,
   deploymentStatus: true,
   environment: true,
   cloudProvider: true,
@@ -3334,6 +3336,7 @@ function controlPlaneCustomerSummaryFromDeployment(params: {
     url: deployment.url,
     customDomain: deployment.customDomain,
     hasDeployment: true,
+    deploymentKind: deployment.deploymentKind,
     deploymentStatus: deployment.deploymentStatus ?? null,
     environment: deployment.environment ?? null,
     cloudProvider: provider.cloudProvider,
@@ -3415,6 +3418,7 @@ function controlPlaneCustomerSummaryFromAccount(account: {
     url: "",
     customDomain: null,
     hasDeployment: false,
+    deploymentKind: null,
     deploymentStatus: null,
     environment: null,
     cloudProvider: null,
